@@ -647,6 +647,7 @@ async def test_filtro_por_status_periodo_e_indicadores(client, db, make_user, au
         "expiradas": 0,
         "total": 3,
         "vendidas": 3,
+        "seguiram": 0,  # nenhum foi adiante (30/10/2026: a base da %)
     }
     # Entrega 01/10 → hardware até 01/01/2027: em 15/12 faltam ≤ 30 dias.
     monkeypatch.setattr(svc, "hoje", lambda: date(2026, 12, 15))

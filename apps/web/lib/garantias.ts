@@ -52,31 +52,42 @@ export type GarantiaLinha = {
   // A frase do pedido: a mensagem do cliente (só para quem lê o Atendimento)
   // ou o motivo da devolução por defeito.
   pedido_trecho?: string | null
+  // O aparelho na tela Devoluções (30/10/2026): o selo ("No técnico · faltam
+  // 5 dias", "Consertado (Novo)", "Perdido (Extraviado)"); o gasto em reais só
+  // vem para admin.
+  devolucao_situacao?: DesfechoAparelho | null
+  devolucao_rotulo?: string | null
+  // No técnico com o prazo de 30 dias vencido (o dia em São Paulo).
+  devolucao_vencido?: boolean
+  devolucao_gasto?: number | null
 }
+export type DesfechoAparelho = 'no_tecnico' | 'consertado' | 'perdido' | 'devolvido' | 'reembolso' | 'a_caminho'
 
 export type OrigemPedido = 'mensagem' | 'sac' | 'devolucao' | 'atendimento' | 'manual' | 'pessoa'
-export const ORIGEM_PEDIDO: Record<OrigemPedido, { emoji: string; rotulo: string }> = {
-  mensagem: { emoji: '💬', rotulo: 'mensagem do cliente' },
-  sac: { emoji: '📋', rotulo: 'SAC do site' },
-  devolucao: { emoji: '↩️', rotulo: 'devolução por defeito' },
-  atendimento: { emoji: '🛠️', rotulo: 'atendimento registrado' },
-  manual: { emoji: '✍️', rotulo: 'cadastrada à mão' },
-  pessoa: { emoji: '👤', rotulo: 'marcada pela equipe' },
+// Sem emoji (29/10/2026: "igual aos nossos painéis do DaVinci").
+export const ORIGEM_PEDIDO: Record<OrigemPedido, { rotulo: string }> = {
+  mensagem: { rotulo: 'mensagem do cliente' },
+  sac: { rotulo: 'SAC do site' },
+  devolucao: { rotulo: 'devolução por defeito' },
+  atendimento: { rotulo: 'atendimento registrado' },
+  manual: { rotulo: 'cadastrada à mão' },
+  pessoa: { rotulo: 'marcada pela equipe' },
 }
+const maiuscula = (t: string) => t.charAt(0).toUpperCase() + t.slice(1)
 export function rotuloDoPedido(g: Pick<GarantiaLinha, 'pedido_em' | 'pedido_origem' | 'nao_e_pedido'>): string {
   if (g.nao_e_pedido) return 'não é pedido de garantia'
   if (!g.pedido_em || !g.pedido_origem) return 'sem pedido de garantia'
   const o = ORIGEM_PEDIDO[g.pedido_origem]
-  return `${o ? `${o.emoji} ${o.rotulo}` : g.pedido_origem} · ${dataBR(g.pedido_em)}`
+  return `${maiuscula(o ? o.rotulo : g.pedido_origem)} · ${dataBR(g.pedido_em)}`
 }
 
-// Na lista: a frase do pedido quando há ("💬 “o celular parou de funcionar” ·
-// 27/10/2026"); sem ela, de onde veio e o dia.
+// Na lista: a frase do pedido quando há ("“o celular parou de funcionar” ·
+// 27/10/2026" ou "Devolução: Danificado (Outros) · 27/10/2026"); sem ela, de
+// onde veio e o dia.
 export function rotuloDoPedidoComTrecho(g: Pick<GarantiaLinha, 'pedido_em' | 'pedido_origem' | 'nao_e_pedido' | 'pedido_trecho'>): string {
   if (!g.pedido_trecho || g.nao_e_pedido || !g.pedido_em || !g.pedido_origem) return rotuloDoPedido(g)
-  const o = ORIGEM_PEDIDO[g.pedido_origem]
   const frase = g.pedido_origem === 'mensagem' ? `“${g.pedido_trecho}”` : g.pedido_trecho
-  return `${o ? `${o.emoji} ` : ''}${frase} · ${dataBR(g.pedido_em)}`
+  return `${maiuscula(frase)} · ${dataBR(g.pedido_em)}`
 }
 
 export type Indicadores = {
@@ -90,6 +101,8 @@ export type Indicadores = {
   total: number
   // As vendas com garantia (com e sem pedido) que a pessoa enxerga.
   vendidas?: number
+  // Dos pedidos, os que SEGUIRAM (a % certa: seguiram ÷ vendidas).
+  seguiram?: number
 }
 
 export type GarantiaLista = { itens: GarantiaLinha[]; total: number; indicadores: Indicadores; hoje: string }
@@ -271,26 +284,22 @@ export const REGRAS_PADRAO: Regras = {
 // As CLASSES de cor ficam nos componentes (GarantiaStatus, GarantiaCobertura,
 // GarantiaPrazoBarra): o Tailwind só lê components/pages/layouts — classe que
 // existe só aqui em lib/ não vira CSS (o tema escuro sumia).
-// Status com o emoji do documento (§2): 🟡 🟢 🔵 🔴.
-export const STATUS: Record<StatusGarantia, { rotulo: string; emoji: string; dica: string }> = {
+// Status sem emoji (29/10/2026): a cor fica no selo (GarantiaStatus).
+export const STATUS: Record<StatusGarantia, { rotulo: string; dica: string }> = {
   aguardando_entrega: {
     rotulo: 'Aguardando entrega',
-    emoji: '🟡',
     dica: 'cadastrada, mas o pedido ainda não tem data de entrega — os prazos entram sozinhos quando ela aparecer',
   },
   ativa: {
     rotulo: 'Ativa',
-    emoji: '🟢',
     dica: 'hoje está dentro do prazo de hardware (hardware e software cobertos)',
   },
   somente_software: {
     rotulo: 'Somente software',
-    emoji: '🔵',
     dica: 'o prazo de hardware acabou; o de software continua',
   },
   expirada: {
     rotulo: 'Expirada',
-    emoji: '🔴',
     dica: 'os dois prazos acabaram',
   },
 }
@@ -300,31 +309,30 @@ export const STATUS: Record<StatusGarantia, { rotulo: string; emoji: string; dic
 // o produto ainda não chegou.
 export const ENTREGUE_SEM_DATA = {
   rotulo: 'Entregue — sem data no DaVinci',
-  emoji: '🟡',
   dica: 'o Bling já marca o pedido como entregue, mas nenhuma fonte do DaVinci tem a data de entrega — sem ela não há prazo (a data inicial não se digita)',
 }
 export function statusInfo(s: string | null | undefined, entregueSemData = false) {
   if (s === 'aguardando_entrega' && entregueSemData) return ENTREGUE_SEM_DATA
-  return STATUS[(s || '') as StatusGarantia] ?? { rotulo: s || '—', emoji: '⚪', dica: '' }
+  return STATUS[(s || '') as StatusGarantia] ?? { rotulo: s || '—', dica: '' }
 }
 
 export const FILTROS_STATUS: { value: FiltroStatus; label: string }[] = [
   { value: 'todos', label: 'Todos' },
-  { value: 'ativa', label: '🟢 Ativa' },
-  { value: 'somente_software', label: '🔵 Somente software' },
-  { value: 'expirada', label: '🔴 Expirada' },
-  { value: 'aguardando_entrega', label: '🟡 Aguardando entrega' },
-  { value: 'entregue_sem_data', label: '🟡 Entregue — sem data no DaVinci' },
+  { value: 'ativa', label: 'Ativa' },
+  { value: 'somente_software', label: 'Somente software' },
+  { value: 'expirada', label: 'Expirada' },
+  { value: 'aguardando_entrega', label: 'Aguardando entrega' },
+  { value: 'entregue_sem_data', label: 'Entregue — sem data no DaVinci' },
   { value: 'hw_vence_30d', label: 'Hardware vence em 30 dias' },
 ]
 
-export const COBERTURA: Record<Cobertura, { rotulo: string; emoji: string }> = {
-  coberto: { rotulo: 'Coberto', emoji: '✅' },
-  fora_da_garantia: { rotulo: 'Fora da garantia', emoji: '⛔' },
-  sem_data_de_entrega: { rotulo: 'Sem data de entrega', emoji: '⏳' },
+export const COBERTURA: Record<Cobertura, { rotulo: string }> = {
+  coberto: { rotulo: 'Coberto' },
+  fora_da_garantia: { rotulo: 'Fora da garantia' },
+  sem_data_de_entrega: { rotulo: 'Sem data de entrega' },
 }
 export function coberturaInfo(c: string | null | undefined) {
-  return COBERTURA[(c || '') as Cobertura] ?? { rotulo: c || '—', emoji: '' }
+  return COBERTURA[(c || '') as Cobertura] ?? { rotulo: c || '—' }
 }
 
 export const TIPOS_PROBLEMA: { value: TipoProblema; label: string; dica: string }[] = [
@@ -756,11 +764,12 @@ export function corpoDaLista(f: FiltrosLista, offset = 0, limite = LIMITE_PAGINA
 // ─── resumo por departamento (28/10/2026) ───────────────────────────────────
 // POST /api/garantias/resumo: a garantia POR PRODUTO (28/10/2026) — uma
 // linha por produto da Tabela de Preços (o modelo, com as cores juntas), com
-// as vendas com garantia, os PEDIDOS de garantia (a porcentagem é pediram ÷
-// vendidas — "a garantia é só para o pessoal que solicita", Eduardo), de onde
-// veio o pedido, a situação e os atendimentos; e o total por departamento (as
-// pílulas). Só contagens: as porcentagens são feitas aqui, de um jeito só.
-export type ResumoDepartamento = { chave: 'celular' | 'eletro' | 'acessorios' | 'outros'; nome: string; vendidas: number; pediram: number }
+// as vendas com garantia, os PEDIDOS de garantia ("a garantia é só para o
+// pessoal que solicita", Eduardo), de onde veio o pedido, a situação e os
+// atendimentos; e o total por departamento (as pílulas). A porcentagem é
+// seguiram ÷ vendidas desde 30/10/2026 ("no chat muitos pedem e não vai para
+// frente"). As porcentagens são feitas na tela, de um jeito só.
+export type ResumoDepartamento = { chave: 'celular' | 'eletro' | 'acessorios' | 'outros'; nome: string; vendidas: number; pediram: number; seguiram: number }
 export type ResumoProduto = {
   chave: string
   departamento: ResumoDepartamento['chave']
@@ -770,6 +779,10 @@ export type ResumoProduto = {
   na_tabela: boolean
   vendidas: number
   pediram: number
+  // Dos que pediram, os que SEGUIRAM: o aparelho voltou, está voltando ou teve
+  // reembolso — a base da % (30/10/2026: no chat muitos pedem e não vai para
+  // frente; reclamação não conta).
+  seguiram: number
   // Dos PEDIDOS: os 4 status e, à parte, "entregue_sem_data" (o Bling já
   // entregou, falta a data no DaVinci — fora do "Aguardando entrega").
   status: Record<StatusGarantia | 'entregue_sem_data', number>
@@ -779,8 +792,23 @@ export type ResumoProduto = {
   atendimentos_software: number
   // As garantias com pedido (a linha abre a lista delas).
   pedidos: number[]
+  // Os mesmos, por coluna da tela (a célula abre só os dela). Coluna sem
+  // pedido não vem.
+  pedidos_por_coluna?: Record<string, number[]>
+  // Manutenção e perdas (30/10/2026): dos que pediram, o aparelho na tela
+  // Devoluções. Uma garantia conta numa só.
+  no_tecnico: number
+  no_tecnico_vencidos: number
+  consertados: number
+  consertados_sem_custo: number
+  perdidos: number
+  // Em reais, só para admin (null para os outros): gasto = conserto + perdidos.
+  gasto?: number | null
+  gasto_conserto?: number | null
+  gasto_perdidos?: number | null
+  valor_no_tecnico?: number | null
 }
-export type Resumo = { vendidas: number; pediram: number; hoje: string; departamentos: ResumoDepartamento[]; produtos: ResumoProduto[] }
+export type Resumo = { vendidas: number; pediram: number; seguiram?: number; hoje: string; ve_valores?: boolean; departamentos: ResumoDepartamento[]; produtos: ResumoProduto[] }
 
 // O corpo do resumo: os filtros da barra (período, origem, status) — a
 // busca e o "só com conversa" são da lista.
@@ -813,6 +841,10 @@ export function largura(parte: number, total: number): number {
 }
 export function numeroBR(n: number): string {
   return (n || 0).toLocaleString('pt-BR')
+}
+// R$ 1.234,50 (a dica e o rodapé); na célula estreita vai sem centavos.
+export function reaisBR(v: number | null | undefined): string {
+  return `R$ ${(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 // ─── histórico das conversas (garantia automática, 28/10/2026) ──────────────

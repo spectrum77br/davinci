@@ -1,12 +1,12 @@
 <script setup lang="ts">
-// Selo do status da garantia com a cor e o emoji do documento (§2):
-// 🟡 Aguardando entrega · 🟢 Ativa · 🔵 Somente software · 🔴 Expirada.
-// `soEmoji` = só o emoji (a coluna da tabela no celular), com o rótulo no
-// title e para o leitor de tela. `entregueSemData`: o "Aguardando entrega" de
-// pedido que o Bling já dá como entregue vira "Entregue — sem data no DaVinci".
+// Selo do status da garantia com a cor do documento (§2) — sem emoji
+// (29/10/2026: "igual aos nossos painéis do DaVinci"): Aguardando entrega
+// (âmbar) · Ativa (verde) · Somente software (azul) · Expirada (vermelho).
+// `entregueSemData`: o "Aguardando entrega" de pedido que o Bling já dá como
+// entregue vira "Entregue — sem data no DaVinci".
 import { statusInfo } from '~/lib/garantias'
 
-const props = defineProps<{ status: string | null | undefined; soEmoji?: boolean; entregueSemData?: boolean }>()
+const props = defineProps<{ status: string | null | undefined; entregueSemData?: boolean }>()
 const info = computed(() => statusInfo(props.status, !!props.entregueSemData))
 // As cores moram aqui (o Tailwind não lê lib/).
 const CORES: Record<string, string> = {
@@ -20,19 +20,10 @@ const cor = computed(() => CORES[props.status || ''] || 'border-border bg-muted 
 
 <template>
   <span
-    v-if="soEmoji"
-    class="inline-flex items-center text-base leading-none"
-    :title="`${info.rotulo} — ${info.dica}`"
-    :aria-label="info.rotulo"
-    role="img"
-    data-status-garantia
-  >{{ info.emoji }}</span>
-  <span
-    v-else
     class="inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-xs font-medium"
     :class="cor"
     :title="info.dica"
     :data-entregue-sem-data="entregueSemData && status === 'aguardando_entrega' ? '' : undefined"
     data-status-garantia
-  ><span aria-hidden="true">{{ info.emoji }}</span>{{ info.rotulo }}</span>
+  >{{ info.rotulo }}</span>
 </template>

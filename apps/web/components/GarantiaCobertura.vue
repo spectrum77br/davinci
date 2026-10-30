@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// Selo da cobertura do atendimento (§5.2): ✅ Coberto · ⛔ Fora da garantia ·
-// ⏳ Sem data de entrega. `bloco` = a caixa da prévia no "Vincular à
-// garantia" (o texto vem no slot). As cores moram aqui (o Tailwind não lê lib/).
+// Selo da cobertura do atendimento (§5.2), sem emoji (29/10/2026): Coberto
+// (verde) · Fora da garantia (vermelho) · Sem data de entrega (âmbar). `bloco`
+// = a caixa da prévia no "Vincular à garantia" (o texto vem no slot). As cores
+// moram aqui (o Tailwind não lê lib/).
 import { coberturaInfo } from '~/lib/garantias'
 
 const props = defineProps<{ cobertura: string | null | undefined; rotulo?: string | null; bloco?: boolean; pequeno?: boolean }>()
@@ -16,7 +17,7 @@ const cor = computed(() => CORES[props.cobertura || ''] || 'border-border bg-mut
 
 <template>
   <div v-if="bloco" class="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2" :class="cor" data-cobertura>
-    <span class="font-semibold">{{ info.emoji }} {{ rotulo || info.rotulo }}</span>
+    <span class="font-semibold">{{ rotulo || info.rotulo }}</span>
     <slot />
   </div>
   <span
@@ -24,5 +25,5 @@ const cor = computed(() => CORES[props.cobertura || ''] || 'border-border bg-mut
     class="inline-flex items-center gap-1 whitespace-nowrap rounded-full border font-medium"
     :class="[cor, pequeno ? 'px-1.5 text-[11px]' : 'px-2 py-0.5 text-xs']"
     data-cobertura
-  ><span v-if="!pequeno" aria-hidden="true">{{ info.emoji }}</span>{{ rotulo || info.rotulo }}</span>
+  >{{ rotulo || info.rotulo }}</span>
 </template>

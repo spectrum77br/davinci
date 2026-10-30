@@ -271,10 +271,12 @@ const produtoAberto = ref('')
 const resumoDepartamento = ref('')
 const resumoBusca = ref('')
 const resumoOrdem = ref({ coluna: 'pediram', desc: true })
-function abrirProduto(p: { nome: string; ids: number[] }) {
+// O número de uma coluna (30/10/2026) abre só os pedidos dela: o aviso diz
+// qual ("A17 · Devolução").
+function abrirProduto(p: { nome: string; ids: number[]; coluna?: string }) {
   trocarDeVista(() => {
     filtros.busca = ''
-    entrarNasConversas('produto', p.ids, p.nome)
+    entrarNasConversas('produto', p.ids, p.coluna ? `${p.nome} · ${p.coluna}` : p.nome)
   })
 }
 function verTodosOsPedidos() {
@@ -461,13 +463,14 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       <ul class="list-disc space-y-1 pl-5 text-muted-foreground">
         <li>A <strong class="text-foreground">data inicial</strong> é a data de entrega do pedido (não se edita). Hardware: +{{ regras.meses_hardware }} meses; software: +{{ regras.meses_software }} meses. Se o dia não existe no mês final, vale o último dia (30/11 → 28/02).</li>
         <li>{{ regras.ultimo_dia_coberto ? 'A garantia vale até a data final, inclusive.' : 'A garantia termina no dia anterior à data final.' }}</li>
-        <li>{{ regras.cadastro_antes_da_entrega ? 'Pode cadastrar antes da entrega: fica 🟡 Aguardando entrega e os prazos entram sozinhos quando a data aparecer.' : 'Só dá para cadastrar depois da entrega.' }}</li>
+        <li>{{ regras.cadastro_antes_da_entrega ? 'Pode cadastrar antes da entrega: fica Aguardando entrega e os prazos entram sozinhos quando a data aparecer.' : 'Só dá para cadastrar depois da entrega.' }}</li>
         <li>{{ regras.garantia_por === 'nf' ? 'Uma garantia por NF (o mesmo CPF não se repete na mesma NF); os itens da NF aparecem no detalhe.' : 'Uma garantia por produto.' }}</li>
-        <li v-if="regras.vinculo_automatico">A garantia <strong class="text-foreground">cai sozinha</strong>: todo pedido com produto Uranyx que tem a nota fiscal de PRODUTO no DaVinci vira garantia (✨), com o nome e o CPF da nota. A nota de embalagem nunca vira garantia. Se faltar algo (CPF que é CNPJ, nota repetida), o pedido fica para o cadastro manual. As conversas do pedido (Shopee, TikTok, Mercado Livre, Amazon) entram sozinhas no histórico, com fotos e vídeos; o "Registrar atendimento" (tipo e solução) continua sendo da pessoa.</li>
+        <li v-if="regras.vinculo_automatico">A garantia <strong class="text-foreground">cai sozinha</strong>: todo pedido com produto Uranyx que tem a nota fiscal de PRODUTO no DaVinci vira garantia (com o selo “criada sozinha pela NF”), com o nome e o CPF da nota. A nota de embalagem nunca vira garantia. Se faltar algo (CPF que é CNPJ, nota repetida), o pedido fica para o cadastro manual. As conversas do pedido (Shopee, TikTok, Mercado Livre, Amazon) entram sozinhas no histórico, com fotos e vídeos; o "Registrar atendimento" (tipo e solução) continua sendo da pessoa.</li>
         <li v-else>O vínculo com o Atendimento é manual: o atendente clica em "Vincular à garantia" e busca por CPF, NF ou pedido (a busca já vem com o pedido da conversa).</li>
         <li>{{ regras.recalcular_quando_entrega_mudar ? 'Se a data de entrega for corrigida, a garantia é recalculada sozinha (fica no log).' : 'A data de entrega corrigida depois não muda a garantia.' }}</li>
-        <li>Status: 🟢 Ativa (hardware e software) · 🔵 Somente software · 🔴 Expirada · 🟡 Aguardando entrega — ou 🟡 "Entregue — sem data no DaVinci", quando o Bling já dá o pedido como entregue mas nenhuma fonte tem a data (a Logística guarda a data só desde 15/07/2026). Na lista o CPF aparece mascarado.</li>
+        <li>Status: Ativa (hardware e software) · Somente software · Expirada · Aguardando entrega — ou "Entregue — sem data no DaVinci", quando o Bling já dá o pedido como entregue mas nenhuma fonte tem a data (a Logística guarda a data só desde 15/07/2026). Na lista o CPF aparece mascarado.</li>
         <li>Sem escolher mensagens, a data do atendimento é a 1ª mensagem do cliente no trecho atual da conversa (uma pausa de até {{ regras.dias_pausa_atendimento }} dias não abre trecho novo).</li>
+        <li><strong class="text-foreground">Garantia por produto</strong>: a % é Seguiram ÷ Vendidas — seguiram = o aparelho voltou, está voltando ou teve reembolso; quem só pediu pelo chat ou só reclamou fica fora. O que cada coluna conta aparece com o mouse no título dela; a conta da % fica ao lado das pílulas de departamento.</li>
       </ul>
     </section>
 
@@ -550,12 +553,15 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
       </button>
     </div>
     <p v-if="indicadores" class="-mt-1 text-xs text-muted-foreground">
-      <span data-total-pedidos>{{ indicadores.total }} {{ indicadores.total === 1 ? 'pedido de garantia' : 'pedidos de garantia' }}<template v-if="indicadores.vendidas"> em {{ numeroBR(indicadores.vendidas) }} vendas com nota ({{ pct(indicadores.total, indicadores.vendidas) }})</template></span> ·
-      <button type="button" class="underline-offset-2 hover:underline" @click="filtros.status = 'aguardando_entrega'; filtros.com_atendimento_no_mes = false">🟡 {{ indicadores.aguardando_entrega }} sem data de entrega</button>
+      <span data-total-pedidos>{{ indicadores.total }} {{ indicadores.total === 1 ? 'pedido de garantia' : 'pedidos de garantia' }}<template v-if="indicadores.vendidas"> em {{ numeroBR(indicadores.vendidas) }} vendas com nota</template></span> ·
+      <!-- A % certa (30/10/2026): dos que SEGUIRAM — no chat muitos pedem e
+           não vai para frente; reclamação não conta. -->
+      <span v-if="indicadores.vendidas && indicadores.seguiram !== undefined" data-total-seguiram>{{ numeroBR(indicadores.seguiram) }} {{ indicadores.seguiram === 1 ? 'seguiu' : 'seguiram' }} ({{ pct(indicadores.seguiram, indicadores.vendidas) }} das vendas) · </span>
+      <button type="button" class="underline-offset-2 hover:underline" @click="filtros.status = 'aguardando_entrega'; filtros.com_atendimento_no_mes = false">{{ indicadores.aguardando_entrega }} sem data de entrega</button>
       <template v-if="indicadores.entregue_sem_data">
         (<button type="button" class="underline-offset-2 hover:underline" data-entregue-sem-data @click="filtros.status = 'entregue_sem_data'; filtros.com_atendimento_no_mes = false">{{ indicadores.entregue_sem_data }} já {{ indicadores.entregue_sem_data === 1 ? 'entregue' : 'entregues' }} no Bling</button>)
       </template> ·
-      <button type="button" class="underline-offset-2 hover:underline" @click="filtros.status = 'expirada'; filtros.com_atendimento_no_mes = false">🔴 {{ indicadores.expiradas }} expiradas</button>
+      <button type="button" class="underline-offset-2 hover:underline" @click="filtros.status = 'expirada'; filtros.com_atendimento_no_mes = false">{{ indicadores.expiradas }} expiradas</button>
     </p>
 
     <p v-if="erro" role="alert" class="flex items-center gap-2 text-sm text-destructive">
@@ -617,8 +623,9 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
                 <div class="truncate text-xs text-muted-foreground">pedido {{ g.pedido_bling }}<template v-if="g.plataforma"> · {{ nomePlataforma(g.plataforma) }}</template> · NF {{ textoNf(g.nf_numero, g.nf_serie) }}</div>
                 <div v-if="g.ultima_previa" class="mt-0.5 truncate text-xs" :class="g.ultima_autor === 'cliente' ? 'text-foreground' : 'text-muted-foreground'">{{ g.ultima_autor === 'loja' ? 'Loja: ' : g.ultima_autor === 'mediador' ? 'Mediador: ' : '' }}{{ g.ultima_previa }}</div>
                 <div class="mt-0.5 truncate text-[11px]" :class="g.pedido_em && !g.nao_e_pedido ? 'text-foreground' : 'text-muted-foreground'" :title="g.pedido_trecho || ''" data-pedido>{{ rotuloDoPedidoComTrecho(g) }}</div>
-                <div class="mt-1 flex items-center gap-1.5">
+                <div class="mt-1 flex flex-wrap items-center gap-1.5">
                   <GarantiaStatus :status="g.status" :entregue-sem-data="g.entregue_sem_data" />
+                  <GarantiaAparelho :situacao="g.devolucao_situacao" :rotulo="g.devolucao_rotulo" :vencido="g.devolucao_vencido" />
                   <span v-if="g.conversas" class="text-[10px] text-muted-foreground">{{ g.conversas }} {{ g.conversas === 1 ? 'conversa' : 'conversas' }}</span>
                   <span v-if="g.atendimentos" class="text-[10px] text-muted-foreground">· {{ g.atendimentos }} atend.</span>
                 </div>

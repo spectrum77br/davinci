@@ -173,6 +173,15 @@ class GarantiaLinhaOut(BaseModel):
     # ou o motivo da devolução por defeito.
     pedido_trecho: str | None = None
     conversas: int = 0
+    # O aparelho na tela Devoluções (30/10/2026): no_tecnico | consertado |
+    # perdido | devolvido — ou, sem a devolução lançada, reembolso |
+    # a_caminho (a plataforma ou o Reembolso) — e o texto do selo ("No técnico
+    # · faltam 5 dias"); o gasto (conserto + aparelho perdido) só para admin.
+    devolucao_situacao: str | None = None
+    devolucao_rotulo: str | None = None
+    # No técnico com o prazo de 30 dias vencido (o dia em São Paulo).
+    devolucao_vencido: bool = False
+    devolucao_gasto: float | None = None
     # A conversa ligada com a mensagem mais recente (a prévia só para quem lê
     # o Atendimento, e nunca de conversa de e-mail).
     ultima_mensagem_em: datetime | None = None
@@ -193,6 +202,10 @@ class IndicadoresOut(BaseModel):
     total: int
     # As vendas com garantia (com e sem pedido) que a pessoa enxerga.
     vendidas: int = 0
+    # Dos pedidos: os que SEGUIRAM — o aparelho voltou, está voltando ou teve
+    # reembolso (30/10/2026: a % certa é seguiram ÷ vendidas; no chat muitos
+    # pedem e não vai para frente; reclamação não conta).
+    seguiram: int = 0
 
 
 class GarantiaListaOut(BaseModel):
@@ -433,6 +446,8 @@ class ResumoDepartamentoOut(BaseModel):
     nome: str
     vendidas: int
     pediram: int = 0
+    # Dos que pediram, os que seguiram (a base da %).
+    seguiram: int = 0
 
 
 class ResumoProdutoOut(BaseModel):
@@ -446,6 +461,12 @@ class ResumoProdutoOut(BaseModel):
     na_tabela: bool = True
     vendidas: int
     pediram: int = 0
+    # Dos que pediram, os que SEGUIRAM (30/10/2026): o aparelho voltou (tela
+    # Devoluções), está voltando (devolução aceita na plataforma) ou teve
+    # reembolso (Reembolso "Cliente" ou pago pela plataforma). Reclamação,
+    # disputa sem decisão e devolução cancelada não. A % da tela é seguiram ÷
+    # vendidas.
+    seguiram: int = 0
     # Dos PEDIDOS: a situação da garantia hoje e de onde veio o pedido.
     status: dict[str, int]
     origens: dict[str, int] = {}
@@ -454,6 +475,27 @@ class ResumoProdutoOut(BaseModel):
     atendimentos_software: int = 0
     # Os ids das garantias com pedido (a linha abre a lista delas).
     pedidos: list[int] = []
+    # Os mesmos ids por coluna da tela (a célula abre só os dela): mensagem,
+    # sac, devolucao, outros, ativa, somente_software, aguardando, expirada,
+    # atendimentos, no_tecnico, consertados, perdidos e gasto (este só para
+    # admin). Coluna sem pedido não vem.
+    pedidos_por_coluna: dict[str, list[int]] = {}
+    # Manutenção e perdas (30/10/2026): dos que pediram, o aparelho na tela
+    # Devoluções — no técnico agora (e quantos com o prazo de 30 dias
+    # vencido), consertados (e quantos sem o custo do conserto lançado) e
+    # perdidos (Extraviado/Sucata). Uma garantia conta numa só.
+    no_tecnico: int = 0
+    no_tecnico_vencidos: int = 0
+    consertados: int = 0
+    consertados_sem_custo: int = 0
+    perdidos: int = 0
+    # Em reais, só para admin (None para os outros): o gasto = o conserto
+    # (Custo manutenção acima de R$ 1) + o custo dos aparelhos perdidos; e o
+    # custo dos aparelhos que estão no técnico.
+    gasto: float | None = None
+    gasto_conserto: float | None = None
+    gasto_perdidos: float | None = None
+    valor_no_tecnico: float | None = None
 
 
 class ResumoOut(BaseModel):
@@ -463,7 +505,10 @@ class ResumoOut(BaseModel):
 
     vendidas: int
     pediram: int
+    seguiram: int = 0
     hoje: date
+    # Os valores em reais (Gasto) vêm só para admin.
+    ve_valores: bool = False
     departamentos: list[ResumoDepartamentoOut]
     produtos: list[ResumoProdutoOut]
 

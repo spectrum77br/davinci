@@ -99,7 +99,7 @@ const STUBS = {
   PageHeader: { props: ['title', 'description'], setup: (p, { slots }) => () => Vue.h('header', [Vue.h('h1', p.title), slots.actions?.()]) },
 }
 // Os componentes de garantia que a página/detalhe usam: vazios, a não ser os passados em `extras`.
-const VAZIOS = ['GarantiaStatus', 'GarantiaCobertura', 'GarantiaPrazoBarra', 'GarantiaDetalhe', 'GarantiaForm', 'GarantiaVincular', 'AtendimentoGarantia']
+const VAZIOS = ['GarantiaStatus', 'GarantiaAparelho', 'GarantiaCobertura', 'GarantiaPrazoBarra', 'GarantiaDetalhe', 'GarantiaForm', 'GarantiaVincular', 'AtendimentoGarantia']
 function appCom(C, props, g = {}, extras = {}) {
   const app = Vue.createSSRApp(C, props)
   for (const [n, c] of Object.entries(STUBS)) app.component(n, c)
@@ -222,10 +222,15 @@ const LINHA = {
   assert.ok(!/(bg|text|border)-(emerald|amber|sky|red)-\d/.test(ler('../lib/garantias.ts')), 'nenhuma classe de cor em lib/')
   assert.ok(!/['"]\.\/lib\//.test(ler('../tailwind.config.ts')), '(lib/ fora do content do Tailwind — por isso as cores ficam nos componentes)')
   for (const c of ['GarantiaStatus', 'GarantiaCobertura']) assert.match(ler(`../components/${c}.vue`), /dark:bg-emerald-500\/15/, `${c}: cor do tema escuro`)
-  // Status com a cor/emoji do documento.
-  assert.deepEqual(Object.fromEntries(Object.entries(L.STATUS).map(([k, v]) => [k, [v.emoji, v.rotulo]])), {
-    aguardando_entrega: ['🟡', 'Aguardando entrega'], ativa: ['🟢', 'Ativa'], somente_software: ['🔵', 'Somente software'], expirada: ['🔴', 'Expirada'],
+  // Status com a cor do documento, sem emoji (29/10/2026: "igual aos nossos painéis").
+  assert.deepEqual(Object.fromEntries(Object.entries(L.STATUS).map(([k, v]) => [k, v.rotulo])), {
+    aguardando_entrega: 'Aguardando entrega', ativa: 'Ativa', somente_software: 'Somente software', expirada: 'Expirada',
   })
+  const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B50}\u{2B55}]/u
+  for (const f of ['../lib/garantias.ts', '../components/GarantiaStatus.vue', '../components/GarantiaCobertura.vue', '../components/GarantiaResumo.vue', '../components/GarantiaHistorico.vue', '../components/GarantiaAparelho.vue', '../pages/garantias.vue']) {
+    const codigo = ler(f).split('\n').filter((l) => !l.trim().startsWith('//')).join('\n')
+    assert.ok(!EMOJI.test(codigo), `${f}: sem emoji na tela`)
+  }
   // O "Aguardando" de pedido que o Bling já dá como entregue: outro texto, mesmo status.
   assert.equal(L.statusInfo('aguardando_entrega', true).rotulo, 'Entregue — sem data no DaVinci')
   assert.equal(L.statusInfo('aguardando_entrega').rotulo, 'Aguardando entrega')
@@ -252,7 +257,9 @@ const LINHA = {
     { status: 'ativa', periodo: 'entrega', de: '2026-10-01', origem: 'robo' })
   // Pedido de garantia (28/10): a data do pedido é o dia em São Paulo (às
   // 22h30 de 27/10 em SP já é 28/10 em UTC).
-  assert.equal(L.rotuloDoPedido({ pedido_em: '2026-10-28T01:30:00Z', pedido_origem: 'mensagem', nao_e_pedido: false }), '💬 mensagem do cliente · 27/10/2026')
+  assert.equal(L.rotuloDoPedido({ pedido_em: '2026-10-28T01:30:00Z', pedido_origem: 'mensagem', nao_e_pedido: false }), 'Mensagem do cliente · 27/10/2026')
+  assert.equal(L.rotuloDoPedidoComTrecho({ pedido_em: '2026-10-28T01:30:00Z', pedido_origem: 'mensagem', nao_e_pedido: false, pedido_trecho: 'o celular não liga' }), '“o celular não liga” · 27/10/2026')
+  assert.equal(L.rotuloDoPedidoComTrecho({ pedido_em: '2026-10-28T01:30:00Z', pedido_origem: 'devolucao', nao_e_pedido: false, pedido_trecho: 'devolução: Danificado (Outros)' }), 'Devolução: Danificado (Outros) · 27/10/2026')
   assert.equal(L.rotuloDoPedido({ pedido_em: null, pedido_origem: null, nao_e_pedido: false }), 'sem pedido de garantia')
   assert.equal(L.rotuloDoPedido({ pedido_em: '2026-10-28T01:30:00Z', pedido_origem: 'mensagem', nao_e_pedido: true }), 'não é pedido de garantia')
   // SAC do site: ":" entre o rótulo e o valor colados (só na tela). O
@@ -550,6 +557,16 @@ async function testarPagina() {
   m.estado.filtros.busca = ''
   await espera(350)
   assert.equal(m.estado.vista, 'resumo')
+  // O número de uma coluna (30/10/2026) abre só os pedidos dela, com o aviso "produto · coluna".
+  n = listas().length
+  m.estado.abrirProduto({ nome: 'A17', ids: [8], coluna: 'Devolução' })
+  await espera(0)
+  assert.equal(m.estado.produtoAberto, 'A17 · Devolução')
+  assert.equal(listas().length, n + 1, 'abrir a célula: uma leitura')
+  assert.deepEqual(listas().at(-1).opts.body.ids, [8])
+  m.estado.voltarParaProdutos()
+  await espera(0)
+  assert.equal(m.estado.produtoAberto, '')
   // O seletor não tem "Conversas": na lista aberta ele mostra a garantia por produto.
   m.estado.abrirProduto({ nome: 'A17', ids: [7] })
   await espera(0)
@@ -627,8 +644,8 @@ async function testarPagina() {
     assert.match(h, /\*\*\*\.982\.247-\*\*/, 'CPF mascarado na lista')
     assert.ok(!/529\.982\.247-25|52998224725/.test(h), 'nunca o CPF completo na lista')
     assert.match(texto(h), /07\/10\/26 07\/01\/27 07\/10\/27/, 'Entrega, Fim HW e Fim SW em dd/mm/aa')
-    assert.match(h, /🟢/)
-    assert.match(h, /🔵/)
+    assert.match(h, /data-status-garantia[^>]*>Ativa</)
+    assert.match(h, /data-status-garantia[^>]*>Somente software</)
     const cartoes = [...h.matchAll(/data-cartao="([a-z_0-9]+)"[\s\S]*?<\/button>/g)].map((x) => [x[1], texto(x[0].replace(/^[^>]*>/, ''))])
     assert.deepEqual(cartoes, [['ativas', 'Ativas 128'], ['somente_software', 'Só software 342'], ['hw_vence_30d', 'HW vence em 30d 17'], ['atendimentos_no_mes', 'Atendimentos no mês 23']])
     assert.match(h, /data-cartoes-garantias/, 'cartões no celular')
@@ -833,7 +850,7 @@ async function testarDetalhe() {
   assert.match(dados, /Corrigir dados/)
   const atend = await d1.aba('atendimentos')
   assert.match(atend, /data-linha-do-tempo/)
-  assert.match(texto(atend), /✅ Coberto/)
+  assert.match(texto(atend), /Coberto/)
   assert.match(texto(atend), /Com os prazos de hoje \(entrega corrigida depois\): Fora da garantia/)
   assert.match(atend, /href="\/atendimento\?conversa=c1"/)
   assert.match(atend, /<img src="\/api\/garantias\/anexos\/5"/)
@@ -852,7 +869,7 @@ async function testarDetalhe() {
   const DET3 = { ...DET, data_inicio: null, fim_hardware: null, fim_software: null, status: 'aguardando_entrega', status_rotulo: 'Entregue — sem data no DaVinci', entregue_sem_data: true, hardware: null, software: null, entrega: { data: null, origem: null, origem_rotulo: null, em: null, verificada_em: '2026-10-07T16:00:00Z' } }
   const d3 = await abrirDetalhe(CONSULTA, DET3)
   const h3 = await d3.aba('dados')
-  assert.match(texto(h3), /🟡 Entregue — sem data no DaVinci/)
+  assert.match(texto(h3), /Entregue — sem data no DaVinci/)
   assert.match(h3, /data-entregue-sem-data-texto/)
   assert.match(texto(h3), /início sem data de entrega/)
   assert.ok(!/O pedido ainda não tem data de entrega/.test(h3))
@@ -981,7 +998,7 @@ async function testarBloco() {
   assert.ok(!/data-vincular-garantia-botao/.test(sem), 'sem Registrar atendimento, sem o botão')
   assert.match(sem, /href="\/garantias\?garantia=7"/)
   assert.match(texto(sem), /Esta conversa já foi vinculada/)
-  assert.match(texto(sem), /🟢 Ativa/)
+  assert.match(texto(sem), /Ativa/)
   assert.ok(!/data-outro-pedido/.test(sem), 'a garantia é do pedido da conversa')
   const outro = await renderizar('../components/AtendimentoGarantia.vue', { situacao: { ...SIT, alerta_cpf_sem_garantia: false, garantias: [{ ...LINHA, pedido_bling: '99999', status: 'aguardando_entrega', entregue_sem_data: true }] }, podeVincular: true, podeAbrir: true, podeCadastrar: false }, {}, extras)
   assert.match(outro, /data-outro-pedido/, 'garantia do mesmo CPF em outro pedido: marcada')
@@ -1028,8 +1045,97 @@ async function testarBloco() {
   assert.ok(!/<AtendimentoGarantia[^>]*canEdit/.test(pedido), 'o bloco não usa o canEdit')
 }
 
+// ═══════════════════════════════════════════════════════════════ garantia por produto
+async function testarResumo() {
+  // 30/10/2026: o número da célula abre só os pedidos dela; Manutenção e perdas
+  // (o aparelho de quem pediu na tela Devoluções); o Gasto em reais só para admin.
+  const produto = {
+    chave: 'tabela:1', departamento: 'celular', nome: 'A17 pro max', skus: ['dg052', 'dg053'], na_tabela: true,
+    vendidas: 100, pediram: 6, seguiram: 2,
+    status: { aguardando_entrega: 0, ativa: 5, somente_software: 0, expirada: 0, entregue_sem_data: 1 },
+    origens: { mensagem: 4, sac: 0, devolucao: 2, atendimento: 0, manual: 0, pessoa: 0 },
+    com_atendimento: 0, atendimentos_hardware: 0, atendimentos_software: 0,
+    pedidos: [1, 2, 3, 4, 5, 6],
+    pedidos_por_coluna: { mensagem: [1, 2, 3, 4], devolucao: [5, 6], seguiram: [5, 6], ativa: [1, 2, 3, 4, 5], aguardando: [6], no_tecnico: [5], consertados: [6], gasto: [6] },
+    no_tecnico: 1, no_tecnico_vencidos: 1, consertados: 1, consertados_sem_custo: 0, perdidos: 0,
+    gasto: 229.4, gasto_conserto: 229.4, gasto_perdidos: 0, valor_no_tecnico: 600,
+  }
+  const RESUMO = { vendidas: 100, pediram: 6, seguiram: 2, hoje: '2026-10-30', ve_valores: true, departamentos: [{ chave: 'celular', nome: 'Celular', vendidas: 100, pediram: 6, seguiram: 2 }], produtos: [produto] }
+  const montarResumo = async (resumo) => {
+    const emitidos = []
+    const g = { user: ADMIN, api: async (url) => { assert.equal(url, '/api/garantias/resumo'); return resumo } }
+    const cx = comEstado(componente('../components/GarantiaResumo.vue', g))
+    const props = { filtros: { ...L.FILTROS_PADRAO }, onAbrir: (x) => emitidos.push(x) }
+    await html(appCom(cx.C, props, g))
+    await new Promise((r) => setTimeout(r, 0))
+    return { cx, emitidos, h: await html(appCom(cx.mesmo, props, g)) }
+  }
+  const { cx, emitidos, h } = await montarResumo(RESUMO)
+  const col = (k) => cx.estado.colunas.find((c) => c.chave === k)
+  assert.deepEqual(cx.estado.colunas.slice(-4).map((c) => c.rotulo), ['No técnico', 'Consertos', 'Perdidos', 'Gasto R$'])
+  assert.match(h, /data-grupo="perdas"[^>]*>Manutenção e perdas</)
+  assert.match(h, /min-w-\[1607px\]/, 'com o Gasto, a tabela fica mais larga')
+  // A % certa (30/10/2026): Seguiram ÷ Vendidas — quem só pediu no chat fica na dica.
+  assert.deepEqual(cx.estado.colunas.slice(0, 4).map((c) => c.rotulo), ['Vendidas', 'Pediram', 'Seguiram', '%'])
+  assert.match(texto((h.match(/data-celula="pct"[^>]*>([\s\S]*?)<\/td>/) || [])[1] || ''), /^2%$/)
+  assert.match(texto((h.match(/data-departamento="celular"[^>]*>([\s\S]*?)<\/button>/) || [])[1] || ''), /^Celular · 2% \(2 de 100\)$/)
+  assert.equal(cx.estado.dicaDaPct(produto), '1,0x a média do Celular (2%) · pediram: 6% (6 de 100)')
+  assert.match(texto((h.match(/data-celula="gasto"[^>]*>([\s\S]*?)<\/td>/) || [])[1] || ''), /^229$/, 'o Gasto sem centavos na célula')
+  // O número abre só os pedidos dele; o zero não abre; Vendidas é o clique da linha.
+  const clique = (k) => { let parou = false; cx.estado.clicarCelula({ stopPropagation: () => { parou = true } }, produto, col(k)); return parou }
+  assert.equal(clique('devolucao'), true)
+  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [5, 6], coluna: 'Devolução' })
+  assert.equal(clique('pediram'), true)
+  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [1, 2, 3, 4, 5, 6], coluna: undefined })
+  const antes = emitidos.length
+  assert.equal(clique('sac'), true, 'o zero não deixa o clique virar o da linha')
+  assert.equal(emitidos.length, antes, 'o zero não abre nada')
+  assert.equal(clique('vendidas'), false, 'Vendidas não é pedido: o clique é o da linha')
+  assert.equal(emitidos.length, antes)
+  clique('no_tecnico')
+  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [5], coluna: 'No técnico' })
+  clique('seguiram')
+  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [5, 6], coluna: 'Seguiram' })
+  // Com o mouse: o vencido e os reais.
+  assert.equal(cx.estado.dicaDaCelula(produto, col('no_tecnico')), 'ver o pedido de garantia — No técnico · 1 com o prazo de 30 dias vencido · R$ 600,00 em aparelhos no técnico')
+  assert.equal(cx.estado.dicaDaCelula(produto, col('gasto')), 'ver o pedido de garantia — Gasto R$ · R$ 229,40: conserto R$ 229,40 + aparelhos perdidos R$ 0,00')
+  assert.equal(cx.estado.dicaDaCelula(produto, col('perdidos')), 'nenhum pedido nesta coluna', 'o zero não herda o "ver os N pedidos" da linha')
+  assert.equal(cx.estado.dicaDaCelula(produto, col('vendidas')), undefined, 'Vendidas fica com a dica da linha')
+  // Quem não é admin: sem o Gasto (o servidor não manda os reais).
+  const semValores = { ...produto, gasto: null, gasto_conserto: null, gasto_perdidos: null, valor_no_tecnico: null, pedidos_por_coluna: { ...produto.pedidos_por_coluna, gasto: undefined } }
+  const r2 = await montarResumo({ ...RESUMO, ve_valores: false, produtos: [semValores] })
+  assert.ok(!r2.cx.estado.colunas.some((c) => c.chave === 'gasto'))
+  assert.ok(!/data-coluna="gasto"/.test(r2.h) && /min-w-\[1530px\]/.test(r2.h))
+  assert.equal(r2.cx.estado.dicaDaCelula(semValores, r2.cx.estado.colunas.find((c) => c.chave === 'no_tecnico')), 'ver o pedido de garantia — No técnico · 1 com o prazo de 30 dias vencido')
+  assert.ok(!/R\$/.test(texto(r2.h)), 'nenhum real na tela de quem não é admin')
+  // A conta da %, discreta ao lado das pílulas (30/10/2026: "bem sutil, só para mim não esquecer").
+  assert.match(texto((h.match(/data-calculo[^>]*>([\s\S]*?)<\/span>/) || [])[1] || ''), /^% = seguiram ÷ vendidas · seguiram = o aparelho voltou, está voltando ou teve reembolso/)
+  assert.ok(!/data-como-calcula/.test(h), 'sem botão')
+  assert.equal(L.reaisBR(1234.5), 'R$ 1.234,50')
+
+  // O selo do aparelho: o vencido (o servidor diz) na cor do perdido; corta
+  // com "…" numa coluna estreita (o texto inteiro no mouse); sem texto, nada.
+  const selo = async (situacao, rotulo, vencido) => html(appCom(componente('../components/GarantiaAparelho.vue', {}), { situacao, rotulo, vencido }))
+  const tecnico = await selo('no_tecnico', 'No técnico · faltam 5 dias', false)
+  assert.match(tecnico, /data-aparelho="no_tecnico"[^>]*>No técnico · faltam 5 dias</)
+  assert.match(tecnico, /bg-orange-50/)
+  assert.match(tecnico, /max-w-full truncate/)
+  assert.match(tecnico, /title="No técnico · faltam 5 dias — o aparelho desta garantia na tela Devoluções"/)
+  assert.match(await selo('no_tecnico', 'No técnico · vencido há 3 dias', true), /bg-rose-50/)
+  assert.match(await selo('consertado', 'Consertado (Novo)', false), /bg-teal-50/)
+  assert.match(await selo('devolvido', 'Devolvido (Novo)', false), /bg-slate-50/)
+  const aCaminho = await selo('a_caminho', 'Devolução a caminho', false)
+  assert.match(aCaminho, /bg-indigo-50/)
+  assert.match(aCaminho, /title="Devolução a caminho — devolução aceita na plataforma, o aparelho está voltando/, 'não manda procurar na tela Devoluções')
+  const reembolso = await selo('reembolso', 'Reembolso ao cliente', false)
+  assert.match(reembolso, /bg-yellow-50/)
+  assert.match(reembolso, /title="Reembolso ao cliente — reembolso ao cliente \(tela Reembolso ou pago pela plataforma\)"/)
+  assert.equal(texto(await selo(null, null, false)), '')
+}
+
 ;(async () => {
   await testarPagina()
+  await testarResumo()
   await testarFormulario()
   await testarDetalhe()
   await testarVincular()

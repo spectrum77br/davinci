@@ -320,19 +320,49 @@ async def _situacoes(session: AsyncSession, garantias: list[Garantia]) -> dict[s
 
 
 async def _linhas(
-    session: AsyncSession, garantias: list[Garantia], dia, user: User | None = None
+    session: AsyncSession,
+    garantias: list[Garantia],
+    dia,
+    user: User | None = None,
+    *,
+    com_aparelho: bool = False,
 ) -> list[GarantiaLinhaOut]:
+    from app.services import garantia_resumo
+
     contagem = await _contagem_atendimentos(session, [g.id for g in garantias])
     situacoes = await _situacoes(session, garantias)
     conversas = await _conversas_das(session, [g.id for g in garantias], user)
     trechos = await _trechos_do_pedido(session, garantias, user)
+    # O aparelho (30/10/2026): o selo "No técnico", "Consertado", "Perdido",
+    # "Reembolso ao cliente", "Devolução a caminho"; os reais só para admin. Só
+    # a tela de Garantias mostra (`com_aparelho`): a conversa do Atendimento, a
+    # busca para vincular e o cadastro não pagam essa leitura.
+    desfechos = (
+        await garantia_resumo.desfechos(session, garantias, dia) if com_aparelho else {}
+    )
+    com_valor = user is not None and user.role == UserRole.ADMIN
+
+    def do_aparelho(g: Garantia) -> dict:
+        if not (f := desfechos.get(g.id)):
+            return {}
+        return {
+            "devolucao_situacao": f.situacao,
+            "devolucao_rotulo": garantia_resumo.rotulo_do_desfecho(f, dia, com_valor),
+            "devolucao_vencido": f.vencido,
+            "devolucao_gasto": f.gasto if com_valor else None,
+        }
+
     return [
         _linha(
             g,
             contagem.get(g.id, 0),
             dia,
             situacoes.get(g.pedido_bling),
-            {**(conversas.get(g.id) or {}), "pedido_trecho": trechos.get(g.id)},
+            {
+                **(conversas.get(g.id) or {}),
+                "pedido_trecho": trechos.get(g.id),
+                **do_aparelho(g),
+            },
         )
         for g in garantias
     ]
@@ -614,10 +644,13 @@ async def _indicadores(session: AsyncSession, escopo, dia) -> IndicadoresOut:
             *base,
         )
     )
+    from app.services import garantia_resumo
+
     return IndicadoresOut(
         **{k: getattr(linha, k) for k in contar},
         total=linha.total,
         vendidas=vendidas,
+        seguiram=await garantia_resumo.contar_seguiram(session, base, dia),
         atendimentos_no_mes=(await session.execute(q)).scalar_one(),
     )
 
@@ -763,7 +796,14 @@ async def resumo(
         fim = datetime.combine(body.ate + timedelta(days=1), time(), svc.SAO_PAULO)
         compra = func.coalesce(garantia_pedido.compra_da_garantia(), Garantia.criado_em)
         filtros.append(compra < fim)
-    dados = await garantia_resumo.resumo(session, filtros, dia, pedido=_filtros_do_pedido(body))
+    dados = await garantia_resumo.resumo(
+        session,
+        filtros,
+        dia,
+        pedido=_filtros_do_pedido(body),
+        # O Gasto em reais (o custo do produto nas Devoluções é só do admin).
+        com_valores=user.role == UserRole.ADMIN,
+    )
     return ResumoOut(**dados)
 
 
@@ -824,7 +864,7 @@ async def listar(
         ).scalars()
     )
     resposta = GarantiaListaOut(
-        itens=await _linhas(session, garantias, dia, user),
+        itens=await _linhas(session, garantias, dia, user, com_aparelho=True),
         total=total,
         indicadores=await _indicadores(session, escopo, dia),
         hoje=dia,
