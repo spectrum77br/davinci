@@ -43,7 +43,7 @@ async def user_arch(db: AsyncSession) -> User:
     u = User(
         open_id=f"email:{email}",
         email=email,
-        role=UserRole.USER,
+        role=UserRole.ADMIN,
         status=UserStatus.ACTIVE,
         permissions=PERM,
     )

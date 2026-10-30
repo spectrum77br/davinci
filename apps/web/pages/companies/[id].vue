@@ -446,6 +446,7 @@ async function patchStore(s: StoreOut, patch: Partial<StoreOut>) {
 }
 
 async function deleteStore(s: StoreOut) {
+  if (!isAdmin.value) return
   if (!confirm(`Excluir loja ${s.marketplace}? (cascade em cadastros vinculados)`)) return
   try {
     await apiE(`/api/stores/${s.id}`, { method: 'DELETE' })
@@ -695,7 +696,7 @@ onMounted(() => { if (trava.iniciar()) carregarTudo() })
                   />
                 </td>
                 <td class="px-3 py-2 text-right">
-                  <Button v-if="canDelete" size="sm" variant="ghost" @click="deleteStore(storeFor(mk)!)">
+                  <Button v-if="isAdmin" size="sm" variant="ghost" @click="deleteStore(storeFor(mk)!)">
                     <Trash2 class="size-4" />
                   </Button>
                 </td>

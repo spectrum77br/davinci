@@ -14,7 +14,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import func, select, text
 
-from app.models import Integration, NfFaturador, PricingAccount, Segment
+from app.models import Integration, NfFaturador, PricingAccount, Segment, UserRole
 
 MANUAL_PLATFORMS = ("site",)
 EDIT_PERMISSION = {"lojas_info": {"view": True, "edit": True, "delete": True}}
@@ -22,7 +22,7 @@ EDIT_PERMISSION = {"lojas_info": {"view": True, "edit": True, "delete": True}}
 
 @pytest_asyncio.fixture
 async def manual_editor(db, make_user, auth_as):
-    user = await make_user(permissions=EDIT_PERMISSION)
+    user = await make_user(role=UserRole.ADMIN, permissions=EDIT_PERMISSION)
     db.add_all([
         Segment(name=slug.title(), slug=slug)
         for slug in ("celular", "mala", "eletro", "catalogo")
@@ -191,21 +191,25 @@ async def test_manual_type_edits_respect_permissions_and_store_team_scope(
     client, db, manual_editor, make_user, auth_as,
 ):
     store_id = await _create_store(client, "site", sales_team=1)
-    for permissions, teams, expected in (
-        ({"lojas_info": {"view": True}}, [1], 403),
-        (EDIT_PERMISSION, [2], 404),
-        (EDIT_PERMISSION, [1], 200),
+    for permissions, teams in (
+        ({"lojas_info": {"view": True}}, [1]),
+        (EDIT_PERMISSION, [2]),
+        (EDIT_PERMISSION, [1]),
     ):
         user = await make_user(permissions=permissions)
         user.sales_teams = teams
         await db.commit()
         auth_as(user)
+        listed = (await client.get("/api/pricing/store-info")).json()
+        assert (store_id in {row["id"] for row in listed}) == (teams == [1])
         response = await client.post(f"/api/pricing/store-info/{store_id}/department", json={
             "department": "mala",
         })
-        assert response.status_code == expected, response.text
+        assert response.status_code == 403, response.text
+        assert response.json()["detail"]["code"] == "admin_only"
         response = await client.delete(f"/api/pricing/store-info/{store_id}/department/mala")
-        assert response.status_code == (204 if expected == 200 else expected), response.text
+        assert response.status_code == 403, response.text
+        assert response.json()["detail"]["code"] == "admin_only"
     auth_as(manual_editor)
     _assert_manual(await _listed(client, store_id), store_id, [])
     await _assert_no_automatic_accounts(db)

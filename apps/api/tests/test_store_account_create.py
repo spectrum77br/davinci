@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
+from app.config import get_settings
 from app.models import Cadastro, CadastroStore, CadastroTipo, Company, Store, StoreInfo, UserRole
 
 
@@ -147,8 +148,9 @@ async def test_store_info_write_failure_rolls_back_account_and_links(
 ):
     _, _, _, body = await seed(db, make_user, auth_as)
     # Disposable test DB: force a later write to fail after Store was flushed.
+    schema = db.bind.dialect.identifier_preparer.quote_schema(get_settings().database_schema)
     await db.execute(text(
-        "ALTER TABLE davinci_test.store_info ADD CONSTRAINT test_reject_account "
+        f"ALTER TABLE {schema}.store_info ADD CONSTRAINT test_reject_account "  # noqa: S608
         "CHECK (email != 'email-1')"
     ))
     await db.commit()
@@ -158,6 +160,6 @@ async def test_store_info_write_failure_rolls_back_account_and_links(
         assert await counts(db) == [0, 0, 0]
     finally:
         await db.execute(text(
-            "ALTER TABLE davinci_test.store_info DROP CONSTRAINT test_reject_account"
+            f"ALTER TABLE {schema}.store_info DROP CONSTRAINT test_reject_account"  # noqa: S608
         ))
         await db.commit()

@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission, user_scope
+from app.deps.auth import require_admin, require_permission, user_scope
 from app.models import (
     Cadastro,
     CadastroStatus,
@@ -123,6 +123,7 @@ async def create_store(
 async def create_store_account(
     body: StoreAccountCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
+    _admin: Annotated[User, Depends(require_admin)],
     user: Annotated[User, Depends(require_permission("empresa", "edit"))],
     _cad: Annotated[User, Depends(require_permission("cadastro", "edit"))],
     _info: Annotated[User, Depends(require_permission("lojas_info", "edit"))],
@@ -221,6 +222,7 @@ def _plataformas(mk: Marketplace) -> tuple[str, ...]:
 async def trocar_email_da_conta(
     body: StoreAccountEmail,
     session: Annotated[AsyncSession, Depends(get_session)],
+    _admin: Annotated[User, Depends(require_admin)],
     _u: Annotated[User, Depends(require_permission("empresa", "edit"))],
     _cad: Annotated[User, Depends(require_permission("cadastro", "edit"))],
     user: Annotated[User, Depends(require_permission("lojas_info", "edit"))],
@@ -386,6 +388,7 @@ async def patch_store(
 async def delete_store(
     store_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
+    _admin: Annotated[User, Depends(require_admin)],
     _u: Annotated[User, Depends(require_permission("empresa", "delete"))],
 ) -> None:
     """Removes the Store + every shadow record tied to it.

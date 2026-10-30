@@ -17,19 +17,20 @@ assert.deepEqual(template.errors, [])
 const script = descriptor.scriptSetup.content
 const modal = script.slice(script.indexOf('// ---------- new account modal'), script.indexOf('async function createStoreCell'))
 const js = ts.transpileModule(modal, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-const factory = new Function('ref', 'reactive', 'api', 'apiE', 'canEdit', 'MARKETPLACE_SHORT', 'refresh', 'error', 'setTimeout', js + `
+const factory = new Function('ref', 'reactive', 'api', 'apiE', 'isAdmin', 'MARKETPLACE_SHORT', 'refresh', 'error', 'setTimeout', js + `
 return { newAccountFor, newAccountForm, availablePhones, availableEmails, availableServers,
   availableCadastrosLoading, availableCadastrosLoaded, availableCadastrosError,
   newAccountSaving, newAccountErr, newAccountResult,
   openNewAccount, closeNewAccount, loadAvailableCadastros, submitNewAccount };
 `)
-function setup() {
+function setup(admin = true) {
+  const isAdmin = ref(admin)
   const calls = []
   const timers = []
   let refreshed = 0
   const api = (url, opts) => new Promise((resolve, reject) => calls.push({ url, opts, resolve, reject }))
-  return { calls, timers, refreshCount: () => refreshed,
-    state: factory(ref, reactive, api, api, ref(true), {}, async () => { refreshed++ }, ref(null), (fn) => { timers.push(fn) }) }
+  return { calls, timers, isAdmin, refreshCount: () => refreshed,
+    state: factory(ref, reactive, api, api, isAdmin, {}, async () => { refreshed++ }, ref(null), (fn) => { timers.push(fn) }) }
 }
 const row = id => ({ company: { id, apelido: id } })
 const finish = (calls, start, prefix) => calls.slice(start, start + 3).forEach((call, i) => call.resolve([{ id: `${prefix}-${i}`, codigo: prefix }]))
@@ -47,6 +48,35 @@ async function ready(ctx, company = 'one', marketplace = 'ml') {
   selectAll(ctx.state)
 }
 async function run() {
+  {
+    const { state: s, calls } = setup(false)
+    await s.openNewAccount(row('blocked'), 'ml')
+    assert.equal(s.newAccountFor.value, null)
+    assert.equal(calls.length, 0, 'non-admin cannot open create-account or fetch its mutation-only options')
+    s.newAccountFor.value = { company: row('blocked').company, mk: 'ml' }
+    s.availableCadastrosLoaded.value = true
+    s.availablePhones.value = [{ id: 'phone' }]; s.availableEmails.value = [{ id: 'email' }]; s.availableServers.value = [{ id: 'server' }]
+    selectAll(s)
+    await s.submitNewAccount()
+    assert.equal(calls.length, 0, 'stale or forged modal state cannot submit for a non-admin')
+  }
+  {
+    const ctx = setup()
+    await ready(ctx)
+    ctx.isAdmin.value = false
+    await ctx.state.submitNewAccount()
+    assert.equal(ctx.calls.length, 3, 'role downgrade blocks submission from an already-open modal')
+  }
+  {
+    const ctx = setup()
+    await ready(ctx)
+    const submitted = ctx.state.submitNewAccount()
+    ctx.calls[3].reject({ data: { detail: { code: 'admin_only' } } })
+    await submitted
+    assert.match(ctx.state.newAccountErr.value, /Somente administradores/)
+    assert.equal(ctx.calls.length, 4)
+  }
+
   {
     const { calls, state: s } = setup()
     s.availablePhones.value = [{ id: 'old' }]
@@ -171,7 +201,7 @@ async function run() {
     calls[3].reject({ data: { detail: { code: 'forbidden' } } })
     await submitted
     assert.equal(calls.length, 4, 'permission failure must not reload options or send follow-up writes')
-    assert.match(s.newAccountErr.value, /permissão/)
+    assert.match(s.newAccountErr.value, /Somente administradores/)
     assert.equal(s.newAccountSaving.value, false)
     assert.equal(s.newAccountResult.value, null)
   }
@@ -192,6 +222,6 @@ async function run() {
     calls[10].resolve({ id: 'second-store' })
     await secondSubmit
   }
-  console.log('PASS: SFC parse and template compilation; 10 modal loading/submit/race/error scenarios')
+  console.log('PASS: SFC parse and template compilation; 13 modal admin-only/loading/submit/race/error scenarios')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

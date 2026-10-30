@@ -137,12 +137,11 @@ const DEPARTMENTS = [
 ]
 
 const { api } = useApi()
-// Lojas é SEPARADO de Tabela de Preços (decisão 13/ago): a tela obedece só a
-// permissão "Lojas (info)" — quem tem tabela_precos mas não lojas_info NÃO
-// edita aqui. O backend espelha (require_permission("lojas_info") nos
-// endpoints /pricing/store-info*).
-const canEdit = useCan('lojas_info', 'edit')
-const canDelete = useCan('lojas_info', 'delete')
+// O acesso de leitura continua obedecendo a lojas_info e ao escopo da conta.
+// Alterações no cadastro de lojas são exclusivas de administradores, mesmo
+// quando um usuário tem permissões antigas de edição/exclusão do recurso.
+const canEdit = useIsAdmin()
+const canDelete = canEdit
 
 const items = ref<StoreInfo[]>([])
 const integrations = ref<IntegrationRef[]>([])
@@ -157,6 +156,7 @@ const filterPlatform = ref<string>('all')
 const search = ref('')
 const mobileTableView = ref(false)
 async function openStoreTable(row: StoreInfo) {
+  if (!canEdit.value) return
   mobileTableView.value = true
   await nextTick()
   document.getElementById(`store-row-${row.id}`)?.scrollIntoView({ block: 'center', inline: 'start' })
@@ -208,6 +208,7 @@ function availableIntegrationsFor(row: StoreInfo): IntegrationRef[] {
 }
 
 async function attachIntegration(row: StoreInfo, integrationId: string) {
+  if (!canEdit.value) return
   if (!integrationId || integrationId === row.integration_id) return
   try {
     const updated = await api<StoreInfo>(`/api/pricing/store-info/${row.id}`, {
@@ -222,6 +223,7 @@ async function attachIntegration(row: StoreInfo, integrationId: string) {
 }
 
 async function unlinkIntegration(row: StoreInfo) {
+  if (!canEdit.value) return
   try {
     const updated = await api<StoreInfo>(`/api/pricing/store-info/${row.id}`, {
       method: 'PATCH',
@@ -237,6 +239,7 @@ async function unlinkIntegration(row: StoreInfo) {
 // Generic single-field PATCH used by the new Bling ID / UpseSeller / Duoker
 // / UF cells.
 async function updateField(row: StoreInfo, field: keyof StoreInfo, value: unknown) {
+  if (!canEdit.value) return
   try {
     const body: Record<string, unknown> = { [field]: value }
     const updated = await api<StoreInfo>(`/api/pricing/store-info/${row.id}`, {
@@ -259,9 +262,11 @@ function boolFromSelect(v: string): boolean | null {
 // UF multi-select popover state: tracks which row's popover is open.
 const openUfRowId = ref<string | null>(null)
 function toggleUfPopover(id: string) {
+  if (!canEdit.value) return
   openUfRowId.value = openUfRowId.value === id ? null : id
 }
 async function toggleUf(row: StoreInfo, uf: string, checked: boolean) {
+  if (!canEdit.value) return
   const current = new Set(row.uf_restrictions || [])
   if (checked) current.add(uf)
   else current.delete(uf)
@@ -283,6 +288,7 @@ function badgeClassTriBool(v: boolean | null): string {
   return 'bg-muted/40 text-muted-foreground border-border'
 }
 async function cycleTriBool(row: StoreInfo, field: 'upseseller' | 'duoker') {
+  if (!canEdit.value) return
   const cur = row[field]
   const next: boolean | null = cur === null ? true : cur === true ? false : null
   await updateField(row, field, next)
@@ -300,6 +306,7 @@ const openUfRow = computed(() =>
 const novoHorario = ref('')
 const openHorRowId = ref<string | null>(null)
 function toggleHorPopover(id: string) {
+  if (!canEdit.value) return
   openHorRowId.value = openHorRowId.value === id ? null : id
 }
 const openHorRow = computed(() =>
@@ -309,15 +316,18 @@ function horariosDe(row: StoreInfo): string[] {
   return (row.etiqueta_horarios || '').split(',').map((s) => s.trim()).filter(Boolean)
 }
 async function setHorarios(row: StoreInfo, lista: string[]) {
+  if (!canEdit.value) return
   const next = Array.from(new Set(lista)).sort()
   await updateField(row, 'etiqueta_horarios', next.length ? next.join(', ') : null)
 }
 async function addHorario(row: StoreInfo) {
+  if (!canEdit.value) return
   if (!novoHorario.value) return
   await setHorarios(row, [...horariosDe(row), novoHorario.value])
   novoHorario.value = ''
 }
 async function removeHorario(row: StoreInfo, hhmm: string) {
+  if (!canEdit.value) return
   await setHorarios(row, horariosDe(row).filter((h) => h !== hhmm))
 }
 
@@ -340,6 +350,7 @@ function tagsSabadoDe(row: StoreInfo): string[] {
   return (row.etiqueta_sabado_tags || '').split(',').map((s) => s.trim()).filter(Boolean)
 }
 async function toggleTagSabado(row: StoreInfo, slug: string) {
+  if (!canEdit.value) return
   const atuais = tagsSabadoDe(row)
   const next = atuais.includes(slug)
     ? atuais.filter((t) => t !== slug)
@@ -347,6 +358,7 @@ async function toggleTagSabado(row: StoreInfo, slug: string) {
   await updateField(row, 'etiqueta_sabado_tags', next.length ? next.join(', ') : null)
 }
 async function setHoraSabado(row: StoreInfo, hhmm: string) {
+  if (!canEdit.value) return
   await updateField(row, 'etiqueta_sabado_horario', hhmm || null)
 }
 
@@ -354,6 +366,7 @@ async function setHoraSabado(row: StoreInfo, hhmm: string) {
 // table). Each add/remove PATCHes `excecoes` via updateField.
 const openExcRowId = ref<string | null>(null)
 function toggleExcPopover(id: string) {
+  if (!canEdit.value) return
   openExcRowId.value = openExcRowId.value === id ? null : id
 }
 const openExcRow = computed(() =>
@@ -373,6 +386,7 @@ function excecaoLabel(r: StoreExcecao): string {
   return r.tipo === 'sku' ? `SKU ${termos}` : `nome contém ${termos}`
 }
 async function addExcecao(row: StoreInfo) {
+  if (!canEdit.value) return
   let regra: StoreExcecao
   if (excDraft.tipo === 'valor') {
     const v = Number(String(excDraft.valor).replace(/\./g, '').replace(',', '.'))
@@ -388,6 +402,7 @@ async function addExcecao(row: StoreInfo) {
   excDraft.termos = ''
 }
 async function removeExcecao(row: StoreInfo, idx: number) {
+  if (!canEdit.value) return
   const next = (row.excecoes || []).filter((_, i) => i !== idx)
   await updateField(row, 'excecoes', next.length ? next : null)
 }
@@ -447,7 +462,7 @@ function setEditInputRef(el: any) {
 const flashed = ref<Set<string>>(new Set())
 
 function isEditing(id: string, field: string) {
-  return editing.value?.id === id && editing.value?.field === field
+  return canEdit.value && editing.value?.id === id && editing.value?.field === field
 }
 
 function isFlashed(id: string, field: string) {
@@ -497,6 +512,7 @@ function cancelEdit() {
 }
 
 async function commitEdit() {
+  if (!canEdit.value) return cancelEdit()
   if (!editing.value) return
   const { id, field } = editing.value
   const row = items.value.find((x) => x.id === id)
@@ -546,6 +562,7 @@ const newRow = reactive({ platform: 'mercadolivre', account_name: '' })
 const adding = ref(false)
 
 function openAdd() {
+  if (!canEdit.value) return
   newRow.platform = 'mercadolivre'
   newRow.account_name = ''
   showAdd.value = true
@@ -556,6 +573,7 @@ function openAdd() {
 }
 
 async function submitNew() {
+  if (!canEdit.value) return
   if (!newRow.platform) return
   adding.value = true
   try {
@@ -577,6 +595,7 @@ async function submitNew() {
 // =========================================================== delete
 
 async function remove(row: StoreInfo) {
+  if (!canDelete.value) return
   if (!confirm(`Excluir loja "${row.account_name || row.platform}"?`)) return
   try {
     await api(`/api/pricing/store-info/${row.id}`, { method: 'DELETE' })
@@ -594,6 +613,7 @@ async function remove(row: StoreInfo) {
 const archiveBusy = ref<Set<string>>(new Set())
 
 async function archiveRow(row: StoreInfo) {
+  if (!canEdit.value) return
   if (!confirm(`Arquivar "${row.account_name || row.platform}"? Ela sai de Lojas, Tabela de Preço e Produtos, e o sync para de empurrar estoque/preço. Reversível em "Arquivadas".`)) return
   archiveBusy.value.add(row.id)
   try {
@@ -607,6 +627,7 @@ async function archiveRow(row: StoreInfo) {
 }
 
 async function unarchiveRow(row: StoreInfo) {
+  if (!canEdit.value) return
   archiveBusy.value.add(row.id)
   try {
     await api(`/api/pricing/store-info/${row.id}/unarchive`, { method: 'POST' })
@@ -682,6 +703,7 @@ function openFatPopover(rowId: string) {
 }
 
 async function patchFaturador(row: StoreInfo, key: string, body: Record<string, unknown>) {
+  if (!canEdit.value) return
   if (fatBusy.value.has(key)) return
   fatBusy.value.add(key)
   try {
@@ -699,6 +721,7 @@ async function patchFaturador(row: StoreInfo, key: string, body: Record<string, 
 }
 
 function setFatPorTipo(row: StoreInfo, dept: string, faturadorId: string) {
+  if (!canEdit.value) return
   const novo: Record<string, string> = { ...(row.nf_faturador_por_tipo || {}) }
   if (faturadorId) novo[dept] = faturadorId
   else delete novo[dept]
@@ -708,6 +731,7 @@ function setFatPorTipo(row: StoreInfo, dept: string, faturadorId: string) {
 }
 
 function setFatPadrao(row: StoreInfo, faturadorId: string) {
+  if (!canEdit.value) return
   void patchFaturador(row, `${row.id}:padrao`, { nf_faturador_id: faturadorId || null })
 }
 
@@ -717,6 +741,7 @@ function fatTiposDefinidos(row: StoreInfo): string[] {
 }
 
 async function toggleDepartment(row: StoreInfo, slug: string, input: HTMLInputElement) {
+  if (!canEdit.value) { input.checked = row.departments.includes(slug); return }
   const key = `${row.id}:${slug}`
   if (tipoBusy.value.has(key)) return
   const checked = input.checked
@@ -790,6 +815,17 @@ async function copyPassword(id: string) {
   } catch { /* clipboard indisponível */ }
 }
 
+watch(canEdit, (allowed) => {
+  if (allowed) return
+  cancelEdit()
+  showAdd.value = false
+  openUfRowId.value = null
+  openHorRowId.value = null
+  openExcRowId.value = null
+  tipoPopoverFor.value = null
+  fatPopoverFor.value = null
+}, { flush: 'sync' })
+
 async function copyText(text: string) {
   await navigator.clipboard.writeText(text)
 }
@@ -800,7 +836,7 @@ async function copyText(text: string) {
     <RouteTabs :tabs="TABS_CADASTROS" />
     <PageHeader
       title="Lojas"
-      :description="mobileTableView ? 'Cadastros completos das lojas — clique em qualquer célula para editar' : 'Cadastros completos das lojas'"
+      :description="canEdit && mobileTableView ? 'Cadastros completos das lojas — clique em qualquer célula para editar' : 'Cadastros completos das lojas'"
     >
       <template #actions>
         <select v-model="filterPlatform" aria-label="Filtrar plataforma das lojas" class="border rounded px-2 py-1 text-sm bg-background">
@@ -891,7 +927,7 @@ async function copyText(text: string) {
         </div>
       </div>
     </section>
-    <p v-if="mobileTableView" class="text-xs text-muted-foreground lg:hidden">Modo tabela: deslize para acessar todas as colunas de edição.</p>
+    <p v-if="mobileTableView" class="text-xs text-muted-foreground lg:hidden">Modo tabela: deslize para acessar todas as colunas{{ canEdit ? ' de edição' : '' }}.</p>
     <div class="border rounded-lg overflow-auto max-h-[65dvh] lg:max-h-[calc(100vh-220px)]" :class="mobileTableView ? 'block' : 'hidden lg:block'" role="region" aria-label="Dados das lojas" tabindex="0">
       <table class="w-full text-sm border-collapse">
         <thead class="sticky top-0 bg-muted z-10">
@@ -935,7 +971,7 @@ async function copyText(text: string) {
           </tr>
 
           <!-- add row -->
-          <tr v-if="showAdd" class="bg-blue-50/40 dark:bg-blue-900/10">
+          <tr v-if="canEdit && showAdd" class="bg-blue-50/40 dark:bg-blue-900/10">
             <td class="border border-border px-1 py-1">
               <select v-model="newRow.platform" class="w-full text-xs border rounded px-1 py-1 bg-background">
                 <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
@@ -978,8 +1014,9 @@ async function copyText(text: string) {
           <tr v-for="row in group.rows" :id="`store-row-${row.id}`" :key="row.id" class="hover:bg-accent/30">
             <!-- platform -->
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              class="border border-border px-2 py-1.5 text-xs"
               :class="{
+                'cursor-pointer': canEdit, 'select-text': !canEdit,
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'platform'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'platform'),
               }"
@@ -1000,6 +1037,7 @@ async function copyText(text: string) {
             <td
               class="border border-border px-2 py-1.5 text-xs"
               :class="{
+                'cursor-pointer': canEdit, 'select-text': !canEdit,
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'account_name'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'account_name'),
               }"
@@ -1013,8 +1051,8 @@ async function copyText(text: string) {
               />
               <div v-else class="flex items-center gap-1 group min-w-0">
                 <span
-                  class="cursor-pointer truncate flex-1"
-                  :class="{ 'text-muted-foreground': !row.account_name }"
+                  class="truncate flex-1"
+                  :class="{ 'text-muted-foreground': !row.account_name, 'cursor-pointer': canEdit, 'select-text': !canEdit }"
                   :title="row.account_name || ''"
                   @click="startEdit(row, 'account_name')"
                 >
@@ -1034,10 +1072,11 @@ async function copyText(text: string) {
                  antiga coluna "Frete"). Select inline igual ao de plataforma;
                  conta com 2+ tipos abre popover com um select POR TIPO (0228). -->
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer relative"
+              class="border border-border px-2 py-1.5 text-xs relative"
               :class="{
+                'cursor-pointer': canEdit, 'select-text': !canEdit,
                 'ring-2 ring-blue-500 ring-inset bg-background':
-                  isEditing(row.id, 'nf_faturador_id') || fatPopoverFor === row.id,
+                  isEditing(row.id, 'nf_faturador_id') || (canEdit && fatPopoverFor === row.id),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'nf_faturador_id'),
               }"
               @click.stop="fatMulti(row)
@@ -1060,7 +1099,7 @@ async function copyText(text: string) {
                 </span>
                 <!-- popover: um select por tipo + o Padrão (regra única) -->
                 <div
-                  v-if="fatPopoverFor === row.id"
+                  v-if="canEdit && fatPopoverFor === row.id"
                   class="absolute z-20 mt-1 left-1/2 -translate-x-1/2 w-56 rounded-md border bg-popover p-2 shadow-lg text-left space-y-1.5"
                   @click.stop
                 >
@@ -1122,8 +1161,9 @@ async function copyText(text: string) {
             <!-- Faturador produto: quem emite a NF PRODUTO da loja (mesma
                  lista de faturadores; a regra de emissão vem depois). -->
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              class="border border-border px-2 py-1.5 text-xs"
               :class="{
+                'cursor-pointer': canEdit, 'select-text': !canEdit,
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'nf_faturador_produto_id'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'nf_faturador_produto_id'),
               }"
@@ -1144,8 +1184,9 @@ async function copyText(text: string) {
               </span>
             </td>
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              class="border border-border px-2 py-1.5 text-xs"
               :class="{
+                'cursor-pointer': canEdit, 'select-text': !canEdit,
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'nf_etiqueta_id'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'nf_etiqueta_id'),
               }"
@@ -1170,9 +1211,8 @@ async function copyText(text: string) {
               class="border border-border px-1 py-1 text-center"
               :class="{ 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'etiqueta_horarios') }"
             >
-              <button
-                type="button"
-                :disabled="!canEdit"
+              <component :is="canEdit ? 'button' : 'span'"
+                :type="canEdit ? 'button' : undefined"
                 class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold transition-colors"
                 :class="row.etiqueta_horarios
                   ? 'bg-blue-500/15 text-blue-400 border-blue-500/40'
@@ -1180,11 +1220,13 @@ async function copyText(text: string) {
                 @click="canEdit && toggleHorPopover(row.id)"
               >
                 {{ row.etiqueta_horarios || 'contínuo' }}
-              </button>
+              </component>
+              <p v-if="!canEdit && (row.etiqueta_sabado_horario || row.etiqueta_sabado_tags)" class="mt-1 text-[10px] text-muted-foreground select-text">Sábado: {{ row.etiqueta_sabado_horario || 'Sem horário' }}{{ row.etiqueta_sabado_tags ? ' · ' + row.etiqueta_sabado_tags : '' }}</p>
             </td>
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              class="border border-border px-2 py-1.5 text-xs"
               :class="{
+                'cursor-pointer': canEdit, 'select-text': !canEdit,
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'nf_impressao_id'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'nf_impressao_id'),
               }"
@@ -1210,8 +1252,9 @@ async function copyText(text: string) {
               :key="f"
             >
               <td
-                class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+                class="border border-border px-2 py-1.5 text-xs"
                 :class="{
+                  'cursor-pointer': canEdit, 'select-text': !canEdit,
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, f),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, f),
                 }"
@@ -1231,8 +1274,9 @@ async function copyText(text: string) {
             </template>
             <!-- Organização comercial, independente dos acessos individuais. -->
             <td
-              class="border border-border px-2 py-1.5 text-xs text-center cursor-pointer"
+              class="border border-border px-2 py-1.5 text-xs text-center"
               :class="{
+                'cursor-pointer': canEdit, 'select-text': !canEdit,
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'commercial_team'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'commercial_team'),
               }"
@@ -1260,8 +1304,9 @@ async function copyText(text: string) {
               :key="f"
             >
               <td
-                class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+                class="border border-border px-2 py-1.5 text-xs"
                 :class="{
+                  'cursor-pointer': canEdit, 'select-text': !canEdit,
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, f),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, f),
                   'font-mono': f === 'cnpj' || f === 'phone',
@@ -1285,8 +1330,9 @@ async function copyText(text: string) {
             <td class="border border-border px-2 py-1.5 text-xs">
               <div class="flex items-center gap-1 group">
                 <span
-                  class="cursor-pointer truncate flex-1 font-mono"
+                  class="truncate flex-1 font-mono"
                   :class="{
+                    'cursor-pointer': canEdit, 'select-text': !canEdit,
                     'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'password'),
                     'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'password'),
                     'text-muted-foreground': !row.has_password,
@@ -1326,8 +1372,9 @@ async function copyText(text: string) {
             </td>
             <!-- shipping_address (compact: truncate + tooltip) -->
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer max-w-[140px]"
+              class="border border-border px-2 py-1.5 text-xs max-w-[140px]"
               :class="{
+                'cursor-pointer': canEdit, 'select-text': !canEdit,
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'shipping_address'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'shipping_address'),
               }"
@@ -1347,8 +1394,9 @@ async function copyText(text: string) {
             </td>
             <!-- return_address (compact: truncate + tooltip) -->
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer max-w-[140px]"
+              class="border border-border px-2 py-1.5 text-xs max-w-[140px]"
               :class="{
+                'cursor-pointer': canEdit, 'select-text': !canEdit,
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'return_address'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'return_address'),
               }"
@@ -1368,8 +1416,9 @@ async function copyText(text: string) {
             </td>
             <!-- observation -->
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              class="border border-border px-2 py-1.5 text-xs"
               :class="{
+                'cursor-pointer': canEdit, 'select-text': !canEdit,
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'observation'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'observation'),
               }"
@@ -1389,13 +1438,13 @@ async function copyText(text: string) {
             <!-- Tipo: classificação da loja; clique para selecionar os tipos. -->
             <td
               class="border border-border px-1 py-1 text-center relative"
-              :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': tipoPopoverFor === row.id }"
+              :class="{ 'ring-2 ring-blue-500 ring-inset bg-background': canEdit && tipoPopoverFor === row.id }"
               :title="canEdit ? 'Vincular departamentos' : ''"
               @click.stop="openTipoPopover(row.id)"
             >
               <div
                 v-if="row.departments.some((d) => DEPT_BADGE[d])"
-                class="flex flex-wrap gap-0.5 justify-center cursor-pointer"
+                class="flex flex-wrap gap-0.5 justify-center" :class="canEdit ? 'cursor-pointer' : 'select-text'"
               >
                 <span
                   v-for="d in row.departments.filter((x) => DEPT_BADGE[x])"
@@ -1406,10 +1455,10 @@ async function copyText(text: string) {
                   {{ DEPT_BADGE[d].label }}
                 </span>
               </div>
-              <span v-else class="text-muted-foreground cursor-pointer text-xs">—</span>
+              <span v-else class="text-muted-foreground text-xs" :class="canEdit ? 'cursor-pointer' : 'select-text'">—</span>
               <!-- popover -->
               <div
-                v-if="tipoPopoverFor === row.id"
+                v-if="canEdit && tipoPopoverFor === row.id"
                 class="absolute z-20 mt-1 left-1/2 -translate-x-1/2 w-36 rounded-md border bg-popover p-2 shadow-lg text-left"
                 @click.stop
               >
@@ -1461,8 +1510,9 @@ async function copyText(text: string) {
                  but the whole <td> is the click target so a row with no
                  value is still trivially editable. -->
             <td
-              class="border border-border px-2 py-1.5 text-xs cursor-pointer"
+              class="border border-border px-2 py-1.5 text-xs"
               :class="{
+                'cursor-pointer': canEdit, 'select-text': !canEdit,
                 'ring-2 ring-blue-500 ring-inset bg-background': isEditing(row.id, 'bling_store_id'),
                 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(row.id, 'bling_store_id'),
               }"
@@ -1484,60 +1534,58 @@ async function copyText(text: string) {
             <!-- UpseSeller — matches Tab.Preço/Integração badge style. Click cycles
                  null → Sim → Não → null. -->
             <td class="border border-border px-1 py-1 text-center">
-              <button
-                type="button"
-                :disabled="!canEdit"
+              <component :is="canEdit ? 'button' : 'span'"
+                :type="canEdit ? 'button' : undefined"
                 class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold transition-colors"
                 :class="badgeClassTriBool(row.upseseller)"
                 @click="canEdit && cycleTriBool(row, 'upseseller')"
               >
                 {{ labelTriBool(row.upseseller) }}
-              </button>
+              </component>
             </td>
             <!-- Duoker -->
             <td class="border border-border px-1 py-1 text-center">
-              <button
-                type="button"
-                :disabled="!canEdit"
+              <component :is="canEdit ? 'button' : 'span'"
+                :type="canEdit ? 'button' : undefined"
                 class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold transition-colors"
                 :class="badgeClassTriBool(row.duoker)"
                 @click="canEdit && cycleTriBool(row, 'duoker')"
               >
                 {{ labelTriBool(row.duoker) }}
-              </button>
+              </component>
             </td>
             <!-- UF — compact badge showing count; click opens popover anchored
                  to the badge (not inside the cell to avoid clipping). -->
             <td class="border border-border px-1 py-1 text-center">
-              <button
-                type="button"
-                :disabled="!canEdit"
+              <component :is="canEdit ? 'button' : 'span'"
+                :type="canEdit ? 'button' : undefined"
                 class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold transition-colors"
                 :class="(row.uf_restrictions && row.uf_restrictions.length)
                   ? 'bg-blue-500/15 text-blue-400 border-blue-500/40'
                   : 'bg-muted/40 text-muted-foreground border-border'"
+                :title="row.uf_restrictions?.join(', ') || 'Nenhuma restrição de UF'"
                 @click="canEdit && toggleUfPopover(row.id)"
               >
-                {{ (row.uf_restrictions && row.uf_restrictions.length)
-                  ? `${row.uf_restrictions.length} UF`
+                {{ row.uf_restrictions?.length
+                  ? (canEdit ? `${row.uf_restrictions.length} UF` : row.uf_restrictions.join(', '))
                   : '—' }}
-              </button>
+              </component>
             </td>
             <!-- Exceções — badge com contagem de regras; popover editor. -->
             <td class="border border-border px-1 py-1 text-center">
-              <button
-                type="button"
-                :disabled="!canEdit"
+              <component :is="canEdit ? 'button' : 'span'"
+                :type="canEdit ? 'button' : undefined"
                 class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold transition-colors"
                 :class="(row.excecoes && row.excecoes.length)
                   ? 'bg-amber-500/15 text-amber-400 border-amber-500/40'
                   : 'bg-muted/40 text-muted-foreground border-border'"
+                :title="row.excecoes?.map(excecaoLabel).join('; ') || 'Nenhuma exceção'"
                 @click="canEdit && toggleExcPopover(row.id)"
               >
-                {{ (row.excecoes && row.excecoes.length)
-                  ? `${row.excecoes.length} regra${row.excecoes.length > 1 ? 's' : ''}`
+                {{ row.excecoes?.length
+                  ? (canEdit ? `${row.excecoes.length} regra${row.excecoes.length > 1 ? 's' : ''}` : row.excecoes.map(excecaoLabel).join('; '))
                   : '—' }}
-              </button>
+              </component>
             </td>
             <!-- actions: arquivar/ativar + delete -->
             <td class="border border-border px-1 py-1 text-center whitespace-nowrap">
@@ -1578,7 +1626,7 @@ async function copyText(text: string) {
          overflow-clipping. Centered overlay; click outside or "fechar" to
          close. -->
     <div
-      v-if="openUfRow"
+      v-if="canEdit && openUfRow"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3"
       @click.self="openUfRowId = null"
     >
@@ -1628,7 +1676,7 @@ async function copyText(text: string) {
     <!-- Horário Etiqueta — escolhe os horários (BRT) no relógio do input time.
          Lista vazia = contínuo (imprime quando a NF fecha). -->
     <div
-      v-if="openHorRow"
+      v-if="canEdit && openHorRow"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3"
       @click.self="openHorRowId = null"
     >
@@ -1735,7 +1783,7 @@ async function copyText(text: string) {
     <!-- Exceções popover — editor do que PODE ir pras UFs da Restrição.
          Pedido que não casa nenhuma vai pra Aguardando Cancelamento. -->
     <div
-      v-if="openExcRow"
+      v-if="canEdit && openExcRow"
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-3"
       @click.self="openExcRowId = null"
     >

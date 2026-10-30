@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import StoreInfo, User, UserRole, UserStatus
 
-PERM = {"tabela_precos": {"view": True, "edit": True, "delete": False}}
+PERM = {"lojas_info": {"view": True}}
 
 
 async def _seed_user(

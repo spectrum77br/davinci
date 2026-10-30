@@ -246,7 +246,7 @@ async def test_precisa_das_tres_permissoes(db, client, make_user, auth_as, missi
 
 @pytest.mark.asyncio
 async def test_respeita_equipe_da_aba_lojas(db, client, make_user, auth_as):
-    """Quem não vê a loja em Lojas (outra equipe) também não troca aqui."""
+    """Editor de outra equipe continua bloqueado; agora a mutação exige admin."""
     _, company, info, store, velho = await seed(db, make_user, auth_as)
     info.sales_team = 2
     user = await make_user(role=UserRole.USER, permissions={
@@ -257,8 +257,8 @@ async def test_respeita_equipe_da_aba_lojas(db, client, make_user, auth_as):
     await db.refresh(user)
     auth_as(user)
     r = await client.put("/api/stores/account/email", json=body(company, "21leona"))
-    assert r.status_code == 404
-    assert r.json()["detail"]["code"] == "store_info_not_found"
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == "admin_only"
     await db.refresh(info)
     assert info.email == "fredys03"
     vinculos = (await db.execute(

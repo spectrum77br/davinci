@@ -1657,6 +1657,8 @@ async def test_importacao_sem_a_coluna_catalogo_nao_apaga_o_preco(
 async def test_lojas_recusa_catalogo_mas_deixa_tirar_o_antigo(
     db: AsyncSession, client: AsyncClient, dono: User, cenario, auth_as: Callable,
 ):
+    dono.role = UserRole.ADMIN
+    await db.commit()
     auth_as(dono)
     loja = StoreInfo(user_id=dono.id, platform="ml", account_name="nova loja")
     db.add(loja)

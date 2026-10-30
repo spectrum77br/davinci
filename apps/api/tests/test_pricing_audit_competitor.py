@@ -426,6 +426,8 @@ async def test_store_info_crud_with_password_encrypt(
     user_full: User,
     auth_as: Callable[[User | None], None],
 ):
+    user_full.role = UserRole.ADMIN
+    await db.commit()
     auth_as(user_full)
     r = await client.post(
         "/api/pricing/store-info",

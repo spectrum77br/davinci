@@ -1183,7 +1183,7 @@ async function loadAvailableCadastros(mk: Marketplace) {
 }
 
 async function openNewAccount(row: GridRow, mk: Marketplace) {
-  if (!canEdit.value) return
+  if (!isAdmin.value) return
   newAccountFor.value = { company: row.company, mk }
   newAccountForm.phoneId = ''
   newAccountForm.emailId = ''
@@ -1201,6 +1201,7 @@ function closeNewAccount() {
 }
 
 async function submitNewAccount() {
+  if (!isAdmin.value) return
   if (!newAccountFor.value || newAccountSaving.value || newAccountResult.value || availableCadastrosLoading.value || !availableCadastrosLoaded.value) return
   const target = newAccountFor.value
   const { company, mk } = target
@@ -1242,8 +1243,8 @@ async function submitNewAccount() {
       await loadAvailableCadastros(mk)
     } else if (code === 'store_already_exists') {
       newAccountErr.value = 'Esta empresa já tem uma conta nesta plataforma. Recarregue a lista de empresas.'
-    } else if (code === 'forbidden') {
-      newAccountErr.value = 'Para criar a conta, você precisa de permissão para editar Empresas, Cadastros e Lojas.'
+    } else if (code === 'forbidden' || code === 'admin_only') {
+      newAccountErr.value = 'Somente administradores podem criar contas de lojas.'
     } else {
       newAccountErr.value = code || e?.message || 'Não foi possível criar a conta.'
     }
@@ -1288,6 +1289,7 @@ watch(cellPopoverFor, () => {
 
 let emailsLivresReq = 0
 async function abrirTrocaEmail(row: GridRow, mk: Marketplace) {
+  if (!podeTrocarEmail.value) return
   const key = `${row.company.id}:${mk}`
   const req = ++emailsLivresReq
   emailEditFor.value = key
@@ -1318,6 +1320,7 @@ function fecharTrocaEmail() {
 }
 
 async function salvarEmail(row: GridRow, mk: Marketplace) {
+  if (!podeTrocarEmail.value) return
   const email = emailNovo.value.trim()
   if (!email || emailSalvando.value) return
   const key = `${row.company.id}:${mk}`
@@ -1385,6 +1388,7 @@ function storeInfoFor(row: GridRow, mk: Marketplace): StoreInfoLite | undefined 
 }
 
 async function removeStoreCell(row: GridRow, mk: Marketplace) {
+  if (!isAdmin.value) return
   const cell = row.stores[mk]
   if (!cell || !cell.id) return
   const apelido = row.company.apelido
@@ -2143,7 +2147,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                           @click="abrirTrocaEmail(row, mk)"
                         ><Pencil class="w-3 h-3" />trocar</button>
                       </div>
-                      <div v-if="emailEditFor === `${row.company.id}:${mk}`" data-troca-email class="py-1 space-y-1">
+                      <div v-if="podeTrocarEmail && emailEditFor === `${row.company.id}:${mk}`" data-troca-email class="py-1 space-y-1">
                         <Input
                           v-model="emailNovo"
                           list="emails-livres-conta"
@@ -2179,13 +2183,13 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                     <div v-else class="text-muted-foreground">Sem store_info vinculada.</div>
                   </div>
                   <button
-                    v-if="row.stores[mk]?.id"
+                    v-if="isAdmin && row.stores[mk]?.id"
                     class="w-full text-left mt-1 px-2 py-1 rounded hover:bg-destructive/10 text-destructive"
                     @click="removeStoreCell(row, mk)"
                   >
                     Remover conta
                   </button>
-                  <p v-else class="mt-1 text-[10px] text-muted-foreground italic">
+                  <p v-else-if="!row.stores[mk]?.id && isAdmin" class="mt-1 text-[10px] text-muted-foreground italic">
                     Detectado via store_info — sem registro em stores. Remova pela aba Lojas.
                   </p>
                 </div>
@@ -2200,7 +2204,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 <span v-else class="text-red-500" :title="`${MARKETPLACE_SHORT[mk]} bloqueado`">×</span>
               </template>
               <button
-                v-else-if="canEdit"
+                v-else-if="isAdmin"
                 class="text-muted-foreground hover:text-foreground"
                 :title="`Criar loja em ${MARKETPLACE_SHORT[mk]}`"
                 @click="createStoreCell(row.company.id, mk)"
@@ -2237,7 +2241,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
 
     <!-- Nova conta (Store + store_info) -->
     <div
-      v-if="newAccountFor"
+      v-if="isAdmin && newAccountFor"
       class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4"
       @click.self="closeNewAccount"
     >

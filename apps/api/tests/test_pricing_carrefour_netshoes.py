@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
 
-from app.models import Integration, PricingAccount, Segment, StoreInfo
+from app.models import Integration, PricingAccount, Segment, StoreInfo, UserRole
 
 PLATFORMS = ("carrefour", "netshoes")
 PERMISSIONS = {
@@ -22,7 +22,7 @@ MONEY_FIELDS = ("commission",) + tuple(
 
 @pytest_asyncio.fixture
 async def editor(db, make_user, auth_as):
-    user = await make_user(permissions=PERMISSIONS)
+    user = await make_user(role=UserRole.ADMIN, permissions=PERMISSIONS)
     db.add_all(Segment(name=slug.title(), slug=slug) for slug in ("celular", "mala", "eletro"))
     await db.commit()
     auth_as(user)
@@ -125,10 +125,10 @@ async def test_new_platform_type_edits_and_accounts_respect_team_scope(
 ):
     store_id = await _store(client, platform, sales_team=1)
     account = await _select(client, store_id, "mala")
-    for permissions, teams, expected in (
-        ({"lojas_info": {"view": True}}, [1], 403),
-        (PERMISSIONS, [2], 404),
-        (PERMISSIONS, [1], 200),
+    for permissions, teams in (
+        ({"lojas_info": {"view": True}}, [1]),
+        (PERMISSIONS, [2]),
+        (PERMISSIONS, [1]),
     ):
         user = await make_user(permissions=permissions)
         user.sales_teams = teams
@@ -137,12 +137,13 @@ async def test_new_platform_type_edits_and_accounts_respect_team_scope(
         response = await client.post(f"/api/pricing/store-info/{store_id}/department", json={
             "department": "mala",
         })
-        assert response.status_code == expected, response.text
-        if expected == 200:
-            assert response.json()["id"] == account["id"]
+        assert response.status_code == 403, response.text
+        assert response.json()["detail"]["code"] == "admin_only"
         if permissions is PERMISSIONS:
             visible = await _accounts(client, platform)
             assert bool(visible) == (teams == [1])
+    auth_as(editor)
+    assert (await _select(client, store_id, "mala"))["id"] == account["id"]
     stored = await db.get(PricingAccount, UUID(account["id"]), populate_existing=True)
     assert stored.user_id == editor.id
     assert await db.scalar(select(func.count()).select_from(PricingAccount)) == 1

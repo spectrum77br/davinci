@@ -224,6 +224,8 @@ export function useCan(resource: Resource, action: Action) {
     const u = auth.user
     if (!u) return false
     if (u.role === 'admin') return true
+    // Lojas é somente leitura para os demais papéis, inclusive com grants antigos.
+    if (resource === 'lojas_info' && action !== 'view') return false
     return u.permissions?.[resource]?.[action] === true
   })
 }

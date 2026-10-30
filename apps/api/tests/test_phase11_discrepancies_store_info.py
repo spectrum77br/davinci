@@ -13,7 +13,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     Company,
-    Department,
     Integration,
     IntegrationPlatform,
     Listing,
@@ -22,6 +21,7 @@ from app.models import (
     PricingAccount,
     PricingPlatform,
     Product,
+    Segment,
     Store,
     StoreInfo,
     StoreStatus,
@@ -52,6 +52,14 @@ async def user_p11(db: AsyncSession) -> User:
     return u
 
 
+@pytest_asyncio.fixture
+async def store_admin_p11(db: AsyncSession, user_p11: User) -> User:
+    user_p11.role = UserRole.ADMIN
+    db.add_all(Segment(name=slug.title(), slug=slug) for slug in ("celular", "mala"))
+    await db.commit()
+    return user_p11
+
+
 # =========================================================== setDepartment
 
 
@@ -59,13 +67,13 @@ async def user_p11(db: AsyncSession) -> User:
 async def test_store_info_set_department_creates_pricing_account(
     db: AsyncSession,
     client: AsyncClient,
-    user_p11: User,
+    store_admin_p11: User,
     auth_as: Callable[[User | None], None],
 ):
-    auth_as(user_p11)
+    auth_as(store_admin_p11)
 
     info = StoreInfo(
-        user_id=user_p11.id,
+        user_id=store_admin_p11.id,
         platform="shopee",
         account_name="Loja Shopee 1",
     )
@@ -105,7 +113,10 @@ async def test_store_info_set_department_creates_pricing_account(
             select(PricingAccount).where(PricingAccount.store_info_id == info.id)
         )
     ).scalars().all()
-    assert {r.department for r in rows} == {Department.CELULAR, Department.MALA}
+    slugs = (await db.execute(
+        select(Segment.slug).where(Segment.id.in_([row.segment_id for row in rows]))
+    )).scalars().all()
+    assert set(slugs) == {"celular", "mala"}
     assert {r.platform for r in rows} == {PricingPlatform.SHOPEE}
 
 
@@ -113,11 +124,11 @@ async def test_store_info_set_department_creates_pricing_account(
 async def test_store_info_set_department_invalid_department(
     db: AsyncSession,
     client: AsyncClient,
-    user_p11: User,
+    store_admin_p11: User,
     auth_as: Callable[[User | None], None],
 ):
-    auth_as(user_p11)
-    info = StoreInfo(user_id=user_p11.id, platform="mercadolivre")
+    auth_as(store_admin_p11)
+    info = StoreInfo(user_id=store_admin_p11.id, platform="mercadolivre")
     db.add(info)
     await db.commit()
     await db.refresh(info)
@@ -134,11 +145,11 @@ async def test_store_info_set_department_invalid_department(
 async def test_store_info_set_department_unsupported_platform(
     db: AsyncSession,
     client: AsyncClient,
-    user_p11: User,
+    store_admin_p11: User,
     auth_as: Callable[[User | None], None],
 ):
-    auth_as(user_p11)
-    info = StoreInfo(user_id=user_p11.id, platform="freeform-x")
+    auth_as(store_admin_p11)
+    info = StoreInfo(user_id=store_admin_p11.id, platform="freeform-x")
     db.add(info)
     await db.commit()
     await db.refresh(info)
@@ -155,10 +166,10 @@ async def test_store_info_set_department_unsupported_platform(
 async def test_store_info_set_department_not_found(
     db: AsyncSession,
     client: AsyncClient,
-    user_p11: User,
+    store_admin_p11: User,
     auth_as: Callable[[User | None], None],
 ):
-    auth_as(user_p11)
+    auth_as(store_admin_p11)
     r = await client.post(
         f"/api/pricing/store-info/{uuid.uuid4()}/department",
         json={"department": "celular"},

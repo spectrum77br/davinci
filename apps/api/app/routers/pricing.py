@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission, user_scope
+from app.deps.auth import require_admin, require_permission, user_scope
 from app.deps.team_scope import TeamScope, resolve_team_scope
 from app.models import (
     AuditDismissedSku,
@@ -2408,9 +2408,7 @@ async def list_store_info(
 async def create_store_info(
     body: StoreInfoCreate,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("lojas_info", "edit"))
-    ],
+    user: Annotated[User, Depends(require_admin)],
 ) -> StoreInfoOut:
     data = body.model_dump(exclude={"password"})
     row = StoreInfo(user_id=user.id, **data)
@@ -2427,9 +2425,7 @@ async def patch_store_info(
     store_info_id: UUID,
     body: StoreInfoPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("lojas_info", "edit"))
-    ],
+    user: Annotated[User, Depends(require_admin)],
 ) -> StoreInfoOut:
     row = (
         await session.execute(
@@ -2540,9 +2536,7 @@ async def _resolve_linked_integration(
 async def archive_store_info(
     store_info_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("lojas_info", "edit"))
-    ],
+    user: Annotated[User, Depends(require_admin)],
 ) -> StoreInfoOut:
     """Arquiva uma loja suspensa: some de Lojas, da Tabela de Preço e de
     Produtos, e o sync para de empurrar estoque/preço. Propaga o
@@ -2581,9 +2575,7 @@ async def archive_store_info(
 async def unarchive_store_info(
     store_info_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("lojas_info", "edit"))
-    ],
+    user: Annotated[User, Depends(require_admin)],
 ) -> StoreInfoOut:
     """Reativa uma loja arquivada (botão "Ativar"): volta pra Lojas, Tabela de
     Preço e Produtos, e o sync volta a mirá-la. Limpa o `archived_at` da loja
@@ -2622,7 +2614,7 @@ async def reveal_store_info_password(
     store_info_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[
-        User, Depends(require_permission("lojas_info", "edit"))
+        User, Depends(require_permission("lojas_info", "view"))
     ],
 ) -> dict[str, str]:
     row = (
@@ -2655,9 +2647,7 @@ async def set_store_info_department(
     store_info_id: UUID,
     body: AccountSetDepartmentIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("lojas_info", "edit"))
-    ],
+    user: Annotated[User, Depends(require_admin)],
 ) -> PricingAccountOut | StoreInfoOut:
     """Bind a department to a store_info. Registration-only platforms retain
     the type on the store, independently of pricing. Existing pricing flow:
@@ -2819,9 +2809,7 @@ async def unbind_store_info_department(
     store_info_id: UUID,
     slug: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("lojas_info", "edit"))
-    ],
+    user: Annotated[User, Depends(require_admin)],
 ) -> None:
     """Removes the pricing_accounts that wire `store_info_id` to a root segment
     matching `slug`. Mirrors the FK-first badge match in `list_store_info`:
@@ -2896,9 +2884,7 @@ async def unbind_store_info_department(
 async def delete_store_info(
     store_info_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[
-        User, Depends(require_permission("lojas_info", "delete"))
-    ],
+    user: Annotated[User, Depends(require_admin)],
 ) -> None:
     res = await session.execute(
         delete(StoreInfo).where(
