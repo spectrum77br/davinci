@@ -603,19 +603,29 @@ async def _destino(
         return await _destino_avaliacao(session, conversa, origem=origem)
     if conversa.canal == CANAL_RECLAMACAO:
         return await _destino_reclamacao(session, conversa, origem=origem, para=para)
-    if conversa.plataforma == "amazon" and conversa.integration_id is None:
-        raise EnvioRecusado(RECUSA_SEM_INTEGRACAO, MOTIVO_AMAZON_SEM_CONTA)
     canal = (
         await session.get(AtendimentoCanal, conversa.canal_id, populate_existing=True)
         if conversa.canal_id is not None
         else None
     )
+    # A Amazon SÓ DE E-MAIL (30/10/2026, `canais_externos.PREFIXO_AMAZON`): a
+    # loja é o canal, sem integração — a resposta sai pelo mesmo Gmail das
+    # outras Amazon (`amazon_email.enviar_texto` não usa a integração).
+    amazon_so_email = (
+        conversa.plataforma == "amazon"
+        and conversa.integration_id is None
+        and canais_externos.tag_da_amazon(canal) is not None
+    )
+    if conversa.plataforma == "amazon" and conversa.integration_id is None and not amazon_so_email:
+        raise EnvioRecusado(RECUSA_SEM_INTEGRACAO, MOTIVO_AMAZON_SEM_CONTA)
     integration = (
         await session.get(Integration, canal.integration_id, populate_existing=True)
-        if canal is not None
+        if canal is not None and canal.integration_id is not None
         else None
     )
-    if canal is None or integration is None or integration.archived_at is not None:
+    if canal is None or (
+        not amazon_so_email and (integration is None or integration.archived_at is not None)
+    ):
         raise EnvioRecusado(
             RECUSA_SEM_INTEGRACAO,
             "A loja desta conversa não está mais conectada ao DaVinci.",

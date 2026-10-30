@@ -37,12 +37,13 @@ from collections.abc import Iterable
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps.team_scope import TeamScope
 from app.models import AtendimentoCanal, Integration, StoreInfo, User, UserRole
 from app.models.atendimento_lojas_pessoa import PADRAO_CHAVE_LOJA, AtendimentoLojaPessoa
+from app.services.atendimento import canais_externos
 
 INTEGRACAO, FICHA, CANAL = "i", "f", "c"
 _CHAVE = re.compile(PADRAO_CHAVE_LOJA)
@@ -144,16 +145,32 @@ async def lojas_para_vincular(session: AsyncSession) -> list[dict[str, Any]]:
     )
     nomes_chat = await lojas_svc.nomes_das_lojas(session, integracoes)
     da_integracao = await rotear.integracoes_das_fichas(session)
-    robos = (
-        await session.execute(
-            select(AtendimentoCanal.id, AtendimentoCanal.plataforma, AtendimentoCanal.cursor).where(
-                AtendimentoCanal.robo_perfil_id.is_not(None)
+    # Os canais SEM integração que são loja: o do robô (Temu/AliExpress) e a
+    # Amazon só de e-mail ("amazon:<tag>", 30/10/2026).
+    sem_integracao = (
+        (
+            await session.execute(
+                select(AtendimentoCanal).where(
+                    AtendimentoCanal.integration_id.is_(None),
+                    or_(
+                        AtendimentoCanal.robo_perfil_id.is_not(None),
+                        AtendimentoCanal.externo_ref.like(f"{canais_externos.PREFIXO_AMAZON}%"),
+                    ),
+                )
             )
         )
-    ).all()
+        .scalars()
+        .all()
+    )
+    robos = []
+    for c in sem_integracao:
+        if c.robo_perfil_id is not None:
+            nome = ((c.cursor or {}).get("robo") or {}).get("loja") or ""
+        else:
+            nome = canais_externos.nome_do_canal(c)
+        robos.append((c.id, c.plataforma, nome))
     robo_por_nome: dict[tuple[str, str], tuple[UUID, str]] = {}
-    for cid, plataforma, cursor in robos:
-        nome = ((cursor or {}).get("robo") or {}).get("loja") or ""
+    for cid, plataforma, nome in robos:
         robo_por_nome.setdefault((_plataforma(plataforma), _norm(nome) or ""), (cid, nome))
 
     lojas: list[dict[str, Any]] = []
@@ -206,10 +223,10 @@ async def lojas_para_vincular(session: AsyncSession) -> list[dict[str, Any]]:
                 "chaves": [chave(INTEGRACAO, integ.id)],
             }
         )
-    for cid, plataforma, cursor in robos:
+    for cid, plataforma, nome in robos:
         if cid in usados_c:
             continue
-        nome = ((cursor or {}).get("robo") or {}).get("loja") or "—"
+        nome = nome or "—"
         lojas.append(
             {
                 "chave": chave(CANAL, cid),

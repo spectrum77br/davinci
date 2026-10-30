@@ -246,6 +246,9 @@ PLATAFORMAS_PASTA = (
     "magalu",
     "aliexpress",
     "shein",
+    # 30/10/2026: o SAC da Netshoes (sem API de mensagens) chega por e-mail na
+    # pasta "netshoes" do Tuta e cai na loja "Netshoes Poofy" (o marrocos).
+    "netshoes",
     PLATAFORMA_SITE,
 )
 # E-mail de PLATAFORMA que tem API (decisão padrão de 08/10): o aviso dela

@@ -54,6 +54,12 @@ from app.services.atendimento.constantes import (
 PREFIXO_SITE = "site:"
 PREFIXO_REDE = "rede:"
 PREFIXO_ZAP = "zap:"
+# A conta Amazon SÓ DE E-MAIL (30/10/2026): sem a API da loja (sem integração),
+# o chat chega pelo Gmail do atendimento com o "+tag" (`amazon_email`). O
+# Eduardo: "quero igual como é nas outras amazon" — a Amazon VR.
+PREFIXO_AMAZON = "amazon:"
+PLATAFORMA_AMAZON = "amazon"
+_TAG_AMAZON = re.compile(r"[a-z0-9]{1,40}")
 # O `phone_number_id` da Meta: só dígitos, até o tamanho da coluna
 # (`atendimento_zap_numeros.phone_number_id`, String(32)).
 _PNID = re.compile(r"[0-9]{1,32}")
@@ -81,6 +87,22 @@ def ref_da_rede(plataforma: str, conta_id: str | int) -> str:
     if plat not in PLATAFORMAS_REDE or not conta or ":" in conta:
         raise ReferenciaInvalida(f"conta de rede inválida: {plat[:16]}")
     return f"{PREFIXO_REDE}{plat}:{conta}"
+
+
+def ref_da_amazon(tag: str) -> str:
+    """'VR' → 'amazon:vr' (o "+tag" do e-mail, minúsculo)."""
+    t = (tag or "").strip().casefold()
+    if not _TAG_AMAZON.fullmatch(t):
+        raise ReferenciaInvalida(f"tag da Amazon inválida: {tag!r}")
+    return f"{PREFIXO_AMAZON}{t}"
+
+
+def tag_da_amazon(canal: AtendimentoCanal | None) -> str | None:
+    """A tag ('vr') do canal Amazon só de e-mail; None para os outros."""
+    if canal is None or canal.integration_id is not None:
+        return None
+    p = partes(canal.externo_ref)
+    return p[2] if p and p[0] == "amazon" else None
 
 
 def ref_do_zap(phone_number_id: str | int) -> str:
@@ -112,6 +134,9 @@ def partes(ref: str | None) -> tuple[str, str, str] | None:
     if texto.startswith(PREFIXO_ZAP):
         pnid = texto[len(PREFIXO_ZAP) :]
         return ("zap", PLATAFORMA_WHATSAPP, pnid) if _PNID.fullmatch(pnid) else None
+    if texto.startswith(PREFIXO_AMAZON):
+        tag = texto[len(PREFIXO_AMAZON) :]
+        return ("amazon", PLATAFORMA_AMAZON, tag) if _TAG_AMAZON.fullmatch(tag) else None
     return None
 
 
@@ -158,6 +183,8 @@ def nome_do_canal(canal: AtendimentoCanal) -> str:
         return NOME_SITE.get(p[2], p[2].capitalize())
     if p and p[0] == "zap":
         return f"WhatsApp · número {p[2]}"
+    if p and p[0] == "amazon":
+        return p[2].upper() if len(p[2]) <= 3 else p[2].capitalize()
     return canal.externo_ref or "—"
 
 
@@ -171,6 +198,8 @@ def descricao_da_origem(canal: AtendimentoCanal) -> str:
         return f"{rede} · token do DaVinci Publicador"
     if p and p[0] == "zap":
         return "WhatsApp · API oficial da Meta (webhook)"
+    if p and p[0] == "amazon":
+        return f"Amazon · e-mail do Seller Central (+{p[2]}), sem a API da loja"
     return "origem externa"
 
 

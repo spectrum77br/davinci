@@ -282,6 +282,9 @@ MODOS_EXTERNOS: dict[str, tuple[str, ...]] = {
     # junto com o envio), `humano` — só admin liga (PATCH /canais), e o envio
     # ainda depende das chaves e do botão do número. IA nunca (P8).
     PLATAFORMA_WHATSAPP: (MODO_OBSERVAR, MODO_HUMANO),
+    # A Amazon só de e-mail (30/10/2026, `canais_externos.PREFIXO_AMAZON`): a
+    # resposta é a mesma das outras Amazon (o Gmail), sempre por pessoa.
+    "amazon": (MODO_OBSERVAR, MODO_HUMANO),
 }
 
 # Saúde da leitura do canal. `sem_escopo` = a plataforma disse "sem

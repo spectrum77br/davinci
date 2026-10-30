@@ -152,6 +152,13 @@ async function principal() {
     const caixa = web('pages/atendimento.vue')
     assert.match(caixa, /v-if="naCaixa && !ehAdmin && resumo && !resumo\.lojas\.length"[\s\S]*?data-sem-lojas[\s\S]*?Usuários › Lojas no atendimento/)
     assert.match(caixa, /const veAbaEmail = computed\(\(\) => ehAdmin\.value\)/)
+    // A Amazon só de e-mail ("amazon:vr", 30/10/2026) é loja: a linha leva as caixas de e-mail.
+    const L = requerer('~/components/AtendimentoLojas.vue')
+    assert.equal(L.ehAmazonSoEmail({ integration_id: null, externo_ref: 'amazon:vr' }), true)
+    assert.equal(L.ehAmazonSoEmail({ integration_id: null, externo_ref: 'site:uranyx' }), false)
+    assert.equal(L.linhaTemCaixas({ externo_ref: 'amazon:vr', integration_id: null }), true)
+    assert.equal(L.linhaTemCaixas({ externo_ref: 'site:uranyx', integration_id: null }), false)
+    assert.equal(L.linhaTemCaixas({ integration_id: 'i1' }), true)
   }
 
   // ------------------------------------------------ funções puras

@@ -108,7 +108,7 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -124,7 +124,7 @@ from app.models import (
     StoreInfo,
 )
 from app.redis_client import redis
-from app.services.atendimento import gravar, lojas, separa_email
+from app.services.atendimento import canais_externos, gravar, lojas, separa_email
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
@@ -1526,7 +1526,10 @@ async def _gravar_cursor(session: AsyncSession, canal: AtendimentoCanal, cursor:
         await session.execute(select(AtendimentoCanal).where(*_filtro_canais_amazon()))
     ).scalars().all()
     for c in canais:
-        c.cursor = dict(cursor)  # dicionário novo: JSONB mutado no lugar não suja
+        # Dicionário novo: JSONB mutado no lugar não suja. O canal só de e-mail
+        # (30/10/2026) guarda o nome dele no `externo` do mesmo cursor: fica.
+        externo = (c.cursor or {}).get(canais_externos.CHAVE_CURSOR)
+        c.cursor = {**cursor, **({canais_externos.CHAVE_CURSOR: externo} if externo else {})}
     if all(c is not canal for c in canais):
         canal.cursor = dict(cursor)
     await session.flush()
@@ -1914,8 +1917,20 @@ def _momento_da_mensagem():
     return func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
 
 
+def _da_conta(conta: Integration | AtendimentoCanal):
+    """WHERE das conversas da conta: a integração, ou o canal só de e-mail (30/10/2026)."""
+    if isinstance(conta, AtendimentoCanal):
+        return and_(
+            AtendimentoConversa.integration_id.is_(None),
+            AtendimentoConversa.canal_id == conta.id,
+        )
+    return AtendimentoConversa.integration_id == conta.id
+
+
 async def _conversa_da_confirmacao(
-    session: AsyncSession, confirmacao: ConfirmacaoAmazon, integ: Integration
+    session: AsyncSession,
+    confirmacao: ConfirmacaoAmazon,
+    integ: Integration | AtendimentoCanal,
 ) -> _DestinoDaCopia:
     """A conversa que a cópia responde — ou nenhuma, sem chutar.
 
@@ -1962,7 +1977,7 @@ async def _conversa_da_confirmacao(
                 .where(
                     AtendimentoConversa.plataforma == PLATAFORMA,
                     AtendimentoConversa.canal == CANAL,
-                    AtendimentoConversa.integration_id == integ.id,
+                    _da_conta(integ),
                     tem_pergunta,
                     # A resposta do Seller Central é do chat, nunca da
                     # conversa de e-mail da ponte (`separa_email`).
@@ -1991,7 +2006,9 @@ async def _conversa_da_confirmacao(
 
 
 async def _resposta_nossa_da_copia(
-    session: AsyncSession, confirmacao: ConfirmacaoAmazon, integ: Integration
+    session: AsyncSession,
+    confirmacao: ConfirmacaoAmazon,
+    integ: Integration | AtendimentoCanal,
 ) -> AtendimentoMensagem | None:
     """A mensagem que saiu PELO DaVinci de que esta cópia é cópia — se for.
 
@@ -2024,7 +2041,7 @@ async def _resposta_nossa_da_copia(
             .where(
                 AtendimentoConversa.plataforma == PLATAFORMA,
                 AtendimentoConversa.canal == CANAL,
-                AtendimentoConversa.integration_id == integ.id,
+                _da_conta(integ),
                 AtendimentoMensagem.autor == AUTOR_LOJA,
                 AtendimentoMensagem.origem.in_(ORIGENS_DAVINCI),
                 AtendimentoMensagem.status.in_((MSG_ENVIADA, MSG_REVISAR, MSG_ENVIANDO)),
@@ -2260,6 +2277,7 @@ async def _aplicar_confirmacoes(
     session: AsyncSession,
     confirmacoes: list[ConfirmacaoAmazon],
     amazon: dict[UUID, Integration],
+    so_email: dict[str, AtendimentoCanal] | None = None,
 ) -> _ResultadoCopias:
     """Grava cada cópia como resposta da LOJA (origem `externo`) na conversa dela.
 
@@ -2289,7 +2307,9 @@ async def _aplicar_confirmacoes(
     for confirmacao in sorted(
         confirmacoes, key=lambda c: (c.enviada_em or datetime.max.replace(tzinfo=UTC), c.uid or 0)
     ):
-        integ = conta_pela_tag(confirmacao.tag, amazon.values())
+        integ = conta_pela_tag(confirmacao.tag, amazon.values()) or (so_email or {}).get(
+            (confirmacao.tag or "").strip().casefold()
+        )
         if integ is None:
             contagem["sem_conta"] += 1
             logger.info("atendimento_amazon_email_confirmacao_sem_conta", uid=confirmacao.uid)
@@ -2619,7 +2639,11 @@ async def _gravar_leitura(session: AsyncSession, leitura: LeituraCaixa) -> Resul
     canais = (
         await session.execute(select(AtendimentoCanal).where(*_filtro_canais_amazon()))
     ).scalars().all()
-    canal_da_conta = {c.integration_id: c for c in canais}
+    canal_da_conta = {c.integration_id: c for c in canais if c.integration_id is not None}
+    # As contas SÓ DE E-MAIL (30/10/2026): sem integração, a loja é o canal
+    # ("amazon:<tag>"), achado pela tag do destinatário ou pela thread.
+    so_email = {t: c for c in canais if (t := canais_externos.tag_da_amazon(c))}
+    so_email_por_id = {c.id: c for c in so_email.values()}
 
     emails: list[EmailAmazon] = []
     devolucoes: list[DevolucaoAmazon] = []
@@ -2698,26 +2722,38 @@ async def _gravar_leitura(session: AsyncSession, leitura: LeituraCaixa) -> Resul
         # Sem nº do pedido: a thread diz de que conversa o e-mail é.
         anterior = await _conversa_da_thread(session, em, agora) if em.pedido is None else None
         externo_id = anterior.externo_id if anterior is not None else em.conversa_externo_id
+        so_email_da_vez = None
+        tag = (em.tag or "").strip().casefold()
         if anterior is not None and anterior.integration_id in amazon:
             integ, achado_por = amazon[anterior.integration_id], "thread"
+        elif anterior is not None and anterior.canal_id in so_email_por_id:
+            integ, achado_por = None, "thread"
+            so_email_da_vez = so_email_por_id[anterior.canal_id]
+        elif tag in so_email and conta_pela_tag(tag, amazon.values()) is None:
+            integ, achado_por, so_email_da_vez = None, "tag", so_email[tag]
         else:
             integ, achado_por = await _conta_do_email(
                 session, em, amazon, cache_pedidos, externo_id
             )
-        canal_da_vez = canal_da_conta.get(integ.id) if integ is not None else None
+        if so_email_da_vez is not None:
+            canal_da_vez = so_email_da_vez
+        else:
+            canal_da_vez = canal_da_conta.get(integ.id) if integ is not None else None
         if integ is not None:
             await _adotar_sem_conta(session, externo_id, integ, canal_da_vez)
+            # O nome da LOJA (cadastro), não o da integração.
+            conta = await lojas.nome_da_loja(session, integ) or None
+        elif so_email_da_vez is not None:
+            conta = canais_externos.nome_do_canal(so_email_da_vez)
+        else:
+            conta = SEM_CONTA  # sem conta achada: a fila "sem dono"
         chave = {
             "canal": canal_da_vez,
             "integration": integ,
             "plataforma": PLATAFORMA,
             "canal_nome": CANAL,
             "externo_id": externo_id,
-            # O nome da LOJA (cadastro), não o da integração; sem conta achada,
-            # a fila "sem dono".
-            "conta": (await lojas.nome_da_loja(session, integ) or None)
-            if integ is not None
-            else SEM_CONTA,
+            "conta": conta,
         }
         conversa, criada = await gravar.upsert_conversa(
             session,
@@ -2760,7 +2796,7 @@ async def _gravar_leitura(session: AsyncSession, leitura: LeituraCaixa) -> Resul
     guardadas = [c for c in leitura.copias_pendentes if c.message_id not in da_leva]
     tentar_guardadas = mensagens_novas > 0
     a_tentar = confirmacoes + (guardadas if tentar_guardadas else [])
-    copias = await _aplicar_confirmacoes(session, a_tentar, amazon)
+    copias = await _aplicar_confirmacoes(session, a_tentar, amazon, so_email)
     mensagens_novas += copias.gravadas
     atualizadas |= copias.mexidas
     leitura.copias_pendentes = _pendentes_em_dia(

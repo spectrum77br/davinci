@@ -233,8 +233,13 @@ export function sitesSemANaoLida<T extends { site: string; grupos: Partial<Recor
 // MESMA plataforma e mesmo nome — uma só (duas fichas com o mesmo nome: a
 // linha do robô fica com as caixas vazias e as fichas viram linhas próprias,
 // nunca a errada).
+// A Amazon SÓ DE E-MAIL (30/10/2026, "amazon:<tag>", sem integração) é loja como
+// a do robô: a linha dela leva as caixas da ficha de mesmo nome.
+export function ehAmazonSoEmail(l: Pick<LinhaDaBarra, 'integration_id' | 'externo_ref'>): boolean {
+  return !l.integration_id && !!l.externo_ref && l.externo_ref.startsWith('amazon:')
+}
 function fichaDoRobo(lista: EmailsDaLoja[], l: LinhaDaBarra): EmailsDaLoja | null {
-  if (l.integration_id || l.externo_ref || l.rede_social_id) return null
+  if (l.integration_id || (l.externo_ref && !ehAmazonSoEmail(l)) || l.rede_social_id) return null
   const nome = nomeComparavel(l.conta)
   const iguais = nome ? lista.filter((e) => !e.integration_id && !!e.store_info_id && e.plataforma === l.plataforma && nomeComparavel(e.loja) === nome) : []
   return iguais.length === 1 ? iguais[0] : null
@@ -246,7 +251,7 @@ function daLinha(lista: EmailsDaLoja[], l: LinhaDaBarra): EmailsDaLoja | null {
 // A linha da barra é uma LOJA (tem caixas de e-mail)? A integração ou a loja do
 // robô; o site (tem as caixas DELE — `siteDaLinha`) e as contas de rede não.
 export function linhaTemCaixas(l: LinhaDaBarra): boolean {
-  return !l.externo_ref && !l.rede_social_id
+  return (!l.externo_ref || ehAmazonSoEmail(l)) && !l.rede_social_id
 }
 // O site da linha da barra ("site:uranyx"), se a API mandou as caixas dele.
 export function siteDaLinha(sites: readonly SiteDaBarra[] | null | undefined, l: Pick<LinhaDaBarra, 'externo_ref' | 'integration_id'>): SiteDaBarra | null {
