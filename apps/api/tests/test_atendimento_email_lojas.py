@@ -46,8 +46,10 @@ from app.models import (
 from app.models.enums import IntegrationPlatform
 from app.models.mail_atendimento import MailMessageMeta
 from app.security.cipher import encrypt_json
+from app.services.atendimento import escopo
 from app.services.mail_atendimento import barra_lojas
 from app.services.mail_atendimento import constantes as mail_constantes
+from tests.lojas_da_pessoa import dar_lojas
 from tests.test_atendimento_separa_email import URL, _ids
 from tests.test_atendimento_separa_email import admin as admin
 from tests.test_atendimento_separa_email import quem_le as quem_le
@@ -337,6 +339,8 @@ async def test_a_caixa_mostra_todo_email_da_pasta_uma_vez_so(
     pasta ser liberada — e o duplicado uma vez só."""
     from app.services.mail_atendimento import indice
 
+    # O `quem_le` entra por último e loga como ele: até a parte dele, quem vê é o admin.
+    auth_as(admin)
     h = await _historico(db, cena)
     ml = {"para": ["21max@tuta.com"], "de": "avisos@mercadolivre.com.br"}
     # Antes de a pasta ser liberada: a ponte só contou (sem loja na meta).
@@ -432,19 +436,18 @@ async def test_a_caixa_mostra_todo_email_da_pasta_uma_vez_so(
     for p in ({"grupo": "xx", "integration_id": str(cena.ml.id)}, {"grupo": "envios"}):
         assert (await client.get(f"{EMAIL}/lojas/emails", params=p)).status_code == 422
 
-    # Quem só lê (não é admin) e vê a loja: o mesmo, pela barra.
+    # Quem só lê (não é admin) e tem a loja (30/10/2026, as lojas por pessoa): o mesmo, pela barra.
+    await dar_lojas(db, quem_le, cena.ml, escopo.chave(escopo.FICHA, cena.loja_ml.id))
     auth_as(quem_le)
     assert await caixa("devolucao") == [str(codigo)]
     d = await client.get(f"{EMAIL}/lojas/emails/{codigo}")
     assert d.status_code == 200 and "482913" in d.json()["texto"]
 
-    # A equipe de OUTRA loja: nem o número nem o e-mail.
-    auth_as(cena.dono)
-    loja = await db.get(StoreInfo, cena.loja_oliveira_ml.id)
-    loja.sales_team = 9
+    # Quem tem OUTRA loja: nem o número nem o e-mail.
     membro = await make_user()
-    membro.sales_teams = [9]
-    await db.commit()
+    await dar_lojas(
+        db, membro, cena.oliveira_ml, escopo.chave(escopo.FICHA, cena.loja_oliveira_ml.id)
+    )
     auth_as(membro)
     assert str(cena.ml.id) not in await _por_loja(client)
     assert await caixa("devolucao") == []
@@ -482,6 +485,8 @@ async def test_quem_nao_e_admin_ve_email_so_pela_barra(db, cena, client, quem_le
     await _na_pasta(db, cena, h["oliveira"], "problemas")
     ficha_cid, ficha = await _ficha_sem_integracao(db, cena)
     await _na_pasta(db, cena, ficha_cid, "envio")
+    # 30/10/2026: as lojas dele (a ficha sem integração também).
+    await dar_lojas(db, quem_le, cena.oliveira_ml, cena.shopee, escopo.chave(escopo.FICHA, ficha))
     auth_as(quem_le)
 
     async def lista(**p):
@@ -523,56 +528,27 @@ async def test_admin_continua_com_a_aba_inteira(db, cena, client, admin):
     assert r.status_code == 200 and r.json()["itens"]
 
 
-async def test_quem_tem_a_permissao_da_aba_ve_a_aba_sem_virar_admin(
-    db, cena, client, quem_le, auth_as
-):
-    """28/10/2026, o Eduardo: "bote o user marrocos no davinci pra poder ver
-    tambem a aba de emails". A permissão `atendimento_email` view abre a aba
-    E-mail inteira para LER (as listas de todas as lojas, o chamado do site, a
-    saúde) a quem não é admin; as filas e as ações seguem de quem mexe."""
-    h = await _historico(db, cena)
+async def test_a_permissao_da_aba_nao_abre_mais_a_aba(db, cena, client, quem_le, auth_as):
+    """28/10/2026 a permissão `atendimento_email` view abria a aba E-mail a quem não
+    é admin (o marrocos). 30/10/2026, o Eduardo: "o email ninguém pode ver a não ser
+    admin né, já no atendimento eles vão ver só das caixas dele" — de novo SÓ ADMIN,
+    com ou sem a permissão; o e-mail da loja dele continua pela barra."""
+    await _historico(db, cena)
     assert quem_le.role == UserRole.USER
-
-    async def lista(**p):
-        return await client.get(f"{URL}/conversas", params={"caixa": "email", **p})
-
-    # Sem a permissão (com ela desligada, ou só com o recurso da caixa): 403, como desde 27/10.
-    for perms in (None, {"atendimento_email": {"view": False}}, {"atendimento": {"view": True}}):
+    for perms in (
+        None,
+        {"atendimento_email": {"view": False}},
+        {"atendimento": {"view": True}},
+        {"atendimento_email": {"view": True}},
+        {"atendimento_email": {"view": True, "edit": True}},
+    ):
         quem_le.permissions = perms or {}
         await db.commit()
+        auth_as(quem_le)
         r = await client.get(f"{EMAIL}/saude")
         assert r.status_code == 403 and r.json()["detail"]["code"] == SO_ADMIN, (perms, r.text)
-        r = await lista(filtro="todas")
+        r = await client.get(f"{URL}/conversas", params={"caixa": "email", "filtro": "todas"})
         assert r.status_code == 403 and r.json()["detail"]["code"] == SO_ADMIN, (perms, r.text)
-
-    # Com a permissão: a aba inteira para ver.
-    quem_le.permissions = {"atendimento_email": {"view": True}}
-    await db.commit()
-    auth_as(quem_le)
-    r = await client.get(f"{EMAIL}/saude")
-    assert r.status_code == 200, r.text
-    assert "lojas_sem_caixa_lida" not in r.json(), "a faixa das lojas sem caixa lida é de quem mexe"
-    r = await lista(filtro="todas")
-    assert r.status_code == 200, r.text
-    assert h["novo"] in {i["id"] for i in r.json()["itens"]}, "a lista de todas as lojas"
-    for p in (
-        {"filtro": "aguardando"},
-        {"integration_id": str(cena.ml.id)},
-        {"integration_id": str(cena.ml.id), "tipo_email": "chamado"},
-        {"tipo_chamado": "sac"},
-    ):
-        r = await lista(**p)
-        assert r.status_code == 200, (p, r.text)
-    assert (await client.get(f"{EMAIL}/contagens")).status_code == 200
-    # Só VER: as filas (podem ter e-mail interno) e as ações seguem de quem mexe.
-    for rota in ("filas", "informativos", "envios", "pastas", "regras"):
-        r = await client.get(f"{EMAIL}/{rota}")
-        assert r.status_code == 403, (rota, r.text)
-        assert r.json()["detail"]["code"] == "atendimento_so_quem_mexe", rota
-    r = await client.post(f"{EMAIL}/reprocessar")
-    assert r.status_code == 403 and r.json()["detail"]["code"] == "atendimento_so_leitura"
-    # (Responder pela conversa é de toda a equipe desde ea8412fe, 28/10/2026 — não é
-    # desta permissão.) E não virou admin: o /me segue sem mexer na caixa.
     me = (await client.get("/api/auth/me")).json()
     assert me["role"] == "user" and me["atendimento"] is True and me["atendimento_mexe"] is False
 
@@ -584,6 +560,7 @@ async def test_loja_bloqueada_e_escopo_cortam_os_numeros(
     await _na_pasta(db, cena, h["ml"], "problemas")
     await _na_pasta(db, cena, h["oliveira"], "problemas")
     leitor = await make_user(role=UserRole.USER)
+    await dar_lojas(db, leitor, cena.ml, cena.oliveira_ml)
     await _salvar(client, auth_as, cena, leitor, lojas_bloqueadas=[f"i:{cena.ml.id}"])
     lojas = await _por_loja(client)
     # A loja continua na barra (é loja dele), mas sem o e-mail bloqueado.
@@ -592,12 +569,8 @@ async def test_loja_bloqueada_e_escopo_cortam_os_numeros(
     params = {"caixa": "email", "filtro": "todas", "grupo_email": "problemas"}
     assert await _ids(client, **params, integration_id=str(cena.ml.id)) == set()
 
-    # A equipe da Barbosa (só a loja do ML dela): só a linha dela, sem fichas.
-    auth_as(cena.dono)
-    loja = await db.get(StoreInfo, cena.loja_ml.id)
-    loja.sales_team = 7
+    # Quem tem só a Barbosa do ML (30/10/2026, as lojas por pessoa): só a linha dela.
     membro = await make_user()
-    membro.sales_teams = [7]
-    await db.commit()
+    await dar_lojas(db, membro, cena.ml, escopo.chave(escopo.FICHA, cena.loja_ml.id))
     auth_as(membro)
     assert set(await _por_loja(client)) == {str(cena.ml.id)}

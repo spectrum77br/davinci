@@ -76,7 +76,6 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.team_scope import resolve_team_scope
 from app.models import AtendimentoConversa, User
 from app.routers.atendimento import (
     SO_LEITURA,
@@ -91,6 +90,7 @@ from app.routers.atendimento import (
 from app.schemas.atendimento import ConversaOut
 from app.services.atendimento import instagram
 from app.services.atendimento import lida as lida_svc
+from app.services.atendimento.escopo import escopo_do_atendimento
 
 logger = structlog.get_logger()
 
@@ -135,7 +135,7 @@ async def marcar_lida(
             status.HTTP_409_CONFLICT,
             detail={"code": lida_svc.RECUSA_NAO_SE_APLICA, "detail": lida_svc.MOTIVO_NAO_SE_APLICA},
         )
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     try:
         # A pessoa abriu: o "visto no DaVinci" vale com ou sem a plataforma.
@@ -191,7 +191,7 @@ async def marcar_visto(
             status.HTTP_409_CONFLICT,
             detail={"code": lida_svc.RECUSA_NAO_SE_APLICA, "detail": lida_svc.MOTIVO_NAO_SE_APLICA},
         )
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     try:
         visto = await lida_svc.gravar_visto(
@@ -229,7 +229,7 @@ async def zerar_nao_lidas(
 ) -> ZerarOut:
     """O "Zerar não lidas" do Duoke: marca como vistas no DaVinci, sem ir à plataforma."""
     body = body or ZerarIn()
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     try:
         total = await lida_svc.zerar_nao_lidas(
             session,

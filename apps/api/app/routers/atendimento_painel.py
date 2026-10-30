@@ -49,7 +49,6 @@ from fastapi import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.team_scope import resolve_team_scope
 from app.models import User
 from app.routers.atendimento import (
     _conversa_ou_404,
@@ -77,6 +76,7 @@ from app.services.atendimento.constantes import (
     PLATAFORMAS_EXTERNAS,
 )
 from app.services.atendimento.enviar import EnvioRecusado
+from app.services.atendimento.escopo import escopo_do_atendimento
 
 logger = structlog.get_logger()
 
@@ -153,7 +153,7 @@ async def painel_do_pedido(
     """
     if instagram.e_instagram(conversa_id):
         return _painel_do_instagram()
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     if c.plataforma == PLATAFORMA_WHATSAPP:
         return await _painel_do_zap(session, c)
@@ -177,7 +177,7 @@ async def criar_nota(
     """Nota interna: nunca é enviada, não conta como resposta, a IA não lê."""
     if instagram.e_instagram(conversa_id):
         raise _somente_leitura()
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     try:
         m = await painel.criar_nota(session, c, body.texto, user_id=user.id)
@@ -215,7 +215,7 @@ async def enviar_foto(
     """
     if instagram.e_instagram(conversa_id):
         raise _somente_leitura()
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     recusa = await enviar.motivo_para_nao_enviar(session, c, para=para)
     if recusa is not None:
@@ -271,7 +271,7 @@ async def nf_do_pedido(
     """
     if instagram.e_instagram(conversa_id):
         raise _somente_leitura()
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     try:
         nf = await danfe.nf_da_conversa(session, c)
@@ -324,7 +324,7 @@ async def adspower_aberto(
     store_info_id = None
     conversa_id = None
     if body.conversa_id is not None:
-        scope = await resolve_team_scope(session, user)
+        scope = await escopo_do_atendimento(session, user)
         c = await _conversa_ou_404(session, str(body.conversa_id), scope)
         conversa_id = str(c.id)
         dados = await painel.perfil_adspower(session, c)

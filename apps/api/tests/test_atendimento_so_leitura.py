@@ -48,12 +48,12 @@ from app.models import (
     UserRole,
     UserStatus,
 )
-from app.models.pricing import StoreInfo
 from app.routers import atendimento as rota
 from app.routers import atendimento_email as rota_email
 from app.security.cipher import encrypt_json
 from app.services import vigia_leitura_atendimento
 from app.services.atendimento import gravar, ia
+from tests.lojas_da_pessoa import dar_lojas
 
 URL = "/api/atendimento"
 AGORA = datetime.now(UTC)
@@ -266,9 +266,9 @@ async def test_quem_so_le_le_tudo_e_nao_mexe_em_nada(client, make_user, auth_as,
             # fica disponível a leitores ou a admins fora da lista operacional.
             assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
         elif (metodo, molde) in rota_email.LEITURAS_SO_DE_ADMIN:
-            # A aba E-mail é só de admin (27/10/2026) — e de quem tem a permissão
-            # `atendimento_email` view (28/10/2026): a leitura que só ela faz.
-            if quem in ("admin_fora_da_lista", "comum_com_a_aba_email"):
+            # A aba E-mail é só de admin (27/10/2026; de 28 a 30/10 também da
+            # permissão `atendimento_email`, que desde 30/10 não abre mais).
+            if quem == "admin_fora_da_lista":
                 assert r.status_code not in (401, 403), (metodo, caminho, r.status_code, r.text)
             else:
                 assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
@@ -377,6 +377,7 @@ async def test_quem_so_le_ve_sugere_avalia_e_responde_mas_nao_configura(
     integ, canal = await _loja(db, dono, "kfa")
     conversa = await _conversa(db, integ, canal, "c1")
     u = await make_user(role=UserRole.ADMIN if quem == "admin_fora_da_lista" else UserRole.USER)
+    await dar_lojas(db, u, integ)  # 30/10/2026: quem não é admin vê as lojas dele
     auth_as(u)
 
     lista = await client.get(f"{URL}/conversas")
@@ -460,6 +461,8 @@ async def test_quem_so_le_nao_troca_a_nota_de_outra_pessoa(client, db, make_user
     livre = await _rascunho(db, conversa, status="substituido")
     leitor = await make_user()
     outro_leitor = await make_user()
+    for quem in (leitor, outro_leitor):
+        await dar_lojas(db, quem, integ)  # 30/10/2026: as lojas dele
 
     auth_as(dono)
     r = await client.post(f"{URL}/rascunhos/{do_dono.id}/avaliacao", json={"nota": "ok"})
@@ -523,6 +526,8 @@ async def test_quem_so_le_preenche_a_nota_da_linha_sem_nota(client, db, make_use
     r = await _rascunho(db, conversa)
     leitor = await make_user()
     outro_leitor = await make_user()
+    for quem in (leitor, outro_leitor):
+        await dar_lojas(db, quem, integ)  # 30/10/2026: as lojas dele
 
     auth_as(dono)
     resp = await client.post(f"{URL}/rascunhos/{r.id}/descartar", json={"motivo": "tom inadequado"})
@@ -556,6 +561,7 @@ async def test_sugerir_sem_limite_para_quem_so_le(
     integ, canal = await _loja(db, dono, "kfa")
     conversa = await _conversa(db, integ, canal, "c1")
     leitor = await make_user()
+    await dar_lojas(db, leitor, integ)  # 30/10/2026: as lojas dele
     monkeypatch.setattr(_fase_de_observacao, "atendimento_ia_teto_diario", 2)
     auth_as(leitor)
     for _ in range(35):
@@ -567,6 +573,7 @@ async def test_sugerir_sem_limite_para_quem_so_le(
 # ─────────────── escopo por equipe, com a trava ligada ───────────────
 
 
+@pytest.mark.lojas_por_pessoa
 async def test_equipe_so_ve_as_proprias_lojas_em_todas_as_rotas(
     client, db, make_user, auth_as, dono, monkeypatch
 ):
@@ -576,19 +583,8 @@ async def test_equipe_so_ve_as_proprias_lojas_em_todas_as_rotas(
     conv_b = await _conversa(db, integ_b, canal_b, "b1")
     rasc_b = await _rascunho(db, conv_b)
     await _dm(db)
-    db.add(
-        StoreInfo(
-            user_id=dono.id,
-            platform="shopee",
-            account_name="loja-a",
-            sales_team=7,
-            integration_id=integ_a.id,
-        )
-    )
-    await db.commit()
-    membro = await make_user()  # sem permissão nenhuma: só a equipe
-    membro.sales_teams = [7]
-    await db.commit()
+    membro = await make_user()  # sem permissão nenhuma: só a loja dele (30/10/2026)
+    await dar_lojas(db, membro, integ_a)
 
     # A faixa "lojas sem ler": uma linha de cada loja e uma sem integração (robô).
     base = vigia_leitura_atendimento.LeituraParada(
@@ -639,9 +635,11 @@ async def test_equipe_so_ve_as_proprias_lojas_em_todas_as_rotas(
     assert (await client.get(f"{URL}/conversas/{conv_a.id}")).status_code == 200
     assert (await client.get(f"{URL}/conversas/{conv_a.id}/abas")).status_code == 200
 
-    # Sem equipe: vê as duas lojas e o Direct (como antes).
-    sem_equipe = await make_user()
-    auth_as(sem_equipe)
+    # Sem loja nenhuma (30/10/2026, as lojas por pessoa): nada. O admin vê tudo.
+    sem_loja = await make_user()
+    auth_as(sem_loja)
+    assert (await client.get(f"{URL}/conversas")).json()["itens"] == []
+    auth_as(dono)
     ids = {i["id"] for i in (await client.get(f"{URL}/conversas")).json()["itens"]}
     assert {str(conv_a.id), str(conv_b.id)} <= ids
     assert any(i.startswith("ig:") for i in ids)

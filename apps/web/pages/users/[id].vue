@@ -737,6 +737,9 @@ async function removeUser(ignorarImobilizado = false, jaConfirmou = false) {
       </div>
     </details>
 
+    <!-- As lojas que a pessoa vê no Atendimento, nos e-mails das lojas e na Garantia (30/10/2026). -->
+    <UsuarioLojasAtendimento :user-id="userId" :is-admin-user="isAdminUser" />
+
     <!-- Senha -->
     <Card>
       <CardHeader>

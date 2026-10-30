@@ -21,10 +21,16 @@ from app.models import (
     UserRole,
 )
 from app.models.atendimento import AtendimentoConversa, AtendimentoMensagem
+from app.models.enums import IntegrationPlatform
+from app.models.integration import Integration
 from app.models.nf import NfNota
 from app.models.pricing import StoreInfo
 from app.routers import garantias as rota
+from app.security.cipher import encrypt_json
 from app.services import garantia as svc
+from app.services.atendimento import escopo
+from tests.conftest import _make_user
+from tests.lojas_da_pessoa import dar_lojas
 
 pytestmark = pytest.mark.asyncio
 
@@ -151,6 +157,49 @@ def _corpo(pedido="300001", nf="1234", nome="João da Silva", cpf="529.982.247-2
     return {"pedido": pedido, "nf_numero": nf, "cliente_nome": nome, "cpf": cpf, **extra}
 
 
+async def _loja_padrao(db) -> tuple[Integration, StoreInfo]:
+    """A loja dos pedidos daqui (o Bling "L1" de `_pedido`) com a integração do
+    chat de `_conversa`. Desde 30/10/2026 quem não é admin vê na Garantia (e no
+    atendimento) só as lojas dele (`atendimento_lojas_pessoa`)."""
+    if (pronta := db.info.get("garantia_loja_padrao")) is not None:
+        return pronta
+    dono = await _make_user(db, role=UserRole.ADMIN)
+    integ = Integration(
+        user_id=dono.id,
+        platform=IntegrationPlatform.SHOPEE,
+        name="loja teste",
+        credentials=encrypt_json({}),
+    )
+    db.add(integ)
+    await db.flush()
+    ficha = StoreInfo(
+        user_id=dono.id,
+        platform="shopee",
+        account_name="loja teste",
+        bling_store_id="L1",
+        integration_id=integ.id,
+    )
+    db.add(ficha)
+    await db.commit()
+    db.info["garantia_loja_padrao"] = (integ, ficha)
+    return integ, ficha
+
+
+@pytest.fixture
+def make_user(db):
+    """O `make_user` de sempre; quem não é admin já vem com a loja dos pedidos
+    daqui (a ficha "L1" e a integração do chat) — a pessoa que atende a loja."""
+
+    async def _f(**kwargs):
+        u = await _make_user(db, **kwargs)
+        if u.role != UserRole.ADMIN:
+            integ, ficha = await _loja_padrao(db)
+            await dar_lojas(db, u, integ, escopo.chave(escopo.FICHA, ficha.id))
+        return u
+
+    return _f
+
+
 async def _admin(make_user, auth_as):
     u = await make_user(role=UserRole.ADMIN, email=f"adm-{uuid.uuid4().hex[:6]}@davinci-test.com")
     auth_as(u)
@@ -164,6 +213,9 @@ async def _cadastrar(client, **kw):
 
 
 async def _conversa(db, pedido="251007ABCD1234", *, integration_id=None, mensagens=None):
+    if integration_id is None:
+        # A conversa é da loja dos pedidos daqui (o escopo por pessoa, 30/10/2026).
+        integration_id = (await _loja_padrao(db))[0].id
     c = AtendimentoConversa(
         plataforma="shopee",
         canal="chat",
@@ -1090,22 +1142,22 @@ async def test_vinculos_da_conversa_aparecem_no_bloco(client, db, make_user, aut
     assert lista["itens"][0]["atendimentos"] == 1
 
 
-# ── Escopo por equipe ────────────────────────────────────────────────────────
+# ── Escopo por pessoa (30/10/2026; antes, por equipe) ─────────────────────────
 
 
 async def test_equipe_ve_so_as_garantias_das_suas_lojas(client, db, make_user, auth_as):
     dono = await _admin(make_user, auth_as)
-    db.add(StoreInfo(user_id=dono.id, platform="shopee", bling_store_id="L1", sales_team=1))
-    db.add(StoreInfo(user_id=dono.id, platform="shopee", bling_store_id="L2", sales_team=2))
+    l2 = StoreInfo(user_id=dono.id, platform="shopee", bling_store_id="L2")
+    db.add(l2)
     await db.commit()
     await _pedido(db)
     await _pedido(db, numero="300002", numeroloja="251007ZZZZ0002", loja="L2", cpf=CPF_2)
     g1 = await _cadastrar(client)
     g2 = await _cadastrar(client, pedido="300002", cpf=CPF_2, nome="Maria Souza")
 
-    equipe2 = await make_user(permissions={**CADASTRA, **REGISTRA})
-    equipe2.sales_teams = [2]
-    await db.commit()
+    # Sem o `make_user` daqui (que dá a loja L1): só a loja L2.
+    equipe2 = await _make_user(db, permissions={**CADASTRA, **REGISTRA})
+    await dar_lojas(db, equipe2, escopo.chave(escopo.FICHA, l2.id))
     auth_as(equipe2)
     lista = (await client.post("/api/garantias/lista", json={})).json()
     assert [i["id"] for i in lista["itens"]] == [g2["id"]]

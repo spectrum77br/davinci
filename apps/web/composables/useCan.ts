@@ -196,7 +196,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   garantias_atendimento: 'Garantias — Registrar atendimento (edit)',
   garantias_cpf: 'Garantias — Ver o CPF completo (view)',
   atendimento: 'Atendimento',
-  atendimento_email: 'Atendimento — aba E-mail: ver (view) e responder/enviar (edit)',
+  atendimento_email: 'Atendimento — aba E-mail (desde 30/10/2026 só admin: esta permissão não abre mais a aba)',
   sincronizacoes: 'Sincronizações',
   sync_logs: 'Sync Logs',
   integracoes: 'Integrações',

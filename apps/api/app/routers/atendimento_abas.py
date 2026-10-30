@@ -44,7 +44,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.team_scope import resolve_team_scope
 from app.models import AtendimentoConversa, AtendimentoMensagem, User
 from app.routers.atendimento import (
     _conversa_ou_404,
@@ -58,6 +57,7 @@ from app.schemas.atendimento import MensagemOut
 from app.services.atendimento import abas as abas_svc
 from app.services.atendimento import instagram
 from app.services.atendimento.constantes import CANAL_AVALIACAO
+from app.services.atendimento.escopo import escopo_do_atendimento
 
 router = APIRouter(
     prefix="/api/atendimento", tags=["atendimento"], dependencies=[Depends(_so_admin)]
@@ -186,7 +186,7 @@ async def abas_da_conversa(
     if instagram.e_instagram(conversa_id):
         # Direct do Instagram: sem pedido, sem abas.
         return _vazio(conversa_id)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     aberta = await _conversa_ou_404(session, conversa_id, scope)
     resultado = await abas_svc.abas_da_conversa(session, aberta)
     fam = resultado.familia

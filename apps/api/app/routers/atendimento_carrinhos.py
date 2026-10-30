@@ -33,7 +33,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.team_scope import resolve_team_scope
 from app.models import AtendimentoCanal, AtendimentoCarrinho, AtendimentoConversa, User
 from app.routers.atendimento import (
     _conversa_ou_404,
@@ -46,6 +45,7 @@ from app.routers.atendimento import (
 )
 from app.services.atendimento import carrinhos
 from app.services.atendimento.constantes import CANAL_CARRINHO
+from app.services.atendimento.escopo import escopo_do_atendimento
 
 logger = structlog.get_logger()
 
@@ -264,7 +264,7 @@ async def carrinho_da_conversa(
 ) -> CarrinhoDaConversaOut:
     """O cartão do carrinho: o aberto (ou o último), os anteriores e a taxa do site."""
     agora = datetime.now(UTC)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
     vazio = CarrinhoDaConversaOut(
         carrinho=None,
@@ -297,7 +297,7 @@ async def _carrinho_ou_404(
     """O carrinho, se a pessoa vê a conversa dele (sem integração: só quem vê tudo)."""
     uid = _uuid_ou_404(carrinho_id, "carrinho_nao_encontrado")
     c = await session.get(AtendimentoCarrinho, uid)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa = (
         await session.get(AtendimentoConversa, c.conversa_id)
         if c is not None and c.conversa_id

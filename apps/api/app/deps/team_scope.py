@@ -42,6 +42,10 @@ class TeamScope:
     integration_ids: set[UUID] = field(default_factory=set)
     bling_store_ids: set[str] = field(default_factory=set)
     account_names: set[str] = field(default_factory=set)  # lower/trim
+    # Os canais do ROBÔ (Temu/AliExpress, sem integração) que a pessoa vê no
+    # /atendimento (30/10/2026, `services/atendimento/escopo.py`). O escopo
+    # por equipe não os conhece: fica vazio aqui.
+    canal_ids: set[UUID] = field(default_factory=set)
     # A leitura das conversas de e-mail tem uma política adicional por pessoa.
     # Mantém o usuário da requisição disponível aos detalhes compartilhados;
     # não muda o escopo comercial nem a igualdade dos escopos existentes.

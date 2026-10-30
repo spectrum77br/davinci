@@ -16,9 +16,9 @@ plataforma). O que passa para quem só lê está no router
 
 A trava do router e o `/api/auth/me` (chaves `atendimento` = vê e
 `atendimento_mexe` = mexe, que o menu e a página leem) usam estas mesmas
-funções: menu, página e API nunca discordam. O escopo por equipe
-(`deps/team_scope.py`) continua valendo por cima: quem tem equipe vê só as
-lojas dela.
+funções: menu, página e API nunca discordam. Por cima vale o escopo por
+PESSOA (30/10/2026, `services/atendimento/escopo.py`): quem não é admin vê só
+as lojas dele (`atendimento_lojas_pessoa`) — sem loja, nenhuma.
 """
 
 from app.config import get_settings
@@ -87,32 +87,26 @@ def so_le(user: User) -> bool:
 
 
 def ve_aba_email(user: User) -> bool:
-    """Vê a ABA E-MAIL inteira do /atendimento: admin, ou quem tem a permissão
-    `atendimento_email` view (28/10/2026, o Eduardo: "bote o user marrocos no
-    davinci pra poder ver tambem a aba de emails" — sem virar admin).
+    """Vê a ABA E-MAIL inteira do /atendimento: SÓ ADMIN.
 
-    Só VER: as ações da aba seguem com `pode_mexer`, e a trava da caixa
-    (`pode_ver`, no router) vale antes. Quem não vê a aba lê e-mail só pela
-    barra de lojas da Caixa (403 `aba_email_so_admin` no resto). A mesma conta
-    do `useCan('atendimento_email', 'view')` do web (admin sempre passa)."""
-    if user.role == UserRole.ADMIN:
-        return True
-    perm = (user.permissions or {}).get("atendimento_email")
-    return isinstance(perm, dict) and perm.get("view") is True
+    30/10/2026, o Eduardo, ao separar as lojas por pessoa: "o email ninguém
+    pode ver a não ser admin né, já no atendimento eles vão ver só das caixas
+    dele — só o admin vê também todos os atendimentos e todos os emails". A
+    permissão `atendimento_email` (28/10/2026, o marrocos vendo e respondendo a
+    aba) deixou de abrir a aba: quem não é admin lê e-mail só pelas caixas das
+    LOJAS DELE na barra da Caixa (`services/atendimento/escopo.py`). A mesma
+    conta do `veAbaEmail` do web; a API recusa as rotas da aba com 403
+    `aba_email_so_admin`."""
+    return user.role == UserRole.ADMIN
 
 
 def responde_email(user: User) -> bool:
-    """RESPONDE e-mail pela aba E-mail (28/10/2026, o Eduardo: "passe para o
-    usuario marrocos acesso para ele conseguir responder os emails de dentro do
-    davinci, hoje so adm pode"): quem NÃO é admin e tem a permissão
-    `atendimento_email` com ver E editar. Responde o e-mail recebido nas caixas
-    que a pessoa vê (`mail_admin.pode_responder_caixa`) e, desde 29/10/2026
-    ("libere para o usuario marrocos poder enviar a mensagem"), escreve e-mail
-    novo, encaminha e manda anexos nas caixas que vê INTEIRAS
-    (`mail_composer.can_compose`). Configurar a caixa continua do dono/admin.
-    Admin fica de fora de propósito: ele segue as regras de sempre (dono/admin
-    e, na caixa da empresa, só quem mexe — `pode_mexer`)."""
-    if user.status != UserStatus.ACTIVE or user.role == UserRole.ADMIN:
-        return False
-    perm = (user.permissions or {}).get("atendimento_email")
-    return isinstance(perm, dict) and perm.get("view") is True and perm.get("edit") is True
+    """Responde e-mail pela caixa crua (a Central da aba E-mail) sem ser dono/admin.
+
+    28–29/10/2026 era quem não é admin com `atendimento_email` ver+editar (o
+    marrocos). Desde 30/10/2026 a aba é só do admin ("o email ninguém pode ver
+    a não ser admin") e ninguém mais ganha esse atalho: responder na Central
+    volta a ser do dono/admin de sempre (`mail_central.allowed`) e, na caixa da
+    empresa, de quem mexe (`pode_mexer`). Fica a função para os chamadores
+    (`mail_admin.pode_responder_caixa`, `caixa.bloqueia_resposta`)."""
+    return False

@@ -1058,7 +1058,7 @@ async def test_previa_404_fora_da_equipe_e_linha_que_nao_existe(db, client, pess
     async def _sem_lojas(_session, _user):
         return TeamScope(unrestricted=False)
 
-    monkeypatch.setattr(rota_auto, "resolve_team_scope", _sem_lojas)
+    monkeypatch.setattr(rota_auto, "escopo_do_atendimento", _sem_lojas)
     r = await client.get(f"/api/atendimento/automacoes/registro/{linha.id}/previa")
     assert r.status_code == 404
     n = await db.scalar(select(func.count()).select_from(AtendimentoMensagem))

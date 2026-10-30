@@ -107,7 +107,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.db import get_session
-from app.deps.team_scope import TeamScope, resolve_team_scope
+from app.deps.team_scope import TeamScope
 from app.models import (
     AtendimentoConversa,
     AtendimentoMensagem,
@@ -152,6 +152,7 @@ from app.services.atendimento.constantes import (
     FONTE_TUTA,
     PLATAFORMA_SITE,
 )
+from app.services.atendimento.escopo import escopo_do_atendimento
 from app.services.mail_atendimento import (
     administracao,
     barra_lojas,
@@ -251,8 +252,9 @@ def _admin(user: User) -> None:
 ABA_SO_ADMIN = ABA_EMAIL_SO_ADMIN
 # As LEITURAS que só a aba E-mail faz e que, até 27/10/2026, quem só lê também
 # fazia (as outras já eram só de quem mexe — `LEITURAS_SO_DE_QUEM_MEXE`, e quem
-# mexe é sempre admin). O nome é de 27/10: hoje é admin OU quem tem a permissão
-# `atendimento_email` view. `tests/test_atendimento_so_leitura.py` confere a lista.
+# mexe é sempre admin). O nome é de 27/10 (de 28 a 30/10 a permissão
+# `atendimento_email` view também lia; desde 30/10, de novo só admin).
+# `tests/test_atendimento_so_leitura.py` confere a lista.
 LEITURAS_SO_DE_ADMIN = frozenset({("GET", f"{_PREFIXO}/saude")})
 
 
@@ -270,6 +272,24 @@ def _no_escopo(scope: TeamScope, integration_id: UUID | None) -> bool:
     )
 
 
+def _escopo_do_email(scope: TeamScope, integ, ficha):
+    """WHERE da loja de um e-mail no escopo da pessoa; None = sem filtro.
+
+    A loja do e-mail é a integração ou — sem ela — a FICHA que a ponte ligou
+    (30/10/2026: a Shopee "luno", as Temu, o ML "eron2" só têm ficha). Quem não
+    é admin vê as das lojas dele (`escopo_do_atendimento`); sem loja, nada."""
+    if scope.unrestricted:
+        return None
+    ou = []
+    if scope.integration_ids:
+        ou.append(integ.in_(sorted(scope.integration_ids)))
+    if scope.store_info_ids:
+        ou.append(and_(integ.is_(None), ficha.in_(sorted(scope.store_info_ids))))
+    if not ou:
+        return literal(False)
+    return ou[0] if len(ou) == 1 else or_(*ou)
+
+
 async def _meta_ou_404(
     session: AsyncSession, message_id: UUID, user: User, *, estados: tuple[str, ...]
 ) -> tuple[MailMessageMeta, MailMessage]:
@@ -278,7 +298,7 @@ async def _meta_ou_404(
     message = await session.get(MailMessage, message_id) if meta is not None else None
     if meta is None or message is None or meta.estado not in estados:
         raise HTTPException(404, detail={"code": "email_nao_encontrado"})
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     if not _no_escopo(scope, meta.integration_id):
         raise HTTPException(404, detail={"code": "email_nao_encontrado"})
     await administracao.exigir_mensagem(session, user, message_id)
@@ -567,8 +587,9 @@ async def listar(
             else None
         )
         q = q.where(_da_loja(integration_id, store_info_id, fichas))
-        scope = await resolve_team_scope(session, user)
-        cond = _clausula_escopo(scope, MailMessageMeta.integration_id)
+        scope = await escopo_do_atendimento(session, user)
+        m = MailMessageMeta
+        cond = _escopo_do_email(scope, m.integration_id, m.store_info_id)
         if cond is not None:
             q = q.where(cond)
         if fila == ESTADO_INFORMATIVO:
@@ -722,7 +743,7 @@ async def vincular(
     )
     if meta.conversa_id is None:
         raise HTTPException(409, detail={"code": "email_sem_conversa"})
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa = await _conversa_ou_404(session, str(meta.conversa_id), scope)
     return await _vincular(session, meta, conversa, body, user, scope)
 
@@ -739,7 +760,7 @@ async def vincular_conversa(
     ponte, a mesma loja), pelo e-mail mais novo da conversa.
     """
     _mexe(user)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
     meta = (
         await session.execute(
@@ -994,7 +1015,7 @@ async def contagens(
     """
     c = AtendimentoConversa
     aberta = c.situacao != CONVERSA_FECHADA
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     cond = _clausula_escopo(scope, c.integration_id)
     response.headers["Cache-Control"] = "no-store"
     visao = await administracao.visao_rapida(session, user)
@@ -1051,10 +1072,10 @@ async def _contagens_por_loja(
     meta, senão a do índice); a conversa entra no grupo pela pasta do e-mail
     RECEBIDO mais recente dela.
 
-    `por_loja` traz TODA loja que a pessoa vê: as integrações (no escopo da
-    equipe) e as fichas SEM integração (Temu, AliExpress, a Shopee "atlas" sem
-    API…: só para quem vê todas as equipes — a ficha não tem integração para o
-    escopo), mesmo sem e-mail nenhum; arquivada só com e-mail. A loja é a que
+    `por_loja` traz TODA loja que a pessoa vê: as integrações e as fichas SEM
+    integração (Temu, AliExpress, a Shopee "atlas" sem API…) do escopo dela
+    (desde 30/10/2026 as lojas da pessoa, `escopo_do_atendimento`; o admin vê
+    todas), mesmo sem e-mail nenhum; arquivada só com e-mail. A loja é a que
     a PONTE deu ao e-mail: a integração da conversa ou — sem integração — a
     ficha (`dados.mail.store_info_id`); a ficha cuja integração existe (o FK
     ativo, senão o par nome + plataforma: `rotear.integracoes_das_fichas`)
@@ -1173,7 +1194,7 @@ async def _contagens_por_loja(
             visao.filtro_mensagem(m.message_id),
         )
     )
-    cond_m = _clausula_escopo(scope, integ)
+    cond_m = _escopo_do_email(scope, integ, ficha)
     if cond_m is not None:
         base_m = base_m.where(cond_m)
     bm = base_m.subquery()
@@ -1242,7 +1263,10 @@ async def _contagens_por_loja(
             # A ficha com e-mail (mesmo arquivada): a plataforma do cadastro, se faltar.
             lojas[(None, fid)]["plataforma"] = lojas[(None, fid)]["plataforma"] or plat
             continue
-        if not scope.unrestricted or fid in da_integracao or arquivada is not None:
+        if fid in da_integracao or arquivada is not None:
+            continue
+        if not scope.unrestricted and fid not in scope.store_info_ids:
+            # 30/10/2026: quem não é admin vê a ficha SEM integração das lojas dele.
             continue
         if plat not in _FICHAS_QUE_NAO_SAO_LOJA:
             item_da_loja(None, fid, plat)
@@ -1431,7 +1455,7 @@ async def _emails_do_site(
     `barra_lojas.email_do_site_sql`, o filtro de acesso da pessoa e a janela. Quem
     não vê todas as equipes: nada (o chamado do site não tem loja). As colunas são
     as da caixa da loja (a meta, o e-mail, a integração e a ficha da meta, a conversa)."""
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     pastas = await barra_lojas.pastas_dos_sites(session)
     visao = await administracao.visao_rapida(session, user)
     m = MailMessageMeta
@@ -1559,7 +1583,7 @@ async def _emails_da_caixa(
     a do índice), o filtro de acesso da pessoa, o escopo da equipe e a janela."""
     pastas = await barra_lojas.pastas_da_barra(session)
     visao = await administracao.visao_rapida(session, user)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     m = MailMessageMeta
     i = barra_lojas.indice_alias()
     integ, ficha = barra_lojas.loja_do_email_sql(i, m)
@@ -1590,7 +1614,7 @@ async def _emails_da_caixa(
         )
     elif store_info_id is not None:
         q = q.where(integ.is_(None), ficha == store_info_id)
-    cond = _clausula_escopo(scope, integ)
+    cond = _escopo_do_email(scope, integ, ficha)
     if cond is not None:
         q = q.where(cond)
     return q
@@ -1659,7 +1683,7 @@ async def emails_da_caixa(
             raise HTTPException(422, detail={"code": "grupo_email_invalido"})
         if integration_id is not None or store_info_id is not None:
             raise HTTPException(422, detail={"code": "site_ou_loja"})
-        if not (await resolve_team_scope(session, user)).unrestricted:
+        if not (await escopo_do_atendimento(session, user)).unrestricted:
             raise HTTPException(403, detail={"code": "email_do_site_fora_do_escopo"})
     else:
         if grupo not in barra_lojas.chaves():
@@ -1857,7 +1881,7 @@ async def emails_da_conversa(
 
     Só a conversa de E-MAIL tem cartões (13/10/2026): a de chat volta vazia —
     o e-mail que a ponte gravou nela não aparece mais (`separa_email`)."""
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
     response.headers["Cache-Control"] = "no-store"
     if not separa_email.e_conversa_de_email(conversa):
@@ -1912,7 +1936,7 @@ async def emails_da_venda(
     (`_emails_da_venda_no_chat`, o link "abrir na aba E-mail"); sem nenhuma,
     o zero de sempre (`{"total": 0, "caixas": []}`).
     """
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
     response.headers["Cache-Control"] = "no-store"
     familia = await abas.familia(session, conversa)
@@ -2032,7 +2056,7 @@ async def emails_desta_venda(
     conversa_id: str, session: Session, user: Leitor, response: Response
 ) -> dict[str, Any]:
     """Cartões sem corpo, somente desta venda; total zero oculta o botão."""
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
     response.headers["Cache-Control"] = "no-store"
     resultado = await venda.listar(session, conversa, scope)
@@ -2055,7 +2079,7 @@ async def email_desta_venda(
     conversa_id: str, message_id: UUID, session: Session, user: Leitor, response: Response
 ) -> dict[str, Any]:
     """Leitura protegida do e-mail selecionado; o caso inteiro não é liberado."""
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
     response.headers["Cache-Control"] = "no-store"
     resultado = await venda.listar(session, conversa, scope)
@@ -2079,7 +2103,7 @@ async def anexo(attachment_id: UUID, session: Session, user: Leitor) -> Response
     if attachment is None or meta is None or meta.estado not in ESTADOS_COM_TEXTO:
         raise HTTPException(404, detail={"code": "anexo_nao_encontrado"})
     await administracao.exigir_mensagem(session, user, attachment.message_id)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     if meta.conversa_id is not None:
         conversa = await session.get(AtendimentoConversa, meta.conversa_id)
         if conversa is None or not _no_escopo(scope, conversa.integration_id):
@@ -2111,7 +2135,7 @@ async def previa(
     mail_message_id: Annotated[UUID | None, Query()] = None,
 ) -> dict[str, Any]:
     """Como a resposta vai sair (De, Para, Assunto, assinatura, citação) e as travas de agora."""
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
     if not ponte.e_conversa_da_ponte(conversa):
         raise HTTPException(409, detail={"code": "nao_e_conversa_de_email"})
@@ -2152,7 +2176,7 @@ async def agrupar(
     FICA o mais antigo dos dois (o protocolo principal), qualquer que seja o
     lado de onde a pessoa clicou; a resposta diz qual ficou."""
     _mexe(user)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     este = await _conversa_ou_404(session, conversa_id, scope)
     outro = await _conversa_ou_404(session, str(body.conversa_id), scope)
     origem, destino = await chamados.ordem_do_agrupamento(session, este, outro)
@@ -2184,7 +2208,7 @@ async def nao_agrupar(
     """RF6: "Não agrupar" — a sugestão deste par some (lembrado nos dois chamados,
     com quem e quando). Agrupar à mão continua possível."""
     _mexe(user)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     este = await _conversa_ou_404(session, conversa_id, scope)
     outro = await _conversa_ou_404(session, str(body.conversa_id), scope)
     await _travar_ou_409(session, este, "conversa_ocupada")

@@ -369,7 +369,7 @@ async def test_fora_do_escopo_da_equipe_e_404(db, client, make_user, auth_as, mo
     async def escopo(session, user):
         return TeamScope(unrestricted=False, integration_ids=set(ids), email_user=user)
 
-    monkeypatch.setattr(rota_atendimento, "resolve_team_scope", escopo)
+    monkeypatch.setattr(rota_atendimento, "escopo_do_atendimento", escopo)
     vendedora = await make_user(role=UserRole.USER)
     auth_as(vendedora)
     r = await client.get(_rota(alheia))

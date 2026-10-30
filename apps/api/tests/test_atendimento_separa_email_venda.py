@@ -29,6 +29,7 @@ import pytest
 from app.config import get_settings
 from app.models import AtendimentoConversa, StoreInfo, UserRole
 from app.services.atendimento import separa_email
+from tests.lojas_da_pessoa import dar_lojas, dar_todas_as_lojas
 from tests.test_mail_ponte import (
     AGORA,
     _amazon,
@@ -253,26 +254,18 @@ async def test_quem_nao_ve_nao_recebe_id_nem_numero(
     assert not await _abre_a_conversa(client, email.id), "a conversa de e-mail também não"
     r = await client.get(f"{URL}/conversas", params={"caixa": "email", "filtro": "todas"})
     assert r.status_code == 403, "a lista inteira (a aba E-mail) é só de admin"
-    # Equipe com o ML: vê o chat, os números e o id — o mesmo que a lista mostra.
-    db.add(
-        StoreInfo(
-            user_id=cena.dono.id,
-            platform="mercadolivre",
-            account_name="equipe-8",
-            sales_team=8,
-            integration_id=cena.ml.id,
-        )
-    )
+    # Quem tem o ML (30/10/2026, as lojas por pessoa): vê o chat, os números e o id.
     do_ml = await make_user(role=UserRole.USER)
-    do_ml.sales_teams = [8]
-    await db.commit()
+    await dar_lojas(db, do_ml, cena.ml)
     auth_as(do_ml)
     corpo = (await client.get(_venda(pack.id))).json()
     assert corpo["total"] == 3 and [c["id"] for c in corpo["conversas"]] == [str(email.id)]
     assert await _abre_a_conversa(client, email.id)
-    # Quem só lê (sem equipe) vê como na lista da aba E-mail.
+    # Quem só lê, com as lojas, vê como na lista da aba E-mail.
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", OUTRO)
-    auth_as(await make_user(role=UserRole.USER))
+    leitor = await make_user(role=UserRole.USER)
+    await dar_todas_as_lojas(db, leitor)
+    auth_as(leitor)
     corpo = (await client.get(_venda(pack.id))).json()
     assert corpo["total"] == 3 and corpo["aguardando"] == 1
     # Quem não vê o /atendimento: 403, nada.

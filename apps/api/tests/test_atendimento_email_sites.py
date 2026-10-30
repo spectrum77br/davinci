@@ -47,6 +47,7 @@ from app.models import (
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services.mail_atendimento import barra_lojas, pedido, responder, rotear
 from app.services.mail_atendimento import constantes as mail_constantes
+from tests.lojas_da_pessoa import dar_lojas
 from tests.test_atendimento_separa_email import URL
 from tests.test_atendimento_separa_email import admin as admin
 from tests.test_atendimento_separa_email import quem_le as quem_le
@@ -596,29 +597,23 @@ async def test_pasta_do_site_sem_categoria_diz_por_que(db, cena, client, admin):
     assert sites["charlots"]["status"] == "sem_pasta"
 
 
-async def test_quem_nao_e_admin_ve_as_caixas_do_site_pela_barra(
-    db, cena, client, quem_le, auth_as
-):
+async def test_quem_nao_e_admin_nao_ve_as_caixas_do_site(db, cena, client, quem_le, auth_as):
+    """30/10/2026 (as lojas por pessoa): o site não é loja da planilha de ninguém —
+    as caixas SAC/Admin dele ficam só para o admin, mesmo com todas as lojas."""
     ids = await _cena_da_barra(db, cena)
     auth_as(quem_le)
-    sites = await _sites(client)
-    assert sites["uranyx"]["grupos"]["sac"]["emails"] == 1
+    assert await _sites(client) == {}
     r = await _lista(client, "uranyx", "admin")
-    assert r.status_code == 200 and [i["id"] for i in r.json()["itens"]] == [ids["admin"]]
-    cid = r.json()["itens"][0]["conversa_id"]
-    # A conversa do site abre (os cartões dela) como a das lojas.
-    assert (await client.get(f"{EMAIL}/conversas/{cid}/emails")).status_code == 200
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "email_do_site_fora_do_escopo"
+    assert ids["admin"]
 
 
 async def test_quem_ve_so_a_equipe_nao_tem_as_caixas_dos_sites(
     db, cena, client, make_user, auth_as
 ):
     await _cena_da_barra(db, cena)
-    loja = await db.get(StoreInfo, cena.loja_ml.id)
-    loja.sales_team = 7
-    membro = await make_user()
-    membro.sales_teams = [7]
-    await db.commit()
+    membro = await make_user()  # só a Barbosa do ML (30/10/2026, as lojas por pessoa)
+    await dar_lojas(db, membro, cena.ml)
     auth_as(membro)
     assert await _sites(client) == {}
     for site in ("uranyx", "makisa", "7buyers"):
@@ -759,13 +754,13 @@ async def test_7buyers_sem_a_pasta_mostra_as_caixas_vazias_com_o_porque(
         assert r.status_code == 200 and r.json() == {"itens": [], "proximo": None}
 
 
-async def test_quem_nao_e_admin_ve_a_makisa_pela_barra(db, cena, client, quem_le, auth_as):
+async def test_quem_nao_e_admin_nao_ve_a_makisa(db, cena, client, quem_le, auth_as):
+    """30/10/2026: os sites só de e-mail (Makisa, 7buyers) também só para o admin."""
     ids = await _cena_da_makisa(db, cena)
     auth_as(quem_le)
-    sites = await _sites(client)
-    assert sites["makisa"]["grupos"]["sac"]["emails"] == 1 and "7buyers" in sites
+    assert await _sites(client) == {}
     r = await _lista(client, "makisa", "sac")
-    assert r.status_code == 200 and [i["id"] for i in r.json()["itens"]] == [ids["sac"]]
+    assert r.status_code == 403 and ids["sac"]
 
 
 # ─────────────── admin@makisa e admin@7buyers: só mostrar (27/10/2026) ───────────────

@@ -30,10 +30,10 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.team_scope import resolve_team_scope
 from app.models import User
 from app.routers.atendimento import _conversa_ou_404, _so_admin, _view
 from app.services.atendimento import instagram, reclamacoes
+from app.services.atendimento.escopo import escopo_do_atendimento
 
 router = APIRouter(
     prefix="/api/atendimento", tags=["atendimento"], dependencies=[Depends(_so_admin)]
@@ -92,7 +92,7 @@ async def reclamacoes_da_conversa(
     if instagram.e_instagram(conversa_id):
         # DM do Instagram não tem pedido nem reclamação.
         return ReclamacoesOut(itens=[], abertas=0, prazo_mais_curto=None)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
     linhas = await reclamacoes.reclamacoes_da_conversa(session, conversa)
     # O "Abrir na Shopee" com o id interno (devolução/pedido): uma consulta.

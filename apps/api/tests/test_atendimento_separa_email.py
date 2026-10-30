@@ -44,6 +44,7 @@ from app.services.atendimento import amazon_email, etiqueta_fatos, gravar, human
 from app.services.atendimento import cliente as cliente_svc
 from app.services.atendimento import sync as sync_svc
 from app.services.mail_atendimento import barra_lojas
+from tests.lojas_da_pessoa import dar_todas_as_lojas
 from tests.test_mail_ponte import (
     AGORA,
     conversa,
@@ -77,10 +78,14 @@ async def admin(cena, auth_as):
 
 
 @pytest.fixture
-async def quem_le(make_user, auth_as, monkeypatch):
-    """Pessoa ativa do DaVinci, sem equipe: LÊ o /atendimento (não mexe)."""
+async def quem_le(make_user, auth_as, monkeypatch, request, db):
+    """Pessoa ativa do DaVinci, não admin: LÊ o /atendimento (não mexe). Desde
+    30/10/2026 (as lojas por pessoa) com TODAS as lojas do cenário (`cena`)."""
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", OUTRO)
     user = await make_user(role=UserRole.USER)
+    if "cena" in request.fixturenames:
+        request.getfixturevalue("cena")
+        await dar_todas_as_lojas(db, user)
     auth_as(user)
     return user
 

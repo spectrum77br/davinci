@@ -19,10 +19,12 @@ qualquer outra escrita de quem só lê responde 403 `atendimento_so_leitura`,
 mesmo para os outros admins. As permissões finas (view/edit/delete)
 continuam nas rotas e passam a valer quando `SO_ADMIN` voltar para False.
 
-ESCOPO POR EQUIPE: como Integrações e Anúncios, pela `integration_id` da
-conversa/canal (`deps/team_scope.py`). Admin e quem não tem equipe veem
-tudo; quem tem equipe vê só as lojas dela. As DMs do Instagram não são de
-loja nenhuma (são das marcas): só aparecem para quem vê tudo.
+ESCOPO POR PESSOA (30/10/2026, `services/atendimento/escopo.py`): pela
+`integration_id` da conversa/canal (e o canal da loja do robô), com as lojas
+da pessoa (`atendimento_lojas_pessoa`, a planilha "Separação de contas" do
+Eduardo). Admin vê tudo; quem não é admin vê só as lojas dele — sem loja
+nenhuma, nenhuma. As DMs do Instagram, os sites, as redes e o Zap não são
+loja da planilha: só aparecem para o admin.
 
 A lista mistura as conversas do marketplace com as DMs do Instagram (id
 `ig:<uuid>`, SÓ LEITURA), paginando as duas pela mesma chave
@@ -120,7 +122,7 @@ from app import worker_pool
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_active_user, require_permission
-from app.deps.team_scope import TeamScope, resolve_team_scope
+from app.deps.team_scope import TeamScope
 from app.models import (
     AtendimentoAvaliacao,
     AtendimentoCanal,
@@ -286,6 +288,7 @@ from app.services.atendimento.constantes import (
     sla_horas,
 )
 from app.services.atendimento.enviar import EnvioRecusado
+from app.services.atendimento.escopo import escopo_do_atendimento
 from app.services.mail_atendimento import administracao as mail_admin
 from app.services.mail_atendimento import barra_lojas as mail_barra
 from app.services.mail_atendimento import rotear as mail_rotear
@@ -358,8 +361,8 @@ SO_LEITURA = {
 # `_aba_inteira`). O `code` fica o mesmo (o web e os testes leem).
 ABA_EMAIL_SO_ADMIN = {
     "code": "aba_email_so_admin",
-    "detail": "A aba E-mail é só de admin (ou de quem tem a permissão da aba E-mail): "
-    "os e-mails de cada loja ficam na barra de lojas da Caixa.",
+    "detail": "A aba E-mail é só de admin: os e-mails das suas lojas ficam na barra "
+    "de lojas da Caixa.",
 }
 
 
@@ -689,18 +692,39 @@ def _utc(quando: datetime | None) -> datetime | None:
     return quando if quando.tzinfo else quando.replace(tzinfo=UTC)
 
 
-def _no_escopo(scope: TeamScope, integration_id: UUID | None) -> bool:
-    return scope.unrestricted or (
-        integration_id is not None and integration_id in scope.integration_ids
-    )
+def _no_escopo(
+    scope: TeamScope, integration_id: UUID | None, canal_id: UUID | None = None
+) -> bool:
+    """A loja está no escopo? `canal_id`: o canal da loja do ROBÔ (Temu/AliExpress,
+    sem integração) — a conversa passa `c.canal_id`, o canal passa o próprio id
+    (30/10/2026, `services/atendimento/escopo.py`)."""
+    if scope.unrestricted:
+        return True
+    if integration_id is not None:
+        return integration_id in scope.integration_ids
+    return canal_id is not None and canal_id in scope.canal_ids
+
+
+def _conversa_no_escopo(scope: TeamScope, c: AtendimentoConversa) -> bool:
+    """A conversa está no escopo? A loja dela: a integração, o canal do robô ou —
+    a conversa de e-mail sem integração — a FICHA que a ponte ligou
+    (`dados.mail.store_info_id`; 30/10/2026: a Shopee "luno", as Temu)."""
+    if _no_escopo(scope, c.integration_id, c.canal_id):
+        return True
+    if scope.unrestricted or c.integration_id is not None:
+        return False
+    ficha = ((c.dados or {}).get(separa_email.CHAVE_MAIL) or {}).get("store_info_id")
+    try:
+        return ficha is not None and UUID(str(ficha)) in scope.store_info_ids
+    except ValueError:
+        return False
 
 
 # Zap do número (decisão do Eduardo, 26/10/2026): SÓ ADMINISTRADOR vê o Zap —
 # a conversa, a linha da lista e da barra, o canal em "Lojas e modo". A
-# conversa e o canal do Zap não têm loja (`integration_id` NULL), e o escopo
-# por equipe deixa ver tudo a quem não tem equipe (`resolve_team_scope`):
-# sem isto, qualquer pessoa ativa sem equipe lia o Zap (nome e telefone do
-# cliente) e, com a permissão fina, respondia por ele. Quem é a pessoa vem do
+# conversa e o canal do Zap não têm loja (`integration_id` NULL); desde
+# 30/10/2026 o escopo por pessoa (`escopo_do_atendimento`) só deixa ver tudo
+# ao admin, e esta trava continua como a segunda chave. Quem é a pessoa vem do
 # próprio escopo (`email_user`, o usuário do pedido); escopo sem pessoa não vê.
 def _ve_o_zap(scope: TeamScope) -> bool:
     quem = scope.email_user
@@ -742,9 +766,28 @@ def _clausula_escopo(scope: TeamScope, coluna):
     """
     if scope.unrestricted:
         return _sem_zap_sql(scope, coluna)
-    if not scope.integration_ids:
+    # A loja do ROBÔ (Temu/AliExpress) não tem integração: entra pelo canal
+    # dela, na tabela da `coluna` (a conversa pelo `canal_id`, o canal pelo id).
+    # A conversa de e-mail sem integração entra pela FICHA da ponte
+    # (`dados.mail.store_info_id`) — a mesma conta de `_conversa_no_escopo`.
+    dono = getattr(coluna, "parent", None)
+    mapper = getattr(dono, "mapper", None)
+    classe = mapper.class_ if mapper is not None else None
+    ou = []
+    if scope.integration_ids:
+        ou.append(coluna.in_(scope.integration_ids))
+    if classe is AtendimentoConversa and scope.canal_ids:
+        ou.append(and_(coluna.is_(None), dono.entity.canal_id.in_(scope.canal_ids)))
+    elif classe is AtendimentoCanal and scope.canal_ids:
+        ou.append(and_(coluna.is_(None), dono.entity.id.in_(scope.canal_ids)))
+    if classe is AtendimentoConversa and scope.store_info_ids:
+        ficha = dono.entity.dados[separa_email.CHAVE_MAIL]["store_info_id"].astext
+        ou.append(
+            and_(coluna.is_(None), ficha.in_(sorted(str(f) for f in scope.store_info_ids)))
+        )
+    if not ou:
         return false()
-    return coluna.in_(scope.integration_ids)
+    return ou[0] if len(ou) == 1 else or_(*ou)
 
 
 async def _nomes(session: AsyncSession, ids: set[UUID | None]) -> dict[UUID, str | None]:
@@ -847,7 +890,11 @@ async def _conversa_ou_404(
 ) -> AtendimentoConversa:
     uid = _uuid_ou_404(conversa_id, "conversa_nao_encontrada")
     c = await session.get(AtendimentoConversa, uid)
-    if c is None or not _no_escopo(scope, c.integration_id) or _zap_escondido(scope, c):
+    if (
+        c is None
+        or not _conversa_no_escopo(scope, c)
+        or _zap_escondido(scope, c)
+    ):
         raise HTTPException(404, detail={"code": "conversa_nao_encontrada"})
     if separa_email.e_conversa_de_email(c) and scope.email_user is not None:
         visivel = await session.scalar(
@@ -1999,7 +2046,7 @@ async def resumo(
     """Contadores da fila (por plataforma e por loja), saúde dos canais e as chaves."""
     from app.services.atendimento import humano as humano_svc
 
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     agora = datetime.now(UTC)
     aguardando = AtendimentoConversa.aguardando_resposta.is_(True)
     # O "Falta responder" (o `aguardando` da resposta: o número da aba
@@ -2749,7 +2796,7 @@ async def listar_conversas(
     momento, ident, sem_prazo, grupo = _cursor(
         antes_de, pelo_prazo=pelo_prazo, pelo_turno=caixa_humano
     )
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
 
     itens: list[dict[str, Any]] = []
     # A caixa (marketplaces, sites e os COMENTÁRIOS das redes) — menos quando
@@ -3186,7 +3233,7 @@ async def detalhe_conversa(
     user: Annotated[User, Depends(_view)],
 ) -> ConversaDetalheOut | dict[str, Any]:
     """A conversa aberta: mensagens, sugestão da IA, pedido e se dá para enviar."""
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     if instagram.e_instagram(conversa_id):
         dados = await instagram.detalhe(session, conversa_id) if scope.unrestricted else None
         if dados is None:
@@ -3290,7 +3337,7 @@ async def anexo_da_conversa(
     nao_encontrado = HTTPException(404, detail={"code": anexo_ml.NAO_ENCONTRADO})
     if instagram.e_instagram(conversa_id):
         raise nao_encontrado
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     if not anexo_ml.conversa_aceita(c) or c.integration_id is None:
         raise nao_encontrado
@@ -3370,7 +3417,7 @@ async def trocar_etiqueta(
     escolhida = (body.etiqueta or "").strip().lower()
     if escolhida not in ETIQUETAS:
         raise HTTPException(422, detail={"code": "etiqueta_invalida"})
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     # Trava e relê: o recálculo do sync/cron não passa por cima desta troca
     # (e esta não passa por cima do que ele acabou de gravar).
@@ -3410,7 +3457,7 @@ async def responder(
     """
     if instagram.e_instagram(conversa_id):
         raise _somente_leitura()
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     try:
         m = await enviar.enviar_resposta(
@@ -3460,7 +3507,7 @@ async def pedir_rascunho(
             409,
             detail={"code": "ia_desligada", "detail": "A IA do atendimento está desligada."},
         )
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     if c.plataforma == PLATAFORMA_WHATSAPP:
         # Zap (19/10/2026, docs/zap/desenho.md P8): a IA fica fora do Zap na
@@ -3682,7 +3729,7 @@ async def atualizar_pedido(
     """
     if instagram.e_instagram(conversa_id):
         raise _sem_pedido_na_plataforma(instagram.PLATAFORMA)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     if c.plataforma not in PLATAFORMAS_COM_PEDIDO:
         raise _sem_pedido_na_plataforma(c.plataforma)
@@ -3877,7 +3924,7 @@ async def editar_conversa(
     """Atribuir, pausar a IA, fechar/reabrir, "não precisa de resposta" e a conta Amazon."""
     if instagram.e_instagram(conversa_id):
         raise _somente_leitura()
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     # Trava e relê: o que o sync gravou até agora (mensagem nova do cliente)
     # entra no recálculo abaixo, e o que ele gravar depois vê o nosso fechar.
@@ -3929,7 +3976,7 @@ async def escolher_copia_amazon(
     esta" só tira a marca desta. Só quem mexe na caixa (a trava do router e
     o `atendimento.edit`). Ver `amazon_email.resolver_copia`.
     """
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
     if c.plataforma != "amazon":
         raise HTTPException(409, detail={"code": "nao_e_amazon"})
@@ -3965,10 +4012,10 @@ async def conferir_mensagem(
     conferir, a `revisar` conta como resposta — responder por cima de uma
     que pode ter saído é o erro que o comprador vê.
     """
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     m = await session.get(AtendimentoMensagem, mensagem_id)
     c = await session.get(AtendimentoConversa, m.conversa_id) if m is not None else None
-    if m is None or c is None or not _no_escopo(scope, c.integration_id):
+    if m is None or c is None or not _conversa_no_escopo(scope, c):
         raise HTTPException(404, detail={"code": "mensagem_nao_encontrada"})
     if _zap_escondido(scope, c):
         raise HTTPException(404, detail={"code": "mensagem_nao_encontrada"})
@@ -4032,7 +4079,7 @@ async def _rascunho_ou_404(
     if (
         r is None
         or conversa is None
-        or not _no_escopo(scope, conversa.integration_id)
+        or not _conversa_no_escopo(scope, conversa)
         or _zap_escondido(scope, conversa)
     ):
         raise HTTPException(404, detail={"code": "rascunho_nao_encontrado"})
@@ -4071,7 +4118,7 @@ async def descartar_rascunho(
     user: Annotated[User, Depends(_responde)],
 ) -> RascunhoUnicoOut:
     """A sugestão não serve — e o PORQUÊ fica para a revisão do manual."""
-    r = await _rascunho_ou_404(session, rascunho_id, await resolve_team_scope(session, user))
+    r = await _rascunho_ou_404(session, rascunho_id, await escopo_do_atendimento(session, user))
     if r.status not in (RASCUNHO_PENDENTE, RASCUNHO_BLOQUEADO):
         raise HTTPException(409, detail={"code": "rascunho_nao_pendente"})
     r.status = RASCUNHO_DESCARTADO
@@ -4177,7 +4224,7 @@ async def avaliar_rascunho(
     Atendimento não pode ser apagado por um clique de quem está se
     ambientando.
     """
-    r = await _rascunho_ou_404(session, rascunho_id, await resolve_team_scope(session, user))
+    r = await _rascunho_ou_404(session, rascunho_id, await escopo_do_atendimento(session, user))
     acao = _ACAO_PELO_STATUS.get(r.status, ACAO_OBSERVOU)
     av = await _avaliacao_de(session, r.id)
     criada = False
@@ -4349,7 +4396,7 @@ async def listar_canais(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_view)],
 ) -> list[CanalOut]:
-    return await _canais(session, await resolve_team_scope(session, user))
+    return await _canais(session, await escopo_do_atendimento(session, user))
 
 
 @router.patch("/canais/{canal_id}", response_model=CanalOut)
@@ -4367,8 +4414,12 @@ async def editar_canal(
     O agente e os assuntos de orientação (20/10/2026): `_editar_agente_do_canal`.
     """
     canal = await session.get(AtendimentoCanal, canal_id)
-    scope = await resolve_team_scope(session, user)
-    if canal is None or not _no_escopo(scope, canal.integration_id) or _zap_escondido(scope, canal):
+    scope = await escopo_do_atendimento(session, user)
+    if (
+        canal is None
+        or not _no_escopo(scope, canal.integration_id, canal.id)
+        or _zap_escondido(scope, canal)
+    ):
         raise HTTPException(404, detail={"code": "canal_nao_encontrado"})
     # Desligar o `auto` numa emergência não pode pendurar atrás da rodada do
     # sync (que grava o contador de não lidas no canal): 409 e tenta de novo.
@@ -5240,7 +5291,7 @@ async def listar_fatos(
         raise HTTPException(422, detail={"code": "escopo_invalido"})
     if plataforma is not None and plataforma not in PLATAFORMAS_CAIXA:
         raise HTTPException(422, detail={"code": "plataforma_invalida"})
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     t = AtendimentoFato
     filtros = []
     cond = _clausula_escopo(scope, t.integration_id)
@@ -5299,7 +5350,7 @@ async def _fato_para_decidir(session: AsyncSession, user: User, fato_id: int) ->
     f = await session.scalar(
         select(AtendimentoFato).where(AtendimentoFato.id == fato_id).with_for_update()
     )
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     if f is None or (f.integration_id is not None and not _no_escopo(scope, f.integration_id)):
         raise HTTPException(404, detail={"code": "fato_nao_encontrado"})
     return f
@@ -5383,7 +5434,7 @@ async def criar_fato(
         )
     await _conferir_categoria(session, body.assunto)
     if body.integration_id is not None:
-        scope = await resolve_team_scope(session, user)
+        scope = await escopo_do_atendimento(session, user)
         loja = await session.get(Integration, body.integration_id)
         if loja is None or not _no_escopo(scope, body.integration_id):
             raise HTTPException(
@@ -5643,7 +5694,7 @@ async def metricas(
     dias: Annotated[int, Query(ge=1, le=90)] = 7,
 ) -> MetricasOut:
     """Tempo de primeira resposta e % no prazo por loja; o que a pessoa fez com a IA."""
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     agora = datetime.now(UTC)
     desde = agora - timedelta(days=dias)
     return MetricasOut(

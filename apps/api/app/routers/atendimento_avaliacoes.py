@@ -38,7 +38,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.deps.team_scope import resolve_team_scope
 from app.models import AtendimentoAvaliacaoLoja, User
 from app.routers.atendimento import (
     _conversa_ou_404,
@@ -55,6 +54,7 @@ from app.schemas.atendimento import MensagemOut
 from app.services.atendimento import avaliacoes, enviar, instagram
 from app.services.atendimento.constantes import ORIGEM_HUMANO
 from app.services.atendimento.enviar import EnvioRecusado
+from app.services.atendimento.escopo import escopo_do_atendimento
 
 logger = structlog.get_logger()
 
@@ -167,7 +167,7 @@ async def _avaliacao_ou_404(
 ) -> AtendimentoAvaliacaoLoja:
     uid = _uuid_ou_404(avaliacao_id, "avaliacao_nao_encontrada")
     a = await session.get(AtendimentoAvaliacaoLoja, uid)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     if a is None or not _no_escopo(scope, a.integration_id):
         raise HTTPException(404, detail={"code": "avaliacao_nao_encontrada"})
     return a
@@ -190,7 +190,7 @@ async def avaliacoes_da_conversa(
             envio_ativo=envio_ativo,
             aviso=avaliacoes.AVISO_RESPOSTA_PUBLICA,
         )
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa = await _conversa_ou_404(session, conversa_id, scope)
     linhas = await avaliacoes.avaliacoes_da_conversa(session, conversa)
     nomes = await _nomes(session, {a.tratada_por for a, _ in linhas})

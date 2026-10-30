@@ -50,7 +50,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_active_user
-from app.deps.team_scope import resolve_team_scope
 from app.models import AtendimentoConversa, Integration, Marca, StoreInfo
 from app.models.mail import MailMailbox, MailMessage
 from app.models.mail_admin import MailAcesso, MailLixeira
@@ -61,6 +60,7 @@ from app.routers.mail import readable_mailbox
 from app.security.cipher import decrypt_json
 from app.services.atendimento import acesso, separa_email
 from app.services.atendimento import lojas as lojas_svc
+from app.services.atendimento.escopo import escopo_do_atendimento
 from app.services.mail_atendimento import administracao as mail_admin
 from app.services.mail_atendimento import indice, pastas, ponte, regras, rotear
 from app.services.mail_bridge_sync import folder_content
@@ -320,7 +320,7 @@ async def _acesso_versao(session: AsyncSession, mailbox: MailMailbox, user: User
     """
     politica = await session.get(MailAcesso, (mailbox.id, user.id), populate_existing=True)
     settings = await session.get(MailMailboxSettings, mailbox.id, populate_existing=True)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     lixeira = (
         await session.execute(
             select(func.max(MailLixeira.updated_at), func.count())
@@ -344,7 +344,10 @@ async def _acesso_versao(session: AsyncSession, mailbox: MailMailbox, user: User
         "stock_tags": sorted(user.stock_tags or []),
         "pode_ver": acesso.pode_ver(user),
         "pode_mexer": acesso.pode_mexer(user),
-        "scope": [scope.unrestricted, sorted(str(x) for x in scope.integration_ids)],
+        "scope": [
+            scope.unrestricted,
+            sorted(str(x) for x in scope.integration_ids | scope.store_info_ids),
+        ],
         "settings": {
             "visibilidade": settings.visibilidade,
             "leitor": str(user.id) in (settings.leitores or []),
@@ -502,22 +505,26 @@ async def _conversas_abriveis(session: AsyncSession, user: User, ids: set[UUID])
     /atendimento (quem vê, no escopo da equipe) — uma consulta, só a página."""
     if not ids or not acesso.pode_ver(user):
         return set()
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c = AtendimentoConversa
+    ficha = c.dados[separa_email.CHAVE_MAIL]["store_info_id"].astext
     linhas = (
         await session.execute(
-            select(c.id, c.integration_id).where(
+            select(c.id, c.integration_id, ficha).where(
                 c.id.in_(ids),
                 separa_email.conversa_de_email_sql(c),
                 mail_admin.filtro_conversa(user, c),
             )
         )
     ).all()
+    # A loja da conversa: a integração ou — sem ela — a ficha da ponte (30/10/2026).
+    fichas = {str(f) for f in scope.store_info_ids}
     return {
         i
-        for i, integration_id in linhas
+        for i, integration_id, da_ficha in linhas
         if scope.unrestricted
         or (integration_id is not None and integration_id in scope.integration_ids)
+        or (integration_id is None and da_ficha in fichas)
     }
 
 

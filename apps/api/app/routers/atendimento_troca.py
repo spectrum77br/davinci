@@ -73,7 +73,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.deps.team_scope import TeamScope, resolve_team_scope
+from app.deps.team_scope import TeamScope
 from app.models import AtendimentoConversa, AtendimentoTroca, BlingOrder, StoreInfo, User
 from app.routers.atendimento import _edit, _no_escopo, _so_admin, _view
 from app.schemas.atendimento_troca import (
@@ -88,6 +88,7 @@ from app.schemas.atendimento_troca import (
 )
 from app.services.atendimento import etiqueta_fatos, painel, troca, troca_oferta
 from app.services.atendimento.ag_cancelamento import classificar, status_na_plataforma
+from app.services.atendimento.escopo import escopo_do_atendimento
 from app.services.atendimento.troca_sugestoes import (
     Catalogo,
     catalogo,
@@ -196,7 +197,7 @@ async def lista_ag_cancelamento(
     dias: Annotated[int, Query(ge=1, le=DIAS_MAX)] = DIAS_PADRAO,
 ) -> ListaAgCancelamentoOut:
     """Os pedidos em 83955 com o porquê e as sugestões de troca. Só leitura, sem Bling."""
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     agora = datetime.now(UTC)
     desde = agora - timedelta(days=dias)
     pedidos = await etiqueta_fatos.pedidos_em_83955(session, desde)
@@ -311,7 +312,7 @@ def _recusa(e: troca.TrocaRecusada) -> HTTPException:
 
 async def _no_escopo_do_pedido(session: AsyncSession, user: User, numero: str) -> None:
     """O pedido é de uma loja da equipe? Fora do escopo = 404 (como pedido que não existe)."""
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     if scope.unrestricted:
         return
     loja = await session.scalar(select(BlingOrder.loja).where(BlingOrder.numero == numero).limit(1))
@@ -424,7 +425,7 @@ async def lista_trocas(
     pedido: Annotated[str | None, Query(max_length=32)] = None,
 ) -> ListaTrocasOut:
     """As trocas de produto (as abertas por padrão), da mais nova para a mais velha."""
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     itens: list[AtendimentoTroca] = []
     try:
         # Num SAVEPOINT: a tabela pode ainda não existir (deploy antes do alembic).
@@ -504,7 +505,7 @@ async def enviar_oferta_de_troca(
     """
     numero = numero_bling.strip()
     await _no_escopo_do_pedido(session, user, numero)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     try:
         dados = await troca_oferta.enviar_oferta(
             session,

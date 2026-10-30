@@ -48,7 +48,7 @@ from app.deps.auth import (
     require_admin,
     require_permission,
 )
-from app.deps.team_scope import TeamScope, resolve_team_scope
+from app.deps.team_scope import TeamScope
 from app.models import (
     BlingOrder,
     Garantia,
@@ -100,6 +100,7 @@ from app.services import garantia as svc
 from app.services import garantia_pedido, garantia_sac
 from app.services.atendimento import acesso, cartoes_plataforma, separa_email
 from app.services.atendimento.contexto import _chaves_do_pedido
+from app.services.atendimento.escopo import escopo_do_atendimento
 from app.services.mail_atendimento import administracao as mail_admin
 from app.services.rate_limit import RateLimitError, sliding_window_check
 
@@ -144,6 +145,10 @@ def _erro(codigo: int, code: str, campo: str | None = None, **extra) -> HTTPExce
 
 
 # ── Escopo ──────────────────────────────────────────────────────────────────
+# Desde 30/10/2026 é o escopo do ATENDIMENTO (`escopo_do_atendimento`): quem não
+# é admin vê só as garantias das lojas dele (o pedido do Bling da ficha) — o
+# Eduardo: "a parte de garantia é vinculada com essa parte de atendimento ...
+# eles só vão poder ver das lojas deles". Sem loja, nenhuma.
 
 
 def _clausula(scope: TeamScope):
@@ -168,7 +173,7 @@ async def _garantia_visivel(
     session: AsyncSession, garantia_id: int, user: User, *, travar: bool = False
 ) -> Garantia:
     g = await session.get(Garantia, garantia_id, with_for_update=travar)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     if g is None or not _pedido_no_escopo(scope, g.loja):
         raise _erro(404, "garantia_nao_encontrada")
     return g
@@ -182,7 +187,7 @@ async def _conversa(session: AsyncSession, conversa_id: str, user: User) -> Aten
     except ValueError as e:  # Instagram ("ig:…") e lixo
         raise _erro(404, "conversa_nao_encontrada", "conversa_id") from e
     c = await session.get(AtendimentoConversa, uid)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     if c is None or not _conversa_no_escopo(scope, c.integration_id):
         raise _erro(404, "conversa_nao_encontrada", "conversa_id")
     return c
@@ -291,7 +296,7 @@ async def _conversas_das(
         )
     ).all()
     le = user is not None and acesso.pode_ver(user)
-    scope = await resolve_team_scope(session, user) if le else None
+    scope = await escopo_do_atendimento(session, user) if le else None
     saida: dict[int, dict] = {}
     for r in linhas:
         previa = (
@@ -400,7 +405,7 @@ async def _trechos_do_pedido(
         ).all():
             saida[por_dev[did]] = f"devolução: {motivo or condicao or 'por defeito'}"
     if por_msg and user is not None and acesso.pode_ver(user):
-        scope = await resolve_team_scope(session, user)
+        scope = await escopo_do_atendimento(session, user)
         m, c = AtendimentoMensagem, AtendimentoConversa
         for mid, texto, integracao, email in (
             await session.execute(
@@ -788,7 +793,7 @@ async def resumo(
     from app.services import garantia_resumo
 
     dia = svc.hoje()
-    escopo = _clausula(await resolve_team_scope(session, user))
+    escopo = _clausula(await escopo_do_atendimento(session, user))
     filtros = _filtros_do_painel(body, escopo, dia)
     if body.periodo == "pedido" and body.ate:
         # As vendidas até o fim do período (a compra no Bling): o pedido do
@@ -818,7 +823,7 @@ async def listar(
     filtram ao clicar. POST: a busca (nome/CPF) vai no corpo, fora do log de
     acesso."""
     dia = svc.hoje()
-    escopo = _clausula(await resolve_team_scope(session, user))
+    escopo = _clausula(await escopo_do_atendimento(session, user))
     cpf = svc.cpf_da_busca(body.busca)
     if cpf:
         await _teto_da_busca_por_cpf(user)
@@ -903,7 +908,7 @@ async def pedido_para_cadastro(
     """Ao informar o pedido: entrega, prazos, itens e as sugestões de NF,
     nome e CPF (a pessoa confere; os campos continuam informados por ela)."""
     pedido = await svc.buscar_pedido(session, numero)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     if pedido is None or not _pedido_no_escopo(scope, pedido.loja):
         raise _erro(404, "pedido_nao_encontrado", "pedido")
     entrega = await svc.resolver_entrega(session, pedido.numero, pedido.numeroloja)
@@ -970,7 +975,7 @@ async def buscar_para_vincular(
     if cpf:
         await _teto_da_busca_por_cpf(user)
     filtros = [_filtro_busca(body.q), Garantia.descartada_em.is_(None)]
-    escopo = _clausula(await resolve_team_scope(session, user))
+    escopo = _clausula(await escopo_do_atendimento(session, user))
     if escopo is not None:
         filtros.append(escopo)
     garantias = list(
@@ -1003,7 +1008,7 @@ async def situacao_da_conversa(
         if pedido is not None:
             break
     cpf = pedido.cpf if pedido else None
-    escopo = _clausula(await resolve_team_scope(session, user))
+    escopo = _clausula(await escopo_do_atendimento(session, user))
     garantias = await svc.garantias_do_cpf_ou_pedido(
         session, cpf, pedido.numero if pedido else None, escopo
     )
@@ -1091,7 +1096,7 @@ async def cadastrar(
     pedido = await _pedido_ou_422(session, body.pedido, user)
     nota = svc.nota_informada(pedido, nf, serie)
     serie = serie or (nota.serie if nota else "")
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     await _sem_duplicata(session, cpf, nf, serie, nota.chave if nota else None, None, scope)
     entrega = await svc.resolver_entrega(session, pedido.numero, pedido.numeroloja)
     if entrega is None and not svc.CADASTRO_ANTES_DA_ENTREGA:
@@ -1157,7 +1162,7 @@ def _conferir_informados(
 
 async def _pedido_ou_422(session: AsyncSession, termo: str, user: User) -> svc.PedidoInfo:
     pedido = await svc.buscar_pedido(session, termo)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     if pedido is None or not _pedido_no_escopo(scope, pedido.loja):
         raise _erro(422, "pedido_nao_encontrado", "pedido")
     return pedido
@@ -1310,7 +1315,7 @@ async def historico(
         out.marcos.sort(key=lambda m: m.em)
         return out
 
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     c, gc = AtendimentoConversa, GarantiaConversa
     ligadas = [
         (conv, como)
@@ -1470,7 +1475,7 @@ async def corrigir(
             serie_final = nota.serie
     if muda_nf or cpf_final != g.cpf:
         chave = (nota.chave if nota else None) if muda_nf else g.nf_chave
-        scope = await resolve_team_scope(session, user)
+        scope = await escopo_do_atendimento(session, user)
         await _sem_duplicata(session, cpf_final, nf_final, serie_final, chave, g.id, scope)
 
     mudancas: list[tuple[str, str | None, str | None]] = []

@@ -126,6 +126,8 @@ DE_OUTRA_MIGRATION = frozenset(
         "atendimento_pares",
         "atendimento_agente_replay",
         "atendimento_site_produtos",
+        # 0440 (30/10/2026): as lojas de cada pessoa, em test_atendimento_lojas_pessoa.py.
+        "atendimento_lojas_pessoa",
     }
 )
 TABELAS = sorted(

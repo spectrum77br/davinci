@@ -71,7 +71,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.deps.team_scope import TeamScope, resolve_team_scope
+from app.deps.team_scope import TeamScope
 from app.models import (
     AtendimentoAutomacaoRegistro,
     AtendimentoAutomacaoRegra,
@@ -83,6 +83,7 @@ from app.routers.atendimento import _clausula_escopo, _edit, _no_escopo, _so_adm
 from app.services.atendimento import automacoes_catalogo as cat
 from app.services.atendimento import automacoes_comparar as comparar
 from app.services.atendimento import automacoes_previa, lojas
+from app.services.atendimento.escopo import escopo_do_atendimento
 
 logger = structlog.get_logger()
 
@@ -310,7 +311,7 @@ async def listar_automacoes(
 ) -> dict[str, Any]:
     """O catálogo × as lojas, com a regra, as contagens e o critério da troca."""
     agora = datetime.now(UTC)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     lojas_canais = await _lojas(session, scope, plataforma)
     ids = [i.id for i, _ in lojas_canais]
     regras = (
@@ -498,7 +499,7 @@ async def registro(
     antes: datetime | None = None,
 ) -> dict[str, Any]:
     """O registro recente, sem texto nenhum (as mais novas primeiro; `antes` pagina)."""
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     consulta = select(_R)
     cond = _clausula_escopo(scope, _R.integration_id)
     if cond is not None:
@@ -549,7 +550,7 @@ async def estatisticas(
     """A conta por automação × loja (precisão, cobertura, % que bateu) e o total da automação."""
     agora = datetime.now(UTC)
     desde = agora - timedelta(days=dias)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     inicios = await comparar.inicio_dos_dados(
         session, automacao=automacao, integration_id=integration_id
     )
@@ -739,7 +740,7 @@ async def mudar_regra(
 ) -> dict[str, Any]:
     """Muda a regra da loja (cria se não houver). `enviar` só com tudo pronto (409)."""
     aut = _automacao_ou_404(automacao)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     integ = await _integracao_ou_404(session, integration_id, scope, aut)
     canal = await _canal(session, integ, aut)
     agora = datetime.now(UTC)
@@ -936,7 +937,7 @@ async def simular_nas_lojas_do_duoke(
     aut = _automacao_ou_404(automacao)
     if aut.travada:
         raise HTTPException(422, detail={"code": "sem_texto"})
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     agora = datetime.now(UTC)
     criadas = ligadas = mantidas = 0
     for integ, _canal_loja in await _lojas(session, scope, aut.plataforma):
@@ -1002,7 +1003,7 @@ async def previa(
     aut = _automacao_ou_404(body.automacao)
     nome_integ = None
     if body.integration_id is not None:
-        scope = await resolve_team_scope(session, user)
+        scope = await escopo_do_atendimento(session, user)
         nome_integ = (await _integracao_ou_404(session, body.integration_id, scope, aut)).name
     partes = (
         _partes_limpas(body.partes)
@@ -1039,7 +1040,7 @@ async def previa_do_registro(
     Monta na hora (nada é gravado; o registro continua sem texto). Fora da
     equipe, ou linha que não existe: 404.
     """
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     x = await session.get(_R, registro_id)
     if x is None or not _no_escopo(scope, x.integration_id):
         raise HTTPException(404, detail={"code": "registro_nao_encontrado"})

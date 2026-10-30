@@ -22,8 +22,10 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from app.models import AtendimentoConversa, StoreInfo
+from app.models import AtendimentoConversa
+from app.services.atendimento import escopo  # noqa: E402
 from app.services.mail_atendimento import chamados, ponte
+from tests.lojas_da_pessoa import dar_lojas  # noqa: E402
 from tests.test_atendimento_separa_email import (
     URL,
     _chat,
@@ -177,13 +179,11 @@ async def test_escopo_da_equipe_e_quem_so_le(db, cena, client, make_user, auth_a
         client, integration_id=str(cena.oliveira_ml.id), filtro="todas"
     ) == {h["oliveira"]}
     contagens = (await client.get(f"{EMAIL}/contagens")).json()
-    assert (contagens["aguardando"], contagens["chamados"]) == (2, 1), "a Oliveira e o chamado"
-    # A equipe da Barbosa (só a loja do ML dela): só a conversa de e-mail dela.
-    loja = await db.get(StoreInfo, cena.loja_ml.id)
-    loja.sales_team = 7
+    # 30/10/2026: o chamado do site não é loja de ninguém — só o admin vê.
+    assert (contagens["aguardando"], contagens["chamados"]) == (1, 0), "a Oliveira"
+    # Quem tem só a Barbosa do ML (as lojas por pessoa): só a conversa de e-mail dela.
     membro = await make_user()
-    membro.sales_teams = [7]
-    await db.commit()
+    await dar_lojas(db, membro, cena.ml, escopo.chave(escopo.FICHA, cena.loja_ml.id))
     auth_as(membro)
     assert await _ids_pela_barra(client, integration_id=str(cena.ml.id), filtro="todas") == {
         h["ml"]

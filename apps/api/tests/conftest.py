@@ -764,3 +764,37 @@ def _numero_da_caixa_sem_o_corte_do_duoke(monkeypatch):
     from app.services.atendimento import pendente
 
     monkeypatch.setattr(pendente, "ZERADO_NO_DUOKE_EM", datetime(2000, 1, 1, tzinfo=UTC))
+
+
+# ── As lojas do atendimento por pessoa (30/10/2026) ───────────────────────────
+# Desde `services/atendimento/escopo.py`, quem não é admin vê no atendimento e na
+# Garantia só as lojas dele (`atendimento_lojas_pessoa`) — sem loja, nenhuma. Os
+# testes de ANTES foram escritos quando o não-admin sem equipe via tudo: para
+# eles, quem não é admin e não tem loja gravada continua no escopo por equipe de
+# antes. O teste marcado `lojas_por_pessoa` (e todo teste em que a pessoa TEM
+# loja gravada) vê a regra de verdade.
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "lojas_por_pessoa: a regra de verdade das lojas por pessoa, sem o legado"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _lojas_por_pessoa_legado(request, monkeypatch):
+    if request.node.get_closest_marker("lojas_por_pessoa"):
+        return
+    import sys
+
+    from app.deps.team_scope import resolve_team_scope
+    from app.services.atendimento import escopo
+
+    real = escopo.escopo_do_atendimento
+
+    async def legado(session, user):
+        if user.role != UserRole.ADMIN and not await escopo.chaves_da_pessoa(session, user.id):
+            return await resolve_team_scope(session, user)
+        return await real(session, user)
+
+    for nome, mod in list(sys.modules.items()):
+        if nome.startswith("app.") and getattr(mod, "escopo_do_atendimento", None) is real:
+            monkeypatch.setattr(mod, "escopo_do_atendimento", legado)

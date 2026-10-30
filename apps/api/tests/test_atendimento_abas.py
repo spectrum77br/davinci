@@ -40,13 +40,13 @@ from app.models import (
     AtendimentoReclamacao,
     Integration,
     IntegrationPlatform,
-    StoreInfo,
     UserRole,
 )
 from app.routers import atendimento as rota_atendimento
 from app.security.cipher import encrypt_json
 from app.services.atendimento import abas, enviar
 from app.services.atendimento.constantes import CANAL_ZAP, FONTE_TUTA
+from tests.lojas_da_pessoa import dar_lojas
 
 T0 = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 URL = "/api/atendimento/conversas/{}/abas"
@@ -978,7 +978,10 @@ async def test_mesma_trava_do_atendimento(db, client, make_user, auth_as, monkey
     n = await _cenario_ml(db, await make_user(role=UserRole.ADMIN))
     monkeypatch.setattr(rota_atendimento, "SO_ADMIN", True)
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", "alguem@davinci-test.com")
-    for u in (await make_user(role=UserRole.USER), await make_user(role=UserRole.ADMIN)):
+    leitor = await make_user(role=UserRole.USER)
+    # 30/10/2026: quem não é admin lê só as lojas dele (`atendimento_lojas_pessoa`).
+    await dar_lojas(db, leitor, n.loja)
+    for u in (leitor, await make_user(role=UserRole.ADMIN)):
         auth_as(u)
         r = await client.get(URL.format(n.pack.id))
         assert r.status_code == 200, r.text
@@ -991,17 +994,12 @@ async def test_mesma_trava_do_atendimento(db, client, make_user, auth_as, monkey
 
 
 async def test_equipe_so_ve_as_abas_das_proprias_lojas(db, client, make_user, auth_as):
-    """O escopo por equipe: a conversa de loja de fora da equipe é 404; a da
-    equipe tem as abas (a família é toda da mesma loja)."""
+    """O escopo por pessoa (30/10/2026; antes, por equipe): a conversa de loja que
+    não é da pessoa é 404; a da loja dela tem as abas (a família é toda da mesma loja)."""
     dono = await make_user(role=UserRole.ADMIN)
     n = await _cenario_ml(db, dono)
-    db.add(
-        StoreInfo(user_id=dono.id, platform="ml", account_name="aguiar", sales_team=7,
-                  integration_id=n.loja)
-    )  # fmt: skip
     membro = await make_user(permissions={"atendimento": {"view": True}})
-    membro.sales_teams = [7]
-    await db.commit()
+    await dar_lojas(db, membro, n.loja)
     auth_as(membro)
     r = await client.get(URL.format(n.x_loja.id))
     assert r.status_code == 404 and r.json()["detail"]["code"] == "conversa_nao_encontrada"

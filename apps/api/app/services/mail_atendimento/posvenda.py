@@ -63,7 +63,7 @@ import structlog
 from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps.team_scope import TeamScope, resolve_team_scope
+from app.deps.team_scope import TeamScope
 from app.models import (
     BlingOrder,
     Chamado,
@@ -78,6 +78,7 @@ from app.models.mail_atendimento import MailFolder, MailMessageMeta
 from app.security.cipher import decrypt_json
 from app.services import chamados as svc_chamados
 from app.services.atendimento import gravar
+from app.services.atendimento.escopo import escopo_do_atendimento
 from app.services.mail_atendimento import administracao, codigos, ponte, texto
 from app.services.mail_atendimento.constantes import (
     ESTADO_GRAVADO,
@@ -416,7 +417,7 @@ async def visiveis(
     (`administracao.filtro_mensagem`, com a lixeira) — ANTES de decifrar."""
     if not ve_o_atendimento or not metas:
         return set()
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     ids = [m.message_id for m in metas if _no_escopo(scope, m)]
     if not ids:
         return set()
@@ -567,7 +568,7 @@ async def emails_sem_chamado(
     )
     if not ve_o_atendimento or not todos:
         return {"total": 0, "ocultos": todos, "itens": []}
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     filtros = [*guardado, administracao.filtro_mensagem(user)]
     if (escopo := _no_escopo_sql(scope)) is not None:
         filtros.append(escopo)

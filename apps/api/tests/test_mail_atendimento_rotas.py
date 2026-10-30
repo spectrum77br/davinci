@@ -28,6 +28,7 @@ from app.models import (
 from app.models.mail_atendimento import MailFolder, MailMailboxSettings
 from app.services import vigia_leitura_atendimento
 from app.services.mail_atendimento import saude as saude_svc
+from tests.lojas_da_pessoa import dar_todas_as_lojas
 from tests.test_mail_ponte import (
     GOSLIN,
     _loja,
@@ -181,6 +182,7 @@ async def test_vincular_ao_pedido_e_ignorar(db, cena, client, admin):
 
 async def test_cartoes_da_conversa_para_quem_le(db, cena, client, quem_le):
     ids = await _mundo_de_emails(db, cena)
+    await dar_todas_as_lojas(db, quem_le)  # 30/10/2026: as lojas criadas agora também
     meta = await meta_de(db, ids["gravado"])
     r = await client.get(f"{EMAIL}/conversas/{meta.conversa_id}/emails")
     assert r.status_code == 200, r.text

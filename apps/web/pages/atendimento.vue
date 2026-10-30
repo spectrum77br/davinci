@@ -122,15 +122,15 @@ const canSugerir = computed(() => auth.user?.atendimento === true)
 const agora = useRelogio()
 
 // A ABA E-MAIL é só de ADMIN (27/10/2026) — o Eduardo: quem não é admin vê
-// e-mail SÓ pela barra de lojas da Caixa (o ampliável de cada loja). Desde
-// 28/10/2026 também de quem tem a permissão `atendimento_email` view (o
-// Eduardo: "bote o user marrocos no davinci pra poder ver tambem a aba de
-// emails") — só VER: as ações seguem com `mexe`. A noção de admin é a do app
-// (o `role` do /me: `useIsAdmin`); a API usa a mesma conta (`acesso.ve_aba_email`)
-// e recusa as rotas da aba com 403 `aba_email_so_admin`. Quem não vê a aba
-// não a tem nas abas, e o `?tab=mail` (ou um `abrirAba('mail')`) cai na Caixa.
-const podeVerAbaEmail = useCan('atendimento_email', 'view')
-const veAbaEmail = computed(() => ehAdmin.value || podeVerAbaEmail.value)
+// e-mail SÓ pela barra de lojas da Caixa (o ampliável de cada loja). De 28 a
+// 30/10/2026 a permissão `atendimento_email` também abria a aba (o marrocos);
+// desde 30/10, com as lojas separadas por pessoa, de novo SÓ ADMIN ("o email
+// ninguém pode ver a não ser admin né, já no atendimento eles vão ver só das
+// caixas dele"). A noção de admin é a do app (o `role` do /me: `useIsAdmin`);
+// a API usa a mesma conta (`acesso.ve_aba_email`) e recusa as rotas da aba com
+// 403 `aba_email_so_admin`. Quem não vê a aba não a tem nas abas, e o
+// `?tab=mail` (ou um `abrirAba('mail')`) cai na Caixa.
+const veAbaEmail = computed(() => ehAdmin.value)
 function abasDe(veEmail: boolean) {
   return ABAS.filter((a) => a.value !== 'mail' || veEmail)
 }
@@ -929,7 +929,7 @@ function selecionarEmailNaCaixa(id: string, email?: EmailDaCaixa) {
   emailNaCaixa.value = id
 }
 // A conversa de e-mail SEM a lista da loja (quem não vê a aba E-mail — só
-// admin e a permissão `atendimento_email`, 27–28/10/2026): o link de dentro do chat ou o `?conversa=` do
+// admin; 27/10/2026, de novo desde 30/10/2026): o link de dentro do chat ou o `?conversa=` do
 // alerta abrem a conversa de e-mail aqui na Caixa, com a barra do e-mail e o
 // "voltar ao chat" de onde saiu. A lista do chat continua.
 function abrirEmailAvulsoNaCaixa(id: string, origem: Origem | null = null) {
@@ -1140,6 +1140,14 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
       </button>
     </div>
 
+    <!-- 30/10/2026: as lojas são por pessoa — quem não é admin e não tem loja vê o porquê da Caixa vazia -->
+    <p
+      v-if="naCaixa && !ehAdmin && resumo && !resumo.lojas.length"
+      class="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900"
+      data-sem-lojas
+    >
+      Você ainda não tem lojas no Atendimento. Peça a um administrador para marcar as suas em Usuários › Lojas no atendimento.
+    </p>
     <!-- lojas sem ler: no topo da Caixa (com o link para a aba) e na própria aba "Lojas e modo" -->
     <AtendimentoLeituraParada
       v-if="naCaixa || aba === 'lojas'"
@@ -1334,7 +1342,7 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
 
     <LazyAtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin" :ver-zap="ehAdmin" :lojas="resumo?.lojas || []" @mudou="carregarResumo" />
     <!-- E-mail: a Central (Caixas) e as Filas do e-mail das lojas (08/10/2026); a conversa de e-mail abre AQUI (13/10/2026) -->
-    <!-- só admin (27/10/2026) e quem tem a permissão atendimento_email view (28/10/2026): os outros veem e-mail pela barra de lojas da Caixa -->
+    <!-- só admin (27/10/2026; de novo só admin desde 30/10/2026): os outros veem e-mail pela barra de lojas da Caixa, só das lojas deles -->
     <template v-if="aba === 'mail' && veAbaEmail">
       <div v-if="emailConversa" class="space-y-2" data-conversa-de-email>
         <AtendimentoEmailConversaBarra

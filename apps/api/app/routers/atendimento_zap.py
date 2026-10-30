@@ -77,7 +77,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_active_user
-from app.deps.team_scope import resolve_team_scope
 from app.models import (
     AtendimentoCanal,
     AtendimentoMensagem,
@@ -135,6 +134,7 @@ from app.services.atendimento import (
     zap_midia,
     zap_saude,
 )
+from app.services.atendimento.escopo import escopo_do_atendimento
 
 router = APIRouter(
     prefix="/api/atendimento/zap", tags=["atendimento"], dependencies=[Depends(_so_admin)]
@@ -173,7 +173,7 @@ async def midia(
     msg = await session.get(AtendimentoMensagem, m.mensagem_id)
     if msg is None:
         raise _nao_encontrada()
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     try:
         await _conversa_ou_404(session, str(msg.conversa_id), scope)
     except HTTPException:

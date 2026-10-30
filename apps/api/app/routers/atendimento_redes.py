@@ -36,7 +36,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.deps.team_scope import resolve_team_scope
 from app.models import (
     AtendimentoCanal,
     AtendimentoComentario,
@@ -59,6 +58,7 @@ from app.schemas.atendimento import MensagemOut
 from app.services.atendimento import instagram, redes
 from app.services.atendimento.constantes import CANAL_COMENTARIO
 from app.services.atendimento.enviar import EnvioRecusado
+from app.services.atendimento.escopo import escopo_do_atendimento
 
 logger = structlog.get_logger()
 
@@ -174,7 +174,7 @@ async def _comentario_ou_404(
 ) -> AtendimentoComentario:
     uid = _uuid_ou_404(comentario_id, "comentario_nao_encontrado")
     c = await session.get(AtendimentoComentario, uid)
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     # Canal de rede não tem loja de marketplace: só quem vê todas (como o Direct).
     if c is None or not _no_escopo(scope, None):
         raise HTTPException(404, detail={"code": "comentario_nao_encontrado"})
@@ -209,7 +209,7 @@ async def publicacao_da_conversa(
     if instagram.e_instagram(conversa_id):
         # O Direct não tem publicação.
         raise HTTPException(404, detail={"code": "sem_publicacao"})
-    scope = await resolve_team_scope(session, user)
+    scope = await escopo_do_atendimento(session, user)
     conversa: AtendimentoConversa = await _conversa_ou_404(session, conversa_id, scope)
     if conversa.canal != CANAL_COMENTARIO:
         raise HTTPException(404, detail={"code": "sem_publicacao"})

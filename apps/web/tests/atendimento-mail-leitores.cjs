@@ -174,8 +174,9 @@ async function principal() {
     await m.montar()
     let html = await m.html()
     assert.match(html, /Quem mais vê/)
-    // 28/10/2026: o texto diz quem RESPONDE (a permissão "aba E-mail: responder")
-    assert.match(html, /Responde os e-mails recebidos só quem também tiver a permissão/)
+    // 30/10/2026: a aba E-mail é só de admin — o leitor só lê as lojas dele e não responde.
+    assert.match(html, /Desde 30\/10\/2026 a aba E-mail é só de admin/)
+    assert.doesNotMatch(html, /Responde os e-mails recebidos só quem também tiver a permissão/)
     assert.match(html, /data-leitor="isr"[\s\S]*Israel/)
     assert.match(html, /Ninguém além do dono e dos admins/)
     assert.equal(m.estado.mudou, false)
@@ -185,7 +186,7 @@ async function principal() {
     assert.equal(m.estado.mudou, true)
     await m.estado.salvar()
     assert.equal(m.chamadas.filter((c) => c.metodo === 'PUT').length, 0, 'desistiu: nada')
-    assert.match(m.perguntas[0], /Israel ver a caixa "Principal 061" inteira \(lista, e-mails e anexos\)\? Responder, só quem tiver a permissão/)
+    assert.match(m.perguntas[0], /Pôr Israel na lista de quem vê a caixa "Principal 061"\? Desde 30\/10\/2026 a aba E-mail é só de admin/)
     confirma = true
     await m.estado.salvar()
     const put = m.chamadas.find((c) => c.metodo === 'PUT')
