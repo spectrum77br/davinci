@@ -44,6 +44,12 @@ from tests.test_atendimento_ia import PEDIDO_MKT, _msg, ia_ligada  # noqa: F401
 PEDIDO_BLING = "910001"
 COMPRADOR = "joaosilva88"  # o `comprador_id` da conversa do `_conversa`
 CPF = "12345678909"  # o destinatário do XML de teste
+# O menu do robô do Duoke (o texto de produção; não é resposta real da loja).
+_MENU_DUOKE = (
+    "Olá, por favor selecione sua dúvida e logo um dos nossos consultores irá atendê-lo! "
+    "1 - Previsão de entrega / Envio 2 - Nota fiscal 3 - Encerramento da compra "
+    "4 - Troca de endereço 5 - Garantia 6 - Falar com atendente"
+)
 
 
 def _chave(numero: int) -> str:
@@ -260,6 +266,55 @@ async def test_documento_que_faltou_na_caixa_manda_a_nf(db, make_user, ligado, p
     assert [s["tipo"] for s in plataforma] == ["imagem", "texto"]
 
 
+@pytest.mark.parametrize(
+    "texto",
+    [
+        # Revisão de 30/10: os casos de 29/10 nas lojas no automático (Barbosa e12c7799,
+        # Vita 95704e8d), que ficaram como `nf:pedido_nao_claro`.
+        "a notafiscal?",
+        "O meu celular não veio com nota fiscal",
+        "o pedido veio sem nota fiscal",
+        "Nota fiscal por favor",
+    ],
+)
+async def test_grafia_documento_sozinho_e_ausencia_mandam_a_nf(
+    db, make_user, ligado, plataforma, texto
+):
+    conversa, gatilho = await _cenario(db, make_user, texto=texto)
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+    assert [s["tipo"] for s in plataforma] == ["imagem", "texto"]
+
+
+async def test_pedido_escrito_com_o_2_do_menu_no_meio_manda_a_nf(db, make_user, ligado, plataforma):
+    """Revisão de 30/10 (Barbosa f1875dc1): o "2" do menu no meio do pedido escrito."""
+    conversa, _ = await _cenario(
+        db, make_user, texto="por favor, me envie a nota fiscal do produto"
+    )
+    await _msg(db, conversa, _MENU_DUOKE, autor="loja", origem="externo", ha=timedelta(minutes=3))
+    await _msg(db, conversa, "2", ha=timedelta(minutes=2))
+    gatilho = await _msg(
+        db, conversa, "por favor, me envie a nota fiscal por aqui", ha=timedelta(minutes=1)
+    )
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+
+
+async def test_2_do_menu_nao_libera_o_acessorio_escrito_depois(db, make_user, ligado, plataforma):
+    """O "2" sai das falas, o resto passa pela régua: o carregador que não veio → pessoa."""
+    conversa, _ = await _cenario(db, make_user, texto="oi")
+    await _msg(db, conversa, _MENU_DUOKE, autor="loja", origem="externo", ha=timedelta(minutes=3))
+    await _msg(db, conversa, "2", ha=timedelta(minutes=2))
+    gatilho = await _msg(
+        db, conversa, "o celular não veio com o carregador nem a nota", ha=timedelta(minutes=1)
+    )
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:pedido_nao_claro" and plataforma == []
+
+
 async def test_a_nf_nunca_sai_duas_vezes_na_conversa(db, make_user, ligado, plataforma):
     conversa, gatilho = await _cenario(db, make_user)
     r = await _rascunho(db, conversa, gatilho)
@@ -426,6 +481,13 @@ async def test_chave_geral_desligada(db, make_user, ligado, plataforma, monkeypa
         "essa nota não é minha, manda a minha nota",
         "recebi o pedido mas a nota não é minha manda a minha nota",
         "não quero a nota fiscal",
+        # Revisão de 30/10: o produto/acessório ou o problema ao lado da grafia nova.
+        "não veio o carregador nem a notafiscal",
+        "o celular veio sem nota e sem carregador",
+        "o celular não chegou, manda a nota fiscal",
+        "o celular veio sem nota, quero devolver",
+        "a danfe veio com o nome errado",
+        "tem nota fiscal?",
     ],
 )
 async def test_pedido_ambiguo_ou_que_exige_pessoa(db, make_user, ligado, plataforma, texto):
@@ -594,6 +656,139 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         # O "emitir" só com o "eu"; a "chave de acesso" com o "nem" é outra coisa.
         ("manda a nota pra emitir", False),
         ("nao veio a chave de acesso nem a nota", False),
+        # Revisão de 30/10 ("faça esse ajuste para termos mais entregas de NF automaticamente
+        # quando é requisitado"). A grafia do documento: grudada, abreviada, a danfe, o cupom.
+        ("a notafiscal?", True),
+        ("me manda a notafiscal", True),
+        ("preciso da nota fical", True),
+        ("cadê a notafical?", True),
+        ("não veio a nota fiscall", True),
+        ("não veio a nota física na caixa", True),
+        ("não veio a nfe", True),
+        ("pode mandar a NF-e?", True),
+        ("manda a danfe por favor", True),
+        ("gostaria de receber a nota fiscal danfe por favor", True),
+        ("preciso do cupom fiscal", True),
+        ("manda a nota da compra", True),
+        ("cadê minha nota fiscal?", True),
+        ("o cupom não veio", False),
+        ("manda o cupom", False),
+        ("tem nfc?", False),
+        ("o celular tem nfc?", False),
+        ("manda as notas fiscais", False),
+        ("manda o xml da danfe", False),
+        ("a danfe veio com o nome errado", False),
+        # O documento sozinho no turno (no lugar do "2" do menu) — só nomeado por inteiro.
+        ("nota fiscal", True),
+        ("Nota fiscal por favor", True),
+        ("boa tarde, nota fiscal", True),
+        ("a nota fiscal do pedido?", True),
+        ("e a nota fiscal?", True),
+        ("NF?", True),
+        ("nota fiscal da minha compra, por gentileza", True),
+        ("nota?", False),
+        ("a nota?", False),
+        ("tem nota fiscal?", False),
+        ("nota fiscal vem?", False),
+        ("com nota fiscal?", False),
+        ("sem nota fiscal?", False),
+        ("nota fiscal no meu nome", False),
+        ("nota fiscal do outro pedido", False),
+        ("a nota fiscal veio?", False),
+        # A ausência com o documento como sujeito: "não veio COM", "veio/chegou SEM", "faltou".
+        ("não veio com a nota fiscal", True),
+        ("o pedido não veio com nota fiscal", True),
+        ("o produto não veio com a nota", True),
+        ("veio sem nota fiscal", True),
+        ("o produto veio sem nota", True),
+        ("o pedido chegou sem a nota fiscal", True),
+        ("recebi sem nota fiscal", True),
+        ("ficou faltando a nf", True),
+        ("está faltando a nota fiscal do pedido", True),
+        ("pode mandar sem nota", False),
+        ("vocês vendem sem nota?", False),
+        ("o celular veio com nota?", False),
+        ("veio com a nota de outra pessoa", False),
+        ("veio sem caixa e sem nota", False),
+        ("veio sem nada nem nota", False),
+        ("faltou o carregador e a nota", False),
+        ("faltou a nota e o carregador", False),
+        ("está faltando a nota de um produto", False),
+        ("não veio sem nota, manda a nota", False),
+        ("não está faltando a nota, manda a nota", False),
+        ("a nota não faltou, manda a nota", False),
+        # O aparelho é o produto: as mesmas travas do produto.
+        ("O meu celular não veio com nota fiscal", True),
+        ("o celular veio sem a nota fiscal", True),
+        ("o relógio não veio com nota fiscal", True),
+        ("o celular chegou mas não veio a nota fiscal", True),
+        ("recebi o celular mas não veio a nota fiscal", True),
+        ("o aparelho chegou, porém não veio a nota fiscal", True),
+        ("bom dia preciso da nota do celular", True),
+        ("o celular veio faltando a nota fiscal", True),
+        ("o celular não veio", False),
+        ("o celular não veio, cadê a nota?", False),
+        ("o celular não chegou, manda a nota", False),
+        ("o celular não veio nem a nota", False),
+        ("o produto não veio nem a nota", False),
+        ("não veio o celular nem a nota", False),
+        ("quero o celular e a nota", False),
+        ("o celular não veio com a nota e o carregador", False),
+        ("o celular não funciona, manda a nota", False),
+        ("os celulares não vieram com nota", False),
+        ("o outro celular veio sem nota", False),
+        ("não veio com a nota de um celular", False),
+        ("o celular não veio com a nota do outro pedido", False),
+        ("o telefone de contato não veio na nota", False),
+        # O acessório que não veio e o problema ficam com a pessoa.
+        ("não veio o carregador nem a nota", False),
+        ("não veio a nota nem o carregador", False),
+        ("o celular não veio com o carregador nem a nota", False),
+        ("o celular veio sem nota e sem carregador", False),
+        ("o celular veio sem a nota e sem o fone", False),
+        ("o carregador não veio com a nota", False),
+        ("o fone não veio", False),
+        ("o celular veio quebrado e sem nota", False),
+        ("o celular não liga e veio sem nota", False),
+        ("o celular veio sem nota, quero devolver", False),
+        ("o celular veio sem nota, preciso para a garantia", False),
+        ("o celular veio sem nota, é original?", False),
+        ("preciso da nota para acionar a garantia", False),
+        ("preciso da nota pra trocar", False),
+        ("não veio a nota, quero o reembolso", False),
+        # A cortesia, o "que", o "só", o "mesmo", o subjuntivo, o "como faço", o "dela".
+        ("vcs podem enviar a nota fiscal desde já agradeço muito obrigado", True),
+        ("por gentileza me enviar a nota fiscal", True),
+        ("manda a nota fiscal, fico no aguardo", True),
+        ("sim, vc pode me enviar a nota fiscal por aqui mesmo", True),
+        ("gostaria que me enviasse a nota fiscal", True),
+        ("gostaria que vcs mandassem a nota fiscal", True),
+        ("só não veio a nota fiscal", True),
+        ("so quero minha nota fiscal", True),
+        ("quero a nota fiscal que não veio", True),
+        ("por que não veio a nota fiscal?", True),
+        ("recebi meu pedido, porém não veio a nota fiscal e preciso dela", True),
+        ("não veio a nota fiscal e vou precisar dela", True),
+        ("pode me encaminhar a nota fiscal?", True),
+        ("como faço para ter acesso à nota fiscal?", True),
+        ("como faço pra receber a nota?", True),
+        ("como consigo a nf do produto?", True),
+        ("manda a nota dela", False),
+        ("só veio a nota fiscal, cadê o produto?", False),
+        ("só chegou a nota fiscal, o produto não", False),
+        ("so recebi a nota, preciso do produto", False),
+        ("gostaria que cancelasse e mandasse a nota", False),
+        ("a nota que veio não é minha", False),
+        ("acho que não veio a nota", False),
+        ("manda a nota que eu preciso pra garantia", False),
+        ("preciso que mande a nota de outro pedido", False),
+        ("encaminha o pedido e a nota", False),
+        ("como faço para trocar a nota?", False),
+        ("como consigo a nota no cnpj?", False),
+        ("como faço pra emitir a nota?", False),
+        ("como faço para receber o produto e a nota?", False),
+        ("como faço pra devolver e pegar a nota?", False),
+        ("como posso ter nota fiscal?", False),
     ],
 )
 def test_pedido_claro(texto, claro):
@@ -622,6 +817,45 @@ def test_pedido_claro_em_duas_falas():
         is False
     )
     assert nf_automatica.pedido_claro(["boa tarde", "não veio a nota fiscal", "pode mandar?"])
+    # Revisão de 30/10: o documento sozinho e o aviso da fala apagada da Shopee.
+    assert nf_automatica.pedido_claro(["boa noite", "a notafiscal?"]) is True
+    assert nf_automatica.pedido_claro(["oi", "nota fiscal", "é original?"]) is False
+    assert (
+        nf_automatica.pedido_claro(
+            ["bom dia", "This message was deleted", "o pedido chegou", "mas não veio a nota fiscal"]
+        )
+        is True
+    )
+    assert (
+        nf_automatica.pedido_claro(["This message was deleted", "o celular não veio, manda a nota"])
+        is False
+    )
+
+
+def test_o_2_do_menu_sai_das_falas_do_turno():
+    """Revisão de 30/10: o "2" que escolheu "Nota fiscal" não é palavra fora da lista."""
+    from types import SimpleNamespace as M
+
+    pede = M(id=1, autor="cliente", texto="por favor, me envie a nota fiscal do produto")
+    menu = M(id=2, autor="loja", texto=_MENU_DUOKE, origem="externo")
+    dois = M(id=3, autor="cliente", texto="2")
+    de_novo = M(id=4, autor="cliente", texto="por favor, me envie a nota fiscal por aqui")
+    recentes = [pede, menu, dois, de_novo]
+    textos = nf_automatica.textos_do_turno(recentes, [pede, dois, de_novo])
+    assert textos == [pede.texto, de_novo.texto]
+    assert nf_automatica.pedido_claro(textos) is True
+    # Sem as falas do turno, o "2" sozinho é com o `pedido_pelo_menu`.
+    assert nf_automatica.textos_do_turno(recentes, [dois]) == []
+    # O "2" sem o menu, os outros números do menu e o menu antes da resposta real ficam.
+    assert nf_automatica.textos_do_turno([pede, dois], [pede, dois]) == [pede.texto, "2"]
+    tres = M(id=3, autor="cliente", texto="3")
+    assert nf_automatica.textos_do_turno([pede, menu, tres], [pede, tres]) == [pede.texto, "3"]
+    loja = M(id=5, autor="loja", texto="Olá! Já verificamos o seu pedido.", origem="externo")
+    assert nf_automatica.textos_do_turno([menu, loja, dois], [dois]) == ["2"]
+    # O que veio antes do menu passa pela mesma régua.
+    vem = M(id=1, autor="cliente", texto="vem com nota fiscal?")
+    textos = nf_automatica.textos_do_turno([vem, menu, dois, de_novo], [vem, dois, de_novo])
+    assert nf_automatica.pedido_claro(textos) is False
 
 
 def test_conferir_xml_pega_chave_trocada():
