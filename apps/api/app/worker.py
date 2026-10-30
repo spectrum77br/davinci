@@ -3202,8 +3202,8 @@ async def denuncia_relatorio_fechar(ctx: dict) -> None:
 
 async def conferencia_shopee_agenda(ctx: dict) -> None:
     """Conferência Shopee (06/10/2026, docs/conferencia-shopee.md): segunda e quarta 13:30 BRT
-    cria a rodada — segunda a semana fechada (domingo–sábado), quarta a parcial dom–ter — com uma
-    coleta por loja ativa (até 30/10/2026 era terça e quinta, semana segunda–domingo); o
+    cria a rodada — as duas com a semana fechada (domingo–sábado) — com uma coleta por loja
+    ativa (até 30/10/2026 era terça semanal e quinta parcial, semana segunda–domingo); o
     executor do Mac passa loja por loja. Só com `conferencia_shopee_cron` (e o Marketing ligado:
     sem o router, o executor não teria de quem puxar). Já tem uma coletando: pula."""
     if not (_settings.enable_marketing and _settings.conferencia_shopee_cron):

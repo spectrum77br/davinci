@@ -1,6 +1,6 @@
 """Conferência Shopee — relatório semanal de marketing por loja (migration 0377).
 
-Segunda (semana fechada dom–sáb) e quarta (parcial dom–ter) às 13:30 BRT o worker cria
+Segunda e quarta (as duas com a semana fechada dom–sáb) às 13:30 BRT o worker cria
 uma EXECUÇÃO com uma COLETA por loja ativa; o executor do Mac abre cada loja
 pelo perfil do AdsPower, lê as APIs internas da Central do Vendedor e devolve
 os números (ColetaDados, docs/conferencia-shopee.md). Quando a última coleta

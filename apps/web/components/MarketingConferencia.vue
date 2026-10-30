@@ -3,8 +3,8 @@
  * Marketing › Conferência Shopee (06/10/2026).
  *
  * O relatório que o conferencia.js montava à mão, agora no DaVinci: o robô do
- * Mac coleta loja por loja (segunda = semana fechada, domingo a sábado; quarta
- * = parcial, domingo até ontem — até 30/10/2026 era terça e quinta, semana
+ * Mac coleta loja por loja (segunda e quarta, as duas com a semana fechada de
+ * domingo a sábado — até 30/10/2026 era terça semanal e quinta parcial, semana
  * segunda a domingo) e o servidor congela o relatório quando a última loja chega. Esta
  * aba LÊ esse relatório congelado (contrato §5) — as contas, os "—" e as cores
  * das variações saem de lib/conferencia.ts, que segue as mesmas regras do
@@ -800,7 +800,7 @@ const informarAberto = ref(false)
       <Inbox class="mx-auto size-6" />
       <p class="font-medium text-foreground">Nenhum relatório {{ plat.da }} ainda</p>
       <p>
-        A conferência roda segunda (semana fechada) e quarta (parcial) às 13:30, quando a agenda está ligada.
+        A conferência roda segunda e quarta às 13:30, sempre com a semana fechada (domingo a sábado), quando a agenda está ligada.
         <template v-if="canEdit">Dá para gerar uma agora pelo botão <b>Gerar agora</b>.</template>
       </p>
     </div>

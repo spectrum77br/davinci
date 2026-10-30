@@ -298,8 +298,8 @@ class Settings(BaseSettings):
     # Mac lê a Central do Vendedor de cada loja pelo perfil do AdsPower e o
     # servidor monta o relatório. Usa o mesmo `marketing_agent_token` acima.
     #
-    # `conferencia_shopee_cron`: a agenda do worker (segunda = semana fechada
-    # domingo–sábado, quarta = parcial dom–ter, 13:30 BRT) só cria a rodada com true. O botão
+    # `conferencia_shopee_cron`: a agenda do worker (segunda e quarta 13:30 BRT,
+    # as duas com a semana fechada domingo–sábado) só cria a rodada com true. O botão
     # "Gerar agora" da tela funciona com ela desligada. O worker lê na SUBIDA:
     # mudou, reinicia o worker. Liga com CONFERENCIA_SHOPEE_CRON=true.
     conferencia_shopee_cron: bool = False

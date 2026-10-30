@@ -16,11 +16,14 @@ rodadas terça e quinta).
 | Execução | Semana do relatório (S1) | Comparação (S2, S3, S4) |
 |---|---|---|
 | **Segunda** (`semanal`) | a semana fechada anterior, **domingo a sábado** | as 3 semanas domingo–sábado antes dela |
-| **Quarta** (`parcial`) | **domingo a terça** da semana atual | domingo–terça das 3 semanas anteriores |
-| Manual | escolhe `semanal` ou `parcial` (num domingo a parcial vira semanal) | idem |
+| **Quarta** (`semanal`) | a **mesma** semana fechada da segunda, com os números já assentados (afiliados, cancelamentos) | idem |
+| Manual | escolhe `semanal` ou `parcial` (domingo até ontem; num domingo vira semanal) | idem |
 
-Exemplos: segunda 02/11/2026 → S1 25/10–31/10, S2 18/10–24/10, S3 11/10–17/10, S4 04/10–10/10.
-Quarta 04/11/2026 → S1 01/11–03/11, S2 25/10–27/10, S3 18/10–20/10, S4 11/10–13/10.
+As duas rodadas da agenda são semanais: o dono não quer pedaço de semana no relatório ("é pra ser
+semanal", 30/10/2026). A `parcial` ficou só no "Gerar agora".
+
+Exemplos: segunda 02/11/2026 e quarta 04/11/2026 → S1 25/10–31/10, S2 18/10–24/10, S3 11/10–17/10,
+S4 04/10–10/10. Uma parcial manual na quarta 04/11 → S1 01/11–03/11, S2 25/10–27/10…
 
 Os períodos são fixados **quando a execução é criada** (no fuso America/Sao_Paulo). Uma coleta atrasada
 continua cobrindo o mesmo período.
@@ -185,7 +188,7 @@ Pedido de 07/10/2026 ("mais ou menos desse jeito"): o Resumo tem o desenho da pl
 | Documento | Aqui | Por quê |
 |---|---|---|
 | Segunda e quinta | Segunda e quarta (de 06/10 a 30/10/2026 foi terça e quinta) | Pedido do usuário |
-| "Últimos 7 dias até ontem" | Segunda = semana fechada domingo–sábado; quarta = parcial dom–ter | Semanas comparáveis; sem dias repetidos entre os relatórios |
+| "Últimos 7 dias até ontem" | Segunda e quarta = semana fechada domingo–sábado | Semanas comparáveis e inteiras |
 | Eletro pela categoria Shopee | Pela lista de SKUs do DaVinci; categoria e título só de reserva | Decisão do usuário; "Casa e Decoração" é ampla demais |
 | `seller_item_detail` em páginas de 50 | Páginas de 20, até `total_count` | A Shopee limita a 20 |
 | Vendas pelo painel geral (30 dias) | Soma diária por produto | Mesma fonte para total e eletro, sem limite de 30 dias |

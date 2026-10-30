@@ -87,7 +87,7 @@ Para cada loja (`src/conferencia.ts`):
    preenchidos pelo perfil**, dá **um** clique em "Entrar" (nunca digita
    nada). Tela de outro site, pediu código, OTP ou captcha, ou não tem os
    campos preenchidos → `deslogada`.
-5. Afiliados do último dia (sábado na segunda, ontem na quarta) ainda não
+5. Afiliados do último dia (o sábado da semana fechada) ainda não
    publicados e antes das 15:00 → `aguardando_afiliados` (fecha o perfil; o
    DaVinci devolve pra fila em 10 min). Depois das 15:00 coleta assim mesmo,
    com o aviso "afiliados só até dd/mm". Semana sem **nenhum** dia na lista

@@ -106,9 +106,11 @@ def test_parcial_no_sabado_vai_de_domingo_a_sexta():
     assert s[3] == {"inicio": "2026-09-13", "fim": "2026-09-18"}
 
 
-def test_tipo_da_agenda_so_segunda_e_quarta():
+def test_tipo_da_agenda_so_segunda_e_quarta_as_duas_semanais():
+    # 30/10/2026: nada de pedaço de semana — a quarta repete a semana fechada.
     assert periodos.tipo_da_agenda(date(2026, 10, 5)) == "semanal"
-    assert periodos.tipo_da_agenda(date(2026, 10, 7)) == "parcial"
+    assert periodos.tipo_da_agenda(date(2026, 10, 7)) == "semanal"
+    assert periodos.semanas("semanal", date(2026, 10, 7)) == periodos.semanas("semanal", date(2026, 10, 5))
     for dia in (4, 6, 8, 9, 10):
         assert periodos.tipo_da_agenda(date(2026, 10, dia)) is None
 

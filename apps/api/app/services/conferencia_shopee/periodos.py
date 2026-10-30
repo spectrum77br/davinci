@@ -7,10 +7,14 @@ atrasada continua cobrindo o mesmo período.
 A semana vai de DOMINGO a SÁBADO (30/10/2026, o dono: "começa domingo
 termina sábado"; até então era segunda a domingo, com rodadas terça e quinta).
 
-  • `semanal` (segunda): S1 = a semana fechada anterior, domingo a sábado;
-    S2, S3, S4 = as 3 semanas domingo–sábado antes dela.
-  • `parcial` (quarta): S1 = domingo da semana atual até ontem; S2..S4 = o
-    mesmo trecho de dias 7, 14 e 21 dias antes (dom–ter × dom–ter).
+A agenda roda segunda e quarta e as DUAS são `semanal` (30/10/2026, o dono:
+"é pra ser semanal" — nada de pedaço de semana; a de quarta repete a semana
+fechada com os números já assentados). A `parcial` só existe no "Gerar agora".
+
+  • `semanal`: S1 = a semana fechada anterior, domingo a sábado; S2, S3, S4 =
+    as 3 semanas domingo–sábado antes dela.
+  • `parcial` (só manual): S1 = domingo da semana atual até ontem; S2..S4 = o
+    mesmo trecho de dias 7, 14 e 21 dias antes.
   • `parcial` num domingo (ainda não há dia nenhum) vira `semanal`.
 
 Prazos de uma rodada criada no instante T:
@@ -51,9 +55,9 @@ def no_fuso(quando: datetime) -> datetime:
 
 
 def tipo_da_agenda(dia: date) -> str | None:
-    """Tipo da rodada que a agenda cria neste dia: segunda `semanal`, quarta
-    `parcial`; nos outros dias, nenhuma."""
-    return {0: "semanal", 2: "parcial"}.get(dia.weekday())
+    """Tipo da rodada que a agenda cria neste dia: segunda e quarta
+    `semanal` (a semana fechada domingo–sábado); nos outros dias, nenhuma."""
+    return {0: "semanal", 2: "semanal"}.get(dia.weekday())
 
 
 def domingo_da_semana(dia: date) -> date:

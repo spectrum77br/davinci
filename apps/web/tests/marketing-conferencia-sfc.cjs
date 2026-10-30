@@ -88,15 +88,15 @@ assert.match(tpl, /@click="trocarPlataforma\(p\.chave\)"/)
 assert.match(script, /const plataforma = ref<Plataforma>\(plataformaValida\(route\.query\.conf\) \?\? 'shopee'\)/, 'lê ?conf=')
 // O mesmo cadastro do Threema serve os 3 (um aviso por marketplace).
 assert.match(tpl, /contexto="conferencia_shopee"[\s\S]{0,200}descricao="[^"]*Shopee, Mercado Livre e Amazon/)
-// Semana domingo a sábado; roda segunda (fechada) e quarta (parcial) às 13:30
+// Semana domingo a sábado; roda segunda e quarta às 13:30, as duas com a semana fechada
 // (até 30/10/2026 era terça/quinta com semana segunda a domingo).
 for (const trecho of [
   '<option value="semanal">semana fechada (dom–sáb)</option>',
   '<option value="parcial">parcial (dom até ontem)</option>',
-  'A conferência roda segunda (semana fechada) e quarta (parcial) às 13:30, quando a agenda está ligada.',
+  'A conferência roda segunda e quarta às 13:30, sempre com a semana fechada (domingo a sábado), quando a agenda está ligada.',
   'cada uma na sua mensagem; segunda e quarta à tarde quando a agenda está ligada',
 ]) assert.ok(tpl.includes(trecho), `na tela: ${trecho}`)
-for (const velho of ['seg–dom', 'seg até ontem', 'terça (semana fechada)', 'quinta (parcial)', 'terça e quinta']) {
+for (const velho of ['seg–dom', 'seg até ontem', 'terça (semana fechada)', 'quinta (parcial)', 'terça e quinta', 'quarta (parcial)']) {
   assert.ok(!tpl.includes(velho), `texto antigo saiu da tela: ${velho}`)
 }
 // O comentário do topo guarda o histórico; as frases do confirm, não.
