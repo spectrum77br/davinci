@@ -1,6 +1,6 @@
 # Conferência Shopee
 
-Relatório de marketing da Shopee, **terça e quinta às 13:30 (BRT)**, com as lojas separadas em
+Relatório de marketing da Shopee, **segunda e quarta às 13:30 (BRT)**, com as lojas separadas em
 **Mala · Celular · Eletro** e comparado com as 3 semanas anteriores. Aparece em **Marketing → Conferência
 Shopee** e gera HTML (a própria tela), CSV, MD, JSON e Excel. O Resumo segue o desenho da planilha antiga
 do dono (seção 5).
@@ -10,14 +10,17 @@ a esse documento estão no fim desta página.
 
 ## 1. Período
 
+A semana vai de **domingo a sábado** (pedido do dono em 30/10/2026; até então era segunda a domingo, com
+rodadas terça e quinta).
+
 | Execução | Semana do relatório (S1) | Comparação (S2, S3, S4) |
 |---|---|---|
-| **Terça** (`semanal`) | a semana fechada anterior, **segunda a domingo** | as 3 semanas segunda–domingo antes dela |
-| **Quinta** (`parcial`) | **segunda a quarta** da semana atual | segunda–quarta das 3 semanas anteriores |
-| Manual | escolhe `semanal` ou `parcial` | idem |
+| **Segunda** (`semanal`) | a semana fechada anterior, **domingo a sábado** | as 3 semanas domingo–sábado antes dela |
+| **Quarta** (`parcial`) | **domingo a terça** da semana atual | domingo–terça das 3 semanas anteriores |
+| Manual | escolhe `semanal` ou `parcial` (num domingo a parcial vira semanal) | idem |
 
-Exemplos: terça 06/10/2026 → S1 28/09–04/10, S2 21/09–27/09, S3 14/09–20/09, S4 07/09–13/09.
-Quinta 08/10/2026 → S1 05/10–07/10, S2 28/09–30/09, S3 21/09–23/09, S4 14/09–16/09.
+Exemplos: segunda 02/11/2026 → S1 25/10–31/10, S2 18/10–24/10, S3 11/10–17/10, S4 04/10–10/10.
+Quarta 04/11/2026 → S1 01/11–03/11, S2 25/10–27/10, S3 18/10–20/10, S4 11/10–13/10.
 
 Os períodos são fixados **quando a execução é criada** (no fuso America/Sao_Paulo). Uma coleta atrasada
 continua cobrindo o mesmo período.
@@ -101,7 +104,7 @@ a conversão de afiliados ficam "—" (nunca 0), também no "Recalcular".
 Pedido de 07/10/2026 ("mais ou menos desse jeito"): o Resumo tem o desenho da planilha antiga do dono.
 
 ```
-                  |        07/09 a 13/09          | … |        28/09 a 04/10          | Variação (28/09–04/10 × 21/09–27/09)
+                  |        06/09 a 12/09          | … |        27/09 a 03/10          | Variação (27/09–03/10 × 20/09–26/09)
  Métrica          | Mala | Celular | Eletro | Geral | … | Mala | Celular | Eletro | Geral | Mala | Celular | Eletro | Geral
  Vendas       afiliados
               Ads
@@ -154,7 +157,7 @@ Pedido de 07/10/2026 ("mais ou menos desse jeito"): o Resumo tem o desenho da pl
 
 ## 7. Como roda
 
-1. **Servidor (worker)**: terça e quinta 16:30 UTC (= 13:30 BRT), se `CONFERENCIA_SHOPEE_CRON=true`, cria a
+1. **Servidor (worker)**: segunda e quarta 16:30 UTC (= 13:30 BRT), se `CONFERENCIA_SHOPEE_CRON=true`, cria a
    execução e uma coleta por conta ativa. O botão **Gerar agora** faz o mesmo.
 2. **Executor do Mac** (`apps/executor/src/conferencia.ts`): pede uma coleta por vez e, para cada loja:
    - se o perfil já está aberto por alguém, devolve para o fim da fila (até 3 vezes) e **nunca fecha um perfil
@@ -181,8 +184,8 @@ Pedido de 07/10/2026 ("mais ou menos desse jeito"): o Resumo tem o desenho da pl
 
 | Documento | Aqui | Por quê |
 |---|---|---|
-| Segunda e quinta | Terça e quinta | Pedido do usuário |
-| "Últimos 7 dias até ontem" | Terça = semana fechada; quinta = parcial seg–qua | Semanas comparáveis; sem 5 dias repetidos entre os relatórios |
+| Segunda e quinta | Segunda e quarta (de 06/10 a 30/10/2026 foi terça e quinta) | Pedido do usuário |
+| "Últimos 7 dias até ontem" | Segunda = semana fechada domingo–sábado; quarta = parcial dom–ter | Semanas comparáveis; sem dias repetidos entre os relatórios |
 | Eletro pela categoria Shopee | Pela lista de SKUs do DaVinci; categoria e título só de reserva | Decisão do usuário; "Casa e Decoração" é ampla demais |
 | `seller_item_detail` em páginas de 50 | Páginas de 20, até `total_count` | A Shopee limita a 20 |
 | Vendas pelo painel geral (30 dias) | Soma diária por produto | Mesma fonte para total e eletro, sem limite de 30 dias |
@@ -200,7 +203,7 @@ rodada ganharam `plataforma`, e há **uma rodada coletando por plataforma** (a d
 
 **Quem coleta.** ML e Amazon são coletados pelo **servidor** (job `conferencia_coletar_servidor` no
 worker), sem AdsPower e sem o Mac: o executor do Mac (`/agent/lease`) só recebe coleta da Shopee.
-"Gerar agora" cria a rodada e põe o job na fila na hora; a agenda (terça e quinta 13:30 BRT, como a
+"Gerar agora" cria a rodada e põe o job na fila na hora; a agenda (segunda e quarta 13:30 BRT, como a
 Shopee) só com `CONFERENCIA_ML_CRON=true` / `CONFERENCIA_AMAZON_CRON=true` (desligadas de fábrica).
 O job pega as lojas uma a uma (3 tentativas, 10 min por loja); se a rodada parar (Redis fora,
 worker reiniciado), o varredor de 10 em 10 min põe o job na fila de novo. A coleta é `parcial` quando

@@ -45,10 +45,11 @@ from app.services.conferencia_shopee import fila, periodos
 
 pytestmark = pytest.mark.asyncio
 
-# Terça 06/10/2026, 13:30 em Brasília: a hora da agenda.
-AGORA = datetime(2026, 10, 6, 16, 30, tzinfo=UTC)
-CORTE = datetime(2026, 10, 6, 20, 30, tzinfo=UTC)  # 17:30 BRT
-PRAZO = datetime(2026, 10, 6, 21, 0, tzinfo=UTC)  # corte + 30 min
+# Segunda 05/10/2026, 13:30 em Brasília: a hora da agenda (semanal). A
+# semana vai de domingo a sábado: S1 = 27/09–03/10.
+AGORA = datetime(2026, 10, 5, 16, 30, tzinfo=UTC)
+CORTE = datetime(2026, 10, 5, 20, 30, tzinfo=UTC)  # 17:30 BRT
+PRAZO = datetime(2026, 10, 5, 21, 0, tzinfo=UTC)  # corte + 30 min
 DUAS = (("k-ana", "Ana", "mala", True, 0), ("k-bia", "Bia", "celular", True, 1))
 
 
@@ -83,7 +84,7 @@ def dados_loja(
     *,
     vendas: float = 2000.0,
     saldo: float | None = 250.0,
-    coletado_em: str = "2026-10-06T17:00:00Z",
+    coletado_em: str = "2026-10-05T17:00:00Z",
     itens_ads: list[dict] | None = None,
     afiliados_itens: list[dict] | None = None,
 ) -> dict:
@@ -173,9 +174,9 @@ async def test_criar_fixa_semanas_prazos_e_uma_coleta_por_conta_ativa(db):
     assert ex.tipo == "semanal" and ex.origem == "manual"
     assert ex.criado_por == "quem@davinci-test.com"
     assert ex.semanas == periodos.semanas("semanal", AGORA.date())
-    assert ex.semanas[0] == {"inicio": "2026-09-28", "fim": "2026-10-04"}
-    assert ex.afiliados_ate.isoformat() == "2026-10-04"
-    assert ex.esperar_afiliados_ate == datetime(2026, 10, 6, 18, 0, tzinfo=UTC)
+    assert ex.semanas[0] == {"inicio": "2026-09-27", "fim": "2026-10-03"}
+    assert ex.afiliados_ate.isoformat() == "2026-10-03"
+    assert ex.esperar_afiliados_ate == datetime(2026, 10, 5, 18, 0, tzinfo=UTC)
     assert ex.corte == CORTE
     assert ex.prazo == PRAZO
     coletas = await coletas_de(db, ex.id)
@@ -187,10 +188,10 @@ async def test_criar_fixa_semanas_prazos_e_uma_coleta_por_conta_ativa(db):
     assert (caio.tentativas, caio.adiamentos) == (0, 0)
 
 
-async def test_parcial_numa_segunda_vira_semanal(db):
+async def test_parcial_num_domingo_vira_semanal(db):
     await semear_contas(db)
-    segunda = datetime(2026, 10, 5, 16, 30, tzinfo=UTC)
-    ex = await _criar(db, "parcial", segunda)
+    domingo = datetime(2026, 10, 4, 16, 30, tzinfo=UTC)
+    ex = await _criar(db, "parcial", domingo)
     assert ex.tipo == "semanal"
 
 
@@ -229,9 +230,9 @@ async def test_lease_entrega_a_mais_antiga_e_marca_coletando(db):
         "adspower_user_id": "k-caio",
         "grupo": "celular",
         "semanas": ex.semanas,
-        "afiliados_ate": "2026-10-04",
-        "esperar_afiliados_ate": "2026-10-06T18:00:00Z",
-        "corte": "2026-10-06T20:30:00Z",
+        "afiliados_ate": "2026-10-03",
+        "esperar_afiliados_ate": "2026-10-05T18:00:00Z",
+        "corte": "2026-10-05T20:30:00Z",
         "login_auto": True,
         "tentativa": 1,
     }
@@ -385,7 +386,7 @@ async def test_resultado_final_grava_dados_e_saldo(db):
     await semear_contas(db)
     ex = await _criar(db)
     job, _ = await _lease(db, AGORA)
-    d = dados_loja(ex.semanas, saldo=353.0008, coletado_em="2026-10-06T16:41:02Z")
+    d = dados_loja(ex.semanas, saldo=353.0008, coletado_em="2026-10-05T16:41:02Z")
     c = await _resultado(db, job["coleta_id"], "ok", AGORA + timedelta(minutes=2), dados=d)
     assert (c.status, c.erro) == ("ok", None)
     assert c.dados == d
@@ -393,7 +394,7 @@ async def test_resultado_final_grava_dados_e_saldo(db):
     (saldo,) = (await db.execute(select(ConferenciaShopeeSaldo))).scalars().all()
     assert saldo.adspower_user_id == "k-caio"
     assert saldo.valor == Decimal("353.00")
-    assert saldo.lido_em == datetime(2026, 10, 6, 16, 41, 2, tzinfo=UTC)
+    assert saldo.lido_em == datetime(2026, 10, 5, 16, 41, 2, tzinfo=UTC)
     assert saldo.execucao_id == ex.id
 
     # Sem saldo (carteira falhou) ou sem dados: nada no histórico.
@@ -433,9 +434,10 @@ async def test_resultado_recusado(db):
 async def test_fecha_so_quando_nao_sobra_fila_e_congela_o_relatorio(db):
     await semear_contas(db, DUAS)
     ex = await _criar(db)
-    # Saldo lido na rodada da semana passada (terça 29/09): vale para S2.
+    # Saldo lido na rodada da semana passada (segunda 28/09): vale para S2
+    # (20/09–26/09; a leitura do dia seguinte ao fim, ±1 dia).
     db.add(ConferenciaShopeeSaldo(adspower_user_id="k-ana",
-                                  lido_em=datetime(2026, 9, 29, 17, 0, tzinfo=UTC),
+                                  lido_em=datetime(2026, 9, 28, 17, 0, tzinfo=UTC),
                                   valor=Decimal("410.50")))
     await db.commit()
     ana, _ = await _lease(db, AGORA)

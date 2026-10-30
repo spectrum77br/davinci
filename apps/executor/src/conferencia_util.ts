@@ -163,21 +163,31 @@ export function ddmm(ymd: string): string {
   return `${ymd.slice(8, 10)}/${ymd.slice(5, 7)}`;
 }
 
-/** As 4 semanas de uma execução, do jeito do servidor (contrato §1). Só o
- *  `--teste-conferencia` usa — no dia a dia as semanas vêm prontas no job.
- *  `parcial` numa segunda (sem dia nenhum ainda) cai para `semanal`. */
+/** O domingo que abre a semana de `ymd` (o próprio dia, se for domingo). */
+export function domingoDaSemana(ymd: string): string {
+  return somarDias(ymd, -diaDaSemana(ymd));
+}
+
+/** As 4 semanas de uma execução, do jeito do servidor (contrato §1;
+ *  `conferencia_shopee/periodos.py`). Só o `--teste-conferencia` usa — no dia
+ *  a dia as semanas vêm prontas no job. A semana vai de domingo a sábado:
+ *  `semanal` = a semana fechada anterior (domingo–sábado); `parcial` = domingo
+ *  desta semana até ontem. `parcial` num domingo (sem dia nenhum ainda) cai
+ *  para `semanal`. */
 export function periodoConferencia(
   tipo: "semanal" | "parcial",
   agora: Date = new Date()
 ): { tipo: "semanal" | "parcial"; semanas: Semana[]; afiliados_ate: string } {
   const hoje = hojeBRT(agora);
-  const segunda = somarDias(hoje, -((diaDaSemana(hoje) + 6) % 7));
+  const domingo = domingoDaSemana(hoje);
   let s1: Semana;
-  if (tipo === "parcial" && hoje !== segunda) {
-    s1 = { inicio: segunda, fim: somarDias(hoje, -1) };
+  if (tipo === "parcial" && hoje !== domingo) {
+    s1 = { inicio: domingo, fim: somarDias(hoje, -1) };
   } else {
     tipo = "semanal";
-    s1 = { inicio: somarDias(segunda, -7), fim: somarDias(segunda, -1) };
+    // o último sábado antes desta semana e os 6 dias antes dele
+    const sabado = somarDias(domingo, -1);
+    s1 = { inicio: somarDias(sabado, -6), fim: sabado };
   }
   const semanas = [0, 1, 2, 3].map((k) => ({
     inicio: somarDias(s1.inicio, -7 * k),

@@ -19,7 +19,7 @@ perfil do AdsPower (o saldo da Shopee) e entra no relatório (o eletro):
     'geral'; o kfa do ML está 'celular' e na Conferência é mala — o grupo
     vence);
   • saldo (só Shopee): a ÚLTIMA leitura de `conferencia_shopee_saldo` do
-    perfil do AdsPower da conta da Conferência (as coletas de ter/qui). Nada
+    perfil do AdsPower da conta da Conferência (as coletas de seg/qua). Nada
     é coletado aqui. O Mercado Livre cobra depois: o `credit_balance` das
     contas do ML não quer dizer nada e NUNCA sai daqui;
   • eletro (decisão do dono): quem teve vendas ou Ads de eletro (> 0) em

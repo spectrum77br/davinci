@@ -1,7 +1,7 @@
 /**
  * Conferência Shopee — a coleta de UMA loja (contrato §8).
  *
- * Relatório de terça/quinta (docs/conferencia-shopee.md): o DaVinci cria uma
+ * Relatório de segunda/quarta (docs/conferencia-shopee.md): o DaVinci cria uma
  * coleta por loja e este executor pede uma por vez. Pra cada loja:
  *
  *   1. passou do corte → "erro" sem abrir nada;

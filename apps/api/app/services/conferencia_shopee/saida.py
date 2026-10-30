@@ -123,7 +123,7 @@ def comparado_com(rel: Mapping) -> str:
 
 
 def tipo_texto(rel: Mapping) -> str:
-    """"semana fechada" / "parcial seg–qua"."""
+    """"semana fechada" / "parcial dom–ter"."""
     if rel.get("tipo") != "parcial":
         return "semana fechada"
     s = (rel.get("semanas") or [None])[0]

@@ -60,7 +60,7 @@ O resultado volta pra linha da aba Devoluções ("Senha pedida ao cliente …" o
 
 ## Conferência Shopee (`conferencia`, desde 06/10/2026)
 
-Relatório de terça e quinta (documentação completa em `docs/conferencia-shopee.md`).
+Relatório de segunda e quarta (documentação completa em `docs/conferencia-shopee.md`).
 O DaVinci cria uma **coleta por loja**; a máquina com `conferencia` no
 `EXECUTOR_FILAS` pede **uma loja por ciclo** (`POST
 /api/marketing/conferencia-shopee/agent/lease`), depois das outras filas, e
@@ -87,7 +87,7 @@ Para cada loja (`src/conferencia.ts`):
    preenchidos pelo perfil**, dá **um** clique em "Entrar" (nunca digita
    nada). Tela de outro site, pediu código, OTP ou captcha, ou não tem os
    campos preenchidos → `deslogada`.
-5. Afiliados do último dia (domingo na terça, ontem na quinta) ainda não
+5. Afiliados do último dia (sábado na segunda, ontem na quarta) ainda não
    publicados e antes das 15:00 → `aguardando_afiliados` (fecha o perfil; o
    DaVinci devolve pra fila em 10 min). Depois das 15:00 coleta assim mesmo,
    com o aviso "afiliados só até dd/mm". Semana sem **nenhum** dia na lista
@@ -135,7 +135,7 @@ Teste manual de uma loja, **sem o DaVinci** (nada é enviado):
 
 ```bash
 npm start -- --teste-conferencia k1dkeaxv            # semana fechada
-npm start -- --teste-conferencia k1dkeaxv --parcial  # seg até ontem
+npm start -- --teste-conferencia k1dkeaxv --parcial  # dom até ontem
 #   --login-auto       deixa clicar em "Entrar" se a loja estiver deslogada
 #   --json saida.json  grava o resultado completo
 ```

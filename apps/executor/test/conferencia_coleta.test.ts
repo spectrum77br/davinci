@@ -156,7 +156,7 @@ function paginaFalsa(o: Opcoes, form?: u.FormLogin) {
   return { page: page as any, chamadas: shopee.chamadas, cliques };
 }
 
-const P = u.periodoConferencia("semanal", new Date("2026-10-06T16:30:00Z"));
+const P = u.periodoConferencia("semanal", new Date("2026-10-05T16:30:00Z"));
 let job: JobConferencia;
 beforeEach(() => {
   job = {
@@ -175,7 +175,7 @@ beforeEach(() => {
 });
 
 test("loja completa: 4 semanas, paginação, somas e saldo → ok", async () => {
-  const f = paginaFalsa({ ultimoPublicado: "2026-10-04", logada: true });
+  const f = paginaFalsa({ ultimoPublicado: "2026-10-03", logada: true });
   const r = await coletarNaPagina(job, f.page);
   assert.equal(r.status, "ok", r.erro || "");
   const d = r.dados!;
@@ -185,10 +185,10 @@ test("loja completa: 4 semanas, paginação, somas e saldo → ok", async () => 
   assert.deepEqual(d.login, { username: "loja_teste", shopid: 42, shop_name: "Loja Teste" });
   assert.equal(d.login_auto_usado, false);
   assert.equal(d.saldo_ads, 123.45);
-  assert.equal(d.afiliados_ultimo_dia, "2026-10-04");
+  assert.equal(d.afiliados_ultimo_dia, "2026-10-03");
   assert.deepEqual(d.avisos, []);
   const s1 = d.semanas[0];
-  assert.equal(s1.inicio, "2026-09-28");
+  assert.equal(s1.inicio, "2026-09-27");
   assert.deepEqual(s1.afiliados, { vendas: 700, comissao: 35.5, pedidos: 7, cliques: 1800 });
   assert.equal(s1.afiliados_itens!.length, 25);
   assert.equal(typeof s1.afiliados_itens![0].item_id, "string");
@@ -200,33 +200,33 @@ test("loja completa: 4 semanas, paginação, somas e saldo → ok", async () => 
   assert.equal(s1.ads_itens![2].item_id, null);
   assert.deepEqual(s1.vendas, { valor: 105.7, pedidos: 14 });
   assert.deepEqual(s1.vendas_itens![0], { item_id: "71", nome: "Produto 71", valor: 70.7, pedidos: 7 });
-  assert.equal(d.semanas[3].inicio, "2026-09-07");
+  assert.equal(d.semanas[3].inicio, "2026-09-06");
   assert.ok(!JSON.stringify(r).includes("SEGREDO"), "token do login não pode vazar");
   assert.ok(!JSON.stringify(r).includes("pesado"), "blocos podados não sobem");
 });
 
 test("afiliados do último dia ainda não saíram e dentro do prazo → aguardando_afiliados", async () => {
-  const f = paginaFalsa({ ultimoPublicado: "2026-10-03", logada: true });
+  const f = paginaFalsa({ ultimoPublicado: "2026-10-02", logada: true });
   const r = await coletarNaPagina(job, f.page);
   assert.equal(r.status, "aguardando_afiliados");
   assert.equal(r.dados, null);
-  assert.match(r.erro || "", /só até 03\/10; falta 04\/10/);
+  assert.match(r.erro || "", /só até 02\/10; falta 03\/10/);
   assert.equal(f.chamadas.length, 2); // login + seller_daily de S1, nada mais
 });
 
 test("passou do prazo dos afiliados → coleta com aviso", async () => {
   job.esperar_afiliados_ate = new Date(Date.now() - 1000).toISOString();
-  const f = paginaFalsa({ ultimoPublicado: "2026-10-03", logada: true });
+  const f = paginaFalsa({ ultimoPublicado: "2026-10-02", logada: true });
   const r = await coletarNaPagina(job, f.page);
   assert.equal(r.status, "ok");
-  assert.deepEqual(r.dados!.avisos, ["afiliados só até 03/10"]);
-  assert.equal(r.dados!.afiliados_ultimo_dia, "2026-10-03");
+  assert.deepEqual(r.dados!.avisos, ["afiliados só até 02/10"]);
+  assert.equal(r.dados!.afiliados_ultimo_dia, "2026-10-02");
 });
 
 test("uma chamada com erro comum → só a seção fica null, status parcial", async () => {
   const s2 = P.semanas[1];
   const f = paginaFalsa({
-    ultimoPublicado: "2026-10-04",
+    ultimoPublicado: "2026-10-03",
     logada: true,
     falhar: (path, body) =>
       path === "/api/pas/v1/report/get_time_graph/" && body.start_time === u.epochInicioDia(s2.inicio)
@@ -245,7 +245,7 @@ test("uma chamada com erro comum → só a seção fica null, status parcial", a
 test("um dia de vendas que falha derruba as vendas da semana (não soma pela metade)", async () => {
   const dia = u.epochInicioDia("2026-10-01");
   const f = paginaFalsa({
-    ultimoPublicado: "2026-10-04",
+    ultimoPublicado: "2026-10-03",
     logada: true,
     falhar: (path, q) =>
       path === "/api/mydata/v4/product/performance/" && Number(q.start_time) === dia
@@ -262,7 +262,7 @@ test("um dia de vendas que falha derruba as vendas da semana (não soma pela met
 test("429 no meio → bloqueada, sem dados, para na hora", async () => {
   let n = 0;
   const f = paginaFalsa({
-    ultimoPublicado: "2026-10-04",
+    ultimoPublicado: "2026-10-03",
     logada: true,
     falhar: (path) => (path === "/api/pas/v1/homepage/query/" && ++n === 2 ? { status: 429, texto: "" } : null),
   });
@@ -274,7 +274,7 @@ test("429 no meio → bloqueada, sem dados, para na hora", async () => {
 
 test("deslogada sem login automático → deslogada, nenhum clique", async () => {
   job.login_auto = false;
-  const f = paginaFalsa({ ultimoPublicado: "2026-10-04", logada: false });
+  const f = paginaFalsa({ ultimoPublicado: "2026-10-03", logada: false });
   const r = await coletarNaPagina(job, f.page);
   assert.equal(r.status, "deslogada");
   assert.equal(f.cliques.length, 0);
@@ -292,7 +292,7 @@ const FORM_CHEIO: u.FormLogin = {
 };
 
 test("deslogada com usuário e senha preenchidos → UM clique em Entrar e coleta", async () => {
-  const f = paginaFalsa({ ultimoPublicado: "2026-10-04", logada: false }, FORM_CHEIO);
+  const f = paginaFalsa({ ultimoPublicado: "2026-10-03", logada: false }, FORM_CHEIO);
   const r = await coletarNaPagina(job, f.page);
   assert.equal(r.status, "ok", r.erro || "");
   assert.deepEqual(f.cliques, [[640, 420]]);
@@ -300,7 +300,7 @@ test("deslogada com usuário e senha preenchidos → UM clique em Entrar e colet
 });
 
 test("tela de login sem senha preenchida → deslogada, nenhum clique", async () => {
-  const f = paginaFalsa({ ultimoPublicado: "2026-10-04", logada: false }, { ...FORM_CHEIO, senhaCheia: false });
+  const f = paginaFalsa({ ultimoPublicado: "2026-10-03", logada: false }, { ...FORM_CHEIO, senhaCheia: false });
   const r = await coletarNaPagina(job, f.page);
   assert.equal(r.status, "deslogada");
   assert.match(r.erro || "", /não tem usuário e senha preenchidos/);
@@ -308,7 +308,7 @@ test("tela de login sem senha preenchida → deslogada, nenhum clique", async ()
 });
 
 test("tela de login pedindo código → deslogada, nenhum clique", async () => {
-  const f = paginaFalsa({ ultimoPublicado: "2026-10-04", logada: false }, { ...FORM_CHEIO, pedeCodigo: true });
+  const f = paginaFalsa({ ultimoPublicado: "2026-10-03", logada: false }, { ...FORM_CHEIO, pedeCodigo: true });
   const r = await coletarNaPagina(job, f.page);
   assert.equal(r.status, "deslogada");
   assert.match(r.erro || "", /código\/verificação/);
@@ -317,7 +317,7 @@ test("tela de login pedindo código → deslogada, nenhum clique", async () => {
 
 test("botão Entrar coberto → não clica", async () => {
   const f = paginaFalsa(
-    { ultimoPublicado: "2026-10-04", logada: false },
+    { ultimoPublicado: "2026-10-03", logada: false },
     { ...FORM_CHEIO, botao: { ...FORM_CHEIO.botao!, livre: false } }
   );
   const r = await coletarNaPagina(job, f.page);
@@ -326,7 +326,7 @@ test("botão Entrar coberto → não clica", async () => {
 });
 
 test("Shopee sem `clicks` (formato antigo) → cliques null, a loja continua ok", async () => {
-  const f = paginaFalsa({ ultimoPublicado: "2026-10-04", logada: true, semCliquesAfiliados: true });
+  const f = paginaFalsa({ ultimoPublicado: "2026-10-03", logada: true, semCliquesAfiliados: true });
   const r = await coletarNaPagina(job, f.page);
   assert.equal(r.status, "ok", r.erro || "");
   for (const s of r.dados!.semanas) {
@@ -337,7 +337,7 @@ test("Shopee sem `clicks` (formato antigo) → cliques null, a loja continua ok"
 });
 
 test("S1 sem nenhum dia de afiliados (loja sem venda de afiliado) → não espera, coleta sem aviso", async () => {
-  const f = paginaFalsa({ ultimoPublicado: "2026-10-04", logada: true, semDiasAfiliadosS1: true });
+  const f = paginaFalsa({ ultimoPublicado: "2026-10-03", logada: true, semDiasAfiliadosS1: true });
   const r = await coletarNaPagina(job, f.page);
   assert.equal(r.status, "ok", r.erro || "");
   assert.equal(r.dados!.afiliados_ultimo_dia, null, "null = nada a esperar (o servidor não lista como incompleta)");
@@ -356,7 +356,7 @@ for (const [nome, falha] of [
     for (const loginAuto of [true, false]) {
       job.login_auto = loginAuto;
       const f = paginaFalsa({
-        ultimoPublicado: "2026-10-04",
+        ultimoPublicado: "2026-10-03",
         logada: true,
         falhar: (path) => (path === "/api/v2/login/" ? falha : null),
       });
@@ -372,7 +372,7 @@ for (const [nome, falha] of [
 test("rede falha no login uma vez → recarrega, tenta de novo e coleta", async () => {
   let n = 0;
   const f = paginaFalsa({
-    ultimoPublicado: "2026-10-04",
+    ultimoPublicado: "2026-10-03",
     logada: true,
     falhar: (path) => (path === "/api/v2/login/" && ++n === 1 ? "rede" : null),
   });
@@ -383,7 +383,7 @@ test("rede falha no login uma vez → recarrega, tenta de novo e coleta", async 
 
 test("rede falha no login duas vezes → erro (não é deslogada) e nenhum clique", async () => {
   const f = paginaFalsa(
-    { ultimoPublicado: "2026-10-04", logada: true, falhar: (path) => (path === "/api/v2/login/" ? "rede" : null) },
+    { ultimoPublicado: "2026-10-03", logada: true, falhar: (path) => (path === "/api/v2/login/" ? "rede" : null) },
     FORM_CHEIO
   );
   const r = await coletarNaPagina(job, f.page);
@@ -395,7 +395,7 @@ test("rede falha no login duas vezes → erro (não é deslogada) e nenhum cliqu
 
 test("tela de login fora da Shopee (portal do proxy) → deslogada, nenhum clique", async () => {
   const f = paginaFalsa(
-    { ultimoPublicado: "2026-10-04", logada: false, loginUrl: "https://portal-do-proxy.example.net/login" },
+    { ultimoPublicado: "2026-10-03", logada: false, loginUrl: "https://portal-do-proxy.example.net/login" },
     FORM_CHEIO
   );
   const r = await coletarNaPagina(job, f.page);

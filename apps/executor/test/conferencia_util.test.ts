@@ -32,47 +32,49 @@ test("hojeBRT usa o fuso de São Paulo", () => {
   assert.equal(u.hojeBRT(new Date("2026-10-05T03:00:00Z")), "2026-10-05");
 });
 
-test("semanal criada na terça 06/10/2026 (exemplo do contrato)", () => {
-  const p = u.periodoConferencia("semanal", new Date("2026-10-06T16:30:00Z"));
+test("semanal criada na segunda 05/10/2026 (exemplo do contrato)", () => {
+  const p = u.periodoConferencia("semanal", new Date("2026-10-05T16:30:00Z"));
   assert.equal(p.tipo, "semanal");
   assert.deepEqual(p.semanas, [
-    { inicio: "2026-09-28", fim: "2026-10-04" },
-    { inicio: "2026-09-21", fim: "2026-09-27" },
-    { inicio: "2026-09-14", fim: "2026-09-20" },
-    { inicio: "2026-09-07", fim: "2026-09-13" },
+    { inicio: "2026-09-27", fim: "2026-10-03" },
+    { inicio: "2026-09-20", fim: "2026-09-26" },
+    { inicio: "2026-09-13", fim: "2026-09-19" },
+    { inicio: "2026-09-06", fim: "2026-09-12" },
   ]);
-  assert.equal(p.afiliados_ate, "2026-10-04");
+  assert.equal(p.afiliados_ate, "2026-10-03");
 });
 
-test("parcial criada na quinta 08/10/2026 (exemplo do contrato)", () => {
-  const p = u.periodoConferencia("parcial", new Date("2026-10-08T16:30:00Z"));
+test("parcial criada na quarta 07/10/2026 (exemplo do contrato)", () => {
+  const p = u.periodoConferencia("parcial", new Date("2026-10-07T16:30:00Z"));
   assert.equal(p.tipo, "parcial");
   assert.deepEqual(p.semanas, [
-    { inicio: "2026-10-05", fim: "2026-10-07" },
-    { inicio: "2026-09-28", fim: "2026-09-30" },
-    { inicio: "2026-09-21", fim: "2026-09-23" },
-    { inicio: "2026-09-14", fim: "2026-09-16" },
+    { inicio: "2026-10-04", fim: "2026-10-06" },
+    { inicio: "2026-09-27", fim: "2026-09-29" },
+    { inicio: "2026-09-20", fim: "2026-09-22" },
+    { inicio: "2026-09-13", fim: "2026-09-15" },
   ]);
-  assert.equal(p.afiliados_ate, "2026-10-07");
+  assert.equal(p.afiliados_ate, "2026-10-06");
 });
 
-test("parcial numa segunda cai para semanal", () => {
-  const p = u.periodoConferencia("parcial", new Date("2026-10-05T15:00:00Z"));
+test("parcial num domingo cai para semanal", () => {
+  const p = u.periodoConferencia("parcial", new Date("2026-10-04T15:00:00Z"));
   assert.equal(p.tipo, "semanal");
-  assert.deepEqual(p.semanas[0], { inicio: "2026-09-28", fim: "2026-10-04" });
+  assert.deepEqual(p.semanas[0], { inicio: "2026-09-27", fim: "2026-10-03" });
 });
 
-test("domingo 23:30 BRT ainda é a semana do domingo", () => {
-  const p = u.periodoConferencia("semanal", new Date("2026-10-05T02:30:00Z"));
-  assert.deepEqual(p.semanas[0], { inicio: "2026-09-21", fim: "2026-09-27" });
+test("sábado 23:30 BRT ainda é a semana do sábado", () => {
+  // 02:30 UTC de domingo 04/10 = 23:30 de sábado 03/10 em Brasília: a semana
+  // atual ainda é 27/09–03/10, então a fechada é a de 20/09–26/09
+  const p = u.periodoConferencia("semanal", new Date("2026-10-04T02:30:00Z"));
+  assert.deepEqual(p.semanas[0], { inicio: "2026-09-20", fim: "2026-09-26" });
 });
 
 test("diasDaSemana e ddmm", () => {
-  assert.equal(u.diasDaSemana({ inicio: "2026-09-28", fim: "2026-10-04" }).length, 7);
-  assert.deepEqual(u.diasDaSemana({ inicio: "2026-10-05", fim: "2026-10-07" }), [
+  assert.equal(u.diasDaSemana({ inicio: "2026-09-27", fim: "2026-10-03" }).length, 7);
+  assert.deepEqual(u.diasDaSemana({ inicio: "2026-10-04", fim: "2026-10-06" }), [
+    "2026-10-04",
     "2026-10-05",
     "2026-10-06",
-    "2026-10-07",
   ]);
   assert.equal(u.ddmm("2026-10-04"), "04/10");
   assert.equal(u.isoUtc(Date.UTC(2026, 9, 6, 16, 41, 2, 789)), "2026-10-06T16:41:02Z");
@@ -393,15 +395,15 @@ function semanaCheia(s: u.Semana): u.SemanaDados {
 }
 
 test("payload v1: chaves na ordem do contrato e status ok/parcial/erro", () => {
-  const sem = u.periodoConferencia("semanal", new Date("2026-10-06T16:30:00Z")).semanas;
+  const sem = u.periodoConferencia("semanal", new Date("2026-10-05T16:30:00Z")).semanas;
   const d = u.montarDados({
-    inicioMs: Date.UTC(2026, 9, 6, 16, 39, 27, 0),
-    fimMs: Date.UTC(2026, 9, 6, 16, 41, 2, 250),
+    inicioMs: Date.UTC(2026, 9, 5, 16, 39, 27, 0),
+    fimMs: Date.UTC(2026, 9, 5, 16, 41, 2, 250),
     chamadas: 63,
     login: { username: "loja_teste", shopid: 1, shop_name: "Loja" },
     loginAutoUsado: false,
     saldo: 10.5,
-    ultimoDia: "2026-10-04",
+    ultimoDia: "2026-10-03",
     semanas: sem.map(semanaCheia),
     avisos: [],
   });
@@ -429,7 +431,7 @@ test("payload v1: chaves na ordem do contrato e status ok/parcial/erro", () => {
     "avisos",
   ]);
   assert.equal(d.versao, 1);
-  assert.equal(d.coletado_em, "2026-10-06T16:41:02Z");
+  assert.equal(d.coletado_em, "2026-10-05T16:41:02Z");
   assert.equal(d.duracao_s, 95.3);
   assert.deepEqual(u.statusDaColeta(d), { status: "ok", erro: null });
 
@@ -442,7 +444,7 @@ test("payload v1: chaves na ordem do contrato e status ok/parcial/erro", () => {
   assert.match(e.erro || "", /Ads: HTTP 500/);
 
   const texto = u.resumoConferencia("ok", null, d);
-  assert.match(texto, /S1 28\/09–04\/10/);
+  assert.match(texto, /S1 27\/09–03\/10/);
   assert.match(texto, /loja_teste/);
   assert.match(texto, /1 ped\. · 10 cliques/);
   const semCliques = { ...d, semanas: d.semanas.map((s) => ({ ...s, afiliados: { ...s.afiliados!, cliques: null } })) };
@@ -450,20 +452,20 @@ test("payload v1: chaves na ordem do contrato e status ok/parcial/erro", () => {
 });
 
 test("validarJob recusa job torto antes de abrir perfil", () => {
-  const p = u.periodoConferencia("semanal", new Date("2026-10-06T16:30:00Z"));
+  const p = u.periodoConferencia("semanal", new Date("2026-10-05T16:30:00Z"));
   const ok = {
     adspower_user_id: "k1abc",
     semanas: p.semanas,
     afiliados_ate: p.afiliados_ate,
-    esperar_afiliados_ate: "2026-10-06T18:00:00Z",
-    corte: "2026-10-06T20:30:00Z",
+    esperar_afiliados_ate: "2026-10-05T18:00:00Z",
+    corte: "2026-10-05T20:30:00Z",
   };
   assert.equal(u.validarJob(ok), null);
   assert.match(u.validarJob({ ...ok, semanas: p.semanas.slice(0, 3) }) || "", /4 semanas/);
   assert.match(u.validarJob({ ...ok, adspower_user_id: "" }) || "", /adspower_user_id/);
   assert.match(u.validarJob({ ...ok, corte: "amanhã" }) || "", /corte/);
   assert.match(
-    u.validarJob({ ...ok, semanas: [{ inicio: "2026-10-04", fim: "2026-09-28" }, ...p.semanas.slice(1)] }) || "",
+    u.validarJob({ ...ok, semanas: [{ inicio: "2026-10-03", fim: "2026-09-27" }, ...p.semanas.slice(1)] }) || "",
     /semana inválida/
   );
 });

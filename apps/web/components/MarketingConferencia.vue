@@ -3,8 +3,9 @@
  * Marketing › Conferência Shopee (06/10/2026).
  *
  * O relatório que o conferencia.js montava à mão, agora no DaVinci: o robô do
- * Mac coleta loja por loja (terça = semana fechada; quinta = parcial, segunda
- * até ontem) e o servidor congela o relatório quando a última loja chega. Esta
+ * Mac coleta loja por loja (segunda = semana fechada, domingo a sábado; quarta
+ * = parcial, domingo até ontem — até 30/10/2026 era terça e quinta, semana
+ * segunda a domingo) e o servidor congela o relatório quando a última loja chega. Esta
  * aba LÊ esse relatório congelado (contrato §5) — as contas, os "—" e as cores
  * das variações saem de lib/conferencia.ts, que segue as mesmas regras do
  * Excel/CSV/MD/HTML e do Threema.
@@ -381,10 +382,10 @@ async function gerar() {
   if (gerando.value) return
   const p = plataforma.value
   const txt = COLETA_TXT[p]
-  const qual = tipoNovo.value === 'parcial' ? 'parcial (segunda até ontem)' : 'da semana fechada (segunda a domingo)'
+  const qual = tipoNovo.value === 'parcial' ? 'parcial (domingo até ontem)' : 'da semana fechada (domingo a sábado)'
   if (!window.confirm(
     `Gerar agora a conferência ${infoPlataforma(p).da} ${qual}?\n\n${txt.confirmar} `
-    + 'Numa segunda-feira a parcial vira semanal (ainda não tem dia na semana).',
+    + 'Num domingo a parcial vira semanal (ainda não tem dia na semana).',
   )) return
   gerando.value = true
   try {
@@ -699,8 +700,8 @@ const informarAberto = ref(false)
               class="h-8 rounded-md border bg-background px-2 text-sm text-foreground"
               aria-label="Tipo da conferência a gerar"
             >
-              <option value="semanal">semana fechada (seg–dom)</option>
-              <option value="parcial">parcial (seg até ontem)</option>
+              <option value="semanal">semana fechada (dom–sáb)</option>
+              <option value="parcial">parcial (dom até ontem)</option>
             </select>
           </label>
           <Button size="sm" class="h-8" :disabled="gerando" @click="gerar">
@@ -799,7 +800,7 @@ const informarAberto = ref(false)
       <Inbox class="mx-auto size-6" />
       <p class="font-medium text-foreground">Nenhum relatório {{ plat.da }} ainda</p>
       <p>
-        A conferência roda terça (semana fechada) e quinta (parcial) às 13:30, quando a agenda está ligada.
+        A conferência roda segunda (semana fechada) e quarta (parcial) às 13:30, quando a agenda está ligada.
         <template v-if="canEdit">Dá para gerar uma agora pelo botão <b>Gerar agora</b>.</template>
       </p>
     </div>
@@ -1131,7 +1132,7 @@ const informarAberto = ref(false)
       :open="informarAberto"
       contexto="conferencia_shopee"
       somente-cadastro
-      descricao="Quem está marcado recebe no Threema o resumo de cada Conferência quando ela termina (Shopee, Mercado Livre e Amazon, cada uma na sua mensagem; terça e quinta à tarde quando a agenda está ligada): vendas, investimento e % s/ vendas de Mala, Celular, Eletro e Geral, as contas sem dados e o link do Excel. Sem ninguém marcado, não vai para ninguém. A seleção fica salva."
+      descricao="Quem está marcado recebe no Threema o resumo de cada Conferência quando ela termina (Shopee, Mercado Livre e Amazon, cada uma na sua mensagem; segunda e quarta à tarde quando a agenda está ligada): vendas, investimento e % s/ vendas de Mala, Celular, Eletro e Geral, as contas sem dados e o link do Excel. Sem ninguém marcado, não vai para ninguém. A seleção fica salva."
       @close="informarAberto = false"
     />
   </div>

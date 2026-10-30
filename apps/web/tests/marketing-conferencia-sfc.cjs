@@ -88,6 +88,21 @@ assert.match(tpl, /@click="trocarPlataforma\(p\.chave\)"/)
 assert.match(script, /const plataforma = ref<Plataforma>\(plataformaValida\(route\.query\.conf\) \?\? 'shopee'\)/, 'lê ?conf=')
 // O mesmo cadastro do Threema serve os 3 (um aviso por marketplace).
 assert.match(tpl, /contexto="conferencia_shopee"[\s\S]{0,200}descricao="[^"]*Shopee, Mercado Livre e Amazon/)
+// Semana domingo a sábado; roda segunda (fechada) e quarta (parcial) às 13:30
+// (até 30/10/2026 era terça/quinta com semana segunda a domingo).
+for (const trecho of [
+  '<option value="semanal">semana fechada (dom–sáb)</option>',
+  '<option value="parcial">parcial (dom até ontem)</option>',
+  'A conferência roda segunda (semana fechada) e quarta (parcial) às 13:30, quando a agenda está ligada.',
+  'cada uma na sua mensagem; segunda e quarta à tarde quando a agenda está ligada',
+]) assert.ok(tpl.includes(trecho), `na tela: ${trecho}`)
+for (const velho of ['seg–dom', 'seg até ontem', 'terça (semana fechada)', 'quinta (parcial)', 'terça e quinta']) {
+  assert.ok(!tpl.includes(velho), `texto antigo saiu da tela: ${velho}`)
+}
+// O comentário do topo guarda o histórico; as frases do confirm, não.
+for (const velho of ["'parcial (segunda até ontem)'", "'da semana fechada (segunda a domingo)'", 'Numa segunda-feira']) {
+  assert.ok(!script.includes(velho), `texto antigo saiu do confirm: ${velho}`)
+}
 // Layout do relatório: SÓ o Resumo, no formato da planilha antiga do dono (pedido
 // de 07/10/2026 — "mais ou menos desse jeito"), igual ao Excel e ao HTML.
 for (const trecho of [
@@ -718,7 +733,9 @@ async function run() {
     await t.s.gerar()
     await esperar()
     assert.equal(t.confirms.length, 1)
-    assert.match(t.confirms[0], /parcial \(segunda até ontem\)/)
+    assert.match(t.confirms[0], /parcial \(domingo até ontem\)/)
+    assert.match(t.confirms[0], /Num domingo a parcial vira semanal \(ainda não tem dia na semana\)\./)
+    assert.ok(!/segunda/.test(t.confirms[0]), 'semana é domingo a sábado desde 30/10/2026')
     assert.deepEqual(corpo, { tipo: 'parcial', plataforma: 'shopee' })
     assert.match(t.confirms[0], /^Gerar agora a conferência da Shopee parcial/)
     assert.match(t.confirms[0], /robô do Mac abre o perfil de cada loja no AdsPower/)
@@ -1235,7 +1252,7 @@ async function plataformas() {
     await esperar()
     assert.equal(plat, 'ml')
     assert.deepEqual(corpo, { tipo: 'semanal', plataforma: 'ml' })
-    assert.match(t.confirms[0], /^Gerar agora a conferência do Mercado Livre da semana fechada/)
+    assert.match(t.confirms[0], /^Gerar agora a conferência do Mercado Livre da semana fechada \(domingo a sábado\)\?/)
     assert.match(t.confirms[0], /servidor lê as vendas do Bling e o Ads do Mercado Livre pela API/)
     assert.ok(!t.confirms[0].includes('robô do Mac'), 'no ML não é o robô do Mac')
     assert.deepEqual(t.toastLog.at(-1), ['success', 'Conferência iniciada', t.s.COLETA_TXT.ml.iniciada])

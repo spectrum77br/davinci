@@ -33,8 +33,8 @@ from tests.test_conferencia_shopee_calculo import (
 
 ABAS = ["Resumo"]  # pedido de 07/10/2026: "é só do resumo que eu preciso"
 NOVAS = calculo.CHAVES[8:]  # cliques, pedidos e conversão (07/10/2026)
-SEMANAS_ANTIGA_PRIMEIRO = ["07/09 a 13/09", "14/09 a 20/09", "21/09 a 27/09", "28/09 a 04/10"]
-VARIACAO = "Variação (28/09–04/10 × 21/09–27/09)"
+SEMANAS_ANTIGA_PRIMEIRO = ["06/09 a 12/09", "13/09 a 19/09", "20/09 a 26/09", "27/09 a 03/10"]
+VARIACAO = "Variação (27/09–03/10 × 20/09–26/09)"
 GRUPOS = ["Mala", "Celular", "Eletro", "Geral"]
 NAVY, BEGE = "1F3864", "DDD9C4"
 
@@ -85,8 +85,8 @@ def test_excel_abre_com_as_abas_do_documento():
 def test_excel_resumo_no_desenho_da_planilha():
     rel, _, wb = _excel()
     ws = wb["Resumo"]
-    assert ws["A1"].value == "Conferência Shopee — 28/09 a 04/10/2026 (semana fechada)"
-    assert ws["A2"].value.startswith("comparado com 21/09 a 27/09 · gerado em")
+    assert ws["A1"].value == "Conferência Shopee — 27/09 a 03/10/2026 (semana fechada)"
+    assert ws["A2"].value.startswith("comparado com 20/09 a 26/09 · gerado em")
     # Cabeçalho em 2 linhas: semanas da mais velha para a mais nova (4 colunas
     # mescladas cada) e, no fim, a Variação S1 × S2.
     assert [ws.cell(4, 3 + 4 * b).value for b in range(5)] == [
@@ -175,7 +175,7 @@ def test_excel_avisos_curtos_e_graficos_abaixo_da_tabela():
     avisos = [ws.cell(r, 1).value for r in range(16, 22) if ws.cell(r, 1).value]
     assert avisos == [
         "⚠️ Sem dados: Luno (perfil Firefox, o robô não abre)",
-        "⚠️ Afiliados incompletos: Barbosa (até 03/10)",
+        "⚠️ Afiliados incompletos: Barbosa (até 02/10)",
     ]
     # Os gráficos começam depois da tabela e dos avisos (sem cobrir nada) e os
     # dados deles ficam embaixo dos gráficos.
@@ -189,7 +189,7 @@ def test_excel_avisos_curtos_e_graficos_abaixo_da_tabela():
     assert titulo >= linha_avisos + 2 + 15
     assert [ws.cell(titulo + 1, c).value for c in range(1, 6)] == ["Vendas", *GRUPOS]
     assert [ws.cell(titulo + 2 + i, 1).value for i in range(4)] == [
-        "07/09–13/09", "14/09–20/09", "21/09–27/09", "28/09–04/10",
+        "06/09–12/09", "13/09–19/09", "20/09–26/09", "27/09–03/10",
     ]
 
 
@@ -228,8 +228,8 @@ def test_csv_ponto_e_virgula_e_virgula_decimal():
     n_linhas = sum(len(g["linhas"]) for g in rel["grupos"])
     assert len(linhas) == 1 + 4 * n_linhas
     inova = linhas[1].split(";")
-    assert inova[:8] == ["Mala", "Inova", "loja_teste", "ok", "", "28/09–04/10", "28/09/2026",
-                         "04/10/2026"]
+    assert inova[:8] == ["Mala", "Inova", "loja_teste", "ok", "", "27/09–03/10", "27/09/2026",
+                         "03/10/2026"]
     assert inova[8] == "1000,00"  # vendas afiliados
     assert inova[11] == "5000"  # impressões (inteiro)
     assert inova[14] == "7,00"  # %
@@ -247,8 +247,8 @@ def test_html_no_desenho_da_planilha():
     pagina = saida.html(rel)
     assert pagina.startswith("<!doctype html>")
     assert "<style>" in pagina and "<script" not in pagina and "http" not in pagina
-    assert "<title>Conferência Shopee — 28/09 a 04/10/2026</title>" in pagina
-    assert "comparado com 21/09 a 27/09" in pagina
+    assert "<title>Conferência Shopee — 27/09 a 03/10/2026</title>" in pagina
+    assert "comparado com 20/09 a 26/09" in pagina
     # Uma tabela só: 2 linhas de cabeçalho, semanas da mais velha para a mais
     # nova e a Variação no fim.
     assert pagina.count('<table class="planilha">') == 1
@@ -285,7 +285,7 @@ def test_html_no_desenho_da_planilha():
     for fora in ("Saldo", "Barbosa (loja_teste)", "<h2>", "Notas", "Gasto de Ads sem produto"):
         assert fora not in pagina, fora
     assert "Sem dados: Luno (perfil Firefox, o robô não abre)" in pagina
-    assert "Afiliados incompletos: Barbosa (até 03/10)" in pagina
+    assert "Afiliados incompletos: Barbosa (até 02/10)" in pagina
 
 
 def test_variacao_colorida_pelo_que_e_bom():
@@ -363,7 +363,7 @@ def test_html_e_md_escapam_o_nome():
 def test_markdown_compacto():
     rel = relatorio_exemplo()
     md = saida.markdown(rel)
-    assert md.startswith("# Conferência Shopee — 28/09 a 04/10/2026\n")
+    assert md.startswith("# Conferência Shopee — 27/09 a 03/10/2026\n")
     cab = ("| Métrica | | " + " | ".join(SEMANAS_ANTIGA_PRIMEIRO) + f" | {VARIACAO} |")
     assert md.count(cab) == 4  # Mala, Celular, Eletro, Geral
     for trecho in ("## Resumo", "### Mala (1 conta)", "### Celular (3 contas · 1 sem dados)",
@@ -374,7 +374,7 @@ def test_markdown_compacto():
                    "|  | Vendas no período |",
                    "## Vendas por conta", "| Celular | Luno ⚠️ perfil Firefox, o robô não abre |",
                    "## Avisos", "Sem dados: Luno (perfil Firefox, o robô não abre)",
-                   "Afiliados incompletos: Barbosa (até 03/10)",
+                   "Afiliados incompletos: Barbosa (até 02/10)",
                    "Gasto de Ads sem produto (ficou em Celular): Barbosa R$ 10,00", "## Notas"):
         assert trecho in md, trecho
     assert "Saldo Ads |" not in md
@@ -383,6 +383,9 @@ def test_markdown_compacto():
 def test_json_e_nome_do_arquivo():
     rel = relatorio_exemplo()
     assert json.loads(saida.json_bytes(rel)) == rel
-    assert saida.nome_arquivo(rel, "xlsx") == "conferencia-shopee-2026-09-28_2026-10-04.xlsx"
-    assert saida.titulo(rel) == "Conferência Shopee — 28/09 a 04/10/2026"
-    assert saida.tipo_texto({**rel, "tipo": "parcial"}) == "parcial seg–dom"
+    assert saida.nome_arquivo(rel, "xlsx") == "conferencia-shopee-2026-09-27_2026-10-03.xlsx"
+    assert saida.titulo(rel) == "Conferência Shopee — 27/09 a 03/10/2026"
+    assert saida.tipo_texto({**rel, "tipo": "parcial"}) == "parcial dom–sáb"
+    # A parcial de verdade (quarta 07/10/2026): domingo 04/10 até ontem, terça 06/10.
+    parcial = {**rel, "tipo": "parcial", "semanas": [{"inicio": "2026-10-04", "fim": "2026-10-06"}]}
+    assert saida.tipo_texto(parcial) == "parcial dom–ter"

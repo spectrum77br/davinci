@@ -398,7 +398,7 @@ async def criar_execucao(
     user: Annotated[User, Depends(_editar)],
     plataforma: Plataforma = "shopee",
 ) -> dict:
-    """"Gerar agora": parcial numa segunda vira semanal (não há dia ainda). No
+    """"Gerar agora": parcial num domingo vira semanal (não há dia ainda). No
     ML e na Amazon a coleta é do servidor: a rodada nasce e o job entra na
     fila do worker na hora (Redis fora → o varredor enfileira em até 10 min)."""
     plataforma = body.plataforma or plataforma

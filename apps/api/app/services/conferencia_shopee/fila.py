@@ -2,7 +2,7 @@
 
 O ciclo de uma rodada (contrato §3, §5 e §7):
 
-  1. `criar_execucao` — agenda (terça/quinta) ou "Gerar agora". Fixa as 4
+  1. `criar_execucao` — agenda (segunda/quarta) ou "Gerar agora". Fixa as 4
      semanas e os prazos (periodos.planejar) e põe uma coleta `pendente` por
      loja ATIVA, com a foto do nome/grupo/perfil daquele momento. Uma rodada
      coletando por vez: outra → `conferencia_em_andamento` (a agenda só pula).

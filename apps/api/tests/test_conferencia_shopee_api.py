@@ -127,7 +127,7 @@ async def test_lease_e_resultado_pelo_http_fecham_a_rodada(client, db, admin):
     ex = await _execucao(db, DUAS)
     ana = await _lease(client)
     assert ana["conta"] == "Ana" and ana["login_auto"] is True and ana["tentativa"] == 1
-    assert ana["corte"] == "2026-10-06T20:30:00Z"
+    assert ana["corte"] == "2026-10-05T20:30:00Z"
     bia = await _lease(client)
     assert await _lease(client) is None
 
@@ -411,7 +411,7 @@ async def test_gerar_agora_e_409_com_outra_coletando(client, db, make_user, auth
     assert corpo["relatorio"] is None
     assert corpo["execucao"]["origem"] == "manual"
     assert corpo["execucao"]["criado_por"] == editor.email
-    assert corpo["execucao"]["semanas"][0] == {"inicio": "2026-09-28", "fim": "2026-10-04"}
+    assert corpo["execucao"]["semanas"][0] == {"inicio": "2026-09-27", "fim": "2026-10-03"}
     assert [c["nome"] for c in corpo["coletas"]] == ["Caio", "Ana", "Bia"]
     r = await client.post(f"{API}/execucoes", json={"tipo": "parcial"})
     assert r.status_code == 409
@@ -499,7 +499,7 @@ async def test_arquivos(client, db, admin):
         assert r.status_code == 200, (fmt, r.text)
         assert r.headers["content-type"].startswith(tipo), fmt
         assert r.headers["content-disposition"] == (
-            f'attachment; filename="conferencia-shopee-2026-09-28_2026-10-04.{fmt}"'
+            f'attachment; filename="conferencia-shopee-2026-09-27_2026-10-03.{fmt}"'
         )
     assert (await client.get(f"{base}/xlsx")).content[:2] == b"PK"
     assert (await client.get(f"{base}/csv")).content.startswith("﻿Grupo;".encode())

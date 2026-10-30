@@ -293,7 +293,7 @@ def test_planilha_e_arquivos_com_o_texto_do_estado():
     assert por_linha[("Resumo", "Vendas no período")]["valores"][-1][-1] == 2000.0
 
     assert saida.titulo(rel).startswith("Conferência Mercado Livre — ")
-    assert saida.nome_arquivo(rel, "xlsx") == "conferencia-ml-2026-09-28_2026-10-04.xlsx"
+    assert saida.nome_arquivo(rel, "xlsx") == "conferencia-ml-2026-09-27_2026-10-03.xlsx"
 
     ws = load_workbook(saida.excel(rel)).active
     assert ws["A1"].value.startswith("Conferência Mercado Livre")
@@ -322,7 +322,7 @@ def test_amazon_no_excel_e_no_threema():
     valores = [c.value for row in ws.iter_rows() for c in row]
     assert "aguardando acesso" in valores and "não se aplica" in valores
     msg = ta.texto(rel, "https://x/excel", ta.link_davinci("abc", "amazon"))
-    assert msg.startswith("📊 Conferência Amazon — 28/09 a 04/10/2026")
+    assert msg.startswith("📊 Conferência Amazon — 27/09 a 03/10/2026")
     assert "invest. aguardando acesso · % s/ vendas aguardando acesso" in msg
     assert "conf=amazon" in msg
     assert ta.link_davinci("abc", "shopee").endswith("/marketing?aba=conferencia&execucao=abc")
@@ -497,7 +497,7 @@ async def test_job_do_servidor_coleta_fecha_e_classifica_pelo_sku(db, dono, cole
     assert ml.status == "pronto"
     kia, kfa = await coletas_de(db, ml.id)
     assert (kia.status, kfa.status) == ("ok", "ok")
-    assert kia.dados["coletado_em"] == "2026-10-06T16:30:00Z"
+    assert kia.dados["coletado_em"] == "2026-10-05T16:30:00Z"
     rel = ml.relatorio
     assert rel["plataforma"] == "ml"
     # dg053.sp é eletro pelo DaVinci (categoria 777 = Eletro); uaf001 pelo SKU.
@@ -751,7 +751,7 @@ async def test_recalcular_rodada_do_ml_e_baixar_arquivo(client, db, dono, admin,
     assert r.status_code == 200 and r.json()["relatorio"]["plataforma"] == "ml"
     r = await client.get(f"{API}/execucoes/{ml.id}/arquivo/csv")
     assert r.status_code == 200
-    assert 'filename="conferencia-ml-2026-09-28_2026-10-04.csv"' in r.headers[
+    assert 'filename="conferencia-ml-2026-09-27_2026-10-03.csv"' in r.headers[
         "content-disposition"
     ]
 

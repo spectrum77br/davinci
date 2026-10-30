@@ -22,8 +22,10 @@ import pytest
 from app.services.conferencia_shopee import calculo, periodos
 from app.services.conferencia_shopee.calculo import montar_relatorio, variacao
 
-SEMANAS = periodos.semanas("semanal", date(2026, 10, 6))
-GERADO = datetime(2026, 10, 6, 19, 0, tzinfo=UTC)
+# Rodada da agenda de segunda 05/10/2026 (semana fechada domingo–sábado):
+# S1 27/09–03/10, S2 20/09–26/09, S3 13/09–19/09, S4 06/09–12/09.
+SEMANAS = periodos.semanas("semanal", date(2026, 10, 5))
+GERADO = datetime(2026, 10, 5, 19, 0, tzinfo=UTC)
 
 
 def execucao(**extra) -> dict:
@@ -32,8 +34,8 @@ def execucao(**extra) -> dict:
         "tipo": "semanal",
         "origem": "agenda",
         "semanas": SEMANAS,
-        "afiliados_ate": "2026-10-04",
-        "criado_em": datetime(2026, 10, 6, 16, 30, tzinfo=UTC),
+        "afiliados_ate": "2026-10-03",
+        "criado_em": datetime(2026, 10, 5, 16, 30, tzinfo=UTC),
         **extra,
     }
 
@@ -104,11 +106,11 @@ def semana(
     }
 
 
-def dados(semanas: list[dict], *, saldo=250.0, ultimo="2026-10-04", usuario="loja_teste",
+def dados(semanas: list[dict], *, saldo=250.0, ultimo="2026-10-03", usuario="loja_teste",
           avisos=()) -> dict:
     return {
         "versao": 1,
-        "coletado_em": "2026-10-06T17:00:00Z",
+        "coletado_em": "2026-10-05T17:00:00Z",
         "duracao_s": 80.0,
         "chamadas": 50,
         "login": {"username": usuario, "shopid": 1, "shop_name": "Loja"},
@@ -157,12 +159,12 @@ def relatorio_exemplo() -> dict:
         execucao(),
         [
             coleta("Inova", "mala", dados(_quatro(afiliados_itens=_AF_ITENS), saldo=120.0)),
-            coleta("Barbosa", "celular", dados(barbosa, ultimo="2026-10-03")),
+            coleta("Barbosa", "celular", dados(barbosa, ultimo="2026-10-02")),
             coleta("atv", "celular", dados(_quatro(), saldo=None)),
             coleta("Luno", "celular", None, status="sem_automacao", erro="perfil Firefox"),
         ],
         mapa_davinci={},
-        saldos={"k-barbosa": [("2026-09-29T15:00:00Z", 400.0)]},
+        saldos={"k-barbosa": [("2026-09-28T15:00:00Z", 400.0)]},
         gerado_em=GERADO,
     )
 
@@ -189,10 +191,10 @@ def test_forma_do_relatorio_e_a_do_contrato():
     # Execução sem plataforma (como as de antes de 07/10/2026) = Shopee, sem estados.
     assert (rel["plataforma"], rel["estados"]) == ("shopee", {})
     assert rel["execucao_id"] == "11111111-1111-1111-1111-111111111111"
-    assert rel["gerado_em"] == "2026-10-06T19:00:00+00:00"
-    assert rel["criado_em"] == "2026-10-06T16:30:00+00:00"
-    assert rel["semanas"][0] == {"inicio": "2026-09-28", "fim": "2026-10-04",
-                                 "rotulo": "28/09–04/10"}
+    assert rel["gerado_em"] == "2026-10-05T19:00:00+00:00"
+    assert rel["criado_em"] == "2026-10-05T16:30:00+00:00"
+    assert rel["semanas"][0] == {"inicio": "2026-09-27", "fim": "2026-10-03",
+                                 "rotulo": "27/09–03/10"}
     # As 8 do contrato no mesmo lugar e, depois, as 6 de 07/10/2026.
     assert [m["chave"] for m in rel["metricas"]] == [
         "vendas_afiliados", "vendas_ads", "saldo_ads", "impressoes", "invest_afiliados",
@@ -528,7 +530,7 @@ def test_item_eletro_sem_cliques_deixa_o_par_inteiro_em_celular_com_aviso():
         None, None, None)
     # O resto do eletro (vendas, comissão) separa normalmente.
     assert (c0["vendas_afiliados"], ele["vendas_afiliados"]) == (700.0, 300.0)
-    assert ("28/09–04/10: sem os cliques por produto de afiliados — os cliques e os pedidos "
+    assert ("27/09–03/10: sem os cliques por produto de afiliados — os cliques e os pedidos "
             "de eletro dessa parte ficaram em Celular") in cel["avisos"]
     # Item que não é eletro sem o campo também: os cliques de eletro saem da
     # proporção dos itens, e sem um deles a proporção fica torta → não divide.
@@ -638,9 +640,9 @@ def test_celular_negativo_fica_vazio_com_aviso_e_eletro_com_o_total():
     assert c0["pct"] is None
     assert (c0["cliques_ads"], c0["pedidos_ads"], c0["conversao_ads"]) == (None, 2, None)
     assert (e0["cliques_ads"], e0["pedidos_ads"], e0["conversao_ads"]) == (10, 1, 10.0)
-    assert ("28/09–04/10: Vendas de eletro passou do total da conta — Celular ficou sem esse "
+    assert ("27/09–03/10: Vendas de eletro passou do total da conta — Celular ficou sem esse "
             "número e Eletro com o total") in cel["avisos"]
-    assert ("28/09–04/10: Cliques Ads de eletro passou do total da conta — Celular ficou sem "
+    assert ("27/09–03/10: Cliques Ads de eletro passou do total da conta — Celular ficou sem "
             "esse número e Eletro com o total") in cel["avisos"]
     g0 = rel["geral"]["semanas"][0]
     assert (g0["vendas"], g0["cliques_ads"]) == (2000.0, 10)
@@ -713,11 +715,11 @@ def _leitura(iso: str, valor: float) -> tuple[str, float]:
 
 
 def test_saldo_da_semana_passada_regra_do_dia_seguinte():
-    fim = date(2026, 9, 27)  # S2; alvo = 28/09
-    exato = _leitura("2026-09-28T16:00:00Z", 10.0)
-    antes = _leitura("2026-09-27T16:00:00Z", 20.0)
-    depois = _leitura("2026-09-29T16:00:00Z", 30.0)
-    fora = _leitura("2026-09-30T16:00:00Z", 40.0)
+    fim = date(2026, 9, 26)  # S2 (sábado); alvo = 27/09 (domingo)
+    exato = _leitura("2026-09-27T16:00:00Z", 10.0)
+    antes = _leitura("2026-09-26T16:00:00Z", 20.0)
+    depois = _leitura("2026-09-28T16:00:00Z", 30.0)
+    fora = _leitura("2026-09-29T16:00:00Z", 40.0)
     assert calculo.saldo_da_semana([fora, depois, exato, antes], fim) == 10.0
     # ±1 dia, e no empate fica a mais cedo.
     assert calculo.saldo_da_semana([depois, antes], fim) == 20.0
@@ -726,23 +728,23 @@ def test_saldo_da_semana_passada_regra_do_dia_seguinte():
     assert calculo.saldo_da_semana([], fim) is None
     # Duas no mesmo dia: a mais cedo.
     assert calculo.saldo_da_semana(
-        [_leitura("2026-09-28T20:00:00Z", 1.0), _leitura("2026-09-28T13:00:00Z", 2.0)], fim
+        [_leitura("2026-09-27T20:00:00Z", 1.0), _leitura("2026-09-27T13:00:00Z", 2.0)], fim
     ) == 2.0
-    # O dia é o de Brasília: 02:00 UTC de 29/09 = 23:00 de 28/09 em BRT.
-    # Aqui as duas são de 28/09 em Brasília (23:00 e 00:30): fica a mais cedo.
+    # O dia é o de Brasília: 02:00 UTC de 28/09 = 23:00 de 27/09 em BRT.
+    # Aqui as duas são de 27/09 em Brasília (23:00 e 00:30): fica a mais cedo.
     assert calculo.saldo_da_semana(
-        [_leitura("2026-09-29T02:00:00Z", 5.0), _leitura("2026-09-28T03:30:00Z", 6.0)], fim
+        [_leitura("2026-09-28T02:00:00Z", 5.0), _leitura("2026-09-27T03:30:00Z", 6.0)], fim
     ) == 6.0
-    assert calculo.saldo_da_semana([_leitura("2026-10-01T02:00:00Z", 7.0)], fim) is None
+    assert calculo.saldo_da_semana([_leitura("2026-09-30T02:00:00Z", 7.0)], fim) is None
     assert calculo.saldo_da_semana(
-        [(datetime(2026, 9, 29, 2, 0, tzinfo=UTC), 8.0)], fim
+        [(datetime(2026, 9, 28, 2, 0, tzinfo=UTC), 8.0)], fim
     ) == 8.0
 
 
 def test_saldo_no_relatorio():
     rel = relatorio_exemplo()
     barbosa = _linha(rel, "celular", "Barbosa")["semanas"]
-    # S1 = leitura desta coleta; S2 (21/09–27/09) = leitura de 29/09 (fim + 2);
+    # S1 = leitura desta coleta; S2 (20/09–26/09) = leitura de 28/09 (fim + 2);
     # S3/S4 sem leitura.
     assert [s["saldo_ads"] for s in barbosa] == [250.0, 400.0, None, None]
     assert all(s["saldo_ads"] is None for s in _linha(rel, "eletro", "Barbosa")["semanas"])
@@ -774,11 +776,11 @@ def test_afiliados_incompletos():
     # sem venda de afiliado na semana): não há o que esperar e não entra na
     # lista — o executor também não espera por ela (contrato §4).
     rel = relatorio_exemplo()
-    assert rel["afiliados_incompletos"] == [{"conta": "Barbosa", "ate": "2026-10-03"}]
+    assert rel["afiliados_incompletos"] == [{"conta": "Barbosa", "ate": "2026-10-02"}]
     rel = montar_relatorio(
         execucao(),
         [coleta("A", "mala", dados(_quatro(), ultimo=None)),
-         coleta("B", "mala", dados(_quatro(), ultimo="2026-10-04"))],
+         coleta("B", "mala", dados(_quatro(), ultimo="2026-10-03"))],
         gerado_em=GERADO,
     )
     assert rel["afiliados_incompletos"] == []
@@ -788,12 +790,12 @@ def test_avisos_da_coleta_e_da_semana_vao_para_a_linha():
     semanas = [semana(0, avisos=["ads: code 5"]), *[semana(i) for i in (1, 2, 3)]]
     rel = montar_relatorio(
         execucao(),
-        [coleta("X", "mala", dados(semanas, avisos=["afiliados só até 03/10"]))],
+        [coleta("X", "mala", dados(semanas, avisos=["afiliados só até 02/10"]))],
         gerado_em=GERADO,
     )
     assert _linha(rel, "mala", "X")["avisos"] == [
-        "afiliados só até 03/10",
-        "28/09–04/10: ads: code 5",
+        "afiliados só até 02/10",
+        "27/09–03/10: ads: code 5",
     ]
 
 
@@ -820,14 +822,15 @@ def test_notas_fixas_e_da_parcial():
     ):
         assert trecho in texto
     assert "Semana parcial" not in texto
-    parcial = periodos.semanas("parcial", date(2026, 10, 8))
+    # Parcial da agenda de quarta 07/10/2026: domingo 04/10 até ontem (terça 06/10).
+    parcial = periodos.semanas("parcial", date(2026, 10, 7))
     rel = montar_relatorio(execucao(tipo="parcial", semanas=parcial,
-                                    afiliados_ate="2026-10-07"), [], gerado_em=GERADO)
+                                    afiliados_ate="2026-10-06"), [], gerado_em=GERADO)
     assert (
-        "Semana parcial: segunda a quarta, comparada com segunda a quarta das semanas anteriores"
+        "Semana parcial: domingo a terça, comparada com domingo a terça das semanas anteriores"
         in " ".join(rel["notas"])
     )
-    assert rel["semanas"][0]["rotulo"] == "05/10–07/10"
+    assert rel["semanas"][0]["rotulo"] == "04/10–06/10"
 
 
 # ───────────────────────────────────────────────────────────── variação

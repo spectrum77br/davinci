@@ -35,7 +35,9 @@ pytestmark = pytest.mark.asyncio
 
 API = "/api/marketing/conferencia-shopee"
 TOKEN = "tok-conferencia-threema"  # noqa: S105 (só do teste)
-SEMANAS = periodos.semanas("semanal", date(2026, 10, 6))
+# Rodada da agenda de segunda 05/10/2026: semana fechada domingo–sábado,
+# S1 27/09–03/10 (S2 20/09–26/09, S3 13/09–19/09, S4 06/09–12/09).
+SEMANAS = periodos.semanas("semanal", date(2026, 10, 5))
 VAZIA = {"vendas": None, "invest_afiliados": None, "invest_ads": None, "pct": None}
 
 
@@ -99,7 +101,7 @@ async def _pronta(db, *, finalizado: datetime = AGORA, enviado: datetime | None 
                  plataforma: str = "shopee"):
     ex = ConferenciaShopeeExecucao(
         plataforma=plataforma,
-        tipo="semanal", origem="agenda", semanas=SEMANAS, afiliados_ate=date(2026, 10, 4),
+        tipo="semanal", origem="agenda", semanas=SEMANAS, afiliados_ate=date(2026, 10, 3),
         esperar_afiliados_ate=AGORA, corte=AGORA, prazo=AGORA, status="pronto",
         relatorio={**relatorio_exemplo(), "plataforma": plataforma},
         finalizado_em=finalizado, threema_enviado_em=enviado, criado_em=AGORA,
@@ -144,7 +146,7 @@ def _rel(tipo: str = "semanal", semanas: list[dict] = SEMANAS, **extra) -> dict:
             {"conta": "Luno", "status": "sem_automacao", "erro": "perfil Firefox"},
             {"conta": "Oliveira", "status": "perfil_em_uso", "erro": None},
         ],
-        "afiliados_incompletos": [{"conta": "Mega", "ate": "2026-10-03"}],
+        "afiliados_incompletos": [{"conta": "Mega", "ate": "2026-10-02"}],
         **extra,
     }
 
@@ -152,12 +154,12 @@ def _rel(tipo: str = "semanal", semanas: list[dict] = SEMANAS, **extra) -> dict:
 async def test_texto_do_contrato():
     msg = ta.texto(_rel(), "https://app/x", "https://app/marketing?aba=conferencia&execucao=1")
     assert msg == (
-        "📊 Conferência Shopee — 28/09 a 04/10/2026 (semana fechada)\n"
+        "📊 Conferência Shopee — 27/09 a 03/10/2026 (semana fechada)\n"
         "Mala: vendas R$ 120.345 (▲ 8,2%) · invest. R$ 9.876 · 8,2% s/ vendas (▼ 0,4 p.p.)\n"
         "Celular: vendas R$ 50.000 · invest. R$ 2.000 · 4,0% s/ vendas\n"
         "Geral: vendas R$ 170.345 (▲ 53,2%) · invest. R$ 11.876 · 7,0% s/ vendas (▼ 1,1 p.p.)\n"
         "⚠️ Sem dados: Luno (perfil Firefox, o robô não abre), Oliveira (perfil em uso)\n"
-        "⚠️ Afiliados incompletos: Mega (até 03/10)\n"
+        "⚠️ Afiliados incompletos: Mega (até 02/10)\n"
         "📎 Excel: https://app/x\n"
         "🔗 No DaVinci: https://app/marketing?aba=conferencia&execucao=1"
     )
@@ -172,7 +174,7 @@ async def test_texto_do_ml_diz_que_o_investimento_e_so_do_ads():
                geral=_total(3, s1, s2), contas_sem_dados=[], afiliados_incompletos=[])
     msg = ta.texto(rel, "https://app/x", ta.link_davinci("1", "ml"))
     assert msg.splitlines()[:2] == [
-        "📊 Conferência Mercado Livre — 28/09 a 04/10/2026 (semana fechada)",
+        "📊 Conferência Mercado Livre — 27/09 a 03/10/2026 (semana fechada)",
         "Geral: vendas R$ 1.030 (▲ 442,1%) · invest. Ads R$ 182 (afiliados não coletado) · "
         "17,7% Ads s/ vendas (▼ 22,3 p.p.)",
     ]
@@ -186,10 +188,10 @@ async def test_texto_do_ml_diz_que_o_investimento_e_so_do_ads():
 
 
 async def test_texto_parcial_e_sem_avisos():
-    sem = periodos.semanas("parcial", date(2026, 10, 8))
+    sem = periodos.semanas("parcial", date(2026, 10, 7))  # quarta: domingo até ontem
     msg = ta.texto(_rel("parcial", sem, contas_sem_dados=[], afiliados_incompletos=[]), "L", "D")
     linhas = msg.split("\n")
-    assert linhas[0] == "📊 Conferência Shopee — 05/10 a 07/10/2026 (parcial seg–qua)"
+    assert linhas[0] == "📊 Conferência Shopee — 04/10 a 06/10/2026 (parcial dom–ter)"
     assert not any(linha.startswith("⚠️") for linha in linhas)
 
 
@@ -211,10 +213,10 @@ async def test_texto_do_relatorio_de_verdade():
     rel = relatorio_exemplo()
     msg = ta.texto(rel, "L", "D")
     linhas = msg.split("\n")
-    assert linhas[0] == "📊 Conferência Shopee — 28/09 a 04/10/2026 (semana fechada)"
+    assert linhas[0] == "📊 Conferência Shopee — 27/09 a 03/10/2026 (semana fechada)"
     assert [linha.split(":")[0] for linha in linhas[1:5]] == ["Mala", "Celular", "Eletro", "Geral"]
     assert "⚠️ Sem dados: Luno (perfil Firefox, o robô não abre)" in linhas
-    assert "⚠️ Afiliados incompletos: Barbosa (até 03/10)" in linhas
+    assert "⚠️ Afiliados incompletos: Barbosa (até 02/10)" in linhas
 
 
 # ───────────────────────────────────────────────────────────── link
@@ -361,7 +363,7 @@ async def test_ultima_loja_pelo_http_avisa_no_threema(client, db, enviados):
     )
     assert r.status_code == 200 and r.json()["execucao_pronta"] is True
     assert len(enviados) == 2  # um envio por destinatário
-    assert enviados[0][0].startswith("📊 Conferência Shopee — 28/09 a 04/10/2026")
+    assert enviados[0][0].startswith("📊 Conferência Shopee — 27/09 a 03/10/2026")
     await db.refresh(ex)
     assert ex.threema_enviado_em == AGORA
 

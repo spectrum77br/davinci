@@ -69,7 +69,8 @@ from app.services.conferencia_shopee.coletores import ml as coletor_ml
 from app.services.conferencia_shopee.coletores import vendas_bling
 from tests.test_conferencia_shopee_fila import AGORA, coletas_de
 
-HOJE = date(2026, 10, 6)  # terça; AGORA = 13:30 BRT
+# A semana vai de domingo a sábado; a agenda semanal roda às segundas.
+HOJE = date(2026, 10, 5)  # segunda; AGORA = 13:30 BRT → S1 = dom 27/09 a sáb 03/10
 SEMANAS = coletores.semanas_do_job(periodos.semanas("semanal", HOJE))
 S1, S2, S3, S4 = SEMANAS
 LOJA_KIA = "204713113"
@@ -280,26 +281,27 @@ async def _cenario(db: AsyncSession, dono: User) -> dict[str, Any]:
         link("MLB4", "dg099.sp"),
     ])
     pedidos = [
-        # S1: capinha + 2 air fryers (o total do pedido tem frete: não entra).
+        # S1 (dom 27/09 a sáb 03/10): capinha + 2 air fryers (o total do
+        # pedido tem frete: não entra).
         *_pedido(1001, _dia_brt(date(2026, 9, 29)),
                  [("uaf001", "Air Fryer 4L", 150, 2), ("dg053.sp", "Capinha", 50, 1)]),
         *_pedido(1002, _dia_brt(date(2026, 9, 30)), [("dg053.sp", "Capinha", 100, 1)],
                  situacao="12"),  # cancelado
         *_pedido(1003, _dia_brt(date(2026, 9, 30)), [("dg053.sp", "Capinha", 100, 1)],
                  situacao="excluido"),
-        # Domingo 23:30 em Brasília (segunda 02:30 UTC): ainda é S1. "Em
+        # Sábado 23:30 em Brasília (domingo 02:30 UTC): ainda é S1. "Em
         # digitação" entra. Sem SKU → pelo nome; sem quantidade → 1.
-        *_pedido(1004, _dia_brt(date(2026, 10, 4), 23, 30),
+        *_pedido(1004, _dia_brt(date(2026, 10, 3), 23, 30),
                  [(None, "Fritadeira Air Fryer avulsa", 80, None)], situacao="21"),
-        # Segunda 00:00 em Brasília: já é a semana seguinte (fora).
-        *_pedido(1005, _dia_brt(date(2026, 10, 5)), [("dg053.sp", "Capinha", 70, 1)]),
+        # Domingo 00:00 em Brasília: já é a semana seguinte (fora).
+        *_pedido(1005, _dia_brt(date(2026, 10, 4)), [("dg053.sp", "Capinha", 70, 1)]),
         # Outra loja: fora.
         *_pedido(1006, _dia_brt(date(2026, 9, 29)), [("dg053.sp", "Capinha", 40, 1)],
                  loja="999"),
         # Situação vazia entra; linha sem valor conta R$ 0,00 (com aviso).
         *_pedido(1007, _dia_brt(date(2026, 10, 1)), [("dg099.sp", "Panela", None, 1)],
                  situacao=None),
-        # S2: entregue.
+        # S2 (dom 20/09 a sáb 26/09): entregue.
         *_pedido(2001, _dia_brt(date(2026, 9, 22)), [("dg053.sp", "Capinha", 200, 1)],
                  situacao="83953"),
         # KFA (Mala).
@@ -359,7 +361,7 @@ def _linha(rel: dict, grupo: str, conta: str) -> dict:
 async def test_vendas_do_bling_por_semana(db, dono):
     await _cenario(db, dono)
     v = await vendas_bling.vendas_por_semana(db, LOJA_KIA, SEMANAS)
-    # S1: 300 + 50 (pedido 1001) + 80 (1004, domingo 23:30) + 0 (1007, sem valor).
+    # S1: 300 + 50 (pedido 1001) + 80 (1004, sábado 23:30) + 0 (1007, sem valor).
     assert v[S1]["vendas"] == {"valor": 430.0, "pedidos": 3}
     itens = {it["item_id"]: it for it in v[S1]["vendas_itens"]}
     assert set(itens) == {"uaf001", "dg053.sp", "(sem SKU) Fritadeira Air Fryer avulsa", "dg099.sp"}
@@ -386,12 +388,15 @@ async def test_vendas_do_bling_por_semana(db, dono):
 
 async def test_vendas_da_parcial_so_os_dias_do_trecho(db, dono):
     await _cenario(db, dono)
-    # Quinta 01/10: S1 = seg 28/09 a qua 30/09 — o pedido de 01/10 e o de
-    # domingo ficam de fora.
-    parcial = coletores.semanas_do_job(periodos.semanas("parcial", date(2026, 10, 1)))
+    # Pedido de HOJE (quarta 30/09, 00:00 em Brasília): fora da parcial.
+    db.add_all(_pedido(1008, _dia_brt(date(2026, 9, 30)), [("dg053.sp", "Capinha", 60, 1)]))
+    await db.commit()
+    # Quarta 30/09: S1 = dom 27/09 a ter 29/09 — o pedido de hoje, o de 01/10
+    # e o de sábado ficam de fora.
+    parcial = coletores.semanas_do_job(periodos.semanas("parcial", date(2026, 9, 30)))
     v = await vendas_bling.vendas_por_semana(db, LOJA_KIA, parcial)
     assert v[parcial[0]]["vendas"] == {"valor": 350.0, "pedidos": 1}
-    assert v[parcial[1]]["vendas"] == {"valor": 200.0, "pedidos": 1}  # seg 21 a qua 23/09
+    assert v[parcial[1]]["vendas"] == {"valor": 200.0, "pedidos": 1}  # dom 20 a ter 22/09
 
 
 _AVISO_ESPELHO_PARADO = (
@@ -406,7 +411,7 @@ _AVISO_LOJA_DESCONHECIDA = (
 
 async def test_vendas_espelho_do_bling_parado_nunca_vira_zero(db, dono, fake_ml):
     """O espelho do Bling parou em 01/10 (nenhum pedido de loja nenhuma depois):
-    a S1 (até 04/10) fica SEM Vendas ("—", coleta parcial) — somar daria menos
+    a S1 (até sáb 03/10) fica SEM Vendas ("—", coleta parcial) — somar daria menos
     que o real. As semanas que o espelho cobre seguem com o número."""
     integ = await _cenario(db, dono)
     await db.execute(delete(BlingOrder).where(BlingOrder.data >= _dia_brt(date(2026, 10, 2))))
@@ -519,7 +524,7 @@ async def test_ml_coleta_vendas_ads_e_anuncios(db, dono, fake_ml):
     assert d["avisos"] == [
         "Ads por anúncio: 1 anúncio(s) com variações ou de catálogo sem a lista de itens — o "
         "eletro deles saiu pelo título",
-        "Ads por anúncio: 2 anúncio(s) sem vínculo no DaVinci em 28/09–04/10 (R$ 15,00 de Ads) "
+        "Ads por anúncio: 2 anúncio(s) sem vínculo no DaVinci em 27/09–03/10 (R$ 15,00 de Ads) "
         "— o eletro deles saiu pelo título",
     ]
     assert s1["avisos"][:2] == [
@@ -609,7 +614,7 @@ async def test_ml_sem_permissao_de_publicidade_fica_sem_ads(db, dono, fake_ml):
     ("erro", "motivo"),
     [
         ((404, {"message": "resource not found", "error": "not_found"}), "404 not_found"),
-        ((200, {"paging": {"total": 1}, "results": [{"date": "2026-09-07", "prints": 1}]}),
+        ((200, {"paging": {"total": 1}, "results": [{"date": "2026-09-06", "prints": 1}]}),
          "502 metricas_ausentes"),
     ],
 )

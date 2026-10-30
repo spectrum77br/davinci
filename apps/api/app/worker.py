@@ -3201,8 +3201,9 @@ async def denuncia_relatorio_fechar(ctx: dict) -> None:
 
 
 async def conferencia_shopee_agenda(ctx: dict) -> None:
-    """Conferência Shopee (06/10/2026, docs/conferencia-shopee.md): terça e quinta 13:30 BRT cria
-    a rodada — terça a semana fechada, quinta a parcial seg–qua — com uma coleta por loja ativa; o
+    """Conferência Shopee (06/10/2026, docs/conferencia-shopee.md): segunda e quarta 13:30 BRT
+    cria a rodada — segunda a semana fechada (domingo–sábado), quarta a parcial dom–ter — com uma
+    coleta por loja ativa (até 30/10/2026 era terça e quinta, semana segunda–domingo); o
     executor do Mac passa loja por loja. Só com `conferencia_shopee_cron` (e o Marketing ligado:
     sem o router, o executor não teria de quem puxar). Já tem uma coletando: pula."""
     if not (_settings.enable_marketing and _settings.conferencia_shopee_cron):
@@ -3276,7 +3277,7 @@ async def _conferencia_servidor_agenda(plataforma: str, ligada: bool) -> None:
 
 
 async def conferencia_ml_agenda(ctx: dict) -> None:
-    """Conferência do Mercado Livre (07/10/2026, docs/conferencia-shopee.md): terça e quinta
+    """Conferência do Mercado Livre (07/10/2026, docs/conferencia-shopee.md): segunda e quarta
     13:30 BRT cria a rodada (mesmas semanas da Shopee) e enfileira a coleta do SERVIDOR
     (`conferencia_coletar_servidor`: pedidos do Bling + API de Anúncios do ML, sem AdsPower).
     Só com `conferencia_ml_cron` (e o Marketing ligado). Já tem uma do ML coletando: pula."""
@@ -5491,11 +5492,12 @@ class WorkerSettings:
         cron(tuta_devolucoes_tick, hour=10, minute=0, run_at_startup=False),
         # Relatório do dia do robô de Denúncia: :07 de toda hora (o de ontem fecha 00:07 BRT).
         cron(denuncia_relatorio_fechar, minute=7, run_at_startup=True, timeout=300),
-        # Conferência Shopee: terça (1) e quinta (3) 16:30 UTC = 13:30 BRT. Dias em número — o
-        # arq 0.28 quebra com weekday={'tue', 'thu'} (nome só vale para um dia).
+        # Conferência Shopee: segunda (0) e quarta (2) 16:30 UTC = 13:30 BRT (até 30/10/2026
+        # era terça e quinta; a semana passou a ser domingo–sábado). Dias em número — o
+        # arq 0.28 quebra com weekday={'mon', 'wed'} (nome só vale para um dia).
         cron(
             conferencia_shopee_agenda,
-            weekday={1, 3},
+            weekday={0, 2},
             hour=16,
             minute=30,
             run_at_startup=False,
@@ -5505,7 +5507,7 @@ class WorkerSettings:
         # CONFERENCIA_ML_CRON / CONFERENCIA_AMAZON_CRON (desligadas de fábrica).
         cron(
             conferencia_ml_agenda,
-            weekday={1, 3},
+            weekday={0, 2},
             hour=16,
             minute=30,
             run_at_startup=False,
@@ -5513,7 +5515,7 @@ class WorkerSettings:
         ),
         cron(
             conferencia_amazon_agenda,
-            weekday={1, 3},
+            weekday={0, 2},
             hour=16,
             minute=30,
             run_at_startup=False,

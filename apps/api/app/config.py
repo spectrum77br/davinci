@@ -298,8 +298,8 @@ class Settings(BaseSettings):
     # Mac lê a Central do Vendedor de cada loja pelo perfil do AdsPower e o
     # servidor monta o relatório. Usa o mesmo `marketing_agent_token` acima.
     #
-    # `conferencia_shopee_cron`: a agenda do worker (terça = semana fechada,
-    # quinta = parcial seg–qua, 13:30 BRT) só cria a rodada com true. O botão
+    # `conferencia_shopee_cron`: a agenda do worker (segunda = semana fechada
+    # domingo–sábado, quarta = parcial dom–ter, 13:30 BRT) só cria a rodada com true. O botão
     # "Gerar agora" da tela funciona com ela desligada. O worker lê na SUBIDA:
     # mudou, reinicia o worker. Liga com CONFERENCIA_SHOPEE_CRON=true.
     conferencia_shopee_cron: bool = False
@@ -314,7 +314,7 @@ class Settings(BaseSettings):
     conferencia_shopee_login_auto: bool = True
     # Conferência do Mercado Livre e da Amazon (07/10/2026): o mesmo relatório,
     # coletado pelo SERVIDOR (pedidos do Bling + API de Anúncios do ML; sem
-    # AdsPower). A agenda (terça/quinta 13:30 BRT, como a Shopee) só cria a
+    # AdsPower). A agenda (segunda/quarta 13:30 BRT, como a Shopee) só cria a
     # rodada com true; "Gerar agora" funciona com elas desligadas. O worker lê
     # na SUBIDA. CONFERENCIA_ML_CRON=true / CONFERENCIA_AMAZON_CRON=true.
     conferencia_ml_cron: bool = False

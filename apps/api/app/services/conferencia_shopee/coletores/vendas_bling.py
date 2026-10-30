@@ -169,7 +169,7 @@ async def vendas_por_semana(
     for dia_pedido, linha_id, bling_id, codigo, descricao, item_valor, quantidade in linhas:
         semana = _semana_do_dia(dia_pedido, semanas) if dia_pedido is not None else None
         if semana is None:
-            continue  # dia fora das semanas (parcial: qui–dom de cada semana)
+            continue  # dia fora das semanas (parcial de quarta: qua–sáb de cada semana)
         pedido = str(bling_id) if bling_id is not None else f"linha:{linha_id}"
         if item_valor is None:
             sem_valor[semana] += 1
