@@ -10,7 +10,8 @@
 // branco no quadrado laranja; AliExpress = "Ae" branco no quadrado vermelho
 // (30/09/2026 — só a cor e a inicial, nada do logo das marcas); Magalu = "M"
 // branco no quadrado azul (30/09/2026, idem: o azul da marca e a inicial);
-// Carrefour = "C" branco no quadrado azul-escuro (30/10/2026, idem).
+// Carrefour = o logo da marca desenhado aqui (30/10/2026: chevron vermelho,
+// forma azul e o "C" branco no vão — o dono pediu "igual do carrefour").
 // Facebook = "f" branco no círculo azul; Site = globo branco no quadrado
 // verde-azulado (02/10/2026: os sites Charlots e Uranyx — não é marca).
 // WhatsApp = balão branco com o fone no círculo verde (19/10/2026, o Zap —
@@ -107,10 +108,12 @@ const letra = computed(() => (cod.value[0] || '?').toUpperCase())
       <text x="12" y="17.2" text-anchor="middle" font-size="14" font-weight="800" font-family="Arial, Helvetica, sans-serif" fill="#fff">M</text>
     </template>
 
-    <!-- Carrefour: "C" branco no quadrado azul-escuro -->
+    <!-- Carrefour: o logo da marca (30/10/2026, o Eduardo: "deixa igual do
+         carrefour") — chevron vermelho, a forma azul e o "C" branco no vão -->
     <template v-else-if="cod === 'carrefour'">
-      <rect x="2" y="2" width="20" height="20" rx="5" fill="#004E9F" />
-      <text x="12" y="17.2" text-anchor="middle" font-size="14" font-weight="800" font-family="Arial, Helvetica, sans-serif" fill="#fff">C</text>
+      <rect x="2" y="2" width="20" height="20" rx="5" fill="#fff" stroke="#E5E7EB" stroke-width="0.5" />
+      <path d="M3.4 12 L10.6 4.6 H14.2 L8.6 12 L14.2 19.4 H10.6 Z" fill="#E30613" />
+      <path d="M16 5.2 C12.7 7 11.1 9.3 11.1 12 C11.1 14.7 12.7 17 16 18.8 L21.2 12 Z" fill="#004E9F" />
     </template>
 
     <!-- Temu: "T" branco no quadrado laranja -->
