@@ -692,6 +692,8 @@ export type PlataformaInfo = { value: string; nome: string; curto: string; cor: 
 // `sellerCenterDe` abaixo): têm loja e canal, mas nunca envio pelo DaVinci.
 // Magalu (30/09/2026) é lida e respondida por API, como Shopee e ML (ver
 // `portalMagaluDe` abaixo). A cor é o azul da marca, só a cor.
+// Carrefour (30/10/2026): as mensagens da Mirakl, lidas e respondidas por API
+// (uma caixa por loja, `chat`). A cor é o azul-escuro da marca, só a cor.
 // Site e Facebook (02/10/2026) são canais EXTERNOS: o carrinho abandonado
 // dos sites Charlots e Uranyx (lido do site) e os comentários da Página
 // (como os do Instagram). Têm canal na aba Lojas, mas não manual nem modelo.
@@ -705,6 +707,7 @@ export const PLATAFORMAS_ATENDIMENTO: PlataformaInfo[] = [
   { value: 'tiktok', nome: 'TikTok', curto: 'TikTok', cor: 'bg-black dark:bg-white', de: 'do TikTok' },
   { value: 'amazon', nome: 'Amazon', curto: 'Amazon', cor: 'bg-amber-500', de: 'da Amazon' },
   { value: 'magalu', nome: 'Magalu', curto: 'Magalu', cor: 'bg-[#0086FF]', de: 'da Magalu' },
+  { value: 'carrefour', nome: 'Carrefour', curto: 'Carrefour', cor: 'bg-[#004E9F]', de: 'do Carrefour' },
   { value: 'temu', nome: 'Temu', curto: 'Temu', cor: 'bg-orange-500', de: 'da Temu' },
   { value: 'aliexpress', nome: 'AliExpress', curto: 'AliExpress', cor: 'bg-red-600', de: 'do AliExpress' },
   { value: 'instagram', nome: 'Instagram', curto: 'Insta', cor: 'bg-pink-500', de: 'do Instagram' },

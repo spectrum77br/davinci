@@ -24,7 +24,9 @@ from dataclasses import dataclass, field
 # robô — o erro, se houver, é a loja não aparecer, nunca uma chamada à Temu.
 # Magalu (30/09/2026): três APIs do vendedor — perguntas, chat e SAC —, lidas
 # pelo `MagaluClient` da integração (`services/atendimento/magalu.py`).
-PLATAFORMAS = ("shopee", "ml", "tiktok", "amazon", "magalu")
+# Carrefour (30/10/2026): as mensagens da Mirakl (inbox), lidas e respondidas
+# pelo `CarrefourClient` da integração (`services/atendimento/carrefour.py`).
+PLATAFORMAS = ("shopee", "ml", "tiktok", "amazon", "magalu", "carrefour")
 
 # Lidas pelo ROBÔ do Mac mini (30/09/2026): um perfil do AdsPower por loja
 # com a lista de conversas do Seller Center aberta; o robô só ESCUTA o que a
@@ -244,6 +246,9 @@ CANAIS_POR_PLATAFORMA: dict[str, tuple[str, ...]] = {
     # Magalu: pergunta pré-venda (no anúncio), chat com o cliente (aberto pelo
     # produto, segue depois da compra) e SAC (protocolo de pós-venda).
     "magalu": (CANAL_PERGUNTA, CANAL_CHAT, CANAL_SAC),
+    # Carrefour: as threads de mensagem da Mirakl (do pedido, da oferta, com o
+    # Carrefour) numa caixa só — a thread diz com quem é.
+    "carrefour": (CANAL_CHAT,),
     # Um canal por loja do robô, sem integração por trás (a migration 0347
     # explica): `atendimento_canais.robo_perfil_id` é o perfil do AdsPower.
     "temu": (CANAL_CHAT,),
@@ -363,6 +368,8 @@ LIMITE_CARACTERES: dict[tuple[str, str], int] = {
     # não tem limite documentado: fica o padrão da caixa.
     ("magalu", CANAL_CHAT): 2200,
     ("magalu", CANAL_SAC): 3000,
+    # Carrefour (M12): a API aceita de 3 a 50.000; a caixa é de chat, fica 2000.
+    ("carrefour", CANAL_CHAT): 2000,
     # Resposta PÚBLICA à avaliação da Shopee (`reply_comment`): 500, o teto
     # do campo no Seller Center (a confirmar na documentação da API).
     ("shopee", CANAL_AVALIACAO): 500,

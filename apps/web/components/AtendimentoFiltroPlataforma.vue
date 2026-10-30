@@ -7,7 +7,7 @@
 // Uma fileira de chips logo acima da Caixa (a largura toda: numa linha só no
 // computador; na tela estreita ela rola de lado): Todas · Mercado Livre ·
 // Shopee · TikTok · Amazon ·
-// Magalu · Temu · AliExpress · Sites · Redes — só as que existem para a
+// Magalu · Carrefour · Temu · AliExpress · Sites · Redes — só as que existem para a
 // pessoa (há loja dela no /resumo, ou conversa esperando), cada um com o
 // "falta responder" da plataforma. Funciona junto com o resto (Todas/Falta
 // responder, Filtrar, busca) e fica lembrado no navegador (a página guarda
@@ -55,6 +55,7 @@ export const GRUPOS_CAIXA: GrupoCaixa[] = [
   { valor: 'tiktok', plataformas: ['tiktok'], nome: 'TikTok' },
   { valor: 'amazon', plataformas: ['amazon'], nome: 'Amazon' },
   { valor: 'magalu', plataformas: ['magalu'], nome: 'Magalu' },
+  { valor: 'carrefour', plataformas: ['carrefour'], nome: 'Carrefour' },
   { valor: 'temu', plataformas: ['temu'], nome: 'Temu' },
   { valor: 'aliexpress', plataformas: ['aliexpress'], nome: 'AliExpress' },
   { valor: 'site', plataformas: ['site'], nome: 'Sites' },

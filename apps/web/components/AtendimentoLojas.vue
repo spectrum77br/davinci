@@ -439,12 +439,12 @@ const emit = defineEmits<{
 }>()
 
 // Ordem do Duoke: Shopee, TikTok, Mercado Livre; depois as que o Duoke não
-// tem — Amazon, Magalu (por API, como as de cima), as lojas do robô (Temu,
+// tem — Amazon, Magalu e Carrefour (por API, como as de cima), as lojas do robô (Temu,
 // AliExpress) —, os sites, as redes (Instagram com o Direct, Facebook) e o
 // WhatsApp (19/10/2026, o Zap): UMA linha por número — o /resumo manda cada
 // número com o `externo_ref` dele ("zap:<phone_number_id>"), e a linha filtra
 // a lista por ela, como o site.
-const ORDEM = ['shopee', 'tiktok', 'ml', 'amazon', 'magalu', 'temu', 'aliexpress', 'site', 'instagram', 'facebook', 'whatsapp']
+const ORDEM = ['shopee', 'tiktok', 'ml', 'amazon', 'magalu', 'carrefour', 'temu', 'aliexpress', 'site', 'instagram', 'facebook', 'whatsapp']
 
 type LojaBarra = {
   // Chave da linha: o integration_id; a loja do robô que vier sem integração

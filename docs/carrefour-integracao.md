@@ -5,6 +5,8 @@ API oficial em `https://marketplace.carrefour.com.br/api`. O endereço é fixo;
 URLs vindas de credenciais, respostas ou redirecionamentos não são seguidas.
 Esta etapa consulta a conta, importa anúncios e permite consultar pedidos.
 Não publica ofertas, estoque, preços, notas fiscais, envio ou reembolsos.
+Desde 30/10/2026 lê e responde as mensagens da loja no `/atendimento` (seção
+"Mensagens"): a resposta na thread (M12) é a única escrita remota liberada.
 
 ## Credenciais e identificação da loja
 
@@ -83,6 +85,47 @@ segundos ou data HTTP; leituras de ofertas/pedidos repetem no máximo uma vez
 quando a espera é de até 5 segundos. Esperas maiores retornam erro com o atraso,
 sem tentar antes do horário. Corpos de erro e mensagens brutas de transporte
 não são incluídos nos erros do cliente, evitando expor segredos.
+
+## Mensagens no atendimento (30/10/2026)
+
+Cada loja Carrefour ganha um canal `chat` no `/atendimento` (nasce em
+`observar`, como os outros; com a loja em `humano` a equipe responde pela
+caixa). O adaptador é `apps/api/app/services/atendimento/carrefour.py`; uma
+conversa por thread da Mirakl.
+
+- **M11** `GET /inbox/threads` (`list_threads`): `updated_since` (o cursor do
+  canal, com 15 min de folga; primeira leitura de 30 dias), `with_messages=true`
+  (as últimas 100 mensagens de cada thread, sem consulta por conversa) e
+  `limit=100`. Paginação por `page_token` (com ele a Mirakl ignora os outros
+  filtros); o cursor só anda com a lista inteira. Não chama A01: o `shop_id`
+  vai explícito, e o limite diário do A01 (com a falha guardada por 24 h)
+  calaria o chat depois de um timeout.
+- **A vez da loja** é a da Mirakl: `metadata.shop_reply_needed_since` (nulo
+  quando a loja respondeu ou marcou "não precisa de resposta") vai em
+  `dados.vez_da_loja_desde`, como o SAC da Magalu. `CUSTOMER_USER` = cliente,
+  `SHOP_USER` = loja, `OPERATOR_USER` (atendimento do Carrefour) = mediador.
+- **M12** `POST /inbox/threads/{id}/message` (`reply_thread`): multipart com a
+  parte `message_input` (JSON `body` + `to`); corpo de 3 a 50.000 caracteres
+  (a caixa limita a 2.000). Vai para quem falou por último que não é a loja (o
+  comprador, ou o Carrefour cobrando) e só para quem a thread autoriza. Nunca
+  repete: timeout e 5xx ficam `revisar`. O `message_id` do 201 é o id externo
+  da linha; a leitura seguinte a reconhece por ele (sem ele, pelo texto).
+- Papéis da chave (OpenAPI): leitura `ROLE_SHOP_ADMIN` ou
+  `ROLE_PARTNER_MESSAGE_READ`/`ROLE_PARTNER_OFFER_MESSAGE_READ`; resposta
+  `ROLE_SHOP_ADMIN` ou `..._MESSAGE_WRITE`. 401/403 deixam o canal
+  `sem_escopo` ("gere a chave de API no portal… e atualize em Integrações");
+  o sync tenta de hora em hora, ou na hora em que a integração é atualizada.
+  429 segura o canal até o `Retry-After`.
+- Conferido em produção em 30/10/2026, só leitura e sem texto de comprador:
+  Poofy responde 200 no M11 (0 threads; a loja não tem pedidos ainda); a chave
+  do VR dá 401 em M11, OR11 e OF21 (o A01 de 26/10 tinha passado: a chave foi
+  trocada ou revogada no portal depois disso).
+
+Testes: `tests/test_atendimento_carrefour.py` (Mirakl falsa por respx).
+
+Fontes: [M11](https://developer.mirakl.com/content/product/mmp/rest/seller/openapi3/messages/m11),
+[M12](https://developer.mirakl.com/content/product/mmp/rest/seller/openapi3/messages/m12),
+[paginação](https://developer.mirakl.com/content/product/mmp/rest/seller/openapi3).
 
 ## Próximas etapas e referências
 

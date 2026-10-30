@@ -263,6 +263,9 @@ ADAPTADORES: dict[str, str] = {
     # MODERAÇÃO da Magalu: "enviada" aqui é "a Magalu recebeu" (o payload do
     # envio diz `moderacao`), e o validador já barra o que ela barraria.
     "magalu": "app.services.atendimento.magalu",
+    # As mensagens da Mirakl (30/10/2026): a resposta na thread (M12) é a
+    # ÚNICA escrita liberada no cliente do Carrefour — estoque e preço não.
+    "carrefour": "app.services.atendimento.carrefour",
 }
 
 # ── Códigos de recusa (estáveis: a tela traduz, o router devolve 409/422) ──

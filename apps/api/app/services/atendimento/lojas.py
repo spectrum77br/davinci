@@ -78,6 +78,7 @@ _PREFIXOS: dict[str, tuple[str, ...]] = {
     "amazon": ("amazon",),
     "tiktok": ("tiktok shop", "tik tok shop", "tiktok", "tik tok", "tts"),
     "magalu": ("magazine luiza", "magalu"),
+    "carrefour": ("carrefour",),
     "shein": ("shein",),
     "temu": ("temu",),
 }

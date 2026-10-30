@@ -3552,6 +3552,7 @@ _PLATAFORMA_NOME = {
     "tiktok": "TikTok Shop",
     "amazon": "Amazon",
     "magalu": "Magalu",
+    "carrefour": "Carrefour",
     "temu": "Temu",
     "aliexpress": "AliExpress",
 }
@@ -3577,6 +3578,10 @@ _CANAL_DESCRICAO = {
         "protocolo de SAC da Magalu sobre um pedido já feito — a Magalu acompanha a "
         "conversa e pode intervir; a resposta vai para o comprador"
     ),
+    ("carrefour", "chat"): (
+        "mensagem do Carrefour — do comprador sobre um pedido ou um anúncio, ou do "
+        "atendimento do Carrefour cobrando a loja; a resposta vai para quem escreveu por último"
+    ),
     # Lidas pelo robô do Mac mini: a equipe COPIA a sugestão para o Seller Center.
     ("temu", "chat"): "chat da Temu com o comprador (a equipe envia pelo Seller Center)",
     ("aliexpress", "chat"): (
@@ -3596,6 +3601,7 @@ _REGRAS_PLATAFORMA = {
         "comprador — nada de CPF, CNPJ, Pix, e-mail, telefone, link nem contato fora "
         "da Magalu."
     ),
+    "carrefour": "- Carrefour: nada de link nem de contato fora do Carrefour.",
     "temu": "- Temu: nada de link nem de contato fora da Temu.",
     "aliexpress": "- AliExpress: nada de link nem de contato fora do AliExpress.",
 }

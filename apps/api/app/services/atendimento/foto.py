@@ -302,6 +302,10 @@ _SEM_ANEXO: dict[str, str] = {
         "Magalu: anexo pelo DaVinci ainda não está liberado. Para mandar a NF (PDF), anexe "
         "pelo portal do parceiro Magalu, no SAC/atendimento do pedido."
     ),
+    "carrefour": (
+        "Carrefour: anexo pelo DaVinci ainda não está liberado. Para mandar a NF (PDF), anexe "
+        "pela mensagem do pedido no portal do Carrefour."
+    ),
 }
 
 

@@ -105,6 +105,7 @@ export const PLATAFORMAS_AG: { valor: string; nome: string }[] = [
   { valor: 'tiktok', nome: 'TikTok' },
   { valor: 'amazon', nome: 'Amazon' },
   { valor: 'magalu', nome: 'Magalu' },
+  { valor: 'carrefour', nome: 'Carrefour' },
   { valor: 'temu', nome: 'Temu' },
   { valor: 'aliexpress', nome: 'AliExpress' },
   { valor: 'site', nome: 'Sites' },

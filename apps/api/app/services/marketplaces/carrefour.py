@@ -1,8 +1,12 @@
-"""Carrefour Brasil / Mirakl: authenticated reads, with remote writes disabled.
+"""Carrefour Brasil / Mirakl: authenticated reads; the only remote write is M12.
 
 Credentials: api_key, shop_id. The server-owned _carrefour_account_check caches
 A01 for 24 hours; on_token_refresh persists this metadata, not a rotated key.
 Never accept that cache from user input. See docs/carrefour-integracao.md.
+
+Messages (30/10/2026, the atendimento chat): M11 lists inbox threads and M12
+replies on an existing thread. Offers, stock, prices, invoices and shipping
+stay read-only (`update_stock` never calls HTTP).
 """
 
 from __future__ import annotations
@@ -10,7 +14,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import json
 import math
+import re
 import time
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -30,7 +36,18 @@ ACCOUNT_CACHE_KEY = "_carrefour_account_check"
 ACCOUNT_CACHE_SECONDS = 86400
 _ACCOUNT_CACHE: dict[str, dict] = {}
 _ACCOUNT_LOCK = asyncio.Lock()
-_READ_PATHS = frozenset({"/account", "/offers", "/orders"})
+INBOX_THREADS_PATH = "/inbox/threads"
+_READ_PATHS = frozenset({"/account", "/offers", "/orders", INBOX_THREADS_PATH})
+# M11 seek pagination: `limit` up to 100; with `page_token` Mirakl ignores the
+# other filters. The token is opaque, but it only ever goes back to the fixed host.
+INBOX_PAGE_MAX = 100
+# Thread ids are UUIDs; anything else never becomes part of a request path.
+_RE_THREAD_ID = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+_RE_PAGE_TOKEN = re.compile(r"^[A-Za-z0-9._~+/=-]{1,2048}$")
+REPLY_RECIPIENT_TYPES = frozenset({"CUSTOMER", "OPERATOR"})
+# M12 `message_input.body`: minLength 3, maxLength 50000.
+REPLY_BODY_MIN = 3
+REPLY_BODY_MAX = 50000
 
 
 class CarrefourError(RuntimeError):
@@ -427,6 +444,72 @@ class CarrefourClient:
             "/orders", "orders", page_size=page_size, max_pages=max_pages, filters=filters,
         ):
             yield order
+
+    async def list_threads(
+        self, *, updated_since: datetime | None = None, page_token: str | None = None,
+        limit: int = INBOX_PAGE_MAX, with_messages: bool = True,
+    ) -> dict:
+        """M11, one raw page: `data`, `next_page_token`. The caller owns the cursor.
+
+        No A01 here: shop_id is explicit, and A01's daily limit (with its cached
+        negative result) would silence the chat for 24 h after one timeout.
+        """
+        params: dict = {"limit": min(max(int(limit), 1), INBOX_PAGE_MAX)}
+        if page_token is not None:
+            if not isinstance(page_token, str) or not _RE_PAGE_TOKEN.match(page_token):
+                raise CarrefourError("invalid_page", "O Carrefour retornou uma página inválida.")
+            params["page_token"] = page_token
+        else:
+            if updated_since is not None:
+                if updated_since.tzinfo is None:
+                    raise CarrefourError(
+                        "invalid_date", "Informe a data de atualização com fuso horário."
+                    )
+                params["updated_since"] = (
+                    updated_since.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                )
+            if with_messages:
+                params["with_messages"] = "true"
+        data = await self._read_json(INBOX_THREADS_PATH, params)
+        rows = data.get("data")
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise CarrefourError("invalid_page", "O Carrefour retornou uma página inválida.")
+        return data
+
+    async def reply_thread(
+        self, thread_id: str, body: str, recipients: list[dict],
+    ) -> httpx.Response:
+        """M12: one message on an existing thread — the only remote write enabled.
+
+        Never retried (a message to a buyer cannot be unsent). Transport errors
+        propagate as httpx exceptions so the caller can tell "not sent"
+        (connection refused) from "maybe sent" (timeout after the request).
+        """
+        if not isinstance(thread_id, str) or not _RE_THREAD_ID.match(thread_id):
+            raise ValueError("invalid_thread_id")
+        if not isinstance(body, str) or not (REPLY_BODY_MIN <= len(body) <= REPLY_BODY_MAX):
+            raise ValueError("invalid_body_length")
+        to = []
+        for recipient in recipients:
+            kind = recipient.get("type") if isinstance(recipient, dict) else None
+            if kind not in REPLY_RECIPIENT_TYPES:
+                raise ValueError("invalid_recipient")
+            item = {"type": kind}
+            ident = recipient.get("id")
+            if isinstance(ident, str) and ident.strip():
+                item["id"] = ident.strip()
+            to.append(item)
+        if not to:
+            raise ValueError("invalid_recipient")
+        api_key, shop_id = self._credentials()
+        message_input = json.dumps({"body": body, "to": to}, ensure_ascii=False)
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            return await client.post(
+                f"{CARREFOUR_API_BASE}{INBOX_THREADS_PATH}/{thread_id}/message",
+                params={"shop_id": shop_id},
+                files={"message_input": (None, message_input, "application/json")},
+                headers={"Authorization": api_key, "Accept": "application/json"},
+            )
 
     async def update_stock(
         self, link: ProductLink, qty: int, *, bling_store_id: int | None = None,

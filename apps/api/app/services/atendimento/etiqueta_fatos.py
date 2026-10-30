@@ -199,6 +199,7 @@ _NOME_PLATAFORMA = {
     "tiktok": "TikTok",
     "amazon": "Amazon",
     "magalu": "Magalu",
+    "carrefour": "Carrefour",
     "temu": "Temu",
     "aliexpress": "AliExpress",
     "instagram": "Instagram",

@@ -42,6 +42,7 @@ _PLATAFORMAS = {
     "tiktok": "pelo TikTok Shop",
     "amazon": "pela Amazon",
     "magalu": "pelo Magalu",
+    "carrefour": "pelo Carrefour",
     "temu": "pela Temu",
     "aliexpress": "pelo AliExpress",
 }

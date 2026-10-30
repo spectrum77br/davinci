@@ -101,7 +101,7 @@ function filtros(o = {}) {
 {
   // A ordem do Eduardo, e "Redes" = Instagram + Facebook; o WhatsApp (o Zap,
   // 19/10/2026) no fim.
-  assert.deepEqual(F.GRUPOS_CAIXA.map((g) => g.nome), ['Mercado Livre', 'Shopee', 'TikTok', 'Amazon', 'Magalu', 'Temu', 'AliExpress', 'Sites', 'Redes', 'WhatsApp'])
+  assert.deepEqual(F.GRUPOS_CAIXA.map((g) => g.nome), ['Mercado Livre', 'Shopee', 'TikTok', 'Amazon', 'Magalu', 'Carrefour', 'Temu', 'AliExpress', 'Sites', 'Redes', 'WhatsApp'])
   assert.deepEqual(F.GRUPOS_CAIXA.find((g) => g.nome === 'WhatsApp').plataformas, ['whatsapp'])
   assert.deepEqual(F.GRUPOS_CAIXA.find((g) => g.nome === 'Redes').plataformas, ['instagram', 'facebook'])
   assert.equal(F.GRUPOS_CAIXA.find((g) => g.nome === 'Redes').valor, 'instagram,facebook')

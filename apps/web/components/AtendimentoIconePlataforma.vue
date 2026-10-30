@@ -9,7 +9,8 @@
 // com o sorriso laranja; Instagram = câmera no quadrado degradê; Temu = "T"
 // branco no quadrado laranja; AliExpress = "Ae" branco no quadrado vermelho
 // (30/09/2026 — só a cor e a inicial, nada do logo das marcas); Magalu = "M"
-// branco no quadrado azul (30/09/2026, idem: o azul da marca e a inicial).
+// branco no quadrado azul (30/09/2026, idem: o azul da marca e a inicial);
+// Carrefour = "C" branco no quadrado azul-escuro (30/10/2026, idem).
 // Facebook = "f" branco no círculo azul; Site = globo branco no quadrado
 // verde-azulado (02/10/2026: os sites Charlots e Uranyx — não é marca).
 // WhatsApp = balão branco com o fone no círculo verde (19/10/2026, o Zap —
@@ -25,6 +26,7 @@ const NOMES: Record<string, string> = {
   tiktok: 'TikTok',
   amazon: 'Amazon',
   magalu: 'Magalu',
+  carrefour: 'Carrefour',
   temu: 'Temu',
   aliexpress: 'AliExpress',
   instagram: 'Instagram',
@@ -103,6 +105,12 @@ const letra = computed(() => (cod.value[0] || '?').toUpperCase())
     <template v-else-if="cod === 'magalu'">
       <rect x="2" y="2" width="20" height="20" rx="5" fill="#0086FF" />
       <text x="12" y="17.2" text-anchor="middle" font-size="14" font-weight="800" font-family="Arial, Helvetica, sans-serif" fill="#fff">M</text>
+    </template>
+
+    <!-- Carrefour: "C" branco no quadrado azul-escuro -->
+    <template v-else-if="cod === 'carrefour'">
+      <rect x="2" y="2" width="20" height="20" rx="5" fill="#004E9F" />
+      <text x="12" y="17.2" text-anchor="middle" font-size="14" font-weight="800" font-family="Arial, Helvetica, sans-serif" fill="#fff">C</text>
     </template>
 
     <!-- Temu: "T" branco no quadrado laranja -->
