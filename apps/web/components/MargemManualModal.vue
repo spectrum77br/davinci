@@ -82,7 +82,9 @@ const emit = defineEmits<{ (e: 'close'): void }>()
             <li><span class="font-medium text-foreground">Informar</span> — escolhe quem recebe no Threema os avisos automáticos do robô (pedido segurado, reprovado automático e margem alta). O envio é sempre do robô.</li>
             <li><span class="font-medium text-foreground">planilha</span> (admins) — baixa a rentabilidade por pedido no período escolhido.</li>
             <li><span class="font-medium text-foreground">atualizar</span> — força a atualização agora. A aba já se atualiza sozinha a cada 1 minuto.</li>
+            <li><span class="font-medium text-foreground">Excel</span> — baixa todas as linhas dos filtros escolhidos (não só a página da tela), com as mesmas colunas da tabela.</li>
           </ul>
+          <p class="text-muted-foreground">O filtro <span class="font-medium text-foreground">situações do Bling</span> separa pela coluna Situação (ex.: Aguardando Cancelamento, Cancelado); só aparecem as que existem nos outros filtros.</p>
         </section>
       </div>
     </div>

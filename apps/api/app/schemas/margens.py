@@ -50,6 +50,9 @@ class MargensMarketplacePage(BaseModel):
     offset: int
     platforms: list[str]
     contas: list[str]
+    # Situações do Bling (nome) presentes no recorte — opções do filtro
+    # "Situação" da aba Margem. Vazio no lookup.
+    situacoes: list[str] = []
     # Lookup-only: True when snapshot didn't have the pedido but bling_orders
     # does — frontend offers a "buscar no historico" CTA that re-requests
     # with force_refresh=true (slow path, ~3min).

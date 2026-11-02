@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import Annotated
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
@@ -23,6 +24,7 @@ from app.models import (
     MargemSaldoManual,
     Margens,
     User,
+    UserRole,
 )
 from app.schemas.margens import (
     ALLOWED_STATUS,
@@ -39,6 +41,7 @@ from app.services.bling_situacoes import (
     SITUACOES_ENVIADO_ETIQUETA_STR,
 )
 from app.services.margem_audit import record_margem_audit
+from app.services.margem_xlsx import build_margem_xlsx
 from app.services.marketplaces.bling import BlingClient
 from app.services.rentabilidade_xlsx import build_rentabilidade_xlsx
 from app.services.verificar_margem import (
@@ -114,6 +117,7 @@ _SITUACAO_TRIAGEM_SQL = (
     f" OR (v.situacao = '{SITUACAO_REPROVADO}' AND v.bling_status_margem = 'Pendente'))"
 )
 _SITUACAO_FILTERS = ("triagem", "all")
+_SP_TZ = ZoneInfo("America/Sao_Paulo")
 
 # "Needs attention" flag — rows the user must triage. Three independent triggers:
 #   1) margin below the configured minimum
@@ -612,25 +616,16 @@ async def list_margens(
     return [MargensOut.model_validate(r) for r in rows]
 
 
-@router.get("/marketplace", response_model=MargensMarketplacePage)
-async def list_margens_marketplace(
-    session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("margem", "view"))],
-    limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
-    search: str | None = Query(None),
-    platform: str | None = Query(None),
-    conta: str | None = Query(None),
-    status: str | None = Query(None),
-    attention_type: str | None = Query(None),
-    situacao: str | None = Query(None),
-) -> MargensMarketplacePage:
-    """Per-item marketplace conciliation rows (paginated, 20d window).
-
-    Reads from davinci.verificar_margem (snapshot of the view).
-    The snapshot is repopulated every 30min by the worker cron, fully
-    rebuilt by the 'atualizar' UI button. User-facing PATCHes update the
-    affected snapshot columns directly so edits appear immediately.
+def _marketplace_list_where(
+    *,
+    search: str | None,
+    platform: str | None,
+    conta: str | None,
+    status: str | None,
+    attention_type: str | None,
+    situacao: str | None,
+) -> tuple[list[str], dict]:
+    """WHERE da aba Margem (lista e Excel usam o mesmo recorte).
 
     `situacao`: "triagem" (default) = só Em aberto + etiqueta enviada (21 Em
     digitação; 83965 Enviado Etiqueta legado) (+ os segurados pelo robô) —
@@ -641,6 +636,10 @@ async def list_margens_marketplace(
     pra "Aguardando Cancelamento"/"Cancelado", então filtrar situação em cima
     dele devolvia sempre 0 (Eduardo, 09/09). Nesse filtro a situação não conta:
     "triagem" = reprovados dos últimos 30 dias, "all" = todos.
+
+    A Situação do Bling escolhida pelo nome (`situacao_bling`) não entra aqui:
+    quem chama soma por cima, porque a lista de opções do filtro é contada
+    sem ela.
     """
     if situacao is not None and situacao not in _SITUACAO_FILTERS:
         raise HTTPException(400, detail={"code": "invalid_situacao"})
@@ -685,7 +684,7 @@ async def list_margens_marketplace(
             # Só o que ainda está em triagem (Em aberto / Em digitação=etiqueta
             # enviada, 83965 legado / segurado pelo robô) — _SITUACAO_TRIAGEM_SQL.
             where.append(_SITUACAO_TRIAGEM_SQL)
-    params: dict = {"limit": limit, "offset": offset}
+    params: dict = {}
     if platform:
         where.append("COALESCE(v.plataforma_bling, v.plataforma_financeiro) = :platform")
         params["platform"] = platform
@@ -729,10 +728,57 @@ async def list_margens_marketplace(
             "OR v.pricing_account_name ILIKE :q)"
         )
         params["q"] = f"%{search}%"
+    return where, params
+
+
+@router.get("/marketplace", response_model=MargensMarketplacePage)
+async def list_margens_marketplace(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(require_permission("margem", "view"))],
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    search: str | None = Query(None),
+    platform: str | None = Query(None),
+    conta: str | None = Query(None),
+    status: str | None = Query(None),
+    attention_type: str | None = Query(None),
+    situacao: str | None = Query(None),
+    situacao_bling: str | None = Query(None),
+) -> MargensMarketplacePage:
+    """Per-item marketplace conciliation rows (paginated, 20d window).
+
+    Reads from davinci.verificar_margem (snapshot of the view).
+    The snapshot is repopulated every 30min by the worker cron, fully
+    rebuilt by the 'atualizar' UI button. User-facing PATCHes update the
+    affected snapshot columns directly so edits appear immediately.
+
+    Filtros: ver `_marketplace_list_where`. `situacao_bling` (Cairo, 02/11)
+    = nome da situação no Bling ("Aguardando Cancelamento", "Cancelado"…);
+    `situacoes` devolve as que existem no recorte dos OUTROS filtros, pra o
+    dropdown só oferecer o que tem linha.
+    """
+    where, params = _marketplace_list_where(
+        search=search,
+        platform=platform,
+        conta=conta,
+        status=status,
+        attention_type=attention_type,
+        situacao=situacao,
+    )
+    base_where_sql = " AND ".join(where)
+    if situacao_bling:
+        where.append("v.situacao_nome = :situacao_bling")
+        params["situacao_bling"] = situacao_bling
     where_sql = " AND ".join(where)
 
     count_sql = text(
         f"SELECT count(*) FROM {_VERIFICAR_MARGEM_TABLE} v WHERE {where_sql}"  # noqa: S608
+    )
+    situacoes_sql = text(
+        "SELECT DISTINCT v.situacao_nome "  # noqa: S608
+        f"FROM {_VERIFICAR_MARGEM_TABLE} v "
+        f"WHERE {base_where_sql} AND v.situacao_nome IS NOT NULL "
+        "ORDER BY 1"
     )
     platforms_sql = text(
         "SELECT DISTINCT COALESCE(plataforma_bling, plataforma_financeiro) AS p "  # noqa: S608
@@ -751,9 +797,13 @@ async def list_margens_marketplace(
     )
 
     total = (await session.execute(count_sql, params)).scalar_one()
-    rows = (await session.execute(items_sql, params)).mappings().all()
+    rows = (
+        await session.execute(items_sql, {**params, "limit": limit, "offset": offset})
+    ).mappings().all()
     platforms = [r[0] for r in (await session.execute(platforms_sql)).all()]
     contas = [r[0] for r in (await session.execute(contas_sql)).all()]
+    situacao_params = {k: v for k, v in params.items() if k != "situacao_bling"}
+    situacoes = [r[0] for r in (await session.execute(situacoes_sql, situacao_params)).all()]
 
     return MargensMarketplacePage(
         items=[MargensMarketplaceOut.model_validate(dict(r)) for r in rows],
@@ -762,6 +812,56 @@ async def list_margens_marketplace(
         offset=offset,
         platforms=platforms,
         contas=contas,
+        situacoes=situacoes,
+    )
+
+
+# Quem vê a coluna "Frete Resultado" na tela — espelha FRETE_RESULTADO_USERS
+# do MargemPainel.vue (mudou lá, muda aqui).
+_FRETE_RESULTADO_EMAILS = frozenset({"spectrum77@tuta.com", "maconer06@tuta.com"})
+
+
+@router.get("/marketplace/export.xlsx")
+async def export_margens_marketplace(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("margem", "view"))],
+    search: str | None = Query(None),
+    platform: str | None = Query(None),
+    conta: str | None = Query(None),
+    status: str | None = Query(None),
+    attention_type: str | None = Query(None),
+    situacao: str | None = Query(None),
+    situacao_bling: str | None = Query(None),
+) -> StreamingResponse:
+    """Excel da aba Margem (Cairo, 02/11): todas as linhas do filtro da tela,
+    sem paginar. Lucro só pra admin e Frete Resultado só pra quem já vê a
+    coluna — as mesmas travas da tabela."""
+    where, params = _marketplace_list_where(
+        search=search,
+        platform=platform,
+        conta=conta,
+        status=status,
+        attention_type=attention_type,
+        situacao=situacao,
+    )
+    if situacao_bling:
+        where.append("v.situacao_nome = :situacao_bling")
+        params["situacao_bling"] = situacao_bling
+    items_sql = text(
+        _build_marketplace_items_sql(_VERIFICAR_MARGEM_TABLE, " AND ".join(where), paginate=False)
+    )
+    rows = (await session.execute(items_sql, params)).mappings().all()
+
+    buf = build_margem_xlsx(
+        rows,
+        com_lucro=user.role == UserRole.ADMIN,
+        com_frete_resultado=(user.email or "").lower() in _FRETE_RESULTADO_EMAILS,
+    )
+    agora = datetime.now(UTC).astimezone(_SP_TZ).strftime("%Y-%m-%d_%H%M")
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="margem_{agora}.xlsx"'},
     )
 
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, Banknote, BookOpen, Check, ChevronLeft, ChevronRight, Download, Loader2, Megaphone, Pencil, RefreshCw, Search, X } from 'lucide-vue-next'
+import { AlertCircle, Banknote, BookOpen, Check, ChevronLeft, ChevronRight, Download, FileSpreadsheet, Loader2, Megaphone, Pencil, RefreshCw, Search, X } from 'lucide-vue-next'
 
 // 16/10 (Vinicius): a mesma tela vive em /margem e como aba "Margem" da Conciliação
 // (depois do Extrato). `embutido` = dentro da Conciliação: sem o cabeçalho da página,
@@ -78,6 +78,7 @@ type PageResponse = {
   offset: number
   platforms: string[]
   contas: string[]
+  situacoes?: string[]
   historico_disponivel?: boolean
 }
 
@@ -159,11 +160,39 @@ const items = ref<MarketplaceRow[]>([])
 const total = ref(0)
 const platforms = ref<string[]>([])
 const contas = ref<string[]>([])
+const situacoes = ref<string[]>([])
 const loading = ref(false)
 const error = ref<string | null>(null)
 // Aviso informativo (não-erro): ex. saldo gravado mas margem abaixo da mínima,
 // pedido mantido como Pendente. Persiste através do reload que segue a ação.
 const notice = ref<string | null>(null)
+
+// Excel da lista (Cairo, 02/11): todas as linhas do filtro, não só a página.
+const excelExporting = ref(false)
+
+async function exportarExcel() {
+  if (excelExporting.value) return
+  excelExporting.value = true
+  error.value = null
+  try {
+    const blob = await api<Blob>(
+      `/api/margens/marketplace/export.xlsx?${filtroParams().toString()}`,
+      { responseType: 'blob' as any },
+    )
+    const href = URL.createObjectURL(blob as any)
+    const a = document.createElement('a')
+    a.href = href
+    a.download = `margem_${isoDate(new Date())}.xlsx`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(href)
+  } catch (e: any) {
+    error.value = apiError(e)
+  } finally {
+    excelExporting.value = false
+  }
+}
 
 // --- Download da planilha de rentabilidade por período (admin) ---
 function isoDate(d: Date): string {
@@ -216,6 +245,15 @@ const attentionType = useState<AttentionType>('margem.motivo', () => 'all')
 // é o legado] + segurados pelo robô); "all" mostra tudo.
 type SituacaoFilter = 'triagem' | 'all'
 const situacaoFilter = useState<SituacaoFilter>('margem.situacao', () => 'triagem')
+// Situação do Bling pelo nome (Cairo, 02/11: "Aguardando Cancelamento",
+// "Cancelado"…). As opções vêm do servidor, só as que existem no recorte dos
+// outros filtros; a escolhida fica na lista mesmo se sumir, pra dar pra voltar.
+const situacaoBling = useState<'all' | string>('margem.situacaoBling', () => 'all')
+const situacaoBlingOpcoes = computed(() =>
+  situacaoBling.value !== 'all' && !situacoes.value.includes(situacaoBling.value)
+    ? [...situacoes.value, situacaoBling.value]
+    : situacoes.value,
+)
 const page = ref(1)
 
 type Tab = 'list' | 'lookup'
@@ -248,26 +286,34 @@ function isBlingPatchError(e: any) {
   return ['bling_patch_failed', 'bling_integration_missing'].includes(apiErrorCode(e))
 }
 
+// Filtros da lista — os mesmos vão pro Excel.
+function filtroParams(): URLSearchParams {
+  const params = new URLSearchParams()
+  if (platform.value !== 'all') params.set('platform', platform.value)
+  if (conta.value !== 'all') params.set('conta', conta.value)
+  if (statusFilter.value !== 'all') params.set('status', statusFilter.value)
+  if (attentionType.value !== 'all') {
+    params.set('attention_type', attentionType.value)
+  }
+  if (situacaoFilter.value !== 'triagem') params.set('situacao', situacaoFilter.value)
+  if (situacaoBling.value !== 'all') params.set('situacao_bling', situacaoBling.value)
+  if (search.value.trim()) params.set('search', search.value.trim())
+  return params
+}
+
 async function load() {
   loading.value = true
   error.value = null
   try {
-    const params = new URLSearchParams()
+    const params = filtroParams()
     params.set('limit', String(PAGE_SIZE))
     params.set('offset', String((page.value - 1) * PAGE_SIZE))
-    if (platform.value !== 'all') params.set('platform', platform.value)
-    if (conta.value !== 'all') params.set('conta', conta.value)
-    if (statusFilter.value !== 'all') params.set('status', statusFilter.value)
-    if (attentionType.value !== 'all') {
-      params.set('attention_type', attentionType.value)
-    }
-    if (situacaoFilter.value !== 'triagem') params.set('situacao', situacaoFilter.value)
-    if (search.value.trim()) params.set('search', search.value.trim())
     const res = await api<PageResponse>(`/api/margens/marketplace?${params.toString()}`)
     items.value = res.items
     total.value = res.total
     platforms.value = res.platforms
     contas.value = res.contas
+    situacoes.value = res.situacoes ?? []
   } catch (e: any) {
     error.value = apiError(e)
   } finally {
@@ -517,6 +563,11 @@ watch(statusFilter, () => {
   load()
 })
 watch(situacaoFilter, () => {
+  if (tab.value !== 'list') return
+  page.value = 1
+  load()
+})
+watch(situacaoBling, () => {
   if (tab.value !== 'list') return
   page.value = 1
   load()
@@ -993,6 +1044,16 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
           <Button
             size="sm"
             variant="outline"
+            :disabled="excelExporting || tab !== 'list'"
+            :title="tab === 'list' ? 'Baixar em Excel todas as linhas do filtro atual (não só esta página)' : 'O Excel sai da aba Pendentes, com os filtros dela'"
+            @click="exportarExcel"
+          >
+            <FileSpreadsheet class="size-4 mr-1.5" :class="{ 'animate-pulse': excelExporting }" />
+            Excel
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
             title="Como esta aba funciona — manual prático"
             @click="manualOpen = true"
           >
@@ -1020,6 +1081,9 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
       </Button>
       <Button size="sm" variant="outline" :disabled="loading" @click="refreshAndLoad">
         <RefreshCw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" /> atualizar
+      </Button>
+      <Button size="sm" variant="outline" :disabled="excelExporting || tab !== 'list'" :title="tab === 'list' ? 'Baixar em Excel todas as linhas do filtro atual (não só esta página)' : 'O Excel sai da aba Pendentes, com os filtros dela'" @click="exportarExcel">
+        <FileSpreadsheet class="size-4 mr-1.5" :class="{ 'animate-pulse': excelExporting }" /> Excel
       </Button>
       <Button size="sm" variant="outline" title="Como esta aba funciona — manual prático" @click="manualOpen = true">
         <BookOpen class="size-4 mr-1.5" /> Manual
@@ -1133,6 +1197,14 @@ const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
         <option v-for="a in ATTENTION_OPTIONS" :key="a" :value="a">
           {{ ATTENTION_LABEL[a] }}
         </option>
+      </select>
+      <select
+        v-model="situacaoBling"
+        class="text-sm rounded-md border bg-background px-2 py-1.5"
+        title="Situação do pedido no Bling (a coluna Situação da tabela). Só aparecem as que existem nos outros filtros."
+      >
+        <option value="all">todas situações do Bling</option>
+        <option v-for="s in situacaoBlingOpcoes" :key="s" :value="s">{{ s }}</option>
       </select>
       <select
         v-model="situacaoFilter"

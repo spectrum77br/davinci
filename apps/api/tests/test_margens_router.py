@@ -1337,3 +1337,117 @@ async def test_marketplace_margem_isenta_por_data_especial(
     pend = {it["pedido_bling"]: it for it in pendente.json()["items"]}
     assert pend["601004"]["data_especial"] is False
     assert pend["601005"]["data_especial"] is False
+
+
+async def _seed_reprovados_por_situacao(db: AsyncSession) -> None:
+    """Dois reprovados: um Aguardando Cancelamento (83955), um Cancelado (12)."""
+    for numero, situacao, nome in (
+        ("400001", "83955", "Aguardando Cancelamento"),
+        ("400002", "12", "Cancelado"),
+    ):
+        order = BlingOrder(
+            bling_id=int(numero) * 10,
+            numero=numero,
+            item_codigo=f"sku-{numero}",
+            item_index=0,
+            situacao=situacao,
+        )
+        db.add(order)
+        await db.commit()
+        await db.refresh(order)
+        await db.execute(
+            text(
+                """
+                INSERT INTO verificar_margem (
+                    bling_order_item_id, pedido_bling, bling_id, sku, produto,
+                    situacao, situacao_nome, plataforma_bling, loja_nome,
+                    item_proportion, bling_custo_produtos, bling_margem_calculado,
+                    margem_minima, bling_status_margem
+                )
+                VALUES (
+                    :id, :numero, :bling_id, :sku, 'Capa teste',
+                    :situacao, :nome, 'amazon', 'Amazon Kia',
+                    1, 100, 0.05,
+                    0.2, 'Reprovado'
+                )
+                """
+            ),
+            {
+                "id": str(order.id),
+                "numero": numero,
+                "bling_id": order.bling_id,
+                "sku": f"sku-{numero}",
+                "situacao": situacao,
+                "nome": nome,
+            },
+        )
+    await db.commit()
+
+
+async def test_marketplace_filtra_pela_situacao_do_bling(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Cairo (02/11): filtro pela Situação do Bling, ao lado de 'todos motivos'.
+    As opções (`situacoes`) saem do recorte dos outros filtros e não encolhem
+    quando uma situação é escolhida — senão o dropdown perdia as outras."""
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    await _seed_reprovados_por_situacao(db)
+
+    todos = (await client.get("/api/margens/marketplace?status=Reprovado")).json()
+    assert todos["total"] == 2
+    assert todos["situacoes"] == ["Aguardando Cancelamento", "Cancelado"]
+
+    so_cancelado = (
+        await client.get("/api/margens/marketplace?status=Reprovado&situacao_bling=Cancelado")
+    ).json()
+    assert so_cancelado["total"] == 1
+    assert [i["pedido_bling"] for i in so_cancelado["items"]] == ["400002"]
+    assert so_cancelado["situacoes"] == ["Aguardando Cancelamento", "Cancelado"]
+
+
+async def test_marketplace_excel_sai_com_o_filtro_da_tela(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """Cairo (02/11): botão Excel — todas as linhas do filtro; Lucro só pra admin."""
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    from app.models import UserRole
+
+    await _seed_reprovados_por_situacao(db)
+    url = (
+        "/api/margens/marketplace/export.xlsx"
+        "?status=Reprovado&situacao_bling=Aguardando%20Cancelamento"
+    )
+
+    user = await make_user(permissions=_margem_permissions())
+    auth_as(user)
+    response = await client.get(url)
+    assert response.status_code == 200
+    assert "spreadsheetml" in response.headers["content-type"]
+    linhas = list(load_workbook(BytesIO(response.content)).active.iter_rows(values_only=True))
+    cabecalho, *dados = linhas
+    assert "Lucro" not in cabecalho
+    assert len(dados) == 1
+    linha = dict(zip(cabecalho, dados[0], strict=True))
+    assert linha["Pedido Bling"] == "400001"
+    assert linha["Situação"] == "Aguardando Cancelamento"
+    assert linha["Status"] == "Reprovado"
+    assert linha["Margem Final"] == pytest.approx(0.05)
+    assert linha["Margem Mínima"] == pytest.approx(0.2)
+
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    response = await client.get(url)
+    cabecalho, linha = list(
+        load_workbook(BytesIO(response.content)).active.iter_rows(values_only=True)
+    )
+    assert dict(zip(cabecalho, linha, strict=True))["Lucro"] == pytest.approx(5.0)
