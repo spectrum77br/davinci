@@ -2690,6 +2690,32 @@ async def test_cobranca_da_plataforma_classificada_pelo_robo_volta_a_sem_dono(db
     assert "cobrancas_soltas" not in out2
 
 
+async def test_linha_zerada_sem_pedido_o_robo_classifica_outro(db, make_user):
+    """03/11 (poofy 02/11, "Tarifa da Amazon · Subscription" R$ 0,00 travava o dia;
+    Vinicius: "Sim, pode fazer"): linha do extrato de R$ 0,00 sem pedido vira "outro"
+    pelo robô. Com dinheiro, desvinculada por pessoa ou fora do extrato: fica."""
+    loja, _integ = await _loja(db, make_user)
+    d = datetime(2026, 11, 2, 15, tzinfo=UTC)
+    zerada = _mov(loja, "ajuste_amazon", d)
+    com_dinheiro = _mov(loja, "ajuste_amazon", d + timedelta(hours=1), credito="353.91")
+    desvinculada = _mov(loja, "outro", d + timedelta(hours=2))
+    desvinculada.vinculado_por = "cairo"
+    fatura = _mov(loja, "fatura_tarifa_venda", d + timedelta(hours=3), origem="ml_fatura")
+    db.add_all([zerada, com_dinheiro, desvinculada, fatura])
+    await db.commit()
+    out = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 3, 12, tzinfo=UTC))
+    await db.commit()
+    assert out["zeradas"] == 1
+    for m in (zerada, com_dinheiro, desvinculada, fatura):
+        await db.refresh(m)
+    assert zerada.classificacao == "outro" and zerada.vinculado_por is None
+    assert com_dinheiro.classificacao is None  # dinheiro: alguém tem que ver
+    assert desvinculada.classificacao is None  # a pessoa deixou assim
+    assert fatura.classificacao is None  # não é linha do extrato
+    out2 = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 3, 13, tzinfo=UTC))
+    assert "zeradas" not in out2
+
+
 async def test_fechar_dia_so_ate_ontem_saldo_diferente_exige_motivo_e_reaberto_a_mao_fica(
     db, make_user, auth_as, client
 ):

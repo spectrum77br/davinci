@@ -1089,6 +1089,37 @@ async def _soltar_cobrancas_da_plataforma(session: AsyncSession, loja: Conciliac
     return len(linhas)
 
 
+async def _classificar_zeradas(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Linha do extrato de R$ 0,00 sem pedido no Bling (03/11, poofy: "Tarifa da Amazon ·
+    Subscription" zerada travava o 02/11): não é dinheiro, não pode travar o dia — o robô
+    classifica "outro", como a liquidação zerada da TikTok (Vinicius: "Sim, pode fazer").
+    A que uma pessoa desvinculou fica como ela deixou. A descrição não muda: a leitura da
+    Amazon reescreveria a linha a cada rodada."""
+    mov = ConciliacaoMovimento
+    linhas = (
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem.in_(ORIGENS_EXTRATO),
+                    mov.pedido_bling.is_(None),
+                    mov.classificacao.is_(None),
+                    mov.vinculado_por.is_(None),
+                    func.coalesce(mov.credito, 0) == 0,
+                    func.coalesce(mov.debito, 0) == 0,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for m in linhas:
+        m.classificacao = "outro"
+    if linhas:
+        await session.flush()
+    return len(linhas)
+
+
 async def recalcular_loja(
     session: AsyncSession, loja: ConciliacaoLoja, *, agora: datetime | None = None
 ) -> dict[str, Any]:
@@ -1733,6 +1764,10 @@ async def recalcular_loja(
     desfeitas = await classificar_vendas_desfeitas(session, loja)
     if desfeitas:
         contagem["venda_desfeita"] = desfeitas
+    # Linha de R$ 0,00 sem pedido: nada entrou, nada saiu — o robô classifica "outro".
+    zeradas = await _classificar_zeradas(session, loja)
+    if zeradas:
+        contagem["zeradas"] = zeradas
     # Cupom do extrato: só o que sai do bolso da loja (EFFECTIVE_COUPON_AMOUNT); as linhas
     # gravadas antes de 15/10 tinham o COUPON_AMOUNT (que soma o cupom bancado pelo ML).
     from app.services.conciliacao_extrato import cupom_da_linha
