@@ -52,6 +52,10 @@ class PedidoAgCancelamentoOut(BaseModel):
     itens: list[ItemPedidoAgOut] = Field(default_factory=list)
     # A conversa principal do pedido (None = o pedido não tem conversa).
     conversa_id: str | None = None
+    # Sem conversa do pedido: o chat do COMPRADOR na loja, ligado a outro
+    # pedido dele (03/11/2026, `etiqueta_fatos.conversas_do_comprador_do_pedido`).
+    # Só para abrir — a troca e a oferta seguem pela `conversa_id`.
+    conversa_comprador_id: str | None = None
     # Só na falta de estoque com `atendimento_troca_sugestoes_ativa`.
     sugestoes_troca: SugestoesTrocaOut | None = None
 

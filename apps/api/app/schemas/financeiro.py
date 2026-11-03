@@ -2,7 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ── Consórcio ──────────────────────────────────────────────────────────
@@ -22,6 +22,7 @@ class ConsorcioOut(BaseModel):
     atualizado: date | None = None
     fundo_reserva: str | None = None
     obs: str | None = None
+    imposto1_manual: Decimal | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -39,6 +40,8 @@ class ConsorcioPatch(BaseModel):
     atualizado: date | None = None
     fundo_reserva: str | None = None
     obs: str | None = None
+    # null volta ao automático (1% do crédito); 0 zera.
+    imposto1_manual: Decimal | None = Field(default=None, ge=0, max_digits=14, decimal_places=2)
 
 
 # ── Suprimentos ────────────────────────────────────────────────────────

@@ -168,10 +168,11 @@ for (const m of tpl.matchAll(/(?<!dark:)\btext-(?:emerald|red|amber)-\d00\b(?![^
 // ---------------------------------------------------------------- página: as abas
 // 08/10/2026: as abas Mercado Livre e Shopee (painéis de Ads) saíram; ficaram
 // Conferência | Criativos | Roteiros | Desempenho, e a Conferência é a padrão.
+// 03/11/2026: entrou a aba Lives (gravação das lives), na permissão de Criativos.
 {
   const s = pagina.script
   const t = pagina.tpl
-  assert.match(s, /type Aba = 'conferencia' \| 'criativos' \| 'roteiros' \| 'desempenho'\n/, 'só as 4 abas')
+  assert.match(s, /type Aba = 'conferencia' \| 'criativos' \| 'roteiros' \| 'desempenho' \| 'lives'\n/, 'só as 5 abas')
   assert.match(s, /const canConferencia = useCan\('marketing', 'view'\)/, 'permissão da aba')
   assert.match(s, /const canCriativos = useCan\('marketing_criativos', 'view'\)/, 'permissão de Criativos')
   assert.match(s, /if \(!canCriativos\.value && !canConferencia\.value\) await navigateTo\('\/403'\)/, 'guarda 403')
@@ -195,7 +196,7 @@ for (const m of tpl.matchAll(/(?<!dark:)\btext-(?:emerald|red|amber)-\d00\b(?![^
   ]) assert.ok(!tela.includes(fora), `aba removida não aparece: ${fora}`)
   // Um botão por aba, cada um com a permissão de antes; a Conferência primeiro.
   const botoes = [...t.matchAll(/<button v-if="(\w+)"[\s\S]*?@click="aba = '(\w+)'">/g)].map((m) => `${m[2]}:${m[1]}`)
-  assert.deepEqual(botoes, ['conferencia:canConferencia', 'criativos:canCriativos', 'roteiros:canCriativos', 'desempenho:canCriativos'])
+  assert.deepEqual(botoes, ['conferencia:canConferencia', 'criativos:canCriativos', 'roteiros:canCriativos', 'desempenho:canCriativos', 'lives:canCriativos'])
   assert.match(t, /<button v-if="canConferencia"[\s\S]{0,400}aba = 'conferencia'[\s\S]{0,200}<ClipboardCheck class="size-3\.5" \/>\s*Conferência\s*<\/button>/, 'botão da aba')
   assert.ok(!t.includes('Conferência Shopee'), 'a aba não diz mais só Shopee')
   assert.match(t, /<MarketingConferencia v-if="aba === 'conferencia' && canConferencia" \/>/, 'render da aba')

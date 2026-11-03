@@ -36,6 +36,9 @@ class FinanceiroConsorcio(Base, TimestampMixin):
     atualizado: Mapped[date | None] = mapped_column(Date, nullable=True)
     fundo_reserva: Mapped[str | None] = mapped_column(Text, nullable=True)
     obs: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Imposto 1% digitado na tela (0447). NULL = automático (1% do crédito nas
+    # cotas com lance, calculado na tela); 0 = zerado à mão.
+    imposto1_manual: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
 
 
 class FinanceiroSuprimentos(Base, TimestampMixin):

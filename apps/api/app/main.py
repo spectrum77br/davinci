@@ -380,6 +380,7 @@ if settings.enable_marketing:
     from app.routers import marketing_conferencia as marketing_conferencia_router
     from app.routers import marketing_creatives as marketing_creatives_router
     from app.routers import marketing_legendas as marketing_legendas_router
+    from app.routers import marketing_lives as marketing_lives_router
     from app.routers import marketing_metricas as marketing_metricas_router
     from app.routers import marketing_personagens as marketing_personagens_router
     from app.routers import marketing_postagens as marketing_postagens_router
@@ -399,6 +400,8 @@ if settings.enable_marketing:
     app.include_router(marketing_roteiros_router.router)
     app.include_router(marketing_personagens_router.router)
     app.include_router(marketing_legendas_router.router)
+    # Marketing › Lives (03/11/2026): cadastro + porta do gravador do Mac.
+    app.include_router(marketing_lives_router.router)
     # Conferência Shopee (06/10/2026, docs/conferencia-shopee.md): relatório
     # semanal por loja; o executor do Mac coleta pelo /agent/*. O link do
     # Excel que vai no Threema leva o token na query: fora do access log.

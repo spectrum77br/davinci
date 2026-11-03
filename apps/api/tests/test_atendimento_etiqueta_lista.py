@@ -23,6 +23,7 @@ from app.config import get_settings
 from app.models import (
     AtendimentoCanal,
     AtendimentoConversa,
+    AtendimentoPedidoComprador,
     AtendimentoReclamacao,
     BlingOrder,
     DmConversa,
@@ -283,6 +284,70 @@ async def test_busca_pelo_numero_do_bling_e_pelo_sku(client, db, make_user, pess
     assert await busca("pi") == []
     # O curinga do LIKE é texto, não curinga.
     assert await busca("MALA_%") == []
+
+
+async def test_busca_pelo_numero_de_outro_pedido_do_comprador(client, db, make_user, pessoa):
+    """03/11/2026 (o dono, o 2610301X726956 que "não aparece no chat"): o chat
+    da Shopee fica ligado a UM pedido — o último cartão que entrou nele. O nº
+    EXATO de outro pedido do mesmo comprador na mesma loja (o da plataforma ou
+    o do Bling) acha o chat dele, pelo índice de pedidos por comprador. O
+    pedaço do nº e o SKU do outro pedido não estendem para o comprador, e o
+    mesmo id de comprador em outra loja não é a mesma pessoa. Só o chat da
+    Shopee/TikTok: o pós-venda do ML é do pack."""
+    c = await _cenario(db, make_user)
+    canc = c["canc"]
+    canc.comprador_id = "777"
+    outra, canal_outra = await _loja(db, await make_user(), "poofy")
+    alheia = await _conversa(db, outra, canal_outra, "ALHEIA", horas=8, pedido="2409OUTRO")
+    alheia.comprador_id = "777"
+    db.add_all(
+        [
+            AtendimentoPedidoComprador(
+                integration_id=canc.integration_id,
+                plataforma="shopee",
+                comprador_id="777",
+                pedido="2409IRMAO",
+            ),
+            AtendimentoPedidoComprador(
+                integration_id=canc.integration_id,
+                plataforma="shopee",
+                comprador_id="888",
+                pedido="2409NAODELE",
+            ),
+        ]
+    )
+    # O ML: o pós-venda é do PACK (um pedido só) — outro pedido do mesmo
+    # comprador não traz essa conversa.
+    pack = c["pack"]
+    pack.comprador_id = "321"
+    db.add(
+        AtendimentoPedidoComprador(
+            integration_id=pack.integration_id,
+            plataforma="ml",
+            comprador_id="321",
+            pedido="2000077777777777",
+        )
+    )
+    await db.commit()
+    await _bling(db, "297100", "2409IRMAO", 83955, "BOLSA-ROSA.sp")
+
+    async def busca(q: str) -> list[str]:
+        return _ids(await client.get(f"{URL}/conversas", params={"q": q}))
+
+    assert await busca("2409IRMAO") == [str(canc.id)]
+    # O order_sn é maiúsculo; digitado em minúscula também acha.
+    assert await busca("2409irmao") == [str(canc.id)]
+    assert await busca("2000077777777777") == []
+    # O nº do Bling do outro pedido.
+    assert await busca("297100") == [str(canc.id)]
+    # Só o nº exato: o pedaço não acha o comprador.
+    assert await busca("2409IRM") == []
+    # O SKU do outro pedido acha só a conversa do próprio pedido (não há).
+    assert await busca("BOLSA-ROSA") == []
+    # Pedido de outro comprador sem conversa: nada.
+    assert await busca("2409NAODELE") == []
+    # A busca de antes continua.
+    assert await busca("297001") == [str(canc.id)]
 
 
 async def test_troca_a_mao_pela_api_e_linha_do_tempo(client, db, make_user, auth_as, pessoa):

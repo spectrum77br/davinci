@@ -9,8 +9,9 @@
 // vê a caixa lê; SEM Bling): para cada pedido o porquê (o mesmo bloco do
 // painel, `AgCancelamentoOut`, desenhado pela mesma `leituraAgCancelamento`
 // do cartão — para quem não vê a Margem, o motivo dela vem "em análise"), os
-// itens, o prazo de envio na plataforma, a conversa (botão "Abrir conversa")
-// e, na falta de estoque com a chave ligada, as sugestões de troca
+// itens, o prazo de envio na plataforma, a conversa (botão "Abrir conversa";
+// sem ela, desde 03/11/2026, o chat do comprador ligado a outro pedido dele:
+// "Abrir chat do comprador") e, na falta de estoque com a chave ligada, as sugestões de troca
 // (AtendimentoTrocaSugestoes). Para quem responde (`useAcessoDaTroca`, desde
 // 03/11/2026 as 3 equipes, nas lojas delas), o
 // "Trocar" e o "enviar oferta" das sugestões (fases 4c e 4d, 08/10/2026) e
@@ -51,6 +52,9 @@ export type PedidoAgCancelamento = {
   itens: ItemPedidoAg[]
   // A conversa principal (null = o pedido não tem conversa no DaVinci).
   conversa_id: string | null
+  // Sem conversa do pedido: o chat do COMPRADOR na loja, ligado a outro pedido
+  // dele (03/11/2026). Só para abrir — a troca e a oferta seguem a `conversa_id`.
+  conversa_comprador_id?: string | null
   sugestoes_troca: SugestoesTroca | null
 }
 // `ListaAgCancelamentoOut`.
@@ -280,8 +284,9 @@ function fechar() {
   aberto.value = false
 }
 function abrir(p: PedidoAgCancelamento) {
-  if (!p.conversa_id) return
-  emit('abrirConversa', p.conversa_id)
+  const id = p.conversa_id ?? p.conversa_comprador_id
+  if (!id) return
+  emit('abrirConversa', id)
   fechar()
 }
 </script>
@@ -529,6 +534,16 @@ function abrir(p: PedidoAgCancelamento) {
               @click="abrir(p)"
             >
               <MessagesSquare class="size-3.5" /> Abrir conversa
+            </button>
+            <button
+              v-else-if="p.conversa_comprador_id"
+              type="button"
+              class="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] hover:bg-muted"
+              title="Este pedido não tem conversa própria: o comprador conversa com a loja pelo chat de outro pedido dele"
+              data-abrir-conversa-comprador
+              @click="abrir(p)"
+            >
+              <MessagesSquare class="size-3.5" /> Abrir chat do comprador
             </button>
             <span v-else class="text-[11px] text-muted-foreground">sem conversa no DaVinci</span>
           </div>

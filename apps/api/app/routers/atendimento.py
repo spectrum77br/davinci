@@ -57,7 +57,8 @@ a lista e o detalhe trazem a etiqueta, o menu Filtrar filtra por ela
 por etiqueta. A troca à mão é o POST /conversas/{id}/etiqueta (fica na
 linha do tempo, `etiqueta_historico` do detalhe). A aba "Falta responder"
 vem pelo prazo mais curto (cursor `prazo:`), e a busca acha também pelo nº
-do Bling e pelo SKU.
+do Bling e pelo SKU — e, desde 03/11/2026, pelo nº de QUALQUER pedido do
+comprador na loja (o chat dele ligado a outro pedido, `_chat_do_comprador_do_pedido`).
 
 CAIXA HUMANO (09/10/2026, `services/atendimento/humano.py`): ao lado da
 Caixa, só o que falta responder e a IA NÃO pode responder — a régua da IA,
@@ -113,7 +114,21 @@ from uuid import UUID, uuid4
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import String, and_, case, cast, exists, false, func, not_, or_, select, text, true
+from sqlalchemy import (
+    String,
+    and_,
+    case,
+    cast,
+    exists,
+    false,
+    func,
+    not_,
+    or_,
+    select,
+    text,
+    true,
+    tuple_,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -129,6 +144,7 @@ from app.models import (
     AtendimentoConversa,
     AtendimentoMensagem,
     AtendimentoModelo,
+    AtendimentoPedidoComprador,
     AtendimentoRascunho,
     AtendimentoRegra,
     BlingOrder,
@@ -225,6 +241,7 @@ from app.services.atendimento.constantes import (
     AUTOR_SISTEMA,
     CANAIS_POR_PLATAFORMA,
     CANAIS_SEMPRE_POS_VENDA,
+    CANAL_CHAT,
     CANAL_COMENTARIO,
     CANAL_EMAIL,
     CANAL_PERGUNTA,
@@ -1308,6 +1325,48 @@ def _busca_no_bling(termo: str):
         select(BlingOrder.numeroloja)
         .where(or_(*conds), BlingOrder.numeroloja.is_not(None))
         .cte("atd_busca_bling")
+    )
+
+
+# O chat que é UM por comprador na loja (03/11/2026): Shopee e TikTok — o
+# mesmo critério da Garantia (`garantias._PLATAFORMAS_POR_COMPRADOR`). No ML a
+# conversa é do pack (um pedido só); avaliação, reclamação e e-mail também.
+PLATAFORMAS_CHAT_DO_COMPRADOR = ("shopee", "tiktok")
+
+
+def _chat_do_comprador_do_pedido(termo: str):
+    """SQL: a conversa é o CHAT do comprador de quem fez o pedido com este nº.
+
+    03/11/2026 (o dono, com o 2610301X726956 em Ag. cancelamento que "não
+    aparece no chat"): o chat da Shopee é um por comprador na loja e fica
+    ligado ao ÚLTIMO pedido que entrou nele; os outros pedidos de quem compra
+    várias vezes não acham conversa. Pelo índice de pedidos por comprador
+    (`atendimento_pedidos_comprador`, `services/atendimento/indice.py`), o nº
+    EXATO de qualquer pedido dele — o da plataforma (o order_sn é maiúsculo:
+    o digitado em minúscula também vale) ou o do Bling — acha o chat dele na
+    mesma loja. Só o chat da Shopee/TikTok (`PLATAFORMAS_CHAT_DO_COMPRADOR`):
+    o pós-venda do ML, a avaliação e a reclamação são de UM pedido, e trazer as
+    dos outros pedidos levaria a resposta para o pedido errado. Só o nº exato:
+    o pedaço de SKU continua achando só a conversa do próprio pedido. Dois
+    braços (o nº e o Bling), cada um no índice por pedido — o OR com o IN do
+    Bling no mesmo WHERE leria a tabela inteira.
+    """
+    apc = AtendimentoPedidoComprador
+    par = tuple_(AtendimentoConversa.integration_id, AtendimentoConversa.comprador_id)
+    do_bling = select(BlingOrder.numeroloja).where(
+        BlingOrder.numero == termo, BlingOrder.numeroloja.is_not(None)
+    )
+    return and_(
+        AtendimentoConversa.plataforma.in_(PLATAFORMAS_CHAT_DO_COMPRADOR),
+        AtendimentoConversa.canal == CANAL_CHAT,
+        or_(
+            par.in_(
+                select(apc.integration_id, apc.comprador_id).where(
+                    apc.pedido.in_(sorted({termo, termo.upper()}))
+                )
+            ),
+            par.in_(select(apc.integration_id, apc.comprador_id).where(apc.pedido.in_(do_bling))),
+        ),
     )
 
 
@@ -2619,6 +2678,9 @@ async def _listar_marketplace(
                 AtendimentoConversa.pedido_marketplace.in_(no_bling),
                 AtendimentoConversa.dados["pack_id"].astext.in_(no_bling),
                 AtendimentoConversa.dados["order_id"].astext.in_(no_bling),
+                # Qualquer pedido do comprador (03/11/2026): o chat dele na
+                # loja, mesmo ligado a outro pedido (`_chat_do_comprador_do_pedido`).
+                _chat_do_comprador_do_pedido(termo_exato),
                 # Os chamados dos sites (RF6): TODOS os protocolos do chamado —
                 # o principal e os agrupados nele (o 2º sumia de "Todas" assim
                 # que chegava mensagem nova: só o resumo da última o achava).

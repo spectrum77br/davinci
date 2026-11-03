@@ -121,13 +121,14 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     AtendimentoAvaliacaoLoja,
     AtendimentoCarrinho,
     AtendimentoConversa,
+    AtendimentoPedidoComprador,
     AtendimentoReclamacao,
     BlingOrder,
     MargemAudit,
@@ -150,6 +151,7 @@ from app.services.atendimento.constantes import (
     CANAIS_SEMPRE_POS_VENDA,
     CANAL_AVALIACAO,
     CANAL_CARRINHO,
+    CANAL_CHAT,
     CANAL_COMENTARIO,
     CANAL_PERGUNTA,
     CANAL_RECLAMACAO,
@@ -1162,4 +1164,57 @@ async def conversas_do_pedido_bling(
     conversas = await conversas_do_pedido(session, plataforma, linha.numeroloja)
     if com_email:
         return conversas
+    return [c for c in conversas if not separa_email.e_conversa_de_email(c)]
+
+
+# O chat que é UM por comprador na loja (03/11/2026) — o mesmo da busca da
+# lista (`routers/atendimento.PLATAFORMAS_CHAT_DO_COMPRADOR`) e da Garantia.
+PLATAFORMAS_CHAT_DO_COMPRADOR = ("shopee", "tiktok")
+
+
+async def conversas_do_comprador_do_pedido(
+    session: AsyncSession, pedido_marketplace: str | None
+) -> list[AtendimentoConversa]:
+    """As conversas da Caixa do COMPRADOR de um pedido (nº na plataforma), na loja do pedido.
+
+    03/11/2026 (o dono, com o 2610301X726956 em Ag. cancelamento que "não
+    aparece no chat"): o chat da Shopee fica ligado a UM pedido — o último que
+    o comprador citou —, e os outros pedidos de quem compra várias vezes ficam
+    sem conversa própria (`conversas_do_pedido` não acha nada). Pelo índice de
+    pedidos por comprador (`atendimento_pedidos_comprador`, `indice.py`): os
+    chats desse comprador na mesma integração, a de mensagem mais
+    recente primeiro). SÓ O CHAT da Shopee/TikTok (`PLATAFORMAS_CHAT_DO_COMPRADOR`,
+    um por comprador na loja): o pós-venda do ML, a avaliação, a reclamação e
+    o e-mail da ponte são de UM pedido — não são "o chat do comprador".
+
+    SÓ PARA ABRIR: o retrato (`dados.pedido_mkt`) e as falas dessa conversa
+    são de OUTRO pedido — quem classifica o motivo, troca ou manda oferta
+    continua com `conversas_do_pedido_bling`.
+    """
+    chave = str(pedido_marketplace or "").strip()
+    if not chave:
+        return []
+    compradores = select(
+        AtendimentoPedidoComprador.integration_id, AtendimentoPedidoComprador.comprador_id
+    ).where(AtendimentoPedidoComprador.pedido == chave)
+    conversas = (
+        (
+            await session.execute(
+                select(AtendimentoConversa)
+                .where(
+                    AtendimentoConversa.plataforma.in_(PLATAFORMAS_CHAT_DO_COMPRADOR),
+                    AtendimentoConversa.canal == CANAL_CHAT,
+                    tuple_(
+                        AtendimentoConversa.integration_id, AtendimentoConversa.comprador_id
+                    ).in_(compradores),
+                )
+                .order_by(
+                    AtendimentoConversa.ultima_mensagem_em.desc().nulls_last(),
+                    AtendimentoConversa.created_at.desc(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     return [c for c in conversas if not separa_email.e_conversa_de_email(c)]
