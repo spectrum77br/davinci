@@ -407,6 +407,19 @@ MOTIVOS_DO_VIDEO = frozenset({
 MAX_PULOS_POR_CONTA = 5
 
 
+def _opcoes_do_robo(rede: RedeSocial) -> dict[str, bool]:
+    """Reel do robô no Instagram vai SÓ pra aba Reels (`share_to_feed=false`).
+
+    Pedido do Eduardo em 03/11/2026 pra Charlots e Uranyx — hoje as duas únicas
+    contas de Instagram no automático. A grade do perfil fica pros vídeos que
+    alguém escolher; a regra "vídeo de produto vai pro feed" entra aqui depois.
+    Só Instagram: nas outras redes a opção não existe e viajaria morta.
+    """
+    if (rede.plataforma or "").strip().lower() == "instagram":
+        return {"share_to_feed": False}
+    return {}
+
+
 async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dict[str, int]:
     """Uma passada: agenda o que couber na grade de hoje de cada conta."""
     agora = agora or datetime.now(UTC)
@@ -459,6 +472,7 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                     creative=criativo,
                     file=arquivo,
                     redes=[rede],
+                    opcoes=_opcoes_do_robo(rede),
                     user_id=None,
                     # Ele se IDENTIFICA, em vez de deixar o agendar() deduzir
                     # pela hora. Sem isto ele passava por clique humano e as

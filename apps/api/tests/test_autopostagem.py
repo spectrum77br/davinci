@@ -260,6 +260,27 @@ async def test_a_postagem_do_robo_nasce_marcada_como_dele(db):
     assert linha.origem == "robo", "senão desligar não é botão de pânico"
 
 
+def test_reel_do_robo_no_instagram_fica_so_na_aba_reels():
+    """Pedido de 03/11/2026 (Charlots e Uranyx): o Reel do robô não entra na
+    grade do perfil. Nas outras redes a opção não existe e não deve viajar."""
+    assert svc._opcoes_do_robo(_rede(plataforma="instagram")) == {"share_to_feed": False}
+    assert svc._opcoes_do_robo(_rede(plataforma=" Instagram ")) == {"share_to_feed": False}
+    for outra in ("tiktok", "facebook", "youtube", "shopee"):
+        assert svc._opcoes_do_robo(_rede(plataforma=outra)) == {}, outra
+
+
+async def test_postagem_do_robo_fora_do_instagram_sai_sem_share_to_feed(db):
+    m, r = await _cenario(db)
+    await _criativo(db, m, nome="a", quando=datetime.now(UTC))
+    agora = datetime.now(UTC).astimezone(BRT).replace(hour=18, minute=30).astimezone(UTC)
+    await svc.rodada(db, agora=agora)
+
+    from sqlalchemy import select as _sel
+
+    linha = (await db.execute(_sel(MarketingPostagem))).scalars().first()
+    assert "share_to_feed" not in (linha.opcoes or {})
+
+
 async def test_cancelar_na_tela_segura_o_robo(db):
     """O "não" da pessoa tem que valer. Antes, cancelar às 18h50 e o robô
     reagendava o MESMO vídeo às 19h02 — o cancelamento virava adiamento."""
