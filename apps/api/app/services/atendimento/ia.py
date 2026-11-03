@@ -245,7 +245,7 @@ from zoneinfo import ZoneInfo
 import anthropic
 import httpx
 import structlog
-from sqlalchemy import and_, case, cast, func, literal, or_, select, true
+from sqlalchemy import and_, case, cast, false, func, literal, or_, select, true
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -363,6 +363,16 @@ PROMPT_VERSAO = "v10"
 # Cliente escreve em rajada ("oi" / "meu pedido" / "não chegou"). Esperar
 # 90 s de silêncio junta a rajada numa sugestão só, em vez de três.
 ESPERA_SILENCIO = timedelta(seconds=90)
+# A MESMA espera contada pela CHEGADA ao banco (`created_at`), não só pelo
+# relógio da plataforma (03/11/2026, Vortan 41415df4 e a1929b16 em 02/11): o
+# sync traz a mensagem ~1–2 min depois de ela ser escrita, então o relógio da
+# plataforma já "passou dos 90 s" quando ela chega — e a saudação ao cartão
+# saía 3 s antes de a pergunta do cliente, escrita antes dela, chegar.
+ESPERA_CHEGADA = ESPERA_SILENCIO
+# O envio sozinho nunca responde um gatilho do cliente mais velho que isto
+# (03/11/2026; o 30/10: 18 saudações atrasadas saíram quando a Vortan e a Mini
+# entraram no Automático). O rascunho fica para a pessoa.
+LIMITE_GATILHO_AUTO = timedelta(hours=3)
 # Na primeira leitura de uma loja entra histórico de meses com o cliente
 # falando por último ("ok obrigado" de julho). Rascunho para isso é token
 # jogado fora: o automático só olha a última semana (a pessoa ainda pode
@@ -488,6 +498,9 @@ MAX_REENVIOS = 5
 REENVIO_DEPOIS = timedelta(minutes=2)
 JANELA_REENVIO = timedelta(hours=24)
 FATO_PEDIDA_PELA_TELA = "pedida_pela_tela"
+# A chegada (`created_at`) da mensagem do cliente mais nova que o rascunho leu
+# (03/11/2026, ver `_trava_do_turno`).
+FATO_CHEGADA_VISTA = "chegada_vista"
 _CHAVE_REENVIO = "atendimento:ia:reenvio:{}:{}"
 _REENVIO_TTL_S = 2 * 24 * 3600
 
@@ -2080,6 +2093,42 @@ async def _ultima_do_cliente(
             .limit(1)
         )
     ).scalar_one_or_none()
+
+
+async def _ultima_chegada_do_cliente(session: AsyncSession, conversa_id: UUID) -> datetime | None:
+    """Quando a mensagem do cliente mais nova CHEGOU ao banco (`created_at`, 03/11/2026).
+
+    Não é a última do cliente pelo relógio da plataforma: a mensagem escrita
+    antes (enviada_em menor) pode chegar depois — é ela que a espera e o
+    "o rascunho viu tudo?" (`FATO_CHEGADA_VISTA`) precisam enxergar.
+    """
+    quando = await session.scalar(
+        select(func.max(AtendimentoMensagem.created_at)).where(
+            AtendimentoMensagem.conversa_id == conversa_id,
+            AtendimentoMensagem.autor == AUTOR_CLIENTE,
+        )
+    )
+    return None if quando is None else (quando if quando.tzinfo else quando.replace(tzinfo=UTC))
+
+
+def _sql_chegou_ha_pouco(agora: datetime):
+    """Mensagem do cliente que CHEGOU (`created_at`) há menos de `ESPERA_CHEGADA`. Para o
+    WHERE de quem escolhe conversa para gerar (`_gerar_pendentes`, `reavaliar_*`).
+
+    Sem a espera (`ESPERA_CHEGADA` zero) não corta nada — `false()` para o `~` do
+    chamador valer sempre."""
+    if ESPERA_CHEGADA <= timedelta(0):
+        return false()
+    chegada = aliased(AtendimentoMensagem)
+    return (
+        select(chegada.id)
+        .where(
+            chegada.conversa_id == AtendimentoConversa.id,
+            chegada.autor == AUTOR_CLIENTE,
+            chegada.created_at > agora - ESPERA_CHEGADA,
+        )
+        .exists()
+    )
 
 
 async def _mensagens_recentes(
@@ -5590,12 +5639,17 @@ async def _gerar(
             turno_incompleto=getattr(recentes, "turno_incompleto", False),
             pedido_marketplace=conversa.pedido_marketplace,
         )
+    # A chegada mais nova que este rascunho viu (03/11/2026): mensagem do cliente
+    # que chegar depois dela — mesmo escrita antes — não foi lida (`_trava_do_turno`).
+    chegada_vista = await _ultima_chegada_do_cliente(session, conversa.id)
     ctx = await contexto_svc.contexto_da_conversa(session, conversa)
     valores = valores_das_lacunas(conversa, ctx)
     fatos = _fatos_para_o_modelo(conversa, ctx, valores)
     # O que fica gravado para auditoria: o que o modelo viu + os valores das
     # lacunas (dado do pedido, não da pessoa).
     fatos_gravados = {**fatos, "lacunas": valores}
+    if chegada_vista is not None:
+        fatos_gravados[FATO_CHEGADA_VISTA] = chegada_vista.isoformat()
     if contexto_reavaliado is not None:
         fatos_gravados["reavaliacao_contexto"] = contexto_reavaliado
     if forcar:
@@ -6224,6 +6278,77 @@ def resposta_generica_do_agente(rascunho: Any) -> bool:
     return checagens.resposta_so_generica(getattr(rascunho, "texto", None))
 
 
+# ── O turno na hora do envio sozinho (03/11/2026, item 1 da análise de 31/10–02/11) ──
+# A saudação ao cartão (o atalho aprovado do `_gerar`, que não é do agente) saía
+# na hora: nem a espera do reenvio do cumprimento do agente, nem a conferência
+# do gatilho. Em 02/11 (Vortan 41415df4 e a1929b16) a pergunta do cliente chegou
+# ao banco 3 s depois dela e ficou sem resposta. Agora TODO envio sozinho (o do
+# agente, o do legado, a NF) passa por `_trava_do_turno` antes de sair.
+MOTIVO_GATILHO_ANTIGO = "gatilho_antigo"
+MOTIVO_SEM_GATILHO = "sem_gatilho"
+MOTIVO_TURNO_MUDOU = "turno_mudou"
+MOTIVO_ESPERA_CHEGADA = "espera_chegada"
+MOTIVO_CARTAO_SEM_TEXTO = "cartao_sem_texto"
+
+
+def _iso_utc(valor: Any) -> datetime | None:
+    if not isinstance(valor, str) or not valor:
+        return None
+    try:
+        quando = datetime.fromisoformat(valor)
+    except ValueError:
+        return None
+    return quando if quando.tzinfo else quando.replace(tzinfo=UTC)
+
+
+async def _trava_do_turno(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    rascunho: AtendimentoRascunho,
+    *,
+    agora: datetime | None = None,
+) -> str | None:
+    """Por que o rascunho não pode sair sozinho AGORA pelo turno do cliente, ou None.
+
+    - `sem_gatilho`: a mensagem que ele responde não existe mais;
+    - `gatilho_antigo`: o gatilho tem mais de `LIMITE_GATILHO_AUTO` (3 h) — o
+      rascunho velho de quando a loja não estava no Automático fica para a pessoa;
+    - `turno_mudou`: o cliente escreveu depois (o gatilho não é mais a última fala,
+      `_cobre`) ou CHEGOU mensagem dele depois do que o rascunho leu
+      (`FATO_CHEGADA_VISTA`), mesmo com o relógio da plataforma de antes;
+    - `espera_chegada`: chegou mensagem do cliente há menos de `ESPERA_CHEGADA`
+      (a rajada pode não ter terminado de chegar; o reenvio tenta depois);
+    - `cartao_sem_texto`: o turno é só o cartão do produto/pedido, sem texto
+      (03/11/2026, "aplique as correções": não se cumprimenta cartão sozinho — ele
+      repetia o menu do Duoke; a fila cuida dele em `sem_demanda.processar`).
+    """
+    agora = agora or datetime.now(UTC)
+    gatilho = (
+        await session.get(AtendimentoMensagem, rascunho.mensagem_gatilho_id)
+        if rascunho.mensagem_gatilho_id is not None
+        else None
+    )
+    if gatilho is None:
+        # Sem a mensagem que ele responde não há como conferir o turno: fica para a pessoa.
+        return MOTIVO_SEM_GATILHO
+    if _momento(gatilho) < agora - LIMITE_GATILHO_AUTO:
+        return MOTIVO_GATILHO_ANTIGO
+    ultima = await _ultima_do_cliente(session, conversa)
+    if ultima is None or not _cobre(rascunho, ultima):
+        return MOTIVO_TURNO_MUDOU
+    chegada = await _ultima_chegada_do_cliente(session, conversa.id)
+    vista = _iso_utc((rascunho.fatos or {}).get(FATO_CHEGADA_VISTA))
+    if chegada is not None and vista is not None and chegada > vista:
+        return MOTIVO_TURNO_MUDOU
+    if ESPERA_CHEGADA > timedelta(0) and chegada is not None and chegada > agora - ESPERA_CHEGADA:
+        return MOTIVO_ESPERA_CHEGADA
+    from app.services.atendimento import sem_demanda
+
+    if sem_demanda.turno_so_de_cartao(await _mensagens_recentes(session, conversa), ultima):
+        return MOTIVO_CARTAO_SEM_TEXTO
+    return None
+
+
 def assunto_de_produto_liberado(assunto: str | None, canal: Any) -> bool:
     """O assunto de PRODUTO (`ASSUNTOS_SO_PESSOA_NO_AGENTE`) está no `auto_categorias` do
     canal (e fora dos só de pessoa)? PURA. O portão do dono (27/10/2026): então o rascunho do
@@ -6441,7 +6566,13 @@ async def _talvez_enviar(
 
         if do_agente and nf_automatica.candidato(rascunho):
             # Só a ação "Enviar o arquivo da NF" (28/10/2026, OK do Eduardo): o caminho
-            # da NF sozinha, com as mesmas travas da conversa e as da NF.
+            # da NF sozinha, com as mesmas travas da conversa e as da NF — e as do
+            # turno (03/11/2026: o gatilho de 3 h, a fala nova ou ainda chegando).
+            if get_settings().atendimento_auto_ativo and rascunho.status == RASCUNHO_PENDENTE:
+                motivo = await _trava_do_turno(session, conversa, rascunho)
+                if motivo is not None:
+                    await _registrar_auto_envio(session, conversa, rascunho, f"nf:{motivo}")
+                    return False
             return await nf_automatica.talvez_enviar(session, conversa, rascunho)
         if not get_settings().atendimento_auto_ativo:
             motivo = "auto_desligado"
@@ -6514,20 +6645,25 @@ async def _talvez_enviar(
                     ligado=get_settings().atendimento_agente_verificador,
                     agora=datetime.now(UTC),
                 )
-            if motivo is None and not reenvio and resposta_generica_do_agente(rascunho):
-                # O 06:53 da Kia (27/10/2026): "Olá!" → "Como podemos ajudar com o Apple
-                # Watch?" saiu sozinho, e a pergunta ("Você tem apenas a pulseira…?",
-                # 06:52:09) só chegou ao banco às 06:53:59 (a sincronização da conversa). O
-                # cumprimento/"como podemos ajudar?" do agente não sai na hora: espera o
-                # reenvio (`REENVIO_DEPOIS`), que confere de novo se o gatilho ainda é a
-                # última fala do cliente (`_cobre`).
-                motivo = MOTIVO_GENERICA_ESPERA
         elif rascunho.categoria not in (canal.auto_categorias or []):
             motivo = "assunto_nao_liberado"
         elif rascunho.categoria in manual_svc.ids_so_humano(
             await manual_svc.categorias_ativas(session)
         ):
             motivo = "assunto_so_humano"
+        if motivo is None:
+            # O turno do cliente (03/11/2026): gatilho de mais de 3 h, fala nova ou
+            # ainda chegando, turno só de cartão — para TODO rascunho, não só o do agente.
+            motivo = await _trava_do_turno(session, conversa, rascunho)
+        if motivo is None and not reenvio and resposta_generica_do_agente(rascunho):
+            # O 06:53 da Kia (27/10/2026): "Olá!" → "Como podemos ajudar com o Apple
+            # Watch?" saiu sozinho, e a pergunta ("Você tem apenas a pulseira…?",
+            # 06:52:09) só chegou ao banco às 06:53:59 (a sincronização da conversa). O
+            # cumprimento/"como podemos ajudar?" não sai na hora: espera o reenvio
+            # (`REENVIO_DEPOIS`), que confere de novo o turno (`_cobre`,
+            # `_trava_do_turno`). Desde 03/11/2026 também o do legado (a saudação
+            # aprovada saía na hora: Vortan 41415df4 e a1929b16, 02/11).
+            motivo = MOTIVO_GENERICA_ESPERA
         if motivo is not None:
             await _registrar_auto_envio(session, conversa, rascunho, motivo)
             return False
@@ -6765,6 +6901,10 @@ async def reenviar_pendentes(
                     r.created_at <= agora - REENVIO_DEPOIS,
                     # O gatilho é a última mensagem do cliente (a do turno atual).
                     func.coalesce(gatilho.enviada_em, gatilho.created_at) >= c.ultima_do_cliente_em,
+                    # E de no máximo 3 h (03/11/2026, `LIMITE_GATILHO_AUTO`): a loja que
+                    # entra no Automático não manda o rascunho velho atrasado.
+                    func.coalesce(gatilho.enviada_em, gatilho.created_at)
+                    >= agora - LIMITE_GATILHO_AUTO,
                     ~select(mais_nova.id)
                     .where(
                         mais_nova.conversa_id == r.conversa_id,
@@ -6855,6 +6995,8 @@ async def reavaliar_contextos(
                 c.situacao.not_in((CONVERSA_FECHADA, CONVERSA_BLOQUEADA)),
                 c.ultima_do_cliente_em >= agora - JANELA_PENDENTES,
                 c.ultima_do_cliente_em <= agora - ESPERA_SILENCIO,
+                # A espera também pela chegada ao banco (03/11/2026, `ESPERA_CHEGADA`).
+                ~_sql_chegou_ha_pouco(agora),
                 or_(c.pode_enviar_ate.is_(None), c.pode_enviar_ate > agora),
                 ~_sql_canal_sem_envio(),
                 r.status.in_((RASCUNHO_PENDENTE, RASCUNHO_BLOQUEADO)),
@@ -7078,7 +7220,9 @@ async def gerar_pendentes(session: AsyncSession, *, limite: int = 10) -> int:
     Pega conversa aguardando resposta, sem IA pausada, não fechada nem
     bloqueada, num canal em modo de `atendimento_ia_modos` (Amazon sem conta
     identificada não tem canal: não dá para responder, não gasta token), com
-    a última mensagem do cliente entre 90 s (a rajada acabou) e 7 dias atrás,
+    a última mensagem do cliente entre 90 s (a rajada acabou) e 7 dias atrás —
+    e nenhuma mensagem do cliente CHEGADA ao banco há menos de 90 s
+    (`ESPERA_CHEGADA`, 03/11/2026: o sync a traz 1–2 min atrasada) —,
     ainda dentro da janela de envio da plataforma, e SEM rascunho nenhum para
     essa última mensagem — descartado e bloqueado também contam: a IA não
     insiste no que a pessoa recusou nem gasta token de novo no que já não
@@ -7259,6 +7403,7 @@ async def reavaliar_politicas(session: AsyncSession, *, limite: int = 3) -> int:
             c.ultima_do_cliente_em.between(
                 agora - JANELA_PENDENTES, agora - ESPERA_SILENCIO
             ),
+            ~_sql_chegou_ha_pouco(agora),
             or_(c.pode_enviar_ate.is_(None), c.pode_enviar_ate > agora),
             r.status.in_((RASCUNHO_PENDENTE, RASCUNHO_BLOQUEADO)),
             func.coalesce(r.prompt_versao, "") != PROMPT_VERSAO,
@@ -7423,6 +7568,10 @@ async def _gerar_pendentes(session: AsyncSession, *, limite: int, modos: tuple[s
                 AtendimentoConversa.situacao.not_in((CONVERSA_FECHADA, CONVERSA_BLOQUEADA)),
                 AtendimentoConversa.ultima_do_cliente_em.is_not(None),
                 AtendimentoConversa.ultima_do_cliente_em <= agora - ESPERA_SILENCIO,
+                # E 90 s desde a CHEGADA ao banco (03/11/2026): o relógio da plataforma
+                # da mensagem que o sync trouxe atrasada já "passou dos 90 s" — e a
+                # pergunta escrita junto ainda estava a caminho (Vortan, 02/11).
+                ~_sql_chegou_ha_pouco(agora),
                 AtendimentoConversa.ultima_do_cliente_em >= agora - JANELA_PENDENTES,
                 or_(
                     AtendimentoConversa.pode_enviar_ate.is_(None),

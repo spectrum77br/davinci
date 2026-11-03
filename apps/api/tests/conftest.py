@@ -767,6 +767,21 @@ def _numero_da_caixa_sem_o_corte_do_duoke(monkeypatch):
     monkeypatch.setattr(pendente, "ZERADO_NO_DUOKE_EM", datetime(2000, 1, 1, tzinfo=UTC))
 
 
+@pytest.fixture(autouse=True)
+def _sem_espera_pela_chegada(request, monkeypatch):
+    """A espera de silêncio também conta pela CHEGADA ao banco (`ia.ESPERA_CHEGADA`,
+    03/11/2026). Nos testes de antes a mensagem nasce agora (`created_at` do servidor) e
+    o relógio da plataforma é que "já passou": para eles a espera pela chegada fica
+    desligada. O teste marcado `espera_na_chegada` vê a regra de verdade."""
+    if request.node.get_closest_marker("espera_na_chegada"):
+        return
+    from datetime import timedelta
+
+    from app.services.atendimento import ia
+
+    monkeypatch.setattr(ia, "ESPERA_CHEGADA", timedelta(0))
+
+
 # ── As lojas do atendimento por pessoa (30/10/2026) ───────────────────────────
 # Desde `services/atendimento/escopo.py`, quem não é admin vê no atendimento e na
 # Garantia só as lojas dele (`atendimento_lojas_pessoa`) — sem loja, nenhuma. Os
@@ -777,6 +792,9 @@ def _numero_da_caixa_sem_o_corte_do_duoke(monkeypatch):
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "lojas_por_pessoa: a regra de verdade das lojas por pessoa, sem o legado"
+    )
+    config.addinivalue_line(
+        "markers", "espera_na_chegada: a espera de silêncio pela chegada ao banco (03/11/2026)"
     )
 
 
