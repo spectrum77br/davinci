@@ -24,7 +24,9 @@ agente, refaz a 1ª camada sobre a MESMA Proposta (`agente.conferir_proposta`, o
   DESSE canal valem para todo registro (o padrão do dono: o da Kia,
   1ca982c3-96e0-4000-95f2-e1fe368f954d); sem ele, o canal de cada registro (lido do banco)
   — a loja que não está no automático tem as listas vazias. `--config-canal-json` lê o mesmo
-  de um arquivo ({"modo", "auto_categorias", "auto_orientacao", "auto_agente"}) — no Mac.
+  de um arquivo ({"modo", "auto_categorias", "auto_orientacao", "auto_agente"}) — no Mac, ou
+  a régua congelada pelo `scripts.agente_eval.config_canal` (o ML, 03/11/2026: as listas da
+  Kia com o modo auto; a plataforma e o canal continuam os da conversa de cada registro).
 
 Saída: uma linha por registro (id, loja, categoria, decisao, bloqueios duros, avisos, o
 rascunho e a resposta_real lado a lado, a decisão de antes do eval) e o resumo (a taxa de

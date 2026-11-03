@@ -28,6 +28,9 @@ Uso (de dentro de apps/api, no container da api):
     uv run python -m scripts.agente_eval.amostra --saida /tmp/agente_eval/amostra.jsonl
     uv run python -m scripts.agente_eval.amostra --loja todas --dias 14 --n 200 \\
         --conjunto teste --saida /tmp/agente_eval/amostra_teste.jsonl
+    uv run python -m scripts.agente_eval.amostra --loja todas --plataforma ml --canal pos_venda \\
+        --desde 2026-10-30 --ate 2026-11-03 --n 50 --excluir A.jsonl --excluir-conversas A.jsonl \\
+        --saida /tmp/agente_eval/amostra_ml_pos.jsonl      (o ML: pós-venda; a pergunta à parte)
 
   --loja kia|todas|<uuid>  kia (padrão) = o canal da Kia Shopee; todas = os
                            canais da --plataforma; um uuid de canal ou de loja.
