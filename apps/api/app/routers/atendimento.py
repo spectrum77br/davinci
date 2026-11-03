@@ -158,6 +158,7 @@ from app.redis_client import redis
 from app.schemas.atendimento import (
     AcaoPessoaOut,
     AgenteResumoOut,
+    ApagarOut,
     AvaliacaoIn,
     AvaliacaoOut,
     AvaliacaoResumoOut,
@@ -217,6 +218,7 @@ from app.services.atendimento import (
     agente_config,
     amazon_email,
     anexo_ml,
+    apagar,
     canais_externos,
     cartoes_plataforma,
     clientes,
@@ -414,6 +416,8 @@ ROTAS_DE_QUEM_RESPONDE = frozenset(
         ("POST", "/api/atendimento/conversas/{conversa_id}/amazon-copia"),
         ("POST", "/api/atendimento/rascunhos/{rascunho_id}/descartar"),
         ("POST", "/api/atendimento/mensagens/{mensagem_id}/conferir"),
+        # O "apagar" (03/11/2026, o "Retirar" do Duoke): quem responde na loja.
+        ("POST", "/api/atendimento/mensagens/{mensagem_id}/apagar"),
         ("POST", "/api/atendimento/avaliacoes/{avaliacao_id}/responder"),
         ("POST", "/api/atendimento/avaliacoes/{avaliacao_id}/tratada"),
         ("POST", "/api/atendimento/carrinhos/{carrinho_id}/resolvido"),
@@ -1780,6 +1784,10 @@ def _mensagem_out(
             if conversa.canal == CANAL_RECLAMACAO and m.autor == AUTOR_LOJA
             else None
         ),
+        # O "apagar" (03/11/2026): o prazo vem das travas do servidor — a tela
+        # não sabe de plataforma nem de janela.
+        pode_apagar_ate=_utc(apagar.pode_apagar_ate(m, conversa)),
+        apagada=apagar.apagada(m),
         **(_entrega_do_zap(m) if conversa.canal == CANAL_ZAP else {}),
     )
 
@@ -4186,6 +4194,85 @@ async def conferir_mensagem(
     return ConferirOut(
         mensagem=_mensagem_out(m, conversa=c, nomes=nomes),
         conversa=await _conversa_out(session, c),
+    )
+
+
+@router.post("/mensagens/{mensagem_id}/apagar", response_model=ApagarOut)
+async def apagar_mensagem(
+    mensagem_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_responde)],
+) -> ApagarOut:
+    """APAGA na plataforma a mensagem que a loja mandou pelo DaVinci (03/11/2026).
+
+    O "Retirar" do Duoke: o comprador deixa de ver (a Shopee põe "This message
+    was deleted" no lugar). Quem pode é quem responde naquela loja (a mesma
+    régua do Enviar: `_responde` + o escopo da pessoa). As travas e o
+    resultado são do `services/atendimento/apagar.py`; a conversa fica
+    TRAVADA durante a ida à plataforma (como no "conferir"), com teto curto.
+
+    Apagou → 200 com a mensagem em `falhou`/`ERRO_APAGADA` e a conversa
+    recalculada (`ia_pausada` = a IA pausou porque a apagada era dela).
+    Travas → 409 com o `code` (`mensagem_nao_apagavel`, `prazo_apagar_passou`,
+    `sem_integracao`, `conversa_ocupada`). A plataforma recusou → 409
+    `plataforma_recusou` com o `erro` curto; nada mudou. Sem resposta
+    (timeout) → 502 `apagar_incerto`: o status fica e a tela manda conferir
+    na Shopee.
+    """
+    scope = await escopo_do_atendimento(session, user)
+    m = await session.get(AtendimentoMensagem, mensagem_id)
+    c = await session.get(AtendimentoConversa, m.conversa_id) if m is not None else None
+    if m is None or c is None or not _conversa_no_escopo(scope, c) or _zap_escondido(scope, c):
+        raise HTTPException(404, detail={"code": "mensagem_nao_encontrada"})
+    if separa_email.e_conversa_de_email(c):
+        await _conversa_ou_404(session, str(c.id), scope)
+    # Trava e relê: o sync pode ter marcado a mesma linha (apagada por fora,
+    # barrada) enquanto a pessoa olhava, e duas abas não apagam juntas.
+    await _travar_ou_409(session, c, "conversa_ocupada")
+    await session.refresh(m)
+    try:
+        resultado = await apagar.apagar_mensagem(session, c, m, user_id=user.id)
+    except apagar.ApagarRecusado as e:
+        logger.info(
+            "atendimento_apagar_recusado",
+            mensagem_id=str(m.id),
+            conversa_id=str(c.id),
+            code=e.code,
+            user_id=str(user.id),
+        )
+        raise HTTPException(409, detail={"code": e.code, "detail": e.detail}) from None
+    # Também no incerto: a tentativa fica no `payload.apagar_incerto`.
+    await session.commit()
+    logger.info(
+        "atendimento_mensagem_apagada",
+        mensagem_id=str(m.id),
+        conversa_id=str(c.id),
+        origem=m.origem,
+        por=apagar.POR_DAVINCI,
+        resultado=resultado.code or "apagou",
+        # Só o código da plataforma (a frase curta vai para a tela).
+        erro=(resultado.erro or "").split(":", 1)[0] or None,
+        ia_pausada=resultado.ia_pausada,
+        user_id=str(user.id),
+    )
+    if resultado.code == apagar.APAGAR_INCERTO:
+        raise HTTPException(
+            502,
+            detail={
+                "code": apagar.APAGAR_INCERTO,
+                "detail": "A Shopee não respondeu: não dá para saber se apagou. Confira na "
+                "Shopee.",
+            },
+        )
+    if resultado.code == apagar.PLATAFORMA_RECUSOU:
+        raise HTTPException(
+            409, detail={"code": apagar.PLATAFORMA_RECUSOU, "erro": resultado.erro}
+        )
+    nomes = await _nomes(session, {m.autor_user_id, user.id})
+    return ApagarOut(
+        mensagem=_mensagem_out(m, conversa=c, nomes=nomes),
+        conversa=await _conversa_out(session, c),
+        ia_pausada=resultado.ia_pausada,
     )
 
 

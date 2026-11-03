@@ -933,6 +933,7 @@ async def gravar_mensagem(
     anexos: list | None = None,
     payload: dict | None = None,
     origem: str | None = None,
+    apagada: bool = False,
 ) -> tuple[AtendimentoMensagem, bool]:
     """Grava uma mensagem vinda da plataforma → (mensagem, criada).
 
@@ -954,6 +955,17 @@ async def gravar_mensagem(
     fechado (ou marcado "não precisa de resposta") nesse meio. Derivar a fila
     do retrato velho faria a mensagem nova do cliente sumir numa conversa
     fechada. Travar a conversa ANTES da mensagem é também a ordem do envio.
+
+    `apagada` (03/11/2026): a plataforma já devolveu esta mensagem da LOJA
+    apagada (o "Retirar" do Duoke antes da nossa 1ª leitura: é como o
+    DaVinci grava as que viu com "This message was deleted"). A linha NOVA
+    nasce `falhou` + `ERRO_APAGADA` (`apagar.marcar_apagada`, por =
+    plataforma), e não `enviada` marcada depois: o `_aposentar_rascunho` e
+    o `_promover_observacao` ignoram a `falhou`, então a sugestão pendente
+    e a avaliação "observou" ficam como estavam. Sem isto, "This message
+    was deleted" virava a "resposta da equipe" na comparação IA × equipe, e
+    a conversa reaberta ficava sem sugestão nova. A linha que já existe não
+    muda aqui (quem lê marca depois).
     """
     if autor not in AUTORES:
         raise ValueError(f"autor desconhecido: {autor!r}")
@@ -1021,6 +1033,11 @@ async def gravar_mensagem(
         status=MSG_ENVIADA if autor == AUTOR_LOJA else MSG_RECEBIDA,
         payload=payload,
     )
+    if apagada and autor == AUTOR_LOJA:
+        # Tardio: o `apagar` importa este módulo. A marca é a mesma do botão.
+        from app.services.atendimento import apagar
+
+        apagar.marcar_apagada(mensagem, por=apagar.POR_PLATAFORMA)
     await session.flush()  # pendências alheias fora do SAVEPOINT (ver upsert_conversa)
     try:
         async with session.begin_nested():

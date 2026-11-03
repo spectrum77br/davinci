@@ -359,6 +359,13 @@ export type Mensagem = {
   entrega?: string | null
   entrega_erro?: string | null
   retida_pela_meta?: boolean
+  // O "apagar" (03/11/2026, o "Retirar" do Duoke): até quando o botão vale
+  // (ISO; o servidor calcula com as travas e a janela da plataforma — a tela
+  // não fixa nem uma nem outra). null/ausente = sem botão.
+  pode_apagar_ate?: string | null
+  // A mensagem da loja apagada na plataforma (pelo DaVinci ou pelo Duoke):
+  // selo cinza "apagada", texto riscado só para a equipe, sem "tentar de novo".
+  apagada?: boolean
 }
 export type Rascunho = {
   id: string
@@ -2111,6 +2118,11 @@ export const ERROS: Record<string, string> = {
   envio_a_conferir: 'A última resposta ficou sem confirmação da plataforma. Marque no balão se ela saiu antes de mandar outra.',
   mensagem_nao_encontrada: 'Mensagem não encontrada (a conversa pode ter mudado — atualize).',
   mensagem_nao_revisar: 'Essa mensagem já foi conferida.',
+  // O "apagar" (03/11/2026): as travas do servidor (`services/atendimento/apagar.py`).
+  mensagem_nao_apagavel: 'Esta mensagem não dá para apagar por aqui (só a que o DaVinci mandou no chat da Shopee, depois que saiu).',
+  prazo_apagar_passou: 'Passou o prazo para apagar — a Shopee só deixa logo depois de mandar.',
+  plataforma_recusou: 'A Shopee não deixou apagar — a mensagem continua lá para o comprador.',
+  apagar_incerto: 'Não deu para confirmar se apagou — confira na Shopee.',
   somente_leitura: 'Esta conversa é só de leitura aqui.',
   ia_desligada: 'A IA está desligada no servidor — sem sugestão por enquanto.',
   // Carrinho do site e comentário das redes (02/10/2026): a IA é de marketplace.

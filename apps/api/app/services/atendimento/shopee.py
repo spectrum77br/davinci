@@ -119,7 +119,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import AtendimentoCanal, AtendimentoConversa, AtendimentoMensagem, Integration
-from app.services.atendimento import enriquecer, gravar, lojas
+from app.services.atendimento import apagar, enriquecer, gravar, lojas
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
     AUTOR_LOJA,
@@ -129,6 +129,8 @@ from app.services.atendimento.constantes import (
     MSG_ENVIADA,
     MSG_FALHOU,
     ORIGENS_DAVINCI,
+    TIPO_SHOPEE_CARTAO_PEDIDO,
+    TIPO_SHOPEE_FIGURINHA,
     ResultadoEnvio,
     ResultadoSync,
     e_chat_de_afiliado,
@@ -199,6 +201,13 @@ _TIPOS_SISTEMA = frozenset({"notification", "bundle_message", "system"})
 _STATUS_AUTOMATICOS = frozenset({"auto_reply", "offwork_autoreply"})
 # A Shopee barrou a mensagem (contato externo etc.): não chegou ao comprador.
 _STATUS_BARRADOS = frozenset({"blocked", "censored_blacklist"})
+# A mensagem APAGADA (03/11/2026; medido em produção, só leitura, nas 53 que o
+# Duoke apagou em 30 dias): ela NÃO some do `get_message` — continua com o
+# mesmo `message_id` e `status` normal, o texto vira este e o
+# `message_option` ganha o bit 0x200000 (2097152 na da loja; a do comprador
+# vem 2097156). Qualquer um dos dois basta.
+BIT_APAGADA = 0x200000
+TEXTO_APAGADA = "This message was deleted"
 # `business_type` 11 = chat de afiliado, não é comprador (push de 05/11/2024;
 # na leitura é o parâmetro das chamadas, `NEGOCIO_AFILIADO` do cliente — o
 # item do `get_message` não traz o campo, medido em 15/10/2026).
@@ -380,10 +389,20 @@ class _Lida:
     anuncio: str | None = None
     afiliado: bool = False
     barrada: str | None = None
+    # Apagada na Shopee depois de mandada (03/11/2026, `_apagada`).
+    apagada: bool = False
 
 
 def _texto_ou_none(valor: Any) -> str | None:
     return valor if isinstance(valor, str) else None
+
+
+def _apagada(msg: dict, conteudo: dict) -> bool:
+    """A Shopee diz que esta mensagem foi apagada? PURA. O bit do
+    `message_option` ou o texto que ela põe no lugar (`TEXTO_APAGADA`, exato)."""
+    if (_int(msg.get("message_option")) or 0) & BIT_APAGADA:
+        return True
+    return conteudo.get("text") == TEXTO_APAGADA
 
 
 def _autor(msg: dict, shop_id: int, tipo_shopee: str, status: str, afiliado: bool) -> str:
@@ -465,6 +484,7 @@ def interpretar(msg: dict, shop_id: int, *, afiliado: bool = False) -> _Lida:
         anuncio=anuncio,
         afiliado=afiliado,
         barrada=status if status in _STATUS_BARRADOS else None,
+        apagada=_apagada(msg, conteudo),
     )
 
 
@@ -681,6 +701,9 @@ async def _gravar_brutas(
     gravada como enviada (a nossa, barrada depois de aceita). A mensagem de
     produto/pedido ganha o cartão com foto e status (`_preencher_cartao`) —
     também a já gravada cujo cartão ficou incompleto numa rodada anterior.
+    A da loja que a Shopee diz APAGADA (03/11/2026) vira `falhou` +
+    `ERRO_APAGADA`: a nova já nasce assim (`gravar_mensagem(apagada=...)`),
+    a já gravada é marcada com o texto que já estava (`_marcar_apagada`).
     `afiliado` = são do chat de afiliado (`interpretar`).
     """
     # Da mais antiga para a mais nova: a fila anda na ordem em que a conversa
@@ -706,8 +729,21 @@ async def _gravar_brutas(
             tipo=lida.tipo,
             anexos=lida.anexos,
             payload=bruta,
+            # A da loja que JÁ chega apagada nasce apagada (03/11/2026): marcar
+            # depois de gravar `enviada` aposentava a sugestão da IA e punha
+            # "This message was deleted" na avaliação (`gravar.gravar_mensagem`).
+            apagada=lida.apagada,
         )
         novas += int(criada_msg)
+        if criada_msg and apagar.apagada(mensagem):
+            logger.info(
+                "atendimento_mensagem_apagada",
+                conversa_id=str(conversa.id),
+                mensagem_id=str(mensagem.id),
+                origem=mensagem.origem,
+                por=apagar.POR_PLATAFORMA,
+                primeira_leitura=True,
+            )
         if (
             afiliado
             and criada_msg
@@ -737,6 +773,8 @@ async def _gravar_brutas(
             mensagem.status = MSG_FALHOU
             mensagem.erro = f"shopee {lida.barrada}"
             barrou = True
+        if lida.apagada and await _marcar_apagada(session, conversa, mensagem):
+            barrou = True
 
     if pedido or anuncio or marcar_afiliado:
         # O elo com o pedido (Bling, rastreio, chamados) sai das mensagens.
@@ -754,6 +792,47 @@ async def _gravar_brutas(
     if barrou:
         await gravar.recalcular_conversa(session, conversa)
     return novas
+
+
+async def _marcar_apagada(
+    session: AsyncSession, conversa: AtendimentoConversa, mensagem: AtendimentoMensagem
+) -> bool:
+    """A Shopee devolveu esta mensagem APAGADA (03/11/2026). True = a da LOJA
+    acabou de ser marcada (quem chama recalcula a conversa).
+
+    É o que a equipe apaga pelo Duoke/Seller Center (o "Retirar") — e o
+    `apagar` do DaVinci que ficou incerto: sem isto, a linha lida antes do
+    recall ficava com o texto original e "respondida" para sempre (o
+    `gravar` não mexe em linha que já existe). Marca como o botão marca
+    (`apagar.marcar_apagada`, `por` = plataforma), sem trocar o texto: o
+    original fica para a equipe. A da IA pausa a IA na conversa, como no
+    botão — nas lojas em AUTO ela mandaria de novo a mesma coisa. A do
+    COMPRADOR só ganha `payload.apagada_pelo_cliente` (o status não muda).
+    A da loja que nasceu apagada nesta leitura já é `falhou`: passa reto.
+    """
+    if mensagem.autor == AUTOR_CLIENTE:
+        if not (mensagem.payload or {}).get("apagada_pelo_cliente"):
+            mensagem.payload = {**(mensagem.payload or {}), "apagada_pelo_cliente": True}
+        return False
+    if mensagem.autor != AUTOR_LOJA or mensagem.status == MSG_FALHOU:
+        return False
+    # Trava e relê (como o `gravar` faz antes de mexer): o botão "apagar" da
+    # tela pode estar marcando esta mesma linha agora.
+    await gravar.travar_linha(session, conversa)
+    await session.refresh(mensagem)
+    if mensagem.status == MSG_FALHOU:
+        return False
+    apagar.marcar_apagada(mensagem, por=apagar.POR_PLATAFORMA)
+    pausou = apagar.pausar_ia_se_era_dela(conversa, mensagem)
+    logger.info(
+        "atendimento_mensagem_apagada",
+        conversa_id=str(conversa.id),
+        mensagem_id=str(mensagem.id),
+        origem=mensagem.origem,
+        por=apagar.POR_PLATAFORMA,
+        ia_pausada=pausou,
+    )
+    return True
 
 
 async def _sincronizar_conversa(
@@ -1616,6 +1695,163 @@ async def enviar_parte(
             conversa_id=conversa_id,
         )
     return ResultadoEnvio(ok=False, erro="shopee parte_desconhecida")
+
+
+# ── Apagar a mensagem que a loja mandou (03/11/2026) ──────────────────────
+# O "Retirar" do Duoke, pelo botão "apagar" do balão. As travas gerais
+# (autor, origem do DaVinci, `enviada`, simulador) e o resultado na linha são
+# do `services/atendimento/apagar.py`; aqui, só o que é da Shopee.
+
+# A janela é a do DUOKE: o `verifyRecall` dele recusa depois de 3 min ("sent
+# for more than 3 minutes and cannot be recalled", erro 12206). A da Shopee
+# NÃO foi confirmada (a doc do `delete_message` é restrita ao login de
+# parceiro): o primeiro uso real confirma — se for outra, muda AQUI; a tela
+# só lê o `pode_apagar_ate` que sai daqui.
+JANELA_APAGAR = timedelta(minutes=3)
+
+# O `message_type` que o `delete_message` pede, pelo tipo da linha. Vídeo não
+# (o Duoke recusa tipo sem recall, erro 12204); "outro" só se for a figurinha.
+_TIPO_SHOPEE_PARA_APAGAR = {
+    TIPO_TEXTO: "text",
+    TIPO_IMAGEM: "image",
+    TIPO_PEDIDO: TIPO_SHOPEE_CARTAO_PEDIDO,
+    TIPO_PRODUTO: "item",
+}
+TIPOS_SHOPEE_APAGAVEIS = frozenset({*_TIPO_SHOPEE_PARA_APAGAR.values(), TIPO_SHOPEE_FIGURINHA})
+# "shopee_chat_delete HTTP 404: ..." (`marketplaces/shopee._corpo_json`): o 4xx
+# fora do JSON é o pedido recusado na porta — nada foi apagado.
+_RE_HTTP = re.compile(r"^shopee_[a-z_]+ HTTP (\d{3})")
+
+
+def _utc_ou_none(quando: datetime | None) -> datetime | None:
+    if quando is None:
+        return None
+    return quando if quando.tzinfo is not None else quando.replace(tzinfo=UTC)
+
+
+def _tipo_shopee_para_apagar(mensagem: AtendimentoMensagem) -> str | None:
+    """O `message_type` da Shopee desta linha, se for um que se apaga. PURA.
+
+    Vale primeiro o que a própria Shopee disse (o item que a leitura adotou,
+    `payload.sync`, ou a resposta do envio, `payload.envio`); sem isso, o tipo
+    da linha — e a linha "outro" só é figurinha pela marca da automação.
+    """
+    payload = mensagem.payload if isinstance(mensagem.payload, dict) else {}
+    for fonte in (payload.get("sync"), payload.get("envio")):
+        if not isinstance(fonte, dict):
+            continue
+        tipo = str(fonte.get("message_type") or "").strip().lower()
+        if tipo:
+            return tipo if tipo in TIPOS_SHOPEE_APAGAVEIS else None
+    if mensagem.tipo == TIPO_OUTRO:
+        marca = payload.get("automacao")
+        if isinstance(marca, dict) and marca.get("parte") == PARTE_FIGURINHA:
+            return TIPO_SHOPEE_FIGURINHA
+        return None
+    return _TIPO_SHOPEE_PARA_APAGAR.get(mensagem.tipo)
+
+
+def _enviada_na_shopee(mensagem: AtendimentoMensagem) -> datetime | None:
+    """De quando conta a janela: o relógio da SHOPEE. PURA.
+
+    O `enviada_em` da linha é a hora em que a Shopee respondeu ao envio (ou o
+    `created_timestamp` da leitura que adotou a linha); o `created_timestamp`
+    da resposta do envio, quando vem, é o da própria Shopee e não é depois —
+    vale o menor, para o prazo daqui nunca passar do dela.
+    """
+    candidatos = [q for q in (_utc_ou_none(mensagem.enviada_em),) if q is not None]
+    envio = (mensagem.payload or {}).get("envio") if isinstance(mensagem.payload, dict) else None
+    if isinstance(envio, dict):
+        quando = para_datetime(envio.get("created_timestamp"))
+        if quando is not None:
+            candidatos.append(quando)
+    return min(candidatos) if candidatos else None
+
+
+def apagavel(
+    conversa: AtendimentoConversa, mensagem: AtendimentoMensagem
+) -> tuple[str, datetime] | None:
+    """(o `message_type` que o `delete_message` pede, até quando dá) — ou None. PURA.
+
+    As travas da SHOPEE: chat de COMPRADOR (o de afiliado fica para depois —
+    o pedido precisaria do `business_type` 11, nunca medido), `externo_id`
+    numérico (o `message_id` que a Shopee devolveu; o `sim:` do simulador
+    nunca passa), um tipo que se apaga (`_tipo_shopee_para_apagar`) e a hora
+    do envio conhecida (`_enviada_na_shopee` + `JANELA_APAGAR`).
+    """
+    if conversa.plataforma != PLATAFORMA or conversa.canal != CANAL_CHAT:
+        return None
+    if _negocio_da_conversa(conversa) != NEGOCIO_COMPRADOR:
+        return None
+    if not str(mensagem.externo_id or "").strip().isdigit():
+        return None
+    tipo = _tipo_shopee_para_apagar(mensagem)
+    desde = _enviada_na_shopee(mensagem)
+    if tipo is None or desde is None:
+        return None
+    return tipo, desde + JANELA_APAGAR
+
+
+def _recusa_da_shopee(exc: BaseException) -> str:
+    """O código e a frase CURTA da Shopee, para a tela (o `erro` do 409).
+
+    O pedido de apagar não leva texto da conversa, então a frase da Shopee
+    não repete nada do comprador — e é o que o primeiro uso real precisa ver
+    para confirmar o formato. Para o log vai só o código (`_codigo_shopee`).
+    """
+    _, _, resto = str(exc).partition(" ")
+    return f"shopee {resto.strip() or _codigo_shopee(exc) or 'erro'}"[:160]
+
+
+async def apagar_mensagem(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    integration: Integration | None,
+    cliente: Any,
+    mensagem: AtendimentoMensagem,
+    *,
+    tipo: str,
+) -> ResultadoEnvio:
+    """Apaga na Shopee a mensagem da loja (`chat_delete_message`). Nunca levanta.
+
+    `tipo` = o `message_type` (`apagavel`). ok=True = a Shopee apagou. A
+    régua do envio (`_envio`) com uma diferença: o HTTP 4xx fora do JSON é
+    recusa (o pedido nem entrou), não ambíguo. Recusa = nada mudou; timeout,
+    5xx, erro sem código = ambíguo — pode ter apagado, e quem chama não mexe
+    no status (a leitura seguinte vê o bit, se apagou).
+    """
+    try:
+        resp = await cliente.chat_delete_message(str(mensagem.externo_id or ""), tipo)
+    except httpx.HTTPStatusError as exc:
+        # Como no envio: só a renovação do token faz `raise_for_status` — ANTES do pedido.
+        return ResultadoEnvio(ok=False, erro=f"shopee token_http_{exc.response.status_code}")
+    except httpx.HTTPError as exc:
+        return ResultadoEnvio(ok=False, ambiguo=True, erro=_erro_operacao(exc))
+    except ValueError:
+        return ResultadoEnvio(ok=False, erro="shopee apagar_invalido")
+    except RuntimeError as exc:
+        codigo = _codigo_shopee(exc)
+        if codigo and not any(p in codigo for p in _PISTAS_AMBIGUAS):
+            return ResultadoEnvio(ok=False, erro=_recusa_da_shopee(exc))
+        if "refresh_token" in str(exc):
+            return ResultadoEnvio(ok=False, erro="shopee sem_refresh_token")
+        http = _RE_HTTP.match(str(exc))
+        if http and 400 <= int(http.group(1)) < 500:
+            return ResultadoEnvio(ok=False, erro=f"shopee HTTP {http.group(1)}")
+        return ResultadoEnvio(ok=False, ambiguo=True, erro=_erro_operacao(exc))
+    except Exception as exc:  # noqa: BLE001 — nunca levanta; sem saber, é ambíguo
+        logger.warning(
+            "atendimento_shopee_apagar_inesperado",
+            conversa_id=str(conversa.id),
+            mensagem_id=str(mensagem.id),
+            erro=type(exc).__name__,
+        )
+        return ResultadoEnvio(ok=False, ambiguo=True, erro=f"shopee {type(exc).__name__}")
+    return ResultadoEnvio(
+        ok=True,
+        externo_id=str(mensagem.externo_id),
+        payload=resp if isinstance(resp, dict) else {},
+    )
 
 
 # ── Resposta à avaliação (RF8, 02/10/2026) ────────────────────────────────

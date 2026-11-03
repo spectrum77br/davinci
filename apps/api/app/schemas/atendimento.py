@@ -344,6 +344,24 @@ class MensagemOut(BaseModel):
     # Reclamação do ML (28/10/2026): a quem a fala da LOJA foi — "comprador"
     # ou "mediador" (o `receiver_role` gravado em `payload.para`).
     para: str | None = None
+    # O "apagar" (03/11/2026, o "Retirar" do Duoke): até quando o botão vale
+    # nesta mensagem — calculado, sem coluna (`apagar.pode_apagar_ate`). None =
+    # não aparece (não é nossa, não é Shopee, passou o prazo...). A tela não
+    # fixa plataforma nem prazo: lê daqui.
+    pode_apagar_ate: datetime | None = None
+    # A mensagem da loja APAGADA na plataforma (pelo botão ou por fora, no
+    # Duoke): `falhou` com `ERRO_APAGADA`. O balão troca o "não saiu" pelo
+    # selo "apagada — o comprador não vê mais" e não oferece "tentar de novo".
+    apagada: bool = False
+
+
+class ApagarOut(BaseModel):
+    """POST /mensagens/{id}/apagar: a mensagem marcada e a conversa recalculada."""
+
+    mensagem: MensagemOut
+    conversa: ConversaOut
+    # A apagada era da IA: a IA pausou nesta conversa (a tela avisa).
+    ia_pausada: bool = False
 
 
 class AcaoPessoaOut(BaseModel):

@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import func, select, update
 
 from app.models import AtendimentoMensagem, AtendimentoRascunho
-from app.services.atendimento import enviar, humano, ia
+from app.services.atendimento import apagar, enviar, gravar, humano, ia
 from app.services.atendimento.constantes import (
     ETIQUETA_AG_CANCELAMENTO,
     ORIGEM_AUTO,
@@ -224,6 +224,61 @@ async def test_reenvio_ja_tentado_nao_rele_contexto(
     monkeypatch.setattr(ia, "_motivos_humano_para_auto", contexto_nao_deve_ser_lido)
     assert await ia.reenviar_pendentes(db) == 0
     assert envios == []
+
+
+@pytest.mark.parametrize("origem", ["externo", ORIGEM_HUMANO])
+async def test_resposta_de_pessoa_apagada_continua_segurando_a_ia(
+    db, make_user, ia_ligada, modelo, envios, origem
+):
+    """03/11/2026: a pessoa responde (pelo DaVinci ou pelo Duoke) antes da
+    sugestão e apaga para reescrever. A apagada fica `falhou` e a conversa
+    volta para a fila, mas a pausa humana de 30 min continua: sem isto, na
+    loja em AUTO a IA respondia sozinha antes do texto corrigido."""
+    conversa = await _cenario_auto(db, make_user, ia_ligada, modelo)
+    pessoa = await _msg(
+        db,
+        conversa,
+        "Chega amanhã.",
+        autor="loja",
+        origem=origem,
+        ha=timedelta(minutes=4),
+    )
+    apagar.marcar_apagada(pessoa, por=apagar.POR_DAVINCI)
+    await gravar.recalcular_conversa(db, conversa)
+    await db.commit()
+    assert conversa.aguardando_resposta is True
+    assert await ia._pausa_humana_ate(db, conversa) is not None
+    r = await ia.gerar_rascunho(db, conversa)
+    assert r is not None and r.status == RASCUNHO_PENDENTE
+    assert r.fatos[ia.FATO_AUTO_ENVIO]["motivo"] == "pausa_humana"
+    assert envios == []
+
+
+async def test_apagada_da_ia_e_falha_comum_nao_iniciam_pausa(db, make_user, ia_ligada, modelo):
+    """A exceção é só a apagada de PESSOA: a da IA (o `apagar` já pausa a IA na
+    conversa) e a resposta que só falhou continuam fora da pausa."""
+    conversa = await _cenario_auto(db, make_user, ia_ligada, modelo)
+    da_ia = await _msg(
+        db,
+        conversa,
+        "Seu pedido chega hoje.",
+        autor="loja",
+        origem=ORIGEM_IA,
+        ha=timedelta(minutes=4),
+    )
+    apagar.marcar_apagada(da_ia, por=apagar.POR_DAVINCI)
+    falha = await _msg(
+        db,
+        conversa,
+        "Vou conferir.",
+        autor="loja",
+        origem=ORIGEM_HUMANO,
+        ha=timedelta(minutes=3),
+    )
+    falha.status = "falhou"
+    falha.erro = "shopee blocked"
+    await db.commit()
+    assert await ia._pausa_humana_ate(db, conversa) is None
 
 
 @pytest.mark.parametrize("segundos,pausa", [(1799, True), (1800, False), (1801, False)])

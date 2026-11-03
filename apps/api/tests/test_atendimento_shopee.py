@@ -41,9 +41,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import (
+    AtendimentoAvaliacao,
     AtendimentoCanal,
     AtendimentoConversa,
     AtendimentoMensagem,
+    AtendimentoRascunho,
     Integration,
     IntegrationPlatform,
     User,
@@ -55,13 +57,17 @@ from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     AUTOR_SISTEMA,
     CHAVE_AFILIADO,
+    ERRO_APAGADA,
     MOTIVO_AFILIADO_SO_PESSOA,
     MSG_ENVIADA,
     MSG_FALHOU,
+    MSG_RECEBIDA,
     ORIGEM_CLIENTE,
     ORIGEM_EXTERNO,
     ORIGEM_HUMANO,
+    ORIGEM_IA,
     PLATAFORMAS,
+    RASCUNHO_PENDENTE,
     STATUS_CANAL,
     motivo_canal_sem_envio,
 )
@@ -957,6 +963,211 @@ async def test_nossa_resposta_barrada_depois_de_aceita_e_vista(db, make_user, te
     assert q.aguardando_resposta is True
     # Só a enviada nos últimos 10 min é reconferida (a antiga não custa chamada).
     assert [c for c, _ in f.chamadas_mensagens] == ["Q"]
+
+
+def _apagar_na_shopee(
+    m: dict, *, do_comprador: bool = False, so_bit: bool = False, so_texto: bool = False
+) -> None:
+    """Como a Shopee devolve a mensagem apagada (medido em 03/11/2026): o mesmo
+    id e `status` normal, o texto trocado e o bit 0x200000 no `message_option`.
+
+    `so_bit` / `so_texto` = só um dos dois sinais (o `_apagada` aceita cada um
+    sozinho): a imagem/figurinha apagada pode vir só com o bit, e o texto
+    sozinho é o que sobra se o `message_option` vier num formato que não se lê.
+    """
+    if not so_texto:
+        m["message_option"] = 2097156 if do_comprador else 2097152
+    if not so_bit:
+        m["content"] = {"text": shopee.TEXTO_APAGADA}
+
+
+@pytest.mark.parametrize(
+    "msg_bruta,conteudo,esperado",
+    [
+        # Só o bit, com o texto original (a do comprador vem 0x200000 | 4).
+        ({"message_option": 0x200000}, {"text": "Chega amanhã!"}, True),
+        ({"message_option": 0x200000 | 4}, {}, True),
+        ({"message_option": "2097152"}, {"text": "oi"}, True),
+        # Só o texto que a Shopee põe no lugar — exato.
+        ({"message_option": 0}, {"text": shopee.TEXTO_APAGADA}, True),
+        ({}, {"text": shopee.TEXTO_APAGADA}, True),
+        ({"message_option": 0}, {"text": "this message was deleted"}, False),
+        ({"message_option": 0}, {"text": "This message was deleted!"}, False),
+        ({"message_option": 4}, {"text": "oi"}, False),
+        ({"message_option": None}, {"url": "https://x/y.jpg"}, False),
+    ],
+    ids=[
+        "so-bit-com-texto",
+        "so-bit-sem-texto",
+        "so-bit-em-string",
+        "so-texto",
+        "so-texto-sem-option",
+        "texto-minusculo",
+        "texto-diferente",
+        "outro-bit",
+        "imagem-normal",
+    ],
+)
+def test_apagada_reconhece_o_bit_e_o_texto_cada_um_sozinho(msg_bruta, conteudo, esperado):
+    """03/11/2026: o bit 0x200000 do `message_option` OU o texto exato bastam."""
+    assert shopee._apagada(msg_bruta, conteudo) is esperado
+
+
+@pytest.mark.parametrize("sinal", ["os-dois", "so-bit", "so-texto"])
+async def test_mensagem_da_loja_apagada_por_fora_vira_apagada_sem_perder_o_texto(
+    db, make_user, teto, sinal
+):
+    """03/11/2026: a equipe apaga pelo Duoke ("Retirar") a resposta que o DaVinci
+    já tinha lido — antes ela ficava com o texto original e "respondida" para
+    sempre (o `gravar` não mexe em linha que já existe). Cada sinal da Shopee
+    vale sozinho (`so-bit`: o content original continua lá)."""
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    t = AGORA - timedelta(hours=1)
+    pelo_duoke = msg("X", t + timedelta(minutes=2), da_loja=True, texto="Chega amanhã!")
+    f.conversa("X", msg("X", t, texto="quando chega?"), pelo_duoke)
+    await _rodar(db, canal, integ, f)
+    conv = (await _conversas(db))["X"]
+    resposta = (await _mensagens(db, conv.id))[-1]
+    assert (resposta.origem, resposta.status) == (ORIGEM_EXTERNO, MSG_ENVIADA)
+
+    # A Shopee apaga; o comprador escreve de novo (a página é relida).
+    _apagar_na_shopee(pelo_duoke, so_bit=sinal == "so-bit", so_texto=sinal == "so-texto")
+    if sinal == "so-bit":
+        assert pelo_duoke["content"] == {"text": "Chega amanhã!"}
+    f.conversa("X", msg("X", t + timedelta(minutes=30), texto="??"))
+    await _rodar(db, canal, integ, f)
+
+    await db.refresh(resposta)
+    assert (resposta.status, resposta.erro) == (MSG_FALHOU, ERRO_APAGADA)
+    # O texto original fica (só a equipe vê); a marca diz quem apagou.
+    assert resposta.texto == "Chega amanhã!"
+    assert resposta.payload["apagada"]["por"] == "plataforma"
+    # Relida de novo (outra mensagem do comprador), não remarca.
+    em = resposta.payload["apagada"]["em"]
+    f.conversa("X", msg("X", t + timedelta(minutes=40), texto="alô"))
+    await _rodar(db, canal, integ, f)
+    await db.refresh(resposta)
+    assert resposta.payload["apagada"]["em"] == em
+
+
+async def test_lida_ja_apagada_e_a_do_comprador_apagada(db, make_user, teto):
+    """A da loja que a primeira leitura já pega apagada também vira apagada (não
+    conta como resposta); a do comprador só ganha a marca, o status fica."""
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    t = AGORA - timedelta(hours=1)
+    pergunta = msg("Y", t, texto="tem azul?")
+    _apagar_na_shopee(pergunta, do_comprador=True)
+    loja = msg("Y", t + timedelta(minutes=1), da_loja=True, texto="x")
+    _apagar_na_shopee(loja)
+    f.conversa("Y", msg("Y", t - timedelta(minutes=1), texto="oi"), pergunta, loja)
+    await _rodar(db, canal, integ, f)
+
+    conv = (await _conversas(db))["Y"]
+    ms = await _mensagens(db, conv.id)
+    do_comprador = next(m for m in ms if m.externo_id == pergunta["message_id"])
+    assert do_comprador.status == MSG_RECEBIDA
+    assert do_comprador.payload["apagada_pelo_cliente"] is True
+    da_loja = next(m for m in ms if m.externo_id == loja["message_id"])
+    assert (da_loja.status, da_loja.erro) == (MSG_FALHOU, ERRO_APAGADA)
+    assert conv.aguardando_resposta is True
+
+
+async def test_primeira_leitura_ja_apagada_nao_aposenta_a_sugestao_nem_promove_a_avaliacao(
+    db, make_user, teto
+):
+    """03/11/2026: a equipe responde pelo Duoke e usa o "Retirar" ANTES de o
+    DaVinci ler. A linha nasce apagada (`gravar_mensagem(apagada=True)`), e não
+    `enviada` marcada depois: a sugestão da IA continua pendente e a nota do
+    modo observação continua `observou` — sem isto, "This message was deleted"
+    virava a "resposta da equipe" na comparação IA × equipe, e a conversa
+    reaberta ficava sem sugestão (o `ja_tratada` da IA via a avaliação)."""
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    t = AGORA - timedelta(hours=1)
+    f.conversa("Z", msg("Z", t, texto="quando chega?"))
+    await _rodar(db, canal, integ, f)
+    conv = (await _conversas(db))["Z"]
+    (pergunta,) = await _mensagens(db, conv.id)
+    sugestao = AtendimentoRascunho(
+        conversa_id=conv.id,
+        mensagem_gatilho_id=pergunta.id,
+        texto="Chega amanhã, segue o rastreio.",
+        status=RASCUNHO_PENDENTE,
+    )
+    db.add(sugestao)
+    await db.commit()
+    nota = AtendimentoAvaliacao(rascunho_id=sugestao.id, acao="observou", nota="ok")
+    db.add(nota)
+    await db.commit()
+
+    apagada = msg("Z", t + timedelta(minutes=2), da_loja=True, texto="Chega amanhã!")
+    _apagar_na_shopee(apagada)
+    f.conversa("Z", apagada)
+    await _rodar(db, canal, integ, f)
+
+    conv = (await _conversas(db))["Z"]
+    da_loja = next(
+        m for m in await _mensagens(db, conv.id) if m.externo_id == apagada["message_id"]
+    )
+    assert (da_loja.origem, da_loja.status, da_loja.erro) == (
+        ORIGEM_EXTERNO,
+        MSG_FALHOU,
+        ERRO_APAGADA,
+    )
+    assert da_loja.payload["apagada"]["por"] == "plataforma"
+    await db.refresh(sugestao)
+    await db.refresh(nota)
+    assert sugestao.status == RASCUNHO_PENDENTE
+    assert (nota.acao, nota.texto_final, nota.similaridade) == ("observou", None, None)
+    assert conv.aguardando_resposta is True
+
+
+async def test_nossa_resposta_da_ia_apagada_pelo_duoke_reabre_e_pausa_a_ia(db, make_user, teto):
+    """A da IA apagada por fora (a reconferência relê a nossa dos últimos 10 min):
+    a conversa volta para a fila e a IA pausa — senão, nas lojas em AUTO, ela
+    mandaria de novo a mesma coisa."""
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    t = AGORA - timedelta(minutes=30)
+    f.conversa("Q", msg("Q", t, texto="cadê meu pedido?"))
+    await _rodar(db, canal, integ, f)
+    conv = (await _conversas(db))["Q"]
+    agora = datetime.now(UTC).replace(microsecond=0)
+    mid = "9000000000000000901"
+    db.add(
+        AtendimentoMensagem(
+            conversa_id=conv.id,
+            externo_id=mid,
+            autor=AUTOR_LOJA,
+            origem=ORIGEM_IA,
+            texto="Seu pedido chega hoje.",
+            status=MSG_ENVIADA,
+            enviada_em=agora - timedelta(minutes=1),
+        )
+    )
+    volta = msg(
+        "Q", agora - timedelta(minutes=1), da_loja=True, texto="Seu pedido chega hoje.", mid=mid
+    )
+    f.conversa("Q", volta)
+    await db.commit()
+    await gravar.recalcular_conversa(db, conv)
+    await db.commit()
+    await _rodar(db, canal, integ, f)
+    assert (await _conversas(db))["Q"].aguardando_resposta is False
+
+    _apagar_na_shopee(volta)
+    await _rodar(db, canal, integ, f)
+
+    q = (await _conversas(db))["Q"]
+    nossa = (await _mensagens(db, q.id))[-1]
+    assert (nossa.status, nossa.erro, nossa.texto) == (
+        MSG_FALHOU,
+        ERRO_APAGADA,
+        "Seu pedido chega hoje.",
+    )
+    assert q.aguardando_resposta is True and q.ia_pausada is True
 
 
 @pytest.mark.parametrize("com_id", [True, False], ids=["envio-com-id", "envio-sem-id"])

@@ -492,6 +492,15 @@ MSG_REVISAR = "revisar"
 # /mensagens/{id}/conferir). No Zap, o status da Meta que chega depois para
 # ela (pelo `biz_opaque`) desfaz a marcação: SAIU (`zap_entrada._status`).
 ERRO_CONFERIDO_NAO_SAIU = "conferido: não saiu"
+# O `erro` da mensagem da LOJA APAGADA na plataforma (03/11/2026, o "Retirar"
+# do Duoke): pelo botão "apagar" do DaVinci (POST /mensagens/{id}/apagar,
+# `services/atendimento/apagar.py`) ou por fora (a equipe no Duoke/Seller
+# Center — a leitura da Shopee reconhece). Fica `falhou` porque o comprador
+# não vê mais: o que já deixa `falhou` de fora (a fila, o "respondida", o
+# envio repetido, a reconferência) vale sem migration. O texto continua na linha, só
+# para a equipe; a tela troca o "não saiu" pelo selo "apagada" e não oferece
+# "tentar de novo".
+ERRO_APAGADA = "apagada pela loja"
 
 # ── Situação da conversa ──────────────────────────────────────────────────
 CONVERSA_ABERTA = "aberta"

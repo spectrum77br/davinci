@@ -795,6 +795,31 @@ class ShopeeClient:
             what="shopee_chat_send",
         )
 
+    async def chat_delete_message(self, message_id: int | str, message_type: str) -> dict:
+        """APAGA uma mensagem que a loja mandou (POST /api/v2/sellerchat/delete_message):
+        o comprador deixa de ver, e a Shopee troca o texto por "This message was
+        deleted" no `get_message` (o mesmo `message_id`, com o bit 0x200000 no
+        `message_option` — medido em produção nas que o Duoke apagou).
+
+        03/11/2026, o botão "apagar" do Atendimento (o "Retirar" do Duoke). O
+        corpo é JSON `{"message_id": <número, como a Shopee devolveu no
+        send_message>, "message_type": "text" | "image" | "order" | "item" |
+        "sticker"}` — o formato do cliente EcomPHP (`deleteMessage($message_id,
+        $message_type)`). NÃO CONFIRMADO na doc oficial (a API Reference é
+        restrita ao login de parceiro) nem o prazo da Shopee (o Duoke recusa
+        depois de 3 min): o primeiro uso real confirma. Id não numérico ou tipo
+        vazio → `ValueError` antes de sair."""
+        mid = str(message_id or "").strip()
+        tipo = str(message_type or "").strip().lower()
+        if not mid.isdigit() or not tipo:
+            raise ValueError("chat_delete_message: message_id numérico e message_type")
+        return await self._call(
+            "POST",
+            "/api/v2/sellerchat/delete_message",
+            json={"message_id": int(mid), "message_type": tipo},
+            what="shopee_chat_delete",
+        )
+
     async def chat_send_autoreply_message(self, to_id: int | str, *, text: str) -> dict:
         """Manda um texto como RESPOSTA AUTOMÁTICA (`status=auto_reply`)
         (POST /api/v2/sellerchat/send_autoreply_message).

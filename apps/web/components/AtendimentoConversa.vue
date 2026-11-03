@@ -921,7 +921,8 @@ function lado(m: Mensagem): 'cliente' | 'loja' | 'sistema' | 'nota' | 'mediador'
 // (qualquer origem — quem diferencia é o rótulo em cima do balão). Cartão
 // sozinho do cliente ganha fundo cinza para o cartão branco aparecer.
 function balaoCls(m: Mensagem) {
-  const falhou = m.status === 'falhou' ? ' ring-1 ring-red-400/80' : ''
+  // A apagada (03/11/2026) não é erro de envio: sem o anel vermelho.
+  const falhou = m.status === 'falhou' && !m.apagada ? ' ring-1 ring-red-400/80' : ''
   if (lado(m) === 'cliente' || lado(m) === 'afiliado') {
     return (soCartao(m) ? 'rounded-tl-sm bg-muted/80' : 'rounded-tl-sm border border-border/70 bg-background') + falhou
   }
@@ -962,6 +963,18 @@ const STATUS_MSG: Record<string, { label: string; cls: string; hint: string }> =
     hint: 'a plataforma não confirmou — pode ter saído. Confira na plataforma e marque se saiu; o DaVinci não tenta de novo sozinho',
   },
   falhou: { label: 'não saiu', cls: 'bg-red-500/15 text-red-700 dark:text-red-300', hint: 'a plataforma recusou — a mensagem NÃO chegou ao comprador' },
+}
+// A mensagem da loja APAGADA na plataforma (03/11/2026, pelo "apagar" daqui ou
+// pelo "Retirar" do Duoke): o servidor grava `falhou`, mas não é envio que
+// falhou — selo cinza no lugar do "não saiu", sem a frase vermelha e sem
+// "tentar de novo". O texto fica visível (riscado), só para a equipe.
+const SELO_APAGADA = {
+  label: 'apagada — o comprador não vê mais',
+  cls: 'bg-muted text-muted-foreground',
+  hint: 'apagada na plataforma: o comprador deixa de ver (pode ter lido antes). O texto fica aqui só para a equipe',
+}
+function seloDaMsg(m: Mensagem) {
+  return m.apagada ? SELO_APAGADA : STATUS_MSG[m.status]
 }
 // Os tipos do Zap (19/10/2026, docs/zap/desenho.md §5.4): o que o leitor do
 // WhatsApp grava em `mensagem.tipo` — áudio, localização, contato, figurinha
@@ -2780,10 +2793,15 @@ function podeTentarDeNovo(m: Mensagem): boolean {
   const d = detalhe.value
   if (!d || !props.canEdit || observacao.value || !d.envio.pode_enviar) return false
   if (m.status !== 'falhou' || lado(m) !== 'loja' || !m.texto || m.tipo === 'imagem') return false
+  // A apagada (03/11/2026) saiu e foi apagada de propósito: mandar de novo não.
+  if (m.apagada) return false
   if (m.origem !== 'davinci_humano' && m.origem !== 'davinci_ia') return false
   if (enviando.value || incertos.has(d.conversa.id)) return false
   const t = ts(m)
-  return !d.mensagens.some((x) => x.id !== m.id && lado(x) === 'loja' && x.status !== 'falhou' && ts(x) >= t)
+  // A apagada depois desta (03/11/2026) também conta como tentativa que saiu:
+  // ela chegou ao comprador e foi tirada de propósito — sem isto, apagar a
+  // resposta nova fazia o "tentar de novo" voltar na recusada mais antiga.
+  return !d.mensagens.some((x) => x.id !== m.id && lado(x) === 'loja' && (x.status !== 'falhou' || x.apagada) && ts(x) >= t)
 }
 async function tentarDeNovo(m: Mensagem) {
   const d = detalhe.value
@@ -2821,6 +2839,60 @@ async function tentarDeNovo(m: Mensagem) {
     tentandoId.value = null
   }
   if (aberta(id)) await carregar(id, true)
+}
+
+// ─── "apagar" a mensagem da loja (03/11/2026, o "Retirar" do Duoke) ─────────
+// Só onde o servidor diz que dá (`pode_apagar_ate`: a mensagem que o DaVinci
+// mandou no chat da Shopee, nos minutos que a plataforma deixa) — a tela não
+// fixa plataforma nem prazo. O relógio de 30 s (`agora`) tira o botão depois
+// do prazo; a contagem de segundos é do AtendimentoApagar.
+const apagandoId = ref<string | null>(null)
+function podeApagar(m: Mensagem, de: string | null): boolean {
+  if (!props.canEdit || de || lado(m) !== 'loja' || !m.pode_apagar_ate) return false
+  const ate = Date.parse(m.pode_apagar_ate)
+  return !Number.isNaN(ate) && agora.value < ate
+}
+async function apagar(m: Mensagem) {
+  const d = detalhe.value
+  if (!d || apagandoId.value || !podeApagar(m, null)) return
+  if (!confirm('Apagar esta mensagem?\n\nO comprador deixa de ver esta mensagem. Não dá para desfazer.')) return
+  const id = d.conversa.id
+  apagandoId.value = m.id
+  // O recarregar fica DENTRO do try (03/11/2026): o botão segue travado até a
+  // conversa nova chegar — o recarregar silencioso pode demorar (o cartão do
+  // cliente vai à loja), e um segundo clique nesse meio ouviria o 409.
+  try {
+    const r = await api<{ ia_pausada?: boolean }>(`/api/atendimento/mensagens/${encodeURIComponent(m.id)}/apagar`, { method: 'POST' })
+    // A mensagem volta já apagada (sem `pode_apagar_ate`): o balão troca na
+    // hora — o selo aparece e o botão some, como no "conferir".
+    const nova = comoObjeto<Mensagem>(r, 'mensagem')
+    if (nova && detalhe.value?.conversa.id === id) {
+      detalhe.value.mensagens = detalhe.value.mensagens.map((x) => (x.id === nova.id ? { ...x, ...nova } : x))
+    }
+    // A resposta traz a conversa recalculada (volta para "Falta responder" se
+    // era a resposta): a linha da lista acompanha.
+    const c = comoObjeto<ConversaDetalhe>(r, 'conversa')
+    if (c) emit('mudou', c)
+    toasts.success('Mensagem apagada', r?.ia_pausada ? 'O comprador não vê mais. A IA pausou nesta conversa para não mandar o mesmo de novo.' : 'O comprador não vê mais (ele pode ter lido antes).')
+    if (aberta(id)) await carregar(id, true)
+  } catch (e: any) {
+    const det = e?.data?.detail
+    const code = det && typeof det === 'object' ? det.code : null
+    const st = statusDoErro(e)
+    // Sem código e sem resposta (rede caiu) ou 5xx: a Shopee pode ter apagado
+    // antes de o servidor responder — a mesma régua do "tentar de novo".
+    if (code === 'apagar_incerto' || (!code && (!st || st >= 500))) {
+      toasts.warning('Não deu para confirmar se apagou — confira na Shopee', 'Se ainda aparece lá, dá para tentar apagar de novo dentro do prazo.')
+    } else if (code === 'plataforma_recusou') {
+      toasts.error(ERROS.plataforma_recusou, typeof det.erro === 'string' && det.erro ? [det.erro] : undefined)
+    } else {
+      const er = erroDaApi(e, 'Não consegui apagar')
+      toasts.error(er.texto, er.motivos)
+    }
+    if (aberta(id)) await carregar(id, true)
+  } finally {
+    apagandoId.value = null
+  }
 }
 
 // ─── painel do pedido ───────────────────────────────────────────────────────
@@ -3538,11 +3610,12 @@ watch(() => props.conversaId, (novo, velho) => {
                 <span v-if="l.m.para" class="shrink-0 rounded px-1" :class="l.m.para === 'mediador' ? 'bg-violet-500/15 text-violet-700 dark:text-violet-300' : 'bg-muted text-muted-foreground'" data-msg-para>→ {{ l.m.para === 'mediador' ? 'Mercado Livre (mediador)' : 'comprador' }}</span>
               </div>
               <div class="max-w-[85%] rounded-lg px-3 py-2 transition-shadow md:max-w-[75%]" :class="[balaoCls(l.m), destacadaId === l.m.id ? 'ring-2 ring-primary/70' : '']">
-                <div v-if="STATUS_MSG[l.m.status]" class="mb-1">
-                  <span class="inline-flex items-center gap-1 rounded px-1.5 py-px text-[11px]" :class="STATUS_MSG[l.m.status].cls" :title="STATUS_MSG[l.m.status].hint">
+                <div v-if="seloDaMsg(l.m)" class="mb-1">
+                  <span class="inline-flex items-center gap-1 rounded px-1.5 py-px text-[11px]" :class="seloDaMsg(l.m)!.cls" :title="seloDaMsg(l.m)!.hint" :data-msg-apagada="l.m.apagada ? '' : undefined">
                     <Loader2 v-if="l.m.status === 'enviando'" class="size-3 animate-spin" />
+                    <Trash2 v-else-if="l.m.apagada" class="size-3" />
                     <TriangleAlert v-else class="size-3" />
-                    {{ STATUS_MSG[l.m.status].label }}
+                    {{ seloDaMsg(l.m)!.label }}
                   </span>
                 </div>
                 <!-- e-mail: a pasta, o destinatário → loja, o remetente, o assunto e o e-mail inteiro -->
@@ -3555,9 +3628,10 @@ watch(() => props.conversaId, (novo, velho) => {
                   :respondendo="!!l.m.email.message_id && emailResponder === l.m.email.message_id"
                   @responder="responderEmail"
                 />
-                <div v-if="l.m.texto" class="whitespace-pre-wrap break-words text-sm leading-relaxed"><template v-for="(p, i) in partesDaMensagem(l.m)" :key="i"><a v-if="p.t === 'url'" :href="p.v" target="_blank" rel="noopener noreferrer" class="break-all underline">{{ p.v }}</a><strong v-else-if="p.t === 'b'" class="font-semibold">{{ p.v }}</strong><template v-else>{{ p.v }}</template></template></div>
+                <!-- apagada (03/11/2026): o texto fica para a equipe, riscado -->
+                <div v-if="l.m.texto" class="whitespace-pre-wrap break-words text-sm leading-relaxed" :class="l.m.apagada ? 'line-through opacity-60' : ''"><template v-for="(p, i) in partesDaMensagem(l.m)" :key="i"><a v-if="p.t === 'url'" :href="p.v" target="_blank" rel="noopener noreferrer" class="break-all underline">{{ p.v }}</a><strong v-else-if="p.t === 'b'" class="font-semibold">{{ p.v }}</strong><template v-else>{{ p.v }}</template></template></div>
                 <div v-else-if="!pecasDaMsg(l.m).length" class="text-sm italic text-muted-foreground">[{{ TIPO_LABEL[l.m.tipo] || 'sem texto' }}]</div>
-                <div v-if="pecasDaMsg(l.m).length" class="flex flex-wrap gap-2" :class="l.m.texto ? 'mt-2' : ''">
+                <div v-if="pecasDaMsg(l.m).length" class="flex flex-wrap gap-2" :class="[l.m.texto ? 'mt-2' : '', l.m.apagada ? 'opacity-60' : '']">
                   <template v-for="pc in pecasDaMsg(l.m)" :key="pc.chave">
                     <AtendimentoCartaoPedido v-if="pc.tipo === 'pedido'" :cartao="pc.cartao" :plataforma="conversa.plataforma" :retrato="pedidoMkt" />
                     <AtendimentoCartaoProduto v-else-if="pc.tipo === 'produto'" :cartao="pc.cartao" />
@@ -3591,7 +3665,7 @@ watch(() => props.conversaId, (novo, velho) => {
                   </template>
                 </div>
                 <!-- A frase diz o que fazer; o código cru (para o suporte) fica no title. -->
-                <div v-if="l.m.status === 'falhou'" class="mt-1 rounded bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-700 dark:text-red-300" :title="l.m.erro || ''">
+                <div v-if="l.m.status === 'falhou' && !l.m.apagada" class="mt-1 rounded bg-red-500/10 px-1.5 py-0.5 text-[11px] text-red-700 dark:text-red-300" :title="l.m.erro || ''">
                   {{ erroDoBalao(l.m) }}
                   <!-- Só com o envio ligado e só na última tentativa (não reenvia sozinho). -->
                   <button
@@ -3647,6 +3721,14 @@ watch(() => props.conversaId, (novo, velho) => {
                   <span v-if="l.m.retida_pela_meta && tiqueDoZap(l.m)!.tipo === 'um'" class="text-amber-700 dark:text-amber-300">segurada pela Meta</span>
                 </template>
                 <CheckCheck v-else-if="l.m.status === 'enviada' && lado(l.m) === 'loja'" class="size-3" />
+                <!-- "apagar" (03/11/2026, o "Retirar" do Duoke): só onde o servidor deixa, com a contagem -->
+                <AtendimentoApagar
+                  v-if="podeApagar(l.m, l.de)"
+                  :ate="l.m.pode_apagar_ate!"
+                  :apagando="apagandoId === l.m.id"
+                  :disabled="!!apagandoId"
+                  @apagar="apagar(l.m)"
+                />
               </div>
               <!-- IA × equipe: o que a IA teria dito no lugar desta resposta -->
               <AtendimentoIaTeria

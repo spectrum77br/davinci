@@ -289,6 +289,7 @@ from app.services.atendimento.constantes import (
     CATEGORIAS_SO_HUMANO,
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
+    ERRO_APAGADA,
     ETIQUETA_DEVOLUCAO,
     FONTE_TUTA,
     HUMANO_ACAO_PESSOA,
@@ -3206,13 +3207,21 @@ async def _pausa_humana_ate(
     DaVinci e respostas de fora seguem a mesma regra. O menu, as campanhas,
     os cartões automáticos e respostas que falharam não iniciam a pausa.
     Só consulta o banco: pode ser conferida novamente sob a trava do envio.
+
+    A resposta de pessoa APAGADA (03/11/2026, `ERRO_APAGADA`: o "apagar" do
+    DaVinci ou o "Retirar" do Duoke) continua abrindo a pausa, embora fique
+    `falhou`: a pessoa apagou para reescrever, e a IA não pode entrar na vez
+    dela — sem isto, nas lojas em AUTO, apagar tirava a pausa e a IA
+    respondia no minuto seguinte, antes do texto corrigido (o comprador
+    recebia duas respostas). A apagada da IA não conta (a origem), e o
+    `apagar` já pausa a IA nessa conversa.
     """
     agora = agora or datetime.now(UTC)
     ultima = await session.scalar(
         select(func.max(_momento_col())).where(
             AtendimentoMensagem.conversa_id == conversa.id,
             AtendimentoMensagem.autor == AUTOR_LOJA,
-            AtendimentoMensagem.status != MSG_FALHOU,
+            or_(AtendimentoMensagem.status != MSG_FALHOU, AtendimentoMensagem.erro == ERRO_APAGADA),
             AtendimentoMensagem.tipo != "nota",
             AtendimentoMensagem.origem.in_((ORIGEM_EXTERNO, ORIGEM_HUMANO)),
             ~gravar.mensagem_automatica_sql(AtendimentoMensagem.texto, AtendimentoMensagem.payload),
