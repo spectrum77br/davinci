@@ -62,7 +62,10 @@ function mount({ tab, conversation, saved, intercept } = {}) {
     useAuthStore: () => ({ user: { id: 'operator', atendimento: true, atendimento_mexe: true } }),
     useCan: () => Vue.ref(true), useIsAdmin: () => Vue.ref(true),
     localStorage: { getItem: (key) => stored.get(key) || null, setItem: (key, value) => stored.set(key, value) },
-    window: { innerWidth: 1600, scrollY: 0, innerHeight: 900 },
+    window: { innerWidth: 1600, scrollY: 0, innerHeight: 900, addEventListener: () => {}, removeEventListener: () => {} },
+    // A tela cheia (03/11/2026, atendimento-tela-cheia): o atalho e a tela do navegador.
+    document: { fullscreenEnabled: false, fullscreenElement: null, addEventListener: () => {}, removeEventListener: () => {} },
+    useTelaCheia: () => Vue.ref(false),
   }
   const mod = { exports: {} }
   new Function('require', 'module', 'exports', ...Object.keys(globals), script)(requiring, mod, mod.exports, ...Object.values(globals))

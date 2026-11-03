@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BarChart3, BookOpen, Bot, Eye, Inbox, Mail, MessageSquareText, RotateCcw, Store, TriangleAlert, UserRound } from 'lucide-vue-next'
+import { BarChart3, BookOpen, Bot, Eye, Fullscreen, Inbox, Mail, Maximize2, MessageSquareText, Minimize2, RotateCcw, Store, TriangleAlert, UserRound } from 'lucide-vue-next'
 import { useResizeObserver, useWindowSize } from '@vueuse/core'
 import {
   AVISO_SO_LEITURA,
@@ -788,7 +788,8 @@ const alturaCaixa = computed(() => {
 // ela ficar logo abaixo da barra do topo (uma vez — depois ela já cabe).
 function mostrarCaixaInteira() {
   const el = caixaEl.value
-  if (!el || !naCaixa.value) return
+  // Na tela cheia a Caixa já vai do topo ao fim da janela.
+  if (!el || !naCaixa.value || telaCheiaAtiva.value) return
   const r = el.getBoundingClientRect()
   if (r.top >= TOPO_FIXO - 8 && r.bottom <= window.innerHeight) return
   let suave = true
@@ -1041,14 +1042,195 @@ onMounted(() => {
 })
 watch(lojasEmailsAbertos, (v) => gravarAbertos(chaveDosEmailsAbertos(), v))
 watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
+
+// ─── tela cheia (03/11/2026) ────────────────────────────────────────────────
+// O Eduardo: "um botão pra ampliar no DaVinci pra deixar fullscreen só o
+// atendimento, parecido em dimensão com o Duoke". A equipe veio do Duoke, que
+// ocupa a tela toda: o "Tela cheia" (ou Ctrl+Shift+F) tira o menu lateral, a
+// barra do topo e o título do DaVinci (o layout, `useTelaCheia`), e as abas
+// viram a barra estreita de ícones da esquerda, como a do Duoke, com os
+// mesmos números. A Caixa fica com a largura e a altura inteiras: ícones |
+// lojas | lista | conversa (+ pedido). Sai pelo "Sair" da barra, pelo mesmo
+// atalho ou pelo Esc — menos com um menu, modal, imagem ou gaveta aberta, ou
+// digitando: aí o Esc é deles. O navegador lembra a escolha; abaixo do `lg`
+// (sem a barra de lojas) a tela é a de sempre. A tela inteira do NAVEGADOR
+// (Fullscreen API, sem as abas do Chrome) é um botão à parte na barra: pede um
+// clique e não volta sozinha ao recarregar.
+const TELA_CHEIA_KEY = 'davinci.atendimento.telaCheia'
+const telaCheia = ref(false)
+const telaCheiaAtiva = computed(() => telaCheia.value && barraDeLojasNaTela.value)
+const telaCheiaDoLayout = useTelaCheia()
+watch(telaCheiaAtiva, (v) => { telaCheiaDoLayout.value = v }, { immediate: true })
+// A barra de lojas sem escolha da pessoa: na tela cheia, com a largura que o
+// menu do DaVinci deixa, ela abre com os nomes já de 1280 px (a do Duoke tem
+// os nomes); fora, volta ao padrão de sempre (1536). A escolha salva manda.
+const LOJAS_COM_NOME_NA_TELA_CHEIA = 1280
+watch(telaCheiaAtiva, (v) => {
+  try {
+    if (localStorage.getItem(LOJAS_KEY) !== null) return
+  } catch {
+    // sem localStorage — segue o padrão pela largura
+  }
+  lojasEscolhidaPelaPessoa = false
+  lojasRecolhidas.value = window.innerWidth < (v ? LOJAS_COM_NOME_NA_TELA_CHEIA : 1536)
+  void nextTick(() => { lojasEscolhidaPelaPessoa = true })
+})
+// Os nomes curtos da barra de ícones (o nome inteiro fica no title).
+const ROTULO_NA_BARRA: Record<Aba, string> = {
+  caixa: 'Caixa', humano: 'Humano', mail: 'E-mail', lojas: 'Lojas',
+  manual: 'Manual', modelos: 'Prontas', automaticas: 'Automát.', metricas: 'Métricas',
+}
+// Os números das abas de cima, na barra de ícones.
+const marcasNaBarra = computed(() => {
+  const m: Partial<Record<Aba, { n: number; titulo: string }>> = {}
+  if (naoLidasDuoke.value) m.caixa = { n: naoLidasDuoke.value, titulo: `${naoLidasDuoke.value} mensagem(ns) não lida(s): o chat de todas as plataformas` }
+  if (resumo.value?.humano) m.humano = { n: resumo.value.humano, titulo: `${resumo.value.humano} conversa(s) esperando uma pessoa: falta responder e a IA não pode` }
+  if (emailEsperando.value) m.mail = { n: emailEsperando.value, titulo: `${emailEsperando.value} e-mail(s) esperando resposta` }
+  if (semLer.value.length) m.lojas = { n: semLer.value.length, titulo: tituloLeituraParada(semLer.value) }
+  return m
+})
+function mudarTelaCheia(v: boolean) {
+  telaCheia.value = v
+  try {
+    localStorage.setItem(TELA_CHEIA_KEY, v ? '1' : '0')
+  } catch {
+    // sem localStorage — só não lembra
+  }
+  if (!v && naTelaDoNavegador.value) void alternarTelaDoNavegador()
+  void nextTick(medirCaixa)
+}
+const telaDoNavegadorPode = ref(false)
+const naTelaDoNavegador = ref(false)
+function lerTelaDoNavegador() {
+  naTelaDoNavegador.value = !!document.fullscreenElement
+}
+async function alternarTelaDoNavegador() {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen()
+    else await document.documentElement.requestFullscreen()
+  } catch {
+    // o navegador recusou (sem o clique, numa moldura) — fica como está
+  }
+}
+// O Esc de quem tem algo aberto por cima (menu, modal, a imagem, a gaveta do
+// pedido) ou está digitando é de lá. A escuta é na captura: vê a tela ANTES de
+// o menu ou o modal fechar com o mesmo Esc. Só conta o que está À MOSTRA: o
+// menu da plataforma, por exemplo, mora escondido na página (v-show).
+const ABERTO_POR_CIMA = '[role="dialog"], [role="alertdialog"], [aria-modal="true"], [role="menu"], dialog[open], .fixed.inset-0'
+function escDeOutraCoisa(e: KeyboardEvent) {
+  const alvo = e.target as HTMLElement | null
+  if (alvo?.closest?.('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return true
+  return [...document.querySelectorAll(ABERTO_POR_CIMA)].some((el) => el.getClientRects().length > 0)
+}
+function aoTeclarNaTelaCheia(e: KeyboardEvent) {
+  if (e.isComposing || e.repeat) return
+  if (e.code === 'KeyF' && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey) {
+    if (!barraDeLojasNaTela.value) return
+    e.preventDefault()
+    mudarTelaCheia(!telaCheia.value)
+    return
+  }
+  if (e.key === 'Escape' && telaCheiaAtiva.value && !escDeOutraCoisa(e)) mudarTelaCheia(false)
+}
+onMounted(() => {
+  try {
+    telaCheia.value = localStorage.getItem(TELA_CHEIA_KEY) === '1'
+  } catch {
+    // sem localStorage — começa na tela de sempre
+  }
+  telaDoNavegadorPode.value = !!document.fullscreenEnabled
+  lerTelaDoNavegador()
+  window.addEventListener('keydown', aoTeclarNaTelaCheia, true)
+  document.addEventListener('fullscreenchange', lerTelaDoNavegador)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', aoTeclarNaTelaCheia, true)
+  document.removeEventListener('fullscreenchange', lerTelaDoNavegador)
+  // As outras páginas têm o menu e a barra do topo.
+  telaCheiaDoLayout.value = false
+})
 </script>
 
 <template>
-  <div class="space-y-3">
+  <div :class="telaCheiaAtiva ? 'flex min-h-dvh' : ''" :data-tela-cheia="telaCheiaAtiva || undefined">
+    <!-- tela cheia (03/11/2026): as abas viram a barra estreita de ícones da esquerda, como a do Duoke -->
+    <nav
+      v-if="telaCheiaAtiva"
+      class="sticky top-0 flex h-dvh w-[68px] shrink-0 flex-col gap-0.5 self-start overflow-y-auto border-r bg-muted/40 px-1 py-2"
+      aria-label="Abas do atendimento"
+      data-barra-tela-cheia
+    >
+      <button
+        v-for="a in abasVisiveis"
+        :key="a.value"
+        type="button"
+        class="relative flex flex-col items-center gap-0.5 rounded-md px-0.5 py-1.5 text-[10px] leading-tight"
+        :class="aba === a.value ? 'bg-primary/10 font-medium text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+        :title="marcasNaBarra[a.value] ? `${a.label} — ${marcasNaBarra[a.value]!.titulo}` : a.label"
+        :aria-current="aba === a.value ? 'page' : undefined"
+        @click="aba = a.value"
+      >
+        <component :is="a.value === 'mail' ? Mail : a.icon" class="size-5" aria-hidden="true" />
+        <span class="max-w-full truncate">{{ ROTULO_NA_BARRA[a.value] }}</span>
+        <span
+          v-if="marcasNaBarra[a.value]"
+          class="absolute right-0.5 top-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white tabular-nums"
+          :aria-label="marcasNaBarra[a.value]!.titulo"
+        >{{ marcasNaBarra[a.value]!.n > 99 ? '99+' : marcasNaBarra[a.value]!.n }}</span>
+      </button>
+      <div class="mt-auto flex flex-col gap-0.5 border-t pt-2">
+        <button
+          type="button"
+          class="flex flex-col items-center gap-0.5 rounded-md px-0.5 py-1.5 text-[10px] leading-tight text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50"
+          :disabled="carregando"
+          title="Atualizar as conversas e os números"
+          @click="atualizarTudo"
+        >
+          <RotateCcw class="size-5" :class="{ 'animate-spin': carregando }" aria-hidden="true" />
+          <span>Atualizar</span>
+        </button>
+        <button
+          v-if="telaDoNavegadorPode"
+          type="button"
+          class="flex flex-col items-center gap-0.5 rounded-md px-0.5 py-1.5 text-[10px] leading-tight hover:bg-muted hover:text-foreground"
+          :class="naTelaDoNavegador ? 'bg-primary/10 text-primary' : 'text-muted-foreground'"
+          :title="naTelaDoNavegador ? 'Voltar a mostrar as abas e a barra do navegador' : 'Usar o monitor inteiro: esconde também as abas e a barra do navegador (como o F11)'"
+          :aria-pressed="naTelaDoNavegador"
+          data-tela-do-navegador
+          @click="alternarTelaDoNavegador"
+        >
+          <Fullscreen class="size-5" aria-hidden="true" />
+          <span>Monitor</span>
+        </button>
+        <button
+          type="button"
+          class="flex flex-col items-center gap-0.5 rounded-md px-0.5 py-1.5 text-[10px] leading-tight text-muted-foreground hover:bg-muted hover:text-foreground"
+          title="Sair da tela cheia: volta o menu do DaVinci (Esc ou Ctrl+Shift+F)"
+          data-tela-cheia-sair
+          @click="mudarTelaCheia(false)"
+        >
+          <Minimize2 class="size-5" aria-hidden="true" />
+          <span>Sair</span>
+        </button>
+      </div>
+    </nav>
+    <div :class="telaCheiaAtiva ? ['flex min-w-0 flex-1 flex-col gap-2 p-2', naCaixa ? 'h-dvh' : ''] : 'space-y-3'">
     <!-- tudo acima da Caixa: medido para a Caixa ir até o fim da janela -->
-    <div ref="topoEl" class="space-y-3">
-    <PageHeader title="Atendimento" description="Conversas de todas as lojas numa caixa só, com o pedido ao lado e a resposta sugerida pela IA.">
+    <div ref="topoEl" :class="telaCheiaAtiva ? 'space-y-2' : 'space-y-3'">
+    <PageHeader v-if="!telaCheiaAtiva" title="Atendimento" description="Conversas de todas as lojas numa caixa só, com o pedido ao lado e a resposta sugerida pela IA.">
       <template #actions>
+        <!-- 03/11/2026: só o atendimento na tela, como o Duoke (de notebook para cima, onde a barra de lojas aparece) -->
+        <Button
+          size="sm"
+          variant="outline"
+          class="hidden lg:inline-flex"
+          title="Só o atendimento na tela, como o Duoke: sem o menu e o cabeçalho do DaVinci (Ctrl+Shift+F; Esc sai)"
+          data-tela-cheia-entrar
+          @click="mudarTelaCheia(true)"
+        >
+          <Maximize2 class="mr-1.5 size-4" />
+          Tela cheia
+        </Button>
         <Button size="sm" variant="outline" :disabled="carregando" @click="atualizarTudo">
           <RotateCcw class="mr-1.5 size-4" :class="{ 'animate-spin': carregando }" />
           atualizar
@@ -1097,8 +1279,8 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
       {{ resumoErro }}
     </div>
 
-    <!-- abas -->
-    <div class="flex gap-1 overflow-x-auto border-b">
+    <!-- abas (na tela cheia, a barra de ícones da esquerda) -->
+    <div v-if="!telaCheiaAtiva" class="flex gap-1 overflow-x-auto border-b">
       <button
         v-for="a in abasVisiveis"
         :key="a.value"
@@ -1184,7 +1366,8 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
       v-show="naCaixa"
       ref="caixaEl"
       class="flex min-h-[420px] overflow-hidden rounded-lg border bg-card"
-      :style="{ height: alturaCaixa }"
+      :class="{ 'flex-1': telaCheiaAtiva }"
+      :style="telaCheiaAtiva ? undefined : { height: alturaCaixa }"
     >
       <aside
         class="hidden min-h-0 shrink-0 flex-col border-r bg-muted/30 lg:flex"
@@ -1356,7 +1539,7 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
           @voltar-ao-chat="voltarAoChat"
           @vinculado="aoVincularConversaDoEmail"
         />
-        <div class="flex min-h-[520px] overflow-hidden rounded-lg border bg-card" style="height: calc(100dvh - 15rem)">
+        <div class="flex min-h-[520px] overflow-hidden rounded-lg border bg-card" :style="{ height: telaCheiaAtiva ? 'calc(100dvh - 4.5rem)' : 'calc(100dvh - 15rem)' }">
           <section class="flex min-h-0 min-w-0 flex-1">
             <AtendimentoConversa
               :key="`${emailConversa}:${emailConversaVersao}`"
@@ -1396,5 +1579,6 @@ watch(gruposEmailsAbertos, (v) => gravarAbertos(chaveDosGruposAbertos(), v))
     <LazyAtendimentoModelos v-if="aba === 'modelos'" :can-edit="canEdit" :can-delete="canDelete" @mudou="(l: Modelo[]) => (modelos = l)" />
     <LazyAtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" />
     <LazyAtendimentoMetricas v-if="aba === 'metricas'" />
+    </div>
   </div>
 </template>

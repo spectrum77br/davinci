@@ -2,6 +2,8 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const route = useRoute()
+// A página em "tela cheia" (useTelaCheia): sem menu, sem barra do topo, sem respiro.
+const telaCheia = useTelaCheia()
 const collapsed = ref(false)
 const mobileMenuOpen = ref(false)
 const isMobile = ref(false)
@@ -79,6 +81,7 @@ onBeforeUnmount(() => {
       @click="closeMobileMenu"
     />
     <AppSidebar
+      v-show="!telaCheia"
       :collapsed="collapsed"
       :mobile="isMobile"
       :mobile-open="mobileMenuOpen"
@@ -86,8 +89,8 @@ onBeforeUnmount(() => {
       @close="closeMobileMenu"
     />
     <div :inert="mobileMenuOpen || undefined" class="flex-1 min-w-0 flex flex-col">
-      <AppTopbar :mobile-menu-open="mobileMenuOpen" @toggle-menu="mobileMenuOpen = !mobileMenuOpen" />
-      <main class="app-main flex-1 min-w-0 px-3 py-4 sm:px-4 lg:px-6 lg:py-6">
+      <AppTopbar v-show="!telaCheia" :mobile-menu-open="mobileMenuOpen" @toggle-menu="mobileMenuOpen = !mobileMenuOpen" />
+      <main class="app-main flex-1 min-w-0" :class="telaCheia ? 'app-main--tela-cheia' : 'px-3 py-4 sm:px-4 lg:px-6 lg:py-6'">
         <slot />
       </main>
     </div>
@@ -114,4 +117,5 @@ onBeforeUnmount(() => {
 @media (min-width: 1024px) {
   .app-main { padding-bottom: 1.5rem; }
 }
+.app-main.app-main--tela-cheia { padding: 0; }
 </style>
