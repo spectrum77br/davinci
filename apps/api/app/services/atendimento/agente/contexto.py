@@ -993,6 +993,11 @@ class ContextoAgente:
             # envio (o registro de antes não muda; a do D1 não liga as isenções da devolução).
             extra["etiquetas_pos_envio"] = etiquetas
             extra["acoes_pos_envio"] = self.acoes_pos_envio
+        if self.etiquetas_pos_envio:
+            # Revisão de paridade do an0311 (03/11/2026): as etiquetas que a régua do turno
+            # LIBEROU (`acao_pessoa.etiquetas_do_turno`, já sem as de depois do modelo) — o
+            # re-gatilho do eval as lê em vez de refazer a régua sem o banco. Só quando há.
+            extra["etiquetas_do_turno"] = sorted(self.etiquetas_pos_envio)
         if self.produto_pelo_anuncio:
             # Liberações L1/L2 (23/10/2026): só quando há (o registro de antes não muda).
             extra["produto_pelo_anuncio"] = True

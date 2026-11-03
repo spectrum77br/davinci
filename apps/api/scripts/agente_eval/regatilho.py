@@ -19,7 +19,8 @@ agente, refaz a 1ª camada sobre a MESMA Proposta (`agente.conferir_proposta`, o
   da api, fora das janelas de postagem e com o OK do Eduardo): os que chegam ao verificador
   passam pelo verificador de verdade (Haiku 5.5, `verificador.MODELO`/`EFFORT`): `auto` ou
   `pessoa:verificador`; o custo conta no teto do DIA do agente (as chaves de replay da
-  conversa) e para no `--teto-usd`;
+  conversa) e para no `--teto-usd` — o que sobrou fica `chega_ao_verificador` com
+  `"teto": true`, o resumo conta e a saída é 4 (`SAIDA_TETO`);
 - `--config-canal <uuid>`: o `modo`, `auto_categorias`, `auto_orientacao` e `auto_agente`
   DESSE canal valem para todo registro (o padrão do dono: o da Kia,
   1ca982c3-96e0-4000-95f2-e1fe368f954d); sem ele, o canal de cada registro (lido do banco)
@@ -75,6 +76,12 @@ TETO_USD = 1.0
 CHEGA = "chega_ao_verificador"
 AUTO = "auto"
 DESCARTADO = "descartado"
+RECIBO = "recibo"
+# O `--verificar` que parou no `--teto-usd` (revisão de paridade do an0311, 03/11/2026): o
+# registro que chegaria ao verificador sai `chega_ao_verificador` com a marca `"teto": true`,
+# o resumo conta (`nao_verificados_pelo_teto`) e a saída do script é este código — nunca mais
+# um corte calado no fim da amostra (o braço com mais elegíveis perdia mais).
+SAIDA_TETO = 4
 # Os nomes das lojas que o relatório usa (integration_id → nome curto); o resto, o prefixo.
 LOJAS = {
     "2ac2633b-c698-4718-99cb-6e5443a80689": "KIA",
@@ -531,23 +538,31 @@ def montar(r: Mapping[str, Any]) -> SimpleNamespace:
             conversa, ctxd, msgs, gatilho, [], acoes=ctx.acoes_codigo, agora=agora
         )
     )
-    # Itens 9 e 10 (03/11/2026): as etiquetas do turno pela régua ATUAL (os detalhes dos
-    # gatilhos não ficam gravados: a régua do código, sem o banco).
-    da_conversa = acao_pessoa.gatilhos(
-        conversa,
-        msgs,
-        ctxd,
-        gatilho=gatilho,
-        postado=(bloco or {}).get("postado"),
-        chaves_ativas=frozenset(),
-        agora=agora,
-    )
-    ctx.etiquetas_pos_envio = acao_pessoa.etiquetas_do_turno(
-        conversa, ctxd, msgs, gatilho, da_conversa
-    )
-    # Revisão de 03/11/2026: a ação gravada que a régua da conversa não dá entrou DEPOIS do
-    # modelo (o OUTRO pedido lido, a ferramenta) — nunca etiqueta, como no `responder`.
-    ctx.sem_etiqueta(set(ctx.acoes_codigo) - {g.codigo for g in da_conversa})
+    if isinstance(decisao.get("etiquetas_do_turno"), list) and not r.get("recalcular_acoes"):
+        # Revisão de paridade do an0311 (03/11/2026): as etiquetas que a régua do turno liberou
+        # na produção do replay (com o retrato, as datas e as chaves de verdade) — só as que
+        # o agente pode deixar para depois do envio.
+        ctx.etiquetas_pos_envio = (
+            frozenset(str(a) for a in decisao["etiquetas_do_turno"]) & agente_ctx.ACOES_ETIQUETA
+        )
+    else:
+        # Itens 9 e 10 (03/11/2026): as etiquetas do turno pela régua ATUAL (os detalhes dos
+        # gatilhos não ficam gravados: a régua do código, sem o banco).
+        da_conversa = acao_pessoa.gatilhos(
+            conversa,
+            msgs,
+            ctxd,
+            gatilho=gatilho,
+            postado=(bloco or {}).get("postado"),
+            chaves_ativas=frozenset(),
+            agora=agora,
+        )
+        ctx.etiquetas_pos_envio = acao_pessoa.etiquetas_do_turno(
+            conversa, ctxd, msgs, gatilho, da_conversa
+        )
+        # Revisão de 03/11/2026: a ação gravada que a régua da conversa não dá entrou DEPOIS
+        # do modelo (o OUTRO pedido lido, a ferramenta) — nunca etiqueta, como no `responder`.
+        ctx.sem_etiqueta(set(ctx.acoes_codigo) - {g.codigo for g in da_conversa})
     ctx.pistas_orientacao = acao_pessoa.pistas_de_orientacao(msgs, gatilho)
     ctx.pistas_turno = acao_pessoa.pistas_do_turno(msgs, gatilho, com_pedido=bool(bloco))
     reaplicar_ferramentas(ctx, rastro)
@@ -564,7 +579,14 @@ def montar(r: Mapping[str, Any]) -> SimpleNamespace:
         pediu_evidencia=acao_pessoa.pediu_evidencia(msgs, gatilho),
     )
     return SimpleNamespace(
-        erro=None, conversa=conversa, gatilho=gatilho, base=base, ctx=ctx, pac=pac, sec=sec
+        erro=None,
+        conversa=conversa,
+        gatilho=gatilho,
+        base=base,
+        ctx=ctx,
+        pac=pac,
+        sec=sec,
+        rastro=rastro,
     )
 
 
@@ -696,6 +718,38 @@ def _antes(r: Mapping[str, Any]) -> str:
     return CHEGA if motivo == "enviaria" else f"pessoa:{motivo}"
 
 
+async def _verificar(
+    m: SimpleNamespace,
+    proposta: Any,
+    final: Any,
+    categoria: str | None,
+    canal: Any,
+    avisos: list,
+    cliente: Any,
+) -> Any:
+    """O verificador de verdade no `final` (o `verificador.no_rascunho` sem a sessão): o
+    resumo com O QUE O ATENDIMENTO JÁ ENVIOU que o rodar gravou (`rastro.ja_enviado`)."""
+    import dataclasses
+
+    resumo = verificador.resumo_do_pacote(
+        m.ctx, m.base, m.gatilho, pediu_evidencia=m.pac.pediu_evidencia, avisos=avisos
+    )
+    ja = tuple(str(x) for x in (m.rastro.get("ja_enviado") or []))
+    if ja:
+        resumo = dataclasses.replace(resumo, ja_enviado=ja)
+    texto = verificador.texto_para_verificar(final.texto, m.base.valores, m.base.nomes)
+    m.ctx.modo_replay = True  # o gasto vai às chaves do replay/eval (o teto do dia é um só)
+    return await verificador.verificar(
+        m.ctx, proposta, texto, resumo, m.ctx.rastro, cliente=cliente,
+        prazo_s=verificador.TIMEOUT_S,
+        nomes=m.base.nomes, assunto=final.categoria,
+        liberados=verificador.assuntos_liberados(
+            _canal_ns(canal), produto=m.ctx.produto_pelo_anuncio
+        ),
+        declarado=categoria,
+    )  # fmt: skip
+
+
 async def regatilhar(
     r: Mapping[str, Any], canal: Mapping[str, Any] | None, *, cliente: Any = None
 ) -> dict:
@@ -709,6 +763,16 @@ async def regatilhar(
         "rascunho_antes": r.get("texto_final"),
         "resposta_real": r.get("resposta_real"),
     }
+    decisao_gravada = r.get("decisao") or {}
+    if decisao_gravada.get("cartao_sem_texto"):
+        # PARIDADE an0311 (item 1): o turno só de cartão não ganha a saudação (o envio
+        # sozinho segura; a fila fecha a visita nova sem resposta).
+        fim = DESCARTADO if decisao_gravada.get("cartao_abre_visita") else "pessoa:cartao_sem_texto"
+        return {**linha, "decisao": fim, "bloqueios": ["cartao_sem_texto"], "avisos": []}
+    if decisao_gravada.get("recibo") and r.get("texto_final") in acao_pessoa.TEXTOS_DO_RECIBO:
+        # PARIDADE an0311 (item 9): o recibo fixo da evidência sai sozinho, sem o verificador.
+        return {**linha, "decisao": RECIBO, "bloqueios": [], "avisos": [],
+                "rascunho": r.get("texto_final")}  # fmt: skip
     if r.get("pulado") or r.get("parada") is None:
         return {**linha, "decisao": "pulado", "bloqueios": [str(r.get("pulado"))], "avisos": []}
     if r.get("atalho") or r.get("parada") == "atalho_aprovado":
@@ -746,26 +810,69 @@ async def regatilhar(
             x.get("id") for x in m.ctx.pares_citados(m.ctx.evidencias, de_produto=True)
         ],
     }
+    if m.ctx.acoes_pessoa == [constantes.ACAO_ENVIAR_ARQUIVO_NF]:
+        # Revisão de paridade do an0311 (03/11/2026): a NF sozinha (`nf_automatica`) não é
+        # simulada — o envio de verdade confere o XML, o CPF e a NF no banco. Só a coluna à
+        # parte (fora do "sozinho", sem nota): o pedido do turno é claro para ela?
+        from app.services.atendimento import nf_automatica
+
+        textos = nf_automatica.textos_do_turno(m.base.recentes, m.base.rajada)
+        out["nf_auto_provavel"] = bool(nf_automatica.pedido_claro(textos))
     if motivo is not None:
         return {**out, "decisao": f"pessoa:{motivo}"}
     if cliente is None:
         return {**out, "decisao": CHEGA}
-    resumo = verificador.resumo_do_pacote(
-        m.ctx, m.base, m.gatilho, pediu_evidencia=m.pac.pediu_evidencia, avisos=avisos
-    )
-    texto = verificador.texto_para_verificar(final.texto, m.base.valores, m.base.nomes)
-    m.ctx.modo_replay = True  # o gasto vai às chaves do replay/eval (o teto do dia é um só)
-    v = await verificador.verificar(
-        m.ctx, c.proposta, texto, resumo, m.ctx.rastro, cliente=cliente,
-        prazo_s=verificador.TIMEOUT_S,
-        nomes=m.base.nomes, assunto=final.categoria,
-        liberados=verificador.assuntos_liberados(
-            _canal_ns(canal), produto=m.ctx.produto_pelo_anuncio
-        ),
-        declarado=categoria,
-    )  # fmt: skip
+    v = await _verificar(m, c.proposta, final, categoria, canal, avisos, cliente)
+    custo_total = v.uso.custo_usd
+    corte_reg: dict[str, Any] | None = None
+    if not v.ok:
+        # PARIDADE an0311 (v17): o corte da frase sem lastro (`agente._sem_a_frase_sem_lastro`):
+        # o resto passa de novo pela 1ª camada inteira e pelo verificador; sai só com o "ok".
+        registro = v.para_fatos(final.texto)
+        cortar = verificador.frase_para_cortar(
+            c.proposta.texto, registro, [*m.base.textos_cliente, *m.base.textos_rajada]
+        )
+        if cortar is not None:
+            resto, frase = cortar
+            corte_reg = {"frase_tirada": frase[:300], "saiu": False}
+            # Como o `responder` (revisão cruzada do an0311): o resto a partir da Proposta do
+            # MODELO (a etiqueta que ele escolheu continua) e sem perder ação de depois do envio.
+            pos_envio_antes = set(m.ctx.acoes_pos_envio)
+            p2 = p.model_copy(update={"texto": resto})
+            m.ctx.modo_replay = False
+            c2 = await _conferir(m, p2)
+            f2 = c2.final
+            barrou = (
+                c2.sem_resposta or f2 is None or not (f2.texto or "").strip()
+                or f2.precisa_humano or f2.status != constantes.RASCUNHO_PENDENTE
+                or getattr(f2, "sem_auto", None) or m.ctx.acoes_pessoa
+                or pos_envio_antes - set(m.ctx.acoes_pos_envio)
+            )  # fmt: skip
+            if not barrou:
+                cat2 = ia.assunto_do_agente(f2.categoria, c2.proposta.acao, m.base.ids_categorias)
+                barrou = verificador.por_que_nao_verifica(
+                    f2, c2.proposta, m.ctx, m.base, m.conversa
+                ) or verificador.por_que_nao_verifica_no_canal(
+                    cat2, m.ctx, m.base, m.conversa, _canal_ns(canal), checagens_feitas=c2.codigos
+                )
+            if barrou:
+                corte_reg["porque"] = "a 1ª camada segurou o resto"
+            else:
+                avisos2 = list(getattr(f2, "avisos", None) or [])
+                v2 = await _verificar(m, c2.proposta, f2, cat2, canal, avisos2, cliente)
+                custo_total += v2.uso.custo_usd
+                if v2.ok:
+                    corte_reg["saiu"] = True
+                    v, final = v2, f2
+                    out["rascunho"] = f2.texto
+                    out["avisos"] = avisos2
+                else:
+                    corte_reg["porque"] = "o verificador não liberou o resto"
     return {
         **out,
+        **({"corte_sem_lastro": corte_reg} if corte_reg is not None else {}),
+        # O texto que SAIRIA (o comparar/exportar dá a nota a este, não ao do rodar).
+        **({"texto_enviado": out["rascunho"]} if corte_reg and corte_reg["saiu"] else {}),
         "decisao": AUTO if v.ok else "pessoa:verificador",
         "verificador": {
             "ok": v.ok,
@@ -778,7 +885,8 @@ async def regatilhar(
             ),
             "custo_usd": round(v.uso.custo_usd, 6),
         },  # fmt: skip
-        "custo_usd": round(v.uso.custo_usd, 6),
+        # O 1º verificador + o do corte (pago saindo ou não), como o `responder`.
+        "custo_usd": round(custo_total, 6),
     }
 
 
@@ -1052,6 +1160,8 @@ def resumo(linhas: Sequence[Mapping[str, Any]]) -> dict:
         "agora_chega_ao_verificador": sum(x.get("decisao") in passa for x in linhas),
         "agora_auto": sum(x.get("decisao") == AUTO for x in linhas),
         "descartados": sum(x.get("decisao") == DESCARTADO for x in linhas),
+        "nao_verificados_pelo_teto": sum(x.get("teto") is True for x in linhas),
+        "nf_auto_provavel": sum(x.get("nf_auto_provavel") is True for x in linhas),
         "com_par_de_produto": sum(bool(x.get("pares_de_produto")) for x in linhas),
         "com_par_citado": sum(bool(x.get("pares_citados")) for x in linhas),
         "custo_usd": round(sum(float(x.get("custo_usd") or 0) for x in linhas), 6),
@@ -1076,6 +1186,12 @@ def imprimir(res: Mapping[str, Any]) -> None:
         res["com_par_de_produto"],
     )
     print("custo do verificador (US$):", res["custo_usd"])
+    if res.get("nao_verificados_pelo_teto"):
+        print(
+            f"ATENÇÃO: {res['nao_verificados_pelo_teto']} registro(s) chegariam ao verificador e "
+            "NÃO foram verificados (o --teto-usd acabou) — a comparação com eles é inválida; "
+            "rode de novo com um teto maior"
+        )
     print("pessoa por motivo:", json.dumps(res["pessoa_por_motivo"], ensure_ascii=False))
     for nome in ("por_loja", "por_categoria"):
         print(nome + ":")
@@ -1206,25 +1322,16 @@ async def main(argv: Sequence[str] | None = None) -> int:
         cliente = await pilha.enter_async_context(
             anthropic.AsyncAnthropic(api_key=chave, base_url=ia.BASE_CLAUDE, max_retries=0)
         )
-    linhas: list[dict] = []
-    gasto = 0.0
     try:
-        for r in registros:
-            canal = (
+        linhas = await regatilhar_todos(
+            registros,
+            lambda r: (
                 canal_fixo if canal_fixo is not None else por_loja.get(str(r.get("integration_id")))
-            )
-            usar = cliente if (cliente is not None and gasto < a.teto_usd) else None
-            try:
-                x = await regatilhar(r, canal, cliente=usar)
-            except Exception as e:  # noqa: BLE001 — um registro ruim não para o resto
-                x = {"id": r.get("id"), "loja": loja_de(r), "decisao": "erro",
-                     "erro": f"{type(e).__name__}: {str(e)[:200]}", "antes": _antes(r)}  # fmt: skip
-            gasto += float(x.get("custo_usd") or 0)
-            linhas.append(x)
-            if not a.resumo_so:
-                campos = ("id", "loja", "categoria", "antes", "decisao")
-                print(json.dumps({k: x.get(k) for k in campos},
-                                 ensure_ascii=False))  # fmt: skip
+            ),
+            cliente=cliente,
+            teto_usd=a.teto_usd,
+            mostrar=not a.resumo_so,
+        )
     finally:
         if pilha is not None:
             await pilha.aclose()
@@ -1235,7 +1342,45 @@ async def main(argv: Sequence[str] | None = None) -> int:
             for x in linhas:
                 f.write(json.dumps(x, ensure_ascii=False) + "\n")
             f.write(json.dumps({"resumo": res}, ensure_ascii=False) + "\n")
-    return 0
+    codigo = codigo_de_saida(res)
+    if codigo:
+        print(f"parou no teto: saída {codigo}", file=sys.stderr)
+    return codigo
+
+
+async def regatilhar_todos(
+    registros: Sequence[Mapping[str, Any]],
+    canal_de: Any,
+    *,
+    cliente: Any = None,
+    teto_usd: float = TETO_USD,
+    mostrar: bool = False,
+) -> list[dict]:
+    """Os registros na ordem, com o verificador (`cliente`) até o `teto_usd`: o que chegaria
+    ao verificador depois do teto fica `chega_ao_verificador` com `"teto": true`."""
+    linhas: list[dict] = []
+    gasto = 0.0
+    for r in registros:
+        canal = canal_de(r)
+        usar = cliente if (cliente is not None and gasto < teto_usd) else None
+        try:
+            x = await regatilhar(r, canal, cliente=usar)
+        except Exception as e:  # noqa: BLE001 — um registro ruim não para o resto
+            x = {"id": r.get("id"), "loja": loja_de(r), "decisao": "erro",
+                 "erro": f"{type(e).__name__}: {str(e)[:200]}", "antes": _antes(r)}  # fmt: skip
+        if cliente is not None and usar is None and x.get("decisao") == CHEGA:
+            x["teto"] = True
+        gasto += float(x.get("custo_usd") or 0)
+        linhas.append(x)
+        if mostrar:
+            campos = ("id", "loja", "categoria", "antes", "decisao")
+            print(json.dumps({k: x.get(k) for k in campos}, ensure_ascii=False))
+    return linhas
+
+
+def codigo_de_saida(res: Mapping[str, Any]) -> int:
+    """0, ou `SAIDA_TETO` quando o teto deixou registro elegível sem o verificador."""
+    return SAIDA_TETO if res.get("nao_verificados_pelo_teto") else 0
 
 
 if __name__ == "__main__":
