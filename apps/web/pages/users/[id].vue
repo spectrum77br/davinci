@@ -120,6 +120,9 @@ function toggleVideoTravaTag(slug: string) {
 
 // Os vínculos de acesso são independentes da organização comercial.
 // Só esta seção grava sales_teams, mediante ação explícita do administrador.
+// Os vínculos 101/102/103 são as Equipes 1/2/3 das lojas (03/11/2026: a
+// equipe da loja em Lojas e o vínculo de acesso dela andam juntos).
+const EQUIPE_DO_VINCULO: Record<number, number> = { 101: 1, 102: 2, 103: 3 }
 type AccountAccessStore = {
   sales_team: number | null
   account_name: string | null
@@ -149,7 +152,11 @@ const accountAccessOptions = computed(() => {
   }
   return [...codes].sort((a, b) => a - b).map((code) => {
     const labels = [...(storeLabels.get(code) || [])].sort((a, b) => a.localeCompare(b))
-    return { code, label: labels.length ? labels.join(' · ') : `Vínculo de acesso ${code}` }
+    return {
+      code,
+      equipe: EQUIPE_DO_VINCULO[code] ?? null,
+      label: labels.length ? labels.join(' · ') : `Vínculo de acesso ${code}`,
+    }
   })
 })
 const accountAccessDirty = computed(() => {
@@ -715,7 +722,9 @@ async function removeUser(ignorarImobilizado = false, jaConfirmou = false) {
               :checked="selectedAccountAccess.includes(option.code)"
               @change="toggleAccountAccess(option.code)"
             />
-            <span>{{ option.label }}</span>
+            <span>
+              <strong v-if="option.equipe" class="font-semibold">Equipe {{ option.equipe }} —</strong> {{ option.label }}
+            </span>
           </label>
           <p v-if="accountAccessLoaded && !accountAccessOptions.length" class="text-sm text-muted-foreground">
             Nenhum vínculo de acesso cadastrado nas contas.

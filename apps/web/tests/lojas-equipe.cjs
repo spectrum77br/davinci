@@ -46,3 +46,12 @@ assert.ok(inicio > 0 && ramo.length > 0, 'commercial_team branch found')
 assert.match(ramo, /cancelEdit\(\)\s*\n\s*if \(!confirm\(aviso\)\) return/)
 assert.match(ramo, /passa a aparecer para a \$\{depois\}/)
 console.log('lojas-equipe: ok')
+
+// Usuários › Acesso às contas: os vínculos 101/102/103 aparecem como Equipe 1/2/3.
+const usuarios = parse(fs.readFileSync(path.resolve(__dirname, '../pages/users/[id].vue'), 'utf8'),
+  { filename: 'users/[id].vue' }).descriptor
+assert.match(usuarios.scriptSetup.content, /const EQUIPE_DO_VINCULO: Record<number, number> = \{ 101: 1, 102: 2, 103: 3 \}/)
+assert.match(usuarios.template.content, /<strong v-if="option\.equipe"[^>]*>Equipe \{\{ option\.equipe \}\} —<\/strong> \{\{ option\.label \}\}/)
+assert.match(usuarios.template.content, /<option :value="3">Equipe 3<\/option>/)
+assert.doesNotMatch(usuarios.template.content, /Londres|Israel|Marrocos/)
+console.log('usuarios-equipe: ok')
