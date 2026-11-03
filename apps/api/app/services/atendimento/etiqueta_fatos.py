@@ -121,13 +121,14 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
     AtendimentoAvaliacaoLoja,
     AtendimentoCarrinho,
     AtendimentoConversa,
+    AtendimentoPedidoComprador,
     AtendimentoReclamacao,
     BlingOrder,
     MargemAudit,
@@ -1162,4 +1163,50 @@ async def conversas_do_pedido_bling(
     conversas = await conversas_do_pedido(session, plataforma, linha.numeroloja)
     if com_email:
         return conversas
+    return [c for c in conversas if not separa_email.e_conversa_de_email(c)]
+
+
+async def conversas_do_comprador_do_pedido(
+    session: AsyncSession, pedido_marketplace: str | None
+) -> list[AtendimentoConversa]:
+    """As conversas da Caixa do COMPRADOR de um pedido (nº na plataforma), na loja do pedido.
+
+    03/11/2026 (o dono, com o 2610301X726956 em Ag. cancelamento que "não
+    aparece no chat"): o chat da Shopee fica ligado a UM pedido — o último que
+    o comprador citou —, e os outros pedidos de quem compra várias vezes ficam
+    sem conversa própria (`conversas_do_pedido` não acha nada). Pelo índice de
+    pedidos por comprador (`atendimento_pedidos_comprador`, `indice.py`): as
+    conversas desse comprador na mesma integração. A ordem é a de
+    `conversas_do_pedido` (o chat antes da reclamação/avaliação, a mais
+    recente primeiro); a conversa de e-mail da ponte nunca vem.
+
+    SÓ PARA ABRIR: o retrato (`dados.pedido_mkt`) e as falas dessa conversa
+    são de OUTRO pedido — quem classifica o motivo, troca ou manda oferta
+    continua com `conversas_do_pedido_bling`.
+    """
+    chave = str(pedido_marketplace or "").strip()
+    if not chave:
+        return []
+    compradores = select(
+        AtendimentoPedidoComprador.integration_id, AtendimentoPedidoComprador.comprador_id
+    ).where(AtendimentoPedidoComprador.pedido == chave)
+    conversas = (
+        (
+            await session.execute(
+                select(AtendimentoConversa)
+                .where(
+                    tuple_(
+                        AtendimentoConversa.integration_id, AtendimentoConversa.comprador_id
+                    ).in_(compradores)
+                )
+                .order_by(
+                    AtendimentoConversa.canal.in_((CANAL_RECLAMACAO, CANAL_AVALIACAO)).asc(),
+                    AtendimentoConversa.ultima_mensagem_em.desc().nulls_last(),
+                    AtendimentoConversa.created_at.desc(),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
     return [c for c in conversas if not separa_email.e_conversa_de_email(c)]

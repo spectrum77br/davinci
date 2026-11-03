@@ -39,6 +39,7 @@ from app.config import get_settings
 from app.main import app
 from app.models import (
     AtendimentoCanal,
+    AtendimentoPedidoComprador,
     AtendimentoTroca,
     BlingOrder,
     Integration,
@@ -654,6 +655,60 @@ async def test_lista_aponta_o_chat_mesmo_com_o_aviso_por_email(db, client, admin
     falta = {p["numero"]: p for p in r.json()["pedidos"]}["300101"]
     assert falta["conversa_id"] == str(chat.id)
     assert falta["motivo"]["codigo"] == "pedido_cliente"
+
+
+async def test_lista_aponta_o_chat_do_comprador_ligado_a_outro_pedido(db, client, admin, make_user):
+    """03/11/2026 (o dono, o 2610301X726956 que "não aparece no chat"): o chat da
+    Shopee fica ligado a UM pedido; o outro pedido do mesmo comprador, sem
+    conversa própria, aponta o chat dele pelo índice de pedidos por comprador
+    (`conversa_comprador_id`) — só para abrir: a `conversa_id` (troca, oferta,
+    retrato do motivo) continua None. Outra loja com o mesmo id de comprador
+    não conta, e o pedido com conversa própria não ganha o campo."""
+    dono = await make_user()
+    chat = await _cenario(db, dono)
+    chat.comprador_id = "555"
+    db.add_all(
+        [
+            AtendimentoPedidoComprador(
+                integration_id=chat.integration_id,
+                plataforma="shopee",
+                comprador_id="555",
+                pedido="SHPTROCA1",
+            ),
+            # 300103 (restrição, sem conversa) é do MESMO comprador na mesma loja.
+            AtendimentoPedidoComprador(
+                integration_id=chat.integration_id,
+                plataforma="shopee",
+                comprador_id="555",
+                pedido="SHP300103",
+            ),
+        ]
+    )
+    # Outra loja: o mesmo id de comprador e o pedido 300102 — não é o chat dele.
+    outra = Integration(
+        user_id=dono.id,
+        platform=IntegrationPlatform.SHOPEE,
+        name="poofy",
+        credentials=encrypt_json({"access_token": "t"}),
+    )
+    db.add(outra)
+    await db.flush()
+    db.add(
+        AtendimentoPedidoComprador(
+            integration_id=outra.id, plataforma="shopee", comprador_id="999", pedido="SHP300102"
+        )
+    )
+    await db.commit()
+
+    por = {p["numero"]: p for p in (await client.get(URL)).json()["pedidos"]}
+    assert por["300103"]["conversa_id"] is None
+    assert por["300103"]["conversa_comprador_id"] == str(chat.id)
+    assert por["300103"]["motivo"]["codigo"] == "restricao_envio"
+    # A trava (300102): o comprador 999 não tem conversa nenhuma.
+    assert por["300102"]["conversa_comprador_id"] is None
+    # O pedido com conversa própria aponta ela, e só ela.
+    assert por["300101"]["conversa_id"] == str(chat.id)
+    assert por["300101"]["conversa_comprador_id"] is None
 
 
 async def test_lista_mascara_a_margem_para_quem_nao_ve(db, client, make_user, auth_as):

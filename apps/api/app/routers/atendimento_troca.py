@@ -204,6 +204,16 @@ async def _conversa(
     return None
 
 
+async def _conversa_do_comprador(
+    session: AsyncSession, numeroloja: str | None, scope: TeamScope
+) -> AtendimentoConversa | None:
+    """O chat do comprador na loja, para o pedido SEM conversa própria — dentro do escopo."""
+    for c in await etiqueta_fatos.conversas_do_comprador_do_pedido(session, numeroloja):
+        if _no_escopo(scope, c.integration_id):
+            return c
+    return None
+
+
 def _urgente_primeiro(p: dict) -> tuple:
     """O prazo de envio mais curto primeiro (sem prazo no fim); empate: o pedido mais recente."""
     prazo: datetime | None = p["prazo_envio"]
@@ -271,6 +281,11 @@ async def lista_ag_cancelamento(
         if filtro and motivo["codigo"] != filtro:
             continue
         extra = extras.get(p.numero) or {"itens": [], "data": None, "prazo_envio": None}
+        # O pedido sem conversa (03/11/2026): o chat do comprador ligado a
+        # outro pedido dele — só o "Abrir chat do comprador".
+        comprador = (
+            await _conversa_do_comprador(session, p.numeroloja, scope) if conversa is None else None
+        )
         sugestoes = None
         if ativas and m.pode_sugerir_troca:
             if cat is None and not catalogo_falhou:
@@ -311,6 +326,7 @@ async def lista_ag_cancelamento(
                 "motivo": motivo,
                 "itens": extra["itens"],
                 "conversa_id": str(conversa.id) if conversa is not None else None,
+                "conversa_comprador_id": str(comprador.id) if comprador is not None else None,
                 "sugestoes_troca": sugestoes,
             }
         )

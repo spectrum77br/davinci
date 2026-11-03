@@ -57,7 +57,8 @@ a lista e o detalhe trazem a etiqueta, o menu Filtrar filtra por ela
 por etiqueta. A troca à mão é o POST /conversas/{id}/etiqueta (fica na
 linha do tempo, `etiqueta_historico` do detalhe). A aba "Falta responder"
 vem pelo prazo mais curto (cursor `prazo:`), e a busca acha também pelo nº
-do Bling e pelo SKU.
+do Bling e pelo SKU — e, desde 03/11/2026, pelo nº de QUALQUER pedido do
+comprador na loja (o chat dele ligado a outro pedido, `_compradores_do_pedido`).
 
 CAIXA HUMANO (09/10/2026, `services/atendimento/humano.py`): ao lado da
 Caixa, só o que falta responder e a IA NÃO pode responder — a régua da IA,
@@ -113,7 +114,21 @@ from uuid import UUID, uuid4
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.encoders import jsonable_encoder
-from sqlalchemy import String, and_, case, cast, exists, false, func, not_, or_, select, text, true
+from sqlalchemy import (
+    String,
+    and_,
+    case,
+    cast,
+    exists,
+    false,
+    func,
+    not_,
+    or_,
+    select,
+    text,
+    true,
+    tuple_,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -129,6 +144,7 @@ from app.models import (
     AtendimentoConversa,
     AtendimentoMensagem,
     AtendimentoModelo,
+    AtendimentoPedidoComprador,
     AtendimentoRascunho,
     AtendimentoRegra,
     BlingOrder,
@@ -1287,6 +1303,32 @@ def _busca_no_bling(termo: str):
         select(BlingOrder.numeroloja)
         .where(or_(*conds), BlingOrder.numeroloja.is_not(None))
         .cte("atd_busca_bling")
+    )
+
+
+def _compradores_do_pedido(termo: str):
+    """(integração, comprador) de quem fez o pedido com este nº — na plataforma ou no Bling.
+
+    03/11/2026 (o dono, com o 2610301X726956 em Ag. cancelamento que "não
+    aparece no chat"): o chat da Shopee fica ligado a UM pedido — o último que
+    o comprador citou —, e quem compra várias vezes tem os outros pedidos sem
+    conversa própria. Pelo índice de pedidos por comprador
+    (`atendimento_pedidos_comprador`, `services/atendimento/indice.py`), o nº
+    EXATO de qualquer pedido dele acha as conversas dele na mesma loja. Só o
+    nº exato (o da plataforma ou o do Bling): o pedaço de SKU continua achando
+    só a conversa do próprio pedido — "mala" não traz todo comprador de mala.
+    """
+    return select(
+        AtendimentoPedidoComprador.integration_id, AtendimentoPedidoComprador.comprador_id
+    ).where(
+        or_(
+            AtendimentoPedidoComprador.pedido == termo,
+            AtendimentoPedidoComprador.pedido.in_(
+                select(BlingOrder.numeroloja).where(
+                    BlingOrder.numero == termo, BlingOrder.numeroloja.is_not(None)
+                )
+            ),
+        )
     )
 
 
@@ -2598,6 +2640,11 @@ async def _listar_marketplace(
                 AtendimentoConversa.pedido_marketplace.in_(no_bling),
                 AtendimentoConversa.dados["pack_id"].astext.in_(no_bling),
                 AtendimentoConversa.dados["order_id"].astext.in_(no_bling),
+                # Qualquer pedido do comprador (03/11/2026): o chat dele na
+                # loja, mesmo ligado a outro pedido (`_compradores_do_pedido`).
+                tuple_(AtendimentoConversa.integration_id, AtendimentoConversa.comprador_id).in_(
+                    _compradores_do_pedido(termo_exato)
+                ),
                 # Os chamados dos sites (RF6): TODOS os protocolos do chamado —
                 # o principal e os agrupados nele (o 2º sumia de "Todas" assim
                 # que chegava mensagem nova: só o resumo da última o achava).
