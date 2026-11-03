@@ -62,14 +62,18 @@ estoque fica de fora (`acesso.pode_ver`). O botão diz o mesmo
 O ESCOPO POR PESSOA vale em toda escrita, também no acesso por id
 (`_no_escopo_do_pedido`): o pedido só das lojas dela (`bling_store_ids`), a
 conversa escolhida (`conversa_id`) só das lojas dela (`_conversa_no_escopo`) e
-a troca do "Retomar" só de um pedido dela — fora, 404 como o que não existe. A
-oferta sai só por conversa das integrações dela. Router à parte (o teste das
+a troca do "Retomar" só de um pedido dela — fora, 404 como o que não existe.
+Sem `conversa_id`, a prévia e o "Trocar" usam a conversa principal DENTRO das
+lojas dela (`_visivel`), nunca a de outra loja com o mesmo nº. A oferta sai só
+por conversa das integrações dela. O `previa_hash` é assinado com o segredo do
+servidor (leva os custos, que a equipe não vê). Router à parte (o teste das
 rotas do painel lista as dele); o `main.py` o inclui.
 """
 
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID
@@ -355,6 +359,19 @@ async def _no_escopo_do_pedido(
     return scope
 
 
+def _visivel(scope: TeamScope) -> Callable[[AtendimentoConversa], bool] | None:
+    """A conversa que a equipe pode usar na troca (None = admin, sem filtro).
+
+    Sem `conversa_id` (o diálogo da lista manda nulo quando a conversa do
+    pedido não é da equipe), a troca escolhe a principal do pedido: o filtro
+    faz ser a principal DENTRO das lojas da pessoa — nunca a de outra loja com
+    o mesmo nº, nem a da integração que a ficha não liga (revisão 03/11/2026).
+    """
+    if scope.unrestricted:
+        return None
+    return lambda c: _conversa_no_escopo(scope, c)
+
+
 @router.post("/pedidos/{numero_bling}/troca/previa", response_model=PreviaTrocaOut)
 async def previa_da_troca(
     body: PreviaTrocaIn,
@@ -363,7 +380,9 @@ async def previa_da_troca(
     numero_bling: Annotated[str, Path(min_length=1, max_length=32)],
 ) -> PreviaTrocaOut:
     """A prévia da troca: só GETs no Bling e na Shopee; nada da troca é gravado."""
-    await _no_escopo_do_pedido(session, user, numero_bling.strip(), conversa_id=body.conversa_id)
+    scope = await _no_escopo_do_pedido(
+        session, user, numero_bling.strip(), conversa_id=body.conversa_id
+    )
     try:
         dados = await troca.previa(
             session,
@@ -372,6 +391,7 @@ async def previa_da_troca(
             sku_antigo=body.sku_antigo,
             sku_novo=body.sku_novo,
             conversa_id=body.conversa_id,
+            visivel=_visivel(scope),
         )
     except troca.TrocaRecusada as e:
         raise _recusa(e) from e
@@ -390,7 +410,9 @@ async def trocar(
     A Margem fica aprovada no nome de quem clicou (`troca.executar`, a trilha
     `margem_audit`), seja admin ou equipe (03/11/2026).
     """
-    await _no_escopo_do_pedido(session, user, numero_bling.strip(), conversa_id=body.conversa_id)
+    scope = await _no_escopo_do_pedido(
+        session, user, numero_bling.strip(), conversa_id=body.conversa_id
+    )
     # Antes do serviço: um erro no meio faz rollback e expira o usuário.
     ve = painel.ve_margem(user)
     aceite = None
@@ -413,6 +435,7 @@ async def trocar(
             confirmar=body.confirmar,
             previa_hash=body.previa_hash,
             idem_key=body.idem_key,
+            visivel=_visivel(scope),
         )
     except troca.TrocaRecusada as e:
         raise _recusa(e) from e
