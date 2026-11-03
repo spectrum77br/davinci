@@ -1733,9 +1733,11 @@ function confirmaSePublica(canal: string | null | undefined, t: string): boolean
   if (canal !== 'avaliacao') return true
   return confirm(perguntaRespostaPublica(avaliacoesDados.value?.aviso, t))
 }
-// Enter envia e Shift+Enter quebra a linha (03/11/2026, o Eduardo, como no
-// Duoke); Ctrl/Cmd+Enter continua enviando. No e-mail (parágrafos) o Enter só
-// quebra a linha e quem envia é o Ctrl+Enter, como antes.
+// Enter envia e Shift+Enter quebra a linha (03/11/2026, o Eduardo: "enter devia
+// enviar e shift enter pular como é o padrão"); Ctrl/Cmd+Enter continua enviando.
+// Caixa vazia ou envio travado: o `enviar()` não manda nada (`podeEnviar`); os
+// anexos (fotos, NF) saem pelo botão deles, como antes. No e-mail (parágrafos)
+// o Enter só quebra a linha e quem envia é o Ctrl+Enter, como antes.
 function aoTeclar(e: KeyboardEvent) {
   if (atalhoAberto.value && !e.isComposing && teclaDoAtalho(e)) return
   if (e.key !== 'Enter' || e.isComposing || e.shiftKey || e.altKey) return
@@ -1744,7 +1746,7 @@ function aoTeclar(e: KeyboardEvent) {
     void enviar()
   }
 }
-const dicaDoEnvio = computed(() => (ehEmail.value ? 'Ctrl+Enter envia' : 'Enter envia · Shift+Enter quebra a linha'))
+const dicaDoEnvio = computed(() => (ehEmail.value ? 'Ctrl+Enter envia' : 'Enter envia · Shift+Enter quebra linha'))
 
 // ─── ações da conversa (PATCH) ──────────────────────────────────────────────
 // Por conversa, como o envio: a ação da A não trava os botões da B.

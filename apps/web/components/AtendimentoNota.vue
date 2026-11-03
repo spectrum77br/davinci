@@ -75,11 +75,13 @@ async function salvar() {
     salvando.value = false
   }
 }
+// Enter salva e Shift+Enter quebra a linha (03/11/2026, o Eduardo: "enter devia
+// enviar e shift enter pular como é o padrão"), como na caixa de resposta;
+// Ctrl/Cmd+Enter também salva. Vazia, o `salvar()` não faz nada.
 function aoTeclar(e: KeyboardEvent) {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-    e.preventDefault()
-    void salvar()
-  }
+  if (e.key !== 'Enter' || e.isComposing || e.shiftKey || e.altKey) return
+  e.preventDefault()
+  void salvar()
 }
 </script>
 
@@ -112,13 +114,13 @@ function aoTeclar(e: KeyboardEvent) {
       :maxlength="NOTA_MAX"
       :disabled="!canEdit || salvando"
       class="block max-h-[40vh] min-h-[68px] w-full resize-y rounded-md border border-amber-300 bg-background px-2.5 py-2 text-sm [field-sizing:content] focus:outline-none focus:ring-1 focus:ring-amber-500 disabled:cursor-not-allowed disabled:opacity-60 dark:border-amber-700/60"
-      :placeholder="canEdit ? 'Escreva a nota para a equipe… (Ctrl+Enter salva)' : 'Só leitura por enquanto — sugestões e 👍/👎 liberados.'"
+      :placeholder="canEdit ? 'Escreva a nota para a equipe… (Enter salva · Shift+Enter quebra linha)' : 'Só leitura por enquanto — sugestões e 👍/👎 liberados.'"
       aria-label="nota interna (só a equipe vê)"
       @keydown="aoTeclar"
     />
     <div class="flex items-center gap-2">
       <span class="text-[11px] tabular-nums" :class="texto.length > NOTA_MAX * 0.9 ? 'text-amber-800 dark:text-amber-300' : 'text-muted-foreground'">{{ texto.length }}/{{ NOTA_MAX }}</span>
-      <Button size="sm" class="ml-auto h-8 bg-amber-600 text-white hover:bg-amber-700" :disabled="!podeSalvar" title="salvar a nota (Ctrl+Enter) — não envia nada ao comprador" @click="salvar">
+      <Button size="sm" class="ml-auto h-8 bg-amber-600 text-white hover:bg-amber-700" :disabled="!podeSalvar" title="salvar a nota (Enter) — não envia nada ao comprador" @click="salvar">
         <Loader2 v-if="salvando" class="mr-1.5 size-4 animate-spin" />
         <StickyNote v-else class="mr-1.5 size-4" />
         Salvar nota

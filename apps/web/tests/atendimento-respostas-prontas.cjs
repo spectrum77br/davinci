@@ -199,7 +199,7 @@ async function caixaDeResposta() {
     // Escrevendo com acento composto (IME), o Enter é da composição.
     t.aoTeclar(tecla('Enter', { isComposing: true }))
     assert.deepEqual(enviados, [true, true])
-    assert.equal(t.dicaDoEnvio.value, 'Enter envia · Shift+Enter quebra a linha')
+    assert.equal(t.dicaDoEnvio.value, 'Enter envia · Shift+Enter quebra linha')
   }
   // No e-mail o Enter é parágrafo; envia o Ctrl+Enter.
   {
