@@ -24,7 +24,6 @@ from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
     BackgroundJobType,
-    BlingOrder,
     CellStatus,
     Integration,
     IntegrationPlatform,
@@ -71,10 +70,6 @@ from app.schemas.products import JobCreatedOut
 from app.security.cipher import decrypt, encrypt
 from app.services.mega_fotos import MegaError, sidecar_request
 from app.services.mega_midias import RAIZ_POR_DEPARTAMENTO
-from app.services.pricing.audit import (
-    match_pricing_to_product_keys,
-    scan_missing_skus,
-)
 from app.services.pricing.anuncios import (
     CANAL_CATALOGO,
     CANAL_KIT,
@@ -86,6 +81,7 @@ from app.services.pricing.anuncios import (
     resolver_anuncios,
     separar_anuncios_disputados,
 )
+from app.services.pricing.audit import scan_missing_skus
 from app.services.pricing.calc import CalcOutcome, calculate
 from app.services.pricing.competitor import search_competitors
 from app.services.pricing.push import (
@@ -1536,20 +1532,30 @@ async def get_stock_map(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
     department: Annotated[str | None, Query()] = None,
-) -> dict[str, int]:
-    """Returns {pricing_product_id: total_stock}.
+    detalhe: Annotated[bool, Query()] = False,
+) -> dict[str, int] | dict[str, dict]:
+    """Returns {pricing_product_id: estoque da linha}.
 
-    Algorithm (per spec):
-      1. Split pricing_product.sku by comma → list of bases.
-      2. For each base (celular): find products whose sku startswith
-         base + "." AND does NOT contain "+". Pick the single "simple"
-         representative — preferred order: shortest sku, then lex-min
-         (so `x043.ra` is picked over `x043.kit2`). Take its stock.
-         If no dotted variant exists, fall back to an exact `base` match.
-      3. For mala / eletro / catalogo: pieces are already simple SKUs;
-         use an exact case-insensitive lookup.
-      4. SUM contributions across pieces. Missing pieces contribute 0.
+    Regra em services/pricing/estoque_linha.py (02/11/2026, "soma de todos
+    os depósitos"): no celular cada peça da linha soma os lotes (ci, pi, ra,
+    sa, sp, cd) — antes era UM lote só, o SKU mais curto; mala, eletro e
+    catálogo usam o SKU exato. Só produto ativo; peça sem SKU conta 0.
+
+    `?detalhe=1` → {id: {"total": int, "partes": [{"sku", "estoque", "peca"},
+    ...], "conjunto": bool}}: os SKUs que formam o número (balão da célula),
+    cada um com a peça da linha a que pertence (celular: a base, dg002; mala
+    e eletro: o SKU, b005.20) para a Reposição cor a cor. `conjunto` = todas
+    as partes são composição do Bling (conjunto de mala, kit com '+'): a
+    compra é pelos tamanhos avulsos e a tela mostra "—" na Reposição.
     """
+    from app.services.pricing.audit import _dept_value, _load_segment_roots
+    from app.services.pricing.estoque_linha import (
+        carregar_indice,
+        linha_de_conjunto,
+        partes_da_linha,
+        total_das_partes,
+    )
+
     _, leaves_by_id, root_id_by_slug = await _segment_index(session)
     stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
     if department:
@@ -1567,77 +1573,38 @@ async def get_stock_map(
         )
         return {}
 
-    product_rows = (
-        await session.execute(
-            select(Product.sku, Product.stock).where(user_scope(Product, user))
-        )
-    ).all()
-
-    # Two indexes:
-    #   exact_stock[sku_lower] = stock (max on duplicate keys)
-    #   variant_pick[base]     = (preferred_sku, stock) — best simple variant
-    exact_stock: dict[str, int] = {}
-    variant_pick: dict[str, tuple[str, int]] = {}
-    for sku, stock in product_rows:
-        if not sku:
-            continue
-        skl = sku.strip().lower()
-        st = int(stock or 0)
-        exact_stock[skl] = max(exact_stock.get(skl, 0), st)
-        if "+" in skl or "." not in skl:
-            continue
-        base = skl.split(".", 1)[0]
-        if not base:
-            continue
-        cur = variant_pick.get(base)
-        if cur is None or (len(skl), skl) < (len(cur[0]), cur[0]):
-            variant_pick[base] = (skl, st)
-
-    from app.services.pricing.audit import _dept_value, _load_segment_roots
-
+    indice = await carregar_indice(session, user_scope(Product, user))
     segment_roots = await _load_segment_roots(session)
 
     out: dict[str, int] = {}
+    detalhado: dict[str, dict] = {}
     matched_pids = 0
-    matched_pieces_total = 0
+    matched_skus = 0
     for pp in pricing_rows:
-        dept_v = _dept_value(pp, segment_roots)
-        total = 0
-        any_match = False
-        for piece in (pp.sku or "").split(","):
-            key = piece.strip().lower()
-            if not key:
-                continue
-            if dept_v == "celular":
-                hit = variant_pick.get(key)
-                if hit is not None:
-                    total += hit[1]
-                    any_match = True
-                    matched_pieces_total += 1
-                elif key in exact_stock:
-                    total += exact_stock[key]
-                    any_match = True
-                    matched_pieces_total += 1
-            else:
-                if key in exact_stock:
-                    total += exact_stock[key]
-                    any_match = True
-                    matched_pieces_total += 1
+        partes = partes_da_linha(indice, pp.sku, _dept_value(pp, segment_roots))
+        total = total_das_partes(partes)
         out[str(pp.id)] = total
-        if any_match:
+        if detalhe:
+            detalhado[str(pp.id)] = {
+                "total": total,
+                "partes": [parte.como_dict() for parte in partes],
+                "conjunto": linha_de_conjunto(partes),
+            }
+        if partes:
             matched_pids += 1
+            matched_skus += len(partes)
 
     logger.info(
         "pricing.stock_map",
         user_id=str(user.id),
         department=department,
         pricing_products=len(pricing_rows),
-        product_skus=len(exact_stock),
-        celular_bases=len(variant_pick),
+        product_skus=len(indice.exato),
+        celular_bases=len(indice.lotes),
         matched_pricing_products=matched_pids,
-        matched_pieces=matched_pieces_total,
+        matched_skus=matched_skus,
     )
-    return out
+    return detalhado if detalhe else out
 
 
 @router.get("/sales-map")
@@ -1646,14 +1613,29 @@ async def get_sales_map(
     user: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
     department: Annotated[str | None, Query()] = None,
     days: Annotated[int, Query(ge=1, le=365)] = 7,
-) -> dict[str, int]:
+    detalhe: Annotated[bool, Query()] = False,
+) -> dict[str, int] | dict[str, dict]:
     """Returns {pricing_product_id: units_sold_in_last_N_days} from bling_orders.
 
-    bling_orders is single-tenant (no user_scope). Cancelled / returned orders
-    are excluded by `situacao`.
-    Sales sum every matched product key — see celular base-SKU rule.
+    bling_orders is single-tenant (no user_scope). O que é venda está em
+    services/vendas_periodo.py (02/11/2026): fora cancelado/excluído/devolvido
+    e as transferências das lojas internas, e o kit `a+b` conta para cada
+    peça. Sales sum every matched product key — see celular base-SKU rule.
+
+    `?detalhe=1` → {id: {"total": int, "pecas": {peça: int}}}: as vendas de
+    cada peça da linha (a mesma string de "peca" do /stock-map; sem venda =
+    0), para a Reposição cor a cor. O total é o do formato simples, a UNIÃO
+    das chaves das peças: fica menor que a soma das peças quando uma venda
+    casa com duas (mala: o conjunto b005.12.20 conta em b005.12 e b005.20).
     """
-    from datetime import UTC, datetime, timedelta
+    from app.services.pricing.audit import (
+        _dept_value,
+        _load_segment_roots,
+        build_match_indexes,
+        match_one_sku_to_keys,
+    )
+    from app.services.pricing.estoque_linha import pecas_da_linha
+    from app.services.vendas_periodo import vendas_por_chave
 
     _, leaves_by_id, root_id_by_slug = await _segment_index(session)
     pp_stmt = select(PricingProduct).where(user_scope(PricingProduct, user))
@@ -1673,44 +1655,36 @@ async def get_sales_map(
         )
         return {}
 
-    cutoff = datetime.now(UTC) - timedelta(days=days)
-    excluded_situations = ("Cancelado", "Devolvido")
-    rows = (
-        await session.execute(
-            select(BlingOrder.item_codigo, BlingOrder.item_quantidade).where(
-                and_(
-                    BlingOrder.item_codigo.isnot(None),
-                    BlingOrder.item_codigo != "",
-                    BlingOrder.data >= cutoff,
-                    BlingOrder.situacao.notin_(excluded_situations),
-                )
-            )
-        )
-    ).all()
-
-    sales_by_key: dict[str, int] = {}
-    for codigo, qty in rows:
-        key = (codigo or "").strip().lower()
-        if not key:
-            continue
-        sales_by_key[key] = sales_by_key.get(key, 0) + int(qty or 0)
-
-    from app.services.pricing.audit import _load_segment_roots
-
+    sales_by_key = {
+        chave: por_janela[0]
+        for chave, por_janela in (await vendas_por_chave(session, [days])).items()
+    }
     segment_roots = await _load_segment_roots(session)
-    matches = match_pricing_to_product_keys(
-        pricing_rows, sales_by_key.keys(), segment_roots
-    )
+    indices = build_match_indexes(sales_by_key.keys())
+
+    def somar(chaves: set[str]) -> int:
+        return sum(sales_by_key.get(chave, 0) for chave in chaves)
 
     out: dict[str, int] = {}
+    detalhado: dict[str, dict] = {}
     matched_pids = 0
     for pp in pricing_rows:
-        keys = matches.get(pp.id)
-        if not keys:
-            out[str(pp.id)] = 0
-            continue
-        out[str(pp.id)] = sum(sales_by_key.get(k, 0) for k in keys)
-        matched_pids += 1
+        dept = _dept_value(pp, segment_roots)
+        # Peça a peça, como match_pricing_to_product_keys faz antes de juntar.
+        chaves_por_peca = {
+            peca: match_one_sku_to_keys(peca, dept, *indices)
+            for peca in pecas_da_linha(pp.sku)
+        }
+        chaves = set().union(*chaves_por_peca.values())
+        total = somar(chaves)
+        out[str(pp.id)] = total
+        if detalhe:
+            detalhado[str(pp.id)] = {
+                "total": total,
+                "pecas": {peca: somar(ks) for peca, ks in chaves_por_peca.items()},
+            }
+        if chaves:
+            matched_pids += 1
 
     logger.info(
         "pricing.sales_map",
@@ -1718,11 +1692,46 @@ async def get_sales_map(
         department=department,
         days=days,
         pricing_products=len(pricing_rows),
-        order_rows=len(rows),
         sales_keys=len(sales_by_key),
         matched_pricing_products=matched_pids,
     )
-    return out
+    return detalhado if detalhe else out
+
+
+@router.get("/reposicao-config")
+async def get_reposicao_config(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("tabela_precos", "view"))],
+    department: Annotated[str | None, Query()] = None,
+) -> dict[str, str | int | bool | None]:
+    """Prazos da coluna Reposição: {"department", "tempo_reposicao",
+    "tempo_estoque", "pode_editar"}.
+
+    São os MESMOS da Importação (import_config, por categoria), lidos sem
+    criar a linha. Quem grava é o PATCH /api/importacao/config, então
+    `pode_editar` segue a edição da Importação (admin ou importacao.edit).
+    Departamento sem Importação (catálogo, vazio) → prazos nulos, nada a
+    editar.
+    """
+    from app.models import UserRole
+    from app.routers.importacao import prazos_da_categoria
+
+    departamento = (department or "").strip().lower()
+    prazos = await prazos_da_categoria(session, departamento)
+    if prazos is None:
+        return {
+            "department": departamento,
+            "tempo_reposicao": None,
+            "tempo_estoque": None,
+            "pode_editar": False,
+        }
+    permissao = (user.permissions or {}).get("importacao") or {}
+    return {
+        "department": departamento,
+        "tempo_reposicao": prazos["tempo_reposicao"],
+        "tempo_estoque": prazos["tempo_estoque"],
+        "pode_editar": user.role == UserRole.ADMIN or bool(permissao.get("edit", False)),
+    }
 
 
 # =============================================================================

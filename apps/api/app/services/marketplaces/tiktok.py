@@ -1736,6 +1736,66 @@ class TikTokClient:
         )
         return True
 
+    async def promocoes_em_andamento(
+        self, *, espera_s: float = 1.0
+    ) -> list[tuple[dict, dict | None]]:
+        """As promoções EM ANDAMENTO da loja, cada uma com o detalhe (os
+        `products`), na ordem da busca — a mesma leitura (e o mesmo cache) que
+        o envio do preço faz para achar a promoção do produto
+        (`_find_product_activity`). Todos os tipos, não só os que o envio
+        usa: quem lê precisa saber também do produto em desconto percentual.
+
+        Cada item: (resumo da busca, detalhe ou None quando o detalhe não
+        veio). Levanta se a BUSCA falhar — sem ela, nenhum SKU da loja tem
+        como ser conferido. O detalhe de UMA promoção que falha (rede,
+        timeout, HTTP 429/5xx, corpo estranho) não derruba a loja: vira None
+        (quem lê não confere o que pode estar nela), com uma nova tentativa
+        `espera_s` depois quando a falha é passageira, e não fica no cache.
+        SÓ LEITURA: a Conferência de preços da Tabela
+        (services/pricing/conferencia_tiktok.py)."""
+        import asyncio
+
+        http_limite = 429
+        erros_do_servidor = range(500, 600)
+
+        async def _detalhe(activity_id: str) -> dict | None:
+            # O mesmo GET (e o mesmo cache) do `_get_activity`; a exceção e a
+            # falha passageira não ficam no cache (a recusa de vez fica None, como lá).
+            if activity_id in self._promo_activity_cache:
+                return self._promo_activity_cache[activity_id]
+            falha = ""
+            for espera in (0.0, espera_s):
+                if espera:
+                    await asyncio.sleep(espera)
+                try:
+                    resp = await self._get(f"/promotion/202309/activities/{activity_id}")
+                except httpx.TransportError as e:  # rede, timeout: passageira
+                    falha = f"{type(e).__name__}: {e}"
+                    continue
+                except Exception as e:  # noqa: BLE001 — corpo estranho etc.: não insiste
+                    falha = f"{type(e).__name__}: {e}"
+                    break
+                codigo = resp.get("code") if isinstance(resp, dict) else None
+                if codigo == http_limite or codigo in erros_do_servidor:
+                    falha = f"HTTP {codigo}"
+                    continue
+                detalhe = resp.get("data") if codigo == 0 else None
+                self._promo_activity_cache[activity_id] = detalhe
+                return detalhe
+            logger.info(
+                "tiktok_promocao_detalhe_falhou", activity_id=activity_id, erro=falha[:200]
+            )
+            return None
+
+        saida: list[tuple[dict, dict | None]] = []
+        for resumo in await self._search_ongoing_activities():
+            if not isinstance(resumo, dict):
+                continue
+            activity_id = str(resumo.get("id") or resumo.get("activity_id") or "")
+            detalhe = await _detalhe(activity_id) if activity_id else None
+            saida.append((resumo, detalhe))
+        return saida
+
     # ---------------------------------------------------------------- product search
 
     async def search_products(

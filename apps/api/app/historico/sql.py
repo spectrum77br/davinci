@@ -119,7 +119,7 @@ TETO_POR_PEDIDO = 200
 # envio de um número, trocar a etapa ou o token é o que o Histórico mostra.
 EXCLUIDAS = re.compile(
     r"^(historico_(evento|alteracao)$|sync_logs|background_job|alembic_version$|auth_codes$"
-    r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$"
+    r"|oauth_states$|pricing_push_idempotency$|pricing_push_confirmacao$|pricing_conferencia$"
     r"|marketing_agent_heartbeat$|alerts$|verificar_margem$|perfis$"
     # trilhas que o próprio sistema já grava junto com a mudança da pessoa
     r"|products_audit$|product_links_audit$|audit_em_andamento_data$|margem_audit$"

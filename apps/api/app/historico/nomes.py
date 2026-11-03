@@ -398,7 +398,16 @@ TABELAS: dict[str, str] = {
     "nf_faturador": "Faturador de NF",
     "margem_saldo_manual": "Saldo manual (Margem)",
     "historico_acesso": "Acesso ao Histórico",
-    "importacao_lotes": "Lote de importação",
+    # Importação (02/11/2026): a chave antiga "importacao_lotes" não era a tabela.
+    "import_lotes": "Lote de importação",
+    "import_lote_items": "Item do lote de importação",
+    "import_products": "Produto da Importação",
+    "import_kit_bases": "Base de kit (Importação)",
+    "import_kit_variations": "Variação de kit (Importação)",
+    "import_kit_marks": "Marca de kit (Importação)",
+    "import_config": "Prazos da Importação",
+    "import_cotacao_params": "Parâmetros da cotação (Importação)",
+    "import_resumo": "Resumo da Importação",
     "company_fiscal": "Dados fiscais da empresa (NFS-e)",
     "nfse_tomador": "Tomador de NFS-e",
     "nfse_modelo": "Modelo de NFS-e mensal",
@@ -474,6 +483,12 @@ CAMPOS: dict[str, str] = {
     "base_calculo": "Base de cálculo",
     # Porcentagem da empresa (Cadastros › Empresas, 29/09): % padrão da NFS-e.
     "percentual_servico": "Porcentagem (nota de serviço)",
+    # Importação (02/11/2026): as colunas do Bling viraram Produto, Custo e Estoque.
+    "modelo_bling": "Produto",
+    "custo_bling": "Custo",
+    "estoque_bling": "Estoque",
+    "tempo_reposicao": "Tempo de reposição (dias)",
+    "tempo_estoque": "Tempo de estoque (dias)",
     # Catálogo ML (06/10/2026).
     "preco_catalogo": "Catálogo (custo)",
     "canal": "Canal (kit/catálogo)",

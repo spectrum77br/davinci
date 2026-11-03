@@ -3,9 +3,11 @@
 Visão resumida pra o humano analisar/conferir um lote: uma linha por
 produto DA CATEGORIA do lote — todos os SKUs da tabela, mesmo sem
 quantidade nesse lote (pedido do operador: planilha completa pra
-planejar, não só o que já foi comprado). Mostra modelo, SKU, custo
-unitário, estoque Bling, quantidade (nesse lote) e total (qtd × custo).
-Linhas sem quantidade ficam com Quantidade/Total em branco.
+planejar, não só o que já foi comprado). Mostra produto, SKU, custo
+unitário, estoque (o da coluna Estoque da Importação: no celular, a soma
+dos lotes), quantidade (nesse lote) e total (qtd × custo). Linhas sem
+quantidade ficam com Quantidade/Total em branco. Os cabeçalhos seguem os
+nomes da tela (02/11/2026).
 
 Camada de arquivo pura: recebe as linhas já calculadas (modelo/sku/
 custo/estoque/quantidade/total) e devolve os bytes do .xlsx. Não lê banco.
@@ -14,9 +16,9 @@ custo/estoque/quantidade/total) e devolve os bytes do .xlsx. Não lê banco.
 from __future__ import annotations
 
 import io
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Iterable
 
 from openpyxl import Workbook
 from openpyxl.styles import Font
@@ -25,7 +27,7 @@ LOTE_EXCEL_MEDIA = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-_HEADERS = ("Modelo Bling", "SKU", "Custo Bling", "Estoque Bling", "Quantidade", "Total")
+_HEADERS = ("Produto", "SKU", "Custo", "Estoque", "Quantidade", "Total")
 
 
 @dataclass(frozen=True)
@@ -72,7 +74,7 @@ def montar_xlsx(nome_lote: str, linhas: Iterable[LinhaLote]) -> bytes:
     for cell in ws[ws.max_row]:
         cell.font = Font(bold=True)
 
-    for col, width in zip("ABCDEF", (40, 18, 14, 14, 12, 16)):
+    for col, width in zip("ABCDEF", (40, 18, 14, 14, 12, 16), strict=True):
         ws.column_dimensions[col].width = width
 
     buf = io.BytesIO()

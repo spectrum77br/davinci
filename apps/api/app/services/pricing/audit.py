@@ -3,7 +3,9 @@
 Two separate concerns live here so callers don't need to duplicate the
 celular base-SKU matching logic:
 
-  * `match_pricing_to_product_keys` — for stock/sales maps.
+  * `match_pricing_to_product_keys` — the per-row wrapper (today only the
+    tests use it; /sales-map and the Importação call `match_one_sku_to_keys`
+    piece by piece).
     Given a list of `pricing_products` and the set of all product SKU keys
     (lowercased), returns `{pricing_product_id: set(matched_product_keys)}`.
 
@@ -139,11 +141,11 @@ def match_one_sku_to_keys(
       2. every key in the same base whose sizes ⊇ piece's sizes —
          single piece (b045.18) catches kits b045.X.18 / b045.18.Y;
          kit (b045.18.20) catches bigger kits b045.X.18.20.Y.
-      3. for kit pieces (≥3 parts) WITHOUT exact, fall back to summing
-         each single-size component (b045.18.20 with no exact →
-         b045.18 + b045.20). Preserves the commit af9465c fallback —
-         covers 2-piece kits that don't sell as kits but whose
-         individual sizes do.
+    O "Kit 6 Malas" (SKU só a base, b045) não tem tamanho no SKU: as vendas
+    dele chegam às peças pela composição do Bling (services/vendas_periodo).
+    Sem o fallback de componentes do af9465c desde 02/11/2026 (coluna "30d" =
+    vendas do produto): o conjunto que não vendeu mostrava as malas avulsas
+    da cor — "ABS 8+12+20+24" com 843 em 30 dias para 53 conjuntos vendidos.
     """
     key = (sku_key or "").strip().lower()
     if not key:
@@ -178,14 +180,6 @@ def match_one_sku_to_keys(
             continue
         if piece_sizes.issubset(bo_sizes):
             matched.add(bo_key)
-
-    # Kit-only fallback (exact empty + ≥3 parts): single-size components.
-    if not by_exact.get(key) and len(parts) >= 3:
-        for size in parts[1:]:
-            if not size.isdigit():
-                continue
-            component_key = f"{base}.{size}"
-            matched.update(by_exact.get(component_key, set()))
 
     return matched
 

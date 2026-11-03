@@ -7,12 +7,12 @@
 //   * Resumo    — lançamentos financeiros (lotes fechados + lançamentos
 //                 avulsos). Ajustes manuais de frete NÃO entram aqui —
 //                 vivem só na aba Frete. Linha de total no rodapé.
-//   * Reposição — parâmetros da fórmula de reposição + card explicando
-//                 o cálculo passo a passo.
+//   * Reposição — virou coluna da aba Mala (02/11/2026); os prazos da
+//                 conta ficam na barra âmbar em cima da grade.
 //
 // V1 caveats:
-//   * estoque_bling / consumo_diario / maior_media_30d são colunas
-//     manuais nesta planilha. Bling sync é uma segunda PR.
+//   * Estoque (estoque_bling) e 30d (vendas_30d) vêm do Bling pela API,
+//     só leitura; a Reposição é calculada aqui (utils/reposicao.ts).
 //   * Tabela vazia por padrão — operador adiciona produtos via UI.
 import { computed, onScopeDispose, reactive, ref, watch } from 'vue'
 import {
@@ -21,6 +21,7 @@ import {
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 import { parseBRNumber, formatBRNumber, formatPercent } from '~/lib/number'
+import { calcularReposicao, explicarReposicao, type ResultadoReposicao } from '~/utils/reposicao'
 
 definePageMeta({
   middleware: ['permission'],
@@ -86,17 +87,15 @@ const showMalaCols = computed(() => !isEletro.value && !isCelular.value)
 // pra próxima. Mantém o offset visualmente alinhado com o min-width
 // declarado em cada <th>/<td> sticky abaixo. Ordem é a ordem de
 // renderização no DOM — qualquer reordenação aqui precisa bater com
-// o template.
+// o template. Desde 02/11/2026: Produto, SKU, Custo, Estoque, 30d e
+// Reposição (as mesmas colunas fixas da Mala/Eletro, que só não grudam).
 const STICKY_WIDTHS_CELULAR: Record<string, number> = {
   modelo_bling: 300,
   sku: 130,
   custo_bling: 60,
   estoque_bling: 66,
-  consumo_diario: 66,
-  memoria_consumo: 70,
-  reposicao_estoque: 76,
-  saldo_reposicao: 76,
-  custo_realizado: 90,
+  vendas_30d: 56,
+  reposicao: 76,
 }
 function stickyLeftCelular(key: string): string {
   let left = 0
@@ -106,6 +105,18 @@ function stickyLeftCelular(key: string): string {
   }
   return '0px'
 }
+// left + min-width da coluna fixa, os dois tirados do mapa acima: o
+// offset da próxima coluna nunca descasa da largura desta.
+function stickyStyleCelular(key: string): Record<string, string> {
+  return { left: stickyLeftCelular(key), minWidth: `${STICKY_WIDTHS_CELULAR[key]}px` }
+}
+// Linhas do cabeçalho da grade — as colunas fixas ocupam todas (rowspan):
+// 9 do lote (lote, DI, abertura, fechamento, previsto, realizado, saldo,
+// prazo, simulação) + a dos sub-cabeçalhos (quant | total). O Celular
+// tem mais 4: transportadora, taxa, frete %, adicional.
+const LINHAS_CABECALHO = 10
+const LINHAS_CABECALHO_CELULAR = LINHAS_CABECALHO + 4
+const rowspanCabecalho = computed(() => (isCelular.value ? LINHAS_CABECALHO_CELULAR : LINHAS_CABECALHO))
 const availableSubtabs = computed(() => SUBTABS_BY_CATEGORIA[categoria.value])
 const countByCategoria = ref<Record<string, number>>({})
 function subtabLabel(t: Tab): string {
@@ -131,13 +142,16 @@ type Product = {
   cor: string | null
   custo_bling: string | number
   estoque_bling: number | null
-  consumo_diario: string | number | null
-  maior_media_30d: string | number | null
+  // Vendas dos últimos 30 dias (unidades). Só o GET /products monta; sem
+  // o campo a grade mostra "—" no 30d e na Reposição.
+  vendas_30d?: number | null
+  // Celular: estoque_bling é a soma dos lotes do produto; aqui cada
+  // parcela (balão da célula Estoque). null quando não há o que somar.
+  estoque_partes?: Array<{ sku: string; estoque: number | null }> | null
+  // consumo diário, memória consumo, reposição estoque, saldo reposição e
+  // custo realizado ainda vêm da API, mas saíram da tela em 02/11/2026.
   duimp: string | null
   ncm: string | null
-  memoria_consumo: string | number | null
-  reposicao_estoque: number | null
-  saldo_reposicao: number | null
   nome_gerado: string
   bling_sync_status: string | null
   bling_sync_marked_at: string | null
@@ -150,8 +164,6 @@ type Product = {
   valor_usd: string | number | null
   valor_brl_realizado: string | number | null
   frete_type: 'regular' | 'swap' | 'acessorios' | null
-  // Aba Importação Celular (etapa atual).
-  custo_realizado: string | number | null
   // Paralelo a lote_quantidades — valor_usd por lote (Celular).
   lote_valores_usd: Record<string, string | number | null>
   // Paralelo — custo BRL manual por lote (Celular, lotes sem
@@ -522,20 +534,28 @@ const pendingItemTargetPatches = new Map<string, Promise<unknown>>()
 // "rodadas antigas".
 const showClosedLotes = ref(true)
 const search = ref('')
-// Filtro extra da aba Importação por coluna "saldo reposição":
+// Filtro extra da aba Importação pela coluna Reposição (02/11/2026, no
+// lugar dos filtros de "saldo reposição" e "reposição estoque"):
 //   - 'todos'    → sem filtro
-//   - 'positivo' → saldo_reposicao > 0  (precisa repor)
-//   - 'negativo' → saldo_reposicao < 0  (já tem sobra)
-//   - 'nenhum'   → saldo_reposicao null OU 0 (sem dados / neutro)
+//   - 'falta'    → Reposição negativa (é quanto comprar)
+//   - 'sobra'    → Reposição zero ou positiva (o estoque cobre o prazo)
+//   - 'sem_dado' → sem estoque lido, sem vendas 30d ou sem prazos
 // Aplicado client-side, depois do filtro de texto.
-type SaldoFilter = 'todos' | 'positivo' | 'negativo' | 'nenhum'
-const saldoFilter = ref<SaldoFilter>('todos')
-// Filtro análogo pra coluna "reposição estoque" (decidir o que
-// comprar). Operam em AND com o saldoFilter.
-type ReposicaoFilter = 'todos' | 'positivo' | 'negativo' | 'nenhum'
-const reposicaoFilter = ref<ReposicaoFilter>('todos')
+type ReposicaoFiltro = 'todos' | 'falta' | 'sobra' | 'sem_dado'
+const reposicaoFiltro = ref<ReposicaoFiltro>('todos')
 
 const visibleLotes = computed(() => lotes.value.filter((l) => showClosedLotes.value || l.is_aberto))
+
+// Colunas da grade da aba Importação: as fixas (as mesmas nas três
+// categorias; só no Celular grudam à esquerda) + duimp e ncm + as de cada
+// lote (Celular: quant | valor | custo; Mala/Eletro: quant | total) +
+// bling e excluir. É o colspan da linha "nenhum produto".
+const COLUNAS_DUIMP_NCM = 2
+const colunasGrade = computed(() =>
+  Object.keys(STICKY_WIDTHS_CELULAR).length + COLUNAS_DUIMP_NCM
+  + visibleLotes.value.length * (isCelular.value ? 3 : 2)
+  + (canEdit.value ? 1 : 0) + (canDelete.value ? 1 : 0),
+)
 
 // Exportar Excel de conferência de UM lote escolhido: baixa .xlsx com
 // uma linha por produto DA CATEGORIA do lote — todos os SKUs, mesmo os
@@ -738,6 +758,67 @@ async function lancarDiPagamento() {
   }
 }
 
+// ── Reposição (02/11/2026, tarefas do Eduardo) ───────────────────
+// A mesma conta da Tabela de Preços (utils/reposicao.ts):
+//   Reposição = Estoque − vendas 30d × (tempo de reposição + tempo de estoque) ÷ 30
+// com o necessário arredondado para cima. Negativo = falta (é quanto
+// comprar, em vermelho). Não desconta o que já está em lote aberto.
+// Calculada aqui, então muda na hora ao mexer nos prazos da barra âmbar.
+// Sem vendas_30d no produto fica "—": contar como zero daria sobra falsa.
+function prazoDias(v: unknown): number | null {
+  // v-model.number devolve '' com o campo apagado.
+  return v === '' || v == null ? null : Number(v)
+}
+function reposicaoDe(row: Product): ResultadoReposicao | null {
+  if (row.vendas_30d == null) return null
+  return calcularReposicao(
+    row.estoque_bling, row.vendas_30d,
+    prazoDias(config.value.tempo_reposicao), prazoDias(config.value.tempo_estoque),
+  )
+}
+function textoReposicao(row: Product): string {
+  const r = reposicaoDe(row)
+  if (!r) return '—'
+  return r.valor < 0 ? `−${-r.valor}` : String(r.valor)
+}
+// `!` porque a regra .grid-table td.calc (texto cinza) ganha da classe de cor.
+function classeReposicao(row: Product): string {
+  const r = reposicaoDe(row)
+  return r && r.valor < 0 ? '!text-red-700 dark:!text-red-400 font-semibold' : ''
+}
+function tituloReposicao(row: Product): string {
+  if (row.vendas_30d == null) return 'Sem as vendas dos últimos 30 dias.'
+  return explicarReposicao(reposicaoDe(row), row.estoque_bling, row.vendas_30d)
+}
+const formulaReposicao = computed(() => {
+  const rep = prazoDias(config.value.tempo_reposicao) ?? '?'
+  const est = prazoDias(config.value.tempo_estoque) ?? '?'
+  return `Reposição = Estoque − vendas 30d × (${rep} + ${est}) ÷ 30`
+})
+// O arredondamento é só da parte das vendas: "o resultado arredondado para
+// cima" leria −10,5 como −10, e a conta dá −11.
+const tituloColunaReposicao = computed(() =>
+  `${formulaReposicao.value}; a parte das vendas é arredondada para cima. `
+  + 'Negativo (vermelho) = falta: é quanto comprar. Positivo = sobra além do prazo. '
+  + 'Não desconta o que já está em lote aberto.',
+)
+// Estoque: no Celular é a soma dos lotes do produto (o balão lista cada um).
+const tituloColunaEstoque = computed(() =>
+  isCelular.value
+    ? 'Estoque no Bling, somando todos os lotes do produto. Passe o mouse no número para ver cada lote.'
+    : 'Estoque do SKU no Bling.',
+)
+function tituloEstoque(row: Product): string {
+  if (row.estoque_bling == null) return 'Sem estoque lido no Bling.'
+  const partes = row.estoque_partes ?? []
+  if (partes.length === 1) return `Estoque no Bling: ${partes[0].sku} ${partes[0].estoque ?? '—'}`
+  if (partes.length > 1) {
+    const soma = partes.map((p) => `${p.sku} ${p.estoque ?? '—'}`).join(' + ')
+    return `Estoque no Bling, soma dos lotes: ${soma} = ${row.estoque_bling}`
+  }
+  return `Estoque no Bling: ${row.estoque_bling}`
+}
+
 const filteredProducts = computed(() => {
   const q = search.value.trim().toLowerCase()
   let list = products.value
@@ -750,30 +831,23 @@ const filteredProducts = computed(() => {
         || (p.fornecedor || '').toLowerCase().includes(q),
     )
   }
-  const mode = saldoFilter.value
-  if (mode !== 'todos') {
+  const modo = reposicaoFiltro.value
+  if (modo !== 'todos') {
     list = list.filter((p) => {
-      const s = p.saldo_reposicao
-      if (s == null) return mode === 'nenhum'
-      const n = Number(s)
-      if (mode === 'positivo') return n > 0
-      if (mode === 'negativo') return n < 0
-      return n === 0  // 'nenhum' inclui 0
-    })
-  }
-  const repMode = reposicaoFilter.value
-  if (repMode !== 'todos') {
-    list = list.filter((p) => {
-      const r = p.reposicao_estoque
-      if (r == null) return repMode === 'nenhum'
-      const n = Number(r)
-      if (repMode === 'positivo') return n > 0
-      if (repMode === 'negativo') return n < 0
-      return n === 0  // 'nenhum' inclui 0
+      const r = reposicaoDe(p)
+      if (!r) return modo === 'sem_dado'
+      if (modo === 'falta') return r.valor < 0
+      return modo === 'sobra' && r.valor >= 0
     })
   }
   return list
 })
+// Botão "Limpar filtro" da grade vazia: há produto, mas a busca ou a
+// reposição esconderam todos. Filtro novo aqui também tem que zerar lá.
+function limparFiltro() {
+  search.value = ''
+  reposicaoFiltro.value = 'todos'
+}
 
 // ── Cotação Celular: cálculo do previsto + autosave ──────────────
 // Fórmula validada pelo operador 2026-06-02:
@@ -934,6 +1008,14 @@ function scheduleSave(row: Product, field: keyof Product, value: any) {
     void persistProduct(row, field)
   }, 500)
 }
+// Nome da coluna na mensagem de erro: os campos do Bling aparecem na tela
+// como Produto, Custo e Estoque (02/11/2026).
+const ROTULO_CAMPO: Partial<Record<keyof Product, string>> = {
+  modelo_bling: 'Produto',
+  custo_bling: 'Custo',
+  estoque_bling: 'Estoque',
+}
+
 async function persistProduct(row: Product, field: keyof Product) {
   const key = `prod_${row.id}_${String(field)}`
   delete saveTimers[key]
@@ -942,10 +1024,10 @@ async function persistProduct(row: Product, field: keyof Product) {
       method: 'PATCH',
       body: { [field]: row[field] },
     })
-    // Reload to get refreshed computed fields (memoria/reposicao/saldo).
+    // Recarrega: Estoque/30d vêm pelo SKU (trocar o SKU muda os dois).
     void loadProductsOnly()
   } catch (e: any) {
-    errorText.value = `Falha ao salvar ${String(field)}: ${e?.data?.detail?.code || 'erro'}`
+    errorText.value = `Falha ao salvar ${ROTULO_CAMPO[field] ?? String(field)}: ${e?.data?.detail?.code || 'erro'}`
   }
 }
 
@@ -1071,8 +1153,22 @@ async function sendToBling(row: Product) {
     const updated = await api<Product>(`/api/importacao/products/${row.id}/sync-bling`, {
       method: 'POST',
     })
+    // Só o estado do envio muda. A resposta de UM produto vem sem o que só
+    // o GET /products monta (estoque somado, vendas 30d, quantidades dos
+    // lotes): espalhar ela inteira apagava esses números (e dava uma
+    // Reposição errada) até o próximo reload.
+    const {
+      bling_sync_status, bling_sync_marked_at, bling_product_id,
+      bling_sync_error, bling_sync_attempted_at, bling_sync_done_at,
+    } = updated
     const idx = products.value.findIndex((p) => p.id === row.id)
-    if (idx >= 0) products.value[idx] = { ...products.value[idx], ...updated }
+    if (idx >= 0) {
+      products.value[idx] = {
+        ...products.value[idx],
+        bling_sync_status, bling_sync_marked_at, bling_product_id,
+        bling_sync_error, bling_sync_attempted_at, bling_sync_done_at,
+      }
+    }
   } catch (e: any) {
     errorText.value = `Falha ao enviar pro Bling: ${e?.data?.detail?.code || 'erro'}`
   }
@@ -1194,7 +1290,8 @@ async function persistLoteItem(prod: Product, loteId: string, qty: number) {
       method: 'PUT',
       body: { product_id: prod.id, quantidade: qty },
     })
-    // Lote previsto changed → refresh lotes (+ products for saldo_reposicao).
+    // Lote previsto changed → refresh lotes (+ products: lote_item_ids do
+    // item recém-criado, que o seletor de SKU destino do Celular usa).
     void loadLotesOnly()
     void loadProductsOnly()
   } catch (e: any) {
@@ -1469,23 +1566,32 @@ async function removeResumo(row: ResumoRow) {
 
 // ── Config (parâmetros da fórmula de reposição) ───────────────────
 // Editado pela barra âmbar no topo da aba Mala (a aba Reposição foi
-// removida). Cada @change dispara este PATCH + reload dos produtos
-// pra recalcular reposicao_estoque/saldo_reposicao.
-async function saveConfig() {
+// removida). A coluna Reposição é calculada no front e já muda enquanto
+// o prazo é digitado; o @change só grava (PATCH) — nada na grade
+// depende de recarregar os produtos.
+// Os mesmos prazos também se editam na Tabela de Preços (mesma row): o
+// PATCH leva SÓ o prazo mexido, senão regravaria o outro com o valor de
+// quando esta tela abriu. A resposta traz os dois como estão no servidor,
+// então o outro prazo já aparece atualizado.
+type CampoPrazo = 'tempo_reposicao' | 'tempo_estoque'
+async function saveConfig(campo: CampoPrazo) {
   try {
-    // Config é por categoria (migration 0132). O body do PATCH só leva
-    // tempo_reposicao/tempo_estoque — a categoria vai por query string,
-    // pra qual row alterar.
+    // Config é por categoria (migration 0132): a categoria vai por query
+    // string, pra qual row alterar.
     config.value = await api<Config>(`/api/importacao/config?${catQs()}`, {
       method: 'PATCH',
-      body: {
-        tempo_reposicao: config.value.tempo_reposicao,
-        tempo_estoque: config.value.tempo_estoque,
-      },
+      body: { [campo]: config.value[campo] },
     })
-    void loadProductsOnly()
   } catch (e: any) {
-    errorText.value = `Falha ao salvar config: ${e?.data?.detail?.code || 'erro'}`
+    // O servidor recusa prazo vazio, quebrado ou fora de 0–999 (422). A
+    // Reposição usa o prazo da tela: volta ao que está salvo, senão a grade
+    // mostra uma conta que o servidor (e a Tabela de Preços) não tem.
+    errorText.value = e?.status === 422
+      ? 'Prazo inválido: use um número inteiro de dias, de 0 a 999. Voltou ao que está salvo.'
+      : `Falha ao salvar config: ${e?.data?.detail?.code || 'erro'}`
+    try {
+      config.value = await api<Config>(`/api/importacao/config?${catQs()}`)
+    } catch { /* fica o da tela; o aviso acima já está à vista */ }
   }
 }
 
@@ -1504,18 +1610,6 @@ function fmtUsd(v: string | number | null | undefined): string {
   const n = Number(v)
   if (!Number.isFinite(n)) return '—'
   return `US$ ${n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-}
-function fmtNum2(v: string | number | null | undefined): string {
-  if (v == null || v === '') return '—'
-  const n = Number(v)
-  if (!Number.isFinite(n)) return '—'
-  return n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-}
-function reposicaoClass(v: number | null): string {
-  if (v == null) return 'text-muted-foreground'
-  if (v > 0) return 'text-red-700 font-semibold'
-  if (v < 0) return 'text-emerald-700 font-semibold'
-  return ''
 }
 function loteTotal(prod: Product, loteId: string): number {
   const q = prod.lote_quantidades[loteId] || 0
@@ -1907,12 +2001,10 @@ onScopeDispose(() => {
 
     <!-- ─── TAB MALA ─────────────────────────────────────────────── -->
     <div v-if="tab === 'mala'" class="space-y-2">
-      <!-- Replenishment parameters — same fields as the Reposição tab,
-           surfaced here so the operator can tweak them while reading
-           the table. Both inputs PATCH the same singleton config row
-           used by the backend's _compute_product_fields() — every
-           reposição/saldo cell recalculates on the next loadProductsOnly
-           triggered by saveConfig(). -->
+      <!-- Prazos da Reposição (config por categoria). A coluna Reposição
+           é calculada no front (reposicaoDe) e muda enquanto o prazo é
+           digitado; o @change grava só o prazo daquele campo (saveConfig).
+           A conta fica escrita aqui, à vista, com os números de agora. -->
       <div class="flex flex-wrap items-center gap-3 bg-amber-50 dark:bg-amber-900/20 border rounded-md px-3 py-2 text-xs">
         <label class="inline-flex items-center gap-2">
           <span class="font-semibold uppercase tracking-wide text-[10px]">tempo de reposição</span>
@@ -1922,7 +2014,7 @@ onScopeDispose(() => {
             class="h-7 w-20 border rounded px-2 text-right text-sm bg-background"
             v-model.number="config.tempo_reposicao"
             :disabled="!canEdit"
-            @change="saveConfig"
+            @change="saveConfig('tempo_reposicao')"
           />
           <span class="text-[10px] text-muted-foreground">dias</span>
         </label>
@@ -1934,13 +2026,14 @@ onScopeDispose(() => {
             class="h-7 w-20 border rounded px-2 text-right text-sm bg-background"
             v-model.number="config.tempo_estoque"
             :disabled="!canEdit"
-            @change="saveConfig"
+            @change="saveConfig('tempo_estoque')"
           />
           <span class="text-[10px] text-muted-foreground">dias</span>
         </label>
-        <span class="ml-auto text-[10px] text-muted-foreground">
-          Recalcula reposição/saldo em tempo real
-        </span>
+        <p class="ml-auto text-[11px] leading-snug" data-formula-reposicao>
+          <strong>{{ formulaReposicao }}.</strong> <span class="font-semibold text-red-700 dark:text-red-400">Negativo (vermelho)</span>
+          = falta: é quanto comprar. Não desconta o que já está em lote aberto.
+        </p>
       </div>
 
       <div class="flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
@@ -1949,29 +2042,23 @@ onScopeDispose(() => {
           <input
             v-model="search"
             type="search"
-            placeholder="Buscar SKU, modelo, cor, fornecedor…"
+            placeholder="Buscar SKU, produto, cor, fornecedor…"
             class="h-7 w-full border rounded pl-7 pr-2 text-xs bg-background"
           />
         </div>
         <label class="inline-flex items-center gap-1 cursor-pointer">
           <input type="checkbox" v-model="showClosedLotes" /> mostrar lotes fechados
         </label>
-        <label class="inline-flex items-center gap-1">
-          <span class="text-muted-foreground">saldo reposição:</span>
-          <select v-model="saldoFilter" class="h-7 border rounded px-2 bg-background">
+        <label
+          class="inline-flex items-center gap-1"
+          title="Falta = Reposição negativa (comprar). Sobra = zero ou positiva (o estoque cobre o prazo). Sem dado = sem estoque, vendas 30d ou prazos."
+        >
+          <span class="text-muted-foreground">reposição:</span>
+          <select v-model="reposicaoFiltro" class="h-7 border rounded px-2 bg-background">
             <option value="todos">todos</option>
-            <option value="positivo">positivo</option>
-            <option value="negativo">negativo</option>
-            <option value="nenhum">nenhum</option>
-          </select>
-        </label>
-        <label class="inline-flex items-center gap-1">
-          <span class="text-muted-foreground">reposição estoque:</span>
-          <select v-model="reposicaoFilter" class="h-7 border rounded px-2 bg-background">
-            <option value="todos">todos</option>
-            <option value="positivo">positivo</option>
-            <option value="negativo">negativo</option>
-            <option value="nenhum">nenhum</option>
+            <option value="falta">falta</option>
+            <option value="sobra">sobra</option>
+            <option value="sem_dado">sem dado</option>
           </select>
         </label>
         <span class="text-muted-foreground">
@@ -2010,81 +2097,70 @@ onScopeDispose(() => {
                  the per-cell inputs in tbody. Mirrors the operator's
                  Excel layout 1:1. -->
             <tr>
-              <!-- min-widths fixados pra: SKU/cor confortáveis, e as
-                   colunas numéricas estreitas o suficiente pra caber
-                   as palavras inteiras (sem quebrar "memória" em
-                   "memóri/a"). Palavras curtas (até ~7 chars) → 60-66px;
-                   "reposição"/"saldo" → 72-76px.
+              <!-- Colunas fixas (02/11/2026, tarefas do Eduardo): Produto,
+                   SKU, Custo e Estoque são os campos do Bling (só o rótulo
+                   mudou — eram "modelo/custo/estoque bling"); 30d = vendas
+                   dos últimos 30 dias; Reposição = a conta da barra âmbar.
+                   Consumo diário, memória consumo, reposição estoque, saldo
+                   reposição e custo realizado saíram da tela.
+                   min-widths: SKU confortável e as numéricas estreitas, só o
+                   bastante pra palavra inteira do cabeçalho. No Celular a
+                   largura vem de STICKY_WIDTHS_CELULAR (stickyStyleCelular).
                    fornecedor/modelo china/cor china/fechamento/TSA
-                   foram removidos da exibição — `modelo bling` já vem
+                   foram removidos da exibição — o Produto já vem
                    consolidado do Bling. Campos seguem no DB (sync ainda
                    grava) e no modal "Criar produto". -->
               <th
-                :rowspan="isCelular ? 14 : 10"
+                :rowspan="rowspanCabecalho"
                 class="col-head text-left"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '300px' } : { minWidth: '500px' }"
-              >modelo bling</th>
+                :style="isCelular ? stickyStyleCelular('modelo_bling') : { minWidth: '500px' }"
+              >Produto</th>
               <th
-                :rowspan="isCelular ? 14 : 10"
+                :rowspan="rowspanCabecalho"
                 class="col-head text-left"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('sku'), minWidth: '130px' } : { minWidth: '130px' }"
+                :style="isCelular ? stickyStyleCelular('sku') : { minWidth: '130px' }"
               >sku</th>
               <th
-                :rowspan="isCelular ? 14 : 10"
+                :rowspan="rowspanCabecalho"
                 class="col-head text-right"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('custo_bling'), minWidth: '60px' } : { minWidth: '60px' }"
-              >custo bling</th>
+                :style="isCelular ? stickyStyleCelular('custo_bling') : { minWidth: '60px' }"
+              >Custo</th>
               <th
-                :rowspan="isCelular ? 14 : 10"
+                :rowspan="rowspanCabecalho"
                 class="col-head text-right"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('estoque_bling'), minWidth: '66px' } : { minWidth: '66px' }"
-              >estoque bling</th>
+                :style="isCelular ? stickyStyleCelular('estoque_bling') : { minWidth: '66px' }"
+                :title="tituloColunaEstoque"
+              >Estoque</th>
               <th
-                :rowspan="isCelular ? 14 : 10"
+                :rowspan="rowspanCabecalho"
                 class="col-head text-right"
                 :class="isCelular ? 'sticky bg-background z-30' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('consumo_diario'), minWidth: '66px' } : { minWidth: '66px' }"
-              >consumo diário</th>
+                :style="isCelular ? stickyStyleCelular('vendas_30d') : { minWidth: '56px' }"
+                title="Vendas dos últimos 30 dias (unidades). Kit e conjunto contam em cada peça."
+              >30d</th>
+              <!-- Última fixa: no Celular leva o divisor grosso do bloco
+                   grudado (lote-divider-anchor). -->
               <th
-                :rowspan="isCelular ? 14 : 10"
+                :rowspan="rowspanCabecalho"
                 class="col-head text-right"
-                :class="isCelular ? 'sticky bg-background z-30' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('memoria_consumo'), minWidth: '70px' } : { minWidth: '70px' }"
-              >memória consumo</th>
-              <th
-                :rowspan="isCelular ? 14 : 10"
-                class="col-head text-right"
-                :class="isCelular ? 'sticky bg-background z-30' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('reposicao_estoque'), minWidth: '76px' } : { minWidth: '76px' }"
-              >reposição estoque</th>
-              <th
-                :rowspan="isCelular ? 14 : 10"
-                class="col-head text-right"
-                :class="isCelular ? 'sticky bg-background z-30' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('saldo_reposicao'), minWidth: '76px' } : { minWidth: '76px' }"
-              >saldo reposição</th>
-              <!-- Celular: `custo realizado` (coluna J do Excel — "media
-                   do custo", editável manualmente). -->
-              <th
-                v-if="isCelular"
-                :rowspan="isCelular ? 14 : 10"
-                class="col-head text-right sticky bg-background z-30 lote-divider-anchor"
-                :style="{ left: stickyLeftCelular('custo_realizado'), minWidth: '90px' }"
-              >custo realizado</th>
+                :class="isCelular ? 'sticky bg-background z-30 lote-divider-anchor' : ''"
+                :style="isCelular ? stickyStyleCelular('reposicao') : { minWidth: '76px' }"
+                :title="tituloColunaReposicao"
+              >Reposição</th>
               <!-- DUIMP: número do despacho, digitado à mão por produto
                    (ocupou o lugar da antiga `obs`, que ninguém usava).
                    Vale nas três categorias. No Celular vem DEPOIS do bloco
-                   sticky — é coluna comum, senão o `left` acumulado do
-                   `custo realizado` sairia do lugar. -->
-              <th :rowspan="isCelular ? 14 : 10" class="col-head text-left" style="min-width: 140px">duimp</th>
+                   sticky — é coluna comum, senão o `left` acumulado das
+                   colunas fixas sairia do lugar. -->
+              <th :rowspan="rowspanCabecalho" class="col-head text-left" style="min-width: 140px">duimp</th>
               <!-- NCM por produto (migration 0226): digitado à mão, depois da
                    DUIMP. Usado pelo faturador com "NCM do produto de
                    importação" — a regra de emissão é programada depois. -->
-              <th :rowspan="isCelular ? 14 : 10" class="col-head text-left" style="min-width: 110px">ncm</th>
+              <th :rowspan="rowspanCabecalho" class="col-head text-left" style="min-width: 110px">ncm</th>
               <template v-for="lote in visibleLotes" :key="`lote-r1-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">lote</td>
                 <td class="lote-value" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">
@@ -2126,8 +2202,8 @@ onScopeDispose(() => {
                   </span>
                 </td>
               </template>
-              <th :rowspan="isCelular ? 14 : 10" v-if="canEdit" class="col-head text-center">bling</th>
-              <th :rowspan="isCelular ? 14 : 10" v-if="canDelete" class="col-head w-8"></th>
+              <th :rowspan="rowspanCabecalho" v-if="canEdit" class="col-head text-center">bling</th>
+              <th :rowspan="rowspanCabecalho" v-if="canDelete" class="col-head w-8"></th>
             </tr>
             <!-- DI (nº manual, PDF anexado, pagamento Bling) logo abaixo do
                  nome do lote. Migration 0214. -->
@@ -2301,16 +2377,33 @@ onScopeDispose(() => {
           </thead>
           <tbody>
             <tr v-if="!loading && filteredProducts.length === 0">
-              <td :colspan="(isEletro ? 9 : isCelular ? 10 : 9) + visibleLotes.length * (isCelular ? 3 : 2) + (canEdit ? 1 : 0) + (canDelete ? 1 : 0)" class="py-6 text-center text-muted-foreground">
-                {{ categoria === 'celular'
-                  ? 'Categoria Celular em construção. Clique em "Criar produto" pra começar.'
-                  : 'Nenhum produto. Clique em "Criar produto" para começar.' }}
+              <td :colspan="colunasGrade" class="text-muted-foreground">
+                <!-- Texto grudado à esquerda: a linha tem a largura de todos
+                     os lotes (no Celular, milhares de px) e, centralizado,
+                     ficava fora da tela. Sobrou produto fora da lista = a
+                     busca ou a reposição esconderam todos; "criar produto" só
+                     com a categoria vazia de verdade. -->
+                <div class="sticky left-0 w-fit px-2 py-3">
+                  <template v-if="products.length">
+                    Nenhum produto com esse filtro.
+                    <button
+                      type="button"
+                      class="ml-1 underline hover:text-foreground"
+                      @click="limparFiltro"
+                    >Limpar filtro</button>
+                  </template>
+                  <template v-else>
+                    {{ categoria === 'celular'
+                      ? 'Categoria Celular em construção. Clique em "Criar produto" pra começar.'
+                      : 'Nenhum produto. Clique em "Criar produto" para começar.' }}
+                  </template>
+                </div>
               </td>
             </tr>
             <tr v-for="row in filteredProducts" :key="row.id" class="even:bg-muted/10 hover:bg-amber-50/40">
               <td
                 :class="isCelular ? 'sticky bg-background z-10' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('modelo_bling'), minWidth: '300px' } : { minWidth: '500px' }"
+                :style="isCelular ? stickyStyleCelular('modelo_bling') : { minWidth: '500px' }"
               >
                 <input class="cell-input" :value="row.modelo_bling ?? ''" :disabled="!canEdit"
                   @input="(e) => scheduleSave(row, 'modelo_bling', (e.target as HTMLInputElement).value)" />
@@ -2318,67 +2411,45 @@ onScopeDispose(() => {
               <td
                 class="font-mono"
                 :class="isCelular ? 'sticky bg-background z-10' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('sku'), minWidth: '130px' } : undefined"
+                :style="isCelular ? stickyStyleCelular('sku') : undefined"
               >
                 <input class="cell-input" :value="row.sku ?? ''" :disabled="!canEdit"
                   @input="(e) => scheduleSave(row, 'sku', (e.target as HTMLInputElement).value)" />
               </td>
               <td
                 :class="isCelular ? 'sticky bg-background z-10' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('custo_bling'), minWidth: '60px' } : undefined"
+                :style="isCelular ? stickyStyleCelular('custo_bling') : undefined"
               >
                 <input type="number" step="0.01" class="cell-input text-right" :value="row.custo_bling" :disabled="!canEdit"
                   @input="(e) => scheduleSave(row, 'custo_bling', Number((e.target as HTMLInputElement).value) || 0)" />
               </td>
-              <!-- estoque_bling auto-pulled from products.stock by SKU in
-                   the router; consumo_diario = bling_orders last 30d / 30.
-                   Both read-only — the operator can't override the source. -->
+              <!-- Estoque e 30d vêm da API, só leitura: Estoque =
+                   products.stock pelo SKU (no Celular, a soma dos lotes —
+                   o balão lista cada um); 30d = vendas dos últimos 30 dias
+                   (0 é dado: não vendeu). Reposição = a conta da barra
+                   âmbar, feita aqui (reposicaoDe); negativa em vermelho. -->
               <td
                 class="calc text-right"
                 :class="isCelular ? 'sticky bg-background z-10' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('estoque_bling'), minWidth: '66px' } : undefined"
-                :title="'Auto: products.stock por SKU'"
+                :style="isCelular ? stickyStyleCelular('estoque_bling') : undefined"
+                :title="tituloEstoque(row)"
               >
                 {{ row.estoque_bling ?? '—' }}
               </td>
               <td
                 class="calc text-right"
                 :class="isCelular ? 'sticky bg-background z-10' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('consumo_diario'), minWidth: '66px' } : undefined"
-                :title="'Auto: bling_orders 30d ÷ 30'"
+                :style="isCelular ? stickyStyleCelular('vendas_30d') : undefined"
               >
-                {{ fmtNum2(row.consumo_diario) }}
+                {{ row.vendas_30d ?? '—' }}
               </td>
               <td
                 class="calc text-right"
-                :class="isCelular ? 'sticky bg-background z-10' : ''"
-                :style="isCelular ? { left: stickyLeftCelular('memoria_consumo'), minWidth: '70px' } : undefined"
-              >{{ fmtNum2(row.memoria_consumo) }}</td>
-              <td
-                class="calc text-right"
-                :class="[reposicaoClass(row.reposicao_estoque), isCelular ? 'sticky bg-background z-10' : '']"
-                :style="isCelular ? { left: stickyLeftCelular('reposicao_estoque'), minWidth: '76px' } : undefined"
+                :class="[classeReposicao(row), isCelular ? 'sticky bg-background z-10 lote-divider-anchor' : '']"
+                :style="isCelular ? stickyStyleCelular('reposicao') : undefined"
+                :title="tituloReposicao(row)"
               >
-                {{ row.reposicao_estoque ?? '—' }}
-              </td>
-              <td
-                class="calc text-right"
-                :class="[reposicaoClass(row.saldo_reposicao), isCelular ? 'sticky bg-background z-10' : '']"
-                :style="isCelular ? { left: stickyLeftCelular('saldo_reposicao'), minWidth: '76px' } : undefined"
-              >
-                {{ row.saldo_reposicao ?? '—' }}
-              </td>
-              <!-- Celular: custo_realizado (read-only, computed pelo
-                   backend como média ponderada por qty do custoBRL
-                   dos lotes onde o produto aparece). Atualiza quando
-                   operador edita valor_usd ou params do lote → próximo
-                   loadProductsOnly traz o novo valor. -->
-              <td
-                v-if="isCelular"
-                class="calc text-right sticky bg-background z-10 lote-divider-anchor"
-                :style="{ left: stickyLeftCelular('custo_realizado'), minWidth: '90px' }"
-              >
-                {{ fmtMoney(row.custo_realizado) }}
+                {{ textoReposicao(row) }}
               </td>
               <td><input class="cell-input" :value="row.duimp ?? ''" :disabled="!canEdit"
                 placeholder="26BR0000000000-0"
@@ -2766,12 +2837,14 @@ onScopeDispose(() => {
             </tr>
           </thead>
           <tbody>
-            <tr v-if="!loading && filteredProducts.length === 0">
+            <!-- Todos os produtos da categoria: a busca e o filtro de
+                 reposição são da aba Importação e não aparecem aqui. -->
+            <tr v-if="!loading && products.length === 0">
               <td colspan="6" class="py-6 text-center text-muted-foreground">
                 Nenhum produto na categoria celular.
               </td>
             </tr>
-            <tr v-for="prod in filteredProducts" :key="prod.id" class="even:bg-muted/10">
+            <tr v-for="prod in products" :key="prod.id" class="even:bg-muted/10">
               <td class="font-medium">{{ prod.modelo_bling || '—' }}</td>
               <td class="text-[10px] text-muted-foreground font-mono">{{ prod.sku }}</td>
               <td>
@@ -2931,8 +3004,8 @@ onScopeDispose(() => {
             </div>
             <div class="font-mono text-sm">{{ newProductPreviewName }}</div>
             <div class="text-[10px] text-muted-foreground mt-1">
-              <template v-if="isEletro">Eletro: nome = <code>{{ '{' }}modelo bling{{ '}' }}</code></template>
-              <template v-else>Padrão: <code>Mala {{ '{' }}modelo bling{{ '}' }} tamanho {{ '{' }}n após o ponto no SKU{{ '}' }} - {{ '{' }}cor{{ '}' }}</code></template>
+              <template v-if="isEletro">Eletro: nome = <code>{{ '{' }}produto{{ '}' }}</code></template>
+              <template v-else>Padrão: <code>Mala {{ '{' }}produto{{ '}' }} tamanho {{ '{' }}n após o ponto no SKU{{ '}' }} - {{ '{' }}cor{{ '}' }}</code></template>
             </div>
           </div>
 
@@ -2942,7 +3015,7 @@ onScopeDispose(() => {
               <input v-model="newProduct.sku" type="text" placeholder="b042.28" class="h-8 border rounded px-2 bg-background font-mono" />
             </label>
             <label class="flex flex-col gap-1">
-              <span class="text-xs font-medium text-muted-foreground">Modelo bling</span>
+              <span class="text-xs font-medium text-muted-foreground">Produto</span>
               <input v-model="newProduct.modelo_bling" type="text" placeholder="Lisa M2" class="h-8 border rounded px-2 bg-background" />
             </label>
             <label v-if="!isEletro" class="flex flex-col gap-1">
@@ -2950,7 +3023,7 @@ onScopeDispose(() => {
               <input v-model="newProduct.cor" type="text" placeholder="Roxo Escuro" class="h-8 border rounded px-2 bg-background" />
             </label>
             <label class="flex flex-col gap-1">
-              <span class="text-xs font-medium text-muted-foreground">Custo bling (R$)</span>
+              <span class="text-xs font-medium text-muted-foreground">Custo (R$)</span>
               <input v-model="newProduct.custo_bling" type="number" step="0.01" min="0" placeholder="0,00" class="h-8 border rounded px-2 bg-background text-right" />
             </label>
             <label class="flex flex-col gap-1">
@@ -3282,10 +3355,10 @@ onScopeDispose(() => {
   color: hsl(var(--muted-foreground));
 }
 /* Sticky horizontal nas colunas fixas (aba Importação Celular).
- * `.calc` (estoque_bling, consumo_diario, memória, reposição, saldo,
- * custo_realizado) aplica bg semi-transparente — hsl/0.5 — que vence
- * o utility `bg-background` por especificidade. Sem essa regra, cells
- * de lote vazam atrás das colunas fixas durante o scroll horizontal.
+ * `.calc` (Estoque, 30d, Reposição) aplica bg semi-transparente —
+ * hsl/0.5 — que vence o utility `bg-background` por especificidade.
+ * Sem essa regra, cells de lote vazam atrás das colunas fixas durante
+ * o scroll horizontal.
  * Specificity (0,2,2) > .grid-table td.calc (0,2,1). Header (.col-head)
  * já é opaco, não precisa override. */
 .grid-table tbody td.sticky {
@@ -3341,8 +3414,8 @@ onScopeDispose(() => {
   background: hsl(var(--muted));
   padding: 4px;
   /* Quebra só em espaços (entre palavras), nunca no meio.
-   * `word-break: break-word` foi removido — não-padrão, quebrava
-   * "memória" em "memóri/a". */
+   * `word-break: break-word` foi removido — não-padrão, partia a
+   * palavra do cabeçalho no meio. */
   white-space: normal;
   word-break: normal;
   overflow-wrap: normal;
@@ -3435,17 +3508,20 @@ onScopeDispose(() => {
 :global(.dark) .lote-quant-cell.border-l {
   border-left-color: hsl(var(--foreground) / 0.5) !important;
 }
-/* No Celular as colunas fixas (modelo…custo_realizado) são sticky e a
- * última (custo_realizado, z-30 no header / z-10 no body) pinta POR CIMA
- * da borda colapsada da 1ª célula de lote — escondendo o 1º divisor no
- * corpo da tabela. Desenhar o divisor como border-RIGHT na própria célula
- * sticky garante que ele apareça em cima. Mala/Eletro não têm colunas
- * sticky, então herdam o border-left normal. */
+/* Divisor grosso do bloco fixo do Celular (Produto…Reposição): fica na
+ * última coluna grudada (Reposição, z-30 no header / z-10 no body), onde
+ * começa a parte que rola (duimp, ncm, lotes). Mesma espessura e cor do
+ * divisor de lote acima. É sombra interna da própria célula, não
+ * border-right: com border-collapse a borda é pintada pela tabela e fica
+ * para trás ao rolar na horizontal (o divisor sumia); a sombra anda junto
+ * com a célula sticky. Mala/Eletro não grudam colunas nem usam a classe.
+ * No escuro é `.dark .x` e não `:global(.dark) .x`: o compilador troca
+ * esse seletor inteiro por `.dark`, e a sombra iria para o <html>. */
 .lote-divider-anchor {
-  border-right: 2px solid hsl(var(--foreground) / 0.7) !important;
+  box-shadow: inset -2px 0 0 hsl(var(--foreground) / 0.7);
 }
-:global(.dark) .lote-divider-anchor {
-  border-right-color: hsl(var(--foreground) / 0.5) !important;
+.dark .lote-divider-anchor {
+  box-shadow: inset -2px 0 0 hsl(var(--foreground) / 0.5);
 }
 /* Divisores HORIZONTAIS entre linhas (produtos). O `--border` do tema é
  * cinza claro e some no fundo branco — operador não enxerga onde uma linha

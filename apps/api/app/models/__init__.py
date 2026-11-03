@@ -284,6 +284,7 @@ from app.models.pricing import (
     PricingPushIdempotency,
     StoreInfo,
 )
+from app.models.pricing_conferencia import PricingConferencia
 from app.models.prioridade_estoque_movimento import PrioridadeEstoqueMovimento
 from app.models.product import (
     BackgroundJob,
@@ -522,6 +523,7 @@ __all__ = [
     "RedeSocialToken",
     "RedeSocialPlataforma",
     "PricingAccount",
+    "PricingConferencia",
     "PricingOverride",
     "PricingPlatform",
     "PricingProduct",

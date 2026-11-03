@@ -90,6 +90,7 @@ from app.services.ouvidoria import modo as ouvidoria_modo
 from app.services.ouvidoria import sincronizar_catalogo as ouvidoria_sincronizar_catalogo
 from app.services.pos_vendas import sync_notas_emitidas as run_pos_vendas_sync
 from app.services.pricing.batch import run_push_prices_batch
+from app.services.pricing.conferencia import run_conferir_precos
 from app.services.pricing.cost_sync import run_sync_bling_costs
 from app.services.prioridade_estoque import prioridade_estoque_sweep
 from app.services.prioridade_estoque_movimentos import manutencao_movimentos_sweep
@@ -4892,6 +4893,22 @@ async def push_prices_batch_run(
         )
 
 
+async def conferir_precos_run(
+    ctx: dict,
+    job_id: str,
+    department: str,
+    user_id: str,
+) -> None:
+    """Conferência de preços da Tabela (02/11/2026): lê o preço vivo dos
+    anúncios do departamento e grava em pricing_conferencia. Só administrador
+    enfileira (routers/pricing_conferencia.py); fora da produção o job falha
+    com "so_no_servidor" sem chamar marketplace nenhum. Abre as próprias
+    sessões (uma por conta lida, nenhuma aberta durante a chamada à API)."""
+    await run_conferir_precos(
+        job_id=UUID(job_id), department=department, user_id=UUID(user_id)
+    )
+
+
 async def sync_bling_costs_run(
     ctx: dict,
     job_id: str,
@@ -6208,6 +6225,10 @@ class WorkerSettingsSync:
         sync_product_run,
         auto_link_run,
         refresh_bling_stock_run,
+        # Conferência de preços: até 3 contas lidas ao mesmo tempo, nenhuma
+        # sessão aberta durante a leitura (cada conta grava numa sessão curta).
+        # Uma tentativa só: quem quiser de novo clica de novo.
+        func(conferir_precos_run, timeout=3600, max_tries=1),
     ]
     queue_name = ARQ_SYNC_QUEUE
     # Pool do processo = 30 (pool_size 10 + overflow 20). Pior caso realista:
@@ -6333,6 +6354,7 @@ __all__ = [
     "bling_token_refresh",
     "conferencia_amazon_agenda",
     "conferencia_coletar_servidor",
+    "conferir_precos_run",
     "conferencia_ml_agenda",
     "conferencia_shopee_agenda",
     "conferencia_shopee_varrer",

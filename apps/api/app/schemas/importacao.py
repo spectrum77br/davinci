@@ -21,9 +21,15 @@ class ImportConfigOut(BaseModel):
     tempo_estoque: int
 
 
+# Teto dos prazos em dias — o mesmo que a Tabela de Preços aceita ao editar.
+PRAZO_MAXIMO_DIAS = 999
+
+
 class ImportConfigPatch(BaseModel):
-    tempo_reposicao: int | None = None
-    tempo_estoque: int | None = None
+    # Dias, de 0 a PRAZO_MAXIMO_DIAS. São os prazos da Reposição na Importação
+    # e na Tabela de Preços (GET /api/pricing/reposicao-config).
+    tempo_reposicao: int | None = Field(default=None, ge=0, le=PRAZO_MAXIMO_DIAS)
+    tempo_estoque: int | None = Field(default=None, ge=0, le=PRAZO_MAXIMO_DIAS)
 
 
 # ── Cotação (parâmetros globais por categoria + patch por produto) ─────
@@ -107,10 +113,23 @@ class ImportProductPatch(BaseModel):
     ncm: str | None = None
 
 
+class EstoqueParteOut(BaseModel):
+    """Um SKU do Bling que entra no estoque da linha, com o saldo dele."""
+    sku: str
+    estoque: int
+
+
 class ImportProductOut(ImportProductBase):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     # Computed fields appended by the router (not stored).
+    # Vendas reais dos últimos 30 dias (coluna "30d", 02/11/2026 —
+    # services/vendas_periodo); nunca o consumo manual gravado. None só nas
+    # respostas de UM produto (create/patch), que não calculam.
+    vendas_30d: int | None = Field(default=None, ge=0)
+    # Celular: os lotes que somam o estoque_bling (a019.ci, a019.sp, ...).
+    # None em mala/eletro (SKU exato) e quando o SKU não está no Bling.
+    estoque_partes: list[EstoqueParteOut] | None = None
     memoria_consumo: Decimal | None = None
     reposicao_estoque: int | None = None
     saldo_reposicao: int | None = None

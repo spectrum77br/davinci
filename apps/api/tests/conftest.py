@@ -146,6 +146,7 @@ async def _setup_schema():
             "push_prices_batch",
             "backfill_ml_stock",
             "ingest_bling_order",
+            "conferir_precos",
         ),
         "background_job_status": (
             "pending",

@@ -7,6 +7,8 @@ Computed fields (not stored): the GET /products endpoint enriches each
 row with memoria_consumo, reposicao_estoque, saldo_reposicao based on
 the manual fields (estoque_bling, consumo_diario, maior_media_30d) +
 the config singleton. GET /lotes enriches with previsto, saldo, prazo.
+Desde 02/11/2026 também vendas_30d (vendas reais dos últimos 30 dias) e,
+no celular, estoque_partes (os lotes que somam o estoque).
 
 Auto-trigger: when PATCH /lotes/{id} sets `fechamento` from NULL to a
 date, the router inserts a row into import_resumo with the lote's
@@ -17,15 +19,17 @@ from __future__ import annotations
 
 import calendar
 import re
+from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from itertools import pairwise
 from typing import Annotated
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -55,6 +59,7 @@ from app.schemas.importacao import (
     CotacaoValorOut,
     CotacaoValorUpsert,
     DiPagamentoIn,
+    EstoqueParteOut,
     ImportConfigOut,
     ImportConfigPatch,
     ImportCotacaoParamsOut,
@@ -85,6 +90,14 @@ from app.schemas.importacao import (
 from app.services import importacao_lote_excel
 from app.services.importacao_naming import generate_product_name, parse_kit_variation
 from app.services.pricing.audit import build_match_indexes, match_one_sku_to_keys
+from app.services.pricing.estoque_linha import (
+    IndiceEstoque,
+    ParteEstoque,
+    carregar_indice,
+    partes_da_linha,
+    total_das_partes,
+)
+from app.services.vendas_periodo import vendas_por_chave
 from app.worker_pool import get_arq_ui_pool
 
 logger = structlog.get_logger()
@@ -120,6 +133,21 @@ async def _get_or_create_config(session: AsyncSession, categoria: str) -> Import
         await session.commit()
         await session.refresh(row)
     return row
+
+
+async def prazos_da_categoria(session: AsyncSession, categoria: str) -> dict[str, int] | None:
+    """Prazos de reposição da categoria SEM criar a linha: os gravados ou, sem
+    linha, os padrões que o GET /config criaria. None = categoria que a
+    Importação não tem. A Tabela de Preços lê por aqui (GET
+    /api/pricing/reposicao-config) — mesmos prazos nas duas telas."""
+    if categoria not in _CATEGORIAS:
+        return None
+    row = (await session.execute(
+        select(ImportConfig).where(ImportConfig.categoria == categoria)
+    )).scalar_one_or_none()
+    if row is None:
+        return dict(_CONFIG_DEFAULTS)
+    return {"tempo_reposicao": row.tempo_reposicao, "tempo_estoque": row.tempo_estoque}
 
 
 @router.get("/config", response_model=ImportConfigOut)
@@ -357,6 +385,65 @@ class _Effective:
         self.maior_media_30d = media
 
 
+_CATEGORIA_CELULAR = "celular"
+# Janelas de vendas (dias para trás a partir de hoje, acumuladas). A 1ª é a
+# coluna "30d"; as seis, uma menos a anterior, viram os baldes mensais do
+# consumo: consumo_diario = 1º balde ÷ 30, maior_media_30d = maior balde ÷ 30.
+_JANELAS_VENDAS = (30, 60, 90, 120, 150, 180)
+_DIAS_POR_BALDE = 30
+
+
+def _chave_da_linha(categoria: str, sku: str | None) -> str:
+    """O que casa estoque e vendas da linha. Celular: a base, o SKU antes do
+    1º ponto (a linha a019.cd soma os lotes a019.* e as vendas de todo a019,
+    inclusive as peças a019 dos kits). Mala e eletro: o próprio SKU."""
+    chave = (sku or "").strip().lower()
+    if categoria == _CATEGORIA_CELULAR:
+        return chave.split(".", 1)[0]
+    return chave
+
+
+def _estoque_da_linha(
+    indice: IndiceEstoque, categoria: str, produto: ImportProduct
+) -> tuple[int | None, list[ParteEstoque]]:
+    """Estoque da linha e as partes do Bling que o formam — a mesma regra na
+    grade (GET /products) e no Excel do lote. Partes pela chave da linha
+    (celular: os lotes da base; mala e eletro: o SKU exato; só produto ativo,
+    services/pricing/estoque_linha); sem nenhuma, o estoque manual gravado."""
+    partes = partes_da_linha(indice, _chave_da_linha(categoria, produto.sku), categoria)
+    if not partes:
+        return produto.estoque_bling, partes
+    return total_das_partes(partes), partes
+
+
+def _somar_janelas(vendas: dict[str, list[int]], chaves: Iterable[str]) -> list[int]:
+    """Soma, janela a janela, as vendas das chaves casadas."""
+    total = [0] * len(_JANELAS_VENDAS)
+    for chave in chaves:
+        for i, quantidade in enumerate(vendas.get(chave, ())):
+            total[i] += quantidade
+    return total
+
+
+def _baldes_mensais(acumuladas: list[int]) -> list[int]:
+    """Vendas acumuladas (30, 60, ... dias) → vendas de cada mês para trás:
+    [0–30 dias, 30–60, 60–90, ...]."""
+    return [atual - anterior for anterior, atual in pairwise([0, *acumuladas])]
+
+
+def _avisar_bases_repetidas(products: Iterable[ImportProduct]) -> None:
+    """Na Importação de celular cada base aparece uma vez. Se repetir, as
+    linhas mostram a mesma soma de lotes e as mesmas vendas (a Reposição
+    contaria duas vezes) — fica o aviso no log."""
+    skus_por_base: dict[str, list[str]] = {}
+    for p in products:
+        if p.sku:
+            skus_por_base.setdefault(_chave_da_linha(_CATEGORIA_CELULAR, p.sku), []).append(p.sku)
+    repetidas = {base: skus for base, skus in skus_por_base.items() if len(skus) > 1}
+    if repetidas:
+        logger.warning("importacao.celular_base_repetida", bases=repetidas)
+
+
 @router.get("/products", response_model=list[ImportProductOut])
 async def list_products(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -444,115 +531,44 @@ async def list_products(
             custo_realizado_den.get(item.product_id, 0) + qty
         )
 
-    # ── Auto-pull: estoque_bling from products.stock by SKU ───────────
-    skus_lower = [(p.sku or "").lower() for p in products if p.sku]
-    stock_by_sku: dict[str, int | None] = {}
-    if skus_lower:
-        stock_rows = (await session.execute(
-            select(func.lower(Product.sku).label("sku"), Product.stock)
-            .where(func.lower(Product.sku).in_(skus_lower))
-        )).all()
-        stock_by_sku = {r.sku: r.stock for r in stock_rows if r.sku}
+    # ── Estoque e vendas do Bling (02/11/2026) ─────────────────────────
+    # Estoque: no celular, a soma dos lotes da base — a linha a019.cd mostra
+    # a019.ci + .pi + .ra + .sa + .sp + .cd, com as parcelas em
+    # estoque_partes (mesma regra da Tabela de Preços, services/pricing/
+    # estoque_linha); mala e eletro, o SKU exato. Só produto ativo. SKU que
+    # não está no Bling fica com o estoque manual gravado (_estoque_da_linha,
+    # o mesmo do Excel do lote).
+    indice_estoque = await carregar_indice(session)
+    if categoria == _CATEGORIA_CELULAR:
+        _avisar_bases_repetidas(products)
 
-    # ── Auto-pull: 6 monthly sales buckets (30, 60, 90, 120, 150, 180d)
-    # from bling_orders by item_codigo. consumo_diario = bucket30 / 30;
-    # maior_media_30d = MAX(buckets) / 30. Excluded situacoes match the
-    # pricing/sales-map endpoint so the two pages agree on what counts.
-    #
-    # Matching uses the same helper as /pricing/sales-map (mala dept):
-    # exact match + size-overlap kit expansion. A piece SKU like
-    # `b045.18` that never sold standalone still picks up every kit
-    # b045.X.18.Y that does — each kit sale also consumes the
-    # individual piece's stock for replenishment purposes.
-    #
-    # TODO(import-dept-resolution): all import_products today are mala/
-    # acessórios, so hardcoding "mala" matches operator reality. When
-    # other dept slugs land here (eletrônico etc), look the dept up via
-    # pricing_products or an explicit segment_id column on import_products.
-    sales_by_key: dict[str, dict[str, int]] = {}
-    candidates_by_sku: dict[str, set[str]] = {}
-    if skus_lower:
-        # 1) All distinct item_codigo keys present in bling_orders within
-        # the 180d window — fed into the matcher to build the indexes.
-        all_keys_rows = (await session.execute(text("""
-            SELECT DISTINCT LOWER(TRIM(item_codigo)) AS k
-            FROM davinci.bling_orders
-            WHERE item_codigo IS NOT NULL AND item_codigo <> ''
-              AND data >= now() - interval '180 days'
-              AND COALESCE(situacao, '') NOT IN ('Cancelado', 'Devolvido', '12')
-        """))).all()
-        all_keys = [r.k for r in all_keys_rows if r.k]
-        by_exact, by_base_celular, by_base_sizes = build_match_indexes(all_keys)
-
-        # 2) For each import SKU, get the candidate item_codigo set via
-        # the shared rules (dept=mala for now — see TODO above).
-        for sku_lc in skus_lower:
-            candidates_by_sku[sku_lc] = match_one_sku_to_keys(
-                sku_lc, "mala", by_exact, by_base_celular, by_base_sizes,
-            )
-
-        # 3) One aggregated query over the UNION of all candidate keys.
-        all_candidates = set().union(*candidates_by_sku.values()) if candidates_by_sku else set()
-        if all_candidates:
-            sales_rows = (await session.execute(text("""
-                SELECT
-                    LOWER(TRIM(item_codigo)) AS sku,
-                    SUM(CASE WHEN data >= now() - interval '30 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b30,
-                    SUM(CASE WHEN data >= now() - interval '60 days'  AND data < now() - interval '30 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b60,
-                    SUM(CASE WHEN data >= now() - interval '90 days'  AND data < now() - interval '60 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b90,
-                    SUM(CASE WHEN data >= now() - interval '120 days' AND data < now() - interval '90 days'  THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b120,
-                    SUM(CASE WHEN data >= now() - interval '150 days' AND data < now() - interval '120 days' THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b150,
-                    SUM(CASE WHEN data >= now() - interval '180 days' AND data < now() - interval '150 days' THEN COALESCE(item_quantidade,0) ELSE 0 END) AS b180
-                FROM davinci.bling_orders
-                WHERE item_codigo IS NOT NULL AND item_codigo <> ''
-                  AND data >= now() - interval '180 days'
-                  AND COALESCE(situacao, '') NOT IN ('Cancelado', 'Devolvido', '12')
-                  AND LOWER(TRIM(item_codigo)) = ANY(:keys)
-                GROUP BY 1
-            """), {"keys": list(all_candidates)})).all()
-            sales_by_key = {
-                r.sku: {
-                    "b30": int(r.b30 or 0), "b60": int(r.b60 or 0),
-                    "b90": int(r.b90 or 0), "b120": int(r.b120 or 0),
-                    "b150": int(r.b150 or 0), "b180": int(r.b180 or 0),
-                }
-                for r in sales_rows
-            }
+    # Vendas (services/vendas_periodo): fora cancelado/excluído/devolvido e
+    # as transferências entre lotes; o kit conta para cada peça. Casadas por
+    # categoria via match_one_sku_to_keys (mala: exato + conjuntos com o
+    # tamanho; eletro: exato; celular: a base inteira). vendas_30d é só venda
+    # real; os baldes mensais seguem alimentando consumo/maior média/memória/
+    # reposição/saldo, que a tela deixou de mostrar mas a API mantém.
+    vendas = await vendas_por_chave(session, _JANELAS_VENDAS)
+    indices_vendas = build_match_indexes(vendas.keys())
 
     out: list[ImportProductOut] = []
     for p in products:
-        sku_lc = (p.sku or "").lower()
+        chave = _chave_da_linha(categoria, p.sku)
 
-        # Effective stock: auto-pulled wins; fall back to stored manual value.
-        auto_stock = stock_by_sku.get(sku_lc)
-        eff_estoque: int | None
-        if auto_stock is not None:
-            eff_estoque = int(auto_stock)
-        else:
-            eff_estoque = p.estoque_bling
+        eff_estoque, partes = _estoque_da_linha(indice_estoque, categoria, p)
+        estoque_partes = (
+            [EstoqueParteOut(sku=x.sku, estoque=x.estoque) for x in partes]
+            if partes and categoria == _CATEGORIA_CELULAR
+            else None
+        )
 
-        # Effective consumo + maior_media from sales buckets when present.
-        # Sum every candidate key's bucket — for mala dept this includes
-        # exact + kit superset matches per match_one_sku_to_keys.
-        candidates = candidates_by_sku.get(sku_lc, set())
-        auto_sales: dict[str, int] | None = None
-        if candidates:
-            agg = dict.fromkeys(("b30", "b60", "b90", "b120", "b150", "b180"), 0)
-            for k in candidates:
-                buckets = sales_by_key.get(k)
-                if not buckets:
-                    continue
-                for b in agg:
-                    agg[b] += buckets[b]
-            if any(v > 0 for v in agg.values()):
-                auto_sales = agg
-        if auto_sales:
-            eff_consumo = Decimal(auto_sales["b30"]) / Decimal(30)
-            biggest = max(
-                auto_sales["b30"], auto_sales["b60"], auto_sales["b90"],
-                auto_sales["b120"], auto_sales["b150"], auto_sales["b180"],
-            )
-            eff_media = Decimal(biggest) / Decimal(30)
+        acumuladas = _somar_janelas(
+            vendas, match_one_sku_to_keys(chave, categoria, *indices_vendas)
+        )
+        baldes = _baldes_mensais(acumuladas)
+        if acumuladas[-1] > 0:
+            eff_consumo = Decimal(baldes[0]) / _DIAS_POR_BALDE
+            eff_media = Decimal(max(baldes)) / _DIAS_POR_BALDE
         else:
             eff_consumo = (
                 Decimal(p.consumo_diario) if p.consumo_diario is not None else None
@@ -572,6 +588,8 @@ async def list_products(
             fechamento=p.fechamento, tsa=p.tsa, modelo_bling=p.modelo_bling,
             sku=p.sku, cor=p.cor, custo_bling=p.custo_bling,
             estoque_bling=eff_estoque,
+            estoque_partes=estoque_partes,
+            vendas_30d=acumuladas[0],
             consumo_diario=eff_consumo,
             maior_media_30d=eff_media,
             duimp=p.duimp,
@@ -1072,7 +1090,8 @@ async def exportar_lote_excel(
 ) -> Response:
     """Baixa o .xlsx de conferência de um lote: uma linha por produto
     DA CATEGORIA do lote (todos os SKUs da tabela, mesmo sem quantidade
-    nesse lote), com estoque Bling, quantidade e total = qtd × custo."""
+    nesse lote), com o estoque da coluna Estoque da grade, quantidade e
+    total = qtd × custo."""
     lote = await session.get(ImportLote, lote_id)
     if lote is None:
         raise HTTPException(404, detail={"code": "lote_not_found"})
@@ -1102,17 +1121,12 @@ async def exportar_lote_excel(
         ).scalars().all()
     }
 
-    # Estoque Bling: auto-pull de products.stock por SKU (case-
-    # insensitive), com fallback no estoque_bling manual do produto —
-    # mesma regra do GET /products (coluna "estoque bling" da tabela).
-    skus_lower = [(p.sku or "").lower() for p in products if p.sku]
-    stock_by_sku: dict[str, int | None] = {}
-    if skus_lower:
-        stock_rows = (await session.execute(
-            select(func.lower(Product.sku).label("sku"), Product.stock)
-            .where(func.lower(Product.sku).in_(skus_lower))
-        )).all()
-        stock_by_sku = {r.sku: r.stock for r in stock_rows if r.sku}
+    # Estoque: o mesmo da coluna Estoque da grade (_estoque_da_linha, como
+    # no GET /products) — no celular a soma dos lotes da base (a019.cd
+    # mostra a019.ci + .sp + .cd...), na mala e no eletro o SKU exato, só
+    # produto ativo; sem SKU no Bling, o estoque manual. Antes era o
+    # products.stock do SKU exato, em qualquer situação.
+    indice_estoque = await carregar_indice(session)
 
     linhas = []
     for prod in products:
@@ -1122,8 +1136,7 @@ async def exportar_lote_excel(
             custo = _custo_unitario_lote(lote, item, prod)
         else:
             custo = Decimal(prod.custo_bling or 0)
-        auto_stock = stock_by_sku.get((prod.sku or "").lower())
-        estoque = int(auto_stock) if auto_stock is not None else prod.estoque_bling
+        estoque, _partes = _estoque_da_linha(indice_estoque, lote.categoria, prod)
         linhas.append(
             importacao_lote_excel.LinhaLote(
                 modelo=prod.modelo_bling,

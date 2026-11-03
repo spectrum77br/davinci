@@ -1187,6 +1187,40 @@ class ShopeeClient:
             what="shopee_model_list",
         )
 
+    async def promocoes_dos_anuncios(
+        self, item_ids: list[int | str]
+    ) -> tuple[dict[int, list[dict]], dict[int, str]]:
+        """As promoções de até 50 anúncios por chamada
+        (GET /api/v2/product/get_item_promotion — o endpoint que o envio do
+        preço consulta um a um no `get_item_promotion`). Devolve
+        (`{item_id: [promoção]}`, `{item_id: failed_reason}`), cada promoção
+        como a Shopee manda (`promotion_type`, `promotion_id`, `model_id`,
+        `promotion_staging`, `start_time`, `end_time`). Levanta em erro de API
+        — diferente do `get_item_promotion`, que engole o erro e devolve None.
+
+        SÓ LEITURA: a Conferência de preços da Tabela
+        (services/pricing/conferencia_shopee.py)."""
+        ids = [str(int(x)) for x in item_ids][:50]
+        if not ids:
+            return {}, {}
+        resp = await self._call(
+            "GET",
+            "/api/v2/product/get_item_promotion",
+            params={"item_id_list": ",".join(ids)},
+            what="shopee_item_promotion",
+        )
+        promocoes: dict[int, list[dict]] = {}
+        for it in resp.get("success_list") or []:
+            if isinstance(it, dict) and str(it.get("item_id") or "").isdigit():
+                promocoes[int(it["item_id"])] = [
+                    p for p in it.get("promotion") or [] if isinstance(p, dict)
+                ]
+        recusas: dict[int, str] = {}
+        for it in resp.get("failure_list") or []:
+            if isinstance(it, dict) and str(it.get("item_id") or "").isdigit():
+                recusas[int(it["item_id"])] = str(it.get("failed_reason") or "")[:200]
+        return promocoes, recusas
+
     # ---- Flex por anúncio: Shopee Entrega Direta (projeto Flex, etapa 3) ----
     #
     # O canal é por ANÚNCIO (`logistic_info` do item; as variações não têm

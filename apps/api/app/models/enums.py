@@ -104,6 +104,9 @@ class BackgroundJobType(StrEnum):
     # failed_jobs_alert_scan e sem re-drive. Com este tipo o pedido ganha o
     # mesmo tratamento durável do webhook de produto (ver ingest_orders_retry_sweep).
     INGEST_BLING_ORDER = "ingest_bling_order"
+    # Conferência de preços da Tabela (02/11/2026, migration 0442): lê o preço
+    # vivo dos anúncios de um departamento (services/pricing/conferencia.py).
+    CONFERIR_PRECOS = "conferir_precos"
 
 
 class BackgroundJobStatus(StrEnum):

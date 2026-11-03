@@ -52,9 +52,11 @@ def test_fila_sync_distinta_das_demais():
 
 def test_worker_sync_registra_os_4_jobs_de_massa():
     """WorkerSettingsSync registra EXATAMENTE os 4 jobs de sync — nada de
-    webhook de pedido/crons, senão o split seria fake."""
+    webhook de pedido/crons, senão o split seria fake. Mais a conferência de
+    preços da Tabela (02/11/2026), que só existe nesta fila (não entra no
+    fallback da default)."""
     names = _fn_names(WorkerSettingsSync.functions)
-    assert names == _SYNC_FN_NAMES
+    assert names == _SYNC_FN_NAMES | {"conferir_precos_run"}
 
 
 def test_worker_sync_consome_da_fila_correta():

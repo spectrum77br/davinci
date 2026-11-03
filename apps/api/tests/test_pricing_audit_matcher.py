@@ -2,8 +2,9 @@
 `app.services.pricing.audit`. Pure function — no DB, no async — so a
 SimpleNamespace mock of PricingProduct is enough.
 
-Covers the mala bidirectional kit↔piece matching added on top of the
-af9465c kit fallback. The fixtures mirror the real-prod pattern:
+Covers the mala bidirectional kit↔piece matching (the af9465c kit
+fallback was removed on 02/11/2026). The fixtures mirror the real-prod
+pattern:
   * `b045.18`, `b046.18`, ... = single-size pieces (one of the "M5
     mista mala 18" SKUs)
   * `b045.12.18`, `b046.18.24`, ... = kits that contain those sizes
@@ -88,29 +89,28 @@ def test_mala_kit_matches_superset_kits_and_keeps_exact():
     assert res[pp.id] == {"b045.18.20", "b045.18.20.24", "b045.12.18.20"}
 
 
-def test_mala_kit_without_exact_falls_back_to_components():
-    """Preserva o fallback do af9465c: kit ≥3 parts sem exact → soma
-    componentes individuais."""
+def test_mala_kit_without_exact_does_not_sum_the_single_pieces():
+    """Sem o fallback do af9465c (02/11/2026): o conjunto que não vendeu
+    não pega as vendas das malas avulsas — "ABS 8+12+20+24" mostrava 843
+    em 30 dias para 53 conjuntos vendidos."""
     seg = uuid4()
     roots = _seg_roots(seg, "mala")
     pp = _pp("b045.18.20", seg)
-    keys = {"b045.18", "b045.20", "b045.24"}  # só componentes
+    keys = {"b045.18", "b045.20", "b045.24"}  # só avulsas
     res = match_pricing_to_product_keys([pp], keys, roots)
-    # Não tem superset porque nenhuma key tem {18,20} ⊆ sizes.
-    # Tem componente fallback (≥3 parts e exact vazio).
-    assert res[pp.id] == {"b045.18", "b045.20"}
+    # Nenhuma key tem {18,20} ⊆ sizes: o conjunto não vendeu.
+    assert pp.id not in res
 
 
-def test_mala_kit_with_exact_does_not_trigger_component_fallback():
-    """Quando exact tem match, o components fallback NÃO dispara
-    (comportamento idêntico ao af9465c)."""
+def test_mala_kit_with_exact_keeps_only_kits():
+    """Com venda do próprio conjunto: ele e os conjuntos maiores que o
+    contêm; as avulsas ficam de fora."""
     seg = uuid4()
     roots = _seg_roots(seg, "mala")
     pp = _pp("b045.18.20", seg)
-    keys = {"b045.18.20", "b045.18", "b045.20"}
+    keys = {"b045.18.20", "b045.12.18.20", "b045.18", "b045.20"}
     res = match_pricing_to_product_keys([pp], keys, roots)
-    # Exact bate; superset (nenhum); fallback NÃO roda (exact não vazio).
-    assert res[pp.id] == {"b045.18.20"}
+    assert res[pp.id] == {"b045.18.20", "b045.12.18.20"}
 
 
 # ── Mala — SKU composto com '+' ─────────────────────────────────────
