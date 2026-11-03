@@ -1191,6 +1191,208 @@ async def test_reclamacao_do_ml_soma_na_loja_e_na_linha_e_zera(
     assert n == 0 and itens[str(rml.id)]["numero_duoke"] == 0
 
 
+# ─────────────── a reclamação do ML no "Falta responder" (03/11/2026) ───────────────
+#
+# O dono, no Mercado Livre: a bolinha da loja com 1 e a aba "Falta responder"
+# vazia (produção: Injox 1, Inova 1, Jlas 2 — todas reclamações abertas). A
+# decisão: "se resolver e fazer aparecer sim" — a reclamação do ML que está na
+# bolinha entra no "Falta responder" pela mesma régua da contribuição dela no
+# número, e sai dos dois juntos.
+
+
+async def test_reclamacao_do_ml_na_bolinha_esta_no_falta_responder_python_e_sql(
+    db, make_user, monkeypatch
+):
+    """`falta_responder_na_caixa` (Python, com o número da conversa) e
+    `falta_responder_na_caixa_sql` dão o mesmo conjunto: exatamente a
+    reclamação do ML que soma no número — a respondida por pessoa, a só de
+    linhas do sistema, a fechada, a "não precisa", a velha, a da Shopee e o
+    SAC da Magalu (o mediador não conta lá) ficam fora."""
+    mundo = await _mundo_reclamacao_ml(db, make_user)
+    no_python = set()
+    for nome, (conversa, esperado) in mundo.items():
+        await db.refresh(conversa)
+        numero = pendente.nao_lidas_duoke(conversa, await _mensagens_de(db, conversa), agora=AGORA)
+        assert numero == esperado, nome
+        dentro = pendente.falta_responder_na_caixa(conversa, numero, agora=AGORA)
+        # A régua do chat não vê a reclamação: só a bolinha a põe aqui.
+        assert not pendente.falta_responder_no_chat(conversa, AGORA) or nome == "magalu_sac", nome
+        assert dentro is (pendente.do_numero(conversa) and numero > 0), nome
+        if dentro:
+            no_python.add(nome)
+    assert no_python == {
+        "mediador_depois_da_loja",
+        "decisao_do_mediador",
+        "comprador_e_mediador",
+        "visto",
+    }
+    no_sql = set(
+        (
+            await db.execute(
+                select(AtendimentoConversa.externo_id).where(
+                    AtendimentoConversa.externo_id.like("rml:%"),
+                    pendente.falta_responder_na_caixa_sql(agora=AGORA),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert no_sql == {f"rml:{n}" for n in no_python}
+    # A chave de desligar (`RECLAMACAO_NO_NUMERO = ()`) tira a reclamação dos dois.
+    monkeypatch.setattr(pendente, "RECLAMACAO_NO_NUMERO", ())
+    assert not pendente.falta_responder_na_caixa(
+        mundo["mediador_depois_da_loja"][0], 1, agora=AGORA
+    )
+    fora = (
+        (
+            await db.execute(
+                select(AtendimentoConversa.externo_id).where(
+                    AtendimentoConversa.externo_id.like("rml:%"),
+                    pendente.falta_responder_na_caixa_sql(agora=AGORA),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert fora == []
+
+
+async def test_reclamacao_do_ml_na_bolinha_aparece_no_falta_responder_e_sai(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """A reclamação do ML com mensagem nova do mediador está na bolinha da loja
+    E no "Falta responder" (o `aguardando` do /resumo por loja e plataforma, o
+    filtro e a marca da linha), com o canal e a etiqueta Reclamação. A loja
+    respondeu (pessoa), alguém viu no DaVinci ou fechou: sai dos dois juntos.
+    O chat (o pack) segue a régua dele; a reclamação do ML sem bolinha (a vez
+    da loja na fila) e a da Shopee/TikTok continuam fora."""
+    monkeypatch.setattr(get_settings(), "atendimento_usuarios", "quem.mexe@davinci-test.com")
+    integ, canal = await _loja(db, await make_user(), "injox")
+    reclamacao = {
+        "plataforma": "ml",
+        "canal_nome": "reclamacao",
+        "situacao": "bloqueada",
+        "etiqueta": "reclamacao",
+    }
+    respondida, vista, fechada = [
+        await _cena(db, integ, None, f"rml:{n}", ("loja", 200), ("mediador", 60), **reclamacao)
+        for n in ("respondida", "vista", "fechada")
+    ]
+    # A vez da loja na fila (a etapa pede ação da loja desde a leitura de 20
+    # min atrás), sem mensagem nova depois da resposta de pessoa: sem bolinha —
+    # fica no filtro Reclamação e no prazo, não aqui.
+    sem_bolinha = await _cena(
+        db,
+        integ,
+        None,
+        "rml:sem_bolinha",
+        ("mediador", 90),
+        ("loja", 30),
+        **{**reclamacao, "situacao": "aberta"},
+        dados={CHAVE_VEZ_DA_LOJA: (AGORA - timedelta(minutes=20)).isoformat()},
+    )
+    pack = await _cena(
+        db, integ, canal, "pack:injox", ("cliente", 90), plataforma="ml", canal_nome="pos_venda"
+    )
+    vez = {CHAVE_VEZ_DA_LOJA: (AGORA - timedelta(minutes=60)).isoformat()}
+    outras = [
+        await _cena(
+            db,
+            integ,
+            None,
+            f"r{p}:injox",
+            ("cliente", 60),
+            ("mediador", 50),
+            plataforma=p,
+            canal_nome="reclamacao",
+            dados=vez,
+        )
+        for p in ("shopee", "tiktok")
+    ]
+    await db.execute(
+        update(AtendimentoMensagem)
+        .where(
+            AtendimentoMensagem.conversa_id.in_(
+                [c.id for c in (respondida, vista, fechada, sem_bolinha, pack, *outras)]
+            )
+        )
+        .values(created_at=AtendimentoMensagem.enviada_em + ATRASO_DO_SYNC)
+    )
+    await db.commit()
+    await db.refresh(sem_bolinha)
+    assert sem_bolinha.aguardando_resposta, "a vez da loja na fila"
+    auth_as(await make_user(email="quem.mexe@davinci-test.com", role=UserRole.ADMIN))
+
+    async def ver() -> tuple[dict, dict, set[str], dict[str, dict]]:
+        r = (await client.get(f"{URL}/resumo")).json()
+        lojas = {lj["plataforma"]: lj for lj in r["lojas"] if lj["conta"] == "injox"}
+        plats = {p["plataforma"]: p for p in r["plataformas"]}
+        falta = (
+            await client.get(f"{URL}/conversas", params={"filtro": "aguardando", "limite": 100})
+        ).json()["itens"]
+        todas = (await client.get(f"{URL}/conversas", params={"limite": 100})).json()["itens"]
+        return lojas, plats, {i["id"] for i in falta}, {i["id"]: i for i in todas}
+
+    def ids(*cs) -> set[str]:
+        return {str(c.id) for c in cs}
+
+    lojas, plats, falta, todas = await ver()
+    # A bolinha da loja: o pack (1 do comprador) + as três reclamações (1 do mediador cada).
+    assert lojas["ml"]["nao_lidas_duoke"] == 4
+    assert falta == ids(respondida, vista, fechada, pack), "bolinha e lista batem"
+    assert lojas["ml"]["aguardando"] == plats["ml"]["aguardando"] == 4
+    linha = todas[str(respondida.id)]
+    assert linha["falta_responder"] is True and linha["numero_duoke"] == 1
+    assert (linha["canal"], linha["etiqueta"]) == ("reclamacao", "reclamacao")
+    assert todas[str(sem_bolinha.id)]["falta_responder"] is True, "a marca da fila continua"
+    assert todas[str(sem_bolinha.id)]["numero_duoke"] == 0
+    # A Shopee/TikTok: a reclamação continua fora do número e do "Falta responder".
+    for c in outras:
+        assert todas[str(c.id)]["numero_duoke"] is None
+        p = c.plataforma
+        assert (lojas[p]["aguardando"], lojas[p]["nao_lidas_duoke"]) == (0, 0), p
+        assert (plats[p]["aguardando"], plats[p]["nao_lidas_duoke"]) == (0, 0), p
+    # Os prazos não mudam: só a da vez da loja (e as da Shopee/TikTok) estão na fila.
+    assert plats["ml"]["vencendo"] == plats["ml"]["vencidas"] == 0
+
+    # A loja respondeu (a pessoa, no ML; o sync traz): sai dos dois.
+    await gravar.gravar_mensagem(
+        db,
+        respondida,
+        externo_id="rml:respondida:loja",
+        autor="loja",
+        texto="Olá, já enviamos a troca.",
+        enviada_em=datetime.now(UTC),
+    )
+    await db.commit()
+    lojas, plats, falta, todas = await ver()
+    assert (lojas["ml"]["nao_lidas_duoke"], lojas["ml"]["aguardando"]) == (3, 3)
+    assert falta == ids(vista, fechada, pack)
+    assert todas[str(respondida.id)]["falta_responder"] is False
+
+    # Alguém abriu no DaVinci (POST /visto, a régua do visto): sai dos dois.
+    d = (await client.get(f"{URL}/conversas/{vista.id}")).json()
+    assert d["conversa"]["numero_duoke"] == 1 and d["conversa"]["falta_responder"] is True
+    r = await client.post(f"{URL}/conversas/{vista.id}/visto", json={"ate": d["visto_ate"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["conversa"]["numero_duoke"] == 0
+    assert r.json()["conversa"]["falta_responder"] is False
+    lojas, plats, falta, todas = await ver()
+    assert (lojas["ml"]["nao_lidas_duoke"], lojas["ml"]["aguardando"]) == (2, 2)
+    assert falta == ids(fechada, pack)
+
+    # Fechada (resolvida pela pessoa): sai dos dois.
+    r = await client.patch(f"{URL}/conversas/{fechada.id}", json={"situacao": "fechada"})
+    assert r.status_code == 200, r.text
+    lojas, plats, falta, todas = await ver()
+    assert (lojas["ml"]["nao_lidas_duoke"], lojas["ml"]["aguardando"]) == (1, 1)
+    # Sobra o pack, pela régua do chat (o comprador por último), como antes.
+    assert falta == ids(pack)
+    assert plats["ml"]["aguardando"] == 1
+
+
 # ─────────────── a ordem da lista "Falta responder" ───────────────
 
 

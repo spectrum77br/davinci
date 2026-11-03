@@ -183,7 +183,9 @@ class ConversaResumoOut(BaseModel):
     # mensagem da loja responde, até a automática) ou não lida no chat da
     # Shopee/TikTok; onde a plataforma diz de quem é a vez, a fila. A tela
     # marca a linha (negrito, bolinha) por ele. A fila de verdade (a IA, o
-    # prazo) continua `aguardando_resposta`.
+    # prazo) continua `aguardando_resposta`. Também a conversa do número com
+    # bolinha (`numero_duoke` > 0): o chat desde 28/10/2026 e a reclamação do
+    # ML desde 03/11/2026 (`pendente.falta_responder_na_caixa`).
     falta_responder: bool = False
     # Mensagens do comprador desde a última resposta de verdade (a bolinha
     # da Caixa Humano).
@@ -1093,9 +1095,10 @@ class FatoNovoIn(BaseModel):
 
 class PlataformaResumoOut(BaseModel):
     plataforma: str
-    # O "Falta responder" da Caixa (`pendente.falta_responder_no_chat`): o
+    # O "Falta responder" da Caixa (`pendente.falta_responder_na_caixa`): o
     # número da aba "Falta responder" — conversas de chat (14/10/2026: sem a
-    # avaliação, a reclamação, o carrinho e os comentários).
+    # avaliação, a reclamação, o carrinho e os comentários) e, desde
+    # 03/11/2026, a reclamação do ML que está na bolinha.
     aguardando: int
     vencendo: int
     vencidas: int

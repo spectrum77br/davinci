@@ -1429,9 +1429,12 @@ def _resumo_dict(
         # marca da linha (negrito, bolinha) e a tela relê os números quando
         # ele muda. Em todo canal: a avaliação esperando resposta continua
         # marcada em "Todas", mesmo fora do filtro (14/10/2026, só o chat).
-        # 28/10/2026: e a conversa de chat com bolinha (`numero_duoke` > 0).
+        # 28/10/2026: e a conversa de chat com bolinha (`numero_duoke` > 0);
+        # 03/11/2026 (o dono: "se resolver e fazer aparecer sim"), também a
+        # reclamação do ML com bolinha (`pendente.do_numero`, a mesma régua
+        # de `falta_responder_na_caixa`).
         "falta_responder": pendente.falta_responder(c)
-        or (pendente.do_chat(c) and (numero_duoke or 0) > 0),
+        or (pendente.do_numero(c) and (numero_duoke or 0) > 0),
         "pendentes": int(pendentes or 0) if c.aguardando_resposta else 0,
         # O número DESTA conversa na Caixa (15/10/2026, o Eduardo: "1 mensagem
         # na kia e nem mostra dessa conversa"): a mesma régua do número da
@@ -2102,7 +2105,9 @@ async def resumo(
     # antigos de avaliação"): a avaliação, a reclamação, o carrinho e os
     # comentários têm os filtros próprios (`pendente.py`). Vencendo/vencidas
     # seguem o PRAZO da fila (`aguardando_resposta`), em todo canal.
-    # 28/10/2026: e toda conversa de chat com bolinha (`falta_responder_na_caixa_sql`).
+    # 28/10/2026: e toda conversa de chat com bolinha (`falta_responder_na_caixa_sql`);
+    # 03/11/2026 (o dono, a bolinha do ML com 1 e a aba vazia: "se resolver e
+    # fazer aparecer sim"), também a reclamação do ML que está na bolinha.
     falta = pendente.falta_responder_na_caixa_sql(agora=agora)
     # O número do DUOKE (o menu de plataformas, a barra de lojas, "Todas ·
     # Shopee" e a aba Caixa) = o "não lida" do Duoke (15/10/2026,
@@ -2513,8 +2518,9 @@ async def _listar_marketplace(
     elif filtro == "aguardando":
         # "Falta responder" da Caixa = IGUAL AO DUOKE e SÓ O CHAT (14/10/2026,
         # `pendente.py`: a avaliação, a reclamação, o carrinho e os comentários
-        # têm os filtros próprios). A Caixa Humano e a aba E-mail continuam na
-        # régua delas (a fila), em todo canal.
+        # têm os filtros próprios) — mais a reclamação do ML que está na
+        # bolinha (03/11/2026, `falta_responder_na_caixa_sql`). A Caixa Humano
+        # e a aba E-mail continuam na régua delas (a fila), em todo canal.
         consulta = consulta.where(
             # D1 (23/10/2026): na Caixa Humano, também a conversa que o agente respondeu com
             # a ação pendente ("responde e marca", `humano.pos_envio_sql`).
@@ -2758,7 +2764,8 @@ async def listar_conversas(
     fim (a mais recente primeiro) — e o cursor (`proximo`) é o do prazo. Na
     Caixa, o "Falta responder" é a régua do Duoke, só nas conversas de chat
     (`services/atendimento/pendente.py`: sem avaliação, reclamação, carrinho e
-    comentários desde 14/10/2026); na Caixa Humano e na aba E-mail, a fila.
+    comentários desde 14/10/2026 — fora a reclamação do ML que está na
+    bolinha, que entra desde 03/11/2026); na Caixa Humano e na aba E-mail, a fila.
     `tipo_chamado` (sac | atacado | duvidas) filtra os chamados dos sites pelo
     tipo (os chips do grupo Site, RF6); `filtro=email_sem_vinculo` traz as
     conversas de e-mail das lojas ainda sem pedido (RF5); `filtro=afiliado`

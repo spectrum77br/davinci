@@ -34,11 +34,13 @@ type OpcaoFiltro = { value: string; label: string; hint: string }
 // SÓ O CHAT (14/10/2026, o dono: "tá pegando uns antigos de avaliação"): o
 // "Falta responder" (a lista e o número da aba) é só das conversas de chat —
 // avaliação, reclamação/devolução, carrinho e comentários ficam nos filtros
-// próprios (o servidor decide: `pendente.falta_responder_no_chat`). A marca
-// da linha continua em todas.
+// próprios (o servidor decide: `pendente.falta_responder_na_caixa`). A marca
+// da linha continua em todas. Desde 03/11/2026 (o dono, a bolinha do ML com 1
+// e a aba vazia: "se resolver e fazer aparecer sim") a reclamação do Mercado
+// Livre que está na bolinha também entra — com a etiqueta Reclamação dela.
 export const ABAS_LISTA: OpcaoFiltro[] = [
   { value: 'todas', label: 'Todas', hint: 'todas as conversas abertas, da mais recente para a mais antiga' },
-  { value: 'aguardando', label: 'Falta responder', hint: 'como o Pendente do Duoke: as conversas de chat em que o comprador falou por último (qualquer mensagem da loja responde, até a automática) ou que estão não lidas na Shopee/TikTok — avaliação, reclamação/devolução, carrinho e comentários ficam nos filtros próprios' },
+  { value: 'aguardando', label: 'Falta responder', hint: 'como o Pendente do Duoke: as conversas de chat em que o comprador falou por último (qualquer mensagem da loja responde, até a automática) ou que estão não lidas na Shopee/TikTok, e a reclamação do Mercado Livre com mensagem nova (a bolinha) — fora isso, avaliação, reclamação/devolução, carrinho e comentários ficam nos filtros próprios' },
 ]
 export const FILTROS_MENU: OpcaoFiltro[] = [
   { value: 'vencendo', label: 'Vencendo', hint: 'o prazo da fila acaba em menos de 2 h (na fila, a resposta automática não conta)' },
