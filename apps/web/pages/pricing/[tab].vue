@@ -563,14 +563,22 @@ function passaFiltroEquipe(a: Account, f: string): boolean {
 }
 
 // As opções do filtro: as equipes das contas desta aba (celular/mala/eletro),
-// em ordem de número, e "Sem equipe" se houver conta sem nenhuma.
-const equipesPresentesNoDept = computed(() => {
+// em ordem de número, e "Sem equipe" se houver conta sem nenhuma. A equipe já
+// escolhida fica na lista mesmo sem conta nesta aba (o filtro sobrevive à
+// troca de aba): sem a opção, o select ficava em branco e a tabela vazia sem
+// dizer por quê. O nome vem das contas das outras abas (`todas`).
+function opcoesEquipe(contas: Account[], todas: Account[], filtro: string) {
   const porNumero = new Map<number, string>()
-  let semEquipe = false
-  for (const a of accountsCurrent.value) {
+  let semEquipe = filtro === SEM_EQUIPE
+  for (const a of contas) {
     const eq = equipesDaConta(a)
     if (!eq.length) semEquipe = true
     for (const e of eq) porNumero.set(e.numero, e.nome)
+  }
+  const escolhida = Number(filtro)
+  if (filtro && filtro !== SEM_EQUIPE && !porNumero.has(escolhida)) {
+    const nome = todas.flatMap(equipesDaConta).find((e) => e.numero === escolhida)?.nome
+    porNumero.set(escolhida, nome ?? `Equipe ${filtro}`)
   }
   return {
     equipes: Array.from(porNumero.entries())
@@ -578,7 +586,10 @@ const equipesPresentesNoDept = computed(() => {
       .map(([numero, nome]) => ({ numero, nome })),
     semEquipe,
   }
-})
+}
+
+const equipesPresentesNoDept = computed(() =>
+  opcoesEquipe(accountsCurrent.value, accounts.value, contasEquipeFilter.value))
 
 // Só aparece quando há o que escolher (como no Faturamento): quem é de uma
 // equipe só vê as contas dela. Com um filtro já escolhido continua na tela,
@@ -1245,6 +1256,9 @@ async function submitNewAcc() {
     if (newAcc.commission) body.commission = (parseDec(newAcc.commission) / 100).toFixed(4)
     const created = await api<Account>('/api/pricing/accounts', { method: 'POST', body })
     accounts.value.push(created)
+    // Conta nova nasce sem loja (= sem equipe): com um filtro de equipe que a
+    // esconderia, o filtro volta a "Todas as equipes" para ela aparecer.
+    if (!passaFiltroEquipe(created, contasEquipeFilter.value)) contasEquipeFilter.value = ''
     showAddAcc.value = false
   } catch (e: any) {
     accountsErr.value = e?.data?.detail?.code ?? 'create_failed'
@@ -4319,7 +4333,7 @@ watch(department, async () => {
             :key="e.numero"
             :value="String(e.numero)"
           >{{ e.nome }}</option>
-          <option v-if="equipesPresentesNoDept.semEquipe || contasEquipeFilter === SEM_EQUIPE" :value="SEM_EQUIPE">Sem equipe</option>
+          <option v-if="equipesPresentesNoDept.semEquipe" :value="SEM_EQUIPE">Sem equipe</option>
         </select>
         <span class="ml-auto text-xs text-muted-foreground">
           {{ accountsFiltered.length }} conta(s)

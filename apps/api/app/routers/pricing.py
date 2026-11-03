@@ -1407,9 +1407,10 @@ async def get_grid(
             )
 
     names_by_id = await _segment_names_by_id(session)
-    equipes = await _equipes_das_contas(session, accounts)
+    # Sem `equipes` aqui: só a aba Contas (/accounts) mostra a coluna, e a
+    # grade é carregada a toda hora (03/11/2026).
     return PricingGridOut(
-        accounts=_accounts_out(accounts, roots_by_id, names_by_id, equipes),
+        accounts=_accounts_out(accounts, roots_by_id, names_by_id),
         products=[_product_out(p, leaves_by_id) for p in products],
         cells=cells,
     )

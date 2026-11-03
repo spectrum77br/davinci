@@ -213,12 +213,42 @@ async def test_catalogo_e_margem_propria_devolvem_as_equipes_da_base(
     assert _equipes(r.json()) == [(102, "Israel")]
 
 
-async def test_escopo_das_equipes_e_o_mesmo_do_vendedor(
+async def test_cada_vendedor_ve_exatamente_as_contas_que_a_coluna_diz_que_sao_dele(
+    db: AsyncSession,
+    client: AsyncClient,
+    cenario: dict,
+    auth_as: Callable,
+):
+    """A promessa da coluna: para cada equipe (e para quem é de duas), o que o
+    vendedor vê no /accounts é exatamente o conjunto de contas em que a coluna
+    (vista pelo admin) traz a equipe dele — pela loja, pela integração (inova),
+    nas duas (kfa) e na coluna de catálogo."""
+    auth_as(cenario["dono"])
+    todas = (await client.get("/api/pricing/accounts")).json()
+    for equipes in ([101], [102], [103], [101, 103]):
+        vendedor = _usuario(UserRole.USER, equipes)
+        db.add(vendedor)
+        await db.commit()
+        auth_as(vendedor)
+        visto = {c["id"] for c in (await client.get("/api/pricing/accounts")).json()}
+        pela_coluna = {c["id"] for c in todas if {e["numero"] for e in c["equipes"]} & set(equipes)}
+        assert visto == pela_coluna, equipes
+        assert visto  # nenhuma equipe do cenário fica sem conta
+    # O caminho pela integração e a conta de duas equipes estão no meio.
+    israel = {c["name"] for c in todas if 102 in {e["numero"] for e in c["equipes"]}}
+    assert israel == {"inova", "kfa"}
+
+
+async def test_escopo_das_equipes_ignora_papel_e_usuario(
     db: AsyncSession,
     cenario: dict,
 ):
-    for numero in (101, 102, 103):
-        vendedor = _usuario(UserRole.USER, [numero])
-        db.add(vendedor)
-        await db.flush()
-        assert await escopo_das_equipes(db, {numero}) == await resolve_team_scope(db, vendedor)
+    """`escopo_das_equipes` é o escopo de um vendedor das equipes, mesmo
+    chamado sem usuário (é o que a coluna usa)."""
+    vendedor = _usuario(UserRole.USER, [102])
+    db.add(vendedor)
+    await db.flush()
+    escopo = await escopo_das_equipes(db, {102})
+    assert escopo.email_user is None
+    assert escopo == await resolve_team_scope(db, vendedor)
+    assert cenario["integ_inova"].id in escopo.integration_ids

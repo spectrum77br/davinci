@@ -140,6 +140,8 @@ class PricingAccountOut(PricingAccountBase):
     # Coluna "Equipe" da aba Contas (03/11/2026): as equipes de vendas cuja
     # cerca deixa ver esta conta (a loja dela, pela régua de
     # `escopo_das_equipes`). Vazia = sem equipe. A filha sai com as da base.
+    # Preenchida no /accounts e nas respostas de UMA conta (create/patch/
+    # department/catálogo); o /grid não calcula (a grade não mostra).
     equipes: list[EquipeDaConta] = []
 
 

@@ -12,7 +12,7 @@ const { descriptor, errors } = parse(fs.readFileSync(filename, 'utf8'), { filena
 assert.deepEqual(errors, [])
 const source = ts.createSourceFile(filename, descriptor.scriptSetup.content,
   ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
-const names = ['equipesDaConta', 'rotuloEquipes', 'passaFiltroEquipe']
+const names = ['equipesDaConta', 'rotuloEquipes', 'passaFiltroEquipe', 'opcoesEquipe']
 const selected = names.map((name) => {
   const node = source.statements.find((candidate) =>
     ts.isFunctionDeclaration(candidate) && candidate.name?.text === name)
@@ -26,8 +26,8 @@ const compiled = ts.transpileModule([semEquipe.getText(source), ...selected].joi
   compilerOptions: { target: ts.ScriptTarget.ES2022 }, reportDiagnostics: true,
 })
 assert.deepEqual(compiled.diagnostics, [])
-const { rotuloEquipes, passaFiltroEquipe } = new Function(
-  `${compiled.outputText}\nreturn { rotuloEquipes, passaFiltroEquipe }`)()
+const { rotuloEquipes, passaFiltroEquipe, opcoesEquipe } = new Function(
+  `${compiled.outputText}\nreturn { rotuloEquipes, passaFiltroEquipe, opcoesEquipe }`)()
 
 const londres = { equipes: [{ numero: 101, nome: 'Londres' }] }
 const duas = { equipes: [{ numero: 102, nome: 'Israel' }, { numero: 103, nome: 'Marrocos' }] }
@@ -48,6 +48,22 @@ assert.equal(passaFiltroEquipe(sem, 'sem'), true)
 assert.equal(passaFiltroEquipe(antiga, 'sem'), true)
 assert.equal(passaFiltroEquipe(londres, 'sem'), false)
 
+// Opções do filtro: as equipes da aba em ordem, "Sem equipe" se houver conta
+// sem nenhuma, e a equipe já escolhida mesmo sem conta nesta aba (o filtro
+// sobrevive à troca Celular → Mala; sem a opção o select ficava em branco).
+const marrocos = { equipes: [{ numero: 103, nome: 'Marrocos' }] }
+const celular = [duas, londres, sem]
+assert.deepEqual(opcoesEquipe(celular, celular, ''), {
+  equipes: [{ numero: 101, nome: 'Londres' }, { numero: 102, nome: 'Israel' }, { numero: 103, nome: 'Marrocos' }],
+  semEquipe: true,
+})
+assert.deepEqual(opcoesEquipe([londres], [londres, marrocos], '103'), {
+  equipes: [{ numero: 101, nome: 'Londres' }, { numero: 103, nome: 'Marrocos' }],
+  semEquipe: false,
+})
+assert.deepEqual(opcoesEquipe([londres], [londres], '104').equipes.at(-1), { numero: 104, nome: 'Equipe 104' })
+assert.equal(opcoesEquipe([londres], [londres], 'sem').semEquipe, true, '"Sem equipe" escolhido continua na lista')
+
 // A coluna fica entre Catálogo ML e Kit, no cabeçalho, na linha de cada conta
 // e na linha de adicionar conta.
 const tpl = descriptor.template.content
@@ -64,5 +80,7 @@ assert.ok(linha.indexOf('data-coluna-equipe') < linha.indexOf('<!-- kit -->'),
 assert.match(contas, /Tipo ML, Catálogo ML e Equipe: definidos depois[\s\S]*?—<\/td>[\s\S]*?—<\/td>[\s\S]*?—<\/td>[\s\S]*?newAcc\.kit_number/,
   'add-account row keeps the columns aligned')
 assert.match(contas, /<select[\s\S]*?v-model="contasEquipeFilter"[\s\S]*?Todas as equipes/)
+// Conta nova (nasce sem equipe) não some atrás de um filtro de equipe.
+assert.match(descriptor.scriptSetup.content, /accounts\.value\.push\(created\)\s*\n(\s*\/\/.*\n)*\s*if \(!passaFiltroEquipe\(created, contasEquipeFilter\.value\)\) contasEquipeFilter\.value = ''/)
 
 console.log('pricing-contas-equipe: ok')
