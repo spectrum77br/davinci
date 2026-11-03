@@ -411,6 +411,11 @@ def conferir_caso(caso: Any, *, linha: int = 0) -> None:
     avisos = caso.get("avisos", [])
     if not isinstance(avisos, list) or not all(isinstance(a, str) for a in avisos):
         raise CasoInvalido(f"{onde}: avisos inválidos")
+    # v17 (an0311, 03/11/2026): o que o atendimento já enviou e os estados que o cliente citou.
+    for chave in ("ja_enviado", "ufs_do_cliente"):
+        valor = caso.get(chave, [])
+        if not isinstance(valor, list) or not all(isinstance(a, str) for a in valor):
+            raise CasoInvalido(f"{onde}: {chave} inválido")
     if "bloqueia_sem_marca" in caso and (
         caso["bloqueia_sem_marca"] not in BLOQUEIOS_SEM_MARCA
         or esperado["ok_para_envio_automatico"]
@@ -530,6 +535,10 @@ def entrada_do_caso(caso: Mapping[str, Any]) -> str:
         pos_envio=tuple(str(a) for a in caso.get("pos_envio") or []),
         # v14 (o portão, 27/10/2026): os AVISOS DAS CHECAGENS (o caso que os traz).
         avisos=tuple(str(a) for a in caso.get("avisos") or []),
+        # v17 (an0311, 03/11/2026): o que o atendimento já enviou e os estados que o cliente
+        # citou (o caso que os traz; sem eles, a entrada de antes).
+        ja_enviado=tuple(str(t) for t in caso.get("ja_enviado") or []),
+        ufs_do_cliente=tuple(str(u) for u in caso.get("ufs_do_cliente") or []),
     )
     return verificador.montar_entrada(
         acao=str(caso.get("acao") or "responder"),
