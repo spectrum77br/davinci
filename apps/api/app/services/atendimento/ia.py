@@ -2095,17 +2095,21 @@ async def _ultima_do_cliente(
     ).scalar_one_or_none()
 
 
-async def _ultima_chegada_do_cliente(session: AsyncSession, conversa_id: UUID) -> datetime | None:
+async def _ultima_chegada_do_cliente(
+    session: AsyncSession, conversa_id: UUID, *, ate: datetime | None = None
+) -> datetime | None:
     """Quando a mensagem do cliente mais nova CHEGOU ao banco (`created_at`, 03/11/2026).
 
     Não é a última do cliente pelo relógio da plataforma: a mensagem escrita
     antes (enviada_em menor) pode chegar depois — é ela que a espera e o
-    "o rascunho viu tudo?" (`FATO_CHEGADA_VISTA`) precisam enxergar.
+    "o rascunho viu tudo?" (`FATO_CHEGADA_VISTA`) precisam enxergar. `ate` = só
+    as mensagens até esse relógio (o replay, `agente.replay.montar_base`).
     """
     quando = await session.scalar(
         select(func.max(AtendimentoMensagem.created_at)).where(
             AtendimentoMensagem.conversa_id == conversa_id,
             AtendimentoMensagem.autor == AUTOR_CLIENTE,
+            *(() if ate is None else (_momento_col() <= ate,)),
         )
     )
     return None if quando is None else (quando if quando.tzinfo else quando.replace(tzinfo=UTC))
