@@ -2149,6 +2149,11 @@ async def _gravar_resultado(
                     user=user,
                     origem=origem,
                 )
+            if origem == ORIGEM_IA and mensagem.status in (MSG_ENVIADA, MSG_REVISAR):
+                # A resposta da IA ganhou o relógio de agora: a fala do cliente que
+                # chegou com ela em voo, e que ela não viu, volta para depois dela
+                # (03/11/2026, `gravar.reordenar_depois_da_ia`).
+                await gravar.reordenar_depois_da_ia(session, conversa, mensagem)
             await gravar.recalcular_conversa(session, conversa)
             await session.commit()
             if vira_par:

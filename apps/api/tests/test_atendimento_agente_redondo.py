@@ -1188,7 +1188,7 @@ def test_3_31ab491d_a_instrucao_de_recebimento_vem_na_entrega_instrucoes():
 def test_3_o_sistema_do_verificador_nao_muda():
     # O item 3 não mudou o SISTEMA (era v9). Parte 2 (item 6, 23/10/2026): o v10 só acrescenta
     # a BUSCA NO CATÁLOGO DA LOJA — o modelo continua o Haiku.
-    assert v.VERSAO in ("v10", "v11", "v12", "v13", "v14", "v15", "v16")
+    assert v.VERSAO in ("v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17")
     assert v.MODELO == "claude-haiku-5-5"
 
 

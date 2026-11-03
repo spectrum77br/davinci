@@ -826,7 +826,14 @@ async def test_6_o_rascunho_do_agente_nunca_sai_com_a_lacuna(
     ]
     r = await ia.gerar_rascunho(db, conversa)
     assert r.texto == f"Olá! Seu pedido já foi enviado; o rastreio é {RASTREIO}.", r.texto
-    assert "{" not in r.texto and r.status == RASCUNHO_PENDENTE and r.precisa_humano
+    assert "{" not in r.texto and r.status == RASCUNHO_PENDENTE
+    if modo == MODO_AUTO:
+        # Item 10 da análise de 31/10–02/11 (o dono, 03/11/2026): o Abrir chamado do atraso
+        # (o pedido de teste tem semanas de postado) é etiqueta — fica para depois do envio, e
+        # o verificador decide (aqui ele não responde: nada sai).
+        assert _do_agente(r)["acoes_pos_envio"] == ["abrir_chamado"], _do_agente(r)
+    else:
+        assert r.precisa_humano
     # O portão (27/10/2026): no automático, a frase da lacuna tirada é AVISO ao verificador.
     lacuna = checagens.MOTIVO_LACUNA_TIRADA.format(lacunas="{nf_numero}")
     assert lacuna in (_do_agente(r)["avisos"] if modo == MODO_AUTO else (r.motivo or ""))

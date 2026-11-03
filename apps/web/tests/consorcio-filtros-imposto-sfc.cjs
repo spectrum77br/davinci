@@ -1,5 +1,5 @@
 // Run from apps/web: node tests/consorcio-filtros-imposto-sfc.cjs
-// Consórcio (03/11/2026): filtros Grupo ou cota / Alienação / Empresa e a
+// Consórcio (03/11/2026): filtros Grupo ou cota / Alienação / Empresa (uma ou mais) e a
 // coluna Imposto 1% (1% do crédito nas cotas com lance, igual ao 7%), que
 // desconta do Crédito líq. e aceita um valor digitado (0 zera; em branco volta
 // ao automático). O auto-save manda num PATCH só os campos editados da linha.
@@ -30,8 +30,8 @@ const compiled = ts.transpileModule(semNuxt, {
 })
 assert.deepEqual(compiled.diagnostics, [])
 const EXPORTA = [
-  'load', 'rows', 'linhasVisiveis', 'filtroGrupoCota', 'filtroAlienacao', 'filtroEmpresa', 'filtrando',
-  'opcoesEmpresa', 'opcoesAlienacao', 'limparFiltros', 'scheduleSave', 'persist', 'addRow', 'removeRow',
+  'load', 'rows', 'linhasVisiveis', 'filtroGrupoCota', 'filtroAlienacao', 'filtroEmpresas', 'filtrando',
+  'opcoesEmpresa', 'opcoesAlienacao', 'limparFiltros', 'alternarEmpresa', 'todasAsEmpresas', 'rotuloEmpresas', 'scheduleSave', 'persist', 'addRow', 'removeRow',
   'errorText', 'saveTimers', 'SEM_VALOR', 'imposto7', 'imposto1', 'imposto1Automatico', 'creditoLiquido',
   'valorDigitadoImposto1', 'valorNumerico', 'empresaDaLinha', 'passaNosFiltros',
 ]
@@ -105,7 +105,7 @@ const centavos = (n) => Math.round(n * 100) / 100
   assert.equal(f.empresaDaLinha('   '), '')
 
   // ── passaNosFiltros ──
-  const todas = { grupoCota: '', alienacao: '', empresa: '' }
+  const todas = { grupoCota: '', alienacao: '', empresas: [] }
   const filtro = (o) => ({ ...todas, ...o })
   const a = linha({ emp: 'Kia ', grupo: 1654, cota: 566, alienacao: 'a contemplar' })
   const b = linha({ emp: 'LOCAGIL', grupo: 2122, cota: 261, alienacao: 'pago' })
@@ -126,27 +126,44 @@ const centavos = (n) => Math.round(n * 100) / 100
   assert.ok(f.passaNosFiltros(c, filtro({ alienacao: f.SEM_VALOR })))
   assert.ok(f.passaNosFiltros(linha({ alienacao: null }), filtro({ alienacao: f.SEM_VALOR })))
   assert.ok(!f.passaNosFiltros(a, filtro({ alienacao: f.SEM_VALOR })))
-  assert.ok(f.passaNosFiltros(a, filtro({ empresa: 'KIA' })))
-  assert.ok(!f.passaNosFiltros(b, filtro({ empresa: 'KIA' })))
-  assert.ok(f.passaNosFiltros(c, filtro({ empresa: f.SEM_VALOR })))
-  assert.ok(!f.passaNosFiltros(a, filtro({ empresa: f.SEM_VALOR })))
-  assert.ok(f.passaNosFiltros(a, filtro({ grupoCota: '1654', alienacao: 'a contemplar', empresa: 'KIA' })))
-  assert.ok(!f.passaNosFiltros(a, filtro({ grupoCota: '1654', alienacao: 'pago', empresa: 'KIA' })))
+  // Empresa: uma ou mais.
+  assert.ok(f.passaNosFiltros(a, filtro({ empresas: ['KIA'] })))
+  assert.ok(!f.passaNosFiltros(b, filtro({ empresas: ['KIA'] })))
+  assert.ok(f.passaNosFiltros(b, filtro({ empresas: ['KIA', 'LOCAGIL'] })))
+  assert.ok(f.passaNosFiltros(a, filtro({ empresas: ['KIA', 'LOCAGIL'] })))
+  assert.ok(!f.passaNosFiltros(c, filtro({ empresas: ['KIA', 'LOCAGIL'] })))
+  assert.ok(f.passaNosFiltros(c, filtro({ empresas: [f.SEM_VALOR] })))
+  assert.ok(f.passaNosFiltros(c, filtro({ empresas: ['LOCAGIL', f.SEM_VALOR] })))
+  assert.ok(!f.passaNosFiltros(a, filtro({ empresas: [f.SEM_VALOR] })))
+  assert.ok(f.passaNosFiltros(a, filtro({ grupoCota: '1654', alienacao: 'a contemplar', empresas: ['KIA'] })))
+  assert.ok(!f.passaNosFiltros(a, filtro({ grupoCota: '1654', alienacao: 'pago', empresas: ['KIA'] })))
 
   // ── A página de verdade: filtros, linha que não some, linha nova ──
   const dados = [
     linha({ id: '1', emp: 'Kia ', grupo: 1654, cota: 566, alienacao: null }),
     linha({ id: '2', emp: 'LOCAGIL', grupo: 2122, cota: 261, alienacao: 'pago' }),
     linha({ id: '3', emp: 'KIA', grupo: 1524, cota: 4926, alienacao: 'pago' }),
+    linha({ id: '4', emp: 'VELASCO', grupo: 1654, cota: 466, alienacao: 'a contemplar' }),
   ]
   const { p, chamadas, patches } = pagina(dados)
   const ids = () => p.linhasVisiveis.value.map((r) => r.id).join(',')
   await p.load()
-  assert.equal(ids(), '1,2,3')
+  assert.equal(ids(), '1,2,3,4')
   assert.equal(p.filtrando.value, false)
-  assert.deepEqual(p.opcoesEmpresa.value, { nomes: ['KIA', 'LOCAGIL'], semEmpresa: false })
+  assert.equal(p.rotuloEmpresas.value, 'Todas')
+  assert.deepEqual(p.opcoesEmpresa.value, { nomes: ['KIA', 'LOCAGIL', 'VELASCO'], semEmpresa: false })
   assert.deepEqual(p.opcoesAlienacao.value, ['pago', 'ag. repasse', 'a contemplar'])
-  p.filtroEmpresa.value = 'KIA'; await vue.nextTick()
+  // Marcar várias empresas: aparecem as linhas de qualquer uma; o rótulo acompanha.
+  p.alternarEmpresa('VELASCO'); p.alternarEmpresa('KIA'); await vue.nextTick()
+  assert.deepEqual(p.filtroEmpresas.value, ['KIA', 'VELASCO']) // na ordem da lista
+  assert.equal(p.rotuloEmpresas.value, 'KIA, VELASCO')
+  assert.equal(ids(), '1,3,4')
+  p.alternarEmpresa('LOCAGIL'); await vue.nextTick()
+  assert.equal(p.rotuloEmpresas.value, '3 empresas')
+  assert.equal(ids(), '1,2,3,4')
+  p.alternarEmpresa('VELASCO'); p.alternarEmpresa('LOCAGIL'); await vue.nextTick() // desmarca
+  assert.deepEqual(p.filtroEmpresas.value, ['KIA'])
+  assert.equal(p.rotuloEmpresas.value, 'KIA')
   assert.equal(ids(), '1,3')
   assert.equal(p.filtrando.value, true)
   // Trocar a EMP de uma linha filtrada não a tira da tela no meio da edição...
@@ -157,10 +174,18 @@ const centavos = (n) => Math.round(n * 100) / 100
   assert.equal(ids(), '100,1,3')
   p.filtroAlienacao.value = 'pago'; await vue.nextTick() // mexer no filtro recalcula
   assert.equal(ids(), '3')
-  p.filtroAlienacao.value = p.SEM_VALOR; p.filtroEmpresa.value = ''; await vue.nextTick()
+  p.filtroAlienacao.value = p.SEM_VALOR; p.todasAsEmpresas(); await vue.nextTick()
   assert.equal(ids(), '100,1')
+  assert.equal(p.rotuloEmpresas.value, 'Todas')
+  // "Sem empresa" marcado junto com outra: a linha nova (em branco) aparece.
+  p.filtroAlienacao.value = ''; p.alternarEmpresa(p.SEM_VALOR); p.alternarEmpresa('LOCAGIL'); await vue.nextTick()
+  assert.deepEqual(p.filtroEmpresas.value, ['LOCAGIL', p.SEM_VALOR])
+  assert.equal(p.rotuloEmpresas.value, 'LOCAGIL, Sem empresa')
+  assert.equal(p.opcoesEmpresa.value.semEmpresa, true)
+  assert.equal(ids(), '100,1,2') // a 1 virou LOCAGIL na edição acima
   p.limparFiltros(); await vue.nextTick()
-  assert.equal(ids(), '100,1,2,3')
+  assert.deepEqual(p.filtroEmpresas.value, [])
+  assert.equal(ids(), '100,1,2,3,4')
   // Recarregar reaplica o filtro escolhido.
   p.filtroGrupoCota.value = '2122'; await vue.nextTick()
   await p.load()
@@ -223,7 +248,12 @@ const centavos = (n) => Math.round(n * 100) / 100
   // Os três filtros, rotulados.
   assert.match(tpl, /<span class="text-muted-foreground">Grupo ou cota<\/span>\s*<input\s+v-model="filtroGrupoCota"/)
   assert.match(tpl, /<span class="text-muted-foreground">Alienação<\/span>\s*<select v-model="filtroAlienacao"/)
-  assert.match(tpl, /<span class="text-muted-foreground">Empresa<\/span>\s*<select v-model="filtroEmpresa"/)
+  // Empresa: botão que abre a lista de caixinhas (uma ou mais).
+  assert.match(tpl, /<span class="text-muted-foreground">Empresa<\/span>[\s\S]*?<PopoverRoot>\s*<PopoverTrigger as-child>\s*<button[^>]*data-filtro-empresa/)
+  assert.match(tpl, /<input type="checkbox"[^>]*:checked="filtroEmpresas\.includes\(e\)" @change="alternarEmpresa\(e\)"/)
+  assert.match(tpl, /:checked="filtroEmpresas\.includes\(SEM_VALOR\)" @change="alternarEmpresa\(SEM_VALOR\)"/)
+  assert.match(tpl, /\{\{ rotuloEmpresas \}\}/)
+  assert.doesNotMatch(tpl, /v-model="filtroEmpresa"/)
   // O load() roda no fim do setup, depois de declarados os filtros.
   assert.match(script, /\nawait load\(\)\n$/)
   console.log('consorcio-filtros-imposto: ok')

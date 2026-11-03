@@ -245,7 +245,7 @@ from zoneinfo import ZoneInfo
 import anthropic
 import httpx
 import structlog
-from sqlalchemy import and_, case, cast, func, literal, or_, select, true
+from sqlalchemy import and_, case, cast, false, func, literal, or_, select, true
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -273,6 +273,7 @@ from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.ag_cancelamento import TEXTOS_IA
 from app.services.atendimento.constantes import (
+    ACAO_ANALISAR_EVIDENCIA,
     ACAO_ENVIAR_ARQUIVO_NF,
     ACENTOS_DE,
     ACENTOS_PARA,
@@ -364,6 +365,16 @@ PROMPT_VERSAO = "v10"
 # Cliente escreve em rajada ("oi" / "meu pedido" / "não chegou"). Esperar
 # 90 s de silêncio junta a rajada numa sugestão só, em vez de três.
 ESPERA_SILENCIO = timedelta(seconds=90)
+# A MESMA espera contada pela CHEGADA ao banco (`created_at`), não só pelo
+# relógio da plataforma (03/11/2026, Vortan 41415df4 e a1929b16 em 02/11): o
+# sync traz a mensagem ~1–2 min depois de ela ser escrita, então o relógio da
+# plataforma já "passou dos 90 s" quando ela chega — e a saudação ao cartão
+# saía 3 s antes de a pergunta do cliente, escrita antes dela, chegar.
+ESPERA_CHEGADA = ESPERA_SILENCIO
+# O envio sozinho nunca responde um gatilho do cliente mais velho que isto
+# (03/11/2026; o 30/10: 18 saudações atrasadas saíram quando a Vortan e a Mini
+# entraram no Automático). O rascunho fica para a pessoa.
+LIMITE_GATILHO_AUTO = timedelta(hours=3)
 # Na primeira leitura de uma loja entra histórico de meses com o cliente
 # falando por último ("ok obrigado" de julho). Rascunho para isso é token
 # jogado fora: o automático só olha a última semana (a pessoa ainda pode
@@ -489,6 +500,9 @@ MAX_REENVIOS = 5
 REENVIO_DEPOIS = timedelta(minutes=2)
 JANELA_REENVIO = timedelta(hours=24)
 FATO_PEDIDA_PELA_TELA = "pedida_pela_tela"
+# A chegada (`created_at`) da mensagem do cliente mais nova que o rascunho leu
+# (03/11/2026, ver `_trava_do_turno`).
+FATO_CHEGADA_VISTA = "chegada_vista"
 _CHAVE_REENVIO = "atendimento:ia:reenvio:{}:{}"
 _REENVIO_TTL_S = 2 * 24 * 3600
 
@@ -525,6 +539,10 @@ _CHAVE_TETO_AGENTE = "atendimento:agente:chamadas:{}:{}"
 _TETO_TTL_S = 2 * 24 * 3600
 
 MOTIVO_NUMERO_INVENTADO = "número que não veio do sistema"
+# A resposta genérica (saudação, agradecimento, pedido de atendente) com pergunta do cliente
+# pendente. No agente (an0311, 03/11/2026), a PERGUNTA DE ESCLARECIMENTO que pede o dado que
+# falta vira aviso ao verificador (`agente.checagens.separar_avisos`).
+MOTIVO_PERGUNTA_PENDENTE = "há pergunta concreta pendente — a resposta genérica não a resolve"
 # A resposta de dado do produto com a ficha do anúncio nos FATOS não sai
 # sozinha no automático (14/10/2026): a ficha pode ser de antes da última
 # mudança do anúncio, ou de outro anúncio do mesmo produto, e o que acompanha
@@ -2083,6 +2101,46 @@ async def _ultima_do_cliente(
     ).scalar_one_or_none()
 
 
+async def _ultima_chegada_do_cliente(
+    session: AsyncSession, conversa_id: UUID, *, ate: datetime | None = None
+) -> datetime | None:
+    """Quando a mensagem do cliente mais nova CHEGOU ao banco (`created_at`, 03/11/2026).
+
+    Não é a última do cliente pelo relógio da plataforma: a mensagem escrita
+    antes (enviada_em menor) pode chegar depois — é ela que a espera e o
+    "o rascunho viu tudo?" (`FATO_CHEGADA_VISTA`) precisam enxergar. `ate` = só
+    as mensagens até esse relógio (o replay, `agente.replay.montar_base`).
+    """
+    quando = await session.scalar(
+        select(func.max(AtendimentoMensagem.created_at)).where(
+            AtendimentoMensagem.conversa_id == conversa_id,
+            AtendimentoMensagem.autor == AUTOR_CLIENTE,
+            *(() if ate is None else (_momento_col() <= ate,)),
+        )
+    )
+    return None if quando is None else (quando if quando.tzinfo else quando.replace(tzinfo=UTC))
+
+
+def _sql_chegou_ha_pouco(agora: datetime):
+    """Mensagem do cliente que CHEGOU (`created_at`) há menos de `ESPERA_CHEGADA`. Para o
+    WHERE de quem escolhe conversa para gerar (`_gerar_pendentes`, `reavaliar_*`).
+
+    Sem a espera (`ESPERA_CHEGADA` zero) não corta nada — `false()` para o `~` do
+    chamador valer sempre."""
+    if ESPERA_CHEGADA <= timedelta(0):
+        return false()
+    chegada = aliased(AtendimentoMensagem)
+    return (
+        select(chegada.id)
+        .where(
+            chegada.conversa_id == AtendimentoConversa.id,
+            chegada.autor == AUTOR_CLIENTE,
+            chegada.created_at > agora - ESPERA_CHEGADA,
+        )
+        .exists()
+    )
+
+
 async def _mensagens_recentes(
     session: AsyncSession, conversa: AtendimentoConversa
 ) -> list[AtendimentoMensagem]:
@@ -3283,9 +3341,17 @@ def responde_e_marca_no_rascunho(rascunho: Any | None) -> bool:
         return False
     fatos = getattr(rascunho, "fatos", None)
     agente = fatos.get("agente") if isinstance(fatos, dict) else None
+    # Itens 9 e 10 (03/11/2026): a etiqueta liberada do turno (`etiquetas_pos_envio`) também
+    # marca — sem ligar as isenções da devolução, que leem só o `responde_e_marca`.
     return (
         isinstance(agente, dict)
-        and agente.get("responde_e_marca") is True
+        and (
+            agente.get("responde_e_marca") is True
+            or bool(
+                isinstance(agente.get("etiquetas_pos_envio"), list)
+                and agente.get("etiquetas_pos_envio")
+            )
+        )
         and isinstance(agente.get("acoes_pos_envio"), list)
         and bool(agente.get("acoes_pos_envio"))
     )
@@ -4829,6 +4895,8 @@ async def conferir_saida(
     fatos_citados: Sequence[str] = (),
     produto_pelo_anuncio: bool = False,
     garantia_apple_pelo_fato: bool = False,
+    ag_cancelamento_etiqueta: bool = False,
+    garantia_geral: str | None = None,
 ) -> SaidaConferida:
     """O código confere o que o modelo disse. Não grava nada; só LÊ o banco
     para saber se a loja respondeu enquanto o modelo escrevia
@@ -4859,6 +4927,12 @@ async def conferir_saida(
     SÓ como o fato aprovado diz — `checagens.garantia_apple_pelo_fato`): as frases dela
     não contam como fala de garantia nem como promessa de cobertura, e a pista "garantia"
     do cliente não briga com a categoria de condição.
+    `garantia_geral` (an0311, 03/11/2026 — `checagens.garantia_geral_pre_venda`): "geral" = a
+    política da garantia antes da compra como a equipe responde (tem garantia, cobre defeito,
+    não cobre quebrado/molhado/mau uso, a devolução é pela Shopee, vídeo e fotos por aqui);
+    "estendida" = só a garantia estendida com a plataforma. As frases dessa forma não contam
+    como fala de garantia, promessa de cobertura, recusa nem negação da garantia; o resto do
+    texto (e o texto inteiro nas outras réguas) se confere como sempre.
     Ver o bloco acima para `agente=True`.
     """
     motivos = list(motivos)
@@ -4924,7 +4998,7 @@ async def conferir_saida(
         # voltarei sim" é agradecimento (o "quem" não pergunta nada).
         and not (agente and foco_so_de_agradecimento(foco))
     ):
-        motivos.append("há pergunta concreta pendente — a resposta genérica não a resolve")
+        motivos.append(MOTIVO_PERGUNTA_PENDENTE)
     if (
         # No agente (ajuste r3), o assunto de produto vai para pessoa no
         # automático MESMO SEM a ficha (produto desconhecido, só o item do
@@ -4962,6 +5036,18 @@ async def conferir_saida(
         ]
     )
     inventados = numeros_inventados(texto, permitidos)
+    if agente and inventados:
+        # an0311 (03/11/2026, 73907524 "quero uma tv 43"): o número que o PRÓPRIO cliente
+        # escreveu, repetido só para nomear o que ele pediu, não foi inventado — nunca como
+        # valor, prazo, data, parcela, porcentagem ou quantidade (`checagens.numeros_do_cliente`).
+        from app.services.atendimento.agente import checagens as _checagens_num
+
+        do_cliente = _checagens_num.numeros_do_cliente(
+            _LACUNA.sub(" ", texto or ""),
+            inventados,
+            [*textos_cliente, *textos_rajada, *(getattr(m, "texto", None) for m in foco)],
+        )
+        inventados = [n for n in inventados if n not in do_cliente]
     if inventados:
         motivos.append(f"{MOTIVO_NUMERO_INVENTADO} ({', '.join(inventados[:5])})")
     # Item 32 da auditoria ao vivo (22/10/2026, 3c): no AGENTE, a devolução já aberta
@@ -4972,8 +5058,11 @@ async def conferir_saida(
     rotina = agente and devolucao_de_rotina
     if (ctx.get("chamados") or ctx.get("devolucoes")) and not rotina:
         motivos.append("pedido com chamado ou devolução")
-    if em_aguardando_cancelamento(ctx.get("pedido")):
-        # Item 4: o 83955 nunca sai sem pessoa — seja qual for o motivo.
+    if em_aguardando_cancelamento(ctx.get("pedido")) and not (agente and ag_cancelamento_etiqueta):
+        # Item 4: o 83955 nunca sai sem pessoa — seja qual for o motivo. Item 10 da análise
+        # de 31/10–02/11 (o dono, 03/11/2026): no AGENTE, com o Ag. cancelamento liberado
+        # como etiqueta (`acao_pessoa.etiquetas_do_turno`: a fala que não toca o destino do
+        # pedido), a resposta sai e a conversa continua na Caixa Humano com o rótulo.
         motivos.append(MOTIVO_AG_CANCELAMENTO)
     if reclamacao_aberta(conversa.dados):
         motivos.append("reclamação/mediação aberta no ML")
@@ -5029,6 +5118,12 @@ async def conferir_saida(
             # D2 (23/10/2026): a frase da garantia Apple do fato aprovado não é fala de
             # garantia nem promessa de cobertura (o resto do texto se confere como sempre).
             texto_da_garantia = _checagens_r4b.sem_as_frases_da_garantia_apple(texto_da_garantia)
+        if garantia_geral:
+            # an0311 (03/11/2026): a política geral da garantia (antes da compra) e a garantia
+            # estendida com a plataforma não são fala de garantia nem promessa de cobertura.
+            texto_da_garantia = _checagens_r4b.sem_as_frases_da_garantia_geral(
+                texto_da_garantia, forma=garantia_geral
+            )
         if sem_evidencia:
             # Fontes v1.3, item 10 (21/10/2026): no agente, a condição ("novo",
             # "lacrado", "original") que o ANÚNCIO da conversa declara — título,
@@ -5455,6 +5550,29 @@ async def _gerar_pelo_agente(
     antes = acao_pessoa.gatilhos_antes_do_modelo(base.recentes, gatilho, sinais=base.sinais)
     if antes.so_cartao:
         return None
+    # Item 9 da análise de 31/10–02/11 (o dono, 03/11/2026): a foto/o vídeo que a loja pediu
+    # chegou e a régua do código só dá "Analisar foto ou vídeo" — o recibo fixo, sem o
+    # modelo (sem custo), que sai sozinho e deixa a conversa no topo da Caixa Humano.
+    recibo = acao_pessoa.recibo_da_evidencia(
+        conversa,
+        base.ctx,
+        base.recentes,
+        gatilho,
+        sinais=base.sinais,
+        sinais_do_cliente=base.sinais_do_cliente,
+    )
+    if recibo is not None:
+        resultado = recibo_do_agente(
+            conversa,
+            gatilho,
+            recibo,
+            modo=base.modo,
+            nomes=base.nomes,
+            manual_hash=manual_hash(organizar_manual(list(base.regras), None)),
+        )
+        return await _salvar(
+            session, conversa, resultado.para_rascunho(conversa, gatilho, base.fatos_gravados)
+        )
     if antes.gatilhos:
         ctx = agente_ctx.ContextoAgente.da_conversa(
             conversa, gatilho, modo=base.modo, nomes=base.nomes
@@ -5536,6 +5654,67 @@ async def _gerar_pelo_agente(
     )
 
 
+# Item 9 (03/11/2026): o recibo da evidência — o assunto do rascunho e o motivo (sem dado).
+ASSUNTO_DO_RECIBO = "defeito"
+MOTIVO_RECIBO = (
+    "recibo da evidência (sai sozinho; a pessoa analisa a foto ou o vídeo — topo da Caixa Humano)"
+)
+FATO_RECIBO = "recibo_evidencia"
+
+
+def recibo_do_agente(
+    conversa: Any,
+    gatilho: Any,
+    texto: str,
+    *,
+    modo: str,
+    nomes: Sequence[str | None] = (),
+    manual_hash: str | None = None,
+) -> Any:
+    """O `agente.ResultadoAgente` do recibo da evidência (item 9): o texto fixo, pendente,
+    sem pessoa, com "Analisar foto ou vídeo" para DEPOIS do envio (`acoes_pos_envio`). PURA."""
+    from app.services.atendimento import agente as agente_svc
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    ctx = agente_ctx.ContextoAgente.da_conversa(conversa, gatilho, modo=modo, nomes=nomes)
+    ctx.acoes_codigo = [ACAO_ANALISAR_EVIDENCIA]
+    ctx.etiquetas_pos_envio = frozenset({ACAO_ANALISAR_EVIDENCIA})
+    ctx.acao = "responder"
+    ctx.parada = agente_svc.PARADA_SEM_AGENTE
+    return agente_svc.ResultadoAgente(
+        parada=agente_svc.PARADA_SEM_AGENTE,
+        gravar=True,
+        texto=texto,
+        categoria=ASSUNTO_DO_RECIBO,
+        confianca=1.0,
+        precisa_humano=False,
+        motivo=MOTIVO_RECIBO,
+        validador_ok=True,
+        validador_erros=[],
+        status=RASCUNHO_PENDENTE,
+        acoes_pessoa=[],
+        fatos_agente={**ctx.para_fatos(), FATO_RECIBO: True},
+        manual_hash=manual_hash,
+    )
+
+
+def recibo_no_rascunho(rascunho: Any) -> bool:
+    """O rascunho é o recibo fixo da evidência (item 9), intacto? PURA. O texto é um dos
+    fixos (`acao_pessoa.TEXTOS_DO_RECIBO`), sem ação de pessoa que trave e com SÓ "Analisar
+    foto ou vídeo" para depois do envio."""
+    from app.services.atendimento.agente import acao_pessoa
+
+    if rascunho is None or not rascunho_do_agente(rascunho):
+        return False
+    agente = _fatos_do_agente(rascunho)
+    return (
+        agente.get(FATO_RECIBO) is True
+        and (getattr(rascunho, "texto", None) or "") in acao_pessoa.TEXTOS_DO_RECIBO
+        and agente.get("acoes_pessoa") == []
+        and agente.get("acoes_pos_envio") == [ACAO_ANALISAR_EVIDENCIA]
+    )
+
+
 def anotar_pistas_alem(resultado: Any) -> None:
     """Grava `fatos.agente.pistas_alem` com o assunto FINAL do rascunho (rodada 4b):
     o pré-filtro SQL do reenvio (`_sql_assunto_liberado`) lê a lista pronta."""
@@ -5599,12 +5778,17 @@ async def _gerar(
             turno_incompleto=getattr(recentes, "turno_incompleto", False),
             pedido_marketplace=conversa.pedido_marketplace,
         )
+    # A chegada mais nova que este rascunho viu (03/11/2026): mensagem do cliente
+    # que chegar depois dela — mesmo escrita antes — não foi lida (`_trava_do_turno`).
+    chegada_vista = await _ultima_chegada_do_cliente(session, conversa.id)
     ctx = await contexto_svc.contexto_da_conversa(session, conversa)
     valores = valores_das_lacunas(conversa, ctx)
     fatos = _fatos_para_o_modelo(conversa, ctx, valores)
     # O que fica gravado para auditoria: o que o modelo viu + os valores das
     # lacunas (dado do pedido, não da pessoa).
     fatos_gravados = {**fatos, "lacunas": valores}
+    if chegada_vista is not None:
+        fatos_gravados[FATO_CHEGADA_VISTA] = chegada_vista.isoformat()
     if contexto_reavaliado is not None:
         fatos_gravados["reavaliacao_contexto"] = contexto_reavaliado
     if forcar:
@@ -6233,6 +6417,77 @@ def resposta_generica_do_agente(rascunho: Any) -> bool:
     return checagens.resposta_so_generica(getattr(rascunho, "texto", None))
 
 
+# ── O turno na hora do envio sozinho (03/11/2026, item 1 da análise de 31/10–02/11) ──
+# A saudação ao cartão (o atalho aprovado do `_gerar`, que não é do agente) saía
+# na hora: nem a espera do reenvio do cumprimento do agente, nem a conferência
+# do gatilho. Em 02/11 (Vortan 41415df4 e a1929b16) a pergunta do cliente chegou
+# ao banco 3 s depois dela e ficou sem resposta. Agora TODO envio sozinho (o do
+# agente, o do legado, a NF) passa por `_trava_do_turno` antes de sair.
+MOTIVO_GATILHO_ANTIGO = "gatilho_antigo"
+MOTIVO_SEM_GATILHO = "sem_gatilho"
+MOTIVO_TURNO_MUDOU = "turno_mudou"
+MOTIVO_ESPERA_CHEGADA = "espera_chegada"
+MOTIVO_CARTAO_SEM_TEXTO = "cartao_sem_texto"
+
+
+def _iso_utc(valor: Any) -> datetime | None:
+    if not isinstance(valor, str) or not valor:
+        return None
+    try:
+        quando = datetime.fromisoformat(valor)
+    except ValueError:
+        return None
+    return quando if quando.tzinfo else quando.replace(tzinfo=UTC)
+
+
+async def _trava_do_turno(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    rascunho: AtendimentoRascunho,
+    *,
+    agora: datetime | None = None,
+) -> str | None:
+    """Por que o rascunho não pode sair sozinho AGORA pelo turno do cliente, ou None.
+
+    - `sem_gatilho`: a mensagem que ele responde não existe mais;
+    - `gatilho_antigo`: o gatilho tem mais de `LIMITE_GATILHO_AUTO` (3 h) — o
+      rascunho velho de quando a loja não estava no Automático fica para a pessoa;
+    - `turno_mudou`: o cliente escreveu depois (o gatilho não é mais a última fala,
+      `_cobre`) ou CHEGOU mensagem dele depois do que o rascunho leu
+      (`FATO_CHEGADA_VISTA`), mesmo com o relógio da plataforma de antes;
+    - `espera_chegada`: chegou mensagem do cliente há menos de `ESPERA_CHEGADA`
+      (a rajada pode não ter terminado de chegar; o reenvio tenta depois);
+    - `cartao_sem_texto`: o turno é só o cartão do produto/pedido, sem texto
+      (03/11/2026, "aplique as correções": não se cumprimenta cartão sozinho — ele
+      repetia o menu do Duoke; a fila cuida dele em `sem_demanda.processar`).
+    """
+    agora = agora or datetime.now(UTC)
+    gatilho = (
+        await session.get(AtendimentoMensagem, rascunho.mensagem_gatilho_id)
+        if rascunho.mensagem_gatilho_id is not None
+        else None
+    )
+    if gatilho is None:
+        # Sem a mensagem que ele responde não há como conferir o turno: fica para a pessoa.
+        return MOTIVO_SEM_GATILHO
+    if _momento(gatilho) < agora - LIMITE_GATILHO_AUTO:
+        return MOTIVO_GATILHO_ANTIGO
+    ultima = await _ultima_do_cliente(session, conversa)
+    if ultima is None or not _cobre(rascunho, ultima):
+        return MOTIVO_TURNO_MUDOU
+    chegada = await _ultima_chegada_do_cliente(session, conversa.id)
+    vista = _iso_utc((rascunho.fatos or {}).get(FATO_CHEGADA_VISTA))
+    if chegada is not None and vista is not None and chegada > vista:
+        return MOTIVO_TURNO_MUDOU
+    if ESPERA_CHEGADA > timedelta(0) and chegada is not None and chegada > agora - ESPERA_CHEGADA:
+        return MOTIVO_ESPERA_CHEGADA
+    from app.services.atendimento import sem_demanda
+
+    if sem_demanda.turno_so_de_cartao(await _mensagens_recentes(session, conversa), ultima):
+        return MOTIVO_CARTAO_SEM_TEXTO
+    return None
+
+
 def assunto_de_produto_liberado(assunto: str | None, canal: Any) -> bool:
     """O assunto de PRODUTO (`ASSUNTOS_SO_PESSOA_NO_AGENTE`) está no `auto_categorias` do
     canal (e fora dos só de pessoa)? PURA. O portão do dono (27/10/2026): então o rascunho do
@@ -6365,6 +6620,11 @@ def _sql_assunto_liberado(r: Any, k: Any, agora: datetime | None = None):
     validade = () if agora is None else (r.created_at >= agora - verificador.VALIDADE_OK,)
     return or_(
         and_(~do_agente, legado),
+        # Item 9 (revisão de 03/11/2026): o recibo fixo da evidência não passa pelo
+        # verificador nem tem assunto a liberar (o `_talvez_enviar`: `recibo_no_rascunho`) — o
+        # que ficou para depois da pausa humana sai no reenvio (o resto do filtro, o `_cobre`,
+        # a triagem e a pausa continuam valendo).
+        and_(do_agente, r.fatos.contains({"agente": {FATO_RECIBO: True}})),
         and_(
             do_agente,
             # O "ok" do verificador semântico (20/10/2026; a trava relê tudo).
@@ -6450,7 +6710,13 @@ async def _talvez_enviar(
 
         if do_agente and nf_automatica.candidato(rascunho):
             # Só a ação "Enviar o arquivo da NF" (28/10/2026, OK do Eduardo): o caminho
-            # da NF sozinha, com as mesmas travas da conversa e as da NF.
+            # da NF sozinha, com as mesmas travas da conversa e as da NF — e as do
+            # turno (03/11/2026: o gatilho de 3 h, a fala nova ou ainda chegando).
+            if get_settings().atendimento_auto_ativo and rascunho.status == RASCUNHO_PENDENTE:
+                motivo = await _trava_do_turno(session, conversa, rascunho)
+                if motivo is not None:
+                    await _registrar_auto_envio(session, conversa, rascunho, f"nf:{motivo}")
+                    return False
             return await nf_automatica.talvez_enviar(session, conversa, rascunho)
         if not get_settings().atendimento_auto_ativo:
             motivo = "auto_desligado"
@@ -6500,6 +6766,12 @@ async def _talvez_enviar(
         )
         if canal is None or canal.modo != MODO_AUTO:
             motivo = "canal_fora_do_auto"
+        elif do_agente and recibo_no_rascunho(rascunho):
+            # Item 9 (03/11/2026): o recibo fixo da evidência não tem assunto a liberar nem
+            # texto do modelo para o verificador — o resto das travas (a triagem com a
+            # etiqueta, a pausa humana, o envio) é o de sempre.
+            if not agente_config.agente_ligado(get_settings(), canal):
+                motivo = "agente_desligado"
         elif do_agente:
             motivo = trava_do_agente(
                 rascunho,
@@ -6523,20 +6795,25 @@ async def _talvez_enviar(
                     ligado=get_settings().atendimento_agente_verificador,
                     agora=datetime.now(UTC),
                 )
-            if motivo is None and not reenvio and resposta_generica_do_agente(rascunho):
-                # O 06:53 da Kia (27/10/2026): "Olá!" → "Como podemos ajudar com o Apple
-                # Watch?" saiu sozinho, e a pergunta ("Você tem apenas a pulseira…?",
-                # 06:52:09) só chegou ao banco às 06:53:59 (a sincronização da conversa). O
-                # cumprimento/"como podemos ajudar?" do agente não sai na hora: espera o
-                # reenvio (`REENVIO_DEPOIS`), que confere de novo se o gatilho ainda é a
-                # última fala do cliente (`_cobre`).
-                motivo = MOTIVO_GENERICA_ESPERA
         elif rascunho.categoria not in (canal.auto_categorias or []):
             motivo = "assunto_nao_liberado"
         elif rascunho.categoria in manual_svc.ids_so_humano(
             await manual_svc.categorias_ativas(session)
         ):
             motivo = "assunto_so_humano"
+        if motivo is None:
+            # O turno do cliente (03/11/2026): gatilho de mais de 3 h, fala nova ou
+            # ainda chegando, turno só de cartão — para TODO rascunho, não só o do agente.
+            motivo = await _trava_do_turno(session, conversa, rascunho)
+        if motivo is None and not reenvio and resposta_generica_do_agente(rascunho):
+            # O 06:53 da Kia (27/10/2026): "Olá!" → "Como podemos ajudar com o Apple
+            # Watch?" saiu sozinho, e a pergunta ("Você tem apenas a pulseira…?",
+            # 06:52:09) só chegou ao banco às 06:53:59 (a sincronização da conversa). O
+            # cumprimento/"como podemos ajudar?" não sai na hora: espera o reenvio
+            # (`REENVIO_DEPOIS`), que confere de novo o turno (`_cobre`,
+            # `_trava_do_turno`). Desde 03/11/2026 também o do legado (a saudação
+            # aprovada saía na hora: Vortan 41415df4 e a1929b16, 02/11).
+            motivo = MOTIVO_GENERICA_ESPERA
         if motivo is not None:
             await _registrar_auto_envio(session, conversa, rascunho, motivo)
             return False
@@ -6774,6 +7051,10 @@ async def reenviar_pendentes(
                     r.created_at <= agora - REENVIO_DEPOIS,
                     # O gatilho é a última mensagem do cliente (a do turno atual).
                     func.coalesce(gatilho.enviada_em, gatilho.created_at) >= c.ultima_do_cliente_em,
+                    # E de no máximo 3 h (03/11/2026, `LIMITE_GATILHO_AUTO`): a loja que
+                    # entra no Automático não manda o rascunho velho atrasado.
+                    func.coalesce(gatilho.enviada_em, gatilho.created_at)
+                    >= agora - LIMITE_GATILHO_AUTO,
                     ~select(mais_nova.id)
                     .where(
                         mais_nova.conversa_id == r.conversa_id,
@@ -6864,6 +7145,8 @@ async def reavaliar_contextos(
                 c.situacao.not_in((CONVERSA_FECHADA, CONVERSA_BLOQUEADA)),
                 c.ultima_do_cliente_em >= agora - JANELA_PENDENTES,
                 c.ultima_do_cliente_em <= agora - ESPERA_SILENCIO,
+                # A espera também pela chegada ao banco (03/11/2026, `ESPERA_CHEGADA`).
+                ~_sql_chegou_ha_pouco(agora),
                 or_(c.pode_enviar_ate.is_(None), c.pode_enviar_ate > agora),
                 ~_sql_canal_sem_envio(),
                 r.status.in_((RASCUNHO_PENDENTE, RASCUNHO_BLOQUEADO)),
@@ -7087,7 +7370,9 @@ async def gerar_pendentes(session: AsyncSession, *, limite: int = 10) -> int:
     Pega conversa aguardando resposta, sem IA pausada, não fechada nem
     bloqueada, num canal em modo de `atendimento_ia_modos` (Amazon sem conta
     identificada não tem canal: não dá para responder, não gasta token), com
-    a última mensagem do cliente entre 90 s (a rajada acabou) e 7 dias atrás,
+    a última mensagem do cliente entre 90 s (a rajada acabou) e 7 dias atrás —
+    e nenhuma mensagem do cliente CHEGADA ao banco há menos de 90 s
+    (`ESPERA_CHEGADA`, 03/11/2026: o sync a traz 1–2 min atrasada) —,
     ainda dentro da janela de envio da plataforma, e SEM rascunho nenhum para
     essa última mensagem — descartado e bloqueado também contam: a IA não
     insiste no que a pessoa recusou nem gasta token de novo no que já não
@@ -7268,6 +7553,7 @@ async def reavaliar_politicas(session: AsyncSession, *, limite: int = 3) -> int:
             c.ultima_do_cliente_em.between(
                 agora - JANELA_PENDENTES, agora - ESPERA_SILENCIO
             ),
+            ~_sql_chegou_ha_pouco(agora),
             or_(c.pode_enviar_ate.is_(None), c.pode_enviar_ate > agora),
             r.status.in_((RASCUNHO_PENDENTE, RASCUNHO_BLOQUEADO)),
             func.coalesce(r.prompt_versao, "") != PROMPT_VERSAO,
@@ -7432,6 +7718,10 @@ async def _gerar_pendentes(session: AsyncSession, *, limite: int, modos: tuple[s
                 AtendimentoConversa.situacao.not_in((CONVERSA_FECHADA, CONVERSA_BLOQUEADA)),
                 AtendimentoConversa.ultima_do_cliente_em.is_not(None),
                 AtendimentoConversa.ultima_do_cliente_em <= agora - ESPERA_SILENCIO,
+                # E 90 s desde a CHEGADA ao banco (03/11/2026): o relógio da plataforma
+                # da mensagem que o sync trouxe atrasada já "passou dos 90 s" — e a
+                # pergunta escrita junto ainda estava a caminho (Vortan, 02/11).
+                ~_sql_chegou_ha_pouco(agora),
                 AtendimentoConversa.ultima_do_cliente_em >= agora - JANELA_PENDENTES,
                 or_(
                     AtendimentoConversa.pode_enviar_ate.is_(None),

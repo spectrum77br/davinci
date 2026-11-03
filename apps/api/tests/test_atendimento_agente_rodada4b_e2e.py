@@ -1126,8 +1126,22 @@ RUINS = [
 # 3/12 meses e as datas do Painel deixaram de ser boas — não saem mais sozinhas.
 GARANTIA_ANTIGA = {"15-K05", "rev-R14", "rev-R15", "rev-R16", "rev-R17", "rev-R18", "rev-R19",
                    "rev-R21"}  # fmt: skip
-BOAS_HOJE = [c for c in BOAS if c[0] not in GARANTIA_ANTIGA]
+# Item 2 da análise de 31/10–02/11 (o dono, 03/11/2026; 7fcf8f73): a tela quebrada nunca
+# ganha a análise da equipe nem o pedido de vídeo (a garantia não cobre) — o 9-K15 deixou de
+# ser bom e vai para a pessoa.
+TELA_QUEBRADA_ANTIGA = {"9-K15"}
+BOAS_HOJE = [c for c in BOAS if c[0] not in GARANTIA_ANTIGA | TELA_QUEBRADA_ANTIGA]
 DA_GARANTIA_ANTIGA = [c for c in BOAS if c[0] in GARANTIA_ANTIGA]
+DA_TELA_QUEBRADA = [c for c in BOAS if c[0] in TELA_QUEBRADA_ANTIGA]
+
+
+@pytest.mark.parametrize("caso", DA_TELA_QUEBRADA, ids=[c[0] for c in DA_TELA_QUEBRADA])
+async def test_a_tela_quebrada_com_a_analise_nao_sai_mais(
+    db: AsyncSession, make_user, agente_ligado, api, envios, redis_mem, lojas, caso
+):
+    r = await _gerar(db, make_user, redis_mem, lojas, api, MODO_AUTO, caso)
+    assert not envios and _decisao(r) != "enviado", (caso[0], _decisao(r))
+    assert r.precisa_humano and checagens.MOTIVO_TELA_QUEBRADA in (r.motivo or ""), r.motivo
 
 
 @pytest.mark.parametrize("caso", DA_GARANTIA_ANTIGA, ids=[c[0] for c in DA_GARANTIA_ANTIGA])

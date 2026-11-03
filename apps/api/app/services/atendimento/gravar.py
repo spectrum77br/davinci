@@ -100,6 +100,7 @@ from app.services.atendimento.constantes import (
     ORIGEM_AUTO,
     ORIGEM_CLIENTE,
     ORIGEM_EXTERNO,
+    ORIGEM_IA,
     ORIGEM_NOTA,
     ORIGEM_SISTEMA,
     ORIGENS_DAVINCI,
@@ -141,6 +142,16 @@ ACAO_SUBSTITUIDO = "escreveu_do_zero"
 
 # Situações que só pessoa (ou a plataforma) muda: o recálculo não mexe.
 _SITUACOES_FIXAS = (CONVERSA_FECHADA, CONVERSA_BLOQUEADA)
+
+# A fala do cliente que a resposta da IA NÃO VIU (03/11/2026, Vortan 41415df4 e
+# a1929b16 em 02/11): escrita antes da resposta pelo relógio da plataforma, mas
+# gravada depois dela (o sync traz a mensagem 1–2 min atrasada). Pelo relógio
+# ela ficava "respondida" e a pergunta nunca ganhava resposta. A gravação a põe
+# logo DEPOIS da resposta (`depois_da_resposta`) e guarda o relógio original em
+# `payload[CHAVE_FORA_DE_ORDEM]`. Só dentro desta janela: história antiga que a
+# primeira leitura traz nunca é reordenada.
+JANELA_FORA_DE_ORDEM = timedelta(minutes=15)
+CHAVE_FORA_DE_ORDEM = "fora_de_ordem"
 
 
 # ── Texto ─────────────────────────────────────────────────────────────────
@@ -328,6 +339,182 @@ async def _atributo(session: AsyncSession, obj: object, nome: str):
     if nome in inspect(obj).unloaded:
         await session.refresh(obj, [nome])
     return getattr(obj, nome)
+
+
+# ── A fala que a resposta da IA não viu (03/11/2026) ──────────────────────
+
+
+def depois_da_resposta(resposta_em: datetime, original: datetime) -> datetime:
+    """O novo `enviada_em` da fala que a resposta da IA não viu. PURA.
+
+    Logo depois da resposta (1 ms) e na MESMA ordem das falas originais: soma
+    1/1000 da distância de `original` ao início da janela (`resposta_em -
+    JANELA_FORA_DE_ORDEM`) — as falas da janela ficam a até ~0,9 s da resposta,
+    na ordem em que o cliente as escreveu, venham na ordem que vierem.
+    """
+    base = resposta_em - JANELA_FORA_DE_ORDEM
+    distancia = min(max(original - base, timedelta(0)), JANELA_FORA_DE_ORDEM)
+    return resposta_em + timedelta(milliseconds=1) + distancia / 1000
+
+
+def relogio_original(mensagem: AtendimentoMensagem) -> datetime:
+    """O relógio da PLATAFORMA da mensagem, mesmo depois de reordenada. PURA."""
+    marca = (mensagem.payload or {}).get(CHAVE_FORA_DE_ORDEM)
+    if isinstance(marca, dict) and isinstance(marca.get("enviada_em_plataforma"), str):
+        try:
+            return _utc(datetime.fromisoformat(marca["enviada_em_plataforma"]))
+        except ValueError:
+            pass
+    return _quando(mensagem)
+
+
+def _empurrar(mensagem: AtendimentoMensagem, resposta: AtendimentoMensagem) -> bool:
+    """Põe a fala do cliente logo depois da `resposta` da IA → True se mudou. Sem banco.
+
+    Só para FRENTE: a resposta que a adoção trouxe para trás (o relógio da
+    plataforma) não puxa a fala de volta para antes dela.
+    """
+    original = relogio_original(mensagem)
+    novo = depois_da_resposta(_quando(resposta), original)
+    if mensagem.enviada_em is not None and _utc(mensagem.enviada_em) >= novo:
+        return False
+    mensagem.payload = {
+        **(mensagem.payload or {}),
+        CHAVE_FORA_DE_ORDEM: {
+            "enviada_em_plataforma": original.isoformat(),
+            "resposta_id": str(resposta.id),
+        },
+    }
+    mensagem.enviada_em = novo
+    return True
+
+
+# Revisão cruzada do an0311 (03/11/2026): a fala atrasada que é SÓ reconhecimento ou presença
+# ("ok obrigado", "?", "alguém?", "oi?") — escrita antes da resposta da IA — não reabre a vez:
+# a resposta que veio depois a cobre (reabrir faria o agente responder de novo o "?" velho, ou a
+# conversa ficar "A IA não respondeu", e o "Falta responder" diferente do Duoke). Pergunta,
+# pedido, anexo e cartão continuam indo para depois da resposta.
+_SO_PRESENCA = re.compile(
+    r"(?:(?:oi+|ola+|opa|ei|alo|hello|alguem|tem\s+alguem|ta|esta|voces?|ai|ae|por\s+favor"
+    r"|bom\s+dia|boa\s+tarde|boa\s+noite)\s*)+"
+)
+
+
+def fala_que_a_resposta_cobre(
+    texto: str | None, *, tipo: str | None = None, anexos: Any = None, payload: Any = None
+) -> bool:
+    """A fala do cliente é só reconhecimento/agradecimento ou presença, sem anexo nem cartão
+    (ver acima)? PURA."""
+    from app.services.atendimento.agente import acao_pessoa
+    from app.services.atendimento.constantes import e_cartao_do_comprador
+
+    if (tipo or "texto") != "texto" or anexos or e_cartao_do_comprador(payload):
+        return False
+    decomposto = unicodedata.normalize("NFKD", (texto or "").lower())
+    plano = "".join(c for c in decomposto if not unicodedata.combining(c))
+    if not plano.strip():
+        return False
+    if re.fullmatch(r"[\s?!.]+", plano):
+        return True
+    if acao_pessoa.so_reconhecimento(texto):
+        return True
+    palavras = " ".join(re.findall(r"[a-z]+", plano))
+    return bool(palavras) and bool(_SO_PRESENCA.fullmatch(palavras))
+
+
+async def _resposta_da_ia_que_nao_viu(
+    session: AsyncSession, conversa: AtendimentoConversa, quando: datetime
+) -> AtendimentoMensagem | None:
+    """A resposta da IA (que não falhou) mais nova, no relógio de `quando` ou depois — e
+    até `JANELA_FORA_DE_ORDEM` dele. É a que não viu a fala do cliente que chega AGORA
+    com esse relógio (a fala nova não existia quando a resposta nasceu)."""
+    momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    return (
+        await session.execute(
+            select(AtendimentoMensagem)
+            .where(
+                AtendimentoMensagem.conversa_id == conversa.id,
+                AtendimentoMensagem.autor == AUTOR_LOJA,
+                AtendimentoMensagem.origem == ORIGEM_IA,
+                AtendimentoMensagem.status != MSG_FALHOU,
+                momento >= quando,
+                momento <= quando + JANELA_FORA_DE_ORDEM,
+            )
+            .order_by(momento.desc(), AtendimentoMensagem.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def reordenar_depois_da_ia(
+    session: AsyncSession, conversa: AtendimentoConversa, resposta: AtendimentoMensagem
+) -> list[AtendimentoMensagem]:
+    """Quando o relógio da resposta da IA muda (o envio terminou, o sync a adotou), as
+    falas do cliente que ela não viu voltam para depois dela → as que mudaram. Sem commit.
+
+    Não viu: a já reordenada por causa desta resposta (`payload[CHAVE_FORA_DE_ORDEM]`) e
+    a que é mais nova que o GATILHO do rascunho dela (o gatilho é a última fala do
+    cliente quando o rascunho nasceu, e o envio confere de novo — `ia._trava_do_turno`)
+    e não passa da resposta, dentro de `JANELA_FORA_DE_ORDEM`.
+    """
+    if (
+        resposta.autor != AUTOR_LOJA
+        or resposta.origem != ORIGEM_IA
+        or resposta.status == MSG_FALHOU
+    ):
+        return []
+    quando = _quando(resposta)
+    momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    marca = AtendimentoMensagem.payload[(CHAVE_FORA_DE_ORDEM, "resposta_id")].astext
+    criterios = [marca == str(resposta.id)]
+    rascunho = (
+        await session.get(AtendimentoRascunho, resposta.rascunho_id)
+        if resposta.rascunho_id is not None
+        else None
+    )
+    gatilho = (
+        await session.get(AtendimentoMensagem, rascunho.mensagem_gatilho_id)
+        if rascunho is not None and rascunho.mensagem_gatilho_id is not None
+        else None
+    )
+    if gatilho is not None:
+        criterios.append(
+            and_(
+                momento > _quando(gatilho),
+                momento <= quando,
+                momento >= quando - JANELA_FORA_DE_ORDEM,
+            )
+        )
+    candidatas = (
+        (
+            await session.execute(
+                select(AtendimentoMensagem).where(
+                    AtendimentoMensagem.conversa_id == conversa.id,
+                    AtendimentoMensagem.autor == AUTOR_CLIENTE,
+                    AtendimentoMensagem.id != resposta.id,
+                    or_(*criterios),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    movidas = [
+        m
+        for m in candidatas
+        if not fala_que_a_resposta_cobre(
+            m.texto, tipo=m.tipo, anexos=m.anexos, payload=getattr(m, "payload", None)
+        )
+        and _empurrar(m, resposta)
+    ]
+    if movidas:
+        logger.info(
+            "atendimento_fala_depois_da_ia",
+            conversa_id=str(conversa.id),
+            resposta_id=str(resposta.id),
+            falas=len(movidas),
+        )
+    return movidas
 
 
 # ── Trava ─────────────────────────────────────────────────────────────────
@@ -859,7 +1046,10 @@ async def _adotar(
         nossa.enviada_em = enviada_em
     if payload:
         nossa.payload = {**(nossa.payload or {}), "sync": payload}
-    recalcular(conversa, [nossa])
+    # O relógio da plataforma pode pôr a resposta da IA depois da fala do cliente
+    # que ela não viu (03/11/2026): a fala volta para depois dela.
+    movidas = await reordenar_depois_da_ia(session, conversa, nossa)
+    recalcular(conversa, [nossa, *movidas])
     # O envio que adotamos pode ter morrido antes de avaliar a
     # sugestão (deploy no meio): a que ficou pendente não vale mais.
     await _aposentar_rascunho(session, conversa, nossa)
@@ -1020,6 +1210,16 @@ async def gravar_mensagem(
                 return nossa, False
             origem = ORIGEM_EXTERNO
 
+    # A fala do cliente que chega DEPOIS de uma resposta da IA, com o relógio da
+    # plataforma de antes dela (03/11/2026): a resposta não a viu — ela vai para
+    # depois da resposta (`_empurrar`) e reabre a vez do cliente.
+    nao_viu = (
+        await _resposta_da_ia_que_nao_viu(session, conversa, enviada_em)
+        if autor == AUTOR_CLIENTE
+        and enviada_em is not None
+        and not fala_que_a_resposta_cobre(texto, tipo=tipo, anexos=anexos, payload=payload)
+        else None
+    )
     mensagem = AtendimentoMensagem(
         conversa_id=conversa.id,
         externo_id=externo_id,
@@ -1038,6 +1238,13 @@ async def gravar_mensagem(
         from app.services.atendimento import apagar
 
         apagar.marcar_apagada(mensagem, por=apagar.POR_PLATAFORMA)
+    if nao_viu is not None and _empurrar(mensagem, nao_viu):
+        logger.info(
+            "atendimento_fala_depois_da_ia",
+            conversa_id=str(conversa.id),
+            resposta_id=str(nao_viu.id),
+            falas=1,
+        )
     await session.flush()  # pendências alheias fora do SAVEPOINT (ver upsert_conversa)
     try:
         async with session.begin_nested():

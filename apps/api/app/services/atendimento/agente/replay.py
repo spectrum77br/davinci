@@ -710,6 +710,10 @@ async def montar_base(
     valores = ia.valores_das_lacunas(conversa, ctx)
     fatos = ia._fatos_para_o_modelo(conversa, ctx, valores)
     fatos_gravados = {**fatos, "lacunas": valores}
+    # A chegada mais nova que o rascunho leu (03/11/2026), como o `_gerar`.
+    chegada_vista = await ia._ultima_chegada_do_cliente(session, conversa.id, ate=as_of)
+    if chegada_vista is not None:
+        fatos_gravados[ia.FATO_CHEGADA_VISTA] = chegada_vista.isoformat()
 
     rajada = ia.rajada_do_cliente(recentes, gatilho)
     textos_cliente = [m.texto for m in rajada if m.texto]
@@ -1149,6 +1153,26 @@ async def como_o_gerar(
     antes = acao_pessoa.gatilhos_antes_do_modelo(base.recentes, gatilho, sinais=base.sinais)
     if antes.so_cartao:
         return None
+    # PARIDADE an0311 (item 9): o recibo fixo da evidência, como o `ia._gerar_pelo_agente` —
+    # antes dos gatilhos de antes do modelo, sem o modelo, no relógio do replay.
+    recibo = acao_pessoa.recibo_da_evidencia(
+        conversa,
+        base.ctx,
+        base.recentes,
+        gatilho,
+        sinais=base.sinais,
+        sinais_do_cliente=base.sinais_do_cliente,
+        agora=extra.get("as_of"),
+    )
+    if recibo is not None:
+        return ia.recibo_do_agente(
+            conversa,
+            gatilho,
+            recibo,
+            modo=base.modo,
+            nomes=base.nomes,
+            manual_hash=ia.manual_hash(ia.organizar_manual(list(base.regras), None)),
+        )
     if antes.gatilhos:
         ctx = ContextoAgente.da_conversa(
             conversa, gatilho, modo=base.modo, nomes=base.nomes, extra=extra
@@ -1255,6 +1279,13 @@ async def rodar_gatilho(
         r.pulado, r.atalho = PULADO_ATALHO, atalho
         r.texto_final = mascarar_texto(atalho.texto, nomes, termos)
         r.decisao = {"rascunho": True, "pessoa": False, "atalho": atalho.categoria}
+        # PARIDADE an0311 (item 1): o envio sozinho segura o turno só de cartão
+        # (`ia._trava_do_turno` → cartao_sem_texto) e a fila o fecha na visita nova.
+        from app.services.atendimento import sem_demanda
+
+        if sem_demanda.turno_so_de_cartao(recentes, gatilho):
+            r.decisao["cartao_sem_texto"] = True
+            r.decisao["cartao_abre_visita"] = sem_demanda.cartao_abre_visita(recentes, gatilho)
         r.rastro = {"transcricao": _transcricao_mascarada(transcricao, nomes, termos)}
         return r
 
@@ -1333,10 +1364,26 @@ async def rodar_gatilho(
     decisao["acoes_modelo"] = _lista(fa.get("acoes_modelo"))
     decisao["modo"] = base.modo
     decisao["avisos_auto"] = [mascarar_texto(a, nomes, termos) for a in decisao["avisos_auto"]]
+    # PARIDADE an0311 (item 9): o recibo fixo (o regatilho o conta como o envio sozinho).
+    if fa.get(ia.FATO_RECIBO):
+        decisao["recibo"] = True
+    # PARIDADE an0311 (itens 9 e 10): as etiquetas que a régua do turno liberou com o contexto
+    # de verdade (o retrato, as datas, as chaves, a UF) — o regatilho as usa em vez de refazer
+    # a régua com o pedido reconstruído (a data fixa de 01/10, sem o retrato). Sempre gravada
+    # (vazia = nenhuma), para o regatilho saber que veio deste replay.
+    decisao["etiquetas_do_turno"] = _lista(fa.get("etiquetas_do_turno"))
     r.decisao = decisao
     r.rastro = _rastro(
         fatos_agente=fa, captura=captura, transcricao=transcricao, nomes=nomes, termos=termos
     )
+    # PARIDADE an0311 (v17): O QUE O ATENDIMENTO JÁ ENVIOU, com a prova do banco (só lê), para
+    # o regatilho (que não tem a sessão) mandar ao verificador como a produção.
+    from app.services.atendimento.agente import verificador as _verificador
+
+    conferidas = await _verificador.respostas_conferidas(session, base.recentes, gatilho)
+    ja = _verificador.ja_enviado_da_conversa(base.recentes, gatilho, base.nomes, conferidas)
+    if ja:
+        r.rastro["ja_enviado"] = [mascarar_texto(t, nomes, termos, digitos=False) for t in ja]
     if gravar and r.parada not in PARADAS_SEM_LINHA:
         r.linha_id = await gravar_replay(r)
     return r

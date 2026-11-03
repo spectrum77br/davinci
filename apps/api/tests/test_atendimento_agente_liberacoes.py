@@ -913,7 +913,7 @@ def test_v11_entrada_traz_a_restricao_e_a_condicao_so_com_as_marcas():
 
 
 def test_v11_sistema_e_versao():
-    assert v.VERSAO in ("v11", "v12", "v13", "v14", "v15", "v16")
+    assert v.VERSAO in ("v11", "v12", "v13", "v14", "v15", "v16", "v17")
     assert (
         "RESTRIÇÃO DE ENVIO POR ESTADO" in v.SISTEMA
         and "CONDIÇÃO DECLARADA NO ANÚNCIO" in v.SISTEMA
@@ -940,9 +940,10 @@ def test_v11_calibracao_tem_as_liberacoes_e_as_linhas_de_antes_sem_as_secoes_nov
         # D1–D3 (23/10/2026): as linhas do grupo `dono_d123` (a garantia Apple, com a
         # condição do anúncio) também trazem a seção; e as do `fechar_eval` (o resumo da
         # restrição, o C2 e o relógio, 23/10/2026); e as do `v16` (27/10/2026: o título, o
-        # «é original?», o receio e a garantia, com a condição do anúncio).
+        # «é original?», o receio e a garantia, com a condição do anúncio); e as do `an0311`
+        # (03/11/2026: o estado que o cliente citou, c5190f5d).
         assert tem == (
-            c.get("grupo") in ("liberacoes", "dono_d123", "fechar_eval", "v16")
+            c.get("grupo") in ("liberacoes", "dono_d123", "fechar_eval", "v16", "an0311")
             and (
                 "conferido" in json.dumps(c["evidencias"])
                 or "condicao" in json.dumps(c["evidencias"])

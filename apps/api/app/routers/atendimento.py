@@ -597,6 +597,10 @@ FILTROS_PERGUNTA_PRIMEIRO = ("midia",)
 # mensagem do cliente (ou a criação, `humano.turno_em_sql`), a mais nova
 # primeiro; o id (como texto) desempata. O cursor: `turno:<ISO>|<id>`.
 _CURSOR_TURNO = "turno:"
+# Item 9 da análise de 31/10–02/11 (o dono, 03/11/2026): a evidência que a loja pediu e
+# chegou vai para o TOPO da Caixa Humano (`humano.prioridade_sql`): o grupo da prioridade
+# primeiro, cada um pelo turno. O cursor do grupo de cima: `turno:prio:<ISO>|<id>`.
+_CURSOR_PRIO = "prio:"
 # As DMs do Instagram esperando entram na mesma ordem pelo prazo: o
 # Instagram não pagina por prazo, então vêm todas (até este teto) e o
 # cursor é aplicado aqui.
@@ -1135,7 +1139,8 @@ def _cursor(
     antes de 14/10/2026 (`prazo:|<id>`, sem a recência) vira (None, "", True,
     0): o grupo sem prazo do começo (a tela não repete o que já tem);
     `prazo:comum:…` (já nos comentários comuns) → grupo 1.
-    Ordem pelo turno (a Caixa Humano): `turno:<ISO>|<id>` → (turno, id, False, 0).
+    Ordem pelo turno (a Caixa Humano): `turno:prio:<ISO>|<id>` (ainda na prioridade, item 9
+    de 03/11/2026) → (turno, id, False, 0); `turno:<ISO>|<id>` → (turno, id, False, 1).
     Sem cursor: o começo (grupo 0).
     """
     bruto = (antes_de or "").strip()
@@ -1145,10 +1150,14 @@ def _cursor(
     if pelo_turno != bruto.startswith(_CURSOR_TURNO):
         raise invalido
     if pelo_turno:
-        turno_txt, sep, ident = bruto[len(_CURSOR_TURNO) :].partition("|")
+        resto = bruto[len(_CURSOR_TURNO) :]
+        grupo = 1
+        if resto.startswith(_CURSOR_PRIO):
+            grupo, resto = 0, resto[len(_CURSOR_PRIO) :]
+        turno_txt, sep, ident = resto.partition("|")
         if not sep or not ident.strip() or not turno_txt.strip():
             raise invalido
-        return _momento_do_cursor(turno_txt, invalido), ident.strip(), False, 0
+        return _momento_do_cursor(turno_txt, invalido), ident.strip(), False, grupo
     if pelo_prazo != bruto.startswith(_CURSOR_PRAZO):
         raise invalido
     grupo = 0
@@ -1192,15 +1201,27 @@ def _momento_do_cursor(bruto: str, invalido: HTTPException) -> datetime | None:
     return _utc(momento)
 
 
+def _na_prioridade(item: dict[str, Any]) -> bool:
+    """O item está no grupo da prioridade da Caixa Humano (item 9, 03/11/2026)?"""
+    humano = item.get("humano")
+    return isinstance(humano, dict) and humano.get("prioridade") is True
+
+
 def _cursor_do_turno(item: dict[str, Any]) -> str | None:
     """O cursor da Caixa Humano a partir do último item da página (None sem o turno)."""
     turno = item.get("turno_em")
-    return f"{_CURSOR_TURNO}{turno.isoformat()}|{item['id']}" if turno else None
+    grupo = _CURSOR_PRIO if _na_prioridade(item) else ""
+    return f"{_CURSOR_TURNO}{grupo}{turno.isoformat()}|{item['id']}" if turno else None
 
 
 def _chave_do_turno(item: dict[str, Any]) -> tuple:
-    """Ordem da Caixa Humano (com `reverse=True`): o turno mais novo primeiro, o id desempata."""
-    return (item.get("turno_em") or datetime.min.replace(tzinfo=UTC), str(item["id"]))
+    """Ordem da Caixa Humano (com `reverse=True`): a prioridade (item 9) primeiro, depois o
+    turno mais novo; o id desempata."""
+    return (
+        _na_prioridade(item),
+        item.get("turno_em") or datetime.min.replace(tzinfo=UTC),
+        str(item["id"]),
+    )
 
 
 def _grupo_do_prazo(item: dict[str, Any]) -> int:
@@ -2685,12 +2706,17 @@ async def _listar_marketplace(
         # não embaixo"), com qualquer filtro: o turno mais novo primeiro (a
         # última mensagem do cliente, ou a criação); o id (como texto)
         # desempata e vai no cursor — nada some nem repete no "carregar mais".
-        momento, ident, _sem, _grupo = _cursor(antes_de, pelo_prazo=False, pelo_turno=True)
+        momento, ident, _sem, grupo = _cursor(antes_de, pelo_prazo=False, pelo_turno=True)
         turno = humano_svc.turno_em_sql()
         id_txt = cast(AtendimentoConversa.id, String)
+        # Item 9 (03/11/2026): a evidência recebida no topo (o grupo 0), depois o resto.
+        prio = humano_svc.prioridade_sql()
         if momento is not None:
-            consulta = consulta.where(or_(turno < momento, and_(turno == momento, id_txt < ident)))
-        consulta = consulta.order_by(turno.desc(), id_txt.desc())
+            depois = or_(turno < momento, and_(turno == momento, id_txt < ident))
+            consulta = consulta.where(
+                or_(not_(prio), and_(prio, depois)) if grupo == 0 else and_(not_(prio), depois)
+            )
+        consulta = consulta.order_by(case((prio, 0), else_=1), turno.desc(), id_txt.desc())
     elif filtro in FILTROS_PELO_PRAZO:
         # O comentário comum das redes no fim (RF7: a pergunta passa à
         # frente); dentro de cada grupo, prazo mais curto primeiro e, sem

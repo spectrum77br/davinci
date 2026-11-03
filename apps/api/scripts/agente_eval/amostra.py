@@ -28,14 +28,34 @@ Uso (de dentro de apps/api, no container da api):
     uv run python -m scripts.agente_eval.amostra --saida /tmp/agente_eval/amostra.jsonl
     uv run python -m scripts.agente_eval.amostra --loja todas --dias 14 --n 200 \\
         --conjunto teste --saida /tmp/agente_eval/amostra_teste.jsonl
+    uv run python -m scripts.agente_eval.amostra --loja todas --plataforma ml --canal pos_venda \\
+        --desde 2026-10-30 --ate 2026-11-03 --n 50 --excluir A.jsonl --excluir-conversas A.jsonl \\
+        --saida /tmp/agente_eval/amostra_ml_pos.jsonl      (o ML: pós-venda; a pergunta à parte)
 
   --loja kia|todas|<uuid>  kia (padrão) = o canal da Kia Shopee; todas = os
                            canais da --plataforma; um uuid de canal ou de loja.
   --plataforma P           shopee (padrão).
   --dias N                 os últimos N dias (padrão 30).
+  --desde D --ate D        no lugar do --dias, uma janela explícita em datas de São Paulo
+                           (AAAA-MM-DD, o --ate inclusive; 03/11/2026). Pode repetir em pares
+                           para dias que não se encostam (--desde 2026-10-30 --ate 2026-10-30
+                           --desde 2026-11-03 --ate 2026-11-03); um --desde sozinho vai até agora.
+  --excluir A.jsonl ...    tira os gatilhos que já estão nessas amostras (o que outro eval usou).
+  --excluir-conversas A.jsonl ...  tira as CONVERSAS dessas amostras, com qualquer turno (as
+                           "conversas inexploradas" do ML, 03/11/2026).
+  --canal C                só as conversas desse canal (pode repetir: --canal pos_venda --canal
+                           pergunta no ML; sem ele, todos os canais com envio da plataforma).
   --n N                    tamanho da amostra (padrão 60).
   --conjunto dev|teste|todos   (padrão todos).
   --semente S              a ordem da escolha (padrão 20261020).
+
+  --gatilhos ARQ           CONGELA exatamente os turnos dados (03/11/2026): um id de mensagem
+                           do cliente por linha (o 1º do turno, como o turnos.sql da análise,
+                           ou o próprio gatilho; '#' comenta). Cada id vira o turno do replay que
+                           tem essa mensagem na rajada — respondido pela equipe, pela IA ou por
+                           ninguém (o `fechado_por` do item). Sem cota, sem --n, sem uma
+                           conversa por vez; o item guarda os ids pedidos (`pedidos`). Não se
+                           mistura com --desde/--ate.
 """
 
 # ruff: noqa: T201
@@ -49,8 +69,8 @@ import json
 import re
 import sys
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
-from datetime import UTC, datetime, timedelta
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
 from uuid import UUID
@@ -58,7 +78,7 @@ from uuid import UUID
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AtendimentoCanal
+from app.models import AtendimentoCanal, AtendimentoConversa, AtendimentoMensagem
 from app.services.atendimento import constantes, ia, validador
 from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento import variacoes as variacoes_svc
@@ -288,6 +308,9 @@ def _item(conversa: Any, turno: replay.Turno) -> dict:
         "gatilho_id": str(turno.gatilho.id),
         "gatilho_em": _iso(ia._momento(turno.gatilho)),
         "resposta_em": _iso(ia._momento(turno.resposta[0])) if turno.resposta else None,
+        # Quem fechou a vez (03/11/2026): "equipe", "ia" ou None (ninguém) — o `--gatilhos`
+        # também congela os turnos que a IA respondeu ou que ficaram sem resposta.
+        "fechado_por": turno.fechado_por,
         "plataforma": conversa.plataforma,
         "canal": conversa.canal,
         "integration_id": str(conversa.integration_id) if conversa.integration_id else None,
@@ -304,6 +327,48 @@ def _item(conversa: Any, turno: replay.Turno) -> dict:
     }
 
 
+def janelas_sp(
+    desde: Sequence[date], ate: Sequence[date], *, agora: datetime
+) -> list[tuple[datetime, datetime]]:
+    """As janelas [início, fim) do `--desde`/`--ate` (datas de São Paulo; o `--ate` inclusive,
+    até a meia-noite seguinte). PURA.
+
+    Em pares, na ordem (o 1º `--desde` com o 1º `--ate`...); um `--desde` sozinho vai até
+    `agora`. Outra combinação, ou fim antes do início: ValueError.
+    """
+    if len(ate) != len(desde) and not (len(desde) == 1 and not ate):
+        raise ValueError("cada --desde precisa do seu --ate (só um --desde sozinho vai até agora)")
+
+    def meia_noite(dia: date) -> datetime:
+        return datetime.combine(dia, time.min, tzinfo=ia.SAO_PAULO).astimezone(UTC)
+
+    saida_: list[tuple[datetime, datetime]] = []
+    for i, d in enumerate(desde):
+        inicio = meia_noite(d)
+        fim = meia_noite(ate[i] + timedelta(days=1)) if ate else agora
+        if fim <= inicio:
+            raise ValueError(f"janela vazia: --desde {d.isoformat()} depois do fim")
+        saida_.append((inicio, fim))
+    return saida_
+
+
+def gatilhos_usados(caminhos: Iterable[Path]) -> frozenset[str]:
+    """Os `gatilho_id` das amostras dadas (o `--excluir`: o que outro eval já usou)."""
+    return _campo_das_amostras(caminhos, "gatilho_id")
+
+
+def conversas_usadas(caminhos: Iterable[Path]) -> frozenset[str]:
+    """Os `conversa_id` das amostras dadas (o `--excluir-conversas`, 03/11/2026)."""
+    return _campo_das_amostras(caminhos, "conversa_id")
+
+
+def _campo_das_amostras(caminhos: Iterable[Path], campo: str) -> frozenset[str]:
+    usados: set[str] = set()
+    for caminho in caminhos:
+        usados.update(str(i[campo]) for i in ler_jsonl(caminho) if i.get(campo))
+    return frozenset(usados)
+
+
 async def montar(
     session: AsyncSession,
     *,
@@ -315,31 +380,172 @@ async def montar(
     conjunto: str | None = None,
     por_conversa: int = 1,
     agora: datetime | None = None,
+    janelas: Sequence[tuple[datetime, datetime]] | None = None,
+    excluir: Collection[str] = frozenset(),
+    excluir_conversas: Collection[str] = frozenset(),
+    so_canais: Collection[str] | None = None,
 ) -> list[dict]:
-    """Os itens da amostra (dicionários prontos para o JSONL). Só lê."""
+    """Os itens da amostra (dicionários prontos para o JSONL). Só lê.
+
+    `janelas` = os [início, fim) do `--desde`/`--ate` (sem elas, os últimos `dias`);
+    `excluir` = os `gatilho_id` que ficam de fora (o `--excluir`); `excluir_conversas` = as
+    conversas que ficam de fora inteiras (o `--excluir-conversas`); `so_canais` = só as conversas
+    desses canais (o `--canal`; None = todos).
+    """
     agora = agora or datetime.now(UTC)
+    if not janelas:
+        janelas = [(agora - timedelta(days=max(1, dias)), agora)]
+    canais = list(canal_ids) if canal_ids is not None else None
     candidatos: list[dict] = []
-    # Lote a lote (a Shopee inteira não cabe na memória de uma vez); os turnos
-    # de uma conversa vêm juntos, e a conversa entra pelos mais recentes.
-    async for achados in replay.turnos_em_lotes(
-        session,
-        inicio=agora - timedelta(days=max(1, dias)),
-        fim=agora,
-        plataformas=[plataforma] if plataforma else None,
-        canal_ids=list(canal_ids) if canal_ids is not None else None,
-    ):
-        vistos: Counter[Any] = Counter()
-        for conversa, turno in sorted(
-            achados, key=lambda par: ia._momento(par[1].gatilho), reverse=True
+    ids: set[str] = set()
+    # Uma conversa entra pelos turnos mais recentes: a janela mais nova primeiro e, dentro
+    # dela, o gatilho mais novo primeiro (os turnos de uma conversa vêm no mesmo lote).
+    vistos: Counter[Any] = Counter()
+    for inicio, fim in sorted(janelas, key=lambda j: j[1], reverse=True):
+        # Lote a lote (a Shopee inteira não cabe na memória de uma vez).
+        async for achados in replay.turnos_em_lotes(
+            session,
+            inicio=inicio,
+            fim=fim,
+            plataformas=[plataforma] if plataforma else None,
+            canal_ids=canais,
         ):
-            if vistos[conversa.id] >= max(1, por_conversa):
-                continue
-            item = _item(conversa, turno)
-            if conjunto and item["conjunto"] != conjunto:
-                continue
-            vistos[conversa.id] += 1
-            candidatos.append(item)
+            for conversa, turno in sorted(
+                achados, key=lambda par: ia._momento(par[1].gatilho), reverse=True
+            ):
+                if str(turno.gatilho.id) in excluir or str(conversa.id) in excluir_conversas:
+                    continue
+                if so_canais is not None and conversa.canal not in so_canais:
+                    continue
+                if vistos[conversa.id] >= max(1, por_conversa):
+                    continue
+                item = _item(conversa, turno)
+                if (conjunto and item["conjunto"] != conjunto) or item["id"] in ids:
+                    continue
+                vistos[conversa.id] += 1
+                ids.add(item["id"])
+                candidatos.append(item)
     return escolher(candidatos, n=n, semente=semente)
+
+
+# ── O `--gatilhos`: exatamente os turnos dados (03/11/2026) ───────────────
+
+_SEPARADORES = re.compile(r"[\s|,;]+")
+# Os ids no `IN` de uma vez.
+LOTE_DE_IDS = 500
+# Faltas do `--gatilhos` (o resumo conta; nada some calado).
+FALTA_NAO_ACHADO = "nao_achado"
+FALTA_CANAL_SEM_ENVIO = "canal_sem_envio"
+FALTA_NAO_E_DO_CLIENTE = "nao_e_do_cliente"
+FALTA_MESMO_TURNO = "mesmo_turno"
+FALTA_FORA_DO_CONJUNTO = "fora_do_conjunto"
+
+
+def ler_gatilhos(caminho: Path) -> list[UUID]:
+    """Os ids do `--gatilhos`: o 1º campo de cada linha ('#' comenta; vazio pula; repetido
+    sai). Um campo que não é uuid: SystemExit com a linha."""
+    ids: dict[UUID, None] = {}
+    for n, linha in enumerate(caminho.read_text(encoding="utf-8").splitlines(), start=1):
+        campos = [c for c in _SEPARADORES.split(linha.split("#", 1)[0]) if c]
+        if not campos:
+            continue
+        try:
+            ids.setdefault(UUID(campos[0]), None)
+        except ValueError:
+            erro = f"{caminho}:{n}: não é um id de mensagem: {campos[0][:40]!r}"
+            raise SystemExit(erro) from None
+    return list(ids)
+
+
+def turno_do_pedido(turnos_: Sequence[replay.Turno], mensagem_id: Any) -> replay.Turno | None:
+    """O turno que tem a mensagem pedida na rajada (o 1º id do turno, como no turnos.sql da
+    análise, ou o próprio gatilho). A mensagem que não é do cliente: None. PURA."""
+    alvo = str(mensagem_id)
+    for t in turnos_:
+        if str(t.gatilho.id) == alvo or any(str(m.id) == alvo for m in t.rajada):
+            return t
+    return None
+
+
+async def turnos_dos_gatilhos(
+    session: AsyncSession, ids: Sequence[UUID]
+) -> tuple[list[tuple[Any, replay.Turno, UUID]], Counter[str]]:
+    """(conversa, turno, id pedido) de cada id — a mesma leitura do `replay.turnos_em_lotes`
+    (sem a que falhou e sem a nota; do `MARGEM_ANTES` antes do 1º pedido até a resposta de
+    24 h depois do último), mas SÓ as conversas dos ids e sem filtrar quem respondeu. Só lê."""
+    m, c = AtendimentoMensagem, AtendimentoConversa
+    momento = ia._momento_col()
+    faltas: Counter[str] = Counter()
+    achadas: dict[UUID, tuple[UUID, datetime]] = {}
+    for i in range(0, len(ids), LOTE_DE_IDS):
+        linhas = await session.execute(
+            select(m.id, m.conversa_id, momento).where(m.id.in_(list(ids[i : i + LOTE_DE_IDS])))
+        )
+        for mid, cid, quando in linhas.all():
+            achadas[mid] = (cid, quando)
+    por_conversa: dict[UUID, list[tuple[UUID, datetime]]] = {}
+    for mid in ids:
+        if mid not in achadas:
+            faltas[FALTA_NAO_ACHADO] += 1
+            continue
+        cid, quando = achadas[mid]
+        por_conversa.setdefault(cid, []).append((mid, quando))
+    saida_: list[tuple[Any, replay.Turno, UUID]] = []
+    for cid, pedidos in por_conversa.items():
+        conversa = await session.get(c, cid)
+        if conversa is None or constantes.motivo_canal_sem_envio(
+            conversa.canal, conversa.plataforma, conversa.dados
+        ):
+            faltas[FALTA_CANAL_SEM_ENVIO] += len(pedidos)
+            continue
+        momentos = [q for _, q in pedidos]
+        mensagens = (
+            (
+                await session.execute(
+                    select(m)
+                    .where(
+                        m.conversa_id == cid,
+                        momento >= min(momentos) - replay.MARGEM_ANTES,
+                        momento
+                        < max(momentos) + replay.MARGEM_DEPOIS + replay.JANELA_RESPOSTA_REAL,
+                        m.status != constantes.MSG_FALHOU,
+                        m.origem != constantes.ORIGEM_NOTA,
+                    )
+                    .order_by(momento, m.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        turnos_ = replay.turnos(list(mensagens))
+        for mid, _quando in pedidos:
+            turno = turno_do_pedido(turnos_, mid)
+            if turno is None:
+                faltas[FALTA_NAO_E_DO_CLIENTE] += 1
+                continue
+            saida_.append((conversa, turno, mid))
+    return saida_, faltas
+
+
+async def montar_dos_gatilhos(
+    session: AsyncSession, ids: Sequence[UUID], *, conjunto: str | None = None
+) -> tuple[list[dict], dict[str, int]]:
+    """Os itens dos ids do `--gatilhos` (na ordem do gatilho) e as faltas. Dois ids do mesmo
+    turno do replay viram UM item com os dois em `pedidos`. Só lê."""
+    achados, faltas = await turnos_dos_gatilhos(session, ids)
+    itens: dict[str, dict] = {}
+    for conversa, turno, pedido in achados:
+        item = _item(conversa, turno)
+        if conjunto and item["conjunto"] != conjunto:
+            faltas[FALTA_FORA_DO_CONJUNTO] += 1
+            continue
+        if item["id"] in itens:
+            itens[item["id"]]["pedidos"].append(str(pedido))
+            faltas[FALTA_MESMO_TURNO] += 1
+            continue
+        item["pedidos"] = [str(pedido)]
+        itens[item["id"]] = item
+    return sorted(itens.values(), key=lambda i: (i["gatilho_em"] or "", i["id"])), dict(faltas)
 
 
 def gravar_jsonl(caminho: Path, itens: Iterable[Mapping[str, Any]]) -> None:
@@ -378,36 +584,94 @@ def _resumo(itens: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return {
         "itens": len(itens),
         "por_estrato": dict(Counter(i["estrato"] for i in itens).most_common()),
+        "por_canal": dict(
+            Counter(f"{i.get('plataforma')}:{i.get('canal')}" for i in itens).most_common()
+        ),
         "por_rotulo": dict(Counter(i.get("rotulo") or "?" for i in itens).most_common()),
         "por_conjunto": dict(Counter(i["conjunto"] for i in itens).most_common()),
+        "por_fechado": dict(
+            Counter(i.get("fechado_por") or "ninguem" for i in itens).most_common()
+        ),
     }
 
 
-async def principal(argv: list[str] | None = None) -> int:
+def _data(valor: str) -> date:
+    try:
+        return date.fromisoformat(valor)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"data AAAA-MM-DD: {valor!r}") from None
+
+
+async def principal(argv: list[str] | None = None, *, agora: datetime | None = None) -> int:
     p = argparse.ArgumentParser(description="A amostra do eval do agente (só leitura).")
     p.add_argument("--loja", default="kia", help="kia | todas | <uuid de canal ou loja>")
     p.add_argument("--plataforma", default="shopee")
     p.add_argument("--dias", type=int, default=30)
+    p.add_argument("--desde", type=_data, action="append", default=[], help="AAAA-MM-DD (SP)")
+    p.add_argument("--ate", type=_data, action="append", default=[], help="AAAA-MM-DD, inclusive")
+    p.add_argument("--excluir", type=Path, nargs="+", action="extend", default=[])
+    p.add_argument("--excluir-conversas", type=Path, nargs="+", action="extend", default=[])
+    p.add_argument("--canal", action="append", default=[], help="só este canal (pode repetir)")
+    p.add_argument("--gatilhos", type=Path, help="um id de mensagem por linha: só esses turnos")
     p.add_argument("--n", type=int, default=60)
     p.add_argument("--conjunto", choices=("dev", "teste", "todos"), default="todos")
     p.add_argument("--semente", default=SEMENTE)
     p.add_argument("--por-conversa", type=int, default=1)
     p.add_argument("--saida", type=Path, default=SAIDA_PADRAO)
     args = p.parse_args(argv)
-    async with replay.sessao_replay() as s:
-        canais = await canais_da_loja(s, args.loja, args.plataforma)
-        itens = await montar(
-            s,
-            canal_ids=canais,
-            plataforma=args.plataforma,
-            dias=args.dias,
-            n=max(1, args.n),
-            semente=args.semente,
-            conjunto=None if args.conjunto == "todos" else args.conjunto,
-            por_conversa=args.por_conversa,
-        )
+    conjunto = None if args.conjunto == "todos" else args.conjunto
+    agora = agora or datetime.now(UTC)
+    extra: dict[str, Any] = {}
+    if args.gatilhos is not None:
+        if args.desde or args.ate or args.canal or args.excluir_conversas:
+            p.error(
+                "--gatilhos não se mistura com --desde/--ate, --canal nem --excluir-conversas "
+                "(os ids já dizem os turnos)"
+            )
+        ids = ler_gatilhos(args.gatilhos)
+        async with replay.sessao_replay() as s:
+            itens, faltas = await montar_dos_gatilhos(s, ids, conjunto=conjunto)
+        extra = {"pedidos": len(ids), "faltas": faltas}
+    else:
+        try:
+            janelas = janelas_sp(args.desde, args.ate, agora=agora) if args.desde else None
+        except ValueError as e:
+            p.error(str(e))
+        if args.ate and not args.desde:
+            p.error("--ate sem --desde")
+        excluir = gatilhos_usados(args.excluir)
+        sem_conversas = conversas_usadas(args.excluir_conversas)
+        async with replay.sessao_replay() as s:
+            canais = await canais_da_loja(s, args.loja, args.plataforma)
+            itens = await montar(
+                s,
+                canal_ids=canais,
+                plataforma=args.plataforma,
+                dias=args.dias,
+                n=max(1, args.n),
+                semente=args.semente,
+                conjunto=conjunto,
+                por_conversa=args.por_conversa,
+                agora=agora,
+                janelas=janelas,
+                excluir=excluir,
+                excluir_conversas=sem_conversas,
+                so_canais=frozenset(args.canal) if args.canal else None,
+            )
+        if janelas:
+            extra["janelas"] = [[_iso(a), _iso(b)] for a, b in janelas]
+        if args.excluir:
+            extra["excluidos_conhecidos"] = len(excluir)
+        if args.excluir_conversas:
+            extra["conversas_excluidas_conhecidas"] = len(sem_conversas)
+        if args.canal:
+            extra["canais"] = sorted(set(args.canal))
     gravar_jsonl(args.saida, itens)
-    print(json.dumps({"saida": str(args.saida), **_resumo(itens)}, ensure_ascii=False, indent=2))
+    print(
+        json.dumps(
+            {"saida": str(args.saida), **_resumo(itens), **extra}, ensure_ascii=False, indent=2
+        )
+    )
     return 0
 
 

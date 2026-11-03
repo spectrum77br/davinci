@@ -764,6 +764,13 @@ class Settings(BaseSettings):
     # e `atendimento_conversas.dados.humano_pos_envio`. `false` = a régua de antes (toda
     # devolução aberta vai inteira para pessoa). O legado não lê.
     atendimento_agente_responde_e_marca: bool = True
+    # Itens 7, 9 e 10 da análise de 31/10–02/11 (o dono, 03/11/2026: "aplique as
+    # correções"): o Abrir chamado (entrega) e o Ag. cancelamento viram ETIQUETA (a resposta
+    # informativa sai e a conversa fica na Caixa Humano com o rótulo), a evidência pedida
+    # ganha o recibo na hora (no topo da Caixa Humano), e o D1 vale também na disputa e no
+    # defeito que só repete o motivo da devolução aberta. `false` = a régua de antes. O
+    # legado não lê.
+    atendimento_agente_etiquetas_pos_envio: bool = True
     # O replay noturno (sombra): refaz os gatilhos do dia anterior e grava só
     # em `atendimento_agente_replay`, nunca na caixa. Plataformas separadas
     # por vírgula.

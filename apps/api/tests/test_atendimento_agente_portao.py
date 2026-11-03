@@ -402,7 +402,7 @@ def _entrada(avisos: tuple[str, ...]) -> str:
 
 
 def test_v14_os_avisos_vao_na_entrada_sem_o_fecho_de_politica():
-    assert verificador.VERSAO == "v16"
+    assert verificador.VERSAO == "v17"
     assert "AVISOS DAS CHECAGENS" not in _entrada(())
     e = _entrada(("afirma o NFC ('sim') sem fonte — no automático, pessoa confere",))
     assert verificador.CABECALHO_AVISOS in e
@@ -534,7 +534,7 @@ def _entrada_shopee(evidencias, texto, perguntas, plataforma="shopee") -> str:
 
 
 def test_v15_as_frases_padrao_vao_so_na_shopee():
-    assert verificador.VERSAO == "v16"
+    assert verificador.VERSAO == "v17"
     e = _entrada_shopee([], "Olá!", ["oi"])
     assert verificador.CABECALHO_FRASES_PADRAO in e
     for frase in verificador.FRASES_PADRAO_SHOPEE:

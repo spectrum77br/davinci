@@ -127,6 +127,8 @@ def _para_nota(
         "estrato": item.get("estrato"),
         "rotulo": item.get("rotulo"),
         "plataforma": reg.get("plataforma") or item.get("plataforma"),
+        # O canal (03/11/2026): no ML a pergunta é pública e o pós-venda tem 350 caracteres.
+        "canal": reg.get("canal") or item.get("canal"),
         "assunto": decisao.get("categoria") or proposta.get("assunto") or reg.get("atalho"),
         "transcricao": list(rastro.get("transcricao") or []),
         "rastro": {

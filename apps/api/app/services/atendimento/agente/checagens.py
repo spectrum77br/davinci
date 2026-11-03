@@ -8916,12 +8916,20 @@ def responde_e_marca_da_proposta(
     lista devolvida, que o laço junta às ações do modelo — fica em `acoes_pos_envio`).
     Sem a marca, sem texto, com outra ação ou "perguntar": a Proposta como veio. PURA."""
     acao = proposta.acao_pessoa
+    # Itens 9 e 10 (03/11/2026): a etiqueta liberada do turno (`ctx.etiquetas_pos_envio`: o
+    # Abrir chamado da entrega, o Ag. cancelamento) que o modelo escolheu com texto também
+    # vira "responder" — a ação continua, depois do envio.
+    de_depois = (agente_ctx.ACOES_POS_ENVIO if ctx.responde_e_marca else frozenset()) | (
+        frozenset(getattr(ctx, "etiquetas_pos_envio", ()) or ()) & agente_ctx.ACOES_ETIQUETA
+    )
     if (
-        not ctx.responde_e_marca
+        not de_depois
         or not (proposta.texto or "").strip()
         or proposta.acao not in ("responder", "pessoa")
-        or (acao is not None and acao not in agente_ctx.ACOES_POS_ENVIO)
+        or (acao is not None and acao not in de_depois)
         or (proposta.acao == "responder" and acao is None)
+        # Sem o D1, a "pessoa" sem a ação nomeada continua pessoa.
+        or (acao is None and not ctx.responde_e_marca)
     ):
         return proposta, []
     nova = proposta.model_copy(update={"acao": "responder", "acao_pessoa": None})
@@ -9007,13 +9015,19 @@ _OUTRA_ACAO_DA_EQUIPE = re.compile(
 )
 
 
-def conferir_responde_e_marca(texto: str, *, acao: str, marca: bool) -> list[PendenciaAgente]:
+def conferir_responde_e_marca(
+    texto: str, *, acao: str, marca: bool, disputa: bool = False
+) -> list[PendenciaAgente]:
     """D1: a resposta do "responde e marca" fora da forma (ver acima) → SUAVE. PURA.
-    `marca` = `ctx.responde_e_marca`."""
+    `marca` = `ctx.responde_e_marca`; `disputa` (item 7, 03/11/2026) = a solicitação está
+    em disputa (`acao_pessoa.disputa_do_turno`): o reembolso não é certo — a frase que o dá
+    sem condição ("o reembolso é feito pela Shopee pela mesma forma de pagamento") é DURA."""
     if not marca or acao not in ("responder", "perguntar") or not (texto or "").strip():
         return []
     plano = " ".join(_plano(texto).split())
     achados: list[str] = []
+    if disputa and _reembolso_sem_condicao(plano):
+        achados.append("dá o reembolso como certo na disputa")
     if _DECIDE_A_DEVOLUCAO.search(plano):
         achados.append("decide ou dá o resultado da devolução/do reembolso")
     if _PRAZO_DO_REEMBOLSO.search(plano):
@@ -9027,6 +9041,198 @@ def conferir_responde_e_marca(texto: str, *, acao: str, marca: bool) -> list[Pen
     return [
         _suave(RESPONDE_E_MARCA, MOTIVO_RESPONDE_E_MARCA.format(o_que=o_que)) for o_que in achados
     ]
+
+
+# Item 7 (03/11/2026): na DISPUTA (a loja contestou, a Shopee julgando), a frase do
+# reembolso só vale com a condição ("se a Shopee aprovar", "caso a decisão seja a seu favor").
+# Revisão de 03/11/2026: as formas do futuro e do infinitivo ("a Shopee vai devolver o seu
+# dinheiro", "devolverá", "irá reembolsar", "vai estornar", "o valor vai ser devolvido") e o
+# "você vai receber o reembolso" também dão o reembolso como certo; e, na disputa, QUALQUER
+# frase do reembolso/estorno/dinheiro de volta sem a condição nem a incerteza dita (o "em
+# análise", o "depende da decisão") segura — a frase do "acontece" segura até com a incerteza
+# ("a Shopee está analisando e vai devolver o seu dinheiro").
+_REEMBOLSO_ACONTECE = re.compile(
+    # O reembolso/o estorno/o dinheiro/o valor + o verbo que o dá como feito ou certo.
+    r"\b(?:reembols\w*|estorno|dinheiro|valor|pagamento)\b,?(?:\s+[a-z0-9,]+){0,6}?\s+"
+    r"(?:(?:e|sera|serao|vai\s+ser|vao\s+ser|ira\s+ser|deve\s+ser|fica|ficara|esta|foi|foram)\s+"
+    r"(?:\w+\s+)?(?:feit|devolvid|creditad|estornad|reembolsad|liberad|pag[oa]s?\b|ressarcid"
+    r"|depositad|restituid|processad|garantid|assegurad)\w*"
+    r"|volta\w*|cai\b|caira|vai\s+(?:cair|voltar|retornar|entrar|sair)|retorna\w*|sai\b|saira"
+    r"|entra\b|entrara)"
+    # O reembolso garantido/assegurado/certo, sem verbo ("fica com o reembolso garantido").
+    r"|\b(?:reembols\w*|estorno|dinheiro|valor)\s+(?:\w+\s+)?(?:garantid|assegurad|cert[oa]\b)\w*"
+    # A Shopee/a plataforma + o verbo, no presente, no futuro ou no infinitivo.
+    r"|\b(?:shopee|plataforma|tiktok)\s+(?:[\w,]+\s+){0,4}?(?:devolv(?:e|em|er|era|erao)"
+    r"|reembols(?:a|am|ar|ara|arao)|estorn(?:a|am|ar|ara|arao)|ressarc(?:e|em|ir|ira)"
+    r"|restitu(?:i|em|ir|ira)|credit(?:a|am|ar|ara))\b"
+    r"|\b(?:shopee|plataforma|tiktok)\s+(?:[\w,]+\s+){0,2}?(?:faz|fara|fazer|libera|liberar"
+    r"|liberara|efetua|efetuar|efetuara|realiza|realizar|realizara|processa|processar"
+    r"|processara)\s+(?:\w+\s+){0,2}?(?:reembols\w*|estorno|devoluc\w*\s+do\s+(?:valor|dinheiro)"
+    r"|valor|dinheiro|pagamento)"
+    # O cliente vai receber/recebe/receberá o reembolso, o dinheiro de volta, o valor.
+    r"|\b(?:(?:vai|ira|vao|irao|deve|devera)\s+receber|recebera|receberao|(?:voce|vc)\s+recebe)"
+    r"\s+(?:[\w,]+\s+){0,3}?(?:reembols\w*|estorno|dinheiro|valor)\b"
+)
+_COM_A_CONDICAO = re.compile(
+    r"\b(?:se|caso)\s+(?:[\w,]+\s+){0,5}?(?:aprov\w*|decid\w*|favor\w*|acatad\w*|acolhid\w*"
+    r"|deferid\w*|der\s+razao|resolv\w*|confirmad\w*)"
+    r"|\b(?:apos|depois\s+d)[ao]?\s+(?:a\s+)?aprovac\w*|\bem\s+caso\s+de\s+aprovac\w*"
+    r"|\bquando\s+(?:a\s+)?(?:shopee|plataforma|tiktok)\s+(?:\w+\s+)?(?:aprovar|der\s+razao)\b"
+    r"|\bdepend\w*\s+(?:\w+\s+){0,2}?d[ao]s?\s+(?:\w+\s+){0,2}?(?:decisao|analise|aprovac\w*"
+    r"|resultado|avaliac\w*|julgament\w*)"
+)
+# A frase que FALA do reembolso (na disputa): o reembolso, o estorno, o ressarcimento, o
+# dinheiro/o valor de volta — fora o nome da solicitação ("a solicitação de reembolso", "o
+# pedido de devolução e reembolso") e o assunto ("sobre o reembolso", "a preocupação com o
+# reembolso"), que não dizem nada dele.
+_FALA_DO_REEMBOLSO = re.compile(
+    r"\breembols\w*|\bestorn\w*|\bressarc\w*|\brestitu\w*|\bdinheiro\s+de\s+volta\b"
+    r"|\b(?:dinheiro|valor|pagamento)\s+(?:[\w,]+\s+){0,3}?(?:volt|devolvid|retorn|credit)\w*"
+    r"|\bdevolv\w*\s+(?:\w+\s+){0,2}?(?:dinheiro|valor|pagamento)\b"
+)
+_NOME_DO_REEMBOLSO = re.compile(
+    r"\b(?:solicitac\w*|pedido|requisic\w*|processo|caso|disputa|analise|andamento|status"
+    r"|situacao|motivo|opcao|botao|tela)\s+(?:\w+\s+)?d[eoa]s?\s+(?:seu\s+|sua\s+)?"
+    r"(?:devoluc\w*\s+(?:e|ou|com)\s+)?(?:reembols\w*|estorno|devoluc\w*)"
+    r"|\b(?:sobre|quanto\s+a[os]?|em\s+relacao\s+a[os]?|a\s+respeito\s+d[oa]"
+    r"|preocupac\w*\s+com|duvida\w*\s+(?:sobre|com))\s+"
+    r"(?:o\s+|a\s+)?(?:seu\s+|sua\s+)?(?:reembols\w*|estorno|devoluc\w*)"
+)
+_INCERTEZA_DO_REEMBOLSO = re.compile(
+    r"\bem\s+analise\b|\banalis\w*|\bavaliac\w*|\bavaliand\w*|\baguard\w*|\bjulg\w*"
+    r"|\bdisputa\b|\bdecisao\b|\bresultado\b"
+    r"|\bnao\s+(?:\w+\s+){0,2}?(?:garant|promet|inform|confirm|sab|consegu|tem\s+como"
+    r"|temos\s+como|ha\s+como|e\s+possivel|previs|definid)\w*"
+    r"|\bainda\s+(?:nao|sem)\b|\bsem\s+(?:previsao|definicao|decisao)\b"
+)
+
+
+def _reembolso_sem_condicao(plano: str) -> bool:
+    """Alguma frase dá o reembolso como certo, sem a condição da decisão? PURA. Só na
+    disputa (`conferir_responde_e_marca(disputa=True)`): a frase do "acontece"
+    (`_REEMBOLSO_ACONTECE`) sem a condição; e a que só FALA do reembolso sem a condição nem
+    a incerteza dita (`_INCERTEZA_DO_REEMBOLSO`)."""
+    for frase in re.split(r"[.!?;\n]+", plano):
+        if not frase.strip() or _COM_A_CONDICAO.search(frase):
+            continue
+        if _REEMBOLSO_ACONTECE.search(frase):
+            return True
+        if _FALA_DO_REEMBOLSO.search(
+            _NOME_DO_REEMBOLSO.sub(" ", frase)
+        ) and not _INCERTEZA_DO_REEMBOLSO.search(frase):
+            return True
+    return False
+
+
+# ── 10c. A tela quebrada (item 2 da análise de 31/10–02/11, 03/11/2026) ─────
+#
+# 7fcf8f73 (Barbosa, 31/10): a equipe já tinha recusado a garantia da tela trincada (mau
+# uso); o agente pediu vídeo e fotos para "a equipe analisar" — reabriu o caso e criou a
+# expectativa. A regra do dono (27/10/2026): a garantia não cobre aparelho quebrado. Com a
+# tela quebrada/trincada/rachada no que o cliente escreveu, a resposta que pede a evidência,
+# oferece análise, devolução, troca ou diz que a garantia cobre → DURA (pessoa). A resposta
+# do D1/da rotina (a solicitação que o cliente JÁ abriu na plataforma) só informa: fora.
+TELA_QUEBRADA = "tela_quebrada_com_oferta"
+MOTIVO_TELA_QUEBRADA = (
+    "o cliente fala de tela quebrada/trincada e a resposta oferece análise, vídeo/fotos, "
+    "devolução ou troca — a garantia não cobre: pessoa"
+)
+_OFERTA_NA_TELA = re.compile(
+    r"\b(?:equipe|loja|nos|a\s+gente|tecnico|assistencia)\s+(?:\w+\s+){0,2}?(?:analis|avali"
+    r"|verific|examin)\w*"
+    r"|\banalis\w*\s+(?:\w+\s+){0,3}?(?:caso|aparelho|video|fotos?|imagens?|tela|garantia)\b"
+    r"|\b(?:solicit|abr|pedir|peca|faca|fazer|iniciar|inicie)\w*\s+(?:\w+\s+){0,2}?(?:devoluc"
+    r"|reembols|troca)\w*"
+    r"|\bdevoluc\w*\s+(?:\w+\s+){0,3}?(?:pela|na|no|pelo)\s+(?:propria\s+)?(?:shopee|plataforma"
+    r"|app|aplicativo|tiktok)\b"
+    r"|\b(?:trocamos|trocaremos|vamos\s+trocar|podemos\s+trocar|fazemos\s+a\s+troca"
+    r"|devolvemos|reembolsamos)\b"
+    r"|\bgarantia\s+(?:\w+\s+){0,2}?(?:cobre|cobrira|abrange)\b(?!\s+(?:apenas|so|somente)\b)"
+)
+
+
+def conferir_tela_quebrada(
+    texto: str,
+    *,
+    acao: str,
+    textos_cliente: Iterable[str],
+    informa_a_solicitacao: bool = False,
+) -> list[PendenciaAgente]:
+    """A tela quebrada com a oferta (ver acima) → DURA. PURA. `textos_cliente` = o que o
+    cliente escreveu na conversa (o histórico lido)."""
+    if informa_a_solicitacao or acao not in ("responder", "perguntar"):
+        return []
+    if not (texto or "").strip():
+        return []
+    if not any(acao_pessoa.fala_de_tela_quebrada(t) for t in textos_cliente if t):
+        return []
+    plano = " ".join(_plano(texto).split())
+    plano_sem_negacao = re.sub(r"\bnao\s+(?:\w+\s+){0,2}?cobre\b", " ", plano)
+    if acao_pessoa.pede_evidencia(texto) or _OFERTA_NA_TELA.search(plano_sem_negacao):
+        return [_pessoa(TELA_QUEBRADA, MOTIVO_TELA_QUEBRADA)]
+    return []
+
+
+# ── 10d. O Ag. cancelamento como etiqueta (item 10, 03/11/2026) ──────────────
+#
+# Com o Ag. cancelamento liberado como etiqueta (`acao_pessoa.etiquetas_do_turno`: a fala
+# que não toca o destino do pedido), a resposta também não fala dele: envio, postagem,
+# entrega, prazo, rastreio, cancelamento — o 83955 pode cancelar o pedido; isso é da pessoa.
+AG_CANCELAMENTO_NA_RESPOSTA = "ag_cancelamento_na_resposta"
+MOTIVO_AG_CANCELAMENTO_NA_RESPOSTA = (
+    "o pedido está em Ag. cancelamento e a resposta fala do envio, da entrega, do prazo ou do "
+    "cancelamento — pessoa"
+)
+_DESTINO_NA_RESPOSTA = re.compile(
+    r"\b(?:envi\w*|post\w*|despach\w*|entreg\w*|prazo\w*|rastrei\w*|transport\w*|cheg\w*"
+    r"|cancel\w*|estorn\w*|reembols\w*|separac\w*|coleta\w*|previs\w*|a\s+caminho|logistic\w*)"
+)
+# Revisão de 03/11/2026: o pedido no 83955 provavelmente não segue (b4e69bf2: no dia seguinte
+# a loja ofereceu outra cor) — a resposta também não diz que ele está confirmado/garantido/
+# "tudo certo", nem fala do estoque da variação, nem oferece outra cor/modelo/troca (o
+# `sugerir_troca`: "a resposta é da pessoa"). A pergunta de produto pura (o NFC, a bateria) e
+# o cumprimento continuam saindo.
+MOTIVO_AG_CANCELAMENTO_ESTADO_NA_RESPOSTA = (
+    "o pedido está em Ag. cancelamento e a resposta dá o pedido como confirmado/certo, fala do "
+    "estoque da variação ou oferece outra opção/troca — pessoa"
+)
+# A despedida de sempre ("ficamos disponíveis para qualquer dúvida") não é o estoque.
+_A_DISPOSICAO = re.compile(
+    r"\b(?:ficamos|fico|estamos|estou|seguimos|sigo|permanecemos|continuamos|sempre)\s+"
+    r"(?:\w+\s+)?disponi\w*"
+)
+_ESTADO_OU_ESTOQUE_NA_RESPOSTA = re.compile(
+    # O estado do pedido dado como certo.
+    r"\b(?:confirmad|garantid|aprovad|assegurad)\w*"
+    r"|\bsegu(?:e|ira|indo|ir)\s+(?:\w+\s+)?normal\w*|\bpode\s+ficar\s+tranquil\w*"
+    r"|\btudo\s+(?:certo|certinho|ok|em\s+ordem)\s+com\s+(?:o\s+|a\s+)?(?:seu\s+|sua\s+)?"
+    r"(?:pedido|compra)"
+    r"|\b(?:pedido|compra)\s+(?:\w+\s+){0,2}?(?:esta|ficou|segue|e)\s+(?:\w+\s+)?(?:certo|certinho"
+    r"|ok|em\s+ordem|normal)\b"
+    # O estoque/a disponibilidade da variação.
+    r"|\bestoque\b|\bdisponi\w*|\bindisponi\w*|\bem\s+falta\b|\bfalt(?:a|ou|ando)\b"
+    r"|\bacab(?:ou|aram|ando)\b|\besgot\w*|\breposic\w*|\brepor\b"
+    # A troca/a oferta de outra opção.
+    r"|\btroc\w*|\bno\s+lugar\b|\bsubstitu\w*|\balternativ\w*"
+    r"|\boutr[ao]s?\s+(?:cor|cores|modelo|modelos|variac\w*|opc\w*|versao|versoes|tamanho"
+    r"|aparelho)\b"
+)
+
+
+def conferir_ag_cancelamento_na_resposta(
+    texto: str, *, acao: str, etiqueta: bool
+) -> list[PendenciaAgente]:
+    """A resposta com o Ag. cancelamento como etiqueta fala do destino do pedido, do estado
+    dele, do estoque da variação ou oferece troca → DURA. PURA. `etiqueta` = o
+    `ag_cancelamento` em `ctx.acoes_pos_envio`."""
+    if not etiqueta or acao not in ("responder", "perguntar") or not (texto or "").strip():
+        return []
+    plano = " ".join(_plano(texto).split())
+    if _DESTINO_NA_RESPOSTA.search(plano):
+        return [_pessoa(AG_CANCELAMENTO_NA_RESPOSTA, MOTIVO_AG_CANCELAMENTO_NA_RESPOSTA)]
+    if _ESTADO_OU_ESTOQUE_NA_RESPOSTA.search(_A_DISPOSICAO.sub(" ", plano)):
+        return [_pessoa(AG_CANCELAMENTO_NA_RESPOSTA, MOTIVO_AG_CANCELAMENTO_ESTADO_NA_RESPOSTA)]
+    return []
 
 
 # ── 11. O OUTRO produto da loja: G1 (23/10/2026) ───────────────────────────
@@ -10424,12 +10630,37 @@ def conferir(
                 *(getattr(m, "texto", None) or "" for m in getattr(base, "foco", ()) or ()),
             ],
             pedido=pedido,
-            acoes_pessoa=ctx.acoes_pessoa,
+            # Item 10 (03/11/2026): o Abrir chamado que virou etiqueta também é a ação.
+            acoes_pessoa=getattr(ctx, "acoes_todas", ctx.acoes_pessoa),
             plataforma=ctx.plataforma,
         )
-        # D1 (23/10/2026): a resposta do "responde e marca" só informa.
+        # D1 (23/10/2026): a resposta do "responde e marca" só informa — e, na disputa
+        # (item 7, 03/11/2026), nunca dá o reembolso como certo.
         pendencias += conferir_responde_e_marca(
-            texto, acao=proposta.acao, marca=ctx.responde_e_marca
+            texto,
+            acao=proposta.acao,
+            marca=ctx.responde_e_marca,
+            disputa=acao_pessoa.disputa_do_turno(base.ctx, base.recentes),
+        )
+        # Item 2 (03/11/2026, 7fcf8f73): a tela quebrada nunca ganha análise, vídeo,
+        # devolução nem troca do agente (a garantia não cobre) — fora o D1/a rotina, que só
+        # informam a solicitação que o cliente JÁ abriu.
+        pendencias += conferir_tela_quebrada(
+            texto,
+            acao=proposta.acao,
+            textos_cliente=[
+                getattr(m, "texto", None) or ""
+                for m in getattr(base, "recentes", ()) or ()
+                if getattr(m, "autor", None) == constantes.AUTOR_CLIENTE
+            ],
+            informa_a_solicitacao=bool(ctx.responde_e_marca or ctx.devolucao_de_rotina),
+        )
+        # Item 10 (03/11/2026): com o Ag. cancelamento como etiqueta, a resposta não fala do
+        # destino do pedido (envio, entrega, prazo, cancelamento) — isso é da pessoa.
+        pendencias += conferir_ag_cancelamento_na_resposta(
+            texto,
+            acao=proposta.acao,
+            etiqueta=constantes.ACAO_AG_CANCELAMENTO in ctx.acoes_pos_envio,
         )
         # D3 (23/10/2026): a política da entrega só com a resposta da equipe citada.
         pendencias += conferir_politica_da_entrega(texto, evidencias_=proposta.evidencias, ctx=ctx)
@@ -10678,16 +10909,22 @@ DURAS: frozenset[str] = frozenset(
         PIX_OU_BANCO,
         PROMETE_RESULTADO,
         CONFIANCA_ABAIXO_DO_PISO,
+        # Item 2 (03/11/2026): a tela quebrada com análise/devolução/troca oferecida; item 10:
+        # o destino do pedido dito com o Ag. cancelamento como etiqueta.
+        TELA_QUEBRADA,
+        AG_CANCELAMENTO_NA_RESPOSTA,
         # O "não" do verificador é a última trava.
         "verificador",
     }
 )
 # Do D1 ("responde e marca"): decidir, prometer data/prazo/valor ou falar de Pix é DURO; o
-# resto (outra ação da equipe, mandar abrir outra solicitação) é aviso.
+# resto (outra ação da equipe, mandar abrir outra solicitação) é aviso. Item 7 (03/11/2026):
+# e dar o reembolso como certo na disputa.
 _RESPONDE_E_MARCA_DURO = (
     "decide ou dá o resultado",
     "promete data, prazo ou valor",
     "fala de Pix",
+    "dá o reembolso como certo na disputa",
 )
 
 
@@ -10759,10 +10996,19 @@ def separar_avisos(
     (e com a escolha "pessoa" do próprio modelo). No copiloto, a mesma. PURA."""
     if modo != constantes.MODO_AUTO:
         return conferida
+    from app.services.atendimento import ia as ia_svc
+
     avisos = list(getattr(conferida, "avisos", None) or [])
     motivos: list[str] = []
+    esclarecimento = pergunta_de_esclarecimento(conferida.texto)
     for m in conferida.motivos:
-        if motivo_e_aviso(m):
+        if m == ia_svc.MOTIVO_PERGUNTA_PENDENTE and esclarecimento:
+            # an0311 (974d4398): a pergunta que pede o dado que falta ao pedido vago — o
+            # verificador confere se o dado falta mesmo (o genérico continua DURO por
+            # `GENERICA_COM_PERGUNTA`).
+            if MOTIVO_ESCLARECIMENTO_COM_PENDENTE not in avisos:
+                avisos.append(MOTIVO_ESCLARECIMENTO_COM_PENDENTE)
+        elif motivo_e_aviso(m):
             if m not in avisos:
                 avisos.append(m)
         else:
@@ -11269,14 +11515,21 @@ def conferir_promessa_dura(
     responde_e_marca: bool = False,
 ) -> list[PendenciaAgente]:
     """1. (ver acima) → DURA no automático. PURA. A mesma régua de `conferir_promessa_de_equipe`
-    no texto sem as três exceções."""
+    no texto sem as três exceções — e (revisão do an0311) a conferência em 1ª pessoa com alguém
+    da loja ou a reserva que essa régua não via (`_CONFERE_COM_ALGUEM_DA_LOJA`)."""
+    if acao in ("responder", "perguntar") and (
+        com_alguem := _CONFERE_COM_ALGUEM_DA_LOJA.search(_plano(texto))
+    ):
+        return [_pessoa(PROMESSA_DURA, MOTIVO_PROMESSA_DURA.format(trecho=com_alguem.group(0)))]
     if not conferir_promessa_de_equipe(
         texto, acao=acao, acoes_pessoa=(), assunto=assunto, textos_cliente=textos_cliente
     ):
         return []
     plano = _JA_CONFERIDO.sub(" ", _plano(texto))
-    if _PEDE_O_DADO_AO_CLIENTE.search(plano):
-        plano = _EU_CONFIRO.sub(" ", plano)
+    # an0311 (03/11/2026, item 2 da seção 12g): o "eu confiro", o "assim confiro", o "para eu
+    # conferir" e o "conferimos pelas opções do anúncio" junto do pedido do dado (a frase com
+    # "me diga" ou a pergunta "qual…?") — o próprio atendimento, na próxima mensagem.
+    plano = sem_a_conferencia_do_atendimento(plano)
     if _pede_evidencia(texto, textos_cliente):
         plano = _ANALISA_E_RESPONDE.sub(" ", plano)
     if responde_e_marca:
@@ -11301,3 +11554,519 @@ def conferir_palavra_chave_sem_envio(
     if enviado:
         return []
     return [_pessoa(PALAVRA_CHAVE_SEM_ENVIO, MOTIVO_PALAVRA_CHAVE_SEM_ENVIO)]
+
+
+# ── 12g. A análise de 31/10–02/11 (an0311, 03/11/2026; o dono: "aplique as correções") ──
+#
+# 192 turnos das 5 lojas no automático (Barbosa, Kia, Mini, Vita, Vortan): respostas BOAS ficaram
+# sem ninguém, ou saíram horas depois, porque uma trava da 1ª camada as segurou por engano. Os
+# falsos positivos daqui (cada um com o prefixo da conversa real) e a rede que fica:
+#
+#   1. NÚMERO DO CLIENTE (73907524 "quero uma tv 43", 7a8f6a5d "é 18 ou 17?", 47a86f5e "a tela
+#      de 6.9"): o número que o PRÓPRIO cliente escreveu, repetido só para nomear o que ele pediu,
+#      não é "número que não veio do sistema" (`numeros_do_cliente`). Continua inventado o número
+#      dito como valor, prazo, data, hora, parcela, porcentagem ou quantidade, e o número longo
+#      (pedido, telefone, documento: mais de 4 dígitos na parte inteira);
+#   2. O PRÓPRIO ATENDIMENTO CONFERE (f7121a4b "Qual é o modelo…? Assim eu confiro as opções",
+#      8f751e9d "Assim confiro se ele está disponível no anúncio", 73907524 "me diga o nome para
+#      eu conferir", a1929b16 "me diga qual modelo e conferimos pelas opções do anúncio"): junto
+#      do pedido do dado ao cliente, é a próxima mensagem do atendimento, no anúncio — não ação da
+#      equipe (`conferir_promessa_dura`). Continua DURO: conferir com a transportadora, o setor, a
+#      equipe ou o estoque; o "vamos verificar e retornamos"; o "a equipe confere";
+#   3. A PERGUNTA DE ESCLARECIMENTO ao pedido vago (974d4398 "quero adquirir mais produto" →
+#      "Qual produto ou modelo você procura?"): o "há pergunta concreta pendente" do legado vira
+#      AVISO ao verificador quando a resposta pergunta o dado que falta
+#      (`pergunta_de_esclarecimento`, em `separar_avisos`). O cumprimento/"como podemos ajudar?"
+#      com pergunta pendente continua DURO (`GENERICA_COM_PERGUNTA`, `GENERICA_COM_PENDENCIA`);
+#   4. A GARANTIA ANTES DA COMPRA (aaf4a63e, a80987a3, 4ed67ae1 — Barbosa e Vortan, sem pedido):
+#      explicar a POLÍTICA geral como a equipe responde (tem garantia; cobre defeito; não cobre
+#      aparelho quebrado, molhado ou com mau uso; conta da entrega; a devolução é pela Shopee; a
+#      compra é protegida pela Shopee; se aparecer defeito, descrever e mandar vídeo e fotos por
+#      aqui) não é "promessa de cobertura sem garantia ativa", nem "recusa de direito", nem a
+#      "fala de garantia" que só pessoa manda (`garantia_geral_pre_venda`). A garantia estendida
+#      comprada na plataforma, "é com a Shopee" (2b4106c1), vale também com pedido. Nunca com
+#      número nem prazo (do aparelho Uranyx, nunca "90 dias", "1 ano" — o dono, 27/10/2026), o
+#      app/site/SAC da Uranyx, a assistência, a garantia legal/CDC, o "está coberto" do caso, a
+#      garantia vencida, a troca, o conserto ou o reembolso, a exclusão que não é a da regra, nem
+#      o diagnóstico. Fora: o produto Apple (o D2, pelo fato aprovado) e quem já comprou ou relata
+#      defeito (pessoa, como sempre). Só as frases dessa forma saem das réguas de GARANTIA; o
+#      texto inteiro passa pelas outras checagens como sempre (a promessa, o prazo, o Pix…), e o
+#      verificador continua sendo a última trava.
+#
+#   Revisão adversarial (03/11/2026, a mesma tarde): o número do cliente só sai logo depois do
+#   nome do produto ("TV 43", "a tela de 6,9", "o modelo 18 ou 17") e nunca na frase que começa
+#   confirmando ("Sim, o preço é 899" continua inventado); o "eu confiro" com alguém da loja nas
+#   palavras logo depois ("junto à transportadora", "consulto o estoque", "junto ao fornecedor",
+#   "com nossa equipe") e a reserva continuam DUROS; a frase da garantia que inverte a regra
+#   (cobre água/queda/mau uso, "mas cobre molhado", "inclusive a bateria", "direto com a Uranyx",
+#   "sem precisar da Shopee", "garantia anual") não é a política; a pergunta de QUANTO TEMPO dura a
+#   garantia fica com pessoa (sem o fato do prazo, a política não a responde); e a estendida com o
+#   defeito relatado ("parou de funcionar") vai a pessoa (qual é o defeito, o vídeo).
+
+# 1. O número do cliente.
+_DIGITOS_DO_INTEIRO_DO_CLIENTE = 4
+_NUMERO_DO_CLIENTE = re.compile(r"\d+(?:[.,]\d+)*")
+_VALOR_OU_PRAZO_ANTES = re.compile(
+    r"(?:r\$|\$|reais|real|valor|preco|precos|custa|custam|custo|frete|desconto|cupom|parcelas?"
+    r"|por|ate|dia|dias|prazo|vezes|apenas|somente|so|restam|resta|sobraram|temos|tem|quantidade"
+    r"|numero|n[o°])\s*$"
+)
+_VALOR_OU_PRAZO_DEPOIS = re.compile(
+    r"^(?:\s*(?:%|x\b|vezes\b|por\s+cento\b|reais\b|real\b|dias?\b|horas?\b|hs?\b|min\w*"
+    r"|semanas?\b|mes(?:es)?\b|anos?\b|uteis\b|util\b|unidades?\b|pecas?\b|itens\b"
+    r"|em\s+estoque\b|de\s+desconto\b|parcelas?\b"
+    r"|de\s+(?:janeiro|fevereiro|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro"
+    r"|dezembro)\b)|[/:]|,\d{2}\b)"
+)
+
+
+# Revisão do an0311 (03/11/2026): a lista do que NÃO vale (`_VALOR_OU_PRAZO_ANTES`, só colado
+# no número) deixava sair o número do cliente dito como valor ("Sim, o preço é 899", "o frete
+# fica 25", "em 12 sem juros", "postamos até as 15", "chega em 5", "são 3 disponíveis", "a
+# bateria é de 6000 mAh"). Agora é a lista do que VALE: o número logo depois do nome do produto
+# ou da característica que o identifica ("TV 43", "a tela de 6,9", "o modelo 18 ou 17", "iPhone
+# 15") — e nunca na frase que começa confirmando ("Sim, …", "Isso, …").
+_NOME_ANTES_DO_NUMERO = re.compile(
+    r"\b(?:tv|tvs|televis\w*|tela|telas|modelo|modelos|versao|versoes|serie|linha|geracao"
+    r"|iphone|ipad|galaxy|redmi|poco|moto|note)\s+(?:de\s+)?"
+    r"(?:\d+(?:[.,]\d+)?\s*(?:,|\bou\b|\be\b)\s*){0,3}$"
+)
+_FRASE_QUE_CONFIRMA = re.compile(
+    r"^\W*(?:(?:ola|oi|opa|bom\s+dia|boa\s+tarde|boa\s+noite)\W+)*(?:sim|isso|exato|exatamente"
+    r"|correto|certo|confirmo|confirmado|confirmada|perfeito|positivo|pode\s+sim|e\s+sim)\b"
+)
+_FIM_DE_FRASE = re.compile(r"[.!?;\n](?!\d)")
+
+
+def _numero_que_nomeia(plano: str, inicio: int, fim: int) -> bool:
+    """A ocorrência `plano[inicio:fim]` nomeia o produto (`_NOME_ANTES_DO_NUMERO`), sem unidade de
+    valor/prazo depois, numa frase que não começa confirmando? PURA."""
+    antes = plano[:inicio]
+    if not _NOME_ANTES_DO_NUMERO.search(antes):
+        return False
+    if _VALOR_OU_PRAZO_DEPOIS.match(plano[fim:]):
+        return False
+    fins = list(_FIM_DE_FRASE.finditer(antes))
+    frase = antes[fins[-1].end() :] if fins else antes
+    return not _FRASE_QUE_CONFIRMA.match(frase)
+
+
+def numeros_do_cliente(
+    texto: str | None, inventados: Sequence[str], textos_cliente: Iterable[str | None]
+) -> list[str]:
+    """Dos `inventados` (`ia.numeros_inventados`), os que o próprio cliente escreveu e que o
+    texto só repete para nomear o que ele pediu (an0311, item 1 acima). PURA.
+
+    Cada um: o mesmo número numa fala do cliente (com ou sem separador: "6.9" = "6,9"), no
+    máximo `_DIGITOS_DO_INTEIRO_DO_CLIENTE` dígitos na parte inteira, e TODA ocorrência dele no
+    texto logo depois do nome do produto (`_numero_que_nomeia`) — nunca como valor, prazo,
+    data, hora, parcela, porcentagem, quantidade nem especificação confirmada."""
+    if not inventados:
+        return []
+    do_cliente: set[str] = set()
+    for t in textos_cliente:
+        if isinstance(t, str) and t:
+            do_cliente |= {re.sub(r"[.,]", "", n) for n in _NUMERO_DO_CLIENTE.findall(t)}
+    if not do_cliente:
+        return []
+    plano = _plano(texto)
+    saida: list[str] = []
+    for bruto in inventados:
+        if re.sub(r"[.,]", "", bruto) not in do_cliente:
+            continue
+        if len(re.split(r"[.,]", bruto)[0]) > _DIGITOS_DO_INTEIRO_DO_CLIENTE:
+            continue
+        achados = list(re.finditer(rf"(?<![\d.,]){re.escape(bruto)}(?!\d|[.,]\d)", plano))
+        if achados and all(
+            not _VALOR_OU_PRAZO_ANTES.search(plano[: m.start()])
+            and _numero_que_nomeia(plano, m.start(), m.end())
+            for m in achados
+        ):
+            saida.append(bruto)
+    return saida
+
+
+# 2. O próprio atendimento confere (junto do pedido do dado ao cliente).
+# A pergunta que PEDE um dado ao cliente ("Qual é o modelo…?", "Sobre qual produto…?").
+_PERGUNTA_O_DADO = re.compile(
+    r"\b(?:qual|quais|sobre\s+qual|de\s+qual|em\s+qual|que\s+(?:modelo|produto|cor|anuncio"
+    r"|tamanho|versao|variacao))\b[^.!?]*\?"
+)
+# O que vem depois do "confiro" e o faz ação da loja: alguém da loja nas palavras logo depois
+# ("com a transportadora", "junto à transportadora", "junto ao fornecedor", "o estoque", "com
+# nossa equipe", "na transportadora", "no depósito" — revisão do an0311: só o "com" deixava o
+# "junto à"/"consulto o estoque" sair) e o remédio ("confirmo a troca", "verifico o reembolso",
+# "confirmo a reserva").
+_ALGUEM_NA_CONFERENCIA = (
+    rf"(?:{_ALGUEM_DA_LOJA}|transportadoras|fornecedores|setores|deposito|galpao|expedicao"
+    r"|almoxarifado|fabricante|fabrica)"
+)
+_ALEM_DE_CONFERIR = (
+    rf"\s+(?:\w+\s+){{0,4}}?(?:{_ALGUEM_NA_CONFERENCIA}\b|(?:a\s+|o\s+|seu\s+|sua\s+)?"
+    r"(?:troca|reembols\w*|estorn\w*|cancelament\w*|devoluc\w*|reenvio|envio|entrega|desconto"
+    r"|valor|prazo|pagamento|frete|reserv\w*|separ\w*)\b)"
+)
+# "assim (eu) confiro", "para (eu) conferir", "e eu verifico" — com o conector antes (nunca o
+# "vou verificar" sozinho) e sem o `_ALEM_DE_CONFERIR`.
+_CONFIRO_DEPOIS_DO_DADO = re.compile(
+    r"\b(?:assim|ai|entao|que|e|para|pra)\s+(?:eu\s+)?(?:ja\s+)?(?:confiro|verifico|vejo"
+    r"|confirmo|consulto|conferir|verificar|ver|confirmar|consultar)\b"
+    rf"(?!{_ALEM_DE_CONFERIR})"
+)
+# "e conferimos pelas opções do anúncio", "que a gente confere no anúncio": o plural só com o
+# ANÚNCIO (as opções, as variações, a ficha) como o lugar da conferência.
+_CONFERIMOS_NO_ANUNCIO = re.compile(
+    r"\b(?:e|que|assim|ai|entao)\s+(?:a\s+gente\s+)?(?:ja\s+)?(?:conferimos|verificamos|vemos"
+    r"|confirmamos|confere|verifica|ve)\b"
+    rf"(?!{_ALEM_DE_CONFERIR})"
+    r"\s+(?:\w+\s+){0,3}?(?:pel[ao]s?|n[ao]s?)\s+(?:\w+\s+){0,2}?(?:anuncio|opcoes|variacoes"
+    r"|ficha)\b"
+)
+
+
+def sem_a_conferencia_do_atendimento(plano: str) -> str:
+    """O texto plano sem o "eu confiro"/"conferimos no anúncio" do próprio atendimento, quando
+    o texto PEDE o dado ao cliente (an0311, item 2 acima). PURA. A conferência com alguém da
+    loja ("eu verifico com a transportadora") e a do remédio ("eu confirmo a troca") ficam."""
+    if not (_PEDE_O_DADO_AO_CLIENTE.search(plano) or _PERGUNTA_O_DADO.search(plano)):
+        return plano
+    plano = _EU_CONFIRO.sub(
+        lambda m: m.group(0) if _ALEM_DE_CONFERIR_RE.match(plano, m.end()) else " ", plano
+    )
+    plano = _CONFERIMOS_NO_ANUNCIO.sub(" ", plano)
+    return _CONFIRO_DEPOIS_DO_DADO.sub(" ", plano)
+
+
+_ALEM_DE_CONFERIR_RE = re.compile(_ALEM_DE_CONFERIR)
+# Revisão do an0311: a conferência em 1ª pessoa com alguém da loja ou a reserva ("para eu
+# verificar na transportadora", "assim eu vejo no depósito", "assim eu confirmo a reserva", "eu
+# verifico com nossa equipe") — no main a régua de equipe também não via parte delas: DURA no
+# automático, junto do pedido do dado ou não. Só com o "eu"/"assim" antes (nunca o "para ver se
+# a transportadora já coletou" que orienta o cliente, nem o "vejo aqui na transportadora" do fato).
+_CONFERE_COM_ALGUEM_DA_LOJA = re.compile(
+    r"\b(?:(?:(?:assim|ai|entao)\s+(?:eu\s+)?|eu\s+)(?:ja\s+)?(?:confiro|verifico|vejo|confirmo"
+    r"|consulto|checo)|(?:para|pra)\s+eu\s+(?:conferir|verificar|ver|confirmar|consultar|checar))\b"
+    rf"(?=\s+(?:\w+\s+){{0,4}}?(?:{_ALGUEM_NA_CONFERENCIA}|reserv\w*|separ\w*)\b)"
+)
+
+
+# 3. A pergunta de esclarecimento.
+MOTIVO_ESCLARECIMENTO_COM_PENDENTE = (
+    "o cliente tem pergunta pendente e a resposta é uma pergunta de esclarecimento — confira se "
+    "o dado que ela pede falta mesmo para responder (o cartão ou o anúncio da conversa já o dão?)"
+)
+
+
+def pergunta_de_esclarecimento(texto: str | None) -> bool:
+    """O texto pede ao cliente o dado que falta (qual produto, modelo, cor, anúncio…) e não é
+    só o cumprimento/o "como podemos ajudar?" (`resposta_so_generica`)? PURA (an0311, item 3)."""
+    plano = _plano(texto)
+    if not plano or resposta_so_generica(texto):
+        return False
+    return bool(_PERGUNTA_O_DADO.search(plano) or _PEDE_O_DADO_AO_CLIENTE.search(plano))
+
+
+# 4. A garantia antes da compra.
+GARANTIA_GERAL = "geral"
+GARANTIA_ESTENDIDA = "estendida"
+# A frase fala de garantia (as palavras que levam às réguas de garantia, e o seguro).
+_FALA_DA_GARANTIA_GERAL = re.compile(
+    r"\bgarant\w*|\bcobert\w*|\bcobre\b|\bcobrem\b|\bassistencia\b|\bprotegid\w*|\bcdc\b"
+    r"|\bcodigo\s+de\s+defesa\b|\bdefeit\w*|\bconserto\w*|\breparo\w*|\bseguro\b"
+)
+# A exclusão da REGRA (a única que a frase pode dizer): quebrado, molhado ou mau uso.
+_EXCLUIDO_PELA_REGRA = (
+    r"(?:quebrad\w*|molhad\w*|mau\s+uso|mal\s+uso|uso\s+indevido|quedas?|liquidos?|oxidac\w*"
+    r"|danos?\s+fisicos?)"
+)
+# A palavra entre o "não cobre" e o excluído nunca VIRA a frase (revisão do an0311: "não cobre
+# aparelho quebrado, MAS cobre aparelho molhado" saía inteira como a exclusão da regra).
+_SEM_VIRAR = (
+    r"(?!(?:mas|porem|contudo|entretanto|todavia|so|apenas|somente|exceto|salvo|menos|sim"
+    r"|cobre|cobrem|cobria|cobrira|inclu\w*|abrang\w*|vale|garant\w*)\b)"
+)
+_EXCLUSAO_DA_REGRA = re.compile(
+    r"\bnao\s+(?:\w+\s+){0,2}?(?:cobre|cobrem|inclui)\s+(?:"
+    + _SEM_VIRAR
+    + r"\w+\s+){0,4}?"
+    + _EXCLUIDO_PELA_REGRA
+    + r"(?:\s*(?:,|\be\b|\bou\b|\bnem\b)\s*(?:"
+    + _SEM_VIRAR
+    + r"\w+\s+){0,3}?"
+    + _EXCLUIDO_PELA_REGRA
+    + r")*"
+)
+# Depois de tirar a exclusão da regra, o excluído que SOBRA na frase é cobertura a mais ("cobre
+# defeitos e também danos por água", "garantia contra quedas", "cobre defeitos e mau uso").
+_EXCLUIDO_QUE_SOBRA = re.compile(
+    r"\b(?:agua|molhad\w*|umidade|quedas?|cai[ru]\w*|derrub\w*|quebr\w*|trinc\w*|rachad\w*"
+    r"|mau\s+uso|mal\s+uso|uso\s+indevido|acident\w*|liquid\w*|oxid\w*|danos?|danificad\w*"
+    r"|impactos?|arranh\w*)\b"
+)
+# A cobertura que vai além do defeito: o "cobre"/"inclui" de outra coisa, o "inclusive", o
+# "contra" que não é o defeito ("cobre a bateria", "inclusive a tela", "contra roubo").
+_COBERTURA_A_MAIS = re.compile(
+    r"\b(?:cobre|cobrem|cobrira|cobria|inclui|incluem|abrange\w*)\b"
+    r"(?!\s+(?:(?:os|o|somente|apenas|so)\s+)?(?:defeit\w*|problemas?\s+de\s+fabric\w*))"
+    r"(?!\s+(?:se|caso|quando)\s+(?:\w+\s+){0,3}?(?:defeit\w*|problemas?\s+de\s+fabric\w*))"
+    r"|\binclusive\b|\bincluindo\b|\balem\s+d[eo]s?\b|\btambem\s+(?:cobre|cobrem|para|contra)\b"
+    r"|\bcontra\s+(?!(?:os\s+|o\s+)?defeit)"
+)
+# Depois de tirar a exclusão da regra: qualquer outra negação da cobertura.
+_OUTRA_NEGACAO_DA_COBERTURA = re.compile(
+    r"\b(?:nao|nem|sem)\s+(?:\w+\s+){0,2}?(?:cobre|cobrem|cobert\w*|garant\w*|vale|inclui|tem)\b"
+)
+# O que a frase da política diz (ao menos uma destas formas).
+_FORMA_DA_GARANTIA_GERAL = re.compile(
+    # tem garantia
+    r"\b(?:tem|possui|possuem|conta\s+com|contam\s+com|vem\s+com|vao\s+com|com)\s+(?:sim\s+)?"
+    r"(?:a\s+)?garantia\b"
+    # a garantia cobre defeito(s) (de fabricação, de fábrica, do aparelho, de funcionamento)
+    r"|\bcobre\s+(?:os\s+|somente\s+|apenas\s+|so\s+)?defeitos?\b"
+    r"|\bgarantia\s+(?:e\s+)?(?:para|contra)\s+(?:os\s+)?defeitos?\b"
+    # conta da entrega
+    r"|\b(?:conta|vale|comeca|passa\s+a\s+contar)\s+(?:a\s+partir\s+)?d[ao]\s+(?:entrega"
+    r"|recebimento)\b"
+    # a devolução pela plataforma, a compra protegida
+    r"|\bdevoluc\w*\s+(?:\w+\s+){0,4}?pel[ao]\s+(?:propri[ao]\s+)?(?:shopee|plataforma|app"
+    r"|aplicativo|pedido)\b"
+    r"|\bprotegid[ao]s?\s+pel[ao]\s+(?:shopee|plataforma)\b"
+    # descrever o defeito e mandar vídeo/fotos por aqui
+    r"|\b(?:mand\w*|envi\w*|grav\w*)\s+(?:\w+\s+){0,4}?(?:video|fotos?)\b"
+    r"|\b(?:descrev\w*|cont\w*|diga|explique)\s+(?:\w+\s+){0,3}?(?:defeito|problema)\b"
+)
+# A garantia estendida (o seguro) comprada na plataforma: é com a plataforma.
+_ESTENDIDA_COM_A_PLATAFORMA = re.compile(
+    r"\b(?:garantia\s+estendida|seguro)\b(?=.*\b(?:shopee|plataforma)\b)"
+)
+# O que a frase da política NUNCA traz.
+_FORA_DA_GARANTIA_GERAL = re.compile(
+    # número e prazo (do aparelho Uranyx, nunca "90 dias", "1 ano" — o dono, 27/10/2026); o
+    # número colado no nome do modelo ("A17", "WP200") não é prazo
+    r"(?<![a-z0-9])\d|\b(?:um|uma|dois|duas|tres|seis|doze|noventa|trinta|sessenta|cento)\s+(?:dias?|mes"
+    r"|meses|anos?)\b|\b(?:dias?|mes|meses|anos?|semanas?|vitalici\w*|prazo|periodo|validade"
+    r"|vigencia)\b"
+    # o caminho fora da plataforma e a marca
+    r"|\buranyx\.com|\bsac\b|\bsite\b|\bapp\s+(?:da\s+)?uranyx\b|\baplicativo\s+(?:da\s+)?uranyx\b"
+    r"|\bassistencia\b|\btecnic[oa]s?\b|\bfabricante\w*|\bhomologad\w*"
+    # a garantia legal (vai pela regra "legal" do `ver_garantia`, nunca por aqui)
+    r"|\blegal\b|\bcdc\b|\bcodigo\s+de\s+defesa\b|\bconsumidor\b"
+    # o caso do cliente coberto, o direito, a garantia vencida, a cobertura sem limite
+    r"|\b(?:esta|estao|estara|estarao|fica|ficam|ficara|sera|serao|seria|continua|segue)\s+"
+    r"(?:\w+\s+)?(?:cobert|garantid|protegid)\w*|\bcobert[oa]s?\s+pel[ao]\b"
+    r"|\bentra\w*\s+na\s+garantia\b|\bdireito\b|\bgarant(?:imos|ido|ida|idos|idas|e|em)\b"
+    r"|\bvenc\w*|\bexpir\w*|\bacabou\b|\bperd\w*|\banul\w*|\bcancel\w*|\btotal\b|\bqualquer\b"
+    r"|\btudo\b"
+    # a troca, o conserto, o reembolso (o remédio é decisão de pessoa)
+    r"|\btroc\w*|\bsubstitu\w*|\bconsert\w*|\brepar\w*|\breembols\w*|\bestorn\w*|\bdinheiro\b"
+    r"|\breenvi\w*|\bnovo\s+aparelho\b|\boutro\s+aparelho\b"
+    # revisão do an0311: o caminho direto com a marca ou com a loja, fora da plataforma ("depois
+    # da Shopee você aciona direto com a Uranyx", "direto com a loja, sem precisar da Shopee") e
+    # o prazo dito sem número ("garantia anual")
+    r"|\bdiret(?:o|amente)\s+(?:\w+\s+){0,2}?(?:com|n[ao]|pel[ao]|junto\s+(?:a|ao))\s+(?:a\s+|o\s+)?"
+    r"(?:propri[ao]\s+)?(?:uranyx|marca|loja|fabric\w*|vendedor|gente|nos)\b"
+    r"|\b(?:com|pela|pelo|na|no|a|junto\s+(?:a|ao))\s+(?:propria\s+)?uranyx\b"
+    r"|\bcom\s+a\s+(?:loja|gente|marca)\b|\bconosco\b|\bcom\s+(?:a\s+)?nossa\s+loja\b"
+    r"|\bsem\s+(?:precisar\s+|ter\s+que\s+|ter\s+de\s+)?(?:de\s+)?(?:passar\s+|abrir\s+|usar\s+)?"
+    r"(?:d[ao]\s+|pel[ao]\s+|n[ao]\s+|a\s+|o\s+)?(?:shopee|plataforma|app|aplicativo|devoluc\w*)\b"
+    r"|\bfora\s+d[ao]\s+(?:shopee|plataforma|app|aplicativo)\b|\bpor\s+fora\b"
+    r"|\b(?:depois|apos|passad[oa]|terminad[oa]|acabad[oa])\s+(?:\w+\s+){0,2}?(?:shopee|plataforma"
+    r"|app|aplicativo|devoluc\w*)\b"
+    r"|\banual\b|\bsemestr\w*|\btrimestr\w*|\bbienal\b|\bmensal\b"
+)
+# No texto INTEIRO (também na oração que não diz "garantia": "Tem garantia; depois, acione pelo
+# app Uranyx"): o prazo com número, o caminho da marca ou fora da plataforma e a garantia legal
+# tiram o texto da forma da política geral.
+_FORA_NO_TEXTO_DA_GARANTIA_GERAL = re.compile(
+    r"(?<![a-z0-9])\d+(?:[.,]\d+)?\s*(?:dias?|mes|meses|anos?|semanas?)\b"
+    r"|\b(?:um|uma|dois|duas|tres|seis|doze|noventa|trinta|sessenta)\s+(?:dias?|mes|meses|anos?)\b"
+    r"|\buranyx\.com|\bsac\b|\bsite\b|\bapp\s+(?:da\s+)?uranyx\b|\baplicativo\s+(?:da\s+)?uranyx\b"
+    r"|\bassistencia\b|\btecnic[oa]s?\b|\bfabricante\w*|\bgarantia\s+legal\b|\bcdc\b"
+    r"|\bcodigo\s+de\s+defesa\b"
+    # revisão do an0311: o caminho com a marca ou com a loja fora da plataforma, também na oração
+    # sem "garantia" ("Tem garantia. Depois é só acionar direto com a Uranyx.")
+    r"|\b(?:acion\w*|contat\w*|fal\w*|procur\w*|cham\w*|resolv\w*|trat\w*|diret(?:o|amente))\s+"
+    r"(?:\w+\s+){0,3}?(?:com|a|pela|pelo|na|no|junto\s+(?:a|ao))\s+(?:a\s+|o\s+)?(?:propri[ao]\s+)?"
+    r"(?:uranyx|marca|fabricante|loja|vendedor)\b"
+    r"|\bsem\s+(?:precisar\s+|ter\s+que\s+|ter\s+de\s+)?(?:de\s+)?(?:passar\s+)?(?:d[ao]\s+|pel[ao]\s+)?"
+    r"(?:shopee|plataforma)\b|\bfora\s+d[ao]\s+(?:shopee|plataforma)\b|\bpor\s+fora\b"
+    r"|\banual\b|\bsemestr\w*|\btrimestr\w*|\bbienal\b"
+)
+# Quem já comprou ou relata o defeito não está antes da compra.
+_RELATA_O_SINTOMA = (
+    r"parou|quebrou|estragou|deu\s+(?:defeito|problema)|nao\s+(?:liga|carrega|funciona)"
+    r"|com\s+defeito|travando|esquentando|descarregando"
+)
+_JA_COMPROU_OU_RELATA = re.compile(
+    r"\b(?:comprei|compramos|recebi|recebemos|chegou|pedi|meu\s+(?:celular|aparelho|relogio"
+    r"|produto|telefone|pedido)|minha\s+compra|" + _RELATA_O_SINTOMA + r")\b"
+)
+# Revisão do an0311: o sintoma que o cliente AFIRMA (fora da pergunta hipotética, `_sem_hipotese`)
+# tira também a forma da garantia estendida — "meu celular parou de funcionar, comprei com
+# garantia estendida" é defeito para pessoa (qual é o defeito, o vídeo), não "é com a Shopee".
+_SINTOMA_AFIRMADO = re.compile(
+    r"\b(?:"
+    + _RELATA_O_SINTOMA
+    + r"|nao\s+(?:esta|ta)\s+(?:ligando|carregando|funcionando)|desligando|reiniciando|travou"
+    r"|apagou|queimou|apresent(?:ou|a|ando)\s+(?:defeito|problema))\b"
+)
+# A hipótese do defeito que não é relato ("caso haver um defeito", "se vier com defeito" —
+# 2b4106c1: a frase sem "?" fica no `_sem_hipotese`).
+_HIPOTESE_DO_DEFEITO = re.compile(
+    r"\b(?:caso|se|si)\s+(?:\w+\s+){0,3}?(?:vier|vierem|der|derem|tiver|tiverem|houver|haver"
+    r"|aparecer|apresentar|acontecer|ocorrer|surgir|dar)\s+(?:\w+\s+){0,2}?(?:defeit\w*"
+    r"|problemas?)\b"
+)
+
+
+def _sintoma_afirmado(clientes: Sequence[str]) -> bool:
+    """O cliente AFIRMA um sintoma (fora da hipótese do defeito: "caso haver um defeito", "se
+    vier com defeito")? PURA. Também dentro da pergunta ("deu defeito na tela, a estendida
+    cobre?") — a pergunta de cobertura não apaga o relato."""
+    return any(_SINTOMA_AFIRMADO.search(_HIPOTESE_DO_DEFEITO.sub(" ", c)) for c in clientes)
+
+
+# Revisão do an0311: a pergunta de QUANTO TEMPO dura a garantia — sem o fato aprovado do prazo
+# (do aparelho Uranyx, nunca "90 dias"/"1 ano"), a política geral não a responde; fica com pessoa.
+# Só junto da garantia ("quanto tempo demora a entrega" não é).
+_PERGUNTA_O_PRAZO_DA_GARANTIA = re.compile(
+    r"\b(?:quanto|quantos|quantas|cuanto|cuantos|qto|qtos)\s+(?:\w+\s+){0,2}?(?:tempo|mes|meses"
+    r"|dias?|anos?)\s+(?:\w+\s+){0,4}?garant\w*"
+    r"|\bgarant\w*\s+(?:\w+\s+){0,3}?(?:de\s+)?(?:quanto|quantos|quantas|cuanto|cuantos|qto|qtos"
+    r"|ate\s+quando)\b"
+    r"|\b(?:prazo|tempo|periodo|validade|vigencia|duracao)\s+d[ae]\s+(?:\w+\s+)?garantia\b"
+)
+
+
+def frase_da_garantia_geral(frase: str, *, so_estendida: bool = False) -> bool:
+    """A frase (plana) diz da garantia SÓ a política geral, como a equipe responde (an0311, item
+    4 acima)? PURA. `so_estendida` = só a forma da garantia estendida com a plataforma."""
+    sem_a_regra = _EXCLUSAO_DA_REGRA.sub(" exclusao_da_regra ", frase)
+    if _FORA_DA_GARANTIA_GERAL.search(sem_a_regra):
+        return False
+    if _EXCLUIDO_QUE_SOBRA.search(sem_a_regra) or _COBERTURA_A_MAIS.search(sem_a_regra):
+        # Revisão do an0311: a frase que INVERTE a regra (cobre água, queda, mau uso; "não cobre
+        # quebrado, mas cobre molhado"; "cobre a bateria", "inclusive a tela").
+        return False
+    if _OUTRA_NEGACAO_DA_COBERTURA.search(sem_a_regra):
+        # A exclusão que não é a da regra ("não cobre a bateria"), o "não tem garantia".
+        return False
+    if validador.diagnostica_ou_promete_defeito(frase):
+        return False
+    if _ESTENDIDA_COM_A_PLATAFORMA.search(frase):
+        return True
+    if so_estendida:
+        return False
+    return "exclusao_da_regra" in sem_a_regra or bool(_FORMA_DA_GARANTIA_GERAL.search(frase))
+
+
+def sem_as_frases_da_garantia_geral(texto: str | None, *, forma: str | None) -> str:
+    """O texto sem as frases da política geral da garantia (`frase_da_garantia_geral`) — com
+    `forma` = `GARANTIA_ESTENDIDA`, só as da garantia estendida. PURA."""
+    if forma not in (GARANTIA_GERAL, GARANTIA_ESTENDIDA):
+        return texto or ""
+    so_estendida = forma == GARANTIA_ESTENDIDA
+    ficam = [
+        frase
+        for frase, _p in _frases_inteiras(texto or "")
+        if not (
+            _FALA_DA_GARANTIA_GERAL.search(_plano(frase))
+            and frase_da_garantia_geral(_plano(frase), so_estendida=so_estendida)
+        )
+    ]
+    return ". ".join(ficam)
+
+
+def garantia_geral_pre_venda(
+    texto: str | None,
+    *,
+    ctx: ContextoAgente,
+    base: BaseDoGerar,
+    fichas: Sequence[Any],
+    pedido: Mapping[str, Any] | None = None,
+    garantias: Sequence[Mapping[str, Any]] | None = None,
+) -> str | None:
+    """A forma da resposta de garantia que sai das réguas de GARANTIA (an0311, item 4):
+    `GARANTIA_GERAL` (a política antes da compra), `GARANTIA_ESTENDIDA` (só a garantia
+    estendida com a plataforma, com ou sem pedido) ou None. PURA.
+
+    Todas juntas: o agente no automático; o cliente fala de garantia (ou do seguro) no turno;
+    nenhuma garantia com status nem de depois da compra no que o `ver_garantia` devolveu; não é
+    produto Apple (o D2); TODA frase do texto que fala de garantia tem a forma
+    (`frase_da_garantia_geral`), e há ao menos uma. A geral, também: sem pedido na conversa,
+    sem o cliente dizer que comprou nem relatar defeito, e sem perguntar QUANTO TEMPO dura a
+    garantia (`_PERGUNTA_O_PRAZO_DA_GARANTIA`: sem o fato do prazo, a política não responde). A
+    estendida, também: sem o cliente relatar defeito (o sintoma afirmado, fora da hipótese)."""
+    if ctx.modo != constantes.MODO_AUTO or not (texto or "").strip():
+        return None
+    clientes = [
+        _plano(t)
+        for t in [
+            *base.textos_rajada,
+            *base.textos_cliente,
+            *(getattr(m, "texto", None) for m in getattr(base, "foco", ()) or ()),
+        ]
+        if isinstance(t, str) and t
+    ]
+    juntos = " ".join(clientes)
+    if not re.search(r"\bgarant\w*|\bseguro\b", juntos):
+        return None
+    if any(
+        isinstance(g, Mapping) and (g.get("status") or g.get("antes_da_compra") is False)
+        for g in garantias or ()
+    ):
+        return None
+    if _produto_apple(fichas):
+        return None
+    if _FORA_NO_TEXTO_DA_GARANTIA_GERAL.search(_plano(texto)):
+        return None
+    falas = [_plano(f) for f, _p in _frases_inteiras(texto or "")]
+    de_garantia = [f for f in falas if _FALA_DA_GARANTIA_GERAL.search(f)]
+    if not de_garantia:
+        return None
+    ctx_base = base.ctx if isinstance(base.ctx, Mapping) else {}
+    fatos_base = base.fatos if isinstance(base.fatos, Mapping) else {}
+    tem_pedido = bool(
+        pedido
+        or ctx_base.get("pedido")
+        or fatos_base.get("pedido")
+        or getattr(ctx, "pedido_da_conversa", None)
+    )
+    sintoma = _sintoma_afirmado(clientes)
+    if (
+        not tem_pedido
+        and not _JA_COMPROU_OU_RELATA.search(juntos)
+        and not _relata_defeito(clientes, com_pedido=False)
+        and not sintoma
+        and not _PERGUNTA_O_PRAZO_DA_GARANTIA.search(juntos)
+        and all(frase_da_garantia_geral(f) for f in de_garantia)
+    ):
+        return GARANTIA_GERAL
+    if (
+        re.search(r"\bestendid\w*|\bseguro\b", juntos)
+        and not sintoma
+        and all(frase_da_garantia_geral(f, so_estendida=True) for f in de_garantia)
+    ):
+        return GARANTIA_ESTENDIDA
+    return None
+
+
+def garantia_geral_da_proposta(
+    proposta: Proposta,
+    texto: str | None,
+    ctx: ContextoAgente,
+    base: BaseDoGerar,
+    *,
+    fichas: Sequence[Any],
+    pedido: Mapping[str, Any] | None = None,
+) -> str | None:
+    """`garantia_geral_pre_venda` com o que o agente já tem (o `conferir_proposta` a chama antes
+    da `ia.conferir_saida`, como o D2). PURA. `proposta` fica na assinatura (o D2 também)."""
+    return garantia_geral_pre_venda(
+        texto,
+        ctx=ctx,
+        base=base,
+        fichas=fichas,
+        pedido=pedido,
+        garantias=getattr(ctx, "garantias_conferidas", None),
+    )
