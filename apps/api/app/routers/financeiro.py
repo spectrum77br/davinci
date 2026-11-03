@@ -29,7 +29,6 @@ from sqlalchemy.orm import undefer
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_admin, require_permission
-from app.deps.team_scope import equipe_de_vendas, nome_da_equipe
 from app.models import (
     DNPConfig,
     DNPProduto,
@@ -1598,14 +1597,14 @@ async def valuation_report(
         return any(mes in months and pred(team) and c
                    for (mes, team), c in dev_idx.items())
 
-    # As três equipes (1 Londres, 2 Israel, 3 Marrocos — 03/11/2026, a mesma
-    # equipe de vendas da loja) aparecem sempre, mesmo vazias.
+    # As três equipes (03/11/2026: a mesma equipe de vendas da loja, 1/2/3)
+    # aparecem sempre, mesmo vazias. Só o número, sem o nome (pedido do dono).
     total_aguard, total_taxa = _com_series(lambda t: True)
     empresas: list[ComercialEmpresaOut] = []
     for team in (1, 2, 3):
         a, t = _com_series(lambda x, team=team: x == team)
         empresas.append(ComercialEmpresaOut(
-            empresa=team, label=f"Equipe {team} · {nome_da_equipe(equipe_de_vendas(team))}",
+            empresa=team, label=f"Equipe {team}",
             aguardando_devolucao=a, taxa_devolucao=t, membros=[],
         ))
     # "Sem equipe" só aparece quando houver dados não atribuídos a equipe.

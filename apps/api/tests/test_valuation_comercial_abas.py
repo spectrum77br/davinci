@@ -1,4 +1,4 @@
-"""Comercial agrupa Equipe 1/2/3 (Londres/Israel/Marrocos) pela equipe da loja.
+"""Comercial agrupa Equipe 1/2/3 pela equipe da loja.
 
 Taxas usam pedidos distintos, inclusive kits, e preservam o total ponderado.
 """
@@ -99,9 +99,7 @@ async def test_comercial_agrupa_equipes_sem_expor_membros(
     com = r.json()["comercial"]
     i = _idx_mes_atual(r.json())
 
-    assert [e["label"] for e in com["empresas"]] == [
-        "Equipe 1 · Londres", "Equipe 2 · Israel", "Equipe 3 · Marrocos",
-    ]
+    assert [e["label"] for e in com["empresas"]] == ["Equipe 1", "Equipe 2", "Equipe 3"]
     emp, vazia, marrocos = com["empresas"]
     assert emp["membros"] == vazia["membros"] == marrocos["membros"] == []
     # Dois grupos de acesso somados na Equipe 1: taxa ponderada 2/6,
@@ -132,7 +130,7 @@ async def test_comercial_organizacao_independe_dos_codigos_de_acesso(
     com = r.json()["comercial"]
 
     labels = {e["label"]: e for e in com["empresas"]}
-    assert set(labels) == {"Equipe 1 · Londres", "Equipe 2 · Israel", "Equipe 3 · Marrocos"}
+    assert set(labels) == {"Equipe 1", "Equipe 2", "Equipe 3"}
     assert {e["empresa"] for e in com["empresas"]} == {1, 2, 3}
     assert all(e["membros"] == [] for e in com["empresas"])
     # Pedido aguardando devolução comprova qual agrupamento recebeu a loja.
@@ -143,8 +141,8 @@ async def test_comercial_organizacao_independe_dos_codigos_de_acesso(
     i = _idx_mes_atual(r.json())
     com = r.json()["comercial"]
     labels = {e["label"]: e for e in com["empresas"]}
-    assert labels["Equipe 1 · Londres"]["aguardando_devolucao"][i] == 150
-    assert labels["Equipe 2 · Israel"]["aguardando_devolucao"][i] == 350
+    assert labels["Equipe 1"]["aguardando_devolucao"][i] == 150
+    assert labels["Equipe 2"]["aguardando_devolucao"][i] == 350
     assert com["total_aguardando_devolucao"][i] == 500
 
 
@@ -167,9 +165,7 @@ async def test_comercial_sem_equipe_vira_aba_sem_membros(
 
     # Equipes vazias continuam visíveis e órfãos mantêm o total geral.
     labels = {e["label"]: e for e in com["empresas"]}
-    assert set(labels) == {
-        "Equipe 1 · Londres", "Equipe 2 · Israel", "Equipe 3 · Marrocos", "Sem equipe",
-    }
+    assert set(labels) == {"Equipe 1", "Equipe 2", "Equipe 3", "Sem equipe"}
     assert labels["Sem equipe"]["membros"] == []
     # Total = 1 ÷ 2 × 100 = 50.
     assert com["total_taxa_devolucao"][i] == 50.0

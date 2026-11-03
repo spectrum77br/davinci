@@ -505,13 +505,13 @@ async function startEdit(row: StoreInfo, field: string) {
   }
 }
 
-// Equipe da loja (03/11/2026): 1 Londres, 2 Israel, 3 Marrocos — a mesma
-// equipe de vendas que decide quem vê a loja (a API grava as duas juntas).
-const EQUIPES_DA_LOJA: Record<number, string> = { 1: 'Londres', 2: 'Israel', 3: 'Marrocos' }
+// Equipe da loja (03/11/2026): 1, 2 ou 3 — a mesma equipe de vendas que
+// decide quem vê a loja (a API grava as duas juntas). Só o número na tela
+// (Eduardo: "não precisa colocar o nome, só o número").
+const EQUIPES_DA_LOJA = [1, 2, 3] as const
 
 function rotuloEquipeLoja(n: number | null | undefined): string {
-  if (n == null) return 'Sem equipe'
-  return EQUIPES_DA_LOJA[n] ? `Equipe ${n} · ${EQUIPES_DA_LOJA[n]}` : `Equipe ${n}`
+  return n == null ? 'Sem equipe' : `Equipe ${n}`
 }
 
 function cancelEdit() {
@@ -542,7 +542,7 @@ async function commitEdit() {
     if (Number.isNaN(n)) return cancelEdit()
     payload.sort_order = n
   } else if (field === 'commercial_team') {
-    if (raw !== '' && !EQUIPES_DA_LOJA[Number(raw)]) return cancelEdit()
+    if (raw !== '' && !(EQUIPES_DA_LOJA as readonly number[]).includes(Number(raw))) return cancelEdit()
     const nova = raw ? Number(raw) : null
     // Trocar a equipe troca quem vê a loja em todas as telas: confirma antes.
     const loja = row.account_name || row.platform
@@ -550,7 +550,7 @@ async function commitEdit() {
     const depois = rotuloEquipeLoja(nova)
     const aviso = nova == null
       ? `Tirar a equipe da loja "${loja}" (${antes})? Os vendedores de equipe deixam de ver esta loja em todas as telas.`
-      : `Mudar a loja "${loja}" de ${antes} para ${depois}? Ela passa a aparecer para a equipe ${EQUIPES_DA_LOJA[nova]} e sai da que via antes, em todas as telas.`
+      : `Mudar a loja "${loja}" de ${antes} para ${depois}? Ela passa a aparecer para a ${depois} e sai da que via antes, em todas as telas.`
     // Fecha a edição antes do confirm: o blur do select chamaria de novo.
     cancelEdit()
     if (!confirm(aviso)) return
@@ -960,7 +960,7 @@ async function copyText(text: string) {
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]" title="Horários (BRT) em que as etiquetas desta loja são impressas. Vazio = contínuo.">Horário Etiqueta</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Impressão</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Responsável</th>
-            <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[130px]" title="Equipe 1 Londres, 2 Israel, 3 Marrocos. É a equipe que vê a loja: trocar aqui muda quem a vê em todas as telas.">Equipe</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[130px]" title="É a equipe que vê a loja: trocar aqui muda quem a vê em todas as telas.">Equipe</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Servidor</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">CNPJ</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[180px]">E-mail</th>
@@ -1292,7 +1292,7 @@ async function copyText(text: string) {
                 </span>
               </td>
             </template>
-            <!-- Equipe da loja (1 Londres, 2 Israel, 3 Marrocos): decide quem vê a loja. -->
+            <!-- Equipe da loja (1, 2, 3): decide quem vê a loja. -->
             <td
               class="border border-border px-2 py-1.5 text-xs text-center"
               :class="{
@@ -1311,7 +1311,7 @@ async function copyText(text: string) {
                 @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
               >
                 <option value="">Sem equipe</option>
-                <option v-for="(nome, n) in EQUIPES_DA_LOJA" :key="n" :value="String(n)">Equipe {{ n }} · {{ nome }}</option>
+                <option v-for="n in EQUIPES_DA_LOJA" :key="n" :value="String(n)">Equipe {{ n }}</option>
               </select>
               <span v-else class="whitespace-nowrap" :class="{ 'text-muted-foreground': row.commercial_team == null }">
                 {{ rotuloEquipeLoja(row.commercial_team) }}

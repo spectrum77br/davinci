@@ -1,6 +1,6 @@
 // Run from apps/web: node tests/lojas-equipe.cjs
-// Equipe da loja (03/11/2026): 1 Londres, 2 Israel, 3 Marrocos — rótulo real
-// da página de Lojas, as três opções no select e o aviso antes de trocar
+// Equipe da loja (03/11/2026): só o número (Equipe 1/2/3) — rótulo real da
+// página de Lojas, as três opções no select e o aviso antes de trocar
 // (trocar a equipe troca quem vê a loja).
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -24,16 +24,18 @@ assert.deepEqual(compiled.diagnostics, [])
 const { EQUIPES_DA_LOJA, rotuloEquipeLoja } = new Function(
   `${compiled.outputText}\nreturn { EQUIPES_DA_LOJA, rotuloEquipeLoja }`)()
 
-assert.deepEqual(EQUIPES_DA_LOJA, { 1: 'Londres', 2: 'Israel', 3: 'Marrocos' })
-assert.equal(rotuloEquipeLoja(1), 'Equipe 1 · Londres')
-assert.equal(rotuloEquipeLoja(2), 'Equipe 2 · Israel')
-assert.equal(rotuloEquipeLoja(3), 'Equipe 3 · Marrocos')
+assert.deepEqual([...EQUIPES_DA_LOJA], [1, 2, 3])
+assert.equal(rotuloEquipeLoja(1), 'Equipe 1')
+assert.equal(rotuloEquipeLoja(2), 'Equipe 2')
+assert.equal(rotuloEquipeLoja(3), 'Equipe 3')
 assert.equal(rotuloEquipeLoja(null), 'Sem equipe')
 assert.equal(rotuloEquipeLoja(undefined), 'Sem equipe')
 
 const tpl = descriptor.template.content
 // As três opções saem de EQUIPES_DA_LOJA; nada de "Equipe 1/2" escrito à mão.
-assert.match(tpl, /<option value="">Sem equipe<\/option>\s*<option v-for="\(nome, n\) in EQUIPES_DA_LOJA"/)
+assert.match(tpl, /<option value="">Sem equipe<\/option>\s*<option v-for="n in EQUIPES_DA_LOJA"[^>]*>Equipe \{\{ n \}\}<\/option>/)
+// Sem nome de equipe na tela (pedido do dono: só o número).
+assert.doesNotMatch(tpl + script, /Londres|Israel|Marrocos/)
 assert.doesNotMatch(tpl, /`Equipe \$\{row\.commercial_team\}`/)
 // O cartão do celular e a célula da tabela usam o mesmo rótulo.
 assert.equal((tpl.match(/rotuloEquipeLoja\(row\.commercial_team\)/g) || []).length, 2)
@@ -42,5 +44,5 @@ const inicio = script.indexOf("} else if (field === 'commercial_team') {")
 const ramo = script.slice(inicio, script.indexOf("} else if (field === 'password') {", inicio))
 assert.ok(inicio > 0 && ramo.length > 0, 'commercial_team branch found')
 assert.match(ramo, /cancelEdit\(\)\s*\n\s*if \(!confirm\(aviso\)\) return/)
-assert.match(ramo, /passa a aparecer para a equipe/)
+assert.match(ramo, /passa a aparecer para a \$\{depois\}/)
 console.log('lojas-equipe: ok')

@@ -603,9 +603,9 @@ async function removeUser(ignorarImobilizado = false, jaConfirmou = false) {
               class="w-full h-9 rounded-md border bg-background px-3 text-sm mt-1"
             >
               <option :value="null">Sem equipe</option>
-              <option :value="1">Equipe 1 · Londres</option>
-              <option :value="2">Equipe 2 · Israel</option>
-              <option :value="3">Equipe 3 · Marrocos</option>
+              <option :value="1">Equipe 1</option>
+              <option :value="2">Equipe 2</option>
+              <option :value="3">Equipe 3</option>
             </select>
             <p class="text-[11px] text-muted-foreground mt-1">
               Organiza o usuário por equipe e mantém seus acessos individuais às lojas.
