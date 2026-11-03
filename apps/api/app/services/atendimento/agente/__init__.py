@@ -1095,7 +1095,9 @@ async def _sem_a_frase_sem_lastro(
     if ctx.modo_replay or base.modo != constantes.MODO_AUTO:
         return None
     try:
-        cortar = verificador.frase_para_cortar(p.texto, conf.registro)
+        cortar = verificador.frase_para_cortar(
+            p.texto, conf.registro, [*base.textos_cliente, *base.textos_rajada]
+        )
     except Exception as e:  # noqa: BLE001 — sem saber, não corta (o rascunho fica para pessoa)
         logger.warning("atendimento_agente_corte_erro", err=type(e).__name__)
         return None

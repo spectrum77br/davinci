@@ -1129,8 +1129,13 @@ class ResumoDoPacote:
 # variação 16 GB / 128 GB Premium NFC" (o verificador deu ok); às 14:22 o cliente pediu o link e o
 # rascunho repetiu o mesmo dado — o verificador o chamou de "sem lastro" (a ficha tem os dois
 # modelos e se contradiz) e o cliente, pronto para comprar, ficou 41 h sem resposta. A seção traz
-# as falas do atendimento automático (origem `davinci_ia`, que só sai com o "ok" deste verificador
-# ou pela saudação aprovada no Manual) — o `SISTEMA` diz o que elas sustentam (só o produto).
+# as falas do atendimento automático que ESTE verificador liberou — o `SISTEMA` diz o que elas
+# sustentam (só o produto).
+# Revisão do an0311 (03/11/2026): a origem `davinci_ia` sozinha não prova o "ok" — o legado
+# (v7/v9/v10: 98 envios em 30 dias, 21 fora da saudação, originalidade e especificação entre eles)
+# e o texto da NF automática também saem com ela. Só entra a fala cujo rascunho é do agente
+# ("ag1") com `fatos.agente.verificador.ok` true e o `texto_sha` do MESMO texto enviado
+# (`respostas_conferidas`); sem essa prova, a seção não vai.
 CABECALHO_JA_ENVIADO = (
     "O QUE O ATENDIMENTO JÁ ENVIOU NESTA CONVERSA (o próprio atendimento automático, a ESTE "
     "cliente; cada resposta foi conferida antes de sair):"
@@ -1138,19 +1143,87 @@ CABECALHO_JA_ENVIADO = (
 MAX_JA_ENVIADO = 3
 
 
-def ja_enviado_da_conversa(
-    recentes: Sequence[Any], gatilho: Any | None, nomes: Iterable[str | None]
-) -> tuple[str, ...]:
-    """As últimas `MAX_JA_ENVIADO` respostas que o atendimento automático (o agente, origem
-    `davinci_ia`) já mandou na conversa, até o gatilho, mascaradas e numa linha cada. PURA."""
-    nomes = tuple(nomes)
-    do_atendimento = [
+def _falas_do_atendimento(recentes: Sequence[Any], gatilho: Any | None) -> list[Any]:
+    """As falas da loja com a origem `davinci_ia` (com texto, fora a automática), até o gatilho."""
+    return [
         m
         for m in acao_pessoa._ate_o_turno(list(recentes or ()), gatilho)
         if getattr(m, "autor", None) == constantes.AUTOR_LOJA
         and getattr(m, "origem", None) == constantes.ORIGEM_IA
         and (getattr(m, "texto", None) or "").strip()
         and not pacote._automatica(m)
+    ]
+
+
+def _conferida_pelo_verificador(m: Any, conferidas: Mapping[str, str]) -> bool:
+    """A fala saiu de um rascunho do agente que ESTE verificador liberou, com o mesmo texto?"""
+    rascunho_id = getattr(m, "rascunho_id", None)
+    sha = conferidas.get(str(rascunho_id)) if rascunho_id is not None else None
+    return bool(sha) and sha == assinatura_do_texto(getattr(m, "texto", None))
+
+
+async def respostas_conferidas(
+    session: AsyncSession | None, recentes: Sequence[Any], gatilho: Any | None
+) -> dict[str, str]:
+    """{rascunho_id: texto_sha} dos rascunhos do agente ("ag1") das falas `davinci_ia` da
+    conversa que o verificador liberou (`fatos.agente.verificador.ok` true). Só LÊ; nunca
+    levanta (sem saber, nenhuma — a seção O QUE O ATENDIMENTO JÁ ENVIOU não vai). (Revisão do
+    an0311, ver acima.)"""
+    ids = list(
+        dict.fromkeys(
+            getattr(m, "rascunho_id", None)
+            for m in _falas_do_atendimento(recentes, gatilho)
+            if getattr(m, "rascunho_id", None) is not None
+        )
+    )
+    if session is None or not ids:
+        return {}
+    from sqlalchemy import select
+
+    from app.models.atendimento import AtendimentoRascunho
+
+    try:
+        linhas = (
+            await session.execute(
+                select(AtendimentoRascunho.id, AtendimentoRascunho.fatos).where(
+                    AtendimentoRascunho.id.in_(ids[-20:]),
+                    AtendimentoRascunho.prompt_versao == constantes.PROMPT_VERSAO_AGENTE,
+                )
+            )
+        ).all()
+    except Exception as e:  # noqa: BLE001 — sem a prova, a seção não vai
+        logger.warning("atendimento_agente_verificador_ja_enviado", err=type(e).__name__)
+        return {}
+    saida: dict[str, str] = {}
+    for rascunho_id, fatos in linhas:
+        agente = fatos.get("agente") if isinstance(fatos, Mapping) else None
+        reg = agente.get("verificador") if isinstance(agente, Mapping) else None
+        if (
+            isinstance(reg, Mapping)
+            and reg.get("ok") is True
+            and isinstance(reg.get("texto_sha"), str)
+        ):
+            saida[str(rascunho_id)] = reg["texto_sha"]
+    return saida
+
+
+def ja_enviado_da_conversa(
+    recentes: Sequence[Any],
+    gatilho: Any | None,
+    nomes: Iterable[str | None],
+    conferidas: Mapping[str, str] | None = None,
+) -> tuple[str, ...]:
+    """As últimas `MAX_JA_ENVIADO` respostas que o atendimento automático (o agente, origem
+    `davinci_ia`) já mandou na conversa, até o gatilho, mascaradas e numa linha cada — só as
+    que o verificador liberou com o mesmo texto (`conferidas` = `respostas_conferidas`; None ou
+    vazio = nenhuma). PURA."""
+    nomes = tuple(nomes)
+    if not conferidas:
+        return ()
+    do_atendimento = [
+        m
+        for m in _falas_do_atendimento(recentes, gatilho)
+        if _conferida_pelo_verificador(m, conferidas)
     ]
     saida: list[str] = []
     for m in do_atendimento[-MAX_JA_ENVIADO:]:
@@ -1326,9 +1399,11 @@ def resumo_do_pacote(
     *,
     pediu_evidencia: bool = False,
     avisos: Sequence[str] = (),
+    conferidas: Mapping[str, str] | None = None,
 ) -> ResumoDoPacote:
     """O resumo a partir do que a execução do agente já tem. Só lê; nada vai ao banco.
-    `avisos` (v14) = os avisos das checagens que não seguram sozinhos."""
+    `avisos` (v14) = os avisos das checagens que não seguram sozinhos. `conferidas` (v17,
+    revisão do an0311) = `respostas_conferidas` — sem elas, sem O QUE O ATENDIMENTO JÁ ENVIOU."""
     foco = [m for m in base.foco if (getattr(m, "texto", None) or "").strip()]
     # Item 24 (22/10/2026): o cartão do comprador com o texto dele, não "[Mensagem]".
     perguntas = [pacote.texto_da_mensagem(m) or "" for m in foco] or list(base.textos_cliente)
@@ -1368,7 +1443,7 @@ def resumo_do_pacote(
             ]
         ),
         # v17 (an0311): o que o atendimento já mandou nesta conversa e os estados do turno.
-        ja_enviado=ja_enviado_da_conversa(base.recentes, gatilho, base.nomes),
+        ja_enviado=ja_enviado_da_conversa(base.recentes, gatilho, base.nomes, conferidas),
         ufs_do_cliente=_ufs_do_turno(base),
     )
 
@@ -2801,6 +2876,9 @@ async def no_rascunho(
         r = Resultado.falhou(FALHA_INJECAO)
     else:
         try:
+            # v17 (revisão do an0311): as falas do agente que este verificador liberou — lidas
+            # antes de soltar a sessão (só LÊ; sem a prova, a seção não vai).
+            conferidas = await respostas_conferidas(session, base.recentes, gatilho)
             if soltar_sessao is not None:
                 await soltar_sessao()
             resumo = resumo_do_pacote(
@@ -2809,6 +2887,7 @@ async def no_rascunho(
                 gatilho,
                 pediu_evidencia=pediu_evidencia,
                 avisos=list(getattr(final, "avisos", None) or []),
+                conferidas=conferidas,
             )
             texto = texto_para_verificar(final.texto, base.valores, base.nomes)
         except Exception as e:  # noqa: BLE001
@@ -2880,8 +2959,35 @@ PARTILHA_MINIMA_DO_CORTE = 0.6
 _PALAVRA_DO_CORTE = re.compile(r"[a-z0-9]+(?:[.,]\d+)?")
 # A frase que começa respondendo ("Sim, …", "Não, …", "Tem sim", "Não tem"): nunca é cortada.
 _RESPOSTA_DIRETA = re.compile(
-    r"^\W*(?:ola\W+)?(?:sim|nao|tem\s+sim|temos\s+sim|nao\s+tem|nao\s+temos|possui|tem|temos)\b"
+    r"^\W*(?:ola\W+)?(?:sim|nao|tem\s+sim|temos\s+sim|nao\s+tem|nao\s+temos|possui|tem|temos"
+    r"|isso|exato|exatamente|correto|acompanha|vem|vem\s+sim|e\s+sim|nao\s+e|funciona)\b"
 )
+# Revisão do an0311 (c81bc743): o cumprimento e a interjeição antes da resposta ("Bom dia, sim,
+# …", "Oi, sim, …", "Isso mesmo, …", "Boa tarde! Infelizmente não tem…") saem antes de casar o
+# `_RESPOSTA_DIRETA`.
+_ABERTURA_DO_CORTE = re.compile(
+    r"^\W*(?:(?:ola|oi|opa|bom\s+dia|boa\s+tarde|boa\s+noite|tudo\s+bem|isso\s+mesmo|claro"
+    r"|certo|perfeito|entendi|infelizmente|felizmente|otimo|beleza|ok|olha|veja|bom|entao"
+    r"|obrigad[oa](?:\s+pela\s+mensagem)?|que\s+bom)\b\W*)+"
+)
+# A frase só de acolhimento ("Sinto muito pelo problema com a bateria.", "Que bom que chegou!")
+# não é a resposta: a 1ª frase que responde é a que vem depois dela.
+_ACOLHIMENTO_DO_CORTE = re.compile(
+    r"^\W*(?:sinto\s+muito|sentimos(?:\s+muito)?|lamento|lamentamos|que\s+bom|obrigad[oa]"
+    r"|agradecemos|entendo|entendi|compreendo)\b[^:;]*$"
+)
+MAX_PALAVRAS_DO_ACOLHIMENTO = 12
+
+
+def _so_acolhimento_do_corte(frase: str) -> bool:
+    """A frase é SÓ acolhimento (curta, sem dois-pontos: "Sinto muito pelo problema com a
+    bateria.")? A que acolhe e informa ("Lamentamos o transtorno: seu pedido foi postado…") não."""
+    plana = validador.plano_de(frase or "")
+    return bool(_ACOLHIMENTO_DO_CORTE.match(plana)) and (
+        len(plana.split()) <= MAX_PALAVRAS_DO_ACOLHIMENTO
+    )
+
+
 _VAZIAS_DO_CORTE = frozenset(
     "a o as os e de da do das dos em no na nos nas um uma uns umas que com por para pra se ao "
     "aos ou eh e".split()
@@ -2907,13 +3013,28 @@ def _frase_da_afirmacao(afirmacao: str, frases: Sequence[str]) -> int | None:
     return boas[0] if len(boas) == 1 else None
 
 
+def _raizes_do_corte(texto: str) -> set[str]:
+    """As palavras de conteúdo pela raiz (5 letras; "6,9" = "6.9") — a partilha com o cliente."""
+    return {
+        p.replace(",", ".")[:5] for p in _palavras_do_corte(texto) if len(p) >= 3 or p.isdigit()
+    }
+
+
 def frase_para_cortar(
-    texto: str | None, registro: Mapping[str, Any] | None
+    texto: str | None,
+    registro: Mapping[str, Any] | None,
+    perguntas: Sequence[str | None] = (),
 ) -> tuple[str, str] | None:
     """(o texto sem a frase, a frase) quando o "não" do verificador (`registro` =
     `Resultado.para_fatos`) é SÓ afirmação sem lastro, as afirmações citadas (até
     `MAX_AFIRMACOES_DO_CORTE`) caem TODAS numa frase só e o resto ainda tem resposta (não é só
-    cortesia nem só o "como podemos ajudar?"); None no resto. PURA (v17, ver acima)."""
+    cortesia nem só o "como podemos ajudar?"); None no resto. PURA (v17, ver acima).
+
+    Revisão do an0311: nunca a frase que é a resposta — a que começa respondendo (também depois
+    do cumprimento ou da interjeição: "Bom dia, sim, …", "Isso mesmo, …"), a 1ª frase depois do
+    cumprimento e do acolhimento, e (com `perguntas` = as falas do cliente no turno) a frase que
+    partilha com elas MAIS palavras do que qualquer outra (fora a frase só de acolhimento: "Sinto
+    muito pelo problema com a bateria." nunca é a resposta)."""
     if not isinstance(registro, Mapping) or registro.get("rodou") is not True:
         return None
     if registro.get("ok") is not False or registro.get("falha"):
@@ -2930,10 +3051,30 @@ def frase_para_cortar(
     if None in indices or len(indices) != 1:
         return None
     (i,) = indices
-    if _RESPOSTA_DIRETA.match(validador.plano_de(frases_[i])):
+    plana = validador.plano_de(frases_[i])
+    if _RESPOSTA_DIRETA.match(plana) or _RESPOSTA_DIRETA.match(_ABERTURA_DO_CORTE.sub("", plana)):
         # A frase sem lastro É a resposta ("Sim, o anúncio traz dual chip…" — c81bc743): sem
         # ela, o resto não responde; segura.
         return None
+    primeira = next(
+        (
+            j
+            for j, f in enumerate(frases_)
+            if not checagens._so_cortesia(f) and not _so_acolhimento_do_corte(f)
+        ),
+        None,
+    )
+    if i == primeira:
+        # Revisão do an0311: a 1ª frase depois do cumprimento é a resposta ("Olá! O A17 Pro Max
+        # tem NFC. Ele também é dual chip."): cortá-la deixaria só o que vem depois; segura.
+        return None
+    do_cliente = set().union(*(_raizes_do_corte(t) for t in perguntas if isinstance(t, str)))
+    if do_cliente and not _so_acolhimento_do_corte(frases_[i]):
+        partilha = [len(_raizes_do_corte(f) & do_cliente) for f in frases_]
+        if partilha[i] and partilha[i] > max(p for j, p in enumerate(partilha) if j != i):
+            # A frase que mais fala do que o cliente perguntou é a resposta dele (ce443965:
+            # "o reembolso é feito pela devolução" ao "e o reembolso?"); segura.
+            return None
     resto = " ".join(f for j, f in enumerate(frases_) if j != i)
     if not resto or checagens._so_cortesia(resto) or checagens.resposta_so_generica(resto):
         return None
