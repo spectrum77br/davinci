@@ -103,6 +103,44 @@ _VALORES = {
 }
 
 
+# Os canais que o cabeçalho do pacote pode trazer pelo nome (sem descrição no `ia`).
+_CANAIS_PELO_NOME = frozenset(
+    {
+        constantes.CANAL_CHAT,
+        constantes.CANAL_PERGUNTA,
+        constantes.CANAL_POS_VENDA,
+        constantes.CANAL_EMAIL,
+        constantes.CANAL_SAC,
+        constantes.CANAL_RECLAMACAO,
+        constantes.CANAL_AVALIACAO,
+    }
+)
+
+
+def canal_do_registro(r: Mapping[str, Any], sec: Mapping[str, Any] | None = None) -> str:
+    """O canal da conversa do registro (03/11/2026, o eval do ML). PURA.
+
+    O `canal` que o rodar gravou (o da amostra); sem ele (o registro de antes), o do
+    CABEÇALHO do pacote: a descrição do `ia._CANAL_DESCRICAO` da plataforma (no ML, a
+    "mensagem pós-venda" é `pos_venda` — antes virava "chat" e o regatilho media o pós-venda
+    sem o limite de 350 caracteres), o nome cru do canal, e por fim "pergunta" no texto
+    (pergunta) ou chat.
+    """
+    gravado = str(r.get("canal") or "").strip()
+    if gravado in _CANAIS_PELO_NOME:
+        return gravado
+    if sec is None:
+        sec = secoes((r.get("rastro") or {}).get("pacote"))
+    texto = str((sec.get("CABEÇALHO") or {}).get("canal") or "").strip()
+    plataforma = str(r.get("plataforma") or "shopee")
+    for (plat, canal), descricao in ia._CANAL_DESCRICAO.items():
+        if plat == plataforma and descricao == texto:
+            return canal
+    if texto in _CANAIS_PELO_NOME:
+        return texto
+    return constantes.CANAL_PERGUNTA if "pergunta" in texto.lower() else constantes.CANAL_CHAT
+
+
 def loja_de(r: Mapping[str, Any]) -> str:
     integ = str(r.get("integration_id") or "")
     return LOJAS.get(integ) or (integ[:8] or "?")
@@ -226,14 +264,15 @@ def mensagens(transcricao: Sequence[str], agora: datetime) -> list[SimpleNamespa
     return saida_
 
 
-def _ctx_do_pedido(bloco: Mapping[str, Any] | None) -> dict:
-    """O contexto do pedido (o formato de `contexto_svc.contexto_da_conversa`) pelo bloco."""
+def _ctx_do_pedido(bloco: Mapping[str, Any] | None, plataforma: str | None = "shopee") -> dict:
+    """O contexto do pedido (o formato de `contexto_svc.contexto_da_conversa`) pelo bloco
+    (a reclamação com o nome da plataforma do registro: "Mercado Livre" no ML)."""
     if not isinstance(bloco, Mapping):
         return {"pedido": None, "logistica": None, "chamados": [], "devolucoes": []}
     reclamacoes = [
         {
             "id": f"r{i}",
-            "plataforma": "Shopee",
+            "plataforma": ia._PLATAFORMA_NOME.get(str(plataforma), str(plataforma)),
             "tipo": "devolucao",
             "tipo_rotulo": r.get("tipo"),
             "status": r.get("estado"),
@@ -432,12 +471,12 @@ def montar(r: Mapping[str, Any]) -> SimpleNamespace:
         sec.get("PEDIDO DA CONVERSA") if isinstance(sec.get("PEDIDO DA CONVERSA"), dict) else None
     )
     fichas = [f for f in sec.get("PRODUTO") or [] if isinstance(f, dict)]
-    canal_txt = str((sec.get("CABEÇALHO") or {}).get("canal") or "")
     conversa = SimpleNamespace(
         id=UUID(str(r.get("conversa_id"))) if r.get("conversa_id") else uuid4(),
         plataforma=r.get("plataforma") or "shopee",
-        canal=constantes.CANAL_PERGUNTA if "pergunta" in canal_txt.lower() else "chat",
-        dados={},
+        canal=canal_do_registro(r, sec),
+        # A reclamação aberta do ML (o rodar grava; 03/11/2026): a mesma trava do envio.
+        dados={"claim_ids": ["eval"]} if r.get("reclamacao_aberta") else {},
         pedido_marketplace=_VALORES["numero_pedido"] if bloco else None,
         etiqueta=constantes.ETIQUETA_DEVOLUCAO if estado.get("devolucao_em_andamento") else None,
         etiquetas_secundarias=[],
@@ -447,7 +486,7 @@ def montar(r: Mapping[str, Any]) -> SimpleNamespace:
         comprador_nome=None,
         anuncio_id=None,
     )
-    ctxd = _ctx_do_pedido(bloco)
+    ctxd = _ctx_do_pedido(bloco, conversa.plataforma)
     rajada = ia.rajada_do_cliente(msgs, gatilho)
     foco = ia.perguntas_pendentes(msgs, gatilho)
     textos_cliente = [m.texto for m in rajada if m.texto]
@@ -680,6 +719,9 @@ async def regatilhar(
     linha = {
         "id": r.get("id"),
         "loja": loja_de(r),
+        # O eval do ML (03/11/2026): o canal entra no resumo (pós-venda × pergunta).
+        "plataforma": r.get("plataforma") or "shopee",
+        "canal": canal_do_registro(r),
         "categoria": (r.get("decisao") or {}).get("categoria") or proposta.get("assunto"),
         "antes": _antes(r),
         "rascunho_antes": r.get("texto_final"),
@@ -1004,10 +1046,10 @@ def resumo(linhas: Sequence[Mapping[str, Any]]) -> dict:
     """O resumo: a decisão de antes e a de agora, no total, por loja e por categoria."""
     passa = (AUTO, CHEGA)
 
-    def _grupo(chave: str) -> dict:
+    def _grupo(chave: str | Any) -> dict:
         g: dict[str, Counter] = defaultdict(Counter)
         for x in linhas:
-            k = str(x.get(chave) or "?")
+            k = str((chave(x) if callable(chave) else x.get(chave)) or "?")
             g[k]["total"] += 1
             g[k]["antes"] += x.get("antes") == CHEGA
             g[k]["agora"] += x.get("decisao") in passa
@@ -1035,7 +1077,13 @@ def resumo(linhas: Sequence[Mapping[str, Any]]) -> dict:
         "avisos_mais_comuns": dict(avisos.most_common(15)),
         "por_loja": _grupo("loja"),
         "por_categoria": _grupo("categoria"),
+        "por_canal": _grupo(_plataforma_canal),
     }
+
+
+def _plataforma_canal(x: Mapping[str, Any]) -> str | None:
+    """O grupo do resumo por canal ("ml:pos_venda"; a linha de antes, sem o canal, "?")."""
+    return f"{x.get('plataforma')}:{x['canal']}" if x.get("canal") else None
 
 
 def imprimir(res: Mapping[str, Any]) -> None:
@@ -1053,9 +1101,9 @@ def imprimir(res: Mapping[str, Any]) -> None:
     )
     print("custo do verificador (US$):", res["custo_usd"])
     print("pessoa por motivo:", json.dumps(res["pessoa_por_motivo"], ensure_ascii=False))
-    for nome in ("por_loja", "por_categoria"):
+    for nome in ("por_loja", "por_canal", "por_categoria"):
         print(nome + ":")
-        for k, v in res[nome].items():
+        for k, v in (res.get(nome) or {}).items():
             linha = (
                 f"  {k:28s} total {v.get('total', 0):3d}  antes {v.get('antes', 0):3d}"
                 f"  agora {v.get('agora', 0):3d}"

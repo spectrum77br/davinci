@@ -60,7 +60,7 @@ from uuid import UUID
 
 from app.config import get_settings
 from app.models import AtendimentoConversa
-from app.services.atendimento import agente, agente_config
+from app.services.atendimento import agente, agente_config, constantes
 from app.services.atendimento.agente import custo, ferramentas, replay
 
 OK = 0
@@ -141,11 +141,18 @@ async def _um(
         "braco": braco,
         "estrato": item.get("estrato"),
         "rotulo": item.get("rotulo"),
+        # O canal da conversa (03/11/2026): o regatilho reconstrói a conversa com ele (no ML,
+        # o pós-venda tem 350 caracteres e a pergunta é pública).
+        **({"canal": item["canal"]} if item.get("canal") else {}),
     }
     async with replay.sessao_replay() as s:
         conversa = await s.get(AtendimentoConversa, UUID(item["conversa_id"]))
         if conversa is None:
             return {**registro, "erro": "conversa_sumiu"}
+        if constantes.reclamacao_aberta(conversa.dados):
+            # A reclamação/mediação aberta no ML (`dados.claim_ids`, 03/11/2026): o automático
+            # nunca responde ali — o regatilho, que não lê o banco, precisa saber.
+            registro["reclamacao_aberta"] = True
         if braco == BRACO_LEGADO:
             r = await replay.rascunho_do_legado(
                 s,
