@@ -684,7 +684,8 @@ async def test_lista_aponta_o_chat_do_comprador_ligado_a_outro_pedido(db, client
             ),
         ]
     )
-    # Outra loja: o mesmo id de comprador e o pedido 300102 — não é o chat dele.
+    # Outra loja: o MESMO id de comprador (555) e o pedido 300102 — o chat da
+    # kfa não é dele (o id é da plataforma, a pessoa é por loja).
     outra = Integration(
         user_id=dono.id,
         platform=IntegrationPlatform.SHOPEE,
@@ -695,7 +696,7 @@ async def test_lista_aponta_o_chat_do_comprador_ligado_a_outro_pedido(db, client
     await db.flush()
     db.add(
         AtendimentoPedidoComprador(
-            integration_id=outra.id, plataforma="shopee", comprador_id="999", pedido="SHP300102"
+            integration_id=outra.id, plataforma="shopee", comprador_id="555", pedido="SHP300102"
         )
     )
     await db.commit()
@@ -704,11 +705,33 @@ async def test_lista_aponta_o_chat_do_comprador_ligado_a_outro_pedido(db, client
     assert por["300103"]["conversa_id"] is None
     assert por["300103"]["conversa_comprador_id"] == str(chat.id)
     assert por["300103"]["motivo"]["codigo"] == "restricao_envio"
-    # A trava (300102): o comprador 999 não tem conversa nenhuma.
+    # A trava (300102): o 555 da OUTRA loja não tem conversa lá.
     assert por["300102"]["conversa_comprador_id"] is None
     # O pedido com conversa própria aponta ela, e só ela.
     assert por["300101"]["conversa_id"] == str(chat.id)
     assert por["300101"]["conversa_comprador_id"] is None
+
+
+async def test_lista_nao_toma_a_avaliacao_como_chat_do_comprador(db, client, admin, make_user):
+    """Só o CHAT é "o chat do comprador": a conversa de avaliação (resposta
+    pública) de outro pedido dele não vira o "Abrir chat do comprador"."""
+    dono = await make_user()
+    chat = await _cenario(db, dono)
+    chat.canal = "avaliacao"
+    chat.comprador_id = "555"
+    db.add(
+        AtendimentoPedidoComprador(
+            integration_id=chat.integration_id,
+            plataforma="shopee",
+            comprador_id="555",
+            pedido="SHP300103",
+        )
+    )
+    await db.commit()
+
+    por = {p["numero"]: p for p in (await client.get(URL)).json()["pedidos"]}
+    assert por["300103"]["conversa_id"] is None
+    assert por["300103"]["conversa_comprador_id"] is None
 
 
 async def test_lista_mascara_a_margem_para_quem_nao_ve(db, client, make_user, auth_as):

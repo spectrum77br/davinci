@@ -151,6 +151,7 @@ from app.services.atendimento.constantes import (
     CANAIS_SEMPRE_POS_VENDA,
     CANAL_AVALIACAO,
     CANAL_CARRINHO,
+    CANAL_CHAT,
     CANAL_COMENTARIO,
     CANAL_PERGUNTA,
     CANAL_RECLAMACAO,
@@ -1166,6 +1167,11 @@ async def conversas_do_pedido_bling(
     return [c for c in conversas if not separa_email.e_conversa_de_email(c)]
 
 
+# O chat que é UM por comprador na loja (03/11/2026) — o mesmo da busca da
+# lista (`routers/atendimento.PLATAFORMAS_CHAT_DO_COMPRADOR`) e da Garantia.
+PLATAFORMAS_CHAT_DO_COMPRADOR = ("shopee", "tiktok")
+
+
 async def conversas_do_comprador_do_pedido(
     session: AsyncSession, pedido_marketplace: str | None
 ) -> list[AtendimentoConversa]:
@@ -1175,10 +1181,11 @@ async def conversas_do_comprador_do_pedido(
     aparece no chat"): o chat da Shopee fica ligado a UM pedido — o último que
     o comprador citou —, e os outros pedidos de quem compra várias vezes ficam
     sem conversa própria (`conversas_do_pedido` não acha nada). Pelo índice de
-    pedidos por comprador (`atendimento_pedidos_comprador`, `indice.py`): as
-    conversas desse comprador na mesma integração. A ordem é a de
-    `conversas_do_pedido` (o chat antes da reclamação/avaliação, a mais
-    recente primeiro); a conversa de e-mail da ponte nunca vem.
+    pedidos por comprador (`atendimento_pedidos_comprador`, `indice.py`): os
+    chats desse comprador na mesma integração, a de mensagem mais
+    recente primeiro). SÓ O CHAT da Shopee/TikTok (`PLATAFORMAS_CHAT_DO_COMPRADOR`,
+    um por comprador na loja): o pós-venda do ML, a avaliação, a reclamação e
+    o e-mail da ponte são de UM pedido — não são "o chat do comprador".
 
     SÓ PARA ABRIR: o retrato (`dados.pedido_mkt`) e as falas dessa conversa
     são de OUTRO pedido — quem classifica o motivo, troca ou manda oferta
@@ -1195,12 +1202,13 @@ async def conversas_do_comprador_do_pedido(
             await session.execute(
                 select(AtendimentoConversa)
                 .where(
+                    AtendimentoConversa.plataforma.in_(PLATAFORMAS_CHAT_DO_COMPRADOR),
+                    AtendimentoConversa.canal == CANAL_CHAT,
                     tuple_(
                         AtendimentoConversa.integration_id, AtendimentoConversa.comprador_id
-                    ).in_(compradores)
+                    ).in_(compradores),
                 )
                 .order_by(
-                    AtendimentoConversa.canal.in_((CANAL_RECLAMACAO, CANAL_AVALIACAO)).asc(),
                     AtendimentoConversa.ultima_mensagem_em.desc().nulls_last(),
                     AtendimentoConversa.created_at.desc(),
                 )

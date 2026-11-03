@@ -292,7 +292,8 @@ async def test_busca_pelo_numero_de_outro_pedido_do_comprador(client, db, make_u
     EXATO de outro pedido do mesmo comprador na mesma loja (o da plataforma ou
     o do Bling) acha o chat dele, pelo índice de pedidos por comprador. O
     pedaço do nº e o SKU do outro pedido não estendem para o comprador, e o
-    mesmo id de comprador em outra loja não é a mesma pessoa."""
+    mesmo id de comprador em outra loja não é a mesma pessoa. Só o chat da
+    Shopee/TikTok: o pós-venda do ML é do pack."""
     c = await _cenario(db, make_user)
     canc = c["canc"]
     canc.comprador_id = "777"
@@ -315,6 +316,18 @@ async def test_busca_pelo_numero_de_outro_pedido_do_comprador(client, db, make_u
             ),
         ]
     )
+    # O ML: o pós-venda é do PACK (um pedido só) — outro pedido do mesmo
+    # comprador não traz essa conversa.
+    pack = c["pack"]
+    pack.comprador_id = "321"
+    db.add(
+        AtendimentoPedidoComprador(
+            integration_id=pack.integration_id,
+            plataforma="ml",
+            comprador_id="321",
+            pedido="2000077777777777",
+        )
+    )
     await db.commit()
     await _bling(db, "297100", "2409IRMAO", 83955, "BOLSA-ROSA.sp")
 
@@ -322,6 +335,9 @@ async def test_busca_pelo_numero_de_outro_pedido_do_comprador(client, db, make_u
         return _ids(await client.get(f"{URL}/conversas", params={"q": q}))
 
     assert await busca("2409IRMAO") == [str(canc.id)]
+    # O order_sn é maiúsculo; digitado em minúscula também acha.
+    assert await busca("2409irmao") == [str(canc.id)]
+    assert await busca("2000077777777777") == []
     # O nº do Bling do outro pedido.
     assert await busca("297100") == [str(canc.id)]
     # Só o nº exato: o pedaço não acha o comprador.
