@@ -1597,11 +1597,11 @@ async def valuation_report(
         return any(mes in months and pred(team) and c
                    for (mes, team), c in dev_idx.items())
 
-    # Organização comercial independente dos códigos que restringem o acesso.
-    # As duas equipes permanecem visíveis mesmo enquanto a Equipe 2 está vazia.
+    # As três equipes (03/11/2026: a mesma equipe de vendas da loja, 1/2/3)
+    # aparecem sempre, mesmo vazias. Só o número, sem o nome (pedido do dono).
     total_aguard, total_taxa = _com_series(lambda t: True)
     empresas: list[ComercialEmpresaOut] = []
-    for team in (1, 2):
+    for team in (1, 2, 3):
         a, t = _com_series(lambda x, team=team: x == team)
         empresas.append(ComercialEmpresaOut(
             empresa=team, label=f"Equipe {team}",

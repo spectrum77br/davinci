@@ -161,8 +161,11 @@ async function enviar(opcoes?: { confirmar?: boolean; confirmarNaoResponde?: boo
     enviando.value = false
   }
 }
+// Enter envia e Shift+Enter quebra a linha (03/11/2026, como a caixa da
+// conversa); Ctrl/Cmd+Enter também. No e-mail (parágrafos) só o Ctrl+Enter.
 function aoTeclar(e: KeyboardEvent) {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+  if (e.key !== 'Enter' || e.isComposing || e.shiftKey || e.altKey) return
+  if (e.ctrlKey || e.metaKey || !ehEmail.value) {
     e.preventDefault()
     void enviar()
   }
@@ -204,7 +207,7 @@ function aoTeclar(e: KeyboardEvent) {
         rows="2"
         :disabled="!!bloqueio || enviando"
         class="block max-h-[30vh] min-h-[56px] w-full resize-y rounded-md border bg-background px-2.5 py-2 text-sm [field-sizing:content] focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
-        :placeholder="bloqueio ? 'Resposta desabilitada nesta aba' : `Escreva a resposta (${responde.canal_rotulo || 'outra conversa'})… (Ctrl+Enter envia)`"
+        :placeholder="bloqueio ? 'Resposta desabilitada nesta aba' : `Escreva a resposta (${responde.canal_rotulo || 'outra conversa'})… (${ehEmail ? 'Ctrl+Enter envia' : 'Enter envia · Shift+Enter quebra linha'})`"
         :aria-label="`resposta pela aba ${aba.rotulo}`"
         @keydown="aoTeclar"
       />
@@ -229,7 +232,7 @@ function aoTeclar(e: KeyboardEvent) {
           class="text-[11px] tabular-nums"
           :class="acimaDoLimite ? 'font-semibold text-red-600 dark:text-red-400' : 'text-muted-foreground'"
         >{{ tamanho }}/{{ limite }}</span>
-        <Button size="sm" class="ml-auto h-8" :disabled="!podeEnviar" :title="bloqueio || 'enviar por esta conversa (Ctrl+Enter)'" @click="enviar()">
+        <Button size="sm" class="ml-auto h-8" :disabled="!podeEnviar" :title="bloqueio || `enviar por esta conversa (${ehEmail ? 'Ctrl+Enter' : 'Enter'})`" @click="enviar()">
           <Loader2 v-if="enviando" class="mr-1.5 size-4 animate-spin" />
           <Send v-else class="mr-1.5 size-4" />
           Enviar

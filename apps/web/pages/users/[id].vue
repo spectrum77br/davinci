@@ -23,7 +23,7 @@ type UserDetail = {
   // Trava de vídeo (17/09): tags cujas solicitações de vídeo trancam a aba
   // Pedidos deste usuário (subconjunto de stock_tags). null = nunca tranca.
   video_trava_tags: string[] | null
-  commercial_team: 1 | 2 | null
+  commercial_team: 1 | 2 | 3 | null
   sales_teams: number[] | null
   marketing_teams: string[] | null
   permissions: Partial<Record<Resource, Partial<ResourcePerm>>>
@@ -77,7 +77,7 @@ const form = reactive({
   threema: '',
   stock_tags: [] as string[],
   video_trava_tags: [] as string[],
-  commercial_team: null as 1 | 2 | null,
+  commercial_team: null as 1 | 2 | 3 | null,
   marketing_teams: [] as string[],
   status: 'pending' as 'pending' | 'active' | 'suspended',
 })
@@ -120,6 +120,9 @@ function toggleVideoTravaTag(slug: string) {
 
 // Os vínculos de acesso são independentes da organização comercial.
 // Só esta seção grava sales_teams, mediante ação explícita do administrador.
+// Os vínculos 101/102/103 são as Equipes 1/2/3 das lojas (03/11/2026: a
+// equipe da loja em Lojas e o vínculo de acesso dela andam juntos).
+const EQUIPE_DO_VINCULO: Record<number, number> = { 101: 1, 102: 2, 103: 3 }
 type AccountAccessStore = {
   sales_team: number | null
   account_name: string | null
@@ -149,7 +152,11 @@ const accountAccessOptions = computed(() => {
   }
   return [...codes].sort((a, b) => a - b).map((code) => {
     const labels = [...(storeLabels.get(code) || [])].sort((a, b) => a.localeCompare(b))
-    return { code, label: labels.length ? labels.join(' · ') : `Vínculo de acesso ${code}` }
+    return {
+      code,
+      equipe: EQUIPE_DO_VINCULO[code] ?? null,
+      label: labels.length ? labels.join(' · ') : `Vínculo de acesso ${code}`,
+    }
   })
 })
 const accountAccessDirty = computed(() => {
@@ -605,6 +612,7 @@ async function removeUser(ignorarImobilizado = false, jaConfirmou = false) {
               <option :value="null">Sem equipe</option>
               <option :value="1">Equipe 1</option>
               <option :value="2">Equipe 2</option>
+              <option :value="3">Equipe 3</option>
             </select>
             <p class="text-[11px] text-muted-foreground mt-1">
               Organiza o usuário por equipe e mantém seus acessos individuais às lojas.
@@ -685,7 +693,7 @@ async function removeUser(ignorarImobilizado = false, jaConfirmou = false) {
       <div class="px-6 pb-6 space-y-3">
         <p class="text-sm text-muted-foreground">
           Selecione os vínculos de contas permitidos para este usuário. Contas no mesmo vínculo
-          são liberadas juntas. Esta seleção é independente da Equipe 1 ou Equipe 2.
+          são liberadas juntas. Esta seleção é independente da Equipe do usuário (1, 2 ou 3) acima.
         </p>
         <p class="text-sm font-medium">
           Sem nenhuma seleção, o usuário terá acesso a todas as contas, respeitando as permissões dos módulos.
@@ -714,7 +722,9 @@ async function removeUser(ignorarImobilizado = false, jaConfirmou = false) {
               :checked="selectedAccountAccess.includes(option.code)"
               @change="toggleAccountAccess(option.code)"
             />
-            <span>{{ option.label }}</span>
+            <span>
+              <strong v-if="option.equipe" class="font-semibold">Equipe {{ option.equipe }} —</strong> {{ option.label }}
+            </span>
           </label>
           <p v-if="accountAccessLoaded && !accountAccessOptions.length" class="text-sm text-muted-foreground">
             Nenhum vínculo de acesso cadastrado nas contas.

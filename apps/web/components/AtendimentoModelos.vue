@@ -15,6 +15,12 @@
 // caixas é medida pelo menor limite entre elas.
 // Temu e AliExpress não aparecem aqui: lá não há caixa de envio (a resposta é
 // no Seller Center), e a resposta pronta só serve para ela.
+//
+// Por equipe (03/11/2026, o Eduardo: "as q ja tem la deixe pra todos mas as
+// novas que eles vao criar vai ter essa ideia de especifico por equipe"): a
+// lista vem do servidor no escopo da pessoa — as "para todos" + as da equipe
+// dela; o admin, todas, com o filtro de equipe. Quem é de equipe cria a da
+// equipe dele e mexe só nas da equipe; a "para todos" só o admin muda.
 import { Check, Loader2, MessageSquareText, Pencil, Plus, RotateCcw, Search, Trash2, X } from 'lucide-vue-next'
 import {
   LACUNAS,
@@ -24,6 +30,7 @@ import {
   comoLista,
   comoObjeto,
   erroDaApi,
+  filtrarProntas,
   limiteDe,
   plataformaInfo,
   tamanhoDoEnvio,
@@ -36,6 +43,10 @@ const { api } = useApi()
 const toasts = useToasts()
 
 const modelos = ref<Modelo[]>([])
+// As equipes do formulário e do filtro (GET /modelos/equipes): `todas` = o admin
+// (escolhe a equipe ou "para todos"); `minhas` = a equipe de quem é de equipe.
+type Equipes = { equipes: { numero: number; nome: string }[]; minhas: number[]; todas: boolean }
+const equipes = ref<Equipes | null>(null)
 const carregando = ref(false)
 const erro = ref<string | null>(null)
 const salvando = ref(false)
@@ -48,7 +59,12 @@ async function carregar() {
   carregando.value = true
   erro.value = null
   try {
-    modelos.value = comoLista<Modelo>(await api<unknown>('/api/atendimento/modelos'), 'modelos')
+    const [lista, eq] = await Promise.all([
+      api<unknown>('/api/atendimento/modelos'),
+      equipes.value ? Promise.resolve(equipes.value) : api<Equipes>('/api/atendimento/modelos/equipes').catch(() => null),
+    ])
+    modelos.value = comoLista<Modelo>(lista, 'modelos')
+    if (eq && Array.isArray(eq.equipes)) equipes.value = eq
   } catch (e: any) {
     erro.value = erroDaApi(e, 'Não consegui carregar as respostas prontas').texto
   } finally {
@@ -59,14 +75,33 @@ onMounted(carregar)
 
 const busca = ref('')
 const filtroPlataforma = ref('')
-const visiveis = computed(() => {
-  const q = busca.value.trim().toLowerCase()
-  return modelos.value
-    .filter((m) => !filtroPlataforma.value || !m.plataforma || m.plataforma === filtroPlataforma.value)
-    .filter((m) => !q || m.titulo.toLowerCase().includes(q) || m.texto.toLowerCase().includes(q))
-    .slice()
-    .sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0) || a.titulo.localeCompare(b.titulo, 'pt-BR'))
+// '' = todas; 'todos' = só as "para todos"; '101' = só as da equipe 101.
+const filtroEquipe = ref('')
+const visiveis = computed(() =>
+  filtrarProntas(
+    modelos.value
+      .filter((m) => !filtroPlataforma.value || !m.plataforma || m.plataforma === filtroPlataforma.value)
+      .filter((m) => !filtroEquipe.value || (filtroEquipe.value === 'todos' ? m.equipe == null : String(m.equipe ?? '') === filtroEquipe.value)),
+    busca.value,
+  ),
+)
+
+// O filtro: o admin escolhe entre todas as equipes; quem é de equipe, entre a
+// dele e as "para todos" (as outras nem chegam).
+const equipesDoFiltro = computed(() => {
+  const e = equipes.value
+  if (!e) return []
+  return e.todas ? e.equipes : e.equipes.filter((x) => e.minhas.includes(x.numero))
 })
+// Quem cria: o admin (canEdit) ou quem é de equipe.
+const podeCriar = computed(() => props.canEdit || !!equipes.value?.minhas.length)
+// Por linha, o que o servidor disse (a própria equipe ou o admin).
+const podeMexer = (m: Modelo) => m.pode_editar ?? props.canEdit
+// O admin apaga com o `delete`; quem é de equipe apaga as da equipe dele.
+const podeApagar = (m: Modelo) => podeMexer(m) && (props.canDelete || !props.canEdit)
+function rotuloEquipe(m: Pick<Modelo, 'equipe' | 'equipe_nome'>) {
+  return m.equipe == null ? 'para todos' : m.equipe_nome || `Equipe ${m.equipe}`
+}
 
 function alcance(m: Pick<Modelo, 'plataforma' | 'canal'>) {
   if (!m.plataforma) return 'todas as lojas'
@@ -75,8 +110,9 @@ function alcance(m: Pick<Modelo, 'plataforma' | 'canal'>) {
 }
 
 // ─── formulário (um só: nova ou edição) ─────────────────────────────────────
-type Form = { id: string | null; titulo: string; texto: string; plataforma: string; canal: string; ativo: boolean; ordem: number }
-const vazio = (): Form => ({ id: null, titulo: '', texto: '', plataforma: '', canal: '', ativo: true, ordem: 0 })
+// `equipe`: '' = para todos (só o admin), senão o número da equipe.
+type Form = { id: string | null; titulo: string; texto: string; plataforma: string; canal: string; ativo: boolean; ordem: number; equipe: string }
+const vazio = (): Form => ({ id: null, titulo: '', texto: '', plataforma: '', canal: '', ativo: true, ordem: 0, equipe: '' })
 const form = reactive<Form>(vazio())
 const formAberto = ref(false)
 const caixaTexto = ref<HTMLTextAreaElement | null>(null)
@@ -85,14 +121,27 @@ const limite = computed(() => limiteDe(form.plataforma || null, form.canal || nu
 // Mesma contagem da caixa de resposta (a do backend: texto normalizado).
 const tamanho = computed(() => tamanhoDoEnvio(form.texto, form.plataforma || null))
 
+// A equipe que a nova nasce: a de quem é de equipe; o admin, a do filtro (ou "para todos").
+function equipeDaNova(): string {
+  const e = equipes.value
+  if (e && !e.todas && e.minhas.length) return String(e.minhas[0])
+  return /^\d+$/.test(filtroEquipe.value) ? filtroEquipe.value : ''
+}
 function abrirNova() {
-  Object.assign(form, vazio(), { ordem: (modelos.value.reduce((mx, m) => Math.max(mx, m.ordem ?? 0), 0) || 0) + 10 })
+  Object.assign(form, vazio(), { ordem: (modelos.value.reduce((mx, m) => Math.max(mx, m.ordem ?? 0), 0) || 0) + 10, equipe: equipeDaNova() })
   formAberto.value = true
 }
 function abrirEdicao(m: Modelo) {
-  Object.assign(form, { id: m.id, titulo: m.titulo, texto: m.texto, plataforma: m.plataforma || '', canal: m.canal || '', ativo: m.ativo, ordem: m.ordem ?? 0 })
+  Object.assign(form, { id: m.id, titulo: m.titulo, texto: m.texto, plataforma: m.plataforma || '', canal: m.canal || '', ativo: m.ativo, ordem: m.ordem ?? 0, equipe: m.equipe == null ? '' : String(m.equipe) })
   formAberto.value = true
 }
+// As opções do campo "Equipe": o admin escolhe; quem é de equipe fica com a dele.
+const opcoesEquipe = computed(() => {
+  const e = equipes.value
+  if (!e) return []
+  return e.todas ? e.equipes : e.equipes.filter((x) => e.minhas.includes(x.numero))
+})
+const escolheEquipe = computed(() => !!equipes.value?.todas)
 function fechar() {
   formAberto.value = false
   Object.assign(form, vazio())
@@ -126,6 +175,7 @@ async function salvar() {
     canal: (form.plataforma && form.canal) || null,
     ativo: form.ativo,
     ordem: Number(form.ordem) || 0,
+    equipe: form.equipe ? Number(form.equipe) : null,
   }
   salvando.value = true
   try {
@@ -191,6 +241,11 @@ const LACUNAS_DA_TELA = LACUNAS.filter((l) => ['numero_pedido', 'rastreio', 'tra
           <Search class="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <input v-model="busca" class="h-8 w-48 rounded-md border bg-background pl-7 pr-2 text-xs" placeholder="buscar…" aria-label="buscar resposta pronta" />
         </div>
+        <select v-if="equipesDoFiltro.length" v-model="filtroEquipe" class="h-8 rounded-md border bg-background px-2 text-xs" aria-label="filtrar por equipe">
+          <option value="">todas as equipes</option>
+          <option value="todos">só as para todos</option>
+          <option v-for="e in equipesDoFiltro" :key="e.numero" :value="String(e.numero)">só {{ e.nome }}</option>
+        </select>
         <select v-model="filtroPlataforma" class="h-8 rounded-md border bg-background px-2 text-xs" aria-label="filtrar por plataforma">
           <option value="">todas</option>
           <option v-for="p in PLATAFORMAS_COM_ENVIO" :key="p.value" :value="p.value">servem para {{ p.nome }}</option>
@@ -198,7 +253,7 @@ const LACUNAS_DA_TELA = LACUNAS.filter((l) => ['numero_pedido', 'rastreio', 'tra
         <Button size="sm" variant="outline" class="h-8" :disabled="carregando" @click="carregar">
           <RotateCcw class="size-4" :class="{ 'animate-spin': carregando }" />
         </Button>
-        <Button v-if="props.canEdit && !formAberto" size="sm" class="h-8" @click="abrirNova">
+        <Button v-if="podeCriar && !formAberto" size="sm" class="h-8" @click="abrirNova">
           <Plus class="mr-1.5 size-4" /> nova resposta
         </Button>
       </div>
@@ -210,10 +265,17 @@ const LACUNAS_DA_TELA = LACUNAS.filter((l) => ['numero_pedido', 'rastreio', 'tra
 
     <!-- formulário -->
     <div v-if="formAberto" class="space-y-2 border-b bg-muted/30 px-3 py-3">
-      <div class="grid gap-2 md:grid-cols-[1fr_180px_160px_90px]">
+      <div class="grid gap-2 md:grid-cols-[1fr_150px_180px_160px_90px]">
         <label class="space-y-1">
           <span class="text-[11px] font-medium text-muted-foreground">Título (só para achar no menu)</span>
           <input v-model="form.titulo" maxlength="200" class="h-9 w-full rounded-md border bg-background px-2 text-sm" placeholder="ex.: Rastreio enviado" />
+        </label>
+        <label class="space-y-1">
+          <span class="text-[11px] font-medium text-muted-foreground" :title="escolheEquipe ? 'para todos ou só uma equipe' : 'a resposta nova fica só para a sua equipe'">Equipe</span>
+          <select v-model="form.equipe" class="h-9 w-full rounded-md border bg-background px-2 text-sm" :disabled="!escolheEquipe && opcoesEquipe.length < 2" aria-label="equipe da resposta pronta">
+            <option v-if="escolheEquipe" value="">para todos</option>
+            <option v-for="e in opcoesEquipe" :key="e.numero" :value="String(e.numero)">{{ e.nome }}</option>
+          </select>
         </label>
         <label class="space-y-1">
           <span class="text-[11px] font-medium text-muted-foreground">Vale para</span>
@@ -278,6 +340,11 @@ const LACUNAS_DA_TELA = LACUNAS.filter((l) => ['numero_pedido', 'rastreio', 'tra
           <div class="flex flex-wrap items-center gap-1.5">
             <span class="text-sm font-medium">{{ m.titulo }}</span>
             <span class="rounded-full bg-muted px-2 py-0.5 text-[11px]">{{ alcance(m) }}</span>
+            <span
+              class="rounded-full px-2 py-0.5 text-[11px]"
+              :class="m.equipe == null ? 'bg-muted text-muted-foreground' : 'bg-sky-500/15 text-sky-800 dark:text-sky-300'"
+              data-equipe-pronta
+            >{{ rotuloEquipe(m) }}</span>
             <span v-if="!m.ativo" class="rounded-full bg-gray-500/15 px-2 py-0.5 text-[11px] text-muted-foreground">desativada</span>
             <span
               v-if="limiteDe(m.plataforma, m.canal) && m.texto.length > (limiteDe(m.plataforma, m.canal) || 0)"
@@ -286,10 +353,10 @@ const LACUNAS_DA_TELA = LACUNAS.filter((l) => ['numero_pedido', 'rastreio', 'tra
           </div>
           <div class="mt-0.5 line-clamp-3 whitespace-pre-line text-xs text-muted-foreground" :title="m.texto">{{ m.texto }}</div>
         </div>
-        <div v-if="props.canEdit" class="flex shrink-0 items-center gap-0.5">
+        <div v-if="podeMexer(m)" class="flex shrink-0 items-center gap-0.5">
           <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" :disabled="salvando" @click="alternar(m)">{{ m.ativo ? 'desativar' : 'ativar' }}</Button>
           <Button size="sm" variant="ghost" class="h-7 px-2" title="editar" @click="abrirEdicao(m)"><Pencil class="size-3.5" /></Button>
-          <Button v-if="props.canDelete" size="sm" variant="ghost" class="h-7 px-2 text-red-600" title="apagar" :disabled="salvando" @click="apagar(m)"><Trash2 class="size-3.5" /></Button>
+          <Button v-if="podeApagar(m)" size="sm" variant="ghost" class="h-7 px-2 text-red-600" title="apagar" :disabled="salvando" @click="apagar(m)"><Trash2 class="size-3.5" /></Button>
         </div>
       </li>
     </ul>

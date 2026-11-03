@@ -83,7 +83,7 @@ class User(Base, TimestampMixin):
     # Organização comercial, independente dos códigos de acesso acima.
     commercial_team: Mapped[int | None] = mapped_column(
         Integer,
-        CheckConstraint("commercial_team IN (1, 2)", name="commercial_team_valid"),
+        CheckConstraint("commercial_team IN (1, 2, 3)", name="commercial_team_valid"),
         nullable=True,
     )
 

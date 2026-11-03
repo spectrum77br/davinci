@@ -29,10 +29,13 @@
 // não deixa clicar o que a prévia já disse que não passa. Nada aqui manda
 // mensagem ao comprador (a oferta é o "enviar oferta" da sugestão, fase 4d).
 //
-// QUEM MEXE (fase de observação, 07/10/2026): trocar escreve no Bling e
-// APROVA a Margem — só quem o /me traz com `atendimento_mexe` e tem
-// atendimento.edit e margem.edit (`acessoDaTroca`); quem só lê vê o cartão
-// e o estado da troca, sem os botões. A API recusa do mesmo jeito.
+// QUEM TROCA (03/11/2026, o Eduardo: "quero que funcione para quem também
+// usa o atendimento, não só admin, essa parte de troca, que é as 3 equipes
+// que vão gerenciar"): trocar escreve no Bling e APROVA a Margem no nome de
+// quem clicou — quem RESPONDE no atendimento (o /me `atendimento_responde`,
+// `acessoDaTroca`), nas lojas dela (a API filtra), sem precisar da Margem: o
+// custo e o % só vêm para quem vê a Margem. Quem não responde vê o cartão e
+// o estado da troca, sem os botões. A API recusa do mesmo jeito.
 //
 // Este bloco (não o setup) é o módulo dos ajudantes puros, testados em
 // tests/atendimento-troca.cjs — por isso só importa TIPO (o
@@ -256,25 +259,28 @@ export function tituloDialogo(nivel: number | null | undefined, numero: string):
   return `${nivel === 0 ? 'Trocar lote' : 'Trocar produto'} do pedido ${numero}`
 }
 
-// Quem pode trocar e quem pode mandar a oferta: a MESMA regra (decisão (g)
-// do Eduardo, 07/10/2026) — quem mexe na caixa (`atendimento_mexe`) com
-// atendimento.edit e margem.edit. Trocar aprova a Margem; a oferta promete a
-// troca ao comprador (quem não pode trocar não oferece). A API recusa igual
-// (troca.pode_escrever).
-export function acessoDaTroca(a: { mexe: boolean; editaAtendimento: boolean; editaMargem: boolean }): { trocar: boolean; ofertar: boolean } {
-  const escreve = a.mexe === true && a.editaAtendimento === true && a.editaMargem === true
+// Quem pode trocar e quem pode mandar a oferta: a MESMA regra (a oferta
+// promete a troca ao comprador: quem não pode trocar não oferece). Desde
+// 03/11/2026 (o Eduardo: "quero que funcione para quem também usa o
+// atendimento, não só admin, essa parte de troca, que é as 3 equipes que vão
+// gerenciar") é quem RESPONDE no atendimento — o `canResponder` da página
+// (pages/atendimento.vue: `atendimento_responde`, ou quem mexe com
+// atendimento.edit). Saiu a decisão (g) de 07/10/2026 (quem mexe +
+// atendimento.edit + margem.edit). A API recusa igual (troca.pode_escrever),
+// só nas lojas da pessoa, e o `troca_envio`/`oferta_envio` diz o porquê.
+export function acessoDaTroca(a: { responde: boolean; mexe: boolean; editaAtendimento: boolean }): { trocar: boolean; ofertar: boolean } {
+  const escreve = a.responde === true || (a.mexe === true && a.editaAtendimento === true)
   return { trocar: escreve, ofertar: escreve }
 }
-// O mesmo critério da página (pages/atendimento.vue: `mexe` + useCan), para
-// o cartão e a lista, que não recebem o `canEdit` da caixa.
+// O mesmo critério da página (pages/atendimento.vue: `canResponder`), para o
+// cartão e a lista, que não recebem o `canResponder` da caixa.
 export function useAcessoDaTroca() {
   const auth = useAuthStore()
   const editaAtendimento = useCan('atendimento', 'edit')
-  const editaMargem = useCan('margem', 'edit')
   return computed(() => acessoDaTroca({
+    responde: auth.user?.atendimento_responde === true,
     mexe: auth.user?.atendimento_mexe === true,
     editaAtendimento: editaAtendimento.value,
-    editaMargem: editaMargem.value,
   }))
 }
 

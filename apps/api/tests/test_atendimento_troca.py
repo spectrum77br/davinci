@@ -28,6 +28,9 @@ estes testes seguram (desenho §3.7 com as decisões do dono de 07/10):
 from __future__ import annotations
 
 import copy
+import hashlib
+import hmac
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -64,6 +67,7 @@ from app.security.cipher import decrypt_json, encrypt_json
 from app.services import margem_auto_hold, nf_auto_enfileirar
 from app.services.atendimento import gravar, painel, troca, troca_sugestoes
 from app.services.marketplaces.bling import BlingCloudflareError
+from tests.lojas_da_pessoa import dar_lojas
 
 NUMERO = "300101"
 BLING_ID = 77001
@@ -2039,10 +2043,16 @@ async def test_o_trocar_diz_se_pode(db, client, auth_as, make_user, monkeypatch,
     assert envio["motivo"] == "plataforma_sem_conferencia" and "Shopee" in envio["texto_motivo"]
     monkeypatch.setattr(_chaves, "atendimento_troca_ativa", False)
     assert (await _envio())["motivo"] == "troca_desligada"
-    # Quem só lê (fase de observação): cinza também (o botão nem aparece na tela).
+    # Quem responde, sem permissão nenhuma (03/11/2026, as 3 equipes): passa da
+    # trava de quem pode e para na do pedido, como o admin.
     monkeypatch.setattr(_chaves, "atendimento_troca_ativa", True)
-    leitor = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
-    assert (await _envio(leitor))["motivo"] == "atendimento_so_leitura"
+    equipe = await make_user()
+    assert (await _envio(equipe))["motivo"] == "plataforma_sem_conferencia"
+    # Quem não responde (o operador de estoque): cinza (o botão nem aparece na tela).
+    operador = await make_user(permissions={"controle_estoque": {"view": True}})
+    operador.stock_tags = ["ci"]
+    await db.commit()
+    assert (await _envio(operador))["motivo"] == "atendimento_so_leitura"
     # Só banco: nenhum GET no Bling nem na Shopee.
     assert c.bling.chamadas == [] and c.shopee.chamadas == []
 
@@ -2050,13 +2060,17 @@ async def test_o_trocar_diz_se_pode(db, client, auth_as, make_user, monkeypatch,
 # ─────────────── as rotas ───────────────
 
 
-async def test_rotas_recusam_quem_so_le(db, client, make_user, auth_as, monkeypatch):
+async def test_rotas_recusam_o_operador_de_estoque(db, client, make_user, auth_as, monkeypatch):
+    """Quem não vê a caixa (o operador de estoque) não troca nem retoma (03/11/2026: o
+    resto da equipe ativa responde — e troca)."""
     c = await _cenario(db, make_user, monkeypatch)
-    leitor = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
-    auth_as(leitor)
+    operador = await make_user(permissions={"controle_estoque": {"view": True, "edit": True}})
+    operador.stock_tags = ["ci"]
+    await db.commit()
+    auth_as(operador)
     corpo = {"sku_antigo": c.antigo, "sku_novo": c.novo}
     r = await client.post(f"{URL}/pedidos/{NUMERO}/troca/previa", json=corpo)
-    assert r.status_code == 403 and r.json()["detail"]["code"] == "atendimento_so_leitura"
+    assert r.status_code == 403 and r.json()["detail"] == {"code": "atendimento_restrito"}
     r = await client.post(
         f"{URL}/pedidos/{NUMERO}/troca",
         json={**corpo, "previa_hash": "x" * 32, "idem_key": str(uuid4()), "confirmar": True},
@@ -2064,34 +2078,382 @@ async def test_rotas_recusam_quem_so_le(db, client, make_user, auth_as, monkeypa
     assert r.status_code == 403
     r = await client.post(f"{URL}/trocas/{uuid4()}/retomar")
     assert r.status_code == 403
-    # Ler, lê.
-    r = await client.get(f"{URL}/trocas")
-    assert r.status_code == 200 and r.json() == {"itens": []}
     assert c.bling.chamadas == []
 
 
-async def test_rotas_pedem_a_margem(db, client, make_user, auth_as, monkeypatch):
-    """Fora da observação: atendimento.edit sem margem.edit = 403 (a troca aprova a Margem)."""
+async def test_fora_da_observacao_rotas_pedem_atendimento_edit_sem_a_margem(
+    db, client, make_user, auth_as, monkeypatch
+):
+    """Fora da observação: o atendimento.edit de sempre; a margem.edit não conta (03/11/2026)."""
     monkeypatch.setattr(rota, "SO_ADMIN", False)
     c = await _cenario(db, make_user, monkeypatch)
-    sem = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
-    auth_as(sem)
+    so_margem = await make_user(permissions={"margem": {"view": True, "edit": True}})
+    auth_as(so_margem)
     r = await client.post(
         f"{URL}/pedidos/{NUMERO}/troca/previa", json={"sku_antigo": c.antigo, "sku_novo": c.novo}
     )
     assert r.status_code == 403
-    assert r.json()["detail"] == {"code": "forbidden", "resource": "margem", "action": "edit"}
-    com = await make_user(
-        permissions={
-            "atendimento": {"view": True, "edit": True},
-            "margem": {"view": True, "edit": True},
-        }
-    )
+    assert r.json()["detail"] == {"code": "forbidden", "resource": "atendimento", "action": "edit"}
+    com = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
     auth_as(com)
     r = await client.post(
         f"{URL}/pedidos/{NUMERO}/troca/previa", json={"sku_antigo": c.antigo, "sku_novo": c.novo}
     )
     assert r.status_code == 200, r.text
+    assert r.json()["pode"] is True
+    assert r.json()["antes"]["custo"] is None, "sem margem.view, sem custo"
+
+
+@pytest.mark.lojas_por_pessoa
+async def test_equipe_troca_e_aprova_a_margem_no_nome_dela(
+    db, client, make_user, auth_as, monkeypatch, _observacoes
+):
+    """03/11/2026, o Eduardo: "quero que funcione para quem também usa o atendimento, não
+    só admin, essa parte de troca, que é as 3 equipes que vão gerenciar". A equipe (role
+    user, sem permissão nenhuma) com a loja do pedido: a prévia, o "Trocar" (a caixinha
+    do aceite continua obrigatória) e a Margem Aprovada no nome DELA — sem ver custo nem
+    %, e a aba Margem continua fechada. Outra equipe: 404 no pedido e na troca."""
+    c = await _cenario(db, make_user, monkeypatch)
+    await _snapshot(db)
+    londres = await make_user(email=f"londres-{uuid4().hex[:6]}@davinci-test.com")
+    londres.name = "Londres Atendimento"
+    await db.commit()
+    await dar_lojas(db, londres, c.integ)
+    israel = await make_user(email=f"israel-{uuid4().hex[:6]}@davinci-test.com")
+    outra = Integration(
+        user_id=c.dono.id,
+        platform=IntegrationPlatform.SHOPEE,
+        name="vrc",
+        credentials=encrypt_json({"access_token": "t"}),
+    )
+    db.add(outra)
+    await db.flush()
+    db.add(
+        StoreInfo(
+            user_id=c.dono.id,
+            platform="shopee",
+            account_name="vrc",
+            bling_store_id="7002",
+            integration_id=outra.id,
+        )
+    )
+    await db.commit()
+    await dar_lojas(db, israel, outra)
+    corpo = {"sku_antigo": c.antigo, "sku_novo": c.novo}
+
+    # Outra equipe: o pedido é como se não existisse (nada no Bling).
+    auth_as(israel)
+    r = await client.post(f"{URL}/pedidos/{NUMERO}/troca/previa", json=corpo)
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "pedido_nao_encontrado"
+    assert c.bling.chamadas == []
+
+    auth_as(londres)
+    out = await painel.painel_da_conversa(db, c.conversa, user=londres)
+    assert out["ag_cancelamento"]["troca_envio"]["disponivel"] is True
+    r = await client.post(f"{URL}/pedidos/{NUMERO}/troca/previa", json=corpo)
+    assert r.status_code == 200, r.text
+    pv = r.json()
+    assert pv["pode"] is True, pv["travas"]
+    assert (pv["antes"]["custo"], pv["depois"]["custo"], pv["dif_custo_pct"]) == (None,) * 3
+    assert "Margem Aprovado por Londres Atendimento" in pv["passos_previstos"]
+    # A caixinha "o cliente aceitou" continua obrigatória (nível 1).
+    clique = {**corpo, "previa_hash": pv["previa_hash"], "idem_key": str(uuid4())}
+    r = await client.post(f"{URL}/pedidos/{NUMERO}/troca", json=clique)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "aceite_obrigatorio"
+    r = await client.post(
+        f"{URL}/pedidos/{NUMERO}/troca",
+        json={**clique, "idem_key": str(uuid4()), "confirmar": True},
+    )
+    assert r.status_code == 200, r.text
+    feita = r.json()
+    assert feita["estado"] == "concluida", feita
+    assert (feita["custo_antigo"], feita["custo_novo"]) == (None, None)
+    assert (feita["aceite_fonte"], feita["criado_por_nome"]) == ("declarado", "Londres Atendimento")
+    # A Margem Aprovada no nome de quem clicou (o pino e as trilhas).
+    [bo] = await _linhas_bo(db)
+    assert (bo.item_codigo, bo.situacao, bo.status, bo.aprovado_por) == (
+        "dg054.sp",
+        "6",
+        "Aprovado",
+        londres.id,
+    )
+    assert await _trilhas(db) == [
+        ("sku", "dg053.sp", "dg054.sp", "atendimento_troca", londres.id),
+        ("status", None, "Aprovado", "atendimento_troca", londres.id),
+        ("situacao", "83955", "6", "atendimento_troca", londres.id),
+    ]
+    # Sem ganhar a Margem: nem o custo na lista das trocas, nem a aba.
+    [item] = (await client.get(f"{URL}/trocas", params={"abertas": "false"})).json()["itens"]
+    assert (item["custo_antigo"], item["custo_novo"]) == (None, None)
+    assert painel.ve_margem(londres) is False
+    assert (await client.get("/api/margens")).status_code == 403
+    # A troca dela, pelo id, é de fora para a outra equipe.
+    auth_as(israel)
+    r = await client.post(f"{URL}/trocas/{feita['id']}/retomar")
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "troca_nao_encontrada"
+    assert (await client.get(f"{URL}/trocas", params={"abertas": "false"})).json() == {"itens": []}
+
+
+def _corpo_do_hash(numero, antigo, novo, produto_id, quantidade, valor_unitario, ca, cn, nivel):
+    """O corpo do `previa_hash` (`troca.hash_previa`), para a conta de quem não tem o segredo."""
+    return json.dumps(
+        [numero, antigo, novo, produto_id, quantidade, valor_unitario, ca, cn, nivel],
+        separators=(",", ":"),
+    ).encode()
+
+
+def test_previa_hash_assinado_com_o_segredo_do_servidor(monkeypatch):
+    """Revisão 03/11/2026: o `previa_hash` leva os dois custos, e a prévia vai às equipes,
+    que não veem a Margem. O sha256 puro (sem segredo) devolvia os custos por força bruta;
+    assinado (HMAC com o `jwt_secret`), sem o segredo a conta não fecha — e o clique, no
+    servidor, confere igual."""
+    args = {
+        "numero": NUMERO,
+        "sku_antigo": "DG053.SP",
+        "sku_novo": "DG054.SP",
+        "produto_id": 5001,
+        "quantidade": 1,
+        "valor_unitario": Decimal("899.90"),
+        "custo_antigo": Decimal("487.0000"),
+        "custo_novo": Decimal("499.0000"),
+        "nivel": 1,
+    }
+    corpo = _corpo_do_hash(
+        NUMERO, "dg053.sp", "dg054.sp", 5001, 1, "899.90", "487.0000", "499.0000", 1
+    )
+    h = troca.hash_previa(**args)
+    assert len(h) == 32
+    assert h != hashlib.sha256(corpo).hexdigest()[:32]
+    segredo = get_settings().jwt_secret.encode()
+    assert h == hmac.new(segredo, corpo, hashlib.sha256).hexdigest()[:32]
+    assert troca.hash_previa(**args) == h  # o clique recalcula igual
+    monkeypatch.setattr(get_settings(), "jwt_secret", "outro-segredo")
+    assert troca.hash_previa(**args) != h
+
+
+@pytest.mark.lojas_por_pessoa
+async def test_equipe_sem_margem_nao_recupera_o_custo_pelo_previa_hash(
+    db, client, make_user, auth_as, monkeypatch
+):
+    """A prova da revisão (03/11/2026), agora fechada: com tudo o mais do corpo na própria
+    prévia, a força bruta nos custos (R$ 1 a 3000 inteiros, no piso/teto da regra) não
+    acha o hash — e o "Trocar" com ele segue valendo."""
+    c = await _cenario(db, make_user, monkeypatch)
+    await db.execute(
+        update(Product).where(Product.sku == c.antigo).values(bling_cost_price=Decimal("487"))
+    )
+    await db.execute(
+        update(Product).where(Product.sku == c.novo).values(bling_cost_price=Decimal("499"))
+    )
+    await db.commit()
+    londres = await make_user(email=f"londres-{uuid4().hex[:6]}@davinci-test.com")
+    await dar_lojas(db, londres, c.integ)
+    auth_as(londres)
+    assert painel.ve_margem(londres) is False
+    corpo = {"sku_antigo": c.antigo, "sku_novo": c.novo}
+    r = await client.post(f"{URL}/pedidos/{NUMERO}/troca/previa", json=corpo)
+    assert r.status_code == 200, r.text
+    pv = r.json()
+    assert pv["pode"] is True, pv["travas"]
+    assert (pv["antes"]["custo"], pv["depois"]["custo"], pv["dif_custo_pct"]) == (None,) * 3
+    alvo = pv["previa_hash"]
+    vu = pv["valor_unitario"]
+    vu_s = str(Decimal(str(vu)).quantize(Decimal("0.01"))) if vu is not None else None
+    fixo = (NUMERO, c.antigo.lower(), c.novo.lower(), pv["depois"]["produto_id"])
+    achado = None
+    for a in range(1, 3001):
+        for n in range(int(a * 0.90), int(a * 1.05) + 1):
+            corpo_h = _corpo_do_hash(
+                *fixo, pv["depois"]["quantidade"], vu_s, f"{a}.0000", f"{n}.0000", pv["nivel"]
+            )
+            if hashlib.sha256(corpo_h).hexdigest()[:32] == alvo:
+                achado = (a, n)
+                break
+        if achado:
+            break
+    assert achado is None
+    r = await client.post(
+        f"{URL}/pedidos/{NUMERO}/troca",
+        json={**corpo, "previa_hash": alvo, "idem_key": str(uuid4()), "confirmar": True},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["estado"] == "concluida"
+
+
+async def _notas_da_conversa(db, conversa_id):
+    return (
+        (
+            await db.execute(
+                select(AtendimentoMensagem.texto).where(
+                    AtendimentoMensagem.conversa_id == conversa_id,
+                    AtendimentoMensagem.tipo == "nota",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+@pytest.mark.lojas_por_pessoa
+async def test_equipe_sem_conversa_id_nao_usa_a_conversa_de_outra_loja(
+    db, client, make_user, auth_as, monkeypatch
+):
+    """Revisão 03/11/2026: sem `conversa_id`, a conversa principal do pedido saía sem o
+    filtro da equipe. Outra loja (de outra equipe) com uma conversa no MESMO nº do pedido:
+    a prévia e o "Trocar" usam a conversa DA EQUIPE — nem os aceites nem a nota de
+    fechamento vão à de fora. O admin segue sem filtro."""
+    c = await _cenario(db, make_user, monkeypatch)
+    londres = await make_user(email=f"londres-{uuid4().hex[:6]}@davinci-test.com")
+    await dar_lojas(db, londres, c.integ)
+    outra = Integration(
+        user_id=c.dono.id,
+        platform=IntegrationPlatform.SHOPEE,
+        name="vrc",
+        credentials=encrypt_json({"access_token": "t"}),
+    )
+    db.add(outra)
+    await db.flush()
+    canal = AtendimentoCanal(
+        integration_id=outra.id, plataforma="shopee", canal="chat", modo="observar", status="ok"
+    )
+    db.add(canal)
+    db.add(
+        StoreInfo(
+            user_id=c.dono.id,
+            platform="shopee",
+            account_name="vrc",
+            bling_store_id="7002",
+            integration_id=outra.id,
+        )
+    )
+    await db.commit()
+    alheia, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal,
+        integration=outra,
+        plataforma="shopee",
+        canal_nome="chat",
+        externo_id="conv-alheia",
+        pedido_marketplace=NUMEROLOJA,
+        comprador_nome="Comprador da Outra Equipe",
+    )
+    await db.commit()
+    await _mensagem(db, alheia, "cliente", "SEGREDO da outra equipe: meu CPF e endereço", 5)
+    corpo = {"sku_antigo": c.antigo, "sku_novo": c.novo}
+
+    auth_as(londres)
+    r = await client.post(f"{URL}/pedidos/{NUMERO}/troca/previa", json=corpo)
+    assert r.status_code == 200, r.text
+    pv = r.json()
+    assert pv["pode"] is True, pv["travas"]
+    assert pv["conversa_id"] == str(c.conversa.id)
+    assert not any("SEGREDO" in (a.get("texto") or "") for a in pv["aceites_possiveis"])
+    r = await client.post(
+        f"{URL}/pedidos/{NUMERO}/troca",
+        json={
+            **corpo,
+            "previa_hash": pv["previa_hash"],
+            "idem_key": str(uuid4()),
+            "confirmar": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["estado"] == "concluida"
+    t = (await db.execute(select(AtendimentoTroca))).scalars().one()
+    assert t.conversa_id == c.conversa.id
+    assert await _notas_da_conversa(db, alheia.id) == []
+    assert await _notas_da_conversa(db, c.conversa.id) != []
+
+    # O admin: como antes, a principal do pedido sem filtro (a mais recente, a de fora).
+    auth_as(c.adm)
+    r = await client.post(f"{URL}/pedidos/{NUMERO}/troca/previa", json=corpo)
+    assert r.status_code == 200, r.text
+    assert r.json()["conversa_id"] == str(alheia.id)
+
+
+@pytest.mark.lojas_por_pessoa
+async def test_equipe_com_a_ficha_sem_o_chat_troca_sem_conversa(
+    db, client, make_user, auth_as, monkeypatch
+):
+    """Revisão 03/11/2026, o caso mais provável: a ficha da loja (os pedidos) não liga a
+    integração do chat (sem FK e nomes diferentes) — a ficha com londres, o chat com
+    israel. A lista de londres traz o pedido sem conversa e o diálogo manda `conversa_id`
+    nulo: a prévia não devolve a conversa nem as falas de israel, e o "Trocar" fica sem
+    conversa (nenhuma nota na de israel). O motivo segue lido da conversa do pedido (a
+    recusa do IN_CANCEL não some porque a equipe não vê o chat)."""
+    from app.services.atendimento import escopo
+
+    c = await _cenario(db, make_user, monkeypatch)
+    ficha = (await db.execute(select(StoreInfo))).scalars().one()
+    ficha.integration_id = None
+    ficha.account_name = "KFA Comercio"
+    await db.commit()
+    londres = await make_user(email=f"londres-{uuid4().hex[:6]}@davinci-test.com")
+    israel = await make_user(email=f"israel-{uuid4().hex[:6]}@davinci-test.com")
+    await dar_lojas(db, londres, escopo.chave(escopo.FICHA, ficha.id))
+    await dar_lojas(db, israel, c.integ)
+    await _mensagem(db, c.conversa, "cliente", "Mensagem que só israel deveria ver", 5)
+    corpo = {"sku_antigo": c.antigo, "sku_novo": c.novo}
+
+    auth_as(londres)
+    r = await client.get(f"{URL}/ag-cancelamento")
+    [p] = [x for x in r.json()["pedidos"] if x["numero"] == NUMERO]
+    assert p["conversa_id"] is None
+    r = await client.post(
+        f"{URL}/pedidos/{NUMERO}/troca/previa",
+        json={**corpo, "conversa_id": str(c.conversa.id)},
+    )
+    assert r.status_code == 404, r.text
+    r = await client.post(f"{URL}/pedidos/{NUMERO}/troca/previa", json=corpo)
+    assert r.status_code == 200, r.text
+    pv = r.json()
+    assert pv["pode"] is True, pv["travas"]
+    assert pv["conversa_id"] is None
+    assert pv["aceites_possiveis"] == []
+    r = await client.post(
+        f"{URL}/pedidos/{NUMERO}/troca",
+        json={
+            **corpo,
+            "previa_hash": pv["previa_hash"],
+            "idem_key": str(uuid4()),
+            "confirmar": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["estado"] == "concluida"
+    t = (await db.execute(select(AtendimentoTroca))).scalars().one()
+    assert t.conversa_id is None
+    assert await _notas_da_conversa(db, c.conversa.id) == []
+
+
+@pytest.mark.lojas_por_pessoa
+async def test_equipe_sem_ver_o_chat_a_recusa_do_comprador_continua(
+    db, client, make_user, auth_as, monkeypatch
+):
+    """O filtro da equipe só tira a conversa da tela e da troca: o motivo continua lido
+    da conversa do pedido. O comprador pediu o cancelamento (IN_CANCEL na Shopee) e a
+    equipe não vê o chat: a troca segue recusada, como para o admin."""
+    from app.services.atendimento import escopo
+
+    c = await _cenario(db, make_user, monkeypatch)
+    ficha = (await db.execute(select(StoreInfo))).scalars().one()
+    ficha.integration_id = None
+    ficha.account_name = "KFA Comercio"
+    dados = copy.deepcopy(c.conversa.dados or {})
+    dados.setdefault("pedido_mkt", {})["status"] = "IN_CANCEL"
+    c.conversa.dados = dados
+    await db.commit()
+    londres = await make_user(email=f"londres-{uuid4().hex[:6]}@davinci-test.com")
+    await dar_lojas(db, londres, escopo.chave(escopo.FICHA, ficha.id))
+    corpo = {"sku_antigo": c.antigo, "sku_novo": c.novo}
+    for quem in (c.adm, londres):
+        auth_as(quem)
+        r = await client.post(f"{URL}/pedidos/{NUMERO}/troca/previa", json=corpo)
+        assert r.status_code == 200, r.text
+        pv = r.json()
+        assert pv["pode"] is False and pv["previa_hash"] is None
+        assert pv["travas"][0]["code"] == "motivo_nao_permite", pv["travas"]
 
 
 async def test_rota_409_e_404(db, client, make_user, auth_as, monkeypatch, _chaves):

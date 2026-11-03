@@ -109,9 +109,12 @@ from app.models.marketing_personagem_requisicao import (
 )
 from app.models.marketing_postagem import STATUS_PUBLICADO, MarketingPostagem
 from app.models.marketing_roteiro import (
+    TIPO_HISTORIA,
+    TIPOS_CONTEUDO,
     MarketingRoteiro,
     MarketingRoteiroPersonagem,
     MarketingRoteiroRef,
+    TipoConteudo,
 )
 from app.models.pricing import PricingProduct
 from app.models.product import Product
@@ -268,6 +271,9 @@ def _linha_out(
         "marca": row.marca,
         "sku": row.sku,
         "roteiro": row.roteiro,
+        # "historia" | "produto" (migration 0444): produto entra também na
+        # grade do Instagram quando o robô posta.
+        "tipo_conteudo": row.tipo_conteudo,
         # None = ainda não olharam; True = aprovado; False = recusado.
         "aprovado": row.aprovado,
         # Booleano em vez da data e do caminho: a agência precisa saber que
@@ -485,6 +491,9 @@ def _roteiro_out(
         # da agência: quem fez não sai para a outra (o mesmo cuidado das
         # Referências).
         "escrita_no_portal": row.criado_pela_equipe is not None or row.origem_id is not None,
+        # "historia" | "produto": em qual das duas abas de ideias ela aparece
+        # (migration 0444).
+        "tipo_conteudo": row.tipo_conteudo,
         "titulo": row.titulo,
         "texto": texto,
         "marca": row.marca,
@@ -694,6 +703,7 @@ async def listar_roteiros(
     situacao: Situacao = "todas",
     desde_dias: Annotated[int | None, Query(gt=0, le=36500)] = None,
     q: Annotated[str | None, Query(max_length=200)] = None,
+    tipo_conteudo: TipoConteudo | None = None,
     resumo: bool = False,
 ) -> dict[str, Any]:
     """A tela de roteiros: o briefing endereçado a esta agência — mais os que
@@ -712,7 +722,8 @@ async def listar_roteiros(
       aprovadas — a mesma regra do selo `entrega`;
     - `personagem_id`: UUID, ou "nenhum" para ideia sem personagem;
     - `desde_dias`: criadas nos últimos N dias;
-    - `q`: busca em título, texto, marca e SKU, sem diferenciar maiúsculas.
+    - `q`: busca em título, texto, marca e SKU, sem diferenciar maiúsculas;
+    - `tipo_conteudo`: historia / produto — as duas abas de ideias (0444).
     """
     filtros: list[Any] = list(_visivel_pra_fora(equipe))
     por_situacao = _filtro_de_situacao(situacao, equipe)
@@ -724,6 +735,8 @@ async def listar_roteiros(
     if desde_dias:
         desde = datetime.now(UTC) - timedelta(days=desde_dias)
         filtros.append(MarketingRoteiro.created_at >= desde)
+    if tipo_conteudo:
+        filtros.append(MarketingRoteiro.tipo_conteudo == tipo_conteudo)
     # Controle sai da busca em vez de recusar: um \x00 no termo derrubava a
     # consulta em 500, e o resto do que foi digitado ainda é uma busca.
     termo = _CONTROLE.sub("", q or "").strip()
@@ -797,6 +810,8 @@ class IdeiaIn(BaseModel):
     # Quem pode pedir "todas" é decisão do PORTAL (só o login admin, que
     # enxerga as duas agências). Daqui, o token só sabe de uma equipe.
     para: Literal["minha_equipe", "todas"] = "minha_equipe"
+    # A aba onde a ideia nasce (migration 0444). Sem tipo = história.
+    tipo_conteudo: TipoConteudo = TIPO_HISTORIA
 
 
 async def _limite_de_ideias(equipe: str) -> None:
@@ -882,6 +897,7 @@ async def criar_ideia(
         product_id=await _product_id_do_sku(session, sku),
         # NULL = as duas agências (a regra invertida — ver o docstring do model).
         equipe_destino=None if payload.para == "todas" else equipe,
+        tipo_conteudo=payload.tipo_conteudo,
         ativo=True,
         created_by=None,
         # A porta por onde o texto entrou. Com "todas" (que só o login admin
@@ -1289,6 +1305,8 @@ async def entregar_do_roteiro(
             product_id=roteiro.product_id,
             equipe=equipe,
             roteiro_id=raiz_id,
+            # O vídeo é do tipo da ideia que ele cumpre (migration 0444).
+            tipo_conteudo=roteiro.tipo_conteudo,
             aprovado=None,
             # A coleção nasce explícita: sem isto, o primeiro acesso depois do
             # flush trata `files` como relação ainda não carregada e tenta ir
@@ -1385,6 +1403,8 @@ async def criar_versao(
         product_id=original.product_id,
         equipe_destino=equipe,
         origem_id=raiz,
+        # A versão é a mesma ideia escrita de outro jeito: fica na mesma aba.
+        tipo_conteudo=original.tipo_conteudo,
         ativo=True,
     )
     session.add(row)
@@ -1591,6 +1611,7 @@ async def propor_video(
     personagem_outro: Annotated[str, Form()] = "",
     ia_modelo: Annotated[str, Form()] = "",
     ia_creditos: Annotated[str, Form()] = "",
+    tipo_conteudo: Annotated[str, Form()] = "",
 ) -> dict[str, Any]:
     """A agência publica um vídeo DELA, com o conceito junto, e cai na revisão.
 
@@ -1616,6 +1637,13 @@ async def propor_video(
         raise HTTPException(400, detail={"code": "sem_arquivo"})
     if len(files) > MAX_FILES_PER_ROW:
         raise HTTPException(400, detail={"code": "muitos_arquivos"})
+
+    # Vídeo autoral não tem ideia de onde herdar o tipo: vem no envio
+    # (migration 0444). Vazio = história; valor fora dos dois é recusado ANTES
+    # de gravar o vídeo em disco.
+    tipo = (tipo_conteudo or "").strip().lower() or TIPO_HISTORIA
+    if tipo not in TIPOS_CONTEUDO:
+        raise HTTPException(400, detail={"code": "tipo_conteudo_invalido"})
 
     conceito = (conceito or "").strip()
     marca_txt = (marca or "").strip() or None
@@ -1667,6 +1695,7 @@ async def propor_video(
         sku=sku_txt,
         product_id=await _product_id_do_sku(session, sku_txt),
         equipe=equipe,
+        tipo_conteudo=tipo,
         aprovado=None,
         files=[],
     )

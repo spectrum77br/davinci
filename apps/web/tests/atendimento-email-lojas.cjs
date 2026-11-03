@@ -932,7 +932,8 @@ async function principal() {
 
     // ── o bloco dos e-mails na Caixa (a página de verdade, com dublês, sem rede)
     const ini = pagina.indexOf('// ─── os E-MAILS de cada loja na Caixa (27/10/2026)')
-    const fim = pagina.indexOf('</script>', ini)
+    // Até a tela cheia (03/11/2026), o bloco seguinte (atendimento-tela-cheia).
+    const fim = pagina.indexOf('// ─── tela cheia (03/11/2026)', ini)
     assert.ok(ini > 0 && fim > ini)
     function bloco({ usuario = 'u1', guardado = new Map(), quebrado = false, largura = 1440, admin = false, sites = [] } = {}) {
       const aba = Vue.ref('caixa')

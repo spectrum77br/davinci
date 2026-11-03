@@ -183,7 +183,9 @@ class ConversaResumoOut(BaseModel):
     # mensagem da loja responde, até a automática) ou não lida no chat da
     # Shopee/TikTok; onde a plataforma diz de quem é a vez, a fila. A tela
     # marca a linha (negrito, bolinha) por ele. A fila de verdade (a IA, o
-    # prazo) continua `aguardando_resposta`.
+    # prazo) continua `aguardando_resposta`. Também a conversa do número com
+    # bolinha (`numero_duoke` > 0): o chat desde 28/10/2026 e a reclamação do
+    # ML desde 03/11/2026 (`pendente.falta_responder_na_caixa`).
     falta_responder: bool = False
     # Mensagens do comprador desde a última resposta de verdade (a bolinha
     # da Caixa Humano).
@@ -892,6 +894,9 @@ class ModeloIn(BaseModel):
     categoria: str | None = None
     ativo: bool = True
     ordem: int = 0
+    # A equipe (101/102/103) ou vazio = para todos (03/11/2026). Só quem mexe
+    # na caixa escolhe; a de quem é de equipe nasce com a equipe dele (router).
+    equipe: int | None = None
 
     _limpa = field_validator("titulo", "texto", mode="before")(_texto_opcional)
     _plat = field_validator("plataforma", mode="before")(_plataforma)
@@ -908,6 +913,8 @@ class ModeloPatch(BaseModel):
     categoria: str | None = None
     ativo: bool | None = None
     ordem: int | None = None
+    # `null` explícito = passa a valer para todos (só quem mexe na caixa).
+    equipe: int | None = None
 
     _limpa = field_validator("titulo", "texto", mode="before")(_texto_opcional)
     _plat = field_validator("plataforma", mode="before")(_plataforma)
@@ -924,6 +931,29 @@ class ModeloOut(BaseModel):
     categoria: str | None = None
     ativo: bool
     ordem: int
+    # NULL = para todos; senão a equipe dona e o nome dela ("Londres").
+    equipe: int | None = None
+    equipe_nome: str | None = None
+    # Quem pediu a lista pode editar/apagar esta? (a própria equipe ou admin;
+    # a "para todos" só o admin).
+    pode_editar: bool = False
+
+
+class EquipeModelo(BaseModel):
+    numero: int
+    nome: str
+
+
+class ModelosEquipesOut(BaseModel):
+    """As equipes do formulário e do filtro da aba Respostas prontas.
+
+    `todas` = quem mexe na caixa (escolhe a equipe ou "para todos" e mexe em
+    qualquer uma); `minhas` = as equipes de quem pediu (a resposta nova dele
+    nasce com elas). Ninguém nas duas = só lê."""
+
+    equipes: list[EquipeModelo]
+    minhas: list[int]
+    todas: bool
 
 
 # ── Fatos da loja do agente (aprovação na aba do Manual, 20/10/2026) ──────
@@ -1065,9 +1095,10 @@ class FatoNovoIn(BaseModel):
 
 class PlataformaResumoOut(BaseModel):
     plataforma: str
-    # O "Falta responder" da Caixa (`pendente.falta_responder_no_chat`): o
+    # O "Falta responder" da Caixa (`pendente.falta_responder_na_caixa`): o
     # número da aba "Falta responder" — conversas de chat (14/10/2026: sem a
-    # avaliação, a reclamação, o carrinho e os comentários).
+    # avaliação, a reclamação, o carrinho e os comentários) e, desde
+    # 03/11/2026, a reclamação do ML que está na bolinha.
     aguardando: int
     vencendo: int
     vencidas: int

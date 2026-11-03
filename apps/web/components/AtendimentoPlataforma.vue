@@ -680,6 +680,38 @@ export type Modelo = {
   canal: string | null
   ativo: boolean
   ordem: number
+  // Por equipe (03/11/2026): null = para todos; senão a equipe dona
+  // (101 Londres, 102 Israel, 103 Marrocos). `pode_editar` vem do servidor:
+  // a própria equipe ou o admin; a "para todos" só o admin.
+  equipe?: number | null
+  equipe_nome?: string | null
+  pode_editar?: boolean
+}
+
+// ─── respostas prontas: a busca do menu e o atalho "/" (03/11/2026) ─────────
+// Sem acento e por palavra: "rastreio env" acha "Rastreio enviado". Toda
+// palavra tem de estar no título ou no texto; as que casam pelo título vêm
+// antes, cada grupo na ordem do menu (ordem, título).
+const semAcento = (s: string) => (s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+export function filtrarProntas<T extends Pick<Modelo, 'titulo' | 'texto' | 'ordem'>>(lista: T[], consulta: string): T[] {
+  const ordenadas = lista.slice().sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0) || a.titulo.localeCompare(b.titulo, 'pt-BR'))
+  const palavras = semAcento(consulta).split(/\s+/).filter(Boolean)
+  if (!palavras.length) return ordenadas
+  const peloTitulo: T[] = []
+  const peloTexto: T[] = []
+  for (const m of ordenadas) {
+    const titulo = semAcento(m.titulo)
+    const tudo = `${titulo} ${semAcento(m.texto)}`
+    if (!palavras.every((p) => tudo.includes(p))) continue
+    ;(palavras.every((p) => titulo.includes(p)) ? peloTitulo : peloTexto).push(m)
+  }
+  return [...peloTitulo, ...peloTexto]
+}
+// O atalho da caixa de resposta: ela começa com "/" e ainda é uma linha só —
+// o que vem depois da barra é a busca ("" logo depois da barra). Fora disso, null.
+export function buscaDoAtalho(texto: string | null | undefined): string | null {
+  const m = /^\/([^\n]{0,80})$/.exec(texto || '')
+  return m ? m[1] : null
 }
 
 // ─── plataformas, canais, modos ─────────────────────────────────────────────

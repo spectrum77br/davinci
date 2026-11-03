@@ -1,5 +1,6 @@
 <script lang="ts">
 import type { PerfilAdsPower } from '~/components/AtendimentoAdsPower.vue'
+import type { AnunciosPainel } from '~/components/AtendimentoVerAnuncio.vue'
 import type { TrocaAberta } from '~/components/AtendimentoTroca.vue'
 import type { OfertaEnvio, TrocaEnvio } from '~/components/AtendimentoTrocaSugestoes.vue'
 
@@ -114,6 +115,20 @@ export type SugestaoTroca = {
   motivo_fora: string | null
   // A oferta ao comprador para ESTA sugestão (só na elegível; o nível 0 não tem).
   texto_oferta: string | null
+  // A foto do modelo (03/11/2026, só na que tem oferta); null = sem foto no
+  // DaVinci (a oferta vai só com o texto).
+  foto?: FotoTroca | null
+}
+// `FotoTrocaOut`: a miniatura, de onde veio e se é a capa do anúncio.
+export type FotoTroca = {
+  // A miniatura (CDN da plataforma); a que vai ao comprador o servidor acha de novo.
+  url: string
+  // loja | outra_loja | catalogo.
+  origem: string
+  // A mesma imagem vale para mais de um modelo no anúncio: pode mostrar outra cor.
+  generica?: boolean
+  // A foto é de um kit com acessório que este produto não leva (o fone do kit).
+  acessorio_a_mais?: boolean
 }
 export type ItemTroca = {
   sku_original: string
@@ -199,6 +214,9 @@ export type Painel = {
   links: { bling: string | null; plataforma: { url: string; rotulo: string } | null }
   // O tipo mora no botão (AtendimentoAdsPower.vue).
   adspower: PerfilAdsPower
+  // O "Ver anúncio" do cabeçalho (o tipo mora no botão, AtendimentoVerAnuncio.vue);
+  // ausente na API antiga.
+  anuncios?: AnunciosPainel | null
   envio_foto: EnvioFoto
   // Só com o pedido em "Aguardando Cancelamento" (item 4); ausente na API antiga.
   ag_cancelamento?: AgCancelamento | null

@@ -50,6 +50,7 @@ from app.models import (
     MarketingPostagem,
     RedeSocial,
 )
+from app.models.marketing_roteiro import TIPO_PRODUTO
 from app.services.marketing import shopee_video_anuncio as _anuncio_shopee
 from app.services.marketing.postagens import (
     BRT,
@@ -407,6 +408,20 @@ MOTIVOS_DO_VIDEO = frozenset({
 MAX_PULOS_POR_CONTA = 5
 
 
+def _opcoes_do_robo(rede: RedeSocial, criativo: MarketingCreative) -> dict[str, bool]:
+    """No Instagram, o tipo do vídeo decide se o Reel entra na grade do perfil.
+
+    Eduardo, 03/11/2026 (Charlots e Uranyx, as contas de Instagram no
+    automático): vídeo de PRODUTO vai também para o feed; HISTÓRIA fica só na
+    aba Reels (`share_to_feed=false`). O tipo vem da ideia que o vídeo cumpre
+    (`tipo_conteudo`, migration 0444) e, sem tipo, é história.
+    Só Instagram: nas outras redes a opção não existe e viajaria morta.
+    """
+    if (rede.plataforma or "").strip().lower() == "instagram":
+        return {"share_to_feed": criativo.tipo_conteudo == TIPO_PRODUTO}
+    return {}
+
+
 async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dict[str, int]:
     """Uma passada: agenda o que couber na grade de hoje de cada conta."""
     agora = agora or datetime.now(UTC)
@@ -459,6 +474,7 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                     creative=criativo,
                     file=arquivo,
                     redes=[rede],
+                    opcoes=_opcoes_do_robo(rede, criativo),
                     user_id=None,
                     # Ele se IDENTIFICA, em vez de deixar o agendar() deduzir
                     # pela hora. Sem isto ele passava por clique humano e as

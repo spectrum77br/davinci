@@ -77,6 +77,7 @@ from app.services.atendimento import (
     ficha,
     ficha_loja,
     ia,
+    respostas_prontas,
     restricao_envio,
     sites_marca,
     validador,
@@ -1504,6 +1505,8 @@ async def dados_consultar_manual(
     skus = _skus_do_pedido(base)
     async with sessao.sessao_leitura() as s:
         m = AtendimentoModelo
+        # As "para todos" + as da equipe da loja da conversa (03/11/2026).
+        equipes = await respostas_prontas.equipes_da_loja(s, ctx.integration_id)
         modelos = (
             await s.execute(
                 select(m.id, m.texto)
@@ -1512,6 +1515,7 @@ async def dados_consultar_manual(
                     m.categoria == assunto,
                     or_(m.plataforma.is_(None), m.plataforma == ctx.plataforma),
                     or_(m.canal.is_(None), m.canal == ctx.canal),
+                    respostas_prontas.clausula_das_equipes(equipes),
                 )
                 .order_by(m.ordem, m.titulo, m.id)
                 .limit(MAX_RESPOSTAS_PRONTAS)

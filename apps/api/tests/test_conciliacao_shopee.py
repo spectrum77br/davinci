@@ -962,3 +962,214 @@ async def test_recalculo_renomeia_a_liberacao_negativa_e_o_raio_x_mostra_o_depoi
     assert por["liquido"]["previsto"] == -0.49 and por["liquido"]["real"] == -0.49
     assert por["liquido"]["dif"] == 0.0
     assert por["depois"]["real"] == 0.49 and por["ficou"]["real"] == 0.0
+
+
+def _income_306115(*, liberado: bool) -> dict:
+    """vortan 306115 (03/11): na venda a Shopee prometia 732,10; na liberação cobrou
+    afiliados 10,32 e +1,44 de taxas e pagou 720,34."""
+    return {
+        "order_selling_price": 885,
+        "cost_of_goods_sold": 885,
+        "seller_product_rebate": {"amount": 25},
+        "net_commission_fee": 100,
+        "net_service_fee": 26.34 if liberado else 24.90,
+        "order_ams_commission_fee": 10.32 if liberado else 0,
+        "actual_shipping_fee": 0,
+        "buyer_paid_shipping_fee": 0,
+        "voucher_from_seller": 3,
+        "escrow_amount": 720.34 if liberado else 732.10,
+    }
+
+
+async def test_previsto_da_shopee_e_a_conta_da_venda_e_recebido_a_menos(
+    db, make_user, auth_as, client
+):
+    """03/11 (Vinicius, vortan 306115: "o previsto e o real não era pra ser exatamente
+    isso?"): a conta da venda fica guardada até liberar; liberou menos que ela (afiliados
+    e taxas cobrados só na liberação) → "recebido a menos", com o que mudou no motivo, na
+    grade e no Raio-X. Pedido que o painel já viu liberado, sem a conta de antes, fica
+    como estava."""
+    from app.models import ConciliacaoPedido, MarketplaceOrderFinancial
+    from app.services.conciliacao_calculo import recalcular_loja
+
+    loja = await _loja_shopee(db, make_user, inicio=date(2026, 10, 1))
+    fin = MarketplaceOrderFinancial(
+        platform=IntegrationPlatform.SHOPEE,
+        integration_id=loja.integration_id,
+        external_order_id="261006VX383P9J",
+        status="posted",
+        gross_amount=Decimal("885"),
+        fee_amount=Decimal("124.90"),
+        freight_amount=Decimal("0"),
+        net_amount=Decimal("732.10"),
+        raw={"escrow": {"order_income": _income_306115(liberado=False)}},
+    )
+    # o outro pedido: o painel só o viu já liberado (antes de 03/11) — sem conta da venda
+    db.add_all(
+        [
+            fin,
+            BlingOrder(
+                bling_id=5001,
+                numero="310002",
+                numeroloja="261006JAPAGO",
+                data=datetime(2026, 10, 6, 12, tzinfo=UTC),
+                total=Decimal("885"),
+                totalprodutos=Decimal("885"),
+                situacao="Atendido",
+                loja="204000002",
+                item_index=0,
+                preco_custo=500.0,
+                item_quantidade=1,
+                item_codigo="i222.sa",
+            ),
+            MarketplaceOrderFinancial(
+                platform=IntegrationPlatform.SHOPEE,
+                integration_id=loja.integration_id,
+                external_order_id="261006JAPAGO",
+                status="posted",
+                gross_amount=Decimal("885"),
+                fee_amount=Decimal("126.34"),
+                freight_amount=Decimal("0"),
+                net_amount=Decimal("720.34"),
+                raw={"escrow": {"order_income": _income_306115(liberado=True)}},
+            ),
+        ]
+    )
+
+    def _liberacao(n: int, pedido_mkt: str, dia: int) -> ConciliacaoMovimento:
+        return ConciliacaoMovimento(
+            integration_id=loja.integration_id,
+            platform=IntegrationPlatform.SHOPEE,
+            origem="shopee_carteira",
+            id_externo=f"lib{n}",
+            data=datetime(2026, 10, dia, 15, tzinfo=UTC),
+            tipo="venda_liberada",
+            descricao="ESCROW_VERIFIED_ADD",
+            sub_tipo="ESCROW_VERIFIED_ADD",
+            pedido_marketplace=pedido_mkt,
+            credito=Decimal("720.34"),
+            debito=Decimal("0"),
+            raw={},
+        )
+
+    db.add(_liberacao(2, "261006JAPAGO", 9))
+    await db.commit()
+
+    async def _pedido(numero: str) -> ConciliacaoPedido:
+        return (
+            await db.execute(
+                select(ConciliacaoPedido)
+                .where(ConciliacaoPedido.pedido_bling == numero)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+
+    await recalcular_loja(db, loja, agora=datetime(2026, 10, 10, 12, tzinfo=UTC))
+    await db.commit()
+    p = await _pedido("310001")
+    assert p.situacao == "aguardando" and p.venda_liquido == Decimal("732.10")
+    assert Decimal(p.conta_na_venda["renda"]) == Decimal("732.10")
+    assert Decimal(p.conta_na_venda["afiliados"]) == 0
+    ja_pago = await _pedido("310002")
+    assert ja_pago.situacao == "bateu" and ja_pago.conta_na_venda is None
+    # a Shopee liberou 720,34 e a Margem releu a conta fechada na liberação
+    db.add(_liberacao(1, "261006VX383P9J", 14))
+    fin.raw = {"escrow": {"order_income": _income_306115(liberado=True)}}
+    fin.net_amount = Decimal("720.34")
+    fin.fee_amount = Decimal("126.34")
+    await db.commit()
+    for dia in (15, 16):  # a rodada seguinte não sobrescreve a conta da venda
+        await recalcular_loja(db, loja, agora=datetime(2026, 10, dia, 12, tzinfo=UTC))
+        await db.commit()
+        p = await _pedido("310001")
+        assert p.situacao == "recebido_a_menos" and p.recebido == Decimal("720.34")
+        assert p.venda_liquido == Decimal("732.10")
+        assert p.dif_previsto_recebido == Decimal("-11.76")
+        assert (
+            p.motivo == "na liberação a Shopee mudou taxas 124.90 → 126.34, afiliados 0.00 → 10.32"
+        )
+        assert p.venda_tarifa == Decimal("124.90") and p.venda_afiliados == Decimal("0")
+        assert Decimal(p.conta_na_venda["renda"]) == Decimal("732.10")
+    ja_pago = await _pedido("310002")
+    assert ja_pago.situacao == "bateu" and ja_pago.conta_na_venda is None
+    # Raio-X: previsto = a conta da venda, real = a da liberação; a linha rosa sai
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    resp = await client.get("/api/conciliacao/pedidos/310001", params={"loja": "Jlas"})
+    assert resp.status_code == 200, resp.text
+    c = resp.json()["comparativo"]
+    por = {x["chave"]: x for x in c["linhas"]}
+    assert por["afiliados"]["previsto"] == 0.0 and por["afiliados"]["real"] == 10.32
+    assert por["tarifa"]["previsto"] == 124.9 and por["tarifa"]["real"] == 126.34
+    assert por["preco"]["dif"] == 0.0
+    assert por["liquido"]["previsto"] == 732.1 and por["liquido"]["real"] == 720.34
+    assert por["liquido"]["dif"] == -11.76
+    assert "previsto_na_venda" not in por
+    assert "previsto = a conta como estava na venda" in c["rodape"]
+    resp = await client.get("/api/conciliacao/pedidos/310002", params={"loja": "Jlas"})
+    por = {x["chave"]: x for x in resp.json()["comparativo"]["linhas"]}
+    assert por["afiliados"]["previsto"] == 10.32 and por["liquido"]["dif"] == 0.0
+
+
+async def test_reembolso_antes_de_liberar_continua_com_a_conta_da_liberacao(
+    db, make_user, auth_as, client
+):
+    """03/11: a conta da venda só vira o previsto quando a diferença é cobrança da Shopee
+    (taxas, afiliados, cupons). Reembolso antes de liberar (a renda cai 300 sem mudar
+    taxa nenhuma) continua comparando com a conta da liberação — "bateu", como antes."""
+    from app.models import ConciliacaoPedido, MarketplaceOrderFinancial
+    from app.services.conciliacao_calculo import recalcular_loja
+
+    loja = await _loja_shopee(db, make_user, inicio=date(2026, 10, 1))
+    fin = MarketplaceOrderFinancial(
+        platform=IntegrationPlatform.SHOPEE,
+        integration_id=loja.integration_id,
+        external_order_id="261006VX383P9J",
+        status="posted",
+        gross_amount=Decimal("885"),
+        fee_amount=Decimal("124.90"),
+        freight_amount=Decimal("0"),
+        net_amount=Decimal("732.10"),
+        raw={"escrow": {"order_income": _income_306115(liberado=False)}},
+    )
+    db.add(fin)
+    await db.commit()
+    await recalcular_loja(db, loja, agora=datetime(2026, 10, 10, 12, tzinfo=UTC))
+    await db.commit()
+    db.add(
+        ConciliacaoMovimento(
+            integration_id=loja.integration_id,
+            platform=IntegrationPlatform.SHOPEE,
+            origem="shopee_carteira",
+            id_externo="lib1",
+            data=datetime(2026, 10, 14, 15, tzinfo=UTC),
+            tipo="venda_liberada",
+            descricao="ESCROW_VERIFIED_ADD",
+            sub_tipo="ESCROW_VERIFIED_ADD",
+            pedido_marketplace="261006VX383P9J",
+            credito=Decimal("432.10"),
+            debito=Decimal("0"),
+            raw={},
+        )
+    )
+    fin.raw = {
+        "escrow": {"order_income": {**_income_306115(liberado=False), "escrow_amount": 432.10}}
+    }
+    fin.net_amount = Decimal("432.10")
+    await db.commit()
+    await recalcular_loja(db, loja, agora=datetime(2026, 10, 15, 12, tzinfo=UTC))
+    await db.commit()
+    p = (
+        await db.execute(
+            select(ConciliacaoPedido)
+            .where(ConciliacaoPedido.pedido_bling == "310001")
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+    assert p.situacao == "bateu" and p.venda_liquido == Decimal("432.10")
+    assert Decimal(p.conta_na_venda["renda"]) == Decimal("732.10")  # guardada, não usada
+    assert "a plataforma mudou a conta em -300.00" in p.motivo
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    resp = await client.get("/api/conciliacao/pedidos/310001", params={"loja": "Jlas"})
+    por = {x["chave"]: x for x in resp.json()["comparativo"]["linhas"]}
+    assert por["liquido"]["previsto"] == 432.1 and por["liquido"]["dif"] == 0.0
+    assert por["previsto_na_venda"]["previsto"] == 732.1

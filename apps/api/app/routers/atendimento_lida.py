@@ -2,6 +2,7 @@
 
   POST /api/atendimento/conversas/{id}/lida
   POST /api/atendimento/conversas/{id}/visto
+  POST /api/atendimento/conversas/{id}/nao-lida  (03/11/2026: o "marcar como não lida")
   POST /api/atendimento/zerar-nao-lidas
 
 Decisão do dono (Eduardo, 14/10/2026): "ao passar também tem que marcar como
@@ -208,6 +209,28 @@ async def marcar_visto(
     except lida_svc.LidaRecusada as e:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail=SO_LEITURA) from e
     return VistoOut(visto_em=visto, conversa=await _conversa_out(session, c))
+
+
+@router.post("/conversas/{conversa_id}/nao-lida", response_model=VistoOut)
+async def marcar_nao_lida(
+    conversa_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_quem_le)],
+) -> VistoOut:
+    """MARCAR COMO NÃO LIDA (03/11/2026): apaga o "visto no DaVinci" — a conversa volta
+    para a bolinha e para o "Falta responder" de todos. Nunca vai à plataforma."""
+    if instagram.e_instagram(conversa_id):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": lida_svc.RECUSA_NAO_SE_APLICA, "detail": lida_svc.MOTIVO_NAO_SE_APLICA},
+        )
+    scope = await escopo_do_atendimento(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    try:
+        await lida_svc.desfazer_visto(session, c, user)
+    except lida_svc.LidaRecusada as e:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, detail=SO_LEITURA) from e
+    return VistoOut(visto_em=None, conversa=await _conversa_out(session, c))
 
 
 class ZerarIn(BaseModel):

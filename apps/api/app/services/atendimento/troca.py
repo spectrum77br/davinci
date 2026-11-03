@@ -78,9 +78,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -416,7 +417,13 @@ def conferir_chaves(numero: str, *, automatica: bool = False) -> None:
 # ── O pedido ──────────────────────────────────────────────────────────────
 
 
-async def _carregar(session: AsyncSession, numero: str, conversa_id: UUID | None = None) -> _Pedido:
+async def _carregar(
+    session: AsyncSession,
+    numero: str,
+    conversa_id: UUID | None = None,
+    *,
+    visivel: Callable[[AtendimentoConversa], bool] | None = None,
+) -> _Pedido:
     """O pedido do espelho, o motivo do 83955, a loja, a conversa e a marca da NF.
 
     A conversa é a da CAIXA (o chat do pedido): a principal, ou a escolhida.
@@ -426,6 +433,15 @@ async def _carregar(session: AsyncSession, numero: str, conversa_id: UUID | None
     as falas dela são e-mails (o aviso da plataforma), não o aceite no chat.
     Escolhida pela tela (o painel da conversa de e-mail), vale a do chat (ou
     nenhuma).
+
+    `visivel` = o escopo da equipe (03/11/2026; None = admin, sem filtro). A
+    conversa da pessoa (`p.conversa`: os aceites da prévia, o `conversa_id`
+    que ela vê, a troca e a nota de fechamento) é a 1ª da Caixa DENTRO do
+    escopo, ou nenhuma — nunca a de outra loja com o mesmo nº, nem a de uma
+    integração que a ficha não liga. O MOTIVO e a loja (a plataforma, a
+    integração da conferência ao vivo) seguem lendo a principal sem filtro:
+    a recusa do IN_CANCEL não pode sumir porque a equipe não vê o chat, e
+    nada disso volta para a tela além do código do motivo.
     """
     linhas = (
         await session.execute(
@@ -478,6 +494,9 @@ async def _carregar(session: AsyncSession, numero: str, conversa_id: UUID | None
     motivo = classificar(
         pedido, status_plataforma=status_na_plataforma(conversa.dados) if conversa else None
     )
+    da_pessoa = conversa
+    if visivel is not None and (conversa is None or not visivel(conversa)):
+        da_pessoa = next((c for c in da_caixa if visivel(c)), None)
     p = _Pedido(
         numero=numero,
         bling_id=next((int(r.bling_id) for r in linhas if r.bling_id), None),
@@ -491,7 +510,7 @@ async def _carregar(session: AsyncSession, numero: str, conversa_id: UUID | None
         itens=itens,
         pedido=pedido,
         motivo=motivo,
-        conversa=conversa,
+        conversa=da_pessoa,
     )
     if p.loja:
         info = (
@@ -1075,7 +1094,15 @@ def hash_previa(
     custo_novo: Decimal | None,
     nivel: int | None,
 ) -> str:
-    """O que a pessoa viu na prévia; o clique confere de novo (`previa_mudou`). PURA."""
+    """O que a pessoa viu na prévia; o clique confere de novo (`previa_mudou`).
+
+    ASSINADO com o segredo do servidor (HMAC-SHA256 com o `jwt_secret`), não
+    um sha256 puro: o corpo leva os dois custos, e desde 03/11/2026 a prévia
+    vai também às equipes, que não veem a Margem — com o resto do corpo na
+    própria resposta, o sha256 puro devolvia os custos por força bruta (R$ 1
+    a 3000 inteiros: ~18 mil tentativas). O clique recalcula no servidor, com
+    o mesmo segredo: a conferência é a mesma.
+    """
     corpo = json.dumps(
         [
             numero,
@@ -1090,7 +1117,8 @@ def hash_previa(
         ],
         separators=(",", ":"),
     )
-    return hashlib.sha256(corpo.encode()).hexdigest()[:32]
+    segredo = get_settings().jwt_secret.encode()
+    return hmac.new(segredo, corpo.encode(), hashlib.sha256).hexdigest()[:32]
 
 
 def linha_observacao(
@@ -1226,19 +1254,21 @@ async def previa(
     sku_antigo: str,
     sku_novo: str,
     conversa_id: UUID | None = None,
+    visivel: Callable[[AtendimentoConversa], bool] | None = None,
 ) -> dict[str, Any]:
     """A prévia da troca: as travas (do banco e ao vivo), o antes e o depois, os
     passos, os aceites possíveis e o `previa_hash` que o clique confere.
 
     Só GETs no Bling e na Shopee; nada da troca é gravado. O commit do fim só
-    guarda o token renovado da Shopee, se houver (crítica M7).
+    guarda o token renovado da Shopee, se houver (crítica M7). `visivel` = o
+    escopo da equipe para a conversa (`_carregar`; None = sem filtro).
     """
     from app.services.atendimento.painel import ve_margem
 
     numero = numero_bling.strip()
     ve, nome = ve_margem(user), _nome(user)
     conferir_chaves(numero)
-    p = await _carregar(session, numero, conversa_id)
+    p = await _carregar(session, numero, conversa_id, visivel=visivel)
     # A MESMA fonte do clique (relida): o `previa_hash` leva os custos, e o
     # catálogo de 10 min de OUTRO processo daria `previa_mudou` à toa.
     cat = await troca_sugestoes.catalogo(session, forcar=True)
@@ -1935,6 +1965,7 @@ async def executar(
     confirmar: bool = False,
     previa_hash: str | None = None,
     automatica: bool = False,
+    visivel: Callable[[AtendimentoConversa], bool] | None = None,
 ) -> AtendimentoTroca:
     """O clique "Trocar" (ou o robô de lote, `automatica=True` e `user=None`).
 
@@ -1945,7 +1976,8 @@ async def executar(
 
     Pessoa: `confirmar` obrigatório nos níveis 1 e 2 (a caixinha), prova do
     aceite opcional (`aceite`), `previa_hash` da prévia. Robô: só nível 0,
-    sem aceite e sem prévia; `criado_por` NULL.
+    sem aceite e sem prévia; `criado_por` NULL. `visivel` = o escopo da equipe
+    para a conversa da troca e da nota (`_carregar`; None = sem filtro).
     """
     if automatica and user is not None:
         raise ValueError("a troca automática não tem pessoa")
@@ -1969,7 +2001,7 @@ async def executar(
         raise TrocaRecusada("troca_em_andamento", troca_id=UUID(aberta["id"]))
 
     # As travas do banco (de novo: nunca confiar na tela).
-    p = await _carregar(session, numero, conversa_id)
+    p = await _carregar(session, numero, conversa_id, visivel=visivel)
     # A pessoa: o catálogo relido (o mesmo da prévia, para o `previa_hash`). O
     # robô: o da memória (10 min), o mesmo com que a rodada escolheu — sem
     # prévia a conferir, e o saldo quem diz é o Bling ao vivo.
@@ -2264,9 +2296,7 @@ async def retomar(session: AsyncSession, user: User | None, troca_id: UUID) -> A
 # ── O botão "Trocar" (o painel e a lista) ─────────────────────────────────
 
 SO_LEITURA = "atendimento_so_leitura"
-TEXTO_SO_LEITURA = (
-    "Só leitura por enquanto: a troca é de quem cuida do Atendimento e mexe na Margem."
-)
+TEXTO_SO_LEITURA = "Só leitura por enquanto: a troca é de quem responde no Atendimento."
 # O `troca_envio` quando a conferência quebrou (o resto do bloco segue).
 TROCA_NAO_CONFERIDA = {
     "disponivel": False,
@@ -2278,10 +2308,20 @@ TROCA_NAO_CONFERIDA = {
 def pode_escrever(user: User | None) -> bool:
     """Passaria nas travas das rotas que ESCREVEM (prévia, troca, retomar e a oferta)?
 
-    Decisão (g) do dono (07/10/2026): `_so_admin` (na fase de observação,
-    só quem `acesso.pode_mexer`) + `atendimento.edit` + `margem.edit` — a
-    troca aprova a Margem, e a oferta promete a troca ao comprador. Admin
-    passa nas duas permissões (como no `require_permission`). O botão
+    03/11/2026, o Eduardo: "quero que funcione para quem também usa o
+    atendimento, não só admin, essa parte de troca, que é as 3 equipes que vão
+    gerenciar". Saiu a decisão (g) de 07/10/2026 (só quem mexe na caixa, com
+    `atendimento.edit` + `margem.edit`): a troca e a oferta são de QUEM
+    RESPONDE — na fase de observação, `acesso.pode_responder` (toda pessoa
+    ativa que vê a caixa, admin ou não; o operador de estoque, não), a mesma
+    trava do responder (`routers/atendimento.py`, `_responde` e
+    `ROTAS_DE_QUEM_RESPONDE`); fora dela, o `atendimento.edit` de sempre
+    (admin passa, como no `require_permission`). Sem `margem.edit` e sem
+    ganhar `margem.view`: a Margem fica aprovada no nome de quem clicou, mas
+    o custo e o % continuam só de quem vê a Margem (`painel.ve_margem`). O
+    escopo por pessoa (os pedidos e as conversas das lojas dela) a rota
+    confere. As outras travas da troca (as chaves, o piloto, os locks, a
+    caixinha do aceite, o Bling ao vivo, a `idem_key`) ficam iguais. O botão
     desliga sem; a rota recusa do mesmo jeito.
     """
     if user is None:
@@ -2290,14 +2330,11 @@ def pode_escrever(user: User | None) -> bool:
     from app.routers import atendimento as caixa
     from app.services.atendimento import acesso
 
-    if caixa.SO_ADMIN and not acesso.pode_mexer(user):
-        return False
+    if caixa.SO_ADMIN:
+        return acesso.pode_responder(user)
     if user.role == UserRole.ADMIN:
         return True
-    perms = user.permissions or {}
-    return bool((perms.get("atendimento") or {}).get("edit")) and bool(
-        (perms.get("margem") or {}).get("edit")
-    )
+    return bool(((user.permissions or {}).get("atendimento") or {}).get("edit"))
 
 
 async def primeira_trava_do_pedido(

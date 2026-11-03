@@ -34,7 +34,7 @@ compile numa query plausível. O filtro de fora vive num lugar só:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -53,6 +53,14 @@ from app.models.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
     from app.models.marketing_personagem import MarketingPersonagem
+
+
+# Os dois tipos de conteúdo (migration 0444). Sem tipo = história: é o que
+# não entra na grade do perfil.
+TIPO_HISTORIA = "historia"
+TIPO_PRODUTO = "produto"
+TIPOS_CONTEUDO = (TIPO_HISTORIA, TIPO_PRODUTO)
+TipoConteudo = Literal["historia", "produto"]
 
 
 class MarketingRoteiro(Base, TimestampMixin):
@@ -86,6 +94,13 @@ class MarketingRoteiro(Base, TimestampMixin):
 
     # NULL = as DUAS agências. Releia o docstring do módulo antes de usar.
     equipe_destino: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+    # "historia" | "produto" (migration 0444, Eduardo 03/11/2026): separa as
+    # duas abas de ideias do portal e desce para o vídeo entregue, onde decide
+    # se o Reel do robô entra também na grade do Instagram (só produto).
+    tipo_conteudo: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=TIPO_HISTORIA, server_default=TIPO_HISTORIA
+    )
 
     # De onde esta versão saiu. A agência não reescreve o roteiro da casa: ela
     # cria a versão dela e as duas ficam lado a lado. Sem o par, some a forma de

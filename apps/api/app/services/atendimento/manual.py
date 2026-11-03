@@ -612,10 +612,14 @@ async def importar_manual(
         .scalars()
         .all()
     )
+    # O manual base é o "para todos": as respostas prontas das equipes (03/11/2026)
+    # não casam com o arquivo nem saem na exportação.
     respostas_banco = list(
         (
             await session.execute(
-                select(AtendimentoModelo).order_by(AtendimentoModelo.created_at)
+                select(AtendimentoModelo)
+                .where(AtendimentoModelo.equipe.is_(None))
+                .order_by(AtendimentoModelo.created_at)
             )
         )
         .scalars()
@@ -834,7 +838,7 @@ async def exportar_manual(session: AsyncSession) -> dict:
         (
             await session.execute(
                 select(AtendimentoModelo)
-                .where(AtendimentoModelo.ativo.is_(True))
+                .where(AtendimentoModelo.ativo.is_(True), AtendimentoModelo.equipe.is_(None))
                 .order_by(AtendimentoModelo.ordem, AtendimentoModelo.titulo)
             )
         )

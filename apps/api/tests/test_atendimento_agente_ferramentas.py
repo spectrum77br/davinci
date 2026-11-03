@@ -1067,6 +1067,49 @@ async def test_consultar_manual_regra_orientacao_prontas_e_fatos_por_escopo(
     assert dados5 == {"assunto_invalido": True, "assuntos": [c["id"] for c in CATEGORIAS]}
 
 
+async def test_consultar_manual_prontas_de_todos_e_da_equipe_da_loja(
+    db: AsyncSession, make_user, redis_mem: RedisMem
+):
+    """03/11/2026: as respostas prontas do agente são as "para todos" + as da
+    equipe da LOJA da conversa (`store_info.sales_team` da ficha)."""
+    conversa, integ = await _kia(db, make_user, redis_mem)
+    db.add_all(
+        [
+            AtendimentoModelo(titulo="Todos", texto="Para todos.", categoria="garantia"),
+            AtendimentoModelo(titulo="I", texto="Da Israel.", categoria="garantia", equipe=102),
+            AtendimentoModelo(titulo="L", texto="Da Londres.", categoria="garantia", equipe=101),
+        ]
+    )
+    await db.commit()
+    base = await _base(db, conversa, recentes=[await _msg(db, conversa, "tem garantia?")])
+
+    async def prontas() -> list[str]:
+        # Um contexto por chamada: a mesma consulta duas vezes no turno é "repetida".
+        dados = await _chamar(
+            _ctx(conversa, base),
+            base,
+            conversa,
+            "consultar_manual",
+            assunto="garantia",
+            pergunta=None,
+        )
+        return sorted(p["texto"] for p in dados["respostas_prontas"])
+
+    # Loja sem equipe: só as para todos.
+    assert await prontas() == ["Para todos."]
+    db.add(
+        StoreInfo(
+            user_id=integ.user_id,
+            platform="shopee",
+            account_name="kia",
+            integration_id=integ.id,
+            sales_team=102,
+        )
+    )
+    await db.commit()
+    assert await prontas() == ["Da Israel.", "Para todos."]
+
+
 async def test_fatos_loja_valido_e_chaves_ativas(db: AsyncSession, make_user):
     agora = datetime.now(UTC)
     assert fatos_loja.valido({"ativo": True, "aprovado_por": "dono", "valido_ate": None}, agora)

@@ -248,10 +248,24 @@ class OfertaTrocaIn(BaseModel):
     # referência é a marca da falta de estoque); `confirmar` = "envie mesmo assim".
     ultima_vista_id: UUID | None = None
     confirmar: bool = False
+    # A foto do modelo antes do texto (03/11/2026): None = a de um modelo só
+    # vai sozinha (a capa genérica, não); True = vai até a genérica (a pessoa
+    # viu e marcou); False = só o texto.
+    com_foto: bool | None = None
 
 
 class OfertaTrocaOut(BaseModel):
     """A oferta enviada: 200 também quando a plataforma falhou (o `status` diz)."""
+
+    # A foto do modelo (03/11/2026, `troca_oferta.FOTO_*`): enviada (antes do
+    # texto) | junto (ML: na mensagem do texto) | revisar (pode ter saído) |
+    # ja_enviada | nao_saiu | sem_foto | nao_suportada | generica | outro_kit |
+    # desmarcada.
+    foto: str | None = None
+    # A frase para a tela quando a foto não foi (o texto foi assim mesmo).
+    foto_aviso: str | None = None
+    # A mensagem da foto (a que foi antes do texto); None no ML (é a mesma).
+    foto_mensagem_id: UUID | None = None
 
     # Saiu (a plataforma confirmou). `revisar` = pode ter saído: confira.
     enviada: bool

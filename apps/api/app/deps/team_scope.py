@@ -54,6 +54,35 @@ def nome_da_equipe(numero: int) -> str:
     return NOMES_EQUIPES.get(numero, f"Equipe {numero}")
 
 
+# A "Equipe" da tela de Lojas (`store_info.commercial_team`: 1, 2, 3) e a
+# equipe de vendas da loja (`sales_team`: 101, 102, 103) são a MESMA coisa
+# desde 03/11/2026 (Eduardo: "a equipe 1 é o londres... equipe 2 é israel,
+# equipe 3 é marrocos"; trocar a equipe da loja troca quem a vê).
+EQUIPE_DE_VENDAS_DO_NUMERO: dict[int, int] = {1: 101, 2: 102, 3: 103}
+NUMERO_DA_EQUIPE_DE_VENDAS: dict[int, int] = {v: k for k, v in EQUIPE_DE_VENDAS_DO_NUMERO.items()}
+
+
+def equipe_de_vendas(numero: int | None) -> int | None:
+    """Equipe 1/2/3 da loja → 101/102/103 (None = sem equipe)."""
+    return EQUIPE_DE_VENDAS_DO_NUMERO.get(numero) if numero is not None else None
+
+
+def numero_da_equipe(sales_team: int | None) -> int | None:
+    """101/102/103 → Equipe 1/2/3; código fora das três (ou None) → None."""
+    return NUMERO_DA_EQUIPE_DE_VENDAS.get(sales_team) if sales_team is not None else None
+
+
+def alinhar_equipes_da_loja(data: dict) -> dict:
+    """Num create/patch de loja, quem veio arrasta o outro: `commercial_team`
+    (a tela de Lojas) define `sales_team`; só `sales_team` define
+    `commercial_team`. Mexe no próprio dict e devolve ele."""
+    if "commercial_team" in data:
+        data["sales_team"] = equipe_de_vendas(data["commercial_team"])
+    elif "sales_team" in data:
+        data["commercial_team"] = numero_da_equipe(data["sales_team"])
+    return data
+
+
 @dataclass
 class TeamScope:
     """Chaves de loja visíveis ao usuário. `unrestricted` = sem filtro."""
@@ -222,7 +251,16 @@ async def resolve_team_scope(session: AsyncSession, user: User) -> TeamScope:
     if not teams:
         return TeamScope(unrestricted=True, email_user=user)
 
-    equipes = set(teams)
+    return await escopo_das_equipes(session, set(teams), email_user=user)
+
+
+async def escopo_das_equipes(
+    session: AsyncSession, equipes: set[int], *, email_user: User | None = None
+) -> TeamScope:
+    """O TeamScope de quem é das `equipes` (sem olhar papel nem usuário): o que
+    `resolve_team_scope` monta para um vendedor delas. Serve também para dizer
+    de qual equipe é uma loja/conta com a MESMA régua da cerca (03/11/2026,
+    coluna Equipe da Tabela de Preços › Contas)."""
     rows = (
         await session.execute(
             select(
@@ -236,7 +274,7 @@ async def resolve_team_scope(session: AsyncSession, user: User) -> TeamScope:
         )
     ).all()
 
-    scope = TeamScope(unrestricted=False, email_user=user)
+    scope = TeamScope(unrestricted=False, email_user=email_user)
     # Lojas sem o FK `integration_id` preenchido (backfill preguiçoso) — caso
     # comum: só `marquezini` tinha o FK. Resolvemos a integração pelo par
     # (nome, plataforma), espelhando `_resolve_linked_integration`, pra que

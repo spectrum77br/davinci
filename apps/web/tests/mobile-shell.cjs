@@ -49,6 +49,8 @@ const windowMock = {
   scrollTo: (value) => scrolled.push(value),
 }
 const storage = new Map()
+// A "tela cheia" do Atendimento (useTelaCheia): o layout só lê.
+const telaCheia = Vue.ref(false)
 const globals = {
   HTMLElement: Element,
   document: documentMock,
@@ -58,6 +60,7 @@ const globals = {
   useAuthStore: () => auth,
   useRuntimeConfig: () => ({ public: { enableMarketing: false } }),
   useApi: () => ({ api: async () => ({ count: 0 }) }),
+  useTelaCheia: () => telaCheia,
 }
 
 function evaluate(content, client = false) {

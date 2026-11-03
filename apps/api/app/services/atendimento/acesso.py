@@ -77,6 +77,11 @@ def pode_responder(user: User) -> bool:
     `ROTAS_DE_QUEM_RESPONDE`: responder, foto, nota, etiqueta, fechar, marcar
     lida...). Configurar a caixa (modo das lojas, manual, automáticas,
     respostas prontas, Zap, zerar não lidas) continua de `pode_mexer`.
+
+    03/11/2026, o Eduardo: "quero que funcione para quem também usa o
+    atendimento, não só admin, essa parte de troca, que é as 3 equipes que vão
+    gerenciar" — a troca de produto e a oferta (`troca.pode_escrever`) também
+    são de quem responde, nas lojas dela.
     """
     return pode_ver(user)
 

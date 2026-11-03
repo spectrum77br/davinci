@@ -38,6 +38,9 @@ type Creative = {
   // listagem de backend antigo tem que continuar abrindo a tela.
   roteiro_id?: string | null
   roteiro_titulo?: string | null
+  // "historia" | "produto" (migration 0444). Produto entra também na grade do
+  // Instagram; história só nos Reels. Opcional pelo mesmo motivo acima.
+  tipo_conteudo?: 'historia' | 'produto'
   aprovado: boolean | null
   // Recado da recusa/aprovação — o mesmo texto que a agência lê no portal.
   // Fica na ENTREGA ("por que este vídeo voltou"), não no briefing.
@@ -284,6 +287,25 @@ async function commitEdit() {
     }, 1200)
   } catch (e: any) {
     toasts.error('Erro ao salvar', errMsg(e))
+  }
+}
+
+// Troca história ⇄ produto direto na célula. Vídeo ligado a uma ideia segue o
+// tipo dela; trocar aqui é a exceção pra um vídeo só (o autoral, por exemplo).
+const trocandoTipo = ref<string | null>(null)
+async function trocarTipo(r: Creative) {
+  const novo = r.tipo_conteudo === 'produto' ? 'historia' : 'produto'
+  trocandoTipo.value = r.id
+  try {
+    const updated = await api<Creative>(`/api/marketing/creatives/${r.id}`, {
+      method: 'PATCH',
+      body: { tipo_conteudo: novo },
+    })
+    Object.assign(r, updated)
+  } catch (e: any) {
+    toasts.error('Erro ao salvar', errMsg(e))
+  } finally {
+    trocandoTipo.value = null
   }
 }
 
@@ -1405,7 +1427,10 @@ function openPublicar(r: Creative) {
   pubLegendaErro.value = false
   pubQuando.value = 'agora'
   pubDataHora.value = proximaHoraBrt()
-  pubShareToFeed.value = true
+  // Produto entra também na grade; história fica só nos Reels — a mesma regra
+  // do robô (Eduardo, 03/11/2026). A caixa continua lá pra exceção. Sem o
+  // campo (backend antigo) fica marcada, como era antes.
+  pubShareToFeed.value = r.tipo_conteudo !== 'historia'
   pubCommit.value = null
   pubErr.value = ''
   pubMarcaId.value = marcaDoCriativo(r)
@@ -2219,6 +2244,18 @@ function filaDropClass(i: number): string {
                   escrever roteiro
                 </button>
                 <span v-else class="text-muted-foreground italic">sem roteiro</span>
+                <button
+                  type="button"
+                  class="rounded px-1 py-px text-[10px] disabled:opacity-50"
+                  :class="r.tipo_conteudo === 'produto'
+                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                    : 'bg-muted text-muted-foreground'"
+                  :disabled="!canEdit || trocandoTipo === r.id"
+                  :title="r.tipo_conteudo === 'produto'
+                    ? 'Produto: no Instagram entra também na grade do perfil. Clique para virar história.'
+                    : 'História: no Instagram fica só na aba Reels. Clique para virar produto.'"
+                  @click.stop="trocarTipo(r)"
+                >{{ r.tipo_conteudo === 'produto' ? 'produto' : 'história' }}</button>
                 <span
                   v-if="r.feedback"
                   class="pill-warning"

@@ -265,6 +265,7 @@ import {
   StickyNote,
   ThumbsDown,
   ThumbsUp,
+  Mail,
   Trash2,
   TriangleAlert,
   Undo2,
@@ -290,6 +291,7 @@ import { conversasComEmail, ehCartaoDeEmail, urlDosCartoes, type CartaoEmail, ty
 import { sinalDeEmails } from '~/components/AtendimentoEmailVenda.vue'
 import type { Painel } from '~/components/AtendimentoPedido.vue'
 import { CLS_AG_CANCELAMENTO, leituraAgCancelamento } from '~/components/AtendimentoAgCancelamento.vue'
+import { CHAVE_ANEXAR_NA_CAIXA } from '~/components/AtendimentoTrocaSugestoes.vue'
 import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
 import { criarMarcadorDeLida, rotaAoAbrir } from '~/lib/atendimentoLida'
 import { AVISO_RESPOSTA_PUBLICA, perguntaRespostaPublica, type AvaliacoesResposta } from '~/components/AtendimentoAvaliacao.vue'
@@ -338,6 +340,8 @@ import {
   portalMagaluDe,
   prazoDe,
   preencherLacunas,
+  buscaDoAtalho,
+  filtrarProntas,
   motivoSellerCenter,
   respondidaNoPortalMagalu,
   respondidaNoSellerCenter,
@@ -665,6 +669,13 @@ async function gravarVisto(id: string, rota: 'lida' | 'visto') {
   detalhe.value = { ...d, conversa: c }
   emit('mudou', c)
 }
+// MARCAR COMO NÃO LIDA (03/11/2026) — o Eduardo, com o Zap para todos: "fazer um
+// marcar como não lido ... ao sumir as bolinhas depois de um tempo com a conversa
+// aberta, se ele clicar nisso volta". O POST /nao-lida apaga o visto (a bolinha e
+// o "Falta responder" voltam para TODOS) e ESTA abertura para de gravar o visto;
+// abrir a conversa de novo grava como sempre.
+const naoLidaAqui = ref<string | null>(null)
+const marcandoNaoLida = ref(false)
 const marcadorLida = criarMarcadorDeLida({
   atual: () => props.conversaId || null,
   visivel: () => props.ativa !== false && (typeof document === 'undefined' || document.visibilityState === 'visible'),
@@ -678,9 +689,35 @@ const marcadorLida = criarMarcadorDeLida({
 // Cada detalhe que chega (ao abrir e no polling) diz se é para chamar, qual
 // rota e até onde a tela mostra.
 watch(() => detalhe.value, (d) => {
-  if (d) marcadorLida.abrir(d.conversa.id, rotaAoAbrir(d, props.canEdit) !== null, d.visto_ate ?? null, d.conversa.notificacoes_migracao_id)
+  if (d) marcadorLida.abrir(d.conversa.id, naoLidaAqui.value !== d.conversa.id && rotaAoAbrir(d, props.canEdit) !== null, d.visto_ate ?? null, d.conversa.notificacoes_migracao_id)
 })
-watch(() => props.conversaId, () => marcadorLida.fechar())
+watch(() => props.conversaId, () => {
+  naoLidaAqui.value = null
+  marcadorLida.fechar()
+})
+async function marcarNaoLida() {
+  const d = detalhe.value
+  if (!d || marcandoNaoLida.value) return
+  const id = d.conversa.id
+  marcandoNaoLida.value = true
+  naoLidaAqui.value = id
+  marcadorLida.abrir(id, false, d.visto_ate ?? null, d.conversa.notificacoes_migracao_id)
+  try {
+    const r = await api<LidaResposta>(`/api/atendimento/conversas/${encodeURIComponent(id)}/nao-lida`, { method: 'POST' })
+    const atual = detalhe.value
+    if (r?.conversa && atual && atual.conversa.id === id) {
+      const c = { ...atual.conversa, ...r.conversa }
+      detalhe.value = { ...atual, conversa: c }
+      emit('mudou', c)
+    }
+    toasts.success('Marcada como não lida: a bolinha voltou para todos')
+  } catch {
+    naoLidaAqui.value = null
+    toasts.error('Não consegui marcar como não lida')
+  } finally {
+    marcandoNaoLida.value = false
+  }
+}
 watch(() => props.ativa, (a) => {
   if (a !== false) marcadorLida.retomar()
 })
@@ -1731,12 +1768,20 @@ function confirmaSePublica(canal: string | null | undefined, t: string): boolean
   if (canal !== 'avaliacao') return true
   return confirm(perguntaRespostaPublica(avaliacoesDados.value?.aviso, t))
 }
+// Enter envia e Shift+Enter quebra a linha (03/11/2026, o Eduardo: "enter devia
+// enviar e shift enter pular como é o padrão"); Ctrl/Cmd+Enter continua enviando.
+// Caixa vazia ou envio travado: o `enviar()` não manda nada (`podeEnviar`); os
+// anexos (fotos, NF) saem pelo botão deles, como antes. No e-mail (parágrafos)
+// o Enter só quebra a linha e quem envia é o Ctrl+Enter, como antes.
 function aoTeclar(e: KeyboardEvent) {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+  if (atalhoAberto.value && !e.isComposing && teclaDoAtalho(e)) return
+  if (e.key !== 'Enter' || e.isComposing || e.shiftKey || e.altKey) return
+  if (e.ctrlKey || e.metaKey || !ehEmail.value) {
     e.preventDefault()
     void enviar()
   }
 }
+const dicaDoEnvio = computed(() => (ehEmail.value ? 'Ctrl+Enter envia' : 'Enter envia · Shift+Enter quebra linha'))
 
 // ─── ações da conversa (PATCH) ──────────────────────────────────────────────
 // Por conversa, como o envio: a ação da A não trava os botões da B.
@@ -2024,18 +2069,81 @@ async function avaliar(nota: 'ok' | 'erro') {
 }
 
 // ─── respostas prontas ──────────────────────────────────────────────────────
+// A lista já vem do servidor no escopo da pessoa (03/11/2026: as "para todos"
+// + as da equipe dela; o admin, todas). Aqui, as que servem nesta caixa.
 const menuModelos = ref(false)
 const buscaModelo = ref('')
-const modelosDaConversa = computed(() => {
+const menuIdx = ref(0)
+const modelosQueServem = computed(() => {
   const c = conversa.value
   if (!c) return []
-  const q = buscaModelo.value.trim().toLowerCase()
-  return props.modelos
-    .filter((m) => m.ativo && (!m.plataforma || m.plataforma === c.plataforma) && (!m.canal || m.canal === c.canal))
-    .filter((m) => !q || m.titulo.toLowerCase().includes(q) || m.texto.toLowerCase().includes(q))
-    .slice()
-    .sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0) || a.titulo.localeCompare(b.titulo, 'pt-BR'))
+  return props.modelos.filter((m) => m.ativo && (!m.plataforma || m.plataforma === c.plataforma) && (!m.canal || m.canal === c.canal))
 })
+const modelosDaConversa = computed(() => filtrarProntas(modelosQueServem.value, buscaModelo.value))
+watch(buscaModelo, () => { menuIdx.value = 0 })
+function teclaDoMenu(e: KeyboardEvent) {
+  const n = modelosDaConversa.value.length
+  if (e.isComposing || !n) return
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault()
+    menuIdx.value = (menuIdx.value + (e.key === 'ArrowDown' ? 1 : n - 1)) % n
+  } else if (e.key === 'Enter') {
+    e.preventDefault()
+    const m = modelosDaConversa.value[Math.min(menuIdx.value, n - 1)]
+    if (m) inserirModelo(m)
+  }
+}
+
+// O atalho "/" (03/11/2026, o Eduardo: "rápido de acesso a respostas prontas"):
+// a caixa começando com "/" abre a lista em cima dela, filtrada pelo que vem
+// depois da barra (título e texto). ↑/↓ escolhe, Enter (ou Tab) põe no lugar do
+// "/busca" com as lacunas preenchidas — com a lista aberta o Enter nunca envia —,
+// Esc fecha (até a barra sair da caixa).
+const ATALHO_MAX = 8
+const atalhoFechado = ref(false)
+const atalhoIdx = ref(0)
+const buscaAtalho = computed(() => (podeDigitar.value ? buscaDoAtalho(texto.value) : null))
+const atalhoAberto = computed(() => buscaAtalho.value !== null && !atalhoFechado.value)
+const listaAtalho = computed(() => (atalhoAberto.value ? filtrarProntas(modelosQueServem.value, buscaAtalho.value || '').slice(0, ATALHO_MAX) : []))
+watch(buscaAtalho, (b) => {
+  atalhoIdx.value = 0
+  if (b === null) atalhoFechado.value = false
+})
+function teclaDoAtalho(e: KeyboardEvent): boolean {
+  const n = listaAtalho.value.length
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    e.stopPropagation()
+    atalhoFechado.value = true
+    return true
+  }
+  if (!n) {
+    // Nada com a busca: o Enter não manda o "/busca" para o comprador.
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      return true
+    }
+    return false
+  }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault()
+    atalhoIdx.value = (atalhoIdx.value + (e.key === 'ArrowDown' ? 1 : n - 1)) % n
+    return true
+  }
+  if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) {
+    // Ctrl+Enter também: com a lista aberta, mandar "/rastr" nunca é o que se quer.
+    // Shift+Enter quebra a linha (e a lista fecha sozinha).
+    e.preventDefault()
+    usarDoAtalho(listaAtalho.value[Math.min(atalhoIdx.value, n - 1)])
+    return true
+  }
+  return false
+}
+function usarDoAtalho(m: Modelo | undefined) {
+  if (!m) return
+  texto.value = ''
+  inserirModelo(m)
+}
 // Primeiro nome para {comprador} — só quando parece nome de gente; apelido de
 // plataforma ("joao_123") fica como lacuna para a pessoa trocar.
 function primeiroNome(n: string | null | undefined) {
@@ -2087,6 +2195,7 @@ function inserirModelo(m: Modelo) {
   }
   menuModelos.value = false
   buscaModelo.value = ''
+  menuIdx.value = 0
 }
 
 // ─── etiqueta: troca à mão (item 2) ─────────────────────────────────────────
@@ -2507,6 +2616,34 @@ async function anexarNf() {
     carregandoNf.value = false
   }
 }
+// A foto do modelo da oferta de troca (03/11/2026): o "copiar oferta" das
+// sugestões (painel do pedido, AtendimentoTrocaSugestoes) põe a foto aqui como
+// anexo — a pessoa confere e manda pelo "Enviar foto", com as travas de
+// sempre. null = anexou; senão o porquê (a sugestão mostra a foto com o
+// "anexar foto" e o "baixar foto"). Onde a foto leva texto (o ML), o texto da
+// oferta vai na legenda vazia.
+function anexarFotoDaTroca(arquivo: File, opcoes?: { legenda?: string | null }): string | null {
+  if (!detalhe.value) return 'Abra a conversa para anexar a foto.'
+  if (motivoSemFoto.value) return motivoSemFoto.value
+  if (!podeSoltarAnexo()) return 'A caixa de resposta desta conversa não está no Responder: volte a ela para anexar a foto.'
+  if (enviandoFoto.value) return 'Espere os anexos terminarem de sair para anexar a foto.'
+  const ja = anexos.value.find((a) => a.estado !== 'enviada' && a.arquivo.name === arquivo.name && a.arquivo.size === arquivo.size)
+  if (ja) return null
+  if (anexosCheios.value) {
+    return maxAnexos.value === 1 ? 'Já há um anexo na caixa: envie ou descarte antes de anexar a foto.' : `Já há ${maxAnexos.value} anexos na caixa (o máximo): tire um para anexar a foto.`
+  }
+  const { aceitos, recusas } = escolherAnexos(
+    anexos.value.filter((a) => a.estado !== 'enviada'),
+    [arquivo],
+    { max: maxAnexos.value, maxBytes: envioFoto.value?.max_bytes || MAX_FOTO, tipos: TIPOS_FOTO },
+  )
+  if (!aceitos.length) return recusas[0] || 'A foto não entrou na caixa.'
+  anexos.value = [...anexos.value, novoAnexo(aceitos[0])]
+  const legenda = (opcoes?.legenda || '').trim()
+  if (legenda && envioFoto.value?.legenda_obrigatoria && !legendaFoto.value.trim()) legendaFoto.value = legenda
+  return null
+}
+provide(CHAVE_ANEXAR_NA_CAIXA, anexarFotoDaTroca)
 // Um POST /foto com estes anexos (vários só onde vão numa mensagem — o ML).
 // Devolve o que houve, sem toast: quem chama junta tudo numa frase.
 type ResultadoAnexo =
@@ -3065,6 +3202,14 @@ watch(() => props.conversaId, (novo, velho) => {
                 <span class="ml-1 2xl:hidden">Portal</span>
                 <span class="ml-1 hidden 2xl:inline">Abrir no portal</span>
               </Button>
+              <!-- Ver anúncio (03/11/2026): a página pública do anúncio, a que o
+                   comprador vê, numa aba nova deste navegador (sem AdsPower).
+                   Vale até para quem só lê. Desligado com o porquê sem anúncio. -->
+              <AtendimentoVerAnuncio
+                v-if="!conversa.somente_leitura && !semPainelDePedido"
+                :anuncios="painelDados?.anuncios ?? null"
+                :carregando="painelCarregando"
+              />
               <!-- 🖥 AdsPower: o perfil da loja desta conversa, no computador de quem
                    clicou (RF11). Desligado com o porquê quando não há perfil. -->
               <AtendimentoAdsPower
@@ -3074,6 +3219,21 @@ watch(() => props.conversaId, (novo, velho) => {
                 :carregando="painelCarregando"
                 :can-edit="canEdit"
               />
+              <!-- Não lida (03/11/2026): a bolinha e o "Falta responder" voltam para todos. -->
+              <Button
+                v-if="!conversa.somente_leitura"
+                size="sm"
+                variant="ghost"
+                class="h-7 px-2 text-xs"
+                :disabled="marcandoNaoLida"
+                title="marcar como não lida: a bolinha e o Falta responder voltam para todos"
+                aria-label="Marcar como não lida"
+                data-nao-lida
+                @click="marcarNaoLida"
+              >
+                <Mail class="size-3.5" />
+                <span class="ml-1 hidden 2xl:inline">Não lida</span>
+              </Button>
               <Button size="sm" variant="ghost" class="h-7 px-2" :disabled="carregando" title="atualizar a conversa (e o painel do pedido)" aria-label="atualizar a conversa" @click="atualizarTudo">
                 <RotateCcw class="size-3.5" :class="{ 'animate-spin': carregando }" />
               </Button>
@@ -3873,17 +4033,54 @@ watch(() => props.conversaId, (novo, velho) => {
             <span>{{ AVISO_MODERACAO_MAGALU }}</span>
           </div>
 
-          <textarea
-            ref="caixa"
-            v-model="texto"
-            rows="3"
-            :disabled="!podeDigitar || enviando"
-            class="block max-h-[40vh] min-h-[76px] w-full resize-y rounded-md border bg-background px-2.5 py-2 text-sm [field-sizing:content] focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
-            :placeholder="podeDigitar ? (conversa.canal === 'avaliacao' ? 'Escreva a resposta PÚBLICA à avaliação… (Ctrl+Enter envia)' : rotuloDestino ? `${rotuloDestino}: escreva a mensagem… (Ctrl+Enter envia)` : 'Escreva a resposta… (Ctrl+Enter envia)') : 'Resposta desabilitada nesta conversa'"
-            aria-label="resposta ao comprador"
-            @keydown="aoTeclar"
-            @paste="aoColar"
-          />
+          <div class="relative">
+            <!-- O atalho "/": a lista abre em cima da caixa, dentro da própria
+                 conversa (sem portal: vale igual na tela cheia). -->
+            <div
+              v-if="atalhoAberto"
+              class="absolute bottom-full left-0 z-[60] mb-1 w-[380px] max-w-full rounded-md border bg-background p-1 shadow-lg"
+              data-atalho-prontas
+            >
+              <div class="px-2 pb-1 pt-0.5 text-[10px] text-muted-foreground">Respostas prontas · ↑↓ escolhe · Enter insere · Esc fecha</div>
+              <ul v-if="listaAtalho.length" id="atalho-prontas" role="listbox" aria-label="respostas prontas" class="max-h-64 space-y-0.5 overflow-y-auto">
+                <li v-for="(m, i) in listaAtalho" :id="`atalho-pronta-${i}`" :key="m.id" role="option" :aria-selected="i === atalhoIdx">
+                  <button
+                    type="button"
+                    tabindex="-1"
+                    class="w-full rounded px-2 py-1 text-left"
+                    :class="i === atalhoIdx ? 'bg-muted' : 'hover:bg-muted/60'"
+                    @mousedown.prevent="usarDoAtalho(m)"
+                    @mousemove="atalhoIdx = i"
+                  >
+                    <div class="flex items-center gap-1.5 text-xs font-medium">
+                      <span class="truncate">{{ m.titulo }}</span>
+                      <span v-if="m.equipe_nome" class="shrink-0 rounded-full bg-sky-500/15 px-1.5 text-[10px] font-normal text-sky-800 dark:text-sky-300">{{ m.equipe_nome }}</span>
+                    </div>
+                    <div class="line-clamp-1 text-[11px] text-muted-foreground">{{ m.texto }}</div>
+                  </button>
+                </li>
+              </ul>
+              <div v-else class="px-2 py-2 text-xs text-muted-foreground">
+                {{ buscaAtalho ? `Nenhuma resposta pronta com “${buscaAtalho}”.` : `Nenhuma resposta pronta para ${plataformaInfo(conversa.plataforma).nome}.` }}
+              </div>
+            </div>
+            <textarea
+              ref="caixa"
+              v-model="texto"
+              rows="3"
+              :disabled="!podeDigitar || enviando"
+              class="block max-h-[40vh] min-h-[76px] w-full resize-y rounded-md border bg-background px-2.5 py-2 text-sm [field-sizing:content] focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
+              :placeholder="podeDigitar ? (conversa.canal === 'avaliacao' ? `Escreva a resposta PÚBLICA à avaliação… (/ respostas prontas · ${dicaDoEnvio})` : rotuloDestino ? `${rotuloDestino}: escreva a mensagem… (/ respostas prontas · ${dicaDoEnvio})` : `Escreva a resposta… (/ respostas prontas · ${dicaDoEnvio})`) : 'Resposta desabilitada nesta conversa'"
+              aria-label="resposta ao comprador"
+              :aria-expanded="atalhoAberto"
+              :aria-controls="atalhoAberto && listaAtalho.length ? 'atalho-prontas' : undefined"
+              :aria-activedescendant="atalhoAberto && listaAtalho.length ? `atalho-pronta-${atalhoIdx}` : undefined"
+              @keydown="aoTeclar"
+              @paste="aoColar"
+              @blur="atalhoFechado = true"
+              @focus="atalhoFechado = false"
+            />
+          </div>
 
           <div v-if="erroEnvio" class="rounded-md border border-red-500/40 bg-red-500/10 px-2.5 py-1.5 text-xs text-red-700 dark:text-red-300">
             <div class="flex items-start gap-2">
@@ -3925,11 +4122,14 @@ watch(() => props.conversaId, (novo, velho) => {
                   class="z-[70] w-[380px] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
                   @close-auto-focus="(e: Event) => e.preventDefault()"
                 >
-                  <input v-model="buscaModelo" class="mb-1.5 h-8 w-full rounded-md border bg-background px-2 text-sm" placeholder="buscar resposta pronta…" aria-label="buscar resposta pronta" />
+                  <input v-model="buscaModelo" class="mb-1.5 h-8 w-full rounded-md border bg-background px-2 text-sm" placeholder="buscar resposta pronta… (↑↓ e Enter)" aria-label="buscar resposta pronta" @keydown="teclaDoMenu" />
                   <ul v-if="modelosDaConversa.length" class="max-h-72 space-y-0.5 overflow-y-auto">
-                    <li v-for="m in modelosDaConversa" :key="m.id">
-                      <button type="button" class="w-full rounded px-2 py-1.5 text-left hover:bg-muted" @click="inserirModelo(m)">
-                        <div class="text-xs font-medium">{{ m.titulo }}</div>
+                    <li v-for="(m, i) in modelosDaConversa" :key="m.id">
+                      <button type="button" class="w-full rounded px-2 py-1.5 text-left hover:bg-muted" :class="{ 'bg-muted': i === menuIdx }" @click="inserirModelo(m)">
+                        <div class="flex items-center gap-1.5 text-xs font-medium">
+                          <span>{{ m.titulo }}</span>
+                          <span v-if="m.equipe_nome" class="shrink-0 rounded-full bg-sky-500/15 px-1.5 text-[10px] font-normal text-sky-800 dark:text-sky-300">{{ m.equipe_nome }}</span>
+                        </div>
                         <div class="line-clamp-2 text-[11px] text-muted-foreground">{{ m.texto }}</div>
                       </button>
                     </li>
@@ -3959,7 +4159,7 @@ watch(() => props.conversaId, (novo, velho) => {
               class="h-8"
               :class="limite && podeDigitar ? '' : 'ml-auto'"
               :disabled="!podeEnviar"
-              :title="incertos.has(conversaId) ? 'travado até a conversa mostrar se o último envio saiu' : 'enviar (Ctrl+Enter)'"
+              :title="incertos.has(conversaId) ? 'travado até a conversa mostrar se o último envio saiu' : `enviar (${ehEmail ? 'Ctrl+Enter' : 'Enter'})`"
               @click="enviar()"
             >
               <Loader2 v-if="enviando" class="mr-1.5 size-4 animate-spin" />

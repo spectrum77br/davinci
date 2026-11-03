@@ -83,6 +83,42 @@ def chaves_da_pessoa_sql(user_id: UUID):
     return select(AtendimentoLojaPessoa.chave).where(AtendimentoLojaPessoa.user_id == user_id)
 
 
+# O Zap (WhatsApp dos números) PARA TODOS (03/11/2026, o Eduardo: "mudar pro
+# whatsapp mostrar pra todas as contas todos ali"): quem tem alguma loja no
+# atendimento vê e responde TODOS os números — o recorte por vendedor só do
+# Zap (30/10/2026) fica desligado. As chaves "c:" dos números continuam
+# gravadas: voltar ao recorte é este `False`.
+ZAP_PARA_TODOS = True
+
+
+async def _canais_do_zap(session: AsyncSession) -> set[UUID]:
+    from app.services.atendimento.constantes import CANAL_ZAP, PLATAFORMA_WHATSAPP
+
+    return set(
+        (
+            await session.execute(
+                select(AtendimentoCanal.id).where(
+                    AtendimentoCanal.plataforma == PLATAFORMA_WHATSAPP,
+                    AtendimentoCanal.canal == CANAL_ZAP,
+                )
+            )
+        ).scalars()
+    )
+
+
+async def pode_o_zap(session: AsyncSession, user: User | None, canal_id: UUID | None) -> bool:
+    """A pessoa vê/responde o Zap deste número? Admin sempre; com `ZAP_PARA_TODOS`,
+    quem tem alguma loja no atendimento; senão, quem tem o número ("c:")."""
+    if user is None:
+        return False
+    if user.role == UserRole.ADMIN:
+        return True
+    chaves = await chaves_da_pessoa(session, user.id)
+    if ZAP_PARA_TODOS:
+        return bool(chaves)
+    return canal_id is not None and chave(CANAL, canal_id) in chaves
+
+
 async def escopo_do_atendimento(session: AsyncSession, user: User) -> TeamScope:
     """O `TeamScope` do atendimento (e da Garantia) pelas lojas da pessoa."""
     if user.role == UserRole.ADMIN:
@@ -93,6 +129,8 @@ async def escopo_do_atendimento(session: AsyncSession, user: User) -> TeamScope:
     integracoes = _ids(chaves, INTEGRACAO)
     fichas = _ids(chaves, FICHA)
     scope = TeamScope(unrestricted=False, email_user=user, canal_ids=_ids(chaves, CANAL))
+    if ZAP_PARA_TODOS and chaves:
+        scope.canal_ids |= await _canais_do_zap(session)
     if integracoes or fichas:
         da_integracao = await rotear.integracoes_das_fichas(session)
         integracoes |= {da_integracao[f] for f in fichas if f in da_integracao}

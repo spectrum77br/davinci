@@ -102,6 +102,14 @@ class PricingAccountPatch(BaseModel):
     slot5_segment_id: UUID | None = None
 
 
+class EquipeDaConta(BaseModel):
+    """Uma equipe de vendas que enxerga a conta: o número de
+    store_info.sales_team (101/102/103) e o rótulo da tela ("Equipe 1/2/3")."""
+
+    numero: int
+    nome: str
+
+
 class PricingAccountOut(PricingAccountBase):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
@@ -129,6 +137,12 @@ class PricingAccountOut(PricingAccountBase):
     # margens; null volta à da base). Desligar o catálogo apaga a filha e as
     # margens próprias: ao religar, a filha nova nasce sem nenhuma.
     margens_catalogo: dict[str, Decimal | None] | None = None
+    # Coluna "Equipe" da aba Contas (03/11/2026): as equipes de vendas cuja
+    # cerca deixa ver esta conta (a loja dela, pela régua de
+    # `escopo_das_equipes`). Vazia = sem equipe. A filha sai com as da base.
+    # Preenchida no /accounts e nas respostas de UMA conta (create/patch/
+    # department/catálogo); o /grid não calcula (a grade não mostra).
+    equipes: list[EquipeDaConta] = []
 
 
 class ContaCatalogoIn(BaseModel):

@@ -73,6 +73,9 @@ type Roteiro = {
   // A agência por cuja porta a ideia NOVA entrou (portal ou o Claude conectado
   // a ele). NULL = escrita aqui dentro, pela casa.
   criado_pela_equipe: string | null
+  // A aba de ideias do portal (migration 0444). Desce para o vídeo entregue:
+  // no Instagram, produto entra também na grade do perfil; história só nos Reels.
+  tipo_conteudo: 'historia' | 'produto'
   ativo: boolean
   referencias: Ref_[]
   personagens: Personagem[]
@@ -799,6 +802,11 @@ async function recusarPedido(r: Requisicao) {
               <span v-if="r.marca">{{ r.marca }}</span>
               <span v-if="r.sku" class="font-mono">{{ r.sku }}</span>
               <span class="pill-muted">{{ destinoLabel(r.equipe_destino) }}</span>
+              <span
+                v-if="r.tipo_conteudo === 'produto'"
+                class="rounded bg-emerald-500/15 px-1 py-px text-emerald-700 dark:text-emerald-400"
+                title="Ideia de produto: o vídeo dela entra também na grade do Instagram"
+              >produto</span>
               <!-- Sem esta marca, a versão da agência entra na lista com o
                    mesmo título da ideia e parece duplicata. -->
               <span
@@ -850,7 +858,7 @@ async function recusarPedido(r: Requisicao) {
           </button>
         </div>
 
-        <div class="grid gap-2 sm:grid-cols-3">
+        <div class="grid gap-2 sm:grid-cols-4">
           <div>
             <label class="mb-1 block text-[11px] font-medium text-muted-foreground">Marca</label>
             <select
@@ -891,6 +899,23 @@ async function recusarPedido(r: Requisicao) {
                 {{ sel.equipe_destino }}
               </option>
               <option v-for="d in destinos" :key="d" :value="d">{{ d }}</option>
+            </select>
+          </div>
+          <div>
+            <label class="mb-1 block text-[11px] font-medium text-muted-foreground">
+              Tipo
+            </label>
+            <!-- Reclassificar leva junto as versões e os vídeos já entregues
+                 para esta ideia (o servidor faz isso no PATCH). -->
+            <select
+              :value="sel.tipo_conteudo"
+              :disabled="!canEdit"
+              title="Produto: o vídeo entra também na grade do Instagram. História: só na aba Reels."
+              class="h-8 w-full rounded-md border bg-background px-2 text-xs outline-none focus:ring-2 focus:ring-ring"
+              @change="salvar('tipo_conteudo', ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="historia">história (só Reels)</option>
+              <option value="produto">produto (Reels + grade)</option>
             </select>
           </div>
         </div>

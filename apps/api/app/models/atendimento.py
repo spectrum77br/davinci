@@ -29,7 +29,7 @@ Dez tabelas:
                              pessoa vira exemplo.
   `atendimento_regras`     — o manual "QUANDO → FAÇA" da IA. Só muda por
                              pessoa; a IA nunca escreve as próprias regras.
-  `atendimento_modelos`    — respostas prontas (macros) da tela.
+  `atendimento_modelos`    — respostas prontas (macros) da tela, para todos ou de uma equipe.
 
 Parte 2 (28/09/2026):
 
@@ -778,6 +778,12 @@ class AtendimentoModelo(Base, TimestampMixin):
     ordem: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    # A equipe dona (03/11/2026, o Eduardo: "as q ja tem la deixe pra todos mas
+    # as novas que eles vao criar vai ter essa ideia de especifico por equipe"):
+    # o número de `users.sales_teams` / `store_info.sales_team` (101 Londres,
+    # 102 Israel, 103 Marrocos — `deps/team_scope.NOMES_EQUIPES`). NULL = para
+    # todos (as de antes da 0443 e as que o admin faz para todos).
+    equipe: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     criado_por: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

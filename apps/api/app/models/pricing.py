@@ -335,12 +335,14 @@ class StoreInfo(Base, TimestampMixin):
     segment: Mapped[str | None] = mapped_column(String(128), nullable=True)
     freight: Mapped[str | None] = mapped_column(String(128), nullable=True)
     cpf_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    # Código interno de acesso à loja. Preserva o escopo individual
-    # existente e não representa a organização comercial.
+    # Equipe de vendas da loja (101 Londres, 102 Israel, 103 Marrocos): é ela
+    # que decide quem vê a loja (team_scope). Desde 03/11/2026 (0445) anda
+    # junto com `commercial_team` (1/2/3, a "Equipe" da tela de Lojas): gravar
+    # um grava o outro (`team_scope.equipe_de_vendas` / `numero_da_equipe`).
     sales_team: Mapped[int | None] = mapped_column(Integer, nullable=True)
     commercial_team: Mapped[int | None] = mapped_column(
         Integer,
-        CheckConstraint("commercial_team IN (1, 2)", name="commercial_team_valid"),
+        CheckConstraint("commercial_team IN (1, 2, 3)", name="commercial_team_valid"),
         nullable=True,
     )
     account_name: Mapped[str | None] = mapped_column(String(128), nullable=True)

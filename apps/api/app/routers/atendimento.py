@@ -122,7 +122,7 @@ from app import worker_pool
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_active_user, require_permission
-from app.deps.team_scope import TeamScope
+from app.deps.team_scope import NOMES_EQUIPES, TeamScope, nome_da_equipe
 from app.models import (
     AtendimentoAvaliacao,
     AtendimentoCanal,
@@ -160,6 +160,7 @@ from app.schemas.atendimento import (
     DescartarIn,
     DestinoOut,
     EnvioOut,
+    EquipeModelo,
     EtiquetaHistoricoOut,
     EtiquetaIn,
     EtiquetaTrocaOut,
@@ -179,6 +180,7 @@ from app.schemas.atendimento import (
     ModeloIn,
     ModeloOut,
     ModeloPatch,
+    ModelosEquipesOut,
     PedidoAtualizarOut,
     PlataformaResumoOut,
     RascunhoOut,
@@ -206,6 +208,7 @@ from app.services.atendimento import (
     gravar,
     instagram,
     pendente,
+    respostas_prontas,
     robo,
     separa_email,
     zap_entrada,
@@ -346,6 +349,8 @@ ROTAS_DE_QUEM_LE = frozenset(
         # notificações devem sumir se clicado em algum atendimento"): só a
         # marca do DaVinci que apaga o número; nada vai à plataforma.
         ("POST", "/api/atendimento/conversas/{conversa_id}/visto"),
+        # O "marcar como não lida" (03/11/2026): o contrário do visto, para todos.
+        ("POST", "/api/atendimento/conversas/{conversa_id}/nao-lida"),
     }
 )
 SO_LEITURA = {
@@ -374,7 +379,12 @@ ABA_EMAIL_SO_ADMIN = {
 # marca lida na plataforma, atualiza o pedido, descarta a sugestão, confere o
 # envio, a avaliação e o carrinho. Configurar a caixa continua só de quem
 # mexe (`acesso.pode_mexer`): modo das lojas, manual, automáticas, respostas
-# prontas, Zap, e-mail, troca, "Zerar não lidas", comentários das redes.
+# prontas, Zap, e-mail, "Zerar não lidas", comentários das redes.
+# A TROCA DE PRODUTO e a OFERTA (03/11/2026, o Eduardo: "quero que funcione
+# para quem também usa o atendimento, não só admin, essa parte de troca, que é
+# as 3 equipes que vão gerenciar"): a prévia, o "Trocar", o "Retomar" e o
+# "Enviar oferta" passaram a ser de quem responde — só nos pedidos e conversas
+# das lojas da pessoa (`routers/atendimento_troca.py`, `troca.pode_escrever`).
 ROTAS_DE_QUEM_RESPONDE = frozenset(
     {
         ("POST", "/api/atendimento/conversas/{conversa_id}/responder"),
@@ -390,6 +400,25 @@ ROTAS_DE_QUEM_RESPONDE = frozenset(
         ("POST", "/api/atendimento/avaliacoes/{avaliacao_id}/responder"),
         ("POST", "/api/atendimento/avaliacoes/{avaliacao_id}/tratada"),
         ("POST", "/api/atendimento/carrinhos/{carrinho_id}/resolvido"),
+        # A troca de produto e a oferta (03/11/2026): as 3 equipes do atendimento.
+        ("POST", "/api/atendimento/pedidos/{numero_bling}/troca/previa"),
+        ("POST", "/api/atendimento/pedidos/{numero_bling}/troca"),
+        ("POST", "/api/atendimento/trocas/{troca_id}/retomar"),
+        ("POST", "/api/atendimento/pedidos/{numero_bling}/troca/oferta"),
+    }
+)
+
+
+# As respostas prontas DA EQUIPE (03/11/2026, o Eduardo: "as novas que eles
+# vão criar vai ter essa ideia de específico por equipe"): quem é de equipe
+# (`respostas_prontas.equipes_do_usuario`) cria a da equipe dele, edita e apaga
+# as da equipe; a "para todos" e as de outra equipe continuam de quem mexe. A
+# trava deixa passar e a rota confere a equipe (`_conferir_equipe_da_pronta`).
+ROTAS_DA_EQUIPE = frozenset(
+    {
+        ("POST", "/api/atendimento/modelos"),
+        ("PATCH", "/api/atendimento/modelos/{modelo_id}"),
+        ("DELETE", "/api/atendimento/modelos/{modelo_id}"),
     }
 )
 
@@ -418,7 +447,19 @@ async def _so_admin(
         return user
     if _quem_responde_passa(request) and acesso.pode_responder(user):
         return user
+    if _da_equipe_passa(request) and _de_equipe(user):
+        return user
     raise HTTPException(status.HTTP_403_FORBIDDEN, detail=SO_LEITURA)
+
+
+def _da_equipe_passa(request: Request) -> bool:
+    rota = request.scope.get("route")
+    return (request.method, getattr(rota, "path", None)) in ROTAS_DA_EQUIPE
+
+
+def _de_equipe(user: User) -> bool:
+    """Responde na caixa e é de uma equipe do atendimento (cria a resposta dela)."""
+    return acesso.pode_responder(user) and bool(respostas_prontas.equipes_do_usuario(user))
 
 
 router = APIRouter(
@@ -1388,9 +1429,12 @@ def _resumo_dict(
         # marca da linha (negrito, bolinha) e a tela relê os números quando
         # ele muda. Em todo canal: a avaliação esperando resposta continua
         # marcada em "Todas", mesmo fora do filtro (14/10/2026, só o chat).
-        # 28/10/2026: e a conversa de chat com bolinha (`numero_duoke` > 0).
+        # 28/10/2026: e a conversa de chat com bolinha (`numero_duoke` > 0);
+        # 03/11/2026 (o dono: "se resolver e fazer aparecer sim"), também a
+        # reclamação do ML com bolinha (`pendente.do_numero`, a mesma régua
+        # de `falta_responder_na_caixa`).
         "falta_responder": pendente.falta_responder(c)
-        or (pendente.do_chat(c) and (numero_duoke or 0) > 0),
+        or (pendente.do_numero(c) and (numero_duoke or 0) > 0),
         "pendentes": int(pendentes or 0) if c.aguardando_resposta else 0,
         # O número DESTA conversa na Caixa (15/10/2026, o Eduardo: "1 mensagem
         # na kia e nem mostra dessa conversa"): a mesma régua do número da
@@ -2061,7 +2105,9 @@ async def resumo(
     # antigos de avaliação"): a avaliação, a reclamação, o carrinho e os
     # comentários têm os filtros próprios (`pendente.py`). Vencendo/vencidas
     # seguem o PRAZO da fila (`aguardando_resposta`), em todo canal.
-    # 28/10/2026: e toda conversa de chat com bolinha (`falta_responder_na_caixa_sql`).
+    # 28/10/2026: e toda conversa de chat com bolinha (`falta_responder_na_caixa_sql`);
+    # 03/11/2026 (o dono, a bolinha do ML com 1 e a aba vazia: "se resolver e
+    # fazer aparecer sim"), também a reclamação do ML que está na bolinha.
     falta = pendente.falta_responder_na_caixa_sql(agora=agora)
     # O número do DUOKE (o menu de plataformas, a barra de lojas, "Todas ·
     # Shopee" e a aba Caixa) = o "não lida" do Duoke (15/10/2026,
@@ -2472,8 +2518,9 @@ async def _listar_marketplace(
     elif filtro == "aguardando":
         # "Falta responder" da Caixa = IGUAL AO DUOKE e SÓ O CHAT (14/10/2026,
         # `pendente.py`: a avaliação, a reclamação, o carrinho e os comentários
-        # têm os filtros próprios). A Caixa Humano e a aba E-mail continuam na
-        # régua delas (a fila), em todo canal.
+        # têm os filtros próprios) — mais a reclamação do ML que está na
+        # bolinha (03/11/2026, `falta_responder_na_caixa_sql`). A Caixa Humano
+        # e a aba E-mail continuam na régua delas (a fila), em todo canal.
         consulta = consulta.where(
             # D1 (23/10/2026): na Caixa Humano, também a conversa que o agente respondeu com
             # a ação pendente ("responde e marca", `humano.pos_envio_sql`).
@@ -2717,7 +2764,8 @@ async def listar_conversas(
     fim (a mais recente primeiro) — e o cursor (`proximo`) é o do prazo. Na
     Caixa, o "Falta responder" é a régua do Duoke, só nas conversas de chat
     (`services/atendimento/pendente.py`: sem avaliação, reclamação, carrinho e
-    comentários desde 14/10/2026); na Caixa Humano e na aba E-mail, a fila.
+    comentários desde 14/10/2026 — fora a reclamação do ML que está na
+    bolinha, que entra desde 03/11/2026); na Caixa Humano e na aba E-mail, a fila.
     `tipo_chamado` (sac | atacado | duvidas) filtra os chamados dos sites pelo
     tipo (os chips do grupo Site, RF6); `filtro=email_sem_vinculo` traz as
     conversas de e-mail das lojas ainda sem pedido (RF5); `filtro=afiliado`
@@ -5073,9 +5121,81 @@ async def apagar_regra(
 
 
 # ── Respostas prontas (modelos) ───────────────────────────────────────────
+# Por equipe desde 03/11/2026 (`services/atendimento/respostas_prontas.py`):
+# cada pessoa vê as "para todos" + as da equipe dela; o admin vê todas. Quem
+# mexe na caixa escolhe a equipe ou "para todos" e mexe em qualquer uma; quem
+# é de equipe cria a da equipe dele e só mexe nas da equipe. A "para todos" só
+# quem mexe na caixa edita ou apaga.
+
+PRONTA_DE_TODOS = {
+    "code": "resposta_de_todos_so_admin",
+    "detail": "Esta resposta pronta é para todos: só o admin muda ou apaga.",
+}
+PRONTA_DE_OUTRA_EQUIPE = {
+    "code": "resposta_de_outra_equipe",
+    "detail": "Esta resposta pronta é de outra equipe.",
+}
 
 
-def _modelo_out(m: AtendimentoModelo) -> ModeloOut:
+def _mexe_em_todas(user: User) -> bool:
+    """Escolhe a equipe (ou "para todos") e mexe em qualquer resposta pronta.
+
+    Na fase de observação, quem mexe na caixa (`acesso.pode_mexer`). Fora dela,
+    quem passou na permissão fina e não é de equipe, como antes da 03/11."""
+    if SO_ADMIN:
+        return acesso.pode_mexer(user)
+    return user.role == UserRole.ADMIN or not respostas_prontas.equipes_do_usuario(user)
+
+
+async def _edita_pronta(user: Annotated[User, Depends(require_active_user)]) -> User:
+    """Cria/edita: na fase de observação a trava já decidiu (quem mexe ou quem é
+    de equipe, `ROTAS_DA_EQUIPE`); fora dela, o `atendimento.edit` de sempre."""
+    if SO_ADMIN:
+        return user
+    return await _edit_fino(user)
+
+
+async def _apaga_pronta(user: Annotated[User, Depends(require_active_user)]) -> User:
+    """Apaga: idem, com o `atendimento.delete` fora da fase de observação."""
+    if SO_ADMIN:
+        return user
+    return await _delete(user)
+
+
+def _pode_editar_pronta(user: User, m: AtendimentoModelo) -> bool:
+    if _mexe_em_todas(user):
+        return True
+    return m.equipe is not None and m.equipe in respostas_prontas.equipes_do_usuario(user)
+
+
+def _conferir_equipe_da_pronta(user: User, m: AtendimentoModelo) -> None:
+    """404 para a de outra equipe que a pessoa nem vê; 403 para a que ela vê e
+    não pode mexer (a "para todos")."""
+    if _pode_editar_pronta(user, m):
+        return
+    if not respostas_prontas.ve_todas(user) and m.equipe is not None:
+        raise HTTPException(404, detail={"code": "modelo_nao_encontrado"})
+    raise HTTPException(
+        403, detail=PRONTA_DE_TODOS if m.equipe is None else PRONTA_DE_OUTRA_EQUIPE
+    )
+
+
+def _equipe_pedida(user: User, pedida: int | None, *, atual: int | None = None) -> int | None:
+    """A equipe que a resposta pronta vai ter. Quem mexe na caixa escolhe (uma
+    das equipes ou `None` = para todos); quem é de equipe fica com a dele."""
+    if pedida is not None and not respostas_prontas.equipe_valida(pedida):
+        raise HTTPException(422, detail={"code": "equipe_invalida"})
+    if _mexe_em_todas(user):
+        return pedida
+    minhas = respostas_prontas.equipes_do_usuario(user)
+    if pedida is None:
+        return atual if atual in minhas else min(minhas)
+    if pedida not in minhas:
+        raise HTTPException(403, detail=PRONTA_DE_OUTRA_EQUIPE)
+    return pedida
+
+
+def _modelo_out(m: AtendimentoModelo, user: User) -> ModeloOut:
     return ModeloOut(
         id=m.id,
         titulo=m.titulo,
@@ -5085,18 +5205,24 @@ def _modelo_out(m: AtendimentoModelo) -> ModeloOut:
         categoria=m.categoria,
         ativo=m.ativo,
         ordem=m.ordem,
+        equipe=m.equipe,
+        equipe_nome=nome_da_equipe(m.equipe) if m.equipe is not None else None,
+        pode_editar=_pode_editar_pronta(user, m),
     )
 
 
 @router.get("/modelos", response_model=list[ModeloOut])
 async def listar_modelos(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(_view)],
+    user: Annotated[User, Depends(_view)],
     plataforma: Annotated[str | None, Query()] = None,
     canal: Annotated[str | None, Query()] = None,
 ) -> list[ModeloOut]:
-    """Todas as respostas prontas; com plataforma/canal, as que valem ali (e as gerais)."""
+    """As respostas prontas que a pessoa vê (as "para todos" + as da equipe dela;
+    o admin, todas); com plataforma/canal, as que valem ali (e as gerais)."""
     consulta = select(AtendimentoModelo)
+    if (visivel := respostas_prontas.clausula_visivel(user)) is not None:
+        consulta = consulta.where(visivel)
     if plataforma:
         consulta = consulta.where(
             or_(AtendimentoModelo.plataforma.is_(None), AtendimentoModelo.plataforma == plataforma)
@@ -5114,16 +5240,31 @@ async def listar_modelos(
         .scalars()
         .all()
     )
-    return [_modelo_out(m) for m in modelos]
+    return [_modelo_out(m, user) for m in modelos]
+
+
+@router.get("/modelos/equipes", response_model=ModelosEquipesOut)
+async def equipes_dos_modelos(
+    user: Annotated[User, Depends(_view)],
+) -> ModelosEquipesOut:
+    """As equipes do formulário e do filtro da aba (e o que a pessoa pode criar)."""
+    todas = _mexe_em_todas(user)
+    minhas = [] if todas else sorted(respostas_prontas.equipes_do_usuario(user))
+    return ModelosEquipesOut(
+        equipes=[EquipeModelo(numero=n, nome=nome) for n, nome in sorted(NOMES_EQUIPES.items())],
+        minhas=minhas,
+        todas=todas,
+    )
 
 
 @router.post("/modelos", response_model=ModeloOut, status_code=status.HTTP_201_CREATED)
 async def criar_modelo(
     body: ModeloIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_edita_pronta)],
 ) -> ModeloOut:
     _validar_par(body.plataforma, body.canal)
+    equipe = _equipe_pedida(user, body.equipe)
     await _conferir_categoria(session, body.categoria)
     m = AtendimentoModelo(
         titulo=body.titulo,
@@ -5133,12 +5274,13 @@ async def criar_modelo(
         categoria=body.categoria,
         ativo=body.ativo,
         ordem=body.ordem,
+        equipe=equipe,
         criado_por=user.id,
     )
     session.add(m)
     await session.commit()
     await session.refresh(m)
-    return _modelo_out(m)
+    return _modelo_out(m, user)
 
 
 @router.patch("/modelos/{modelo_id}", response_model=ModeloOut)
@@ -5146,12 +5288,15 @@ async def editar_modelo(
     modelo_id: UUID,
     body: ModeloPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_edita_pronta)],
 ) -> ModeloOut:
     m = await session.get(AtendimentoModelo, modelo_id)
     if m is None:
         raise HTTPException(404, detail={"code": "modelo_nao_encontrado"})
+    _conferir_equipe_da_pronta(user, m)
     campos = body.model_fields_set
+    if "equipe" in campos:
+        m.equipe = _equipe_pedida(user, body.equipe, atual=m.equipe)
     if "titulo" in campos:
         if not body.titulo:
             raise HTTPException(422, detail={"code": "titulo_vazio"})
@@ -5174,18 +5319,19 @@ async def editar_modelo(
     _validar_par(m.plataforma, m.canal)
     await session.commit()
     await session.refresh(m)
-    return _modelo_out(m)
+    return _modelo_out(m, user)
 
 
 @router.delete("/modelos/{modelo_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def apagar_modelo(
     modelo_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(_delete)],
+    user: Annotated[User, Depends(_apaga_pronta)],
 ) -> Response:
     m = await session.get(AtendimentoModelo, modelo_id)
     if m is None:
         raise HTTPException(404, detail={"code": "modelo_nao_encontrado"})
+    _conferir_equipe_da_pronta(user, m)
     await session.delete(m)
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

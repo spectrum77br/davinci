@@ -42,7 +42,8 @@ canais o Duoke não entra, a mensagem do mediador é a cobrança e o prazo é o 
 plataforma — a reclamação vencida está marcada (e em "Vencidas"). Desde
 14/10/2026 a reclamação, a avaliação e o carrinho saem do filtro "Falta
 responder" (só o chat, abaixo); o SAC da Magalu, que é conversa com o
-comprador, fica.
+comprador, fica. Desde 03/11/2026 a reclamação do ML que está na bolinha
+volta ("A RECLAMAÇÃO DO ML NO FALTA RESPONDER", abaixo).
 
 "Resolvida" = fechada ou marcada "não precisa de resposta" no DaVinci (as
 duas voltam sozinhas quando o comprador escreve de novo). A bloqueada
@@ -71,7 +72,9 @@ devolução/mediação, comentário das redes e carrinho do site não estão nel
 (`CANAIS_FORA_DO_CHAT`). Desde então:
 
   • o filtro e o número da aba "Falta responder" contam só a conversa de
-    chat (`falta_responder_no_chat`) — essas outras têm os filtros próprios
+    chat (`falta_responder_no_chat`; desde 28/10/2026 também a de chat com
+    bolinha e, desde 03/11/2026, a reclamação do ML com bolinha —
+    `falta_responder_na_caixa`) — essas outras têm os filtros próprios
     (Avaliação, Reclamação, Devolução, Carrinho, Mídia). A marca da linha
     (`falta_responder`) continua em todas: em "Todas", a avaliação esperando
     resposta segue em negrito;
@@ -169,9 +172,10 @@ régua do chat e, além do comprador, a mensagem do MEDIADOR conta
 (`do_comprador_no_numero(mediador=True)`); a resposta de pessoa da loja e o
 "visto no DaVinci" zeram, as linhas que o DaVinci escreve ("aberta",
 "encerrada") não contam. O número fica na linha da reclamação, não na do
-pack — a soma da loja é a mesma. O filtro "Falta responder" e a marca da
-linha não mudam (a reclamação segue fora do chat, com o filtro dela), e a
-reclamação/devolução da Shopee e da TikTok continua fora do número.
+pack — a soma da loja é a mesma. Até 03/11/2026 o filtro "Falta responder"
+e a marca da linha não mudavam (a reclamação seguia fora do chat, com o
+filtro dela — abaixo, o que mudou), e a reclamação/devolução da Shopee e da
+TikTok continua fora do número.
 O que ainda NÃO é igual (revisão de 15/10/2026): (1) no Duoke pack e
 reclamação são UMA conversa com um contador — abrir ou responder um zera
 tudo; aqui cada uma tem os seus marcos (a resposta de pessoa e o "visto" do
@@ -182,7 +186,29 @@ o mediador que escreve segundos depois da resposta da loja (a 5593269721,
 injox: 14:13:26 e 14:13:35 UTC, depois da resposta às 14:13:21) aqui dá 2, e
 no Duoke pode ter ficado lida se quem respondeu estava com a conversa aberta.
 A conferir na próxima medição; para tirar a reclamação do número sem mexer em
-mais nada, `RECLAMACAO_NO_NUMERO = ()`.
+mais nada, `RECLAMACAO_NO_NUMERO = ()` (desde 03/11/2026 ela sai também do
+"Falta responder", que a segue — abaixo).
+
+A RECLAMAÇÃO DO ML NO "FALTA RESPONDER" (03/11/2026). O dono, no Mercado
+Livre: a bolinha da loja mostrava 1 e a aba "Falta responder" estava vazia —
+a bolinha conta a reclamação do ML (acima) e o filtro era só o chat. Medido
+em produção no mesmo dia: Injox 1, Inova 1 e Jlas 2, todas reclamações
+abertas (a conversa `reclamacao`, sem canal), nenhuma de chat. A decisão do
+dono: "se resolver e fazer aparecer sim". Desde então o "Falta responder"
+da Caixa — o filtro, o `aguardando` do /resumo (por loja e por plataforma)
+e a marca da linha — traz também a reclamação do ML QUE ESTÁ NA BOLINHA,
+pela mesma régua da contribuição dela no número (`do_numero` e
+`nao_lidas_duoke` > 0, `falta_responder_na_caixa`): a bolinha e a lista
+batem, e o que tira de uma tira da outra — a resposta de pessoa da loja, o
+"visto no DaVinci", fechar ou "não precisa de resposta", os 7 dias. A
+reclamação ENCERRADA no ML (a conversa fica bloqueada, não fechada) com a
+decisão do mediador ainda não vista continua nas duas, como na bolinha. A
+linha segue com a etiqueta dela (Reclamação; Devolução quando a reclamação
+virou devolução — a fd10600a da Jlas 2) e o "· Reclamação" da loja. NÃO
+mudam: a reclamação do ML SEM bolinha (a vez da loja na fila, sem mensagem
+nova — fica no filtro Reclamação e em Vencendo/Vencidas, pelo prazo), a da
+Shopee/TikTok, a avaliação, o carrinho, os comentários, a régua do número,
+o filtro Reclamação e a Caixa Humano (a régua dela é a fila).
 
 O canal sem mensagem para contar fica com a regra que já tinha: o Direct do
 Instagram (adaptador só leitura — as mensagens ficam em `dm_mensagens`, não
@@ -456,7 +482,8 @@ def do_chat(conversa: Any) -> bool:
 
 
 def falta_responder_no_chat(conversa: Any, agora: datetime | None = None) -> bool:
-    """O filtro "Falta responder" da Caixa: a régua do Duoke, só no chat. PURA."""
+    """A régua do Duoke, só no chat. PURA — a metade (a)/(b) do filtro "Falta
+    responder" da Caixa; a outra é a bolinha (`falta_responder_na_caixa`)."""
     return do_chat(conversa) and falta_responder(conversa, agora)
 
 
@@ -722,7 +749,8 @@ def do_numero_sql(c: Any = AtendimentoConversa):
 
 
 def falta_responder_no_chat_sql(c: Any = AtendimentoConversa, agora: datetime | None = None):
-    """SQL de `falta_responder_no_chat` — o filtro e o número da aba "Falta responder"."""
+    """SQL de `falta_responder_no_chat` — a metade (a)/(b) do filtro e do número
+    da aba "Falta responder" (`falta_responder_na_caixa_sql`)."""
     return and_(do_chat_sql(c), falta_responder_sql(c, agora))
 
 
@@ -739,15 +767,24 @@ def falta_responder_na_caixa(
     a que só o robô respondeu, a pergunta do FAQ que o comprador clicou.
     Abriu (o visto apaga a bolinha) e só o robô tinha respondido: sai, como
     no Duoke. A gêmea de `falta_responder_na_caixa_sql`.
+
+    03/11/2026, o dono (a bolinha do ML com 1 e a aba vazia): "se resolver e
+    fazer aparecer sim" — a bolinha vale em toda conversa DO NÚMERO
+    (`do_numero`: o chat e a reclamação do ML), não só no chat. A reclamação
+    do ML entra só pela bolinha (a régua do chat não a vê): está no número da
+    loja, está aqui; a resposta de pessoa, o visto, fechar, "não precisa" e
+    os 7 dias a tiram dos dois juntos.
     """
-    return falta_responder_no_chat(conversa, agora) or (do_chat(conversa) and (numero or 0) > 0)
+    return falta_responder_no_chat(conversa, agora) or (do_numero(conversa) and (numero or 0) > 0)
 
 
 def falta_responder_na_caixa_sql(c: Any = AtendimentoConversa, agora: datetime | None = None):
-    """SQL de `falta_responder_na_caixa` (nunca NULL)."""
+    """SQL de `falta_responder_na_caixa` (nunca NULL) — a bolinha em toda
+    conversa do número (`do_numero_sql`: o chat e a reclamação do ML,
+    03/11/2026)."""
     return or_(
         falta_responder_no_chat_sql(c, agora),
-        and_(do_chat_sql(c), nao_lidas_duoke_sql(c, agora) > 0),
+        and_(do_numero_sql(c), nao_lidas_duoke_sql(c, agora) > 0),
     )
 
 
