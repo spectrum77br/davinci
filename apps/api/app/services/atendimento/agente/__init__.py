@@ -1098,7 +1098,12 @@ async def _sem_a_frase_sem_lastro(
     frase_para_cortar`). O resto passa de novo pela 1ª camada INTEIRA (`conferir_proposta`) e
     pelo verificador; sai só com o "ok" do texto cortado — sem bloqueio duro, sem pessoa e com a
     pergunta tratada (o "só se o resto ainda responde"). Senão, None ou o `Corte` que não saiu
-    (o rascunho de antes fica, para pessoa, com o contexto como estava). Nunca levanta."""
+    (o rascunho de antes fica, para pessoa, com o contexto como estava). Nunca levanta.
+
+    `p` = a Proposta como o MODELO a deu (antes da `conferir_proposta`): a 2ª conferência a
+    troca de novo e a etiqueta que o modelo escolheu continua para depois do envio; o resto
+    que perderia uma ação de depois do envio do texto inteiro não sai (revisão cruzada do
+    an0311, 03/11/2026)."""
     if ctx.modo_replay or base.modo != constantes.MODO_AUTO:
         return None
     try:
@@ -1118,6 +1123,10 @@ async def _sem_a_frase_sem_lastro(
         "saiu": False,
     }
     foto = _foto_do_ctx(ctx)
+    # Revisão cruzada do an0311 (03/11/2026): as ações de depois do envio do texto inteiro (a
+    # etiqueta que o modelo escolheu, a do código, a reclamação do D1) — o resto não sai sem
+    # alguma delas (sairia sem a etiqueta e sem a marca, e a conversa deixaria a Caixa Humano).
+    pos_envio_antes = set(ctx.acoes_pos_envio)
     try:
         p2 = p.model_copy(update={"texto": resto})
         c2 = await conferir_proposta(session, conversa, gatilho, base, ctx, p2, pac)
@@ -1130,6 +1139,7 @@ async def _sem_a_frase_sem_lastro(
             or final2.status != constantes.RASCUNHO_PENDENTE
             or getattr(final2, "sem_auto", None)
             or ctx.acoes_pessoa
+            or pos_envio_antes - set(ctx.acoes_pos_envio)
         ):
             _voltar_o_ctx(ctx, foto)
             registro["porque"] = "a 1ª camada segurou o resto"
@@ -1140,7 +1150,7 @@ async def _sem_a_frase_sem_lastro(
             gatilho,
             base,
             ctx,
-            p2,
+            c2.proposta,
             final2,
             cliente=cliente,
             prazo_s=_prazo_do_verificador(prazo, forcar=base.forcar),
@@ -1170,7 +1180,7 @@ async def _sem_a_frase_sem_lastro(
         saiu=True,
         registro=registro,
         custo_usd=custo2,
-        proposta=p2,
+        proposta=c2.proposta,
         final=conf2.final,
         codigos=list(c2.codigos),
         conferencia=conf2,
@@ -1348,6 +1358,10 @@ async def _responder(
     p = proposta_da_mensagem(ultima)
     if p is None:
         return ex.sem_texto(PARADA_FORMATO, MOTIVO_FORA_DO_FORMATO)
+    # A Proposta como o MODELO a deu: o corte da frase sem lastro confere o resto a partir
+    # dela (a `conferir_proposta` troca a "pessoa"/etiqueta por "responder" e guarda a ação
+    # à parte — conferir de novo a já trocada perdia a etiqueta que o modelo escolheu).
+    p_do_modelo = p
     c = await conferir_proposta(session, conversa, gatilho, base, ctx, p, pac)
     p, conferida = c.proposta, c.conferida
     if c.sem_resposta:
@@ -1407,7 +1421,7 @@ async def _responder(
         gatilho,
         base,
         ctx,
-        p,
+        p_do_modelo,
         pac,
         conf,
         cliente=cliente,
