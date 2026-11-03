@@ -34,10 +34,11 @@
 //     diálogo da troca (AtendimentoTroca), com a prévia ao vivo no Bling. Só
 //     com `troca_envio.disponivel` (a chave da troca, o piloto, as travas do
 //     pedido — tudo nasce desligado); senão fica cinza com o porquê.
-// Quem só lê (fase de observação) não vê "enviar oferta" nem "Trocar": quem
-// manda é o pai (`podeTrocar`/`podeOfertar`, de `acessoDaTroca` — os dois
-// pedem margem.edit). Com uma troca aberta no pedido, o "Trocar" some — uma
-// troca por vez (o cartão mostra o Retomar).
+// Quem não responde no atendimento não vê "enviar oferta" nem "Trocar": quem
+// manda é o pai (`podeTrocar`/`podeOfertar`, de `acessoDaTroca` — desde
+// 03/11/2026 quem responde, as 3 equipes, sem a margem.edit). Com uma troca
+// aberta no pedido, o "Trocar" some — uma troca por vez (o cartão mostra o
+// Retomar).
 //
 // Este bloco (não o setup) é o módulo dos ajudantes puros, testados em
 // tests/atendimento-troca-sugestoes.cjs e tests/atendimento-troca.cjs — por

@@ -11,7 +11,8 @@
 // do cartão — para quem não vê a Margem, o motivo dela vem "em análise"), os
 // itens, o prazo de envio na plataforma, a conversa (botão "Abrir conversa")
 // e, na falta de estoque com a chave ligada, as sugestões de troca
-// (AtendimentoTrocaSugestoes). Para quem mexe (`useAcessoDaTroca`), o
+// (AtendimentoTrocaSugestoes). Para quem responde (`useAcessoDaTroca`, desde
+// 03/11/2026 as 3 equipes, nas lojas delas), o
 // "Trocar" e o "enviar oferta" das sugestões (fases 4c e 4d, 08/10/2026) e
 // o "Retomar" da troca aberta; o diálogo da troca (AtendimentoTroca) abre
 // por cima desta lista, que se relê quando ele fecha depois de uma escrita.

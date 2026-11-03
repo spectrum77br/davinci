@@ -46,8 +46,12 @@ da plataforma não é recusa: a linha existe e a tela mostra), com a marca
 `oferta_mensagem_id` (`oferta_enviada_id`, crítica M11); e, quando saiu ou
 pode ter saído, a nota interna "Oferta de troca enviada (a -> b) por <nome>".
 A oferta NÃO aprova a Margem nem fala com o Bling, mas PROMETE a troca ao
-comprador: a rota pede o mesmo da troca (decisão (g) do dono, 07/10/2026) —
-`_so_admin` + `atendimento.edit` + `margem.edit` (`troca.pode_escrever`).
+comprador: a rota pede o mesmo da troca (`troca.pode_escrever`). Desde
+03/11/2026 (o Eduardo: "quero que funcione para quem também usa o
+atendimento, não só admin, essa parte de troca, que é as 3 equipes que vão
+gerenciar") é QUEM RESPONDE no atendimento (`acesso.pode_responder`), só
+nos pedidos e conversas das lojas da pessoa — a decisão (g) de 07/10/2026
+(`_so_admin` + `atendimento.edit` + `margem.edit`) saiu.
 
 `situacao_da_oferta` é o `oferta_envio` do bloco Ag. cancelamento (painel e
 lista): as MESMAS travas que não dependem do produto escolhido, para o
@@ -116,9 +120,7 @@ TEXTOS = {
         "A oferta sai pelo chat do pedido, não pelo e-mail: abra a conversa do pedido na Caixa "
         "(ou mande pelo Duoke ou pela plataforma)."
     ),
-    SO_LEITURA: (
-        "Só leitura por enquanto: a oferta sai por quem cuida do Atendimento e mexe na Margem."
-    ),
+    SO_LEITURA: "Só leitura por enquanto: a oferta sai por quem responde no Atendimento.",
     "item_nao_em_falta": "O item escolhido não é o que está em falta neste pedido.",
     "item_saiu": "O item em falta já não está no pedido.",
     "nivel_sem_oferta": (
@@ -165,9 +167,9 @@ def _da_recusa_do_envio(e: EnvioRecusado) -> OfertaRecusada:
 def pode_escrever(user: User | None) -> bool:
     """Passaria nas travas da rota? O botão desliga sem.
 
-    As MESMAS da troca (`troca.pode_escrever`, decisão (g) do dono):
-    `_so_admin` + `atendimento.edit` + `margem.edit` — quem não pode trocar
-    não promete a troca ao comprador.
+    As MESMAS da troca (`troca.pode_escrever`): quem não pode trocar não
+    promete a troca ao comprador. Desde 03/11/2026, quem responde no
+    atendimento (as 3 equipes, nas lojas delas), sem a `margem.edit`.
     """
     return troca.pode_escrever(user)
 

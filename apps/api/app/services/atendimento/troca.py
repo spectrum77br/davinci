@@ -2264,9 +2264,7 @@ async def retomar(session: AsyncSession, user: User | None, troca_id: UUID) -> A
 # ── O botão "Trocar" (o painel e a lista) ─────────────────────────────────
 
 SO_LEITURA = "atendimento_so_leitura"
-TEXTO_SO_LEITURA = (
-    "Só leitura por enquanto: a troca é de quem cuida do Atendimento e mexe na Margem."
-)
+TEXTO_SO_LEITURA = "Só leitura por enquanto: a troca é de quem responde no Atendimento."
 # O `troca_envio` quando a conferência quebrou (o resto do bloco segue).
 TROCA_NAO_CONFERIDA = {
     "disponivel": False,
@@ -2278,10 +2276,20 @@ TROCA_NAO_CONFERIDA = {
 def pode_escrever(user: User | None) -> bool:
     """Passaria nas travas das rotas que ESCREVEM (prévia, troca, retomar e a oferta)?
 
-    Decisão (g) do dono (07/10/2026): `_so_admin` (na fase de observação,
-    só quem `acesso.pode_mexer`) + `atendimento.edit` + `margem.edit` — a
-    troca aprova a Margem, e a oferta promete a troca ao comprador. Admin
-    passa nas duas permissões (como no `require_permission`). O botão
+    03/11/2026, o Eduardo: "quero que funcione para quem também usa o
+    atendimento, não só admin, essa parte de troca, que é as 3 equipes que vão
+    gerenciar". Saiu a decisão (g) de 07/10/2026 (só quem mexe na caixa, com
+    `atendimento.edit` + `margem.edit`): a troca e a oferta são de QUEM
+    RESPONDE — na fase de observação, `acesso.pode_responder` (toda pessoa
+    ativa que vê a caixa, admin ou não; o operador de estoque, não), a mesma
+    trava do responder (`routers/atendimento.py`, `_responde` e
+    `ROTAS_DE_QUEM_RESPONDE`); fora dela, o `atendimento.edit` de sempre
+    (admin passa, como no `require_permission`). Sem `margem.edit` e sem
+    ganhar `margem.view`: a Margem fica aprovada no nome de quem clicou, mas
+    o custo e o % continuam só de quem vê a Margem (`painel.ve_margem`). O
+    escopo por pessoa (os pedidos e as conversas das lojas dela) a rota
+    confere. As outras travas da troca (as chaves, o piloto, os locks, a
+    caixinha do aceite, o Bling ao vivo, a `idem_key`) ficam iguais. O botão
     desliga sem; a rota recusa do mesmo jeito.
     """
     if user is None:
@@ -2290,14 +2298,11 @@ def pode_escrever(user: User | None) -> bool:
     from app.routers import atendimento as caixa
     from app.services.atendimento import acesso
 
-    if caixa.SO_ADMIN and not acesso.pode_mexer(user):
-        return False
+    if caixa.SO_ADMIN:
+        return acesso.pode_responder(user)
     if user.role == UserRole.ADMIN:
         return True
-    perms = user.permissions or {}
-    return bool((perms.get("atendimento") or {}).get("edit")) and bool(
-        (perms.get("margem") or {}).get("edit")
-    )
+    return bool(((user.permissions or {}).get("atendimento") or {}).get("edit"))
 
 
 async def primeira_trava_do_pedido(

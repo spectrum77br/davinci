@@ -15,8 +15,12 @@ só fala com o comprador. O que estes testes seguram (decisão (f) do dono):
   (`payload.oferta_troca`) e grava a nota "Oferta de troca enviada (a -> b)
   por <nome>"; a plataforma que falha não vira nota;
 - a troca que vem depois guarda `oferta_mensagem_id` (crítica M11);
-- a permissão: `_so_admin` + `atendimento.edit` + `margem.edit`, como a troca
-  (decisão (g) do dono: a oferta promete a troca ao comprador);
+- a permissão: a mesma da troca (a oferta promete a troca ao comprador) —
+  desde 03/11/2026 (o Eduardo: "quero que funcione para quem também usa o
+  atendimento, não só admin, essa parte de troca, que é as 3 equipes que vão
+  gerenciar") quem RESPONDE (`_responde`), sem a `margem.edit` da decisão (g),
+  só no pedido e na conversa das lojas da pessoa (404 no de outra equipe,
+  também pelo id); o operador de estoque, não;
 - as travas do PEDIDO que a troca recusaria com certeza (a plataforma, a NF
   na fila…) e o kit de lotes misturados: nada sai;
 - a conversa que mudou: fala do CLIENTE ou da loja depois do que a tela tinha
@@ -66,6 +70,7 @@ from app.services.atendimento import (
 )
 from app.services.atendimento import shopee as adaptador_shopee
 from app.services.atendimento.constantes import ResultadoEnvio
+from tests.lojas_da_pessoa import dar_lojas
 from tests.test_atendimento_troca import BlingFalso, ShopeeFalsa, _ligar
 
 NUMERO = "300101"
@@ -354,32 +359,40 @@ def _texto_4b() -> str:
 # ─────────────── a rota e a permissão ───────────────
 
 
-def test_rota_tem_a_trava_da_caixa_e_a_margem():
+def test_rota_tem_a_trava_da_caixa_e_a_de_quem_responde():
     [r] = [r for r in app.routes if isinstance(r, APIRoute) and r.path == ROTA]
     assert r.methods == {"POST"}
     assert r.endpoint.__module__ == atendimento_troca.__name__
     deps = [d.call for d in r.dependant.dependencies]
     assert rota._so_admin in deps
-    assert rota._edit in deps
-    # Decisão (g): a oferta promete a troca — pede o mesmo que a troca.
-    assert atendimento_troca._margem_edit in deps
+    # 03/11/2026: a oferta promete a troca — pede o mesmo que a troca: quem
+    # responde (as 3 equipes), sem a margem.edit da decisão (g).
+    assert rota._responde in deps
+    assert rota._edit not in deps
+    assert ("POST", ROTA) in rota.ROTAS_DE_QUEM_RESPONDE
+    assert not hasattr(atendimento_troca, "_margem_edit")
 
 
-async def test_quem_so_le_nao_envia(db, client, make_user, auth_as, monkeypatch, envio, chat):
+async def test_operador_de_estoque_nao_envia(
+    db, client, make_user, auth_as, monkeypatch, envio, chat
+):
     c = await _cenario(db, make_user, monkeypatch)
-    leitor = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
-    auth_as(leitor)
+    operador = await make_user(permissions={"controle_estoque": {"view": True, "edit": True}})
+    operador.stock_tags = ["ci"]
+    await db.commit()
+    auth_as(operador)
     r = await client.post(URL, json={"sku_novo": c.novo})
     assert r.status_code == 403
-    assert r.json()["detail"]["code"] == "atendimento_so_leitura"
+    assert r.json()["detail"] == {"code": "atendimento_restrito"}
+    assert troca_oferta.pode_escrever(operador) is False
     await _nada_saiu(db, c, chat)
 
 
-async def test_pede_atendimento_edit_e_a_margem(
+async def test_fora_da_observacao_pede_atendimento_edit_sem_a_margem(
     db, client, make_user, auth_as, monkeypatch, envio, chat
 ):
-    """Fora da observação: sem atendimento.edit = 403; sem margem.edit = 403 (quem não
-    pode trocar não promete a troca); com os dois, envia."""
+    """Fora da observação: sem atendimento.edit = 403 (mesmo com a Margem); com ele, envia
+    — a margem.edit não conta mais (03/11/2026)."""
     monkeypatch.setattr(rota, "SO_ADMIN", False)
     c = await _cenario(db, make_user, monkeypatch)
     sem = await make_user(permissions={"atendimento": {"view": True}, "margem": {"edit": True}})
@@ -387,24 +400,117 @@ async def test_pede_atendimento_edit_e_a_margem(
     r = await client.post(URL, json={"sku_novo": c.novo})
     assert r.status_code == 403
     assert r.json()["detail"] == {"code": "forbidden", "resource": "atendimento", "action": "edit"}
-    so_atendimento = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
-    auth_as(so_atendimento)
-    r = await client.post(URL, json={"sku_novo": c.novo})
-    assert r.status_code == 403
-    assert r.json()["detail"] == {"code": "forbidden", "resource": "margem", "action": "edit"}
-    # O botão diz o mesmo (cinza, "só leitura"), sem a Margem.
-    out = await painel.painel_da_conversa(db, c.conversa, user=so_atendimento)
+    # O botão diz o mesmo (cinza, "só leitura").
+    out = await painel.painel_da_conversa(db, c.conversa, user=sem)
     assert out["ag_cancelamento"]["oferta_envio"]["motivo"] == "atendimento_so_leitura"
     await _nada_saiu(db, c, chat)
 
-    com = await make_user(
-        permissions={"atendimento": {"view": True, "edit": True}, "margem": {"edit": True}}
-    )
-    auth_as(com)
+    so_atendimento = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
+    out = await painel.painel_da_conversa(db, c.conversa, user=so_atendimento)
+    assert out["ag_cancelamento"]["oferta_envio"]["disponivel"] is True
+    auth_as(so_atendimento)
     r = await client.post(URL, json={"sku_novo": c.novo})
     assert r.status_code == 200, r.text
     assert r.json()["enviada"] is True
     assert chat.textos == [_texto_4b()]
+
+
+async def _de_outra_equipe(db, dono, numeroloja):
+    """A loja de OUTRA equipe (Bling 7002, "vrc") e uma conversa dela com `numeroloja`."""
+    integ = Integration(
+        user_id=dono.id,
+        platform=IntegrationPlatform.SHOPEE,
+        name="vrc",
+        credentials=encrypt_json({"access_token": "t"}),
+    )
+    db.add(integ)
+    await db.flush()
+    canal = AtendimentoCanal(
+        integration_id=integ.id, plataforma="shopee", canal="chat", modo="humano", status="ok"
+    )
+    db.add(canal)
+    db.add(
+        StoreInfo(
+            user_id=dono.id,
+            platform="shopee",
+            account_name="vrc",
+            bling_store_id="7002",
+            integration_id=integ.id,
+        )
+    )
+    await db.commit()
+    conversa, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal,
+        integration=integ,
+        plataforma="shopee",
+        canal_nome="chat",
+        externo_id="conv-outra-equipe",
+        pedido_marketplace=numeroloja,
+        comprador_nome="Outro Comprador",
+    )
+    await db.commit()
+    return integ, canal, conversa
+
+
+@pytest.mark.lojas_por_pessoa
+async def test_equipe_envia_a_oferta_so_nas_lojas_dela(
+    db, client, make_user, auth_as, monkeypatch, envio, chat
+):
+    """A equipe que responde (role user, sem permissão nenhuma, sem a Margem): a oferta
+    sai pela conversa da loja dela, com a nota no nome dela; outra equipe, 404 — o
+    pedido e a conversa pelo id — e nada sai."""
+    c = await _cenario(db, make_user, monkeypatch)
+    londres = await make_user(email=f"londres-{uuid4().hex[:6]}@davinci-test.com")
+    londres.name = "Londres Atendimento"
+    await db.commit()
+    await dar_lojas(db, londres, c.integ)
+    israel = await make_user(email=f"israel-{uuid4().hex[:6]}@davinci-test.com")
+    integ_outra, canal_outra, conversa_outra = await _de_outra_equipe(db, c.dono, "SHPOUTRA")
+    await dar_lojas(db, israel, integ_outra)
+
+    # O pedido de outra equipe: 404, nada sai.
+    auth_as(israel)
+    r = await client.post(URL, json={"sku_novo": c.novo})
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "pedido_nao_encontrado"
+    await _nada_saiu(db, c, chat)
+
+    auth_as(londres)
+    # A conversa de outra equipe pelo id (de outro pedido, ou com o MESMO nº do
+    # pedido na plataforma): 404, nada sai.
+    mesma, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal_outra,
+        integration=integ_outra,
+        plataforma="shopee",
+        canal_nome="chat",
+        externo_id="conv-outra-mesmo-pedido",
+        pedido_marketplace=NUMEROLOJA,
+        comprador_nome="Outro Comprador",
+    )
+    await db.commit()
+    for outra in (conversa_outra, mesma):
+        r = await client.post(URL, json={"sku_novo": c.novo, "conversa_id": str(outra.id)})
+        assert r.status_code == 404, r.text
+        assert r.json()["detail"]["code"] == "conversa_nao_encontrada"
+    await _nada_saiu(db, c, chat)
+
+    # O botão no painel: liberado para ela (sem a Margem).
+    out = await painel.painel_da_conversa(db, c.conversa, user=londres)
+    assert out["ag_cancelamento"]["oferta_envio"]["disponivel"] is True
+    assert painel.ve_margem(londres) is False
+    r = await client.post(URL, json={"sku_novo": c.novo, "conversa_id": str(c.conversa.id)})
+    assert r.status_code == 200, r.text
+    assert r.json()["enviada"] is True
+    assert chat.textos == [_texto_4b()]
+    [m] = await _mensagens(db, c.conversa.id, autor="loja")
+    assert (m.origem, m.autor_user_id) == ("davinci_humano", londres.id)
+    [nota] = await _mensagens(db, c.conversa.id, tipo="nota")
+    assert nota.texto == "Oferta de troca enviada (dg053.sp -> dg054.sp) por Londres Atendimento."
+    assert nota.autor_user_id == londres.id
+    # As conversas da outra equipe ficaram sem nada.
+    for outra in (conversa_outra, mesma):
+        assert await _mensagens(db, outra.id, autor="loja") == []
 
 
 # ─────────────── as travas do envio (nada sai) ───────────────
@@ -701,9 +807,15 @@ async def test_painel_diz_se_a_oferta_pode_sair(db, make_user, monkeypatch, _cha
         "texto_motivo": None,
         "ultima_mensagem_id": None,  # a conversa ainda sem fala
     }
-    # Quem só lê: o botão desligado com o porquê (a rota daria 403).
-    leitor = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
-    out = await painel.painel_da_conversa(db, c.conversa, user=leitor)
+    # Quem responde, sem permissão nenhuma (03/11/2026, as 3 equipes): liberado.
+    equipe = await make_user()
+    out = await painel.painel_da_conversa(db, c.conversa, user=equipe)
+    assert out["ag_cancelamento"]["oferta_envio"]["disponivel"] is True
+    # Quem não responde (o operador de estoque): o botão desligado com o porquê.
+    operador = await make_user(permissions={"controle_estoque": {"view": True}})
+    operador.stock_tags = ["ci"]
+    await db.commit()
+    out = await painel.painel_da_conversa(db, c.conversa, user=operador)
     assert out["ag_cancelamento"]["oferta_envio"]["motivo"] == "atendimento_so_leitura"
     # A chave da troca desligada.
     monkeypatch.setattr(_chaves, "atendimento_troca_ativa", False)

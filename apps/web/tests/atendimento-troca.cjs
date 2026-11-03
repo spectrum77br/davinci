@@ -6,7 +6,7 @@
 //    TrocaIn, TrocaOut, as travas, os passos) e o TrocaAbertaOut do painel; a
 //    oferta (OfertaEnvio, o corpo e a resposta) é a do router; as URLs são as
 //    rotas do router (com o método e a permissão: escrever — a troca E a
-//    oferta, decisão (g) do dono — pede atendimento.edit e margem.edit); todo
+//    oferta — é de quem responde, desde 03/11/2026 as 3 equipes); todo
 //    estado (`troca.ESTADOS`) e todo passo que o serviço grava têm texto;
 //  - os ajudantes puros: a chave por abertura, quem pode (`acessoDaTroca`),
 //    por que o botão não anda (`motivoSemClique`: a caixinha OBRIGATÓRIA nos
@@ -155,13 +155,17 @@ const igual = (a, b, msg) => assert.deepEqual(a.slice().sort(), b.slice().sort()
   assert.equal(TR.urlRetomar('t-1'), `${prefixo}/trocas/t-1/retomar`)
   assert.equal(TR.URL_TROCAS, `${prefixo}/trocas`)
   assert.equal(TR.urlTroca('a/b'), `${prefixo}/pedidos/a%2Fb/troca`, 'o número vai codificado')
-  // Escrever na troca: a trava da caixa + atendimento.edit + margem.edit (a troca
-  // aprova a Margem); ler a lista: quem vê a caixa.
+  // Escrever na troca (03/11/2026, as 3 equipes): a trava da caixa + quem
+  // RESPONDE (`_responde`, as rotas em ROTAS_DE_QUEM_RESPONDE), sem a
+  // margem.edit da decisão (g); ler a lista: quem vê a caixa.
   assert.match(roteador, /dependencies=\[Depends\(_so_admin\)\]/, 'a trava da caixa em todo o router')
-  assert.match(roteador, /^_margem_edit = require_permission\("margem", "edit"\)$/m)
-  for (const r of [previa, clique, retomar]) {
-    assert.match(r.decorador, /dependencies=\[Depends\(_margem_edit\)\]/, 'margem.edit')
-    assert.match(r.params, /Depends\(_edit\)/, 'atendimento.edit')
+  assert.doesNotMatch(roteador, /_margem_edit|require_permission\("margem"/, 'sem a margem.edit')
+  const caixa = api('routers/atendimento.py')
+  const deQuemResponde = (caixa.match(/^ROTAS_DE_QUEM_RESPONDE = frozenset\(\s*\{([\s\S]*?)\n {4}\}\n\)/m) || [])[1] || ''
+  for (const [r, caminho] of [[previa, '/pedidos/{numero_bling}/troca/previa'], [clique, '/pedidos/{numero_bling}/troca'], [retomar, '/trocas/{troca_id}/retomar']]) {
+    assert.doesNotMatch(r.decorador, /dependencies=/, 'só a trava do router e a de quem responde')
+    assert.match(r.params, /Depends\(_responde\)/, 'quem responde')
+    assert.ok(deQuemResponde.includes(`("POST", "${prefixo}${caminho}")`), `${caminho} em ROTAS_DE_QUEM_RESPONDE`)
   }
   assert.match(lista.params, /Depends\(_view\)/)
   assert.match(clique.params, /body: TrocaIn/)
@@ -169,11 +173,12 @@ const igual = (a, b, msg) => assert.deepEqual(a.slice().sort(), b.slice().sort()
 
   // A oferta (fase 4d): o contrato — POST /pedidos/{n}/troca/oferta, corpo e
   // resposta, e o `oferta_envio` do bloco Ag. cancelamento — nos dois
-  // sentidos. Escrever a oferta é PROMETER a troca ao comprador: a trava da
-  // caixa + atendimento.edit + margem.edit, como a troca (decisão (g)).
+  // sentidos. Escrever a oferta é PROMETER a troca ao comprador: a mesma trava
+  // da troca (desde 03/11/2026, quem responde, sem a margem.edit).
   const oferta = rota('post', '/pedidos/{numero_bling}/troca/oferta')
-  assert.match(oferta.decorador, /dependencies=\[Depends\(_margem_edit\)\]/, 'a oferta pede margem.edit')
-  assert.match(oferta.params, /Depends\(_edit\)/)
+  assert.doesNotMatch(oferta.decorador, /dependencies=/, 'a oferta não pede a margem.edit')
+  assert.match(oferta.params, /Depends\(_responde\)/)
+  assert.ok(deQuemResponde.includes(`("POST", "${prefixo}/pedidos/{numero_bling}/troca/oferta")`), 'a oferta em ROTAS_DE_QUEM_RESPONDE')
   const saida = (oferta.decorador.match(/response_model=(\w+)/) || [])[1]
   const entrada = (oferta.params.match(/body: (\w+)/) || [])[1]
   assert.ok(saida && entrada, 'o corpo e a resposta da oferta')
@@ -209,18 +214,24 @@ const igual = (a, b, msg) => assert.deepEqual(a.slice().sort(), b.slice().sort()
     Object.defineProperty(globalThis, 'crypto', { value: original, configurable: true })
   }
 
-  // Quem pode: trocar E ofertar = mexe + atendimento.edit + margem.edit (decisão (g)).
-  const acesso = (mexe, editaAtendimento, editaMargem) => TR.acessoDaTroca({ mexe, editaAtendimento, editaMargem })
+  // Quem pode: trocar E ofertar = quem RESPONDE (03/11/2026, as 3 equipes) — o
+  // `canResponder` da página: `atendimento_responde`, ou quem mexe com
+  // atendimento.edit. A margem.edit não conta mais (a decisão (g) saiu).
+  const acesso = (responde, mexe, editaAtendimento) => TR.acessoDaTroca({ responde, mexe, editaAtendimento })
+  assert.deepEqual(acesso(true, false, false), { trocar: true, ofertar: true }, 'a equipe que responde, sem permissão nenhuma')
   assert.deepEqual(acesso(true, true, true), { trocar: true, ofertar: true })
-  assert.deepEqual(acesso(true, true, false), { trocar: false, ofertar: false }, 'sem margem.edit não promete a troca')
-  assert.deepEqual(acesso(true, false, true), { trocar: false, ofertar: false })
-  assert.deepEqual(acesso(false, true, true), { trocar: false, ofertar: false }, 'quem só lê (fase de observação)')
+  assert.deepEqual(acesso(false, true, true), { trocar: true, ofertar: true }, 'quem mexe com atendimento.edit')
+  assert.deepEqual(acesso(false, true, false), { trocar: false, ofertar: false })
+  assert.deepEqual(acesso(false, false, true), { trocar: false, ofertar: false }, 'quem não responde (o operador de estoque nem vê)')
   // O composable usa o mesmo critério da página (o /me e as permissões).
   const fonteAcesso = dialogo.descriptor.script.content.slice(dialogo.descriptor.script.content.indexOf('export function useAcessoDaTroca'))
+  assert.match(fonteAcesso, /auth\.user\?\.atendimento_responde === true/)
   assert.match(fonteAcesso, /auth\.user\?\.atendimento_mexe === true/)
   assert.match(fonteAcesso, /useCan\('atendimento', 'edit'\)/)
-  assert.match(fonteAcesso, /useCan\('margem', 'edit'\)/)
-  assert.match(fs.readFileSync(path.resolve(__dirname, '../pages/atendimento.vue'), 'utf8'), /const mexe = computed\(\(\) => auth\.user\?\.atendimento_mexe === true\)/)
+  assert.doesNotMatch(fonteAcesso, /useCan\('margem'/, 'sem a Margem')
+  const pagina = fs.readFileSync(path.resolve(__dirname, '../pages/atendimento.vue'), 'utf8')
+  assert.match(pagina, /const mexe = computed\(\(\) => auth\.user\?\.atendimento_mexe === true\)/)
+  assert.match(pagina, /const canResponder = computed\(\(\) => canEdit\.value \|\| auth\.user\?\.atendimento_responde === true\)/)
 
   assert.equal(TR.rotuloBotao(0), 'Trocar lote e voltar para Em aberto')
   assert.equal(TR.rotuloBotao(1), 'Trocar e voltar para Em aberto')

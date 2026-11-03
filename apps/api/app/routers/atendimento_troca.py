@@ -45,17 +45,26 @@ A OFERTA PELO CHAT (fase 4d, 07/10/2026 — `services/atendimento/troca_oferta.p
       que a tela devolve como `ultima_vista_id`) — e `motivo.troca_envio`, o
       mesmo para o "Trocar" (a chave, o piloto, as travas do pedido).
 
-ACESSO (Eduardo, 07/10/2026 — a caixa aberta para a equipe em só leitura):
-a MESMA TRAVA do router da caixa (`_so_admin`: GET passa para quem
-`acesso.pode_ver`; escrever, só quem `acesso.pode_mexer`). Ler (a lista, as
-trocas) = `_view`; escrever (prévia, troca, retomar) = `_so_admin` +
-`atendimento.edit` + `margem.edit` (a troca APROVA a Margem); a oferta, o
-MESMO (decisão (g): ela promete a troca ao comprador). O escopo por
-equipe: pedido só das lojas da equipe (`bling_store_ids`), conversa só das
-integrações dela. Quem não vê a Margem (`painel.ve_margem`) não recebe custo
-nem % e vê o motivo da Margem como "em análise" (`painel.mascarar_motivo`).
-Router à parte (o teste das rotas do painel lista as dele); o `main.py` o
-inclui.
+ACESSO: a MESMA TRAVA do router da caixa (`_so_admin`: GET passa para quem
+`acesso.pode_ver`). Ler (a lista, as trocas) = `_view`. Escrever (a prévia,
+o "Trocar", o "Retomar" e o "Enviar oferta") = QUEM RESPONDE no atendimento
+(`_responde`; as quatro rotas estão em `ROTAS_DE_QUEM_RESPONDE`) — 03/11/2026,
+o Eduardo: "quero que funcione para quem também usa o atendimento, não só
+admin, essa parte de troca, que é as 3 equipes que vão gerenciar". Saiu a
+decisão (g) de 07/10/2026 (só quem mexe na caixa, com `atendimento.edit` +
+`margem.edit`): a troca segue APROVANDO a Margem no nome de quem clicou, mas
+ninguém ganha a Margem por isso — quem não a vê (`painel.ve_margem`) não
+recebe custo nem % e vê o motivo da Margem como "em análise"
+(`painel.mascarar_motivo`); a aba Margem continua fechada. O operador de
+estoque fica de fora (`acesso.pode_ver`). O botão diz o mesmo
+(`troca.pode_escrever`, no `troca_envio`/`oferta_envio`).
+
+O ESCOPO POR PESSOA vale em toda escrita, também no acesso por id
+(`_no_escopo_do_pedido`): o pedido só das lojas dela (`bling_store_ids`), a
+conversa escolhida (`conversa_id`) só das lojas dela (`_conversa_no_escopo`) e
+a troca do "Retomar" só de um pedido dela — fora, 404 como o que não existe. A
+oferta sai só por conversa das integrações dela. Router à parte (o teste das
+rotas do painel lista as dele); o `main.py` o inclui.
 """
 
 from __future__ import annotations
@@ -72,10 +81,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
-from app.deps.auth import require_permission
 from app.deps.team_scope import TeamScope
 from app.models import AtendimentoConversa, AtendimentoTroca, BlingOrder, StoreInfo, User
-from app.routers.atendimento import _edit, _no_escopo, _so_admin, _view
+from app.routers.atendimento import (
+    _conversa_no_escopo,
+    _no_escopo,
+    _responde,
+    _so_admin,
+    _view,
+)
 from app.schemas.atendimento_troca import (
     ListaAgCancelamentoOut,
     ListaTrocasOut,
@@ -106,9 +120,11 @@ router = APIRouter(
 DIAS_PADRAO = 60
 DIAS_MAX = 120
 
-# Escrever na troca: a troca aprova a Margem (o recurso é `margem`, no
-# singular — o mesmo da aba Margem, `routers/margens.py`).
-_margem_edit = require_permission("margem", "edit")
+# A conversa escolhida fora das lojas da pessoa (ou que não existe): 404.
+CONVERSA_NAO_ENCONTRADA = {
+    "code": "conversa_nao_encontrada",
+    "detail": "Conversa não encontrada (ou de uma loja fora das suas).",
+}
 
 
 async def _itens_e_prazos(session: AsyncSession, numeros: list[str]) -> dict[str, dict[str, Any]]:
@@ -310,29 +326,44 @@ def _recusa(e: troca.TrocaRecusada) -> HTTPException:
     return HTTPException(e.status, detail=detalhe)
 
 
-async def _no_escopo_do_pedido(session: AsyncSession, user: User, numero: str) -> None:
-    """O pedido é de uma loja da equipe? Fora do escopo = 404 (como pedido que não existe)."""
+async def _no_escopo_do_pedido(
+    session: AsyncSession,
+    user: User,
+    numero: str,
+    *,
+    conversa_id: UUID | None = None,
+    codigo: str = "pedido_nao_encontrado",
+) -> TeamScope:
+    """O pedido (e a conversa escolhida) é das lojas da pessoa? Fora = 404, como o que não existe.
+
+    Admin vê tudo. As equipes (03/11/2026) só trocam e oferecem nos pedidos das
+    lojas delas (`bling_store_ids`) e só pela conversa das lojas delas
+    (`_conversa_no_escopo`: a integração, o canal do robô, a ficha do e-mail).
+    `codigo` = o 404 do pedido (o "Retomar" diz `troca_nao_encontrada`).
+    Devolve o escopo (a oferta filtra as conversas por ele).
+    """
     scope = await escopo_do_atendimento(session, user)
     if scope.unrestricted:
-        return
+        return scope
     loja = await session.scalar(select(BlingOrder.loja).where(BlingOrder.numero == numero).limit(1))
     if not loja or str(loja) not in scope.bling_store_ids:
-        raise HTTPException(404, detail={"code": "pedido_nao_encontrado"})
+        raise HTTPException(404, detail={"code": codigo})
+    if conversa_id is not None:
+        conversa = await session.get(AtendimentoConversa, conversa_id)
+        if conversa is None or not _conversa_no_escopo(scope, conversa):
+            raise HTTPException(404, detail=CONVERSA_NAO_ENCONTRADA)
+    return scope
 
 
-@router.post(
-    "/pedidos/{numero_bling}/troca/previa",
-    response_model=PreviaTrocaOut,
-    dependencies=[Depends(_margem_edit)],
-)
+@router.post("/pedidos/{numero_bling}/troca/previa", response_model=PreviaTrocaOut)
 async def previa_da_troca(
     body: PreviaTrocaIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
     numero_bling: Annotated[str, Path(min_length=1, max_length=32)],
 ) -> PreviaTrocaOut:
     """A prévia da troca: só GETs no Bling e na Shopee; nada da troca é gravado."""
-    await _no_escopo_do_pedido(session, user, numero_bling.strip())
+    await _no_escopo_do_pedido(session, user, numero_bling.strip(), conversa_id=body.conversa_id)
     try:
         dados = await troca.previa(
             session,
@@ -347,19 +378,19 @@ async def previa_da_troca(
     return PreviaTrocaOut(**dados)
 
 
-@router.post(
-    "/pedidos/{numero_bling}/troca",
-    response_model=TrocaOut,
-    dependencies=[Depends(_margem_edit)],
-)
+@router.post("/pedidos/{numero_bling}/troca", response_model=TrocaOut)
 async def trocar(
     body: TrocaIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
     numero_bling: Annotated[str, Path(min_length=1, max_length=32)],
 ) -> TrocaOut:
-    """O clique "Trocar": 200 com a troca (o `estado` diz onde parou); 409 na trava."""
-    await _no_escopo_do_pedido(session, user, numero_bling.strip())
+    """O clique "Trocar": 200 com a troca (o `estado` diz onde parou); 409 na trava.
+
+    A Margem fica aprovada no nome de quem clicou (`troca.executar`, a trilha
+    `margem_audit`), seja admin ou equipe (03/11/2026).
+    """
+    await _no_escopo_do_pedido(session, user, numero_bling.strip(), conversa_id=body.conversa_id)
     # Antes do serviço: um erro no meio faz rollback e expira o usuário.
     ve = painel.ve_margem(user)
     aceite = None
@@ -388,15 +419,11 @@ async def trocar(
     return TrocaOut(**troca.troca_out(feita, ve_custo=ve))
 
 
-@router.post(
-    "/trocas/{troca_id}/retomar",
-    response_model=TrocaOut,
-    dependencies=[Depends(_margem_edit)],
-)
+@router.post("/trocas/{troca_id}/retomar", response_model=TrocaOut)
 async def retomar_troca(
     troca_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
 ) -> TrocaOut:
     """Segue a troca de onde parou: GET primeiro, só para frente, nunca PUT."""
     try:
@@ -408,7 +435,8 @@ async def retomar_troca(
     )
     if numero is None:
         raise HTTPException(404, detail={"code": "troca_nao_encontrada"})
-    await _no_escopo_do_pedido(session, user, numero)
+    # A troca de um pedido de fora das lojas da pessoa: como a que não existe.
+    await _no_escopo_do_pedido(session, user, numero, codigo="troca_nao_encontrada")
     ve = painel.ve_margem(user)
     try:
         feita = await troca.retomar(session, user, troca_id)
@@ -485,27 +513,27 @@ async def _oferta_envio(
         return dict(troca_oferta.OFERTA_NAO_CONFERIDA)
 
 
-@router.post(
-    "/pedidos/{numero_bling}/troca/oferta",
-    response_model=OfertaTrocaOut,
-    dependencies=[Depends(_margem_edit)],
-)
+@router.post("/pedidos/{numero_bling}/troca/oferta", response_model=OfertaTrocaOut)
 async def enviar_oferta_de_troca(
     body: OfertaTrocaIn,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_edit)],
+    user: Annotated[User, Depends(_responde)],
     numero_bling: Annotated[str, Path(min_length=1, max_length=32)],
 ) -> OfertaTrocaOut:
     """O botão "Enviar oferta": o texto da oferta ao comprador pela conversa do pedido.
 
-    `_so_admin` + `atendimento.edit` + `margem.edit`, como a troca (decisão
-    (g) do dono): a oferta não fala com o Bling, mas promete a troca — quem
-    não pode trocar não oferece. Erro da PLATAFORMA não é erro HTTP: 200 com
-    a mensagem em `falhou`/`revisar`, como no responder.
+    A mesma trava da troca: a oferta não fala com o Bling, mas promete a troca
+    — quem não pode trocar não oferece. Desde 03/11/2026 (o Eduardo: "quero
+    que funcione para quem também usa o atendimento, não só admin, essa parte
+    de troca, que é as 3 equipes que vão gerenciar") é quem responde
+    (`_responde`), só no pedido e na conversa das lojas da pessoa; saiu a
+    decisão (g) de 07/10/2026 (`atendimento.edit` + `margem.edit`). O envio
+    segue pelo caminho único (`enviar.enviar_resposta`) com todas as travas
+    dele. Erro da PLATAFORMA não é erro HTTP: 200 com a mensagem em
+    `falhou`/`revisar`, como no responder.
     """
     numero = numero_bling.strip()
-    await _no_escopo_do_pedido(session, user, numero)
-    scope = await escopo_do_atendimento(session, user)
+    scope = await _no_escopo_do_pedido(session, user, numero, conversa_id=body.conversa_id)
     try:
         dados = await troca_oferta.enviar_oferta(
             session,

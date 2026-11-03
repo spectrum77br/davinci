@@ -208,8 +208,8 @@ export function leituraAgCancelamento(ag: AgCancelamento): LeituraAgCancelamento
 // O cartão do porquê no painel do pedido (aba Pedido, logo abaixo do estoque).
 // Na falta de estoque com a chave da troca ligada (fase 4b, 05/10/2026), as
 // sugestões de troca vêm DENTRO do cartão (AtendimentoTrocaSugestoes), com o
-// "Trocar" e o "enviar oferta" (fases 4c e 4d, 08/10/2026) para quem mexe
-// (`useAcessoDaTroca`); a troca aberta do pedido aparece aqui, com o estado
+// "Trocar" e o "enviar oferta" (fases 4c e 4d, 08/10/2026) para quem responde
+// (`useAcessoDaTroca`, 03/11/2026); a troca aberta do pedido aparece aqui, com o estado
 // e o "Retomar". O diálogo da troca NÃO mora aqui: a troca tira o pedido de
 // 83955, o painel relido some com este cartão e o resultado sumiria junto
 // — quem o abre é o painel (AtendimentoPedido), pelos eventos.

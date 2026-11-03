@@ -64,6 +64,7 @@ from app.security.cipher import decrypt_json, encrypt_json
 from app.services import margem_auto_hold, nf_auto_enfileirar
 from app.services.atendimento import gravar, painel, troca, troca_sugestoes
 from app.services.marketplaces.bling import BlingCloudflareError
+from tests.lojas_da_pessoa import dar_lojas
 
 NUMERO = "300101"
 BLING_ID = 77001
@@ -2039,10 +2040,16 @@ async def test_o_trocar_diz_se_pode(db, client, auth_as, make_user, monkeypatch,
     assert envio["motivo"] == "plataforma_sem_conferencia" and "Shopee" in envio["texto_motivo"]
     monkeypatch.setattr(_chaves, "atendimento_troca_ativa", False)
     assert (await _envio())["motivo"] == "troca_desligada"
-    # Quem só lê (fase de observação): cinza também (o botão nem aparece na tela).
+    # Quem responde, sem permissão nenhuma (03/11/2026, as 3 equipes): passa da
+    # trava de quem pode e para na do pedido, como o admin.
     monkeypatch.setattr(_chaves, "atendimento_troca_ativa", True)
-    leitor = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
-    assert (await _envio(leitor))["motivo"] == "atendimento_so_leitura"
+    equipe = await make_user()
+    assert (await _envio(equipe))["motivo"] == "plataforma_sem_conferencia"
+    # Quem não responde (o operador de estoque): cinza (o botão nem aparece na tela).
+    operador = await make_user(permissions={"controle_estoque": {"view": True}})
+    operador.stock_tags = ["ci"]
+    await db.commit()
+    assert (await _envio(operador))["motivo"] == "atendimento_so_leitura"
     # Só banco: nenhum GET no Bling nem na Shopee.
     assert c.bling.chamadas == [] and c.shopee.chamadas == []
 
@@ -2050,13 +2057,17 @@ async def test_o_trocar_diz_se_pode(db, client, auth_as, make_user, monkeypatch,
 # ─────────────── as rotas ───────────────
 
 
-async def test_rotas_recusam_quem_so_le(db, client, make_user, auth_as, monkeypatch):
+async def test_rotas_recusam_o_operador_de_estoque(db, client, make_user, auth_as, monkeypatch):
+    """Quem não vê a caixa (o operador de estoque) não troca nem retoma (03/11/2026: o
+    resto da equipe ativa responde — e troca)."""
     c = await _cenario(db, make_user, monkeypatch)
-    leitor = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
-    auth_as(leitor)
+    operador = await make_user(permissions={"controle_estoque": {"view": True, "edit": True}})
+    operador.stock_tags = ["ci"]
+    await db.commit()
+    auth_as(operador)
     corpo = {"sku_antigo": c.antigo, "sku_novo": c.novo}
     r = await client.post(f"{URL}/pedidos/{NUMERO}/troca/previa", json=corpo)
-    assert r.status_code == 403 and r.json()["detail"]["code"] == "atendimento_so_leitura"
+    assert r.status_code == 403 and r.json()["detail"] == {"code": "atendimento_restrito"}
     r = await client.post(
         f"{URL}/pedidos/{NUMERO}/troca",
         json={**corpo, "previa_hash": "x" * 32, "idem_key": str(uuid4()), "confirmar": True},
@@ -2064,34 +2075,120 @@ async def test_rotas_recusam_quem_so_le(db, client, make_user, auth_as, monkeypa
     assert r.status_code == 403
     r = await client.post(f"{URL}/trocas/{uuid4()}/retomar")
     assert r.status_code == 403
-    # Ler, lê.
-    r = await client.get(f"{URL}/trocas")
-    assert r.status_code == 200 and r.json() == {"itens": []}
     assert c.bling.chamadas == []
 
 
-async def test_rotas_pedem_a_margem(db, client, make_user, auth_as, monkeypatch):
-    """Fora da observação: atendimento.edit sem margem.edit = 403 (a troca aprova a Margem)."""
+async def test_fora_da_observacao_rotas_pedem_atendimento_edit_sem_a_margem(
+    db, client, make_user, auth_as, monkeypatch
+):
+    """Fora da observação: o atendimento.edit de sempre; a margem.edit não conta (03/11/2026)."""
     monkeypatch.setattr(rota, "SO_ADMIN", False)
     c = await _cenario(db, make_user, monkeypatch)
-    sem = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
-    auth_as(sem)
+    so_margem = await make_user(permissions={"margem": {"view": True, "edit": True}})
+    auth_as(so_margem)
     r = await client.post(
         f"{URL}/pedidos/{NUMERO}/troca/previa", json={"sku_antigo": c.antigo, "sku_novo": c.novo}
     )
     assert r.status_code == 403
-    assert r.json()["detail"] == {"code": "forbidden", "resource": "margem", "action": "edit"}
-    com = await make_user(
-        permissions={
-            "atendimento": {"view": True, "edit": True},
-            "margem": {"view": True, "edit": True},
-        }
-    )
+    assert r.json()["detail"] == {"code": "forbidden", "resource": "atendimento", "action": "edit"}
+    com = await make_user(permissions={"atendimento": {"view": True, "edit": True}})
     auth_as(com)
     r = await client.post(
         f"{URL}/pedidos/{NUMERO}/troca/previa", json={"sku_antigo": c.antigo, "sku_novo": c.novo}
     )
     assert r.status_code == 200, r.text
+    assert r.json()["pode"] is True
+    assert r.json()["antes"]["custo"] is None, "sem margem.view, sem custo"
+
+
+@pytest.mark.lojas_por_pessoa
+async def test_equipe_troca_e_aprova_a_margem_no_nome_dela(
+    db, client, make_user, auth_as, monkeypatch, _observacoes
+):
+    """03/11/2026, o Eduardo: "quero que funcione para quem também usa o atendimento, não
+    só admin, essa parte de troca, que é as 3 equipes que vão gerenciar". A equipe (role
+    user, sem permissão nenhuma) com a loja do pedido: a prévia, o "Trocar" (a caixinha
+    do aceite continua obrigatória) e a Margem Aprovada no nome DELA — sem ver custo nem
+    %, e a aba Margem continua fechada. Outra equipe: 404 no pedido e na troca."""
+    c = await _cenario(db, make_user, monkeypatch)
+    await _snapshot(db)
+    londres = await make_user(email=f"londres-{uuid4().hex[:6]}@davinci-test.com")
+    londres.name = "Londres Atendimento"
+    await db.commit()
+    await dar_lojas(db, londres, c.integ)
+    israel = await make_user(email=f"israel-{uuid4().hex[:6]}@davinci-test.com")
+    outra = Integration(
+        user_id=c.dono.id,
+        platform=IntegrationPlatform.SHOPEE,
+        name="vrc",
+        credentials=encrypt_json({"access_token": "t"}),
+    )
+    db.add(outra)
+    await db.flush()
+    db.add(
+        StoreInfo(
+            user_id=c.dono.id,
+            platform="shopee",
+            account_name="vrc",
+            bling_store_id="7002",
+            integration_id=outra.id,
+        )
+    )
+    await db.commit()
+    await dar_lojas(db, israel, outra)
+    corpo = {"sku_antigo": c.antigo, "sku_novo": c.novo}
+
+    # Outra equipe: o pedido é como se não existisse (nada no Bling).
+    auth_as(israel)
+    r = await client.post(f"{URL}/pedidos/{NUMERO}/troca/previa", json=corpo)
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "pedido_nao_encontrado"
+    assert c.bling.chamadas == []
+
+    auth_as(londres)
+    out = await painel.painel_da_conversa(db, c.conversa, user=londres)
+    assert out["ag_cancelamento"]["troca_envio"]["disponivel"] is True
+    r = await client.post(f"{URL}/pedidos/{NUMERO}/troca/previa", json=corpo)
+    assert r.status_code == 200, r.text
+    pv = r.json()
+    assert pv["pode"] is True, pv["travas"]
+    assert (pv["antes"]["custo"], pv["depois"]["custo"], pv["dif_custo_pct"]) == (None,) * 3
+    assert "Margem Aprovado por Londres Atendimento" in pv["passos_previstos"]
+    # A caixinha "o cliente aceitou" continua obrigatória (nível 1).
+    clique = {**corpo, "previa_hash": pv["previa_hash"], "idem_key": str(uuid4())}
+    r = await client.post(f"{URL}/pedidos/{NUMERO}/troca", json=clique)
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "aceite_obrigatorio"
+    r = await client.post(
+        f"{URL}/pedidos/{NUMERO}/troca",
+        json={**clique, "idem_key": str(uuid4()), "confirmar": True},
+    )
+    assert r.status_code == 200, r.text
+    feita = r.json()
+    assert feita["estado"] == "concluida", feita
+    assert (feita["custo_antigo"], feita["custo_novo"]) == (None, None)
+    assert (feita["aceite_fonte"], feita["criado_por_nome"]) == ("declarado", "Londres Atendimento")
+    # A Margem Aprovada no nome de quem clicou (o pino e as trilhas).
+    [bo] = await _linhas_bo(db)
+    assert (bo.item_codigo, bo.situacao, bo.status, bo.aprovado_por) == (
+        "dg054.sp",
+        "6",
+        "Aprovado",
+        londres.id,
+    )
+    assert await _trilhas(db) == [
+        ("sku", "dg053.sp", "dg054.sp", "atendimento_troca", londres.id),
+        ("status", None, "Aprovado", "atendimento_troca", londres.id),
+        ("situacao", "83955", "6", "atendimento_troca", londres.id),
+    ]
+    # Sem ganhar a Margem: nem o custo na lista das trocas, nem a aba.
+    [item] = (await client.get(f"{URL}/trocas", params={"abertas": "false"})).json()["itens"]
+    assert (item["custo_antigo"], item["custo_novo"]) == (None, None)
+    assert painel.ve_margem(londres) is False
+    assert (await client.get("/api/margens")).status_code == 403
+    # A troca dela, pelo id, é de fora para a outra equipe.
+    auth_as(israel)
+    r = await client.post(f"{URL}/trocas/{feita['id']}/retomar")
+    assert r.status_code == 404 and r.json()["detail"]["code"] == "troca_nao_encontrada"
+    assert (await client.get(f"{URL}/trocas", params={"abertas": "false"})).json() == {"itens": []}
 
 
 async def test_rota_409_e_404(db, client, make_user, auth_as, monkeypatch, _chaves):

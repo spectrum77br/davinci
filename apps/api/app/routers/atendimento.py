@@ -377,7 +377,12 @@ ABA_EMAIL_SO_ADMIN = {
 # marca lida na plataforma, atualiza o pedido, descarta a sugestão, confere o
 # envio, a avaliação e o carrinho. Configurar a caixa continua só de quem
 # mexe (`acesso.pode_mexer`): modo das lojas, manual, automáticas, respostas
-# prontas, Zap, e-mail, troca, "Zerar não lidas", comentários das redes.
+# prontas, Zap, e-mail, "Zerar não lidas", comentários das redes.
+# A TROCA DE PRODUTO e a OFERTA (03/11/2026, o Eduardo: "quero que funcione
+# para quem também usa o atendimento, não só admin, essa parte de troca, que é
+# as 3 equipes que vão gerenciar"): a prévia, o "Trocar", o "Retomar" e o
+# "Enviar oferta" passaram a ser de quem responde — só nos pedidos e conversas
+# das lojas da pessoa (`routers/atendimento_troca.py`, `troca.pode_escrever`).
 ROTAS_DE_QUEM_RESPONDE = frozenset(
     {
         ("POST", "/api/atendimento/conversas/{conversa_id}/responder"),
@@ -393,6 +398,11 @@ ROTAS_DE_QUEM_RESPONDE = frozenset(
         ("POST", "/api/atendimento/avaliacoes/{avaliacao_id}/responder"),
         ("POST", "/api/atendimento/avaliacoes/{avaliacao_id}/tratada"),
         ("POST", "/api/atendimento/carrinhos/{carrinho_id}/resolvido"),
+        # A troca de produto e a oferta (03/11/2026): as 3 equipes do atendimento.
+        ("POST", "/api/atendimento/pedidos/{numero_bling}/troca/previa"),
+        ("POST", "/api/atendimento/pedidos/{numero_bling}/troca"),
+        ("POST", "/api/atendimento/trocas/{troca_id}/retomar"),
+        ("POST", "/api/atendimento/pedidos/{numero_bling}/troca/oferta"),
     }
 )
 
