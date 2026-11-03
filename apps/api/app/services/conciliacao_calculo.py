@@ -180,6 +180,57 @@ def conta_shopee(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal] 
     }
 
 
+def conta_em_texto(conta: dict[str, Decimal]) -> dict[str, str]:
+    """A conta da Shopee como vai pro JSON de `conta_na_venda`."""
+    return {k: str(v) for k, v in conta.items()}
+
+
+def conta_de_texto(guardada: Any) -> dict[str, Decimal] | None:
+    """`conta_na_venda` de volta em Decimal (None se não tem ou está estragada)."""
+    if not isinstance(guardada, dict) or guardada.get("renda") is None:
+        return None
+    try:
+        return {k: Decimal(str(v)) for k, v in guardada.items() if v is not None}
+    except InvalidOperation:
+        return None
+
+
+_LINHAS_DA_CONTA = (
+    ("preco", "preço"),
+    ("subsidio", "subsídio"),
+    ("frete_loja", "frete"),
+    ("cupons", "cupons"),
+    ("taxas", "taxas"),
+    ("afiliados", "afiliados"),
+)
+
+
+def mudancas_da_conta(antes: dict[str, Decimal], depois: dict[str, Decimal]) -> str | None:
+    """O que a Shopee mudou na conta entre a venda e a liberação (03/11, vortan 306115:
+    "afiliados 0.00 → 10.32, taxas 124.90 → 126.34")."""
+    partes = [
+        f"{rotulo} {antes.get(k, ZERO):.2f} → {depois.get(k, ZERO):.2f}"
+        for k, rotulo in _LINHAS_DA_CONTA
+        if abs(depois.get(k, ZERO) - antes.get(k, ZERO)) > TOLERANCIA
+    ]
+    return "na liberação a Shopee mudou " + ", ".join(partes) if partes else None
+
+
+def so_cobrancas_mudaram(antes: dict[str, Decimal], depois: dict[str, Decimal]) -> bool:
+    """Entre a venda e a liberação só mudou o que a Shopee cobra (taxas, afiliados,
+    cupons): mesmo preço, subsídio e frete, e a renda mudou exatamente isso. Devolução
+    ou reembolso antes de liberar mexe em outra coisa — aí o previsto continua sendo a
+    conta da liberação, como antes de 03/11."""
+
+    def dif(k: str) -> Decimal:
+        return depois.get(k, ZERO) - antes.get(k, ZERO)
+
+    if any(abs(dif(k)) > TOLERANCIA for k in ("preco", "subsidio", "frete_loja")):
+        return False
+    cobrado = dif("taxas") + dif("afiliados") + dif("cupons")
+    return abs(dif("renda") + cobrado) <= TOLERANCIA
+
+
 _TAXAS_TIKTOK_CONHECIDAS = (
     "platform_commission_amount",
     "transaction_fee_amount",
@@ -747,6 +798,9 @@ def frete_do_comprador(
     return dif if dif > TOLERANCIA else ZERO
 
 
+CARTEIRA_SO_LIQUIDO = "a carteira só traz o líquido: abertura no detalhe da venda"
+
+
 def _motivo_da_diferenca(
     venda: MarketplaceOrderFinancial | None,
     fatura: dict[str, Decimal],
@@ -763,7 +817,7 @@ def _motivo_da_diferenca(
     # A carteira da Shopee só traz o líquido (sem tarifa/frete na linha): não dá pra
     # dizer "cobrado 0,00". Fica só a diferença, e a abertura está no detalhe da venda.
     if liberacoes and all(m.tarifa is None and m.frete is None for m in liberacoes):
-        return " · ".join([*partes, "a carteira só traz o líquido: abertura no detalhe da venda"])
+        return " · ".join([*partes, CARTEIRA_SO_LIQUIDO])
     frete_previsto = _d(venda.freight_amount) if venda else None
     frete_cobrado = _soma([m.frete for m in liberacoes]).copy_abs() if liberacoes else None
     # O extrato cobra o frete INTEIRO (SHIPPING_FEE) e o bruto traz o que o comprador
@@ -1348,23 +1402,42 @@ async def recalcular_loja(
             else (amazon_venda["liquido"] if amazon_venda else None)
         )
         estado_bling = nome_bling.strip().lower()
-        calc = situacao_do_pedido(
-            agora=agora,
-            data_pedido=cab.data,
-            bling_total=bling_produtos,
-            venda=venda,
-            previsao=previsao,
-            bling_cancelado=estado_bling in BLING_DESFEITO,
-            bling_situacao=estado_bling or None,
-            movs_extrato=extrato,
-            fatura=fatura,
-            liquido_previsto=liquido_previsto,
-            plataforma=plataforma_loja,
-            entregue_em=entregue_por_numero.get(numero),
+        args_situacao: dict[str, Any] = {
+            "agora": agora,
+            "data_pedido": cab.data,
+            "bling_total": bling_produtos,
+            "venda": venda,
+            "previsao": previsao,
+            "bling_cancelado": estado_bling in BLING_DESFEITO,
+            "bling_situacao": estado_bling or None,
+            "movs_extrato": extrato,
+            "fatura": fatura,
+            "liquido_previsto": liquido_previsto,
+            "plataforma": plataforma_loja,
+            "entregue_em": entregue_por_numero.get(numero),
             # loja por arquivo (KFA): a Margem não lê a venda — sem linha no CSV é
             # "aguardando" (e vence pelo prazo), não "venda não lida" pra sempre
-            sem_margem=loja.modo_extrato == "upload",
+            "sem_margem": loja.modo_extrato == "upload",
+        }
+        calc = situacao_do_pedido(**args_situacao)
+        # 03/11 (Vinicius, Shopee vortan 306115: "o previsto e o real não era pra ser
+        # exatamente isso?"): o previsto é o que a venda prometeu — a conta guardada antes
+        # de liberar —, não a que a Shopee fecha na liberação (afiliados, taxas). Recebeu
+        # menos que isso: "recebido a menos" (escolha dele). Pedido liberado antes de
+        # 03/11 não tem a conta guardada e fica como estava.
+        anterior = existentes.get(numero)
+        ja_liberou = calc["liberado_em"] is not None or (
+            anterior is not None and anterior.liberado_em is not None
         )
+        conta_venda = (
+            conta_de_texto(anterior.conta_na_venda)
+            if plataforma_loja == "shopee" and anterior is not None
+            else None
+        )
+        conta_agora = conta_shopee(venda) if conta_venda is not None and ja_liberou else None
+        vale_a_venda = conta_agora is not None and so_cobrancas_mudaram(conta_venda, conta_agora)
+        if vale_a_venda:
+            calc = situacao_do_pedido(**{**args_situacao, "liquido_previsto": conta_venda["renda"]})
         if plataforma_loja == "amazon" and calc["situacao"] == "bateu":
             calc["motivo"] = motivo_amazon(extrato)
             # envio próprio sem o frete do Melhor Envio: "falta frete" (etapa = pendência)
@@ -1395,6 +1468,17 @@ async def recalcular_loja(
         venda_ok = venda if calc["situacao"] != "sem_venda" else None
         # Shopee: a conta como a tela deles (preço de venda, subsídio, taxas líquidas)
         shopee = conta_shopee(venda_ok) if plataforma_loja == "shopee" else None
+        # a conta da venda acompanha a Margem até liberar; na liberação congela
+        if shopee is not None and not ja_liberou:
+            conta_venda = shopee
+        prometida = conta_venda if vale_a_venda else None
+        if prometida is not None and shopee is not None and calc["situacao"] != "bateu":
+            mudou = mudancas_da_conta(prometida, shopee)
+            texto = calc["motivo"]
+            if mudou and texto and CARTEIRA_SO_LIQUIDO in texto:
+                calc["motivo"] = texto.replace(CARTEIRA_SO_LIQUIDO, mudou)
+            elif mudou:
+                calc["motivo"] = f"{mudou} · {texto}" if texto else mudou
         # TikTok: a conta do extrato por pedido (valor = após desconto da loja,
         # tarifa = todas as taxas, frete = parte da loja)
         tiktok = conta_tiktok(venda_ok) if plataforma_loja == "tiktok" else None
@@ -1495,7 +1579,8 @@ async def recalcular_loja(
         ):
             previsto_na_venda = atual.venda_liquido
         if (
-            previsto_na_venda is not None
+            prometida is None
+            and previsto_na_venda is not None
             and liquido_gravado is not None
             and abs(liquido_gravado - previsto_na_venda) > TOLERANCIA
             and calc["situacao"] not in ("cancelado", "sem_venda")
@@ -1505,6 +1590,9 @@ async def recalcular_loja(
                 f"liberação (previsto na venda {previsto_na_venda:.2f})"
             )
             calc["motivo"] = f"{calc['motivo']} · {aviso}" if calc["motivo"] else aviso
+        # Shopee liberada com a conta da venda guardada: a grade mostra o que a venda
+        # prometeu (o real fica no raio-x); o resto, a conta de agora
+        grade = prometida if prometida is not None else shopee
         valores = {
             "platform": loja.platform,
             "bling_id": cab.bling_id,
@@ -1519,26 +1607,28 @@ async def recalcular_loja(
             "bling_custofrete": _d(cab.custofrete),
             "bling_taxacomissao": _d(cab.taxacomissao),
             "venda_valor": (
-                shopee["preco"] if shopee else (_d(venda.gross_amount) if venda else None)
+                grade["preco"] if grade else (_d(venda.gross_amount) if venda else None)
             ),
             "venda_tarifa": (
-                shopee["taxas"] if shopee else (_d(venda.fee_amount) if venda_ok else None)
+                grade["taxas"] if grade else (_d(venda.fee_amount) if venda_ok else None)
             ),
             "venda_frete": (
-                shopee["frete_loja"] if shopee else (_d(venda.freight_amount) if venda_ok else None)
+                grade["frete_loja"] if grade else (_d(venda.freight_amount) if venda_ok else None)
             ),
             # Shopee: "extras" = subsídio no produto + cupons da loja (a tela deles)
             "venda_cupom": (
-                shopee["subsidio"] + shopee["cupons"]
-                if shopee
+                grade["subsidio"] + grade["cupons"]
+                if grade
                 else (_d(venda.discount_amount) if venda_ok else None)
             ),
-            "venda_afiliados": shopee.get("afiliados") if shopee else None,
+            "venda_afiliados": grade.get("afiliados") if grade else None,
             "venda_frete_pago": frete_pago,
             "venda_estorno": _d(venda.refund_amount) if venda_ok else None,
-            # Amazon: o líquido previsto é o da venda (Shipment + tarifas), sem estornos
-            "venda_liquido": liquido_gravado,
+            # Amazon: o líquido previsto é o da venda (Shipment + tarifas), sem estornos;
+            # Shopee liberada: a renda que a venda prometeu (03/11)
+            "venda_liquido": prometida["renda"] if prometida is not None else liquido_gravado,
             "previsto_na_venda": previsto_na_venda,
+            "conta_na_venda": conta_em_texto(conta_venda) if conta_venda is not None else None,
             "venda_status": venda.status if venda_ok else None,
             "previsao_liberacao": calc["previsao"],
             "fatura_tarifa": fatura["tarifa"] if fatura_movs else None,

@@ -219,6 +219,10 @@ class ConciliacaoPedido(Base, TimestampMixin):
     # conta na liberação e a Margem relê — sem isto a diferença que a plataforma
     # acrescentou sumia atrás do "bateu"
     previsto_na_venda: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # Shopee: a conta linha a linha (conta_shopee, em texto) como estava ANTES de liberar
+    # (03/11): o Previsto do raio-x e da grade é o que a venda prometeu, não a conta que
+    # a Shopee fecha na liberação. Atualiza a cada rodada até liberar; depois congela.
+    conta_na_venda: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     venda_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     previsao_liberacao: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True

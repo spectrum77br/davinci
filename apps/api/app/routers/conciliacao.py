@@ -1908,36 +1908,44 @@ def _comparativo(
             # As mesmas linhas de "Informações de Pagamento › Exibir Detalhes de Renda"
             # da Shopee, pra comparar linha a linha (15/10, pedido 301438).
             sh = {k: float(x) for k, x in shopee.items()}
+            # 03/11 (Vinicius, vortan 306115): o Previsto é a conta como estava na venda
+            # (guardada antes de liberar); o Real, a que a Shopee fechou na liberação
+            na_venda = conta_de_texto(p.conta_na_venda) if liberou else None
+            if na_venda is not None and not so_cobrancas_mudaram(na_venda, shopee):
+                na_venda = None  # devolução/reembolso: o previsto é a conta da liberação
+            pv = {k: float(x) for k, x in na_venda.items()} if na_venda else sh
             linhas = [
-                linha("preco", "Preço de venda", sh["preco"], real(sh["preco"])),
+                linha("preco", "Preço de venda", pv.get("preco"), real(sh["preco"])),
                 linha(
                     "subsidio",
                     "− Subsídio da Shopee no produto",
-                    sh["subsidio"],
+                    pv.get("subsidio"),
                     real(sh["subsidio"]),
                     estilo="muted",
                 ),
                 linha(
                     "produtos",
                     "= Subtotal dos produtos",
-                    sh["subtotal_produtos"],
+                    pv.get("subtotal_produtos"),
                     real(sh["subtotal_produtos"]),
                     estilo="bold",
                 ),
                 linha(
                     "frete",
                     "± Subtotal de frete (parte da loja)",
-                    sh["frete_loja"],
+                    pv.get("frete_loja"),
                     real(sh["frete_loja"]),
                 ),
-                linha("cupom", "− Cupons e descontos da loja", sh["cupons"], real(sh["cupons"])),
+                linha(
+                    "cupom", "− Cupons e descontos da loja", pv.get("cupons"), real(sh["cupons"])
+                ),
                 linha(
                     "tarifa",
                     "− Taxas e encargos (comissão, serviço, transação)",
-                    sh["taxas"],
+                    pv.get("taxas"),
                     real(sh["taxas"]),
                 ),
-                linha("afiliados", "− Afiliados", sh["afiliados"], real(sh["afiliados"])),
+                linha("afiliados", "− Afiliados", pv.get("afiliados"), real(sh["afiliados"])),
                 linha(
                     "depois",
                     "± Depois da liberação (estornos, ajustes)",
@@ -1946,7 +1954,7 @@ def _comparativo(
                     compara=False,
                     estilo="muted",
                 ),
-                linha("liquido", "= Renda do pedido", sh["renda"], real_liquido, estilo="bold"),
+                linha("liquido", "= Renda do pedido", pv.get("renda"), real_liquido, estilo="bold"),
             ]
             return {
                 "linhas": _fechar(linhas),
@@ -1967,7 +1975,13 @@ def _comparativo(
                 "rodape": (
                     'as mesmas linhas de "Informações de Pagamento › Detalhes de Renda" '
                     "da Shopee · "
-                    '"Renda do pedido" real é o que a carteira pagou'
+                    + (
+                        "previsto = a conta como estava na venda, real = a que a Shopee "
+                        "fechou na liberação · "
+                        if na_venda
+                        else ""
+                    )
+                    + '"Renda do pedido" real é o que a carteira pagou'
                 ),
                 "frete_liquido_loja": None,
             }
@@ -2354,8 +2368,10 @@ async def exportar_xlsx(
 
 from app.models import BlingOrder, ConciliacaoDia, ConciliacaoSync  # noqa: E402
 from app.services.conciliacao_calculo import (  # noqa: E402
+    conta_de_texto,
     outros_descontos_do_extrato,
     recalcular_loja,
+    so_cobrancas_mudaram,
 )
 from app.services.conciliacao_extrato import TIPOS_RESERVA as TIPOS_RESERVA_SET  # noqa: E402
 from app.services.conciliacao_extrato import bling_store_ids_da_loja  # noqa: E402
