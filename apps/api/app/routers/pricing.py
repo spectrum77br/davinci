@@ -18,7 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_admin, require_permission, user_scope
-from app.deps.team_scope import TeamScope, resolve_team_scope
+from app.deps.team_scope import (
+    TeamScope,
+    escopo_das_equipes,
+    nome_da_equipe,
+    resolve_team_scope,
+)
 from app.models import (
     AuditDismissedSku,
     BackgroundJob,
@@ -43,6 +48,7 @@ from app.schemas.pricing import (
     CompetitorPriceRow,
     ContaCatalogoIn,
     ContaCatalogoOut,
+    EquipeDaConta,
     PricingAccountCreate,
     PricingAccountOut,
     PricingAccountPatch,
@@ -263,11 +269,14 @@ def _account_out(
     *,
     base: PricingAccount | None = None,
     conta_catalogo_id: UUID | None = None,
+    equipes: list[int] | None = None,
 ) -> PricingAccountOut:
     """`base`: a conta de kit de uma coluna de catálogo — a filha sai com os
     números e anotações dela, e as margens próprias em `margens_catalogo`.
-    `conta_catalogo_id`: a filha de uma conta de kit (catálogo ligado)."""
+    `conta_catalogo_id`: a filha de uma conta de kit (catálogo ligado).
+    `equipes`: os números das equipes que veem a conta (`_equipes_das_contas`)."""
     out = PricingAccountOut.model_validate(row)
+    out.equipes = [EquipeDaConta(numero=n, nome=nome_da_equipe(n)) for n in equipes or ()]
     out.has_password = bool(row.password_enc)
     out.department = roots_by_id.get(row.segment_id)
     if names_by_id is not None:
@@ -294,13 +303,57 @@ def _so_filhas_com_base(rows):
     return [r for r in rows if r.canal != CANAL_CATALOGO or r.conta_base_id in bases]
 
 
+async def _equipes_das_contas(session: AsyncSession, rows) -> dict[UUID, list[int]]:
+    """Conta → números das equipes de vendas que a veem (coluna "Equipe" da
+    aba Contas, 03/11/2026). A régua é a da cerca (`_team_scope_accounts` com
+    o escopo de `escopo_das_equipes`): a conta é da equipe cuja loja ela
+    aponta (`store_info_id`) ou cuja integração ela usa. Assim a coluna nunca
+    diz uma equipe e a cerca mostra a conta para outra. A coluna de catálogo
+    não tem loja: sai com as equipes da base. Lista vazia = sem equipe."""
+    por_id = {r.id: r for r in rows}
+    loja_de: dict[UUID, PricingAccount] = {}
+    for r in rows:
+        if r.canal != CANAL_CATALOGO:
+            loja_de[r.id] = r
+            continue
+        if r.conta_base_id is None:
+            continue
+        base = por_id.get(r.conta_base_id) or await session.get(
+            PricingAccount, r.conta_base_id
+        )
+        if base is not None:
+            loja_de[r.id] = base
+    if not loja_de:
+        return {}
+    numeros = (
+        await session.execute(
+            select(StoreInfo.sales_team)
+            .where(StoreInfo.sales_team.is_not(None))
+            .distinct()
+            .order_by(StoreInfo.sales_team)
+        )
+    ).scalars().all()
+    equipes: dict[UUID, list[int]] = {}
+    for numero in numeros:
+        escopo = await escopo_das_equipes(session, {numero})
+        for conta_id, conta in loja_de.items():
+            if (
+                conta.store_info_id in escopo.store_info_ids
+                or conta.integration_id in escopo.integration_ids
+            ):
+                equipes.setdefault(conta_id, []).append(numero)
+    return equipes
+
+
 def _accounts_out(
     rows,
     roots_by_id: dict[UUID, str],
     names_by_id: dict[UUID, str] | None = None,
+    equipes_por_conta: dict[UUID, list[int]] | None = None,
 ) -> list[PricingAccountOut]:
     por_id = {r.id: r for r in rows}
     filha_de = {r.conta_base_id: r.id for r in rows if r.canal == CANAL_CATALOGO}
+    equipes_por_conta = equipes_por_conta or {}
     return [
         _account_out(
             r,
@@ -308,6 +361,7 @@ def _accounts_out(
             names_by_id,
             base=por_id.get(r.conta_base_id) if r.canal == CANAL_CATALOGO else None,
             conta_catalogo_id=filha_de.get(r.id),
+            equipes=equipes_por_conta.get(r.id),
         )
         for r in rows
     ]
@@ -332,12 +386,17 @@ async def _uma_conta_out(
 ) -> PricingAccountOut:
     """Saída de UMA conta (create/patch/department), com a base (se for
     filha) ou a filha (se for de kit) já resolvida."""
+    equipes = (await _equipes_das_contas(session, [row])).get(row.id)
     if row.canal == CANAL_CATALOGO:
         base = await session.get(PricingAccount, row.conta_base_id)
-        return _account_out(row, roots_by_id, names_by_id, base=base)
+        return _account_out(row, roots_by_id, names_by_id, base=base, equipes=equipes)
     filha = await _filha_de(session, row.id)
     return _account_out(
-        row, roots_by_id, names_by_id, conta_catalogo_id=filha.id if filha else None
+        row,
+        roots_by_id,
+        names_by_id,
+        conta_catalogo_id=filha.id if filha else None,
+        equipes=equipes,
     )
 
 
@@ -399,7 +458,8 @@ async def _patch_margens_da_filha(
     )
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
-    return _account_out(filha, roots_by_id, names_by_id, base=base)
+    equipes = (await _equipes_das_contas(session, [filha, base])).get(filha.id)
+    return _account_out(filha, roots_by_id, names_by_id, base=base, equipes=equipes)
 
 
 def _product_out(
@@ -495,7 +555,8 @@ async def list_accounts(
     stmt = stmt.order_by(PricingAccount.sort_order, PricingAccount.name)
     rows = _so_filhas_com_base((await session.execute(stmt)).scalars().all())
     names_by_id = await _segment_names_by_id(session)
-    return _accounts_out(rows, roots_by_id, names_by_id)
+    equipes = await _equipes_das_contas(session, rows)
+    return _accounts_out(rows, roots_by_id, names_by_id, equipes)
 
 
 @router.post(
@@ -1346,8 +1407,9 @@ async def get_grid(
             )
 
     names_by_id = await _segment_names_by_id(session)
+    equipes = await _equipes_das_contas(session, accounts)
     return PricingGridOut(
-        accounts=_accounts_out(accounts, roots_by_id, names_by_id),
+        accounts=_accounts_out(accounts, roots_by_id, names_by_id, equipes),
         products=[_product_out(p, leaves_by_id) for p in products],
         cells=cells,
     )
@@ -2297,13 +2359,20 @@ async def definir_catalogo_da_conta(
 
     roots_by_id, _, _ = await _segment_index(session)
     names_by_id = await _segment_names_by_id(session)
+    equipes = await _equipes_das_contas(session, [base, *([filha] if filha else [])])
     return ContaCatalogoOut(
         ativo=filha is not None,
         conta=_account_out(
-            base, roots_by_id, names_by_id, conta_catalogo_id=filha.id if filha else None
+            base,
+            roots_by_id,
+            names_by_id,
+            conta_catalogo_id=filha.id if filha else None,
+            equipes=equipes.get(base.id),
         ),
         conta_catalogo=(
-            _account_out(filha, roots_by_id, names_by_id, base=base) if filha else None
+            _account_out(filha, roots_by_id, names_by_id, base=base, equipes=equipes.get(filha.id))
+            if filha
+            else None
         ),
     )
 

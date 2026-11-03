@@ -222,7 +222,16 @@ async def resolve_team_scope(session: AsyncSession, user: User) -> TeamScope:
     if not teams:
         return TeamScope(unrestricted=True, email_user=user)
 
-    equipes = set(teams)
+    return await escopo_das_equipes(session, set(teams), email_user=user)
+
+
+async def escopo_das_equipes(
+    session: AsyncSession, equipes: set[int], *, email_user: User | None = None
+) -> TeamScope:
+    """O TeamScope de quem é das `equipes` (sem olhar papel nem usuário): o que
+    `resolve_team_scope` monta para um vendedor delas. Serve também para dizer
+    de qual equipe é uma loja/conta com a MESMA régua da cerca (03/11/2026,
+    coluna Equipe da Tabela de Preços › Contas)."""
     rows = (
         await session.execute(
             select(
@@ -236,7 +245,7 @@ async def resolve_team_scope(session: AsyncSession, user: User) -> TeamScope:
         )
     ).all()
 
-    scope = TeamScope(unrestricted=False, email_user=user)
+    scope = TeamScope(unrestricted=False, email_user=email_user)
     # Lojas sem o FK `integration_id` preenchido (backfill preguiçoso) — caso
     # comum: só `marquezini` tinha o FK. Resolvemos a integração pelo par
     # (nome, plataforma), espelhando `_resolve_linked_integration`, pra que

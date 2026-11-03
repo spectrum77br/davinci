@@ -344,7 +344,13 @@ type Account = {
   // {"1".."5": margem do tipo, ou null = usa a da conta de kit}. Os
   // margin1..5 dela continuam vindo com os da base.
   margens_catalogo?: Record<string, string | number | null> | null
+  // Coluna "Equipe" da aba Contas (03/11/2026): as equipes de vendas que veem
+  // a conta (Londres, Israel, Marrocos), pela mesma régua da cerca. Vazia =
+  // sem equipe. A coluna de catálogo vem com as da base.
+  equipes?: EquipeDaConta[]
 }
+
+type EquipeDaConta = { numero: number; nome: string }
 
 // Global toast feedback for push / auto-match outcomes. Rendered by
 // <AppToastStack /> in app.vue, so we just call success/error/warning here.
@@ -535,12 +541,60 @@ const nTiposAba = computed(() => (TYPE_HEADERS.value[department.value] ?? []).le
 // SSH-style contas filters
 const contasSearch = ref('')
 const contasPlatformFilter = ref<string>('')
+// Filtro de equipe (03/11/2026): '' = todas, 'sem' = contas sem equipe, ou o
+// número da equipe ('101'...). Uma conta vista por duas equipes entra nas duas.
+const SEM_EQUIPE = 'sem'
+const contasEquipeFilter = ref<string>('')
+
+function equipesDaConta(a: Account): EquipeDaConta[] {
+  return a.equipes ?? []
+}
+
+function rotuloEquipes(a: Account): string {
+  const eq = equipesDaConta(a)
+  return eq.length ? eq.map((e) => e.nome).join(' / ') : 'Sem equipe'
+}
+
+function passaFiltroEquipe(a: Account, f: string): boolean {
+  if (!f) return true
+  const eq = equipesDaConta(a)
+  if (f === SEM_EQUIPE) return eq.length === 0
+  return eq.some((e) => String(e.numero) === f)
+}
+
+// As opções do filtro: as equipes das contas desta aba (celular/mala/eletro),
+// em ordem de número, e "Sem equipe" se houver conta sem nenhuma.
+const equipesPresentesNoDept = computed(() => {
+  const porNumero = new Map<number, string>()
+  let semEquipe = false
+  for (const a of accountsCurrent.value) {
+    const eq = equipesDaConta(a)
+    if (!eq.length) semEquipe = true
+    for (const e of eq) porNumero.set(e.numero, e.nome)
+  }
+  return {
+    equipes: Array.from(porNumero.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([numero, nome]) => ({ numero, nome })),
+    semEquipe,
+  }
+})
+
+// Só aparece quando há o que escolher (como no Faturamento): quem é de uma
+// equipe só vê as contas dela. Com um filtro já escolhido continua na tela,
+// para dar para voltar a "Todas as equipes" ao trocar de aba.
+const mostrarFiltroEquipe = computed(() => {
+  const { equipes, semEquipe } = equipesPresentesNoDept.value
+  return equipes.length + (semEquipe ? 1 : 0) > 1 || contasEquipeFilter.value !== ''
+})
 
 const accountsFiltered = computed(() => {
   const q = contasSearch.value.trim().toLowerCase()
   const pf = contasPlatformFilter.value
+  const ef = contasEquipeFilter.value
   return accountsCurrent.value.filter((a) => {
     if (pf && a.platform !== pf) return false
+    if (!passaFiltroEquipe(a, ef)) return false
     if (!q) return true
     return (
       a.name.toLowerCase().includes(q) ||
@@ -4252,6 +4306,21 @@ watch(department, async () => {
           <option value="">Todas plataformas</option>
           <option v-for="p in platformsPresentInDept" :key="p" :value="p">{{ platformLabel(p) }}</option>
         </select>
+        <select
+          v-if="mostrarFiltroEquipe"
+          v-model="contasEquipeFilter"
+          data-filtro-equipe
+          aria-label="Filtrar contas pela equipe"
+          class="border rounded px-2 py-1 text-sm bg-background h-8"
+        >
+          <option value="">Todas as equipes</option>
+          <option
+            v-for="e in equipesPresentesNoDept.equipes"
+            :key="e.numero"
+            :value="String(e.numero)"
+          >{{ e.nome }}</option>
+          <option v-if="equipesPresentesNoDept.semEquipe || contasEquipeFilter === SEM_EQUIPE" :value="SEM_EQUIPE">Sem equipe</option>
+        </select>
         <span class="ml-auto text-xs text-muted-foreground">
           {{ accountsFiltered.length }} conta(s)
         </span>
@@ -4275,6 +4344,10 @@ watch(department, async () => {
                 class="text-center px-2 py-2 font-medium border-b border-border w-28"
                 title="Liga a tabela ML Catálogo desta conta: colunas próprias na Tabela de Preços, calculadas pela coluna Catálogo dos produtos (com a comissão e os fretes desta conta; a margem é a desta conta ou a própria do catálogo, no botão “% margens”), que mandam preço só para o anúncio de catálogo."
               >Catálogo ML</th>
+              <th
+                class="text-center px-2 py-2 font-medium border-b border-border min-w-[90px]"
+                title="Equipe de vendas que vê esta conta (Londres, Israel, Marrocos), pela loja ligada a ela — a mesma que separa o que cada vendedor enxerga."
+              >Equipe</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-12">Kit</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Comissão</th>
               <th
@@ -4326,7 +4399,8 @@ watch(department, async () => {
                   <option v-for="p in PLATFORMS" :key="p.value" :value="p.value">{{ p.label }}</option>
                 </select>
               </td>
-              <!-- Tipo ML e Catálogo ML: definidos depois, na linha criada. -->
+              <!-- Tipo ML, Catálogo ML e Equipe: definidos depois, na linha criada. -->
+              <td class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border text-center text-xs text-muted-foreground">—</td>
               <td class="border border-border px-1 py-1">
@@ -4546,6 +4620,12 @@ watch(department, async () => {
                 </template>
                 <span v-else class="text-xs text-muted-foreground">—</span>
               </td>
+              <!-- equipe: só leitura (vem da equipe de vendas da loja) -->
+              <td
+                class="border border-border px-2 py-1.5 text-xs text-center whitespace-nowrap"
+                :class="{ 'text-muted-foreground': !equipesDaConta(acc).length }"
+                data-coluna-equipe
+              >{{ rotuloEquipes(acc) }}</td>
               <!-- kit -->
               <td
                 class="border border-border px-2 py-1.5 text-xs cursor-pointer text-center"
