@@ -304,7 +304,10 @@ logger = structlog.get_logger()
 # loja e a ameaça de escalar (pessoa), o D1 na disputa e no defeito da devolução aberta, as
 # etiquetas (Abrir chamado da entrega, Ag. cancelamento, evidência com o recibo) e a
 # prioridade da evidência recebida.
-VERSAO = 9
+# 10 (03/11/2026, revisão cruzada do an0311): a etiqueta continua até a PESSOA agir — o Abrir
+# chamado (entrega) da marca no turno seguinte e o turno depois do recibo da evidência
+# (`acao_pessoa.etiquetas_que_continuam`, `acao_pessoa.depois_do_recibo`).
+VERSAO = 10
 # A chave em `atendimento_conversas.dados`.
 CHAVE = "humano"
 # Conversas por rodada do cron (o recálculo inicial, ~500, leva umas 3).

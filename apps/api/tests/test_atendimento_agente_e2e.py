@@ -845,21 +845,17 @@ async def test_h_video_depois_do_pedido_da_loja_vai_para_analisar_evidencia(
     )  # fmt: skip
     await db.commit()
 
-    # Vídeo + texto DEPOIS do recibo: sem outro recibo — o modelo responde, o código manda
-    # para pessoa (o pedido de evidência de antes do recibo continua valendo).
+    # Vídeo + texto DEPOIS do recibo: sem outro recibo e (revisão cruzada do an0311,
+    # 03/11/2026) sem o modelo — o turno depois do recibo é da pessoa que analisa
+    # (`acao_pessoa.depois_do_recibo`; o pedido de evidência de antes do recibo vale).
     await _msg(db, conversa, None, tipo="video", ha=timedelta(minutes=3))
     await _msg(db, conversa, "segue o vídeo, ele não carrega mais", ha=timedelta(minutes=2))
-    api.roteiro = [
-        _final(
-            texto="Olá! Recebemos o vídeo, obrigado. A equipe analisa e responde por aqui.",
-            assunto="defeito",
-        )
-    ]
+    api.roteiro = []
     r2 = await ia.gerar_rascunho(db, conversa)
     fatos = _do_agente(r2)
-    assert len(api.pedidos) == 1
+    assert api.pedidos == [] and api.clientes == []
     assert fatos["acoes_codigo"] == ["analisar_evidencia"] and r2.precisa_humano
-    assert len(envios) == 1 and _decisao(r2) == "precisa_humano"
+    assert not r2.texto and len(envios) == 1 and _decisao(r2) == "rascunho_nao_pendente"
 
 
 async def test_h_orientacao_de_defeito_pede_o_video_sem_ir_para_pessoa(

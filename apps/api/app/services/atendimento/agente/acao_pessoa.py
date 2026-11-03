@@ -155,6 +155,16 @@ DETALHE_DEVOLUCAO_NA_PLATAFORMA = (
     "central do vendedor"
 )
 DETALHE_REMETENTE = "dúvida de remetente sem fato aprovado"
+# Revisão cruzada do an0311 (03/11/2026): a etiqueta continua até a PESSOA agir — o turno
+# seguinte do cliente ("Ok, obrigado") não a apaga (`etiquetas_que_continuam`,
+# `depois_do_recibo`).
+DETALHE_CHAMADO_PENDENTE = (
+    "a etiqueta Abrir chamado (entrega) de antes continua: ninguém da loja respondeu depois — "
+    "abrir chamado com a plataforma para acompanhar a entrega, sem prometer prazo"
+)
+DETALHE_DEPOIS_DO_RECIBO = (
+    "a evidência que a loja pediu chegou (o recibo saiu) e ninguém da loja respondeu depois"
+)
 # O turno só com o cartão do produto/pedido: nem rascunho (spec 6.2).
 MOTIVO_SO_CARTAO = "o cliente só mandou o cartão do produto ou do pedido — sem resposta"
 
@@ -390,6 +400,66 @@ def pediu_evidencia(recentes: Sequence[Any], gatilho: Any | None) -> bool:
     É a marca `[a loja pediu evidência]` da transcrição do pacote.
     """
     return fala_que_pediu_evidencia(recentes, gatilho) is not None
+
+
+# ── A etiqueta continua até a PESSOA agir (revisão cruzada do an0311, 03/11/2026) ──
+#
+# A etiqueta do "responde e marca" (`humano.CHAVE_POS_ENVIO`) valia só enquanto o turno era o
+# mesmo: o "Ok, obrigado" do cliente depois do rastreio com o Abrir chamado (entrega) fazia um
+# turno novo sem a etiqueta (a régua lê o texto da rajada), a resposta dele saía sozinha e a
+# conversa saía da Caixa Humano — o chamado nunca era aberto. O mesmo com a evidência: depois
+# do recibo, a legenda que o sync trouxe atrasada (reordenada para depois dele) fazia um turno
+# sem o anexo, e o "mande o vídeo" de novo passava pela 1ª camada. Agora a etiqueta continua
+# no turno seguinte enquanto ninguém da loja respondeu depois da marca: o Abrir chamado
+# (entrega) volta como ação do código (e vira etiqueta de novo só pela régua do turno,
+# `etiquetas_do_turno`); a evidência com o recibo é da pessoa (`depois_do_recibo`, trava).
+# O Ag. cancelamento não precisa: ele vem do estado do pedido a cada turno.
+CHAVE_POS_ENVIO = "humano_pos_envio"  # = `humano.CHAVE_POS_ENVIO` (o teste confere)
+ETIQUETAS_QUE_CONTINUAM = frozenset({constantes.ACAO_ABRIR_CHAMADO})
+
+
+def _epoch(valor: Any) -> float | None:
+    if not isinstance(valor, datetime):
+        return None
+    return (valor if valor.tzinfo else valor.replace(tzinfo=UTC)).timestamp()
+
+
+def etiquetas_que_continuam(conversa: Any, gatilho: Any | None) -> frozenset[str]:
+    """As etiquetas (`ETIQUETAS_QUE_CONTINUAM`) da marca do "responde e marca" de um turno
+    ANTERIOR que continuam neste (ver acima). PURA.
+
+    Todas juntas: a marca (`dados.humano_pos_envio`) com a ação; a conversa não marcada "não
+    precisa responder"; o gatilho é de um turno DEPOIS do marcado (o mesmo turno é o
+    `humano.pos_envio_vale`); e ninguém da loja respondeu depois da marca (a
+    `ultima_da_loja_em` até o "ate" dela — a resposta da pessoa tira; a do agente que leva a
+    etiqueta grava a marca de novo)."""
+    dados = getattr(conversa, "dados", None)
+    marca = dados.get(CHAVE_POS_ENVIO) if isinstance(dados, Mapping) else None
+    if not isinstance(marca, Mapping) or getattr(conversa, "sem_resposta_necessaria", False):
+        return frozenset()
+    acoes = (
+        frozenset(a for a in (marca.get("acoes") or []) if isinstance(a, str))
+        & ETIQUETAS_QUE_CONTINUAM
+    )
+    turno, ate = marca.get("turno"), marca.get("ate")
+    if not acoes or not isinstance(turno, (int, float)) or not isinstance(ate, (int, float)):
+        return frozenset()
+    if isinstance(turno, bool) or isinstance(ate, bool):
+        return frozenset()
+    quando = _epoch(_momento(gatilho)) if gatilho is not None else None
+    if quando is None or quando <= float(turno) + 1e-6:
+        return frozenset()
+    loja = _epoch(getattr(conversa, "ultima_da_loja_em", None))
+    if loja is not None and loja > float(ate):
+        return frozenset()
+    return acoes
+
+
+def depois_do_recibo(recentes: Sequence[Any], gatilho: Any | None) -> bool:
+    """A última fala real da loja antes do turno é o recibo da evidência (item 9) — a pessoa
+    ainda não respondeu depois dele (ver acima)? PURA."""
+    ultima = ultima_fala_real(recentes, gatilho)
+    return ultima is not None and e_recibo_da_evidencia(getattr(ultima, "texto", None))
 
 
 def midia_da_mensagem(m: Any) -> str | None:
@@ -1612,7 +1682,7 @@ def etiquetas_ligadas() -> bool:
 # cancelamento pedido também.
 _DETALHES_DO_CHAMADO_ETIQUETA = frozenset(
     motivo_da_acao(constantes.ACAO_ABRIR_CHAMADO, d)
-    for d in (DETALHE_ATRASO, DETALHE_PARADO, DETALHE_RASTREIO_PARADO)
+    for d in (DETALHE_ATRASO, DETALHE_PARADO, DETALHE_RASTREIO_PARADO, DETALHE_CHAMADO_PENDENTE)
 )
 # O Ag. cancelamento (o 83955: o pedido pode não seguir) só na fala que não toca o destino do
 # pedido — a pergunta de produto, o cumprimento, o agradecimento. Envio, prazo, entrega,
@@ -1886,15 +1956,46 @@ def contesta_a_decisao_da_loja(recentes: Sequence[Any], gatilho: Any | None) -> 
     if not _CONTESTA_A_DECISAO.search(plano):
         return False
     inicio = min((q for m in rajada if (q := _momento(m)) is not None), default=None)
+    fala_da_garantia = bool(_TEMA_DA_DECISAO_DA_GARANTIA.search(plano))
     for m in recentes:
         if m in rajada or not ia.resposta_da_loja(m):
             continue
         quando = _momento(m)
         if inicio is not None and quando is not None and quando > inicio:
             continue
-        if _DECISAO_DA_LOJA.search(_plano_de(getattr(m, "texto", None))):
-            return True
+        texto = getattr(m, "texto", None)
+        if not _DECISAO_DA_LOJA.search(_plano_de(texto)):
+            continue
+        if (
+            not fala_da_garantia
+            and getattr(m, "origem", None) == constantes.ORIGEM_IA
+            and not _DECISAO_DA_LOJA.search(_plano_de(_sem_a_politica_geral_da_garantia(texto)))
+        ):
+            # Revisão cruzada do an0311 (03/11/2026): a "decisão" é só a política geral da
+            # garantia que o AGENTE explicou ("não cobre quebrado, molhado ou mau uso" — a
+            # liberação da garantia geral) e a contestação não é da garantia ("que absurdo, o
+            # pedido nem saiu"): não é a decisão da loja contestada. A da pessoa conta sempre.
+            continue
+        return True
     return False
+
+
+# A contestação que fala da garantia/do defeito/da decisão do caso (a política geral da garantia
+# só conta como "decisão" contestada com ela; ver `contesta_a_decisao_da_loja`).
+_TEMA_DA_DECISAO_DA_GARANTIA = re.compile(
+    r"\bgarantia\b|\bdefeit\w*|\bcobert\w*|\bcobre\w*|\b(?:mau|mal)\s+uso\b|\bquebr\w*"
+    r"|\btrinc\w*|\brach\w*|\bestrag\w*|\bmolhad\w*|\bagua\b|\bqueda\b|\bcaiu\b|\bderrub\w*"
+    r"|\btroc\w*|\bdevol\w*|\breembols\w*|\bestorn\w*|\brecus\w*|\bnega(?:ram|da|do|r)\b"
+    r"|\bnegou\b|\bindefer\w*|\bconsert\w*|\bassistencia\b|\banalis\w*|\bsozinh[oa]\b"
+)
+
+
+def _sem_a_politica_geral_da_garantia(texto: str | None) -> str:
+    """O texto da loja sem as frases da política geral da garantia (`checagens.
+    frase_da_garantia_geral`). PURA."""
+    from app.services.atendimento.agente import checagens
+
+    return checagens.sem_as_frases_da_garantia_geral(texto, forma=checagens.GARANTIA_GERAL)
 
 
 def _encerrada_depois(
@@ -3004,6 +3105,13 @@ def _antes(
         saida.append(_gatilho(constantes.ACAO_INSTRUCAO, antes=True))
     if _so_anexo(rajada) and pediu_evidencia(recentes, gatilho):
         saida.append(_gatilho(constantes.ACAO_ANALISAR_EVIDENCIA, DETALHE_SO_ANEXO, antes=True))
+    elif depois_do_recibo(recentes, gatilho):
+        # Revisão cruzada do an0311 (03/11/2026): depois do recibo da evidência, o turno do
+        # cliente (a legenda atrasada, o "ok", a pergunta) é da pessoa que analisa — sem o
+        # modelo (o "mande o vídeo" de novo nunca sai).
+        saida.append(
+            _gatilho(constantes.ACAO_ANALISAR_EVIDENCIA, DETALHE_DEPOIS_DO_RECIBO, antes=True)
+        )
     return saida, _so_cartao(rajada)
 
 
@@ -3301,6 +3409,15 @@ def gatilhos(
         conversa, ctx, plano, postado=postado, agora=agora
     ):
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_PARADO))
+    # Revisão cruzada do an0311 (03/11/2026): a etiqueta Abrir chamado (entrega) de um turno
+    # anterior que ninguém da loja respondeu ainda — a resposta de agora não a apaga. Com o
+    # chamado já no pedido (a pessoa agiu) ou a devolução aberta (a régua dela), não.
+    elif (
+        not devolucao_aberta
+        and not ctx.get("chamados")
+        and constantes.ACAO_ABRIR_CHAMADO in etiquetas_que_continuam(conversa, gatilho)
+    ):
+        saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_CHAMADO_PENDENTE))
     # 12 — dinheiro fora do fluxo do app; a "diferença" cede à recusa padrão.
     sem_pedido_falso = _NAO_E_PEDIDO.sub(" ", plano)
     if (

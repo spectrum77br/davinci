@@ -389,6 +389,39 @@ def _empurrar(mensagem: AtendimentoMensagem, resposta: AtendimentoMensagem) -> b
     return True
 
 
+# Revisão cruzada do an0311 (03/11/2026): a fala atrasada que é SÓ reconhecimento ou presença
+# ("ok obrigado", "?", "alguém?", "oi?") — escrita antes da resposta da IA — não reabre a vez:
+# a resposta que veio depois a cobre (reabrir faria o agente responder de novo o "?" velho, ou a
+# conversa ficar "A IA não respondeu", e o "Falta responder" diferente do Duoke). Pergunta,
+# pedido, anexo e cartão continuam indo para depois da resposta.
+_SO_PRESENCA = re.compile(
+    r"(?:(?:oi+|ola+|opa|ei|alo|hello|alguem|tem\s+alguem|ta|esta|voces?|ai|ae|por\s+favor"
+    r"|bom\s+dia|boa\s+tarde|boa\s+noite)\s*)+"
+)
+
+
+def fala_que_a_resposta_cobre(
+    texto: str | None, *, tipo: str | None = None, anexos: Any = None, payload: Any = None
+) -> bool:
+    """A fala do cliente é só reconhecimento/agradecimento ou presença, sem anexo nem cartão
+    (ver acima)? PURA."""
+    from app.services.atendimento.agente import acao_pessoa
+    from app.services.atendimento.constantes import e_cartao_do_comprador
+
+    if (tipo or "texto") != "texto" or anexos or e_cartao_do_comprador(payload):
+        return False
+    decomposto = unicodedata.normalize("NFKD", (texto or "").lower())
+    plano = "".join(c for c in decomposto if not unicodedata.combining(c))
+    if not plano.strip():
+        return False
+    if re.fullmatch(r"[\s?!.]+", plano):
+        return True
+    if acao_pessoa.so_reconhecimento(texto):
+        return True
+    palavras = " ".join(re.findall(r"[a-z]+", plano))
+    return bool(palavras) and bool(_SO_PRESENCA.fullmatch(palavras))
+
+
 async def _resposta_da_ia_que_nao_viu(
     session: AsyncSession, conversa: AtendimentoConversa, quando: datetime
 ) -> AtendimentoMensagem | None:
@@ -466,7 +499,14 @@ async def reordenar_depois_da_ia(
         .scalars()
         .all()
     )
-    movidas = [m for m in candidatas if _empurrar(m, resposta)]
+    movidas = [
+        m
+        for m in candidatas
+        if not fala_que_a_resposta_cobre(
+            m.texto, tipo=m.tipo, anexos=m.anexos, payload=getattr(m, "payload", None)
+        )
+        and _empurrar(m, resposta)
+    ]
     if movidas:
         logger.info(
             "atendimento_fala_depois_da_ia",
@@ -1163,7 +1203,9 @@ async def gravar_mensagem(
     # depois da resposta (`_empurrar`) e reabre a vez do cliente.
     nao_viu = (
         await _resposta_da_ia_que_nao_viu(session, conversa, enviada_em)
-        if autor == AUTOR_CLIENTE and enviada_em is not None
+        if autor == AUTOR_CLIENTE
+        and enviada_em is not None
+        and not fala_que_a_resposta_cobre(texto, tipo=tipo, anexos=anexos, payload=payload)
         else None
     )
     mensagem = AtendimentoMensagem(
