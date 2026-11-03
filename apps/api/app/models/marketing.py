@@ -403,6 +403,13 @@ class MarketingCreative(Base, TimestampMixin):
     # Equipe de marketing dona da linha (nome livre; casa com
     # users.marketing_teams). NULL = sem equipe (só admin/sem-equipe vê).
     equipe: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # "historia" | "produto" (migration 0444). Nasce com o tipo da ideia que o
+    # vídeo cumpre (ou o que a agência marcou no vídeo autoral) e acompanha a
+    # ideia quando ela é reclassificada. O robô lê daqui: produto vai também
+    # para a grade do Instagram, história só para a aba Reels.
+    tipo_conteudo: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="historia", server_default="historia"
+    )
     # DEPRECADA (migration 0299): o briefing virou `marketing_roteiros.texto`.
     # A coluna continua no banco por uma versão porque o downgrade a recriaria
     # VAZIA e os textos de produção não voltariam. Ninguém lê daqui além do

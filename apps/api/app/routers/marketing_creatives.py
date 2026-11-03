@@ -41,6 +41,7 @@ from app.models import (
     User,
     UserRole,
 )
+from app.models.marketing_roteiro import TIPO_HISTORIA, TipoConteudo
 from app.schemas.marketing_legendas import legenda_opcional
 from app.services.marketing import autopostagem, link_criativo
 from app.services.marketing.anexos import (
@@ -99,6 +100,9 @@ def _row_out(
         # personagens moram em /api/marketing/roteiros.
         "roteiro_id": str(row.roteiro_id) if row.roteiro_id else None,
         "roteiro_titulo": row.roteiro_ref.titulo if row.roteiro_ref else None,
+        # "historia" | "produto" (migration 0444): produto entra também na
+        # grade do Instagram quando o robô posta.
+        "tipo_conteudo": row.tipo_conteudo,
         "aprovado": row.aprovado,
         # O recado escrito na aprovação/recusa. É o que a agência lê no portal.
         "feedback": row.feedback,
@@ -387,6 +391,7 @@ class CreativeIn(BaseModel):
     # Legenda escrita à mão pra ESTE vídeo. Vazio vira NULL de propósito: é
     # o NULL que faz a cascata seguir pra biblioteca da marca/produto.
     legenda: str | None = None
+    tipo_conteudo: TipoConteudo = TIPO_HISTORIA
 
     _v_legenda = field_validator("legenda", mode="before")(legenda_opcional)
 
@@ -434,6 +439,7 @@ async def create_creative(
         product_id=await _product_id_do_sku(session, payload.sku),
         equipe=equipe,
         legenda=payload.legenda,
+        tipo_conteudo=payload.tipo_conteudo,
         created_by=user.id,
     )
     session.add(row)
@@ -471,6 +477,9 @@ class CreativePatch(BaseModel):
     # dá pra escrever sem recusar nada (um ajuste fino, um "faltou o SKU na
     # tela"), e o `aprovar` também carimba este campo.
     feedback: str | None = None
+    # "historia" | "produto" (migration 0444). Ligar a linha a um roteiro sem
+    # mandar o tipo faz ela herdar o da ideia.
+    tipo_conteudo: TipoConteudo | None = None
 
     _v_legenda = field_validator("legenda", mode="before")(legenda_opcional)
 
@@ -489,6 +498,14 @@ async def patch_creative(
     trocou_roteiro = "roteiro_id" in data
     if trocou_roteiro:
         row.roteiro_id = await _roteiro_valido(session, data["roteiro_id"])
+        if row.roteiro_id is not None and not data.get("tipo_conteudo"):
+            row.tipo_conteudo = await session.scalar(
+                select(MarketingRoteiro.tipo_conteudo).where(
+                    MarketingRoteiro.id == row.roteiro_id
+                )
+            )
+    if data.get("tipo_conteudo"):
+        row.tipo_conteudo = data["tipo_conteudo"]
     if "modelo" in data:
         modelo = (data["modelo"] or "").strip()
         if not modelo:

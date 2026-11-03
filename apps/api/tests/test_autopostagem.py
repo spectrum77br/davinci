@@ -260,13 +260,19 @@ async def test_a_postagem_do_robo_nasce_marcada_como_dele(db):
     assert linha.origem == "robo", "senão desligar não é botão de pânico"
 
 
-def test_reel_do_robo_no_instagram_fica_so_na_aba_reels():
-    """Pedido de 03/11/2026 (Charlots e Uranyx): o Reel do robô não entra na
-    grade do perfil. Nas outras redes a opção não existe e não deve viajar."""
-    assert svc._opcoes_do_robo(_rede(plataforma="instagram")) == {"share_to_feed": False}
-    assert svc._opcoes_do_robo(_rede(plataforma=" Instagram ")) == {"share_to_feed": False}
+def test_no_instagram_produto_vai_pra_grade_e_historia_so_pra_aba_reels():
+    """Eduardo, 03/11/2026: vídeo de produto também no feed; história só na
+    aba Reels. Nas outras redes a opção não existe e não deve viajar."""
+    produto = MarketingCreative(modelo="p", tipo_conteudo="produto")
+    historia = MarketingCreative(modelo="h", tipo_conteudo="historia")
+    ig = _rede(plataforma="instagram")
+    assert svc._opcoes_do_robo(ig, produto) == {"share_to_feed": True}
+    assert svc._opcoes_do_robo(ig, historia) == {"share_to_feed": False}
+    assert svc._opcoes_do_robo(_rede(plataforma=" Instagram "), historia) == {
+        "share_to_feed": False
+    }
     for outra in ("tiktok", "facebook", "youtube", "shopee"):
-        assert svc._opcoes_do_robo(_rede(plataforma=outra)) == {}, outra
+        assert svc._opcoes_do_robo(_rede(plataforma=outra), produto) == {}, outra
 
 
 async def test_postagem_do_robo_fora_do_instagram_sai_sem_share_to_feed(db):

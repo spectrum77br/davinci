@@ -44,7 +44,7 @@ import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,6 +70,7 @@ from app.models.marketing_ideia_requisicao import (
 from app.models.marketing_ideia_requisicao import (
     STATUS_RECUSADA as IDEIA_RECUSADA,
 )
+from app.models.marketing_roteiro import TIPO_HISTORIA, TipoConteudo
 from app.routers.marketing_creatives import _user_equipes
 from app.services.marketing.anexos import (
     _EXT_REFERENCIA,
@@ -147,6 +148,7 @@ def _roteiro_out(row: MarketingRoteiro) -> dict[str, Any]:
         # briefing da casa, e reendereçá-lo para "as duas" mandaria o texto de
         # uma agência para a outra sem ninguém perceber.
         "criado_pela_equipe": row.criado_pela_equipe,
+        "tipo_conteudo": row.tipo_conteudo,
         "ativo": row.ativo,
         "referencias": [_ref_out(r) for r in row.refs],
         "personagens": [
@@ -221,6 +223,8 @@ class RoteiroIn(BaseModel):
     sku: str | None = None
     # Vazio/ausente = as DUAS agências (regra do Eduardo).
     equipe_destino: str | None = None
+    # A aba do portal onde a ideia aparece (migration 0444).
+    tipo_conteudo: TipoConteudo = TIPO_HISTORIA
 
 
 class RoteiroPatch(BaseModel):
@@ -230,6 +234,7 @@ class RoteiroPatch(BaseModel):
     sku: str | None = None
     equipe_destino: str | None = None
     ativo: bool | None = None
+    tipo_conteudo: TipoConteudo | None = None
 
 
 def _destino_limpo(bruto: str | None) -> str | None:
@@ -254,6 +259,23 @@ def _agencias_do_portal() -> list[str]:
     for equipe in _mapa_tokens().values():
         vistas.setdefault(equipe.strip().lower(), equipe.strip())
     return sorted(vistas.values(), key=str.lower)
+
+
+async def _reclassificar_descendentes(session: AsyncSession, row: MarketingRoteiro) -> None:
+    """O tipo da ideia vale para o que saiu dela: as versões das agências
+    (`origem_id`) e os vídeos entregues para ela (`roteiro_id`). Sem isto,
+    reclassificar uma ideia deixava os vídeos já na fila do robô com o tipo
+    velho — e o Reel de produto continuava fora da grade."""
+    await session.execute(
+        update(MarketingRoteiro)
+        .where(MarketingRoteiro.origem_id == row.id)
+        .values(tipo_conteudo=row.tipo_conteudo)
+    )
+    await session.execute(
+        update(MarketingCreative)
+        .where(MarketingCreative.roteiro_id == row.id)
+        .values(tipo_conteudo=row.tipo_conteudo)
+    )
 
 
 async def _sincronizar_entregas(session: AsyncSession, row: MarketingRoteiro) -> None:
@@ -377,6 +399,7 @@ async def criar(
         sku=sku,
         product_id=await _product_id_do_sku(session, sku),
         equipe_destino=destino,
+        tipo_conteudo=payload.tipo_conteudo,
         created_by=user.id,
     )
     session.add(row)
@@ -426,6 +449,9 @@ async def editar(
         row.equipe_destino = novo
     if "ativo" in data:
         row.ativo = bool(data["ativo"])
+    if data.get("tipo_conteudo") and data["tipo_conteudo"] != row.tipo_conteudo:
+        row.tipo_conteudo = data["tipo_conteudo"]
+        await _reclassificar_descendentes(session, row)
     await session.commit()
     # Depois do commit: escrever o texto, ligar o `ativo` ou trocar o destino
     # são exatamente os três eventos que mudam PRA QUEM este briefing existe.
