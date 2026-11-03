@@ -4,7 +4,8 @@
 // DEVEDOR, FINALIZADO, CRÉDITO líquido) ficam read-only. O IMPOSTO 1% é
 // calculado, mas aceita um valor digitado (0 zera).
 import { computed, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
+import { ChevronDown, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
+import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 
 definePageMeta({
   middleware: ['permission'],
@@ -186,7 +187,7 @@ function fmtMoney(n: number | null): string {
 const totalRows = computed(() => rows.value.length)
 
 // ── Filtros ───────────────────────────────────────────────────────────
-// "" = todas; SEM_VALOR = só as linhas com a célula vazia.
+// "" (ou nenhuma empresa marcada) = todas; SEM_VALOR = só as linhas com a célula vazia.
 const SEM_VALOR = '__sem__'
 
 // "Kia", "KIA" e "Kia " são a mesma empresa.
@@ -194,7 +195,7 @@ function empresaDaLinha(emp: string | null | undefined): string {
   return (emp ?? '').trim().toUpperCase()
 }
 
-type Filtros = { grupoCota: string, alienacao: string, empresa: string }
+type Filtros = { grupoCota: string, alienacao: string, empresas: string[] }
 
 // Grupo ou cota: um número procura nos dois ("1654" acha o grupo 1654 e a
 // cota 1654); "1654/566" é o grupo 1654 com a cota começando por 566.
@@ -210,43 +211,61 @@ function passaNosFiltros(row: Row, f: Filtros): boolean {
     const a = row.alienacao ?? ''
     if (f.alienacao === SEM_VALOR ? a !== '' : a !== f.alienacao) return false
   }
-  if (f.empresa) {
+  // Empresa: uma ou mais (Eduardo, 03/11); a linha passa se for de qualquer uma.
+  if (f.empresas.length) {
     const e = empresaDaLinha(row.emp)
-    if (f.empresa === SEM_VALOR ? e !== '' : e !== f.empresa) return false
+    if (!f.empresas.includes(e === '' ? SEM_VALOR : e)) return false
   }
   return true
 }
 
 const filtroGrupoCota = ref('')
 const filtroAlienacao = ref('')
-const filtroEmpresa = ref('')
+const filtroEmpresas = ref<string[]>([])
 const filtrando = computed(() =>
-  Boolean(filtroGrupoCota.value.trim() || filtroAlienacao.value || filtroEmpresa.value))
+  Boolean(filtroGrupoCota.value.trim() || filtroAlienacao.value || filtroEmpresas.value.length))
 
 // Quem aparece é decidido quando o filtro muda (ou ao recarregar), não a cada
 // tecla: trocar a EMP ou a alienação de uma linha não a faz sumir da tela.
 const idsVisiveis = ref(new Set<string>())
 function aplicarFiltros() {
-  const f = { grupoCota: filtroGrupoCota.value, alienacao: filtroAlienacao.value, empresa: filtroEmpresa.value }
+  const f = { grupoCota: filtroGrupoCota.value, alienacao: filtroAlienacao.value, empresas: filtroEmpresas.value }
   idsVisiveis.value = new Set(rows.value.filter((r) => passaNosFiltros(r, f)).map((r) => r.id))
 }
-watch([filtroGrupoCota, filtroAlienacao, filtroEmpresa], aplicarFiltros)
+watch([filtroGrupoCota, filtroAlienacao, filtroEmpresas], aplicarFiltros)
 const linhasVisiveis = computed(() => rows.value.filter((r) => idsVisiveis.value.has(r.id)))
 
 function limparFiltros() {
   filtroGrupoCota.value = ''
   filtroAlienacao.value = ''
-  filtroEmpresa.value = ''
+  filtroEmpresas.value = []
 }
 
 // Opções vêm das linhas; a escolhida continua na lista mesmo sem linha.
 const opcoesEmpresa = computed(() => {
   const nomes = new Set(rows.value.map((r) => empresaDaLinha(r.emp)))
-  if (filtroEmpresa.value && filtroEmpresa.value !== SEM_VALOR) nomes.add(filtroEmpresa.value)
+  for (const e of filtroEmpresas.value) if (e !== SEM_VALOR) nomes.add(e)
   return {
     nomes: [...nomes].filter(Boolean).sort((a, b) => a.localeCompare(b, 'pt-BR')),
-    semEmpresa: nomes.has('') || filtroEmpresa.value === SEM_VALOR,
+    semEmpresa: nomes.has('') || filtroEmpresas.value.includes(SEM_VALOR),
   }
+})
+// Marca/desmarca uma empresa (array novo: o watch dos filtros vê a troca).
+function alternarEmpresa(e: string) {
+  const marcadas = filtroEmpresas.value.includes(e)
+    ? filtroEmpresas.value.filter((x) => x !== e)
+    : [...filtroEmpresas.value, e]
+  const ordem = [...opcoesEmpresa.value.nomes, SEM_VALOR]
+  filtroEmpresas.value = ordem.filter((o) => marcadas.includes(o))
+}
+function todasAsEmpresas() {
+  filtroEmpresas.value = []
+}
+// "Todas", "KIA", "KIA, LOCAGIL" ou "3 empresas".
+const rotuloEmpresas = computed(() => {
+  const nomes = filtroEmpresas.value.map((e) => (e === SEM_VALOR ? 'Sem empresa' : e))
+  if (nomes.length === 0) return 'Todas'
+  return nomes.length <= 2 ? nomes.join(', ') : `${nomes.length} empresas`
 })
 const opcoesAlienacao = computed(() => {
   const valores = new Set(ALIENACAO_OPTIONS.filter(Boolean))
@@ -304,14 +323,61 @@ await load()
           <option :value="SEM_VALOR">Sem alienação</option>
         </select>
       </label>
-      <label class="flex flex-col gap-1">
+      <div class="flex flex-col gap-1">
         <span class="text-muted-foreground">Empresa</span>
-        <select v-model="filtroEmpresa" data-filtro-empresa class="border rounded px-2 py-1 text-sm bg-background h-8">
-          <option value="">Todas</option>
-          <option v-for="e in opcoesEmpresa.nomes" :key="e" :value="e">{{ e }}</option>
-          <option v-if="opcoesEmpresa.semEmpresa" :value="SEM_VALOR">Sem empresa</option>
-        </select>
-      </label>
+        <!-- Uma ou mais empresas: abre a lista para marcar; nenhuma marcada = todas. -->
+        <PopoverRoot>
+          <PopoverTrigger as-child>
+            <button
+              type="button"
+              data-filtro-empresa
+              title="Escolha uma ou mais empresas"
+              class="inline-flex items-center justify-between gap-2 border rounded px-2 py-1 text-sm bg-background h-8 min-w-[6rem] max-w-[16rem]"
+            >
+              <span class="truncate">{{ rotuloEmpresas }}</span>
+              <ChevronDown class="size-3.5 shrink-0 opacity-60" />
+            </button>
+          </PopoverTrigger>
+          <PopoverPortal>
+            <PopoverContent
+              side="bottom"
+              align="start"
+              :side-offset="4"
+              :collision-padding="8"
+              data-lista-empresas
+              class="z-[70] w-56 max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
+            >
+              <div class="mb-1 flex items-center px-1 text-[11px] font-medium text-muted-foreground">
+                Marque uma ou mais
+                <button
+                  v-if="filtroEmpresas.length"
+                  type="button"
+                  class="ml-auto font-normal underline hover:text-foreground"
+                  @click="todasAsEmpresas"
+                >todas</button>
+              </div>
+              <label
+                v-for="e in opcoesEmpresa.nomes"
+                :key="e"
+                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+              >
+                <input type="checkbox" class="size-4" :checked="filtroEmpresas.includes(e)" @change="alternarEmpresa(e)" />
+                {{ e }}
+              </label>
+              <label
+                v-if="opcoesEmpresa.semEmpresa"
+                class="flex cursor-pointer items-center gap-2 rounded px-1 py-1 text-sm hover:bg-muted/50"
+              >
+                <input type="checkbox" class="size-4" :checked="filtroEmpresas.includes(SEM_VALOR)" @change="alternarEmpresa(SEM_VALOR)" />
+                Sem empresa
+              </label>
+              <div class="mt-1 border-t px-1 pt-1 text-[11px] text-muted-foreground">
+                Nenhuma marcada = todas. Esc ou clicar fora fecha.
+              </div>
+            </PopoverContent>
+          </PopoverPortal>
+        </PopoverRoot>
+      </div>
       <button
         v-if="filtrando"
         data-limpar-filtros
@@ -421,7 +487,7 @@ await load()
             <td class="calc text-right">{{ fmtMoney(imposto7(row)) }}</td>
             <td>
               <!-- Em branco = automático (o 1% aparece em cinza); 0 ou outro valor = digitado. -->
-              <input type="number" step="0.01" min="0" class="cell-input text-right" data-imposto1
+              <input type="number" step="0.01" min="0" class="cell-input text-right" style="min-width: 5.5rem" data-imposto1
                 :value="row.imposto1_manual ?? ''" :placeholder="fmtMoney(imposto1Automatico(row))"
                 :disabled="!canEdit" title="Em branco: 1% do crédito, automático. Digite 0 para zerar."
                 @input="(e) => {
