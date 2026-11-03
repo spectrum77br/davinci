@@ -304,9 +304,7 @@ async def test_email_da_netshoes_na_entrada_cai_na_caixa_problemas_da_loja(
     assert r.json()["itens"] == []
 
 
-async def test_zap_do_numero_so_para_quem_tem_o_numero(db, make_user, client, auth_as):
-    """30/10/2026: o vendedor vê e responde o Zap dos números das lojas dele; o outro
-    vendedor, não (404); o admin vê todos. A tela dos números continua só do admin."""
+async def _zap_mini(db):
     from app.services.atendimento import gravar
 
     canal = AtendimentoCanal(
@@ -337,20 +335,81 @@ async def test_zap_do_numero_so_para_quem_tem_o_numero(db, make_user, client, au
         enviada_em=datetime.now(UTC) - timedelta(minutes=5),
     )
     await db.commit()
+    return canal, conversa
+
+
+async def test_zap_para_todos_os_vendedores(db, make_user, client, auth_as):
+    """03/11/2026 ("mudar pro whatsapp mostrar pra todas as contas todos ali"): quem tem
+    alguma loja no atendimento vê e responde TODOS os números; quem não tem loja, não
+    (404); a tela dos números continua só do admin. As chaves "c:" ficam gravadas."""
+    canal, conversa = await _zap_mini(db)
+    londres, israel, sem_loja = await make_user(), await make_user(), await make_user()
+    await dar_lojas(db, londres, escopo.chave(escopo.CANAL, canal.id))
+    await dar_lojas(db, israel, escopo.chave(escopo.FICHA, canal.id))  # outra loja qualquer
+
+    for vendedor in (londres, israel):
+        auth_as(vendedor)
+        assert (await client.get(f"/api/atendimento/conversas/{conversa.id}")).status_code == 200
+        r = (await client.get("/api/atendimento/resumo")).json()
+        assert "Mini" in [lj["conta"] for lj in r["lojas"]]
+        assert await enviar._responde_o_zap(db, vendedor, conversa) is True
+        assert (await client.get("/api/atendimento/zap/numeros")).status_code == 404
+
+    auth_as(sem_loja)
+    assert (await client.get(f"/api/atendimento/conversas/{conversa.id}")).status_code == 404
+    assert await enviar._responde_o_zap(db, sem_loja, conversa) is False
+
+    lojas = {lj["chave"]: lj for lj in await escopo.lojas_para_vincular(db)}
+    assert lojas[escopo.chave(escopo.CANAL, canal.id)]["plataforma"] == "whatsapp"
+
+
+async def test_zap_por_vendedor_volta_com_a_chave(db, make_user, client, auth_as, monkeypatch):
+    """Com `ZAP_PARA_TODOS = False`, o recorte de 30/10 volta: só quem tem o número."""
+    monkeypatch.setattr(escopo, "ZAP_PARA_TODOS", False)
+    canal, conversa = await _zap_mini(db)
     londres, israel = await make_user(), await make_user()
     await dar_lojas(db, londres, escopo.chave(escopo.CANAL, canal.id))
     await dar_lojas(db, israel, escopo.chave(escopo.FICHA, canal.id))
-
     auth_as(londres)
     assert (await client.get(f"/api/atendimento/conversas/{conversa.id}")).status_code == 200
-    r = (await client.get("/api/atendimento/resumo")).json()
-    assert [lj["conta"] for lj in r["lojas"]] == ["Mini"]
-    assert await enviar._responde_o_zap(db, londres, conversa) is True
-    assert (await client.get("/api/atendimento/zap/numeros")).status_code == 404
-
     auth_as(israel)
     assert (await client.get(f"/api/atendimento/conversas/{conversa.id}")).status_code == 404
     assert await enviar._responde_o_zap(db, israel, conversa) is False
 
-    lojas = {lj["chave"]: lj for lj in await escopo.lojas_para_vincular(db)}
-    assert lojas[escopo.chave(escopo.CANAL, canal.id)]["plataforma"] == "whatsapp"
+
+async def test_marcar_como_nao_lida_volta_a_bolinha_para_todos(db, make_user, client, auth_as):
+    """03/11/2026: abrir apaga a bolinha (o visto); "não lida" a traz de volta — no
+    número da conversa e no "Falta responder" — para todos, sem ir à plataforma."""
+    from app.services.atendimento import pendente
+
+    canal, conversa = await _zap_mini(db)
+    londres, israel = await make_user(), await make_user()
+    await dar_lojas(db, londres, escopo.chave(escopo.CANAL, canal.id))
+    await dar_lojas(db, israel, escopo.chave(escopo.FICHA, canal.id))
+    url = f"/api/atendimento/conversas/{conversa.id}"
+
+    async def numero():
+        await db.refresh(conversa)
+        return await db.scalar(
+            select(pendente.nao_lidas_duoke_sql()).where(AtendimentoConversa.id == conversa.id)
+        )
+
+    assert await numero() == 1
+    auth_as(londres)
+    assert (await client.post(f"{url}/visto")).status_code == 200
+    assert await numero() == 0
+    r = await client.post(f"{url}/nao-lida")
+    assert r.status_code == 200, r.text
+    assert r.json()["visto_em"] is None
+    assert await numero() == 1
+    falta = await db.scalar(
+        select(pendente.falta_responder_na_caixa_sql()).where(AtendimentoConversa.id == conversa.id)
+    )
+    assert falta is True
+    # Quem não tem a conversa: 404, nada muda.
+    sem_loja = await make_user()
+    auth_as(sem_loja)
+    assert (await client.post(f"{url}/nao-lida")).status_code == 404
+    # O Direct do Instagram não é conversa da Caixa.
+    auth_as(israel)
+    assert (await client.post("/api/atendimento/conversas/ig:abc/nao-lida")).status_code == 409

@@ -458,6 +458,37 @@ async def gravar_visto(
     return conversa.visto_em
 
 
+async def desfazer_visto(
+    session: AsyncSession, conversa: AtendimentoConversa, user: User | None
+) -> None:
+    """MARCAR COMO NÃO LIDA (03/11/2026) — o Eduardo, com o Zap para todos: "fazer um
+    marcar como não lido ... se ele clicar nisso volta, já que às vezes alguém não
+    vai querer responder".
+
+    Apaga o "visto no DaVinci" (`visto_em` e o da base importada,
+    `notificacoes_visto_em`): a conversa volta a contar como se ninguém a tivesse
+    aberto — a mensagem do comprador depois da última resposta de PESSOA volta
+    para a bolinha e para o "Falta responder", para todos (a regra do Duoke em
+    `pendente.nao_lidas_duoke`, que não muda). Nada vai à plataforma. Quem vê a
+    caixa pode (como o /visto); IA e crons nunca. Commita e relê a conversa."""
+    if user is None or not acesso.pode_ver(user):
+        raise LidaRecusada(RECUSA_SO_LEITURA, "Só quem vê o Atendimento marca como não lida.")
+    await session.execute(
+        update(AtendimentoConversa)
+        .where(AtendimentoConversa.id == conversa.id)
+        .values(
+            visto_em=None,
+            notificacoes_visto_em=None,
+            # Marca de leitura, não mudança da conversa.
+            updated_at=AtendimentoConversa.updated_at,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    await session.refresh(conversa)
+    logger.info("atendimento_nao_lida", conversa_id=str(conversa.id), user_id=str(user.id))
+
+
 async def zerar_nao_lidas(
     session: AsyncSession,
     user: User | None,

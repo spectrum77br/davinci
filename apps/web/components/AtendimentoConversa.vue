@@ -265,6 +265,7 @@ import {
   StickyNote,
   ThumbsDown,
   ThumbsUp,
+  Mail,
   Trash2,
   TriangleAlert,
   Undo2,
@@ -667,6 +668,13 @@ async function gravarVisto(id: string, rota: 'lida' | 'visto') {
   detalhe.value = { ...d, conversa: c }
   emit('mudou', c)
 }
+// MARCAR COMO NÃO LIDA (03/11/2026) — o Eduardo, com o Zap para todos: "fazer um
+// marcar como não lido ... ao sumir as bolinhas depois de um tempo com a conversa
+// aberta, se ele clicar nisso volta". O POST /nao-lida apaga o visto (a bolinha e
+// o "Falta responder" voltam para TODOS) e ESTA abertura para de gravar o visto;
+// abrir a conversa de novo grava como sempre.
+const naoLidaAqui = ref<string | null>(null)
+const marcandoNaoLida = ref(false)
 const marcadorLida = criarMarcadorDeLida({
   atual: () => props.conversaId || null,
   visivel: () => props.ativa !== false && (typeof document === 'undefined' || document.visibilityState === 'visible'),
@@ -680,9 +688,35 @@ const marcadorLida = criarMarcadorDeLida({
 // Cada detalhe que chega (ao abrir e no polling) diz se é para chamar, qual
 // rota e até onde a tela mostra.
 watch(() => detalhe.value, (d) => {
-  if (d) marcadorLida.abrir(d.conversa.id, rotaAoAbrir(d, props.canEdit) !== null, d.visto_ate ?? null, d.conversa.notificacoes_migracao_id)
+  if (d) marcadorLida.abrir(d.conversa.id, naoLidaAqui.value !== d.conversa.id && rotaAoAbrir(d, props.canEdit) !== null, d.visto_ate ?? null, d.conversa.notificacoes_migracao_id)
 })
-watch(() => props.conversaId, () => marcadorLida.fechar())
+watch(() => props.conversaId, () => {
+  naoLidaAqui.value = null
+  marcadorLida.fechar()
+})
+async function marcarNaoLida() {
+  const d = detalhe.value
+  if (!d || marcandoNaoLida.value) return
+  const id = d.conversa.id
+  marcandoNaoLida.value = true
+  naoLidaAqui.value = id
+  marcadorLida.abrir(id, false, d.visto_ate ?? null, d.conversa.notificacoes_migracao_id)
+  try {
+    const r = await api<LidaResposta>(`/api/atendimento/conversas/${encodeURIComponent(id)}/nao-lida`, { method: 'POST' })
+    const atual = detalhe.value
+    if (r?.conversa && atual && atual.conversa.id === id) {
+      const c = { ...atual.conversa, ...r.conversa }
+      detalhe.value = { ...atual, conversa: c }
+      emit('mudou', c)
+    }
+    toasts.success('Marcada como não lida: a bolinha voltou para todos')
+  } catch {
+    naoLidaAqui.value = null
+    toasts.error('Não consegui marcar como não lida')
+  } finally {
+    marcandoNaoLida.value = false
+  }
+}
 watch(() => props.ativa, (a) => {
   if (a !== false) marcadorLida.retomar()
 })
@@ -3156,6 +3190,21 @@ watch(() => props.conversaId, (novo, velho) => {
                 :carregando="painelCarregando"
                 :can-edit="canEdit"
               />
+              <!-- Não lida (03/11/2026): a bolinha e o "Falta responder" voltam para todos. -->
+              <Button
+                v-if="!conversa.somente_leitura"
+                size="sm"
+                variant="ghost"
+                class="h-7 px-2 text-xs"
+                :disabled="marcandoNaoLida"
+                title="marcar como não lida: a bolinha e o Falta responder voltam para todos"
+                aria-label="Marcar como não lida"
+                data-nao-lida
+                @click="marcarNaoLida"
+              >
+                <Mail class="size-3.5" />
+                <span class="ml-1 hidden 2xl:inline">Não lida</span>
+              </Button>
               <Button size="sm" variant="ghost" class="h-7 px-2" :disabled="carregando" title="atualizar a conversa (e o painel do pedido)" aria-label="atualizar a conversa" @click="atualizarTudo">
                 <RotateCcw class="size-3.5" :class="{ 'animate-spin': carregando }" />
               </Button>

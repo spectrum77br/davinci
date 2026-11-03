@@ -349,6 +349,8 @@ ROTAS_DE_QUEM_LE = frozenset(
         # notificações devem sumir se clicado em algum atendimento"): só a
         # marca do DaVinci que apaga o número; nada vai à plataforma.
         ("POST", "/api/atendimento/conversas/{conversa_id}/visto"),
+        # O "marcar como não lida" (03/11/2026): o contrário do visto, para todos.
+        ("POST", "/api/atendimento/conversas/{conversa_id}/nao-lida"),
     }
 )
 SO_LEITURA = {

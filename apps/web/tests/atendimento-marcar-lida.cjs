@@ -413,7 +413,8 @@ function marcador(extra = {}) {
   assert.match(bloco, /`\/api\/atendimento\/conversas\/\$\{encodeURIComponent\(id\)\}\/\$\{rota\}`, \{ method: 'POST', body \}/)
   // A releitura com mensagem nova: só o /visto.
   assert.match(bloco, /rever: \(id\) => gravarVisto\(id, 'visto'\)/)
-  assert.match(bloco, /marcadorLida\.abrir\(d\.conversa\.id, rotaAoAbrir\(d, props\.canEdit\) !== null, d\.visto_ate \?\? null, d\.conversa\.notificacoes_migracao_id\)/)
+  // 03/11/2026: depois do "não lida", esta abertura não grava (`naoLidaAqui`).
+  assert.match(bloco, /marcadorLida\.abrir\(d\.conversa\.id, naoLidaAqui\.value !== d\.conversa\.id && rotaAoAbrir\(d, props\.canEdit\) !== null, d\.visto_ate \?\? null, d\.conversa\.notificacoes_migracao_id\)/)
 
   async function tela({ canEdit = true, marcar_lida = true, respostaFalha = false, naoMarcou = false, adiarRespostas = false } = {}) {
     const rel = relogioFalso()
@@ -448,11 +449,11 @@ function marcador(extra = {}) {
     }
     const js = transpile(bloco.replace(/^type LidaResposta = .*$/m, ''))
     const rodar = new Function(
-      'criarMarcadorDeLida', 'rotaAoAbrir', 'props', 'detalhe', 'api', 'emit', 'watch', 'onMounted', 'onBeforeUnmount', 'document',
+      'criarMarcadorDeLida', 'rotaAoAbrir', 'props', 'detalhe', 'api', 'emit', 'watch', 'onMounted', 'onBeforeUnmount', 'document', 'ref', 'toasts',
       js,
     )
     rodar(Lt.criarMarcadorDeLida, Lt.rotaAoAbrir, props, detalhe, apiFalsa, (e, c) => emitidos.push([e, c]), Vue.watch,
-      (f) => montar.push(f), (f) => desmontar.push(f), doc)
+      (f) => montar.push(f), (f) => desmontar.push(f), doc, Vue.ref, { success: () => {}, error: () => {} })
     montar.forEach((f) => f())
     const chegar = async (id, nao = 2, visto_ate = null, conversa = {}) => {
       detalhe.value = { conversa: { id, nao_lidas: nao, plataforma: 'shopee', ...conversa }, mensagens: [], marcar_lida, visto_ate }
@@ -794,6 +795,38 @@ function marcador(extra = {}) {
     for (const p of ['"shopee": frozenset({CANAL_CHAT})', '"tiktok": frozenset({CANAL_CHAT})', '"ml": frozenset({CANAL_POS_VENDA})']) {
       assert.ok(servico.includes(p), p)
     }
+  }
+
+  // ───────────────────────── marcar como NÃO LIDA (03/11/2026)
+  {
+    const rota = api('routers/atendimento_lida.py')
+    assert.match(rota, /@router\.post\("\/conversas\/\{conversa_id\}\/nao-lida", response_model=VistoOut\)/)
+    assert.match(rota, /await lida_svc\.desfazer_visto\(session, c, user\)/)
+    const servico = api('services/atendimento/lida.py')
+    assert.match(servico, /visto_em=None,\n\s*notificacoes_visto_em=None,/, 'apaga os dois vistos')
+    const rotaDetalhe = api('routers/atendimento.py')
+    const lista = rotaDetalhe.slice(rotaDetalhe.indexOf('ROTAS_DE_QUEM_LE = frozenset('), rotaDetalhe.indexOf('SO_LEITURA = {'))
+    assert.match(lista, /\("POST", "\/api\/atendimento\/conversas\/\{conversa_id\}\/nao-lida"\)/, 'quem só lê também marca')
+    const C = sfc('../components/AtendimentoConversa.vue').fonte
+    // O botão no cabeçalho (menos no Direct) e a rota.
+    assert.match(C, /<Button\s+v-if="!conversa\.somente_leitura"[\s\S]*?data-nao-lida\s+@click="marcarNaoLida"/)
+    assert.match(C, /\/api\/atendimento\/conversas\/\$\{encodeURIComponent\(id\)\}\/nao-lida`, \{ method: 'POST' \}/)
+    // ESTA abertura para de gravar o visto (senão a bolinha sumia de novo em 1,5 s);
+    // trocar de conversa volta ao normal.
+    assert.match(C, /marcadorLida\.abrir\(d\.conversa\.id, naoLidaAqui\.value !== d\.conversa\.id && rotaAoAbrir\(d, props\.canEdit\) !== null/)
+    assert.match(C, /naoLidaAqui\.value = id\n\s*marcadorLida\.abrir\(id, false,/)
+    assert.match(C, /watch\(\(\) => props\.conversaId, \(\) => \{\n\s*naoLidaAqui\.value = null\n\s*marcadorLida\.fechar\(\)/)
+    // O marcador de verdade: com `quer = false` a abertura não grava.
+    let chamadas = 0
+    const relogio = { agendar: (fn) => { relogio.fn = fn; return 1 }, cancelar: () => { relogio.fn = null } }
+    const m = L.criarMarcadorDeLida({ marcar: async () => { chamadas++ }, atual: () => 'z1', visivel: () => true, relogio })
+    m.abrir('z1', true, 't1')
+    m.abrir('z1', false, 't1') // clicou "não lida" antes do 1,5 s
+    if (relogio.fn) relogio.fn()
+    await tique()
+    m.abrir('z1', false, 't2') // a releitura com mensagem nova: continua sem gravar
+    await tique()
+    assert.equal(chamadas, 0, 'depois do "não lida" a abertura não grava o visto')
   }
 
   console.log('atendimento-marcar-lida: ok')
