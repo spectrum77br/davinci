@@ -345,7 +345,7 @@ type Account = {
   // margin1..5 dela continuam vindo com os da base.
   margens_catalogo?: Record<string, string | number | null> | null
   // Coluna "Equipe" da aba Contas (03/11/2026): as equipes de vendas que veem
-  // a conta (Londres, Israel, Marrocos), pela mesma régua da cerca. Vazia =
+  // a conta ("Equipe 1/2/3", a mesma de Lojas), pela régua da cerca. Vazia =
   // sem equipe. A coluna de catálogo vem com as da base.
   equipes?: EquipeDaConta[]
 }
@@ -4360,7 +4360,7 @@ watch(department, async () => {
               >Catálogo ML</th>
               <th
                 class="text-center px-2 py-2 font-medium border-b border-border min-w-[90px]"
-                title="Equipe de vendas que vê esta conta (Londres, Israel, Marrocos), pela loja ligada a ela — a mesma que separa o que cada vendedor enxerga."
+                title="Equipe que vê esta conta (Equipe 1, 2 ou 3, a mesma da tela de Lojas), pela loja ligada a ela — a que separa o que cada vendedor enxerga."
               >Equipe</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-12">Kit</th>
               <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Comissão</th>

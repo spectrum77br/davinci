@@ -104,7 +104,7 @@ class PricingAccountPatch(BaseModel):
 
 class EquipeDaConta(BaseModel):
     """Uma equipe de vendas que enxerga a conta: o número de
-    store_info.sales_team e o nome (101 Londres, 102 Israel, 103 Marrocos)."""
+    store_info.sales_team (101/102/103) e o rótulo da tela ("Equipe 1/2/3")."""
 
     numero: int
     nome: str

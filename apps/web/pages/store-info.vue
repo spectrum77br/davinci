@@ -544,13 +544,15 @@ async function commitEdit() {
   } else if (field === 'commercial_team') {
     if (raw !== '' && !(EQUIPES_DA_LOJA as readonly number[]).includes(Number(raw))) return cancelEdit()
     const nova = raw ? Number(raw) : null
-    // Trocar a equipe troca quem vê a loja em todas as telas: confirma antes.
+    // Trocar a equipe troca quem vê a loja (cerca por equipe): confirma antes.
+    // O Atendimento (conversas, e-mails, Garantia) é por PESSOA desde a 0440
+    // e não acompanha — o aviso diz isso.
     const loja = row.account_name || row.platform
     const antes = rotuloEquipeLoja(row.commercial_team)
     const depois = rotuloEquipeLoja(nova)
     const aviso = nova == null
-      ? `Tirar a equipe da loja "${loja}" (${antes})? Os vendedores de equipe deixam de ver esta loja em todas as telas.`
-      : `Mudar a loja "${loja}" de ${antes} para ${depois}? Ela passa a aparecer para a ${depois} e sai da que via antes, em todas as telas.`
+      ? `Tirar a equipe da loja "${loja}" (${antes})? Os vendedores de equipe deixam de ver esta loja em Pedidos, Produtos, Preços, Logística e Faturamento.\n\nO Atendimento (conversas, e-mails, Garantia) é por pessoa e não muda: ajuste em Usuários › Lojas no atendimento.`
+      : `Mudar a loja "${loja}" de ${antes} para ${depois}? Ela passa a aparecer para a ${depois} e sai da que via antes em Pedidos, Produtos, Preços, Logística e Faturamento.\n\nO Atendimento (conversas, e-mails, Garantia) é por pessoa e não muda: ajuste em Usuários › Lojas no atendimento.`
     // Fecha a edição antes do confirm: o blur do select chamaria de novo.
     cancelEdit()
     if (!confirm(aviso)) return
@@ -960,7 +962,7 @@ async function copyText(text: string) {
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]" title="Horários (BRT) em que as etiquetas desta loja são impressas. Vazio = contínuo.">Horário Etiqueta</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Impressão</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Responsável</th>
-            <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[130px]" title="É a equipe que vê a loja: trocar aqui muda quem a vê em todas as telas.">Equipe</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[130px]" title="É a equipe que vê a loja: trocar aqui muda quem a vê em Pedidos, Produtos, Preços, Logística e Faturamento. O Atendimento é por pessoa (Usuários › Lojas no atendimento).">Equipe</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Servidor</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">CNPJ</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[180px]">E-mail</th>

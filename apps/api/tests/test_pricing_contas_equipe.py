@@ -149,13 +149,13 @@ async def test_contas_saem_com_as_equipes_da_cerca(
     r = await client.get("/api/pricing/accounts", params={"department": "celular"})
     assert r.status_code == 200, r.text
     por_id = {c["id"]: c for c in r.json()}
-    assert _equipes(por_id[str(cenario["mega"].id)]) == [(101, "Londres")]
-    assert _equipes(por_id[str(cenario["inova"].id)]) == [(102, "Israel")]
+    assert _equipes(por_id[str(cenario["mega"].id)]) == [(101, "Equipe 1")]
+    assert _equipes(por_id[str(cenario["inova"].id)]) == [(102, "Equipe 2")]
     # Loja de uma equipe e integração de outra: as duas veem, as duas aparecem.
-    assert _equipes(por_id[str(cenario["kfa"].id)]) == [(102, "Israel"), (103, "Marrocos")]
+    assert _equipes(por_id[str(cenario["kfa"].id)]) == [(102, "Equipe 2"), (103, "Equipe 3")]
     assert _equipes(por_id[str(cenario["avulsa"].id)]) == []
     # A coluna de catálogo não tem loja: vai com a base.
-    assert _equipes(por_id[str(cenario["catalogo"].id)]) == [(102, "Israel")]
+    assert _equipes(por_id[str(cenario["catalogo"].id)]) == [(102, "Equipe 2")]
 
 
 async def test_vendedor_da_equipe_ve_so_as_contas_que_a_coluna_diz_que_sao_dele(
@@ -169,7 +169,7 @@ async def test_vendedor_da_equipe_ve_so_as_contas_que_a_coluna_diz_que_sao_dele(
     await db.commit()
     auth_as(londres)
     contas = (await client.get("/api/pricing/accounts")).json()
-    assert [(c["name"], _equipes(c)) for c in contas] == [("mega", [(101, "Londres")])]
+    assert [(c["name"], _equipes(c)) for c in contas] == [("mega", [(101, "Equipe 1")])]
 
 
 async def test_editar_a_conta_devolve_as_equipes_e_a_integracao_nova_muda_a_equipe(
@@ -182,14 +182,14 @@ async def test_editar_a_conta_devolve_as_equipes_e_a_integracao_nova_muda_a_equi
         f"/api/pricing/accounts/{cenario['mega'].id}", json={"discount": "31.12"}
     )
     assert r.status_code == 200, r.text
-    assert _equipes(r.json()) == [(101, "Londres")]
+    assert _equipes(r.json()) == [(101, "Equipe 1")]
 
     r = await client.patch(
         f"/api/pricing/accounts/{cenario['avulsa'].id}",
         json={"integration_id": str(cenario["integ_inova"].id)},
     )
     assert r.status_code == 200, r.text
-    assert _equipes(r.json()) == [(102, "Israel")]
+    assert _equipes(r.json()) == [(102, "Equipe 2")]
 
 
 async def test_catalogo_e_margem_propria_devolvem_as_equipes_da_base(
@@ -203,14 +203,14 @@ async def test_catalogo_e_margem_propria_devolvem_as_equipes_da_base(
     )
     assert r.status_code == 200, r.text
     corpo = r.json()
-    assert _equipes(corpo["conta"]) == [(102, "Israel")]
-    assert _equipes(corpo["conta_catalogo"]) == [(102, "Israel")]
+    assert _equipes(corpo["conta"]) == [(102, "Equipe 2")]
+    assert _equipes(corpo["conta_catalogo"]) == [(102, "Equipe 2")]
 
     r = await client.patch(
         f"/api/pricing/accounts/{cenario['catalogo'].id}", json={"margin1": "0.25"}
     )
     assert r.status_code == 200, r.text
-    assert _equipes(r.json()) == [(102, "Israel")]
+    assert _equipes(r.json()) == [(102, "Equipe 2")]
 
 
 async def test_cada_vendedor_ve_exatamente_as_contas_que_a_coluna_diz_que_sao_dele(

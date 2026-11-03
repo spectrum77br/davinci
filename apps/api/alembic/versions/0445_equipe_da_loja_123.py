@@ -25,6 +25,10 @@ onde o número ainda é o que a 0445 gravaria (sales_team − 100); os usuários
 voltam só se ainda têm o valor novo. Depois o CHECK volta a (1, 2): se sobrou
 algum 3 (loja ou usuário mexido à mão), para com a mensagem e nada muda.
 
+DEPLOY: rodar DEPOIS do `up -d` da versão nova. A API de antes só aceita
+equipe 1 ou 2 na resposta; com um 3 gravado e ela ainda no ar, Lojas e
+Usuários dão 500 até a troca. A versão nova funciona com os dados de antes.
+
 Revision ID: 0445_equipe_da_loja_123
 Revises: 0444_tipo_conteudo_historia_produto
 """
@@ -59,7 +63,12 @@ USUARIOS: tuple[tuple[str, str, int | None, int | None], ...] = (
 
 
 def _check(valores: str) -> None:
-    for tabela in ("store_info", "users"):
+    # users ANTES de store_info: a API lê users (login) e depois store_info na
+    # mesma transação; trancar na ordem contrária pode dar deadlock com o app
+    # no ar. O lock_timeout (como na 0441) evita congelar o DaVinci atrás de
+    # uma transação longa que esteja lendo store_info.
+    op.execute("SET LOCAL lock_timeout = '30s'")
+    for tabela in ("users", "store_info"):
         nome = f"ck_{tabela}_commercial_team_valid"
         op.execute(
             f"ALTER TABLE {SCHEMA}.{tabela} DROP CONSTRAINT IF EXISTS {nome}, "  # noqa: S608

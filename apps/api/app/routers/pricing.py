@@ -23,6 +23,7 @@ from app.deps.team_scope import (
     alinhar_equipes_da_loja,
     escopo_das_equipes,
     nome_da_equipe,
+    numero_da_equipe,
     resolve_team_scope,
 )
 from app.models import (
@@ -263,6 +264,13 @@ _CAMPOS_ESPELHADOS_NA_FILHA = (
 _MARGENS_PROPRIAS = ("margin1", "margin2", "margin3", "margin4", "margin5")
 
 
+def _rotulo_equipe(sales_team: int) -> str:
+    """"Equipe 1/2/3" (03/11/2026: só o número, como em Lojas); código fora
+    das três equipes cai no nome de `nome_da_equipe` ("Equipe N")."""
+    numero = numero_da_equipe(sales_team)
+    return f"Equipe {numero}" if numero is not None else nome_da_equipe(sales_team)
+
+
 def _account_out(
     row: PricingAccount,
     roots_by_id: dict[UUID, str],
@@ -277,7 +285,7 @@ def _account_out(
     `conta_catalogo_id`: a filha de uma conta de kit (catálogo ligado).
     `equipes`: os números das equipes que veem a conta (`_equipes_das_contas`)."""
     out = PricingAccountOut.model_validate(row)
-    out.equipes = [EquipeDaConta(numero=n, nome=nome_da_equipe(n)) for n in equipes or ()]
+    out.equipes = [EquipeDaConta(numero=n, nome=_rotulo_equipe(n)) for n in equipes or ()]
     out.has_password = bool(row.password_enc)
     out.department = roots_by_id.get(row.segment_id)
     if names_by_id is not None:

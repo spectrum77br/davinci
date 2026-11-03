@@ -45,6 +45,9 @@ const ramo = script.slice(inicio, script.indexOf("} else if (field === 'password
 assert.ok(inicio > 0 && ramo.length > 0, 'commercial_team branch found')
 assert.match(ramo, /cancelEdit\(\)\s*\n\s*if \(!confirm\(aviso\)\) return/)
 assert.match(ramo, /passa a aparecer para a \$\{depois\}/)
+// O aviso não promete o Atendimento (por pessoa desde a 0440).
+assert.match(ramo, /O Atendimento \(conversas, e-mails, Garantia\) é por pessoa e não muda/)
+assert.doesNotMatch(ramo, /em todas as telas/)
 console.log('lojas-equipe: ok')
 
 // Usuários › Acesso às contas: os vínculos 101/102/103 aparecem como Equipe 1/2/3.
