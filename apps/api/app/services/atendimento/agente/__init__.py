@@ -952,6 +952,16 @@ async def conferir_proposta(
         garantia_apple_pelo_fato=checagens.garantia_apple_da_proposta(
             p, entrada["texto"], ctx, base, fichas=[*pac.fichas, *ctx.fichas_lidas]
         ),
+        # an0311 (03/11/2026): a política geral da garantia antes da compra, como a equipe
+        # responde (e a garantia estendida com a plataforma) — `checagens.garantia_geral_pre_venda`.
+        garantia_geral=checagens.garantia_geral_da_proposta(
+            p,
+            entrada["texto"],
+            ctx,
+            base,
+            fichas=[*pac.fichas, *ctx.fichas_lidas],
+            pedido=pac.pedido,
+        ),
     )
     # Eval real de 21/10/2026: a lacuna que o código não preencheu ("{rastreio}"
     # sem rastreio) nunca fica no rascunho — a frase dela sai (ou, sem resposta
@@ -1033,6 +1043,129 @@ async def conferir_proposta(
         ctx.isencoes = [checagens.ISENCAO_CAMINHO_URANYX]
     codigos = [pendencia.codigo for pendencia in chk.pendencias]
     return Conferido(p, conferida, chk, final=final, codigos=codigos)
+
+
+@dataclass
+class Corte:
+    """O corte da frase sem lastro (v17, `_sem_a_frase_sem_lastro`): `saiu` = o resto passou
+    nas duas camadas (a `proposta`, o `final`, os `codigos` e a `conferencia` são os dele);
+    `registro` = o `fatos.agente.corte_sem_lastro` (só códigos e o texto do agente);
+    `custo_usd` = o do 2º verificador (pago saindo ou não)."""
+
+    saiu: bool
+    registro: dict
+    custo_usd: float = 0.0
+    proposta: Proposta | None = None
+    final: SaidaConferida | None = None
+    codigos: list[str] = field(default_factory=list)
+    conferencia: Any = None
+
+
+def _foto_do_ctx(ctx: ContextoAgente) -> dict[str, Any]:
+    """O estado do contexto (cópia rasa de cada campo) — a 2ª conferência do corte o muda."""
+    import copy
+
+    return {k: copy.copy(v) for k, v in vars(ctx).items()}
+
+
+def _voltar_o_ctx(ctx: ContextoAgente, foto: dict[str, Any]) -> None:
+    for k, v in foto.items():
+        setattr(ctx, k, v)
+
+
+async def _sem_a_frase_sem_lastro(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    gatilho: AtendimentoMensagem,
+    base: BaseDoGerar,
+    ctx: ContextoAgente,
+    p: Proposta,
+    pac: Any,
+    conf: Any,
+    *,
+    cliente: Any,
+    prazo: float,
+) -> Corte | None:
+    """v17 (an0311, 03/11/2026 — o dono: "quando só um trecho não tem base, tirar o trecho e
+    enviar"): o "não" do verificador que é SÓ uma frase sem lastro (`verificador.
+    frase_para_cortar`). O resto passa de novo pela 1ª camada INTEIRA (`conferir_proposta`) e
+    pelo verificador; sai só com o "ok" do texto cortado — sem bloqueio duro, sem pessoa e com a
+    pergunta tratada (o "só se o resto ainda responde"). Senão, None ou o `Corte` que não saiu
+    (o rascunho de antes fica, para pessoa, com o contexto como estava). Nunca levanta."""
+    if ctx.modo_replay or base.modo != constantes.MODO_AUTO:
+        return None
+    try:
+        cortar = verificador.frase_para_cortar(p.texto, conf.registro)
+    except Exception as e:  # noqa: BLE001 — sem saber, não corta (o rascunho fica para pessoa)
+        logger.warning("atendimento_agente_corte_erro", err=type(e).__name__)
+        return None
+    if cortar is None:
+        return None
+    resto, frase = cortar
+    antes = conf.registro or {}
+    registro: dict[str, Any] = {
+        "frase_tirada": frase[:300],
+        "afirma_sem_lastro": list(antes.get("afirma_sem_lastro") or [])[:3],
+        "saiu": False,
+    }
+    foto = _foto_do_ctx(ctx)
+    try:
+        p2 = p.model_copy(update={"texto": resto})
+        c2 = await conferir_proposta(session, conversa, gatilho, base, ctx, p2, pac)
+        final2 = c2.final
+        if (
+            c2.sem_resposta
+            or final2 is None
+            or not (final2.texto or "").strip()
+            or final2.precisa_humano
+            or final2.status != constantes.RASCUNHO_PENDENTE
+            or getattr(final2, "sem_auto", None)
+            or ctx.acoes_pessoa
+        ):
+            _voltar_o_ctx(ctx, foto)
+            registro["porque"] = "a 1ª camada segurou o resto"
+            return Corte(saiu=False, registro=registro)
+        conf2 = await verificador.no_rascunho(
+            session,
+            conversa,
+            gatilho,
+            base,
+            ctx,
+            p2,
+            final2,
+            cliente=cliente,
+            prazo_s=_prazo_do_verificador(prazo, forcar=base.forcar),
+            pediu_evidencia=pac.pediu_evidencia,
+            checagens_feitas=c2.codigos,
+            soltar_sessao=lambda: _soltar_a_sessao(session, ctx),
+        )
+    except Exception as e:  # noqa: BLE001 — o rascunho de antes fica (para pessoa)
+        _voltar_o_ctx(ctx, foto)
+        logger.warning("atendimento_agente_corte_erro", err=type(e).__name__)
+        registro["porque"] = "erro"
+        return Corte(saiu=False, registro=registro)
+    custo2 = float(getattr(conf2, "custo_usd", 0.0) or 0.0)
+    chaves = ("rodou", "ok", "falha", "problemas", "afirma_sem_lastro", "motivos", "texto_sha")
+    # O 1º "não" (o texto inteiro) e o 2º veredito (o resto): os dois ficam no registro.
+    registro["verificador_antes"] = {k: antes.get(k) for k in chaves}
+    registro["verificador"] = {k: (conf2.registro or {}).get(k) for k in chaves}
+    if not ((conf2.registro or {}).get("ok") is True and not conf2.codigo):
+        _voltar_o_ctx(ctx, foto)
+        registro["porque"] = "o verificador não liberou o resto"
+        return Corte(saiu=False, registro=registro, custo_usd=custo2)
+    registro["saiu"] = True
+    logger.info(
+        "atendimento_agente_corte", saiu=True, afirmacoes=len(registro["afirma_sem_lastro"])
+    )
+    return Corte(
+        saiu=True,
+        registro=registro,
+        custo_usd=custo2,
+        proposta=p2,
+        final=conf2.final,
+        codigos=list(c2.codigos),
+        conferencia=conf2,
+    )
 
 
 async def responder(
@@ -1257,11 +1390,33 @@ async def _responder(
         checagens_feitas=codigos,
         soltar_sessao=lambda: _soltar_a_sessao(session, ctx),
     )
+    # v17 (an0311, 03/11/2026): o "não" que é SÓ uma frase sem lastro — o resto, se ainda
+    # responde, passa de novo pelas duas camadas e sai sem a frase (`_sem_a_frase_sem_lastro`).
+    corte = await _sem_a_frase_sem_lastro(
+        session,
+        conversa,
+        gatilho,
+        base,
+        ctx,
+        p,
+        pac,
+        conf,
+        cliente=cliente,
+        prazo=prazo,
+    )
+    custo_do_verificador, custo_do_corte = conf.custo_usd, 0.0
+    fatos_do_corte: dict[str, Any] = {}
+    if corte is not None:
+        custo_do_corte = corte.custo_usd
+        fatos_do_corte = {"corte_sem_lastro": corte.registro}
+        if corte.saiu:
+            p, final, codigos, conf = corte.proposta, corte.final, corte.codigos, corte.conferencia
     final = conf.final
     _guardar_avisos(ctx, final)
     if conf.codigo:
         codigos.append(conf.codigo)
     fatos_do_verificador = {"verificador": conf.registro} if conf.registro is not None else {}
+    fatos_do_verificador.update(fatos_do_corte)
     ctx.parada = PARADA_FIM
     ex._ms()
     return ex.pronto(
@@ -1284,8 +1439,8 @@ async def _responder(
             manual_hash=ia.manual_hash(ia.organizar_manual(list(base.regras), final.categoria)),
             tokens_entrada=ctx.uso.tokens_entrada,
             tokens_saida=ctx.uso.saida,
-            # O laço + o verificador (o uso dele fica à parte, no registro).
-            custo_usd=ctx.uso.custo_usd + conf.custo_usd,
+            # O laço + o verificador (o uso dele fica à parte, no registro) + o do corte.
+            custo_usd=ctx.uso.custo_usd + custo_do_verificador + custo_do_corte,
             proposta=p,
             conferida=final,
         ),

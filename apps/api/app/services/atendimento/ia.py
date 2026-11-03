@@ -524,6 +524,10 @@ _CHAVE_TETO_AGENTE = "atendimento:agente:chamadas:{}:{}"
 _TETO_TTL_S = 2 * 24 * 3600
 
 MOTIVO_NUMERO_INVENTADO = "número que não veio do sistema"
+# A resposta genérica (saudação, agradecimento, pedido de atendente) com pergunta do cliente
+# pendente. No agente (an0311, 03/11/2026), a PERGUNTA DE ESCLARECIMENTO que pede o dado que
+# falta vira aviso ao verificador (`agente.checagens.separar_avisos`).
+MOTIVO_PERGUNTA_PENDENTE = "há pergunta concreta pendente — a resposta genérica não a resolve"
 # A resposta de dado do produto com a ficha do anúncio nos FATOS não sai
 # sozinha no automático (14/10/2026): a ficha pode ser de antes da última
 # mudança do anúncio, ou de outro anúncio do mesmo produto, e o que acompanha
@@ -4820,6 +4824,7 @@ async def conferir_saida(
     fatos_citados: Sequence[str] = (),
     produto_pelo_anuncio: bool = False,
     garantia_apple_pelo_fato: bool = False,
+    garantia_geral: str | None = None,
 ) -> SaidaConferida:
     """O código confere o que o modelo disse. Não grava nada; só LÊ o banco
     para saber se a loja respondeu enquanto o modelo escrevia
@@ -4850,6 +4855,12 @@ async def conferir_saida(
     SÓ como o fato aprovado diz — `checagens.garantia_apple_pelo_fato`): as frases dela
     não contam como fala de garantia nem como promessa de cobertura, e a pista "garantia"
     do cliente não briga com a categoria de condição.
+    `garantia_geral` (an0311, 03/11/2026 — `checagens.garantia_geral_pre_venda`): "geral" = a
+    política da garantia antes da compra como a equipe responde (tem garantia, cobre defeito,
+    não cobre quebrado/molhado/mau uso, a devolução é pela Shopee, vídeo e fotos por aqui);
+    "estendida" = só a garantia estendida com a plataforma. As frases dessa forma não contam
+    como fala de garantia, promessa de cobertura, recusa nem negação da garantia; o resto do
+    texto (e o texto inteiro nas outras réguas) se confere como sempre.
     Ver o bloco acima para `agente=True`.
     """
     motivos = list(motivos)
@@ -4915,7 +4926,7 @@ async def conferir_saida(
         # voltarei sim" é agradecimento (o "quem" não pergunta nada).
         and not (agente and foco_so_de_agradecimento(foco))
     ):
-        motivos.append("há pergunta concreta pendente — a resposta genérica não a resolve")
+        motivos.append(MOTIVO_PERGUNTA_PENDENTE)
     if (
         # No agente (ajuste r3), o assunto de produto vai para pessoa no
         # automático MESMO SEM a ficha (produto desconhecido, só o item do
@@ -4953,6 +4964,18 @@ async def conferir_saida(
         ]
     )
     inventados = numeros_inventados(texto, permitidos)
+    if agente and inventados:
+        # an0311 (03/11/2026, 73907524 "quero uma tv 43"): o número que o PRÓPRIO cliente
+        # escreveu, repetido só para nomear o que ele pediu, não foi inventado — nunca como
+        # valor, prazo, data, parcela, porcentagem ou quantidade (`checagens.numeros_do_cliente`).
+        from app.services.atendimento.agente import checagens as _checagens_num
+
+        do_cliente = _checagens_num.numeros_do_cliente(
+            _LACUNA.sub(" ", texto or ""),
+            inventados,
+            [*textos_cliente, *textos_rajada, *(getattr(m, "texto", None) for m in foco)],
+        )
+        inventados = [n for n in inventados if n not in do_cliente]
     if inventados:
         motivos.append(f"{MOTIVO_NUMERO_INVENTADO} ({', '.join(inventados[:5])})")
     # Item 32 da auditoria ao vivo (22/10/2026, 3c): no AGENTE, a devolução já aberta
@@ -5020,6 +5043,12 @@ async def conferir_saida(
             # D2 (23/10/2026): a frase da garantia Apple do fato aprovado não é fala de
             # garantia nem promessa de cobertura (o resto do texto se confere como sempre).
             texto_da_garantia = _checagens_r4b.sem_as_frases_da_garantia_apple(texto_da_garantia)
+        if garantia_geral:
+            # an0311 (03/11/2026): a política geral da garantia (antes da compra) e a garantia
+            # estendida com a plataforma não são fala de garantia nem promessa de cobertura.
+            texto_da_garantia = _checagens_r4b.sem_as_frases_da_garantia_geral(
+                texto_da_garantia, forma=garantia_geral
+            )
         if sem_evidencia:
             # Fontes v1.3, item 10 (21/10/2026): no agente, a condição ("novo",
             # "lacrado", "original") que o ANÚNCIO da conversa declara — título,

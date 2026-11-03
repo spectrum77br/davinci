@@ -303,7 +303,32 @@ logger = structlog.get_logger()
 # "homologado pela Uranyx"); do aparelho Uranyx, «90 dias», «1 ano», «9 meses», o app
 # Uranyx, o site uranyx.com.br/sac e o SAC não têm lastro (o caminho da Uranyx saiu).
 # Calibração: o grupo `v16` (cada caso bom → ok; o espelho ruim → bloqueia).
-VERSAO = "v16"
+# v17 (a análise de 31/10–02/11, an0311, 03/11/2026 — o dono: "aplique as correções"; os falsos
+# alarmes do v16 ao vivo, cada um com o prefixo da conversa; nada que bloqueava afrouxou fora
+# destes, e cada um tem o espelho ruim na calibração, o grupo `an0311`):
+#  1. (910f3c9d, Vortan 01/11 14:22 — o cliente pronto para comprar ficou 41 h sem resposta) o
+#     que o PRÓPRIO atendimento já mandou nesta conversa, conferido antes de sair, é lastro do
+#     PRODUTO dito de novo com o mesmo sentido: a seção O QUE O ATENDIMENTO JÁ ENVIOU
+#     (`linhas_do_ja_enviado`, só quando há resposta do agente na conversa) — o anúncio com dados
+#     em conflito não o desmente; a mudança de agora nas EVIDÊNCIAS e a correção da equipe, sim;
+#     nunca estado, data, prazo ou valor de pedido, promessa nem aprovação;
+#  2. (a1929b16, d82a78ed) "me diga qual modelo e conferimos pelas opções do anúncio", "assim eu
+#     confiro", "para eu conferir": o próprio atendimento, na próxima mensagem — não é ação da
+#     equipe (item 1); a conferência com a equipe, a transportadora ou o estoque continua;
+#  3. (73907524 "quero uma tv 43", 47a86f5e "a tela de 6.9") o número que o cliente escreveu,
+#     repetido para nomear o que ele pediu, não é afirmação; o pedido VAGO respondido com a
+#     pergunta de qual produto trata o turno (974d4398), e o pedido de atendente junto de uma
+#     dúvida, tratada a dúvida, também (0e119859, e7841cbc — o código decide antes se vai a pessoa);
+#  4. (c5190f5d, "entregam no Ceará?", 14 h de atraso) a linha do estado que o CLIENTE citou na
+#     RESTRIÇÃO DE ENVIO POR ESTADO (`linhas_da_restricao(ufs_do_cliente=…)`): recebe, não recebe
+#     ou depende do valor — calculado pelo código;
+#  5. (aaf4a63e, a80987a3 — Barbosa, antes da compra) a política geral da garantia como a equipe
+#     responde (tem garantia, cobre defeito, não cobre quebrado/molhado/mau uso, a devolução pela
+#     Shopee, vídeo e fotos por aqui) não é promessa de cobertura nem recusa: a FRASE-PADRÃO nova
+#     e o item 2; do aparelho Uranyx, «90 dias» e «1 ano» continuam sem lastro (27/10/2026).
+# A calibração com a chave (US$ ~0,25, de dentro do container e com o OK do Eduardo) precisa
+# rodar antes de confiar nos números do v17 — este commit só a preparou (o grupo `an0311`).
+VERSAO = "v17"
 MODELO = "claude-haiku-5-5"
 # 26/10/2026: "low" → "medium". Calibração v13 (462 linhas): o medium segura mais ruim
 # (97,3% × 96,4%) e barra menos da metade das boas (12 × 26 de 97), por ~US$ 0,0005
@@ -629,7 +654,11 @@ anúncio casou. É lastro só de que a loja vende (ou não vende) aquele produto
 disponível ou esgotado — nunca de característica, preço ou prazo, nem do produto da conversa;
 - RESTRIÇÃO DE ENVIO POR ESTADO (quando vier): de cada anúncio, o que o sistema conferiu \
 (a frase do anúncio, a regra Apple→RJ da Shopee e as restrições da loja): os estados que não \
-recebem, os que dependem do valor do pedido, ou «nenhuma restrição»;
+recebem, os que dependem do valor do pedido, ou «nenhuma restrição»; e, quando o cliente cita um \
+estado, a linha «o estado que o cliente citou: <UF> — recebe», «— NÃO recebe» ou «— depende do \
+valor do pedido», que o código calculou;
+- O QUE O ATENDIMENTO JÁ ENVIOU NESTA CONVERSA (quando vier): as respostas que o próprio \
+atendimento automático já mandou a ESTE cliente, cada uma conferida antes de sair;
 - CONDIÇÃO DECLARADA NO ANÚNCIO (quando vier): o que o próprio anúncio diz de novo, lacrado \
 e original (no título, no atributo de condição ou na descrição); o que a linha não traz, o \
 anúncio não declara;
@@ -729,7 +758,12 @@ temos como", "hoje só vale para software", "não é coberto"; ou diz que algo q
 cliente fez anula a garantia. Recusa é decisão de pessoa — mesmo quando a garantia \
 nas EVIDÊNCIAS está vencida. Recusar o cancelamento (dizer que não dá, não é possível \
 ou a loja não consegue cancelar) conta; orientar que, com o pedido já enviado, o caminho \
-é a devolução ao receber NÃO é recusa.
+é a devolução ao receber NÃO é recusa. Antes da compra (sem pedido), a quem pergunta se tem \
+garantia ou o que ela cobre, dizer a REGRA geral — tem garantia, cobre defeito, não cobre \
+aparelho quebrado, molhado ou com mau uso — sem decidir o caso de um aparelho do cliente, NÃO \
+é recusa (é a FRASE-PADRÃO da garantia); e, no item 1 e na lista 6, «tem garantia» e «cobre \
+defeito» ditos antes da compra são essa política, não promessa de cobertura de um pedido — o \
+prazo com número continua contando na lista 6 (do aparelho Uranyx, nunca «90 dias», «1 ano»).
 
 3. contradiz_restricao_de_regiao — as EVIDÊNCIAS trazem restrição de envio por \
 estado e o texto diz ou dá a entender que entrega lá; ou diz que entrega no Brasil \
@@ -836,7 +870,17 @@ equipe disse que vem com película, que o modelo tem NFC, que funciona no Brasil
 rascunho diz o mesmo) tem lastro, a menos que um campo das EVIDÊNCIAS diga o contrário (a \
 descrição que diz que não acompanha vence a resposta); a linha «vale para produto só no \
 modelo nomeado» sustenta o que a resposta diz do modelo que ela NOMEIA, quando é o modelo de \
-que o cliente pergunta. \
+que o cliente pergunta; e (v17) o que O QUE O ATENDIMENTO JÁ ENVIOU \
+diz do PRODUTO (característica, especificação, a variação e o modelo dela, o que o anúncio \
+traz), dito de novo com o mesmo sentido sobre o mesmo anúncio — repetir o que já foi conferido e \
+enviado não é afirmação nova, e o anúncio com dados em conflito (dois modelos, a ficha que se \
+contradiz) não o desmente; desmentem só a mudança de agora nas EVIDÊNCIAS (a variação agora \
+disponivel=false) e a equipe que disse outra coisa depois, na CONVERSA RECENTE; o que o rascunho \
+diz A MAIS se confere como sempre, e essa seção nunca sustenta estado, data, prazo ou valor de \
+pedido, promessa nem aprovação; e o número que o próprio cliente escreveu, repetido só para \
+nomear o que ele pediu («a TV de 43», «a tela de 6,9», «o modelo 18 ou 17») — se o produto \
+existe, tem ou é vendido continua se conferindo; e «enviamos para <estado>, sim» com a linha «o \
+estado que o cliente citou: <UF> — recebe» da RESTRIÇÃO DE ENVIO POR ESTADO. \
 Continua contando: o prazo com número, dia ou data que nenhum \
 campo traz (em 2 dias úteis, até sexta, chega no sábado); com a AÇÃO QUE CONTINUA COM A \
 PESSOA, dizer que a devolução ou o reembolso foi aprovado, recusado, aceito ou pago, ou dar \
@@ -895,6 +939,13 @@ responde ao pedido de antes não trata o turno — false. A pergunta de QUANDO a
 esgotada volta («quando estará disponível?», «tem previsão?») respondida com «sem previsão \
 de reposição» é tratada (true); o cliente que só conta o que vai fazer e agradece («vou \
 aguardar até dia 30, obrigada») não pergunta nada: agradecer e dizer onde acompanhar trata. \
+O pedido VAGO (o cliente diz o que quer sem dizer qual: «quero uma TV 43», «quero comprar mais \
+produtos», «estou com dúvida», «pode escolher o celular?» sem o cartão nem o anúncio) respondido \
+com a pergunta de qual produto, modelo ou anúncio é tratado (true) — com o cartão ou o anúncio \
+na conversa que já dá o dado, perguntar de novo não trata. O pedido de atendente (a opção do \
+menu, «6», «falar com atendente») junto de uma dúvida ou problema do turno: o texto que trata a \
+dúvida, ou pede o dado ou a evidência que falta para tratá-la, trata o turno (true) — se o \
+pedido de atendente vai para pessoa, o código decide antes de você. \
 Isso vale só para o item 7: o texto \
 que promete que uma pessoa, \
 um atendente ou a equipe vai assumir, chamar, transferir, responder ou retornar \
@@ -967,7 +1018,10 @@ a garantia ou um fato das EVIDÊNCIAS os traga — a garantia da Apple de 1 ano 
 ativação, do fato aprovado, continua valendo. Não contam: o receio sem pergunta («tenho medo \
 de comprar») acolhido com o que tem lastro (produto novo, compra protegida pela Shopee) trata o \
 turno (item 7 true); pedir o dado para responder na próxima mensagem («me diga o modelo que eu \
-confiro por aqui») não promete ação da equipe (item 1) — «a equipe confere/retorna» marca.
+confiro por aqui», «qual é o anúncio? assim eu confiro as opções», «me diga o nome para eu \
+conferir», «me diga qual modelo e conferimos pelas opções do anúncio») não promete ação da \
+equipe (item 1): é o próprio atendimento, no anúncio — «a equipe confere/retorna», conferir com \
+a transportadora, o setor ou o estoque, e o «conferimos e te avisamos» marcam.
 
 Seja coerente, com o ônus na prova: sustentada é a afirmação que um campo das \
 EVIDÊNCIAS diz, ou a regra e o caminho que a ORIENTAÇÃO APROVADA, as REGRAS DA LOJA ou \
@@ -1061,6 +1115,60 @@ class ResumoDoPacote:
     # v14 (o portão do dono, 27/10/2026): os AVISOS das checagens determinísticas que não
     # seguram sozinhos (`SaidaConferida.avisos`) — vazio = a seção não vai (a entrada de antes).
     avisos: tuple[str, ...] = ()
+    # v17 (an0311, 03/11/2026, 910f3c9d): as respostas que o próprio atendimento automático já
+    # mandou nesta conversa (`ja_enviado_da_conversa`, mascaradas) — vazio = a seção não vai.
+    ja_enviado: tuple[str, ...] = ()
+    # v17 (c5190f5d): as UFs que o cliente citou no turno (`restricao_envio.ufs_citadas`) — a
+    # RESTRIÇÃO DE ENVIO POR ESTADO diz, de cada anúncio conferido, se cada uma recebe.
+    ufs_do_cliente: tuple[str, ...] = ()
+
+
+# ── v17 (an0311, 03/11/2026): o que o atendimento já enviou nesta conversa ──
+#
+# 910f3c9d (Vortan, 01/11): às 14:16 o agente respondeu "o de 6,9 polegadas é o A18 Pro Max, na
+# variação 16 GB / 128 GB Premium NFC" (o verificador deu ok); às 14:22 o cliente pediu o link e o
+# rascunho repetiu o mesmo dado — o verificador o chamou de "sem lastro" (a ficha tem os dois
+# modelos e se contradiz) e o cliente, pronto para comprar, ficou 41 h sem resposta. A seção traz
+# as falas do atendimento automático (origem `davinci_ia`, que só sai com o "ok" deste verificador
+# ou pela saudação aprovada no Manual) — o `SISTEMA` diz o que elas sustentam (só o produto).
+CABECALHO_JA_ENVIADO = (
+    "O QUE O ATENDIMENTO JÁ ENVIOU NESTA CONVERSA (o próprio atendimento automático, a ESTE "
+    "cliente; cada resposta foi conferida antes de sair):"
+)
+MAX_JA_ENVIADO = 3
+
+
+def ja_enviado_da_conversa(
+    recentes: Sequence[Any], gatilho: Any | None, nomes: Iterable[str | None]
+) -> tuple[str, ...]:
+    """As últimas `MAX_JA_ENVIADO` respostas que o atendimento automático (o agente, origem
+    `davinci_ia`) já mandou na conversa, até o gatilho, mascaradas e numa linha cada. PURA."""
+    nomes = tuple(nomes)
+    do_atendimento = [
+        m
+        for m in acao_pessoa._ate_o_turno(list(recentes or ()), gatilho)
+        if getattr(m, "autor", None) == constantes.AUTOR_LOJA
+        and getattr(m, "origem", None) == constantes.ORIGEM_IA
+        and (getattr(m, "texto", None) or "").strip()
+        and not pacote._automatica(m)
+    ]
+    saida: list[str] = []
+    for m in do_atendimento[-MAX_JA_ENVIADO:]:
+        quando = getattr(m, "enviada_em", None) or getattr(m, "created_at", None)
+        rotulo = ""
+        if isinstance(quando, datetime):
+            quando = quando if quando.tzinfo else quando.replace(tzinfo=UTC)
+            rotulo = f"[{quando.astimezone(ia.SAO_PAULO).strftime('%d/%m %H:%M')}] "
+        texto = ia.mascarar(_uma_linha(m.texto, ia.MAX_CHARS_MENSAGEM), nomes)
+        saida.append(f"{rotulo}{texto}")
+    return tuple(saida)
+
+
+def linhas_do_ja_enviado(ja_enviado: Sequence[str]) -> list[str]:
+    """A seção O QUE O ATENDIMENTO JÁ ENVIOU (vazia sem resposta do agente). PURA (v17)."""
+    if not ja_enviado:
+        return []
+    return [CABECALHO_JA_ENVIADO, *(f"- {_sem_moldura(str(t))}" for t in ja_enviado)]
 
 
 # ── v7 (21/10/2026): o turno sem pergunta e as lacunas com o dado ──
@@ -1259,7 +1367,26 @@ def resumo_do_pacote(
                 :MAX_AVISOS
             ]
         ),
+        # v17 (an0311): o que o atendimento já mandou nesta conversa e os estados do turno.
+        ja_enviado=ja_enviado_da_conversa(base.recentes, gatilho, base.nomes),
+        ufs_do_cliente=_ufs_do_turno(base),
     )
+
+
+def _ufs_do_turno(base: BaseDoGerar) -> tuple[str, ...]:
+    """As UFs que o cliente citou no turno (a rajada, as perguntas pendentes). PURA (v17)."""
+    from app.services.atendimento import restricao_envio
+
+    textos = [
+        *base.textos_rajada,
+        *base.textos_cliente,
+        *(getattr(m, "texto", None) for m in base.foco or ()),
+    ]
+    ufs: list[str] = []
+    for t in textos:
+        if isinstance(t, str) and t:
+            ufs += [u for u in restricao_envio.ufs_citadas(t) if u not in ufs]
+    return tuple(ufs)
 
 
 def busca_do_contexto(ctx: ContextoAgente) -> tuple[dict, ...]:
@@ -1412,9 +1539,29 @@ def _anuncio_da_linha(dado: Mapping) -> str:
     return f"anuncio:{dado.get('item_id')}" + (f" «{titulo}»" if titulo else "")
 
 
-def linhas_da_restricao(evidencias: Sequence[Any]) -> list[str]:
+def _estado_citado(uf: str, ufs: Sequence[str], conforme: Sequence[str]) -> str:
+    """A linha do estado que o cliente citou (v17, c5190f5d): o que a restrição diz dele."""
+    from app.services.atendimento import restricao_envio
+
+    nome = restricao_envio.UFS.get(uf, uf)
+    if uf in ufs:
+        situacao = "NÃO recebe"
+    elif uf in conforme:
+        situacao = "depende do valor do pedido"
+    else:
+        situacao = (
+            "recebe (não está entre os que não recebem nem entre os que dependem do valor do "
+            "pedido)"
+        )
+    return f"  · o estado que o cliente citou: {uf} ({nome}) — {situacao}"
+
+
+def linhas_da_restricao(evidencias: Sequence[Any], ufs_do_cliente: Sequence[str] = ()) -> list[str]:
     """As linhas da RESTRIÇÃO DE ENVIO POR ESTADO (v11): só os blocos conferidos (a chave
-    "conferido"); sem eles, nenhuma (a entrada de antes). PURA."""
+    "conferido"); sem eles, nenhuma (a entrada de antes). PURA.
+
+    v17 (an0311, c5190f5d "entregam no Ceará?"): com `ufs_do_cliente`, cada anúncio conferido
+    ganha a linha de cada estado que o cliente citou (`_estado_citado`)."""
     linhas: list[str] = []
     for bruto in evidencias:
         for dado in _dados_da_evidencia(bruto):
@@ -1424,6 +1571,7 @@ def linhas_da_restricao(evidencias: Sequence[Any]) -> list[str]:
                     continue
                 ufs = [str(u) for u in r.get("ufs") or []]
                 conforme = [str(u) for u in r.get("ufs_conforme_pedido") or []]
+                citados = [_estado_citado(uf, ufs, conforme) for uf in ufs_do_cliente]
                 if r.get("nenhuma") is True and not ufs and not conforme:
                     linha = (
                         f"- {_anuncio_da_linha(ficha_)}: nenhuma restrição — todos os estados "
@@ -1442,6 +1590,8 @@ def linhas_da_restricao(evidencias: Sequence[Any]) -> list[str]:
                         + "; ".join(partes)
                         + "; os demais estados recebem"
                     )
+                # v17: as linhas do estado citado ficam junto do anúncio (o teto conta o par).
+                linha += "".join(f"\n{c}" for c in citados)
                 if linha not in linhas:
                     linhas.append(linha)
     if not linhas:
@@ -1929,6 +2079,12 @@ FRASES_PADRAO_GARANTIA_SHOPEE: tuple[str, ...] = (
     "Garantia estendida comprada na plataforma: é diretamente com a plataforma.",
     "Aparelho Uranyx (a marca do anúncio ou do pedido), quando o cliente pergunta da "
     "homologação ou da Anatel: «homologado pela Uranyx».",
+    # v17 (an0311, 03/11/2026: aaf4a63e, a80987a3 — a pergunta antes da compra).
+    "Antes da compra (sem pedido), a quem pergunta se tem garantia ou o que ela cobre: tem "
+    "garantia; cobre defeito (de fabricação); não cobre aparelho quebrado, molhado ou com mau "
+    "uso; conta a partir da entrega; enquanto o app oferece, a devolução é pela Shopee; se "
+    "aparecer defeito, descrever e mandar vídeo e fotos por aqui — sem prazo nem número (do "
+    "aparelho Uranyx, nunca «90 dias» nem «1 ano»).",
 )
 FRASE_PADRAO_ACESSORIO = (
     "No momento a loja não tem anúncio de {acessorio} (o fato aprovado das EVIDÊNCIAS): "
@@ -2069,8 +2225,10 @@ def montar_entrada(
         *linhas_da_busca(resumo.busca, nomes),
         # v11 (liberações L2 e L3, 23/10/2026): a restrição de envio conferida e a condição
         # que o anúncio declara, só quando as evidências trazem as marcas novas.
-        *linhas_da_restricao(so_evidencias),
+        *linhas_da_restricao(so_evidencias, resumo.ufs_do_cliente),
         *linhas_da_condicao(so_evidencias),
+        # v17 (an0311, 910f3c9d): o que o atendimento automático já mandou nesta conversa.
+        *linhas_do_ja_enviado(resumo.ja_enviado),
         *orientacao_aprovada(assunto, resumo.plataforma_codigo),
         # v8 (item 23): a política de estoque só com a variação esgotada nas evidências
         # e a resposta de estoque (revisão da rodada 6: `politica_de_estoque_vale`).
@@ -2705,6 +2863,81 @@ async def no_rascunho(
         final, checagens.Checagens(pendencias=[pendencia]), acoes_pessoa=[], modo=base.modo
     )
     return Conferencia(novo, registro, r.uso.custo_usd, CODIGO)
+
+
+# ── v17 (an0311, 03/11/2026): o corte da frase sem lastro ─────────────────
+#
+# O dono: "quando só um trecho não tem base, tirar o trecho e enviar" (ad4d4b72, Mini 31/10: o
+# rascunho certo sobre o WP200 Pro ficou 4 h para pessoa por uma frase a mais — «A opção de 256
+# GB do WP200 Pro está esgotada»). Quando o "não" do verificador é SÓ afirmação sem lastro (nenhuma
+# marca, a pergunta tratada) e todas as afirmações citadas caem numa frase só, o agente tira essa
+# frase (`frase_para_cortar`), passa o resto de novo pela 1ª camada inteira e pelo verificador, e
+# só com o "ok" do MESMO texto cortado ele sai (`agente._sem_a_frase_sem_lastro`). Sem resposta no
+# resto (só cortesia, só o "como podemos ajudar?") ou com o 2º "não", fica o rascunho de antes,
+# para pessoa — "só se o resto ainda responde; senão, segura".
+MAX_AFIRMACOES_DO_CORTE = 3
+PARTILHA_MINIMA_DO_CORTE = 0.6
+_PALAVRA_DO_CORTE = re.compile(r"[a-z0-9]+(?:[.,]\d+)?")
+# A frase que começa respondendo ("Sim, …", "Não, …", "Tem sim", "Não tem"): nunca é cortada.
+_RESPOSTA_DIRETA = re.compile(
+    r"^\W*(?:ola\W+)?(?:sim|nao|tem\s+sim|temos\s+sim|nao\s+tem|nao\s+temos|possui|tem|temos)\b"
+)
+_VAZIAS_DO_CORTE = frozenset(
+    "a o as os e de da do das dos em no na nos nas um uma uns umas que com por para pra se ao "
+    "aos ou eh e".split()
+)
+
+
+def _palavras_do_corte(texto: str) -> set[str]:
+    return {
+        p
+        for p in _PALAVRA_DO_CORTE.findall(validador.plano_de(texto or ""))
+        if p not in _VAZIAS_DO_CORTE and (len(p) > 1 or p.isdigit())
+    }
+
+
+def _frase_da_afirmacao(afirmacao: str, frases: Sequence[str]) -> int | None:
+    """O índice da ÚNICA frase que contém a afirmação citada (a partilha das palavras dela), ou
+    None (nenhuma passa de `PARTILHA_MINIMA_DO_CORTE`, ou duas passam). PURA."""
+    alvo = _palavras_do_corte(afirmacao)
+    if not alvo:
+        return None
+    partilhas = [len(alvo & _palavras_do_corte(f)) / len(alvo) for f in frases]
+    boas = [i for i, p in enumerate(partilhas) if p >= PARTILHA_MINIMA_DO_CORTE]
+    return boas[0] if len(boas) == 1 else None
+
+
+def frase_para_cortar(
+    texto: str | None, registro: Mapping[str, Any] | None
+) -> tuple[str, str] | None:
+    """(o texto sem a frase, a frase) quando o "não" do verificador (`registro` =
+    `Resultado.para_fatos`) é SÓ afirmação sem lastro, as afirmações citadas (até
+    `MAX_AFIRMACOES_DO_CORTE`) caem TODAS numa frase só e o resto ainda tem resposta (não é só
+    cortesia nem só o "como podemos ajudar?"); None no resto. PURA (v17, ver acima)."""
+    if not isinstance(registro, Mapping) or registro.get("rodou") is not True:
+        return None
+    if registro.get("ok") is not False or registro.get("falha"):
+        return None
+    if list(registro.get("problemas") or []) != [SEM_LASTRO]:
+        return None
+    afirmacoes = [str(a) for a in registro.get("afirma_sem_lastro") or [] if str(a or "").strip()]
+    if not afirmacoes or len(afirmacoes) > MAX_AFIRMACOES_DO_CORTE:
+        return None
+    frases_ = [f.strip() for f in checagens._ENTRE_FRASES.split(texto or "") if f.strip()]
+    if len(frases_) < 2:
+        return None
+    indices = {_frase_da_afirmacao(a, frases_) for a in afirmacoes}
+    if None in indices or len(indices) != 1:
+        return None
+    (i,) = indices
+    if _RESPOSTA_DIRETA.match(validador.plano_de(frases_[i])):
+        # A frase sem lastro É a resposta ("Sim, o anúncio traz dual chip…" — c81bc743): sem
+        # ela, o resto não responde; segura.
+        return None
+    resto = " ".join(f for j, f in enumerate(frases_) if j != i)
+    if not resto or checagens._so_cortesia(resto) or checagens.resposta_so_generica(resto):
+        return None
+    return resto, frases_[i]
 
 
 # ── A trava do envio sozinho (`ia._talvez_enviar`) ────────────────────────
