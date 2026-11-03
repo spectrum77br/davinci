@@ -338,6 +338,8 @@ import {
   portalMagaluDe,
   prazoDe,
   preencherLacunas,
+  buscaDoAtalho,
+  filtrarProntas,
   motivoSellerCenter,
   respondidaNoPortalMagalu,
   respondidaNoSellerCenter,
@@ -1731,12 +1733,18 @@ function confirmaSePublica(canal: string | null | undefined, t: string): boolean
   if (canal !== 'avaliacao') return true
   return confirm(perguntaRespostaPublica(avaliacoesDados.value?.aviso, t))
 }
+// Enter envia e Shift+Enter quebra a linha (03/11/2026, o Eduardo, como no
+// Duoke); Ctrl/Cmd+Enter continua enviando. No e-mail (parágrafos) o Enter só
+// quebra a linha e quem envia é o Ctrl+Enter, como antes.
 function aoTeclar(e: KeyboardEvent) {
-  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+  if (atalhoAberto.value && !e.isComposing && teclaDoAtalho(e)) return
+  if (e.key !== 'Enter' || e.isComposing || e.shiftKey || e.altKey) return
+  if (e.ctrlKey || e.metaKey || !ehEmail.value) {
     e.preventDefault()
     void enviar()
   }
 }
+const dicaDoEnvio = computed(() => (ehEmail.value ? 'Ctrl+Enter envia' : 'Enter envia · Shift+Enter quebra a linha'))
 
 // ─── ações da conversa (PATCH) ──────────────────────────────────────────────
 // Por conversa, como o envio: a ação da A não trava os botões da B.
@@ -2024,18 +2032,81 @@ async function avaliar(nota: 'ok' | 'erro') {
 }
 
 // ─── respostas prontas ──────────────────────────────────────────────────────
+// A lista já vem do servidor no escopo da pessoa (03/11/2026: as "para todos"
+// + as da equipe dela; o admin, todas). Aqui, as que servem nesta caixa.
 const menuModelos = ref(false)
 const buscaModelo = ref('')
-const modelosDaConversa = computed(() => {
+const menuIdx = ref(0)
+const modelosQueServem = computed(() => {
   const c = conversa.value
   if (!c) return []
-  const q = buscaModelo.value.trim().toLowerCase()
-  return props.modelos
-    .filter((m) => m.ativo && (!m.plataforma || m.plataforma === c.plataforma) && (!m.canal || m.canal === c.canal))
-    .filter((m) => !q || m.titulo.toLowerCase().includes(q) || m.texto.toLowerCase().includes(q))
-    .slice()
-    .sort((a, b) => (a.ordem ?? 0) - (b.ordem ?? 0) || a.titulo.localeCompare(b.titulo, 'pt-BR'))
+  return props.modelos.filter((m) => m.ativo && (!m.plataforma || m.plataforma === c.plataforma) && (!m.canal || m.canal === c.canal))
 })
+const modelosDaConversa = computed(() => filtrarProntas(modelosQueServem.value, buscaModelo.value))
+watch(buscaModelo, () => { menuIdx.value = 0 })
+function teclaDoMenu(e: KeyboardEvent) {
+  const n = modelosDaConversa.value.length
+  if (e.isComposing || !n) return
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault()
+    menuIdx.value = (menuIdx.value + (e.key === 'ArrowDown' ? 1 : n - 1)) % n
+  } else if (e.key === 'Enter') {
+    e.preventDefault()
+    const m = modelosDaConversa.value[Math.min(menuIdx.value, n - 1)]
+    if (m) inserirModelo(m)
+  }
+}
+
+// O atalho "/" (03/11/2026, o Eduardo: "rápido de acesso a respostas prontas"):
+// a caixa começando com "/" abre a lista em cima dela, filtrada pelo que vem
+// depois da barra (título e texto). ↑/↓ escolhe, Enter (ou Tab) põe no lugar do
+// "/busca" com as lacunas preenchidas — com a lista aberta o Enter nunca envia —,
+// Esc fecha (até a barra sair da caixa).
+const ATALHO_MAX = 8
+const atalhoFechado = ref(false)
+const atalhoIdx = ref(0)
+const buscaAtalho = computed(() => (podeDigitar.value ? buscaDoAtalho(texto.value) : null))
+const atalhoAberto = computed(() => buscaAtalho.value !== null && !atalhoFechado.value)
+const listaAtalho = computed(() => (atalhoAberto.value ? filtrarProntas(modelosQueServem.value, buscaAtalho.value || '').slice(0, ATALHO_MAX) : []))
+watch(buscaAtalho, (b) => {
+  atalhoIdx.value = 0
+  if (b === null) atalhoFechado.value = false
+})
+function teclaDoAtalho(e: KeyboardEvent): boolean {
+  const n = listaAtalho.value.length
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    e.stopPropagation()
+    atalhoFechado.value = true
+    return true
+  }
+  if (!n) {
+    // Nada com a busca: o Enter não manda o "/busca" para o comprador.
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      return true
+    }
+    return false
+  }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault()
+    atalhoIdx.value = (atalhoIdx.value + (e.key === 'ArrowDown' ? 1 : n - 1)) % n
+    return true
+  }
+  if ((e.key === 'Enter' || e.key === 'Tab') && !e.shiftKey) {
+    // Ctrl+Enter também: com a lista aberta, mandar "/rastr" nunca é o que se quer.
+    // Shift+Enter quebra a linha (e a lista fecha sozinha).
+    e.preventDefault()
+    usarDoAtalho(listaAtalho.value[Math.min(atalhoIdx.value, n - 1)])
+    return true
+  }
+  return false
+}
+function usarDoAtalho(m: Modelo | undefined) {
+  if (!m) return
+  texto.value = ''
+  inserirModelo(m)
+}
 // Primeiro nome para {comprador} — só quando parece nome de gente; apelido de
 // plataforma ("joao_123") fica como lacuna para a pessoa trocar.
 function primeiroNome(n: string | null | undefined) {
@@ -2087,6 +2158,7 @@ function inserirModelo(m: Modelo) {
   }
   menuModelos.value = false
   buscaModelo.value = ''
+  menuIdx.value = 0
 }
 
 // ─── etiqueta: troca à mão (item 2) ─────────────────────────────────────────
@@ -3881,17 +3953,54 @@ watch(() => props.conversaId, (novo, velho) => {
             <span>{{ AVISO_MODERACAO_MAGALU }}</span>
           </div>
 
-          <textarea
-            ref="caixa"
-            v-model="texto"
-            rows="3"
-            :disabled="!podeDigitar || enviando"
-            class="block max-h-[40vh] min-h-[76px] w-full resize-y rounded-md border bg-background px-2.5 py-2 text-sm [field-sizing:content] focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
-            :placeholder="podeDigitar ? (conversa.canal === 'avaliacao' ? 'Escreva a resposta PÚBLICA à avaliação… (Ctrl+Enter envia)' : rotuloDestino ? `${rotuloDestino}: escreva a mensagem… (Ctrl+Enter envia)` : 'Escreva a resposta… (Ctrl+Enter envia)') : 'Resposta desabilitada nesta conversa'"
-            aria-label="resposta ao comprador"
-            @keydown="aoTeclar"
-            @paste="aoColar"
-          />
+          <div class="relative">
+            <!-- O atalho "/": a lista abre em cima da caixa, dentro da própria
+                 conversa (sem portal: vale igual na tela cheia). -->
+            <div
+              v-if="atalhoAberto"
+              class="absolute bottom-full left-0 z-[60] mb-1 w-[380px] max-w-full rounded-md border bg-background p-1 shadow-lg"
+              data-atalho-prontas
+            >
+              <div class="px-2 pb-1 pt-0.5 text-[10px] text-muted-foreground">Respostas prontas · ↑↓ escolhe · Enter insere · Esc fecha</div>
+              <ul v-if="listaAtalho.length" id="atalho-prontas" role="listbox" aria-label="respostas prontas" class="max-h-64 space-y-0.5 overflow-y-auto">
+                <li v-for="(m, i) in listaAtalho" :id="`atalho-pronta-${i}`" :key="m.id" role="option" :aria-selected="i === atalhoIdx">
+                  <button
+                    type="button"
+                    tabindex="-1"
+                    class="w-full rounded px-2 py-1 text-left"
+                    :class="i === atalhoIdx ? 'bg-muted' : 'hover:bg-muted/60'"
+                    @mousedown.prevent="usarDoAtalho(m)"
+                    @mousemove="atalhoIdx = i"
+                  >
+                    <div class="flex items-center gap-1.5 text-xs font-medium">
+                      <span class="truncate">{{ m.titulo }}</span>
+                      <span v-if="m.equipe_nome" class="shrink-0 rounded-full bg-sky-500/15 px-1.5 text-[10px] font-normal text-sky-800 dark:text-sky-300">{{ m.equipe_nome }}</span>
+                    </div>
+                    <div class="line-clamp-1 text-[11px] text-muted-foreground">{{ m.texto }}</div>
+                  </button>
+                </li>
+              </ul>
+              <div v-else class="px-2 py-2 text-xs text-muted-foreground">
+                {{ buscaAtalho ? `Nenhuma resposta pronta com “${buscaAtalho}”.` : `Nenhuma resposta pronta para ${plataformaInfo(conversa.plataforma).nome}.` }}
+              </div>
+            </div>
+            <textarea
+              ref="caixa"
+              v-model="texto"
+              rows="3"
+              :disabled="!podeDigitar || enviando"
+              class="block max-h-[40vh] min-h-[76px] w-full resize-y rounded-md border bg-background px-2.5 py-2 text-sm [field-sizing:content] focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
+              :placeholder="podeDigitar ? (conversa.canal === 'avaliacao' ? `Escreva a resposta PÚBLICA à avaliação… (/ respostas prontas · ${dicaDoEnvio})` : rotuloDestino ? `${rotuloDestino}: escreva a mensagem… (/ respostas prontas · ${dicaDoEnvio})` : `Escreva a resposta… (/ respostas prontas · ${dicaDoEnvio})`) : 'Resposta desabilitada nesta conversa'"
+              aria-label="resposta ao comprador"
+              :aria-expanded="atalhoAberto"
+              :aria-controls="atalhoAberto && listaAtalho.length ? 'atalho-prontas' : undefined"
+              :aria-activedescendant="atalhoAberto && listaAtalho.length ? `atalho-pronta-${atalhoIdx}` : undefined"
+              @keydown="aoTeclar"
+              @paste="aoColar"
+              @blur="atalhoFechado = true"
+              @focus="atalhoFechado = false"
+            />
+          </div>
 
           <div v-if="erroEnvio" class="rounded-md border border-red-500/40 bg-red-500/10 px-2.5 py-1.5 text-xs text-red-700 dark:text-red-300">
             <div class="flex items-start gap-2">
@@ -3933,11 +4042,14 @@ watch(() => props.conversaId, (novo, velho) => {
                   class="z-[70] w-[380px] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
                   @close-auto-focus="(e: Event) => e.preventDefault()"
                 >
-                  <input v-model="buscaModelo" class="mb-1.5 h-8 w-full rounded-md border bg-background px-2 text-sm" placeholder="buscar resposta pronta…" aria-label="buscar resposta pronta" />
+                  <input v-model="buscaModelo" class="mb-1.5 h-8 w-full rounded-md border bg-background px-2 text-sm" placeholder="buscar resposta pronta… (↑↓ e Enter)" aria-label="buscar resposta pronta" @keydown="teclaDoMenu" />
                   <ul v-if="modelosDaConversa.length" class="max-h-72 space-y-0.5 overflow-y-auto">
-                    <li v-for="m in modelosDaConversa" :key="m.id">
-                      <button type="button" class="w-full rounded px-2 py-1.5 text-left hover:bg-muted" @click="inserirModelo(m)">
-                        <div class="text-xs font-medium">{{ m.titulo }}</div>
+                    <li v-for="(m, i) in modelosDaConversa" :key="m.id">
+                      <button type="button" class="w-full rounded px-2 py-1.5 text-left hover:bg-muted" :class="{ 'bg-muted': i === menuIdx }" @click="inserirModelo(m)">
+                        <div class="flex items-center gap-1.5 text-xs font-medium">
+                          <span>{{ m.titulo }}</span>
+                          <span v-if="m.equipe_nome" class="shrink-0 rounded-full bg-sky-500/15 px-1.5 text-[10px] font-normal text-sky-800 dark:text-sky-300">{{ m.equipe_nome }}</span>
+                        </div>
                         <div class="line-clamp-2 text-[11px] text-muted-foreground">{{ m.texto }}</div>
                       </button>
                     </li>
@@ -3967,7 +4079,7 @@ watch(() => props.conversaId, (novo, velho) => {
               class="h-8"
               :class="limite && podeDigitar ? '' : 'ml-auto'"
               :disabled="!podeEnviar"
-              :title="incertos.has(conversaId) ? 'travado até a conversa mostrar se o último envio saiu' : 'enviar (Ctrl+Enter)'"
+              :title="incertos.has(conversaId) ? 'travado até a conversa mostrar se o último envio saiu' : `enviar (${ehEmail ? 'Ctrl+Enter' : 'Enter'})`"
               @click="enviar()"
             >
               <Loader2 v-if="enviando" class="mr-1.5 size-4 animate-spin" />

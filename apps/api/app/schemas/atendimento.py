@@ -892,6 +892,9 @@ class ModeloIn(BaseModel):
     categoria: str | None = None
     ativo: bool = True
     ordem: int = 0
+    # A equipe (101/102/103) ou vazio = para todos (03/11/2026). Só quem mexe
+    # na caixa escolhe; a de quem é de equipe nasce com a equipe dele (router).
+    equipe: int | None = None
 
     _limpa = field_validator("titulo", "texto", mode="before")(_texto_opcional)
     _plat = field_validator("plataforma", mode="before")(_plataforma)
@@ -908,6 +911,8 @@ class ModeloPatch(BaseModel):
     categoria: str | None = None
     ativo: bool | None = None
     ordem: int | None = None
+    # `null` explícito = passa a valer para todos (só quem mexe na caixa).
+    equipe: int | None = None
 
     _limpa = field_validator("titulo", "texto", mode="before")(_texto_opcional)
     _plat = field_validator("plataforma", mode="before")(_plataforma)
@@ -924,6 +929,29 @@ class ModeloOut(BaseModel):
     categoria: str | None = None
     ativo: bool
     ordem: int
+    # NULL = para todos; senão a equipe dona e o nome dela ("Londres").
+    equipe: int | None = None
+    equipe_nome: str | None = None
+    # Quem pediu a lista pode editar/apagar esta? (a própria equipe ou admin;
+    # a "para todos" só o admin).
+    pode_editar: bool = False
+
+
+class EquipeModelo(BaseModel):
+    numero: int
+    nome: str
+
+
+class ModelosEquipesOut(BaseModel):
+    """As equipes do formulário e do filtro da aba Respostas prontas.
+
+    `todas` = quem mexe na caixa (escolhe a equipe ou "para todos" e mexe em
+    qualquer uma); `minhas` = as equipes de quem pediu (a resposta nova dele
+    nasce com elas). Ninguém nas duas = só lê."""
+
+    equipes: list[EquipeModelo]
+    minhas: list[int]
+    todas: bool
 
 
 # ── Fatos da loja do agente (aprovação na aba do Manual, 20/10/2026) ──────
