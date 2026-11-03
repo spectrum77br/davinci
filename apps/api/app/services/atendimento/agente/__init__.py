@@ -866,11 +866,6 @@ async def conferir_proposta(
     `pacote.Pacote` (`fatos`, `fichas`, `pedido`); `forcar_conferencia` = o `forcar` da
     `conferir_saida` (None = `base.forcar` ou o replay)."""
     forcar = (base.forcar or ctx.modo_replay) if forcar_conferencia is None else forcar_conferencia
-    # Rodada "fechar o eval" (23/10/2026): a política da entrega dita com a resposta-padrão
-    # da MESMA loja no pacote ganha o par:<id> nas evidências; e, no "responde e marca"
-    # (D1), a `reclamacao_aberta` que o modelo ainda pediu vira a ação de depois do envio.
-    p = checagens.com_par_da_politica(p, ctx)
-    p, pos_envio_do_modelo = checagens.responde_e_marca_da_proposta(p, ctx)
 
     # Os OUTROS pedidos que as ferramentas leram: a régua de ESTADO roda neles
     # também (revisão de 20/10/2026) — o código sempre vence.
@@ -878,7 +873,17 @@ async def conferir_proposta(
     for ctx_pedido, postado in ctx.pedidos_lidos:
         dele = acao_pessoa.gatilhos_de_outro_pedido(ctx_pedido, postado, base.recentes, gatilho)
         ctx.acoes_codigo = contexto.ordenar_acoes(ctx.acoes_codigo, [g.codigo for g in dele])
+        # Revisão de 03/11/2026: a ação do OUTRO pedido (o "consta entregue e não recebi"
+        # dele, o Ag. cancelamento dele) nunca vira a etiqueta do turno (item 10): trava.
+        # Antes da `responde_e_marca_da_proposta`, que lê as etiquetas.
+        ctx.sem_etiqueta(g.codigo for g in dele)
         andamento_de_outro += checagens.conferir_andamento(ctx_pedido)
+
+    # Rodada "fechar o eval" (23/10/2026): a política da entrega dita com a resposta-padrão
+    # da MESMA loja no pacote ganha o par:<id> nas evidências; e, no "responde e marca"
+    # (D1), a `reclamacao_aberta` que o modelo ainda pediu vira a ação de depois do envio.
+    p = checagens.com_par_da_politica(p, ctx)
+    p, pos_envio_do_modelo = checagens.responde_e_marca_da_proposta(p, ctx)
 
     # Rodada 4b: o assunto que o rascunho trata pelas lacunas também precisa
     # estar liberado ("…a previsão é {previsao_entrega}" declarado nota_fiscal).
@@ -952,6 +957,8 @@ async def conferir_proposta(
         garantia_apple_pelo_fato=checagens.garantia_apple_da_proposta(
             p, entrada["texto"], ctx, base, fichas=[*pac.fichas, *ctx.fichas_lidas]
         ),
+        # Item 10 (03/11/2026): o Ag. cancelamento liberado como etiqueta neste turno.
+        ag_cancelamento_etiqueta=constantes.ACAO_AG_CANCELAMENTO in ctx.acoes_pos_envio,
     )
     # Eval real de 21/10/2026: a lacuna que o código não preencheu ("{rastreio}"
     # sem rastreio) nunca fica no rascunho — a frase dela sai (ou, sem resposta

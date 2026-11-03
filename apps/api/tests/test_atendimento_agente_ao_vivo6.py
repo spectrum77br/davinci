@@ -540,24 +540,24 @@ async def test_22_de_ponta_a_ponta_o_pedido_de_28_dias_vai_para_o_chamado(
     db, make_user, agente_ligado, modelo, envios, api, teto_limpo
 ):
     """O "cadê meu pedido?" do pedido de teste da Shopee, postado em 24/09 e ainda em
-    trânsito: no automático, o rascunho vai para pessoa (abrir_chamado), nada sai sozinho
-    e o verificador nem roda; a Caixa Humano diz o mesmo."""
+    trânsito: o código marca abrir_chamado. Até 03/11/2026 o rascunho ia inteiro para pessoa;
+    desde o item 10 da análise de 31/10–02/11 (o dono: "aplique as correções") o Abrir
+    chamado do atraso é ETIQUETA — a resposta do rastreio vai ao verificador (aqui ele não
+    responde: nada sai) e a ação fica para depois do envio; a Caixa Humano diz o mesmo."""
     conversa = await _ver._no_auto(db, make_user, agente_ligado)
     api.agente = [_ver._mensagem_do_agente()]
 
     r = await ia.gerar_rascunho(db, conversa)
 
     assert modelo.chamadas == [] and envios == []
-    # O motivo é o rótulo da ação (o detalhe do gatilho só vai à coluna no caminho que
-    # nem chama o modelo — `checagens.conferir_acao_de_pessoa`, como sempre).
-    assert r.precisa_humano and r.motivo == acao_pessoa.motivo_da_acao(
-        constantes.ACAO_ABRIR_CHAMADO
-    )
     agente = r.fatos["agente"]
     assert agente["acoes_codigo"] == [constantes.ACAO_ABRIR_CHAMADO]
-    assert agente["verificador"]["rodou"] is False and api.pedidos == []
+    assert agente["acoes_pessoa"] == []
+    assert agente["acoes_pos_envio"] == [constantes.ACAO_ABRIR_CHAMADO]
+    assert agente["etiquetas_pos_envio"] == [constantes.ACAO_ABRIR_CHAMADO]
     triagem = await humano.triar_conversa(db, conversa, so_humano=())
     assert constantes.ACAO_ABRIR_CHAMADO in triagem.assuntos
+    assert constantes.HUMANO_ACAO_PESSOA in triagem.marca
 
 
 def test_22_o_pacote_nao_ganha_campo_novo():

@@ -243,6 +243,8 @@ from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import ia, separa_email
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.constantes import (
+    ACAO_AG_CANCELAMENTO,
+    ACAO_ANALISAR_EVIDENCIA,
     ACOES_PESSOA,
     CANAL_AVALIACAO,
     CANAL_PERGUNTA,
@@ -298,7 +300,11 @@ logger = structlog.get_logger()
 # 8 (23/10/2026): no canal com o agente, as decisões D1–D3 do dono — o "responde e marca"
 # (a conversa respondida com a ação pendente continua aqui: `pos_envio_vale`), o chamado
 # da entrega na Shopee só com a condição dele e o "6" do menu que não é insistência.
-VERSAO = 8
+# 9 (03/11/2026, itens 2, 7, 9 e 10 da análise de 31/10–02/11): a contestação da decisão da
+# loja e a ameaça de escalar (pessoa), o D1 na disputa e no defeito da devolução aberta, as
+# etiquetas (Abrir chamado da entrega, Ag. cancelamento, evidência com o recibo) e a
+# prioridade da evidência recebida.
+VERSAO = 9
 # A chave em `atendimento_conversas.dados`.
 CHAVE = "humano"
 # Conversas por rodada do cron (o recálculo inicial, ~500, leva umas 3).
@@ -359,6 +365,10 @@ class Triagem:
     # D1: a conversa já respondida pelo agente com a ação pendente (`pos_envio_vale`) —
     # gravado no cálculo ("pos_envio": true) para a tela dizer "respondida pela IA".
     pos_envio: bool = False
+    # Item 9 da análise de 31/10–02/11 (o dono, 03/11/2026): a evidência que a loja pediu
+    # chegou ("Analisar foto ou vídeo") — a conversa vai para o TOPO da Caixa Humano
+    # (gravado no cálculo, "prioridade": true; a lista ordena por ele antes do turno).
+    prioridade: bool = False
 
     @property
     def para_pessoa(self) -> bool:
@@ -819,11 +829,38 @@ def _triar_do_agente(
         conversa, ctx, recentes, gatilho, acoes=acoes, agora=agora
     ):
         marca = {HUMANO_RECLAMACAO, HUMANO_DEVOLUCAO, HUMANO_ACAO_PESSOA} & motivos
+    # Itens 9 e 10 (03/11/2026): as etiquetas do turno (a MESMA régua do rascunho,
+    # `acao_pessoa.etiquetas_do_turno` e `recibo_da_evidencia`): o Abrir chamado da entrega,
+    # o Ag. cancelamento e a evidência recebida não seguram o envio sozinho — a conversa
+    # continua aqui com o rótulo (`pos_envio_vale`). Só quando TODA ação do código é uma
+    # delas (ou a reclamação do D1, acima).
+    etiquetas = set(acao_pessoa.etiquetas_do_turno(conversa, ctx, recentes, gatilho, gatilhos))
+    if acao_pessoa.recibo_da_evidencia(conversa, ctx, recentes, gatilho, agora=agora):
+        etiquetas.add(ACAO_ANALISAR_EVIDENCIA)
+    if acoes and set(acoes) <= etiquetas | (acao_pessoa.ACOES_POS_ENVIO if marca else frozenset()):
+        marca.add(HUMANO_ACAO_PESSOA)
+        if ACAO_AG_CANCELAMENTO in etiquetas:
+            marca.add(HUMANO_AG_CANCELAMENTO)
+    marca &= motivos
+    # A etiqueta que o agente deixou depois do envio (o "abrir_chamado" que só o modelo
+    # escolheu, por exemplo) continua na Caixa Humano enquanto a marca vale.
+    if pos_envio:
+        dados = conversa.dados if isinstance(getattr(conversa, "dados", None), dict) else {}
+        da_marca = (dados.get(CHAVE_POS_ENVIO) or {}).get("acoes") or []
+        deixadas = [
+            a
+            for a in da_marca
+            if isinstance(a, str) and a in acao_pessoa.ACOES_ETIQUETA and a not in acoes
+        ]
+        if deixadas:
+            acoes = [a for a in ACOES_PESSOA if a in {*acoes, *deixadas}]
+            motivos.add(HUMANO_ACAO_PESSOA)
     return Triagem(
         motivos=tuple(m for m in ORDEM_HUMANO if m in motivos),
         assuntos=tuple(acoes),
         marca=tuple(m for m in ORDEM_HUMANO if m in marca),
         pos_envio=pos_envio and bool(motivos),
+        prioridade=ACAO_ANALISAR_EVIDENCIA in acoes,
     )
 
 
@@ -863,6 +900,9 @@ def para_tela(
         # D1 (23/10/2026): a IA já respondeu o cliente; a ação continua com a pessoa (só
         # quando há: a linha de antes não muda).
         saida["pos_envio"] = True
+    if dados.get("prioridade") is True and motivos:
+        # Item 9 (03/11/2026): a evidência recebida — o topo da Caixa Humano (só quando há).
+        saida["prioridade"] = True
     return saida
 
 
@@ -998,6 +1038,15 @@ def triada_sql():
 def _com_motivo_sql():
     """O cálculo gravado é do turno atual e tem motivo. Nunca NULL."""
     return and_(triada_sql(), func.coalesce(_campo("motivos") != _JSON_LISTA_VAZIA, false()))
+
+
+def prioridade_sql():
+    """Item 9 (03/11/2026): o cálculo do turno atual marcou a prioridade (a evidência que a
+    loja pediu chegou) — o topo da Caixa Humano. Nunca NULL; a gêmea de `para_tela`."""
+    return and_(
+        _com_motivo_sql(),
+        func.coalesce(_campo("prioridade") == cast(literal("true"), JSONB), false()),
+    )
 
 
 def _pausada_sql():
@@ -1266,6 +1315,9 @@ async def gravar_triagem(
     if triagem.pos_envio:
         # D1 (23/10/2026): a conversa já respondida pelo agente, com a ação pendente.
         base["pos_envio"] = True
+    if triagem.prioridade and triagem.motivos:
+        # Item 9 (03/11/2026): a evidência recebida vai para o topo (só quando há).
+        base["prioridade"] = True
     valor = cast(literal(json.dumps(base), Text), JSONB).op("||", return_type=JSONB)(
         func.jsonb_build_object(
             literal_column("'turno'"),

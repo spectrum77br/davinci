@@ -536,15 +536,30 @@ def test_4_o_cartao_sozinho_entra_no_d1():
 @pytest.mark.parametrize(
     "motivo",
     [
-        "Produto com defeito",
         "Produto danificado",
         "Recebi o item errado",
         "Faltando peças",
-        "Não funciona",
     ],
 )
 def test_4_o_cartao_com_problema_continua_com_pessoa(motivo):
     recentes = [_loja("Olá!"), _cartao(motivo)]
+    assert not acao_pessoa.responde_e_marca_do_turno(
+        _conv(), _ctx_d1(), recentes, recentes[-1], acoes=["reclamacao_aberta"], agora=AGORA
+    )
+
+
+@pytest.mark.parametrize("motivo", ["Produto com defeito", "Não funciona"])
+def test_4_o_cartao_do_defeito_informa_desde_03_11(motivo, monkeypatch):
+    """Item 7 da análise de 31/10–02/11 (o dono, 03/11/2026): o DEFEITO é o motivo da
+    devolução que o cliente acabou de abrir — a resposta só confirma a solicitação (a
+    Shopee analisa) e a ação continua com a pessoa. Com a chave desligada, como antes."""
+    from app.config import get_settings
+
+    recentes = [_loja("Olá!"), _cartao(motivo)]
+    assert acao_pessoa.responde_e_marca_do_turno(
+        _conv(), _ctx_d1(), recentes, recentes[-1], acoes=["reclamacao_aberta"], agora=AGORA
+    )
+    monkeypatch.setattr(get_settings(), "atendimento_agente_etiquetas_pos_envio", False)
     assert not acao_pessoa.responde_e_marca_do_turno(
         _conv(), _ctx_d1(), recentes, recentes[-1], acoes=["reclamacao_aberta"], agora=AGORA
     )

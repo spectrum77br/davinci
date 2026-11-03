@@ -829,12 +829,24 @@ async def test_h_video_depois_do_pedido_da_loja_vai_para_analisar_evidencia(
 
     r = await ia.gerar_rascunho(db, conversa)
 
-    # Só o vídeo depois do pedido da loja: nem chama o modelo.
+    # Só o vídeo depois do pedido da loja: nem chama o modelo. Item 9 da análise de
+    # 31/10–02/11 (o dono, 03/11/2026): o recibo fixo sai na hora e a análise continua com a
+    # pessoa ("Analisar foto ou vídeo" para depois do envio, no topo da Caixa Humano).
     assert api.pedidos == [] and api.clientes == []
-    assert r.texto is None and _do_agente(r)["acoes_pessoa"] == ["analisar_evidencia"]
-    assert "Analisar foto ou vídeo" in r.motivo and envios == []
+    assert r.texto == "Recebemos o vídeo, obrigado! A equipe analisa e responde por aqui."
+    assert _do_agente(r)["acoes_pessoa"] == []
+    assert _do_agente(r)["acoes_pos_envio"] == ["analisar_evidencia"]
+    assert [e["texto"] for e in envios] == [r.texto] and _decisao(r) == "enviado"
+    from app.services.atendimento import gravar
 
-    # Vídeo + texto: o modelo responde, o código manda para pessoa do mesmo jeito.
+    await gravar.gravar_mensagem(
+        db, conversa, externo_id="ia-recibo", autor="loja", texto=r.texto,
+        enviada_em=datetime.now(UTC) - timedelta(minutes=4), origem=ORIGEM_IA,
+    )  # fmt: skip
+    await db.commit()
+
+    # Vídeo + texto DEPOIS do recibo: sem outro recibo — o modelo responde, o código manda
+    # para pessoa (o pedido de evidência de antes do recibo continua valendo).
     await _msg(db, conversa, None, tipo="video", ha=timedelta(minutes=3))
     await _msg(db, conversa, "segue o vídeo, ele não carrega mais", ha=timedelta(minutes=2))
     api.roteiro = [
@@ -847,7 +859,7 @@ async def test_h_video_depois_do_pedido_da_loja_vai_para_analisar_evidencia(
     fatos = _do_agente(r2)
     assert len(api.pedidos) == 1
     assert fatos["acoes_codigo"] == ["analisar_evidencia"] and r2.precisa_humano
-    assert envios == [] and _decisao(r2) == "precisa_humano"
+    assert len(envios) == 1 and _decisao(r2) == "precisa_humano"
 
 
 async def test_h_orientacao_de_defeito_pede_o_video_sem_ir_para_pessoa(

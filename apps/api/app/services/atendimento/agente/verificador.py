@@ -1058,6 +1058,9 @@ class ResumoDoPacote:
     # v12 (D1 do dono, 23/10/2026): as ações de pessoa que ficam para DEPOIS do envio no
     # "responde e marca" (`ctx.acoes_pos_envio`) — vazio = a seção não vai.
     pos_envio: tuple[str, ...] = ()
+    # Item 7 (revisão de 03/11/2026): a devolução/reclamação aberta está em DISPUTA
+    # (`acao_pessoa.disputa_do_turno`) — a linha da disputa na seção do pós-envio.
+    disputa: bool = False
     # v14 (o portão do dono, 27/10/2026): os AVISOS das checagens determinísticas que não
     # seguram sozinhos (`SaidaConferida.avisos`) — vazio = a seção não vai (a entrada de antes).
     avisos: tuple[str, ...] = ()
@@ -1252,6 +1255,11 @@ def resumo_do_pacote(
         busca=busca_do_contexto(ctx),
         # v12 (D1): a ação que continua com a pessoa depois do envio.
         pos_envio=tuple(getattr(ctx, "acoes_pos_envio", None) or ()),
+        # Item 7 (revisão de 03/11/2026): a disputa, só com a devolução aberta no pós-envio.
+        disputa=(
+            constantes.ACAO_RECLAMACAO_ABERTA in (getattr(ctx, "acoes_pos_envio", None) or ())
+            and acao_pessoa.disputa_do_turno(base.ctx, base.recentes)
+        ),
         # v14 (o portão): os avisos das checagens, mascarados.
         avisos=tuple(
             ia.mascarar(_uma_linha(a, MAX_CHARS_AVISO), tuple(base.nomes))
@@ -1297,6 +1305,17 @@ _ROTULO_DO_POS_ENVIO = {
         "central do vendedor; o rascunho só informa o estado da solicitação e o caminho, "
         "nunca decide, aprova, recusa nem dá prazo ou valor"
     ),
+    # Item 10 (03/11/2026): as etiquetas — a pessoa age depois; o rascunho só informa.
+    constantes.ACAO_ABRIR_CHAMADO: (
+        "abrir o chamado da entrega com a plataforma — a equipe abre depois do envio; o "
+        "rascunho só diz o que o pedido mostra e a política da entrega, sem prometer o "
+        "chamado, a verificação nem data"
+    ),
+    constantes.ACAO_AG_CANCELAMENTO: (
+        "o pedido em Ag. cancelamento — a equipe decide o destino do pedido; o rascunho só "
+        "responde o que não depende dele (produto, cumprimento), sem falar de envio, entrega, "
+        "prazo nem cancelamento"
+    ),
 }
 
 
@@ -1324,9 +1343,21 @@ def linhas_dos_avisos(avisos: Sequence[str]) -> list[str]:
     return [CABECALHO_AVISOS, *(f"- {a}" for a in limpos)]
 
 
-def linhas_do_pos_envio(acoes: Sequence[str]) -> list[str]:
-    """As linhas da AÇÃO QUE CONTINUA COM A PESSOA (v12, D1). Sem ação, nenhuma. PURA."""
+# Item 7 (revisão de 03/11/2026): na DISPUTA a frase aprovada do D1 ("o reembolso é feito
+# pela Shopee pela mesma forma de pagamento") dá como certo o que a Shopee ainda julga.
+LINHA_DA_DISPUTA = (
+    "a solicitação está em DISPUTA (a loja contestou; a Shopee julga): o reembolso só "
+    '"se a Shopee aprovar" — o rascunho que dá o reembolso, o estorno ou o dinheiro de volta '
+    "como certo (em qualquer tempo do verbo) não sai"
+)
+
+
+def linhas_do_pos_envio(acoes: Sequence[str], *, disputa: bool = False) -> list[str]:
+    """As linhas da AÇÃO QUE CONTINUA COM A PESSOA (v12, D1). Sem ação, nenhuma. PURA.
+    `disputa` (item 7): a linha da disputa, só com a devolução aberta entre as ações."""
     linhas = [f"- {_ROTULO_DO_POS_ENVIO[a]}" for a in acoes if a in _ROTULO_DO_POS_ENVIO]
+    if disputa and constantes.ACAO_RECLAMACAO_ABERTA in acoes:
+        linhas.append(f"- {LINHA_DA_DISPUTA}")
     return [CABECALHO_POS_ENVIO, *linhas] if linhas else []
 
 
@@ -2111,7 +2142,7 @@ def montar_entrada(
         ),
         *linhas_das_lacunas(texto, preenchidas),
         # v12 (D1): a ação que continua com a pessoa, só no "responde e marca".
-        *linhas_do_pos_envio(resumo.pos_envio),
+        *linhas_do_pos_envio(resumo.pos_envio, disputa=resumo.disputa),
         # v14 (o portão, 27/10/2026): os avisos das checagens, só quando há.
         *linhas_dos_avisos(resumo.avisos),
         "RASCUNHO:",
