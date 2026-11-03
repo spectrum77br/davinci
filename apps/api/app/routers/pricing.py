@@ -20,6 +20,7 @@ from app.db import get_session
 from app.deps.auth import require_admin, require_permission, user_scope
 from app.deps.team_scope import (
     TeamScope,
+    alinhar_equipes_da_loja,
     escopo_das_equipes,
     nome_da_equipe,
     resolve_team_scope,
@@ -2490,6 +2491,12 @@ async def create_store_info(
     user: Annotated[User, Depends(require_admin)],
 ) -> StoreInfoOut:
     data = body.model_dump(exclude={"password"})
+    # Equipe 1/2/3 e equipe de vendas 101/102/103 andam juntas (03/11/2026):
+    # a que veio no corpo define a outra.
+    recebido = {
+        k: data[k] for k in ("commercial_team", "sales_team") if k in body.model_fields_set
+    }
+    data.update(alinhar_equipes_da_loja(recebido))
     row = StoreInfo(user_id=user.id, **data)
     if body.password:
         row.password_enc = encrypt(body.password)
@@ -2547,6 +2554,8 @@ async def patch_store_info(
     if "password" in data:
         pwd = data.pop("password")
         row.password_enc = encrypt(pwd) if pwd else None
+    # A "Equipe" da tela de Lojas troca também quem vê a loja (03/11/2026).
+    alinhar_equipes_da_loja(data)
     for k, v in data.items():
         setattr(row, k, v)
     # Types selected while the store was registration-only must remain visible

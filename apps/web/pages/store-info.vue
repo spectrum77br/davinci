@@ -49,7 +49,7 @@ type StoreInfo = {
   duoker: boolean | null
   uf_restrictions: string[] | null
   excecoes: StoreExcecao[] | null
-  commercial_team: 1 | 2 | null
+  commercial_team: 1 | 2 | 3 | null
   nf_faturador_id: string | null
   // Faturador POR TIPO (0228): {"celular": "<uuid>", "eletro": "<uuid>"}.
   // Contas com 2+ tipos escolhem uma regra por tipo; null = regra única.
@@ -505,6 +505,15 @@ async function startEdit(row: StoreInfo, field: string) {
   }
 }
 
+// Equipe da loja (03/11/2026): 1 Londres, 2 Israel, 3 Marrocos — a mesma
+// equipe de vendas que decide quem vê a loja (a API grava as duas juntas).
+const EQUIPES_DA_LOJA: Record<number, string> = { 1: 'Londres', 2: 'Israel', 3: 'Marrocos' }
+
+function rotuloEquipeLoja(n: number | null | undefined): string {
+  if (n == null) return 'Sem equipe'
+  return EQUIPES_DA_LOJA[n] ? `Equipe ${n} · ${EQUIPES_DA_LOJA[n]}` : `Equipe ${n}`
+}
+
 function cancelEdit() {
   editing.value = null
   editValue.value = ''
@@ -533,8 +542,19 @@ async function commitEdit() {
     if (Number.isNaN(n)) return cancelEdit()
     payload.sort_order = n
   } else if (field === 'commercial_team') {
-    if (raw !== '' && raw !== '1' && raw !== '2') return cancelEdit()
-    payload.commercial_team = raw ? Number(raw) : null
+    if (raw !== '' && !EQUIPES_DA_LOJA[Number(raw)]) return cancelEdit()
+    const nova = raw ? Number(raw) : null
+    // Trocar a equipe troca quem vê a loja em todas as telas: confirma antes.
+    const loja = row.account_name || row.platform
+    const antes = rotuloEquipeLoja(row.commercial_team)
+    const depois = rotuloEquipeLoja(nova)
+    const aviso = nova == null
+      ? `Tirar a equipe da loja "${loja}" (${antes})? Os vendedores de equipe deixam de ver esta loja em todas as telas.`
+      : `Mudar a loja "${loja}" de ${antes} para ${depois}? Ela passa a aparecer para a equipe ${EQUIPES_DA_LOJA[nova]} e sai da que via antes, em todas as telas.`
+    // Fecha a edição antes do confirm: o blur do select chamaria de novo.
+    cancelEdit()
+    if (!confirm(aviso)) return
+    payload.commercial_team = nova
   } else if (field === 'password') {
     payload.password = raw || null
   } else {
@@ -885,7 +905,7 @@ async function copyText(text: string) {
         <div class="store-cards grid min-w-0 gap-3">
           <article v-for="row in group.rows" :key="row.id" class="store-card min-w-0 rounded-xl border bg-card p-3">
             <div class="flex items-start justify-between gap-2">
-              <div class="min-w-0"><h3 class="break-words text-sm font-semibold">{{ row.account_name || 'Sem nome de conta' }}</h3><p class="mt-1 text-xs text-muted-foreground">{{ platformLabel(row.platform) }} · {{ row.commercial_team == null ? 'Sem equipe' : `Equipe ${row.commercial_team}` }}</p></div>
+              <div class="min-w-0"><h3 class="break-words text-sm font-semibold">{{ row.account_name || 'Sem nome de conta' }}</h3><p class="mt-1 text-xs text-muted-foreground">{{ platformLabel(row.platform) }} · {{ rotuloEquipeLoja(row.commercial_team) }}</p></div>
               <span v-if="archivedView" class="rounded-md border bg-muted px-2 py-1 text-xs">Arquivada</span>
             </div>
             <div class="mt-3 flex flex-wrap gap-1.5" aria-label="Tipos da loja"><span v-for="d in row.departments" :key="d" class="rounded-md border bg-muted/40 px-2 py-1 text-xs">{{ DEPARTMENTS.find(x => x.value === d)?.label || d }}</span><span v-if="!row.departments.length" class="text-xs text-muted-foreground">Sem tipo</span></div>
@@ -940,7 +960,7 @@ async function copyText(text: string) {
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]" title="Horários (BRT) em que as etiquetas desta loja são impressas. Vazio = contínuo.">Horário Etiqueta</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Impressão</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Responsável</th>
-            <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[110px]">Equipe</th>
+            <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[130px]" title="Equipe 1 Londres, 2 Israel, 3 Marrocos. É a equipe que vê a loja: trocar aqui muda quem a vê em todas as telas.">Equipe</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[80px]">Servidor</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">CNPJ</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[180px]">E-mail</th>
@@ -1272,7 +1292,7 @@ async function copyText(text: string) {
                 </span>
               </td>
             </template>
-            <!-- Organização comercial, independente dos acessos individuais. -->
+            <!-- Equipe da loja (1 Londres, 2 Israel, 3 Marrocos): decide quem vê a loja. -->
             <td
               class="border border-border px-2 py-1.5 text-xs text-center"
               :class="{
@@ -1291,11 +1311,10 @@ async function copyText(text: string) {
                 @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
               >
                 <option value="">Sem equipe</option>
-                <option value="1">Equipe 1</option>
-                <option value="2">Equipe 2</option>
+                <option v-for="(nome, n) in EQUIPES_DA_LOJA" :key="n" :value="String(n)">Equipe {{ n }} · {{ nome }}</option>
               </select>
-              <span v-else :class="{ 'text-muted-foreground': row.commercial_team == null }">
-                {{ row.commercial_team == null ? 'Sem equipe' : `Equipe ${row.commercial_team}` }}
+              <span v-else class="whitespace-nowrap" :class="{ 'text-muted-foreground': row.commercial_team == null }">
+                {{ rotuloEquipeLoja(row.commercial_team) }}
               </span>
             </td>
             <!-- text fields: server / cnpj / email / phone -->

@@ -23,7 +23,7 @@ type UserDetail = {
   // Trava de vídeo (17/09): tags cujas solicitações de vídeo trancam a aba
   // Pedidos deste usuário (subconjunto de stock_tags). null = nunca tranca.
   video_trava_tags: string[] | null
-  commercial_team: 1 | 2 | null
+  commercial_team: 1 | 2 | 3 | null
   sales_teams: number[] | null
   marketing_teams: string[] | null
   permissions: Partial<Record<Resource, Partial<ResourcePerm>>>
@@ -77,7 +77,7 @@ const form = reactive({
   threema: '',
   stock_tags: [] as string[],
   video_trava_tags: [] as string[],
-  commercial_team: null as 1 | 2 | null,
+  commercial_team: null as 1 | 2 | 3 | null,
   marketing_teams: [] as string[],
   status: 'pending' as 'pending' | 'active' | 'suspended',
 })
@@ -603,8 +603,9 @@ async function removeUser(ignorarImobilizado = false, jaConfirmou = false) {
               class="w-full h-9 rounded-md border bg-background px-3 text-sm mt-1"
             >
               <option :value="null">Sem equipe</option>
-              <option :value="1">Equipe 1</option>
-              <option :value="2">Equipe 2</option>
+              <option :value="1">Equipe 1 · Londres</option>
+              <option :value="2">Equipe 2 · Israel</option>
+              <option :value="3">Equipe 3 · Marrocos</option>
             </select>
             <p class="text-[11px] text-muted-foreground mt-1">
               Organiza o usuário por equipe e mantém seus acessos individuais às lojas.
@@ -685,7 +686,7 @@ async function removeUser(ignorarImobilizado = false, jaConfirmou = false) {
       <div class="px-6 pb-6 space-y-3">
         <p class="text-sm text-muted-foreground">
           Selecione os vínculos de contas permitidos para este usuário. Contas no mesmo vínculo
-          são liberadas juntas. Esta seleção é independente da Equipe 1 ou Equipe 2.
+          são liberadas juntas. Esta seleção é independente da Equipe do usuário (1, 2 ou 3) acima.
         </p>
         <p class="text-sm font-medium">
           Sem nenhuma seleção, o usuário terá acesso a todas as contas, respeitando as permissões dos módulos.

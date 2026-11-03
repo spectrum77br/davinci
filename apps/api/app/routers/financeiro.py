@@ -29,6 +29,7 @@ from sqlalchemy.orm import undefer
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_admin, require_permission
+from app.deps.team_scope import equipe_de_vendas, nome_da_equipe
 from app.models import (
     DNPConfig,
     DNPProduto,
@@ -1597,14 +1598,14 @@ async def valuation_report(
         return any(mes in months and pred(team) and c
                    for (mes, team), c in dev_idx.items())
 
-    # Organização comercial independente dos códigos que restringem o acesso.
-    # As duas equipes permanecem visíveis mesmo enquanto a Equipe 2 está vazia.
+    # As três equipes (1 Londres, 2 Israel, 3 Marrocos — 03/11/2026, a mesma
+    # equipe de vendas da loja) aparecem sempre, mesmo vazias.
     total_aguard, total_taxa = _com_series(lambda t: True)
     empresas: list[ComercialEmpresaOut] = []
-    for team in (1, 2):
+    for team in (1, 2, 3):
         a, t = _com_series(lambda x, team=team: x == team)
         empresas.append(ComercialEmpresaOut(
-            empresa=team, label=f"Equipe {team}",
+            empresa=team, label=f"Equipe {team} · {nome_da_equipe(equipe_de_vendas(team))}",
             aguardando_devolucao=a, taxa_devolucao=t, membros=[],
         ))
     # "Sem equipe" só aparece quando houver dados não atribuídos a equipe.

@@ -5,8 +5,10 @@ from pydantic import BaseModel, EmailStr, Field
 
 from app.schemas.permissions import Permissions
 
-# Organização comercial; os códigos históricos de acesso continuam separados.
-CommercialTeam = Annotated[int, Field(strict=True, ge=1, le=2)]
+# Equipe 1 Londres, 2 Israel, 3 Marrocos (03/11/2026). No usuário é só
+# organização (não mexe no acesso); na LOJA anda junto com a equipe de vendas
+# (`store_info.sales_team` 101/102/103) — ver `team_scope.equipe_de_vendas`.
+CommercialTeam = Annotated[int, Field(strict=True, ge=1, le=3)]
 
 
 # Single source of truth for the valid operator-of-stock tags. The UI

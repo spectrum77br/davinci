@@ -1,4 +1,8 @@
-"""Equipe comercial organiza cadastros sem alterar o acesso individual."""
+"""Equipe 1/2/3 (Londres/Israel/Marrocos, 03/11/2026).
+
+No USUÁRIO é só organização: não altera o acesso individual. Na LOJA anda
+junto com a equipe de vendas (101/102/103), que decide quem vê a loja.
+"""
 # ruff: noqa: S608
 # SQL usa apenas nomes locais constantes e um schema temporário gerado por UUID.
 
@@ -30,10 +34,10 @@ from app.schemas.users import UserCreate, UserPatch
         (StoreInfoPatch, {}),
     ],
 )
-def test_commercial_team_accepts_only_integer_one_two_or_null(schema, required):
-    for value in (1, 2, None):
+def test_commercial_team_accepts_only_integer_one_two_three_or_null(schema, required):
+    for value in (1, 2, 3, None):
         assert schema(**required, commercial_team=value).commercial_team == value
-    for value in (-1, 0, 3, 101, True, False, 1.0, "1", "1.1"):
+    for value in (-1, 0, 4, 101, True, False, 1.0, "1", "1.1"):
         with pytest.raises(ValidationError):
             schema(**required, commercial_team=value)
 
@@ -80,31 +84,52 @@ async def test_patch_user_commercial_team_preserves_access(client, make_user, au
 
 
 @pytest.mark.asyncio
-async def test_patch_store_commercial_team_preserves_access(client, make_user, auth_as, db):
+async def test_patch_store_equipe_troca_quem_ve_a_loja(client, make_user, auth_as, db):
+    """A "Equipe" da tela de Lojas é a equipe de vendas: Equipe 2 → 102 (o
+    vendedor de Londres deixa de ver, o de Israel passa a ver); "Sem equipe" →
+    nenhuma; e gravar só o `sales_team` acerta o número."""
     admin = await make_user(role=UserRole.ADMIN)
-    target = await make_user()
-    target.sales_teams = [101]
-    target.commercial_team = 1
+    londres = await make_user()
+    londres.sales_teams = [101]
+    israel = await make_user()
+    israel.sales_teams = [102]
     store = StoreInfo(user_id=admin.id, platform="shopee", sales_team=101, commercial_team=1)
     db.add(store)
     await db.commit()
     auth_as(admin)
 
-    for value in (2, None):
+    for value, sales, ve_londres, ve_israel in (
+        (2, 102, set(), {store.id}),
+        (None, None, set(), set()),
+        (1, 101, {store.id}, set()),
+        (3, 103, set(), set()),
+    ):
         response = await client.patch(
             f"/api/pricing/store-info/{store.id}", json={"commercial_team": value}
         )
         assert response.status_code == 200, response.text
         assert response.json()["commercial_team"] == value
-        assert response.json()["sales_team"] == 101
+        assert response.json()["sales_team"] == sales
         await db.refresh(store)
-        await db.refresh(target)
-        assert store.sales_team == 101
-        assert target.sales_teams == [101]
-        assert target.commercial_team == 1
-        scope = await resolve_team_scope(db, target)
-        assert scope.unrestricted is False
-        assert scope.store_info_ids == {store.id}
+        assert (store.commercial_team, store.sales_team) == (value, sales)
+        assert (await resolve_team_scope(db, londres)).store_info_ids == ve_londres
+        assert (await resolve_team_scope(db, israel)).store_info_ids == ve_israel
+
+    response = await client.patch(
+        f"/api/pricing/store-info/{store.id}", json={"sales_team": 102}
+    )
+    assert response.status_code == 200, response.text
+    assert (response.json()["commercial_team"], response.json()["sales_team"]) == (2, 102)
+    # Código de acesso fora das três equipes: fica, sem número.
+    response = await client.patch(
+        f"/api/pricing/store-info/{store.id}", json={"sales_team": 201}
+    )
+    assert (response.json()["commercial_team"], response.json()["sales_team"]) == (None, 201)
+    # Mexer em outro campo não mexe na equipe.
+    response = await client.patch(
+        f"/api/pricing/store-info/{store.id}", json={"cnpj": "1"}
+    )
+    assert (response.json()["commercial_team"], response.json()["sales_team"]) == (None, 201)
 
 
 @pytest.mark.asyncio
@@ -121,15 +146,21 @@ async def test_create_commercial_team_does_not_invent_access_codes(client, make_
     assert user.commercial_team == 2
     assert user.sales_teams is None
 
+    # Na LOJA a equipe é a de vendas: criar na Equipe 2 cria na 102 (Israel).
     response = await client.post(
         "/api/pricing/store-info", json={"platform": "shopee", "commercial_team": 2}
     )
     assert response.status_code == 201, response.text
     assert response.json()["commercial_team"] == 2
-    assert response.json()["sales_team"] is None
+    assert response.json()["sales_team"] == 102
     store = await db.get(StoreInfo, UUID(response.json()["id"]))
-    assert store.commercial_team == 2
-    assert store.sales_team is None
+    assert (store.commercial_team, store.sales_team) == (2, 102)
+    response = await client.post(
+        "/api/pricing/store-info", json={"platform": "shopee", "sales_team": 103}
+    )
+    assert (response.json()["commercial_team"], response.json()["sales_team"]) == (3, 103)
+    response = await client.post("/api/pricing/store-info", json={"platform": "shopee"})
+    assert (response.json()["commercial_team"], response.json()["sales_team"]) == (None, None)
 
 
 @pytest.mark.asyncio
