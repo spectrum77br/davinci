@@ -9045,23 +9045,81 @@ def conferir_responde_e_marca(
 
 # Item 7 (03/11/2026): na DISPUTA (a loja contestou, a Shopee julgando), a frase do
 # reembolso só vale com a condição ("se a Shopee aprovar", "caso a decisão seja a seu favor").
+# Revisão de 03/11/2026: as formas do futuro e do infinitivo ("a Shopee vai devolver o seu
+# dinheiro", "devolverá", "irá reembolsar", "vai estornar", "o valor vai ser devolvido") e o
+# "você vai receber o reembolso" também dão o reembolso como certo; e, na disputa, QUALQUER
+# frase do reembolso/estorno/dinheiro de volta sem a condição nem a incerteza dita (o "em
+# análise", o "depende da decisão") segura — a frase do "acontece" segura até com a incerteza
+# ("a Shopee está analisando e vai devolver o seu dinheiro").
 _REEMBOLSO_ACONTECE = re.compile(
-    r"\b(?:reembols\w*|estorno|dinheiro|valor)\b(?:\s+[a-z0-9]+){0,6}?\s+(?:e\s+feito|sera\s+feito"
-    r"|e\s+devolvid[oa]|sera\s+devolvid[oa]|volta|voltara|cai|caira|retorna|retornara"
-    r"|e\s+creditad[oa]|sera\s+creditad[oa]|vai\s+(?:cair|voltar|retornar))\b"
-    r"|\b(?:a\s+)?(?:shopee|plataforma)\s+(?:\w+\s+){0,2}?(?:devolve|reembolsa|estorna)\b"
+    # O reembolso/o estorno/o dinheiro/o valor + o verbo que o dá como feito ou certo.
+    r"\b(?:reembols\w*|estorno|dinheiro|valor|pagamento)\b,?(?:\s+[a-z0-9,]+){0,6}?\s+"
+    r"(?:(?:e|sera|serao|vai\s+ser|vao\s+ser|ira\s+ser|deve\s+ser|fica|ficara|esta|foi|foram)\s+"
+    r"(?:\w+\s+)?(?:feit|devolvid|creditad|estornad|reembolsad|liberad|pag[oa]s?\b|ressarcid"
+    r"|depositad|restituid|processad|garantid|assegurad)\w*"
+    r"|volta\w*|cai\b|caira|vai\s+(?:cair|voltar|retornar|entrar|sair)|retorna\w*|sai\b|saira"
+    r"|entra\b|entrara)"
+    # O reembolso garantido/assegurado/certo, sem verbo ("fica com o reembolso garantido").
+    r"|\b(?:reembols\w*|estorno|dinheiro|valor)\s+(?:\w+\s+)?(?:garantid|assegurad|cert[oa]\b)\w*"
+    # A Shopee/a plataforma + o verbo, no presente, no futuro ou no infinitivo.
+    r"|\b(?:shopee|plataforma|tiktok)\s+(?:[\w,]+\s+){0,4}?(?:devolv(?:e|em|er|era|erao)"
+    r"|reembols(?:a|am|ar|ara|arao)|estorn(?:a|am|ar|ara|arao)|ressarc(?:e|em|ir|ira)"
+    r"|restitu(?:i|em|ir|ira)|credit(?:a|am|ar|ara))\b"
+    r"|\b(?:shopee|plataforma|tiktok)\s+(?:[\w,]+\s+){0,2}?(?:faz|fara|fazer|libera|liberar"
+    r"|liberara|efetua|efetuar|efetuara|realiza|realizar|realizara|processa|processar"
+    r"|processara)\s+(?:\w+\s+){0,2}?(?:reembols\w*|estorno|devoluc\w*\s+do\s+(?:valor|dinheiro)"
+    r"|valor|dinheiro|pagamento)"
+    # O cliente vai receber/recebe/receberá o reembolso, o dinheiro de volta, o valor.
+    r"|\b(?:(?:vai|ira|vao|irao|deve|devera)\s+receber|recebera|receberao|(?:voce|vc)\s+recebe)"
+    r"\s+(?:[\w,]+\s+){0,3}?(?:reembols\w*|estorno|dinheiro|valor)\b"
 )
 _COM_A_CONDICAO = re.compile(
-    r"\b(?:se|caso)\s+(?:\w+\s+){0,4}?(?:aprov\w*|decid\w*|favor\w*|for\s+aprovad\w*|acatad\w*"
-    r"|der\s+razao|resolv\w*)|\bapos\s+a\s+(?:analise|decisao)\b|\bdepois\s+da\s+(?:analise|decisao)\b"
-    r"|\bquando\s+(?:a\s+)?(?:shopee|plataforma)\s+(?:\w+\s+)?(?:aprovar|decidir|concluir)\b"
+    r"\b(?:se|caso)\s+(?:[\w,]+\s+){0,5}?(?:aprov\w*|decid\w*|favor\w*|acatad\w*|acolhid\w*"
+    r"|deferid\w*|der\s+razao|resolv\w*|confirmad\w*)"
+    r"|\b(?:apos|depois\s+d)[ao]?\s+(?:a\s+)?aprovac\w*|\bem\s+caso\s+de\s+aprovac\w*"
+    r"|\bquando\s+(?:a\s+)?(?:shopee|plataforma|tiktok)\s+(?:\w+\s+)?(?:aprovar|der\s+razao)\b"
+    r"|\bdepend\w*\s+(?:\w+\s+){0,2}?d[ao]s?\s+(?:\w+\s+){0,2}?(?:decisao|analise|aprovac\w*"
+    r"|resultado|avaliac\w*|julgament\w*)"
+)
+# A frase que FALA do reembolso (na disputa): o reembolso, o estorno, o ressarcimento, o
+# dinheiro/o valor de volta — fora o nome da solicitação ("a solicitação de reembolso", "o
+# pedido de devolução e reembolso") e o assunto ("sobre o reembolso", "a preocupação com o
+# reembolso"), que não dizem nada dele.
+_FALA_DO_REEMBOLSO = re.compile(
+    r"\breembols\w*|\bestorn\w*|\bressarc\w*|\brestitu\w*|\bdinheiro\s+de\s+volta\b"
+    r"|\b(?:dinheiro|valor|pagamento)\s+(?:[\w,]+\s+){0,3}?(?:volt|devolvid|retorn|credit)\w*"
+    r"|\bdevolv\w*\s+(?:\w+\s+){0,2}?(?:dinheiro|valor|pagamento)\b"
+)
+_NOME_DO_REEMBOLSO = re.compile(
+    r"\b(?:solicitac\w*|pedido|requisic\w*|processo|caso|disputa|analise|andamento|status"
+    r"|situacao|motivo|opcao|botao|tela)\s+(?:\w+\s+)?d[eoa]s?\s+(?:seu\s+|sua\s+)?"
+    r"(?:devoluc\w*\s+(?:e|ou|com)\s+)?(?:reembols\w*|estorno|devoluc\w*)"
+    r"|\b(?:sobre|quanto\s+a[os]?|em\s+relacao\s+a[os]?|a\s+respeito\s+d[oa]"
+    r"|preocupac\w*\s+com|duvida\w*\s+(?:sobre|com))\s+"
+    r"(?:o\s+|a\s+)?(?:seu\s+|sua\s+)?(?:reembols\w*|estorno|devoluc\w*)"
+)
+_INCERTEZA_DO_REEMBOLSO = re.compile(
+    r"\bem\s+analise\b|\banalis\w*|\bavaliac\w*|\bavaliand\w*|\baguard\w*|\bjulg\w*"
+    r"|\bdisputa\b|\bdecisao\b|\bresultado\b"
+    r"|\bnao\s+(?:\w+\s+){0,2}?(?:garant|promet|inform|confirm|sab|consegu|tem\s+como"
+    r"|temos\s+como|ha\s+como|e\s+possivel|previs|definid)\w*"
+    r"|\bainda\s+(?:nao|sem)\b|\bsem\s+(?:previsao|definicao|decisao)\b"
 )
 
 
 def _reembolso_sem_condicao(plano: str) -> bool:
-    """Alguma frase dá o reembolso como certo, sem a condição da decisão? PURA."""
+    """Alguma frase dá o reembolso como certo, sem a condição da decisão? PURA. Só na
+    disputa (`conferir_responde_e_marca(disputa=True)`): a frase do "acontece"
+    (`_REEMBOLSO_ACONTECE`) sem a condição; e a que só FALA do reembolso sem a condição nem
+    a incerteza dita (`_INCERTEZA_DO_REEMBOLSO`)."""
     for frase in re.split(r"[.!?;\n]+", plano):
-        if _REEMBOLSO_ACONTECE.search(frase) and not _COM_A_CONDICAO.search(frase):
+        if not frase.strip() or _COM_A_CONDICAO.search(frase):
+            continue
+        if _REEMBOLSO_ACONTECE.search(frase):
+            return True
+        if _FALA_DO_REEMBOLSO.search(
+            _NOME_DO_REEMBOLSO.sub(" ", frase)
+        ) and not _INCERTEZA_DO_REEMBOLSO.search(frase):
             return True
     return False
 
@@ -9129,17 +9187,51 @@ _DESTINO_NA_RESPOSTA = re.compile(
     r"\b(?:envi\w*|post\w*|despach\w*|entreg\w*|prazo\w*|rastrei\w*|transport\w*|cheg\w*"
     r"|cancel\w*|estorn\w*|reembols\w*|separac\w*|coleta\w*|previs\w*|a\s+caminho|logistic\w*)"
 )
+# Revisão de 03/11/2026: o pedido no 83955 provavelmente não segue (b4e69bf2: no dia seguinte
+# a loja ofereceu outra cor) — a resposta também não diz que ele está confirmado/garantido/
+# "tudo certo", nem fala do estoque da variação, nem oferece outra cor/modelo/troca (o
+# `sugerir_troca`: "a resposta é da pessoa"). A pergunta de produto pura (o NFC, a bateria) e
+# o cumprimento continuam saindo.
+MOTIVO_AG_CANCELAMENTO_ESTADO_NA_RESPOSTA = (
+    "o pedido está em Ag. cancelamento e a resposta dá o pedido como confirmado/certo, fala do "
+    "estoque da variação ou oferece outra opção/troca — pessoa"
+)
+# A despedida de sempre ("ficamos disponíveis para qualquer dúvida") não é o estoque.
+_A_DISPOSICAO = re.compile(
+    r"\b(?:ficamos|fico|estamos|estou|seguimos|sigo|permanecemos|continuamos|sempre)\s+"
+    r"(?:\w+\s+)?disponi\w*"
+)
+_ESTADO_OU_ESTOQUE_NA_RESPOSTA = re.compile(
+    # O estado do pedido dado como certo.
+    r"\b(?:confirmad|garantid|aprovad|assegurad)\w*"
+    r"|\bsegu(?:e|ira|indo|ir)\s+(?:\w+\s+)?normal\w*|\bpode\s+ficar\s+tranquil\w*"
+    r"|\btudo\s+(?:certo|certinho|ok|em\s+ordem)\s+com\s+(?:o\s+|a\s+)?(?:seu\s+|sua\s+)?"
+    r"(?:pedido|compra)"
+    r"|\b(?:pedido|compra)\s+(?:\w+\s+){0,2}?(?:esta|ficou|segue|e)\s+(?:\w+\s+)?(?:certo|certinho"
+    r"|ok|em\s+ordem|normal)\b"
+    # O estoque/a disponibilidade da variação.
+    r"|\bestoque\b|\bdisponi\w*|\bindisponi\w*|\bem\s+falta\b|\bfalt(?:a|ou|ando)\b"
+    r"|\bacab(?:ou|aram|ando)\b|\besgot\w*|\breposic\w*|\brepor\b"
+    # A troca/a oferta de outra opção.
+    r"|\btroc\w*|\bno\s+lugar\b|\bsubstitu\w*|\balternativ\w*"
+    r"|\boutr[ao]s?\s+(?:cor|cores|modelo|modelos|variac\w*|opc\w*|versao|versoes|tamanho"
+    r"|aparelho)\b"
+)
 
 
 def conferir_ag_cancelamento_na_resposta(
     texto: str, *, acao: str, etiqueta: bool
 ) -> list[PendenciaAgente]:
-    """A resposta com o Ag. cancelamento como etiqueta fala do destino do pedido → DURA.
-    PURA. `etiqueta` = o `ag_cancelamento` em `ctx.acoes_pos_envio`."""
+    """A resposta com o Ag. cancelamento como etiqueta fala do destino do pedido, do estado
+    dele, do estoque da variação ou oferece troca → DURA. PURA. `etiqueta` = o
+    `ag_cancelamento` em `ctx.acoes_pos_envio`."""
     if not etiqueta or acao not in ("responder", "perguntar") or not (texto or "").strip():
         return []
-    if _DESTINO_NA_RESPOSTA.search(" ".join(_plano(texto).split())):
+    plano = " ".join(_plano(texto).split())
+    if _DESTINO_NA_RESPOSTA.search(plano):
         return [_pessoa(AG_CANCELAMENTO_NA_RESPOSTA, MOTIVO_AG_CANCELAMENTO_NA_RESPOSTA)]
+    if _ESTADO_OU_ESTOQUE_NA_RESPOSTA.search(_A_DISPOSICAO.sub(" ", plano)):
+        return [_pessoa(AG_CANCELAMENTO_NA_RESPOSTA, MOTIVO_AG_CANCELAMENTO_ESTADO_NA_RESPOSTA)]
     return []
 
 

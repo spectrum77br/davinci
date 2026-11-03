@@ -1635,6 +1635,16 @@ _DESTINO_DO_PEDIDO = frozenset(
     }
 )
 _PLATAFORMAS_DAS_ETIQUETAS = frozenset({"shopee", "tiktok"})
+# Revisão de 03/11/2026: no 83955 (quase sempre a falta de estoque), a fala do cliente sobre o
+# estoque, a cor/a variação ou a troca toca o problema do pedido — trava, como antes (o
+# b4e69bf2: a loja ofereceu outra cor no dia seguinte; o `sugerir_troca`: "a resposta é da
+# pessoa"). A pergunta de característica (o NFC, a bateria) continua como etiqueta.
+_ESTOQUE_OU_TROCA_NA_FALA = re.compile(
+    r"\bestoque\b|\bdisponi\w*|\bindisponi\w*|\bem\s+falta\b|\bfalt(?:a|ou|ando)\b"
+    r"|\bacab(?:ou|aram|ando)\b|\besgot\w*|\breposic\w*|\brepor\b|\btroc\w*|\bsubstitu\w*"
+    r"|\bno\s+lugar\b|\boutr[ao]s?\s+(?:cor|cores|modelo|modelos|variac\w*|opc\w*)\b"
+    r"|\bcor\b|\bcores\b|\bvariac\w*"
+)
 
 
 def etiquetas_do_turno(
@@ -1652,7 +1662,9 @@ def etiquetas_do_turno(
     (ela segura de qualquer jeito); o anexo no turno (a evidência tem a régua dela,
     `recibo_da_evidencia`). O `abrir_chamado` (o do código ou o que o modelo escolher):
     só o do atraso/rastreio parado e sem o dinheiro ou o cancelamento pedido. O
-    `ag_cancelamento`: só a fala que não toca o destino do pedido."""
+    `ag_cancelamento`: só a fala que não toca o destino do pedido nem o estoque, a cor/a
+    variação ou a troca (revisão de 03/11/2026). A ação que entra depois do modelo (o outro
+    pedido lido, a ferramenta) sai das etiquetas (`ContextoAgente.sem_etiqueta`)."""
     if not etiquetas_ligadas():
         return frozenset()
     ctx = ctx if isinstance(ctx, Mapping) else {}
@@ -1697,6 +1709,7 @@ def etiquetas_do_turno(
         and not menu
         and not _OBJETO_DA_ENTREGA.search(plano)
         and not _PEDE_SEGURAR.search(plano)
+        and not _ESTOQUE_OU_TROCA_NA_FALA.search(plano)
     ):
         saida.add(constantes.ACAO_AG_CANCELAMENTO)
     return frozenset(saida)

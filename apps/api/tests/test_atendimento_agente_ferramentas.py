@@ -1314,8 +1314,14 @@ async def test_sugerir_troca_so_83955_falta_de_estoque_niveis_1_e_2_sem_custo(
         }
 
     monkeypatch.setattr(troca_sugestoes, "sugestoes_do_pedido", _sugestoes)
+    # Revisão de 03/11/2026: o Ag. cancelamento que a régua do turno tinha liberado como
+    # etiqueta (item 10) volta a travar quando a ferramenta acha a opção de troca.
+    ctx.etiquetas_pos_envio = frozenset({constantes.ACAO_AG_CANCELAMENTO})
     texto = await _tools(ctx, base, conversa)["sugerir_troca"].call({"numero": "251006SEMESTQ1"})
     dados = _ler(texto, "sugerir_troca")
+    assert constantes.ACAO_AG_CANCELAMENTO in ctx.acoes_codigo
+    assert ctx.etiquetas_pos_envio == frozenset() and ctx.acoes_pos_envio == []
+    assert constantes.ACAO_AG_CANCELAMENTO in ctx.acoes_pessoa
     assert dados["opcoes"] == [
         {"nome": "Uranyx A18 Azul", "nivel": 1, "mesmo_produto": False},
         {"nome": "Uranyx F110", "nivel": 2, "mesmo_produto": False},

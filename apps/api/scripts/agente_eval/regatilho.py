@@ -347,6 +347,13 @@ def reaplicar_ferramentas(ctx: Any, rastro: Mapping[str, Any]) -> None:
             continue
         if nome == ferramentas.VER_GARANTIA:
             dados = garantia_de_hoje(dados)
+        if nome == ferramentas.SUGERIR_TROCA and dados.get("opcoes"):
+            # Revisão de 03/11/2026: a opção de troca marca o Ag. cancelamento (o
+            # `dados_sugerir_troca`) e nunca como etiqueta — como no `responder`.
+            ctx.acoes_codigo = agente_ctx.ordenar_acoes(
+                ctx.acoes_codigo, [constantes.ACAO_AG_CANCELAMENTO]
+            )
+            ctx.sem_etiqueta([constantes.ACAO_AG_CANCELAMENTO])
         provados = [x for x in ids if not x.startswith(agente_ctx.PREFIXOS_SEM_PROVA)]
         provados += [str(x) for x in dados.get("evidencias") or [] if isinstance(x, str)]
         corpo = json.dumps(dados, ensure_ascii=False, sort_keys=True)
@@ -526,21 +533,21 @@ def montar(r: Mapping[str, Any]) -> SimpleNamespace:
     )
     # Itens 9 e 10 (03/11/2026): as etiquetas do turno pela régua ATUAL (os detalhes dos
     # gatilhos não ficam gravados: a régua do código, sem o banco).
-    ctx.etiquetas_pos_envio = acao_pessoa.etiquetas_do_turno(
+    da_conversa = acao_pessoa.gatilhos(
         conversa,
-        ctxd,
         msgs,
-        gatilho,
-        acao_pessoa.gatilhos(
-            conversa,
-            msgs,
-            ctxd,
-            gatilho=gatilho,
-            postado=(bloco or {}).get("postado"),
-            chaves_ativas=frozenset(),
-            agora=agora,
-        ),
+        ctxd,
+        gatilho=gatilho,
+        postado=(bloco or {}).get("postado"),
+        chaves_ativas=frozenset(),
+        agora=agora,
     )
+    ctx.etiquetas_pos_envio = acao_pessoa.etiquetas_do_turno(
+        conversa, ctxd, msgs, gatilho, da_conversa
+    )
+    # Revisão de 03/11/2026: a ação gravada que a régua da conversa não dá entrou DEPOIS do
+    # modelo (o OUTRO pedido lido, a ferramenta) — nunca etiqueta, como no `responder`.
+    ctx.sem_etiqueta(set(ctx.acoes_codigo) - {g.codigo for g in da_conversa})
     ctx.pistas_orientacao = acao_pessoa.pistas_de_orientacao(msgs, gatilho)
     ctx.pistas_turno = acao_pessoa.pistas_do_turno(msgs, gatilho, com_pedido=bool(bloco))
     reaplicar_ferramentas(ctx, rastro)

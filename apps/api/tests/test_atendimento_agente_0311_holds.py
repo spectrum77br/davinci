@@ -22,6 +22,7 @@ endereço, rastreio ou número de pedido real). Nenhuma chamada a LLM, à loja o
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -30,11 +31,14 @@ import pytest
 from sqlalchemy import select, update
 
 import app.db as _db
-from app.models import AtendimentoConversa
+from app.models import AtendimentoConversa, AtendimentoMensagem, AtendimentoRascunho
+from app.services.atendimento import agente as agente_svc
 from app.services.atendimento import constantes, gravar, humano, ia
 from app.services.atendimento.agente import acao_pessoa, checagens, prompt
 from app.services.atendimento.agente import contexto as agente_ctx
+from app.services.atendimento.agente import verificador as v
 from app.services.atendimento.agente.saida import Proposta
+from scripts.agente_eval import regatilho
 from tests.test_atendimento_agente_decisoes_dono import (
     AGORA,
     BLOCO_DEV,
@@ -70,7 +74,10 @@ from tests.test_atendimento_agente_e2e import (  # noqa: F401 — fixtures
     sem_busca_pendurada,
     telegram,
 )
+from tests.test_atendimento_agente_furos import SAIU
 from tests.test_atendimento_agente_laco import _categorias_do_manual
+from tests.test_atendimento_agente_portao import PACOTE as PACOTE_REGATILHO
+from tests.test_atendimento_agente_portao import _registro as _registro_regatilho
 from tests.test_atendimento_agente_redondo import SHOPEE_REAL, VAI_AO_VERIFICADOR, VAI_COM_AVISO
 from tests.test_atendimento_humano import (  # noqa: F401 — fixtures
     URL,
@@ -839,3 +846,372 @@ async def test_9_a_caixa_humano_lista_a_prioridade_primeiro(
         if cursor is None:
             break
     assert ids == esperado
+
+
+# ═══════════════ A revisão de 03/11/2026: os achados do branch ═══════════════
+
+# Achado 1 (item 7): na disputa, o reembolso dado como certo no futuro, no infinitivo ou com
+# outro verbo também segura — antes, só "o reembolso é feito pela Shopee" segurava.
+DISPUTA_CERTO = [
+    "A Shopee vai devolver o seu dinheiro pela mesma forma de pagamento.",
+    "A Shopee vai reembolsar você pela mesma forma de pagamento.",
+    "A Shopee vai estornar o valor na mesma forma de pagamento.",
+    "A Shopee devolverá o valor pela mesma forma de pagamento.",
+    "A Shopee irá reembolsar o valor pela mesma forma de pagamento.",
+    "Você vai receber o reembolso pela mesma forma de pagamento.",
+    "O reembolso vai ser feito pela mesma forma de pagamento.",
+    "Seu dinheiro será estornado na mesma forma de pagamento.",
+    "O reembolso será liberado pela mesma forma de pagamento.",
+    "O valor vai ser devolvido pela mesma forma de pagamento.",
+    "O reembolso sai pela mesma forma de pagamento.",
+    "A Shopee está analisando e vai devolver o seu dinheiro.",
+    "Após a análise, o reembolso é feito pela mesma forma de pagamento.",
+    "A Shopee fará o reembolso pela mesma forma de pagamento.",
+    "Pode aguardar: você fica com o reembolso garantido.",
+]
+# O que só informa a disputa (a condição, a incerteza, o nome da solicitação): sai.
+DISPUTA_INFORMA = [
+    D1_COM_CONDICAO,
+    "A sua solicitação de reembolso está em análise pela Shopee.",
+    "O pedido de devolução e reembolso está em análise pela Shopee; acompanhe em Minhas Compras.",
+    "O reembolso depende da decisão da Shopee.",
+    "O reembolso, se aprovado, é feito pela mesma forma de pagamento.",
+    "Caso a decisão seja a seu favor, o reembolso é feito pela Shopee.",
+    "Compreendemos a sua preocupação com o reembolso. A Shopee está analisando a disputa.",
+    "Não conseguimos informar quando sai o reembolso: a decisão é da Shopee.",
+    "Para receber o reembolso, é preciso aguardar a análise da Shopee.",
+]
+
+
+def test_rev_7_a_disputa_pela_frase_pura():
+    for texto in DISPUTA_CERTO:
+        assert checagens._reembolso_sem_condicao(checagens._plano(texto)), texto
+        # Fora da disputa a régua do D1 de antes não muda (a frase da disputa não entra).
+        assert not any(
+            "certo na disputa" in x.motivo
+            for x in checagens.conferir_responde_e_marca(texto, acao="responder", marca=True)
+        ), texto
+    for texto in DISPUTA_INFORMA:
+        assert not checagens._reembolso_sem_condicao(checagens._plano(texto)), texto
+
+
+@pytest.mark.parametrize("texto", DISPUTA_CERTO)
+async def test_rev_7_na_disputa_o_reembolso_certo_em_qualquer_tempo_segura(texto):
+    """0ab228be/626c2374 (paráfrase): o cliente cobra o reembolso na disputa que a loja
+    contestou; o rascunho dá o reembolso como certo — antes da revisão, ia ao verificador."""
+    ctx = _ctx_dev(reclamacoes=[_reclamacao(status="Loja contestou")])
+    msgs = [_menu(), *_cli("Quando sai o meu reembolso?")]
+    r = await _auto(_p(f"A solicitação está em análise pela Shopee. {texto}", "reembolso", ["pedido", "par:2003"]),
+                    msgs, ctx_pedido=ctx, bloco=BLOCO_DEV, postado=acao_pessoa.POSTADO_SIM,
+                    valores=VALORES, pares_do_pacote=[PAR_REEMBOLSO])  # fmt: skip
+    assert r.ctx.responde_e_marca
+    assert r.decisao not in (VAI, VAI_COM_AVISO), (texto, r.decisao)
+    assert any("certo na disputa" in m for m in r.motivos), r.motivos
+
+
+async def test_rev_7_o_verificador_le_a_linha_da_disputa():
+    msgs = [_menu(), *_cli("Quando sai o meu reembolso?")]
+    disputa = _ctx_dev(reclamacoes=[_reclamacao(status="Loja contestou")])
+    r = await _auto(_p(D1_COM_CONDICAO, "reembolso", ["pedido", "par:2003"]), msgs, ctx_pedido=disputa,
+                    bloco=BLOCO_DEV, postado=acao_pessoa.POSTADO_SIM, valores=VALORES,
+                    pares_do_pacote=[PAR_REEMBOLSO])  # fmt: skip
+    assert r.decisao in (VAI, VAI_COM_AVISO)
+    resumo = v.resumo_do_pacote(r.ctx, r.base, msgs[-1])
+    assert resumo.disputa and resumo.pos_envio == (constantes.ACAO_RECLAMACAO_ABERTA,)
+    entrada = v.montar_entrada(acao="responder", acao_pessoa=None, texto=D1_COM_CONDICAO,
+                               resumo=resumo, consultas=[])  # fmt: skip
+    assert v.CABECALHO_POS_ENVIO in entrada and v.LINHA_DA_DISPUTA in entrada
+    # Sem disputa (a devolução aberta de sempre): a linha não vai.
+    fora = await _auto(_p(D1_TEXTO, "reembolso", ["pedido", "par:2003"]), msgs, ctx_pedido=_ctx_dev(),
+                       bloco=BLOCO_DEV, postado=acao_pessoa.POSTADO_SIM, valores=VALORES,
+                       pares_do_pacote=[PAR_REEMBOLSO])  # fmt: skip
+    assert fora.ctx.acoes_pos_envio == [constantes.ACAO_RECLAMACAO_ABERTA]
+    resumo2 = v.resumo_do_pacote(fora.ctx, fora.base, msgs[-1])
+    assert not resumo2.disputa
+    assert v.LINHA_DA_DISPUTA not in v.montar_entrada(
+        acao="responder", acao_pessoa=None, texto=D1_TEXTO, resumo=resumo2, consultas=[]
+    )
+    assert v.linhas_do_pos_envio((constantes.ACAO_ABRIR_CHAMADO,), disputa=True)[-1].endswith(
+        "verificação nem data"
+    )
+
+
+# Achado 2 (item 10): com o Ag. cancelamento como etiqueta, a resposta que dá o pedido como
+# confirmado/garantido/"tudo certo", fala do estoque da variação ou oferece outra cor/troca
+# segura (o b4e69bf2: a loja ofereceu outra cor no dia seguinte — trabalho da pessoa).
+AG_ESTADO_OU_TROCA = [
+    (
+        "Muito obrigada pela atenção",
+        "Nós que agradecemos! Seu pedido está confirmado e segue normalmente.",
+        "agradecimento",
+    ),
+    (
+        "Muito obrigada pela atenção",
+        "Nós que agradecemos! Pode ficar tranquila, está tudo certo com o seu pedido.",
+        "agradecimento",
+    ),
+    (
+        "Muito obrigada pela atenção",
+        "Nós que agradecemos! Seu pedido está garantido, qualquer dúvida é só chamar.",
+        "agradecimento",
+    ),
+    (
+        "Esse celular tem NFC?",
+        "Sim, o A17 Pro Max tem NFC. Seu pedido está confirmado e segue normalmente.",
+        "espec_celular",
+    ),
+    (
+        "Esse celular tem NFC?",
+        "Sim, tem NFC. Se preferir, temos outra cor disponível no mesmo anúncio.",
+        "espec_celular",
+    ),
+    (
+        "Boa tarde",
+        "Boa tarde! A cor Azul acabou no estoque. Você aceita a Prata no lugar?",
+        "saudacao_ou_vaga",
+    ),
+]
+
+
+@pytest.mark.parametrize("situacao", [None, "Aguardando Cancelamento"])
+@pytest.mark.parametrize(("fala", "texto", "assunto"), AG_ESTADO_OU_TROCA)
+async def test_rev_10_o_ag_cancelamento_nao_confirma_o_pedido_nem_oferece_troca(
+    fala, texto, assunto, situacao
+):
+    bloco = _bloco() if situacao is None else _bloco(situacao=situacao)
+    r = await _auto(_p(texto, assunto, ["pedido"]), [_menu(), *_cli(fala)], ctx_pedido=_ctx_ag(),
+                    bloco=bloco, postado=acao_pessoa.POSTADO_NAO, valores=VALORES)  # fmt: skip
+    assert r.ctx.acoes_pos_envio == [constantes.ACAO_AG_CANCELAMENTO], fala
+    assert checagens.AG_CANCELAMENTO_NA_RESPOSTA in r.codigos, (texto, r.codigos)
+    assert r.decisao not in (VAI, VAI_COM_AVISO)
+
+
+def test_rev_10_a_resposta_do_produto_e_o_cumprimento_continuam():
+    for texto in (
+        "Sim, o A17 Pro Max tem NFC.",
+        "Nós que agradecemos! Qualquer dúvida, é só chamar.",
+        "Boa tarde! Em que podemos ajudar?",
+        "A bateria é de 5000 mAh, conforme o anúncio.",
+        "Nós que agradecemos! Ficamos disponíveis para qualquer dúvida.",
+    ):
+        assert (
+            checagens.conferir_ag_cancelamento_na_resposta(texto, acao="responder", etiqueta=True)
+            == []
+        ), texto
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "Ainda tem o azul em estoque? Foi o que eu comprei",
+        "Tem na cor preta?",
+        "Posso trocar pela cor preta?",
+        "A cor que eu comprei acabou?",
+        "Vai ter reposição?",
+    ],
+)
+async def test_rev_10_a_fala_do_estoque_ou_da_troca_no_83955_trava(fala):
+    msgs = [_menu(), *_cli(fala)]
+    lista = acao_pessoa.gatilhos(_conv(), msgs, _ctx_ag(), gatilho=msgs[-1],
+                                 postado=acao_pessoa.POSTADO_NAO, chaves_ativas=frozenset(), agora=AGORA)  # fmt: skip
+    assert constantes.ACAO_AG_CANCELAMENTO in [g.codigo for g in lista]
+    got = acao_pessoa.etiquetas_do_turno(_conv(), _ctx_ag(), msgs, msgs[-1], lista)
+    assert constantes.ACAO_AG_CANCELAMENTO not in got, fala
+    assert (
+        constantes.HUMANO_AG_CANCELAMENTO
+        not in _triar(msgs, _ctx_ag(), postado=acao_pessoa.POSTADO_NAO).marca
+    )
+    # A oferta de outra cor (o que o `sugerir_troca` daria) segura como antes do item 10.
+    r = await _auto(_p("Infelizmente a cor Azul está em falta. Temos a Preta disponível no mesmo anúncio, você prefere essa?",
+                       "estoque_variacao", ["pedido"]), msgs, ctx_pedido=_ctx_ag(), bloco=_bloco(),
+                    postado=acao_pessoa.POSTADO_NAO, valores=VALORES)  # fmt: skip
+    assert r.ctx.acoes_pos_envio == [] and ia.MOTIVO_AG_CANCELAMENTO in r.motivos
+    assert r.decisao not in (VAI, VAI_COM_AVISO)
+
+
+# Achado 3 (item 10): a ação que entra DEPOIS da régua do turno (o OUTRO pedido lido pela
+# ferramenta, a ferramenta que marca) nunca vira etiqueta: trava, como antes.
+OUTRO_ENTREGUE = {
+    "pedido": {"numero": "90009", "numeroloja": "261010CCCC0009", "situacao": "Entregue",
+               "itens": [{"descricao": "Fone sem fio", "quantidade": 1}]},
+    "logistica": {"status": "Entregue", "data_envio": "2026-10-12"},
+    "chamados": [], "devolucoes": [],
+}  # fmt: skip
+OUTRO_TEXTO = (
+    "Sentimos muito! Confira com a portaria ou com os vizinhos; se não encontrar, abra a "
+    "solicitação de não recebimento em Minhas Compras > o pedido."
+)
+
+
+async def _conferir_com_outro(p: Proposta, msgs: list, *, pedidos_lidos: list) -> tuple:
+    """O `agente.conferir_proposta` de verdade (sem banco, sem modelo), com os outros pedidos
+    que a ferramenta leu (`ctx.pedidos_lidos`)."""
+    conversa = _conv()
+    gatilho = msgs[-1]
+    rajada = ia.rajada_do_cliente(msgs, gatilho)
+    foco = ia.perguntas_pendentes(msgs, gatilho)
+    base = agente_ctx.BaseDoGerar(
+        recentes=msgs, rajada=rajada, foco=foco, textos_cliente=[x.texto or "" for x in (foco or rajada)],
+        textos_rajada=[x.texto or "" for x in rajada], ctx=CTX_POSTADO, valores=dict(VALORES),
+        fatos={"anuncio": None}, fatos_gravados={}, categorias=_categorias_do_manual(), regras=[],
+        sinais=[], motivos=[], opcoes_sensiveis=[], sinais_do_cliente=[], nomes=(),
+        modo=constantes.MODO_AUTO, forcar=False, nf_politica_aprovada=False, insistiu=False,
+    )  # fmt: skip
+    lista = acao_pessoa.gatilhos(conversa, msgs, CTX_POSTADO, gatilho=gatilho, postado=acao_pessoa.POSTADO_SIM,
+                                 chaves_ativas=frozenset(), agora=AGORA)  # fmt: skip
+    ctx = agente_ctx.ContextoAgente.da_conversa(conversa, gatilho, modo=constantes.MODO_AUTO)
+    ctx.acoes_codigo = agente_ctx.ordenar_acoes([g.codigo for g in lista])
+    ctx.etiquetas_pos_envio = acao_pessoa.etiquetas_do_turno(
+        conversa, CTX_POSTADO, msgs, gatilho, lista
+    )
+    ctx.pistas_orientacao = acao_pessoa.pistas_de_orientacao(msgs, gatilho)
+    ctx.pistas_turno = acao_pessoa.pistas_do_turno(msgs, gatilho, com_pedido=True)
+    bloco = _bloco()
+    ctx.permitir(ids=[agente_ctx.ID_PEDIDO], textos=[json.dumps(bloco, ensure_ascii=False)])
+    ctx.pedidos_lidos = list(pedidos_lidos)
+    antes = ctx.etiquetas_pos_envio
+    pac = SimpleNamespace(fatos={"anuncio": None, "agente_pedido": bloco}, fichas=[], pedido=bloco)
+    c = await agente_svc.conferir_proposta(
+        None, conversa, gatilho, base, ctx, p, pac, forcar_conferencia=True
+    )
+    return c, ctx, antes
+
+
+@pytest.mark.parametrize(
+    "p",
+    [
+        _p(OUTRO_TEXTO, "rastreio", ["pedido"]),
+        # O modelo também escolheu o chamado: sem a etiqueta, continua "pessoa".
+        Proposta(acao="pessoa", texto=OUTRO_TEXTO, assunto="rastreio", confianca=0.85,
+                 acao_pessoa="abrir_chamado", motivo_pessoa="consta entregue", evidencias=["pedido"]),
+    ],
+)  # fmt: skip
+async def test_rev_10_o_outro_pedido_entregue_e_nao_recebido_trava(p):
+    msgs = [_menu(), *_cli("Não recebi o meu outro pedido, o do fone")]
+    c, ctx, antes = await _conferir_com_outro(
+        p, msgs, pedidos_lidos=[(OUTRO_ENTREGUE, acao_pessoa.POSTADO_SIM)]
+    )
+    # A régua do turno (só a conversa) tinha liberado o chamado; o do OUTRO pedido o tira.
+    assert constantes.ACAO_ABRIR_CHAMADO in antes
+    assert constantes.ACAO_ABRIR_CHAMADO in ctx.acoes_codigo
+    assert constantes.ACAO_ABRIR_CHAMADO not in ctx.etiquetas_pos_envio
+    assert constantes.ACAO_ABRIR_CHAMADO in ctx.acoes_pessoa and ctx.acoes_pos_envio == []
+    assert c.final is not None and c.final.precisa_humano
+
+
+async def test_rev_10_sem_o_outro_pedido_o_chamado_do_modelo_continua_etiqueta():
+    """O controle: o mesmo turno sem o outro pedido lido — o chamado que só o modelo escolheu
+    (o atraso, item 10) continua etiqueta."""
+    msgs = [_menu(), *_cli("A entrega passou da data e não chegou")]
+    p = Proposta(acao="pessoa", texto=TEMPLATE, assunto="rastreio", confianca=0.85,
+                 acao_pessoa="abrir_chamado", motivo_pessoa="previsão vencida", evidencias=["pedido"])  # fmt: skip
+    _c, ctx, _antes = await _conferir_com_outro(p, msgs, pedidos_lidos=[])
+    assert ctx.acoes_pos_envio == [constantes.ACAO_ABRIR_CHAMADO] and ctx.acoes_pessoa == []
+
+
+def test_rev_10_o_regatilho_tira_a_etiqueta_da_acao_de_depois_do_modelo():
+    # O "não recebi" do outro pedido gravado no eval (`decisao.acoes_codigo`) que a régua da
+    # conversa não dá: trava no re-gatilho também.
+    def _montar(
+        acoes: list, fala: str, ferramentas_: list | None = None, pacote: str = PACOTE_REGATILHO
+    ):
+        r = _registro_regatilho(
+            "Confira com a portaria.", decisao={"acoes_codigo": acoes},
+            rastro={"pacote": pacote, "transcricao": [f"[26/10 09:59] Cliente: {fala}"],
+                    "ferramentas": ferramentas_ or []},
+        )  # fmt: skip
+        return regatilho.montar(r).ctx
+
+    fala = "Não recebi o meu outro pedido, o do fone"
+    assert constantes.ACAO_ABRIR_CHAMADO in _montar([], fala).etiquetas_pos_envio
+    ctx = _montar([constantes.ACAO_ABRIR_CHAMADO], fala)
+    assert constantes.ACAO_ABRIR_CHAMADO not in ctx.etiquetas_pos_envio
+    assert ctx.acoes_pessoa == [constantes.ACAO_ABRIR_CHAMADO]
+    # O `sugerir_troca` com a opção gravado no rastro: o Ag. cancelamento trava.
+    ag = PACOTE_REGATILHO.replace(
+        json.dumps({**SAIU, "numero": "{numero_pedido}", "itens": []}, ensure_ascii=False),
+        json.dumps({**SAIU, "numero": "{numero_pedido}", "itens": [], "situacao": "Aguardando Cancelamento",
+                    "postado": "nao", "ag_cancelamento": {"codigo": "sem_estoque"}}, ensure_ascii=False),
+    )  # fmt: skip
+    assert ag != PACOTE_REGATILHO
+    assert (
+        constantes.ACAO_AG_CANCELAMENTO in _montar([], "Boa tarde", pacote=ag).etiquetas_pos_envio
+    )
+    troca = {"ferramenta": "sugerir_troca", "args": {"numero": None},
+             "resultado": '<dados fonte="sugerir_troca">' + json.dumps(
+                 {"pedido": "{numero_pedido}", "opcoes": [{"nome": "X", "nivel": 1, "mesmo_produto": False}],
+                  "evidencias": ["troca:{numero_pedido}"]}) + "</dados>"}  # fmt: skip
+    ctx2 = _montar([], "Boa tarde", [troca], pacote=ag)
+    assert constantes.ACAO_AG_CANCELAMENTO not in ctx2.etiquetas_pos_envio
+    assert constantes.ACAO_AG_CANCELAMENTO in ctx2.acoes_pessoa
+
+
+# Achado 4 (item 9): o recibo que ficou para depois da pausa humana (a PESSOA da equipe pediu
+# o vídeo) sai no reenvio do cron quando a pausa acaba e ninguém respondeu.
+PEDE_VIDEO_EQUIPE = "Pode mandar um vídeo mostrando o defeito, por favor?"
+
+
+async def _recibo_na_pausa(db, make_user) -> tuple:
+    await _importar_manual_base(db)
+    await _pedido_completo(db)
+    conversa = await _conversa_ia(db, make_user, pedido=PEDIDO_MKT)
+    await _ligar(
+        db, conversa, modo=constantes.MODO_AUTO, auto_categorias=SHOPEE_REAL.auto_categorias,
+        auto_orientacao=SHOPEE_REAL.auto_orientacao, auto_agente=SHOPEE_REAL.auto_agente,
+    )  # fmt: skip
+    await _msg_ia(db, conversa, "O celular chegou e não carrega", ha=timedelta(minutes=30))
+    pedido = await _msg_ia(
+        db, conversa, PEDE_VIDEO_EQUIPE, autor="loja", origem=constantes.ORIGEM_EXTERNO,
+        ha=timedelta(minutes=20),
+    )  # fmt: skip
+    await _msg_ia(db, conversa, None, tipo="video", ha=timedelta(minutes=5))
+    await db.refresh(conversa)
+    r = await ia.gerar_rascunho(db, conversa)
+    assert r is not None and ia.recibo_no_rascunho(r)
+    return conversa, pedido, r
+
+
+async def _a_pausa_acabou(db, conversa, pedido, r) -> None:
+    """A mensagem da pessoa ficou há 45 min (a pausa de 30 min acabou) e o rascunho, há 4."""
+    await db.execute(
+        update(AtendimentoMensagem).where(AtendimentoMensagem.id == pedido.id).values(
+            enviada_em=datetime.now(UTC) - timedelta(minutes=45),
+            created_at=datetime.now(UTC) - timedelta(minutes=45),
+        )
+    )  # fmt: skip
+    await db.execute(
+        update(AtendimentoRascunho).where(AtendimentoRascunho.id == r.id).values(
+            created_at=datetime.now(UTC) - timedelta(minutes=4)
+        )
+    )  # fmt: skip
+    await db.commit()
+    assert await ia._pausa_humana_ate(db, conversa) is None
+
+
+async def test_rev_9_o_recibo_da_pausa_humana_sai_no_reenvio(
+    db, make_user, agente_ligado, api, envios
+):
+    api.roteiro = []
+    conversa, pedido, r = await _recibo_na_pausa(db, make_user)
+    # Na pausa: nem o envio na hora, nem o reenvio.
+    assert _decisao(r) == "pausa_humana" and envios == []
+    assert await ia.reenviar_pendentes(db) == 0 and envios == []
+    await _a_pausa_acabou(db, conversa, pedido, r)
+    for _ in range(2):  # a rodada inteira do cron, duas vezes: sai uma vez só
+        await ia.gerar_pendentes(db)
+    await db.refresh(r)
+    assert [e["texto"] for e in envios] == [r.texto] and _decisao(r) == "enviado", r.fatos
+    assert api.clientes == []  # sem modelo nem verificador
+
+
+async def test_rev_9_o_recibo_nao_sai_se_a_pessoa_respondeu(
+    db, make_user, agente_ligado, api, envios
+):
+    api.roteiro = []
+    conversa, pedido, r = await _recibo_na_pausa(db, make_user)
+    await _a_pausa_acabou(db, conversa, pedido, r)
+    # A equipe respondeu depois do vídeo: a conversa não espera mais resposta.
+    await _msg_ia(db, conversa, "Recebemos, vamos analisar.", autor="loja",
+                  origem=constantes.ORIGEM_EXTERNO, ha=timedelta(minutes=1))  # fmt: skip
+    await db.refresh(conversa)
+    assert await ia.reenviar_pendentes(db) == 0 and envios == []

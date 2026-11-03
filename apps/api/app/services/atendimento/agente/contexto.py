@@ -931,6 +931,16 @@ class ContextoAgente:
 
     # ── decisão ──
 
+    def sem_etiqueta(self, acoes: Iterable[str | None]) -> None:
+        """Revisão de 03/11/2026: a ação que entrou DEPOIS da régua do turno — a do OUTRO
+        pedido que a ferramenta leu (`acao_pessoa.gatilhos_de_outro_pedido`: o "consta
+        entregue e não recebi" dele) ou a que a ferramenta marcou (o `sugerir_troca`: o Ag.
+        cancelamento com a opção de troca, "a resposta é da pessoa") — nunca vira etiqueta:
+        trava, como sempre. A `etiquetas_do_turno` só viu os gatilhos da conversa."""
+        tirar = frozenset(a for a in acoes if a) & self.etiquetas_pos_envio
+        if tirar:
+            self.etiquetas_pos_envio = self.etiquetas_pos_envio - tirar
+
     def _depois_do_envio(self, acao: str) -> bool:
         """A ação fica para DEPOIS do envio (D1 ou a etiqueta liberada do turno)?"""
         return (self.responde_e_marca and acao in ACOES_POS_ENVIO) or (

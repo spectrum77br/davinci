@@ -1738,6 +1738,8 @@ async def dados_sugerir_troca(
     # Opção de troca = o pedido está parado em Ag. cancelamento por falta de
     # estoque: a resposta é da pessoa (o código marca; revisão de 20/10/2026).
     ctx.acoes_codigo = contexto.ordenar_acoes(ctx.acoes_codigo, [constantes.ACAO_AG_CANCELAMENTO])
+    # Revisão de 03/11/2026: e nunca como a etiqueta do turno (item 10) — trava.
+    ctx.sem_etiqueta([constantes.ACAO_AG_CANCELAMENTO])
     return Resultado(
         dados={
             "pedido": alvo.rotulo,

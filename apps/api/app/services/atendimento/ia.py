@@ -6453,6 +6453,11 @@ def _sql_assunto_liberado(r: Any, k: Any, agora: datetime | None = None):
     validade = () if agora is None else (r.created_at >= agora - verificador.VALIDADE_OK,)
     return or_(
         and_(~do_agente, legado),
+        # Item 9 (revisão de 03/11/2026): o recibo fixo da evidência não passa pelo
+        # verificador nem tem assunto a liberar (o `_talvez_enviar`: `recibo_no_rascunho`) — o
+        # que ficou para depois da pausa humana sai no reenvio (o resto do filtro, o `_cobre`,
+        # a triagem e a pausa continuam valendo).
+        and_(do_agente, r.fatos.contains({"agente": {FATO_RECIBO: True}})),
         and_(
             do_agente,
             # O "ok" do verificador semântico (20/10/2026; a trava relê tudo).
