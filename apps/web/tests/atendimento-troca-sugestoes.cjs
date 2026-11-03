@@ -594,6 +594,28 @@ async function testarFoto() {
   assert.equal(T.podeMandarFoto(it0.sugestoes[0], LIBERADA), false, 'sem foto')
   assert.equal(T.fotoMarcadaDePadrao(laranja, LIBERADA), true)
   assert.equal(T.fotoMarcadaDePadrao(capa, LIBERADA), false)
+  // A foto de um kit com acessório que não vai (o aparelho sozinho só com a foto do
+  // kit com fone): o aviso, e a caixinha começa desmarcada, como a capa.
+  const KIT = { url: 'https://cf.shopee.com.br/file/kit_tn', origem: 'loja', generica: false, acessorio_a_mais: true }
+  assert.equal(T.fotoMarcadaDePadrao({ foto: KIT }, LIBERADA), false)
+  assert.equal(T.avisoDaFoto(KIT), T.FOTO_DO_KIT)
+  assert.equal(T.avisoDaFoto(CAPA), T.FOTO_GENERICA)
+  assert.equal(T.avisoDaFoto(FOTO), null)
+  assert.equal(T.avisoDaFoto(null), null)
+  assert.equal(T.rotuloFoto(KIT), 'foto do anúncio desta loja (de um kit com acessório que não vai)')
+  {
+    const comKit = structuredClone(comFotos)
+    comKit.itens[0].sugestoes[1].foto = KIT
+    const k = montarBloco(comKit, base, async () => ({ ...structuredClone(ENVIADA), foto: 'outro_kit', foto_aviso: null }))
+    const hk = await htmlDe(k)
+    assert.ok(hk.includes(T.FOTO_DO_KIT), 'o cartão avisa')
+    k.estado.pedirConfirmacao(chave)
+    const hc = await htmlDe(k)
+    const cx = hc.slice(hc.indexOf('data-confirmar-foto'), hc.indexOf('</label>', hc.indexOf('data-confirmar-foto')))
+    assert.doesNotMatch(cx, /\schecked/, 'a foto do kit começa desmarcada')
+    await k.estado.enviarOferta(it0, comKit.itens[0].sugestoes[1])
+    assert.equal(k.chamadas[0].opts.body.com_foto, false)
+  }
 
   // O cartão: a miniatura (sem o Referer, como as fotos do pedido), de onde veio e o aviso da capa.
   const r = await renderBloco(comFotos, base)

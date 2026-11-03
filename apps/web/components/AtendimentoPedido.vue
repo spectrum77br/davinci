@@ -127,6 +127,8 @@ export type FotoTroca = {
   origem: string
   // A mesma imagem vale para mais de um modelo no anúncio: pode mostrar outra cor.
   generica?: boolean
+  // A foto é de um kit com acessório que este produto não leva (o fone do kit).
+  acessorio_a_mais?: boolean
 }
 export type ItemTroca = {
   sku_original: string

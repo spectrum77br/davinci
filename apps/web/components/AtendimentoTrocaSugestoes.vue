@@ -49,9 +49,10 @@
 // confere e manda. Sem a caixa (a lista Ag. cancelamento) ou sem caber, a
 // foto aparece com o porquê, o "anexar foto" (de novo) e o "baixar foto". O
 // "enviar oferta" manda a foto ANTES do texto (`com_foto`: a caixinha da
-// confirmação; a capa do anúncio que vale para várias cores começa
-// desmarcada); a foto que não foi volta em `foto_aviso` e aparece na
-// sugestão. Sem foto, a oferta vai só com o texto e o cartão avisa.
+// confirmação; a capa do anúncio que vale para várias cores e a foto de um
+// kit com acessório que não vai começam desmarcadas); a foto que não foi
+// volta em `foto_aviso` e aparece na sugestão. Sem foto, a oferta vai só
+// com o texto e o cartão avisa.
 //
 // Este bloco (não o setup) é o módulo dos ajudantes puros, testados em
 // tests/atendimento-troca-sugestoes.cjs e tests/atendimento-troca.cjs — por
@@ -256,13 +257,15 @@ export const ORIGEM_FOTO: Record<string, string> = {
 }
 export const SEM_FOTO = 'Sem foto do modelo no DaVinci: a oferta vai só com o texto.'
 export const FOTO_GENERICA = 'A foto é a capa do anúncio e pode mostrar outra cor: confira antes de mandar.'
+export const FOTO_DO_KIT = 'A foto é de um kit com acessório que não vai junto (ex.: o fone): confira antes de mandar.'
 export const SEM_CAIXA = 'A caixa de resposta não está aberta aqui: abra a conversa para anexar, ou baixe a foto.'
 export const FOTO_ANEXADA = 'Foto anexada na caixa de resposta e texto copiado: confira e envie.'
 export const FOTO_NAO_VAI_AQUI = 'Esta conversa não recebe foto pelo DaVinci: vai só o texto.'
 // O title da miniatura.
 export function rotuloFoto(f: FotoTroca | null | undefined): string {
   if (!f) return SEM_FOTO
-  return `${ORIGEM_FOTO[f.origem] || 'foto do modelo'}${f.generica ? ' (a capa do anúncio: pode mostrar outra cor)' : ''}`
+  const obs = f.generica ? ' (a capa do anúncio: pode mostrar outra cor)' : f.acessorio_a_mais ? ' (de um kit com acessório que não vai)' : ''
+  return `${ORIGEM_FOTO[f.origem] || 'foto do modelo'}${obs}`
 }
 // O GET da foto (bytes): o "copiar oferta" a põe na caixa; o "baixar foto" abre.
 export function urlFoto(numero: string, sku: string, conversaId?: string | null): string {
@@ -278,9 +281,16 @@ export function nomeDaFoto(sku: string, mime: string | null | undefined): string
 export function podeMandarFoto(s: Pick<SugestaoTroca, 'foto'>, o: OfertaEnvio | null | undefined): boolean {
   return !!s.foto && o?.foto === true
 }
-// A caixinha começa marcada? Sim, menos na capa do anúncio (pode ser outra cor).
+// A caixinha começa marcada? Sim, menos na capa do anúncio (pode ser outra cor)
+// e na foto de um kit com acessório que não vai.
 export function fotoMarcadaDePadrao(s: Pick<SugestaoTroca, 'foto'>, o: OfertaEnvio | null | undefined): boolean {
-  return podeMandarFoto(s, o) && !s.foto?.generica
+  return podeMandarFoto(s, o) && !s.foto?.generica && !s.foto?.acessorio_a_mais
+}
+// O aviso da foto que pode enganar (outra cor, acessório a mais); null = foto do produto.
+export function avisoDaFoto(f: FotoTroca | null | undefined): string | null {
+  if (!f) return null
+  if (f.generica) return FOTO_GENERICA
+  return f.acessorio_a_mais ? FOTO_DO_KIT : null
 }
 // A caixa de resposta da conversa aberta (AtendimentoConversa) põe o arquivo
 // como anexo: null = anexou; senão o porquê. `legenda` = o texto onde a foto
@@ -497,7 +507,7 @@ async function enviarOferta(it: ItemTroca, s: SugestaoTroca, confirmar = false) 
               </p>
               <p v-if="s.texto_oferta && !s.foto" class="text-[10px] text-muted-foreground" data-oferta-sem-foto>{{ SEM_FOTO }}</p>
               <p v-else-if="s.foto && s.foto.origem !== 'loja'" class="text-[10px] text-muted-foreground" data-foto-origem>{{ rotuloFoto(s.foto) }}</p>
-              <p v-if="s.foto?.generica" class="text-[10px] text-amber-800 dark:text-amber-300" data-foto-generica>{{ FOTO_GENERICA }}</p>
+              <p v-if="avisoDaFoto(s.foto)" class="text-[10px] text-amber-800 dark:text-amber-300" data-foto-generica>{{ avisoDaFoto(s.foto) }}</p>
             </div>
             <div class="flex shrink-0 flex-col items-end gap-1">
               <button
@@ -584,7 +594,7 @@ async function enviarOferta(it: ItemTroca, s: SugestaoTroca, confirmar = false) 
                 @change="marcarFoto(chaveDe(it, s), ($event.target as HTMLInputElement).checked)"
               />
               <img :src="s.foto.url" :alt="`foto de ${s.nome || s.sku}`" referrerpolicy="no-referrer" class="size-12 shrink-0 rounded border bg-muted object-cover" />
-              <span>mandar esta foto antes do texto<template v-if="s.foto.generica"> — {{ FOTO_GENERICA }}</template></span>
+              <span>mandar esta foto antes do texto<template v-if="avisoDaFoto(s.foto)"> — {{ avisoDaFoto(s.foto) }}</template></span>
             </label>
             <p v-else-if="s.foto" class="text-[10px] text-muted-foreground" data-foto-nao-vai>{{ FOTO_NAO_VAI_AQUI }}</p>
             <p class="whitespace-pre-wrap break-words rounded bg-background/70 px-2 py-1">{{ s.texto_oferta }}</p>

@@ -62,8 +62,9 @@ ela nunca sai sozinha com um texto que o envio recusaria. No ML a foto vai
 DENTRO da mensagem do texto (a legenda obrigatória): uma mensagem só. A
 foto que não vai (`foto` na resposta + `foto_aviso`) não segura o texto:
 sem foto no DaVinci (`sem_foto`), a plataforma sem foto pelo DaVinci
-(`nao_suportada`), só a capa do anúncio com várias cores (`generica` — vai
-só se a pessoa marcar: `com_foto=True`), não baixou ou a plataforma recusou
+(`nao_suportada`), só a capa do anúncio com várias cores (`generica`) ou
+só a foto de um kit com acessório que não vai (`outro_kit`) — as duas vão
+só se a pessoa marcar: `com_foto=True` —, não baixou ou a plataforma recusou
 (`nao_saiu`), a mesma foto há menos de 2 min (`ja_enviada`), ou a pessoa
 desmarcou (`com_foto=False`). A mensagem da foto leva a marca
 `payload.oferta_troca_foto` (a `oferta_troca`, a do aceite, fica no texto).
@@ -160,6 +161,7 @@ FOTO_NAO_SAIU = "nao_saiu"  # não baixou ou foi recusada: o texto foi sozinho
 FOTO_SEM_FOTO = "sem_foto"  # o produto não tem foto no DaVinci
 FOTO_NAO_SUPORTADA = "nao_suportada"  # a conversa não recebe foto pelo DaVinci
 FOTO_GENERICA = "generica"  # só a capa do anúncio (pode ser outra cor): sem marcar, não vai
+FOTO_OUTRO_KIT = "outro_kit"  # só a foto de um kit com acessório que não vai: sem marcar, não vai
 FOTO_DESMARCADA = "desmarcada"  # a pessoa mandou só o texto
 SO_TEXTO = "a oferta foi só com o texto"
 
@@ -471,6 +473,12 @@ async def _escolher_foto(
             None,
             FOTO_GENERICA,
             f"Só achei a foto da capa do anúncio (pode mostrar outra cor): {SO_TEXTO}.",
+        )
+    if escolhida.acessorio_a_mais and com_foto is not True:
+        return (
+            None,
+            FOTO_OUTRO_KIT,
+            f"Só achei a foto de um kit com acessório que não vai junto: {SO_TEXTO}.",
         )
     return escolhida, None, None
 

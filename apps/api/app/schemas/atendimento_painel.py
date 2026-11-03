@@ -299,6 +299,9 @@ class FotoTrocaOut(BaseModel):
     # A mesma imagem vale para mais de um modelo no anúncio (a capa): pode
     # mostrar outra cor — o "enviar oferta" só a manda se a pessoa marcar.
     generica: bool = False
+    # A foto é de um kit com acessório que este produto não leva (o aparelho
+    # sozinho só com a foto do kit com fone): também só vai marcada.
+    acessorio_a_mais: bool = False
 
 
 class SugestaoTrocaOut(BaseModel):

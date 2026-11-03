@@ -128,17 +128,46 @@ def test_escolher_a_ordem():
         "dg0541.sp", "https://cf.shopee.com.br/file/e_tn", "retrato", loja, "shopee", agora
     )
 
-    # A loja da conversa vence, mesmo só pelo principal.
+    # A MESMA composição (o aparelho com o fone a001, em qualquer lote) vence a loja:
+    # a foto da loja só do aparelho não mostra o que vai.
     f = esc([do_catalogo, de_outra_exato, da_loja_principal, fora, outro_produto])
-    assert (f.url, f.origem, f.generica) == (da_loja_principal.url, "loja", False)
-    assert f.url_envio == "https://cf.shopee.com.br/file/a"
-    # Sem ela, outra loja; sem as duas, o catálogo (https, -O).
-    assert esc([do_catalogo, de_outra_exato]).origem == "outra_loja"
+    assert (f.url, f.origem, f.generica) == (de_outra_exato.url, "outra_loja", False)
+    assert f.url_envio == "https://cf.shopee.com.br/file/b"
+    # Com a mesma composição na loja (outro lote), a loja vence.
+    da_loja_outro_lote = cand(
+        "dg054.ci+a001.ci", "https://cf.shopee.com.br/file/h_tn", "retrato", loja, "shopee", agora
+    )
+    f = esc([de_outra_exato, da_loja_outro_lote])
+    assert (f.url, f.origem) == (da_loja_outro_lote.url, "loja")
+    # A mesma composição só no catálogo: ele vence a loja só do aparelho; com a mesma
+    # composição dos dois lados, a loja vence o catálogo.
+    assert esc([do_catalogo, da_loja_principal]).url == "https://http2.mlstatic.com/D_c-O.jpg"
+    assert esc([do_catalogo, da_loja_outro_lote]).url == da_loja_outro_lote.url
     f = esc([do_catalogo, fora, outro_produto])
     assert (f.origem, f.url) == ("catalogo", "https://http2.mlstatic.com/D_c-O.jpg")
     # Host fora das CDNs e outro produto (dg0541 ≠ dg054): nada.
     assert esc([fora, outro_produto]) is None
-    # Na mesma loja, o SKU exato antes do principal; no empate, a mais nova.
+    # O aparelho SOZINHO (dg085.sp): a foto sem acessório antes da do kit com fone —
+    # mesmo sendo de outra loja —, e, só com kits, o que mostra menos coisa a mais.
+    so_aparelho = cand(
+        "dg085.ra", "https://cf.shopee.com.br/file/i_tn", "retrato", outra, "shopee", agora
+    )
+    kit_fone = cand(
+        "dg085.ra+a003.ra", "https://cf.shopee.com.br/file/j_tn", "retrato", loja, "shopee", agora
+    )
+    kit_dois = cand(
+        "dg085.ra+a003.ra+a004.ra",
+        "https://cf.shopee.com.br/file/k_tn",
+        "retrato",
+        loja,
+        "shopee",
+        agora,
+    )
+    assert esc([kit_fone, kit_dois, so_aparelho], sku="dg085.sp").url == so_aparelho.url
+    assert esc([kit_dois, kit_fone], sku="dg085.sp").url == kit_fone.url
+    # O kit (aparelho + fone) sem foto do kit: a do aparelho sozinho antes da do outro kit.
+    assert esc([kit_dois, so_aparelho], sku="dg085.sp+a003.sp").url == so_aparelho.url
+    # Na mesma loja e composição, o SKU exato antes do outro lote; no empate, a mais nova.
     exato_velho = cand(
         "dg054.sp+a001.sp",
         "https://cf.shopee.com.br/file/f_tn",
@@ -147,18 +176,19 @@ def test_escolher_a_ordem():
         "shopee",
         agora - timedelta(days=9),
     )
-    assert esc([da_loja_principal, exato_velho]).url == exato_velho.url
+    assert esc([da_loja_outro_lote, exato_velho]).url == exato_velho.url
     novo = cand(
         "dg054.sp+a001.sp", "https://cf.shopee.com.br/file/g_tn", "retrato", loja, "shopee", agora
     )
     assert esc([exato_velho, novo]).url == novo.url
-    # A capa compartilhada (a mesma foto para o dg054 e o dg053) perde até para outra loja…
-    modelos = {da_loja_principal.url: {"dg054", "dg053"}}
-    f = esc([da_loja_principal, de_outra_exato], modelos)
-    assert (f.url, f.generica) == (de_outra_exato.url, False)
+    # A capa compartilhada (a mesma foto para o dg054 e o dg053) perde até para outra
+    # composição de outra loja…
+    modelos = {da_loja_outro_lote.url: {"dg054", "dg053"}}
+    f = esc([da_loja_outro_lote, da_loja_principal], modelos)
+    assert (f.url, f.generica) == (da_loja_principal.url, False)
     # …e, sozinha, vem marcada.
-    f = esc([da_loja_principal], modelos)
-    assert (f.url, f.generica) == (da_loja_principal.url, True)
+    f = esc([da_loja_outro_lote], modelos)
+    assert (f.url, f.generica) == (da_loja_outro_lote.url, True)
 
 
 def test_nota_com_a_foto():
@@ -195,20 +225,21 @@ async def _retrato(db, c, integ, canal, externo, itens):
     return conversa
 
 
-async def _com_fotos(db, make_user, monkeypatch, *, generica=False):
+async def _com_fotos(db, make_user, monkeypatch, *, generica=False, kit=False):
     """O cenário da oferta (dg053.sp em falta → dg054.sp Laranja) com a foto do dg054.
 
     A loja da conversa (kfa) tem um pedido do dg054.sp com a foto da variação;
     outra loja (vrc), outra foto. `generica`: na loja, a mesma imagem vale para
-    o dg054 e o dg055 (a capa do anúncio).
+    o dg054 e o dg055 (a capa do anúncio). `kit`: a loja só tem a foto do
+    dg054 no kit com fone (a003), e a outra loja nenhuma.
     """
     c = await _cenario(db, make_user, monkeypatch)
-    da_loja = [("dg054.sp", CAPA if generica else LARANJA)]
+    da_loja = [("dg054.sp+a003.sp" if kit else "dg054.sp", CAPA if generica else LARANJA)]
     if generica:
         da_loja.append(("dg055.sp", CAPA))
     await _retrato(db, c, c.integ, c.canal, "conv-retrato-loja", da_loja)
     integ_outra, canal_outra, _ = await _de_outra_equipe(db, c.dono, "SHPOUTRA")
-    if not generica:
+    if not generica and not kit:
         await _retrato(
             db, c, integ_outra, canal_outra, "conv-retrato-outra", [("dg054.sp", LARANJA_OUTRA)]
         )
@@ -287,7 +318,12 @@ async def test_painel_traz_a_foto_da_loja(db, make_user, monkeypatch, envio):
     [item] = out["sugestoes_troca"]["itens"]
     [s] = item["sugestoes"]
     assert s["sku"] == "dg054.sp"
-    assert s["foto"] == {"url": LARANJA, "origem": "loja", "generica": False}
+    assert s["foto"] == {
+        "url": LARANJA,
+        "origem": "loja",
+        "generica": False,
+        "acessorio_a_mais": False,
+    }
     # A de fora (sem estoque) não tem oferta, nem foto.
     assert all("foto" not in f for f in item["fora"])
     assert out["ag_cancelamento"]["oferta_envio"]["foto"] is True
@@ -316,14 +352,24 @@ async def test_lista_traz_a_foto(db, client, auth_as, make_user, monkeypatch, en
     assert r.status_code == 200, r.text
     [p] = r.json()["pedidos"]
     [s] = p["sugestoes_troca"]["itens"][0]["sugestoes"]
-    assert s["foto"] == {"url": LARANJA, "origem": "loja", "generica": False}
+    assert s["foto"] == {
+        "url": LARANJA,
+        "origem": "loja",
+        "generica": False,
+        "acessorio_a_mais": False,
+    }
 
 
 async def test_painel_foto_generica_vem_marcada(db, make_user, monkeypatch, envio):
     c = await _com_fotos(db, make_user, monkeypatch, generica=True)
     out = await painel.painel_da_conversa(db, c.conversa, user=c.adm)
     [s] = out["sugestoes_troca"]["itens"][0]["sugestoes"]
-    assert s["foto"] == {"url": CAPA, "origem": "loja", "generica": True}
+    assert s["foto"] == {
+        "url": CAPA,
+        "origem": "loja",
+        "generica": True,
+        "acessorio_a_mais": False,
+    }
 
 
 async def test_foto_do_catalogo(db, make_user, monkeypatch, envio):
@@ -343,7 +389,7 @@ async def test_foto_do_catalogo(db, make_user, monkeypatch, envio):
             integration_id=integ_ml.id,
             platform=IntegrationPlatform.ML,
             external_id="MLB1",
-            sku="dg054.ci+a001.ci",
+            sku="dg054.ci",
             title="A17 Laranja",
             thumbnail_url="http://http2.mlstatic.com/D_9-MLB1_042026-I.jpg",
         )
@@ -355,6 +401,7 @@ async def test_foto_do_catalogo(db, make_user, monkeypatch, envio):
         "url": "https://http2.mlstatic.com/D_9-MLB1_042026-O.jpg",
         "origem": "catalogo",
         "generica": False,
+        "acessorio_a_mais": False,
     }
 
 
@@ -449,6 +496,36 @@ async def test_foto_generica_so_vai_marcada(
     assert ordem == ["texto"] and cdn.urls == []
     assert out["foto"] == "generica" and "pode mostrar outra cor" in out["foto_aviso"]
     # A pessoa viu a capa e marcou "mandar a foto": vai.
+    [m] = await _mensagens(db, c.conversa.id, autor="loja")
+    out = await troca_oferta.enviar_oferta(
+        db,
+        c.adm,
+        numero_bling=NUMERO,
+        sku_novo=c.novo,
+        texto="Pode ser a laranja?",
+        ultima_vista_id=m.id,
+        com_foto=True,
+    )
+    assert ordem == ["texto", "foto", "texto"] and out["foto"] == "enviada"
+
+
+async def test_foto_do_kit_com_fone_so_vai_marcada(
+    db, make_user, monkeypatch, envio, chat, cdn, imagem, ordem
+):
+    """O aparelho sozinho só tem a foto do kit com fone: o cartão avisa
+    (`acessorio_a_mais`) e o "enviar oferta" só a manda marcada."""
+    c = await _com_fotos(db, make_user, monkeypatch, kit=True)
+    out = await painel.painel_da_conversa(db, c.conversa, user=c.adm)
+    [s] = out["sugestoes_troca"]["itens"][0]["sugestoes"]
+    assert s["foto"] == {
+        "url": LARANJA,
+        "origem": "loja",
+        "generica": False,
+        "acessorio_a_mais": True,
+    }
+    out = await troca_oferta.enviar_oferta(db, c.adm, numero_bling=NUMERO, sku_novo=c.novo)
+    assert ordem == ["texto"] and cdn.urls == []
+    assert out["foto"] == "outro_kit" and "acessório que não vai junto" in out["foto_aviso"]
     [m] = await _mensagens(db, c.conversa.id, autor="loja")
     out = await troca_oferta.enviar_oferta(
         db,

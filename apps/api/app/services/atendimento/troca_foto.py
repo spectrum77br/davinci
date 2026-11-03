@@ -15,9 +15,12 @@ DE ONDE VEM (nenhuma ida à loja; só o que o DaVinci já guardou):
   2. o retrato de OUTRA loja (a mesma plataforma antes) — `outra_loja`;
   3. o catálogo: a miniatura do anúncio em `listings` e a `products.image_url`
      — `catalogo`.
-  Em cada fonte, o SKU exato antes; depois sem o lote (o kit inteiro); por
-  fim só o principal (o aparelho, a mala): a foto do modelo é a mesma em
-  qualquer lote e com qualquer acessório (`chaves_da_foto`).
+  A foto da MESMA composição (o aparelho com os mesmos acessórios, em
+  qualquer lote) vem antes da loja: a do kit com fone mostraria ao comprador
+  um fone que não vai. Sem ela, vale a do principal (o aparelho, a mala) —
+  a que mostra menos acessório a mais primeiro (`chaves_da_foto`, `escolher`).
+  Medido em 03/11/2026: com a loja na frente da composição, ~60% das fotos
+  eram de outra composição.
 
 A FOTO GENÉRICA: na Shopee o anúncio pode usar a MESMA imagem para todas as
 variações (a capa) — medido em 03/11/2026: 107 das 1.103 imagens dos
@@ -29,6 +32,11 @@ Medido em produção (03/11/2026): `products.image_url` vazio nos 5.538
 produtos; os `listings` parados desde 15/05 (e a Shopee lá com o SKU do
 anúncio, não o do Bling); os retratos cobrem 526 dos 1.865 SKUs com estoque
 pelo SKU exato e 1.360 pelo principal — a consulta leva ~75 ms.
+
+A FOTO DO KIT: o aparelho sozinho que só tem foto do kit (com fone, com
+relógio) — ou o kit que só tem a de outro kit — fica com
+`acessorio_a_mais`: a tela avisa e o "enviar oferta" só a manda marcada,
+como a genérica.
 
 A FOTO QUE VAI: a da CDN da plataforma em tamanho cheio (`url_para_enviar`:
 a Shopee sem o `_tn` de 320 px — 958 px; o ML no `-O`), baixada pelo
@@ -121,9 +129,17 @@ class FotoEscolhida:
     origem: str
     # A mesma imagem vale para mais de um modelo no anúncio: pode mostrar outra cor.
     generica: bool = False
+    # A foto é de um kit com acessório que este produto NÃO leva (o aparelho
+    # sozinho só com a foto do kit com fone): pode mostrar o que não vai.
+    acessorio_a_mais: bool = False
 
     def para_tela(self) -> dict[str, Any]:
-        return {"url": self.url, "origem": self.origem, "generica": self.generica}
+        return {
+            "url": self.url,
+            "origem": self.origem,
+            "generica": self.generica,
+            "acessorio_a_mais": self.acessorio_a_mais,
+        }
 
 
 # ── PURAS ─────────────────────────────────────────────────────────────────
@@ -195,6 +211,11 @@ def _nivel(chaves: tuple[str, str, str], sku_candidato: str) -> int | None:
     return next((i for i in range(3) if chaves[i] and chaves[i] == outras[i]), None)
 
 
+def _acessorios(sku: str | None) -> set[str]:
+    """Os acessórios do kit, sem o lote ("dg085.ra+a003.ra" → {"a003"}). PURA."""
+    return set(chaves_da_foto(sku)[1].split("+")[1:])
+
+
 def escolher(
     candidatas: Iterable[Candidata],
     sku: str,
@@ -206,14 +227,18 @@ def escolher(
     """A melhor foto do SKU para a conversa (da loja `integration_id`). PURA.
 
     A ordem: a foto de UM modelo só antes da genérica (a capa do anúncio
-    com várias cores); a da mesma loja, a de outra loja, a do catálogo; o
-    SKU exato, sem o lote, o principal; a mesma plataforma; a mais nova.
-    `modelos_da_url` = {url: os modelos (principal) que aparecem com ela em
-    TODOS os retratos}.
+    com várias cores); a da MESMA composição (o aparelho com os mesmos
+    acessórios, em qualquer lote) antes de qualquer outra, de qualquer loja —
+    a foto do kit com fone mostraria um fone que não vai —, e, sem ela, a que
+    mostra menos acessório a mais e depois a que falta menos; a da mesma
+    loja, a de outra loja, a do catálogo; o SKU exato antes de outro lote; a
+    mesma plataforma; a mais nova. `modelos_da_url` = {url: os modelos
+    (principal) que aparecem com ela em TODOS os retratos}.
     """
     chaves = chaves_da_foto(sku)
     if not chaves[0]:
         return None
+    acess = _acessorios(sku)
     modelos = modelos_da_url or {}
     melhor: tuple[tuple, Candidata, bool] | None = None
     for c in candidatas:
@@ -227,8 +252,11 @@ def escolher(
             origem = 0 if integration_id is not None and c.integration_id == integration_id else 1
         else:
             origem = 2
+        do_kit = _acessorios(c.sku)
         ordem = (
             generica,
+            len(do_kit - acess),
+            len(acess - do_kit),
             origem,
             nivel,
             plataforma is None or c.plataforma != plataforma,
@@ -243,8 +271,9 @@ def escolher(
     return FotoEscolhida(
         url=previa,
         url_envio=url_para_enviar(previa),
-        origem=ORIGENS[ordem[1]],
+        origem=ORIGENS[ordem[3]],
         generica=generica,
+        acessorio_a_mais=ordem[1] > 0,
     )
 
 

@@ -259,7 +259,8 @@ class OfertaTrocaOut(BaseModel):
 
     # A foto do modelo (03/11/2026, `troca_oferta.FOTO_*`): enviada (antes do
     # texto) | junto (ML: na mensagem do texto) | revisar (pode ter saído) |
-    # ja_enviada | nao_saiu | sem_foto | nao_suportada | generica | desmarcada.
+    # ja_enviada | nao_saiu | sem_foto | nao_suportada | generica | outro_kit |
+    # desmarcada.
     foto: str | None = None
     # A frase para a tela quando a foto não foi (o texto foi assim mesmo).
     foto_aviso: str | None = None
