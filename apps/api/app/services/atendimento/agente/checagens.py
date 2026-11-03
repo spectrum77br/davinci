@@ -8916,12 +8916,20 @@ def responde_e_marca_da_proposta(
     lista devolvida, que o laço junta às ações do modelo — fica em `acoes_pos_envio`).
     Sem a marca, sem texto, com outra ação ou "perguntar": a Proposta como veio. PURA."""
     acao = proposta.acao_pessoa
+    # Itens 9 e 10 (03/11/2026): a etiqueta liberada do turno (`ctx.etiquetas_pos_envio`: o
+    # Abrir chamado da entrega, o Ag. cancelamento) que o modelo escolheu com texto também
+    # vira "responder" — a ação continua, depois do envio.
+    de_depois = (agente_ctx.ACOES_POS_ENVIO if ctx.responde_e_marca else frozenset()) | (
+        frozenset(getattr(ctx, "etiquetas_pos_envio", ()) or ()) & agente_ctx.ACOES_ETIQUETA
+    )
     if (
-        not ctx.responde_e_marca
+        not de_depois
         or not (proposta.texto or "").strip()
         or proposta.acao not in ("responder", "pessoa")
-        or (acao is not None and acao not in agente_ctx.ACOES_POS_ENVIO)
+        or (acao is not None and acao not in de_depois)
         or (proposta.acao == "responder" and acao is None)
+        # Sem o D1, a "pessoa" sem a ação nomeada continua pessoa.
+        or (acao is None and not ctx.responde_e_marca)
     ):
         return proposta, []
     nova = proposta.model_copy(update={"acao": "responder", "acao_pessoa": None})
@@ -9007,13 +9015,19 @@ _OUTRA_ACAO_DA_EQUIPE = re.compile(
 )
 
 
-def conferir_responde_e_marca(texto: str, *, acao: str, marca: bool) -> list[PendenciaAgente]:
+def conferir_responde_e_marca(
+    texto: str, *, acao: str, marca: bool, disputa: bool = False
+) -> list[PendenciaAgente]:
     """D1: a resposta do "responde e marca" fora da forma (ver acima) → SUAVE. PURA.
-    `marca` = `ctx.responde_e_marca`."""
+    `marca` = `ctx.responde_e_marca`; `disputa` (item 7, 03/11/2026) = a solicitação está
+    em disputa (`acao_pessoa.disputa_do_turno`): o reembolso não é certo — a frase que o dá
+    sem condição ("o reembolso é feito pela Shopee pela mesma forma de pagamento") é DURA."""
     if not marca or acao not in ("responder", "perguntar") or not (texto or "").strip():
         return []
     plano = " ".join(_plano(texto).split())
     achados: list[str] = []
+    if disputa and _reembolso_sem_condicao(plano):
+        achados.append("dá o reembolso como certo na disputa")
     if _DECIDE_A_DEVOLUCAO.search(plano):
         achados.append("decide ou dá o resultado da devolução/do reembolso")
     if _PRAZO_DO_REEMBOLSO.search(plano):
@@ -9027,6 +9041,106 @@ def conferir_responde_e_marca(texto: str, *, acao: str, marca: bool) -> list[Pen
     return [
         _suave(RESPONDE_E_MARCA, MOTIVO_RESPONDE_E_MARCA.format(o_que=o_que)) for o_que in achados
     ]
+
+
+# Item 7 (03/11/2026): na DISPUTA (a loja contestou, a Shopee julgando), a frase do
+# reembolso só vale com a condição ("se a Shopee aprovar", "caso a decisão seja a seu favor").
+_REEMBOLSO_ACONTECE = re.compile(
+    r"\b(?:reembols\w*|estorno|dinheiro|valor)\b(?:\s+[a-z0-9]+){0,6}?\s+(?:e\s+feito|sera\s+feito"
+    r"|e\s+devolvid[oa]|sera\s+devolvid[oa]|volta|voltara|cai|caira|retorna|retornara"
+    r"|e\s+creditad[oa]|sera\s+creditad[oa]|vai\s+(?:cair|voltar|retornar))\b"
+    r"|\b(?:a\s+)?(?:shopee|plataforma)\s+(?:\w+\s+){0,2}?(?:devolve|reembolsa|estorna)\b"
+)
+_COM_A_CONDICAO = re.compile(
+    r"\b(?:se|caso)\s+(?:\w+\s+){0,4}?(?:aprov\w*|decid\w*|favor\w*|for\s+aprovad\w*|acatad\w*"
+    r"|der\s+razao|resolv\w*)|\bapos\s+a\s+(?:analise|decisao)\b|\bdepois\s+da\s+(?:analise|decisao)\b"
+    r"|\bquando\s+(?:a\s+)?(?:shopee|plataforma)\s+(?:\w+\s+)?(?:aprovar|decidir|concluir)\b"
+)
+
+
+def _reembolso_sem_condicao(plano: str) -> bool:
+    """Alguma frase dá o reembolso como certo, sem a condição da decisão? PURA."""
+    for frase in re.split(r"[.!?;\n]+", plano):
+        if _REEMBOLSO_ACONTECE.search(frase) and not _COM_A_CONDICAO.search(frase):
+            return True
+    return False
+
+
+# ── 10c. A tela quebrada (item 2 da análise de 31/10–02/11, 03/11/2026) ─────
+#
+# 7fcf8f73 (Barbosa, 31/10): a equipe já tinha recusado a garantia da tela trincada (mau
+# uso); o agente pediu vídeo e fotos para "a equipe analisar" — reabriu o caso e criou a
+# expectativa. A regra do dono (27/10/2026): a garantia não cobre aparelho quebrado. Com a
+# tela quebrada/trincada/rachada no que o cliente escreveu, a resposta que pede a evidência,
+# oferece análise, devolução, troca ou diz que a garantia cobre → DURA (pessoa). A resposta
+# do D1/da rotina (a solicitação que o cliente JÁ abriu na plataforma) só informa: fora.
+TELA_QUEBRADA = "tela_quebrada_com_oferta"
+MOTIVO_TELA_QUEBRADA = (
+    "o cliente fala de tela quebrada/trincada e a resposta oferece análise, vídeo/fotos, "
+    "devolução ou troca — a garantia não cobre: pessoa"
+)
+_OFERTA_NA_TELA = re.compile(
+    r"\b(?:equipe|loja|nos|a\s+gente|tecnico|assistencia)\s+(?:\w+\s+){0,2}?(?:analis|avali"
+    r"|verific|examin)\w*"
+    r"|\banalis\w*\s+(?:\w+\s+){0,3}?(?:caso|aparelho|video|fotos?|imagens?|tela|garantia)\b"
+    r"|\b(?:solicit|abr|pedir|peca|faca|fazer|iniciar|inicie)\w*\s+(?:\w+\s+){0,2}?(?:devoluc"
+    r"|reembols|troca)\w*"
+    r"|\bdevoluc\w*\s+(?:\w+\s+){0,3}?(?:pela|na|no|pelo)\s+(?:propria\s+)?(?:shopee|plataforma"
+    r"|app|aplicativo|tiktok)\b"
+    r"|\b(?:trocamos|trocaremos|vamos\s+trocar|podemos\s+trocar|fazemos\s+a\s+troca"
+    r"|devolvemos|reembolsamos)\b"
+    r"|\bgarantia\s+(?:\w+\s+){0,2}?(?:cobre|cobrira|abrange)\b(?!\s+(?:apenas|so|somente)\b)"
+)
+
+
+def conferir_tela_quebrada(
+    texto: str,
+    *,
+    acao: str,
+    textos_cliente: Iterable[str],
+    informa_a_solicitacao: bool = False,
+) -> list[PendenciaAgente]:
+    """A tela quebrada com a oferta (ver acima) → DURA. PURA. `textos_cliente` = o que o
+    cliente escreveu na conversa (o histórico lido)."""
+    if informa_a_solicitacao or acao not in ("responder", "perguntar"):
+        return []
+    if not (texto or "").strip():
+        return []
+    if not any(acao_pessoa.fala_de_tela_quebrada(t) for t in textos_cliente if t):
+        return []
+    plano = " ".join(_plano(texto).split())
+    plano_sem_negacao = re.sub(r"\bnao\s+(?:\w+\s+){0,2}?cobre\b", " ", plano)
+    if acao_pessoa.pede_evidencia(texto) or _OFERTA_NA_TELA.search(plano_sem_negacao):
+        return [_pessoa(TELA_QUEBRADA, MOTIVO_TELA_QUEBRADA)]
+    return []
+
+
+# ── 10d. O Ag. cancelamento como etiqueta (item 10, 03/11/2026) ──────────────
+#
+# Com o Ag. cancelamento liberado como etiqueta (`acao_pessoa.etiquetas_do_turno`: a fala
+# que não toca o destino do pedido), a resposta também não fala dele: envio, postagem,
+# entrega, prazo, rastreio, cancelamento — o 83955 pode cancelar o pedido; isso é da pessoa.
+AG_CANCELAMENTO_NA_RESPOSTA = "ag_cancelamento_na_resposta"
+MOTIVO_AG_CANCELAMENTO_NA_RESPOSTA = (
+    "o pedido está em Ag. cancelamento e a resposta fala do envio, da entrega, do prazo ou do "
+    "cancelamento — pessoa"
+)
+_DESTINO_NA_RESPOSTA = re.compile(
+    r"\b(?:envi\w*|post\w*|despach\w*|entreg\w*|prazo\w*|rastrei\w*|transport\w*|cheg\w*"
+    r"|cancel\w*|estorn\w*|reembols\w*|separac\w*|coleta\w*|previs\w*|a\s+caminho|logistic\w*)"
+)
+
+
+def conferir_ag_cancelamento_na_resposta(
+    texto: str, *, acao: str, etiqueta: bool
+) -> list[PendenciaAgente]:
+    """A resposta com o Ag. cancelamento como etiqueta fala do destino do pedido → DURA.
+    PURA. `etiqueta` = o `ag_cancelamento` em `ctx.acoes_pos_envio`."""
+    if not etiqueta or acao not in ("responder", "perguntar") or not (texto or "").strip():
+        return []
+    if _DESTINO_NA_RESPOSTA.search(" ".join(_plano(texto).split())):
+        return [_pessoa(AG_CANCELAMENTO_NA_RESPOSTA, MOTIVO_AG_CANCELAMENTO_NA_RESPOSTA)]
+    return []
 
 
 # ── 11. O OUTRO produto da loja: G1 (23/10/2026) ───────────────────────────
@@ -10424,12 +10538,37 @@ def conferir(
                 *(getattr(m, "texto", None) or "" for m in getattr(base, "foco", ()) or ()),
             ],
             pedido=pedido,
-            acoes_pessoa=ctx.acoes_pessoa,
+            # Item 10 (03/11/2026): o Abrir chamado que virou etiqueta também é a ação.
+            acoes_pessoa=getattr(ctx, "acoes_todas", ctx.acoes_pessoa),
             plataforma=ctx.plataforma,
         )
-        # D1 (23/10/2026): a resposta do "responde e marca" só informa.
+        # D1 (23/10/2026): a resposta do "responde e marca" só informa — e, na disputa
+        # (item 7, 03/11/2026), nunca dá o reembolso como certo.
         pendencias += conferir_responde_e_marca(
-            texto, acao=proposta.acao, marca=ctx.responde_e_marca
+            texto,
+            acao=proposta.acao,
+            marca=ctx.responde_e_marca,
+            disputa=acao_pessoa.disputa_do_turno(base.ctx, base.recentes),
+        )
+        # Item 2 (03/11/2026, 7fcf8f73): a tela quebrada nunca ganha análise, vídeo,
+        # devolução nem troca do agente (a garantia não cobre) — fora o D1/a rotina, que só
+        # informam a solicitação que o cliente JÁ abriu.
+        pendencias += conferir_tela_quebrada(
+            texto,
+            acao=proposta.acao,
+            textos_cliente=[
+                getattr(m, "texto", None) or ""
+                for m in getattr(base, "recentes", ()) or ()
+                if getattr(m, "autor", None) == constantes.AUTOR_CLIENTE
+            ],
+            informa_a_solicitacao=bool(ctx.responde_e_marca or ctx.devolucao_de_rotina),
+        )
+        # Item 10 (03/11/2026): com o Ag. cancelamento como etiqueta, a resposta não fala do
+        # destino do pedido (envio, entrega, prazo, cancelamento) — isso é da pessoa.
+        pendencias += conferir_ag_cancelamento_na_resposta(
+            texto,
+            acao=proposta.acao,
+            etiqueta=constantes.ACAO_AG_CANCELAMENTO in ctx.acoes_pos_envio,
         )
         # D3 (23/10/2026): a política da entrega só com a resposta da equipe citada.
         pendencias += conferir_politica_da_entrega(texto, evidencias_=proposta.evidencias, ctx=ctx)
@@ -10678,16 +10817,22 @@ DURAS: frozenset[str] = frozenset(
         PIX_OU_BANCO,
         PROMETE_RESULTADO,
         CONFIANCA_ABAIXO_DO_PISO,
+        # Item 2 (03/11/2026): a tela quebrada com análise/devolução/troca oferecida; item 10:
+        # o destino do pedido dito com o Ag. cancelamento como etiqueta.
+        TELA_QUEBRADA,
+        AG_CANCELAMENTO_NA_RESPOSTA,
         # O "não" do verificador é a última trava.
         "verificador",
     }
 )
 # Do D1 ("responde e marca"): decidir, prometer data/prazo/valor ou falar de Pix é DURO; o
-# resto (outra ação da equipe, mandar abrir outra solicitação) é aviso.
+# resto (outra ação da equipe, mandar abrir outra solicitação) é aviso. Item 7 (03/11/2026):
+# e dar o reembolso como certo na disputa.
 _RESPONDE_E_MARCA_DURO = (
     "decide ou dá o resultado",
     "promete data, prazo ou valor",
     "fala de Pix",
+    "dá o reembolso como certo na disputa",
 )
 
 

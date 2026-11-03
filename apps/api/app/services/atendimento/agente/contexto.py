@@ -151,6 +151,19 @@ MAX_EVIDENCIAS = 20
 # (`acao_pessoa.responde_e_marca_do_turno`), ficam para DEPOIS do envio — a resposta
 # informativa sai e a conversa continua na Caixa Humano com a etiqueta delas.
 ACOES_POS_ENVIO = frozenset({constantes.ACAO_RECLAMACAO_ABERTA})
+# Itens 9 e 10 da análise de 31/10–02/11 (o dono, 03/11/2026: "aplique as correções"; e a
+# alavanca A de 29/10: "responde e marca" para o Abrir chamado (entrega)): as ações de
+# pessoa que viram ETIQUETA — a resposta informativa sai e a conversa continua na Caixa
+# Humano com o rótulo delas — quando a régua do turno libera
+# (`acao_pessoa.etiquetas_do_turno`; o recibo da evidência, `acao_pessoa.recibo_da_evidencia`).
+# Cada uma só pela régua dela; fora dela, continua trava, como sempre.
+ACOES_ETIQUETA = frozenset(
+    {
+        constantes.ACAO_ABRIR_CHAMADO,
+        constantes.ACAO_AG_CANCELAMENTO,
+        constantes.ACAO_ANALISAR_EVIDENCIA,
+    }
+)
 
 
 def ordenar_acoes(*listas: Iterable[str | None]) -> list[str]:
@@ -540,6 +553,10 @@ class ContextoAgente:
     # (a `reclamacao_aberta`) não travam o envio (`acoes_pessoa`) e ficam para DEPOIS dele
     # (`acoes_pos_envio`, no `para_fatos`): a conversa continua na Caixa Humano.
     responde_e_marca: bool = False
+    # Itens 9 e 10 (03/11/2026): as ações de `ACOES_ETIQUETA` que a régua do turno liberou
+    # como etiqueta (`acao_pessoa.etiquetas_do_turno`): não travam o envio (`acoes_pessoa`)
+    # e ficam para DEPOIS dele (`acoes_pos_envio`). Vazio = como antes.
+    etiquetas_pos_envio: frozenset[str] = frozenset()
     # Item 6 da rodada "redondo" (23/10/2026): o que a `buscar_anuncios_da_loja` achou —
     # `anuncios_buscados` (item_id → {"nome_curto", "variacoes_casadas", "disponivel",
     # "da_conversa", "titulo_plano"}) e `buscas_catalogo` (cada busca: {"termo",
@@ -914,23 +931,29 @@ class ContextoAgente:
 
     # ── decisão ──
 
+    def _depois_do_envio(self, acao: str) -> bool:
+        """A ação fica para DEPOIS do envio (D1 ou a etiqueta liberada do turno)?"""
+        return (self.responde_e_marca and acao in ACOES_POS_ENVIO) or (
+            acao in ACOES_ETIQUETA and acao in self.etiquetas_pos_envio
+        )
+
+    @property
+    def acoes_todas(self) -> list[str]:
+        """As do código mais as do modelo, na ordem da régua — COM as de depois do envio."""
+        return ordenar_acoes(self.acoes_codigo, self.acoes_modelo)
+
     @property
     def acoes_pessoa(self) -> list[str]:
         """As do código mais as do modelo, na ordem da régua — sem as que ficam para depois
-        do envio no "responde e marca" (D1, `acoes_pos_envio`)."""
-        todas = ordenar_acoes(self.acoes_codigo, self.acoes_modelo)
-        if not self.responde_e_marca:
-            return todas
-        return [a for a in todas if a not in ACOES_POS_ENVIO]
+        do envio no "responde e marca" (D1) e nas etiquetas do turno (itens 9 e 10,
+        `acoes_pos_envio`)."""
+        return [a for a in self.acoes_todas if not self._depois_do_envio(a)]
 
     @property
     def acoes_pos_envio(self) -> list[str]:
-        """D1: as ações de pessoa que continuam marcadas DEPOIS do envio (a conversa fica
-        na Caixa Humano com a etiqueta delas). Vazio fora do "responde e marca"."""
-        if not self.responde_e_marca:
-            return []
-        todas = ordenar_acoes(self.acoes_codigo, self.acoes_modelo)
-        return [a for a in todas if a in ACOES_POS_ENVIO]
+        """D1 e as etiquetas: as ações de pessoa que continuam marcadas DEPOIS do envio (a
+        conversa fica na Caixa Humano com a etiqueta delas). Vazio fora das duas marcas."""
+        return [a for a in self.acoes_todas if self._depois_do_envio(a)]
 
     def para_fatos(self) -> dict:
         """O `rascunho.fatos["agente"]` (spec 3.3.3): enxuto, sem conteúdo de ferramenta.
@@ -953,6 +976,12 @@ class ContextoAgente:
         if self.responde_e_marca:
             # D1 (23/10/2026): só quando há (o registro de antes não muda).
             extra["responde_e_marca"] = True
+            extra["acoes_pos_envio"] = self.acoes_pos_envio
+        etiquetas = [a for a in self.acoes_pos_envio if a in ACOES_ETIQUETA]
+        if etiquetas:
+            # Itens 9 e 10 (03/11/2026): só quando alguma etiqueta ficou para depois do
+            # envio (o registro de antes não muda; a do D1 não liga as isenções da devolução).
+            extra["etiquetas_pos_envio"] = etiquetas
             extra["acoes_pos_envio"] = self.acoes_pos_envio
         if self.produto_pelo_anuncio:
             # Liberações L1/L2 (23/10/2026): só quando há (o registro de antes não muda).

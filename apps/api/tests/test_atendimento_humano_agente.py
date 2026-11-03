@@ -732,8 +732,9 @@ def test_a_acao_de_pessoa_fica_na_ordem_do_assunto_e_a_tela_escreve():
 
 
 def test_versao_7_retria_tudo():
-    # 7 (21/10/2026): o pedido de atendente pela régua do agente.
-    assert humano.VERSAO == 8
+    # 7 (21/10/2026): o pedido de atendente pela régua do agente; 9 (03/11/2026): as
+    # etiquetas, a contestação e a prioridade da evidência.
+    assert humano.VERSAO == 9
 
 
 # ─────────────── paridade com o caminho do agente no `_gerar` ───────────────

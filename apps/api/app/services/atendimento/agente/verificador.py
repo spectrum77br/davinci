@@ -1297,6 +1297,17 @@ _ROTULO_DO_POS_ENVIO = {
         "central do vendedor; o rascunho só informa o estado da solicitação e o caminho, "
         "nunca decide, aprova, recusa nem dá prazo ou valor"
     ),
+    # Item 10 (03/11/2026): as etiquetas — a pessoa age depois; o rascunho só informa.
+    constantes.ACAO_ABRIR_CHAMADO: (
+        "abrir o chamado da entrega com a plataforma — a equipe abre depois do envio; o "
+        "rascunho só diz o que o pedido mostra e a política da entrega, sem prometer o "
+        "chamado, a verificação nem data"
+    ),
+    constantes.ACAO_AG_CANCELAMENTO: (
+        "o pedido em Ag. cancelamento — a equipe decide o destino do pedido; o rascunho só "
+        "responde o que não depende dele (produto, cumprimento), sem falar de envio, entrega, "
+        "prazo nem cancelamento"
+    ),
 }
 
 

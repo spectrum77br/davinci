@@ -273,6 +273,7 @@ from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.ag_cancelamento import TEXTOS_IA
 from app.services.atendimento.constantes import (
+    ACAO_ANALISAR_EVIDENCIA,
     ACAO_ENVIAR_ARQUIVO_NF,
     ACENTOS_DE,
     ACENTOS_PARA,
@@ -3274,9 +3275,17 @@ def responde_e_marca_no_rascunho(rascunho: Any | None) -> bool:
         return False
     fatos = getattr(rascunho, "fatos", None)
     agente = fatos.get("agente") if isinstance(fatos, dict) else None
+    # Itens 9 e 10 (03/11/2026): a etiqueta liberada do turno (`etiquetas_pos_envio`) também
+    # marca — sem ligar as isenções da devolução, que leem só o `responde_e_marca`.
     return (
         isinstance(agente, dict)
-        and agente.get("responde_e_marca") is True
+        and (
+            agente.get("responde_e_marca") is True
+            or bool(
+                isinstance(agente.get("etiquetas_pos_envio"), list)
+                and agente.get("etiquetas_pos_envio")
+            )
+        )
         and isinstance(agente.get("acoes_pos_envio"), list)
         and bool(agente.get("acoes_pos_envio"))
     )
@@ -4820,6 +4829,7 @@ async def conferir_saida(
     fatos_citados: Sequence[str] = (),
     produto_pelo_anuncio: bool = False,
     garantia_apple_pelo_fato: bool = False,
+    ag_cancelamento_etiqueta: bool = False,
 ) -> SaidaConferida:
     """O código confere o que o modelo disse. Não grava nada; só LÊ o banco
     para saber se a loja respondeu enquanto o modelo escrevia
@@ -4963,8 +4973,11 @@ async def conferir_saida(
     rotina = agente and devolucao_de_rotina
     if (ctx.get("chamados") or ctx.get("devolucoes")) and not rotina:
         motivos.append("pedido com chamado ou devolução")
-    if em_aguardando_cancelamento(ctx.get("pedido")):
-        # Item 4: o 83955 nunca sai sem pessoa — seja qual for o motivo.
+    if em_aguardando_cancelamento(ctx.get("pedido")) and not (agente and ag_cancelamento_etiqueta):
+        # Item 4: o 83955 nunca sai sem pessoa — seja qual for o motivo. Item 10 da análise
+        # de 31/10–02/11 (o dono, 03/11/2026): no AGENTE, com o Ag. cancelamento liberado
+        # como etiqueta (`acao_pessoa.etiquetas_do_turno`: a fala que não toca o destino do
+        # pedido), a resposta sai e a conversa continua na Caixa Humano com o rótulo.
         motivos.append(MOTIVO_AG_CANCELAMENTO)
     if reclamacao_aberta(conversa.dados):
         motivos.append("reclamação/mediação aberta no ML")
@@ -5446,6 +5459,29 @@ async def _gerar_pelo_agente(
     antes = acao_pessoa.gatilhos_antes_do_modelo(base.recentes, gatilho, sinais=base.sinais)
     if antes.so_cartao:
         return None
+    # Item 9 da análise de 31/10–02/11 (o dono, 03/11/2026): a foto/o vídeo que a loja pediu
+    # chegou e a régua do código só dá "Analisar foto ou vídeo" — o recibo fixo, sem o
+    # modelo (sem custo), que sai sozinho e deixa a conversa no topo da Caixa Humano.
+    recibo = acao_pessoa.recibo_da_evidencia(
+        conversa,
+        base.ctx,
+        base.recentes,
+        gatilho,
+        sinais=base.sinais,
+        sinais_do_cliente=base.sinais_do_cliente,
+    )
+    if recibo is not None:
+        resultado = recibo_do_agente(
+            conversa,
+            gatilho,
+            recibo,
+            modo=base.modo,
+            nomes=base.nomes,
+            manual_hash=manual_hash(organizar_manual(list(base.regras), None)),
+        )
+        return await _salvar(
+            session, conversa, resultado.para_rascunho(conversa, gatilho, base.fatos_gravados)
+        )
     if antes.gatilhos:
         ctx = agente_ctx.ContextoAgente.da_conversa(
             conversa, gatilho, modo=base.modo, nomes=base.nomes
@@ -5524,6 +5560,67 @@ async def _gerar_pelo_agente(
     anotar_pistas_alem(resultado)
     return await _salvar(
         session, conversa, resultado.para_rascunho(conversa, gatilho, base.fatos_gravados)
+    )
+
+
+# Item 9 (03/11/2026): o recibo da evidência — o assunto do rascunho e o motivo (sem dado).
+ASSUNTO_DO_RECIBO = "defeito"
+MOTIVO_RECIBO = (
+    "recibo da evidência (sai sozinho; a pessoa analisa a foto ou o vídeo — topo da Caixa Humano)"
+)
+FATO_RECIBO = "recibo_evidencia"
+
+
+def recibo_do_agente(
+    conversa: Any,
+    gatilho: Any,
+    texto: str,
+    *,
+    modo: str,
+    nomes: Sequence[str | None] = (),
+    manual_hash: str | None = None,
+) -> Any:
+    """O `agente.ResultadoAgente` do recibo da evidência (item 9): o texto fixo, pendente,
+    sem pessoa, com "Analisar foto ou vídeo" para DEPOIS do envio (`acoes_pos_envio`). PURA."""
+    from app.services.atendimento import agente as agente_svc
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    ctx = agente_ctx.ContextoAgente.da_conversa(conversa, gatilho, modo=modo, nomes=nomes)
+    ctx.acoes_codigo = [ACAO_ANALISAR_EVIDENCIA]
+    ctx.etiquetas_pos_envio = frozenset({ACAO_ANALISAR_EVIDENCIA})
+    ctx.acao = "responder"
+    ctx.parada = agente_svc.PARADA_SEM_AGENTE
+    return agente_svc.ResultadoAgente(
+        parada=agente_svc.PARADA_SEM_AGENTE,
+        gravar=True,
+        texto=texto,
+        categoria=ASSUNTO_DO_RECIBO,
+        confianca=1.0,
+        precisa_humano=False,
+        motivo=MOTIVO_RECIBO,
+        validador_ok=True,
+        validador_erros=[],
+        status=RASCUNHO_PENDENTE,
+        acoes_pessoa=[],
+        fatos_agente={**ctx.para_fatos(), FATO_RECIBO: True},
+        manual_hash=manual_hash,
+    )
+
+
+def recibo_no_rascunho(rascunho: Any) -> bool:
+    """O rascunho é o recibo fixo da evidência (item 9), intacto? PURA. O texto é um dos
+    fixos (`acao_pessoa.TEXTOS_DO_RECIBO`), sem ação de pessoa que trave e com SÓ "Analisar
+    foto ou vídeo" para depois do envio."""
+    from app.services.atendimento.agente import acao_pessoa
+
+    if rascunho is None or not rascunho_do_agente(rascunho):
+        return False
+    agente = _fatos_do_agente(rascunho)
+    return (
+        agente.get(FATO_RECIBO) is True
+        and (getattr(rascunho, "texto", None) or "") in acao_pessoa.TEXTOS_DO_RECIBO
+        and agente.get("acoes_pessoa") == []
+        and agente.get("acoes_pos_envio") == [ACAO_ANALISAR_EVIDENCIA]
     )
 
 
@@ -6491,6 +6588,12 @@ async def _talvez_enviar(
         )
         if canal is None or canal.modo != MODO_AUTO:
             motivo = "canal_fora_do_auto"
+        elif do_agente and recibo_no_rascunho(rascunho):
+            # Item 9 (03/11/2026): o recibo fixo da evidência não tem assunto a liberar nem
+            # texto do modelo para o verificador — o resto das travas (a triagem com a
+            # etiqueta, a pausa humana, o envio) é o de sempre.
+            if not agente_config.agente_ligado(get_settings(), canal):
+                motivo = "agente_desligado"
         elif do_agente:
             motivo = trava_do_agente(
                 rascunho,

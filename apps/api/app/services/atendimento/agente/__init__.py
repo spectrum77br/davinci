@@ -952,6 +952,8 @@ async def conferir_proposta(
         garantia_apple_pelo_fato=checagens.garantia_apple_da_proposta(
             p, entrada["texto"], ctx, base, fichas=[*pac.fichas, *ctx.fichas_lidas]
         ),
+        # Item 10 (03/11/2026): o Ag. cancelamento liberado como etiqueta neste turno.
+        ag_cancelamento_etiqueta=constantes.ACAO_AG_CANCELAMENTO in ctx.acoes_pos_envio,
     )
     # Eval real de 21/10/2026: a lacuna que o código não preencheu ("{rastreio}"
     # sem rastreio) nunca fica no rascunho — a frase dela sai (ou, sem resposta

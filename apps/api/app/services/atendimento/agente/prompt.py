@@ -412,6 +412,11 @@ NOTAS_DA_PLATAFORMA: dict[str, tuple[str, ...]] = {
         'devolução pela Shopee"; nunca aprovada/recusada, data, prazo, valor, Pix nem outra '
         "solicitação. Sem essa marca (nem devolucao_sem_decisao_da_loja), a ação é "
         "reclamacao_aberta e o texto só confirma que a solicitação foi aberta e onde acompanhar.",
+        # Itens 7 e 10 da análise de 31/10–02/11 (o dono, 03/11/2026): a disputa e as
+        # etiquetas (o código decide se a ação fica para depois do envio).
+        'Disputa: "em análise pela Shopee", reembolso só "se aprovado". abrir_chamado: o que '
+        "o PEDIDO mostra, sem prometer o chamado. Ag. cancelamento: nunca envio, entrega, prazo "
+        "nem cancelamento.",
         # O dono, 27/10/2026: a garantia como a equipe responde hoje (vale por cima da seção
         # GARANTIA do bloco 1, que não muda — o hash dele é fixo).
         "Garantia/defeito (decisão do dono; vale por cima da seção GARANTIA): como a "
@@ -898,6 +903,9 @@ PRODUTO_CONDICAO_REGIAO = (
     'siga o "resumo" dela (fonte "loja" também): o estado do cliente fora dela recebe, o que '
     '"depende do valor do pedido" nunca é sim nem não, e nunca "todo o Brasil". Não é '
     "dado_indisponivel.\n"
+    # Item 11 da análise de 31/10–02/11 (o dono, 03/11/2026): f7323756, ad4d4b72 — a variação
+    # respondida por sim/não pela lista do anúncio (o bloco 2 está no teto: só esta linha).
+    '- Variação: sim ou não pelas variações do anúncio, nunca só "confira no anúncio".\n'
     "- Garantia Apple antes da compra: só o fato aprovado ou a resposta da equipe desta loja "
     '("garantia Apple de 1 ano a partir da ativação"), citando fato:<id> ou par:<id>; nada de '
     "garantia da loja, legal, cobertura ou outro prazo. Com variação aberta/ativada no "

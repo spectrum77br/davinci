@@ -230,6 +230,8 @@ async def _auto(
     ctx.responde_e_marca = acao_pessoa.responde_e_marca_do_turno(
         conversa, ctxd, msgs, gatilho, acoes=ctx.acoes_codigo, agora=agora
     )
+    # Itens 9 e 10 (03/11/2026): as etiquetas do turno, como o `gatilhos_de_codigo`.
+    ctx.etiquetas_pos_envio = acao_pessoa.etiquetas_do_turno(conversa, ctxd, msgs, gatilho, lista)
     ctx.pistas_orientacao = acao_pessoa.pistas_de_orientacao(msgs, gatilho)
     ctx.pistas_turno = acao_pessoa.pistas_do_turno(
         msgs, gatilho, com_pedido=bool(ctxd.get("pedido"))
@@ -248,8 +250,11 @@ async def _auto(
     ctx.pistas_turno = list(
         dict.fromkeys([*ctx.pistas_turno, *acao_pessoa.pistas_do_rascunho(p.texto)])
     )
+    # O `agente.conferir_proposta`: a ação do modelo que fica para depois do envio (D1 e as
+    # etiquetas do item 10) vira "responder".
+    p, depois = checagens.responde_e_marca_da_proposta(p, ctx)
     ctx.acao = p.acao
-    ctx.acoes_modelo = saida.acoes_do_modelo(p)
+    ctx.acoes_modelo = [*saida.acoes_do_modelo(p), *depois]
     ctx.evidencias = saida.evidencias(p)
     fatos: dict[str, Any] = {"anuncio": None, "ficha_do_anuncio": fichas}
     if bloco:
@@ -267,6 +272,7 @@ async def _auto(
         fatos_citados=ctx.fatos_citados(ctx.evidencias),
         produto_pelo_anuncio=checagens.liberacao_da_proposta(p, entrada["texto"], entrada["categoria"], ctx, base, fichas=fichas),
         garantia_apple_pelo_fato=checagens.garantia_apple_da_proposta(p, entrada["texto"], ctx, base, fichas=fichas),
+        ag_cancelamento_etiqueta=constantes.ACAO_AG_CANCELAMENTO in ctx.acoes_pos_envio,
     )  # fmt: skip
     conferida = checagens.sem_lacuna_vazia(conferida)
     ctx.pedido_da_conversa = bloco
@@ -488,16 +494,30 @@ async def test_d3_o_que_nao_e_a_resposta_padrao_nao_sai(texto, evidencias, pares
     assert r.decisao != VAI
 
 
-async def test_d3_com_o_chamado_a_resposta_padrao_nao_sai():
-    """O chamado é 100% pessoa (decisão do dono): mesmo a resposta-padrão com o par."""
+async def test_d3_com_o_chamado_a_resposta_padrao_sai_com_a_etiqueta():
+    """Até 03/11/2026 o chamado era 100% pessoa. Item 10 da análise de 31/10–02/11 (a
+    alavanca A do dono de 29/10 e "aplique as correções" de 03/11): o Abrir chamado da
+    entrega vira ETIQUETA — a resposta-padrão com o par vai ao verificador e a ação fica para
+    depois do envio (a conversa continua na Caixa Humano). O dinheiro pedido junto: trava."""
     r = await _auto(
         _p(TEMPLATE, "entrega_nao_recebida", ["pedido", "par:8440"]),
         [_menu(), *_cli("já tem 8 dias e nem saiu de SP, vocês podem ver junto com a Shopee?")],
         ctx_pedido=CTX_POSTADO, bloco=_bloco(), postado=acao_pessoa.POSTADO_SIM, valores=VALORES,
         pares_do_pacote=[PAR_PRAZO], conversa=_conv(dados=_retrato(1)),
     )  # fmt: skip
-    assert constantes.ACAO_ABRIR_CHAMADO in r.ctx.acoes_pessoa and r.decisao != VAI
-    assert not r.ctx.responde_e_marca and r.ctx.acoes_pos_envio == []
+    assert constantes.ACAO_ABRIR_CHAMADO in r.ctx.acoes_codigo
+    assert constantes.ACAO_ABRIR_CHAMADO not in r.ctx.acoes_pessoa
+    assert r.ctx.acoes_pos_envio == [constantes.ACAO_ABRIR_CHAMADO]
+    assert r.decisao == VAI, (r.codigos, r.motivos)
+    assert not r.ctx.responde_e_marca
+    dinheiro = await _auto(
+        _p(TEMPLATE, "entrega_nao_recebida", ["pedido", "par:8440"]),
+        [_menu(), *_cli("Não chegou e a previsão já passou, quero o reembolso")],
+        ctx_pedido=CTX_POSTADO, bloco=_bloco(), postado=acao_pessoa.POSTADO_SIM, valores=VALORES,
+        pares_do_pacote=[PAR_PRAZO], conversa=_conv(dados=_retrato(1)),
+    )  # fmt: skip
+    assert constantes.ACAO_ABRIR_CHAMADO in dinheiro.ctx.acoes_pessoa and dinheiro.decisao != VAI
+    assert dinheiro.ctx.acoes_pos_envio == []
 
 
 def test_d3_o_par_da_resposta_padrao_vai_ao_pacote():
@@ -690,19 +710,10 @@ async def test_d1_o_turno_informativo_responde_e_marca(falas):
         (["Vou no Procon se não devolverem meu dinheiro"], {}, {}),
         (["Eu tô esperando o reembolso", "quero falar com uma pessoa"], {}, {}),
         (["Cadê meu reembolso? me manda a nota fiscal"], {}, {}),
-        # O chamado no pedido, a reclamação do ML e o canal de reclamação.
+        # O chamado no pedido, a reclamação do ML e o canal de reclamação. (A DISPUTA saiu
+        # daqui no item 7 de 03/11/2026: o D1 marca e a resposta não dá o reembolso como
+        # certo — `test_0311_d1_na_disputa_so_com_a_condicao`.)
         (["Eu tô esperando o dinheiro do celular"], {"chamados": [{"status": "aberto"}]}, {}),
-        # 28/10/2026 (25c0a87f): a reclamação em DISPUTA (a loja contestou) é da pessoa.
-        (
-            ["Quero meu reembolso de volta"],
-            {"reclamacoes": [_reclamacao(status="Loja contestou")]},
-            {},
-        ),
-        (
-            ["Eu tô esperando o dinheiro do celular"],
-            {"reclamacoes": [_reclamacao(status="Em análise pela Shopee (disputa)")]},
-            {},
-        ),
         (["Eu tô esperando o dinheiro do celular"], {}, {"plataforma": "ml"}),
         (["Eu tô esperando o dinheiro do celular"], {}, {"canal": constantes.CANAL_RECLAMACAO}),
     ],
@@ -736,9 +747,13 @@ def _cartao_rr(situacao: str, rr_status: str = "request_submitted", devolucao: i
     return m
 
 
-def test_d1_a_disputa_no_cartao_do_chat_fica_com_pessoa():
+def test_d1_a_disputa_no_cartao_do_chat_fica_com_pessoa(monkeypatch):
     """A revisão de 28/10/2026: até a reclamação sincronizar (~1 h), a disputa só está
-    no cartão do chat — o D1 não pode responder por cima dela."""
+    no cartão do chat. Item 7 (03/11/2026): o D1 marca também na disputa — a disputa do
+    cartão vale para a régua da resposta (`acao_pessoa.disputa_do_turno`: o reembolso só
+    com a condição); com a chave desligada, a de antes (pessoa)."""
+    from app.config import get_settings
+
     disputa = _cartao_rr("Disputa com a Shopee solicitada")
     assert acao_pessoa.disputa_nos_cartoes([disputa])
     assert not acao_pessoa.disputa_nos_cartoes([_cartao_rr("Em análise pela Shopee")])
@@ -747,9 +762,13 @@ def test_d1_a_disputa_no_cartao_do_chat_fica_com_pessoa():
         [disputa, _cartao_rr("Reembolso concluído", rr_status="refund_completed")]
     )
     msgs = [_menu(), disputa, *_cli("Quero meu reembolso de volta")]
-    assert not acao_pessoa.responde_e_marca_do_turno(_conv(), _ctx_dev(), msgs, msgs[-1])
+    assert acao_pessoa.responde_e_marca_do_turno(_conv(), _ctx_dev(), msgs, msgs[-1])
+    assert acao_pessoa.disputa_do_turno(_ctx_dev(), msgs)
     sem = [_menu(), _cartao_rr("Em análise pela Shopee"), *_cli("Quero meu reembolso de volta")]
     assert acao_pessoa.responde_e_marca_do_turno(_conv(), _ctx_dev(), sem, sem[-1])
+    assert not acao_pessoa.disputa_do_turno(_ctx_dev(), sem)
+    monkeypatch.setattr(get_settings(), "atendimento_agente_etiquetas_pos_envio", False)
+    assert not acao_pessoa.responde_e_marca_do_turno(_conv(), _ctx_dev(), msgs, msgs[-1])
 
 
 def test_d1_sem_devolucao_aberta_nao_ha_o_que_marcar():

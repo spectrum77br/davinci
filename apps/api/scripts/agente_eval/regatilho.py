@@ -524,6 +524,23 @@ def montar(r: Mapping[str, Any]) -> SimpleNamespace:
             conversa, ctxd, msgs, gatilho, [], acoes=ctx.acoes_codigo, agora=agora
         )
     )
+    # Itens 9 e 10 (03/11/2026): as etiquetas do turno pela régua ATUAL (os detalhes dos
+    # gatilhos não ficam gravados: a régua do código, sem o banco).
+    ctx.etiquetas_pos_envio = acao_pessoa.etiquetas_do_turno(
+        conversa,
+        ctxd,
+        msgs,
+        gatilho,
+        acao_pessoa.gatilhos(
+            conversa,
+            msgs,
+            ctxd,
+            gatilho=gatilho,
+            postado=(bloco or {}).get("postado"),
+            chaves_ativas=frozenset(),
+            agora=agora,
+        ),
+    )
     ctx.pistas_orientacao = acao_pessoa.pistas_de_orientacao(msgs, gatilho)
     ctx.pistas_turno = acao_pessoa.pistas_do_turno(msgs, gatilho, com_pedido=bool(bloco))
     reaplicar_ferramentas(ctx, rastro)
