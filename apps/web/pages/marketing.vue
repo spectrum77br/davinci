@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { nextTick, onMounted, ref, watch } from 'vue'
-import { BarChart3, Clapperboard, ClipboardCheck, NotebookPen, TrendingUp } from 'lucide-vue-next'
+import { BarChart3, Clapperboard, ClipboardCheck, NotebookPen, Radio, TrendingUp } from 'lucide-vue-next'
 
-// Abas: Conferência | Criativos | Roteiros | Desempenho.
+// Abas: Conferência | Criativos | Roteiros | Desempenho | Lives.
 //
 // 08/10/2026: as abas Mercado Livre e Shopee (os painéis de Ads: tabelas de
 // 7/30 dias, gráfico Evolução, agenda automática, Oferta Relâmpago, alertas de
@@ -14,13 +14,14 @@ import { BarChart3, Clapperboard, ClipboardCheck, NotebookPen, TrendingUp } from
 // Criativos, Roteiros e Desempenho. A aba Roteiros pendura no MESMO recurso de
 // Criativos (migration 0299): recurso novo nasceria False pra todo mundo menos
 // admin, e não existe migration de backfill de permissão neste repositório.
-// Pelo mesmo motivo a Conferência pendura em "marketing".
+// Pelo mesmo motivo a Conferência pendura em "marketing". A aba Lives
+// (03/11/2026, gravação das lives da Shopee/TikTok) também fica em Criativos.
 const canCriativos = useCan('marketing_criativos', 'view')
 const canConferencia = useCan('marketing', 'view')
 const route = useRoute()
 const router = useRouter()
 
-type Aba = 'conferencia' | 'criativos' | 'roteiros' | 'desempenho'
+type Aba = 'conferencia' | 'criativos' | 'roteiros' | 'desempenho' | 'lives'
 // ?aba= abre a aba direto (o aviso do Threema manda pra ?aba=conferencia&execucao=<id>).
 // Aba que a pessoa não pode ver cai no padrão. Os links antigos ?aba=ml e
 // ?aba=shopee caem na Conferência (o middleware abaixo já trocou pra
@@ -28,7 +29,7 @@ type Aba = 'conferencia' | 'criativos' | 'roteiros' | 'desempenho'
 function abaDaUrl(): Aba | null {
   const q = String(route.query.aba || '')
   if ((q === 'conferencia' || q === 'ml' || q === 'shopee') && canConferencia.value) return 'conferencia'
-  if ((q === 'criativos' || q === 'roteiros' || q === 'desempenho') && canCriativos.value) return q
+  if ((q === 'criativos' || q === 'roteiros' || q === 'desempenho' || q === 'lives') && canCriativos.value) return q
   return null
 }
 // Quem vê o Marketing abre na Conferência; quem só tem Criativos, em Criativos.
@@ -126,6 +127,14 @@ definePageMeta({
           <TrendingUp class="size-3.5" />
           Desempenho
         </button>
+        <!-- Lives: o cadastro das lives que o robô do Mac grava. -->
+        <button v-if="canCriativos"
+          class="px-3 py-1.5 rounded text-sm whitespace-nowrap transition-colors inline-flex items-center gap-1.5"
+          :class="aba === 'lives' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
+          @click="aba = 'lives'">
+          <Radio class="size-3.5" />
+          Lives
+        </button>
       </div>
     </div>
 
@@ -140,5 +149,6 @@ definePageMeta({
       :foco="focoRoteiro"
     />
     <MarketingDesempenho v-else-if="aba === 'desempenho' && canCriativos" />
+    <MarketingLives v-else-if="aba === 'lives' && canCriativos" />
   </div>
 </template>

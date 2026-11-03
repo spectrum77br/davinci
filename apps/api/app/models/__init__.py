@@ -231,6 +231,7 @@ from app.models.marketing_personagem import (
 from app.models.marketing_personagem_requisicao import (  # noqa: F401
     MarketingPersonagemRequisicao,
 )
+from app.models.marketing_live import MarketingLive
 from app.models.marketing_postagem import (
     STATUS_EM_VOO,
     MarketingPostagem,
@@ -485,6 +486,7 @@ __all__ = [
     "MarketingRoteiro",
     "MarketingRoteiroPersonagem",
     "MarketingRoteiroRef",
+    "MarketingLive",
     "MarketingPostagem",
     "MarketingPostagemMetrica",
     "MarketingSchedule",

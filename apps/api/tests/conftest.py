@@ -446,6 +446,7 @@ _CLEANUP_TABLES = (
     "claude_conectores",  # FK -> users: antes de users
     "chamados_ia_regras",  # FK -> users: antes de users
     "chamados_ia_avaliacoes",  # FK -> users/chamados: antes dos dois
+    "marketing_lives",  # FK -> integrations/users
     "marketing_postagens",  # FK -> criativos/redes_sociais: antes dos dois
     "marketing_creative_files",
     # marketing_creatives tem FK -> marketing_roteiros (SET NULL), então a
