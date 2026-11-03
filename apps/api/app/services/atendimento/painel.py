@@ -42,6 +42,8 @@ E o que a tela usa por aqui:
       "Abrir no Bling" e "Abrir na plataforma" (Shopee: o order_id interno
       de `links_shopee`, lido em `ids_shopee_do_painel`; sem ele, a busca)
   perfil_adspower(session, conversa)  o perfil (campo Servidor do store-info)
+  anuncio_publico.anuncios_da_conversa  o "Ver anúncio" (03/11/2026): a página
+      pública do anúncio do pedido/do chat/da pergunta, sem ida à loja
   ag_cancelamento_do_pedido(pedido, conversa, observacoes)
       o PORQUÊ do pedido em "Aguardando Cancelamento" (item 4, 02/10/2026):
       o classificador (`ag_cancelamento.classificar`) com o que o painel já
@@ -124,7 +126,7 @@ from app.models import (
     UserRole,
 )
 from app.services import links_shopee
-from app.services.atendimento import separa_email
+from app.services.atendimento import anuncio_publico, separa_email
 from app.services.atendimento.ag_cancelamento import (
     CANCELADO_PLATAFORMA,
     DESCONHECIDO,
@@ -1579,6 +1581,23 @@ async def painel_da_conversa(
             "codigo": "falhou",
         }
 
+    # "Ver anúncio" (03/11/2026): a página pública do anúncio, sem ida à loja.
+    # Os SKUs do Bling só servem quando não há retrato (`anuncio_publico`).
+    skus_bling = [i["sku"] for i in itens] if fonte_itens == "bling" else []
+    anuncios, _ = await _seguro(
+        session,
+        "anuncios",
+        lambda: anuncio_publico.anuncios_da_conversa(session, conversa, skus_bling=skus_bling),
+        None,
+        cid,
+    )
+    if anuncios is None:
+        anuncios = {
+            "itens": [],
+            "motivo": "Não consegui ler o anúncio agora.",
+            "codigo": anuncio_publico.FALHOU,
+        }
+
     envio_foto, _ = await _seguro(
         session, "foto", lambda: situacao_da_foto(session, conversa), None, cid
     )
@@ -1615,6 +1634,7 @@ async def painel_da_conversa(
         "observacoes_bling": observacoes_tela,
         "links": links_do_pedido(conversa, pedido, ids_shopee),
         "adspower": adspower,
+        "anuncios": anuncios,
         "envio_foto": envio_foto
         if envio_foto is not None
         else {"pode": False, "motivo": "Não consegui conferir o envio agora.", "codigo": "falhou"},

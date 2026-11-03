@@ -1,5 +1,6 @@
 <script lang="ts">
 import type { PerfilAdsPower } from '~/components/AtendimentoAdsPower.vue'
+import type { AnunciosPainel } from '~/components/AtendimentoVerAnuncio.vue'
 import type { TrocaAberta } from '~/components/AtendimentoTroca.vue'
 import type { OfertaEnvio, TrocaEnvio } from '~/components/AtendimentoTrocaSugestoes.vue'
 
@@ -199,6 +200,9 @@ export type Painel = {
   links: { bling: string | null; plataforma: { url: string; rotulo: string } | null }
   // O tipo mora no botão (AtendimentoAdsPower.vue).
   adspower: PerfilAdsPower
+  // O "Ver anúncio" do cabeçalho (o tipo mora no botão, AtendimentoVerAnuncio.vue);
+  // ausente na API antiga.
+  anuncios?: AnunciosPainel | null
   envio_foto: EnvioFoto
   // Só com o pedido em "Aguardando Cancelamento" (item 4); ausente na API antiga.
   ag_cancelamento?: AgCancelamento | null

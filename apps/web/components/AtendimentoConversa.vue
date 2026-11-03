@@ -3065,6 +3065,14 @@ watch(() => props.conversaId, (novo, velho) => {
                 <span class="ml-1 2xl:hidden">Portal</span>
                 <span class="ml-1 hidden 2xl:inline">Abrir no portal</span>
               </Button>
+              <!-- Ver anúncio (03/11/2026): a página pública do anúncio, a que o
+                   comprador vê, numa aba nova deste navegador (sem AdsPower).
+                   Vale até para quem só lê. Desligado com o porquê sem anúncio. -->
+              <AtendimentoVerAnuncio
+                v-if="!conversa.somente_leitura && !semPainelDePedido"
+                :anuncios="painelDados?.anuncios ?? null"
+                :carregando="painelCarregando"
+              />
               <!-- 🖥 AdsPower: o perfil da loja desta conversa, no computador de quem
                    clicou (RF11). Desligado com o porquê quando não há perfil. -->
               <AtendimentoAdsPower

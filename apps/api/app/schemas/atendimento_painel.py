@@ -122,6 +122,25 @@ class LinksOut(BaseModel):
     plataforma: LinkOut | None = None
 
 
+class AnuncioOut(BaseModel):
+    """Um anúncio do "Ver anúncio" (`anuncio_publico.anuncios_da_conversa`)."""
+
+    item_id: str
+    titulo: str | None = None
+    variacao: str | None = None
+    # A página pública (https da própria plataforma), a que o comprador vê.
+    link: str
+    # pedido | chat | conversa — de onde o anúncio saiu.
+    origem: str
+
+
+class AnunciosOut(BaseModel):
+    itens: list[AnuncioOut] = Field(default_factory=list)
+    # Sem anúncio: a frase do botão desligado (e o código estável).
+    motivo: str | None = None
+    codigo: str | None = None
+
+
 class AdsPowerOut(BaseModel):
     # O nº do perfil no AdsPower (campo Servidor do store-info = serial_number).
     perfil: str | None = None
@@ -336,6 +355,8 @@ class PainelOut(BaseModel):
     observacoes_bling: ObservacoesBlingOut | None = None
     links: LinksOut = Field(default_factory=LinksOut)
     adspower: AdsPowerOut = Field(default_factory=AdsPowerOut)
+    # O "Ver anúncio" do cabeçalho (03/11/2026); vazio = sem botão ativo.
+    anuncios: AnunciosOut = Field(default_factory=AnunciosOut)
     envio_foto: EnvioFotoOut = Field(default_factory=EnvioFotoOut)
     # Só com o pedido em "Aguardando Cancelamento" (item 4); None no resto.
     ag_cancelamento: AgCancelamentoOut | None = None
