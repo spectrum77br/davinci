@@ -115,6 +115,18 @@ export type SugestaoTroca = {
   motivo_fora: string | null
   // A oferta ao comprador para ESTA sugestão (só na elegível; o nível 0 não tem).
   texto_oferta: string | null
+  // A foto do modelo (03/11/2026, só na que tem oferta); null = sem foto no
+  // DaVinci (a oferta vai só com o texto).
+  foto?: FotoTroca | null
+}
+// `FotoTrocaOut`: a miniatura, de onde veio e se é a capa do anúncio.
+export type FotoTroca = {
+  // A miniatura (CDN da plataforma); a que vai ao comprador o servidor acha de novo.
+  url: string
+  // loja | outra_loja | catalogo.
+  origem: string
+  // A mesma imagem vale para mais de um modelo no anúncio: pode mostrar outra cor.
+  generica?: boolean
 }
 export type ItemTroca = {
   sku_original: string

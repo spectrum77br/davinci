@@ -1112,6 +1112,7 @@ async def test_painel_bloco_ag_cancelamento(db, client, admin, make_user, bling)
             "motivo": "troca_desligada",
             "texto_motivo": "A troca de produto está desligada (ATENDIMENTO_TROCA_ATIVA).",
             "ultima_mensagem_id": None,
+            "foto": False,
         },
     }
     # Nenhuma troca aberta no pedido (o `troca_aberta` do painel é o de fora de 83955).

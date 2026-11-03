@@ -227,6 +227,9 @@ class OfertaEnvioOut(BaseModel):
     # tela a devolve como `ultima_vista_id` (409 `conversa_mudou` se chegou
     # fala do cliente ou da loja depois).
     ultima_mensagem_id: UUID | None = None
+    # Podendo: a conversa recebe foto pelo DaVinci — a foto do modelo vai
+    # antes do texto (03/11/2026). False = a oferta vai só com o texto.
+    foto: bool = False
 
 
 class TrocaEnvioOut(BaseModel):
@@ -286,6 +289,18 @@ class AgCancelamentoOut(BaseModel):
     oferta_envio: OfertaEnvioOut = Field(default_factory=OfertaEnvioOut)
 
 
+class FotoTrocaOut(BaseModel):
+    """A foto do modelo sugerido (03/11/2026, `services/atendimento/troca_foto.py`)."""
+
+    # A miniatura (CDN da plataforma, https); a que vai ao comprador o servidor acha de novo.
+    url: str
+    # loja (o anúncio da loja da conversa) | outra_loja | catalogo.
+    origem: str
+    # A mesma imagem vale para mais de um modelo no anúncio (a capa): pode
+    # mostrar outra cor — o "enviar oferta" só a manda se a pessoa marcar.
+    generica: bool = False
+
+
 class SugestaoTrocaOut(BaseModel):
     """Um produto parecido para trocar o item em falta (item 4, fase 4b, 05/10/2026).
 
@@ -312,6 +327,9 @@ class SugestaoTrocaOut(BaseModel):
     motivo_fora: str | None = None
     # A oferta ao comprador para ESTA sugestão (só na elegível; o nível 0 não tem).
     texto_oferta: str | None = None
+    # A foto do modelo (só na que tem oferta); None = sem foto no DaVinci (a
+    # oferta vai só com o texto e a tela avisa).
+    foto: FotoTrocaOut | None = None
 
 
 class ItemTrocaOut(BaseModel):

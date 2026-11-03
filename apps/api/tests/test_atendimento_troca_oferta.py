@@ -806,6 +806,7 @@ async def test_painel_diz_se_a_oferta_pode_sair(db, make_user, monkeypatch, _cha
         "motivo": None,
         "texto_motivo": None,
         "ultima_mensagem_id": None,  # a conversa ainda sem fala
+        "foto": True,  # o chat da Shopee recebe foto: a do modelo vai antes do texto
     }
     # Quem responde, sem permissão nenhuma (03/11/2026, as 3 equipes): liberado.
     equipe = await make_user()
@@ -860,6 +861,7 @@ async def test_lista_traz_a_oferta(db, client, auth_as, make_user, monkeypatch, 
         "motivo": None,
         "texto_motivo": None,
         "ultima_mensagem_id": None,
+        "foto": True,
     }
 
 

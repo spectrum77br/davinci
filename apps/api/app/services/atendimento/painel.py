@@ -1567,6 +1567,14 @@ async def painel_da_conversa(
         )
         if not ok_troca or sugestoes_troca is None:
             sugestoes_troca = sugestoes_falhou(ve_custo=ve_margem(user))
+        else:
+            # A foto do modelo em cada sugestão com oferta (03/11/2026): a do
+            # anúncio desta loja primeiro. Nunca derruba as sugestões.
+            from app.services.atendimento import troca_foto
+
+            await troca_foto.fotos_nos_blocos(
+                session, [(sugestoes_troca, conversa.integration_id, conversa.plataforma)]
+            )
 
     if ve_lojas(user):
         adspower, _ = await _seguro(

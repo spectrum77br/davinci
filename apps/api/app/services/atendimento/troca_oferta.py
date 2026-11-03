@@ -53,10 +53,26 @@ gerenciar") é QUEM RESPONDE no atendimento (`acesso.pode_responder`), só
 nos pedidos e conversas das lojas da pessoa — a decisão (g) de 07/10/2026
 (`_so_admin` + `atendimento.edit` + `margem.edit`) saiu.
 
+A FOTO DO MODELO (03/11/2026, o Eduardo: "daria pra gente no copiar anexar
+uma imagem do modelo de troca já junto seria melhor"): antes do texto vai a
+foto do produto sugerido (`troca_foto`: a do anúncio da mesma loja, senão de
+outra loja ou do catálogo), pelo caminho da foto (`enviar.enviar_foto`) com
+as travas dela. O texto e as travas do envio são conferidos ANTES da foto:
+ela nunca sai sozinha com um texto que o envio recusaria. No ML a foto vai
+DENTRO da mensagem do texto (a legenda obrigatória): uma mensagem só. A
+foto que não vai (`foto` na resposta + `foto_aviso`) não segura o texto:
+sem foto no DaVinci (`sem_foto`), a plataforma sem foto pelo DaVinci
+(`nao_suportada`), só a capa do anúncio com várias cores (`generica` — vai
+só se a pessoa marcar: `com_foto=True`), não baixou ou a plataforma recusou
+(`nao_saiu`), a mesma foto há menos de 2 min (`ja_enviada`), ou a pessoa
+desmarcou (`com_foto=False`). A mensagem da foto leva a marca
+`payload.oferta_troca_foto` (a `oferta_troca`, a do aceite, fica no texto).
+
 `situacao_da_oferta` é o `oferta_envio` do bloco Ag. cancelamento (painel e
 lista): as MESMAS travas que não dependem do produto escolhido, para o
 botão nunca dizer "pode" e a rota dizer "não" — e o `ultima_mensagem_id`
-que a tela devolve como `ultima_vista_id`.
+que a tela devolve como `ultima_vista_id`, e `foto` (a conversa recebe foto
+pelo DaVinci).
 
 FORA DA 4d (desenho §4): a IA marcar "parece aceite / recusa", a conversa
 nova para o pedido sem conversa, a tabela `atendimento_ag_cancelamento` e
@@ -85,8 +101,10 @@ from app.services.atendimento import (
     gravar,
     separa_email,
     troca,
+    troca_foto,
     troca_sugestoes,
 )
+from app.services.atendimento import foto as foto_mod
 from app.services.atendimento.ag_cancelamento import SEM_ESTOQUE
 from app.services.atendimento.constantes import (
     AUTOR_CLIENTE,
@@ -132,6 +150,18 @@ TEXTOS = {
     troca_sugestoes.FORA_CUSTO_ABAIXO_PISO: troca.TEXTOS["custo_abaixo_piso"],
     "conversa_nao_encontrada": "Conversa não encontrada.",
 }
+
+# ── A foto do modelo (03/11/2026): o `foto` da resposta ───────────────────
+FOTO_ENVIADA = "enviada"  # saiu antes do texto
+FOTO_JUNTO = "junto"  # ML: dentro da mensagem do texto
+FOTO_REVISAR = "revisar"  # a plataforma não confirmou: pode ter saído
+FOTO_JA_ENVIADA = "ja_enviada"  # a mesma foto saiu há menos de 2 min
+FOTO_NAO_SAIU = "nao_saiu"  # não baixou ou foi recusada: o texto foi sozinho
+FOTO_SEM_FOTO = "sem_foto"  # o produto não tem foto no DaVinci
+FOTO_NAO_SUPORTADA = "nao_suportada"  # a conversa não recebe foto pelo DaVinci
+FOTO_GENERICA = "generica"  # só a capa do anúncio (pode ser outra cor): sem marcar, não vai
+FOTO_DESMARCADA = "desmarcada"  # a pessoa mandou só o texto
+SO_TEXTO = "a oferta foi só com o texto"
 
 # O `oferta_envio` quando a conferência quebrou (o resto do painel segue).
 OFERTA_NAO_CONFERIDA = {
@@ -353,9 +383,15 @@ def _nome(user: User) -> str:
     return (user.name or "").strip() or (user.email or "").strip() or str(user.id)
 
 
-def texto_da_nota(antigo: str, novo: str, nome: str, *, status: str) -> str:
+def texto_da_nota(
+    antigo: str, novo: str, nome: str, *, status: str, foto: str | None = None
+) -> str:
     """A nota interna da oferta. PURA."""
     texto = f"Oferta de troca enviada ({antigo} -> {novo}) por {nome}."
+    if foto in (FOTO_ENVIADA, FOTO_JUNTO):
+        texto += " Foi com a foto do modelo."
+    elif foto == FOTO_REVISAR:
+        texto += " A foto do modelo pode ter saído: confira."
     if status == MSG_REVISAR:
         texto += " A plataforma não confirmou o envio: confira a conversa."
     return texto
@@ -369,11 +405,13 @@ async def _registrar(
     marca: dict[str, Any],
     nota: str | None,
     user_id: UUID,
+    foto: AtendimentoMensagem | None = None,
 ) -> None:
     """A marca da oferta na mensagem e a nota interna. A mensagem JÁ SAIU: nunca levanta.
 
     A trava da conversa antes (a ordem do sync: conversa, depois mensagem),
-    e a mensagem relida — o sync pode tê-la adotado no meio.
+    e a mensagem relida — o sync pode tê-la adotado no meio. A mensagem da
+    `foto` (a que foi antes do texto) leva a marca `oferta_troca_foto`.
     """
     from app.services.atendimento import painel
 
@@ -381,6 +419,9 @@ async def _registrar(
         await gravar.travar_linha(session, conversa)
         await session.refresh(mensagem)
         mensagem.payload = {**(mensagem.payload or {}), "oferta_troca": marca}
+        if foto is not None and foto is not mensagem:
+            await session.refresh(foto)
+            foto.payload = {**(foto.payload or {}), "oferta_troca_foto": marca}
         if nota:
             await painel.criar_nota(session, conversa, nota, user_id=user_id)
         await session.commit()
@@ -399,6 +440,77 @@ async def _registrar(
                 pass
 
 
+async def _escolher_foto(
+    session: AsyncSession, conversa: AtendimentoConversa, sku: str, com_foto: bool | None
+) -> tuple[troca_foto.FotoEscolhida | None, str | None, str | None]:
+    """A foto do modelo a mandar, ou (None, o `foto` da resposta, o aviso).
+
+    Nunca levanta: sem foto, a oferta segue com o texto. `com_foto`: None = a
+    foto de um modelo só vai sozinha (a capa genérica, não); True = vai até a
+    genérica (a pessoa viu e marcou); False = só o texto.
+    """
+    if com_foto is False:
+        return None, FOTO_DESMARCADA, None
+    if foto_mod.motivo_sem_foto(conversa):
+        return None, FOTO_NAO_SUPORTADA, f"Esta conversa não recebe foto pelo DaVinci: {SO_TEXTO}."
+    try:
+        async with session.begin_nested():
+            escolhida = await troca_foto.foto_do_sku(
+                session,
+                sku,
+                integration_id=conversa.integration_id,
+                plataforma=conversa.plataforma,
+            )
+    except Exception as e:  # noqa: BLE001 — a foto é complemento da oferta
+        logger.warning("atendimento_troca_oferta_foto_falhou", sku=sku, err=type(e).__name__)
+        return None, FOTO_NAO_SAIU, f"Não consegui procurar a foto do modelo agora: {SO_TEXTO}."
+    if escolhida is None:
+        return None, FOTO_SEM_FOTO, f"O produto não tem foto no DaVinci: {SO_TEXTO}."
+    if escolhida.generica and com_foto is not True:
+        return (
+            None,
+            FOTO_GENERICA,
+            f"Só achei a foto da capa do anúncio (pode mostrar outra cor): {SO_TEXTO}.",
+        )
+    return escolhida, None, None
+
+
+async def _baixar_foto(
+    conversa: AtendimentoConversa, escolhida: troca_foto.FotoEscolhida, sku: str
+) -> tuple[foto_mod.Foto | None, str | None, str | None]:
+    """A foto da CDN pronta para a caixa, ou (None, `nao_saiu`, o aviso). Nunca levanta."""
+    try:
+        bruta = await troca_foto.baixar(escolhida.url_envio, f"troca_{sku}.jpg")
+        return foto_mod.para_a_caixa(conversa, bruta), None, None
+    except (troca_foto.FotoIndisponivel, foto_mod.FotoInvalida) as e:
+        logger.info("atendimento_troca_oferta_foto_nao_baixou", sku=sku, code=e.code)
+        aviso = f"Não consegui baixar a foto do modelo ({e.detail.rstrip('.')}): {SO_TEXTO}."
+        return None, FOTO_NAO_SAIU, aviso
+
+
+def _aviso_da_recusa(e: EnvioRecusado) -> tuple[str, str]:
+    """A trava da foto (nada dela saiu) → o `foto` e o aviso; o texto segue."""
+    if e.code == enviar.RECUSA_ENVIO_REPETIDO:
+        return FOTO_JA_ENVIADA, f"A mesma foto saiu há menos de 2 minutos: {SO_TEXTO}."
+    detalhe = e.detail if isinstance(e.detail, str) else "; ".join(map(str, e.detail or []))
+    return FOTO_NAO_SAIU, f"A foto não foi ({detalhe.rstrip('.')}): {SO_TEXTO}."
+
+
+async def _conferir_texto_antes_da_foto(
+    session: AsyncSession, conversa: AtendimentoConversa, texto: str
+) -> None:
+    """As travas do envio e o texto (validador, repetido) ANTES da foto: ela nunca
+    sai sozinha com um texto que o envio recusaria. Levanta a `OfertaRecusada`."""
+    try:
+        recusa = await enviar.motivo_para_nao_enviar(session, conversa, origem=ORIGEM_HUMANO)
+        if recusa is not None:
+            raise recusa
+        normalizado = enviar._preparar_texto(texto, conversa=conversa, origem=ORIGEM_HUMANO)
+        await enviar._conferir_repetido(session, conversa, normalizado)
+    except EnvioRecusado as e:
+        raise _da_recusa_do_envio(e) from e
+
+
 async def enviar_oferta(
     session: AsyncSession,
     user: User,
@@ -411,6 +523,7 @@ async def enviar_oferta(
     ultima_vista_id: UUID | None = None,
     confirmar: bool = False,
     integracoes: Collection[UUID] | None = None,
+    com_foto: bool | None = None,
 ) -> dict[str, Any]:
     """O botão "Enviar oferta"; devolve o `OfertaTrocaOut`.
 
@@ -421,7 +534,9 @@ async def enviar_oferta(
     `ultima_vista_id` = o `oferta_envio.ultima_mensagem_id` que a tela tinha
     (`conversa_mudou` se chegou fala depois); `confirmar` envia mesmo assim.
     `integracoes` = as integrações da equipe (None = sem filtro). COMMITA
-    (o `enviar` commita antes e depois da plataforma).
+    (o `enviar` commita antes e depois da plataforma). `com_foto` = a foto
+    do modelo antes do texto (`_escolher_foto`; o `foto` da resposta diz o
+    que houve com ela).
     """
     if user is None:
         raise ValueError("a oferta precisa de quem clicou")
@@ -466,28 +581,81 @@ async def enviar_oferta(
         await _conferir_vista(session, conversa, ultima_vista_id, marcada_em)
 
     escrito = (texto or "").strip()
-    try:
-        mensagem = await enviar.enviar_resposta(
-            session,
-            conversa,
-            escrito or texto_4b,
-            user=user,
-            origem=ORIGEM_HUMANO,
-            ultima_vista_id=ultima_vista_id,
-            confirmar=confirmar,
-        )
-    except EnvioRecusado as e:
-        logger.info(
-            "atendimento_troca_oferta_recusada",
-            pedido=numero,
-            conversa_id=str(conversa.id),
-            code=e.code,
-            user_id=str(user_id),
-        )
-        raise _da_recusa_do_envio(e) from e
+    a_enviar = escrito or texto_4b
+
+    # A foto do modelo ANTES do texto (03/11/2026). Com foto a mandar, o texto
+    # e as travas do envio são conferidos antes: a foto nunca sai sozinha.
+    da_foto, foto_status, foto_aviso = await _escolher_foto(session, conversa, sug.sku, com_foto)
+    pronta = None
+    if da_foto is not None:
+        await _conferir_texto_antes_da_foto(session, conversa, a_enviar)
+        pronta, foto_status, foto_aviso = await _baixar_foto(conversa, da_foto, sug.sku)
+    # No ML a foto vai DENTRO da mensagem do texto (legenda obrigatória).
+    junto = pronta is not None and foto_mod.legenda_obrigatoria(conversa)
+    mensagem_foto: AtendimentoMensagem | None = None
+    vista_do_texto = ultima_vista_id
+    if pronta is not None:
+        try:
+            mensagem_foto = await enviar.enviar_foto(
+                session,
+                conversa,
+                pronta,
+                legenda=a_enviar if junto else None,
+                user=user,
+                ultima_vista_id=ultima_vista_id,
+                confirmar=confirmar,
+            )
+        except EnvioRecusado as e:
+            # Nada da foto saiu: o texto segue (e esbarra na mesma trava, se for do envio).
+            logger.info("atendimento_troca_oferta_foto_recusada", pedido=numero, code=e.code)
+            foto_status, foto_aviso = _aviso_da_recusa(e)
+            junto = False
+        else:
+            if mensagem_foto.status == MSG_FALHOU:
+                # O porquê fica no balão da foto, na conversa.
+                foto_status = FOTO_NAO_SAIU
+                foto_aviso = f"A plataforma recusou a foto (veja na conversa): {SO_TEXTO}."
+                junto = False
+            elif junto:
+                foto_status = FOTO_JUNTO if mensagem_foto.status == MSG_ENVIADA else FOTO_REVISAR
+            else:
+                foto_status = FOTO_ENVIADA if mensagem_foto.status == MSG_ENVIADA else FOTO_REVISAR
+                if foto_status == FOTO_REVISAR:
+                    foto_aviso = "A plataforma não confirmou a foto: confira na conversa."
+                # A foto é nossa: o texto não a conta como "a conversa mudou".
+                vista_do_texto = mensagem_foto.id
+
+    if junto and mensagem_foto is not None:
+        # ML: a mensagem da foto É a oferta (foto + texto).
+        mensagem = mensagem_foto
+    else:
+        try:
+            mensagem = await enviar.enviar_resposta(
+                session,
+                conversa,
+                a_enviar,
+                user=user,
+                origem=ORIGEM_HUMANO,
+                ultima_vista_id=vista_do_texto,
+                confirmar=confirmar,
+            )
+        except EnvioRecusado as e:
+            logger.info(
+                "atendimento_troca_oferta_recusada",
+                pedido=numero,
+                conversa_id=str(conversa.id),
+                code=e.code,
+                user_id=str(user_id),
+            )
+            recusa = _da_recusa_do_envio(e)
+            if foto_status in (FOTO_ENVIADA, FOTO_REVISAR) and isinstance(recusa.detail, str):
+                # Corrida rara (o texto foi conferido antes da foto): a foto já foi.
+                recusa.detail = f"A foto do modelo saiu, mas o texto não: {recusa.detail}"
+            raise recusa from e
 
     novo = sug.sku
     saiu = mensagem.status in (MSG_ENVIADA, MSG_REVISAR)
+    foto_saiu = foto_status in (FOTO_ENVIADA, FOTO_JUNTO, FOTO_REVISAR)
     await _registrar(
         session,
         conversa,
@@ -499,8 +667,13 @@ async def enviar_oferta(
             "nivel": sug.nivel,
             "editada": bool(escrito) and escrito != texto_4b,
         },
-        nota=texto_da_nota(item["sku"], novo, nome, status=mensagem.status) if saiu else None,
+        nota=(
+            texto_da_nota(item["sku"], novo, nome, status=mensagem.status, foto=foto_status)
+            if saiu
+            else None
+        ),
         user_id=user_id,
+        foto=mensagem_foto if mensagem_foto is not None and not junto else None,
     )
     logger.info(
         "atendimento_troca_oferta",
@@ -511,9 +684,15 @@ async def enviar_oferta(
         para=novo,
         nivel=sug.nivel,
         status=mensagem.status,
+        foto=foto_status,
         user_id=str(user_id),
     )
     return {
+        "foto": foto_status,
+        "foto_aviso": foto_aviso,
+        "foto_mensagem_id": (
+            mensagem_foto.id if mensagem_foto is not None and foto_saiu and not junto else None
+        ),
         "enviada": mensagem.status == MSG_ENVIADA,
         "mensagem_id": mensagem.id,
         "texto": mensagem.texto or "",
@@ -579,6 +758,8 @@ async def situacao_da_oferta(
         "motivo": None,
         "texto_motivo": None,
         "ultima_mensagem_id": str(ultima) if ultima else None,
+        # A conversa recebe foto pelo DaVinci: a foto do modelo vai antes do texto.
+        "foto": foto_mod.motivo_sem_foto(conversa) is None,
     }
 
 

@@ -107,6 +107,8 @@ export const PLATAFORMAS_AG: { valor: string; nome: string }[] = [
   { valor: 'amazon', nome: 'Amazon' },
   { valor: 'magalu', nome: 'Magalu' },
   { valor: 'carrefour', nome: 'Carrefour' },
+  // A Netshoes (30/10/2026) está nos chips da Caixa (só e-mail, sem chat).
+  { valor: 'netshoes', nome: 'Netshoes' },
   { valor: 'temu', nome: 'Temu' },
   { valor: 'aliexpress', nome: 'AliExpress' },
   { valor: 'site', nome: 'Sites' },

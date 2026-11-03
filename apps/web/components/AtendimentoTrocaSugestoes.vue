@@ -39,11 +39,25 @@
 // 03/11/2026 quem responde, as 3 equipes, sem a margem.edit). Com uma troca
 // aberta no pedido, o "Trocar" some — uma troca por vez (o cartão mostra o
 // Retomar).
+// A FOTO DO MODELO (03/11/2026, o Eduardo: "daria pra gente no copiar anexar
+// uma imagem do modelo de troca já junto seria melhor"): cada sugestão com
+// oferta traz a `foto` (services/atendimento/troca_foto.py — a do anúncio da
+// loja da conversa, senão de outra loja ou do catálogo), a miniatura no
+// cartão. O "copiar oferta" copia o texto E põe a foto como anexo na caixa de
+// resposta da conversa aberta (`CHAVE_ANEXAR_NA_CAIXA`, da
+// AtendimentoConversa; a foto vem do GET /pedidos/{n}/troca/foto) — a pessoa
+// confere e manda. Sem a caixa (a lista Ag. cancelamento) ou sem caber, a
+// foto aparece com o porquê, o "anexar foto" (de novo) e o "baixar foto". O
+// "enviar oferta" manda a foto ANTES do texto (`com_foto`: a caixinha da
+// confirmação; a capa do anúncio que vale para várias cores começa
+// desmarcada); a foto que não foi volta em `foto_aviso` e aparece na
+// sugestão. Sem foto, a oferta vai só com o texto e o cartão avisa.
 //
 // Este bloco (não o setup) é o módulo dos ajudantes puros, testados em
 // tests/atendimento-troca-sugestoes.cjs e tests/atendimento-troca.cjs — por
 // isso só importa TIPO.
-import type { ItemTroca, SugestaoTroca } from '~/components/AtendimentoPedido.vue'
+import type { InjectionKey } from 'vue'
+import type { FotoTroca, ItemTroca, SugestaoTroca } from '~/components/AtendimentoPedido.vue'
 import type { EscolhaTroca } from '~/components/AtendimentoTroca.vue'
 
 // O que cada nível quer dizer (troca_sugestoes.NIVEL_*).
@@ -129,6 +143,8 @@ export type OfertaEnvio = {
   // Podendo: a fala mais recente da conversa quando o bloco foi montado — vai
   // de volta como `ultima_vista_id`.
   ultima_mensagem_id?: string | null
+  // Podendo: a conversa recebe foto pelo DaVinci (a foto vai antes do texto).
+  foto?: boolean
 }
 // `AgCancelamentoOut.troca_envio`: o "Trocar" pode (a chave da troca, o
 // piloto, as travas do pedido)? Sem o campo (API antiga), pode — a prévia
@@ -156,10 +172,18 @@ export type OfertaTrocaIn = {
   texto?: string | null
   ultima_vista_id?: string | null
   confirmar?: boolean
+  // A foto do modelo antes do texto: o que a pessoa marcou (sem foto, false).
+  com_foto?: boolean | null
 }
 // A resposta (`OfertaTrocaOut`): a mensagem gravada na conversa — 200 também
 // quando a plataforma falhou (o `status` diz).
 export type OfertaTrocaOut = {
+  // O que houve com a foto (`troca_oferta.FOTO_*`): enviada, junto (ML),
+  // revisar, ja_enviada, nao_saiu, sem_foto, nao_suportada, generica, desmarcada.
+  foto?: string | null
+  // A frase quando a foto não foi (o texto foi assim mesmo).
+  foto_aviso?: string | null
+  foto_mensagem_id?: string | null
   enviada: boolean
   mensagem_id: string
   texto: string
@@ -198,8 +222,8 @@ export function motivoSemOferta(o: OfertaEnvio | null | undefined): string | nul
   const t = (o.texto_motivo || '').trim().replace(/\.+$/, '')
   return t || MOTIVO_OFERTA[(o.motivo || '').trim()] || OFERTA_INDISPONIVEL
 }
-export function corpoDaOferta(skuAntigo: string, skuNovo: string, conversaId: string | null | undefined, texto: string, ultimaVistaId?: string | null, confirmar = false): OfertaTrocaIn {
-  return { sku_novo: skuNovo, sku_antigo: skuAntigo, conversa_id: conversaId || null, texto, ultima_vista_id: ultimaVistaId || null, confirmar }
+export function corpoDaOferta(skuAntigo: string, skuNovo: string, conversaId: string | null | undefined, texto: string, ultimaVistaId?: string | null, confirmar = false, comFoto = false): OfertaTrocaIn {
+  return { sku_novo: skuNovo, sku_antigo: skuAntigo, conversa_id: conversaId || null, texto, ultima_vista_id: ultimaVistaId || null, confirmar, com_foto: comFoto }
 }
 // O erro do POST da oferta. `conversa_mudou` (o cliente ou a loja escreveu
 // depois do que o bloco tinha): a frase do backend (quem e a hora) e o
@@ -222,10 +246,51 @@ export function marcaDaOferta(r: Pick<OfertaTrocaOut, 'status' | 'enviada'>): Ma
   return null
 }
 export const OFERTA_A_CONFERIR = 'A plataforma não confirmou: a oferta pode ter saído — confira na conversa antes de mandar de novo.'
+
+// ─── a foto do modelo (03/11/2026) ─────────────────────────────────────────
+// De onde veio a foto (`FotoTrocaOut.origem`, troca_foto.ORIGENS).
+export const ORIGEM_FOTO: Record<string, string> = {
+  loja: 'foto do anúncio desta loja',
+  outra_loja: 'foto do anúncio de outra loja',
+  catalogo: 'foto do catálogo',
+}
+export const SEM_FOTO = 'Sem foto do modelo no DaVinci: a oferta vai só com o texto.'
+export const FOTO_GENERICA = 'A foto é a capa do anúncio e pode mostrar outra cor: confira antes de mandar.'
+export const SEM_CAIXA = 'A caixa de resposta não está aberta aqui: abra a conversa para anexar, ou baixe a foto.'
+export const FOTO_ANEXADA = 'Foto anexada na caixa de resposta e texto copiado: confira e envie.'
+export const FOTO_NAO_VAI_AQUI = 'Esta conversa não recebe foto pelo DaVinci: vai só o texto.'
+// O title da miniatura.
+export function rotuloFoto(f: FotoTroca | null | undefined): string {
+  if (!f) return SEM_FOTO
+  return `${ORIGEM_FOTO[f.origem] || 'foto do modelo'}${f.generica ? ' (a capa do anúncio: pode mostrar outra cor)' : ''}`
+}
+// O GET da foto (bytes): o "copiar oferta" a põe na caixa; o "baixar foto" abre.
+export function urlFoto(numero: string, sku: string, conversaId?: string | null): string {
+  const q = new URLSearchParams({ sku })
+  if (conversaId) q.set('conversa_id', conversaId)
+  return `/api/atendimento/pedidos/${encodeURIComponent(numero)}/troca/foto?${q.toString()}`
+}
+// O nome do arquivo na caixa: "troca_dg054.sp.jpg".
+export function nomeDaFoto(sku: string, mime: string | null | undefined): string {
+  return `troca_${sku.replace(/[^A-Za-z0-9._-]+/g, '_')}.${/png/i.test(mime || '') ? 'png' : 'jpg'}`
+}
+// A foto pode ir no "enviar oferta"? A sugestão tem foto e a conversa recebe foto.
+export function podeMandarFoto(s: Pick<SugestaoTroca, 'foto'>, o: OfertaEnvio | null | undefined): boolean {
+  return !!s.foto && o?.foto === true
+}
+// A caixinha começa marcada? Sim, menos na capa do anúncio (pode ser outra cor).
+export function fotoMarcadaDePadrao(s: Pick<SugestaoTroca, 'foto'>, o: OfertaEnvio | null | undefined): boolean {
+  return podeMandarFoto(s, o) && !s.foto?.generica
+}
+// A caixa de resposta da conversa aberta (AtendimentoConversa) põe o arquivo
+// como anexo: null = anexou; senão o porquê. `legenda` = o texto onde a foto
+// leva texto junto (o ML).
+export type AnexarNaCaixa = (arquivo: File, opcoes?: { legenda?: string | null }) => string | null
+export const CHAVE_ANEXAR_NA_CAIXA: InjectionKey<AnexarNaCaixa> = Symbol('anexarNaCaixa')
 </script>
 
 <script setup lang="ts">
-import { Check, Copy, Loader2, Send, Shuffle } from 'lucide-vue-next'
+import { Check, Copy, Download, ImageOff, ImagePlus, Loader2, Send, Shuffle } from 'lucide-vue-next'
 import type { SugestoesTroca } from '~/components/AtendimentoPedido.vue'
 import type { TrocaAberta } from '~/components/AtendimentoTroca.vue'
 import { copiar, erroDaApi, erroEnvioLegivel } from '~/components/AtendimentoPlataforma.vue'
@@ -256,13 +321,65 @@ const rodape = computed(() => avisoEstoque(props.sugestoes.catalogo_lido_em))
 // A chave do que acabou de ser copiado ("<sku original>|<sku novo>"), por 2 s.
 const copiado = ref<string | null>(null)
 let timer: ReturnType<typeof setTimeout> | null = null
-async function copiarOferta(chave: string, texto: string | null) {
-  if (!texto || !(await copiar(texto))) return
-  copiado.value = chave
-  if (timer) clearTimeout(timer)
-  timer = setTimeout(() => { copiado.value = null }, 2000)
+// "copiar oferta": o texto e, com a foto, a foto como anexo na caixa de resposta
+// (a foto vai mesmo se o navegador negar a área de transferência).
+async function copiarOferta(it: ItemTroca, s: SugestaoTroca) {
+  const chave = chaveDe(it, s)
+  if (!s.texto_oferta) return
+  if (await copiar(s.texto_oferta)) {
+    copiado.value = chave
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(() => { copiado.value = null }, 2000)
+  }
+  if (s.foto) await anexarFoto(it, s)
 }
 onBeforeUnmount(() => { if (timer) clearTimeout(timer) })
+
+// A foto do modelo na caixa de resposta da conversa aberta (a AtendimentoConversa
+// oferece; na lista Ag. cancelamento não há caixa). `fotoAnexada` = a sugestão
+// cuja foto foi para a caixa; `fotoPendente` = o porquê de não ter ido (a foto
+// aparece com "anexar foto" e "baixar foto").
+const anexarNaCaixa = inject(CHAVE_ANEXAR_NA_CAIXA, null)
+const fotoAnexada = ref<string | null>(null)
+const fotoPendente = ref<Record<string, string>>({})
+const anexandoFoto = ref<string | null>(null)
+function marcarPendente(chave: string, porque: string | null) {
+  const { [chave]: _, ...resto } = fotoPendente.value
+  fotoPendente.value = porque ? { ...resto, [chave]: porque } : resto
+}
+// Os bytes da foto (o servidor acha de novo pelo SKU e baixa da CDN).
+async function baixarFoto(numero: string, sku: string): Promise<File> {
+  const r = await $fetch.raw<Blob>(urlFoto(numero, sku, props.conversaId), { credentials: 'include', responseType: 'blob' })
+  if (!r._data) throw new Error('foto vazia')
+  const tipo = r._data.type || r.headers.get('content-type') || 'image/jpeg'
+  return new File([r._data], nomeDaFoto(sku, tipo), { type: tipo })
+}
+async function porqueDoErro(e: any): Promise<string> {
+  // O erro veio como Blob (responseType): lê o JSON para a frase da API.
+  let dados = e?.data
+  if (dados instanceof Blob) {
+    try { dados = JSON.parse(await dados.text()) } catch { dados = null }
+  }
+  return erroDaApi({ data: dados, status: e?.status ?? e?.response?.status }, 'Não consegui buscar a foto agora').texto
+}
+async function anexarFoto(it: ItemTroca, s: SugestaoTroca) {
+  const chave = chaveDe(it, s)
+  if (!s.foto || !props.numero || anexandoFoto.value) return
+  if (!anexarNaCaixa) {
+    marcarPendente(chave, SEM_CAIXA)
+    return
+  }
+  anexandoFoto.value = chave
+  try {
+    const porque = anexarNaCaixa(await baixarFoto(props.numero, s.sku), { legenda: s.texto_oferta })
+    marcarPendente(chave, porque)
+    fotoAnexada.value = porque ? (fotoAnexada.value === chave ? null : fotoAnexada.value) : chave
+  } catch (e: any) {
+    marcarPendente(chave, await porqueDoErro(e))
+  } finally {
+    anexandoFoto.value = null
+  }
+}
 
 // "Trocar": com o pedido, a permissão e sem troca aberta (senão nem aparece);
 // com a troca desligada, fora do piloto ou uma trava do pedido, fica cinza.
@@ -281,6 +398,16 @@ const confirmando = ref<string | null>(null)
 const enviandoOferta = ref<string | null>(null)
 const enviadas = ref<Record<string, MarcaOferta>>({})
 const erroOferta = ref<({ chave: string } & ErroOferta) | null>(null)
+// A caixinha "mandar a foto" de cada sugestão (sem mexer, o padrão:
+// `fotoMarcadaDePadrao`) e o aviso da foto que não foi, depois do envio.
+const comFoto = ref<Record<string, boolean>>({})
+const avisoFoto = ref<Record<string, string>>({})
+function vaiComFoto(chave: string, s: SugestaoTroca): boolean {
+  return podeMandarFoto(s, props.ofertaEnvio) && (comFoto.value[chave] ?? fotoMarcadaDePadrao(s, props.ofertaEnvio))
+}
+function marcarFoto(chave: string, marcada: boolean) {
+  comFoto.value = { ...comFoto.value, [chave]: marcada }
+}
 function pedirConfirmacao(chave: string) {
   if (!ofertaVisivel.value || semOferta.value || enviadas.value[chave]) return
   erroOferta.value = null
@@ -293,10 +420,16 @@ async function enviarOferta(it: ItemTroca, s: SugestaoTroca, confirmar = false) 
   enviandoOferta.value = chave
   erroOferta.value = null
   try {
-    const corpo = corpoDaOferta(it.sku_original, s.sku, props.conversaId, s.texto_oferta, props.ofertaEnvio?.ultima_mensagem_id, confirmar)
+    const corpo = corpoDaOferta(it.sku_original, s.sku, props.conversaId, s.texto_oferta, props.ofertaEnvio?.ultima_mensagem_id, confirmar, vaiComFoto(chave, s))
     const r = await api<OfertaTrocaOut>(urlOferta(numero), { method: 'POST', body: corpo })
     confirmando.value = null
+    // A foto que não foi (o texto foi assim mesmo): o porquê na sugestão.
+    const aviso = (r.foto_aviso || '').trim()
+    const { [chave]: _, ...outros } = avisoFoto.value
+    avisoFoto.value = aviso ? { ...outros, [chave]: aviso } : outros
     const marca = marcaDaOferta(r)
+    // Saiu: o aviso da foto na caixa (do "copiar") já não vale.
+    if (marca && fotoAnexada.value === chave) fotoAnexada.value = null
     // Não saiu (a plataforma recusou): o porquê, e pode tentar de novo.
     if (marca) enviadas.value = { ...enviadas.value, [chave]: marca }
     else erroOferta.value = { chave, texto: `A oferta não saiu: ${erroEnvioLegivel(r.erro)}`, motivos: [], confirmar: false }
@@ -335,6 +468,24 @@ async function enviarOferta(it: ItemTroca, s: SugestaoTroca, confirmar = false) 
           :data-nivel="s.nivel"
         >
           <div class="flex items-start gap-1.5">
+            <!-- A foto do modelo (só na que tem oferta): a miniatura, ou o "sem foto". -->
+            <img
+              v-if="s.foto"
+              :src="s.foto.url"
+              :alt="`foto de ${s.nome || s.sku}`"
+              :title="rotuloFoto(s.foto)"
+              loading="lazy"
+              referrerpolicy="no-referrer"
+              class="size-10 shrink-0 rounded border bg-muted object-cover"
+              data-foto-troca
+              :data-origem="s.foto.origem"
+            />
+            <span
+              v-else-if="s.texto_oferta"
+              class="flex size-10 shrink-0 items-center justify-center rounded border border-dashed text-muted-foreground"
+              :title="SEM_FOTO"
+              data-sem-foto
+            ><ImageOff class="size-4" /></span>
             <div class="min-w-0 flex-1">
               <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                 <span class="font-mono text-[11px]">{{ s.sku }}</span>
@@ -344,17 +495,22 @@ async function enviarOferta(it: ItemTroca, s: SugestaoTroca, confirmar = false) 
               <p class="text-[10px] text-muted-foreground">
                 {{ s.estoque ?? '—' }} em estoque<template v-if="textoCusto(s.dif_custo_pct)"> · {{ textoCusto(s.dif_custo_pct) }}</template>
               </p>
+              <p v-if="s.texto_oferta && !s.foto" class="text-[10px] text-muted-foreground" data-oferta-sem-foto>{{ SEM_FOTO }}</p>
+              <p v-else-if="s.foto && s.foto.origem !== 'loja'" class="text-[10px] text-muted-foreground" data-foto-origem>{{ rotuloFoto(s.foto) }}</p>
+              <p v-if="s.foto?.generica" class="text-[10px] text-amber-800 dark:text-amber-300" data-foto-generica>{{ FOTO_GENERICA }}</p>
             </div>
             <div class="flex shrink-0 flex-col items-end gap-1">
               <button
                 v-if="s.texto_oferta"
                 type="button"
-                class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] hover:bg-muted"
-                :title="s.texto_oferta"
+                class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] hover:bg-muted disabled:opacity-60"
+                :disabled="anexandoFoto === chaveDe(it, s)"
+                :title="s.foto ? `${s.texto_oferta}\n\n(copia o texto e anexa a foto na caixa de resposta)` : s.texto_oferta"
                 data-copiar-oferta
-                @click="copiarOferta(chaveDe(it, s), s.texto_oferta)"
+                @click="copiarOferta(it, s)"
               >
-                <Check v-if="copiado === chaveDe(it, s)" class="size-3 text-emerald-600" />
+                <Loader2 v-if="anexandoFoto === chaveDe(it, s)" class="size-3 animate-spin" />
+                <Check v-else-if="copiado === chaveDe(it, s)" class="size-3 text-emerald-600" />
                 <Copy v-else class="size-3" />
                 {{ copiado === chaveDe(it, s) ? 'copiado' : 'copiar oferta' }}
               </button>
@@ -386,9 +542,51 @@ async function enviarOferta(it: ItemTroca, s: SugestaoTroca, confirmar = false) 
             </div>
           </div>
 
+          <!-- A foto na caixa de resposta: foi, ou o porquê com o "anexar foto"/"baixar foto". -->
+          <p v-if="fotoAnexada === chaveDe(it, s) && !fotoPendente[chaveDe(it, s)]" class="text-[11px] text-emerald-800 dark:text-emerald-300" data-foto-anexada>{{ FOTO_ANEXADA }}</p>
+          <div v-if="s.foto && fotoPendente[chaveDe(it, s)]" class="flex items-start gap-2 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px]" data-foto-pendente>
+            <img :src="s.foto.url" :alt="`foto de ${s.nome || s.sku}`" referrerpolicy="no-referrer" class="size-16 shrink-0 rounded border bg-muted object-cover" />
+            <div class="min-w-0 flex-1 space-y-1">
+              <p class="break-words">{{ fotoPendente[chaveDe(it, s)] }}</p>
+              <div class="flex flex-wrap items-center gap-1.5">
+                <button
+                  v-if="anexarNaCaixa"
+                  type="button"
+                  class="inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[10px] hover:bg-muted disabled:opacity-60"
+                  :disabled="!!anexandoFoto"
+                  data-anexar-foto
+                  @click="anexarFoto(it, s)"
+                >
+                  <Loader2 v-if="anexandoFoto === chaveDe(it, s)" class="size-3 animate-spin" />
+                  <ImagePlus v-else class="size-3" /> anexar foto
+                </button>
+                <a
+                  v-if="numero"
+                  :href="urlFoto(numero, s.sku, conversaId)"
+                  :download="nomeDaFoto(s.sku, null)"
+                  class="inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-[10px] hover:bg-muted"
+                  data-baixar-foto
+                ><Download class="size-3" /> baixar foto</a>
+              </div>
+            </div>
+          </div>
+
           <!-- Confirmar o envio: mensagem para comprador não se desenvia. -->
           <div v-if="confirmando === chaveDe(it, s) && s.texto_oferta" class="space-y-1 rounded border border-sky-500/40 bg-sky-500/10 px-2 py-1" data-confirmar-oferta>
-            <p class="text-[11px]">Mandar este texto ao comprador agora, pelo chat da plataforma?</p>
+            <p class="text-[11px]">{{ vaiComFoto(chaveDe(it, s), s) ? 'Mandar a foto do modelo e este texto ao comprador agora, pelo chat da plataforma?' : 'Mandar este texto ao comprador agora, pelo chat da plataforma?' }}</p>
+            <!-- A foto vai ANTES do texto; a capa do anúncio (várias cores) começa desmarcada. -->
+            <label v-if="podeMandarFoto(s, ofertaEnvio) && s.foto" class="flex cursor-pointer items-start gap-1.5 text-[11px]" data-confirmar-foto>
+              <input
+                type="checkbox"
+                class="mt-0.5"
+                :checked="vaiComFoto(chaveDe(it, s), s)"
+                :disabled="!!enviandoOferta"
+                @change="marcarFoto(chaveDe(it, s), ($event.target as HTMLInputElement).checked)"
+              />
+              <img :src="s.foto.url" :alt="`foto de ${s.nome || s.sku}`" referrerpolicy="no-referrer" class="size-12 shrink-0 rounded border bg-muted object-cover" />
+              <span>mandar esta foto antes do texto<template v-if="s.foto.generica"> — {{ FOTO_GENERICA }}</template></span>
+            </label>
+            <p v-else-if="s.foto" class="text-[10px] text-muted-foreground" data-foto-nao-vai>{{ FOTO_NAO_VAI_AQUI }}</p>
             <p class="whitespace-pre-wrap break-words rounded bg-background/70 px-2 py-1">{{ s.texto_oferta }}</p>
             <div class="flex items-center justify-end gap-1.5">
               <button type="button" class="rounded border px-1.5 py-0.5 text-[10px] hover:bg-muted" :disabled="!!enviandoOferta" @click="confirmando = null">cancelar</button>
@@ -405,6 +603,7 @@ async function enviarOferta(it: ItemTroca, s: SugestaoTroca, confirmar = false) 
             </div>
           </div>
           <p v-if="enviadas[chaveDe(it, s)] === 'revisar'" class="text-[11px] text-amber-800 dark:text-amber-300" data-oferta-a-conferir>{{ OFERTA_A_CONFERIR }}</p>
+          <p v-if="avisoFoto[chaveDe(it, s)]" class="text-[11px] text-amber-800 dark:text-amber-300" data-aviso-foto>{{ avisoFoto[chaveDe(it, s)] }}</p>
           <div v-if="erroOferta && erroOferta.chave === chaveDe(it, s)" class="text-[11px] text-red-700 dark:text-red-300" data-erro-oferta>
             <p>{{ erroOferta.texto }}</p>
             <p v-for="(m, i) in erroOferta.motivos" :key="i">{{ m }}</p>

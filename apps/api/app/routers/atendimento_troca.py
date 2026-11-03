@@ -79,7 +79,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -104,7 +104,13 @@ from app.schemas.atendimento_troca import (
     TrocaIn,
     TrocaOut,
 )
-from app.services.atendimento import etiqueta_fatos, painel, troca, troca_oferta
+from app.services.atendimento import (
+    etiqueta_fatos,
+    painel,
+    troca,
+    troca_foto,
+    troca_oferta,
+)
 from app.services.atendimento.ag_cancelamento import classificar, status_na_plataforma
 from app.services.atendimento.escopo import escopo_do_atendimento
 from app.services.atendimento.troca_sugestoes import (
@@ -245,6 +251,8 @@ async def lista_ag_cancelamento(
     catalogo_falhou = False
     # As travas do pedido (só banco), uma leitura para o "Trocar" e a oferta.
     memo: dict[str, Any] = {}
+    # (bloco, integração da conversa, plataforma) das sugestões que levam foto.
+    com_foto: list[tuple[dict, UUID | None, str | None]] = []
     for p in pedidos:
         conversa = await _conversa(session, p.numero, scope)
         m = classificar(
@@ -306,6 +314,17 @@ async def lista_ag_cancelamento(
                 "sugestoes_troca": sugestoes,
             }
         )
+        if sugestoes is not None and not sugestoes.get("falhou"):
+            com_foto.append(
+                (
+                    sugestoes,
+                    conversa.integration_id if conversa is not None else None,
+                    plataforma or (conversa.plataforma if conversa else None),
+                )
+            )
+    # A foto do modelo de cada sugestão com oferta (03/11/2026): UMA leitura
+    # para a lista inteira; fora, as sugestões seguem sem foto.
+    await troca_foto.fotos_nos_blocos(session, com_foto)
     saida.sort(key=_urgente_primeiro)
     # Só leitura: nada a gravar.
     await session.rollback()
@@ -569,7 +588,71 @@ async def enviar_oferta_de_troca(
             ultima_vista_id=body.ultima_vista_id,
             confirmar=body.confirmar,
             integracoes=None if scope.unrestricted else scope.integration_ids,
+            com_foto=body.com_foto,
         )
     except troca.TrocaRecusada as e:
         raise _recusa(e) from e
     return OfertaTrocaOut(**dados)
+
+
+@router.get("/pedidos/{numero_bling}/troca/foto")
+async def foto_da_sugestao(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_view)],
+    numero_bling: Annotated[str, Path(min_length=1, max_length=32)],
+    sku: Annotated[str, Query(min_length=1, max_length=191)],
+    conversa_id: UUID | None = None,
+) -> Response:
+    """A foto do modelo sugerido, em bytes — o "copiar oferta" a põe como anexo na caixa.
+
+    03/11/2026 (`services/atendimento/troca_foto.py`): a do anúncio da loja
+    da conversa (a escolhida, ou a principal do pedido DENTRO das lojas da
+    pessoa), senão de outra loja ou do catálogo — baixada pelo servidor da
+    CDN da plataforma (a URL nunca vem da tela: o SKU é de um produto do
+    catálogo da troca). Ler basta (`_view`): anexar e mandar é da caixa de
+    resposta, com as travas dela. Fora das lojas da pessoa, 404. Sem foto,
+    404 `sem_foto`; a CDN fora, 502 `foto_indisponivel`. O cabeçalho
+    `X-Foto-Origem` diz de onde veio e `X-Foto-Generica` se é a capa do
+    anúncio (pode mostrar outra cor).
+    """
+    numero = numero_bling.strip()
+    scope = await _no_escopo_do_pedido(session, user, numero, conversa_id=conversa_id)
+    alvo = sku.strip().lower()
+    cat = await catalogo(session)
+    produto = cat.produtos.get(alvo)
+    if produto is None:
+        raise HTTPException(
+            404, detail={"code": "produto_nao_encontrado", "detail": "Produto fora do catálogo."}
+        )
+    conversa = (
+        await session.get(AtendimentoConversa, conversa_id)
+        if conversa_id is not None
+        else await _conversa(session, numero, scope)
+    )
+    escolhida = await troca_foto.foto_do_sku(
+        session,
+        produto.sku,
+        integration_id=conversa.integration_id if conversa is not None else None,
+        plataforma=conversa.plataforma if conversa is not None else None,
+    )
+    await session.rollback()
+    if escolhida is None:
+        raise HTTPException(
+            404,
+            detail={"code": "sem_foto", "detail": "O produto não tem foto no DaVinci."},
+        )
+    try:
+        f = await troca_foto.baixar(escolhida.url_envio, f"troca_{produto.sku}.jpg")
+    except troca_foto.FotoIndisponivel as e:
+        logger.info("atendimento_troca_foto_nao_baixou", pedido=numero, sku=alvo, code=e.code)
+        raise HTTPException(502, detail={"code": "foto_indisponivel", "detail": e.detail}) from e
+    return Response(
+        content=f.conteudo,
+        media_type=f.mime,
+        headers={
+            "Content-Disposition": f'inline; filename="{f.nome}"',
+            "Cache-Control": "private, max-age=300",
+            "X-Foto-Origem": escolhida.origem,
+            "X-Foto-Generica": "1" if escolhida.generica else "0",
+        },
+    )

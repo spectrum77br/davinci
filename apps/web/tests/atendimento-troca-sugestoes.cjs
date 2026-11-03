@@ -247,15 +247,18 @@ const SUGESTOES = {
   falhou: false,
 }
 
-const ICONES_BLOCO = ['Check', 'Copy', 'Loader2', 'Send', 'Shuffle']
+const ICONES_BLOCO = ['Check', 'Copy', 'Download', 'ImageOff', 'ImagePlus', 'Loader2', 'Send', 'Shuffle']
 // O bloco montado com o setup de verdade. `extra` = as props da 4c/4d (sem
 // elas, os padrões: sem pedido e sem permissão); `responde` = a API falsa.
 const ENVIADA = { enviada: true, mensagem_id: 'm-1', texto: 'ok', status: 'enviada', erro: null, conversa_id: 'conv-1', sku_antigo: 'dg057.ci+a001.ci', sku_novo: 'dg056.ci+a001.ci', nivel: 1 }
-function montarBloco(sugestoes, extra = {}, responde = async () => structuredClone(ENVIADA)) {
+// `caixa` = o "anexar" que a AtendimentoConversa oferece (provide), ou null
+// (a lista Ag. cancelamento); `foto` = o GET da foto falso ($fetch.raw).
+function montarBloco(sugestoes, extra = {}, responde = async () => structuredClone(ENVIADA), { caixa = null, foto = null } = {}) {
   const props = Vue.reactive({ numero: null, conversaId: null, podeTrocar: false, podeOfertar: false, trocaAberta: null, ofertaEnvio: null, trocaEnvio: null, ...extra, sugestoes })
   const copiados = []
   const chamadas = []
   const emitidos = []
+  const fotosPedidas = []
   const estado = setupDe(bloco, {
     computed: Vue.computed,
     ref: Vue.ref,
@@ -276,9 +279,18 @@ function montarBloco(sugestoes, extra = {}, responde = async () => structuredClo
     copiar: async (t) => { copiados.push(t); return true },
     erroDaApi: P.erroDaApi,
     erroEnvioLegivel: P.erroEnvioLegivel,
+    inject: (chave, padrao) => (chave === T.CHAVE_ANEXAR_NA_CAIXA && caixa ? caixa : padrao),
+    CHAVE_ANEXAR_NA_CAIXA: T.CHAVE_ANEXAR_NA_CAIXA,
+    $fetch: { raw: async (url, opts) => { fotosPedidas.push({ url, opts }); if (!foto) throw new Error('sem $fetch'); return foto(url, opts) } },
+    urlFoto: T.urlFoto,
+    nomeDaFoto: T.nomeDaFoto,
+    SEM_CAIXA: T.SEM_CAIXA,
+    podeMandarFoto: T.podeMandarFoto,
+    fotoMarcadaDePadrao: T.fotoMarcadaDePadrao,
     ...Object.fromEntries(ICONES_BLOCO.map((n) => [n, icone(n)])),
-  }, ['rodape', 'copiado', 'copiarOferta', 'trocaLiberada', 'semTroca', 'trocar', 'ofertaVisivel', 'semOferta', 'temOferta', 'confirmando', 'enviandoOferta', 'enviadas', 'erroOferta', 'pedirConfirmacao', 'enviarOferta'])
-  return { props, estado, copiados, chamadas, emitidos }
+  }, ['rodape', 'copiado', 'copiarOferta', 'trocaLiberada', 'semTroca', 'trocar', 'ofertaVisivel', 'semOferta', 'temOferta', 'confirmando', 'enviandoOferta', 'enviadas', 'erroOferta', 'pedirConfirmacao', 'enviarOferta',
+    'anexarNaCaixa', 'fotoAnexada', 'fotoPendente', 'anexandoFoto', 'anexarFoto', 'comFoto', 'avisoFoto', 'vaiComFoto', 'marcarFoto'])
+  return { props, estado, copiados, chamadas, emitidos, fotosPedidas }
 }
 async function htmlDe(m) {
   const app = Vue.createSSRApp({ setup: () => ({ ...T, ...m.props, ...m.estado }), render: renderDe(bloco) })
@@ -330,11 +342,17 @@ async function testarBloco() {
   assert.doesNotMatch(bloco.fonte, /v-html/)
 
   // Copiar: o texto da sugestão, e o "copiado" na chave dela.
-  await estado.copiarOferta('dg057.ci+a001.ci|dg056.ci+a001.ci', OFERTA)
+  const item0 = SUGESTOES.itens[0]
+  await estado.copiarOferta(item0, item0.sugestoes[1])
   assert.deepEqual(copiados, [OFERTA])
   assert.equal(estado.copiado.value, 'dg057.ci+a001.ci|dg056.ci+a001.ci')
-  await estado.copiarOferta('x|y', null)
+  await estado.copiarOferta(item0, item0.sugestoes[0])
   assert.equal(copiados.length, 1, 'sem texto, nada a copiar')
+  // Sem foto (o backend manda null): o "sem foto" na miniatura e o aviso — a oferta vai só com o texto.
+  assert.equal((html.match(/data-sem-foto/g) || []).length, 2, 'nas duas com oferta')
+  assert.equal((html.match(/data-oferta-sem-foto/g) || []).length, 2)
+  assert.ok(html.includes(T.SEM_FOTO))
+  assert.doesNotMatch(html, /data-foto-troca|data-foto-pendente|data-foto-anexada/)
 
   // Quem não vê a Margem: sem o % (o backend manda null).
   const semCusto = structuredClone(SUGESTOES)
@@ -367,8 +385,8 @@ async function testarBlocoComTroca() {
   assert.equal(T.motivoSemOferta({ disponivel: false, motivo: 'envio_desligado' }), T.MOTIVO_OFERTA.envio_desligado)
   assert.equal(T.motivoSemOferta({ disponivel: false, motivo: 'x', texto_motivo: 'A loja está em Observar.' }), 'A loja está em Observar', 'a frase do backend primeiro (o ponto é da tela)')
   assert.equal(T.motivoSemOferta({ disponivel: false, motivo: 'codigo_novo' }), T.OFERTA_INDISPONIVEL)
-  assert.deepEqual(T.corpoDaOferta('dg057.ci', 'dg056.ci', '', 'Olá'), { sku_novo: 'dg056.ci', sku_antigo: 'dg057.ci', conversa_id: null, texto: 'Olá', ultima_vista_id: null, confirmar: false })
-  assert.deepEqual(T.corpoDaOferta('a', 'b', 'c', 'Olá', 'm-9', true), { sku_novo: 'b', sku_antigo: 'a', conversa_id: 'c', texto: 'Olá', ultima_vista_id: 'm-9', confirmar: true })
+  assert.deepEqual(T.corpoDaOferta('dg057.ci', 'dg056.ci', '', 'Olá'), { sku_novo: 'dg056.ci', sku_antigo: 'dg057.ci', conversa_id: null, texto: 'Olá', ultima_vista_id: null, confirmar: false, com_foto: false })
+  assert.deepEqual(T.corpoDaOferta('a', 'b', 'c', 'Olá', 'm-9', true, true), { sku_novo: 'b', sku_antigo: 'a', conversa_id: 'c', texto: 'Olá', ultima_vista_id: 'm-9', confirmar: true, com_foto: true })
   // O "Trocar": sem o campo (API antiga) pode (a prévia confere tudo); senão o porquê.
   assert.equal(T.motivoSemTroca(null), null)
   assert.equal(T.motivoSemTroca({ disponivel: true }), null)
@@ -438,7 +456,7 @@ async function testarBlocoComTroca() {
   assert.ok(h.includes('Mandar este texto ao comprador agora, pelo chat da plataforma?'))
   assert.equal((h.match(/data-confirmar-oferta/g) || []).length, 1, 'só na sugestão clicada')
   await m.estado.enviarOferta(it0, it0.sugestoes[1])
-  assert.deepEqual(m.chamadas, [{ url: '/api/atendimento/pedidos/300101/troca/oferta', opts: { method: 'POST', body: { sku_novo: 'dg056.ci+a001.ci', sku_antigo: 'dg057.ci+a001.ci', conversa_id: 'conv-1', texto: OFERTA, ultima_vista_id: null, confirmar: false } } }])
+  assert.deepEqual(m.chamadas, [{ url: '/api/atendimento/pedidos/300101/troca/oferta', opts: { method: 'POST', body: { sku_novo: 'dg056.ci+a001.ci', sku_antigo: 'dg057.ci+a001.ci', conversa_id: 'conv-1', texto: OFERTA, ultima_vista_id: null, confirmar: false, com_foto: false } } }])
   assert.equal(m.estado.confirmando.value, null)
   assert.equal(m.estado.enviadas.value[chave], 'enviada')
   assert.deepEqual(m.emitidos, [['ofertaEnviada', ENVIADA]])
@@ -531,6 +549,164 @@ async function testarBlocoComTroca() {
   assert.equal(T.urlOferta('300101'), `${prefixo}/pedidos/300101/troca/oferta`)
   // O bloco só fala com a rota da oferta (nunca a de responder/enviar da conversa).
   assert.doesNotMatch(bloco.descriptor.scriptSetup.content, /\/responder|\/enviar|\/conversas\//)
+}
+
+// ------------------------------------------------ a foto do modelo (03/11/2026)
+// O Eduardo: "daria pra gente no copiar anexar uma imagem do modelo de troca já
+// junto seria melhor". A miniatura no cartão; o "copiar oferta" copia o texto E
+// põe a foto na caixa de resposta (o provide da AtendimentoConversa) — sem a
+// caixa, a foto aparece com o porquê, "anexar foto" e "baixar foto"; o "enviar
+// oferta" manda a foto antes do texto (`com_foto`, a caixinha da confirmação).
+async function testarFoto() {
+  const LIBERADA = { disponivel: true, motivo: null, texto_motivo: null, foto: true }
+  const base = { numero: '300101', conversaId: 'conv-1', podeTrocar: true, podeOfertar: true, ofertaEnvio: LIBERADA }
+  const FOTO = { url: 'https://cf.shopee.com.br/file/laranja_tn', origem: 'loja', generica: false }
+  const CAPA = { url: 'https://cf.shopee.com.br/file/capa_tn', origem: 'outra_loja', generica: true }
+  const comFotos = structuredClone(SUGESTOES)
+  comFotos.itens[0].sugestoes[1].foto = FOTO
+  comFotos.itens[0].sugestoes[2].foto = CAPA
+  const it0 = comFotos.itens[0]
+  const laranja = it0.sugestoes[1]
+  const capa = it0.sugestoes[2]
+  const chave = T.chaveDe(it0, laranja)
+  const chaveCapa = T.chaveDe(it0, capa)
+
+  // O contrato: FotoTroca = FotoTrocaOut; as origens = as do serviço; a URL = a rota.
+  igual(tipo('FotoTroca', pedido.fonte), campos('FotoTrocaOut', schemasPainel), 'FotoTroca = FotoTrocaOut')
+  assert.match(schemasPainel, /^ {4}foto: FotoTrocaOut \| None = None$/m)
+  assert.match(pedido.fonte, /^ {2}foto\?: FotoTroca \| null$/m)
+  const servicoFoto = api('services/atendimento/troca_foto.py')
+  igual(Object.keys(T.ORIGEM_FOTO), [...servicoFoto.matchAll(/^ORIGEM_[A-Z_]+ = "([a-z_]+)"$/gm)].map((m) => m[1]), 'ORIGEM_FOTO = troca_foto.ORIGEM_*')
+  const roteadorTroca = api('routers/atendimento_troca.py')
+  assert.match(roteadorTroca, /@router\.get\("\/pedidos\/\{numero_bling\}\/troca\/foto"\)/)
+  assert.match(roteadorTroca, /sku: Annotated\[str, Query\(/)
+  assert.equal(T.urlFoto('300101', 'dg054.sp+a001.sp', 'conv-1'), '/api/atendimento/pedidos/300101/troca/foto?sku=dg054.sp%2Ba001.sp&conversa_id=conv-1')
+  assert.equal(T.urlFoto('300101', 'dg054.sp'), '/api/atendimento/pedidos/300101/troca/foto?sku=dg054.sp')
+  assert.equal(T.nomeDaFoto('dg054.sp+a001.sp', 'image/png'), 'troca_dg054.sp_a001.sp.png')
+  assert.equal(T.nomeDaFoto('dg054.sp', null), 'troca_dg054.sp.jpg')
+  assert.equal(T.rotuloFoto(null), T.SEM_FOTO)
+  assert.equal(T.rotuloFoto(FOTO), 'foto do anúncio desta loja')
+  assert.equal(T.rotuloFoto(CAPA), 'foto do anúncio de outra loja (a capa do anúncio: pode mostrar outra cor)')
+  // A foto vai no envio só com a foto E a conversa que recebe foto; a capa começa desmarcada.
+  assert.equal(T.podeMandarFoto(laranja, LIBERADA), true)
+  assert.equal(T.podeMandarFoto(laranja, { ...LIBERADA, foto: false }), false)
+  assert.equal(T.podeMandarFoto(laranja, null), false)
+  assert.equal(T.podeMandarFoto(it0.sugestoes[0], LIBERADA), false, 'sem foto')
+  assert.equal(T.fotoMarcadaDePadrao(laranja, LIBERADA), true)
+  assert.equal(T.fotoMarcadaDePadrao(capa, LIBERADA), false)
+
+  // O cartão: a miniatura (sem o Referer, como as fotos do pedido), de onde veio e o aviso da capa.
+  const r = await renderBloco(comFotos, base)
+  const imgs = r.html.match(/<img[^>]*data-foto-troca[^>]*>/g) || []
+  assert.equal(imgs.length, 2)
+  assert.ok(imgs[0].includes('src="https://cf.shopee.com.br/file/laranja_tn"') && imgs[0].includes('referrerpolicy="no-referrer"'))
+  assert.ok(imgs[0].includes('title="foto do anúncio desta loja"') && imgs[0].includes('data-origem="loja"'))
+  assert.equal((r.html.match(/data-foto-origem/g) || []).length, 1, 'só a de outra loja diz de onde veio')
+  assert.ok(r.html.includes('foto do anúncio de outra loja (a capa do anúncio: pode mostrar outra cor)'))
+  assert.equal((r.html.match(/data-foto-generica/g) || []).length, 1)
+  assert.ok(r.html.includes(T.FOTO_GENERICA))
+  assert.doesNotMatch(r.html, /data-sem-foto|data-oferta-sem-foto/, 'todas as com oferta têm foto')
+
+  // "copiar oferta" com a caixa aberta: o texto copiado e a foto na caixa
+  // (com o texto da oferta como legenda, para onde a foto leva texto).
+  const naCaixa = []
+  const blob = new Blob([Buffer.from('jpeg')], { type: 'image/jpeg' })
+  const fotoOk = async () => ({ _data: blob, headers: new Map([['content-type', 'image/jpeg']]) })
+  let m = montarBloco(comFotos, base, undefined, { caixa: (arq, op) => { naCaixa.push([arq.name, arq.type, op]); return null }, foto: fotoOk })
+  await m.estado.copiarOferta(it0, laranja)
+  assert.deepEqual(m.copiados, [OFERTA])
+  assert.deepEqual(m.fotosPedidas.map((x) => [x.url, x.opts.responseType, x.opts.credentials]), [['/api/atendimento/pedidos/300101/troca/foto?sku=dg056.ci%2Ba001.ci&conversa_id=conv-1', 'blob', 'include']])
+  assert.deepEqual(naCaixa, [['troca_dg056.ci_a001.ci.jpg', 'image/jpeg', { legenda: OFERTA }]])
+  assert.equal(m.estado.fotoAnexada.value, chave)
+  let h = await htmlDe(m)
+  assert.match(h, /data-foto-anexada/)
+  assert.ok(h.includes(T.FOTO_ANEXADA))
+  assert.doesNotMatch(h, /data-foto-pendente/)
+  // Sem foto: só o texto (nada pedido).
+  await m.estado.copiarOferta(it0, { ...laranja, foto: null })
+  assert.equal(m.fotosPedidas.length, 1)
+
+  // A caixa não aceita (cheia, na nota, conversa sem foto…): a foto aparece com o
+  // porquê, "anexar foto" (de novo) e "baixar foto"; depois de liberar, anexa.
+  let porque = 'Já há um anexo na caixa: envie ou descarte antes de anexar a foto.'
+  m = montarBloco(comFotos, base, undefined, { caixa: () => porque, foto: fotoOk })
+  await m.estado.copiarOferta(it0, laranja)
+  assert.deepEqual(m.copiados, [OFERTA], 'o texto foi copiado assim mesmo')
+  assert.equal(m.estado.fotoPendente.value[chave], porque)
+  h = await htmlDe(m)
+  const pendente = h.slice(h.indexOf('data-foto-pendente'), h.indexOf('</li>', h.indexOf('data-foto-pendente')))
+  assert.ok(pendente.includes(porque))
+  assert.match(pendente, /src="https:\/\/cf\.shopee\.com\.br\/file\/laranja_tn"/)
+  assert.match(pendente, /data-anexar-foto/)
+  assert.match(pendente, /href="\/api\/atendimento\/pedidos\/300101\/troca\/foto\?sku=dg056\.ci%2Ba001\.ci&amp;conversa_id=conv-1"[^>]*download="troca_dg056\.ci_a001\.ci\.jpg"[^>]*data-baixar-foto/)
+  porque = null
+  await m.estado.anexarFoto(it0, laranja)
+  assert.equal(m.estado.fotoPendente.value[chave], undefined)
+  assert.equal(m.estado.fotoAnexada.value, chave)
+  // O GET falhou (404 sem foto): a frase da API, lida do Blob.
+  m = montarBloco(comFotos, base, undefined, {
+    caixa: () => null,
+    foto: async () => { throw { status: 404, data: new Blob([JSON.stringify({ detail: { code: 'sem_foto', detail: 'O produto não tem foto no DaVinci.' } })]) } },
+  })
+  await m.estado.copiarOferta(it0, laranja)
+  assert.equal(m.estado.fotoPendente.value[chave], 'O produto não tem foto no DaVinci.')
+  assert.equal(m.estado.fotoAnexada.value, null)
+
+  // A lista Ag. cancelamento (sem caixa): o porquê e "baixar foto", sem "anexar foto" — nada é pedido.
+  m = montarBloco(comFotos, base, undefined, { caixa: null, foto: fotoOk })
+  assert.equal(m.estado.anexarNaCaixa, null)
+  await m.estado.copiarOferta(it0, laranja)
+  assert.deepEqual(m.copiados, [OFERTA])
+  assert.deepEqual(m.fotosPedidas, [])
+  assert.equal(m.estado.fotoPendente.value[chave], T.SEM_CAIXA)
+  h = await htmlDe(m)
+  assert.match(h, /data-baixar-foto/)
+  assert.doesNotMatch(h, /data-anexar-foto/)
+
+  // "enviar oferta": a confirmação mostra a foto com a caixinha (marcada) e o
+  // corpo leva `com_foto`; a capa começa desmarcada e vai só se a pessoa marcar.
+  m = montarBloco(comFotos, base, async () => ({ ...structuredClone(ENVIADA), foto: 'enviada', foto_aviso: null }))
+  m.estado.pedirConfirmacao(chave)
+  h = await htmlDe(m)
+  assert.ok(h.includes('Mandar a foto do modelo e este texto ao comprador agora, pelo chat da plataforma?'))
+  const caixinha = h.slice(h.indexOf('data-confirmar-foto'), h.indexOf('</label>', h.indexOf('data-confirmar-foto')))
+  assert.match(caixinha, /type="checkbox"[^>]*checked/)
+  assert.ok(caixinha.includes('mandar esta foto antes do texto'))
+  await m.estado.enviarOferta(it0, laranja)
+  assert.equal(m.chamadas[0].opts.body.com_foto, true)
+  assert.deepEqual(m.estado.avisoFoto.value, {})
+  m.estado.pedirConfirmacao(chaveCapa)
+  h = await htmlDe(m)
+  const caixinhaCapa = h.slice(h.indexOf('data-confirmar-foto'), h.indexOf('</label>', h.indexOf('data-confirmar-foto')))
+  assert.doesNotMatch(caixinhaCapa, /\schecked/, 'a capa começa desmarcada')
+  assert.ok(caixinhaCapa.includes(T.FOTO_GENERICA))
+  assert.ok(h.includes('Mandar este texto ao comprador agora, pelo chat da plataforma?'))
+  m.estado.marcarFoto(chaveCapa, true)
+  await m.estado.enviarOferta(it0, capa)
+  assert.equal(m.chamadas[1].opts.body.com_foto, true, 'marcou: vai')
+  // Desmarcou a foto da loja: só o texto.
+  const m2 = montarBloco(comFotos, base)
+  m2.estado.marcarFoto(chave, false)
+  await m2.estado.enviarOferta(it0, laranja)
+  assert.equal(m2.chamadas[0].opts.body.com_foto, false)
+  // A conversa que não recebe foto pelo DaVinci: sem caixinha, com o porquê; só o texto.
+  const m3 = montarBloco(comFotos, { ...base, ofertaEnvio: { ...LIBERADA, foto: false } })
+  m3.estado.pedirConfirmacao(chave)
+  h = await htmlDe(m3)
+  assert.doesNotMatch(h, /data-confirmar-foto/)
+  assert.ok(h.includes(T.FOTO_NAO_VAI_AQUI))
+  await m3.estado.enviarOferta(it0, laranja)
+  assert.equal(m3.chamadas[0].opts.body.com_foto, false)
+
+  // A foto que não foi (o texto foi): o aviso do backend na sugestão.
+  const AVISO = 'Não consegui baixar a foto do modelo (A CDN da foto respondeu 404): a oferta foi só com o texto.'
+  const m4 = montarBloco(comFotos, base, async () => ({ ...structuredClone(ENVIADA), foto: 'nao_saiu', foto_aviso: AVISO }))
+  await m4.estado.enviarOferta(it0, laranja)
+  assert.equal(m4.estado.enviadas.value[chave], 'enviada')
+  assert.equal(m4.estado.avisoFoto.value[chave], AVISO)
+  h = await htmlDe(m4)
+  assert.match(h, /data-aviso-foto/)
+  assert.ok(h.includes(AVISO))
 }
 
 // ------------------------------------------------ o encaixe no cartão
@@ -866,6 +1042,7 @@ async function testarTrocasParadas() {
 
 testarBloco()
   .then(testarBlocoComTroca)
+  .then(testarFoto)
   .then(testarLista)
   .then(testarListaComTroca)
   .then(testarTrocasParadas)

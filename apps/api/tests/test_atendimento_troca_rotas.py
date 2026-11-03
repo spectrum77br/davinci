@@ -261,6 +261,8 @@ def test_rotas_tem_a_trava_da_caixa():
     assert {(r.path, tuple(sorted(r.methods))) for r in rotas} == {
         (URL, ("GET",)),
         ("/api/atendimento/trocas", ("GET",)),
+        # A foto do modelo para o "copiar oferta" (03/11/2026): ler basta.
+        ("/api/atendimento/pedidos/{numero_bling}/troca/foto", ("GET",)),
         *ESCRITAS,
     }
     # A decisão (g) de 07/10/2026 (margem.edit para escrever) saiu em 03/11/2026.

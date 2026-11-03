@@ -57,7 +57,7 @@ assert.equal(C.rotuloEnviarAnexos([{ pdf: false }, { pdf: true }]), 'Enviar 2 an
 const ini = setup.indexOf('const fotoInput = ref')
 const fim = setup.indexOf('// ─── "tentar de novo"')
 assert.ok(ini > 0 && fim > ini)
-const js = transpile(setup.slice(ini, fim)) + '\nreturn { anexos, adicionarAnexos, tirarAnexo, enviarFoto, aoColar, aEnviar, legendaFoto, maxAnexos }'
+const js = transpile(setup.slice(ini, fim)) + '\nreturn { anexos, adicionarAnexos, tirarAnexo, enviarFoto, aoColar, aEnviar, legendaFoto, maxAnexos, anexarFotoDaTroca }'
 
 globalThis.URL.createObjectURL = () => 'blob:x'
 globalThis.URL.revokeObjectURL = () => {}
@@ -69,8 +69,11 @@ class FD {
   um(k) { return this.todos(k)[0] }
 }
 
-function montar({ envio, respostas = [], confirmar = true }) {
+// A caixa oferece o "anexar" à foto da oferta de troca (03/11/2026): o provide.
+const CHAVE_ANEXAR = Symbol('anexarNaCaixa')
+function montar({ envio, respostas = [], confirmar = true, modo = 'responder' }) {
   const chamadas = []
+  const providos = new Map()
   const toasts = { ok: [], erro: [], aviso: [] }
   const detalhe = Vue.ref({ conversa: { id: 'c1', plataforma: envio.plataforma || 'shopee', somente_leitura: false }, mensagens: [{ id: '00000000-0000-4000-8000-000000000001', criada_em: '2026-11-03T10:00:00Z' }] })
   let n = 0
@@ -81,17 +84,19 @@ function montar({ envio, respostas = [], confirmar = true }) {
     return { mensagem: { id: `00000000-0000-4000-8000-0000000001${String(n).padStart(2, '0')}`, status: r.status, erro: r.erroMsg ?? null, criada_em: '2026-11-03T10:01:00Z' } }
   }
   const nomes = ['ref', 'computed', 'onBeforeUnmount', 'envioFoto', 'motivoSemFoto', 'MAX_FOTO', 'TIPOS_FOTO', 'escolherAnexos', 'toasts', 'modoCaixa', 'respondePorOutra', 'canalExterno', 'props', 'detalhe',
-    'tituloDaNf', 'painelCarregando', 'LEGENDA_NF', 'erroDaApi', 'api', 'destinosReclamacao', 'destinoCaixa', 'rolarProFim', 'erroEnvioLegivel', 'statusDoErro', 'ultimaVista', 'RE_UUID', 'aberta', 'enviandoIds', 'envioSimulado', 'carregar', 'confirm', 'FormData']
+    'tituloDaNf', 'painelCarregando', 'LEGENDA_NF', 'erroDaApi', 'api', 'destinosReclamacao', 'destinoCaixa', 'rolarProFim', 'erroEnvioLegivel', 'statusDoErro', 'ultimaVista', 'RE_UUID', 'aberta', 'enviandoIds', 'envioSimulado', 'carregar', 'confirm', 'FormData',
+    'provide', 'CHAVE_ANEXAR_NA_CAIXA']
   const valores = [Vue.ref, Vue.computed, () => {}, Vue.ref({ pode: true, max_bytes: 10 * 1024 * 1024, ...envio }), Vue.ref(''), 10 * 1024 * 1024, TIPOS, C.escolherAnexos,
     { success: (t) => toasts.ok.push(t), error: (t, l) => toasts.erro.push([t, l]), warning: (t, l) => toasts.aviso.push([t, l]) },
-    Vue.ref('responder'), Vue.ref(false), Vue.ref(false), { canEdit: true, flags: null }, detalhe,
+    Vue.ref(modo), Vue.ref(false), Vue.ref(false), { canEdit: true, flags: null }, detalhe,
     C.tituloDaNf, Vue.ref(false), C.LEGENDA_NF,
     (e, base) => ({ texto: e?.data?.detail?.detail || base, motivos: [] }),
     api, Vue.ref([]), Vue.ref(''), () => {}, (e) => `recusou: ${e}`, (e) => e?.status ?? null,
     (d) => d.mensagens[d.mensagens.length - 1].id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-    (id) => id === 'c1', new Set(), () => false, async () => {}, () => confirmar, FD]
+    (id) => id === 'c1', new Set(), () => false, async () => {}, () => confirmar, FD,
+    (k, v) => providos.set(k, v), CHAVE_ANEXAR]
   const t = new Function(...nomes, js)(...valores)
-  return { t, chamadas, toasts, detalhe }
+  return { t, chamadas, toasts, detalhe, providos }
 }
 const fotos = (n) => Array.from({ length: n }, (_, i) => ({ name: `f${i + 1}.jpg`, type: 'image/jpeg', size: 500 + i, lastModified: i }))
 
@@ -214,6 +219,45 @@ async function principal() {
   assert.match(api('routers/atendimento_painel.py'), /arquivo: Annotated\[list\[UploadFile\], File\(\)\]/)
   const tipo = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoPedido.vue'), 'utf8')
   assert.match(tipo, /max_anexos\?: number\n  numa_mensagem\?: boolean/)
+
+  // A FOTO DA OFERTA DE TROCA (03/11/2026): o "copiar oferta" das sugestões põe a
+  // foto do modelo aqui como anexo (o provide com a chave das sugestões); a
+  // pessoa confere e manda pelo "Enviar foto". null = anexou; senão o porquê.
+  {
+    assert.match(setup, /provide\(CHAVE_ANEXAR_NA_CAIXA, anexarFotoDaTroca\)/)
+    assert.match(setup, /import \{ CHAVE_ANEXAR_NA_CAIXA \} from '~\/components\/AtendimentoTrocaSugestoes\.vue'/)
+    const foto = { name: 'troca_dg054.sp.jpg', type: 'image/jpeg', size: 900, lastModified: 5 }
+    const m = montar({ envio: { max_anexos: 10, numa_mensagem: false, legenda_permitida: false } })
+    assert.equal(m.providos.get(CHAVE_ANEXAR), m.t.anexarFotoDaTroca, 'a caixa oferece o anexar')
+    assert.equal(m.t.anexarFotoDaTroca(foto, { legenda: 'Olá, oferta' }), null)
+    assert.deepEqual(m.t.anexos.value.map((a) => [a.arquivo.name, a.estado]), [['troca_dg054.sp.jpg', 'pendente']])
+    assert.equal(m.t.legendaFoto.value, '', 'na Shopee a foto vai sozinha: a legenda fica vazia')
+    // O segundo clique no "copiar oferta": a mesma foto não entra duas vezes.
+    assert.equal(m.t.anexarFotoDaTroca(foto), null)
+    assert.equal(m.t.anexos.value.length, 1)
+    await m.t.enviarFoto()
+    assert.deepEqual(m.chamadas.map((c) => c.fd.todos('arquivo')), [['troca_dg054.sp.jpg']], 'sai pelo POST /foto de sempre')
+
+    // ML (a foto leva texto): o texto da oferta vai na legenda vazia — e não
+    // passa por cima do que a pessoa já escreveu.
+    const ml = montar({ envio: { plataforma: 'ml', max_anexos: 5, numa_mensagem: true, legenda_obrigatoria: true, legenda_permitida: true } })
+    assert.equal(ml.t.anexarFotoDaTroca(foto, { legenda: 'Olá, oferta' }), null)
+    assert.equal(ml.t.legendaFoto.value, 'Olá, oferta')
+    const ml2 = montar({ envio: { plataforma: 'ml', max_anexos: 5, numa_mensagem: true, legenda_obrigatoria: true, legenda_permitida: true } })
+    ml2.t.legendaFoto.value = 'o meu texto'
+    ml2.t.anexarFotoDaTroca(foto, { legenda: 'Olá, oferta' })
+    assert.equal(ml2.t.legendaFoto.value, 'o meu texto')
+
+    // Não cabe: o porquê, e nada entra.
+    const cheia = montar({ envio: { max_anexos: 1, numa_mensagem: false, legenda_permitida: false } })
+    cheia.t.adicionarAnexos(fotos(1))
+    assert.match(cheia.t.anexarFotoDaTroca(foto), /^Já há um anexo na caixa/)
+    assert.deepEqual(cheia.t.anexos.value.map((a) => a.arquivo.name), ['f1.jpg'])
+    // A caixa na Nota interna: o porquê.
+    const nota = montar({ envio: { max_anexos: 10, numa_mensagem: false }, modo: 'nota' })
+    assert.match(nota.t.anexarFotoDaTroca(foto), /não está no Responder/)
+    assert.equal(nota.t.anexos.value.length, 0)
+  }
 
   console.log('atendimento-varias-imagens: ok')
 }

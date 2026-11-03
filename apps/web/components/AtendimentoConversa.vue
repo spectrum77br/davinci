@@ -291,6 +291,7 @@ import { conversasComEmail, ehCartaoDeEmail, urlDosCartoes, type CartaoEmail, ty
 import { sinalDeEmails } from '~/components/AtendimentoEmailVenda.vue'
 import type { Painel } from '~/components/AtendimentoPedido.vue'
 import { CLS_AG_CANCELAMENTO, leituraAgCancelamento } from '~/components/AtendimentoAgCancelamento.vue'
+import { CHAVE_ANEXAR_NA_CAIXA } from '~/components/AtendimentoTrocaSugestoes.vue'
 import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
 import { criarMarcadorDeLida, rotaAoAbrir } from '~/lib/atendimentoLida'
 import { AVISO_RESPOSTA_PUBLICA, perguntaRespostaPublica, type AvaliacoesResposta } from '~/components/AtendimentoAvaliacao.vue'
@@ -2615,6 +2616,34 @@ async function anexarNf() {
     carregandoNf.value = false
   }
 }
+// A foto do modelo da oferta de troca (03/11/2026): o "copiar oferta" das
+// sugestões (painel do pedido, AtendimentoTrocaSugestoes) põe a foto aqui como
+// anexo — a pessoa confere e manda pelo "Enviar foto", com as travas de
+// sempre. null = anexou; senão o porquê (a sugestão mostra a foto com o
+// "anexar foto" e o "baixar foto"). Onde a foto leva texto (o ML), o texto da
+// oferta vai na legenda vazia.
+function anexarFotoDaTroca(arquivo: File, opcoes?: { legenda?: string | null }): string | null {
+  if (!detalhe.value) return 'Abra a conversa para anexar a foto.'
+  if (motivoSemFoto.value) return motivoSemFoto.value
+  if (!podeSoltarAnexo()) return 'A caixa de resposta desta conversa não está no Responder: volte a ela para anexar a foto.'
+  if (enviandoFoto.value) return 'Espere os anexos terminarem de sair para anexar a foto.'
+  const ja = anexos.value.find((a) => a.estado !== 'enviada' && a.arquivo.name === arquivo.name && a.arquivo.size === arquivo.size)
+  if (ja) return null
+  if (anexosCheios.value) {
+    return maxAnexos.value === 1 ? 'Já há um anexo na caixa: envie ou descarte antes de anexar a foto.' : `Já há ${maxAnexos.value} anexos na caixa (o máximo): tire um para anexar a foto.`
+  }
+  const { aceitos, recusas } = escolherAnexos(
+    anexos.value.filter((a) => a.estado !== 'enviada'),
+    [arquivo],
+    { max: maxAnexos.value, maxBytes: envioFoto.value?.max_bytes || MAX_FOTO, tipos: TIPOS_FOTO },
+  )
+  if (!aceitos.length) return recusas[0] || 'A foto não entrou na caixa.'
+  anexos.value = [...anexos.value, novoAnexo(aceitos[0])]
+  const legenda = (opcoes?.legenda || '').trim()
+  if (legenda && envioFoto.value?.legenda_obrigatoria && !legendaFoto.value.trim()) legendaFoto.value = legenda
+  return null
+}
+provide(CHAVE_ANEXAR_NA_CAIXA, anexarFotoDaTroca)
 // Um POST /foto com estes anexos (vários só onde vão numa mensagem — o ML).
 // Devolve o que houve, sem toast: quem chama junta tudo numa frase.
 type ResultadoAnexo =
