@@ -147,6 +147,14 @@ function imposto1(row: Row): number | null {
   }
   return imposto1Automatico(row)
 }
+// Texto de um <input type="number">, ou undefined enquanto o número está
+// incompleto ("1141." no meio da digitação: o navegador dá valor vazio). Salvar
+// ali apagava a célula, o Vue reescrevia o campo sem o ponto e "500.00" virava
+// 5000 (achado na revisão de 03/11; valia para todas as células de número).
+function valorNumerico(e: Event): string | undefined {
+  const input = e.target as HTMLInputElement
+  return input.validity?.badInput ? undefined : input.value
+}
 // Célula do Imposto 1%: vazia = volta ao automático (null); número ≥ 0 = digitado;
 // negativo ou inválido = não salva (undefined).
 function valorDigitadoImposto1(texto: string): number | null | undefined {
@@ -369,7 +377,7 @@ await load()
             <td>
               <input type="number" step="0.01" class="cell-input text-right" style="min-width: 5.5rem"
                 :value="row.credito ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'credito', Number((e.target as HTMLInputElement).value) || null)" />
+                @input="(e) => { const v = valorNumerico(e); if (v !== undefined) scheduleSave(row, 'credito', Number(v) || null) }" />
             </td>
             <td>
               <input class="cell-input" :value="row.emp ?? ''" :disabled="!canEdit"
@@ -378,12 +386,12 @@ await load()
             <td>
               <input type="number" class="cell-input text-right"
                 :value="row.grupo ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'grupo', Number((e.target as HTMLInputElement).value) || null)" />
+                @input="(e) => { const v = valorNumerico(e); if (v !== undefined) scheduleSave(row, 'grupo', Number(v) || null) }" />
             </td>
             <td>
               <input type="number" class="cell-input text-right"
                 :value="row.cota ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'cota', Number((e.target as HTMLInputElement).value) || null)" />
+                @input="(e) => { const v = valorNumerico(e); if (v !== undefined) scheduleSave(row, 'cota', Number(v) || null) }" />
             </td>
             <td>
               <!-- v-model (instead of :value+@change) so SSR renders
@@ -403,12 +411,12 @@ await load()
             <td>
               <input type="number" class="cell-input text-right"
                 :value="row.parc_a_pagar ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'parc_a_pagar', Number((e.target as HTMLInputElement).value) || null)" />
+                @input="(e) => { const v = valorNumerico(e); if (v !== undefined) scheduleSave(row, 'parc_a_pagar', Number(v) || null) }" />
             </td>
             <td>
               <input type="number" step="0.01" class="cell-input text-right" style="min-width: 5.5rem"
                 :value="row.lance ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'lance', Number((e.target as HTMLInputElement).value) || null)" />
+                @input="(e) => { const v = valorNumerico(e); if (v !== undefined) scheduleSave(row, 'lance', Number(v) || null) }" />
             </td>
             <td class="calc text-right">{{ fmtMoney(imposto7(row)) }}</td>
             <td>
@@ -417,14 +425,15 @@ await load()
                 :value="row.imposto1_manual ?? ''" :placeholder="fmtMoney(imposto1Automatico(row))"
                 :disabled="!canEdit" title="Em branco: 1% do crédito, automático. Digite 0 para zerar."
                 @input="(e) => {
-                  const v = valorDigitadoImposto1((e.target as HTMLInputElement).value)
+                  const texto = valorNumerico(e)
+                  const v = texto === undefined ? undefined : valorDigitadoImposto1(texto)
                   if (v !== undefined) scheduleSave(row, 'imposto1_manual', v)
                 }" />
             </td>
             <td>
               <input type="number" step="0.01" class="cell-input text-right"
                 :value="row.valor_parc ?? ''" :disabled="!canEdit"
-                @input="(e) => scheduleSave(row, 'valor_parc', Number((e.target as HTMLInputElement).value) || null)" />
+                @input="(e) => { const v = valorNumerico(e); if (v !== undefined) scheduleSave(row, 'valor_parc', Number(v) || null) }" />
             </td>
             <td class="calc text-right">{{ fmtMoney(devedor(row)) }}</td>
             <td>

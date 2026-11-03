@@ -33,7 +33,7 @@ const EXPORTA = [
   'load', 'rows', 'linhasVisiveis', 'filtroGrupoCota', 'filtroAlienacao', 'filtroEmpresa', 'filtrando',
   'opcoesEmpresa', 'opcoesAlienacao', 'limparFiltros', 'scheduleSave', 'persist', 'addRow', 'removeRow',
   'errorText', 'saveTimers', 'SEM_VALOR', 'imposto7', 'imposto1', 'imposto1Automatico', 'creditoLiquido',
-  'valorDigitadoImposto1', 'empresaDaLinha', 'passaNosFiltros',
+  'valorDigitadoImposto1', 'valorNumerico', 'empresaDaLinha', 'passaNosFiltros',
 ]
 const montar = new Function('api', 'auth', 'confirm', 'computed', 'reactive', 'ref', 'watch',
   `${compiled.outputText}\nreturn { ${EXPORTA.join(', ')} }`)
@@ -92,6 +92,12 @@ const centavos = (n) => Math.round(n * 100) / 100
   assert.equal(f.valorDigitadoImposto1('1141.8'), 1141.8)
   assert.equal(f.valorDigitadoImposto1('-1'), undefined)
   assert.equal(f.valorDigitadoImposto1('abc'), undefined)
+  // Número incompleto ("1141." no meio da digitação) não salva nada: antes
+  // apagava a célula e "500.00" virava 5000.
+  const evento = (value, badInput) => ({ target: { value, validity: { badInput } } })
+  assert.equal(f.valorNumerico(evento('', true)), undefined)
+  assert.equal(f.valorNumerico(evento('', false)), '')
+  assert.equal(f.valorNumerico(evento('1141.0', false)), '1141.0')
 
   // ── Empresa: as grafias da mesma EMP viram uma ──
   for (const e of ['Kia', 'KIA', 'KIa', 'Kia ', ' kia']) assert.equal(f.empresaDaLinha(e), 'KIA')
@@ -201,6 +207,11 @@ const centavos = (n) => Math.round(n * 100) / 100
   assert.match(celula, /valorDigitadoImposto1\(/)
   assert.match(celula, /if \(v !== undefined\) scheduleSave\(row, 'imposto1_manual', v\)/)
   assert.match(tpl, /<span[^>]*data-dica-imposto1>\s*Imposto 1%: em branco calcula sozinho/)
+  // Toda célula de número passa pela trava do número incompleto.
+  const numericos = tpl.split('<input type="number"').slice(1).map((t) => t.slice(0, t.indexOf('/>')))
+  assert.equal(numericos.length, 7)
+  for (const n of numericos) assert.match(n, /@input="\(e\) => \{[\s\S]*valorNumerico\(e\)/)
+  assert.doesNotMatch(tpl, /Number\(\(e\.target as HTMLInputElement\)\.value\)/)
   // Cabeçalho e linha com o mesmo número de colunas; o colspan acompanha.
   const ths = (tpl.match(/<th\b/g) || []).length
   const tds = (tpl.slice(tpl.indexOf('<tr v-for="row in linhasVisiveis"')).match(/<td\b/g) || []).length
