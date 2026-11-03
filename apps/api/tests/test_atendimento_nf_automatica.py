@@ -352,6 +352,110 @@ async def test_2_do_menu_nao_libera_o_acessorio_escrito_depois(db, make_user, li
     assert _decisao(r) == "nf:pedido_nao_claro" and plataforma == []
 
 
+async def test_kia_d800b008_motivo_e_formato_manda_a_nf(db, make_user, ligado, plataforma):
+    """Revisão de 03/11 (Kia d800b008, 01/11): o cartão do produto, o pedido com o motivo e o
+    formato, e o menu do Duoke depois — a pessoa mandou a NF 7,5 h depois."""
+    conversa, cartao = await _cenario(db, make_user, texto=None)
+    cartao.tipo, cartao.payload = "produto", {"message_type": "item"}
+    await db.commit()
+    gatilho = await _msg(
+        db,
+        conversa,
+        "Olá bom dia, não foi enviada a nota fiscal junto com o produto, por favor preciso que "
+        "me enviem caso eu precise da assistência técnica da Apple.Nem que seja por aqui em PDF.",
+        ha=timedelta(minutes=4),
+    )
+    await _msg(db, conversa, _MENU_DUOKE, autor="loja", origem="externo", ha=timedelta(minutes=3))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+    assert [s["tipo"] for s in plataforma] == ["imagem", "texto"]
+
+
+async def _vita_0f89c1ea(db, make_user) -> tuple[Any, AtendimentoMensagem]:
+    """O turno do Vita 0f89c1ea (02/11): o botão do FAQ, o pedido coloquial, o menu, o "2", o
+    pedido escrito, outro "2", o botão de novo e o "Oi????"."""
+    conversa, botao = await _cenario(db, make_user, texto="Conversar com Vendedor")
+    botao.payload, botao.tipo = {"message_type": "faq_liveagent"}, "outro"
+    await db.commit()
+    falas = [
+        ("cliente", "Eu só tô querendo vcs dem pra mim a nota"),
+        ("cliente", "Porque tô precisando e vcs não enviaram ela ni em a caixa no por chat"),
+        ("loja", _MENU_DUOKE),
+        ("cliente", "2"),
+        ("cliente", "Preciso a nota fiscal do telefone"),
+        ("cliente", "2"),
+        ("botao", "Conversar com Vendedor"),
+        ("cliente", "Oi????"),
+        ("botao", "Conversar com Vendedor"),
+    ]
+    ultima = botao
+    for i, (quem, texto) in enumerate(falas):
+        ha = timedelta(seconds=280 - 30 * i)
+        if quem == "loja":
+            await _msg(db, conversa, texto, autor="loja", origem="externo", ha=ha)
+            continue
+        ultima = await _msg(
+            db, conversa, texto, ha=ha, tipo="outro" if quem == "botao" else "texto"
+        )
+        if quem == "botao":
+            ultima.payload = {"message_type": "faq_liveagent"}
+            await db.commit()
+    return conversa, ultima
+
+
+async def test_vita_0f89c1ea_pedido_coloquial_com_o_menu_manda_a_nf(
+    db, make_user, ligado, plataforma
+):
+    """Revisão de 03/11: "tô querendo … a nota", "não enviaram ela" (a nota nomeada antes), o "2"
+    do menu e o botão "Conversar com Vendedor" fora das falas."""
+    conversa, gatilho = await _vita_0f89c1ea(db, make_user)
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+    assert [s["tipo"] for s in plataforma] == ["imagem", "texto"]
+
+
+async def test_barbosa_991c233d_nota_fiscal_02_manda_a_nf(db, make_user, ligado, plataforma):
+    """Revisão de 03/11 (Barbosa 991c233d): a escolha escrita "Nota fiscal 02" depois do menu e o
+    "Vocês não enviaram a nota fiscal" — a pessoa mandou a NF 22 h depois."""
+    conversa, _ = await _cenario(db, make_user, texto="Gostaria  que vcs enviassem a nota fiscal")
+    await _msg(db, conversa, _MENU_DUOKE, autor="loja", origem="externo", ha=timedelta(minutes=4))
+    await _msg(db, conversa, "Nota fiscal  02", ha=timedelta(minutes=3))
+    gatilho = await _msg(db, conversa, "Vocês não enviaram a nota fiscal", ha=timedelta(minutes=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+
+
+async def test_kia_eec94b87_o_produto_comentado_e_o_6_ficam_com_a_pessoa(
+    db, make_user, ligado, plataforma
+):
+    """Revisão de 03/11: o "chegou" e o "vou avaliar" são cortesia, mas o comentário do produto
+    ("chegou descarregado, botei pra carregar") e o "6" do menu (atendente) seguram."""
+    conversa, _ = await _cenario(
+        db,
+        make_user,
+        texto="Boa tarde!! Meu relógio depois de muita luta chegou, acho que chegou "
+        "descarregado, botei pra carregar e já ligou",
+    )
+    await _msg(db, conversa, "Eu quero a nota fiscal por favor", ha=timedelta(minutes=4))
+    await _msg(db, conversa, "Assim que carregar eu vou avaliar também", ha=timedelta(minutes=3))
+    await _msg(db, conversa, _MENU_DUOKE, autor="loja", origem="externo", ha=timedelta(minutes=2))
+    gatilho = await _msg(db, conversa, "6", ha=timedelta(minutes=1))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:pedido_nao_claro" and plataforma == []
+    # Sem o "6" e sem o comentário do produto, o "chegou" e o "vou avaliar" passam.
+    assert nf_automatica.pedido_claro(
+        [
+            "Boa tarde!! Meu relógio chegou",
+            "Eu quero a nota fiscal por favor",
+            "Assim que carregar eu vou avaliar também",
+        ]
+    )
+
+
 async def test_a_nf_nunca_sai_duas_vezes_na_conversa(db, make_user, ligado, plataforma):
     conversa, gatilho = await _cenario(db, make_user)
     r = await _rascunho(db, conversa, gatilho)
@@ -927,6 +1031,94 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("preciso da nota fiscal & do produto", False),
         ("manda a nota fiscal + o produto", False),
         ("preciso da nota fiscal e desse produto", False),
+        # Revisão de 03/11 (31/10–02/11 nas lojas no automático). A ausência dita pelo ENVIO
+        # (Kia d800b008) vira o "não veio", com as mesmas travas.
+        ("não foi enviada a nota fiscal", True),
+        ("a nota fiscal não foi enviada", True),
+        ("A nota fiscal não foi enviado", True),
+        ("vocês não enviaram a nota fiscal", True),
+        ("vcs não me mandaram a nf", True),
+        ("não foi enviado o produto, manda a nota", False),
+        ("o pedido não foi enviado, manda a nota fiscal", False),
+        ("não enviaram o pedido, cadê a nota fiscal", False),
+        ("não mandaram o carregador nem a nota", False),
+        ("não enviaram a nota e o carregador", False),
+        ("não foi enviada a nota fiscal no meu cpf", False),
+        ("não foi enviada a nota do outro pedido", False),
+        ("vocês não enviaram ainda, manda a nota", False),
+        ("não enviaram a nota fiscal, quero devolver", False),
+        # O gerúndio (Vita 0f89c1ea), o "dêem" e o "preciso a nota".
+        ("tô querendo a nota fiscal", True),
+        ("estou querendo a nota", True),
+        ("Eu só tô querendo vcs dem pra mim a nota", True),
+        ("estou precisando da nf", True),
+        ("Preciso a nota fiscal do telefone", True),
+        ("preciso a nota fiscal", True),
+        ("tô querendo trocar, manda a nota", False),
+        ("estou querendo devolver, cadê a nota", False),
+        ("tô querendo dar nota pra vocês", False),
+        ("quero dar nota pra vocês", False),
+        ("tô querendo saber se vem nota", False),
+        ("estou querendo a nota fiscal no cnpj", False),
+        # O motivo e o formato (Kia d800b008); a garantia, o defeito e a troca continuam.
+        (
+            "Olá bom dia, não foi enviada a nota fiscal junto com o produto, por favor preciso "
+            "que me enviem caso eu precise da assistência técnica da Apple.Nem que seja por aqui "
+            "em PDF.",
+            True,
+        ),
+        ("preciso da nota fiscal para a assistência técnica", True),
+        ("manda a nota fiscal, caso eu precise", True),
+        ("manda a nota, pode ser em pdf", True),
+        ("pode mandar a nota fiscal pelo chat?", True),
+        ("preciso da nota fiscal porque vou precisar dela", True),
+        ("preciso da nota fiscal para a garantia", False),
+        ("caso eu precise acionar a garantia manda a nota", False),
+        ("preciso da nota para levar na assistência, o celular não liga", False),
+        ("manda a nota caso eu precise devolver", False),
+        ("manda a nota fiscal porque o produto não veio", False),
+        ("manda a nota fiscal pois veio quebrado", False),
+        ("manda a nota fiscal em pdf e a foto do produto", False),
+        ("manda a nota no meu email em pdf", False),
+        ("nem na caixa nem por chat", False),
+        ("não veio nem na caixa, manda a nota", False),
+        # A cortesia de quem recebeu (Kia eec94b87, sem o comentário do produto).
+        ("o relógio chegou, já ligou, quero a nota fiscal por favor", True),
+        ("quero a nota fiscal, assim que carregar eu vou avaliar também", True),
+        ("manda a nota fiscal, depois eu avalio", True),
+        ("vou avaliar mal se não mandar a nota", False),
+        ("manda a nota fiscal, vou avaliar com 1 estrela", False),
+        ("o celular não ligou, quero a nota fiscal", False),
+        ("já ligou e desligou sozinho, manda a nota", False),
+        ("vou avaliar se devolvo, manda a nota", False),
+        # Repassado nos 30 dias (até 03/11): o que ainda segurava pedido simples.
+        ("Tem como você me enviar a nota fiscal desse produto. Eu estou precisando dela", True),
+        (
+            "Oii tudo bem? Chegou tudo direitinho aqui, você poderia me fornecer uma NF? Caso eu "
+            "precise da Apple em algum momento, muito obrigada!",
+            True,
+        ),
+        ("Boa noite., não deixe de mandar a nota fiscal,por favor.,agradecido.", True),
+        ("Minha encomenda chegou certo, mais não veio a nota fiscal", True),
+        ("Depois me envia a nota fiscal por favor", True),
+        (
+            "Ei tudo bem? O macbook chegou mas não encontrei a NF, você consegue me mandar por "
+            "aqui?",
+            True,
+        ),
+        ("preciso da nota fiscal da mercadoria", True),
+        ("Como faço pra ter acesso a nota fiscal do MacBook?", True),
+        ("o ipad não veio, manda a nota", False),
+        ("a mercadoria não chegou, preciso da nota fiscal", False),
+        ("não veio a mercadoria nem a nota", False),
+        ("quero o macbook e a nota fiscal", False),
+        ("não deixe de mandar a nota e o carregador", False),
+        ("não deixe de mandar o produto e a nota", False),
+        ("chegou certo, mais o carregador não veio, manda a nota", False),
+        ("não veio mais a nota", False),
+        ("me fornecer a nota fiscal no cnpj", False),
+        ("caso eu precise da Apple pra trocar, manda a nota", False),
+        ("depois que chegar o produto me manda a nota", False),
     ],
 )
 def test_pedido_claro(texto, claro):
@@ -1067,6 +1259,59 @@ def test_o_2_de_um_menu_anterior_e_a_mesma_escolha():
     faltou = cliente(0, "veio faltando item")
     quantos = loja(1, "Quantos faltaram?")
     assert nf_automatica.pedido_pelo_menu([faltou, quantos, um, menu2, dois], dois) is False
+
+
+def test_a_ela_e_a_nota_so_nomeada_antes_e_sem_o_produto_no_meio():
+    """Revisão de 03/11 (Vita 0f89c1ea): "vcs não enviaram ela" depois de "a nota" é a nota."""
+    vita = [
+        "Eu só tô querendo vcs dem pra mim a nota",
+        "Porque tô precisando e vcs não enviaram ela ni em a caixa no por chat",
+    ]
+    assert nf_automatica.pedido_claro(vita) is True
+    assert nf_automatica.pedido_claro(["a nota fiscal, vocês não enviaram ela"]) is True
+    # Sem a nota antes, ou com o produto no meio, a "ela" pode ser o produto: pessoa.
+    assert nf_automatica.pedido_claro(["vcs não enviaram ela"]) is False
+    assert nf_automatica.pedido_claro(["vcs não enviaram ela", "manda a nota"]) is False
+    assert nf_automatica.pedido_claro(["não veio a caixa, vcs não enviaram ela"]) is False
+    assert nf_automatica.pedido_claro(["a nota e a caixa não veio, não enviaram ela"]) is False
+    assert nf_automatica.pedido_claro(["quero a nota", "a encomenda não recebi ela"]) is False
+
+
+def test_a_escolha_do_2_escrita_com_o_zero_ou_o_nome_da_opcao():
+    """Revisão de 03/11 (Barbosa 991c233d, "Nota fiscal 02"; Barbosa 0a20b168, "2 nota fiscal
+    em PDF, manda pra mim"): o mesmo "2" — só depois do menu."""
+    from types import SimpleNamespace as M
+
+    menu = M(id=2, autor="loja", texto=_MENU_DUOKE, origem="externo")
+    pede = M(id=1, autor="cliente", texto="Gostaria que vcs enviassem a nota fiscal")
+    for escolha in ("02", "2 - Nota fiscal", "Nota fiscal  02", "2 nota fiscal", "2. NF"):
+        dois = M(id=3, autor="cliente", texto=escolha)
+        assert nf_automatica.textos_do_turno([pede, menu, dois], [pede, dois]) == [pede.texto]
+        assert nf_automatica.pedido_pelo_menu([pede, menu, dois], dois) is True, escolha
+    # O "2" na frente do pedido escrito sai; o resto passa pela régua.
+    pdf = M(id=3, autor="cliente", texto="2 nota fiscal, me manda a nota em PDF")
+    textos = nf_automatica.textos_do_turno([menu, pdf], [pdf])
+    assert textos == ["nota fiscal, me manda a nota em PDF"]
+    assert nf_automatica.pedido_claro(textos) is True
+    garantia = M(id=4, autor="cliente", texto="2 nota fiscal e a garantia")
+    textos = nf_automatica.textos_do_turno([menu, garantia], [garantia])
+    assert textos == ["nota fiscal e a garantia"] and nf_automatica.pedido_claro(textos) is False
+    # Sem o menu antes, a escolha escrita continua na régua (o número fora da lista segura).
+    sem_menu = M(id=3, autor="cliente", texto="Nota fiscal 02")
+    assert nf_automatica.textos_do_turno([pede, sem_menu], [pede, sem_menu]) == [
+        pede.texto,
+        sem_menu.texto,
+    ]
+    assert nf_automatica.pedido_claro([pede.texto, sem_menu.texto]) is False
+    # Outros números e o "2" com outra opção não são a escolha da NF.
+    for outra in ("2 e 5", "25", "2 garantia", "nota 2", "nota fiscal 3", "12"):
+        x = M(id=3, autor="cliente", texto=outra)
+        assert nf_automatica.pedido_pelo_menu([menu, x], x) is False, outra
+    # O "2" respondendo à loja continua com a pessoa, escrito de qualquer jeito.
+    quantos = M(id=4, autor="loja", texto="Quantas unidades vieram?", origem="externo")
+    falta = M(id=3, autor="cliente", texto="veio faltando item", origem="externo", payload={})
+    zero_dois = M(id=5, autor="cliente", texto="02", origem="externo", payload={})
+    assert nf_automatica.pedido_pelo_menu([menu, falta, quantos, zero_dois], zero_dois) is False
 
 
 def test_a_fala_que_e_so_o_produto_pede_o_produto():

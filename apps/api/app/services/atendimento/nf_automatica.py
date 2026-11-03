@@ -165,6 +165,43 @@ meu celular não veio com nota fiscal"):
   envio: o código no ar manda a NF em 45 conversas (16 nas lojas no automático) — 42 certas
   (15), 1 errada (o cabo que não veio, engolido) e 2 repetidas (a loja já tinha mandado a
   NF); esta régua manda em 45 (21) — 45 certas (21), nenhuma errada, nenhuma repetida.
+
+REVISÃO DE 03/11/2026 (a análise de 31/10–02/11 nas lojas no automático; o Eduardo: "aplique
+as correções"). Três pedidos reais da NF ficaram como `nf:pedido_nao_claro` e a pessoa mandou
+a NF de 20 min a 26 h depois — Kia d800b008 ("não foi enviada a nota fiscal junto com o
+produto … caso eu precise da assistência técnica da Apple. Nem que seja por aqui em PDF"),
+Vita 0f89c1ea ("tô querendo vcs dêem pra mim a nota … vcs não enviaram ela nem na caixa nem
+por chat") e Kia eec94b87 (a NF com o relógio que "chegou descarregado" e o "6" do menu — esse
+continua com a pessoa: o comentário do produto e o pedido de atendente). O pedido claro lê:
+
+- a ausência dita pelo ENVIO (`_NAO_ENVIARAM`): "não foi enviada/mandada a nota", "a nota não
+  foi enviada", "não (me) enviaram/mandaram a nota" viram o "não veio" — com as MESMAS travas
+  ("não foi enviado o produto", "não enviaram o pedido, manda a nota" → pessoa);
+- o pedido no gerúndio ("tô/estou querendo a nota", "tô precisando da nf") e o "dêem";
+- a "ela" que é a nota nomeada antes no turno, sem o produto no meio (`_ela_e_a_nota`: "vcs
+  não enviaram ela" depois de "a nota"; "a nota e a caixa … não veio ela" fica);
+- o MOTIVO e o FORMATO do pedido (`_MOTIVO_E_FORMATO`): "caso eu precise", "para a assistência
+  (técnica) da Apple/autorizada", "porque/pois", "nem que seja por aqui", "pode ser em pdf",
+  "nem na caixa nem por chat". A garantia continua segurando ("preciso da nota para acionar a
+  garantia" → pessoa), como o defeito e a troca;
+- a cortesia de quem recebeu ("chegou", "já ligou", "assim que carregar vou avaliar").
+
+Repassado nos turnos reais de 30 dias (até 03/11, todas as lojas, só leitura e mascarado), as
+frases que ainda seguravam pedido simples também entram, com as mesmas travas: a escolha do menu
+escrita com o zero ou o nome da opção ("Nota fiscal 02", "2 - nota fiscal"; o "2" na frente do
+pedido escrito sai — `_so_o_2`, só depois do menu), "estou precisando dela", "me fornecer uma
+NF", "caso eu precise da Apple em algum momento", "não deixe de mandar a nota", o "mais" no
+lugar do "mas", o "depois", o "agradecido", a "encomenda" e o MacBook/iPad/iPhone/notebook/
+tablet/mercadoria como o produto.
+
+- Medido nos turnos reais de 30 dias (até 03/11; Shopee/TikTok chat e ML pós-venda; 401
+  conversas que citam o documento ou mandaram "2"; o portão de texto no ponto em que o rascunho
+  sai, 150 s depois da última fala): o código de 30/10 passa 92 turnos em 58 conversas; esta
+  régua passa 111 turnos em 70 conversas (+12, 5 nas lojas no automático: Kia d800b008, Vita
+  0f89c1ea, Barbosa 991c233d, vortan b7f249ea e d5bab3f3) e nenhum que passava deixou de passar.
+  Lidas uma a uma, as 12 são pedido só da NF (nenhuma é outro assunto). A NF sai só onde a
+  `conferir_nf` acha a cheia única do comprador: no Vita 0f89c1ea e no vortan b7f249ea a NF não
+  está no `nf_nota` (continuam com a pessoa por isso, não pelo texto).
 """
 
 from __future__ import annotations
@@ -236,6 +273,9 @@ _O_CLIENTE_FAZ = re.compile(
     # Revisão de 30/10: "(e) preciso dela", "vou precisar dela" — a dela é a nota do turno ("a
     # nota dela", de outra pessoa, continua fora da lista).
     r"|\b(?:preciso|precisava|precisaria|vou\s+precisar)\s+dela\b"
+    # Revisão de 03/11 (vortan b7f249ea, "Tem como você me enviar a nota fiscal desse produto ||
+    # Eu estou precisando dela"): o gerúndio também.
+    r"|\b(?:(?:to|tou|estou|estava)\s+)?precisando\s+dela\b"
     # Revisão da revisão de 30/10: "(favor me) enviar/mandar ela" — a "ela" é a nota do turno, só
     # logo depois do verbo do pedido — e o "se puder/se possível" da cortesia.
     r"|\b(?:manda|mande|mandar|mandem|envia|envie|enviar|enviem|passa|passe|passar|"
@@ -287,11 +327,16 @@ _O_DOC_LOGO_DEPOIS = (
 _PEDE = re.compile(
     # "me manda a nota", "pode enviar a nf?", "passa a nota fiscal", "encaminha a nota" (30/10)
     r"\b(?:manda|mande|mandar|mandem|envia|envie|enviar|enviem|passa|passe|passar|"
-    r"encaminha|encaminhe|encaminhar|encaminhem)\b"
+    r"encaminha|encaminhe|encaminhar|encaminhem|"
+    # Revisão de 03/11 (Jlas 8963e116): "você poderia me fornecer uma NF?".
+    r"fornecer|forneca|fornece)\b"
     r"(?:\s+\w+){0,3}?\s+(?:a\s+|minha\s+|sua\s+)?" + _DOC + r"\b"
     # "preciso da nota fiscal", "queria a nf do pedido"
     r"|\b(?:preciso|precisava|precisaria|quero|queria|gostaria|necessito)\b"
     r"(?:\s+\w+){0,3}?\s+(?:a\s+|da\s+|de\s+|uma\s+)?" + _DOC + r"\b"
+    # Revisão de 03/11 (Vita 0f89c1ea): o gerúndio — "tô querendo a nota", "estou precisando da
+    # nf", "tô querendo vcs dêem pra mim a nota".
+    r"|\b(?:querendo|precisando)\b(?:\s+\w+){0,4}?\s+(?:a\s+|da\s+|de\s+|uma\s+)?" + _DOC + r"\b"
     # "não veio a nota", "a nota fiscal não chegou", "cadê a nf"
     r"|\bnao\s+(?:veio|vieram|recebi|chegou|encontrei|achei|tinha|tem|estava)\b(?:\s+\w+){0,4}?\s+"
     r"(?:a\s+)?" + _DOC + r"\b"
@@ -389,6 +434,7 @@ _CORTESIA = frozenset(
     """
     oi ola ei bom boa dia tarde noite tudo bem ok certo sim por favor pf pfv porfavor
     obrigado obrigada obg grato grata agradeco desde ja gentileza muito aguardo fico
+    agradecido agradecida
     oii oiii oie oiee olaa opa joia blz beleza valeu tranquilo
     """.split()
 )
@@ -414,10 +460,11 @@ _PALAVRAS_DO_PEDIDO = (
         preciso precisava precisaria quero queria gostaria necessito eu vou querer receber
         solicito solicitar solicitacao que q so mesmo enviasse enviassem mandasse mandassem
         vao conseguir
+        to tou estou querendo precisando dem deem porque pois fornecer forneca fornece depois
         nao veio vieram recebi chegou encontrei achei tinha estava foi cade ainda
         nota notas fiscal nf nfe copia arquivo pdf digital via segunda de novo
         a o as os um uma da do de na no em e minha meu sua seu desse deste dessa desta
-        esse este essa esta junto caixa pacote embalagem pedido compra produto
+        esse este essa esta junto caixa pacote embalagem pedido compra produto encomenda
         """.split()
     )
 )
@@ -462,6 +509,20 @@ _CONVERSAR_COM_VENDEDOR = "conversar com vendedor"
 # O menu do robô da loja (o do Duoke, 28/10/2026): "Escolha uma opção: 1 - Rastreio
 # 2 - Nota fiscal …" — a resposta "2" é o pedido da NF.
 _MENU_NF = re.compile(r"\b2\s*[-–.)]\s*nota\s+fiscal\b")
+# Revisão de 03/11 (Barbosa 991c233d, "Nota fiscal 02"; vortan 28abba47 e Barbosa 0a20b168, "2
+# nota fiscal"): a escolha escrita com o zero ou com o nome da opção ("02", "2 - nota fiscal",
+# "nota fiscal 2") é o mesmo "2"; e o "2" na frente do pedido escrito ("2 nota fiscal em PDF,
+# manda pra mim") sai, o resto passa pela régua. Só depois do menu, como o "2" sozinho.
+_ESCOLHA_DO_2 = re.compile(
+    r"0?2(?:\s*[-–.):]*\s*(?:nota\s+fiscal|nf|nfe))?|(?:nota\s+fiscal|nf|nfe)\s*[-–(:]*\s*0?2\s*\)?"
+)
+_O_2_NA_FRENTE = re.compile(r"^\s*0?2\s*[-–.):]*\s*(?=(?:nota|nf|nfe|danfe)\b)", re.IGNORECASE)
+
+
+def _so_o_2(texto: str | None) -> bool:
+    """A fala é só a escolha do "2" (com o zero ou o nome da opção)? PURA."""
+    plano = " ".join(_grafia(validador.plano_de(texto or "")).split()).strip(" .!\n")
+    return bool(_ESCOLHA_DO_2.fullmatch(plano))
 
 
 def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
@@ -504,9 +565,9 @@ def pedido_pelo_menu(recentes: Sequence[Any], gatilho: Any) -> bool:
     # A foto ou o vídeo junto do "2" (o defeito, o item errado) é fala que não lemos: pessoa.
     if any(_midia(m) for m in depois):
         return False
-    falas = (m.texto or "" for m in depois if not _sem_fala(m))
-    plano = " ".join(validador.plano_de(" ".join(falas)).split())
-    if plano.strip(" .!") != "2":
+    # O cartão do pedido/produto sem texto não é fala (como no "2" juntado de antes).
+    falas = [m.texto for m in depois if not _sem_fala(m) and (m.texto or "").strip()]
+    if not falas or not all(_so_o_2(t) for t in falas):
         return False
     rajada = ia.rajada_do_cliente(recentes[:ultimo], None)
     if any(_midia(m) for m in rajada) or _responde_a_pergunta_da_loja(recentes, rajada):
@@ -557,7 +618,7 @@ def _midia(m: Any) -> bool:
 
 def _2_de_outro_menu(recentes: Sequence[Any], m: Any) -> bool:
     """O "2" antes do menu atual escolheu a NF num menu anterior (e não respondeu a loja)? PURA."""
-    if validador.plano_de(m.texto or "").strip(" .!\n") != "2":
+    if not _so_o_2(m.texto):
         return False
     i = next((j for j, x in enumerate(recentes) if x.id == m.id), 0)
     loja = next((x for x in reversed(recentes[:i]) if x.autor == constantes.AUTOR_LOJA), None)
@@ -599,7 +660,9 @@ def textos_do_turno(recentes: Sequence[Any], rajada: Sequence[Any]) -> list[str 
     da loja; o resto do turno passa pela MESMA régua — o que veio antes do menu também ("vem
     com nota fiscal? || 2" continua com a pessoa) — e os outros números do menu (3
     cancelamento, 5 garantia, 6 atendente) seguram. Revisão da revisão de 30/10: a figurinha e
-    o botão "Conversar com vendedor" da Shopee também saem (`_sem_fala`).
+    o botão "Conversar com vendedor" da Shopee também saem (`_sem_fala`). Revisão de 03/11: o
+    "02" e o "2"/"nota fiscal" com o nome da opção saem (`_so_o_2`), e o "2" na frente do pedido
+    escrito também ("2 nota fiscal em PDF, manda pra mim" → "nota fiscal em PDF, manda pra mim").
     """
     from app.services.atendimento import ia
 
@@ -611,14 +674,23 @@ def textos_do_turno(recentes: Sequence[Any], rajada: Sequence[Any]) -> list[str 
     ]
     respostas = [i for i, m in enumerate(recentes) if ia.resposta_da_loja(m)]
 
-    def escolheu_a_nf(m: Any) -> bool:
+    def depois_do_menu(m: Any) -> bool:
         i = posicao.get(m.id)
-        if i is None or validador.plano_de(m.texto or "").strip(" .!\n") != "2":
+        if i is None:
             return False
         resposta = max((j for j in respostas if j < i), default=-1)
         return any(resposta < j < i for j in menus)
 
-    return [m.texto for m in rajada if not escolheu_a_nf(m) and not _sem_fala(m)]
+    textos: list[str | None] = []
+    for m in rajada:
+        if _sem_fala(m):
+            continue
+        if not depois_do_menu(m):
+            textos.append(m.texto)
+        elif not _so_o_2(m.texto):
+            # Revisão de 03/11: o "2" na frente do pedido escrito ("2 nota fiscal em PDF").
+            textos.append(_O_2_NA_FRENTE.sub("", m.texto) if m.texto else m.texto)
+    return textos
 
 
 def _sem_fala(m: Any) -> bool:
@@ -743,17 +815,20 @@ def _so_cortesia(texto: str) -> bool:
 # pessoa (1 dos 27 turnos reais de 60 dias que passavam) — e o pedido que começa outra
 # frase sem a vírgula também ("ainda não chegou preciso da nota"). Revisão da revisão de 30/10:
 # o "só que" é o mesmo "mas" ("me manda a nota fiscal só que ainda não chegou" → pessoa; "o
-# pedido chegou só que não veio a nota" passa).
+# pedido chegou só que não veio a nota" passa). Revisão de 03/11 (Jlas bbadab8c, "Minha
+# encomenda chegou certo, mais não veio a nota fiscal"): o "mais" escrito no lugar do "mas" corta
+# o trecho e vale antes do "não" (cortar mais é sempre mais conservador: "não veio mais a nota"
+# vira "não veio" sem o documento → pessoa).
 _NAO_VEIO = re.compile(r"\bnao\b")
 _TRECHOS = re.compile(
-    r"[,.;:!?]+|\b(?:mas|porem|e|so\s+q(?:ue)?)\b"
+    r"[,.;:!?]+|\b(?:mas|mais|porem|e|so\s+q(?:ue)?)\b"
     r"|(?=\b(?:preciso|precisava|quero|queria|gostaria|cade|manda|mande|envia|envie)\b)"
 )
 _NOME_DO_DOC = re.compile(r"\b" + _PAPEL + r"\b")
 # O "mas" só vale antes do "não" e do lugar ("o pedido chegou mas não veio a nota", "mas na
 # caixa não tinha a nota"); "mas e o pedido?", "mas a nota não é minha" sobram. Revisão de
 # 30/10: o "porém" é o mesmo "mas" ("o aparelho chegou, porém não veio a nota fiscal").
-_MAS_NAO = re.compile(r"\b(?:mas|porem)\s+(?=nao\b|n[ao]s?\s+(?:caixa|embalagem|pacote)\b)")
+_MAS_NAO = re.compile(r"\b(?:mas|mais|porem)\s+(?=nao\b|n[ao]s?\s+(?:caixa|embalagem|pacote)\b)")
 
 # Revisão de 30/10/2026 (o Eduardo: "faça esse ajuste para termos mais entregas de NF
 # automaticamente quando é requisitado"; nas lojas no automático, em 29/10, ficaram sem
@@ -772,8 +847,15 @@ _GRAFIAS = (
 #   nota"): vira "produto" e passa pelas MESMAS travas do produto — "não veio o celular",
 #   "o celular não chegou, manda a nota", "quero o celular e a nota" continuam com a pessoa. O
 #   acessório (carregador, cabo, fone, capinha) não entra: fica fora da lista do que pode e
-#   "não veio o carregador nem a nota" vai para a pessoa;
-_O_APARELHO = re.compile(r"\b(?:celular|aparelho|telefone|smartphone|relogio|smartwatch)\b")
+#   "não veio o carregador nem a nota" vai para a pessoa. Revisão de 03/11 (Jlas cc87409d, "O
+#   macbook chegou mas não encontrei a NF"; Mini d7337f84, "preciso da nota fiscal da
+#   mercadoria"): o MacBook, o iPad, o iPhone, o notebook, o tablet e a mercadoria também são o
+#   produto, com as mesmas travas;
+_O_APARELHO = re.compile(
+    r"\b(?:celular|aparelho|telefone|smartphone|relogio|smartwatch"
+    r"|macbook|ipad|iphone|notebook|tablet|mercadoria)\b"
+)
+_AS_MERCADORIAS = re.compile(r"\bmercadorias\b")
 # - a AUSÊNCIA dita de outro jeito vira o "não veio a nota" que as réguas já leem: "não veio
 #   COM a nota" (o "com" só depois do "não": "veio com a nota?" e "vem com nota?" ficam) e
 #   "veio/chegou/recebi SEM a nota" (o "sem" só entre o verbo e a nota: "pode mandar sem nota",
@@ -865,6 +947,26 @@ _COMPREI = (
 )
 # O "&" e o "+" são o "e" ("a nota fiscal & o produto").
 _E_COMERCIAL = re.compile(r"\s*[&+]\s*")
+# - Revisão de 03/11 (Kia d800b008, "não foi enviada a nota fiscal junto com o produto"): a
+#   ausência dita pelo ENVIO vira o "não veio" — "não foi enviada/mandada a nota", "a nota não
+#   foi enviada", "não (me) enviaram/mandaram a nota". O que vem depois passa pelas MESMAS travas
+#   do "não veio": "não foi enviado o produto", "o pedido não foi enviado", "não enviaram o
+#   pedido, manda a nota" e "não mandaram o carregador nem a nota" ficam com a pessoa.
+_NAO_ENVIARAM = (
+    (
+        re.compile(
+            r"\bnao\s+(?:me\s+|nos\s+)?(?:foi|foram)\s+(?:enviad|mandad|encaminhad)[oa]s?\b"
+        ),
+        "nao veio",
+    ),
+    (
+        re.compile(
+            r"\bnao\s+(?:me\s+|nos\s+)?"
+            r"(?:enviaram|mandaram|enviou|mandou|encaminharam|encaminhou)\b"
+        ),
+        "nao veio",
+    ),
+)
 
 
 def _grafia(plano: str) -> str:
@@ -873,13 +975,78 @@ def _grafia(plano: str) -> str:
     for regra, troca in (
         (_E_COMERCIAL, " e "),
         *_GRAFIAS,
+        (_AS_MERCADORIAS, "produtos"),
         (_O_APARELHO, "produto"),
+        *_NAO_ENVIARAM,
         *_COMPREI,
         *_SEM_A_NOTA,
         *_JUNTO_COM,
     ):
         plano = regra.sub(troca, plano)
     return plano
+
+
+# Revisão de 03/11 (Vita 0f89c1ea, "tô querendo vcs dêem pra mim a nota || porque tô precisando e
+# vcs não enviaram ela nem na caixa nem por chat"): a "ela" logo depois do "não veio" (o
+# "enviaram" já reescrito) é a nota quando ela foi nomeada ANTES no turno e nada do produto
+# (caixa, compra, encomenda, embalagem…) veio no meio — com o produto no meio, a "ela" pode ser
+# ele e o trecho fica sem o documento (pessoa).
+_NAO_VEIO_ELA = re.compile(r"\bnao\s+(?:veio|vieram|chegou|recebi)\s+ela\b")
+_O_DOC_NOMEADO = re.compile(r"\b(?:nota|nf|nfe)\b")
+_O_PRODUTO_NO_MEIO = re.compile(r"\b" + _O_PRODUTO + r"\b")
+
+
+def _ela_e_a_nota(falas: Sequence[str]) -> list[str]:
+    """Troca a "ela" do "não veio ela" por "a nota" quando é a nota nomeada antes. PURA."""
+    saida: list[str] = []
+    for fala in falas:
+        anteriores = " ".join(saida)
+
+        def troca(m: re.Match, fala: str = fala, anteriores: str = anteriores) -> str:
+            antes = f"{anteriores} {fala[: m.start()]}"
+            docs = list(_O_DOC_NOMEADO.finditer(antes))
+            if not docs or _O_PRODUTO_NO_MEIO.search(antes[docs[-1].end() :]):
+                return m.group(0)
+            return m.group(0)[: -len("ela")] + "a nota"
+
+        saida.append(_NAO_VEIO_ELA.sub(troca, fala))
+    return saida
+
+
+# Revisão de 03/11 (Kia d800b008, "por favor preciso que me enviem caso eu precise da assistência
+# técnica da Apple. Nem que seja por aqui em PDF"): o MOTIVO e o FORMATO do pedido não sobram —
+# o "caso/se eu precise (dela)", "para (uma eventual) assistência (técnica) (da Apple/autorizada)",
+# o "nem/mesmo que seja", o "pode ser" antes do formato ou do canal ("pode ser em pdf/por aqui")
+# e o lugar em que a nota não veio ("nem na caixa", "nem por chat", "pelo chat"). A garantia, o
+# defeito e a troca continuam no `_NAO_E_SO_A_NF` ("caso eu precise acionar a garantia" e
+# "preciso da nota para trocar" → pessoa). E a cortesia de quem recebeu: "já ligou", "assim que
+# carregar (eu) vou avaliar (também)", "depois eu avalio", "não deixe de mandar a nota".
+_MARCA = r"(?:apple|samsung|xiaomi|motorola|marca|fabricante)"
+_ASSISTENCIA = (
+    r"(?:a\s+|uma\s+)?(?:eventual\s+)?assistencia(?:\s+tecnica)?"
+    r"(?:\s+(?:autorizada|oficial|d[ae]\s+" + _MARCA + r"))?"
+)
+_MOTIVO_E_FORMATO = re.compile(
+    # "caso eu precise (dela / da assistência / da Apple) (em algum momento)" (Jlas 8963e116).
+    r"\b(?:caso|se|quando|se\s+(?:um|algum)\s+dia)\s+(?:eu\s+)?(?:precise|precisar|for\s+precisar)"
+    r"(?:\s+(?:dela|d[ae]\s+" + _ASSISTENCIA + r"|d[ae]\s+" + _MARCA + r"))?"
+    r"(?:\s+(?:em\s+algum\s+momento|futuramente|um\s+dia|mais\s+tarde))?\b"
+    r"|\b(?:para|pra)\s+(?:levar\s+(?:n[ao]\s+|a\s+)?)?" + _ASSISTENCIA + r"\b"
+    # "não deixe/esqueça de mandar a nota" é o pedido (vortan d5bab3f3).
+    r"|\bnao\s+(?:deixe|deixem|esqueca|esquecam|esquece)\s+de\s+(?=(?:me\s+)?(?:manda|mande|mandar"
+    r"|envia|envie|enviar|passa|passar|encaminha|encaminhar)\b)"
+    r"|\b(?:nem|mesmo)\s+que\s+seja\b"
+    r"|\bpode\s+ser\s+(?=(?:por|em|pelo|aqui|pdf|digital)\b)"
+    r"|\b(?:nem|ni)\s+(?:(?:em\s+)?(?:a|o)\s+|na\s+|no\s+|em\s+|pel[ao]\s+|por\s+)?"
+    r"(?:caixa|embalagem|pacote|chat|aqui)\b"
+    r"|\b(?:por|pelo|no|via)\s+(?:o\s+)?chat\b"
+    r"|\bja\s+(?:ligou|liguei|funcionou)\b"
+    r"|\b(?:(?:assim\s+que|quando|depois\s+que|logo\s+que)\s+(?:eu\s+)?"
+    r"(?:carregar|testar|usar|ligar|receber|abrir|conferir)(?:\s+(?:ele|ela|o\s+produto))?\s*,?\s*)?"
+    r"(?:eu\s+)?(?:ja\s+)?(?:vou|irei|depois\s+(?:eu\s+)?vou)\s+avaliar"
+    r"(?:\s+(?:tambem|a\s+loja|voces|vcs|o\s+produto|a\s+compra))?\b"
+    r"|\bdepois\s+(?:eu\s+)?avalio(?:\s+tambem)?\b"
+)
 
 
 def _so_o_documento(plano: str) -> bool:
@@ -917,7 +1084,7 @@ def _so_o_produto(fala: str) -> bool:
 def pedido_claro(textos: Sequence[str | None]) -> bool:
     """O turno do cliente PEDE a NF do pedido, e só isso? PURA."""
     falas = [_grafia(validador.plano_de(t)) for t in textos if t]
-    falas = [f for f in falas if " ".join(f.split()).strip(" .") != _APAGADA]
+    falas = _ela_e_a_nota([f for f in falas if " ".join(f.split()).strip(" .") != _APAGADA])
     if any(_so_o_produto(f) for f in falas) or any(_MEU_SOLTO_NO_PEDIDO.search(f) for f in falas):
         return False
     plano = " ".join(" ".join(falas).split())
@@ -932,6 +1099,7 @@ def pedido_claro(textos: Sequence[str | None]) -> bool:
         return False
     resto = _O_CLIENTE_FAZ.sub(" ", _COMO_RECEBO.sub(" ", plano))
     resto = _MAS_NAO.sub(" ", _GRUDADO_NO_PAPEL.sub(" ", resto))
+    resto = _MOTIVO_E_FORMATO.sub(" ", resto)
     return all(p in _PALAVRAS_DO_PEDIDO for p in re.findall(r"[a-z0-9]+", resto))
 
 
