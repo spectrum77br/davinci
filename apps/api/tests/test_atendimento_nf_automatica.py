@@ -456,6 +456,67 @@ async def test_kia_eec94b87_o_produto_comentado_e_o_6_ficam_com_a_pessoa(
     )
 
 
+async def _rascunho_com_as_pistas_reais(db: AsyncSession, conversa, gatilho):
+    """O rascunho com `pistas_turno`/`pistas_orientacao` das funções PURAS do `acao_pessoa` sobre
+    o mesmo turno (como a rodada do agente grava); só a escolha do modelo (a NF) é suposta."""
+    from app.services.atendimento.agente import acao_pessoa
+
+    recentes = list(
+        (
+            await db.execute(
+                select(AtendimentoMensagem)
+                .where(AtendimentoMensagem.conversa_id == conversa.id)
+                .order_by(AtendimentoMensagem.enviada_em)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    pistas = acao_pessoa.pistas_do_turno(recentes, gatilho, com_pedido=True)
+    orientacao = acao_pessoa.pistas_de_orientacao(recentes, gatilho)
+    return await _rascunho(db, conversa, gatilho, pistas_turno=pistas, pistas_orientacao=orientacao)
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Chegou o celular mas não veio a nota fiscal nem a caixa",
+        "Não veio nota fiscal nem caixa",
+        "o relógio chegou, mas não veio a nota fiscal nem a embalagem",
+        "Quero a nota fiscal porque não veio junto o produto",
+        "Preciso da nota fiscal porque não veio tudo",
+        "Quero a nota fiscal, não veio junto o produto",
+    ],
+)
+async def test_a_caixa_ou_o_produto_que_nao_veio_nao_some_na_nf(
+    db, make_user, ligado, plataforma, texto
+):
+    """Revisão da revisão de 03/11: com as pistas reais do turno só a da NF aparece (nenhuma
+    outra camada segura), então o texto é a trava — a caixa e o produto que não vieram ficam com
+    a pessoa e nada sai."""
+    conversa, gatilho = await _cenario(db, make_user, texto=texto)
+    r = await _rascunho_com_as_pistas_reais(db, conversa, gatilho)
+    assert (r.fatos or {})["agente"]["pistas_turno"] == ["nota_fiscal"]
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:pedido_nao_claro", _decisao(r)
+    assert plataforma == []
+
+
+async def test_o_agradecimento_no_turno_segura_a_nf_como_outro_assunto(
+    db, make_user, ligado, plataforma
+):
+    """Revisão da revisão de 03/11 (vortan d5bab3f3, Jlas 8963e116): o texto passa, mas a pista
+    "agradecimento" do turno vira `nf:outro_assunto` antes — dos 12 ganhos medidos só no texto,
+    10 passam também as pistas (4 nas lojas no automático)."""
+    texto = "Boa noite., não deixe de mandar a nota fiscal,por favor.,agradecido."
+    assert nf_automatica.pedido_claro([texto]) is True
+    conversa, gatilho = await _cenario(db, make_user, texto=texto)
+    r = await _rascunho_com_as_pistas_reais(db, conversa, gatilho)
+    assert "agradecimento" in (r.fatos or {})["agente"]["pistas_turno"]
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:outro_assunto" and plataforma == []
+
+
 async def test_a_nf_nunca_sai_duas_vezes_na_conversa(db, make_user, ligado, plataforma):
     conversa, gatilho = await _cenario(db, make_user)
     r = await _rascunho(db, conversa, gatilho)
@@ -1119,6 +1180,30 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
         ("me fornecer a nota fiscal no cnpj", False),
         ("caso eu precise da Apple pra trocar, manda a nota", False),
         ("depois que chegar o produto me manda a nota", False),
+        # Revisão da revisão de 03/11: o lugar só com a preposição; "nem a caixa" é a caixa que
+        # não veio também (o aparelho sem a caixa) → pessoa.
+        ("Chegou o celular mas não veio a nota fiscal nem a caixa", False),
+        ("Não veio a nota fiscal nem a caixa", False),
+        ("O celular chegou sem nota fiscal e nem a caixa", False),
+        ("Não veio nota fiscal nem caixa", False),
+        ("não veio a nota fiscal nem a embalagem", False),
+        ("não veio a nota fiscal nem o pacote", False),
+        ("a nota fiscal não veio nem na caixa nem pelo chat", True),
+        ("não veio a nota fiscal nem no pacote", True),
+        ("não enviaram a nota fiscal ni em a caixa", True),
+        # O "porque/pois" corta o trecho como a vírgula: o "não veio" depois dele sem o
+        # documento é o produto (ou o item) que não veio → pessoa.
+        ("Quero a nota fiscal porque não veio junto o produto", False),
+        ("Preciso da nota fiscal porque não veio tudo", False),
+        ("Quero a nota fiscal porque não veio certo", False),
+        ("me manda a nota fiscal porque nao veio tudo, so veio o produto", False),
+        ("tô precisando da nota fiscal porque não veio tudo certinho", False),
+        ("Preciso da nota fiscal pois não veio tudo", False),
+        ("me manda a nota fiscal pois não veio junto", False),
+        ("Quero a nota fiscal, não veio junto o produto", False),
+        ("Preciso da nota fiscal, não veio tudo", False),
+        ("preciso da nota fiscal porque a nota não veio na caixa", True),
+        ("manda a nota fiscal pois não veio a nota", True),
     ],
 )
 def test_pedido_claro(texto, claro):

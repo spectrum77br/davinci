@@ -183,7 +183,10 @@ continua com a pessoa: o comentário do produto e o pedido de atendente). O pedi
 - o MOTIVO e o FORMATO do pedido (`_MOTIVO_E_FORMATO`): "caso eu precise", "para a assistência
   (técnica) da Apple/autorizada", "porque/pois", "nem que seja por aqui", "pode ser em pdf",
   "nem na caixa nem por chat". A garantia continua segurando ("preciso da nota para acionar a
-  garantia" → pessoa), como o defeito e a troca;
+  garantia" → pessoa), como o defeito e a troca. Revisão da revisão: o lugar só COM a preposição
+  ("nem a caixa", "nem caixa", "nem o pacote" é a caixa que também não veio → pessoa) e o
+  "porque/pois" corta o trecho como a vírgula ("quero a nota porque não veio junto o produto",
+  "preciso da nota pois não veio tudo" → pessoa);
 - a cortesia de quem recebeu ("chegou", "já ligou", "assim que carregar vou avaliar").
 
 Repassado nos turnos reais de 30 dias (até 03/11, todas as lojas, só leitura e mascarado), as
@@ -197,9 +200,12 @@ tablet/mercadoria como o produto.
 - Medido nos turnos reais de 30 dias (até 03/11; Shopee/TikTok chat e ML pós-venda; 401
   conversas que citam o documento ou mandaram "2"; o portão de texto no ponto em que o rascunho
   sai, 150 s depois da última fala): o código de 30/10 passa 92 turnos em 58 conversas; esta
-  régua passa 111 turnos em 70 conversas (+12, 5 nas lojas no automático: Kia d800b008, Vita
-  0f89c1ea, Barbosa 991c233d, vortan b7f249ea e d5bab3f3) e nenhum que passava deixou de passar.
-  Lidas uma a uma, as 12 são pedido só da NF (nenhuma é outro assunto). A NF sai só onde a
+  régua passa 111 turnos em 70 conversas (+12) e nenhum que passava deixou de passar (o mesmo
+  depois da revisão da revisão). Lidas uma a uma, as 12 são pedido só da NF (nenhuma é outro
+  assunto). Com as pistas reais do turno (`acao_pessoa.pistas_do_turno`), 10 das 12 passam
+  também — 4 nas lojas no automático: Kia d800b008, Vita 0f89c1ea, Barbosa 991c233d e vortan
+  b7f249ea; o vortan d5bab3f3 ("agradecido") e o Jlas 8963e116 ("muito obrigada!") ficam como
+  `nf:outro_assunto` pela pista "agradecimento", antes do texto. A NF sai só onde a
   `conferir_nf` acha a cheia única do comprador: no Vita 0f89c1ea e no vortan b7f249ea a NF não
   está no `nf_nota` (continuam com a pessoa por isso, não pelo texto).
 """
@@ -818,10 +824,12 @@ def _so_cortesia(texto: str) -> bool:
 # pedido chegou só que não veio a nota" passa). Revisão de 03/11 (Jlas bbadab8c, "Minha
 # encomenda chegou certo, mais não veio a nota fiscal"): o "mais" escrito no lugar do "mas" corta
 # o trecho e vale antes do "não" (cortar mais é sempre mais conservador: "não veio mais a nota"
-# vira "não veio" sem o documento → pessoa).
+# vira "não veio" sem o documento → pessoa). Revisão de 03/11: o "porque/pois" (que entrou na
+# lista do que pode pelo Vita 0f89c1ea) corta também, como a vírgula — "quero a nota fiscal
+# porque não veio junto o produto", "preciso da nota fiscal pois não veio tudo" → pessoa.
 _NAO_VEIO = re.compile(r"\bnao\b")
 _TRECHOS = re.compile(
-    r"[,.;:!?]+|\b(?:mas|mais|porem|e|so\s+q(?:ue)?)\b"
+    r"[,.;:!?]+|\b(?:mas|mais|porem|e|so\s+q(?:ue)?|porque|pois)\b"
     r"|(?=\b(?:preciso|precisava|quero|queria|gostaria|cade|manda|mande|envia|envie)\b)"
 )
 _NOME_DO_DOC = re.compile(r"\b" + _PAPEL + r"\b")
@@ -1037,7 +1045,10 @@ _MOTIVO_E_FORMATO = re.compile(
     r"|envia|envie|enviar|passa|passar|encaminha|encaminhar)\b)"
     r"|\b(?:nem|mesmo)\s+que\s+seja\b"
     r"|\bpode\s+ser\s+(?=(?:por|em|pelo|aqui|pdf|digital)\b)"
-    r"|\b(?:nem|ni)\s+(?:(?:em\s+)?(?:a|o)\s+|na\s+|no\s+|em\s+|pel[ao]\s+|por\s+)?"
+    # O lugar com a preposição OBRIGATÓRIA (revisão de 03/11): "nem a caixa", "nem caixa", "nem
+    # o pacote" é a CAIXA que não veio também (o aparelho sem a caixa pode ser usado ou trocado)
+    # e sobra na lista → pessoa; "nem na caixa", "ni em a caixa", "nem por chat" é o lugar.
+    r"|\b(?:nem|ni)\s+(?:em\s+(?:a|o)\s+|na\s+|no\s+|em\s+|pel[ao]\s+|por\s+)"
     r"(?:caixa|embalagem|pacote|chat|aqui)\b"
     r"|\b(?:por|pelo|no|via)\s+(?:o\s+)?chat\b"
     r"|\bja\s+(?:ligou|liguei|funcionou)\b"
