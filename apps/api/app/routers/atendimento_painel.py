@@ -196,7 +196,7 @@ async def enviar_foto(
     conversa_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_responde)],
-    arquivo: Annotated[UploadFile, File()],
+    arquivo: Annotated[list[UploadFile], File()],
     legenda: Annotated[str | None, Form(max_length=10_000)] = None,
     ultima_vista_id: Annotated[UUID | None, Form()] = None,
     confirmar: Annotated[bool, Form()] = False,
@@ -207,6 +207,11 @@ async def enviar_foto(
 
     Na reclamação do ML (28/10/2026), a foto/PDF vai na mensagem da reclamação,
     `para` o comprador ou o mediador (como o /responder).
+
+    Várias (03/11/2026): o campo `arquivo` repetido — só onde vão NUMA
+    mensagem (`foto.numa_mensagem`, o ML, até `foto.max_anexos`); nos chats a
+    tela manda uma por vez, na ordem (cada uma é uma mensagem). Anexo que não
+    serve → 422 com `anexo` = qual (1, 2…).
 
     Trava → 409 com o `code` (texto/foto reprovados → 422), como o
     /responder. Erro da PLATAFORMA não é erro HTTP: volta 200 com a mensagem
@@ -223,24 +228,53 @@ async def enviar_foto(
     motivo = foto.motivo_sem_foto(c)
     if motivo:
         raise _recusa_http(EnvioRecusado(enviar.RECUSA_FOTO_NAO_SUPORTADA, motivo))
-    dados = await arquivo.read(foto.MAX_BYTES_UPLOAD + 1)
-    try:
-        # A conferência e, no PDF (a NF), a conversão: o PDF só fica PDF onde a
-        # plataforma aceita arquivo (pós-venda do ML); nos chats sem arquivo vira
-        # imagem. PyMuPDF é síncrono: fora do laço de eventos.
-        imagem = await asyncio.to_thread(
-            foto.validar_para_a_caixa, c, dados, arquivo.filename, arquivo.content_type
-        )
-    except foto.FotoInvalida as e:
+    total = len(arquivo)
+    if total > 1 and not foto.numa_mensagem(c):
         raise HTTPException(
             422,
-            detail={"code": enviar.RECUSA_FOTO_INVALIDA, "detail": e.detail, "motivo": e.code},
-        ) from e
+            detail={
+                "code": enviar.RECUSA_FOTO_INVALIDA,
+                "detail": "Nesta plataforma cada foto vai numa mensagem: mande uma por vez.",
+                "motivo": "uma_por_mensagem",
+            },
+        )
+    if total > foto.max_anexos(c):
+        raise HTTPException(
+            422,
+            detail={
+                "code": enviar.RECUSA_FOTO_INVALIDA,
+                "detail": f"Cabem até {foto.max_anexos(c)} anexos numa mensagem aqui.",
+                "motivo": "anexos_demais",
+            },
+        )
+    imagens: list[foto.Foto] = []
+    for i, arq in enumerate(arquivo, 1):
+        dados = await arq.read(foto.MAX_BYTES_UPLOAD + 1)
+        try:
+            # A conferência e, no PDF (a NF), a conversão: o PDF só fica PDF onde a
+            # plataforma aceita arquivo (pós-venda do ML); nos chats sem arquivo vira
+            # imagem. PyMuPDF é síncrono: fora do laço de eventos.
+            imagens.append(
+                await asyncio.to_thread(
+                    foto.validar_para_a_caixa, c, dados, arq.filename, arq.content_type
+                )
+            )
+        except foto.FotoInvalida as e:
+            detalhe = e.detail if total == 1 else f"{arq.filename or f'Anexo {i}'}: {e.detail}"
+            raise HTTPException(
+                422,
+                detail={
+                    "code": enviar.RECUSA_FOTO_INVALIDA,
+                    "detail": detalhe,
+                    "motivo": e.code,
+                    **({"anexo": i} if total > 1 else {}),
+                },
+            ) from e
     try:
         m = await enviar.enviar_foto(
             session,
             c,
-            imagem,
+            imagens[0] if total == 1 else imagens,
             legenda=legenda,
             user=user,
             ultima_vista_id=ultima_vista_id,

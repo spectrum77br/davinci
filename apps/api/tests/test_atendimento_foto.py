@@ -645,3 +645,206 @@ async def test_rota_shopee_pdf_vira_imagem(db, client, admin, make_user, monkeyp
     assert r.status_code == 422
     assert r.json()["detail"]["motivo"] == "pdf_paginas"
     assert len(enviados) == 1
+
+
+# ─────────────── várias de uma vez (03/11/2026) ───────────────
+# "às vezes preciso mandar umas 5": no ML todas vão NUMA mensagem, com o texto;
+# nos chats cada imagem é uma mensagem (a tela manda uma por vez, na ordem).
+
+
+def _jpgs(n: int) -> list[bytes]:
+    return [b"\xff\xd8\xff\xe0" + b"\x00\x10JFIF" + bytes([65 + i]) * 200 for i in range(n)]
+
+
+def test_quantas_e_como_vao_por_caixa():
+    from types import SimpleNamespace
+
+    def conv(plataforma, canal):
+        return SimpleNamespace(plataforma=plataforma, canal=canal)
+
+    assert (
+        foto.numa_mensagem(conv("ml", "pos_venda")),
+        foto.max_anexos(conv("ml", "pos_venda")),
+    ) == (
+        True,
+        foto.MAX_ANEXOS_NUMA_MENSAGEM,
+    )
+    assert foto.numa_mensagem(conv("ml", "reclamacao")) is True
+    for plataforma, canal in (("shopee", "chat"), ("tiktok", "chat"), ("whatsapp", "zap")):
+        assert foto.numa_mensagem(conv(plataforma, canal)) is False
+        assert foto.max_anexos(conv(plataforma, canal)) == foto.MAX_ANEXOS_DE_UMA_VEZ
+    # Sem anexo aqui (pergunta do ML, Amazon): nenhuma.
+    assert foto.max_anexos(conv("ml", "pergunta")) == 0
+    assert foto.max_anexos(conv("amazon", "email")) == 0
+
+
+async def test_ml_varias_fotos_vao_numa_mensagem_na_ordem(db, make_user, monkeypatch):
+    subidos: list[bytes] = []
+
+    def api(request):
+        if request.url.path == "/messages/attachments":
+            subidos.append(request.content)
+            return httpx.Response(200, json={"id": f"999_{len(subidos)}.jpg"})
+        if request.url.path == f"/messages/packs/2000009980/sellers/{SELLER}":
+            corpo = json.loads(request.content)
+            assert corpo["text"] == "Seguem as fotos."
+            assert corpo["attachments"] == ["999_1.jpg", "999_2.jpg", "999_3.jpg"]
+            return httpx.Response(201, json={"id": "msg-ml-v"})
+        return httpx.Response(404, json={"error": "not_found"})
+
+    rede = _Rede(monkeypatch, api)
+    _cliente(monkeypatch, _ml_real())
+    conversa, user = await _cenario(
+        db,
+        make_user,
+        plataforma="ml",
+        canal="pos_venda",
+        externo="2000009980",
+        comprador=str(COMPRADOR_ML),
+    )
+    fotos = [foto.validar_foto(b, f"f{i}.jpg") for i, b in enumerate(_jpgs(3), 1)]
+    m = await enviar.enviar_foto(db, conversa, fotos, legenda="Seguem as fotos.", user=user)
+    assert m.status == "enviada", m.erro
+    # Na ordem escolhida: a 1ª sobe primeiro.
+    assert [bytes([65 + i]) * 200 in subidos[i] for i in range(3)] == [True] * 3
+    assert [a["nome"] for a in m.anexos] == ["f1.jpg", "f2.jpg", "f3.jpg"]
+    assert (m.tipo, m.texto) == ("imagem", "Seguem as fotos.")
+    assert [f["sha256"] for f in m.payload["fotos"]] == [f.sha256 for f in fotos]
+    assert m.payload["envio"]["ml_anexos"] == ["999_1.jpg", "999_2.jpg", "999_3.jpg"]
+    assert len([c for c in rede.caminhos() if c[1].startswith("/messages/packs/")]) == 1
+
+    # A trava de repetida vale para CADA imagem da mensagem: mandar a 2ª de
+    # novo em menos de 2 min é recusado, nada sobe.
+    antes = len(rede.feitos)
+    with pytest.raises(EnvioRecusado) as e:
+        await enviar.enviar_foto(db, conversa, fotos[1], legenda="De novo.", user=user)
+    assert e.value.code == enviar.RECUSA_ENVIO_REPETIDO
+    assert len(rede.feitos) == antes
+
+
+async def test_ml_varias_upload_de_uma_falha_nada_sai(db, make_user, monkeypatch):
+    subidos: list[int] = []
+
+    def api(request):
+        if request.url.path == "/messages/attachments":
+            subidos.append(1)
+            if len(subidos) == 2:
+                return httpx.Response(400, json={"code": "invalid_file"})
+            return httpx.Response(200, json={"id": f"999_{len(subidos)}.jpg"})
+        raise AssertionError("sem todos os anexos não há mensagem")
+
+    _Rede(monkeypatch, api)
+    _cliente(monkeypatch, _ml_real())
+    conversa, user = await _cenario(
+        db,
+        make_user,
+        plataforma="ml",
+        canal="pos_venda",
+        externo="2000009981",
+        comprador=str(COMPRADOR_ML),
+    )
+    fotos = [foto.validar_foto(b, f"f{i}.jpg") for i, b in enumerate(_jpgs(3), 1)]
+    m = await enviar.enviar_foto(db, conversa, fotos, legenda="Fotos.", user=user)
+    assert m.status == "falhou"
+    # Diz QUAL falhou; a 3ª nem sobe.
+    assert "invalid_file" in m.erro and "(anexo 2 de 3)" in m.erro
+    assert len(subidos) == 2
+
+
+async def test_varias_numa_chamada_so_onde_vao_juntas(db, make_user, monkeypatch):
+    rede = _Rede(monkeypatch, _shopee_ok)
+    _cliente(monkeypatch, _shopee_real())
+    conversa, user = await _cenario(db, make_user, externo="conv-varias")
+    fotos = [foto.validar_foto(b, "f.jpg") for b in _jpgs(2)]
+    # Shopee: cada imagem é uma mensagem — a lista é recusada antes de subir.
+    with pytest.raises(EnvioRecusado) as e:
+        await enviar.enviar_foto(db, conversa, fotos, user=user)
+    assert e.value.code == enviar.RECUSA_FOTO_INVALIDA
+    assert rede.feitos == []
+    # Uma por vez, na ordem: as duas saem, cada uma na sua mensagem.
+    for f in fotos:
+        m = await enviar.enviar_foto(db, conversa, f, user=user)
+        assert m.status == "enviada", m.erro
+    assert len([p for p in rede.feitos if p.url.path.endswith("/send_message")]) == 2
+
+
+async def test_ml_mesma_imagem_duas_vezes_e_acima_do_teto(db, make_user, monkeypatch):
+    rede = _Rede(monkeypatch, lambda r: httpx.Response(500))
+    _cliente(monkeypatch, _ml_real())
+    conversa, user = await _cenario(
+        db,
+        make_user,
+        plataforma="ml",
+        canal="pos_venda",
+        externo="2000009982",
+        comprador=str(COMPRADOR_ML),
+    )
+    a = foto.validar_foto(_jpgs(1)[0], "a.jpg")
+    with pytest.raises(EnvioRecusado) as e:
+        await enviar.enviar_foto(db, conversa, [a, a], legenda="Fotos.", user=user)
+    assert e.value.code == enviar.RECUSA_FOTO_INVALIDA
+    assert "duas vezes" in e.value.detail
+    demais = [foto.validar_foto(b, "f.jpg") for b in _jpgs(foto.MAX_ANEXOS_NUMA_MENSAGEM + 1)]
+    with pytest.raises(EnvioRecusado) as e:
+        await enviar.enviar_foto(db, conversa, demais, legenda="Fotos.", user=user)
+    assert e.value.code == enviar.RECUSA_FOTO_INVALIDA
+    assert rede.feitos == []
+
+
+async def test_rota_varias_fotos(db, client, admin, make_user, monkeypatch):
+    def api(request):
+        if request.url.path == "/messages/attachments":
+            return httpx.Response(200, json={"id": f"999_{len(rede.feitos)}.jpg"})
+        if request.url.path.startswith("/messages/packs/"):
+            assert len(json.loads(request.content)["attachments"]) == 2
+            return httpx.Response(201, json={"id": "msg-ml-r"})
+        return httpx.Response(404)
+
+    rede = _Rede(monkeypatch, api)
+    _cliente(monkeypatch, _ml_real())
+    ml, _ = await _cenario(
+        db,
+        make_user,
+        plataforma="ml",
+        canal="pos_venda",
+        externo="2000009983",
+        comprador=str(COMPRADOR_ML),
+    )
+    j1, j2, j3 = _jpgs(3)
+    # Um anexo que não serve no meio: 422 diz qual, nada sobe.
+    r = await client.post(
+        f"{URL}/conversas/{ml.id}/foto",
+        files=[
+            ("arquivo", ("a.jpg", j1, "image/jpeg")),
+            ("arquivo", ("b.gif", b"GIF89a..", "image/gif")),
+        ],
+        data={"legenda": "Fotos."},
+    )
+    assert r.status_code == 422
+    assert (r.json()["detail"]["code"], r.json()["detail"]["anexo"]) == ("foto_invalida", 2)
+    assert r.json()["detail"]["detail"].startswith("b.gif: ")
+    assert rede.feitos == []
+    # Acima do teto da mensagem: recusado.
+    r = await client.post(
+        f"{URL}/conversas/{ml.id}/foto",
+        files=[("arquivo", (f"{i}.jpg", b, "image/jpeg")) for i, b in enumerate(_jpgs(6))],
+        data={"legenda": "Fotos."},
+    )
+    assert (r.status_code, r.json()["detail"]["motivo"]) == (422, "anexos_demais")
+    # Duas boas: uma mensagem com as duas.
+    r = await client.post(
+        f"{URL}/conversas/{ml.id}/foto",
+        files=[("arquivo", ("a.jpg", j1, "image/jpeg")), ("arquivo", ("b.jpg", j2, "image/jpeg"))],
+        data={"legenda": "Fotos."},
+    )
+    assert r.status_code == 200, r.text
+    m = r.json()["mensagem"]
+    assert m["status"] == "enviada" and [a["nome"] for a in m["anexos"]] == ["a.jpg", "b.jpg"]
+
+    # Shopee: várias na mesma chamada → 422 (a tela manda uma por vez).
+    sh, _ = await _cenario(db, make_user, externo="conv-rota-varias")
+    r = await client.post(
+        f"{URL}/conversas/{sh.id}/foto",
+        files=[("arquivo", ("a.jpg", j1, "image/jpeg")), ("arquivo", ("c.jpg", j3, "image/jpeg"))],
+    )
+    assert (r.status_code, r.json()["detail"]["motivo"]) == (422, "uma_por_mensagem")

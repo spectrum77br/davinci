@@ -66,6 +66,43 @@ export function tituloDaNf(
   if (ef?.nf_numero) return `anexar a NF nº ${ef.nf_numero} deste pedido${ef.pdf === 'imagem' ? ' (este chat não aceita PDF: vai como imagem)' : ' (PDF)'}`
   return ef?.nf_motivo || 'anexar a NF deste pedido'
 }
+
+// Várias de uma vez (03/11/2026, a equipe: "às vezes preciso mandar umas 5").
+// O que entra na lista de anexos: o tipo, o tamanho, o mesmo arquivo duas
+// vezes (nome + tamanho + data) e o teto da caixa (`max_anexos` do painel).
+// Devolve os aceitos, na ordem, e uma frase por recusado.
+export function escolherAnexos(
+  atuais: { arquivo: { name: string; size: number; lastModified: number } }[],
+  novos: File[],
+  op: { max: number; maxBytes: number; tipos: string[] },
+): { aceitos: File[]; recusas: string[] } {
+  const aceitos: File[] = []
+  const recusas: string[] = []
+  const chave = (f: { name: string; size: number; lastModified: number }) => `${f.name}|${f.size}|${f.lastModified}`
+  const vistos = new Set(atuais.map((a) => chave(a.arquivo)))
+  let cheio = false
+  for (const f of novos) {
+    if (!op.tipos.includes(f.type)) {
+      recusas.push(`${f.name}: só dá para mandar foto JPG ou PNG, ou PDF.`)
+    } else if (f.size > op.maxBytes) {
+      recusas.push(`${f.name}: passa de ${Math.round(op.maxBytes / (1024 * 1024))} MB — escolha um menor.`)
+    } else if (vistos.has(chave(f))) {
+      recusas.push(`${f.name}: já está anexado.`)
+    } else if (atuais.length + aceitos.length >= op.max) {
+      cheio = true
+    } else {
+      vistos.add(chave(f))
+      aceitos.push(f)
+    }
+  }
+  if (cheio) recusas.push(op.max === 1 ? 'Aqui vai um anexo por vez.' : `Cabem até ${op.max} anexos de uma vez — os outros ficaram de fora.`)
+  return { aceitos, recusas }
+}
+// O botão de enviar: "Enviar foto", "Enviar PDF" ou "Enviar 3 anexos".
+export function rotuloEnviarAnexos(itens: { pdf: boolean }[]): string {
+  if (itens.length === 1) return itens[0].pdf ? 'Enviar PDF' : 'Enviar foto'
+  return itens.every((a) => !a.pdf) ? `Enviar ${itens.length} fotos` : `Enviar ${itens.length} anexos`
+}
 </script>
 
 <script setup lang="ts">
@@ -2294,7 +2331,7 @@ function aoCriarNota(m: Mensagem) {
 }
 
 // ─── foto na resposta (Shopee, TikTok, pós-venda do ML, Zap) ───────────────
-// Uma imagem por vez, pelo POST /conversas/{id}/foto (caminho único de saída
+// Pelo POST /conversas/{id}/foto (caminho único de saída
 // no backend: as mesmas travas do texto). A foto só sobe para a plataforma no
 // envio; escolher e desistir não manda nada a lugar nenhum. No ML ela vai
 // junto de um texto (obrigatório lá); na Shopee e no TikTok, sozinha; no Zap
@@ -2305,6 +2342,13 @@ function aoCriarNota(m: Mensagem) {
 // (Shopee, TikTok, Zap) o servidor transforma em imagem (`'imagem'`). O
 // botão "NF" busca a DANFE da nota cheia do pedido (GET /conversas/{id}/nf)
 // e anexa — a pessoa confere e manda; nada sai sozinho.
+// Várias de uma vez (03/11/2026): pelo botão (`multiple`), colando (Ctrl+V na
+// caixa) ou arrastando sobre a resposta, até `max_anexos`. Cada uma com a
+// prévia e o "tirar". No ML (`numa_mensagem`) vão TODAS numa mensagem, com o
+// texto; nos chats, uma mensagem por imagem, na ordem, uma de cada vez (a
+// legenda opcional do Zap vai com a última). Cada uma guarda o seu estado:
+// a que falhou mostra o porquê e reenvia sozinha; a incerta (pode ter saído)
+// não reenvia — a trava de repetida do servidor segura o clique de novo.
 const envioFoto = computed(() => painelDados.value?.envio_foto ?? null)
 const TIPOS_FOTO = ['image/jpeg', 'image/png', 'application/pdf']
 const MAX_FOTO = 10 * 1024 * 1024
@@ -2322,35 +2366,90 @@ const motivoSemFoto = computed(() => {
 const fotoInput = ref<HTMLInputElement | null>(null)
 // `nfChave`: a chave da NF do botão "NF" (28/10/2026) — vai no POST /foto e marca a
 // NF mandada pela pessoa (o agente nunca a repete na conversa).
-const foto = ref<{ arquivo: File; previa: string; pdf: boolean; nfChave?: string } | null>(null)
+type Anexo = {
+  id: number
+  arquivo: File
+  previa: string
+  pdf: boolean
+  nfChave?: string
+  estado: 'pendente' | 'enviando' | 'enviada' | 'falhou' | 'incerta'
+  erro?: string
+}
+const anexos = ref<Anexo[]>([])
+let seqAnexo = 0
 const legendaFoto = ref('')
 const enviandoFoto = ref(false)
+const arrastando = ref(false)
+const maxAnexos = computed(() => envioFoto.value?.max_anexos || 1)
+const anexosNumaMensagem = computed(() => !!envioFoto.value?.numa_mensagem)
+// O que ainda vai: pendentes e as que falharam (a enviada e a incerta, não).
+const aEnviar = computed(() => anexos.value.filter((a) => a.estado === 'pendente' || a.estado === 'falhou'))
+const anexosCheios = computed(() => anexos.value.filter((a) => a.estado !== 'enviada').length >= maxAnexos.value)
+const temNfAnexada = computed(() => anexos.value.some((a) => a.nfChave && a.estado !== 'enviada'))
 function descartarFoto() {
-  if (foto.value) URL.revokeObjectURL(foto.value.previa)
-  foto.value = null
+  for (const a of anexos.value) URL.revokeObjectURL(a.previa)
+  anexos.value = []
   legendaFoto.value = ''
 }
 onBeforeUnmount(descartarFoto)
+function tirarAnexo(id: number) {
+  if (enviandoFoto.value) return
+  const a = anexos.value.find((x) => x.id === id)
+  if (a) URL.revokeObjectURL(a.previa)
+  anexos.value = anexos.value.filter((x) => x.id !== id)
+  if (!anexos.value.length) legendaFoto.value = ''
+}
+function novoAnexo(arquivo: File, nfChave?: string): Anexo {
+  return { id: ++seqAnexo, arquivo, previa: URL.createObjectURL(arquivo), pdf: arquivo.type === 'application/pdf', nfChave, estado: 'pendente' }
+}
+function adicionarAnexos(arquivos: File[]) {
+  if (!arquivos.length || enviandoFoto.value) return
+  if (motivoSemFoto.value) {
+    toasts.warning('O anexo não sai por aqui nesta conversa', motivoSemFoto.value)
+    return
+  }
+  const { aceitos, recusas } = escolherAnexos(
+    anexos.value.filter((a) => a.estado !== 'enviada'),
+    arquivos,
+    { max: maxAnexos.value, maxBytes: envioFoto.value?.max_bytes || MAX_FOTO, tipos: TIPOS_FOTO },
+  )
+  if (recusas.length) toasts.error(recusas.length === 1 ? recusas[0] : 'Alguns arquivos não entraram', recusas.length === 1 ? undefined : recusas)
+  if (aceitos.length) anexos.value = [...anexos.value, ...aceitos.map((f) => novoAnexo(f))]
+}
 function escolherFoto() {
   if (motivoSemFoto.value) return
   fotoInput.value?.click()
 }
 function aoEscolherFoto(ev: Event) {
   const alvo = ev.target as HTMLInputElement
-  const f = alvo.files?.[0]
+  const arquivos = Array.from(alvo.files || [])
   alvo.value = ''
-  if (!f) return
-  const max = envioFoto.value?.max_bytes || MAX_FOTO
-  if (!TIPOS_FOTO.includes(f.type)) {
-    toasts.error('Só dá para mandar foto JPG ou PNG, ou PDF.')
-    return
-  }
-  if (f.size > max) {
-    toasts.error(`O arquivo passa de ${Math.round(max / (1024 * 1024))} MB — escolha um menor.`)
-    return
-  }
-  descartarFoto()
-  foto.value = { arquivo: f, previa: URL.createObjectURL(f), pdf: f.type === 'application/pdf' }
+  adicionarAnexos(arquivos)
+}
+// Colar (Ctrl+V) na caixa de resposta: os arquivos do recorte viram anexos; o
+// texto colado segue normal. Só onde a caixa responde ESTA conversa.
+function podeSoltarAnexo(): boolean {
+  return modoCaixa.value === 'responder' && !respondePorOutra.value && !canalExterno.value && !!props.canEdit && !detalhe.value?.conversa.somente_leitura
+}
+function aoColar(ev: ClipboardEvent) {
+  const arquivos = Array.from(ev.clipboardData?.files || [])
+  if (!arquivos.length || !podeSoltarAnexo()) return
+  ev.preventDefault()
+  adicionarAnexos(arquivos)
+}
+function temArquivo(ev: DragEvent) {
+  return !!ev.dataTransfer && Array.from(ev.dataTransfer.types || []).includes('Files')
+}
+function aoArrastarSobre(ev: DragEvent) {
+  if (!temArquivo(ev) || !podeSoltarAnexo()) return
+  ev.preventDefault()
+  arrastando.value = true
+}
+function aoSoltar(ev: DragEvent) {
+  arrastando.value = false
+  if (!temArquivo(ev) || !podeSoltarAnexo()) return
+  ev.preventDefault()
+  adicionarAnexos(Array.from(ev.dataTransfer?.files || []))
 }
 const carregandoNf = ref(false)
 const tituloNf = computed(() => tituloDaNf(envioFoto.value, motivoSemFoto.value))
@@ -2370,8 +2469,12 @@ async function anexarNf() {
     toasts.warning('A NF não sai pelo DaVinci nesta conversa', motivoSemFoto.value)
     return
   }
-  if (foto.value) {
-    toasts.warning('Já há um anexo', 'Envie ou descarte o anexo antes de anexar a NF.')
+  if (temNfAnexada.value) {
+    toasts.warning('A NF já está anexada', 'Ela vai junto com os outros anexos.')
+    return
+  }
+  if (anexosCheios.value) {
+    toasts.warning('Não cabe mais um anexo', maxAnexos.value === 1 ? 'Envie ou descarte o anexo antes de anexar a NF.' : `Cabem até ${maxAnexos.value} de uma vez: tire um para anexar a NF.`)
     return
   }
   const ef = envioFoto.value
@@ -2385,11 +2488,11 @@ async function anexarNf() {
     // `.raw`: o número vem da NF que o servidor escolheu AGORA (X-NF-Numero),
     // não do painel (que pode estar velho).
     const r = await $fetch.raw<Blob>(`/api/atendimento/conversas/${encodeURIComponent(id)}/nf`, { credentials: 'include', responseType: 'blob' })
-    if (!aberta(id) || foto.value || !r._data) return
+    if (!aberta(id) || anexosCheios.value || temNfAnexada.value || !r._data) return
     const numero = r.headers.get('x-nf-numero') || envioFoto.value?.nf_numero
     const arquivo = new File([r._data], numero ? `NF_${numero}.pdf` : 'NF.pdf', { type: 'application/pdf' })
     const nfChave = r.headers.get('x-nf-chave') || undefined
-    foto.value = { arquivo, previa: URL.createObjectURL(arquivo), pdf: true, nfChave }
+    anexos.value = [...anexos.value, novoAnexo(arquivo, nfChave)]
     if (envioFoto.value?.legenda_obrigatoria && !legendaFoto.value.trim()) legendaFoto.value = LEGENDA_NF
   } catch (e: any) {
     // O erro veio como Blob (responseType) e o `data` do FetchError é só
@@ -2404,63 +2507,131 @@ async function anexarNf() {
     carregandoNf.value = false
   }
 }
-async function enviarFoto(opcoes?: { confirmar?: boolean }) {
+// Um POST /foto com estes anexos (vários só onde vão numa mensagem — o ML).
+// Devolve o que houve, sem toast: quem chama junta tudo numa frase.
+type ResultadoAnexo =
+  | { tipo: 'saiu'; mensagem: Mensagem | null; incerta: boolean }
+  | { tipo: 'recusou'; mensagem: Mensagem; erro: string }
+  | { tipo: 'trava'; code: string; texto: string; motivos: string[]; seguir: boolean }
+  | { tipo: 'sem_resposta' }
+async function postarAnexos(id: string, itens: Anexo[], legenda: string, vista: string | null, confirmar: boolean): Promise<ResultadoAnexo> {
+  const fd = new FormData()
+  for (const f of itens) fd.append('arquivo', f.arquivo, f.arquivo.name)
+  // A NF do botão "NF" (uma só na lista: `temNfAnexada`).
+  const f = itens.find((a) => a.nfChave)
+  if (f?.nfChave) fd.append('nf_chave', f.nfChave)
+  if (legenda) fd.append('legenda', legenda)
+  // Reclamação do ML: o anexo vai na mensagem ao destino da caixa.
+  if (destinosReclamacao.value.length && destinoCaixa.value) fd.append('para', destinoCaixa.value)
+  if (vista) fd.append('ultima_vista_id', vista)
+  if (confirmar) fd.append('confirmar', 'true')
+  try {
+    const r = await api<{ mensagem: Mensagem }>(`/api/atendimento/conversas/${encodeURIComponent(id)}/foto`, { method: 'POST', body: fd })
+    const m = r?.mensagem ?? null
+    if (m && detalhe.value?.conversa.id === id && !detalhe.value.mensagens.some((x) => x.id === m.id)) {
+      detalhe.value.mensagens = [...detalhe.value.mensagens, m]
+      rolarProFim()
+    }
+    if (m?.status === 'falhou') return { tipo: 'recusou', mensagem: m, erro: erroEnvioLegivel(m.erro) }
+    return { tipo: 'saiu', mensagem: m, incerta: m?.status === 'revisar' }
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    const st = statusDoErro(e)
+    if (!code && (!st || st >= 500)) return { tipo: 'sem_resposta' }
+    const er = erroDaApi(e, 'Não consegui mandar a foto')
+    // Anexo que não serve (PDF grande, tipo): é DESTE anexo — os outros seguem.
+    return { tipo: 'trava', code: code || '', texto: er.texto, motivos: er.motivos, seguir: code === 'foto_invalida' }
+  }
+}
+async function enviarFoto(opcoes?: { confirmar?: boolean; so?: number }) {
   const d = detalhe.value
-  const f = foto.value
-  if (!d || !f || enviandoFoto.value || motivoSemFoto.value) return
+  if (!d || enviandoFoto.value || motivoSemFoto.value) return
   const legenda = legendaFoto.value.trim()
   if (envioFoto.value?.legenda_obrigatoria && !legenda) {
     toasts.error('No Mercado Livre o anexo vai junto de um texto', 'Escreva uma frase para acompanhar o anexo.')
     return
   }
+  const todos = aEnviar.value
+  if (!todos.length) return
   const id = d.conversa.id
-  const fd = new FormData()
-  fd.append('arquivo', f.arquivo, f.arquivo.name)
-  if (f.nfChave) fd.append('nf_chave', f.nfChave)
-  if (legenda && envioFoto.value?.legenda_permitida) fd.append('legenda', legenda)
-  // Reclamação do ML: o anexo vai na mensagem ao destino da caixa.
-  if (destinosReclamacao.value.length && destinoCaixa.value) fd.append('para', destinoCaixa.value)
-  const vista = ultimaVista(d)
-  if (vista) fd.append('ultima_vista_id', vista)
-  if (opcoes?.confirmar === true) fd.append('confirmar', 'true')
+  // ML: todas numa mensagem (reenviar = a mensagem inteira). Chats: uma por
+  // mensagem, na ordem; o "reenviar" de uma manda só ela.
+  const lotes: Anexo[][] = anexosNumaMensagem.value
+    ? [todos]
+    : (opcoes?.so != null ? todos.filter((a) => a.id === opcoes.so) : todos).map((a) => [a])
+  const ultimo = anexos.value[anexos.value.length - 1]
+  let vista = ultimaVista(d)
+  let confirmar = opcoes?.confirmar === true
+  let saiu = 0
+  let repetidas = 0
+  let falhou = 0
+  let incerta = false
+  let simulada = false
+  let parou = ''
   enviandoFoto.value = true
   enviandoIds.add(id)
   try {
-    const r = await api<{ mensagem: Mensagem }>(`/api/atendimento/conversas/${encodeURIComponent(id)}/foto`, { method: 'POST', body: fd })
-    const m = r?.mensagem
-    if (m && detalhe.value?.conversa.id === id && !detalhe.value.mensagens.some((x) => x.id === m.id)) {
-      detalhe.value.mensagens = [...detalhe.value.mensagens, m]
-      rolarProFim()
-    }
-    const oQue = f.pdf ? 'o PDF' : 'a foto'
-    if (m?.status === 'falhou') {
-      toasts.error(`A plataforma recusou ${oQue} — NÃO chegou ao comprador`, erroEnvioLegivel(m.erro))
-    } else {
-      if (aberta(id)) descartarFoto()
-      if (m?.status === 'revisar') toasts.warning(`Não deu para confirmar o envio d${oQue}`, 'Pode ter saído. Confira na plataforma e marque no balão se saiu.')
-      else toasts.success(f.pdf ? 'PDF enviado' : 'Foto enviada', envioSimulado(m, props.flags, d.conversa.plataforma) ? 'simulador: não chegou ao comprador' : undefined)
-    }
-    if (aberta(id)) await carregar(id, true)
-  } catch (e: any) {
-    const code = e?.data?.detail?.code
-    const st = statusDoErro(e)
-    if (!code && (!st || st >= 500)) {
-      toasts.warning('Não deu para confirmar o envio da foto — pode ter saído', 'Espere a conversa atualizar antes de mandar de novo.')
-    } else {
-      const er = erroDaApi(e, 'Não consegui mandar a foto')
-      if (code === 'conversa_mudou' && aberta(id) && confirm(`${er.texto}\n\n${er.motivos.join('\n')}\n\nMandar a foto mesmo assim?`)) {
-        enviandoFoto.value = false
-        enviandoIds.delete(id)
-        await enviarFoto({ confirmar: true })
-        return
+    for (const lote of lotes) {
+      // Trocou de conversa no meio: o resto fica (a lista é desta conversa).
+      if (!aberta(id) || !lote.every((a) => anexos.value.includes(a))) break
+      // A legenda: no ML vai com a mensagem; no Zap (opcional), com a ÚLTIMA imagem.
+      const legendaDoLote = envioFoto.value?.legenda_obrigatoria || (envioFoto.value?.legenda_permitida && lote.includes(ultimo)) ? legenda : ''
+      for (const a of lote) { a.estado = 'enviando'; a.erro = undefined }
+      let r = await postarAnexos(id, lote, legendaDoLote, vista, confirmar)
+      if (r.tipo === 'trava' && r.code === 'conversa_mudou') {
+        // Alguém respondeu enquanto a pessoa montava: ela confere e decide.
+        if (!aberta(id) || !confirm(`${r.texto}\n\n${r.motivos.join('\n')}\n\nMandar ${todos.length > 1 ? 'os anexos' : 'o anexo'} mesmo assim?`)) {
+          for (const a of lote) a.estado = 'pendente'
+          break
+        }
+        confirmar = true
+        r = await postarAnexos(id, lote, legendaDoLote, vista, true)
       }
-      toasts.error(er.texto, er.motivos)
+      if (r.tipo === 'saiu' || r.tipo === 'recusou') vista = r.mensagem?.id && RE_UUID.test(r.mensagem.id) ? r.mensagem.id : vista
+      if (r.tipo === 'saiu') {
+        for (const a of lote) a.estado = r.incerta ? 'incerta' : 'enviada'
+        simulada = envioSimulado(r.mensagem, props.flags, d.conversa.plataforma)
+        if (r.incerta) { incerta = true; parou = 'Não deu para confirmar se saiu — confira na plataforma antes de mandar o resto.'; break }
+        saiu += lote.length
+      } else if (r.tipo === 'recusou') {
+        for (const a of lote) { a.estado = 'falhou'; a.erro = `A plataforma recusou: ${r.erro}` }
+        falhou += lote.length
+      } else if (r.tipo === 'sem_resposta') {
+        for (const a of lote) { a.estado = 'incerta'; a.erro = 'Sem resposta do servidor — pode ter saído.' }
+        incerta = true
+        parou = 'Espere a conversa atualizar antes de mandar de novo.'
+        break
+      } else if (r.code === 'envio_repetido') {
+        // A trava de repetida: esta mesma imagem saiu há menos de 2 min.
+        for (const a of lote) { a.estado = 'enviada'; a.erro = 'Já tinha saído há pouco — não foi de novo.' }
+        repetidas += lote.length
+      } else {
+        for (const a of lote) { a.estado = 'falhou'; a.erro = [r.texto, ...r.motivos].join(' — ') }
+        falhou += lote.length
+        if (!r.seguir) { parou = r.texto; break }
+      }
     }
-    if (aberta(id)) await carregar(id, true)
   } finally {
+    // O que não chegou a ir (parou no meio) volta a pendente.
+    for (const a of anexos.value) if (a.estado === 'enviando') a.estado = 'pendente'
     enviandoFoto.value = false
     enviandoIds.delete(id)
   }
+  const sim = simulada ? 'simulador: não chegou ao comprador' : undefined
+  if (!aberta(id)) return
+  if (anexos.value.length && anexos.value.every((a) => a.estado === 'enviada')) {
+    descartarFoto()
+    const linhas = [...(repetidas ? [`${repetidas === 1 ? 'Um já tinha saído' : `${repetidas} já tinham saído`} há pouco — não foi de novo.`] : []), ...(sim ? [sim] : [])]
+    if (saiu) toasts.success(saiu === 1 ? 'Anexo enviado' : `${saiu} anexos enviados`, linhas.length ? linhas : undefined)
+    else toasts.warning('Nada foi enviado de novo', linhas)
+  } else if (incerta) {
+    toasts.warning('Não deu para confirmar o envio de um anexo — pode ter saído', parou || 'Confira na plataforma e marque no balão se saiu.')
+  } else if (falhou) {
+    toasts.error(falhou === 1 ? 'Um anexo NÃO saiu' : `${falhou} anexos NÃO saíram`, [...(saiu ? [`${saiu} saíram.`] : []), parou || 'Veja qual abaixo e reenvie só ele.'])
+  } else if (saiu) {
+    toasts.success(saiu === 1 ? 'Anexo enviado' : `${saiu} anexos enviados`, sim)
+  }
+  await carregar(id, true)
 }
 
 // ─── "tentar de novo" na resposta que a plataforma recusou ──────────────────
@@ -3351,7 +3522,14 @@ watch(() => props.conversaId, (novo, velho) => {
         />
 
         <!-- resposta -->
-        <div class="shrink-0 space-y-2 border-t bg-background p-2">
+        <!-- Soltar arquivos aqui = anexar (03/11/2026). -->
+        <div
+          class="shrink-0 space-y-2 border-t bg-background p-2"
+          :class="arrastando ? 'ring-2 ring-inset ring-primary' : ''"
+          @dragover="aoArrastarSobre"
+          @dragleave.self="arrastando = false"
+          @drop="aoSoltar"
+        >
           <div v-if="atualizacaoFalhou" class="text-[11px] text-muted-foreground">Não consegui atualizar agora — tento de novo em instantes.</div>
 
           <!-- Responder × Nota interna (a nota vale até no modo observação: não sai
@@ -3394,13 +3572,13 @@ watch(() => props.conversaId, (novo, velho) => {
             <template v-if="modoCaixa === 'responder' && !canalExterno">
               <!-- Na aba em que responde OUTRA conversa, a foto não sai (ela é desta). -->
               <template v-if="!respondePorOutra">
-              <input ref="fotoInput" type="file" accept="image/jpeg,image/png,application/pdf" class="hidden" aria-hidden="true" tabindex="-1" @change="aoEscolherFoto" />
+              <input ref="fotoInput" type="file" accept="image/jpeg,image/png,application/pdf" :multiple="maxAnexos > 1" class="hidden" aria-hidden="true" tabindex="-1" @change="aoEscolherFoto" />
               <Button
                 size="sm"
                 variant="outline"
                 class="ml-auto h-7 px-2 text-xs"
-                :disabled="!!motivoSemFoto || enviandoFoto || !!foto"
-                :title="motivoSemFoto || (foto ? 'já há um anexo — envie ou descarte' : 'anexar uma foto (JPG ou PNG) ou um PDF para mandar ao comprador')"
+                :disabled="!!motivoSemFoto || enviandoFoto || anexosCheios"
+                :title="motivoSemFoto || (anexosCheios ? (maxAnexos > 1 ? `já há ${maxAnexos} anexos (o máximo de uma vez) — envie ou tire um` : 'já há um anexo — envie ou descarte') : maxAnexos > 1 ? `anexar fotos (JPG ou PNG) ou PDF para mandar ao comprador — até ${maxAnexos} de uma vez; também dá para colar (Ctrl+V) ou arrastar` : 'anexar uma foto (JPG ou PNG) ou um PDF para mandar ao comprador')"
                 aria-label="anexar foto ou PDF"
                 @click="escolherFoto"
               >
@@ -3411,7 +3589,7 @@ watch(() => props.conversaId, (novo, velho) => {
                 size="sm"
                 variant="outline"
                 class="h-7 px-2 text-xs"
-                :disabled="carregandoNf || enviandoFoto || !!foto"
+                :disabled="carregandoNf || enviandoFoto || anexosCheios || temNfAnexada"
                 :title="tituloNf"
                 aria-label="anexar a NF deste pedido"
                 data-anexar-nf
@@ -3423,31 +3601,77 @@ watch(() => props.conversaId, (novo, velho) => {
             </template>
           </div>
 
-          <!-- foto ou PDF anexado: prévia, texto (ML) e enviar/descartar -->
-          <div v-if="modoCaixa === 'responder' && foto && !respondePorOutra" class="flex items-start gap-2 rounded-md border bg-muted/40 p-2 text-xs" :data-anexo-pdf="foto.pdf ? '' : undefined">
-            <a v-if="foto.pdf" :href="foto.previa" target="_blank" rel="noopener" class="flex size-16 shrink-0 flex-col items-center justify-center gap-0.5 rounded border bg-background text-muted-foreground hover:bg-muted" title="abrir o PDF para conferir">
-              <FileText class="size-6" /><span class="text-[10px] underline">abrir</span>
-            </a>
-            <img v-else :src="foto.previa" alt="foto anexada" class="size-16 shrink-0 rounded border object-cover" />
-            <div class="min-w-0 flex-1 space-y-1">
-              <div class="truncate font-medium" :title="foto.arquivo.name">{{ foto.arquivo.name }}</div>
-              <div class="text-muted-foreground">{{ (foto.arquivo.size / 1024).toFixed(0) }} KB · {{ envioFoto?.legenda_obrigatoria ? 'vai junto do texto abaixo' : envioFoto?.legenda_permitida ? 'pode ir com uma legenda (opcional)' : 'vai sozinha (o texto vai pela caixa, separado)' }}</div>
-              <div v-if="foto.pdf" class="text-muted-foreground" data-pdf-como>{{ envioFoto?.pdf === 'imagem' ? 'Este chat não aceita PDF: o PDF vai como IMAGEM (as páginas, até 3).' : 'Vai como arquivo PDF.' }}</div>
-              <input
-                v-if="envioFoto?.legenda_permitida"
-                v-model="legendaFoto"
-                :maxlength="envioFoto?.legenda_max || limite || 350"
-                class="h-7 w-full rounded-md border bg-background px-2 text-xs"
-                :placeholder="envioFoto?.legenda_obrigatoria ? 'Texto que vai junto da foto (obrigatório no Mercado Livre)' : 'Legenda (opcional) — vai junto da foto'"
-                aria-label="texto que vai junto da foto"
-              />
-              <div v-if="motivoSemFoto" class="text-amber-800 dark:text-amber-300">{{ motivoSemFoto }}</div>
+          <!-- fotos ou PDF anexados: prévia de cada um (com o "tirar" e o estado),
+               texto (ML) / legenda (Zap) e enviar/descartar -->
+          <div v-if="modoCaixa === 'responder' && anexos.length && !respondePorOutra" class="space-y-2 rounded-md border bg-muted/40 p-2 text-xs" data-anexos :data-anexo-pdf="anexos.some((a) => a.pdf) ? '' : undefined">
+            <ul class="flex flex-wrap gap-2" aria-label="anexos">
+              <li
+                v-for="(a, i) in anexos"
+                :key="a.id"
+                class="relative w-16 shrink-0"
+                :data-anexo-estado="a.estado"
+                :title="`${i + 1}. ${a.arquivo.name} · ${(a.arquivo.size / 1024).toFixed(0)} KB${a.erro ? ` — ${a.erro}` : ''}`"
+              >
+                <a v-if="a.pdf" :href="a.previa" target="_blank" rel="noopener" class="flex size-16 flex-col items-center justify-center gap-0.5 rounded border bg-background text-muted-foreground hover:bg-muted" title="abrir o PDF para conferir">
+                  <FileText class="size-6" /><span class="text-[10px] underline">abrir</span>
+                </a>
+                <img v-else :src="a.previa" :alt="`anexo ${i + 1}`" class="size-16 rounded border object-cover" :class="a.estado === 'enviada' ? 'opacity-60' : ''" />
+                <span class="absolute left-0.5 top-0.5 rounded bg-background/90 px-1 text-[10px] font-medium leading-4">{{ i + 1 }}</span>
+                <span v-if="a.estado === 'enviando'" class="absolute inset-0 flex items-center justify-center rounded bg-background/60"><Loader2 class="size-4 animate-spin" /></span>
+                <span v-else-if="a.estado === 'enviada'" class="absolute bottom-0.5 right-0.5 rounded-full bg-emerald-600 p-0.5 text-white" title="saiu"><Check class="size-3" /></span>
+                <span v-else-if="a.estado === 'falhou'" class="absolute bottom-0.5 right-0.5 rounded-full bg-red-600 p-0.5 text-white" title="não saiu"><X class="size-3" /></span>
+                <span v-else-if="a.estado === 'incerta'" class="absolute bottom-0.5 right-0.5 rounded-full bg-amber-500 px-1 text-[10px] font-bold leading-4 text-white" title="pode ter saído — confira na plataforma">?</span>
+                <button
+                  v-if="a.estado === 'pendente' || a.estado === 'falhou'"
+                  type="button"
+                  class="absolute -right-1.5 -top-1.5 rounded-full border bg-background p-0.5 text-muted-foreground shadow-sm hover:text-foreground disabled:opacity-50"
+                  :disabled="enviandoFoto"
+                  :aria-label="`tirar o anexo ${i + 1} (${a.arquivo.name})`"
+                  title="tirar este anexo (nada foi enviado)"
+                  @click="tirarAnexo(a.id)"
+                ><X class="size-3" /></button>
+              </li>
+            </ul>
+            <div class="text-muted-foreground">
+              {{ anexos.length === 1 ? `${anexos[0].arquivo.name} · ${(anexos[0].arquivo.size / 1024).toFixed(0)} KB · ` : `${anexos.length} anexos · ` }}{{ envioFoto?.legenda_obrigatoria ? (anexos.length > 1 ? 'vão todos numa mensagem, junto do texto abaixo' : 'vai junto do texto abaixo') : anexos.length > 1 ? `cada um vai numa mensagem, na ordem${envioFoto?.legenda_permitida ? ' (a legenda vai com o último)' : ''}` : envioFoto?.legenda_permitida ? 'pode ir com uma legenda (opcional)' : 'vai sozinha (o texto vai pela caixa, separado)' }}
             </div>
-            <div class="flex shrink-0 flex-col gap-1">
-              <Button size="sm" class="h-7 px-2 text-xs" :disabled="!!motivoSemFoto || enviandoFoto || (!!envioFoto?.legenda_obrigatoria && !legendaFoto.trim())" :title="foto.pdf ? 'mandar o PDF ao comprador' : 'mandar a foto ao comprador'" @click="enviarFoto()">
-                <Loader2 v-if="enviandoFoto" class="mr-1 size-3.5 animate-spin" /><Send v-else class="mr-1 size-3.5" /> {{ foto.pdf ? 'Enviar PDF' : 'Enviar foto' }}
+            <div v-if="anexos.some((a) => a.pdf)" class="text-muted-foreground" data-pdf-como>{{ envioFoto?.pdf === 'imagem' ? 'Este chat não aceita PDF: o PDF vai como IMAGEM (as páginas, até 3).' : 'Vai como arquivo PDF.' }}</div>
+            <!-- O que não saiu (ou pode ter saído), um por linha; no chat, reenvia só ele. -->
+            <ul v-if="anexos.some((a) => a.erro)" class="space-y-0.5" data-anexos-erros>
+              <li v-for="a in anexos.filter((x) => x.erro)" :key="a.id" class="flex items-start gap-1.5" :class="a.estado === 'falhou' ? 'text-red-700 dark:text-red-300' : 'text-muted-foreground'">
+                <span class="min-w-0 flex-1"><b>{{ anexos.indexOf(a) + 1 }}.</b> {{ a.arquivo.name }}: {{ a.erro }}</span>
+                <button
+                  v-if="a.estado === 'falhou' && !anexosNumaMensagem"
+                  type="button"
+                  class="shrink-0 rounded border bg-background px-1.5 font-medium hover:bg-muted disabled:opacity-50"
+                  :disabled="!!motivoSemFoto || enviandoFoto"
+                  :data-reenviar-anexo="anexos.indexOf(a) + 1"
+                  @click="enviarFoto({ so: a.id })"
+                >reenviar</button>
+              </li>
+            </ul>
+            <input
+              v-if="envioFoto?.legenda_permitida"
+              v-model="legendaFoto"
+              :maxlength="envioFoto?.legenda_max || limite || 350"
+              class="h-7 w-full rounded-md border bg-background px-2 text-xs"
+              :placeholder="envioFoto?.legenda_obrigatoria ? 'Texto que vai junto da foto (obrigatório no Mercado Livre)' : 'Legenda (opcional) — vai junto da foto'"
+              aria-label="texto que vai junto da foto"
+            />
+            <div v-if="motivoSemFoto" class="text-amber-800 dark:text-amber-300">{{ motivoSemFoto }}</div>
+            <div class="flex flex-wrap items-center justify-end gap-1">
+              <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" :disabled="enviandoFoto" title="descartar os anexos que não saíram (nada deles foi enviado)" @click="descartarFoto"><X class="mr-1 size-3.5" /> {{ anexos.some((a) => a.estado === 'enviada') ? 'Limpar' : 'Descartar' }}</Button>
+              <Button
+                v-if="aEnviar.length"
+                size="sm"
+                class="h-7 px-2 text-xs"
+                :disabled="!!motivoSemFoto || enviandoFoto || (!!envioFoto?.legenda_obrigatoria && !legendaFoto.trim())"
+                :title="aEnviar.length > 1 ? 'mandar os anexos ao comprador, na ordem' : aEnviar[0].pdf ? 'mandar o PDF ao comprador' : 'mandar a foto ao comprador'"
+                data-enviar-anexos
+                @click="enviarFoto()"
+              >
+                <Loader2 v-if="enviandoFoto" class="mr-1 size-3.5 animate-spin" /><Send v-else class="mr-1 size-3.5" /> {{ aEnviar.some((a) => a.estado === 'falhou') && aEnviar.every((a) => a.estado === 'falhou') ? (aEnviar.length > 1 ? 'Reenviar os que falharam' : 'Reenviar') : rotuloEnviarAnexos(aEnviar) }}
               </Button>
-              <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" :disabled="enviandoFoto" title="descartar o anexo (nada foi enviado)" @click="descartarFoto"><X class="mr-1 size-3.5" /> Descartar</Button>
             </div>
           </div>
 
@@ -3584,7 +3808,7 @@ watch(() => props.conversaId, (novo, velho) => {
               <span v-if="motivoSemFoto" class="text-amber-800 dark:text-amber-300">{{ motivoSemFoto }}</span>
               <span v-else-if="envioFoto?.nf_numero">A NF nº {{ envioFoto.nf_numero }} deste pedido está no DaVinci{{ envioFoto.pdf === 'imagem' ? ' — este chat não aceita PDF, ela vai como imagem' : '' }}.</span>
               <span v-else class="text-amber-800 dark:text-amber-300">{{ envioFoto?.nf_motivo || 'Conferindo a NF do pedido…' }}</span>
-              <button v-if="!motivoSemFoto && envioFoto?.nf_numero" type="button" class="ml-auto inline-flex items-center gap-1 rounded border border-indigo-300/70 bg-background px-1.5 py-0.5 hover:bg-muted disabled:opacity-50" :disabled="carregandoNf || enviandoFoto || !!foto" @click="anexarNf">
+              <button v-if="!motivoSemFoto && envioFoto?.nf_numero" type="button" class="ml-auto inline-flex items-center gap-1 rounded border border-indigo-300/70 bg-background px-1.5 py-0.5 hover:bg-muted disabled:opacity-50" :disabled="carregandoNf || enviandoFoto || anexosCheios || temNfAnexada" @click="anexarNf">
                 <Loader2 v-if="carregandoNf" class="size-3 animate-spin" /> Anexar a NF
               </button>
             </div>
@@ -3658,6 +3882,7 @@ watch(() => props.conversaId, (novo, velho) => {
             :placeholder="podeDigitar ? (conversa.canal === 'avaliacao' ? 'Escreva a resposta PÚBLICA à avaliação… (Ctrl+Enter envia)' : rotuloDestino ? `${rotuloDestino}: escreva a mensagem… (Ctrl+Enter envia)` : 'Escreva a resposta… (Ctrl+Enter envia)') : 'Resposta desabilitada nesta conversa'"
             aria-label="resposta ao comprador"
             @keydown="aoTeclar"
+            @paste="aoColar"
           />
 
           <div v-if="erroEnvio" class="rounded-md border border-red-500/40 bg-red-500/10 px-2.5 py-1.5 text-xs text-red-700 dark:text-red-300">

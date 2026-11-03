@@ -478,3 +478,26 @@ async def test_conversa_bloqueada_so_leitura_antiga_continua_recusando(db, make_
         await enviar.enviar_resposta(db, conversa, "Oi", user=user, para="mediador")
     assert e.value.code == enviar.RECUSA_CONVERSA_BLOQUEADA
     assert ml.feitos == []
+
+
+async def test_varias_fotos_sobem_e_vao_numa_mensagem(db, make_user, monkeypatch):
+    """Várias de uma vez (03/11/2026): cada uma sobe, e todas vão na MESMA mensagem."""
+    ml = _MLFalso(monkeypatch)
+    conversa, user = await _cenario(db, make_user)
+    fotos = [
+        foto.validar_foto(JPG, "a.jpg"),
+        foto.validar_para_a_caixa(conversa, _pdf(), "NF 15.pdf", "application/pdf"),
+    ]
+    m = await enviar.enviar_foto(
+        db, conversa, fotos, legenda="Seguem os arquivos.", user=user, para="mediador"
+    )
+    assert m.status == "enviada", m.erro
+    assert m.tipo == "arquivo"  # com um PDF junto
+    assert [a["tipo"] for a in m.anexos] == ["imagem", "arquivo"]
+    assert ml.caminhos() == [
+        ("GET", f"/post-purchase/v1/claims/{CLAIM}"),
+        ("POST", f"/post-purchase/v1/claims/{CLAIM}/attachments"),
+        ("POST", f"/post-purchase/v1/claims/{CLAIM}/attachments"),
+        ("POST", f"/post-purchase/v1/claims/{CLAIM}/actions/send-message"),
+    ]
+    assert ml.enviados()[0]["attachments"] == ["777_nf.pdf", "777_nf.pdf"]

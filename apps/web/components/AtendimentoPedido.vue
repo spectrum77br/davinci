@@ -179,6 +179,10 @@ export type EnvioFoto = {
   legenda_permitida: boolean
   // O teto da legenda quando é menor que o do texto (Zap: 1.024, 27/10/2026).
   legenda_max?: number | null
+  // Várias de uma vez (03/11/2026): quantas a tela deixa escolher e se vão
+  // numa mensagem só (o ML, com o texto) ou uma mensagem por imagem (os chats).
+  max_anexos?: number
+  numa_mensagem?: boolean
   // PDF (28/10/2026): 'arquivo' = chega como PDF (pós-venda do ML); 'imagem' =
   // o chat não aceita arquivo e o PDF vira imagem; null = sem anexo aqui.
   pdf?: 'arquivo' | 'imagem' | null

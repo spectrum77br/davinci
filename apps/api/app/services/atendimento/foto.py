@@ -41,6 +41,13 @@ Por plataforma (a resposta é a do chat da conversa):
   Amazon, Magalu, Temu, AliExpress, Instagram: sem foto pelo DaVinci (por
   enquanto) — `motivo_sem_foto` diz à pessoa o caminho de cada plataforma.
 
+Várias de uma vez (03/11/2026, a equipe: "às vezes preciso mandar umas 5"):
+no ML todas vão NUMA mensagem, com o texto (`attachments` é lista — em
+produção o comprador já manda até 5 numa mensagem do pós-venda e a loja até
+20 na reclamação; teto nosso `MAX_ANEXOS_NUMA_MENSAGEM`). Nos chats (Shopee,
+TikTok, Zap) cada imagem é uma mensagem: a tela manda uma por vez, na ordem,
+pelo mesmo POST (até `MAX_ANEXOS_DE_UMA_VEZ` escolhidas de uma vez).
+
 PDF (28/10/2026, a NF — "o primeiro empecilho" da equipe respondendo pelo
 DaVinci): o mesmo botão aceita PDF (até 10 MB, conferido pelos bytes e
 aberto pelo PyMuPDF: sem senha, com página). Só o PÓS-VENDA DO ML recebe o
@@ -71,6 +78,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -146,6 +154,12 @@ MIN_DPI_PDF_IMAGEM = 60
 # larga (ou o contrário) não é documento — é recusada.
 LARGURA_PDF_IMAGEM = 595.0
 MAX_PROPORCAO_PAGINA = 4.0
+
+# Várias de uma vez (03/11/2026): no ML, todas na mesma mensagem (até 5);
+# nos chats, quantas a tela deixa escolher de uma vez (cada uma, uma mensagem).
+CAIXAS_NUMA_MENSAGEM = CAIXAS_COM_LEGENDA
+MAX_ANEXOS_NUMA_MENSAGEM = 5
+MAX_ANEXOS_DE_UMA_VEZ = 10
 
 # O ML: o anexo sobe para o site da conta (Brasil).
 ML_SITE = "MLB"
@@ -432,6 +446,23 @@ def limite_da_legenda(conversa: AtendimentoConversa) -> int | None:
     return LIMITE_LEGENDA.get((conversa.plataforma, conversa.canal))
 
 
+def numa_mensagem(conversa: AtendimentoConversa) -> bool:
+    """Vários anexos vão numa mensagem só (o ML, com o texto)? Senão, um por mensagem."""
+    return (conversa.plataforma, conversa.canal) in CAIXAS_NUMA_MENSAGEM
+
+
+def max_anexos(conversa: AtendimentoConversa) -> int:
+    """Quantos anexos a pessoa escolhe de uma vez nesta caixa (0 = sem anexo aqui)."""
+    if motivo_sem_foto(conversa):
+        return 0
+    return MAX_ANEXOS_NUMA_MENSAGEM if numa_mensagem(conversa) else MAX_ANEXOS_DE_UMA_VEZ
+
+
+def _qual(i: int, total: int) -> str:
+    """No erro de vários anexos, qual deles (a tela mostra); com um só, nada."""
+    return f" (anexo {i} de {total})" if total > 1 else ""
+
+
 def preparar_para(
     plataforma: str, foto: Foto, *, teto_caixa: int | None = None
 ) -> tuple[str, bytes, str]:
@@ -474,12 +505,16 @@ async def enviar_imagem(
     conversa: AtendimentoConversa,
     integration: Any,
     cliente: Any,
-    foto: Foto,
+    foto: Foto | Sequence[Foto],
     legenda: str | None,
     *,
     para: str | None = None,
 ) -> ResultadoEnvio:
     """Sobe a foto e manda a mensagem com ela. Nunca levanta.
+
+    Várias (03/11/2026): só onde vão NUMA mensagem (`numa_mensagem`, o ML) —
+    sobem todas e saem juntas, com o texto; upload de uma que falha = nada
+    saiu (o erro diz qual). Nos chats, uma por chamada.
 
     O `payload` leva `imagem_url` (Shopee/TikTok: a URL da plataforma, que a
     tela mostra no balão) ou `ml_anexo` (ML: o id do anexo).
@@ -491,24 +526,36 @@ async def enviar_imagem(
     """
     if conversa.plataforma == PLATAFORMA_WHATSAPP:
         return ResultadoEnvio(ok=False, erro="zap_sem_destino")
+    fotos = [foto] if isinstance(foto, Foto) else list(foto)
+    if not fotos:
+        return ResultadoEnvio(ok=False, erro=f"{conversa.plataforma} sem_anexo")
+    if len(fotos) > 1 and not numa_mensagem(conversa):
+        return ResultadoEnvio(ok=False, erro=f"{conversa.plataforma} uma_por_mensagem")
     reclamacao = conversa.plataforma == "ml" and conversa.canal == CANAL_RECLAMACAO
-    try:
-        nome, dados, mime = preparar_para(
-            conversa.plataforma,
-            foto,
-            teto_caixa=MAX_BYTES_RECLAMACAO_ML if reclamacao else None,
-        )
-    except FotoInvalida as e:
-        return ResultadoEnvio(ok=False, erro=f"{conversa.plataforma} {e.code}")
+    prontas: list[tuple[str, bytes, str]] = []
+    for i, f in enumerate(fotos, 1):
+        try:
+            prontas.append(
+                preparar_para(
+                    conversa.plataforma,
+                    f,
+                    teto_caixa=MAX_BYTES_RECLAMACAO_ML if reclamacao else None,
+                )
+            )
+        except FotoInvalida as e:
+            return ResultadoEnvio(
+                ok=False, erro=f"{conversa.plataforma} {e.code}{_qual(i, len(fotos))}"
+            )
+    nome, dados, mime = prontas[0]
     try:
         if reclamacao:
-            return await _ml_reclamacao(conversa, cliente, nome, dados, mime, legenda, para)
+            return await _ml_reclamacao(conversa, cliente, prontas, legenda, para)
         if conversa.plataforma == "shopee":
             return await _shopee(conversa, cliente, nome, dados, mime)
         if conversa.plataforma == "tiktok":
             return await _tiktok(conversa, cliente, nome, dados, mime)
         if conversa.plataforma == "ml" and conversa.canal == CANAL_POS_VENDA:
-            return await _ml(conversa, cliente, nome, dados, mime, legenda)
+            return await _ml(conversa, cliente, prontas, legenda)
     except Exception as e:  # noqa: BLE001 — envio nunca levanta; sem saber, é ambíguo
         logger.warning(
             "atendimento_foto_envio_inesperado",
@@ -720,13 +767,11 @@ async def _ml_subir_anexo_reclamacao(
 async def _ml_reclamacao(
     conversa: AtendimentoConversa,
     cliente: Any,
-    nome: str,
-    dados: bytes,
-    mime: str,
+    prontas: list[tuple[str, bytes, str]],
     legenda: str | None,
     para: str | None,
 ) -> ResultadoEnvio:
-    """A foto/PDF na mensagem da reclamação (ao comprador ou ao mediador)."""
+    """A(s) foto(s)/PDF na mensagem da reclamação (ao comprador ou ao mediador)."""
     from app.services.atendimento import ml as adaptador_ml
 
     if not (legenda or "").strip():
@@ -734,8 +779,16 @@ async def _ml_reclamacao(
     if para is None:
         return ResultadoEnvio(ok=False, erro="reclamacao_sem_destino")
 
-    async def subir(claim_id: str) -> str:
-        return await _ml_subir_anexo_reclamacao(cliente, claim_id, nome, dados, mime)
+    async def subir(claim_id: str) -> list[str]:
+        subidos: list[str] = []
+        for i, (nome, dados, mime) in enumerate(prontas, 1):
+            try:
+                subidos.append(
+                    await _ml_subir_anexo_reclamacao(cliente, claim_id, nome, dados, mime)
+                )
+            except _UploadML as e:
+                raise _UploadML(f"{e.erro}{_qual(i, len(prontas))}") from e
+        return subidos
 
     return await adaptador_ml.responder_reclamacao(
         None, conversa, None, cliente, legenda, para=para, subir_anexo=subir
@@ -745,9 +798,7 @@ async def _ml_reclamacao(
 async def _ml(
     conversa: AtendimentoConversa,
     cliente: Any,
-    nome: str,
-    dados: bytes,
-    mime: str,
+    prontas: list[tuple[str, bytes, str]],
     legenda: str | None,
 ) -> ResultadoEnvio:
     from app.services.atendimento import ml as adaptador_ml
@@ -763,13 +814,17 @@ async def _ml(
     )
     if not destinatario:
         return ResultadoEnvio(ok=False, erro="sem_comprador")
-    # 1. Upload: falhou = nada saiu.
-    try:
-        anexo = await _ml_subir_anexo(cliente, nome, dados, mime)
-    except _UploadML as e:
-        return ResultadoEnvio(ok=False, erro=f"ml {e.erro}")
-    except (httpx.HTTPError, RuntimeError) as e:
-        return ResultadoEnvio(ok=False, erro=f"ml upload {type(e).__name__}")
+    # 1. Upload (um por anexo, na ordem): falhou um = nada saiu (o anexo
+    # órfão some sozinho no ML em 48 h).
+    anexos: list[str] = []
+    for i, (nome, dados, mime) in enumerate(prontas, 1):
+        qual = _qual(i, len(prontas))
+        try:
+            anexos.append(await _ml_subir_anexo(cliente, nome, dados, mime))
+        except _UploadML as e:
+            return ResultadoEnvio(ok=False, erro=f"ml {e.erro}{qual}")
+        except (httpx.HTTPError, RuntimeError) as e:
+            return ResultadoEnvio(ok=False, erro=f"ml upload {type(e).__name__}{qual}")
 
     def _uid(v: Any) -> Any:
         return int(v) if str(v).isdigit() else str(v)
@@ -779,7 +834,7 @@ async def _ml(
         "from": {"user_id": _uid(seller_id)},
         "to": {"user_id": _uid(destinatario)},
         "text": legenda,
-        "attachments": [anexo],
+        "attachments": anexos,
     }
     # 2. A mensagem: a régua do texto (`_postar`: 2xx saiu, 4xx recusou —
     # com bloqueio quando é o caso —, 5xx/sem resposta ambíguo). Uma
@@ -793,5 +848,9 @@ async def _ml(
         ),
         conversa=conversa,
     )
-    resultado.payload = {**(resultado.payload or {}), "ml_anexo": anexo}
+    resultado.payload = {
+        **(resultado.payload or {}),
+        "ml_anexo": anexos[0],
+        **({"ml_anexos": anexos} if len(anexos) > 1 else {}),
+    }
     return resultado

@@ -478,7 +478,7 @@ async function principal() {
     assert.match(tela, /l\.m\.status === 'revisar' && lado\(l\.m\) === 'loja' && !l\.de/)
     // A foto é desta conversa: some na aba em que responde outra.
     assert.match(tela, /<template v-if="!respondePorOutra">\s*<input ref="fotoInput"/)
-    assert.match(tela, /modoCaixa === 'responder' && foto && !respondePorOutra/)
+    assert.match(tela, /modoCaixa === 'responder' && anexos\.length && !respondePorOutra/)
     // O divisor de origem abre a conversa de origem.
     assert.match(tela, /l\.tipo === 'origem'[\s\S]{0,600}emit\('abrirConversa', l\.id\)/)
     // A conversa nova começa na aba dela; as abas relidas com o resto.

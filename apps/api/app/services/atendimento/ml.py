@@ -1673,7 +1673,7 @@ async def responder_reclamacao(
     texto: str,
     *,
     para: str,
-    subir_anexo: Callable[[str], Awaitable[str]] | None = None,
+    subir_anexo: Callable[[str], Awaitable[str | list[str]]] | None = None,
 ) -> ResultadoEnvio:
     """Manda `texto` NA reclamação do ML, ao comprador ou ao mediador. Nunca levanta.
 
@@ -1685,7 +1685,8 @@ async def responder_reclamacao(
     liberada AGORA — a etapa pode ter mudado depois da última leitura (o cron
     relê de 10 em 10 min); sem ela, nada sai (falha limpa, com o porquê).
     `subir_anexo(claim_id)` (a foto/PDF, `foto.py`) roda depois dessa
-    conferência e devolve o `filename`; falhou = nada saiu.
+    conferência e devolve o `filename` (ou a lista deles: várias fotos numa
+    mensagem, 03/11/2026); falhou = nada saiu.
 
     O ML responde "201 created" sem o id da mensagem: a linha fica sem id e a
     leitura das reclamações a adota (mesmo texto, ±15 min — `gravar`).
@@ -1714,7 +1715,9 @@ async def responder_reclamacao(
     anexos: list[str] = []
     if subir_anexo is not None:
         try:
-            anexos.append(await subir_anexo(claim_id))
+            subidos = await subir_anexo(claim_id)
+            # Várias fotos (03/11/2026): todas na mesma mensagem.
+            anexos.extend([subidos] if isinstance(subidos, str) else subidos)
         except Exception as e:  # noqa: BLE001 — upload não fala com ninguém: falha limpa
             return ResultadoEnvio(ok=False, erro=f"ml {getattr(e, 'erro', type(e).__name__)}")
     resultado = await _postar(

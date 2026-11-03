@@ -152,6 +152,10 @@ class EnvioFotoOut(BaseModel):
     # O teto da legenda quando é menor que o do texto da caixa (Zap: 1.024,
     # 27/10/2026); None = o limite do texto.
     legenda_max: int | None = None
+    # Várias de uma vez (03/11/2026): quantas a tela deixa escolher, e se vão
+    # numa mensagem só (o ML, com o texto) ou uma mensagem por imagem.
+    max_anexos: int = 1
+    numa_mensagem: bool = False
     # O PDF (28/10/2026): 'arquivo' = chega como PDF (pós-venda do ML);
     # 'imagem' = o chat não aceita arquivo e o PDF vira imagem; None = sem anexo.
     pdf: str | None = None

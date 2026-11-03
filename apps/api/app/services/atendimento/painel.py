@@ -1183,6 +1183,10 @@ async def situacao_da_foto(session: AsyncSession, conversa: AtendimentoConversa)
         "legenda_obrigatoria": foto.legenda_obrigatoria(conversa),
         "legenda_permitida": foto.legenda_permitida(conversa),
         "legenda_max": foto.limite_da_legenda(conversa),
+        # Várias de uma vez (03/11/2026): quantas e se vão juntas (o ML) ou uma
+        # mensagem por imagem (os chats).
+        "max_anexos": foto.max_anexos(conversa),
+        "numa_mensagem": foto.numa_mensagem(conversa),
         # 28/10/2026: como o PDF chega ('arquivo' no pós-venda do ML, 'imagem'
         # nos chats sem arquivo) e a NF cheia do pedido para o atalho.
         "pdf": foto.como_vai_o_pdf(conversa),

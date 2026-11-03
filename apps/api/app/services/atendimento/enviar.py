@@ -2210,7 +2210,9 @@ async def _conferir_foto_repetida(
 ) -> None:
     """A mesma imagem já saiu (ou está saindo) nesta conversa há pouco? → `envio_repetido`.
 
-    Na reclamação, só a que foi ao MESMO destino (`para`, o `receiver_role`)."""
+    Na reclamação, só a que foi ao MESMO destino (`para`, o `receiver_role`).
+    Vale também para cada imagem de uma mensagem com várias (`payload.fotos`,
+    o ML, 03/11/2026)."""
     repetida = await session.scalar(
         select(AtendimentoMensagem.id)
         .where(
@@ -2218,7 +2220,10 @@ async def _conferir_foto_repetida(
             AtendimentoMensagem.origem.in_(ORIGENS_DAVINCI),
             AtendimentoMensagem.status.in_(_STATUS_QUE_SAIRAM),
             AtendimentoMensagem.created_at >= datetime.now(UTC) - JANELA_REPETIDO,
-            AtendimentoMensagem.payload["foto"]["sha256"].astext == sha256,
+            or_(
+                AtendimentoMensagem.payload["foto"]["sha256"].astext == sha256,
+                AtendimentoMensagem.payload["fotos"].contains([{"sha256": sha256}]),
+            ),
             *((AtendimentoMensagem.payload["para"].astext == para,) if para is not None else ()),
         )
         .limit(1)
@@ -2247,8 +2252,12 @@ async def _preparar_foto(
 
     Zap (27/10/2026): a foto é reduzida ao teto da Cloud API e a NOSSA cópia
     vai para o disco junto da linha em voo (devolvida: é ela que sobe).
+    Várias (03/11/2026): `foto` pode ser a lista — só onde vão numa mensagem
+    (o ML); uma linha, um anexo por imagem, cada uma na trava de repetida.
     """
     from app.services.atendimento import foto as foto_mod
+
+    fotos = list(foto) if isinstance(foto, list | tuple) else [foto]
 
     await travar_conversa(session, conversa)
     destino = await _destino(session, conversa, origem=ORIGEM_HUMANO, para=para)
@@ -2256,6 +2265,22 @@ async def _preparar_foto(
     motivo = foto_mod.motivo_sem_foto(conversa)
     if motivo:
         raise EnvioRecusado(RECUSA_FOTO_NAO_SUPORTADA, motivo)
+    if not fotos:
+        raise EnvioRecusado(RECUSA_FOTO_INVALIDA, "Nenhum anexo para mandar.")
+    if len(fotos) > 1 and not foto_mod.numa_mensagem(conversa):
+        raise EnvioRecusado(
+            RECUSA_FOTO_INVALIDA,
+            "Nesta plataforma cada foto vai numa mensagem: mande uma por vez.",
+        )
+    if len(fotos) > foto_mod.max_anexos(conversa):
+        raise EnvioRecusado(
+            RECUSA_FOTO_INVALIDA,
+            f"Cabem até {foto_mod.max_anexos(conversa)} anexos numa mensagem aqui.",
+        )
+    if len({f.sha256 for f in fotos}) < len(fotos):
+        raise EnvioRecusado(
+            RECUSA_FOTO_INVALIDA, "A mesma imagem foi anexada duas vezes — tire a repetida."
+        )
     legenda_ok: str | None = None
     if foto_mod.legenda_obrigatoria(conversa):
         # ML: a foto vai DENTRO de uma mensagem — o texto passa pelo validador
@@ -2271,21 +2296,26 @@ async def _preparar_foto(
             RECUSA_FOTO_INVALIDA,
             "Nesta plataforma a foto vai sozinha: mande o texto pela caixa de resposta.",
         )
-    await _conferir_foto_repetida(session, conversa, foto.sha256, para=destino.receiver_role)
+    for f in fotos:
+        await _conferir_foto_repetida(session, conversa, f.sha256, para=destino.receiver_role)
     if ultima_vista_id is not None and not confirmar:
         await _conferir_mudou(session, conversa, ultima_vista_id)
     pronta: tuple[str, bytes, str] | None = None
     if destino.zap is not None:
         # O teto da Cloud API (5 MB): reduz ANTES — a cópia é o que sai.
         try:
-            pronta = foto_mod.preparar_para(PLATAFORMA_WHATSAPP, foto)
+            pronta = foto_mod.preparar_para(PLATAFORMA_WHATSAPP, fotos[0])
         except foto_mod.FotoInvalida as e:
             raise EnvioRecusado(RECUSA_FOTO_INVALIDA, e.detail) from e
 
     await aposentar_envios_presos(session, conversa_id=conversa.id)
     # O PDF (a NF, 28/10/2026) só chega aqui como PDF no pós-venda do ML
     # (`foto.para_a_caixa`): a linha é um ARQUIVO, sem URL de balão.
-    tipo = "arquivo" if foto.mime == foto_mod.PDF else "imagem"
+    def _tipo(f) -> str:
+        return "arquivo" if f.mime == foto_mod.PDF else "imagem"
+
+    tipo = "arquivo" if any(_tipo(f) == "arquivo" for f in fotos) else "imagem"
+    marcas = [{"sha256": f.sha256, "mime": f.mime, "bytes": f.tamanho} for f in fotos]
     mensagem = AtendimentoMensagem(
         conversa_id=conversa.id,
         externo_id=None,
@@ -2295,12 +2325,17 @@ async def _preparar_foto(
         tipo=tipo,
         texto=legenda_ok,
         # A URL só existe depois do upload (`_aplicar_resultado` põe).
-        anexos=[{"tipo": tipo, "nome": foto.nome, "mime": foto.mime, "tamanho": foto.tamanho}],
+        anexos=[
+            {"tipo": _tipo(f), "nome": f.nome, "mime": f.mime, "tamanho": f.tamanho}
+            for f in fotos
+        ],
         enviada_em=None,
         status=MSG_ENVIANDO,
         rascunho_id=None,
         payload={
-            "foto": {"sha256": foto.sha256, "mime": foto.mime, "bytes": foto.tamanho},
+            "foto": marcas[0],
+            # Várias numa mensagem (o ML): cada uma, para a trava de repetida.
+            **({"fotos": marcas} if len(marcas) > 1 else {}),
             # Reclamação: a quem foi (o `receiver_role`, o mesmo da leitura).
             **({"para": destino.receiver_role} if destino.para else {}),
             # A NF do botão "NF" (28/10/2026): a chave marca a NF que a pessoa
@@ -2449,6 +2484,9 @@ async def enviar_foto(
 ) -> AtendimentoMensagem:
     """Envia UMA foto (já conferida: `foto.validar_foto`) na conversa; devolve a mensagem.
 
+    Ou várias (a lista, 03/11/2026) numa mensagem só — onde a plataforma junta
+    (`foto.numa_mensagem`, o ML, com o texto); nos chats a tela manda uma por vez.
+
     O mesmo contrato do `enviar_resposta`: `EnvioRecusado` = nada saiu (trava
     nossa); erro da plataforma vira `falhou`/`revisar` na mensagem; COMMITA
     antes de falar com a plataforma e depois. Só pessoa manda foto (a IA
@@ -2493,7 +2531,8 @@ async def enviar_foto(
         conversa_id=str(conversa.id),
         mensagem_id=str(mensagem.id),
         plataforma=conversa.plataforma,
-        bytes=foto.tamanho,
+        bytes=sum(a.get("tamanho") or 0 for a in mensagem.anexos or []),
+        anexos=len(mensagem.anexos or []),
         simulador=get_settings().atendimento_simulador,
     )
     # Os nomeados SÓ com o Zap (como no texto).
