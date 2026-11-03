@@ -710,6 +710,10 @@ async def montar_base(
     valores = ia.valores_das_lacunas(conversa, ctx)
     fatos = ia._fatos_para_o_modelo(conversa, ctx, valores)
     fatos_gravados = {**fatos, "lacunas": valores}
+    # A chegada mais nova que o rascunho leu (03/11/2026), como o `_gerar`.
+    chegada_vista = await ia._ultima_chegada_do_cliente(session, conversa.id, ate=as_of)
+    if chegada_vista is not None:
+        fatos_gravados[ia.FATO_CHEGADA_VISTA] = chegada_vista.isoformat()
 
     rajada = ia.rajada_do_cliente(recentes, gatilho)
     textos_cliente = [m.texto for m in rajada if m.texto]

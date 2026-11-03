@@ -106,7 +106,10 @@ async def test_cartao_estruturado_pede_duvida_foto_real_pede_pessoa(
     r = await ia.gerar_rascunho(db, c)
     if cartao:
         assert r.validador_ok and not r.precisa_humano, r.motivo
-        assert "podemos ajudar" in r.texto and len(envios) == 1
+        # 03/11/2026 ("aplique as correções"): a saudação ao cartão sozinho fica como
+        # sugestão, mas não sai sozinha — a fila processa o cartão (`sem_demanda`).
+        assert "podemos ajudar" in r.texto and envios == []
+        assert r.fatos[ia.FATO_AUTO_ENVIO]["motivo"] == ia.MOTIVO_CARTAO_SEM_TEXTO
     else:
         assert r.status == RASCUNHO_BLOQUEADO and r.precisa_humano
         assert envios == []
