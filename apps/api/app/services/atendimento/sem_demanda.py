@@ -41,6 +41,7 @@ from app.services.atendimento.constantes import (
     e_cartao_do_comprador,
     e_mensagem_automatica,
     motivo_canal_sem_envio,
+    rotulo_tipo_plataforma,
 )
 from app.services.atendimento.pendente import resposta_de_pessoa
 
@@ -69,8 +70,11 @@ REGRA_FACA = (
 )
 CHAVE_AUDITORIA = "processamento_sem_demanda"
 MOTIVO = "cartao_sem_pergunta_ja_acolhido"
-# O cartão sozinho sem o robô depois dele (03/11/2026): sai da fila do mesmo jeito.
+# O cartão sozinho sem o robô depois dele (03/11/2026): sai da fila do mesmo jeito —
+# só quando abre uma visita (`cartao_abre_visita`).
 MOTIVO_SEM_TEXTO = "cartao_sem_texto"
+# A resposta real da loja a menos disto antes do cartão = a mesma visita (03/11/2026).
+VISITA_DO_CARTAO = timedelta(hours=24)
 INTERVALO_FIGURINHA_ANTIGA = timedelta(days=7)
 MOTIVO_CARD_ANTIGO = "cliente mandou só foto/vídeo/arquivo — a IA não vê anexo"
 
@@ -205,6 +209,24 @@ def _figurinha_estruturada_antiga(mensagem: Any, ultimo_cartao: Any) -> bool:
     return antes is not None and depois is not None and depois - antes >= INTERVALO_FIGURINHA_ANTIGA
 
 
+def cartao_sem_texto(mensagem: Any) -> bool:
+    """O cartão do comprador veio SEM texto dele? PURA (03/11/2026).
+
+    Vazio ou só o rótulo que o adaptador põe no lugar do texto: o `variation_card`
+    da Shopee é gravado como `outro` com "[Mensagem]" (`shopee.interpretar`,
+    `constantes.rotulo_tipo_plataforma`) — não é fala do cliente (87faf260, 2e67ca0b).
+    O texto que veio junto no cartão (`content.text`) continua sendo fala.
+    """
+    texto = (getattr(mensagem, "texto", None) or "").strip()
+    if not texto:
+        return True
+    payload = getattr(mensagem, "payload", None)
+    if not isinstance(payload, dict):
+        return False
+    tipo = payload.get("message_type") or payload.get("type")
+    return isinstance(tipo, str) and texto == rotulo_tipo_plataforma(tipo)
+
+
 def _turno_de_cartao(mensagens: Sequence[Any], gatilho: Any | None) -> Sequence[Any] | None:
     """O turno (desde a última resposta real da loja) quando ele é SÓ cartão sem texto
     — com histórico completo e o gatilho como a última fala do cliente —, ou None. PURA.
@@ -217,7 +239,7 @@ def _turno_de_cartao(mensagens: Sequence[Any], gatilho: Any | None) -> Sequence[
         return None
     if not e_cartao_do_comprador(getattr(gatilho, "payload", None)):
         return None
-    if (getattr(gatilho, "texto", None) or "").strip():
+    if not cartao_sem_texto(gatilho):
         return None
     ids = [getattr(m, "id", None) for m in mensagens]
     if getattr(gatilho, "id", None) not in ids:
@@ -236,7 +258,7 @@ def _turno_de_cartao(mensagens: Sequence[Any], gatilho: Any | None) -> Sequence[
         return None
     for mensagem in clientes:
         if e_cartao_do_comprador(getattr(mensagem, "payload", None)):
-            if (getattr(mensagem, "texto", None) or "").strip():
+            if not cartao_sem_texto(mensagem):
                 return None
         elif not _figurinha_estruturada_antiga(mensagem, gatilho):
             return None
@@ -253,6 +275,36 @@ def turno_so_de_cartao(mensagens: Sequence[Any], gatilho: Any | None) -> bool:
     (`ia._trava_do_turno`) e a fila o processa sem resposta (`processar`).
     """
     return _turno_de_cartao(mensagens, gatilho) is not None
+
+
+def cartao_abre_visita(mensagens: Sequence[Any], gatilho: Any | None) -> bool:
+    """O cartão sozinho abre uma VISITA nova (não responde a loja)? PURA (03/11/2026).
+
+    Só então a fila o fecha sem o robô depois dele (`processar`). A resposta real
+    da loja (pessoa ou IA) a menos de `VISITA_DO_CARTAO` antes do cartão, ou que
+    perguntou algo ao cliente, faz do cartão a resposta dela ("qual é o anúncio?"
+    → o cartão, f7121a4b): a dúvida continua aberta e fica para a pessoa — a
+    saudação segue segurada (`ia._trava_do_turno`).
+    """
+    quando = _momento(gatilho)
+    if quando is None:
+        return False
+    ultima: Any | None = None
+    for m in mensagens:
+        momento = _momento(m)
+        if (
+            resposta_de_pessoa(m)
+            and getattr(m, "origem", None) != ORIGEM_AUTO
+            and momento is not None
+            and momento <= quando
+            and (ultima is None or momento >= _momento(ultima))
+        ):
+            ultima = m
+    if ultima is None:
+        return True
+    if quando - _momento(ultima) < VISITA_DO_CARTAO:
+        return False
+    return "?" not in (getattr(ultima, "texto", None) or "")
 
 
 def cartao_ja_acolhido(mensagens: Sequence[Any], gatilho: Any | None) -> bool:
@@ -399,7 +451,11 @@ async def processar(
             # correções"): também sai da fila sem saudação — mas só depois da espera
             # pela CHEGADA (`ia.ESPERA_CHEGADA`): a pergunta escrita junto com o cartão
             # pode ainda estar a caminho (o sync a traz 1–2 min depois).
-            if not turno_so_de_cartao(recentes, gatilho):
+            # E só o cartão que ABRE uma visita: o que responde a pergunta da loja
+            # ("qual é o anúncio?") fica para a pessoa (`cartao_abre_visita`).
+            if not turno_so_de_cartao(recentes, gatilho) or not cartao_abre_visita(
+                recentes, gatilho
+            ):
                 return False
             if ia.ESPERA_CHEGADA > timedelta(0):
                 chegada = await ia._ultima_chegada_do_cliente(session, conversa.id)

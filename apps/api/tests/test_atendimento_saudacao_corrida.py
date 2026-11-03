@@ -52,6 +52,9 @@ from tests.test_atendimento_ia import (
 )
 
 CARTAO = {"message_type": "item", "content": {"item_id": 123}}
+# O cartão de VARIAÇÃO como o `shopee.interpretar` o grava: tipo `outro`, texto "[Mensagem]".
+CARTAO_VARIACAO = {"message_type": "variation_card", "content": {"item_id": 123, "model_id": 456}}
+ROTULO_VARIACAO = "[Mensagem]"
 MENU = "Olá, por favor selecione sua dúvida e logo um dos nossos consultores irá atendê-lo!"
 
 
@@ -433,6 +436,45 @@ def test_turno_so_de_cartao_e_so_o_cartao_sem_texto():
     # A pergunta já respondida não conta: o turno novo é só o cartão.
     resposta = _m("loja", "Temos sim.", minutos=5.5, origem="davinci_humano")
     assert sem_demanda.turno_so_de_cartao([pergunta, resposta, card], card)
+    # O cartão de VARIAÇÃO (87faf260): o "[Mensagem]" é o rótulo do adaptador, não fala.
+    variacao = _m("cliente", ROTULO_VARIACAO, payload=dict(CARTAO_VARIACAO))
+    assert sem_demanda.cartao_sem_texto(variacao)
+    assert sem_demanda.turno_so_de_cartao([variacao], variacao)
+    # O cartão do item + o de variação (2e67ca0b): continua só cartão.
+    assert sem_demanda.turno_so_de_cartao([card, variacao], variacao)
+    # O texto que veio NO cartão de variação (`content.text`) é fala do cliente.
+    escrito = _m("cliente", "tem na cor azul?", payload=dict(CARTAO_VARIACAO))
+    assert not sem_demanda.cartao_sem_texto(escrito)
+    assert not sem_demanda.turno_so_de_cartao([escrito], escrito)
+    # O rótulo de OUTRO tipo no cartão não é o do adaptador: é texto.
+    assert not sem_demanda.cartao_sem_texto(_m("cliente", "[Figurinha]", payload=dict(CARTAO)))
+
+
+def test_cartao_abre_visita_so_sem_resposta_da_loja_na_mesma_visita():
+    """O cartão que RESPONDE a loja ("qual é o anúncio?" → o cartão, f7121a4b) não abre
+    visita; o cartão de uma visita nova, sim."""
+    card = _m("cliente", payload=dict(CARTAO), minutos=5)
+    assert sem_demanda.cartao_abre_visita([card], card)
+    # O menu do Duoke (automático) antes do cartão não é resposta da loja.
+    menu = _m("loja", MENU, minutos=6)
+    assert sem_demanda.cartao_abre_visita([menu, card], card)
+    # A IA perguntou qual é o anúncio há 34 min: o cartão é a resposta.
+    pergunta = _m("cliente", "O celular vem aleatório ou posso escolher?", minutos=40)
+    pediu = _m("loja", "Qual é o anúncio? Pode nos enviar aqui?", minutos=39, origem=ORIGEM_IA)
+    assert not sem_demanda.cartao_abre_visita([pergunta, pediu, card], card)
+    # Resposta sem pergunta, mas na mesma visita (< 24 h): também não abre.
+    temos = _m("loja", "Temos sim.", minutos=60 * 23, origem="davinci_humano")
+    assert not sem_demanda.cartao_abre_visita([temos, card], card)
+    # Visita velha (> 24 h) que terminou sem perguntar nada: o cartão abre outra.
+    velha = _m("loja", "Temos sim.", minutos=60 * 30, origem="davinci_humano")
+    assert sem_demanda.cartao_abre_visita([velha, card], card)
+    # Visita velha que terminou perguntando algo ao cliente: fica para a pessoa.
+    perguntou = _m("loja", "Qual é o número do pedido?", minutos=60 * 30, origem="davinci_humano")
+    assert not sem_demanda.cartao_abre_visita([perguntou, card], card)
+    # A resposta DEPOIS do cartão não conta para a visita dele.
+    depois = _m("loja", "Qual é a sua dúvida?", minutos=4, origem="davinci_humano")
+    assert sem_demanda.cartao_abre_visita([card, depois], card)
+    assert not sem_demanda.cartao_abre_visita([card], None)
 
 
 async def test_cartao_sozinho_nao_ganha_saudacao_e_o_rascunho_fica_segurado(
@@ -510,6 +552,94 @@ async def test_rodada_inteira_cartao_e_pergunta_atrasada_ganham_a_resposta_certa
     await _chegou_ha(db, conversa, timedelta(minutes=2))
     assert await ia.gerar_pendentes(db) == 1
     assert len(envios) == 1 and "rastreio" in envios[0]["texto"].lower()
+
+
+@pytest.mark.espera_na_chegada
+async def test_cartao_de_variacao_sozinho_nao_ganha_saudacao_87faf260(
+    db, make_user, ia_ligada, modelo, envios
+):
+    """O 87faf260: o turno é SÓ o `variation_card`, gravado como `outro` com
+    "[Mensagem]". Antes da correção: a saudação era segurada 2 min e saía no reenvio.
+    Agora: nenhuma saudação, e a fila processa o cartão sem resposta."""
+    conversa = await _loja_auto(db, make_user, ia_ligada, manual_base=True)
+    card, _ = await gravar.gravar_mensagem(
+        db,
+        conversa,
+        externo_id="variacao",
+        autor="cliente",
+        texto=ROTULO_VARIACAO,
+        tipo="outro",
+        enviada_em=datetime.now(UTC) - timedelta(minutes=3),
+        payload=dict(CARTAO_VARIACAO),
+    )
+    await db.commit()
+    await _chegou_ha(db, conversa, timedelta(minutes=3))
+    # O rascunho direto (sem a fila) é a saudação, e o envio sozinho segura pelo cartão.
+    r = await ia.gerar_rascunho(db, conversa)
+    assert r is not None and r.texto == ia.TEXTO_CARTAO_APROVADO
+    assert r.fatos[ia.FATO_AUTO_ENVIO]["motivo"] == ia.MOTIVO_CARTAO_SEM_TEXTO
+    await _nasceu_ha(db, r, timedelta(minutes=3))
+    # A rodada do cron e o reenvio: nada sai; a saudação segurada é aposentada.
+    await ia.gerar_pendentes(db)
+    assert await ia.reenviar_pendentes(db) == 0
+    assert envios == []
+    await db.refresh(conversa)
+    await db.refresh(r)
+    assert r.status == RASCUNHO_SUBSTITUIDO
+    assert conversa.sem_resposta_necessaria and not conversa.aguardando_resposta
+    assert conversa.dados[sem_demanda.CHAVE_AUDITORIA]["motivo"] == sem_demanda.MOTIVO_SEM_TEXTO
+    assert sem_demanda.turno_so_de_cartao(await ia._mensagens_recentes(db, conversa), card)
+    assert modelo.chamadas == []
+
+
+@pytest.mark.espera_na_chegada
+async def test_cartao_que_responde_o_pedido_da_ia_fica_para_a_pessoa_f7121a4b(
+    db, make_user, ia_ligada, modelo, envios
+):
+    """f7121a4b: o cliente perguntou, a IA pediu o anúncio e o cliente mandou SÓ o cartão.
+    A dúvida continua aberta: nada sai sozinho (a saudação segue segurada) e a conversa
+    NÃO é fechada como "sem resposta necessária" — vai para a Caixa Humano."""
+    conversa = await _loja_auto(db, make_user, ia_ligada, manual_base=True)
+    pergunta = await _cliente(
+        db, conversa, "O celular vem aleatório ou posso escolher?", ha=timedelta(minutes=40)
+    )
+    await _resposta_ia(
+        db,
+        conversa,
+        "Olá! Para eu te ajudar, qual é o celular ou o anúncio? Pode nos enviar o anúncio aqui?",
+        ha=timedelta(minutes=39),
+        gatilho=pergunta,
+    )
+    await _cartao(db, conversa, ha=timedelta(minutes=5))
+    await _chegou_ha(db, conversa, timedelta(minutes=5))
+    await db.refresh(conversa)
+    assert conversa.aguardando_resposta
+
+    assert not await sem_demanda.processar(db, conversa.id, canal_autorizado_id=conversa.canal_id)
+    await ia.gerar_pendentes(db)
+    await ia.gerar_pendentes(db)
+    await db.refresh(conversa)
+    assert not conversa.sem_resposta_necessaria and conversa.aguardando_resposta
+    assert sem_demanda.CHAVE_AUDITORIA not in (conversa.dados or {})
+    assert envios == []
+    assert humano.ia_sem_resposta(conversa, datetime.now(UTC) + timedelta(hours=1))
+
+
+@pytest.mark.espera_na_chegada
+async def test_cartao_de_visita_nova_depois_de_resposta_antiga_sai_da_fila(
+    db, make_user, ia_ligada, modelo, envios
+):
+    """A resposta da loja de 3 dias atrás, sem pergunta: o cartão de hoje abre outra visita
+    e é processado sem saudação, como o cartão sem histórico."""
+    conversa = await _loja_auto(db, make_user, ia_ligada)
+    antiga = await _cliente(db, conversa, "tem na cor azul?", ha=timedelta(days=3, minutes=5))
+    await _resposta_ia(db, conversa, "Temos sim.", ha=timedelta(days=3), gatilho=antiga)
+    await _cartao(db, conversa, ha=timedelta(minutes=5))
+    await _chegou_ha(db, conversa, timedelta(minutes=5))
+    assert await sem_demanda.processar(db, conversa.id, canal_autorizado_id=conversa.canal_id)
+    assert conversa.sem_resposta_necessaria and not conversa.aguardando_resposta
+    assert conversa.dados[sem_demanda.CHAVE_AUDITORIA]["motivo"] == sem_demanda.MOTIVO_SEM_TEXTO
+    assert envios == []
 
 
 # ─────────────── (c) o teto de 3 h ───────────────
