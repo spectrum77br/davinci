@@ -121,6 +121,23 @@ def _venda_cancelada(fin: MarketplaceOrderFinancial | None) -> bool:
     return str(order.get("status") or "").lower() == "cancelled"
 
 
+def conta_ml_desfeita(venda: MarketplaceOrderFinancial | None) -> dict[str, Decimal | None] | None:
+    """A conta que a venda do ML tinha antes de ser desfeita (a Margem zera a venda
+    desfeita e guarda a conta em `raw`). 04/11 (Vinicius, 305862: "não existe pedido ML
+    sem tarifa"): o previsto é o que a venda prometeu; o estorno aparece depois, à parte."""
+    raw = venda.raw if (venda is not None and isinstance(venda.raw, dict)) else None
+    conta = raw.get("conta_antes_de_desfazer") if raw else None
+    if not isinstance(conta, dict):
+        return None
+    return {k: _d(conta.get(k)) for k in ("tarifa", "frete", "cupom", "liquido")}
+
+
+def _teve_troca(venda: MarketplaceOrderFinancial | None) -> bool:
+    raw = venda.raw if (venda is not None and isinstance(venda.raw, dict)) else None
+    troca = raw.get("ml_troca") if raw else None
+    return isinstance(troca, dict) and bool(troca.get("novos_pedidos"))
+
+
 def _escrow_income(venda: MarketplaceOrderFinancial | None) -> dict[str, Any] | None:
     raw = venda.raw if (venda is not None and isinstance(venda.raw, dict)) else None
     escrow = raw.get("escrow") if raw else None
@@ -594,6 +611,11 @@ def situacao_do_pedido(
             )
             quando = ultimo_debito.data.astimezone(BRT)
             motivo = f"{ultimo_debito.tipo} de {ultimo_debito.debito} em {quando:%d/%m}"
+            if cancelada:
+                # 04/11 (305862): "mediação de 632,34" não dizia que a venda foi desfeita
+                # nem quanto sobrou; a soma das saídas foi 805,97
+                origem = "troca no ML" if _teve_troca(venda) else "venda desfeita"
+                motivo = f"{origem}: ficou {recebido:.2f} com a loja"
         elif (
             saidas_depois
             and saidas_depois > TOLERANCIA
@@ -786,15 +808,39 @@ def _previsao_por_prazo(
     return None
 
 
+def juros_do_comprador(
+    valor: Decimal | None,
+    tarifa_venda: Decimal | None,
+    liberacoes: list[ConciliacaoMovimento],
+) -> Decimal:
+    """Juros do parcelamento pagos pelo comprador: entram no bruto do pagamento e saem
+    no FINANCING_FEE, sem mexer no que a loja recebe (305862: 880,09 = 799,28 + 80,81).
+    Eram lidos como frete do comprador, e tarifa e frete ficavam vermelhos com o líquido
+    certo. Parcelamento bancado pela LOJA é outra coisa: fica fora do bruto e a tarifa da
+    venda já o inclui (301744: 156,56 = 98,88 + 57,68). O que o bruto traz a menos que o
+    parcelamento também é da loja — o que passou do preço aí é o frete do comprador."""
+    parcelamento = _soma([m.parcelamento for m in liberacoes]).copy_abs()
+    if valor is None or parcelamento <= TOLERANCIA:
+        return ZERO
+    excedente = _soma([m.bruto for m in liberacoes if m.bruto is not None]) - valor
+    tarifa = _soma([m.tarifa for m in liberacoes]).copy_abs()
+    pago_pela_loja = bool(tarifa_venda) and abs(tarifa_venda - tarifa - parcelamento) <= TOLERANCIA
+    if pago_pela_loja or excedente < parcelamento - TOLERANCIA:
+        return ZERO
+    return parcelamento
+
+
 def frete_do_comprador(
     venda: MarketplaceOrderFinancial | None, liberacoes: list[ConciliacaoMovimento]
 ) -> Decimal:
-    """Quanto o comprador pagou de frete = bruto do extrato − valor da venda (ML põe o
-    frete do comprador dentro do GROSS_AMOUNT do pagamento). Zero quando não dá pra saber."""
+    """Quanto o comprador pagou de frete = bruto do extrato − valor da venda − juros do
+    parcelamento (ML põe os dois dentro do GROSS_AMOUNT do pagamento). Zero quando não dá
+    pra saber."""
     if venda is None or venda.gross_amount is None or not liberacoes:
         return ZERO
     bruto = _soma([m.bruto for m in liberacoes if m.bruto is not None])
-    dif = bruto - _d(venda.gross_amount)
+    valor = _d(venda.gross_amount)
+    dif = bruto - valor - juros_do_comprador(valor, _d(venda.fee_amount), liberacoes)
     return dif if dif > TOLERANCIA else ZERO
 
 
@@ -835,6 +881,9 @@ def _motivo_da_diferenca(
     # comparar só a primeira dizia "cobrou a menos" num pedido recebido a menos
     parcelamento = _soma([m.parcelamento for m in liberacoes]).copy_abs() if liberacoes else ZERO
     tarifa_prevista = _d(venda.fee_amount) if venda else None
+    # os juros pagos pelo comprador entram e saem: não são tarifa da loja
+    if venda is not None:
+        parcelamento -= juros_do_comprador(_d(venda.gross_amount), tarifa_prevista, liberacoes)
     tarifa_cobrada = (
         (_soma([m.tarifa for m in liberacoes]).copy_abs() + parcelamento) if liberacoes else None
     )
@@ -1401,6 +1450,10 @@ async def recalcular_loja(
             if amazon_linhas
             else (amazon_venda["liquido"] if amazon_venda else None)
         )
+        # ML desfeito: o previsto segue a conta que a venda tinha (a Margem zera)
+        conta_desfeita = conta_ml_desfeita(venda) if plataforma_loja == "ml" else None
+        if conta_desfeita and conta_desfeita["liquido"] is not None:
+            liquido_previsto = conta_desfeita["liquido"]
         estado_bling = nome_bling.strip().lower()
         args_situacao: dict[str, Any] = {
             "agora": agora,
@@ -1564,6 +1617,8 @@ async def recalcular_loja(
         liquido_gravado = (
             amazon["liquido"] if amazon else (_d(venda.net_amount) if venda_ok else None)
         )
+        if conta_desfeita and conta_desfeita["liquido"] is not None:
+            liquido_gravado = conta_desfeita["liquido"]
         # 19/10 (revisão): o previsto de ANTES da liberação. A Shopee e a TikTok fecham a
         # conta na hora de liberar (afiliados, taxa de serviço) e a Margem relê o pedido —
         # o valor novo substituía o antigo e a diferença sumia atrás do "bateu" (Jlas
@@ -1578,6 +1633,9 @@ async def recalcular_loja(
             and atual.venda_liquido is not None
         ):
             previsto_na_venda = atual.venda_liquido
+        if conta_desfeita:
+            # a conta original JÁ é o previsto; o zero guardado antes não é "mudou a conta"
+            previsto_na_venda = None
         if (
             prometida is None
             and previsto_na_venda is not None
@@ -1610,16 +1668,32 @@ async def recalcular_loja(
                 grade["preco"] if grade else (_d(venda.gross_amount) if venda else None)
             ),
             "venda_tarifa": (
-                grade["taxas"] if grade else (_d(venda.fee_amount) if venda_ok else None)
+                grade["taxas"]
+                if grade
+                else (
+                    conta_desfeita["tarifa"]
+                    if conta_desfeita
+                    else (_d(venda.fee_amount) if venda_ok else None)
+                )
             ),
             "venda_frete": (
-                grade["frete_loja"] if grade else (_d(venda.freight_amount) if venda_ok else None)
+                grade["frete_loja"]
+                if grade
+                else (
+                    conta_desfeita["frete"]
+                    if conta_desfeita
+                    else (_d(venda.freight_amount) if venda_ok else None)
+                )
             ),
             # Shopee: "extras" = subsídio no produto + cupons da loja (a tela deles)
             "venda_cupom": (
                 grade["subsidio"] + grade["cupons"]
                 if grade
-                else (_d(venda.discount_amount) if venda_ok else None)
+                else (
+                    conta_desfeita["cupom"]
+                    if conta_desfeita
+                    else (_d(venda.discount_amount) if venda_ok else None)
+                )
             ),
             "venda_afiliados": grade.get("afiliados") if grade else None,
             "venda_frete_pago": frete_pago,

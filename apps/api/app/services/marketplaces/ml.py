@@ -282,6 +282,17 @@ class MercadoLivreClient:
         r.raise_for_status()
         return r.json() or {}
 
+    async def get_claim_changes(self, claim_id: str | int) -> dict | list:
+        """A troca ligada à reclamação (GET /post-purchase/v1/claims/{id}/changes).
+
+        Só existe quando `claim.related_entities` traz "changes". Campos da
+        documentação do ML: `type` (change = outro produto, replace = o mesmo),
+        `status`, `new_orders_ids` (o pedido que o ML cria pro produto novo) e
+        `new_orders_shipments`. Levanta em não-2xx (quem chama trata a falha)."""
+        r = await self._request("GET", f"/post-purchase/v1/claims/{claim_id}/changes")
+        r.raise_for_status()
+        return r.json() or {}
+
     async def get_claim_messages(self, claim_id: str | int) -> list[dict]:
         """Mensagens da reclamação (GET /post-purchase/v1/claims/{id}/messages):
         `[{sender_role, receiver_role, message, date_created, attachments…}]`.

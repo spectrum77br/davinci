@@ -120,7 +120,8 @@ type Versao = Record<string, number | string | null | undefined>
 type LinhaComparativo = { chave: string; rotulo: string; previsto: number | null; real: number | null; dif: number | null; estilo: string }
 type Comparativo = { linhas: LinhaComparativo[]; real_rotulo: string; rodape: string | null; comparar: boolean; nota: string | null; frete_liquido_loja: number | null }
 type FretePago = { fonte: string; servico: string | null; status: string | null; rastreio: string | null; preco: number | null; desconto: number | null; conferencia: number | null; frete_pago: number | null; pago_em: string | null; postado_em: string | null; cancelado_em: string | null }
-type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'extrato', Versao>; comparativo: Comparativo; movimentos: Movimento[]; frete_pago?: FretePago[] }
+type Troca = { papel: 'antigo' | 'novo'; outro: Pedido | null; venda_inteira: number | null; falta_liberar?: boolean }
+type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'extrato', Versao>; comparativo: Comparativo; movimentos: Movimento[]; frete_pago?: FretePago[]; troca?: Troca | null }
 
 const { api } = useApi()
 const canEdit = useCan('conciliacao', 'edit')
@@ -979,6 +980,18 @@ await carregar()
             <span>Liberado {{ fmtDia(raiox.pedido.liberado_em) }}<span v-if="raiox.pedido.previsao_liberacao && !raiox.pedido.liberado_em && raiox.pedido.situacao !== 'cancelado'"> (prev. {{ fmtDia(raiox.pedido.previsao_liberacao) }})</span></span>
             <span>Bling: {{ raiox.pedido.situacao_bling || '—' }}</span>
             <span><span class="rounded px-1.5 py-0.5 font-bold" :class="sitCls(raiox.pedido.situacao)">● {{ raiox.pedido.situacao_label }}</span> <span class="rounded px-1.5 py-0.5 font-bold" :class="etapaCls(raiox.pedido.etapa)">{{ raiox.pedido.etapa_label }}</span></span>
+          </div>
+          <div v-if="raiox.troca" class="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 dark:border-amber-800 dark:bg-amber-950/30">
+            <div class="font-bold text-amber-800 dark:text-amber-300">Troca no Mercado Livre</div>
+            <template v-if="raiox.troca.outro">
+              <div>
+                {{ raiox.troca.papel === 'antigo' ? 'Este é o pedido do produto que voltou. O produto novo está no pedido' : 'Este é o pedido do produto novo. O produto que voltou está no pedido' }}
+                <button type="button" class="font-bold underline" @click="abrir(raiox.troca.outro)">{{ raiox.troca.outro.pedido_bling }}</button>.
+                A tela do ML mostra só o pagamento novo.
+              </div>
+              <div class="font-bold">Venda inteira: {{ fmtMoney(raiox.troca.venda_inteira) }}<span v-if="raiox.troca.falta_liberar" class="font-normal text-muted-foreground"> (conta o previsto do que ainda não liberou)</span></div>
+            </template>
+            <div v-else>O ML criou um pedido novo para esta troca, mas ele ainda não está no painel.</div>
           </div>
           <table class="w-full border-collapse">
             <thead class="bg-muted text-[10px] uppercase text-muted-foreground">

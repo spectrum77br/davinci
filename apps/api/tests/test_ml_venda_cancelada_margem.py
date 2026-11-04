@@ -148,6 +148,86 @@ async def test_venda_cancelada_fica_com_liquido_zero():
     )
 
 
+async def test_venda_desfeita_guarda_a_conta_de_antes_de_zerar():
+    """04/11 (305862): a Conciliação compara o que o ML liberou com a conta da venda."""
+    order = _order(status="cancelled", payments=_estornado("2400.00"))
+    snap = await _fetch_ml(_FakeML({PEDIDO: order}, billing=False), PEDIDO)
+    assert snap.fee_amount == Decimal("0") and snap.net_amount == Decimal("0.00")
+    conta = snap.raw["conta_antes_de_desfazer"]
+    assert Decimal(conta["tarifa"]) == Decimal("264.12")
+    assert Decimal(conta["frete"]) == Decimal("27.90")
+    assert Decimal(conta["liquido"]) == Decimal("2107.98")
+
+
+async def test_venda_de_pe_nao_tem_conta_desfeita_nem_troca():
+    snap = await _fetch_ml(_FakeML({PEDIDO: _order()}), PEDIDO)
+    assert snap.raw["conta_antes_de_desfazer"] is None and snap.raw["ml_troca"] is None
+
+
+class _FakeTroca(_FakeML):
+    """A reclamação do pedido antigo traz a troca, como na documentação do ML."""
+
+    claim: dict = {"related_entities": ["return", "changes"]}
+    changes: dict | list = {
+        "type": "change",
+        "status": "delivered",
+        "new_orders_ids": [2000019217755594],
+        "new_orders_shipments": [48339859967],
+    }
+    buscas = 0
+
+    async def buscar_reclamacoes_do_recurso(self, resource: str, resource_id: str) -> list[dict]:
+        self.buscas += 1
+        return [{"id": 5555}]
+
+    async def get_claim(self, claim_id) -> dict:
+        assert str(claim_id) == "5555"
+        return self.claim
+
+    async def get_claim_changes(self, claim_id) -> dict | list:
+        return self.changes
+
+
+async def test_venda_desfeita_le_o_pedido_novo_da_troca():
+    order = _order(status="cancelled", payments=_estornado("2400.00"))
+    order["mediations"] = [{"id": 5555}]
+    fake = _FakeTroca({PEDIDO: order}, billing=False)
+    snap = await _fetch_ml(fake, PEDIDO)
+    assert fake.buscas == 0
+    assert snap.raw["ml_troca"] == {
+        "reclamacao": "5555",
+        "tipo": "change",
+        "status": "delivered",
+        "novos_pedidos": ["2000019217755594"],
+    }
+
+
+async def test_troca_achada_pela_busca_quando_o_pedido_nao_lista_a_mediacao():
+    order = _order(status="cancelled", payments=_estornado("2400.00"))
+    fake = _FakeTroca({PEDIDO: order}, billing=False)
+    fake.changes = [fake.changes]  # a documentação não crava objeto ou lista
+    snap = await _fetch_ml(fake, PEDIDO)
+    assert fake.buscas == 1
+    assert snap.raw["ml_troca"]["novos_pedidos"] == ["2000019217755594"]
+
+
+async def test_devolucao_sem_troca_nao_chama_changes():
+    order = _order(status="cancelled", payments=_estornado("2400.00"))
+    order["mediations"] = [{"id": 5555}]
+    fake = _FakeTroca({PEDIDO: order}, billing=False)
+    fake.claim = {"related_entities": ["return"]}
+    fake.changes = {}
+    assert (await _fetch_ml(fake, PEDIDO)).raw["ml_troca"] is None
+
+
+async def test_falha_ao_ler_a_troca_nao_derruba_a_venda():
+    """`_FakeML` não tem as chamadas de reclamação: é o mesmo que a API negar o acesso."""
+    order = _order(status="cancelled", payments=_estornado("2400.00"))
+    snap = await _fetch_ml(_FakeML({PEDIDO: order}, billing=False), PEDIDO)
+    assert snap.status == "posted" and snap.net_amount == Decimal("0.00")
+    assert "erro" in snap.raw["ml_troca"]
+
+
 async def test_cancelada_sem_pagamento_aprovado_tambem_zera():
     order = _order(
         status="cancelled", payments=[{"status": "cancelled", "transaction_amount": 2400.0}]
@@ -239,6 +319,11 @@ async def test_varredura_rele_so_quem_precisa(db, make_user, monkeypatch):
     ja_corrigido = {
         "order": {"status": "cancelled"},
         "ml_cancelamento": {"desfeitas": ["x"], "estorno": "1"},
+        "conta_antes_de_desfazer": {"tarifa": "10.00"},
+    }
+    sem_conta_original = {
+        "order": {"status": "paid"},
+        "ml_cancelamento": {"desfeitas": ["x"], "estorno": "1"},
     }
     visto_de_pe = {
         "order": {"status": "paid"},
@@ -258,6 +343,8 @@ async def test_varredura_rele_so_quem_precisa(db, make_user, monkeypatch):
         _mof(integ, 29657605, raw=visto_de_pe, fetched_at=recente),
         # 6: conta antiga sem sinal de cancelamento → não relê.
         _mof(integ, 29657606, raw={"order": {"status": "paid"}}, fetched_at=antigo),
+        # 7: desfeita antes de 04/11, sem a conta original → relê (305862: pedido "paid").
+        _mof(integ, 29657607, raw=sem_conta_original, fetched_at=recente),
     ])
     db.add(BlingOrder(
         bling_id=29657603, numero="29657603", item_codigo="a", item_index=0, situacao="12",
@@ -279,4 +366,4 @@ async def test_varredura_rele_so_quem_precisa(db, make_user, monkeypatch):
     monkeypatch.setattr(mf, "_rodar_lote", _fake_lote)
     await mf.run_ml_cancelados_resync(db)
 
-    assert sorted(vistos) == [29657601, 29657603, 29657604]
+    assert sorted(vistos) == [29657601, 29657603, 29657604, 29657607]

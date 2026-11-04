@@ -711,6 +711,7 @@ from sqlalchemy import func, literal_column, or_  # noqa: E402
 
 from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoPedido  # noqa: E402
 from app.models.conciliacao import ORIGEM_EXTRATO, ORIGEM_TIKTOK, ORIGENS_EXTRATO  # noqa: E402
+from app.models.integration import IntegrationPlatform  # noqa: E402
 from app.services.conciliacao_tiktok import AGUARDANDO, aguardando_repasse  # noqa: E402
 
 _BRT = ZoneInfo("America/Sao_Paulo")
@@ -1175,6 +1176,14 @@ async def amazon_upload_chave_gerar(
     return {"chave": chave}
 
 
+def _sem_desfeita_ml(coluna: Any) -> Any:
+    """Para os totais: a venda do ML desfeita mostra a conta que tinha na linha dela, mas
+    o ML devolveu tarifa e frete e nada mais vai entrar — fora da soma, como sempre foi."""
+    ped = ConciliacaoPedido
+    desfeita = (ped.platform == IntegrationPlatform.ML) & (ped.venda_estorno >= ped.venda_valor)
+    return sa_case((desfeita, 0), else_=coluna)
+
+
 @router.get("/pedidos")
 async def listar_pedidos(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1216,9 +1225,9 @@ async def listar_pedidos(
             select(
                 func.count(),
                 func.sum(ped.venda_valor),
-                func.sum(ped.venda_tarifa),
-                func.sum(ped.venda_frete),
-                func.sum(ped.venda_liquido),
+                func.sum(_sem_desfeita_ml(ped.venda_tarifa)),
+                func.sum(_sem_desfeita_ml(ped.venda_frete)),
+                func.sum(_sem_desfeita_ml(ped.venda_liquido)),
                 func.sum(ped.recebido),
                 func.sum(ped.dif_previsto_recebido),
                 func.sum(ped.custo),
@@ -1335,14 +1344,17 @@ async def raio_x(
     # Frete do comprador: o ML põe dentro do GROSS do pagamento o que o comprador pagou
     # de frete, e desconta o frete INTEIRO (SHIPPING_FEE); a venda guarda só a parte da
     # loja. Sem isso o Raio-X mostrava 24,45 × 55,44 e parecia erro (300415, 15/10).
+    # 04/11 (305862): os juros do parcelamento pagos pelo comprador também vêm no GROSS;
+    # eram lidos como frete do comprador
     bruto_extrato = _soma("bruto", liberacoes)
     venda_valor = _num(p.venda_valor)
+    juros_comprador = float(juros_do_comprador(p.venda_valor, p.venda_tarifa, liberacoes))
     frete_comprador = (
-        round(bruto_extrato - venda_valor, 2)
+        round(bruto_extrato - venda_valor - juros_comprador, 2)
         if (
             bruto_extrato is not None
             and venda_valor is not None
-            and bruto_extrato - venda_valor > 0.005
+            and bruto_extrato - venda_valor - juros_comprador > 0.005
         )
         else 0.0
     )
@@ -1364,7 +1376,10 @@ async def raio_x(
         "venda": {
             "valor": venda_valor,
             "frete_comprador": frete_comprador,
-            "bruto": round(venda_valor + frete_comprador, 2) if venda_valor is not None else None,
+            "juros_comprador": juros_comprador,
+            "bruto": round(venda_valor + frete_comprador + juros_comprador, 2)
+            if venda_valor is not None
+            else None,
             "tarifa": _num(p.venda_tarifa),
             "frete": venda_frete,
             "frete_cobrado": round(venda_frete + frete_comprador, 2)
@@ -1385,17 +1400,20 @@ async def raio_x(
         "extrato": {
             "valor": bruto_extrato,
             "frete_comprador": frete_comprador if bruto_extrato is not None else None,
-            "produtos": round(bruto_extrato - frete_comprador, 2)
+            "juros_comprador": juros_comprador if bruto_extrato is not None else None,
+            "produtos": round(bruto_extrato - frete_comprador - juros_comprador, 2)
             if bruto_extrato is not None
             else None,
             "tarifa": _soma("tarifa", liberacoes),
             "parcelamento": _soma("parcelamento", liberacoes),
             # 19/10: a tarifa de venda do ML inclui a taxa de parcelamento (CVVFN) — é
-            # com isso que o `fee_amount` da venda se compara
+            # com isso que o `fee_amount` da venda se compara. Os juros pagos pelo
+            # comprador entram e saem: não são tarifa da loja
             "tarifa_total": (
                 round(
                     (_soma("tarifa", liberacoes) or 0.0)
-                    + (_soma("parcelamento", liberacoes) or 0.0),
+                    + (_soma("parcelamento", liberacoes) or 0.0)
+                    - juros_comprador,
                     2,
                 )
                 if (
@@ -1438,6 +1456,68 @@ async def raio_x(
             {**_movimento_out(m), "reserva_aberta": reserva_aberta.get(m.id)} for m in movs
         ],
         "frete_pago": await _fretes_pagos_do_pedido(session, p),
+        "troca": await _troca_do_pedido(session, p),
+    }
+
+
+async def _troca_do_pedido(session: AsyncSession, p: ConciliacaoPedido) -> dict[str, Any] | None:
+    """Troca no ML: uma tela de venda, dois pedidos no Bling (04/11, 305862 → 306420).
+    A Margem guarda em `raw.ml_troca` os pedidos novos que o ML criou; aqui os dois lados
+    se acham, e a pessoa vê que o resultado da venda é a soma deles."""
+    from app.models import MarketplaceOrderFinancial as Fin
+
+    if getattr(p.platform, "value", str(p.platform)) != "ml" or not p.numeroloja:
+        return None
+    fin = (
+        await session.execute(
+            select(Fin).where(
+                Fin.integration_id == p.integration_id, Fin.external_order_id == p.numeroloja
+            )
+        )
+    ).scalar_one_or_none()
+    raw = fin.raw if (fin is not None and isinstance(fin.raw, dict)) else {}
+    troca = raw.get("ml_troca") if isinstance(raw.get("ml_troca"), dict) else {}
+    novos = [str(x) for x in troca.get("novos_pedidos") or []]
+    if novos:
+        papel = "antigo"
+        outro_fin = select(Fin).where(
+            Fin.integration_id == p.integration_id,
+            or_(Fin.external_order_id.in_(novos), Fin.raw["order"]["id"].astext.in_(novos)),
+        )
+    else:
+        order = raw.get("order") if isinstance(raw.get("order"), dict) else {}
+        order_id = order.get("id")
+        if not order_id:
+            return None
+        papel = "novo"
+        outro_fin = select(Fin).where(
+            Fin.integration_id == p.integration_id,
+            Fin.raw["ml_troca"]["novos_pedidos"].contains([str(order_id)]),
+        )
+    achado = (await session.execute(outro_fin.limit(1))).scalars().first()
+    outro = None
+    if achado is not None and achado.pedido_bling:
+        outro = (
+            await session.execute(
+                select(ConciliacaoPedido).where(
+                    ConciliacaoPedido.integration_id == p.integration_id,
+                    ConciliacaoPedido.pedido_bling == achado.pedido_bling,
+                )
+            )
+        ).scalar_one_or_none()
+    if outro is None:
+        # a troca existe, mas o outro lado ainda não entrou no painel: diz isso
+        return {"papel": papel, "outro": None, "venda_inteira": None} if novos else None
+
+    def _valor(x: ConciliacaoPedido) -> Decimal:
+        return x.recebido if x.recebido is not None else (x.venda_liquido or Decimal("0"))
+
+    return {
+        "papel": papel,
+        "outro": _pedido_out(outro),
+        # recebido onde já entrou; onde não entrou, o previsto (a tela diz qual é qual)
+        "venda_inteira": _num(_valor(p) + _valor(outro)),
+        "falta_liberar": p.recebido is None or outro.recebido is None,
     }
 
 
@@ -1640,6 +1720,25 @@ def _comparativo(
         # mesmo segundo da liberação — é "depois da liberação"
         real_liquido = round(liberado, 2)
         depois = round(recebido - liberado, 2)
+    frete_fora = 0.0
+    if plataforma == "ml" and recebido is not None and liberado is not None:
+        # 04/11 (306037, 305862): "depois" olhava só o que veio DEPOIS da hora da liberação
+        # e só os débitos; a mediação do mesmo minuto e a tarifa devolvida ficavam de fora e
+        # as linhas não somavam (0,00 × −626,10). Vale toda linha que não é a liberação nem
+        # reserva. Assim a coluna fecha: Líquido + estornos = Ficou com a loja.
+        def _saldo(m: ConciliacaoMovimento) -> float:
+            return float(m.credito or 0) - float(m.debito or 0)
+
+        do_extrato = [
+            m for m in movs if m.origem in ORIGENS_EXTRATO and m.tipo not in TIPOS_RESERVA_SET
+        ]
+        fora_da_liberacao = sum(
+            _saldo(m) for m in do_extrato if m.tipo not in ("frete", "venda_liberada")
+        )
+        # frete lançado em linha própria é custo da venda: entra na linha do frete
+        frete_fora = round(-sum(_saldo(m) for m in do_extrato if m.tipo == "frete"), 2)
+        depois = round(fora_da_liberacao, 2)
+        real_liquido = round(recebido - a_parte - fora_da_liberacao, 2)
 
     def _fechar(linhas_: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if depois is not None and abs(depois) > 0.005:
@@ -2026,6 +2125,15 @@ def _comparativo(
             "frete_liquido_loja": None,
         }
     fc = n(v.get("frete_comprador")) or 0.0
+    juros = n(v.get("juros_comprador")) or 0.0
+    juros_real = n(e.get("juros_comprador"))
+    # taxa de parcelamento que a LOJA paga: o que sobra tirando os juros do comprador
+    parcelamento_loja = (
+        round(e["parcelamento"] - juros, 2) if e.get("parcelamento") is not None else None
+    )
+    frete_real = n(e.get("frete"))
+    if frete_fora:
+        frete_real = round((frete_real or 0.0) + frete_fora, 2)
     linhas = [
         linha("produtos", "Produtos (preço da venda)", n(v.get("valor")), n(e.get("produtos"))),
         linha(
@@ -2033,6 +2141,14 @@ def _comparativo(
             "+ Frete pago pelo comprador",
             fc,
             n(e.get("frete_comprador")),
+            compara=False,
+            estilo="muted",
+        ),
+        linha(
+            "juros",
+            "+ Juros do parcelamento (pagos pelo comprador)",
+            juros,
+            juros_real,
             compara=False,
             estilo="muted",
         ),
@@ -2047,15 +2163,23 @@ def _comparativo(
         # só o MP_FEE dizia "cobrou a menos" num pedido recebido a menos
         linha(
             "tarifa",
-            "− Tarifa de venda (com a taxa de parcelamento)",
+            "− Tarifa de venda",
             n(v.get("tarifa")),
             n(e.get("tarifa_total")),
         ),
         linha(
             "parcelamento",
-            "dos quais taxa de parcelamento",
+            "dos quais taxa de parcelamento da loja",
             None,
-            n(e.get("parcelamento")),
+            parcelamento_loja,
+            compara=False,
+            estilo="muted",
+        ),
+        linha(
+            "juros_saida",
+            "− Juros repassados ao ML (entram e saem)",
+            juros,
+            juros_real,
             compara=False,
             estilo="muted",
         ),
@@ -2063,7 +2187,7 @@ def _comparativo(
             "frete",
             "− Frete Mercado Envios (inteiro)",
             n(v.get("frete_cobrado")),
-            n(e.get("frete")),
+            frete_real,
         ),
         linha("cupom", "− Cupom da loja", n(v.get("cupom")), n(e.get("cupom"))),
         linha(
@@ -2074,14 +2198,6 @@ def _comparativo(
             n(e.get("outros_descontos")),
         ),
         linha(
-            "depois",
-            "± Depois da liberação (estornos, mediações)",
-            0.0 if tem_extrato else None,
-            depois,
-            compara=False,
-            estilo="muted",
-        ),
-        linha(
             "a_parte",
             "− Cobranças à parte na fatura",
             None,
@@ -2090,16 +2206,35 @@ def _comparativo(
             estilo="muted",
         ),
         linha("liquido", "= Líquido", n(v.get("liquido")), real_liquido, estilo="bold"),
+        # 04/11: abaixo do Líquido, pra coluna somar de cima a baixo — o Líquido é o que o
+        # ML lançou; o "Ficou com a loja" vem logo depois, já com os estornos
+        linha(
+            "depois",
+            "± Estornos e mediações",
+            0.0 if tem_extrato else None,
+            depois,
+            compara=False,
+            estilo="muted",
+        ),
     ]
     if fc <= 0.005:
-        linhas = [x for x in linhas if x["chave"] not in ("frete_comprador", "total")]
+        linhas = [x for x in linhas if x["chave"] != "frete_comprador"]
+    if juros <= 0.005:
+        linhas = [x for x in linhas if x["chave"] not in ("juros", "juros_saida")]
+    if fc <= 0.005 and juros <= 0.005:
+        linhas = [x for x in linhas if x["chave"] != "total"]
     if plataforma != "ml":
         linhas = [x for x in linhas if x["chave"] != "a_parte"]
     if not (e.get("outros_descontos") and abs(e["outros_descontos"]) > 0.005):
         linhas = [x for x in linhas if x["chave"] != "outros_descontos"]
-    if not (e.get("parcelamento") and abs(e["parcelamento"]) > 0.005):
+    if not (parcelamento_loja and abs(parcelamento_loja) > 0.005):
         linhas = [x for x in linhas if x["chave"] != "parcelamento"]
     fl = n(v.get("frete"))
+    # venda desfeita: a Margem zera. Com a conta original guardada, previsto × real vale;
+    # sem ela (leitura antiga) o previsto é zero e comparar só pinta tudo de vermelho
+    estorno, valor_venda = n(v.get("estorno")) or 0.0, n(v.get("valor")) or 0.0
+    desfeita = valor_venda > 0 and estorno >= valor_venda - 0.005
+    sem_conta_original = desfeita and not n(v.get("liquido"))
     return {
         "linhas": _fechar(linhas),
         "real_rotulo": "extrato + fatura",
@@ -2111,11 +2246,16 @@ def _comparativo(
             )
             + '"Real" é o extrato do Mercado Pago mais o que a fatura cobra à parte'
         ),
-        "comparar": p.situacao != "cancelado",
+        "comparar": p.situacao != "cancelado" and not sem_conta_original,
         "nota": (
             "venda desfeita: as colunas mostram o que entrou e o que saiu, não há previsto a cobrar"
-            if p.situacao == "cancelado"
-            else None
+            if p.situacao == "cancelado" or sem_conta_original
+            else (
+                "venda desfeita: o previsto é a conta que ela tinha; o que voltou está em "
+                "Estornos e mediações"
+                if desfeita
+                else None
+            )
         ),
         "frete_liquido_loja": n(v.get("frete")),
     }
@@ -2369,6 +2509,7 @@ async def exportar_xlsx(
 from app.models import BlingOrder, ConciliacaoDia, ConciliacaoSync  # noqa: E402
 from app.services.conciliacao_calculo import (  # noqa: E402
     conta_de_texto,
+    juros_do_comprador,
     outros_descontos_do_extrato,
     recalcular_loja,
     so_cobrancas_mudaram,
@@ -3405,11 +3546,11 @@ async def _somas_pedidos(
             select(
                 func.count(),
                 func.sum(ped.venda_valor),
-                func.sum(ped.venda_tarifa),
-                func.sum(ped.venda_frete),
+                func.sum(_sem_desfeita_ml(ped.venda_tarifa)),
+                func.sum(_sem_desfeita_ml(ped.venda_frete)),
                 func.sum(ped.fatura_parcelamento),
-                func.sum(ped.venda_cupom),
-                func.sum(ped.venda_liquido),
+                func.sum(_sem_desfeita_ml(ped.venda_cupom)),
+                func.sum(_sem_desfeita_ml(ped.venda_liquido)),
                 func.sum(ped.recebido),
                 func.sum(ped.saidas_depois),
                 func.sum(ped.custo),
