@@ -259,10 +259,17 @@ LEITURAS_SO_DE_ADMIN = frozenset({("GET", f"{_PREFIXO}/saude")})
 
 
 def _aba_inteira(user: User) -> None:
-    """A rota é só da aba E-mail: admin ou quem tem `atendimento_email` view
-    (`acesso.ve_aba_email`, a mesma conta do `useCan` do web). Só ver: as
-    ações seguem com `_mexe`."""
+    """A rota é só da aba E-mail: admin ou quem tem `atendimento_email_aba` view
+    (`acesso.ve_aba_email`, a mesma conta do `veAbaEmail` do web). Só ver: as
+    ações seguem com `_acao_da_aba` e `_mexe`."""
     if not acesso.ve_aba_email(user):
+        raise HTTPException(403, detail=ABA_SO_ADMIN)
+
+
+def _acao_da_aba(user: User) -> None:
+    """Mexer na aba E-mail (vincular, ignorar, reprocessar, resolver): só admin.
+    Quem tem a permissão da aba só vê (04/11/2026)."""
+    if user.role != UserRole.ADMIN:
         raise HTTPException(403, detail=ABA_SO_ADMIN)
 
 
@@ -657,7 +664,7 @@ async def escolher_loja(
     integração da ficha: o FK ativo, senão o par (nome, plataforma).
     """
     _mexe(user)
-    _aba_inteira(user)
+    _acao_da_aba(user)
     meta, _message = await _meta_ou_404(session, message_id, user, estados=(ESTADO_SEM_LOJA,))
     # O endereço principal da conta (o login do Tuta) nunca é "o alias" da loja.
     mailbox = await session.get(MailMailbox, meta.mailbox_id)
@@ -737,7 +744,7 @@ async def vincular(
 ) -> dict[str, Any]:
     """ "E-mail sem vínculo": ligar a conversa do e-mail a um pedido (ou ao de outra conversa)."""
     _mexe(user)
-    _aba_inteira(user)
+    _acao_da_aba(user)
     meta, _message = await _meta_ou_404(
         session, message_id, user, estados=(ESTADO_SEM_VINCULO, ESTADO_GRAVADO)
     )
@@ -925,7 +932,7 @@ async def _registrar_pessoa(
 async def ignorar(message_id: UUID, session: Session, user: Leitor) -> dict[str, Any]:
     """Tira o e-mail da fila (não é de loja nenhuma). Fica registrado quem tirou."""
     _mexe(user)
-    _aba_inteira(user)
+    _acao_da_aba(user)
     meta, _message = await _meta_ou_404(
         session, message_id, user, estados=(ESTADO_SEM_LOJA, ESTADO_RESUMO, ESTADO_ERRO)
     )
@@ -943,7 +950,7 @@ async def ignorar(message_id: UUID, session: Session, user: Leitor) -> dict[str,
 async def reprocessar_um(message_id: UUID, session: Session, user: Leitor) -> dict[str, Any]:
     """De novo pela ponte (cadastro corrigido): só sem loja ou com erro."""
     _mexe(user)
-    _aba_inteira(user)
+    _acao_da_aba(user)
     await _meta_ou_404(session, message_id, user, estados=(ESTADO_SEM_LOJA, ESTADO_ERRO))
     estado = await ponte.reprocessar(session, message_id)
     await session.commit()
@@ -2304,7 +2311,7 @@ async def resolver_envio(
 ) -> dict[str, Any]:
     """Uma pessoa conferiu no Tuta: saiu ou não saiu. Nunca reenvia (a regra DA Central)."""
     _mexe(user)
-    _aba_inteira(user)
+    _acao_da_aba(user)
     liga = await session.get(MailOutboxMeta, job_id)
     job = await session.get(MailOutbox, job_id) if liga is not None else None
     if liga is None or job is None or liga.origem != "conversa":

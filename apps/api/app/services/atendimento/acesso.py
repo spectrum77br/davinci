@@ -101,8 +101,16 @@ def ve_aba_email(user: User) -> bool:
     aba) deixou de abrir a aba: quem não é admin lê e-mail só pelas caixas das
     LOJAS DELE na barra da Caixa (`services/atendimento/escopo.py`). A mesma
     conta do `veAbaEmail` do web; a API recusa as rotas da aba com 403
-    `aba_email_so_admin`."""
-    return user.role == UserRole.ADMIN
+    `aba_email_so_admin`.
+
+    04/11/2026, o Eduardo: "libere a visualização da aba de email pro user
+    marrocos". Permissão NOVA, `atendimento_email_aba` view, só para LER: a antiga
+    segue sem abrir, porque londres e israel também a têm marcada. As ações da aba
+    continuam de admin (`_acao_da_aba`, no router)."""
+    if user.role == UserRole.ADMIN:
+        return True
+    perm = (getattr(user, "permissions", None) or {}).get("atendimento_email_aba")
+    return isinstance(perm, dict) and perm.get("view") is True
 
 
 def responde_email(user: User) -> bool:

@@ -830,7 +830,7 @@ async function principal() {
     assert.match(tpl, /<template v-if="aba === 'mail' && veAbaEmail">/)
     // 30/10/2026 (as lojas por pessoa — "o email ninguém pode ver a não ser admin"): a
     // permissão `atendimento_email` (o marrocos, 28/10) não abre mais a aba.
-    assert.match(pagina, /const veAbaEmail = computed\(\(\) => ehAdmin\.value\)\n/)
+    assert.match(pagina, /const podeVerAbaEmail = useCan\('atendimento_email_aba', 'view'\)\nconst veAbaEmail = computed\(\(\) => ehAdmin\.value \|\| podeVerAbaEmail\.value\)\n/)
     assert.doesNotMatch(pagina, /useCan\('atendimento_email'/, 'a permissão não abre mais a aba')
 
     // ── a aba E-mail só para quem a vê, de verdade (o trecho da página com dublês)
@@ -842,7 +842,7 @@ async function principal() {
     }
     {
       // A conta da página com o useCan de verdade (admin, permissão, sem permissão).
-      const corpo = trecho('const veAbaEmail = ', 'function abasDe(')
+      const corpo = trecho('const podeVerAbaEmail = ', 'function abasDe(')
       let usuario = null
       const can = {}
       new Function('exports', 'require', 'useAuthStore', transpile(web('composables/useCan.ts')))(can, require, () => ({ user: usuario }))
@@ -853,6 +853,9 @@ async function principal() {
       assert.equal(ve({ role: 'admin', permissions: {} }), true, 'admin')
       assert.equal(ve({ role: 'user', permissions: { atendimento_email: { view: true, edit: true } } }), false, 'a permissão (o marrocos) não abre mais')
       assert.equal(ve({ role: 'user', permissions: { atendimento_email: { view: false } } }), false)
+      // 04/11/2026: a permissão nova abre a aba só para ver (o marrocos).
+      assert.equal(ve({ role: 'user', permissions: { atendimento_email_aba: { view: true } } }), true, 'a permissão nova')
+      assert.equal(ve({ role: 'user', permissions: { atendimento_email_aba: { view: false } } }), false)
       assert.equal(ve({ role: 'user', permissions: { atendimento: { view: true, edit: true, delete: true } } }), false, 'o recurso da caixa não abre a aba')
       assert.equal(ve({ role: 'user', permissions: {} }), false)
       assert.equal(ve(null), false)

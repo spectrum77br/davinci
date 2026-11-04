@@ -369,7 +369,12 @@ async function loadMailboxes() {
         const primary = result.items.find((item) => item.address.trim().toLowerCase() === '061083.jf@tuta.com')
         mailboxId.value = primary?.id || result.items[0]?.id || ''
       }
-    } catch (reason) { if (!disposed) error.value = errorText(reason) }
+    } catch (reason) {
+      if (disposed) return
+      // A Central é só de admin: quem só vê a aba fica nas Filas, sem erro na tela.
+      if (!props.isAdmin && Number((reason as any)?.status ?? (reason as any)?.statusCode ?? (reason as any)?.response?.status) === 403) mailboxes.value = []
+      else error.value = errorText(reason)
+    }
   })()
   mailboxRequest = promise
   try { await promise } finally { if (mailboxRequest === promise) mailboxRequest = null }
@@ -750,6 +755,7 @@ onBeforeUnmount(() => {
     <!-- Sections: the mailboxes (this screen) and the Atendimento queues (who operates Atendimento) -->
     <div v-if="seesQueues || canAdminister" class="flex gap-1 overflow-x-auto border-b" role="tablist" aria-label="Seções do e-mail" data-mail-sections>
       <button
+        v-if="isAdmin || mailboxes.length"
         type="button"
         role="tab"
         :aria-selected="section === 'mailboxes'"

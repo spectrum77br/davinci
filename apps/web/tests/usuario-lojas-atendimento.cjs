@@ -151,7 +151,7 @@ async function principal() {
     // A Caixa de quem não é admin e não tem loja diz o porquê (e a aba E-mail é só de admin).
     const caixa = web('pages/atendimento.vue')
     assert.match(caixa, /v-if="naCaixa && !ehAdmin && resumo && !resumo\.lojas\.length"[\s\S]*?data-sem-lojas[\s\S]*?Usuários › Lojas no atendimento/)
-    assert.match(caixa, /const veAbaEmail = computed\(\(\) => ehAdmin\.value\)/)
+    assert.match(caixa, /const veAbaEmail = computed\(\(\) => ehAdmin\.value \|\| podeVerAbaEmail\.value\)/)
     // A Amazon só de e-mail ("amazon:vr", 30/10/2026) é loja: a linha leva as caixas de e-mail.
     const L = requerer('~/components/AtendimentoLojas.vue')
     assert.equal(L.ehAmazonSoEmail({ integration_id: null, externo_ref: 'amazon:vr' }), true)

@@ -30,6 +30,7 @@ export type Resource =
   | 'garantias_cpf'
   | 'atendimento'
   | 'atendimento_email'
+  | 'atendimento_email_aba'
   | 'sincronizacoes'
   | 'sync_logs'
   | 'integracoes'
@@ -108,7 +109,7 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     resources: [
       'devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados',
       'garantias', 'garantias_atendimento', 'garantias_cpf',
-      'atendimento_email',
+      'atendimento_email', 'atendimento_email_aba',
     ],
   },
   {
@@ -197,6 +198,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   garantias_cpf: 'Garantias — Ver o CPF completo (view)',
   atendimento: 'Atendimento',
   atendimento_email: 'Atendimento — aba E-mail (desde 30/10/2026 só admin: esta permissão não abre mais a aba)',
+  atendimento_email_aba: 'Atendimento — ver a aba E-mail (só ler; as ações seguem de admin)',
   sincronizacoes: 'Sincronizações',
   sync_logs: 'Sync Logs',
   integracoes: 'Integrações',

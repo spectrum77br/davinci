@@ -130,7 +130,10 @@ const agora = useRelogio()
 // a API usa a mesma conta (`acesso.ve_aba_email`) e recusa as rotas da aba com
 // 403 `aba_email_so_admin`. Quem não vê a aba não a tem nas abas, e o
 // `?tab=mail` (ou um `abrirAba('mail')`) cai na Caixa.
-const veAbaEmail = computed(() => ehAdmin.value)
+// 04/11/2026 (o Eduardo: "libere a visualização da aba de email pro user marrocos"): a
+// permissão `atendimento_email_aba` abre a aba só para ver; as ações seguem de admin.
+const podeVerAbaEmail = useCan('atendimento_email_aba', 'view')
+const veAbaEmail = computed(() => ehAdmin.value || podeVerAbaEmail.value)
 function abasDe(veEmail: boolean) {
   return ABAS.filter((a) => a.value !== 'mail' || veEmail)
 }
@@ -1562,7 +1565,7 @@ onBeforeUnmount(() => {
       <LazyAtendimentoMail
         v-show="!emailConversa"
         :is-admin="isAdmin"
-        :can-operate="mexe"
+        :can-operate="mexe && ehAdmin"
         :can-view="canSugerir"
         :stores="resumo?.lojas || []"
         :waiting="emailEsperando"

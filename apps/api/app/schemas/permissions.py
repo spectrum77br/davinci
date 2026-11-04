@@ -43,6 +43,9 @@ Resource = Literal[
     "garantias",
     "garantias_atendimento",
     "garantias_cpf",
+    # Atendimento › aba E-mail só para VER (04/11/2026): `acesso.ve_aba_email`.
+    # Mesmo nome no useCan.ts.
+    "atendimento_email_aba",
     # Atendimento (25/09/2026) — caixa única das conversas de Shopee, ML,
     # TikTok e Amazon, com rascunho da IA. view lê a fila; edit responde e
     # mexe no manual/respostas prontas; delete apaga regra/modelo. Mesmo
