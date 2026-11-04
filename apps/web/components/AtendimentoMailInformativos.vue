@@ -7,7 +7,8 @@
 // e-mail" abre o texto PROTEGIDO (links de acesso e códigos fora, nunca HTML),
 // como nas filas.
 //
-// Só quem MEXE no /atendimento (as rotas recusam os outros com
+// Quem MEXE no /atendimento e, desde 04/11/2026, quem só vê a aba, nas lojas dele
+// e sem o Abrir no Tuta (as rotas recusam os outros com
 // `atendimento_so_quem_mexe`); cada linha passa pelo filtro de acesso da
 // pessoa (as lojas e as categorias permitidas). Rotas (routers/atendimento_email.py):
 //   GET …/email/informativos                       — os itens (sem texto);
@@ -58,6 +59,8 @@ import { avisosDeProtecao, remetenteLegivel, tamanhoLegivel, urlDoAnexo, type Ca
 const props = defineProps<{
   // Sobe quando as Filas se atualizam ("atualizar", a volta da conversa): relê.
   sinal?: number
+  // Quem só vê a aba (04/11/2026): sem o que é de quem administra.
+  soVe?: boolean
 }>()
 
 const { api, url } = useApi()
@@ -180,7 +183,7 @@ watch(() => props.sinal, () => { atualizar() })
 
     <div v-if="erro" class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-red-700 dark:text-red-300">{{ erro }}</div>
     <div v-else-if="carregando && !itens.length" class="flex justify-center py-4"><Loader2 class="size-4 animate-spin" /></div>
-    <div v-else-if="!itens.length" class="py-2 text-muted-foreground" data-sem-pastas-informativas>Nenhuma pasta informativa ainda: escolha a categoria Informativo numa pasta em Pastas e regras.</div>
+    <div v-else-if="!itens.length" class="py-2 text-muted-foreground" data-sem-pastas-informativas>{{ soVe ? 'Nenhum e-mail informativo das suas lojas.' : 'Nenhuma pasta informativa ainda: escolha a categoria Informativo numa pasta em Pastas e regras.' }}</div>
     <ul v-else class="divide-y">
       <li v-for="it in itens" :key="it.pasta_id" class="py-0.5" :data-pasta-informativa="it.pasta_id">
         <button
@@ -213,7 +216,7 @@ watch(() => props.sinal, () => { atualizar() })
                 <button type="button" class="inline-flex items-center gap-0.5 underline" :aria-expanded="emailAberto === e.id" data-ver-email-informativo @click="verEmail(e)">
                   <component :is="emailAberto === e.id ? ChevronUp : ChevronDown" class="size-3" />{{ emailAberto === e.id ? 'fechar o e-mail' : 'ver o e-mail' }}
                 </button>
-                <a v-if="e.abrir_no_tuta" :href="e.abrir_no_tuta" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-0.5 underline" title="abre no Tuta (lá fica lido)"><ExternalLink class="size-3" />Abrir no Tuta</a>
+                <a v-if="!soVe && e.abrir_no_tuta" :href="e.abrir_no_tuta" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-0.5 underline" title="abre no Tuta (lá fica lido)"><ExternalLink class="size-3" />Abrir no Tuta</a>
               </div>
               <div v-if="emailAberto === e.id" class="space-y-1.5 rounded-md border bg-background p-2" data-email-informativo-aberto>
                 <div v-if="!detalhe" class="flex justify-center py-3"><Loader2 class="size-4 animate-spin" /></div>

@@ -6,6 +6,12 @@
 // qualquer loja e de endereço interno (a rota recusa os outros com
 // `atendimento_so_quem_mexe`).
 //
+// QUEM SÓ VÊ A ABA (04/11/2026, o Eduardo, do marrocos: "dxa ele ver tdo na aba de
+// email dele la as lojas sege so as dele"): `podeLerFilas` carrega e mostra as
+// mesmas filas, as pastas e a saúde — a API já recorta pelas lojas dele e pelos
+// e-mails sem loja — e, sem `podeMexer`, nenhuma ação aparece: escolher a loja,
+// vincular, tirar da fila, reprocessar, Saiu/Não saiu, mudar pastas e palavras.
+//
 // O E-MAIL SAIU DA CAIXA (13/10/2026 — o dono: "o e-mail aparece só na aba de
 // e-mail; a do chat aparece só no chat"): as conversas de e-mail da ponte não
 // estão mais na Caixa do chat. Por isso as filas de CONVERSA ficam aqui, com
@@ -76,8 +82,21 @@ export const FILAS: { value: Fila; label: string; dica: string }[] = [
 // As filas que são CONVERSAS de e-mail (13/10/2026): quem vê o /atendimento
 // vê estas (as mesmas que via na Caixa); as outras são de quem mexe.
 export const FILAS_DE_CONVERSA: ReadonlySet<Fila> = new Set<Fila>(['chamados', 'aguardando', 'todas'])
-export function filasDaPessoa(podeMexer: boolean) {
-  return podeMexer ? FILAS : FILAS.filter((f) => FILAS_DE_CONVERSA.has(f.value))
+// `lePorInteiro`: quem mexe e quem só vê a aba (`podeLerFilas`) têm todas as filas.
+export function filasDaPessoa(lePorInteiro: boolean) {
+  return lePorInteiro ? FILAS : FILAS.filter((f) => FILAS_DE_CONVERSA.has(f.value))
+}
+// A dica da fila para quem só vê: o que é a fila, sem mandar fazer o que ele não faz.
+const DICA_DE_QUEM_SO_VE: Partial<Record<Fila, string>> = {
+  sem_loja: 'O endereço que recebeu (e a pasta) não diz de qual loja é: quem administra escolhe a loja.',
+  sem_vinculo: 'Já está na conversa de e-mail da loja, mas sem pedido: quem administra vincula ao pedido.',
+  suspeito: 'O remetente pode ser falso: não responda nem clique em links.',
+  erro: 'A ponte não conseguiu ler este e-mail: quem administra reprocessa ou tira da fila.',
+  revisar_envio: 'A resposta pode ter saído (o Mac não confirmou): quem administra confere nos Enviados do Tuta.',
+  chamados: 'Os chamados dos sites ficam com quem administra.',
+}
+export function dicaDaFila(f: { value: Fila; dica: string }, podeMexer: boolean): string {
+  return podeMexer ? f.dica : DICA_DE_QUEM_SO_VE[f.value] || f.dica
 }
 // Os TIPOS do chamado dos sites (RF6, 09/10/2026; na Caixa até 13/10/2026):
 // os chips da fila "Chamados dos sites", com os códigos da API
@@ -189,13 +208,14 @@ export function pedidosQueExistem(e: Pick<ItemFila, 'pedidos_citados'>): string[
 }
 
 // O que cada fila deixa fazer (a rota confere de novo).
-export function acoesDaFila(fila: Fila, isAdmin: boolean) {
+// Quem só vê a aba (`podeMexer` falso): nenhuma.
+export function acoesDaFila(fila: Fila, isAdmin: boolean, podeMexer = true) {
   return {
-    escolherLoja: fila === 'sem_loja',
-    vincular: fila === 'sem_vinculo',
-    ignorar: fila === 'sem_loja' || fila === 'resumo' || fila === 'erro',
-    reprocessar: fila === 'sem_loja' || fila === 'erro',
-    reprocessarFila: fila === 'sem_loja' && isAdmin,
+    escolherLoja: podeMexer && fila === 'sem_loja',
+    vincular: podeMexer && fila === 'sem_vinculo',
+    ignorar: podeMexer && (fila === 'sem_loja' || fila === 'resumo' || fila === 'erro'),
+    reprocessar: podeMexer && (fila === 'sem_loja' || fila === 'erro'),
+    reprocessarFila: podeMexer && fila === 'sem_loja' && isAdmin,
   }
 }
 
@@ -241,9 +261,10 @@ export function perguntaResolver(saiu: boolean): string {
 }
 
 // A lista de conversa vazia: o porquê, pela fila (e pela busca).
-export function vazioDaConversa(fila: Fila, busca: string, fechadas: boolean): string {
+// `soVe`: o chamado do site não é de loja nenhuma, e a conversa dele fica com o admin.
+export function vazioDaConversa(fila: Fila, busca: string, fechadas: boolean, soVe = false): string {
   if (busca) return 'Nada encontrado para essa busca.'
-  if (fila === 'chamados') return 'Nenhum chamado aberto dos sites.'
+  if (fila === 'chamados') return soVe ? 'Os chamados dos sites não são de uma loja: ficam com quem administra.' : 'Nenhum chamado aberto dos sites.'
   if (fila === 'todas') return fechadas ? 'Nenhuma conversa de e-mail fechada.' : 'Nenhuma conversa de e-mail aberta.'
   return 'Nenhum e-mail esperando resposta.'
 }
@@ -267,6 +288,9 @@ const props = defineProps<{
   // Mexe no /atendimento: as filas de e-mail e as ações. Falso (quem só lê,
   // 13/10/2026) = só as filas de CONVERSA (os chamados, o falta responder e todas).
   podeMexer?: boolean
+  // Só ver (04/11/2026, `atendimento_email_aba`): todas as filas, as pastas e a
+  // saúde, recortadas pela API; as ações continuam em `podeMexer`.
+  podeLerFilas?: boolean
   // A página mostra uma conversa de e-mail por cima (a aba E-mail, 13/10/2026):
   // esta tela fica montada, escondida; na volta, a fila e os números de novo.
   pausado?: boolean
@@ -284,8 +308,9 @@ const { api, url } = useApi()
 const toasts = useToasts()
 
 const mexe = computed(() => props.podeMexer !== false)
-const filasVisiveis = computed(() => filasDaPessoa(mexe.value))
-const fila = ref<Fila>(mexe.value ? 'sem_loja' : 'chamados')
+const le = computed(() => mexe.value || props.podeLerFilas === true)
+const filasVisiveis = computed(() => filasDaPessoa(le.value))
+const fila = ref<Fila>(le.value ? 'sem_loja' : 'chamados')
 const contagensFilas = ref<Record<string, number> | null>(null)
 const contagensConversaLocal = ref<ContagensDeConversa | null>(null)
 const contagensCompartilhadas = computed(() => !!props.atualizarContagensDeConversa)
@@ -314,7 +339,7 @@ const pedidoDigitado = reactive<Record<string, string>>({})
 const lojaEscolhida = reactive<Record<string, string>>({})
 let geracao = 0
 
-const acoes = computed(() => acoesDaFila(fila.value, props.isAdmin))
+const acoes = computed(() => acoesDaFila(fila.value, props.isAdmin, mexe.value))
 // "Pastas e regras" não é fila: a aba ao lado das filas (a fila fica guardada).
 const pastasAbertas = ref(false)
 function verFila(f: Fila) {
@@ -324,20 +349,20 @@ function verFila(f: Fila) {
 const filaInfo = computed(() => FILAS.find((f) => f.value === fila.value) || FILAS[0])
 
 // As contagens são ajuda: a fila aberta mostra o erro dela. As das filas de
-// e-mail só para quem mexe (a rota recusa os outros); as das conversas, todos.
+// e-mail só para quem lê as filas (a rota recusa os outros); as das conversas, todos.
 function carregarContagensDeConversa(): Promise<void> {
   if (props.atualizarContagensDeConversa) return props.atualizarContagensDeConversa()
   return api<ContagensDeConversa>('/api/atendimento/email/contagens').then((r) => { contagensConversaLocal.value = r }).catch(() => {})
 }
 async function carregarContagens(conversaJaSolicitada = false) {
   const pedidos: Promise<void>[] = conversaJaSolicitada && contagensCompartilhadas.value ? [] : [carregarContagensDeConversa()]
-  if (mexe.value) {
+  if (le.value) {
     pedidos.push(api<Record<string, number>>('/api/atendimento/email/filas').then((r) => { contagensFilas.value = r }).catch(() => {}))
   }
   await Promise.all(pedidos)
 }
 async function carregarSaude() {
-  if (!mexe.value) return
+  if (!le.value) return
   try {
     saude.value = await api('/api/atendimento/email/saude')
   } catch {
@@ -382,7 +407,7 @@ async function carregar(mais = false, automatico = false) {
 }
 // As pastas informativas (o chip Informativos, para quem mexe): em cima da
 // lista; relidas no "atualizar" e na volta da conversa (o `sinal`).
-const informativosAbertos = computed(() => mexe.value && tipoEmail.value === 'informativo' && !pastasAbertas.value && fila.value !== 'revisar_envio')
+const informativosAbertos = computed(() => le.value && tipoEmail.value === 'informativo' && !pastasAbertas.value && fila.value !== 'revisar_envio')
 const sinalInformativos = ref(0)
 async function atualizar() {
   sinalInformativos.value++
@@ -560,7 +585,7 @@ const curto = (p: string) => plataformaInfo(p).curto
         :aria-selected="!pastasAbertas && fila === f.value"
         class="inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs"
         :class="!pastasAbertas && fila === f.value ? 'bg-muted font-medium' : 'text-muted-foreground hover:bg-muted/60'"
-        :title="f.dica"
+        :title="dicaDaFila(f, mexe)"
         :data-fila="f.value"
         @click="verFila(f.value)"
       >
@@ -568,7 +593,7 @@ const curto = (p: string) => plataformaInfo(p).curto
         <span v-if="contagens[f.value]" class="rounded-full bg-background px-1.5 text-[10px] tabular-nums ring-1 ring-border">{{ contagens[f.value] }}</span>
       </button>
       <button
-        v-if="mexe"
+        v-if="le"
         type="button"
         role="tab"
         :aria-selected="pastasAbertas"
@@ -584,10 +609,10 @@ const curto = (p: string) => plataformaInfo(p).curto
     </div>
 
     <!-- pastas e regras (não é fila) -->
-    <AtendimentoMailPastas v-if="pastasAbertas" :is-admin="isAdmin" />
+    <AtendimentoMailPastas v-if="pastasAbertas" :is-admin="isAdmin && mexe" />
 
     <div v-if="!pastasAbertas" class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-      <span>{{ filaInfo.dica }}</span>
+      <span>{{ dicaDaFila(filaInfo, mexe) }}</span>
       <button v-if="acoes.reprocessarFila" type="button" class="ml-auto inline-flex items-center gap-1 rounded border px-2 py-0.5 text-foreground hover:bg-muted" :disabled="!!ocupado" title="depois de corrigir o cadastro (Cadastros › Lojas), passa a fila de novo pela ponte" @click="reprocessarFila">
         <RotateCcw class="size-3.5" /> reprocessar a fila
       </button>
@@ -607,7 +632,7 @@ const curto = (p: string) => plataformaInfo(p).curto
 
     <!-- as pastas informativas (21/10/2026): um item por pasta, uma linha por e-mail -->
     <template v-if="informativosAbertos">
-      <AtendimentoMailInformativos :sinal="sinalInformativos" />
+      <AtendimentoMailInformativos :sinal="sinalInformativos" :so-ve="!mexe" />
       <p class="text-[11px] text-muted-foreground" data-informativos-abaixo>Abaixo, “{{ filaInfo.label }}” com o tipo Informativo: os e-mails da Entrada (que liga como hoje) e os de antes da categoria por pasta.</p>
     </template>
 
@@ -618,13 +643,13 @@ const curto = (p: string) => plataformaInfo(p).curto
       <div v-else-if="!envios.length" class="py-8 text-center text-xs text-muted-foreground">Nenhuma resposta esperando conferência.</div>
       <ul v-else class="space-y-2">
         <li v-for="v in envios" :key="v.id" class="space-y-1 rounded-lg border border-amber-500/40 p-2.5 text-xs" :data-envio="v.id">
-          <div class="font-medium">{{ v.lease_vencido ? 'O Mac pegou esta resposta e sumiu (há mais de 15 min): pode ter saído — confira nos Enviados do Tuta e marque.' : 'Pode ter saído — confira nos Enviados do Tuta e marque.' }}</div>
+          <div class="font-medium">{{ v.lease_vencido ? `O Mac pegou esta resposta e sumiu (há mais de 15 min): pode ter saído — ${mexe ? 'confira nos Enviados do Tuta e marque' : 'quem administra confere nos Enviados do Tuta'}.` : `Pode ter saído — ${mexe ? 'confira nos Enviados do Tuta e marque' : 'quem administra confere nos Enviados do Tuta'}.` }}</div>
           <div class="break-all">{{ v.de || '?' }} → {{ v.para || '?' }}</div>
           <div class="text-muted-foreground">{{ fmtDataHora(v.criado_em) }}<template v-if="v.codigo"> · {{ v.codigo }}</template></div>
           <div class="flex flex-wrap items-center gap-1.5 pt-0.5">
             <button v-if="v.conversa_id" type="button" class="rounded border px-2 py-0.5 hover:bg-muted" @click="emit('abrirConversa', v.conversa_id)">abrir a conversa</button>
-            <button type="button" class="rounded border px-2 py-0.5 text-emerald-700 hover:bg-emerald-500/10 disabled:opacity-50 dark:text-emerald-300" :disabled="!!ocupado" data-resolver-saiu @click="resolver(v, true)">Saiu</button>
-            <button type="button" class="rounded border px-2 py-0.5 text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-300" :disabled="!!ocupado" data-resolver-nao-saiu @click="resolver(v, false)">Não saiu</button>
+            <button v-if="mexe" type="button" class="rounded border px-2 py-0.5 text-emerald-700 hover:bg-emerald-500/10 disabled:opacity-50 dark:text-emerald-300" :disabled="!!ocupado" data-resolver-saiu @click="resolver(v, true)">Saiu</button>
+            <button v-if="mexe" type="button" class="rounded border px-2 py-0.5 text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-300" :disabled="!!ocupado" data-resolver-nao-saiu @click="resolver(v, false)">Não saiu</button>
             <Loader2 v-if="ocupado === `env:${v.id}`" class="size-3.5 animate-spin" />
           </div>
         </li>
@@ -682,7 +707,7 @@ const curto = (p: string) => plataformaInfo(p).curto
       </div>
       <div v-if="carregando && !conversas.length" class="flex justify-center py-8"><Loader2 class="size-5 animate-spin" /></div>
       <div v-else-if="!conversas.length" class="py-8 text-center text-xs text-muted-foreground">
-        {{ vazioDaConversa(fila, busca, fechadas) }}
+        {{ vazioDaConversa(fila, busca, fechadas, !mexe && le) }}
         <!-- a busca em "Todas as conversas" não achou nas abertas (ou nas fechadas): a outra metade é 1 clique -->
         <button v-if="fila === 'todas' && busca" type="button" class="ml-1 underline hover:text-foreground" data-buscar-na-outra @click="verFechadas(!fechadas)">procurar nas {{ fechadas ? 'abertas' : 'fechadas' }}</button>
       </div>
@@ -725,7 +750,7 @@ const curto = (p: string) => plataformaInfo(p).curto
             <span v-if="e.loja" class="text-muted-foreground">· {{ plataformaInfo(e.plataforma).curto }} {{ e.loja }}</span>
             <span v-if="e.protocolo && !e.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">{{ e.protocolo }}</span>
             <ShieldAlert v-if="e.suspeito" class="size-3.5 text-red-600" aria-label="remetente pode ser falso" />
-            <a v-if="e.abrir_no_tuta" :href="e.abrir_no_tuta" target="_blank" rel="noopener noreferrer" class="ml-auto inline-flex items-center gap-0.5 underline" title="abre no Tuta (lá fica lido)"><ExternalLink class="size-3" />Abrir no Tuta</a>
+            <a v-if="mexe && e.abrir_no_tuta" :href="e.abrir_no_tuta" target="_blank" rel="noopener noreferrer" class="ml-auto inline-flex items-center gap-0.5 underline" title="abre no Tuta (lá fica lido)"><ExternalLink class="size-3" />Abrir no Tuta</a>
           </div>
           <div class="break-words font-medium">{{ e.assunto || '(sem assunto)' }}</div>
           <div class="break-all text-muted-foreground">De {{ e.de || '—' }} · para {{ destinoDaLoja(e.alias, e.loja) }}</div>

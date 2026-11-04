@@ -129,6 +129,9 @@ const agora = useRelogio()
 const podeVerAbaEmail = useCan('atendimento_email_aba', 'view')
 const podeLerCaixaEmail = useCan('atendimento_email_leitura', 'view')
 const veAbaEmail = computed(() => ehAdmin.value || podeVerAbaEmail.value || podeLerCaixaEmail.value)
+// Quem lê TODAS as Filas (04/11/2026): quem mexe, e quem não é admin e tem a
+// permissão da aba, nas lojas dele (a mesma conta de `acesso.le_filas_email`).
+const leFilasEmail = computed(() => (mexe.value && ehAdmin.value) || (!ehAdmin.value && podeVerAbaEmail.value))
 function abasDe(veEmail: boolean) {
   return ABAS.filter((a) => a.value !== 'mail' || veEmail)
 }
@@ -1542,7 +1545,7 @@ onBeforeUnmount(() => {
             <AtendimentoConversa
               :key="`${emailConversa}:${emailConversaVersao}`"
               :conversa-id="emailConversa"
-              :can-edit="ehAdmin && canResponder"
+              :can-edit="(ehAdmin || podeVerAbaEmail) && canResponder"
               :can-sugerir="canSugerir"
               :modelos="modelos"
               :flags="resumo?.flags || null"
@@ -1561,6 +1564,7 @@ onBeforeUnmount(() => {
         v-show="!emailConversa"
         :is-admin="isAdmin"
         :can-operate="mexe && ehAdmin"
+        :can-read-queues="leFilasEmail"
         :can-view="canSugerir"
         :stores="resumo?.lojas || []"
         :waiting="emailEsperando"

@@ -889,7 +889,7 @@ async function principal() {
       assert.ok(posVenda.resources.includes('atendimento_email_leitura'))
       assert.ok(posVenda.resources.includes('atendimento_email_aba'))
       assert.ok(posVenda.resources.includes('atendimento_email'))
-      assert.equal(can.RESOURCE_LABELS.atendimento_email_aba, 'Atendimento — ver a aba E-mail (só ler; as ações seguem de admin)')
+      assert.equal(can.RESOURCE_LABELS.atendimento_email_aba, 'Atendimento — ver a aba E-mail (só ler, nas lojas da pessoa; as ações seguem de admin)')
       assert.equal(can.RESOURCE_LABELS.atendimento_email_leitura, 'Atendimento — caixa de e-mail (somente leitura)')
       const permissoesApi = fs.readFileSync(path.resolve(__dirname, '../../api/app/schemas/permissions.py'), 'utf8')
       assert.match(permissoesApi, /^ {4}"atendimento_email_leitura",$/m, 'o recurso no backend')

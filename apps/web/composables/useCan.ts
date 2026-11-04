@@ -196,7 +196,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   garantias_cpf: 'Garantias — Ver o CPF completo (view)',
   atendimento: 'Atendimento',
   atendimento_email: 'Atendimento — aba E-mail (desde 30/10/2026 só admin: esta permissão não abre mais a aba)',
-  atendimento_email_aba: 'Atendimento — ver a aba E-mail (só ler; as ações seguem de admin)',
+  atendimento_email_aba: 'Atendimento — ver a aba E-mail (só ler, nas lojas da pessoa; as ações seguem de admin)',
   atendimento_email_leitura: 'Atendimento — caixa de e-mail (somente leitura)',
   sincronizacoes: 'Sincronizações',
   sync_logs: 'Sync Logs',

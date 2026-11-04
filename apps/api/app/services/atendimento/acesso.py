@@ -122,6 +122,20 @@ def ve_aba_email(user: User) -> bool:
     return ve_caixa_email(user) or _leitura_email_concedida(user, "atendimento_email_aba")
 
 
+def so_le_filas_email(user: User) -> bool:
+    """Quem VÊ as filas da aba E-mail sem mexer: não é admin e tem
+    `atendimento_email_aba` view (04/11/2026, o Eduardo, do marrocos: "dxa ele ver
+    tdo na aba de email dele la as lojas sege so as dele"). As rotas recortam pelas
+    lojas dele (`routers/atendimento_email.py`, `_email_nas_lojas`). A leitura da
+    caixa (`atendimento_email_leitura`) e a permissão antiga não entram aqui."""
+    return user.role != UserRole.ADMIN and _leitura_email_concedida(user, "atendimento_email_aba")
+
+
+def le_filas_email(user: User) -> bool:
+    """As LEITURAS das filas, das pastas e das regras: quem mexe ou `so_le_filas_email`."""
+    return pode_mexer(user) or so_le_filas_email(user)
+
+
 def responde_email(user: User) -> bool:
     """Responde e-mail pela caixa crua (a Central da aba E-mail) sem ser dono/admin.
 

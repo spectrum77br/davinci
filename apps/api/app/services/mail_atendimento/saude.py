@@ -37,8 +37,10 @@ Só leitura; nada aqui decifra e-mail (só o config das caixas, para os aliases)
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 import structlog
@@ -288,14 +290,25 @@ async def caixas_visiveis(session: AsyncSession, user: User) -> list[MailMailbox
 
 
 async def linha_da_caixa(
-    session: AsyncSession, mailbox: MailMailbox, *, user: User | None = None
+    session: AsyncSession,
+    mailbox: MailMailbox,
+    *,
+    user: User | None = None,
+    recorte_email: Callable[[Any], Any] | None = None,
+    recorte_envio: Any = None,
 ) -> dict:
-    """A linha da Saúde: estado, sinal, chaves e o que a ponte decidiu (contagens)."""
+    """A linha da Saúde: estado, sinal, chaves e o que a ponte decidiu (contagens).
+
+    `recorte_email`/`recorte_envio` (04/11/2026, quem só vê a aba E-mail): os WHERE
+    das lojas da pessoa, a mesma régua das filas. Com eles, os números da caixa são
+    só os dela e as contagens de pasta (que olham o e-mail de toda loja) não vêm."""
     cfg = await config_caixa.config_da_caixa(session, mailbox.id)
     agora = datetime.now(UTC)
     visto = _utc(mailbox.last_seen_at)
     online = visto is not None and visto > agora - timedelta(minutes=3)
-    filtrada = user is not None and await administracao.tem_politica(session, mailbox.id, user)
+    filtrada = recorte_email is not None or (
+        user is not None and await administracao.tem_politica(session, mailbox.id, user)
+    )
     contagens = {
         estado: int(n)
         for estado, n in (
@@ -306,6 +319,11 @@ async def linha_da_caixa(
                     *(
                         [administracao.filtro_mensagem(user, MailMessageMeta.message_id)]
                         if user is not None
+                        else []
+                    ),
+                    *(
+                        [recorte_email(MailMessageMeta.message_id)]
+                        if recorte_email is not None
                         else []
                     ),
                 )
@@ -356,6 +374,7 @@ async def linha_da_caixa(
                     if user is not None
                     else []
                 ),
+                *([recorte_envio] if recorte_envio is not None else []),
                 or_(
                     MailOutbox.status == "uncertain",
                     and_(

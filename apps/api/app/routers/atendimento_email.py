@@ -46,6 +46,14 @@ trava `_so_admin`, o `pode_ver`/`pode_mexer` e o escopo por equipe):
   Eduardo: "bote o user marrocos no davinci pra poder ver tambem a aba de
   emails") — só VER: as filas e as ações continuam de quem mexe.
 
+  QUEM SÓ VÊ A ABA (04/11/2026, o Eduardo, do marrocos: "dxa ele ver tdo na aba de
+  email dele la as lojas sege so as dele"): quem não é admin e tem
+  `atendimento_email_aba` view (`acesso.so_le_filas_email`) faz as LEITURAS abaixo
+  (`_le_filas`), todas recortadas ANTES de contar e paginar pela mesma condição
+  (`_email_nas_lojas`, `_envio_nas_lojas`): o e-mail das lojas dele e o sem loja
+  nenhuma entram; o de loja que não é dele não aparece em lugar nenhum. As ações
+  continuam só de admin e a Central (/api/mail/*) também.
+
   só quem MEXE (as filas podem ter e-mail de qualquer loja e de endereço interno):
     GET   …/filas                   — as contagens
     GET   …/emails?fila=…           — sem_loja | sem_vinculo | suspeito | resumo | erro |
@@ -101,7 +109,7 @@ from zoneinfo import ZoneInfo
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import and_, case, exists, func, literal, not_, or_, select, update
+from sqlalchemy import and_, case, exists, func, literal, literal_column, not_, or_, select, update
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -121,6 +129,7 @@ from app.models import (
     User,
     UserRole,
 )
+from app.models.mail_admin import MailAcesso
 from app.models.mail_atendimento import (
     AtendimentoRegraPastaEmail,
     MailFolder,
@@ -132,6 +141,7 @@ from app.routers.atendimento import (
     ABA_EMAIL_SO_ADMIN,
     TIPOS_CHAMADO,
     _clausula_escopo,
+    _conversa_no_escopo,
     _conversa_ou_404,
     _nomes_das_lojas,
     _so_admin,
@@ -214,6 +224,7 @@ _SP = ZoneInfo("America/Sao_Paulo")
 # As LEITURAS que só quem mexe faz: a exceção ao "quem só lê lê tudo" do
 # /atendimento (crítica de 08/10: as filas podem ter e-mail de qualquer loja e
 # de endereço interno). `tests/test_atendimento_so_leitura.py` confere a lista.
+# Desde 04/11/2026 também de quem só vê a aba (`_le_filas`), nas lojas dele.
 LEITURAS_SO_DE_QUEM_MEXE = frozenset(
     {
         ("GET", f"{_PREFIXO}/filas"),
@@ -234,6 +245,13 @@ SO_QUEM_MEXE = {
 def _mexe(user: User) -> None:
     """As filas, as pastas e as ações: só quem MEXE no /atendimento."""
     if not acesso.pode_mexer(user):
+        raise HTTPException(403, detail=SO_QUEM_MEXE)
+
+
+def _le_filas(user: User) -> None:
+    """As LEITURAS das filas e das pastas: quem mexe ou quem só vê a aba, recortado
+    pelas lojas dele (`_email_nas_lojas`). Os outros: o mesmo 403 de `_mexe`."""
+    if not acesso.le_filas_email(user):
         raise HTTPException(403, detail=SO_QUEM_MEXE)
 
 
@@ -297,16 +315,167 @@ def _escopo_do_email(scope: TeamScope, integ, ficha):
     return ou[0] if len(ou) == 1 else or_(*ou)
 
 
+def _conversa_nas_lojas(scope: TeamScope, c):
+    """WHERE da conversa (`c`, um `aliased`) para quem só vê a aba: a conversa sem
+    loja (o chamado do site) ou na loja dele (a integração ou a ficha da ponte)."""
+    ficha = func.nullif(c.dados[separa_email.CHAVE_MAIL]["store_info_id"].astext, "")
+    return or_(
+        and_(c.integration_id.is_(None), ficha.is_(None)),
+        _clausula_escopo(scope, c.integration_id),
+    )
+
+
+_SUGESTAO_COM_LOJA = "'$[*] ? (@.store_info_id != null || @.integration_id != null)'::jsonpath"
+
+
+def _sem_loja_que_pode_ser_dele(scope: TeamScope, m):
+    """O e-mail SEM loja que quem só vê a aba enxerga: sem sugestão de loja, ou com uma
+    das dele entre as sugeridas. Com só lojas dos outros (288 dos 598 de produção,
+    04/11/2026) não aparece: "as lojas seguem só as dele". Sugestão de marca não tem
+    loja (`store_info_id` nulo) e não esconde."""
+    suas = [
+        *(m.sugestoes.contains([{"integration_id": str(i)}]) for i in scope.integration_ids),
+        *(m.sugestoes.contains([{"store_info_id": str(f)}]) for f in scope.store_info_ids),
+    ]
+    tem_loja = func.coalesce(
+        func.jsonb_path_exists(
+            m.sugestoes,
+            literal_column(_SUGESTAO_COM_LOJA),
+        ),
+        False,
+    )
+    return or_(not_(tem_loja), *suas)
+
+
+def _email_nas_lojas(scope: TeamScope, message_id):
+    """A condição ÚNICA do recorte de quem só vê a aba E-mail: aplicar ANTES de contar
+    e paginar. `message_id`: a coluna da consulta de fora (ou o id).
+
+    O e-mail entra se NÃO está ligado a loja nenhuma (`_sem_loja_que_pode_ser_dele`) ou
+    se está nas lojas da pessoa.
+    A loja é a da meta (a ponte) ou — sem ela — a do índice (`loja_do_email_sql`),
+    como na barra de lojas; a conversa dele também precisa ser sem loja ou dele.
+    EXISTS de propósito: o `integ IN (...)` dá NULL quando o e-mail só tem a ficha, e
+    NULL aqui esconde; um NOT EXISTS mostraria o e-mail da ficha de outra pessoa."""
+    msg, m, c = aliased(MailMessage), aliased(MailMessageMeta), aliased(AtendimentoConversa)
+    i = barra_lojas.indice_alias()
+    integ, ficha = barra_lojas.loja_do_email_sql(i, m)
+    return (
+        select(literal(1))
+        .select_from(msg)
+        .outerjoin(m, m.message_id == msg.id)
+        .outerjoin(i, i.message_id == msg.id)
+        .outerjoin(c, c.id == m.conversa_id)
+        .where(
+            msg.id == message_id,
+            or_(
+                and_(integ.is_(None), ficha.is_(None), _sem_loja_que_pode_ser_dele(scope, m)),
+                _escopo_do_email(scope, integ, ficha),
+            ),
+            or_(m.conversa_id.is_(None), c.id.is_(None), _conversa_nas_lojas(scope, c)),
+        )
+        .correlate_except(msg, m, i, c)
+        .exists()
+    )
+
+
+def _envio_nas_lojas(scope: TeamScope):
+    """O recorte de um job da fila (`MailOutbox` + `MailOutboxMeta` na consulta de fora):
+    a loja da conversa ligada e a do e-mail respondido. Sem as duas, sem loja."""
+    c = aliased(AtendimentoConversa)
+    conversa = (
+        select(literal(1))
+        .where(c.id == MailOutboxMeta.conversa_id, _conversa_nas_lojas(scope, c))
+        .correlate_except(c)
+        .exists()
+    )
+    return and_(
+        or_(MailOutboxMeta.conversa_id.is_(None), conversa),
+        or_(MailOutbox.message_id.is_(None), _email_nas_lojas(scope, MailOutbox.message_id)),
+    )
+
+
+async def _escopo_da_aba(session: AsyncSession, user: User) -> TeamScope:
+    """O escopo das leituras da aba. Quem tem recorte consulta sem JIT: o Postgres
+    gastava segundos compilando as subconsultas correlatas (como em GET …/contagens)."""
+    scope = await escopo_do_atendimento(session, user)
+    if not scope.unrestricted:
+        await session.execute(sql_text("SET LOCAL jit = off"))
+    return scope
+
+
+def _recorte_email(scope: TeamScope, message_id) -> tuple:
+    """Os WHERE do recorte numa consulta de e-mails (o admin não tem nenhum)."""
+    return () if scope.unrestricted else (_email_nas_lojas(scope, message_id),)
+
+
+def _recorte_envio(scope: TeamScope) -> tuple:
+    """Os WHERE do recorte numa consulta de jobs (o admin não tem nenhum)."""
+    return () if scope.unrestricted else (_envio_nas_lojas(scope),)
+
+
+async def _conversa_que_abre(
+    session: AsyncSession, scope: TeamScope, conversa_id: UUID | None
+) -> str | None:
+    """O id da conversa do cartão; None se a pessoa não a abre (o chamado do site
+    não é de loja dela: o e-mail aparece, o link daria 404)."""
+    if conversa_id is None:
+        return None
+    if not scope.unrestricted:
+        c = await session.get(AtendimentoConversa, conversa_id)
+        if c is None or not _conversa_no_escopo(scope, c):
+            return None
+        # A mesma régua de `_conversa_ou_404`: a de e-mail com um e-mail fora do alcance dele.
+        if separa_email.e_conversa_de_email(c) and scope.email_user is not None:
+            visivel = await session.scalar(
+                select(AtendimentoConversa.id).where(
+                    AtendimentoConversa.id == c.id,
+                    administracao.filtro_conversa(scope.email_user),
+                )
+            )
+            if visivel is None:
+                return None
+    return str(conversa_id)
+
+
+# Os motivos de "Sem loja" que mandam escolher ou ligar a loja: quem só vê não tem o controle.
+MOTIVOS_QUE_MANDAM_AGIR = frozenset(
+    {"ambiguo", "sem_alias", "entrada_sem_plataforma", "marca_ambigua", "loja_sem_integracao"}
+)
+MOTIVO_DE_QUEM_SO_VE = "Chegou sem uma loja definida: quem administra escolhe a loja."
+
+
+async def _so_para_ver(
+    session: AsyncSession, scope: TeamScope, cartao: dict[str, Any], meta: MailMessageMeta
+) -> dict[str, Any]:
+    """O cartão de quem só vê a aba: sem o que só serve para mexer (as sugestões de
+    loja, que trazem as lojas dos outros; os pedidos citados; o Abrir no Tuta)."""
+    if scope.unrestricted:
+        return cartao
+    if meta.motivo in MOTIVOS_QUE_MANDAM_AGIR:
+        cartao["motivo_texto"] = MOTIVO_DE_QUEM_SO_VE
+    cartao.update(
+        sugestoes=[],
+        pedidos_citados=[],
+        abrir_no_tuta=None,
+        conversa_id=await _conversa_que_abre(session, scope, meta.conversa_id),
+    )
+    return cartao
+
+
 async def _meta_ou_404(
     session: AsyncSession, message_id: UUID, user: User, *, estados: tuple[str, ...]
 ) -> tuple[MailMessageMeta, MailMessage]:
-    """O e-mail da fila (para quem mexe). Segurança, privado, só contar: 404."""
+    """O e-mail da fila (para quem mexe; quem só vê a aba, nas lojas dele).
+    Segurança, privado, só contar: 404."""
     meta = await session.get(MailMessageMeta, message_id)
     message = await session.get(MailMessage, message_id) if meta is not None else None
     if meta is None or message is None or meta.estado not in estados:
         raise HTTPException(404, detail={"code": "email_nao_encontrado"})
     scope = await escopo_do_atendimento(session, user)
-    if not _no_escopo(scope, meta.integration_id):
+    if not scope.unrestricted and not await session.scalar(
+        select(_email_nas_lojas(scope, message_id))
+    ):
         raise HTTPException(404, detail={"code": "email_nao_encontrado"})
     await administracao.exigir_mensagem(session, user, message_id)
     return meta, message
@@ -502,8 +671,9 @@ def _filtro_da_fila(fila: str):
 
 @router.get("/filas")
 async def filas(session: Session, user: Leitor) -> dict[str, int]:
-    _mexe(user)
+    _le_filas(user)
     _aba_inteira(user)
+    scope = await _escopo_da_aba(session, user)
     saida = {}
     for fila in FILAS:
         saida[fila] = int(
@@ -511,6 +681,7 @@ async def filas(session: Session, user: Leitor) -> dict[str, int]:
                 select(func.count()).where(
                     *_filtro_da_fila(fila),
                     administracao.filtro_mensagem(user, MailMessageMeta.message_id),
+                    *_recorte_email(scope, MailMessageMeta.message_id),
                 )
             )
             or 0
@@ -526,6 +697,7 @@ async def filas(session: Session, user: Leitor) -> dict[str, int]:
                 MailOutboxMeta.origem == "conversa",
                 _a_conferir(),
                 administracao.filtro_mensagem(user, MailOutbox.message_id),
+                *_recorte_envio(scope),
             )
         )
         or 0
@@ -567,7 +739,7 @@ async def listar(
     (a integração, ou a ficha sem integração). Com a loja escolhida vale
     também o escopo da equipe (como nas contagens por loja): nunca mais do
     que a fila inteira já mostra."""
-    _mexe(user)
+    _le_filas(user)
     _aba_inteira(user)
     if fila not in FILAS:
         raise HTTPException(422, detail={"code": "fila_invalida"})
@@ -575,12 +747,14 @@ async def listar(
         raise HTTPException(422, detail={"code": "tipo_email_invalido"})
     if integration_id is not None and store_info_id is not None:
         raise HTTPException(422, detail={"code": "loja_ambigua"})
+    scope = await _escopo_da_aba(session, user)
     q = (
         select(MailMessageMeta, MailMessage)
         .join(MailMessage, MailMessage.id == MailMessageMeta.message_id)
         .where(
             *_filtro_da_fila(fila),
             administracao.filtro_mensagem(user, MailMessageMeta.message_id),
+            *_recorte_email(scope, MailMessageMeta.message_id),
         )
     )
     if tipo_email:
@@ -594,7 +768,6 @@ async def listar(
             else None
         )
         q = q.where(_da_loja(integration_id, store_info_id, fichas))
-        scope = await escopo_do_atendimento(session, user)
         m = MailMessageMeta
         cond = _escopo_do_email(scope, m.integration_id, m.store_info_id)
         if cond is not None:
@@ -621,6 +794,7 @@ async def listar(
             email = ponte.decifrar(msg)
             item["assunto"] = codigos.proteger(email.assunto, "").assunto
             item["de"] = email.de
+        await _so_para_ver(session, scope, item, meta)
     response.headers["Cache-Control"] = "no-store"
     return {
         "itens": itens,
@@ -634,14 +808,15 @@ async def listar(
 async def detalhe(
     message_id: UUID, session: Session, user: Leitor, response: Response
 ) -> dict[str, Any]:
-    _mexe(user)
+    _le_filas(user)
     _aba_inteira(user)
     meta, message = await _meta_ou_404(
         session, message_id, user, estados=(*ESTADOS_COM_TEXTO, ESTADO_ERRO)
     )
     nomes = await _nomes_das_lojas(session, {meta.integration_id})
     response.headers["Cache-Control"] = "no-store"
-    return await _cartao(session, meta, message, nomes, com_texto=True)
+    cartao = await _cartao(session, meta, message, nomes, com_texto=True)
+    return await _so_para_ver(session, await escopo_do_atendimento(session, user), cartao, meta)
 
 
 class LojaIn(BaseModel):
@@ -1901,6 +2076,11 @@ async def emails_da_conversa(
                 MailMessageMeta.conversa_id == conversa.id,
                 MailMessageMeta.estado.in_(ESTADOS_COM_TEXTO),
                 administracao.filtro_mensagem(user, MailMessageMeta.message_id),
+                *(
+                    _recorte_email(scope, MailMessageMeta.message_id)
+                    if acesso.so_le_filas_email(user)
+                    else ()
+                ),
             )
             .order_by(MailMessage.received_at)
             .limit(200)
@@ -1917,8 +2097,14 @@ async def emails_da_conversa(
             # O pedido escrito no formulário, no Bling: só SUGESTÃO (nunca liga sozinho).
             "pedido_sugerido": await chamados.pedido_sugerido(session, conversa, scope),
         }
+    cartoes = [await _cartao(session, m, msg, nomes, com_texto=True) for m, msg in linhas]
+    if acesso.so_le_filas_email(user):
+        cartoes = [
+            await _so_para_ver(session, scope, cartao, m)
+            for cartao, (m, _) in zip(cartoes, linhas, strict=True)
+        ]
     return {
-        "emails": [await _cartao(session, m, msg, nomes, com_texto=True) for m, msg in linhas],
+        "emails": cartoes,
         "chamado": chamado,
         "outros_chamados": await chamados.outros_chamados(session, conversa, user=user),
     }
@@ -1967,6 +2153,11 @@ async def emails_da_venda(
                 MailMessageMeta.conversa_id.in_(ids),
                 MailMessageMeta.estado.in_(ESTADOS_COM_TEXTO),
                 administracao.filtro_mensagem(user, MailMessageMeta.message_id),
+                *(
+                    _recorte_email(scope, MailMessageMeta.message_id)
+                    if acesso.so_le_filas_email(user)
+                    else ()
+                ),
             )
             .group_by(
                 MailMessageMeta.alias_recebido,
@@ -2104,14 +2295,18 @@ async def email_desta_venda(
 
 @router.get("/anexos/{attachment_id}")
 async def anexo(attachment_id: UUID, session: Session, user: Leitor) -> Response:
-    """O anexo de um e-mail que a equipe vê (pela conversa; sem loja: quem mexe)."""
+    """O anexo de um e-mail que a equipe vê (pela conversa; sem loja: quem mexe; quem
+    só vê a aba: o e-mail que as filas mostram a ele, a mesma régua)."""
     attachment = await session.get(MailAttachment, attachment_id)
     meta = await session.get(MailMessageMeta, attachment.message_id) if attachment else None
     if attachment is None or meta is None or meta.estado not in ESTADOS_COM_TEXTO:
         raise HTTPException(404, detail={"code": "anexo_nao_encontrado"})
     await administracao.exigir_mensagem(session, user, attachment.message_id)
     scope = await escopo_do_atendimento(session, user)
-    if meta.conversa_id is not None:
+    if acesso.so_le_filas_email(user):
+        if not await session.scalar(select(_email_nas_lojas(scope, attachment.message_id))):
+            raise HTTPException(404, detail={"code": "anexo_nao_encontrado"})
+    elif meta.conversa_id is not None:
         conversa = await session.get(AtendimentoConversa, meta.conversa_id)
         if conversa is None or not _no_escopo(scope, conversa.integration_id):
             raise HTTPException(404, detail={"code": "anexo_nao_encontrado"})
@@ -2147,6 +2342,13 @@ async def previa(
     if not ponte.e_conversa_da_ponte(conversa):
         raise HTTPException(409, detail={"code": "nao_e_conversa_de_email"})
     p = await responder.previa(session, conversa, mail_message_id=mail_message_id)
+    # Quem só vê a aba não lê, na citação, o e-mail de outra loja que caiu na conversa dele.
+    if (
+        p.message is not None
+        and acesso.so_le_filas_email(user)
+        and not await session.scalar(select(_email_nas_lojas(scope, p.message.id)))
+    ):
+        raise HTTPException(404, detail={"code": "email_nao_encontrado"})
     response.headers["Cache-Control"] = "no-store"
     return {
         "mail_message_id": str(p.message.id) if p.message else None,
@@ -2249,15 +2451,19 @@ async def envios(
     estado: Annotated[str | None, Query(max_length=16)] = None,
     limite: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> dict[str, Any]:
-    """As respostas pela fila da Central que saíram de conversa ("revisar envio": uncertain)."""
-    _mexe(user)
+    """As respostas pela fila da Central que saíram de conversa ("revisar envio": uncertain).
+
+    Quem só vê a aba: as da conversa ou do e-mail das lojas dele (`_envio_nas_lojas`)."""
+    _le_filas(user)
     _aba_inteira(user)
+    scope = await _escopo_da_aba(session, user)
     q = (
         select(MailOutbox, MailOutboxMeta)
         .join(MailOutboxMeta, MailOutboxMeta.outbox_id == MailOutbox.id)
         .where(
             MailOutboxMeta.origem == "conversa",
             administracao.filtro_mensagem(user, MailOutbox.message_id),
+            *_recorte_envio(scope),
         )
     )
     if estado == "revisar":
@@ -2276,7 +2482,7 @@ async def envios(
                 "codigo": job.error_code,
                 "de": vista["from_address"],
                 "para": vista["to"],
-                "conversa_id": str(liga.conversa_id) if liga.conversa_id else None,
+                "conversa_id": await _conversa_que_abre(session, scope, liga.conversa_id),
                 "mensagem_id": (
                     str(liga.atendimento_mensagem_id) if liga.atendimento_mensagem_id else None
                 ),
@@ -2334,7 +2540,8 @@ async def resolver_envio(
 async def _caixas_das_pastas(session: AsyncSession, user: User) -> set[UUID]:
     """As caixas cujas pastas esta pessoa (que mexe) vê: as que ela vê na Saúde e
     as com ponte (é o que a ponte lê). As pastas de uma caixa PRIVADA (o
-    conector v2 manda a lista inteira da conta) só para quem abre a caixa."""
+    conector v2 manda a lista inteira da conta) só para quem abre a caixa. A caixa
+    com a ponte que a política bloqueou para a pessoa fica de fora (04/11/2026)."""
     visiveis = {m.id for m in await saude.caixas_visiveis(session, user)}
     visiveis |= {
         mid
@@ -2346,6 +2553,16 @@ async def _caixas_das_pastas(session: AsyncSession, user: User) -> set[UUID]:
             )
         ).all()
     }
+    if user.role != UserRole.ADMIN:
+        visiveis -= set(
+            (
+                await session.execute(
+                    select(MailAcesso.mailbox_id).where(
+                        MailAcesso.user_id == user.id, MailAcesso.modo == "bloqueado"
+                    )
+                )
+            ).scalars()
+        )
     return visiveis
 
 
@@ -2355,8 +2572,9 @@ async def listar_pastas(
     user: Leitor,
     mailbox_id: Annotated[UUID | None, Query()] = None,
 ) -> dict[str, Any]:
-    _mexe(user)
+    _le_filas(user)
     _aba_inteira(user)
+    scope = await _escopo_da_aba(session, user)
     r = await regras.carregar(session)
     visiveis = await _caixas_das_pastas(session, user)
     q = (
@@ -2401,7 +2619,15 @@ async def listar_pastas(
                         func.count().filter(guardado),
                     )
                     .join(MailMessage, MailMessage.id == MailMessageMeta.message_id)
-                    .where(MailMessageMeta.folder_id.in_(ids))
+                    .where(
+                        MailMessageMeta.folder_id.in_(ids),
+                        *_recorte_email(scope, MailMessageMeta.message_id),
+                        *(
+                            ()
+                            if scope.unrestricted
+                            else (administracao.filtro_mensagem(user, MailMessageMeta.message_id),)
+                        ),
+                    )
                     .group_by(MailMessageMeta.folder_id)
                 )
             ).all()
@@ -2414,6 +2640,10 @@ async def listar_pastas(
         )
     }
     for p in linhas:
+        # Quem só vê: a pasta sem nenhum e-mail dele não aparece, nem o nome (a de outra loja,
+        # a da caixa privada). Sem isso, a tela mostrava pasta que não é dele com zero.
+        if not scope.unrestricted and p.id not in contas:
+            continue
         classe = regras.efetiva(p, r)
         travada = not regras.e_criada(p.tipo_tuta)
         categoria = regras.categoria_que_vale(p)
@@ -2561,9 +2791,13 @@ async def informativos(session: Session, user: Leitor, response: Response) -> di
     com quantas linhas (e-mails), o último e as lojas — contando SÓ os e-mails
     que ela pode ver (`administracao.filtro_mensagem`). As linhas do item vêm
     de GET /emails?fila=informativo&pasta=<id> (com a paginação `antes_de`); o
-    e-mail inteiro, de GET /emails/{id}. Sem texto aqui."""
-    _mexe(user)
+    e-mail inteiro, de GET /emails/{id}. Sem texto aqui.
+
+    Quem só vê a aba: só os e-mails das lojas dele e sem loja, e a pasta sem nenhum
+    deles nem aparece."""
+    _le_filas(user)
     _aba_inteira(user)
+    scope = await _escopo_da_aba(session, user)
     lista = await _pastas_informativas(session, user)
     caixas = {
         m.id: m.label
@@ -2588,6 +2822,7 @@ async def informativos(session: Session, user: Leitor, response: Response) -> di
                     MailMessageMeta.folder_id.in_([p.id for p in lista]),
                     MailMessageMeta.estado == ESTADO_INFORMATIVO,
                     administracao.filtro_mensagem(user, MailMessageMeta.message_id),
+                    *_recorte_email(scope, MailMessageMeta.message_id),
                 )
                 .group_by(
                     MailMessageMeta.folder_id,
@@ -2631,6 +2866,8 @@ async def informativos(session: Session, user: Leitor, response: Response) -> di
                 "lojas": sorted(conta["lojas"]),
             }
         )
+    if not scope.unrestricted:
+        itens = [i for i in itens if i["total"]]
     # O item com e-mail mais novo em cima; os vazios no fim, pelo nome.
     itens.sort(
         key=lambda i: (
@@ -2645,7 +2882,7 @@ async def informativos(session: Session, user: Leitor, response: Response) -> di
 
 @router.get("/regras")
 async def listar_regras(session: Session, user: Leitor) -> dict[str, Any]:
-    _mexe(user)
+    _le_filas(user)
     _aba_inteira(user)
     linhas = (
         await session.execute(
@@ -2737,13 +2974,32 @@ async def saude_das_caixas(session: Session, user: Leitor, response: Response) -
     """Uma linha por caixa: as da EMPRESA para todos; a privada só para o dono/admin.
 
     Só a aba E-mail mostra (Filas): desde 27/10/2026, só quem vê a aba
-    (`_aba_inteira`: admin ou `atendimento_email` view)."""
+    (`_aba_inteira`: admin ou `atendimento_email` view).
+
+    Quem só vê a aba (`so_le_filas_email`): os números de cada caixa só das lojas dele
+    e sem loja, e os avisos de cadastro só das lojas dele. A caixa privada continua
+    só para o dono/admin."""
     _aba_inteira(user)
     caixas = await saude.caixas_visiveis(session, user)
+    so_ve = acesso.so_le_filas_email(user)
+    recorte: dict[str, Any] = {}
+    if so_ve:
+        scope = await _escopo_da_aba(session, user)
+        recorte = {
+            "recorte_email": lambda coluna: _email_nas_lojas(scope, coluna),
+            "recorte_envio": _envio_nas_lojas(scope),
+        }
     saida: dict[str, Any] = {
-        "caixas": [await saude.linha_da_caixa(session, c, user=user) for c in caixas]
+        "caixas": [await saude.linha_da_caixa(session, c, user=user, **recorte) for c in caixas]
     }
     if acesso.pode_mexer(user):
         saida.update(await saude.lojas_sem_caixa_lida(session))
+    elif so_ve:
+        saida.update(
+            {
+                chave: [lj for lj in lista if UUID(lj["store_info_id"]) in scope.store_info_ids]
+                for chave, lista in (await saude.lojas_sem_caixa_lida(session)).items()
+            }
+        )
     response.headers["Cache-Control"] = "no-store"
     return saida

@@ -1,7 +1,8 @@
 <script lang="ts">
 // PASTAS E REGRAS do e-mail das lojas (RF5, 09/10/2026), em E-mail › Filas
-// (só quem MEXE no /atendimento: as rotas recusam os outros com
-// `atendimento_so_quem_mexe`; MUDAR é de admin — `so_admin`).
+// (quem MEXE no /atendimento e, desde 04/11/2026, quem só vê a aba, com os números
+// das lojas dele: as rotas recusam os outros com `atendimento_so_quem_mexe`; MUDAR
+// é de admin — `so_admin` —, e `isAdmin` falso esconde tudo o que muda).
 //
 //   Pastas  — as pastas de cada caixa que a ponte enxerga, com a plataforma,
 //             a finalidade e o que a ponte faz com ela: lê o corpo (entra no

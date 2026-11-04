@@ -28,6 +28,8 @@ type IndexItem = { id: string; recebido_em: string; direcao: string; tem_anexos:
 type Outbox = { id: string; status: string; text: string; to: string; from_address: string; created_at: string; error_code: string | null; pode_conferir?: boolean }
 type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: string[]; reply_to: string | null; attachments: MailAttachment[]; reply: { to: string; from_address: string | null; allowed_from_addresses?: string[]; can_reply: boolean; send_ready: boolean }; outbox: Outbox[] }
 
+// `canReadQueues` (04/11/2026, `atendimento_email_aba`) = vê todas as Filas, as
+// pastas e a saúde, recortadas pelas lojas dela na API, sem nenhuma ação.
 // `canOperate` = the person operates /atendimento (`atendimento_mexe`): sees the
 // Atendimento queues ("Filas", AtendimentoMailFilas). `canView` (13/10/2026) =
 // the person sees /atendimento (read-only included): email left the chat inbox,
@@ -44,7 +46,7 @@ type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: 
 // this visit to /atendimento: the page keeps it, since this component mounts
 // again every time the E-mail tab opens.
 type Section = 'mailboxes' | 'queues' | 'admin'
-const props = withDefaults(defineProps<{ isAdmin: boolean; canOperate?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; conversationCounts?: ContagensDeConversa | null; refreshConversationCounts?: () => Promise<void>; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
+const props = withDefaults(defineProps<{ isAdmin: boolean; canOperate?: boolean; canReadQueues?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; conversationCounts?: ContagensDeConversa | null; refreshConversationCounts?: () => Promise<void>; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
 const emit = defineEmits<{ (e: 'openConversation', id: string): void; (e: 'update:rememberedSection', value: Section): void }>()
 const { api, url } = useApi()
 const mailboxes = ref<Mailbox[]>([])
@@ -746,7 +748,7 @@ onBeforeUnmount(() => {
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
         <h2 class="flex items-center gap-2 text-lg font-semibold"><Mail class="h-5 w-5" /> E-mail</h2>
-        <p v-if="section === 'queues'" class="text-sm text-muted-foreground">{{ canOperate ? 'Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, chamados dos sites, falta responder, suspeitos, resumos e respostas a conferir.' : 'Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail.' }}</p>
+        <p v-if="section === 'queues'" class="text-sm text-muted-foreground" data-mail-filas-descricao>{{ canOperate ? 'Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, chamados dos sites, falta responder, suspeitos, resumos e respostas a conferir.' : canReadQueues ? 'Os e-mails das suas lojas e os que ainda não têm loja: sem loja, sem vínculo, falta responder, suspeitos, resumos e respostas a conferir. Aqui você só vê.' : 'Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail.' }}</p>
         <p v-else-if="section === 'admin'" class="text-sm text-muted-foreground">Acessos por pessoa, loja e venda, regras de exibição e lixeira do DaVinci.</p>
         <p v-else class="text-sm text-muted-foreground">Caixas de e-mail para administradores e leitores expressamente autorizados.</p>
       </div>
@@ -798,6 +800,7 @@ onBeforeUnmount(() => {
       v-if="seesQueues && section === 'queues'"
       :is-admin="isAdmin"
       :pode-mexer="!!canOperate"
+      :pode-ler-filas="!!canReadQueues"
       :lojas="stores || []"
       :pausado="!!paused"
       :tique="refreshTick"
