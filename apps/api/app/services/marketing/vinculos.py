@@ -50,7 +50,24 @@ async def _marca_id_do_texto(session: AsyncSession, marca: str | None) -> UUID |
 
 
 async def _product_id_do_sku(session: AsyncSession, sku: str | None) -> UUID | None:
-    """Resolve o SKU do criativo para o id do produto, pela ponte dos anúncios.
+    """SKU do criativo → id do produto. O campo pode trazer vários códigos.
+
+    Eduardo, 04/11/2026: o produto com duas voltagens tem no catálogo o SKU
+    "usl001m1.110, usl001m1.220", e o roteiro e o criativo herdam esse texto.
+    Inteiro ele não casa com nada: o `product_id` ficava NULL e o vídeo da
+    máquina de raspadinha caía na legenda padrão da marca, que fala de celular.
+    Vale o primeiro código que resolve: as voltagens são o mesmo aparelho, e a
+    biblioteca de legendas tem o mesmo texto nas duas.
+    """
+    for codigo in (sku or "").split(","):
+        produto = await _product_id_de_um_sku(session, codigo)
+        if produto is not None:
+            return produto
+    return None
+
+
+async def _product_id_de_um_sku(session: AsyncSession, sku: str | None) -> UUID | None:
+    """Resolve UM código de SKU para o id do produto, pela ponte dos anúncios.
 
     Medido nos 41 criativos de produção: `product_links.external_sku` casa
     39; `pricing_products` casa 21 e `products.sku`, zero. Por isso a corrente

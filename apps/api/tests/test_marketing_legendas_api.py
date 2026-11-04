@@ -580,6 +580,26 @@ async def test_sku_so_no_cadastro_liga_pelo_cadastro(client, db, make_user, auth
     assert r.json()["product_id"] == str(cadastro.id)
 
 
+async def test_sku_com_duas_voltagens_liga_no_primeiro(client, db, make_user, auth_as):
+    """O catálogo guarda as voltagens juntas ("x.110, x.220") e o criativo herda
+    o texto. Sem produto, o vídeo cai no padrão da marca, que é de outro produto."""
+    user = await _user(make_user, auth_as, edit=True, role=UserRole.ADMIN)
+    v110 = await _produto(db, user, nome="sluchie USL001 M1 110v", sku="usl999m1.110")
+    await _produto(db, user, nome="sluchie USL001 M1 220v", sku="usl999m1.220")
+
+    r = await client.post(
+        API_CRIATIVOS, json={"modelo": "Slush", "sku": "usl999m1.110, usl999m1.220"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["product_id"] == str(v110.id)
+
+    r = await client.post(
+        API_CRIATIVOS, json={"modelo": "Slush", "sku": "nao-existe, usl999m1.110"}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["product_id"] == str(v110.id)
+
+
 async def test_irmao_de_outro_nome_perde_pro_cadastro(client, db, make_user, auth_as):
     """Irmão é palpite; SKU inteiro no cadastro é identidade. Com nomes
     diferentes (outra cor de verdade), vale o cadastro."""
