@@ -1,4 +1,4 @@
-"""Private inbox + mailbox-scoped Mac worker. No mailbox credentials on the server."""
+"""Admin-only inbox + mailbox-scoped Mac worker. No mailbox credentials on the server."""
 
 import secrets
 from datetime import UTC, datetime
@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
 from app.db import get_session
-from app.deps.auth import require_active_user, require_admin
+from app.deps.auth import require_admin
 from app.models.enums import UserRole, UserStatus
 from app.models.mail import MailAttachment, MailDraft, MailMailbox, MailMessage, MailOutbox
 from app.models.user import User
@@ -38,7 +38,6 @@ from app.services.mail_atendimento import responder as mail_responder
 
 router = APIRouter(prefix="/api/mail", tags=["mail"])
 Session = Annotated[AsyncSession, Depends(get_session)]
-ActiveUser = Annotated[User, Depends(require_active_user)]
 Admin = Annotated[User, Depends(require_admin)]
 
 
@@ -135,7 +134,7 @@ AgentMailbox = Annotated[MailMailbox, Depends(agent_mailbox)]
 
 
 @router.get("/mailboxes")
-async def list_mailboxes(session: Session, user: ActiveUser, response: Response):
+async def list_mailboxes(session: Session, user: Admin, response: Response):
     response.headers["Cache-Control"] = "no-store"
     query = select(MailMailbox).order_by(MailMailbox.label)
     if user.role != UserRole.ADMIN:
@@ -221,7 +220,7 @@ async def rotate_token(mailbox_id: UUID, session: Session, user: Admin, response
 async def list_messages(
     mailbox_id: UUID,
     session: Session,
-    user: ActiveUser,
+    user: Admin,
     response: Response,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=100_000),
@@ -247,7 +246,7 @@ async def list_messages(
 
 
 @router.get("/messages/{message_id}")
-async def get_message(message_id: UUID, session: Session, user: ActiveUser, response: Response):
+async def get_message(message_id: UUID, session: Session, user: Admin, response: Response):
     message, mailbox = await user_message(session, message_id, user, read=True)
     attachments = (
         await session.scalars(
@@ -309,7 +308,7 @@ async def get_message(message_id: UUID, session: Session, user: ActiveUser, resp
 
 
 @router.get("/attachments/{attachment_id}")
-async def download_attachment(attachment_id: UUID, session: Session, user: ActiveUser):
+async def download_attachment(attachment_id: UUID, session: Session, user: Admin):
     attachment = await session.get(MailAttachment, attachment_id)
     if attachment is None:
         raise fail("attachment_not_found")
@@ -329,9 +328,8 @@ async def download_attachment(attachment_id: UUID, session: Session, user: Activ
 
 
 @router.post("/messages/{message_id}/reply", status_code=202)
-async def reply(message_id: UUID, request: Request, session: Session, user: ActiveUser):
-    # Dono/admin como sempre, ou quem tem `atendimento_email` ver+editar e vê a
-    # caixa (28/10/2026). Quem não pode recebe o mesmo 404 de antes.
+async def reply(message_id: UUID, request: Request, session: Session, user: Admin):
+    # A Central exige admin; as regras adicionais de remetente e envio continuam valendo.
     message, mailbox = await user_message(session, message_id, user, lock=True, read=True)
     if not await mail_admin.pode_responder_caixa(session, mailbox, user):
         raise fail("mailbox_not_found")
@@ -361,8 +359,8 @@ async def reply(message_id: UUID, request: Request, session: Session, user: Acti
 
 
 @router.post("/outbox/{job_id}/resolve")
-async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, user: ActiveUser):
-    # A person checked Tuta; never resends. Owner/admin only, like reading.
+async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, user: Admin):
+    # An administrator checked Tuta; this never resends the message.
     job = await session.get(MailOutbox, job_id)
     mailbox = await session.get(MailMailbox, job.mailbox_id) if job else None
     if job is None or mailbox is None:
@@ -427,7 +425,7 @@ async def compose_mailbox(session, mailbox_id, user, *, lock=False):
 async def compose_context(
     mailbox_id: UUID,
     session: Session,
-    user: ActiveUser,
+    user: Admin,
     response: Response,
     source_message_id: UUID | None = None,
     action: str = Query("new", pattern="^(new|reply|reply_all|forward)$"),
@@ -443,7 +441,7 @@ async def compose_context(
 
 
 @router.post("/mailboxes/{mailbox_id}/send", status_code=202)
-async def compose_send(mailbox_id: UUID, request: Request, session: Session, user: ActiveUser):
+async def compose_send(mailbox_id: UUID, request: Request, session: Session, user: Admin):
     mailbox = await compose_mailbox(session, mailbox_id, user, lock=True)
     body = await limited_body(request, ComposeSendIn, mail_composer.MAX_REQUEST_BYTES)
     try:
@@ -455,7 +453,7 @@ async def compose_send(mailbox_id: UUID, request: Request, session: Session, use
 
 
 @router.get("/mailboxes/{mailbox_id}/outbox")
-async def compose_outbox(mailbox_id: UUID, session: Session, user: ActiveUser, response: Response):
+async def compose_outbox(mailbox_id: UUID, session: Session, user: Admin, response: Response):
     await compose_mailbox(session, mailbox_id, user)
     jobs = await session.stream_scalars(
         select(MailOutbox)
@@ -472,7 +470,7 @@ async def compose_outbox(mailbox_id: UUID, session: Session, user: ActiveUser, r
 
 
 @router.get("/mailboxes/{mailbox_id}/drafts")
-async def list_drafts(mailbox_id: UUID, session: Session, user: ActiveUser, response: Response):
+async def list_drafts(mailbox_id: UUID, session: Session, user: Admin, response: Response):
     await compose_mailbox(session, mailbox_id, user)
     drafts = await session.stream_scalars(
         select(MailDraft)
@@ -489,7 +487,7 @@ async def list_drafts(mailbox_id: UUID, session: Session, user: ActiveUser, resp
 
 
 @router.post("/mailboxes/{mailbox_id}/drafts", status_code=201)
-async def create_draft(mailbox_id: UUID, request: Request, session: Session, user: ActiveUser):
+async def create_draft(mailbox_id: UUID, request: Request, session: Session, user: Admin):
     mailbox = await compose_mailbox(session, mailbox_id, user, lock=True)
     body = await limited_body(request, ComposeDraftIn, mail_composer.MAX_REQUEST_BYTES)
     count = await session.scalar(
@@ -532,7 +530,7 @@ async def own_draft(session, draft_id, user, *, lock=False):
 
 
 @router.get("/drafts/{draft_id}")
-async def get_draft(draft_id: UUID, session: Session, user: ActiveUser, response: Response):
+async def get_draft(draft_id: UUID, session: Session, user: Admin, response: Response):
     draft, mailbox = await own_draft(session, draft_id, user)
     body = ComposeDraftIn.model_validate(decrypt_json(draft.content_enc))
     try:
@@ -544,7 +542,7 @@ async def get_draft(draft_id: UUID, session: Session, user: ActiveUser, response
 
 
 @router.patch("/drafts/{draft_id}")
-async def update_draft(draft_id: UUID, request: Request, session: Session, user: ActiveUser):
+async def update_draft(draft_id: UUID, request: Request, session: Session, user: Admin):
     draft, mailbox = await own_draft(session, draft_id, user, lock=True)
     body = await limited_body(request, ComposeDraftIn, mail_composer.MAX_REQUEST_BYTES)
     try:
@@ -558,7 +556,7 @@ async def update_draft(draft_id: UUID, request: Request, session: Session, user:
 
 
 @router.delete("/drafts/{draft_id}", status_code=204)
-async def delete_draft(draft_id: UUID, session: Session, user: ActiveUser):
+async def delete_draft(draft_id: UUID, session: Session, user: Admin):
     draft, _ = await own_draft(session, draft_id, user, lock=True)
     await session.delete(draft)
     await session.commit()

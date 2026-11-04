@@ -10,6 +10,7 @@ from app.models import MailMessage, UserRole
 from app.models.mail_admin import MailAcesso, MailLixeira
 from app.models.mail_atendimento import MailCaixaIndice
 from app.routers import mail_caixa
+from app.services.mail_atendimento import administracao as mail_admin
 from app.services.mail_atendimento import indice, ponte
 from tests.test_mail_caixa import _lista, _min, _pastas, _por_id
 from tests.test_mail_ponte import AGORA, _config, cena, entrar
@@ -117,7 +118,7 @@ async def test_busca_respeita_lixeira_local_e_restauracao(db, cena, client, auth
     ]
 
 
-async def test_busca_filtrada_nao_decifra_ou_revela_loja_negada(
+async def test_concessao_filtrada_nao_libera_busca_nem_decifra_mensagem(
     db, cena, client, make_user, auth_as, monkeypatch
 ):
     permitido = await entrar(
@@ -155,12 +156,15 @@ async def test_busca_filtrada_nao_decifra_ou_revela_loja_negada(
 
     monkeypatch.setattr(ponte, "decifrar", medir)
     auth_as(pessoa)
-    result = await _lista(client, cena.geral, q="Pedido permitido")
-    assert [i["id"] for i in result["itens"]] == [str(permitido)]
-    for q in ("invisivel", "Shopee"):
-        result = await _lista(client, cena.geral, q=q)
-        assert result["itens"] == [] and result["proximo"] is None and result["faltam"] == 0
-    assert negado not in decifrados
+    for q in ("Pedido permitido", "invisivel", "Shopee"):
+        result = await client.get(f"/api/mail/mailboxes/{cena.geral.id}/lista", params={"q": q})
+        assert result.status_code == 403 and result.json()["detail"]["code"] == "admin_only"
+    assert decifrados == []
+    # O filtro interno que também atende e-mails de lojas continua restrito.
+    visiveis = set(
+        await db.scalars(select(MailMessage.id).where(mail_admin.filtro_mensagem(pessoa)))
+    )
+    assert permitido in visiveis and negado not in visiveis
 
 
 async def test_busca_nao_concede_acesso_a_outra_caixa(db, cena, client, make_user, auth_as):
@@ -168,7 +172,7 @@ async def test_busca_nao_concede_acesso_a_outra_caixa(db, cena, client, make_use
     await entrar(db, cena.geral, assunto="Assunto pesquisado")
     auth_as(pessoa)
     r = await client.get(f"/api/mail/mailboxes/{cena.geral.id}/lista", params={"q": "Assunto"})
-    assert r.status_code == 404
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "admin_only"
     assert await db.scalar(select(func.count()).select_from(MailCaixaIndice)) == 0
 
 
@@ -243,9 +247,12 @@ async def test_versao_de_acesso_muda_com_pedido_permitido_mesmo_com_iguais_conta
         pedidos_permitidos=[{"loja": f"i:{cena.ml.id}", "numero": X}],
     )
     auth_as(pessoa)
-    antes = await _pastas(client, cena.geral)
-    assert antes["pastas"][0]["total"] == 1
-    assert [i["id"] for i in (await _lista(client, cena.geral))["itens"]] == [str(x.message_id)]
+    assert (await client.get(f"/api/mail/mailboxes/{cena.geral.id}/pastas")).status_code == 403
+    # Mantém a cobertura da invalidação interna sem liberar a caixa ao usuário.
+    antes = await mail_caixa._acesso_versao(db, cena.geral, pessoa)
+    assert list(
+        await db.scalars(select(MailMessage.id).where(mail_admin.filtro_mensagem(pessoa)))
+    ) == [x.message_id]
     auth_as(cena.dono)
     await _salvar(
         client,
@@ -257,12 +264,14 @@ async def test_versao_de_acesso_muda_com_pedido_permitido_mesmo_com_iguais_conta
         expected_updated_at=primeira["updated_at"],
     )
     auth_as(pessoa)
-    depois = await _pastas(client, cena.geral)
-    assert depois["pastas"][0]["total"] == 1
-    assert depois["acesso_versao"] != antes["acesso_versao"]
-    assert [i["id"] for i in (await _lista(client, cena.geral))["itens"]] == [str(y.message_id)]
-    assert len(depois["acesso_versao"]) == 64
-    assert X not in depois["acesso_versao"] and Y not in depois["acesso_versao"]
+    assert (await client.get(f"/api/mail/mailboxes/{cena.geral.id}/pastas")).status_code == 403
+    depois = await mail_caixa._acesso_versao(db, cena.geral, pessoa)
+    assert depois != antes
+    assert list(
+        await db.scalars(select(MailMessage.id).where(mail_admin.filtro_mensagem(pessoa)))
+    ) == [y.message_id]
+    assert len(depois) == 64
+    assert X not in depois and Y not in depois
 
 
 async def test_versao_de_acesso_nao_muda_com_sync_ou_email_novo_mas_muda_com_lixeira(
@@ -301,15 +310,16 @@ async def test_versao_de_acesso_cobre_configuracao_e_equipe_resolvida(
     settings.leitores = [str(pessoa.id)]
     await db.commit()
     auth_as(pessoa)
-    antes = (await _pastas(client, cena.geral))["acesso_versao"]
+    assert (await client.get(f"/api/mail/mailboxes/{cena.geral.id}/pastas")).status_code == 403
+    antes = await mail_caixa._acesso_versao(db, cena.geral, pessoa)
     # A pessoa continua na mesma equipe; quem muda é uma loja da equipe.
     cena.loja_oliveira_ml.sales_team = 1
     await db.commit()
-    equipe = (await _pastas(client, cena.geral))["acesso_versao"]
+    equipe = await mail_caixa._acesso_versao(db, cena.geral, pessoa)
     assert equipe != antes
     settings.visibilidade = "privada"
     await db.commit()
-    assert (await _pastas(client, cena.geral))["acesso_versao"] != equipe
+    assert await mail_caixa._acesso_versao(db, cena.geral, pessoa) != equipe
 
 
 async def test_cache_dos_selos_reusa_loja_entre_lotes(db, cena, client, auth_as, monkeypatch):

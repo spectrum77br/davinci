@@ -168,6 +168,7 @@ const statuses: Record<string, string> = { queued: 'Na fila do Mac', leased: 'En
 
 // The refusal (HTTP detail.code) or a failed job's error_code, in plain Portuguese.
 const knownErrors: Record<string, string> = {
+  admin_only: 'A caixa de e-mail é acessível somente aos administradores.',
   sending_unavailable: 'O envio não está disponível. Confira a conexão do Mac e a permissão de envio.',
   reply_already_pending: 'Já existe uma resposta pendente para esta mensagem.',
   request_id_conflict: 'Esta tentativa já foi registrada com outro conteúdo. Atualize e confira a resposta anterior.',
@@ -736,7 +737,7 @@ onBeforeUnmount(() => {
         <h2 class="flex items-center gap-2 text-lg font-semibold"><Mail class="h-5 w-5" /> E-mail</h2>
         <p v-if="section === 'queues'" class="text-sm text-muted-foreground">{{ canOperate ? 'Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, chamados dos sites, falta responder, suspeitos, resumos e respostas a conferir.' : 'Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail.' }}</p>
         <p v-else-if="section === 'admin'" class="text-sm text-muted-foreground">Acessos por pessoa, loja e venda, regras de exibição e lixeira do DaVinci.</p>
-        <p v-else class="text-sm text-muted-foreground">Caixas privadas, acessíveis ao responsável, aos administradores e a quem um admin liberar (só leitura; quem tem a permissão "Atendimento — aba E-mail: responder" também responde e envia).</p>
+        <p v-else class="text-sm text-muted-foreground">Caixas de e-mail acessíveis somente aos administradores.</p>
       </div>
       <div v-if="section === 'mailboxes'" class="flex gap-2">
         <button v-if="isAdmin" class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" @click="showSetup = !showSetup"><Plus class="h-4 w-4" /> Cadastrar caixa</button>

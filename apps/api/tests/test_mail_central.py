@@ -105,19 +105,19 @@ async def claim(client, account):
     return result.json()["jobs"]
 
 
-async def test_owner_and_admin_only_all_detail_paths(client, account, make_user, auth_as):
+async def test_only_admin_can_open_all_detail_paths(client, account, make_user, auth_as):
     message_id = await ingest(client, account)
     detail = (await client.get(f"{ROOT}/messages/{message_id}")).json()
     attachment_id = detail["attachments"][0]["id"]
     other = await make_user()
     auth_as(other)
-    assert (await client.get(f"{ROOT}/mailboxes")).json() == {"items": []}
+    assert (await client.get(f"{ROOT}/mailboxes")).status_code == 403
     for path in [
         f"/mailboxes/{account['mailbox']['id']}/messages",
         f"/messages/{message_id}",
         f"/attachments/{attachment_id}",
     ]:
-        assert (await client.get(ROOT + path)).status_code == 404
+        assert (await client.get(ROOT + path)).status_code == 403
     assert (
         await client.post(
             f"{ROOT}/messages/{message_id}/reply",
@@ -126,7 +126,7 @@ async def test_owner_and_admin_only_all_detail_paths(client, account, make_user,
                 "text": "forbidden",
             },
         )
-    ).status_code == 404
+    ).status_code == 403
     assert (
         await client.post(
             f"{ROOT}/mailboxes",
@@ -140,7 +140,7 @@ async def test_owner_and_admin_only_all_detail_paths(client, account, make_user,
     assert (await client.get(f"{ROOT}/mailboxes")).status_code == 401
 
 
-async def test_assigned_owner_can_read_without_team_wide_access(
+async def test_assigned_owner_without_admin_role_cannot_read(
     client,
     account,
     make_user,
@@ -152,6 +152,9 @@ async def test_assigned_owner_can_read_without_team_wide_access(
     mailbox.owner_user_id = owner.id
     await db.commit()
     auth_as(owner)
+    result = await client.get(f"{ROOT}/mailboxes")
+    assert result.status_code == 403 and result.json()["detail"]["code"] == "admin_only"
+    auth_as(account["admin"])
     assert len((await client.get(f"{ROOT}/mailboxes")).json()["items"]) == 1
 
 
@@ -371,8 +374,8 @@ async def test_html_is_encrypted_private_and_returned_as_inert_json(
     assert "html" not in listing.json()["items"][0]
     other = await make_user()
     auth_as(other)
-    assert (await client.get(f"{ROOT}/messages/{mid}")).status_code == 404
-    assert (await client.get(f"{ROOT}/attachments/{attachment.id}")).status_code == 404
+    assert (await client.get(f"{ROOT}/messages/{mid}")).status_code == 403
+    assert (await client.get(f"{ROOT}/attachments/{attachment.id}")).status_code == 403
 
 
 async def test_presentation_repair_is_idempotent_keeps_ids_and_reply_state(

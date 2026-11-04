@@ -210,10 +210,11 @@ async function principal() {
     assert.match(await m2.html(), /role="alert"[^>]*>Só usuários ativos/)
   }
 
-  // ------------------------------------------------ o Configurar inclui a seção
+  // A Central não oferece mais concessão individual da caixa completa.
   {
     const fonte = web('components/AtendimentoMailConfigurar.vue')
-    assert.match(fonte, /<AtendimentoMailLeitores :mailbox="mailbox" \/>/)
+    assert.doesNotMatch(fonte, /<AtendimentoMailLeitores/)
+    assert.match(fonte, /data-caixa-so-admin>O acesso à caixa completa é exclusivo dos administradores/)
   }
 
   // ------------------------------------------------ a aba E-mail para o LEITOR

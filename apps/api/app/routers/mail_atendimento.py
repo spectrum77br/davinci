@@ -1,7 +1,6 @@
 """Configuração NOSSA de cada caixa da Central de e-mail (08/10/2026).
 
-  GET   /api/mail/mailboxes/{id}/settings — dono da caixa ou admin (quem não
-        pode recebe 404, como na Central: nem fica sabendo que a caixa existe).
+  GET   /api/mail/mailboxes/{id}/settings — admin, como toda a caixa da Central.
   PATCH /api/mail/mailboxes/{id}/settings — admin, como o PATCH da Central;
         numa caixa `empresa`, ou mudando a ponte/visibilidade de qualquer
         caixa, também quem MEXE no /atendimento (`acesso.pode_mexer`).
@@ -22,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_active_user, require_admin
+from app.deps.auth import require_admin
 from app.models.user import User
 from app.routers.mail import fail, user_mailbox
 from app.schemas.mail_atendimento import ConfigCaixaPatch, LeitoresPut
@@ -31,13 +30,12 @@ from app.services.mail_atendimento import caixa, leitores
 
 router = APIRouter(prefix="/api/mail", tags=["mail"])
 Session = Annotated[AsyncSession, Depends(get_session)]
-ActiveUser = Annotated[User, Depends(require_active_user)]
 Admin = Annotated[User, Depends(require_admin)]
 
 
 @router.get("/mailboxes/{mailbox_id}/settings")
 async def ver_configuracao(
-    mailbox_id: UUID, session: Session, user: ActiveUser, response: Response
+    mailbox_id: UUID, session: Session, user: Admin, response: Response
 ):
     mailbox = await user_mailbox(session, mailbox_id, user)
     response.headers["Cache-Control"] = "no-store"

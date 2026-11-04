@@ -381,13 +381,13 @@ async def test_resolver_na_fila_ou_de_outra_pessoa(caixa, client, db, make_user,
     estranho = await make_user()
     auth_as(estranho)
     r = await client.post(f"{ROOT}/outbox/{job['id']}/resolve", json={"saiu": True})
-    assert r.status_code == 404  # nem fica sabendo que a caixa existe
-    # O DONO (não admin) resolve na caixa dele, como lê e responde.
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "admin_only"
+    # A propriedade legada não libera mais as rotas humanas da Central.
     caixa_db = await db.get(MailMailbox, UUID(caixa["id"]))
     caixa_db.owner_user_id = estranho.id
     await db.commit()
     r = await client.post(f"{ROOT}/outbox/{job['id']}/resolve", json={"saiu": True})
-    assert r.json()["detail"]["code"] == "job_not_uncertain"
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "admin_only"
 
 
 # ─── 4. caixa da EMPRESA ────────────────────────────────────────────────────
@@ -530,16 +530,16 @@ async def test_configuracao_padrao_sem_linha(caixa, client, make_user, auth_as, 
     assert r.headers["cache-control"] == "no-store"
     estranho = await make_user()
     auth_as(estranho)
-    assert (await client.get(f"{ROOT}/mailboxes/{caixa['id']}/settings")).status_code == 404
+    assert (await client.get(f"{ROOT}/mailboxes/{caixa['id']}/settings")).status_code == 403
     r = await client.patch(
         f"{ROOT}/mailboxes/{caixa['id']}/settings", json={"remetente_estrito": True}
     )
     assert r.status_code == 403
-    # O DONO (não admin) lê a configuração da caixa dele, mas não muda.
+    # Nem o dono não-admin lê ou muda a configuração da caixa.
     caixa_db = await db.get(MailMailbox, UUID(caixa["id"]))
     caixa_db.owner_user_id = estranho.id
     await db.commit()
-    assert (await client.get(f"{ROOT}/mailboxes/{caixa['id']}/settings")).status_code == 200
+    assert (await client.get(f"{ROOT}/mailboxes/{caixa['id']}/settings")).status_code == 403
     r = await client.patch(
         f"{ROOT}/mailboxes/{caixa['id']}/settings", json={"remetente_estrito": True}
     )

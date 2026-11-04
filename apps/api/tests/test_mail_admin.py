@@ -21,7 +21,10 @@ from app.models import Base, StoreInfo, UserRole
 from app.models.mail import MailAttachment, MailMailbox, MailMessage, MailOutbox
 from app.models.mail_admin import MailAcesso, MailAdminEvento, MailLixeira
 from app.models.mail_atendimento import MailCaixaIndice, MailMailboxSettings, MailMessageMeta
+from app.schemas.mail import ReplyIn
 from app.security.cipher import decrypt_json
+from app.services import mail_central
+from app.services.mail_atendimento import administracao as mail_admin
 from tests.test_mail_central import account, claim, enable, ingest, queued
 from tests.test_mail_ponte import _config, cena, entrar, meta_de, pedido_existe, rodar
 from tests.test_mail_venda_rotas import X, Y, _caso
@@ -133,7 +136,7 @@ async def test_duas_telas_nao_sobrescrevem_criacao_ou_edicao(client, cena, make_
     assert await db.scalar(select(func.count()).select_from(MailAdminEvento)) == 2
 
 
-async def test_selecionadas_filtra_caixa_indice_contagens_detalhe_anexos_e_nao_envia(
+async def test_selecionadas_preserva_filtro_interno_sem_liberar_caixa_ou_envio(
     db, cena, client, make_user, auth_as
 ):
     x = await _caso(db, cena, "12345678", X, anexos=[("x.txt", "text/plain", b"X")])
@@ -154,36 +157,28 @@ async def test_selecionadas_filtra_caixa_indice_contagens_detalhe_anexos_e_nao_e
     auth_as(cena.dono)
     await _salvar(client, cena, pessoa, modo="selecionadas", lojas_permitidas=[f"i:{cena.ml.id}"])
     auth_as(pessoa)
-    boxes = (await client.get("/api/mail/mailboxes")).json()["items"]
-    assert len(boxes) == 1 and boxes[0]["so_leitura"] is True
-    assert boxes[0]["aliases"] == [] and boxes[0]["address"] == ""
-    for path, chave in (
-        (f"/api/mail/mailboxes/{cena.geral.id}/messages", "items"),
-        (f"/api/mail/mailboxes/{cena.geral.id}/lista", "itens"),
+    for path in (
+        "/api/mail/mailboxes",
+        f"/api/mail/mailboxes/{cena.geral.id}/messages",
+        f"/api/mail/mailboxes/{cena.geral.id}/lista",
+        f"/api/mail/mailboxes/{cena.geral.id}/pastas",
+        f"/api/mail/messages/{x.message_id}",
+        f"/api/mail/messages/{outro_id}",
+        f"/api/mail/attachments/{outro_anexo}",
     ):
         r = await client.get(path)
-        assert r.status_code == 200, r.text
-        assert [i["id"] for i in r.json()[chave]] == [str(x.message_id)]
-    pastas = (await client.get(f"/api/mail/mailboxes/{cena.geral.id}/pastas")).json()
-    assert pastas["pastas"][0]["total"] == 1
-    assert sum(x["total"] for x in pastas["lojas"]) == 1
-    cfg = await db.get(MailMailboxSettings, cena.geral.id)
-    cfg.remetente_estrito = False
-    await db.commit()
-    detalhe = await client.get(f"/api/mail/messages/{x.message_id}")
-    assert detalhe.status_code == 200
-    reply = detalhe.json()["reply"]
-    assert set(reply["allowed_from_addresses"]).issubset(
-        {*reply["receiving_aliases"], reply["from_address"]}
+        assert r.status_code == 403 and r.json()["detail"]["code"] == "admin_only"
+    # A política continua filtrando os serviços usados pelas rotas de lojas.
+    visiveis = set(
+        await db.scalars(select(MailMessage.id).where(mail_admin.filtro_mensagem(pessoa)))
     )
-    assert (await client.get(f"/api/mail/messages/{outro_id}")).status_code == 404
-    assert (await client.get(f"/api/mail/attachments/{outro_anexo}")).status_code == 404
+    assert visiveis == {x.message_id}
     assert (
         await client.post(
             f"/api/mail/messages/{x.message_id}/reply",
             json={"request_id": str(uuid4()), "text": "Sem permissão"},
         )
-    ).status_code == 404
+    ).status_code == 403
 
 
 async def test_padrao_nao_concede_caixa_e_bloqueio_nega_ate_dono(
@@ -193,15 +188,17 @@ async def test_padrao_nao_concede_caixa_e_bloqueio_nega_ate_dono(
     auth_as(cena.dono)
     regra = await _salvar(client, cena, pessoa)
     auth_as(pessoa)
-    assert (await client.get("/api/mail/mailboxes")).json()["items"] == []
-    assert (await client.get(f"/api/mail/mailboxes/{cena.geral.id}/messages")).status_code == 404
+    assert (await client.get("/api/mail/mailboxes")).status_code == 403
+    assert (await client.get(f"/api/mail/mailboxes/{cena.geral.id}/messages")).status_code == 403
+    assert not await mail_admin.pode_ver_caixa(db, cena.geral, pessoa)
     cena.geral.owner_user_id = pessoa.id
     await db.commit()
     auth_as(cena.dono)
     await _salvar(client, cena, pessoa, modo="bloqueado", expected_updated_at=regra["updated_at"])
     auth_as(pessoa)
-    assert (await client.get("/api/mail/mailboxes")).json()["items"] == []
-    assert (await client.get(f"/api/mail/mailboxes/{cena.geral.id}/messages")).status_code == 404
+    assert (await client.get("/api/mail/mailboxes")).status_code == 403
+    assert (await client.get(f"/api/mail/mailboxes/{cena.geral.id}/messages")).status_code == 403
+    assert not await mail_admin.pode_ver_caixa(db, cena.geral, pessoa)
 
 
 async def test_bloqueio_ficha_cobre_integracao_ambigua_de_email_legado(
@@ -224,7 +221,15 @@ async def test_bloqueio_ficha_cobre_integracao_ambigua_de_email_legado(
     auth_as(cena.dono)
     await _salvar(client, cena, pessoa, lojas_bloqueadas=[f"f:{cena.loja_ml.id}"])
     auth_as(pessoa)
-    assert (await client.get(f"/api/mail/messages/{meta.message_id}")).status_code == 404
+    assert (await client.get(f"/api/mail/messages/{meta.message_id}")).status_code == 403
+    assert (
+        await db.scalar(
+            select(MailMessage.id).where(
+                MailMessage.id == meta.message_id, mail_admin.filtro_mensagem(pessoa)
+            )
+        )
+        is None
+    )
 
 
 async def test_lixeira_local_idempotente_restaura_sem_tocar_original_ponte_ou_tuta(
@@ -305,7 +310,15 @@ async def test_revogar_politica_impede_lease_ja_enfileirado(
         f"/api/mail/messages/{mid}/reply",
         json={"request_id": str(uuid4()), "text": "Resposta da pessoa"},
     )
-    assert r.status_code == 202, r.text
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "admin_only"
+    # Simula uma resposta pendente criada antes da restrição HTTP; a revogação
+    # de política ainda deve impedir o conector de executar esse trabalho legado.
+    await db.refresh(box)  # heartbeat e habilitação ocorreram em outra sessão HTTP
+    message = await db.get(MailMessage, UUID(mid))
+    await mail_central.queue_reply(
+        db, box, message, pessoa, ReplyIn(request_id=uuid4(), text="Resposta anterior")
+    )
+    await db.commit()
     auth_as(account["admin"])
     r = await client.put(f"{ADMIN}/acessos/{box.id}/{pessoa.id}", json=_regra(modo="bloqueado"))
     assert r.status_code == 200, r.text

@@ -1,17 +1,8 @@
-"""Quem mais vê uma caixa da Central de e-mail (09/10/2026): os LEITORES.
+"""A Central de e-mail é exclusiva de administradores, inclusive via API.
 
-Eduardo: "deixe o usuário israel ver a aba de e-mail agora". A regra:
-
-  • ler (a caixa na lista, as mensagens, uma mensagem, o anexo) = dono, admin
-    ou usuário ATIVO na lista `leitores` da caixa;
-  • escrever (responder, resolver envio, PATCH da caixa, trocar a chave,
-    configurar, ver/mudar a configuração e a própria lista) continua sendo o
-    `allowed()` da Central (dono/admin) — o leitor nunca;
-  • quem muda a lista: admin que MEXE no /atendimento, na caixa privada de
-    outro dono também; só usuários ativos; dono e admins saem da lista;
-  • lista vazia (ou sem linha de configuração) = exatamente como hoje.
-
-E a 0389 sobe e desce (só as 3 colunas, em cima da 0387).
+Leitores antigos não recebem acesso HTTP à caixa, às mensagens ou aos anexos.
+A configuração interna dos leitores e a sincronização autenticada do agente
+continuam preservadas. A migration 0389 também continua reversível.
 """
 
 # ruff: noqa: S608
@@ -50,6 +41,11 @@ async def _por_leitores(client, mailbox_id: str, ids: list) -> object:
     )
 
 
+def _somente_admin(response):
+    assert response.status_code == 403, response.text
+    assert response.json()["detail"]["code"] == "admin_only"
+
+
 async def _cena(client, account, make_user, auth_as):  # noqa: F811
     """A caixa do admin com 1 e-mail (com anexo), o envio ligado e 1 resposta
     na fila; o israel (usuário comum, ativo) na lista de leitores."""
@@ -72,7 +68,7 @@ async def _cena(client, account, make_user, auth_as):  # noqa: F811
     }
 
 
-async def test_leitor_ve_a_caixa_as_mensagens_e_o_anexo(
+async def test_leitor_nao_ve_a_caixa_as_mensagens_ou_o_anexo_mas_admin_ve(
     client,
     account,  # noqa: F811
     make_user,
@@ -81,9 +77,18 @@ async def test_leitor_ve_a_caixa_as_mensagens_e_o_anexo(
     cena = await _cena(client, account, make_user, auth_as)
     box = account["mailbox"]["id"]
     auth_as(cena["israel"])
+    for caminho in (
+        f"{ROOT}/mailboxes",
+        f"{ROOT}/mailboxes/{box}/messages",
+        f"{ROOT}/messages/{cena['message_id']}",
+        f"{ROOT}/attachments/{cena['attachment_id']}",
+    ):
+        _somente_admin(await client.get(caminho))
+
+    auth_as(account["admin"])
     itens = (await client.get(f"{ROOT}/mailboxes")).json()["items"]
     assert [i["id"] for i in itens] == [box]
-    assert itens[0]["so_leitura"] is True
+    assert not itens[0].get("so_leitura", False)
     assert "agent_token" not in itens[0]
     lista = await client.get(f"{ROOT}/mailboxes/{box}/messages")
     assert lista.status_code == 200
@@ -119,19 +124,18 @@ async def test_leitor_nao_responde_resolve_configura_nem_troca_a_chave(
         f"{ROOT}/messages/{cena['message_id']}/reply",
         json={"request_id": str(uuid4()), "text": "do leitor"},
     )
-    assert r.status_code == 404
+    _somente_admin(r)
     r = await client.post(f"{ROOT}/outbox/{cena['job_id']}/resolve", json={"saiu": True})
-    assert r.status_code == 404
+    _somente_admin(r)
     # As rotas de admin da Central e as nossas: o leitor nem passa do "admin".
-    assert (await client.patch(f"{ROOT}/mailboxes/{box}", json={"label": "x"})).status_code == 403
-    assert (await client.post(f"{ROOT}/mailboxes/{box}/token")).status_code == 403
-    assert (
+    _somente_admin(await client.patch(f"{ROOT}/mailboxes/{box}", json={"label": "x"}))
+    _somente_admin(await client.post(f"{ROOT}/mailboxes/{box}/token"))
+    _somente_admin(
         await client.patch(f"{ROOT}/mailboxes/{box}/settings", json={"ponte_ligada": True})
-    ).status_code == 403
-    assert (await client.get(f"{ROOT}/mailboxes/{box}/leitores")).status_code == 403
-    assert (await _por_leitores(client, box, [cena["israel"].id])).status_code == 403
-    # A configuração (GET) é do dono/admin: o leitor não precisa dela na tela.
-    assert (await client.get(f"{ROOT}/mailboxes/{box}/settings")).status_code == 404
+    )
+    _somente_admin(await client.get(f"{ROOT}/mailboxes/{box}/leitores"))
+    _somente_admin(await _por_leitores(client, box, [cena["israel"].id]))
+    _somente_admin(await client.get(f"{ROOT}/mailboxes/{box}/settings"))
     # Nada novo na fila, a chave do Mac continua valendo, a caixa igual.
     assert await db.scalar(select(func.count()).select_from(MailOutbox)) == antes
     sinal = await client.post(
@@ -145,7 +149,7 @@ async def test_leitor_nao_responde_resolve_configura_nem_troca_a_chave(
     assert mailbox.label == "Private test inbox"
 
 
-async def test_quem_nao_e_leitor_recebe_404_e_lista_vazia_e_como_hoje(
+async def test_usuario_sem_permissao_ou_leitor_revogado_recebe_admin_only(
     client,
     account,  # noqa: F811
     make_user,
@@ -155,30 +159,29 @@ async def test_quem_nao_e_leitor_recebe_404_e_lista_vazia_e_como_hoje(
     cena = await _cena(client, account, make_user, auth_as)
     box = account["mailbox"]["id"]
     caminhos = [
+        "/mailboxes",
         f"/mailboxes/{box}/messages",
         f"/messages/{cena['message_id']}",
         f"/attachments/{cena['attachment_id']}",
     ]
     outro = await make_user(role=UserRole.USER)
     auth_as(outro)
-    assert (await client.get(f"{ROOT}/mailboxes")).json() == {"items": []}
     for caminho in caminhos:
-        assert (await client.get(ROOT + caminho)).status_code == 404, caminho
-    # Lista vazia: o israel volta a não ver nada (como antes da 0389).
+        _somente_admin(await client.get(ROOT + caminho))
+    # A revogação da lista não altera o bloqueio da Central por perfil.
     auth_as(account["admin"])
     r = await _por_leitores(client, box, [])
     assert r.status_code == 200 and r.json()["leitores"] == []
     auth_as(cena["israel"])
-    assert (await client.get(f"{ROOT}/mailboxes")).json() == {"items": []}
     for caminho in caminhos:
-        assert (await client.get(ROOT + caminho)).status_code == 404, caminho
+        _somente_admin(await client.get(ROOT + caminho))
     # Sem linha de configuração nenhuma: idem.
     await db.execute(text("DELETE FROM mail_mailbox_settings"))
     await db.commit()
-    assert (await client.get(f"{ROOT}/mailboxes")).json() == {"items": []}
+    _somente_admin(await client.get(f"{ROOT}/mailboxes"))
 
 
-async def test_leitor_de_uma_caixa_nao_ve_a_outra(
+async def test_leitor_de_uma_caixa_nao_ve_nenhuma_caixa_na_central(
     client,
     account,  # noqa: F811
     make_user,
@@ -190,9 +193,9 @@ async def test_leitor_de_uma_caixa_nao_ve_a_outra(
     )
     assert outra.status_code == 201
     auth_as(cena["israel"])
-    itens = (await client.get(f"{ROOT}/mailboxes")).json()["items"]
-    assert [i["id"] for i in itens] == [account["mailbox"]["id"]]
-    assert (await client.get(f"{ROOT}/mailboxes/{outra.json()['id']}/messages")).status_code == 404
+    _somente_admin(await client.get(f"{ROOT}/mailboxes"))
+    for box in (account["mailbox"]["id"], outra.json()["id"]):
+        _somente_admin(await client.get(f"{ROOT}/mailboxes/{box}/messages"))
 
 
 async def test_usuario_inativo_na_lista_nao_ve_e_nao_entra(
@@ -207,12 +210,12 @@ async def test_usuario_inativo_na_lista_nao_ve_e_nao_entra(
     israel = cena["israel"]
     israel.status = UserStatus.SUSPENDED
     await db.commit()
-    # O teste pula o `require_active_user` (auth_as): quem barra é a regra de ler.
+    # auth_as pula require_active_user; o perfil não admin ainda bloqueia a Central.
     auth_as(israel)
-    assert (await client.get(f"{ROOT}/mailboxes")).json() == {"items": []}
-    assert (await client.get(f"{ROOT}/mailboxes/{box}/messages")).status_code == 404
-    assert (await client.get(f"{ROOT}/messages/{cena['message_id']}")).status_code == 404
-    assert (await client.get(f"{ROOT}/attachments/{cena['attachment_id']}")).status_code == 404
+    _somente_admin(await client.get(f"{ROOT}/mailboxes"))
+    _somente_admin(await client.get(f"{ROOT}/mailboxes/{box}/messages"))
+    _somente_admin(await client.get(f"{ROOT}/messages/{cena['message_id']}"))
+    _somente_admin(await client.get(f"{ROOT}/attachments/{cena['attachment_id']}"))
     # E não entra na lista (nem quem não existe): nada muda.
     auth_as(account["admin"])
     for ids in ([israel.id], [uuid4()]):
@@ -273,25 +276,20 @@ async def test_quem_muda_a_lista_admin_que_mexe_mesmo_na_privada_de_outro(
     assert r.status_code == 422
 
 
-# ─────────────── toda rota GET de uma caixa está classificada ───────────────
-#
-# A outra frente traz GET /mailboxes/{id}/pastas e /lista (routers/mail_caixa.py)
-# com `user_mailbox` (dono/admin). Se o merge não trocar por `readable_mailbox`,
-# o leitor recebe 404 e não vê nada: o teste abaixo pega isso. Rota GET NOVA de
-# caixa/mensagem/anexo também precisa entrar numa das duas listas.
+# ─────────────── toda rota GET de uma caixa exige admin ───────────────
 
-LEITURA = {
-    # o leitor vê (routers/mail.readable_mailbox → leitores.pode_ver_caixa)
+GETS_SO_ADMIN = {
     "/api/mail/mailboxes/{mailbox_id}/messages",
     "/api/mail/messages/{message_id}",
     "/api/mail/attachments/{attachment_id}",
-    "/api/mail/mailboxes/{mailbox_id}/pastas",  # outra frente (no merge)
-    "/api/mail/mailboxes/{mailbox_id}/lista",  # outra frente (no merge)
-}
-SO_DONO_OU_ADMIN = {
-    # o leitor recebe 403/404
+    "/api/mail/mailboxes/{mailbox_id}/pastas",
+    "/api/mail/mailboxes/{mailbox_id}/lista",
     "/api/mail/mailboxes/{mailbox_id}/settings",
     "/api/mail/mailboxes/{mailbox_id}/leitores",
+    "/api/mail/mailboxes/{mailbox_id}/compose-context",
+    "/api/mail/mailboxes/{mailbox_id}/drafts",
+    "/api/mail/mailboxes/{mailbox_id}/outbox",
+    "/api/mail/drafts/{draft_id}",
 }
 
 
@@ -310,15 +308,15 @@ def _gets_de_caixa() -> set[str]:
     return rotas
 
 
-def test_toda_rota_get_de_caixa_esta_classificada():
-    sem_classe = _gets_de_caixa() - LEITURA - SO_DONO_OU_ADMIN
+def test_toda_rota_get_de_caixa_tem_cobertura_admin_only():
+    sem_classe = _gets_de_caixa() - GETS_SO_ADMIN
     assert not sem_classe, (
-        "Rota GET nova numa caixa/mensagem/anexo: ponha em LEITURA (e use "
-        "routers/mail.readable_mailbox) ou em SO_DONO_OU_ADMIN: " + ", ".join(sorted(sem_classe))
+        "Rota GET nova numa caixa/mensagem/anexo: inclua em GETS_SO_ADMIN "
+        "para validar o bloqueio de leitores: " + ", ".join(sorted(sem_classe))
     )
 
 
-async def test_leitor_abre_toda_rota_de_leitura_e_nenhuma_de_dono(
+async def test_leitor_nao_abre_nenhuma_rota_get_da_central(
     client,
     account,  # noqa: F811
     make_user,
@@ -329,19 +327,13 @@ async def test_leitor_abre_toda_rota_de_leitura_e_nenhuma_de_dono(
         "mailbox_id": account["mailbox"]["id"],
         "message_id": cena["message_id"],
         "attachment_id": cena["attachment_id"],
+        "draft_id": str(uuid4()),
     }
     existentes = _gets_de_caixa()
     auth_as(cena["israel"])
-    for caminho in sorted(LEITURA & existentes):
+    for caminho in sorted(GETS_SO_ADMIN & existentes):
         r = await client.get(caminho.format(**valores))
-        assert r.status_code == 200, (
-            f"o leitor não abre {caminho} ({r.status_code} {r.text[:120]}): "
-            "a rota precisa de routers/mail.readable_mailbox no lugar de user_mailbox"
-        )
-        assert r.headers["cache-control"] == "no-store", caminho
-    for caminho in sorted(SO_DONO_OU_ADMIN & existentes):
-        r = await client.get(caminho.format(**valores))
-        assert r.status_code in (403, 404), caminho
+        _somente_admin(r)
 
 
 # ─────────────── a migration 0389 ───────────────

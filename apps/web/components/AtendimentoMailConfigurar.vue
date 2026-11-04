@@ -21,7 +21,8 @@
 // PRIVADA de outra pessoa, só o DONO abre mais dela para a equipe (passar
 // para empresa, desligar "só endereços de loja", puxar o corte para trás) —
 // o admin pode desligar a ponte (a rota recusa com `so_o_dono_da_caixa`).
-//   Quem mais vê — os LEITORES da caixa (AtendimentoMailLeitores, 09/10/2026).
+// A caixa completa é exclusiva de administradores; concessões antigas de
+// leitores não liberam a Central.
 // Funções puras aqui em cima (tests/atendimento-mail-atendimento.cjs).
 
 export type ConfigCaixa = {
@@ -281,7 +282,6 @@ async function salvarAliases() {
       </div>
     </fieldset>
 
-    <!-- quem mais vê a caixa (só leitura), 09/10/2026 -->
-    <AtendimentoMailLeitores :mailbox="mailbox" />
+    <p class="rounded border p-3 text-xs text-muted-foreground" data-caixa-so-admin>O acesso à caixa completa é exclusivo dos administradores.</p>
   </div>
 </template>

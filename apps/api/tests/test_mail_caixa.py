@@ -74,10 +74,12 @@ async def _contar(db, modelo) -> int:
     return int(await db.scalar(select(func.count()).select_from(modelo)) or 0)
 
 
-# ── Permissão: a mesma da caixa dele ──────────────────────────────────────
+# ── Permissão HTTP: a caixa completa exige administrador ─────────────────
 
 
-async def test_dono_e_admin_veem_e_os_outros_recebem_404(db, cena, client, make_user, auth_as):
+async def test_so_admin_ve_pastas_e_lista_mesmo_com_dono_legado(
+    db, cena, client, make_user, auth_as
+):
     dona = await make_user(role=UserRole.USER)
     caixa = _caixa(dona, "Da Dona — Tuta", "dona@tuta.com", [], "token-da-dona-0123456789abc")
     db.add(caixa)
@@ -85,23 +87,22 @@ async def test_dono_e_admin_veem_e_os_outros_recebem_404(db, cena, client, make_
     await entrar(db, caixa, pasta="INBOX", para=["dona@tuta.com"], recebido_em=_min(1))
 
     auth_as(dona)  # a dona (não é admin)
-    assert (await _pastas(client, caixa))["pastas"][0]["total"] == 1
-    assert len((await _lista(client, caixa))["itens"]) == 1
-    # A dona não vê a caixa de outro dono: 404, como na Central.
-    for rota in ("pastas", "lista"):
-        r = await client.get(f"{URL}/{cena.geral.id}/{rota}")
-        assert (r.status_code, r.json()["detail"]["code"]) == (404, "mailbox_not_found")
+    for mailbox in (caixa, cena.geral):
+        for rota in ("pastas", "lista"):
+            r = await client.get(f"{URL}/{mailbox.id}/{rota}")
+            assert (r.status_code, r.json()["detail"]["code"]) == (403, "admin_only")
 
     auth_as(cena.dono)  # admin, não é o dono
+    assert (await _pastas(client, caixa))["pastas"][0]["total"] == 1
     assert len((await _lista(client, caixa))["itens"]) == 1
 
     outra = await make_user(role=UserRole.USER)
     auth_as(outra)
     for rota in ("pastas", "lista"):
         r = await client.get(f"{URL}/{caixa.id}/{rota}")
-        assert (r.status_code, r.json()["detail"]["code"]) == (404, "mailbox_not_found")
+        assert (r.status_code, r.json()["detail"]["code"]) == (403, "admin_only")
         r = await client.get(f"{URL}/{uuid4()}/{rota}")
-        assert r.status_code == 404
+        assert r.status_code == 403
     # Quem não pode não faz nem o índice da caixa andar.
     assert await _contar(db, MailCaixaIndice) == 1
 

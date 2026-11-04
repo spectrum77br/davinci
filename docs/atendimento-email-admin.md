@@ -1,8 +1,13 @@
 # Administração dos e-mails do Atendimento
 
+A caixa completa em **Atendimento → E-mail** é exclusiva de administradores.
+Esse bloqueio vale também para acesso direto às mensagens, anexos, rascunhos
+e envios da Central. Ser responsável pela caixa ou ter permissões e concessões
+antigas de leitor não libera esse acesso. O conector do Tuta continua sincronizando.
+
 A aba **E-mail → Administração** fica disponível para administradores que
-podem operar o Atendimento. Cadastrar a funcionalidade não altera os acessos
-existentes: uma regra só entra em vigor quando o administrador a salva.
+podem operar o Atendimento. As regras abaixo controlam mensagens vinculadas
+às lojas e vendas; elas não concedem acesso à caixa completa.
 
 ## Acesso das pessoas
 
@@ -13,7 +18,7 @@ todas as caixas e não recebem restrições individuais de leitura.
   pessoa já possui, aplicando as restrições escolhidas abaixo. Não concede
   acesso novo à caixa inteira.
 - **Somente selecionadas:** concede leitura dos e-mails das lojas selecionadas
-  na Central. Uma seleção vazia não libera nenhuma mensagem. Não concede
+  pelas áreas das lojas e vendas. Uma seleção vazia não libera nenhuma mensagem. Não concede
   permissão para responder nem amplia a equipe comercial no Atendimento.
 - **Bloquear:** impede a leitura dos e-mails dessa caixa pela pessoa.
 
@@ -30,7 +35,7 @@ comprovar uma seleção restrita não são liberados por aproximação.
 Uma conversa pode guardar e-mails de vendas diferentes. Se parte dela estiver
 bloqueada ou na lixeira, a conversa completa fica oculta para evitar expor o
 histórico ou a prévia do item indisponível. Os e-mails individualmente permitidos
-continuam acessíveis na Central e na respectiva venda.
+continuam acessíveis pelas áreas das lojas e pela respectiva venda.
 
 O formulário mostra quem alterou a regra e quando. Se outro administrador
 salvar a mesma regra durante a edição, a gravação é recusada e o formulário
@@ -39,7 +44,7 @@ preserva a edição local para conferência.
 ## Pastas e exibição
 
 A seção reúne as regras de pastas já existentes e o atalho para configurar a
-caixa, seus endereços, a ponte para o Atendimento e os leitores da caixa inteira.
+caixa, seus endereços e a ponte para o Atendimento.
 Uma regra de pasta controla o que entra no Atendimento; uma regra de acesso
 controla o que cada pessoa consegue ler no DaVinci.
 

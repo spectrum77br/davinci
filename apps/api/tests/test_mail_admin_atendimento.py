@@ -103,7 +103,7 @@ async def test_sem_politica_mantem_leitura_do_atendimento_sem_liberar_caixa(
     assert cards.status_code == 200, cards.text
     assert [c["id"] for c in cards.json()["emails"]] == [str(meta.message_id)]
     assert (await client.get(f"{ATENDIMENTO}/conversas/{meta.conversa_id}")).status_code == 200
-    assert (await client.get(f"/api/mail/messages/{meta.message_id}")).status_code == 404
+    assert (await client.get(f"/api/mail/messages/{meta.message_id}")).status_code == 403
 
 
 async def test_bloquear_loja_tira_previa_historico_abas_contagens_e_anexos(
@@ -198,7 +198,7 @@ async def test_caso_misto_nao_libera_historico_y_mas_venda_x_mantem_email_x(
     await _negado_na_conversa(client, x.conversa_id)
     await _lista_inteira_recusada(client)
     assert await _ids_pela_barra(client, integration_id=str(cena.ml.id)) == set()
-    # A venda X e a Central continuam liberando só o e-mail autorizado X.
+    # A venda X continua liberando só o e-mail autorizado X; a caixa é só admin.
     sale_x = await client.get(f"{EMAIL}/venda/{chat_x.id}")
     assert sale_x.status_code == 200, sale_x.text
     assert [i["id"] for i in sale_x.json()["itens"]] == [str(x.message_id)]
@@ -207,13 +207,19 @@ async def test_caso_misto_nao_libera_historico_y_mas_venda_x_mantem_email_x(
     for base in ("/api/mail/messages", f"{EMAIL}/venda/{chat_x.id}/emails"):
         permitted = await client.get(f"{base}/{x.message_id}")
         denied = await client.get(f"{base}/{y.message_id}")
-        assert permitted.status_code == 200, permitted.text
-        assert "CORPO X" in permitted.text
-        assert denied.status_code == 404 and "CORPO Y PRIVADO" not in denied.text
+        if base == "/api/mail/messages":
+            assert permitted.status_code == denied.status_code == 403
+            assert "CORPO X" not in permitted.text
+        else:
+            assert permitted.status_code == 200, permitted.text
+            assert "CORPO X" in permitted.text
+            assert denied.status_code == 404
+        assert "CORPO Y PRIVADO" not in denied.text
     for mid, expected in ((x.message_id, 200), (y.message_id, 404)):
         aid = await _id_anexo(db, mid)
         for base in ("/api/mail/attachments", f"{EMAIL}/anexos"):
-            assert (await client.get(f"{base}/{aid}")).status_code == expected
+            status = 403 if base == "/api/mail/attachments" else expected
+            assert (await client.get(f"{base}/{aid}")).status_code == status
 
 
 async def test_loja_do_pedido_e_obrigatoria_e_bloqueio_equivalente_prevalece(
@@ -247,7 +253,7 @@ async def test_loja_do_pedido_e_obrigatoria_e_bloqueio_equivalente_prevalece(
     )
     # Ficha e integração são a mesma loja; negação ganha da permissão.
     await _negado_na_conversa(client, a.conversa_id)
-    assert (await client.get(f"/api/mail/messages/{a.message_id}")).status_code == 404
+    assert (await client.get(f"/api/mail/messages/{a.message_id}")).status_code == 403
 
 
 async def test_lixeira_local_tira_copias_anexos_e_contagens_e_restaura_sem_apagar(
@@ -273,7 +279,8 @@ async def test_lixeira_local_tira_copias_anexos_e_contagens_e_restaura_sem_apaga
         auth_as(user)
         await _negado_na_conversa(client, meta.conversa_id)
         assert (await client.get(f"{EMAIL}/anexos/{aid}")).status_code == 404
-        assert (await client.get(f"/api/mail/messages/{meta.message_id}")).status_code == 404
+        status = 404 if user.role == UserRole.ADMIN else 403
+        assert (await client.get(f"/api/mail/messages/{meta.message_id}")).status_code == status
         sale = await client.get(f"{EMAIL}/venda/{chat.id}")
         assert sale.status_code == 200 and sale.json()["total"] == 0
         counts = (await client.get(f"{EMAIL}/contagens")).json()
@@ -418,7 +425,7 @@ async def test_email_unico_que_cita_pedidos_x_e_y_nao_e_liberado_so_por_x(
         pedidos_permitidos=[{"loja": f"i:{cena.ml.id}", "numero": X}],
     )
     await _negado_na_conversa(client, meta.conversa_id)
-    assert (await client.get(f"/api/mail/messages/{meta.message_id}")).status_code == 404
+    assert (await client.get(f"/api/mail/messages/{meta.message_id}")).status_code == 403
     sale = await client.get(f"{EMAIL}/venda/{chat.id}")
     assert sale.status_code == 200, sale.text
     assert sale.json()["total"] == 0
