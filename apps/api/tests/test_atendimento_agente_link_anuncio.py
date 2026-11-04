@@ -1341,7 +1341,7 @@ def test_a_calibracao_tem_os_espelhos_da_revisao():
 
 @pytest.mark.parametrize(
     "texto",
-    ["Segue: link_anúncio:a", "Segue: link-anuncio:a", "Segue: link anuncio a", "link_do_anuncio:a"],
+    ["Segue: link_anúncio:a", "Segue: link-anuncio:a", "Segue: link anuncio a", "link_do_anuncio:a"],  # noqa: E501
 )
 def test_a_lacuna_mal_escrita_e_reconhecida(texto):
     assert catalogo.lacunas_de_link(texto)
@@ -1356,7 +1356,7 @@ def test_a_frase_normal_sobre_o_link_nao_e_lacuna(texto):
 
 def test_a_ficha_antes_da_busca_tambem_retira_o_link():
     ctx = SimpleNamespace(links_anuncio={})
-    agente_ctx.ContextoAgente.retirar_link(ctx, "123")
+    contexto.ContextoAgente.retirar_link(ctx, "123")
     assert ctx.links_anuncio["123"]["url"] is None
 
 

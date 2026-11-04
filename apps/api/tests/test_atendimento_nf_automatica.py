@@ -2150,16 +2150,17 @@ async def test_d2_cartao_de_produto_no_turno_fica_com_a_pessoa(
     assert _decisao(r) == "nf:varios_pedidos_do_comprador" and plataforma == []
 
 
-async def test_d2_cartao_de_produto_em_turno_ja_respondido_nao_muda_o_recem_feito(
+async def test_d2_cartao_de_produto_em_turno_ja_respondido_fica_com_a_pessoa(
     db, make_user, ligado, plataforma
 ):
+    """Mandado depois do pedido novo, o cartão pode ser de outra compra: "manda a nota" fala dele."""
     conversa, _ = await _recem_feito_com_outro_pedido(db, make_user, "bom dia")
     await _msg(db, conversa, None, tipo="produto", ha=timedelta(minutes=45))
     await _msg(db, conversa, "tudo certo!", autor="loja", ha=timedelta(minutes=40))
     gatilho = await _msg(db, conversa, "manda a nota fiscal", ha=timedelta(minutes=2))
     r = await _rascunho(db, conversa, gatilho)
     await ia._talvez_enviar(db, conversa, r)
-    assert _decisao(r) == "enviado_nf", _decisao(r)
+    assert _decisao(r) == "nf:varios_pedidos_do_comprador" and plataforma == []
 
 
 async def test_d2_o_cartao_de_pedido_decide_mesmo_com_o_de_produto_no_turno(
