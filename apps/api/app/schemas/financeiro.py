@@ -57,6 +57,7 @@ class SuprimentosOut(BaseModel):
     valor: Decimal | None = None
     inicio: date | None = None
     fim: date | None = None
+    campos_manuais: list[str] | None = None
     pdf_nome: str | None = None
     tem_pdf: bool = False
     anatel_numero: str | None = None

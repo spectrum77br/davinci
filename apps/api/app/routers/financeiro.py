@@ -160,7 +160,6 @@ async def delete_consorcio(
 
 
 _SUPRIMENTOS_PDF_MAX_BYTES = 8 * 1024 * 1024
-_CAMPOS_OFICIAIS_ANATEL = {"modelo", "nome_comercial", "certificado", "numero", "inicio", "fim"}
 
 
 @router.get("/suprimentos/anatel/status", response_model=CertificacoesAnatelStatusOut)
@@ -360,7 +359,8 @@ async def create_suprimentos(
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "edit"))],
 ) -> SuprimentosOut:
-    row = FinanceiroSuprimentos(**body.model_dump(exclude_unset=True))
+    values = body.model_dump(exclude_unset=True)
+    row = FinanceiroSuprimentos(**values, campos_manuais=sorted(values) or None)
     session.add(row)
     await session.commit()
     await session.refresh(row)
@@ -382,14 +382,11 @@ async def patch_suprimentos(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(404, detail={"code": "suprimentos_not_found"})
-    if row.anatel_numero and body.model_fields_set & _CAMPOS_OFICIAIS_ANATEL:
-        raise HTTPException(409, detail={"code": "certificacao_automatica"})
-    if row.inmetro_chave:
-        from app.services.certificacoes_inmetro_sync import campos_oficiais_inmetro
-
-        if body.model_fields_set & campos_oficiais_inmetro(row):
-            raise HTTPException(409, detail={"code": "certificacao_automatica"})
-    for k, v in body.model_dump(exclude_unset=True).items():
+    values = body.model_dump(exclude_unset=True)
+    changed = {key for key, value in values.items() if getattr(row, key) != value}
+    if changed:
+        row.campos_manuais = sorted(set(row.campos_manuais or []) | changed)
+    for k, v in values.items():
         setattr(row, k, v)
     await session.commit()
     await session.refresh(row)
