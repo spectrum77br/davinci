@@ -144,13 +144,17 @@ from app.services.atendimento.ag_cancelamento import (
 )
 from app.services.atendimento.constantes import (
     AUTOR_EQUIPE,
+    CANAL_CHAT,
+    CANAL_RECLAMACAO,
     MSG_RECEBIDA,
     ORIGEM_NOTA,
     PLATAFORMAS_ROBO,
     TIPO_NOTA,
+    e_chat_de_afiliado,
 )
 from app.services.atendimento.etiqueta_fatos import (
     PedidoBling,
+    conversas_do_pedido,
     conversas_do_pedido_bling,
     normalizar_plataforma,
     pedido_bling_da_conversa,
@@ -1273,6 +1277,42 @@ def ag_cancelamento_do_pedido(
     return bloco_do_motivo(m, observacao_topo=primeira_linha(obs), ve_margem=ve_margem)
 
 
+def devolucao_sem_retrato(conversa: AtendimentoConversa) -> bool:
+    """É a conversa `reclamacao` da Shopee ainda sem retrato próprio (`dados.pedido_mkt`)? PURA."""
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    return (
+        conversa.plataforma == "shopee"
+        and conversa.canal == CANAL_RECLAMACAO
+        and not dados.get("pedido_mkt")
+    )
+
+
+async def chat_que_empresta_o_retrato(
+    session: AsyncSession, conversa: AtendimentoConversa
+) -> AtendimentoConversa | None:
+    """O retrato emprestado (04/11/2026): o chat do MESMO pedido, na mesma loja, com o retrato.
+
+    Para a conversa `reclamacao` da Shopee sem retrato próprio (`devolucao_sem_retrato`).
+    Só se o `pedido` do retrato bate com o dela: o retrato de outra compra num
+    painel sobre esta é pior que painel vazio. Nunca o chat de afiliado.
+    """
+    pedido = (conversa.pedido_marketplace or "").strip()
+    if not pedido:
+        return None
+    for chat in await conversas_do_pedido(session, "shopee", pedido):
+        dados = chat.dados if isinstance(chat.dados, dict) else {}
+        retrato = dados.get("pedido_mkt")
+        if (
+            chat.canal == CANAL_CHAT
+            and chat.integration_id == conversa.integration_id
+            and not e_chat_de_afiliado(chat.plataforma, dados)
+            and isinstance(retrato, dict)
+            and str(retrato.get("pedido") or "").strip() == pedido
+        ):
+            return chat
+    return None
+
+
 async def conversa_do_retrato(
     session: AsyncSession, conversa: AtendimentoConversa, pedido: PedidoBling
 ) -> AtendimentoConversa | None:
@@ -1284,8 +1324,12 @@ async def conversa_do_retrato(
     sugestões de troca. Nela vale o CHAT do pedido — o mesmo da troca e da
     lista Ag. cancelamento (a 1ª de `conversas_do_pedido_bling`, como em
     `troca._carregar`); sem chat, nenhum (a classificação do pedido sem
-    conversa, a mesma da lista).
+    conversa, a mesma da lista). A conversa `reclamacao` da Shopee sem retrato
+    próprio (04/11/2026) usa o do chat do mesmo pedido, quando bate
+    (`chat_que_empresta_o_retrato`); sem ele, fica com ela mesma.
     """
+    if devolucao_sem_retrato(conversa):
+        return await chat_que_empresta_o_retrato(session, conversa) or conversa
     if not separa_email.e_conversa_de_email(conversa):
         return conversa
     conversas = await conversas_do_pedido_bling(session, pedido.numero)
@@ -1480,7 +1524,9 @@ async def painel_da_conversa(
     ag_cancelamento = None
     retrato: AtendimentoConversa | None = conversa
     ok_retrato = True
-    if pedido is not None and separa_email.e_conversa_de_email(conversa):
+    if pedido is not None and (
+        separa_email.e_conversa_de_email(conversa) or devolucao_sem_retrato(conversa)
+    ):
         retrato, ok_retrato = await _seguro(
             session, "retrato", lambda: conversa_do_retrato(session, conversa, pedido), None, cid
         )

@@ -176,7 +176,9 @@ export function rotuloEnviarAnexos(itens: { pdf: boolean }[]): string {
 //   · o CARTÃO DA RECLAMAÇÃO (AtendimentoReclamacao) entre as faixas e as
 //     mensagens, só quando a conversa (ou o pedido dela) tem reclamação,
 //     mediação ou devolução da plataforma — só leitura. Relido no "atualizar"
-//     e junto com o painel (a cada 2 min).
+//     e junto com o painel (a cada 2 min). A devolução da Shopee do pedido da
+//     conversa (04/11/2026) mora no painel: o cartão encolhe para a linha do
+//     título, com "ver no pedido".
 // - Avaliações de venda (RF8, 02/10/2026): o CARTÃO DA AVALIAÇÃO
 //   (AtendimentoAvaliacao) logo abaixo do da reclamação, só quando o pedido
 //   da conversa tem avaliação (Shopee e Mercado Livre): estrelas, texto,
@@ -2238,8 +2240,34 @@ function aoTrocarEtiqueta(r: EtiquetaTroca) {
 // e avisa quantas há (`carregado`); a faixa só aparece quando há alguma.
 const reclamacaoRef = ref<{ carregar: () => Promise<void> } | null>(null)
 const reclamacoesQtd = ref(0)
+// A resposta inteira vai também para o painel do pedido (04/11/2026): é de lá
+// que sai o bloco da devolução.
+const reclamacoesDados = ref<ReclamacoesResposta | null>(null)
 function aoCarregarReclamacoes(r: ReclamacoesResposta) {
+  reclamacoesDados.value = r
   reclamacoesQtd.value = r?.itens?.length || 0
+}
+// O pedido do chat mudou com a conversa aberta (a devolução prendeu ou soltou o
+// foco, ou o comprador citou outra compra): o `do_pedido`, o estoque e o nº do
+// Bling vieram do pedido anterior. Relê já, sem esperar o tique de 2 min, e o
+// painel fica em branco até chegar: o estoque de um pedido não aparece sob o nº
+// do outro. Troca de conversa, não: ela já relê tudo.
+watch(
+  () => [detalhe.value?.conversa.id, detalhe.value?.conversa.pedido_marketplace] as const,
+  ([id, pedido], [idAntes, pedidoAntes]) => {
+    if (!id || id !== idAntes || pedido === pedidoAntes) return
+    void reclamacaoRef.value?.carregar()
+    painelDados.value = null
+    void carregarPainel(id)
+    void carregarGarantia(id)
+  },
+)
+// "ver no pedido" do cartão: abre o painel (se fechado) e rola até o bloco.
+const painelPedidoRef = ref<{ mostrarDevolucao: (id: string) => Promise<void> } | null>(null)
+async function verDevolucaoNoPedido(id: string) {
+  if (!pedidoVisivel.value) alternarPedido()
+  await nextTick()
+  await painelPedidoRef.value?.mostrarDevolucao(id)
 }
 // Carrinho do site e comentário das redes (02/10/2026) não têm pedido de
 // plataforma: nem reclamação nem avaliação para buscar. O Zap (19/10/2026)
@@ -2972,6 +3000,7 @@ watch(() => props.conversaId, (novo, velho) => {
   garantiaErro.value = null
   vincularAberto.value = false
   // O cartão da reclamação relê sozinho (watch do conversaId dele).
+  reclamacoesDados.value = null
   reclamacoesQtd.value = 0
   // O da avaliação também; o que ele trouxe era da conversa anterior.
   avaliacoesDados.value = null
@@ -3471,7 +3500,7 @@ watch(() => props.conversaId, (novo, velho) => {
           v-show="reclamacoesQtd > 0"
           class="max-h-[38vh] shrink-0 overflow-y-auto border-b px-3 py-2"
         >
-          <AtendimentoReclamacao ref="reclamacaoRef" :conversa-id="conversa.id" :perfil="painelDados?.adspower ?? null" @carregado="aoCarregarReclamacoes" />
+          <AtendimentoReclamacao ref="reclamacaoRef" :conversa-id="conversa.id" :perfil="painelDados?.adspower ?? null" @carregado="aoCarregarReclamacoes" @ver-no-pedido="verDevolucaoNoPedido" />
         </div>
 
         <!-- Cartão da avaliação de venda (RF8): estrelas, texto, fotos, resposta
@@ -4265,6 +4294,7 @@ watch(() => props.conversaId, (novo, velho) => {
     >
       <AtendimentoPedido
         :key="detalhe.conversa.id"
+        ref="painelPedidoRef"
         :conversa="detalhe.conversa"
         :contexto="detalhe.contexto"
         :pedido-mkt="pedidoMkt"
@@ -4278,6 +4308,7 @@ watch(() => props.conversaId, (novo, velho) => {
         :painel-carregando="painelCarregando"
         :painel-erro="painelErro"
         :avaliacoes="avaliacoesDados"
+        :reclamacoes="reclamacoesDados"
         :garantia="garantiaSituacao"
         :garantia-carregando="garantiaCarregando"
         :garantia-erro="garantiaErro"

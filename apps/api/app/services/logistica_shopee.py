@@ -493,7 +493,9 @@ def _entregue_em_do_detalhe(det: dict | None) -> datetime | None:
 _SHOPEE_STATUS_CONFERIR = {"PROCESSING", "ACCEPTED"}
 
 
-def _acao_pendente_shopee(det: dict | None, status: str | None) -> tuple[str | None, datetime | None]:
+def _acao_pendente_shopee(
+    det: dict | None, status: str | None, agora: datetime | None = None
+) -> tuple[str | None, datetime | None]:
     """O que a Shopee espera da LOJA neste caso e até quando — a ação de prazo
     mais curto (Vinicius 16/09: "prazo de resposta da loja no painel"). Tudo
     vem do DETALHE da devolução:
@@ -502,7 +504,10 @@ def _acao_pendente_shopee(det: dict | None, status: str | None) -> tuple[str | N
       - `seller_proof.seller_proof_status == PENDING` + `seller_evidence_deadline`:
         a Shopee pediu prova da loja (2 dias);
       - `negotiation.negotiation_status == PENDING_RESPOND` + `offer_due_date`:
-        o cliente fez uma proposta;
+        o cliente fez uma proposta. Sem `offer_due_date`, em PROCESSING, vale o
+        `due_date` FUTURO (04/11/2026, medido: é o "Restante" do Duoke; o
+        `due_date` vencido é velho, de outra etapa, e não vira prazo; em JUDGING
+        o `due_date` existe, mas a vez não é da loja);
       - pacote de volta ENTREGUE + status em `_SHOPEE_STATUS_CONFERIR` +
         `return_seller_due_date`: conferir o pacote e responder (3 dias). A
         Shopee às vezes já manda essa data ANTES da entrega (estimativa, ex.
@@ -520,7 +525,12 @@ def _acao_pendente_shopee(det: dict | None, status: str | None) -> tuple[str | N
         cands.append(("SHOPEE_ENVIAR_EVIDENCIAS", epoch_to_dt(proof.get("seller_evidence_deadline"))))
     neg = d.get("negotiation") if isinstance(d.get("negotiation"), dict) else {}
     if str(neg.get("negotiation_status") or "").strip().upper() == "PENDING_RESPOND":
-        cands.append(("SHOPEE_RESPONDER_PROPOSTA", epoch_to_dt(neg.get("offer_due_date"))))
+        prazo_proposta = epoch_to_dt(neg.get("offer_due_date"))
+        if prazo_proposta is None and st == "PROCESSING":
+            devido = epoch_to_dt(d.get("due_date"))
+            if devido is not None and devido > (agora or datetime.now(UTC)):
+                prazo_proposta = devido
+        cands.append(("SHOPEE_RESPONDER_PROPOSTA", prazo_proposta))
     if st in _SHOPEE_STATUS_CONFERIR and _entregue_em_do_detalhe(d) is not None:
         cands.append(("SHOPEE_CONFERIR_PACOTE", epoch_to_dt(d.get("return_seller_due_date"))))
     comp = d.get("seller_compensation") if isinstance(d.get("seller_compensation"), dict) else {}

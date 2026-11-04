@@ -240,7 +240,7 @@ from app.models import (
 )
 from app.redis_client import redis
 from app.services.atendimento import contexto as contexto_svc
-from app.services.atendimento import ia, separa_email
+from app.services.atendimento import foco_devolucao, ia, separa_email
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.constantes import (
     ACAO_AG_CANCELAMENTO,
@@ -1785,10 +1785,15 @@ async def contar(session: AsyncSession) -> dict[str, Any]:
         (_pausada_sql(), literal(HUMANO_IA_PAUSADA)),
         else_=literal(HUMANO_IA_SEM_RESPOSTA),
     ).label("motivo_principal")
+    # A régua da lista (04/11/2026, `foco_devolucao`): a conversa da devolução da
+    # Shopee cujo comprador tem chat aberto não conta, como não aparece na tela.
+    fora_da_lista = foco_devolucao.fora_da_lista_sql(
+        await foco_devolucao.conversas_da_devolucao_com_chat(session)
+    )
     linhas = (
         await session.execute(
             select(c.plataforma, motivo, func.count())
-            .where(caixa_humano_sql(lojas, agora))
+            .where(caixa_humano_sql(lojas, agora), fora_da_lista)
             .group_by(c.plataforma, motivo)
         )
     ).all()
@@ -1801,7 +1806,7 @@ async def contar(session: AsyncSession) -> dict[str, Any]:
         await session.execute(
             select(func.count(), func.count().filter(para_pessoa_sql(lojas, agora)))
             .select_from(c)
-            .where(escopo_sql())
+            .where(escopo_sql(), fora_da_lista)
         )
     ).one()
     return {

@@ -1383,15 +1383,25 @@ async def atendimento_reclamacoes(
 
         try:
             async with _db.SessionLocal() as session:
+                fabrica = fabrica_cliente or clientes.cliente_da_integracao
+                retratos: set[UUID] = set()
                 resumo["devolucoes"] = await reclamacoes_devolucoes.ligar_devolucoes(
                     session,
                     agora=agora,
                     commit_a_cada=COMMIT_DEVOLUCOES_A_CADA,
                     # O motivo do comprador e o comprador da conversa nova: só
                     # GET, com a cota de `reclamacoes_devolucoes`.
-                    fabrica_cliente=fabrica_cliente or clientes.cliente_da_integracao,
+                    fabrica_cliente=fabrica,
+                    retratos_pendentes=retratos,
                 )
                 await session.commit()
+                # Depois do commit (04/11/2026): a ida à loja pelo retrato não
+                # segura nenhuma conversa travada, e nunca derruba o cron.
+                renovados = await reclamacoes_devolucoes.renovar_retratos(
+                    session, retratos, fabrica_cliente=fabrica
+                )
+                if renovados:
+                    resumo["devolucoes"]["retratos"] = renovados
         except Exception as exc:  # noqa: BLE001 — o ML já foi gravado
             logger.error("atendimento_devolucoes_falhou", err=type(exc).__name__)
             resumo["devolucoes"] = {"erro": type(exc).__name__}
@@ -1538,7 +1548,10 @@ def status_para_tela(r: AtendimentoReclamacao) -> str | None:
 
 
 def para_tela(
-    r: AtendimentoReclamacao, ids_shopee: links_shopee.IdsShopee | None = None
+    r: AtendimentoReclamacao,
+    ids_shopee: links_shopee.IdsShopee | None = None,
+    *,
+    pedido_da_conversa: str | None = None,
 ) -> dict[str, Any]:
     """A reclamação no formato do cartão (`AtendimentoReclamacao.vue`). Sem texto de comprador.
 
@@ -1546,6 +1559,11 @@ def para_tela(
     traduzido); `solucao` = o que ele PEDIU na Shopee/TikTok ("Devolução +
     reembolso") — até 02/10/2026 esse texto ia no `motivo`, e a linha antiga
     ainda não relida é lida assim.
+
+    O bloco "Devolução" no painel do pedido (04/11/2026): `pedido_da_conversa` =
+    o pedido da conversa pedida; `do_pedido` = caso ABERTO da Shopee desse
+    pedido (a tela põe o bloco no painel e encolhe o cartão). `valor_reembolso`,
+    `moeda`, `rastreio_volta` e `situacao_volta` vêm None quando não se sabe.
     """
     from app.services.atendimento import reclamacoes_devolucoes
 
@@ -1566,6 +1584,8 @@ def para_tela(
     tipo_nome = NOME_TIPO.get(r.tipo, r.tipo)
     if r.plataforma in ("shopee", "tiktok") and r.tipo == RECLAMACAO_TIPO_RECLAMACAO:
         tipo_nome = "Disputa"
+    pedido_conversa = _id(pedido_da_conversa)
+    valor = dados.get("valor_reembolso")
     return {
         "id": r.id,
         "plataforma": r.plataforma,
@@ -1591,4 +1611,14 @@ def para_tela(
         "devolucao_status": _id(devolucao.get("status")) or None,
         "conversa_id": r.conversa_id,
         "url_plataforma": url_na_plataforma(r, ids_shopee),
+        "do_pedido": (
+            r.encerrada_em is None
+            and r.plataforma == "shopee"
+            and bool(pedido_conversa)
+            and _id(r.pedido_marketplace) == pedido_conversa
+        ),
+        "valor_reembolso": float(valor) if isinstance(valor, int | float) else None,
+        "moeda": _id(dados.get("moeda")) or None,
+        "rastreio_volta": _id(dados.get("rastreio_volta")) or None,
+        "situacao_volta": _id(dados.get("situacao_volta")) or None,
     }

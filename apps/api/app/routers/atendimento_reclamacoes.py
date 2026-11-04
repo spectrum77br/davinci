@@ -32,7 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.models import User
 from app.routers.atendimento import _conversa_ou_404, _so_admin, _view
-from app.services.atendimento import instagram, reclamacoes
+from app.services.atendimento import foco_devolucao, instagram, reclamacoes
+from app.services.atendimento.constantes import CANAL_RECLAMACAO
 from app.services.atendimento.escopo import escopo_do_atendimento
 
 router = APIRouter(
@@ -73,6 +74,15 @@ class ReclamacaoOut(BaseModel):
     devolucao_status: str | None
     conversa_id: UUID | None
     url_plataforma: str | None
+    # O bloco "Devolução" no painel do pedido (04/11/2026): caso ABERTO da Shopee
+    # do pedido da conversa pedida. True = a tela põe o bloco e encolhe o cartão.
+    do_pedido: bool = False
+    # `refund_amount` e `currency` do detalhe; o rastreio e a situação da volta,
+    # de `devolucao_rastreio`. Sem o dado, None: a tela não desenha a linha.
+    valor_reembolso: float | None = None
+    moeda: str | None = None
+    rastreio_volta: str | None = None
+    situacao_volta: str | None = None
 
 
 class ReclamacoesOut(BaseModel):
@@ -97,7 +107,17 @@ async def reclamacoes_da_conversa(
     linhas = await reclamacoes.reclamacoes_da_conversa(session, conversa)
     # O "Abrir na Shopee" com o id interno (devolução/pedido): uma consulta.
     ids_shopee = await reclamacoes.ids_shopee_das(session, linhas)
-    itens = [ReclamacaoOut(**reclamacoes.para_tela(r, ids_shopee)) for r in linhas]
+    # O bloco no painel só no chat e na conversa da devolução: e-mail, avaliação e
+    # chat de afiliado ficam com o cartão de sempre.
+    pedido_do_bloco = (
+        conversa.pedido_marketplace
+        if foco_devolucao.vale_para(conversa) or conversa.canal == CANAL_RECLAMACAO
+        else None
+    )
+    itens = [
+        ReclamacaoOut(**reclamacoes.para_tela(r, ids_shopee, pedido_da_conversa=pedido_do_bloco))
+        for r in linhas
+    ]
     prazos = [i.prazo_em for i in itens if i.aberta and i.prazo_em is not None]
     return ReclamacoesOut(
         itens=itens,

@@ -66,7 +66,7 @@ from app.models import (
     Integration,
 )
 from app.services.atendimento import etiqueta as etiqueta_svc
-from app.services.atendimento import lojas, separa_email
+from app.services.atendimento import foco_devolucao, lojas, separa_email
 from app.services.atendimento import notificacoes as notificacoes_svc
 from app.services.atendimento.constantes import (
     AUTOMACOES_QUE_FECHAM_A_VEZ,
@@ -624,6 +624,7 @@ async def travar_linha(session: AsyncSession, obj, *, espera: str | None = None)
 # O acontecimento que vai entre parênteses na linha do tempo da etiqueta.
 MOTIVO_ETIQUETA_LEITURA = "leitura da plataforma"
 MOTIVO_ETIQUETA_MENSAGEM = "mensagem nova"
+MOTIVO_ETIQUETA_FOCO = "pedido da devolução"
 
 
 def _o_que_decide_a_etiqueta(conversa: AtendimentoConversa) -> tuple:
@@ -719,6 +720,87 @@ async def _buscar_conversa(
     return (await session.execute(q.limit(1))).scalar_one_or_none()
 
 
+async def _foco_na_leitura(
+    session: AsyncSession, conversa: AtendimentoConversa, lido: str | None
+) -> tuple[str | None, str | None] | None:
+    """A trava da devolução (04/11/2026, `foco_devolucao`) → (pedido, citado); None = não mexe.
+
+    Só consulta o foco quando o pedido lido difere do atual ou a chave do citado
+    existe: o chat sem devolução, com a citação de sempre, não paga consulta.
+    """
+    if lido is None or not foco_devolucao.vale_para(conversa):
+        return None
+    citado = foco_devolucao.pedido_citado(conversa.dados)
+    if lido == conversa.pedido_marketplace and not citado:
+        return None
+    foco = await foco_devolucao.pedido_em_foco(session, conversa)
+    return foco_devolucao.decidir_pedido(conversa.pedido_marketplace, citado, foco, lido)
+
+
+def _gravar_citado(conversa: AtendimentoConversa, citado: str | None) -> None:
+    """`dados.pedido_citado` = `citado`; None tira a chave. Dicionário NOVO só se mudou."""
+    base = conversa.dados if isinstance(conversa.dados, dict) else {}
+    if foco_devolucao.pedido_citado(base) == citado:
+        return
+    novo = {k: v for k, v in base.items() if k != foco_devolucao.CHAVE_PEDIDO_CITADO}
+    if citado:
+        novo[foco_devolucao.CHAVE_PEDIDO_CITADO] = citado
+    conversa.dados = novo
+
+
+async def _travar_se_livre(session: AsyncSession, conversa: AtendimentoConversa) -> bool:
+    """Trava a conversa (SKIP LOCKED) e a relê; False = ocupada, a próxima passada corrige."""
+    await session.flush()
+    livre = (
+        await session.execute(
+            select(AtendimentoConversa.id)
+            .where(AtendimentoConversa.id == conversa.id)
+            .with_for_update(skip_locked=True, key_share=True)
+        )
+    ).first()
+    if livre is None:
+        return False
+    await session.refresh(conversa)
+    return True
+
+
+async def aplicar_foco_da_devolucao(
+    session: AsyncSession, conversa: AtendimentoConversa, *, agora: datetime | None = None
+) -> bool:
+    """A passada do cron no chat da devolução (04/11/2026) → True = o chat mudou. Não commita.
+
+    A mesma regra da leitura (`foco_devolucao.decidir_pedido`, sem pedido lido):
+    entra no foco guardando o pedido de antes, ou volta para o citado quando a
+    devolução encerrou. Só trava quando há o que mudar; ocupada (o sync gravando
+    agora) não espera: a corrida se corrige na próxima passada. A etiqueta segue a
+    régua de sempre (`_o_que_decide_a_etiqueta`).
+    """
+    if not foco_devolucao.vale_para(conversa):
+        return False
+    foco = await foco_devolucao.pedido_em_foco(session, conversa, agora)
+    atual = conversa.pedido_marketplace
+    citado = foco_devolucao.pedido_citado(conversa.dados)
+    if foco_devolucao.decidir_pedido(atual, citado, foco, None) == (atual, citado):
+        return False
+    if not await _travar_se_livre(session, conversa):
+        return False
+    atual = conversa.pedido_marketplace
+    citado = foco_devolucao.pedido_citado(conversa.dados)
+    novo, novo_citado = foco_devolucao.decidir_pedido(atual, citado, foco, None)
+    if (novo, novo_citado) == (atual, citado):
+        return False
+    decide_antes = _o_que_decide_a_etiqueta(conversa)
+    conversa.pedido_marketplace = novo
+    _gravar_citado(conversa, novo_citado)
+    await session.flush()
+    if conversa.etiqueta is None or _o_que_decide_a_etiqueta(conversa) != decide_antes:
+        await etiqueta_svc.recalcular_etiqueta(
+            session, conversa, motivo=MOTIVO_ETIQUETA_FOCO, agora=agora
+        )
+        await session.flush()
+    return True
+
+
 async def upsert_conversa(
     session: AsyncSession,
     *,
@@ -750,6 +832,11 @@ async def upsert_conversa(
 
     Recalcula a ETIQUETA na conversa nova e quando a leitura muda o que a
     decide (`_o_que_decide_a_etiqueta`) — ou quando ela ainda não tem.
+
+    O PEDIDO passa pela trava da devolução (04/11/2026, `foco_devolucao`): todos
+    os escritores do pedido do chat vêm por aqui, e a página relida reaplica a
+    citação antiga mesmo sem mensagem nova. Com devolução aberta ligada ao chat
+    da Shopee, ele fica no pedido devolvido e o lido vai para `dados.pedido_citado`.
     """
     externo_id = _cabe(sem_nul(str(externo_id)), 191)
     conta = sem_nul(conta)
@@ -838,12 +925,22 @@ async def upsert_conversa(
         conversa.conta = conta
     elif conversa.conta is None and integration is not None:
         conversa.conta = await _nome_da_loja(session, integration)
+    foco = await _foco_na_leitura(session, conversa, campos["pedido_marketplace"])
+    if foco is not None:
+        campos["pedido_marketplace"] = foco[0]
+        # O citado regrava `dados`: só com a linha travada e relida, ou uma chave
+        # que outro processo gravou agora se perderia. Ocupada: a próxima leitura grava.
+        citado_antes = foco_devolucao.pedido_citado(conversa.dados)
+        if foco[1] != citado_antes and not await _travar_se_livre(session, conversa):
+            foco = (foco[0], citado_antes)
     for nome, valor in campos.items():
         if valor is not None:
             setattr(conversa, nome, valor)
     if dados:
         # Dicionário NOVO: mutar o JSONB no lugar não marca a coluna como suja.
         conversa.dados = {**(conversa.dados or {}), **dados}
+    if foco is not None:
+        _gravar_citado(conversa, foco[1])
     if situacao is not None and conversa.ultima_mensagem_em is not None:
         # Situação vinda do adaptador ("aberta" ao desbloquear) precisa
         # voltar a bater com as mensagens: aberta × respondida é derivada.

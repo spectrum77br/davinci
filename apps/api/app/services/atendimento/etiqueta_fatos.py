@@ -1187,9 +1187,13 @@ async def conversas_do_comprador_do_pedido(
     um por comprador na loja): o pós-venda do ML, a avaliação, a reclamação e
     o e-mail da ponte são de UM pedido — não são "o chat do comprador".
 
-    SÓ PARA ABRIR: o retrato (`dados.pedido_mkt`) e as falas dessa conversa
-    são de OUTRO pedido — quem classifica o motivo, troca ou manda oferta
-    continua com `conversas_do_pedido_bling`.
+    PARA ABRIR E PARA LIGAR A DEVOLUÇÃO: o retrato (`dados.pedido_mkt`) e as
+    falas dessa conversa são de OUTRO pedido — quem classifica o motivo, troca
+    ou manda oferta continua com `conversas_do_pedido_bling`. A única exceção é
+    a devolução da Shopee (04/11/2026, `reclamacoes_devolucoes._chat_do_comprador`):
+    o caso liga no chat achado aqui e o foco leva o chat para o pedido devolvido
+    (`foco_devolucao`). Esta busca não tira o chat de afiliado nem o fechado:
+    quem liga filtra (`foco_devolucao.chat_do_comprador_serve`).
     """
     chave = str(pedido_marketplace or "").strip()
     if not chave:

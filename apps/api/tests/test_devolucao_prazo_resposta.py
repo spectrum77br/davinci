@@ -443,6 +443,49 @@ def test_shopee_outros_prazos_da_loja_e_o_mais_curto_vence():
     )
 
 
+def test_shopee_proposta_sem_data_usa_o_due_date_futuro():
+    """04/11/2026 (medido): PROCESSING + PENDING_RESPOND + `offer_due_date` nulo + `due_date`
+    futuro é o "Restante" do Duoke. Só nesse caso: o `due_date` vencido é velho (fixture
+    do 292317), sem PENDING_RESPOND não é ação da loja, e JUDGING traz `due_date` sem ser
+    a vez da loja."""
+    f = logistica_shopee._acao_pendente_shopee
+    agora = datetime.fromtimestamp(1788800000, tz=UTC)
+    futuro, vencido = 1788890340, 1788700000
+    sem_data = {"negotiation_status": "PENDING_RESPOND", "offer_due_date": None}
+
+    def det(negociacao: dict = sem_data, **kw) -> dict:
+        # O pacote ainda voltando: o prazo de conferir não entra na conta.
+        return _det_shopee(
+            negotiation=negociacao,
+            **{"reverse_logistics_status": "LOGISTICS_PICKUP_DONE", "due_date": futuro, **kw},
+        )
+
+    # O caso: o `due_date` futuro dá o prazo, com a ação de responder a proposta.
+    assert f(det(), "PROCESSING", agora) == (
+        "SHOPEE_RESPONDER_PROPOSTA", datetime.fromtimestamp(futuro, tz=UTC)
+    )
+    # O `offer_due_date` continua mandando quando existe.
+    com_data = {"negotiation_status": "PENDING_RESPOND", "offer_due_date": 1788999999}
+    assert f(det(com_data), "PROCESSING", agora) == (
+        "SHOPEE_RESPONDER_PROPOSTA", datetime.fromtimestamp(1788999999, tz=UTC)
+    )
+    # Vencido: sem prazo.
+    assert f(det(due_date=vencido), "PROCESSING", agora) == (None, None)
+    # O agora é o limite: `due_date` igual ao agora já venceu.
+    assert f(det(), "PROCESSING", datetime.fromtimestamp(futuro, tz=UTC)) == (None, None)
+    # Sem PENDING_RESPOND: nada, mesmo com o `due_date` futuro.
+    outra = {"negotiation_status": "", "offer_due_date": None}
+    assert f(det(outra), "PROCESSING", agora) == (None, None)
+    # JUDGING: nada muda (medido: traz `due_date` e não é ação da loja).
+    assert f(det(), "JUDGING", agora) == (None, None)
+    # O mais curto continua vencendo: o pacote entregue com prazo antes do `due_date`.
+    assert f(
+        _det_shopee(negotiation=sem_data, due_date=futuro, return_seller_due_date=1788850000),
+        "PROCESSING",
+        agora,
+    ) == ("SHOPEE_CONFERIR_PACOTE", datetime.fromtimestamp(1788850000, tz=UTC))
+
+
 class _FakeShopeeComDetalhe:
     """get_return_list (janela por create_time) + get_return_detail."""
 

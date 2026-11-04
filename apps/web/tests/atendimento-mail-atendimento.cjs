@@ -1590,11 +1590,12 @@ async function principal() {
     // A lista: a Caixa só com o chat; `caixa=email` só com o e-mail.
     assert.match(rotasAtd, /^CAIXAS = \("", CAIXA_HUMANO, CAIXA_EMAIL\)$/m)
     // 27/10/2026: o filtro de acesso decidido uma vez pelo pedido (`visao_rapida`) — ou o inteiro, sem ele.
-    assert.match(rotasAtd, /if caixa_email:\s+consulta = consulta\.where\(\s*separa_email\.conversa_de_email_sql\(\),[\s\S]*?filtro_email if filtro_email is not None else mail_admin\.filtro_conversa\(user\),\s*\)\s+else:\s+consulta = consulta\.where\(separa_email\.na_caixa_sql\(\)\)/)
+    assert.match(rotasAtd, /if caixa_email:\s+consulta = consulta\.where\(\s*separa_email\.conversa_de_email_sql\(\),[\s\S]*?filtro_email if filtro_email is not None else mail_admin\.filtro_conversa\(user\),\s*\)\s+else:\s+(?:#[^\n]*\s+)*consulta = consulta\.where\(\s*separa_email\.na_caixa_sql\(\)/)
     assert.match(rotasAtd, /filtro_email = \(await mail_admin\.visao_rapida\(session, user\)\)\.filtro_conversa\(\)/)
     assert.match(rotasAtd, /and not caixa_email\n\s+\)/, 'o Direct nunca entra na lista do e-mail')
     // O /resumo (plataformas, barra de lojas, etiquetas, Caixa Humano): só a Caixa.
-    assert.match(rotasAtd, /cond = and_\(separa_email\.na_caixa_sql\(\), \*\(\[escopo\] if escopo is not None else \[\]\)\)/)
+    // (04/11/2026: a régua da conversa da devolução com chat aberto entra junto, foco_devolucao.)
+    assert.match(rotasAtd, /cond = and_\(\s*separa_email\.na_caixa_sql\(\),[\s\S]{0,120}?\*\(\[escopo\] if escopo is not None else \[\]\),?\s*\)/)
     assert.match(rotasAtd, /q_loja = select\([\s\S]*?\)\.where\(cond\)\.group_by\(/)
     assert.doesNotMatch(rotasAtd, /q_plat\s*=/, 'plataformas usam a mesma agregação filtrada por e-mail e escopo')
     for (const classe of ['PlataformaResumoOut', 'LojaResumoOut', 'ResumoOut']) {

@@ -146,6 +146,7 @@ from app.models import (
     AtendimentoModelo,
     AtendimentoPedidoComprador,
     AtendimentoRascunho,
+    AtendimentoReclamacao,
     AtendimentoRegra,
     BlingOrder,
     Integration,
@@ -223,6 +224,7 @@ from app.services.atendimento import (
     cartoes_plataforma,
     clientes,
     enviar,
+    foco_devolucao,
     gravar,
     instagram,
     pendente,
@@ -1380,6 +1382,20 @@ def _do_dados(c: AtendimentoConversa, chave: str) -> dict[str, Any] | None:
     return dict(valor) if isinstance(valor, dict) and valor else None
 
 
+async def _retrato_do_detalhe(
+    session: AsyncSession, c: AtendimentoConversa
+) -> dict[str, Any] | None:
+    """O `pedido_mkt` do detalhe: o da conversa ou, na conversa `reclamacao` da Shopee
+    sem o dela (04/11/2026), o do chat do mesmo pedido (`painel.chat_que_empresta_o_retrato`)."""
+    from app.services.atendimento import painel
+
+    retrato = _do_dados(c, "pedido_mkt")
+    if retrato is not None or not painel.devolucao_sem_retrato(c):
+        return retrato
+    chat = await painel.chat_que_empresta_o_retrato(session, c)
+    return _do_dados(chat, "pedido_mkt") if chat is not None else None
+
+
 # Os mesmos hosts que o leitor da caixa aceita ao gravar
 # (`amazon_email._links_do_rodape`). Aqui é o cinto da saída: `conversa.dados`
 # é JSON livre, e o que sai daqui vira botão/link que a pessoa clica.
@@ -2212,8 +2228,15 @@ async def resumo(
     # Só a CAIXA (13/10/2026): a conversa de e-mail da ponte mora na aba
     # E-mail e não conta aqui em nada — plataformas, barra de lojas,
     # etiquetas, Caixa Humano (os números dela: GET /email/contagens).
+    # Nem a conversa da devolução da Shopee cujo comprador tem chat aberto
+    # (04/11/2026, `foco_devolucao`): os ids como valores, a mesma régua da lista.
     escopo = _clausula_escopo(scope, AtendimentoConversa.integration_id)
-    cond = and_(separa_email.na_caixa_sql(), *([escopo] if escopo is not None else []))
+    ocultas = await foco_devolucao.conversas_da_devolucao_com_chat(session)
+    cond = and_(
+        separa_email.na_caixa_sql(),
+        foco_devolucao.fora_da_lista_sql(ocultas),
+        *([escopo] if escopo is not None else []),
+    )
 
     nao_lidas = func.coalesce(func.sum(AtendimentoConversa.nao_lidas), 0)
     # Conversas NÃO fechadas por etiqueta (o menu Filtrar), na mesma ordem de
@@ -2527,7 +2550,15 @@ async def _listar_marketplace(
             filtro_email if filtro_email is not None else mail_admin.filtro_conversa(user),
         )
     else:
-        consulta = consulta.where(separa_email.na_caixa_sql())
+        # A conversa da devolução da Shopee some quando o comprador tem chat
+        # aberto (04/11/2026, `foco_devolucao`): a mesma régua do /resumo e da
+        # Caixa Humano. Abas e o acesso direto por id continuam vendo.
+        consulta = consulta.where(
+            separa_email.na_caixa_sql(),
+            foco_devolucao.fora_da_lista_sql(
+                await foco_devolucao.conversas_da_devolucao_com_chat(session)
+            ),
+        )
     if caixa_email and tipo_email:
         consulta = consulta.where(_tipo_do_email_sql() == tipo_email)
     if caixa_email and pastas_do_grupo is not None:
@@ -2689,6 +2720,15 @@ async def _listar_marketplace(
                 # Qualquer pedido do comprador (03/11/2026): o chat dele na
                 # loja, mesmo ligado a outro pedido (`_chat_do_comprador_do_pedido`).
                 _chat_do_comprador_do_pedido(termo_exato),
+                # O nº da devolução da Shopee (04/11/2026): o caso que está no chat do
+                # comprador não tem mais a conversa com esse número (`foco_devolucao`).
+                AtendimentoConversa.id.in_(
+                    select(AtendimentoReclamacao.conversa_id).where(
+                        AtendimentoReclamacao.plataforma == foco_devolucao.PLATAFORMA,
+                        AtendimentoReclamacao.externo_id == termo_exato,
+                        AtendimentoReclamacao.conversa_id.is_not(None),
+                    )
+                ),
                 # Os chamados dos sites (RF6): TODOS os protocolos do chamado —
                 # o principal e os agrupados nele (o 2º sumia de "Todas" assim
                 # que chegava mensagem nova: só o resumo da última o achava).
@@ -3456,7 +3496,7 @@ async def detalhe_conversa(
         ),
         "contexto": await _contexto(session, c),
         "envio": await _envio(session, c),
-        "pedido_mkt": _do_dados(c, "pedido_mkt"),
+        "pedido_mkt": await _retrato_do_detalhe(session, c),
         "produto": _do_dados(c, "produto"),
         "sugestoes": await _sugestoes(session, c.id, user_id=user.id),
         "pedido_atualizavel": await _pedido_atualizavel(session, c),

@@ -233,7 +233,7 @@ from app.models import (
     BlingOrder,
     NfNota,
 )
-from app.services.atendimento import constantes, danfe, validador
+from app.services.atendimento import constantes, danfe, foco_devolucao, validador
 
 logger = structlog.get_logger()
 
@@ -1476,6 +1476,9 @@ async def _travas_da_conversa(
         return "conversa_fechada_ou_bloqueada"
     if constantes.reclamacao_aberta(conversa.dados):
         return "reclamacao_aberta"
+    # O chat preso no pedido da devolução (04/11/2026): a NF pedida pode ser da outra compra.
+    if foco_devolucao.citou_outro_pedido(conversa):
+        return "pedido_citado_outro"
     if conversa.plataforma in constantes.PLATAFORMAS_SEM_AUTO:
         return "plataforma_sem_auto"
     if constantes.motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados):

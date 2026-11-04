@@ -635,6 +635,18 @@ async def test_canal_fora_do_auto_fica_com_a_pessoa(db, make_user, ligado, plata
     assert _decisao(r) == "nf:canal_fora_do_auto" and plataforma == []
 
 
+async def test_chat_preso_na_devolucao_com_outro_pedido_citado_fica_com_a_pessoa(
+    db, make_user, ligado, plataforma
+):
+    """04/11/2026 (`foco_devolucao`): a NF pedida pode ser da outra compra."""
+    conversa, gatilho = await _cenario(db, make_user)
+    conversa.dados = {**(conversa.dados or {}), "pedido_citado": "OUTRA-COMPRA"}
+    await db.commit()
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:pedido_citado_outro" and plataforma == []
+
+
 async def test_chave_geral_desligada(db, make_user, ligado, plataforma, monkeypatch):
     monkeypatch.setattr(get_settings(), "atendimento_nf_automatica", False)
     conversa, gatilho = await _cenario(db, make_user)

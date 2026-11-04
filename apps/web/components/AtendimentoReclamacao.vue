@@ -28,6 +28,15 @@
 // lembra a escolha (uma chave só, vale para todas as conversas). Recolher só
 // esconde (v-show): o link da plataforma e o copiar o nº seguem iguais.
 //
+// NO PEDIDO (04/11/2026, devolução da Shopee no chat do comprador; o dono: "o
+// negócio é pra aquele pedido, então se reconhecer a devolução fica naquele"):
+// o caso que está no painel (`do_pedido`, decidido pelo backend) mostra aqui só
+// a linha do título (tipo, nº, status, prazo), sem corpo e sem chevron, e um
+// "ver no pedido" que abre o painel e rola até o bloco. O corpo mora lá
+// (AtendimentoDevolucaoPedido); o prazo repete de propósito, porque o painel
+// pode estar fechado. O cartão segue montado: é ele que busca e avisa a
+// conversa. Encerradas, casos de outro pedido e as outras plataformas: igual.
+//
 // Este bloco (não o setup) é o módulo dos ajudantes puros, testados em
 // tests/atendimento-reclamacao.cjs — por isso não importa nada.
 
@@ -59,6 +68,14 @@ export interface Reclamacao {
   devolucao_status: string | null
   conversa_id: string | null
   url_plataforma: string | null
+  // Caso aberto da Shopee do pedido desta conversa (04/11/2026): o corpo vai
+  // para o bloco do painel. Opcional, como os dados abaixo (só o bloco usa;
+  // vazios, a linha não aparece).
+  do_pedido?: boolean
+  valor_reembolso?: number | null
+  moeda?: string | null
+  rastreio_volta?: string | null
+  situacao_volta?: string | null
 }
 
 export interface ReclamacoesResposta {
@@ -270,6 +287,8 @@ const emit = defineEmits<{
   // Para quem monta a conversa: quantas abertas e o prazo mais curto (o selo
   // do cabeçalho, se quiser).
   (e: 'carregado', r: ReclamacoesResposta): void
+  // "ver no pedido" do caso que está no painel: a conversa abre e rola até ele.
+  (e: 'verNoPedido', id: string): void
 }>()
 const { api } = useApi()
 const toasts = useToasts()
@@ -340,11 +359,19 @@ async function copiarNumero(r: Reclamacao) {
       v-for="r in abertas"
       :key="r.id"
       class="rounded-md border text-[13px] leading-5"
-      :class="[corDoTipo(r.tipo).borda, cartaoAberto ? 'p-3' : 'px-3 py-1.5']"
+      :class="[corDoTipo(r.tipo).borda, cartaoAberto && !r.do_pedido ? 'p-3' : 'px-3 py-1.5']"
       data-reclamacao
     >
       <div class="flex flex-wrap items-center gap-1.5">
+        <!-- no painel do pedido: não há o que recolher, o corpo mora lá -->
+        <span v-if="r.do_pedido" class="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-px text-xs font-semibold" :class="corDoTipo(r.tipo).selo">
+          <Undo2 v-if="r.tipo === 'devolucao'" class="size-3.5" aria-hidden="true" />
+          <Scale v-else-if="r.mediacao" class="size-3.5" aria-hidden="true" />
+          <TriangleAlert v-else class="size-3.5" aria-hidden="true" />
+          {{ r.tipo_rotulo }}
+        </span>
         <button
+          v-else
           type="button"
           class="-ml-1 inline-flex shrink-0 items-center gap-1 rounded px-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
           :aria-expanded="cartaoAberto"
@@ -372,9 +399,18 @@ async function copiarNumero(r: Reclamacao) {
         >
           <Copy class="size-3.5" />
         </button>
-        <span class="text-xs text-muted-foreground">· {{ r.plataforma_nome }}</span>
+        <span v-if="!r.do_pedido" class="text-xs text-muted-foreground">· {{ r.plataforma_nome }}</span>
+        <span v-if="r.do_pedido && statusLegivel(r)" class="min-w-0 truncate text-xs" data-reclamacao-status-no-pedido>· {{ statusLegivel(r) }}</span>
+        <button
+          v-if="r.do_pedido"
+          type="button"
+          class="shrink-0 text-xs underline hover:opacity-80"
+          title="abrir o painel do pedido, com os dados da devolução"
+          data-reclamacao-ver-no-pedido
+          @click="emit('verNoPedido', r.id)"
+        >ver no pedido</button>
         <span
-          v-if="!cartaoAberto && statusLegivel(r)"
+          v-else-if="!cartaoAberto && statusLegivel(r)"
           class="min-w-0 cursor-pointer truncate text-xs"
           :title="[statusLegivel(r), r.motivo ? `Motivo: ${motivoLegivel(r.motivo)}` : ''].filter(Boolean).join('\n')"
           data-reclamacao-resumo
@@ -388,7 +424,7 @@ async function copiarNumero(r: Reclamacao) {
         >{{ prazoReclamacao(r, agora)!.texto }}</span>
       </div>
 
-      <div v-show="cartaoAberto" data-reclamacao-corpo>
+      <div v-if="!r.do_pedido" v-show="cartaoAberto" data-reclamacao-corpo>
         <div v-if="statusLegivel(r)" class="mt-1" :title="r.status || undefined">{{ statusLegivel(r) }}</div>
         <div v-if="r.motivo" class="text-muted-foreground" :title="r.motivo">Motivo: {{ motivoLegivel(r.motivo) }}</div>
         <div v-if="r.solucao" class="text-muted-foreground">Pede: {{ r.solucao }}</div>

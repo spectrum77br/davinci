@@ -87,6 +87,8 @@ CANAL_SAC = "sac"
 # (`sync.garantir_canais` criaria um canal por conta ML e o adaptador de chat
 # tentaria lê-lo) — quem a escreve é `services/atendimento/reclamacoes.py`.
 CANAL_RECLAMACAO = "reclamacao"
+# `atendimento_reclamacoes.dados.fonte` da linha que veio da aba Logística.
+FONTE_LOGISTICA = "logistica"
 # Avaliação de venda PENDENTE (RF8, 02/10/2026): a conversa que nasce quando
 # uma avaliação fica sem resposta da loja (Shopee) ou com nota 1–3 sem
 # tratar (ML), com `externo_id` = id da avaliação na plataforma. Como a

@@ -40,6 +40,7 @@ from app.models.atendimento import AtendimentoPar
 from app.services.atendimento import constantes, humano, ia
 from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import manual as manual_svc
+from app.services.atendimento import foco_devolucao
 from app.services.atendimento.agente import acao_pessoa, checagens, pacote, pares, prompt, saida
 from app.services.atendimento.agente import contexto as agente_ctx
 from app.services.atendimento.agente import verificador as v
@@ -932,6 +933,35 @@ def test_32_devolucao_de_rotina_so_sem_nada_para_a_loja_decidir(rotina_ligada):
     assert not rotina(_conv(etiquetas_secundarias=["reclamacao"]), _ctx_dev(_rec()))
     # A etiqueta Devolução (a do sistema para a devolução aberta) não tira a rotina.
     assert rotina(_conv(etiqueta="devolucao"), _ctx_dev(_rec()))
+
+
+def test_32_chat_preso_na_devolucao_com_outro_pedido_citado_vai_para_pessoa(rotina_ligada):
+    """04/11/2026: o chat fica no pedido devolvido, e o comprador citou outra compra
+    (`dados.pedido_citado`): ele pode estar falando dela. Citado igual ao do chat, ou
+    sem a chave, a rotina segue."""
+    ctx = _ctx_dev(_rec())
+    assert _rotina(_conv(pedido_marketplace="A"), ctx)
+    assert _rotina(_conv(pedido_marketplace="A", dados={"pedido_citado": "A"}), ctx)
+    assert not _rotina(_conv(pedido_marketplace="A", dados={"pedido_citado": "B"}), ctx)
+    # O mesmo no gancho do turno, o que os outros passos usam.
+    recentes = _turno(PERGUNTA_ROTINA)
+    conversa = _conv(pedido_marketplace="A", dados={"pedido_citado": "B"})
+    assert not acao_pessoa.rotina_do_turno(conversa, ctx, recentes, recentes[-1])
+
+
+def test_32_chat_preso_com_outro_pedido_citado_tambem_nao_responde_e_marca(
+    rotina_ligada, monkeypatch
+):
+    """Sem isto a trava só trocava uma resposta sozinha pela outra: a rotina cai e o
+    "responde e marca" passa a valer, com a resposta saindo sobre o pedido preso."""
+    ctx = _ctx_dev(_rec())
+    recentes = _turno(PERGUNTA_ROTINA)
+    conversa = _conv(pedido_marketplace="A", dados={"pedido_citado": "B"})
+    assert not acao_pessoa.responde_e_marca_do_turno(conversa, ctx, recentes, recentes[-1])
+    # A prova de que é esta trava que segura: só a do D1 fingindo não ver o citado.
+    respostas = iter([False, True])
+    monkeypatch.setattr(foco_devolucao, "citou_outro_pedido", lambda _c: next(respostas))
+    assert acao_pessoa.responde_e_marca_do_turno(conversa, ctx, recentes, recentes[-1])
 
 
 def test_32_revisao_a_rotina_ligada_por_padrao_e_desligavel(monkeypatch):

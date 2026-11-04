@@ -77,7 +77,7 @@ import structlog
 from sqlalchemy import select
 
 from app.models import BlingOrder
-from app.services.atendimento import cartoes_plataforma, constantes, ia, validador
+from app.services.atendimento import cartoes_plataforma, constantes, foco_devolucao, ia, validador
 from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento.agente import contexto as agente_ctx
 
@@ -1290,11 +1290,15 @@ def devolucao_de_rotina(
     """A conversa só tem devolução aberta na plataforma SEM nada para a loja decidir e
     o turno do cliente só pergunta o andamento (ver acima)? PURA (fora a chave). Sem
     nenhuma aberta no contexto, não (o cartão e o retrato em devolução sem a reclamação
-    sincronizada continuam com pessoa)."""
+    sincronizada continuam com pessoa). 04/11/2026: com o chat preso no pedido da devolução
+    e o comprador tendo citado OUTRO pedido (`dados.pedido_citado`), ele pode estar falando
+    de outra compra: vai para pessoa."""
     if not rotina_ligada():
         return False
     ctx = ctx if isinstance(ctx, Mapping) else {}
     if getattr(conversa, "plataforma", None) not in ("shopee", "tiktok"):
+        return False
+    if foco_devolucao.citou_outro_pedido(conversa):
         return False
     if (
         getattr(conversa, "canal", None) == constantes.CANAL_RECLAMACAO
@@ -1570,6 +1574,10 @@ def responde_e_marca_do_turno(
         return False
     ctx = ctx if isinstance(ctx, Mapping) else {}
     if getattr(conversa, "plataforma", None) not in ("shopee", "tiktok"):
+        return False
+    # O chat preso no pedido da devolução e o comprador citando outro (04/11/2026,
+    # `foco_devolucao`): a resposta sairia sobre o pedido errado. Vai para pessoa.
+    if foco_devolucao.citou_outro_pedido(conversa):
         return False
     # Item 7 da análise de 31/10–02/11 (o dono, 03/11/2026): a régua nova da devolução já
     # aberta (a disputa, o defeito que é o motivo dela e o "6" sozinho) com a chave das

@@ -10,6 +10,21 @@ import type { OfertaEnvio, TrocaEnvio } from '~/components/AtendimentoTrocaSuges
 const ultimaAtualizacao = new Map<string, number>()
 const TRAVA_MS = 60_000
 
+// Retrato de OUTRO pedido (04/11/2026, devolução da Shopee no chat): o pedido da
+// conversa muda (a devolução prende o foco e, ao encerrar, solta) antes de o
+// retrato ser refeito. Nesse intervalo o painel trata como sem retrato: nunca o
+// nº de um pedido com os itens de outro. Só Shopee: no ML o retrato é do pack e
+// o nº pode diferir sem ser outra compra.
+export function retratoDoPedido<T extends { pedido?: string | null }>(
+  retrato: T | null | undefined,
+  conversa: { plataforma?: string | null; pedido_marketplace?: string | null },
+): T | null {
+  if (!retrato) return null
+  if (conversa.plataforma !== 'shopee') return retrato
+  const pedido = conversa.pedido_marketplace
+  return pedido && retrato.pedido && retrato.pedido !== pedido ? null : retrato
+}
+
 // ─── painel do pedido (01/10/2026, item 3 do Comunicador) ───────────────────
 // GET /api/atendimento/conversas/{id}/painel (routers/atendimento_painel.py):
 // estoque por item, margem (a da aba Margem), Observações do Bling (ao vivo,
@@ -290,6 +305,11 @@ export function situacaoDoSaldo(it: Pick<ItemEstoque, 'existe' | 'saldo' | 'quan
 //   A troca parada no meio com o pedido FORA de 83955 (o PATCH 6 que falhou
 //   deixa o pedido em Atendido) não tem cartão do porquê: vem no
 //   `painel.troca_aberta`, numa faixa própria com o Retomar.
+// - Devolução da Shopee dentro do pedido (04/11/2026; o dono: "o negócio é pra
+//   aquele pedido"): o bloco AtendimentoDevolucaoPedido entre os itens e os
+//   valores, como no Duoke, ou antes do "sem retrato" quando ainda não há
+//   retrato (o bloco não pode sumir junto). Só leitura. Os dados vêm da mesma
+//   resposta do cartão do topo, que encolhe para a linha do título.
 import {
   CheckCircle2,
   ChevronDown,
@@ -344,6 +364,7 @@ import {
   type EventoCliente,
   type PedidoMkt,
 } from '~/components/AtendimentoPlataforma.vue'
+import { ordenarReclamacoes, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
 import type { AcessoGarantia, SituacaoConversa } from '~/lib/garantias'
 import { quemTroca, rotuloEstado, useAcessoDaTroca, type EscolhaTroca } from '~/components/AtendimentoTroca.vue'
 
@@ -383,9 +404,13 @@ const props = withDefaults(defineProps<{
   // "E-mails da venda" (RF1/RF5, 09/10/2026): o `sinalDeEmails` da conversa
   // (AtendimentoEmailVenda). 0 = a conversa não tem e-mail: o bloco não aparece.
   emailsSinal?: number
+  // As reclamações e devoluções (GET /conversas/{id}/reclamacoes, que o cartão
+  // do topo busca). null = ainda não veio (ou falhou): o bloco não aparece.
+  reclamacoes?: ReclamacoesResposta | null
 }>(), {
   cliente: null, leituraAtiva: true, atualizavel: null, painel: null, painelCarregando: false, painelErro: null, avaliacoes: null,
   garantia: null, garantiaCarregando: false, garantiaErro: null, garantiaAcesso: null, emailsSinal: 0,
+  reclamacoes: null,
 })
 const emit = defineEmits<{
   (e: 'fechar'): void
@@ -418,7 +443,7 @@ const aba = ref<Aba>(
     : 'pedido',
 )
 
-const pm = computed(() => props.pedidoMkt)
+const pm = computed(() => retratoDoPedido(props.pedidoMkt, props.conversa))
 const itensPm = computed(() => pm.value?.itens || [])
 const log = computed(() => pm.value?.logistica || null)
 const moeda = computed(() => pm.value?.moeda || 'BRL')
@@ -504,7 +529,7 @@ const numeroMarketplace = computed(() => props.conversa.pedido_marketplace || pm
 const temDavinci = computed(() => !!(pedido.value || logistica.value || notaFiscal.value || chamados.value.length || devolucoes.value.length))
 // Sem retrato (TikTok, Amazon, pedido ainda não buscado) o "No DaVinci" é o
 // que há: começa aberto. Chamado aberto também abre — é aviso importante.
-const davinciAberto = ref(!props.pedidoMkt || chamados.value.length > 0)
+const davinciAberto = ref(!pm.value || chamados.value.length > 0)
 
 // Links para as telas que já existem: Chamados aceita ?search=, Logística
 // aceita ?tab=<plataforma>&q=<busca> (é o que a Ouvidoria já usa).
@@ -588,6 +613,9 @@ const LOG_COR = {
 } as const
 
 const fotosFalhas = reactive(new Set<number>())
+// As fotos falhas são por posição: o item 2 de um pedido não vale para o do outro
+// (o painel não remonta quando o pedido do chat muda: a aba e o diálogo ficam).
+watch(() => props.conversa.pedido_marketplace, () => fotosFalhas.clear())
 
 // ─── linha do tempo do cartão "Cliente" ─────────────────────────────────────
 // Evento do pedido DESTA conversa (compra, envio, entrega, avaliação dele):
@@ -677,6 +705,24 @@ const avaliacoesPainel = computed<AvaliacaoLoja[]>(() =>
 const avaliacoesDoPedido = computed(() => avaliacoesPainel.value.filter((a) => a.do_pedido))
 const avaliacoesAnteriores = computed(() => avaliacoesPainel.value.filter((a) => !a.do_pedido))
 const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) => a.pendente).length)
+
+// ─── devolução dentro do pedido (04/11/2026) ────────────────────────────────
+// Quem decide é o `do_pedido` do backend (a tela não compara nº para decidir).
+// A conferência do nº é só a rede: o detalhe é relido a cada 15 s e as
+// reclamações a cada 2 min, e a devolução de um pedido não pode aparecer no
+// painel do outro enquanto a resposta nova não chega.
+const devolucoesDoPedido = computed(() => ordenarReclamacoes(props.reclamacoes?.itens || [])
+  .filter((r) => r.do_pedido && r.aberta && r.pedido_marketplace === props.conversa.pedido_marketplace))
+const rolagemPainel = ref<HTMLElement | null>(null)
+// O "ver no pedido" do cartão do topo: volta para a aba Pedido e rola até o bloco.
+async function mostrarDevolucao(id: string) {
+  aba.value = 'pedido'
+  await nextTick()
+  const blocos = Array.from(rolagemPainel.value?.querySelectorAll<HTMLElement>('[data-devolucao-pedido]') ?? [])
+  const bloco = blocos.find((b) => b.dataset.devolucaoPedido === id) ?? blocos[0]
+  bloco?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+}
+defineExpose({ mostrarDevolucao })
 </script>
 
 <template>
@@ -704,7 +750,7 @@ const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) =
       </button>
     </div>
 
-    <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain text-sm">
+    <div ref="rolagemPainel" class="min-h-0 flex-1 overflow-y-auto overscroll-contain text-sm">
       <!-- ═══ PEDIDO ═══ -->
       <div v-if="aba === 'pedido'" class="space-y-4 px-3 py-3">
         <!-- Garantia Uranyx: garantias do CPF/pedido, alerta e o Vincular -->
@@ -802,6 +848,15 @@ const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) =
             </li>
           </ul>
 
+          <!-- devolução deste pedido: depois dos itens, antes dos valores (a ordem do Duoke) -->
+          <AtendimentoDevolucaoPedido
+            v-for="r in devolucoesDoPedido"
+            :key="r.id"
+            :r="r"
+            :perfil="pnl?.adspower ?? null"
+            :conversa-id="conversa.id"
+          />
+
           <!-- valores e pagamento -->
           <dl class="grid grid-cols-[1fr_auto] gap-x-3 gap-y-1.5 text-xs">
             <template v-if="pm.valor_pago !== null && pm.valor_pago !== undefined">
@@ -882,18 +937,27 @@ const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) =
           </div>
         </template>
 
-        <!-- sem retrato -->
-        <div v-else class="space-y-2 rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">
-          <Package class="mx-auto size-6 opacity-60" />
-          <div>{{ semRetrato }}</div>
-          <div v-if="numeroMarketplace" class="flex items-center justify-center gap-1 font-mono text-foreground">
-            {{ numeroMarketplace }}
-            <button type="button" class="rounded p-0.5 opacity-60 hover:bg-muted hover:opacity-100" title="copiar nº do pedido" @click="copiarTexto(numeroMarketplace, 'Nº do pedido')"><Copy class="size-3" /></button>
+        <!-- sem retrato (o bloco da devolução não some junto) -->
+        <template v-else>
+          <AtendimentoDevolucaoPedido
+            v-for="r in devolucoesDoPedido"
+            :key="r.id"
+            :r="r"
+            :perfil="pnl?.adspower ?? null"
+            :conversa-id="conversa.id"
+          />
+          <div class="space-y-2 rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">
+            <Package class="mx-auto size-6 opacity-60" />
+            <div>{{ semRetrato }}</div>
+            <div v-if="numeroMarketplace" class="flex items-center justify-center gap-1 font-mono text-foreground">
+              {{ numeroMarketplace }}
+              <button type="button" class="rounded p-0.5 opacity-60 hover:bg-muted hover:opacity-100" title="copiar nº do pedido" @click="copiarTexto(numeroMarketplace, 'Nº do pedido')"><Copy class="size-3" /></button>
+            </div>
+            <button v-if="podeAtualizar" type="button" class="inline-flex items-center gap-1 rounded border bg-background px-2 py-1 text-foreground hover:bg-muted disabled:opacity-50" :disabled="atualizando" @click="atualizar">
+              <RotateCcw class="size-3.5" :class="{ 'animate-spin': atualizando }" /> buscar na plataforma
+            </button>
           </div>
-          <button v-if="podeAtualizar" type="button" class="inline-flex items-center gap-1 rounded border bg-background px-2 py-1 text-foreground hover:bg-muted disabled:opacity-50" :disabled="atualizando" @click="atualizar">
-            <RotateCcw class="size-3.5" :class="{ 'animate-spin': atualizando }" /> buscar na plataforma
-          </button>
-        </div>
+        </template>
 
         <!-- painel do pedido: carregando / falhou -->
         <div v-if="painelCarregando && !pnl" class="flex items-center gap-1.5 text-[11px] text-muted-foreground">

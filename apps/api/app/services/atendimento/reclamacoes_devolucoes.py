@@ -36,6 +36,26 @@ aparecia na caixa. Regras:
     aparece TAMBÉM no chat (o cartão casa pelo pedido) e a linha passa a
     apontar para o chat; a conversa da devolução continua, com a história.
 
+A DEVOLUÇÃO NO CHAT DO COMPRADOR (Shopee, 04/11/2026). O dono: "só quando um
+produto tiver devolução mantém no mesmo chat, caso não, segue igual". O chat da
+Shopee é um por comprador e fica no último pedido citado: o comprador com chat em
+OUTRO pedido não recebia o cartão e ganhava uma segunda conversa. Agora, nesta
+ordem, a principal do caso é: o chat do pedido, o chat do comprador
+(`_chat_do_comprador`), a conversa da devolução. Regras:
+  • com o chat do comprador, a conversa `reclamacao` NÃO nasce; a que já existe
+    continua recebendo as linhas (é a história da aba Reclamação) e a lista a
+    esconde (`foco_devolucao.conversas_da_devolucao_com_chat`);
+  • o chat fica no pedido devolvido enquanto a devolução estiver aberta e, ao
+    encerrar, volta para o último citado: a regra (`gravar.
+    aplicar_foco_da_devolucao`) roda em TODA passada, para o chat principal de
+    cada caso, mesmo sem novidade — uma corrida com o sync se corrige aqui;
+  • para o chat não vai nada da conversa da devolução: nem as linhas do sistema
+    (mudariam a prévia, a ordem e a fila), nem o bloqueio, nem a vez e o prazo
+    da plataforma;
+  • o retrato do pedido (`renovar_retratos`) é pedido depois do commit, com
+    teto por rodada: a sobra entra na rodada seguinte.
+TikTok continua como sempre.
+
 O MOTIVO DO COMPRADOR (02/10/2026). A Logística não guarda o motivo, e o
 `motivo` desta tabela guardava o TIPO de solução ("Devolução + reembolso"),
 não o que o comprador alegou. Agora o tipo vai para `dados.solucao` (o cartão
@@ -52,6 +72,9 @@ produção em 02/10/2026:
     `reason_text` — o rótulo da TikTok, já em português ("Item com defeito",
     "O item não corresponde à descrição"). A `note` (texto livre) NUNCA é
     guardada.
+Da Shopee vem também o valor do reembolso (`refund_amount`, `currency`, para o
+bloco do painel, 04/11/2026). O caso aberto ainda sem ele é relido uma vez, e a
+cada `REVER_VALOR_A_CADA` enquanto a Shopee não o trouxer.
 COTA MÍNIMA: só as ABERTAS novas ou que mudaram de status desde a última
 leitura; no máximo `MAX_LEITURAS_RODADA` chamadas por rodada (as que vão
 ganhar conversa primeiro, depois o prazo mais curto — o resto entra na rodada
@@ -102,7 +125,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -121,7 +144,9 @@ from app.models import (
 from app.services import logistica_rules
 from app.services.atendimento import (
     constantes,
+    enriquecer,
     etiqueta_fatos,
+    foco_devolucao,
     gravar,
     lojas,
     reclamacoes,
@@ -129,19 +154,20 @@ from app.services.atendimento import (
 )
 from app.services.atendimento.constantes import (
     AUTOR_SISTEMA,
+    CANAL_CHAT,
     CANAL_RECLAMACAO,
     CHAVE_PRAZO_LIDO_EM,
     CHAVE_PRAZO_PLATAFORMA,
     CHAVE_VEZ_DA_LOJA,
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
+    FONTE_LOGISTICA,
     RECLAMACAO_TIPO_DEVOLUCAO,
     RECLAMACAO_TIPO_RECLAMACAO,
 )
 
 logger = structlog.get_logger()
 
-FONTE_LOGISTICA = "logistica"
 PLATAFORMAS_LIGADAS = ("shopee", "tiktok")
 MOTIVO_ETIQUETA = "devolução lida pela Logística"
 
@@ -239,6 +265,11 @@ MAX_ERROS_LOJA = 2
 # Leituras do comprador por caso (uma por `RETENTAR_FALHA`): o pedido que a
 # plataforma devolve sem o comprador não é perguntado a cada hora para sempre.
 MAX_TENTATIVAS_COMPRADOR = 3
+# O caso aberto cuja última leitura veio sem o valor do reembolso: de quanto em
+# quanto perguntar de novo (a linha de antes do valor é relida na hora).
+REVER_VALOR_A_CADA = timedelta(hours=24)
+# Retratos do pedido por rodada (`renovar_retratos`); a sobra vai na próxima.
+MAX_RETRATOS_RODADA = 20
 
 # ── A conversa da devolução ───────────────────────────────────────────────
 # Conversas do pedido que NÃO são com o comprador: a da reclamação e a da
@@ -358,6 +389,9 @@ class CasoLogistica:
     acao: str | None = None
     prazo: datetime | None = None
     criada_em: datetime | None = None
+    # O pacote que volta (`rastreio_auto`, `localizacao_auto`): o bloco do painel.
+    rastreio: str | None = None
+    localizacao: str | None = None
 
 
 def tipo_do_caso(caso: CasoLogistica) -> str:
@@ -406,6 +440,18 @@ def motivo_shopee(detalhe: dict | None) -> tuple[str | None, str | None]:
     if not codigo or codigo in _MOTIVOS_VAZIOS:
         return None, None
     return codigo, motivo_legivel(codigo)
+
+
+def reembolso_shopee(detalhe: dict | None) -> tuple[float | None, str | None]:
+    """(valor, moeda) do reembolso no `get_return_detail`. Zero ou ilegível = não se sabe."""
+    bruto = (detalhe or {}).get("refund_amount")
+    try:
+        valor = None if bruto is None or isinstance(bruto, bool) else float(bruto)
+    except (TypeError, ValueError):
+        valor = None
+    if valor is None or not 0 < valor < float("inf"):
+        return None, None
+    return valor, _texto((detalhe or {}).get("currency")) or None
 
 
 def motivo_tiktok(registros: list[dict] | None) -> str | None:
@@ -526,6 +572,8 @@ async def casos_da_logistica(
                 acao=(_texto(dr.acao_auto) or None) if acao_vale(dr, status) else None,
                 prazo=_utc(dr.prazo_acao_auto) if acao_vale(dr, status) else None,
                 criada_em=_utc(dr.devolucao_criada_em) if dr is not None else None,
+                rastreio=(_texto(dr.rastreio_auto) or None) if dr is not None else None,
+                localizacao=(_texto(dr.localizacao_auto) or None) if dr is not None else None,
             )
         )
     return casos
@@ -608,6 +656,25 @@ async def _compradores_do_indice(
     return saida
 
 
+async def _ligadas_ao_chat_do_comprador(
+    session: AsyncSession, linhas: Collection[AtendimentoReclamacao | None]
+) -> set[UUID]:
+    """Das conversas destas linhas, as que são o chat da Shopee que recebe a devolução."""
+    da_shopee = (r for r in linhas if r is not None and r.plataforma == foco_devolucao.PLATAFORMA)
+    ids = sorted({r.conversa_id for r in da_shopee if r.conversa_id}, key=str)
+    saida: set[UUID] = set()
+    for inicio in range(0, len(ids), _LOTE_IN):
+        lote = ids[inicio : inicio + _LOTE_IN]
+        for c in (
+            await session.execute(
+                select(AtendimentoConversa).where(AtendimentoConversa.id.in_(lote))
+            )
+        ).scalars():
+            if foco_devolucao.chat_do_comprador_serve(c, c.integration_id):
+                saida.add(c.id)
+    return saida
+
+
 class _Integracoes:
     """A integração da conta da Logística (o mesmo casamento da Logística), com cache."""
 
@@ -644,6 +711,9 @@ class LeituraCaso:
     motivo_codigo: str | None = None
     # O tipo pelo detalhe (Shopee `return_solution`), quando a Logística não o tem.
     tipo_caso: str | None = None
+    # O valor do reembolso pelo detalhe da Shopee (`refund_amount`, `currency`).
+    valor_reembolso: float | None = None
+    moeda: str | None = None
     motivo_lido: bool = False
     motivo_falhou: bool = False
     comprador_id: str | None = None
@@ -673,13 +743,26 @@ def _comprador_sem_tentativa(dados: dict, agora: datetime) -> bool:
     return quando is None or agora - quando >= reclamacoes.RETENTAR_FALHA
 
 
+def _falta_o_valor(caso: CasoLogistica, dados: dict, agora: datetime) -> bool:
+    """A Shopee ainda deve o valor do reembolso? (04/11/2026, o bloco do painel)
+
+    A linha de antes do valor (sem `valor_lido_em`) é relida na hora; a que já
+    foi lida sem ele, a cada `REVER_VALOR_A_CADA`: em toda rodada, gastaria a
+    cota com quem a Shopee não tem o que dizer."""
+    if caso.plataforma != "shopee" or dados.get("valor_reembolso") is not None:
+        return False
+    quando = reclamacoes.data_ml(dados.get("valor_lido_em"))
+    return quando is None or agora - quando >= REVER_VALOR_A_CADA
+
+
 def quer_motivo(caso: CasoLogistica, linha: AtendimentoReclamacao | None, agora: datetime) -> bool:
-    """Ler o motivo deste caso agora? Só o ABERTO com id na plataforma, novo ou
-    com status mudado desde a última leitura, e sem falha recente."""
+    """Ler o motivo deste caso agora? Só o ABERTO com id na plataforma, novo, com
+    status mudado desde a última leitura ou ainda sem o valor do reembolso
+    (`_falta_o_valor`), e sem falha recente."""
     if caso.return_id is None or not caso_aberto(caso, agora):
         return False
     dados = (linha.dados if linha is not None else None) or {}
-    if dados.get("motivo_lido_status") == caso.status:
+    if dados.get("motivo_lido_status") == caso.status and not _falta_o_valor(caso, dados, agora):
         return False
     return not _motivo_falhou_ha_pouco(dados, caso.status, agora)
 
@@ -722,6 +805,7 @@ async def _ler_motivo(cliente: Any, caso: CasoLogistica, leitura: LeituraCaso) -
         detalhe = await cliente.get_return_detail(caso.return_id)
         leitura.motivo_codigo, leitura.motivo = motivo_shopee(detalhe)
         leitura.tipo_caso = SOLUCAO_DA_SHOPEE.get((detalhe or {}).get("return_solution"))
+        leitura.valor_reembolso, leitura.moeda = reembolso_shopee(detalhe)
     else:
         registros = await cliente.get_return_records_strict(caso.return_id)
         leitura.motivo = motivo_tiktok(registros)
@@ -757,16 +841,29 @@ async def ler_na_plataforma(
     if not abertos:
         return {}
     canais = await _conversas_dos_pedidos(session, abertos)
+    linhas = {
+        (c.plataforma, c.pedido_marketplace): _escolher(
+            existentes.get((c.plataforma, c.pedido_marketplace), []),
+            externo_id_do_caso(c),
+            c.pedido_marketplace,
+        )
+        for c in abertos
+    }
+    no_chat = await _ligadas_ao_chat_do_comprador(session, list(linhas.values()))
     # (caso, vai ganhar conversa, quer o comprador, quer o motivo)
     candidatos: list[tuple[CasoLogistica, bool, bool, bool]] = []
     for caso in abertos:
         chave = (caso.plataforma, caso.pedido_marketplace)
-        linha = _escolher(existentes.get(chave, []), externo_id_do_caso(caso), chave[1])
+        linha = linhas[chave]
         dados = (linha.dados if linha is not None else None) or {}
         # Vai ganhar a conversa da devolução (`_conversa_da_devolucao`): nem
-        # chat com o comprador, nem a conversa da devolução de antes.
+        # chat com o comprador, nem a conversa da devolução de antes. A linha
+        # que já está no chat do comprador (04/11/2026) tem chat, mesmo com ele
+        # em outro pedido: não pergunta o comprador de novo.
         do_pedido = canais.get(chave, {})
-        com_chat = bool(set(do_pedido) - CANAIS_SEM_O_COMPRADOR)
+        com_chat = bool(set(do_pedido) - CANAIS_SEM_O_COMPRADOR) or (
+            linha is not None and linha.conversa_id in no_chat
+        )
         sem_conversa = CANAL_RECLAMACAO not in do_pedido and not com_chat
         # O comprador: da conversa que vai nascer, ou da que nasceu sem ele
         # (com o chat do pedido, o comprador já está nele: não pergunta).
@@ -981,19 +1078,23 @@ async def _conversa_da_devolucao(
     leitura: LeituraCaso | None,
     conversas: list[AtendimentoConversa],
     agora: datetime,
+    tem_chat_do_comprador: bool = False,
 ) -> tuple[AtendimentoConversa | None, bool]:
     """A conversa `reclamacao` do pedido → (conversa, criada). Nasce só para o
-    caso ABERTO sem conversa com o comprador; a que já existe (de um caso
-    anterior do pedido, ou de antes de o chat aparecer) continua sendo
-    escrita. None = o pedido não tem (nem ganha) conversa da devolução."""
+    caso ABERTO sem conversa com o comprador, nem no pedido, nem no chat dele
+    ligado a outro pedido (`tem_chat_do_comprador`, 04/11/2026); a que já existe
+    (de um caso anterior do pedido, ou de antes de o chat aparecer) continua
+    sendo escrita. None = o pedido não tem (nem ganha) conversa da devolução."""
     conversa = next((c for c in conversas if c.canal == CANAL_RECLAMACAO), None)
     criada = False
     if conversa is None:
-        com_o_comprador = [c for c in conversas if e_com_o_comprador(c)]
-        if not aberto or com_o_comprador or integracao is None:
+        com_o_comprador = _chats_do_caso(conversas, caso, aberto)
+        if not aberto or com_o_comprador or tem_chat_do_comprador or integracao is None:
             return None, False
         if leitura is not None and leitura.adiada:
             return None, False  # a cota acabou: nasce na rodada seguinte, completa
+        # O chat fechado do pedido (`_chats_do_caso`): já se sabe quem é o comprador.
+        chat_fechado = next((c for c in conversas if e_com_o_comprador(c) and c.comprador_id), None)
         conversa, criada = await gravar.upsert_conversa(
             session,
             canal=None,
@@ -1002,8 +1103,10 @@ async def _conversa_da_devolucao(
             canal_nome=CANAL_RECLAMACAO,
             externo_id=linha.externo_id,
             conta=await lojas.nome_da_loja(session, integracao) or None,
-            comprador_id=leitura.comprador_id if leitura is not None else None,
-            comprador_nome=leitura.comprador_nome if leitura is not None else None,
+            comprador_id=(leitura.comprador_id if leitura is not None else None)
+            or (chat_fechado.comprador_id if chat_fechado is not None else None),
+            comprador_nome=(leitura.comprador_nome if leitura is not None else None)
+            or (chat_fechado.comprador_nome if chat_fechado is not None else None),
             pedido_marketplace=caso.pedido_marketplace,
             situacao=CONVERSA_BLOQUEADA,
             bloqueio_motivo=bloqueio_so_leitura(caso.plataforma),
@@ -1083,6 +1186,153 @@ async def _conversa_da_devolucao(
     return conversa, criada
 
 
+def _chats_do_caso(
+    conversas: list[AtendimentoConversa], caso: CasoLogistica, aberto: bool
+) -> list[AtendimentoConversa]:
+    """Os chats do pedido que recebem o caso. Com a devolução ABERTA da Shopee, chat FECHADO
+    não conta: ele sai da lista e o caso ficaria invisível. A conversa da devolução nasce e
+    vira a principal; o chat reaberto volta a receber o caso, na passada seguinte."""
+    chats = [c for c in conversas if e_com_o_comprador(c)]
+    if aberto and caso.plataforma == foco_devolucao.PLATAFORMA:
+        return [c for c in chats if c.situacao != CONVERSA_FECHADA]
+    return chats
+
+
+async def _chat_do_comprador(
+    session: AsyncSession,
+    caso: CasoLogistica,
+    linha: AtendimentoReclamacao,
+    aberto: bool,
+    integracao: Integration | None,
+    leitura: LeituraCaso | None,
+    conversas: list[AtendimentoConversa],
+) -> AtendimentoConversa | None:
+    """O chat do COMPRADOR, ligado a outro pedido, para o caso sem chat próprio (04/11/2026).
+
+    Só Shopee, a mesma loja, o canal chat, fora o de afiliado, não fechado
+    (`foco_devolucao.chat_do_comprador_serve`). Primeiro o chat em que a linha já
+    está: o vínculo sobrevive ao chat que muda de pedido e ao índice que não tem
+    o pedido. Caso encerrado sem conversa `reclamacao` para aí: sem devolução
+    aberta, nada muda — o caso velho não vai parar num chat em que nunca esteve.
+    Com ela, segue: a lista a esconde, e o histórico precisa de um caminho.
+    Depois, pelo índice de pedidos do comprador (`conversas_do_comprador_do_pedido`); como o índice
+    depende de um job de hora em hora, com reserva pelo comprador lido na
+    plataforma e pelo da conversa `reclamacao` de antes. Não escreve nada.
+    """
+    if caso.plataforma != foco_devolucao.PLATAFORMA:
+        return None
+    integration_id = integracao.id if integracao is not None else linha.integration_id
+    if integration_id is None:
+        return None
+    if linha.conversa_id is not None:
+        ligada = await session.get(AtendimentoConversa, linha.conversa_id)
+        if ligada is not None and foco_devolucao.chat_do_comprador_serve(ligada, integration_id):
+            return ligada
+    if not aberto and not any(c.canal == CANAL_RECLAMACAO for c in conversas):
+        return None
+    for chat in await etiqueta_fatos.conversas_do_comprador_do_pedido(
+        session, caso.pedido_marketplace
+    ):
+        if foco_devolucao.chat_do_comprador_serve(chat, integration_id):
+            return chat
+    da_devolucao = next((c for c in conversas if c.canal == CANAL_RECLAMACAO), None)
+    reservas = (
+        leitura.comprador_id if leitura is not None else None,
+        da_devolucao.comprador_id if da_devolucao is not None else None,
+    )
+    for comprador in dict.fromkeys(_texto(r) for r in reservas if _texto(r)):
+        chats = await session.execute(
+            select(AtendimentoConversa)
+            .where(
+                AtendimentoConversa.plataforma == foco_devolucao.PLATAFORMA,
+                AtendimentoConversa.canal == CANAL_CHAT,
+                AtendimentoConversa.integration_id == integration_id,
+                AtendimentoConversa.comprador_id == comprador,
+            )
+            .order_by(
+                AtendimentoConversa.ultima_mensagem_em.desc().nulls_last(),
+                AtendimentoConversa.created_at.desc(),
+            )
+        )
+        for chat in chats.scalars():
+            if foco_devolucao.chat_do_comprador_serve(chat, integration_id):
+                return chat
+    return None
+
+
+def _retrato_do_pedido(conversa: AtendimentoConversa) -> str | None:
+    """De que pedido é o retrato guardado na conversa; None = sem retrato."""
+    retrato = (conversa.dados or {}).get(enriquecer.CHAVE_PEDIDO)
+    if not isinstance(retrato, dict) or not retrato:
+        return None
+    return _texto(retrato.get("pedido")) or ""
+
+
+def _quer_retrato(conversa: AtendimentoConversa, caso: CasoLogistica, aberto: bool) -> bool:
+    """A conversa principal do caso precisa do retrato do pedido dela? PURA.
+
+    O chat que o foco levou ou tirou do pedido com o retrato de OUTRO pedido;
+    e, com o caso aberto, o chat em foco e a conversa `reclamacao` sem chat ainda
+    sem retrato nenhum.
+    """
+    if caso.plataforma != "shopee" or not (
+        foco_devolucao.vale_para(conversa) or conversa.canal == CANAL_RECLAMACAO
+    ):
+        return False
+    pedido = _texto(conversa.pedido_marketplace)
+    if not pedido:
+        return False
+    do_retrato = _retrato_do_pedido(conversa)
+    if do_retrato is not None:
+        return do_retrato != pedido
+    return aberto and pedido == caso.pedido_marketplace
+
+
+async def renovar_retratos(
+    session: AsyncSession,
+    pendentes: Collection[UUID],
+    *,
+    fabrica_cliente: FabricaCliente | None,
+) -> int:
+    """O retrato das conversas que `ligar_devolucoes` juntou → quantas ganharam. Depois do commit.
+
+    Sem o retrato do pedido em foco, o painel fica sem itens: `enriquecer_canal`
+    olha só o tempo, e a leitura do chat sai antes de enriquecer quando não há
+    mensagem nova. Pelo caminho de sempre (`enriquecer_conversa`, sem forçar: o
+    carimbo de falha é respeitado), um commit por conversa (`gravar.fim_do_item`),
+    com o teto da rodada (`MAX_RETRATOS_RODADA`); a sobra entra na rodada seguinte,
+    que junta as pendentes de novo. A trava é a dele: só depois da ida à loja.
+    Só GET. NUNCA levanta: o retrato é enfeite, o cron já gravou o que importa.
+    """
+    if not pendentes or fabrica_cliente is None:
+        return 0
+    feitos = 0
+    cota = enriquecer.Cota(restam=MAX_RETRATOS_RODADA)
+    leitores = _Leitores(fabrica_cliente)
+    for conversa_id in sorted(pendentes, key=str):
+        if not cota.tem():
+            break
+        try:
+            conversa = await session.get(AtendimentoConversa, conversa_id, populate_existing=True)
+            if conversa is None or conversa.integration_id is None:
+                continue
+            integ = await session.get(Integration, conversa.integration_id)
+            cliente = await leitores.de(integ) if integ is not None else None
+            if cliente is None:
+                continue
+            if await enriquecer.enriquecer_conversa(session, conversa, integ, cliente, cota=cota):
+                feitos += 1
+            await gravar.fim_do_item(session)
+        except Exception as exc:  # noqa: BLE001 — ver docstring
+            logger.warning(
+                "atendimento_devolucao_retrato_falhou",
+                conversa_id=str(conversa_id),
+                err=type(exc).__name__,
+            )
+            await session.rollback()
+    return feitos
+
+
 async def ligar_caso(
     session: AsyncSession,
     caso: CasoLogistica,
@@ -1153,6 +1403,12 @@ async def ligar_caso(
             "motivo_lido_status": caso.status,
             "motivo_falhou": None,
         }
+        if caso.plataforma == "shopee":
+            # O valor já lido não some com a releitura que volta sem ele.
+            lido["valor_lido_em"] = _iso(agora)
+            if leitura.valor_reembolso is not None:
+                lido["valor_reembolso"] = leitura.valor_reembolso
+                lido["moeda"] = leitura.moeda
     if leitura is not None and leitura.motivo:
         alvo.motivo = leitura.motivo
     elif _motivo_legado(alvo):
@@ -1172,6 +1428,15 @@ async def ligar_caso(
         if aberto and caso.acao
         else None
     )
+    # O pacote que volta (o bloco do painel): sem o rastreio de agora, fica o de antes.
+    volta = (
+        {
+            "rastreio_volta": caso.rastreio or anteriores.get("rastreio_volta"),
+            "situacao_volta": caso.localizacao or anteriores.get("situacao_volta"),
+        }
+        if caso.plataforma == "shopee"
+        else {}
+    )
     alvo.dados = {
         **anteriores,
         "fonte": FONTE_LOGISTICA,
@@ -1185,6 +1450,7 @@ async def ligar_caso(
         "acao_texto": acao_texto,
         "status_texto": status_tela(caso.plataforma, caso.status, tipo_caso),
         "mudou_em": _iso(caso.mudou_em),
+        **volta,
         **lido,
     }
     await session.flush()
@@ -1192,18 +1458,49 @@ async def ligar_caso(
     conversas = await etiqueta_fatos.conversas_do_pedido(
         session, caso.plataforma, caso.pedido_marketplace
     )
+    # O chat com o comprador: o do pedido ou, sem ele, o do comprador ligado a
+    # outro pedido (Shopee, 04/11/2026, ver o topo).
+    com_o_comprador = _chats_do_caso(conversas, caso, aberto)
+    do_comprador = (
+        None
+        if com_o_comprador
+        else await _chat_do_comprador(session, caso, alvo, aberto, integracao, leitura, conversas)
+    )
     da_devolucao, conversa_criada = await _conversa_da_devolucao(
-        session, caso, alvo, aberto, integracao, leitura, conversas, agora
+        session,
+        caso,
+        alvo,
+        aberto,
+        integracao,
+        leitura,
+        conversas,
+        agora,
+        tem_chat_do_comprador=do_comprador is not None,
     )
     # A conversa principal do pedido: a do chat com o comprador; sem chat, a
     # da devolução (o cartão aparece nas duas, pelo pedido). Nunca a conversa
     # de e-mail da ponte (`separa_email`, aba E-mail): só com ela, a linha
     # fica sem conversa (ou com a de antes).
-    com_o_comprador = [c for c in conversas if e_com_o_comprador(c)]
     da_caixa = (c for c in conversas if not separa_email.e_conversa_de_email(c))
-    principal = com_o_comprador[0] if com_o_comprador else da_devolucao or next(da_caixa, None)
+    principal = (
+        com_o_comprador[0]
+        if com_o_comprador
+        else do_comprador or da_devolucao or next(da_caixa, None)
+    )
     if principal is not None:
         alvo.conversa_id = principal.id
+    # A conversa da devolução que nasceu sem o comprador: ele já é conhecido pelo chat.
+    # Sem o comprador nela, a lista nunca a esconde e o caso fica em duas linhas.
+    if (
+        da_devolucao is not None
+        and principal is not da_devolucao
+        and not da_devolucao.comprador_id
+        and principal is not None
+        and foco_devolucao.vale_para(principal)
+        and principal.comprador_id
+        and await gravar.travar_linha(session, da_devolucao)
+    ):
+        da_devolucao.comprador_id = principal.comprador_id
     await session.flush()
     # A Logística guarda UM caso por pedido: o que era o caso de antes e
     # ainda estava aberto aqui acabou (foi substituído pelo atual).
@@ -1214,7 +1511,80 @@ async def ligar_caso(
         outra.prazo_em = None
         outra.dados = {**(outra.dados or {}), "substituida_por": externo_id}
     await session.flush()
+    # O foco roda em TODA passada, mesmo sem novidade, e depois de encerrar o
+    # caso substituído: o chat fica no pedido devolvido ou volta para o citado.
+    if principal is not None:
+        await gravar.aplicar_foco_da_devolucao(session, principal, agora=agora)
     return alvo, criada, criada or antes != _retrato(alvo), conversa_criada
+
+
+async def _soltar_focos_sem_caso(
+    session: AsyncSession,
+    casos: Collection[CasoLogistica],
+    agora: datetime,
+    retratos_pendentes: set[UUID] | None,
+) -> int:
+    """Os chats presos no pedido de um caso que o cron não visita mais → quantos mudaram.
+
+    `ligar_caso` só passa no caso que está na Logística, e a faxina dela apaga a
+    linha quando o Bling finaliza o pedido, sem olhar a devolução. Sem esta volta,
+    o chat segue no pedido devolvido e a linha aberta para sempre. Só os chats com
+    `dados.pedido_citado` (os que o foco tirou de outro pedido): encerra a linha que
+    saiu da Logística e volta o chat para o citado. As linhas sem chat preso ficam
+    como estão: encerrá-las é escrita em massa, decisão do dono.
+    """
+    vivos = {c.pedido_marketplace for c in casos if c.plataforma == foco_devolucao.PLATAFORMA}
+    chats = (
+        await session.execute(
+            select(AtendimentoConversa).where(
+                AtendimentoConversa.plataforma == foco_devolucao.PLATAFORMA,
+                AtendimentoConversa.canal == CANAL_CHAT,
+                AtendimentoConversa.dados.has_key(foco_devolucao.CHAVE_PEDIDO_CITADO),
+            )
+        )
+    ).scalars().all()
+    mudaram = 0
+    for chat in chats:
+        try:
+            async with session.begin_nested():
+                linhas = (
+                    await session.execute(
+                        select(AtendimentoReclamacao).where(
+                            AtendimentoReclamacao.conversa_id == chat.id,
+                            AtendimentoReclamacao.plataforma == foco_devolucao.PLATAFORMA,
+                            AtendimentoReclamacao.encerrada_em.is_(None),
+                        )
+                    )
+                ).scalars().all()
+                orfas = [
+                    r
+                    for r in linhas
+                    if r.pedido_marketplace not in vivos
+                    and (r.dados or {}).get("fonte") == FONTE_LOGISTICA
+                ]
+                for linha in orfas:
+                    linha.encerrada_em = agora
+                    linha.prazo_em = None
+                    linha.dados = {**(linha.dados or {}), "saiu_da_logistica_em": _iso(agora)}
+                await session.flush()
+                mudou = await gravar.aplicar_foco_da_devolucao(session, chat, agora=agora)
+                if orfas:
+                    await reclamacoes.recalcular_etiquetas(
+                        session, [chat], motivo=MOTIVO_ETIQUETA, agora=agora
+                    )
+                if mudou:
+                    mudaram += 1
+                    if retratos_pendentes is not None and (
+                        _retrato_do_pedido(chat) != _texto(chat.pedido_marketplace)
+                    ):
+                        retratos_pendentes.add(chat.id)
+        except Exception as exc:  # noqa: BLE001 — um chat não derruba os outros
+            logger.warning(
+                "atendimento_devolucao_soltar_foco_falhou",
+                conversa_id=str(chat.id),
+                err=type(exc).__name__,
+            )
+    return mudaram
 
 
 async def ligar_devolucoes(
@@ -1224,6 +1594,7 @@ async def ligar_devolucoes(
     pedidos: Collection[str] | None = None,
     commit_a_cada: int | None = None,
     fabrica_cliente: FabricaCliente | None = None,
+    retratos_pendentes: set[UUID] | None = None,
 ) -> dict:
     """Liga as devoluções/disputas de Shopee e TikTok da Logística ao atendimento.
 
@@ -1234,6 +1605,8 @@ async def ligar_devolucoes(
     `fabrica_cliente` liga a leitura do motivo e do comprador na plataforma
     (só GET, com cota — ver o topo); sem ela nada sai para a plataforma. Não
     commita, a não ser com `commit_a_cada` (commit a cada N casos gravados).
+    `retratos_pendentes` junta as conversas que precisam do retrato do pedido:
+    quem chama passa em `renovar_retratos` DEPOIS do commit (04/11/2026).
     Devolve as contagens.
     """
     agora = agora or _agora()
@@ -1284,9 +1657,25 @@ async def ligar_devolucoes(
                     resumo["ligadas"] += 1
                 if conversa_criada:
                     resumo["conversas_novas"] += 1
+                # A conversa da linha: pode ser o chat do comprador, que a
+                # busca pelo pedido não acha (Shopee, 04/11/2026).
+                ligada = (
+                    await session.get(AtendimentoConversa, linha.conversa_id)
+                    if caso.plataforma == foco_devolucao.PLATAFORMA and linha.conversa_id
+                    else None
+                )
+                if (
+                    retratos_pendentes is not None
+                    and ligada is not None
+                    and _quer_retrato(ligada, caso, linha.encerrada_em is None)
+                ):
+                    retratos_pendentes.add(ligada.id)
                 if mudou:
                     alvo = await reclamacoes.conversas_para_etiqueta(
-                        session, caso.plataforma, [caso.pedido_marketplace]
+                        session,
+                        caso.plataforma,
+                        [caso.pedido_marketplace],
+                        extra=[ligada] if ligada is not None else (),
                     )
                     resumo["etiquetas"] += await reclamacoes.recalcular_etiquetas(
                         session, alvo, motivo=MOTIVO_ETIQUETA, agora=agora
@@ -1303,5 +1692,10 @@ async def ligar_devolucoes(
             continue
         if commit_a_cada and gravados and gravados % commit_a_cada == 0:
             await session.commit()
+    # Só na passada completa e com a Logística lida: sem casos, nada prova que saíram de lá.
+    if pedidos is None and casos:
+        resumo["focos_soltos"] = await _soltar_focos_sem_caso(
+            session, casos, agora, retratos_pendentes
+        )
     logger.info("atendimento_devolucoes_ligadas", **resumo)
     return resumo
