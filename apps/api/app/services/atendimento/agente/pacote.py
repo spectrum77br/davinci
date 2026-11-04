@@ -523,6 +523,12 @@ _LOCAL_DEPOIS = re.compile(
 _UF_NO_FIM = re.compile(r"\s*[-–]\s*[A-Z]{2}\s*$")
 
 
+def _sem_tudo_certo(texto: str) -> str:
+    """Sem o "Está tudo certo" do começo do evento da Shopee (ver `_TUDO_CERTO_DO_EVENTO`)."""
+    sem_certo = _TUDO_CERTO_DO_EVENTO.sub("", texto)
+    return sem_certo if sem_certo == texto else sem_certo[:1].upper() + sem_certo[1:]
+
+
 def status_sem_cidade(status: str | None) -> str | None:
     """O último status da transportadora sem cidade nem UF. PURA."""
     if not status:
@@ -530,6 +536,7 @@ def status_sem_cidade(status: str | None) -> str | None:
     texto = " ".join(str(status).split())
     if "—" in texto:
         texto = texto.rsplit("—", 1)[1]
+    texto = _sem_tudo_certo(texto.strip())
     texto = _SETA.sub("", texto)
     texto = _UF_NO_FIM.sub("", texto)
     if m := _LOCAL_DEPOIS.match(texto):
@@ -554,14 +561,20 @@ _AINDA_TEM_LUGAR = re.compile(r"\s[-–]\s*[A-Z]{2}\b|/[A-Z]{2}\b|:\s*[A-ZÀ-Ý]
 # A palavra com maiúscula que não começa frase é nome próprio (cidade, bairro, pessoa) —
 # menos os da própria logística.
 _NOMES_DA_LOGISTICA = frozenset({"shopee", "spx", "xpress", "express", "correios", "j&t"})
+_TUDO_CERTO_DO_EVENTO = re.compile(
+    r"^\s*est[aá]\s+tudo\s+certo(?:\s+com\s+o\s+seu\s+pedido)?\s*[,.!:;–-]*\s*(?:ele\s+)?",
+    re.IGNORECASE,
+)
 
 
 def status_do_evento_sem_cidade(texto: str | None) -> str | None:
     """O texto do último evento do retrato sem o lugar (ver acima); None se sobrar cara
-    de lugar ou de nome próprio — nunca vai ao modelo pela metade. PURA."""
+    de lugar ou de nome próprio — nunca vai ao modelo pela metade. PURA. Sem o "Está tudo
+    certo" da Shopee: o modelo repetia com o rastreio parado há 11 dias (40a0d370, 04/11)."""
     if not isinstance(texto, str) or not texto.strip():
         return None
     limpo = " ".join(_LUGAR_DO_EVENTO.sub(" ", " ".join(texto.split())).split())
+    limpo = _sem_tudo_certo(limpo)
     limpo = re.sub(r"\s+([,.;:!?])", r"\1", limpo).strip(" -–,;:")
     if not limpo or _AINDA_TEM_LUGAR.search(limpo):
         return None

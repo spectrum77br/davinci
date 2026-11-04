@@ -221,6 +221,15 @@ _MOTIVO_EMAIL = "contato fora da loja (e-mail)"
 _MOTIVO_PERFIL = "contato fora da loja (@perfil)"
 _MOTIVO_REDE = "contato fora da loja (rede social)"
 _MOTIVO_LINK = "link"
+# "Não enviamos link de pagamento, cuidado com golpes" é outra coisa, e está certa.
+_NEGA_LINK = re.compile(
+    r"\bnao\s+(?:\w+\s+){0,3}?(?:enviar|mandar|passar|compartilhar|enviamos|mandamos|passamos"
+    r"|compartilhamos|envio|mando)\s+(?:\w+\s+){0,2}?links?\b"
+    r"(?!\s+(?:de\s+pagamento|suspeito|externo|por\s+fora))"
+    r"|\blinks?\s+(?:\w+\s+){0,3}?nao\s+(?:\w+\s+){0,2}?(?:permitid|aceit|pode|podem|enviad|mandad)\w*"
+    r"|\bnao\s+(?:permite|aceita)m?\s+(?:\w+\s+){0,2}?links?\b"
+    r"(?!\s+(?:de\s+pagamento|suspeito|externo|por\s+fora))"
+)
 _MOTIVO_PIX = "pagamento fora da plataforma (PIX)"
 _MOTIVO_BANCO = "pagamento fora da plataforma (conta bancária)"
 _MOTIVO_POR_FORA = "negociação fora da plataforma"
@@ -985,6 +994,10 @@ def validar(
         if not zap and origem != ORIGEM_HUMANO:
             motivos.append(_MOTIVO_LINK)
         plano = _apagar(_LINK, plano)
+    # O agente não manda link, mas não pode dizer que a loja não manda: a equipe manda
+    # (04/11/2026, 76417da4: "Não enviamos links por aqui", com a cliente sem achar o anúncio).
+    if not zap and origem != ORIGEM_HUMANO and _NEGA_LINK.search(plano):
+        motivos.append(_MOTIVO_LINK)
     if not zap:
         if _algum(_TELEFONE, plano):
             motivos.append(_MOTIVO_TELEFONE)
@@ -2540,7 +2553,12 @@ def _motivo_da_promessa(frase: str, plano: str, garantias: list[dict]) -> str | 
 # estoque", "…garantir que continue disponível até amanhã", "…garantir a cor")
 # — o verbo só fala de garantia com o aparelho, o defeito ou a cobertura.
 _GARANTIR_A_ENTREGA = re.compile(
-    r"\bgarantir\s+(?:a\s+entrega|o\s+prazo|a\s+data|a\s+chegada|que\s+(?:chegue|chega|chegara"
+    # Sem o artigo (b2153054), só com a negação: "podemos garantir entrega" é promessa.
+    r"\bnao\s+(?:\w+\s+){0,2}?garantir\s+(?:entrega|prazo|data)\b"
+    r"(?!\s+(?:\w+\s+){0,4}?(?:defeito|aparelho|assistencia|conserto|reparo|troca|garantia"
+    r"|cobert\w*|peca)\b)"
+    r"|\bgarantir\s+(?:a\s+entrega|o\s+prazo|a\s+data|a\s+chegada"
+    r"|que\s+(?:chegue|chega|chegara"
     r"|sera\s+entregue|seja\s+entregue|o\s+pedido|a\s+entrega|o\s+envio))\b"
     r"|\bgarant(?:ir|imos|e|o)\s+(?:a\s+|o\s+|as\s+|os\s+|essa\s+|esse\s+)?(?:estoque|disponibilidade"
     r"|cor|cores|variac\w+|quantidade|unidades?|reposicao|preco|valor|frete|horario|postagem"

@@ -171,7 +171,9 @@ DESCRICOES: dict[str, str] = {
     BUSCAR_ANUNCIOS_DA_LOJA: (
         "Os anúncios DESTA loja (mesma plataforma) cujo título ou variação casa com o termo: "
         "outro produto, acessório ou modelo que o cliente quer comprar ou saber se a loja "
-        "vende (outro modelo, capa, película, carregador, cesto ou vidro avulso). Cada um: "
+        "vende (outro modelo, capa, película, carregador, cesto ou vidro avulso), ou que "
+        "tenha o recurso que o produto da conversa não tem ('NFC', '5G', '512 GB', "
+        "'expansivel'). Cada um: "
         "item_id, nome_curto, variacoes_casadas, disponivel (true = à venda e disponível; "
         "false = esgotado; null = não se sabe) e da_conversa. Termo curto, só o produto "
         "('cesto de vidro 4 litros', 'capa A18', 'Doogee Fire 7 Ultra'). Para dizer que a "
@@ -182,7 +184,20 @@ DESCRICOES: dict[str, str] = {
         "vazia do termo inteiro não prova: busque de novo, mais curto); modelo ou versão que "
         "a busca não achou: pergunte qual é ou encaminhe, nunca 'não temos'. Não prova "
         "característica: para isso, ver_anuncio (e o de outro anúncio nunca vale para o "
-        "produto da conversa)."
+        "produto da conversa). "
+        # O dono (04/11/2026): "esse produto não tem, mas o produto Y tem, que temos". Em 49
+        # "não" de NFC em 30 dias, a equipe ofereceu outro produto em 16; o agente, em nenhum.
+        # Aqui, e não no bloco 2, que está no teto.
+        "Recurso que o produto da conversa não tem (NFC, 5G, memória maior, zíper expansivo), "
+        "antes da compra: diga que este não tem e busque o recurso aqui ('NFC', 'expansivel'); "
+        "abra até 2 com ver_anuncio e indique só o que a ficha confirma, com disponivel=true "
+        "(anúncio de vários modelos: só o modelo da variação), citando ficha:<id> e "
+        "anuncio:<id>: 'Este não tem NFC, mas temos o <nome>, que tem; aparece na página da "
+        "loja no app, pelo nome.' Isto não é emendar outro assunto nem motivo de pessoa, mesmo "
+        "com o Manual encaminhando. Sem confirmar: diga só que este não tem. Com pedido, "
+        "reclamação ou defeito: só se o cliente pedir outro. Pedido de link: oriente buscar "
+        "pelo nome, sem dizer que não envia link; quem já buscou e não achou ou insiste: acao "
+        "'pessoa' (dado_indisponivel), com anuncio:<id> no motivo."
     ),
 }
 # O pedido da conversa sai como lacuna: a `conferir_saida` preenche.
@@ -1395,10 +1410,13 @@ def _prontas_sem_espera(prontas: list[dict]) -> list[dict]:
 
     As "(sugestão para pessoa)" do manual base trazem a espera ("Nossa equipe
     vai verificar … e responde por aqui"): o agente recebe o resto
-    (`checagens.sem_frases_de_espera`), como na resposta que ele escreve.
+    (`checagens.sem_frases_de_espera`), como na resposta que ele escreve. A que nega o link
+    ("Não enviamos links por aqui", em produção) não vai ao agente (04/11/2026, 76417da4).
     """
     saida: list[dict] = []
     for p in prontas:
+        if validador._NEGA_LINK.search(validador.plano_de(p["texto"])):
+            continue
         texto = checagens.sem_frases_de_espera(p["texto"])
         if texto != p["texto"] and (
             not texto.strip() or checagens.so_cortesia_ou_recebimento(texto)

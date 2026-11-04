@@ -502,19 +502,18 @@ async def test_a_caixa_ou_o_produto_que_nao_veio_nao_some_na_nf(
     assert plataforma == []
 
 
-async def test_o_agradecimento_no_turno_segura_a_nf_como_outro_assunto(
+async def test_o_agradecimento_no_turno_nao_segura_a_nf_como_outro_assunto(
     db, make_user, ligado, plataforma
 ):
-    """Revisão da revisão de 03/11 (vortan d5bab3f3, Jlas 8963e116): o texto passa, mas a pista
-    "agradecimento" do turno vira `nf:outro_assunto` antes — dos 12 ganhos medidos só no texto,
-    10 passam também as pistas (4 nas lojas no automático)."""
+    """04/11/2026 (9be5a62b): a pista "agradecimento" não é assunto em lugar nenhum
+    (`ia.pistas_alem_do_assunto`); segurava 5 rascunhos de NF em 30 dias."""
     texto = "Boa noite., não deixe de mandar a nota fiscal,por favor.,agradecido."
     assert nf_automatica.pedido_claro([texto]) is True
     conversa, gatilho = await _cenario(db, make_user, texto=texto)
     r = await _rascunho_com_as_pistas_reais(db, conversa, gatilho)
     assert "agradecimento" in (r.fatos or {})["agente"]["pistas_turno"]
     await ia._talvez_enviar(db, conversa, r)
-    assert _decisao(r) == "nf:outro_assunto" and plataforma == []
+    assert _decisao(r) != "nf:outro_assunto"
 
 
 async def test_a_nf_nunca_sai_duas_vezes_na_conversa(db, make_user, ligado, plataforma):

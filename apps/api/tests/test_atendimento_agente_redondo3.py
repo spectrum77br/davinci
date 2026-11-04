@@ -927,3 +927,47 @@ async def test_a1_o_conteudo_da_caixa_nao_e_g1(texto):
         fichas=[FICHA_A17],
     )
     assert not _g1(r), r.codigos
+
+
+# ── 04/11/2026: anúncio fora de venda e a oferta do recurso que falta ─────────
+
+
+def _vinculo_status(status: str | None, estoque: int = 5) -> catalogo.Vinculo:
+    return catalogo.Vinculo(
+        item_id="1",
+        variation_id=None,
+        titulo="Uranyx A18 NFC",
+        estoque=estoque,
+        sincronizado=True,
+        anuncio_status=status,
+    )
+
+
+@pytest.mark.parametrize(
+    "status,esperado",
+    [
+        ("active", True),
+        (None, True),  # Shopee, TikTok: o status não vem; vale o estoque
+        ("paused", None),
+        ("under_review", None),
+        ("inactive", None),
+    ],
+)
+def test_anuncio_fora_de_venda_nao_e_oferecido_como_disponivel(status, esperado):
+    assert catalogo.disponivel([_vinculo_status(status)]) is esperado
+
+
+def test_anuncio_pausado_sem_estoque_segue_esgotado():
+    assert catalogo.disponivel([_vinculo_status("paused", estoque=0)]) is False
+
+
+def test_um_vinculo_a_venda_basta_para_o_anuncio_estar_disponivel():
+    assert catalogo.disponivel([_vinculo_status("paused"), _vinculo_status("active")]) is True
+
+
+def test_a_ferramenta_manda_procurar_outro_produto_com_o_recurso_e_confirmar_na_ficha():
+    texto = ferramentas.DESCRICOES[ferramentas.BUSCAR_ANUNCIOS_DA_LOJA]
+    assert "ver_anuncio" in texto and "disponivel=true" in texto
+    assert "antes da compra" in texto
+    assert "Com pedido, reclamação ou defeito" in texto
+    assert "sem dizer que não envia link" in texto

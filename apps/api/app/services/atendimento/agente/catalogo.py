@@ -61,8 +61,13 @@ MAX_CHARS_NOME_VARIACAO = 60
 MAX_CHARS_TERMO = 80
 MAX_CHARS_NOME_CURTO = 60
 MAX_PALAVRAS_NOME_CURTO = 8
-# Os vínculos lidos por busca (a Kia tem ~280 vivos na Shopee).
-MAX_VINCULOS = 2_000
+# Os vínculos lidos por busca (a Kia tem ~280 vivos na Shopee; forpaper, marquezini e
+# kfa têm ~3.000 no ML, e o corte é por id, sem avisar: a busca não acharia o resto).
+MAX_VINCULOS = 5_000
+# O status do anúncio que está à venda. Só o ML grava (34% dos vínculos vivos do ML estão
+# pausados ou em revisão, com estoque); sem status, vale o estoque, como sempre.
+ANUNCIO_A_VENDA = frozenset({"active"})
+STATUS_NAO_LIDO = "nao_lido"
 
 # ── As palavras ───────────────────────────────────────────────────────────
 
@@ -397,6 +402,9 @@ _UNIDADE = re.compile(
 _ESPEC = re.compile(r"^\d+(?:[.,/]\d+)+[a-z]*$|^\d+(?:gb|tb|mb|g|w|v|mah|l|ml|mm|cm|kg|hz|mp)$")
 
 
+_PREFIXO_DO_TITULO = re.compile(r"^\s*(?:caap|cappa)\s*\*+\s*", re.IGNORECASE)
+
+
 def nome_curto(titulo: str) -> str:
     """Marca e modelo do título, sem garantia, condição nem especificação. PURA.
 
@@ -404,11 +412,15 @@ def nome_curto(titulo: str) -> str:
     "Doogee Fire 6 Power 20.256 GB - - Resistente…" → "Doogee Fire 6 Power";
     "AirFryer Fritadeira Digital 4 Litros Tigela de Vidro…" → "AirFryer Fritadeira Digital".
     """
-    tokens = str(titulo or "").split()
+    # O prefixo "Caap **"/"Cappa **" de ~1.500 títulos do ML não é nome (04/11/2026: a oferta
+    # pública sairia "temos o Caap, que tem").
+    tokens = _PREFIXO_DO_TITULO.sub("", str(titulo or "")).split()
     saida: list[str] = []
     for i, bruto in enumerate(tokens):
         p = plano_de(bruto).strip(".,;:!()[]*")
         seguinte = plano_de(tokens[i + 1]).strip(".,;:!()[]*") if i + 1 < len(tokens) else ""
+        if not p and not saida:
+            continue
         if not p or p in _FIM_DO_NOME or _ESPEC.match(p):
             break
         if p.isdigit() and _UNIDADE.match(seguinte):
@@ -429,14 +441,20 @@ class Vinculo:
     titulo: str
     estoque: int | None
     sincronizado: bool
+    anuncio_status: str | None = None
+
+
+def _a_venda(v: Vinculo) -> bool:
+    status = str(v.anuncio_status or "").strip().lower()
+    return not status or status in ANUNCIO_A_VENDA
 
 
 def disponivel(vinculos: Sequence[Vinculo]) -> bool | None:
-    """Algum com estoque > 0 e a sincronização ok → True; todos com estoque 0 → False;
-    o resto → None. PURA."""
+    """Algum à venda com estoque > 0 e a sincronização ok → True; todos com estoque 0 →
+    False; o resto (o pausado com estoque, por exemplo) → None. PURA."""
     if not vinculos:
         return None
-    if any((v.estoque or 0) > 0 and v.sincronizado for v in vinculos):
+    if any((v.estoque or 0) > 0 and v.sincronizado and _a_venda(v) for v in vinculos):
         return True
     if all(v.estoque == 0 for v in vinculos):
         return False
@@ -557,6 +575,7 @@ async def vinculos_da_loja(
                 ProductLink.listing_title,
                 ProductLink.stock,
                 ProductLink.last_sync_status,
+                ProductLink.anuncio_status,
             )
             .where(
                 ProductLink.integration_id == integration_id,
@@ -580,6 +599,9 @@ async def vinculos_da_loja(
                 titulo=str(linha.listing_title),
                 estoque=linha.stock,
                 sincronizado=linha.last_sync_status == LinkSyncStatus.OK,
+                # No ML o status vazio é "não lido", não "sem status": não oferece.
+                anuncio_status=linha.anuncio_status
+                or (STATUS_NAO_LIDO if str(plataforma).endswith("ml") else None),
             )
         )
     return saida

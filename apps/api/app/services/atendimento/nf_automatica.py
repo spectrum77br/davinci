@@ -1143,6 +1143,8 @@ def motivo_do_rascunho(rascunho: Any) -> str | None:
     aviso, sem pista de outro assunto, sem checagem pendente, e o `sem_auto`
     só com a ação da NF.
     """
+    from app.services.atendimento import ia
+
     if not candidato(rascunho):
         return "outra_acao"
     if getattr(rascunho, "categoria", None) != CATEGORIA:
@@ -1153,7 +1155,10 @@ def motivo_do_rascunho(rascunho: Any) -> str | None:
     for chave in ("avisos_auto", "pistas_alem", "pistas_orientacao", "checagens"):
         if agente.get(chave):
             return chave
-    if any(p != CATEGORIA for p in agente.get("pistas_turno") or []):
+    # A pista que não é assunto (o agradecimento, a saudação) não pede liberação em lugar
+    # nenhum (`ia.pistas_alem_do_assunto`), nem aqui: "mandem a NF, agradecido" é só a NF.
+    pistas = agente.get("pistas_turno") or []
+    if any(p != CATEGORIA and p not in ia._PISTAS_SEM_ASSUNTO for p in pistas):
         return "outro_assunto"
     if list(agente.get("sem_auto") or []) != [MOTIVO_SEM_AUTO_NF]:
         return "sem_auto"

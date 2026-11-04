@@ -1701,7 +1701,10 @@ def _so_cartao(rajada: Sequence[AtendimentoMensagem]) -> bool:
 _NF = re.compile(r"\b(?:nota\s+fiscal|nfe?|danfe)\b")
 _NF_DOCUMENTO = re.compile(
     r"\b(?:arquivo|copia|pdf|cnpj|cpf|corrig\w*|correc\w*|reemiss\w*|serie|"
-    r"numero|nao\s+(?:recebi|veio|chegou)|nao\s+mand\w*|falt\w*|"
+    # O "número" que não é do documento fica de fora: "tem nota? e o número de registro da
+    # Anatel?" é pré-venda (04/11/2026, 340848b7).
+    r"numero(?!\s+d[eoa]\s+(?:registro|anatel|homologacao|telefone|celular|modelo|imei)\b)|"
+    r"nao\s+(?:recebi|veio|chegou)|nao\s+mand\w*|falt\w*|"
     r"manda\w*|envie\w*|enviar|acionar)\b"
 )
 

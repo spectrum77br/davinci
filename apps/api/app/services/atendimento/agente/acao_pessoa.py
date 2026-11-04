@@ -2242,6 +2242,18 @@ _PARADO_DESDE = re.compile(
 )
 
 
+# A pergunta de onde está ou de quando chega, sem reclamar. Não o "chegou" nem o "recebi"
+# (quem já recebeu), nem o pedido citado em outro assunto (NF, cancelar, endereço).
+_PERGUNTA_DA_ENTREGA = re.compile(
+    r"\b(?:previsao|prazo|data)\s+(?:de\s+|da\s+|para\s+)?(?:a\s+)?(?:entrega|chegada|chegar)\b"
+    r"|\bquando\s+(?:\w+\s+){0,2}?(?:chega|chegara|vai\s+chegar|sera\s+entregue|entrega|recebo)\b"
+    r"|\b(?:chega|chegara|vai\s+chegar|entrega)\s+(?:\w+\s+)?(?:hoje|amanha)\b"
+    r"|\b(?:onde|aonde|cade)\s+(?:\w+\s+){0,2}?(?:esta\s+)?(?:o\s+|a\s+|meu\s+|minha\s+)?"
+    r"(?:pedido|encomenda|pacote|produto|compra)\b"
+    r"|\brastre(?:io|amento|ar)\b"
+)
+
+
 def fala_da_entrega(plano: str) -> bool:
     """O turno fala da entrega que não veio (reclama, parado, "era o dia", a data que
     passou) ou pede ação nela? PURA (D3)."""
@@ -2270,28 +2282,34 @@ def chamado_de_entrega_shopee(
          próprio cliente sem a data vencida.
     O "hoje era o dia" e a data que passou, com movimento recente, não bastam."""
     ctx = ctx if isinstance(ctx, Mapping) else {}
-    if not fala_da_entrega(plano):
+    # 04/11/2026 (40a0d370, "Previsão de Entrega" com o rastreio parado há 11 dias): quem só
+    # PERGUNTA da entrega não "fala da entrega" nesta régua, mas o evento velho vale igual.
+    fala = fala_da_entrega(plano)
+    if not fala and not _PERGUNTA_DA_ENTREGA.search(plano):
         return False
     if condicao_do_cliente(plano) and not prazo_vencido(plano, agora):
         return False
     if ctx.get("chamados"):
         return False
-    if pede_acao_na_entrega(plano, agora):
-        return True
-    if reclama_que_esta_parado(plano) and _PARADO_DESDE.search(plano):
-        return True
-    logistica = ctx.get("logistica") if isinstance(ctx.get("logistica"), Mapping) else {}
-    if falha_na_entrega(str(logistica.get("status") or "")):
-        return True
+    if fala:
+        if pede_acao_na_entrega(plano, agora):
+            return True
+        if reclama_que_esta_parado(plano) and _PARADO_DESDE.search(plano):
+            return True
+        logistica = ctx.get("logistica") if isinstance(ctx.get("logistica"), Mapping) else {}
+        if falha_na_entrega(str(logistica.get("status") or "")):
+            return True
     evento = evento_do_retrato(retrato_do_pedido(conversa, ctx, agora=agora), agora)
     if evento is not None:
-        if falha_na_entrega(evento[0]):
+        if fala and falha_na_entrega(evento[0]):
             return True
         momento = _instante(agora) or datetime.now(UTC)
         parado = (momento - evento[1]).total_seconds() >= DIAS_SEM_EVENTO * 86400
         # O "parado/sem atualização" com o evento velho fica com o motivo próprio dele (o
         # `rastreio_parado_no_retrato`, logo depois na régua 11).
         return parado and not reclama_que_esta_parado(plano)
+    if not fala:
+        return False
     if cita_prazo_a_frente(plano, _hoje(agora)) and not prazo_vencido(plano, agora):
         return False
     dias = dias_desde_o_envio(ctx, agora)
