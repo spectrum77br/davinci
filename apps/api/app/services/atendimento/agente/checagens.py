@@ -1199,13 +1199,41 @@ def opcoes_citadas(texto: str | None, lista: _Lista) -> set[_Opcao]:
 # como condição ("se estiver esgotada, não há previsão") — o aviso "sem a variação esgotada"
 # segurava o «sem previsão» igual ao da equipe (ccef00af2b17, 85f56d89186a, 30670d4d00ee). Com a
 # lista, nada muda: a opção DISPONÍVEL continua contradição e a que a lista não tem (ou só sem
-# estoque confiável), aviso (o reposicao-12 da calibração).
+# estoque confiável), aviso (o reposicao-12 da calibração; na lista COMPLETA, v18, abaixo).
 _CLIENTE_DIZ_ESGOTADO = re.compile(
     r"\b(?:esgotad\w*|acabou|acabaram|sem\s+estoque|indisponivel|nao\s+tem\s+mais"
     r"|quando\s+(?:vai\s+ter|volta\w*|chega\w*|tera|terao|estara|estarao|repo\w*)"
     r"|previsao\s+de\s+(?:retorno|reposicao|chegada|voltar)|vai\s+voltar|volta\s+a\s+ter)\b"
 )
 _CONDICAO_DA_FRASE = re.compile(r"^\W*(?:e\s+)?(?:se|caso)\b")
+# v18 (87747398, Vortan; o dono, 04/11/2026): a lista COMPLETA diz tudo o que o anúncio tem. O
+# "sem previsão" da COR que o cliente pediu e que ela não tem (a cinza, com Rosa e Prata à venda)
+# e o "das demais", depois de citar TODAS as opções à venda, são o que a equipe responde. A lista
+# sem cor nenhuma ("12 GB / 128 GB") não diz nada de cor, e o título que traz a cor a desmente. Na
+# lista incompleta (o reposicao-12 da calibração) e na opção disponível, nada muda.
+_DAS_DEMAIS = re.compile(
+    r"\b(?:d[aoe]s?\s+)?(?:demais|outr[ao]s?(?:\s+[a-z]+)?|resto|restantes?)\b"
+)
+
+
+def _opcao_fora_da_lista_completa(
+    lista: _Lista, oracao: str, clientes: Sequence[str], antes: Sequence[_Opcao], titulo: Any
+) -> bool:
+    """A oração do "sem previsão" fala da cor que a lista COMPLETA não tem (ver acima)?
+    "Esgotada" continua de fora: o que a lista não tem não esgotou. `antes` = as opções que o
+    texto citou antes da oração; `titulo` = o da ficha da lista. PURA."""
+    if not lista.completa or _ESGOTADO_NA_FRASE.search(oracao):
+        return False
+    do_anuncio = {cor for o in lista.opcoes for cor in o.cores}
+    do_titulo = set(_cores_de(_plano(str(titulo or ""))))
+    if not do_anuncio or not set(_cores_de(_plano(" ".join(clientes)))) - do_anuncio - do_titulo:
+        return False
+    # A frase pode negar a cor do próprio título ("A preta não tem previsão", título "... Preto").
+    if set(_cores_de(_plano(oracao))) & do_titulo:
+        return False
+    return not _DAS_DEMAIS.search(oracao) or all(
+        o in antes for o in lista.opcoes if o.disponivel and o.confiavel
+    )
 
 
 def conferir_sem_previsao(
@@ -1275,6 +1303,10 @@ def conferir_sem_previsao(
                     continue
                 faladas = na_oracao
             else:
+                if not do_cliente and _opcao_fora_da_lista_completa(
+                    lista, sentenca[ini:fim_oracao], clientes, antes, fichas[0].get("titulo")
+                ):
+                    continue
                 faladas = antes[-1:] or do_cliente
             if not faladas:
                 if all(o.disponivel is False and o.confiavel for o in lista.opcoes):
@@ -5339,7 +5371,7 @@ _DIZ_QUE_REEMBOLSOU = re.compile(
     r"|\b(?:reembolso|estorno|dinheiro|valor)\s+(?:[a-z0-9]+\s+)?ja\s+(?:caiu|voltou|entrou)\b"
 )
 _DIZ_QUE_EMITIU = re.compile(
-    r"\b(?:nota|nf|nfe|nota\s+fiscal)\s+(?:[a-z0-9]+\s+){0,2}?(?:ja\s+)?(?:foi|esta)\s+"
+    r"\b(?:nota|nf|nfe|nota\s+fiscal)\s+(?:[a-z0-9]+\s+){0,3}?(?:ja\s+)?(?:foi|esta)\s+"
     r"(?:emitid|gerad|enviad|disponivel)\w*"
     # Rodada 4: "a nota saiu", "a nota ficou pronta".
     r"|\b(?:nota|nf|nfe|nota\s+fiscal)\s+(?:ja\s+)?(?:saiu|ficou\s+pronta)\b"
@@ -7422,7 +7454,9 @@ def recado_ao_revisor(texto: str | None) -> str | None:
         if _cita_o_anuncio(plano, m):
             continue
         return " ".join(m.group(0).split())[:40]
-    if m := _RECADO_NO_TEXTO_CRU.search(_LACUNA.sub(" ", texto or "")):
+    if m := _RECADO_NO_TEXTO_CRU.search(
+        _LACUNA.sub(" ", validador.sem_lacuna_de_link(texto or ""))
+    ):
         return " ".join(m.group(0).split())[:40]
     if (m := _NOTA_NO_FIM.search(plano)) and (
         _VOCABULARIO_DE_REVISAO.search(m.group(1)) and not _DO_PEDIDO_OU_PRODUTO.search(m.group(1))
@@ -9260,6 +9294,14 @@ MOTIVO_OUTRO_PRODUTO_SEM_BUSCA = (
     "(anuncio:<id>) — no automático, pessoa confere"
 )
 NAO_TEMOS_SEM_FONTE = "nao_temos_sem_fonte"
+# v18 (revisão da rodada de 04/11/2026): o "temos outro modelo que tem" e o "temos o <nome>"
+# oferecem um produto: sem o anúncio citado, disponivel=true, não saem (`pendencia_dura`) — o
+# aviso sozinho deixava a oferta do anúncio pausado (disponivel=null) e a do nome sem dígito
+# ("temos o Smartphone Titan") para o verificador decidir.
+MOTIVO_OFERTA_SEM_ANUNCIO = (
+    'oferece "{trecho}" sem citar o anúncio da busca no catálogo com disponivel=true '
+    "(anuncio:<id>) — pessoa"
+)
 MOTIVO_NAO_TEMOS_SEM_FONTE = (
     'diz que a loja não tem "{trecho}" sem o fato aprovado nem a busca vazia no catálogo — '
     "no automático, pessoa confere"
@@ -9315,7 +9357,95 @@ _ESGOTADO_NA_FRASE = re.compile(
 # A parte que diz VENDA (sem objeto nomeado: "vendemos separadamente na nossa loja") e a
 # que diz DISPONÍVEL ("está disponível na nossa loja" exige o disponivel=true).
 _VENDA_NA_PARTE = re.compile(r"\bvend\w*|\ba\s+venda\b|\btemos\b|\btrabalhamos\s+com\b")
+# Quem oferece: "temos", "vendemos", "a loja tem".
+_QUEM_OFERECE = r"\b(?:temos|vendemos|(?:a|nossa)\s+loja\s+(?:tem|vende))\b"
+_TEMOS = re.compile(_QUEM_OFERECE)
+_TEMOS_NA_PERGUNTA = re.compile(r"(?<!\bse\s)" + _QUEM_OFERECE)
 _DISPONIVEL_NA_PARTE = re.compile(r"\bdisponive(?:l|is)\b|\bem\s+estoque\b|\bpronta\s+entrega\b")
+# O "temos" que oferece sem nomear ("temos outro modelo que tem", "temos uma versão com NFC",
+# "temos outro na loja", "vendemos outro modelo", "temos sim, modelos com NFC") — a variação do
+# anúncio da conversa fica de fora ("neste anúncio", "no anúncio", "outra opção de cor",
+# "temos os modelos informados").
+_PRODUTO_SEM_NOME = (
+    r"(?:modelos?|versao|versoes|aparelhos?|celular(?:es)?|produtos?|anuncios?"
+    r"|opc(?:ao|oes)(?!\s+de\s+(?:cor|cores|tamanho|voltagem)))\b"
+)
+_ADVERBIO_DO_TEMOS = r"(?:(?:sim|tambem|aqui|ainda),?\s+){0,2}"
+_TEMOS_SEM_NOME = re.compile(
+    _QUEM_OFERECE + r",?\s+(?:(?:[a-z]+,?\s+){0,3}?(?:"
+    rf"outr[ao]s?\s+{_PRODUTO_SEM_NOME}|outr[ao]s?\s+(?:na|no|em|aqui|que)\b"
+    rf"|um[a]?\s+{_PRODUTO_SEM_NOME})"
+    rf"|{_ADVERBIO_DO_TEMOS}(?:modelos|versoes|celulares)\b)"
+    # "Temos versões de 128 GB" e "Temos outras opções: Rosa e Azul" falam das variações daqui.
+    r"(?!\s+(?:de\s+)?\d)(?!\s*:)"
+    r"(?!.*\b(?:neste|nesse|deste|desse|no)\s+(?:mesmo\s+)?anuncio\b)"
+)
+# O "temos o <nome>": o nome vai até a próxima preposição, conjunção ou pontuação.
+_TEMOS_O_NOME = re.compile(
+    _QUEM_OFERECE + rf",?\s+{_ADVERBIO_DO_TEMOS}(?:o|a|os|as)\s+(?P<nome>[a-z0-9 ]+)"
+)
+_FIM_DO_NOME_OFERECIDO = re.compile(
+    r"\b(?:que|com|em|na|no|nas|nos|para|pra|por|de|da|do|das|dos|ao|sem|sim|aqui|tambem|e|ou"
+    r"|disponive(?:l|is)|a\s+venda)\b"
+)
+# O que vem depois de "temos o/a" e não é nome de produto.
+_NAO_E_NOME_DE_PRODUTO = frozenset(
+    """
+    opcao opcoes cor cores versao versoes variacao variacoes tamanho tamanhos modelo modelos
+    produto produtos aparelho aparelhos celular item itens mesmo mesma mesmos mesmas anuncio
+    anuncios loja informacao informacoes garantia nota fiscal prazo previsao data suporte
+    acesso valor numero estoque unidade unidades pedido link video foto fotos cartao pagamento
+    frete entrega pronta certeza confirmacao compatibilidade cidade retirada compromisso costume
+    venda
+    """.split()
+)
+_FIM_DA_FRASE_CRUA = re.compile(r"[.!?…\n]+")
+
+
+def _sinal_de_nome(texto: str | None, ctx: Any) -> set[str]:
+    """As palavras com cara de nome de produto: com maiúscula no meio da frase do texto CRU
+    ("temos o Smartphone Titan") ou no título de um anúncio da busca ou com link oferecido. A
+    lista do que não é nome não acaba ("temos as cores informadas", 18 vezes da equipe em 60
+    dias; "temos o modelo conforme o anúncio", "a Rosa neste anúncio"). PURA."""
+    com_maiuscula = [
+        palavra
+        for frase in _FIM_DA_FRASE_CRUA.split(texto or "")
+        for palavra in frase.split()[1:]
+        if palavra[:1].isupper()
+    ]
+    achados = [
+        a for b in getattr(ctx, "buscas_catalogo", None) or [] for a in b.get("anuncios") or []
+    ]
+    links = (getattr(ctx, "links_anuncio", None) or {}).values()
+    saida = set(catalogo.palavras(" ".join(com_maiuscula)))
+    for achado in [*achados, *links]:
+        if isinstance(achado, Mapping):
+            saida |= _palavras_do_anuncio(achado)
+    return saida
+
+
+def _nome_oferecido(parte: str, da_conversa: set[str], sinal: set[str]) -> set[str]:
+    """As palavras do nome no "temos o <nome>" que a conversa não tem e têm cara de nome de
+    produto (`sinal`, ver `_sinal_de_nome`) — fora cor, especificação e o que não é nome de
+    produto (ver `_NAO_E_NOME_DE_PRODUTO`). Vazio = não oferece. PURA."""
+    m = _TEMOS_O_NOME.search(parte)
+    if m is None:
+        return set()
+    nome = _FIM_DO_NOME_OFERECIDO.split(m.group("nome"), maxsplit=1)[0]
+    return {
+        p
+        for p in catalogo.palavras(nome)
+        if len(p) > 1
+        and p in sinal
+        and p not in da_conversa
+        and p not in _NAO_E_NOME_DE_PRODUTO
+        and p not in _CORES
+        and not _ESPEC_COLADA.match(p)
+        and not _UNIDADE_DEPOIS.match(p)
+        and not p.isdigit()
+    }
+
+
 # A parte que fala de OUTRO anúncio da loja ou da venda avulsa.
 _OUTRO_ANUNCIO_NA_PARTE = re.compile(
     r"\boutro\s+anuncio|\banuncio\s+(?:proprio|separado)|\bnossa\s+loja|\bpagina\s+da"
@@ -9328,8 +9458,12 @@ _MAX_CHARS_MODELO = 6
 # O número de especificação (o "4" de "4 litros", o "128" de "128 GB") não é modelo.
 _UNIDADE_DEPOIS = re.compile(
     r"^(?:gb|tb|mb|g|w|v|mah|l|ml|mm|cm|kg|hz|mp|litro|polegada|peca|unidade|dia|hora|mes|mese"
-    r"|ano|minuto|semana|x|vez|veze|real|reai)$"
+    r"|ano|minuto|semana|x|vez|veze|real|reai"
+    # "3 opções de cor", "2 modelos": a contagem, não o nome do modelo.
+    r"|opcao|opcoe|cor|versao|versoe|modelo|variacao|variacoe)$"
 )
+# O milhar e a memória com ponto ("10.000 mAh", "12.128"): não são nome de modelo.
+_NUMERO_COM_PONTO = re.compile(r"\b\d{1,3}\.\d{3}\b")
 
 
 # A especificação colada ao número ("5G", "4G", "108MP", "50W"): não é nome de modelo.
@@ -9338,7 +9472,7 @@ _ESPEC_COLADA = re.compile(r"^\d+(?:g|gb|tb|mb|w|v|mah|mp|hz|k|mm|ml|l|x|p)$")
 
 def _modelos_e_marcas(oracao: str) -> tuple[set[str], set[str]]:
     """(palavras de modelo — com número, fora a especificação —, marcas) da oração. PURA."""
-    ps = catalogo.palavras(oracao)
+    ps = catalogo.palavras(_NUMERO_COM_PONTO.sub(" ", oracao))
     modelos: set[str] = set()
     for i, p in enumerate(ps):
         if not any(c.isdigit() for c in p) or _ESPEC_COLADA.match(p):
@@ -9366,11 +9500,26 @@ def palavras_da_conversa(fichas: Sequence[Any], fontes_extra: Sequence[str] = ()
     return {p for t in textos for p in catalogo.palavras(t)}
 
 
+def _palavras_do_anuncio(achado: Mapping[str, Any]) -> set[str]:
+    do_anuncio = set(catalogo.palavras(achado.get("titulo_plano") or ""))
+    return do_anuncio | set(catalogo.palavras(achado.get("nome_curto") or ""))
+
+
 def _cobre(achado: Mapping[str, Any], exigidas: set[str]) -> bool:
     """O anúncio achado nomeia tudo o que a frase nomeia (o acessório e o modelo)?"""
-    do_anuncio = set(catalogo.palavras(achado.get("titulo_plano") or ""))
-    do_anuncio |= set(catalogo.palavras(achado.get("nome_curto") or ""))
-    return exigidas <= do_anuncio
+    return exigidas <= _palavras_do_anuncio(achado)
+
+
+def _citados_cobrem(
+    citados: Iterable[Mapping[str, Any]], aceitos: tuple[bool, ...], exigidas: set[str]
+) -> bool:
+    """Os anúncios citados com `disponivel` aceito nomeiam, JUNTOS, tudo o que a frase nomeia
+    ("temos o A e o B", com os dois citados)? O acessório, na mesma linha: "a capa do A18" não
+    se sustenta com a capa do C17 e o A18. Nenhum citado aceito: não. PURA."""
+    validos = [a for a in citados if a.get("disponivel") in aceitos]
+    if exigidas & catalogo.ACESSORIOS:
+        return any(_cobre(a, exigidas) for a in validos)
+    return bool(validos) and exigidas <= set().union(*map(_palavras_do_anuncio, validos))
 
 
 def _fatos_que_negam(fatos_citados: Sequence[str]) -> set[str]:
@@ -9456,13 +9605,15 @@ def conferir_outro_produto_da_loja(
         a for b in ctx.buscas_catalogo if not b.get("achados") for a in b.get("sem_no_titulo") or []
     }
     dos_fatos = _fatos_que_negam(fatos_citados)
+    sinal = _sinal_de_nome(texto, ctx)
     saida: list[PendenciaAgente] = []
     # O "esgotado" vale para a resposta inteira ("é vendido separadamente na nossa loja…;
     # no momento, o de 4 litros está esgotado"): o anúncio com disponivel=false cobre a
     # frase de que a loja o vende só quando o texto diz que ele está esgotado.
     diz_esgotado = bool(_ESGOTADO_NA_FRASE.search(_plano(texto)))
     for sentenca, pergunta in _sentencas(_plano(texto)):
-        if pergunta:
+        # v18: "temos outro modelo com NFC, quer ver?" também oferece.
+        if pergunta and not _TEMOS_NA_PERGUNTA.search(sentenca):
             continue
         esgotado = bool(_ESGOTADO_NA_FRASE.search(sentenca))
         for parte in _PARTES_DA_FRASE.split(sentenca):
@@ -9509,6 +9660,27 @@ def conferir_outro_produto_da_loja(
                     m = _TER.search(parte)
                 if m is None or _NEGA_O_TER.search(parte[: m.end()]):
                     continue
+            if esgotado:
+                aceitos: tuple[bool, ...] = (False,)
+            elif diz_esgotado and not _DISPONIVEL_NA_PARTE.search(parte):
+                aceitos = (True, False)
+            else:
+                aceitos = (True,)
+            # v18: o "temos" que oferece (ver `MOTIVO_OFERTA_SEM_ANUNCIO`). O anúncio da própria
+            # conversa não é o "outro modelo".
+            nome = _nome_oferecido(parte, da_conversa, sinal)
+            sem_nome = bool(_TEMOS_SEM_NOME.search(parte))
+            if sem_nome or nome or (_TEMOS.search(parte) and de_fora):
+                exigir = nome | outro_acessorio | de_fora
+                candidatos = [a for a in citados if not (sem_nome and a.get("da_conversa"))]
+                if not _citados_cobrem(candidatos, aceitos, exigir):
+                    saida.append(
+                        _suave(
+                            OUTRO_PRODUTO_SEM_BUSCA,
+                            MOTIVO_OFERTA_SEM_ANUNCIO.format(trecho=trecho),
+                        )
+                    )
+                continue
             if not (explicito or outro_acessorio or de_fora):
                 # "Temos sim a cor azul": a variação do produto da conversa (as checagens
                 # de variação conferem).
@@ -9525,13 +9697,7 @@ def conferir_outro_produto_da_loja(
                 | (modelos - da_conversa)
                 | (marcas - da_conversa)
             )
-            if esgotado:
-                aceitos: tuple[bool, ...] = (False,)
-            elif diz_esgotado and not _DISPONIVEL_NA_PARTE.search(parte):
-                aceitos = (True, False)
-            else:
-                aceitos = (True,)
-            if any(a.get("disponivel") in aceitos and _cobre(a, exigidas) for a in citados):
+            if _citados_cobrem(citados, aceitos, exigidas):
                 continue
             saida.append(
                 _suave(
@@ -9542,6 +9708,139 @@ def conferir_outro_produto_da_loja(
                 )
             )
     return _sem_repetir(saida)
+
+
+# ── 11b. O link do anúncio (D3 do dono, 04/11/2026; ver `catalogo`) ────────
+#
+# "nao da pra ele mesmo abrir e ter os da loja o agente". O texto passa pela 1ª camada com a
+# lacuna, que nenhuma régua lê como número, link ou prazo; link que o modelo escreveu cai no
+# validador, que aqui não aceita nenhuma URL. No fim, a lacuna vira a URL montada do anúncio vivo
+# desta loja (`com_os_links_do_anuncio`) e as URLs vão para `fatos.agente.links_anuncio`: o
+# `enviar` só aceita essas, exatas. Só a Shopee recebe a lacuna (`ferramentas._com_link`).
+LINK_DO_ANUNCIO = "link_do_anuncio"
+MOTIVO_LINK_DESCONHECIDO = (
+    "a resposta usa {lacuna}, que as ferramentas não ofereceram nesta conversa — não sai"
+)
+MOTIVO_LINK_DE_OUTRO_ANUNCIO = (
+    'a frase "{trecho}" nomeia um produto, e o link vai para outro anúncio — pessoa confere'
+)
+MOTIVO_LINK_SEM_EVIDENCIA = (
+    "a resposta usa {lacuna} sem citar esse anúncio nas evidências (anuncio:<id> ou ficha:<id>) — "
+    "pessoa confere"
+)
+
+
+def _citou_o_anuncio(item: str, citadas: set[str]) -> bool:
+    """A resposta cita o `anuncio:` da busca ou o que o `ver_anuncio` leu desse anúncio?"""
+    return bool(
+        citadas
+        & {
+            agente_ctx.id_anuncio(item),
+            agente_ctx.id_ficha(item),
+            agente_ctx.id_variacoes(item),
+            agente_ctx.id_especificacoes(item),
+        }
+    )
+
+
+def conferir_link_do_anuncio(
+    texto: str | None, *, ctx: ContextoAgente, evidencias: Iterable[str | None]
+) -> list[PendenciaAgente]:
+    """A lacuna do link no texto CRU do modelo (`texto`; a frase da lacuna errada ainda está
+    nele): a que esta execução não ofereceu → BLOQUEIA; a do anúncio que as `evidencias` não
+    citam → DURA; o produto de que a frase fala e que o anúncio do link não tem → DURA. A parte
+    da lacuna que não nomeia produto fala do último nomeado antes dela ("Temos o A18 Pro Max.
+    Segue o link do anúncio: {link_anuncio:a}"), mesmo sem dígito, ou, sem nenhum antes, do
+    próximo; o "temos outro modelo" solta o nomeado antes dele. O acessório só conta na parte
+    da lacuna ("o link da capinha"): "o A18 vem com carregador" não vende carregador. PURA."""
+    lacunas = catalogo.lacunas_de_link(texto)
+    if not lacunas:
+        return []
+    links = getattr(ctx, "links_anuncio", None) or {}
+    por_codigo = {v.get("codigo"): (item, v) for item, v in links.items() if v.get("url")}
+    citadas = {" ".join(str(e or "").split()) for e in evidencias or ()}
+    saida: list[PendenciaAgente] = []
+    for lacuna in lacunas:
+        oferecido = por_codigo.get(catalogo.codigo_da_lacuna(lacuna))
+        if oferecido is None:
+            saida.append(
+                _bloqueia(LINK_DO_ANUNCIO, MOTIVO_LINK_DESCONHECIDO.format(lacuna=lacuna[:40]))
+            )
+        elif not _citou_o_anuncio(oferecido[0], citadas):
+            saida.append(
+                _pessoa(LINK_DO_ANUNCIO, MOTIVO_LINK_SEM_EVIDENCIA.format(lacuna=lacuna[:40]))
+            )
+    sinal = _sinal_de_nome(texto, ctx)
+    nomeado: set[str] = set()
+    trecho = ""
+    sem_nome: list[Mapping[str, Any]] = []
+    oferece_outro = False
+    da_conversa = {str(i) for i in getattr(ctx, "anuncios_do_pacote", None) or () if i}
+
+    def _confere(link: Mapping[str, Any]) -> None:
+        if not _cobre(link, nomeado):
+            saida.append(
+                _pessoa(LINK_DO_ANUNCIO, MOTIVO_LINK_DE_OUTRO_ANUNCIO.format(trecho=trecho))
+            )
+
+    for sentenca, _pergunta in _sentencas(_plano(texto)):
+        for parte in _PARTES_DA_FRASE.split(sentenca):
+            lacunas_da_parte = catalogo.lacunas_de_link(parte)
+            limpa = validador.sem_lacuna_de_link(parte)
+            modelos, marcas = _modelos_e_marcas(limpa)
+            nomes = modelos | marcas | _nome_oferecido(limpa, set(), sinal)
+            if lacunas_da_parte:
+                nomes |= catalogo.acessorios_em(limpa)
+            if nomes:
+                nomeado, trecho = nomes, " ".join(limpa.split())[:60]
+                for link in sem_nome:
+                    _confere(link)
+                sem_nome = []
+            elif _TEMOS_SEM_NOME.search(limpa):
+                nomeado = set()
+                oferece_outro = True
+                trecho = " ".join(limpa.split())[:60]
+            for lacuna in lacunas_da_parte:
+                oferecido = por_codigo.get(catalogo.codigo_da_lacuna(lacuna))
+                if oferecido is None:
+                    continue
+                # "Temos outro modelo que tem. Segue o link": o link não pode ser o desta conversa.
+                if oferece_outro and str(oferecido[0]) in da_conversa:
+                    saida.append(
+                        _pessoa(LINK_DO_ANUNCIO, MOTIVO_LINK_DE_OUTRO_ANUNCIO.format(trecho=trecho))
+                    )
+                if nomeado:
+                    _confere(oferecido[1])
+                else:
+                    sem_nome.append(oferecido[1])
+    return _sem_repetir(saida)
+
+
+def com_os_links_do_anuncio(
+    final: SaidaConferida, ctx: ContextoAgente, *, plataforma: str, canal: str
+) -> SaidaConferida:
+    """A `SaidaConferida` com a URL no lugar de cada lacuna do link (a frase da lacuna que não
+    foi oferecida sai) e `ctx.links_usados` com as URLs. Passou do limite da plataforma com a
+    URL: BLOQUEADO, para pessoa. Sem lacuna, a mesma."""
+    ctx.links_usados = []
+    texto = final.texto or ""
+    if not catalogo.lacunas_de_link(texto):
+        return final
+    preenchido, ctx.links_usados = catalogo.preencher_links(texto, ctx.links_por_codigo())
+    preenchido = validador.normalizar(preenchido, plataforma=plataforma, canal=canal)
+    limite = constantes.limite_caracteres(plataforma, canal)
+    if len(preenchido) <= limite:
+        return dataclasses.replace(final, texto=preenchido)
+    motivo = f"passa do limite de {limite} caracteres com o link ({len(preenchido)})"
+    return dataclasses.replace(
+        final,
+        texto=preenchido,
+        motivos=[*final.motivos, motivo],
+        erros=[*final.erros, motivo],
+        status=constantes.RASCUNHO_BLOQUEADO,
+        precisa_humano=True,
+        sem_auto=[*(final.sem_auto or []), motivo],
+    )
 
 
 def anuncios_de_fora(
@@ -10939,6 +11238,9 @@ def pendencia_dura(p: PendenciaAgente) -> bool:
         # (c) a reposição prometida ("volta ao estoque logo", "últimas unidades", "reservo") e
         # (k) o sku/id interno da variação — seja qual for o código da conferência.
         return True
+    if p.codigo == OUTRO_PRODUTO_SEM_BUSCA:
+        # v18: o "temos" que oferece sem o anúncio à venda citado; o resto da G1 é aviso.
+        return p.motivo.startswith("oferece ")
     if p.codigo == ESTADO_CONTRADIZ:
         # (c) a aprovação ou conclusão que só a equipe dá; o resto do estado é aviso.
         return p.motivo.startswith("afirma aprovação")
@@ -11196,7 +11498,12 @@ MOTIVO_CONTEUDO_SEM_O_DADO = (
     'a pergunta do que vem junto respondida com a negativa ou o "não consta" sem a '
     "resposta da equipe do mesmo produto — o que a caixa traz, a equipe sabe (pessoa)"
 )
-DURAS = DURAS | {ENTREGUE_A_QUEM_NAO_RECEBEU, MODELO_SEM_O_DADO, CONTEUDO_SEM_O_DADO}
+DURAS = DURAS | {
+    ENTREGUE_A_QUEM_NAO_RECEBEU,
+    MODELO_SEM_O_DADO,
+    CONTEUDO_SEM_O_DADO,
+    LINK_DO_ANUNCIO,
+}
 
 _ENTREGUE_NO_TEXTO = re.compile(
     r"\b(?:consta|aparece|esta|foi|ja\s+foi|ficou)\s+(?:como\s+)?entregue\b"

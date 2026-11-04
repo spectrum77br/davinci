@@ -616,7 +616,7 @@ def test_o_resumo_le_o_estado_do_turno():
 
 def test_o_sistema_v17_tem_as_regras_novas_e_mantem_as_travas():
     s = v.SISTEMA
-    assert v.VERSAO == "v17"
+    assert v.VERSAO == "v18"
     # as liberações (an0311)
     assert "O QUE O ATENDIMENTO JÁ ENVIOU NESTA CONVERSA" in s
     assert "conferimos pelas opções do anúncio" in s

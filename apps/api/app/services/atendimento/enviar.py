@@ -1175,6 +1175,9 @@ async def _texto_com_isencao_do_agente(
     `ver_garantia` liberando): o texto é revalidado SEM essa frase e o que
     continua errado (outro link, telefone…) recusa como antes. Sem a marca —
     o legado, a pessoa escrevendo do zero — levanta a mesma recusa.
+
+    D3 do dono (04/11/2026): `fatos.agente.links_anuncio` = as URLs que o CÓDIGO pôs no lugar
+    da lacuna do link; o validador aceita só essas, exatas (`validador.validar`).
     """
     from app.services.atendimento import validador
     from app.services.atendimento.agente import checagens
@@ -1183,20 +1186,27 @@ async def _texto_com_isencao_do_agente(
     fatos = (rascunho.fatos or {}) if rascunho is not None else {}
     agente = fatos.get("agente") if isinstance(fatos, dict) else None
     isencoes = agente.get("isencoes") if isinstance(agente, dict) else None
-    if not (isinstance(isencoes, list) and checagens.ISENCAO_CAMINHO_URANYX in isencoes):
+    uranyx = isinstance(isencoes, list) and checagens.ISENCAO_CAMINHO_URANYX in isencoes
+    do_agente = agente.get("links_anuncio") if isinstance(agente, dict) else None
+    links = [str(u) for u in do_agente if u] if isinstance(do_agente, list) else []
+    if not uranyx and not links:
         raise recusa
     normalizado = validador.normalizar(
         texto or "", plataforma=conversa.plataforma, canal=conversa.canal
     )
-    motivos = checagens.erros_sem_o_caminho_uranyx(
-        normalizado,
-        validador.validar(
-            normalizado, plataforma=conversa.plataforma, canal=conversa.canal, origem=origem
-        ),
-        lambda t: validador.validar(
-            t, plataforma=conversa.plataforma, canal=conversa.canal, origem=origem
-        ),
-    )
+
+    def _validar(t: str) -> list[str]:
+        return validador.validar(
+            t,
+            plataforma=conversa.plataforma,
+            canal=conversa.canal,
+            origem=origem,
+            links_permitidos=links,
+        )
+
+    motivos = _validar(normalizado)
+    if uranyx:
+        motivos = checagens.erros_sem_o_caminho_uranyx(normalizado, motivos, _validar)
     if motivos or not normalizado.strip():
         raise recusa
     return normalizado

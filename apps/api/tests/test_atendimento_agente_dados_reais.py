@@ -44,7 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, Product, ProductLink
 from app.models.enums import LinkSyncStatus
-from app.services.atendimento import ficha, humano, ia
+from app.services.atendimento import ficha, humano, ia, validador
 from app.services.atendimento.agente import acao_pessoa, checagens, ferramentas, prompt, saida
 from app.services.atendimento.constantes import (
     MODO_AUTO,
@@ -313,8 +313,14 @@ def test_4_as_respostas_prontas_chegam_sem_a_espera():
     defeito = [por_id[p["id"]]["texto"] for p in com_espera if p["categoria"] == "defeito"]
     assert defeito and all("vídeo" in t or "fotos" in t for t in defeito)
     assert all("Retornamos" not in t for t in defeito)
-    # As que não tinham espera chegam iguais.
-    assert [p for p in prontas if not checagens.tem_espera(p["texto"])] == [
+    # As que não tinham espera chegam iguais, menos a que nega o link (04/11/2026, 76417da4).
+    nega_o_link = {
+        p["id"] for p in prontas if validador._NEGA_LINK.search(validador.plano_de(p["texto"]))
+    }
+    assert nega_o_link and not nega_o_link & set(por_id)
+    assert [
+        p for p in prontas if not checagens.tem_espera(p["texto"]) and p["id"] not in nega_o_link
+    ] == [
         p for p in limpas if p["id"] not in {q["id"] for q in com_espera}
     ]
 

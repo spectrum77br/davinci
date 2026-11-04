@@ -2925,18 +2925,39 @@ def _aceitou_a_oferta(textos: Sequence[str], pede: bool) -> bool:
     )
 
 
+# D4 do dono (04/11/2026; 06ae0f18: a IA respondeu às 19:45:08 e o "6" veio às 19:45:09): o "6"
+# sozinho até 60 s depois da resposta do agente cruzou com ela, não é insistência. Depois disso,
+# nada muda. O 3º pedido seguido, o irritado e o "sim" à pessoa oferecida valem antes.
+_SEIS_CRUZOU_ATE_S = 60
+
+
+def _seis_cruzou_com_a_resposta(rajada: Sequence[Any], ultima: Any | None) -> bool:
+    """O turno é só o "6" do menu, até `_SEIS_CRUZOU_ATE_S` depois da resposta do agente? PURA."""
+    if ultima is None or getattr(ultima, "origem", None) != constantes.ORIGEM_IA:
+        return False
+    respondeu = _momento(ultima)
+    falas = [_momento(m) for m in rajada]
+    if respondeu is None or None in falas:
+        return False
+    return all(ia._OPCAO_ATENDENTE.match(_plano_de(m.texto)) for m in rajada) and all(
+        (quando - respondeu).total_seconds() <= _SEIS_CRUZOU_ATE_S for quando in falas
+    )
+
+
 def pedido_de_pessoa(recentes: Sequence[Any], gatilho: Any | None) -> str | None:
     """O pedido de pessoa que AINDA manda para pessoa no agente: o motivo, ou None. PURA.
 
     Ver o comentário da seção (decisão do dono, 21/10/2026). Na ordem: recusou
     o virtual; pediu a pessoa oferecida (ou disse "sim" à oferta); pediu com
     irritação, alerta, xingamento ou reclamação; o 3º pedido seguido
-    (`_TETO_DE_PEDIDOS`); e, sem nada novo a responder: disse que a resposta
+    (`_TETO_DE_PEDIDOS`); fora o "6" que cruzou com a resposta do agente (D4 de 04/11/2026);
+    e, sem nada novo a responder: disse que a resposta
     de verdade da loja não respondeu, ou pediu de novo depois da resposta da
     loja (`ia.MOTIVO_INSISTIU_EM_PESSOA`).
     """
     recentes = _ate_o_turno(list(recentes), gatilho)
-    textos = [m.texto for m in ia.rajada_do_cliente(recentes, gatilho) if _do_cliente(m)]
+    rajada = [m for m in ia.rajada_do_cliente(recentes, gatilho) if _do_cliente(m)]
+    textos = [m.texto for m in rajada]
     if not textos:
         return None
     if any(recusa_o_virtual(t) for t in textos):
@@ -2961,6 +2982,8 @@ def pedido_de_pessoa(recentes: Sequence[Any], gatilho: Any | None) -> str | None
         return MOTIVO_PEDIU_IRRITADO
     if _pedidos_seguidos(turnos) + 1 >= _TETO_DE_PEDIDOS:
         return MOTIVO_PEDIU_3_VEZES
+    if _seis_cruzou_com_a_resposta(rajada, ultima):
+        return None
     # D3 (decisão do dono, 23/10/2026 ~12:50): o "6"/"Falar com Atendente" do menu junto de
     # outra fala do cliente ("Já solicitei meu reembolso / Pois o pedido não chegou / 6") é
     # a escolha da opção, não a insistência — o atendente é o agente, que responde o que o

@@ -362,6 +362,13 @@ class BlingClient:
         r.raise_for_status()
         return r.json().get("data") or {}
 
+    async def get_nfe(self, nfe_id: int) -> dict:
+        """Detalhe da NF-e desta conta (`GET /nfe/{id}`): `xml` (link assinado), `chaveAcesso`,
+        `situacao`. O id vem de `notaFiscal.id` do pedido (`get_order`)."""
+        r = await self._request("GET", f"/nfe/{nfe_id}")
+        r.raise_for_status()
+        return r.json().get("data") or {}
+
     async def get_logistica_objeto(self, objeto_id: int) -> dict:
         """Objeto de postagem (`GET /logisticas/objetos/{id}`; o id vem de
         `pedido.transporte.volumes[].id`): serviço, rastreio (`rastreamento.

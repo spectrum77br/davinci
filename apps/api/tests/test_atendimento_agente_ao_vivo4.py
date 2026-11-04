@@ -199,10 +199,10 @@ def test_a_versao_e_a_v7_e_vai_no_registro():
     # 22/10/2026 (itens 22 e 23 da auditoria ao vivo): o v8 guarda tudo o que o v7 trouxe;
     # o v9 (item 32: as respostas da equipe citadas) guarda tudo o que o v8 trouxe; o v10
     # (rodada "redondo", 23/10/2026: a busca no catálogo da loja) guarda o v9 inteiro.
-    assert v.VERSAO == "v17"  # a garantia da equipe e o título (27/10/2026)
+    assert v.VERSAO == "v18"  # a garantia da equipe e o título (27/10/2026)
     r = v.Resultado(ok=True, veredito=None, pediu=True)
-    assert r.para_fatos("Olá!")["versao"] == "v17"
-    assert v._nao_rodou("copiloto")["versao"] == "v17"
+    assert r.para_fatos("Olá!")["versao"] == "v18"
+    assert v._nao_rodou("copiloto")["versao"] == "v18"
 
 
 # ═══════════════ 1. as lacunas com e sem o dado ═══════════════
@@ -889,7 +889,7 @@ def test_nenhuma_regra_que_bloqueia_afrouxou():
     ):
         assert regra in s, regra
     # O sistema continua fixo (cache) e sem chaves além das lacunas.
-    sem_lacunas = s
+    sem_lacunas = s.replace("{link_anuncio:<letra>}", "")  # v18 (D3 do dono): a lacuna do link
     for nome in constantes.LACUNAS:
         sem_lacunas = sem_lacunas.replace("{" + nome + "}", "")
     assert "{" not in sem_lacunas

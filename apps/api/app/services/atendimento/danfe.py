@@ -21,7 +21,9 @@ cheia). O PDF da caixa (`nf_etiqueta_arquivo.nf_caixa_pdf`) quase nunca
 existe (1 pedido em 14 dias) e as contas do Bling da nota cheia estão sem
 token — por isso a DANFE é DESENHADA aqui, do XML (`gerar_pdf`), com o
 PyMuPDF que a API já usa. A DANFE é só a representação impressa: o documento
-fiscal é o XML autorizado, e qualquer sistema emissor desenha a sua.
+fiscal é o XML autorizado, e qualquer sistema emissor desenha a sua. Sem a cheia
+ali, a NF automática tenta ler o XML no Bling e o grava no `nf_nota`
+(`nf_bling.py`, 04/11/2026).
 
 O desenho segue os blocos da DANFE retrato (canhoto, emitente, DANFE com
 número/série/folha, código de barras CODE-128C da chave, chave, natureza da

@@ -176,6 +176,7 @@ async def _auto(
     anuncio_titulo: str | None = None,
     textos_extra: list[str] | None = None,
     acoes_modelo: list[str] | None = None,
+    nf_politica_aprovada: bool = False,
 ) -> SimpleNamespace:
     """O caminho AUTO do `agente.responder` sem banco e sem modelo (a proposta é a do
     rascunho real), com a configuração real dos canais Shopee.
@@ -226,7 +227,7 @@ async def _auto(
         nomes=(),
         modo=constantes.MODO_AUTO,
         forcar=False,
-        nf_politica_aprovada=False,
+        nf_politica_aprovada=nf_politica_aprovada,
         insistiu=False,
     )
     # acao_pessoa.gatilhos_de_codigo, sem o banco (sem chaves ativas nem UF restrita).
@@ -302,6 +303,7 @@ async def _auto(
         garantia_consultada=ctx.garantia_consultada,
         permitidos_extra=ctx.permitidos_extra(),
         modo=constantes.MODO_AUTO,
+        nf_politica_aprovada=nf_politica_aprovada,
         forcar=True,
         agente=True,
         fatos_citados=ctx.fatos_citados(ctx.evidencias),
@@ -1188,7 +1190,7 @@ def test_3_31ab491d_a_instrucao_de_recebimento_vem_na_entrega_instrucoes():
 def test_3_o_sistema_do_verificador_nao_muda():
     # O item 3 não mudou o SISTEMA (era v9). Parte 2 (item 6, 23/10/2026): o v10 só acrescenta
     # a BUSCA NO CATÁLOGO DA LOJA — o modelo continua o Haiku.
-    assert v.VERSAO in ("v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17")
+    assert v.VERSAO in ("v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18")
     assert v.MODELO == "claude-haiku-5-5"
 
 

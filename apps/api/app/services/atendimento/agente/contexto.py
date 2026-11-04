@@ -36,6 +36,7 @@ from uuid import UUID
 
 from app.services.atendimento import constantes
 from app.services.atendimento import contexto as contexto_svc
+from app.services.atendimento.agente.catalogo import codigo_do_link, lacuna_do_link
 from app.services.atendimento.agente.custo import Uso
 
 # ── Ids de evidência (spec 3.3.3) ─────────────────────────────────────────
@@ -565,6 +566,11 @@ class ContextoAgente:
     # conferência G1 exige o `anuncio:<id>` delas.
     anuncios_buscados: dict[str, dict] = field(default_factory=dict)
     buscas_catalogo: list[dict] = field(default_factory=list)
+    # D3 do dono (04/11/2026): os links que as ferramentas ofereceram nesta execução, só na
+    # Shopee (item_id → {"codigo", "url", "titulo_plano"}; o modelo só vê a lacuna) e as URLs
+    # que o código pôs no texto (`fatos.agente.links_anuncio`: o `enviar` aceita só estas).
+    links_anuncio: dict[str, dict] = field(default_factory=dict)
+    links_usados: list[str] = field(default_factory=list)
     # Revisão do fechamento (23/10/2026): os anúncios que o PACOTE aceitou (o da conversa,
     # os cartões desta loja, os itens do pedido, as fichas), antes das ferramentas — o
     # "da_conversa" da busca no catálogo (o `ver_anuncio` de outro anúncio da loja também
@@ -797,6 +803,39 @@ class ContextoAgente:
             }
         )
 
+    def oferecer_link(self, item_id: str, url: str, titulo_plano: str = "") -> str | None:
+        """A lacuna do link deste anúncio (D3 do dono, 04/11/2026): a mesma em toda a execução.
+        None = já retirada (`retirar_link`)."""
+        item = _limpo(item_id)
+        link = self.links_anuncio.get(item)
+        if link is None:
+            link = {
+                "codigo": codigo_do_link(len(self.links_anuncio)),
+                "url": url,
+                "titulo_plano": titulo_plano,
+            }
+            self.links_anuncio[item] = link
+        return lacuna_do_link(link["codigo"]) if link["url"] else None
+
+    def retirar_link(self, item_id: str) -> None:
+        """A ficha ao vivo diz que o anúncio não tem nada à venda: a lacuna que a busca já deu
+        deixa de valer. O código fica ocupado (o próximo anúncio não pode herdá-lo)."""
+        item = _limpo(item_id)
+        link = self.links_anuncio.get(item)
+        if link is not None:
+            link["url"] = None
+        elif item:
+            # A ficha veio antes da busca: a busca não pode oferecer o link depois.
+            self.links_anuncio[item] = {
+                "codigo": codigo_do_link(len(self.links_anuncio)),
+                "url": None,
+                "titulo_plano": "",
+            }
+
+    def links_por_codigo(self) -> dict[str, str]:
+        """{código da lacuna: URL} dos links oferecidos nesta execução."""
+        return {v["codigo"]: v["url"] for v in self.links_anuncio.values() if v["url"]}
+
     def estado_das_ferramentas(self) -> tuple:
         """O que as ferramentas mudam no `ctx` (para a 2ª passada voltar a ele)."""
         return (
@@ -814,6 +853,7 @@ class ContextoAgente:
             {k: dict(v) for k, v in self.anuncios_buscados.items()},
             [dict(b) for b in self.buscas_catalogo],
             list(self.numeros_vistos),
+            {k: dict(v) for k, v in self.links_anuncio.items()},
         )
 
     def voltar_ferramentas(self, estado: tuple) -> None:
@@ -833,6 +873,7 @@ class ContextoAgente:
             buscados,
             buscas,
             numeros_vistos,
+            links,
         ) = estado
         self.registro.ids = set(ids)
         self.registro.textos = list(textos)
@@ -849,6 +890,7 @@ class ContextoAgente:
         self.anuncios_buscados = {k: dict(v) for k, v in buscados.items()}
         self.buscas_catalogo = [dict(b) for b in buscas]
         self.numeros_vistos = list(numeros_vistos)
+        self.links_anuncio = {k: dict(v) for k, v in links.items()}
 
     # ── rastro e orçamento ──
 
@@ -1010,6 +1052,9 @@ class ContextoAgente:
                 {"termo": b.get("termo"), "achados": list(b.get("achados") or [])}
                 for b in self.buscas_catalogo
             ]
+        if self.links_usados:
+            # D3 do dono (04/11/2026): só quando há (o registro de antes não muda).
+            extra["links_anuncio"] = list(self.links_usados)
         return {
             **extra,
             "versao": constantes.PROMPT_VERSAO_AGENTE,

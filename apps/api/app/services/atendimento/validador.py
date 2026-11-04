@@ -531,7 +531,9 @@ _DESESTIMULA_DEVOLUCAO = (
     ),
 )
 
-_LACUNA = re.compile(r"\{\{?\s*[a-z_]+\s*\}?\}", re.IGNORECASE)
+_LACUNA = re.compile(r"\{\{?\s*[a-z_]+(?::[a-z0-9_-]+)?\s*\}?\}", re.IGNORECASE)
+# A lacuna do link do anúncio (D3 do dono, 04/11/2026): só o agente, na Shopee.
+_LACUNA_DE_LINK = re.compile(r"\{\{?\s*link_anuncio:[a-z]+\s*\}?\}", re.IGNORECASE)
 
 # ── Regras só da IA ───────────────────────────────────────────────────────
 
@@ -933,6 +935,24 @@ def _fora_do_latin1(texto: str) -> list[str]:
     return vistos
 
 
+def _sem_os_links_permitidos(plano: str, links: Collection[str]) -> str:
+    """O texto plano sem as URLs exatas de `links`: nem colada a outra coisa, nem com mais
+    caminho ou parâmetro depois. O ponto final da frase não conta como continuação. PURA."""
+    for link in links:
+        alvo = plano_de(str(link or "")).strip()
+        if alvo:
+            plano = re.sub(
+                rf"(?<![\w/.:@-]){re.escape(alvo)}(?![\w/?&=#%+~@-]|[.:,;]\S)", " ", plano
+            )
+    return plano
+
+
+def sem_lacuna_de_link(texto: str) -> str:
+    """O texto sem a lacuna do link do anúncio (`{link_anuncio:b}`): a 1ª camada do agente lê o
+    texto SEM a URL, e o código a preenche no fim (`checagens.com_os_links_do_anuncio`). PURA."""
+    return _LACUNA_DE_LINK.sub(" ", texto or "")
+
+
 def validar(
     texto: str,
     *,
@@ -940,6 +960,7 @@ def validar(
     canal: str,
     origem: str,
     prazos_de_garantia: Collection[tuple[int, str, str]] = (),
+    links_permitidos: Collection[str] = (),
 ) -> list[str]:
     """Motivos pelos quais o texto NÃO pode sair (lista vazia = pode).
 
@@ -953,6 +974,11 @@ def validar(
     "prazo"/"garantia em número" na frase que fala da garantia, cada um com
     o seu par na mesma oração. Qualquer outro prazo continua barrado. Vazio
     (o legado e a pessoa): nada muda.
+
+    `links_permitidos` = só o AGENTE, só na Shopee (D3 do dono, 04/11/2026): as URLs que o
+    CÓDIGO pôs no lugar da lacuna do link (`fatos.agente.links_anuncio`). Sai do texto só a
+    URL EXATA; outra URL, a mesma com outro caminho ou parâmetro e o link que o modelo
+    escreveu continuam barrados. Vazio (todo o resto): nada muda.
     """
     limpo = normalizar(texto or "", plataforma=plataforma, canal=canal)
     if not limpo:
@@ -964,6 +990,8 @@ def validar(
         motivos.append(f"passa do limite de {limite} caracteres ({len(limpo)})")
 
     plano = plano_de(limpo)
+    if links_permitidos and origem == ORIGEM_IA and plataforma == "shopee":
+        plano = _sem_os_links_permitidos(plano, links_permitidos)
     # Zap (26/10/2026): o canal da própria marca — o contato não é "fora da loja".
     zap = e_zap(plataforma, canal)
 

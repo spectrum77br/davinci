@@ -1017,6 +1017,10 @@ async def conferir_proposta(
     ]
     if da_etiqueta:
         chk = checagens.Checagens(pendencias=[*chk.pendencias, *da_etiqueta])
+    # D3 do dono (04/11/2026): o link do anúncio, no texto como o modelo escreveu.
+    do_link = checagens.conferir_link_do_anuncio(p.texto, ctx=ctx, evidencias=p.evidencias)
+    if do_link:
+        chk = checagens.Checagens(pendencias=[*chk.pendencias, *do_link])
     if base.modo == constantes.MODO_AUTO:
         # O portão (27/10/2026): a confiança do próprio agente (abaixo de 0,5 pessoa; até 0,8
         # aviso) e o assunto de produto sem a marca do anúncio nem a resposta da equipe (aviso).
@@ -1041,6 +1045,10 @@ async def conferir_proposta(
         conferida, modo=base.modo, pessoa_do_modelo=bool(entrada["precisa_humano"])
     )
     final = checagens.aplicar(conferida, chk, acoes_pessoa=ctx.acoes_pessoa, modo=base.modo)
+    # D3 do dono: a URL entra só aqui, depois de toda a 1ª camada (o verificador vê a lacuna).
+    final = checagens.com_os_links_do_anuncio(
+        final, ctx, plataforma=conversa.plataforma, canal=conversa.canal
+    )
     _guardar_avisos(ctx, final)
     # A garantia Uranyx depois dos 90 dias (decisão 7 do dono): o envio confere
     # o texto sem a frase do caminho da Uranyx só com esta marca no rascunho.

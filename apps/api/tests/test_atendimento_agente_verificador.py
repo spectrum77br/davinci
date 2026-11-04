@@ -277,7 +277,10 @@ def test_o_sistema_e_fixo_e_cabe_no_cache():
         "{rastreio}", ""
     ).replace("{nf_numero}", "").replace("{transportadora}", "").replace(
         "{data_envio}", ""
-    ).replace("{previsao_entrega}", "")
+    ).replace("{previsao_entrega}", "").replace(
+        "{link_anuncio:<letra>}",  # v18 (D3 do dono): a lacuna do link, descrita
+        "",
+    )
     # O mínimo do cache do Haiku 5.5 é 512 tokens (~3,5 caracteres por token).
     assert len(verificador.SISTEMA) > 512 * 4
     for marca in (*verificador.MARCAS, "afirma_sem_lastro", "responde_o_que_foi_perguntado"):

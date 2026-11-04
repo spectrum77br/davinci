@@ -4758,6 +4758,30 @@ def afirma_do_pedido(texto: str) -> bool:
     return False
 
 
+# v18 (c7d6db8b, 04/11/2026): a regra geral da nota fiscal ("todos os pedidos acompanham nota
+# fiscal") e a confirmação curta dela. "Seu pedido", "sua nota", "emitida" e "enviada" são o
+# estado de uma compra, e isso sem o pedido na conversa continua avisando.
+_NF_DE_UMA_COMPRA = re.compile(
+    r"\b(?:seus?|suas?|teus?|tuas?)\s+(?:pedidos?|notas?|nf|nfe|compras?)\b"
+    r"|\b(?:emitid|enviad|gerad)\w*"
+)
+_NF_REGRA_GERAL = re.compile(
+    r"\btod[oa]s?\s+(?:os\s+|as\s+)?(?:pedidos?|compras?)\b"
+    r"|\b(?:acompanham?|vem|vao)\s+(?:com\s+)?(?:a\s+)?(?:nota|nf|nfe)\b"
+)
+_SO_CONFIRMA = re.compile(
+    r"(?:(?:ola|oi|sim|isso|isso\s+mesmo|exato|correto|e\s+verdade|verdade)\W*)+"
+)
+
+
+def so_a_regra_da_nf(texto: str) -> bool:
+    """O texto é só a regra geral da nota fiscal ou a confirmação curta dela? PURA (agente)."""
+    plano = " ".join(validador.plano_de(texto or "").split())
+    if _NF_DE_UMA_COMPRA.search(plano) or _AFIRMA_DO_PEDIDO.search(plano):
+        return False
+    return bool(_NF_REGRA_GERAL.search(plano) or _SO_CONFIRMA.fullmatch(plano))
+
+
 # A garantia que NÃO cobre o aparelho hoje (revisão 2 de 20/10/2026): com uma
 # destas no que `ver_garantia` devolveu, qualquer fala de garantia/cobertura do
 # agente vai para pessoa — é ela quem decide, e o CDC vale (regra 7).
@@ -5098,7 +5122,20 @@ async def conferir_saida(
     if (
         motivo_do_pedido
         and agente
-        and (afirma_do_pedido(final) or sem_dado or desconhecidas or inventados)
+        and (
+            sem_dado
+            or desconhecidas
+            or inventados
+            or (
+                afirma_do_pedido(final)
+                # v18 (c7d6db8b, 04/11/2026): o aviso cobrava um pedido que a regra não cita.
+                and not (
+                    categoria == "nota_fiscal"
+                    and not conversa.pedido_marketplace
+                    and so_a_regra_da_nf(final)
+                )
+            )
+        )
     ):
         motivos.append(motivo_do_pedido)
     from app.services.atendimento import evidencias
@@ -5162,7 +5199,9 @@ async def conferir_saida(
             ]
         )
     erros = validador.validar(
-        final,
+        # D3 do dono (04/11/2026): a lacuna do link só vira URL no fim da 1ª camada do agente;
+        # aqui o validador não aceita URL nenhuma (o link que o modelo escreveu fica barrado).
+        validador.sem_lacuna_de_link(final) if agente else final,
         plataforma=conversa.plataforma,
         canal=conversa.canal,
         origem=ORIGEM_IA,

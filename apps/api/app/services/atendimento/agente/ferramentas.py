@@ -72,6 +72,7 @@ from app.models.atendimento import AtendimentoPedidoComprador
 from app.services import garantia as garantia_svc
 from app.services.atendimento import (
     ag_cancelamento,
+    anuncio_publico,
     constantes,
     especificacoes,
     ficha,
@@ -139,7 +140,8 @@ DESCRICOES: dict[str, str] = {
         "afirmar característica, variação, cor ou disponibilidade. Variação: só disponível "
         'ou esgotado, nunca quantidade; fonte "cadastro" é o nome interno (não afirme a '
         "opção por ele) e completas=false quer dizer que pode haver outras. Só anúncios "
-        "citados na conversa ou desta mesma loja."
+        "citados na conversa ou desta mesma loja. Campo link, quando vier: como usar está "
+        "em buscar_anuncios_da_loja."
     ),
     VER_PEDIDO: (
         "Outro pedido do MESMO comprador nesta loja: situação, itens, envio, entrega, NF, "
@@ -175,11 +177,11 @@ DESCRICOES: dict[str, str] = {
         "tenha o recurso que o produto da conversa não tem ('NFC', '5G', '512 GB', "
         "'expansivel'). Cada um: "
         "item_id, nome_curto, variacoes_casadas, disponivel (true = à venda e disponível; "
-        "false = esgotado; null = não se sabe) e da_conversa. Termo curto, só o produto "
-        "('cesto de vidro 4 litros', 'capa A18', 'Doogee Fire 7 Ultra'). Para dizer que a "
-        "loja tem ou vende outro produto, cite anuncio:<item_id> com disponivel=true (ou "
+        "false = esgotado; null = não se sabe), da_conversa e, onde há, link. Termo curto, só "
+        "o produto ('cesto de vidro 4 litros', 'capa A18', 'Doogee Fire 7 Ultra'). Para dizer "
+        "que a loja tem ou vende outro produto, cite anuncio:<item_id> com disponivel=true (ou "
         "false para dizer que está esgotado) e diga que ele aparece na página da loja no "
-        "app, pelo nome — nunca link nem preço. 'Não temos' só com o fato aprovado (capinha, "
+        "app, pelo nome — nunca URL nem preço. 'Não temos' só com o fato aprovado (capinha, "
         "película) ou quando a busca diz que nenhum título da loja tem o acessório (a busca "
         "vazia do termo inteiro não prova: busque de novo, mais curto); modelo ou versão que "
         "a busca não achou: pergunte qual é ou encaminhe, nunca 'não temos'. Não prova "
@@ -195,8 +197,17 @@ DESCRICOES: dict[str, str] = {
         "anuncio:<id>: 'Este não tem NFC, mas temos o <nome>, que tem; aparece na página da "
         "loja no app, pelo nome.' Isto não é emendar outro assunto nem motivo de pessoa, mesmo "
         "com o Manual encaminhando. Sem confirmar: diga só que este não tem. Com pedido, "
-        "reclamação ou defeito: só se o cliente pedir outro. Pedido de link: oriente buscar "
-        "pelo nome, sem dizer que não envia link; quem já buscou e não achou ou insiste: acao "
+        "reclamação ou defeito: só se o cliente pedir outro. "
+        # D3 do dono (04/11/2026, "nao da pra ele mesmo abrir e ter os da loja o agente"): só
+        # a Shopee recebe o campo `link`; o ML fica como estava até as primeiras respostas
+        # públicas passarem. O texto é um só por ferramenta: quem não recebe o campo cai na
+        # última frase. Quem preenche e confere: `checagens.com_os_links_do_anuncio`.
+        "Link: quando o anúncio trouxer o campo link (a lacuna {link_anuncio:x}), ao cliente "
+        "que pede o link ou não acha o anúncio, e na oferta do recurso, escreva a lacuna "
+        "exatamente como veio, a do anúncio de que a frase fala ('Segue o link do anúncio: "
+        "{link_anuncio:x}'): o sistema a troca pelo link do anúncio da loja, e é o único link "
+        "permitido. Nunca escreva URL nem invente lacuna. Sem o campo link: oriente buscar pelo "
+        "nome, sem dizer que não envia link; quem já buscou e não achou ou insiste: acao "
         "'pessoa' (dado_indisponivel), com anuncio:<id> no motivo."
     ),
 }
@@ -766,6 +777,45 @@ def _conversa_do_pedido(ctx: ContextoAgente, alvo: Alvo) -> SimpleNamespace:
     )
 
 
+# ── O link do anúncio (D3 do dono, 04/11/2026; ver `catalogo`) ─────────────
+
+# Só a Shopee: o ML fica sem a lacuna até as primeiras respostas públicas passarem.
+_PLATAFORMA_DO_LINK = "shopee"
+
+
+async def _shop_id_do_link(s: AsyncSession, ctx: ContextoAgente) -> int | None:
+    """O id da loja para montar o link; None fora da plataforma do link (nada a oferecer)."""
+    if ctx.plataforma != _PLATAFORMA_DO_LINK or ctx.integration_id is None:
+        return None
+    return await anuncio_publico._shop_id(s, ctx.integration_id)
+
+
+def _com_link(
+    ctx: ContextoAgente, anuncio: dict[str, Any], shop_id: int | None, titulo_plano: str
+) -> dict[str, Any]:
+    """O anúncio com a lacuna do link, quando dá para montar: anúncio vivo DESTA loja (quem
+    chama garante) e à venda (`disponivel` true: nem o esgotado nem o pausado ou o "não se sabe").
+    O modelo só vê a lacuna; a URL fica no `ctx`."""
+    if shop_id is None or anuncio.get("disponivel") is not True:
+        return anuncio
+    url = anuncio_publico.link_montado(_PLATAFORMA_DO_LINK, anuncio.get("item_id"), shop_id=shop_id)
+    if url is None:
+        return anuncio
+    lacuna = ctx.oferecer_link(str(anuncio["item_id"]), url, titulo_plano)
+    return {**anuncio, "link": lacuna} if lacuna else anuncio
+
+
+def _nada_a_venda_na_ficha(f: Mapping[str, Any] | None) -> bool:
+    """A lista completa da ficha, sem nenhuma variação disponível: é como o anúncio parado chega
+    (`variacoes._parado`), e o vínculo não sabe. O anúncio sem variação não dá esse sinal. PURA."""
+    variacoes = [v for v in (f or {}).get("variacoes") or [] if isinstance(v, Mapping)]
+    return (
+        bool(variacoes)
+        and (f or {}).get("variacoes_completas") is True
+        and not any(v.get("disponivel") is True for v in variacoes)
+    )
+
+
 # ── 1. ver_anuncio ────────────────────────────────────────────────────────
 
 _CHAVES_VARIACAO = ("nome", "disponivel", "confiavel", "fonte", "selecionada")
@@ -844,7 +894,26 @@ async def dados_ver_anuncio(
         )
         produtos = await especificacoes.produtos_do_anuncio(s, plat, ctx.integration_id, item)
         espec = await especificacoes.especificacoes_do_produto(s, f, produtos, titulo)
+        # D3 do dono (04/11/2026): só o anúncio com vínculo vivo DESTA loja, nunca o cartão de
+        # outro vendedor que o cliente mandou.
+        shop_id = await _shop_id_do_link(s, ctx)
+        vinculos = (
+            (await catalogo.vinculos_da_loja(s, plat, ctx.integration_id, item_id=item)).get(item)
+            if shop_id is not None
+            else None
+        )
     dados: dict[str, Any] = {"item_id": item, "titulo": titulo}
+    if vinculos and _nada_a_venda_na_ficha(f):
+        ctx.retirar_link(item)
+    elif vinculos:
+        com_link = _com_link(
+            ctx,
+            {"item_id": item, "disponivel": catalogo.disponivel(vinculos)},
+            shop_id,
+            catalogo.plano(" ".join(v.titulo for v in vinculos)),
+        )
+        if com_link.get("link"):
+            dados["link"] = com_link["link"]
     ids = []
     if f or titulo or (espec.get("campos") if isinstance(espec, Mapping) else None):
         # A trava da ficha no automático vale para o que se leu aqui também —
@@ -1799,8 +1868,8 @@ async def dados_buscar_anuncios_da_loja(
 
     A mesma integração e a mesma plataforma da conversa (nunca o Bling, nunca outra
     loja), vínculo vivo; até `catalogo.MAX_ANUNCIOS`, cada um com `anuncio:<item_id>`
-    nas evidências. Sem preço, quantidade, SKU nem link. "da_conversa" = o anúncio é o
-    da conversa (citado, cartão, item do pedido).
+    nas evidências. Sem preço, quantidade nem SKU; na Shopee, a lacuna do link (D3 do dono,
+    `_com_link`). "da_conversa" = o anúncio é o da conversa (citado, cartão, item do pedido).
     """
     lido = catalogo.ler_termo(termo)
     plat = ficha.plataforma_do_catalogo(ctx.plataforma)
@@ -1817,9 +1886,10 @@ async def dados_buscar_anuncios_da_loja(
     citados |= {i for i in ctx.anuncios_do_pacote if i}
     async with sessao.sessao_leitura() as s:
         por_anuncio = await catalogo.vinculos_da_loja(s, plat, ctx.integration_id)
+        shop_id = await _shop_id_do_link(s, ctx)
     achados = catalogo.buscar_nos_vinculos(lido, por_anuncio, da_conversa=citados)
     ausentes = [] if achados else catalogo.sem_no_titulo(lido.acessorios, por_anuncio)
-    anuncios = [a.para_o_modelo() for a in achados]
+    anuncios = [_com_link(ctx, a.para_o_modelo(), shop_id, a.titulo_plano) for a in achados]
     dados: dict[str, Any] = {"termo": lido.texto, "anuncios": anuncios}
     if anuncios:
         dados["como_achar"] = COMO_ACHAR
@@ -1834,7 +1904,10 @@ async def dados_buscar_anuncios_da_loja(
             "termo": lido.texto,
             "acessorios": sorted(lido.acessorios),
             "modelo": lido.modelo,
-            "anuncios": [{**a.para_o_modelo(), "titulo_plano": a.titulo_plano} for a in achados],
+            "anuncios": [
+                {**d, "titulo_plano": a.titulo_plano}
+                for a, d in zip(achados, anuncios, strict=True)
+            ],
             "sem_no_titulo": ausentes,
         },
     )
