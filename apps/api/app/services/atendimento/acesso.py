@@ -91,26 +91,35 @@ def so_le(user: User) -> bool:
     return pode_ver(user) and not pode_mexer(user)
 
 
+def _leitura_email_concedida(user: User, recurso: str) -> bool:
+    grant = (user.permissions or {}).get(recurso)
+    return (
+        user.status == UserStatus.ACTIVE
+        and isinstance(grant, dict)
+        and grant.get("view") is True
+    )
+
+
+def ve_caixa_email(user: User) -> bool:
+    """A caixa completa: admin ou leitura explícita, ainda limitada por caixa.
+
+    A permissão da aba/Filas sozinha não abre mensagens da Central. Enviar,
+    configurar e administrar continuam exclusivos de administradores.
+    """
+    return user.role == UserRole.ADMIN or _leitura_email_concedida(
+        user, "atendimento_email_leitura"
+    )
+
+
 def ve_aba_email(user: User) -> bool:
-    """Vê a ABA E-MAIL inteira do /atendimento: SÓ ADMIN.
+    """Admin ou concessões novas de leitura da aba ou da caixa (04/11/2026).
 
-    30/10/2026, o Eduardo, ao separar as lojas por pessoa: "o email ninguém
-    pode ver a não ser admin né, já no atendimento eles vão ver só das caixas
-    dele — só o admin vê também todos os atendimentos e todos os emails". A
-    permissão `atendimento_email` (28/10/2026, o marrocos vendo e respondendo a
-    aba) deixou de abrir a aba: quem não é admin lê e-mail só pelas caixas das
-    LOJAS DELE na barra da Caixa (`services/atendimento/escopo.py`). A mesma
-    conta do `veAbaEmail` do web; a API recusa as rotas da aba com 403
-    `aba_email_so_admin`.
-
-    04/11/2026, o Eduardo: "libere a visualização da aba de email pro user
-    marrocos". Permissão NOVA, `atendimento_email_aba` view, só para LER: a antiga
-    segue sem abrir, porque londres e israel também a têm marcada. As ações da aba
-    continuam de admin (`_acao_da_aba`, no router)."""
-    if user.role == UserRole.ADMIN:
-        return True
-    perm = (getattr(user, "permissions", None) or {}).get("atendimento_email_aba")
-    return isinstance(perm, dict) and perm.get("view") is True
+    `atendimento_email_aba` mantém acesso às Filas. `atendimento_email_leitura`
+    também abre a aba para consultar as caixas autorizadas. Nenhuma delas
+    permite enviar/configurar nem amplia o escopo das lojas. A permissão
+    antiga `atendimento_email` continua sem abrir a aba.
+    """
+    return ve_caixa_email(user) or _leitura_email_concedida(user, "atendimento_email_aba")
 
 
 def responde_email(user: User) -> bool:

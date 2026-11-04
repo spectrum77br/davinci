@@ -25,8 +25,8 @@ visualmente igual ao Tuta".
       que a ponte ligou a uma conversa de CHAT (o aviso de até 13/10, a mesma
       mensagem da Amazon pelo Gmail) não leva: o chat não mostra e-mail.
 
-A caixa inteira da Central exige administrador em todas as rotas HTTP, mesmo
-quando existem concessões antigas para donos ou leitores. Os e-mails das lojas
+A caixa inteira da Central exige administrador ou concessão explícita de leitura,
+além do acesso à caixa. Concessões antigas sozinhas não abrem a Central. Os e-mails das lojas
 no Atendimento continuam usando suas rotas e seu escopo próprios.
 O conteúdo continua cifrado: o índice
 (`services/mail_atendimento/indice.py`) guarda só a pasta e a loja; o
@@ -50,14 +50,13 @@ from sqlalchemy import DateTime, Uuid, func, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_admin
 from app.models import AtendimentoConversa, Integration, Marca, StoreInfo
 from app.models.mail import MailMailbox, MailMessage
 from app.models.mail_admin import MailAcesso, MailLixeira
 from app.models.mail_atendimento import MailCaixaIndice, MailMailboxSettings
 from app.models.user import User
 from app.routers.atendimento import _nomes_das_lojas
-from app.routers.mail import readable_mailbox
+from app.routers.mail import MailReader, readable_mailbox
 from app.security.cipher import decrypt_json
 from app.services.atendimento import acesso, separa_email
 from app.services.atendimento import lojas as lojas_svc
@@ -68,7 +67,6 @@ from app.services.mail_bridge_sync import folder_content
 
 router = APIRouter(prefix="/api/mail", tags=["mail"])
 Session = Annotated[AsyncSession, Depends(get_session)]
-Admin = Annotated[User, Depends(require_admin)]
 
 POR_PAGINA = 50
 # Conteúdo cifrado: a busca varre só resumos autorizados, em lotes limitados.
@@ -405,7 +403,7 @@ def _pastas_do_catalogo(mailbox: MailMailbox) -> dict[str, pastas.PastaDoEmail]:
 async def pastas_da_caixa(
     mailbox_id: UUID,
     session: Session,
-    user: Admin,
+    user: MailReader,
     response: Response,
     loja: str | None = Query(default=None, max_length=40),
     pasta: str | None = Query(default=None, max_length=40),
@@ -629,7 +627,7 @@ async def _resumos_da_pagina(
 async def lista_da_caixa(
     mailbox_id: UUID,
     session: Session,
-    user: Admin,
+    user: MailReader,
     response: Response,
     pasta: str | None = Query(default=None, max_length=40),
     loja: str | None = Query(default=None, max_length=40),

@@ -140,16 +140,17 @@ async function principal() {
     }
     for (const chave of ['"leitores"', '"candidatos"', '"atualizado_por"', '"atualizado_em"', '"ativo"', '"nome"']) assert.ok(svc.includes(chave), chave)
     const central = api('routers/mail.py')
-    // Ler: a regra de leitores; escrever: o allowed() dele (user_mailbox).
+    // A permissão nova abre leitura sujeita ao acesso específico da caixa.
+    // Responder e resolver continuam exigindo admin, mesmo com grants antigos.
     assert.match(central, /item\["so_leitura"\] = True/)
+    assert.match(central, /async def require_mail_reader[\s\S]*?acesso\.ve_caixa_email\(user\)/)
+    assert.match(api('services/atendimento/acesso.py'), /def ve_caixa_email[\s\S]*?_leitura_email_concedida\(\s*user, "atendimento_email_leitura"\s*\)/)
     assert.match(central, /async def readable_mailbox[\s\S]*pode_ver_caixa/)
     assert.match(central, /def list_messages[\s\S]*?await readable_mailbox\(/)
     assert.match(central, /def get_message[\s\S]*?user_message\(session, message_id, user, read=True\)/)
     assert.match(central, /def download_attachment[\s\S]*?read=True\)/)
-    // 28/10/2026: o leitor só responde com `atendimento_email` ver+editar
-    // (`pode_responder_caixa`); sem ela, o mesmo 404 de antes.
-    assert.match(central, /def reply\([\s\S]*?user_message\(session, message_id, user, lock=True, read=True\)\n\s+if not await mail_admin\.pode_responder_caixa\(session, mailbox, user\):\n\s+raise fail\("mailbox_not_found"\)/)
-    assert.match(central, /def resolve_outbox[\s\S]*?service\.allowed\(mailbox, user\)/)
+    assert.match(central, /def reply\([^\n]+user: Admin\):/)
+    assert.match(central, /def resolve_outbox\([^\n]+user: Admin\):/)
   }
 
   // ------------------------------------------------ funções puras
@@ -174,11 +175,12 @@ async function principal() {
     await m.montar()
     let html = await m.html()
     assert.match(html, /Quem mais vê/)
-    // 30/10/2026: a aba E-mail é só de admin — o leitor só lê as lojas dele e não responde.
-    assert.match(html, /Desde 30\/10\/2026 a aba E-mail é só de admin/)
-    assert.doesNotMatch(html, /Responde os e-mails recebidos só quem também tiver a permissão/)
+    assert.match(html, /permissão de leitura da Central/)
+    assert.match(html, /autorizações necessárias em conjunto/)
+    assert.match(html, /sem responder, enviar ou configurar/)
+    assert.match(html, /Permissões antigas de e-mail não liberam esse acesso/)
     assert.match(html, /data-leitor="isr"[\s\S]*Israel/)
-    assert.match(html, /Ninguém além do dono e dos admins/)
+    assert.match(html, /Nenhuma autorização adicional registrada/)
     assert.equal(m.estado.mudou, false)
     await m.estado.salvar()
     assert.equal(m.chamadas.filter((c) => c.metodo === 'PUT').length, 0, 'sem mudança: nada')
@@ -186,7 +188,8 @@ async function principal() {
     assert.equal(m.estado.mudou, true)
     await m.estado.salvar()
     assert.equal(m.chamadas.filter((c) => c.metodo === 'PUT').length, 0, 'desistiu: nada')
-    assert.match(m.perguntas[0], /Pôr Israel na lista de quem vê a caixa "Principal 061"\? Desde 30\/10\/2026 a aba E-mail é só de admin/)
+    assert.match(m.perguntas[0], /Pôr Israel na lista de quem vê a caixa "Principal 061"\? A pessoa também precisa da permissão de leitura da Central/)
+    assert.match(m.perguntas[0], /sem responder, enviar ou configurar/)
     confirma = true
     await m.estado.salvar()
     const put = m.chamadas.find((c) => c.metodo === 'PUT')
@@ -210,20 +213,23 @@ async function principal() {
     assert.match(await m2.html(), /role="alert"[^>]*>Só usuários ativos/)
   }
 
-  // A Central não oferece mais concessão individual da caixa completa.
+  // A configuração explica os dois requisitos sem reabrir concessões antigas.
   {
     const fonte = web('components/AtendimentoMailConfigurar.vue')
     assert.doesNotMatch(fonte, /<AtendimentoMailLeitores/)
-    assert.match(fonte, /data-caixa-so-admin>O acesso à caixa completa é exclusivo dos administradores/)
+    assert.match(fonte, /data-caixa-acesso>Administradores podem acessar a caixa completa/)
+    assert.match(fonte, /permissão de leitura da Central e de autorização para esta caixa/)
   }
 
   // ------------------------------------------------ a aba E-mail para o LEITOR
   {
-    const caixa = { id: 'box1', label: 'Principal 061', address: 'p@tuta.com', aliases: ['p@tuta.com', 'loja@tuta.com'], state: 'online', send_enabled: true, can_send: true, last_sync_at: null, so_leitura: true }
-    const mensagem = { id: 'm1', mailbox_id: 'box1', subject: 'Pedido 123', from_address: 'c@x.com', from_name: 'Cliente', to: ['loja@tuta.com'], cc: [], reply_to: null, received_at: '2026-10-09T12:00:00Z', direction: 'inbound', folder: 'INBOX', text: 'Onde está meu pedido?', attachments: [{ id: 'a1', filename: 'nota.pdf', size: 2048 }], reply: { to: 'c@x.com', from_address: 'loja@tuta.com', can_reply: true, send_ready: true }, outbox: [{ id: 'job1', status: 'uncertain', text: 'resp', to: 'c@x.com', from_address: 'loja@tuta.com', created_at: '2026-10-09T12:05:00Z', error_code: null }] }
+    // Flags antigas inconsistentes não podem ampliar so_leitura.
+    const caixa = { id: 'box1', label: 'Principal 061', address: 'p@tuta.com', aliases: ['p@tuta.com', 'loja@tuta.com'], state: 'online', send_enabled: true, can_send: true, last_sync_at: null, so_leitura: true, pode_responder: true, pode_compor: true }
+    const mensagem = { id: 'm1', mailbox_id: 'box1', subject: 'Pedido 123', from_address: 'c@x.com', from_name: 'Cliente', to: ['loja@tuta.com'], cc: [], reply_to: null, received_at: '2026-10-09T12:00:00Z', direction: 'inbound', folder: 'INBOX', text: 'Onde está meu pedido?', attachments: [{ id: 'a1', filename: 'nota.pdf', size: 2048 }], reply: { to: 'c@x.com', from_address: 'loja@tuta.com', can_reply: true, send_ready: true }, outbox: [{ id: 'job1', status: 'uncertain', text: 'resp', to: 'c@x.com', from_address: 'loja@tuta.com', created_at: '2026-10-09T12:05:00Z', error_code: null, pode_conferir: true }] }
     const filhos = {
       AtendimentoMailFilas: { props: ['isAdmin', 'lojas'], setup: () => () => Vue.h('div', { 'data-filas-stub': '' }) },
       AtendimentoMailConfigurar: { props: ['mailbox'], setup: (p) => () => Vue.h('div', { 'data-configurar-stub': p.mailbox.id }) },
+      AtendimentoMailComposer: { setup: () => () => Vue.h('div', { 'data-composer-stub': '' }) },
     }
     // O leitor (usuário comum: a página passa isAdmin=false e canOperate=false).
     const m = montar('../components/AtendimentoMail.vue', { isAdmin: false, canOperate: false, stores: [] }, {
@@ -236,6 +242,8 @@ async function principal() {
     await m.estado.openMessage('m1')
     assert.equal(m.estado.section, 'mailboxes')
     assert.equal(m.estado.readOnly, true)
+    assert.equal(m.estado.canAnswer, false)
+    assert.equal(m.estado.canCompose, false)
     let html = await m.html()
     assert.match(html, /data-mail-read-only[^>]*>Você só vê esta caixa/)
     assert.match(html, /Pedido 123/)
@@ -244,12 +252,31 @@ async function principal() {
     assert.doesNotMatch(html, /Responder|Conferir e enviar resposta|aria-label="Texto da resposta"/)
     assert.doesNotMatch(html, /data-mail-resolve|Não saiu/)
     assert.doesNotMatch(html, /data-mail-configure|data-configurar-stub|Permitir respostas humanas|Desativar respostas|Cadastrar caixa/)
+    assert.doesNotMatch(html, /data-composer-stub|data-mail-message-actions|data-mail-reply-attachments/)
     assert.doesNotMatch(html, /data-mail-sections|data-filas-stub/)
-    // Mesmo que alguém force: nada é enviado.
+    // Mesmo com resposta pronta e sem pendências, nada é enviado nem alterado.
     m.estado.draft = 'não pode'
+    m.estado.detail.outbox = []
+    assert.equal(m.estado.pending, false)
     await m.estado.sendReply()
+    let aberturas = 0
+    m.estado.composer = { open: async () => { aberturas++ } }
+    await m.estado.openComposer('reply')
+    await m.estado.openComposer('forward')
+    await m.estado.resolveJob(mensagem.outbox[0], true)
+    await m.estado.changeSending()
+    m.estado.reviewDelete()
+    assert.equal(m.estado.deleteTarget, null)
+    assert.equal(aberturas, 0)
+    assert.equal(m.perguntas.length, 0)
     assert.equal(m.chamadas.filter((c) => c.metodo !== 'GET').length, 0)
-    // O dono/admin (sem so_leitura) continua vendo o responder e o Saiu/Não saiu, como antes.
+    // Até um perfil admin respeita so_leitura; não há exceção via flags antigas.
+    m.reativo.isAdmin = true
+    await m.estado.changeSending()
+    await m.estado.resolveJob(mensagem.outbox[0], false)
+    assert.equal(m.estado.canCompose, false)
+    assert.equal(m.chamadas.filter((c) => c.metodo !== 'GET').length, 0)
+    // Admin sem so_leitura continua com responder, compositor e conferência.
     const d = montar('../components/AtendimentoMail.vue', { isAdmin: true, canOperate: true, stores: [] }, {
       respostas: { '/api/mail/mailboxes': { items: [{ ...caixa, so_leitura: undefined }] }, '/api/mail/mailboxes/box1/messages': { items: [mensagem], more: false }, '/api/mail/messages/m1': mensagem },
       filhos,
@@ -264,6 +291,49 @@ async function principal() {
     assert.match(html, /Conferir e enviar resposta/)
     assert.match(html, /data-mail-resolve/)
     assert.match(html, /data-mail-configure/)
+    assert.match(html, /data-composer-stub/)
+  }
+
+  // Quem começa nas Filas ainda descobre a caixa expressamente autorizada.
+  {
+    const principal = { id: 'principal', label: 'Principal — Tuta', address: '061083.jf@tuta.com', aliases: [], state: 'online', send_enabled: false, can_send: false, last_sync_at: null, so_leitura: true }
+    const filhos = { AtendimentoMailFilas: { setup: () => () => Vue.h('div', { 'data-filas-stub': '' }) } }
+    for (const inicio of [{ waiting: 3 }, { rememberedSection: 'queues' }, { waiting: 3, waitingReady: false }]) {
+      const m = montar('../components/AtendimentoMail.vue', { isAdmin: false, canView: true, ...inicio }, {
+        respostas: { '/api/mail/mailboxes': { items: [principal] } }, filhos,
+      })
+      await m.montar()
+      if (inicio.waitingReady === false) {
+        assert.equal(m.chamadas.length, 0, 'aguarda a contagem inicial')
+        m.reativo.waitingReady = true
+        await Vue.nextTick(); await esperar()
+      }
+      assert.equal(m.chamadas.filter((c) => c.url === '/api/mail/mailboxes').length, 1, 'descobre a Principal uma vez')
+      assert.equal(m.estado.section, 'queues', 'descobrir caixas não muda a seção escolhida')
+      assert.equal(m.estado.mailboxId, 'principal')
+      const html = await m.html()
+      assert.match(html, />Caixas<\/button>/)
+      assert.match(html, /data-filas-stub/)
+      assert.doesNotMatch(html, /data-mail-admin-tab/)
+      assert.equal(m.chamadas.some((c) => c.url.includes('/principal/')), false, 'não lê mensagens enquanto está nas Filas')
+    }
+
+    // A permissão só da aba não abre Caixas; 403 desfaz a seleção lembrada.
+    for (const rememberedSection of ['', 'mailboxes']) {
+      const m = montar('../components/AtendimentoMail.vue', { isAdmin: false, canView: true, rememberedSection }, {
+        respostas: { '/api/mail/mailboxes': Object.assign(new Error('sem acesso à Central'), { status: 403, data: { detail: { code: 'admin_only' } } }) }, filhos,
+      })
+      await m.montar()
+      assert.equal(m.estado.section, 'queues')
+      assert.equal(m.estado.chosenSection, 'queues')
+      assert.equal(m.estado.mailboxId, '')
+      assert.deepEqual(m.estado.mailboxes, [])
+      assert.equal(m.estado.error, '')
+      const html = await m.html()
+      assert.match(html, /data-filas-stub/)
+      assert.doesNotMatch(html, />Caixas<\/button>|Nenhuma caixa disponível|role="alert"/)
+      assert.deepEqual(m.emitidos.at(-1), ['update:rememberedSection', 'queues'])
+    }
   }
 
   console.log('atendimento-mail-leitores: ok')

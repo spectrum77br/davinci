@@ -313,7 +313,8 @@ async function principal() {
     assert.match(paginaTpl, /v-if="a\.value === 'mail' && emailEsperando"[\s\S]*?data-marca-email\s*>\{\{ emailEsperando > 99 \? '99\+' : emailEsperando \}\}<\/span>/)
     // (27/10/2026: a aba E-mail só para admin; 28/10: ou a permissão atendimento_email.)
     assert.match(paginaTpl, /<template v-if="aba === 'mail' && veAbaEmail">\s+<div v-if="emailConversa"[^>]*data-conversa-de-email>\s+<AtendimentoEmailConversaBarra/)
-    assert.match(paginaTpl, /<AtendimentoEmailConversaBarra\s+:conversa="emailConversaLinha"\s+:pode-mexer="mexe"\s+:com-chat="!!chatDeOrigem"\s+@voltar="fecharConversaDoEmail"\s+@voltar-ao-chat="voltarAoChat"\s+@vinculado="aoVincularConversaDoEmail"\s+\/>/)
+    assert.match(paginaTpl, /<AtendimentoEmailConversaBarra\s+:conversa="emailConversaLinha"\s+:pode-mexer="ehAdmin && mexe"\s+:com-chat="!!chatDeOrigem"\s+@voltar="fecharConversaDoEmail"\s+@voltar-ao-chat="voltarAoChat"\s+@vinculado="aoVincularConversaDoEmail"\s+\/>/)
+    assert.match(paginaTpl, /:conversa-id="emailConversa"\s+:can-edit="ehAdmin && canResponder"/)
     assert.match(paginaTpl, /<AtendimentoConversa\s+:key="`\$\{emailConversa\}:\$\{emailConversaVersao\}`"\s+:conversa-id="emailConversa"[\s\S]*?:ativa="aba === 'mail'"\s+@mudou="aoMudarConversaDoEmail"[\s\S]*?@abrir-conversa="abrirConversaDoEmail"/)
   }
 

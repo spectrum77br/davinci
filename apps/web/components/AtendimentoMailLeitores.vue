@@ -7,8 +7,9 @@
 //       ativos, sem o dono e sem admins: esses já veem) e quem/quando mudou;
 //   PUT /api/mail/mailboxes/{id}/leitores {leitores: [ids]} — troca a lista.
 //
-// O leitor vê a caixa (a lista e o e-mail aberto, os anexos); nunca responde,
-// resolve envio, configura nem troca a chave (a API confere).
+// A lista só libera a caixa a quem também recebeu `atendimento_email_leitura`
+// (view). A permissão antiga `atendimento_email` não libera a Central.
+// O leitor nunca responde, resolve envio, configura nem troca a chave.
 // Funções puras aqui em cima (tests/atendimento-mail-leitores.cjs).
 
 export type Pessoa = { id: string; nome: string }
@@ -86,7 +87,7 @@ async function salvar() {
   const novos = escolhidos.value.filter((id) => !visao.value!.leitores.some((l) => l.id === id))
   if (novos.length) {
     const nomes = opcoes.value.filter((o) => novos.includes(o.id)).map((o) => o.nome).join(', ')
-    if (!confirm(`Pôr ${nomes} na lista de quem vê a caixa "${props.mailbox.label}"? Desde 30/10/2026 a aba E-mail é só de admin: a pessoa não abre a caixa na tela e não responde por aqui.`)) return
+    if (!confirm(`Pôr ${nomes} na lista de quem vê a caixa "${props.mailbox.label}"? A pessoa também precisa da permissão de leitura da Central. O acesso permite apenas ler mensagens e anexos, sem responder, enviar ou configurar.`)) return
   }
   salvando.value = true
   erro.value = null
@@ -105,10 +106,10 @@ onMounted(() => { void carregar() })
   <fieldset class="space-y-2 border-t pt-3" :disabled="salvando" data-mail-leitores>
     <legend class="sr-only">Quem mais vê</legend>
     <div class="flex items-center gap-2 text-xs font-medium"><Eye class="h-3.5 w-3.5" /> Quem mais vê <Loader2 v-if="carregando" class="h-3.5 w-3.5 animate-spin" /></div>
-    <p class="text-[11px] text-muted-foreground">Além do dono e dos admins. Desde 30/10/2026 a aba E-mail é só de admin: quem estiver marcado não abre mais a caixa na tela (no Atendimento, cada pessoa vê só as caixas das lojas dela). Responder por aqui, configurar e trocar a chave: só o dono e os admins.</p>
+    <p class="text-[11px] text-muted-foreground">Administradores acessam a caixa. Para outros usuários, marque a pessoa e libere a permissão de leitura da Central. São autorizações necessárias em conjunto: apenas ler mensagens e anexos, sem responder, enviar ou configurar. Permissões antigas de e-mail não liberam esse acesso.</p>
     <p v-if="erro" role="alert" class="rounded border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">{{ erro }}</p>
     <div v-if="visao" class="max-h-48 space-y-1 overflow-y-auto rounded border p-2">
-      <p v-if="!opcoes.length" class="text-xs text-muted-foreground">Nenhum usuário ativo além do dono e dos admins.</p>
+      <p v-if="!opcoes.length" class="text-xs text-muted-foreground">Nenhum usuário ativo disponível para adicionar.</p>
       <label v-for="o in opcoes" :key="o.id" class="flex items-center gap-2 text-xs" :data-leitor="o.id">
         <input type="checkbox" :checked="escolhidos.includes(o.id)" @change="alternar(o.id, ($event.target as HTMLInputElement).checked)" />
         <span>{{ o.nome }}</span>
@@ -116,7 +117,7 @@ onMounted(() => { void carregar() })
       </label>
     </div>
     <div v-if="visao" class="flex flex-wrap items-center gap-2">
-      <span class="text-[11px] text-muted-foreground"><template v-if="visao.atualizado_em">Mudou por último: {{ visao.atualizado_por?.nome || '—' }} em {{ fmtDataHora(visao.atualizado_em) }}</template><template v-else>Ninguém além do dono e dos admins.</template></span>
+      <span class="text-[11px] text-muted-foreground"><template v-if="visao.atualizado_em">Mudou por último: {{ visao.atualizado_por?.nome || '—' }} em {{ fmtDataHora(visao.atualizado_em) }}</template><template v-else>Nenhuma autorização adicional registrada.</template></span>
       <button type="button" class="ml-auto inline-flex items-center gap-1 rounded bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-40" :disabled="!mudou || salvando" data-salvar-leitores @click="salvar">
         <Loader2 v-if="salvando" class="h-3.5 w-3.5 animate-spin" /><Save v-else class="h-3.5 w-3.5" /> salvar quem vê
       </button>

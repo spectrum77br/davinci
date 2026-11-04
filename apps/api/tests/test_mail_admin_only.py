@@ -10,6 +10,7 @@ from app.deps.auth import require_admin
 from app.main import app
 from app.models.mail import MailDraft, MailMailbox, MailMessage, MailOutbox
 from app.models.mail_atendimento import MailMailboxSettings
+from app.routers.mail import require_mail_reader
 from tests.test_mail_central import ROOT, account, enable, ingest, message
 
 
@@ -47,7 +48,7 @@ def human_routes(box, mid, aid, job, draft):
     ]
 
 
-@pytest.mark.parametrize("tipo", ["comum", "dono", "leitor", "permissoes_antigas"])
+@pytest.mark.parametrize("tipo", ["comum", "dono", "leitor", "permissoes_antigas", "aba_apenas"])
 async def test_central_recusa_todas_rotas_humanas_sem_admin(
     client, account, db, make_user, auth_as, tipo,
 ):
@@ -63,13 +64,17 @@ async def test_central_recusa_todas_rotas_humanas_sem_admin(
     draft_response = await client.post(f"{ROOT}/mailboxes/{box}/drafts", json={"text": "Rascunho"})
     assert draft_response.status_code == 201, draft_response.text
     permissions = {"atendimento_email": {"view": True, "edit": True, "delete": True}}
-    user = await make_user(permissions=permissions if tipo == "permissoes_antigas" else {})
+    if tipo == "aba_apenas":
+        permissions = {"atendimento_email_aba": {"view": True, "edit": True}}
+    user = await make_user(
+        permissions=permissions if tipo in {"permissoes_antigas", "aba_apenas"} else {}
+    )
     mailbox = await db.get(MailMailbox, UUID(box))
     draft = await db.get(MailDraft, UUID(draft_response.json()["id"]))
     job = await db.get(MailOutbox, UUID(queued.json()["id"]))
     if tipo == "dono":
         mailbox.owner_user_id = user.id
-    if tipo in {"leitor", "permissoes_antigas"}:
+    if tipo in {"leitor", "permissoes_antigas", "aba_apenas"}:
         db.add(MailMailboxSettings(mailbox_id=mailbox.id, leitores=[str(user.id)]))
     # Mesmo ser autor dos objetos da caixa não substitui a função de admin.
     draft.author_user_id = user.id
@@ -112,16 +117,92 @@ async def test_central_recusa_todas_rotas_humanas_sem_admin(
 
 
 def test_novas_rotas_humanas_nao_podem_ficar_sem_trava_admin():
-    def uses_admin(dependant):
-        return dependant.call is require_admin or any(uses_admin(d) for d in dependant.dependencies)
+    def uses(dependant, dependency):
+        return dependant.call is dependency or any(
+            uses(d, dependency) for d in dependant.dependencies
+        )
+
+    reader_paths = {
+        "/api/mail/mailboxes",
+        "/api/mail/mailboxes/{mailbox_id}/messages",
+        "/api/mail/messages/{message_id}",
+        "/api/mail/attachments/{attachment_id}",
+        "/api/mail/mailboxes/{mailbox_id}/pastas",
+        "/api/mail/mailboxes/{mailbox_id}/lista",
+    }
 
     human = [route for route in app.routes
              if getattr(route, "path", "").startswith(f"{ROOT}/")
              and not route.path.startswith(f"{ROOT}/agent/")]
     assert human
     for route in human:
-        assert uses_admin(route.dependant), (route.methods, route.path)
+        dependency = (
+            require_mail_reader if route.methods == {"GET"} and route.path in reader_paths
+            else require_admin
+        )
+        assert uses(route.dependant, dependency), (route.methods, route.path)
     agents = [route for route in app.routes
               if getattr(route, "path", "").startswith(f"{ROOT}/agent/")]
     assert agents
-    assert all(not uses_admin(route.dependant) for route in agents)
+    assert all(not uses(route.dependant, require_admin) for route in agents)
+    assert all(not uses(route.dependant, require_mail_reader) for route in agents)
+
+
+@pytest.mark.parametrize("dono", [False, True])
+async def test_excecao_nova_le_so_a_caixa_liberada_sem_poder_escrever(
+    client, account, db, make_user, auth_as, dono,
+):
+    box = account["mailbox"]["id"]
+    mid = await ingest(client, account)
+    aid = (await client.get(f"{ROOT}/messages/{mid}")).json()["attachments"][0]["id"]
+    await enable(client, account)
+    other = await client.post(f"{ROOT}/mailboxes", json={
+        "label": "Caixa não autorizada", "address": "restricted@example.com",
+    })
+    assert other.status_code == 201
+    user = await make_user(permissions={
+        "atendimento_email_leitura": {"view": True, "edit": False, "delete": False},
+        "atendimento_email": {"view": True, "edit": True, "delete": False},
+    })
+    mailbox = await db.get(MailMailbox, UUID(box))
+    if dono:
+        mailbox.owner_user_id = user.id
+    else:
+        db.add(MailMailboxSettings(mailbox_id=mailbox.id, leitores=[str(user.id)]))
+    await db.commit()
+    auth_as(user)
+    paths = {
+        f"{ROOT}/mailboxes", f"{ROOT}/mailboxes/{box}/messages", f"{ROOT}/messages/{mid}",
+        f"{ROOT}/attachments/{aid}", f"{ROOT}/mailboxes/{box}/pastas",
+        f"{ROOT}/mailboxes/{box}/lista",
+    }
+    for method, path, body in human_routes(box, mid, aid, uuid4(), uuid4()):
+        result = await getattr(client, method)(path, **({"json": body} if body is not None else {}))
+        if method == "get" and path in paths:
+            assert result.status_code == 200, (path, result.text)
+        else:
+            assert result.status_code == 403, (method, path, result.text)
+    listed = (await client.get(f"{ROOT}/mailboxes")).json()["items"]
+    assert len(listed) == 1 and listed[0]["id"] == box
+    assert listed[0]["so_leitura"] is True
+    assert listed[0]["pode_responder"] is listed[0]["pode_compor"] is False
+    detail = (await client.get(f"{ROOT}/messages/{mid}")).json()
+    assert detail["reply"]["can_reply"] is False
+    assert (await client.get(f"{ROOT}/mailboxes/{other.json()['id']}/messages")).status_code == 404
+    assert await db.scalar(select(func.count()).select_from(MailOutbox)) == 0
+
+    # Retirar somente a nova permissão fecha inclusive links diretos antigos.
+    user.permissions = {"atendimento_email": {"view": True, "edit": True}}
+    await db.commit()
+    for path in paths:
+        assert (await client.get(path)).status_code == 403
+
+
+async def test_permissao_nova_sem_concessao_de_caixa_nao_libera_conteudo(
+    client, account, db, make_user, auth_as,
+):
+    mid = await ingest(client, account)
+    user = await make_user(permissions={"atendimento_email_leitura": {"view": True}})
+    auth_as(user)
+    assert (await client.get(f"{ROOT}/mailboxes")).json() == {"items": []}
+    assert (await client.get(f"{ROOT}/messages/{mid}")).status_code == 404

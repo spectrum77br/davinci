@@ -63,6 +63,9 @@ Resource = Literal[
     # 28/10/2026: `edit` (junto com o view) = RESPONDER o e-mail recebido nas
     # caixas que a pessoa vê (`acesso.responde_email`), sem virar admin.
     "atendimento_email",
+    # Exceção explícita de leitura da Central. Não reativa concessões antigas
+    # nem permite enviar/configurar; cada caixa mantém sua lista de leitores.
+    "atendimento_email_leitura",
     # Legacy single-bucket — no longer used by any route after the
     # financeiro_* split below, but kept in the literal so stored
     # permissions JSON containing the old key still validates.

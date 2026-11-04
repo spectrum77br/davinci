@@ -1,4 +1,4 @@
-"""Admin-only inbox + mailbox-scoped Mac worker. No mailbox credentials on the server."""
+"""Admin inbox, explicit readers and mailbox-scoped Mac worker. No mailbox credentials."""
 
 import secrets
 from datetime import UTC, datetime
@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only
 
 from app.db import get_session
-from app.deps.auth import require_admin
+from app.deps.auth import require_active_user, require_admin
 from app.models.enums import UserRole, UserStatus
 from app.models.mail import MailAttachment, MailDraft, MailMailbox, MailMessage, MailOutbox
 from app.models.user import User
@@ -32,6 +32,7 @@ from app.schemas.mail_bridge_sync import BridgeSnapshot
 from app.security.cipher import decrypt_bytes, decrypt_json, encrypt_json
 from app.services import mail_central as service
 from app.services import mail_composer
+from app.services.atendimento import acesso
 from app.services.mail_atendimento import administracao as mail_admin
 from app.services.mail_atendimento import caixa as mailbox_settings
 from app.services.mail_atendimento import responder as mail_responder
@@ -39,6 +40,15 @@ from app.services.mail_atendimento import responder as mail_responder
 router = APIRouter(prefix="/api/mail", tags=["mail"])
 Session = Annotated[AsyncSession, Depends(get_session)]
 Admin = Annotated[User, Depends(require_admin)]
+
+
+async def require_mail_reader(user: Annotated[User, Depends(require_active_user)]) -> User:
+    if not acesso.ve_caixa_email(user):
+        raise HTTPException(403, detail={"code": "admin_only"})
+    return user
+
+
+MailReader = Annotated[User, Depends(require_mail_reader)]
 
 
 def fail(code: str, status: int = 404) -> HTTPException:
@@ -134,7 +144,7 @@ AgentMailbox = Annotated[MailMailbox, Depends(agent_mailbox)]
 
 
 @router.get("/mailboxes")
-async def list_mailboxes(session: Session, user: Admin, response: Response):
+async def list_mailboxes(session: Session, user: MailReader, response: Response):
     response.headers["Cache-Control"] = "no-store"
     query = select(MailMailbox).order_by(MailMailbox.label)
     if user.role != UserRole.ADMIN:
@@ -143,15 +153,10 @@ async def list_mailboxes(session: Session, user: Admin, response: Response):
     items = []
     for mailbox in mailboxes:
         item = service.mailbox_view(mailbox)
-        if not service.allowed(mailbox, user):
+        if user.role != UserRole.ADMIN:
             item["so_leitura"] = True
-            # Só lê a caixa, mas pode RESPONDER o e-mail recebido (permissão
-            # `atendimento_email` ver+editar, 28/10/2026): a tela mostra só o
-            # formulário de resposta; o resto da caixa continua só leitura.
-            item["pode_responder"] = await mail_admin.pode_responder_caixa(session, mailbox, user)
-            # ... e ESCREVE e-mail novo (Nova mensagem, rascunhos, encaminhar,
-            # anexos) quando vê a caixa inteira (29/10/2026).
-            item["pode_compor"] = await mail_composer.can_compose(session, mailbox, user)
+            item["pode_responder"] = False
+            item["pode_compor"] = False
         if await mail_admin.tem_politica(session, mailbox.id, user):
             # A concessão é de mensagens, não da lista de aliases das outras lojas.
             item.update(address="", aliases=[], leitura_filtrada=True)
@@ -220,7 +225,7 @@ async def rotate_token(mailbox_id: UUID, session: Session, user: Admin, response
 async def list_messages(
     mailbox_id: UUID,
     session: Session,
-    user: Admin,
+    user: MailReader,
     response: Response,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0, le=100_000),
@@ -246,7 +251,7 @@ async def list_messages(
 
 
 @router.get("/messages/{message_id}")
-async def get_message(message_id: UUID, session: Session, user: Admin, response: Response):
+async def get_message(message_id: UUID, session: Session, user: MailReader, response: Response):
     message, mailbox = await user_message(session, message_id, user, read=True)
     attachments = (
         await session.scalars(
@@ -265,8 +270,8 @@ async def get_message(message_id: UUID, session: Session, user: Admin, response:
         .order_by(MailOutbox.created_at)
         .execution_options(yield_per=1)
     )
-    dono = service.allowed(mailbox, user)
-    responde = dono or await mail_admin.pode_responder_caixa(session, mailbox, user)
+    dono = user.role == UserRole.ADMIN
+    responde = dono and await mail_admin.pode_responder_caixa(session, mailbox, user)
     pode_compor = await mail_composer.can_compose(session, mailbox, user) if responde else False
     outbox = []
     async for job in outbox_rows:
@@ -301,6 +306,7 @@ async def get_message(message_id: UUID, session: Session, user: Admin, response:
         ],
         "reply": {
             **reply,
+            "can_reply": reply["can_reply"] and responde,
             "send_ready": service.send_ready(mailbox),
         },
         "outbox": outbox,
@@ -308,7 +314,7 @@ async def get_message(message_id: UUID, session: Session, user: Admin, response:
 
 
 @router.get("/attachments/{attachment_id}")
-async def download_attachment(attachment_id: UUID, session: Session, user: Admin):
+async def download_attachment(attachment_id: UUID, session: Session, user: MailReader):
     attachment = await session.get(MailAttachment, attachment_id)
     if attachment is None:
         raise fail("attachment_not_found")

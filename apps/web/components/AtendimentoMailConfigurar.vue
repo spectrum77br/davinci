@@ -7,9 +7,9 @@
 //                Central (/api/mail/mailboxes/{id} {aliases}): troca a lista
 //                inteira e recifra; o endereço principal fica sempre.
 //   Atendimento — a configuração NOSSA (/api/mail/mailboxes/{id}/settings):
-//     visibilidade  privada (só o dono e os admins) | empresa (a equipe vê os
-//                   e-mails das lojas pelo /atendimento; a caixa inteira, só
-//                   dono/admin);
+//     visibilidade  privada | empresa (a equipe vê os e-mails das lojas pelo
+//                   /atendimento). A Central exige admin ou a nova permissão
+//                   de leitura com autorização específica para a caixa;
 //     ponte         levar ao /atendimento o que chegar DAQUI EM DIANTE;
 //     só aliases de loja — a caixa privada com ponte leva SÓ o e-mail dos
 //                   endereços de loja (obrigatório: o resto dela é do dono);
@@ -21,8 +21,8 @@
 // PRIVADA de outra pessoa, só o DONO abre mais dela para a equipe (passar
 // para empresa, desligar "só endereços de loja", puxar o corte para trás) —
 // o admin pode desligar a ponte (a rota recusa com `so_o_dono_da_caixa`).
-// A caixa completa é exclusiva de administradores; concessões antigas de
-// leitores não liberam a Central.
+// Leitores precisam da permissão `atendimento_email_leitura` e de acesso à
+// caixa. A permissão antiga `atendimento_email` não libera a Central.
 // Funções puras aqui em cima (tests/atendimento-mail-atendimento.cjs).
 
 export type ConfigCaixa = {
@@ -99,7 +99,7 @@ export function mudancasDaConfig(atual: ConfigCaixa, f: FormConfig): Record<stri
 export function confirmacoesDaConfig(m: Record<string, unknown>, nomeDaCaixa: string): string[] {
   const out: string[] = []
   if (m.ponte_ligada === true) out.push(`Ligar a ponte da caixa "${nomeDaCaixa}"? Os e-mails das lojas que chegarem DAQUI EM DIANTE entram no Atendimento (os antigos não).`)
-  if (m.visibilidade === 'empresa') out.push(`Passar "${nomeDaCaixa}" para caixa da EMPRESA? A equipe passa a ver os e-mails das lojas pelo Atendimento (a caixa inteira continua só com o dono e os admins). Responder, ligar o envio, mexer nos endereços e trocar a chave do Mac por ela passam a exigir quem cuida do Atendimento — se o dono não cuida, perde isso — e o envio começa em MODO TESTE (só os endereços de teste recebem).`)
+  if (m.visibilidade === 'empresa') out.push(`Passar "${nomeDaCaixa}" para caixa da EMPRESA? A equipe passa a ver os e-mails das lojas pelo Atendimento (a caixa completa continua restrita a administradores e leitores expressamente autorizados). Responder, ligar o envio, mexer nos endereços e trocar a chave do Mac por ela passam a exigir quem cuida do Atendimento — se o dono não cuida, perde isso — e o envio começa em MODO TESTE (só os endereços de teste recebem).`)
   if (m.envio_modo === 'real') out.push(`Envio REAL em "${nomeDaCaixa}"? As respostas passam a ir para o cliente (sempre por clique de uma pessoa).`)
   if (m.ponte_so_aliases_de_loja === false) out.push('Levar ao Atendimento TODOS os e-mails da caixa (não só os dos endereços de loja)?')
   return out
@@ -246,7 +246,7 @@ async function salvarAliases() {
       <label class="flex flex-wrap items-center gap-2 text-xs">
         Quem vê
         <select v-model="form.visibilidade" class="rounded border bg-background p-1.5" data-config-visibilidade>
-          <option value="privada">privada — só o dono e os admins</option>
+          <option value="privada">privada — administradores e leitores autorizados</option>
           <option value="empresa">da empresa — a equipe vê os e-mails das lojas pelo Atendimento</option>
         </select>
       </label>
@@ -282,6 +282,6 @@ async function salvarAliases() {
       </div>
     </fieldset>
 
-    <p class="rounded border p-3 text-xs text-muted-foreground" data-caixa-so-admin>O acesso à caixa completa é exclusivo dos administradores.</p>
+    <p class="rounded border p-3 text-xs text-muted-foreground" data-caixa-acesso>Administradores podem acessar a caixa completa. Outros usuários precisam da permissão de leitura da Central e de autorização para esta caixa, sem poder responder, enviar ou configurar.</p>
   </div>
 </template>
