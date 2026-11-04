@@ -21,6 +21,7 @@ from app.models import (
     BlingOrder,
     Integration,
     IntegrationPlatform,
+    MargemAudit,
     MargemSaldoManual,
     Margens,
     User,
@@ -225,7 +226,9 @@ _SALDO_FINAL_BLING_SQL = (
 # 299836, margem Bling 193%). Sem repasse, decide pela âncora Bling como a
 # Amazon. AliExpress/etc. continuam aguardando o repasse (_ATTENTION_SALDO_SQL,
 # ramo a). Se um dia existir adaptador da Magalu, o real vence pelo COALESCE.
-_PLATAFORMAS_MARGEM_SEM_REPASSE_IN = "('amazon', 'magalu')"
+# TEMU (04/11): mesmo caso da Magalu, sem adaptador financeiro. O saldo nunca
+# chega e o pedido ficava segurado até alguém aprovar na mão (305821, 305980).
+_PLATAFORMAS_MARGEM_SEM_REPASSE_IN = "('amazon', 'magalu', 'temu')"
 _MARGEM_SEM_REPASSE_SQL = (
     "COALESCE(v.plataforma_bling, v.plataforma_financeiro, '') "
     f"IN {_PLATAFORMAS_MARGEM_SEM_REPASSE_IN}"
@@ -1963,6 +1966,56 @@ async def _apply_bling_decision(
     )
 
 
+async def _parado_no_degrau_atendido(session: AsyncSession, order: BlingOrder) -> bool:
+    """O espelho está em Atendido por um Aprovar que não terminou?
+
+    Atendido também é situação de pedido que JÁ SAIU, então 9 sozinho não diz
+    nada: devolver um despachado para Em aberto refaria nota e etiqueta. A
+    prova é a trilha: a última mudança de situação registrada ainda é a ida
+    para Aguardando Cancelamento, porque a volta só grava depois do último
+    passo. E sem `em_andamento_data`, carimbada quando sai a etiqueta."""
+    if str(order.situacao or "") != str(SITUACAO_ATENDIDO) or order.em_andamento_data is not None:
+        return False
+    ultima = await session.scalar(
+        select(MargemAudit.valor_novo)
+        .where(
+            MargemAudit.bling_id == str(order.bling_id),
+            MargemAudit.acao == "situacao",
+        )
+        .order_by(MargemAudit.created_at.desc())
+        .limit(1)
+    )
+    return ultima == str(SITUACAO_REPROVADO)
+
+
+async def _degrau_confirmado_no_bling(client: BlingClient, bling_id: int) -> bool:
+    """O Bling ainda diz Atendido e sem nota? O espelho pode estar atrasado.
+
+    False = alguém já mexeu no pedido: o Aprovar fica só no DaVinci e a
+    situação do Bling não é tocada. Bling fora do ar vira erro na tela, nunca
+    aprovação silenciosa."""
+    try:
+        vivo = await client.get_order(bling_id)
+    except httpx.HTTPError as e:
+        logger.warning("margem_degrau_leitura_falhou", bling_id=bling_id, erro=str(e)[:200])
+        raise HTTPException(
+            502,
+            detail={
+                "code": "bling_patch_failed",
+                "http": 0,
+                "message": "Não consegui ler o pedido no Bling. Aprove de novo em instantes.",
+            },
+        ) from e
+    situacao = str((vivo.get("situacao") or {}).get("id") or "")
+    nf_id = (vivo.get("notaFiscal") or {}).get("id")
+    confirmado = situacao == str(SITUACAO_ATENDIDO) and not nf_id
+    if not confirmado:
+        logger.info(
+            "margem_degrau_nao_confirmado", bling_id=bling_id, situacao=situacao, nf_id=nf_id
+        )
+    return confirmado
+
+
 async def _apply_bling_decision_by_pedido(
     session: AsyncSession,
     actor_id: UUID,
@@ -2003,6 +2056,14 @@ async def _apply_bling_decision_by_pedido(
         and (order.status or "") in ("Pendente", "Reprovado")
     ):
         patch_bling = True
+    # A mesma exceção para o pedido que parou NO DEGRAU: o Atendido passou e o
+    # Em aberto não (04/11: 306636, 305980, 305821). Sem ela o espelho em 9
+    # caía no local-only — pino Aprovado e venda parada no Bling, sem aviso.
+    degrau_atendido = new_status == "Aprovado" and await _parado_no_degrau_atendido(
+        session, order
+    )
+    if degrau_atendido:
+        patch_bling = True
 
     # Pedido CANCELADO (12) no Bling é ponto final: aprovar aqui tentaria
     # ressuscitar a venda (12 → 9 Atendido → 6 Em aberto), mexendo em estoque e
@@ -2013,11 +2074,15 @@ async def _apply_bling_decision_by_pedido(
     if str(current_situacao_id or "") == str(SITUACAO_CANCELADO):
         patch_bling = False
 
+    client = None
     if patch_bling and str(current_situacao_id or "") != str(situacao_id):
         client = await _global_bling_client(session)
         if client is None:
             raise HTTPException(400, detail={"code": "bling_integration_missing"})
+        if degrau_atendido:
+            patch_bling = await _degrau_confirmado_no_bling(client, int(order.bling_id))
 
+    if client is not None and patch_bling:
         if new_status == "Aprovado":
             steps: list[int] = []
             if str(current_situacao_id or "") != str(SITUACAO_ATENDIDO):
@@ -2040,6 +2105,11 @@ async def _apply_bling_decision_by_pedido(
                     http=code,
                     body=body,
                 )
+                if new_status == "Aprovado" and step_id == SITUACAO_APROVADO:
+                    message = (
+                        "O pedido ficou em Atendido no Bling e não voltou para Em aberto. "
+                        f"Aprove de novo. Bling: {message or f'erro {code}'}"
+                    )
                 raise HTTPException(
                     502,
                     detail={

@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import BlingOrder, Segment, SegmentSpecialDate, SituacaoBling
 from app.routers import margens as margens_router
 from app.services import margem_auto_hold
+from app.services.margem_audit import record_margem_audit
 
 pytestmark = pytest.mark.asyncio
 
@@ -501,6 +502,33 @@ async def test_magalu_sem_adaptador_decide_pela_margem_do_bling(db: AsyncSession
     assert "aguardando" not in obs[702]
 
 
+async def test_temu_sem_adaptador_decide_pela_margem_do_bling(db: AsyncSession):
+    """Temu também não tem adaptador financeiro: o saldo nunca chega e o pedido
+    ficava segurado por "aguardando saldo da plataforma" até alguém aprovar na
+    mão (305821, 305980). Segue a regra da Magalu: saudável pela âncora Bling
+    passa sem hold, abaixo da mínima reprova direto."""
+    # 703: saldo Bling 100, custo 80 → 25% ≥ 10%: passa, sem hold.
+    await _seed_pedido(
+        db, pedido="703", bling_id=703, margem_null=True, saldo_aguardando=True,
+        custo=80, plataforma="temu",
+    )
+    # 704: saldo Bling 100, custo 95 → 5,3% < 10%: reprova direto pelo Bling.
+    await _seed_pedido(
+        db, pedido="704", bling_id=704, margem_null=True, saldo_aguardando=True,
+        custo=95, plataforma="temu",
+    )
+    fake = FakeBling()
+
+    res = await margem_auto_hold.run(db, client=fake, hoje=HOJE)
+
+    assert res == {"held": 0, "reprovados": 1, "pulados": 0, "failed": 0, "alertas": 0}
+    assert fake.situacao_calls == [(704, 83955)]
+    obs = {bid: body["observacoes"] for bid, body in fake.put_bodies}
+    assert 703 not in obs
+    assert "margem abaixo do mínimo" in obs[704]
+    assert "aguardando" not in obs[704]
+
+
 async def test_obs_rejeitada_pelo_bling_ainda_segura_o_pedido(db: AsyncSession):
     """Bling recusa o PUT da venda com 400 (ex.: erro 67, estoque insuficiente
     — caso real do 291676): determinístico, retry nunca resolveria. O recado
@@ -729,6 +757,212 @@ async def test_aprovar_local_only_num_segurado_ainda_solta_no_bling(
     snap = await _snapshot(db, "291670")
     assert snap["situacao"] == "6"
     assert snap["bling_status_margem"] == "Aprovado"
+
+
+class FakeDegrau:
+    """Bling da volta do segurado: `situacao`/`nf_id` é o que a leitura devolve,
+    `falha_em` é o passo que o Bling recusa, `leitura_falha` derruba o GET."""
+
+    def __init__(
+        self,
+        *,
+        situacao: int = 9,
+        nf_id: int = 0,
+        falha_em: int | None = None,
+        leitura_falha: bool = False,
+    ) -> None:
+        self.situacao = situacao
+        self.nf_id = nf_id
+        self.falha_em = falha_em
+        self.leitura_falha = leitura_falha
+        self.calls: list[tuple[int, int]] = []
+        self.get_calls: list[int] = []
+
+    async def get_order(self, bling_id: int) -> dict:
+        self.get_calls.append(bling_id)
+        if self.leitura_falha:
+            raise httpx.ConnectError("bling fora")
+        return {"situacao": {"id": self.situacao}, "notaFiscal": {"id": self.nf_id}}
+
+    async def update_order_situacao(self, bling_id: int, situacao_id: int) -> None:
+        self.calls.append((bling_id, situacao_id))
+        if situacao_id == self.falha_em:
+            request = httpx.Request("PATCH", "https://bling.test")
+            response = httpx.Response(
+                400, json={"error": {"message": "recusado"}}, request=request
+            )
+            raise httpx.HTTPStatusError("400", request=request, response=response)
+
+
+async def _seed_degrau(
+    db: AsyncSession, monkeypatch, fake: FakeDegrau, *, situacao: str = "9", com_trilha: bool = True
+) -> None:
+    await _seed_pedido(
+        db, pedido="291670", bling_id=111, situacao=situacao, status="Pendente",
+        margem_baixa=False,
+    )
+    if com_trilha:
+        await record_margem_audit(
+            db,
+            acao="situacao",
+            pedido_bling="291670",
+            bling_id=111,
+            sku=None,
+            valor_antigo="6",
+            valor_novo="83955",
+            origem="margens_auto",
+            mudado_por=None,
+        )
+    await db.commit()
+
+    async def fake_global_bling_client(session):
+        return fake
+
+    monkeypatch.setattr(margens_router, "_global_bling_client", fake_global_bling_client)
+
+
+async def _aprovar(client, *, local_only: bool = True):
+    return await client.patch(
+        "/api/margens/marketplace/status/291670",
+        json={"status": "Aprovado", "sku": "sku-291670", "local_only": local_only},
+    )
+
+
+async def _pedido(db: AsyncSession) -> tuple:
+    row = (
+        await db.execute(text("SELECT situacao, status FROM bling_orders WHERE bling_id = 111"))
+    ).one()
+    return tuple(row)
+
+
+async def test_aprovar_parado_no_degrau_termina_em_aberto(
+    client, db: AsyncSession, make_user, auth_as, monkeypatch
+):
+    """O Atendido passou e o Em aberto não: o Aprovar manda só o passo que falta,
+    mesmo com local_only. Antes o espelho em 9 caía no local-only, e o pedido
+    ficava Aprovado na Margem e parado no Bling (306636, 305980, 305821)."""
+    auth_as(await make_user(permissions=_margem_permissions()))
+    fake = FakeDegrau()
+    await _seed_degrau(db, monkeypatch, fake)
+
+    response = await _aprovar(client)
+
+    assert response.status_code == 200
+    assert fake.get_calls == [111]
+    assert fake.calls == [(111, margens_router.SITUACAO_APROVADO)]
+    assert await _pedido(db) == ("6", "Aprovado")
+    snap = await _snapshot(db, "291670")
+    assert snap["situacao"] == "6"
+
+
+async def test_segundo_passo_recusado_avisa_e_aprovar_de_novo_termina(
+    client, db: AsyncSession, make_user, auth_as, monkeypatch
+):
+    """O caminho inteiro do defeito: 9 passa, 6 é recusado, a tela avisa e nada
+    fica aprovado. O webhook põe o espelho em 9 e o novo Aprovar termina."""
+    auth_as(await make_user(permissions=_margem_permissions()))
+    fake = FakeDegrau(falha_em=margens_router.SITUACAO_APROVADO)
+    await _seed_degrau(db, monkeypatch, fake, situacao="83955")
+
+    response = await _aprovar(client)
+
+    assert response.status_code == 502
+    assert "ficou em Atendido" in response.json()["detail"]["message"]
+    assert "recusado" in response.json()["detail"]["message"]
+    assert await _pedido(db) == ("83955", "Pendente")
+
+    await db.execute(text("UPDATE bling_orders SET situacao = '9' WHERE bling_id = 111"))
+    await db.commit()
+    fake.falha_em = None
+    fake.calls.clear()
+
+    response = await _aprovar(client)
+
+    assert response.status_code == 200
+    assert fake.calls == [(111, margens_router.SITUACAO_APROVADO)]
+    assert await _pedido(db) == ("6", "Aprovado")
+
+
+async def test_atendido_sem_trilha_do_hold_nao_volta_para_em_aberto(
+    client, db: AsyncSession, make_user, auth_as, monkeypatch
+):
+    """Atendido também é pedido que já saiu: sem a trilha do hold, o Aprovar
+    continua só no DaVinci. Devolver a Em aberto refaria nota e etiqueta."""
+    auth_as(await make_user(permissions=_margem_permissions()))
+    fake = FakeDegrau()
+    await _seed_degrau(db, monkeypatch, fake, com_trilha=False)
+
+    response = await _aprovar(client)
+
+    assert response.status_code == 200
+    assert fake.calls == [] and fake.get_calls == []
+    assert await _pedido(db) == ("9", "Aprovado")
+
+
+async def test_atendido_com_etiqueta_nao_volta_para_em_aberto(
+    client, db: AsyncSession, make_user, auth_as, monkeypatch
+):
+    """A trilha diz hold, mas a etiqueta saiu depois: o pedido andou por fora."""
+    auth_as(await make_user(permissions=_margem_permissions()))
+    fake = FakeDegrau()
+    await _seed_degrau(db, monkeypatch, fake)
+    await db.execute(
+        text("UPDATE bling_orders SET em_andamento_data = now() WHERE bling_id = 111")
+    )
+    await db.commit()
+
+    response = await _aprovar(client)
+
+    assert response.status_code == 200
+    assert fake.calls == [] and fake.get_calls == []
+    assert await _pedido(db) == ("9", "Aprovado")
+
+
+async def test_degrau_que_ja_mudou_no_bling_nao_recebe_patch(
+    client, db: AsyncSession, make_user, auth_as, monkeypatch
+):
+    """Espelho atrasado: alguém já mexeu no Bling. Não toca na situação."""
+    auth_as(await make_user(permissions=_margem_permissions()))
+    fake = FakeDegrau(situacao=21)
+    await _seed_degrau(db, monkeypatch, fake)
+
+    response = await _aprovar(client)
+
+    assert response.status_code == 200
+    assert fake.get_calls == [111] and fake.calls == []
+    assert await _pedido(db) == ("9", "Aprovado")
+
+
+async def test_degrau_com_nota_no_bling_nao_recebe_patch(
+    client, db: AsyncSession, make_user, auth_as, monkeypatch
+):
+    """Com nota no Bling o pedido não volta para Em aberto (segunda nota)."""
+    auth_as(await make_user(permissions=_margem_permissions()))
+    fake = FakeDegrau(nf_id=555)
+    await _seed_degrau(db, monkeypatch, fake)
+
+    response = await _aprovar(client)
+
+    assert response.status_code == 200
+    assert fake.calls == []
+    assert await _pedido(db) == ("9", "Aprovado")
+
+
+async def test_degrau_com_bling_fora_nao_aprova_em_silencio(
+    client, db: AsyncSession, make_user, auth_as, monkeypatch
+):
+    """Leitura do Bling falhou: erro na tela, nada aprovado, e o fallback
+    local_only da tela cai no mesmo erro."""
+    auth_as(await make_user(permissions=_margem_permissions()))
+    fake = FakeDegrau(leitura_falha=True)
+    await _seed_degrau(db, monkeypatch, fake)
+
+    response = await _aprovar(client)
+
+    assert response.status_code == 502
+    assert response.json()["detail"]["code"] == "bling_patch_failed"
+    assert fake.calls == []
+    assert await _pedido(db) == ("9", "Pendente")
 
 
 async def test_nao_segura_margem_baixa_em_data_especial(db: AsyncSession):
