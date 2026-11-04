@@ -43,6 +43,9 @@ Resource = Literal[
     "garantias",
     "garantias_atendimento",
     "garantias_cpf",
+    # Atendimento › aba E-mail só para VER (04/11/2026): `acesso.ve_aba_email`.
+    # Mesmo nome no useCan.ts.
+    "atendimento_email_aba",
     # Atendimento (25/09/2026) — caixa única das conversas de Shopee, ML,
     # TikTok e Amazon, com rascunho da IA. view lê a fila; edit responde e
     # mexe no manual/respostas prontas; delete apaga regra/modelo. Mesmo
@@ -60,6 +63,9 @@ Resource = Literal[
     # 28/10/2026: `edit` (junto com o view) = RESPONDER o e-mail recebido nas
     # caixas que a pessoa vê (`acesso.responde_email`), sem virar admin.
     "atendimento_email",
+    # Exceção explícita de leitura da Central. Não reativa concessões antigas
+    # nem permite enviar/configurar; cada caixa mantém sua lista de leitores.
+    "atendimento_email_leitura",
     # Legacy single-bucket — no longer used by any route after the
     # financeiro_* split below, but kept in the literal so stored
     # permissions JSON containing the old key still validates.

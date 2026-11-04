@@ -1,9 +1,11 @@
 # Administração dos e-mails do Atendimento
 
-A caixa completa em **Atendimento → E-mail** é exclusiva de administradores.
-Esse bloqueio vale também para acesso direto às mensagens, anexos, rascunhos
-e envios da Central. Ser responsável pela caixa ou ter permissões e concessões
-antigas de leitor não libera esse acesso. O conector do Tuta continua sincronizando.
+A caixa completa em **Atendimento → E-mail** fica disponível aos administradores.
+Uma exceção explícita, `atendimento_email_leitura` com **ver**, permite consultar
+mensagens, pastas e anexos somente das caixas já concedidas à pessoa. Não libera
+envio, rascunhos, exclusão ou configurações. Ser responsável pela caixa ou ter
+apenas permissões antigas de leitor não abre a Central. Revogar a nova permissão
+fecha também os links diretos. O conector do Tuta continua sincronizando.
 
 A aba **E-mail → Administração** fica disponível para administradores que
 podem operar o Atendimento. As regras abaixo controlam mensagens vinculadas

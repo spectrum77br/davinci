@@ -824,13 +824,14 @@ async function principal() {
     // No celular: a lista some quando há conversa aberta (a do chat ou a de e-mail).
     assert.match(tpl, /:class="abertaNaCaixa \? 'hidden' : 'flex'"/)
     assert.match(tpl, /:class="abertaNaCaixa \? 'flex' : 'hidden'"/)
-    // A aba E-mail: só admin (as abas à mostra e o conteúdo) — 27/10/2026 e, de novo, desde 30/10/2026.
+    // A aba E-mail: administradores ou a nova concessão explícita de leitura.
     assert.match(tpl, /v-for="a in abasVisiveis"/)
     assert.doesNotMatch(tpl, /v-for="a in ABAS"/)
     assert.match(tpl, /<template v-if="aba === 'mail' && veAbaEmail">/)
-    // 30/10/2026 (as lojas por pessoa — "o email ninguém pode ver a não ser admin"): a
-    // permissão `atendimento_email` (o marrocos, 28/10) não abre mais a aba.
-    assert.match(pagina, /const veAbaEmail = computed\(\(\) => ehAdmin\.value\)\n/)
+    // Filas e Central têm concessões separadas; o recurso legado não abre a aba.
+    assert.match(pagina, /const podeVerAbaEmail = useCan\('atendimento_email_aba', 'view'\)/)
+    assert.match(pagina, /const podeLerCaixaEmail = useCan\('atendimento_email_leitura', 'view'\)/)
+    assert.match(pagina, /const veAbaEmail = computed\(\(\) => ehAdmin\.value \|\| podeVerAbaEmail\.value \|\| podeLerCaixaEmail\.value\)\n/)
     assert.doesNotMatch(pagina, /useCan\('atendimento_email'/, 'a permissão não abre mais a aba')
 
     // ── a aba E-mail só para quem a vê, de verdade (o trecho da página com dublês)
@@ -842,26 +843,57 @@ async function principal() {
     }
     {
       // A conta da página com o useCan de verdade (admin, permissão, sem permissão).
-      const corpo = trecho('const veAbaEmail = ', 'function abasDe(')
-      let usuario = null
+      const corpo = trecho('const podeVerAbaEmail = ', 'function abasDe(')
+      const auth = Vue.reactive({ user: null })
       const can = {}
-      new Function('exports', 'require', 'useAuthStore', transpile(web('composables/useCan.ts')))(can, require, () => ({ user: usuario }))
+      new Function('exports', 'require', 'useAuthStore', transpile(web('composables/useCan.ts')))(can, require, () => auth)
+      const acesso = new Function('computed', 'useCan', 'ehAdmin', `${corpo}\nreturn veAbaEmail`)(Vue.computed, can.useCan, Vue.computed(() => auth.user?.role === 'admin'))
       const ve = (u) => {
-        usuario = u
-        return new Function('computed', 'useCan', 'ehAdmin', `${corpo}\nreturn veAbaEmail`)(Vue.computed, can.useCan, Vue.computed(() => u?.role === 'admin')).value
+        auth.user = u
+        return acesso.value
       }
       assert.equal(ve({ role: 'admin', permissions: {} }), true, 'admin')
-      assert.equal(ve({ role: 'user', permissions: { atendimento_email: { view: true, edit: true } } }), false, 'a permissão (o marrocos) não abre mais')
+      assert.equal(ve({ role: 'user', permissions: { atendimento_email: { view: true, edit: true, delete: true } } }), false, 'a permissão antiga não abre')
       assert.equal(ve({ role: 'user', permissions: { atendimento_email: { view: false } } }), false)
+      // 04/11/2026: a permissão nova abre a aba só para ver (o marrocos).
+      assert.equal(ve({ role: 'user', permissions: { atendimento_email_aba: { view: true } } }), true, 'a permissão nova')
+      assert.equal(ve({ role: 'user', permissions: { atendimento_email_aba: { view: false } } }), false)
       assert.equal(ve({ role: 'user', permissions: { atendimento: { view: true, edit: true, delete: true } } }), false, 'o recurso da caixa não abre a aba')
+      assert.equal(ve({ role: 'user', permissions: { atendimento_email_leitura: { view: true, edit: true, delete: true } } }), true, 'a nova concessão permite ler')
+      assert.equal(can.useCan('atendimento_email_leitura', 'edit').value, false, 'a concessão de leitura não permite editar')
+      assert.equal(can.useCan('atendimento_email_leitura', 'delete').value, false, 'a concessão de leitura não permite excluir')
+      const abaLeitor = Vue.ref('mail')
+      const scope = Vue.effectScope()
+      scope.run(() => new Function('watch', 'veAbaEmail', 'aba', trecho('watch(veAbaEmail, (v) => {', 'watch(emailNaCaixa,'))(Vue.watch, acesso, abaLeitor))
+      auth.user.permissions.atendimento_email_leitura.view = false
+      await Vue.nextTick()
+      assert.equal(acesso.value, false, 'revogar a concessão atualiza a aba sem recarregar')
+      assert.equal(abaLeitor.value, 'caixa', 'revogar a leitura fecha a aba E-mail já aberta')
+      assert.equal(ve({ role: 'user', permissions: { atendimento_email_aba: { view: true }, atendimento_email_leitura: { view: true } } }), true)
+      abaLeitor.value = 'mail'
+      auth.user.permissions.atendimento_email_leitura.view = false
+      await Vue.nextTick()
+      assert.equal(acesso.value, true, 'revogar Central preserva a concessão separada de Filas')
+      assert.equal(abaLeitor.value, 'mail')
+      auth.user.permissions.atendimento_email_aba.view = false
+      await Vue.nextTick()
+      assert.equal(acesso.value, false, 'revogar as duas concessões fecha a aba')
+      assert.equal(abaLeitor.value, 'caixa')
+      scope.stop()
+      auth.user.permissions.atendimento_email_leitura = { edit: true, delete: true }
+      assert.equal(acesso.value, false, 'edit/delete sem view não concedem leitura')
       assert.equal(ve({ role: 'user', permissions: {} }), false)
       assert.equal(ve(null), false)
       // A tela de Permissões: o recurso no grupo Pós-venda, com o rótulo do "ver".
       const posVenda = can.RESOURCE_GROUPS.find((g) => g.label === 'Pós-venda')
+      assert.ok(posVenda.resources.includes('atendimento_email_leitura'))
+      assert.ok(posVenda.resources.includes('atendimento_email_aba'))
       assert.ok(posVenda.resources.includes('atendimento_email'))
-      assert.equal(can.RESOURCE_LABELS.atendimento_email, 'Atendimento — aba E-mail (desde 30/10/2026 só admin: esta permissão não abre mais a aba)')
+      assert.equal(can.RESOURCE_LABELS.atendimento_email_aba, 'Atendimento — ver a aba E-mail (só ler, nas lojas da pessoa; as ações seguem de admin)')
+      assert.equal(can.RESOURCE_LABELS.atendimento_email_leitura, 'Atendimento — caixa de e-mail (somente leitura)')
       const permissoesApi = fs.readFileSync(path.resolve(__dirname, '../../api/app/schemas/permissions.py'), 'utf8')
-      assert.match(permissoesApi, /^ {4}"atendimento_email",$/m, 'o recurso no backend')
+      assert.match(permissoesApi, /^ {4}"atendimento_email_leitura",$/m, 'o recurso no backend')
+      assert.match(permissoesApi, /^ {4}"atendimento_email_aba",$/m, 'a concessão de Filas permanece no backend')
     }
     {
       const abas = trecho('type Aba = ', "const { api } = useApi()")

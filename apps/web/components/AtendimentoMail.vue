@@ -28,6 +28,8 @@ type IndexItem = { id: string; recebido_em: string; direcao: string; tem_anexos:
 type Outbox = { id: string; status: string; text: string; to: string; from_address: string; created_at: string; error_code: string | null; pode_conferir?: boolean }
 type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: string[]; reply_to: string | null; attachments: MailAttachment[]; reply: { to: string; from_address: string | null; allowed_from_addresses?: string[]; can_reply: boolean; send_ready: boolean }; outbox: Outbox[] }
 
+// `canReadQueues` (04/11/2026, `atendimento_email_aba`) = vê todas as Filas, as
+// pastas e a saúde, recortadas pelas lojas dela na API, sem nenhuma ação.
 // `canOperate` = the person operates /atendimento (`atendimento_mexe`): sees the
 // Atendimento queues ("Filas", AtendimentoMailFilas). `canView` (13/10/2026) =
 // the person sees /atendimento (read-only included): email left the chat inbox,
@@ -44,7 +46,7 @@ type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: 
 // this visit to /atendimento: the page keeps it, since this component mounts
 // again every time the E-mail tab opens.
 type Section = 'mailboxes' | 'queues' | 'admin'
-const props = withDefaults(defineProps<{ isAdmin: boolean; canOperate?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; conversationCounts?: ContagensDeConversa | null; refreshConversationCounts?: () => Promise<void>; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
+const props = withDefaults(defineProps<{ isAdmin: boolean; canOperate?: boolean; canReadQueues?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; conversationCounts?: ContagensDeConversa | null; refreshConversationCounts?: () => Promise<void>; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
 const emit = defineEmits<{ (e: 'openConversation', id: string): void; (e: 'update:rememberedSection', value: Section): void }>()
 const { api, url } = useApi()
 const mailboxes = ref<Mailbox[]>([])
@@ -53,12 +55,10 @@ const mailbox = computed(() => mailboxes.value.find((item) => item.id === mailbo
 // "Quem mais vê" (09/10/2026): the API marks a mailbox the person only READS
 // (`so_leitura`): no reply, no resolve, no settings, no token.
 const readOnly = computed(() => mailbox.value?.so_leitura === true)
-// Só lê a caixa, mas RESPONDE o e-mail recebido (permissão `atendimento_email`
-// ver+editar, 28/10/2026): só o formulário de resposta e o "Saiu/Não saiu".
-const canAnswer = computed(() => !readOnly.value || mailbox.value?.pode_responder === true)
-// ... e escreve e-mail novo, encaminha e manda anexos quando vê a caixa
-// inteira (29/10/2026): o compositor inteiro, sem configurar a caixa.
-const canCompose = computed(() => !readOnly.value || mailbox.value?.pode_compor === true)
+// A exceção `atendimento_email_leitura` libera somente leitura. Flags antigas
+// de resposta ou composição nunca ampliam uma caixa marcada `so_leitura`.
+const canAnswer = computed(() => !readOnly.value)
+const canCompose = computed(() => !readOnly.value)
 const messages = ref<Summary[]>([])
 const detail = ref<Detail | null>(null)
 const loading = ref(false)
@@ -148,7 +148,7 @@ watch(() => props.waitingReady, (ready) => {
   // da visita continua aberta quando a contagem chega mais tarde.
   if (!chosenSection.value && seesQueues.value && (props.waiting ?? 0) > 0) chosenSection.value = 'queues'
   initialSectionResolved.value = true
-  if (mounted && !disposed && !chosenSection.value) void loadMailboxes()
+  if (mounted && !disposed && (!props.isAdmin || !chosenSection.value)) void loadMailboxes()
 })
 // "Configurar": aliases and the Atendimento settings of the selected mailbox
 // (AtendimentoMailConfigurar) — admins who operate Atendimento only.
@@ -168,7 +168,7 @@ const statuses: Record<string, string> = { queued: 'Na fila do Mac', leased: 'En
 
 // The refusal (HTTP detail.code) or a failed job's error_code, in plain Portuguese.
 const knownErrors: Record<string, string> = {
-  admin_only: 'A caixa de e-mail é acessível somente aos administradores.',
+  admin_only: 'Esta ação exige um administrador. A leitura da caixa precisa de autorização específica.',
   sending_unavailable: 'O envio não está disponível. Confira a conexão do Mac e a permissão de envio.',
   reply_already_pending: 'Já existe uma resposta pendente para esta mensagem.',
   request_id_conflict: 'Esta tentativa já foi registrada com outro conteúdo. Atualize e confira a resposta anterior.',
@@ -369,7 +369,20 @@ async function loadMailboxes() {
         const primary = result.items.find((item) => item.address.trim().toLowerCase() === '061083.jf@tuta.com')
         mailboxId.value = primary?.id || result.items[0]?.id || ''
       }
-    } catch (reason) { if (!disposed) error.value = errorText(reason) }
+    } catch (reason) {
+      if (disposed) return
+      // A permissão da aba, sozinha, só abre Filas. Uma seleção anterior de
+      // Caixas não pode manter a pessoa numa seção cujo acesso foi recusado.
+      if (!props.isAdmin && Number((reason as any)?.status ?? (reason as any)?.statusCode ?? (reason as any)?.response?.status) === 403) {
+        mailboxes.value = []
+        mailboxId.value = ''
+        error.value = ''
+        if (seesQueues.value && chosenSection.value !== 'queues') {
+          chosenSection.value = 'queues'
+          emit('update:rememberedSection', 'queues')
+        }
+      } else error.value = errorText(reason)
+    }
   })()
   mailboxRequest = promise
   try { await promise } finally { if (mailboxRequest === promise) mailboxRequest = null }
@@ -582,7 +595,7 @@ async function createMailbox() {
 }
 
 async function changeSending() {
-  if (!mailbox.value || !props.isAdmin) return
+  if (!mailbox.value || !props.isAdmin || readOnly.value) return
   const enabled = !mailbox.value.send_enabled
   if (enabled && !window.confirm('Permitir respostas escritas por pessoas nesta caixa? O Mac também precisa estar conectado e com o envio liberado.')) return
   try {
@@ -623,7 +636,7 @@ async function sendReply() {
 
 // A person checked Tuta: did the uncertain reply go out? Never resends.
 async function resolveJob(job: Outbox, sent: boolean) {
-  if (!detail.value || deleting.value || resolving.value) return
+  if (!detail.value || readOnly.value || job.pode_conferir === false || deleting.value || resolving.value) return
   const question = sent
     ? 'Confirmar que esta resposta aparece nos Enviados do Tuta?'
     : 'Marcar que esta resposta NÃO saiu?\n\nConfira nos Enviados do Tuta antes: se ela saiu e alguém responder de novo, o cliente recebe duas vezes.'
@@ -709,10 +722,10 @@ onMounted(async () => {
   mounted = true
   document.addEventListener('visibilitychange', resumePolling)
   window.addEventListener('focus', resumePolling)
-  // Filas/Administração têm suas próprias consultas. Só descobre caixas
-  // aqui quando a seção ainda precisa decidir o destino inicial; abrir
-  // Caixas depois carrega seus dados pelo mesmo refresh, uma única vez.
-  if ((!chosenSection.value && initialSectionResolved.value) || section.value === 'mailboxes') await loadMailboxes()
+  // Leitores precisam descobrir as caixas autorizadas mesmo começando nas
+  // Filas: o botão Caixas depende dessa lista. Quem só tem acesso à aba recebe
+  // 403 e continua nas Filas. Administradores já veem o botão sem essa consulta.
+  if ((initialSectionResolved.value && (!props.isAdmin || !chosenSection.value)) || section.value === 'mailboxes') await loadMailboxes()
   if (!disposed) {
     if (section.value === 'mailboxes') await loadList()
     schedulePoll()
@@ -735,9 +748,9 @@ onBeforeUnmount(() => {
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div>
         <h2 class="flex items-center gap-2 text-lg font-semibold"><Mail class="h-5 w-5" /> E-mail</h2>
-        <p v-if="section === 'queues'" class="text-sm text-muted-foreground">{{ canOperate ? 'Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, chamados dos sites, falta responder, suspeitos, resumos e respostas a conferir.' : 'Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail.' }}</p>
+        <p v-if="section === 'queues'" class="text-sm text-muted-foreground" data-mail-filas-descricao>{{ canOperate ? 'Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, chamados dos sites, falta responder, suspeitos, resumos e respostas a conferir.' : canReadQueues ? 'Os e-mails das suas lojas e os que ainda não têm loja: sem loja, sem vínculo, falta responder, suspeitos, resumos e respostas a conferir. Aqui você só vê.' : 'Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail.' }}</p>
         <p v-else-if="section === 'admin'" class="text-sm text-muted-foreground">Acessos por pessoa, loja e venda, regras de exibição e lixeira do DaVinci.</p>
-        <p v-else class="text-sm text-muted-foreground">Caixas de e-mail acessíveis somente aos administradores.</p>
+        <p v-else class="text-sm text-muted-foreground">Caixas de e-mail para administradores e leitores expressamente autorizados.</p>
       </div>
       <div v-if="section === 'mailboxes'" class="flex gap-2">
         <button v-if="isAdmin" class="inline-flex items-center gap-2 rounded border px-3 py-2 text-sm" @click="showSetup = !showSetup"><Plus class="h-4 w-4" /> Cadastrar caixa</button>
@@ -750,6 +763,7 @@ onBeforeUnmount(() => {
     <!-- Sections: the mailboxes (this screen) and the Atendimento queues (who operates Atendimento) -->
     <div v-if="seesQueues || canAdminister" class="flex gap-1 overflow-x-auto border-b" role="tablist" aria-label="Seções do e-mail" data-mail-sections>
       <button
+        v-if="isAdmin || mailboxes.length"
         type="button"
         role="tab"
         :aria-selected="section === 'mailboxes'"
@@ -786,6 +800,7 @@ onBeforeUnmount(() => {
       v-if="seesQueues && section === 'queues'"
       :is-admin="isAdmin"
       :pode-mexer="!!canOperate"
+      :pode-ler-filas="!!canReadQueues"
       :lojas="stores || []"
       :pausado="!!paused"
       :tique="refreshTick"
@@ -821,7 +836,7 @@ onBeforeUnmount(() => {
           <select v-model="mailboxId" aria-label="Caixa de e-mail" :disabled="sending || deleting || composerActive" class="max-w-full rounded border bg-background p-2 text-sm"><option v-for="item in mailboxes" :key="item.id" :value="item.id">{{ item.label }}<template v-if="item.address"> · {{ item.address }}</template><template v-else-if="item.leitura_filtrada"> · acesso por lojas</template></option></select>
           <span class="text-sm">{{ states[mailbox.state] || 'Conexão precisa de atenção' }}</span>
           <span class="text-xs text-muted-foreground">Última leitura: {{ date(mailbox.last_sync_at) }}</span>
-          <span v-if="readOnly" class="ml-auto text-xs text-muted-foreground" data-mail-read-only>{{ mailbox.pode_responder ? (mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa e pode respondê-los (sem configurar).' : mailbox.pode_compor ? 'Você responde e envia e-mails desta caixa (sem configurar).' : 'Você responde os e-mails desta caixa (sem configurar).') : mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa (sem responder nem configurar).' : 'Você só vê esta caixa (sem responder nem configurar).' }}</span>
+          <span v-if="readOnly" class="ml-auto text-xs text-muted-foreground" data-mail-read-only>{{ mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa (sem responder nem configurar).' : 'Você só vê esta caixa (sem responder nem configurar).' }}</span>
           <button v-if="isAdmin && !readOnly" class="ml-auto rounded border px-3 py-2 text-xs" @click="changeSending">{{ mailbox.send_enabled ? 'Desativar respostas' : 'Permitir respostas humanas' }}</button>
           <button v-if="isAdmin && !readOnly" class="inline-flex items-center gap-1 rounded border px-3 py-2 text-xs" :aria-expanded="configuring" data-mail-configure @click="configuring = !configuring"><Settings2 class="h-3.5 w-3.5" /> Configurar</button>
         </div>
@@ -982,7 +997,7 @@ onBeforeUnmount(() => {
                 <p class="break-all text-xs text-muted-foreground">{{ job.from_address }} → {{ job.to }}</p>
                 <p v-if="job.status === 'failed' && jobFailure(job.error_code)" class="text-xs text-red-700">{{ jobFailure(job.error_code) }}</p>
                 <p class="whitespace-pre-wrap break-words text-sm">{{ job.text }}</p>
-                <div v-if="job.status === 'uncertain' && (job.pode_conferir ?? !readOnly)" class="flex flex-wrap items-center gap-2 pt-1" data-mail-resolve>
+                <div v-if="job.status === 'uncertain' && !readOnly && job.pode_conferir !== false" class="flex flex-wrap items-center gap-2 pt-1" data-mail-resolve>
                   <span class="text-xs text-muted-foreground">Conferiu nos Enviados do Tuta?</span>
                   <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving || deleting" @click="resolveJob(job, true)">Saiu</button>
                   <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving || deleting" @click="resolveJob(job, false)">Não saiu</button>

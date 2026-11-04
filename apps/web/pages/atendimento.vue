@@ -121,16 +121,17 @@ const isAdmin = computed(() => mexe.value && ehAdmin.value)
 const canSugerir = computed(() => auth.user?.atendimento === true)
 const agora = useRelogio()
 
-// A ABA E-MAIL é só de ADMIN (27/10/2026) — o Eduardo: quem não é admin vê
-// e-mail SÓ pela barra de lojas da Caixa (o ampliável de cada loja). De 28 a
-// 30/10/2026 a permissão `atendimento_email` também abria a aba (o marrocos);
-// desde 30/10, com as lojas separadas por pessoa, de novo SÓ ADMIN ("o email
-// ninguém pode ver a não ser admin né, já no atendimento eles vão ver só das
-// caixas dele"). A noção de admin é a do app (o `role` do /me: `useIsAdmin`);
-// a API usa a mesma conta (`acesso.ve_aba_email`) e recusa as rotas da aba com
-// 403 `aba_email_so_admin`. Quem não vê a aba não a tem nas abas, e o
-// `?tab=mail` (ou um `abrirAba('mail')`) cai na Caixa.
-const veAbaEmail = computed(() => ehAdmin.value)
+// Administradores e usuários expressamente autorizados veem a aba. A permissão
+// `atendimento_email_aba` permite ver as Filas; `atendimento_email_leitura`
+// também permite ler as caixas liberadas pelo servidor. Nenhuma delas habilita
+// alterações. A permissão legada `atendimento_email` não reabre a aba.
+// Sem acesso, links para `?tab=mail` e `abrirAba('mail')` voltam à Caixa.
+const podeVerAbaEmail = useCan('atendimento_email_aba', 'view')
+const podeLerCaixaEmail = useCan('atendimento_email_leitura', 'view')
+const veAbaEmail = computed(() => ehAdmin.value || podeVerAbaEmail.value || podeLerCaixaEmail.value)
+// Quem lê TODAS as Filas (04/11/2026): quem mexe, e quem não é admin e tem a
+// permissão da aba, nas lojas dele (a mesma conta de `acesso.le_filas_email`).
+const leFilasEmail = computed(() => (mexe.value && ehAdmin.value) || (!ehAdmin.value && podeVerAbaEmail.value))
 function abasDe(veEmail: boolean) {
   return ABAS.filter((a) => a.value !== 'mail' || veEmail)
 }
@@ -1528,12 +1529,12 @@ onBeforeUnmount(() => {
 
     <LazyAtendimentoCanais v-if="aba === 'lojas'" :can-edit="canEdit" :is-admin="isAdmin" :ver-zap="ehAdmin" :lojas="resumo?.lojas || []" @mudou="carregarResumo" />
     <!-- E-mail: a Central (Caixas) e as Filas do e-mail das lojas (08/10/2026); a conversa de e-mail abre AQUI (13/10/2026) -->
-    <!-- só admin (27/10/2026; de novo só admin desde 30/10/2026): os outros veem e-mail pela barra de lojas da Caixa, só das lojas deles -->
+    <!-- Administradores e leitores autorizados; a concessão de leitura não habilita alterações. -->
     <template v-if="aba === 'mail' && veAbaEmail">
       <div v-if="emailConversa" class="space-y-2" data-conversa-de-email>
         <AtendimentoEmailConversaBarra
           :conversa="emailConversaLinha"
-          :pode-mexer="mexe"
+          :pode-mexer="ehAdmin && mexe"
           :com-chat="!!chatDeOrigem"
           @voltar="fecharConversaDoEmail"
           @voltar-ao-chat="voltarAoChat"
@@ -1544,7 +1545,7 @@ onBeforeUnmount(() => {
             <AtendimentoConversa
               :key="`${emailConversa}:${emailConversaVersao}`"
               :conversa-id="emailConversa"
-              :can-edit="canResponder"
+              :can-edit="(ehAdmin || podeVerAbaEmail) && canResponder"
               :can-sugerir="canSugerir"
               :modelos="modelos"
               :flags="resumo?.flags || null"
@@ -1562,7 +1563,8 @@ onBeforeUnmount(() => {
       <LazyAtendimentoMail
         v-show="!emailConversa"
         :is-admin="isAdmin"
-        :can-operate="mexe"
+        :can-operate="mexe && ehAdmin"
+        :can-read-queues="leFilasEmail"
         :can-view="canSugerir"
         :stores="resumo?.lojas || []"
         :waiting="emailEsperando"

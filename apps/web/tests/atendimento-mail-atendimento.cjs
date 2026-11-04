@@ -256,7 +256,7 @@ async function principal() {
     assert.match(rotas, /if estado == "revisar":\s+q = q\.where\(_a_conferir\(\)\)/)
     // A contagem da fila "revisar envio" = a lista (só a resposta de CONVERSA: o
     // job da caixa crua da empresa também tem ligação, `caixa_empresa`).
-    assert.match(rotas, /\.where\(\s*MailOutboxMeta\.origem == "conversa",\s*_a_conferir\(\),\s*administracao\.filtro_mensagem\(user, MailOutbox\.message_id\),\s*\)\s+\)\s+or 0\s+\)\s+return saida/)
+    assert.match(rotas, /\.where\(\s*MailOutboxMeta\.origem == "conversa",\s*_a_conferir\(\),\s*administracao\.filtro_mensagem\(user, MailOutbox\.message_id\),\s*\*_recorte_envio\(scope\),\s*\)\s+\)\s+or 0\s+\)\s+return saida/)
     assert.equal(F.urlDaFila('sem_loja'), '/api/atendimento/email/emails?fila=sem_loja')
     assert.equal(F.urlDaFila('resumo', '2026-10-08T10:00:00+00:00'), '/api/atendimento/email/emails?fila=resumo&antes_de=2026-10-08T10%3A00%3A00%2B00%3A00')
 
@@ -308,12 +308,13 @@ async function principal() {
     // A página passa quem mexe, quem vê, as lojas e o "abrir a conversa" — que
     // abre a conversa de e-mail NA aba E-mail (13/10/2026), nunca na Caixa.
     const paginaTpl = sfc('../pages/atendimento.vue').descriptor.template.content
-    assert.match(paginaTpl, /<LazyAtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:waiting-ready="emailContagensProntas"\s+:conversation-counts="emailContagens"\s+:refresh-conversation-counts="carregarContagensEmail"\s+:paused="!!emailConversa"\s+:refresh-tick="emailTique"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
+    assert.match(paginaTpl, /<LazyAtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe && ehAdmin"\s+:can-read-queues="leFilasEmail"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:waiting-ready="emailContagensProntas"\s+:conversation-counts="emailContagens"\s+:refresh-conversation-counts="carregarContagensEmail"\s+:paused="!!emailConversa"\s+:refresh-tick="emailTique"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
     // O número da aba E-mail (o e-mail saiu da Caixa Humano): o que falta responder nele.
     assert.match(paginaTpl, /v-if="a\.value === 'mail' && emailEsperando"[\s\S]*?data-marca-email\s*>\{\{ emailEsperando > 99 \? '99\+' : emailEsperando \}\}<\/span>/)
     // (27/10/2026: a aba E-mail só para admin; 28/10: ou a permissão atendimento_email.)
     assert.match(paginaTpl, /<template v-if="aba === 'mail' && veAbaEmail">\s+<div v-if="emailConversa"[^>]*data-conversa-de-email>\s+<AtendimentoEmailConversaBarra/)
-    assert.match(paginaTpl, /<AtendimentoEmailConversaBarra\s+:conversa="emailConversaLinha"\s+:pode-mexer="mexe"\s+:com-chat="!!chatDeOrigem"\s+@voltar="fecharConversaDoEmail"\s+@voltar-ao-chat="voltarAoChat"\s+@vinculado="aoVincularConversaDoEmail"\s+\/>/)
+    assert.match(paginaTpl, /<AtendimentoEmailConversaBarra\s+:conversa="emailConversaLinha"\s+:pode-mexer="ehAdmin && mexe"\s+:com-chat="!!chatDeOrigem"\s+@voltar="fecharConversaDoEmail"\s+@voltar-ao-chat="voltarAoChat"\s+@vinculado="aoVincularConversaDoEmail"\s+\/>/)
+    assert.match(paginaTpl, /:conversa-id="emailConversa"\s+:can-edit="\(ehAdmin \|\| podeVerAbaEmail\) && canResponder"/)
     assert.match(paginaTpl, /<AtendimentoConversa\s+:key="`\$\{emailConversa\}:\$\{emailConversaVersao\}`"\s+:conversa-id="emailConversa"[\s\S]*?:ativa="aba === 'mail'"\s+@mudou="aoMudarConversaDoEmail"[\s\S]*?@abrir-conversa="abrirConversaDoEmail"/)
   }
 
@@ -1735,7 +1736,7 @@ async function principal() {
     // Nas Filas: a aba "Pastas e regras" ao lado das filas (não é fila).
     const filasFonte = sfc('../components/AtendimentoMailFilas.vue').descriptor.template.content
     assert.match(filasFonte, /data-fila="pastas"\s+@click="pastasAbertas = true"\s*>Pastas e regras<\/button>/)
-    assert.match(filasFonte, /<AtendimentoMailPastas v-if="pastasAbertas" :is-admin="isAdmin" \/>/)
+    assert.match(filasFonte, /<AtendimentoMailPastas v-if="pastasAbertas" :is-admin="isAdmin && mexe" \/>/)
     const fl = montar('../components/AtendimentoMailFilas.vue', { isAdmin: true, lojas: [] }, {
       respostas: { '/api/atendimento/email/filas': {}, '/api/atendimento/email/saude': { caixas: [] }, '/api/atendimento/email/emails?fila=sem_loja': { itens: [], proximo: null } },
       filhos: { AtendimentoMailPastas: { props: ['isAdmin'], setup: (p) => () => Vue.h('div', { 'data-pastas-stub': String(p.isAdmin) }) } },
@@ -1994,8 +1995,8 @@ async function principal() {
     assert.ok(rotasEmail.includes('@router.get("/informativos")'))
     const rota = rotasEmail.slice(rotasEmail.indexOf('async def informativos('), rotasEmail.indexOf('@router.get("/regras")'))
     for (const campo of ['pasta_id', 'nome', 'mailbox_id', 'caixa', 'total', 'ultimo_em', 'lojas', 'itens']) assert.ok(rota.includes(`"${campo}"`), `informativos: ${campo}`)
-    assert.match(rota, /_mexe\(user\)/, 'só quem mexe')
-    assert.match(rota, /administracao\.filtro_mensagem\(user, MailMessageMeta\.message_id\)/, 'conta só o que a pessoa pode ver')
+    assert.match(rota, /_le_filas\(user\)/, 'só quem lê as filas')
+    assert.match(rota, /administracao\.filtro_mensagem\(user, MailMessageMeta\.message_id\),\s+\*_recorte_email\(scope, MailMessageMeta\.message_id\),/, 'conta só o que a pessoa pode ver, nas lojas dela')
     assert.doesNotMatch(rota, /decifrar|"texto"|"assunto"/, 'sem o e-mail em si')
     assert.match(rotasEmail, /pasta: Annotated\[UUID \| None, Query\(\)\] = None,/)
     assert.match(rotasEmail, /if pasta is not None:\s+q = q\.where\(MailMessageMeta\.folder_id == pasta\)/)
@@ -2075,7 +2076,7 @@ async function principal() {
 
     // Nas Filas: com o chip Informativos (quem mexe), o bloco em cima da lista.
     const filasFonte = sfc('../components/AtendimentoMailFilas.vue').descriptor.template.content
-    assert.match(filasFonte, /<template v-if="informativosAbertos">\s+<AtendimentoMailInformativos :sinal="sinalInformativos" \/>/)
+    assert.match(filasFonte, /<template v-if="informativosAbertos">\s+<AtendimentoMailInformativos :sinal="sinalInformativos" :so-ve="!mexe" \/>/)
     const stubInf = { AtendimentoMailInformativos: { props: ['sinal'], setup: (p) => () => Vue.h('div', { 'data-informativos-stub': String(p.sinal) }) } }
     const respostasFilas = {
       '/api/atendimento/email/filas': { sem_loja: 0, informativo: 3 },

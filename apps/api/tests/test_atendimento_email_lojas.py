@@ -556,6 +556,46 @@ async def test_a_permissao_da_aba_nao_abre_mais_a_aba(db, cena, client, quem_le,
     assert me["role"] == "user" and me["atendimento"] is True and me["atendimento_mexe"] is False
 
 
+async def test_a_permissao_nova_abre_a_aba_so_para_ver(db, cena, client, quem_le, auth_as):
+    """04/11/2026, o Eduardo: "libere a visualização da aba de email pro user marrocos".
+    `atendimento_email_aba` view lê a aba; as ações seguem de admin, mesmo com o edit."""
+    await _historico(db, cena)
+    quem_le.permissions = {"atendimento_email_aba": {"view": True, "edit": True}}
+    await db.commit()
+    auth_as(quem_le)
+    for rota in ("saude", "filas", "informativos", "envios", "pastas", "regras"):
+        r = await client.get(f"{EMAIL}/{rota}")
+        assert r.status_code != 403 or r.json()["detail"]["code"] != SO_ADMIN, (rota, r.text)
+    r = await client.get(f"{URL}/conversas", params={"caixa": "email", "filtro": "todas"})
+    assert r.status_code == 200, r.text
+    nada = "00000000-0000-0000-0000-000000000000"
+    for rota in (
+        f"emails/{nada}/loja",
+        f"emails/{nada}/vincular",
+        f"emails/{nada}/ignorar",
+        f"emails/{nada}/reprocessar",
+        f"envios/{nada}/resolver",
+    ):
+        r = await client.post(f"{EMAIL}/{rota}", json={})
+        assert r.status_code == 403, (rota, r.text)
+        assert r.json()["detail"]["code"] == "atendimento_so_leitura", (rota, r.text)
+
+
+async def test_concessao_nova_abre_aba_sem_tornar_admin(db, cena, client, quem_le, auth_as):
+    await _historico(db, cena)
+    quem_le.permissions = {"atendimento_email_leitura": {"view": True}}
+    await db.commit()
+    auth_as(quem_le)
+    result = await client.get(f"{EMAIL}/saude")
+    assert result.status_code == 200, result.text
+    me = (await client.get("/api/auth/me")).json()
+    assert me["role"] == "user" and me["atendimento_mexe"] is False
+    assert me["permissions"]["atendimento_email_leitura"]["view"] is True
+    # Configurar a ponte e ver as filas operacionais continuam restritos.
+    result = await client.get(f"{EMAIL}/filas")
+    assert result.status_code == 403, result.text
+
+
 async def test_loja_bloqueada_e_escopo_cortam_os_numeros(
     db, cena, client, make_user, auth_as, admin
 ):

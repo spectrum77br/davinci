@@ -112,11 +112,12 @@ const can = loadLib('../composables/useCan.ts', { useAuthStore: lojaFalsa })
 {
   const posVenda = can.RESOURCE_GROUPS.find((g) => g.label === 'Pós-venda')
   // Garantias (07/10/2026) entra no grupo com as três permissões do documento.
-  // A aba E-mail (28/10/2026): `atendimento_email` view = via a aba sem ser admin;
-  // desde 30/10/2026 a aba é só de admin e a permissão não abre mais (o rótulo diz).
-  assert.deepEqual(posVenda.resources, ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados', 'garantias', 'garantias_atendimento', 'garantias_cpf', 'atendimento_email'],
+  // Preserva a permissão de Filas e acrescenta a leitura específica da Central.
+  // O recurso legado continua listado, mas não reabre a aba.
+  assert.deepEqual(posVenda.resources, ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados', 'garantias', 'garantias_atendimento', 'garantias_cpf', 'atendimento_email', 'atendimento_email_aba', 'atendimento_email_leitura'],
     'o recurso continua fora da tela de Permissões (quem vê e quem mexe vêm do /me)')
-  assert.equal(can.RESOURCE_LABELS.atendimento_email, 'Atendimento — aba E-mail (desde 30/10/2026 só admin: esta permissão não abre mais a aba)')
+  assert.equal(can.RESOURCE_LABELS.atendimento_email_leitura, 'Atendimento — caixa de e-mail (somente leitura)')
+  assert.equal(can.RESOURCE_LABELS.atendimento_email_aba, 'Atendimento — ver a aba E-mail (só ler, nas lojas da pessoa; as ações seguem de admin)')
   for (const g of can.RESOURCE_GROUPS) assert.ok(!g.resources.includes('atendimento'), `atendimento fora do grupo ${g.label}`)
   assert.ok(!can.RESOURCES.includes('atendimento'))
   assert.equal(can.RESOURCE_LABELS.atendimento, 'Atendimento', 'o rótulo continua (para quando a fase acabar)')

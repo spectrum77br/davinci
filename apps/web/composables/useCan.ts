@@ -30,6 +30,8 @@ export type Resource =
   | 'garantias_cpf'
   | 'atendimento'
   | 'atendimento_email'
+  | 'atendimento_email_aba'
+  | 'atendimento_email_leitura'
   | 'sincronizacoes'
   | 'sync_logs'
   | 'integracoes'
@@ -99,16 +101,13 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     // edit = Registrar atendimento ("Vincular à garantia" no /atendimento);
     // `garantias_cpf` view = ver o CPF completo no detalhe. Mesmos nomes em
     // apps/api/app/schemas/permissions.py.
-    // Atendimento › aba E-mail (28/10/2026): a aba é só de admin desde 27/10; o
-    // Eduardo pediu o marrocos vendo a aba também, sem virar admin. O `view`
-    // abre a aba para LER (`acesso.ve_aba_email`, `veAbaEmail` em
-    // pages/atendimento.vue); desde 28/10/2026 o `edit` (com o view) deixa
-    // RESPONDER o e-mail recebido nas caixas que a pessoa vê
-    // (`acesso.responde_email`); configurar segue com `atendimento_mexe`.
+    // A permissão da aba abre as Filas; a leitura da Central exige a concessão
+    // específica e o escopo de caixas autorizado pelo servidor. O recurso
+    // legado `atendimento_email` continua sem conceder acesso à aba.
     resources: [
       'devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados',
       'garantias', 'garantias_atendimento', 'garantias_cpf',
-      'atendimento_email',
+      'atendimento_email', 'atendimento_email_aba', 'atendimento_email_leitura',
     ],
   },
   {
@@ -197,6 +196,8 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   garantias_cpf: 'Garantias — Ver o CPF completo (view)',
   atendimento: 'Atendimento',
   atendimento_email: 'Atendimento — aba E-mail (desde 30/10/2026 só admin: esta permissão não abre mais a aba)',
+  atendimento_email_aba: 'Atendimento — ver a aba E-mail (só ler, nas lojas da pessoa; as ações seguem de admin)',
+  atendimento_email_leitura: 'Atendimento — caixa de e-mail (somente leitura)',
   sincronizacoes: 'Sincronizações',
   sync_logs: 'Sync Logs',
   integracoes: 'Integrações',
@@ -226,6 +227,7 @@ export function useCan(resource: Resource, action: Action) {
     if (u.role === 'admin') return true
     // Lojas é somente leitura para os demais papéis, inclusive com grants antigos.
     if (resource === 'lojas_info' && action !== 'view') return false
+    if (resource === 'atendimento_email_leitura' && action !== 'view') return false
     return u.permissions?.[resource]?.[action] === true
   })
 }
