@@ -15,6 +15,7 @@ from app.models.financeiro import (
     CertificacoesSyncState,
     FinanceiroSuprimentos,
 )
+from app.services.certificacoes_edicao import aplicar_campos_oficiais
 
 STATE_ID = "inmetro_makisa"
 MAKISA_CNPJ = "40191104000145"
@@ -42,7 +43,7 @@ def normalizar_identificador(value: str | None) -> str:
 
 
 def campos_oficiais_inmetro(row: FinanceiroSuprimentos) -> set[str]:
-    """Campos protegidos no PATCH; datas só são oficiais quando a fonte as informa."""
+    """Campos comprovados na fonte, independentemente das edições no cadastro local."""
     if not row.inmetro_chave:
         return set()
     dados = row.inmetro_dados or {}
@@ -124,7 +125,8 @@ def _snapshot(row: FinanceiroSuprimentos) -> dict:
     result = {}
     for field in (
         "produto", "modelo", "nome_comercial", "certificado", "numero", "valor",
-        "inicio", "fim", "pdf_nome", "anatel_numero", "anatel_dados", "anatel_encontrado",
+        "inicio", "fim", "campos_manuais", "pdf_nome", "anatel_numero", "anatel_dados",
+        "anatel_encontrado",
         "inmetro_chave", "inmetro_dados", "inmetro_encontrado",
     ):
         value = getattr(row, field)
@@ -186,13 +188,15 @@ async def _aplicar(session: AsyncSession, records: list[dict], now: datetime) ->
             evento = "reencontrado"
         before = None if is_new else _snapshot(row)
         if not (row.produto or "").strip():
-            row.produto = record["produto"]
+            aplicar_campos_oficiais(row, {"produto": record["produto"]})
         for field in record["campos_confirmados"]:
             if field in _CAMPOS_DATAS:
                 if record.get(field):
-                    setattr(row, field, _date(record[field]))
+                    aplicar_campos_oficiais(row, {field: _date(record[field])})
             else:
-                setattr(row, field, "inmetro" if field == "certificado" else record[field])
+                aplicar_campos_oficiais(
+                    row, {field: "inmetro" if field == "certificado" else record[field]},
+                )
         row.inmetro_chave = key
         row.inmetro_dados = record
         row.inmetro_consultado_em = now

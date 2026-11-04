@@ -25,7 +25,7 @@ const exportsForTest = `return {
   CERT_OPTIONS, ANATEL_SOURCE_URL, INMETRO_SOURCE_URL, totalRows, scheduleSave, syncAnatel, syncInmetro,
   exportTable, load, loadAnatelStatus, loadInmetroStatus,
   attachPdf, addRow, removeRow, downloadCertificate, rowStatusClass, officialSituation,
-  officialSituationClass, isLinked, isOfficialField, officialSource, officialData,
+  officialSituationClass, isLinked, isOfficialField, hasManualOfficialFields, officialSource, officialData,
   isMissingSource, officialAlerts, fieldSourceTitle, openDetails, formatTimestamp, formatDate, formatCnpj
 }`
 
@@ -55,7 +55,7 @@ const settle = () => new Promise(setImmediate)
 const row = (values = {}) => ({
   id: 'one', produto: 'Telefone', modelo: 'USM003', nome_comercial: 'Modelo comercial',
   certificado: 'anatel', numero: '07197-26-18234', valor: 53000,
-  inicio: '2026-07-30', fim: '2028-07-30', tem_pdf: true, pdf_nome: 'certificado.pdf',
+  inicio: '2026-07-30', fim: '2028-07-30', tem_pdf: true, pdf_nome: 'certificado.pdf', campos_manuais: null,
   anatel_numero: null, anatel_dados: null, anatel_consultado_em: null, anatel_encontrado: null,
   inmetro_chave: null, inmetro_dados: null, inmetro_consultado_em: null, inmetro_encontrado: null,
   ...values,
@@ -189,32 +189,63 @@ async function run() {
   {
     const { state: s, calls } = page()
     const linked = row({ anatel_numero: '07197-26-18234', anatel_dados: source() })
-    for (const field of ['modelo', 'nome_comercial', 'certificado', 'numero', 'inicio', 'fim']) {
-      const previous = linked[field]
-      s.scheduleSave(linked, field, 'invalid manual change')
-      assert.equal(linked[field], previous, `automatic ${field} must remain read-only`)
+    s.rows.value = [linked]
+    const changes = {
+      produto: 'Nome amigável', modelo: 'Novo modelo', nome_comercial: 'Novo nome comercial',
+      certificado: 'inmetro', numero: 'NOVO-001', valor: 123,
+      inicio: '2026-09-01', fim: '2029-09-01',
+    }
+    const originalSource = structuredClone(linked.anatel_dados)
+    for (const [field, value] of Object.entries(changes)) {
+      s.scheduleSave(linked, field, value)
+      assert.equal(linked[field], value, `linked ${field} must be editable`)
     }
     await s.removeRow(linked)
-    assert.equal(calls.length, 0, 'automatic records cannot be deleted')
-    s.scheduleSave(linked, 'produto', 'Nome amigável')
-    s.scheduleSave(linked, 'valor', 123)
-    const syncing = s.syncAnatel()
-    assert.deepEqual(calls[0].options.body, { produto: 'Nome amigável', valor: 123 })
-    calls[0].reject(new Error('stop before source request'))
-    await syncing
+    assert.equal(calls.length, 0, 'automatic records still cannot be deleted')
+    assert.deepEqual(linked.anatel_dados, originalSource, 'editing the registration must never alter official source data')
+    const loading = s.load()
+    assert.deepEqual(calls[0].options.body, changes, 'all edited fields must be included in the save')
+    assert.equal(calls[0].options.method, 'PATCH')
+    calls[0].resolve({ ...linked })
+    await settle()
+    calls.find(c => c.url === '/api/financeiro/suprimentos').resolve([{ ...linked, campos_manuais: Object.keys(changes) }])
+    calls.find(c => c.url.endsWith('/anatel/status')).resolve(status())
+    calls.find(c => c.url.endsWith('/inmetro/status')).resolve(status())
+    await loading
+    const saved = s.rows.value[0]
+    for (const [field, value] of Object.entries(changes)) assert.equal(saved[field], value)
+    assert.match(s.officialSituation(saved), /Cadastro editado/)
+    assert.doesNotMatch(s.officialSituationClass(saved), /emerald/)
+    s.selectedRow.value = saved
+    const html = await render(s)
+    const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
+    assert.equal(controls.length, 8)
+    for (const control of controls) assert.doesNotMatch(control, /readonly|disabled/)
+    const dialog = html.slice(html.indexOf('<dialog'))
+    assert.match(dialog, /Dados da fonte original/)
+    assert.match(dialog, /07197-26-18234/)
+    assert.match(dialog, /USM003/)
+    assert.match(dialog, /Homologação Emitida/)
+    assert.doesNotMatch(dialog, /NOVO-001|Novo modelo|Novo nome comercial/, 'official details must not misrepresent edited identity')
   }
   {
     const { state: s, calls } = page({ isAdmin: false, user: { permissions: { financeiro_suprimentos: { view: true, delete: true } } } })
-    const current = row()
+    const current = row({ anatel_numero: '07197-26-18234', anatel_dados: source() })
+    const previous = structuredClone(current)
     s.rows.value = [current]
-    s.scheduleSave(current, 'produto', 'unauthorized change')
+    for (const field of ['produto', 'modelo', 'nome_comercial', 'certificado', 'numero', 'valor', 'inicio', 'fim']) {
+      s.scheduleSave(current, field, 'unauthorized change')
+    }
     await s.syncAnatel()
     assert.equal(calls.length, 0)
-    assert.equal(current.produto, 'Telefone')
+    assert.deepEqual(current, previous)
     const html = await render(s)
     assert.doesNotMatch(html, /Atualizar agora|Nova certificação|Anexar PDF/)
     assert.match(html, /Baixar tabela em PDF/)
     assert.match(html, /Baixar PDF de Telefone/)
+    const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
+    assert.equal(controls.length, 8)
+    for (const control of controls) assert.match(control, /disabled/)
   }
   {
     const { state: s, calls } = page()
@@ -240,7 +271,7 @@ async function run() {
     assert.match(html, /Em Análise - RE/)
     assert.match(html, /Manual · sem confirmação automática/)
     assert.match(html, /Atualização diária/)
-    assert.equal((html.match(/readonly/g) || []).length, 10, 'five text/date fields per automatic row remain read-only')
+    assert.equal((html.match(/readonly/g) || []).length, 0, 'linked source fields are editable in the table')
     assert.equal((html.match(/aria-label="Excluir certificação"/g) || []).length, 1, 'only manual row exposes delete')
     assert.match(s.rowStatusClass(emitted), /red/, 'expiry styling is independent of official status')
     assert.match(s.officialSituationClass(emitted), /emerald/)
@@ -255,7 +286,23 @@ async function run() {
     assert.match(details, /isso não confirma cancelamento ou irregularidade/)
     assert.match(details, /Base oficial da Anatel/)
   }
-  console.log('PASS: ten Anatel synchronization, permissions, data preservation and rendered UI scenarios')
+  {
+    const { state: s, calls } = page()
+    const current = row({ anatel_numero: '07197-26-18234', anatel_dados: source() })
+    const previous = structuredClone(current)
+    for (const blockedBy of ['loading', 'rowBusy']) {
+      if (blockedBy === 'loading') s.loading.value = true
+      else s.rowBusy[current.id] = true
+      for (const field of ['produto', 'modelo', 'nome_comercial', 'certificado', 'numero', 'valor', 'inicio', 'fim']) {
+        s.scheduleSave(current, field, 'blocked during save')
+      }
+      s.loading.value = false
+      delete s.rowBusy[current.id]
+    }
+    assert.deepEqual(current, previous, 'source field editing must retain busy guards')
+    assert.equal(calls.length, 0)
+  }
+  console.log('PASS: Anatel editing, saved patches, official data isolation, permissions and synchronization scenarios')
 }
 module.exports = { page, row, source, status, render, settle }
 if (require.main === module) run().catch(error => { console.error(error); process.exitCode = 1 })

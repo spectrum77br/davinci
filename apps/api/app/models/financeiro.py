@@ -53,6 +53,8 @@ class FinanceiroSuprimentos(Base, TimestampMixin):
     valor: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     inicio: Mapped[date | None] = mapped_column(Date, nullable=True)
     fim: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Campos cadastrados/corrigidos pelo usuário não são substituídos pela consulta oficial.
+    campos_manuais: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     pdf_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
     # A listagem e a exportação usam só os metadados, sem carregar os anexos.
     pdf_arquivo: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True, deferred=True)

@@ -97,54 +97,62 @@ async function run() {
   }
   {
     const { state: s, calls } = page()
-    const current = linked()
-    for (const field of ['modelo', 'certificado', 'numero']) {
-      const before = current[field]
-      s.scheduleSave(current, field, 'manual override')
-      assert.equal(current[field], before)
-      assert.equal(s.isOfficialField(current, field), true)
-    }
-    for (const field of ['inicio', 'fim', 'nome_comercial', 'produto', 'valor']) {
-      assert.equal(s.isOfficialField(current, field), false, `${field} must remain editable if not confirmed`)
-    }
-    const dated = linked({ inmetro_dados: source({
+    const current = linked({ inmetro_dados: source({
       inicio: '2025-08-03', fim: '2027-08-03',
       campos_confirmados: ['modelo', 'certificado', 'numero', 'inicio', 'fim'],
     }) })
-    for (const field of ['inicio', 'fim']) {
-      s.scheduleSave(dated, field, '2020-01-01')
-      assert.notEqual(dated[field], '2020-01-01')
-      assert.equal(s.isOfficialField(dated, field), true)
+    s.rows.value = [current]
+    const changes = {
+      produto: 'Produto corrigido', modelo: 'Novo modelo', nome_comercial: 'Nome corrigido',
+      certificado: 'isento', numero: 'NOVO-002', valor: 24500,
+      inicio: '2026-09-01', fim: '2031-09-01',
     }
-    for (const dados of [null, source({ campos_confirmados: [] })]) {
+    const originalSource = structuredClone(current.inmetro_dados)
+    for (const [field, value] of Object.entries(changes)) {
+      s.scheduleSave(current, field, value)
+      assert.equal(current[field], value, `linked ${field} must be editable, including confirmed dates`)
+    }
+    await s.removeRow(current)
+    assert.equal(calls.length, 0, 'linked source records still cannot be deleted')
+    assert.deepEqual(current.inmetro_dados, originalSource)
+    const loading = s.load()
+    assert.equal(calls[0].options.method, 'PATCH')
+    assert.deepEqual(calls[0].options.body, changes)
+    calls[0].resolve({ ...current })
+    await settle()
+    calls.find(c => c.url === '/api/financeiro/suprimentos').resolve([{ ...current, campos_manuais: Object.keys(changes) }])
+    calls.find(c => c.url.endsWith('/anatel/status')).resolve(status())
+    calls.find(c => c.url.endsWith('/inmetro/status')).resolve(status())
+    await loading
+    for (const [field, value] of Object.entries(changes)) assert.equal(s.rows.value[0][field], value)
+    s.selectedRow.value = s.rows.value[0]
+    assert.match(s.officialSituation(s.selectedRow.value), /Cadastro editado/)
+    assert.doesNotMatch(s.officialSituationClass(s.selectedRow.value), /emerald/)
+    const html = await render(s)
+    const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
+    assert.equal(controls.length, 8)
+    for (const control of controls) assert.doesNotMatch(control, /readonly|disabled/)
+    const dialog = html.slice(html.indexOf('<dialog'))
+    assert.match(dialog, /MODERNA-0069\/25/)
+    assert.match(dialog, /UAF001-M1/)
+    assert.match(dialog, /03\/08\/2025/)
+    assert.doesNotMatch(dialog, /NOVO-002|Novo modelo|01\/09\/2031/)
+  }
+  {
+    const { state: s } = page()
+    for (const dados of [null, source({ campos_confirmados: [] }), source({ inicio: null, fim: null, campos_confirmados: ['inicio', 'fim'] })]) {
       const incomplete = linked({ inmetro_dados: dados })
-      for (const field of ['modelo', 'certificado', 'numero']) {
-        const before = incomplete[field]
-        s.scheduleSave(incomplete, field, 'manual override')
-        assert.equal(incomplete[field], before, 'linked identity stays protected even without source confirmation metadata')
-        assert.equal(s.isOfficialField(incomplete, field), true)
-      }
-    }
-    for (const missingDate of [null, undefined, '']) {
-      const incomplete = linked({ inmetro_dados: source({
-        inicio: missingDate, fim: missingDate, campos_confirmados: ['inicio', 'fim'],
-      }) })
-      for (const field of ['inicio', 'fim']) {
-        assert.equal(s.isOfficialField(incomplete, field), false, 'confirmation metadata without a source date must not lock a manual date')
-        s.scheduleSave(incomplete, field, '2020-01-01')
-        assert.equal(incomplete[field], '2020-01-01')
+      for (const field of ['modelo', 'certificado', 'numero', 'inicio', 'fim']) {
+        const value = field === 'certificado' ? 'isento' : ['inicio', 'fim'].includes(field) ? '2026-09-01' : 'Edição manual'
+        s.scheduleSave(incomplete, field, value)
+        assert.equal(incomplete[field], value, 'missing source confirmation metadata must not block editing')
       }
       s.rows.value = [incomplete]
-      const html = await render(s)
-      assert.doesNotMatch(html, /<input[^>]*type="date"[^>]*readonly/, 'missing source dates remain editable in the rendered table')
+      assert.doesNotMatch(await render(s), /<input[^>]*readonly/)
     }
-    const unconfirmedDates = linked({ inmetro_dados: source({ inicio: '2025-08-03', fim: '2027-08-03' }) })
-    for (const field of ['inicio', 'fim']) assert.equal(s.isOfficialField(unconfirmedDates, field), false)
     assert.equal(s.isOfficialField(linked({ inmetro_dados: source({ campos_confirmados: ['produto', 'valor', 'nome_comercial'] }) }), 'nome_comercial'), false)
     const anatel = row({ anatel_numero: '071972618234', anatel_dados: anatelSource() })
-    assert.equal(s.isOfficialField(anatel, 'nome_comercial'), true, 'Anatel rules stay unchanged')
-    await s.removeRow(current)
-    assert.equal(calls.length, 0, 'automatic records cannot be deleted or altered in guarded fields')
+    assert.equal(s.isOfficialField(anatel, 'nome_comercial'), true, 'source provenance remains separate from editing permission')
   }
   {
     const { state: s, calls } = page()
@@ -203,7 +211,7 @@ async function run() {
     assert.match(html, /Atualizar agora/)
     assert.match(html, /Atualizar Inmetro/)
     assert.match(html, /PDF do certificado/)
-    assert.equal((html.match(/readonly/g) || []).length, 2, 'only number and model text inputs are read-only')
+    assert.equal((html.match(/readonly/g) || []).length, 0, 'all registered fields are editable')
     const dialog = html.slice(html.indexOf('<dialog'))
     assert.match(dialog, /Não informada pelo ProdCert/)
     assert.doesNotMatch(dialog, /08\/03\/2025|08\/03\/2030/, 'source details must never show manual dates as official')
@@ -214,14 +222,23 @@ async function run() {
   }
   {
     const { state: s, calls } = page({ isAdmin: false, user: { permissions: { financeiro_suprimentos: { view: true } } } })
-    s.rows.value = [linked()]
+    const current = linked()
+    const before = structuredClone(current)
+    s.rows.value = [current]
+    for (const field of ['produto', 'modelo', 'nome_comercial', 'certificado', 'numero', 'valor', 'inicio', 'fim']) {
+      s.scheduleSave(current, field, 'unauthorized change')
+    }
     await s.syncInmetro()
     assert.equal(calls.length, 0)
+    assert.deepEqual(current, before)
     const html = await render(s)
+    const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
+    assert.equal(controls.length, 8)
+    for (const control of controls) assert.match(control, /disabled/)
     assert.doesNotMatch(html, /Atualizar Inmetro|Atualizar agora/)
     assert.match(html, /Baixar tabela em PDF/)
     assert.match(html, /Ver dados de Inmetro/)
   }
-  console.log('PASS: ten Inmetro source isolation, autosave, confirmed fields, permissions and rendered UI scenarios')
+  console.log('PASS: Inmetro editing, saved patches, confirmed dates, official data isolation and permission scenarios')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })

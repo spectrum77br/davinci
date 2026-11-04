@@ -15,6 +15,7 @@ from app.models.financeiro import (
     CertificacoesSyncState,
     FinanceiroSuprimentos,
 )
+from app.services.certificacoes_edicao import aplicar_campos_oficiais
 
 STATE_ID = "anatel_makisa"
 MAKISA_CNPJ = "40191104000145"
@@ -97,7 +98,8 @@ def _snapshot(row: FinanceiroSuprimentos) -> dict:
     result = {}
     for field in (
         "produto", "modelo", "nome_comercial", "certificado", "numero", "valor",
-        "inicio", "fim", "pdf_nome", "anatel_numero", "anatel_dados", "anatel_encontrado",
+        "inicio", "fim", "campos_manuais", "pdf_nome", "anatel_numero", "anatel_dados",
+        "anatel_encontrado",
     ):
         value = getattr(row, field)
         if isinstance(value, date):
@@ -138,7 +140,8 @@ async def _aplicar(session: AsyncSession, records: list[dict], now: datetime) ->
     linked = {row.anatel_numero: row for row in rows if row.anatel_numero}
     manual = defaultdict(list)
     for row in rows:
-        if not row.anatel_numero and (row.certificado or "").strip().lower() == "anatel":
+        if (not row.anatel_numero and not row.inmetro_chave
+                and (row.certificado or "").strip().lower() == "anatel"):
             manual[normalizar_numero(row.numero)].append(row)
 
     seen = set()
@@ -161,13 +164,13 @@ async def _aplicar(session: AsyncSession, records: list[dict], now: datetime) ->
             evento = "reencontrado"
         before = None if is_new else _snapshot(row)
         if not (row.produto or "").strip():
-            row.produto = record["produto"]
-        row.modelo = ", ".join(record["modelos"]) or None
-        row.nome_comercial = ", ".join(record["nomes_comerciais"]) or None
-        row.certificado = "anatel"
-        row.numero = _formatar_numero(numero)
-        row.inicio = _date(record.get("inicio"))
-        row.fim = _date(record.get("fim"))
+            aplicar_campos_oficiais(row, {"produto": record["produto"]})
+        aplicar_campos_oficiais(row, {
+            "modelo": ", ".join(record["modelos"]) or None,
+            "nome_comercial": ", ".join(record["nomes_comerciais"]) or None,
+            "certificado": "anatel", "numero": _formatar_numero(numero),
+            "inicio": _date(record.get("inicio")), "fim": _date(record.get("fim")),
+        })
         row.anatel_numero = numero
         row.anatel_dados = record
         row.anatel_encontrado = True

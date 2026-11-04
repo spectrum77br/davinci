@@ -102,8 +102,9 @@ async def test_status_sync_list_and_history_show_official_metadata(
     assert row["anatel_encontrado"] is True
     assert row["anatel_consultado_em"]
     assert row["anatel_dados"] == _record()
-    assert row["modelo"] == "USM003"
-    assert row["fim"] == "2028-07-30"
+    assert row["modelo"] == "Anterior"
+    assert row["fim"] == "2028-07-01"
+    assert row["inicio"] == "2026-07-30"  # Campo não digitado ainda acompanha a fonte.
     assert row["produto"] == "smartphone 4G"
     assert Decimal(str(row["valor"])) == Decimal("53000")
     assert "pdf_arquivo" not in row
@@ -126,7 +127,8 @@ async def test_status_sync_list_and_history_show_official_metadata(
     history = (await client.get(f"{BASE}/{row['id']}/historico")).json()
     assert len(history) == 2
     assert history[0]["evento"] == "atualizacao"
-    assert history[0]["depois"]["fim"] == "2029-07-30"
+    assert history[0]["depois"]["fim"] == "2028-07-01"
+    assert history[0]["depois"]["anatel_dados"]["fim"] == "2029-07-30"
     assert history[1]["evento"] == "vinculacao"
 
 
@@ -156,17 +158,58 @@ async def test_view_edit_and_delete_permissions_are_enforced(client, make_user, 
     ("modelo", "Outro"), ("nome_comercial", "Outro"), ("certificado", "inmetro"),
     ("numero", "123"), ("inicio", "2026-01-01"), ("fim", None),
 ])
-async def test_linked_official_fields_cannot_be_overwritten(
+async def test_linked_fields_can_be_corrected_without_losing_original_source(
     client, make_user, auth_as, source, field, value,
 ):
     auth_as(await make_user(role=UserRole.ADMIN))
     row = await _sync(client)
     response = await client.patch(f"{BASE}/{row['id']}", json={field: value, "produto": "Outro"})
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "certificacao_automatica"
-    unchanged = (await client.get(BASE)).json()[0]
-    assert unchanged[field] == row[field]
-    assert unchanged["produto"] == row["produto"]
+    assert response.status_code == 200, response.text
+    assert set(response.json()["campos_manuais"]) == {field, "produto"}
+    assert response.json()["anatel_dados"] == row["anatel_dados"]
+    source.return_value = _payload(situacao_requerimento="Suspensa")
+    updated = await _sync(client)
+    assert updated[field] == value
+    assert updated["produto"] == "Outro"
+    assert updated["anatel_numero"] == row["anatel_numero"]
+    assert updated["anatel_dados"]["situacao_requerimento"] == "Suspensa"
+    assert len((await client.get(BASE)).json()) == 1
+
+
+async def test_only_changed_fields_are_pinned_and_explicit_clears_survive_refresh(
+    client, make_user, auth_as, source,
+):
+    auth_as(await make_user(role=UserRole.ADMIN))
+    row = await _sync(client)
+    response = await client.patch(f"{BASE}/{row['id']}", json={
+        "modelo": row["modelo"], "produto": None, "nome_comercial": None, "inicio": None,
+    })
+    assert response.status_code == 200
+    assert set(response.json()["campos_manuais"]) == {"produto", "nome_comercial", "inicio"}
+    source.return_value = _payload(modelos=["Modelo novo na fonte"])
+    updated = await _sync(client)
+    assert updated["modelo"] == "Modelo novo na fonte"
+    assert updated["produto"] is None
+    assert updated["nome_comercial"] is None
+    assert updated["inicio"] is None
+
+
+async def test_edits_before_linking_survive_first_sync(client, make_user, auth_as, source):
+    auth_as(await make_user(role=UserRole.ADMIN))
+    created = (await client.post(BASE, json={
+        "certificado": "anatel", "numero": "07197-26-18234", "fim": None,
+    })).json()
+    response = await client.patch(f"{BASE}/{created['id']}", json={
+        "modelo": "Modelo digitado", "inicio": "2026-01-01",
+    })
+    assert response.status_code == 200
+    row = await _sync(client)
+    assert row["id"] == created["id"]
+    assert row["modelo"] == "Modelo digitado"
+    assert row["inicio"] == "2026-01-01"
+    assert row["fim"] is None
+    assert row["nome_comercial"] == "Fossibot F112"
+    assert set(row["campos_manuais"]) == {"certificado", "numero", "fim", "modelo", "inicio"}
 
 
 async def test_linked_product_price_and_pdf_stay_editable_but_delete_is_blocked(
@@ -264,13 +307,16 @@ async def test_waiting_mutation_rechecks_link_after_concurrent_sync_commits(
         assert not request.done()
         await db.commit()
         response = await asyncio.wait_for(request, timeout=5)
-        assert response.status_code == 409, response.text
-        assert response.json()["detail"]["code"] == "certificacao_automatica"
+        assert response.status_code == (200 if method == "patch" else 409), response.text
         listed = (await client.get(BASE)).json()
         assert len(listed) == 1
         assert listed[0]["id"] == str(row_id)
         assert listed[0]["anatel_numero"] == "071972618234"
-        assert listed[0]["modelo"] is None
+        assert listed[0]["modelo"] == ("Outro" if method == "patch" else None)
+        if method == "patch":
+            assert "modelo" in listed[0]["campos_manuais"]
+        else:
+            assert response.json()["detail"]["code"] == "certificacao_automatica"
     finally:
         if not request.done():
             request.cancel()

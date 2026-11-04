@@ -71,6 +71,19 @@ def _texto(row: object, campo: str) -> str:
                     texto += f" {label} não informada pelo ProdCert."
                     if getattr(row, field, None):
                         texto += f" {label} da tabela: manual."
+        campos_fonte = {"modelo", "nome_comercial", "certificado", "numero", "inicio", "fim"}
+        if fonte == "Inmetro":
+            campos_fonte = {"modelo", "certificado", "numero"} | {
+                field for field in ("inicio", "fim")
+                if field in (dados.get("campos_confirmados") or []) and dados.get(field)
+            }
+        if set(getattr(row, "campos_manuais", None) or []) & campos_fonte:
+            numero = dados.get("numero") or getattr(row, "anatel_numero", None) or "não informado"
+            modelos = dados.get("modelo") or ", ".join(dados.get("modelos") or [])
+            origem = f"Fonte original: {fonte}, nº {numero}."
+            if modelos:
+                origem += f" Modelo: {modelos}."
+            texto = f"Cadastro editado manualmente. {origem} Situação da fonte: {texto}"
         return texto
     valor = getattr(row, campo, None)
     if valor is None or valor == "":

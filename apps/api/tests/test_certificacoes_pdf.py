@@ -160,3 +160,32 @@ def test_certificacoes_pdf_leaves_unused_area_blank_on_later_pages():
         assert empty_area.height > 20
         image = page.get_pixmap(clip=empty_area, alpha=False)
         assert set(image.samples) == {255}, "unused area must not repeat previous backgrounds"
+
+
+def test_certificacoes_pdf_identifies_manual_edits_and_original_source():
+    rows = [
+        SimpleNamespace(
+            produto="Cadastro corrigido", modelo="Modelo editado", numero="NOVO-123",
+            campos_manuais=["modelo", "numero"], anatel_numero="071972618234",
+            anatel_encontrado=True, anatel_dados={
+                "numero": "071972618234", "modelos": ["USM003"],
+                "situacao_requerimento": "Homologação Emitida",
+            },
+        ),
+        SimpleNamespace(
+            produto="Airfryer", certificado="isento", campos_manuais=["certificado"],
+            inmetro_chave="MODERNA|MODERNA-0069/25|UAF001-M1", inmetro_encontrado=True,
+            inmetro_dados={"numero": "MODERNA-0069/25", "modelo": "UAF001-M1",
+                           "situacao_certificado": "Ativo"},
+        ),
+    ]
+    with fitz.open(stream=montar_pdf(rows), filetype="pdf") as doc:
+        texto = " ".join(_texto(page) for page in doc)
+        assert texto.count("Cadastro editado manualmente.") == 2
+        assert "Fonte original: Anatel" in texto
+        assert "071972618234" in texto and "USM003" in texto
+        assert "Fonte original: Inmetro" in texto
+        assert "MODERNA-0069/25" in texto and "UAF001-M1" in texto
+        assert "Situação da fonte: Anatel - Homologação Emitida" in texto
+        assert "Situação da fonte: Inmetro - Ativo" in texto
+        assert "NOVO-123" in texto and "Modelo editado" in texto

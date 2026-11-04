@@ -87,6 +87,7 @@ type Row = {
   fim: string | null
   tem_pdf: boolean
   pdf_nome: string | null
+  campos_manuais: string[] | null
   anatel_numero: string | null
   anatel_dados: AnatelRecord | null
   anatel_consultado_em: string | null
@@ -177,7 +178,8 @@ async function load() {
 await load()
 
 function scheduleSave(row: Row, field: keyof Row, value: any) {
-  if (!canEdit.value || busy.value || rowBusy[row.id] || isOfficialField(row, field)) return
+  if (!canEdit.value || busy.value || rowBusy[row.id]) return
+  if (row[field] !== value) row.campos_manuais = [...new Set([...(row.campos_manuais || []), field])]
   ;(row as any)[field] = value
   autosave.schedule(row.id, field, value)
 }
@@ -226,6 +228,10 @@ function isOfficialField(row: Row, field: keyof Row) {
   return Boolean((field === 'inicio' || field === 'fim') && row.inmetro_dados?.campos_confirmados?.includes(field) && row.inmetro_dados[field])
 }
 
+function hasManualOfficialFields(row: Row) {
+  return Boolean(row.campos_manuais?.some(field => isOfficialField(row, field as keyof Row)))
+}
+
 function officialSource(row: Row) {
   return row.anatel_numero ? 'Anatel' : row.inmetro_chave ? 'Inmetro' : ''
 }
@@ -243,19 +249,20 @@ function officialAlerts(row: Row) {
 }
 
 function fieldSourceTitle(row: Row, field: keyof Row) {
-  if (isOfficialField(row, field)) return `Atualizado automaticamente por ${officialSource(row)}`
+  if (isOfficialField(row, field)) return `Dados de ${officialSource(row)}; suas edições serão preservadas.`
   if (row.inmetro_chave && (field === 'inicio' || field === 'fim')) return 'Data preenchida manualmente; não informada pelo ProdCert.'
   return ''
 }
 
 function officialSituation(row: Row) {
   if (!isLinked(row)) return 'Manual · sem confirmação automática'
+  if (hasManualOfficialFields(row)) return 'Cadastro editado · consultar fonte'
   const situation = row.anatel_numero ? row.anatel_dados?.situacao_requerimento : row.inmetro_dados?.situacao_certificado
   return `${officialSource(row)} · ${situation || 'Situação não informada na fonte'}`
 }
 
 function officialSituationClass(row: Row) {
-  if (!isLinked(row) || isMissingSource(row)) return 'text-muted-foreground'
+  if (!isLinked(row) || isMissingSource(row) || hasManualOfficialFields(row)) return 'text-muted-foreground'
   if (row.inmetro_chave && !row.anatel_numero) {
     const situation = row.inmetro_dados?.situacao_certificado?.toLocaleLowerCase('pt-BR') || ''
     if (situation === 'ativo') return 'text-emerald-700 dark:text-emerald-400'
@@ -510,7 +517,7 @@ const totalRows = computed(() => rows.value.length)
       <div class="space-y-1">
         <p class="font-medium">Inmetro · Makisa Trading LTDA · Atualização diária</p>
         <p class="text-muted-foreground">Última consulta bem-sucedida: {{ formatTimestamp(inmetroStatus?.ultimo_sucesso_em) }}</p>
-        <p class="text-muted-foreground">Fonte: ProdCert. Datas não informadas na fonte podem ser preenchidas manualmente.</p>
+        <p class="text-muted-foreground">Fonte: ProdCert. Os dados oficiais podem ser consultados em “Ver”.</p>
       </div>
       <button v-if="canAttach" class="ml-auto inline-flex items-center gap-1.5 rounded-md border bg-background px-3 py-1.5 text-xs hover:bg-muted disabled:opacity-50"
         :disabled="busy || hasBusyRow" @click="syncInmetro">
@@ -524,6 +531,8 @@ const totalRows = computed(() => rows.value.length)
     <p v-if="inmetroSyncMessage" role="status" class="text-xs text-muted-foreground">{{ inmetroSyncMessage }}</p>
     <p v-if="inmetroSyncError" role="alert" class="text-sm text-destructive">{{ inmetroSyncError }}</p>
     <div v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</div>
+
+    <p v-if="canEdit" class="text-xs text-muted-foreground">Todos os campos do cadastro podem ser editados. As alterações são salvas automaticamente e preservadas nas próximas consultas.</p>
 
     <div class="flex justify-end lg:hidden">
       <button class="rounded-lg border px-3 py-2 text-xs" :aria-pressed="mobileTableMode" @click="mobileTableMode = !mobileTableMode">{{ mobileTableMode ? 'Ver cartões' : 'Ver tabela' }}</button>
@@ -590,23 +599,23 @@ const totalRows = computed(() => rows.value.length)
             </td>
             <td>
               <input class="cell-input" :value="row.modelo ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :readonly="isOfficialField(row, 'modelo')" :title="row.modelo || ''"
+                :title="row.modelo || ''"
                 @input="(e) => scheduleSave(row, 'modelo', (e.target as HTMLInputElement).value)" />
             </td>
             <td>
               <input class="cell-input" :value="row.nome_comercial ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :readonly="isOfficialField(row, 'nome_comercial')" :title="row.nome_comercial || ''"
+                :title="row.nome_comercial || ''"
                 @input="(e) => scheduleSave(row, 'nome_comercial', (e.target as HTMLInputElement).value)" />
             </td>
             <td>
-              <select class="cell-input" :value="row.certificado ?? ''" :disabled="!canEdit || busy || rowBusy[row.id] || isOfficialField(row, 'certificado')"
+              <select class="cell-input" :value="row.certificado ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
                 @change="(e) => scheduleSave(row, 'certificado', (e.target as HTMLSelectElement).value)">
                 <option v-for="o in CERT_OPTIONS" :key="o" :value="o">{{ o || '—' }}</option>
               </select>
             </td>
             <td>
               <input class="cell-input" :value="row.numero ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :readonly="isOfficialField(row, 'numero')" :title="fieldSourceTitle(row, 'numero')"
+                :title="fieldSourceTitle(row, 'numero')"
                 @input="(e) => scheduleSave(row, 'numero', (e.target as HTMLInputElement).value)" />
             </td>
             <td>
@@ -616,12 +625,12 @@ const totalRows = computed(() => rows.value.length)
             </td>
             <td>
               <input type="date" class="cell-input" :value="row.inicio ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :readonly="isOfficialField(row, 'inicio')" :title="fieldSourceTitle(row, 'inicio')"
+                :title="fieldSourceTitle(row, 'inicio')"
                 @input="(e) => scheduleSave(row, 'inicio', (e.target as HTMLInputElement).value || null)" />
             </td>
             <td>
               <input type="date" class="cell-input" :value="row.fim ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
-                :readonly="isOfficialField(row, 'fim')" :title="fieldSourceTitle(row, 'fim')"
+                :title="fieldSourceTitle(row, 'fim')"
                 @input="(e) => scheduleSave(row, 'fim', (e.target as HTMLInputElement).value || null)" />
             </td>
             <td class="official-status-cell">
@@ -674,11 +683,12 @@ const totalRows = computed(() => rows.value.length)
       <div v-if="selectedRow" class="space-y-4 p-5">
         <div class="flex items-start justify-between gap-4">
           <div>
-            <h2 id="certification-details-title" class="text-lg font-semibold">Dados oficiais · {{ officialSource(selectedRow) }}</h2>
-            <p class="text-sm text-muted-foreground">{{ selectedRow.produto || officialData(selectedRow)?.produto || 'Certificação' }} · {{ selectedRow.numero }}</p>
+            <h2 id="certification-details-title" class="text-lg font-semibold">Dados da fonte original · {{ officialSource(selectedRow) }}</h2>
+            <p class="text-sm text-muted-foreground">{{ officialData(selectedRow)?.produto || 'Certificação' }} · {{ officialData(selectedRow)?.numero || selectedRow.anatel_numero || 'Número não informado na fonte' }}</p>
           </div>
           <button class="rounded p-1 hover:bg-muted" aria-label="Fechar dados oficiais" @click="detailsDialog?.close()"><X class="size-4" /></button>
         </div>
+        <p v-if="hasManualOfficialFields(selectedRow)" class="text-sm text-muted-foreground">O cadastro contém alterações manuais. A situação abaixo se refere aos dados originais da fonte.</p>
         <p v-if="isMissingSource(selectedRow)" class="rounded bg-amber-50 p-3 text-sm text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
           Este registro não foi localizado na última consulta. Os dados abaixo são da consulta anterior; isso não confirma cancelamento ou irregularidade.
         </p>

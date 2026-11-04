@@ -1,4 +1,4 @@
-"""Inmetro no cadastro existente, permissões e proteção dos campos comprovados."""
+"""Inmetro no cadastro existente, permissões e persistência das correções manuais."""
 
 import asyncio
 from datetime import UTC, datetime
@@ -18,6 +18,7 @@ from app.models.financeiro import (
     FinanceiroSuprimentos,
 )
 from app.services import certificacoes_inmetro_sync as sync
+from app.services import certificacoes_sync as anatel_sync
 
 BASE = "/api/financeiro/suprimentos"
 
@@ -79,7 +80,10 @@ async def test_sync_links_existing_record_and_preserves_anatel_state(
     assert result.json()["atualizados"] == 1 and result.json()["criados"] == 0
     rows = (await client.get(BASE)).json()
     assert len(rows) == 1 and rows[0]["id"] == row_id
-    assert rows[0]["modelo"] == "UAF001-M1"
+    assert rows[0]["modelo"] == "UAF001"
+    assert rows[0]["fim"] == "2027-08-03"
+    assert rows[0]["inicio"] == "2026-04-30"
+    assert rows[0]["inmetro_dados"]["modelo"] == "UAF001-M1"
     assert rows[0]["nome_comercial"] == "M1, M2"
     assert rows[0]["inmetro_dados"]["situacao_certificado"] == "Ativo"
     assert rows[0]["anatel_numero"] is None
@@ -95,16 +99,17 @@ async def test_sync_links_existing_record_and_preserves_anatel_state(
     assert history[0]["antes"]["fim"] == "2027-08-03"
 
 
-async def test_read_only_fields_preserve_custom_labels_price_and_pdf(
-    client, make_user, auth_as, source,
+async def test_all_fields_stay_editable_preserving_original_source_price_and_pdf(
+    client, make_user, auth_as, source, monkeypatch,
 ):
     auth_as(await make_user(role=UserRole.ADMIN))
     row_id = await _manual(client)
     assert (await client.post(f"{BASE}/inmetro/sincronizar")).json()["status"] == "ok"
-    for field, value in {"modelo": "Outro", "numero": "Outro", "certificado": "anatel",
-                         "inicio": "2020-01-01", "fim": "2020-01-01"}.items():
+    edits = {"modelo": "Outro", "numero": "07197-26-18234", "certificado": "anatel",
+             "inicio": "2020-01-01", "fim": None}
+    for field, value in edits.items():
         response = await client.patch(f"{BASE}/{row_id}", json={field: value})
-        assert response.status_code == 409, response.text
+        assert response.status_code == 200, response.text
     assert (await client.delete(f"{BASE}/{row_id}")).status_code == 409
     response = await client.patch(f"{BASE}/{row_id}", json={
         "produto": "Minha fritadeira", "nome_comercial": "Meu nome comercial", "valor": 42,
@@ -122,6 +127,24 @@ async def test_read_only_fields_preserve_custom_labels_price_and_pdf(
     row = (await client.get(BASE)).json()[0]
     assert row["produto"] == "Minha fritadeira" and row["nome_comercial"] == "Meu nome comercial"
     assert row["valor"] == "42.00"
+    assert all(row[field] == value for field, value in edits.items())
+    assert row["inmetro_dados"] == _record()
+    assert row["inmetro_chave"] == _record()["chave"]
+    assert len((await client.get(BASE)).json()) == 1
+
+    # Alterar o tipo/número local não deve fazer Anatel tomar o vínculo original do Inmetro.
+    monkeypatch.setattr(anatel_sync, "fetch_certificacoes", AsyncMock(return_value={
+        "source_url": "https://dados.gov.br/", "source_updated_at": None, "sha256": "b" * 64,
+        "records": [{"numero": "071972618234", "produto": "Telefone", "modelos": ["Outro"],
+                     "nomes_comerciais": [], "cnpj": "40191104000145", "alertas": []}],
+    }))
+    assert (await client.post(f"{BASE}/anatel/sincronizar")).json()["status"] == "ok"
+    rows = (await client.get(BASE)).json()
+    assert len(rows) == 2
+    original = next(item for item in rows if item["id"] == row_id)
+    assert original["anatel_numero"] is None
+    assert original["inmetro_chave"] == _record()["chave"]
+    assert all(original[field] == value for field, value in edits.items())
 
 
 async def test_date_not_confirmed_by_source_remains_manual(client, make_user, auth_as, source):
@@ -134,7 +157,12 @@ async def test_date_not_confirmed_by_source_remains_manual(client, make_user, au
     assert (await client.get(BASE)).json()[0]["fim"] == "2027-08-03"
     assert (await client.patch(f"{BASE}/{row_id}", json={"fim": "2029-01-01"})).status_code == 200
     response = await client.patch(f"{BASE}/{row_id}", json={"inicio": "2029-01-01"})
-    assert response.status_code == 409
+    assert response.status_code == 200
+    source.return_value["records"] = [_record(fim="2033-04-30")]
+    assert (await client.post(f"{BASE}/inmetro/sincronizar")).json()["status"] == "ok"
+    row = (await client.get(BASE)).json()[0]
+    assert row["inicio"] == row["fim"] == "2029-01-01"
+    assert row["inmetro_dados"]["fim"] == "2033-04-30"
 
 
 async def test_permissions_and_failed_source_keep_last_success(client, make_user, auth_as, source):
@@ -187,8 +215,12 @@ async def test_mutation_waits_and_checks_inmetro_link(client, make_user, auth_as
     try:
         await asyncio.wait_for(wait_for_lock(), timeout=5)
         await db.commit()
-        assert (await asyncio.wait_for(request, timeout=5)).status_code == 409
-        assert len((await client.get(BASE)).json()) == 1
+        response = await asyncio.wait_for(request, timeout=5)
+        assert response.status_code == (200 if method == "patch" else 409)
+        rows = (await client.get(BASE)).json()
+        assert len(rows) == 1
+        assert rows[0]["inmetro_chave"] == _record()["chave"]
+        assert rows[0]["modelo"] == ("Outro" if method == "patch" else "UAF001")
     finally:
         if not request.done():
             request.cancel()
