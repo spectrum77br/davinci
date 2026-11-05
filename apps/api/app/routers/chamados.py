@@ -2923,16 +2923,22 @@ def _trabalho_do_cerebro(plataforma: str | None, canais: list[str]):
         )
 
     rec = _ult(ChamadoMensagem.direcao == "recebida")
-    # 05/11 (288967): a fala lida na tela grava a hora da AMAZON em `created_at`.
+    # 05/11 (288967): a fala lida na TELA grava a hora da plataforma em `created_at`.
     # Com o robô passando de 3 em 3 h, uma análise pode cair entre a resposta e a
-    # leitura; pela hora da Amazon a fala pareceria já analisada e a IA não
-    # acordaria. `updated_at` da `recebida` diz quando ela chegou aqui.
+    # leitura; pela hora da plataforma a fala pareceria já analisada e a IA não
+    # acordaria. `updated_at` da `recebida` diz quando ela chegou aqui. Só o canal
+    # robô: a fala da API é regravada quando o link assinado muda (TikTok, 303842)
+    # e acordaria a IA a cada passada. A lixeirinha também mexe na linha.
     rec_chegou = (
         select(
             ChamadoMensagem.chamado_id,
             func.max(ChamadoMensagem.updated_at).label("ult"),
         )
-        .where(ChamadoMensagem.direcao == "recebida")
+        .where(
+            ChamadoMensagem.direcao == "recebida",
+            ChamadoMensagem.canal == "robo",
+            ChamadoMensagem.excluida_at.is_(None),
+        )
         .group_by(ChamadoMensagem.chamado_id)
         .subquery()
     )
@@ -2948,8 +2954,7 @@ def _trabalho_do_cerebro(plataforma: str | None, canais: list[str]):
     resposta_nova = rec.c.ult.is_not(None) & or_(
         ana.c.ult.is_(None),
         rec.c.ult > ana.c.ult,
-        (func.lower(func.coalesce(Chamado.plataforma, "")) == "amazon")
-        & (rec_chegou.c.ult > ana.c.ult),
+        rec_chegou.c.ult > ana.c.ult,
     )
     bloqueio = (
         blq.c.ult.is_not(None)
