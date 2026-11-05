@@ -51,6 +51,7 @@ from app.models.chamado import (
     ChamadoMensagem,
     ChamadoPedido,
     ChamadoRevisao,
+    ChamadoRevisaoDia,
 )
 from app.models.claude_conector import ClaudeConector
 from app.models.company import Cadastro, CadastroStore, Company, Store
@@ -543,6 +544,7 @@ __all__ = [
     "ChamadoLeitor",
     "ChamadoMensagem",
     "ChamadoRevisao",
+    "ChamadoRevisaoDia",
     "ChamadoPedido",
     "Refund",
     "Segment",

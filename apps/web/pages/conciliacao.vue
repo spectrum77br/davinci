@@ -172,6 +172,10 @@ const dataFiltro = ref<'pedido' | 'liberacao'>('pedido')
 const situacao = ref('')
 const etapa = ref('')
 const q = ref('')
+// 05/11 (botão Conciliação do histórico do chamado): pedido que veio no link em
+// `?q=`. Achou, vai pra loja dele com o Raio-X aberto; não achou, avisa por quê.
+const pedidoDoLink = ref('')
+const avisoPedido = ref('')
 const page = ref(1)
 const SIZE = 100
 const itens = ref<Pedido[]>([])
@@ -419,6 +423,7 @@ async function carregar() {
     itens.value = r.itens
     total.value = r.total
     resumo.value = r.resumo
+    if (pedidoDoLink.value) abrirPedidoDoLink()
     if (selecionado.value && !itens.value.some((i) => i.pedido_bling === selecionado.value?.pedido_bling)) {
       raioxSeq++ // Raio-X em voo de um pedido que saiu da lista não vale mais
       selecionado.value = null
@@ -430,6 +435,19 @@ async function carregar() {
   } finally {
     if (seq === carregarSeq) loading.value = false
   }
+}
+
+function abrirPedidoDoLink() {
+  const pedido = pedidoDoLink.value
+  pedidoDoLink.value = ''
+  const p = itens.value.find((i) => i.pedido_bling === pedido)
+  if (!p) {
+    const desde = inicioDaAba.value ? ` Ela só tem pedidos desde ${fmtDia(`${inicioDaAba.value}T12:00:00`)}.` : ''
+    avisoPedido.value = `O pedido ${pedido} não está na Conciliação.${desde}`
+    return
+  }
+  irParaLoja(contaDoPedido(p))
+  abrir(p)
 }
 
 async function abrir(p: Pedido) {
@@ -635,6 +653,7 @@ function extrasTitulo(p: Pedido) {
 }
 
 function limpar() {
+  avisoPedido.value = ''
   situacao.value = ''
   etapa.value = ''
   q.value = ''
@@ -692,6 +711,10 @@ if (typeof q0.loja === 'string') {
   }
 }
 if (typeof q0.situacao === 'string') situacao.value = q0.situacao
+if (typeof q0.q === 'string' && q0.q.trim()) {
+  q.value = q0.q.trim()
+  pedidoDoLink.value = q.value
+}
 if (typeof q0.etapa === 'string') etapa.value = q0.etapa
 if (q0.visao === 'extrato') {
   extratoDia.value = diaValido(q0.dia) ? q0.dia : '' // 16/10, revisão: valor inválido é ignorado (cai em ontem)
@@ -786,6 +809,7 @@ await carregar()
     <MargemPainel v-if="visao === 'margem'" embutido />
 
     <template v-if="visao === 'pedidos'">
+    <div v-if="avisoPedido" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/20 dark:text-amber-300">{{ avisoPedido }}</div>
     <div class="flex flex-wrap items-center gap-2 text-xs">
       <label class="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-1">
         <span class="font-semibold text-muted-foreground">Loja</span>

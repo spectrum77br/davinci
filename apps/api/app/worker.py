@@ -2526,6 +2526,18 @@ async def logistica_cliente_mensagens(ctx: dict) -> None:
     logger.info("logistica_cliente_mensagens_done", **summary)
 
 
+async def chamados_revisao_foto_dia(ctx: dict) -> None:
+    """De hora em hora (:50): foto de como está a revisão de hoje (painel Dias da aba
+    Chamados). A última do dia é a que fica, então uma passada perdida numa subida
+    só deixa a foto uma hora mais velha."""
+    # Import aqui: o status da aba é montado no router, que o worker não carrega.
+    from app.routers.chamados import fotografar_revisao
+
+    async with session_scope() as s:
+        resumo = await fotografar_revisao(s)
+    logger.info("chamados_revisao_foto_done", falta=resumo["falta"], prazos=resumo["prazos"])
+
+
 async def chamados_replica_automatica(ctx: dict) -> None:
     """De hora em hora (:25): réplica automática dos Chamados (reenvia a
     mensagem cadastrada a cada N dias enquanto ligada) + monitoramento (fecha
@@ -5412,6 +5424,8 @@ class WorkerSettings:
         # Toda hora (:25): réplica automática + acompanhamento dos Chamados
         # (todo chamado de API do ML fecha sozinho quando o claim encerra).
         cron(chamados_replica_automatica, minute=25, run_at_startup=False),
+        # Toda hora (:50): foto da revisão do dia (painel Dias dos Chamados).
+        cron(chamados_revisao_foto_dia, minute=50, run_at_startup=False, timeout=120),
         # A cada 30 min (:10/:40): só reembolso da TikTok → chamado com prazo + Threema.
         cron(chamados_tiktok_reembolso_vigia, minute={10, 40}, run_at_startup=False, timeout=600),
         # 1x/dia (05:50 BRT) e no startup: catálogo de situações = Bling (2 GETs).

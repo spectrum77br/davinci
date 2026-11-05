@@ -12,7 +12,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import select, text
 
-from app.models import Chamado, ChamadoMensagem, ChamadoRevisao
+from app.models import Chamado, ChamadoMensagem, ChamadoRevisao, ChamadoRevisaoDia
 from app.services import chamados_revisao as rev
 
 HOJE = date(2026, 11, 5)
@@ -336,3 +336,84 @@ async def test_converte_no_banco_e_guarda_o_original(db):
         await db.execute(select(ChamadoRevisao).where(ChamadoRevisao.chamado_id == velho.id))
     ).scalar_one()
     assert (log.tipo, log.observacao_antes) == ("convertido", "18 - conferido")
+
+
+# --- painel Dias ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dias_conta_novos_concluidos_e_abertos(client, make_user, auth_as, db):
+    user = await make_user(role="user", permissions=PERM)
+    auth_as(user)
+    agora = datetime.now(UTC)
+    ontem = agora - timedelta(days=1)
+    velho = _ch(id=uuid4(), created_at=agora - timedelta(days=20))
+    fechado_ontem = _ch(
+        id=uuid4(), created_at=agora - timedelta(days=20), resolvido=True, resolvido_at=ontem
+    )
+    novo_ontem = _ch(id=uuid4(), created_at=ontem)
+    novo_hoje = _ch(id=uuid4(), created_at=agora)
+    db.add_all([velho, fechado_ontem, novo_ontem, novo_hoje])
+    await db.commit()
+
+    corpo = (await client.get("/api/chamados/dias", params={"limite": 3})).json()
+    hoje, d_ontem, anteontem = corpo["dias"]
+    assert (hoje["abertos"], hoje["novos"], hoje["concluidos"]) == (3, 1, 0)
+    assert (d_ontem["abertos"], d_ontem["novos"], d_ontem["concluidos"]) == (2, 1, 1)
+    assert (anteontem["abertos"], anteontem["novos"]) == (2, 0)
+    assert corpo["novos"] == 2 and corpo["concluidos"] == 1
+    assert corpo["saldo"] == 1
+    # Hoje é ao vivo; dia sem foto não tem revisão.
+    assert hoje["tem_registro"] is True and hoje["falta"] == 3
+    assert set(hoje["faltaram"]) == {str(velho.id), str(novo_ontem.id), str(novo_hoje.id)}
+    assert d_ontem["tem_registro"] is False
+
+
+@pytest.mark.asyncio
+async def test_foto_do_dia_aparece_no_painel_e_regrava(client, make_user, auth_as, db):
+    from app.routers.chamados import fotografar_revisao
+
+    user = await make_user(role="user", permissions=PERM)
+    auth_as(user)
+    ch = await _chamado(client)
+    await client.post(f"/api/chamados/{ch['id']}/revisao", json={"tipo": "conferido"})
+    outro = await _chamado(client, pedido_bling="301909")
+
+    await fotografar_revisao(db)
+    await db.commit()
+    await client.post(f"/api/chamados/{outro['id']}/revisao", json={"tipo": "revisar"})
+    await fotografar_revisao(db)
+    await db.commit()
+
+    fotos = list((await db.execute(select(ChamadoRevisaoDia))).scalars())
+    assert len(fotos) == 1
+    assert (fotos[0].conferido, fotos[0].revisar, fotos[0].falta) == (1, 1, 0)
+
+    # A foto de ontem é a que vale pra ontem.
+    fotos[0].dia = rev.hoje_sp() - timedelta(days=1)
+    await db.commit()
+    corpo = (await client.get("/api/chamados/dias", params={"limite": 2})).json()
+    assert corpo["dias"][1]["tem_registro"] is True
+    assert corpo["dias"][1]["conferido"] == 1
+
+
+def test_resumo_do_dia_separa_falta_de_prazo():
+    class Linha:
+        def __init__(self, estado, status="aguard_plataforma"):
+            self.id = uuid4()
+            self.status_aba = status
+            self.revisao_estado = estado
+
+    linhas = [
+        Linha("conferido"),
+        Linha("revisar"),
+        Linha("fixo"),
+        Linha("falta"),
+        Linha("falta", "analise_humano"),
+        Linha("prazo_vencido"),
+        Linha("respondeu"),
+    ]
+    r = rev.resumir_dia(linhas)
+    assert (r["conferido"], r["revisar"], r["fixo"], r["falta"], r["prazos"]) == (1, 1, 1, 2, 2)
+    assert r["por_status"] == {"aguard_plataforma": 1, "analise_humano": 1}
+    assert len(r["faltaram"]) == 4

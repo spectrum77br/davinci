@@ -25,7 +25,7 @@ import {
 } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { REVISAO_DOT, REVISAO_FILTROS, REVISAO_ORDEM, REVISAO_PRECISA_VER, diaMes, passaNoFiltroRevisao, rotuloRevisao } from '~/lib/chamadosRevisao'
-import type { RevisaoCampos, RevisaoEstado, RevisaoMarca } from '~/lib/chamadosRevisao'
+import type { RevisaoCampos, RevisaoDia, RevisaoDias, RevisaoEstado, RevisaoMarca } from '~/lib/chamadosRevisao'
 import { hojeISO } from '~/lib/conciliacao'
 
 // 30/09/2026: a tela virou componente pra aba Jurídico morar também em
@@ -274,6 +274,7 @@ const podeAvisoIa = computed(() => {
 })
 const avisoIaCfgOpen = ref(false)
 const canDelete = useCan('chamados', 'delete')
+const canConciliacao = useCan('conciliacao', 'view')
 
 const items = ref<ChamadoRow[]>([])
 const total = ref(0)
@@ -299,6 +300,9 @@ const ordemRevisao = ref(new Map<string, number>())
 const plataformaTotais = ref<Record<string, number>>({})
 // Raio-X: o chamado aberto no painel da direita (por id, sobrevive ao replaceRow).
 const raioId = ref<string | null>(null)
+// Painel Dias: os números e o dia clicado, que filtra a tabela nos que faltaram.
+const diasRevisao = ref<RevisaoDias | null>(null)
+const diaEscolhido = ref<RevisaoDia | null>(null)
 // Aba Jurídico (Eduardo 04/09): tudo que foi encaminhado ao jurídico, aberto ou resolvido.
 // 24/09 (Vinicius): aba IA de Chamado — o cérebro ganha nome e lugar (liga/desliga,
 // manual "quando acontecer isso, faça isso", o que ela decidiu). `?tab=ia` abre nela.
@@ -363,7 +367,8 @@ function filtrarGrupo(key: string) {
 // Filtro da coluna Status (um código; o card do resumo usa o mesmo filtro).
 const visiveis = computed(() => {
   const f = statusFilter.value
-  const linhas = items.value.filter((r) => (f === 'all' || r.status_aba === f) && passaNoFiltroRevisao(r.revisao_estado, revisaoFilter.value))
+  const faltaram = diaEscolhido.value ? new Set(diaEscolhido.value.faltaram) : null
+  const linhas = items.value.filter((r) => (f === 'all' || r.status_aba === f) && passaNoFiltroRevisao(r.revisao_estado, revisaoFilter.value) && (!faltaram || faltaram.has(r.id)))
   if (mostrar.value !== 'abertos') return linhas
   const ordem = ordemRevisao.value
   return [...linhas].sort((a, b) => (ordem.get(a.id) ?? 1) - (ordem.get(b.id) ?? 1))
@@ -453,6 +458,7 @@ function abrirRaio(row: ChamadoRow) {
   raioId.value = raioId.value === row.id ? null : row.id
 }
 function limparFiltros() {
+  diaEscolhido.value = null
   search.value = ''
   origemFilter.value = 'all'
   plataformaFilter.value = 'all'
@@ -460,6 +466,44 @@ function limparFiltros() {
   statusFilter.value = 'all'
   revisaoFilter.value = 'all'
 }
+function escolherDia(dia: RevisaoDia) {
+  diaEscolhido.value = diaEscolhido.value?.dia === dia.dia ? null : dia
+  statusFilter.value = 'all'
+  revisaoFilter.value = 'all'
+}
+const diaResumo = computed(() => {
+  const d = diaEscolhido.value
+  if (!d) return null
+  const abertos = new Set(items.value.map((r) => r.id))
+  const naLista = d.faltaram.filter((id) => abertos.has(id)).length
+  return { titulo: `Faltaram em ${diaMes(d.dia)}: ${d.faltaram.length} ${d.faltaram.length === 1 ? 'chamado' : 'chamados'}`, concluidos: d.faltaram.length - naLista }
+})
+function statusLabelDe(codigo: string): string {
+  return STATUS_POR_CODIGO[codigo]?.label || codigo
+}
+async function carregarDias() {
+  try {
+    diasRevisao.value = await api<RevisaoDias>('/api/chamados/dias')
+  } catch {
+    diasRevisao.value = null
+  }
+}
+// Marcar várias linhas seguidas: o painel relê uma vez só, quando a pessoa para.
+let diasTimer: ReturnType<typeof setTimeout> | null = null
+function atualizarDias() {
+  if (diasTimer) clearTimeout(diasTimer)
+  diasTimer = setTimeout(carregarDias, 800)
+}
+
+// Botão Conciliação do histórico (05/11): a Conciliação acha o pedido em todas as lojas
+// da aba e vai pra loja dele — o nome da loja no chamado não é o mesmo de lá.
+const ABA_CONCILIACAO: Record<string, string> = { 'mercado livre': 'ml', shopee: 'shopee', tiktok: 'tiktok', amazon: 'amazon' }
+function linkConciliacao(row: ChamadoRow) {
+  const aba = ABA_CONCILIACAO[nomePlataforma(row.plataforma)]
+  if (!aba || !row.pedido_bling || !canConciliacao.value) return null
+  return { path: '/conciliacao', query: { visao: 'pedidos', tab: aba, loja: 'todas', q: row.pedido_bling } }
+}
+
 // Coluna Últ. resposta: sem fala real, a data do status (Encerrado/Concluído).
 function ultimaTexto(row: ChamadoRow): string {
   if (row.ultima_resposta_at) return `${fmtCurto(row.ultima_resposta_at)} · ${quemRespondeu(row).replace(/mercado livre/i, 'ML')}`
@@ -713,7 +757,7 @@ async function loadSituacoes() {
   }
 }
 
-await Promise.all([load(), loadSituacoes()])
+await Promise.all([load(), loadSituacoes(), carregarDias()])
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 watch(search, () => {
@@ -907,7 +951,11 @@ async function marcarRevisao(row: ChamadoRow, marca: RevisaoMarca) {
       method: 'POST',
       body: { tipo: marca.tipo, ate: marca.ate ?? null, motivo: marca.motivo ?? null },
     })
-    r.itens.forEach(replaceRow)
+    r.itens.forEach((linha) => {
+      replaceRow(linha)
+      if (hist.row?.id === linha.id) hist.row = linha
+    })
+    atualizarDias()
   } catch (e: any) {
     toasts.error('Não foi possível marcar', apiError(e))
   }
@@ -1857,7 +1905,7 @@ async function confirmarExcluir() {
   <div class="chamados-panel min-w-0 space-y-2.5">
     <!-- 05/11/2026: padrão da Conciliação. A aba Jurídico saiu em 30/09 e a coluna em
          05/11 (Vinicius: "não usamos"); os dados e o modal continuam no código. -->
-    <div v-if="modo !== 'juridico'" class="flex flex-wrap items-center gap-3 rounded-md border bg-card px-3 py-1.5 lg:grid lg:grid-cols-[1fr_auto_1fr]">
+    <div v-if="modo !== 'juridico'" class="flex flex-wrap items-center gap-3 rounded-md border bg-card px-3 py-1.5">
       <h1 class="text-[15px] font-bold">Chamados</h1>
       <div class="flex flex-wrap items-center gap-3.5 text-xs font-semibold">
         <div v-if="tab === 'chamados'" class="flex flex-wrap gap-0.5">
@@ -1873,8 +1921,8 @@ async function confirmarExcluir() {
           <button type="button" class="rounded px-2.5 py-1" :class="tab === 'ia' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'" @click="tab = 'ia'">IA de Chamado</button>
         </div>
       </div>
-      <div class="flex items-center justify-end gap-1.5 text-xs font-semibold">
-        <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50" :disabled="loading" @click="load">
+      <div class="ml-auto flex items-center justify-end gap-1.5 text-xs font-semibold">
+        <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50" :disabled="loading" @click="load(); carregarDias()">
           <RotateCcw class="size-3.5" :class="{ 'animate-spin': loading }" /> Recarregar
         </button>
         <button type="button" class="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-primary px-2.5 py-1 text-primary-foreground disabled:opacity-50" :disabled="!canEdit" @click="openAdd">
@@ -1998,7 +2046,7 @@ async function confirmarExcluir() {
 
     <template v-if="tab !== 'ia'">
     <!-- filtros (mesmo formato da Conciliação); a plataforma virou aba lá em cima -->
-    <div class="flex flex-wrap items-center justify-center gap-1.5 text-xs">
+    <div class="flex flex-wrap items-center gap-1.5 text-xs">
       <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2">
         <span class="font-semibold text-muted-foreground">Origem</span>
         <select v-model="origemFilter" class="bg-transparent outline-none">
@@ -2064,7 +2112,7 @@ async function confirmarExcluir() {
     </div>
 
     <!-- revisão do dia: clicar numa etiqueta filtra a lista -->
-    <div v-if="tab === 'chamados' && mostrar === 'abertos'" class="flex flex-wrap items-center justify-center gap-3 rounded-md border bg-card px-3 py-1.5 text-xs">
+    <div v-if="tab === 'chamados' && mostrar === 'abertos'" class="flex flex-wrap items-center gap-3 rounded-md border bg-card px-3 py-1.5 text-xs">
       <span class="text-[13px] font-bold">Revisão de {{ hojeRotulo }}</span>
       <span class="inline-block h-2.5 w-60 overflow-hidden rounded-full bg-muted"><span class="block h-full bg-[#1f3a5f] dark:bg-slate-300" :style="{ width: `${revisaoPct}%` }" /></span>
       <span><b>{{ revisaoResumo.feitos }} de {{ revisaoResumo.total }}</b> revisados</span>
@@ -2083,12 +2131,18 @@ async function confirmarExcluir() {
     </div>
 
     <div class="grid items-stretch gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div class="flex min-w-0 flex-col gap-3">
       <div class="flex min-w-0 flex-col rounded-md border bg-card">
         <div class="relative flex items-center justify-center rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
           <span>Chamados — uma linha por caso</span>
           <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">quem está com a bola × o que já foi revisado hoje</span>
         </div>
-        <div class="max-h-[72vh] overflow-auto focus:outline-none" tabindex="0">
+        <div v-if="diaResumo" class="flex flex-wrap items-center gap-2.5 border-b border-blue-200 bg-blue-50 px-3 py-1.5 text-xs dark:border-blue-900 dark:bg-blue-950/30">
+          <b>{{ diaResumo.titulo }}</b>
+          <span class="text-muted-foreground">a Revisão mostra como estão hoje<template v-if="diaResumo.concluidos"> · {{ diaResumo.concluidos }} já {{ diaResumo.concluidos === 1 ? 'concluído' : 'concluídos' }}</template></span>
+          <button type="button" class="ml-auto text-primary underline" @click="diaEscolhido = null">voltar pra lista de hoje</button>
+        </div>
+        <div class="max-h-[60vh] overflow-auto focus:outline-none" tabindex="0">
           <table class="w-full min-w-[1240px] table-fixed border-collapse text-[11.5px]">
             <colgroup>
               <col class="w-[48px]"><col class="w-[60px]"><col class="w-[96px]"><col class="w-[17.5%]">
@@ -2175,6 +2229,8 @@ async function confirmarExcluir() {
           </table>
         </div>
         <div class="mt-auto border-t px-3 py-1.5 text-center text-[11px] text-muted-foreground">Clique na linha abre o Raio-X do chamado à direita. Conferido e Revisar valem só no dia; Fixo vale até a data. Cada dia a lista recomeça.</div>
+      </div>
+      <ChamadosDias v-if="tab === 'chamados' && diasRevisao" :dados="diasRevisao" :escolhido="diaEscolhido?.dia || null" :status-label="statusLabelDe" @escolher="escolherDia" />
       </div>
 
       <div class="flex min-w-0 flex-col gap-3">
@@ -2341,6 +2397,17 @@ async function confirmarExcluir() {
               <ExternalLink class="size-3.5 mr-1" />
               Devoluções
             </NuxtLink>
+            <!-- 05/11/2026 (Vinicius): conferir se caiu o valor que a loja informou. -->
+            <NuxtLink
+              v-if="linkConciliacao(hist.row)"
+              :to="linkConciliacao(hist.row)!"
+              target="_blank"
+              class="inline-flex h-7 items-center whitespace-nowrap rounded-md border border-input bg-background px-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
+              title="Abrir a Conciliação numa aba nova, na loja deste pedido, com o Raio-X aberto"
+            >
+              <ExternalLink class="size-3.5 mr-1" />
+              Conciliação
+            </NuxtLink>
             <Button
               v-if="hist.row.canal === 'api' || hist.row.chamado_de_tela"
               size="sm"
@@ -2354,10 +2421,6 @@ async function confirmarExcluir() {
             >
               <Loader2 v-if="relendo" class="size-3.5 mr-1 animate-spin" />
               {{ relendo ? 'Atualizando…' : 'Atualizar' }}
-            </Button>
-            <Button size="sm" variant="outline" class="h-7 px-2" :disabled="!canEdit" title="Encaminhar ao jurídico (Threema + dossiê com fotos)" @click="openJuridico(hist.row)">
-              <Scale class="size-3.5 mr-1" />
-              {{ hist.row.juridico_enviado_at ? 'Reenviar ao jurídico' : 'Encaminhar ao jurídico' }}
             </Button>
             <button type="button" class="rounded p-1 hover:bg-muted" @click="closeHistorico"><X class="size-4" /></button>
           </div>
@@ -2717,6 +2780,11 @@ async function confirmarExcluir() {
                 <Bot v-else class="size-4 mr-1.5" />
                 Enviar instrução
               </Button>
+            </div>
+            <!-- 05/11/2026 (Vinicius): "abro o histórico, analiso e marco aqui dentro". -->
+            <div v-if="!hist.row.resolvido" class="flex items-center justify-end gap-2 min-w-0">
+              <span class="shrink-0 text-xs font-medium">Revisão</span>
+              <ChamadoRevisaoSeletor :revisao="hist.row" :disabled="!canEdit" @marcar="(m) => { if (hist.row) marcarRevisao(hist.row, m) }" />
             </div>
           </div>
         </div>

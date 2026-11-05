@@ -11,7 +11,7 @@ app.services.chamados; aqui é CRUD + histórico + anexos + os botões.
 import hashlib
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
@@ -49,6 +49,7 @@ from app.models import (
     ChamadoLeitor,
     ChamadoMensagem,
     ChamadoPedido,
+    ChamadoRevisaoDia,
     DevolucaoAnexo,
     Devolution,
     Logistica,
@@ -116,6 +117,8 @@ from app.schemas.chamados import (
     JuridicoIn,
     JuridicoOut,
     ResolverIn,
+    RevisaoDiaOut,
+    RevisaoDiasOut,
     RevisaoIn,
     RevisaoOut,
     SituacoesOut,
@@ -590,6 +593,92 @@ async def delete_anexo(
 
 
 # ------------------------------------------------------------- listagem / CRUD
+
+
+async def _abertos_com_estado(session: AsyncSession, conds: list) -> list[ChamadoOut]:
+    """Os chamados abertos com o status da aba e o estado da revisão calculados."""
+    rows = list(
+        (await session.execute(select(Chamado).where(Chamado.resolvido.is_(False), *conds)))
+        .scalars()
+        .all()
+    )
+    return await _to_out(session, rows)
+
+
+async def fotografar_revisao(session: AsyncSession) -> dict:
+    """Grava como a revisão de hoje está agora (cron de hora em hora)."""
+    resumo = chamados_revisao.resumir_dia(await _abertos_com_estado(session, []))
+    await chamados_revisao.gravar_foto(session, chamados_revisao.hoje_sp(), resumo)
+    return resumo
+
+
+@router.get("/dias", response_model=RevisaoDiasOut)
+async def dias_da_revisao(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "view"))],
+    limite: int = Query(8, ge=1, le=31),
+) -> RevisaoDiasOut:
+    """Painel Dias (Vinicius 05/11/2026): quantos abriram e fecharam em cada dia e como
+    ficou a revisão. Abertos, novos e concluídos saem de `created_at`/`resolvido_at`,
+    com a cerca da equipe. A foto é da empresa inteira, então quem tem equipe vê a
+    revisão só de hoje (calculada com a cerca); hoje é sempre ao vivo."""
+    equipe = await _clausula_do_usuario(session, user)
+    conds = [] if equipe is None else [equipe]
+    hoje = chamados_revisao.hoje_sp()
+    dias = [hoje - timedelta(days=i) for i in range(limite)]
+
+    def dia_sp(quando: datetime) -> date:
+        return quando.astimezone(svc.SAO_PAULO).date()
+
+    pares = [
+        (dia_sp(criado), (dia_sp(fechado) if fechado else date.min) if resolvido else None)
+        for criado, resolvido, fechado in (
+            await session.execute(
+                select(Chamado.created_at, Chamado.resolvido, Chamado.resolvido_at).where(*conds)
+            )
+        ).all()
+    ]
+
+    def abertos_em(dia: date) -> int:
+        return sum(
+            1 for aberto, fechado in pares if aberto <= dia and (fechado is None or fechado > dia)
+        )
+
+    fotos: dict[date, dict] = {}
+    if equipe is None:
+        for foto in (
+            await session.execute(select(ChamadoRevisaoDia).where(ChamadoRevisaoDia.dia.in_(dias)))
+        ).scalars():
+            fotos[foto.dia] = {
+                "conferido": foto.conferido,
+                "revisar": foto.revisar,
+                "fixo": foto.fixo,
+                "falta": foto.falta,
+                "prazos": foto.prazos,
+                "por_status": foto.por_status,
+                "faltaram": foto.faltaram,
+            }
+    fotos[hoje] = chamados_revisao.resumir_dia(await _abertos_com_estado(session, conds))
+
+    saida = [
+        RevisaoDiaOut(
+            dia=dia,
+            abertos=abertos_em(dia),
+            novos=sum(1 for aberto, _ in pares if aberto == dia),
+            concluidos=sum(1 for _, fechado in pares if fechado == dia),
+            tem_registro=dia in fotos,
+            **fotos.get(dia, {}),
+        )
+        for dia in dias
+    ]
+    novos = sum(d.novos for d in saida)
+    return RevisaoDiasOut(
+        dias=saida,
+        novos=novos,
+        concluidos=sum(d.concluidos for d in saida),
+        novos_por_dia=round(novos / limite, 1),
+        saldo=saida[0].abertos - abertos_em(dias[-1] - timedelta(days=1)),
+    )
 
 
 @router.get("", response_model=ChamadoPage)

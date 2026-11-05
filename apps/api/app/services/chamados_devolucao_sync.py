@@ -39,6 +39,7 @@ prova, reembolso pago, ganhamos/perdemos) e desde quando — ver
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
@@ -220,6 +221,31 @@ async def _ja_tem(
     return (await session.execute(q.limit(1))).scalar_one_or_none() is not None
 
 
+# 05/11/2026 (303842, 687 mensagens): a TikTok devolve link assinado NOVO das fotos e
+# vídeos do comprador a cada leitura; comparando o texto inteiro, cada passada do cron
+# gravava a fala de novo.
+_LINK = r"https?://\S+"
+
+
+async def _mesma_fala_outro_link(
+    session: AsyncSession, ch: Chamado, texto: str
+) -> ChamadoMensagem | None:
+    """A fala já gravada que só difere deste texto nos links."""
+    if "http" not in texto:
+        return None
+    q = (
+        select(ChamadoMensagem)
+        .where(
+            ChamadoMensagem.chamado_id == ch.id,
+            ChamadoMensagem.direcao == "recebida",
+            func.regexp_replace(ChamadoMensagem.texto, _LINK, "", "g") == re.sub(_LINK, "", texto),
+        )
+        .order_by(ChamadoMensagem.created_at.desc())
+        .limit(1)
+    )
+    return (await session.execute(q)).scalar_one_or_none()
+
+
 async def registrar_recebida(
     session: AsyncSession, ch: Chamado, plat: str, texto: str, *, quando: datetime | None = None
 ) -> bool:
@@ -235,6 +261,11 @@ async def registrar_recebida(
     if not texto or await _ja_tem(session, ch, texto):
         return False
     if bruto != texto and await _ja_tem(session, ch, bruto):
+        return False
+    gravada = await _mesma_fala_outro_link(session, ch, texto)
+    if gravada is not None:
+        # O link antigo vence em poucos dias: fica o novo, na mesma mensagem.
+        gravada.texto = texto
         return False
     msg = chamados_svc.nova_mensagem(
         ch,

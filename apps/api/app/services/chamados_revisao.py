@@ -15,10 +15,15 @@ Nada roda à meia-noite: a marca guarda a data e `estado_da_revisao` compara com
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, date, datetime
+from typing import Protocol
 from uuid import UUID
 
-from app.models import Chamado, ChamadoRevisao
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import Chamado, ChamadoRevisao, ChamadoRevisaoDia
 from app.services.chamados import SAO_PAULO
 
 CONFERIDO = "conferido"
@@ -32,6 +37,13 @@ ESTADO_FALTA = "falta"
 ESTADO_PRAZO_HOJE = "prazo_hoje"
 ESTADO_PRAZO_VENCIDO = "prazo_vencido"
 ESTADO_RESPONDEU = "respondeu"
+PRECISA_VER = (ESTADO_PRAZO_HOJE, ESTADO_PRAZO_VENCIDO, ESTADO_RESPONDEU)
+
+
+class LinhaDoDia(Protocol):
+    id: UUID
+    status_aba: str | None
+    revisao_estado: str
 
 
 def hoje_sp() -> date:
@@ -91,4 +103,48 @@ def marcar(
         motivo=motivo if fixo else None,
         autor_nome=autor_nome,
         autor_id=autor_id,
+    )
+
+
+def resumir_dia(linhas: Iterable[LinhaDoDia]) -> dict:
+    """Como os chamados abertos estão agora, no formato da foto do dia."""
+    resumo: dict = {
+        CONFERIDO: 0,
+        REVISAR: 0,
+        FIXO: 0,
+        ESTADO_FALTA: 0,
+        "prazos": 0,
+        "por_status": {},
+        "faltaram": [],
+    }
+    for linha in linhas:
+        estado = linha.revisao_estado
+        if estado in PRECISA_VER:
+            resumo["prazos"] += 1
+            resumo["faltaram"].append(str(linha.id))
+            continue
+        resumo[estado] += 1
+        if estado == ESTADO_FALTA:
+            status = linha.status_aba or ""
+            resumo["por_status"][status] = resumo["por_status"].get(status, 0) + 1
+            resumo["faltaram"].append(str(linha.id))
+    return resumo
+
+
+async def gravar_foto(session: AsyncSession, dia: date, resumo: dict) -> None:
+    """Regrava a foto do dia: a última do dia é a que vale."""
+    valores = {
+        "conferido": resumo[CONFERIDO],
+        "revisar": resumo[REVISAR],
+        "fixo": resumo[FIXO],
+        "falta": resumo[ESTADO_FALTA],
+        "prazos": resumo["prazos"],
+        "por_status": resumo["por_status"],
+        "faltaram": resumo["faltaram"],
+        "updated_at": datetime.now(UTC),
+    }
+    await session.execute(
+        insert(ChamadoRevisaoDia)
+        .values(dia=dia, **valores)
+        .on_conflict_do_update(index_elements=[ChamadoRevisaoDia.dia], set_=valores)
     )

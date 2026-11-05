@@ -158,6 +158,33 @@ class RevisaoOut(BaseModel):
     itens: list[ChamadoOut]
 
 
+class RevisaoDiaOut(BaseModel):
+    """Uma linha do painel Dias. Abertos, novos e concluídos saem dos próprios
+    chamados; a revisão só existe do dia em que a foto começou (`tem_registro`)."""
+
+    dia: date
+    abertos: int
+    novos: int
+    concluidos: int
+    tem_registro: bool = False
+    conferido: int = 0
+    revisar: int = 0
+    fixo: int = 0
+    falta: int = 0
+    prazos: int = 0
+    por_status: dict[str, int] = Field(default_factory=dict)
+    faltaram: list[str] = Field(default_factory=list)
+
+
+class RevisaoDiasOut(BaseModel):
+    dias: list[RevisaoDiaOut]
+    novos: int
+    concluidos: int
+    novos_por_dia: float
+    # Quanto os abertos andaram no período (positivo = acumulou).
+    saldo: int
+
+
 class JuridicoIn(BaseModel):
     observacao: str | None = None
 

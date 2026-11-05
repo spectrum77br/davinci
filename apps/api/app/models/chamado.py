@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -194,6 +195,24 @@ class ChamadoRevisao(Base, TimestampMixin):
         nullable=True,
     )
     observacao_antes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ChamadoRevisaoDia(Base, TimestampMixin):
+    """Foto de como ficou a revisão de cada dia (painel Dias, 05/11/2026). Regravada
+    de hora em hora: a última do dia é a que fica. `falta` = sem marca; `prazos` =
+    Fixo que pede olhar. `faltaram` = ids dos dois, pro clique no dia na tela;
+    `por_status` conta só os sem marca."""
+
+    __tablename__ = "chamado_revisao_dias"
+
+    dia: Mapped[date] = mapped_column(Date, primary_key=True)
+    conferido: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    revisar: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fixo: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    falta: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    prazos: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    por_status: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    faltaram: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
 
 class ChamadoMensagem(Base, TimestampMixin):
