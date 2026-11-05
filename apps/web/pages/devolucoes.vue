@@ -789,7 +789,9 @@ const lookupResults = ref<LookupRow[]>([])
 const lookupError = ref<string | null>(null)
 const creating = ref(false)
 const drafts = ref<DevolutionDraft[]>([])
-const addedThisSession = ref<Set<string>>(new Set())
+// Uma entrada por produto criado nesta busca (pedido|sku, repetida se o pedido
+// tem a mesma peça mais de uma vez — o "já feito" conta unidades, 302146).
+const addedThisSession = ref<string[]>([])
 
 const dirtyRows = ref<Set<string>>(new Set())
 const savingRows = ref<Set<string>>(new Set())
@@ -966,22 +968,31 @@ const expandedLookupResults = computed<LookupRow[]>(() => {
   return rows
 })
 
-const alreadyAddedKeys = computed(() => {
-  const keys = new Set<string>()
-  for (const row of items.value) {
-    keys.add(`${row.pedido_bling}|${row.sku}`)
+// Unidades já lançadas. O backend marca as que já tinham devolução na hora da
+// busca (por unidade, não por SKU); aqui entram as criadas depois dela, uma
+// unidade por produto criado. Antes a tabela carregada marcava pedido+sku
+// inteiro: kit com 3 malas iguais e uma excluída não deixava relançar (302146).
+const alreadyAddedRows = computed(() => {
+  const restantes = new Map<string, number>()
+  for (const k of addedThisSession.value) restantes.set(k, (restantes.get(k) ?? 0) + 1)
+  const marcadas = new Set<LookupRow>()
+  for (const row of expandedLookupResults.value) {
+    if (row.ja_devolvido === true) {
+      marcadas.add(row)
+      continue
+    }
+    const k = `${row.pedido_bling}|${row.sku}`
+    const n = restantes.get(k) ?? 0
+    if (n > 0) {
+      marcadas.add(row)
+      restantes.set(k, n - 1)
+    }
   }
-  for (const k of addedThisSession.value) {
-    keys.add(k)
-  }
-  return keys
+  return marcadas
 })
 
 function isAlreadyAdded(row: LookupRow) {
-  // O backend já marca itens com devolução lançada (não depende da página
-  // carregada da tabela); mantemos os keys locais p/ o que foi criado agora.
-  return row.ja_devolvido === true
-    || alreadyAddedKeys.value.has(`${row.pedido_bling}|${row.sku}`)
+  return alreadyAddedRows.value.has(row)
 }
 // Produtos do pedido ainda não adicionados — todos entram de uma vez no rascunho.
 const selectableLookupCount = computed(
@@ -1770,7 +1781,7 @@ function openAdd() {
   lookupResults.value = []
   lookupError.value = null
   drafts.value = []
-  addedThisSession.value = new Set()
+  addedThisSession.value = []
 }
 function closeAdd() {
   addOpen.value = false
@@ -1778,7 +1789,7 @@ function closeAdd() {
   lookupResults.value = []
   lookupError.value = null
   drafts.value = []
-  addedThisSession.value = new Set()
+  addedThisSession.value = []
 }
 
 function openCorrecao() {
@@ -1899,6 +1910,9 @@ async function lookupOrder() {
   lookupError.value = null
   lookupResults.value = []
   drafts.value = []
+  // A busca nova já traz do backend o que foi lançado até agora; contar de
+  // novo o que foi criado nesta sessão esconderia unidades a mais.
+  addedThisSession.value = []
   try {
     const res = await api<LookupRow[]>(`/api/devolutions/order-lookup?pedido=${encodeURIComponent(pedido)}`)
     lookupResults.value = res
@@ -2023,7 +2037,9 @@ async function createAllDevolutions() {
         }
         if (page.value === 1) items.value = [created, ...items.value].slice(0, PAGE_SIZE)
         total.value += 1
-        addedThisSession.value = new Set([...addedThisSession.value, `${created.pedido_bling}|${created.sku}`])
+        // Chave da LINHA DA BUSCA de onde o rascunho veio (o servidor limpa o
+        // SKU — espaço, vazio — e aí a unidade criada não seria contada).
+        addedThisSession.value = [...addedThisSession.value, `${d.pedido_bling}|${d.sku}`]
         added += 1
         if (estoqueSr) showStockToast(estoqueSr, createdId, created)
         if (created.estoque_status === 'falhou' || created.estoque_status === 'conferindo') pendentesNoAdd += 1
@@ -2564,6 +2580,15 @@ async function removeRow(row: DevolutionRow) {
     total.value = Math.max(0, total.value - 1)
     void refreshTotals()
     if (res) avisarExclusao(row, res)
+    // "Adicionar pedido" aberto no mesmo pedido (excluir para relançar como
+    // Usado, 302146): busca de novo para a unidade excluída voltar na hora —
+    // só sem rascunho na tela, que a busca descartaria.
+    if (
+      addOpen.value && !drafts.value.length && row.pedido_bling
+      && lookupResults.value.some((r) => r.pedido_bling === row.pedido_bling)
+    ) {
+      void lookupOrder()
+    }
   } catch (e: any) {
     error.value = apiError(e)
     // O servidor pode ter marcado a linha (estorno que pode ter saído): relê
@@ -3109,8 +3134,8 @@ async function backfillAddresses() {
           </thead>
           <tbody>
             <tr
-              v-for="row in expandedLookupResults"
-              :key="`${row.pedido_bling}-${row.sku}-${row.conta}`"
+              v-for="(row, i) in expandedLookupResults"
+              :key="`${row.pedido_bling}-${row.sku}-${row.conta}-${i}`"
               class="border-t"
               :class="isAlreadyAdded(row) ? 'opacity-50' : ''"
             >

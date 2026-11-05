@@ -469,3 +469,134 @@ async def test_order_lookup_marks_already_devolved_items(
     assert response.status_code == 200
     ja = {r["sku"]: r["ja_devolvido"] for r in response.json()}
     assert ja == {"dg053.sp": False, "a003.sp": True, "a004.sp": True}
+
+
+async def test_order_lookup_counts_units_not_skus(
+    client,
+    db: AsyncSession,
+    make_user,
+    auth_as,
+):
+    """302146 (05/11): 2 kits b056.18.24 + 1 b056.24 avulsa = 3 malas b056.24.
+    As 9 malas foram lançadas e UMA b056.24 foi excluída para voltar como
+    Usado. Com o "já feito" por pedido+sku, as 3 b056.24 ficavam marcadas e a
+    excluída não dava para relançar. Agora só as unidades lançadas contam."""
+    user = await make_user(permissions=_devolution_permissions(edit=False, delete=False))
+    auth_as(user)
+    schema = get_settings().database_schema
+
+    await db.execute(
+        text(
+            """
+            INSERT INTO products (id, user_id, sku, name, cost_price, situacao)
+            VALUES
+                (gen_random_uuid(), :uid, 'b056.18', 'Mala Sorriso M6 tamanho 18', 100, 'A'),
+                (gen_random_uuid(), :uid, 'b056.24', 'Mala Sorriso M6 tamanho 24', 126, 'A')
+            """
+        ),
+        {"uid": user.id},
+    )
+    await db.execute(
+        text(
+            """
+            INSERT INTO devolutions
+                (pedido_bling, conta, sku, condicao_produto, quantidade, custo_produto)
+            VALUES
+                ('302146', 'Shopee KFA', 'b056.18', 'Novo', 1, 100),
+                ('302146', 'Shopee KFA', 'b056.18', 'Novo', 1, 100),
+                ('302146', 'Shopee KFA', 'b056.24', 'Novo', 1, 126),
+                ('302146', 'Shopee KFA', 'b056.24', 'Novo', 1, 126)
+            """
+        )
+    )
+    await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
+    await db.execute(
+        text(
+            f"""
+            CREATE VIEW "{schema}".vw_devolucoes AS
+            SELECT * FROM (VALUES
+                (
+                    '2026-10-07T03:00:00+00:00'::timestamptz,
+                    '302146'::text, NULL::text, 'Shopee KFA'::text, NULL::bigint,
+                    'b056.18.24'::text, 'Kit Malas Sorriso M6'::text, 2::integer, NULL::uuid,
+                    NULL::text, NULL::text,
+                    NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
+                ),
+                (
+                    '2026-10-07T03:00:00+00:00'::timestamptz,
+                    '302146'::text, NULL::text, 'Shopee KFA'::text, NULL::bigint,
+                    'b056.24'::text, 'Mala Sorriso M6 tamanho 24'::text, 1::integer, NULL::uuid,
+                    NULL::text, NULL::text,
+                    NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text
+                )
+            ) AS t(
+                data, pedido_bling, pedido_marketplace, loja_nome, bling_loja_id,
+                sku, produto, quantidade, bling_order_item_id, nome_destinatario,
+                cep_destino, endereco_destino, numero_destino, complemento_destino,
+                bairro_destino, cidade_destino, uf_destino
+            )
+            """  # noqa: S608
+        )
+    )
+    await db.commit()
+
+    try:
+        response = await client.get("/api/devolutions/order-lookup?pedido=302146")
+    finally:
+        await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
+        await db.commit()
+
+    assert response.status_code == 200
+    rows = response.json()
+    por_sku: dict[str, list[bool]] = {}
+    for r in rows:
+        por_sku.setdefault(r["sku"], []).append(r["ja_devolvido"])
+    assert sorted(por_sku["b056.18"]) == [True, True]
+    assert sorted(por_sku["b056.24"]) == [False, True, True]
+
+
+async def test_marcar_unidades_prefere_custo_da_linha_lancada():
+    """Kit (126) + avulsa (130) da mesma mala: lançadas a 126 e a 130, a que
+    sobra para relançar é a outra de 126 — não a avulsa."""
+    from app.routers.devolutions import _marcar_unidades_lancadas
+
+    rows = [
+        {"pedido_bling": "302146", "sku": "b056.24", "custo_produto": 126.0},
+        {"pedido_bling": "302146", "sku": "b056.24", "custo_produto": 126.0},
+        {"pedido_bling": "302146", "sku": "b056.24", "custo_produto": 130.0},
+    ]
+    _marcar_unidades_lancadas(rows, {("302146", "b056.24"): [126.0, 130.0]})
+    assert [r["ja_devolvido"] for r in rows] == [True, False, True]
+
+
+async def test_marcar_unidades_custo_diferente_ou_vazio_marca_na_ordem():
+    """Custo editado na linha (ou sem custo) não casa com unidade nenhuma:
+    a contagem vale do mesmo jeito, marcando na ordem do pedido."""
+    from app.routers.devolutions import _marcar_unidades_lancadas
+
+    rows = [
+        {"pedido_bling": "1", "sku": "a003.sp", "custo_produto": 10.0},
+        {"pedido_bling": "1", "sku": "a003.sp", "custo_produto": 10.0},
+        {"pedido_bling": "1", "sku": "a003.sp", "custo_produto": 10.0},
+        {"pedido_bling": "1", "sku": "a004.sp", "custo_produto": None},
+    ]
+    _marcar_unidades_lancadas(rows, {("1", "a003.sp"): [99.0, None]})
+    assert [r["ja_devolvido"] for r in rows] == [True, True, False, False]
+
+    # Mais linhas lançadas que unidades no pedido: todas marcadas, sem erro.
+    rows2 = [{"pedido_bling": "1", "sku": "a003.sp", "custo_produto": 10.0}]
+    _marcar_unidades_lancadas(rows2, {("1", "a003.sp"): [10.0, 10.0, 10.0]})
+    assert rows2[0]["ja_devolvido"] is True
+
+
+async def test_marcar_unidades_item_sem_sku_conta_pela_chave_vazia():
+    """Item sem código no Bling (sku NULL): a devolução lançada dele também
+    conta — senão uma busca nova o mostraria livre e daria para lançar 2×."""
+    from app.routers.devolutions import _marcar_unidades_lancadas
+
+    rows = [
+        {"pedido_bling": "9", "sku": None, "custo_produto": 0.0},
+        {"pedido_bling": "9", "sku": "b056.24", "custo_produto": 126.0},
+    ]
+    _marcar_unidades_lancadas(rows, {("9", ""): [None]})
+    assert [r["ja_devolvido"] for r in rows] == [True, False]
