@@ -688,6 +688,10 @@ type PricingProduct = {
   // Colunas Modelo / Nº do certificado / Validade (05/11/2026): a linha da
   // Certificações achada pelo código no nome ("… - USM003"). Só leitura.
   certificacao?: CertificacaoDoProduto | null
+  // Vínculo gravado (migration 0457), escolhido na coluna Modelo. Sem ele,
+  // o servidor tenta o código no nome e marca certificacao_pelo_nome.
+  certificacao_id?: string | null
+  certificacao_pelo_nome?: boolean
   created_at: string
   updated_at: string
 }
@@ -733,6 +737,35 @@ function certValidadeClasse(c: CertificacaoDoProduto | null | undefined): string
   if (n === null) return ''
   if (n < 0) return 'text-red-700 font-medium'
   return n < 30 ? 'text-amber-700 font-medium' : ''
+}
+// Coluna Modelo (05/11/2026, à tarde): os nomes foram limpos ("uranyx A17 pro
+// max 12.128", sem o "- USM003") e o certificado passou a ser escolhido aqui
+// e gravado na linha. Opções = as linhas da Certificações.
+const certOpcoes = ref<CertificacaoDoProduto[]>([])
+async function loadCertOpcoes() {
+  try {
+    certOpcoes.value = await api<CertificacaoDoProduto[]>('/api/pricing/certificacoes')
+  } catch { /* sem opções: a coluna segue mostrando o que veio no produto */ }
+}
+function certOpcaoRotulo(c: CertificacaoDoProduto): string {
+  const modelo = c.modelo?.trim() || 'sem modelo'
+  return `${modelo} — ${c.produto || 'sem produto'}${c.numero?.trim() ? ` (${c.numero})` : ''}`
+}
+async function setCertificacao(p: PricingProduct, id: string) {
+  const antes = { certificacao_id: p.certificacao_id, certificacao: p.certificacao, certificacao_pelo_nome: p.certificacao_pelo_nome }
+  const escolhido = certOpcoes.value.find((c) => c.id === id) ?? null
+  Object.assign(p, { certificacao_id: id || null, certificacao: escolhido, certificacao_pelo_nome: false }) // otimista
+  try {
+    const updated = await api<PricingProduct>(`/api/pricing/products/${p.id}`, {
+      method: 'PATCH',
+      body: { certificacao_id: id || null },
+    })
+    Object.assign(p, updated)
+    flash(p.id, 'certificacao_id')
+  } catch (e: any) {
+    Object.assign(p, antes)
+    productsErr.value = e?.data?.detail?.code ?? 'save_failed'
+  }
 }
 function certTitulo(c: CertificacaoDoProduto | null | undefined): string {
   if (!c) return 'Nenhum certificado da Certificações com o código do nome deste produto (ex.: "… - USM003").'
@@ -853,6 +886,7 @@ async function loadProducts() {
   productsErr.value = null
   try {
     products.value = await api<PricingProduct[]>('/api/pricing/products')
+    if (canEditProdutos.value) void loadCertOpcoes()
   } catch (e: any) {
     productsErr.value = e?.data?.detail?.code ?? 'load_failed'
   } finally {
@@ -5037,7 +5071,7 @@ watch(department, async () => {
               <template v-if="mostraCertificado">
                 <th
                   class="text-left px-2 py-2 font-medium border-b border-border min-w-[90px]"
-                  title="Modelo do certificado, copiado da Certificações (Importação › Certificações). Achado pelo código no fim do nome do produto, ex.: “… - USM003”."
+                  title="Modelo do certificado: escolha a linha da Certificações (Importação › Certificações) e o Nº e a Validade vêm junto. Sem escolha, vale o código no fim do nome (ex.: “… - USM003”)."
                   data-col-cert-modelo
                 >Modelo</th>
                 <th
@@ -5242,11 +5276,28 @@ watch(department, async () => {
               </template>
               <template v-if="mostraCertificado">
                 <td
-                  class="border border-border px-2 py-1.5 text-xs"
-                  :class="{ 'text-muted-foreground': !p.certificacao }"
-                  :title="certTitulo(p.certificacao)"
+                  class="border border-border text-xs"
+                  :class="[
+                    canEditProdutos ? 'px-1 py-1' : 'px-2 py-1.5',
+                    { 'text-muted-foreground': !p.certificacao, 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'certificacao_id') },
+                  ]"
+                  :title="certTitulo(p.certificacao) + (p.certificacao_pelo_nome ? ' Achado pelo código no nome; escolha na lista para gravar.' : '')"
                   data-cert-modelo
-                >{{ p.certificacao ? (p.certificacao.modelo || p.certificacao.produto || '—') : '—' }}</td>
+                >
+                  <select
+                    v-if="canEditProdutos"
+                    class="w-full max-w-[150px] text-xs border rounded px-1 py-0.5 bg-background cursor-pointer"
+                    :class="p.certificacao_pelo_nome ? 'italic text-muted-foreground' : ''"
+                    data-cert-escolha
+                    @change="setCertificacao(p, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <!-- :selected por opção (como a Prioridade): as opções chegam
+                         depois dos produtos e o :value no select não se reaplica. -->
+                    <option value="" :selected="!p.certificacao_id">{{ p.certificacao_pelo_nome && p.certificacao ? `${p.certificacao.modelo || p.certificacao.produto} (pelo nome)` : '—' }}</option>
+                    <option v-for="c in certOpcoes" :key="c.id" :value="c.id" :selected="c.id === p.certificacao_id">{{ certOpcaoRotulo(c) }}</option>
+                  </select>
+                  <template v-else>{{ p.certificacao ? (p.certificacao.modelo || p.certificacao.produto || '—') : '—' }}</template>
+                </td>
                 <td
                   class="border border-border px-2 py-1.5 text-xs font-mono whitespace-nowrap"
                   :class="{ 'text-muted-foreground': !p.certificacao?.numero }"

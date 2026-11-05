@@ -241,3 +241,106 @@ async def test_produtos_trazem_o_certificado_e_acompanham_a_certificacoes(
     )
     assert r.status_code == 200
     assert r.json()["certificacao"] is None
+
+
+@pytest.mark.asyncio
+async def test_certificado_gravado_vale_mesmo_sem_codigo_no_nome(
+    db: AsyncSession,
+    client: AsyncClient,
+    editor: User,
+    auth_as: Callable[[User | None], None],
+):
+    """05/11 à tarde o Eduardo limpou os nomes ("uranyx A17 pro max 12.128",
+    sem o "- USM003") e as colunas esvaziaram. Desde a 0457 o certificado é
+    escolhido na coluna Modelo e fica gravado na linha."""
+    root = Segment(name="Celular", slug="celular", sort_order=0)
+    db.add(root)
+    await db.commit()
+    await db.refresh(root)
+    db.add(Segment(name="Cel + Fone", slug="cel-fone", parent_id=root.id, sort_order=1))
+    usm003 = FinanceiroSuprimentos(
+        produto="smartphone 4G",
+        modelo="USM003",
+        certificado="anatel",
+        numero="07197-26-18234",
+        fim=date(2028, 7, 30),
+    )
+    usm001 = FinanceiroSuprimentos(
+        produto="smartphone 5G",
+        modelo="USM001",
+        certificado="anatel",
+        numero="08215-25-18234",
+        fim=date(2028, 2, 20),
+    )
+    db.add_all([usm003, usm001])
+    await db.commit()
+
+    auth_as(editor)
+    r = await client.post(
+        "/api/pricing/products",
+        json={"sku": "dg052", "name": "uranyx A17 pro max 12.128", "cost_kit1": "100"},
+    )
+    assert r.status_code == 201
+    pid = r.json()["id"]
+    assert r.json()["certificacao"] is None  # nome limpo e nada gravado
+
+    # Opções da coluna Modelo: sem precisar da permissão de Certificações.
+    r = await client.get("/api/pricing/certificacoes")
+    assert r.status_code == 200
+    assert {c["modelo"] for c in r.json()} >= {"USM003", "USM001"}
+
+    r = await client.patch(f"/api/pricing/products/{pid}", json={"certificacao_id": str(usm003.id)})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["certificacao_id"] == str(usm003.id)
+    assert body["certificacao"]["numero"] == "07197-26-18234"
+    assert body["certificacao_pelo_nome"] is False
+
+    # O gravado vence o código do nome: nome com "- USM001" continua USM003.
+    r = await client.patch(f"/api/pricing/products/{pid}", json={"name": "uranyx A17 - USM001"})
+    assert r.json()["certificacao"]["modelo"] == "USM003"
+
+    # Certificado que não existe → 422, nada muda.
+    r = await client.patch(
+        f"/api/pricing/products/{pid}", json={"certificacao_id": str(uuid.uuid4())}
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "certificacao_not_found"
+
+    # Tirar o vínculo → volta a valer o código do nome (marcado como "pelo nome").
+    r = await client.patch(f"/api/pricing/products/{pid}", json={"certificacao_id": None})
+    assert r.status_code == 200
+    assert r.json()["certificacao_id"] is None
+    assert r.json()["certificacao"]["modelo"] == "USM001"
+    assert r.json()["certificacao_pelo_nome"] is True
+
+    # Certificação excluída → o vínculo vira NULL (ON DELETE SET NULL).
+    await client.patch(
+        f"/api/pricing/products/{pid}",
+        json={"certificacao_id": str(usm003.id), "name": "uranyx A17"},
+    )
+    await db.delete(usm003)
+    await db.commit()
+    r = await client.get("/api/pricing/products")
+    (linha,) = [p for p in r.json() if p["id"] == pid]
+    assert linha["certificacao_id"] is None and linha["certificacao"] is None
+
+
+@pytest.mark.asyncio
+async def test_opcoes_de_certificado_pedem_permissao_da_tabela(
+    client: AsyncClient,
+    db: AsyncSession,
+    auth_as: Callable[[User | None], None],
+):
+    u = User(
+        open_id=f"email:sem-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        email=f"sem-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        role=UserRole.USER,
+        status=UserStatus.ACTIVE,
+        permissions={},
+    )
+    db.add(u)
+    await db.commit()
+    auth_as(u)
+    r = await client.get("/api/pricing/certificacoes")
+    assert r.status_code == 403

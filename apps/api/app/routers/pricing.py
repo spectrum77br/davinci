@@ -32,6 +32,7 @@ from app.models import (
     BackgroundJobStatus,
     BackgroundJobType,
     CellStatus,
+    FinanceiroSuprimentos,
     Integration,
     IntegrationPlatform,
     PricingAccount,
@@ -487,9 +488,14 @@ def _product_out(
     if pair:
         out.department, out.product_type = pair
     # Aba Produtos (05/11/2026): Modelo / Nº do certificado / Validade vêm da
-    # Certificações pelo código no nome. A grade não passa a lista e fica sem.
+    # Certificações — o certificado gravado na linha (migration 0457) ou, sem
+    # ele, o achado pelo código no nome. A grade não passa a lista e fica sem.
     if certificacoes is not None:
-        cert = certificacao_do_produto(row.name, certificacoes)
+        if row.certificacao_id is not None:
+            cert = next((c for c in certificacoes if c.id == row.certificacao_id), None)
+        else:
+            cert = certificacao_do_produto(row.name, certificacoes)
+            out.certificacao_pelo_nome = cert is not None
         if cert is not None:
             out.certificacao = CertificacaoDoProdutoOut(
                 id=cert.id, produto=cert.produto, modelo=cert.modelo,
@@ -711,6 +717,26 @@ async def delete_account(
 # Products
 # =============================================================================
 
+@router.get("/certificacoes", response_model=list[CertificacaoDoProdutoOut])
+async def list_certificacoes_para_produtos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[
+        User, Depends(require_permission("tabela_precos_produtos", "view"))
+    ],
+) -> list[CertificacaoDoProdutoOut]:
+    """Opções da coluna Modelo da aba Produtos (só o que a coluna mostra:
+    quem edita a Tabela de Preços não precisa ver a tela de Certificações)."""
+    certs = await carregar_certificacoes(session)
+    certs.sort(key=lambda c: ((c.produto or "").lower(), (c.modelo or "").lower()))
+    return [
+        CertificacaoDoProdutoOut(
+            id=c.id, produto=c.produto, modelo=c.modelo,
+            certificado=c.certificado, numero=c.numero, fim=c.fim,
+        )
+        for c in certs
+    ]
+
+
 @router.get("/products", response_model=list[PricingProductOut])
 async def list_products(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -802,6 +828,15 @@ async def patch_product(
         raise HTTPException(404, detail={"code": "product_not_found"})
 
     data = body.model_dump(exclude_unset=True)
+    # Certificado escolhido na coluna Modelo: tem de existir na Certificações.
+    if data.get("certificacao_id") is not None:
+        existe = await session.scalar(
+            select(FinanceiroSuprimentos.id).where(
+                FinanceiroSuprimentos.id == data["certificacao_id"]
+            )
+        )
+        if existe is None:
+            raise HTTPException(422, detail={"code": "certificacao_not_found"})
     # Apagar o link das fotos na tela = desligar a pasta do MEGA desta linha.
     # Antes só o link sumia: o fotos_path ficava, e o próximo envio continuava
     # indo para a pasta antiga que a tela já dizia não ter. Vão junto a
