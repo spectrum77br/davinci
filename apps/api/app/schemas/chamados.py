@@ -808,6 +808,11 @@ class AgentChamadoAnaliseOut(BaseModel):
     # 25/09: todos os arquivos do chamado (sem conteúdo) — a IA escolhe as
     # fotos do "Upload Evidence" da Shopee e baixa por /agent/anexos/{id}.
     anexos: list[ChamadoAnexoOut] = []
+    # 05/11 (300121): a TikTok não abre link do MEGA e pediu o arquivo do vídeo; a IA
+    # só via o link que estivesse no texto da abertura. `link_envio` = como embalamos,
+    # `link_abertura` = abertura do pacote devolvido. A IA baixa e anexa.
+    link_envio: str | None = None
+    link_abertura: str | None = None
     replicas_robo: int = 0
     analises: int = 0
 

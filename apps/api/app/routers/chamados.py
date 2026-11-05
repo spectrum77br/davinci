@@ -3112,6 +3112,23 @@ async def _fotos_da_devolucao(session: AsyncSession, ch: Chamado) -> list[Chamad
     ]
 
 
+async def _videos_da_devolucao(session: AsyncSession, ch: Chamado) -> tuple[str | None, str | None]:
+    """Link do vídeo de envio e do vídeo de abertura das linhas de devolução do pedido.
+
+    05/11 (300121): a TikTok não abre link do MEGA e pediu o arquivo. No motivo
+    "Bloqueado" o link nem vai no texto da abertura (302299, 301805), então a IA não
+    tinha como achar. Só vale link: a operadora já digitou "nao ha, …" nesse campo."""
+    if ch.origem != "devolucao":
+        return None, None
+    linhas = await _lancamentos_do_chamado(session, ch)
+
+    def primeiro(campo: str) -> str | None:
+        valores = ((getattr(d, campo) or "").strip() for d in linhas)
+        return next((v for v in valores if v.startswith("http")), None)
+
+    return primeiro("link_envio"), primeiro("link_abertura")
+
+
 async def _item_do_cerebro(session: AsyncSession, ch: Chamado) -> AgentChamadoAnaliseOut:
     """O chamado como o cérebro enxerga: a conversa do CASO inteiro (linhas irmãs
     da mesma consulta), instrução/bloqueio pendentes e os prints da abertura."""
@@ -3146,6 +3163,7 @@ async def _item_do_cerebro(session: AsyncSession, ch: Chamado) -> AgentChamadoAn
         for a in todos
     )
     fotos_dev = [] if tem_foto else await _fotos_da_devolucao(session, ch)
+    link_envio, link_abertura = await _videos_da_devolucao(session, ch)
     pend = _instrucao_pendente(msgs)
     _m, bloq = _bloqueio_de(msgs)
     return AgentChamadoAnaliseOut(
@@ -3178,6 +3196,8 @@ async def _item_do_cerebro(session: AsyncSession, ch: Chamado) -> AgentChamadoAn
         ],
         anexos_abertura=[a.id for a in anexos],
         anexos=[_anexo_out(a) for a in todos] + fotos_dev,
+        link_envio=link_envio,
+        link_abertura=link_abertura,
         replicas_robo=sum(
             1 for m in msgs if m.direcao == "enviada" and m.autor_nome == AUTOR_CEREBRO
         ),

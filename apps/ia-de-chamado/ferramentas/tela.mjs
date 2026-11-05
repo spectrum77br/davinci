@@ -7,6 +7,7 @@
 //     | campos | escrever "campo" "texto" [enter] | anexar "campo" tmp/a.jpg[,tmp/b.jpg]
 //     | captcha | tecla Enter | vivo | js "expr"
 //   ferramentas/tela - entrada | encolher "arquivo" [720|540|480] | apagar "arquivo"
+//     | mega "link do MEGA"
 //
 // Abre o perfil se estiver fechado (quem chama FECHA no fim: adspower.py fechar).
 // A aba escolhida fica em tmp/.aba-<perfil>. Coordenadas em px CSS (print ÷ 2).
@@ -283,6 +284,44 @@ if (!perfil || !cmd) {
 // depois de enviado (pedido do Cairo: "subir o vídeo e depois excluir").
 const ENTRADA = "fotos e videos subir chamado";
 const dentro = (a, pasta) => path.resolve(a).startsWith(path.resolve(pasta) + path.sep);
+// 05/11 (300121): a TikTok não abre link do MEGA e pede o arquivo do vídeo. `mega`
+// baixa o vídeo do chamado pra tmp/ (a rodada apaga) pelo MEGAcmd do Mac; link público
+// não mexe na conta logada ali. Depois `encolher`, se passar do limite, e `anexar`.
+const MEGACMD = "/Applications/MEGAcmd.app/Contents/MacOS";
+const LINK_MEGA = /^https:\/\/(?:www\.)?mega\.(?:nz|co\.nz)\/(?:file\/([\w-]+)#|#!([\w-]+)!)[-\w]{20,}$/;
+if (cmd === "mega") {
+  const json = (o) => console.log(JSON.stringify(o, null, 1));
+  const link = (args[0] || "").trim();
+  const m = LINK_MEGA.exec(link);
+  if (!m) {
+    json({ ok: false, erro: "só link de arquivo do MEGA com a chave: https://mega.nz/file/<id>#<chave>", link });
+    process.exit(1);
+  }
+  const pasta = path.resolve("tmp", `mega-${m[1] || m[2]}`);
+  fs.mkdirSync(pasta, { recursive: true });
+  const baixados = () => fs.readdirSync(pasta).filter((a) => !a.startsWith("."));
+  if (!baixados().length) {
+    const { execFileSync } = await import("node:child_process");
+    try {
+      execFileSync(path.join(MEGACMD, "mega-get"), [link, `${pasta}/`], {
+        env: { ...process.env, PATH: `${MEGACMD}:${process.env.PATH}` },
+        stdio: "ignore",
+        timeout: 15 * 60 * 1000,
+      });
+    } catch (e) {
+      json({ ok: false, erro: `o MEGA não entregou o arquivo (${e.code || e.status || e.message})` });
+      process.exit(1);
+    }
+  }
+  const [nome] = baixados();
+  if (!nome) {
+    json({ ok: false, erro: "o MEGA terminou sem entregar arquivo nenhum" });
+    process.exit(1);
+  }
+  const arquivo = path.join("tmp", path.basename(pasta), nome);
+  json({ ok: true, arquivo, mb: Math.round(fs.statSync(arquivo).size / 1e5) / 10 });
+  process.exit();
+}
 if (["entrada", "encolher", "apagar"].includes(cmd)) {
   const json = (o) => console.log(JSON.stringify(o, null, 1));
   const mb = (a) => Math.round(fs.statSync(a).size / 1e5) / 10;

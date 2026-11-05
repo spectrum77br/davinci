@@ -524,6 +524,48 @@ async def test_avaliacao_no_historico_e_ao_fechar(client, db, cenario):
     assert not [m for m in msgs if m["tipo"] == "instrucao"]
 
 
+async def test_caso_traz_os_links_de_video_da_devolucao(client, db, cenario):
+    """05/11 (300121, 302299): a TikTok não abre link do MEGA e pede o arquivo. A IA
+    recebe o link de envio e o de abertura de qualquer linha do pedido; texto que a
+    operadora digitou no campo não conta, e chamado que não é de devolução vem vazio."""
+    from datetime import date
+
+    from app.models import Devolution
+
+    hermes = {"X-Agent-Token": _HERMES}
+    envio = "https://mega.nz/file/envio#chave"
+    abertura = "https://mega.nz/file/abertura#chave"
+    digitado = Devolution(conta="TikTok Mini", motivo_devolucao="Danificado", pedido_bling="300121",
+                          link_envio="nao ha, foi sem video")
+    kit = Devolution(conta="TikTok Mini", motivo_devolucao="Danificado", pedido_bling=" 300121 ",
+                     link_envio=f" {envio} ", link_abertura=abertura)
+    so_abertura = Devolution(conta="TikTok Mini", motivo_devolucao="Bloqueado", pedido_bling="302299",
+                             link_abertura=abertura)
+    db.add_all([digitado, kit, so_abertura])
+    await db.flush()
+    db.add_all([
+        Chamado(pedido_bling="300121", plataforma="tiktok", conta="TikTok Mini", origem="devolucao",
+                origem_ref=str(digitado.id), canal="api", data=date.today()),
+        Chamado(pedido_bling="302299", plataforma="tiktok", conta="TikTok Mini", origem="devolucao",
+                origem_ref=str(so_abertura.id), canal="api", data=date.today()),
+        Chamado(pedido_bling="300121-frete", plataforma="tiktok", conta="TikTok Mini", origem="manual",
+                canal="manual", data=date.today()),
+    ])
+    await db.commit()
+
+    async def caso(pedido: str) -> dict:
+        r = await client.post("/api/chamados/agent/caso", headers=hermes, json={"pedido_bling": pedido})
+        assert r.status_code == 200, r.text
+        return r.json()["chamados"][0]
+
+    dois = await caso("300121")
+    assert (dois["link_envio"], dois["link_abertura"]) == (envio, abertura)
+    um = await caso("302299")
+    assert (um["link_envio"], um["link_abertura"]) == (None, abertura)
+    nenhum = await caso("300121-frete")
+    assert (nenhum["link_envio"], nenhum["link_abertura"]) == (None, None)
+
+
 async def test_caso_sem_foto_ve_as_da_devolucao(client, db, cenario):
     """29/09 (294654): a abertura falhou (loja sem integração) e o chamado ficou
     sem foto; o atendente da Shopee abriu a disputa na mão e pediu evidência. O
