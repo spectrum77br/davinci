@@ -94,7 +94,7 @@ from tests.test_atendimento_ia import (
 # 28/10/2026 (o dono: "temos que perder essa trava"): a devolução/reclamação é tratada
 # como a equipe da loja trata, o cliente decide — no lugar do "nunca desestimule
 # reclamação" (antes "633eaf94186a21ee").
-RETRATO_BLOCO_GERAL = "b5bb3c081a415e6b"
+RETRATO_BLOCO_GERAL = "831bbe85cb904340"
 
 
 def _geral() -> str:

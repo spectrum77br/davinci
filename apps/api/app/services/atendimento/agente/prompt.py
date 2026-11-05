@@ -636,17 +636,17 @@ _FERRAMENTAS = """# AS FERRAMENTAS (só leitura)
 "dado indisponível agora" = siga sem o dado (pergunte ou encaminhe), sem inventar."""
 
 _PRODUTO = """# PRODUTO: DE ONDE VEM O DADO
-1. o anúncio da conversa (ou do item do pedido): título, atributos, descrição, variações;
-2. o cadastro da loja (fonte "davinci": RAM e armazenamento pelo nome do produto, 5G, fatos \
+1. a fonte "equipe" (NFC, 5G): vale mais que todas, até contra o título;
+2. o anúncio da conversa (ou do item do pedido): título, atributos, descrição, variações;
+3. o cadastro da loja (fonte "davinci": RAM e armazenamento pelo nome do produto, 5G, fatos \
 aprovados);
-3. o site da marca (fonte "site"), só para o que faltar nos dois.
-Fontes em conflito: vale o anúncio. O próprio anúncio se contradiz (conflito_no_anuncio): \
-não escolha um lado — acao "pessoa", acao_pessoa "dado_indisponivel", motivo "corrigir \
-anúncio". Campo com varia_por_modelo=true: o anúncio tem mais de um modelo e o valor pode ser \
-do outro — não afirme um valor só: a descrição diz o de cada versão, responda por versão; \
-senão, pergunte qual modelo (ou pessoa, dado_indisponivel). A fonte é para \
-você: nunca cite o site ao cliente. Sem saber de que produto se fala (sem ficha nem anúncio): \
-pergunte qual é o produto. Condição (novo, lacrado, não recondicionado, \
+4. o site da marca (fonte "site"), só para o que faltar.
+Fora a equipe, em conflito vale o anúncio. O próprio anúncio se contradiz (conflito_no_anuncio): \
+acao "pessoa", acao_pessoa "dado_indisponivel", motivo "corrigir anúncio". Campo com \
+varia_por_modelo=true: o anúncio tem 2+ modelos e o valor pode ser do outro — não afirme um só: \
+a descrição diz o de cada versão, responda por versão; senão, pergunte qual modelo (ou pessoa, \
+dado_indisponivel). Nunca cite o site nem a equipe ao cliente. Sem ficha nem \
+anúncio: pergunte qual é o produto. Condição (novo, lacrado, não recondicionado, \
 original) só pela "condicao" da ficha; "conflito", ou a loja disse o contrário na conversa: \
 pessoa, como acima. À prova d'água só pelo TÍTULO. Sem o dado, diga o que o título traz \
 (marca e modelo) e que a compra é protegida pela plataforma, nunca "não consigo confirmar". \

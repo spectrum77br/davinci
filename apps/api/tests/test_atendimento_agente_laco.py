@@ -617,12 +617,13 @@ def test_bloco_geral_tem_as_fontes_do_dono():
     texto = prompt.bloco_geral()
     # Decisão 3: anúncio > cadastro do DaVinci > site; conflito → anúncio;
     # o anúncio se contradiz → dado_indisponivel "corrigir anúncio";
-    # sem saber o produto → perguntar qual.
-    anuncio = texto.index("1. o anúncio da conversa")
-    cadastro = texto.index("2. o cadastro da loja")
-    site = texto.index("3. o site da marca")
-    assert anuncio < cadastro < site
-    assert "Fontes em conflito: vale o anúncio" in texto
+    # sem saber o produto → perguntar qual. A equipe (05/11/2026) vale acima de todas.
+    equipe = texto.index('1. a fonte "equipe"')
+    anuncio = texto.index("2. o anúncio da conversa")
+    cadastro = texto.index("3. o cadastro da loja")
+    site = texto.index("4. o site da marca")
+    assert equipe < anuncio < cadastro < site
+    assert "Fora a equipe, em conflito vale o anúncio" in texto
     assert '"dado_indisponivel", motivo "corrigir anúncio"' in texto
     assert "pergunte qual é o produto" in texto
     # Variações: as 3 fontes, só disponível/esgotado, lista incompleta.

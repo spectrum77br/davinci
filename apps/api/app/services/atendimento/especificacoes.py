@@ -4,6 +4,10 @@ Não há tabela de especificação no DaVinci. A decisão 3 do dono (20/10/2026)
 "o site às vezes não tem exatamente o que o anúncio tem, por isso é
 interessante ver o anúncio do produto que está sendo conversado". A ordem:
 
+  0. "equipe": só em `nfc` e `rede_5g`, o que a equipe da loja disse do modelo
+     (`recursos_equipe`, a decisão do dono de 05/11/2026): vale mais que todas,
+     até contra o título do anúncio (`aplicar_a_equipe`). Sem veredito, ou com
+     o anúncio ligando 2+ modelos, não muda nada;
   1. "anuncio": o anúncio da conversa — o título atual, os atributos e a
      descrição LIMPA da ficha (`ficha.ficha_do_anuncio`). A ficha de OUTRO
      anúncio do mesmo produto só dá o título (o kit e a descrição variam por
@@ -52,13 +56,14 @@ from app.config import get_settings
 from app.models import Product, ProductLink
 from app.models.enums import IntegrationPlatform
 from app.services.atendimento import ficha as ficha_svc
-from app.services.atendimento import sites_marca
+from app.services.atendimento import recursos_equipe, sites_marca
 from app.services.atendimento.ficha_respostas import REGRAS_APROVADAS
 from app.services.atendimento.troca_sugestoes import _RE_5G, _RE_SPEC
 from app.services.atendimento.validador import plano_de
 
 logger = structlog.get_logger()
 
+FONTE_EQUIPE = "equipe"
 FONTE_ANUNCIO = "anuncio"
 FONTE_DAVINCI = "davinci"
 FONTE_SITE = "site"
@@ -105,6 +110,9 @@ _FATO_AIR_FRYER = "a air fryer Uranyx não é bivolt"
 NOTA_WIFI = "Wi-Fi de 5 GHz não é rede móvel 5G"
 NOTA_RAM_SEM_SEPARAR = "a fonte não diz se inclui RAM virtual"
 NOTA_VARIA = "varia conforme a variação"
+NOTA_EQUIPE = "a equipe da loja confirma, mesmo com o anúncio dizendo outra coisa"
+# Os campos em que a equipe vale, e o recurso de `recursos_equipe` de cada um.
+_RECURSO_DA_EQUIPE = {"nfc": recursos_equipe.NFC, "rede_5g": recursos_equipe.G5}
 
 
 def _aprovado(trecho: str) -> bool:
@@ -903,6 +911,52 @@ def marcar_varia_por_modelo(resultado: dict) -> dict:
     return resultado
 
 
+def _variacao_selecionada(ficha: Mapping[str, Any] | None) -> str | None:
+    """O nome da variação do cartão ou do pedido, se a ficha traz. PURA."""
+    for v in (ficha or {}).get("variacoes") or []:
+        if isinstance(v, Mapping) and v.get("selecionada") is True and v.get("nome"):
+            return str(v["nome"])
+    return None
+
+
+def aplicar_a_equipe(resultado: dict, titulo: str | None, variacao: str | None = None) -> dict:
+    """A palavra da equipe nos campos dela, por cima do que se juntou (ver o topo). PURA.
+
+    Com veredito, a linha do campo passa a ser SIM ou NAO com a fonte "equipe": sai o conflito do
+    anúncio e o conflito entre fontes daquele campo, e a nota diz quando o anúncio dizia outra
+    coisa. Quem chama não passa aqui o anúncio de 2+ modelos."""
+    campos = list(resultado.get("campos") or [])
+    conflitos = list(resultado.get("conflitos") or [])
+    for campo, recurso in _RECURSO_DA_EQUIPE.items():
+        veredito = recursos_equipe.o_que_a_equipe_diz(recurso, titulo, variacao)
+        if veredito is None:
+            continue
+        valor = SIM if veredito else NAO
+        antiga = next((c for c in campos if c.get("campo") == campo), None)
+        linha: dict[str, Any] = {"campo": campo, "valor": valor, "fonte": FONTE_EQUIPE}
+        if (
+            antiga is not None
+            and antiga.get("fonte") == FONTE_ANUNCIO
+            and antiga.get("valor") != valor
+        ):
+            linha["nota"] = NOTA_EQUIPE
+        if antiga is not None:
+            campos[campos.index(antiga)] = linha
+        else:
+            ordem = CAMPOS.index(campo)
+            depois = next(
+                (i for i, c in enumerate(campos) if CAMPOS.index(c["campo"]) > ordem), len(campos)
+            )
+            campos.insert(depois, linha)
+        conflitos = [c for c in conflitos if c.get("campo") != campo]
+    return {
+        **resultado,
+        "campos": campos,
+        "conflitos": conflitos,
+        "conflito_no_anuncio": any(c.get("conflito_no_anuncio") for c in campos),
+    }
+
+
 # ── O banco ───────────────────────────────────────────────────────────────
 
 
@@ -956,7 +1010,7 @@ async def especificacoes_do_produto(
 ) -> dict:
     """As especificações do produto do anúncio, com a fonte de cada campo.
 
-    `{"campos": [{campo, valor, fonte: "anuncio"|"davinci"|"site", nota?,
+    `{"campos": [{campo, valor, fonte: "equipe"|"anuncio"|"davinci"|"site", nota?,
     conflito_no_anuncio?, varia_por_modelo?}], "conflitos": [{campo, valor,
     fonte, outro_valor, outra_fonte}], "conflito_no_anuncio": bool, "site":
     slug|None}`. `ficha` = a de `ficha.ficha_do_anuncio` (ou None; os
@@ -1004,4 +1058,6 @@ async def especificacoes_do_produto(
     )
     if varios:
         marcar_varia_por_modelo(resultado)
+    else:
+        resultado = aplicar_a_equipe(resultado, titulo_atual, _variacao_selecionada(ficha))
     return {**resultado, "site": slug}

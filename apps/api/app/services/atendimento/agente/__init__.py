@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -53,7 +53,7 @@ import structlog
 
 from app.config import get_settings
 from app.redis_client import redis
-from app.services.atendimento import agente_config, constantes, ficha_loja, ia
+from app.services.atendimento import agente_config, constantes, ficha_loja, ia, recursos_equipe
 from app.services.atendimento.agente import (
     acao_pessoa,
     catalogo,
@@ -891,14 +891,26 @@ async def _ofertas_do_recurso(
     buscas: list[dict] = []
     for termo in recurso.termos:
         buscas += await ferramentas.buscar_pelo_codigo(ctx, termo, base=base, conversa=conversa)
-    achados = checagens.achados_do_recurso(
-        recurso,
-        buscas,
-        tipo=tipo,
-        ids_da_conversa=ids_da_conversa,
-        texto=p.texto,
-        evidencias=p.evidencias,
-    )
+
+    def _achados() -> list[Mapping[str, Any]]:
+        return checagens.achados_do_recurso(
+            recurso,
+            buscas,
+            tipo=tipo,
+            ids_da_conversa=ids_da_conversa,
+            texto=p.texto,
+            evidencias=p.evidencias,
+        )
+
+    achados = _achados()
+    # O corte da busca deixa de fora quem a equipe confirma: procura pelo código dele.
+    for codigo in recursos_equipe.CODIGOS_PARA_BUSCA.get(recurso.chave, ()):
+        if achados or _relogio() >= limite:
+            break
+        buscas += await ferramentas.buscar_pelo_codigo(
+            ctx, f"{codigo} {recurso.termos[0]}", base=base, conversa=conversa
+        )
+        achados = _achados()
     loja = None if ctx.sem_ida_a_loja else ficha_loja.Busca(ctx.integration_id, ctx.canal_id)
     ofertas: list[checagens.OfertaDoRecurso] = []
     for achado in achados[: checagens.MAX_FICHAS_DO_RECURSO]:
@@ -926,7 +938,7 @@ async def _ofertas_do_recurso(
         ofertas.append(
             checagens.OfertaDoRecurso(
                 item_id=item,
-                nome=checagens.nome_para_a_frase(achado.get("nome_curto")),
+                nome=checagens.nome_para_a_oferta(achado),
                 lacuna=catalogo.lacuna_do_link(link["codigo"]) if link else None,
                 por_versao=por_versao,
                 ids=(contexto.id_anuncio(item), contexto.id_ficha(item)),

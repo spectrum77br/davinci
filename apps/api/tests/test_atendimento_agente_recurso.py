@@ -428,7 +428,7 @@ S7_NFC = (
 
 @pytest.mark.parametrize("titulo", [F105, C68, S7_NFC, "Uranyx A17 Pro Max 12.128 GB NFC"])
 def test_o_titulo_que_a_equipe_desmente_nao_entra(titulo):
-    # A lista é fechada: o título diz NFC, a equipe nega e o site não cita.
+    # Vale a equipe (o dono, 05/11/2026): o título diz NFC, a equipe nega.
     achado = _achado(ITEM_S7, titulo, nome=catalogo.nome_curto(titulo))
     assert _achados(achado) == []
     dado = _dado(titulo, especificacoes=_espec())
@@ -530,7 +530,7 @@ def test_o_5g_do_wifi_nao_e_literal():
 
 def test_a_mala_expansivel_e_literal_e_o_nome_tem_artigo():
     mala = _achado(
-        "1", "Mala De Bordo 20 Polegadas Expansível + Mochila Executiva 10Kg ME1 - Branco"
+        "1", "Mala De Bordo 20 Polegadas Expansível + Mochila Executiva 10Kg P7 - Branco"
     )
     assert len(_achados(mala, recurso=ZIPER, tipo="mala")) == 1
     assert checagens._artigo_do_nome("Mala De Bordo") == "a"
@@ -618,8 +618,8 @@ def test_o_que_a_ficha_diz(dado, esperado):
 
 
 def test_a_variacao_casada_na_busca_e_por_versao():
-    achado = _achado(variacoes=("T8 Pro - Preto - NFC,256",))
-    assert checagens.ficha_confirma_o_recurso(NFC, _dado("Uranyx T8 Pro 256 GB"), achado) is True
+    achado = _achado(variacoes=("P1 Pro - Preto - NFC,256",))
+    assert checagens.ficha_confirma_o_recurso(NFC, _dado("Uranyx P1 Pro 256 GB"), achado) is True
 
 
 # ═══════════════ a frase e o canal ═══════════════
@@ -1251,7 +1251,7 @@ async def test_e2e_so_uma_versao_tem_e_a_frase_fala_da_versao(
     db, make_user, agente_ligado, api, envios, monkeypatch
 ):
     conversa, integ, r_mem = await _nfc(db, make_user, monkeypatch)
-    titulo = "Uranyx F117 Pro Max 12.64 / 16.128 GB Memoria NFC"
+    titulo = "Uranyx P1 Pro Max 12.64 / 16.128 GB Memoria NFC"
     await _link(db, integ, ITEM_VARIOS, "1", f"{titulo} - Laranja,16 GB / 128 GB Premium NFC")
     await _link(db, integ, ITEM_VARIOS, "2", f"{titulo} - Laranja,12 GB / 64 GB")
     _ficha(r_mem, integ, ITEM_VARIOS, titulo, "Celular. A versão Premium tem NFC.")
@@ -1259,7 +1259,7 @@ async def test_e2e_so_uma_versao_tem_e_a_frase_fala_da_versao(
 
     r = await ia_svc.gerar_rascunho(db, conversa)
 
-    assert "Temos também o Uranyx F117 Pro Max na versão que tem esse recurso:" in r.texto, r.motivo
+    assert "Temos também o Uranyx P1 Pro Max na versão que tem esse recurso:" in r.texto, r.motivo
     assert ITEM_VARIOS in _do_agente(r)["recurso_oferecido"]["anuncios"]
     assert [e["texto"] for e in envios] == [r.texto] and _decisao(r) == "enviado", r.motivo
 
@@ -1291,7 +1291,7 @@ async def test_e2e_a_mala_expansivel_com_o_artigo(
     conversa.anuncio_titulo = "Mala De Bordo 20 Polegadas 10kg ABS - Preto"
     await _link(db, integ, "55500000001", "1", conversa.anuncio_titulo)
     _ficha(r_mem, integ, "55500000001", conversa.anuncio_titulo, "Mala de bordo rígida.")
-    titulo = "Mala De Viagem Bordo 20 Polegadas Expansível ME1 - Preto"
+    titulo = "Mala De Viagem Bordo 20 Polegadas Expansível P7 - Preto"
     await _link(db, integ, "55500000002", "1", titulo)
     _ficha(r_mem, integ, "55500000002", titulo, "Mala com zíper expansível.")
     await db.commit()
@@ -1302,7 +1302,7 @@ async def test_e2e_a_mala_expansivel_com_o_artigo(
     r = await ia_svc.gerar_rascunho(db, conversa)
 
     assert r.texto.startswith(
-        "Esta mala não tem zíper expansivo. Temos a Mala De Viagem Bordo, que tem esse recurso: "
+        "Esta mala não tem zíper expansivo. Temos a Mala De Viagem Bordo P7, que tem esse recurso: "
     ), (r.motivo, r.validador_erros, r.texto)
     assert _do_agente(r)["recurso_oferecido"]["recurso"] == "ziper_expansivo"
     assert [e["texto"] for e in envios] == [r.texto] and _decisao(r) == "enviado", r.motivo
@@ -1342,12 +1342,15 @@ async def test_e2e_o_prazo_da_leitura_nao_abre_outra_ficha(
 async def test_e2e_o_mesmo_modelo_inteiro_nao_e_oferecido(
     db, make_user, agente_ligado, api, envios, monkeypatch
 ):
-    # "Este não tem" e "temos o mesmo, que tem" se desmentem.
+    # "Este não tem" e "temos o mesmo, que tem" se desmentem: o C68 de 128 não tem, o de 512 tem.
     conversa, integ, r_mem = await _nfc(db, make_user, monkeypatch)
-    conversa.anuncio_titulo = "Uranyx A18 Pro Max 16.128 Gb Memoria - Laranja"
+    conversa.anuncio_titulo = "Uranyx C68 Plus 16.128 Gb Memoria - Laranja"
     conversa.anuncio_id = ITEM_S7
-    await _link(db, integ, ITEM_S7, "1", "Uranyx A18 Pro Max 16.128 Gb Memoria - Laranja")
+    await _link(db, integ, ITEM_S7, "1", "Uranyx C68 Plus 16.128 Gb Memoria - Laranja")
     _ficha(r_mem, integ, ITEM_S7, conversa.anuncio_titulo, "Celular com 2 chips. Sem NFC.")
+    await db.execute(ProductLink.__table__.delete().where(ProductLink.external_id == ITEM_A18))
+    await _link(db, integ, ITEM_VARIOS, "1", "Uranyx C68 Plus 24.512 Gb Memoria NFC - Laranja")
+    _ficha(r_mem, integ, ITEM_VARIOS, "Uranyx C68 Plus 24.512 Gb Memoria NFC", "Celular com NFC.")
     await db.commit()
     _modelo(api, texto="Este aparelho não tem NFC.", item=ITEM_S7)
 
