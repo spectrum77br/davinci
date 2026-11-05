@@ -346,17 +346,71 @@ def url_da_consulta_ml(ch: Chamado) -> str:
     return CONSULTA_ML_URL.format((ch.chamado or "").strip())
 
 
+# ---------------------------------------------- caso do suporte da Amazon (05/11)
+# 288967 (caso 23057891781, KFA): a resposta do suporte ao vendedor só existe no
+# Seller Central e no e-mail principal do caso, e nada trazia pro chamado. A
+# pessoa (ou a IA) abre o caso e grava o nº no `chamado`, então NÃO se exige caso
+# de tela: o 288967 é canal manual. Protocolo com traço ("52020-49750-0878840")
+# é SAFE-T ou outra coisa, não é caso, e fica de fora pelo formato.
+CASO_AMAZON_URL = "https://sellercentral.amazon.com.br/cu/case-dashboard/view-case?caseID={}"
+_CASO_AMAZON = r"^\d{9,14}$"
+# "Amazon KFA", "kfa" → "kfa": a mesma chave que o executor tira do nome do
+# perfil ("KFA - Amazon").
+_PLAT_AMAZON_PREFIXO = r"^(amazon|amz)[^a-z0-9]+"
+_PLAT_AMAZON_SUFIXO = r"[^a-z0-9]+(amazon|amz)$"
+
+
+def loja_amazon(conta: str | None) -> str:
+    t = (conta or "").strip().lower()
+    t = re.sub(_PLAT_AMAZON_PREFIXO, "", t)
+    t = re.sub(_PLAT_AMAZON_SUFIXO, "", t)
+    return re.sub(r"[^a-z0-9]+", "", t)
+
+
+def loja_amazon_sql():
+    t = func.lower(func.trim(func.coalesce(Chamado.conta, "")))
+    t = func.regexp_replace(t, _PLAT_AMAZON_PREFIXO, "")
+    t = func.regexp_replace(t, _PLAT_AMAZON_SUFIXO, "")
+    return func.regexp_replace(t, "[^a-z0-9]+", "", "g")
+
+
+def condicoes_caso_amazon() -> list:
+    """Caso do suporte da Amazon que o executor relê: Amazon, vivo, sem decisão
+    final, com o nº do caso (só dígitos) no `chamado`."""
+    return [
+        Chamado.resolvido.is_(False),
+        chamados_svc.NAO_ENCERRADO_SQL,
+        func.trim(func.coalesce(Chamado.chamado, "")).op("~")(_CASO_AMAZON),
+        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
+            chamados_svc.apelidos_da_plataforma("amazon")
+        ),
+    ]
+
+
+def e_caso_amazon(ch: Chamado) -> bool:
+    return (
+        (ch.plataforma or "").strip().lower() in chamados_svc.apelidos_da_plataforma("amazon")
+        and re.match(_CASO_AMAZON, (ch.chamado or "").strip()) is not None
+    )
+
+
+def url_do_caso_amazon(ch: Chamado) -> str:
+    return CASO_AMAZON_URL.format((ch.chamado or "").strip())
+
+
 def condicoes_do_leitor(
     *,
     portal: bool = True,
     consultas: bool = True,
     ml: bool = False,
+    amazon: bool = False,
     agora: datetime | None = None,
 ) -> list:
     """Tudo que é da fila do executor de leitura: devolução contestada pela API
     (Seller Center), com `portal` o caso aberto na tela pelo Portal, com
-    `consultas` o chamado com consulta do Portal ligada (294571) e com `ml` a
-    consulta do formulário de ajuda do ML (30/09)."""
+    `consultas` o chamado com consulta do Portal ligada (294571), com `ml` a
+    consulta do formulário de ajuda do ML (30/09) e com `amazon` o caso do
+    suporte da Amazon (05/11)."""
     ramos = [and_(*condicoes_devolucao_shopee(agora))]
     if portal:
         ramos.append(and_(*condicoes_portal_shopee()))
@@ -364,6 +418,8 @@ def condicoes_do_leitor(
         ramos.append(and_(*condicoes_consulta_ligada()))
     if ml:
         ramos.append(and_(*condicoes_consulta_ml()))
+    if amazon:
+        ramos.append(and_(*condicoes_caso_amazon()))
     return [or_(*ramos)]
 
 
@@ -455,13 +511,15 @@ async def fila_devolucao_shopee(
     portal: bool = False,
     consultas: bool = False,
     ml_lojas: list[str] | None = None,
+    amazon_lojas: list[str] | None = None,
     agora: datetime | None = None,
 ) -> list[Chamado]:
     """Devoluções da Shopee contestadas PELA API que o executor de leitura deve
     reler no Seller Center — a fila do `/agent/leitor/fila`. Com `ml_lojas`
     (30/09) entram também as consultas do formulário de ajuda do ML dessas lojas
     (chave de `loja_ml`: "forpaper", "aguiar2") — a lista é das lojas em que o
-    robô tem perfil do ML, pelo mesmo motivo de `contas`.
+    robô tem perfil do ML, pelo mesmo motivo de `contas`. `amazon_lojas` (05/11)
+    faz o mesmo com os casos do suporte da Amazon (chave de `loja_amazon`).
 
     Vinicius 24/09 (296012): a API da Shopee só dá códigos; a fala do agente
     ("não será possível aprovar sua solicitação…") mora no "Histórico da
@@ -497,6 +555,9 @@ async def fila_devolucao_shopee(
     lojas = sorted({loja_ml(x) for x in ml_lojas or []} - {""})
     if lojas:
         ramos.append(and_(*condicoes_consulta_ml(), loja_ml_sql().in_(lojas)))
+    lojas_amazon = sorted({loja_amazon(x) for x in amazon_lojas or []} - {""})
+    if lojas_amazon:
+        ramos.append(and_(*condicoes_caso_amazon(), loja_amazon_sql().in_(lojas_amazon)))
     if not ramos:
         return []
     conds = [
@@ -541,7 +602,11 @@ async def fila_devolucao_shopee(
         ch.leitura_robo_claim_at = agora
     await session.commit()
     logger.info(
-        "chamados_leitor_fila", casos=len(rows), contas=len(contas or []), ml_lojas=len(lojas)
+        "chamados_leitor_fila",
+        casos=len(rows),
+        contas=len(contas or []),
+        ml_lojas=len(lojas),
+        amazon_lojas=len(lojas_amazon),
     )
     return list(rows)
 

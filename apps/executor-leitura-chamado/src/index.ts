@@ -39,6 +39,11 @@
  * 22/10 (304535): perfil Firefox (FlowerBrowser) é aberto por WebDriver BiDi, e
  * perfil que não conecta é fechado e pulado sem derrubar a passada.
  *
+ * 05/11 (288967): caso do suporte ao vendedor da Amazon (`tipo: amazon_caso`) —
+ * resposta que só existia no Seller Central e no e-mail do caso. Lido pelo link
+ * direto (amazon_caso.ts) no perfil "<Loja> - Amazon". Fila e modo PRÓPRIOS:
+ * `LEITURA_AMAZON=seco|real` (sem nada = desligado).
+ *
  * Uso:
  *   npm start                         loop (LEITURA_MODO do .env, default seco)
  *   npm start -- --uma-vez            uma passada e sai
@@ -49,6 +54,8 @@
  *                                     lê direto na tela, sem falar com o DaVinci
  *   npm start -- --teste-ml 484465159 --conta forpaper
  *                                     idem, consulta do ML
+ *   npm start -- --teste-amazon 23057891781 --conta kfa
+ *                                     idem, caso do suporte da Amazon
  */
 import "dotenv/config";
 
@@ -63,10 +70,11 @@ import * as perfis from "./perfis";
 import * as historico from "./shopee_historico";
 import * as portal from "./shopee_portal";
 import * as ml from "./ml_consulta";
+import * as amazon from "./amazon_caso";
 import * as maos from "./ml_responder";
 import type { Caso } from "./davinci";
 
-const VERSION = "1.4.1";
+const VERSION = "1.5.0";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function arg(nome: string): string | undefined {
@@ -77,6 +85,7 @@ const UMA_VEZ = process.argv.includes("--uma-vez");
 const SO = arg("--so");
 const TESTE_PEDIDO = arg("--teste-pedido");
 const TESTE_ML = arg("--teste-ml");
+const TESTE_AMAZON = arg("--teste-amazon");
 
 interface Sessao {
   browser: Browser;
@@ -187,6 +196,8 @@ async function lerUm(page: Page, caso: Caso, real: boolean): Promise<void> {
     let l: historico.Leitura;
     if (tipo === "ml_consulta") {
       l = await ml.ler(page, caso);
+    } else if (tipo === "amazon_caso") {
+      l = await amazon.ler(page, caso);
     } else if (tipo === "portal") {
       l = await portal.ler(page, caso);
     } else if (tipo === "ambos") {
@@ -214,7 +225,7 @@ async function lerUm(page: Page, caso: Caso, real: boolean): Promise<void> {
       l = await historico.ler(page, caso);
     }
     if (l.pendencias?.length) log.warn(`${rot}: a tela pede algo nosso — ${l.pendencias.join(" | ")}`);
-    const deles = tipo === "ml_consulta" ? "do ML" : "da Shopee";
+    const deles = tipo === "ml_consulta" ? "do ML" : tipo === "amazon_caso" ? "da Amazon" : "da Shopee";
     log.info(`${rot}: ${l.itens.length} mensagem(ns) na janela, ${l.falas.length} ${deles}`);
     if (!real) {
       fs.mkdirSync(cfg.secoDir, { recursive: true });
@@ -260,6 +271,8 @@ async function passada(): Promise<void> {
     const perfisMl = precisaMl ? await perfis.mapaMl(todos) : new Map<string, perfis.Perfil>();
     if (cfg.responder !== "desligado") await responderMl(perfisMl);
     const mapaMl = cfg.ml === "desligado" ? new Map<string, perfis.Perfil>() : perfisMl;
+    const mapaAmazon =
+      cfg.amazon === "desligado" ? new Map<string, perfis.Perfil>() : await perfis.mapaAmazon(todos);
     const contas = [...mapa.keys()];
     // `--so` sempre espia: não marca a entrega dos outros casos da fila.
     const espiar = cfg.modo === "seco" || !!SO;
@@ -271,13 +284,23 @@ async function passada(): Promise<void> {
         await davinci.fila(SO ? 200 : cfg.limite, [], espiarMl, false, perfis.lojasMlDaFila(mapaMl))
       );
     }
+    if (mapaAmazon.size) {
+      // Fila própria da Amazon (05/11): modo dela, sem mexer nas outras.
+      const espiarAmazon = cfg.amazon === "seco" || !!SO;
+      casos = casos.concat(
+        await davinci.fila(SO ? 200 : cfg.limite, [], espiarAmazon, false, [], [...mapaAmazon.keys()])
+      );
+    }
     if (SO) {
       casos = casos.filter((c) =>
         [c.chamado_id, c.pedido_bling, c.pedido_marketplace, c.chamado].includes(SO)
       );
     }
     if (!casos.length) {
-      log.info(`nada pra ler agora (${contas.length} lojas Shopee, ${mapaMl.size} ML com perfil)`);
+      log.info(
+        `nada pra ler agora (${contas.length} lojas Shopee, ${mapaMl.size} ML, ` +
+          `${mapaAmazon.size} Amazon com perfil)`
+      );
       return;
     }
     // Agrupa pelo PERFIL: a mesma loja tem um perfil na Shopee e outro no ML.
@@ -286,7 +309,9 @@ async function passada(): Promise<void> {
       const p =
         c.tipo === "ml_consulta"
           ? perfis.perfilMl(mapaMl, c.conta)
-          : mapa.get((c.conta || "").trim().toLowerCase());
+          : c.tipo === "amazon_caso"
+            ? perfis.perfilAmazon(mapaAmazon, c.conta)
+            : mapa.get((c.conta || "").trim().toLowerCase());
       if (!p) {
         log.warn(`${c.conta}: sem perfil no AdsPower — o caso ${c.chamado} fica pra depois`);
         continue;
@@ -300,7 +325,12 @@ async function passada(): Promise<void> {
       if (!s) continue;
       try {
         for (const caso of lista) {
-          const real = caso.tipo === "ml_consulta" ? cfg.ml === "real" : cfg.modo === "real";
+          const real =
+            caso.tipo === "ml_consulta"
+              ? cfg.ml === "real"
+              : caso.tipo === "amazon_caso"
+                ? cfg.amazon === "real"
+                : cfg.modo === "real";
           await lerUm(s.page, caso, real);
         }
       } catch (e: any) {
@@ -418,6 +448,30 @@ async function testeMl(): Promise<void> {
   }
 }
 
+/** `--teste-amazon`: lê o caso da Amazon direto na tela, sem DaVinci. */
+async function testeAmazon(): Promise<void> {
+  const conta = arg("--conta") || "";
+  const p = perfis.perfilAmazon(await perfis.mapaAmazon(), conta);
+  if (!p) throw new Error(`sem perfil "<loja> - Amazon" no AdsPower pra "${conta}"`);
+  const s = await abrirPerfil(p.userId, p.nome);
+  if (!s) throw new Error(`perfil ${p.nome} em uso`);
+  try {
+    const l = await amazon.ler(s.page, {
+      chamado_id: "teste",
+      chamado: TESTE_AMAZON || "",
+      pedido_bling: null,
+      pedido_marketplace: null,
+      conta,
+      plataforma: "amazon",
+      leitura_robo_at: null,
+      tipo: "amazon_caso",
+    });
+    console.log(JSON.stringify({ perfil: p.nome, ...l }, null, 2));
+  } finally {
+    await fecharPerfil(s);
+  }
+}
+
 /** `--teste-pedido`: lê direto na tela, sem DaVinci — pra conferir o caminho. */
 async function teste(): Promise<void> {
   const conta = (arg("--conta") || "").trim().toLowerCase();
@@ -445,10 +499,14 @@ async function main(): Promise<void> {
   log.info(
     `executor-leitura-chamado v${VERSION} — api=${cfg.davinciApiUrl} modo=${cfg.modo.toUpperCase()}` +
       ` intervalo=${Math.round(cfg.intervaloMs / 60000)}min ml=${cfg.ml.toUpperCase()}` +
-      ` responder=${cfg.responder.toUpperCase()}`
+      ` amazon=${cfg.amazon.toUpperCase()} responder=${cfg.responder.toUpperCase()}`
   );
   if (TESTE_ML) {
     await testeMl();
+    return;
+  }
+  if (TESTE_AMAZON) {
+    await testeAmazon();
     return;
   }
   if (TESTE_PEDIDO) {

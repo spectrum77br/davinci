@@ -17,7 +17,8 @@ function int(name: string, def: number): number {
  *  DaVinci (e sem marcar a entrega na fila). `real` = manda o que leu pro
  *  chamado. Default seco: quem liga o real é uma pessoa, de propósito. */
 export type Modo = "seco" | "real";
-/** 30/09: consultas do formulário de ajuda do ML — desligado até alguém ligar. */
+/** 30/09: consultas do formulário de ajuda do ML — desligado até alguém ligar.
+ *  05/11: vale também pros casos do suporte da Amazon. */
 export type ModoMl = "desligado" | "seco" | "real";
 
 export interface Config {
@@ -34,6 +35,9 @@ export interface Config {
   portal: boolean;
   /** 30/09 (298394): LEITURA_ML=seco|real lê as consultas do ML; sem nada = desligado. */
   ml: ModoMl;
+  /** 05/11 (288967): LEITURA_AMAZON=seco|real lê os casos do suporte da Amazon;
+   *  sem nada = desligado. */
+  amazon: ModoMl;
   /** 30/09 (298394): RESPONDER_ML=seco|real posta as réplicas nas consultas do
    *  ML (seco: escreve, fotografa e apaga); sem nada = desligado. */
   responder: ModoMl;
@@ -74,6 +78,7 @@ export const cfg: Config = {
   secoDir: str("SECO_DIR", "./logs/seco"),
   portal: str("LEITURA_PORTAL", "1") !== "0",
   ml: ((v) => (v === "real" || v === "seco" ? v : "desligado"))(str("LEITURA_ML")) as ModoMl,
+  amazon: ((v) => (v === "real" || v === "seco" ? v : "desligado"))(str("LEITURA_AMAZON")) as ModoMl,
   responder: ((v) => (v === "real" || v === "seco" ? v : "desligado"))(str("RESPONDER_ML")) as ModoMl,
   responderToken: str("RESPONDER_TOKEN"),
   perfisExtra: perfisExtra(),

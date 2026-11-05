@@ -1608,7 +1608,8 @@ async def reler_na_plataforma(
     "Atualizar" passa a significar FURAR A FILA da leitura — o caso vai pro topo
     e o robô o lê no próximo poll, em vez de bater numa porta que não existe."""
     ch = await _get_da_equipe(session, user, chamado_id)
-    if await chamados_leitura.e_caso_de_tela(session, ch):
+    # 05/11: o caso do suporte da Amazon também não tem API, mesmo aberto à mão.
+    if chamados_leitura.e_caso_amazon(ch) or await chamados_leitura.e_caso_de_tela(session, ch):
         cid = ch.id  # antes do commit: ele expira a linha (ver `sync_um`)
         await chamados_leitura.furar_a_fila(session, ch)
         await session.refresh(ch)
@@ -2319,21 +2320,27 @@ async def agent_leitor_fila(
         portal=body.portal,
         consultas=body.consultas,
         ml_lojas=body.ml_lojas,
+        amazon_lojas=body.amazon_lojas,
     )
     out: list[AgentCasoLeituraOut] = []
     for c in casos:
-        if chamados_leitura.e_consulta_ml(c):
+        ml = chamados_leitura.e_consulta_ml(c)
+        if ml or chamados_leitura.e_caso_amazon(c):
             out.append(
                 AgentCasoLeituraOut(
                     chamado_id=c.id,
                     chamado=(c.chamado or "").strip(),
-                    chamado_url=chamados_leitura.url_da_consulta_ml(c),
+                    chamado_url=(
+                        chamados_leitura.url_da_consulta_ml(c)
+                        if ml
+                        else chamados_leitura.url_do_caso_amazon(c)
+                    ),
                     pedido_bling=c.pedido_bling,
                     pedido_marketplace=(c.pedido_marketplace or "").strip() or None,
                     conta=c.conta,
                     plataforma=c.plataforma,
                     leitura_robo_at=c.leitura_robo_at,
-                    tipo="ml_consulta",
+                    tipo="ml_consulta" if ml else "amazon_caso",
                 )
             )
             continue
@@ -2379,6 +2386,7 @@ async def agent_leitor_resultado(
         chamados_leitura.e_devolucao_shopee_da_api(ch)
         or chamados_leitura.consulta_do_portal(ch) is not None
         or chamados_leitura.e_consulta_ml(ch)
+        or chamados_leitura.e_caso_amazon(ch)
     ):
         raise HTTPException(409, detail={"code": "chamado_fora_do_leitor"})
     r = await chamados_leitura.registrar(
@@ -2915,6 +2923,19 @@ def _trabalho_do_cerebro(plataforma: str | None, canais: list[str]):
         )
 
     rec = _ult(ChamadoMensagem.direcao == "recebida")
+    # 05/11 (288967): a fala lida na tela grava a hora da AMAZON em `created_at`.
+    # Com o robô passando de 3 em 3 h, uma análise pode cair entre a resposta e a
+    # leitura; pela hora da Amazon a fala pareceria já analisada e a IA não
+    # acordaria. `updated_at` da `recebida` diz quando ela chegou aqui.
+    rec_chegou = (
+        select(
+            ChamadoMensagem.chamado_id,
+            func.max(ChamadoMensagem.updated_at).label("ult"),
+        )
+        .where(ChamadoMensagem.direcao == "recebida")
+        .group_by(ChamadoMensagem.chamado_id)
+        .subquery()
+    )
     ana = _ult(ChamadoMensagem.tipo == "analise")
     ins = _ult(ChamadoMensagem.tipo == "instrucao")
     env = _ult(ChamadoMensagem.direcao == "enviada")
@@ -2924,7 +2945,12 @@ def _trabalho_do_cerebro(plataforma: str | None, canais: list[str]):
         & ChamadoMensagem.erro.in_(sorted(svc.ERROS_ESPERA_PLATAFORMA))
     )
     fechou = _ultimo_fechamento()
-    resposta_nova = rec.c.ult.is_not(None) & or_(ana.c.ult.is_(None), rec.c.ult > ana.c.ult)
+    resposta_nova = rec.c.ult.is_not(None) & or_(
+        ana.c.ult.is_(None),
+        rec.c.ult > ana.c.ult,
+        (func.lower(func.coalesce(Chamado.plataforma, "")) == "amazon")
+        & (rec_chegou.c.ult > ana.c.ult),
+    )
     bloqueio = (
         blq.c.ult.is_not(None)
         & (blq.c.ult == env.c.ult)
@@ -2968,6 +2994,7 @@ def _trabalho_do_cerebro(plataforma: str | None, canais: list[str]):
     return (
         select(Chamado)
         .outerjoin(rec, rec.c.chamado_id == Chamado.id)
+        .outerjoin(rec_chegou, rec_chegou.c.chamado_id == Chamado.id)
         .outerjoin(ana, ana.c.chamado_id == Chamado.id)
         .outerjoin(ins, ins.c.chamado_id == Chamado.id)
         .outerjoin(env, env.c.chamado_id == Chamado.id)

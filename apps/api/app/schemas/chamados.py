@@ -646,7 +646,8 @@ class AgentCasoLeituraOut(BaseModel):
     # `portal` = consulta do Portal de Atendimento, abrir direto a `chamado_url`.
     # 30/09: `ml_consulta` = consulta do formulário de ajuda do ML, abrir a
     # `chamado_url` (mercadolivre.com.br/cases/detail/<N>).
-    tipo: Literal["devolucao", "portal", "ambos", "ml_consulta"] = "devolucao"
+    # 05/11: `amazon_caso` = caso do suporte da Amazon, abrir a `chamado_url`.
+    tipo: Literal["devolucao", "portal", "ambos", "ml_consulta", "amazon_caso"] = "devolucao"
     # 25/09 (294571): consulta do Portal ligada ao chamado (`tipo` portal/ambos) —
     # ler em `consulta_url`. Na devolução, `chamado` segue sendo a solicitação.
     consulta_portal: str | None = None
@@ -681,6 +682,9 @@ class AgentLeitorFilaIn(BaseModel):
     # "aguiar2") — entram as consultas do formulário de ajuda do ML delas,
     # `tipo: "ml_consulta"`. Vazio/ausente = nenhuma (executor antigo).
     ml_lojas: list[str] | None = None
+    # 05/11 (288967): lojas em que o robô tem perfil da Amazon (chave "kfa") —
+    # entram os casos do suporte delas, `tipo: "amazon_caso"`.
+    amazon_lojas: list[str] | None = None
 
 
 class AgentFalaLidaIn(BaseModel):

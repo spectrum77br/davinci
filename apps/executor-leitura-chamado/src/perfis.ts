@@ -58,18 +58,19 @@ const PERFIL_FIXO_ML: Record<string, string> = { jlas2: "k1bhpx2w", kfa2: "k1bhp
 
 const GRUPOS_OPERACAO = new Set(["lojas", "israel", "marrocos", "contas"]);
 
-/** Perfis dedicados do ML ("Forpaper - Mercado Livre"), pela chave da loja. Com
- *  dois perfis da mesma loja, fica o do grupo de operação (Lojas) — o da
- *  Contabilidade é cópia e só vale se não houver outro. */
-export async function mapaMl(
-  perfis?: adspower.AdsPowerProfile[]
-): Promise<Map<string, Perfil>> {
+/** Perfis dedicados de uma plataforma, pela chave da loja. Com dois perfis da
+ *  mesma loja, fica o do grupo de operação (Lojas) — o da Contabilidade é cópia
+ *  e só vale se não houver outro. */
+function dedicados(
+  todos: adspower.AdsPowerProfile[],
+  nomeDoPerfil: RegExp,
+  chaveDa: (loja: string) => string
+): Map<string, Perfil> {
   const out = new Map<string, Perfil & { operacao: boolean }>();
-  const todos = perfis ?? (await adspower.list());
   for (const p of todos) {
-    const m = /^(.+?)\s*-\s*mercado\s*livre\s*$/i.exec(p.name.trim());
+    const m = nomeDoPerfil.exec(p.name.trim());
     if (!m) continue;
-    const chave = lojaMl(m[1]);
+    const chave = chaveDa(m[1]);
     if (!chave) continue;
     const operacao = GRUPOS_OPERACAO.has((p.group_name || "").trim().toLowerCase());
     const ja = out.get(chave);
@@ -78,6 +79,15 @@ export async function mapaMl(
   }
   const final = new Map<string, Perfil>();
   for (const [k, v] of out) final.set(k, { userId: v.userId, nome: v.nome });
+  return final;
+}
+
+/** Perfis dedicados do ML ("Forpaper - Mercado Livre"), pela chave da loja. */
+export async function mapaMl(
+  perfis?: adspower.AdsPowerProfile[]
+): Promise<Map<string, Perfil>> {
+  const todos = perfis ?? (await adspower.list());
+  const final = dedicados(todos, /^(.+?)\s*-\s*mercado\s*livre\s*$/i, lojaMl);
   for (const [chave, userId] of Object.entries(PERFIL_FIXO_ML)) {
     const p = todos.find((x) => x.user_id === userId);
     if (p) final.set(chave, { userId: p.user_id, nome: p.name });
@@ -97,4 +107,31 @@ export function lojasMlDaFila(m: Map<string, Perfil>): string[] {
   const out = new Set(m.keys());
   for (const [apelido, perfil] of Object.entries(APELIDO_ML)) if (m.has(perfil)) out.add(apelido);
   return [...out].sort();
+}
+
+// --------------------------------------------------------------- Amazon (05/11)
+
+/** "Amazon KFA", "kfa", "KFA - Amazon" -> "kfa". Mesma regra do DaVinci
+ *  (`chamados_leitura.loja_amazon`), que filtra a fila por essa chave. */
+export function lojaAmazon(conta: string | null | undefined): string {
+  let t = (conta || "").trim().toLowerCase();
+  t = t.replace(/^(amazon|amz)[^a-z0-9]+/, "");
+  t = t.replace(/[^a-z0-9]+(amazon|amz)$/, "");
+  return t.replace(/[^a-z0-9]+/g, "");
+}
+
+/** Perfis "<Loja> - Amazon", pela chave da loja. "Uranyx - Amazon EUA" é a loja
+ *  dos EUA e fica de fora: o caso abre em sellercentral.amazon.com.br. */
+export async function mapaAmazon(
+  perfis?: adspower.AdsPowerProfile[]
+): Promise<Map<string, Perfil>> {
+  return dedicados(perfis ?? (await adspower.list()), /^(.+?)\s*-\s*amazon\s*$/i, lojaAmazon);
+}
+
+/** O perfil da Amazon de um chamado (pelo nome da loja no chamado). */
+export function perfilAmazon(
+  m: Map<string, Perfil>,
+  conta: string | null | undefined
+): Perfil | undefined {
+  return m.get(lojaAmazon(conta));
 }

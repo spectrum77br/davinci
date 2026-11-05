@@ -264,6 +264,32 @@ async def test_consulta_do_ml_sem_leitura_vira_ocorrencia_do_ml(db):
     assert "Mercado Livre" in o.acao and "Seller Center" not in o.acao
 
 
+async def test_caso_da_amazon_sem_leitura_vira_ocorrencia_da_amazon(db):
+    """05/11 (288967): o caso do suporte da Amazon entrou na fila do robô — se ficar
+    sem leitura, o vigia cobra com o texto da Amazon."""
+    await _leitor(db, visto_min=1)
+    ch = Chamado(
+        id=uuid4(), pedido_bling=f"vrl-{uuid4().hex[:6]}", pedido_marketplace="701-6560199-9046606",
+        plataforma="amazon", conta="Amazon KFA", origem="devolucao", chamado="23057891781",
+        canal="manual", leitura_robo_at=_agora() - timedelta(hours=7),
+    )
+    db.add(ch)
+    await db.flush()
+    f = chamados_svc.nova_mensagem(
+        ch, texto="Acionamos a equipe de transporte.", tipo="resposta", direcao="recebida",
+        autor_nome="Amazon", status="registrada",
+    )
+    f.created_at = f.enviada_at = _agora() - timedelta(hours=10)
+    db.add(f)
+    await db.commit()
+    await vigia.vigia_robo_leitura_run(db)
+    o = await _por_chave(db, f"caso:{ch.id}")
+    assert o is not None and o.titulo.startswith("Caso da Amazon sem leitura")
+    assert "caso 23057891781, pedido Amazon 701-6560199-9046606" in o.detalhe
+    assert "a Amazon respondeu" in o.detalhe
+    assert "Seller Central" in o.acao
+
+
 async def test_sweep_e_serializado_pelo_advisory_lock(db):
     from app.services.advisory_lock import SYNC_NAMESPACE
 

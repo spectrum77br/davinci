@@ -1356,6 +1356,12 @@ async function salvarConsulta() {
   }
 }
 
+// Caso do suporte da Amazon: mesma régua de `chamados_leitura.e_caso_amazon`.
+function casoAmazon(row: ChamadoRow): boolean {
+  return (row.plataforma ?? '').trim().toLowerCase() === 'amazon'
+    && /^\d{9,14}$/.test((row.chamado ?? '').trim())
+}
+
 async function relerAgora() {
   const row = hist.row
   if (!row || !canEdit.value || relendo.value) return
@@ -2409,12 +2415,12 @@ async function confirmarExcluir() {
               Conciliação
             </NuxtLink>
             <Button
-              v-if="hist.row.canal === 'api' || hist.row.chamado_de_tela"
+              v-if="hist.row.canal === 'api' || hist.row.chamado_de_tela || casoAmazon(hist.row)"
               size="sm"
               variant="outline"
               class="h-7 px-2"
               :disabled="!canEdit || relendo"
-              :title="hist.row.chamado_de_tela
+              :title="hist.row.chamado_de_tela || casoAmazon(hist.row)
                 ? 'Pôr este caso na frente da fila do robô de leitura (ele abre a tela da plataforma)'
                 : 'Ler o caso na plataforma agora (o robô faz isso de hora em hora, no minuto 25)'"
               @click="relerAgora"

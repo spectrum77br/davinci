@@ -13,8 +13,9 @@ ninguém fica sabendo ("não tô achando no ouvidoria robôs … esse aí").
 1. `executor:sem_sinal` — o robô parou de perguntar a fila. Ele pergunta a
    cada 10 min, e cada pergunta carimba `chamados_leitores.last_used_at`.
    Nunca-deu-sinal só vira ocorrência se houver caso esperando leitura.
-2. `caso:<chamado_id>` — devolução, consulta do Portal de Atendimento (25/09)
-   ou consulta do formulário de ajuda do ML (30/09) da fila (mesma régua da
+2. `caso:<chamado_id>` — devolução, consulta do Portal de Atendimento (25/09),
+   consulta do formulário de ajuda do ML (30/09) ou caso do suporte da Amazon
+   (05/11) da fila (mesma régua da
    fila do robô, `chamados_leitura.condicoes_do_leitor`) sem leitura além da
    cadência + `atraso_horas`: 3 h + 3 h = 6 h no caso normal; caso frio
    (ninguém fala há 15 dias) é lido 1×/dia, então 24 h + 3 h. Pega login
@@ -70,6 +71,12 @@ ACAO_CASO_ML = (
     "› logs): login do Mercado Livre caído, perfil \"<Loja> - Mercado Livre\" aberto "
     "por alguém ou faltando no AdsPower, ou página da consulta mudada. Enquanto "
     "isso, conferir a consulta direto no Mercado Livre (Ajuda › Consultas recentes)"
+)
+ACAO_CASO_AMAZON = (
+    "Ver o registro do robô no Mac mini da Makisa (DaVinci › executor-leitura-chamado "
+    "› logs): login do Seller Central caído, perfil \"<Loja> - Amazon\" aberto por "
+    "alguém ou faltando no AdsPower, ou página do caso mudada. Enquanto isso, "
+    "conferir o caso direto no Seller Central (Gerenciar casos de suporte)"
 )
 
 _CONTADORES = (
@@ -140,7 +147,7 @@ async def _casos(
     linhas = (
         await session.execute(
             select(Chamado, ultima_fala.label("ultima_fala"), entrou.label("entrou"))
-            .where(*chamados_leitura.condicoes_do_leitor(ml=True, agora=agora))
+            .where(*chamados_leitura.condicoes_do_leitor(ml=True, amazon=True, agora=agora))
             .order_by(Chamado.created_at)
         )
     ).all()
@@ -159,8 +166,13 @@ async def _casos(
         # 25/09 (292592): consulta do Portal de Atendimento também é da fila;
         # 30/09 (298394): e a consulta do formulário de ajuda do ML
         ml = chamados_leitura.e_consulta_ml(ch)
-        portal = not ml and chamados_leitura.e_portal_shopee(ch)
-        o_que = "Consulta do ML" if ml else "Consulta do Portal" if portal else "Devolução"
+        amazon = chamados_leitura.e_caso_amazon(ch)
+        portal = not ml and not amazon and chamados_leitura.e_portal_shopee(ch)
+        o_que = (
+            "Consulta do ML"
+            if ml
+            else "Caso da Amazon" if amazon else "Consulta do Portal" if portal else "Devolução"
+        )
         if lido is None:
             titulo = f"{o_que} sem leitura nenhuma há {_idade(minutos)}"
             detalhe = f"Na fila do robô desde {_br(ent or ch.created_at)} e nunca foi lida"
@@ -169,27 +181,36 @@ async def _casos(
             onde = (
                 "na página da consulta"
                 if ml
-                else "no Portal de Atendimento" if portal else "no Seller Center"
+                else "na página do caso"
+                if amazon
+                else "no Portal de Atendimento"
+                if portal
+                else "no Seller Center"
             )
             detalhe = f"Última leitura {onde} em {_br(lido)}"
         numero = (
-            f"consulta {ch.chamado or '?'}" if ml or portal else f"solicitação {ch.chamado or '?'}"
+            f"caso {ch.chamado or '?'}"
+            if amazon
+            else f"consulta {ch.chamado or '?'}"
+            if ml or portal
+            else f"solicitação {ch.chamado or '?'}"
         )
-        quem = "o ML" if ml else "a Shopee"
+        quem = "o ML" if ml else "a Amazon" if amazon else "a Shopee"
+        loja = "ML" if ml else "Amazon" if amazon else "Shopee"
         detalhe += (
-            f" — {numero}, pedido {'ML' if ml else 'Shopee'} {ch.pedido_marketplace or '?'}. "
+            f" — {numero}, pedido {loja} {ch.pedido_marketplace or '?'}. "
             f"Se {quem} respondeu nesse meio-tempo, o chamado não sabe"
         )
         await _registrar(
             r,
             agora,
             chave=f"caso:{ch.id}",
-            plataforma="ml" if ml else "shopee",
+            plataforma="ml" if ml else "amazon" if amazon else "shopee",
             conta=ch.conta,
             pedido=ch.pedido_bling,
             titulo=titulo,
             detalhe=detalhe,
-            acao=ACAO_CASO_ML if ml else ACAO_CASO,
+            acao=ACAO_CASO_ML if ml else ACAO_CASO_AMAZON if amazon else ACAO_CASO,
             link=f"{LINK_PAINEL}?search={ch.pedido_bling}" if ch.pedido_bling else LINK_PAINEL,
             severidade="pessoa",
             precisa_pessoa=True,

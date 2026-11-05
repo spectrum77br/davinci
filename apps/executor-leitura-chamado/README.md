@@ -65,8 +65,20 @@ não conseguiu avisar), não manda de novo. `seco`: escreve, fotografa, apaga,
 não anexa e não envia (`logs/seco/responder-<pedido>.json` + print em `debug/`).
 Com as mãos ativas, o DaVinci não entrega mais essas réplicas ao robô antigo.
 
+**v1.5 (05/11 — 288967): caso do suporte ao vendedor da Amazon**
+(`tipo: amazon_caso`). A resposta do suporte só existia no Seller Central e no
+e-mail principal do caso. Entra na fila todo chamado Amazon aberto com o nº do
+caso (só dígitos) no `chamado`, mesmo aberto à mão. Abre
+`sellercentral.amazon.com.br/cu/case-dashboard/view-case?caseID=<N>` no perfil
+`<Loja> - Amazon` e lê a resposta de `ViewCase` que a própria página busca: hora
+exata, autor e texto, sem nenhum clique. A pesquisa e o rodapé saem do texto. O
+chat só aparece depois de encerrado: as falas da Amazon entram numa fala só, e a
+conversa inteira fica no histórico. "Respondidas" não fecha o chamado. Fila e modo
+próprios: `LEITURA_AMAZON=seco|real` no `.env` (sem nada = desligado).
+
 Loja → perfil: casa pelo nome do perfil (`Vortan - Shopee` → `Shopee Vortan`;
-`Forpaper - Mercado Livre` → `forpaper`, aceitando "ML Forpaper" no chamado).
+`Forpaper - Mercado Livre` → `forpaper`, aceitando "ML Forpaper" no chamado;
+`KFA - Amazon` → `kfa`, aceitando "Amazon KFA" no chamado).
 O que não casar na Shopee vai no `PERFIS_EXTRA` do `.env`.
 
 ## Rodar
@@ -74,6 +86,7 @@ O que não casar na Shopee vai no `PERFIS_EXTRA` do `.env`.
 ```bash
 npm start -- --teste-pedido 260910MATESNVN --conta "Shopee Vortan"   # só a tela, sem DaVinci
 npm start -- --teste-ml 484465159 --conta forpaper                   # idem, consulta do ML
+npm start -- --teste-amazon 23057891781 --conta kfa                  # idem, caso da Amazon
 npm start -- --uma-vez                                               # uma passada (modo do .env)
 LEITURA_MODO=real npm start -- --uma-vez --so 296012                  # um caso, de verdade
 ```

@@ -13,8 +13,9 @@ export interface Caso {
   chamado: string;
   chamado_url?: string | null;
   /** 30/09: `ml_consulta` = consulta do formulário de ajuda do ML
-   *  (`chamado_url` = mercadolivre.com.br/cases/detail/<N>). */
-  tipo?: "devolucao" | "portal" | "ambos" | "ml_consulta";
+   *  (`chamado_url` = mercadolivre.com.br/cases/detail/<N>).
+   *  05/11: `amazon_caso` = caso do suporte da Amazon (`chamado` = nº do caso). */
+  tipo?: "devolucao" | "portal" | "ambos" | "ml_consulta" | "amazon_caso";
   /** 25/09 (294571): consulta do Portal ligada ao chamado (tipo portal/ambos). */
   consulta_portal?: string | null;
   consulta_url?: string | null;
@@ -65,13 +66,15 @@ async function post<T>(path: string, body: unknown, token = cfg.token): Promise<
 
 /** Casos pra reler agora. `espiar` = só olha (não marca a entrega) — modo seco
  *  e o `--so`. `contas` = as lojas da Shopee que este Mac tem perfil pra abrir;
- *  `mlLojas` (30/09) = as do ML ("forpaper", "aguiar2"), vazio = nenhuma. */
+ *  `mlLojas` (30/09) = as do ML ("forpaper", "aguiar2"), vazio = nenhuma;
+ *  `amazonLojas` (05/11) = as da Amazon ("kfa"), idem. */
 export async function fila(
   limite: number,
   contas: string[],
   espiar: boolean,
   portal: boolean,
-  mlLojas: string[] = []
+  mlLojas: string[] = [],
+  amazonLojas: string[] = []
 ): Promise<Caso[]> {
   const data = await post<{ casos: Caso[] }>("/api/chamados/agent/leitor/fila", {
     limite,
@@ -81,6 +84,7 @@ export async function fila(
     // v1.2: sabe ler a devolução E a consulta ligada no mesmo caso (tipo "ambos")
     consultas: portal,
     ml_lojas: mlLojas,
+    amazon_lojas: amazonLojas,
   });
   return data.casos ?? [];
 }
