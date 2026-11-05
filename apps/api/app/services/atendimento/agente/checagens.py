@@ -9241,6 +9241,20 @@ def _o_que_erra_no_endereco(plano: str, *, pede: bool = False) -> str | None:
     return None
 
 
+# A frase fixa uma vez só: quem insiste depois dela (91e36877 mandou 4 falas) vai para a pessoa, e
+# não recebe a mesma frase de novo. A etiqueta é a da exceção: "alterar o endereço" a loja não faz.
+MOTIVO_ENDERECO_INSISTE = "o cliente insiste em mudar o endereço depois da resposta fixa"
+
+
+def _frase_do_endereco_ja_saiu(recentes: Sequence[Any]) -> bool:
+    return any(
+        m.autor == constantes.AUTOR_LOJA
+        and m.status != constantes.MSG_FALHOU
+        and (m.texto or "") == constantes.RESPOSTA_ENDERECO_ML
+        for m in recentes
+    )
+
+
 def endereco_no_ml_da_proposta(
     p: Proposta, ctx: ContextoAgente, recentes: Sequence[Any], gatilho: Any
 ) -> Proposta:
@@ -9276,6 +9290,16 @@ def endereco_no_ml_da_proposta(
     erro = _o_que_erra_no_endereco(plano, pede=pede)
     if not (alterar or pede or (p.assunto == "endereco" and erro == DIZ_QUE_DA_PARA_ALTERAR)):
         return p
+    if _frase_do_endereco_ja_saiu(recentes):
+        return p.model_copy(
+            update={
+                "acao": "pessoa",
+                "acao_pessoa": constantes.ACAO_EXCECAO,
+                "motivo_pessoa": MOTIVO_ENDERECO_INSISTE,
+                "assunto": "endereco",
+                "texto": "",
+            }
+        )
     return p.model_copy(
         update={
             "acao": "responder",

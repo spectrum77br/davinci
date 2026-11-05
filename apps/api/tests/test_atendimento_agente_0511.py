@@ -3134,3 +3134,62 @@ def test_rev3_a_compra_feita_nao_e_o_pedido(fala):
 def test_rev3_apontar_o_anuncio_nao_nomeia_a_variacao(fala):
     assert acao_pessoa._pedido_de_atacado(validador.plano_de(fala)) == (20, False)
 
+
+def _loja_0511(texto: str, *, status: str = "enviada") -> SimpleNamespace:
+    m = _cli(texto)[0]
+    m.autor, m.origem, m.status = constantes.AUTOR_LOJA, "davinci_ia", status
+    return m
+
+
+def test_a_insistencia_depois_da_frase_do_endereco_vai_para_a_pessoa():
+    # 91e36877: 4 falas, e a mesma frase poderia sair 4 vezes.
+    msgs = [
+        *_cli("Quero alterar o endereço de entrega"),
+        _loja_0511(FIXA_ENDERECO),
+        *_cli("Mas preciso mudar o endereço de entrega"),
+    ]
+    saida = checagens.endereco_no_ml_da_proposta(_proposta(FIXA_ENDERECO), _ctx(), msgs, msgs[-1])
+    assert saida.acao == "pessoa" and saida.texto == ""
+    assert saida.acao_pessoa == constantes.ACAO_EXCECAO
+    assert saida.motivo_pessoa == checagens.MOTIVO_ENDERECO_INSISTE
+
+
+def test_a_frase_do_endereco_que_falhou_nao_conta_como_enviada():
+    msgs = [
+        *_cli("Quero alterar o endereço de entrega"),
+        _loja_0511(FIXA_ENDERECO, status=constantes.MSG_FALHOU),
+        *_cli("Quero alterar o endereço de entrega"),
+    ]
+    saida = checagens.endereco_no_ml_da_proposta(_proposta(), _ctx(), msgs, msgs[-1])
+    assert saida.acao == "responder" and saida.texto == FIXA_ENDERECO
+
+
+def test_outra_pergunta_depois_da_frase_do_endereco_segue_com_o_modelo():
+    msgs = [
+        *_cli("Quero alterar o endereço de entrega"),
+        _loja_0511(FIXA_ENDERECO),
+        *_cli("E o carregador vem na caixa?"),
+    ]
+    p = _proposta("Sim, o carregador vem na caixa.", assunto="especificacao")
+    assert checagens.endereco_no_ml_da_proposta(p, _ctx(), msgs, msgs[-1]) == p
+
+
+async def test_e2e_a_frase_do_endereco_sai_uma_vez_e_a_insistencia_fica_com_a_pessoa(
+    db: AsyncSession, make_user, agente_ligado, api, envios
+):
+    conversa = await _endereco_e2e(
+        db, make_user, canal="pos_venda", pedido="2000001",
+        fala="Quero alterar o endereço de entrega",
+    )  # fmt: skip
+    await _msg_ia(
+        db, conversa, FIXA_ENDERECO, autor="loja", origem="davinci_ia", ha=timedelta(minutes=20)
+    )
+    await _msg_ia(db, conversa, "Mas preciso mudar o endereço", ha=timedelta(minutes=10))
+    await db.refresh(conversa)
+    api.roteiro = [_final(texto=FIXA_ENDERECO, assunto="endereco", confianca=0.9)]
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert envios == [] and r.precisa_humano
+    assert _do_agente(r)["acoes_pessoa"] == [constantes.ACAO_EXCECAO], r.fatos
+    assert api.verificador == []
