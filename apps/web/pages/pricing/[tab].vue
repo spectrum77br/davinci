@@ -5294,6 +5294,12 @@ watch(department, async () => {
                     <!-- :selected por opção (como a Prioridade): as opções chegam
                          depois dos produtos e o :value no select não se reaplica. -->
                     <option value="" :selected="!p.certificacao_id">{{ p.certificacao_pelo_nome && p.certificacao ? `${p.certificacao.modelo || p.certificacao.produto} (pelo nome)` : '—' }}</option>
+                    <!-- Lista ainda carregando (ou falhou): o gravado aparece mesmo assim. -->
+                    <option
+                      v-if="p.certificacao_id && p.certificacao && !certOpcoes.some((c) => c.id === p.certificacao_id)"
+                      :value="p.certificacao_id"
+                      selected
+                    >{{ certOpcaoRotulo(p.certificacao) }}</option>
                     <option v-for="c in certOpcoes" :key="c.id" :value="c.id" :selected="c.id === p.certificacao_id">{{ certOpcaoRotulo(c) }}</option>
                   </select>
                   <template v-else>{{ p.certificacao ? (p.certificacao.modelo || p.certificacao.produto || '—') : '—' }}</template>
