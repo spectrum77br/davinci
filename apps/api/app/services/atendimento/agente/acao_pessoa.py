@@ -855,6 +855,9 @@ _ENTREGA_JA_FEITA = re.compile(
 _A_CAMINHO_DO_LUGAR_ERRADO = re.compile(
     r"(?<!estou )(?<!to )(?<!tou )(?<!vou )(?<!estamos )\b(?:foi|foram|veio|vieram|indo)\s+"
     rf"{_VAO_ATE_O_LUGAR}{_LUGAR_ERRADO}"
+    rf"|\b(?:entreg\w*|passou|passaram)\s+(?:\w+\s+){{0,2}}?(?:na|no|em|para|pra|pro|a)\s+"
+    rf"{_LUGAR_DO_ENDERECO}\s+errad\w*"
+    r"|\b(?:errou|erraram)\s+(?:\w+\s+){0,2}?(?:endereco|cep|casa|rua|numero)\b"
 )
 _PEDE_PARA_MUDAR = re.compile(
     r"\b(?:quero|queria|preciso|precisava|pode|podem|poderia|posso|tem\s+como|teria\s+como|consegue"
@@ -3672,7 +3675,9 @@ _MUDANCA_DO_ENDERECO_NA_FALA = re.compile(
     rf"\b{_MUDAR_NA_FALA}\s+{_VAO_DA_MUDANCA}{_LUGAR_NA_FALA}\b"
     rf"|\b(?:endereco|cep)\s+(?:(?!nao\b|for\b|se\b)\w+\s+){{0,4}}?(?:{_MUDAR_NA_FALA}|errad\w*"
     r"|incorret\w*|incomplet\w*)\b"
-    r"|\bendereco\s+(?:certo|correto|novo)\s+e\b"
+    # O "é" sem acento, com o que só ele aceita: "o endereço certo e agora?" é a conjunção.
+    r"|\bendereco\s+(?:certo|correto|novo)\s+e\s+(?:(?:n[ao]|em|a|o)\s+)?"
+    r"(?:outr[oa]|rua|avenida|av|travessa|alameda|rodovia|\d+)\b"
     r"|\b(?:endereco|cep)\s+nao\s+(?:e\s+mais\s+valido|vale\s+mais|existe\s+mais)\b"
     r"|\b(?:acrescent\w*|inclu\w*|adicion\w*|coloc\w*|bot(?:ar|ei|a)|insir\w*|inser\w*)\s+"
     rf"{_VAO_DA_MUDANCA}(?:complemento|apto|apartamento|bloco|numero\s+d[ao]\s+(?:casa|apartamento"

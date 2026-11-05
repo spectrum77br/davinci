@@ -6452,7 +6452,9 @@ _MOVIMENTO_DEPOIS_DO_DIA = re.compile(
 # sexta"): a lista dos verbos não fecha, e a pessoa confere. Menos o que já aconteceu ("foi postado
 # na sexta") e a "segunda foto".
 _DIA_NO_PASSADO = re.compile(r"\b(?:foi|foram)\s+(?:\w+\s+){0,2}$")
-_DIA_QUE_E_ORDEM = re.compile(r"^\s*-?\s*(?:feira\s+)?(?:foto|imagem|figura|linha|pergunta)\b")
+_DIA_QUE_E_ORDEM = re.compile(
+    r"^\s*-?\s*(?:feira\s+)?(?:foto|imagem|figura|linha|pergunta|geracao|versao|pagina|edicao)\b"
+)
 
 
 def _trechos_de_prazo(oracao: str, plataforma: str | None = None) -> Iterator[re.Match[str]]:
@@ -9142,7 +9144,7 @@ MOTIVO_ENDERECO_NO_ML = (
     "no Mercado Livre a loja não altera o endereço, e a resposta {o_que} — só pessoa"
 )
 DIZ_QUE_DA_PARA_ALTERAR = "diz que dá para alterar"
-_MUDAR_ENDERECO = r"(?:alter|mud|troc|corrig|atualiz|arrum|conserta)"
+_MUDAR_ENDERECO = r"(?:alter|mud|troc|corrig|atualiz|arrum|conserta|ajust)"
 # Dizer que dá para alterar, em qualquer texto.
 _DA_PARA_ALTERAR_ENDERECO = re.compile(
     r"(?<!nao )(?<!nao se )\b(?:da\s+para|da\s+pra|e\s+possivel|podemos|posso|pode|podem|consigo"
@@ -9196,6 +9198,7 @@ _PEDE_O_ENDERECO = re.compile(
     r"|precisamos\s+d[eo]|(?:me|nos)\s+(?:enviar?|mandar|informar?|passar?|dizer|falar?|fale))\s+"
     r"(?:\w+\s+){0,3}?(?:endereco|cep|complemento|numero|cidade)\b"
     r"|\bqual\s+(?:e\s+)?(?:o\s+|a\s+)?(?:\w+\s+)?(?:endereco|cep|numero|cidade|complemento)\b"
+    r"|\bpara\s+onde\s+(?:\w+\s+)?(?:quer|deseja|devemos|podemos)\b"
 )
 _NAO_PRECISA_DO_ENDERECO = re.compile(
     r"\bnao\s+(?:precisa|e\s+preciso|e\s+necessario)\s+(?:de\s+)?\w+\s+(?:\w+\s+){0,3}?"
@@ -9206,7 +9209,8 @@ _CEP_NO_ANUNCIO = re.compile(
     r"\b(?:informe|digite|coloque)\s+(?:\w+\s+){0,2}?cep\s+(?:\w+\s+){0,2}?(?:no|na|do|da)\s+anuncio\b"
 )
 _MANDA_FALAR_COM_A_LOJA = re.compile(
-    r"\bfal[ea]\s+com\s+a\s+(?:loja|gente)\b|\bmensagens\s+da\s+compra\b"
+    r"\bfal[ea]\s+com\s+a\s+(?:loja|gente)\b|\bfal[ea]\s+conosco\b|\bmensagens\s+da\s+(?:compra|loja)\b"
+    r"|\bprocure\s+o\s+vendedor\b|\bpelas\s+mensagens\b"
     r"|\bentre\s+em\s+contato\b|\bnos\s+chame\b|\bchame\s+a\s+loja\b"
 )
 # O endereço do cliente repetido no texto (91e36877 mandou rua, lote e CEP).
@@ -9220,9 +9224,17 @@ _VERBO_DE_MUDAR_ENDERECO = re.compile(
 )
 
 
+# "O frete pode mudar conforme o CEP": o que muda é o frete, e o verbo não é sobre o endereço.
+_MUDA_CONFORME_O_CEP = re.compile(
+    rf"\b{_MUDAR_ENDERECO}\w*\s+(?:conforme|de\s+acordo\s+com|segundo|dependendo\s+d[oe]|pelo|pela)\s+"
+    r"(?:\w+\s+){0,2}?(?:endereco|cep|regiao)\b"
+)
+
+
 def _o_que_erra_no_endereco(plano: str, *, pede: bool = False) -> str | None:
     """O que o texto erra na regra do endereço. `pede` = o turno pede a mudança: aí a ressalva, o
     "sim" e o "fale com a loja" contam mesmo sem o verbo de mudar no texto. PURA."""
+    plano = _MUDA_CONFORME_O_CEP.sub(" ", plano)
     if not pede:
         plano = _NEGA_DEPOIS_DO_ENVIO.sub(" ", plano)
     fala_de_mudar = pede or _VERBO_DE_MUDAR_ENDERECO.search(plano) is not None
@@ -9261,11 +9273,14 @@ def endereco_no_ml_da_proposta(
     """A Proposta do endereço no ML, na forma aprovada (ver acima). PURA. Outra ação de pessoa
     continua com a pessoa.
 
-    Com o turno pedindo a mudança, a saída é o texto fixo, seja qual for o assunto ou o texto do
-    modelo: as listas do que erra nunca fecham. Sem o pedido, o assunto do endereço cobre também
-    "confirmar o endereço" e "entrega no meu CEP?": só o "dá para alterar" vira a frase, porque ela
-    não responderia ao resto, e `conferir_endereco_no_ml` segura para a pessoa o que ainda errar. A
-    entrega relatada é outro caso: a frase não responde, e a ação de mudar vira o chamado."""
+    Com o turno pedindo a mudança e o assunto do endereço, ou o texto falando em mudá-lo, a saída é
+    o texto fixo: as listas do que erra nunca fecham. Com outro assunto e outro texto, a resposta do
+    modelo fica: a fala pode ser outra pergunta ("no meu CEP o frete muda?"), a frase errada em
+    público não tem volta, e `conferir_endereco_no_ml` segura para a pessoa o que o texto errar. A
+    frase com a resposta de outra parte do turno também fica. Sem o pedido, o assunto do endereço
+    cobre também "confirmar o endereço" e "entrega no meu CEP?": só o "dá para alterar" vira a
+    frase. A entrega relatada é outro caso: a frase não responde, e a ação de mudar vira o chamado.
+    Nos pedidos reais medidos, o modelo declarou o assunto do endereço ou a ação de mudar."""
     if ctx.plataforma not in constantes.PLATAFORMAS_SEM_ALTERAR_ENDERECO or ctx.canal not in (
         constantes.CANAL_PERGUNTA,
         constantes.CANAL_POS_VENDA,
@@ -9275,8 +9290,9 @@ def endereco_no_ml_da_proposta(
     if p.acao == "pessoa" and not alterar:
         return p
     plano = _plano(p.texto)
+    frase = _plano(constantes.RESPOSTA_ENDERECO_ML)
     if acao_pessoa.entrega_relatada_no_turno(recentes, gatilho):
-        if alterar or p.assunto == "endereco" or _plano(constantes.RESPOSTA_ENDERECO_ML) in plano:
+        if alterar or p.assunto == "endereco" or frase in plano:
             return p.model_copy(
                 update={
                     "acao": "pessoa",
@@ -9288,9 +9304,9 @@ def endereco_no_ml_da_proposta(
         return p
     pede = acao_pessoa.pede_alterar_endereco(recentes, gatilho, canal=ctx.canal)
     erro = _o_que_erra_no_endereco(plano, pede=pede)
-    if not (alterar or pede or (p.assunto == "endereco" and erro == DIZ_QUE_DA_PARA_ALTERAR)):
-        return p
-    if _frase_do_endereco_ja_saiu(recentes):
+    if _frase_do_endereco_ja_saiu(recentes) and (
+        alterar or pede or p.assunto == "endereco" or frase in plano
+    ):
         return p.model_copy(
             update={
                 "acao": "pessoa",
@@ -9300,6 +9316,15 @@ def endereco_no_ml_da_proposta(
                 "texto": "",
             }
         )
+    if not alterar and frase in plano and plano != frase and erro is None:
+        return p
+    if not (
+        alterar
+        or plano == frase
+        or (p.assunto == "endereco" and (pede or erro == DIZ_QUE_DA_PARA_ALTERAR))
+        or (pede and _VERBO_DE_MUDAR_ENDERECO.search(_MUDA_CONFORME_O_CEP.sub(" ", plano)))
+    ):
+        return p
     return p.model_copy(
         update={
             "acao": "responder",
@@ -9324,7 +9349,11 @@ def conferir_endereco_no_ml(
     if acao not in ("responder", "perguntar"):
         return []
     plano = _plano(texto)
-    if assunto != "endereco" and not pede and not _VERBO_DE_MUDAR_ENDERECO.search(plano):
+    if (
+        assunto != "endereco"
+        and not pede
+        and not _VERBO_DE_MUDAR_ENDERECO.search(_MUDA_CONFORME_O_CEP.sub(" ", plano))
+    ):
         return []
     o_que = _o_que_erra_no_endereco(plano, pede=pede)
     return [_pessoa(ENDERECO_NO_ML, MOTIVO_ENDERECO_NO_ML.format(o_que=o_que))] if o_que else []

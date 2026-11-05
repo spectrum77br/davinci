@@ -184,17 +184,68 @@ def normalizar(texto: str, *, plataforma: str, canal: str) -> str:
 _HOMOGLIFOS = str.maketrans(
     {
         # cirílico
-        "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x",
-        "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "ԛ": "q", "ԝ": "w", "һ": "h",
-        "ӏ": "l", "к": "k", "м": "m", "т": "t", "в": "b", "н": "h", "ѡ": "w",
-        "А": "a", "В": "b", "Е": "e", "К": "k", "М": "m", "Н": "h", "О": "o",
-        "Р": "p", "С": "c", "Т": "t", "У": "y", "Х": "x", "І": "i", "Ј": "j",
+        "а": "a",
+        "е": "e",
+        "о": "o",
+        "р": "p",
+        "с": "c",
+        "у": "y",
+        "х": "x",
+        "і": "i",
+        "ј": "j",
+        "ѕ": "s",
+        "ԁ": "d",
+        "ԛ": "q",
+        "ԝ": "w",
+        "һ": "h",
+        "ӏ": "l",
+        "к": "k",
+        "м": "m",
+        "т": "t",
+        "в": "b",
+        "н": "h",
+        "ѡ": "w",
+        "А": "a",
+        "В": "b",
+        "Е": "e",
+        "К": "k",
+        "М": "m",
+        "Н": "h",
+        "О": "o",
+        "Р": "p",
+        "С": "c",
+        "Т": "t",
+        "У": "y",
+        "Х": "x",
+        "І": "i",
+        "Ј": "j",
         "Ѕ": "s",
         # grego
-        "α": "a", "ο": "o", "ρ": "p", "ε": "e", "ι": "i", "κ": "k", "ν": "v",
-        "τ": "t", "υ": "u", "χ": "x", "ω": "w", "Α": "a", "Β": "b", "Ε": "e",
-        "Ζ": "z", "Η": "h", "Ι": "i", "Κ": "k", "Μ": "m", "Ν": "n", "Ο": "o",
-        "Ρ": "p", "Τ": "t", "Υ": "y", "Χ": "x",
+        "α": "a",
+        "ο": "o",
+        "ρ": "p",
+        "ε": "e",
+        "ι": "i",
+        "κ": "k",
+        "ν": "v",
+        "τ": "t",
+        "υ": "u",
+        "χ": "x",
+        "ω": "w",
+        "Α": "a",
+        "Β": "b",
+        "Ε": "e",
+        "Ζ": "z",
+        "Η": "h",
+        "Ι": "i",
+        "Κ": "k",
+        "Μ": "m",
+        "Ν": "n",
+        "Ο": "o",
+        "Ρ": "p",
+        "Τ": "t",
+        "Υ": "y",
+        "Χ": "x",
     }
 )
 
@@ -310,9 +361,7 @@ _REDE_SOCIAL = (
         r"|linkedin|skype|signal)\b"
     ),
     # Apelido curto só com contexto: "face" sozinho é a face da mala.
-    re.compile(
-        r"\b(?:no|pelo|meu|nosso|nossa|seu|sua)\s+(?:face|fb|ig|insta|tg|tt)\b"
-    ),
+    re.compile(r"\b(?:no|pelo|meu|nosso|nossa|seu|sua)\s+(?:face|fb|ig|insta|tg|tt)\b"),
 )
 
 _LINK = (
@@ -443,7 +492,9 @@ _AVALIACAO = (
         r"|significa)"
     ),
     # Estrela em emoji: "5⭐", "⭐⭐⭐⭐⭐".
-    re.compile(r"\d\s*[\u2b50\u2605\U0001f31f]|[\u2b50\u2605\U0001f31f](?:\s*[\u2b50\u2605\U0001f31f])+"),
+    re.compile(
+        r"\d\s*[\u2b50\u2605\U0001f31f]|[\u2b50\u2605\U0001f31f](?:\s*[\u2b50\u2605\U0001f31f])+"
+    ),
     # Pedir para NÃO avaliar mal: "não deixe avaliação negativa", "evite dar
     # nota baixa", "não avalie mal".
     re.compile(
@@ -575,8 +626,11 @@ _UNIDADE_MEDIDA = (
 _ASPAS_POLEGADA = r"(?:\"|''|\u201d|\u2033|\u2032\u2032)"
 _TAMANHO_DE_TELA = r"(?<![\d.,])(?:\d[.,]\d{1,2}|\d{2}[.,]\d)\s*" + _ASPAS_POLEGADA
 _MEDIDA_DE_TELA = re.compile(
-    r"\b(?:tela|display|visor)\b[^\d\n.!?]{0,30}" + _TAMANHO_DE_TELA
-    + r"|" + _TAMANHO_DE_TELA + r"\s*(?:de\s+)?(?:tela|display)\b"
+    r"\b(?:tela|display|visor)\b[^\d\n.!?]{0,30}"
+    + _TAMANHO_DE_TELA
+    + r"|"
+    + _TAMANHO_DE_TELA
+    + r"\s*(?:de\s+)?(?:tela|display)\b"
 )
 # A variação de MEMÓRIA do celular ("12.64 + 64 Sd Card", "F105 - 12.64", "Branco
 # 12.64 está esgotada": RAM.armazenamento, como os anúncios Uranyx escrevem) não é
@@ -741,9 +795,7 @@ _PRAZO_NO_ML = (
         r"\bprevis(?:ao|t[oa])\b(?:\s+\w+){0,3}?\s+(?:(?:e|sera|para|pra|na|no|ate)\s+)+"
         rf"(?:(?:a|o)\s+)?{_DIA_DA_PROMESSA}\b{_NAO_E_O_DIA}"
     ),
-    re.compile(
-        rf"(?:^|[.!?]\s*)(?:sim\W+)?(?:(?:na|no|ate)\s+)?{_DIA_DA_PROMESSA}\s*(?:[.!?]|$)"
-    ),
+    re.compile(rf"(?:^|[.!?]\s*)(?:sim\W+)?(?:(?:na|no|ate)\s+)?{_DIA_DA_PROMESSA}\s*(?:[.!?]|$)"),
     re.compile(
         rf"\b{_DIA_DA_PROMESSA}\b{_NAO_E_O_DIA}\s+(?:(?!nao\b)\w+\s+){{0,2}}?"
         r"(?:chega|chegam|chegara|chegarao|vai\s+chegar|sai|saira)\b"
@@ -763,18 +815,20 @@ _NEGA_A_ENTREGA_ANTES = re.compile(
     r"|\b(?:nao|nem|nunca)\s+$"
 )
 _NEGA_A_ENTREGA_DEPOIS = re.compile(
-    r"^\s+(?:nao|nem)\s+(?:pode\s+ser|e|esta|sera|foi|fica)\s+"
+    r"^(?:\s*-\s*feira)?\s+(?:nao|nem)\s+(?:pode\s+ser|e|esta|sera|foi|fica)\s+"
     r"(?:garantid|confirmad|prometid|assegurad)\w*"
-    r"|^\s+nao\s+e\s+possivel\b"
+    r"|^(?:\s*-\s*feira)?\s+nao\s+e\s+possivel\b"
     # Depende de quem entrega; "depende só de você comprar agora" é a promessa com condição.
-    r"|^\s+depende\s+(?:\w+\s+){0,3}?(?:rotina|transportadora|correios?|mercado\s+livre|plataforma"
+    r"|^(?:\s*-\s*feira)?\s+depende\s+(?:\w+\s+){0,3}?(?:rotina|transportadora|correios?"
+    r"|mercado\s+livre|plataforma"
     r"|logistica|regiao|cep)\b"
 )
 # "Sobre a entrega para amanhã, não temos como garantir": só com o "sobre", porque "a entrega é
 # amanhã, não temos como garantir o horário" afirma o dia.
 _SOBRE_A_ENTREGA = re.compile(r"\b(?:sobre|quanto\s+a)\s+(?:(?:a|o)\s+)?$")
 _NEGA_DEPOIS_DO_SOBRE = re.compile(
-    r"^[\s,]+nao\s+(?:temos\s+como|tenho\s+como|tem\s+como|ha\s+como|conseguimos|consigo|podemos"
+    r"^(?:\s*-\s*feira)?[\s,]+nao\s+(?:temos\s+como|tenho\s+como|tem\s+como|ha\s+como|conseguimos"
+    r"|consigo|podemos"
     r"|posso)\s+(?:garantir|confirmar|prometer|assegurar|afirmar|informar)\b"
     # O verbo fecha a oração: com "o horário" depois, é o horário que se nega, e o dia fica de pé.
     r"(?:\s+(?:isso|essa\s+data|esse\s+dia|esse\s+prazo))?\s*(?:[.!?,;]|$)"
@@ -806,15 +860,17 @@ _ORACAO_DA_CHEGADA = re.compile(
 # informar o CEP"). "Mas é bem provável" e "porém chega" desfazem a negativa, e a lista do que
 # afirma não fecha.
 _ADVERSATIVA_QUE_AFIRMA = re.compile(
-    r"\b(?:mas|porem|contudo|entretanto|todavia|so\s+que)\b(?!\s+(?:\w+\s+){0,3}?(?:veja|ver"
+    r"\b(?:mas|porem|contudo|entretanto|todavia|so\s+que)\b"
+    r"(?!\s+(?:(?!cheg\w*\b|sai\w*\b|vem\b|dev\w+\b)\w+\s+){0,6}?(?:veja|ver"
     r"|confira|conferir|consulte|consultar|acompanh\w+|aparece\w*|mostra\w*|inform\w+|definid\w*"
-    r"|fale|falar|chame|chamar)\b)"
+    r"|fale|falar|chame|chamar|disposicao)\b)"
 )
 _AFIRMA_A_CHEGADA = re.compile(
     r"\b(?:vai|vao|deve|devem|devera|deverao|ira|irao)\s+chegar\b|\bchegara(?:o)?\b"
     r"|\btudo\s+indica\b|\bprovav\w+\b|\bcom\s+certeza\b|\bfi(?:que|ca)\s+tranquil\w+\b"
     r"|\bpode\s+(?:ficar\s+tranquil\w+|comprar|contar)\b"
-    r"|(?<!se )(?<!quando )\b(?:ele|ela|pedido|produto|encomenda)\s+chega\b"
+    r"|(?<!se )(?<!quando )(?<!se o )(?<!se a )(?<!quando o )(?<!quando a )"
+    r"\b(?:ele|ela|pedido|produto|encomenda)\s+chega\b"
 )
 
 
@@ -858,7 +914,8 @@ VAO_DA_ENTREGA = frozenset(
     "entrega entregue sai saia saira sair feito feita realizado realizada enviado enviada postado "
     "postada despachado despachada ate ou depois hoje amanha segunda terca quarta quinta sexta "
     "sabado domingo feira aqui daqui exatamente exata exato exatas exatos especifica especifico "
-    "justo ja residencia trabalho moradia tempo nova novo tentativa certa".split()
+    "justo ja residencia trabalho moradia tempo nova novo tentativa certa receba receber recebe "
+    "dele dela ai ira".split()
 )
 VAO_DE_OUTRO_ASSUNTO = frozenset(
     "cor cores estoque como estara disponibilidade variacao variacoes modelo quantidade preco "
@@ -895,6 +952,8 @@ def sujeito_livre_da_entrega(vao: str, trecho: str) -> bool:
         (_QUE_A_COISA.match(vao) and _VERBO_DO_SUJEITO_LIVRE.match(trecho))
         or ((_A_CHEGADA_DA_COISA.match(vao) or _QUE_A_COISA_CHEGA.match(vao)) and dia)
     )
+
+
 _GARANTIA = (
     re.compile(rf"\bgarantia\s+(?:de\s+)?(?:\d+|{_NUMERO_POR_EXTENSO})\b"),
     # "a garantia é de 1 ano", "garantia de fábrica de doze meses".
@@ -902,9 +961,7 @@ _GARANTIA = (
         rf"\bgarantia\b[^.!?\n]{{0,25}}?\b(?:\d+|{_NUMERO_POR_EXTENSO})\s*"
         r"(?:anos?|mes|meses|dias?|semanas?)\b"
     ),
-    re.compile(
-        rf"\b(?:\d+|{_NUMERO_POR_EXTENSO})\s*(?:anos?|mes|meses|dias?)\s+de\s+garantia\b"
-    ),
+    re.compile(rf"\b(?:\d+|{_NUMERO_POR_EXTENSO})\s*(?:anos?|mes|meses|dias?)\s+de\s+garantia\b"),
     re.compile(
         r"\bgarantia\s+(?:\w+\s+){0,2}?(?:vitalicia|eterna|ilimitada|total|para\s+sempre"
         r"|por\s+toda\s+a\s+vida)\b"
@@ -913,7 +970,9 @@ _GARANTIA = (
 # Promessa que só pessoa faz: reembolso, estorno, troca, reenvio, "pode
 # ficar com o produto", "sem custo". A pessoa sabe o que promete; a IA não.
 _PROMESSA = (
-    re.compile(r"\b(?:reembols|estorn|ressarc|reenvi|devolv|troc|cancel)(?:aremos|eremos|iremos)\b"),
+    re.compile(
+        r"\b(?:reembols|estorn|ressarc|reenvi|devolv|troc|cancel)(?:aremos|eremos|iremos)\b"
+    ),
     re.compile(
         r"\bvamos\s+(?:\w+\s+)?(?:reembolsar|estornar|ressarcir|reenviar|trocar|cancelar"
         r"|devolver\s+(?:o\s+|seu\s+)?(?:valor|dinheiro)|enviar\s+(?:outr[oa]|um\s+nov[oa]"
@@ -1058,9 +1117,7 @@ _PEDE_ZAP = (
         r"(?:(?:o\s+|os\s+dados\s+do\s+)(?:seu\s+)?cartao\s+(?:de\s+)?(?:credito|debito)"
         r"|seu\s+cartao)\b"
     ),
-    re.compile(
-        r"\bfoto\s+d[oa]\s+(?:seu\s+|sua\s+)?(?:rg|cpf|cnh|identidade|documento|cartao)\b"
-    ),
+    re.compile(r"\bfoto\s+d[oa]\s+(?:seu\s+|sua\s+)?(?:rg|cpf|cnh|identidade|documento|cartao)\b"),
     re.compile(r"\b(?:cvv|cvc)\b"),
 )
 # PEDIR o número da CONTA (financeira): "manda o número da sua conta", "me
@@ -2928,7 +2985,7 @@ def sem_a_negativa_da_entrega_no_ml(texto: str) -> str:
         ) and set(palavras.split()) <= VAO_DA_ENTREGA
         return " " if da_entrega and _FALA_DA_ENTREGA.search(resto) else m.group(0)
 
-    plano = plano_de(texto)
+    plano = re.sub(r"\s*-\s*feira\b", "", plano_de(texto))
     sem_a_negativa = _NEGA_GARANTIR_NO_ML.sub(
         _sem, _DIA_ANTES_DA_NEGATIVA.sub(" ", _ENTREGA_NAO_GARANTIDA_NO_ML.sub(" ", plano))
     )
