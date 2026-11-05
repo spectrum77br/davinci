@@ -549,24 +549,9 @@ def test_r2_o_assunto_errado_com_a_fala_errada_vira_a_resposta_aprovada():
 @pytest.mark.parametrize(
     ("canal", "postado", "ctx", "msgs"),
     [
-        (
-            "pergunta",
-            None,
-            None,
-            _cli("Tem como mudar o endereço depois que você finaliza a compra e paga"),
-        ),
-        (
-            "pos_venda",
-            acao_pessoa.POSTADO_NAO,
-            PEDIDO_NAO_POSTADO,
-            _cli("Quero alterar o endereço de entrega"),
-        ),
-        (
-            "pos_venda",
-            acao_pessoa.POSTADO_SIM,
-            PEDIDO_NAO_POSTADO,
-            _cli("Quero alterar o endereço de entrega"),
-        ),
+        ("pergunta", None, None, _cli("Tem como mudar o endereço depois que você finaliza a compra e paga")),
+        ("pos_venda", acao_pessoa.POSTADO_NAO, PEDIDO_NAO_POSTADO, _cli("Quero alterar o endereço de entrega")),
+        ("pos_venda", acao_pessoa.POSTADO_SIM, PEDIDO_NAO_POSTADO, _cli("Quero alterar o endereço de entrega")),
         ("pos_venda", None, PEDIDO_NAO_POSTADO, _cli("Quero alterar o endereço de entrega")),
         ("pos_venda", acao_pessoa.POSTADO_NAO, PEDIDO_NAO_POSTADO, _turno_do_menu()),
     ],
@@ -843,10 +828,7 @@ def test_r3_a_quantidade_do_pedido(fala, esperado):
     [
         ("Frasqueira Rígida De Mão De Viagem 12 Polegadas Roxo Escuro M2", True),
         ("Mala Charlot's Park M1-m6 Violeta-escuro Lisa", True),
-        (
-            "Frasqueira Maleta Maquiagem Profissional Com Alça Necessaire Viagem 8 Polegadas Organizado",
-            True,
-        ),
+        ("Frasqueira Maleta Maquiagem Profissional Com Alça Necessaire Viagem 8 Polegadas Organizado", True),
         ("Mala Viagem Policarbonato Aluminio Usb Tsa 10kg 20 Polegadas Bordo - Branco", True),
         ("Cappa ** Uranyx Hotwav A17 Pro Max 128 Gb Memoria 12 Gb Ram Laranja - 12.128", False),
         ("Celular Doogee Note 128gb", False),
@@ -971,37 +953,13 @@ async def _atacado_e2e(
 @pytest.mark.parametrize(
     ("caso", "fala", "titulo", "estoque"),
     [
-        (
-            "070f1828",
-            "consegue um valor melhor pra comprar 20UN?",
-            "Frasqueira Rígida De Mão De Viagem 12 Polegadas Roxo Escuro M2",
-            427,
-        ),
-        (
-            "378b1cd9",
-            "consegue um valor melhor pra 15UN?",
-            "Mala Charlot's Park M1-m6 Violeta-escuro Lisa",
-            137,
-        ),
-        (
-            "8f27c582",
-            "Consegue um valor melhor pra 20UN?",
-            "Frasqueira Maleta Maquiagem Profissional Com Alça Necessaire Viagem 8 Polegadas Organizado",
-            266,
-        ),
+        ("070f1828", "consegue um valor melhor pra comprar 20UN?", "Frasqueira Rígida De Mão De Viagem 12 Polegadas Roxo Escuro M2", 427),
+        ("378b1cd9", "consegue um valor melhor pra 15UN?", "Mala Charlot's Park M1-m6 Violeta-escuro Lisa", 137),
+        ("8f27c582", "Consegue um valor melhor pra 20UN?", "Frasqueira Maleta Maquiagem Profissional Com Alça Necessaire Viagem 8 Polegadas Organizado", 266),
     ],
 )
 async def test_r3_e2e_os_tres_reais_saem_sem_o_modelo(
-    db: AsyncSession,
-    make_user,
-    agente_ligado,
-    api,
-    envios,
-    recusa_ativa,
-    caso,
-    fala,
-    titulo,
-    estoque,
+    db: AsyncSession, make_user, agente_ligado, api, envios, recusa_ativa, caso, fala, titulo, estoque
 ):
     conversa = await _atacado_e2e(db, make_user, fala, estoque=estoque, titulo=titulo)
     api.roteiro = []  # o modelo não é chamado
@@ -1260,9 +1218,7 @@ def test_r3_o_rascunho_da_pessoa_nao_tem_texto_nem_a_marca():
 async def test_r3_o_reenvio_acha_a_frase_presa_na_pausa(db: AsyncSession, make_user):
     conversa = await _conversa_ml(db, make_user)
     r = await _rascunho(db, conversa, FRASE, _fatos_do_atacado())
-    outro = await _rascunho(
-        db, conversa, "Olá!", {"agente": {"isencoes": []}}, status="substituido"
-    )
+    outro = await _rascunho(db, conversa, "Olá!", {"agente": {"isencoes": []}}, status="substituido")
     k, x = AtendimentoCanal, AtendimentoRascunho
     linhas = await db.scalars(
         select(x.id)
@@ -1292,12 +1248,7 @@ async def test_r3_a_paridade_no_replay_e_no_regatilho(db: AsyncSession, make_use
     r = await replay.como_o_gerar(db, conversa, msgs[-1], base, extra)
 
     assert r.texto == FRASE and r.fatos_agente.get(ia.FATO_ATACADO) is True
-    canal = {
-        "modo": "auto",
-        "auto_categorias": [],
-        "auto_agente": [],
-        "auto_orientacao": ["desconto"],
-    }
+    canal = {"modo": "auto", "auto_categorias": [], "auto_agente": [], "auto_orientacao": ["desconto"]}
     x = await regatilho.regatilhar(
         {"id": "a1", "parada": r.parada, "proposta": {}, "texto_final": r.texto,
          "decisao": {"atacado": True}, "plataforma": "ml"},
@@ -1337,9 +1288,7 @@ def test_o_agente_nao_ganhou_frase_nova_de_atacado_no_prompt():
         "A entrega para hoje não pode ser garantida.",
     ],
 )
-async def test_r1_a_negativa_do_fato_passa_no_validador_e_no_envio(
-    db: AsyncSession, make_user, texto
-):
+async def test_r1_a_negativa_do_fato_passa_no_validador_e_no_envio(db: AsyncSession, make_user, texto):
     assert _ml(texto) == []
     assert checagens.conferir_prazo_sem_lastro(texto, plataforma="ml") == []
     conversa = await _conversa_ml(db, make_user)
@@ -1451,13 +1400,7 @@ MUDA_PUBLICA = "Tem como mudar o endereço depois que você finaliza a compra?"
     [
         # O texto que diz que dá, no assunto do endereço e sem a pista antiga no turno.
         ("pergunta", None, ERRA_ENDERECO, "Sim, é possível alterar o endereço.", "endereco"),
-        (
-            "pergunta",
-            None,
-            ERRA_ENDERECO,
-            "Sim, o endereço pode ser alterado pela loja.",
-            "endereco",
-        ),
+        ("pergunta", None, ERRA_ENDERECO, "Sim, o endereço pode ser alterado pela loja.", "endereco"),
         ("pergunta", None, ERRA_ENDERECO, "Dá para mudar o endereço depois da compra.", "endereco"),
         ("pergunta", None, ERRA_ENDERECO, "Arrumamos sim.", "endereco"),
         # A negação que vira condição.
@@ -1526,20 +1469,8 @@ MUDA_PUBLICA = "Tem como mudar o endereço depois que você finaliza a compra?"
             "outro",
         ),
         # A negativa que repete o endereço abreviado.
-        (
-            "pos_venda",
-            "2000001",
-            PEDE_ENDERECO,
-            "Não alteramos o endereço: a entrega segue para Av. Principal, 1000.",
-            "endereco",
-        ),
-        (
-            "pos_venda",
-            "2000001",
-            PEDE_ENDERECO,
-            "Não alteramos o endereço. Seu pedido vai para R. das Flores 123.",
-            "endereco",
-        ),
+        ("pos_venda", "2000001", PEDE_ENDERECO, "Não alteramos o endereço: a entrega segue para Av. Principal, 1000.", "endereco"),
+        ("pos_venda", "2000001", PEDE_ENDERECO, "Não alteramos o endereço. Seu pedido vai para R. das Flores 123.", "endereco"),
     ],
 )
 async def test_r2_e2e_o_que_diz_que_da_vira_a_resposta_aprovada(
@@ -1582,10 +1513,7 @@ def test_r2_a_trava_le_o_pedido_em_outro_assunto(texto):
 
 def test_r2_outra_parte_do_turno_sem_o_pedido_nao_vira_a_frase():
     # Sem o pedido de mudança, o modelo respondeu a outra coisa: fica para o verificador.
-    for texto in (
-        "O prazo aparece no anúncio.",
-        "Seu pedido foi postado hoje, mas ainda sem rastreio.",
-    ):
+    for texto in ("O prazo aparece no anúncio.", "Seu pedido foi postado hoje, mas ainda sem rastreio."):
         prazo = _proposta(texto, assunto="prazo_antes_compra")
         assert _no_ml(prazo, pede=False) == prazo
 
@@ -1614,25 +1542,13 @@ def test_r2_a_cobertura_na_pergunta_publica_nao_e_pedido_de_mudanca():
 @pytest.mark.parametrize(
     ("fala", "texto"),
     [
-        (
-            "Entrega no meu endereço em Manaus?",
-            "Entregamos em todo o Brasil; confira informando o CEP no anúncio.",
-        ),
-        (
-            "vocês entregam no meu endereço?",
-            "O prazo e o frete para o seu CEP aparecem no anúncio ao informar o CEP.",
-        ),
+        ("Entrega no meu endereço em Manaus?", "Entregamos em todo o Brasil; confira informando o CEP no anúncio."),
+        ("vocês entregam no meu endereço?", "O prazo e o frete para o seu CEP aparecem no anúncio ao informar o CEP."),
         ("vocês entregam no meu endereço?", "Enviamos para o seu CEP: confira o frete no anúncio."),
         ("vocês entregam no meu endereço?", "Informe o CEP no anúncio para ver o frete."),
-        (
-            "confirma o endereço de entrega?",
-            "A entrega segue o endereço do pedido, em Minhas compras.",
-        ),
+        ("confirma o endereço de entrega?", "A entrega segue o endereço do pedido, em Minhas compras."),
         ("o frete é pelo cep?", "O frete só é possível calcular com o CEP, no anúncio."),
-        (
-            "vocês entregam no meu endereço?",
-            "Entregamos. Se já comprou, fale com a loja pelas mensagens da compra.",
-        ),
+        ("vocês entregam no meu endereço?", "Entregamos. Se já comprou, fale com a loja pelas mensagens da compra."),
     ],
 )
 def test_r2_quem_nao_pede_a_mudanca_nao_recebe_a_frase(fala, texto):
@@ -1718,9 +1634,7 @@ def test_r2_no_ml_a_entrega_errada_continua_com_chamado(fala):
 @pytest.mark.parametrize("fala", ["coloquei o endereço errado", "pode entregar para outra pessoa?"])
 def test_r2_fora_do_ml_o_gatilho_11_nao_muda(fala):
     msgs = _cli(fala)
-    assert constantes.ACAO_ABRIR_CHAMADO in _gatilhos(
-        _conv(), msgs, postado=acao_pessoa.POSTADO_SIM
-    )
+    assert constantes.ACAO_ABRIR_CHAMADO in _gatilhos(_conv(), msgs, postado=acao_pessoa.POSTADO_SIM)
 
 
 @pytest.mark.parametrize(
@@ -2006,12 +1920,7 @@ async def test_r3_o_replay_grava_a_marca_do_atacado(
 
     assert falsa.pedidos == [] and r.texto_final == FRASE
     assert r.decisao["atacado"] is True
-    canal = {
-        "modo": "auto",
-        "auto_categorias": [],
-        "auto_agente": [],
-        "auto_orientacao": ["desconto"],
-    }
+    canal = {"modo": "auto", "auto_categorias": [], "auto_agente": [], "auto_orientacao": ["desconto"]}
     x = await regatilho.regatilhar(
         {"id": "a1", "parada": r.parada, "proposta": {}, "texto_final": r.texto_final,
          "decisao": r.decisao, "plataforma": "ml"},
@@ -2323,9 +2232,7 @@ async def test_rev2_e2e_o_verbo_solto_nao_tira_o_pedido_de_mudanca(
     assert constantes.ACAO_ABRIR_CHAMADO not in _gatilhos(ml, msgs, postado=acao_pessoa.POSTADO_SIM)
     conversa = await _endereco_e2e(db, make_user, canal="pos_venda", pedido="2000001", fala=fala)
     await _com_as_listas_do_ml(db, conversa)
-    api.roteiro = [
-        _final(texto="Claro, para onde devemos enviar?", assunto="endereco", confianca=0.9)
-    ]
+    api.roteiro = [_final(texto="Claro, para onde devemos enviar?", assunto="endereco", confianca=0.9)]
 
     r = await ia.gerar_rascunho(db, conversa)
 
@@ -2337,41 +2244,11 @@ async def test_rev2_e2e_o_verbo_solto_nao_tira_o_pedido_de_mudanca(
     ("canal", "pedido", "fala", "assunto", "texto"),
     [
         # A negativa com outra coisa depois.
-        (
-            "pos_venda",
-            "2000001",
-            "Quero alterar o endereço de entrega",
-            "endereco",
-            "Não alteramos o endereço por aqui. Fale conosco pelas mensagens.",
-        ),
-        (
-            "pos_venda",
-            "2000001",
-            "Quero alterar o endereço de entrega",
-            "endereco",
-            "Não alteramos o endereço pelo chat, ligue para nós.",
-        ),
-        (
-            "pos_venda",
-            "2000001",
-            "Quero alterar o endereço de entrega",
-            "endereco",
-            "Não mudamos o endereço pelo chat. Você consegue alterar em Minhas compras.",
-        ),
-        (
-            "pos_venda",
-            "2000001",
-            "Quero alterar o endereço de entrega",
-            "endereco",
-            "Não alteramos o endereço. O correio altera se você pedir.",
-        ),
-        (
-            "pos_venda",
-            "2000001",
-            "Quero alterar o endereço de entrega",
-            "endereco",
-            "Não alteramos o endereço. Para onde você quer receber?",
-        ),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "endereco", "Não alteramos o endereço por aqui. Fale conosco pelas mensagens."),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "endereco", "Não alteramos o endereço pelo chat, ligue para nós."),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "endereco", "Não mudamos o endereço pelo chat. Você consegue alterar em Minhas compras."),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "endereco", "Não alteramos o endereço. O correio altera se você pedir."),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "endereco", "Não alteramos o endereço. Para onde você quer receber?"),
     ],
 )
 async def test_rev2_e2e_com_o_pedido_a_saida_e_o_texto_fixo(
@@ -2431,10 +2308,7 @@ async def test_rev2_e2e_a_negativa_com_o_endereco_na_fala_sai_na_pergunta(
 def test_rev2_a_pista_solta_nao_e_pedido_de_mudanca(fala):
     msgs = _cli(fala)
     assert not acao_pessoa.pede_alterar_endereco(msgs, msgs[-1])
-    for canal, texto in (
-        ("pergunta", "A devolução é pelo Mercado Livre."),
-        ("pos_venda", "Não temos loja física."),
-    ):
+    for canal, texto in (("pergunta", "A devolução é pelo Mercado Livre."), ("pos_venda", "Não temos loja física.")):
         p = _proposta(texto)
         assert checagens.endereco_no_ml_da_proposta(p, _ctx(canal=canal), msgs, msgs[-1]) == p
 
@@ -2474,21 +2348,9 @@ def test_rev2_o_quatro_com_outra_opcao_do_menu_nao_e_pedido():
 @pytest.mark.parametrize(
     ("fala", "texto", "canal"),
     [
-        (
-            "Entrega no meu endereço?",
-            "O endereço é o que você escolhe na compra, mas o prazo e o frete aparecem no anúncio ao informar o CEP.",
-            "pergunta",
-        ),
-        (
-            "Quero confirmar o endereço de entrega",
-            "A entrega segue o endereço do pedido, mas você confere em Minhas compras.",
-            "pos_venda",
-        ),
-        (
-            "qual endereço está no pedido?",
-            "A entrega segue o endereço do pedido que você vê hoje em Minhas compras.",
-            "pos_venda",
-        ),
+        ("Entrega no meu endereço?", "O endereço é o que você escolhe na compra, mas o prazo e o frete aparecem no anúncio ao informar o CEP.", "pergunta"),
+        ("Quero confirmar o endereço de entrega", "A entrega segue o endereço do pedido, mas você confere em Minhas compras.", "pos_venda"),
+        ("qual endereço está no pedido?", "A entrega segue o endereço do pedido que você vê hoje em Minhas compras.", "pos_venda"),
     ],
 )
 def test_rev2_a_palavra_comum_nao_e_a_ressalva(fala, texto, canal):
@@ -2504,10 +2366,7 @@ def test_rev2_a_palavra_comum_nao_e_a_ressalva(fala, texto, canal):
 
 
 def test_rev2_a_ressalva_colada_a_negativa_continua():
-    for texto in (
-        "Não alteramos o endereço agora.",
-        "Não alteramos o endereço, mas a transportadora troca.",
-    ):
+    for texto in ("Não alteramos o endereço agora.", "Não alteramos o endereço, mas a transportadora troca."):
         (trava,) = checagens.conferir_endereco_no_ml(
             texto, acao="responder", assunto="endereco", plataforma="ml"
         )
@@ -2771,12 +2630,7 @@ async def test_rev2_a_frase_do_copiloto_nao_sai_quando_o_canal_vira_auto(
 async def test_rev2_o_regatilho_le_a_regua_do_canal_na_frase():
     base = {"id": "a1", "parada": "x", "proposta": {}, "texto_final": FRASE,
             "decisao": {"atacado": True}, "plataforma": "ml"}  # fmt: skip
-    livre = {
-        "modo": "auto",
-        "auto_categorias": [],
-        "auto_agente": [],
-        "auto_orientacao": ["desconto"],
-    }
+    livre = {"modo": "auto", "auto_categorias": [], "auto_agente": [], "auto_orientacao": ["desconto"]}
     x = await regatilho.regatilhar(base, livre)
     assert x["decisao"] == regatilho.RECIBO
     y = await regatilho.regatilhar(base, {**livre, "auto_orientacao": []})
@@ -2794,11 +2648,7 @@ async def test_rev2_e2e_o_pedido_lido_por_ferramenta_usa_a_plataforma_da_convers
 ):
     # Sem a plataforma em `gatilhos_de_outro_pedido`, o outro pedido abriria `alterar_endereco`.
     conversa = await _endereco_e2e(
-        db,
-        make_user,
-        canal="pos_venda",
-        pedido="2000001",
-        fala="Quero alterar o endereço de entrega",
+        db, make_user, canal="pos_venda", pedido="2000001", fala="Quero alterar o endereço de entrega"
     )
     real = agente_ctx.ContextoAgente.da_conversa
 
@@ -2824,9 +2674,7 @@ async def test_rev2_a_regra_suave_do_agente_recebe_a_plataforma_da_conversa():
         assunto="prazo_antes_compra", confianca=0.9, acao_pessoa=None, motivo_pessoa="",
         evidencias=["regra:prazo_antes_compra"],
     )  # fmt: skip
-    ml = await _auto(
-        p, msgs, conversa=_conv(plataforma="ml", canal="pergunta", pedido_marketplace=None)
-    )
+    ml = await _auto(p, msgs, conversa=_conv(plataforma="ml", canal="pergunta", pedido_marketplace=None))
     assert checagens.PRAZO_SEM_LASTRO in ml.codigos
     shopee = await _auto(p, msgs, conversa=_conv(pedido_marketplace=None))
     assert checagens.PRAZO_SEM_LASTRO not in shopee.codigos
@@ -3067,50 +2915,18 @@ async def test_rev3_as_outras_plataformas_nao_leem_o_dia_nem_a_negativa_do_ml():
 @pytest.mark.parametrize(
     ("fala", "texto", "canal"),
     [
-        (
-            "Quero mudar o local de entrega depois de comprar",
-            "Só é possível antes do envio. Fale com a loja pelas mensagens da compra.",
-            "pergunta",
-        ),
-        (
-            "Pode alterar a rua depois da compra?",
-            "Sim, antes do envio é só falar com a loja.",
-            "pergunta",
-        ),
-        (
-            "Se eu comprar pode trocar o local depois?",
-            "Sim, antes do envio é só falar com a loja.",
-            "pergunta",
-        ),
-        (
-            "Posso receber na casa da minha mãe depois de comprar?",
-            "Sim, é só nos avisar antes do envio.",
-            "pergunta",
-        ),
+        ("Quero mudar o local de entrega depois de comprar", "Só é possível antes do envio. Fale com a loja pelas mensagens da compra.", "pergunta"),
+        ("Pode alterar a rua depois da compra?", "Sim, antes do envio é só falar com a loja.", "pergunta"),
+        ("Se eu comprar pode trocar o local depois?", "Sim, antes do envio é só falar com a loja.", "pergunta"),
+        ("Posso receber na casa da minha mãe depois de comprar?", "Sim, é só nos avisar antes do envio.", "pergunta"),
         ("Pode alterar a rua?", "Sim, antes do envio.", "pos_venda"),
-        (
-            "Tem como acrescentar o complemento?",
-            "Sim, vou incluir o complemento no pedido.",
-            "pos_venda",
-        ),
-        (
-            "Tem como acrescentar o complemento?",
-            "Claro, pode me mandar o complemento por aqui.",
-            "pos_venda",
-        ),
+        ("Tem como acrescentar o complemento?", "Sim, vou incluir o complemento no pedido.", "pos_venda"),
+        ("Tem como acrescentar o complemento?", "Claro, pode me mandar o complemento por aqui.", "pos_venda"),
         ("Troca o local de entrega", "Feito, local de entrega trocado.", "pos_venda"),
-        (
-            "O endereço certo é outro",
-            "Sem problema, fale com a loja pelas mensagens da compra.",
-            "pos_venda",
-        ),
+        ("O endereço certo é outro", "Sem problema, fale com a loja pelas mensagens da compra.", "pos_venda"),
         ("Meu endereço correto é outro", "Pode nos enviar o correto, por favor?", "pos_venda"),
         # As falas reais: 91e36877, dc4d717c e c7254e1c.
-        (
-            "Rua do Pedido quadra 13 lote 07 Cep 70000000",
-            "Endereço anotado, obrigado!",
-            "pos_venda",
-        ),
+        ("Rua do Pedido quadra 13 lote 07 Cep 70000000", "Endereço anotado, obrigado!", "pos_venda"),
         ("Esse endereço não é mais válido", "Certo, obrigado por avisar.", "pos_venda"),
         ("Complemento de endereço", "Pode nos enviar o complemento, por favor?", "pos_venda"),
     ],
@@ -3125,117 +2941,27 @@ def test_rev3_o_pedido_com_outros_nomes_so_recebe_o_texto_fixo(fala, texto, cana
 @pytest.mark.parametrize(
     ("fala", "texto", "assunto", "canal"),
     [
-        (
-            "Não quero mudar o endereço, quanto tempo leva?",
-            "O prazo aparece no anúncio.",
-            "prazo_antes_compra",
-            "pergunta",
-        ),
-        (
-            "Posso comprar e receber em outro endereço?",
-            "Sim, você escolhe o endereço na hora da compra.",
-            "cobertura_regiao",
-            "pergunta",
-        ),
-        (
-            "Se eu comprar pode ser entregue em outro endereço?",
-            "Sim, você escolhe na compra.",
-            "cobertura_regiao",
-            "pergunta",
-        ),
-        (
-            "Tá dando erro no meu cep",
-            "Tente informar de novo no anúncio.",
-            "prazo_antes_compra",
-            "pergunta",
-        ),
+        ("Não quero mudar o endereço, quanto tempo leva?", "O prazo aparece no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("Posso comprar e receber em outro endereço?", "Sim, você escolhe o endereço na hora da compra.", "cobertura_regiao", "pergunta"),
+        ("Se eu comprar pode ser entregue em outro endereço?", "Sim, você escolhe na compra.", "cobertura_regiao", "pergunta"),
+        ("Tá dando erro no meu cep", "Tente informar de novo no anúncio.", "prazo_antes_compra", "pergunta"),
         ("Deu erro no CEP", "Tente informar de novo no anúncio.", "prazo_antes_compra", "pergunta"),
-        (
-            "Mudando o CEP muda o frete?",
-            "O frete aparece no anúncio.",
-            "prazo_antes_compra",
-            "pergunta",
-        ),
-        (
-            "Se eu trocar de cep o frete muda?",
-            "O frete aparece no anúncio.",
-            "prazo_antes_compra",
-            "pergunta",
-        ),
-        (
-            "se o endereço for diferente muda o frete?",
-            "O frete aparece no anúncio.",
-            "prazo_antes_compra",
-            "pergunta",
-        ),
-        (
-            "se eu mudar o cep o frete muda?",
-            "O frete aparece no anúncio.",
-            "prazo_antes_compra",
-            "pergunta",
-        ),
+        ("Mudando o CEP muda o frete?", "O frete aparece no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("Se eu trocar de cep o frete muda?", "O frete aparece no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("se o endereço for diferente muda o frete?", "O frete aparece no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("se eu mudar o cep o frete muda?", "O frete aparece no anúncio.", "prazo_antes_compra", "pergunta"),
         ("Vocês mudaram de endereço?", "Não temos loja física.", "fatos_loja", "pergunta"),
-        (
-            "Tem outro endereço para devolver?",
-            "A devolução é pelo Mercado Livre.",
-            "troca_devolucao",
-            "pergunta",
-        ),
-        (
-            "Vai chegar amanhã? Dia 10 estarei em outro endereço",
-            "O prazo aparece no anúncio.",
-            "prazo_antes_compra",
-            "pergunta",
-        ),
-        (
-            "Não mudei o endereço, por que não chegou?",
-            "Acompanhe em Minhas compras.",
-            "rastreio",
-            "pos_venda",
-        ),
-        (
-            "Não tenho interesse em trocar o endereço, só quero a nota",
-            "A nota vai em Minhas compras.",
-            "nf",
-            "pos_venda",
-        ),
-        (
-            "mandaram o produto errado no meu endereço",
-            "Sentimos muito pelo ocorrido.",
-            "item_errado_faltando",
-            "pos_venda",
-        ),
-        (
-            "chegou produto errado no meu endereço",
-            "Sentimos muito pelo ocorrido.",
-            "item_errado_faltando",
-            "pos_venda",
-        ),
-        (
-            "quero trocar a mala qual o endereço para devolver",
-            "A devolução é pelo Mercado Livre.",
-            "troca_devolucao",
-            "pos_venda",
-        ),
-        (
-            "preciso trocar o produto qual o endereço",
-            "A devolução é pelo Mercado Livre.",
-            "troca_devolucao",
-            "pos_venda",
-        ),
-        (
-            "apareceu endereço incorreto no rastreio, o que faço?",
-            "Acompanhe em Minhas compras.",
-            "rastreio",
-            "pos_venda",
-        ),
+        ("Tem outro endereço para devolver?", "A devolução é pelo Mercado Livre.", "troca_devolucao", "pergunta"),
+        ("Vai chegar amanhã? Dia 10 estarei em outro endereço", "O prazo aparece no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("Não mudei o endereço, por que não chegou?", "Acompanhe em Minhas compras.", "rastreio", "pos_venda"),
+        ("Não tenho interesse em trocar o endereço, só quero a nota", "A nota vai em Minhas compras.", "nf", "pos_venda"),
+        ("mandaram o produto errado no meu endereço", "Sentimos muito pelo ocorrido.", "item_errado_faltando", "pos_venda"),
+        ("chegou produto errado no meu endereço", "Sentimos muito pelo ocorrido.", "item_errado_faltando", "pos_venda"),
+        ("quero trocar a mala qual o endereço para devolver", "A devolução é pelo Mercado Livre.", "troca_devolucao", "pos_venda"),
+        ("preciso trocar o produto qual o endereço", "A devolução é pelo Mercado Livre.", "troca_devolucao", "pos_venda"),
+        ("apareceu endereço incorreto no rastreio, o que faço?", "Acompanhe em Minhas compras.", "rastreio", "pos_venda"),
         # O endereço da NF de 9f3dd292.
-        (
-            "Somente endereço, cidade e telefone estão errados",
-            "A nota vai em Minhas compras.",
-            "nf",
-            "pos_venda",
-        ),
+        ("Somente endereço, cidade e telefone estão errados", "A nota vai em Minhas compras.", "nf", "pos_venda"),
     ],
 )
 def test_rev3_o_que_nao_pede_a_mudanca_mantem_a_resposta_do_modelo(fala, texto, assunto, canal):

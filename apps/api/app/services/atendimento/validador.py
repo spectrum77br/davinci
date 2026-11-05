@@ -184,68 +184,17 @@ def normalizar(texto: str, *, plataforma: str, canal: str) -> str:
 _HOMOGLIFOS = str.maketrans(
     {
         # cirílico
-        "а": "a",
-        "е": "e",
-        "о": "o",
-        "р": "p",
-        "с": "c",
-        "у": "y",
-        "х": "x",
-        "і": "i",
-        "ј": "j",
-        "ѕ": "s",
-        "ԁ": "d",
-        "ԛ": "q",
-        "ԝ": "w",
-        "һ": "h",
-        "ӏ": "l",
-        "к": "k",
-        "м": "m",
-        "т": "t",
-        "в": "b",
-        "н": "h",
-        "ѡ": "w",
-        "А": "a",
-        "В": "b",
-        "Е": "e",
-        "К": "k",
-        "М": "m",
-        "Н": "h",
-        "О": "o",
-        "Р": "p",
-        "С": "c",
-        "Т": "t",
-        "У": "y",
-        "Х": "x",
-        "І": "i",
-        "Ј": "j",
+        "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x",
+        "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "ԛ": "q", "ԝ": "w", "һ": "h",
+        "ӏ": "l", "к": "k", "м": "m", "т": "t", "в": "b", "н": "h", "ѡ": "w",
+        "А": "a", "В": "b", "Е": "e", "К": "k", "М": "m", "Н": "h", "О": "o",
+        "Р": "p", "С": "c", "Т": "t", "У": "y", "Х": "x", "І": "i", "Ј": "j",
         "Ѕ": "s",
         # grego
-        "α": "a",
-        "ο": "o",
-        "ρ": "p",
-        "ε": "e",
-        "ι": "i",
-        "κ": "k",
-        "ν": "v",
-        "τ": "t",
-        "υ": "u",
-        "χ": "x",
-        "ω": "w",
-        "Α": "a",
-        "Β": "b",
-        "Ε": "e",
-        "Ζ": "z",
-        "Η": "h",
-        "Ι": "i",
-        "Κ": "k",
-        "Μ": "m",
-        "Ν": "n",
-        "Ο": "o",
-        "Ρ": "p",
-        "Τ": "t",
-        "Υ": "y",
-        "Χ": "x",
+        "α": "a", "ο": "o", "ρ": "p", "ε": "e", "ι": "i", "κ": "k", "ν": "v",
+        "τ": "t", "υ": "u", "χ": "x", "ω": "w", "Α": "a", "Β": "b", "Ε": "e",
+        "Ζ": "z", "Η": "h", "Ι": "i", "Κ": "k", "Μ": "m", "Ν": "n", "Ο": "o",
+        "Ρ": "p", "Τ": "t", "Υ": "y", "Χ": "x",
     }
 )
 
@@ -361,7 +310,9 @@ _REDE_SOCIAL = (
         r"|linkedin|skype|signal)\b"
     ),
     # Apelido curto só com contexto: "face" sozinho é a face da mala.
-    re.compile(r"\b(?:no|pelo|meu|nosso|nossa|seu|sua)\s+(?:face|fb|ig|insta|tg|tt)\b"),
+    re.compile(
+        r"\b(?:no|pelo|meu|nosso|nossa|seu|sua)\s+(?:face|fb|ig|insta|tg|tt)\b"
+    ),
 )
 
 _LINK = (
@@ -492,9 +443,7 @@ _AVALIACAO = (
         r"|significa)"
     ),
     # Estrela em emoji: "5⭐", "⭐⭐⭐⭐⭐".
-    re.compile(
-        r"\d\s*[\u2b50\u2605\U0001f31f]|[\u2b50\u2605\U0001f31f](?:\s*[\u2b50\u2605\U0001f31f])+"
-    ),
+    re.compile(r"\d\s*[\u2b50\u2605\U0001f31f]|[\u2b50\u2605\U0001f31f](?:\s*[\u2b50\u2605\U0001f31f])+"),
     # Pedir para NÃO avaliar mal: "não deixe avaliação negativa", "evite dar
     # nota baixa", "não avalie mal".
     re.compile(
@@ -626,11 +575,8 @@ _UNIDADE_MEDIDA = (
 _ASPAS_POLEGADA = r"(?:\"|''|\u201d|\u2033|\u2032\u2032)"
 _TAMANHO_DE_TELA = r"(?<![\d.,])(?:\d[.,]\d{1,2}|\d{2}[.,]\d)\s*" + _ASPAS_POLEGADA
 _MEDIDA_DE_TELA = re.compile(
-    r"\b(?:tela|display|visor)\b[^\d\n.!?]{0,30}"
-    + _TAMANHO_DE_TELA
-    + r"|"
-    + _TAMANHO_DE_TELA
-    + r"\s*(?:de\s+)?(?:tela|display)\b"
+    r"\b(?:tela|display|visor)\b[^\d\n.!?]{0,30}" + _TAMANHO_DE_TELA
+    + r"|" + _TAMANHO_DE_TELA + r"\s*(?:de\s+)?(?:tela|display)\b"
 )
 # A variação de MEMÓRIA do celular ("12.64 + 64 Sd Card", "F105 - 12.64", "Branco
 # 12.64 está esgotada": RAM.armazenamento, como os anúncios Uranyx escrevem) não é
@@ -795,7 +741,9 @@ _PRAZO_NO_ML = (
         r"\bprevis(?:ao|t[oa])\b(?:\s+\w+){0,3}?\s+(?:(?:e|sera|para|pra|na|no|ate)\s+)+"
         rf"(?:(?:a|o)\s+)?{_DIA_DA_PROMESSA}\b{_NAO_E_O_DIA}"
     ),
-    re.compile(rf"(?:^|[.!?]\s*)(?:sim\W+)?(?:(?:na|no|ate)\s+)?{_DIA_DA_PROMESSA}\s*(?:[.!?]|$)"),
+    re.compile(
+        rf"(?:^|[.!?]\s*)(?:sim\W+)?(?:(?:na|no|ate)\s+)?{_DIA_DA_PROMESSA}\s*(?:[.!?]|$)"
+    ),
     re.compile(
         rf"\b{_DIA_DA_PROMESSA}\b{_NAO_E_O_DIA}\s+(?:(?!nao\b)\w+\s+){{0,2}}?"
         r"(?:chega|chegam|chegara|chegarao|vai\s+chegar|sai|saira)\b"
@@ -961,7 +909,9 @@ _GARANTIA = (
         rf"\bgarantia\b[^.!?\n]{{0,25}}?\b(?:\d+|{_NUMERO_POR_EXTENSO})\s*"
         r"(?:anos?|mes|meses|dias?|semanas?)\b"
     ),
-    re.compile(rf"\b(?:\d+|{_NUMERO_POR_EXTENSO})\s*(?:anos?|mes|meses|dias?)\s+de\s+garantia\b"),
+    re.compile(
+        rf"\b(?:\d+|{_NUMERO_POR_EXTENSO})\s*(?:anos?|mes|meses|dias?)\s+de\s+garantia\b"
+    ),
     re.compile(
         r"\bgarantia\s+(?:\w+\s+){0,2}?(?:vitalicia|eterna|ilimitada|total|para\s+sempre"
         r"|por\s+toda\s+a\s+vida)\b"
@@ -970,9 +920,7 @@ _GARANTIA = (
 # Promessa que só pessoa faz: reembolso, estorno, troca, reenvio, "pode
 # ficar com o produto", "sem custo". A pessoa sabe o que promete; a IA não.
 _PROMESSA = (
-    re.compile(
-        r"\b(?:reembols|estorn|ressarc|reenvi|devolv|troc|cancel)(?:aremos|eremos|iremos)\b"
-    ),
+    re.compile(r"\b(?:reembols|estorn|ressarc|reenvi|devolv|troc|cancel)(?:aremos|eremos|iremos)\b"),
     re.compile(
         r"\bvamos\s+(?:\w+\s+)?(?:reembolsar|estornar|ressarcir|reenviar|trocar|cancelar"
         r"|devolver\s+(?:o\s+|seu\s+)?(?:valor|dinheiro)|enviar\s+(?:outr[oa]|um\s+nov[oa]"
@@ -1117,7 +1065,9 @@ _PEDE_ZAP = (
         r"(?:(?:o\s+|os\s+dados\s+do\s+)(?:seu\s+)?cartao\s+(?:de\s+)?(?:credito|debito)"
         r"|seu\s+cartao)\b"
     ),
-    re.compile(r"\bfoto\s+d[oa]\s+(?:seu\s+|sua\s+)?(?:rg|cpf|cnh|identidade|documento|cartao)\b"),
+    re.compile(
+        r"\bfoto\s+d[oa]\s+(?:seu\s+|sua\s+)?(?:rg|cpf|cnh|identidade|documento|cartao)\b"
+    ),
     re.compile(r"\b(?:cvv|cvc)\b"),
 )
 # PEDIR o número da CONTA (financeira): "manda o número da sua conta", "me
