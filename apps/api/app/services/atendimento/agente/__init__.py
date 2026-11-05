@@ -871,7 +871,9 @@ async def conferir_proposta(
     # também (revisão de 20/10/2026) — o código sempre vence.
     andamento_de_outro: list[checagens.PendenciaAgente] = []
     for ctx_pedido, postado in ctx.pedidos_lidos:
-        dele = acao_pessoa.gatilhos_de_outro_pedido(ctx_pedido, postado, base.recentes, gatilho)
+        dele = acao_pessoa.gatilhos_de_outro_pedido(
+            ctx_pedido, postado, base.recentes, gatilho, plataforma=conversa.plataforma
+        )
         ctx.acoes_codigo = contexto.ordenar_acoes(ctx.acoes_codigo, [g.codigo for g in dele])
         # Revisão de 03/11/2026: a ação do OUTRO pedido (o "consta entregue e não recebi"
         # dele, o Ag. cancelamento dele) nunca vira a etiqueta do turno (item 10): trava.
@@ -884,6 +886,8 @@ async def conferir_proposta(
     # (D1), a `reclamacao_aberta` que o modelo ainda pediu vira a ação de depois do envio.
     p = checagens.com_par_da_politica(p, ctx)
     p, pos_envio_do_modelo = checagens.responde_e_marca_da_proposta(p, ctx)
+    # O dono, 05/11/2026: no Mercado Livre a loja não altera o endereço e o agente responde.
+    p = checagens.endereco_no_ml_da_proposta(p, ctx, base.recentes, gatilho)
 
     # Rodada 4b: o assunto que o rascunho trata pelas lacunas também precisa
     # estar liberado ("…a previsão é {previsao_entrega}" declarado nota_fiscal).

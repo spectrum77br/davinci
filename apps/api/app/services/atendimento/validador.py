@@ -544,6 +544,7 @@ _MOTIVO_PRAZO = "prazo em números só pode vir do sistema"
 # O nome público (rodada 4 do agente, 21/10/2026: só o caminho do agente tira
 # este motivo quando o prazo vem negado — "não conseguimos garantir até sexta").
 MOTIVO_PRAZO = _MOTIVO_PRAZO
+MOTIVO_PERCENTUAL = _MOTIVO_PERCENTUAL
 _MOTIVO_GARANTIA = "prazo de garantia só pode vir do sistema"
 _MOTIVO_DADO_PESSOAL = "pede ou repete dado pessoal (CPF, endereço, telefone)"
 _MOTIVO_PROMESSA = "promessa (reembolso, troca, sem custo) só pessoa pode fazer"
@@ -680,6 +681,38 @@ _PRAZO = (
         r"\b(?:cheg|entreg|receb|envi|post|despach|sai|saira)\w*\s+(?:ate\s+)?"
         r"(?:hoje|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo)\b"
     ),
+)
+# O dono, 05/11/2026 (Mercado Livre, 5590d694, dc962f66): "garantir a entrega para amanhã" e
+# "garantir a chegada amanhã" são a mesma frase e só a segunda batia em `_PRAZO`, porque o
+# último padrão pede o dia colado ao substantivo. O acaso valia para a promessa: "a chegada é
+# amanhã", "a entrega será na sexta" e "garantimos a entrega para hoje" passavam. Estes dois
+# fecham a promessa com o verbo de ligação e com o "para"; a entrega na sexta sem verbo fica de
+# fora ("a entrega no sábado depende da rotina da transportadora" é legítimo). Só no ML: a
+# negativa honesta sai pela isenção do agente (`checagens.prazo_do_validador_sem_afirmacao`).
+_ENTREGA_NO_SUBSTANTIVO = r"(?:chegada|entrega|recebimento|postagem|envio|despacho|coleta)"
+_DIA_DA_PROMESSA = rf"(?:hoje|amanha|{_DIA_DA_SEMANA})"
+_PRAZO_NO_ML = (
+    re.compile(
+        rf"\b{_ENTREGA_NO_SUBSTANTIVO}\s+"
+        r"(?:e|eh|sera|fica|ficou|vai\s+ser|deve\s+ser|esta|estara)\s+"
+        r"(?:(?:prevista?|previsto|marcad[oa]|agendad[oa]|programad[oa]|confirmad[oa]"
+        r"|garantid[oa])\s+)?"
+        rf"(?:(?:para|pra|na|no|ate)\s+)?{_DIA_DA_PROMESSA}\b"
+    ),
+    re.compile(
+        rf"\b{_ENTREGA_NO_SUBSTANTIVO}\s+(?:para|pra)\s+(?:(?:a|o)\s+)?{_DIA_DA_PROMESSA}\b"
+    ),
+)
+# A negativa do próprio fato não é promessa: "não temos entrega para hoje", "a transportadora não
+# faz entrega para domingo", "a entrega para hoje não pode ser garantida". Lista fechada entre o
+# "não" e o substantivo: "não se preocupe que a entrega para hoje está garantida" continua promessa.
+_NEGA_A_ENTREGA_ANTES = re.compile(
+    r"\b(?:nao|nem|nunca)\s+(?:(?:temos|tem|ha|existe|fazemos|faz|fazem|fazer|oferecemos|oferece"
+    r"|realizamos|realiza|realizam|previsao\s+de)\s+){1,2}(?:(?:uma|a|o)\s+)?$"
+)
+_NEGA_A_ENTREGA_DEPOIS = re.compile(
+    r"^\s+(?:nao|nem)\s+(?:pode\s+ser|e|esta|sera|foi|fica)\s+"
+    r"(?:garantid|confirmad|prometid|assegurad)\w*"
 )
 _GARANTIA = (
     re.compile(rf"\bgarantia\s+(?:de\s+)?(?:\d+|{_NUMERO_POR_EXTENSO})\b"),
@@ -953,6 +986,27 @@ def sem_lacuna_de_link(texto: str) -> str:
     return _LACUNA_DE_LINK.sub(" ", texto or "")
 
 
+def padroes_de_prazo(plataforma: str | None) -> tuple[re.Pattern[str], ...]:
+    """Os padrões do prazo que só a lacuna preenche, na plataforma. PURA."""
+    return (*_PRAZO, *_PRAZO_NO_ML) if plataforma == "ml" else _PRAZO
+
+
+def entrega_negada_no_ml(texto: str, m: re.Match[str], padrao: re.Pattern[str]) -> bool:
+    """O trecho `m` de `padrao` é a negativa do próprio fato, em um padrão só do ML? PURA."""
+    return padrao in _PRAZO_NO_ML and bool(
+        _NEGA_A_ENTREGA_ANTES.search(texto[: m.start()])
+        or _NEGA_A_ENTREGA_DEPOIS.search(texto[m.end() :])
+    )
+
+
+def _promete_prazo(texto: str, plataforma: str | None) -> bool:
+    return any(
+        not entrega_negada_no_ml(texto, m, padrao)
+        for padrao in padroes_de_prazo(plataforma)
+        for m in padrao.finditer(texto)
+    )
+
+
 def validar(
     texto: str,
     *,
@@ -1098,7 +1152,7 @@ def validar(
             motivos.append(_MOTIVO_PERCENTUAL)
         if _FRETE.search(plano):
             motivos.append(_MOTIVO_FRETE)
-        if _algum(_PRAZO, _sem_ate_o_dia_da_garantia(do_prazo)):
+        if _promete_prazo(_sem_ate_o_dia_da_garantia(do_prazo), plataforma):
             motivos.append(_MOTIVO_PRAZO)
         if _algum(_GARANTIA, do_prazo):
             motivos.append(_MOTIVO_GARANTIA)

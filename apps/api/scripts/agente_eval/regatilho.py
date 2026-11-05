@@ -817,6 +817,10 @@ async def regatilhar(
         # PARIDADE an0311 (item 9): o recibo fixo da evidência sai sozinho, sem o verificador.
         return {**linha, "decisao": RECIBO, "bloqueios": [], "avisos": [],
                 "rascunho": r.get("texto_final")}  # fmt: skip
+    if decisao_gravada.get("atacado") and r.get("texto_final") == constantes.FRASE_ATACADO_ML:
+        # PARIDADE (o dono, 05/11/2026): a resposta fixa do atacado no ML, como o recibo.
+        return {**linha, "decisao": RECIBO, "bloqueios": [], "avisos": [],
+                "rascunho": r.get("texto_final")}  # fmt: skip
     if r.get("pulado") or r.get("parada") is None:
         return {**linha, "decisao": "pulado", "bloqueios": [str(r.get("pulado"))], "avisos": []}
     if r.get("atalho") or r.get("parada") == "atalho_aprovado":

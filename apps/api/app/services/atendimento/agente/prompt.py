@@ -273,6 +273,28 @@ ORIENTACAO: dict[str, str] = {
     ),
 }
 
+# A orientação que muda por plataforma (o dono, 05/11/2026). `ORIENTACAO` é a do bloco 1, de hash
+# fixo: esta vai por cima dela no `consultar_manual` e no verificador. A frase da instrução de
+# recebimento fica aqui porque a entrega_instrucoes lê a orientação do endereço (31ab491d).
+ORIENTACAO_DA_PLATAFORMA: dict[str, dict[str, str]] = {
+    "ml": {
+        "endereco": (
+            "No Mercado Livre a loja nunca altera o endereço de uma compra, postada ou não: "
+            "o Mercado Livre não permite que a loja altere, por questão de segurança. Instrução "
+            "de recebimento: a entrega segue o endereço do pedido e a loja não passa recado ao "
+            "entregador. Nunca peça nem repita o endereço nem mande falar com a loja para "
+            "alterá-lo."
+        ),
+    },
+}
+
+
+def orientacao_do_assunto(assunto: str, plataforma: str | None) -> str | None:
+    """A orientação aprovada do assunto nesta plataforma. PURA."""
+    da_plataforma = ORIENTACAO_DA_PLATAFORMA.get(plataforma or "", {})
+    return da_plataforma.get(assunto) or ORIENTACAO.get(assunto)
+
+
 # Um exemplo por ação da régua (spec 6.3), na ordem de `constantes.ACOES_PESSOA`.
 EXEMPLOS_ACAO: dict[str, str] = {
     constantes.ACAO_AG_CANCELAMENTO: (
@@ -435,6 +457,14 @@ NOTAS_DA_PLATAFORMA: dict[str, tuple[str, ...]] = {
         "compra.",
         "Pós-venda: no máximo 350 caracteres. Se as respostas não couberem, acao 'pessoa' "
         "(excecao) em vez de cortar pergunta. Ao pedir vídeo, ofereça fotos como alternativa.",
+        # O dono, 05/11/2026 (91e36877, dc3e318f): vale por cima da orientação do endereço do
+        # bloco 1 ("Não postado: alterar_endereco"), que não muda; o hash dele é fixo.
+        "Endereço (decisão do dono; vale por cima da orientação do endereço e da pergunta "
+        "pública): no Mercado Livre a loja nunca altera o endereço de uma compra, postada ou não, "
+        "e a ação alterar_endereco não existe aqui. Mesmo de quem já comprou: acao 'responder', "
+        f"assunto endereco, '{constantes.RESPOSTA_ENDERECO_ML}' Sem pedir nem citar o endereço, "
+        "sem 'antes do envio', sem mandar falar com a loja sobre isso; o verbo é alterar, nunca "
+        "corrigir, atualizar, confirmar ou trocar.",
     ),
     "amazon": (
         "Comece com 'Olá. Sobre o pedido {numero_pedido}:' (a lacuna, como está); sem essa "

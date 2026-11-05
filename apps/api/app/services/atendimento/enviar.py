@@ -217,6 +217,7 @@ from app.services.atendimento.constantes import (
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
     DESTINOS_RECLAMACAO,
+    FRASE_ATACADO_ML,
     MODO_AUTO,
     MODOS_QUE_ENVIAM,
     MOTIVO_AFILIADO_SO_PESSOA,
@@ -1178,6 +1179,12 @@ async def _texto_com_isencao_do_agente(
 
     D3 do dono (04/11/2026): `fatos.agente.links_anuncio` = as URLs que o CÓDIGO pôs no lugar
     da lacuna do link; o validador aceita só essas, exatas (`validador.validar`).
+
+    O dono, 05/11/2026, só no Mercado Livre e só no rascunho do agente: (1) a negativa honesta do
+    prazo ("Não temos como garantir a chegada amanhã", dc962f66): a 1ª camada já a aceitava e
+    este portão a recusava. A conta é refeita aqui, no texto que vai, e só o motivo do prazo
+    sai; (2) a resposta fixa do atacado: só com a marca e o texto IGUAL à frase, e só o motivo
+    do percentual sai. O legado e a pessoa não mudam.
     """
     from app.services.atendimento import validador
     from app.services.atendimento.agente import checagens
@@ -1189,11 +1196,23 @@ async def _texto_com_isencao_do_agente(
     uranyx = isinstance(isencoes, list) and checagens.ISENCAO_CAMINHO_URANYX in isencoes
     do_agente = agente.get("links_anuncio") if isinstance(agente, dict) else None
     links = [str(u) for u in do_agente if u] if isinstance(do_agente, list) else []
-    if not uranyx and not links:
-        raise recusa
     normalizado = validador.normalizar(
         texto or "", plataforma=conversa.plataforma, canal=conversa.canal
     )
+    do_agente_no_ml = (
+        origem == ORIGEM_IA and isinstance(agente, dict) and conversa.plataforma == "ml"
+    )
+    negativa = do_agente_no_ml and checagens.prazo_do_validador_sem_afirmacao(
+        normalizado, plataforma=conversa.plataforma
+    )
+    atacado = (
+        do_agente_no_ml
+        and isinstance(isencoes, list)
+        and checagens.ISENCAO_ATACADO_ML in isencoes
+        and normalizado == FRASE_ATACADO_ML
+    )
+    if not uranyx and not links and not negativa and not atacado:
+        raise recusa
 
     def _validar(t: str) -> list[str]:
         return validador.validar(
@@ -1207,6 +1226,10 @@ async def _texto_com_isencao_do_agente(
     motivos = _validar(normalizado)
     if uranyx:
         motivos = checagens.erros_sem_o_caminho_uranyx(normalizado, motivos, _validar)
+    if negativa:
+        motivos = [m for m in motivos if m != validador.MOTIVO_PRAZO]
+    if atacado:
+        motivos = [m for m in motivos if m != validador.MOTIVO_PERCENTUAL]
     if motivos or not normalizado.strip():
         raise recusa
     return normalizado

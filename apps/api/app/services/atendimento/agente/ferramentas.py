@@ -1458,6 +1458,17 @@ POR_CIMA_DA_REGRA: dict[str, str] = {
 }
 
 
+# O dono, 05/11/2026: a regra do endereço em produção fala em "a equipe verifica o que ainda é
+# possível". No Mercado Livre a loja não altera; a sobreposição é aqui, sem escrever no banco.
+POR_CIMA_DA_REGRA_NA_PLATAFORMA: dict[tuple[str, str], str] = {
+    ("ml", "endereco"): (
+        "Decisão do dono: no Mercado Livre a loja nunca altera o endereço de uma compra, postada "
+        "ou não. A verificação da equipe e o 'alterar_endereco' da regra não valem aqui: siga a "
+        "orientação do assunto."
+    ),
+}
+
+
 # Integração r5 (21/10/2026): o eval real mostrou o rascunho de pessoa copiando
 # a frase de espera da "Sugestão" da regra do manual antigo ("dizer que … a
 # equipe verifica a situação do envio e responde por aqui"). A regra vai como
@@ -1581,7 +1592,7 @@ async def dados_consultar_manual(
     if assunto not in validos:
         return Resultado(dados={"assunto_invalido": True, "assuntos": list(validos)})
     regras = _do_assunto(base.regras, assunto)
-    orientacao = prompt.ORIENTACAO.get(assunto)
+    orientacao = prompt.orientacao_do_assunto(assunto, ctx.plataforma)
     citados = (
         ficha.anuncios_da_conversa(conversa, base.recentes)
         if conversa is not None and getattr(conversa, "plataforma", None)
@@ -1642,7 +1653,9 @@ async def dados_consultar_manual(
         "respostas_prontas": prontas,
         "fatos": [fato_do_manual(f) for f in fatos],
     }
-    por_cima = POR_CIMA_DA_REGRA.get(assunto)
+    por_cima = POR_CIMA_DA_REGRA_NA_PLATAFORMA.get(
+        (ctx.plataforma, assunto)
+    ) or POR_CIMA_DA_REGRA.get(assunto)
     if assunto not in _ESPERA_APROVADA_NA_REGRA and any(
         checagens.tem_espera(r.get("faca")) for r in regras
     ):

@@ -274,6 +274,7 @@ from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.ag_cancelamento import TEXTOS_IA
 from app.services.atendimento.constantes import (
     ACAO_ANALISAR_EVIDENCIA,
+    ACAO_DESCONTO_BRINDE,
     ACAO_ENVIAR_ARQUIVO_NF,
     ACENTOS_DE,
     ACENTOS_PARA,
@@ -293,6 +294,7 @@ from app.services.atendimento.constantes import (
     ERRO_APAGADA,
     ETIQUETA_DEVOLUCAO,
     FONTE_TUTA,
+    FRASE_ATACADO_ML,
     HUMANO_ACAO_PESSOA,
     HUMANO_ALERTA,
     HUMANO_ATENDENTE,
@@ -5220,7 +5222,9 @@ async def conferir_saida(
         # da Shopee do retrato fresco), repetido numa oração que só diz o status.
         do_pedido = fatos.get("agente_pedido") if isinstance(fatos, dict) else None
         status = [do_pedido.get("ultimo_status")] if isinstance(do_pedido, dict) else []
-        if _checagens.prazo_do_validador_sem_afirmacao(final, status=status):
+        if _checagens.prazo_do_validador_sem_afirmacao(
+            final, status=status, plataforma=conversa.plataforma
+        ):
             erros = [e for e in erros if e != validador.MOTIVO_PRAZO]
     if agente and erros and garantias_conferidas:
         # Revisão r5i de 21/10/2026 (decisão 7 do dono), só o agente: depois dos
@@ -5615,6 +5619,24 @@ async def _gerar_pelo_agente(
         return await _salvar(
             session, conversa, resultado.para_rascunho(conversa, gatilho, base.fatos_gravados)
         )
+    # O dono, 05/11/2026: o pedido de preço por quantidade no Mercado Livre não chega ao modelo.
+    atacado = (
+        None
+        if antes.gatilhos
+        else await acao_pessoa.decisao_do_atacado(session, conversa, base, gatilho)
+    )
+    if atacado is not None:
+        resultado = atacado_do_agente(
+            conversa,
+            gatilho,
+            atacado,
+            modo=base.modo,
+            nomes=base.nomes,
+            manual_hash=manual_hash(organizar_manual(list(base.regras), None)),
+        )
+        return await _salvar(
+            session, conversa, resultado.para_rascunho(conversa, gatilho, base.fatos_gravados)
+        )
     if antes.gatilhos:
         ctx = agente_ctx.ContextoAgente.da_conversa(
             conversa, gatilho, modo=base.modo, nomes=base.nomes
@@ -5754,6 +5776,72 @@ def recibo_no_rascunho(rascunho: Any) -> bool:
         and (getattr(rascunho, "texto", None) or "") in acao_pessoa.TEXTOS_DO_RECIBO
         and agente.get("acoes_pessoa") == []
         and agente.get("acoes_pos_envio") == [ACAO_ANALISAR_EVIDENCIA]
+    )
+
+
+# O atacado no ML (o dono, 05/11/2026, `acao_pessoa.decisao_do_atacado`).
+ASSUNTO_DO_ATACADO = "desconto"
+MOTIVO_ATACADO = "resposta fixa do atacado (sai sozinha, sem o modelo)"
+FATO_ATACADO = "atacado_ml"
+
+
+def atacado_do_agente(
+    conversa: Any,
+    gatilho: Any,
+    decisao: tuple[str, str],
+    *,
+    modo: str,
+    nomes: Sequence[str | None] = (),
+    manual_hash: str | None = None,
+) -> Any:
+    """O `agente.ResultadoAgente` da decisão do atacado. PURA. Responde: a frase fixa, pendente e
+    sem pessoa. Pessoa: sem texto, com "Desconto, brinde ou condição especial" e o motivo interno
+    (a quantidade pedida), como os gatilhos de antes do modelo."""
+    from app.services.atendimento import agente as agente_svc
+    from app.services.atendimento.agente import acao_pessoa, checagens
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    caminho, motivo = decisao
+    ctx = agente_ctx.ContextoAgente.da_conversa(conversa, gatilho, modo=modo, nomes=nomes)
+    if caminho != acao_pessoa.ATACADO_RESPONDE:
+        ctx.acoes_codigo = [ACAO_DESCONTO_BRINDE]
+        return agente_svc.ResultadoAgente.sem_texto(
+            ctx,
+            parada=agente_svc.PARADA_SEM_AGENTE,
+            motivo=motivo,
+            categoria=ASSUNTO_DO_ATACADO,
+            manual_hash=manual_hash,
+        )
+    ctx.acao = "responder"
+    ctx.parada = agente_svc.PARADA_SEM_AGENTE
+    ctx.isencoes = [checagens.ISENCAO_ATACADO_ML]
+    return agente_svc.ResultadoAgente(
+        parada=agente_svc.PARADA_SEM_AGENTE,
+        gravar=True,
+        texto=FRASE_ATACADO_ML,
+        categoria=ASSUNTO_DO_ATACADO,
+        confianca=1.0,
+        precisa_humano=False,
+        motivo=MOTIVO_ATACADO,
+        validador_ok=True,
+        validador_erros=[],
+        status=RASCUNHO_PENDENTE,
+        acoes_pessoa=[],
+        fatos_agente={**ctx.para_fatos(), FATO_ATACADO: True},
+        manual_hash=manual_hash,
+    )
+
+
+def atacado_no_rascunho(rascunho: Any) -> bool:
+    """O rascunho é a resposta fixa do atacado, intacta? PURA. A marca, o texto igual à frase e
+    nenhuma ação de pessoa."""
+    if rascunho is None or not rascunho_do_agente(rascunho):
+        return False
+    agente = _fatos_do_agente(rascunho)
+    return (
+        agente.get(FATO_ATACADO) is True
+        and (getattr(rascunho, "texto", None) or "") == FRASE_ATACADO_ML
+        and agente.get("acoes_pessoa") == []
     )
 
 
@@ -6667,6 +6755,8 @@ def _sql_assunto_liberado(r: Any, k: Any, agora: datetime | None = None):
         # que ficou para depois da pausa humana sai no reenvio (o resto do filtro, o `_cobre`,
         # a triagem e a pausa continuam valendo).
         and_(do_agente, r.fatos.contains({"agente": {FATO_RECIBO: True}})),
+        # O dono, 05/11/2026: a resposta fixa do atacado no ML, pelo mesmo motivo.
+        and_(do_agente, r.fatos.contains({"agente": {FATO_ATACADO: True}})),
         and_(
             do_agente,
             # O "ok" do verificador semântico (20/10/2026; a trava relê tudo).
@@ -6808,10 +6898,11 @@ async def _talvez_enviar(
         )
         if canal is None or canal.modo != MODO_AUTO:
             motivo = "canal_fora_do_auto"
-        elif do_agente and recibo_no_rascunho(rascunho):
+        elif do_agente and (recibo_no_rascunho(rascunho) or atacado_no_rascunho(rascunho)):
             # Item 9 (03/11/2026): o recibo fixo da evidência não tem assunto a liberar nem
             # texto do modelo para o verificador — o resto das travas (a triagem com a
-            # etiqueta, a pausa humana, o envio) é o de sempre.
+            # etiqueta, a pausa humana, o envio) é o de sempre. A resposta fixa do atacado no
+            # ML (o dono, 05/11/2026) também: o verificador a seguraria sempre.
             if not agente_config.agente_ligado(get_settings(), canal):
                 motivo = "agente_desligado"
         elif do_agente:

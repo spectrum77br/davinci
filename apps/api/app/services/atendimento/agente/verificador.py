@@ -343,7 +343,17 @@ logger = structlog.get_logger()
 #  5. (revisão da rodada de 04/11) a linha da busca com disponivel=null não sustenta "tem", nem a
 #     do anúncio da conversa «temos outro modelo».
 # A calibração com a chave precisa rodar antes de confiar nos números do v18.
-VERSAO = "v18"
+# v19 (as decisões do dono de 05/11/2026, Mercado Livre; cada caso com o espelho ruim na
+# calibração, grupo `an0511`):
+#  1. (60f9cb15, "vai chegar amanhã? dia 10 não estou aqui") a pergunta do dia, sem pedido nas
+#     EVIDÊNCIAS, respondida com que a loja não garante esse dia, o prazo pelo CEP no anúncio e as
+#     mensagens da compra é tratada: o motivo pessoal é contexto, não outra pergunta (item 7, só com
+#     a PLATAFORMA Mercado Livre: o SISTEMA é um só e as outras não mudam);
+#  2. (91e36877, dc3e318f) com a ORIENTAÇÃO APROVADA de que a loja nunca altera o endereço (só o
+#     ML, `prompt.ORIENTACAO_DA_PLATAFORMA`), dizer isso não é recusa de direito (item 2), e dizer
+#     que dá para alterar, pedir o dado ou mandar à loja não tem lastro.
+# A calibração com a chave precisa rodar antes de confiar nos números do v19.
+VERSAO = "v19"
 MODELO = "claude-haiku-5-5"
 # 26/10/2026: "low" → "medium". Calibração v13 (462 linhas): o medium segura mais ruim
 # (97,3% × 96,4%) e barra menos da metade das boas (12 × 26 de 97), por ~US$ 0,0005
@@ -776,7 +786,11 @@ temos como", "hoje só vale para software", "não é coberto"; ou diz que algo q
 cliente fez anula a garantia. Recusa é decisão de pessoa — mesmo quando a garantia \
 nas EVIDÊNCIAS está vencida. Recusar o cancelamento (dizer que não dá, não é possível \
 ou a loja não consegue cancelar) conta; orientar que, com o pedido já enviado, o caminho \
-é a devolução ao receber NÃO é recusa. Antes da compra (sem pedido), a quem pergunta se tem \
+é a devolução ao receber NÃO é recusa. Dizer que a plataforma não permite à loja alterar o \
+endereço de uma compra, quando a ORIENTAÇÃO APROVADA do assunto diz que a loja nunca altera, NÃO \
+é recusa; com essa orientação, dizer que dá para alterar (antes do envio), pedir o endereço ou \
+mandar falar com a loja para alterar marca a lista 6. Antes da compra (sem pedido), a quem \
+pergunta se tem \
 garantia ou o que ela cobre, dizer a REGRA geral — tem garantia, cobre defeito, não cobre \
 aparelho quebrado, molhado ou com mau uso — sem decidir o caso de um aparelho do cliente, NÃO \
 é recusa (é a FRASE-PADRÃO da garantia); e, no item 1 e na lista 6, «tem garantia» e «cobre \
@@ -965,6 +979,12 @@ de reposição» é tratada (true); a pergunta se é verdade o que o atendimento
 verdade? se for eu compro») respondida com a confirmação disso é tratada (true); o cliente que \
 só conta o que vai fazer e agradece («vou \
 aguardar até dia 30, obrigada») não pergunta nada: agradecer e dizer onde acompanhar trata. \
+Só com PLATAFORMA Mercado Livre: a pergunta de se chega em certo dia sem pedido nas EVIDÊNCIAS, \
+com ou sem o motivo pessoal dela (viagem, não estar em casa), respondida com que a loja não tem \
+como garantir esse dia, onde ver o prazo e o frete pelo CEP no anúncio e, para quem já comprou, \
+as mensagens da compra é tratada (true): o motivo é contexto, não outra pergunta, e sem pedido o \
+texto não precisa decidir se o cliente já comprou. Se o motivo traz um pedido (entregar outro \
+dia, deixar com alguém), ele é pergunta; com pedido nas EVIDÊNCIAS, mandar ao anúncio não trata. \
 O pedido VAGO (o cliente diz o que quer sem dizer qual: «quero uma TV 43», «quero comprar mais \
 produtos», «estou com dúvida», «pode escolher o celular?» sem o cartão nem o anúncio) respondido \
 com a pergunta de qual produto, modelo ou anúncio é tratado (true) — com o cartão ou o anúncio \
@@ -1974,7 +1994,7 @@ def orientacao_aprovada(assunto: str | None, plataforma_codigo: str = "") -> lis
     """
     linhas: list[str] = []
     for nome in assuntos_da_orientacao(assunto):
-        if orientacao := prompt.ORIENTACAO.get(nome):
+        if orientacao := prompt.orientacao_do_assunto(nome, plataforma_codigo):
             linhas += [f"ORIENTAÇÃO APROVADA DO ASSUNTO ({nome}):", f"- {orientacao}"]
     caminhos = prompt.CAMINHOS_APP.get(plataforma_codigo)
     if caminhos:
