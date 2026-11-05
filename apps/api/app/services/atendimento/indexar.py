@@ -33,6 +33,12 @@ Por que cada cuidado:
 - CADA LOJA NA SUA SESSÃO, e pedidos e avaliações em transações separadas:
   a loja sem permissão de produto (get_comment) ainda indexa os pedidos.
 - SÓ LEITURA na Shopee. Log só com ids, contagens e código de erro.
+
+A RODADA DO TIKTOK (`indexar_tiktok_nao_pagos`, 05/11/2026, o brinde do pedido não pago):
+a meia em meia hora, só nas lojas com a regra ligada, UMA busca dos não pagos das últimas
+4 h e, para os que saíram de não pago, UM lote de status. Os ~21 pedidos por dia não
+precisam da leitura geral. Interruptor próprio, desligado por padrão
+(`atendimento_tiktok_nao_pagos_ativa`), além de `atendimento_leitura_ativa`.
 """
 
 from __future__ import annotations
@@ -44,12 +50,19 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 import app.db as _db
 from app.config import get_settings
-from app.models import AtendimentoCanal, Integration, IntegrationPlatform
+from app.models import (
+    AtendimentoAutomacaoRegra,
+    AtendimentoCanal,
+    AtendimentoPedidoComprador,
+    Integration,
+    IntegrationPlatform,
+)
 from app.redis_client import redis
+from app.services.atendimento import automacoes_catalogo as cat
 from app.services.atendimento import clientes, indice
 
 logger = structlog.get_logger()
@@ -72,6 +85,17 @@ CANAL_DESLIGADO = "desligado"
 # Menor que o intervalo do cron (1 h): se o processo morrer, a próxima roda.
 TRAVA_TTL_S = 50 * 60
 CHAVE_TRAVA = "atendimento:indexar:rodada"
+
+# ── O TikTok: os pedidos não pagos (o brinde, 05/11/2026) ─────────────────
+AUTOMACAO_TIKTOK = "tiktok_nao_pago_brinde"
+# O `LOOKBACK_NAO_PAGO` do motor: a linha nasce antes das 3 h e o status ainda anda.
+JANELA_TIKTOK = timedelta(hours=4)
+# O não pago que sumiu da busca é relido por 30 h: o TikTok cancela às 24 h.
+RELER_TIKTOK = timedelta(hours=30)
+LOTE_STATUS_TIKTOK = 50  # o máximo do `ids` da Order API
+PAGINA_TIKTOK = 100
+CHAVE_TRAVA_TIKTOK = "atendimento:indexar:tiktok_nao_pagos"
+TRAVA_TIKTOK_TTL_S = 25 * 60  # menor que o intervalo do cron (30 min)
 
 FabricaCliente = Callable[[Integration], Awaitable[Any]]
 
@@ -274,11 +298,10 @@ def canal_desligado(integration_id: Any, canal: str | None = None) -> Any:
     return consulta.exists()
 
 
-
-async def _pegar_trava() -> tuple[bool, str | None]:
+async def _pegar_trava(chave: str = CHAVE_TRAVA, ttl: int = TRAVA_TTL_S) -> tuple[bool, str | None]:
     token = uuid4().hex
     try:
-        pegou = await redis.set(CHAVE_TRAVA, token, nx=True, ex=TRAVA_TTL_S)
+        pegou = await redis.set(chave, token, nx=True, ex=ttl)
     except Exception as exc:  # noqa: BLE001
         # Sem Redis, roda sem trava: o índice é idempotente (upsert).
         logger.warning("atendimento_indexar_trava_indisponivel", err=type(exc).__name__)
@@ -286,7 +309,7 @@ async def _pegar_trava() -> tuple[bool, str | None]:
     return bool(pegou), token
 
 
-async def _soltar_trava(token: str | None) -> None:
+async def _soltar_trava(token: str | None, chave: str = CHAVE_TRAVA) -> None:
     if token is None:
         return
     try:
@@ -294,7 +317,7 @@ async def _soltar_trava(token: str | None) -> None:
             "if redis.call('get', KEYS[1]) == ARGV[1] then "
             "return redis.call('del', KEYS[1]) else return 0 end",
             1,
-            CHAVE_TRAVA,
+            chave,
             token,
         )
     except Exception:  # noqa: BLE001 — o TTL solta sozinho
@@ -339,3 +362,142 @@ async def indexar_pedidos(*, fabrica_cliente: FabricaCliente | None = None) -> d
         return resumo
     finally:
         await _soltar_trava(token)
+
+
+# ── A rodada do TikTok: os pedidos não pagos ──────────────────────────────
+
+
+async def _indexar_tiktok_nao_pagos(
+    session: Any, integration: Integration, cliente: Any, agora: datetime
+) -> tuple[int, bool]:
+    """Os não pagos da janela → índice; os que saíram de não pago → status novo.
+
+    Sem o segundo passo o índice diria UNPAID até o fim, e a simulação contaria quem já
+    pagou. O que o TikTok não devolve fica como está. (quantos gravou, coube na página?)
+    """
+    pagina = await cliente.search_orders(
+        create_time_ge=int((agora - JANELA_TIKTOK).timestamp()),
+        create_time_lt=int(agora.timestamp()),
+        page_size=PAGINA_TIKTOK,
+        order_status="UNPAID",
+    )
+    gravados = 0
+    vistos: set[str] = set()
+    for o in pagina.get("orders") or []:
+        linha = indice.pedido_tiktok(o)
+        if linha is None:
+            continue
+        await indice.registrar_pedido(session, integration_id=integration.id, **linha)
+        vistos.add(linha["pedido"])
+        gravados += 1
+    await session.commit()  # nada de transação aberta durante a chamada seguinte
+
+    p = AtendimentoPedidoComprador
+    sumiram = list(
+        (
+            await session.execute(
+                select(p.pedido)
+                .where(
+                    p.integration_id == integration.id,
+                    p.plataforma == "tiktok",
+                    p.status == "UNPAID",
+                    p.criado_em >= agora - RELER_TIKTOK,
+                )
+                .order_by(p.criado_em)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    sumiram = [n for n in sumiram if n not in vistos][:LOTE_STATUS_TIKTOK]
+    await session.commit()
+    if sumiram:
+        # Erro aqui não levanta (`get_order_status_map`): a próxima rodada relê.
+        mapa = await cliente.get_order_status_map(sumiram)
+        for numero, info in mapa.items():
+            status = str((info or {}).get("status") or "").strip().upper()
+            if status and status != "UNPAID":
+                await session.execute(
+                    update(p)
+                    .where(p.integration_id == integration.id, p.pedido == numero)
+                    .values(status=status[: indice.STATUS_MAX], atualizado_em=agora)
+                )
+        await session.commit()
+    return gravados, not pagina.get("next_page_token")
+
+
+async def _lojas_tiktok_com_regra(session: Any) -> list[UUID]:
+    """As lojas do `TIKTOK_BRINDE` com a regra ligada e o chat `ok`, sem nome de loja escrito.
+
+    O nome vem com espaço em produção (" Mini"): `nome_normalizado`. O canal `sem_escopo`
+    (Poofy, Inova) e o `desligado` ficam de fora. Sem regra ligada, nenhuma chamada.
+    """
+    linhas = (
+        await session.execute(
+            select(Integration.id, Integration.name)
+            .join(
+                AtendimentoAutomacaoRegra,
+                AtendimentoAutomacaoRegra.integration_id == Integration.id,
+            )
+            .join(AtendimentoCanal, AtendimentoCanal.integration_id == Integration.id)
+            .where(
+                Integration.platform == IntegrationPlatform.TIKTOK,
+                Integration.archived_at.is_(None),
+                AtendimentoAutomacaoRegra.automacao == AUTOMACAO_TIKTOK,
+                AtendimentoAutomacaoRegra.modo != cat.MODO_DESLIGADO,
+                AtendimentoCanal.canal == cat.CANAL_CHAT,
+                AtendimentoCanal.status == "ok",
+            )
+        )
+    ).all()
+    lojas = cat.CATALOGO[AUTOMACAO_TIKTOK].lojas_duoke
+    return [r.id for r in linhas if cat.nome_normalizado(r.name) in lojas]
+
+
+async def indexar_tiktok_nao_pagos(*, fabrica_cliente: FabricaCliente | None = None) -> dict:
+    """A rodada do TikTok. Nunca levanta por causa de uma loja. Só leitura no TikTok.
+
+    Sai na hora sem os dois interruptores (`{"ligado": False}`) ou com outra rodada em
+    andamento (`{"pulado": True}`).
+    """
+    s = get_settings()
+    if not (s.atendimento_leitura_ativa and s.atendimento_tiktok_nao_pagos_ativa):
+        return {"ligado": False}
+    pegou, token = await _pegar_trava(CHAVE_TRAVA_TIKTOK, TRAVA_TIKTOK_TTL_S)
+    if not pegou:
+        return {"pulado": True}
+    fabrica = fabrica_cliente or clientes.cliente_da_integracao
+    resumo: dict[str, Any] = {"lojas": 0, "pedidos": 0, "erros": 0}
+    try:
+        async with _db.SessionLocal() as session:
+            ids = await _lojas_tiktok_com_regra(session)
+        resumo["lojas"] = len(ids)
+        for integration_id in ids:
+            # Cada loja na sua sessão: a que falha não leva o trabalho das outras.
+            async with _db.SessionLocal() as session:
+                integration = await session.get(Integration, integration_id)
+                if integration is None:
+                    continue
+                try:
+                    cliente = await fabrica(integration)
+                    gravados, coube = await _indexar_tiktok_nao_pagos(
+                        session, integration, cliente, _agora()
+                    )
+                    resumo["pedidos"] += gravados
+                    if not coube:
+                        # Mais de 100 não pagos em 4 h: nunca visto (~21 por dia). O mais
+                        # novo vem primeiro: a próxima rodada ainda pega os de agora.
+                        logger.warning(
+                            "atendimento_indexar_tiktok_teto", integration_id=str(integration_id)
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    await session.rollback()
+                    resumo["erros"] += 1
+                    logger.warning(
+                        "atendimento_indexar_tiktok_falhou",
+                        integration_id=str(integration_id),
+                        erro=_erro(exc),
+                    )
+        return resumo
+    finally:
+        await _soltar_trava(token, CHAVE_TRAVA_TIKTOK)

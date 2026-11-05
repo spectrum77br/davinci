@@ -1025,6 +1025,21 @@ class TikTokClient:
             f"/customer_service/202309/conversations/{conversation_id}/messages", corpo
         )
 
+    async def cs_create_conversation(self, buyer_user_id: str) -> dict:
+        """Abre (ou reabre) a conversa com um comprador. Nunca chamado em produção até
+        05/11/2026: só atrás de `atendimento_tiktok_criar_conversa`.
+
+            POST /customer_service/202309/conversations
+            body {"buyer_user_id": "..."}
+
+        Pela doc oficial: `buyer_user_id` é o `user_id` da Order API; `data.conversation_id`
+        volta; a conversa que já existe é reaberta com o mesmo id; 45109003 = o comprador
+        não atende aos critérios (conversa em 30 dias, pedido em 60 ou devolução). Devolve
+        o corpo cru."""
+        return await self._post(
+            "/customer_service/202309/conversations", {"buyer_user_id": str(buyer_user_id)}
+        )
+
     async def cs_upload_image(
         self, filename: str, content: bytes, mime: str = "image/jpeg"
     ) -> dict:

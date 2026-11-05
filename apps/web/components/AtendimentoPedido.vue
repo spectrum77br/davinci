@@ -240,7 +240,23 @@ export type Painel = {
   // A troca de produto aberta do pedido em QUALQUER situação (fase 4c): a
   // parada no meio com o pedido fora de 83955 (em 9 ou já em 6) só vem aqui.
   troca_aberta?: TrocaAberta | null
+  // O brinde do pedido não pago (05/11/2026): só com a oferta enviada e o pedido
+  // pago. Os botões moram em AtendimentoBrindeAcoes.
+  brinde?: BrindePainel | null
   gerado_em: string | null
+}
+// `BrindePainelOut` (schemas/atendimento_painel.py).
+export type BrindePainel = {
+  integration_id: string | null
+  pedido: string | null
+  numero_bling: string | null
+  tipo: string | null
+  rotulo: string | null
+  sku_sugerido: string | null
+  estado: string | null
+  pode_adicionar: boolean
+  motivo: string | null
+  erro: string | null
 }
 
 // Margem em fração (0.165) → "16,5%" (como a aba Margem).
@@ -648,6 +664,8 @@ const margemPedido = computed(() => pnl.value?.margem ?? null)
 const obsBling = computed(() => pnl.value?.observacoes_bling ?? null)
 // O porquê do "Aguardando Cancelamento" (item 4); null fora de 83955.
 const agCancelamento = computed(() => pnl.value?.ag_cancelamento ?? null)
+// O brinde do pedido não pago (05/11/2026).
+const brindePedido = computed(() => pnl.value?.brinde ?? null)
 // As sugestões de troca (fase 4b): vão dentro do cartão do porquê.
 const sugestoesTroca = computed(() => pnl.value?.sugestoes_troca ?? null)
 const numeroBling = computed(() => pnl.value?.pedido?.numero_bling ?? null)
@@ -1024,6 +1042,30 @@ defineExpose({ mostrarDevolucao })
           </ul>
         </section>
 
+        <!-- O brinde do pedido não pago (05/11/2026): logo abaixo do estoque, com os
+             botões; o estado depois de decidido fica à vista. -->
+        <section
+          v-if="brindePedido && brindePedido.integration_id && brindePedido.pedido"
+          class="space-y-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 p-2"
+          data-brinde-pedido
+        >
+          <p class="text-xs font-medium">
+            Brinde da oferta: {{ brindePedido.rotulo || 'a conferir' }}<template v-if="brindePedido.sku_sugerido"> ({{ brindePedido.sku_sugerido }})</template>
+            <span v-if="brindePedido.estado" class="font-normal text-muted-foreground"> · {{ brindePedido.estado }}</span>
+          </p>
+          <p v-if="brindePedido.estado === 'expirado'" class="text-xs text-destructive">Brinde não adicionado em 12 h: a NF seguiu sem ele.</p>
+          <p v-if="brindePedido.estado === 'incerto' && brindePedido.erro" class="text-xs text-amber-700 dark:text-amber-400">{{ brindePedido.erro }}</p>
+          <AtendimentoBrindeAcoes
+            :key="`${brindePedido.integration_id}-${brindePedido.pedido}`"
+            :integration-id="brindePedido.integration_id"
+            :pedido="brindePedido.pedido"
+            :rotulo="brindePedido.rotulo"
+            :sku="brindePedido.sku_sugerido"
+            :pode-adicionar="brindePedido.pode_adicionar"
+            :motivo="brindePedido.motivo"
+            @mudou="emit('recarregarPainel', false)"
+          />
+        </section>
         <!-- ENCAIXE (item 4): o cartão de Ag. cancelamento (fase 4a), com as
              sugestões de troca dentro (fase 4b), o "Trocar" (4c) e o
              "enviar oferta" (4d) — AQUI, logo abaixo do estoque. -->

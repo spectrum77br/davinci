@@ -1336,6 +1336,8 @@ MENSAGENS_DAVINCI_FORA: tuple[str, ...] = (
     r"|que alegria saber que sua mala ja chegou"
     r"|so passando para saber se esta tudo certo com o seu produto)",
     r"^ja segue nossa loja aqui",
+    # A oferta do brinde do pedido não pago (05/11/2026, `TEXTO_NAO_PAGO_BRINDE`).
+    r"^oi! vimos que seu pedido ainda esta aguardando pagamento",
     # O agradecimento da 4–5★ e a pergunta da 1–3★ no chat (29/10/2026,
     # `automacoes_catalogo.TEXTO_AGRADECER_CHAT`/`TEXTO_ENTENDER_CHAT`), com e
     # sem o nome ("Oi, fulana! …" / "Oi! …").
@@ -1646,3 +1648,19 @@ def e_pergunta(texto: str | None) -> bool:
         return True
     palavras = set(re.findall(r"[a-z0-9]+", normalizar_inicio(texto)))
     return not palavras.isdisjoint(PALAVRAS_PERGUNTA)
+
+
+# ── O brinde do pedido não pago (o dono, 05/11/2026) ───────────────────────
+# 3 h depois de um pedido criado e não pago, a oferta: AirTag para celular,
+# chaveiro exclusivo para mala. Quem finaliza ganha o item no MESMO pedido do
+# Bling, pelo botão do Comunicador (`services/atendimento/brinde.py`).
+AUTOMACOES_BRINDE = frozenset({"shopee_nao_pago_brinde", "tiktok_nao_pago_brinde"})
+# O SKU base de cada brinde. O AirTag tem lotes (a019.cd/.ci/.pi/.ra/.sa/.sp) e
+# sai do lote do item vendido; `a019.us` e `a075.us` são capas de iPhone, outro
+# produto: `.us` nunca é lote de brinde.
+BRINDE_SKU = {"airtag": "a019", "chaveiro": "a075"}
+# O valor da linha do brinde no pedido do Bling (R$): falta o contador confirmar.
+BRINDE_VALOR_NF = 0.01
+# Quantas horas o pedido pago com brinde prometido fica fora da fila da NF,
+# esperando o botão: a NF entra na fila em até 2 min depois do pagamento.
+BRINDE_SEGURA_NF_H = 12

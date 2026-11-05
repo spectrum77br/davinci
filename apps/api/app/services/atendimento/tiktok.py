@@ -932,6 +932,55 @@ def _maior(base: int, visto: int | None) -> int:
 # ── Envio ─────────────────────────────────────────────────────────────────
 
 
+@dataclass
+class AberturaConversa:
+    """O `abrir_conversa`: a conversa, ou a recusa definitiva, ou nada (tente de novo)."""
+
+    conversa: AtendimentoConversa | None = None
+    recusada: bool = False
+    erro: str | None = None
+
+
+async def abrir_conversa(
+    session: AsyncSession,
+    canal: AtendimentoCanal,
+    integration: Integration,
+    cliente: Any,
+    *,
+    comprador_id: str,
+) -> AberturaConversa:
+    """Abre a conversa com o comprador e a grava. Nunca levanta. Nunca commita (05/11/2026).
+
+    Sem mandar mensagem: quem manda é o `enviar_texto`, pelo caminho de sempre. A leitura
+    seguinte acha a conversa pelo id (`gravar.upsert_conversa`) e completa o resto.
+    """
+    try:
+        resp = await cliente.cs_create_conversation(comprador_id)
+    except Exception as exc:  # noqa: BLE001 — sem resposta: abrir de novo devolve o mesmo id
+        return AberturaConversa(erro=f"tiktok {type(exc).__name__}")
+    resp = resp if isinstance(resp, dict) else {}
+    codigo = _codigo(resp)
+    if codigo != 0:
+        erro = f"tiktok code={codigo}"
+        ambiguo = codigo is None or codigo in _CODIGOS_AMBIGUOS or 500 <= codigo < 600
+        return AberturaConversa(recusada=not ambiguo, erro=erro)
+    data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+    externo_id = str(data.get("conversation_id") or "").strip()
+    if not externo_id:
+        return AberturaConversa(erro="tiktok sem_conversation_id")
+    conversa, _ = await gravar.upsert_conversa(
+        session,
+        canal=canal,
+        integration=integration,
+        plataforma=PLATAFORMA,
+        canal_nome=CANAL_CHAT,
+        externo_id=externo_id,
+        conta=await lojas.nome_da_loja(session, integration) or None,
+        comprador_id=comprador_id,
+    )
+    return AberturaConversa(conversa=conversa)
+
+
 async def enviar_texto(
     session: AsyncSession,
     conversa: AtendimentoConversa,

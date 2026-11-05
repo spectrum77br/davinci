@@ -199,6 +199,37 @@ def pedido_shopee(o: dict, *, comprador_id: str | None = None) -> dict | None:
     }
 
 
+def pedido_tiktok(o: dict) -> dict | None:
+    """Pedido do `search_orders` do TikTok → argumentos de `registrar_pedido` (05/11/2026).
+
+    `id` é o `numeroLoja` do Bling e `user_id` é o `comprador_id` da conversa (238 de 238
+    conferidos). O TikTok repete a linha por unidade: vira "2× Nome". Só o `product_name`,
+    sem o `sku_name`: o título do anúncio decide celular ou mala, e a variação "Laranja +
+    Fone" não pode tirar o brinde do celular (`brinde_do_resumo`).
+    """
+    if not isinstance(o, dict):
+        return None
+    pedido = _curto(o.get("id"), PEDIDO_MAX)
+    comprador = _curto(o.get("user_id"), COMPRADOR_MAX)
+    if not pedido or not comprador or comprador == "0":
+        return None
+    quantos: dict[str, int] = {}
+    for item in o.get("line_items") or []:
+        nome = str(item.get("product_name") or "").strip() if isinstance(item, dict) else ""
+        if nome:
+            quantos[nome] = quantos.get(nome, 0) + 1
+    pagamento = o.get("payment") if isinstance(o.get("payment"), dict) else {}
+    return {
+        "plataforma": "tiktok",
+        "comprador_id": comprador,
+        "pedido": pedido,
+        "criado_em": de_epoch(o.get("create_time")),
+        "total": _valor(pagamento.get("total_amount")),
+        "status": _curto(str(o.get("status") or "").upper(), STATUS_MAX),
+        "itens_resumo": resumo_itens(quantos.items()),
+    }
+
+
 def _url(bruto: Any) -> str | None:
     """Só endereço https (o `<img>`/`<video>` da tela), sem NUL, até `URL_MAX`."""
     if not isinstance(bruto, str):

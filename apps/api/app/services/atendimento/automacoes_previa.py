@@ -227,11 +227,14 @@ async def _valores(
     aut: cat.Automacao,
     nome_loja: str | None,
 ) -> dict[str, str]:
-    """As lacunas próprias (o cupom do "carrinho", pela faixa do valor do pedido)."""
-    if "valor_cupom" not in aut.lacunas or not x.pedido:
+    """As lacunas próprias: o cupom do "carrinho" (a faixa do valor) e o brinde (o item)."""
+    if not (set(aut.lacunas) & {"valor_cupom", "brinde_oferta"}) or not x.pedido:
         return {}
     indice = await automacoes._compradores_do_pedido(session, [(x.integration_id, x.pedido)])
     idx = indice.get((x.integration_id, x.pedido))
+    if "brinde_oferta" in aut.lacunas:
+        oferta = cat.BRINDE_OFERTA.get(cat.brinde_do_resumo(idx[4]) if idx else None)
+        return {"brinde_oferta": oferta} if oferta else {}
     valor = cat.valor_cupom(nome_loja, idx[3] if idx else None)
     return {"valor_cupom": str(valor)} if valor is not None else {}
 

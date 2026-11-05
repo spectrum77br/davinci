@@ -984,6 +984,26 @@ async def atendimento_prazos(ctx: dict) -> None:
         logger.info("atendimento_prazos_tick", avisadas=avisadas)
 
 
+async def atendimento_tiktok_nao_pagos(ctx: dict) -> dict | None:
+    """A cada 30 min: os pedidos não pagos do TikTok, para o brinde (05/11/2026).
+
+    UMA busca por loja com a regra ligada, e um lote de status se algum saiu de não pago
+    (services/atendimento/indexar.py). Desligado por padrão
+    (`atendimento_tiktok_nao_pagos_ativa`). Só leitura no TikTok.
+    """
+    if not (_settings.atendimento_leitura_ativa and _settings.atendimento_tiktok_nao_pagos_ativa):
+        return None
+    from app.services.atendimento import indexar as _atendimento_indexar
+
+    try:
+        resumo = await _atendimento_indexar.indexar_tiktok_nao_pagos()
+    except Exception as e:  # noqa: BLE001
+        logger.error("atendimento_tiktok_nao_pagos_falhou", err=type(e).__name__)
+        return None
+    logger.info("atendimento_tiktok_nao_pagos_tick", **resumo)
+    return resumo
+
+
 async def atendimento_indexar_pedidos(ctx: dict) -> dict | None:
     """De hora em hora (:22): pedidos e avaliações da Shopee por comprador.
 
@@ -5384,6 +5404,7 @@ class WorkerSettings:
         func(atendimento_humano, timeout=120),
         atendimento_prazos,
         func(atendimento_indexar_pedidos, timeout=1200),
+        func(atendimento_tiktok_nao_pagos, timeout=300),
         # Comunicador (01/10/2026): reclamações da plataforma e etiqueta. Aqui
         # também para dar para enfileirar uma rodada à mão.
         func(atendimento_reclamacoes, timeout=540),
@@ -5755,6 +5776,8 @@ class WorkerSettings:
         # Índice de pedidos/avaliações da Shopee para o cartão "Cliente": de
         # hora em hora, janela de 2 h (uma rodada que falha não deixa buraco).
         cron(atendimento_indexar_pedidos, minute={22}, run_at_startup=False, timeout=1200),
+        # Os não pagos do TikTok para o brinde (05/11/2026): o interruptor é próprio.
+        cron(atendimento_tiktok_nao_pagos, minute={7, 37}, run_at_startup=False, timeout=300),
         # Comunicador (01/10/2026): reclamações/devoluções da plataforma no
         # :06… e a etiqueta no :08… (ver _ATENDIMENTO_RECLAMACOES_MINUTOS).
         # `timeout=540` = a trava da rodada das reclamações (9 min): o job

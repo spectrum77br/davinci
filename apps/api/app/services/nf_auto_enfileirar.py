@@ -285,6 +285,18 @@ async def run_auto_enfileirar_nf() -> dict:
         "pulados": 0,
         "fundidos": 0,
     }
+    # O brinde que venceu as 12 h (05/11/2026): o registro e a nota, numa transação
+    # própria e curta (a do sweep segura as locks enquanto fala com o Bling). Falha
+    # só loga: a trava solta pelo relógio, com ou sem este passo.
+    try:
+        from app.services.atendimento.brinde import expirar_vencidos
+
+        async with session_scope() as sessao_brinde:
+            expirados = await expirar_vencidos(sessao_brinde)
+        if expirados:
+            summary["brindes_expirados"] = expirados
+    except Exception:  # noqa: BLE001
+        logger.exception("nf_auto_enfileirar_brinde_expirar_falhou")
     async with session_scope() as session:
         got = (
             await session.execute(
@@ -1447,12 +1459,33 @@ async def _candidatos(
 
     em_fila = await _em_fila(session, "import_avulsa")
     numeros = [n for n in numeros if n not in ja_tratados and n not in em_fila]
+    # O brinde do pedido não pago (05/11/2026): com a oferta enviada e sem decisão,
+    # o pedido espera o botão por até 12 h. Como o adiado, é espera (`pular_adiados`):
+    # os avisos ainda o contam como candidato, ele volta sozinho e não toma vaga.
+    if pular_adiados and numeros:
+        segurados = await _segurados_pelo_brinde(session, numeros)
+        if segurados:
+            logger.info("nf_auto_enfileirar_brinde_segurados", pedidos=sorted(segurados))
+            numeros = [n for n in numeros if n not in segurados]
     if pular_adiados and numeros:
         recentes = await _adiados_recentes(numeros)
         if recentes:
             logger.info("nf_auto_enfileirar_adiados_pulados", pedidos=sorted(recentes))
             numeros = [n for n in numeros if n not in recentes]
     return numeros[:limite]
+
+
+async def _segurados_pelo_brinde(session, numeros: list[str]) -> set[str]:
+    """Quem a oferta do brinde segura agora. Erro = ninguém: nunca derruba nem trava o
+    sweep (savepoint; a tabela pode ainda não existir no deploy antes do alembic)."""
+    try:
+        from app.services.atendimento.brinde import segurados_pela_oferta
+
+        async with session.begin_nested():
+            return await segurados_pela_oferta(session, numeros)
+    except Exception:  # noqa: BLE001
+        logger.exception("nf_auto_enfileirar_brinde_trava_falhou")
+        return set()
 
 
 async def _adiados_recentes(numeros: list[str]) -> set[str]:

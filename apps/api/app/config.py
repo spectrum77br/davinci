@@ -632,6 +632,15 @@ class Settings(BaseSettings):
     atendimento_automacoes_envio: bool = False
     atendimento_automacoes_teto_dia: int = 400
     atendimento_automacoes_shopee_auto_reply: bool = False
+    # O brinde do pedido não pago no TikTok (05/11/2026):
+    #   • `atendimento_tiktok_nao_pagos_ativa`: a rodada `atendimento_tiktok_nao_pagos`
+    #     lê os não pagos das lojas com a regra ligada (GETs/busca, nenhuma mensagem).
+    #   • `atendimento_tiktok_criar_conversa`: abre conversa com quem nunca falou com a
+    #     loja (POST da Customer Service API). Fica desligada até o dono decidir: a
+    #     política do TikTok proíbe marketing não solicitado, e só um envio real diz se o
+    #     pedido não pago conta como critério (erro 45109003).
+    atendimento_tiktok_nao_pagos_ativa: bool = False
+    atendimento_tiktok_criar_conversa: bool = False
 
     # Sugestões de TROCA DE PRODUTO no pedido em "Aguardando Cancelamento" por
     # falta de estoque (item 4, fase 4b, 05/10/2026): o painel do pedido e a

@@ -18,6 +18,7 @@ from app.routers import atendimento as atendimento_router
 from app.routers import atendimento_abas as atendimento_abas_router
 from app.routers import atendimento_automacoes as atendimento_automacoes_router
 from app.routers import atendimento_avaliacoes as atendimento_avaliacoes_router
+from app.routers import atendimento_brinde as atendimento_brinde_router
 from app.routers import atendimento_carrinhos as atendimento_carrinhos_router
 from app.routers import atendimento_email as atendimento_email_router
 from app.routers import atendimento_lida as atendimento_lida_router
@@ -325,6 +326,8 @@ app.include_router(atendimento_reclamacoes_router.router)
 # Item 4, fase 4b (05/10/2026): a lista Ag. cancelamento (pedidos em 83955,
 # com ou sem conversa) com as sugestões de troca. Só leitura, sem Bling.
 app.include_router(atendimento_troca_router.router)
+# 05/11/2026: o brinde do pedido não pago (o botão e a lista "Brindes a adicionar").
+app.include_router(atendimento_brinde_router.router)
 # Avaliações de venda (02/10/2026): a aba ★ Avaliação (Shopee e ML), o
 # "responder em público" (atrás do envio) e o "marcar como tratada".
 app.include_router(atendimento_avaliacoes_router.router)

@@ -367,6 +367,21 @@ class SugestoesTrocaOut(BaseModel):
     falhou: bool = False
 
 
+class BrindePainelOut(BaseModel):
+    """O brinde do pedido não pago (05/11/2026). Só com oferta enviada e pedido pago."""
+
+    integration_id: UUID | None = None
+    pedido: str | None = None
+    numero_bling: str | None = None
+    tipo: str | None = None
+    rotulo: str | None = None
+    sku_sugerido: str | None = None
+    estado: str | None = None
+    pode_adicionar: bool = False
+    motivo: str | None = None
+    erro: str | None = None
+
+
 class PainelOut(BaseModel):
     pedido: PedidoPainelOut | None = None
     estoque: EstoqueOut = Field(default_factory=EstoqueOut)
@@ -387,6 +402,8 @@ class PainelOut(BaseModel):
     # parada no meio com o pedido fora de 83955 (em 9, ou em 6 sem a NF
     # liberada) só aparece aqui — com o Retomar.
     troca_aberta: TrocaAbertaOut | None = None
+    # O brinde do pedido não pago (05/11/2026): só com a oferta enviada e o pedido pago.
+    brinde: BrindePainelOut | None = None
     gerado_em: datetime | None = None
 
 

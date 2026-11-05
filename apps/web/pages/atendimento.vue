@@ -1359,6 +1359,8 @@ onBeforeUnmount(() => {
       <Eye class="h-3.5 w-3.5" />{{ zerando ? 'Zerando…' : 'Zerar não lidas' }}
     </button>
     <span v-if="zerarErro && !emHumano" class="text-xs text-destructive">{{ zerarErro }}</span>
+    <!-- "Brindes a adicionar (N)" (05/11/2026): quem paga depois da oferta não escreve no chat. Sem pendente, nada aparece. -->
+    <AtendimentoBrindesLista @abrir-conversa="abrirConversaNaCaixa" />
     </div>
     </div>
 

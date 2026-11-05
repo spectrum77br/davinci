@@ -18,6 +18,7 @@ Regras da spec (aba NF, áudios 25/07):
   - `nf_cheia=True`  → valor integral do item (avulso).
   - `nf_cheia=False` → `percentual` % do valor do item (exclusivo 0,1%,
     upseller 2%/1%/70%/100%).
+  - piso de R$ 0,01 no unitário da linha com base maior que zero (o brinde, 05/11/2026).
 
 Só transforma; NÃO gera Excel nem loga em site — essas camadas ficam por cima.
 """
@@ -112,6 +113,13 @@ def transformar_item(regra: _RegraFaturador, item: ItemPedido) -> NfLinha:
         total = base_total * pct / Decimal(100)
     total = _q(total)
     unit = _q(total / Decimal(qtd)) if qtd else Decimal("0.00")
+    # O piso (o brinde do não pago, 05/11/2026): a linha de R$ 0,01 x rateio x 2%
+    # arredondava para 0,00, e o Upseller recusa ("O preço unitário deve ser um número
+    # entre 0,01 e 999999999", `nf_upseller`): o pedido ficava em erro e fora do sweep,
+    # e o bloco inteiro podia cair junto. Item de graça (base zero) segue zero.
+    if qtd and base_total > 0 and unit < _CENT:
+        unit = _CENT
+        total = _CENT * Decimal(qtd)
     return NfLinha(
         sku=sku,
         nome=nome,

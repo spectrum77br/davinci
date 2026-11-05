@@ -254,6 +254,8 @@ def _aut_out(aut: cat.Automacao) -> dict[str, Any]:
         # Só simula (o porquê, em português): a tela trava o Enviar com ele.
         "so_simulacao": aut.so_simular,
         "so_simulacao_texto": cat.SO_SIMULAR.get(aut.so_simular or ""),
+        # O Duoke não manda esta (o brinde, 05/11/2026): `enviar` sem o acordo com ele.
+        "duoke_nao_manda": aut.duoke_nao_manda,
     }
 
 
@@ -392,8 +394,11 @@ async def listar_automacoes(
                     "ultimo": ultimo.get((aut.codigo, integ.id)),
                     "pode_enviar": not motivos,
                     "por_que_nao_enviar": motivos,
-                    "pode_trocar": bool(criterio["pode_trocar"]),
-                    "por_que_nao_trocar": list(criterio["por_que_nao"]),
+                    # Sem o Duoke no meio não há critério de troca (o brinde, 05/11/2026).
+                    "pode_trocar": aut.duoke_nao_manda or bool(criterio["pode_trocar"]),
+                    "por_que_nao_trocar": (
+                        [] if aut.duoke_nao_manda else list(criterio["por_que_nao"])
+                    ),
                     # Os 7 dias de dados da regra nesta loja ("faltam N dias" na tela).
                     "dados_desde": criterio["dados_desde"],
                     "dias_de_dados": criterio["dias_de_dados"],
@@ -794,7 +799,7 @@ async def mudar_regra(
                     "detail": "Esta regra não pode ir para ENVIAR agora.",
                 },
             )
-        if not body.desliguei_no_duoke:
+        if not body.desliguei_no_duoke and not aut.duoke_nao_manda:
             raise HTTPException(
                 422,
                 detail={
@@ -803,30 +808,32 @@ async def mudar_regra(
                 },
             )
         # A troca é LOJA por loja: o critério desta loja nos últimos 7 dias,
-        # com os 7 dias de dados da regra nela (`com_os_dias`).
-        inicios = await comparar.inicio_dos_dados(
-            session, automacao=aut.codigo, integration_id=integ.id
-        )
-        conta = await comparar.estatisticas(
-            session,
-            desde=agora - timedelta(days=CRITERIO_DIAS),
-            ate=agora,
-            automacao=aut.codigo,
-            integration_id=integ.id,
-            inicios=inicios,
-        )
-        criterio = conta.get((aut.codigo, integ.id)) or comparar.com_os_dias(
-            comparar.resumir({}, aut), desde=inicios.get((aut.codigo, integ.id)), agora=agora
-        )
-        if not criterio["pode_trocar"] and not body.troca_sem_criterio:
-            raise HTTPException(
-                422,
-                detail={
-                    "code": "criterio_nao_passou",
-                    "motivos": list(criterio["por_que_nao"]),
-                    "detail": "O critério da troca não passou nesta loja nos últimos 7 dias.",
-                },
+        # com os 7 dias de dados da regra nela (`com_os_dias`). O que o Duoke não
+        # manda (o brinde, 05/11/2026) não tem com o que comparar: as chaves acima bastam.
+        if not aut.duoke_nao_manda:
+            inicios = await comparar.inicio_dos_dados(
+                session, automacao=aut.codigo, integration_id=integ.id
             )
+            conta = await comparar.estatisticas(
+                session,
+                desde=agora - timedelta(days=CRITERIO_DIAS),
+                ate=agora,
+                automacao=aut.codigo,
+                integration_id=integ.id,
+                inicios=inicios,
+            )
+            criterio = conta.get((aut.codigo, integ.id)) or comparar.com_os_dias(
+                comparar.resumir({}, aut), desde=inicios.get((aut.codigo, integ.id)), agora=agora
+            )
+            if not criterio["pode_trocar"] and not body.troca_sem_criterio:
+                raise HTTPException(
+                    422,
+                    detail={
+                        "code": "criterio_nao_passou",
+                        "motivos": list(criterio["por_que_nao"]),
+                        "detail": "O critério da troca não passou nesta loja nos últimos 7 dias.",
+                    },
+                )
     mudou_versao = False
     if body.partes is not None:
         partes = _partes_limpas(body.partes)

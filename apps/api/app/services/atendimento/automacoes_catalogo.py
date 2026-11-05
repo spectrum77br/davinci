@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
@@ -98,6 +99,11 @@ ESTADOS_QUE_SAEM = (
     ESTADO_ENVIADO,
     ESTADO_REVISAR,
 )
+# A oferta do brinde que PODE ter chegado ao comprador (05/11/2026). O envio ambíguo
+# (timeout, worker morto: `aposentar_enviando_presos`) fica em `revisar` e nunca
+# retenta, mas a pessoa pode ter lido e pago. Para quem honra a promessa (a trava da
+# NF, o botão, a espera da IA) ele conta como enviado, igual a `_ja_recebeu_carrinho`.
+ESTADOS_OFERTA_BRINDE = (ESTADO_ENVIANDO, ESTADO_ENVIADO, ESTADO_REVISAR)
 
 DUOKE_PENDENTE = "pendente"
 DUOKE_MANDOU = "mandou"
@@ -127,6 +133,8 @@ TIPO_POS = "pos"
 # As que faltavam do Duoke (05/10/2026, à noite): o pedido não pago com cupom
 # ("carrinho") e a resposta da avaliação (4–5★ e 1–3★).
 TIPO_NAO_PAGO = "nao_pago"
+# O brinde do pedido não pago (05/11/2026): nunca casa com modelo do Duoke (`automacao_do_modelo`).
+TIPO_NAO_PAGO_BRINDE = "nao_pago_brinde"
 TIPO_AVALIACAO_BOA = "avaliacao_boa"
 TIPO_AVALIACAO_RUIM = "avaliacao_ruim"
 
@@ -185,6 +193,8 @@ MOTIVOS: dict[str, str] = {
     "pedido_pago": "O pedido já foi pago",
     "abaixo_do_minimo": "Pedido abaixo do valor que ganha cupom (celular R$ 1.000; mala R$ 150)",
     "sem_valor": "Sem o valor do pedido (o índice ainda não o trouxe)",
+    # Pedido não pago com brinde (05/11/2026).
+    "sem_brinde": "O item do pedido não ganha brinde (nem celular nem mala)",
     # Resposta da avaliação.
     "estrelas_mudaram": "O comprador mudou a nota da avaliação",
     # 29/10/2026: a 4–5★ com queixa escrita fica para pessoa; a conversa do
@@ -270,9 +280,18 @@ PLACEHOLDERS_EXTRA: dict[str, str] = {
         "o valor do cupom pela faixa do pedido, como o Duoke: celular R$ 20 (de R$ 1.000), "
         "25 (de R$ 1.500) e 30 (de R$ 2.000); mala R$ 5 (de R$ 150) e 10 (de R$ 500)"
     ),
+    "brinde_oferta": (
+        "o brinde pelo item do pedido: 1 AirTag para celular, 1 chaveiro exclusivo para mala "
+        "(o pedido que não é nenhum dos dois não recebe a mensagem)"
+    ),
 }
 # O valor de exemplo de cada lacuna extra (a prévia da regra e o teste do texto).
-EXEMPLOS_EXTRA: dict[str, str] = {"valor_cupom": "20"}
+# A oferta do brinde pelo que `brinde_do_resumo` devolve (o dono, 05/11/2026).
+BRINDE_OFERTA: dict[str, str] = {
+    "airtag": "1 AirTag Uranyx de presente, enviado junto com o seu celular.",
+    "chaveiro": "1 chaveiro exclusivo de presente, enviado junto com a sua mala.",
+}
+EXEMPLOS_EXTRA: dict[str, str] = {"valor_cupom": "20", "brinde_oferta": BRINDE_OFERTA["airtag"]}
 
 # ── Textos padrão (os do Duoke, em pt-BR, com o nome dentro) ──────────────
 
@@ -367,6 +386,12 @@ TEXTO_NAO_PAGO = (
     "💸 R${valor_cupom} OFF\n\n"
     "É só aplicar o cupom no checkout e garantir seu desconto! 🛒✨\n\n"
     "E fico a disposição para tirar qualquer duvida sobre o produto!"
+)
+# O brinde do pedido não pago (o dono, 05/11/2026): 3 h depois da criação, sem
+# cupom. A lacuna é o que muda entre celular e mala (`BRINDE_OFERTA`).
+TEXTO_NAO_PAGO_BRINDE = (
+    "Oi! Vimos que seu pedido ainda está aguardando pagamento. Finalizando o pagamento, "
+    "você ganha {brinde_oferta} 🎁"
 )
 # A resposta da avaliação do Duoke: a PÚBLICA (na avaliação) e a do chat.
 TEXTO_AVALIACAO_BOA_PUBLICA = "Obrigado pela confiança! 🙏 Volte sempre que precisar!"
@@ -470,6 +495,11 @@ SHOPEE_MALA = frozenset({"inova", "kfa", "minas", "poofy"})
 # O "carrinho" (pedido não pago com cupom): as 13 menos a Kia (0 de 22 não
 # pagos dela, 14 dias). A Aguiar também não tem.
 SHOPEE_NAO_PAGO = SHOPEE_CAMPANHAS - {"kia", "fiore"}
+# O brinde do pedido não pago (05/11/2026): TODAS as lojas Shopee de produção (as
+# 14: as campanhas e a Aguiar), com os nomes antigos e os novos. O Duoke NÃO manda
+# esta mensagem: em `lojas_duoke`, esta lista só serve para o botão "simular nas
+# lojas" ligar todas de uma vez (`Automacao.duoke_nao_manda`).
+SHOPEE_BRINDE = SHOPEE_CAMPANHAS | {"aguiar"}
 # A resposta da avaliação: as 13 (a Aguiar responde à mão).
 SHOPEE_AVALIACAO = SHOPEE_CAMPANHAS
 # O "pedido recebido" do TikTok: só ATV, Barbosa e Mini (0 em Injox, JLAS e Eron).
@@ -477,6 +507,10 @@ TIKTOK_PEDIDO = frozenset({"atv", "barbosa", "mini"})
 TIKTOK_AGUARDE = frozenset({"mini", "barbosa", "atv", "eron"})
 TIKTOK_CONVITE = frozenset({"atv", "barbosa", "mini", "injox", "jlas", "eron"})
 TIKTOK_DUVIDA = frozenset({"atv", "barbosa", "mini", "eron"})
+# O brinde do pedido não pago no TikTok (05/11/2026): as 6 lojas com o chat ok, conferidas
+# na API (Poofy e Inova estão sem `seller.customer_service`). O Duoke NÃO manda: aqui é a
+# lista de onde a regra nasce em simular (`Automacao.duoke_nao_manda`).
+TIKTOK_BRINDE = frozenset({"atv", "barbosa", "mini", "injox", "jlas", "eron"})
 ML_MENU = frozenset(
     {
         "aguiar",
@@ -543,6 +577,61 @@ def valor_cupom(nome_loja: str | None, total: float | None) -> int | None:
     return valor
 
 
+# O brinde do pedido não pago (o dono, 05/11/2026): celular ganha AirTag, mala
+# ganha chaveiro. Pelo texto dos itens no índice (`itens_resumo`), que é o que o
+# DaVinci tem antes do pagamento (o SKU só existe depois, no Bling).
+# Lido em produção (SELECT, 05/11/2026, 30 dias, Shopee, UNPAID e CANCELLED: 295
+# textos, 4.606 pedidos): "2× Uranyx" (o × do índice, 47 pedidos) caía em nenhum; a
+# roda de reposição "para Mala" (1) e a frasqueira/necessaire vendida SOZINHA (17:
+# a mensagem diz "a sua mala") ganhavam chaveiro. O kit "Mala e Frasqueira" é mala.
+_BRINDE_QTD = r"^(\d+\s*[x×]\s*)?"
+_BRINDE_MALA = re.compile(r"\b(malas?|maletas?|frasqueiras?)\b")
+# Títulos reais (`product_links`, 05/11/2026): 13 anúncios citam "mala" e não são mala
+# (chaveiro de pelúcia, balança de bagagem, rodinhas). "Rodinhas 360", "Cadeado" e
+# "Balança" também aparecem em título de mala: por isso a âncora no INÍCIO, não `_BRINDE_FORA`.
+_BRINDE_SO_ACESSORIO_DE_MALA = re.compile(
+    _BRINDE_QTD
+    + r"(frasqueiras?|maletas?|necessaires?|chaveiros?|balancas?|par\s+de\s+rodinhas"
+    + r"|kit\s+(\d+\s+)?(unidades?\s+)?(de\s+)?rodinhas)\b"
+)
+_BRINDE_CELULAR = re.compile(
+    r"\b(smartphones?|celular(es)?|iphone)\b|" + _BRINDE_QTD + r"(kit\s+)?uranyx\b"
+)
+# O que tem "Uranyx" no nome e não é celular, o kit que já traz o AirTag e a peça.
+# Os títulos reais do TikTok (`product_links`, 323 em 05/11/2026) trouxeram dois: o
+# "Uranyx Tag Localizador…" (o próprio AirTag) e o "Uranyx Cesto… Para Air Fryers".
+_BRINDE_FORA = re.compile(
+    r"\b(airtag|air tag|localizador|rastreador|relogio|smartwatch|watch|fones?|earbuds?|oculos"
+    r"|air ?fryers?|fritadeira|cesto|tablet|capas?|carregador|pelicula|reposicao|sobressalente)\b"
+)
+
+
+def _brinde_do_item(item: str) -> str | None:
+    """Um item do resumo, já sem acento e em minúsculas. PURA."""
+    if _BRINDE_FORA.search(item) or _BRINDE_SO_ACESSORIO_DE_MALA.search(item):
+        return None
+    if _BRINDE_MALA.search(item):
+        return "chaveiro"
+    return "airtag" if _BRINDE_CELULAR.search(item) else None
+
+
+def brinde_do_resumo(itens_resumo: str | None) -> str | None:
+    """ "airtag", "chaveiro" ou None (não ganha), pelo texto dos itens. PURA.
+
+    Item a item (o resumo junta com "; "): a almofada junto da mala não tira o
+    chaveiro. Nos dois (nunca visto), o chaveiro: a oferta fala de um item só.
+    """
+    texto = "".join(
+        c
+        for c in unicodedata.normalize("NFKD", str(itens_resumo or "").lower())
+        if not unicodedata.combining(c)
+    )
+    brindes = {_brinde_do_item(item.strip()) for item in texto.split(";")}
+    if "chaveiro" in brindes:
+        return "chaveiro"
+    return "airtag" if "airtag" in brindes else None
+
+
 # ── O catálogo ────────────────────────────────────────────────────────────
 
 
@@ -598,6 +687,11 @@ class Automacao:
     so_simular: str | None = None
     # As lacunas próprias desta automação (além do `{comprador}`).
     lacunas: tuple[str, ...] = ()
+    # O Duoke NÃO manda esta mensagem (o brinde, 05/11/2026): `enviar` não depende
+    # do acordo com ele (a caixinha "desliguei no Duoke", o critério de 95%, a espera
+    # da transição, o "o Duoke já mandou") e a linha nem entra no comparador. As
+    # chaves gerais e a regra em `enviar` continuam obrigatórias.
+    duoke_nao_manda: bool = False
     # Do pedido, mas comparada com o Duoke NA CONVERSA (o TikTok: o aviso de
     # pedido da TikTok não traz o nº, e a conversa é a do comprador).
     compara_na_conversa: bool = False
@@ -903,6 +997,36 @@ def _montar() -> dict[str, Automacao]:
             diferenca_combinada="visto_de_hora_em_hora",
             so_duoke_espera=_h(3),
         ),
+        # ── O brinde do pedido não pago (o dono, 05/11/2026) ───────────────
+        Automacao(
+            codigo="shopee_nao_pago_brinde",
+            plataforma="shopee",
+            canal=CANAL_CHAT,
+            nome="Pedido não pago, com brinde (AirTag ou chaveiro)",
+            tipo=TIPO_NAO_PAGO_BRINDE,
+            gatilho=GATILHO_NAO_PAGO,
+            alvo=ALVO_PEDIDO,
+            familia=FAMILIA_PEDIDO,
+            descricao=(
+                "Pedido criado e ainda não pago → 3 h depois da criação, das 9h às 21h, uma vez "
+                "por pedido e uma por comprador em 7 dias: 1 AirTag para celular, 1 chaveiro para "
+                "mala. Em Enviar, confere na Shopee, na hora, que o pedido segue não pago. O Duoke "
+                "não manda esta mensagem. Depois dela, a IA não responde sozinha por 7 dias."
+            ),
+            partes=(dict(PARTE_CARTAO), _texto(TEXTO_NAO_PAGO_BRINDE)),
+            atraso_min=180,
+            # A espera da madrugada: o que vence às 21h01 sai às 9h (12 h depois).
+            validade=_h(14),
+            lojas_duoke=SHOPEE_BRINDE,
+            janela=(time(9, 0), time(21, 0)),
+            # Em TODAS as lojas (o dono), a IA no automático também: em produção, 420
+            # linhas do `shopee_nao_pago` pularam com `ia_no_automatico` nas lojas com
+            # a IA ligada. A resposta do comprador vai para pessoa (`ia._talvez_enviar`).
+            condicoes={"um_por_comprador_h": 168, "com_ia_no_automatico": True},
+            campanha=True,
+            lacunas=("brinde_oferta",),
+            duoke_nao_manda=True,
+        ),
         Automacao(
             codigo="shopee_avaliacao_boa",
             plataforma="shopee",
@@ -1075,6 +1199,37 @@ def _montar() -> dict[str, Automacao]:
             compara_na_conversa=True,
             comparar=("evento", timedelta(0), _h(1)),
             atraso_max_duoke=_h(1),
+        ),
+        # O brinde do pedido não pago no TikTok (o dono, 05/11/2026): o mesmo texto, o
+        # mesmo atraso e a mesma janela da Shopee, só o texto (sem cartão: `_conferir_parte`
+        # é só da Shopee). Sem `campanha`: ela é o `auto_reply` da Shopee, que aqui não
+        # existe. O pedido vem da rodada `indexar.indexar_tiktok_nao_pagos`.
+        Automacao(
+            codigo="tiktok_nao_pago_brinde",
+            plataforma="tiktok",
+            canal=CANAL_CHAT,
+            nome="Pedido não pago, com brinde (AirTag ou chaveiro)",
+            tipo=TIPO_NAO_PAGO_BRINDE,
+            gatilho=GATILHO_NAO_PAGO,
+            alvo=ALVO_PEDIDO,
+            familia=FAMILIA_PEDIDO,
+            descricao=(
+                "Pedido criado e ainda não pago → 3 h depois da criação, das 9h às 21h, uma vez "
+                "por pedido e uma por comprador em 7 dias: 1 AirTag para celular, 1 chaveiro para "
+                "mala. Só para quem já tem conversa com a loja. Em Enviar, confere no TikTok, na "
+                "hora, que o pedido segue não pago. O Duoke não manda esta mensagem. Depois dela, "
+                "a IA não responde sozinha por 7 dias."
+            ),
+            partes=(_texto(TEXTO_NAO_PAGO_BRINDE),),
+            atraso_min=180,
+            # A espera da madrugada, como na Shopee. O TikTok cancela às 24 h da criação
+            # (155 de 155 medidos): o que vence às 21h01 sai às 9h, com 15 h de pedido.
+            validade=_h(14),
+            lojas_duoke=TIKTOK_BRINDE,
+            janela=(time(9, 0), time(21, 0)),
+            condicoes={"um_por_comprador_h": 168, "com_ia_no_automatico": True},
+            lacunas=("brinde_oferta",),
+            duoke_nao_manda=True,
         ),
         Automacao(
             codigo="ml_menu",
@@ -2331,9 +2486,14 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
         return "sem_texto"
     if f.get("canal_sem_acesso"):
         return "loja_sem_acesso"
-    if f.get("canal_auto") and aut.alvo != ALVO_AVALIACAO:
+    if (
+        f.get("canal_auto")
+        and aut.alvo != ALVO_AVALIACAO
+        and not (aut.tipo == TIPO_NAO_PAGO_BRINDE and _cond(regra, aut, "com_ia_no_automatico"))
+    ):
         # A avaliação na loja com a IA no automático é só o CHAT dela
-        # (`chat_segurado_pela_ia`, abaixo): a pública não passa pela IA.
+        # (`chat_segurado_pela_ia`, abaixo): a pública não passa pela IA. O brinde
+        # (05/11/2026) tem a condição ligada: sai também nessas lojas.
         return "ia_no_automatico"
     if f.get("conversa_bloqueada"):
         return "conversa_bloqueada"
@@ -2425,6 +2585,18 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
         # Um por comprador em 24 h (`UM_POR_COMPRADOR_H`, medido no Duoke).
         if f.get("ja_recebeu"):
             return "ja_recebeu"
+    elif aut.tipo == TIPO_NAO_PAGO_BRINDE:
+        # 05/11/2026: o status precisa ser UNPAID (o índice que sumiu não é "não
+        # pago"). O índice pode estar velho às 3 h: no modo enviar, o motor ainda
+        # confere na plataforma (`automacoes._status_ao_vivo`). O cancelado já saiu acima.
+        if f.get("pedido_pago"):
+            return "pedido_pago"
+        if f.get("status_pedido") != "UNPAID":
+            return "status_mudou"
+        if f.get("brinde") not in BRINDE_OFERTA:
+            return "sem_brinde"
+        if f.get("ja_recebeu"):
+            return "ja_recebeu"
     elif aut.tipo in (TIPO_AVALIACAO_BOA, TIPO_AVALIACAO_RUIM):
         if f.get("estrelas_mudaram"):
             return "estrelas_mudaram"
@@ -2461,6 +2633,7 @@ _TIPOS_CAMPANHA = (
     TIPO_ENTREGUE,
     TIPO_POS,
     TIPO_NAO_PAGO,
+    TIPO_NAO_PAGO_BRINDE,
 )
 
 

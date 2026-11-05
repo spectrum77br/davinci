@@ -26,7 +26,10 @@ leitura das caixas nos ímpares; UMA por vez, trava no Redis):
          pela leitura da caixa (`descobrir_tiktok_pedidos`); a avaliação pela
          leitura das avaliações (`descobrir_avaliacoes`) — esta ENVIA desde
          29/10/2026 (a resposta pública pelo `enviar.
-         enviar_automatica_resposta_publica`, o chat como as outras).
+         enviar_automatica_resposta_publica`, o chat como as outras);
+       • (05/11/2026) o brinde do pedido não pago, a mesma descoberta 3 h depois
+         da criação: em enviar, confere na plataforma antes (`_status_ao_vivo`). A do
+         TikTok tem o índice alimentado por `indexar.indexar_tiktok_nao_pagos`.
      Grava `INSERT … ON CONFLICT DO NOTHING` pela chave única.
   2. DECIDIR — as linhas que venceram (até 200 por rodada, no máximo 50 da
      mesma regra: a fila parada de uma loja não segura as outras): validade,
@@ -211,6 +214,9 @@ SHOPEE_PEDIDO = r"^[0-9]{6}[0-9A-Z]{8}$"
 _STATUS_SEM_ACESSO = ("sem_escopo", "desligado")
 _SITUACOES_CANCELADO = ("12", "excluido")
 _STATUS_INDICE_CANCELADO = ("CANCELLED", "IN_CANCEL")
+# O brinde (05/11/2026): o que NÃO prova pagamento no índice (`_comprador_pagou_outro`).
+_STATUS_INDICE_SEM_PAGAMENTO = ("", "UNPAID", *_STATUS_INDICE_CANCELADO)
+JANELA_PAGOU_OUTRO = timedelta(hours=48)
 # Bling no fluxo de devolução (Resolvido, Aguardando Devolução...): o
 # entregue e o pós não vão (`automacoes_catalogo.SITUACOES_BLING_DEVOLUCAO`).
 _SITUACOES_DEVOLUCAO = cat.SITUACOES_BLING_DEVOLUCAO
@@ -475,7 +481,9 @@ def _linha_registro(
         "visto_em": agora,
         "devido_em": devido_em,
         "estado": cat.ESTADO_AGENDADO,
-        "duoke": cat.DUOKE_PENDENTE,
+        # O que o Duoke não manda (o brinde, 05/11/2026) nem entra no comparador: o
+        # pedido cancelado depois da oferta não é "mandaria para cancelado".
+        "duoke": cat.DUOKE_NAO_SE_APLICA if aut.duoke_nao_manda else cat.DUOKE_PENDENTE,
     }
 
 
@@ -655,20 +663,32 @@ async def _conversas_do_comprador(
 
 async def _compradores_do_pedido(
     session: AsyncSession, pares: list[tuple[UUID, str]]
-) -> dict[tuple[UUID, str], tuple[str, str | None, datetime | None, float | None]]:
-    """(loja, pedido) → (comprador, status, criado_em, total) pelo índice do cartão "Cliente"."""
+) -> dict[tuple[UUID, str], tuple[str, str | None, datetime | None, float | None, str | None]]:
+    """(loja, pedido) → (comprador, status, criado_em, total, itens): o índice do "Cliente"."""
     if not pares:
         return {}
     pedidos = sorted({p for _, p in pares})
     linhas = (
         await session.execute(
             select(
-                _P.integration_id, _P.pedido, _P.comprador_id, _P.status, _P.criado_em, _P.total
+                _P.integration_id,
+                _P.pedido,
+                _P.comprador_id,
+                _P.status,
+                _P.criado_em,
+                _P.total,
+                _P.itens_resumo,
             ).where(_P.pedido.in_(pedidos))
         )
     ).all()
     return {
-        (r.integration_id, r.pedido): (r.comprador_id, r.status, _utc(r.criado_em), r.total)
+        (r.integration_id, r.pedido): (
+            r.comprador_id,
+            r.status,
+            _utc(r.criado_em),
+            r.total,
+            r.itens_resumo,
+        )
         for r in linhas
     }
 
@@ -1051,17 +1071,25 @@ async def descobrir_nao_pagos(
     (`visto_em`, `decidido_em`, o atraso real da conta) e é a diferença
     combinada `visto_de_hora_em_hora`. Uma vez por pedido (a chave). Nenhuma
     chamada à plataforma.
+
+    O brinde (`shopee_nao_pago_brinde`, 05/11/2026) nasce aqui também, com o
+    `devido_em` de 3 h: a chave única é por automação, e o LOOKBACK de 4 h pega o
+    pedido antes de vencer. O status confere de novo na decisão (o índice envelhece).
+    A plataforma é a da automação: o TikTok entrou com o brinde; o ML não tem regra aqui.
     """
     ativas = _ativas_do_gatilho(regras, cat.GATILHO_NAO_PAGO)
     if not ativas:
         return 0
     piso = max(agora - LOOKBACK_NAO_PAGO, motor_desde)
     integs = sorted({i for por in ativas.values() for i in por}, key=str)
+    plataformas = sorted({cat.CATALOGO[codigo].plataforma for codigo in ativas})
     linhas = (
         await session.execute(
-            select(_P.integration_id, _P.pedido, _P.comprador_id, _P.criado_em).where(
+            select(
+                _P.integration_id, _P.plataforma, _P.pedido, _P.comprador_id, _P.criado_em
+            ).where(
                 _P.integration_id.in_(integs),
-                _P.plataforma == "shopee",
+                _P.plataforma.in_(plataformas),
                 _P.status == "UNPAID",
                 _P.criado_em >= piso,
                 _P.criado_em <= agora,
@@ -1082,6 +1110,8 @@ async def descobrir_nao_pagos(
             regra = por_loja.get(r.integration_id)
             criado = _utc(r.criado_em)
             if regra is None or criado is None or criado < _desde_da_regra(regra, piso):
+                continue
+            if r.plataforma != aut.plataforma:
                 continue
             novas.append(
                 _linha_registro(
@@ -1298,9 +1328,10 @@ class _Contexto:
     duoke_pedido: dict[UUID, list[datetime]] = field(default_factory=dict)
     # O nome de cada loja (o cupom do "carrinho" é pelo tipo dela: celular ou mala).
     nomes_loja: dict[UUID, str] = field(default_factory=dict)
-    # Pedido não pago: (loja, comprador) → o `devido_em` dos "carrinhos" que a
-    # rodada já decidiu mandar (um por comprador em 24 h, também no mesmo lote).
-    recebidos: dict[tuple[UUID, str], list[datetime]] = field(default_factory=dict)
+    # Pedido não pago: (automação, loja, comprador) → o `devido_em` dos que a rodada
+    # já decidiu mandar (um por comprador no intervalo da regra, também no mesmo
+    # lote). Por automação (05/11/2026): o cupom e o brinde não contam um para o outro.
+    recebidos: dict[tuple[str, UUID, str], list[datetime]] = field(default_factory=dict)
     # O relógio real do começo: a reconferência anda o `agora` pelo que passou.
     inicio: float = field(default_factory=_time.monotonic)
     # Depois disto (relógio monotônico) nenhum envio novo começa (`ORCAMENTO_ENVIO_S`).
@@ -1524,6 +1555,7 @@ async def _fatos_de_pedido(
             "pedido_pago": x.pedido in pago_em,
             "pago_em": pago_em.get(x.pedido),
             "total_pedido": idx[3] if idx else None,
+            "brinde": cat.brinde_do_resumo(idx[4]) if idx else None,
         }
     return saida
 
@@ -1807,9 +1839,17 @@ async def _chats_duoke_da_avaliacao(
 
 
 async def _ja_recebeu_carrinho(
-    session: AsyncSession, linha: AtendimentoAutomacaoRegistro, horas: float
+    session: AsyncSession,
+    linha: AtendimentoAutomacaoRegistro,
+    horas: float,
+    *,
+    so_reais: bool = False,
 ) -> bool:
-    """O comprador já tem um "carrinho" do DaVinci (simulado ou enviado) nas `horas` antes."""
+    """O comprador já tem um "carrinho" do DaVinci (simulado ou enviado) nas `horas` antes.
+
+    Da MESMA automação: o cupom não conta para o brinde, nem o contrário. `so_reais`
+    (o brinde em enviar, 05/11/2026): a oferta só simulada não segura a de verdade.
+    """
     if not linha.comprador_id or linha.devido_em is None:
         return False
     devido = _utc(linha.devido_em)
@@ -1821,10 +1861,53 @@ async def _ja_recebeu_carrinho(
             _R.comprador_id == linha.comprador_id,
             _R.id != linha.id,
             _R.estado.in_(
-                (cat.ESTADO_SIMULADO, cat.ESTADO_ENVIANDO, cat.ESTADO_ENVIADO, cat.ESTADO_REVISAR)
+                (cat.ESTADO_ENVIANDO, cat.ESTADO_ENVIADO, cat.ESTADO_REVISAR)
+                if so_reais
+                else (
+                    cat.ESTADO_SIMULADO,
+                    cat.ESTADO_ENVIANDO,
+                    cat.ESTADO_ENVIADO,
+                    cat.ESTADO_REVISAR,
+                )
             ),
             _R.devido_em >= devido - timedelta(hours=horas),
             _R.devido_em <= devido,
+        )
+        .limit(1)
+    )
+    return achou is not None
+
+
+async def _comprador_pagou_outro(
+    session: AsyncSession, linha: AtendimentoAutomacaoRegistro, *, agora: datetime
+) -> bool:
+    """O mesmo comprador, na mesma loja, tem OUTRO pedido pago nas últimas 48 h? (só o brinde)
+
+    05/11/2026: quem refez o pedido e pagou seguia recebendo "seu pedido ainda está
+    aguardando pagamento": o pedido velho continua UNPAID às 3 h (89% dos cancelados),
+    e pagá-lo pelo brinde vira dois celulares e uma devolução. Em produção, 30 dias:
+    111 de 4.481 não pagos de celular ou mala têm pedido pago do mesmo produto e
+    comprador até 3 h depois. Pago = status fora de não pago e cancelado no índice, ou
+    já no Bling (que só recebe pedido pago: o índice é de hora em hora e pode estar velho).
+    """
+    if not linha.comprador_id or not linha.pedido:
+        return False
+    no_bling = (
+        select(_B.id)
+        .where(
+            _B.numeroloja == _P.pedido,
+            func.coalesce(_B.situacao, "").not_in(_SITUACOES_CANCELADO),
+        )
+        .exists()
+    )
+    achou = await session.scalar(
+        select(_P.pedido)
+        .where(
+            _P.integration_id == linha.integration_id,
+            _P.comprador_id == linha.comprador_id,
+            _P.pedido != linha.pedido,
+            _P.criado_em >= agora - JANELA_PAGOU_OUTRO,
+            or_(func.coalesce(_P.status, "").not_in(_STATUS_INDICE_SEM_PAGAMENTO), no_bling),
         )
         .limit(1)
     )
@@ -1860,10 +1943,23 @@ async def _extras(
                 extras["nao_e_primeira"] = await _nao_e_primeira(session, linha)
         if aut is not None and aut.tipo in (cat.TIPO_DUVIDA_1, cat.TIPO_DUVIDA_2):
             extras["ja_comprou"] = await _ja_comprou(session, linha, conversa)
-        if aut is not None and aut.tipo == cat.TIPO_NAO_PAGO:
+        if aut is not None and aut.tipo in (cat.TIPO_NAO_PAGO, cat.TIPO_NAO_PAGO_BRINDE):
             regra = ctx.regras.get((linha.automacao, linha.integration_id))
             horas = float(cat._cond(regra, aut, "um_por_comprador_h", cat.UM_POR_COMPRADOR_H))
-            extras["ja_recebeu"] = await _ja_recebeu_carrinho(session, linha, horas)
+            extras["ja_recebeu"] = await _ja_recebeu_carrinho(
+                session,
+                linha,
+                horas,
+                so_reais=aut.tipo == cat.TIPO_NAO_PAGO_BRINDE
+                and regra is not None
+                and _modo_efetivo(regra)[0] == cat.MODO_ENVIAR,
+            )
+        if (
+            aut is not None
+            and aut.tipo == cat.TIPO_NAO_PAGO_BRINDE
+            and await _comprador_pagou_outro(session, linha, agora=ctx.agora)
+        ):
+            extras["pedido_pago"] = True
         av = avaliacoes.get(linha.id)
         if aut is not None and aut.alvo == cat.ALVO_AVALIACAO and av is not None:
             menor, maior = aut.estrelas or (1, 5)
@@ -2070,6 +2166,7 @@ async def _contexto(
         if x.pedido
         and (aut_x := cat.CATALOGO.get(x.automacao)) is not None
         and aut_x.alvo == cat.ALVO_PEDIDO
+        and not aut_x.duoke_nao_manda
         and (r := regras.get((x.automacao, x.integration_id))) is not None
         and _modo_efetivo(r)[0] == cat.MODO_ENVIAR
     ]
@@ -2220,15 +2317,20 @@ def _avaliar(
         fatos["valor_cupom"] = valor
         if valor is not None:
             valores = {"valor_cupom": str(valor)}
+    if aut.tipo == cat.TIPO_NAO_PAGO_BRINDE and fatos.get("brinde") in cat.BRINDE_OFERTA:
+        valores = {"brinde_oferta": cat.BRINDE_OFERTA[fatos["brinde"]]}
+    if aut.tipo in (cat.TIPO_NAO_PAGO, cat.TIPO_NAO_PAGO_BRINDE):
         if linha.comprador_id and not fatos.get("ja_recebeu"):
-            # Um por comprador no intervalo da regra (24 h), também no mesmo lote.
+            # Um por comprador no intervalo da regra, também no mesmo lote.
             janela = timedelta(
                 hours=float(cat._cond(regra, aut, "um_por_comprador_h", cat.UM_POR_COMPRADOR_H))
             )
             devido = _utc(linha.devido_em)
             fatos["ja_recebeu"] = any(
                 devido - janela <= t <= devido
-                for t in ctx.recebidos.get((linha.integration_id, linha.comprador_id), [])
+                for t in ctx.recebidos.get(
+                    (linha.automacao, linha.integration_id, linha.comprador_id), []
+                )
             )
     if modo == cat.MODO_ENVIAR and fatos.get("canal_erro"):
         return _Veredito("esperar", modo)  # a leitura da loja falhou agora: a próxima rodada
@@ -2238,7 +2340,8 @@ def _avaliar(
         # passar do `devido_em` + a espera do Duoke; e confere se ele mandou
         # DEPOIS do gatilho (na conversa, ou — nas do pedido — pelo cartão do
         # pedido ou pela conversa do pedido: `duoke_dos_pedidos`, no `_contexto`).
-        if _em_transicao(regra, agora):
+        # O que o Duoke não manda (o brinde, 05/11/2026) não espera nem confere o Duoke.
+        if _em_transicao(regra, agora) and not aut.duoke_nao_manda:
             espera = _utc(linha.devido_em) + aut.espera_duoke
             canal = ctx.canais.get((linha.integration_id, aut.canal))
             lido = _utc(canal.ultimo_ok_em) if canal is not None else None
@@ -2250,7 +2353,7 @@ def _avaliar(
             lida_av = fatos.get("avaliacao_lida_em")
             if aut.alvo == cat.ALVO_AVALIACAO and (lida_av is None or _utc(lida_av) < espera):
                 return _Veredito("esperar", modo)
-        duoke = fatos.get("duoke_depois") or []
+        duoke = [] if aut.duoke_nao_manda else (fatos.get("duoke_depois") or [])
         if duoke:
             depois_da_troca = regra.enviar_desde is not None and any(
                 t >= _utc(regra.enviar_desde) for t in duoke
@@ -2283,6 +2386,16 @@ def _avaliar(
     )
     if motivos:
         return _Veredito("pular", modo, "texto_invalido")
+    # O brinde do TikTok (05/11/2026): sem conversa e sem a chave de abrir, não sai. Vale
+    # no modo seco também, para a simulação não prometer os ~21 por dia quando só os ~5
+    # com conversa sairiam. A API não tem o `to_id` da Shopee.
+    abre_conversa_tiktok = (
+        aut.plataforma == "tiktok" and aut.tipo == cat.TIPO_NAO_PAGO_BRINDE and conversa is None
+    )
+    if abre_conversa_tiktok and not (
+        get_settings().atendimento_tiktok_criar_conversa and ctx.compradores.get(linha.id)
+    ):
+        return _Veredito("pular", modo, "sem_conversa")
     if fatos.get("sem_chat"):
         # A avaliação (4–5★ ou 1–3★) sem como mandar o chat: só a resposta
         # pública (`decidir` já pulou a regra que não tem pública).
@@ -2307,6 +2420,8 @@ def _avaliar(
         return _Veredito("pular", modo, teto, teto if modo == cat.MODO_SIMULAR else None)
     if modo == cat.MODO_ENVIAR:
         so_publica = all(p.get("tipo") == cat.PARTE_RESPOSTA_PUBLICA for p in partes)
+        if abre_conversa_tiktok:
+            return _Veredito("enviar", modo, partes=partes)  # `_enviar` abre antes de mandar
         if conversa is None and not so_publica:
             # Sem conversa no DaVinci: só a Shopee manda, pelo comprador do
             # pedido (`to_id`). Sem ele ainda, espera o índice trazê-lo. (A
@@ -2424,6 +2539,90 @@ async def _parou(
     await session.commit()
 
 
+async def _status_ao_vivo(session: AsyncSession, linha: AtendimentoAutomacaoRegistro) -> str | None:
+    """O status do pedido NA PLATAFORMA, agora (None = não deu: a próxima rodada). UM GET.
+
+    O índice é de hora em hora, com janela de 2 h: às 3 h da criação, o status
+    dele pode estar velho (05/11/2026). Só o modo enviar do brinde chega aqui.
+    No TikTok, o `get_order_detail` devolve {} no erro da API: vira "não sei".
+    """
+    from app.services.atendimento import clientes
+
+    # Nada de transação aberta durante a chamada à plataforma.
+    await session.commit()
+    integracao = await session.get(Integration, linha.integration_id)
+    if integracao is None or not linha.pedido:
+        return None
+    try:
+        cliente = await clientes.cliente_da_integracao(integracao)
+        if linha.plataforma == "tiktok":
+            pedido = await cliente.get_order_detail(linha.pedido) or {}
+            if str(pedido.get("id") or "").strip() != linha.pedido:
+                return None  # o pedido não veio: nunca o status de outro
+            return str(pedido.get("status") or "").strip().upper() or None
+        pedido = await cliente.get_order_buyer(linha.pedido) or {}
+    except Exception as e:  # noqa: BLE001 — erro da plataforma = "não sei": não manda
+        logger.info(
+            "atendimento_automacoes_status_ao_vivo_falhou",
+            automacao=linha.automacao,
+            integration_id=str(linha.integration_id),
+            erro=type(e).__name__,
+        )
+        return None
+    return str(pedido.get("order_status") or "").strip().upper() or None
+
+
+async def _abrir_conversa_tiktok(
+    session: AsyncSession,
+    ctx: _Contexto,
+    aut: cat.Automacao,
+    regra: AtendimentoAutomacaoRegra,
+    linha: AtendimentoAutomacaoRegistro,
+) -> AtendimentoConversa | None:
+    """Abre a conversa do comprador (`atendimento_tiktok_criar_conversa`, 05/11/2026).
+
+    Sem resposta: fica `agendado` (a doc diz que abrir de novo devolve o mesmo id). Recusa
+    (45109003, comprador fora dos critérios): `pulado`, sem tentar de novo. Nada de
+    transação aberta durante a chamada. None = nada a mandar nesta rodada.
+    """
+    from app.services.atendimento import clientes
+    from app.services.atendimento import tiktok as adaptador_tiktok
+
+    await session.commit()
+    integracao = await session.get(Integration, linha.integration_id)
+    canal = ctx.canais.get((linha.integration_id, aut.canal))
+    comprador = ctx.compradores.get(linha.id)
+    if integracao is None or canal is None or not comprador:
+        return None
+    try:
+        cliente = await clientes.cliente_da_integracao(integracao)
+    except Exception as e:  # noqa: BLE001 — sem cliente, nada saiu: a próxima rodada
+        logger.info(
+            "atendimento_automacoes_abrir_conversa_falhou",
+            integration_id=str(linha.integration_id),
+            erro=type(e).__name__,
+        )
+        return None
+    aberta = await adaptador_tiktok.abrir_conversa(
+        session, canal, integracao, cliente, comprador_id=comprador
+    )
+    if aberta.conversa is not None:
+        linha.conversa_id = aberta.conversa.id
+        await session.commit()
+    elif aberta.recusada:
+        _fechar(
+            linha,
+            estado=cat.ESTADO_PULADO,
+            agora=ctx.agora,
+            modo=cat.MODO_ENVIAR,
+            motivo="sem_conversa",
+            regra=regra,
+        )
+        linha.erro = (aberta.erro or "")[:200] or None
+        await session.commit()
+    return aberta.conversa
+
+
 async def _enviar(
     session: AsyncSession,
     ctx: _Contexto,
@@ -2484,8 +2683,30 @@ async def _enviar(
         )
         await session.commit()
         return
+    if aut.tipo == cat.TIPO_NAO_PAGO_BRINDE:
+        # A promessa do brinde só vai para quem AINDA não pagou (05/11/2026): a
+        # conferência na Shopee, logo antes de marcar `enviando`.
+        status = await _status_ao_vivo(session, linha)
+        if status is None:
+            return
+        if status != "UNPAID":
+            _fechar(
+                linha,
+                estado=cat.ESTADO_PULADO,
+                agora=novo.agora,
+                modo=veredito.modo,
+                motivo="status_mudou",
+                regra=regra,
+            )
+            await session.commit()
+            return
     partes = veredito.partes
     conversa = novo.conversas.get(linha.conversa_id) if linha.conversa_id else None
+    if conversa is None and aut.plataforma == "tiktok" and aut.tipo == cat.TIPO_NAO_PAGO_BRINDE:
+        # Só chega aqui com a chave ligada (`_avaliar`), depois da conferência ao vivo.
+        conversa = await _abrir_conversa_tiktok(session, novo, aut, regra, linha)
+        if conversa is None:
+            return
     to_id = novo.compradores.get(linha.id)
     nome = novo.nomes.get(linha.id)
     linha.estado = cat.ESTADO_ENVIANDO
@@ -2713,11 +2934,11 @@ async def _decidir_uma(
     )
     ctx.contagem[(regra.integration_id, aut.familia, "seco")] += 1
     ctx.contagem[(regra.integration_id, aut.codigo, "seco")] += 1
-    if aut.tipo == cat.TIPO_NAO_PAGO and linha.comprador_id:
-        # O próximo "carrinho" do mesmo comprador no lote já vê este.
-        ctx.recebidos.setdefault((linha.integration_id, linha.comprador_id), []).append(
-            _utc(linha.devido_em)
-        )
+    if aut.tipo in (cat.TIPO_NAO_PAGO, cat.TIPO_NAO_PAGO_BRINDE) and linha.comprador_id:
+        # O próximo do mesmo comprador no lote já vê este.
+        ctx.recebidos.setdefault(
+            (linha.automacao, linha.integration_id, linha.comprador_id), []
+        ).append(_utc(linha.devido_em))
     if linha.conversa_id:
         # A próxima linha desta conversa na mesma rodada já vê esta como saída.
         ctx.registro.setdefault(linha.conversa_id, []).append(

@@ -428,6 +428,9 @@ ROTAS_DE_QUEM_RESPONDE = frozenset(
         ("POST", "/api/atendimento/pedidos/{numero_bling}/troca"),
         ("POST", "/api/atendimento/trocas/{troca_id}/retomar"),
         ("POST", "/api/atendimento/pedidos/{numero_bling}/troca/oferta"),
+        # O brinde do pedido não pago (05/11/2026): as mesmas 3 equipes, nas lojas delas.
+        ("POST", "/api/atendimento/brindes/{integration_id}/{pedido}/adicionar"),
+        ("POST", "/api/atendimento/brindes/{integration_id}/{pedido}/dispensar"),
     }
 )
 

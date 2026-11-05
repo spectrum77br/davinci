@@ -23,6 +23,7 @@ from app.models.atendimento import (
     AtendimentoSiteProduto,
     AtendimentoTroca,
 )
+from app.models.atendimento_brinde import AtendimentoBrinde
 from app.models.atendimento_lojas_pessoa import AtendimentoLojaPessoa
 from app.models.atendimento_zap import (
     AtendimentoZapApp,
@@ -341,6 +342,7 @@ __all__ = [
     "AtendimentoAutomacaoRegra",
     "AtendimentoAvaliacao",
     "AtendimentoAvaliacaoLoja",
+    "AtendimentoBrinde",
     "AtendimentoCanal",
     "AtendimentoCarrinho",
     "AtendimentoCategoria",

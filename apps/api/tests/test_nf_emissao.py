@@ -111,3 +111,26 @@ def test_transformar_pedido_varias_linhas():
     linhas = nf_emissao.transformar_pedido(r, itens)
     assert [l.sku for l in linhas] == ["a", "b"]
     assert [l.valor_total for l in linhas] == [Decimal("100.00"), Decimal("400.00")]
+
+
+def test_piso_de_um_centavo_na_linha_com_base_maior_que_zero():
+    """O brinde (05/11/2026): R$ 0,01 x rateio x 2% arredondava para 0,00, e o Upseller recusa
+    "O preço unitário deve ser um número entre 0,01 e 999999999": o pedido ficava sem NF."""
+    for pct, unit in (("2", "0.006"), ("1", "0.006"), ("70", "0.006"), ("0.1", "0.01")):
+        r = _Regra(nf_cheia=False, percentual=Decimal(pct), sku_fonte="e3", nome_fonte="embalagem")
+        linha = nf_emissao.transformar_item(r, _item(sku="a019.sp", unit=unit))
+        assert linha.valor_unitario == Decimal("0.01"), pct
+        assert linha.valor_total == Decimal("0.01"), pct
+
+
+def test_piso_com_quantidade_e_o_que_nao_muda():
+    r = _Regra(nf_cheia=False, percentual=Decimal("2"))
+    # 2 × R$ 0,10 a 2% = 0,004: o piso vale no unitário e o total acompanha.
+    linha = nf_emissao.transformar_item(r, _item(qtd=2, unit="0.10"))
+    assert (linha.valor_unitario, linha.valor_total) == (Decimal("0.01"), Decimal("0.02"))
+    # Item de graça segue zero, e a quantidade zero não divide.
+    assert nf_emissao.transformar_item(r, _item(unit="0")).valor_total == Decimal("0.00")
+    assert nf_emissao.transformar_item(r, _item(qtd=0, unit="10")).valor_unitario == Decimal("0.00")
+    # Quem já dá 1 centavo ou mais não muda.
+    linha = nf_emissao.transformar_item(r, _item(unit="1000"))
+    assert (linha.valor_unitario, linha.valor_total) == (Decimal("20.00"), Decimal("20.00"))

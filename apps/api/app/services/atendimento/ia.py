@@ -6689,6 +6689,34 @@ async def _registrar_auto_envio(
     )
 
 
+# O brinde do pedido não pago (05/11/2026): a IA não sabe da oferta e poderia negar
+# o brinde. Depois da oferta enviada, a conversa fica com pessoa por 7 dias.
+MOTIVO_OFERTA_DE_BRINDE = "oferta_de_brinde"
+JANELA_OFERTA_DE_BRINDE = timedelta(days=7)
+
+
+async def _oferta_de_brinde_recente(session: AsyncSession, conversa: AtendimentoConversa) -> bool:
+    """A oferta do brinde saiu nesta conversa nos últimos 7 dias? Pelo registro do motor."""
+    from app.models import AtendimentoAutomacaoRegistro as Registro
+    from app.services.atendimento import automacoes_catalogo as catalogo
+    from app.services.atendimento.constantes import AUTOMACOES_BRINDE
+
+    achou = await session.scalar(
+        select(Registro.id)
+        .where(
+            Registro.conversa_id == conversa.id,
+            Registro.automacao.in_(AUTOMACOES_BRINDE),
+            # O envio ambíguo também: a pessoa pode ter lido e pago. O preso
+            # (`aposentar_enviando_presos`) não tem `decidido_em`: vale o `updated_at`.
+            Registro.estado.in_(catalogo.ESTADOS_OFERTA_BRINDE),
+            func.coalesce(Registro.decidido_em, Registro.updated_at)
+            >= datetime.now(UTC) - JANELA_OFERTA_DE_BRINDE,
+        )
+        .limit(1)
+    )
+    return achou is not None
+
+
 async def _talvez_enviar(
     session: AsyncSession,
     conversa: AtendimentoConversa,
@@ -6711,6 +6739,11 @@ async def _talvez_enviar(
         do_agente = rascunho_do_agente(rascunho)
         from app.services.atendimento import nf_automatica
 
+        if await _oferta_de_brinde_recente(session, conversa):
+            # A sugestão fica para a pessoa; a conversa entra na Caixa Humano pela
+            # espera da IA (`humano.ia_sem_resposta`).
+            await _registrar_auto_envio(session, conversa, rascunho, MOTIVO_OFERTA_DE_BRINDE)
+            return False
         if do_agente and nf_automatica.candidato(rascunho):
             # Só a ação "Enviar o arquivo da NF" (28/10/2026, OK do Eduardo): o caminho
             # da NF sozinha, com as mesmas travas da conversa e as da NF — e as do

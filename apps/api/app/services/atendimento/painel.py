@@ -1660,6 +1660,25 @@ async def painel_da_conversa(
         session, "link_shopee", lambda: ids_shopee_do_painel(session, conversa, pedido), None, cid
     )
 
+    # O brinde do pedido não pago (05/11/2026): num SAVEPOINT, a tabela pode ainda
+    # não existir (o deploy do código antes do alembic). Só o banco; o clique confere.
+    brinde_bloco = None
+    if pedido is not None:
+        from app.services.atendimento import brinde as _brinde
+
+        brinde_bloco, _ = await _seguro(
+            session,
+            "brinde",
+            lambda: _brinde.bloco_do_painel(
+                session,
+                integration_id=conversa.integration_id,
+                pedido=pedido.numeroloja or conversa.pedido_marketplace,
+                user=user,
+            ),
+            None,
+            cid,
+        )
+
     observacoes_tela = observacoes if ve_margem(user) else observacoes_sem_margem(observacoes)
     return {
         "pedido": (
@@ -1695,5 +1714,6 @@ async def painel_da_conversa(
         "ag_cancelamento": ag_cancelamento,
         "sugestoes_troca": sugestoes_troca,
         "troca_aberta": aberta,
+        "brinde": brinde_bloco,
         "gerado_em": datetime.now(UTC).isoformat(),
     }
