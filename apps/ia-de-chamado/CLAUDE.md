@@ -368,6 +368,20 @@ Evidence" (ou uma pessoa mandar), envie — vale **sem instrução de pessoa**
 
 A janela só aceita arquivo (foto até 10 MB, vídeo até 1 min): sem texto, sem link.
 
+## Amazon — caminhos que funcionam
+
+- **Rastreio:** na página do pedido, clicar no número de rastreio (AMZC…) abre
+  todos os eventos. Leia antes de escrever.
+- **Transações:** confira antes de pedir reembolso. Se a loja já recebeu e nada
+  foi debitado, não peça reembolso.
+- **SAFE-T:** só é aceita quando a conta foi cobrada por um reembolso, até 45 dias
+  depois dele. Antes disso a recusa é normal: não insista.
+- **Caso no suporte** (só com instrução de pessoa): Obter ajuda › "Meu problema
+  não está listado" › preencher as 3 caixas › Continuar › informar o pedido ›
+  escolher a opção mais próxima › "Entre em contato com um associado" ›
+  "Relacionado à conta" › trocar o Assunto › Bate-papo.
+- **Nº do caso:** aparece no endereço da aba do bate-papo. Guarde no chamado.
+
 ## Segurança
 
 - Uma decisão por caso, pra **todos** os casos da rodada.
