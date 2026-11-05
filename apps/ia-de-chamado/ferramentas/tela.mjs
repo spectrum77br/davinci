@@ -126,7 +126,13 @@ function captchaNaPagina() {
 // numeradas na ordem da tela e marcadas com data-ia-campo pra achar de novo.
 // `rotulo` = o que a pessoa lê pra saber o que vai ali (label, aria, placeholder,
 // data-placeholder, texto em volta); `textos` = tudo isso, pra casar o pedido.
-function camposDaPagina() {
+//
+// 05/11 (288967): no Seller Central da Amazon a caixa de verdade fica dentro de
+// kat-input/kat-textarea (shadow DOM) e o formulário do suporte dentro de quadros
+// (iframe) — `campos` só achava a busca do topo e a IA desistia. Agora a busca
+// entra no shadow DOM, roda em cada quadro da mesma loja (veja `camposDeTudo`) e
+// `base` continua a numeração de onde o quadro anterior parou.
+function camposDaPagina(base = 0) {
   const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
   const sel = [
     "input:not([type])",
@@ -140,8 +146,18 @@ function camposDaPagina() {
     if (b.width > 0 && b.height > 0) return true;
     return false;
   };
-  const todos = [...document.querySelectorAll(sel)].filter(
-    (e) => !e.disabled && !e.readOnly && e.name !== "g-recaptcha-response",
+  const fundo = (raiz, acc = []) => {
+    for (const e of raiz.querySelectorAll("*")) {
+      acc.push(e);
+      if (e.shadowRoot) fundo(e.shadowRoot, acc);
+    }
+    return acc;
+  };
+  const tudo = fundo(document);
+  // caixa em shadow DOM: quem está na página (rótulo, vizinhos) é o componente dono
+  const dono = (e) => e.getRootNode().host || e;
+  const todos = tudo.filter(
+    (e) => e.matches(sel) && !e.disabled && !e.readOnly && e.name !== "g-recaptcha-response",
   );
   // arquivo costuma ser um input invisível dentro da área "Selecionar arquivos".
   // 05/10 (296301, recurso da TikTok): no cartão de foto o input fica DUAS camadas
@@ -152,10 +168,11 @@ function camposDaPagina() {
     return null;
   };
   const campos = todos.filter((e) => vis(e) || (e.type === "file" && areaDoArquivo(e)));
-  document.querySelectorAll("[data-ia-campo]").forEach((e) => e.removeAttribute("data-ia-campo"));
+  tudo.forEach((e) => e.removeAttribute("data-ia-campo"));
   const eCampo = new Set(campos);
-  const textoAntes = (el) => {
+  const textoAntes = (caixa) => {
     // último texto visível antes da caixa (rótulo solto, fora de <label>)
+    const el = dono(caixa);
     const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     let ultimo = "";
     for (let n = w.nextNode(); n; n = w.nextNode()) {
@@ -168,11 +185,12 @@ function camposDaPagina() {
     }
     return ultimo;
   };
-  const textoEmVolta = (el) => {
+  const textoEmVolta = (caixa) => {
     // sobe até achar um bloco com texto que não tenha outra caixa dentro
+    const el = dono(caixa);
     let a = el.parentElement;
     for (let i = 0; a && i < 5; i++, a = a.parentElement) {
-      if ([...eCampo].some((o) => o !== el && a.contains(o))) return "";
+      if ([...eCampo].some((o) => o !== caixa && a.contains(dono(o)))) return "";
       let t = norm(a.innerText);
       if (el.isContentEditable) t = norm(t.replace(norm(el.innerText), ""));
       if (t) return t.slice(0, 200);
@@ -196,13 +214,16 @@ function camposDaPagina() {
     return linhas.length ? [linhas[0], linhas.join(" ")] : [];
   };
   return campos.map((e, i) => {
-    const n = i + 1;
+    const n = base + i + 1;
     e.setAttribute("data-ia-campo", String(n));
     const porId = (ids) =>
       norm((ids || "").split(/\s+/).map((id) => document.getElementById(id)?.innerText || "").join(" "));
+    const h = dono(e) === e ? null : dono(e);
     const textos = [
       ...(e.type === "file" ? rotuloDoArquivo(e) : []),
       norm([...(e.labels || [])].map((l) => l.innerText).join(" ")),
+      norm(h?.getAttribute("label")),
+      norm(h?.getAttribute("aria-label")),
       norm(e.getAttribute("aria-label")),
       porId(e.getAttribute("aria-labelledby")),
       norm(e.getAttribute("placeholder")),
@@ -402,11 +423,52 @@ try {
   const saida = (o) => console.log(typeof o === "string" ? o : JSON.stringify(o, null, 1));
   const captcha = () => page.evaluate(captchaNaPagina).catch(() => null);
   const avisoCaptcha = (c) => `\n⚠ CAPTCHA NA TELA (${c}) — pare aqui, não tente passar (CLAUDE.md).`;
+  // 05/11 (288967): quadros (iframe) que importam = os visíveis e da MESMA loja. O
+  // de outro site (reCAPTCHA, anúncio) fica de fora: quem cuida dele é o `captcha`.
+  const quadrosDaLoja = async () => {
+    const host = (u) => {
+      try {
+        return new URL(u).host;
+      } catch {
+        return "";
+      }
+    };
+    const lista = [];
+    for (const f of page.frames()) {
+      if (f === page.mainFrame() || host(f.url()) !== host(page.url())) continue;
+      const caixa = await f.frameElement().then((h) => h?.boundingBox()).catch(() => null);
+      if (caixa && caixa.width > 1 && caixa.height > 1) lista.push(f);
+    }
+    return lista;
+  };
+  const camposDeTudo = async () => {
+    const lista = [];
+    for (const f of [page.mainFrame(), ...(await quadrosDaLoja())]) {
+      const achados = await f.evaluate(camposDaPagina, lista.length).catch(() => []);
+      lista.push(...achados.map((c) => ({ ...c, quadro: f })));
+    }
+    return lista;
+  };
+  // a caixa escolhida, esteja onde estiver (quadro, shadow DOM)
+  const alcaDoCampo = async (campo) =>
+    (
+      await campo.quadro.evaluateHandle((n) => {
+        const anda = (raiz) => {
+          for (const e of raiz.querySelectorAll("*")) {
+            if (e.getAttribute("data-ia-campo") === String(n)) return e;
+            const r = e.shadowRoot && anda(e.shadowRoot);
+            if (r) return r;
+          }
+          return null;
+        };
+        return anda(document);
+      }, campo.n)
+    ).asElement();
   // espera a caixa aparecer (chat que ainda está montando) até 15 s
   const acharCampo = async (alvo, soArquivo) => {
     let r;
     for (let i = 0; i < 8; i++) {
-      const lista = await page.evaluate(camposDaPagina);
+      const lista = await camposDeTudo();
       r = { ...escolherCampo(lista, alvo, soArquivo), lista };
       if (r.campo || r.achados?.length) return r;
       await espera(2000);
@@ -429,7 +491,12 @@ try {
     saida(page.url() + (c ? avisoCaptcha(c) : ""));
   } else if (cmd === "texto") {
     const cauda = Number(args[0] || 3000);
-    const t = await page.evaluate(() => document.body.innerText);
+    let t = await page.evaluate(() => document.body.innerText);
+    // 05/11 (288967): o conteúdo do Seller Central fica em quadro — vem depois do menu
+    for (const f of await quadrosDaLoja()) {
+      const q = await f.evaluate(() => document.body?.innerText || "").catch(() => "");
+      if (q.trim()) t += `\n[quadro]\n${q}`;
+    }
     const c = await captcha();
     saida(`[${page.url()}]\n` + t.slice(-cauda) + (c ? avisoCaptcha(c) : ""));
   } else if (cmd === "clicar") {
@@ -447,6 +514,33 @@ try {
       return { ok: true, achados: folhas.length, x: b.x + b.width / 2, y: b.y + b.height / 2, tag: e.tagName };
     }, args[0]);
     if (r.ok) await page.mouse.click(r.x, r.y);
+    else {
+      // 05/11 (288967): botão dentro de quadro ou de shadow DOM (kat-button)
+      for (const f of await quadrosDaLoja()) {
+        const h = (
+          await f.evaluateHandle((alvo) => {
+            const acc = [];
+            const anda = (raiz) => raiz.querySelectorAll("*").forEach((e) => {
+              acc.push(e);
+              if (e.shadowRoot) anda(e.shadowRoot);
+            });
+            anda(document);
+            const vis = (e) => { const b = e.getBoundingClientRect(); return b.width > 0 && b.height > 0; };
+            const texto = (e) => (e.innerText || e.getAttribute("label") || "").replace(/\s+/g, " ").trim();
+            const achados = acc.filter((e) => vis(e) && texto(e) === alvo);
+            return achados.filter((e) => !achados.some((o) => o !== e && e.contains(o))).pop() || null;
+          }, args[0])
+        ).asElement();
+        if (h) {
+          await h.evaluate((e) => e.scrollIntoView({ block: "center" }));
+          await h.click();
+          r.ok = true;
+          r.achados = 1;
+          r.quadro = true;
+          break;
+        }
+      }
+    }
     await espera(2500);
     saida({ ...r, captcha: await captcha() });
   } else if (cmd === "ponto") {
@@ -455,8 +549,15 @@ try {
     const c = await captcha();
     saida("ok" + (c ? avisoCaptcha(c) : ""));
   } else if (cmd === "campos") {
-    const lista = await page.evaluate(camposDaPagina);
-    saida({ url: page.url(), captcha: await captcha(), campos: lista.map(({ textos, proprios, ...c }) => c) });
+    const lista = await camposDeTudo();
+    saida({
+      url: page.url(),
+      captcha: await captcha(),
+      campos: lista.map(({ textos, proprios, quadro, ...c }) => ({
+        ...c,
+        ...(quadro === page.mainFrame() ? {} : { quadro: true }),
+      })),
+    });
   } else if (cmd === "escrever") {
     const [alvo, texto, enter] = args;
     const r = await acharCampo(alvo, false);
@@ -464,7 +565,7 @@ try {
       saida({ ok: false, erro: r.erro, achados: r.achados, campos: resumoLista(r.lista) });
       process.exitCode = 1;
     } else {
-      const h = await page.$(`[data-ia-campo="${r.campo.n}"]`);
+      const h = await alcaDoCampo(r.campo);
       await h.evaluate((e) => e.scrollIntoView({ block: "center" }));
       await h.click();
       // apaga o que já estava escrito (repetir o comando não duplica o texto)
@@ -514,7 +615,7 @@ try {
         saida({ ok: false, erro: r.erro, achados: r.achados, campos: resumoLista(r.lista) });
         process.exitCode = 1;
       } else {
-        const h = await page.$(`[data-ia-campo="${r.campo.n}"]`);
+        const h = await alcaDoCampo(r.campo);
         // 07/10 (290968): a caixa da contestação da TikTok aceita só
         // .jpg,.jpeg,.png,.mp4 — o .MOV sumia sem erro nenhum. Confere antes.
         const aceita = (await h.evaluate((e) => e.accept || "")).toLowerCase();
@@ -547,7 +648,7 @@ try {
               return null;
             });
           const antes = await lerArea();
-          if (bidi) await anexarPorDentro(page, `[data-ia-campo="${r.campo.n}"]`, arquivos);
+          if (bidi) await anexarPorDentro(r.campo.quadro, `[data-ia-campo="${r.campo.n}"]`, arquivos);
           else await h.uploadFile(...arquivos.map((a) => path.resolve(a)));
           await espera(3000);
           const nomes = await h.evaluate((e) => [...e.files].map((f) => f.name));
