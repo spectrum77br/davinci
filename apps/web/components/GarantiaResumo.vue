@@ -12,14 +12,20 @@
 // 04/11/2026 (as 3 partes do painel): é a aba Resumo, só do admin. As pílulas
 // de departamento ficam na página (a pílula escolhida chega em
 // `departamento`). Colunas: Vendas (Vendidas, Saldo e a % = gasto ÷ saldo ×
-// 100), Atendimento (como pediu: Mensagem, SAC, Devolução) e Manutenção
-// (Consertos, Perdidos e o Gasto da tela Reembolso). Clicar na linha (ou em
+// 100), Atendimento (como pediu: Mensagem, SAC, Devolução) e Manutenção (só o
+// Gasto da tela Reembolso — 05/11/2026: "em manutenção deixe somente o
+// gasto"; Consertos e Perdidos saíram). Desde 05/11/2026 também: só os
+// produtos da Tabela de Preços › Produtos (o vendido fora dela fica só na aba
+// Garantia), o Saldo é a conta da rentabilidade (o que sobrou: base −
+// comissão − frete − custo) e, com o período pela data da venda, o título diz
+// de quais vendas são os números. Clicar na linha (ou em
 // Vendidas, Saldo, %) abre todas as garantias do produto (emit 'abrir' com a
 // `chave`); o número das outras colunas abre só aqueles pedidos (os `ids`).
 import { AlertCircle, ArrowDown, ArrowUp, Loader2 } from 'lucide-vue-next'
 import {
   DEPARTAMENTOS,
   corpoDoResumo,
+  dataBR,
   errosDaApi,
   numeroBR,
   pctDoGasto,
@@ -78,10 +84,19 @@ const nomeDoDepartamento = computed(() =>
 function plano(t: string) {
   return t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
 }
+// Só os produtos da Tabela de Preços › Produtos (05/11/2026); o rodapé soma
+// só eles.
 const produtos = computed<ResumoProduto[]>(() => {
   const termo = plano(busca.value.trim())
   return (resumo.value?.produtos || []).filter((p) =>
-    p.departamento === props.departamento && (!termo || plano(`${p.nome} ${p.skus.join(' ')}`).includes(termo)))
+    p.na_tabela && p.departamento === props.departamento && (!termo || plano(`${p.nome} ${p.skus.join(' ')}`).includes(termo)))
+})
+// O período pela data da venda (05/11/2026): de quais vendas são os números.
+const periodoDasVendas = computed(() => {
+  const { periodo, de, ate } = props.filtros
+  if (periodo !== 'venda' || (!de && !ate)) return ''
+  if (de && ate) return `vendas de ${dataBR(de)} a ${dataBR(ate)}`
+  return de ? `vendas a partir de ${dataBR(de)}` : `vendas até ${dataBR(ate)}`
 })
 
 // As colunas de número. A explicação (`dica`) aparece ao passar o mouse no
@@ -99,13 +114,13 @@ type Coluna = { chave: string; grupo: Grupo; rotulo: string; dica: string; valor
 const taxa = (p: ResumoProduto) => (p.saldo ? (p.gasto || 0) / p.saldo : 0)
 const COLUNAS: Coluna[] = [
   { chave: 'vendidas', grupo: 'venda', rotulo: 'Vendidas', dica: 'Vendas com nota fiscal de produto: cada venda é uma garantia.', valor: (p) => p.vendidas },
-  { chave: 'saldo', grupo: 'venda', rotulo: 'Saldo', dica: 'Saldo de todas as vendas do produto, a conta da planilha de rentabilidade: base − comissão − frete do Bling (o "Saldo Bling" da Margem), em reais e sem os centavos; o valor exato aparece com o mouse.', valor: (p) => p.saldo || 0, soValores: true },
+  { chave: 'saldo', grupo: 'venda', rotulo: 'Saldo', dica: 'O que sobrou das vendas do produto, a conta da planilha de rentabilidade: base − comissão − frete − custo do produto (do Bling), em reais e sem os centavos; o valor exato aparece com o mouse.', valor: (p) => p.saldo || 0, soValores: true },
   { chave: 'pct', grupo: 'venda', rotulo: '%', dica: 'Gasto ÷ Saldo × 100', valor: taxa, soValores: true },
   { chave: 'mensagem', grupo: 'atendimento', rotulo: 'Mensagem', dica: 'O cliente escreveu pedindo a garantia no chat da plataforma ou por e-mail.', valor: (p) => p.origens.mensagem || 0 },
   { chave: 'sac', grupo: 'atendimento', rotulo: 'SAC', dica: 'O cliente preencheu o formulário do SAC no site.', valor: (p) => p.origens.sac || 0 },
   { chave: 'devolucao', grupo: 'atendimento', rotulo: 'Devolução', dica: 'Devolução por defeito (dano funcional, danificado ou manutenção).', valor: (p) => p.origens.devolucao || 0 },
-  { chave: 'consertos', grupo: 'manutencao', rotulo: 'Consertos', dica: 'Dos que pediram: o aparelho passou pela manutenção e voltou ao estoque (Novo ou Usado), na tela Devoluções.', valor: (p) => p.consertos || 0 },
-  { chave: 'perdidos', grupo: 'manutencao', rotulo: 'Perdidos', dica: 'Dos que pediram: o aparelho não volta a ser vendido — Extraviado (sumiu no caminho) ou Sucata.', valor: (p) => p.perdidos || 0 },
+  // Manutenção só com o Gasto (05/11/2026): o conserto e os perdidos continuam
+  // dentro dele (as três partes aparecem com o mouse).
   { chave: 'gasto', grupo: 'manutencao', rotulo: 'Gasto R$', dica: 'Dinheiro gasto com quem pediu garantia, da tela Reembolso: conserto (Manutenção) + aparelhos perdidos (Extraviado/Sucata) + reembolso ao cliente. Sem os centavos; o valor exato aparece com o mouse.', valor: (p) => p.gasto || 0, soValores: true },
 ]
 const colunas = computed(() => COLUNAS.filter((c) => !c.soValores || resumo.value?.ve_valores))
@@ -147,6 +162,8 @@ const GRUPOS: { chave: Grupo; nome: string; topo: string; titulo: string; celula
 ]
 const DO_GRUPO = Object.fromEntries(GRUPOS.map((g) => [g.chave, g])) as Record<Grupo, (typeof GRUPOS)[number]>
 const colunasDo = (g: Grupo) => colunas.value.filter((c) => c.grupo === g).length
+// Grupo sem coluna na tela não tem título (sem os reais, a Manutenção some).
+const gruposNaTela = computed(() => GRUPOS.filter((g) => colunasDo(g.chave)))
 function soma(campo: (p: ResumoProduto) => number) {
   return produtos.value.reduce((n, p) => n + campo(p), 0)
 }
@@ -208,12 +225,13 @@ function textoDaCelula(p: ResumoProduto, c: Coluna) {
         <div>
           <h3 class="flex items-center gap-2 text-base font-semibold">
             Resumo por produto — {{ nomeDoDepartamento }}
+            <span v-if="periodoDasVendas" class="text-sm font-normal text-muted-foreground" data-periodo-vendas>· {{ periodoDasVendas }}</span>
             <Loader2 v-if="carregando" class="size-4 animate-spin text-muted-foreground" />
           </h3>
           <p class="text-xs text-muted-foreground">
             {{ produtos.length }} produto(s) — clique no número para ver só aqueles pedidos · clique na linha para ver todas as garantias do produto · clique no título da coluna para ordenar ·
             <!-- A conta da %, discreta ("bem sutil, só para mim não esquecer", 30/10/2026). -->
-            <span title="saldo = base − comissão − frete do Bling (a planilha de rentabilidade) · gasto = tela Reembolso (conserto + perdidos + reembolso ao cliente) de quem pediu garantia" data-calculo>% = gasto ÷ saldo × 100</span>
+            <span title="saldo = base − comissão − frete − custo do produto (a planilha de rentabilidade: o que sobrou) · gasto = tela Reembolso (conserto + perdidos + reembolso ao cliente) de quem pediu garantia" data-calculo>% = gasto ÷ saldo × 100</span>
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
@@ -233,7 +251,7 @@ function textoDaCelula(p: ResumoProduto, c: Coluna) {
             <tr data-grupos>
               <th colspan="2" class="border-b border-border bg-background"></th>
               <th
-                v-for="g in GRUPOS"
+                v-for="g in gruposNaTela"
                 :key="g.chave"
                 :colspan="colunasDo(g.chave)"
                 class="whitespace-nowrap border border-border px-1 py-1 text-center text-[11px] font-semibold"
@@ -249,7 +267,7 @@ function textoDaCelula(p: ResumoProduto, c: Coluna) {
                   <span class="truncate">SKU</span><ArrowDown v-if="sentido('sku') === 'descending'" class="size-3 shrink-0" /><ArrowUp v-else-if="sentido('sku')" class="size-3 shrink-0" />
                 </button>
               </th>
-              <th class="whitespace-nowrap border-b border-border px-2 py-2 text-left text-xs font-medium" title="O modelo na Tabela de Preços (o vendido que não está nela entra pelo SKU)." :aria-sort="sentido('nome')" data-coluna="nome">
+              <th class="whitespace-nowrap border-b border-border px-2 py-2 text-left text-xs font-medium" title="O modelo na Tabela de Preços › Produtos (o vendido fora dela fica só na aba Garantia)." :aria-sort="sentido('nome')" data-coluna="nome">
                 <button type="button" class="flex items-center gap-1" @click="ordenar('nome')">
                   <span class="truncate">Produto</span><ArrowDown v-if="sentido('nome') === 'descending'" class="size-3 shrink-0" /><ArrowUp v-else-if="sentido('nome')" class="size-3 shrink-0" />
                 </button>
@@ -290,7 +308,6 @@ function textoDaCelula(p: ResumoProduto, c: Coluna) {
               </td>
               <td class="border border-border px-2 py-1.5 text-xs group-hover:bg-accent/40">
                 {{ p.nome }}
-                <span v-if="!p.na_tabela" class="ml-1 whitespace-nowrap rounded bg-muted px-1 text-[10px] text-muted-foreground" title="vendido, mas sem linha na Tabela de Preços">fora da Tabela de Preços</span>
               </td>
               <td
                 v-for="c in colunas"

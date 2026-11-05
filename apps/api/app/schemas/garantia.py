@@ -86,8 +86,10 @@ class ListaFiltro(BaseModel):
 
     busca: str | None = Field(default=None, max_length=100)
     status: StatusFiltro = "todos"
-    # `pedido`: a data do pedido de garantia (28/10/2026).
-    periodo: Literal["cadastro", "entrega", "pedido"] = "cadastro"
+    # `pedido`: a data do pedido de garantia (28/10/2026). `venda`: o dia da
+    # compra no Bling (05/11/2026, "se eu colocar uma data, filtra o saldo
+    # daqueles dias") — as garantias das vendas feitas no período.
+    periodo: Literal["cadastro", "entrega", "pedido", "venda"] = "cadastro"
     de: date | None = None
     ate: date | None = None
     com_atendimento_no_mes: bool = False

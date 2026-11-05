@@ -115,6 +115,8 @@ async def _garantia(
     base=1000,
     comissao=None,
     frete=None,
+    custo=None,
+    compra=datetime(2026, 10, 1, tzinfo=UTC),
     situacao="15",
 ):
     db.add(
@@ -122,7 +124,7 @@ async def _garantia(
             numero=numero,
             numeroloja=f"MKT{numero}",
             loja="L1",
-            data=datetime(2026, 10, 1, tzinfo=UTC),
+            data=compra,
             total=1000,
             situacao=situacao,
             item_index=0,
@@ -133,6 +135,7 @@ async def _garantia(
             valorbase=base,
             taxacomissao=comissao,
             custofrete=frete,
+            preco_custo=custo,
             categoria_nome=categoria,
         )
     )
@@ -704,8 +707,9 @@ def test_gasto_da_tela_reembolso():
 
 def test_saldo_da_linha():
     """04/11/2026 ("saldo → valor de saldo de todos os itens com base na
-    planilha de rentabilidade"): base − comissão − frete do pedido, na parte
-    da linha pelo valor dos itens."""
+    planilha de rentabilidade"): base − comissão − frete − custo do pedido
+    (a conta da rentabilidade desde 05/11), na parte da linha pelo valor dos
+    itens."""
     tabela = {"dg053": ("1", "A17", ["dg053"]), "u015": ("2", "Air Fryer", ["u015"])}
 
     def item(sku, valor, qtd=1, *, base=1000, comissao=100, frete=0, custo=None, situacao="9"):
@@ -744,11 +748,62 @@ def test_saldo_da_linha():
     assert s([item("dg053.sp", 1000, situacao="excluido")], "tabela:1", tabela) == 0.0
     assert s([item("dg053.sp", 1000, situacao="83955")], "tabela:1", tabela) == 900.0
     assert s([], "tabela:1", tabela) == 0.0
-    # O "Lucro" (desligado): tira também a parte da linha no custo dos produtos.
-    assert resumo.SALDO_MENOS_CUSTO is False
+    # A conta da rentabilidade (ligada em 05/11/2026, "somente o que sobrou"):
+    # tira também o custo dos produtos do pedido antes de dividir; com
+    # menos_custo=False, fica o Saldo Bling.
+    assert resumo.SALDO_MENOS_CUSTO is True
     custo = [item("dg053.sp", 900, custo=500), item("u015", 100, custo=60)]
-    assert s(custo, "tabela:1", tabela, menos_custo=True) == round((900 - 560) * 0.9, 2)
-    assert s(custo, "tabela:1", tabela) == 810.0
+    assert s(custo, "tabela:1", tabela) == round((900 - 560) * 0.9, 2)
+    assert s(custo, "tabela:1", tabela, menos_custo=False) == 810.0
+    # O custo conta a quantidade (2 × 60): (1000 − 100 − 620) × 100/1000.
+    dois = [item("dg053.sp", 900, custo=500), item("u015", 50, 2, custo=60)]
+    assert s(dois, "tabela:2", tabela) == 28.0
+
+
+async def test_saldo_da_rentabilidade_e_periodo_da_venda(client, db, make_user, auth_as):
+    """05/11/2026: o Saldo é a conta da rentabilidade (base − comissão − frete
+    − custo) e o período pela data da VENDA ("se eu colocar uma data, filtra o
+    saldo daqueles dias") filtra o Resumo e a lista: as vendas daqueles dias."""
+    dono = await make_user(role=UserRole.ADMIN)
+    auth_as(dono)
+    await _tabela(db, dono, ("dg052,dg053,dg054", "uranyx A17 pro max 12.128"))
+    caro = {"comissao": 100, "frete": 50, "custo": 600}
+    await _garantia(
+        db,
+        "300401",
+        "dg053.sp",
+        "A17",
+        "Celular",
+        **caro,
+        compra=datetime(2026, 10, 1, 15, tzinfo=UTC),
+    )
+    g2 = await _garantia(
+        db,
+        "300402",
+        "dg053.sp",
+        "A17",
+        "Celular",
+        **caro,
+        compra=datetime(2026, 10, 20, 15, tzinfo=UTC),
+    )
+    [a17] = (await client.post("/api/garantias/resumo", json={})).json()["produtos"]
+    # 2 × (1000 − 100 − 50 − 600)
+    assert (a17["vendidas"], a17["saldo"]) == (2, 500.0)
+    corpo = {"periodo": "venda", "de": "2026-10-15", "ate": "2026-10-31"}
+    [a17] = (await client.post("/api/garantias/resumo", json=corpo)).json()["produtos"]
+    assert (a17["vendidas"], a17["saldo"]) == (1, 250.0)
+    lista = (await client.post("/api/garantias/lista", json={**corpo, "mostrar": "todas"})).json()
+    assert [i["id"] for i in lista["itens"]] == [g2.id]
+    # Só o "até" (o dia inteiro em São Paulo): a venda de 01/10.
+    [a17] = (
+        await client.post("/api/garantias/resumo", json={"periodo": "venda", "ate": "2026-10-01"})
+    ).json()["produtos"]
+    assert (a17["vendidas"], a17["saldo"]) == (1, 250.0)
+    # Só o "de": a venda de 20/10.
+    [a17] = (
+        await client.post("/api/garantias/resumo", json={"periodo": "venda", "de": "2026-10-20"})
+    ).json()["produtos"]
+    assert (a17["vendidas"], a17["saldo"]) == (1, 250.0)
 
 
 async def test_duas_garantias_do_mesmo_pedido_contam_o_aparelho_uma_vez(

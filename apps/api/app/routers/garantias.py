@@ -912,7 +912,19 @@ def _filtros_do_painel(body: ListaFiltro, escopo, dia) -> list:
     if body.status != "todos":
         filtros.append(svc.filtro_status(body.status, dia))
     de, ate = body.de, body.ate
-    if (de or ate) and body.periodo != "pedido":
+    if (de or ate) and body.periodo == "venda":
+        # As vendas feitas no período (05/11/2026): o dia da compra no Bling em
+        # São Paulo, de `de` a `ate` inclusive — a mesma data da planilha de
+        # rentabilidade. No Resumo, Vendidas, Saldo, pedidos e Gasto são todos
+        # dessas vendas. Sem o pedido no Bling, o dia do cadastro.
+        compra = func.coalesce(garantia_pedido.compra_da_garantia(), Garantia.criado_em)
+        if de:
+            filtros.append(compra >= datetime.combine(de, time(), svc.SAO_PAULO))
+        if ate:
+            filtros.append(
+                compra < datetime.combine(ate + timedelta(days=1), time(), svc.SAO_PAULO)
+            )
+    elif (de or ate) and body.periodo != "pedido":
         if body.periodo == "entrega":
             if de:
                 filtros.append(Garantia.data_inicio >= de)

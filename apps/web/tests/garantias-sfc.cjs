@@ -937,13 +937,24 @@ async function testarPagina() {
     assert.match(h, /data-garantia-resumo/, 'o Resumo na tela')
     assert.ok(t.chamadas.some((c) => c.url === '/api/garantias/resumo'), 'o admin lê o /resumo')
     assert.ok(!/id="gar-busca"/.test(h), 'a busca é da aba Garantia')
-    assert.match(h, /id="gar-status"/, 'status, período e origem valem no Resumo')
+    assert.match(h, /id="gar-status"/, 'status e período valem no Resumo')
+    // O período ao lado das abas (05/11/2026), sempre pela data da venda: o
+    // "Período por" saiu ("exclua isso também"); ficam só as datas.
+    const linhaAbas = (h.match(/data-linha-abas[^>]*>([\s\S]*?)data-barra/) || [])[1] || ''
+    assert.match(linhaAbas, /data-abas[\s\S]*data-periodo[\s\S]*id="gar-de"[\s\S]*id="gar-ate"/, 'o período fica ao lado das abas')
+    assert.ok(!/id="gar-periodo"|Período por/.test(h), 'sem o "Período por"')
+    assert.ok(!/id="gar-origem"|data-origem/.test(h), 'sem a Origem (05/11/2026, "excluir origem também")')
+    assert.match(linhaAbas, /<label for="gar-de"[^>]*>Vendas de<\/label>/)
+    assert.equal(t.cx.estado.filtros.periodo, 'venda')
+    assert.equal(L.FILTROS_PADRAO.periodo, 'venda')
     assert.ok(!/data-indicadores/.test(h), 'os cartões são da aba Garantia')
     assert.ok(!/seguiram/i.test(texto(h)), 'nada de "seguiram" na tela')
     // "Como funciona": as 3 partes, o Resumo só para admin, a % e o Atendimento.
     t.cx.estado.regrasAbertas = true
     const regras = texto(await t.h())
-    for (const trecho of ['3 partes', 'Resumo (só para administradores)', 'a % é gasto ÷ saldo × 100', 'saldo = base − comissão − frete do Bling, a conta da planilha de rentabilidade',
+    for (const trecho of ['3 partes', 'Resumo (só para administradores)', 'só os produtos da Tabela de Preços › Produtos', 'A % é gasto ÷ saldo × 100',
+      'saldo = base − comissão − frete − custo do produto, a conta da planilha de rentabilidade (o que sobrou)',
+      'Com o período pela data da venda, tudo é só das vendas daqueles dias',
       'gasto = tela Reembolso (conserto + perdidos + reembolso ao cliente) de quem pediu garantia',
       'Atendimento = quem pediu garantia e ainda tem algo em aberto (no técnico, chegou sem condição, voltando, plataforma decidindo, pedido de garantia que ainda não respondemos) — sai sozinho quando termina']) {
       assert.ok(regras.includes(trecho), `Como funciona: ${trecho}`)
@@ -1458,7 +1469,8 @@ async function testarBloco() {
 async function testarResumo() {
   // 04/11/2026 (as 3 partes): a aba Resumo, só do admin — Vendas (Vendidas,
   // Saldo e a % = gasto ÷ saldo × 100), Atendimento (como pediu) e Manutenção
-  // (Consertos, Perdidos e o Gasto da tela Reembolso). A pílula fica na página.
+  // (só o Gasto da tela Reembolso desde 05/11/2026: "em manutenção deixe
+  // somente o gasto"). A pílula fica na página.
   const produto = {
     chave: 'tabela:1', departamento: 'celular', nome: 'A17 pro max', skus: ['dg052', 'dg053'], na_tabela: true,
     vendidas: 100, pediram: 6, seguiram: 2,
@@ -1469,14 +1481,20 @@ async function testarResumo() {
     pedidos_por_coluna: { mensagem: [1, 2, 3, 4], devolucao: [5, 6], consertos: [6], gasto: [5, 6] },
   }
   const outro = {
-    chave: 'sku:dg019', departamento: 'celular', nome: 'DG019', skus: ['dg019'], na_tabela: false,
+    chave: 'tabela:2', departamento: 'celular', nome: 'DG019', skus: ['dg019'], na_tabela: true,
     vendidas: 300, pediram: 1, seguiram: 0, origens: { mensagem: 1 }, consertos: 0, perdidos: 1,
     gasto: 120.6, gasto_conserto: 0, gasto_perdidos: 120.6, gasto_cliente: 0, saldo: 15000.4,
     pedidos: [7], pedidos_por_coluna: { mensagem: [7], perdidos: [7], gasto: [7] },
   }
   const semSaldo = {
-    chave: 'sku:u9', departamento: 'eletro', nome: 'U9', skus: ['u9'], na_tabela: false, vendidas: 3, pediram: 0, seguiram: 0,
+    chave: 'tabela:3', departamento: 'eletro', nome: 'U9', skus: ['u9'], na_tabela: true, vendidas: 3, pediram: 0, seguiram: 0,
     origens: {}, consertos: 0, perdidos: 0, gasto: 0, gasto_conserto: 0, gasto_perdidos: 0, gasto_cliente: 0, saldo: 0, pedidos: [], pedidos_por_coluna: {},
+  }
+  // Vendido fora da Tabela de Preços (05/11/2026): não aparece no Resumo nem no rodapé.
+  const fora = {
+    chave: 'sku:dg1028', departamento: 'celular', nome: 'Uranyx C57S AVULSO', skus: ['dg1028'], na_tabela: false,
+    vendidas: 50, pediram: 2, seguiram: 0, origens: { mensagem: 2 }, consertos: 0, perdidos: 0,
+    gasto: 40, gasto_conserto: 0, gasto_perdidos: 0, gasto_cliente: 40, saldo: 20000, pedidos: [8, 9], pedidos_por_coluna: { mensagem: [8, 9], gasto: [9] },
   }
   const RESUMO = {
     vendidas: 403, pediram: 7, seguiram: 2, hoje: '2026-11-04', ve_valores: true,
@@ -1485,14 +1503,14 @@ async function testarResumo() {
       { chave: 'mala', nome: 'Mala', vendidas: 0, pediram: 0, saldo: 0, gasto: 0 },
       { chave: 'eletro', nome: 'Eletro', vendidas: 3, pediram: 0, saldo: 0, gasto: 0 },
     ],
-    produtos: [outro, produto, semSaldo],
+    produtos: [outro, produto, semSaldo, fora],
   }
-  const montarResumo = async (resumo, departamento = 'celular') => {
+  const montarResumo = async (resumo, departamento = 'celular', filtros = {}) => {
     const emitidos = []
     const todos = []
     const g = { user: ADMIN, api: async (url) => { assert.equal(url, '/api/garantias/resumo'); return resumo } }
     const cx = comEstado(componente('../components/GarantiaResumo.vue', g))
-    const props = { filtros: { ...L.FILTROS_PADRAO }, departamento, onAbrir: (x) => emitidos.push(x), onTodos: () => todos.push(1) }
+    const props = { filtros: { ...L.FILTROS_PADRAO, ...filtros }, departamento, onAbrir: (x) => emitidos.push(x), onTodos: () => todos.push(1) }
     await html(appCom(cx.C, props, g))
     await new Promise((r) => setTimeout(r, 0))
     return { cx, emitidos, todos, h: await html(appCom(cx.mesmo, props, g)) }
@@ -1507,34 +1525,37 @@ async function testarResumo() {
   const total = (html, k) => texto((html.match(new RegExp(`<td[^>]*data-total="${k}"[^>]*>([\\s\\S]*?)</td>`)) || [])[1] || '')
   // As colunas, na ordem da SPEC — e as que saíram não voltam.
   const titulos = [...h.matchAll(/<th[^>]*data-coluna="\w+"[^>]*>([\s\S]*?)<\/th>/g)].map((x) => texto(x[1]))
-  assert.deepEqual(titulos, ['SKU', 'Produto', 'Vendidas', 'Saldo', '%', 'Mensagem', 'SAC', 'Devolução', 'Consertos', 'Perdidos', 'Gasto R$'])
+  assert.deepEqual(titulos, ['SKU', 'Produto', 'Vendidas', 'Saldo', '%', 'Mensagem', 'SAC', 'Devolução', 'Gasto R$'])
   const grupos = [...h.matchAll(/<th([^>]*data-grupo="(\w+)"[^>]*)>([\s\S]*?)<\/th>/g)].map((x) => [x[2], texto(x[3]), Number((/colspan="(\d+)"/.exec(x[1]) || [])[1])])
-  assert.deepEqual(grupos, [['venda', 'Vendas', 3], ['atendimento', 'Atendimento', 3], ['manutencao', 'Manutenção', 3]])
-  for (const saiu of ['Pediram', 'Seguiram', 'Outros', 'Ativa', 'Só software', 'Aguardando', 'Expirada', 'Atendidos', 'No técnico', 'Como pediu', 'Situação de quem pediu', 'Manutenção e perdas']) {
+  assert.deepEqual(grupos, [['venda', 'Vendas', 3], ['atendimento', 'Atendimento', 3], ['manutencao', 'Manutenção', 1]])
+  for (const saiu of ['Pediram', 'Seguiram', 'Outros', 'Ativa', 'Só software', 'Aguardando', 'Expirada', 'Atendidos', 'No técnico', 'Consertos', 'Perdidos', 'Como pediu', 'Situação de quem pediu', 'Manutenção e perdas']) {
     assert.ok(!titulos.includes(saiu) && !grupos.some((g) => g[1] === saiu), `sem "${saiu}"`)
   }
   assert.equal((/<th[^>]*title="([^"]*)"[^>]*data-coluna="pct"/.exec(h) || [])[1], 'Gasto ÷ Saldo × 100')
   assert.ok(!/data-departamento=/.test(h), 'as pílulas ficam na página')
-  // A largura mínima é a conta das colunas na tela (112 + 186 + 9 × 77).
-  assert.match(h, /<table[^>]*style="min-width:991px;?"/)
+  // A largura mínima é a conta das colunas na tela (112 + 186 + 7 × 77).
+  assert.match(h, /<table[^>]*style="min-width:837px;?"/)
   // Só o departamento da pílula; Vendidas (maior em cima) é a ordem padrão.
-  assert.deepEqual([...h.matchAll(/<tr[^>]*data-produto="([^"]+)"/g)].map((x) => x[1]), ['sku:dg019', 'tabela:1'])
+  assert.deepEqual([...h.matchAll(/<tr[^>]*data-produto="([^"]+)"/g)].map((x) => x[1]), ['tabela:2', 'tabela:1'])
+  assert.ok(!/fora da Tabela de Preços|Uranyx C57S AVULSO/.test(h), 'o vendido fora da Tabela de Preços não aparece')
   assert.match(h, /aria-sort="descending"[^>]*data-coluna="vendidas"/)
   // Os números: o Saldo e o Gasto em reais sem os centavos (o exato no mouse); a % com 2 casas.
   assert.deepEqual(celula(h, 'tabela:1', 'saldo'), { texto: '6.650', titulo: 'R$ 6.650,00' })
   assert.deepEqual(celula(h, 'tabela:1', 'pct'), { texto: '3,45%', titulo: 'gasto R$ 229,40 ÷ saldo R$ 6.650,00 × 100' })
-  assert.equal(celula(h, 'sku:dg019', 'pct').texto, '0,80%')
-  assert.equal(celula(h, 'sku:dg019', 'saldo').texto, '15.000')
+  assert.equal(celula(h, 'tabela:2', 'pct').texto, '0,80%')
+  assert.equal(celula(h, 'tabela:2', 'saldo').texto, '15.000')
   assert.deepEqual(celula(h, 'tabela:1', 'gasto'), {
     texto: '229',
     titulo: 'ver os 2 pedidos de garantia — Gasto R$ · R$ 229,40: conserto R$ 200,00 + perdidos R$ 0,00 + reembolso ao cliente R$ 29,40 — da tela Reembolso',
   })
-  assert.deepEqual(['vendidas', 'mensagem', 'sac', 'devolucao', 'consertos', 'perdidos'].map((k) => celula(h, 'tabela:1', k).texto), ['100', '4', '0', '2', '1', '0'])
+  assert.deepEqual(['vendidas', 'mensagem', 'sac', 'devolucao'].map((k) => celula(h, 'tabela:1', k).texto), ['100', '4', '0', '2'])
+  for (const k of ['consertos', 'perdidos']) assert.equal(celula(h, 'tabela:1', k), null, `sem a célula ${k}`)
   assert.equal(celula(h, 'tabela:1', 'sac').titulo, 'nenhum pedido nesta coluna', 'o zero não herda o "ver as N garantias" da linha')
   assert.equal(celula(h, 'tabela:1', 'mensagem').titulo, 'ver os 4 pedidos de garantia — Mensagem')
   // O rodapé: as somas; a % = Σgasto ÷ Σsaldo × 100.
-  assert.deepEqual(['vendidas', 'saldo', 'pct', 'mensagem', 'sac', 'devolucao', 'consertos', 'perdidos', 'gasto'].map((k) => total(h, k)),
-    ['400', '21.650', '1,62%', '5', '0', '2', '1', '1', '350'])
+  assert.deepEqual(['vendidas', 'saldo', 'pct', 'mensagem', 'sac', 'devolucao', 'gasto'].map((k) => total(h, k)),
+    ['400', '21.650', '1,62%', '5', '0', '2', '350'])
+  assert.ok(!/data-total="(consertos|perdidos)"/.test(h), 'sem Consertos e Perdidos no rodapé')
   assert.match(h, /title="R\$ 350,00: conserto R\$ 200,00 \+ perdidos R\$ 120,60 \+ reembolso ao cliente R\$ 29,40 — da tela Reembolso"/, 'o Gasto do rodapé aberto no mouse')
   assert.match(texto((h.match(/<tr[^>]*data-total-departamento[^>]*>([\s\S]*?)<\/tr>/) || [])[1] || ''), /^Total — Celular /)
   // A conta da %, discreta; a busca por SKU ou produto continua.
@@ -1550,15 +1571,14 @@ async function testarResumo() {
   assert.equal(emitidos.length, antes)
   assert.equal(clique(produto, 'devolucao'), true)
   assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [5, 6], coluna: 'Devolução' })
-  clique(produto, 'consertos')
-  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [6], coluna: 'Consertos' })
   clique(produto, 'gasto')
   assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [5, 6], coluna: 'Gasto R$' })
-  clique(outro, 'perdidos')
-  assert.deepEqual(emitidos.at(-1), { nome: 'DG019', ids: [7], coluna: 'Perdidos' })
+  clique(outro, 'gasto')
+  assert.deepEqual(emitidos.at(-1), { nome: 'DG019', ids: [7], coluna: 'Gasto R$' })
+  assert.equal(col('consertos'), undefined)
+  assert.equal(col('perdidos'), undefined)
   antes = emitidos.length
   assert.equal(clique(produto, 'sac'), true, 'o zero não deixa o clique virar o da linha')
-  assert.equal(clique(produto, 'perdidos'), true)
   assert.equal(emitidos.length, antes, 'o zero não abre nada')
   // A linha sem venda nenhuma não abre; o "Ver todos os pedidos de garantia" continua.
   cx.estado.abrir({ ...produto, vendidas: 0 })
@@ -1567,12 +1587,20 @@ async function testarResumo() {
   assert.match(h, /data-ver-todos/)
   // Ordenar pela %: o maior gasto sobre o saldo em cima.
   cx.estado.ordenar('pct')
-  assert.deepEqual(cx.estado.linhas.map((p) => p.chave), ['tabela:1', 'sku:dg019'])
+  assert.deepEqual(cx.estado.linhas.map((p) => p.chave), ['tabela:1', 'tabela:2'])
   // O Eletro (sem saldo): a % é "—", na linha e no rodapé.
   const eletro = await montarResumo(RESUMO, 'eletro')
-  assert.equal(celula(eletro.h, 'sku:u9', 'pct').texto, '—')
+  assert.equal(celula(eletro.h, 'tabela:3', 'pct').texto, '—')
   assert.equal(total(eletro.h, 'pct'), '—')
   assert.match(texto((eletro.h.match(/<tr[^>]*data-total-departamento[^>]*>([\s\S]*?)<\/tr>/) || [])[1] || ''), /^Total — Eletro /)
+  // O período pela data da venda (05/11/2026): o título diz de quais vendas são os números.
+  assert.ok(!/data-periodo-vendas/.test(h), 'sem datas, sem o período no título')
+  const comDatas = await montarResumo(RESUMO, 'celular', { periodo: 'venda', de: '2026-11-01', ate: '2026-11-05' })
+  assert.equal(texto((comDatas.h.match(/<span[^>]*data-periodo-vendas[^>]*>([\s\S]*?)<\/span>/) || [])[1] || ''), '· vendas de 01/11/2026 a 05/11/2026')
+  const soAte = await montarResumo(RESUMO, 'celular', { periodo: 'venda', ate: '2026-11-05' })
+  assert.match(soAte.h, /vendas até 05\/11\/2026/)
+  const peloPedido = await montarResumo(RESUMO, 'celular', { periodo: 'pedido', de: '2026-11-01', ate: '2026-11-05' })
+  assert.ok(!/data-periodo-vendas/.test(peloPedido.h), 'pela data do pedido, o título não fala de vendas')
   // A Mala, sem venda: o vazio lembra que a garantia é da Uranyx.
   const mala = await montarResumo(RESUMO, 'mala')
   assert.equal(texto((mala.h.match(/<td[^>]*data-sem-produtos[^>]*>([\s\S]*?)<\/td>/) || [])[1] || ''),
@@ -1580,8 +1608,10 @@ async function testarResumo() {
   // Sem os reais (o servidor não mandou): sem Saldo, % e Gasto — nenhum real na tela.
   const semValores = { ...produto, gasto: null, gasto_conserto: null, gasto_perdidos: null, gasto_cliente: null, saldo: null, pedidos_por_coluna: { ...produto.pedidos_por_coluna, gasto: undefined } }
   const r2 = await montarResumo({ ...RESUMO, ve_valores: false, produtos: [semValores] })
-  assert.deepEqual(r2.cx.estado.colunas.map((c) => c.rotulo), ['Vendidas', 'Mensagem', 'SAC', 'Devolução', 'Consertos', 'Perdidos'])
-  assert.match(r2.h, /<table[^>]*style="min-width:760px;?"/, 'a largura acompanha as colunas')
+  assert.deepEqual(r2.cx.estado.colunas.map((c) => c.rotulo), ['Vendidas', 'Mensagem', 'SAC', 'Devolução'])
+  assert.match(r2.h, /<table[^>]*style="min-width:606px;?"/, 'a largura acompanha as colunas')
+  // Sem o Gasto a Manutenção fica sem coluna: o título do grupo some junto.
+  assert.deepEqual([...r2.h.matchAll(/data-grupo="(\w+)"/g)].map((x) => x[1]), ['venda', 'atendimento'])
   assert.ok(!/R\$/.test(texto(r2.h)), 'nenhum real na tela de quem não vê os valores')
   // O 403 de quem não é admin vira frase (a página nem chama, mas se chamar).
   const erro403 = comEstado(componente('../components/GarantiaResumo.vue', { user: CONSULTA, api: async () => { throw Object.assign(new Error('403'), { statusCode: 403, data: { detail: { code: 'so_admin' } } }) } }))

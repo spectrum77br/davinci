@@ -155,9 +155,13 @@ TIPOS_DO_GASTO = ("Manutenção", "Extraviado", "Sucata", "Cliente")
 
 # ── Saldo (04/11/2026, "saldo de todos os itens com base na planilha de
 # rentabilidade") ──────────────────────────────────────────────────────────────
-# Base − Comissão − Frete do pedido no Bling (o "Saldo Bling" da Margem). Com
-# True, tira também o custo dos produtos (o "Lucro").
-SALDO_MENOS_CUSTO = False
+# Base − Comissão − Frete − Custo dos produtos do pedido no Bling: a MESMA
+# conta do robô da rentabilidade (05/11/2026: "usar o mesmo cálculo da
+# rentabilidade, que na teoria é somente o que sobrou"). Com False, fica só o
+# Base − Comissão − Frete (o "Saldo Bling" da Margem). O robô troca a base, a
+# comissão e o frete do pedido da Amazon pelos da API da Amazon; aqui ficam os
+# do Bling (139 das 6.474 vendas com garantia em 05/11).
+SALDO_MENOS_CUSTO = True
 # O pedido cancelado ou excluído do Bling não tem saldo.
 _SEM_SALDO = ("12", "excluido")
 
@@ -702,13 +706,13 @@ def saldo_da_linha(
     menos_custo: bool | None = None,
 ) -> float:
     """O saldo de UM pedido na parte da linha `chave` (a planilha de
-    rentabilidade: Base − Comissão − Frete, o "Saldo Bling" da Margem).
+    rentabilidade: Base − Comissão − Frete − Custo dos produtos).
     `itens` = as linhas do pedido em `bling_orders` (uma por item; a base, a
     comissão e o frete do pedido se repetem em todas). A parte da linha é o
     valor dos itens dela (preço × quantidade) sobre o valor de todos; sem
     valor nos itens, pelo número de itens. O pedido cancelado (12) ou excluído
     do Bling não tem saldo. `menos_custo` (padrão SALDO_MENOS_CUSTO) tira
-    também a parte da linha no custo dos produtos (o "Lucro"). PURA."""
+    também o custo dos produtos do pedido antes de dividir. PURA."""
     if not itens or any(str(i.situacao or "") in _SEM_SALDO for i in itens):
         return 0.0
 

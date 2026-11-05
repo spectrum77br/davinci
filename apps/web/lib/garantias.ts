@@ -754,8 +754,10 @@ export function barraPrazo(p: Prazo | null | undefined): { pct: number; texto: s
 export type FiltrosLista = {
   busca: string
   status: FiltroStatus
-  // `pedido`: a data do pedido de garantia (28/10/2026).
-  periodo: 'cadastro' | 'entrega' | 'pedido'
+  // `pedido`: a data do pedido de garantia (28/10/2026). `venda` (o padrão
+  // desde 05/11/2026, "se eu colocar uma data, filtra o saldo daqueles dias"):
+  // o dia da compra no Bling — as garantias das vendas feitas no período.
+  periodo: 'cadastro' | 'entrega' | 'pedido' | 'venda'
   de: string
   ate: string
   com_atendimento_no_mes: boolean
@@ -777,7 +779,7 @@ export type FiltrosLista = {
   em_atendimento?: boolean
 }
 
-export const FILTROS_PADRAO: FiltrosLista = { busca: '', status: 'todos', periodo: 'pedido', de: '', ate: '', com_atendimento_no_mes: false, mostrar: 'pedidos' }
+export const FILTROS_PADRAO: FiltrosLista = { busca: '', status: 'todos', periodo: 'venda', de: '', ate: '', com_atendimento_no_mes: false, mostrar: 'pedidos' }
 
 export const LIMITE_PAGINA = 100
 
@@ -786,7 +788,7 @@ export type CorpoLista = {
   offset: number
   busca?: string
   status?: FiltroStatus
-  periodo?: 'cadastro' | 'entrega' | 'pedido'
+  periodo?: 'cadastro' | 'entrega' | 'pedido' | 'venda'
   de?: string
   ate?: string
   com_atendimento_no_mes?: boolean

@@ -321,8 +321,8 @@ const ativo = computed(() => cartaoAtivo(filtros))
 function clicarCartao(c: Cartao) {
   Object.assign(filtros, filtroDoCartao(filtros, c))
 }
-// Os filtros que a aba mostra: o Resumo tem status, período e origem; a
-// Garantia, também a busca e os cartões.
+// Os filtros que a aba mostra: o Resumo tem status e período; a Garantia,
+// também a busca e os cartões.
 const temFiltro = computed(() => {
   const barra = filtros.status !== 'todos' || !!filtros.de || !!filtros.ate || (!!filtros.origem && filtros.origem !== 'todas')
   if (aba.value === 'resumo') return barra
@@ -576,7 +576,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
         <li>{{ regras.recalcular_quando_entrega_mudar ? 'Se a data de entrega for corrigida, a garantia é recalculada sozinha (fica no log).' : 'A data de entrega corrigida depois não muda a garantia.' }}</li>
         <li>Status: Ativa (hardware e software) · Somente software · Expirada · Aguardando entrega — ou "Entregue — sem data no DaVinci", quando o Bling já dá o pedido como entregue mas nenhuma fonte tem a data (a Logística guarda a data só desde 15/07/2026). Na lista o CPF aparece mascarado.</li>
         <li>Sem escolher mensagens, a data do atendimento é a 1ª mensagem do cliente no trecho atual da conversa (uma pausa de até {{ regras.dias_pausa_atendimento }} dias não abre trecho novo).</li>
-        <li><strong class="text-foreground">Resumo</strong>: a % é gasto ÷ saldo × 100 — saldo = base − comissão − frete do Bling, a conta da planilha de rentabilidade, de todas as vendas do produto; gasto = tela Reembolso (conserto + perdidos + reembolso ao cliente) de quem pediu garantia. O que cada coluna conta aparece com o mouse no título dela.</li>
+        <li><strong class="text-foreground">Resumo</strong>: só os produtos da Tabela de Preços › Produtos. A % é gasto ÷ saldo × 100 — saldo = base − comissão − frete − custo do produto, a conta da planilha de rentabilidade (o que sobrou), das vendas do produto; gasto = tela Reembolso (conserto + perdidos + reembolso ao cliente) de quem pediu garantia. Com o período pela data da venda, tudo é só das vendas daqueles dias. O que cada coluna conta aparece com o mouse no título dela.</li>
         <li><strong class="text-foreground">Atendimento</strong> = quem pediu garantia e ainda tem algo em aberto (no técnico, chegou sem condição, voltando, plataforma decidindo, pedido de garantia que ainda não respondemos) — sai sozinho quando termina. Conversa comum esperando a loja (um "obrigado", uma foto) não entra. O mais urgente fica em cima.</li>
       </ul>
     </section>
@@ -599,6 +599,11 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
     </div>
 
     <!-- as abas embaixo (como as da Tabela de Preços) -->
+    <!-- As abas e, ao lado delas, o período (05/11/2026: as setas no print — "se
+         eu colocar uma data, filtra o saldo daqueles dias"). Sempre pela data da
+         venda: o "Período por" saiu ("exclua isso também"). O Atendimento não
+         tem filtro. -->
+    <div class="flex flex-wrap items-end gap-x-4 gap-y-2" data-linha-abas>
     <div class="flex flex-wrap gap-1 rounded-md bg-muted/40 p-1 w-fit" role="tablist" data-abas>
       <button
         v-for="t in abasVisiveis"
@@ -616,9 +621,23 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
         <span v-if="t.chave !== 'resumo' && contagem" class="text-xs text-muted-foreground">({{ numeroBR(t.chave === 'garantia' ? contagem.garantias : contagem.atendimento) }})</span>
       </button>
     </div>
+    <div v-if="aba !== 'atendimento'" class="flex flex-wrap items-end gap-2" data-periodo>
+      <div class="flex w-full items-end gap-2 sm:w-auto">
+        <div class="flex-1 sm:w-36 sm:flex-none">
+          <label for="gar-de" class="mb-1 block text-xs font-medium text-muted-foreground">Vendas de</label>
+          <Input id="gar-de" v-model="filtros.de" type="date" class="h-9" :max="filtros.ate || undefined" />
+        </div>
+        <div class="flex-1 sm:w-36 sm:flex-none">
+          <label for="gar-ate" class="mb-1 block text-xs font-medium text-muted-foreground">Até</label>
+          <Input id="gar-ate" v-model="filtros.ate" type="date" class="h-9" :min="filtros.de || undefined" />
+        </div>
+      </div>
+    </div>
+    </div>
 
-    <!-- a barra: a busca e o "Mostrar" são da aba Garantia; status, período e
-         origem valem também no Resumo. O Atendimento não tem filtro. -->
+    <!-- a barra: a busca e o "Mostrar" são da aba Garantia; o status vale
+         também no Resumo (o período fica ao lado das abas; a Origem saiu em
+         05/11/2026, "excluir origem também"). O Atendimento não tem filtro. -->
     <div v-if="aba !== 'atendimento'" class="flex flex-wrap items-end gap-2" data-barra>
       <div v-if="aba === 'garantia'" class="w-full sm:w-80">
         <label for="gar-busca" class="mb-1 block text-xs font-medium text-muted-foreground">Buscar</label>
@@ -633,37 +652,11 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
           <option v-for="s in FILTROS_STATUS" :key="s.value" :value="s.value">{{ s.label }}</option>
         </select>
       </div>
-      <div class="w-[calc(50%-0.25rem)] sm:w-56">
-        <label for="gar-periodo" class="mb-1 block text-xs font-medium text-muted-foreground">Período por</label>
-        <select id="gar-periodo" v-model="filtros.periodo" class="h-9 w-full rounded-md border bg-background px-2 text-sm">
-          <option value="pedido">data do pedido de garantia</option>
-          <option value="entrega">data de entrega</option>
-          <option value="cadastro">data de cadastro</option>
-        </select>
-      </div>
-      <div class="flex w-full items-end gap-2 sm:w-auto">
-        <div class="flex-1 sm:w-36 sm:flex-none">
-          <label for="gar-de" class="mb-1 block text-xs font-medium text-muted-foreground">De</label>
-          <Input id="gar-de" v-model="filtros.de" type="date" class="h-9" :max="filtros.ate || undefined" />
-        </div>
-        <div class="flex-1 sm:w-36 sm:flex-none">
-          <label for="gar-ate" class="mb-1 block text-xs font-medium text-muted-foreground">Até</label>
-          <Input id="gar-ate" v-model="filtros.ate" type="date" class="h-9" :min="filtros.de || undefined" />
-        </div>
-      </div>
       <div v-if="aba === 'garantia' && !abertoPor" class="w-[calc(50%-0.25rem)] sm:w-52">
         <label for="gar-mostrar" class="mb-1 block text-xs font-medium text-muted-foreground">Mostrar</label>
         <select id="gar-mostrar" v-model="mostrar" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-mostrar>
           <option value="todas">todas as vendas com nota</option>
           <option value="pedidos">só pedidos de garantia</option>
-        </select>
-      </div>
-      <div class="w-[calc(50%-0.25rem)] sm:w-44">
-        <label for="gar-origem" class="mb-1 block text-xs font-medium text-muted-foreground">Origem</label>
-        <select id="gar-origem" v-model="filtros.origem" class="h-9 w-full rounded-md border bg-background px-2 text-sm" data-origem>
-          <option value="todas">todas</option>
-          <option value="robo">criadas sozinhas (NF)</option>
-          <option value="manual">cadastradas na tela</option>
         </select>
       </div>
       <Button v-if="temFiltro" size="sm" variant="ghost" class="h-9" @click="limparFiltros">limpar filtros</Button>
