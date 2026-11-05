@@ -103,10 +103,17 @@ class ListaFiltro(BaseModel):
     # A garantia por produto (28/10/2026): a linha do produto abre os pedidos
     # dela (os ids que o Resumo mandou).
     ids: list[int] | None = Field(default=None, max_length=2000)
+    # As 3 partes do painel (04/11/2026): o departamento da pílula (a linha do
+    # produto decide — `garantia_resumo.mapa_das_linhas`), a linha do Resumo
+    # (a `chave` dela: todas as garantias daquele produto) e a aba Atendimento
+    # (só quem está em atendimento agora, o mais urgente primeiro).
+    departamento: Literal["celular", "mala", "eletro"] | None = None
+    produto: str | None = Field(default=None, max_length=200)
+    em_atendimento: bool = False
     limite: int = Field(default=200, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
-    _v_texto = field_validator("busca", mode="before")(_texto)
+    _v_texto = field_validator("busca", "produto", mode="before")(_texto)
 
 
 class BuscaVinculo(BaseModel):
@@ -139,6 +146,20 @@ class EntregaOut(BaseModel):
     # Instante cru da fonte (UTC) e a última conferência do robô.
     em: datetime | None = None
     verificada_em: datetime | None = None
+
+
+class EmAtendimentoOut(BaseModel):
+    """Por que a garantia está em atendimento agora (04/11/2026,
+    services/garantia_atendimento.py): o 1º motivo em aberto, o texto do
+    selo e desde quando."""
+
+    motivo: Literal[
+        "no_tecnico", "sem_condicao", "voltando", "plataforma_decidindo", "pedido_sem_resposta"
+    ]
+    rotulo: str
+    desde: datetime | None = None
+    # No técnico com o prazo de 30 dias vencido.
+    vencido: bool = False
 
 
 class GarantiaLinhaOut(BaseModel):
@@ -188,9 +209,17 @@ class GarantiaLinhaOut(BaseModel):
     ultima_previa: str | None = None
     ultima_autor: str | None = None
     ultima_plataforma: str | None = None
+    # As 3 partes do painel (04/11/2026): o departamento da linha do produto
+    # (celular | mala | eletro; só a lista manda) e, de quem está em
+    # atendimento agora, o motivo (o selo da aba Atendimento).
+    departamento: str | None = None
+    atendimento: EmAtendimentoOut | None = None
 
 
 class IndicadoresOut(BaseModel):
+    """Os cartões da aba Garantia e a linha embaixo deles. Com a pílula
+    (04/11/2026), só o departamento dela — sem os filtros da barra."""
+
     ativas: int
     somente_software: int
     hw_vence_30d: int
@@ -202,10 +231,47 @@ class IndicadoresOut(BaseModel):
     total: int
     # As vendas com garantia (com e sem pedido) que a pessoa enxerga.
     vendidas: int = 0
-    # Dos pedidos: os que SEGUIRAM — o aparelho voltou, está voltando ou teve
-    # reembolso (30/10/2026: a % certa é seguiram ÷ vendidas; no chat muitos
-    # pedem e não vai para frente; reclamação não conta).
-    seguiram: int = 0
+
+
+class AbaOut(BaseModel):
+    # Todas as garantias (as vendas com nota) e as em atendimento agora.
+    garantias: int = 0
+    atendimento: int = 0
+
+
+class AbasOut(BaseModel):
+    """As pílulas e as abas (04/11/2026): o que a pessoa enxerga em cada
+    departamento (o escopo dela), sem os filtros da barra — como os cartões."""
+
+    celular: AbaOut
+    mala: AbaOut
+    eletro: AbaOut
+
+
+class PedidoSemGarantiaOut(BaseModel):
+    """A busca não achou garantia, mas achou o PEDIDO (dentro do escopo da
+    pessoa): por que ele ainda não tem garantia (04/11/2026 — o SAC procura
+    pelo nº da plataforma). Nunca traz CPF nem nome."""
+
+    pedido_bling: str
+    pedido_marketplace: str | None = None
+    plataforma: str | None = None
+    conta: str | None = None
+    data: datetime | None = None
+    situacao: str | None = None
+    produto_uranyx: bool = False
+    motivo: Literal[
+        "antes_das_notas",
+        "cancelado",
+        "pendencia",
+        "sem_nf_produto",
+        "sem_produto_uranyx",
+        "outro",
+    ]
+    # Uma frase para a tela.
+    motivo_texto: str
+    # A pessoa pode cadastrar a garantia (a janela "Nova garantia").
+    pode_cadastrar: bool = False
 
 
 class GarantiaListaOut(BaseModel):
@@ -213,6 +279,8 @@ class GarantiaListaOut(BaseModel):
     total: int
     indicadores: IndicadoresOut
     hoje: date
+    abas: AbasOut
+    pedido_sem_garantia: PedidoSemGarantiaOut | None = None
 
 
 class ItemOut(BaseModel):
@@ -442,12 +510,13 @@ class HistoricoOut(BaseModel):
 
 
 class ResumoDepartamentoOut(BaseModel):
-    chave: str  # celular | eletro | acessorios | outros
+    chave: str  # celular | mala | eletro (os três sempre, nesta ordem)
     nome: str
     vendidas: int
     pediram: int = 0
-    # Dos que pediram, os que seguiram (a base da %).
-    seguiram: int = 0
+    # Em reais, só para admin: a soma das linhas do departamento.
+    saldo: float | None = None
+    gasto: float | None = None
 
 
 class ResumoProdutoOut(BaseModel):
@@ -463,51 +532,43 @@ class ResumoProdutoOut(BaseModel):
     pediram: int = 0
     # Dos que pediram, os que SEGUIRAM (30/10/2026): o aparelho voltou (tela
     # Devoluções), está voltando (devolução aceita na plataforma) ou teve
-    # reembolso (Reembolso "Cliente" ou pago pela plataforma). Reclamação,
-    # disputa sem decisão e devolução cancelada não. A % da tela é seguiram ÷
-    # vendidas.
+    # reembolso (Reembolso "Cliente" ou pago pela plataforma).
     seguiram: int = 0
-    # Dos PEDIDOS: a situação da garantia hoje e de onde veio o pedido.
-    status: dict[str, int]
+    # Dos PEDIDOS, de onde veio o pedido (a coluna Atendimento da tela):
+    # mensagem, sac e devolucao.
     origens: dict[str, int] = {}
-    com_atendimento: int = 0
-    atendimentos_hardware: int = 0
-    atendimentos_software: int = 0
-    # Os ids das garantias com pedido (a linha abre a lista delas).
-    pedidos: list[int] = []
-    # Os mesmos ids por coluna da tela (a célula abre só os dela): mensagem,
-    # sac, devolucao, outros, ativa, somente_software, aguardando, expirada,
-    # atendimentos, no_tecnico, consertados, perdidos e gasto (este só para
-    # admin). Coluna sem pedido não vem.
-    pedidos_por_coluna: dict[str, list[int]] = {}
-    # Manutenção e perdas (30/10/2026): dos que pediram, o aparelho na tela
-    # Devoluções — no técnico agora (e quantos com o prazo de 30 dias
-    # vencido), consertados (e quantos sem o custo do conserto lançado) e
-    # perdidos (Extraviado/Sucata). Uma garantia conta numa só.
-    no_tecnico: int = 0
-    no_tecnico_vencidos: int = 0
-    consertados: int = 0
-    consertados_sem_custo: int = 0
+    # Manutenção (30/10/2026): dos que pediram, o aparelho na tela Devoluções —
+    # consertados e perdidos (Extraviado/Sucata). Uma garantia conta numa só.
+    consertos: int = 0
     perdidos: int = 0
-    # Em reais, só para admin (None para os outros): o gasto = o conserto
-    # (Custo manutenção acima de R$ 1) + o custo dos aparelhos perdidos; e o
-    # custo dos aparelhos que estão no técnico.
+    # Em reais, só para admin (None para os outros). O gasto (04/11/2026: "o
+    # gasto é baseado na tabela de reembolso") dos que pediram = o conserto +
+    # os aparelhos perdidos + o reembolso ao cliente, da tela Reembolso. O
+    # saldo de TODAS as vendas = base − comissão − frete do Bling (a planilha
+    # de rentabilidade). A % da tela é gasto ÷ saldo × 100.
     gasto: float | None = None
     gasto_conserto: float | None = None
     gasto_perdidos: float | None = None
-    valor_no_tecnico: float | None = None
+    gasto_cliente: float | None = None
+    saldo: float | None = None
+    # Os ids das garantias com pedido (a linha abre a lista delas).
+    pedidos: list[int] = []
+    # Os mesmos ids por coluna da tela (a célula abre só os dela): mensagem,
+    # sac, devolucao, consertos, perdidos e gasto (este só para admin). Coluna
+    # sem pedido não vem.
+    pedidos_por_coluna: dict[str, list[int]] = {}
 
 
 class ResumoOut(BaseModel):
-    """POST /api/garantias/resumo: a garantia por produto (28/10/2026) — as
-    vendas com garantia e os pedidos de garantia por produto e por
-    departamento (as porcentagens a tela calcula das contagens)."""
+    """POST /api/garantias/resumo (só admin, 04/11/2026): a garantia por
+    produto — as vendas com garantia e os pedidos de garantia por produto e
+    por departamento (a % a tela calcula: gasto ÷ saldo × 100)."""
 
     vendidas: int
     pediram: int
     seguiram: int = 0
     hoje: date
-    # Os valores em reais (Gasto) vêm só para admin.
+    # Os valores em reais (saldo e gasto) vêm só para admin.
     ve_valores: bool = False
     departamentos: list[ResumoDepartamentoOut]
     produtos: list[ResumoProdutoOut]

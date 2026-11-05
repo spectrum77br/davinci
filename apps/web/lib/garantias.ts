@@ -60,8 +60,18 @@ export type GarantiaLinha = {
   // No técnico com o prazo de 30 dias vencido (o dia em São Paulo).
   devolucao_vencido?: boolean
   devolucao_gasto?: number | null
+  // As 3 partes do painel (04/11/2026): o departamento da linha do produto e,
+  // para quem está em atendimento agora, o motivo (o selo da aba Atendimento).
+  departamento?: Departamento | null
+  atendimento?: AtendimentoAgora | null
 }
 export type DesfechoAparelho = 'no_tecnico' | 'consertado' | 'perdido' | 'devolvido' | 'reembolso' | 'a_caminho'
+
+// "Em atendimento" (04/11/2026, services/garantia_atendimento.py): quem pediu
+// garantia e ainda tem algo em aberto — o 1º motivo que vale, nesta ordem. O
+// rótulo vem pronto do servidor; `desde` = quando o motivo começou.
+export type MotivoAtendimento = 'no_tecnico' | 'sem_condicao' | 'voltando' | 'plataforma_decidindo' | 'pedido_sem_resposta'
+export type AtendimentoAgora = { motivo: MotivoAtendimento; rotulo: string; desde: string | null; vencido: boolean }
 
 export type OrigemPedido = 'mensagem' | 'sac' | 'devolucao' | 'atendimento' | 'manual' | 'pessoa'
 // Sem emoji (29/10/2026: "igual aos nossos painéis do DaVinci").
@@ -90,6 +100,8 @@ export function rotuloDoPedidoComTrecho(g: Pick<GarantiaLinha, 'pedido_em' | 'pe
   return `${maiuscula(frase)} · ${dataBR(g.pedido_em)}`
 }
 
+// Os cartões da aba Garantia e a linha embaixo deles: do departamento da
+// pílula (04/11/2026), sem os filtros da barra.
 export type Indicadores = {
   ativas: number
   somente_software: number
@@ -101,11 +113,49 @@ export type Indicadores = {
   total: number
   // As vendas com garantia (com e sem pedido) que a pessoa enxerga.
   vendidas?: number
-  // Dos pedidos, os que SEGUIRAM (a % certa: seguiram ÷ vendidas).
-  seguiram?: number
 }
 
-export type GarantiaLista = { itens: GarantiaLinha[]; total: number; indicadores: Indicadores; hoje: string }
+// As 3 partes do painel (04/11/2026): o que a pessoa enxerga em cada
+// departamento (a equipe dela), sem os filtros da barra — como os cartões. As
+// pílulas e as abas mostram estes números.
+export type ContagemDaAba = { garantias: number; atendimento: number }
+export type GarantiaLista = {
+  itens: GarantiaLinha[]
+  total: number
+  indicadores: Indicadores
+  hoje: string
+  abas?: Record<Departamento, ContagemDaAba> | null
+  // A busca não achou garantia, mas achou o pedido (dentro da equipe): o
+  // cartão diz por que ele ainda não tem garantia.
+  pedido_sem_garantia?: PedidoSemGarantia | null
+}
+
+// Por que o pedido ainda não tem garantia (04/11/2026): o SAC busca o nº da
+// plataforma de um pedido que o robô não pegou. Nunca traz CPF nem nome.
+export type MotivoSemGarantia = 'antes_das_notas' | 'cancelado' | 'pendencia' | 'sem_nf_produto' | 'sem_produto_uranyx' | 'outro'
+export type PedidoSemGarantia = {
+  pedido_bling: string
+  pedido_marketplace: string | null
+  plataforma: string | null
+  conta: string | null
+  data: string | null
+  situacao: string | null
+  produto_uranyx: boolean
+  motivo: MotivoSemGarantia
+  motivo_texto: string
+  pode_cadastrar: boolean
+}
+
+/** "Pedido 288113 · Mercado Livre Loja X · nº na plataforma 2000… · compra 30/07/2026 · Entregue — ainda sem garantia: <motivo>". */
+export function textoPedidoSemGarantia(p: PedidoSemGarantia): string {
+  const loja = [nomePlataforma(p.plataforma), p.conta].filter(Boolean).join(' ')
+  const partes = [`Pedido ${p.pedido_bling}`]
+  if (loja) partes.push(loja)
+  if (p.pedido_marketplace) partes.push(`nº na plataforma ${p.pedido_marketplace}`)
+  if (p.data) partes.push(`compra ${dataBR(p.data)}`)
+  if (p.situacao) partes.push(p.situacao)
+  return `${partes.join(' · ')} — ainda sem garantia: ${p.motivo_texto}`
+}
 
 export type Prazo = { fim: string; dias_total: number; dias_restantes: number; coberto_hoje: boolean }
 
@@ -416,6 +466,7 @@ export const ERROS: Record<string, string> = {
   atendimento_repetido: 'Este atendimento acabou de ser vinculado (clique duplo?) — não foi gravado de novo.',
   anexo_nao_encontrado: 'Anexo não encontrado.',
   muitas_buscas_por_cpf: 'Muitas buscas pelo CPF completo em pouco tempo — espere um pouco ou busque pelo pedido, pela NF ou pelo nome.',
+  so_admin: 'O Resumo da garantia é só para administradores.',
   forbidden: 'Sem permissão para isso.',
 }
 
@@ -490,10 +541,13 @@ export type AcessoGarantia = {
   ve: boolean
   // Log de quem consultou/alterou: só admin.
   log: boolean
+  // A aba Resumo do painel (a garantia por produto, com saldo e gasto em
+  // reais): só admin (04/11/2026; o POST /resumo também recusa os outros).
+  resumo: boolean
 }
 
 export function acessoGarantia(u: UsuarioLike): AcessoGarantia {
-  if (!u) return { consulta: false, cadastra: false, registra: false, veCpf: false, ve: false, log: false }
+  if (!u) return { consulta: false, cadastra: false, registra: false, veCpf: false, ve: false, log: false, resumo: false }
   const admin = u.role === 'admin'
   const p = (r: string, a: 'view' | 'edit') => admin || u.permissions?.[r]?.[a] === true
   const consulta = p('garantias', 'view') || p('garantias', 'edit')
@@ -505,6 +559,7 @@ export function acessoGarantia(u: UsuarioLike): AcessoGarantia {
     veCpf: p('garantias_cpf', 'view'),
     ve: consulta || registra,
     log: admin,
+    resumo: admin,
   }
 }
 
@@ -712,8 +767,14 @@ export type FiltrosLista = {
   // Pedido de garantia (28/10/2026): o Painel é dos pedidos; "todas" mostra
   // também a venda sem pedido.
   mostrar?: 'pedidos' | 'todas'
-  // A garantia por produto: a linha do produto abre os pedidos dela.
+  // A garantia por produto: o número de uma coluna abre só os pedidos dela.
   ids?: number[]
+  // As 3 partes do painel (04/11/2026): o departamento da pílula; a linha do
+  // Resumo (a `chave` do produto: todas as garantias dele); e a aba
+  // Atendimento (só quem está em atendimento agora, o mais urgente em cima).
+  departamento?: Departamento | null
+  produto?: string | null
+  em_atendimento?: boolean
 }
 
 export const FILTROS_PADRAO: FiltrosLista = { busca: '', status: 'todos', periodo: 'pedido', de: '', ate: '', com_atendimento_no_mes: false, mostrar: 'pedidos' }
@@ -734,6 +795,9 @@ export type CorpoLista = {
   origem?: 'robo' | 'manual'
   mostrar?: 'todas'
   ids?: number[]
+  departamento?: Departamento
+  produto?: string
+  em_atendimento?: boolean
 }
 
 /**
@@ -758,60 +822,114 @@ export function corpoDaLista(f: FiltrosLista, offset = 0, limite = LIMITE_PAGINA
   if (f.origem && f.origem !== 'todas') q.origem = f.origem
   if (f.mostrar === 'todas') q.mostrar = 'todas'
   if (f.ids?.length) q.ids = f.ids
+  if (f.departamento) q.departamento = f.departamento
+  if (f.produto) q.produto = f.produto
+  if (f.em_atendimento) q.em_atendimento = true
   return q
 }
 
-// ─── resumo por departamento (28/10/2026) ───────────────────────────────────
-// POST /api/garantias/resumo: a garantia POR PRODUTO (28/10/2026) — uma
-// linha por produto da Tabela de Preços (o modelo, com as cores juntas), com
-// as vendas com garantia, os PEDIDOS de garantia ("a garantia é só para o
-// pessoal que solicita", Eduardo), de onde veio o pedido, a situação e os
-// atendimentos; e o total por departamento (as pílulas). A porcentagem é
-// seguiram ÷ vendidas desde 30/10/2026 ("no chat muitos pedem e não vai para
-// frente"). As porcentagens são feitas na tela, de um jeito só.
-export type ResumoDepartamento = { chave: 'celular' | 'eletro' | 'acessorios' | 'outros'; nome: string; vendidas: number; pediram: number; seguiram: number }
+// ─── as 3 partes do painel (04/11/2026) ─────────────────────────────────────
+// "vamos dividir o painel garantia em 3 partes" (Eduardo): Resumo (a visão por
+// produto, só admin), Garantia (todas as garantias) e Atendimento (só o que
+// está em atendimento agora) — no estilo da Tabela de Preços: as pílulas de
+// departamento em cima e as abas embaixo. Os departamentos são as raízes da
+// Tabela de Preços (services/garantia_resumo.py).
+export type Departamento = 'celular' | 'mala' | 'eletro'
+export const DEPARTAMENTOS: { chave: Departamento; nome: string }[] = [
+  { chave: 'celular', nome: 'Celular' },
+  { chave: 'mala', nome: 'Mala' },
+  { chave: 'eletro', nome: 'Eletro' },
+]
+export type Aba = 'resumo' | 'garantia' | 'atendimento'
+
+// A URL guarda a aba (?aba=) e o departamento (?dept=). O admin abre no
+// Resumo; os outros, na Garantia — e quem não é admin nunca cai no Resumo.
+const primeiro = (v: unknown) => (Array.isArray(v) ? v[0] : v)
+export function abaDaUrl(v: unknown, admin: boolean): Aba {
+  const a = primeiro(v)
+  if (a === 'garantia' || a === 'atendimento') return a
+  return admin ? 'resumo' : 'garantia'
+}
+export function departamentoDaUrl(v: unknown): Departamento {
+  const d = primeiro(v)
+  return DEPARTAMENTOS.find((x) => x.chave === d)?.chave ?? 'celular'
+}
+
+/** "Mercado Livre · Loja X" — a coluna Loja da Tabela. */
+export function lojaDaGarantia(g: Pick<GarantiaLinha, 'plataforma' | 'conta'>): string {
+  return [nomePlataforma(g.plataforma), g.conta].filter(Boolean).join(' · ') || '—'
+}
+
+/** Há quanto tempo (o dia em São Paulo): "hoje", "há 1 dia", "há 12 dias". */
+export function haQuantoTempo(desde: string | null | undefined, hoje: string = hojeSP()): string {
+  const dia = diaEmSP(desde)
+  if (!dia) return ''
+  const dias = Math.round((Date.parse(`${hoje}T00:00:00Z`) - Date.parse(`${dia}T00:00:00Z`)) / 86_400_000)
+  if (!Number.isFinite(dias)) return ''
+  if (dias <= 0) return 'hoje'
+  return dias === 1 ? 'há 1 dia' : `há ${dias} dias`
+}
+
+/** O selo da aba Atendimento: "No técnico · há 42 dias · prazo vencido" — o
+ *  tempo é desde quando o motivo começou (o aparelho foi para o técnico); o
+ *  "vencido" vai no fim, sem número, para não confundir com o "vencido há N
+ *  dias" do aparelho (que conta desde o fim do prazo). */
+export function seloDoAtendimento(a: AtendimentoAgora, hoje?: string): string {
+  const base = a.vencido ? a.rotulo.replace(/ · vencido$/, '') : a.rotulo
+  return [base, haQuantoTempo(a.desde, hoje), a.vencido ? 'prazo vencido' : ''].filter(Boolean).join(' · ')
+}
+
+// ─── resumo por produto (28/10/2026; 3 partes desde 04/11/2026) ─────────────
+// POST /api/garantias/resumo (só admin): a garantia POR PRODUTO — uma linha
+// por produto da Tabela de Preços (o modelo, com as cores juntas), com as
+// vendas e o SALDO delas (a planilha de rentabilidade: base − comissão − frete
+// do Bling), como os pedidos de garantia chegaram (mensagem, SAC, devolução)
+// e a manutenção (consertos, perdidos e o GASTO, da tela Reembolso); e o total
+// por departamento. A % é gasto ÷ saldo × 100 (04/11/2026: "% --> manutenção
+// gastos/saldo *100"), feita na tela, de um jeito só (pctDoGasto).
+export type ResumoDepartamento = {
+  chave: Departamento
+  nome: string
+  vendidas: number
+  pediram: number
+  // Em reais, só para admin (como os do produto).
+  saldo?: number | null
+  gasto?: number | null
+}
+// As colunas do Resumo que abrem só os pedidos delas.
+export type ColunaDePedidos = 'mensagem' | 'sac' | 'devolucao' | 'consertos' | 'perdidos' | 'gasto'
 export type ResumoProduto = {
   chave: string
-  departamento: ResumoDepartamento['chave']
+  departamento: Departamento
   nome: string
   skus: string[]
   // false = vendido, mas sem linha na Tabela de Preços (entra pelo SKU).
   na_tabela: boolean
   vendidas: number
   pediram: number
-  // Dos que pediram, os que SEGUIRAM: o aparelho voltou, está voltando ou teve
-  // reembolso — a base da % (30/10/2026: no chat muitos pedem e não vai para
-  // frente; reclamação não conta).
   seguiram: number
-  // Dos PEDIDOS: os 4 status e, à parte, "entregue_sem_data" (o Bling já
-  // entregou, falta a data no DaVinci — fora do "Aguardando entrega").
-  status: Record<StatusGarantia | 'entregue_sem_data', number>
-  origens: Partial<Record<OrigemPedido, number>>
-  com_atendimento: number
-  atendimentos_hardware: number
-  atendimentos_software: number
-  // As garantias com pedido (a linha abre a lista delas).
-  pedidos: number[]
-  // Os mesmos, por coluna da tela (a célula abre só os dela). Coluna sem
-  // pedido não vem.
-  pedidos_por_coluna?: Record<string, number[]>
-  // Manutenção e perdas (30/10/2026): dos que pediram, o aparelho na tela
-  // Devoluções. Uma garantia conta numa só.
-  no_tecnico: number
-  no_tecnico_vencidos: number
-  consertados: number
-  consertados_sem_custo: number
+  // Como pediu (a coluna Atendimento): mensagem, SAC do site, devolução por defeito.
+  origens: Partial<Record<'mensagem' | 'sac' | 'devolucao', number>>
+  // Manutenção (a tela Devoluções): dos que pediram, os consertados e os
+  // perdidos (Extraviado/Sucata). Uma garantia conta numa só.
+  consertos: number
   perdidos: number
-  // Em reais, só para admin (null para os outros): gasto = conserto + perdidos.
+  // Em reais, só para admin: o gasto (tela Reembolso) de quem pediu garantia
+  // = conserto + perdidos + reembolso ao cliente; o saldo de TODAS as vendas.
   gasto?: number | null
   gasto_conserto?: number | null
   gasto_perdidos?: number | null
-  valor_no_tecnico?: number | null
+  gasto_cliente?: number | null
+  saldo?: number | null
+  // As garantias com pedido; e os mesmos por coluna da tela (a célula abre só
+  // os dela). Coluna sem pedido não vem.
+  pedidos: number[]
+  pedidos_por_coluna?: Partial<Record<ColunaDePedidos, number[]>>
 }
-export type Resumo = { vendidas: number; pediram: number; seguiram?: number; hoje: string; ve_valores?: boolean; departamentos: ResumoDepartamento[]; produtos: ResumoProduto[] }
+export type Resumo = { vendidas: number; pediram: number; seguiram: number; hoje: string; ve_valores: boolean; departamentos: ResumoDepartamento[]; produtos: ResumoProduto[] }
 
-// O corpo do resumo: os filtros da barra (período, origem, status) — a
-// busca e o "só com conversa" são da lista.
+// O corpo do resumo: os filtros da barra que a aba Resumo mostra (período,
+// origem, status). A busca, o "Mostrar" e os cartões são da aba Garantia.
 export function corpoDoResumo(f: FiltrosLista): Partial<CorpoLista> {
   const q: Partial<CorpoLista> = {}
   if (f.status && f.status !== 'todos') q.status = f.status
@@ -820,19 +938,15 @@ export function corpoDoResumo(f: FiltrosLista): Partial<CorpoLista> {
     if (f.de) q.de = f.de
     if (f.ate) q.ate = f.ate
   }
-  if (f.com_atendimento_no_mes) q.com_atendimento_no_mes = true
   if (f.origem && f.origem !== 'todas') q.origem = f.origem
   return q
 }
 
-// 77,4% — uma casa (sem casa quando é redondo); o que não chega a 0,1% vira
-// "<0,1%" (nunca um "0%" que não é zero); total 0 → "0%".
-export function pct(parte: number, total: number): string {
-  if (!total || !parte) return '0%'
-  const v = (parte / total) * 100
-  if (v < 0.05) return '<0,1%'
-  const arred = Math.round(v * 10) / 10
-  return `${(Number.isInteger(arred) ? arred.toFixed(0) : arred.toFixed(1)).replace('.', ',')}%`
+// A % do Resumo: gasto ÷ saldo × 100, com 2 casas ("3,45%"); sem saldo, "—".
+export function pctDoGasto(gasto: number | null | undefined, saldo: number | null | undefined): string {
+  if (!saldo) return '—'
+  const v = ((gasto || 0) / saldo) * 100 || 0
+  return `${v.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}%`
 }
 // Largura da barra (0–100), com um mínimo visível para o que não é zero.
 export function largura(parte: number, total: number): number {
