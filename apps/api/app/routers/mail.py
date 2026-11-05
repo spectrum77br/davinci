@@ -448,6 +448,12 @@ async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, us
     if job is None or mailbox is None:
         raise fail("job_not_found")
     dono = user.role == UserRole.ADMIN
+    if not dono and job.message_id is not None and not await session.scalar(
+        select(MailMessage.id).where(
+            MailMessage.id == job.message_id, mail_admin.filtro_mensagem(user),
+        )
+    ):
+        raise fail("job_not_found")
     # Quem só responde (`atendimento_email` ver+editar, 28/10/2026) confere
     # apenas o PRÓPRIO envio: a resposta simples e, desde 29/10/2026, o do
     # compositor (Nova mensagem/encaminhar) enquanto ainda pode compor.

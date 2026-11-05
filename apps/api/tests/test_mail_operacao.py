@@ -474,3 +474,57 @@ async def test_lixeira_preserva_restricao_de_admin_que_nao_mexe(
     ):
         result = await getattr(client, method)(path, **({"json": {}} if method == "post" else {}))
         assert result.status_code == 403, (method, path, result.text)
+
+
+@pytest.mark.parametrize("owner", [False, True])
+async def test_conferencia_de_envio_proprio_exige_mensagem_ainda_visivel(
+    client,
+    account,
+    db,
+    make_user,
+    auth_as,
+    owner,
+):
+    mid = await ingest(client, account)
+    await enable(client, account)
+    user = await operator(db, account, make_user, owner=owner)
+    box = UUID(account["mailbox"]["id"])
+    auth_as(user)
+    queued = await client.post(
+        f"{ROOT}/messages/{mid}/reply",
+        json={
+            "request_id": str(uuid4()),
+            "text": "Conteúdo privado da resposta anterior",
+        },
+    )
+    assert queued.status_code == 202, queued.text
+    [leased] = await claim(client, account)
+    receipt = await client.post(
+        f"{account['agent']}/outbox/{leased['id']}/receipt",
+        headers=account["headers"],
+        json={"lease_token": leased["lease_token"], "status": "uncertain"},
+    )
+    assert receipt.status_code == 200, receipt.text
+    policy = MailAcesso(
+        mailbox_id=box,
+        user_id=user.id,
+        modo="padrao",
+        tipos_permitidos=["chamado"],
+    )
+    db.add(policy)
+    await db.commit()
+    assert (await client.get(f"{ROOT}/messages/{mid}")).status_code == 404
+    # A caixa continua disponível; só a origem deste envio deixou de ser visível.
+    assert (await client.get(f"{ROOT}/mailboxes")).json()["items"][0]["id"] == str(box)
+    resolved = await client.post(f"{ROOT}/outbox/{leased['id']}/resolve", json={"saiu": False})
+    assert resolved.status_code == 404, resolved.text
+    assert resolved.json() == {"detail": {"code": "job_not_found"}}
+    job = await db.get(MailOutbox, UUID(leased["id"]))
+    await db.refresh(job)
+    assert job.status == "uncertain"
+    # Retirar a restrição restaura a conferência, sem reenviar a mensagem.
+    await db.delete(policy)
+    await db.commit()
+    resolved = await client.post(f"{ROOT}/outbox/{leased['id']}/resolve", json={"saiu": False})
+    assert resolved.status_code == 200 and resolved.json()["status"] == "failed"
+    assert await claim(client, account) == []
