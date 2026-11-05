@@ -333,7 +333,9 @@ async def test_painel_diz_a_nf_e_como_o_pdf_chega(db, make_user):
 
     amazon = await _conversa(db, make_user, plataforma="amazon", canal="email", pedido="701-1")
     s = await painel.situacao_da_foto(db, amazon)
-    assert s["pdf"] is None and "Seller Central" in s["motivo"]
+    # Amazon (05/11/2026): com o comprador da retransmissão, o anexo vale; este e-mail
+    # não tem (`test_atendimento_nf_amazon`).
+    assert s["pdf"] is None and "não veio de um comprador" in s["motivo"]
 
 
 async def test_devolucao_cancelado_e_carrinho_ficam_com_a_pessoa(db, make_user):

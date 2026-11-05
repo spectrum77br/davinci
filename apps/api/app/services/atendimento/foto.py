@@ -38,8 +38,14 @@ Por plataforma (a resposta é a do chat da conversa):
                       `attachments: [filename]` e um TEXTO (obrigatório, como
                       no pós-venda). O upload só acontece depois de conferida
                       a ação da loja (`ml.responder_reclamacao`).
-  Amazon, Magalu, Temu, AliExpress, Instagram: sem foto pelo DaVinci (por
-  enquanto) — `motivo_sem_foto` diz à pessoa o caminho de cada plataforma.
+  Amazon (e-mail)     05/11/2026, o Eduardo: "igual às outras, mesmo padrão":
+                      anexo no MESMO e-mail da resposta ao endereço de
+                      retransmissão (`amazon_email.enviar_texto`), com o texto
+                      (obrigatório, como no ML). Ajuda da Amazon: PDF, JPG e PNG,
+                      a mensagem inteira até 10 MB. Só a conversa com comprador
+                      (o e-mail informativo da Central não tem para quem mandar).
+  Magalu, Temu, AliExpress, Instagram: sem foto pelo DaVinci (por enquanto) —
+  `motivo_sem_foto` diz à pessoa o caminho de cada plataforma.
 
 Várias de uma vez (03/11/2026, a equipe: "às vezes preciso mandar umas 5"):
 no ML todas vão NUMA mensagem, com o texto (`attachments` é lista — em
@@ -52,7 +58,7 @@ PDF (28/10/2026, a NF — "o primeiro empecilho" da equipe respondendo pelo
 DaVinci): o mesmo botão aceita PDF (até 10 MB, conferido pelos bytes e
 aberto pelo PyMuPDF: sem senha, com página). Só o PÓS-VENDA DO ML recebe o
 PDF como arquivo (`CAIXAS_COM_PDF`: o upload de anexo da doc oficial aceita
-JPG, PNG, PDF, HEIC e GIF até 25 MB). O chat da Shopee e o do TikTok não têm
+JPG, PNG, PDF, HEIC e GIF até 25 MB) e o e-mail da AMAZON. O chat da Shopee e o do TikTok não têm
 mensagem de arquivo (Shopee: nenhum `file` em 113 mil mensagens de 60 dias;
 TikTok: texto, imagem, vídeo e cartões) — lá o PDF vira UMA IMAGEM com as
 páginas empilhadas (`pdf_em_imagem`, até `MAX_PAGINAS_IMAGEM`) e sai pelo
@@ -89,6 +95,7 @@ import structlog
 from app.models import AtendimentoConversa
 from app.services.atendimento.constantes import (
     CANAL_CHAT,
+    CANAL_EMAIL,
     CANAL_POS_VENDA,
     CANAL_RECLAMACAO,
     CANAL_ZAP,
@@ -111,6 +118,7 @@ MAX_BYTES_PLATAFORMA: dict[str, int] = {
     "ml": 5 * 1024 * 1024,
     # Cloud API: imagem até 5 MB (documentação da mídia, consultada em 17/10).
     PLATAFORMA_WHATSAPP: 5 * 1024 * 1024,
+    "amazon": 5_000_000,
 }
 # Teto de RESOLUÇÃO (largura × altura, lido do cabeçalho). Os 10 MB não
 # bastam: um PNG de 1 MB com 9000×9000 pixels decodifica para mais de 1 GB
@@ -127,10 +135,13 @@ CAIXAS_COM_FOTO = frozenset(
         ("ml", CANAL_POS_VENDA),
         ("ml", CANAL_RECLAMACAO),
         (PLATAFORMA_WHATSAPP, CANAL_ZAP),
+        ("amazon", CANAL_EMAIL),
     }
 )
-# No ML a foto vai DENTRO de uma mensagem com texto (obrigatório).
-CAIXAS_COM_LEGENDA = frozenset({("ml", CANAL_POS_VENDA), ("ml", CANAL_RECLAMACAO)})
+# No ML e na Amazon a foto vai DENTRO de uma mensagem com texto (obrigatório).
+CAIXAS_COM_LEGENDA = frozenset(
+    {("ml", CANAL_POS_VENDA), ("ml", CANAL_RECLAMACAO), ("amazon", CANAL_EMAIL)}
+)
 # No Zap a legenda é PERMITIDA sem ser obrigatória (§6.8): a foto pode ir
 # sozinha ou com uma frase — que passa pelo validador como qualquer resposta.
 CAIXAS_COM_LEGENDA_OPCIONAL = frozenset({(PLATAFORMA_WHATSAPP, CANAL_ZAP)})
@@ -140,8 +151,15 @@ LIMITE_LEGENDA: dict[tuple[str, str], int] = {(PLATAFORMA_WHATSAPP, CANAL_ZAP): 
 
 # (plataforma, caixa) que recebem o PDF como ARQUIVO; nas outras com foto, o
 # PDF vira imagem. O teto do arquivo na plataforma (ML: 25 MB, doc oficial).
-CAIXAS_COM_PDF = frozenset({("ml", CANAL_POS_VENDA), ("ml", CANAL_RECLAMACAO)})
-MAX_BYTES_PDF_PLATAFORMA: dict[str, int] = {"ml": 25 * 1024 * 1024}
+CAIXAS_COM_PDF = frozenset(
+    {("ml", CANAL_POS_VENDA), ("ml", CANAL_RECLAMACAO), ("amazon", CANAL_EMAIL)}
+)
+# Amazon: a mensagem inteira até 10 MB, e o anexo no e-mail cresce 4/3 (base64).
+MAX_BYTES_EMAIL_AMAZON = 7_000_000
+MAX_BYTES_PDF_PLATAFORMA: dict[str, int] = {
+    "ml": 25 * 1024 * 1024,
+    "amazon": MAX_BYTES_EMAIL_AMAZON,
+}
 # O anexo da RECLAMAÇÃO do ML tem teto próprio (doc: 5 MB, foto ou PDF).
 MAX_BYTES_RECLAMACAO_ML = 5_000_000
 # PDF que vira imagem: até 3 páginas empilhadas (a DANFE costuma ter 1); a
@@ -308,10 +326,6 @@ def _conferir_pdf(dados: bytes) -> int:
 
 # O caminho de cada plataforma quando o anexo não sai pelo DaVinci (28/10/2026).
 _SEM_ANEXO: dict[str, str] = {
-    "amazon": (
-        "Amazon: anexo pelo DaVinci ainda não está liberado. Para mandar a NF (PDF), abra a "
-        "conversa no Seller Central (Mensagens do comprador) e use o anexo de lá."
-    ),
     "magalu": (
         "Magalu: anexo pelo DaVinci ainda não está liberado. Para mandar a NF (PDF), anexe "
         "pelo portal do parceiro Magalu, no SAC/atendimento do pedido."
@@ -326,6 +340,12 @@ _SEM_ANEXO: dict[str, str] = {
 def motivo_sem_foto(conversa: AtendimentoConversa) -> str | None:
     """Por que esta conversa não aceita anexo pelo DaVinci (e o caminho); None = aceita."""
     par = (conversa.plataforma, conversa.canal)
+    if conversa.plataforma == "amazon" and par in CAIXAS_COM_FOTO:
+        from app.services.atendimento import amazon_email
+
+        if not amazon_email.eh_endereco_de_retransmissao(conversa.comprador_id):
+            return "Este e-mail da Amazon não veio de um comprador: não há para quem mandar anexo."
+        return None
     if par in CAIXAS_COM_FOTO:
         return None
     if conversa.plataforma == "ml":
@@ -556,6 +576,8 @@ async def enviar_imagem(
             return await _tiktok(conversa, cliente, nome, dados, mime)
         if conversa.plataforma == "ml" and conversa.canal == CANAL_POS_VENDA:
             return await _ml(conversa, cliente, prontas, legenda)
+        if conversa.plataforma == "amazon":
+            return await _amazon(session, conversa, integration, prontas, legenda)
     except Exception as e:  # noqa: BLE001 — envio nunca levanta; sem saber, é ambíguo
         logger.warning(
             "atendimento_foto_envio_inesperado",
@@ -566,6 +588,25 @@ async def enviar_imagem(
             ok=False, ambiguo=True, erro=f"{conversa.plataforma} {type(e).__name__}"
         )
     return ResultadoEnvio(ok=False, erro=f"foto_nao_suportada:{conversa.plataforma}")
+
+
+async def _amazon(
+    session: Any,
+    conversa: AtendimentoConversa,
+    integration: Any,
+    prontas: Sequence[tuple[str, bytes, str]],
+    legenda: str | None,
+) -> ResultadoEnvio:
+    """O anexo no e-mail da resposta: nada sobe antes (a régua é a do texto)."""
+    from app.services.atendimento import amazon_email
+
+    if not (legenda or "").strip():
+        return ResultadoEnvio(ok=False, erro="amazon legenda_vazia")
+    if sum(len(dados) for _, dados, _ in prontas) > MAX_BYTES_EMAIL_AMAZON:
+        return ResultadoEnvio(ok=False, erro="amazon anexo_grande")
+    return await amazon_email.enviar_texto(
+        session, conversa, integration, None, legenda, anexos=prontas
+    )
 
 
 async def _shopee(
