@@ -790,3 +790,13 @@ Desde 03/11 o previsto da Shopee é a conta da venda, e o afiliado só aparece n
 O pedido continua "Recebido a menos", com a diferença e o motivo, e os valores não mudam. Sai do "Onde agir hoje" e do Threema das 07:00; a obs do bloco Dias continua contando. Só pega pendência: finalizado e reaberto seguem o que já foi decidido, e movimento novo reabre para uma pessoa fechar. Decisão dele, porque é regra automática sobre diferença (ver a regra-mãe da seção 40). Se a Shopee mudar os 14%, os pedidos voltam a ficar amarelos e `TAXA_SOBRE_AFILIADOS` precisa de revisão. Só a Shopee: a TikTok não usa a conta da venda.
 
 **Venda devolvida no "Onde agir" (05/11):** o pedido que bateu mas recebeu zero ou menos fica em pendência para a pessoa decidir o custo, e não tinha cartão, porque os cartões saem da situação e a dele é "Bateu". O ATV 305950 só aparecia na obs do bloco Dias. Agora tem cartão próprio, que também vai para o Threema. Em pendência, "Bateu" só existe nesse caso; o reaberto que bateu continua no cartão dos reabertos. Venda desfeita com dinheiro (situação "Cancelado" em pendência) também não tem cartão, mas não havia nenhum caso em 05/11.
+
+## 44. TikTok: o previsto não some quando a estimativa zera (05/11)
+
+Caso Poofy 306443: "não entendo como pode ter um pedido sem valor previsto". Enquanto a venda não liquida, só existe a estimativa da TikTok, e o painel gravava cada número novo por cima do anterior. O reembolso levou a estimativa a zero, a venda nunca liquidou e o previsto virou 0,00. Dos 84 pedidos TikTok em estimativa em 05/11, 82 tinham valor positivo; os outros eram o 306443 e um cancelado.
+
+- **Previsto mantido** (`previsto_que_zerou`): estimativa zerada em pedido que não foi cancelado (na plataforma nem no Bling) mantém o último previsto. Quando a venda liquida, o valor real substitui o guardado.
+- **Compensação compara com o previsto:** o "reembolso de logística" (`LOGISTICS_REIMBURSEMENT`) entra no lugar da venda. Abaixo do previsto é "Recebido a menos", acima é "Recebido a mais", e o motivo diz que é compensação. Nada finaliza sozinho.
+- **Efeito no "A liberar":** enquanto a compensação não vem, o pedido segue "aguardando" e o previsto conta no quadro. Se ela não vier, vence pelo prazo e vira cartão, em vez de sumir com previsto zero.
+
+O 306443 fica com 0,00: o valor antigo não ficou guardado. Referência: líquido do Bling, R$ 128,50.

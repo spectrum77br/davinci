@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import select
 
@@ -11,8 +12,10 @@ from app.models import (
     BlingOrder,
     ConciliacaoLoja,
     ConciliacaoMovimento,
+    ConciliacaoPedido,
     ConciliacaoSync,
     Integration,
+    MarketplaceOrderFinancial,
     StoreInfo,
 )
 from app.models.conciliacao import ConciliacaoDia
@@ -21,6 +24,7 @@ from app.security.cipher import encrypt_json
 from app.services.conciliacao_calculo import conta_tiktok_de_transacoes, recalcular_loja
 from app.services.conciliacao_jobs import fechar_dias_prontos
 from app.services.conciliacao_tiktok import (
+    ORIGEM_TIKTOK,
     ROTA_EXTRATOS,
     ROTA_REPASSES,
     aguardando_repasse,
@@ -1154,3 +1158,137 @@ async def test_extrato_reemitido_pela_tiktok_nao_ganha_repasse_e_o_reparo_desfaz
         .all()
     )
     assert [s.id_externo for s in saques] == ["repasse:1"]
+
+
+async def _pedido_com_estimativa(db, make_user) -> tuple[ConciliacaoLoja, Any]:
+    """Pedido da TikTok ainda sem liquidar: a Margem só tem a estimativa de 340,00."""
+    loja = await _loja_tiktok(db, make_user)
+    fin = MarketplaceOrderFinancial(
+        integration_id=loja.integration_id,
+        platform="tiktok",
+        external_order_id=PEDIDO,
+        status="estimated",
+        net_amount=Decimal("340"),
+        raw={"unsettled_estimate": {"est_settlement_amount": "340"}},
+    )
+    db.add(fin)
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    return loja, fin
+
+
+def _compensacao(loja: ConciliacaoLoja, valor: str) -> ConciliacaoMovimento:
+    return ConciliacaoMovimento(
+        integration_id=loja.integration_id,
+        platform=IntegrationPlatform.TIKTOK,
+        origem=ORIGEM_TIKTOK,
+        id_externo="reembolso-logistica-1",
+        data=datetime(2026, 10, 20, 3, tzinfo=UTC),
+        tipo="ajuste_tiktok",
+        descricao="Ajuste da TikTok (logistics_reimbursement)",
+        sub_tipo="LOGISTICS_REIMBURSEMENT",
+        pedido_marketplace=PEDIDO,
+        credito=Decimal(valor),
+        debito=Decimal("0"),
+        raw={},
+    )
+
+
+async def _pedido_320001(db) -> ConciliacaoPedido:
+    return (
+        await db.execute(
+            select(ConciliacaoPedido)
+            .where(ConciliacaoPedido.pedido_bling == "320001")
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+
+
+async def test_estimativa_que_zerou_mantem_o_previsto_e_compara_a_compensacao(db, make_user):
+    """05/11 (Poofy 306443: "não entendo como pode ter um pedido sem valor previsto"): o
+    reembolso leva a estimativa a zero e a venda nunca liquida. O previsto continua o que
+    a venda prometeu, e a compensação da TikTok é comparada com ele."""
+    loja, fin = await _pedido_com_estimativa(db, make_user)
+    assert (await _pedido_320001(db)).venda_liquido == Decimal("340.00")
+    fin.net_amount = Decimal("0")
+    await db.commit()
+    for _ in range(2):  # a rodada seguinte parte do previsto mantido
+        await recalcular_loja(db, loja, agora=AGORA)
+        await db.commit()
+        p = await _pedido_320001(db)
+        assert p.situacao == "aguardando" and p.venda_liquido == Decimal("340.00")
+    db.add(_compensacao(loja, "353.70"))
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    p = await _pedido_320001(db)
+    assert p.situacao == "recebido_a_mais" and p.etapa == "pendencia"
+    assert p.venda_liquido == Decimal("340.00") and p.recebido == Decimal("353.70")
+    assert p.dif_previsto_recebido == Decimal("13.70")
+    assert p.motivo == (
+        "compensação da TikTok de 353.70 (reembolso de logística): a venda não liquidou"
+    )
+
+
+async def test_compensacao_menor_que_o_previsto_e_recebido_a_menos(db, make_user):
+    loja, fin = await _pedido_com_estimativa(db, make_user)
+    fin.net_amount = Decimal("0")
+    db.add(_compensacao(loja, "300.00"))
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    p = await _pedido_320001(db)
+    assert p.situacao == "recebido_a_menos"
+    assert p.dif_previsto_recebido == Decimal("-40.00")
+
+
+async def test_compensacao_sem_previsto_guardado_continua_a_mais(db, make_user):
+    """O caso do 306443: o valor antigo não ficou guardado, o previsto segue 0,00."""
+    loja = await _loja_tiktok(db, make_user)
+    db.add(
+        MarketplaceOrderFinancial(
+            integration_id=loja.integration_id,
+            platform="tiktok",
+            external_order_id=PEDIDO,
+            status="estimated",
+            net_amount=Decimal("0"),
+            raw={},
+        )
+    )
+    db.add(_compensacao(loja, "153.70"))
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    p = await _pedido_320001(db)
+    assert p.situacao == "recebido_a_mais" and p.venda_liquido == Decimal("0.00")
+    assert p.dif_previsto_recebido == Decimal("153.70")
+    assert p.motivo.startswith("compensação da TikTok de 153.70")
+
+
+async def test_estimativa_zerada_de_pedido_cancelado_nao_mantem_o_previsto(db, make_user):
+    """Cancelado no Bling: zero é a resposta certa."""
+    loja, fin = await _pedido_com_estimativa(db, make_user)
+    fin.net_amount = Decimal("0")
+    bling = (await db.execute(select(BlingOrder))).scalars().one()
+    bling.situacao = "Cancelado"
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    p = await _pedido_320001(db)
+    assert p.situacao == "cancelado" and p.venda_liquido == Decimal("0.00")
+
+
+async def test_liquidacao_de_verdade_vence_o_previsto_mantido(db, make_user):
+    """Se a venda liquidar depois, o valor real da plataforma substitui o guardado."""
+    loja, fin = await _pedido_com_estimativa(db, make_user)
+    fin.net_amount = Decimal("0")
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    fin.status = "posted"
+    fin.net_amount = Decimal("330")
+    await db.commit()
+    await recalcular_loja(db, loja, agora=AGORA)
+    await db.commit()
+    assert (await _pedido_320001(db)).venda_liquido == Decimal("330.00")
