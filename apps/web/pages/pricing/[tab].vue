@@ -713,22 +713,32 @@ function certNumero(c: CertificacaoDoProduto | null | undefined): string {
   if (c.numero?.trim()) return c.numero
   return c.certificado === 'isento' ? 'Isento' : 'sem número'
 }
+// Validade em DIAS que faltam (Eduardo, 05/11/2026: "coloque a validade por
+// dias"); a data fica no balão. Conta pelo dia de hoje em São Paulo.
+function certDias(c: CertificacaoDoProduto | null | undefined): number | null {
+  if (!c?.fim) return null
+  const dia = (iso: string) => { const [a, m, d] = iso.split('-').map(Number); return Date.UTC(a, m - 1, d) }
+  return Math.round((dia(c.fim) - dia(isoToday())) / 86_400_000)
+}
 function certValidade(c: CertificacaoDoProduto | null | undefined): string {
-  return c?.fim ? c.fim.split('-').reverse().join('/') : '—'
+  const n = certDias(c)
+  if (n === null) return '—'
+  if (n === 0) return 'vence hoje'
+  if (n < 0) return `vencido há ${-n} ${n === -1 ? 'dia' : 'dias'}`
+  return `${n.toLocaleString('pt-BR')} ${n === 1 ? 'dia' : 'dias'}`
 }
 // Mesmas cores da Certificações: vermelho vencido, âmbar a menos de 30 dias.
 function certValidadeClasse(c: CertificacaoDoProduto | null | undefined): string {
-  if (!c?.fim) return ''
-  const hoje = isoToday()
-  if (c.fim < hoje) return 'text-red-700 font-medium'
-  const limite = new Date(`${hoje}T12:00:00`)
-  limite.setDate(limite.getDate() + 30)
-  return c.fim < limite.toISOString().slice(0, 10) ? 'text-amber-700 font-medium' : ''
+  const n = certDias(c)
+  if (n === null) return ''
+  if (n < 0) return 'text-red-700 font-medium'
+  return n < 30 ? 'text-amber-700 font-medium' : ''
 }
 function certTitulo(c: CertificacaoDoProduto | null | undefined): string {
   if (!c) return 'Nenhum certificado da Certificações com o código do nome deste produto (ex.: "… - USM003").'
   const tipo = c.certificado ? ` · ${c.certificado === 'isento' ? 'isento' : c.certificado.toUpperCase()}` : ''
-  return `Da Certificações: ${c.produto || 'sem produto'}${tipo}. Muda lá, muda aqui.`
+  const fim = c.fim ? ` Válido até ${c.fim.split('-').reverse().join('/')}.` : ''
+  return `Da Certificações: ${c.produto || 'sem produto'}${tipo}.${fim} Muda lá, muda aqui.`
 }
 
 const products = ref<PricingProduct[]>([])
@@ -5035,8 +5045,8 @@ watch(department, async () => {
                   title="Número do certificado (Anatel/Inmetro), copiado da Certificações."
                 >Nº certificado</th>
                 <th
-                  class="text-left px-2 py-2 font-medium border-b border-border w-24"
-                  title="Até quando o certificado vale (coluna Fim da Certificações). Vermelho = vencido; âmbar = vence em menos de 30 dias."
+                  class="text-right px-2 py-2 font-medium border-b border-border w-24"
+                  title="Quantos dias faltam para o certificado vencer (coluna Fim da Certificações; a data aparece ao passar o mouse). Vermelho = vencido; âmbar = vence em menos de 30 dias."
                 >Validade</th>
               </template>
               <th v-for="k in kitCount" :key="`kith-${k}`" class="text-right px-2 py-2 font-medium border-b border-border w-24" :title="kitTitulo(k)">
@@ -5244,7 +5254,7 @@ watch(department, async () => {
                   data-cert-numero
                 >{{ certNumero(p.certificacao) }}</td>
                 <td
-                  class="border border-border px-2 py-1.5 text-xs whitespace-nowrap"
+                  class="border border-border px-2 py-1.5 text-xs whitespace-nowrap text-right tabular-nums"
                   :class="p.certificacao?.fim ? certValidadeClasse(p.certificacao) : 'text-muted-foreground'"
                   :title="certTitulo(p.certificacao)"
                   data-cert-validade
