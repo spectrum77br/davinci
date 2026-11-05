@@ -118,8 +118,8 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   },
   {
     // Suprimentos = ciclo de compra/importação. `financeiro_suprimentos` é a
-    // página "Certificações" (rota /financeiro/suprimentos no menu e aba da
-    // Importação). Simulação e DNP saíram em 05/11/2026.
+    // tela "Certificações" (aba da Importação; desde 05/11/2026 fora do menu,
+    // a rota /financeiro/suprimentos segue abrindo). Simulação e DNP saíram.
     label: 'Suprimentos',
     resources: [
       'financeiro_suprimentos',

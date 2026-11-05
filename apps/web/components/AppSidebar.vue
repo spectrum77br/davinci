@@ -228,7 +228,9 @@ const sections = computed<Section[]>(() => [
   {
     label: 'Suprimentos',
     items: [
-      { to: '/financeiro/suprimentos', label: 'Certificações', icon: FileText, resource: 'financeiro_suprimentos' },
+      // Certificações saiu do menu em 05/11/2026 (Eduardo: "pode sumir
+      // daqui"): fica só como aba da Importação. A rota
+      // /financeiro/suprimentos continua abrindo para links antigos.
       { to: '/importacao', label: 'Importação', icon: Ship, resource: 'importacao' },
       // Simulação e DNP saíram em 05/11/2026 (Eduardo: "pode excluir"); as
       // tabelas financeiro_simulacao/dnp_* e a API continuam no banco.

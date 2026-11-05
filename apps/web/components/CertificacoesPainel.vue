@@ -2,8 +2,9 @@
 // Suprimentos — certificações (Anatel/Inmetro/isento) com alerta visual
 // de validade: linha âmbar quando faltam < 30 dias, vermelha quando já
 // venceu. Auto-save inline, mesmo padrão da página Consórcio.
-// Desde 05/11/2026 é componente: abre pelo menu (/financeiro/suprimentos)
-// e como aba "Certificações" da Importação (no lugar da antiga aba Kit).
+// Desde 05/11/2026 é componente: aba "Certificações" da Importação (no
+// lugar da antiga aba Kit) e a rota antiga /financeiro/suprimentos, que
+// saiu do menu.
 // `embutido` tira o recuo da página quando vem dentro da Importação.
 import { computed, onBeforeUnmount, reactive, ref } from 'vue'
 import { Download, ExternalLink, FileDown, Paperclip, Plus, RefreshCw, Trash2, X } from 'lucide-vue-next'
