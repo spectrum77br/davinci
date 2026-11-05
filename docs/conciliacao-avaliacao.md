@@ -775,3 +775,16 @@ O saldo sintético parte de zero no início da loja, então o quadro não conhec
 - **Preso** = transações `DEFERRED` = lista "Transações adiadas". KIA 90.610,63 igual à tela; Poofy 116 linhas e 26.651,39 iguais à lista. O cartão do Painel de pagamentos da Poofy mostrou 27.252,39: R$ 601,00 a mais que a própria lista, sem explicação na tela.
 
 `ler_saldo_da_amazon` roda no fim de `run_amazon_sync` e guarda em `ConciliacaoSync.detalhe.saldo_amazon`. Se a Amazon negar, o quadro segue na soma e diz isso na loja; a leitura das linhas não falha. A prova dos nove do Extrato do dia continua na soma encadeada, agora com o nome "Soma do painel". KFA segue por arquivo, sem saldo.
+
+## 43. Recebido a menos só de afiliado: o robô finaliza (05/11)
+
+Desde 03/11 o previsto da Shopee é a conta da venda, e o afiliado só aparece na liberação. Em 04/11 foram 27 pedidos "Recebido a menos", todos de afiliado, e cada um precisava ser aberto e finalizado à mão: "não gostaria que ficasse esses amarelo para sempre, parece que eu não resolvi".
+
+`baixa_de_afiliados` finaliza o pedido, com `etapa_por = robô`, só quando tudo isto vale:
+
+- afiliados subiu;
+- preço, subsídio, frete e cupons não mudaram nem um centavo;
+- a taxa subiu exatamente 14% do afiliado, arredondado (27 de 27 pedidos de 04/11);
+- a diferença do pedido é afiliado + taxa, ao centavo.
+
+O pedido continua "Recebido a menos", com a diferença e o motivo, e os valores não mudam. Sai do "Onde agir hoje" e do Threema das 07:00; a obs do bloco Dias continua contando. Só pega pendência: finalizado e reaberto seguem o que já foi decidido, e movimento novo reabre para uma pessoa fechar. Decisão dele, porque é regra automática sobre diferença (ver a regra-mãe da seção 40). Se a Shopee mudar os 14%, os pedidos voltam a ficar amarelos e `TAXA_SOBRE_AFILIADOS` precisa de revisão. Só a Shopee: a TikTok não usa a conta da venda.
