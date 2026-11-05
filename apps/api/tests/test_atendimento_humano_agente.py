@@ -531,7 +531,14 @@ def test_a_grade_de_nao_regressao_cobre_cada_motivo_de_origin():
     """A grade não é decorativa: cada motivo gravável de origin aparece nela."""
     vistos = {m for caso in CASOS.values() for m in _rodar(_triar_origem, caso).motivos}
     # O `acao_pessoa` só existe no canal com o agente (não é motivo de origin).
-    gravaveis = set(ORDEM_HUMANO) - {"ia_sem_resposta", "falha", "ia_pausada", "acao_pessoa"}
+    # A oferta do brinde vem do registro do motor (`triar_conversa`), não da régua pura.
+    gravaveis = set(ORDEM_HUMANO) - {
+        "ia_sem_resposta",
+        "falha",
+        "ia_pausada",
+        "acao_pessoa",
+        "oferta_de_brinde",
+    }
     assert gravaveis <= vistos
 
 

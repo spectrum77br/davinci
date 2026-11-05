@@ -911,6 +911,9 @@ HUMANO_BLOQUEADA = "bloqueada"
 HUMANO_FALHA = "falha"
 # Não é gravado: a tela pausou a IA nesta conversa (entra na hora, pela consulta).
 HUMANO_IA_PAUSADA = "ia_pausada"
+# A oferta do brinde saiu nesta conversa (05/11/2026): a IA não sabe dela e poderia
+# negar o brinde; por 7 dias, quem responde é pessoa (`ia._oferta_de_brinde_recente`).
+HUMANO_OFERTA_BRINDE = "oferta_de_brinde"
 # Os motivos do estado do pedido/conversa (os únicos que põem a bloqueada na Caixa Humano).
 HUMANO_DE_ESTADO = frozenset(
     {
@@ -939,6 +942,7 @@ ORDEM_HUMANO: tuple[str, ...] = (
     HUMANO_ASSUNTO,
     HUMANO_SO_ANEXO,
     HUMANO_IA,
+    HUMANO_OFERTA_BRINDE,
     HUMANO_IA_SEM_RESPOSTA,
     HUMANO_FALHA,
     HUMANO_IA_PAUSADA,
@@ -962,6 +966,7 @@ ROTULO_HUMANO: dict[str, str] = {
     HUMANO_ASSUNTO: "Assunto só de pessoa",
     HUMANO_SO_ANEXO: "Só foto/vídeo/arquivo",
     HUMANO_IA: "A IA marcou: precisa de pessoa",
+    HUMANO_OFERTA_BRINDE: "Oferta de brinde enviada",
     HUMANO_IA_SEM_RESPOSTA: "A IA não respondeu",
     HUMANO_FALHA: "Não deu para triar: confira",
     HUMANO_IA_PAUSADA: "IA pausada",

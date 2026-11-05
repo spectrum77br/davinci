@@ -128,6 +128,10 @@ DE_OUTRA_MIGRATION = frozenset(
         "atendimento_site_produtos",
         # 0440 (30/10/2026): as lojas de cada pessoa, em test_atendimento_lojas_pessoa.py.
         "atendimento_lojas_pessoa",
+        # 0454 (05/11/2026): a resposta padrão desativada por equipe.
+        "atendimento_modelos_desativados",
+        # 0455 (05/11/2026): o brinde do pedido não pago, em test_atendimento_brinde.py.
+        "atendimento_brindes",
     }
 )
 TABELAS = sorted(
@@ -500,7 +504,9 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         # semente congelada: nada das automações que vieram depois).
         assert sum(1 for nome, _ in semente if nome == "mini") == 4
         assert not any(c in simulacao.CODIGOS for _, c in semente)
-        assert set(automacoes.CODIGOS) | set(simulacao.CODIGOS) == set(cat.CATALOGO)
+        # As do brinde (05/11/2026) não têm semente: a regra nasce no botão "simular nas lojas".
+        semeadas = set(automacoes.CODIGOS) | set(simulacao.CODIGOS)
+        assert semeadas | {"shopee_nao_pago_brinde", "tiktok_nao_pago_brinde"} == set(cat.CATALOGO)
 
         # A 0371 semeia as que faltavam (só simulação), sem tocar no que existe.
         await db.execute(

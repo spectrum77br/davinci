@@ -201,7 +201,7 @@ import json
 import time
 from collections import Counter, defaultdict
 from collections.abc import Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
@@ -269,6 +269,7 @@ from app.services.atendimento.constantes import (
     HUMANO_IA,
     HUMANO_IA_PAUSADA,
     HUMANO_IA_SEM_RESPOSTA,
+    HUMANO_OFERTA_BRINDE,
     HUMANO_PEDIDO_NAO_ACHADO,
     HUMANO_RECLAMACAO,
     HUMANO_SEM_DADO,
@@ -1439,7 +1440,7 @@ async def triar_conversa(
     sugestao = await _sugestao_do_turno(session, conversa)
     if await ia._agente_no_canal(session, conversa):
         # O canal com o AGENTE (spec 6.6): o que a régua dele lê do banco.
-        return triar(
+        triagem = triar(
             conversa,
             recentes,
             ctx,
@@ -1450,15 +1451,21 @@ async def triar_conversa(
             agente=True,
             **await _leituras_do_agente(session, conversa, ctx),
         )
-    return triar(
-        conversa,
-        recentes,
-        ctx,
-        so_humano=so_humano,
-        sugestao=sugestao,
-        gatilho=gatilho,
-        ia_e_o_atendente=await ia._ia_e_o_atendente(session, conversa),
-    )
+    else:
+        triagem = triar(
+            conversa,
+            recentes,
+            ctx,
+            so_humano=so_humano,
+            sugestao=sugestao,
+            gatilho=gatilho,
+            ia_e_o_atendente=await ia._ia_e_o_atendente(session, conversa),
+        )
+    if await ia._oferta_de_brinde_recente(session, conversa):
+        # 05/11/2026: pelo registro do motor; o chip diz por que a IA não respondeu.
+        motivos = {*triagem.motivos, HUMANO_OFERTA_BRINDE}
+        triagem = replace(triagem, motivos=tuple(m for m in ORDEM_HUMANO if m in motivos))
+    return triagem
 
 
 async def _leituras_do_agente(
