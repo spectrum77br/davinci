@@ -6334,20 +6334,26 @@ _NAO_GARANTE_O_PRAZO = re.compile(
     r"|veja|ver)\s+se)"
     r"\b(?P<vao>\s+(?:[a-z0-9]+\s+){0,8}?)?\s*$"
 )
-# 05/11/2026 (regra 1 do dono, só no ML): o vão entre a negação e o prazo não pode afirmar o
-# prazo. "Não temos como garantir o HORÁRIO da chegada amanhã" e "não temos como garantir a cor E
-# chega amanhã" dão a chegada por certa; "garantir a cor até a semana que vem" e "garantir como
-# estará o estoque nos próximos dias" continuam negando. O "e" de "e possível" é o verbo da
-# negação. O envio do ML passou a aceitar a negativa, e esta é a régua que ele usa.
-_VAO_QUE_AFIRMA = re.compile(
-    r"\b(?:e(?!\s+possivel)|porque|pois|porem|contudo|entretanto|todavia|horarios?|horas?|turno"
-    r"|periodo|transportadora|entregador|motorista|rota)\b"
+# 05/11/2026 (regra 1 do dono, só no ML): o vão entre a negação e o prazo só pode falar da própria
+# entrega. "Não temos como garantir o HORÁRIO da chegada amanhã", "a cor E chega amanhã" e "não sei
+# em que MOMENTO chega amanhã" dão a chegada por certa, e a lista do que afirma nunca fecha; quem
+# fala da transportadora nega do mesmo jeito ("garantir que a transportadora entregue amanhã"). O
+# envio do ML passou a aceitar a negativa, e esta é a régua que ele usa. "Garantir a cor até a
+# semana que vem" e "como estará o estoque nos próximos dias" também negam, desde que o prazo não
+# seja de um verbo de chegada: "a cor chega amanhã" e "como chega amanhã" não
+# (`validador.VAO_DA_ENTREGA`).
+_VERBO_DA_CHEGADA = re.compile(
+    r"(?:cheg(?!ada)\w*|sa[ie]\w*|vai|vao|segu\w+|receb(?!imento)\w*|entrega[mr]?|entregamos|envia\w*"
+    r"|enviamos|posta\w*|despacha\w*)$"
 )
 # O texto plano tira o acento: depois do sujeito, o "e" é o verbo ("confirmar se a entrega É
-# amanhã", "garantir que o pedido É entregue"), não a conjunção ("a cor E chega amanhã").
+# amanhã", "garantir que o pedido É entregue"), não a conjunção. Antes do verbo de chegada, é a
+# conjunção ("a data E chega amanhã").
 _E_DE_LIGACAO = re.compile(
     r"\b(entrega|chegada|recebimento|postagem|envio|despacho|coleta|pedido|produto|encomenda|prazo"
-    r"|previsao|data|ele|ela)\s+e\b"
+    r"|previsao|data|ele|ela)\s+e\b(?!\s+(?:cheg(?!ada)\w*|sa[ie]\w*|vai|vao|segu\w+"
+    r"|receb(?!imento)\w*|entrega|entregam|entregamos|enviamos|envia\w*|posta\w*|despacha\w*|sera"
+    r"|ira|irao|vem|fica)\b)"
 )
 # A segunda negação desfaz a primeira ("não temos como NÃO garantir"), e "não preciso NEM dizer"
 # afirma. Vale o que vem logo antes da negação do verbo.
@@ -6361,23 +6367,73 @@ _DESFAZ_A_NEGACAO = re.compile(
 _NAO_PERTO = re.compile(r"\b(?:nao|nunca|nem)\s+(?:[a-z0-9]+\s+){0,3}$")
 
 
-def _nega_o_prazo(antes: str, plataforma: str | None = None) -> bool:
-    """O que vem antes do prazo é a negação do verbo de garantir? PURA. No ML, sem afirmar nada no
-    vão; com duas negações, vale a que tiver o vão limpo."""
+_AFIRMA_NA_ORACAO_DE_DENTRO = re.compile(r"(?:sai|saem|chega|chegam|vai|vao|segue|seguem)\b")
+
+
+def _vao_so_da_entrega(vao: str, trecho: str) -> bool:
+    """O vão entre a negação e o `trecho` do prazo só fala da entrega? PURA."""
+    palavras = _E_DE_LIGACAO.sub(r"\1", f"{vao} {trecho}").split()
+    palavras = palavras[: len(palavras) - len(trecho.split())]
+    if validador.sujeito_livre_da_entrega(" ".join(palavras), trecho):
+        return True
+    # "A chegada do pedido QUE SAI hoje": o dia é da oração de dentro, e ela afirma.
+    if "que" in palavras[1:] and _AFIRMA_NA_ORACAO_DE_DENTRO.match(trecho):
+        return False
+    if not set(palavras) <= validador.VAO_DA_ENTREGA | validador.VAO_DE_OUTRO_ASSUNTO:
+        return False
+    # "Informar A TRANSPORTADORA da entrega para amanhã" dá a entrega por certa; "garantir QUE a
+    # transportadora entregue" e "confirmar COM a transportadora", não.
+    if palavras[:1] in (["a"], ["o"]) and palavras[1:2] in (
+        ["transportadora"], ["entregador"], ["motorista"], ["carteiro"],
+    ):  # fmt: skip
+        return False
+    return not (
+        set(palavras) & validador.VAO_DE_OUTRO_ASSUNTO
+        and any(_VERBO_DA_CHEGADA.match(p) for p in [*palavras, *trecho.split()[:1]])
+    )
+
+
+# Mais formas da negativa, só no ML: a loja como sujeito, o pronome antes do verbo, o que a loja não
+# marca ("não temos como antecipar a entrega para amanhã") e o substantivo ("não temos garantia de
+# entrega amanhã", "não é garantido que chegue amanhã"). As outras plataformas seguem com a
+# `_NAO_GARANTE_O_PRAZO`.
+_AUX_DA_NEGATIVA = (
+    r"(?:conseguimos|consigo|consegue|podemos|posso|pode|temos\s+como|tenho\s+como|tem\s+como"
+    r"|ha\s+como|da\s+para|da\s+pra|e\s+possivel)"
+)
+_NAO_GARANTE_O_PRAZO_NO_ML = re.compile(
+    rf"(?:\b(?:nao|nem|nunca)\s+(?:{_AUX_DA_NEGATIVA}\s+)?(?:te|lhe)\s+"
+    r"(?:garantir|confirmar|prometer|afirmar|dizer|assegurar|informar)"
+    r"|\b(?:nao|nem|nunca)\s+(?:garante|confirma|promete|assegura)"
+    rf"|\b(?:nao|nem|nunca)\s+{_AUX_DA_NEGATIVA}\s+(?:antecipar|agendar|programar|marcar)"
+    r"|\bnao\s+(?:temos|tem|ha|existe)\s+garantia\s+(?:de|da|do)"
+    r"|\bnao\s+(?:e|esta)\s+garantid[oa]\s+(?:que|se))"
+    r"\b(?P<vao>\s+(?:[a-z0-9]+\s+){0,8}?)?\s*$"
+)
+
+
+def _nega_o_prazo(antes: str, plataforma: str | None = None, trecho: str = "") -> bool:
+    """O que vem antes do prazo (`trecho`) é a negação do verbo de garantir? PURA. No ML, com o vão
+    só falando da entrega; com duas negações, vale a que tiver o vão limpo."""
     inicio = 0
     while m := _NAO_GARANTE_O_PRAZO.search(antes, inicio):
         if plataforma != "ml":
             return True
-        vao = _E_DE_LIGACAO.sub(r"\1", m.group("vao") or "")
-        if not _VAO_QUE_AFIRMA.search(vao) and not _DESFAZ_A_NEGACAO.search(antes[: m.start()]):
+        if _vao_so_da_entrega(m.group("vao") or "", trecho) and not _DESFAZ_A_NEGACAO.search(
+            antes[: m.start()]
+        ):
             return True
         inicio = m.start() + 1
+    if plataforma == "ml" and (m := _NAO_GARANTE_O_PRAZO_NO_ML.search(antes)):
+        return _vao_so_da_entrega(m.group("vao") or "", trecho) and not _DESFAZ_A_NEGACAO.search(
+            antes[: m.start()]
+        )
     return False
 
 
 def _prazo_negado(oracao: str, m: re.Match[str], plataforma: str | None = None) -> bool:
     antes = oracao[: m.start()]
-    if _nega_o_prazo(antes, plataforma):
+    if _nega_o_prazo(antes, plataforma, m.group(0)):
         return True
     if m.group(0).startswith(("nao ", "sem ")):
         return False  # o próprio trecho é a afirmação ("não atrasa", "sem atraso")
@@ -6392,11 +6448,24 @@ _MOVIMENTO_DEPOIS_DO_DIA = re.compile(
 )
 
 
-def _trechos_de_prazo(oracao: str) -> Iterator[re.Match[str]]:
+# No ML (regra 1 do dono), o dia da semana na resposta não precisa do verbo ("pode esperar na
+# sexta"): a lista dos verbos não fecha, e a pessoa confere. Menos o que já aconteceu ("foi postado
+# na sexta") e a "segunda foto".
+_DIA_NO_PASSADO = re.compile(r"\b(?:foi|foram)\s+(?:\w+\s+){0,2}$")
+_DIA_QUE_E_ORDEM = re.compile(r"^\s*-?\s*(?:feira\s+)?(?:foto|imagem|figura|linha|pergunta)\b")
+
+
+def _trechos_de_prazo(oracao: str, plataforma: str | None = None) -> Iterator[re.Match[str]]:
     yield from _PRAZO_DO_AGENTE.finditer(oracao)
     for m in _DIA_DA_SEMANA.finditer(oracao):
         antes = " ".join(oracao[: m.start()].split()[-5:])
         if _VERBO_DE_MOVIMENTO.search(antes) or _MOVIMENTO_DEPOIS_DO_DIA.search(oracao[m.end() :]):
+            yield m
+        elif (
+            plataforma == "ml"
+            and not _DIA_NO_PASSADO.search(antes + " ")
+            and not _DIA_QUE_E_ORDEM.match(oracao[m.end() :])
+        ):
             yield m
 
 
@@ -6409,13 +6478,24 @@ def conferir_prazo_sem_lastro(
 
     `blocos` (item 1 da auditoria ao vivo, 22–23/10/2026) = os blocos do pedido: o
     prazo que o último status traz, numa oração que só repete o status, tem o dado."""
+    # No ML, a negativa do próprio fato nem chega aqui ("sobre a entrega para amanhã, não temos como
+    # garantir": a vírgula separa as orações).
+    texto = validador.sem_a_entrega_negada_no_ml(texto or "") if plataforma == "ml" else texto
+    plano = _plano(texto)
     for oracao in _oracoes_afirmadas(texto or ""):
         if _ECO_DA_NECESSIDADE.search(oracao.strip()):
             # O portão (27/10/2026, 8d3644a22825): "Entendemos a sua necessidade de receber
             # antes da viagem" ecoa o cliente — não promete prazo.
             continue
-        for m in _trechos_de_prazo(oracao):
-            if _prazo_negado(oracao, m, plataforma) or _prazo_do_status(oracao, m, blocos):
+        for m in _trechos_de_prazo(oracao, plataforma):
+            negado = _prazo_negado(oracao, m, plataforma)
+            # No ML, a negativa não isenta o que vem depois dela, nem quando o validador não vê o
+            # prazo ("não temos garantia de entrega amanhã, mas chega").
+            pos = plano.rfind(m.group(0))
+            depois = plano[pos + len(m.group(0)) :] if pos >= 0 else oracao[m.end() :]
+            if plataforma == "ml" and negado and validador.afirma_o_dia_depois(depois):
+                negado = False
+            if negado or _prazo_do_status(oracao, m, blocos):
                 continue
             trecho = " ".join(m.group(0).split())[:40]
             return [_suave(PRAZO_SEM_LASTRO, f'prazo sem dado que o sustente ("{trecho}")')]
@@ -6443,25 +6523,21 @@ def prazo_do_validador_so_negado(texto: str | None) -> bool:
     return prazo_do_validador_sem_afirmacao(texto)
 
 
-# 05/11/2026 (regra 1 do dono, só no ML): a oração separa o que a frase junta. Em "Não temos como
-# garantir a chegada amanhã, só na sexta", o prazo negado é amanhã e o afirmado é sexta. Depois do
-# último prazo negado da frase, um dia sem "nem"/"ou" na frente tira a isenção.
-_DIA_DEPOIS_DA_NEGATIVA = re.compile(
-    r"(?P<alternativa>\b(?:nem|ou)\s+(?:(?:na|no|a|o|para|pra|ate|em|depois\s+de)\s+){0,2})?"
-    r"\b(?:hoje|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo|dia\s+\d)\b"
-)
-# No texto todo, a afirmação que vem depois da "dúvida" e fica fora da frase e do dia: "confira se
-# chega amanhã, chega sim", "quer saber se chega amanhã? Chega.", "amanhã não. Sexta sim.",
-# "não confirmamos porque já está confirmada".
+# No texto todo, a afirmação que vem depois da "dúvida" e fica fora do dia: "confira se chega
+# amanhã, chega sim", "quer saber se chega amanhã? Chega.", "não confirmamos porque já está
+# confirmada". O "mas" que desfaz a negativa é da `validador.afirma_o_dia_depois`.
 _AFIRMA_DEPOIS_DA_NEGATIVA = re.compile(
-    r"\bchega\s+sim\b|\bque\s+chega\s*(?:[.!?]|$)|(?:^|[.!?]\s*)chega\s*(?:[.!?]|$)"
+    r"\bchega\s*,?\s+sim\b(?!\s+(?:junto|com)\b)|(?<!em )(?<!dia )\bque\s+chega\s*(?:[.!?]|$)"
+    r"|(?:^|[.!?,:;]\s*)chega\s*(?:[.!?,]|$)"
     r"|\b(?:hoje|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo)\s+sim\b"
     r"|(?<!nao )\besta\s+(?:confirmad|garantid)\w*"
+    r"|\b(?:chegada|entrega|prazo|data|postagem|envio)\s+(?:(?!nao\b)\w+\s+){0,3}?esta\s+"
+    r"(?:confirmad|garantid)\w*"
 )
-
-
-def _afirma_o_dia_depois(cauda: str) -> bool:
-    return any(m.group("alternativa") is None for m in _DIA_DEPOIS_DA_NEGATIVA.finditer(cauda))
+# Confirmados, o pagamento e a compra são outra coisa ("a compra foi aprovada e está confirmada").
+_PAGAMENTO_CONFIRMADO = re.compile(
+    r"\b(?:pagamento|compra|pedido)\b[^.,;!?]{0,30}?\besta\s+confirmad\w*"
+)
 
 
 def prazo_do_validador_sem_afirmacao(
@@ -6477,33 +6553,37 @@ def prazo_do_validador_sem_afirmacao(
     atualizações em até 1 dia" repete o evento da Shopee do bloco do pedido (`status` = os
     `ultimo_status` dos blocos); "seu pedido chega em até 1 dia" com o mesmo status, não.
     `plataforma` = os padrões do validador nela (`validador.padroes_de_prazo`) e, no ML, as
-    afirmações que a negação esconde (`_VAO_QUE_AFIRMA`, `_DIA_DEPOIS_DA_NEGATIVA`).
+    afirmações que a negação esconde (`_vao_so_da_entrega`, `validador.afirma_o_dia_depois`).
     """
     blocos = [{"ultimo_status": s} for s in status if isinstance(s, str) and s.strip()]
     padroes = validador.padroes_de_prazo(plataforma)
     plano = _plano(texto)
-    if plataforma == "ml" and _AFIRMA_DEPOIS_DA_NEGATIVA.search(plano):
+    if plataforma == "ml" and _AFIRMA_DEPOIS_DA_NEGATIVA.search(
+        _PAGAMENTO_CONFIRMADO.sub(" ", plano)
+    ):
         return False
     achou = False
+    negou = False
     for sentenca, _pergunta in _sentencas(plano):
-        negou = False
         for oracao in _ORACOES.split(sentenca):
             for padrao in padroes:
                 for m in padrao.finditer(oracao):
-                    if validador.entrega_negada_no_ml(oracao, m, padrao):
+                    if validador.entrega_negada_no_ml(oracao, m, padrao, plataforma):
+                        negou = True
                         continue
                     achou = True
-                    if _nega_o_prazo(oracao[: m.start()], plataforma):
+                    if _nega_o_prazo(oracao[: m.start()], plataforma, m.group(0)):
                         negou = True
                     elif not _prazo_do_status(oracao, m, blocos):
                         return False
-        if negou and plataforma == "ml":
-            fim = max(
-                (m.end() for padrao in padroes for m in padrao.finditer(sentenca)),
-                default=len(sentenca),
-            )
-            if _afirma_o_dia_depois(sentenca[fim:]):
-                return False
+    # A negativa não isenta o dia afirmado depois dela, na frase ("amanhã, só na sexta") ou na
+    # seguinte ("amanhã. A previsão é sexta.").
+    if negou and plataforma == "ml":
+        fim = max(
+            (m.end() for padrao in padroes for m in padrao.finditer(plano)), default=len(plano)
+        )
+        if validador.afirma_o_dia_depois(plano[fim:]):
+            return False
     return achou
 
 
@@ -9056,19 +9136,12 @@ def responde_e_marca_da_proposta(
 # o resultado é conferido aqui: a proposta errada vira a resposta aprovada, e o que escapa dela
 # (o assunto do endereço sem o pedido de mudança no turno) segura para a pessoa
 # (`conferir_endereco_no_ml`). As listas do que erra são abertas; quem fecha a porta é a regra do
-# turno: pedida a mudança, no assunto do endereço, só fica o texto que nega a alteração.
+# turno: pedida a mudança, só sai o texto fixo.
 ENDERECO_NO_ML = "endereco_no_ml"
 MOTIVO_ENDERECO_NO_ML = (
     "no Mercado Livre a loja não altera o endereço, e a resposta {o_que} — só pessoa"
 )
 DIZ_QUE_DA_PARA_ALTERAR = "diz que dá para alterar"
-_LOJA_NAO_ALTERA_ENDERECO = re.compile(
-    r"\bnao\s+(?:\w+\s+){0,5}?(?:alter|mud)\w*\s+(?:\w+\s+){0,3}?(?:endereco|dados)\b"
-    r"|\ba\s+entrega\s+segue\s+o\s+endereco\b"
-    # Antes da compra: "o endereço é o que você escolhe na compra".
-    r"|\bendereco\s+(?:\w+\s+){0,4}?(?:escolh|selecion)\w*"
-    r"|\b(?:escolh|selecion)\w*\s+(?:\w+\s+){0,3}?endereco\b"
-)
 _MUDAR_ENDERECO = r"(?:alter|mud|troc|corrig|atualiz|arrum|conserta)"
 # Dizer que dá para alterar, em qualquer texto.
 _DA_PARA_ALTERAR_ENDERECO = re.compile(
@@ -9081,7 +9154,8 @@ _DA_PARA_ALTERAR_ENDERECO = re.compile(
     r"|atualizarei|atualizaremos|atualizo|arrumamos|arrumarei|arrumaremos|arrumo|consertamos"
     r"|consertarei|consertaremos|conserto|ajustei|ajustamos|ajustarei|ajustaremos|ajustad[oa])\b"
     rf"|\btransportadora\s+(?:\w+\s+){{0,3}}?{_MUDAR_ENDERECO}\w*"
-    r"|\b(?:recebemos|anotamos|registramos)\s+(?:\w+\s+){0,3}?(?:pedido|solicitacao)\b"
+    r"|\b(?:recebemos|anotamos|registramos)\s+(?:\w+\s+){0,3}?(?:pedido|solicitacao|endereco)\b"
+    r"|\b(?:endereco|cep|complemento)\s+(?:\w+\s+){0,2}?(?:anotad|registrad)\w*"
 )
 # A condição, a ressalva e o "sim" ("só depois da postagem", "por enquanto", "mas a transportadora
 # troca", "Sim, é possível"): só no texto que fala de mudar, ou com o turno pedindo a mudança. Fora
@@ -9098,10 +9172,23 @@ _RESSALVA_DO_ENDERECO = re.compile(
     r"|^\W*(?:sim|claro|consigo|conseguimos|podemos|com\s+certeza|da\s+sim|pode\s+sim|sem\s+problema"
     r"|perfeito|certo|ok|tudo\s+bem|combinado|beleza)\b"
 )
-# A ressalva de palavra comum só conta colada à negativa ("não alteramos agora", "não alteramos,
-# mas..."): numa resposta sobre outra parte do turno, "foi postado hoje" não fala do endereço.
+# A ressalva de palavra comum só conta colada à negativa da alteração ("não alteramos agora", "não
+# alteramos, mas..."): "a entrega segue o endereço do pedido, mas você confere em Minhas compras" e
+# "o endereço é o que você escolhe na compra, mas o frete..." não falam de mudar.
 _RESSALVA_NA_NEGATIVA = re.compile(
-    r"\bagora\b|\bhoje\b|\bmas\b|\bporem\b|\bcontudo\b|\bentretanto\b|\bbasta\b|\btentamos\b"
+    r"\bnao\s+(?:\w+\s+){0,5}?(?:alter|mud)\w*\s+(?:\w+\s+){0,3}?(?:endereco|dados)\b[^.!?]{0,40}?"
+    r"\b(?:agora|hoje|mas|porem|contudo|entretanto|basta|tentamos)\b"
+)
+# O que o bloco 1 ensina no ML, em todo turno: sem pedido de mudança, não é o "só depois do envio".
+_ENVIO_DA_NEGATIVA = r"(?:depois|apos)\s+(?:d[oa]|o|a)\s+(?:envio|postagem)"
+_NEGA_ALTERAR = (
+    r"nao\s+(?:permite|pode|e\s+possivel|da\s+para|da\s+pra)\s+(?:ser\s+)?(?:alterar|alterad[oa]"
+    r"|mudar|mudad[oa])"
+)
+_NEGA_DEPOIS_DO_ENVIO = re.compile(
+    rf"\b{_NEGA_ALTERAR}\s+(?:o\s+)?endereco\s+{_ENVIO_DA_NEGATIVA}\b"
+    rf"|\b{_ENVIO_DA_NEGATIVA}\s*,?\s+(?:(?:a\s+plataforma|o\s+mercado\s+livre|o\s+endereco)\s+)?"
+    rf"{_NEGA_ALTERAR}(?:\s+o\s+endereco)?\b"
 )
 # O imperativo, ou o "me passe": "ao informar o CEP" e "enviamos para o seu CEP" não pedem nada.
 _PEDE_O_ENDERECO = re.compile(
@@ -9131,25 +9218,18 @@ _VERBO_DE_MUDAR_ENDERECO = re.compile(
     rf"\b{_MUDAR_ENDERECO}\w*\s+(?:\w+\s+){{0,3}}?(?:endereco|cep)\b"
     rf"|\b(?:endereco|cep)\s+(?:\w+\s+){{0,3}}?{_MUDAR_ENDERECO}\w*"
 )
-# Palavras que as réguas de recusa e de condição do legado leem como outra coisa: "trocar o
-# endereço" é recusa de direito, "endereço novo" é condição do produto, "corrigir o endereço" é
-# pedir dado. O texto volta para a frase aprovada.
-_ENDERECO_FORA_DA_FORMA = re.compile(
-    r"\b(?:troc|corrig|atualiz|confirm)\w*\s+(?:\w+\s+){0,2}?endereco\b"
-    r"|\btroca\s+de\s+endereco\b|\bendereco\s+novo\b"
-)
 
 
 def _o_que_erra_no_endereco(plano: str, *, pede: bool = False) -> str | None:
     """O que o texto erra na regra do endereço. `pede` = o turno pede a mudança: aí a ressalva, o
     "sim" e o "fale com a loja" contam mesmo sem o verbo de mudar no texto. PURA."""
-    verbo = _VERBO_DE_MUDAR_ENDERECO.search(plano) is not None
-    fala_de_mudar = pede or verbo
-    negativa = verbo or _LOJA_NAO_ALTERA_ENDERECO.search(plano) is not None
+    if not pede:
+        plano = _NEGA_DEPOIS_DO_ENVIO.sub(" ", plano)
+    fala_de_mudar = pede or _VERBO_DE_MUDAR_ENDERECO.search(plano) is not None
     if (
         _DA_PARA_ALTERAR_ENDERECO.search(plano)
         or (fala_de_mudar and _RESSALVA_DO_ENDERECO.search(plano))
-        or (negativa and _RESSALVA_NA_NEGATIVA.search(plano))
+        or _RESSALVA_NA_NEGATIVA.search(plano)
     ):
         return DIZ_QUE_DA_PARA_ALTERAR
     if _PEDE_O_ENDERECO.search(_CEP_NO_ANUNCIO.sub(" ", _NAO_PRECISA_DO_ENDERECO.sub(" ", plano))):
@@ -9161,48 +9241,40 @@ def _o_que_erra_no_endereco(plano: str, *, pede: bool = False) -> str | None:
     return None
 
 
-def _turno_pede_mudar_o_endereco(
-    assunto: str | None, ctx: ContextoAgente, recentes: Sequence[Any], gatilho: Any
-) -> bool:
-    """O turno pede a mudança? "Envia para outra cidade?" na pergunta pública, que o modelo leu
-    como cobertura, não pede: a resposta é "sim, enviamos". PURA."""
-    if assunto == "cobertura_regiao" and ctx.canal == constantes.CANAL_PERGUNTA:
-        return False
-    return acao_pessoa.pede_alterar_endereco(recentes, gatilho)
-
-
 def endereco_no_ml_da_proposta(
     p: Proposta, ctx: ContextoAgente, recentes: Sequence[Any], gatilho: Any
 ) -> Proposta:
     """A Proposta do endereço no ML, na forma aprovada (ver acima). PURA. Outra ação de pessoa
     continua com a pessoa.
 
-    Com o turno pedindo a mudança e o assunto do endereço, o texto só fica se negar a alteração e
-    não disser nada errado; em outro assunto, só sai o que erra (o modelo pode ter respondido a
-    outra parte do turno). Sem o pedido, o assunto do endereço cobre também "confirmar o endereço"
-    e "entrega no meu CEP?": só o "dá para alterar" vira a frase, porque ela não responderia ao
-    resto, e `conferir_endereco_no_ml` segura para a pessoa o que ainda errar."""
-    if ctx.plataforma not in constantes.PLATAFORMAS_SEM_ALTERAR_ENDERECO:
+    Com o turno pedindo a mudança, a saída é o texto fixo, seja qual for o assunto ou o texto do
+    modelo: as listas do que erra nunca fecham. Sem o pedido, o assunto do endereço cobre também
+    "confirmar o endereço" e "entrega no meu CEP?": só o "dá para alterar" vira a frase, porque ela
+    não responderia ao resto, e `conferir_endereco_no_ml` segura para a pessoa o que ainda errar. A
+    entrega relatada é outro caso: a frase não responde, e a ação de mudar vira o chamado."""
+    if ctx.plataforma not in constantes.PLATAFORMAS_SEM_ALTERAR_ENDERECO or ctx.canal not in (
+        constantes.CANAL_PERGUNTA,
+        constantes.CANAL_POS_VENDA,
+    ):
         return p
-    plano = _plano(p.texto)
     alterar = p.acao_pessoa == constantes.ACAO_ALTERAR_ENDERECO
     if p.acao == "pessoa" and not alterar:
         return p
-    pede = _turno_pede_mudar_o_endereco(p.assunto, ctx, recentes, gatilho)
-    erro = _o_que_erra_no_endereco(plano, pede=pede)
-    publica = p.assunto == "posvenda_pergunta_publica" and pede
-    do_assunto = p.assunto == "endereco" and (pede or erro == DIZ_QUE_DA_PARA_ALTERAR)
-    # O modelo pode declarar outro assunto ("trocar o endereço" em troca_devolucao).
-    fala_de_mudar = _VERBO_DE_MUDAR_ENDERECO.search(plano) is not None
-    de_outro = pede and (fala_de_mudar or erro is not None)
-    if not (alterar or publica or do_assunto or de_outro):
+    plano = _plano(p.texto)
+    if acao_pessoa.entrega_relatada_no_turno(recentes, gatilho):
+        if alterar or p.assunto == "endereco" or _plano(constantes.RESPOSTA_ENDERECO_ML) in plano:
+            return p.model_copy(
+                update={
+                    "acao": "pessoa",
+                    "acao_pessoa": constantes.ACAO_ABRIR_CHAMADO,
+                    "motivo_pessoa": p.motivo_pessoa or acao_pessoa.DETALHE_ENTREGA_ERRADA,
+                    "texto": "",
+                }
+            )
         return p
-    texto_bom = (
-        _LOJA_NAO_ALTERA_ENDERECO.search(plano)
-        and erro is None
-        and not _ENDERECO_FORA_DA_FORMA.search(plano)
-    )
-    if texto_bom and not (alterar or publica or do_assunto):
+    pede = acao_pessoa.pede_alterar_endereco(recentes, gatilho, canal=ctx.canal)
+    erro = _o_que_erra_no_endereco(plano, pede=pede)
+    if not (alterar or pede or (p.assunto == "endereco" and erro == DIZ_QUE_DA_PARA_ALTERAR)):
         return p
     return p.model_copy(
         update={
@@ -9210,8 +9282,8 @@ def endereco_no_ml_da_proposta(
             "acao_pessoa": None,
             "motivo_pessoa": "",
             "assunto": "endereco",
-            "texto": p.texto if texto_bom else constantes.RESPOSTA_ENDERECO_ML,
-            "confianca": p.confianca if texto_bom else max(p.confianca, 0.9),
+            "texto": constantes.RESPOSTA_ENDERECO_ML,
+            "confianca": max(p.confianca, 0.9),
             "evidencias": list(dict.fromkeys([*p.evidencias, "regra:endereco"])),
         }
     )
@@ -11256,9 +11328,7 @@ def conferir(
                     acao=proposta.acao,
                     assunto=conferida.categoria,
                     plataforma=ctx.plataforma,
-                    pede=_turno_pede_mudar_o_endereco(
-                        conferida.categoria, ctx, base.recentes, gatilho
-                    ),
+                    pede=acao_pessoa.pede_alterar_endereco(base.recentes, gatilho, canal=ctx.canal),
                 )
             pendencias += conferir_palavra_chave_sem_envio(texto, pedido, acao=proposta.acao)
             # v16 no holdout (27/10/2026): a instrução física sem o lastro do modelo.

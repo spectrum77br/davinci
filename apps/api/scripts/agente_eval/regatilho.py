@@ -818,7 +818,14 @@ async def regatilhar(
         return {**linha, "decisao": RECIBO, "bloqueios": [], "avisos": [],
                 "rascunho": r.get("texto_final")}  # fmt: skip
     if decisao_gravada.get("atacado") and r.get("texto_final") == constantes.FRASE_ATACADO_ML:
-        # PARIDADE (o dono, 05/11/2026): a resposta fixa do atacado no ML, como o recibo.
+        # PARIDADE (o dono, 05/11/2026): a resposta fixa do atacado no ML, como o recibo, mas com a
+        # régua do canal (`ia.trava_do_agente`): o verificador é o único que fica de fora.
+        if canal is None or canal.get("modo") != constantes.MODO_AUTO:
+            return {**linha, "decisao": "pessoa:canal_fora_do_auto",
+                    "bloqueios": ["canal_fora_do_auto"], "avisos": []}  # fmt: skip
+        if ia.ASSUNTO_DO_ATACADO not in (canal.get("auto_orientacao") or []):
+            return {**linha, "decisao": "pessoa:orientacao_nao_liberada",
+                    "bloqueios": ["orientacao_nao_liberada"], "avisos": []}  # fmt: skip
         return {**linha, "decisao": RECIBO, "bloqueios": [], "avisos": [],
                 "rascunho": r.get("texto_final")}  # fmt: skip
     if r.get("pulado") or r.get("parada") is None:

@@ -279,12 +279,20 @@ async def test_r1_o_envio_recusa_a_promessa_do_agente(db: AsyncSession, make_use
         await _envio(db, conversa, texto, r)
 
 
-async def test_r1_o_legado_e_a_shopee_no_envio_nao_mudam(db: AsyncSession, make_user):
+async def test_r1_o_legado_no_ml_recusa_e_a_shopee_no_envio_nao_muda(db: AsyncSession, make_user):
     texto = NEGATIVAS_REAIS["dc962f66"]
     conversa = await _conversa_ml(db, make_user)
     legado = await _rascunho(db, conversa, texto, {})
     with pytest.raises(enviar.EnvioRecusado):
         await _envio(db, conversa, texto, legado)
+    # Os padrões novos valem para o legado do ML, sem a isenção do agente: mais rígido, nunca menos.
+    forma_nova = "Não temos como garantir a entrega para amanhã."
+    r_novo = await _rascunho(db, conversa, forma_nova, {}, status="substituido")
+    with pytest.raises(enviar.EnvioRecusado):
+        await _envio(db, conversa, forma_nova, r_novo)
+    assert validador.validar(
+        forma_nova, plataforma="shopee", canal="chat", origem=constantes.ORIGEM_IA
+    ) == []
     shopee = await _conversa_ia(db, make_user, pedido=None, externo_id="sh-1")
     r = await _rascunho(db, shopee, texto, {"agente": {"isencoes": []}})
     with pytest.raises(enviar.EnvioRecusado):
@@ -311,7 +319,7 @@ def _casos_an0511() -> dict[str, dict]:
 
 def test_a_calibracao_tem_os_casos_e_os_espelhos():
     casos = _casos_an0511()
-    assert len(casos) == 17
+    assert len(casos) == 16
     boas = {k for k, c in casos.items() if c["esperado"]["ok_para_envio_automatico"]}
     assert boas == {k for k in casos if k.startswith("an0511-boa-")}
     assert len(boas) == 7
@@ -332,10 +340,6 @@ def test_a_calibracao_tem_os_casos_e_os_espelhos():
     ):
         assert casos[k]["texto"] == FIXA_ENDERECO
     assert all(not calibrar.contaminado(c) for c in casos.values())
-    # O critério da pergunta do dia é só do ML: o mesmo texto, na Shopee, não é o bom.
-    shopee = casos["an0511-ruim-shopee-sem-a-regra-do-ml"]
-    assert shopee["texto"] == falso["texto"] and shopee["plataforma"] == "shopee"
-    assert shopee["esperado"]["ok_para_envio_automatico"] is False
 
 
 def test_a_calibracao_do_endereco_le_a_orientacao_do_ml():
@@ -497,14 +501,14 @@ def test_r2_a_acao_do_modelo_e_o_assunto_publico_viram_resposta():
 @pytest.mark.parametrize(
     "texto",
     [
-        FIXA_ENDERECO,
         "Por questão de segurança, não podemos alterar o endereço da compra.",
         "A entrega segue o endereço do pedido e a loja não passa recado ao entregador.",
         f"{FIXA_ENDERECO} O celular é o modelo do anúncio.",
     ],
 )
-def test_r2_o_texto_que_ja_nega_fica_como_o_modelo_escreveu(texto):
-    assert _no_ml(_proposta(texto)).texto == texto
+def test_r2_com_o_pedido_so_o_texto_fixo_sai(texto):
+    assert _no_ml(_proposta(FIXA_ENDERECO)).texto == FIXA_ENDERECO
+    assert _no_ml(_proposta(texto)).texto == FIXA_ENDERECO
 
 
 def test_r2_as_outras_plataformas_e_as_outras_acoes_ficam():
@@ -520,11 +524,9 @@ def test_r2_as_outras_plataformas_e_as_outras_acoes_ficam():
     # Outro assunto, sem a pista, não muda.
     prazo = _proposta("O prazo aparece no anúncio.", assunto="prazo_antes_compra")
     assert _no_ml(prazo, pede=False) == prazo
-    # Com a pista, outro assunto que não fala de mudar o endereço também não muda.
-    assert _no_ml(prazo) == prazo
-    # O texto que já nega, em outro assunto, fica como veio.
-    misto = _proposta(f"{FIXA_ENDERECO} O prazo aparece no anúncio.", assunto="prazo_antes_compra")
-    assert _no_ml(misto) == misto
+    # Com o pedido no turno, o assunto declarado não muda a saída: o texto fixo.
+    novo = _no_ml(prazo)
+    assert novo.texto == FIXA_ENDERECO and novo.assunto == "endereco"
 
 
 def test_r2_o_assunto_errado_com_a_fala_errada_vira_a_resposta_aprovada():
@@ -1224,7 +1226,7 @@ async def test_r3_a_paridade_no_replay_e_no_regatilho(db: AsyncSession, make_use
     r = await replay.como_o_gerar(db, conversa, msgs[-1], base, extra)
 
     assert r.texto == FRASE and r.fatos_agente.get(ia.FATO_ATACADO) is True
-    canal = {"modo": "auto", "auto_categorias": [], "auto_agente": [], "auto_orientacao": []}
+    canal = {"modo": "auto", "auto_categorias": [], "auto_agente": [], "auto_orientacao": ["desconto"]}
     x = await regatilho.regatilhar(
         {"id": "a1", "parada": r.parada, "proposta": {}, "texto_final": r.texto,
          "decisao": {"atacado": True}, "plataforma": "ml"},
@@ -1437,11 +1439,11 @@ def test_r2_a_trava_le_o_pedido_em_outro_assunto(texto):
         ) == []
 
 
-def test_r2_a_outra_parte_do_turno_mista_nao_vira_a_frase():
-    # O modelo respondeu à outra parte, sem nada errado no endereço: fica para o verificador.
+def test_r2_outra_parte_do_turno_sem_o_pedido_nao_vira_a_frase():
+    # Sem o pedido de mudança, o modelo respondeu a outra coisa: fica para o verificador.
     for texto in ("O prazo aparece no anúncio.", "Seu pedido foi postado hoje, mas ainda sem rastreio."):
         prazo = _proposta(texto, assunto="prazo_antes_compra")
-        assert _no_ml(prazo) == prazo
+        assert _no_ml(prazo, pede=False) == prazo
 
 
 def _pergunta_coberta(fala: str, texto: str, assunto: str, canal: str = "pergunta") -> Proposta:
@@ -1456,9 +1458,10 @@ def test_r2_a_cobertura_na_pergunta_publica_nao_e_pedido_de_mudanca():
     texto = "Sim, enviamos para todo o Brasil."
     novo = _pergunta_coberta(fala, texto, "cobertura_regiao")
     assert novo.texto == texto and novo.assunto == "cobertura_regiao"
-    # Depois da compra, ou lida como outra coisa, é o pedido.
+    # O assunto que o modelo declarou não decide: na pergunta, sem o verbo de mudar, é a cobertura.
+    assert _pergunta_coberta(fala, texto, "outro").texto == texto
+    # Depois da compra é o pedido.
     assert _pergunta_coberta(fala, texto, "cobertura_regiao", "pos_venda").texto == FIXA_ENDERECO
-    assert _pergunta_coberta(fala, texto, "outro").texto == FIXA_ENDERECO
 
 
 @pytest.mark.parametrize(
@@ -1839,10 +1842,1295 @@ async def test_r3_o_replay_grava_a_marca_do_atacado(
 
     assert falsa.pedidos == [] and r.texto_final == FRASE
     assert r.decisao["atacado"] is True
-    canal = {"modo": "auto", "auto_categorias": [], "auto_agente": [], "auto_orientacao": []}
+    canal = {"modo": "auto", "auto_categorias": [], "auto_agente": [], "auto_orientacao": ["desconto"]}
     x = await regatilho.regatilhar(
         {"id": "a1", "parada": r.parada, "proposta": {}, "texto_final": r.texto_final,
          "decisao": r.decisao, "plataforma": "ml"},
         canal,
     )  # fmt: skip
     assert x["decisao"] == regatilho.RECIBO and x["rascunho"] == FRASE
+
+
+# ═══════════════ A segunda rodada de revisão das correções ═══════════════
+
+
+def _isenta(texto: str, canal: str = "pergunta") -> bool:
+    """A negativa passa nas camadas do texto: o validador, o envio e a regra suave."""
+    final = validador.normalizar(texto, plataforma="ml", canal=canal)
+    motivos = validador.validar(final, plataforma="ml", canal=canal, origem=constantes.ORIGEM_IA)
+    if motivos and not (
+        motivos == [validador.MOTIVO_PRAZO]
+        and checagens.prazo_do_validador_sem_afirmacao(final, plataforma="ml")
+    ):
+        return False
+    return checagens.conferir_prazo_sem_lastro(final, plataforma="ml") == []
+
+
+# ── Regra 1: o que dizia "chega" com a negação em volta ──
+
+PROMESSAS_DA_REVISAO = [
+    # O "e" depois do sujeito é a conjunção quando vem o verbo de chegada.
+    "Não temos como garantir a data e chega amanhã.",
+    "Não temos como garantir o prazo e chega amanhã.",
+    "Não temos como garantir a entrega e chega amanhã.",
+    "Não temos como confirmar o envio e chega amanhã.",
+    "Não temos como confirmar a previsão e chega amanhã.",
+    "Não temos como garantir a data e vai chegar amanhã.",
+    "Não temos como garantir o prazo e sai hoje.",
+    "Não temos como garantir a entrega e sai amanhã.",
+    "Não temos como garantir a data e chega na sexta.",
+    # O dia afirmado na frase seguinte, ou depois da negativa do fato.
+    "Não temos como garantir a chegada amanhã. A previsão é sexta.",
+    "Não temos como garantir a chegada amanhã. Só na sexta.",
+    "Não temos como garantir a chegada amanhã. Talvez na sexta.",
+    "Não temos como garantir a chegada amanhã. Sexta com certeza.",
+    "Não temos como garantir a chegada amanhã. Sexta, sim.",
+    "Não temos como garantir a chegada amanhã. Sexta é mais certo.",
+    "Não temos entrega para hoje, só na sexta.",
+    "Não fazemos entrega para domingo, só na segunda.",
+    "Não fazemos entrega para domingo. Segunda sim.",
+    # A promessa sem negação nenhuma.
+    "Fazemos a entrega na sexta.",
+    "Temos entrega na sexta.",
+    "Prometemos a chegada na sexta.",
+    "A entrega acontecerá na sexta.",
+    "Na sexta você recebe.",
+    "Terça você recebe.",
+    "Na terça está aí.",
+    "Você terá o pedido na sexta.",
+    "Chega sim.",
+    "Sim, chega.",
+    "Chega.",
+    "Pode comprar que chega.",
+    "Pode ficar tranquilo, chega a tempo.",
+    # O vão que dá a chegada por certa, fora de qualquer lista de palavras.
+    "Não sabemos em que momento chega amanhã.",
+    "Não temos como dizer em que parte do dia chega amanhã.",
+    "Não temos como informar o minuto exato em que chega amanhã.",
+    "Não temos como informar exatamente quando chega amanhã.",
+    "Não sei como chega amanhã.",
+    "Pode conferir se chega amanhã: chega.",
+    "Consulte se chega amanhã, mas chega.",
+    "Não temos como garantir a cor chega amanhã.",
+    # A negativa de outra coisa depois do dia afirmado.
+    "A entrega é amanhã, não temos como garantir o horário.",
+    "Não temos como garantir o horário, mas chega amanhã.",
+]
+
+
+@pytest.mark.parametrize("texto", PROMESSAS_DA_REVISAO)
+def test_rev2_a_promessa_escondida_nao_passa_nas_camadas(texto):
+    assert not _isenta(texto)
+
+
+NEGATIVAS_DA_REVISAO = [
+    # Outro assunto confirmado não desfaz a negativa.
+    "O pagamento está confirmado, mas não temos como garantir a chegada amanhã.",
+    "Sua compra está confirmada. Não temos como garantir a chegada amanhã.",
+    "O pedido está confirmado. Não temos como garantir a entrega amanhã.",
+    # O dia da compra, e a lista dos dias que também não valem.
+    "Não temos como garantir que chegue amanhã, mesmo comprando hoje.",
+    "Não temos como garantir a chegada amanhã, mesmo que você compre hoje.",
+    "Não temos como garantir a chegada amanhã, sexta ou sábado.",
+    "Não temos como garantir a chegada amanhã, e o prazo para o seu CEP aparece hoje no anúncio.",
+    "Não temos como garantir a chegada amanhã, pois o prazo depende de quando a compra é feita hoje.",
+    # Quem faz a entrega é o sujeito da negativa, não a afirmação.
+    "Não temos como garantir que a transportadora entregue amanhã.",
+    "Não conseguimos confirmar com a transportadora se chega amanhã.",
+    "Não temos como garantir que a transportadora faça a entrega amanhã.",
+    "Não temos como confirmar com a transportadora se a entrega é amanhã.",
+    # O substantivo antes da negativa.
+    "Sobre a entrega para amanhã, não temos como garantir.",
+    "A entrega para hoje não é possível.",
+    "A entrega para sábado depende da rotina da transportadora.",
+    "Não trabalhamos com entrega para hoje.",
+    # As formas da loja como sujeito e do pronome.
+    "A loja não garante a chegada amanhã.",
+    "Não temos como te garantir a chegada amanhã.",
+]
+
+
+@pytest.mark.parametrize("texto", NEGATIVAS_DA_REVISAO)
+def test_rev2_a_negativa_honesta_passa_nas_camadas(texto):
+    assert _isenta(texto), texto
+
+
+async def test_rev2_a_negativa_com_substantivo_antes_passa_no_envio(db: AsyncSession, make_user):
+    conversa = await _conversa_ml(db, make_user)
+    for texto in (
+        "Sobre a entrega para amanhã, não temos como garantir.",
+        "A entrega para hoje não é possível.",
+        "A entrega para sábado depende da rotina da transportadora.",
+    ):
+        r = await _rascunho(db, conversa, texto, {"agente": {"isencoes": []}}, status="substituido")
+        assert await _envio(db, conversa, texto, r) == texto
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Não garantimos a chegada amanhã.",
+        "Não garantimos que chegue amanhã.",
+        "Não temos como garantir que o celular chegue amanhã.",
+        "Não temos como garantir que ele chegue amanhã.",
+        "Não temos como garantir que o produto chegue amanhã.",
+        "Não temos como garantir que o Mercado Livre entregue amanhã.",
+        "Não temos como garantir se a entrega será amanhã.",
+        "Não temos como garantir chegada amanhã.",
+        "Não temos como garantir nem confirmar a chegada amanhã.",
+        "Não temos como garantir essa data.",
+        "A entrega para amanhã não pode ser garantida.",
+        "A loja não garante a chegada amanhã.",
+        "Não temos como te garantir a chegada amanhã.",
+    ],
+)
+async def test_rev2_a_negativa_com_outras_palavras_nao_e_fala_de_garantia(texto):
+    msgs = _cli("Este celular vai chegar amanhã pq no dia 10 eu não vô está aqui não")
+    p = Proposta(
+        acao="responder", texto=texto, assunto="prazo_antes_compra", confianca=0.9,
+        acao_pessoa=None, motivo_pessoa="", evidencias=["regra:prazo_antes_compra"],
+    )  # fmt: skip
+    conv = _conv(plataforma="ml", canal="pergunta", pedido_marketplace=None)
+    x = await _auto(p, msgs, conversa=conv)
+    assert ia.MOTIVO_RESPOSTA_DE_GARANTIA not in x.motivos, x.motivos
+    assert ia.MOTIVO_RECUSA_DE_DIREITO not in x.motivos, x.motivos
+    assert not any("prazo em números" in m for m in x.motivos), x.motivos
+    assert checagens.PRAZO_SEM_LASTRO not in x.codigos
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Não garantimos o aparelho.",
+        "Não garantimos a troca.",
+        "Não temos como garantir o conserto do celular.",
+    ],
+)
+def test_rev2_a_negativa_da_garantia_continua_com_a_pessoa(texto):
+    # A oração tem de falar só da entrega: aqui segue a régua de sempre, e o texto volta intacto.
+    assert validador.sem_a_negativa_da_entrega_no_ml(texto) == texto
+
+
+# ── Regra 2: a entrega errada não recebe a frase ──
+
+# As listas dos 48 canais do ML em produção (05/11/2026): a regra não pode depender de um canal
+# de teste mais estreito que o real.
+ORIENTACAO_DO_ML = [
+    "cancelamento", "defeito", "desconto", "divergencia_anuncio", "endereco",
+    "entrega_nao_recebida", "garantia", "item_errado_faltando", "outro", "reembolso",
+    "substituicao_estoque", "troca_devolucao",
+]  # fmt: skip
+AGENTE_DO_ML = [
+    "acessorios_avulsos", "agradecimento", "canal_externo_dados", "cobertura_regiao",
+    "confirmar_variacao", "entrega_instrucoes", "estoque_variacao", "nota_fiscal",
+    "opiniao_recomendacao", "parceria_fora_escopo", "pede_atendente", "pedido_link_midia",
+    "pedido_nao_localizado", "prazo_antes_compra", "prazo_envio", "preco_pagamento", "rastreio",
+    "saudacao_ou_vaga", "uso_configuracao",
+]  # fmt: skip
+
+
+async def _com_as_listas_do_ml(db: AsyncSession, conversa: Any) -> None:
+    await _ligar(
+        db, conversa, modo=constantes.MODO_AUTO, auto_orientacao=ORIENTACAO_DO_ML,
+        auto_categorias=AGENTE_DO_ML, auto_agente=AGENTE_DO_ML,
+    )  # fmt: skip
+
+
+ENTREGA_ERRADA_DA_REVISAO = [
+    "Entregaram no vizinho",
+    "Foi entregue em outro bairro",
+    "Foi entregue na rua de trás, no vizinho",
+    "O correio entregou no número errado",
+    "Deixaram meu pedido em outra rua",
+    "Meu pedido foi entregue em outro estado",
+    "Consta entregue mas não é o meu endereço",
+    # O "e" e o "que" antes do verbo só valem para "é entregue" e "que entregue".
+    "O correio veio e entregou no endereço errado.",
+    "Saiu pra entrega e entregaram no endereço errado.",
+    "Disseram que entregaram no endereço errado.",
+    "A transportadora disse que entregou na casa errada.",
+    "O entregador veio e entregou para outra pessoa.",
+    # O endereço antigo é o lugar errado.
+    "Deixaram no meu endereço antigo.",
+    "Chegou no endereço antigo.",
+    "Foi pro endereço antigo.",
+    "Levaram para o endereço antigo.",
+    "Entregaram no meu endereço antigo.",
+]
+
+
+@pytest.mark.parametrize("fala", ENTREGA_ERRADA_DA_REVISAO)
+@pytest.mark.parametrize("modelo", ["acao", "frase"])
+async def test_rev2_e2e_a_entrega_errada_vai_para_a_pessoa(
+    db: AsyncSession, make_user, agente_ligado, api, envios, fala, modelo
+):
+    conversa = await _endereco_e2e(db, make_user, canal="pos_venda", pedido="2000001", fala=fala)
+    await _ligar(
+        db, conversa, modo=constantes.MODO_AUTO,
+        auto_orientacao=["endereco", "entrega_nao_recebida"],
+    )  # fmt: skip
+    api.roteiro = [
+        _final(
+            acao="pessoa", texto="", assunto="endereco", confianca=0.8,
+            acao_pessoa=constantes.ACAO_ALTERAR_ENDERECO, motivo_pessoa="mudar o endereço",
+        )
+        if modelo == "acao"
+        else _final(texto=FIXA_ENDERECO, assunto="endereco", confianca=0.9)
+    ]  # fmt: skip
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert constantes.ACAO_ABRIR_CHAMADO in _do_agente(r)["acoes_pessoa"], r.motivo
+    assert FIXA_ENDERECO != r.texto and envios == []
+
+
+def test_rev2_a_proposta_na_entrega_que_falhou_nao_vira_a_frase():
+    msgs = _cli("por que não entregaram no endereço certo?")
+    p = checagens.endereco_no_ml_da_proposta(_proposta(FIXA_ENDERECO), _ctx(), msgs, msgs[-1])
+    assert p.acao == "pessoa" and p.acao_pessoa == constantes.ACAO_ABRIR_CHAMADO and not p.texto
+    # A resposta de outro assunto fica para o verificador: não é a frase.
+    outro = _proposta("Veja o status em Minhas compras.", assunto="rastreio")
+    assert checagens.endereco_no_ml_da_proposta(outro, _ctx(), msgs, msgs[-1]) == outro
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        # 18f03bf2 e d1b83122: a entrega a caminho do lugar errado, em produção.
+        "o pacote está andando em endereço errado",
+        "porque ele ta andando em endereço errado",
+        "estão entregando no lugar errado",
+        "estão entregando no endereço errado",
+        "o envio está rodando em endereço errado",
+    ],
+)
+def test_rev2_a_entrega_em_andamento_no_lugar_errado_abre_chamado(fala):
+    msgs = _cli(fala)
+    ml = _conv(plataforma="ml", canal="pos_venda")
+    assert constantes.ACAO_ABRIR_CHAMADO in _gatilhos(ml, msgs, postado=acao_pessoa.POSTADO_SIM)
+    assert not acao_pessoa.pede_alterar_endereco(msgs, msgs[-1])
+
+
+async def test_rev2_e2e_18f03bf2_nao_recebe_a_frase(
+    db: AsyncSession, make_user, agente_ligado, api, envios
+):
+    conversa = await _endereco_e2e(
+        db, make_user, canal="pos_venda", pedido="2000001",
+        fala="Meu pacote está andando em endereço errado e tenho medo de chegar quebrado",
+    )  # fmt: skip
+    await _ligar(
+        db, conversa, modo=constantes.MODO_AUTO,
+        auto_orientacao=["endereco", "entrega_nao_recebida", "rastreio"],
+    )  # fmt: skip
+    api.roteiro = [_final(texto="Acompanhe em Minhas compras.", assunto="rastreio", confianca=0.9)]
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert constantes.ACAO_ABRIR_CHAMADO in _do_agente(r)["acoes_pessoa"], r.motivo
+    assert FIXA_ENDERECO != r.texto and envios == []
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "coloquei o endereço errado e vocês já enviaram, pode mudar?",
+        "coloquei o endereço errado, recebi a mensagem que já foi postado",
+        "recebi o email da compra, coloquei o endereço errado",
+        "recebi a confirmação e vi que está no endereço errado, quero mudar",
+        "pode entregar em outro endereço? já me enviaram o código de rastreio",
+        "pode entregar em outro endereço? recebi o aviso de que saiu",
+        "Se enviou hoje ainda dá para mudar o endereço?",
+        "Recebi a confirmação da compra e quero alterar o endereço",
+        "Ainda não chegou e quero mudar o endereço de entrega",
+        "Já enviou? quero mudar o endereço",
+    ],
+)
+async def test_rev2_e2e_o_verbo_solto_nao_tira_o_pedido_de_mudanca(
+    db: AsyncSession, make_user, agente_ligado, api, envios, fala
+):
+    msgs = _cli(fala)
+    assert acao_pessoa.pede_alterar_endereco(msgs, msgs[-1])
+    ml = _conv(plataforma="ml", canal="pos_venda")
+    assert constantes.ACAO_ABRIR_CHAMADO not in _gatilhos(ml, msgs, postado=acao_pessoa.POSTADO_SIM)
+    conversa = await _endereco_e2e(db, make_user, canal="pos_venda", pedido="2000001", fala=fala)
+    await _com_as_listas_do_ml(db, conversa)
+    api.roteiro = [_final(texto="Claro, para onde devemos enviar?", assunto="endereco", confianca=0.9)]
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r.texto == FIXA_ENDERECO and not r.precisa_humano, r.motivo
+    assert [e["texto"] for e in envios] == [FIXA_ENDERECO], r.fatos
+
+
+@pytest.mark.parametrize(
+    ("canal", "pedido", "fala", "assunto", "texto"),
+    [
+        # O assunto declarado não desliga a regra.
+        ("pergunta", None, "Se eu comprar, dá pra trocar o endereço depois?", "cobertura_regiao", "Sim, pode sim."),
+        ("pergunta", None, "Posso mudar o endereço depois de comprar?", "cobertura_regiao", "Sim, enviamos para todo o Brasil."),
+        ("pergunta", None, "Dá para mudar o endereço depois de comprar?", "prazo_antes_compra", "Para onde você quer receber?"),
+        ("pergunta", None, "Dá para mudar o endereço depois de comprar?", "prazo_antes_compra", "Fale conosco pelas mensagens da loja depois da compra."),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "rastreio", "Para onde você quer receber?"),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "rastreio", "Procure o vendedor pelas mensagens."),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "rastreio", "Fale conosco pelas mensagens."),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "rastreio", "Dá para ajustar, sim."),
+        # A negativa com outra coisa depois.
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "endereco", "Não alteramos o endereço por aqui. Fale conosco pelas mensagens."),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "endereco", "Não alteramos o endereço pelo chat, ligue para nós."),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "endereco", "Não mudamos o endereço pelo chat. Você consegue alterar em Minhas compras."),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "endereco", "Não alteramos o endereço. O correio altera se você pedir."),
+        ("pos_venda", "2000001", "Quero alterar o endereço de entrega", "endereco", "Não alteramos o endereço. Para onde você quer receber?"),
+    ],
+)
+async def test_rev2_e2e_com_o_pedido_a_saida_e_o_texto_fixo(
+    db: AsyncSession, make_user, agente_ligado, api, envios, canal, pedido, fala, assunto, texto
+):
+    conversa = await _endereco_e2e(db, make_user, canal=canal, pedido=pedido, fala=fala)
+    await _com_as_listas_do_ml(db, conversa)
+    api.roteiro = [_final(texto=texto, assunto=assunto, confianca=0.9)]
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r.texto == FIXA_ENDERECO and r.categoria == "endereco" and not r.precisa_humano, r.motivo
+    assert [e["texto"] for e in envios] == [FIXA_ENDERECO], r.fatos
+
+
+NEGATIVA_DA_REGRA = NEGATIVAS_REAIS["regra"]
+
+
+@pytest.mark.parametrize(
+    ("fala", "assunto"),
+    [
+        ("Meu endereço é em Goiás, chega amanhã?", "prazo_antes_compra"),
+        ("envia para outro estado?", "prazo_antes_compra"),
+        ("envia para outra cidade?", "outro"),
+        ("entrega em outra cidade?", "prazo_antes_compra"),
+        ("entrega no endereço do meu trabalho?", "entrega_instrucoes"),
+    ],
+)
+def test_rev2_a_regra_do_endereco_nao_apaga_a_negativa_do_prazo(fala, assunto):
+    p = _pergunta_coberta(fala, NEGATIVA_DA_REGRA, assunto)
+    assert p.texto == NEGATIVA_DA_REGRA and p.assunto == assunto
+
+
+async def test_rev2_e2e_a_negativa_com_o_endereco_na_fala_sai_na_pergunta(
+    db: AsyncSession, make_user, agente_ligado, api, envios
+):
+    conversa = await _endereco_e2e(
+        db, make_user, canal="pergunta", pedido=None, fala="Meu endereço é em Goiás, chega amanhã?"
+    )
+    await _com_as_listas_do_ml(db, conversa)
+    api.roteiro = [_final(texto=NEGATIVA_DA_REGRA, assunto="prazo_antes_compra", confianca=0.9)]
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r.texto == NEGATIVA_DA_REGRA and not r.precisa_humano, r.motivo
+    assert [e["texto"] for e in envios] == [NEGATIVA_DA_REGRA] and _decisao(r) == "enviado", r.fatos
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "Quero trocar a mala, qual o endereço para devolver?",
+        "Mudei de ideia, qual o endereço da loja de vocês?",
+        "Quero trocar a mala qual o endereço para devolver?",
+    ],
+)
+def test_rev2_a_pista_solta_nao_e_pedido_de_mudanca(fala):
+    msgs = _cli(fala)
+    assert not acao_pessoa.pede_alterar_endereco(msgs, msgs[-1])
+    for canal, texto in (("pergunta", "A devolução é pelo Mercado Livre."), ("pos_venda", "Não temos loja física.")):
+        p = _proposta(texto)
+        assert checagens.endereco_no_ml_da_proposta(p, _ctx(canal=canal), msgs, msgs[-1]) == p
+
+
+@pytest.mark.parametrize(
+    ("fala", "pede"),
+    [
+        # O verbo de entrega negado não tira o pedido com todas as letras.
+        ("Meu pedido ainda não foi entregue, quero mudar o endereço", True),
+        ("Se for entregue amanhã, dá para mudar o endereço?", True),
+        ("Levou muito tempo, quero mudar o endereço", True),
+        # O endereço certo não é pedido de mudança.
+        ("O endereço não está errado, por que não entregaram?", False),
+    ],
+)
+def test_rev2_o_pedido_com_todas_as_letras_e_a_entrega_que_falhou(fala, pede):
+    msgs = _cli(fala)
+    assert acao_pessoa.pede_alterar_endereco(msgs, msgs[-1]) is pede
+
+
+@pytest.mark.parametrize("canal", ["reclamacao", "avaliacao"])
+def test_rev2_a_regra_do_endereco_e_so_da_pergunta_e_do_pos_venda(canal):
+    msgs = _cli("Quero alterar o endereço de entrega")
+    p = _proposta("", acao="pessoa", acao_pessoa=constantes.ACAO_ALTERAR_ENDERECO)
+    assert checagens.endereco_no_ml_da_proposta(p, _ctx(canal=canal), msgs, msgs[-1]) == p
+
+
+def test_rev2_o_quatro_com_outra_opcao_do_menu_nao_e_pedido():
+    # c29cf3c9: apertou 4 e depois 5, e contou o defeito.
+    msgs = _turno_do_menu()
+    assert acao_pessoa.pede_alterar_endereco(msgs, msgs[-1])
+    dois = [*msgs, *_cli("5")]
+    assert ia.assuntos_sensiveis_do_menu(dois, dois[-1]) == ["endereco", "garantia"]
+    assert not acao_pessoa.pede_alterar_endereco(dois, dois[-1])
+
+
+@pytest.mark.parametrize(
+    ("fala", "texto", "canal"),
+    [
+        ("Entrega no meu endereço?", "O endereço é o que você escolhe na compra, mas o prazo e o frete aparecem no anúncio ao informar o CEP.", "pergunta"),
+        ("Quero confirmar o endereço de entrega", "A entrega segue o endereço do pedido, mas você confere em Minhas compras.", "pos_venda"),
+        ("qual endereço está no pedido?", "A entrega segue o endereço do pedido que você vê hoje em Minhas compras.", "pos_venda"),
+    ],
+)
+def test_rev2_a_palavra_comum_nao_e_a_ressalva(fala, texto, canal):
+    msgs = _cli(fala)
+    p = _proposta(texto)
+    assert checagens.endereco_no_ml_da_proposta(p, _ctx(canal=canal), msgs, msgs[-1]) == p
+    assert checagens.conferir_endereco_no_ml(
+        texto, acao="responder", assunto="endereco", plataforma="ml"
+    ) == []
+
+
+def test_rev2_a_ressalva_colada_a_negativa_continua():
+    for texto in ("Não alteramos o endereço agora.", "Não alteramos o endereço, mas a transportadora troca."):
+        (trava,) = checagens.conferir_endereco_no_ml(
+            texto, acao="responder", assunto="endereco", plataforma="ml"
+        )
+        assert trava.codigo == checagens.ENDERECO_NO_ML
+
+
+@pytest.mark.parametrize("assunto", ["entrega_instrucoes", "rastreio"])
+def test_rev2_a_frase_do_bloco_1_nao_segura_outro_assunto(assunto):
+    texto = (
+        "A plataforma não permite alterar o endereço depois do envio; acompanhe em Minhas compras. "
+        "A entrega segue o endereço do pedido e a loja não passa recado ao entregador."
+    )
+    assert checagens.conferir_endereco_no_ml(
+        texto, acao="responder", assunto=assunto, plataforma="ml"
+    ) == []
+    # Com o pedido no turno, a ressalva conta: a saída é o texto fixo.
+    assert checagens.conferir_endereco_no_ml(
+        texto, acao="responder", assunto=assunto, plataforma="ml", pede=True
+    )
+
+
+@pytest.mark.parametrize(
+    ("fala", "segura"),
+    [
+        ("comprei no endereço errado, tem como mudar?", False),
+        ("comprei errado o endereço", False),
+        ("comprei com o endereço errado", False),
+        ("comprei errado, quero outro", True),
+        ("comprei errado o endereço e me arrependi", True),
+    ],
+)
+def test_rev2_comprei_no_endereco_errado_nao_segura_o_envio(fala, segura):
+    msgs = _cli(fala)
+    ml = _conv(plataforma="ml", canal="pos_venda")
+    assert (constantes.ACAO_SEGURAR_ENVIO in _gatilhos(ml, msgs, postado=None)) is segura
+    # Fora do ML, o gatilho 7 não muda.
+    if "endereço" in fala and "com o" not in fala:
+        assert constantes.ACAO_SEGURAR_ENVIO in _gatilhos(_conv(), msgs, postado=None)
+
+
+# ── Regra 3: a frase só para a fala que cabe inteira no pedido ──
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        # A dúvida sobre o preço.
+        "Esse preço vale para 20 unidades?",
+        "Esse preço é só para 20 unidades?",
+        "Esse valor é mesmo por 20 unidades?",
+        # Outro produto, a capacidade, a negação e a compra feita.
+        "Qual o preço da capa pra 20 malas?",
+        "Qual o preço do cadeado para 20 malas?",
+        "Qual o valor dessa mala? 15 peças cabem nela",
+        "Qual o valor da mala pra levar 20 peças?",
+        "Nem quero 20 unidades, só uma, qual o valor?",
+        "Queria 20 unidades mas agora só uma, qual o valor?",
+        # O multiplicador e os lotes que detalham o total.
+        "Quero 10 caixas, 20 unidades em cada, qual valor?",
+        "Quero 30 pacotes, 20 unidades por pacote, qual valor?",
+        "Quero 20 unidades de cada, qual o valor?",
+        # A outra dúvida, a contraoferta e a personalização.
+        "Essa mala é original? Quero 20 unidades, qual o valor",
+        "Tem loja física? Quero 20 unidades, qual o valor",
+        "Quero 20 unidades, aceita cartão? qual o valor",
+        "Quero 20 unidades, são novas? qual o valor",
+        "Quero 20 unidades, qual o valor e o peso",
+        "Quero 20 unidades, qual o valor em 3 vezes",
+        "Preciso de 20 malas pra amanhã, qual o valor?",
+        "Consegue um valor melhor pra 20 unidades a 150 cada?",
+        "Quero 20 unidades, faço 150 cada, qual o desconto?",
+        "Preciso de 20 malas para bordar, qual o valor?",
+        "Preciso de 20 malas c/ cadeado, qual o valor?",
+    ],
+)
+async def test_rev2_e2e_o_que_nao_cabe_no_pedido_nao_recebe_a_frase(
+    db: AsyncSession, make_user, agente_ligado, api, envios, recusa_ativa, fala
+):
+    assert acao_pessoa.quantidade_de_atacado(validador.plano_de(fala)) is None
+    conversa = await _atacado_e2e(db, make_user, fala)
+    api.roteiro = [
+        _final(
+            acao="pessoa", texto="", assunto="desconto", confianca=0.8,
+            acao_pessoa=constantes.ACAO_DESCONTO_BRINDE, motivo_pessoa="ver com a equipe",
+        )
+    ]  # fmt: skip
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert api.pedidos and FRASE != r.texto and envios == []
+
+
+@pytest.mark.parametrize(
+    ("fala", "quantidade"),
+    [
+        # O que nomeia outra coisa junto do lote: não é o pedido puro.
+        ("Quero 20 malas tiffany, qual o valor?", 20),
+        ("Quero 20 malas champanhe, qual o valor?", 20),
+        ("Quero 20 malas mostarda, qual o valor?", 20),
+        ("Quero 20 malas rose gold, qual o valor?", 20),
+        ("Quero 20 malas caqui, qual o valor?", 20),
+        ("Quero 20 malas de despacho, qual o valor?", 20),
+        ("Quero 20 malas de 24, qual o valor?", 20),
+        ("Quero 20 malas grandes, qual o valor?", 20),
+        ("Quero 20 unidades da G, qual o valor?", 20),
+        ("Preta, 20 unidades, qual o valor?", 20),
+        ("Quero 20 unidades de rodinha, qual o valor?", 20),
+        ("Quero 20 unidades de cadeado, qual o valor?", 20),
+        ("Quero 20 unidades de celular, qual valor?", 20),
+        ("Valor das 20 unidades da minha compra", 20),
+        ("Compro 20 malas no CNPJ, qual o valor?", 20),
+    ],
+)
+async def test_rev2_e2e_o_lote_com_outro_nome_vai_para_a_pessoa(
+    db: AsyncSession, make_user, agente_ligado, api, envios, recusa_ativa, fala, quantidade
+):
+    assert acao_pessoa.quantidade_de_atacado(validador.plano_de(fala)) == quantidade
+    conversa = await _atacado_e2e(db, make_user, fala, estoque=500)
+    api.roteiro = []
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r is not None and not (r.texto or "").strip() and r.precisa_humano, r.motivo
+    assert f"{quantidade} unidades de uma variação" in (r.motivo or "")
+    assert api.clientes == [] and envios == []
+
+
+@pytest.mark.parametrize(
+    ("fala", "quantidade"),
+    [
+        ("Quero 100 ou 20 unidades, qual o valor?", 100),
+        ("Quero entre 20 e 30 malas, qual o valor?", 30),
+        ("preço para 20 a 40 unidades", 40),
+    ],
+)
+def test_rev2_na_faixa_vale_o_maior_numero(fala, quantidade):
+    assert acao_pessoa.quantidade_de_atacado(validador.plano_de(fala)) == quantidade
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "Consegue um valor melhor pra 20UN??",
+        "tem desconto para 20 unidades??",
+        "quanto ficam 50 unidades?",
+        "quanto custam 30 malas?",
+        "20 unidades fica quanto?",
+        "20 peças sai por quanto?",
+        "quanto sairia 20 unidades?",
+        "quanto custaria 20 unidades?",
+        "20 unidades sai quanto?",
+        "preço p/ 30 unidades",
+        "preço para 30 pçs",
+        "gostei da mala e quero 20 unidades, qual o valor?",
+        "tenho uma loja e preciso de 30 malas, qual o valor?",
+        "Boa tarde e preciso de 30 malas, tem desconto?",
+        "Sou lojista, preciso de 30 malas, qual o valor?",
+        "quero 20 unidades desse modelo, qual o valor?",
+        "Qual o valor de 30 malas desse modelo?",
+        "consegue um valor melhor pra 20UN desse modelo?",
+        "tem desconto pra 20 unidades desse tamanho?",
+        "Consegue um desconto comprando 20 unidades desse?",
+        "Quero 20 unidades da mala, qual o valor?",
+    ],
+)
+async def test_rev2_e2e_o_pedido_de_verdade_recebe_a_frase(
+    db: AsyncSession, make_user, agente_ligado, api, envios, recusa_ativa, fala
+):
+    conversa = await _atacado_e2e(db, make_user, fala)
+    api.roteiro = []
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r.texto == FRASE and not r.precisa_humano, r.motivo
+    assert api.clientes == [] and [e["texto"] for e in envios] == [FRASE]
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "Quero a M2 roxa",
+        "Quero a preta",
+        "Gostaria da roxa escuro",
+        "Preciso da preta",
+        "Pode ser a roxa",
+        "M2 roxa, consegue?",
+        "Pode criar pra mim?",
+        "Queria aquele desconto na roxa",
+        "Pode fazer esse valor nas 20?",
+        "Qual a altura da mala?",
+    ],
+)
+async def test_rev2_e2e_a_volta_ao_mesmo_anuncio_vai_sempre_para_a_pessoa(
+    db: AsyncSession, make_user, agente_ligado, api, envios, recusa_ativa, fala
+):
+    conversa = await _atacado_e2e(db, make_user, fala)
+    await _frase_ja_enviada(db, conversa, item=conversa.anuncio_id)
+    api.roteiro = []
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r is not None and not (r.texto or "").strip() and r.precisa_humano, r.motivo
+    assert acao_pessoa.MOTIVO_ATACADO_SEGUIMENTO in (r.motivo or "")
+    assert api.clientes == [] and envios == []
+
+
+async def test_rev2_o_agradecimento_no_mesmo_anuncio_nao_e_a_volta(
+    db: AsyncSession, make_user, recusa_ativa
+):
+    conversa = await _atacado_e2e(db, make_user, "Obrigado!")
+    await _frase_ja_enviada(db, conversa, item=conversa.anuncio_id)
+    assert await _decide(db, conversa, "Obrigado!") is None
+
+
+@pytest.mark.parametrize(
+    ("fala", "esperado"),
+    [
+        ("Quero a M2 roxa", True),
+        ("Pode ser a roxa", True),
+        ("Gostaria da roxa escuro", True),
+        ("Preciso da preta", True),
+        ("Tem na cor azul", False),
+    ],
+)
+def test_rev2_quero_e_a_volta_natural_em_outro_anuncio(fala, esperado):
+    assert acao_pessoa._responde_a_frase(validador.plano_de(fala)) is esperado
+
+
+# ── Regra 3: a frase passa pela régua do canal ──
+
+
+async def test_rev2_a_frase_nao_sai_com_o_desconto_desligado_no_canal(
+    db: AsyncSession, make_user, agente_ligado, api, envios, recusa_ativa
+):
+    conversa = await _atacado_e2e(db, make_user, "consegue um valor melhor pra 20UN?")
+    await _ligar(db, conversa, modo=constantes.MODO_AUTO, auto_orientacao=[], auto_categorias=[])
+    api.roteiro = []
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r.texto == FRASE and envios == []
+    assert _decisao(r) == "orientacao_nao_liberada", r.fatos
+
+
+async def test_rev2_a_frase_do_copiloto_nao_sai_quando_o_canal_vira_auto(
+    db: AsyncSession, make_user, agente_ligado, api, envios, recusa_ativa
+):
+    conversa = await _atacado_e2e(db, make_user, "consegue um valor melhor pra 20UN?")
+    await _ligar(db, conversa, modo=constantes.MODO_COPILOTO, auto_orientacao=["desconto"])
+    api.roteiro = []
+    r = await ia.gerar_rascunho(db, conversa)
+    assert r.texto == FRASE and envios == [] and _do_agente(r)["modo"] == constantes.MODO_COPILOTO
+    canal = await _ligar(db, conversa, modo=constantes.MODO_AUTO, auto_orientacao=["desconto"])
+
+    assert ia.trava_do_agente(r, canal, ligado=True) == "gerado_no_copiloto"
+    assert not await ia._talvez_enviar(db, conversa, r)
+    assert envios == []
+
+
+async def test_rev2_o_regatilho_le_a_regua_do_canal_na_frase():
+    base = {"id": "a1", "parada": "x", "proposta": {}, "texto_final": FRASE,
+            "decisao": {"atacado": True}, "plataforma": "ml"}  # fmt: skip
+    livre = {"modo": "auto", "auto_categorias": [], "auto_agente": [], "auto_orientacao": ["desconto"]}
+    x = await regatilho.regatilhar(base, livre)
+    assert x["decisao"] == regatilho.RECIBO
+    y = await regatilho.regatilhar(base, {**livre, "auto_orientacao": []})
+    assert y["decisao"] == "pessoa:orientacao_nao_liberada"
+    z = await regatilho.regatilhar(base, {**livre, "modo": "copiloto"})
+    assert z["decisao"] == "pessoa:canal_fora_do_auto"
+    assert (await regatilho.regatilhar(base, None))["decisao"] == "pessoa:canal_fora_do_auto"
+
+
+# ── Os pontos de chamada que nenhum teste via ──
+
+
+async def test_rev2_e2e_o_pedido_lido_por_ferramenta_usa_a_plataforma_da_conversa(
+    db: AsyncSession, make_user, agente_ligado, api, envios, monkeypatch
+):
+    # Sem a plataforma em `gatilhos_de_outro_pedido`, o outro pedido abriria `alterar_endereco`.
+    conversa = await _endereco_e2e(
+        db, make_user, canal="pos_venda", pedido="2000001", fala="Quero alterar o endereço de entrega"
+    )
+    real = agente_ctx.ContextoAgente.da_conversa
+
+    def _com_outro_pedido(*a: Any, **k: Any) -> Any:
+        ctx = real(*a, **k)
+        ctx.pedidos_lidos.append((dict(PEDIDO_NAO_POSTADO), acao_pessoa.POSTADO_NAO))
+        return ctx
+
+    monkeypatch.setattr(agente_ctx.ContextoAgente, "da_conversa", staticmethod(_com_outro_pedido))
+    api.roteiro = [_final(texto=FIXA_ENDERECO, assunto="endereco", confianca=0.9)]
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert _do_agente(r)["acoes_pessoa"] == [] and r.texto == FIXA_ENDERECO, r.motivo
+    assert [e["texto"] for e in envios] == [FIXA_ENDERECO]
+
+
+async def test_rev2_a_regra_suave_do_agente_recebe_a_plataforma_da_conversa():
+    # `checagens.conferir` passa a plataforma: sem ela, o vão não vale na regra suave.
+    msgs = _cli("Esta mala chega amanhã?")
+    p = Proposta(
+        acao="responder", texto="Não temos como garantir o horário da entrega amanhã.",
+        assunto="prazo_antes_compra", confianca=0.9, acao_pessoa=None, motivo_pessoa="",
+        evidencias=["regra:prazo_antes_compra"],
+    )  # fmt: skip
+    ml = await _auto(p, msgs, conversa=_conv(plataforma="ml", canal="pergunta", pedido_marketplace=None))
+    assert checagens.PRAZO_SEM_LASTRO in ml.codigos
+    shopee = await _auto(p, msgs, conversa=_conv(pedido_marketplace=None))
+    assert checagens.PRAZO_SEM_LASTRO not in shopee.codigos
+
+
+async def test_rev2_o_envio_que_falhou_nao_conta_como_frase_recebida(
+    db: AsyncSession, make_user, recusa_ativa
+):
+    conversa = await _atacado_e2e(db, make_user, "É o modelo M2 roxo")
+    m = await _msg_ia(db, conversa, FRASE, autor="loja", origem="externo", ha=timedelta(days=1))
+    agora = datetime.now(UTC)
+    assert await acao_pessoa._atacado_ja_respondido(db, conversa, agora)
+    m.status = constantes.MSG_FALHOU
+    await db.commit()
+    assert not await acao_pessoa._atacado_ja_respondido(db, conversa, agora)
+
+
+async def test_rev2_o_replay_decide_o_seguimento_no_relogio_do_as_of(
+    db: AsyncSession, make_user, recusa_ativa, ajustes
+):
+    # A frase saiu DEPOIS da fala: no relógio dela ainda não aconteceu. No de agora, seria a volta.
+    conversa = await _atacado_e2e(db, make_user, "consegue um valor melhor pra 20UN?")
+    gatilho = await db.scalar(
+        select(AtendimentoMensagem).where(AtendimentoMensagem.conversa_id == conversa.id)
+    )
+    await _msg_ia(db, conversa, FRASE, autor="loja", origem="externo", ha=timedelta(minutes=5))
+    falsa = _ApiDoReplay([])
+
+    async with replay.sessao_replay() as s:
+        c = await s.get(AtendimentoConversa, conversa.id)
+        r = await replay.rodar_gatilho(
+            s, c, _momento(gatilho), gravar=False, cliente=falsa.cliente()
+        )
+
+    assert falsa.pedidos == [] and r.texto_final == FRASE
+
+
+# ═══════════════ Terceira revisão: as correções da segunda ═══════════════
+
+PROMESSAS_DA_REV3 = [
+    # O dia com "na" e qualquer verbo: a mesma promessa de "garantimos a chegada amanhã".
+    "Podemos garantir a entrega na sexta.",
+    "Consigo garantir a chegada na sexta.",
+    "Dá para garantir a entrega na sexta.",
+    "Confirmamos a entrega na sexta.",
+    "Asseguramos a entrega na sexta.",
+    "Pode contar com a entrega na sexta.",
+    "A entrega na sexta é certa.",
+    "Sim, a entrega na sexta.",
+    "Aguarde a entrega na sexta.",
+    "A transportadora entrega na sexta.",
+    "A previsão é sexta.",
+    "Previsto para sexta.",
+    "Sexta ele chega.",
+    "Sim, sexta.",
+    # A lista de dias só nega colada ao prazo; solta, afirma.
+    "Não temos como garantir a chegada amanhã. A previsão é sexta ou sábado.",
+    "Não temos como garantir a chegada amanhã, só sexta ou sábado.",
+    "Não temos como garantir a chegada amanhã, só na sexta ou no sábado.",
+    "Não temos como garantir a chegada amanhã, mas deve ser sexta ou sábado.",
+    "Não temos como garantir a chegada amanhã, mas sexta ou sábado com certeza.",
+    "Não temos como garantir a chegada amanhã. Será ou sexta ou sábado.",
+    "Não temos entrega para hoje. A previsão é sexta ou sábado.",
+    # A compra não isenta o que vem depois dela, e só o "hoje" é o dia da compra.
+    "Não temos como garantir a chegada amanhã. Sua compra vem na sexta.",
+    "Não temos como garantir a chegada amanhã. Sua compra está prevista para sexta.",
+    "Não temos como garantir a chegada amanhã. Comprando hoje vem na sexta.",
+    "Não temos como garantir a chegada amanhã. A previsão do anúncio é sexta.",
+    # O que parece negativa do fato e não nega.
+    "A entrega para amanhã depende só de você comprar agora.",
+    "Sobre a entrega para amanhã, não temos como garantir o horário.",
+    "A entrega para amanhã não está garantida, mas é bem provável.",
+    # O "mas" que desfaz a negativa, com qualquer palavra.
+    "Não temos como confirmar se chega amanhã, mas tudo indica que sim.",
+    "Não temos como garantir a chegada amanhã, mas é bem provável.",
+    "Não temos como garantir a chegada amanhã, mas vai chegar.",
+    "Não temos como garantir a chegada amanhã, mas chegará.",
+    "Não temos como garantir a chegada amanhã, porém chega.",
+    "Não temos como garantir a chegada amanhã, mas pode ficar tranquilo.",
+    # O "e" antes da chegada é a conjunção.
+    "Não temos como garantir a data e será entregue amanhã.",
+    "Não temos como garantir o prazo e será entregue amanhã.",
+    "Não temos como garantir a data e entrega amanhã.",
+    # A promessa sem data não depende da pontuação.
+    "Chega, pode comprar.",
+    "Chega, sim.",
+    # A negativa que termina em afirmação sem "mas".
+    "Não temos como garantir que a air fryer chegue amanhã, ela chega.",
+    # A oração de dentro afirma.
+    "Não temos como garantir a chegada do pedido que sai hoje.",
+    # O validador tira a "garantia de entrega" da conta: a regra suave é quem vê.
+    "Não temos garantia de entrega amanhã, mas chega.",
+    "Não temos garantia de entrega amanhã, só na sexta.",
+    # Fora de qualquer lista de verbos.
+    "Pode esperar na sexta.",
+    "Vai na sexta.",
+    "Sexta-feira ele estará aí.",
+    "Entrega garantida na sexta.",
+]
+
+
+@pytest.mark.parametrize("texto", PROMESSAS_DA_REV3)
+def test_rev3_a_promessa_nao_passa_nas_camadas(texto):
+    assert not _isenta(texto), texto
+
+
+NEGATIVAS_DA_REV3 = [
+    # O vão fala da entrega com palavras e produtos que nenhuma lista fecha.
+    "Não consigo confirmar daqui se chega amanhã.",
+    "Não conseguimos confirmar aqui se o pedido sai hoje.",
+    "Não temos como garantir que a air fryer chegue amanhã.",
+    "Não temos como garantir a chegada da sua air fryer amanhã.",
+    "Não temos como garantir a chegada do roteador amanhã.",
+    "Não temos como garantir a chegada do Uranyx amanhã.",
+    "Não temos como garantir que chegue exatamente amanhã.",
+    "Não temos como garantir a chegada na sua residência amanhã.",
+    "Não consigo confirmar daqui se sai hoje nem se chega até a data que você precisa.",
+    # A negativa real de a7f1e4b8 e as formas com o substantivo.
+    "Não temos acesso ao transporte, então não conseguimos garantir se a nova tentativa será hoje.",
+    "Não temos como garantir uma data exata de entrega.",
+    "Não conseguimos garantir o dia exato da chegada.",
+    "Não temos como garantir um prazo exato.",
+    "Não conseguimos garantir uma data específica.",
+    "Não garantimos data exata de entrega.",
+    "Não conseguimos garantir que ele chegue a tempo.",
+    "Não temos garantia de entrega amanhã.",
+    "Não há garantia de entrega amanhã.",
+    "Não é garantido que chegue amanhã.",
+    # A orientação depois do "mas" e o outro "chega".
+    "Não temos como garantir a chegada amanhã, mas veja quando chega no anúncio.",
+    "Não temos como garantir a chegada amanhã, mas confira se chega no anúncio ao informar o CEP.",
+    "Não temos como garantir a chegada amanhã, mas veja se chega a tempo no anúncio ao informar o CEP.",
+    "Não temos como informar o dia em que chega.",
+    "Não sabemos o dia em que chega.",
+    # O pagamento e a compra confirmados, em qualquer ordem.
+    "Sua compra foi aprovada e está confirmada. Não temos como garantir a chegada amanhã.",
+    "O pagamento foi aprovado e está confirmado, mas não temos como garantir a chegada amanhã.",
+    "Não temos como garantir a chegada amanhã. O pagamento foi aprovado e está confirmado.",
+    # O dia colado ao substantivo é a mesma negativa do "para".
+    "A chegada amanhã não pode ser garantida.",
+    "A entrega amanhã não é garantida.",
+    "A entrega amanhã não está garantida.",
+    "A chegada amanhã não é garantida.",
+    "Sobre a chegada amanhã, não temos como garantir.",
+    "Quanto à entrega amanhã, não temos como garantir.",
+    "Sobre a entrega para amanhã, não temos como garantir.",
+    "Quanto à entrega para amanhã, não temos como garantir.",
+    "Não temos como antecipar a entrega para amanhã.",
+    "Não temos como agendar a entrega para amanhã.",
+    "Para amanhã, não temos como garantir a entrega.",
+    "Amanhã não temos como garantir.",
+    # O dia que também não vale.
+    "Não temos como garantir a chegada amanhã, nem antes de sexta.",
+    "Não temos como garantir a chegada amanhã, nem até domingo.",
+    "Não temos como garantir a chegada amanhã, a transportadora não entrega sábado nem domingo.",
+    "Não temos como garantir a chegada amanhã, porque hoje é feriado.",
+    # A entrega no dia, sem promessa.
+    "A entrega no sábado depende da rotina da transportadora.",
+    "A transportadora não entrega no sábado.",
+    "Não podemos garantir a entrega na sexta.",
+    "A tentativa de entrega na segunda tentativa depende da transportadora.",
+    # O dia que não é prazo.
+    "O pedido foi postado na sexta.",
+    "As medidas estão na segunda foto do anúncio.",
+]
+
+
+@pytest.mark.parametrize("texto", NEGATIVAS_DA_REV3)
+async def test_rev3_a_negativa_sai_por_todas_as_camadas(db: AsyncSession, make_user, texto):
+    # A 1ª camada inteira, e não só as funções do prazo: a garantia e a recusa também barravam.
+    p = Proposta(
+        acao="responder", texto=texto, assunto="prazo_antes_compra", confianca=0.9,
+        acao_pessoa=None, motivo_pessoa="", evidencias=["regra:prazo_antes_compra"],
+    )  # fmt: skip
+    conv = _conv(plataforma="ml", canal="pergunta", pedido_marketplace=None)
+    x = await _auto(p, _cli("chega amanhã?"), conversa=conv)
+    assert x.motivos == [], x.motivos
+    assert checagens.PRAZO_SEM_LASTRO not in x.codigos
+    conversa = await _conversa_ml(db, make_user)
+    r = await _rascunho(db, conversa, texto, {"agente": {"isencoes": []}})
+    assert await _envio(db, conversa, texto, r) == texto
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Não garantimos o aparelho depois da entrega.",
+        "Não garantimos o celular depois do prazo.",
+        "Não temos como garantir o produto depois da entrega.",
+        "O produto não tem nem garantia depois da entrega.",
+        "Produto não garantido depois da entrega.",
+        "Não garantimos o aparelho nem um dia.",
+        "Não temos garantia depois da entrega.",
+        "Não garantimos que a garantia do aparelho seja hoje.",
+    ],
+)
+@pytest.mark.parametrize("canal", ["pergunta", "pos_venda"])
+async def test_rev3_a_garantia_do_produto_continua_com_a_pessoa(texto, canal):
+    assert validador.sem_a_negativa_da_entrega_no_ml(texto) == texto
+    p = Proposta(
+        acao="responder", texto=texto, assunto="garantia", confianca=0.9,
+        acao_pessoa=None, motivo_pessoa="", evidencias=["regra:garantia"],
+    )  # fmt: skip
+    conv = _conv(
+        plataforma="ml", canal=canal, pedido_marketplace=None if canal == "pergunta" else "1"
+    )
+    x = await _auto(p, _cli("tem garantia?"), conversa=conv)
+    assert ia.MOTIVO_RESPOSTA_DE_GARANTIA in x.motivos or validador.MOTIVO_NEGA_GARANTIA in x.motivos
+
+
+def test_rev3_o_que_vem_junto_nao_e_prazo():
+    assert validador.MOTIVO_PRAZO not in _ml("O carregador chega sim junto com o celular.")
+    assert validador.MOTIVO_PRAZO in _ml("Chega sim.")
+
+
+async def test_rev3_as_outras_plataformas_nao_leem_o_dia_nem_a_negativa_do_ml():
+    for plataforma, texto in (
+        ("shopee", "Confirmamos a entrega na sexta."),
+        ("shopee", "A previsão é sexta."),
+        ("tiktok", "Sim, sexta."),
+    ):
+        final = validador.normalizar(texto, plataforma=plataforma, canal="pergunta")
+        assert validador.MOTIVO_PRAZO not in validador.validar(
+            final, plataforma=plataforma, canal="pergunta", origem=constantes.ORIGEM_IA
+        )
+    # O padrão antigo continua sem a saída do ML.
+    assert validador.MOTIVO_PRAZO in validador.validar(
+        "A chegada amanhã não é garantida.",
+        plataforma="shopee", canal="pergunta", origem=constantes.ORIGEM_IA,
+    )  # fmt: skip
+
+
+# ── Regra 2: o pedido com outras palavras e o que não é pedido ──
+
+
+@pytest.mark.parametrize(
+    ("fala", "texto", "canal"),
+    [
+        ("Quero mudar o local de entrega depois de comprar", "Só é possível antes do envio. Fale com a loja pelas mensagens da compra.", "pergunta"),
+        ("Pode alterar a rua depois da compra?", "Sim, antes do envio é só falar com a loja.", "pergunta"),
+        ("Se eu comprar pode trocar o local depois?", "Sim, antes do envio é só falar com a loja.", "pergunta"),
+        ("Posso receber na casa da minha mãe depois de comprar?", "Sim, é só nos avisar antes do envio.", "pergunta"),
+        ("Pode alterar a rua?", "Sim, antes do envio.", "pos_venda"),
+        ("Tem como acrescentar o complemento?", "Sim, vou incluir o complemento no pedido.", "pos_venda"),
+        ("Tem como acrescentar o complemento?", "Claro, pode me mandar o complemento por aqui.", "pos_venda"),
+        ("Troca o local de entrega", "Feito, local de entrega trocado.", "pos_venda"),
+        ("O endereço certo é outro", "Sem problema, fale com a loja pelas mensagens da compra.", "pos_venda"),
+        ("Meu endereço correto é outro", "Pode nos enviar o correto, por favor?", "pos_venda"),
+        # As falas reais: 91e36877, dc4d717c e c7254e1c.
+        ("Rua do Pedido quadra 13 lote 07 Cep 70000000", "Endereço anotado, obrigado!", "pos_venda"),
+        ("Esse endereço não é mais válido", "Certo, obrigado por avisar.", "pos_venda"),
+        ("Complemento de endereço", "Pode nos enviar o complemento, por favor?", "pos_venda"),
+    ],
+)
+def test_rev3_o_pedido_com_outros_nomes_so_recebe_o_texto_fixo(fala, texto, canal):
+    msgs = _cli(fala)
+    assert acao_pessoa.pede_alterar_endereco(msgs, msgs[-1], canal=canal)
+    p = checagens.endereco_no_ml_da_proposta(_proposta(texto), _ctx(canal=canal), msgs, msgs[-1])
+    assert p.texto == FIXA_ENDERECO
+
+
+@pytest.mark.parametrize(
+    ("fala", "texto", "assunto", "canal"),
+    [
+        ("Não quero mudar o endereço, quanto tempo leva?", "O prazo aparece no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("Posso comprar e receber em outro endereço?", "Sim, você escolhe o endereço na hora da compra.", "cobertura_regiao", "pergunta"),
+        ("Se eu comprar pode ser entregue em outro endereço?", "Sim, você escolhe na compra.", "cobertura_regiao", "pergunta"),
+        ("Tá dando erro no meu cep", "Tente informar de novo no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("Deu erro no CEP", "Tente informar de novo no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("Mudando o CEP muda o frete?", "O frete aparece no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("Se eu trocar de cep o frete muda?", "O frete aparece no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("se o endereço for diferente muda o frete?", "O frete aparece no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("se eu mudar o cep o frete muda?", "O frete aparece no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("Vocês mudaram de endereço?", "Não temos loja física.", "fatos_loja", "pergunta"),
+        ("Tem outro endereço para devolver?", "A devolução é pelo Mercado Livre.", "troca_devolucao", "pergunta"),
+        ("Vai chegar amanhã? Dia 10 estarei em outro endereço", "O prazo aparece no anúncio.", "prazo_antes_compra", "pergunta"),
+        ("Não mudei o endereço, por que não chegou?", "Acompanhe em Minhas compras.", "rastreio", "pos_venda"),
+        ("Não tenho interesse em trocar o endereço, só quero a nota", "A nota vai em Minhas compras.", "nf", "pos_venda"),
+        ("mandaram o produto errado no meu endereço", "Sentimos muito pelo ocorrido.", "item_errado_faltando", "pos_venda"),
+        ("chegou produto errado no meu endereço", "Sentimos muito pelo ocorrido.", "item_errado_faltando", "pos_venda"),
+        ("quero trocar a mala qual o endereço para devolver", "A devolução é pelo Mercado Livre.", "troca_devolucao", "pos_venda"),
+        ("preciso trocar o produto qual o endereço", "A devolução é pelo Mercado Livre.", "troca_devolucao", "pos_venda"),
+        ("apareceu endereço incorreto no rastreio, o que faço?", "Acompanhe em Minhas compras.", "rastreio", "pos_venda"),
+        # O endereço da NF de 9f3dd292.
+        ("Somente endereço, cidade e telefone estão errados", "A nota vai em Minhas compras.", "nf", "pos_venda"),
+    ],
+)
+def test_rev3_o_que_nao_pede_a_mudanca_mantem_a_resposta_do_modelo(fala, texto, assunto, canal):
+    msgs = _cli(fala)
+    assert not acao_pessoa.pede_alterar_endereco(msgs, msgs[-1], canal=canal)
+    p = _proposta(texto, assunto=assunto)
+    assert checagens.endereco_no_ml_da_proposta(p, _ctx(canal=canal), msgs, msgs[-1]) == p
+
+
+async def test_rev3_e2e_a_resposta_certa_nao_vira_a_frase_na_pergunta_publica(
+    db: AsyncSession, make_user, agente_ligado, api, envios
+):
+    fala = "Não quero mudar o endereço, quanto tempo leva?"
+    conversa = await _endereco_e2e(db, make_user, canal="pergunta", pedido=None, fala=fala)
+    texto = "O prazo e o frete aparecem no anúncio ao informar o CEP."
+    api.roteiro = [_final(texto=texto, assunto="prazo_antes_compra", confianca=0.9)]
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r.texto == texto and FIXA_ENDERECO != r.texto
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "estou indo para outra cidade, quero mudar o endereço de entrega",
+        "vou me mudar, estou indo para outra cidade, pode alterar o endereço?",
+        "estou indo pra outro estado, tem como trocar o endereço?",
+        "a compra foi com o endereço errado, tem como mudar?",
+        "foi o endereço errado que coloquei, pode alterar?",
+        "o pedido foi com o cep errado, consegue corrigir?",
+        "coloquei errado, foi para outro endereço na compra, tem como alterar?",
+    ],
+)
+def test_rev3_o_foi_e_o_indo_nao_seguram_o_pedido_de_mudanca(fala):
+    # Sem o pedido na mesma fala, são a entrega: `test_rev2_e2e_a_entrega_errada_vai_para_a_pessoa`.
+    msgs = _cli(fala)
+    assert not acao_pessoa.entrega_relatada_no_turno(msgs, msgs[-1])
+    p = _proposta(FIXA_ENDERECO, assunto="endereco")
+    saida = checagens.endereco_no_ml_da_proposta(p, _ctx(), msgs, msgs[-1])
+    assert saida.acao == "responder" and saida.texto == FIXA_ENDERECO
+    assert _gatilhos(_conv(plataforma="ml"), msgs, postado=acao_pessoa.POSTADO_SIM) == []
+
+
+@pytest.mark.parametrize(
+    ("fala", "canal"),
+    [
+        # A palavra do lugar em outra conversa: nada de frase fixa em público.
+        ("Aceita troca no local?", "pergunta"),
+        ("Onde coloco o número de série?", "pos_venda"),
+        ("Envia para a rua das Flores, cep 70000000?", "pergunta"),
+        ("O frete muda se eu trocar o CEP?", "pergunta"),
+        ("Não tem problema se não conseguiu incluir o número do apartamento.", "pos_venda"),
+        ("Vai chegar amanhã? Dia 10 estarei em outro endereço", "pos_venda"),
+    ],
+)
+def test_rev3_a_palavra_do_lugar_nao_e_o_pedido(fala, canal):
+    msgs = _cli(fala)
+    assert not acao_pessoa.pede_alterar_endereco(msgs, msgs[-1], canal=canal)
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "o carteiro deixou outro aviso",
+        "levou outra semana pra chegar",
+        "o correio entregou outro dia e veio com defeito",
+        "meu pedido foi entregue e quero comprar outra unidade",
+        "foi entregue hoje, qual o código para outra compra?",
+        "entregaram o produto errado",
+        "entregaram a cor errada",
+        "foi entregue, mas o carregador está errado",
+        "Entregaram o modelo errado",
+        "Entregaram outro produto",
+        "Entregaram outro dia",
+        "O produto entregue está errado",
+    ],
+)
+def test_rev3_o_lugar_errado_e_o_lugar(fala):
+    assert not acao_pessoa._entrega_errada_no_ml(validador.plano_de(fala))
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "A plataforma não permite alterar o endereço depois do envio.",
+        "Depois da postagem, o endereço não pode ser alterado.",
+        "Depois do envio, a plataforma não permite alterar o endereço.",
+        "Após o envio, não é possível alterar o endereço.",
+        "A entrega segue o endereço do pedido, e a plataforma não permite alterar o endereço depois da postagem.",
+    ],
+)
+def test_rev3_o_que_o_bloco_1_ensina_em_qualquer_ordem_nao_segura_outro_assunto(texto):
+    assert checagens.conferir_endereco_no_ml(
+        texto, acao="responder", assunto="entrega_instrucoes", plataforma="ml"
+    ) == []
+
+
+def test_rev3_o_so_depois_do_envio_continua_na_trava():
+    (trava,) = checagens.conferir_endereco_no_ml(
+        "Só depois da postagem é possível alterar o endereço.",
+        acao="responder", assunto="entrega_instrucoes", plataforma="ml",
+    )  # fmt: skip
+    assert trava.codigo == checagens.ENDERECO_NO_ML
+
+
+# ── Regra 3: a leitura dos lotes e a gramática do pedido ──
+
+
+@pytest.mark.parametrize(
+    ("fala", "quantidade"),
+    [
+        # Lotes somam, com ou sem a palavra que liga.
+        ("Quero 40 e 40 malas, qual o valor?", 80),
+        ("Quero 15 e 15 unidades, qual o valor?", 30),
+        ("Quero 100 e 20 unidades, qual o valor?", 120),
+        ("Quero 40 malas. Quero 40 frasqueiras. Qual o valor?", 80),
+        ("Quero 40 malas 40 frasqueiras, qual o valor?", 80),
+        ("Quero 40 malas e 40 frasqueiras, qual o valor?", 80),
+        # O detalhe do total não soma: abaixo do mínimo de verdade.
+        ("Quero 10 unidades, 5 malas e 5 frasqueiras, qual o valor?", 10),
+        ("Quero 10 malas, 5 unidades e 5 unidades, qual valor?", 10),
+        ("Quero 5 malas, 5 frasqueiras e 10 unidades, qual valor?", 10),
+        ("Quero 8 malas, 4 delas grandes e 4 delas pequenas, qual o valor?", 8),
+        ("Quero 10 malas, 5 delas P e 5 delas G, qual o valor?", 10),
+        # A faixa e o "ou" continuam valendo o maior.
+        ("Quero entre 20 e 30 malas, qual o valor?", 30),
+        ("Quero 20 malas ou 30 malas, qual o valor?", 30),
+    ],
+)
+def test_rev3_a_leitura_dos_lotes(fala, quantidade):
+    assert acao_pessoa.quantidade_de_atacado(validador.plano_de(fala)) == quantidade
+
+
+@pytest.mark.parametrize(
+    ("fala", "estoque"),
+    [
+        ("Quero 40 e 40 malas, qual o valor?", 50),
+        ("Quero 15 e 15 unidades, qual o valor?", 20),
+        ("Quero 100 e 20 unidades, qual o valor?", 110),
+        ("Quero 40 malas. Quero 40 frasqueiras. Qual o valor?", 50),
+        ("Quero 40 malas 40 frasqueiras, qual o valor?", 50),
+    ],
+)
+async def test_rev3_e2e_os_lotes_acima_do_estoque_vao_para_a_pessoa(
+    db: AsyncSession, make_user, agente_ligado, api, envios, recusa_ativa, fala, estoque
+):
+    conversa = await _atacado_e2e(db, make_user, fala, estoque=estoque)
+    api.roteiro = []
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r is not None and FRASE != r.texto and r.precisa_humano and envios == []
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "Quero 10 unidades, 5 malas e 5 frasqueiras, qual o valor?",
+        "Quero 10 malas, 5 unidades e 5 unidades, qual valor?",
+        "É preço para 20 malas?",
+        "É valor por 20 unidades?",
+        "É desconto de 20 unidades?",
+        "É atacado para 20 unidades?",
+        "Quanto ficou 20 malas?",
+        "Por quanto saiu 20 malas?",
+        "Quanto saiu as 20 unidades?",
+        "Oi é preço para 20 malas?",
+    ],
+)
+async def test_rev3_e2e_o_que_nao_e_o_pedido_nao_recebe_a_frase(
+    db: AsyncSession, make_user, agente_ligado, api, envios, recusa_ativa, fala
+):
+    conversa = await _atacado_e2e(db, make_user, fala)
+    api.roteiro = [
+        _final(
+            acao="pessoa", texto="", assunto="desconto", confianca=0.8,
+            acao_pessoa=constantes.ACAO_DESCONTO_BRINDE, motivo_pessoa="ver com a equipe",
+        )
+    ]  # fmt: skip
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert api.pedidos and FRASE != r.texto and envios == []
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "Consegue um valor melhor pra 20UN? Grato",
+        "Consegue um valor melhor pra 20UN, por gentileza?",
+        "Consegue um valor melhor pra 20UN? Aguardo",
+        "Amigo, quanto fica 20 unidades?",
+        "Tem desconto na compra de 20 unidades?",
+        "melhor preço para 20 unidades",
+        "vc dá desconto pra 20 unidades?",
+        "quanto de desconto para 20 unidades?",
+        "vende no atacado? preciso de 50 unidades",
+        "tem preço especial para 20 unidades?",
+        "melhora o preço pra 20 unidades?",
+        "Tenho interesse em 20 unidades, qual o valor?",
+        "quero fazer um pedido de 30 unidades, qual o valor?",
+        "preço unitário para 20 unidades?",
+        "estou precisando de 20 unidades, qual o valor?",
+    ],
+)
+async def test_rev3_e2e_o_pedido_natural_recebe_a_frase(
+    db: AsyncSession, make_user, agente_ligado, api, envios, recusa_ativa, fala
+):
+    conversa = await _atacado_e2e(db, make_user, fala)
+    api.roteiro = []
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    assert r is not None and r.texto == FRASE and api.pedidos == []
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "Fiz um pedido de 20 unidades, qual o valor?",
+        "Meu pedido de 20 unidades, qual o valor?",
+        "Valor das 20 unidades da minha compra",
+    ],
+)
+def test_rev3_a_compra_feita_nao_e_o_pedido(fala):
+    pedido = acao_pessoa._pedido_de_atacado(validador.plano_de(fala))
+    assert pedido is None or pedido[1]
+
+
+@pytest.mark.parametrize(
+    "fala",
+    [
+        "consegue um valor melhor pra 20UN desse anúncio?",
+        "Tem desconto pra 20 unidades nesse modelo?",
+        "consegue um valor melhor pra 20UN nessa mala?",
+        "consegue um valor melhor pra 20UN nesse produto?",
+        "consegue um valor melhor pra 20UN nesse anúncio?",
+        "consegue um valor melhor pra 20UN neste item?",
+        "consegue um valor melhor pra 20UN iguais?",
+        "consegue um valor melhor pra 20UN da mesma?",
+        "20 unidades iguais, qual o valor?",
+    ],
+)
+def test_rev3_apontar_o_anuncio_nao_nomeia_a_variacao(fala):
+    assert acao_pessoa._pedido_de_atacado(validador.plano_de(fala)) == (20, False)
+

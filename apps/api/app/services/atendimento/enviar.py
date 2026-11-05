@@ -1184,7 +1184,8 @@ async def _texto_com_isencao_do_agente(
     prazo ("Não temos como garantir a chegada amanhã", dc962f66): a 1ª camada já a aceitava e
     este portão a recusava. A conta é refeita aqui, no texto que vai, e só o motivo do prazo
     sai; (2) a resposta fixa do atacado: só com a marca e o texto IGUAL à frase, e só o motivo
-    do percentual sai. O legado e a pessoa não mudam.
+    do percentual sai. A pessoa não muda. O rascunho do legado não tem a isenção e os padrões novos
+    do prazo no ML (`validador._PRAZO_NO_ML`) valem para ele: lá a negativa vai para a pessoa.
     """
     from app.services.atendimento import validador
     from app.services.atendimento.agente import checagens

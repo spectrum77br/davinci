@@ -5251,6 +5251,8 @@ async def conferir_saida(
     # consultado): a promessa de cobertura não BLOQUEIA a sugestão — vai
     # para pessoa (`fala_de_garantia`, logo abaixo); a data de garantia
     # inventada continua bloqueando.
+    if agente and conversa.plataforma == "ml":
+        texto_da_garantia = validador.sem_a_negativa_da_entrega_no_ml(texto_da_garantia)
     erros = list(
         dict.fromkeys(
             [
@@ -6755,7 +6757,9 @@ def _sql_assunto_liberado(r: Any, k: Any, agora: datetime | None = None):
         # que ficou para depois da pausa humana sai no reenvio (o resto do filtro, o `_cobre`,
         # a triagem e a pausa continuam valendo).
         and_(do_agente, r.fatos.contains({"agente": {FATO_RECIBO: True}})),
-        # O dono, 05/11/2026: a resposta fixa do atacado no ML, pelo mesmo motivo.
+        # O dono, 05/11/2026: a resposta fixa do atacado no ML também não passa pelo verificador.
+        # Ela tem assunto, mas este filtro não olha o `auto_orientacao`: quem decide é o
+        # `_talvez_enviar` (`trava_do_agente`).
         and_(do_agente, r.fatos.contains({"agente": {FATO_ATACADO: True}})),
         and_(
             do_agente,
@@ -6898,13 +6902,22 @@ async def _talvez_enviar(
         )
         if canal is None or canal.modo != MODO_AUTO:
             motivo = "canal_fora_do_auto"
-        elif do_agente and (recibo_no_rascunho(rascunho) or atacado_no_rascunho(rascunho)):
+        elif do_agente and recibo_no_rascunho(rascunho):
             # Item 9 (03/11/2026): o recibo fixo da evidência não tem assunto a liberar nem
             # texto do modelo para o verificador — o resto das travas (a triagem com a
-            # etiqueta, a pausa humana, o envio) é o de sempre. A resposta fixa do atacado no
-            # ML (o dono, 05/11/2026) também: o verificador a seguraria sempre.
+            # etiqueta, a pausa humana, o envio) é o de sempre.
             if not agente_config.agente_ligado(get_settings(), canal):
                 motivo = "agente_desligado"
+        elif do_agente and atacado_no_rascunho(rascunho):
+            # A resposta fixa do atacado no ML (o dono, 05/11/2026) tem assunto: a régua do canal
+            # vale, com o interruptor e o rascunho nascido no copiloto. Só o verificador fica de
+            # fora, porque a seguraria sempre.
+            motivo = trava_do_agente(
+                rascunho,
+                canal,
+                etiquetas=_etiquetas_da_conversa(conversa),
+                ligado=agente_config.agente_ligado(get_settings(), canal),
+            )
         elif do_agente:
             motivo = trava_do_agente(
                 rascunho,
