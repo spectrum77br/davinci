@@ -344,6 +344,7 @@ import {
   preencherLacunas,
   buscaDoAtalho,
   filtrarProntas,
+  prontaAtiva,
   motivoSellerCenter,
   respondidaNoPortalMagalu,
   respondidaNoSellerCenter,
@@ -2085,14 +2086,15 @@ async function avaliar(nota: 'ok' | 'erro') {
 
 // ─── respostas prontas ──────────────────────────────────────────────────────
 // A lista já vem do servidor no escopo da pessoa (03/11/2026: as "para todos"
-// + as da equipe dela; o admin, todas). Aqui, as que servem nesta caixa.
+// + as da equipe dela; o admin, todas). Aqui, as que servem nesta caixa, sem as
+// que a equipe desativou para ela (05/11/2026).
 const menuModelos = ref(false)
 const buscaModelo = ref('')
 const menuIdx = ref(0)
 const modelosQueServem = computed(() => {
   const c = conversa.value
   if (!c) return []
-  return props.modelos.filter((m) => m.ativo && (!m.plataforma || m.plataforma === c.plataforma) && (!m.canal || m.canal === c.canal))
+  return props.modelos.filter((m) => prontaAtiva(m) && (!m.plataforma || m.plataforma === c.plataforma) && (!m.canal || m.canal === c.canal))
 })
 const modelosDaConversa = computed(() => filtrarProntas(modelosQueServem.value, buscaModelo.value))
 watch(buscaModelo, () => { menuIdx.value = 0 })

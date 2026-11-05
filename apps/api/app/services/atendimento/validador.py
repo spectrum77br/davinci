@@ -531,7 +531,9 @@ _DESESTIMULA_DEVOLUCAO = (
     ),
 )
 
-_LACUNA = re.compile(r"\{\{?\s*[a-z_]+\s*\}?\}", re.IGNORECASE)
+_LACUNA = re.compile(r"\{\{?\s*[a-z_]+(?::[a-z0-9_-]+)?\s*\}?\}", re.IGNORECASE)
+# A lacuna do link do anúncio (D3 do dono, 04/11/2026): só o agente, na Shopee.
+_LACUNA_DE_LINK = re.compile(r"\{\{?\s*link_anuncio:[a-z]+\s*\}?\}", re.IGNORECASE)
 
 # ── Regras só da IA ───────────────────────────────────────────────────────
 
@@ -542,6 +544,7 @@ _MOTIVO_PRAZO = "prazo em números só pode vir do sistema"
 # O nome público (rodada 4 do agente, 21/10/2026: só o caminho do agente tira
 # este motivo quando o prazo vem negado — "não conseguimos garantir até sexta").
 MOTIVO_PRAZO = _MOTIVO_PRAZO
+MOTIVO_PERCENTUAL = _MOTIVO_PERCENTUAL
 _MOTIVO_GARANTIA = "prazo de garantia só pode vir do sistema"
 _MOTIVO_DADO_PESSOAL = "pede ou repete dado pessoal (CPF, endereço, telefone)"
 _MOTIVO_PROMESSA = "promessa (reembolso, troca, sem custo) só pessoa pode fazer"
@@ -679,6 +682,226 @@ _PRAZO = (
         r"(?:hoje|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo)\b"
     ),
 )
+# O dono, 05/11/2026 (Mercado Livre, 5590d694, dc962f66): "garantir a entrega para amanhã" e
+# "garantir a chegada amanhã" são a mesma frase e só a segunda batia em `_PRAZO`, porque o
+# último padrão pede o dia colado ao substantivo. O acaso valia para a promessa: "a chegada é
+# amanhã", "a entrega será na sexta" e "garantimos a entrega para hoje" passavam. Estes fecham a
+# promessa com o verbo de ligação, com o "para", com o verbo de quem entrega ("fazemos a entrega na
+# sexta", "a entrega acontecerá na sexta"), com o "você recebe" ("terça você recebe", "você terá o
+# pedido na sexta", "na terça está aí") e com o "chega" sem data ("Sim, chega.", "pode comprar que
+# chega"). A entrega no dia, com qualquer verbo ("confirmamos a entrega na sexta", "a transportadora
+# entrega na sexta", "pode contar com a entrega na sexta"), a previsão ("a previsão é sexta"), o dia
+# sozinho na resposta ("Sim, sexta.") e o dia antes da chegada ("sexta ele chega") também. "A
+# entrega no sábado depende da rotina da transportadora" é legítimo (`_NEGA_A_ENTREGA_DEPOIS`). Só
+# no ML: a negativa honesta sai pela isenção do agente
+# (`checagens.prazo_do_validador_sem_afirmacao`).
+_ENTREGA_NO_SUBSTANTIVO = r"(?:chegada|entrega|recebimento|postagem|envio|despacho|coleta)"
+_DIA_DA_PROMESSA = rf"(?:hoje|amanha|{_DIA_DA_SEMANA})"
+_NO_DIA = rf"(?:(?:para|pra|na|no|ate|em)\s+)?(?:(?:a|o)\s+)?{_DIA_DA_PROMESSA}\b"
+# "Na segunda tentativa", "segunda via": não é o dia.
+_NAO_E_O_DIA = r"(?!\s*-?\s*(?:feira\s+)?(?:tentativa|via|opcao|vez|parte|etapa|chance)\b)"
+_PRAZO_NO_ML = (
+    re.compile(
+        rf"\b{_ENTREGA_NO_SUBSTANTIVO}\s+"
+        r"(?:e|eh|sera|fica|ficou|vai\s+ser|deve\s+ser|esta|estara)\s+"
+        r"(?:(?:prevista?|previsto|marcad[oa]|agendad[oa]|programad[oa]|confirmad[oa]"
+        r"|garantid[oa])\s+)?"
+        rf"(?:(?:para|pra|na|no|ate)\s+)?{_DIA_DA_PROMESSA}\b"
+    ),
+    re.compile(
+        rf"\b{_ENTREGA_NO_SUBSTANTIVO}\s+(?:para|pra)\s+(?:(?:a|o)\s+)?{_DIA_DA_PROMESSA}\b"
+    ),
+    re.compile(
+        r"(?<!nao )\b(?:fazemos|faz|fazem|temos|tem|prometemos|garantimos|realizamos|oferecemos)\s+"
+        rf"(?:(?:a|o|uma|um)\s+)?{_ENTREGA_NO_SUBSTANTIVO}\s+{_NO_DIA}"
+    ),
+    re.compile(rf"\b{_ENTREGA_NO_SUBSTANTIVO}\s+(?:acontece\w*|ocorre\w*|vem|vira)\s+{_NO_DIA}"),
+    re.compile(
+        rf"\b(?:(?:na|no|ate|em)\s+)?{_DIA_DA_PROMESSA}\s+(?:voce|vc)\s+"
+        r"(?:recebe|recebera|tera|vai\s+receber|vai\s+ter)\b"
+    ),
+    re.compile(
+        r"\b(?:voce|vc)\s+(?:recebe|recebera|tera|vai\s+receber|vai\s+ter)\s+(?:\w+\s+){0,3}?"
+        rf"(?:na|no|ate|em)\s+{_DIA_DA_PROMESSA}\b"
+    ),
+    re.compile(
+        rf"\b(?:(?:na|no|ate)\s+)?{_DIA_DA_PROMESSA}(?:\s*-?\s*feira)?\s+(?:(?:ele|ela)\s+)?"
+        r"(?:esta|estara|ta)\s+(?:ai|la|com\s+voce)\b"
+    ),
+    re.compile(
+        r"\bchega\s*,?\s+sim\b(?!\s+(?:junto|com)\b)|(?<!em )(?<!dia )\bque\s+chega\s*(?:[.!?]|$)"
+        r"|(?:^|[.!?,:;]\s*)chega\s*(?:[.!?,]|$)|(?<!nao )\bchega\s+a\s+tempo\b"
+    ),
+    re.compile(
+        rf"\b{_ENTREGA_NO_SUBSTANTIVO}\s+(?:(?:garantid|confirmad|prevista|certa|marcad|agendad"
+        r"|programad)\w*\s+(?:para|pra|na|no|ate|em)\s+|(?:na|no|ate|em)\s+)(?:(?:a|o)\s+)?"
+        rf"{_DIA_DA_PROMESSA}\b{_NAO_E_O_DIA}"
+    ),
+    re.compile(
+        r"\bprevis(?:ao|t[oa])\b(?:\s+\w+){0,3}?\s+(?:(?:e|sera|para|pra|na|no|ate)\s+)+"
+        rf"(?:(?:a|o)\s+)?{_DIA_DA_PROMESSA}\b{_NAO_E_O_DIA}"
+    ),
+    re.compile(
+        rf"(?:^|[.!?]\s*)(?:sim\W+)?(?:(?:na|no|ate)\s+)?{_DIA_DA_PROMESSA}\s*(?:[.!?]|$)"
+    ),
+    re.compile(
+        rf"\b{_DIA_DA_PROMESSA}\b{_NAO_E_O_DIA}\s+(?:(?!nao\b)\w+\s+){{0,2}}?"
+        r"(?:chega|chegam|chegara|chegarao|vai\s+chegar|sai|saira)\b"
+    ),
+)
+# O padrão antigo com o dia colado ao substantivo ("a chegada amanhã"): a negativa é a mesma frase.
+_PRAZO_DO_VERBO_NO_DIA = _PRAZO[-1]
+# A negativa do próprio fato não é promessa: "não temos entrega para hoje", "a transportadora não
+# faz entrega para domingo", "a entrega para hoje não pode ser garantida", "sobre a entrega para
+# amanhã, não temos como garantir". Lista fechada entre o "não" e o substantivo: "não se preocupe
+# que a entrega para hoje está garantida" continua promessa.
+_NEGA_A_ENTREGA_ANTES = re.compile(
+    r"\b(?:nao|nem|nunca)\s+(?:(?:temos|tenho|tem|ha|existe|fazemos|faz|fazem|fazer|oferecemos"
+    r"|oferece|realizamos|realiza|realizam|trabalhamos\s+com|trabalha\s+com|previsao\s+de)\s+){1,2}"
+    r"(?:(?:uma|a|o)\s+)?$"
+    # O verbo negado: "a transportadora não entrega no sábado".
+    r"|\b(?:nao|nem|nunca)\s+$"
+)
+_NEGA_A_ENTREGA_DEPOIS = re.compile(
+    r"^(?:\s*-\s*feira)?\s+(?:nao|nem)\s+(?:pode\s+ser|e|esta|sera|foi|fica)\s+"
+    r"(?:garantid|confirmad|prometid|assegurad)\w*"
+    r"|^(?:\s*-\s*feira)?\s+nao\s+e\s+possivel\b"
+    # Depende de quem entrega; "depende só de você comprar agora" é a promessa com condição.
+    r"|^(?:\s*-\s*feira)?\s+depende\s+(?:\w+\s+){0,3}?(?:rotina|transportadora|correios?"
+    r"|mercado\s+livre|plataforma"
+    r"|logistica|regiao|cep)\b"
+)
+# "Sobre a entrega para amanhã, não temos como garantir": só com o "sobre", porque "a entrega é
+# amanhã, não temos como garantir o horário" afirma o dia.
+_SOBRE_A_ENTREGA = re.compile(r"\b(?:sobre|quanto\s+a)\s+(?:(?:a|o)\s+)?$")
+_NEGA_DEPOIS_DO_SOBRE = re.compile(
+    r"^(?:\s*-\s*feira)?[\s,]+nao\s+(?:temos\s+como|tenho\s+como|tem\s+como|ha\s+como|conseguimos"
+    r"|consigo|podemos"
+    r"|posso)\s+(?:garantir|confirmar|prometer|assegurar|afirmar|informar)\b"
+    # O verbo fecha a oração: com "o horário" depois, é o horário que se nega, e o dia fica de pé.
+    r"(?:\s+(?:isso|essa\s+data|esse\s+dia|esse\s+prazo))?\s*(?:[.!?,;]|$)"
+)
+# O dia afirmado depois da negativa, na frase ou na seguinte ("amanhã, só na sexta"; "amanhã. A
+# previsão é sexta."). Não contam: a lista dos dias que também não valem, colada ao prazo negado
+# ("amanhã, sexta ou sábado"; "só sexta ou sábado" afirma), o dia com "nem" ("nem antes de sexta",
+# "não entrega sábado nem domingo") e o hoje da compra ou do anúncio ("mesmo comprando hoje").
+_DIAS_DA_LISTA = r"(?:hoje|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo)"
+_ANTES_DO_DIA = r"(?:(?:na|no|a|o|para|pra|ate|em|depois\s+de|antes\s+de|antes\s+da)\s+){0,2}"
+_DIA_DEPOIS_DA_NEGATIVA = re.compile(
+    rf"(?P<alternativa>\b(?:nem|nao\s+(?:\w+\s+)?entrega\w*)\s+{_ANTES_DO_DIA})?"
+    r"\b(?:hoje|amanha|segunda|terca|quarta|quinta|sexta|sabado|domingo|dia\s+\d)\b"
+    r"(?!\s*-?\s*(?:feira\s+)?(?:tentativa|via|opcao|vez|parte|etapa|chance)\b)"
+)
+_LISTA_COLADA = re.compile(
+    rf"^\s*,?\s*(?:(?:ou|nem)\s+)?{_ANTES_DO_DIA}{_DIAS_DA_LISTA}\b(?:\s*-?\s*feira)?"
+    rf"(?:\s*(?:,|\bou\b|\bnem\b)\s*{_ANTES_DO_DIA}{_DIAS_DA_LISTA}\b(?:\s*-?\s*feira)?)*"
+)
+_SEGUE_NA_LISTA = re.compile(r"^\s*(?:-?\s*feira\s*)?(?:,|\bou\b|\bnem\b|\be\b)\s*$")
+_ORACAO_DA_COMPRA = re.compile(
+    r"\b(?:compr\w*|pag(?:a|ue|ar|ando|amento)\w*|anuncio)\b|\bhoje\s+e\s+feriado\b"
+)
+_ORACAO_DA_CHEGADA = re.compile(
+    r"\b(?:cheg\w*|sai\w*|entreg\w*|receb\w*|envi\w*|post\w*|vem|vira|vai|fica\w*|previs\w*"
+    r"|previst\w*|sera)\b"
+)
+# Depois da negativa, o "mas" só pode orientar ("mas veja no anúncio", "mas confira se chega ao
+# informar o CEP"). "Mas é bem provável" e "porém chega" desfazem a negativa, e a lista do que
+# afirma não fecha.
+_ADVERSATIVA_QUE_AFIRMA = re.compile(
+    r"\b(?:mas|porem|contudo|entretanto|todavia|so\s+que)\b"
+    r"(?!\s+(?:(?!cheg\w*\b|sai\w*\b|vem\b|dev\w+\b)\w+\s+){0,6}?(?:veja|ver"
+    r"|confira|conferir|consulte|consultar|acompanh\w+|aparece\w*|mostra\w*|inform\w+|definid\w*"
+    r"|fale|falar|chame|chamar|disposicao)\b)"
+)
+_AFIRMA_A_CHEGADA = re.compile(
+    r"\b(?:vai|vao|deve|devem|devera|deverao|ira|irao)\s+chegar\b|\bchegara(?:o)?\b"
+    r"|\btudo\s+indica\b|\bprovav\w+\b|\bcom\s+certeza\b|\bfi(?:que|ca)\s+tranquil\w+\b"
+    r"|\bpode\s+(?:ficar\s+tranquil\w+|comprar|contar)\b"
+    r"|(?<!se )(?<!quando )(?<!se o )(?<!se a )(?<!quando o )(?<!quando a )"
+    r"\b(?:ele|ela|pedido|produto|encomenda)\s+chega\b"
+)
+
+
+def afirma_o_dia_depois(cauda: str) -> bool:
+    """A `cauda`, o que vem depois do último prazo negado, desfaz a negativa ou afirma outro dia?
+    PURA."""
+    if _ADVERSATIVA_QUE_AFIRMA.search(cauda) or _AFIRMA_A_CHEGADA.search(cauda):
+        return True
+    lista = _LISTA_COLADA.match(cauda)
+    inicio = lista.end() if lista and re.search(r"\b(?:ou|nem)\b", lista.group(0)) else 0
+    fim_isento = None
+    for m in _DIA_DEPOIS_DA_NEGATIVA.finditer(cauda, inicio):
+        if m.group("alternativa") is not None or (
+            fim_isento is not None and _SEGUE_NA_LISTA.match(cauda[fim_isento : m.start()])
+        ):
+            fim_isento = m.end()
+            continue
+        antes, depois = cauda[: m.start()], cauda[m.start() :]
+        oracao = re.split(r"[,;.!?]", antes)[-1] + re.split(r"[,;.!?]", depois)[0]
+        if (
+            depois.startswith("hoje")
+            and _ORACAO_DA_COMPRA.search(oracao)
+            and not _ORACAO_DA_CHEGADA.search(oracao)
+        ):
+            continue
+        return True
+    return False
+
+
+# As palavras que a negativa do prazo pode ter no ML, entre o verbo de garantir e o prazo: só o que
+# fala da própria entrega (`checagens._vao_so_da_entrega`, `sem_a_negativa_da_entrega_no_ml`).
+VAO_DA_ENTREGA = frozenset(
+    "a o as os um uma uns umas que se essa esse esta este isso sua seu suas seus te lhe ela ele "
+    "elas eles nem com de do da dos das no na nos nas para pra em ao pelo pela mesmo ainda certeza "
+    "certo exatidao voce vc chegada entrega recebimento postagem envio despacho coleta pedido "
+    "produto encomenda compra mercadoria item aparelho celular smartphone telefone mala frasqueira "
+    "transportadora entregador motorista correio correios carteiro mercado livre plataforma ml "
+    "data dia prazo previsao endereco regiao cep cidade casa confirmar garantir prometer afirmar "
+    "dizer informar assegurar prever saber for sera seja vai ser va possa consiga faca faz fara "
+    "realize realiza aconteca acontece ocorra ocorre chega chegue chegara chegaria chegar entregar "
+    "entrega entregue sai saia saira sair feito feita realizado realizada enviado enviada postado "
+    "postada despachado despachada ate ou depois hoje amanha segunda terca quarta quinta sexta "
+    "sabado domingo feira aqui daqui exatamente exata exato exatas exatos especifica especifico "
+    "justo ja residencia trabalho moradia tempo nova novo tentativa certa receba receber recebe "
+    "dele dela ai ira".split()
+)
+VAO_DE_OUTRO_ASSUNTO = frozenset(
+    "cor cores estoque como estara disponibilidade variacao variacoes modelo quantidade preco "
+    "valor frete".split()
+)
+# O produto não cabe em lista nenhuma ("que a air fryer chegue amanhã", "a chegada do roteador
+# amanhã"). Na forma fechada, o sujeito é livre, menos o que muda o assunto ou liga outra oração.
+_SUJEITO_LIVRE = (
+    r"(?:(?!e\b|ou\b|mas\b|pois\b|porque\b|que\b|como\b|quando\b|em\b|cheg\w*\b|sai\w*\b"
+    r"|entreg\w*\b|hora\w*\b|momento\b|minuto\b|turno\b|periodo\b|parte\b|cor\b|cores\b"
+    r"|estoque\b|modelo\b|preco\b|valor\b|frete\b|sem\b|com\b|garanti\w*\b|troca\b|conserto\b"
+    r"|reparo\b|reembolso\b|defeito\b|devolu\w*\b)[a-z0-9]+\s+){1,5}"
+)
+_QUE_A_COISA = re.compile(rf"^(?:que|se)\s+{_SUJEITO_LIVRE}$")
+_QUE_A_COISA_CHEGA = re.compile(
+    rf"^(?:que|se)\s+{_SUJEITO_LIVRE}(?:chegue|cheguem|chega|chegam|chegara|chegarao|saia|sai|saira"
+    r")\s+$"
+)
+_A_CHEGADA_DA_COISA = re.compile(
+    rf"^(?:a\s+|o\s+)?(?:chegada|entrega|recebimento|postagem|envio)\s+d[aoe]s?\s+{_SUJEITO_LIVRE}$"
+)
+_VERBO_DO_SUJEITO_LIVRE = re.compile(
+    r"^(?:chegue|cheguem|chega|chegam|chegara|chegarao|chegaria|saia|sai|saira|seja|sera|for|vai|va"
+    r"|entregue|entreguem)\b"
+)
+
+
+def sujeito_livre_da_entrega(vao: str, trecho: str) -> bool:
+    """O `vao` antes do prazo (`trecho`) é só o sujeito da chegada, seja qual for o item? PURA."""
+    vao = " ".join(vao.split()) + " "
+    trecho = trecho.strip()
+    dia = re.match(_DIA_DA_PROMESSA + r"\b", trecho) is not None
+    return bool(
+        (_QUE_A_COISA.match(vao) and _VERBO_DO_SUJEITO_LIVRE.match(trecho))
+        or ((_A_CHEGADA_DA_COISA.match(vao) or _QUE_A_COISA_CHEGA.match(vao)) and dia)
+    )
+
+
 _GARANTIA = (
     re.compile(rf"\bgarantia\s+(?:de\s+)?(?:\d+|{_NUMERO_POR_EXTENSO})\b"),
     # "a garantia é de 1 ano", "garantia de fábrica de doze meses".
@@ -933,6 +1156,81 @@ def _fora_do_latin1(texto: str) -> list[str]:
     return vistos
 
 
+def _sem_os_links_permitidos(plano: str, links: Collection[str]) -> str:
+    """O texto plano sem as URLs exatas de `links`: nem colada a outra coisa, nem com mais
+    caminho ou parâmetro depois. O ponto final da frase não conta como continuação. PURA."""
+    for link in links:
+        alvo = plano_de(str(link or "")).strip()
+        if alvo:
+            plano = re.sub(
+                rf"(?<![\w/.:@-]){re.escape(alvo)}(?![\w/?&=#%+~@-]|[.:,;]\S)", " ", plano
+            )
+    return plano
+
+
+def sem_lacuna_de_link(texto: str) -> str:
+    """O texto sem a lacuna do link do anúncio (`{link_anuncio:b}`): a 1ª camada do agente lê o
+    texto SEM a URL, e o código a preenche no fim (`checagens.com_os_links_do_anuncio`). PURA."""
+    return _LACUNA_DE_LINK.sub(" ", texto or "")
+
+
+def padroes_de_prazo(plataforma: str | None) -> tuple[re.Pattern[str], ...]:
+    """Os padrões do prazo que só a lacuna preenche, na plataforma. PURA."""
+    return (*_PRAZO, *_PRAZO_NO_ML) if plataforma == "ml" else _PRAZO
+
+
+_ENTREGA_NO_INICIO = re.compile(_ENTREGA_NO_SUBSTANTIVO + r"\b")
+# "Para amanhã, não temos como garantir a entrega": o dia antes da negativa, sem mais nada.
+_DIA_ANTES_DA_NEGATIVA = re.compile(
+    rf"(?:^|(?<=[.!?])\s*)(?:(?:para|pra)\s+)?{_DIA_DA_PROMESSA}\s*,?\s+nao\s+(?:temos\s+como"
+    r"|tenho\s+como|tem\s+como|conseguimos|consigo|podemos|posso)\s+garantir\b"
+    rf"(?:\s+(?:a|o)\s+{_ENTREGA_NO_SUBSTANTIVO})?\s*(?=[.!?]|$)"
+)
+
+
+def entrega_negada_no_ml(
+    texto: str, m: re.Match[str], padrao: re.Pattern[str], plataforma: str | None = None
+) -> bool:
+    """O trecho `m` de `padrao` é a negativa do próprio fato, em um padrão só do ML ou, no ML, no
+    padrão antigo com o substantivo colado ao dia ("a chegada amanhã não é garantida")? PURA."""
+    colada = (
+        plataforma == "ml"
+        and padrao is _PRAZO_DO_VERBO_NO_DIA
+        and _ENTREGA_NO_INICIO.match(m.group(0)) is not None
+    )
+    return (
+        (padrao in _PRAZO_NO_ML or colada)
+        and bool(
+            _NEGA_A_ENTREGA_ANTES.search(texto[: m.start()])
+            or _NEGA_A_ENTREGA_DEPOIS.search(texto[m.end() :])
+            or (
+                _SOBRE_A_ENTREGA.search(texto[: m.start()])
+                and _NEGA_DEPOIS_DO_SOBRE.search(texto[m.end() :])
+            )
+        )
+        and not afirma_o_dia_depois(texto[m.end() :])
+    )
+
+
+def sem_a_entrega_negada_no_ml(texto: str) -> str:
+    """O texto (plano) sem os trechos que `entrega_negada_no_ml` lê como a negativa. PURA."""
+    plano = _DIA_ANTES_DA_NEGATIVA.sub(" ", plano_de(texto))
+    for padrao in (*_PRAZO_NO_ML, _PRAZO_DO_VERBO_NO_DIA):
+        plano = padrao.sub(
+            lambda m, p=padrao: " " if entrega_negada_no_ml(m.string, m, p, "ml") else m.group(0),
+            plano,
+        )
+    return plano
+
+
+def _promete_prazo(texto: str, plataforma: str | None) -> bool:
+    return any(
+        not entrega_negada_no_ml(texto, m, padrao, plataforma)
+        for padrao in padroes_de_prazo(plataforma)
+        for m in padrao.finditer(texto)
+    )
+
+
 def validar(
     texto: str,
     *,
@@ -940,6 +1238,7 @@ def validar(
     canal: str,
     origem: str,
     prazos_de_garantia: Collection[tuple[int, str, str]] = (),
+    links_permitidos: Collection[str] = (),
 ) -> list[str]:
     """Motivos pelos quais o texto NÃO pode sair (lista vazia = pode).
 
@@ -953,6 +1252,11 @@ def validar(
     "prazo"/"garantia em número" na frase que fala da garantia, cada um com
     o seu par na mesma oração. Qualquer outro prazo continua barrado. Vazio
     (o legado e a pessoa): nada muda.
+
+    `links_permitidos` = só o AGENTE, só na Shopee (D3 do dono, 04/11/2026): as URLs que o
+    CÓDIGO pôs no lugar da lacuna do link (`fatos.agente.links_anuncio`). Sai do texto só a
+    URL EXATA; outra URL, a mesma com outro caminho ou parâmetro e o link que o modelo
+    escreveu continuam barrados. Vazio (todo o resto): nada muda.
     """
     limpo = normalizar(texto or "", plataforma=plataforma, canal=canal)
     if not limpo:
@@ -964,6 +1268,8 @@ def validar(
         motivos.append(f"passa do limite de {limite} caracteres ({len(limpo)})")
 
     plano = plano_de(limpo)
+    if links_permitidos and origem == ORIGEM_IA and plataforma == "shopee":
+        plano = _sem_os_links_permitidos(plano, links_permitidos)
     # Zap (26/10/2026): o canal da própria marca — o contato não é "fora da loja".
     zap = e_zap(plataforma, canal)
 
@@ -1070,7 +1376,7 @@ def validar(
             motivos.append(_MOTIVO_PERCENTUAL)
         if _FRETE.search(plano):
             motivos.append(_MOTIVO_FRETE)
-        if _algum(_PRAZO, _sem_ate_o_dia_da_garantia(do_prazo)):
+        if _promete_prazo(_sem_ate_o_dia_da_garantia(do_prazo), plataforma):
             motivos.append(_MOTIVO_PRAZO)
         if _algum(_GARANTIA, do_prazo):
             motivos.append(_MOTIVO_GARANTIA)
@@ -2568,6 +2874,72 @@ _GARANTIR_A_ENTREGA = re.compile(
     r"(?:\w+\s+){0,2}?(?:continu\w*|ainda|tenha|tera|haja|havera|fique|fica|ficara|esteja|estara"
     r"|vai\s+estar|vai\s+ter|sobre|sobra|reste|o\s+estoque|a\s+cor|a\s+variacao|disponive\w*)\b"
 )
+
+
+# 05/11/2026 (regra 1 do dono, só no ML): a negativa do prazo com outras palavras ("Não garantimos
+# que chegue amanhã", "não temos como garantir que o celular chegue amanhã", "a entrega para amanhã
+# não pode ser garantida", "não temos garantia de entrega amanhã") não é fala de garantia nem recusa
+# de direito, e `_GARANTIR_A_ENTREGA`, que as outras plataformas usam, só conhece algumas formas. O
+# que se nega tem de ser a entrega, e a oração inteira tem de falar dela: "não garantimos o
+# aparelho", "não garantimos o aparelho depois da entrega", "produto não garantido" e "não
+# garantimos a troca" continuam com a pessoa. Só o verbo: "garantia" e "garantido" são a garantia do
+# produto, menos "garantia DE ENTREGA" e "é garantido QUE".
+_NEGA_GARANTIR_NO_ML = re.compile(
+    r"(?:\b(?:nao|nem|nunca)\s+(?:(?:conseguimos|consigo|consegue|podemos|posso|pode|temos\s+como"
+    r"|tenho\s+como|tem\s+como|ha\s+como|da\s+para|da\s+pra|e\s+possivel|vamos|vou)\s+)?"
+    r"(?:(?:te|lhe)\s+)?garant(?:ir|imos|o|e|em)\b"
+    r"|\bnao\s+(?:temos|tem|ha|existe)\s+garantia\b"
+    r"(?=\s+d[aeo]\s+(?:entrega|chegada|recebimento|postagem|envio|prazo|data|dia)\b)"
+    r"|\bnao\s+(?:e|esta)\s+garantid[oa]\b(?=\s+(?:que|se)\b))"
+    r"(?P<resto>[^,;.!?]*)"
+)
+_O_QUE_SE_NEGA_E_A_ENTREGA = re.compile(
+    r"^\s+(?:nem\s+\w+\s+)?(?:(?:que|se)\b"
+    r"|(?:(?:a|o|as|os|uma|um|essa|esse|esta|este|sua|seu|de|d[ao])\s+){0,2}"
+    rf"(?:{_ENTREGA_NO_SUBSTANTIVO}|data|dia|prazo|previsao)\b)"
+)
+_ENTREGA_NAO_GARANTIDA_NO_ML = re.compile(
+    rf"\b{_ENTREGA_NO_SUBSTANTIVO}\s+(?:(?:para|pra|de)\s+)?(?:(?:a|o)\s+)?{_DIA_DA_PROMESSA}\s+"
+    r"(?:nao|nem)\s+(?:pode\s+ser|e|esta|sera|foi|fica)\s+garantid\w*"
+    # "Sobre a entrega para amanhã, não temos como garantir": o verbo fecha a oração.
+    rf"|\b(?:sobre|quanto\s+a)\s+(?:(?:a|o)\s+)?{_ENTREGA_NO_SUBSTANTIVO}\s+(?:(?:para|pra|de)\s+)?"
+    rf"(?:(?:a|o)\s+)?{_DIA_DA_PROMESSA}\s*,?\s+nao\s+(?:temos\s+como|tenho\s+como|tem\s+como"
+    r"|conseguimos|consigo|podemos|posso)\s+garantir\b"
+    r"(?:\s+(?:isso|essa\s+data|esse\s+dia|esse\s+prazo))?\s*(?=[.!?,;]|$)"
+)
+_FALA_DA_ENTREGA = re.compile(
+    r"\b(?:cheg\w*|entreg\w*|recebimento|envio|postagem|data|dia|prazo|tentativa|hoje|amanha"
+    r"|segunda|terca|quarta|quinta|sexta|sabado|domingo)\b"
+)
+_SUJEITO_DE_QUE = re.compile(
+    rf"^\s+((?:que|se)\s+{_SUJEITO_LIVRE})(?=(?:chegue|cheguem|chega|chegam|chegara|saia|sai|saira"
+    r"|seja|sera|for|vai|va)\b)"
+)
+_DA_COISA_ATE_O_DIA = re.compile(
+    r"^\s+(?:a\s+|o\s+)?((?:chegada|entrega|recebimento|postagem|envio)\s+d[aoe]s?\s+"
+    rf"{_SUJEITO_LIVRE})"
+    rf"(?={_DIA_DA_PROMESSA}\b)"
+)
+
+
+def sem_a_negativa_da_entrega_no_ml(texto: str) -> str:
+    """O texto (plano) sem a negativa do prazo, para as réguas de garantia e de recusa. PURA."""
+
+    def _sem(m: re.Match[str]) -> str:
+        resto = m.group("resto")
+        # O produto não cabe na lista: sai o sujeito da forma fechada, e o resto fica na conta.
+        fechado = _SUJEITO_DE_QUE.match(resto) or _DA_COISA_ATE_O_DIA.match(resto)
+        palavras = resto[fechado.end() :] if fechado else resto
+        da_entrega = (
+            fechado is not None or _O_QUE_SE_NEGA_E_A_ENTREGA.match(resto) is not None
+        ) and set(palavras.split()) <= VAO_DA_ENTREGA
+        return " " if da_entrega and _FALA_DA_ENTREGA.search(resto) else m.group(0)
+
+    plano = re.sub(r"\s*-\s*feira\b", "", plano_de(texto))
+    sem_a_negativa = _NEGA_GARANTIR_NO_ML.sub(
+        _sem, _DIA_ANTES_DA_NEGATIVA.sub(" ", _ENTREGA_NAO_GARANTIDA_NO_ML.sub(" ", plano))
+    )
+    return texto if sem_a_negativa == plano else sem_a_negativa
 
 
 def fala_de_garantia(

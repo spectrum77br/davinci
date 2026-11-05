@@ -12,6 +12,8 @@
 //  - o menu "Respostas prontas": a mesma busca e ↑/↓ + Enter;
 //  - a aba: a equipe de cada uma, o filtro, o campo Equipe (o admin escolhe,
 //    quem é de equipe fica com a dele) e os botões só onde a pessoa pode mexer;
+//  - a padrão desativada só para a equipe (05/11/2026): some do "/" e do menu
+//    dela, e fica na aba para reativar;
 //  - o contrato com a API (ModeloOut, /modelos/equipes).
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -96,8 +98,8 @@ function montarCaixa({ modelos = [RASTREIO, NOTA, PRAZO, SO_ML, INATIVA], podeDi
   const caixa = Vue.ref({ selectionStart: 0, selectionEnd: 0, focus() {}, setSelectionRange() {} })
   const detalhe = Vue.ref({ conversa: { id: 'c1' }, contexto: { pedido: { numeroloja: '2511ABC' }, logistica: { rastreio: 'BR123', transportadora: 'Correios' }, nota_fiscal: { numero: '4321' } } })
   const conversa = Vue.computed(() => ({ id: 'c1', plataforma: 'shopee', canal: 'chat', comprador_nome: 'maria silva', pedido_marketplace: '2511ABC' }))
-  const nomes = ['ref', 'computed', 'watch', 'nextTick', 'props', 'conversa', 'texto', 'prefill', 'baseRascunhoId', 'rejeitadaId', 'caixa', 'podeDigitar', 'detalhe', 'chamadoNaTela', 'fmtData', 'preencherLacunas', 'filtrarProntas', 'buscaDoAtalho', 'enviar', 'ehEmail']
-  const valores = [Vue.ref, Vue.computed, Vue.watch, (f) => (f ? f() : Promise.resolve()), { modelos }, conversa, Vue.ref(''), Vue.ref(''), Vue.ref(null), Vue.ref(null), caixa, Vue.ref(podeDigitar), detalhe, Vue.ref(null), (d) => d, P.preencherLacunas, P.filtrarProntas, P.buscaDoAtalho, async () => { enviados.push(true) }, Vue.ref(email)]
+  const nomes = ['ref', 'computed', 'watch', 'nextTick', 'props', 'conversa', 'texto', 'prefill', 'baseRascunhoId', 'rejeitadaId', 'caixa', 'podeDigitar', 'detalhe', 'chamadoNaTela', 'fmtData', 'preencherLacunas', 'filtrarProntas', 'buscaDoAtalho', 'enviar', 'ehEmail', 'prontaAtiva']
+  const valores = [Vue.ref, Vue.computed, Vue.watch, (f) => (f ? f() : Promise.resolve()), { modelos }, conversa, Vue.ref(''), Vue.ref(''), Vue.ref(null), Vue.ref(null), caixa, Vue.ref(podeDigitar), detalhe, Vue.ref(null), (d) => d, P.preencherLacunas, P.filtrarProntas, P.buscaDoAtalho, async () => { enviados.push(true) }, Vue.ref(email), P.prontaAtiva]
   return { t: new Function(...nomes, js)(...valores), enviados }
 }
 const tique = () => new Promise((r) => setTimeout(r, 0))
@@ -213,6 +215,16 @@ async function caixaDeResposta() {
     assert.deepEqual(enviados, [true])
     assert.equal(t.dicaDoEnvio.value, 'Ctrl+Enter envia')
   }
+  // A padrão que a equipe desativou some do "/" e do menu; a do admin também.
+  {
+    assert.equal(P.prontaAtiva({ ativo: true }), true)
+    assert.equal(P.prontaAtiva({ ativo: true, desativada_na_equipe: true }), false)
+    assert.equal(P.prontaAtiva({ ativo: false, desativada_na_equipe: false }), false)
+    const { t } = montarCaixa({ modelos: [{ ...PRAZO, desativada_na_equipe: true }, NOTA] })
+    t.texto.value = '/'
+    assert.deepEqual(t.listaAtalho.value.map((m) => m.titulo), ['Nota fiscal'])
+    assert.deepEqual(t.modelosDaConversa.value.map((m) => m.titulo), ['Nota fiscal'])
+  }
   // "/" no meio do texto, ou em conversa sem envio: nada abre.
   {
     const { t } = montarCaixa()
@@ -277,6 +289,7 @@ function globais({ lista, equipes, chamadas = [] }) {
         if (url === '/api/atendimento/modelos/equipes') return equipes
         if (url === '/api/atendimento/modelos' && !opts) return lista
         if (opts?.method === 'POST') return { id: 'novo', ...opts.body, equipe_nome: 'Londres', pode_editar: true }
+        if (opts?.method === 'PUT') return { ...lista.find((m) => url.includes(`/${m.id}/`)), desativada_na_equipe: !opts.body.ativo, desativada_equipes: opts.body.ativo ? [] : ['Londres'] }
         return {}
       },
     }),
@@ -353,6 +366,27 @@ async function aba() {
     assert.equal(semDelete.podeApagar(lista[0]), false)
   }
 
+  // A padrão só para a equipe: PUT na rota da equipe, a linha muda e o `ativo`
+  // (do admin, para todos) fica como estava.
+  {
+    const chamadas = []
+    const PADRAO = M({ titulo: 'Obrigado', texto: 'Obrigado!', pode_desativar: true })
+    const g = globais({ lista: [PADRAO], equipes: { equipes: EQUIPES, minhas: [101], todas: false }, chamadas })
+    const a = montarAba({ canEdit: false, canDelete: false }, g)
+    await a.carregar()
+    assert.equal(a.modelos.filter(P.prontaAtiva).length, 1)
+    await a.alternarNaEquipe(a.modelos[0])
+    const put = chamadas.find((c) => c[1]?.method === 'PUT')
+    assert.equal(put[0], '/api/atendimento/modelos/Obrigado/ativa-na-equipe')
+    assert.deepEqual(put[1].body, { ativo: false })
+    assert.equal(a.modelos[0].desativada_na_equipe, true)
+    assert.equal(a.modelos[0].ativo, true)
+    assert.equal(a.modelos.filter(P.prontaAtiva).length, 0)
+    await a.alternarNaEquipe(a.modelos[0])
+    assert.deepEqual(chamadas.filter((c) => c[1]?.method === 'PUT')[1][1].body, { ativo: true })
+    assert.equal(a.modelos[0].desativada_na_equipe, false)
+  }
+
   // Quem não é de equipe: só lê (sem "nova resposta" nem botões).
   {
     const g = globais({ lista: [ANTIGA], equipes: { equipes: EQUIPES, minhas: [], todas: false } })
@@ -369,6 +403,9 @@ async function aba() {
   assert.match(tpl, /<Button v-if="podeApagar\(m\)"/)
   assert.match(tpl, /<option v-if="escolheEquipe" value="">para todos<\/option>/)
   assert.match(tpl, /data-equipe-pronta/)
+  assert.match(tpl, /<div v-else-if="m\.pode_desativar"[\s\S]*?data-alternar-na-equipe @click="alternarNaEquipe\(m\)">\{\{ m\.desativada_na_equipe \? 'ativar' : 'desativar' \}\}/)
+  assert.match(tpl, /data-desativada-na-equipe>desativada na sua equipe/)
+  assert.match(tpl, /v-if="escolheEquipe && m\.desativada_equipes\?\.length"[\s\S]*?desativada por \{\{ m\.desativada_equipes\.join/)
   assert.match(tpl, /<select v-if="equipesDoFiltro\.length" v-model="filtroEquipe"[^>]*aria-label="filtrar por equipe"/)
 }
 
@@ -381,6 +418,8 @@ async function aba() {
   const rota = api('routers/atendimento.py')
   assert.match(rota, /@router\.get\("\/modelos\/equipes", response_model=ModelosEquipesOut\)/)
   assert.match(rota, /ROTAS_DA_EQUIPE = frozenset\(/)
+  assert.match(rota, /@router\.put\("\/modelos\/\{modelo_id\}\/ativa-na-equipe", response_model=ModeloOut\)/)
+  for (const campo of ['desativada_na_equipe: bool', 'desativada_equipes: list[str]', 'pode_desativar: bool']) assert.ok(out.includes(campo), campo)
 }
 
 caixaDeResposta()

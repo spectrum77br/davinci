@@ -791,6 +791,33 @@ class AtendimentoModelo(Base, TimestampMixin):
     )
 
 
+class AtendimentoModeloDesativado(Base):
+    """A resposta padrão ("para todos") que UMA equipe desativou só para ela.
+
+    05/11/2026, o Eduardo: "os 3 grupos devem poder desativar as respostas padroes
+    pra deixar quais eles querem ... separado por equipe se um desativar e outro
+    nao nao afeta o outro". Uma linha por resposta + equipe; sem linha, ativa. O
+    `ativo` da resposta continua sendo o do admin, que vale para todos.
+    """
+
+    __tablename__ = "atendimento_modelos_desativados"
+
+    modelo_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_modelos.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    equipe: Mapped[int] = mapped_column(Integer, primary_key=True)
+    desativada_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    desativada_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )
+
+
 class AtendimentoCategoria(Base, TimestampMixin):
     """Um ASSUNTO de atendimento — a lista oficial que a IA usa para classificar.
 

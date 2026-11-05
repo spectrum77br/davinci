@@ -13,18 +13,27 @@ de `users.sales_teams` e de `store_info.sales_team` — 101 Londres, 102 Israel,
   • o agente (`consultar_manual`): as "para todos" + as da equipe da LOJA da
     conversa (`equipes_da_loja`).
 
+05/11/2026, o Eduardo: "os 3 grupos devem poder desativar as respostas padroes
+pra deixar quais eles querem ... se um desativar e outro nao nao afeta o outro".
+Cada equipe desativa uma "para todos" só para ela (`atendimento_modelos_desativados`):
+some do "/" e do menu dela, e continua na aba para reativar. É a lista da equipe,
+não o conhecimento da IA: o agente segue usando as "para todos" que o admin deixou
+ativas (o `ativo` da resposta, que vale para todos).
+
 Quem cria, edita e apaga fica no router (depende da fase de observação).
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps.team_scope import NOMES_EQUIPES
-from app.models import AtendimentoModelo, User, UserRole
+from app.models import AtendimentoModelo, AtendimentoModeloDesativado, User, UserRole
 from app.models.pricing import StoreInfo
 
 
@@ -56,6 +65,49 @@ def clausula_das_equipes(equipes: set[int] | frozenset[int]):
     if not equipes:
         return m.equipe.is_(None)
     return or_(m.equipe.is_(None), m.equipe.in_(sorted(equipes)))
+
+
+async def desativadas_por_modelo(
+    session: AsyncSession, modelo_ids: Iterable[UUID]
+) -> dict[UUID, set[int]]:
+    """{resposta: as equipes que a desativaram só para elas}."""
+    ids = list(modelo_ids)
+    if not ids:
+        return {}
+    d = AtendimentoModeloDesativado
+    saida: dict[UUID, set[int]] = {}
+    for modelo_id, equipe in (
+        await session.execute(select(d.modelo_id, d.equipe).where(d.modelo_id.in_(ids)))
+    ).all():
+        saida.setdefault(modelo_id, set()).add(equipe)
+    return saida
+
+
+async def marcar_nas_equipes(
+    session: AsyncSession,
+    modelo_id: UUID,
+    equipes: Iterable[int],
+    *,
+    ativo: bool,
+    quem: UUID | None = None,
+) -> None:
+    """Ativa ou desativa a resposta só nestas equipes (repetir não muda nada)."""
+    d = AtendimentoModeloDesativado
+    lista = sorted(equipes)
+    if ativo:
+        await session.execute(delete(d).where(d.modelo_id == modelo_id, d.equipe.in_(lista)))
+    elif lista:
+        await session.execute(
+            insert(d)
+            .values([{"modelo_id": modelo_id, "equipe": e, "desativada_por": quem} for e in lista])
+            .on_conflict_do_nothing()
+        )
+
+
+async def limpar_desativadas(session: AsyncSession, modelo_id: UUID) -> None:
+    """A resposta passou a ser de uma equipe: a escolha das outras não vale mais."""
+    d = AtendimentoModeloDesativado
+    await session.execute(delete(d).where(d.modelo_id == modelo_id))
 
 
 async def equipes_da_loja(session: AsyncSession, integration_id: UUID | None) -> set[int]:

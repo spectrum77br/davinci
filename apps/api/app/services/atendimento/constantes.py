@@ -1053,6 +1053,18 @@ ASSUNTOS_LIBERADOS_PELO_ANUNCIO: tuple[str, ...] = tuple(
     a for a in ASSUNTOS_SO_PESSOA_NO_AGENTE if a != "resistencia_agua"
 )
 
+# As decisões do dono de 05/11/2026 sobre o Mercado Livre. Endereço: a loja nunca altera o endereço
+# de uma compra, postada ou não ("o mercado livre não permite alterarmos dados do cliente por
+# questão de segurança", 91e36877), e a ação `alterar_endereco` não existe lá.
+PLATAFORMAS_SEM_ALTERAR_ENDERECO = frozenset({"ml"})
+RESPOSTA_ENDERECO_ML = (
+    "O Mercado Livre não permite que a loja altere o endereço de uma compra, por questão de "
+    "segurança."
+)
+# Atacado: a resposta da equipe, palavra por palavra (070f1828, 378b1cd9, 8f27c582). É fixa e o
+# envio só a aceita igual (`enviar._texto_com_isencao_do_agente`).
+FRASE_ATACADO_ML = "20% de desconto, informe o modelo específico que envie um anúncio de atacado"
+
 # A régua "ação de pessoa" (spec 6.3): vai para pessoa só quando alguém
 # precisa AGIR (anexar, mudar, segurar, abrir chamado, analisar) ou DECIDIR
 # (exceção, desconto, brinde, fora da plataforma), ou bate trava dura. O

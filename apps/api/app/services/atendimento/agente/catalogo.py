@@ -19,9 +19,9 @@ loja), casando o título público do anúncio e o nome da variação (`listing_t
 "título - variação"). Devolve até `MAX_ANUNCIOS` anúncios:
   {item_id, nome_curto (marca e modelo do título, sem garantia, condição nem
    especificação), variacoes_casadas, disponivel, da_conversa}
-— sem preço, quantidade, SKU nem link. `disponivel` é calculado SÓ nas variações
-casadas (sem variação no termo, em todas): algum vínculo com estoque > 0 e a última
-sincronização ok → true; todos com estoque 0 → false; o resto → null (não se sabe).
+— sem preço, quantidade nem SKU; o link, só a lacuna (ver o fim). `disponivel` é calculado SÓ
+nas variações casadas (sem variação no termo, em todas): algum vínculo com estoque > 0 e a
+última sincronização ok → true; todos com estoque 0 → false; o resto → null (não se sabe).
 
 As GUARDAS:
   - palavra de ACESSÓRIO no termo (capa, capinha, película, carregador, cesto, vidro,
@@ -562,29 +562,30 @@ def ordenar(achados: Iterable[Achado]) -> list[Achado]:
 
 
 async def vinculos_da_loja(
-    s: AsyncSession, plataforma: Any, integration_id: UUID | None
+    s: AsyncSession, plataforma: Any, integration_id: UUID | None, *, item_id: str | None = None
 ) -> dict[str, list[Vinculo]]:
-    """Os vínculos VIVOS da integração e da plataforma, por anúncio. Só leitura."""
+    """Os vínculos VIVOS da integração e da plataforma, por anúncio (com `item_id`, só os
+    dele). Só leitura."""
     if integration_id is None or plataforma is None:
         return {}
+    consulta = select(
+        ProductLink.external_id,
+        ProductLink.variation_id,
+        ProductLink.listing_title,
+        ProductLink.stock,
+        ProductLink.last_sync_status,
+        ProductLink.anuncio_status,
+    ).where(
+        ProductLink.integration_id == integration_id,
+        ProductLink.platform == plataforma,
+        ProductLink.morto_desde.is_(None),
+        ProductLink.listing_title.is_not(None),
+    )
+    if item_id is not None:
+        consulta = consulta.where(ProductLink.external_id == item_id)
     linhas = (
         await s.execute(
-            select(
-                ProductLink.external_id,
-                ProductLink.variation_id,
-                ProductLink.listing_title,
-                ProductLink.stock,
-                ProductLink.last_sync_status,
-                ProductLink.anuncio_status,
-            )
-            .where(
-                ProductLink.integration_id == integration_id,
-                ProductLink.platform == plataforma,
-                ProductLink.morto_desde.is_(None),
-                ProductLink.listing_title.is_not(None),
-            )
-            .order_by(ProductLink.external_id, ProductLink.variation_id)
-            .limit(MAX_VINCULOS)
+            consulta.order_by(ProductLink.external_id, ProductLink.variation_id).limit(MAX_VINCULOS)
         )
     ).all()
     saida: dict[str, list[Vinculo]] = {}
@@ -648,3 +649,68 @@ def buscar_nos_vinculos(
         if (a := casar(termo, list(vinculos), da_conversa=item in citados)) is not None
     ]
     return ordenar(achados)[:MAX_ANUNCIOS]
+
+
+# ── O link do anúncio (D3 do dono, 04/11/2026) ─────────────────────────────
+#
+# "nao da pra ele mesmo abrir e ter os da loja o agente". Na Shopee, as ferramentas dão ao
+# modelo uma LACUNA por anúncio vivo desta loja ({link_anuncio:b}); o modelo nunca vê a URL
+# nem a escreve. A URL fica no `ctx` e o código a põe no lugar da lacuna no fim da 1ª camada
+# (`checagens.com_os_links_do_anuncio`). A lacuna que a execução não ofereceu não sai.
+_LACUNA_DO_LINK = re.compile(r"\{\{?\s*link_anuncio:([a-z]+)\s*\}?\}", re.IGNORECASE)
+# O que o modelo escreveu no lugar do link ("{link}", "{link_anuncio_b}", "[link do anúncio]"),
+# e a lacuna sem as chaves ("link_anuncio:a", "(link_anuncio_a)").
+_CARA_DE_LACUNA_DE_LINK = re.compile(
+    r"[{\[<]{1,2}\s*(?:link|url)[^{}\[\]<>]*[}\]>]{1,2}"
+    r"|\blink[_-](?:do[_-])?an[uú]ncio[\w:-]*|\blink\s+an[uú]ncio\s+[a-z]\b",
+    re.IGNORECASE,
+)
+_ENTRE_AS_FRASES = re.compile(r"(?<=[.!?…])\s+|\s*\n+\s*")
+
+
+def codigo_do_link(indice: int) -> str:
+    """O código da lacuna, só com letras (0 → "a", 25 → "z", 26 → "aa"): dígito de item na
+    lacuna liberaria o número e cairia nas réguas de telefone e de id interno. PURA."""
+    codigo = ""
+    n = max(0, int(indice)) + 1
+    while n:
+        n, resto = divmod(n - 1, 26)
+        codigo = chr(ord("a") + resto) + codigo
+    return codigo
+
+
+def lacuna_do_link(codigo: str) -> str:
+    return "{link_anuncio:" + codigo + "}"
+
+
+def lacunas_de_link(texto: Any) -> list[str]:
+    """Tudo no texto que tem cara de lacuna de link, sem repetir, na ordem. PURA."""
+    return list(
+        dict.fromkeys(m.group(0) for m in _CARA_DE_LACUNA_DE_LINK.finditer(str(texto or "")))
+    )
+
+
+def codigo_da_lacuna(lacuna: str) -> str | None:
+    """O código da lacuna bem escrita ("{link_anuncio:b}" → "b"); senão None. PURA."""
+    m = _LACUNA_DO_LINK.fullmatch(str(lacuna or "").strip())
+    return m.group(1).lower() if m else None
+
+
+def preencher_links(texto: Any, links: Mapping[str, str]) -> tuple[str, list[str]]:
+    """(o texto com as URLs, as URLs usadas). `links` = {código: URL}. A frase com a lacuna que
+    não está em `links` sai do texto: a lacuna nunca chega ao cliente. PURA."""
+    usados: list[str] = []
+
+    def _troca(m: re.Match[str]) -> str:
+        url = links.get(m.group(1).lower())
+        if url is None:
+            return m.group(0)
+        if url not in usados:
+            usados.append(url)
+        return url
+
+    preenchido = _LACUNA_DO_LINK.sub(_troca, str(texto or ""))
+    if not lacunas_de_link(preenchido):
+        return preenchido, usados
+    frases = [f.strip() for f in _ENTRE_AS_FRASES.split(preenchido) if f.strip()]
+    return " ".join(f for f in frases if not lacunas_de_link(f)), usados

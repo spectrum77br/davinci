@@ -453,7 +453,8 @@ def test_6_a_descricao_da_ferramenta_traz_as_regras_g1():
     d = ferramentas.DESCRICOES[ferramentas.BUSCAR_ANUNCIOS_DA_LOJA]
     for trecho in (
         "cite anuncio:<item_id> com disponivel=true",
-        "nunca link nem preço",
+        # D3 do dono (04/11/2026): o link só pela lacuna, e a URL nunca.
+        "nunca URL nem preço",
         "'Não temos' só com o fato aprovado (capinha, película) ou quando a busca diz que "
         "nenhum título da loja tem o acessório",
         "a busca vazia do termo inteiro não prova",
@@ -744,7 +745,7 @@ async def test_6_o_outro_anuncio_lido_nao_empresta_caracteristica():
 
 
 def test_6_o_verificador_v10_le_a_busca_so_quando_houve():
-    assert v.VERSAO in ("v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17")
+    assert v.VERSAO in ("v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19")
     assert v.MODELO == HAIKU
     s = " ".join(v.SISTEMA.split())
     for trecho in (

@@ -106,7 +106,11 @@ def _conversa(**kw: Any) -> SimpleNamespace:
 
 
 def _gatilho(**kw: Any) -> SimpleNamespace:
-    base = {"id": uuid4(), "enviada_em": datetime(2026, 10, 20, 14, 0, tzinfo=UTC)}
+    base = {
+        "id": uuid4(),
+        "enviada_em": datetime(2026, 10, 20, 14, 0, tzinfo=UTC),
+        "texto": "Tem na cor azul?",
+    }
     base.update(kw)
     return SimpleNamespace(**base)
 

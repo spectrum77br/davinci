@@ -26,7 +26,7 @@ aprovadas, TODAS juntas (qualquer uma que falte → fica com a pessoa, com o
 4. Pedido cancelado, carrinho com vários pedidos, só a NF de embalagem (a
    cheia sai no lote da noite) e comprador com MAIS DE UM pedido (na loja, pelo
    índice da Shopee, ou nos cartões de pedido da conversa: qual NF ele quer?)
-   → pessoa.
+   → pessoa, a não ser que o turno defina o pedido (a revisão de 04/11, abaixo).
 5. As travas do envio sozinho: o automático ligado, o modo `auto`, o agente
    ligado no canal, a conversa aguardando (não pausada, atribuída, fechada,
    bloqueada, sem reclamação), a pausa humana de 30 min, a triagem da Caixa
@@ -208,6 +208,29 @@ tablet/mercadoria como o produto.
   `nf:outro_assunto` pela pista "agradecimento", antes do texto. A NF sai só onde a
   `conferir_nf` acha a cheia única do comprador: no Vita 0f89c1ea e no vortan b7f249ea a NF não
   está no `nf_nota` (continuam com a pessoa por isso, não pelo texto).
+
+REVISÃO DE 04/11/2026 (as decisões D1 e D2 do Eduardo):
+
+- D1, a cheia que não está no `nf_nota` é lida do Bling, só leitura (`nf_bling.py`): ela entra no
+  `nf_nota` e passa pelas mesmas conferências da `conferir_nf`. A parcial não entra e não sai;
+  falhou, fica com a pessoa como `nf:nf_nao_chegou`/`nf:nf_so_embalagem`. O pedido antes de
+  08/2026, sem CPF no espelho, confere o destinatário com o CPF do pedido no Bling.
+- D2, comprador com mais de um pedido recebe a NF "do pedido recém-feito ou do cartão enviado no
+  turno" (`_pedido_definido_no_turno`, Mini 974d4398 e Vita 9be5a62b). O cartão: os de pedido do
+  turno do cliente são todos do pedido da conversa, e a nota não é de depois de outro pedido mais
+  novo do comprador (`_nota_depois_de_outro_pedido`: o coletor liga a NF pelo CPF, e ela pode ser
+  a desse outro). O recém-feito (só a Shopee, que tem o índice): sem cartão de pedido nem de
+  produto no turno, o pedido da conversa é o mais novo do comprador, feito há até
+  `JANELA_RECEM_FEITO`, o anterior tem mais de `FOLGA_DO_ANTERIOR` e nem o turno nem o que o cliente
+  disse desde esse pedido fala de pacote recebido (o que chegou é outro pedido). O resto segue com
+  a pessoa como `nf:varios_pedidos_do_comprador`: cartão de outro pedido ou de produto no turno,
+  dois pedidos próximos, data desconhecida. O dono do pedido continua conferido antes (o índice)
+  e depois (ao vivo na plataforma). O carrinho (`nf:nf_varios_pedidos`) também: é UMA compra com
+  várias NFs, e aqui não há o que escolher.
+- O pedido claro lê o "prefiro/preferia a nota por aqui" (Vita 9be5a62b, depois de a loja dizer que
+  a nota vai na caixa), o "queria pedir a nota", o "mas" antes do verbo do pedido ("entendi, mas
+  prefiro a nota", "mas eu gostaria da nota fiscal") e o "entendi", com as mesmas travas ("prefiro
+  não receber a nota", "prefiro o produto e a nota", "ainda não chegou prefiro a nota" → pessoa).
 """
 
 from __future__ import annotations
@@ -233,7 +256,7 @@ from app.models import (
     BlingOrder,
     NfNota,
 )
-from app.services.atendimento import constantes, danfe, foco_devolucao, validador
+from app.services.atendimento import constantes, danfe, foco_devolucao, nf_bling, validador
 
 logger = structlog.get_logger()
 
@@ -250,6 +273,10 @@ CAIXAS = frozenset(
 )
 # Pedidos do mesmo comprador na loja nesta janela: mais de um = qual NF? → pessoa.
 JANELA_PEDIDOS = timedelta(days=60)
+# D2 (04/11/2026): o pedido recém-feito define a NF só feito há até isto e com o anterior a mais
+# que a folga (dois pedidos próximos: qual NF? → pessoa).
+JANELA_RECEM_FEITO = timedelta(days=3)
+FOLGA_DO_ANTERIOR = timedelta(days=7)
 # O motivo que o agente grava no `sem_auto` para a ação da NF (o único aceito).
 MOTIVO_SEM_AUTO_NF = (
     f"ação de pessoa: {constantes.rotulo_acao_pessoa(constantes.ACAO_ENVIAR_ARQUIVO_NF)}"
@@ -330,6 +357,8 @@ _O_DOC_LOGO_DEPOIS = (
     r"(?!\s+(?:veio|vieram|chegou|chegaram|recebi|tinha|tem|estava|foi)\s+"
     r"(?:(?:a|as|o|os|minha)\s+){0,2}(?:nota|nf|nfe)\b)"
 )
+# Revisão de 04/11 (Vita 9be5a62b, "Prefiro a nota fiscal por aqui").
+_PREFIRO = r"prefiro|preferia|preferiria"
 _PEDE = re.compile(
     # "me manda a nota", "pode enviar a nf?", "passa a nota fiscal", "encaminha a nota" (30/10)
     r"\b(?:manda|mande|mandar|mandem|envia|envie|enviar|enviem|passa|passe|passar|"
@@ -338,7 +367,7 @@ _PEDE = re.compile(
     r"fornecer|forneca|fornece)\b"
     r"(?:\s+\w+){0,3}?\s+(?:a\s+|minha\s+|sua\s+)?" + _DOC + r"\b"
     # "preciso da nota fiscal", "queria a nf do pedido"
-    r"|\b(?:preciso|precisava|precisaria|quero|queria|gostaria|necessito)\b"
+    r"|\b(?:preciso|precisava|precisaria|quero|queria|gostaria|necessito|" + _PREFIRO + r")\b"
     r"(?:\s+\w+){0,3}?\s+(?:a\s+|da\s+|de\s+|uma\s+)?" + _DOC + r"\b"
     # Revisão de 03/11 (Vita 0f89c1ea): o gerúndio — "tô querendo a nota", "estou precisando da
     # nf", "tô querendo vcs dêem pra mim a nota".
@@ -349,7 +378,9 @@ _PEDE = re.compile(
     r"|\b" + _DOC + r"\b(?:\s+\w+){0,3}?\s+nao\s+(?:veio|chegou|estava|tinha|foi)\b"
     r"|\bcade\s+(?:a\s+)?(?:minha\s+)?" + _DOC + r"\b"
     # "vou querer a nota", "quero receber a nf", "solicito a nota fiscal"
-    r"|\b(?:querer|receber|solicit\w*)\b(?:\s+\w+){0,3}?\s+(?:a\s+|da\s+|de\s+)?" + _DOC + r"\b"
+    r"|\b(?:querer|receber|solicit\w*|pedir)\b(?:\s+\w+){0,3}?\s+(?:a\s+|da\s+|de\s+)?"
+    + _DOC
+    + r"\b"
 )
 # Pedido que NÃO é "mande a NF do pedido": CNPJ, XML, correção, reemissão,
 # série/IMEI, nota de outro, ou outro assunto colado (dinheiro, devolução).
@@ -406,13 +437,16 @@ _NAO_E_SO_A_NF = re.compile(
     # O produto pedido ("quero meu produto e a nota", "me envia o pedido e a nota", "cadê o
     # pedido e a nota").
     + r"|\b(?:manda|mande|mandar|mandem|envia|envie|enviar|enviem|passa|passe|passar|encaminh\w*|"
-    r"preciso|precisava|precisaria|quero|queria|gostaria|necessito|querer|receber|solicit\w*)\s+"
+    r"preciso|precisava|precisaria|quero|queria|gostaria|necessito|querer|receber|solicit\w*|pedir|"
+    + _PREFIRO
+    + r")\s+"
     r"(?:(?:o|a|os|as|meu|minha|do|da|dos|das|de|um|uma)\s+){0,2}" + _O_PRODUTO + r"\b"
     r"|\bcade\s+(?:(?:o|a|os|as|meu|minha)\s+){0,2}" + _O_PRODUTO + r"\b"
     # A nota que não é a dele, o pedido/nota "certo" e o "não quero" ("essa nota não é
     # minha", "manda a nota do pedido certo", "não quero a nota").
     r"|\bnao\s+e\b|\b(?:pedido|nota)\s+cert[oa]\b"
-    r"|\bnao\s+(?:quero|queria|gostaria|vou\s+querer)\b"
+    r"|\bnao\s+(?:quero|queria|gostaria|vou\s+querer|" + _PREFIRO + r")\b"
+    r"|\b(?:" + _PREFIRO + r")\s+nao\b"
     # Outra nota além da deste pedido ("e também a nota do pedido", "a segunda nota", "a
     # nota de um produto") — a "segunda via" é a mesma nota.
     r"|\btambem\s+(?:a\s+|as\s+)?(?:nota|notas|nf|nfe)(?:\s+fiscal)?\s+d[aeo]s?\b"
@@ -467,6 +501,7 @@ _PALAVRAS_DO_PEDIDO = (
         solicito solicitar solicitacao que q so mesmo enviasse enviassem mandasse mandassem
         vao conseguir
         to tou estou querendo precisando dem deem porque pois fornecer forneca fornece depois
+        prefiro preferia preferiria pedir entendi
         nao veio vieram recebi chegou encontrei achei tinha estava foi cade ainda
         nota notas fiscal nf nfe copia arquivo pdf digital via segunda de novo
         a o as os um uma da do de na no em e minha meu sua seu desse deste dessa desta
@@ -830,13 +865,19 @@ def _so_cortesia(texto: str) -> bool:
 _NAO_VEIO = re.compile(r"\bnao\b")
 _TRECHOS = re.compile(
     r"[,.;:!?]+|\b(?:mas|mais|porem|e|so\s+q(?:ue)?|porque|pois)\b"
-    r"|(?=\b(?:preciso|precisava|quero|queria|gostaria|cade|manda|mande|envia|envie)\b)"
+    r"|(?=\b(?:preciso|precisava|quero|queria|gostaria|cade|manda|mande|envia|envie|"
+    + _PREFIRO
+    + r")\b)"
 )
 _NOME_DO_DOC = re.compile(r"\b" + _PAPEL + r"\b")
 # O "mas" só vale antes do "não" e do lugar ("o pedido chegou mas não veio a nota", "mas na
 # caixa não tinha a nota"); "mas e o pedido?", "mas a nota não é minha" sobram. Revisão de
-# 30/10: o "porém" é o mesmo "mas" ("o aparelho chegou, porém não veio a nota fiscal").
-_MAS_NAO = re.compile(r"\b(?:mas|mais|porem)\s+(?=nao\b|n[ao]s?\s+(?:caixa|embalagem|pacote)\b)")
+# 30/10: o "porém" é o mesmo "mas" ("o aparelho chegou, porém não veio a nota fiscal"). Revisão de
+# 04/11: antes do verbo do pedido também ("mas eu gostaria da nota fiscal", "mas prefiro a nota").
+_MAS_NAO = re.compile(
+    r"\b(?:mas|mais|porem)\s+(?=nao\b|n[ao]s?\s+(?:caixa|embalagem|pacote)\b"
+    r"|(?:eu\s+)?(?:preciso|quero|queria|gostaria|" + _PREFIRO + r")\b)"
+)
 
 # Revisão de 30/10/2026 (o Eduardo: "faça esse ajuste para termos mais entregas de NF
 # automaticamente quando é requisitado"; nas lojas no automático, em 29/10, ficaram sem
@@ -1197,25 +1238,144 @@ def conferir_xml(xml: bytes, nota: Any) -> str | None:
 
 async def pedidos_recentes_do_comprador(
     session: AsyncSession, conversa: AtendimentoConversa, agora: datetime
-) -> int:
-    """Quantos pedidos este comprador tem nesta loja na janela (o índice da Shopee)."""
-    return int(
-        await session.scalar(
-            select(func.count(func.distinct(AtendimentoPedidoComprador.pedido))).where(
-                AtendimentoPedidoComprador.integration_id == conversa.integration_id,
-                AtendimentoPedidoComprador.comprador_id == str(conversa.comprador_id or ""),
-                or_(
-                    AtendimentoPedidoComprador.criado_em.is_(None),
-                    AtendimentoPedidoComprador.criado_em >= agora - JANELA_PEDIDOS,
-                ),
-            )
+) -> dict[str, datetime | None]:
+    """Os pedidos deste comprador nesta loja na janela, com a data (o índice da Shopee)."""
+    linhas = await session.execute(
+        select(AtendimentoPedidoComprador.pedido, AtendimentoPedidoComprador.criado_em).where(
+            AtendimentoPedidoComprador.integration_id == conversa.integration_id,
+            AtendimentoPedidoComprador.comprador_id == str(conversa.comprador_id or ""),
+            or_(
+                AtendimentoPedidoComprador.criado_em.is_(None),
+                AtendimentoPedidoComprador.criado_em >= agora - JANELA_PEDIDOS,
+            ),
         )
-        or 0
+    )
+    return dict(linhas.tuples().all())
+
+
+def _recem_feito(pedido: str, pedidos: dict[str, datetime | None], agora: datetime) -> bool:
+    """O pedido é o recém-feito do comprador, sem outro perto dele? Data desconhecida não. PURA."""
+    feito = pedidos.get(pedido)
+    if feito is None or feito < agora - JANELA_RECEM_FEITO:
+        return False
+    return all(
+        outro is not None and outro <= feito - FOLGA_DO_ANTERIOR
+        for numero, outro in pedidos.items()
+        if numero != pedido
     )
 
 
+# O pacote recebido ("não veio a nota", "chegou", "na caixa"): com um pedido recém-feito, o que
+# chegou é um pedido anterior. Só o pedido simples da NF fica no recém-feito.
+_FALA_DO_PACOTE = re.compile(
+    r"\b(?:nao|chegou|chegaram|veio|vieram|recebi|recebid[ao]s?|caixa|embalagem|pacote"
+    r"|entreg\w*|comigo)\b"
+)
+
+
+async def _pedido_definido_no_turno(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    rascunho: AtendimentoRascunho | None,
+    pedidos: dict[str, datetime | None],
+    agora: datetime,
+) -> str | None:
+    """D2: como o turno define a NF do comprador com vários pedidos (None = não define).
+
+    "cartao": os cartões de pedido do turno do cliente são todos do pedido da conversa.
+    "recem_feito": sem cartão de pedido nem de produto no turno (o de produto pode ser de outra
+    compra), o pedido da conversa é o recém-feito (`_recem_feito`, só com o índice) e nem o turno
+    nem o que o cliente disse desde esse pedido falam do pacote recebido. A fala de antes do pedido
+    novo não diz nada dele (o Mini 974d4398 falou do pacote antes de comprar de novo).
+    """
+    from app.services.atendimento import ia
+
+    if rascunho is None or rascunho.mensagem_gatilho_id is None:
+        return None
+    gatilho = await session.get(AtendimentoMensagem, rascunho.mensagem_gatilho_id)
+    recentes = await ia._mensagens_recentes(session, conversa)
+    rajada = ia.rajada_do_cliente(recentes, gatilho)
+    cartoes = {p for m in rajada if m.tipo == "pedido" for p in _pedidos_do_cartao(m.anexos)}
+    if cartoes:
+        return "cartao" if cartoes <= _ids_do_pedido(conversa) else None
+    if any(m.tipo == "produto" for m in rajada):
+        return None
+    pedido = str(conversa.pedido_marketplace or "").strip()
+    if not _recem_feito(pedido, pedidos, agora):
+        return None
+    do_turno = {m.id for m in rajada}
+    # O cartão mandado depois do pedido novo, em turno anterior: "manda a nota desse" fala dele.
+    for m in recentes:
+        if m.autor != constantes.AUTOR_CLIENTE or ia._momento(m) < pedidos[pedido]:
+            continue
+        if m.tipo == "produto" or (
+            m.tipo == "pedido" and not _pedidos_do_cartao(m.anexos) <= _ids_do_pedido(conversa)
+        ):
+            return None
+    falas = [
+        *textos_do_turno(recentes, rajada),
+        *(
+            m.texto
+            for m in recentes
+            if m.autor == constantes.AUTOR_CLIENTE
+            and m.id not in do_turno
+            and ia._momento(m) >= pedidos[pedido]
+        ),
+    ]
+    planas = [_grafia(validador.plano_de(t)) for t in falas if t]
+    return None if any(_FALA_DO_PACOTE.search(f) for f in planas) else "recem_feito"
+
+
+async def _nota_depois_de_outro_pedido(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    nf: danfe.NfDoPedido,
+    pedidos: dict[str, datetime | None],
+    agora: datetime,
+) -> bool:
+    """D2, o cartão: a nota saiu no dia ou depois de OUTRO pedido do comprador, mais novo que o da
+    conversa? O coletor liga a NF pelo CPF (`routers/nf._casar_pedido_da_nota`), e ela pode ser a
+    desse outro. Sem a data de algum deles (o TikTok não tem o índice e o cartão não a traz), o
+    `BlingOrder`; sem ela também, fica com a pessoa (True). Só depois da `_nota_unica`."""
+    cartoes = await pedidos_nos_cartoes(session, conversa, agora)
+    outros = (set(pedidos) | cartoes) - _ids_do_pedido(conversa)
+    datas = {p: pedidos.get(p) for p in outros}
+    if faltam := [p for p, d in datas.items() if d is None]:
+        linhas = await session.execute(
+            select(BlingOrder.numeroloja, func.min(BlingOrder.data))
+            .where(BlingOrder.numeroloja.in_(faltam))
+            .group_by(BlingOrder.numeroloja)
+        )
+        datas.update(linhas.tuples().all())
+    if any(d is None for d in datas.values()):
+        return True
+    data_pedido = await session.scalar(
+        select(func.min(BlingOrder.data)).where(BlingOrder.numero == nf.pedido_bling)
+    )
+    if data_pedido is None or nf.emitida_em is None:
+        return True
+    return any(_dia(data_pedido) <= _dia(d) <= _dia(nf.emitida_em) for d in datas.values())
+
+
+async def _a_cheia_do_bling(
+    session: AsyncSession, conversa: AtendimentoConversa, code: str
+) -> danfe.NfDoPedido:
+    """D1: a cheia que falta no `nf_nota`, trazida do Bling (`nf_bling`). Levanta `NaoSai(code)`."""
+    try:
+        pedido = await danfe._pedido_bling_da_conversa(session, conversa)
+        if pedido and await nf_bling.trazer_a_cheia(session, pedido):
+            return await danfe.nf_da_conversa(session, conversa)
+    except danfe.NfIndisponivel as e:
+        raise NaoSai(e.code) from e
+    raise NaoSai(code)
+
+
 async def conferir_nf(
-    session: AsyncSession, conversa: AtendimentoConversa, agora: datetime | None = None
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    agora: datetime | None = None,
+    *,
+    rascunho: AtendimentoRascunho | None = None,
 ) -> tuple[danfe.NfDoPedido, bytes]:
     """A nota cheia do pedido DESTA conversa e DESTE comprador, com o XML. Levanta `NaoSai`."""
     agora = agora or datetime.now(UTC)
@@ -1242,16 +1402,29 @@ async def conferir_nf(
             raise NaoSai("comprador_nao_conferido")
         if dono != {comprador}:
             raise NaoSai("pedido_de_outro_comprador")
-        if await pedidos_recentes_do_comprador(session, conversa, agora) > 1:
+        pedidos = await pedidos_recentes_do_comprador(session, conversa, agora)
+    else:
+        pedidos = {}
+    como = None
+    if len(pedidos) > 1 or await pedidos_nos_cartoes(session, conversa, agora) - _ids_do_pedido(
+        conversa
+    ):
+        como = await _pedido_definido_no_turno(session, conversa, rascunho, pedidos, agora)
+        if como is None:
             raise NaoSai("varios_pedidos_do_comprador")
-    if await pedidos_nos_cartoes(session, conversa, agora) - _ids_do_pedido(conversa):
-        raise NaoSai("varios_pedidos_do_comprador")
+        logger.info("atendimento_nf_auto_pedido_definido", conversa_id=str(conversa.id), como=como)
     try:
         nf = await danfe.nf_da_conversa(session, conversa)
     except danfe.NfIndisponivel as e:
-        raise NaoSai(e.code) from e
+        if e.code not in ("nf_nao_chegou", "nf_so_embalagem"):
+            raise NaoSai(e.code) from e
+        nf = await _a_cheia_do_bling(session, conversa, e.code)
     if motivo := await _nota_unica(session, nf):
         raise NaoSai(motivo)
+    if como == "cartao" and await _nota_depois_de_outro_pedido(
+        session, conversa, nf, pedidos, agora
+    ):
+        raise NaoSai("varios_pedidos_do_comprador")
     # O pedido do Bling achado É o da conversa (nada de chave reserva).
     linhas = (
         await session.execute(
@@ -1263,6 +1436,9 @@ async def conferir_nf(
     if not linhas or not {str(n or "").strip() for n, _ in linhas} <= _ids_do_pedido(conversa):
         raise NaoSai("pedido_do_bling_diferente")
     docs = {"".join(c for c in str(d or "") if c.isdigit()) for _, d in linhas}
+    if docs == {""}:
+        # Antes de 08/2026 o espelho não guardava o documento: vale o do pedido no Bling.
+        docs = {await nf_bling.documento_no_bling(session, nf.pedido_bling)}
     if len(docs) != 1 or not next(iter(docs)):
         raise NaoSai("pedido_sem_documento")
     nota = await session.get(NfNota, nf.id)
@@ -1365,12 +1541,16 @@ async def pedidos_nos_cartoes(
         .scalars()
         .all()
     )
-    pedidos: set[str] = set()
-    for anexos in linhas:
-        for a in anexos or []:
-            if isinstance(a, dict) and a.get("tipo") == "pedido" and a.get("pedido"):
-                pedidos.add(str(a["pedido"]).strip())
-    return pedidos
+    return {p for anexos in linhas for p in _pedidos_do_cartao(anexos)}
+
+
+def _pedidos_do_cartao(anexos: Any) -> set[str]:
+    """Os pedidos nos anexos de uma mensagem de cartão. PURA."""
+    return {
+        str(a["pedido"]).strip()
+        for a in anexos or []
+        if isinstance(a, dict) and a.get("tipo") == "pedido" and a.get("pedido")
+    }
 
 
 async def pedido_na_plataforma(
@@ -1551,7 +1731,7 @@ async def talvez_enviar(
             motivo = await _travas_da_conversa(session, conversa, rascunho)
             if motivo is not None:
                 raise NaoSai(motivo)
-            nf, xml = await conferir_nf(session, conversa)
+            nf, xml = await conferir_nf(session, conversa, rascunho=rascunho)
             pdf = await asyncio.to_thread(danfe.gerar_pdf, xml)
             anexo = await asyncio.to_thread(
                 foto.validar_para_a_caixa, conversa, pdf, nf.nome_arquivo, foto.PDF

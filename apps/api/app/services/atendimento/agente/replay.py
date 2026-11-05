@@ -1173,6 +1173,24 @@ async def como_o_gerar(
             nomes=base.nomes,
             manual_hash=ia.manual_hash(ia.organizar_manual(list(base.regras), None)),
         )
+    # PARIDADE (o dono, 05/11/2026): o atacado no ML, como o `ia._gerar_pelo_agente`, no relógio
+    # do replay; o estoque e a loja são os de agora, não os do `as_of`.
+    atacado = (
+        None
+        if antes.gatilhos
+        else await acao_pessoa.decisao_do_atacado(
+            session, conversa, base, gatilho, agora=extra.get("as_of")
+        )
+    )
+    if atacado is not None:
+        return ia.atacado_do_agente(
+            conversa,
+            gatilho,
+            atacado,
+            modo=base.modo,
+            nomes=base.nomes,
+            manual_hash=ia.manual_hash(ia.organizar_manual(list(base.regras), None)),
+        )
     if antes.gatilhos:
         ctx = ContextoAgente.da_conversa(
             conversa, gatilho, modo=base.modo, nomes=base.nomes, extra=extra
@@ -1367,6 +1385,8 @@ async def rodar_gatilho(
     # PARIDADE an0311 (item 9): o recibo fixo (o regatilho o conta como o envio sozinho).
     if fa.get(ia.FATO_RECIBO):
         decisao["recibo"] = True
+    if fa.get(ia.FATO_ATACADO):
+        decisao["atacado"] = True
     # PARIDADE an0311 (itens 9 e 10): as etiquetas que a régua do turno liberou com o contexto
     # de verdade (o retrato, as datas, as chaves, a UF) — o regatilho as usa em vez de refazer
     # a régua com o pedido reconstruído (a data fixa de 01/10, sem o retrato). Sempre gravada

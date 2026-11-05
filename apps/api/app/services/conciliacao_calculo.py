@@ -11,8 +11,9 @@ Regras (decididas com o Vinicius em 14/10/2026, `docs/conciliacao-avaliacao.md`)
 * Situação: bateu / recebido a menos / a mais / aguardando / vencido /
   estornado depois / cancelado / Bling ≠ venda / sem venda. Tolerância R$ 0,05.
 * Etapa: aguardando → conciliado ou pendência → finalizado (sozinho, 7 dias
-  depois de bater sem novidade; à mão quando teve pendência) → reaberto
-  (chegou movimento depois de finalizado) → finalizado de novo.
+  depois de bater sem novidade ou quando a diferença é só afiliado da Shopee;
+  à mão quando teve pendência) → reaberto (chegou movimento depois de
+  finalizado) → finalizado de novo.
 * Sobrou = recebido (ou previsto, enquanto não liberou) − custo − reembolso;
   margem = sobrou ÷ custo, a mesma conta da Margem.
 """
@@ -62,6 +63,9 @@ logger = structlog.get_logger()
 BRT = ZoneInfo("America/Sao_Paulo")
 
 TOLERANCIA = Decimal("0.05")
+CENTAVO = Decimal("0.01")
+# o que a Shopee cobra em cima da comissão de afiliados (27 de 27 pedidos de 04/11)
+TAXA_SOBRE_AFILIADOS = Decimal("0.14")
 DIAS_FINALIZAR = 7
 DIAS_VENCIDO_SEM_PREVISAO = 45
 FOLGA_PREVISAO = timedelta(days=2)
@@ -246,6 +250,45 @@ def so_cobrancas_mudaram(antes: dict[str, Decimal], depois: dict[str, Decimal]) 
         return False
     cobrado = dif("taxas") + dif("afiliados") + dif("cupons")
     return abs(dif("renda") + cobrado) <= TOLERANCIA
+
+
+def previsto_que_zerou(
+    venda: MarketplaceOrderFinancial | None, anterior: ConciliacaoPedido | None
+) -> Decimal | None:
+    """O previsto que a TikTok apagou (05/11, Poofy 306443: "não entendo como pode ter um
+    pedido sem valor previsto"). Enquanto não liquida só existe a estimativa dela, e o
+    reembolso leva a estimativa a zero: o painel gravava o zero por cima do que a venda
+    prometeu. Devolve o último previsto guardado, ou None se não há o que manter."""
+    if venda is None or anterior is None or venda.status != "estimated":
+        return None
+    if _d(venda.net_amount) != ZERO or _venda_cancelada(venda):
+        return None
+    guardado = anterior.venda_liquido
+    return guardado if guardado is not None and guardado > ZERO else None
+
+
+def baixa_de_afiliados(
+    antes: dict[str, Decimal], depois: dict[str, Decimal], diferenca: Decimal | None
+) -> str | None:
+    """O motivo pra finalizar sozinho o "recebido a menos" que é só afiliado (05/11,
+    Vinicius: "não gostaria que ficasse esses amarelo para sempre"). Vale quando a
+    diferença inteira é a comissão de afiliados mais os 14% que a Shopee cobra em cima
+    dela, ao centavo. Cupom, frete, taxa fora dos 14% ou um centavo sobrando devolvem
+    None: o pedido continua pendência pra alguém olhar."""
+
+    def dif(k: str) -> Decimal:
+        return depois.get(k, ZERO) - antes.get(k, ZERO)
+
+    afiliados, taxa = dif("afiliados"), dif("taxas")
+    if diferenca is None or afiliados <= ZERO:
+        return None
+    if any(abs(dif(k)) >= CENTAVO for k in ("preco", "subsidio", "frete_loja", "cupons")):
+        return None
+    if abs(taxa - afiliados * TAXA_SOBRE_AFILIADOS) > CENTAVO / 2:  # só o arredondamento
+        return None
+    if abs(diferenca + afiliados + taxa) >= CENTAVO:
+        return None
+    return f"só afiliados: {afiliados:.2f} + {taxa:.2f} de taxa em cima deles = toda a diferença"
 
 
 _TAXAS_TIKTOK_CONHECIDAS = (
@@ -569,6 +612,18 @@ def situacao_do_pedido(
             motivo = f"nada liberou e {verbo} {abs(mexeu_sem_liberar):.2f}" + (
                 " (venda desfeita)" if cancelada or bling_cancelado else ""
             )
+            compensacao = _soma(
+                [m.credito for m in dinheiro if m.sub_tipo == "LOGISTICS_REIMBURSEMENT"]
+            )
+            if compensacao > ZERO and mexeu_sem_liberar > ZERO:
+                # 05/11 (Poofy 306443): cliente reembolsado e a TikTok paga a loja no lugar
+                # da venda, que não liquida. Compara com o previsto como qualquer dinheiro.
+                if mexeu_sem_liberar < (venda_liquido or ZERO):
+                    situacao = "recebido_a_menos"
+                motivo = (
+                    f"compensação da TikTok de {compensacao:.2f} (reembolso de logística): "
+                    "a venda não liquidou"
+                )
         elif cancelada:
             situacao = "cancelado"
             motivo = "venda desfeita no ML"
@@ -1491,6 +1546,13 @@ async def recalcular_loja(
         vale_a_venda = conta_agora is not None and so_cobrancas_mudaram(conta_venda, conta_agora)
         if vale_a_venda:
             calc = situacao_do_pedido(**{**args_situacao, "liquido_previsto": conta_venda["renda"]})
+        previsto_mantido = (
+            previsto_que_zerou(venda, anterior)
+            if plataforma_loja == "tiktok" and estado_bling not in BLING_DESFEITO
+            else None
+        )
+        if previsto_mantido is not None:
+            calc = situacao_do_pedido(**{**args_situacao, "liquido_previsto": previsto_mantido})
         if plataforma_loja == "amazon" and calc["situacao"] == "bateu":
             calc["motivo"] = motivo_amazon(extrato)
             # envio próprio sem o frete do Melhor Envio: "falta frete" (etapa = pendência)
@@ -1532,6 +1594,17 @@ async def recalcular_loja(
                 calc["motivo"] = texto.replace(CARTEIRA_SO_LIQUIDO, mudou)
             elif mudou:
                 calc["motivo"] = f"{mudou} · {texto}" if texto else mudou
+            # 05/11: só pendência nova — finalizado e reaberto seguem o que já decidiram
+            baixa = baixa_de_afiliados(prometida, shopee, calc["dif_previsto_recebido"])
+            if baixa and calc["situacao"] == "recebido_a_menos" and etapa["etapa"] == "pendencia":
+                etapa = {
+                    **etapa,
+                    "etapa": "finalizado",
+                    "etapa_em": agora,
+                    "etapa_por": ETAPA_PELO_ROBO,
+                    "etapa_motivo": baixa,
+                }
+                contagem["finalizado_so_afiliados"] += 1
         # TikTok: a conta do extrato por pedido (valor = após desconto da loja,
         # tarifa = todas as taxas, frete = parte da loja)
         tiktok = conta_tiktok(venda_ok) if plataforma_loja == "tiktok" else None
@@ -1619,6 +1692,8 @@ async def recalcular_loja(
         )
         if conta_desfeita and conta_desfeita["liquido"] is not None:
             liquido_gravado = conta_desfeita["liquido"]
+        if previsto_mantido is not None:
+            liquido_gravado = previsto_mantido
         # 19/10 (revisão): o previsto de ANTES da liberação. A Shopee e a TikTok fecham a
         # conta na hora de liberar (afiliados, taxa de serviço) e a Margem relê o pedido —
         # o valor novo substituía o antigo e a diferença sumia atrás do "bateu" (Jlas

@@ -871,7 +871,9 @@ async def conferir_proposta(
     # também (revisão de 20/10/2026) — o código sempre vence.
     andamento_de_outro: list[checagens.PendenciaAgente] = []
     for ctx_pedido, postado in ctx.pedidos_lidos:
-        dele = acao_pessoa.gatilhos_de_outro_pedido(ctx_pedido, postado, base.recentes, gatilho)
+        dele = acao_pessoa.gatilhos_de_outro_pedido(
+            ctx_pedido, postado, base.recentes, gatilho, plataforma=conversa.plataforma
+        )
         ctx.acoes_codigo = contexto.ordenar_acoes(ctx.acoes_codigo, [g.codigo for g in dele])
         # Revisão de 03/11/2026: a ação do OUTRO pedido (o "consta entregue e não recebi"
         # dele, o Ag. cancelamento dele) nunca vira a etiqueta do turno (item 10): trava.
@@ -884,6 +886,8 @@ async def conferir_proposta(
     # (D1), a `reclamacao_aberta` que o modelo ainda pediu vira a ação de depois do envio.
     p = checagens.com_par_da_politica(p, ctx)
     p, pos_envio_do_modelo = checagens.responde_e_marca_da_proposta(p, ctx)
+    # O dono, 05/11/2026: no Mercado Livre a loja não altera o endereço e o agente responde.
+    p = checagens.endereco_no_ml_da_proposta(p, ctx, base.recentes, gatilho)
 
     # Rodada 4b: o assunto que o rascunho trata pelas lacunas também precisa
     # estar liberado ("…a previsão é {previsao_entrega}" declarado nota_fiscal).
@@ -1017,6 +1021,10 @@ async def conferir_proposta(
     ]
     if da_etiqueta:
         chk = checagens.Checagens(pendencias=[*chk.pendencias, *da_etiqueta])
+    # D3 do dono (04/11/2026): o link do anúncio, no texto como o modelo escreveu.
+    do_link = checagens.conferir_link_do_anuncio(p.texto, ctx=ctx, evidencias=p.evidencias)
+    if do_link:
+        chk = checagens.Checagens(pendencias=[*chk.pendencias, *do_link])
     if base.modo == constantes.MODO_AUTO:
         # O portão (27/10/2026): a confiança do próprio agente (abaixo de 0,5 pessoa; até 0,8
         # aviso) e o assunto de produto sem a marca do anúncio nem a resposta da equipe (aviso).
@@ -1041,6 +1049,10 @@ async def conferir_proposta(
         conferida, modo=base.modo, pessoa_do_modelo=bool(entrada["precisa_humano"])
     )
     final = checagens.aplicar(conferida, chk, acoes_pessoa=ctx.acoes_pessoa, modo=base.modo)
+    # D3 do dono: a URL entra só aqui, depois de toda a 1ª camada (o verificador vê a lacuna).
+    final = checagens.com_os_links_do_anuncio(
+        final, ctx, plataforma=conversa.plataforma, canal=conversa.canal
+    )
     _guardar_avisos(ctx, final)
     # A garantia Uranyx depois dos 90 dias (decisão 7 do dono): o envio confere
     # o texto sem a frase do caminho da Uranyx só com esta marca no rascunho.

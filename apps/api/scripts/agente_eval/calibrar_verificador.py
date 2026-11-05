@@ -196,6 +196,15 @@ O `boa-catalogo-capa-fato` ganhou o "sem_no_titulo" da capa (a Kia não tem capa
 nenhum). A barra: os 4 bons do `catalogo` liberados, NENHUM escape nos 7 ruins dele nem no
 `reposicao`, e o recall de sempre no resto.
 
+`SISTEMA` v18 (as decisões do dono de 04/11/2026): o grupo `an0411` (22), cada caso bom com o
+espelho ruim — a opção fora da lista completa (87747398; a lista só de memória, o "das demais" sem
+a opção à venda), a confirmação do texto aprovado já enviado (c7d6db8b; a curta de quem só pergunta
+se é verdade, com o frete, o "1 ano" e o dinheiro de espelho), negar o link (76417da4), a lacuna do
+link do anúncio (a letra trocada com duas linhas na busca) e o "temos" com a linha de
+disponivel=null, com o anúncio da própria conversa e sem o recurso. A barra: os 6 bons liberados e
+NENHUM escape nos 16 ruins, sem cair o recall do resto (o `reposicao`, o `catalogo` e o `an0311`
+inclusive).
+
 Saída: 0 ok; 2 sem chave; 3 na janela; 4 parou no teto.
 """
 

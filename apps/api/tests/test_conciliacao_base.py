@@ -4071,7 +4071,7 @@ async def test_finalizar_zerando_o_custo_e_desfazer(db, make_user, auth_as, clie
     assert ped["custo_zerado_em"] is None and ped["custo_zerado_motivo"] is None
 
 
-async def test_venda_devolvida_que_bateu_nao_finaliza_sozinha(db, make_user):
+async def test_venda_devolvida_que_bateu_nao_finaliza_sozinha(db, make_user, auth_as, client):
     """22/10 (Vinicius): bateu, mas recebeu zero ou menos (devolvida, a loja pagou a
     taxa) — o robô não finaliza depois de 7 dias: espera a pessoa decidir o custo."""
     loja, _ = await _loja(db, make_user)
@@ -4101,6 +4101,18 @@ async def test_venda_devolvida_que_bateu_nao_finaliza_sozinha(db, make_user):
     await db.commit()
     p = await _conciliado(db, "302216")
     assert p.etapa == "pendencia"
+    # 05/11 (ATV 305950): a pendência aparece no "Onde agir", com o filtro certo
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    corpo = (await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-10"})).json()
+    (item,) = [a for a in corpo["agir"] if "devolvida" in a["titulo"]]
+    assert item["titulo"] == "jlas2 · 1 venda(s) devolvida(s)" and item["acao"] == "pedidos"
+    assert item["filtro"] == {"situacao": "bateu", "etapa": "pendencia"}
+    assert "1 venda(s) devolvida(s)" in corpo["lojas"][0]["situacao"]
+    # finalizou: o cartão some
+    p.etapa = "finalizado"
+    await db.commit()
+    corpo = (await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-10"})).json()
+    assert not [a for a in corpo["agir"] if "devolvida" in a["titulo"]]
 
 
 # --- 04/11: Raio-X do ML (troca 305862 → 306420, juros, linhas que somam) ---------------

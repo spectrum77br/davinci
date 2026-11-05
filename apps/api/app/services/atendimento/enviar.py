@@ -217,6 +217,7 @@ from app.services.atendimento.constantes import (
     CONVERSA_BLOQUEADA,
     CONVERSA_FECHADA,
     DESTINOS_RECLAMACAO,
+    FRASE_ATACADO_ML,
     MODO_AUTO,
     MODOS_QUE_ENVIAM,
     MOTIVO_AFILIADO_SO_PESSOA,
@@ -1175,6 +1176,16 @@ async def _texto_com_isencao_do_agente(
     `ver_garantia` liberando): o texto é revalidado SEM essa frase e o que
     continua errado (outro link, telefone…) recusa como antes. Sem a marca —
     o legado, a pessoa escrevendo do zero — levanta a mesma recusa.
+
+    D3 do dono (04/11/2026): `fatos.agente.links_anuncio` = as URLs que o CÓDIGO pôs no lugar
+    da lacuna do link; o validador aceita só essas, exatas (`validador.validar`).
+
+    O dono, 05/11/2026, só no Mercado Livre e só no rascunho do agente: (1) a negativa honesta do
+    prazo ("Não temos como garantir a chegada amanhã", dc962f66): a 1ª camada já a aceitava e
+    este portão a recusava. A conta é refeita aqui, no texto que vai, e só o motivo do prazo
+    sai; (2) a resposta fixa do atacado: só com a marca e o texto IGUAL à frase, e só o motivo
+    do percentual sai. A pessoa não muda. O rascunho do legado não tem a isenção e os padrões novos
+    do prazo no ML (`validador._PRAZO_NO_ML`) valem para ele: lá a negativa vai para a pessoa.
     """
     from app.services.atendimento import validador
     from app.services.atendimento.agente import checagens
@@ -1183,20 +1194,43 @@ async def _texto_com_isencao_do_agente(
     fatos = (rascunho.fatos or {}) if rascunho is not None else {}
     agente = fatos.get("agente") if isinstance(fatos, dict) else None
     isencoes = agente.get("isencoes") if isinstance(agente, dict) else None
-    if not (isinstance(isencoes, list) and checagens.ISENCAO_CAMINHO_URANYX in isencoes):
-        raise recusa
+    uranyx = isinstance(isencoes, list) and checagens.ISENCAO_CAMINHO_URANYX in isencoes
+    do_agente = agente.get("links_anuncio") if isinstance(agente, dict) else None
+    links = [str(u) for u in do_agente if u] if isinstance(do_agente, list) else []
     normalizado = validador.normalizar(
         texto or "", plataforma=conversa.plataforma, canal=conversa.canal
     )
-    motivos = checagens.erros_sem_o_caminho_uranyx(
-        normalizado,
-        validador.validar(
-            normalizado, plataforma=conversa.plataforma, canal=conversa.canal, origem=origem
-        ),
-        lambda t: validador.validar(
-            t, plataforma=conversa.plataforma, canal=conversa.canal, origem=origem
-        ),
+    do_agente_no_ml = (
+        origem == ORIGEM_IA and isinstance(agente, dict) and conversa.plataforma == "ml"
     )
+    negativa = do_agente_no_ml and checagens.prazo_do_validador_sem_afirmacao(
+        normalizado, plataforma=conversa.plataforma
+    )
+    atacado = (
+        do_agente_no_ml
+        and isinstance(isencoes, list)
+        and checagens.ISENCAO_ATACADO_ML in isencoes
+        and normalizado == FRASE_ATACADO_ML
+    )
+    if not uranyx and not links and not negativa and not atacado:
+        raise recusa
+
+    def _validar(t: str) -> list[str]:
+        return validador.validar(
+            t,
+            plataforma=conversa.plataforma,
+            canal=conversa.canal,
+            origem=origem,
+            links_permitidos=links,
+        )
+
+    motivos = _validar(normalizado)
+    if uranyx:
+        motivos = checagens.erros_sem_o_caminho_uranyx(normalizado, motivos, _validar)
+    if negativa:
+        motivos = [m for m in motivos if m != validador.MOTIVO_PRAZO]
+    if atacado:
+        motivos = [m for m in motivos if m != validador.MOTIVO_PERCENTUAL]
     if motivos or not normalizado.strip():
         raise recusa
     return normalizado

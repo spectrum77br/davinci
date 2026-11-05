@@ -603,6 +603,73 @@ def test_d3_o_6_com_a_pergunta_pendente_e_o_agente_que_responde():
     assert acao_pessoa.pedido_de_pessoa(seis, None) == acao_pessoa.MOTIVO_PEDIU_3_VEZES
 
 
+def _ia_em(texto: str, quando: datetime) -> SimpleNamespace:
+    m = _m("loja", texto, origem=constantes.ORIGEM_IA)
+    m.enviada_em = m.created_at = quando
+    return m
+
+
+def _cli_em(fala: str, quando: datetime) -> SimpleNamespace:
+    m = _m("cliente", fala)
+    m.enviada_em = m.created_at = quando
+    return m
+
+
+# D4 do dono (04/11/2026; 06ae0f18: a IA às 19:45:08 e o "6" às 19:45:09): a resposta e o menu
+# chegam juntos, e o "6" cruzou com eles. Antes de 60 s não é insistência; depois, nada muda.
+@pytest.mark.parametrize(
+    ("segundos", "insiste"), [(1, False), (60, False), (61, True), (600, True)]
+)
+def test_d4_o_6_sozinho_ate_60_s_depois_da_resposta_do_agente(segundos, insiste):
+    pediu = _cli("Quero falar com uma pessoa")
+    respondeu = pediu[-1].enviada_em + timedelta(seconds=30)
+    msgs = [
+        *pediu,
+        _ia_em("O pote de 2,5 L está esgotado e não temos previsão de reposição.", respondeu),
+        _cli_em("6", respondeu + timedelta(seconds=segundos)),
+    ]
+    esperado = ia.MOTIVO_INSISTIU_EM_PESSOA if insiste else None
+    assert acao_pessoa.pedido_de_pessoa(msgs, None) == esperado
+
+
+def test_d4_o_6_que_cruzou_nao_livra_o_resto_da_regua():
+    pediu = _cli("Quero falar com uma pessoa")
+    respondeu = pediu[-1].enviada_em + timedelta(seconds=30)
+    resposta = _ia_em("O pote de 2,5 L está esgotado.", respondeu)
+    logo = respondeu + timedelta(seconds=5)
+    # Só o agente: o "6" depois da resposta da equipe segue a régua de sempre.
+    equipe = _loja("O pote de 2,5 L está esgotado.")
+    equipe.enviada_em = equipe.created_at = respondeu
+    assert (
+        acao_pessoa.pedido_de_pessoa([*pediu, equipe, _cli_em("6", logo)], None)
+        == ia.MOTIVO_INSISTIU_EM_PESSOA
+    )
+    # Só o "6": a fala escrita junto não entra no D4.
+    assert (
+        acao_pessoa.pedido_de_pessoa(
+            [*pediu, resposta, _cli_em("quero falar com uma pessoa", logo)], None
+        )
+        == ia.MOTIVO_INSISTIU_EM_PESSOA
+    )
+    # A rajada inteira dentro dos 60 s: o 2º "6", depois deles, é insistência.
+    assert (
+        acao_pessoa.pedido_de_pessoa(
+            [
+                *pediu,
+                resposta,
+                _cli_em("6", logo),
+                _cli_em("6", respondeu + timedelta(seconds=90)),
+            ],
+            None,
+        )
+        == ia.MOTIVO_INSISTIU_EM_PESSOA
+    )
+    # O "6" que aceita a pessoa oferecida continua aceitando.
+    oferta = _ia_em("Se preferir, uma pessoa da nossa equipe pode assumir a conversa.", respondeu)
+    if acao_pessoa.ofereceu_pessoa(oferta.texto):
+        assert acao_pessoa.pedido_de_pessoa([*pediu, oferta, _cli_em("6", logo)], None) is not None
+
+
 # ═══════════════ D1. o "responde e marca" ═══════════════
 
 
@@ -1288,7 +1355,7 @@ def test_v12_a_entrada_so_traz_a_acao_da_pessoa_no_responde_e_marca():
         consultas=[],
     )
     assert v.CABECALHO_POS_ENVIO in com and "central do vendedor" in com
-    assert v.VERSAO == "v17" and v.MODELO == "claude-haiku-5-5"
+    assert v.VERSAO == "v19" and v.MODELO == "claude-haiku-5-5"
     assert (
         "AÇÃO QUE CONTINUA COM A PESSOA" in v.SISTEMA and "não vale para essa variação" in v.SISTEMA
     )

@@ -104,6 +104,7 @@ import asyncio
 import importlib
 import re
 import statistics
+from collections.abc import Collection
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from math import ceil
@@ -196,6 +197,7 @@ from app.schemas.atendimento import (
     MetricaLojaOut,
     MetricasOut,
     ModeloIn,
+    ModeloNaEquipeIn,
     ModeloOut,
     ModeloPatch,
     ModelosEquipesOut,
@@ -445,6 +447,7 @@ ROTAS_DA_EQUIPE = frozenset(
         ("POST", "/api/atendimento/modelos"),
         ("PATCH", "/api/atendimento/modelos/{modelo_id}"),
         ("DELETE", "/api/atendimento/modelos/{modelo_id}"),
+        ("PUT", "/api/atendimento/modelos/{modelo_id}/ativa-na-equipe"),
     }
 )
 
@@ -5353,6 +5356,14 @@ PRONTA_DE_OUTRA_EQUIPE = {
     "code": "resposta_de_outra_equipe",
     "detail": "Esta resposta pronta é de outra equipe.",
 }
+PRONTA_SO_DE_TODOS = {
+    "code": "so_resposta_de_todos",
+    "detail": "Só a resposta padrão (para todos) se desativa por equipe.",
+}
+PRONTA_SO_QUEM_E_DE_EQUIPE = {
+    "code": "so_quem_e_de_equipe",
+    "detail": "Só quem é de equipe desativa só para ela; o admin desativa para todos.",
+}
 
 
 def _mexe_em_todas(user: User) -> bool:
@@ -5413,7 +5424,11 @@ def _equipe_pedida(user: User, pedida: int | None, *, atual: int | None = None) 
     return pedida
 
 
-def _modelo_out(m: AtendimentoModelo, user: User) -> ModeloOut:
+def _modelo_out(m: AtendimentoModelo, user: User, desativadas: Collection[int] = ()) -> ModeloOut:
+    minhas = respostas_prontas.equipes_do_usuario(user)
+    # Só a "para todos" tem escolha por equipe; a dele, ninguém de fora precisa saber.
+    equipes_off = set(desativadas) if m.equipe is None else set()
+    visiveis = equipes_off if respostas_prontas.ve_todas(user) else equipes_off & minhas
     return ModeloOut(
         id=m.id,
         titulo=m.titulo,
@@ -5426,7 +5441,16 @@ def _modelo_out(m: AtendimentoModelo, user: User) -> ModeloOut:
         equipe=m.equipe,
         equipe_nome=nome_da_equipe(m.equipe) if m.equipe is not None else None,
         pode_editar=_pode_editar_pronta(user, m),
+        desativada_na_equipe=bool(minhas) and minhas <= equipes_off,
+        desativada_equipes=[nome_da_equipe(n) for n in sorted(visiveis)],
+        pode_desativar=m.equipe is None and m.ativo and _de_equipe(user),
     )
+
+
+async def _modelo_saida(session: AsyncSession, m: AtendimentoModelo, user: User) -> ModeloOut:
+    """A resposta de uma só, com a escolha das equipes."""
+    desativadas = await respostas_prontas.desativadas_por_modelo(session, [m.id])
+    return _modelo_out(m, user, desativadas.get(m.id, ()))
 
 
 @router.get("/modelos", response_model=list[ModeloOut])
@@ -5458,7 +5482,10 @@ async def listar_modelos(
         .scalars()
         .all()
     )
-    return [_modelo_out(m, user) for m in modelos]
+    desativadas = await respostas_prontas.desativadas_por_modelo(
+        session, [m.id for m in modelos if m.equipe is None]
+    )
+    return [_modelo_out(m, user, desativadas.get(m.id, ())) for m in modelos]
 
 
 @router.get("/modelos/equipes", response_model=ModelosEquipesOut)
@@ -5515,6 +5542,8 @@ async def editar_modelo(
     campos = body.model_fields_set
     if "equipe" in campos:
         m.equipe = _equipe_pedida(user, body.equipe, atual=m.equipe)
+        if m.equipe is not None:
+            await respostas_prontas.limpar_desativadas(session, m.id)
     if "titulo" in campos:
         if not body.titulo:
             raise HTTPException(422, detail={"code": "titulo_vazio"})
@@ -5537,7 +5566,36 @@ async def editar_modelo(
     _validar_par(m.plataforma, m.canal)
     await session.commit()
     await session.refresh(m)
-    return _modelo_out(m, user)
+    return await _modelo_saida(session, m, user)
+
+
+@router.put("/modelos/{modelo_id}/ativa-na-equipe", response_model=ModeloOut)
+async def ativar_modelo_na_equipe(
+    modelo_id: UUID,
+    body: ModeloNaEquipeIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_edita_pronta)],
+) -> ModeloOut:
+    """Ativa ou desativa uma resposta padrão só para a equipe de quem pediu.
+
+    05/11/2026, o Eduardo: "se um desativar e outro nao nao afeta o outro". O admin
+    não é de equipe: o desativar dele é o `ativo` do PATCH, que vale para todos."""
+    m = await session.get(AtendimentoModelo, modelo_id)
+    if m is None:
+        raise HTTPException(404, detail={"code": "modelo_nao_encontrado"})
+    minhas = respostas_prontas.equipes_do_usuario(user)
+    if m.equipe is not None:
+        if not respostas_prontas.ve_todas(user) and m.equipe not in minhas:
+            raise HTTPException(404, detail={"code": "modelo_nao_encontrado"})
+        raise HTTPException(422, detail=PRONTA_SO_DE_TODOS)
+    if not minhas:
+        raise HTTPException(403, detail=PRONTA_SO_QUEM_E_DE_EQUIPE)
+    await respostas_prontas.marcar_nas_equipes(
+        session, m.id, minhas, ativo=body.ativo, quem=user.id
+    )
+    await session.commit()
+    await session.refresh(m)
+    return await _modelo_saida(session, m, user)
 
 
 @router.delete("/modelos/{modelo_id}", status_code=status.HTTP_204_NO_CONTENT)

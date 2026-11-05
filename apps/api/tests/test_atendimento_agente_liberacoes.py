@@ -913,7 +913,7 @@ def test_v11_entrada_traz_a_restricao_e_a_condicao_so_com_as_marcas():
 
 
 def test_v11_sistema_e_versao():
-    assert v.VERSAO in ("v11", "v12", "v13", "v14", "v15", "v16", "v17")
+    assert v.VERSAO in ("v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18", "v19")
     assert (
         "RESTRIÇÃO DE ENVIO POR ESTADO" in v.SISTEMA
         and "CONDIÇÃO DECLARADA NO ANÚNCIO" in v.SISTEMA

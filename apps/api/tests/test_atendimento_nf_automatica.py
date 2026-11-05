@@ -1855,3 +1855,481 @@ async def test_2_do_menu_com_o_problema_escrito_antes_fica_com_a_pessoa(
     r = await _rascunho(db, conversa, gatilho)
     await ia._talvez_enviar(db, conversa, r)
     assert _decisao(r) == "nf:pedido_nao_claro" and plataforma == []
+
+
+# ─────────────── D2: o turno define o pedido do comprador com vários (04/11/2026) ───────────────
+
+
+async def _cartao_no_turno(db, conversa, pedido: str, *, ha: timedelta, autor: str = "cliente"):
+    await gravar.gravar_mensagem(
+        db,
+        conversa,
+        externo_id=f"cartao-{pedido}-{autor}-{ha.total_seconds()}",
+        autor=autor,
+        texto=None,
+        enviada_em=datetime.now(UTC) - ha,
+        tipo="pedido",
+        anexos=[{"tipo": "pedido", "pedido": pedido}],
+    )
+    await db.commit()
+
+
+async def _pedido_feito(db, conversa, pedido: str, ha: timedelta | None, dono: str = COMPRADOR):
+    """A data do pedido no índice da Shopee (None = desconhecida), criando a linha se faltar."""
+    linha = await db.scalar(
+        select(AtendimentoPedidoComprador).where(
+            AtendimentoPedidoComprador.integration_id == conversa.integration_id,
+            AtendimentoPedidoComprador.pedido == pedido,
+        )
+    )
+    if linha is None:
+        linha = AtendimentoPedidoComprador(
+            integration_id=conversa.integration_id,
+            plataforma="shopee",
+            comprador_id=dono,
+            pedido=pedido,
+        )
+        db.add(linha)
+    linha.criado_em = None if ha is None else datetime.now(UTC) - ha
+    await db.commit()
+
+
+async def _pedido_no_espelho(db, pedido: str, ha: timedelta, bling_id: int = 910099):
+    """Outro pedido do comprador no `BlingOrder` (a data dele quando o cartão não a traz)."""
+    db.add(
+        BlingOrder(
+            bling_id=bling_id,
+            item_index=0,
+            numero=str(bling_id),
+            numeroloja=pedido,
+            total=Decimal("100.00"),
+            situacao="9",
+            item_codigo="b096.21",
+            documento_destinatario=CPF,
+            data=datetime.now(UTC) - ha,
+        )
+    )
+    await db.commit()
+
+
+async def test_d2_974d4398_o_cartao_do_cliente_no_turno_define_o_pedido(
+    db, make_user, ligado, plataforma
+):
+    """Mini 974d4398: o pedido, o cartão dele, o menu e o "2", com outro pedido na loja."""
+    conversa, _ = await _cenario(
+        db, make_user, outros_pedidos=1, texto="Bom dia ! Por favor mandar a nota fiscal!"
+    )
+    await _cartao_no_turno(db, conversa, PEDIDO_MKT, ha=timedelta(minutes=4))
+    await _msg(db, conversa, _MENU_DUOKE, autor="loja", origem="externo", ha=timedelta(minutes=3))
+    gatilho = await _msg(db, conversa, "2", ha=timedelta(minutes=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+    assert [s["tipo"] for s in plataforma] == ["imagem", "texto"]
+
+
+@pytest.mark.parametrize(
+    "cartoes",
+    [
+        # O cartão do turno é de OUTRO pedido do mesmo comprador.
+        ("OUTRO0",),
+        # Dois cartões no turno, com o da conversa entre eles: qual NF?
+        (PEDIDO_MKT, "OUTRO0"),
+    ],
+)
+async def test_d2_cartao_de_outro_pedido_no_turno_fica_com_a_pessoa(
+    db, make_user, ligado, plataforma, cartoes
+):
+    conversa, _ = await _cenario(db, make_user, outros_pedidos=1, texto="manda a nota fiscal")
+    for i, pedido in enumerate(cartoes):
+        await _cartao_no_turno(db, conversa, pedido, ha=timedelta(minutes=4, seconds=i))
+    gatilho = await _msg(db, conversa, "manda a nota fiscal", ha=timedelta(minutes=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:varios_pedidos_do_comprador" and plataforma == []
+
+
+async def test_d2_cartao_antes_da_resposta_da_loja_nao_e_do_turno(
+    db, make_user, ligado, plataforma
+):
+    """O cartão do pedido em turno já respondido não define a NF de agora."""
+    conversa, gatilho = await _cenario(db, make_user, outros_pedidos=1, texto="manda a nota fiscal")
+    await _cartao_no_turno(db, conversa, PEDIDO_MKT, ha=timedelta(hours=3))
+    await _msg(db, conversa, "bom dia, tudo bem?", autor="loja", ha=timedelta(hours=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:varios_pedidos_do_comprador" and plataforma == []
+
+
+async def test_d2_pedido_de_outro_comprador_nunca_sai_nem_com_o_cartao_no_turno(
+    db, make_user, ligado, plataforma
+):
+    """LGPD: o cartão do pedido de outro comprador (o índice) segura antes de escolher."""
+    conversa, _ = await _cenario(
+        db, make_user, dono="outracompradora", outros_pedidos=1, texto="manda a nota fiscal"
+    )
+    await _cartao_no_turno(db, conversa, PEDIDO_MKT, ha=timedelta(minutes=4))
+    gatilho = await _msg(db, conversa, "manda a nota fiscal", ha=timedelta(minutes=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:pedido_de_outro_comprador" and plataforma == []
+
+
+async def test_d2_pedido_fora_do_indice_nunca_sai_nem_com_o_cartao_no_turno(
+    db, make_user, ligado, plataforma
+):
+    conversa, _ = await _cenario(db, make_user, dono=None, texto="manda a nota fiscal")
+    await _cartao_no_turno(db, conversa, PEDIDO_MKT, ha=timedelta(minutes=4))
+    gatilho = await _msg(db, conversa, "manda a nota fiscal", ha=timedelta(minutes=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:comprador_nao_conferido" and plataforma == []
+
+
+async def test_d2_comprador_diferente_ao_vivo_nunca_sai_nem_com_o_cartao_no_turno(
+    db, make_user, ligado, plataforma
+):
+    """O índice pode estar velho: a plataforma ao vivo tem a última palavra."""
+    conversa, _ = await _cenario(db, make_user, outros_pedidos=1, texto="manda a nota fiscal")
+    await _cartao_no_turno(db, conversa, PEDIDO_MKT, ha=timedelta(minutes=4))
+    gatilho = await _msg(db, conversa, "manda a nota fiscal", ha=timedelta(minutes=2))
+    plataforma.comprador = "outracompradora"
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:comprador_diferente_na_plataforma" and plataforma == []
+
+
+@pytest.mark.parametrize(
+    ("cartao_no_turno", "esperado"),
+    [(True, "enviado_nf"), (False, "nf:varios_pedidos_do_comprador")],
+)
+async def test_d2_tiktok_so_o_cartao_do_turno_define(
+    db, make_user, ligado, plataforma, cartao_no_turno, esperado
+):
+    """O TikTok não tem o índice: só o cartão do turno define, nunca o recém-feito."""
+    from app.models import IntegrationPlatform
+
+    conversa, gatilho = await _cenario(
+        db,
+        make_user,
+        dono=None,
+        texto="manda a nota fiscal",
+        onde={"plataforma": "tiktok", "platform": IntegrationPlatform.TIKTOK},
+    )
+    await _pedido_no_espelho(db, "OUTRO0", timedelta(days=40))
+    await _cartao_no_turno(db, conversa, "OUTRO0", ha=timedelta(days=9))
+    await _msg(db, conversa, "bom dia, tudo bem?", autor="loja", ha=timedelta(days=8))
+    if cartao_no_turno:
+        await _cartao_no_turno(db, conversa, PEDIDO_MKT, ha=timedelta(minutes=6))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == esperado, _decisao(r)
+    assert bool(plataforma) is cartao_no_turno
+
+
+async def test_d2_9be5a62b_o_recem_feito_manda_a_nf(db, make_user, ligado, plataforma):
+    """Vita 9be5a62b: 4 pedidos em 60 dias, o da conversa feito há 13 h, o cartão velho de outro
+    pedido e "Prefiro a nota fiscal por aqui" depois de a loja dizer que a nota vai na caixa."""
+    conversa, gatilho = await _cenario(
+        db, make_user, outros_pedidos=3, texto="Prefiro a nota fiscal por aqui"
+    )
+    await _pedido_feito(db, conversa, PEDIDO_MKT, timedelta(hours=13))
+    for i, ha in enumerate((10, 20, 30)):
+        await _pedido_feito(db, conversa, f"OUTRO{i}", timedelta(days=ha))
+    await _cartao_no_turno(db, conversa, "OUTRO0", ha=timedelta(days=9), autor="cliente")
+    await _msg(db, conversa, "sim, enviamos", autor="loja", ha=timedelta(days=8))
+    await _msg(db, conversa, "Vai anexada à caixa.", autor="loja", ha=timedelta(minutes=40))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+
+
+@pytest.mark.parametrize(
+    ("meu", "outro"),
+    [
+        # Não é mais recém-feito.
+        (timedelta(days=3, hours=1), timedelta(days=20)),
+        # Dois pedidos próximos: qual NF?
+        (timedelta(hours=13), timedelta(days=6)),
+        # O da conversa não é o mais novo.
+        (timedelta(days=2), timedelta(hours=2)),
+        # Data desconhecida, de um ou do outro.
+        (None, timedelta(days=20)),
+        (timedelta(hours=13), None),
+    ],
+)
+async def test_d2_pedido_que_nao_e_o_recem_feito_fica_com_a_pessoa(
+    db, make_user, ligado, plataforma, meu, outro
+):
+    conversa, gatilho = await _cenario(db, make_user, outros_pedidos=1, texto="manda a nota fiscal")
+    await _pedido_feito(db, conversa, PEDIDO_MKT, meu)
+    await _pedido_feito(db, conversa, "OUTRO0", outro)
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:varios_pedidos_do_comprador" and plataforma == []
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "não veio a nota fiscal",
+        "chegou sem nota fiscal",
+        "o pedido chegou, manda a nota fiscal",
+        "na caixa não tinha a nota",
+    ],
+)
+async def test_d2_o_pacote_recebido_nao_e_o_recem_feito(db, make_user, ligado, plataforma, texto):
+    """Pedido de ontem e "não veio a nota": o que chegou é o pedido anterior."""
+    assert nf_automatica.pedido_claro([texto]) is True
+    conversa, gatilho = await _cenario(db, make_user, outros_pedidos=1, texto=texto)
+    await _pedido_feito(db, conversa, PEDIDO_MKT, timedelta(hours=13))
+    await _pedido_feito(db, conversa, "OUTRO0", timedelta(days=20))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:varios_pedidos_do_comprador" and plataforma == []
+
+
+async def _pacote_no_turno_anterior(db, conversa, *, fala_ha: timedelta, resposta_ha: timedelta):
+    await _msg(db, conversa, "meu celular chegou e não veio a nota fiscal", ha=fala_ha)
+    await _msg(db, conversa, "A nota vai na caixa.", autor="loja", ha=resposta_ha)
+    gatilho = await _msg(db, conversa, "manda a nota fiscal", ha=timedelta(minutes=2))
+    return await _rascunho(db, conversa, gatilho)
+
+
+async def _recem_feito_com_outro_pedido(db, make_user, texto: str = "manda a nota fiscal"):
+    conversa, gatilho = await _cenario(db, make_user, outros_pedidos=1, texto=texto)
+    await _pedido_feito(db, conversa, PEDIDO_MKT, timedelta(hours=13))
+    await _pedido_feito(db, conversa, "OUTRO0", timedelta(days=20))
+    return conversa, gatilho
+
+
+async def test_d2_o_pacote_dito_no_turno_anterior_nao_e_o_recem_feito(
+    db, make_user, ligado, plataforma
+):
+    """A resposta da loja corta o turno, mas o que chegou continua sendo o pedido anterior."""
+    conversa, _ = await _recem_feito_com_outro_pedido(db, make_user, "bom dia")
+    r = await _pacote_no_turno_anterior(
+        db, conversa, fala_ha=timedelta(minutes=45), resposta_ha=timedelta(minutes=40)
+    )
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:varios_pedidos_do_comprador" and plataforma == []
+
+
+async def test_d2_o_pacote_dito_antes_do_pedido_novo_nao_segura_o_recem_feito(
+    db, make_user, ligado, plataforma
+):
+    """Mini 974d4398: a fala do pacote é de ANTES da compra nova, e não diz nada dela."""
+    conversa, _ = await _recem_feito_com_outro_pedido(db, make_user, "bom dia")
+    r = await _pacote_no_turno_anterior(
+        db, conversa, fala_ha=timedelta(days=10), resposta_ha=timedelta(days=9)
+    )
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "manda a nota fiscal desse",
+        "quero a nota desse produto",
+        "preciso da nota fiscal deste",
+        "quero a nota fiscal desse aqui",
+        "manda a nota fiscal",
+    ],
+)
+async def test_d2_cartao_de_produto_no_turno_fica_com_a_pessoa(
+    db, make_user, ligado, plataforma, texto
+):
+    """O cartão de produto pode ser de outra compra: o recém-feito não define a NF."""
+    conversa, _ = await _recem_feito_com_outro_pedido(db, make_user, "bom dia")
+    await _msg(db, conversa, "tudo certo!", autor="loja", ha=timedelta(minutes=40))
+    await _msg(db, conversa, None, tipo="produto", ha=timedelta(minutes=3))
+    gatilho = await _msg(db, conversa, texto, ha=timedelta(minutes=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:varios_pedidos_do_comprador" and plataforma == []
+
+
+async def test_d2_cartao_de_produto_em_turno_ja_respondido_fica_com_a_pessoa(
+    db, make_user, ligado, plataforma
+):
+    """Mandado depois do pedido novo, o cartão pode ser de outra compra: "manda a nota" fala dele."""
+    conversa, _ = await _recem_feito_com_outro_pedido(db, make_user, "bom dia")
+    await _msg(db, conversa, None, tipo="produto", ha=timedelta(minutes=45))
+    await _msg(db, conversa, "tudo certo!", autor="loja", ha=timedelta(minutes=40))
+    gatilho = await _msg(db, conversa, "manda a nota fiscal", ha=timedelta(minutes=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:varios_pedidos_do_comprador" and plataforma == []
+
+
+async def test_d2_o_cartao_de_pedido_decide_mesmo_com_o_de_produto_no_turno(
+    db, make_user, ligado, plataforma
+):
+    conversa, _ = await _recem_feito_com_outro_pedido(db, make_user, "bom dia")
+    await _msg(db, conversa, "tudo certo!", autor="loja", ha=timedelta(minutes=40))
+    await _msg(db, conversa, None, tipo="produto", ha=timedelta(minutes=4))
+    await _cartao_no_turno(db, conversa, PEDIDO_MKT, ha=timedelta(minutes=3))
+    gatilho = await _msg(db, conversa, "manda a nota fiscal", ha=timedelta(minutes=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+
+
+async def _nota_emitida(db, ha: timedelta) -> None:
+    nota = await db.scalar(select(NfNota).where(NfNota.pedido_bling == PEDIDO_BLING))
+    nota.data_emissao = datetime.now(UTC) - ha
+    await db.commit()
+
+
+async def _pedido_da_conversa_feito(db, ha: timedelta) -> None:
+    pedido = await db.scalar(select(BlingOrder).where(BlingOrder.numero == PEDIDO_BLING))
+    pedido.data = datetime.now(UTC) - ha
+    await db.commit()
+
+
+@pytest.mark.parametrize(
+    ("outro", "emitida", "esperado"),
+    [
+        # A NF saiu depois do pedido mais novo: pode ser a dele.
+        (timedelta(days=2), timedelta(days=1), "nf:varios_pedidos_do_comprador"),
+        # No mesmo dia da compra do outro também.
+        (timedelta(days=2), timedelta(days=2), "nf:varios_pedidos_do_comprador"),
+        # A NF saiu antes de o comprador fazer o outro pedido: é a deste.
+        (timedelta(days=2), timedelta(days=29), "enviado_nf"),
+        # O outro pedido é mais velho que o da conversa.
+        (timedelta(days=45), timedelta(days=1), "enviado_nf"),
+    ],
+)
+async def test_d2_o_cartao_nao_manda_a_nota_de_depois_de_outro_pedido(
+    db, make_user, ligado, plataforma, outro, emitida, esperado
+):
+    """O coletor liga a NF pelo CPF: com o pedido novo fora do espelho, a NF dele fica no antigo."""
+    conversa, _ = await _cenario(db, make_user, outros_pedidos=1, texto="bom dia")
+    await _pedido_feito(db, conversa, PEDIDO_MKT, timedelta(days=30))
+    await _pedido_da_conversa_feito(db, timedelta(days=30))
+    await _pedido_feito(db, conversa, "OUTRO0", outro)
+    await _nota_emitida(db, emitida)
+    await _cartao_no_turno(db, conversa, PEDIDO_MKT, ha=timedelta(minutes=4))
+    gatilho = await _msg(db, conversa, "manda a nota fiscal", ha=timedelta(minutes=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == esperado, _decisao(r)
+    assert bool(plataforma) is (esperado == "enviado_nf")
+
+
+@pytest.mark.parametrize(
+    ("no_espelho", "esperado"),
+    [
+        (None, "nf:varios_pedidos_do_comprador"),  # sem a data do outro pedido: pessoa
+        (timedelta(days=2), "nf:varios_pedidos_do_comprador"),  # mais novo que a nota
+        (timedelta(days=40), "enviado_nf"),
+    ],
+)
+async def test_d2_tiktok_a_data_do_outro_pedido_vem_do_espelho(
+    db, make_user, ligado, plataforma, no_espelho, esperado
+):
+    """O TikTok não tem o índice e o cartão não traz a data."""
+    from app.models import IntegrationPlatform
+
+    conversa, _ = await _cenario(
+        db,
+        make_user,
+        dono=None,
+        texto="bom dia",
+        onde={"plataforma": "tiktok", "platform": IntegrationPlatform.TIKTOK},
+    )
+    await _pedido_da_conversa_feito(db, timedelta(days=30))
+    await _nota_emitida(db, timedelta(days=1))
+    if no_espelho is not None:
+        await _pedido_no_espelho(db, "OUTRO0", no_espelho)
+    await _cartao_no_turno(db, conversa, "OUTRO0", ha=timedelta(days=9))
+    await _msg(db, conversa, "bom dia, tudo bem?", autor="loja", ha=timedelta(days=8))
+    await _cartao_no_turno(db, conversa, PEDIDO_MKT, ha=timedelta(minutes=4))
+    gatilho = await _msg(db, conversa, "manda a nota fiscal", ha=timedelta(minutes=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == esperado, _decisao(r)
+
+
+async def test_d2_o_recem_feito_de_um_comprador_so_nao_muda_nada(db, make_user, ligado, plataforma):
+    """Um pedido só: a escolha nem entra, como antes."""
+    conversa, gatilho = await _cenario(db, make_user, texto="não veio a nota fiscal")
+    await _pedido_feito(db, conversa, PEDIDO_MKT, timedelta(hours=13))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+
+
+async def test_d2_o_carrinho_continua_com_a_pessoa_com_o_cartao_no_turno(
+    db, make_user, ligado, plataforma
+):
+    """`nf_varios_pedidos`: uma compra com várias NFs no Bling; o cartão não escolhe nenhuma."""
+    conversa, _ = await _cenario(db, make_user, texto="manda a nota fiscal")
+    db.add(
+        BlingOrder(
+            bling_id=910002,
+            item_index=0,
+            numero="910002",
+            numeroloja=PEDIDO_MKT,
+            total=Decimal("100.00"),
+            situacao="9",
+            item_codigo="b096.21",
+            documento_destinatario=CPF,
+            data=datetime.now(UTC) - timedelta(days=5),
+        )
+    )
+    await db.commit()
+    await _cartao_no_turno(db, conversa, PEDIDO_MKT, ha=timedelta(minutes=4))
+    gatilho = await _msg(db, conversa, "manda a nota fiscal", ha=timedelta(minutes=2))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) in ("nf:nf_varios_pedidos", "nf:pedido_do_bling_diferente")
+    assert plataforma == []
+
+
+@pytest.mark.parametrize(
+    ("texto", "claro"),
+    [
+        # Vita 9be5a62b e as formas parecidas do pedido simples.
+        ("Prefiro a nota fiscal por aqui", True),
+        ("prefiro receber a nota por aqui", True),
+        ("preferia a nf em pdf", True),
+        ("eu preferiria a nota fiscal por aqui, obrigado", True),
+        ("entendi, mas prefiro a nota fiscal por aqui", True),
+        ("mas eu gostaria da nota fiscal", True),
+        ("queria pedir a nota fiscal", True),
+        ("o pedido chegou mas preciso da nota fiscal", True),
+        # As mesmas travas de sempre.
+        ("prefiro não receber a nota", False),
+        ("eu não prefiro a nota por aqui", False),
+        ("prefiro sem nota fiscal", False),
+        ("prefiro o produto e a nota", False),
+        ("prefiro a nota e o produto", False),
+        ("prefiro trocar, manda a nota", False),
+        ("prefiro a nota no cnpj", False),
+        ("prefiro a nota por e-mail", False),
+        ("ainda não chegou prefiro a nota", False),
+        ("não chegou mas preciso da nota", False),
+        ("mas e o pedido? prefiro a nota", False),
+        ("queria pedir a nota do outro pedido", False),
+        ("queria pedir o produto e a nota", False),
+        ("prefiro o produto", False),
+        ("entendi", False),
+        ("mas prefiro", False),
+    ],
+)
+def test_pedido_claro_prefiro(texto, claro):
+    assert nf_automatica.pedido_claro([texto]) is claro
+
+
+def test_d2_recem_feito_olha_a_folga_e_a_data():
+    agora = datetime(2026, 11, 4, 12, tzinfo=UTC)
+    feito = agora - timedelta(hours=13)
+    recem = nf_automatica._recem_feito
+    assert recem("A", {"A": feito}, agora) is True
+    assert recem("A", {"A": feito, "B": feito - timedelta(days=7)}, agora) is True
+    assert recem("A", {"A": feito, "B": feito - timedelta(days=6)}, agora) is False
+    assert recem("A", {"A": feito, "B": None}, agora) is False
+    assert recem("A", {"B": feito}, agora) is False
+    assert recem("A", {"A": agora - timedelta(days=3, minutes=1)}, agora) is False

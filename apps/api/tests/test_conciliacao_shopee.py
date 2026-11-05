@@ -1173,3 +1173,187 @@ async def test_reembolso_antes_de_liberar_continua_com_a_conta_da_liberacao(
     por = {x["chave"]: x for x in resp.json()["comparativo"]["linhas"]}
     assert por["liquido"]["previsto"] == 432.1 and por["liquido"]["dif"] == 0.0
     assert por["previsto_na_venda"]["previsto"] == 732.1
+
+
+def test_baixa_de_afiliados_so_quando_a_conta_fecha_ao_centavo():
+    """05/11 (Vinicius): a baixa sozinha vale só quando a diferença inteira é o afiliado
+    mais os 14% em cima dele. Qualquer outra coisa fica pra alguém olhar."""
+    from app.services.conciliacao_calculo import baixa_de_afiliados
+
+    def conta(**mudou: str) -> dict[str, Decimal]:
+        base = {
+            "preco": "885",
+            "subsidio": "25",
+            "frete_loja": "0",
+            "cupons": "3",
+            "taxas": "124.90",
+            "afiliados": "0",
+        }
+        return {k: Decimal(v) for k, v in {**base, **mudou}.items()}
+
+    venda = conta()
+    fechou = conta(taxas="126.34", afiliados="10.32")
+    assert (
+        baixa_de_afiliados(venda, fechou, Decimal("-11.76"))
+        == "só afiliados: 10.32 + 1.44 de taxa em cima deles = toda a diferença"
+    )
+    assert baixa_de_afiliados(venda, fechou, None) is None
+    # um centavo sobrando na diferença
+    assert baixa_de_afiliados(venda, fechou, Decimal("-11.77")) is None
+    # taxa um centavo acima dos 14%
+    taxa_maior = conta(taxas="126.35", afiliados="10.32")
+    assert baixa_de_afiliados(venda, taxa_maior, Decimal("-11.77")) is None
+    # taxa subiu sem afiliado
+    assert baixa_de_afiliados(venda, conta(taxas="126.34"), Decimal("-1.44")) is None
+    # cupom ou frete junto com o afiliado
+    com_cupom = conta(taxas="126.34", afiliados="10.32", cupons="3.50")
+    assert baixa_de_afiliados(venda, com_cupom, Decimal("-12.26")) is None
+    com_frete = conta(taxas="126.34", afiliados="10.32", frete_loja="1")
+    assert baixa_de_afiliados(venda, com_frete, Decimal("-12.76")) is None
+
+
+async def _liberou_306115(db, make_user, *, servico: float = 26.34, renda: float = 720.34):
+    """O 306115 até a liberação: conta da venda guardada, a Shopee pagou `renda` e a
+    Margem releu a conta. `servico` é a taxa de serviço fechada na liberação."""
+    from app.models import MarketplaceOrderFinancial
+    from app.services.conciliacao_calculo import recalcular_loja
+
+    loja = await _loja_shopee(db, make_user, inicio=date(2026, 10, 1))
+    fin = MarketplaceOrderFinancial(
+        platform=IntegrationPlatform.SHOPEE,
+        integration_id=loja.integration_id,
+        external_order_id="261006VX383P9J",
+        status="posted",
+        gross_amount=Decimal("885"),
+        fee_amount=Decimal("124.90"),
+        freight_amount=Decimal("0"),
+        net_amount=Decimal("732.10"),
+        raw={"escrow": {"order_income": _income_306115(liberado=False)}},
+    )
+    db.add(fin)
+    await db.commit()
+    await recalcular_loja(db, loja, agora=datetime(2026, 10, 10, 12, tzinfo=UTC))
+    await db.commit()
+    db.add(
+        ConciliacaoMovimento(
+            integration_id=loja.integration_id,
+            platform=IntegrationPlatform.SHOPEE,
+            origem="shopee_carteira",
+            id_externo="lib1",
+            data=datetime(2026, 10, 14, 15, tzinfo=UTC),
+            tipo="venda_liberada",
+            descricao="ESCROW_VERIFIED_ADD",
+            sub_tipo="ESCROW_VERIFIED_ADD",
+            pedido_marketplace="261006VX383P9J",
+            credito=Decimal(str(renda)),
+            debito=Decimal("0"),
+            raw={},
+        )
+    )
+    income = {
+        **_income_306115(liberado=True),
+        "net_service_fee": servico,
+        "escrow_amount": renda,
+    }
+    fin.raw = {"escrow": {"order_income": income}}
+    fin.net_amount = Decimal(str(renda))
+    await db.commit()
+    return loja
+
+
+async def _pedido_310001(db):
+    from app.models import ConciliacaoPedido
+
+    return (
+        await db.execute(
+            select(ConciliacaoPedido)
+            .where(ConciliacaoPedido.pedido_bling == "310001")
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+
+
+async def test_recebido_a_menos_so_de_afiliado_finaliza_sozinho(db, make_user, auth_as, client):
+    """05/11 (Vinicius: "não gostaria que ficasse esses amarelo para sempre"): o pedido
+    continua "recebido a menos", com a diferença e o motivo, mas o robô finaliza e ele
+    sai do "Onde agir". Movimento novo reabre, e aí só a pessoa fecha."""
+    from app.services.conciliacao_calculo import recalcular_loja
+
+    loja = await _liberou_306115(db, make_user)
+    agora = datetime.now(UTC)
+    r = await recalcular_loja(db, loja, agora=agora)
+    await db.commit()
+    assert r["finalizado_so_afiliados"] == 1
+    p = await _pedido_310001(db)
+    assert p.situacao == "recebido_a_menos" and p.dif_previsto_recebido == Decimal("-11.76")
+    assert p.venda_liquido == Decimal("732.10") and p.recebido == Decimal("720.34")
+    assert p.motivo == "na liberação a Shopee mudou taxas 124.90 → 126.34, afiliados 0.00 → 10.32"
+    assert p.etapa == "finalizado" and p.etapa_por == "robô"
+    assert p.etapa_motivo == "só afiliados: 10.32 + 1.44 de taxa em cima deles = toda a diferença"
+    # a rodada seguinte não finaliza de novo nem mexe na data
+    finalizado_em = p.etapa_em
+    r = await recalcular_loja(db, loja, agora=agora + timedelta(days=1))
+    await db.commit()
+    assert "finalizado_so_afiliados" not in r
+    p = await _pedido_310001(db)
+    assert p.etapa == "finalizado" and p.etapa_em == finalizado_em
+    # fora do "Onde agir hoje", que é também a lista do vigia no Threema
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    corpo = (await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-14"})).json()
+    assert not [a for a in corpo["agir"] if "a menos" in a["titulo"]]
+    # cobrança nova no pedido: reabre e o robô não fecha de novo
+    db.add(
+        ConciliacaoMovimento(
+            integration_id=loja.integration_id,
+            platform=IntegrationPlatform.SHOPEE,
+            origem="shopee_carteira",
+            id_externo="cobranca1",
+            data=agora + timedelta(days=2),
+            tipo="ajuste_shopee",
+            descricao="ADJUSTMENT_CENTER_DEDUCT",
+            sub_tipo="ADJUSTMENT_CENTER_DEDUCT",
+            pedido_marketplace="261006VX383P9J",
+            pedido_bling="310001",
+            vinculado_por="vinicius",
+            credito=Decimal("0"),
+            debito=Decimal("5"),
+            raw={},
+        )
+    )
+    await db.commit()
+    for dias in (3, 4):
+        await recalcular_loja(db, loja, agora=agora + timedelta(days=dias))
+        await db.commit()
+        p = await _pedido_310001(db)
+        assert p.etapa == "reaberto" and "movimento novo" in p.etapa_motivo
+
+
+async def test_diferenca_alem_do_afiliado_continua_pendencia(db, make_user):
+    """R$ 1,00 a mais de taxa de serviço junto com o afiliado: a conta dos 14% não fecha
+    e o pedido fica no "Onde agir"."""
+    from app.services.conciliacao_calculo import recalcular_loja
+
+    loja = await _liberou_306115(db, make_user, servico=27.34, renda=719.34)
+    r = await recalcular_loja(db, loja, agora=datetime.now(UTC))
+    await db.commit()
+    assert "finalizado_so_afiliados" not in r
+    p = await _pedido_310001(db)
+    assert p.situacao == "recebido_a_menos" and p.dif_previsto_recebido == Decimal("-12.76")
+    assert p.etapa == "pendencia" and p.etapa_motivo is None
+
+
+async def test_afiliado_reaberto_pela_pessoa_nao_volta_a_finalizar(db, make_user):
+    from app.services.conciliacao_calculo import recalcular_loja
+
+    loja = await _liberou_306115(db, make_user)
+    agora = datetime.now(UTC)
+    await recalcular_loja(db, loja, agora=agora)
+    await db.commit()
+    p = await _pedido_310001(db)
+    p.etapa, p.etapa_por, p.etapa_motivo = "reaberto", "cairo sa", "quero conferir"
+    await db.commit()
+    await recalcular_loja(db, loja, agora=agora + timedelta(days=1))
+    await db.commit()
+    p = await _pedido_310001(db)
+    assert p.etapa == "reaberto" and p.etapa_por == "cairo sa"
+    assert p.etapa_motivo == "quero conferir"

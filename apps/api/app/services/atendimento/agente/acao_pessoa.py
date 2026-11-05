@@ -33,7 +33,8 @@ O que o código detecta, na ordem da régua (`gatilhos`):
                          pedido AINDA NÃO postado;
   8  alterar_endereco    pista de endereço/destinatário (ou a opção 4) e o
                          pedido ainda não postado — depois de postado é
-                         orientação;
+                         orientação; no Mercado Livre nunca (o dono, 05/11/2026:
+                         a loja não altera, `constantes.PLATAFORMAS_SEM_ALTERAR_ENDERECO`);
   9  enviar_arquivo_nf   `ia.nf_exige_pessoa`;
   10 analisar_evidencia  anexo do cliente DEPOIS de a loja pedir foto/vídeo
                          (só anexo: ANTES do modelo);
@@ -42,8 +43,10 @@ O que o código detecta, na ordem da régua (`gatilhos`):
                          Entregue do Bling — o mesmo dado do modelo, em toda
                          plataforma, 21/10/2026), extravio, ou o status de
                          volta ao remetente (também o "consta entregue" do
-                         retrato do MESMO pedido); e, por ÚLTIMO (22/10/2026,
-                         item 22), a entrega atrasada (`atraso_de_entrega`);
+                         retrato do MESMO pedido); a entrega errada (no Mercado
+                         Livre, só a entrega feita: `_entrega_errada_no_ml`); e, por
+                         ÚLTIMO (22/10/2026, item 22), a entrega atrasada
+                         (`atraso_de_entrega`);
   12 aprovar_fora_da_plataforma  Pix, depósito, dados bancários, "por fora",
                          reembolso parcial, "pago a diferença" (a diferença
                          vira orientação com a recusa padrão aprovada);
@@ -70,13 +73,13 @@ import functools
 import re
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
 from sqlalchemy import select
 
-from app.models import BlingOrder
+from app.models import AtendimentoConversa, AtendimentoMensagem, BlingOrder, IntegrationPlatform
 from app.services.atendimento import cartoes_plataforma, constantes, foco_devolucao, ia, validador
 from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento.agente import contexto as agente_ctx
@@ -806,6 +809,75 @@ _ENTREGA_ERRADA = re.compile(
     r"|\bdeix\w*\s+(?:\w+\s+){0,2}?(?:em|no|na|com)\s+outr[ao]\s+(?:lugar|casa|endereco|pessoa"
     r"|vizinho|apartamento|predio)\b"
     r"|\b(?:casa|endereco|apartamento|predio)\s+errad\w*\b"
+)
+# As mesmas palavras pedem a mudança ("coloquei o endereço errado", "pode entregar em outro
+# endereço?"). No Mercado Livre, onde a loja não altera, a separação é pela entrega: feita, ou a
+# caminho do lugar errado, é chamado. O verbo que também fala de outra coisa ("recebi a
+# confirmação", "vocês já enviaram", "foi postado") só conta colado ao lugar errado: "mandaram para
+# o endereço errado" e o pacote "andando em endereço errado" (18f03bf2) são a entrega; "já enviaram,
+# pode mudar?" é o pedido. O lugar errado é o lugar: "o produto errado" e "outro dia" são outra
+# coisa, e o endereço antigo é o errado.
+_LUGAR_DO_ENDERECO = (
+    r"(?:casa|endereco|lugar|pessoa|vizinh[oa]|apartamento|predio|rua|cidade|bloco|bairro|numero|cep"
+    r"|estado)"
+)
+_LUGAR_ERRADO_SEM_PREPOSICAO = (
+    rf"(?:{_LUGAR_DO_ENDERECO}\s+(?:errad\w*|antig\w*)"
+    r"|outr[ao]\s+(?:casa|endereco|lugar|pessoa|vizinh[oa]|apartamento|predio|rua|cidade|bloco"
+    r"|bairro|estado|cliente))\b"
+)
+_LUGAR_ERRADO = (
+    r"(?:(?:para|pra|pro|no|na|em|num|numa|a|ao|com)\s+)?(?:(?:o|a|um|uma|meu|minha)\s+)?"
+    rf"{_LUGAR_ERRADO_SEM_PREPOSICAO}"
+)
+_VAO_ATE_O_LUGAR = (
+    r"(?:(?:parar|enviad[oa]|mandad[oa]|despachad[oa]|postad[oa]|levad[oa]|ja|mesmo|sim|meu|minha|o"
+    r"|a|pedido|pacote|encomenda|produto|celular|caixa)\s+){0,3}?"
+)
+# O "é entregue" e o "que entregue" não são o fato, e o "entregou" depois de "e" e de "que" é ("veio
+# e entregou", "disse que entregou").
+_ENTREGOU = (
+    r"(?<!nao )(?<!n )\b(?:entregaram|entregou)\b"
+    r"|(?<!nao )(?<!n )(?<!nao foi )(?<!n foi )(?<!ser )(?<!sera )(?<!for )(?<!que )(?<!seja )"
+    r"(?<!favor )(?<!e )(?<!eh )\bentregues?\b"
+)
+_VERBO_NO_LUGAR_ERRADO = (
+    r"\b(?:deixaram|deixou|levaram|levou|entregando|mandaram|mandou|mandando|mandad[oa]|enviaram"
+    r"|enviou|enviando|enviad[oa]|despachad[oa]|postad[oa]|chegou|chegaram|chegando|andando|andou"
+    rf"|rodando|rodou|circulando)\s+{_VAO_ATE_O_LUGAR}{_LUGAR_ERRADO}"
+)
+_ENTREGA_NO_LUGAR_ERRADO = re.compile(_VERBO_NO_LUGAR_ERRADO)
+_ENTREGA_JA_FEITA = re.compile(
+    rf"{_ENTREGOU}|{_VERBO_NO_LUGAR_ERRADO}|\b(?:outr[ao]\s+pessoa|quem)\s+(?:recebeu|assinou)\b"
+)
+# "Foi", "veio" e "indo" nem sempre têm o pacote por sujeito ("a compra foi com o endereço errado",
+# "estou indo para outra cidade"): com o pedido de mudar na mesma fala, são o pedido.
+_A_CAMINHO_DO_LUGAR_ERRADO = re.compile(
+    r"(?<!estou )(?<!to )(?<!tou )(?<!vou )(?<!estamos )\b(?:foi|foram|veio|vieram|indo)\s+"
+    rf"{_VAO_ATE_O_LUGAR}{_LUGAR_ERRADO}"
+    rf"|\b(?:entreg\w*|passou|passaram)\s+(?:\w+\s+){{0,2}}?(?:na|no|em|para|pra|pro|a)\s+"
+    rf"{_LUGAR_DO_ENDERECO}\s+errad\w*"
+    r"|\b(?:errou|erraram)\s+(?:\w+\s+){0,2}?(?:endereco|cep|casa|rua|numero)\b"
+)
+_PEDE_PARA_MUDAR = re.compile(
+    r"\b(?:quero|queria|preciso|precisava|pode|podem|poderia|posso|tem\s+como|teria\s+como|consegue"
+    r"|conseguem|conseguiria|da\s+pra|da\s+para|gostaria|como)\s+(?:de\s+)?(?:\w+\s+){0,2}?"
+    r"(?:alterar|mudar|trocar|corrigir|atualizar|arrumar|consertar|editar|ajustar)\b"
+)
+# A entrega que não aconteceu também não é pedido ("ia entregar no meu endereço e não entregaram"),
+# a menos que ele peça a mudança com todas as letras ("ainda não chegou e quero mudar o endereço").
+_ENTREGA_QUE_FALHOU = re.compile(
+    r"\b(?:nao|n)\s+(?:me\s+|nos\s+)?(?:entregaram|entregou|entregue|foi\s+entregue)\b"
+)
+# A entrega feita no lugar errado fora das formas de `_ENTREGA_ERRADA` ("entregaram no vizinho",
+# "o correio entregou no número errado", "foi entregue em outro bairro"). Só o ML: lá a separação
+# acima tirou o chamado de quem só pede a mudança, e este é quem não pode perdê-lo.
+_ENTREGA_FEITA_NO_LUGAR_ERRADO = re.compile(
+    r"(?:(?<!nao )(?<!n )\b(?:entregaram|entregou|deixaram|deixou|levaram|levou)\b"
+    r"|(?<!nao )(?<!n )(?<!nao foi )(?<!n foi )(?<!ser )(?<!sera )(?<!for )(?<!que )(?<!seja )"
+    r"(?<!favor )(?<!e )(?<!eh )\bentregues?\b)"
+    rf"[^.!?]{{0,40}}?(?:\bvizinh\w*|\b{_LUGAR_ERRADO_SEM_PREPOSICAO}"
+    r"|\bnao\s+e\s+(?:o\s+)?meu\s+endereco\b)"
 )
 _RASTREIO_PARADO = re.compile(
     r"\b(?:rastreio|rastreamento|pedido|encomenda|pacote|status|codigo)\s+(?:\w+\s+){0,2}?"
@@ -2925,18 +2997,39 @@ def _aceitou_a_oferta(textos: Sequence[str], pede: bool) -> bool:
     )
 
 
+# D4 do dono (04/11/2026; 06ae0f18: a IA respondeu às 19:45:08 e o "6" veio às 19:45:09): o "6"
+# sozinho até 60 s depois da resposta do agente cruzou com ela, não é insistência. Depois disso,
+# nada muda. O 3º pedido seguido, o irritado e o "sim" à pessoa oferecida valem antes.
+_SEIS_CRUZOU_ATE_S = 60
+
+
+def _seis_cruzou_com_a_resposta(rajada: Sequence[Any], ultima: Any | None) -> bool:
+    """O turno é só o "6" do menu, até `_SEIS_CRUZOU_ATE_S` depois da resposta do agente? PURA."""
+    if ultima is None or getattr(ultima, "origem", None) != constantes.ORIGEM_IA:
+        return False
+    respondeu = _momento(ultima)
+    falas = [_momento(m) for m in rajada]
+    if respondeu is None or None in falas:
+        return False
+    return all(ia._OPCAO_ATENDENTE.match(_plano_de(m.texto)) for m in rajada) and all(
+        (quando - respondeu).total_seconds() <= _SEIS_CRUZOU_ATE_S for quando in falas
+    )
+
+
 def pedido_de_pessoa(recentes: Sequence[Any], gatilho: Any | None) -> str | None:
     """O pedido de pessoa que AINDA manda para pessoa no agente: o motivo, ou None. PURA.
 
     Ver o comentário da seção (decisão do dono, 21/10/2026). Na ordem: recusou
     o virtual; pediu a pessoa oferecida (ou disse "sim" à oferta); pediu com
     irritação, alerta, xingamento ou reclamação; o 3º pedido seguido
-    (`_TETO_DE_PEDIDOS`); e, sem nada novo a responder: disse que a resposta
+    (`_TETO_DE_PEDIDOS`); fora o "6" que cruzou com a resposta do agente (D4 de 04/11/2026);
+    e, sem nada novo a responder: disse que a resposta
     de verdade da loja não respondeu, ou pediu de novo depois da resposta da
     loja (`ia.MOTIVO_INSISTIU_EM_PESSOA`).
     """
     recentes = _ate_o_turno(list(recentes), gatilho)
-    textos = [m.texto for m in ia.rajada_do_cliente(recentes, gatilho) if _do_cliente(m)]
+    rajada = [m for m in ia.rajada_do_cliente(recentes, gatilho) if _do_cliente(m)]
+    textos = [m.texto for m in rajada]
     if not textos:
         return None
     if any(recusa_o_virtual(t) for t in textos):
@@ -2961,6 +3054,8 @@ def pedido_de_pessoa(recentes: Sequence[Any], gatilho: Any | None) -> str | None
         return MOTIVO_PEDIU_IRRITADO
     if _pedidos_seguidos(turnos) + 1 >= _TETO_DE_PEDIDOS:
         return MOTIVO_PEDIU_3_VEZES
+    if _seis_cruzou_com_a_resposta(rajada, ultima):
+        return None
     # D3 (decisão do dono, 23/10/2026 ~12:50): o "6"/"Falar com Atendente" do menu junto de
     # outra fala do cliente ("Já solicitei meu reembolso / Pois o pedido não chegou / 6") é
     # a escolha da opção, não a insistência — o atendente é o agente, que responde o que o
@@ -3378,9 +3473,13 @@ def gatilhos(
     # cancelar se demorar?" antes da compra é orientação).
     if pode_nao_ter_saido(postado, conversa, ctx=ctx, recentes=recentes):
         detalhe = None if postado == POSTADO_NAO else DETALHE_POSTAGEM_DESCONHECIDA
-        if "cancelamento" in pistas or "cancelamento" in menu:
+        if "cancelamento" in menu or _pede_cancelar(
+            pistas, plano, getattr(conversa, "plataforma", None)
+        ):
             saida.append(_gatilho(constantes.ACAO_SEGURAR_ENVIO, detalhe))
-        if "endereco" in pistas or "endereco" in menu or _DESTINATARIO.search(plano):
+        if _loja_altera_endereco(getattr(conversa, "plataforma", None)) and (
+            "endereco" in pistas or "endereco" in menu or _DESTINATARIO.search(plano)
+        ):
             saida.append(_gatilho(constantes.ACAO_ALTERAR_ENDERECO, detalhe))
     # 9 — arquivo, correção ou reemissão da NF (e a NF no CNPJ).
     if ia.nf_exige_pessoa(textos) or _PEDE_NF_CNPJ.search(plano):
@@ -3416,7 +3515,11 @@ def gatilhos(
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_NAO_RECEBEU))
     elif extravio_relatado(plano) or _SUMIU.search(plano):
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_EXTRAVIO))
-    elif _ENTREGA_ERRADA.search(plano):
+    elif (
+        _ENTREGA_ERRADA.search(plano)
+        if _loja_altera_endereco(getattr(conversa, "plataforma", None))
+        else _entrega_errada_no_ml(plano)
+    ):
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_ENTREGA_ERRADA))
     elif _RASTREIO_PARADO.search(plano) and postado not in (POSTADO_NAO, POSTADO_CANCELADO):
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_RASTREIO_PARADO))
@@ -3530,11 +3633,164 @@ def pode_nao_ter_saido(
 # ── Os OUTROS pedidos lidos pelas ferramentas (revisão de 20/10/2026) ─────
 
 
+def _loja_altera_endereco(plataforma: str | None) -> bool:
+    return plataforma not in constantes.PLATAFORMAS_SEM_ALTERAR_ENDERECO
+
+
+# "Comprei no endereço errado" é o pedido da regra do endereço, não o "comprei errado" do gatilho 7.
+_COMPREI_NO_ENDERECO_ERRADO = re.compile(
+    r"\b(?:comprei|pedi|finalizei)\s+(?:(?:no|com|o|um)\s+)?(?:endereco\s+errad\w*"
+    r"|errad\w*\s+(?:o\s+)?endereco)\b"
+)
+
+
+def _pede_cancelar(pistas: Collection[str], plano: str, plataforma: str | None) -> bool:
+    """A pista do cancelamento vale no gatilho 7? PURA. Fora do ML, sempre."""
+    if "cancelamento" not in pistas:
+        return False
+    if _loja_altera_endereco(plataforma) or not _COMPREI_NO_ENDERECO_ERRADO.search(plano):
+        return True
+    sem_o_endereco = _COMPREI_NO_ENDERECO_ERRADO.sub(" ", plano)
+    return "cancelamento" in {
+        *ia.pistas_de_categoria(sem_o_endereco),
+        *_pistas_do_agente(sem_o_endereco),
+    }
+
+
+# A mudança com todas as letras: o verbo colado ao lugar da entrega, sem pontuação e sem outro nome
+# no meio. A pista do legado (55 caracteres de qualquer coisa) lê "Quero trocar a mala, qual o
+# endereço para devolver?" e "Mudei de ideia, qual o endereço da loja?"; "Meu endereço é em Goiás,
+# chega amanhã?" também não pede nada. O lugar tem outros nomes ("mudar o local", "alterar a rua",
+# "acrescentar o complemento", "o endereço certo é outro", "esse endereço não é mais válido").
+_MUDAR_NA_FALA = r"(?:alter|mud|troc|corrig|atualiz|arrum|conserta|edit|ajust)\w*"
+_LUGAR_NA_FALA = (
+    r"(?:endereco|cep|local|rua|bairro|complemento|numero\s+d[ao]\s+(?:casa|apartamento|apto|predio"
+    r"|residencia|rua))"
+)
+_VAO_DA_MUDANCA = (
+    r"(?:(?:o|a|os|as|meu|minha|seu|sua|este|esse|esta|essa|de|do|da|para|pra|pro|um|uma|outro|outra"
+    r"|novo|nova|ja|logo|so|dados?|nome)\s+){0,3}?"
+)
+_MUDANCA_DO_ENDERECO_NA_FALA = re.compile(
+    rf"\b{_MUDAR_NA_FALA}\s+{_VAO_DA_MUDANCA}{_LUGAR_NA_FALA}\b"
+    rf"|\b(?:endereco|cep)\s+(?:(?!nao\b|for\b|se\b)\w+\s+){{0,4}}?(?:{_MUDAR_NA_FALA}|errad\w*"
+    r"|incorret\w*|incomplet\w*)\b"
+    # O "é" sem acento, com o que só ele aceita: "o endereço certo e agora?" é a conjunção.
+    r"|\bendereco\s+(?:certo|correto|novo)\s+e\s+(?:(?:n[ao]|em|a|o)\s+)?"
+    r"(?:outr[oa]|rua|avenida|av|travessa|alameda|rodovia|\d+)\b"
+    r"|\b(?:endereco|cep)\s+nao\s+(?:e\s+mais\s+valido|vale\s+mais|existe\s+mais)\b"
+    r"|\b(?:acrescent\w*|inclu\w*|adicion\w*|coloc\w*|bot(?:ar|ei|a)|insir\w*|inser\w*)\s+"
+    rf"{_VAO_DA_MUDANCA}(?:complemento|apto|apartamento|bloco|numero\s+d[ao]\s+(?:casa|apartamento"
+    r"|apto|predio|residencia|rua))\b"
+    r"|\bcomplemento\s+d[eo]\s+endereco\b"
+    # "Posso receber na casa da minha mãe depois de comprar?"
+    r"|\b(?:receber|entregar|enviar|mandar)\s+(?:\w+\s+){0,4}?(?:casa|endereco|trabalho|local"
+    r"|outr[ao])\b[^.!?]{0,30}\b(?:depois|apos)\s+d[ae]\s+(?:comprar|pagar|compra|pagamento)\b"
+    # "Se eu errar o endereço vocês arrumam?", "coloquei errado o endereço". O "erro no CEP" do site
+    # e o "produto errado no meu endereço" não são o endereço errado.
+    r"|\b(?:errei|errar|erramos|errou|erraram|errando)\s+(?:\w+\s+){0,2}?(?:endereco|cep)\b"
+    r"|\berrad[oa]\s+(?:o|a|meu|minha)\s+(?:endereco|cep)\b"
+)
+# O que parece o pedido e não é: quem nega o querer ("não quero mudar o endereço, quanto tempo
+# leva?", "não mudei o endereço"), a loja que mudou ("vocês mudaram de endereço?") e o endereço de
+# devolver. Sai da conta só o trecho: "não quero mudar o CEP, quero corrigir a rua" continua pedido.
+# "Rua tal, quadra 13, lote 7": o endereço novo na mensagem, depois da compra. Na pergunta pública,
+# "envia para a rua tal, CEP tal?" é a cobertura.
+_ENDERECO_ESCRITO = re.compile(
+    r"\b(?:rua|avenida|av|travessa|alameda|rodovia)\s+\w+[^.!?]{0,60}?\b(?:quadra|lote|cep"
+    r"|referencia)\b"
+)
+_NAO_E_O_PEDIDO = re.compile(
+    r"\bnao\s+(?:quero|queria|preciso|precisa|pretendo|vou|tenho\s+interesse\s+em|e\s+para|e\s+pra"
+    rf"|conseguiu|conseguiram)\s+(?:\w+\s+)?(?:{_MUDAR_NA_FALA}|acrescent\w*|inclu\w*|adicion\w*"
+    rf"|coloc\w*)\s+{_VAO_DA_MUDANCA}(?:{_LUGAR_NA_FALA}|apto|apartamento|bloco)\b"
+    rf"|\bnao\s+(?:mudei|alterei|troquei|corrigi|errei)\s+{_VAO_DA_MUDANCA}{_LUGAR_NA_FALA}\b"
+    r"|\b(?:voces|vcs|voce|vc|loja)\s+(?:mudaram|mudou)\s+de\s+endereco\b"
+    r"|\b(?:estarei|vou\s+estar)\s+em\s+outro\s+endereco\b"
+    r"|\b(?:outro\s+)?endereco\s+(?:(?:\w+\s+){0,2}?(?:para|pra|de)\s+)?devol\w*"
+)
+# O frete que muda com o CEP ("se eu trocar de CEP o frete muda?") e o rastreio que acusa o endereço
+# ("apareceu endereço incorreto no rastreio") são outra pergunta, e o modelo responde.
+_OUTRA_PERGUNTA_COM_O_CEP = re.compile(
+    r"\b(?:se|mudando|trocando|alterando)\b[^.!?,]{0,40}?\b(?:endereco|cep)\b[^.!?,]{0,30}?"
+    r"\b(?:frete|prazo|valor)\b"
+    r"|\b(?:frete|prazo|valor)\b[^.!?,]{0,20}?\bse\b[^.!?,]{0,30}?\b(?:endereco|cep)\b"
+    r"|\b(?:apareceu|aparece|consta|mostra|diz|dizendo|informa)\b[^.!?]{0,30}\bendereco\s+"
+    r"(?:errad|incorret|incomplet)\w*"
+)
+_ENDERECO_DA_NOTA = re.compile(r"\bendereco\s+(?:d|n)[ao]\s+(?:nota|nf|nfe|danfe)\b")
+
+
+def _entrega_errada_no_ml(plano: str) -> bool:
+    """O gatilho 11 no ML: a entrega feita, ou a caminho, no lugar errado? PURA."""
+    return bool(
+        (_ENTREGA_ERRADA.search(plano) and _ENTREGA_JA_FEITA.search(plano))
+        or _ENTREGA_NO_LUGAR_ERRADO.search(plano)
+        or _ENTREGA_FEITA_NO_LUGAR_ERRADO.search(plano)
+        or (_A_CAMINHO_DO_LUGAR_ERRADO.search(plano) and not _PEDE_PARA_MUDAR.search(plano))
+    )
+
+
+def entrega_relatada(plano: str) -> bool:
+    """O turno conta uma entrega feita, a caminho do lugar errado, ou que falhou? PURA. Só o ML usa:
+    não é o pedido de mudança da regra do endereço, e a frase fixa não responde."""
+    return bool(
+        _ENTREGA_JA_FEITA.search(plano)
+        or _ENTREGA_FEITA_NO_LUGAR_ERRADO.search(plano)
+        or (_A_CAMINHO_DO_LUGAR_ERRADO.search(plano) and not _PEDE_PARA_MUDAR.search(plano))
+        or (_ENTREGA_QUE_FALHOU.search(plano) and not _MUDANCA_DO_ENDERECO_NA_FALA.search(plano))
+    )
+
+
+def _falas_do_turno(recentes: Sequence[Any], gatilho: Any | None) -> str:
+    """O plano do turno com cada fala uma vez e separadas: o de `_planos_do_turno` repete a fala, e
+    a regra lê "endereço para devolver QUERO TROCAR" entre o fim dela e o começo da cópia."""
+    rajada, textos, _plano_turno = _planos_do_turno(list(recentes), gatilho)
+    return _plano([". ".join(dict.fromkeys([*(m.texto or "" for m in rajada), *textos]))])
+
+
+def entrega_relatada_no_turno(recentes: Sequence[Any], gatilho: Any | None) -> bool:
+    """`entrega_relatada` nas falas do turno. PURA."""
+    return entrega_relatada(_falas_do_turno(recentes, gatilho))
+
+
+def pede_alterar_endereco(
+    recentes: Sequence[Any], gatilho: Any | None, *, canal: str | None = None
+) -> bool:
+    """O turno pede mudar o endereço ou o destinatário? PURA. Só o ML usa.
+
+    O "4" do menu, a mudança com todas as letras e, depois da compra, o que os gatilhos 8 e 11 leem
+    como outro lugar. Na pergunta pública não há compra: "envia para outra cidade?" e "entrega no
+    meu trabalho?" são a cobertura. A entrega relatada não é pedido, e o "4" que veio com outra
+    opção do menu também não diz nada sozinho."""
+    recentes = list(recentes)
+    plano = _falas_do_turno(recentes, gatilho)
+    if ia.assuntos_sensiveis_do_menu(recentes, gatilho) == ["endereco"]:
+        return True
+    if entrega_relatada(plano) or _ENDERECO_DA_NOTA.search(plano):
+        return False
+    if _OUTRA_PERGUNTA_COM_O_CEP.search(plano):
+        return False
+    plano = _NAO_E_O_PEDIDO.sub(" ", plano)
+    if _MUDANCA_DO_ENDERECO_NA_FALA.search(plano):
+        return True
+    if canal == constantes.CANAL_PERGUNTA:
+        return False
+    return bool(
+        _ENDERECO_ESCRITO.search(plano)
+        or _PEDE_ENDERECO.search(plano)
+        or _DESTINATARIO.search(plano)
+        or _ENTREGA_ERRADA.search(plano)
+    )
+
+
 def gatilhos_de_outro_pedido(
     ctx_pedido: Mapping[str, Any],
     postado: str | None,
     recentes: Sequence[Any],
     gatilho: Any | None,
+    *,
+    plataforma: str | None = None,
 ) -> list[GatilhoPessoa]:
     """Os gatilhos de ESTADO de um pedido que o agente leu por ferramenta. PURA.
 
@@ -3565,9 +3821,11 @@ def gatilhos_de_outro_pedido(
         saida.append(_gatilho(constantes.ACAO_AVALIACAO_BAIXA))
     if pedido and (postado == POSTADO_NAO or postado is None):
         detalhe = None if postado == POSTADO_NAO else DETALHE_POSTAGEM_DESCONHECIDA
-        if "cancelamento" in pistas or "cancelamento" in menu:
+        if "cancelamento" in menu or _pede_cancelar(pistas, plano, plataforma):
             saida.append(_gatilho(constantes.ACAO_SEGURAR_ENVIO, detalhe))
-        if "endereco" in pistas or "endereco" in menu or _DESTINATARIO.search(plano):
+        if _loja_altera_endereco(plataforma) and (
+            "endereco" in pistas or "endereco" in menu or _DESTINATARIO.search(plano)
+        ):
             saida.append(_gatilho(constantes.ACAO_ALTERAR_ENDERECO, detalhe))
     if pedido and _NAO_RECEBEU.search(plano) and pedido_entregue(ctx_pedido):
         saida.append(_gatilho(constantes.ACAO_ABRIR_CHAMADO, DETALHE_NAO_RECEBEU))
@@ -3698,6 +3956,429 @@ async def gatilhos_de_codigo(
         base.recentes, gatilho, com_pedido=bool((base.ctx or {}).get("pedido"))
     )
     return lista
+
+
+# ── O atacado no Mercado Livre (decisão do dono, 05/11/2026) ───────────────
+#
+# Pedido de preço melhor por uma quantidade: a resposta da equipe é fixa
+# (`constantes.FRASE_ATACADO_ML`, 070f1828, 378b1cd9, 8f27c582) e sai sem modelo nem verificador
+# (como o recibo da evidência). A quantidade acima do estoque (d75b1521: 60 com 3 no estoque) ou
+# o estoque que não se determina vão para pessoa. O varejo sem quantidade segue como hoje.
+#
+# O recorte é o menor que os dados sustentam, até o dono decidir: o 20% só apareceu em mala e
+# frasqueira, nas lojas Marquezini e KFA, a partir de 15 unidades. Em celular a equipe respondeu
+# "esse é o melhor preço" (jlas2, kfa Doogee): lá nada muda. A resposta é pública e sem volta.
+ATACADO_RESPONDE = "responde"
+ATACADO_PESSOA = "pessoa"
+ATACADO_LOJAS = frozenset({"marquezini", "kfa"})
+ATACADO_QTD_MIN = 15
+# Cada pergunta do ML é uma conversa nova: o "informe o modelo" que o comprador responde chegaria
+# ao modelo sem contexto, e o anúncio de atacado quem cria é a equipe.
+ATACADO_SEGUIMENTO = timedelta(days=7)
+MOTIVO_ATACADO_SEGUIMENTO = (
+    "o comprador recebeu a resposta do atacado nos últimos 7 dias e voltou: é com a pessoa"
+)
+MOTIVO_ATACADO_POS_VENDA = (
+    "pediu {qtd} unidades no pós-venda: o estoque não se determina sem o anúncio"
+)
+MOTIVO_ATACADO_SEM_ESTOQUE = "pediu {qtd} unidades e o estoque do anúncio não se determina"
+MOTIVO_ATACADO_ACIMA = "pediu {qtd} unidades, acima do estoque do anúncio"
+MOTIVO_ATACADO_VARIACAO = "pediu {qtd} unidades de uma variação: o estoque dela não se determina"
+MOTIVO_ATACADO_CITA = "pediu {qtd} unidades citando o anúncio ou o desconto: a frase não responde"
+
+_UNIDADE_DO_ATACADO = (
+    r"(?:un|und|unds|unid|unids|unidades?|pecas?|pcs?|malas?|frasqueiras?|itens|delas|deles"
+    r"|(?:dessas?|desses?|destas?|destes?)(?:\s+(?:malas?|frasqueiras?|unidades?|pecas?|itens))?)"
+)
+# A frase é pública, sem modelo e sem volta, e o pedido real é curto ("consegue um valor melhor pra
+# 20UN?", "Quero um orçamento para 60 delas"): a fala INTEIRA tem de caber nesta gramática. O que
+# sobrar é outra coisa, e listas do que não pode ("esse preço vale para 20 unidades?", "20 unidades
+# de rodinha", "aceita cartão?", "faço 150 cada") nunca fecham. A quantidade só vale com a unidade
+# escrita: sem ela o número é da mala ("quero 24"), do desconto ou de outra coisa.
+_LOTE_DO_ATACADO = re.compile(
+    r"(?<![\d.,%])(?:(?P<faixa>\d{1,5})\s+(?:ou|a)\s+|(?P<mais>\d{1,5})\s+e\s+)?"
+    r"(?P<n>\d{1,3}(?:\.\d{3})+|\d{1,5})\s*"
+    rf"(?P<mil>mil\s+)?(?:(?P<duzia>duzias?)|(?P<unidade>{_UNIDADE_DO_ATACADO}))\b"
+)
+_MARCA_DO_LOTE = "§"
+# O que liga o pedido ao lote: "para 20", "acima de 20", "umas 20", "as 20".
+_ANTES_DO_LOTE = re.compile(
+    r"(?:\b(?:para|pra|por|de|das|dos|em|nas|nos|acima\s+de|a\s+partir\s+de|mais\s+de|cerca\s+de"
+    rf"|umas?|uns|as|os|ate|entre)\s+|\bp/\s*)+(?={_MARCA_DO_LOTE})"
+)
+_NOME_DO_PRECO = r"(?:valor|preco|desconto|orcamento|cotacao)"
+_DO_PRECO = r"(?:\s+(?:melhor|especial|unitario|diferenciado))?"
+_FICA_OU_SAI = r"(?:fica|ficam|ficaria|ficariam|sai|saem|sairia|sairiam|saira)"
+_PEDE_O_PRECO = re.compile(
+    # "qual o melhor preço", "qual seria o valor"
+    rf"\bqual\s+(?:e\s+|seria\s+|fica\s+)?(?:o\s+|seu\s+)?(?:melhor\s+)?{_NOME_DO_PRECO}{_DO_PRECO}\b"
+    # "quanto fica", "quanto custariam", "por quanto sai", "fica quanto", "sai por quanto". O que já
+    # "ficou" ou "saiu" é a compra passada.
+    rf"|\b(?:por\s+)?quanto\s+(?:{_FICA_OU_SAI}|custa\w*|seria\w*|faz\w*|e|sao|de\s+desconto)\b"
+    rf"|\b(?:{_FICA_OU_SAI}|custa\w*)\s+(?:por\s+)?quanto\b"
+    # "consegue um valor melhor", "consegue melhorar o preço", "tem desconto", "faz preço", "quero
+    # um orçamento", "me passa o valor"
+    r"|\b(?:(?:voce|vc|voces|vcs)\s+)?(?:conseg\w+|consigo|tem\s+como|teria\s+como|da\s+para|da\s+pra"
+    r"|pode\w*|tem|teria|ha|existe|faz|faca|fazem|da|dao|daria|dariam|me\s+passa|me\s+passe|passa"
+    r"|passe|me\s+manda"
+    r"|me\s+mande|manda|mande|me\s+informa|me\s+informe|informa|informe|quero|queria"
+    r"|gostaria\s+de|gostaria|preciso\s+de|precisava\s+de)\s+(?:me\s+)?"
+    r"(?:fazer\s+|dar\s+|passar\s+|melhorar\s+|saber\s+)?(?:algum\s+|alguma\s+|um\s+|uma\s+|o\s+|a\s+|seu\s+)?"
+    rf"(?:melhor\s+)?{_NOME_DO_PRECO}{_DO_PRECO}\b"
+    r"|\bcom\s+(?:um\s+)?desconto\b"
+    rf"|\bmelhor\w*\s+(?:o\s+|esse\s+|seu\s+)?{_NOME_DO_PRECO}\b"
+    # O nome sozinho: "valor para 30 malas", "preço p/ 30 unidades".
+    rf"|\b{_NOME_DO_PRECO}{_DO_PRECO}\b"
+    r"|\b(?:(?:fica|sai|faz)\s+)?(?:mais\s+barato|em\s+conta)\b"
+    r"|\b(?:vend\w+\s+)?(?:(?:no|de|por|em|para|pra)\s+)?atacado\b"
+)
+_PEDE_O_LOTE = re.compile(
+    r"\b(?:(?:para|pra)\s+)?(?:(?:se\s+)?(?:eu\s+)?(?:quero|queria|gostaria\s+de|pretendo|vou|desejo"
+    r"|tenho\s+interesse\s+em|interesse\s+em|estou\s+querendo|to\s+querendo)\s+)?"
+    r"(?:comprar|comprando|levar|levando|pegar|pegando|encomendar|pedir)\b"
+    r"|\bse\s+(?:eu\s+)?(?:comprar|levar|pegar)\b"
+    r"|\b(?:tenho\s+)?interesse(?:\s+em)?\b"
+    r"|\b(?:(?:estou|to|tou|estamos)\s+)?(?:precisando|querendo)(?:\s+de)?\b"
+    r"|\b(?:eu\s+)?(?:quero\s+fazer\s+|gostaria\s+de\s+fazer\s+|queria\s+fazer\s+)?"
+    rf"(?:(?:um|uma|na|em)\s+)?(?:pedido|encomenda|compra)(?:\s+de\b|(?=\s+{_MARCA_DO_LOTE}))"
+    r"|\b(?:eu\s+)?(?:compro|levo|pego|quero|queria|gostaria\s+de|gostaria|preciso\s+de|preciso"
+    r"|precisava(?:\s+de)?)\b"
+)
+# Quem se apresenta não pergunta outra coisa ("Sou lojista", "tenho uma loja e preciso de 30
+# malas").
+_APRESENTA_O_LOTE = re.compile(
+    r"\bsou\s+(?:lojista|revendedor[a]?|comerciante|atacadista)\b|\btenho\s+(?:uma\s+)?loja\b"
+    r"|\bgostei\s+d[aoe]\s+(?:mala|frasqueira|produto|modelo)\b|\b(?:para|pra)\s+revend\w+\b"
+)
+# "20 unidades DESSE MODELO" aponta para o próprio anúncio; não nomeia uma variação.
+_APONTA_O_ANUNCIO = re.compile(
+    rf"(?<={_MARCA_DO_LOTE})\s+(?:(?:dess[ae]s?|dest[ae]s?|ness[ae]s?|nest[ae]s?)(?:\s+(?:modelo"
+    r"|tamanho|mala|frasqueira|produto|item|anuncio))?|d[ao]\s+(?:mala|frasqueira|produto|anuncio)"
+    r"|iguais|d[ao]\s+mesm[ao](?:\s+(?:modelo|mala|frasqueira|produto|item|anuncio))?)\b|\s+aqui\b"
+)
+# "É preço para 20 malas?" duvida do preço; o texto plano tira o acento e o "é" vira o "e" que liga.
+_DUVIDA_DO_PRECO = re.compile(
+    rf"(?:^|[.!?,;]\s*)(?:e|eh)\s+(?:(?:esse|este|o)\s+)?(?:{_NOME_DO_PRECO}|atacado)\b"
+)
+# O link e o percentual ficam de fora da conta: quem os cita vai para a pessoa logo adiante.
+_CITACAO_NA_FALA = re.compile(
+    r"https?://\S+|(?:\b(?:os|o|de)\s+)?\d+\s*%(?:\s+(?:de\s+desconto|off))?"
+)
+_SEPARA_A_FALA = re.compile(r"[,.;:!?()/-]+")
+# O "e" entre o que a gramática conhece: "gostei da mala E quero", "20 unidades E qual o valor".
+_LIGA_A_FALA = re.compile(
+    rf"\be\s+(?=\|)|(?<={_MARCA_DO_LOTE})\s+(?:e|ou|mais)\s+(?={_MARCA_DO_LOTE})"
+)
+# As palavras coladas ao lote nomeiam a variação ("20 malas tiffany", "20 unidades da G", "20 malas
+# de 24"): a regra manda para pessoa. Com estas no meio, é outra coisa, e vai ao modelo.
+_COLADO_AO_LOTE = re.compile(
+    rf"{_MARCA_DO_LOTE}((?:\s+(?![|{_MARCA_DO_LOTE}])\S+){{1,3}})"
+    rf"(?=\s*(?:\||{_MARCA_DO_LOTE}|e\s|ou\s|$))"
+)
+_NAO_E_VARIACAO = re.compile(
+    r"\b(?:com|c|sem|s|para|pra|por|em|a|ao|que|nao|nem|mas|so|cada|agora|hoje|amanha)\b"
+)
+# O nome da variação em outro lugar da fala ("Preta, 20 unidades, qual o valor?").
+_VARIACAO_NA_FALA = re.compile(
+    r"\b(?:modelo|tamanho|polegadas?|pol)\b|\b(?:malas?|frasqueiras?|unidades?)\s+[pmg]\b|\b[mp]\d\b"
+    r"|\b(?:pret[ao]s?|branc[ao]s?|azul|azuis|rosas?|rox[ao]s?|vermelh[ao]s?|verdes?|amarel[ao]s?"
+    r"|cinzas?|beges?|marrom|marrons|laranjas?|violetas?|vinhos?|bordos?|dourad[ao]s?|pratas?"
+    r"|pratead[ao]s?|grafites?|lilas|cremes?|nudes?|coral|corais|champ[ae]\w*|tiffany|mostarda"
+    r"|rose|caqui)\b"
+)
+# O cumprimento e o agradecimento não são outra dúvida ("Oi, tudo bem? Consegue um valor melhor pra
+# 20UN? Obrigado").
+_CORTESIA_DO_ATACADO = re.compile(
+    r"\b(?:oi+|ola|opa|bom\s+dia|boa\s+tarde|boa\s+noite|tudo\s+(?:bem|bom|certo)|td\s+(?:bem|bom)"
+    r"|como\s+vai|obrigad[oa]s?|agradec\w*|valeu|por\s+favor|pfv?|pfvr|por\s+gentileza|gentileza"
+    r"|grat[oa]|aguardo|desde\s+ja|atenciosamente|amig[oa]|senhor|senhora)\b"
+)
+_MAX_CHARS_DO_ATACADO = 160
+# O título que COMEÇA em mala ou frasqueira, com ou sem "kit"/"conjunto"/"jogo" na frente. Citar a
+# mala não basta: "Necessaire ... Organizador Mala Viagem", "Par De Rodinhas ... Mala De Viagem",
+# "Chaveiro ... Para Mala" e "Capa Para Mala" são acessórios (títulos reais de KFA e Marquezini).
+_TITULO_DE_MALA = re.compile(
+    r"^\W*(?:(?:kit|conjunto|jogo)\s+(?:(?:jogo|de|viagem|\d+)\s+){0,3})?(?:malas?|frasqueiras?)\b"
+)
+# A volta depois da frase cita o modelo, o anúncio ou os 20% (74cdf2be, a8d172cf, e92cc16f: "queria
+# os 20% de desconto para 20 UN no atacado <link>"): quem cria o anúncio de atacado é a equipe.
+_CITA_O_ANUNCIO_OU_O_DESCONTO = re.compile(r"https?://|\blink\b|\d\s*%")
+_FALA_DO_MODELO = re.compile(
+    rf"\bmodelos?\b|\batacado\b|\banuncio\b|{_CITA_O_ANUNCIO_OU_O_DESCONTO.pattern}"
+)
+
+
+def _total_do_grupo(partes: list[int]) -> int:
+    """A soma dos lotes ligados, ou o total que eles detalham ("10 unidades, 5 malas e 5
+    frasqueiras" são 10, nos dois sentidos). PURA."""
+    if len(partes) >= 3 and partes[0] == sum(partes[1:]):
+        return partes[0]
+    if len(partes) >= 3 and partes[-1] == sum(partes[:-1]):
+        return partes[-1]
+    return sum(partes)
+
+
+def _pedido_de_atacado(plano: str) -> tuple[int, bool] | None:
+    """(a quantidade, nomeou uma variação?) da fala que cabe na gramática do pedido (ver acima), ou
+    None. PURA. Os lotes ligados somam ("40 malas e 40 frasqueiras", "40 e 40 malas", "40 malas. 40
+    frasqueiras"), a menos que detalhem o total; na faixa, com "ou" e o mesmo lote em outra frase,
+    vale o maior. "Mil" e dúzia contam."""
+    if not plano or len(plano) > _MAX_CHARS_DO_ATACADO:
+        return None
+    fala = _CORTESIA_DO_ATACADO.sub(" ", _CITACAO_NA_FALA.sub(" ", plano))
+    if _DUVIDA_DO_PRECO.search(fala.strip()):
+        return None
+    lotes: list[list[int]] = []
+    unidades: set[str] = set()
+    pedacos: list[str] = []
+    ultimo = 0
+    for m in _LOTE_DO_ATACADO.finditer(fala):
+        n = int(m.group("n").replace(".", ""))
+        n *= (1000 if m.group("mil") else 1) * (12 if m.group("duzia") else 1)
+        n = max(n, int(m.group("faixa") or 0))
+        entre = fala[ultimo : m.start()]
+        partes = [n]
+        if m.group("mais"):
+            na_faixa = re.search(r"\bentre\s+$", fala[: m.start()])
+            partes = [max(n, int(m.group("mais")))] if na_faixa else [int(m.group("mais")), n]
+        unidade = (m.group("unidade") or "duzia").rstrip("s")
+        ligado = re.search(r"(?:\b(?:e|mais)\s+|,\s*)$", entre) or not entre.strip()
+        # Outra unidade soma, mesmo em outra frase ("40 malas. 40 frasqueiras"); o "ou" escolhe.
+        if lotes and (ligado or unidade not in unidades) and not re.search(r"\bou\s+$", entre):
+            lotes[-1] += partes
+        else:
+            lotes.append(partes)
+        unidades.add(unidade)
+        pedacos += [entre, f" {_MARCA_DO_LOTE} "]
+        ultimo = m.end()
+    if not lotes:
+        return None
+    resto = "".join([*pedacos, fala[ultimo:]])
+    if not _PEDE_O_PRECO.search(resto):
+        return None
+    resto = _APONTA_O_ANUNCIO.sub(" ", _ANTES_DO_LOTE.sub("", resto))
+    for parte in (_PEDE_O_PRECO, _PEDE_O_LOTE, _APRESENTA_O_LOTE, _SEPARA_A_FALA):
+        resto = parte.sub(" | ", resto)
+    resto = " ".join(_LIGA_A_FALA.sub(" ", resto).split())
+    variacao = False
+    for colado in _COLADO_AO_LOTE.findall(resto):
+        if _NAO_E_VARIACAO.search(colado):
+            return None
+        variacao = True
+    solto = _COLADO_AO_LOTE.sub(_MARCA_DO_LOTE, resto)
+    solto = solto.replace(_MARCA_DO_LOTE, " ").replace("|", " ")
+    if solto.split():
+        if not _VARIACAO_NA_FALA.search(solto):
+            return None
+        variacao = True
+    return max(_total_do_grupo(partes) for partes in lotes), variacao
+
+
+def quantidade_de_atacado(plano: str) -> int | None:
+    """A quantidade de um pedido de preço por quantidade, ou None. PURA. `plano` é o turno sem
+    acento."""
+    pedido = _pedido_de_atacado(plano)
+    return pedido[0] if pedido else None
+
+
+def anuncio_de_mala(titulo: str | None) -> bool:
+    """O anúncio é de mala ou frasqueira, pelo título? PURA."""
+    return bool(_TITULO_DE_MALA.search(_plano_de(titulo)))
+
+
+def estoque_cobre(vinculos: Sequence[Any], quantidade: int) -> bool | None:
+    """O estoque do anúncio cobre a quantidade? None = não se determina. PURA.
+
+    O `min` fecha o vínculo velho (o estoque do produto vem do webhook do Bling; nas lojas grandes
+    só ~38% dos vínculos sincronizaram em 24 h) e o `max` é o anúncio com variações, para quem não
+    disse qual quer (a fala que cita a variação não chega aqui). Qualquer vínculo sem estoque, sem
+    sincronia ou com o anúncio parado: não se determina.
+    """
+    if not vinculos:
+        return None
+    estoques: list[int] = []
+    for v in vinculos:
+        if (
+            v.estoque is None
+            or v.estoque_produto is None
+            or v.status != "ok"
+            or v.anuncio_status != "active"
+        ):
+            return None
+        estoques.append(min(v.estoque, v.estoque_produto))
+    return max(estoques) >= quantidade
+
+
+async def _atacado_ja_respondido(
+    session: AsyncSession, conversa: Any, agora: datetime
+) -> frozenset[str | None]:
+    """Os anúncios em que o mesmo comprador, na mesma loja, recebeu a frase do atacado na janela
+    (vazio = não recebeu). Só lê."""
+    comprador = getattr(conversa, "comprador_id", None)
+    if not comprador or getattr(conversa, "integration_id", None) is None:
+        return frozenset()
+    linhas = await session.scalars(
+        select(AtendimentoConversa.anuncio_id)
+        .join(AtendimentoMensagem, AtendimentoConversa.id == AtendimentoMensagem.conversa_id)
+        .where(
+            AtendimentoConversa.integration_id == conversa.integration_id,
+            AtendimentoConversa.comprador_id == comprador,
+            AtendimentoMensagem.autor == constantes.AUTOR_LOJA,
+            AtendimentoMensagem.status != constantes.MSG_FALHOU,
+            AtendimentoMensagem.texto == constantes.FRASE_ATACADO_ML,
+            AtendimentoMensagem.enviada_em >= agora - ATACADO_SEGUIMENTO,
+            AtendimentoMensagem.enviada_em <= agora,
+        )
+        .distinct()
+    )
+    return frozenset(linhas)
+
+
+# A pergunta de verdade: "quero", "gostaria", "preciso" e "pode" são a volta mais natural ("Quero a
+# M2 roxa"), e a `ia._PALAVRA_DE_PERGUNTA` as lê como pergunta.
+_PERGUNTA_DE_VERDADE = re.compile(
+    r"\b(?:qual|quais|quanto\w*|como|onde|quando|quem|por\s+que|porque|tem|teria|possui|existe|vem"
+    r"|vai)\b"
+)
+
+
+def _responde_a_frase(plano: str) -> bool:
+    """A fala parece a volta do "informe o modelo", e não outra pergunta? PURA. "É o modelo M2
+    roxo" e "Quero a preta" sim; "qual a altura da mala?" e "obrigado" não."""
+    if _FALA_DO_MODELO.search(plano):
+        return True
+    if "?" in plano or _PERGUNTA_DE_VERDADE.search(plano):
+        return False
+    return not ia.pistas_de_categoria(plano)
+
+
+def _so_cortesia(plano: str) -> bool:
+    return not re.sub(r"\W+", "", _CORTESIA_DO_ATACADO.sub(" ", plano))
+
+
+async def _estoque_do_anuncio(session: AsyncSession, conversa: Any, quantidade: int) -> bool | None:
+    """`estoque_cobre` com os vínculos vivos do anúncio da conversa. Falha de leitura: None."""
+    from app.services.atendimento import variacoes
+
+    if not conversa.anuncio_id:
+        return None
+    try:
+        async with session.begin_nested():
+            vinculos = await variacoes.vinculos_do_anuncio(
+                session,
+                IntegrationPlatform(conversa.plataforma),
+                conversa.integration_id,
+                conversa.anuncio_id,
+            )
+    except Exception as exc:  # noqa: BLE001 — sem a leitura, o estoque não se determina
+        logger.warning(
+            "atendimento_agente_atacado_estoque_falhou",
+            conversa_id=str(conversa.id),
+            erro=type(exc).__name__,
+        )
+        return None
+    return estoque_cobre(vinculos, quantidade)
+
+
+async def decisao_do_atacado(
+    session: AsyncSession,
+    conversa: Any,
+    base: BaseDoGerar,
+    gatilho: Any | None,
+    *,
+    agora: datetime | None = None,
+) -> tuple[str, str] | None:
+    """(`ATACADO_RESPONDE` ou `ATACADO_PESSOA`, o motivo interno), ou None = o caminho de sempre.
+
+    Fora do recorte (ver acima) nada muda. Com outra ação de pessoa no turno também é o caminho de
+    sempre: a mesma régua da Caixa Humano, com as chaves reais, para rascunho e triagem não
+    divergirem. Só lê. `agora` = o relógio do replay.
+    """
+    from app.services.atendimento.agente import fatos_loja
+
+    if conversa.plataforma != "ml" or conversa.canal not in (
+        constantes.CANAL_PERGUNTA,
+        constantes.CANAL_POS_VENDA,
+    ):
+        return None
+    if " ".join(_plano_de(getattr(conversa, "conta", None)).split()) not in ATACADO_LOJAS:
+        return None
+    agora = agora or datetime.now(UTC)
+    pergunta = conversa.canal == constantes.CANAL_PERGUNTA
+    # Os textos do turno, uma vez cada: o plano de `_planos_do_turno` repete a fala.
+    _rajada, textos, _plano_turno = _planos_do_turno(list(base.recentes), gatilho)
+    plano = _plano_de(" ".join(dict.fromkeys(textos)))
+    quantidade, nomeia_variacao = _pedido_de_atacado(plano) or (None, False)
+    pedido_de_atacado = quantidade is not None and quantidade >= ATACADO_QTD_MIN
+    if pergunta:
+        try:
+            async with session.begin_nested():
+                respondidos = await _atacado_ja_respondido(session, conversa, agora)
+        except Exception as exc:  # noqa: BLE001 — sem a leitura: o caminho de sempre
+            logger.warning(
+                "atendimento_agente_atacado_seguimento_falhou",
+                conversa_id=str(conversa.id),
+                erro=type(exc).__name__,
+            )
+            return None
+        # A volta ao mesmo anúncio é da pessoa, seja o que for: o modelo não sabe da frase e poderia
+        # negar em público o desconto que ela ofereceu. Em outro anúncio, o pedido novo ganha a
+        # frase de novo (070f1828 e 378b1cd9: o mesmo comprador, dois anúncios), e outra pergunta
+        # vai ao modelo. O agradecimento não precisa de ninguém.
+        if (
+            respondidos
+            and not _so_cortesia(plano)
+            and (
+                conversa.anuncio_id in respondidos
+                or (not pedido_de_atacado and _responde_a_frase(plano))
+            )
+        ):
+            return ATACADO_PESSOA, MOTIVO_ATACADO_SEGUIMENTO
+    if not pedido_de_atacado:
+        return None
+    if not pergunta:
+        # A conversa do pós-venda não traz o anúncio (291 de 291 em produção).
+        return ATACADO_PESSOA, MOTIVO_ATACADO_POS_VENDA.format(qtd=quantidade)
+    if not anuncio_de_mala(conversa.anuncio_titulo):
+        return None
+    chaves: frozenset[str] = frozenset()
+    try:
+        async with session.begin_nested():
+            chaves = await fatos_loja.chaves_ativas(
+                session,
+                CHAVES_QUE_TROCAM_GATILHO,
+                plataforma=conversa.plataforma,
+                integration_id=conversa.integration_id,
+                agora=agora,
+            )
+    except Exception as exc:  # noqa: BLE001 — sem as chaves: o caminho de sempre
+        logger.warning(
+            "atendimento_agente_chaves_falhou",
+            conversa_id=str(conversa.id),
+            erro=type(exc).__name__,
+        )
+        return None
+    if gatilhos(
+        conversa,
+        base.recentes,
+        base.ctx,
+        gatilho=gatilho,
+        postado=None,
+        chaves_ativas=chaves,
+        sinais=base.sinais,
+        sinais_do_cliente=base.sinais_do_cliente,
+        agora=agora,
+    ):
+        return None
+    if _CITA_O_ANUNCIO_OU_O_DESCONTO.search(plano):
+        return ATACADO_PESSOA, MOTIVO_ATACADO_CITA.format(qtd=quantidade)
+    if nomeia_variacao:
+        return ATACADO_PESSOA, MOTIVO_ATACADO_VARIACAO.format(qtd=quantidade)
+    cobre = await _estoque_do_anuncio(session, conversa, quantidade)
+    if cobre is True:
+        return ATACADO_RESPONDE, ""
+    motivo = MOTIVO_ATACADO_ACIMA if cobre is False else MOTIVO_ATACADO_SEM_ESTOQUE
+    return ATACADO_PESSOA, motivo.format(qtd=quantidade)
 
 
 def juntar(do_codigo: Iterable[str], do_modelo: Iterable[str]) -> list[str]:
