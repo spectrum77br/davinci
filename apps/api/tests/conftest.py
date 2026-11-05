@@ -565,6 +565,9 @@ _CLEANUP_TABLES = (
     "product_categories",
     "margem_audit",
     "prioridade_estoque_movimentos",
+    # 0453: linhas antes do cabeçalho (FK); o cabeçalho antes de users.
+    "estoque_transferencia_linhas",
+    "estoque_transferencias",
     "margens",
     "chamado_anexo",
     "chamado_mensagem",

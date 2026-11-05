@@ -2477,6 +2477,43 @@ async def devolucao_estoque_conferir_tick(ctx: dict) -> None:
         logger.exception("devolucao_estoque_conferir_failed")
 
 
+async def estoque_transferencia_tick(ctx: dict) -> None:
+    """A cada 2 min: termina as transferências do Controle de Estoque que
+    ficaram no meio (05/11/2026). Perna em "conferindo" (o Bling respondeu
+    erro depois de receber) é procurada no extrato antes de qualquer coisa;
+    entrada recusada com certeza (a saída já saiu) é lançada de novo. Sem
+    pendência = 1 SELECT, zero Bling."""
+    from sqlalchemy import or_, select
+
+    from app.models import EstoqueTransferenciaLinha as L
+    from app.services import estoque_transferencia as svc
+    from app.services.devolution_stock_return import _get_bling_client
+
+    try:
+        async with session_scope() as s:
+            tem = (
+                await s.execute(
+                    select(L.id).where(or_(
+                        L.saida_status.in_((svc.ENVIANDO, svc.CONFERINDO)),
+                        L.entrada_status.in_(
+                            (svc.ENVIANDO, svc.CONFERINDO, svc.PENDENTE, svc.FALHOU)
+                        ),
+                    )).limit(1)
+                )
+            ).first()
+            if tem is None:
+                return
+            # Cliente e sessão juntos: a renovação do token grava nesta sessão.
+            client = await _get_bling_client(s)
+            if client is None:
+                return
+            out = await svc.processar_pendentes(client)
+        if any(out.values()):
+            logger.info("estoque_transferencia_tick", **out)
+    except Exception:  # noqa: BLE001
+        logger.exception("estoque_transferencia_tick_failed")
+
+
 async def devolucao_prazo_sync(ctx: dict) -> None:
     """A cada 30 min: pergunta à Shopee/TikTok até quando dá pra contestar cada
     devolução recente e avisa no Threema quando o motivo ainda está vazio a
@@ -5307,6 +5344,7 @@ class WorkerSettings:
         nf_recuperar_tick,
         prioridade_estoque_tick,
         prioridade_estoque_estorno_tick,
+        func(estoque_transferencia_tick, timeout=600),
         # Flex por anúncio (etapa 3): varredura, botão "Sincronizar" e o
         # gancho do pedido Flex. 15 min de teto: até 400 leituras do ML + as
         # escritas da rodada, uma de cada vez.
@@ -5940,6 +5978,15 @@ class WorkerSettings:
         # Manutenção das compensações de kit (retry, estorno de cancelado,
         # aviso): 2×/hora em :16/:46, minutos livres. Sem pendência = SELECTs.
         cron(prioridade_estoque_estorno_tick, minute={16, 46}, run_at_startup=False),
+        # Transferir estoque (Controle de Estoque, 05/11): termina as pernas
+        # paradas (conferência no extrato, entrada recusada). Minutos ímpares,
+        # fora da conferência das devoluções; 1 SELECT quando não há nada.
+        cron(
+            estoque_transferencia_tick,
+            minute=set(range(1, 60, 2)),
+            run_at_startup=True,
+            timeout=600,
+        ),
         # Flex por anúncio (projeto Flex, etapa 3): de flex_intervalo_min em
         # flex_intervalo_min (padrão 15 → :12/:27/:42/:57). Com
         # flex_modo=desligado (o padrão) o tick sai na hora. O critério "o .sp

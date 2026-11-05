@@ -65,6 +65,7 @@ from app.config import get_settings
 from app.models import (
     BlingOrder,
     Devolution,
+    EstoqueTransferenciaLinha,
     Integration,
     MargemAudit,
     PrioridadeEstoqueMovimento,
@@ -1001,10 +1002,31 @@ async def conferir_entradas_pendentes(
                     )
                 )
             ).one()
-            concorrentes = int(n_dev or 0) + int(n_robo or 0)
-            inicio_busca = min(x for x in (t0, primeira_dev, primeira_robo) if x is not None)
-            usados = select(Devolution.estoque_mov_ref).where(
-                Devolution.estoque_mov_ref.is_not(None)
+            # Entrada de "Transferir estoque" (Controle de Estoque, 05/11) no
+            # mesmo produto e quantidade, perto da tentativa: também pode ser
+            # a dona do movimento.
+            tl = EstoqueTransferenciaLinha
+            n_transf, primeira_transf = (
+                await session.execute(
+                    select(func.count(), func.min(tl.entrada_tentativa_at))
+                    .select_from(tl)
+                    .where(
+                        tl.destino_bling_id == int(pid),
+                        tl.quantidade == qty,
+                        tl.entrada_status.in_(("ok", "conferindo", "enviando")),
+                        tl.entrada_mov_ref.is_(None),
+                        tl.entrada_tentativa_at.between(de, ate),
+                    )
+                )
+            ).one()
+            concorrentes = int(n_dev or 0) + int(n_robo or 0) + int(n_transf or 0)
+            inicio_busca = min(
+                x for x in (t0, primeira_dev, primeira_robo, primeira_transf) if x is not None
+            )
+            usados = (
+                select(Devolution.estoque_mov_ref)
+                .where(Devolution.estoque_mov_ref.is_not(None))
+                .union(select(tl.entrada_mov_ref).where(tl.entrada_mov_ref.is_not(None)))
             )
             candidatos = (
                 (

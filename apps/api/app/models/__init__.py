@@ -289,6 +289,7 @@ from app.models.pricing import (
 )
 from app.models.pricing_conferencia import PricingConferencia
 from app.models.prioridade_estoque_movimento import PrioridadeEstoqueMovimento
+from app.models.estoque_transferencia import EstoqueTransferencia, EstoqueTransferenciaLinha
 from app.models.product import (
     BackgroundJob,
     BackgroundJobDetail,
@@ -473,6 +474,8 @@ __all__ = [
     "HistoricoEvento",
     "MargemAudit",
     "PrioridadeEstoqueMovimento",
+    "EstoqueTransferencia",
+    "EstoqueTransferenciaLinha",
     "MargemSaldoManual",
     "Margens",
     "MarketingAccount",
