@@ -47,6 +47,9 @@ SEM_NOTICIA = timedelta(minutes=5)
 # (e-mails + Shopee no perfil 50 + Anatel/SEI) e entrou a Réplica.
 # 13/10/2026 (Vinicius: "eu acionar esses botão dentro dos casos e enviar quando eu quiser"): o 9 Jurídico saiu da
 # lista — virou os botões "Montar pasta jurídico" / "Enviar ao jurídico" na ficha do caso (aba Casos), sem agenda.
+# 05/11/2026 (Vinicius: "o passo 5 print poderia virar o passo 3… dai fica na sequencia certa"): o print vem antes da
+# denúncia — 3 Prints pendentes · 4 Nossos · 5 Diversos · 6 Anatel em diante igual. O Mercado Livre tira o print dentro
+# da procura (agente v40, print_na_procura.py); o passo 3 pega a Shopee e o que ficou sem print. As chaves não mudam.
 PASSOS: dict[str, tuple[int, str, str, str]] = {
     "checagem": (0, "Checagem antes da rodada", "perfil 50 + 148 + contas das lojas + Safari + Tuta",
                  "confere logins, perfis, captcha, Safari e Tuta antes da rodada — não muda nada"),
@@ -54,13 +57,14 @@ PASSOS: dict[str, tuple[int, str, str, str]] = {
                      "lê as respostas das denúncias (e-mails no Tuta), o andamento dos processos da Anatel no SEI "
                      "e o pedido das compras de prova"),
     "procura": (2, "Procurar anúncios novos", "perfil 50 + 148 + celular + Safari",
-                "procura as marcas no Mercado Livre, Shopee, TikTok e Amazon e salva no sistema"),
-    "denuncias": (3, "Denúncias Nossos", "perfil 50 + celular",
+                "procura as marcas no Mercado Livre, Shopee, TikTok e Amazon e salva no sistema; "
+                "no Mercado Livre já tira o print de cada anúncio novo"),
+    "prints": (3, "Prints pendentes", "perfil 148 (Shopee) + perfil 50 (ML)",
+               "tira o print de todo anúncio achado que ainda não tem um bom: a Shopee e o que o Mercado Livre deixou"),
+    "denuncias": (4, "Denúncias Nossos", "perfil 50 + celular",
                   "denunciava na loja o anúncio com o NOSSO certificado — desligado desde 03/10"),
-    "diversos": (4, "Denúncias Diversos", "perfil 50 + 148 (Shopee) + celular",
+    "diversos": (5, "Denúncias Diversos", "perfil 50 + 148 (Shopee) + celular",
                  "denuncia uma vez na loja o anúncio com certificado de outra empresa ou nº que não é do aparelho"),
-    "prints": (5, "Prints", "perfil 148 (Shopee) + perfil 50 (ML)",
-               "tira o print da página de cada anúncio que vai à Anatel"),
     "anatel": (6, "Denúncias Anatel", "Safari (SEI) + Tuta",
                "peticiona no SEI, uma petição por loja, com o print e as provas de cada anúncio"),
     "replica_diversos": (7, "Réplica Denúncias Diversos", "contas das lojas (ML 93/78 · Shopee 155/146)",
@@ -101,7 +105,7 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
         "quem": ["Tuta (sac@makisa)", "Safari: SEI com a conta do advogado e gov.br",
                  "perfil 50: conta compradora da Shopee e do Mercado Livre (makisatrading)"],
         "confere": [
-            "Denúncias do Mercado Livre (passo 4) e da Réplica no ML (passo 7) — pelo e-mail.",
+            "Denúncias do Mercado Livre (passo 5) e da Réplica no ML (passo 7) — pelo e-mail.",
             "Processos da Anatel (passo 6) — andamento e anexos no SEI.",
             "TikTok: ainda ninguém lê as respostas — vai entrar a leitura pelo app do celular.",
         ],
@@ -113,6 +117,8 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
     "procura": {
         "passos": [
             "Mercado Livre no perfil 50: busca hotwav, oukitel, fossibot, uranyx e oscal.",
+            "Mercado Livre: ao abrir cada anúncio novo já tira o print da hora, com a cópia da página. No fim sobe só "
+            "o que ficou no escopo; o que não saiu fica para o passo 3.",
             "Shopee: o perfil 50 busca hotwav e uranyx e o 148 busca oukitel, fossibot e oscal, ao mesmo tempo.",
             "TikTok pelo app no celular e pelo site no perfil 50.",
             "Amazon no perfil 50 (só procura — a Amazon não é denunciada por enquanto).",
@@ -151,7 +157,8 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
     },
     "prints": {
         "passos": [
-            "Tira o print da página de cada anúncio que vai à Anatel e ainda não tem print que valha.",
+            "Pega todo anúncio achado que ainda não tem print bom: a Shopee, que a procura lê sem abrir a página, e o que "
+            "o Mercado Livre não conseguiu na procura.",
             "Só vale print da página do próprio anúncio, sem captcha, com a cópia da página.",
             "O primeiro print bom é o que vai à Anatel e não vence: depois dele o robô não tira outro (29/10).",
             "Captcha na tela: não salva, para aquele site e deixa a conta descansar.",
@@ -160,7 +167,7 @@ EXPLICACAO: dict[str, dict[str, list[str]]] = {
         ],
         "quem": ["Perfil 148 (Luno – Shopee)", "Perfil 50 (MAKISA) — Mercado Livre"],
         "confere": ["O detector de print confere antes de salvar e de novo antes de anexar na Anatel."],
-        "consertando": ["Sem horário por enquanto: rodar à mão e medir o tempo."],
+        "consertando": [],
     },
     "anatel": {
         "passos": [

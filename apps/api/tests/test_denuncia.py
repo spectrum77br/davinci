@@ -375,12 +375,13 @@ def test_painel_frentes_agenda_e_alarme():
     assert [x["ordem"] for x in p["passos"]] == list(range(9))
     assert p["passos"][0]["acao"] == "checagem" and p["passos"][-1]["acao"] == "ativos_inativos"
     assert "juridico" not in passos
-    # 07/10: numeração nova — 4 Diversos, 5 Prints, 6 Anatel, 7 Réplica, 8 Ativos; o Tempo parado saiu
+    # 05/11: o print vem antes da denúncia — 3 Prints pendentes, 4 Nossos, 5 Diversos, 6 Anatel, 7 Réplica, 8 Ativos
     assert [x["acao"] for x in p["passos"][5:9]] == [
-        "prints", "anatel", "replica_diversos", "ativos_inativos"]
+        "diversos", "anatel", "replica_diversos", "ativos_inativos"]
     assert "capa_perguntas" not in [x["acao"] for x in p["passos"]]
     assert "aproveitar_parado" not in passos
-    assert [x["acao"] for x in p["passos"][2:5]] == ["procura", "denuncias", "diversos"]
+    assert [x["acao"] for x in p["passos"][2:5]] == ["procura", "prints", "denuncias"]
+    assert passos["prints"]["nome"] == "Prints pendentes"
     assert not any(x["em_criacao"] for x in p["passos"])
     assert passos["anatel"]["em_criacao"] is False and passos["anatel"]["explicacao"]["passos"]
     assert any("148" in q for q in passos["prints"]["explicacao"]["quem"])
