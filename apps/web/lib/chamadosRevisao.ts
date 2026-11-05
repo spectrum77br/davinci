@@ -14,12 +14,15 @@ export type RevisaoCampos = {
   revisao_estado: RevisaoEstado
 }
 
-// Painel Dias: GET /api/chamados/dias. Sem `tem_registro` não há revisão daquele dia.
+// Painel por mês: GET /api/chamados/dias. Sem `tem_registro` não há revisão daquele dia.
 export type RevisaoDia = {
   dia: string
   abertos: number
   novos: number
   concluidos: number
+  lucro: number
+  prejuizo: number
+  acumulado: number
   tem_registro: boolean
   conferido: number
   revisar: number
@@ -29,7 +32,7 @@ export type RevisaoDia = {
   por_status: Record<string, number>
   faltaram: string[]
 }
-export type RevisaoDias = { dias: RevisaoDia[]; novos: number; concluidos: number; novos_por_dia: number; saldo: number }
+export type RevisaoDias = { dias: RevisaoDia[] }
 
 // `tipo` nulo tira a marca; `ate` e `motivo` só no Fixo.
 export type RevisaoMarca = { tipo: RevisaoTipo | null; ate?: string; motivo?: string }

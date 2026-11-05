@@ -11,6 +11,7 @@ app.services.chamados; aqui é CRUD + histórico + anexos + os botões.
 import hashlib
 import secrets
 from dataclasses import dataclass
+from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated
@@ -616,33 +617,59 @@ async def fotografar_revisao(session: AsyncSession) -> dict:
 async def dias_da_revisao(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("chamados", "view"))],
-    limite: int = Query(8, ge=1, le=31),
+    meses: int = Query(6, ge=1, le=24),
 ) -> RevisaoDiasOut:
-    """Painel Dias (Vinicius 05/11/2026): quantos abriram e fecharam em cada dia e como
-    ficou a revisão. Abertos, novos e concluídos saem de `created_at`/`resolvido_at`,
-    com a cerca da equipe. A foto é da empresa inteira, então quem tem equipe vê a
-    revisão só de hoje (calculada com a cerca); hoje é sempre ao vivo."""
+    """Painel por mês (Vinicius 05/11/2026): quantos abriram e fecharam em cada dia,
+    como ficou a revisão e o lucro/prejuízo dos concluídos, dia a dia, dos últimos
+    `meses` meses (a tela junta por mês). Abertos, novos e concluídos saem de
+    `created_at`/`resolvido_at`, com a cerca da equipe. A foto é da empresa inteira,
+    então quem tem equipe vê a revisão só de hoje (calculada com a cerca); hoje é
+    sempre ao vivo."""
     equipe = await _clausula_do_usuario(session, user)
     conds = [] if equipe is None else [equipe]
     hoje = chamados_revisao.hoje_sp()
-    dias = [hoje - timedelta(days=i) for i in range(limite)]
 
     def dia_sp(quando: datetime) -> date:
         return quando.astimezone(svc.SAO_PAULO).date()
 
-    pares = [
-        (dia_sp(criado), (dia_sp(fechado) if fechado else date.min) if resolvido else None)
-        for criado, resolvido, fechado in (
+    linhas = [
+        (dia_sp(criado), (dia_sp(fechado) if fechado else date.min) if resolvido else None, valor)
+        for criado, resolvido, fechado, valor in (
             await session.execute(
-                select(Chamado.created_at, Chamado.resolvido, Chamado.resolvido_at).where(*conds)
+                select(
+                    Chamado.created_at,
+                    Chamado.resolvido,
+                    Chamado.resolvido_at,
+                    Chamado.valor_recuperado,
+                ).where(*conds)
             )
         ).all()
     ]
+    mes_inicial = hoje.year * 12 + hoje.month - meses
+    inicio = date(mes_inicial // 12, mes_inicial % 12 + 1, 1)
+    if linhas:
+        inicio = min(hoje, max(inicio, min(aberto for aberto, _, _ in linhas)))
+    dias = [hoje - timedelta(days=i) for i in range((hoje - inicio).days + 1)]
 
     def abertos_em(dia: date) -> int:
         return sum(
-            1 for aberto, fechado in pares if aberto <= dia and (fechado is None or fechado > dia)
+            1
+            for aberto, fechado, _ in linhas
+            if aberto <= dia and (fechado is None or fechado > dia)
         )
+
+    lucro: dict[date, Decimal] = defaultdict(Decimal)
+    prejuizo: dict[date, Decimal] = defaultdict(Decimal)
+    for _, fechado, valor in linhas:
+        if fechado and valor:
+            (lucro if valor > 0 else prejuizo)[fechado] += valor
+    acumulado: dict[date, Decimal] = {}
+    soma = Decimal(0)
+    for dia in reversed(dias):
+        if dia.day == 1:
+            soma = Decimal(0)
+        soma += lucro[dia] + prejuizo[dia]
+        acumulado[dia] = soma
 
     fotos: dict[date, dict] = {}
     if equipe is None:
@@ -664,21 +691,17 @@ async def dias_da_revisao(
         RevisaoDiaOut(
             dia=dia,
             abertos=abertos_em(dia),
-            novos=sum(1 for aberto, _ in pares if aberto == dia),
-            concluidos=sum(1 for _, fechado in pares if fechado == dia),
+            novos=sum(1 for aberto, _, _ in linhas if aberto == dia),
+            concluidos=sum(1 for _, fechado, _ in linhas if fechado == dia),
+            lucro=float(lucro[dia]),
+            prejuizo=float(prejuizo[dia]),
+            acumulado=float(acumulado[dia]),
             tem_registro=dia in fotos,
             **fotos.get(dia, {}),
         )
         for dia in dias
     ]
-    novos = sum(d.novos for d in saida)
-    return RevisaoDiasOut(
-        dias=saida,
-        novos=novos,
-        concluidos=sum(d.concluidos for d in saida),
-        novos_por_dia=round(novos / limite, 1),
-        saldo=saida[0].abertos - abertos_em(dias[-1] - timedelta(days=1)),
-    )
+    return RevisaoDiasOut(dias=saida)
 
 
 @router.get("", response_model=ChamadoPage)

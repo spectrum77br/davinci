@@ -4105,17 +4105,22 @@ async def _eventos_do_dia(
     return {chave: int(v or 0) for (chave, _c, _cond), v in zip(_EVENTOS_DIA, row, strict=True)}
 
 
+_MESES_NO_RESUMO = 3
+
+
 def _obs_de_eventos(ev: dict[str, int]) -> list[str]:
     return [f"{ev[k]} {_ROTULO_EVENTO[k]}" for k, _c, _cond in _EVENTOS_DIA if ev.get(k)]
 
 
 async def _resumo_dos_dias(
-    session: AsyncSession, lojas: list[ConciliacaoLoja], ate: date, *, n: int = 15
+    session: AsyncSession, lojas: list[ConciliacaoLoja], ate: date
 ) -> list[dict[str, Any]]:
     """Bloco "Dias" do Resumo (16/10): um dia por linha, com quantas lojas fecharam,
     quantas não tiveram movimento, quantas esperam o repasse da TikTok e quantas ainda
-    têm pendência (com o nome e o motivo), mais a obs do que aconteceu no dia."""
-    de = ate - timedelta(days=n - 1)
+    têm pendência (com o nome e o motivo), mais a obs do que aconteceu no dia. Desde
+    05/11 a tela junta por mês: vêm os meses inteiros (`_MESES_NO_RESUMO`)."""
+    mes_inicial = ate.year * 12 + ate.month - _MESES_NO_RESUMO
+    de = date(mes_inicial // 12, mes_inicial % 12 + 1, 1)
     if lojas:
         # 28/10 (Vinicius: "deixa como se tivesse início dia 24/10"): antes do início de
         # todas as lojas não há dia — a lista não mostra "todos fechados" vazios

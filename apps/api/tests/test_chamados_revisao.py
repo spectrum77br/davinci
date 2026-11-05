@@ -5,7 +5,8 @@ migration 0451 converte as anotações da Observação."""
 from __future__ import annotations
 
 import importlib.util
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
+from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
@@ -13,6 +14,7 @@ import pytest
 from sqlalchemy import select, text
 
 from app.models import Chamado, ChamadoMensagem, ChamadoRevisao, ChamadoRevisaoDia
+from app.services import chamados as svc
 from app.services import chamados_revisao as rev
 
 HOJE = date(2026, 11, 5)
@@ -356,13 +358,11 @@ async def test_dias_conta_novos_concluidos_e_abertos(client, make_user, auth_as,
     db.add_all([velho, fechado_ontem, novo_ontem, novo_hoje])
     await db.commit()
 
-    corpo = (await client.get("/api/chamados/dias", params={"limite": 3})).json()
-    hoje, d_ontem, anteontem = corpo["dias"]
+    corpo = (await client.get("/api/chamados/dias", params={"meses": 2})).json()
+    hoje, d_ontem, anteontem = corpo["dias"][:3]
     assert (hoje["abertos"], hoje["novos"], hoje["concluidos"]) == (3, 1, 0)
     assert (d_ontem["abertos"], d_ontem["novos"], d_ontem["concluidos"]) == (2, 1, 1)
     assert (anteontem["abertos"], anteontem["novos"]) == (2, 0)
-    assert corpo["novos"] == 2 and corpo["concluidos"] == 1
-    assert corpo["saldo"] == 1
     # Hoje é ao vivo; dia sem foto não tem revisão.
     assert hoje["tem_registro"] is True and hoje["falta"] == 3
     assert set(hoje["faltaram"]) == {str(velho.id), str(novo_ontem.id), str(novo_hoje.id)}
@@ -391,10 +391,59 @@ async def test_foto_do_dia_aparece_no_painel_e_regrava(client, make_user, auth_a
 
     # A foto de ontem é a que vale pra ontem.
     fotos[0].dia = rev.hoje_sp() - timedelta(days=1)
+    db.add(_ch(id=uuid4(), created_at=datetime.now(UTC) - timedelta(days=3)))
     await db.commit()
-    corpo = (await client.get("/api/chamados/dias", params={"limite": 2})).json()
+    corpo = (await client.get("/api/chamados/dias", params={"meses": 2})).json()
     assert corpo["dias"][1]["tem_registro"] is True
     assert corpo["dias"][1]["conferido"] == 1
+
+
+@pytest.mark.asyncio
+async def test_dias_soma_lucro_prejuizo_e_acumula_no_mes(client, make_user, auth_as, db):
+    """Vinicius 05/11: lucro e prejuízo pelo dia da conclusão; o acumulado zera no dia 1."""
+    user = await make_user(role="user", permissions=PERM)
+    auth_as(user)
+    meio_dia = datetime.combine(
+        rev.hoje_sp().replace(day=1), time(12), tzinfo=svc.SAO_PAULO
+    ).astimezone(UTC)
+    fim_do_mes_passado = meio_dia - timedelta(days=1)
+    velho = meio_dia - timedelta(days=40)
+
+    def fechado(quando, valor):
+        return _ch(
+            id=uuid4(), created_at=velho, resolvido=True, resolvido_at=quando,
+            valor_recuperado=valor,
+        )
+
+    db.add_all(
+        [
+            fechado(fim_do_mes_passado, Decimal("500.00")),
+            fechado(meio_dia, Decimal("100.50")),
+            fechado(meio_dia, Decimal("-30.25")),
+            fechado(meio_dia, Decimal("0")),
+            _ch(id=uuid4(), created_at=velho, resolvido=False, valor_recuperado=Decimal("999")),
+        ]
+    )
+    await db.commit()
+    corpo = (await client.get("/api/chamados/dias", params={"meses": 2})).json()
+    por_dia = {d["dia"]: d for d in corpo["dias"]}
+    dia1 = por_dia[rev.hoje_sp().replace(day=1).isoformat()]
+    assert (dia1["lucro"], dia1["prejuizo"], dia1["acumulado"]) == (100.5, -30.25, 70.25)
+    assert dia1["concluidos"] == 3
+    # O mês anterior fecha no dele e não entra no acumulado deste.
+    ultimo = por_dia[(rev.hoje_sp().replace(day=1) - timedelta(days=1)).isoformat()]
+    assert (ultimo["lucro"], ultimo["acumulado"]) == (500.0, 500.0)
+    assert corpo["dias"][0]["acumulado"] == 70.25
+
+
+@pytest.mark.asyncio
+async def test_dias_comeca_no_primeiro_chamado(client, make_user, auth_as, db):
+    user = await make_user(role="user", permissions=PERM)
+    auth_as(user)
+    db.add(_ch(id=uuid4(), created_at=datetime.now(UTC)))
+    await db.commit()
+    corpo = (await client.get("/api/chamados/dias", params={"meses": 6})).json()
+    assert [d["dia"] for d in corpo["dias"]] == [rev.hoje_sp().isoformat()]
 
 
 def test_resumo_do_dia_separa_falta_de_prazo():
