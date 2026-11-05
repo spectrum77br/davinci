@@ -955,6 +955,16 @@ class ModeloOut(BaseModel):
     # Quem pediu a lista pode editar/apagar esta? (a própria equipe ou admin;
     # a "para todos" só o admin).
     pode_editar: bool = False
+    # Cada equipe desativa a "para todos" só para ela (05/11/2026). `ativo` acima é o
+    # do admin, que vale para todos. `desativada_na_equipe` = para quem pediu;
+    # `desativada_equipes` = os nomes (o admin vê todas; os outros, só a dele).
+    desativada_na_equipe: bool = False
+    desativada_equipes: list[str] = Field(default_factory=list)
+    pode_desativar: bool = False
+
+
+class ModeloNaEquipeIn(BaseModel):
+    ativo: bool
 
 
 class EquipeModelo(BaseModel):

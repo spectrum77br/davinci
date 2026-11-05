@@ -11,8 +11,9 @@ Regras (decididas com o Vinicius em 14/10/2026, `docs/conciliacao-avaliacao.md`)
 * Situação: bateu / recebido a menos / a mais / aguardando / vencido /
   estornado depois / cancelado / Bling ≠ venda / sem venda. Tolerância R$ 0,05.
 * Etapa: aguardando → conciliado ou pendência → finalizado (sozinho, 7 dias
-  depois de bater sem novidade; à mão quando teve pendência) → reaberto
-  (chegou movimento depois de finalizado) → finalizado de novo.
+  depois de bater sem novidade ou quando a diferença é só afiliado da Shopee;
+  à mão quando teve pendência) → reaberto (chegou movimento depois de
+  finalizado) → finalizado de novo.
 * Sobrou = recebido (ou previsto, enquanto não liberou) − custo − reembolso;
   margem = sobrou ÷ custo, a mesma conta da Margem.
 """
@@ -62,6 +63,9 @@ logger = structlog.get_logger()
 BRT = ZoneInfo("America/Sao_Paulo")
 
 TOLERANCIA = Decimal("0.05")
+CENTAVO = Decimal("0.01")
+# o que a Shopee cobra em cima da comissão de afiliados (27 de 27 pedidos de 04/11)
+TAXA_SOBRE_AFILIADOS = Decimal("0.14")
 DIAS_FINALIZAR = 7
 DIAS_VENCIDO_SEM_PREVISAO = 45
 FOLGA_PREVISAO = timedelta(days=2)
@@ -246,6 +250,30 @@ def so_cobrancas_mudaram(antes: dict[str, Decimal], depois: dict[str, Decimal]) 
         return False
     cobrado = dif("taxas") + dif("afiliados") + dif("cupons")
     return abs(dif("renda") + cobrado) <= TOLERANCIA
+
+
+def baixa_de_afiliados(
+    antes: dict[str, Decimal], depois: dict[str, Decimal], diferenca: Decimal | None
+) -> str | None:
+    """O motivo pra finalizar sozinho o "recebido a menos" que é só afiliado (05/11,
+    Vinicius: "não gostaria que ficasse esses amarelo para sempre"). Vale quando a
+    diferença inteira é a comissão de afiliados mais os 14% que a Shopee cobra em cima
+    dela, ao centavo. Cupom, frete, taxa fora dos 14% ou um centavo sobrando devolvem
+    None: o pedido continua pendência pra alguém olhar."""
+
+    def dif(k: str) -> Decimal:
+        return depois.get(k, ZERO) - antes.get(k, ZERO)
+
+    afiliados, taxa = dif("afiliados"), dif("taxas")
+    if diferenca is None or afiliados <= ZERO:
+        return None
+    if any(abs(dif(k)) >= CENTAVO for k in ("preco", "subsidio", "frete_loja", "cupons")):
+        return None
+    if abs(taxa - afiliados * TAXA_SOBRE_AFILIADOS) > CENTAVO / 2:  # só o arredondamento
+        return None
+    if abs(diferenca + afiliados + taxa) >= CENTAVO:
+        return None
+    return f"só afiliados: {afiliados:.2f} + {taxa:.2f} de taxa em cima deles = toda a diferença"
 
 
 _TAXAS_TIKTOK_CONHECIDAS = (
@@ -1532,6 +1560,17 @@ async def recalcular_loja(
                 calc["motivo"] = texto.replace(CARTEIRA_SO_LIQUIDO, mudou)
             elif mudou:
                 calc["motivo"] = f"{mudou} · {texto}" if texto else mudou
+            # 05/11: só pendência nova — finalizado e reaberto seguem o que já decidiram
+            baixa = baixa_de_afiliados(prometida, shopee, calc["dif_previsto_recebido"])
+            if baixa and calc["situacao"] == "recebido_a_menos" and etapa["etapa"] == "pendencia":
+                etapa = {
+                    **etapa,
+                    "etapa": "finalizado",
+                    "etapa_em": agora,
+                    "etapa_por": ETAPA_PELO_ROBO,
+                    "etapa_motivo": baixa,
+                }
+                contagem["finalizado_so_afiliados"] += 1
         # TikTok: a conta do extrato por pedido (valor = após desconto da loja,
         # tarifa = todas as taxas, frete = parte da loja)
         tiktok = conta_tiktok(venda_ok) if plataforma_loja == "tiktok" else None

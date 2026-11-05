@@ -4316,15 +4316,20 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         )
         # 16/10 (revisão): só o que ainda está em aberto — pedido finalizado com motivo
         # continuava cobrando no "Onde agir" (kia 302142)
-        por_situacao = dict(
-            (
-                await session.execute(
-                    select(ped.situacao, func.count())
-                    .where(*base, ped.etapa.in_(_ETAPAS_PENDENTES))
-                    .group_by(ped.situacao)
-                )
-            ).all()
-        )
+        por_situacao: Counter[str] = Counter()
+        devolvidas = 0
+        for situacao, etapa, qtd in (
+            await session.execute(
+                select(ped.situacao, ped.etapa, func.count())
+                .where(*base, ped.etapa.in_(_ETAPAS_PENDENTES))
+                .group_by(ped.situacao, ped.etapa)
+            )
+        ).all():
+            por_situacao[situacao] += qtd
+            # 05/11 (ATV 305950): "bateu" em pendência só existe na venda devolvida; o
+            # reaberto que bateu já aparece no cartão dos reabertos
+            if situacao == "bateu" and etapa == "pendencia":
+                devolvidas = qtd
         mes = await _somas_pedidos(session, loja, mes_ini, dia + timedelta(days=1))
         mes["ajustes_meses_anteriores"], mes["ajustes_qtd"] = await _ajustes_anteriores(
             session, loja, mes_ini, dia + timedelta(days=1)
@@ -4398,6 +4403,8 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             problemas.append(f"{estornados} estornado(s) depois")
         if em_disputa:
             problemas.append(f"{em_disputa} em disputa (dinheiro retido)")
+        if devolvidas:
+            problemas.append(f"{devolvidas} venda(s) devolvida(s)")
         if loja.ultimo_erro:
             problemas.append(f"erro: {loja.ultimo_erro[:80]}")
         # Só o dia (16/10, Vinicius): o que trava o dia e o que aconteceu nele
@@ -4639,6 +4646,17 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     "detalhe": "apagado ou mudou de loja no Bling: finalizar ou religar as linhas",
                     "acao": "pedidos",
                     "filtro": {"situacao": "fora_da_loja", "etapa": "pendencia,reaberto"},
+                }
+            )
+        if devolvidas:
+            agir.append(
+                {
+                    "gravidade": "warn",
+                    "loja": loja.conta,
+                    "titulo": f"{loja.conta} · {devolvidas} venda(s) devolvida(s)",
+                    "detalhe": "recebeu zero ou menos: finalizar decidindo manter ou zerar o custo",
+                    "acao": "pedidos",
+                    "filtro": {"situacao": "bateu", "etapa": "pendencia"},
                 }
             )
         if dia_status == "pronto":
