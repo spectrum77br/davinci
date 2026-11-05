@@ -10,7 +10,9 @@ equipe". Na fase de observação (`rota.SO_ADMIN`, como em produção):
 - o admin da lista vê todas, escolhe a equipe ou "para todos" e mexe em tudo;
   a "para todos" só ele muda ou apaga;
 - quem não é de equipe (sem `sales_teams`, ou só com outro código, como o
-  cairo [201]) só lê, como antes.
+  cairo [201]) só lê, como antes;
+- cada equipe desativa uma "para todos" só para ela (05/11/2026): "se um
+  desativar e outro nao nao afeta o outro". O `ativo` é o do admin, para todos.
 """
 
 from __future__ import annotations
@@ -22,10 +24,17 @@ from uuid import uuid4
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from app.config import get_settings
-from app.models import AtendimentoModelo, Integration, IntegrationPlatform, User, UserRole
+from app.models import (
+    AtendimentoModelo,
+    AtendimentoModeloDesativado,
+    Integration,
+    IntegrationPlatform,
+    User,
+    UserRole,
+)
 from app.models.pricing import StoreInfo
 from app.routers import atendimento as rota
 from app.security.cipher import encrypt_json
@@ -202,12 +211,121 @@ async def test_as_equipes_do_formulario(client, auth_as, gente):
         assert (e["todas"], e["minhas"]) == (False, []), quem
 
 
+# ── Cada equipe desativa as padrão só para ela (05/11/2026) ──────────────────
+
+
+async def _na_equipe(client, auth_as, user, modelo_id, *, ativo: bool):
+    auth_as(user)
+    return await client.put(f"{URL}/modelos/{modelo_id}/ativa-na-equipe", json={"ativo": ativo})
+
+
+async def test_cada_equipe_desativa_a_padrao_so_para_ela(client, auth_as, gente, antiga):
+    # Antes de alguém mexer: ativa para todos, e quem é de equipe pode desativar.
+    m = (await _lista(client, auth_as, gente["londres"]))["Obrigado"]
+    assert (m["ativo"], m["desativada_na_equipe"], m["pode_desativar"]) == (True, False, True)
+    assert m["pode_editar"] is False
+
+    r = await _na_equipe(client, auth_as, gente["londres"], antiga.id, ativo=False)
+    assert r.status_code == 200, r.text
+    assert (r.json()["ativo"], r.json()["desativada_na_equipe"]) == (True, True)
+    assert r.json()["desativada_equipes"] == ["Londres"]
+    # Repetir não muda nada.
+    r = await _na_equipe(client, auth_as, gente["londres"], antiga.id, ativo=False)
+    assert (r.status_code, r.json()["desativada_na_equipe"]) == (200, True)
+
+    # A outra equipe não é afetada e nem fica sabendo.
+    israel = (await _lista(client, auth_as, gente["israel"]))["Obrigado"]
+    assert (israel["ativo"], israel["desativada_na_equipe"]) == (True, False)
+    assert israel["desativada_equipes"] == []
+    # Quem não é de equipe e o admin continuam com a resposta ativa.
+    sem = (await _lista(client, auth_as, gente["sem_equipe"]))["Obrigado"]
+    assert (sem["ativo"], sem["desativada_na_equipe"], sem["pode_desativar"]) == (
+        True,
+        False,
+        False,
+    )
+    dono = (await _lista(client, auth_as, gente["dono"]))["Obrigado"]
+    assert (dono["ativo"], dono["desativada_na_equipe"]) == (True, False)
+    assert dono["desativada_equipes"] == ["Londres"]
+
+    # A Israel desativa também: cada uma enxerga a própria; o admin, as duas.
+    await _na_equipe(client, auth_as, gente["israel"], antiga.id, ativo=False)
+    assert (await _lista(client, auth_as, gente["dono"]))["Obrigado"]["desativada_equipes"] == [
+        "Londres",
+        "Israel",
+    ]
+    londres = (await _lista(client, auth_as, gente["londres"]))["Obrigado"]
+    assert londres["desativada_equipes"] == ["Londres"]
+
+    # A Londres reativa: a Israel continua com ela desativada.
+    r = await _na_equipe(client, auth_as, gente["londres"], antiga.id, ativo=True)
+    assert (r.json()["desativada_na_equipe"], r.json()["desativada_equipes"]) == (False, [])
+    assert (await _lista(client, auth_as, gente["israel"]))["Obrigado"]["desativada_na_equipe"]
+
+
+async def test_o_desativar_do_admin_vale_para_todos_e_editar_continua_so_dele(
+    client, auth_as, gente, antiga
+):
+    # Quem é de equipe desativa, mas não muda o `ativo` nem o texto da padrão.
+    auth_as(gente["londres"])
+    r = await client.patch(f"{URL}/modelos/{antiga.id}", json={"ativo": False})
+    assert (r.status_code, r.json()["detail"]["code"]) == (403, "resposta_de_todos_so_admin")
+
+    auth_as(gente["dono"])
+    r = await client.patch(f"{URL}/modelos/{antiga.id}", json={"ativo": False})
+    assert (r.status_code, r.json()["ativo"]) == (200, False)
+    for quem in ("londres", "israel"):
+        m = (await _lista(client, auth_as, gente[quem]))["Obrigado"]
+        assert (m["ativo"], m["pode_desativar"]) == (False, False), quem
+
+    # O admin não é de equipe: o caminho dele é o `ativo`, para todos.
+    r = await _na_equipe(client, auth_as, gente["dono"], antiga.id, ativo=False)
+    assert (r.status_code, r.json()["detail"]["code"]) == (403, "so_quem_e_de_equipe")
+    # Quem não é de equipe só lê.
+    for quem in ("sem_equipe", "cairo", "admin_fora"):
+        r = await _na_equipe(client, auth_as, gente[quem], antiga.id, ativo=False)
+        assert (r.status_code, r.json()["detail"]["code"]) == (403, "atendimento_so_leitura"), quem
+
+
+async def test_so_a_padrao_se_desativa_por_equipe(db, client, auth_as, gente, antiga):
+    auth_as(gente["londres"])
+    minha = (await client.post(f"{URL}/modelos", json={"titulo": "L", "texto": "l"})).json()
+    assert minha["pode_desativar"] is False
+    # A da própria equipe se desativa pelo PATCH de sempre (só ela usa).
+    r = await _na_equipe(client, auth_as, gente["londres"], minha["id"], ativo=False)
+    assert (r.status_code, r.json()["detail"]["code"]) == (422, "so_resposta_de_todos")
+    # A de outra equipe nem existe para quem é de fora.
+    r = await _na_equipe(client, auth_as, gente["israel"], minha["id"], ativo=False)
+    assert r.status_code == 404
+    r = await _na_equipe(client, auth_as, gente["israel"], uuid4(), ativo=False)
+    assert r.status_code == 404
+
+    async def linhas() -> int:
+        return await db.scalar(select(func.count()).select_from(AtendimentoModeloDesativado))
+
+    # Virar resposta de uma equipe limpa a escolha das outras.
+    await _na_equipe(client, auth_as, gente["israel"], antiga.id, ativo=False)
+    assert await linhas() == 1
+    auth_as(gente["dono"])
+    r = await client.patch(f"{URL}/modelos/{antiga.id}", json={"equipe": 103})
+    assert (r.status_code, r.json()["desativada_equipes"]) == (200, [])
+    assert await linhas() == 0
+    # Apagar a resposta leva as linhas dela.
+    await client.patch(f"{URL}/modelos/{antiga.id}", json={"equipe": None})
+    await _na_equipe(client, auth_as, gente["israel"], antiga.id, ativo=False)
+    assert await linhas() == 1
+    auth_as(gente["dono"])
+    assert (await client.delete(f"{URL}/modelos/{antiga.id}")).status_code == 204
+    assert await linhas() == 0
+
+
 def test_a_trava_deixa_so_as_rotas_de_resposta_pronta_para_a_equipe():
     caminhos = {(m, r.path) for r in rota.router.routes for m in getattr(r, "methods", ())}
     assert rota.ROTAS_DA_EQUIPE <= caminhos
     assert {p for _, p in rota.ROTAS_DA_EQUIPE} == {
         f"{URL}/modelos",
         f"{URL}/modelos/{{modelo_id}}",
+        f"{URL}/modelos/{{modelo_id}}/ativa-na-equipe",
     }
 
 
@@ -319,6 +437,52 @@ async def test_migration_0443_poe_a_coluna_e_as_antigas_ficam_para_todos(db, mon
                 )
             ).scalars()
             assert "equipe" not in set(colunas)
+    finally:
+        async with engine.begin() as conn:
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+
+
+async def test_migration_0454_cria_a_tabela_e_nao_muda_nada(db, monkeypatch):
+    caminho = (
+        Path(__file__).resolve().parents[1]
+        / "alembic"
+        / "versions"
+        / "0454_atendimento_modelo_desativado.py"
+    )
+    spec = importlib.util.spec_from_file_location("m0454", caminho)
+    mig = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mig)
+    assert mig.revision == "0454_atendimento_modelo_desativado"
+    assert mig.down_revision == "0453_estoque_transferencias"
+    schema = "m0454_" + uuid4().hex[:12]
+    monkeypatch.setattr(mig, "SCHEMA", schema)
+
+    def rodar(passo):
+        def _f(conn):
+            ctx = MigrationContext.configure(conn)
+            mig.op = Operations(ctx)
+            passo()
+
+        return _f
+
+    engine = db.bind
+    existe = (
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema = :s AND table_name = :t"
+    )
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+            await conn.execute(text(f'CREATE TABLE "{schema}".users (id uuid PRIMARY KEY)'))
+            await conn.execute(
+                text(f'CREATE TABLE "{schema}".atendimento_modelos (id uuid PRIMARY KEY)')
+            )
+            await conn.run_sync(rodar(mig.upgrade))
+            nome = {"s": schema, "t": "atendimento_modelos_desativados"}
+            assert (await conn.execute(text(existe), nome)).scalar() == 1
+            contar = f'SELECT count(*) FROM "{schema}".atendimento_modelos_desativados'  # noqa: S608
+            assert (await conn.execute(text(contar))).scalar() == 0
+            await conn.run_sync(rodar(mig.downgrade))
+            assert (await conn.execute(text(existe), nome)).scalar() == 0
     finally:
         async with engine.begin() as conn:
             await conn.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))

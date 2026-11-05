@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import (
     AtendimentoModelo,
+    AtendimentoModeloDesativado,
     AtendimentoPedidoComprador,
     BlingOrder,
     Garantia,
@@ -1106,6 +1107,11 @@ async def test_consultar_manual_prontas_de_todos_e_da_equipe_da_loja(
             sales_team=102,
         )
     )
+    await db.commit()
+    assert await prontas() == ["Da Israel.", "Para todos."]
+    # A equipe desativar uma padrão muda a lista dela, não o que a IA sabe (05/11/2026).
+    todos = await db.scalar(select(AtendimentoModelo.id).where(AtendimentoModelo.titulo == "Todos"))
+    db.add(AtendimentoModeloDesativado(modelo_id=todos, equipe=102))
     await db.commit()
     assert await prontas() == ["Da Israel.", "Para todos."]
 

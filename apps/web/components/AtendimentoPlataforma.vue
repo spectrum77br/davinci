@@ -693,6 +693,15 @@ export type Modelo = {
   equipe?: number | null
   equipe_nome?: string | null
   pode_editar?: boolean
+  // Cada equipe desativa a "para todos" só para ela (05/11/2026). `ativo` é o do
+  // admin, que vale para todos; estes são os da equipe de quem pediu a lista.
+  desativada_na_equipe?: boolean
+  desativada_equipes?: string[]
+  pode_desativar?: boolean
+}
+// Aparece no "/" e no menu da conversa de quem pediu a lista?
+export function prontaAtiva(m: Pick<Modelo, 'ativo' | 'desativada_na_equipe'>): boolean {
+  return m.ativo && !m.desativada_na_equipe
 }
 
 // ─── respostas prontas: a busca do menu e o atalho "/" (03/11/2026) ─────────

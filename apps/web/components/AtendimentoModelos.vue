@@ -21,6 +21,11 @@
 // lista vem do servidor no escopo da pessoa — as "para todos" + as da equipe
 // dela; o admin, todas, com o filtro de equipe. Quem é de equipe cria a da
 // equipe dele e mexe só nas da equipe; a "para todos" só o admin muda.
+//
+// 05/11/2026, o Eduardo: "os 3 grupos devem poder desativar as respostas padroes
+// pra deixar quais eles querem ... se um desativar e outro nao nao afeta o
+// outro". Na "para todos", o "desativar" de quem é de equipe vale só para ela
+// (PUT .../ativa-na-equipe); o do admin continua valendo para todos.
 import { Check, Loader2, MessageSquareText, Pencil, Plus, RotateCcw, Search, Trash2, X } from 'lucide-vue-next'
 import {
   LACUNAS,
@@ -33,6 +38,7 @@ import {
   filtrarProntas,
   limiteDe,
   plataformaInfo,
+  prontaAtiva,
   tamanhoDoEnvio,
   type Modelo,
 } from '~/components/AtendimentoPlataforma.vue'
@@ -211,6 +217,21 @@ async function alternar(m: Modelo) {
   }
 }
 
+// A resposta padrão só para a equipe de quem clicou: as outras não mudam.
+async function alternarNaEquipe(m: Modelo) {
+  salvando.value = true
+  try {
+    const ativo = !!m.desativada_na_equipe
+    const r = comoObjeto<Modelo>(await api<unknown>(`/api/atendimento/modelos/${encodeURIComponent(m.id)}/ativa-na-equipe`, { method: 'PUT', body: { ativo } }), 'modelo')
+    const i = modelos.value.findIndex((x) => x.id === m.id)
+    if (i >= 0) modelos.value[i] = r ?? { ...m, desativada_na_equipe: !ativo }
+  } catch (e: any) {
+    falhou(e, 'Não consegui mudar a resposta pronta')
+  } finally {
+    salvando.value = false
+  }
+}
+
 async function apagar(m: Modelo) {
   if (!confirm(`Apagar a resposta pronta "${m.titulo}"?\n\nSe for só por um tempo, use "desativar".`)) return
   salvando.value = true
@@ -235,7 +256,7 @@ const LACUNAS_DA_TELA = LACUNAS.filter((l) => ['numero_pedido', 'rastreio', 'tra
     <div class="flex flex-wrap items-center gap-2 border-b px-3 py-2">
       <MessageSquareText class="size-4 text-muted-foreground" />
       <h2 class="text-sm font-semibold">Respostas prontas</h2>
-      <span class="text-xs text-muted-foreground">{{ modelos.filter((m) => m.ativo).length }} ativa(s)</span>
+      <span class="text-xs text-muted-foreground">{{ modelos.filter(prontaAtiva).length }} ativa(s)</span>
       <div class="ml-auto flex flex-wrap items-center gap-2">
         <div class="relative">
           <Search class="absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -334,7 +355,7 @@ const LACUNAS_DA_TELA = LACUNAS.filter((l) => ['numero_pedido', 'rastreio', 'tra
     </div>
 
     <ul class="divide-y">
-      <li v-for="m in visiveis" :key="m.id" class="flex items-start gap-3 px-3 py-2.5" :class="m.ativo ? '' : 'opacity-60'">
+      <li v-for="m in visiveis" :key="m.id" class="flex items-start gap-3 px-3 py-2.5" :class="prontaAtiva(m) ? '' : 'opacity-60'">
         <span class="mt-0.5 w-8 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground" title="ordem no menu">{{ m.ordem ?? 0 }}</span>
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-center gap-1.5">
@@ -345,7 +366,9 @@ const LACUNAS_DA_TELA = LACUNAS.filter((l) => ['numero_pedido', 'rastreio', 'tra
               :class="m.equipe == null ? 'bg-muted text-muted-foreground' : 'bg-sky-500/15 text-sky-800 dark:text-sky-300'"
               data-equipe-pronta
             >{{ rotuloEquipe(m) }}</span>
-            <span v-if="!m.ativo" class="rounded-full bg-gray-500/15 px-2 py-0.5 text-[11px] text-muted-foreground">desativada</span>
+            <span v-if="!m.ativo" class="rounded-full bg-gray-500/15 px-2 py-0.5 text-[11px] text-muted-foreground">{{ m.equipe == null && !escolheEquipe ? 'desativada pelo admin' : 'desativada' }}</span>
+            <span v-else-if="m.desativada_na_equipe" class="rounded-full bg-gray-500/15 px-2 py-0.5 text-[11px] text-muted-foreground" data-desativada-na-equipe>desativada na sua equipe</span>
+            <span v-if="escolheEquipe && m.desativada_equipes?.length" class="rounded-full bg-gray-500/15 px-2 py-0.5 text-[11px] text-muted-foreground" title="desativada só para essas equipes; as outras continuam vendo" data-desativada-por>desativada por {{ m.desativada_equipes.join(', ') }}</span>
             <span
               v-if="limiteDe(m.plataforma, m.canal) && m.texto.length > (limiteDe(m.plataforma, m.canal) || 0)"
               class="rounded-full bg-red-500/15 px-2 py-0.5 text-[11px] text-red-700 dark:text-red-300"
@@ -357,6 +380,9 @@ const LACUNAS_DA_TELA = LACUNAS.filter((l) => ['numero_pedido', 'rastreio', 'tra
           <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" :disabled="salvando" @click="alternar(m)">{{ m.ativo ? 'desativar' : 'ativar' }}</Button>
           <Button size="sm" variant="ghost" class="h-7 px-2" title="editar" @click="abrirEdicao(m)"><Pencil class="size-3.5" /></Button>
           <Button v-if="podeApagar(m)" size="sm" variant="ghost" class="h-7 px-2 text-red-600" title="apagar" :disabled="salvando" @click="apagar(m)"><Trash2 class="size-3.5" /></Button>
+        </div>
+        <div v-else-if="m.pode_desativar" class="flex shrink-0 items-center gap-0.5">
+          <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" title="só para a sua equipe: as outras continuam vendo" :disabled="salvando" data-alternar-na-equipe @click="alternarNaEquipe(m)">{{ m.desativada_na_equipe ? 'ativar' : 'desativar' }}</Button>
         </div>
       </li>
     </ul>
