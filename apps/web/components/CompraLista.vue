@@ -456,7 +456,8 @@ function resumoDaEmissao(c: Compra): string {
   return `${c.comprador.apelido || c.comprador.razao_social} compra ${resumoItens(c)} de ${c.vendedor_nome} · ${fmtBrl(c.total)} · CFOP ${c.cfop}`
 }
 
-// A NF é de verdade: confirma digitando EMITIR. O servidor ainda pode pedir uma
+// A NF é de verdade: confirma num clique, com o resumo (quem, quantas, total, CFOP) na janela.
+// 05/11 Eduardo: "já aparece para clicar em emitir, não precisa escrever emitir". O servidor ainda pode pedir uma
 // 2ª confirmação (409): a planilha já foi baixada (importada à mão = NF em dobro)
 // ou já tem outra compra da empresa com a vendedora no mesmo mês. Cada uma é
 // perguntada uma vez e o pedido vai de novo com a flag.
@@ -471,7 +472,6 @@ async function emitir(c: Compra) {
     ],
     tom: 'perigo',
     botao: 'emitir',
-    digitar: 'EMITIR',
   })
   if (!ok) return
   const flags = { confirmo_planilha_nao_importada: false, confirmo_outra_no_mes: false }

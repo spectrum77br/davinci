@@ -240,14 +240,37 @@ const qtdPeloPct = computed(() => {
   if (!Number.isFinite(pct) || pct <= 0) return null
   return quantidadePeloPercentual(fat.value!.valor, pct, l.valor_unitario || 0)
 })
-let pularPct = false // edição: a quantidade gravada não é trocada quando o faturamento chega
-watch(qtdPeloPct, (q) => {
-  if (pularPct) {
-    if (q != null) pularPct = false
-    return
-  }
-  if (q != null && form.linhas[0]) form.linhas[0].quantidade = q > 0 ? String(q) : ''
+// edição: a quantidade gravada não é trocada quando chega o faturamento DA PRÓPRIA compra (empresa|mês|%|linha);
+// se o usuário mexer em qualquer um desses antes, a flag cai e vale a conta
+let pularPct: string | null = null
+const contextoPct = () =>
+  [form.company_id, form.mes, form.modo, form.percentual, form.linhas[0]?.chave, form.linhas[0]?.valor_unitario].join('|')
+// 05/11: a conta aparecia ("= 15 un.") e a linha ficava vazia (a Aguiar saiu registrada com 1). O watch só
+// olhava o número da conta: se ele não mudava (linha trocada, campo apagado, o mesmo % digitado de novo), a
+// quantidade não voltava. Agora reage também ao % digitado, ao modo e à troca da 1ª linha — e, se a
+// quantidade ainda ficar diferente da conta, a tela avisa e oferece "usar N" (pctDiverge, abaixo).
+watch(
+  () => [qtdPeloPct.value, form.percentual, form.modo, form.linhas[0]?.chave] as const,
+  ([q]) => {
+    if (pularPct != null && pularPct !== contextoPct()) pularPct = null
+    if (pularPct != null) {
+      if (q != null) pularPct = null
+      return
+    }
+    if (q != null && form.linhas[0]) form.linhas[0].quantidade = q > 0 ? String(q) : ''
+  },
+)
+// a quantidade da 1ª linha não é a da conta do % (mexida à mão, ou não entrou): mostra e oferece a da conta
+const pctDiverge = computed(() => {
+  const q = qtdPeloPct.value
+  const l = form.linhas[0]
+  if (q == null || q <= 0 || !l) return null
+  return lerQuantidade(l.quantidade) === q ? null : q
 })
+function usarQtdDoPct() {
+  const q = qtdPeloPct.value
+  if (q != null && q > 0 && form.linhas[0]) form.linhas[0].quantidade = String(q)
+}
 const alvoPct = computed(() => {
   if (!temFaturamento.value) return null
   const pct = Number(String(form.percentual).replace(',', '.'))
@@ -350,7 +373,7 @@ function corpo() {
 }
 
 function limpar() {
-  pularPct = false
+  pularPct = null
   pularRecargaDoComprador = false
   form.modo = 'quantidade'
   form.percentual = ''
@@ -401,7 +424,6 @@ watch(
   (c) => {
     if (!c) return
     pularRecargaDoComprador = form.company_id !== c.company_id
-    pularPct = c.modo === 'percentual'
     form.company_id = c.company_id
     form.vendedor_cnpj = c.vendedor_cnpj
     form.mes = c.competencia.slice(0, 7)
@@ -428,6 +450,7 @@ watch(
       valor_unitario: String(i.valor_unitario),
     }))
     tentou.value = false
+    pularPct = c.modo === 'percentual' ? contextoPct() : null // depois de montar o form: é o contexto da compra
   },
   { immediate: true },
 )
@@ -556,6 +579,22 @@ const podeEditar = computed(() => tela.canEdit.value)
             <p v-if="alvoPct != null && qtdPeloPct != null" class="text-xs text-muted-foreground">
               {{ fmtBrl(alvoPct) }} ÷ {{ fmtBrl(form.linhas[0]?.valor_unitario || 0) }} =
               <span class="font-medium text-foreground">{{ fmtQtd(qtdPeloPct) }} un.</span>
+            </p>
+            <p
+              v-if="pctDiverge != null"
+              class="flex flex-wrap items-center gap-2 text-xs text-amber-700 dark:text-amber-400"
+              data-teste="pct-diverge"
+            >
+              A quantidade na linha ({{ lerQuantidade(form.linhas[0]?.quantidade ?? '') ?? 'vazia' }}) não é a do %.
+              <Button
+                v-if="podeEditar"
+                size="sm"
+                variant="outline"
+                class="h-7 px-2 text-xs"
+                @click="usarQtdDoPct"
+              >
+                usar {{ fmtQtd(pctDiverge) }}
+              </Button>
             </p>
           </div>
         </NfseCampo>

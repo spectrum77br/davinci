@@ -7,7 +7,7 @@
 //    no Bling) nunca mais tem planilha, editar, reabrir, excluir nem emitir —
 //    planilha importada à mão por cima = NF em dobro;
 //  - vendedora manual nunca tem "emitir";
-//  - Emitir pede EMITIR digitado e, no 409 planilha_ja_baixada/outra_no_mes,
+//  - Emitir confirma num clique (05/11: sem digitar EMITIR) e, no 409 planilha_ja_baixada/outra_no_mes,
 //    pergunta de novo e reenvia com a flag (uma vez cada);
 //  - a lista se relê a cada 30 s só enquanto houver compra na fila/com o robô,
 //    e para fora da aba (KeepAlive) e ao desmontar.
@@ -283,7 +283,7 @@ const bloco = (de, ate) => {
   assert.ok(!/algoOcupado/.test(scriptLista.replace(/\/\/.*$/gm, '')), 'fora do algoOcupado')
 }
 
-// --- Emitir: EMITIR digitado + 2ª confirmação com a flag no 409
+// --- Emitir: confirmação de um clique + 2ª confirmação com a flag no 409
 async function testarEmitir() {
   const js = transpilar(bloco('async function emitir', 'async function copiarChave'))
   const fabricar = (respostasApi, respostasConfirmar) => {
@@ -327,7 +327,7 @@ async function testarEmitir() {
     assert.equal(t.posts.length, 0)
     const p = t.perguntas[0]
     assert.equal(p.titulo, 'Emitir NF de verdade')
-    assert.equal(p.digitar, 'EMITIR', 'trava de produção: digitar EMITIR')
+    assert.equal(p.digitar, undefined, 'um clique: não pede para digitar EMITIR (05/11)')
     assert.equal(p.tom, 'perigo')
     assert.equal(p.botao, 'emitir')
     assert.ok(p.linhas.some((l) => /VITA compra 121 × Embalagem de COMERCIAL BEZERRA/.test(l)), 'resumo na confirmação')
@@ -611,13 +611,87 @@ return { listaMarcadas, grupoMarcado, grupoDoCabecalho, marcaveis, marcacao, mar
   const arqCc = path.resolve(__dirname, '../components/ContabilidadeCompra.vue')
   const cc = fs.readFileSync(arqCc, 'utf8')
   assert.match(cc, /<CompraLista[\s\S]*?:vendedoras="vendedoras"/, 'a lista recebe as vendedoras (quem é automática)')
+  assert.match(tpl, /v-if="pctDiverge != null"[\s\S]*?@click="usarQtdDoPct"/, 'quantidade ≠ conta do %: aviso com "usar N"')
+}
+
+// --- % do faturamento (05/11: a conta dizia "= 15 un." e a linha ficava vazia; a Aguiar saiu com 1)
+async function testarPct() {
+  const arqForm = path.resolve(__dirname, '../components/CompraForm.vue')
+  const sfc = parse(fs.readFileSync(arqForm, 'utf8'), { filename: arqForm }).descriptor.scriptSetup.content
+  const i = sfc.indexOf('// % do faturamento: a quantidade da 1ª linha')
+  const j = sfc.indexOf('const alvoPct', i)
+  assert.ok(i >= 0 && j > i, 'bloco do % no CompraForm')
+  const js = transpilar(sfc.slice(i, j))
+  const { reactive } = requireWeb('vue')
+  const montar = () => {
+    let chave = 1
+    const linha = (q = '') => ({ chave: chave++, produto_id: 'p1', nome: 'Embalagem', sku: 'a001', ncm: '39232110', unidade: 'UN', quantidade: q, valor_unitario: '9.30' })
+    const form = reactive({ modo: 'quantidade', percentual: '', linhas: [linha()] })
+    const fat = ref(null)
+    const temFaturamento = computed(() => !!fat.value && Number(fat.value.valor) > 0)
+    const env = { form, fat, temFaturamento, computed, watch, quantidadePeloPercentual: L.quantidadePeloPercentual, lerQuantidade: L.lerQuantidade }
+    const nomes = Object.keys(env)
+    const r = new Function(...nomes, js + '\nreturn { qtdPeloPct, pctDiverge, usarQtdDoPct }')(...nomes.map((n) => env[n]))
+    return { ...r, form, fat, linha }
+  }
+  // fluxo normal: empresa → faturamento → % → a linha recebe a conta
+  {
+    const t = montar()
+    t.fat.value = { valor: '13958.60' }
+    t.form.modo = 'percentual'
+    t.form.percentual = '1'
+    await nextTick()
+    assert.equal(t.qtdPeloPct.value, 15)
+    assert.equal(t.form.linhas[0].quantidade, '15', '1% de R$ 13.958,60 a R$ 9,30 = 15')
+    assert.equal(t.pctDiverge.value, null)
+  }
+  // a 1ª linha trocada com a conta igual (o caso da Aguiar): antes ficava vazia
+  {
+    const t = montar()
+    t.fat.value = { valor: '13958.60' }
+    t.form.modo = 'percentual'
+    t.form.percentual = '1'
+    await nextTick()
+    t.form.linhas = [t.linha()]
+    await nextTick()
+    assert.equal(t.form.linhas[0].quantidade, '15', 'linha nova recebe a conta mesmo com o mesmo resultado')
+  }
+  // quantidade mexida: o aviso aparece e "usar 15" põe de volta; o mesmo % digitado de novo também refaz
+  {
+    const t = montar()
+    t.fat.value = { valor: '13958.60' }
+    t.form.modo = 'percentual'
+    t.form.percentual = '1'
+    await nextTick()
+    t.form.linhas[0].quantidade = '1'
+    await nextTick()
+    assert.equal(t.pctDiverge.value, 15, 'quantidade 1 com conta 15: avisa')
+    t.usarQtdDoPct()
+    assert.equal(t.form.linhas[0].quantidade, '15')
+    assert.equal(t.pctDiverge.value, null)
+    t.form.linhas[0].quantidade = ''
+    t.form.percentual = '1,0'
+    await nextTick()
+    assert.equal(t.form.linhas[0].quantidade, '15', '% digitado de novo refaz a conta')
+  }
+  // digitar a quantidade (modo quantidade): o % não mexe em nada
+  {
+    const t = montar()
+    t.fat.value = { valor: '13958.60' }
+    t.form.linhas[0].quantidade = '40'
+    await nextTick()
+    assert.equal(t.qtdPeloPct.value, null)
+    assert.equal(t.form.linhas[0].quantidade, '40')
+    assert.equal(t.pctDiverge.value, null)
+  }
 }
 
 ;(async () => {
   await testarEmitir()
   await testarReleitura()
   await testarMarcacao()
-  console.log('PASS: 6 status e 9 etapas iguais ao servidor; menu por status (queimado sem planilha/editar/reabrir/excluir/emitir, manual sem emitir); Emitir com EMITIR e reenvio com flag no 409; releitura de 30 s só com robô e com a aba ativa; vendedora automática no formulário; imprimir/baixar a DANFE da NF emitida com chave (menu, caixinhas sem misturar com a planilha, lote pelas rotas da Compra)')
+  await testarPct()
+  console.log('PASS: 6 status e 9 etapas iguais ao servidor; menu por status (queimado sem planilha/editar/reabrir/excluir/emitir, manual sem emitir); Emitir num clique (sem EMITIR) e reenvio com flag no 409; % do faturamento põe a quantidade na linha (linha trocada, % redigitado) e avisa quando difere; releitura de 30 s só com robô e com a aba ativa; vendedora automática no formulário; imprimir/baixar a DANFE da NF emitida com chave (menu, caixinhas sem misturar com a planilha, lote pelas rotas da Compra)')
 })().catch((e) => {
   console.error(e)
   process.exit(1)
