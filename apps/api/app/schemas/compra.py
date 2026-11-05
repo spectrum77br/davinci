@@ -294,7 +294,11 @@ class CompraOut(BaseModel):
     emissao_iniciada_em: datetime | None = None
     emissao_tentativas: int = 0
     emissao_erro: str | None = None
+    emissao_etapa: str | None = None  # até onde o robô chegou (models/compra.py:ETAPAS)
     nf_emitida_em: datetime | None = None
+    planilha_baixada_em: datetime | None = None
+    # o pedido pode já estar no Bling da vendedora: sem editar, reabrir, excluir nem planilha
+    numero_queimado: bool = False
     observacoes: str | None
     itens: list[ItemOut]
     created_at: datetime
@@ -302,17 +306,95 @@ class CompraOut(BaseModel):
     criado_por: str | None = None
 
 
+def _nf_numero(v: object) -> str:
+    d = _digitos(v) if isinstance(v, str) else (str(v) if isinstance(v, int) else None)
+    if not d:
+        raise ValueError("Digite o número da NF (só números).")
+    return d.lstrip("0") or "0"
+
+
+def _nf_chave(v: object) -> str | None:
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    d = _digitos(v) if isinstance(v, str) else None
+    if not d or len(d) != 44:
+        raise ValueError("A chave de acesso da NF-e tem 44 números.")
+    return d
+
+
 class NfIn(BaseModel):
     nf_numero: str = Field(min_length=1, max_length=20)
+    # 04/11: opcional — anotar a NF que o robô deixou pela metade (erro) com a chave
+    nf_chave: str | None = None
 
     @field_validator("nf_numero", mode="before")
     @classmethod
     def _v_nf(cls, v: object) -> str:
-        d = _digitos(v) if isinstance(v, str) else (str(v) if isinstance(v, int) else None)
-        if not d:
-            raise ValueError("Digite o número da NF (só números).")
-        return d.lstrip("0") or "0"
+        return _nf_numero(v)
+
+    @field_validator("nf_chave", mode="before")
+    @classmethod
+    def _v_chave(cls, v: object) -> str | None:
+        return _nf_chave(v)
 
 
 class PlanilhaIn(BaseModel):
     ids: list[UUID] = Field(min_length=1, max_length=200)
+
+
+# --- emissão automática (04/11/2026, services/compra_emissao.py) ----------------------------
+
+# Mesma lista e ordem de `app/models/compra.py:ETAPAS` (o teste confere).
+Etapa = Literal[
+    "lease",
+    "import_tentado",
+    "importado",
+    "nf_gerada",
+    "pronta_sefaz",
+    "sefaz_tentado",
+    "autorizada",
+    "xml_ok",
+    "devolvido",
+]
+
+
+class EmitirIn(BaseModel):
+    # "Emitir" depois de baixar a planilha: confirmo que ela NÃO foi importada no Bling
+    confirmo_planilha_nao_importada: bool = False
+    # já há outra compra da mesma empresa, mês e vendedora na fila ou com NF
+    confirmo_outra_no_mes: bool = False
+
+
+class AgenteLeaseIn(BaseModel):
+    serial: str = Field(min_length=1, max_length=40)
+
+
+class AgenteEtapaIn(BaseModel):
+    etapa: Etapa
+    nf_numero: str | None = None  # a partir de nf_gerada
+    detalhe: str | None = Field(default=None, max_length=500)
+
+    @field_validator("nf_numero", mode="before")
+    @classmethod
+    def _v_nf(cls, v: object) -> str | None:
+        return None if v in (None, "") else _nf_numero(v)
+
+
+class AgenteResultadoIn(BaseModel):
+    status: Literal["nf_emitida", "erro"]
+    etapa: Etapa | None = None  # onde parou (erro)
+    retentavel: bool = False
+    motivo: str | None = Field(default=None, max_length=2000)
+    nf_numero: str | None = None
+    nf_chave: str | None = None
+    xml_b64: str | None = Field(default=None, max_length=5_000_000)
+
+    @field_validator("nf_numero", mode="before")
+    @classmethod
+    def _v_nf(cls, v: object) -> str | None:
+        return None if v in (None, "") else _nf_numero(v)
+
+    @field_validator("nf_chave", mode="before")
+    @classmethod
+    def _v_chave(cls, v: object) -> str | None:
+        return _nf_chave(v)

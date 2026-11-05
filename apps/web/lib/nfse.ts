@@ -568,11 +568,23 @@ export type NfseApi = {
   // num só (imprimir) ou monta o .zip. Recebe as notas (e não só os ids) para
   // o aviso dizer quais faltaram pelo nº e pela empresa. null = não saiu nada.
   // Chame direto do clique: imprimir abre a aba antes de esperar o servidor.
-  imprimirLote(notas: NotaDoLote[]): Promise<ResultadoArquivos | null>
-  baixarLote(notas: NotaDoLote[], tipo: 'pdf' | 'xml'): Promise<ResultadoArquivos | null>
+  // `origem` (04/11): as NFs de compra (lib/compra.ts LOTE_COMPRA); sem ela, NFS-e.
+  imprimirLote(notas: NotaDoLote[], origem?: OrigemLote): Promise<ResultadoArquivos | null>
+  baixarLote(notas: NotaDoLote[], tipo: 'pdf' | 'xml', origem?: OrigemLote): Promise<ResultadoArquivos | null>
   // Contabilidade › Compra (23/10): baixa um arquivo da API com a chave (a planilha do Bling).
   // false = não baixou (o erro já virou aviso na tela).
   baixarArquivo(path: string, nome: string, opts?: any): Promise<boolean>
+  // Contabilidade › Compra (04/11): um PDF da API numa aba, para imprimir (a DANFE da
+  // NF de compra, atrás da chave inteira: sem o link de 60 s da NFS-e). Chame direto do
+  // clique: a aba abre antes de esperar o servidor. false = não abriu (já avisou).
+  abrirArquivo(path: string, o: AbrirArquivoOpts): Promise<boolean>
+}
+
+export type AbrirArquivoOpts = {
+  titulo: string // título da aba enquanto o PDF desce
+  carregando: string // texto da aba enquanto o PDF desce
+  nome: string // nome do arquivo se o navegador bloquear a aba (aí ele baixa)
+  erro: string // título do aviso se não der
 }
 
 // O que o lote de arquivos precisa de cada nota.
@@ -583,6 +595,31 @@ export type ResultadoArquivos = { total: number; ok: number; faltaram: string[] 
 
 // Igual ao backend (services/nfse/lote_arquivos.py MAX_LOTE): notas por vez.
 export const MAX_LOTE_ARQUIVOS = 100
+
+// De onde vem o lote: POST `${rota}/imprimir` e `${rota}/arquivos`, com o mesmo corpo
+// e os mesmos cabeçalhos X-Nfse-*; o começo do nome do arquivo e os textos dos avisos.
+// 04/11/2026: a NF de compra (Contabilidade › Compra) usa o mesmo caminho (LOTE_COMPRA).
+export type OrigemLote = {
+  rota: string
+  arquivo: string // notas-de-servico → notas-de-servico_20260930-1415.pdf
+  uma: string // 'nota'
+  varias: string // 'notas'
+  tituloAba: string // a aba de imprimir enquanto o PDF desce
+  faltouPdf: string // por que a que ficou fora da impressão não veio
+  faltouZip: string // por que a que ficou fora do .zip não veio
+  porPartes: string // passou de 100
+}
+
+export const LOTE_NFSE: OrigemLote = {
+  rota: '/api/nfse/emissoes/lote',
+  arquivo: 'notas-de-servico',
+  uma: 'nota',
+  varias: 'notas',
+  tituloAba: 'Notas para imprimir',
+  faltouPdf: 'A NFE.io não devolveu o PDF dessas notas. Tente de novo em alguns minutos.',
+  faltouZip: 'A NFE.io não devolveu o arquivo dessas notas; o motivo está no _FALTARAM.txt, dentro do .zip.',
+  porPartes: 'Vá por partes: filtre por mês ou empresa na aba Notas emitidas.',
+}
 
 // A nota tem PDF e XML na NFE.io: autorizada (ou já cancelada) e com o id de
 // lá. "Cancelando" fica de fora do lote: o PDF muda quando a prefeitura confirmar.

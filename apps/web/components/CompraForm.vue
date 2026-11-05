@@ -21,7 +21,7 @@ import {
 } from '~/lib/nfse'
 import {
   CAMPOS_ENDERECO, ORIGEM_ENDERECO, cfopSugerido, faltandoNoEndereco, fmtNcm, fmtQtd, lerQuantidade,
-  nomeDaPlanilha, quantidadePeloPercentual, totalDaLinha,
+  nomeDaPlanilha, quantidadePeloPercentual, totalDaLinha, vendedoraAutomatica,
   type Compra, type Comprador, type Endereco, type FaturamentoCompra, type Produto, type Vendedora,
 } from '~/lib/compra'
 
@@ -107,11 +107,16 @@ const opcoesVendedoras = computed<Vendedora[]>(() => {
   const lista = [...props.vendedoras]
   const e = props.editando
   if (e && !lista.some((v) => v.cnpj === e.vendedor_cnpj)) {
-    lista.push({ cnpj: e.vendedor_cnpj, nome: e.vendedor_nome, uf: e.vendedor_uf, municipio: null, notas_90d: 0, ultima: null })
+    lista.push({
+      cnpj: e.vendedor_cnpj, nome: e.vendedor_nome, uf: e.vendedor_uf, municipio: null, notas_90d: 0, ultima: null,
+      automatico: false, adspower_serial: null,
+    })
   }
   return lista
 })
 const vendedora = computed(() => opcoesVendedoras.value.find((v) => v.cnpj === form.vendedor_cnpj) ?? null)
+// 04/11/2026: a NF dessa vendedora sai pelo robô (Compras feitas › emitir a NF)
+const vendedoraRobo = computed(() => vendedoraAutomatica(vendedora.value))
 
 // --- quem compra ------------------------------------------------------------------------
 
@@ -477,7 +482,7 @@ const podeEditar = computed(() => tela.canEdit.value)
           >
             <option value="" disabled>{{ carregando ? 'carregando…' : 'escolha de quem comprar…' }}</option>
             <option v-for="v in opcoesVendedoras" :key="v.cnpj" :value="v.cnpj">
-              {{ v.nome }} · {{ fmtDoc(v.cnpj) }}{{ v.uf ? ` · ${v.uf}` : '' }}
+              {{ v.nome }} · {{ fmtDoc(v.cnpj) }}{{ v.uf ? ` · ${v.uf}` : '' }}{{ vendedoraAutomatica(v) ? ' · automático' : '' }}
             </option>
           </select>
           <p v-if="!carregando && !opcoesVendedoras.length" class="text-xs text-amber-600 dark:text-amber-400">
@@ -740,9 +745,16 @@ const podeEditar = computed(() => tela.canEdit.value)
       </NfseCampo>
 
       <NfseAviso tom="info" :icone="Info" compacto>
-        A planilha do Bling não leva IE, NCM nem CFOP. Ao emitir no Bling de
-        <span class="font-medium">{{ vendedora?.nome || 'quem vende' }}</span>: conferir a natureza de operação (CFOP
-        {{ cfopFinal }}), o NCM do produto (pelo SKU) e a IE do contato.
+        <template v-if="vendedoraRobo">
+          <span class="font-medium">Vendedora automática: emita pelo robô em Compras feitas</span> (menu ⋯ › emitir a
+          NF); ele acerta o NCM e a IE no Bling e confere o XML. Baixe a planilha só se for emitir à mão: com ela
+          baixada, o Emitir pergunta de novo (importada à mão = NF em dobro).
+        </template>
+        <template v-else>
+          A planilha do Bling não leva IE, NCM nem CFOP. Ao emitir no Bling de
+          <span class="font-medium">{{ vendedora?.nome || 'quem vende' }}</span>: conferir a natureza de operação (CFOP
+          {{ cfopFinal }}), o NCM do produto (pelo SKU) e a IE do contato.
+        </template>
       </NfseAviso>
     </NfseSecao>
 

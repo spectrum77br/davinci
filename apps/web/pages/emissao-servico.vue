@@ -40,11 +40,11 @@ import { Button } from '~/components/ui/button'
 import { SENHA_EXTRA_TRAVA } from '~/composables/useSenhaExtra'
 import { TABS_CADASTROS } from '~/lib/navGroups'
 import {
-  erroApi, fmtMes, itemReenvio, MAX_LOTE_ARQUIVOS, mesAtual, mesValido, NFSE_API, NFSE_TELA, plural, prestadorPorId,
+  erroApi, fmtMes, itemReenvio, LOTE_NFSE, MAX_LOTE_ARQUIVOS, mesAtual, mesValido, NFSE_API, NFSE_TELA, plural, prestadorPorId,
   STATUS_PARA_RESOLVER,
-  type AbaId, type AbrirModeloOpts, type AbrirTomadorOpts, type AvulsaApi, type CancelarApi, type ConfirmApi,
+  type AbaId, type AbrirArquivoOpts, type AbrirModeloOpts, type AbrirTomadorOpts, type AvulsaApi, type CancelarApi, type ConfirmApi,
   type ConfirmarOpts, type EmailApi, type Emissao, type EmpresaApi, type IntegrarApi, type ItemLote, type LoteApi, type Modelo, type ModeloApi,
-  type NfseApi, type NfseTela, type NotaApi, type NotaDoLote, type PedidoEmitir, type Prestador, type ResultadoArquivos,
+  type NfseApi, type NfseTela, type NotaApi, type NotaDoLote, type OrigemLote, type PedidoEmitir, type Prestador, type ResultadoArquivos,
   type ResultadoLote,
   type SecaoEmpresa, type StatusNfse, type Tomador, type TomadorApi,
 } from '~/lib/nfse'
@@ -208,18 +208,37 @@ async function linkDoArquivo(id: string, tipo: 'pdf' | 'xml'): Promise<string> {
   return r.url
 }
 
-async function abrirPdf(id: string): Promise<void> {
-  // A aba abre JÁ no clique: depois de esperar o link, o navegador a bloquearia.
+// A aba abre JÁ no clique: depois de esperar o servidor (ou o link), o navegador a
+// bloquearia sem aviso (lição do controle-estoque: "5 funcionava e 8 não").
+function abrirAbaJa(titulo: string, texto: string): Window | null {
   const aba = window.open('', '_blank')
   if (aba) {
     aba.opener = null
     try {
-      aba.document.title = 'PDF da nota'
-      aba.document.body.textContent = 'Carregando o PDF da nota…'
+      aba.document.title = titulo
+      aba.document.body.textContent = texto
     } catch {
       // aba de outro jeito (extensão, política do navegador): segue sem o aviso
     }
   }
+  return aba
+}
+
+// O PDF que desceu na aba aberta no clique. Bloqueador de janelas (sem aba): baixa o
+// PDF. A pessoa fechou a aba antes de o PDF chegar: desistiu, não faz nada.
+function pdfNaAba(aba: Window | null, pdf: Blob, nome: string) {
+  if (!aba) {
+    salvarBlob(pdf, nome)
+  } else if (!aba.closed) {
+    const url = URL.createObjectURL(pdf)
+    aba.location.href = url
+    // O leitor de PDF já carregou; depois de 1 minuto o link some da memória.
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  }
+}
+
+async function abrirPdf(id: string): Promise<void> {
+  const aba = abrirAbaJa('PDF da nota', 'Carregando o PDF da nota…')
   try {
     const url = await linkDoArquivo(id, 'pdf')
     // Bloqueador de janelas (sem aba): o PDF é baixado. A pessoa fechou a aba
@@ -296,12 +315,12 @@ function salvarBlob(arquivo: Blob, nome: string) {
 }
 
 // "nº 5 (ATV), nº 7 (Rocha)" das que faltaram; acima de 8, "e mais N".
-function quaisFaltaram(notas: NotaDoLote[], ids: string[]): string {
+function quaisFaltaram(notas: NotaDoLote[], ids: string[], o: OrigemLote = LOTE_NFSE): string {
   const porId = new Map(notas.map((n) => [n.id, n]))
   const nomes = ids.map((id) => {
     const n = porId.get(id)
-    if (!n) return 'uma nota'
-    const numero = n.n_nfse ? `nº ${n.n_nfse}` : 'nota sem número'
+    if (!n) return `uma ${o.uma}`
+    const numero = n.n_nfse ? `nº ${n.n_nfse}` : `${o.uma} sem número`
     return n.prestador_nome ? `${numero} (${n.prestador_nome})` : numero
   })
   const primeiras = nomes.slice(0, 8).join(', ')
@@ -319,41 +338,27 @@ function avisarOcupado() {
 
 // No máximo 100 por vez (o servidor recusa mais). Confere ANTES de abrir a aba
 // de impressão: sem isto, a aba abria em branco, fechava e o aviso vinha em inglês.
-function demaisNoLote(ids: string[]): boolean {
+function demaisNoLote(ids: string[], o: OrigemLote): boolean {
   if (ids.length <= MAX_LOTE_ARQUIVOS) return false
-  toasts.warning(
-    `No máximo ${MAX_LOTE_ARQUIVOS} notas por vez`,
-    `São ${ids.length}. Vá por partes: filtre por mês ou empresa na aba Notas emitidas.`,
-  )
+  toasts.warning(`No máximo ${MAX_LOTE_ARQUIVOS} ${o.varias} por vez`, `São ${ids.length}. ${o.porPartes}`)
   return true
 }
 
 // Junta os PDFs no servidor e abre numa aba para imprimir (Ctrl+P no leitor de
-// PDF do navegador). A aba abre JÁ no clique: depois de esperar o servidor, o
-// navegador a bloquearia sem aviso (lição do controle-estoque: "5 funcionava e
-// 8 não"). Bloqueador de janelas (sem aba): baixa o PDF. A pessoa fechou a aba
-// antes de o PDF chegar: desistiu, não faz nada.
-async function imprimirLote(notas: NotaDoLote[]): Promise<ResultadoArquivos | null> {
+// PDF do navegador). A aba abre JÁ no clique (abrirAbaJa); sem aba, baixa o PDF.
+// `o` (04/11): de onde vem o lote — NFS-e (padrão) ou as NFs de compra (DANFEs).
+async function imprimirLote(notas: NotaDoLote[], o: OrigemLote = LOTE_NFSE): Promise<ResultadoArquivos | null> {
   const ids = idsDoLote(notas)
-  if (!ids.length || demaisNoLote(ids)) return null
+  if (!ids.length || demaisNoLote(ids, o)) return null
   if (arquivosOcupado.value) {
     avisarOcupado()
     return null
   }
-  const aba = window.open('', '_blank')
-  if (aba) {
-    aba.opener = null
-    try {
-      aba.document.title = 'Notas para imprimir'
-      aba.document.body.textContent = `Juntando ${plural(ids.length, 'nota', 'notas')} para imprimir…`
-    } catch {
-      // aba de outro jeito (extensão, política do navegador): segue sem o aviso
-    }
-  }
+  const aba = abrirAbaJa(o.tituloAba, `Juntando ${plural(ids.length, o.uma, o.varias)} para imprimir…`)
   arquivosOcupado.value = true
   try {
     let cab: ResultadoArquivos | null = null
-    const pdf = await apiN<Blob>('/api/nfse/emissoes/lote/imprimir', {
+    const pdf = await apiN<Blob>(`${o.rota}/imprimir`, {
       method: 'POST',
       body: { ids },
       responseType: 'blob',
@@ -362,26 +367,16 @@ async function imprimirLote(notas: NotaDoLote[]): Promise<ResultadoArquivos | nu
       },
     })
     const r: ResultadoArquivos = cab ?? { total: ids.length, ok: ids.length, faltaram: [] }
-    if (!aba) {
-      salvarBlob(pdf, `notas-de-servico_${carimbo()}.pdf`)
-    } else if (!aba.closed) {
-      const url = URL.createObjectURL(pdf)
-      aba.location.href = url
-      // O leitor de PDF já carregou; depois de 1 minuto o link some da memória.
-      setTimeout(() => URL.revokeObjectURL(url), 60_000)
-    }
+    pdfNaAba(aba, pdf, `${o.arquivo}_${carimbo()}.pdf`)
     if (r.faltaram.length) {
-      toasts.warning('Ficaram fora da impressão', [
-        `${quaisFaltaram(notas, r.faltaram)}.`,
-        'A NFE.io não devolveu o PDF dessas notas. Tente de novo em alguns minutos.',
-      ])
+      toasts.warning('Ficaram fora da impressão', [`${quaisFaltaram(notas, r.faltaram, o)}.`, o.faltouPdf])
     }
     return r
   } catch (e) {
     aba?.close()
     const lido = await lerErroDeArquivo(e)
     // Senha vencida: o cadeado já explica.
-    if (!trava.eTravamento(lido)) toasts.error('Não deu para juntar as notas para imprimir', erroApi(lido))
+    if (!trava.eTravamento(lido)) toasts.error(`Não deu para juntar as ${o.varias} para imprimir`, erroApi(lido))
     return null
   } finally {
     arquivosOcupado.value = false
@@ -390,9 +385,13 @@ async function imprimirLote(notas: NotaDoLote[]): Promise<ResultadoArquivos | nu
 
 // Baixa o .zip com os PDFs ou os XMLs das notas (uma pasta por empresa). O nome
 // é montado aqui: o $fetch com blob não lê o nome que o servidor manda.
-async function baixarLote(notas: NotaDoLote[], tipo: 'pdf' | 'xml'): Promise<ResultadoArquivos | null> {
+async function baixarLote(
+  notas: NotaDoLote[],
+  tipo: 'pdf' | 'xml',
+  o: OrigemLote = LOTE_NFSE,
+): Promise<ResultadoArquivos | null> {
   const ids = idsDoLote(notas)
-  if (!ids.length || demaisNoLote(ids)) return null
+  if (!ids.length || demaisNoLote(ids, o)) return null
   if (arquivosOcupado.value) {
     avisarOcupado()
     return null
@@ -401,7 +400,7 @@ async function baixarLote(notas: NotaDoLote[], tipo: 'pdf' | 'xml'): Promise<Res
   const rotulo = tipo === 'pdf' ? 'PDFs' : 'XMLs'
   try {
     let cab: ResultadoArquivos | null = null
-    const zip = await apiN<Blob>('/api/nfse/emissoes/lote/arquivos', {
+    const zip = await apiN<Blob>(`${o.rota}/arquivos`, {
       method: 'POST',
       body: { ids, tipo },
       responseType: 'blob',
@@ -410,14 +409,14 @@ async function baixarLote(notas: NotaDoLote[], tipo: 'pdf' | 'xml'): Promise<Res
       },
     })
     const r: ResultadoArquivos = cab ?? { total: ids.length, ok: ids.length, faltaram: [] }
-    salvarBlob(zip, `notas-de-servico_${tipo}_${carimbo()}.zip`)
+    salvarBlob(zip, `${o.arquivo}_${tipo}_${carimbo()}.zip`)
     if (r.faltaram.length) {
-      toasts.warning(`Baixadas ${r.ok} de ${plural(r.total, 'nota', 'notas')} (${rotulo})`, [
-        `Faltaram: ${quaisFaltaram(notas, r.faltaram)}.`,
-        'A NFE.io não devolveu o arquivo dessas notas; o motivo está no _FALTARAM.txt, dentro do .zip.',
+      toasts.warning(`Baixadas ${r.ok} de ${plural(r.total, o.uma, o.varias)} (${rotulo})`, [
+        `Faltaram: ${quaisFaltaram(notas, r.faltaram, o)}.`,
+        o.faltouZip,
       ])
     } else {
-      toasts.success(r.ok === 1 ? `1 nota baixada (${rotulo})` : `${r.ok} notas baixadas (${rotulo})`)
+      toasts.success(r.ok === 1 ? `1 ${o.uma} baixada (${rotulo})` : `${r.ok} ${o.varias} baixadas (${rotulo})`)
     }
     return r
   } catch (e) {
@@ -443,7 +442,23 @@ async function baixarArquivo(path: string, nome: string, opts: any = {}): Promis
   }
 }
 
-const nfseApi: NfseApi = { api: apiN, abrirPdf, baixarXml, imprimirLote, baixarLote, baixarArquivo }
+// Contabilidade › Compra (04/11/2026, "igual emissão de serviço, tem que dar para imprimir
+// a nota"): a DANFE da NF de compra numa aba. A rota fica atrás da chave inteira (sem o
+// link de 60 s da NFS-e): o PDF desce com o cabeçalho e a aba abre o arquivo da memória.
+async function abrirArquivo(path: string, o: AbrirArquivoOpts): Promise<boolean> {
+  const aba = abrirAbaJa(o.titulo, o.carregando)
+  try {
+    pdfNaAba(aba, await apiN<Blob>(path, { responseType: 'blob' }), o.nome)
+    return true
+  } catch (e) {
+    aba?.close()
+    const lido = await lerErroDeArquivo(e)
+    if (!trava.eTravamento(lido)) toasts.error(o.erro, erroApi(lido))
+    return false
+  }
+}
+
+const nfseApi: NfseApi = { api: apiN, abrirPdf, baixarXml, imprimirLote, baixarLote, baixarArquivo, abrirArquivo }
 provide(NFSE_API, nfseApi)
 
 function bloquear() {

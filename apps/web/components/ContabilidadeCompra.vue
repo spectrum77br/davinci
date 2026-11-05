@@ -108,10 +108,12 @@ function aoMudarProdutos() {
       @parar-de-editar="pararDeEditar"
       @ir-produtos="aba = 'produtos'"
     />
+    <!-- as vendedoras dizem quais compras saem pelo robô (emitir a NF) -->
     <CompraLista
       v-if="aba === 'compras'"
       :versao="versaoLista"
       :destacar="ultimaSalva"
+      :vendedoras="vendedoras"
       @editar="editar"
     />
     <CompraProdutos v-if="aba === 'produtos'" @mudou="aoMudarProdutos" />

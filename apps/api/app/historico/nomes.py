@@ -200,6 +200,9 @@ ACOES: dict[tuple[str, str], str] = {
     ): "enviou a nota de serviço por e-mail (manual)",
     ("POST", "/api/nfse/emissoes/lote/arquivos"): "baixou notas de serviço em lote (PDF/XML)",
     ("POST", "/api/nfse/emissoes/lote/imprimir"): "imprimiu notas de serviço em lote",
+    # Compra (04/11/2026): a DANFE e o XML da NF de compra em lote (nada muda no banco).
+    ("POST", "/api/nfse/compras/lote/arquivos"): "baixou NFs de compra em lote (PDF/XML)",
+    ("POST", "/api/nfse/compras/lote/imprimir"): "imprimiu NFs de compra em lote",
     ("POST", "/api/nfse/prestadores/{company_id}/nfeio/ligar"): "ligou a empresa na NFE.io",
     ("POST", "/api/nfse/prestadores/{company_id}/nfeio/integrar"): "integrou a empresa na NFE.io",
     ("POST", "/api/nfse/prestadores/{company_id}/nfeio/atualizar"): "atualizou a empresa da NFE.io",
@@ -283,6 +286,7 @@ ACOES: dict[tuple[str, str], str] = {
 # login de marketplace.
 FRASES: dict[tuple[str, str], str] = {
     ("GET", "/api/estoque/pedidos/{pedido_bling}/etiqueta"): "imprimiu a etiqueta",
+    ("GET", "/api/nfse/compras/{pedido_id}/planilha"): "baixou a planilha da compra",
     ("GET", "/api/integrations/ml/callback"): "conectou conta do Mercado Livre",
     ("GET", "/api/integrations/tiktok/callback"): "conectou conta do TikTok",
     ("GET", "/api/integrations/magalu/callback"): "conectou conta da Magalu",
@@ -328,11 +332,13 @@ ROTAS_DE_ROBO: set[tuple[str, str]] = {
     ("POST", "/api/nfse/previa"),
 }
 
-# GET que muda coisa e é de pessoa: marca a etiqueta como impressa, e o
-# retorno do login de marketplace (reconectar conta). Casado no endereço cru,
-# antes de o roteador escolher a rota.
+# GET que muda coisa e é de pessoa: marca a etiqueta como impressa, o
+# retorno do login de marketplace (reconectar conta) e a planilha da compra
+# (04/11/2026: carimba `planilha_baixada_em`). Casado no endereço cru, antes de
+# o roteador escolher a rota.
 GET_QUE_GRAVA = re.compile(
-    r"^/api/(estoque/pedidos/[^/]+/etiqueta$|integrations/[a-z]+/callback(/|$)|oauth/[a-z]+/callback$)"
+    r"^/api/(estoque/pedidos/[^/]+/etiqueta$|integrations/[a-z]+/callback(/|$)|oauth/[a-z]+/callback$"
+    r"|nfse/compras/[^/]+/planilha$)"
 )
 
 # Corpo nunca guardado (senha, código de login, segredo no caminho; e a

@@ -21,8 +21,9 @@ vendedora (o mesmo CSV de 41 colunas de `services/nf_relatorio.py`); a NF sai l�
 - `CompraVendedora` (23/10, Eduardo: "na teoria tem que ser automático"): as contas
   Bling de NF de onde se compra, com o perfil do AdsPower logado nela e a chave
   "automático". Compra de vendedora automática vai para a fila (`na_fila`) e o robô
-  do Mac (~/nf-executor/compra_nf.py) importa, emite, manda à SEFAZ (um envio só) e
-  devolve número e chave (`nf_emitida`) ou o motivo (`erro`).
+  do Mac (~/nf-executor/compra_emitir.py) importa, emite, manda à SEFAZ (um envio só) e
+  devolve número, chave e XML (`nf_emitida`) ou o motivo (`erro`). Até onde ele chegou
+  fica em `emissao_etapa` (04/11/2026, `services/compra_emissao.py`).
 """
 
 from datetime import date, datetime
@@ -60,6 +61,33 @@ NUMERO_INICIAL = 8_000_001
 # registrada → (emitir automático) na_fila → emitindo → nf_emitida | erro; cancelada.
 # Manual (planilha) continua: registrada → nf_emitida anotando o número.
 STATUS = ("registrada", "na_fila", "emitindo", "nf_emitida", "erro", "cancelada")
+
+# Até onde o robô chegou (04/11/2026; só ele escreve, sempre para a frente). A
+# ordem importa: da `import_tentado` em diante o "Confirmar" da importação pode
+# ter sido clicado, então o pedido 800000x pode existir no Bling da vendedora e
+# o número está QUEIMADO — nunca mais vai numa planilha (número repetido = o
+# Bling recusa o arquivo inteiro) e a compra não volta a ser editável.
+ETAPAS = (
+    "lease",
+    "import_tentado",
+    "importado",
+    "nf_gerada",
+    "pronta_sefaz",
+    "sefaz_tentado",
+    "autorizada",
+    "xml_ok",
+    "devolvido",
+)
+
+
+def etapa_indice(etapa: str | None) -> int:
+    """Posição da etapa em `ETAPAS` (-1 = o robô nunca pegou)."""
+    return ETAPAS.index(etapa) if etapa in ETAPAS else -1
+
+
+def queimado(etapa: str | None) -> bool:
+    """O pedido pode já existir no Bling da vendedora (etapa ≥ import_tentado)."""
+    return etapa_indice(etapa) >= ETAPAS.index("import_tentado")
 
 
 class CompraVendedora(Base, TimestampMixin):
@@ -124,8 +152,18 @@ class CompraPedido(Base, TimestampMixin):
         CheckConstraint(
             "status <> 'nf_emitida' OR nf_numero IS NOT NULL", name="nf_emitida_tem_numero"
         ),
+        CheckConstraint(
+            f"emissao_etapa IS NULL OR emissao_etapa IN {ETAPAS}", name="emissao_etapa_valida"
+        ),
         Index("ix_compra_pedido_competencia", "competencia"),
         Index("ix_compra_pedido_company", "company_id"),
+        # a mesma NF não fica anotada em duas compras
+        Index(
+            "uq_compra_pedido_nf_chave",
+            "nf_chave",
+            unique=True,
+            postgresql_where=text("nf_chave IS NOT NULL"),
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -162,7 +200,13 @@ class CompraPedido(Base, TimestampMixin):
         SmallInteger, nullable=False, server_default="0"
     )
     emissao_erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # até onde o robô chegou (`ETAPAS`); NULL = o robô nunca pegou essa compra
+    emissao_etapa: Mapped[str | None] = mapped_column(String(16), nullable=True)
     nf_emitida_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # alguém baixou a planilha (pode ter importado à mão): o "Emitir" pede confirmação
+    planilha_baixada_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     observacoes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
