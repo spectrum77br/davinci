@@ -47,6 +47,7 @@ from app.models import (
 from app.schemas.pricing import (
     AccountSetDepartmentIn,
     AutoMatchResult,
+    CertificacaoDoProdutoOut,
     CompetitorPriceRow,
     ContaCatalogoIn,
     ContaCatalogoOut,
@@ -76,6 +77,11 @@ from app.schemas.pricing import (
 )
 from app.schemas.products import JobCreatedOut
 from app.security.cipher import decrypt, encrypt
+from app.services.certificacao_produto import (
+    Certificacao,
+    carregar_certificacoes,
+    certificacao_do_produto,
+)
 from app.services.mega_fotos import MegaError, sidecar_request
 from app.services.mega_midias import RAIZ_POR_DEPARTAMENTO
 from app.services.pricing.anuncios import (
@@ -472,12 +478,23 @@ async def _patch_margens_da_filha(
 
 
 def _product_out(
-    row: PricingProduct, leaves_by_id: dict[UUID, tuple[str, int]]
+    row: PricingProduct,
+    leaves_by_id: dict[UUID, tuple[str, int]],
+    certificacoes: list[Certificacao] | None = None,
 ) -> PricingProductOut:
     out = PricingProductOut.model_validate(row)
     pair = leaves_by_id.get(row.segment_id)
     if pair:
         out.department, out.product_type = pair
+    # Aba Produtos (05/11/2026): Modelo / Nº do certificado / Validade vêm da
+    # Certificações pelo código no nome. A grade não passa a lista e fica sem.
+    if certificacoes is not None:
+        cert = certificacao_do_produto(row.name, certificacoes)
+        if cert is not None:
+            out.certificacao = CertificacaoDoProdutoOut(
+                id=cert.id, produto=cert.produto, modelo=cert.modelo,
+                certificado=cert.certificado, numero=cert.numero, fim=cert.fim,
+            )
     return out
 
 
@@ -724,7 +741,8 @@ async def list_products(
         PricingProduct.sku,
     )
     rows = (await session.execute(stmt)).scalars().all()
-    return [_product_out(r, leaves_by_id) for r in rows]
+    certificacoes = await carregar_certificacoes(session)
+    return [_product_out(r, leaves_by_id, certificacoes) for r in rows]
 
 
 @router.post(
@@ -758,7 +776,7 @@ async def create_product(
         raise
     await session.refresh(row)
     _, leaves_by_id, _ = await _segment_index(session)
-    return _product_out(row, leaves_by_id)
+    return _product_out(row, leaves_by_id, await carregar_certificacoes(session))
 
 
 @router.patch("/products/{product_id}", response_model=PricingProductOut)
@@ -824,7 +842,7 @@ async def patch_product(
         raise
     await session.refresh(row)
     _, leaves_by_id, _ = await _segment_index(session)
-    return _product_out(row, leaves_by_id)
+    return _product_out(row, leaves_by_id, await carregar_certificacoes(session))
 
 
 @router.delete("/products/{product_id}")

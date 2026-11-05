@@ -5,7 +5,7 @@ import {
   Package, Megaphone, DollarSign, Undo2,
   Receipt, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
-  Coins, FileText, Calculator, FlaskConical, Ship, Landmark, Headset,
+  Coins, FileText, Ship, Landmark, Headset,
   ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, Smartphone, ShieldCheck, X, Scale,
 } from 'lucide-vue-next'
 import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
@@ -230,8 +230,8 @@ const sections = computed<Section[]>(() => [
     items: [
       { to: '/financeiro/suprimentos', label: 'Certificações', icon: FileText, resource: 'financeiro_suprimentos' },
       { to: '/importacao', label: 'Importação', icon: Ship, resource: 'importacao' },
-      { to: '/financeiro/simulacao', label: 'Simulação', icon: Calculator, resource: 'financeiro_simulacao' },
-      { to: '/financeiro/dnp', label: 'DNP', icon: FlaskConical, resource: 'financeiro_dnp' },
+      // Simulação e DNP saíram em 05/11/2026 (Eduardo: "pode excluir"); as
+      // tabelas financeiro_simulacao/dnp_* e a API continuam no banco.
     ],
   },
   {

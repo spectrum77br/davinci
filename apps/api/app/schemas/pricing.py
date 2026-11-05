@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -251,6 +251,18 @@ class PricingProductPatch(BaseModel):
         return _norm_prioridade_estoque(v)
 
 
+class CertificacaoDoProdutoOut(BaseModel):
+    """A linha da Certificações achada pelo código no nome do produto
+    (services/certificacao_produto.py). Só saída: copiada, nunca gravada."""
+
+    id: UUID
+    produto: str | None = None
+    modelo: str | None = None
+    certificado: str | None = None  # anatel / inmetro / isento
+    numero: str | None = None
+    fim: date | None = None  # validade (coluna Fim da Certificações)
+
+
 class PricingProductOut(PricingProductBase):
     model_config = ConfigDict(from_attributes=True)
     sku: str = Field(max_length=2048)
@@ -269,6 +281,9 @@ class PricingProductOut(PricingProductBase):
     embalagens_path: str | None = None
     embalagens_count: int | None = None
     midias_contadas_em: datetime | None = None
+    # Colunas Modelo / Nº do certificado / Validade da aba Produtos
+    # (05/11/2026). None = nenhum certificado com o código do nome.
+    certificacao: CertificacaoDoProdutoOut | None = None
 
 
 class PricingProductImportItem(BaseModel):

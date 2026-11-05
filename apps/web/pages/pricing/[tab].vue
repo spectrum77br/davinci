@@ -685,14 +685,51 @@ type PricingProduct = {
   embalagens_count: number | null
   midias_contadas_em: string | null
   prioridade_estoque: string | null
+  // Colunas Modelo / Nº do certificado / Validade (05/11/2026): a linha da
+  // Certificações achada pelo código no nome ("… - USM003"). Só leitura.
+  certificacao?: CertificacaoDoProduto | null
   created_at: string
   updated_at: string
+}
+type CertificacaoDoProduto = {
+  id: string
+  produto: string | null
+  modelo: string | null
+  certificado: string | null
+  numero: string | null
+  fim: string | null
 }
 
 // Tags de estoque válidas pra coluna Prioridade (mesmo conjunto dos sufixos
 // de SKU: dg053.ci, dg053.sp…). Eduardo (2026-08-27): "a tag que eu colocar
 // la, o sku com a tag, ja deve trocar, porque a prioridade e ele".
 const TAGS_PRIORIDADE = ['ci', 'pi', 'ra', 'sa', 'sp', 'us', 'cd'] as const
+
+// Certificado na aba Produtos (Celular e Eletro; Mala não tem certificado).
+// O servidor acha a linha da Certificações pelo código no nome do produto.
+const mostraCertificado = computed(() => department.value !== 'mala')
+function certNumero(c: CertificacaoDoProduto | null | undefined): string {
+  if (!c) return '—'
+  if (c.numero?.trim()) return c.numero
+  return c.certificado === 'isento' ? 'Isento' : 'sem número'
+}
+function certValidade(c: CertificacaoDoProduto | null | undefined): string {
+  return c?.fim ? c.fim.split('-').reverse().join('/') : '—'
+}
+// Mesmas cores da Certificações: vermelho vencido, âmbar a menos de 30 dias.
+function certValidadeClasse(c: CertificacaoDoProduto | null | undefined): string {
+  if (!c?.fim) return ''
+  const hoje = isoToday()
+  if (c.fim < hoje) return 'text-red-700 font-medium'
+  const limite = new Date(`${hoje}T12:00:00`)
+  limite.setDate(limite.getDate() + 30)
+  return c.fim < limite.toISOString().slice(0, 10) ? 'text-amber-700 font-medium' : ''
+}
+function certTitulo(c: CertificacaoDoProduto | null | undefined): string {
+  if (!c) return 'Nenhum certificado da Certificações com o código do nome deste produto (ex.: "… - USM003").'
+  const tipo = c.certificado ? ` · ${c.certificado === 'isento' ? 'isento' : c.certificado.toUpperCase()}` : ''
+  return `Da Certificações: ${c.produto || 'sem produto'}${tipo}. Muda lá, muda aqui.`
+}
 
 const products = ref<PricingProduct[]>([])
 const productsLoading = ref(false)
@@ -4987,6 +5024,21 @@ watch(department, async () => {
                 <th class="text-left px-2 py-2 font-medium border-b border-border">Descrição</th>
                 <th class="text-left px-2 py-2 font-medium border-b border-border">Modelo</th>
               </template>
+              <template v-if="mostraCertificado">
+                <th
+                  class="text-left px-2 py-2 font-medium border-b border-border min-w-[90px]"
+                  title="Modelo do certificado, copiado da Certificações (Importação › Certificações). Achado pelo código no fim do nome do produto, ex.: “… - USM003”."
+                  data-col-cert-modelo
+                >Modelo</th>
+                <th
+                  class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]"
+                  title="Número do certificado (Anatel/Inmetro), copiado da Certificações."
+                >Nº certificado</th>
+                <th
+                  class="text-left px-2 py-2 font-medium border-b border-border w-24"
+                  title="Até quando o certificado vale (coluna Fim da Certificações). Vermelho = vencido; âmbar = vence em menos de 30 dias."
+                >Validade</th>
+              </template>
               <th v-for="k in kitCount" :key="`kith-${k}`" class="text-right px-2 py-2 font-medium border-b border-border w-24" :title="kitTitulo(k)">
                 Kit {{ k }}
                 <span v-if="kitNome(k)" class="block text-[9px] font-normal text-muted-foreground leading-tight whitespace-normal">{{ kitNome(k) }}</span>
@@ -5057,6 +5109,10 @@ watch(department, async () => {
                 <td class="border border-border px-1 py-1">
                   <input v-model="newProd.model" type="text" placeholder="Modelo" class="w-full text-xs border rounded px-1.5 py-1 bg-background" />
                 </td>
+              </template>
+              <!-- Certificado: vem sozinho pelo código no nome, depois de salvar. -->
+              <template v-if="mostraCertificado">
+                <td v-for="i in 3" :key="`newcert-${i}`" class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               </template>
               <td v-for="k in kitCount" :key="`newkit-${k}`" class="border border-border px-1 py-1">
                 <input v-model="(newProd as any)[`cost_kit${k}`]" type="text" inputmode="decimal" :placeholder="k === 1 ? '0.00' : ''" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
@@ -5173,6 +5229,26 @@ watch(department, async () => {
                   />
                   <span v-else>{{ p.model || '—' }}</span>
                 </td>
+              </template>
+              <template v-if="mostraCertificado">
+                <td
+                  class="border border-border px-2 py-1.5 text-xs"
+                  :class="{ 'text-muted-foreground': !p.certificacao }"
+                  :title="certTitulo(p.certificacao)"
+                  data-cert-modelo
+                >{{ p.certificacao ? (p.certificacao.modelo || p.certificacao.produto || '—') : '—' }}</td>
+                <td
+                  class="border border-border px-2 py-1.5 text-xs font-mono whitespace-nowrap"
+                  :class="{ 'text-muted-foreground': !p.certificacao?.numero }"
+                  :title="certTitulo(p.certificacao)"
+                  data-cert-numero
+                >{{ certNumero(p.certificacao) }}</td>
+                <td
+                  class="border border-border px-2 py-1.5 text-xs whitespace-nowrap"
+                  :class="p.certificacao?.fim ? certValidadeClasse(p.certificacao) : 'text-muted-foreground'"
+                  :title="certTitulo(p.certificacao)"
+                  data-cert-validade
+                >{{ certValidade(p.certificacao) }}</td>
               </template>
               <td
                 v-for="k in kitCount" :key="`kit-${k}`"

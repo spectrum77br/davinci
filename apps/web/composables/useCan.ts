@@ -16,8 +16,6 @@ export type Resource =
   | 'controle_estoque'
   | 'financeiro_consorcio'
   | 'financeiro_suprimentos'
-  | 'financeiro_simulacao'
-  | 'financeiro_dnp'
   | 'imobilizado'
   | 'importacao'
   | 'devolucoes'
@@ -113,20 +111,19 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
   },
   {
     // Financeiro = só Consórcio (na tela de Permissões). Valuation é
-    // admin-only — não aparece aqui. Certificações, Importação, Simulação
-    // e DNP são do ciclo de compra/importação e foram pra Suprimentos (menu).
+    // admin-only — não aparece aqui. Certificações e Importação são do
+    // ciclo de compra/importação e foram pra Suprimentos (menu).
     label: 'Financeiro',
     resources: ['financeiro_consorcio'],
   },
   {
     // Suprimentos = ciclo de compra/importação. `financeiro_suprimentos` é a
-    // página "Certificações" (rota /financeiro/suprimentos no menu).
+    // página "Certificações" (rota /financeiro/suprimentos no menu e aba da
+    // Importação). Simulação e DNP saíram em 05/11/2026.
     label: 'Suprimentos',
     resources: [
       'financeiro_suprimentos',
       'importacao',
-      'financeiro_simulacao',
-      'financeiro_dnp',
     ],
   },
   {
@@ -183,8 +180,6 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   controle_estoque: 'Controle de Estoque',
   financeiro_consorcio: 'Consórcio',
   financeiro_suprimentos: 'Certificações',
-  financeiro_simulacao: 'Simulação',
-  financeiro_dnp: 'DNP',
   imobilizado: 'Imobilizado (patrimônio)',
   importacao: 'Importação',
   devolucoes: 'Devoluções',

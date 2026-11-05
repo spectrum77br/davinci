@@ -174,7 +174,6 @@ function apiFalsa(cat, produtos, lotes, chamadas, salvo) {
     if (rota === '/api/importacao/resumo') return { items: [], total: 0 }
     if (rota === '/api/importacao/cotacao') return { fabricantes: [], produtos: [], valores: [] }
     if (rota === '/api/importacao/categoria-counts') return { mala: MALA.length, eletro: 0, celular: CELULAR.length }
-    if (rota === '/api/importacao/kit') return { variations: [], bases: [], marks: [] }
     if (rota === '/api/importacao/cotacao/params') return { categoria: cat, taxa_cambio: 5.1, frete_regular_pct: 0.16, frete_swap_pct: 0.06, frete_acessorios_pct: 0.2, adicional: 12 }
     if (rota === '/api/importacao/frete') return { rows: [], transportadoras: [], total_a_entregar: 0, saldo_a_pagar: 0 }
     const sync = /^\/api\/importacao\/products\/([^/]+)\/sync-bling$/.exec(rota)
@@ -192,8 +191,10 @@ const LEITOR = { isAdmin: false, user: { role: 'user', permissions: { importacao
 async function abrir({ cat, produtos, lotes, auth = ADMIN }) {
   const chamadas = []
   const avisos = []
-  const servidor = { tempo_reposicao: CONFIG[cat][0], tempo_estoque: CONFIG[cat][1] }
-  const C = componente({ cat, auth, api: apiFalsa(cat, produtos, lotes, chamadas, servidor) })
+  // cat undefined = a página aberta sem ?cat= (cai no Celular).
+  const doServidor = cat ?? 'celular'
+  const servidor = { tempo_reposicao: CONFIG[doServidor][0], tempo_estoque: CONFIG[doServidor][1] }
+  const C = componente({ cat, auth, api: apiFalsa(doServidor, produtos, lotes, chamadas, servidor) })
   const caixa = { estado: null }
   const app = Vue.createSSRApp({
     ...C,
@@ -203,9 +204,9 @@ async function abrir({ cat, produtos, lotes, auth = ADMIN }) {
       return s
     },
   })
+  // A aba Certificações é o componente da tela do menu (testado à parte).
   const vazio = { render: () => null }
-  app.component('CreateKitVariationCelularModal', vazio)
-  app.component('CreateKitVariationMalaModal', vazio)
+  app.component('CertificacoesPainel', vazio)
   app.config.warnHandler = (msg) => avisos.push(msg)
   const html = await renderToString(app)
   assert.deepEqual(avisos, [], `${cat}: render sem aviso do Vue`)
@@ -213,8 +214,7 @@ async function abrir({ cat, produtos, lotes, auth = ADMIN }) {
   // Renderiza de novo o MESMO estado (depois de mexer nele).
   const deNovo = async () => {
     const app2 = Vue.createSSRApp({ ...C, setup: () => caixa.estado })
-    app2.component('CreateKitVariationCelularModal', vazio)
-    app2.component('CreateKitVariationMalaModal', vazio)
+    app2.component('CertificacoesPainel', { props: ['embutido'], render: () => Vue.h('div', { 'data-certificacoes': '' }) })
     return new JSDOM(await renderToString(app2)).window.document
   }
   return { doc: new JSDOM(html).window.document, estado: caixa.estado, chamadas, deNovo, servidor }
@@ -517,6 +517,33 @@ const VERMELHO = '!text-red-700'
     assert.ok(modal.rotulos.includes('Custo (R$)'), `${cat}: rótulo do custo_bling`)
     assert.doesNotMatch(modal.texto, FORA)
     assert.ok(modal.texto.includes(DICA_NOME[cat]), `${cat}: dica do nome gerado`)
+  }
+
+  // ═════════════════════ Categorias na ordem da Tabela de Preços; Kit → Certificações
+  {
+    const botoes = (doc) => [...doc.querySelectorAll('button')].map(texto)
+    const { doc, estado, chamadas, deNovo } = await abrir({ cat: undefined, produtos: CELULAR, lotes: [] })
+    // Sem ?cat= abre no Celular, como a Tabela de Preços.
+    assert.equal(estado.categoria, 'celular')
+    const cats = botoes(doc).filter((b) => /^(Celular|Mala|Eletro) \(/.test(b)).map((b) => b.split(' ')[0])
+    assert.deepEqual(cats, ['Celular', 'Mala', 'Eletro'])
+    assert.ok(!chamadas.some((c) => c.url.startsWith('/api/importacao/kit')), 'nada da aba Kit é carregado')
+    const abas = (d) => botoes(d).filter((b) => ['Importação', 'Resumo', 'Cotação', 'Certificações', 'Frete', 'Kit'].includes(b))
+    assert.deepEqual(abas(doc), ['Importação', 'Resumo', 'Cotação', 'Certificações', 'Frete'])
+    estado.tab = 'certificacoes'
+    const d2 = await deNovo()
+    assert.ok(d2.querySelector('[data-certificacoes]'), 'aba Certificações mostra a tela de Certificações')
+    assert.ok(!botoes(d2).includes('Recarregar'), 'o Recarregar da Importação some (a tela tem o dela)')
+    for (const cat of ['mala', 'eletro']) {
+      const { doc: d } = await abrir({ cat, produtos: [], lotes: [] })
+      assert.deepEqual(abas(d), ['Importação', 'Resumo', 'Cotação', 'Certificações'], `${cat}: abas`)
+    }
+    // Quem vê a Importação mas não vê Certificações não ganha a aba.
+    const { doc: d3 } = await abrir({ cat: 'mala', produtos: [], lotes: [], auth: LEITOR })
+    assert.deepEqual(abas(d3), ['Importação', 'Resumo', 'Cotação'])
+    const comCert = { isAdmin: false, user: { role: 'user', permissions: { importacao: { view: true }, financeiro_suprimentos: { view: true } } } }
+    const { doc: d4 } = await abrir({ cat: 'mala', produtos: [], lotes: [], auth: comCert })
+    assert.deepEqual(abas(d4), ['Importação', 'Resumo', 'Cotação', 'Certificações'])
   }
 
   console.log('Importação: colunas Produto/Custo/Estoque/30d/Reposição ok')

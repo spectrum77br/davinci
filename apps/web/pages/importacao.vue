@@ -46,23 +46,26 @@ const canDelete = computed(() => {
 // aba Mala, que é onde realmente importam.
 // Sub-tab interno: 'mala' é a aba principal "Importação" (mantido o key
 // histórico pra não renomear toda a página; o label mostra "Importação").
-type Tab = 'mala' | 'resumo' | 'cotacao' | 'kit' | 'frete'
+type Tab = 'mala' | 'resumo' | 'cotacao' | 'certificacoes' | 'frete'
 const tab = ref<Tab>('mala')
 
 // ── Categoria (selector top-level, espelha /pricing/tabela) ───────────
+// Mesma ordem e mesmo padrão da Tabela de Preços: Celular, Mala, Eletro
+// (Eduardo, 05/11/2026).
 type Categoria = 'mala' | 'eletro' | 'celular'
 const CATEGORIAS = [
+  { key: 'celular' as const, label: 'Celular', icon: Smartphone },
   { key: 'mala' as const, label: 'Mala', icon: Briefcase },
   { key: 'eletro' as const, label: 'Eletro', icon: Zap },
-  { key: 'celular' as const, label: 'Celular', icon: Smartphone },
 ]
-// Eletro não tem aba Kit (produtos não viram composto). Aba Frete é
-// específica do Celular (etapa 4) — operacional de transportadora,
-// saldo a pagar, ajustes manuais.
+// A aba Kit saiu em 05/11/2026 e a Certificações (a mesma tela do menu
+// Suprimentos › Certificações) entrou no lugar dela, nas três categorias.
+// Aba Frete é específica do Celular (etapa 4) — operacional de
+// transportadora, saldo a pagar, ajustes manuais.
 const SUBTABS_BY_CATEGORIA: Record<Categoria, readonly Tab[]> = {
-  mala: ['mala', 'resumo', 'cotacao', 'kit'],
-  eletro: ['mala', 'resumo', 'cotacao'],
-  celular: ['mala', 'resumo', 'cotacao', 'kit', 'frete'],
+  mala: ['mala', 'resumo', 'cotacao', 'certificacoes'],
+  eletro: ['mala', 'resumo', 'cotacao', 'certificacoes'],
+  celular: ['mala', 'resumo', 'cotacao', 'certificacoes', 'frete'],
 }
 const route = useRoute()
 const router = useRouter()
@@ -70,7 +73,7 @@ const categoria = ref<Categoria>(
   (typeof route.query.cat === 'string'
     && (['mala', 'eletro', 'celular'] as const).includes(route.query.cat as Categoria))
     ? (route.query.cat as Categoria)
-    : 'mala',
+    : 'celular',
 )
 const isEletro = computed(() => categoria.value === 'eletro')
 const isCelular = computed(() => categoria.value === 'celular')
@@ -117,13 +120,16 @@ function stickyStyleCelular(key: string): Record<string, string> {
 const LINHAS_CABECALHO = 10
 const LINHAS_CABECALHO_CELULAR = LINHAS_CABECALHO + 4
 const rowspanCabecalho = computed(() => (isCelular.value ? LINHAS_CABECALHO_CELULAR : LINHAS_CABECALHO))
-const availableSubtabs = computed(() => SUBTABS_BY_CATEGORIA[categoria.value])
+const podeVerCertificacoes = computed(() =>
+  auth.isAdmin || Boolean(auth.user?.permissions?.financeiro_suprimentos?.view))
+const availableSubtabs = computed(() =>
+  SUBTABS_BY_CATEGORIA[categoria.value].filter((t) => t !== 'certificacoes' || podeVerCertificacoes.value))
 const countByCategoria = ref<Record<string, number>>({})
 function subtabLabel(t: Tab): string {
   return t === 'mala' ? 'Importação'
     : t === 'resumo' ? 'Resumo'
     : t === 'cotacao' ? 'Cotação'
-    : t === 'frete' ? 'Frete' : 'Kit'
+    : t === 'frete' ? 'Frete' : 'Certificações'
 }
 function catQs(): string {
   return `categoria=${categoria.value}`
@@ -273,37 +279,6 @@ type CotacaoGrid = {
   produtos: CotProduto[]
   valores: CotValor[]
 }
-
-type KitVariation = {
-  id: string
-  code: string
-  label: string
-  ordem: number
-  highlight: boolean
-  obs: string | null
-}
-type KitBase = {
-  id: string
-  modelo_bling: string | null
-  sku_base: string
-  cor: string | null
-  ordem: number
-}
-type KitMark = {
-  id: string
-  base_id: string
-  variation_id: string
-  bling_product_id: number | null
-  bling_sync_status: 'pending' | 'sent' | 'error' | null
-  bling_sync_error: string | null
-  bling_sync_attempted_at: string | null
-  bling_sync_done_at: string | null
-  pricing_product_id: string | null
-  pricing_sync_status: 'pending' | 'sent' | 'error' | null
-  pricing_sync_error: string | null
-  pricing_sync_done_at: string | null
-}
-type KitGrid = { variations: KitVariation[]; bases: KitBase[]; marks: KitMark[] }
 
 // ── State ─────────────────────────────────────────────────────────
 const products = ref<Product[]>([])
@@ -457,42 +432,6 @@ async function salvarFreteAjuste() {
   }
 }
 
-// Kit grid state. `kitMarkMap` é o lookup canônico (key → mark) —
-// usado pra render e pra resync. Re-construído a cada loadKit. As
-// mudanças otimistas no toggle entram aqui também.
-const kit = ref<KitGrid>({ variations: [], bases: [], marks: [] })
-const kitMarkMap = reactive<Record<string, KitMark>>({})
-
-// "Criar Kit": 2 modais separados (Celular/Mala) com regras próprias.
-// Cada categoria abre o seu — não é unificado pra cada um evoluir
-// independente. Spec dos modais em components/CreateKitVariationXModal.
-const createKitCelularOpen = ref(false)
-const createKitMalaOpen = ref(false)
-
-async function onKitVariationCreated(_v: { id: string; code: string; label: string; ordem: number }) {
-  // Refetch da aba pra trazer a coluna nova. Marks ficam vazias até o
-  // operador clicar na célula do produto correspondente.
-  try {
-    const kt = await api<KitGrid>(`/api/importacao/kit?${catQs()}`)
-    kit.value = kt
-    rebuildKitMarkMap(kt.marks)
-  } catch (e: any) {
-    errorText.value = e?.data?.detail?.code || 'falha_refetch_kit'
-  }
-}
-function kitKey(baseId: string, varId: string): string {
-  return `${baseId}::${varId}`
-}
-function getKitMark(baseId: string, varId: string): KitMark | undefined {
-  return kitMarkMap[kitKey(baseId, varId)]
-}
-function isKitMarked(baseId: string, varId: string): boolean {
-  return kitKey(baseId, varId) in kitMarkMap
-}
-function rebuildKitMarkMap(marks: KitMark[]) {
-  for (const k of Object.keys(kitMarkMap)) delete kitMarkMap[k]
-  for (const m of marks) kitMarkMap[kitKey(m.base_id, m.variation_id)] = m
-}
 // Cells map: cellKey(produto_id, fabricante_id) → { capacidade, valor_real, valor_usd }
 // as strings (inputs bind to strings; we coerce numbers on persist). Rebuilt
 // from cotacao.valores on every load and topped-up on the fly when the user
@@ -592,7 +531,8 @@ async function exportarLote() {
 }
 
 // ── Simulação + DI por lote (migration 0214) ─────────────────────────
-// PDF da simulação vem do Financeiro → Simulação ("Anexar ao lote").
+// PDF da simulação vinha do Financeiro → Simulação ("Anexar ao lote"); a tela
+// saiu em 05/11/2026 e a linha só baixa os PDFs já anexados.
 // DI é anexada manualmente aqui; ao anexar, oferece lançar o pagamento
 // no Bling (contas a pagar, contato isatrading) em N parcelas.
 // Regra: blob obtido após await NUNCA usa window.open — <a download>.
@@ -942,7 +882,6 @@ async function loadAll() {
   loading.value = true
   errorText.value = null
   const qs = catQs()
-  const hasKit = availableSubtabs.value.includes('kit')
   try {
     const [cfg, ps, ls, rs, ct, counts] = await Promise.all([
       api<Config>(`/api/importacao/config?${qs}`),
@@ -959,15 +898,6 @@ async function loadAll() {
     cotacao.value = ct
     rebuildCotCells(ct.valores)
     countByCategoria.value = counts
-    // Kit só pra mala/celular — eletro não tem; reseta o grid.
-    if (hasKit) {
-      const kt = await api<KitGrid>(`/api/importacao/kit?${qs}`)
-      kit.value = kt
-      rebuildKitMarkMap(kt.marks)
-    } else {
-      kit.value = { variations: [], bases: [], marks: [] }
-      rebuildKitMarkMap([])
-    }
     // Cotação params — só relevante pra celular nesta etapa. Endpoint
     // auto-cria a row na 1ª chamada com defaults, então é seguro chamar
     // sempre (operador acaba inicializando ao abrir a aba pela 1ª vez).
@@ -1129,10 +1059,6 @@ async function saveNewProduct() {
     })
     products.value = [...products.value, row]
     showCreateModal.value = false
-    // Celular: o backend também criou a linha correspondente na aba Kit.
-    // Refetch pra ela aparecer na matriz sem recarregar a página. Best-
-    // effort e no-op p/ eletro (sem aba Kit) — reloadKitOnly já ignora erro.
-    if (availableSubtabs.value.includes('kit')) void reloadKitOnly()
   } catch (e: any) {
     errorText.value = `Falha ao adicionar: ${e?.data?.detail?.code || 'erro'}`
   } finally {
@@ -1755,162 +1681,6 @@ async function removeCotProduto(prod: CotProduto) {
   }
 }
 
-// ── Kit: toggle handler ────────────────────────────────────────────
-// Toggle otimista: muda kitMarkMap local, manda PUT, reverte em caso
-// de erro. Sem debounce — toggle é discreto. Desmarcar uma row que já
-// foi sincronizada com Bling exibe warning (destrutivo).
-async function toggleKitMark(baseId: string, varId: string) {
-  const key = kitKey(baseId, varId)
-  const existing = kitMarkMap[key]
-  const wasMarked = existing !== undefined
-
-  // Warning na desmarcação se já sincronizado.
-  if (wasMarked && existing.bling_product_id !== null) {
-    const ok = confirm(
-      `Esse kit foi criado no Bling (id ${existing.bling_product_id}).\n\n`
-      + `Desmarcar aqui NÃO remove o produto no Bling — você precisa apagar lá manualmente se quiser.\n\n`
-      + `Continuar?`,
-    )
-    if (!ok) return
-  }
-
-  // Otimista: snapshot pra rollback.
-  const snapshot = existing ? { ...existing } : null
-  if (wasMarked) {
-    delete kitMarkMap[key]
-  } else {
-    // Mark pending até o server confirmar (não temos id ainda).
-    kitMarkMap[key] = {
-      id: 'pending',
-      base_id: baseId,
-      variation_id: varId,
-      bling_product_id: null,
-      bling_sync_status: 'pending',
-      bling_sync_error: null,
-      bling_sync_attempted_at: null,
-      bling_sync_done_at: null,
-      pricing_product_id: null,
-      pricing_sync_status: null,
-      pricing_sync_error: null,
-      pricing_sync_done_at: null,
-    }
-  }
-  try {
-    // Backend retorna a mark criada (com id real do DB) ou null se
-    // desmarcou. Antes era 204 sem body — frontend mantinha placeholder
-    // local com id='pending' que nunca casava com a row real, e se o
-    // backend de alguma forma não persistisse, o operador ficava com
-    // "x laranja" eternamente sem worker pra processar.
-    const result = await api<KitMark | null>('/api/importacao/kit/mark', {
-      method: 'PUT',
-      body: { base_id: baseId, variation_id: varId, marked: !wasMarked },
-    })
-    if (result != null) {
-      // Sobrescreve o placeholder com a mark real (id verdadeiro,
-      // status atualizado pelo backend).
-      kitMarkMap[key] = result
-    }
-    // Se result=null, mark foi deletada — kitMarkMap já está sem ela.
-  } catch (e: any) {
-    // Rollback
-    if (wasMarked && snapshot) {
-      kitMarkMap[key] = snapshot
-    } else {
-      delete kitMarkMap[key]
-    }
-    errorText.value = `Falha ao salvar marca do kit: ${e?.data?.detail?.code || 'erro'}`
-  }
-}
-
-async function resyncKitMark(mark: KitMark) {
-  try {
-    const updated = await api<KitMark>(`/api/importacao/kit/mark/${mark.id}/resync`, {
-      method: 'POST',
-    })
-    kitMarkMap[kitKey(mark.base_id, mark.variation_id)] = updated
-  } catch (e: any) {
-    errorText.value = `Falha ao reenviar: ${e?.data?.detail?.code || 'erro'}`
-  }
-}
-
-async function resyncKitPricing(mark: KitMark) {
-  try {
-    const updated = await api<KitMark>(`/api/importacao/kit/mark/${mark.id}/resync-pricing`, {
-      method: 'POST',
-    })
-    kitMarkMap[kitKey(mark.base_id, mark.variation_id)] = updated
-  } catch (e: any) {
-    errorText.value = `Falha ao reenviar pricing: ${e?.data?.detail?.code || 'erro'}`
-  }
-}
-
-function kitMarkTitle(m: KitMark | undefined): string {
-  if (!m) return 'Clique pra marcar'
-  const parts: string[] = []
-  if (m.bling_sync_status === 'sent') {
-    parts.push(`Bling: id ${m.bling_product_id}`)
-  } else if (m.bling_sync_status === 'pending') {
-    parts.push('Bling: aguardando…')
-  } else if (m.bling_sync_status === 'error') {
-    parts.push(`Bling erro: ${m.bling_sync_error ?? '?'}`)
-  }
-  if (m.pricing_sync_status === 'sent') {
-    parts.push('Pricing: criado')
-  } else if (m.pricing_sync_status === 'pending') {
-    parts.push('Pricing: aguardando…')
-  } else if (m.pricing_sync_status === 'error') {
-    parts.push(`Pricing erro: ${m.pricing_sync_error ?? '?'}`)
-  }
-  return parts.length > 0 ? parts.join(' | ') : 'Marcado'
-}
-
-// Cor da célula: error em qualquer um vermelho, pending âmbar, sent
-// (ou só Bling sent + pricing null) verde.
-function kitMarkColorClass(m: KitMark | undefined): string {
-  if (!m) return ''
-  if (m.bling_sync_status === 'error' || m.pricing_sync_status === 'error') {
-    return 'kit-mark-error'
-  }
-  if (m.bling_sync_status === 'pending' || m.pricing_sync_status === 'pending') {
-    return 'kit-mark-pending'
-  }
-  return 'kit-mark-sent'
-}
-
-function kitMarkHasError(m: KitMark | undefined): boolean {
-  if (!m) return false
-  return m.bling_sync_status === 'error' || m.pricing_sync_status === 'error'
-}
-
-// Polling leve: se há marks pending, refresh do grid a cada 10s.
-// Para automaticamente quando não há mais pending. Limitado à aba kit.
-let kitPollHandle: ReturnType<typeof setInterval> | null = null
-async function reloadKitOnly() {
-  try {
-    const kt = await api<KitGrid>(`/api/importacao/kit?${catQs()}`)
-    kit.value = kt
-    rebuildKitMarkMap(kt.marks)
-  } catch { /* ignore */ }
-}
-function hasPendingKitMarks(): boolean {
-  for (const k in kitMarkMap) {
-    const m = kitMarkMap[k]
-    if (m.bling_sync_status === 'pending' || m.pricing_sync_status === 'pending') {
-      return true
-    }
-  }
-  return false
-}
-watch([() => tab.value, kitMarkMap], () => {
-  const shouldPoll = tab.value === 'kit' && hasPendingKitMarks()
-  if (shouldPoll && !kitPollHandle) {
-    kitPollHandle = setInterval(() => { void reloadKitOnly() }, 10_000)
-  } else if (!shouldPoll && kitPollHandle) {
-    clearInterval(kitPollHandle)
-    kitPollHandle = null
-  }
-}, { deep: true })
-
 // Polling análogo na aba Mala: refresh do grid a cada 10s enquanto
 // houver produtos com bling_sync_status='pending'. Para automaticamente
 // quando todos viram 'sent'/'error'.
@@ -1929,14 +1699,13 @@ watch([() => tab.value, products], () => {
 }, { deep: true })
 
 onScopeDispose(() => {
-  if (kitPollHandle) clearInterval(kitPollHandle)
   if (malaPollHandle) clearInterval(malaPollHandle)
 })
 </script>
 
 <template>
   <div class="space-y-3 p-4">
-    <!-- Selector top-level de categoria (Mala / Eletro / Celular) -->
+    <!-- Selector top-level de categoria (Celular / Mala / Eletro) -->
     <div class="flex flex-wrap gap-2">
       <button
         v-for="cat in CATEGORIAS"
@@ -1966,7 +1735,7 @@ onScopeDispose(() => {
           {{ subtabLabel(t) }}
         </button>
       </div>
-      <div v-if="visibleLotes.length" class="ml-auto flex items-center gap-1.5">
+      <div v-if="visibleLotes.length && tab !== 'certificacoes'" class="ml-auto flex items-center gap-1.5">
         <select
           v-model="loteExport"
           class="h-8 border rounded px-2 text-sm bg-background"
@@ -1986,6 +1755,7 @@ onScopeDispose(() => {
         </button>
       </div>
       <button
+        v-if="tab !== 'certificacoes'"
         class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted disabled:opacity-50"
         :class="{ 'ml-auto': !visibleLotes.length }"
         :disabled="loading"
@@ -2302,7 +2072,7 @@ onScopeDispose(() => {
                 <td class="lote-value calculated" :colspan="isCelular ? 2 : 1" :class="loteBgClass(lote.nome)">{{ lote.prazo != null ? lote.prazo + 'd' : '—' }}</td>
               </template>
             </tr>
-            <!-- Simulação (PDF vindo do Financeiro → Simulação). Migration 0214. -->
+            <!-- Simulação (PDF anexado pela antiga tela Simulação, que saiu em 05/11/2026). Migration 0214. -->
             <tr>
               <template v-for="lote in visibleLotes" :key="`lote-rsim-${lote.id}`">
                 <td class="lote-label border-l" :class="loteBgClass(lote.nome)">simulação</td>
@@ -2881,108 +2651,11 @@ onScopeDispose(() => {
       </div>
     </div>
 
-    <!-- ─── TAB KIT ──────────────────────────────────────────────────
-         Matriz produto × variação de kit. Seed fixo via migration
-         0099 — operador apenas toggle de "x". Integração com Bling /
-         Tabela de Preços fica pras fases 2/3. -->
-    <div v-if="tab === 'kit'" class="space-y-2">
-      <div class="flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
-        <span class="text-muted-foreground">
-          Matriz <strong>{{ kit.bases.length }}</strong> produtos × <strong>{{ kit.variations.length }}</strong> variações.
-          Clique pra marcar/desmarcar "x". Criação automática no Bling
-          (<em>categoria {{ categoria }} kit</em>)<template v-if="categoria === 'mala'"> e item na Tabela de Preços ficam pra fase 2</template>.
-        </span>
-        <!-- "Criar Kit" — botão separado por categoria (cada um abre
-             seu próprio modal com regras específicas). Eletro não tem
-             aba kit, então só aparece em mala/celular. -->
-        <button
-          v-if="canEdit && categoria === 'celular'"
-          class="ml-auto inline-flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-2.5 py-1 hover:opacity-90"
-          @click="createKitCelularOpen = true"
-        >
-          <Plus class="size-3" /> Criar Kit
-        </button>
-        <button
-          v-if="canEdit && categoria === 'mala'"
-          class="ml-auto inline-flex items-center gap-1 rounded-md bg-primary text-primary-foreground px-2.5 py-1 hover:opacity-90"
-          @click="createKitMalaOpen = true"
-        >
-          <Plus class="size-3" /> Criar Kit
-        </button>
-      </div>
-
-      <CreateKitVariationCelularModal
-        :open="createKitCelularOpen"
-        @close="createKitCelularOpen = false"
-        @created="onKitVariationCreated"
-      />
-      <CreateKitVariationMalaModal
-        :open="createKitMalaOpen"
-        @close="createKitMalaOpen = false"
-        @created="onKitVariationCreated"
-      />
-
-      <div class="border rounded-md overflow-auto" style="max-height: calc(100vh - 220px)">
-        <table class="kit-table text-xs border-collapse">
-          <thead>
-            <tr>
-              <th class="kit-h kit-col-modelo">modelo</th>
-              <th class="kit-h kit-col-sku">sku</th>
-              <!-- Celular: cor já está embutida no modelo_bling
-                   ("Apple iPad 11 128 GB - Amarelo"); coluna omitida. -->
-              <th v-if="!isCelular" class="kit-h kit-col-cor">cor</th>
-              <th
-                v-for="v in kit.variations" :key="v.id"
-                class="kit-h kit-h-var"
-                :class="{ 'kit-h-highlight': v.highlight }"
-                :title="v.obs || `Variação #${v.ordem}`"
-              >
-                {{ v.label }}
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-if="!loading && kit.bases.length === 0">
-              <td :colspan="(isCelular ? 2 : 3) + kit.variations.length" class="py-6 text-center text-muted-foreground">
-                Sem dados — verifique se a migration de seed (0099) rodou.
-              </td>
-            </tr>
-            <tr v-for="b in kit.bases" :key="b.id" class="even:bg-muted/10 hover:bg-amber-50/40">
-              <td class="kit-col-modelo">{{ b.modelo_bling ?? '—' }}</td>
-              <td class="kit-col-sku font-mono">{{ b.sku_base }}</td>
-              <td v-if="!isCelular" class="kit-col-cor">{{ b.cor ?? '—' }}</td>
-              <td
-                v-for="v in kit.variations" :key="`${b.id}-${v.id}`"
-                class="kit-cell"
-                :class="{ 'kit-cell-highlight': v.highlight, 'kit-cell-disabled': !canEdit }"
-                :title="kitMarkTitle(getKitMark(b.id, v.id))"
-                @click="canEdit && toggleKitMark(b.id, v.id)"
-              >
-                <template v-if="isKitMarked(b.id, v.id)">
-                  <span class="kit-mark" :class="kitMarkColorClass(getKitMark(b.id, v.id))">x</span>
-                  <!-- Resync (Bling) — visível se Bling status='error'. -->
-                  <button
-                    v-if="canEdit && getKitMark(b.id, v.id)?.bling_sync_status === 'error'"
-                    class="kit-resync"
-                    title="Reenviar tudo (Bling + Pricing)"
-                    @click.stop="resyncKitMark(getKitMark(b.id, v.id)!)"
-                  >↻</button>
-                  <!-- Resync só pricing — Bling ok mas pricing falhou. -->
-                  <button
-                    v-else-if="canEdit
-                      && getKitMark(b.id, v.id)?.bling_sync_status === 'sent'
-                      && getKitMark(b.id, v.id)?.pricing_sync_status === 'error'"
-                    class="kit-resync"
-                    title="Reenviar pricing (Bling já criado)"
-                    @click.stop="resyncKitPricing(getKitMark(b.id, v.id)!)"
-                  >↻ $</button>
-                </template>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
+    <!-- ─── TAB CERTIFICAÇÕES ─────────────────────────────────────
+         A mesma tela do menu Suprimentos › Certificações (05/11/2026,
+         no lugar da antiga aba Kit). Uma lista só para as três
+         categorias: as certificações não são separadas por categoria. -->
+    <CertificacoesPainel v-if="tab === 'certificacoes'" embutido />
 
     <!-- ─── MODAL: Criar Produto ────────────────────────────────────
          Backed by saveNewProduct() — POSTs to /api/importacao/products.
@@ -3674,119 +3347,5 @@ onScopeDispose(() => {
 .cot-input::placeholder {
   color: hsl(var(--muted-foreground));
   font-style: italic;
-}
-
-/* ── Kit table ──────────────────────────────────────────────────── */
-.kit-table {
-  width: auto;
-  min-width: 100%;
-  border-collapse: collapse;
-}
-.kit-table th,
-.kit-table td {
-  border: 1px solid hsl(var(--border));
-  padding: 2px 6px;
-  vertical-align: middle;
-}
-.kit-h {
-  background: hsl(var(--muted));
-  font-weight: 600;
-  font-size: 11px;
-  text-align: center;
-  position: sticky;
-  top: 0;
-  z-index: 2;
-}
-.kit-h-var {
-  white-space: nowrap;
-  min-width: 60px;
-  padding: 4px 6px;
-}
-.kit-h-highlight {
-  background: rgb(254 240 138);  /* yellow-200 */
-}
-:global(.dark) .kit-h-highlight {
-  background: rgb(133 77 14 / 0.4);  /* yellow-900 */
-}
-/* Sticky left cols: modelo (left:0), sku (left:120), cor (left:230) */
-.kit-col-modelo {
-  position: sticky;
-  left: 0;
-  background: hsl(var(--background));
-  min-width: 120px;
-  max-width: 120px;
-  z-index: 3;
-}
-.kit-col-sku {
-  position: sticky;
-  left: 120px;
-  background: hsl(var(--background));
-  min-width: 110px;
-  max-width: 110px;
-  z-index: 3;
-}
-.kit-col-cor {
-  position: sticky;
-  left: 230px;
-  background: hsl(var(--background));
-  min-width: 130px;
-  max-width: 130px;
-  z-index: 3;
-}
-/* Header sticky cols need higher z to sit on top of body sticky */
-thead .kit-col-modelo,
-thead .kit-col-sku,
-thead .kit-col-cor {
-  z-index: 4;
-  background: hsl(var(--muted));
-}
-.kit-cell {
-  text-align: center;
-  cursor: pointer;
-  min-width: 60px;
-  user-select: none;
-}
-.kit-cell:hover {
-  background: hsl(var(--muted) / 0.4);
-}
-.kit-cell-highlight {
-  background: rgb(254 252 232);  /* yellow-50 */
-}
-:global(.dark) .kit-cell-highlight {
-  background: rgb(133 77 14 / 0.15);
-}
-.kit-cell-highlight:hover {
-  background: rgb(254 240 138);  /* yellow-200 */
-}
-.kit-cell-disabled {
-  cursor: not-allowed;
-  opacity: 0.7;
-}
-.kit-mark {
-  color: rgb(21 128 61);  /* green-700 — default e 'sent' */
-  font-weight: 700;
-  font-size: 13px;
-}
-.kit-mark-sent {
-  color: rgb(21 128 61);  /* green-700 */
-}
-.kit-mark-pending {
-  color: rgb(217 119 6);  /* amber-600 */
-}
-.kit-mark-error {
-  color: rgb(220 38 38);  /* red-600 */
-}
-.kit-resync {
-  margin-left: 4px;
-  color: rgb(180 83 9);   /* amber-700 */
-  font-size: 11px;
-  cursor: pointer;
-  text-decoration: underline;
-  background: transparent;
-  border: none;
-  padding: 0;
-}
-.kit-resync:hover {
-  color: rgb(146 64 14);  /* amber-800 */
 }
 </style>
