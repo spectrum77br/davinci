@@ -10232,6 +10232,612 @@ def com_os_links_do_anuncio(
     )
 
 
+# ── 11c. O recurso que este produto não tem (o dono, 04 e 05/11/2026) ──────
+#
+# "esse produto não tem, mas o produto Y tem, que temos" e, depois, "dá pra ser mais incisivo?".
+# A orientação na descrição do `buscar_anuncios_da_loja` o modelo pode ignorar: em 30 dias, de 49
+# "não" de NFC, a equipe ofereceu outro produto em 16 e o agente em nenhum. Aqui o CÓDIGO decide,
+# sem outra chamada ao modelo: o cliente perguntou o recurso NESTE turno, antes da compra, e o
+# texto diz que este não tem e não oferece nada. O código procura pelo mesmo caminho das
+# ferramentas (a busca e a ficha entram no `ctx`), escolhe até 2 anúncios e acrescenta a frase
+# fixa. A resposta nova passa por todas as travas e pelo verificador (`agente.conferir_proposta`,
+# que volta ao texto do modelo se ela segurar). Sem anúncio: o "este não tem" fica, porque é
+# honesto, e nunca "a loja não tem". O vocabulário é fechado: só o que o dono citou. A revisão de
+# 05/11/2026 fechou também o resto: o que não se sabe ler é "não oferece" (perder uma oferta é
+# melhor que oferecer errado, e a pergunta do ML é pública e irreversível).
+@dataclass(frozen=True)
+class RecursoDaLoja:
+    """Um recurso do vocabulário: `chave` vai ao `fatos.agente`, `termos` são as buscas no
+    catálogo, `padrao` lê a menção no texto plano, `so_do_tipo` limita ao tipo de produto
+    ("expansível" de celular é a memória, não o zíper), `campo` é o das especificações, `rotulo` é
+    como a frase o nomeia, `modelos` são os únicos códigos oferecidos (None = sem lista) e
+    `outra_coisa` é o que, na mesma fala ou oração, mostra que o assunto é outro."""
+
+    chave: str
+    termos: tuple[str, ...]
+    padrao: str
+    rotulo: str
+    so_do_tipo: str | None = None
+    campo: str | None = None
+    modelos: frozenset[str] | None = None
+    outra_coisa: str | None = None
+
+    def citado_em(self, plano: str) -> bool:
+        return bool(re.search(self.padrao, _sem_wifi_5(plano)))
+
+    def e_outra_coisa(self, plano: str) -> bool:
+        return bool(self.outra_coisa and re.search(self.outra_coisa, plano))
+
+    def confirma_os_modelos(self, plano: str) -> bool:
+        """Todo código de modelo do texto está na lista fechada (e há algum)? Sem lista, sim."""
+        if self.modelos is None:
+            return True
+        achados = _modelos_do(plano)
+        return bool(achados) and achados <= self.modelos
+
+
+# O título sozinho não prova o recurso (a revisão de 05/11/2026): "Fossibot F105 … Nfc" e "Fossibot
+# S7 … Nfc" dizem NFC, mas em 30 dias a equipe negou em 14 de 14 e em 26 de 26 conversas com
+# resposta, e o site não cita; o C68 varia. Por isso a lista é FECHADA, e o modelo novo fica sem
+# oferta até entrar aqui: perder a oferta é melhor que oferecer errado, e a pergunta do ML é
+# pública e irreversível. NFC = a página do site da marca cita (f109, f109s, f112, f117, s5, t8,
+# wp60), mais o A18 (16 "sim" da equipe e nenhum "não"). 5G = a página do site cita (f109, f110,
+# f112). A decisão do dono sobre os modelos em conflito está pendente. O zíper não tem lista: mala
+# nem sempre tem código, e a medição não achou título falso.
+_MODELOS_COM_NFC = frozenset({"a18", "f109", "f109s", "f112", "f117", "s5", "t8", "wp60"})
+_MODELOS_COM_5G = frozenset({"f109", "f110", "f112"})
+# "O wifi é 5g?", "a banda do wifi", "a internet 5g da minha casa": a rede de casa, não a do cel.
+_REDE_DE_CASA = (
+    r"\bwi\s*-?\s*fi\b|\bwireless\b|\brote?ador\b|\bbanda\b|\bghz\b|\bcasa\b|\bresidenc\w*"
+)
+RECURSOS_DA_LOJA: tuple[RecursoDaLoja, ...] = (
+    RecursoDaLoja("nfc", ("NFC",), r"\bnfc\b", "NFC", campo="nfc", modelos=_MODELOS_COM_NFC),
+    RecursoDaLoja(
+        "5g",
+        ("5G",),
+        r"\b5\s?g\b",
+        "5G",
+        campo="rede_5g",
+        modelos=_MODELOS_COM_5G,
+        outra_coisa=_REDE_DE_CASA,
+    ),
+    RecursoDaLoja(
+        "ziper_expansivo",
+        ("expansivel", "expansivo"),
+        r"\bexpans(?:ivel|iveis|ivo|ivos|iva|ivas)\b",
+        "zíper expansivo",
+        so_do_tipo="mala",
+    ),
+)
+MAX_OFERTAS_DO_RECURSO = 2
+# Os anúncios abertos por oferta (cada um é o `ver_anuncio` inteiro, que pode ir à loja).
+MAX_FICHAS_DO_RECURSO = 4
+# A decisão do dono está pendente: com pedido na conversa, por enquanto, nunca. Para valer no
+# pedido ainda não enviado, troque por `RECURSO_COM_PEDIDO_NAO_ENVIADO`.
+RECURSO_COM_PEDIDO_NUNCA = "nunca"
+RECURSO_COM_PEDIDO_NAO_ENVIADO = "nao_enviado"
+RECURSO_COM_PEDIDO = RECURSO_COM_PEDIDO_NUNCA
+# Só a pergunta de produto: a reclamação, o defeito e o resto da conversa ficam como estão.
+_ASSUNTOS_DO_RECURSO = frozenset(constantes.ASSUNTOS_LIBERADOS_PELO_ANUNCIO)
+# O cliente fala do recurso que já tem na mão: "o NFC não funciona" não pede outro produto.
+_RECLAMA_DO_RECURSO = re.compile(
+    r"\bnao\s+(?:esta\s+)?(?:funciona\w*|pega|liga|ativa|conecta|reconhece|abre|fecha)\b"
+    r"|\bparou\b|\bdefeit\w*|\bquebr\w*|\bproblema\w*|\bcomprei\b|\brecebi\b|\bchegou\b"
+    r"|\breclam\w*|\bdevol\w*|\breembols\w*|\btroc(?:a|ar)\b|\bgarantia\b"
+)
+# O cliente que não pede alternativa (a revisão de 05/11/2026): "não quero outro modelo", "só quero
+# saber", "quero justamente sem". O "sem <recurso>" na fala é lido à parte (`_pede_sem_o_recurso`).
+_RECUSA_OUTRO = re.compile(
+    r"\bnao\s+(?:quero|preciso|procuro|busco)\b|\bso\s+(?:quero|queria|preciso)\s+saber\b"
+    r"|\bprefiro\b|\bjustamente\b"
+)
+# A leitura LARGA da negativa, só para a FICHA do anúncio oferecido: lá, o engano tira a oferta.
+# "Não tem NFC", "sem NFC", "não informa se tem NFC". O "tem" no meio separa outra afirmação ("não
+# tem 5G mas tem NFC"), fora o "se tem" do "não informa". Lido de cada resposta real de 30 dias.
+_RECURSO_NEGADO_ANTES = (
+    r"\b(?:nao\s+(?:tem|possui|conta\s+com|informa|consta|traz|trazem|vem\s+com|suporta|pega|e|ha"
+    r"|cita|menciona|acompanha|oferece|inclui|dispoe\s+de|funciona\s+(?:no|com|em))|sem)\s+"
+    r"(?:(?!mas\b|porem\b|tem\b|tinha\b|possui\b|que\b)[a-z0-9-]+\s+){0,5}?"
+)
+_RECURSO_NEGADO_DEPOIS = (
+    r"(?:\s+(?:[a-z0-9-]+\s+){0,2}?nao\s+(?:consta|aparece|esta|vem|e\s+informad\w*"
+    r"|foi\s+informad\w*)\b|\s*[-:=]\s*(?:nao|no)\b)"
+)
+# A leitura FECHADA, para o TEXTO do modelo: aqui o engano põe a oferta numa resposta certa ("Sim,
+# faz pagamento sem contato por NFC", "Não é só NFC", "O NFC não vem ativado", "NFC - não precisa",
+# "com e sem NFC", "Não há cobrança para usar o NFC"; a revisão de 05/11/2026). Entre o "não" e o
+# recurso só passam as palavras daqui, e o "não" depois dele só vale fechando a oração.
+_ENTRE_O_NAO_E_O_RECURSO = (
+    r"(?:(?:o|a|os|as|um|uma|nenhum|nenhuma|de|do|da|com|ao|a|sobre|para|por|se|na|no|em"
+    r"|tecnologia|funcao|recurso|suporte|compatibilidade|compativel|conexao|sistema|sensor|chip"
+    r"|rede|movel|internet|sinal|ziper|pagamento|aproximacao|informacao|mencao|indicacao|presenca"
+    r"|especificacao|celular|aparelho|modelo)\s+){0,5}?"
+)
+_TEXTO_NEGA_ANTES = (
+    r"\b(?:nao\s+(?:tem|possui|conta\s+com|informa|consta|traz|trazem|vem\s+com|suporta|pega|e|ha"
+    r"|cita|menciona|acompanha|oferece|inclui|dispoe\s+de|funciona\s+(?:no|com|em))"
+    r"|(?<!\bcom\se\s)(?<!\bcom\sou\s)sem)\s+" + _ENTRE_O_NAO_E_O_RECURSO
+)
+_TEXTO_NEGA_DEPOIS = (
+    r"(?:\s+(?:[a-z0-9-]+\s+){0,2}?nao\s+(?:consta|aparece|e\s+informad\w*|foi\s+informad\w*"
+    r"|(?:esta|vem)(?:\s*$|\s+(?:disponivel|presente|incluid\w*|inclus\w*|informad\w*"
+    r"|neste|nesta|nesse|nessa|no\s+anuncio)\b))|\s*[-:=]\s*(?:nao|no)\s*$)"
+)
+_SE_TEM = re.compile(r"\bse\s+(?:tem|possui|vem\s+com|e)\b")
+# As orações: "O A17 não tem NFC. O A18 tem." e "não tem NFC e o A18 tem" são duas afirmações.
+_ORACAO_DO_RECURSO = re.compile(
+    r"[;,\n!?]|\.(?!\d)|\bmas\b|\bporem\b|\be\s+(?:o|a|os|as|esse|essa|este|esta)\b"
+)
+# O texto já oferece ("mas temos", "outro modelo", "na nossa loja"), ou pergunta qual.
+_OUTRO_NO_TEXTO = re.compile(
+    r"\boutr[oa]s?\s+(?:modelos?|versao|versoes|opc(?:ao|oes)|aparelhos?|celular(?:es)?|produtos?"
+    r"|malas?|anuncios?|variac(?:ao|oes))\b"
+)
+# A revisão de 05/11/2026: o texto aponta a alternativa sem "temos" nem "outro": "somente o modelo
+# a18", "a versão Premium deste anúncio tem", "qual aparelho tem". Falar de versão já diz que outra
+# versão pode ter: a frase fixa, em cima, seria uma segunda alternativa.
+_APONTA_A_ALTERNATIVA = re.compile(
+    r"\bvers(?:ao|oes)\b|\bvariac(?:ao|oes)\b|\bpremium\b"
+    r"|\b(?:somente|apenas|so)\s+(?:(?:o|a|os|as|no|na|nos|nas|em|para)\s+)?"
+    r"(?:modelos?|aparelhos?|celular(?:es)?|produtos?|malas?)\b"
+)
+_TEM_SEM_OBJETO = re.compile(r"(?<!\bnao\s)\b(?:tem|possui|possuem)\s*$")
+_COMECA_COM_SIM = re.compile(
+    r"^(?:(?:ola|oi|bom\s+dia|boa\s+tarde|boa\s+noite)\W+(?:\w+\W+){0,2}?)?sim\b"
+)
+_QUAL_MODELO = re.compile(r"\bqua(?:l|is)\b.*\b(?:modelo|versao|variacao|anuncio|produto|mala)s?\b")
+_NEGA_O_TEMOS = re.compile(r"\b(?:nao|nem)\s+(?:\w+\s+)?$")
+# O anúncio que não se indica sem dizer a condição dele (a frase é fixa e não diz).
+_NAO_OFERECE = re.compile(
+    r"\b(?:usad[oa]s?|seminov[oa]s?|recondicionad[oa]s?|vitrine|mostruario|open\s*box"
+    r"|avariad[oa]s?|com\s+defeito|retirada\s+de\s+pecas)\b"
+)
+# O título de vários modelos: o recurso escrito nele pode ser só de um (medido em produção,
+# 05/11/2026: "Uranyx A17 Pro Max … / Uranyx S5 … NFC", "… Varios Modelos com NFC", "F109 5G ou
+# F109S", "4G e 5G"). Sem a variação dizendo o recurso, não se sabe qual tem.
+_TITULO_DE_VARIOS = re.compile(
+    r"\bvarios\s+modelos\b|\bseries\b|\bmodelos\b|\b4g\s*(?:e|/|ou)\s*5g\b"
+)
+_NOME_LIMPO = re.compile(r"[\w'&+. -]+")
+_ENTRE_AS_FRASES_DO_RECURSO = re.compile(r"((?<=[.!?…])\s+|\n+)")
+# O fecho de cortesia: o único que fica depois da frase. Fechada: o resto é conteúdo.
+_SO_CORTESIA = re.compile(
+    r"^(?:\W*(?:qualquer\s+(?:duvida|coisa|outra\s+duvida)\b.*|estamos\s+a\s+disposicao\b.*"
+    r"|estou\s+a\s+disposicao\b.*|a\s+disposicao\b.*|conte\s+conosco\b.*|agradec\w+\b.*"
+    r"|obrigad[oa]\b.*|espero\s+ter\s+ajudado\b.*|posso\s+ajudar\b.*|boa\s+compra\b.*"
+    r"|tenha\s+um\b.*|bom\s+dia|boa\s+tarde|boa\s+noite|abracos?|atenciosamente\b.*))\W*$"
+)
+_FRASE_DA_OFERTA = re.compile(r"\bque\s+tem\s+esse\s+recurso\b")
+_FRASE_SEM_LACUNA = "aparece na página da loja no app, pelo nome."
+_FRASE_SEM_LACUNA_DOIS = "aparecem na página da loja no app, pelo nome."
+
+
+def _sem_wifi_5(plano: str) -> str:
+    """O texto plano sem o "Wi-Fi 5G": é a rede sem fio de casa, não o 5G do celular. PURA."""
+    return especificacoes_svc._WIFI_5.sub(" ", plano)
+
+
+def _ficha_nega_o_recurso(recurso: RecursoDaLoja, plano: str) -> bool:
+    """A ficha do anúncio oferecido pode estar negando o recurso? Larga de propósito. PURA."""
+    plano = _SE_TEM.sub("se", _sem_wifi_5(plano))
+    return bool(
+        re.search(_RECURSO_NEGADO_ANTES + rf"(?:{recurso.padrao})", plano)
+        or re.search(rf"(?:{recurso.padrao})" + _RECURSO_NEGADO_DEPOIS, plano)
+    )
+
+
+def _nega_o_recurso(recurso: RecursoDaLoja, plano: str) -> bool:
+    """A oração plana do texto do modelo diz, sem dúvida, que não tem (ou não informa)? PURA."""
+    if recurso.e_outra_coisa(plano):
+        return False
+    plano = _SE_TEM.sub("se", _sem_wifi_5(plano))
+    return bool(
+        re.search(_TEXTO_NEGA_ANTES + rf"(?:{recurso.padrao})", plano)
+        or re.search(rf"(?:{recurso.padrao})" + _TEXTO_NEGA_DEPOIS, plano)
+    )
+
+
+def _pede_sem_o_recurso(recurso: RecursoDaLoja, plano: str) -> bool:
+    """O cliente quer justamente SEM o recurso ("esse é sem NFC?")? PURA."""
+    return bool(re.search(rf"\bsem\s+(?:(?:o|a)\s+)?(?:{recurso.padrao})", plano))
+
+
+def tipo_do_titulo(titulo: Any) -> str | None:
+    """O tipo de produto do título (o 1º nome de `_TIPOS_DE_PRODUTO`): o que aparece primeiro, e
+    o "S5 128 GB + Tag e Fone" é celular. Título de celular quase nunca diz "celular": a memória
+    também conta (`catalogo._TITULO_DE_CELULAR`, medido em produção). Sem saber, None. PURA."""
+    plano = catalogo.plano(titulo)
+    achados: list[tuple[int, str]] = []
+    for grupo in _TIPOS_DE_PRODUTO:
+        for nome in grupo:
+            m = re.search(rf"\b{re.escape(nome)}\b", plano)
+            if m is not None:
+                achados.append((m.start(), grupo[0]))
+    m = catalogo._TITULO_DE_CELULAR.search(plano)
+    if m is not None:
+        achados.append((m.start(), _TIPOS_DE_PRODUTO[0][0]))
+    return min(achados)[1] if achados else None
+
+
+def tem_pedido_na_conversa(pedido: Any, base: BaseDoGerar, conversa: Any) -> bool:
+    """A conversa tem pedido (o do pacote, o do contexto, o dos fatos ou a chave dela)? PURA."""
+    do_ctx = base.ctx if isinstance(base.ctx, Mapping) else {}
+    dos_fatos = base.fatos if isinstance(base.fatos, Mapping) else {}
+    return bool(
+        pedido
+        or do_ctx.get("pedido")
+        or dos_fatos.get("pedido")
+        or (getattr(conversa, "pedido_marketplace", None) or "").strip()
+    )
+
+
+def titulos_e_ids_da_conversa(
+    fichas: Sequence[Any], ctx: ContextoAgente, base: BaseDoGerar, conversa: Any
+) -> tuple[list[str], set[str]]:
+    """(os títulos, os ids) do produto da CONVERSA. O `ver_anuncio` de outro anúncio não conta."""
+    titulos = [str(t) for t in [getattr(conversa, "anuncio_titulo", None)] if t]
+    fontes = base.fatos if isinstance(base.fatos, Mapping) else {}
+    if isinstance(fontes.get("anuncio"), str):
+        titulos.append(fontes["anuncio"])
+    ids = {str(i) for i in getattr(ctx, "anuncios_do_pacote", None) or () if i}
+    if getattr(conversa, "anuncio_id", None):
+        ids.add(str(conversa.anuncio_id))
+    for f in fichas:
+        if isinstance(f, Mapping) and f.get("da_conversa") is not False:
+            if f.get("titulo"):
+                titulos.append(str(f["titulo"]))
+            if f.get("item_id"):
+                ids.add(str(f["item_id"]))
+    return list(dict.fromkeys(titulos)), ids
+
+
+def _ja_oferece_outro(
+    p: Proposta, plano: str, ids_da_conversa: Collection[str], titulos: Sequence[str]
+) -> bool:
+    """O texto já oferece outro produto, aponta a versão ou o modelo que tem, cita um anúncio de
+    fora ou já tem o link? PURA."""
+    if catalogo.lacunas_de_link(p.texto) or _OUTRO_NO_TEXTO.search(plano):
+        return True
+    if _OUTRO_ANUNCIO_NA_PARTE.search(plano) or _APONTA_A_ALTERNATIVA.search(plano):
+        return True
+    if any(not _NEGA_O_TEMOS.search(plano[: m.start()]) for m in _TEMOS.finditer(plano)):
+        return True
+    if any(_TEM_SEM_OBJETO.search(o.strip()) for o in _ORACAO_DO_RECURSO.split(plano)):
+        return True
+    # O modelo que não é o da conversa: de quem se fala é outro ("o a18 tem", "somente o a18").
+    if _modelos_do(plano) - {m for t in titulos for m in _modelos_do(t)}:
+        return True
+    return any(
+        str(e).startswith(("anuncio:", "ficha:", "espec:", "variacoes:"))
+        and str(e).split(":", 1)[1].strip() not in ids_da_conversa
+        for e in p.evidencias
+    )
+
+
+def recurso_a_oferecer(
+    p: Proposta,
+    *,
+    textos_cliente: Sequence[str | None],
+    titulos: Sequence[str],
+    ids_da_conversa: Collection[str],
+    tem_pedido: bool,
+    canal: str | None,
+    postado: str | None = None,
+    textos_cliente_antes: Sequence[str | None] = (),
+    textos_da_loja: Sequence[str | None] = (),
+) -> tuple[RecursoDaLoja, str] | None:
+    """O (recurso, tipo de produto) que o código procura na loja, ou None. PURA.
+
+    Quem aciona é a pergunta do cliente neste turno, nunca o título do anúncio, e a negativa no
+    texto do modelo. Toda menção ao recurso no texto tem de ser negativa: "tem NFC" e "o A18 tem"
+    não acionam, nem o "qual modelo?". Com pedido, ver `RECURSO_COM_PEDIDO`.
+
+    A revisão de 05/11/2026 fechou: só um recurso do vocabulário na fala e no texto ("esse
+    recurso" não diz qual); nada de reclamação ou de compra em NENHUMA fala do turno nem nas de
+    antes (`textos_cliente_antes`, a conversa sem pedido ligado); nada de "não quero outro" nem de
+    "quero sem"; e a loja que já falou do recurso ou já ofereceu (`textos_da_loja`) não oferece de
+    novo a cada pergunta."""
+    if p.acao != "responder" or p.acao_pessoa or not (p.texto or "").strip():
+        return None
+    if p.assunto not in _ASSUNTOS_DO_RECURSO:
+        return None
+    if tem_pedido and canal != constantes.CANAL_PERGUNTA:
+        if RECURSO_COM_PEDIDO != RECURSO_COM_PEDIDO_NAO_ENVIADO or postado:
+            return None
+    tipos = {t for t in (tipo_do_titulo(x) for x in titulos) if t}
+    if len(tipos) != 1:
+        return None
+    (tipo,) = tipos
+    falas = [_plano(t) for t in textos_cliente if t]
+    plano = _plano(p.texto)
+    if _COMECA_COM_SIM.search(plano) or _ja_oferece_outro(p, plano, ids_da_conversa, titulos):
+        return None
+    if any(_QUAL_MODELO.search(f) for f, pergunta in _sentencas(plano) if pergunta):
+        return None
+    do_tipo = [r for r in RECURSOS_DA_LOJA if r.so_do_tipo in (None, tipo)]
+    no_texto = [r for r in do_tipo if r.citado_em(plano)]
+    na_fala = [r for r in do_tipo if any(r.citado_em(f) for f in falas)]
+    if len(no_texto) != 1 or na_fala != no_texto:
+        return None
+    (recurso,) = no_texto
+    do_recurso = [f for f in falas if recurso.citado_em(f)]
+    if any(recurso.e_outra_coisa(f) or _pede_sem_o_recurso(recurso, f) for f in do_recurso):
+        return None
+    do_cliente = [*falas, *(_plano(t) for t in textos_cliente_antes if t)]
+    if any(_RECLAMA_DO_RECURSO.search(f) or _RECUSA_OUTRO.search(f) for f in do_cliente):
+        return None
+    da_loja = [_plano(t) for t in textos_da_loja if t]
+    if any(recurso.citado_em(f) or _FRASE_DA_OFERTA.search(f) for f in da_loja):
+        return None
+    oracoes = [o for o in _ORACAO_DO_RECURSO.split(plano) if recurso.citado_em(o)]
+    if oracoes and all(_nega_o_recurso(recurso, o) for o in oracoes):
+        return recurso, tipo
+    return None
+
+
+@dataclass(frozen=True)
+class OfertaDoRecurso:
+    """Um anúncio que a frase fixa indica. `por_versao` = só uma versão dele tem o recurso;
+    `lacuna` = a do link, só onde há (a Shopee)."""
+
+    item_id: str
+    nome: str
+    lacuna: str | None = None
+    por_versao: bool = False
+    ids: tuple[str, ...] = ()
+
+
+def achados_do_recurso(
+    recurso: RecursoDaLoja,
+    buscas: Iterable[Mapping[str, Any]],
+    *,
+    tipo: str,
+    ids_da_conversa: Collection[str],
+    texto: str | None,
+    evidencias: Iterable[str | None] = (),
+) -> list[Mapping[str, Any]]:
+    """Os achados das buscas que podem ser oferecidos, antes de abrir a ficha. PURA.
+
+    À venda (`disponivel` true, nunca o "não se sabe"), fora da conversa, do mesmo tipo de produto,
+    com o recurso escrito no título ou na variação, de um modelo da lista fechada do recurso, sem
+    condição que a frase não diz, e com um nome que se possa escrever. O anúncio de que o próprio
+    texto fala ("o A18 não tem") não é o que tem: não entra pelo modelo nem pela ficha citada."""
+    modelos_do_texto = _modelos_do(texto)
+    citados = {str(e).split(":", 1)[1].strip() for e in evidencias if e and ":" in str(e)}
+    vistos: set[str] = set()
+    saida: list[Mapping[str, Any]] = []
+    for achado in (a for b in buscas for a in b.get("anuncios") or []):
+        item = str(achado.get("item_id") or "")
+        nome = " ".join(str(achado.get("nome_curto") or "").split())
+        do_anuncio = catalogo.plano(achado.get("titulo_plano") or "")
+        chave_nome = nome.casefold()
+        if (
+            not item
+            or item in vistos
+            or chave_nome in vistos
+            or item in ids_da_conversa
+            or item in citados
+            or achado.get("da_conversa") is True
+            or achado.get("disponivel") is not True
+            or not recurso.citado_em(do_anuncio)
+            or not recurso.confirma_os_modelos(do_anuncio)
+            or tipo_do_titulo(do_anuncio) != tipo
+            or _NAO_OFERECE.search(do_anuncio)
+            or not _NOME_LIMPO.fullmatch(nome)
+            or ".." in nome
+            or _TITULO_DE_VARIOS.search(catalogo.plano(nome))
+            or len(catalogo.palavras(nome)) < 2
+            or catalogo.acessorios_em(nome)
+            or _modelos_do(do_anuncio) & modelos_do_texto
+        ):
+            continue
+        vistos |= {item, chave_nome}
+        saida.append(achado)
+    return saida
+
+
+def ficha_confirma_o_recurso(
+    recurso: RecursoDaLoja, dado: Any, achado: Mapping[str, Any]
+) -> bool | None:
+    """A ficha do `ver_anuncio` (`dado`, o JSON) confirma o recurso? PURA.
+
+    None = não: sem ficha, emprestada de outro anúncio, a ficha nega ("sem NFC", "NFC: No", a
+    especificação dizendo não), o anúncio se contradiz, nada à venda, modelo fora da lista fechada
+    do recurso, ou vários modelos sem a variação dizer qual tem. False = sim, o anúncio inteiro.
+    True = sim, só uma versão dele: a variação diz o recurso, e outra não (a frase fala da versão,
+    não do anúncio)."""
+    from app.services.atendimento import ficha as ficha_svc
+
+    if not isinstance(dado, Mapping) or dado.get("sem_ficha"):
+        return None
+    if str(dado.get("fonte") or "").startswith(ficha_svc.FONTE_OUTRO_ANUNCIO):
+        return None
+    atributos = [_atributo_em_portugues(a) for a in dado.get("atributos") or []]
+    textos = [dado.get("titulo"), dado.get("descricao"), *atributos]
+    if any(isinstance(t, str) and _ficha_nega_o_recurso(recurso, _plano(t)) for t in textos):
+        return None
+    espec = dado.get("especificacoes") if isinstance(dado.get("especificacoes"), Mapping) else {}
+    varia = False
+    if recurso.campo:
+        for c in espec.get("campos") or []:
+            if not isinstance(c, Mapping) or c.get("campo") != recurso.campo:
+                continue
+            varia = varia or bool(c.get("varia_por_modelo"))
+            nega = _chaves_do_valor(recurso.campo, c.get("valor")) == {especificacoes_svc.NAO}
+            if nega or c.get("conflito_no_anuncio"):
+                return None
+        if any(
+            isinstance(k, Mapping) and k.get("campo") == recurso.campo
+            for k in espec.get("conflitos") or []
+        ):
+            return None
+    blocos = dado.get("variacoes") if isinstance(dado.get("variacoes"), Mapping) else {}
+    lista = [
+        v
+        for v in blocos.get("variacoes") or []
+        if isinstance(v, Mapping)
+        and isinstance(v.get("nome"), str)
+        and v.get("fonte") != variacoes_svc.FONTE_CADASTRO
+    ]
+    # A revisão de 05/11/2026: o "NFC - F105,64 GB" de um anúncio que liga vários modelos: o prefixo
+    # vale para o anúncio, não prova cada versão, e "na versão que tem" não diz qual. Dois modelos
+    # nas variações, ou um fora da lista fechada: não se oferece.
+    casadas = [str(v) for v in achado.get("variacoes_casadas") or []]
+    das_versoes = {m for n in [*(v["nome"] for v in lista), *casadas] for m in _modelos_do(n)}
+    titulo_todo = catalogo.plano(dado.get("titulo") or achado.get("titulo_plano") or "")
+    if len(das_versoes) > 1 or not recurso.confirma_os_modelos(
+        " ".join([titulo_todo, *sorted(das_versoes)])
+    ):
+        return None
+    com = [v for v in lista if recurso.citado_em(_plano(v["nome"]))]
+    a_venda = [v for v in lista if v.get("disponivel") is True]
+    if blocos.get("completas") is True and lista and not a_venda:
+        return None
+    if com and len(com) < len(lista):
+        return True if any(v.get("disponivel") is True for v in com) else None
+    if com:
+        return False if a_venda or blocos.get("completas") is not True else None
+    if casadas:
+        return True
+    # Só o título diz o recurso: um modelo só, senão não se sabe qual tem.
+    modelos = _modelos_do(titulo_todo) | das_versoes
+    if varia or len(modelos) > 1 or _TITULO_DE_VARIOS.search(titulo_todo):
+        return None
+    return False
+
+
+def mesmo_modelo_da_conversa(achado: Mapping[str, Any], titulos: Sequence[str]) -> bool:
+    """O anúncio oferecido é o modelo da conversa ("este não tem" e "temos o mesmo, que tem" se
+    desmentem)? Pelo título inteiro: o nome curto corta antes do código ("Mala De Viagem", sem o
+    ME1). A VERSÃO que tem, de outro anúncio do mesmo modelo, a equipe indica. PURA."""
+    oferecido = " ".join(str(achado.get(k) or "") for k in ("nome_curto", "titulo_plano"))
+    return bool(_modelos_do(oferecido) & {m for t in titulos for m in _modelos_do(t)})
+
+
+def modelos_do_nome(achado: Mapping[str, Any]) -> list[str]:
+    """Os códigos de modelo do nome oferecido, em ordem, para a busca do "pelo nome". PURA."""
+    return sorted(_modelos_do(achado.get("nome_curto")))
+
+
+def nome_para_a_frase(nome: Any) -> str:
+    """O nome como a frase o escreve: "uranyx F109" com maiúscula, "Uranyx S5 128" sem o número
+    solto que o corte do título deixa. PURA."""
+    limpo = re.sub(r"(?:\s+\d+)+$", "", " ".join(str(nome or "").split()))
+    return limpo[:1].upper() + limpo[1:]
+
+
+def nome_acha_so_quem_tem(
+    recurso: RecursoDaLoja,
+    achado: Mapping[str, Any],
+    buscas_do_modelo: Iterable[Mapping[str, Any]],
+) -> bool:
+    """Sem link (ML, TikTok), o cliente acha o anúncio pelo nome: o nome tem o código do modelo, e
+    nenhum outro anúncio à venda desse código deixa de citar o recurso? "Mala De Viagem" não acha
+    nada, e "Uranyx F109" acha também o F109 de 4G (7 das 15 lojas ML com oferta de 5G, a revisão
+    de 05/11/2026). Sem a busca, não. PURA."""
+    if not _modelos_do(achado.get("nome_curto")):
+        return False
+    achados = [a for b in buscas_do_modelo for a in b.get("anuncios") or []]
+    return bool(achados) and all(
+        recurso.citado_em(catalogo.plano(a.get("titulo_plano") or ""))
+        for a in achados
+        if a.get("disponivel") is True
+    )
+
+
+def _artigo_do_nome(nome: str) -> str:
+    """O artigo do "Temos o/a <nome>": a mala é feminina, "Kit 3 Malas" não. PURA."""
+    palavras_do_nome = catalogo.palavras(nome)
+    primeiras = palavras_do_nome[:3]
+    if palavras_do_nome[:1] and palavras_do_nome[0] in ("kit", "conjunto"):
+        return "o"
+    return "a" if "mala" in primeiras or "mochila" in primeiras else "o"
+
+
+def frase_do_recurso(ofertas: Sequence[OfertaDoRecurso]) -> str:
+    """A frase fixa. Sem "que tem NFC": a `conferir_fonte_produto` lê a oração como dito do
+    produto da CONVERSA, o que dá um "diz NFC sim, mas o anúncio diz não" falso ao verificador, e
+    o `_com_a_frase` nomeia o recurso quando a negativa não é a última coisa dita. Um link por
+    frase: a `conferir_link_do_anuncio` confere o link contra o nome da mesma parte. PURA."""
+
+    def _nome(o: OfertaDoRecurso) -> str:
+        return f"{_artigo_do_nome(o.nome)} {o.nome}"
+
+    def _que_tem(o: OfertaDoRecurso) -> str:
+        return f"{_nome(o)}{' na versão' if o.por_versao else ','} que tem esse recurso"
+
+    a = ofertas[0]
+    if len(ofertas) == 1:
+        return f"Temos {_que_tem(a)}" + (f": {a.lacuna}" if a.lacuna else f"; {_FRASE_SEM_LACUNA}")
+    b = ofertas[1]
+    if a.lacuna and b.lacuna:
+        return f"Temos {_que_tem(a)}: {a.lacuna}. Temos também {_que_tem(b)}: {b.lacuna}"
+    return f"Temos {_nome(a)} e {_nome(b)}, que têm esse recurso; {_FRASE_SEM_LACUNA_DOIS}"
+
+
+def _com_a_frase(texto: str, recurso: RecursoDaLoja, frase: str) -> str:
+    """O texto com a frase no fim, antes só do fecho de cortesia. A revisão de 05/11/2026: logo
+    depois da negativa, o resto do texto ("Ele tem Wifi, 4G…", "Também não tem…") passava a falar
+    do produto oferecido. E, se a negativa não é a última coisa dita, "esse recurso" apontaria o
+    que veio depois: a frase nomeia o recurso. PURA."""
+    partes = _ENTRE_AS_FRASES_DO_RECURSO.split(texto.strip())
+    fim = len(partes)
+    while (
+        fim > 1
+        and _SO_CORTESIA.match(_plano(partes[fim - 1]))
+        and not recurso.citado_em(_plano(partes[fim - 1]))
+    ):
+        fim -= 2
+    corpo = "".join(partes[:fim]).rstrip()
+    fecho = "".join(partes[fim:]).strip()
+    ultimas = [o for o in _ORACAO_DO_RECURSO.split(_plano(partes[fim - 1])) if o.strip()]
+    colada = bool(ultimas) and _nega_o_recurso(recurso, ultimas[-1])
+    if corpo[-1:] not in (".", "!", "?", "…"):
+        corpo += "."
+    if not colada:
+        frase = f"Quanto ao {recurso.rotulo}, {frase[:1].lower()}{frase[1:]}"
+    if fecho:
+        separa = "\n" if "\n" in partes[fim] else " "
+        fim_da_frase = frase if frase[-1:] in (".", "!", "?") else f"{frase}."
+        return f"{corpo} {fim_da_frase}{separa}{fecho}"
+    return f"{corpo} {frase}"
+
+
+def proposta_com_o_recurso(
+    p: Proposta,
+    recurso: RecursoDaLoja,
+    ofertas: Sequence[OfertaDoRecurso],
+    *,
+    links: Mapping[str, str],
+    plataforma: str,
+    canal: str,
+) -> tuple[Proposta, list[OfertaDoRecurso]] | None:
+    """A Proposta com a frase fixa e as evidências, cabendo no canal (`limite_caracteres`, com a
+    URL no lugar da lacuna) e, no ML, no ISO-8859-1. Com 2 que não cabem, tenta 1; nenhum cabe:
+    None (a resposta fica como está). O que não tem a lacuna sai quando outro tem. PURA."""
+    com_lacuna = [o for o in ofertas if o.lacuna]
+    candidatas = (com_lacuna or list(ofertas))[:MAX_OFERTAS_DO_RECURSO]
+    if not com_lacuna and any(o.por_versao for o in candidatas):
+        # "Temos o A na versão e o B, que têm" não diz qual versão: uma oferta só.
+        candidatas = candidatas[:1]
+    limite = constantes.limite_caracteres(plataforma, canal)
+    for n in range(len(candidatas), 0, -1):
+        usadas = candidatas[:n]
+        novo = _com_a_frase(p.texto, recurso, frase_do_recurso(usadas))
+        final, _urls = catalogo.preencher_links(novo, links)
+        final = validador.normalizar(final, plataforma=plataforma, canal=canal)
+        if len(final) > limite or (plataforma == "ml" and validador._fora_do_latin1(final)):
+            continue
+        ids = [i for o in usadas for i in o.ids]
+        return (
+            p.model_copy(
+                update={"texto": novo, "evidencias": list(dict.fromkeys([*p.evidencias, *ids]))}
+            ),
+            usadas,
+        )
+    return None
+
+
 def anuncios_de_fora(
     fichas: Sequence[Any], ctx: ContextoAgente, fontes_extra: Sequence[str] = ()
 ) -> frozenset[str]:
@@ -11037,6 +11643,9 @@ def liberacao_da_proposta(
     `ia.conferir_saida`, no texto do modelo; a `conferir`, de novo, no texto final). PURA."""
     if ctx.modo != constantes.MODO_AUTO:
         return False
+    if ctx.marca_do_texto_do_modelo is not None:
+        # A oferta do recurso (05/11/2026): a frase fixa não muda de quem é a resposta.
+        return ctx.marca_do_texto_do_modelo
     from app.services.atendimento import ia as ia_svc
 
     clientes = list(dict.fromkeys([*base.textos_rajada, *base.textos_cliente]))
@@ -11114,7 +11723,8 @@ def conferir(
         )
         pendencias += conferir_variacoes(
             texto,
-            fichas,
+            # A oferta do recurso (05/11/2026): a ficha dela não vira "2 anúncios na conversa".
+            fichas if ctx.marca_do_texto_do_modelo is None else fichas_do_produto,
             clientes,
             com_pedido=bool(pedido) or bool(fatos_da_base.get("pedido")),
             caracteristica=capacidade_sem_estoque(

@@ -1926,6 +1926,64 @@ async def dados_buscar_anuncios_da_loja(
     )
 
 
+# ── O código pelo mesmo caminho (o recurso do dono, 05/11/2026) ───────────────
+
+
+async def buscar_pelo_codigo(
+    ctx: ContextoAgente, termo: str, *, base: BaseDoGerar | None = None, conversa: Any = None
+) -> list[dict]:
+    """O `buscar_anuncios_da_loja` sem o modelo: o mesmo `executar` (registro, rastro e orçamento).
+    Devolve a busca que ficou no `ctx`: a que o modelo já fez com o mesmo termo não roda de novo;
+    sem orçamento, nada. Levanta como a ferramenta."""
+    lido = catalogo.ler_termo(termo).texto.casefold()
+
+    def _feitas() -> list[dict]:
+        feitas = [b for b in ctx.buscas_catalogo if str(b.get("termo")).casefold() == lido]
+        return [dict(b) for b in feitas[-1:]]
+
+    if not _feitas():
+        # A régua da repetida só vê palavras de 3+ letras: o "5G" colidiria com o "S5" do modelo.
+        ctx.consultas = [c for c in ctx.consultas if c[0] != BUSCAR_ANUNCIOS_DA_LOJA]
+        await executar(
+            ctx,
+            BUSCAR_ANUNCIOS_DA_LOJA,
+            {"termo": termo},
+            lambda: dados_buscar_anuncios_da_loja(ctx, termo, base=base, conversa=conversa),
+        )
+    return _feitas()
+
+
+async def ver_pelo_codigo(
+    ctx: ContextoAgente,
+    item_id: str,
+    *,
+    base: BaseDoGerar | None = None,
+    conversa: Any = None,
+    loja: ficha_loja.Busca | None = None,
+) -> dict | None:
+    """O `ver_anuncio` sem o modelo, pelo mesmo `executar`: a ficha entra no `ctx`. Devolve o JSON
+    que ficou no registro (o último deste anúncio), ou None sem orçamento. Levanta como a
+    ferramenta."""
+    await executar(
+        ctx,
+        VER_ANUNCIO,
+        {"item_id": item_id},
+        lambda: dados_ver_anuncio(ctx, item_id, base=base, conversa=conversa, loja=loja),
+    )
+    if contexto.id_ficha(item_id) not in ctx.registro.ids:
+        return None
+    lidos = []
+    for texto in ctx.registro.textos:
+        try:
+            lidos.append(json.loads(texto))
+        except (TypeError, ValueError):
+            continue
+    return next(
+        (d for d in reversed(lidos) if isinstance(d, dict) and str(d.get("item_id")) == item_id),
+        None,
+    )
+
+
 # ── As ferramentas desta execução ─────────────────────────────────────────
 
 

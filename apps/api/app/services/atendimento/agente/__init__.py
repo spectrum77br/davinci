@@ -53,9 +53,10 @@ import structlog
 
 from app.config import get_settings
 from app.redis_client import redis
-from app.services.atendimento import agente_config, constantes, ia
+from app.services.atendimento import agente_config, constantes, ficha_loja, ia
 from app.services.atendimento.agente import (
     acao_pessoa,
+    catalogo,
     checagens,
     contexto,
     custo,
@@ -848,7 +849,212 @@ class Conferido:
     ja_tratado: bool = False
 
 
+def _segurou(c: Conferido, ctx: ContextoAgente) -> bool:
+    """A 1ª camada segurou (ou nada a responder)? No automático, a régua do corte da frase sem
+    lastro. No copiloto nada sai sozinho e a pergunta de produto sempre vai à pessoa: só o
+    bloqueio e a ação de pessoa contam, e ela vê a oferta no rascunho."""
+    f = c.final
+    if (
+        c.sem_resposta
+        or f is None
+        or not (f.texto or "").strip()
+        or f.status != constantes.RASCUNHO_PENDENTE
+        or bool(ctx.acoes_pessoa)
+    ):
+        return True
+    if ctx.modo != constantes.MODO_AUTO:
+        return False
+    return bool(f.precisa_humano) or bool(getattr(f, "sem_auto", None))
+
+
+# A leitura da oferta do recurso (a busca e até `MAX_FICHAS_DO_RECURSO` fichas, que podem ir à loja)
+# não come o prazo do verificador. Cooperativo como o do laço (nada cancela no meio): passou disso,
+# não abre outra ficha, e cada ida à loja já tem o tempo dela.
+PRAZO_DO_RECURSO_S = 8.0
+
+
+async def _ofertas_do_recurso(
+    ctx: ContextoAgente,
+    recurso: checagens.RecursoDaLoja,
+    tipo: str,
+    p: Proposta,
+    ids_da_conversa: set[str],
+    titulos: Sequence[str],
+    *,
+    base: BaseDoGerar,
+    conversa: AtendimentoConversa,
+) -> list[checagens.OfertaDoRecurso]:
+    """A busca e as fichas pelo caminho das ferramentas (ver `checagens.recurso_a_oferecer`), até
+    `MAX_OFERTAS_DO_RECURSO` anúncios que a ficha confirma, até `PRAZO_DO_RECURSO_S`. Levanta
+    como elas."""
+    limite = _relogio() + PRAZO_DO_RECURSO_S
+    buscas: list[dict] = []
+    for termo in recurso.termos:
+        buscas += await ferramentas.buscar_pelo_codigo(ctx, termo, base=base, conversa=conversa)
+    achados = checagens.achados_do_recurso(
+        recurso,
+        buscas,
+        tipo=tipo,
+        ids_da_conversa=ids_da_conversa,
+        texto=p.texto,
+        evidencias=p.evidencias,
+    )
+    loja = None if ctx.sem_ida_a_loja else ficha_loja.Busca(ctx.integration_id, ctx.canal_id)
+    ofertas: list[checagens.OfertaDoRecurso] = []
+    for achado in achados[: checagens.MAX_FICHAS_DO_RECURSO]:
+        if _relogio() >= limite:
+            break
+        item = str(achado["item_id"])
+        dado = await ferramentas.ver_pelo_codigo(ctx, item, base=base, conversa=conversa, loja=loja)
+        por_versao = checagens.ficha_confirma_o_recurso(recurso, dado, achado)
+        link = ctx.links_anuncio.get(item)
+        if por_versao is None or (link is not None and not link.get("url")):
+            # A ficha contradiz, ou diz que nada está à venda (`retirar_link`).
+            continue
+        if not por_versao and checagens.mesmo_modelo_da_conversa(achado, titulos):
+            continue
+        if link is None:
+            # Sem link (ML, TikTok): o cliente procura pelo nome, que tem de achar só quem tem.
+            codigos = checagens.modelos_do_nome(achado)
+            mesmos: list[dict] = []
+            for codigo in codigos:
+                mesmos += await ferramentas.buscar_pelo_codigo(
+                    ctx, codigo, base=base, conversa=conversa
+                )
+            if not checagens.nome_acha_so_quem_tem(recurso, achado, mesmos):
+                continue
+        ofertas.append(
+            checagens.OfertaDoRecurso(
+                item_id=item,
+                nome=checagens.nome_para_a_frase(achado.get("nome_curto")),
+                lacuna=catalogo.lacuna_do_link(link["codigo"]) if link else None,
+                por_versao=por_versao,
+                ids=(contexto.id_anuncio(item), contexto.id_ficha(item)),
+            )
+        )
+        if len(ofertas) >= checagens.MAX_OFERTAS_DO_RECURSO:
+            break
+    return ofertas
+
+
 async def conferir_proposta(
+    session: AsyncSession | None,
+    conversa: AtendimentoConversa,
+    gatilho: AtendimentoMensagem,
+    base: BaseDoGerar,
+    ctx: ContextoAgente,
+    p: Proposta,
+    pac: Any,
+    *,
+    forcar_conferencia: bool | None = None,
+) -> Conferido:
+    """A 1ª camada (`_conferir_a_proposta`) e, onde cabe, a oferta do recurso (o dono, 05/11/2026,
+    `checagens.recurso_a_oferecer`).
+
+    A oferta é monotônica. Só tenta quando o texto do modelo passou limpo, e o texto com a oferta
+    passa de novo pela 1ª camada inteira: se ela segurar, ou a leitura falhar, volta o resultado
+    do texto do modelo, com o `ctx` como estava. Assim ela não tira resposta certa nem passa
+    por cima de trava. Sem anúncio: o texto fica ("este não tem" é honesto).
+
+    A revisão de 05/11/2026: sem a oferta no caminho sem banco (`session` None, o re-gatilho
+    "determinístico, sem chave") e no replay. O catálogo lido seria o de hoje (sem `as_of`), a
+    `proposta` gravada perderia o texto do modelo e o eval não bateria com o ao vivo. Logo, o eval
+    não mede a oferta: quem mede é o `fatos.agente.recurso_oferecido` do que rodou de verdade."""
+    c = await _conferir_a_proposta(
+        session, conversa, gatilho, base, ctx, p, pac, forcar_conferencia=forcar_conferencia
+    )
+    ctx.recurso_oferecido = None
+    if session is None or ctx.modo_replay or ctx.sem_oferta_do_recurso or _segurou(c, ctx):
+        return c
+    if c.proposta.texto != p.texto or c.proposta.acao != saida.RESPONDER:
+        return c
+    try:
+        fichas = [*pac.fichas, *ctx.fichas_lidas]
+        titulos, ids_da_conversa = checagens.titulos_e_ids_da_conversa(fichas, ctx, base, conversa)
+        alvo = checagens.recurso_a_oferecer(
+            p,
+            textos_cliente=[*base.textos_rajada, *base.textos_cliente],
+            titulos=titulos,
+            ids_da_conversa=ids_da_conversa,
+            tem_pedido=checagens.tem_pedido_na_conversa(pac.pedido, base, conversa),
+            canal=conversa.canal,
+            postado=getattr(pac, "postado", None),
+            textos_cliente_antes=[
+                m.texto for m in base.recentes if m.autor == ia.AUTOR_CLIENTE and m.texto
+            ],
+            textos_da_loja=[m.texto for m in base.recentes if ia.resposta_da_loja(m)],
+        )
+    except Exception as e:  # noqa: BLE001 — a oferta nunca derruba a resposta
+        logger.warning("atendimento_agente_recurso_erro", err=type(e).__name__)
+        return c
+    if alvo is None:
+        return c
+    recurso, tipo = alvo
+    foto = _foto_do_ctx(ctx)
+    ferramentas_antes = ctx.estado_das_ferramentas()
+    consultas_antes = list(ctx.consultas)
+    fechou_antes = ctx.fechou_sem_ferramentas
+
+    def _fica_como_estava(porque: str) -> Conferido:
+        # A foto é rasa, e as ferramentas têm o estado delas (`estado_das_ferramentas`).
+        rastro = ctx.rastro  # o rastro fica: é o registro do que rodou
+        _voltar_o_ctx(ctx, foto)
+        ctx.voltar_ferramentas(ferramentas_antes)
+        ctx.rastro, ctx.consultas = rastro, consultas_antes
+        ctx.fechou_sem_ferramentas = fechou_antes
+        ctx.recurso_sem_oferta = {"recurso": recurso.chave, "porque": porque}
+        return c
+
+    try:
+        # A leitura pode ir à loja: a sessão do `_gerar` não fica "idle in transaction" nela.
+        if session is not None:
+            await _soltar_a_sessao(session, ctx)
+        ofertas = await _ofertas_do_recurso(
+            ctx, recurso, tipo, p, ids_da_conversa, titulos, base=base, conversa=conversa
+        )
+        com_oferta = (
+            checagens.proposta_com_o_recurso(
+                p,
+                recurso,
+                ofertas,
+                links=ctx.links_por_codigo(),
+                plataforma=conversa.plataforma,
+                canal=conversa.canal,
+            )
+            if ofertas
+            else None
+        )
+        if com_oferta is None:
+            return _fica_como_estava("sem_anuncio" if not ofertas else "nao_cabe")
+        p2, usadas = com_oferta
+        # A revisão de 05/11/2026: a frase fixa fala de OUTRO anúncio, e a evidência dela derrubaria
+        # a marca L1 da resposta, com avisos que não são dela (o verificador os lê). A marca e a
+        # conferência das variações são as do texto do modelo; o resto da camada roda no novo.
+        ctx.marca_do_texto_do_modelo = ctx.produto_pelo_anuncio
+        try:
+            c2 = await _conferir_a_proposta(
+                session,
+                conversa,
+                gatilho,
+                base,
+                ctx,
+                p2,
+                pac,
+                forcar_conferencia=forcar_conferencia,
+            )
+        finally:
+            ctx.marca_do_texto_do_modelo = None
+    except Exception as e:  # noqa: BLE001 — a leitura nunca derruba a resposta
+        logger.warning("atendimento_agente_recurso_erro", err=type(e).__name__)
+        return _fica_como_estava("erro")
+    if _segurou(c2, ctx):
+        return _fica_como_estava("a_1a_camada_segurou")
+    ctx.ferramentas_antes_do_recurso = ferramentas_antes
+    ctx.recurso_oferecido = {"recurso": recurso.chave, "anuncios": [o.item_id for o in usadas]}
+    return c2
+
+
+async def _conferir_a_proposta(
     session: AsyncSession | None,
     conversa: AtendimentoConversa,
     gatilho: AtendimentoMensagem,
@@ -1092,6 +1298,71 @@ def _voltar_o_ctx(ctx: ContextoAgente, foto: dict[str, Any]) -> None:
         setattr(ctx, k, v)
 
 
+async def _sem_a_oferta_do_recurso(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    gatilho: AtendimentoMensagem,
+    base: BaseDoGerar,
+    ctx: ContextoAgente,
+    p: Proposta,
+    pac: Any,
+    conf: Any,
+    *,
+    cliente: Any,
+    prazo: float,
+) -> tuple[Conferido, Any] | None:
+    """O dono (05/11/2026): o "não" do verificador ao texto com a oferta do recurso não pode levar
+    junto a resposta certa do modelo. O texto do modelo (`p`, com as ferramentas de antes da
+    oferta) passa de novo pelas duas camadas, e o veredito dele é o que vale, como se a oferta
+    nunca tivesse existido. Só no "não" de verdade: a falha do verificador fica como está, para
+    pessoa, sem gastar de novo. Nunca levanta (o que falhar deixa o "não", para pessoa)."""
+    antes = conf.registro or {}
+    if (
+        not ctx.recurso_oferecido
+        or ctx.modo_replay
+        or base.modo != constantes.MODO_AUTO
+        or antes.get("rodou") is not True
+        or antes.get("ok") is not False
+        or antes.get("falha")
+    ):
+        return None
+    oferta = dict(ctx.recurso_oferecido)
+    foto = _foto_do_ctx(ctx)
+    ferramentas_com_oferta = ctx.estado_das_ferramentas()
+    try:
+        ctx.sem_oferta_do_recurso = True
+        ctx.voltar_ferramentas(ctx.ferramentas_antes_do_recurso)
+        c = await conferir_proposta(session, conversa, gatilho, base, ctx, p, pac)
+        if c.final is None or c.sem_resposta:
+            raise ValueError("sem o texto do modelo")
+        conf_do_modelo = await verificador.no_rascunho(
+            session,
+            conversa,
+            gatilho,
+            base,
+            ctx,
+            c.proposta,
+            c.final,
+            cliente=cliente,
+            prazo_s=_prazo_do_verificador(prazo, forcar=base.forcar),
+            pediu_evidencia=pac.pediu_evidencia,
+            checagens_feitas=c.codigos,
+            soltar_sessao=lambda: _soltar_a_sessao(session, ctx),
+        )
+    except Exception as e:  # noqa: BLE001 — o "não" de antes fica (para pessoa)
+        _voltar_o_ctx(ctx, foto)
+        ctx.voltar_ferramentas(ferramentas_com_oferta)
+        logger.warning("atendimento_agente_recurso_erro", err=type(e).__name__)
+        return None
+    ctx.recurso_sem_oferta = {
+        **oferta,
+        "porque": "verificador",
+        "problemas": list(antes.get("problemas") or [])[:5],
+        "afirma_sem_lastro": list(antes.get("afirma_sem_lastro") or [])[:3],
+    }
+    return c, conf_do_modelo
+
+
 async def _sem_a_frase_sem_lastro(
     session: AsyncSession,
     conversa: AtendimentoConversa,
@@ -1141,6 +1412,9 @@ async def _sem_a_frase_sem_lastro(
     pos_envio_antes = set(ctx.acoes_pos_envio)
     try:
         p2 = p.model_copy(update={"texto": resto})
+        # A revisão de 05/11/2026: o resto não ganha oferta. O "não" do verificador a ela levaria
+        # o resto junto, porque o retorno ao texto do modelo não roda aqui (a foto volta a marca).
+        ctx.sem_oferta_do_recurso = True
         c2 = await conferir_proposta(session, conversa, gatilho, base, ctx, p2, pac)
         final2 = c2.final
         if (
@@ -1425,6 +1699,24 @@ async def _responder(
         checagens_feitas=codigos,
         soltar_sessao=lambda: _soltar_a_sessao(session, ctx),
     )
+    # O dono (05/11/2026): o "não" ao texto com a oferta do recurso: vale o texto do modelo.
+    custo_da_oferta = 0.0
+    sem_oferta = await _sem_a_oferta_do_recurso(
+        session,
+        conversa,
+        gatilho,
+        base,
+        ctx,
+        p_do_modelo,
+        pac,
+        conf,
+        cliente=cliente,
+        prazo=prazo,
+    )
+    if sem_oferta is not None:
+        custo_da_oferta = conf.custo_usd
+        c, conf = sem_oferta
+        p, final, codigos = c.proposta, c.final, c.codigos
     # v17 (an0311, 03/11/2026): o "não" que é SÓ uma frase sem lastro — o resto, se ainda
     # responde, passa de novo pelas duas camadas e sai sem a frase (`_sem_a_frase_sem_lastro`).
     corte = await _sem_a_frase_sem_lastro(
@@ -1475,7 +1767,7 @@ async def _responder(
             tokens_entrada=ctx.uso.tokens_entrada,
             tokens_saida=ctx.uso.saida,
             # O laço + o verificador (o uso dele fica à parte, no registro) + o do corte.
-            custo_usd=ctx.uso.custo_usd + custo_do_verificador + custo_do_corte,
+            custo_usd=ctx.uso.custo_usd + custo_do_verificador + custo_do_corte + custo_da_oferta,
             proposta=p,
             conferida=final,
         ),

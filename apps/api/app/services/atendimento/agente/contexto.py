@@ -571,6 +571,16 @@ class ContextoAgente:
     # que o código pôs no texto (`fatos.agente.links_anuncio`: o `enviar` aceita só estas).
     links_anuncio: dict[str, dict] = field(default_factory=dict)
     links_usados: list[str] = field(default_factory=list)
+    # O dono (05/11/2026), `checagens.recurso_a_oferecer`: a oferta que o CÓDIGO pôs no texto
+    # ({"recurso", "anuncios"}, vai ao `fatos.agente` para medir), o que ele tentou e não pôs
+    # ({"recurso", "porque"}), a marca de não tentar de novo e as ferramentas de antes dela (o
+    # verificador recusou o texto com a oferta: o do modelo volta sem a ficha do outro anúncio).
+    recurso_oferecido: dict | None = None
+    recurso_sem_oferta: dict | None = None
+    sem_oferta_do_recurso: bool = False
+    ferramentas_antes_do_recurso: tuple | None = None
+    # Só durante a 2ª passada da oferta: a marca L1 do texto do modelo (`liberacao_da_proposta`).
+    marca_do_texto_do_modelo: bool | None = None
     # Revisão do fechamento (23/10/2026): os anúncios que o PACOTE aceitou (o da conversa,
     # os cartões desta loja, os itens do pedido, as fichas), antes das ferramentas — o
     # "da_conversa" da busca no catálogo (o `ver_anuncio` de outro anúncio da loja também
@@ -1055,6 +1065,11 @@ class ContextoAgente:
         if self.links_usados:
             # D3 do dono (04/11/2026): só quando há (o registro de antes não muda).
             extra["links_anuncio"] = list(self.links_usados)
+        if self.recurso_oferecido:
+            # O dono (05/11/2026): só quando há, como o resto.
+            extra["recurso_oferecido"] = dict(self.recurso_oferecido)
+        if self.recurso_sem_oferta:
+            extra["recurso_sem_oferta"] = dict(self.recurso_sem_oferta)
         return {
             **extra,
             "versao": constantes.PROMPT_VERSAO_AGENTE,
