@@ -44,10 +44,10 @@ const PLATAFORMA_TABS = [
   { key: 'flex', label: 'Flex' },
 ] as const
 type PlataformaTab = (typeof PLATAFORMA_TABS)[number]['key']
-// Quem vê o Flex (`flex_usuarios` no .env, 05/10/2026: só heisenberg e
-// thorfinn por enquanto). /api/flex/acesso responde 200 só para eles; para os
-// outros a aba Flex não aparece e o selo/aviso "Flex" some dos pedidos (a API
-// da Logística também já manda a linha sem o tipo de envio).
+// Quem vê o Flex: só admin (05/11/2026; antes a lista `flex_usuarios` do .env).
+// /api/flex/acesso responde 200 só para eles; para os outros a aba Flex não
+// aparece e o selo/aviso "Flex" some dos pedidos (a API da Logística também já
+// manda a linha sem o tipo de envio).
 const podeVerFlex = ref(false)
 // De onde o motoboy do Flex sai (aba Flex › Local de saída — editável por
 // admin; São Bernardo do Campo / .sp de fábrica): os textos seguem o local.
