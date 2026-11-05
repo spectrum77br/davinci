@@ -5065,12 +5065,12 @@ watch(department, async () => {
           </thead>
           <tbody>
             <tr v-if="productsLoading && !products.length">
-              <td colSpan="18" class="text-center py-6 text-muted-foreground">
+              <td colSpan="999" class="text-center py-6 text-muted-foreground">
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
             <tr v-else-if="!productsCurrent.length && !showAddProd">
-              <td colSpan="18" class="text-center py-6 text-muted-foreground">
+              <td colSpan="999" class="text-center py-6 text-muted-foreground">
                 {{ filtroMidias || searchProdutos.trim() ? 'Nenhum produto com esse filtro.' : 'Nenhum produto neste departamento.' }}
               </td>
             </tr>
