@@ -766,3 +766,12 @@ Caso kfa (ml) 305862: "juro que não entendo esse raio-x", "não existe pedido M
 4. **A coluna soma de cima a baixo.** Só no ML: "Estornos e mediações" conta toda linha que não é liberação, frete nem reserva, em qualquer horário, com créditos e débitos, e fica abaixo do Líquido: Líquido + estornos = Ficou com a loja (306037, 305862).
 
 Em aberto: o frete da troca não vem na leitura do pedido novo (306420: frete 0 na Margem e no Bling, 67,88 na tela do ML) e a data prevista diverge (26/11 × 11/11). Fica como diferença visível em 11/11.
+
+## 42. Quadro "Dinheiro nas plataformas": saldo da Amazon como ela informa (05/11)
+
+O saldo sintético parte de zero no início da loja, então o quadro não conhecia o que a Amazon já guardava antes de 24/10: faltavam R$ 38.652,04 na KIA e R$ 8.026,56 na Poofy. Conferido com o Seller Central no mesmo horário:
+
+- **Na conta** = soma dos grupos de repasse abertos (`financialEventGroups`, paginado) = "Fundos disponíveis". KIA 5.762,68 e Poofy 6.250,89, iguais à tela. A primeira página da janela de 120 dias não trazia o grupo do Boleto da Poofy.
+- **Preso** = transações `DEFERRED` = lista "Transações adiadas". KIA 90.610,63 igual à tela; Poofy 116 linhas e 26.651,39 iguais à lista. O cartão do Painel de pagamentos da Poofy mostrou 27.252,39: R$ 601,00 a mais que a própria lista, sem explicação na tela.
+
+`ler_saldo_da_amazon` roda no fim de `run_amazon_sync` e guarda em `ConciliacaoSync.detalhe.saldo_amazon`. Se a Amazon negar, o quadro segue na soma e diz isso na loja; a leitura das linhas não falha. A prova dos nove do Extrato do dia continua na soma encadeada, agora com o nome "Soma do painel". KFA segue por arquivo, sem saldo.

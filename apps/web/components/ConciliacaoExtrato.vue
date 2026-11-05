@@ -14,7 +14,7 @@ const rodape = computed(() =>
   props.plataforma === 'tiktok'
     ? { inicial: 'Início do extrato', creditos: 'Pedidos liquidados', debitos: 'Repasse pro banco', final: 'Pedidos − repasse', informado: 'Tem que dar', diferenca: 'Diferença' }
     : props.plataforma === 'amazon'
-      ? { inicial: 'Saldo na Amazon (início do dia)', creditos: 'Lançamentos e ajustes', debitos: 'Estornos, tarifas e repasses', final: 'Saldo na Amazon (fim do dia)', informado: 'Saldo encadeado', diferenca: 'Diferença' }
+      ? { inicial: 'Soma do painel (início do dia)', creditos: 'Lançamentos e ajustes', debitos: 'Estornos, tarifas e repasses', final: 'Soma do painel (fim do dia)', informado: 'Saldo encadeado', diferenca: 'Diferença' }
       : { inicial: 'Saldo inicial', creditos: 'Entradas (créditos)', debitos: 'Saídas (débitos)', final: 'Saldo final calculado', informado: `Saldo informado pelo ${quemInforma.value}`, diferenca: 'Diferença' },
 )
 const notaRodape = computed(() =>

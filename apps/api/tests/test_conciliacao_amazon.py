@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from httpx import Response
 from sqlalchemy import select
 
@@ -22,6 +23,7 @@ from app.models.integration import IntegrationPlatform
 from app.security.cipher import encrypt_json
 from app.services.conciliacao_amazon import (
     BRT,
+    ROTA_GRUPOS,
     ROTA_TRANSACOES,
     conta_amazon_de_quebras,
     quebras_da_transacao,
@@ -136,8 +138,18 @@ class _AmazonFalsa:
         self.por_pagina = por_pagina
         self.chamadas: list[dict] = []
         self.marketplace_id = "A2Q3Y263D00KWC"
+        self.grupos: list[list[dict]] | None = None  # páginas; None = a Amazon nega
 
     async def _request(self, method: str, path: str, *, params=None, json=None):
+        if path == ROTA_GRUPOS:
+            if self.grupos is None:
+                return Response(403, json={"errors": [{"code": "Unauthorized"}]})
+            i = int(params.get("NextToken") or 0)
+            prox = str(i + 1) if i + 1 < len(self.grupos) else None
+            return Response(
+                200,
+                json={"payload": {"FinancialEventGroupList": self.grupos[i], "NextToken": prox}},
+            )
         assert method == "GET" and path == ROTA_TRANSACOES
         self.chamadas.append(params or {})
         de = datetime.fromisoformat(params["postedAfter"])
@@ -145,6 +157,7 @@ class _AmazonFalsa:
             t
             for t in self.transacoes
             if datetime.fromisoformat(t["postedDate"].replace("Z", "+00:00")) >= de
+            and params.get("transactionStatus") in (None, t["transactionStatus"])
         ]
         ini = int(params.get("nextToken") or 0)
         pagina = lista[ini : ini + self.por_pagina]
@@ -1528,3 +1541,84 @@ async def test_linha_sem_pedido_da_kfa_reconhece_a_identidade_do_215f0494_e_tira
     assert r2["migrados"] == 1 and r2["inseridos"] == 0 and r2["duplicatas_apagadas"] == 0
     movs = (await db.execute(select(ConciliacaoMovimento))).scalars().all()
     assert [m.id_externo for m in movs] == [novo_id]
+
+
+# --- 05/11: o saldo como a Amazon informa, não a soma desde o início do painel ----------
+
+
+def _grupo(status: str, total: str) -> dict:
+    return {
+        "ProcessingStatus": status,
+        "OriginalTotal": {"CurrencyCode": "BRL", "CurrencyAmount": float(total)},
+    }
+
+
+async def _dinheiro_kia(client) -> dict:
+    corpo = (await client.get("/api/conciliacao/resumo")).json()
+    return next(x for x in corpo["lojas"] if x["conta"] == "kia")["dinheiro"]
+
+
+async def test_quadro_usa_o_saldo_que_a_amazon_informa(db, make_user, auth_as, client):
+    """KIA e Poofy em 05/11: o painel somava desde 24/10 e faltavam 38.652,04 e 8.026,56.
+    O retido de antes do início do painel também conta: quem sabe é a Amazon."""
+    loja = await _loja_amazon(db, make_user)
+    antiga = _tx("tx-antiga", "Shipment", "DEFERRED", "2026-09-20T12:00:00Z", "90000.00")
+    cliente = _AmazonFalsa([_venda_proprio(), _venda_dba(), _repasse(), antiga])
+    # o grupo do Boleto da Poofy só veio na 2ª página; grupo fechado não é saldo
+    cliente.grupos = [
+        [_grupo("Open", "2143.36"), _grupo("Closed", "1523.43")],
+        [_grupo("Open", "3619.32"), _grupo("Open", "0")],
+    ]
+    r = await run_amazon_sync(db, loja, cliente, agora=AGORA)
+    await db.commit()
+    assert not r["erros"]
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    d = await _dinheiro_kia(client)
+    assert d["na_conta"] == 5762.68 and d["nota"] is None
+    assert d["preso"] == 92356.21 and d["a_liberar"] == 92356.21  # 90.000,00 + 2.356,21
+    assert d["a_liberar_pedidos"] == 2 and d["saldo_em"] == AGORA.isoformat()
+
+
+async def test_sem_saldo_da_amazon_o_quadro_avisa_que_e_soma(db, make_user, auth_as, client):
+    """A Amazon negou: fica a soma do painel, dizendo que é soma, e a leitura das linhas
+    não falha por isso."""
+    loja = await _loja_amazon(db, make_user)
+    cliente = _AmazonFalsa([_venda_proprio(), _venda_dba(), _repasse()])
+    r = await run_amazon_sync(db, loja, cliente, agora=AGORA)
+    await db.commit()
+    assert not r["erros"] and r["lidas"] == 3
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    d = await _dinheiro_kia(client)
+    assert d["preso"] == 2356.21 and d["na_conta"] == 678.0
+    assert "soma do painel" in d["nota"]
+
+
+async def test_leitura_que_falha_depois_nao_apaga_o_ultimo_saldo_informado(
+    db, make_user, auth_as, client
+):
+    loja = await _loja_amazon(db, make_user)
+    cliente = _AmazonFalsa([_venda_proprio(), _venda_dba(), _repasse()])
+    cliente.grupos = [[_grupo("Open", "100.00")]]
+    await run_amazon_sync(db, loja, cliente, agora=AGORA)
+    await db.commit()
+    cliente.grupos = None
+    await run_amazon_sync(db, loja, cliente, agora=AGORA + timedelta(days=1))
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+    d = await _dinheiro_kia(client)
+    assert d["na_conta"] == 100.0 and d["saldo_em"] == AGORA.isoformat()
+
+
+async def test_retido_cortado_nao_vira_saldo(monkeypatch):
+    """Lista pela metade daria um retido menor sem ninguém ver."""
+    from app.services import conciliacao_amazon as ca
+
+    async def _cortada(*_a, **_k):
+        return [], True
+
+    cliente = _AmazonFalsa([])
+    cliente.grupos = [[_grupo("Open", "1.00")]]
+    monkeypatch.setattr(ca, "ler_transacoes", _cortada)
+    with pytest.raises(RuntimeError, match="cortada"):
+        await ca.ler_saldo_da_amazon(cliente, AGORA)
+

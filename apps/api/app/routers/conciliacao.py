@@ -710,7 +710,12 @@ from sqlalchemy import case as sa_case  # noqa: E402
 from sqlalchemy import func, literal_column, or_  # noqa: E402
 
 from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoPedido  # noqa: E402
-from app.models.conciliacao import ORIGEM_EXTRATO, ORIGEM_TIKTOK, ORIGENS_EXTRATO  # noqa: E402
+from app.models.conciliacao import (  # noqa: E402
+    ORIGEM_AMAZON,
+    ORIGEM_EXTRATO,
+    ORIGEM_TIKTOK,
+    ORIGENS_EXTRATO,
+)
 from app.models.integration import IntegrationPlatform  # noqa: E402
 from app.services.conciliacao_tiktok import AGUARDANDO, aguardando_repasse  # noqa: E402
 
@@ -3639,6 +3644,27 @@ async def _ajustes_anteriores(
     return float(valor or 0), int(n or 0)
 
 
+async def _saldo_real_amazon(
+    session: AsyncSession, loja: ConciliacaoLoja
+) -> dict[str, Any] | None:
+    """O último saldo que a Amazon informou na leitura do extrato."""
+    sync = ConciliacaoSync
+    detalhe = (
+        await session.execute(
+            select(sync.detalhe)
+            .where(
+                sync.integration_id == loja.integration_id,
+                sync.origem == ORIGEM_AMAZON,
+                sync.status == "lido",
+                sync.detalhe["saldo_amazon"].has_key("disponivel"),
+            )
+            .order_by(sync.lido_em.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return detalhe["saldo_amazon"] if detalhe else None
+
+
 async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dict[str, Any]:
     """Onde o dinheiro está agora (bloco "Dinheiro nas plataformas", 15/10): na conta
     (último saldo informado pela plataforma), preso a liberar (líquido previsto das
@@ -3720,8 +3746,17 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
             )
         ).one()
         preso = max(_num(preso_v or 0) or 0.0, 0.0)
-        if na_conta is not None:
+        real = await _saldo_real_amazon(session, loja)
+        if real is not None:
+            # 05/11: como a Amazon informa. O saldo somado aqui parte de zero em 24/10 e
+            # não conhece o que ela já guardava antes disso
+            na_conta = float(real["disponivel"])
+            preso = max(float(real["retido"]), 0.0)
+            n_preso = real["retido_linhas"]
+            saldo_em = real["lido_em"]
+        elif na_conta is not None:
             na_conta = round(na_conta - preso, 2)
+            nota = "soma do painel desde o início: a Amazon não informou o saldo"
         # pedido cujo dinheiro está preso já entra pelo "preso": não soma de novo pela
         # venda (16/10 à noite: kia mostrava 151 mil, o certo ~75 mil)
         presos_sq = select(mov.pedido_bling).where(
