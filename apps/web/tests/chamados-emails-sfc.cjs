@@ -45,6 +45,11 @@ function requerer(nome) {
   if (nome === 'vue') return VueSemInstancia
   if (nome === 'lucide-vue-next') return new Proxy({}, { get: () => icone })
   if (nome === 'reka-ui') return new Proxy({}, { get: () => casca })
+  if (nome.startsWith('~/lib/')) {
+    const mod = { exports: {} }
+    new Function('require', 'module', 'exports', transpile(ler(`../lib/${nome.slice(6)}.ts`)))(require, mod, mod.exports)
+    return mod.exports
+  }
   return require(nome)
 }
 const AUTO = ['ref', 'computed', 'reactive', 'watch', 'nextTick', 'useApi', 'useToasts', 'useAuthStore', 'useCan', 'useRoute']

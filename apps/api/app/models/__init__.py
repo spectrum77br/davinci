@@ -50,6 +50,7 @@ from app.models.chamado import (
     ChamadoLeitor,
     ChamadoMensagem,
     ChamadoPedido,
+    ChamadoRevisao,
 )
 from app.models.claude_conector import ClaudeConector
 from app.models.company import Cadastro, CadastroStore, Company, Store
@@ -541,6 +542,7 @@ __all__ = [
     "ChamadoIaRegra",
     "ChamadoLeitor",
     "ChamadoMensagem",
+    "ChamadoRevisao",
     "ChamadoPedido",
     "Refund",
     "Segment",

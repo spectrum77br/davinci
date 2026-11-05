@@ -116,6 +116,8 @@ from app.schemas.chamados import (
     JuridicoIn,
     JuridicoOut,
     ResolverIn,
+    RevisaoIn,
+    RevisaoOut,
     SituacoesOut,
 )
 from app.services import chamados as svc
@@ -125,6 +127,7 @@ from app.services import (
     chamados_ia_aviso,
     chamados_juridico,
     chamados_leitura,
+    chamados_revisao,
     devolucao_exclusao,
 )
 from app.services.devolution_delete import (
@@ -304,6 +307,7 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
         for u in (await session.execute(select(User).where(User.id.in_(quem_ids)))).scalars():
             nomes[u.id] = u.name or u.email
 
+    hoje = chamados_revisao.hoje_sp()
     out: list[ChamadoOut] = []
     for r in rows:
         msgs = mensagens_do_caso(r)
@@ -355,6 +359,12 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
                 if r.status_plataforma == svc.STATUS_ENCERRADO
                 else None
             ),
+        )
+        o.revisao_estado = chamados_revisao.estado_da_revisao(
+            r,
+            ultima_resposta_at=o.ultima_resposta_at,
+            ultima_resposta_direcao=o.ultima_resposta_direcao,
+            hoje=hoje,
         )
         o.auto_proximo_envio_at = svc.auto_proximo_envio(r)
         o.anexos_auto = anexos_auto.get(r.id, [])
@@ -669,6 +679,17 @@ async def list_chamados(
     if cond_plataforma is not None:
         q_contas = q_contas.where(cond_plataforma)
     contas = [c for c in (await session.execute(q_contas)).scalars() if c]
+    # Abas de plataforma (05/11/2026): os mesmos filtros, menos o de plataforma.
+    plataforma_totais: dict[str, int] = {}
+    nome_plataforma = func.lower(func.trim(func.coalesce(Chamado.plataforma, "")))
+    for p, n in await session.execute(
+        select(nome_plataforma, func.count())
+        .where(*[c for c in conds if c is not cond_plataforma])
+        .group_by(nome_plataforma)
+    ):
+        if p:
+            canonica = svc.plataforma_canonica(p)
+            plataforma_totais[canonica] = plataforma_totais.get(canonica, 0) + int(n)
     return ChamadoPage(
         items=await _to_out(session, rows),
         total=total,
@@ -676,6 +697,7 @@ async def list_chamados(
         offset=offset,
         plataformas=plataformas,
         contas=contas,
+        plataforma_totais=plataforma_totais,
     )
 
 
@@ -1516,6 +1538,57 @@ async def reler_na_plataforma(
             422, detail={"code": r.get("erro") or "chamado_sem_api", "plataforma": r.get("plataforma")}
         )
     return await _one_out(session, ch)
+
+
+@router.post("/{chamado_id}/revisao", response_model=RevisaoOut)
+async def marcar_revisao(
+    chamado_id: UUID,
+    body: RevisaoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+) -> RevisaoOut:
+    """05/11/2026 (Vinicius): coluna Revisão — Conferido e Revisar valem no dia,
+    Fixo até a data. A marca vale pro CASO: as linhas abertas irmãs (mesma consulta
+    do ML) levam junto, senão ele teria de marcar pedido por pedido. Concluído não
+    entra na revisão do dia: 422 `revisao_chamado_concluido`."""
+    ch = await _get_da_equipe(session, user, chamado_id)
+    if ch.resolvido:
+        raise HTTPException(422, detail={"code": "revisao_chamado_concluido"})
+    hoje = chamados_revisao.hoje_sp()
+    if body.tipo == chamados_revisao.FIXO:
+        if body.ate is None or body.ate <= hoje:
+            raise HTTPException(422, detail={"code": "revisao_data_invalida"})
+        if not body.motivo:
+            raise HTTPException(422, detail={"code": "revisao_motivo_vazio"})
+    linhas = [ch]
+    ids = await _ids_do_caso(session, ch)
+    if len(ids) > 1:
+        linhas += list(
+            (
+                await session.execute(
+                    select(Chamado)
+                    .where(Chamado.id.in_(ids), Chamado.id != ch.id, Chamado.resolvido.is_(False))
+                    .order_by(Chamado.created_at)
+                )
+            ).scalars()
+        )
+    for linha in linhas:
+        session.add(
+            chamados_revisao.marcar(
+                linha,
+                tipo=body.tipo,
+                ate=body.ate,
+                motivo=body.motivo,
+                autor_nome=_autor(user),
+                autor_id=user.id,
+                hoje=hoje,
+            )
+        )
+    await session.commit()
+    for linha in linhas:
+        await session.refresh(linha)
+    logger.info("chamado_revisao", chamado_id=str(ch.id), tipo=body.tipo, linhas=len(linhas))
+    return RevisaoOut(itens=await _to_out(session, linhas))
 
 
 @router.post("/{chamado_id}/instrucao", response_model=ChamadoOut)

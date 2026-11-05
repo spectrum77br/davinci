@@ -1,20 +1,16 @@
 <script setup lang="ts">
 import {
   AlertCircle,
-  ArrowLeftRight,
   Bot,
   Check,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
   ExternalLink,
-  Gavel,
   History,
-  Hourglass,
   ImagePlus,
   Loader2,
   Mail,
-  MessagesSquare,
   Paperclip,
   Plus,
   RotateCcw,
@@ -25,10 +21,12 @@ import {
   ThumbsUp,
   Trash2,
   Undo2,
-  UserRound,
   X,
 } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
+import { REVISAO_DOT, REVISAO_FILTROS, REVISAO_ORDEM, REVISAO_PRECISA_VER, diaMes, passaNoFiltroRevisao, rotuloRevisao } from '~/lib/chamadosRevisao'
+import type { RevisaoCampos, RevisaoEstado, RevisaoMarca } from '~/lib/chamadosRevisao'
+import { hojeISO } from '~/lib/conciliacao'
 
 // 30/09/2026: a tela virou componente pra aba Jurídico morar também em
 // Ouvidoria › Denúncia (Vinicius: "tira o jurídico do chamado e coloca nesse
@@ -201,8 +199,8 @@ type ChamadoRow = {
   ultima_resposta_direcao: 'enviada' | 'recebida' | null
   ultima_resposta_autor: string | null
   anexos_auto: Anexo[]
-}
-type Page = { items: ChamadoRow[]; total: number; limit: number; offset: number; plataformas: string[]; contas: string[] }
+} & RevisaoCampos
+type Page = { items: ChamadoRow[]; total: number; limit: number; offset: number; plataformas: string[]; contas: string[]; plataforma_totais?: Record<string, number> }
 type Lookup = {
   data: string | null
   pedido_bling: string | null
@@ -294,6 +292,13 @@ const contaFilter = ref<'all' | string>('all')
 const mostrar = ref<'abertos' | 'resolvidos' | 'todos'>('abertos')
 // Filtro pela coluna Status — na página carregada (o status é calculado na listagem).
 const statusFilter = ref<'all' | string>('all')
+// 05/11/2026: coluna Revisão. Filtro também na página carregada; `ordemRevisao` é a
+// posição de cada linha calculada no carregamento — marcar não faz a linha pular.
+const revisaoFilter = ref<'all' | string>('all')
+const ordemRevisao = ref(new Map<string, number>())
+const plataformaTotais = ref<Record<string, number>>({})
+// Raio-X: o chamado aberto no painel da direita (por id, sobrevive ao replaceRow).
+const raioId = ref<string | null>(null)
 // Aba Jurídico (Eduardo 04/09): tudo que foi encaminhado ao jurídico, aberto ou resolvido.
 // 24/09 (Vinicius): aba IA de Chamado — o cérebro ganha nome e lugar (liga/desliga,
 // manual "quando acontecer isso, faça isso", o que ela decidiu). `?tab=ia` abre nela.
@@ -324,16 +329,17 @@ const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)
 // páginas); os grupos juntam os status da coluna Status por quem está com a
 // bola e são contados na página carregada — como o filtro de status, porque o
 // status é calculado na listagem. Clicar num card filtra por ele.
-type ResumoGrupo = { key: string; label: string; tone: 'default' | 'warning' | 'danger'; icon: any; hint: string }
+type ResumoGrupo = { key: string; label: string; cor: string; hint: string }
 // 19/09: um card por status (a chave É o código de `status_aba`). "Concluído" só
 // aparece quando o select "mostrar" traz os concluídos — em "abertos" seria sempre 0.
+// 05/11: o número leva a cor do chip do Status.
 const RESUMO_GRUPOS: ResumoGrupo[] = [
-  { key: 'analise_humano', label: 'Análise Humano', tone: 'danger', icon: UserRound, hint: 'o robô não conseguiu — precisa de gente' },
-  { key: 'analise_robo', label: 'Análise Robô', tone: 'default', icon: Bot, hint: 'a IA de Chamado ou o robô têm trabalho aqui' },
-  { key: 'aguard_plataforma', label: 'Aguard. Plataforma', tone: 'default', icon: Hourglass, hint: 'a bola está com a plataforma' },
-  { key: 'encerrado', label: 'Encerrado', tone: 'warning', icon: Gavel, hint: 'a plataforma encerrou — falta fechar com lucro/prejuízo' },
+  { key: 'analise_humano', label: 'Análise Humano', cor: 'text-red-600 dark:text-red-400', hint: 'o robô não conseguiu — precisa de gente' },
+  { key: 'analise_robo', label: 'Análise Robô', cor: 'text-indigo-700 dark:text-indigo-300', hint: 'a IA de Chamado ou o robô têm trabalho aqui' },
+  { key: 'aguard_plataforma', label: 'Aguard. Plataforma', cor: 'text-sky-700 dark:text-sky-300', hint: 'a bola está com a plataforma' },
+  { key: 'encerrado', label: 'Encerrado', cor: 'text-amber-700 dark:text-amber-300', hint: 'a plataforma encerrou — falta fechar com lucro/prejuízo' },
 ]
-const RESUMO_CONCLUIDO: ResumoGrupo = { key: 'concluido', label: 'Concluído', tone: 'default', icon: CheckCircle2, hint: 'fechado por uma pessoa' }
+const RESUMO_CONCLUIDO: ResumoGrupo = { key: 'concluido', label: 'Concluído', cor: '', hint: 'fechado por uma pessoa' }
 // Mais de uma página: os grupos e a divisão por origem só enxergam a página carregada.
 const resumoParcial = computed(() => items.value.length < total.value)
 const resumoTotalLabel = computed(() => mostrar.value === 'abertos' ? 'Chamados abertos' : mostrar.value === 'resolvidos' ? 'Chamados concluídos' : 'Chamados')
@@ -357,9 +363,108 @@ function filtrarGrupo(key: string) {
 // Filtro da coluna Status (um código; o card do resumo usa o mesmo filtro).
 const visiveis = computed(() => {
   const f = statusFilter.value
-  if (f === 'all') return items.value
-  return items.value.filter((r) => r.status_aba === f)
+  const linhas = items.value.filter((r) => (f === 'all' || r.status_aba === f) && passaNoFiltroRevisao(r.revisao_estado, revisaoFilter.value))
+  if (mostrar.value !== 'abertos') return linhas
+  const ordem = ordemRevisao.value
+  return [...linhas].sort((a, b) => (ordem.get(a.id) ?? 1) - (ordem.get(b.id) ?? 1))
 })
+
+// ----------------------------------------------------------------- abas de plataforma
+const NOME_ABA: Record<string, string> = { 'mercado livre': 'Mercado Livre', shopee: 'Shopee', tiktok: 'TikTok', amazon: 'Amazon' }
+const ORDEM_ABA = ['mercado livre', 'shopee', 'tiktok', 'amazon']
+const plataformaAbas = computed(() => {
+  const totais = plataformaTotais.value
+  const posicao = (p: string) => { const i = ORDEM_ABA.indexOf(p); return i < 0 ? ORDEM_ABA.length : i }
+  return plataformas.value
+    .filter((p) => (totais[p] || 0) > 0 || p === plataformaFilter.value)
+    .map((p) => ({ value: p, label: NOME_ABA[p] || p, n: totais[p] || 0 }))
+    .sort((a, b) => posicao(a.value) - posicao(b.value))
+})
+const plataformaTotal = computed(() => Object.values(plataformaTotais.value).reduce((s, n) => s + n, 0))
+
+// ----------------------------------------------------------------- revisão do dia
+const hojeRotulo = computed(() => diaMes(hojeISO()))
+const revisaoResumo = computed(() => {
+  const n = (estados: RevisaoEstado[]) => items.value.filter((r) => estados.includes(r.revisao_estado)).length
+  const revisar = n(['revisar'])
+  const conferido = n(['conferido'])
+  const fixo = n(['fixo'])
+  return { prazos: n(REVISAO_PRECISA_VER), falta: n(['falta']), revisar, conferido, fixo, feitos: revisar + conferido + fixo, total: items.value.length }
+})
+const revisaoPct = computed(() => (revisaoResumo.value.total ? (revisaoResumo.value.feitos / revisaoResumo.value.total) * 100 : 0))
+const revisaoPills = computed(() => {
+  const r = revisaoResumo.value
+  return [
+    { key: 'prazos', n: r.prazos, label: r.prazos === 1 ? 'prazo pra ver' : 'prazos pra ver', dot: REVISAO_DOT.prazo_vencido },
+    { key: 'falta', n: r.falta, label: 'falta revisar', dot: REVISAO_DOT.falta },
+    { key: 'revisar', n: r.revisar, label: 'revisar', dot: REVISAO_DOT.revisar },
+    { key: 'conferido', n: r.conferido, label: 'conferido', dot: REVISAO_DOT.conferido },
+    { key: 'fixo', n: r.fixo, label: 'fixo com data', dot: REVISAO_DOT.fixo },
+  ]
+})
+function filtrarRevisao(key: string) {
+  revisaoFilter.value = revisaoFilter.value === key ? 'all' : key
+}
+
+// Painel "Onde agir hoje": os prazos um a um (Abrir), o resto em grupos (Ver).
+type AgirItem = { chave: string; titulo: string; detalhe: string; dot: string; acao: string; row?: ChamadoRow; status?: string; revisao?: string }
+const TITULO_PRAZO: Partial<Record<RevisaoEstado, string>> = { prazo_hoje: 'Prazo chegou hoje', respondeu: 'Plataforma respondeu' }
+const agirItens = computed<AgirItem[]>(() => {
+  const prazos = items.value
+    .filter((r) => REVISAO_PRECISA_VER.includes(r.revisao_estado))
+    .sort((a, b) => REVISAO_PRECISA_VER.indexOf(a.revisao_estado) - REVISAO_PRECISA_VER.indexOf(b.revisao_estado) || (b.revisao_ate || '').localeCompare(a.revisao_ate || ''))
+    .map((r) => ({
+      chave: r.id,
+      titulo: `${TITULO_PRAZO[r.revisao_estado] || `Prazo venceu ${diaMes(r.revisao_ate)}`} · ${r.pedido_bling || r.pedido_marketplace || 'chamado'}`,
+      detalhe: [r.conta, r.revisao_motivo].filter(Boolean).join(' · '),
+      dot: REVISAO_DOT.prazo_vencido,
+      acao: 'Abrir',
+      row: r,
+    }))
+  const faltam = (status: string) => items.value.filter((r) => r.revisao_estado === 'falta' && r.status_aba === status).length
+  const grupos: AgirItem[] = [
+    { chave: 'analise_humano', titulo: `Análise Humano · ${faltam('analise_humano')} sem revisão hoje`, detalhe: 'o robô não conseguiu — precisa de gente', dot: 'bg-red-600', acao: 'Ver', status: 'analise_humano', revisao: 'falta' },
+    { chave: 'encerrado', titulo: `Encerrado · ${faltam('encerrado')} sem revisão hoje`, detalhe: 'falta fechar com lucro/prejuízo', dot: 'bg-amber-600', acao: 'Ver', status: 'encerrado', revisao: 'falta' },
+    { chave: 'revisar', titulo: `Revisar · ${revisaoResumo.value.revisar} esperando o robô`, detalhe: 'olhar de novo antes de fechar o dia', dot: 'bg-amber-600', acao: 'Ver', status: 'all', revisao: 'revisar' },
+    { chave: 'aguard_plataforma', titulo: `Aguard. Plataforma · ${faltam('aguard_plataforma')} sem revisão hoje`, detalhe: 'ver se a plataforma respondeu', dot: 'bg-sky-600', acao: 'Ver', status: 'aguard_plataforma', revisao: 'falta' },
+    { chave: 'analise_robo', titulo: `Análise Robô · ${faltam('analise_robo')} sem revisão hoje`, detalhe: 'ver se o robô agiu', dot: 'bg-indigo-600', acao: 'Ver', status: 'analise_robo', revisao: 'falta' },
+  ]
+  const contagem: Record<string, number> = { revisar: revisaoResumo.value.revisar }
+  return [...prazos, ...grupos.filter((g) => (g.chave in contagem ? contagem[g.chave] : faltam(g.chave)) > 0)]
+})
+const fixosItens = computed(() =>
+  items.value
+    .filter((r) => r.revisao_estado === 'fixo')
+    .sort((a, b) => (a.revisao_ate || '').localeCompare(b.revisao_ate || '')),
+)
+function agir(item: AgirItem) {
+  if (item.row) {
+    abrirRaio(item.row)
+    nextTick(() => document.getElementById(`chamado-${item.row!.id}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
+    return
+  }
+  statusFilter.value = item.status || 'all'
+  revisaoFilter.value = item.revisao || 'all'
+}
+
+// ----------------------------------------------------------------- Raio-X
+const raioRow = computed(() => items.value.find((r) => r.id === raioId.value) || null)
+function abrirRaio(row: ChamadoRow) {
+  raioId.value = raioId.value === row.id ? null : row.id
+}
+function limparFiltros() {
+  search.value = ''
+  origemFilter.value = 'all'
+  plataformaFilter.value = 'all'
+  contaFilter.value = 'all'
+  statusFilter.value = 'all'
+  revisaoFilter.value = 'all'
+}
+// Coluna Últ. resposta: sem fala real, a data do status (Encerrado/Concluído).
+function ultimaTexto(row: ChamadoRow): string {
+  if (row.ultima_resposta_at) return `${fmtCurto(row.ultima_resposta_at)} · ${quemRespondeu(row).replace(/mercado livre/i, 'ML')}`
+  return mostraDataStatus(row) ? fmtCurto(row.status_aba_at) : '—'
+}
 const rangeStart = computed(() => (total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1))
 const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
 
@@ -370,6 +475,9 @@ const ERROS: Record<string, string> = {
   estoque_conferindo: 'a entrada no estoque do Bling de um desses lançamentos ainda está sendo conferida — espere até 10 min',
   estoque_estorno_sem_confirmacao: 'o estorno de um desses lançamentos pode ter saído no Bling — confira o extrato e use "Estorno já saiu" em Devoluções antes de excluir',
   chamado_not_found: 'chamado não encontrado',
+  revisao_data_invalida: 'escolha uma data depois de hoje',
+  revisao_motivo_vazio: 'escreva o motivo',
+  revisao_chamado_concluido: 'chamado concluído não entra na revisão do dia',
   chamado_pedido_nao_encontrado: 'pedido não encontrado no DaVinci',
   chamado_mensagem_vazia: 'digite a mensagem',
   chamado_anexo_tipo_invalido: 'anexo precisa ser imagem (png/jpg/webp/gif)',
@@ -584,8 +692,10 @@ async function load() {
     if (contaFilter.value !== 'all') params.set('conta', contaFilter.value)
     const res = await api<Page>(`/api/chamados?${params.toString()}`)
     items.value = res.items
+    ordemRevisao.value = new Map(res.items.map((r) => [r.id, REVISAO_ORDEM[r.revisao_estado] ?? 1]))
     total.value = res.total
     plataformas.value = res.plataformas
+    plataformaTotais.value = res.plataforma_totais || {}
     contas.value = res.contas || []
   } catch (e: any) {
     error.value = apiError(e)
@@ -788,6 +898,38 @@ async function saveRow(row: ChamadoRow, extra: Record<string, unknown> = {}): Pr
     })
   rowSaveQueue.set(id, next)
   await next
+}
+
+// 05/11/2026: a marca vale pro caso — a API devolve todas as linhas que mudaram.
+async function marcarRevisao(row: ChamadoRow, marca: RevisaoMarca) {
+  try {
+    const r = await api<{ itens: ChamadoRow[] }>(`/api/chamados/${row.id}/revisao`, {
+      method: 'POST',
+      body: { tipo: marca.tipo, ate: marca.ate ?? null, motivo: marca.motivo ?? null },
+    })
+    r.itens.forEach(replaceRow)
+  } catch (e: any) {
+    toasts.error('Não foi possível marcar', apiError(e))
+  }
+}
+
+function salvarRaio(row: ChamadoRow, campos: Record<string, unknown>) {
+  Object.assign(row, campos)
+  saveRow(row)
+}
+
+// Instrução pelo Raio-X: registra e já marca Revisar (é o "escrevi pro robô, volto
+// pra ver"). Devolve o erro pro campo do painel.
+async function instruirERevisar(row: ChamadoRow, texto: string): Promise<string | null> {
+  try {
+    const updated = await api<ChamadoRow>(`/api/chamados/${row.id}/instrucao`, { method: 'POST', body: { texto } })
+    replaceRow(updated)
+    await marcarRevisao(updated, { tipo: 'revisar' })
+    toasts.success('Instrução registrada', 'O robô lê na próxima passada. Chamado marcado como Revisar.')
+    return null
+  } catch (e: any) {
+    return apiError(e)
+  }
 }
 
 async function aplicarStatusBling(row: ChamadoRow) {
@@ -1712,29 +1854,32 @@ async function confirmarExcluir() {
 </script>
 
 <template>
-  <div class="chamados-panel min-w-0 space-y-5">
-    <PageHeader v-if="modo !== 'juridico'" title="Chamados" description="Todos os chamados abertos nas plataformas — Margem, Logística, Devolução e Vendas — num lugar só.">
-      <template #actions>
-        <Button size="sm" variant="outline" :disabled="loading" @click="load">
-          <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
-          atualizar
-        </Button>
-        <Button size="sm" :disabled="!canEdit" @click="openAdd">
-          <Plus class="size-4 mr-1.5" />
-          novo chamado
-        </Button>
-      </template>
-    </PageHeader>
-
-    <!-- 30/09: a aba Jurídico saiu daqui — mora em Ouvidoria › Denúncia (modo="juridico") -->
-    <div v-if="modo !== 'juridico'" class="flex flex-wrap sm:flex-nowrap gap-1 border-b">
-      <button type="button" class="px-3 py-2 text-sm border-b-2 -mb-px" :class="tab === 'chamados' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" @click="tab = 'chamados'">Chamados</button>
-      <button type="button" class="px-3 py-2 text-sm border-b-2 -mb-px inline-flex items-center gap-1.5" :class="tab === 'ia' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" @click="tab = 'ia'">
-        <Bot class="size-4" /> IA de Chamado
-      </button>
-      <div v-if="tab === 'ia' && podeAvisoIa" class="ml-auto w-full sm:w-auto min-w-0 flex flex-wrap sm:flex-nowrap items-center gap-2 pb-1">
-        <span class="text-xs text-muted-foreground">Se a IA parar num "não sou robô" ou login, avisa no Threema.</span>
-        <Button size="sm" variant="outline" @click="avisoIaCfgOpen = true">quem recebe o aviso</Button>
+  <div class="chamados-panel min-w-0 space-y-2.5">
+    <!-- 05/11/2026: padrão da Conciliação. A aba Jurídico saiu em 30/09 e a coluna em
+         05/11 (Vinicius: "não usamos"); os dados e o modal continuam no código. -->
+    <div v-if="modo !== 'juridico'" class="flex flex-wrap items-center gap-3 rounded-md border bg-card px-3 py-1.5 lg:grid lg:grid-cols-[1fr_auto_1fr]">
+      <h1 class="text-[15px] font-bold">Chamados</h1>
+      <div class="flex flex-wrap items-center gap-3.5 text-xs font-semibold">
+        <div v-if="tab === 'chamados'" class="flex flex-wrap gap-0.5">
+          <button type="button" class="border-b-2 px-2.5 py-1" :class="plataformaFilter === 'all' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'" @click="plataformaFilter = 'all'">
+            Todas <span class="font-medium text-muted-foreground">{{ plataformaTotal }}</span>
+          </button>
+          <button v-for="p in plataformaAbas" :key="p.value" type="button" class="border-b-2 px-2.5 py-1" :class="plataformaFilter === p.value ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'" @click="plataformaFilter = p.value">
+            {{ p.label }} <span class="font-medium text-muted-foreground">{{ p.n }}</span>
+          </button>
+        </div>
+        <div class="inline-flex rounded-md border p-px">
+          <button type="button" class="rounded px-2.5 py-1" :class="tab === 'chamados' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'" @click="tab = 'chamados'">Chamados</button>
+          <button type="button" class="rounded px-2.5 py-1" :class="tab === 'ia' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'" @click="tab = 'ia'">IA de Chamado</button>
+        </div>
+      </div>
+      <div class="flex items-center justify-end gap-1.5 text-xs font-semibold">
+        <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50" :disabled="loading" @click="load">
+          <RotateCcw class="size-3.5" :class="{ 'animate-spin': loading }" /> Recarregar
+        </button>
+        <button type="button" class="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-primary px-2.5 py-1 text-primary-foreground disabled:opacity-50" :disabled="!canEdit" @click="openAdd">
+          <Plus class="size-3.5" /> novo chamado
+        </button>
       </div>
     </div>
     <div v-else class="flex flex-wrap items-center gap-2">
@@ -1746,6 +1891,11 @@ async function confirmarExcluir() {
           atualizar
         </Button>
       </div>
+    </div>
+
+    <div v-if="tab === 'ia' && podeAvisoIa" class="flex flex-wrap items-center justify-end gap-2">
+      <span class="text-xs text-muted-foreground">Se a IA parar num "não sou robô" ou login, avisa no Threema.</span>
+      <Button size="sm" variant="outline" @click="avisoIaCfgOpen = true">quem recebe o aviso</Button>
     </div>
 
     <div v-if="error" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
@@ -1844,277 +1994,252 @@ async function confirmarExcluir() {
       </div>
     </div>
 
+    <ChamadosIa v-if="tab === 'ia'" :can-edit="canEdit" />
+
+    <template v-if="tab !== 'ia'">
+    <!-- filtros (mesmo formato da Conciliação); a plataforma virou aba lá em cima -->
+    <div class="flex flex-wrap items-center justify-center gap-1.5 text-xs">
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2">
+        <span class="font-semibold text-muted-foreground">Origem</span>
+        <select v-model="origemFilter" class="bg-transparent outline-none">
+          <option value="all">Todas</option>
+          <option v-for="o in ORIGENS" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+      </label>
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="filtrar por conta (ex. ML Aguiar 2)">
+        <span class="font-semibold text-muted-foreground">Conta</span>
+        <select v-model="contaFilter" class="max-w-[150px] bg-transparent outline-none">
+          <option value="all">Todas</option>
+          <option v-for="c in contas" :key="c" :value="c">{{ c }}</option>
+        </select>
+      </label>
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2">
+        <span class="font-semibold text-muted-foreground">Mostrar</span>
+        <select v-model="mostrar" class="bg-transparent outline-none">
+          <option value="abertos">Abertos</option>
+          <option value="resolvidos">Concluídos</option>
+          <option value="todos">Todos</option>
+        </select>
+      </label>
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="filtrar pela coluna Status">
+        <span class="font-semibold text-muted-foreground">Status</span>
+        <select v-model="statusFilter" class="bg-transparent outline-none">
+          <option value="all">Todos</option>
+          <option v-for="s in STATUS_ABA" :key="s.value" :value="s.value">{{ s.label }}</option>
+        </select>
+      </label>
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="filtrar pela coluna Revisão">
+        <span class="font-semibold text-muted-foreground">Revisão</span>
+        <select v-model="revisaoFilter" class="bg-transparent outline-none">
+          <option value="all">Todas</option>
+          <option v-for="f in REVISAO_FILTROS" :key="f.value" :value="f.value">{{ f.label }}</option>
+        </select>
+      </label>
+      <label class="inline-flex h-7 min-w-0 items-center gap-1 rounded-md border bg-card px-2">
+        <Search class="size-3.5 text-muted-foreground" />
+        <input v-model="search" class="w-64 bg-transparent outline-none" placeholder="buscar pedido, conta, produto, chamado" />
+      </label>
+      <button type="button" class="text-muted-foreground underline" @click="limparFiltros">limpar</button>
+      <span class="text-muted-foreground">{{ visiveis.length }} de {{ total }} chamados</span>
+    </div>
+
     <!-- resumo (18/09): total do servidor + grupos da coluna Status na página carregada; clicar filtra -->
     <div v-if="tab === 'chamados'" class="grid grid-cols-2 gap-2" :class="resumoGrupos.length > 4 ? 'lg:grid-cols-6' : 'lg:grid-cols-5'">
-      <button type="button" class="rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary" title="mostrar todos os status" @click="statusFilter = 'all'">
-        <StatCard :label="resumoTotalLabel" :value="total" :icon="MessagesSquare" :hint="resumoPorOrigem || undefined" compact />
+      <button type="button" class="rounded-md border bg-card px-3 py-1.5 text-center hover:bg-muted/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary" :title="resumoPorOrigem || 'mostrar todos os status'" @click="statusFilter = 'all'">
+        <span class="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{{ resumoTotalLabel }}</span>
+        <span class="block text-xl font-bold leading-tight">{{ total }}</span>
       </button>
       <button
         v-for="g in resumoGrupos"
         :key="g.key"
         type="button"
-        class="rounded-lg text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        class="rounded-md border bg-card px-3 py-1.5 text-center hover:bg-muted/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
         :class="statusFilter === g.key ? 'ring-2 ring-primary' : ''"
-        :title="statusFilter === g.key ? 'tirar o filtro' : `filtrar: ${g.label}`"
+        :title="statusFilter === g.key ? 'tirar o filtro' : `filtrar: ${g.label} — ${g.hint}`"
         @click="filtrarGrupo(g.key)"
       >
-        <StatCard :label="g.label" :value="g.n" :icon="g.icon" :tone="g.tone" :hint="g.hint" compact />
+        <span class="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{{ g.label }}</span>
+        <span class="block text-xl font-bold leading-tight" :class="g.cor">{{ g.n }}</span>
       </button>
     </div>
 
-    <ChamadosIa v-if="tab === 'ia'" :can-edit="canEdit" />
-
-    <template v-if="tab !== 'ia'">
-    <!-- filtros -->
-    <div class="flex flex-wrap items-center gap-2">
-      <div class="relative min-w-0 w-full sm:w-auto">
-        <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-        <input v-model="search" class="h-9 w-full sm:w-72 rounded-md border bg-background pl-8 pr-3 text-sm" placeholder="buscar pedido, conta, produto, chamado…" />
-      </div>
-      <select v-model="origemFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
-        <option value="all">todas origens</option>
-        <option v-for="o in ORIGENS" :key="o.value" :value="o.value">{{ o.label }}</option>
-      </select>
-      <select v-model="plataformaFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
-        <option value="all">todas plataformas</option>
-        <option v-for="p in plataformas" :key="p" :value="p">{{ p }}</option>
-      </select>
-      <select v-model="contaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="filtrar por conta (ex. ML Aguiar 2)">
-        <option value="all">todas contas</option>
-        <option v-for="c in contas" :key="c" :value="c">{{ c }}</option>
-      </select>
-      <select v-model="mostrar" class="h-9 rounded-md border bg-background px-2 text-sm">
-        <option value="abertos">abertos</option>
-        <option value="resolvidos">concluídos</option>
-        <option value="todos">todos</option>
-      </select>
-      <select v-model="statusFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="filtrar pela coluna Status">
-        <option value="all">todos status</option>
-        <optgroup label="status">
-          <option v-for="s in STATUS_ABA" :key="s.value" :value="s.value">{{ s.label }}</option>
-        </optgroup>
-      </select>
-      <span class="ml-auto text-xs text-muted-foreground">{{ rangeStart }}–{{ rangeEnd }} de {{ total }}</span>
+    <!-- revisão do dia: clicar numa etiqueta filtra a lista -->
+    <div v-if="tab === 'chamados' && mostrar === 'abertos'" class="flex flex-wrap items-center justify-center gap-3 rounded-md border bg-card px-3 py-1.5 text-xs">
+      <span class="text-[13px] font-bold">Revisão de {{ hojeRotulo }}</span>
+      <span class="inline-block h-2.5 w-60 overflow-hidden rounded-full bg-muted"><span class="block h-full bg-[#1f3a5f] dark:bg-slate-300" :style="{ width: `${revisaoPct}%` }" /></span>
+      <span><b>{{ revisaoResumo.feitos }} de {{ revisaoResumo.total }}</b> revisados</span>
+      <button
+        v-for="p in revisaoPills"
+        :key="p.key"
+        type="button"
+        class="inline-flex items-center gap-1.5 rounded bg-muted px-2 py-0.5 font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        :class="revisaoFilter === p.key ? 'ring-2 ring-primary' : ''"
+        :title="revisaoFilter === p.key ? 'tirar o filtro' : `filtrar: ${p.label}`"
+        @click="filtrarRevisao(p.key)"
+      >
+        <span class="size-[7px] rounded-full" :class="p.dot" />
+        {{ p.n }} {{ p.label }}
+      </button>
     </div>
 
-    <!-- planilha -->
-    <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
-      <table class="min-w-[2000px] text-xs border-collapse">
-        <thead class="sticky top-0 z-20 bg-background">
-          <tr>
-            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="8">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="5">Chamado</th>
-            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-violet-50 dark:bg-violet-900/20" colspan="1">Jurídico</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Bling</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600" colspan="2">Controle</th>
-          </tr>
-          <tr class="border-b">
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[80px]">Data</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px]">Pedido Bling</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px]">Pedido Marketplace</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]">Plataforma</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px]">Produto</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]">SKU</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Conta</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px]">Status Bling</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Origem</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[190px] bg-amber-50 dark:bg-amber-900/20">Chamado</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Canal</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap w-[1%] bg-amber-50 dark:bg-amber-900/20" title="Quem está com a bola (o porquê fica no tooltip do chip) + quem falou por último">Status</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap w-[150px] min-w-[120px] max-w-[150px] bg-amber-50 dark:bg-amber-900/20">Observação</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-violet-50 dark:bg-violet-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Encaminhado ao jurídico: quando, por quem, observação e link do dossiê">Jurídico</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[210px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Alterar status Bling</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] border-l-[3px] border-gray-400 dark:border-gray-600" title="Resultado do chamado (R$): positivo = lucro, negativo = prejuízo">Valor</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]"></th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-if="loading && !items.length">
-            <td colspan="17" class="py-8 text-center text-muted-foreground">
-              <Loader2 class="size-4 inline animate-spin mr-1.5" />
-              carregando…
-            </td>
-          </tr>
-          <tr v-else-if="!visiveis.length">
-            <td colspan="17" class="py-8 text-center text-muted-foreground">{{ items.length ? 'nenhum chamado com esse status nesta página' : 'sem chamados' }}</td>
-          </tr>
-          <tr v-for="row in visiveis" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110" :class="{ 'opacity-60': row.resolvido }">
-            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDate(row.data) }}</td>
-            <td class="px-2 py-1 font-mono whitespace-nowrap">{{ row.pedido_bling || '—' }}</td>
-            <td class="px-2 py-1 font-mono text-muted-foreground whitespace-nowrap">{{ row.pedido_marketplace || '—' }}</td>
-            <td class="px-2 py-1 uppercase whitespace-nowrap">{{ nomePlataforma(row.plataforma) || '—' }}</td>
-            <td class="px-2 py-1 max-w-[320px] truncate" :title="row.produto || ''">{{ row.produto || '—' }}</td>
-            <td class="px-2 py-1 font-mono whitespace-nowrap max-w-[180px] truncate" :title="row.sku || ''">{{ row.sku || '—' }}</td>
-            <td class="px-2 py-1 whitespace-nowrap">{{ row.conta || '—' }}</td>
-            <td class="px-2 py-1 whitespace-nowrap">
-              <span>{{ row.status_bling_atual || row.status_bling || '—' }}</span>
-            </td>
-            <td class="px-2 py-1 whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-              <span class="rounded px-1.5 py-0.5 text-[11px] font-medium" :class="{
-                'bg-violet-500/15 text-violet-700 dark:text-violet-300': row.origem === 'margem',
-                'bg-sky-500/15 text-sky-700 dark:text-sky-300': row.origem === 'logistica',
-                'bg-orange-500/15 text-orange-700 dark:text-orange-300': row.origem === 'devolucao',
-                'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300': row.origem === 'vendas',
-              }">{{ origemLabel(row.origem) }}</span>
-            </td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <div class="flex items-center gap-1">
-                <input
-                  :value="row.chamado || ''"
-                  :disabled="!canEdit"
-                  :class="sheetInputClass"
-                  placeholder="protocolo / claim"
-                  @input="(e) => setRowText(row, 'chamado', (e.target as HTMLInputElement).value)"
-                  @change="saveRow(row)"
-                />
-                <button
-                  type="button"
-                  class="shrink-0 inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] hover:bg-muted"
-                  title="histórico do chamado e resposta à plataforma"
-                  @click="openHistorico(row)"
-                >
-                  <History class="size-3.5" />
-                  {{ row.mensagens_total }}
-                </button>
-              </div>
-              <!-- 25/09 (294571): a consulta do Portal ligada ao chamado, logo abaixo do
-                   nº da devolução — é ela que o robô de leitura abre no Portal. -->
-              <a
-                v-if="row.consulta_portal"
-                :href="`https://seller-service.cs.shopee.com.br/detail/${row.consulta_portal}`"
-                target="_blank"
-                rel="noopener"
-                class="mt-0.5 block text-[10px] text-muted-foreground hover:underline"
-                title="Consulta no Portal de Atendimento da Shopee (o robô de leitura lê lá também)"
-              >Portal: {{ row.consulta_portal }}</a>
-            </td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <select :value="row.canal" :disabled="!canEdit" :class="sheetSelectClass" @change="(e) => { row.canal = (e.target as HTMLSelectElement).value as Canal; saveRow(row) }">
-                <option v-for="c in CANAIS" :key="c.value" :value="c.value" :title="c.hint">{{ c.label }}</option>
-              </select>
-            </td>
-            <!-- Status (17/09, Vinicius "status e últ. resposta não seria a mesma coisa?"):
-                 uma célula só — 1ª linha o chip (data só em Encerrado/Concluído); 2ª linha
-                 quem falou por último. 19/09 (Vinicius: "tira esse do meio, painel bem
-                 limpo"): o porquê do status saiu daqui e ficou só no tooltip do chip. -->
-            <td class="px-2 py-1 w-[1%] max-w-[210px] bg-amber-50/40 dark:bg-amber-900/10">
-              <div class="space-y-0.5">
-                <div class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                  <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-medium whitespace-nowrap" :class="statusInfo(row).cls" :title="statusTitle(row)">{{ statusInfo(row).label }}</span>
-                  <span v-if="mostraDataStatus(row)" class="text-[11px] text-muted-foreground whitespace-nowrap">{{ fmtCurto(row.status_aba_at) }}</span>
+    <div class="grid items-stretch gap-3 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div class="flex min-w-0 flex-col rounded-md border bg-card">
+        <div class="relative flex items-center justify-center rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+          <span>Chamados — uma linha por caso</span>
+          <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">quem está com a bola × o que já foi revisado hoje</span>
+        </div>
+        <div class="max-h-[72vh] overflow-auto focus:outline-none" tabindex="0">
+          <table class="w-full min-w-[1240px] table-fixed border-collapse text-[11.5px]">
+            <colgroup>
+              <col class="w-[48px]"><col class="w-[60px]"><col class="w-[96px]"><col class="w-[17.5%]">
+              <col class="w-[70px]"><col class="w-[104px]"><col class="w-[46px]"><col class="w-[130px]"><col class="w-[12%]"><col class="w-[9%]">
+              <col class="w-[214px]">
+            </colgroup>
+            <thead class="sticky top-0 z-10 bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
+              <tr>
+                <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="4">Identificação</th>
+                <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="6">Chamado</th>
+                <th class="sticky right-0 border-b border-l border-l-slate-300 bg-muted px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Hoje</th>
+              </tr>
+              <tr>
+                <th class="border-b px-1.5 py-1 text-center font-semibold">Data</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold">Pedido</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold">Conta</th>
+                <th class="border-b px-1.5 py-1 text-left font-semibold">Produto</th>
+                <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Origem</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold">Protocolo</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold">Msgs</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold" title="Quem está com a bola (o porquê fica no tooltip do chip)">Status</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold">Últ. resposta</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold">Observação</th>
+                <th class="sticky right-0 border-b border-l border-l-slate-300 bg-muted px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Revisão</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="loading && !items.length">
+                <td colspan="11" class="py-8 text-center text-muted-foreground">
+                  <Loader2 class="size-4 inline animate-spin mr-1.5" />
+                  carregando…
+                </td>
+              </tr>
+              <tr v-else-if="!visiveis.length">
+                <td colspan="11" class="py-8 text-center text-muted-foreground">{{ items.length ? 'nenhum chamado com esse filtro nesta página' : 'sem chamados' }}</td>
+              </tr>
+              <tr
+                v-for="row in visiveis"
+                :id="`chamado-${row.id}`"
+                :key="row.id"
+                class="h-10 cursor-pointer border-b hover:bg-muted/40"
+                :class="[row.id === raioId ? 'bg-blue-50 shadow-[inset_3px_0_0_hsl(var(--primary))] dark:bg-blue-950/30' : '', row.resolvido ? 'opacity-60' : '']"
+                @click="abrirRaio(row)"
+              >
+                <td class="px-1.5 text-center text-muted-foreground" :title="fmtDate(row.data)">{{ fmtDate(row.data).slice(0, 5) }}</td>
+                <td class="px-1.5 text-center font-mono font-bold">{{ row.pedido_bling || '—' }}</td>
+                <td class="truncate px-1.5 text-center" :title="row.conta || ''">{{ row.conta || '—' }}</td>
+                <td class="truncate px-1.5" :title="row.produto || ''">{{ row.produto || '—' }}</td>
+                <td class="border-l border-l-slate-300 px-1.5 text-center dark:border-l-slate-600">{{ origemLabel(row.origem) }}</td>
+                <td class="truncate px-1.5 text-center" :title="row.chamado || ''">
+                  <a v-if="row.chamado && row.chamado_url" :href="row.chamado_url" target="_blank" rel="noopener" class="hover:underline" title="abrir na plataforma" @click.stop>{{ row.chamado }}</a>
+                  <template v-else>{{ row.chamado || '—' }}</template>
+                </td>
+                <td class="px-1.5 text-center">
+                  <button type="button" class="inline-flex w-9 items-center justify-center gap-0.5 rounded border py-px text-[10.5px] text-muted-foreground hover:bg-muted" title="histórico do chamado e resposta à plataforma" @click.stop="openHistorico(row)">
+                    <History class="size-2.5" />
+                    {{ row.mensagens_total }}
+                  </button>
+                </td>
+                <td class="px-1.5 text-center">
+                  <span class="inline-block w-[124px] rounded py-0.5 text-center text-[11px] font-semibold" :class="statusInfo(row).cls" :title="statusTitle(row)">{{ statusInfo(row).label }}</span>
+                </td>
+                <td class="truncate px-1.5 text-center text-[11px] text-muted-foreground" :title="ultimaTexto(row)">{{ ultimaTexto(row) }}</td>
+                <!-- 18/09: a célula mostra só o começo; clicou, abre o balão. O motivo do Fixo
+                     aparece aqui quando a Observação está vazia. -->
+                <td class="px-0.5 text-center text-[11px] text-muted-foreground" @click.stop>
+                  <ObservacaoPopover
+                    :model-value="row.observacao"
+                    :disabled="!canEdit"
+                    :placeholder="row.revisao_motivo || ''"
+                    :titulo="`Observação · ${row.pedido_bling || row.pedido_marketplace || 'chamado'}`"
+                    centro
+                    @update:model-value="(v) => setRowText(row, 'observacao', v)"
+                    @save="saveRow(row)"
+                  />
+                </td>
+                <!-- fica presa à direita: em tela menor a tabela rola, mas a Revisão continua à vista -->
+                <td class="sticky right-0 border-l border-l-slate-300 px-1.5 text-center dark:border-l-slate-600" :class="row.id === raioId ? 'bg-blue-50 dark:bg-blue-950' : 'bg-card'" @click.stop>
+                  <ChamadoRevisaoSeletor v-if="!row.resolvido" :revisao="row" :disabled="!canEdit" @marcar="(m) => marcarRevisao(row, m)" />
+                  <span v-else-if="row.resolvido_at" class="text-[11px] tabular-nums text-muted-foreground" :title="`fechado em ${fmtDateTime(row.resolvido_at)}`">fechado {{ fmtCurto(row.resolvido_at) }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="mt-auto border-t px-3 py-1.5 text-center text-[11px] text-muted-foreground">Clique na linha abre o Raio-X do chamado à direita. Conferido e Revisar valem só no dia; Fixo vale até a data. Cada dia a lista recomeça.</div>
+      </div>
+
+      <div class="flex min-w-0 flex-col gap-3">
+        <ChamadoRaioX
+          v-if="raioRow"
+          :row="raioRow"
+          :can-edit="canEdit"
+          :can-delete="canDelete"
+          :busy="busy.has(raioRow.id)"
+          :origem="origemLabel(raioRow.origem)"
+          :status-label="statusInfo(raioRow).label"
+          :status-cls="statusInfo(raioRow).cls"
+          :status-titulo="statusTitle(raioRow)"
+          :ultima-resposta="ultimaTexto(raioRow)"
+          :canais="CANAIS"
+          :situacoes="situacoes"
+          :instruir="(texto: string) => instruirERevisar(raioRow!, texto)"
+          class="flex-1"
+          @fechar="raioId = null"
+          @marcar="(m) => marcarRevisao(raioRow!, m)"
+          @historico="openHistorico(raioRow)"
+          @salvar="(c) => salvarRaio(raioRow!, c)"
+          @aplicar-bling="aplicarStatusBling(raioRow)"
+          @resolver="openResolver(raioRow)"
+          @reabrir="reabrir(raioRow)"
+          @excluir="openExcluir(raioRow)"
+        />
+        <template v-else-if="mostrar === 'abertos'">
+          <div class="flex min-w-0 flex-col rounded-md border bg-card">
+            <div class="rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-center text-xs font-semibold text-white">Onde agir hoje</div>
+            <div class="space-y-1.5 p-2">
+              <div v-for="a in agirItens" :key="a.chave" class="grid grid-cols-[12px_minmax(0,1fr)_58px] items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs">
+                <span class="size-[7px] rounded-full" :class="a.dot" />
+                <div class="min-w-0">
+                  <div class="truncate font-bold" :title="a.titulo">{{ a.titulo }}</div>
+                  <div class="truncate text-[11px] text-muted-foreground" :title="a.detalhe">{{ a.detalhe }}</div>
                 </div>
-                <div v-if="row.ultima_resposta_at" class="text-[11px] whitespace-nowrap" :class="row.ultima_resposta_direcao === 'recebida' ? 'text-orange-600 dark:text-orange-400' : 'text-emerald-700 dark:text-emerald-300'" :title="`última resposta: ${fmtDateTime(row.ultima_resposta_at)} · ${quemRespondeu(row)}`">
-                  <span v-if="mostraDataStatus(row)" class="text-muted-foreground">últ. </span>{{ fmtCurto(row.ultima_resposta_at) }} · {{ quemRespondeu(row) }}
-                </div>
+                <button type="button" class="h-6 rounded-md border text-[11px] font-semibold hover:bg-muted" @click="agir(a)">{{ a.acao }}</button>
               </div>
-            </td>
-            <!-- 18/09 (Vinicius): a célula mostra só o começo; clicou, abre o balão com o
-                 texto inteiro (ObservacaoPopover) — a linha não muda de altura. -->
-            <td class="px-1 py-0.5 w-[150px] max-w-[150px] bg-amber-50/40 dark:bg-amber-900/10">
-              <ObservacaoPopover
-                :model-value="row.observacao"
-                :disabled="!canEdit"
-                :titulo="`Observação · ${row.pedido_bling || row.pedido_marketplace || 'chamado'}`"
-                @update:model-value="(v) => setRowText(row, 'observacao', v)"
-                @save="saveRow(row)"
-              />
-            </td>
-            <td class="px-2 py-1 bg-violet-50/40 dark:bg-violet-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-              <div v-if="row.juridico_enviado_at" class="space-y-0.5 text-[11px]">
-                <div class="whitespace-nowrap"><Scale class="inline size-3 mr-0.5 text-violet-600" />{{ fmtDateTime(row.juridico_enviado_at) }} · {{ row.juridico_enviado_por_nome || '—' }}</div>
-                <div v-if="row.juridico_obs" class="max-w-[220px] truncate text-muted-foreground" :title="row.juridico_obs">{{ row.juridico_obs }}</div>
-                <div class="flex items-center gap-2">
-                  <a v-if="row.juridico_link" :href="row.juridico_link" target="_blank" rel="noopener" class="underline">dossiê</a>
-                  <button v-if="row.juridico_link" type="button" class="underline text-muted-foreground" @click="copiarLink(row.juridico_link!)">copiar link</button>
-                  <button v-if="canEdit" type="button" class="underline text-muted-foreground" @click="openJuridico(row)">reenviar</button>
-                </div>
-              </div>
-              <Button v-else size="sm" variant="outline" class="h-7 px-2" :disabled="!canEdit" title="Encaminhar ao jurídico: aviso no Threema com o histórico e as fotos" @click="openJuridico(row)">
-                <Scale class="size-3.5 mr-1" />
-                jurídico
-              </Button>
-            </td>
-            <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-              <div class="flex items-center gap-1">
-                <select :value="row.alterar_status_bling || ''" :disabled="!canEdit" :class="sheetSelectClass" @change="(e) => { row.alterar_status_bling = (e.target as HTMLSelectElement).value || null; saveRow(row) }">
-                  <option value="">— não altera</option>
-                  <option v-for="s in situacoes" :key="s" :value="s">{{ s }}</option>
-                </select>
-                <button
-                  type="button"
-                  class="shrink-0 inline-flex items-center rounded border p-1 hover:bg-muted disabled:opacity-40"
-                  :disabled="!canEdit || !row.alterar_status_bling || !row.pedido_bling || busy.has(row.id)"
-                  title="aplicar no Bling agora"
-                  @click="aplicarStatusBling(row)"
-                >
-                  <Loader2 v-if="busy.has(row.id)" class="size-3.5 animate-spin" />
-                  <ArrowLeftRight v-else class="size-3.5" />
-                </button>
-              </div>
-            </td>
-            <!-- Resultado do chamado (R$): positivo = lucro, negativo = prejuízo — Eduardo 03/09 e 15/09 -->
-            <td class="px-1 py-0.5 border-l-[3px] border-gray-400 dark:border-gray-600">
-              <input
-                :value="row.valor_recuperado ?? ''"
-                :disabled="!canEdit"
-                type="number"
-                step="0.01"
-                placeholder="R$"
-                :class="[
-                  sheetInputClass,
-                  'text-right tabular-nums font-medium',
-                  Number(row.valor_recuperado) > 0 ? 'text-emerald-700 dark:text-emerald-300' : Number(row.valor_recuperado) < 0 ? 'text-red-600 dark:text-red-400' : '',
-                ]"
-                :title="resultadoTexto(row.valor_recuperado) || 'Resultado do chamado (R$): positivo = lucro, negativo = prejuízo'"
-                @input="(e) => { const v = (e.target as HTMLInputElement).value; row.valor_recuperado = v === '' ? null : Number(v) }"
-                @change="saveRow(row)"
-              />
-            </td>
-            <td class="px-2 py-1 text-right whitespace-nowrap">
-              <div class="inline-flex items-center gap-1">
-                <button
-                  v-if="!row.resolvido"
-                  type="button"
-                  class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] hover:bg-muted disabled:opacity-40"
-                  :disabled="!canEdit || busy.has(row.id)"
-                  title="marcar como resolvido"
-                  @click="openResolver(row)"
-                >
-                  <CheckCircle2 class="size-3.5" />
-                  resolver
-                </button>
-                <button
-                  v-else
-                  type="button"
-                  class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] hover:bg-muted disabled:opacity-40"
-                  :disabled="!canEdit || busy.has(row.id)"
-                  title="reabrir"
-                  @click="reabrir(row)"
-                >
-                  <Undo2 class="size-3.5" />
-                  reabrir
-                </button>
-                <button
-                  v-if="canDelete"
-                  type="button"
-                  class="inline-flex items-center rounded border p-1 text-red-500 hover:bg-red-500/10 disabled:opacity-40"
-                  :disabled="busy.has(row.id)"
-                  title="excluir chamado e lançamentos"
-                  @click="openExcluir(row)"
-                >
-                  <Trash2 class="size-3.5" />
-                </button>
-              </div>
-              <!-- 07/10 (Vinicius): quando foi posto em Resolver — pra acompanhar os concluídos. -->
-              <div
-                v-if="row.resolvido && row.resolvido_at"
-                class="mt-0.5 text-[11px] tabular-nums text-muted-foreground"
-                :title="`fechado em ${fmtDateTime(row.resolvido_at)}`"
-              >fechado {{ fmtCurto(row.resolvido_at) }}</div>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+              <div v-if="!agirItens.length" class="rounded-md border px-2.5 py-3 text-center text-xs text-muted-foreground">nada pra agir: todos revisados hoje</div>
+            </div>
+          </div>
+          <div class="flex min-w-0 flex-1 flex-col rounded-md border bg-card">
+            <div class="rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-center text-xs font-semibold text-white">Fixos com data</div>
+            <button
+              v-for="f in fixosItens"
+              :key="f.id"
+              type="button"
+              class="grid w-full grid-cols-[48px_minmax(0,1fr)] items-center gap-2 border-b px-3 py-1.5 text-left text-xs last:border-b-0 hover:bg-muted/40"
+              @click="abrirRaio(f)"
+            >
+              <b class="text-center">{{ diaMes(f.revisao_ate) }}</b>
+              <span class="min-w-0">
+                <span class="block truncate">{{ f.pedido_bling || f.pedido_marketplace || 'chamado' }} · {{ f.conta }}</span>
+                <span class="block truncate text-[11px] text-muted-foreground">{{ f.revisao_motivo }}</span>
+              </span>
+            </button>
+            <div v-if="!fixosItens.length" class="px-3 py-3 text-center text-[11px] text-muted-foreground">nenhum chamado fixado com data</div>
+          </div>
+        </template>
+        <div v-else class="flex min-w-0 flex-1 flex-col rounded-md border bg-card">
+          <div class="rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-center text-xs font-semibold text-white">Raio-X</div>
+          <div class="px-3 py-6 text-center text-xs text-muted-foreground">clique num chamado pra ver o Raio-X</div>
+        </div>
+      </div>
     </div>
 
     <div v-if="total > PAGE_SIZE" class="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2">

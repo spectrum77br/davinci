@@ -130,6 +130,32 @@ class ChamadoOut(BaseModel):
     juridico_obs: str | None = None
     juridico_link: str | None = None
     juridico_enviados: list[str] = []  # IDs Threema que receberam (CSV no banco)
+    # Revisão do dia (05/11/2026): a marca gravada e `revisao_estado`, o que a linha
+    # mostra HOJE (falta | conferido | revisar | fixo | prazo_hoje | prazo_vencido |
+    # respondeu) — ver `services/chamados_revisao.estado_da_revisao`.
+    revisao_tipo: str | None = None
+    revisao_dia: date | None = None
+    revisao_ate: date | None = None
+    revisao_motivo: str | None = None
+    revisao_por_nome: str | None = None
+    revisao_at: datetime | None = None
+    revisao_estado: str = "falta"
+
+
+class RevisaoIn(BaseModel):
+    """Marca da coluna Revisão. `tipo` nulo tira a marca; `fixo` exige data futura
+    e motivo (conferido no POST /{id}/revisao, que devolve o código de erro)."""
+
+    tipo: Literal["conferido", "revisar", "fixo"] | None = None
+    ate: date | None = None
+    motivo: str | None = None
+
+    _clean = field_validator("motivo", mode="before")(_clean_optional_text)
+
+
+class RevisaoOut(BaseModel):
+    # Todas as linhas do caso que receberam a marca (a própria primeiro).
+    itens: list[ChamadoOut]
 
 
 class JuridicoIn(BaseModel):
@@ -247,6 +273,10 @@ class ChamadoPage(BaseModel):
     # Contas pro filtro (Eduardo 15/09: "filtrar por conta, ex. ML Aguiar 2") —
     # restritas à plataforma filtrada, quando há uma.
     contas: list[str] = Field(default_factory=list)
+    # 05/11/2026 (abas de plataforma): quantos chamados por plataforma com os OUTROS
+    # filtros aplicados — o filtro de plataforma fica de fora, senão a aba
+    # escolhida zerava as outras.
+    plataforma_totais: dict[str, int] = Field(default_factory=dict)
 
 
 class ChamadoLookupOut(BaseModel):
