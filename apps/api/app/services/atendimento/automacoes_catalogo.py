@@ -443,10 +443,15 @@ def _publica(t: str) -> dict:
 # O nome da INTEGRAÇÃO (`integrations.name`, strip + lower), como a
 # Logística casa a conta. Fora do alcance (sem acesso pelo DaVinci): TikTok
 # Inova e Poofy, ML Poofy e ML lucas mei — ali continua no Duoke.
+# Shopee renomeadas (23/09 na Shopee e no Bling; a integração em 05/11/2026):
+# jlas → atlas, kia → fiore. As listas da Shopee têm os DOIS nomes — o antigo
+# ainda vale onde a integração não foi renomeada.
 
 SHOPEE_MENU = frozenset(
     {
+        "atlas",
         "barbosa",
+        "fiore",
         "inova",
         "jlas",
         "kfa",
@@ -464,7 +469,7 @@ SHOPEE_CAMPANHAS = SHOPEE_MENU | {"atv"}
 SHOPEE_MALA = frozenset({"inova", "kfa", "minas", "poofy"})
 # O "carrinho" (pedido não pago com cupom): as 13 menos a Kia (0 de 22 não
 # pagos dela, 14 dias). A Aguiar também não tem.
-SHOPEE_NAO_PAGO = SHOPEE_CAMPANHAS - {"kia"}
+SHOPEE_NAO_PAGO = SHOPEE_CAMPANHAS - {"kia", "fiore"}
 # A resposta da avaliação: as 13 (a Aguiar responde à mão).
 SHOPEE_AVALIACAO = SHOPEE_CAMPANHAS
 # O "pedido recebido" do TikTok: só ATV, Barbosa e Mini (0 em Injox, JLAS e Eron).

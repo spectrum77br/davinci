@@ -255,7 +255,13 @@ class BlingClient:
             await self._on_refresh(self.creds)
 
     async def _request(
-        self, method: str, path: str, *, params: dict | None = None, json: Any = None
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json: Any = None,
+        repetir_503: bool = True,
     ) -> httpx.Response:
         if self._expired():
             await self.refresh()
@@ -275,7 +281,15 @@ class BlingClient:
                 headers["Authorization"] = f"Bearer {self.access_token}"
                 continue
             cf = _looks_like_cf_html(r)
-            if r.status_code in (429, 503) or (r.status_code == 403 and cf):
+            # `repetir_503=False` (Transferir estoque, 05/11/2026): um POST de
+            # estoque que voltou 503 pode ter sido gravado — quem chama trata
+            # como dúvida em vez de mandar de novo. 429 e o desafio do
+            # Cloudflare são recusas antes de processar: repetem sempre.
+            if (
+                r.status_code == 429
+                or (r.status_code == 503 and repetir_503)
+                or (r.status_code == 403 and cf)
+            ):
                 last_exc = BlingCloudflareError(
                     f"status={r.status_code} cf_html={cf}"
                 )
@@ -626,6 +640,7 @@ class BlingClient:
         deposit_id: int | None = None,
         observacao: str | None = None,
         custo: float | None = None,
+        repetir_503: bool = True,
     ) -> dict:
         """Raw Bling stock write. POST /Api/v3/estoques.
 
@@ -655,7 +670,7 @@ class BlingClient:
             body["observacoes"] = observacao
         if custo is not None and custo > 0:
             body["custo"] = float(custo)
-        r = await self._request("POST", "/estoques", json=body)
+        r = await self._request("POST", "/estoques", json=body, repetir_503=repetir_503)
         r.raise_for_status()
         return r.json().get("data") or {}
 

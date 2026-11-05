@@ -18,7 +18,7 @@ import {
   Boxes, Truck, ClipboardList, Loader2, RefreshCw,
   AlertTriangle, Download, Printer, FileText, FileUp, Upload, Trash2,
   ArrowUp, ArrowDown, Megaphone, Check, LifeBuoy, Send, Video, Package,
-  ChevronDown,
+  ChevronDown, ArrowLeftRight,
 } from 'lucide-vue-next'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
@@ -195,6 +195,8 @@ const isAdmin = computed(() => auth.user?.role === 'admin')
 // Modal do botão INFORMAR (admin-only): relatório via Threema dos pedidos
 // movidos pra Aguardando Cancelamento por falta de estoque.
 const informarEstoqueOpen = ref(false)
+// Transferir estoque (05/11/2026, só admin): troca a loja "Centro de Distribuição" do Bling.
+const transferirOpen = ref(false)
 
 // "Atualizar Bling" (job refresh-bling-stock) libera pra quem pode editar o
 // Controle de Estoque — mesma permissão do botão "Recarregar" (sync-stocks).
@@ -994,7 +996,7 @@ let autoRefreshTimer: number | null = null
 
 function autoRefreshTick() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
-  if (loading.value || informarEstoqueOpen.value || imprimindoLote.value) return
+  if (loading.value || informarEstoqueOpen.value || transferirOpen.value || imprimindoLote.value) return
   if (typeof document !== 'undefined') {
     const el = document.activeElement
     const tag = el ? el.tagName : ''
@@ -2167,6 +2169,16 @@ async function conferirTodos() {
       >
         <Megaphone class="size-3.5" />
         Informar
+      </button>
+      <button
+        v-if="isAdmin"
+        class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-muted"
+        :title="'Passa estoque de um SKU para outro direto no Bling (lote ou troca de produto) — substitui a loja Centro de Distribuição (só admins)'"
+        data-botao-transferir-estoque
+        @click="transferirOpen = true"
+      >
+        <ArrowLeftRight class="size-3.5" />
+        Transferir estoque
       </button>
       <div class="stock-tabs flex gap-1 rounded-md bg-muted/40 p-1 w-fit flex-wrap" aria-label="Áreas do controle de estoque">
         <button
@@ -3682,6 +3694,14 @@ async function conferirTodos() {
       contexto="controle_estoque"
       descricao="Manda via Threema os pedidos movidos pra Aguardando Cancelamento por falta de estoque (que ainda estão nessa situação). A seleção de destinatários fica salva."
       @close="informarEstoqueOpen = false"
+    />
+
+    <!-- Transferir estoque (admin-only) -->
+    <TransferirEstoqueModal
+      v-if="isAdmin"
+      :open="transferirOpen"
+      @close="transferirOpen = false"
+      @transferido="tab === 'estoque' && loadCurrentTab()"
     />
   </div>
 </template>

@@ -1481,3 +1481,17 @@ def test_decidir_da_avaliacao_queixa_atendida_chat_e_ia_no_automatico():
     assert "queixa_no_comentario" in cat.DIVERGENCIAS
     for m in ("queixa_no_comentario", "conversa_com_pessoa", "avaliacao_ja_atendida"):
         assert m in cat.MOTIVOS
+
+
+def test_shopee_renomeadas_valem_com_o_nome_novo_e_o_antigo():
+    """05/11/2026: a integração da Shopee Jlas virou "Atlas" e a da Kia virou
+    "Fiore". As automações da Shopee continuam nas duas lojas com qualquer um
+    dos nomes — e o carrinho segue fora da Kia/Fiore."""
+    menu = cat.CATALOGO["shopee_menu"]
+    for nome in ("Atlas", " Fiore", "Jlas", " Kia"):
+        assert cat.nome_normalizado(nome) in menu.lojas_duoke
+        assert cat.modo_semente(menu, nome) == cat.MODO_SIMULAR
+    assert "fiore" not in cat.SHOPEE_NAO_PAGO and "kia" not in cat.SHOPEE_NAO_PAGO
+    assert "atlas" in cat.SHOPEE_NAO_PAGO
+    # O ML Kia (outra conta) não muda.
+    assert "fiore" not in cat.ML_MENU and "kia" in cat.ML_MENU

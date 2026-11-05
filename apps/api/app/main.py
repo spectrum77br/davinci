@@ -45,6 +45,7 @@ from app.routers import devolutions as devolutions_router
 from app.routers import discrepancies as discrepancies_router
 from app.routers import email_padroes as email_padroes_router
 from app.routers import estoque as estoque_router
+from app.routers import estoque_transferencias as estoque_transferencias_router
 from app.routers import faturamento as faturamento_router
 from app.routers import conciliacao as conciliacao_router
 from app.routers import faturas as faturas_router
@@ -357,6 +358,7 @@ app.include_router(atendimento_robo_router.router)
 # para a API do app com o token da equipe (só thorfinn e heisenberg).
 app.include_router(app_uranyx_router.router)
 app.include_router(estoque_router.router)
+app.include_router(estoque_transferencias_router.router)
 app.include_router(faturamento_router.router)
 app.include_router(financeiro_router.router)
 app.include_router(importacao_router.router)
