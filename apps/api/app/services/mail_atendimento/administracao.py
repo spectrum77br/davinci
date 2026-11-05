@@ -64,7 +64,7 @@ def _restritiva(p):
     )
 
 
-def filtro_mensagem(user: User, message_id=MailMessage.id):
+def filtro_mensagem(user: User, message_id=MailMessage.id, *, incluir_lixeira=False):
     """Expressão SQL correlata: aplicar ANTES de contar/paginar/decifrar.
 
     É uma restrição, não uma concessão de caixa/equipe; a rota mantém sua
@@ -78,8 +78,9 @@ def filtro_mensagem(user: User, message_id=MailMessage.id):
         .correlate_except(tr)
         .exists()
     )
+    visivel = literal(True) if incluir_lixeira else not_(excluida)
     if user.role == UserRole.ADMIN:
-        return not_(excluida)
+        return visivel
     if user.status != UserStatus.ACTIVE:
         return false()
     msg, p, m, i, a = (
@@ -187,7 +188,7 @@ def filtro_mensagem(user: User, message_id=MailMessage.id):
         .correlate_except(msg, p, m, i, a)
         .exists()
     )
-    return and_(not_(excluida), not_(negada))
+    return and_(visivel, not_(negada))
 
 
 def filtro_conversa(user: User, c=AtendimentoConversa):
@@ -387,16 +388,15 @@ async def pode_ver_caixa(session: AsyncSession, mailbox: MailMailbox, user: User
 
 
 async def pode_responder_caixa(session: AsyncSession, mailbox: MailMailbox, user: User) -> bool:
-    """Responde e-mail recebido nesta caixa: o dono/admin de sempre, ou quem
-    tem `atendimento_email` ver+editar (`acesso.responde_email`, 28/10/2026) E
-    vê a caixa. Vale na rota /reply, no "Saiu/Não saiu" da própria resposta e
-    na conferência do Mac antes de enviar (`mail_central.lease`)."""
-    from app.services import mail_central
+    """Admin ou operação explícita, sempre sujeita ao acesso atual da caixa.
+
+    A mesma regra vale na resposta, na conferência própria e no conector.
+    """
     from app.services.atendimento import acesso
 
     if not await pode_ver_caixa(session, mailbox, user):
         return False
-    return mail_central.allowed(mailbox, user) or acesso.responde_email(user)
+    return acesso.opera_caixa_email(user)
 
 
 async def remetentes_da_concessao(
@@ -410,7 +410,7 @@ async def remetentes_da_concessao(
     from app.services import mail_central
     from app.services.mail_atendimento import caixa as mailbox_settings
 
-    if mail_central.allowed(mailbox, user) or not await tem_politica(session, mailbox.id, user):
+    if user.role == UserRole.ADMIN or not await tem_politica(session, mailbox.id, user):
         return None
     cfg = await mailbox_settings.config_da_caixa(session, mailbox.id)
     env = mail_central.reply_envelope(

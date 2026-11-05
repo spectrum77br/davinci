@@ -10,7 +10,7 @@ from app.deps.auth import require_admin
 from app.main import app
 from app.models.mail import MailDraft, MailMailbox, MailMessage, MailOutbox
 from app.models.mail_atendimento import MailMailboxSettings
-from app.routers.mail import require_mail_reader
+from app.routers.mail import require_mail_manager, require_mail_operator, require_mail_reader
 from tests.test_mail_central import ROOT, account, enable, ingest, message
 
 
@@ -131,15 +131,29 @@ def test_novas_rotas_humanas_nao_podem_ficar_sem_trava_admin():
         "/api/mail/mailboxes/{mailbox_id}/lista",
     }
 
+    operator_paths = {
+        "/api/mail/messages/{message_id}/reply", "/api/mail/outbox/{job_id}/resolve",
+        "/api/mail/mailboxes/{mailbox_id}/compose-context", "/api/mail/mailboxes/{mailbox_id}/send",
+        "/api/mail/mailboxes/{mailbox_id}/outbox", "/api/mail/mailboxes/{mailbox_id}/drafts",
+        "/api/mail/drafts/{draft_id}",
+    }
+    manager_paths = {
+        "/api/mail/mailboxes/{mailbox_id}/trash", "/api/mail/messages/{message_id}/trash",
+        "/api/mail/messages/{message_id}/restore",
+    }
     human = [route for route in app.routes
              if getattr(route, "path", "").startswith(f"{ROOT}/")
              and not route.path.startswith(f"{ROOT}/agent/")]
     assert human
     for route in human:
-        dependency = (
-            require_mail_reader if route.methods == {"GET"} and route.path in reader_paths
-            else require_admin
-        )
+        if route.path in manager_paths:
+            dependency = require_mail_manager
+        elif route.path in operator_paths:
+            dependency = require_mail_operator
+        elif route.methods == {"GET"} and route.path in reader_paths:
+            dependency = require_mail_reader
+        else:
+            dependency = require_admin
         assert uses(route.dependant, dependency), (route.methods, route.path)
     agents = [route for route in app.routes
               if getattr(route, "path", "").startswith(f"{ROOT}/agent/")]

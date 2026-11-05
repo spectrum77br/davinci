@@ -141,7 +141,7 @@ async function principal() {
     for (const chave of ['"leitores"', '"candidatos"', '"atualizado_por"', '"atualizado_em"', '"ativo"', '"nome"']) assert.ok(svc.includes(chave), chave)
     const central = api('routers/mail.py')
     // A permissão nova abre leitura sujeita ao acesso específico da caixa.
-    // Responder e resolver continuam exigindo admin, mesmo com grants antigos.
+    // Responder e resolver exigem a concessão nova; os grants antigos não bastam.
     assert.match(central, /item\["so_leitura"\] = True/)
     assert.match(central, /async def require_mail_reader[\s\S]*?acesso\.ve_caixa_email\(user\)/)
     assert.match(api('services/atendimento/acesso.py'), /def ve_caixa_email[\s\S]*?_leitura_email_concedida\(\s*user, "atendimento_email_leitura"\s*\)/)
@@ -149,8 +149,8 @@ async function principal() {
     assert.match(central, /def list_messages[\s\S]*?await readable_mailbox\(/)
     assert.match(central, /def get_message[\s\S]*?user_message\(session, message_id, user, read=True\)/)
     assert.match(central, /def download_attachment[\s\S]*?read=True\)/)
-    assert.match(central, /def reply\([^\n]+user: Admin\):/)
-    assert.match(central, /def resolve_outbox\([^\n]+user: Admin\):/)
+    assert.match(central, /def reply\([^\n]+user: MailOperator\):/)
+    assert.match(central, /def resolve_outbox\([^\n]+user: MailOperator\):/)
   }
 
   // ------------------------------------------------ funções puras
@@ -230,6 +230,7 @@ async function principal() {
       AtendimentoMailFilas: { props: ['isAdmin', 'lojas'], setup: () => () => Vue.h('div', { 'data-filas-stub': '' }) },
       AtendimentoMailConfigurar: { props: ['mailbox'], setup: (p) => () => Vue.h('div', { 'data-configurar-stub': p.mailbox.id }) },
       AtendimentoMailComposer: { setup: () => () => Vue.h('div', { 'data-composer-stub': '' }) },
+      AtendimentoMailLixeira: { setup: () => () => Vue.h('div', { 'data-trash-stub': '' }) },
     }
     // O leitor (usuário comum: a página passa isAdmin=false e canOperate=false).
     const m = montar('../components/AtendimentoMail.vue', { isAdmin: false, canOperate: false, stores: [] }, {
@@ -270,6 +271,32 @@ async function principal() {
     assert.equal(aberturas, 0)
     assert.equal(m.perguntas.length, 0)
     assert.equal(m.chamadas.filter((c) => c.metodo !== 'GET').length, 0)
+    // A concessão de operação habilita ações da caixa sem habilitar administração.
+    const op = montar('../components/AtendimentoMail.vue', { isAdmin: false, canOperate: false, stores: [] }, {
+      respostas: {
+        '/api/mail/mailboxes': { items: [{ ...caixa, pode_operar: true, pode_gerenciar: true }] },
+        '/api/mail/mailboxes/box1/messages': { items: [mensagem], more: false },
+        '/api/mail/messages/m1': { ...mensagem, outbox: [] },
+        '/api/mail/messages/m1/trash': { excluido: true },
+      }, filhos,
+    })
+    await op.html(); await op.estado.loadMailboxes(); await Vue.nextTick(); await esperar()
+    await op.estado.openMessage('m1')
+    assert.equal(op.estado.canAnswer, true)
+    assert.equal(op.estado.canCompose, true)
+    assert.equal(op.estado.canDelete, true)
+    assert.equal(op.estado.canAdminister, false)
+    const opHtml = await op.html()
+    assert.match(opHtml, /data-composer-stub|data-mail-message-actions/)
+    assert.match(opHtml, /data-mail-delete-review/)
+    assert.match(opHtml, /data-trash-stub/)
+    assert.doesNotMatch(opHtml, /data-mail-configure|data-configurar-stub|Desativar respostas|Cadastrar caixa/)
+    let compostas = 0
+    op.estado.composer = { open: async () => { compostas++ } }
+    await op.estado.openComposer('reply'); await op.estado.openComposer('forward')
+    assert.equal(compostas, 2)
+    op.estado.reviewDelete(); await op.estado.deleteMessage()
+    assert.ok(op.chamadas.some((c) => c.url === '/api/mail/messages/m1/trash' && c.metodo === 'POST'))
     // Até um perfil admin respeita so_leitura; não há exceção via flags antigas.
     m.reativo.isAdmin = true
     await m.estado.changeSending()
@@ -292,6 +319,19 @@ async function principal() {
     assert.match(html, /data-mail-resolve/)
     assert.match(html, /data-mail-configure/)
     assert.match(html, /data-composer-stub/)
+  }
+
+  // Lixeira local: lista somente a caixa escolhida e restaura pelo identificador.
+  {
+    const l = montar('../components/AtendimentoMailLixeira.vue', { mailboxId: 'box1' }, { respostas: {
+      '/api/mail/mailboxes/box1/trash': { items: [{ id: 'm1', subject: 'Apagado', from_address: 'a@example.com' }], more: false },
+      '/api/mail/messages/m1/restore': { excluido: false },
+    } })
+    await l.estado.toggle()
+    assert.match(await l.html(), /Apagado|Restaurar/)
+    await l.estado.restore(l.estado.items[0])
+    assert.equal(l.estado.items.length, 0)
+    assert.ok(l.chamadas.some((c) => c.url === '/api/mail/messages/m1/restore' && c.metodo === 'POST'))
   }
 
   // Quem começa nas Filas ainda descobre a caixa expressamente autorizada.

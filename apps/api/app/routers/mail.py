@@ -1,4 +1,4 @@
-"""Admin inbox, explicit readers and mailbox-scoped Mac worker. No mailbox credentials."""
+"""Explicit mailbox readers/operators and mailbox-scoped worker. No mailbox credentials."""
 
 import secrets
 from datetime import UTC, datetime
@@ -16,6 +16,7 @@ from app.db import get_session
 from app.deps.auth import require_active_user, require_admin
 from app.models.enums import UserRole, UserStatus
 from app.models.mail import MailAttachment, MailDraft, MailMailbox, MailMessage, MailOutbox
+from app.models.mail_admin import MailLixeira
 from app.models.user import User
 from app.schemas.mail import (
     ComposeDraftIn,
@@ -28,6 +29,7 @@ from app.schemas.mail import (
     Receipt,
     ReplyIn,
 )
+from app.schemas.mail_admin import ExcluirEmailIn
 from app.schemas.mail_bridge_sync import BridgeSnapshot
 from app.security.cipher import decrypt_bytes, decrypt_json, encrypt_json
 from app.services import mail_central as service
@@ -49,6 +51,24 @@ async def require_mail_reader(user: Annotated[User, Depends(require_active_user)
 
 
 MailReader = Annotated[User, Depends(require_mail_reader)]
+
+
+async def require_mail_operator(user: Annotated[User, Depends(require_active_user)]) -> User:
+    if not acesso.opera_caixa_email(user):
+        raise HTTPException(403, detail={"code": "admin_only"})
+    return user
+
+
+async def require_mail_manager(user: Annotated[User, Depends(require_mail_operator)]) -> User:
+    if user.role == UserRole.ADMIN and not acesso.pode_mexer(user):
+        raise HTTPException(403, detail={"code": "atendimento_permission_required"})
+    if not acesso.opera_caixa_email(user, excluir=True):
+        raise HTTPException(403, detail={"code": "admin_only"})
+    return user
+
+
+MailOperator = Annotated[User, Depends(require_mail_operator)]
+MailManager = Annotated[User, Depends(require_mail_manager)]
 
 
 def fail(code: str, status: int = 404) -> HTTPException:
@@ -87,9 +107,8 @@ async def user_mailbox(session: AsyncSession, mailbox_id: UUID, user: User) -> M
 
 
 async def readable_mailbox(session: AsyncSession, mailbox_id: UUID, user: User) -> MailMailbox:
-    # READ-only routes: owner/admin, or an active user on the mailbox's
-    # "Quem mais vê" list (mailbox_readers.pode_ver_caixa). Writing stays on
-    # `user_mailbox` (allowed()). Same 404 for whoever cannot see it.
+    # Every human operation keeps the mailbox access check. Configuration
+    # remains on user_mailbox + Admin; composing has its explicit grant.
     mailbox = await session.get(MailMailbox, mailbox_id)
     if mailbox is None or not await mail_admin.pode_ver_caixa(session, mailbox, user):
         raise fail("mailbox_not_found")
@@ -155,8 +174,10 @@ async def list_mailboxes(session: Session, user: MailReader, response: Response)
         item = service.mailbox_view(mailbox)
         if user.role != UserRole.ADMIN:
             item["so_leitura"] = True
-            item["pode_responder"] = False
-            item["pode_compor"] = False
+            item["pode_operar"] = acesso.opera_caixa_email(user)
+            item["pode_responder"] = await mail_admin.pode_responder_caixa(session, mailbox, user)
+            item["pode_compor"] = await mail_composer.can_compose(session, mailbox, user)
+            item["pode_gerenciar"] = acesso.opera_caixa_email(user, excluir=True)
         if await mail_admin.tem_politica(session, mailbox.id, user):
             # A concessão é de mensagens, não da lista de aliases das outras lojas.
             item.update(address="", aliases=[], leitura_filtrada=True)
@@ -250,6 +271,61 @@ async def list_messages(
     }
 
 
+@router.get("/mailboxes/{mailbox_id}/trash")
+async def list_trash(
+    mailbox_id: UUID, session: Session, user: MailManager, response: Response,
+    limit: int = Query(default=50, ge=1, le=100),
+    offset: int = Query(default=0, ge=0, le=100_000),
+):
+    await readable_mailbox(session, mailbox_id, user)
+    rows = (await session.scalars(
+        select(MailMessage)
+        .join(MailLixeira, MailLixeira.message_id == MailMessage.id)
+        .where(
+            MailMessage.mailbox_id == mailbox_id,
+            MailLixeira.excluido_em.is_not(None),
+            mail_admin.filtro_mensagem(user, incluir_lixeira=True),
+        )
+        .order_by(MailLixeira.excluido_em.desc(), MailMessage.id.desc())
+        .offset(offset).limit(limit + 1)
+    )).all()
+    response.headers["Cache-Control"] = "no-store"
+    return {"items": [service.message_view(row) for row in rows[:limit]], "more": len(rows) > limit}
+
+
+async def managed_message(session, message_id, user):
+    message = await session.scalar(
+        select(MailMessage).where(
+            MailMessage.id == message_id,
+            mail_admin.filtro_mensagem(user, incluir_lixeira=True),
+        ).with_for_update()
+    )
+    if message is None:
+        raise fail("message_not_found")
+    await readable_mailbox(session, message.mailbox_id, user)
+    return message
+
+
+@router.post("/messages/{message_id}/trash")
+async def trash_message(
+    message_id: UUID, body: ExcluirEmailIn, session: Session, user: MailManager,
+):
+    await managed_message(session, message_id, user)
+    result = await mail_admin.mudar_lixeira(
+        session, message_id, user, excluir=True, motivo=body.motivo,
+    )
+    await session.commit()
+    return result
+
+
+@router.post("/messages/{message_id}/restore")
+async def restore_message(message_id: UUID, session: Session, user: MailManager):
+    await managed_message(session, message_id, user)
+    result = await mail_admin.mudar_lixeira(session, message_id, user, excluir=False)
+    await session.commit()
+    return result
+
+
 @router.get("/messages/{message_id}")
 async def get_message(message_id: UUID, session: Session, user: MailReader, response: Response):
     message, mailbox = await user_message(session, message_id, user, read=True)
@@ -271,7 +347,7 @@ async def get_message(message_id: UUID, session: Session, user: MailReader, resp
         .execution_options(yield_per=1)
     )
     dono = user.role == UserRole.ADMIN
-    responde = dono and await mail_admin.pode_responder_caixa(session, mailbox, user)
+    responde = await mail_admin.pode_responder_caixa(session, mailbox, user)
     pode_compor = await mail_composer.can_compose(session, mailbox, user) if responde else False
     outbox = []
     async for job in outbox_rows:
@@ -334,8 +410,8 @@ async def download_attachment(attachment_id: UUID, session: Session, user: MailR
 
 
 @router.post("/messages/{message_id}/reply", status_code=202)
-async def reply(message_id: UUID, request: Request, session: Session, user: Admin):
-    # A Central exige admin; as regras adicionais de remetente e envio continuam valendo.
+async def reply(message_id: UUID, request: Request, session: Session, user: MailOperator):
+    # Operação explícita; as regras de caixa, remetente e envio continuam valendo.
     message, mailbox = await user_message(session, message_id, user, lock=True, read=True)
     if not await mail_admin.pode_responder_caixa(session, mailbox, user):
         raise fail("mailbox_not_found")
@@ -365,13 +441,13 @@ async def reply(message_id: UUID, request: Request, session: Session, user: Admi
 
 
 @router.post("/outbox/{job_id}/resolve")
-async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, user: Admin):
+async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, user: MailOperator):
     # An administrator checked Tuta; this never resends the message.
     job = await session.get(MailOutbox, job_id)
     mailbox = await session.get(MailMailbox, job.mailbox_id) if job else None
     if job is None or mailbox is None:
         raise fail("job_not_found")
-    dono = service.allowed(mailbox, user)
+    dono = user.role == UserRole.ADMIN
     # Quem só responde (`atendimento_email` ver+editar, 28/10/2026) confere
     # apenas o PRÓPRIO envio: a resposta simples e, desde 29/10/2026, o do
     # compositor (Nova mensagem/encaminhar) enquanto ainda pode compor.
@@ -413,7 +489,7 @@ async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, us
 
 async def compose_mailbox(session, mailbox_id, user, *, lock=False):
     # Who sees the mailbox (404 otherwise); composing is `can_compose`: the
-    # owner/admin, or `atendimento_email` view+edit on the whole mailbox.
+    # admin, or explicit operation permission on the whole mailbox.
     mailbox = await readable_mailbox(session, mailbox_id, user)
     if not await mail_composer.can_compose(session, mailbox, user):
         raise fail("compose_not_allowed", 403)
@@ -431,7 +507,7 @@ async def compose_mailbox(session, mailbox_id, user, *, lock=False):
 async def compose_context(
     mailbox_id: UUID,
     session: Session,
-    user: Admin,
+    user: MailOperator,
     response: Response,
     source_message_id: UUID | None = None,
     action: str = Query("new", pattern="^(new|reply|reply_all|forward)$"),
@@ -447,7 +523,7 @@ async def compose_context(
 
 
 @router.post("/mailboxes/{mailbox_id}/send", status_code=202)
-async def compose_send(mailbox_id: UUID, request: Request, session: Session, user: Admin):
+async def compose_send(mailbox_id: UUID, request: Request, session: Session, user: MailOperator):
     mailbox = await compose_mailbox(session, mailbox_id, user, lock=True)
     body = await limited_body(request, ComposeSendIn, mail_composer.MAX_REQUEST_BYTES)
     try:
@@ -459,7 +535,9 @@ async def compose_send(mailbox_id: UUID, request: Request, session: Session, use
 
 
 @router.get("/mailboxes/{mailbox_id}/outbox")
-async def compose_outbox(mailbox_id: UUID, session: Session, user: Admin, response: Response):
+async def compose_outbox(
+    mailbox_id: UUID, session: Session, user: MailOperator, response: Response,
+):
     await compose_mailbox(session, mailbox_id, user)
     jobs = await session.stream_scalars(
         select(MailOutbox)
@@ -476,7 +554,7 @@ async def compose_outbox(mailbox_id: UUID, session: Session, user: Admin, respon
 
 
 @router.get("/mailboxes/{mailbox_id}/drafts")
-async def list_drafts(mailbox_id: UUID, session: Session, user: Admin, response: Response):
+async def list_drafts(mailbox_id: UUID, session: Session, user: MailOperator, response: Response):
     await compose_mailbox(session, mailbox_id, user)
     drafts = await session.stream_scalars(
         select(MailDraft)
@@ -493,7 +571,7 @@ async def list_drafts(mailbox_id: UUID, session: Session, user: Admin, response:
 
 
 @router.post("/mailboxes/{mailbox_id}/drafts", status_code=201)
-async def create_draft(mailbox_id: UUID, request: Request, session: Session, user: Admin):
+async def create_draft(mailbox_id: UUID, request: Request, session: Session, user: MailOperator):
     mailbox = await compose_mailbox(session, mailbox_id, user, lock=True)
     body = await limited_body(request, ComposeDraftIn, mail_composer.MAX_REQUEST_BYTES)
     count = await session.scalar(
@@ -536,7 +614,7 @@ async def own_draft(session, draft_id, user, *, lock=False):
 
 
 @router.get("/drafts/{draft_id}")
-async def get_draft(draft_id: UUID, session: Session, user: Admin, response: Response):
+async def get_draft(draft_id: UUID, session: Session, user: MailOperator, response: Response):
     draft, mailbox = await own_draft(session, draft_id, user)
     body = ComposeDraftIn.model_validate(decrypt_json(draft.content_enc))
     try:
@@ -548,7 +626,7 @@ async def get_draft(draft_id: UUID, session: Session, user: Admin, response: Res
 
 
 @router.patch("/drafts/{draft_id}")
-async def update_draft(draft_id: UUID, request: Request, session: Session, user: Admin):
+async def update_draft(draft_id: UUID, request: Request, session: Session, user: MailOperator):
     draft, mailbox = await own_draft(session, draft_id, user, lock=True)
     body = await limited_body(request, ComposeDraftIn, mail_composer.MAX_REQUEST_BYTES)
     try:
@@ -562,7 +640,7 @@ async def update_draft(draft_id: UUID, request: Request, session: Session, user:
 
 
 @router.delete("/drafts/{draft_id}", status_code=204)
-async def delete_draft(draft_id: UUID, session: Session, user: Admin):
+async def delete_draft(draft_id: UUID, session: Session, user: MailOperator):
     draft, _ = await own_draft(session, draft_id, user, lock=True)
     await session.delete(draft)
     await session.commit()

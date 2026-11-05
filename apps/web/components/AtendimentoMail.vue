@@ -5,7 +5,7 @@ import type { ContagensDeConversa } from '~/components/AtendimentoMailFilas.vue'
 import type { MailAttachment } from '~/lib/mailHtml'
 import type { ComposeAction, ComposeSource } from '~/lib/mailCompose'
 
-type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null; so_leitura?: boolean; leitura_filtrada?: boolean; pode_responder?: boolean; pode_compor?: boolean }
+type Mailbox = { id: string; label: string; address: string; aliases: string[]; state: string; send_enabled: boolean; can_send: boolean; last_sync_at: string | null; so_leitura?: boolean; leitura_filtrada?: boolean; pode_responder?: boolean; pode_compor?: boolean; pode_operar?: boolean; pode_gerenciar?: boolean }
 type Summary = { id: string; subject: string; from_address: string; from_name: string; received_at: string; direction: string; folder: string; has_attachments: boolean; store?: StoreBadge; folder_id?: string; subject_hidden?: boolean; conversation_id?: string | null }
 // Folders and store badges ("Caixas", 09/10/2026 — the owner: "bring the store
 // name here too; keep it separate and looking like Tuta"). routers/mail_caixa.py:
@@ -55,10 +55,10 @@ const mailbox = computed(() => mailboxes.value.find((item) => item.id === mailbo
 // "Quem mais vê" (09/10/2026): the API marks a mailbox the person only READS
 // (`so_leitura`): no reply, no resolve, no settings, no token.
 const readOnly = computed(() => mailbox.value?.so_leitura === true)
-// A exceção `atendimento_email_leitura` libera somente leitura. Flags antigas
-// de resposta ou composição nunca ampliam uma caixa marcada `so_leitura`.
-const canAnswer = computed(() => !readOnly.value)
-const canCompose = computed(() => !readOnly.value)
+// Operação exige a concessão nova além das capacidades da caixa.
+// A concessão antiga de leitura continua sem permitir qualquer alteração.
+const canAnswer = computed(() => !readOnly.value || (mailbox.value?.pode_operar === true && mailbox.value?.pode_responder === true))
+const canCompose = computed(() => !readOnly.value || (mailbox.value?.pode_operar === true && mailbox.value?.pode_compor === true))
 const messages = ref<Summary[]>([])
 const detail = ref<Detail | null>(null)
 const loading = ref(false)
@@ -157,7 +157,8 @@ const resolving = ref('')
 
 const pending = computed(() => detail.value?.outbox.some((job) => ['queued', 'leased', 'uncertain'].includes(job.status)) ?? false)
 const canReply = computed(() => !deleting.value && canAnswer.value && detail.value?.reply.can_reply && detail.value.reply.send_ready && !pending.value && replyAddresses.value.includes(fromAddress.value))
-const canDelete = computed(() => canAdminister.value && !!detail.value && !readOnly.value && !sending.value && !deleting.value && !resolving.value && !pending.value)
+const canManageMessages = computed(() => (canAdminister.value && !readOnly.value) || mailbox.value?.pode_gerenciar === true)
+const canDelete = computed(() => canManageMessages.value && !!detail.value && !sending.value && !deleting.value && !resolving.value && !pending.value)
 // Uma caixa filtrada não revela os aliases das outras lojas. Quem já podia
 // responder continua com o remetente deste e-mail autorizado no detalhe.
 // The message detail applies strict sender and company mailbox rules. With an
@@ -636,7 +637,7 @@ async function sendReply() {
 
 // A person checked Tuta: did the uncertain reply go out? Never resends.
 async function resolveJob(job: Outbox, sent: boolean) {
-  if (!detail.value || readOnly.value || job.pode_conferir === false || deleting.value || resolving.value) return
+  if (!detail.value || !canAnswer.value || job.pode_conferir === false || deleting.value || resolving.value) return
   const question = sent
     ? 'Confirmar que esta resposta aparece nos Enviados do Tuta?'
     : 'Marcar que esta resposta NÃO saiu?\n\nConfira nos Enviados do Tuta antes: se ela saiu e alguém responder de novo, o cliente recebe duas vezes.'
@@ -671,14 +672,14 @@ async function deleteMessage() {
   ++detailGeneration; ++listGeneration; ++foldersGeneration
   loading.value = false
   try {
-    await api(`/api/atendimento/email/admin/emails/${encodeURIComponent(target.id)}/excluir`, { method: 'POST', body: { motivo: deleteReason.value.trim() || null } })
+    await api(`/api/mail/messages/${encodeURIComponent(target.id)}/trash`, { method: 'POST', body: { motivo: deleteReason.value.trim() || null } })
     if (disposed) return
     ++detailGeneration
     resetList()
     detail.value = null; openedSummary.value = null
     draft.value = ''; draftRequestId.value = ''
     deleteTarget.value = null; deleteReason.value = ''
-    notice.value = 'E-mail excluído do DaVinci. Você pode restaurá-lo em Administração → Lixeira do DaVinci. O original continua no Tuta.'
+    notice.value = 'E-mail excluído do DaVinci. Você pode restaurá-lo na Lixeira desta caixa. O original continua no Tuta.'
   } catch (reason) { if (!disposed) error.value = errorText(reason) }
   finally {
     deleting.value = false
@@ -836,7 +837,7 @@ onBeforeUnmount(() => {
           <select v-model="mailboxId" aria-label="Caixa de e-mail" :disabled="sending || deleting || composerActive" class="max-w-full rounded border bg-background p-2 text-sm"><option v-for="item in mailboxes" :key="item.id" :value="item.id">{{ item.label }}<template v-if="item.address"> · {{ item.address }}</template><template v-else-if="item.leitura_filtrada"> · acesso por lojas</template></option></select>
           <span class="text-sm">{{ states[mailbox.state] || 'Conexão precisa de atenção' }}</span>
           <span class="text-xs text-muted-foreground">Última leitura: {{ date(mailbox.last_sync_at) }}</span>
-          <span v-if="readOnly" class="ml-auto text-xs text-muted-foreground" data-mail-read-only>{{ mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa (sem responder nem configurar).' : 'Você só vê esta caixa (sem responder nem configurar).' }}</span>
+          <span v-if="readOnly" class="ml-auto text-xs text-muted-foreground" data-mail-read-only>{{ canAnswer ? 'Você pode responder e operar os e-mails permitidos desta caixa.' : mailbox.leitura_filtrada ? 'Você vê somente os e-mails permitidos desta caixa (sem responder nem configurar).' : 'Você só vê esta caixa (sem responder nem configurar).' }}</span>
           <button v-if="isAdmin && !readOnly" class="ml-auto rounded border px-3 py-2 text-xs" @click="changeSending">{{ mailbox.send_enabled ? 'Desativar respostas' : 'Permitir respostas humanas' }}</button>
           <button v-if="isAdmin && !readOnly" class="inline-flex items-center gap-1 rounded border px-3 py-2 text-xs" :aria-expanded="configuring" data-mail-configure @click="configuring = !configuring"><Settings2 class="h-3.5 w-3.5" /> Configurar</button>
         </div>
@@ -861,6 +862,8 @@ onBeforeUnmount(() => {
           @active="composerActive = $event"
           @sent="composerSent"
         />
+
+        <AtendimentoMailLixeira v-if="canManageMessages" :key="`trash-${mailbox.id}`" :mailbox-id="mailbox.id" :disabled="sending || deleting || composerActive" @restaurado="refresh" />
 
         <form class="space-y-2" role="search" aria-label="Pesquisar nesta caixa de e-mail" data-mail-search @submit.prevent="submitSearch">
           <div class="flex gap-2">
@@ -968,12 +971,12 @@ onBeforeUnmount(() => {
                 data-mail-open-conversation
                 @click="openConversation"
               ><MessageSquare class="h-3.5 w-3.5" /> Abrir a conversa deste e-mail</button>
-              <div v-if="canAdminister && !readOnly" class="space-y-2 pt-1">
+              <div v-if="canManageMessages" class="space-y-2 pt-1">
                 <button v-if="!deleteTarget" type="button" class="inline-flex items-center gap-1 rounded border px-2 py-1 text-xs text-destructive disabled:opacity-40" :disabled="!canDelete" data-mail-delete-review @click="reviewDelete"><Trash2 class="size-3.5" /> Excluir do DaVinci</button>
                 <p v-if="pending && !deleteTarget" class="text-[11px] text-muted-foreground">Confira a resposta pendente ou em conferência antes de excluir este e-mail.</p>
                 <section v-if="deleteTarget" class="space-y-2 rounded border border-destructive/30 bg-destructive/5 p-3 text-xs" aria-label="Conferir exclusão do e-mail" data-mail-delete-confirm>
                   <p class="break-words font-medium">Excluir do DaVinci: {{ deleteTarget.assunto }}</p>
-                  <p>Este e-mail sai das listas, das conversas e dos e-mails da venda no DaVinci. Você pode restaurá-lo em Administração → Lixeira do DaVinci. O original continua no Tuta.</p>
+                  <p>Este e-mail sai das listas, das conversas e dos e-mails da venda no DaVinci. Você pode restaurá-lo na Lixeira desta caixa. O original continua no Tuta.</p>
                   <p v-if="draft.trim()" class="font-medium">O rascunho desta resposta será descartado ao confirmar.</p>
                   <p v-if="pending" class="font-medium">Há uma resposta pendente ou em conferência. Confira o envio antes de excluir.</p>
                   <label class="block">Motivo (opcional)<input v-model="deleteReason" maxlength="300" class="mt-1 block w-full rounded border bg-background p-2" :disabled="deleting" aria-label="Motivo da exclusão do e-mail" /></label>
@@ -997,7 +1000,7 @@ onBeforeUnmount(() => {
                 <p class="break-all text-xs text-muted-foreground">{{ job.from_address }} → {{ job.to }}</p>
                 <p v-if="job.status === 'failed' && jobFailure(job.error_code)" class="text-xs text-red-700">{{ jobFailure(job.error_code) }}</p>
                 <p class="whitespace-pre-wrap break-words text-sm">{{ job.text }}</p>
-                <div v-if="job.status === 'uncertain' && !readOnly && job.pode_conferir !== false" class="flex flex-wrap items-center gap-2 pt-1" data-mail-resolve>
+                <div v-if="job.status === 'uncertain' && canAnswer && job.pode_conferir !== false" class="flex flex-wrap items-center gap-2 pt-1" data-mail-resolve>
                   <span class="text-xs text-muted-foreground">Conferiu nos Enviados do Tuta?</span>
                   <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving || deleting" @click="resolveJob(job, true)">Saiu</button>
                   <button type="button" class="rounded border px-2 py-1 text-xs" :disabled="!!resolving || deleting" @click="resolveJob(job, false)">Não saiu</button>

@@ -66,6 +66,8 @@ Resource = Literal[
     # Exceção explícita de leitura da Central. Não reativa concessões antigas
     # nem permite enviar/configurar; cada caixa mantém sua lista de leitores.
     "atendimento_email_leitura",
+    # Operação nas caixas já autorizadas; edit envia, delete permite lixeira local.
+    "atendimento_email_operacao",
     # Legacy single-bucket — no longer used by any route after the
     # financeiro_* split below, but kept in the literal so stored
     # permissions JSON containing the old key still validates.
