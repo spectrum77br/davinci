@@ -476,6 +476,19 @@ try {
     return r;
   };
   const resumoLista = (lista) => lista.map((c) => `#${c.n} ${c.tipo}: ${c.rotulo}`);
+  // 05/11 (300121, 302299): clique em caixa e botão sem o `h.click()` do puppeteer.
+  // Ele pergunta antes se a caixa está à vista (IntersectionObserver), e essa
+  // resposta só vem com a janela sendo desenhada. Com a janela escondida no Mac mini
+  // (visibilityState = hidden) ficava 180 s parado, dava "Runtime.callFunctionOn
+  // timed out" e o chat da TikTok fechava por inatividade; só andava se a IA tirasse
+  // um print no meio. Posição + clique do mouse funcionam escondida, como no `ponto`.
+  // A janela não vem pra frente de propósito: a Denúncia usa mouse e janela de verdade.
+  const clicarNa = async (h) => {
+    await h.evaluate((e) => e.scrollIntoView({ block: "center", behavior: "instant" }));
+    const caixa = await h.boundingBox();
+    if (!caixa) throw new Error("a caixa não tem posição na tela");
+    await page.mouse.click(caixa.x + caixa.width / 2, caixa.y + caixa.height / 2);
+  };
 
   if (cmd === "ws") {
     saida(browser.wsEndpoint());
@@ -532,8 +545,7 @@ try {
           }, args[0])
         ).asElement();
         if (h) {
-          await h.evaluate((e) => e.scrollIntoView({ block: "center" }));
-          await h.click();
+          await clicarNa(h);
           r.ok = true;
           r.achados = 1;
           r.quadro = true;
@@ -566,10 +578,10 @@ try {
       process.exitCode = 1;
     } else {
       const h = await alcaDoCampo(r.campo);
-      await h.evaluate((e) => e.scrollIntoView({ block: "center" }));
-      await h.click();
+      await clicarNa(h);
       // apaga o que já estava escrito (repetir o comando não duplica o texto)
       await h.evaluate((e) => {
+        if (e.getRootNode().activeElement !== e) e.focus(); // clique caiu em outra coisa
         if (e.isContentEditable) {
           const s = window.getSelection();
           s.selectAllChildren(e);
