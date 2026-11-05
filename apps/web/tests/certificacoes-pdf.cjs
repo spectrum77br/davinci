@@ -24,11 +24,11 @@ function requests() {
   const save = (id, patch) => new Promise((resolve, reject) => calls.push({ id, patch, resolve, reject }))
   return { calls, save }
 }
-const filename = path.join(__dirname, '../pages/financeiro/suprimentos.vue')
+const filename = path.join(__dirname, '../components/CertificacoesPainel.vue')
 const { descriptor, errors } = parse(fs.readFileSync(filename, 'utf8'), { filename })
 assert.deepEqual(errors, [])
 assert.deepEqual(compileTemplate({ source: descriptor.template.content, filename, id: 'pdf-check' }).errors, [])
-const pageScript = descriptor.scriptSetup.content.replace(/^import .*$/gm, '').replace('await load()', '')
+const pageScript = descriptor.scriptSetup.content.replace(/^import .*$/gm, '').replace('await load()', '').replace(/^defineProps.*$/m, '')
 function page() {
   const { calls, save } = requests()
   const downloads = []

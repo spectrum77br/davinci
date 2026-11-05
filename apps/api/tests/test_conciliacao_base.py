@@ -2034,8 +2034,8 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(
     # data de movimento no exemplo → não é "do dia")
     assert linha["problemas_dia"] == ["1 linha(s) sem dono"] and linha["obs_dia"] == []
     assert linha["eventos_dia"]["estornados"] == 0
-    # bloco Dias: fixo nos 15 dias até ontem (15/10), não no dia pedido; 13/10 com a
-    # jlas2 pendente
+    # bloco Dias: do início da loja (01/10) até ontem (15/10), não no dia pedido; 13/10
+    # com a jlas2 pendente
     dias = corpo["dias"]
     assert len(dias) == 15 and dias[0]["dia"] == "2026-10-15" and dias[-1]["dia"] == "2026-10-01"
     d13 = dias[2]

@@ -71,6 +71,9 @@ assert.doesNotMatch(fonte, /e\.data = JSON\.parse/)
 assert.match(fonte, /legenda_obrigatoria && !legendaFoto\.value\.trim\(\)\) legendaFoto\.value = LEGENDA_NF/)
 // Sem anexo aqui (Amazon, Magalu, pergunta do ML): o clique diz o caminho.
 assert.match(fonte, /toasts\.warning\('A NF não sai pelo DaVinci nesta conversa', motivoSemFoto\.value\)/)
+// O texto obrigatório não é só do ML (Amazon, 05/11/2026): a frase não cita a plataforma.
+assert.match(fonte, /Nesta plataforma o anexo vai junto de um texto/)
+assert.doesNotMatch(fonte, /obrigatório no Mercado Livre/)
 // O botão "NF" e o cartão do rascunho existem; o anexo PDF diz como chega.
 assert.match(fonte, /data-anexar-nf/)
 assert.match(fonte, /data-nf-no-rascunho/)

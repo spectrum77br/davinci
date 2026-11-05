@@ -117,6 +117,25 @@ function isoLocal(d: Date) {
   const p = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
+// '2026-11' → 'Novembro 2026'
+export function tituloMes(mes: string) {
+  const [ano, m] = mes.split('-')
+  const nome = new Date(Number(ano), Number(m) - 1, 1).toLocaleDateString('pt-BR', { month: 'long' })
+  return `${nome.charAt(0).toUpperCase()}${nome.slice(1)} ${ano}`
+}
+
+// Painéis por mês (Chamados e Conciliação): a lista vem do dia mais novo pro mais velho.
+export function porMes<T extends { dia: string }>(dias: T[]): Array<{ mes: string; dias: T[] }> {
+  const saida: Array<{ mes: string; dias: T[] }> = []
+  for (const d of dias) {
+    const mes = d.dia.slice(0, 7)
+    const ultimo = saida[saida.length - 1]
+    if (ultimo?.mes === mes) ultimo.dias.push(d)
+    else saida.push({ mes, dias: [d] })
+  }
+  return saida
+}
+
 export function ontemISO() {
   const d = new Date()
   d.setDate(d.getDate() - 1)

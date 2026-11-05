@@ -8,8 +8,9 @@ aprovadas, TODAS juntas (qualquer uma que falte → fica com a pessoa, com o
 1. Qualquer canal em modo `auto` com o agente ligado — sem lista de lojas
    (complemento do Eduardo: "se eu ativar outra loja ela já deve poder enviar
    a nf automaticamente também") —, nas caixas que recebem o anexo (`CAIXAS`:
-   chat da Shopee e do TikTok como imagem, pós-venda do ML como PDF; Amazon e
-   Magalu fora até terem envio de anexo) e com o assunto `nota_fiscal` MARCADO
+   chat da Shopee e do TikTok como imagem, pós-venda do ML como PDF; Magalu fora
+   até ter envio de anexo, e a Amazon — que tem, pela pessoa — fora porque nada
+   sai sozinho nela: `PLATAFORMAS_SEM_AUTO`) e com o assunto `nota_fiscal` MARCADO
    na loja, como todo assunto do automático (`auto_categorias` e
    `auto_agente` do canal — é o que marcar ao ligar uma loja nova).
 2. O cliente pediu a NF de forma CLARA (`pedido_claro`): verbo de pedido ou

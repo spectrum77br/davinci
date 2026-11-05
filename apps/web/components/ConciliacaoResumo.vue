@@ -4,7 +4,7 @@
 // dos pedidos e a lista "Onde agir hoje" — a mesma que o vigia vai mandar no
 // Threema. O rodapé é o mês até ontem, por marketplace e da empresa inteira.
 import { ChevronLeft, ChevronRight, Loader2, RefreshCw } from 'lucide-vue-next'
-import { fmtDia, fmtDiaHora, fmtHora, fmtMoney, fmtPct, ontemISO, sinal, somaDias } from '~/lib/conciliacao'
+import { fmtDia, fmtDiaHora, fmtHora, fmtMoney, fmtPct, ontemISO, porMes, sinal, somaDias, tituloMes } from '~/lib/conciliacao'
 
 const props = defineProps<{ canEdit: boolean }>()
 const emit = defineEmits<{
@@ -213,6 +213,22 @@ const mesLabel = computed(() => {
 const abertos = ref<Record<string, boolean>>({})
 function alternar(key: string) {
   abertos.value = { ...abertos.value, [key]: !abertos.value[key] }
+}
+// Bloco de dias por mês (05/11, Vinicius): o mês do dia escolhido abre sozinho; o resto
+// começa fechado. O clique em "mostrar"/"esconder" vale até recarregar.
+const mesesDoResumo = computed(() => porMes(dados.value?.dias || []))
+const abertosMes = ref<Record<string, boolean>>({})
+function mesAberto(mes: string) {
+  return abertosMes.value[mes] ?? dados.value?.dia.slice(0, 7) === mes
+}
+function alternarMes(mes: string) {
+  abertosMes.value = { ...abertosMes.value, [mes]: !mesAberto(mes) }
+}
+function somaDosDias(dias: DiaResumo[], f: (d: DiaResumo) => number) {
+  return dias.reduce((s, d) => s + f(d), 0)
+}
+function diasComPendencia(dias: DiaResumo[]) {
+  return dias.filter((d) => d.com_pendencia).length
 }
 // Tabela de lojas (16/10, Vinicius): cada marketplace começa escondido, com o resumo
 // na linha; "mostrar" abre as lojas.
@@ -512,14 +528,14 @@ onMounted(() => {
         </div>
         <div class="flex min-w-0 flex-col rounded-md border bg-card">
           <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
-            <span>Dias — como ficou cada dia das {{ dados.lojas.length }} lojas (últimos {{ dados.dias.length }})</span>
-            <span class="text-[10px] font-normal text-white/80">clique no dia muda a tabela de cima</span>
+            <span>Meses — como ficou cada mês das {{ dados.lojas.length }} lojas</span>
+            <span class="text-[10px] font-normal text-white/80">mostrar abre os dias · clique no dia muda a tabela de cima</span>
           </div>
           <div class="overflow-x-auto">
             <table class="w-full text-xs">
               <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th class="border-b px-2 py-1 text-left">Dia</th>
+                  <th class="border-b px-2 py-1 text-left">Mês / dia</th>
                   <th class="border-b px-2 py-1 text-right">Fechados</th>
                   <th class="border-b px-2 py-1 text-right" title="já contados em Fechados">dos quais sem movimento</th>
                   <th class="border-b px-2 py-1 text-right" title="já contados em Fechados">dos quais aguard. repasse</th>
@@ -528,8 +544,20 @@ onMounted(() => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="d in dados.dias" :key="d.dia" class="cursor-pointer border-b hover:bg-muted/40" :class="d.dia === dados.dia && 'bg-amber-50 dark:bg-amber-950/20'" @click="escolherDia(d.dia)">
-                  <td class="whitespace-nowrap px-2 py-1 font-bold">{{ fmtDia(d.dia + 'T12:00:00') }}<span v-if="d.dia === ontemISO()" class="font-normal text-muted-foreground"> (ontem)</span></td>
+                <template v-for="m in mesesDoResumo" :key="m.mes">
+                <tr class="border-b bg-muted/60 font-bold">
+                  <td class="whitespace-nowrap px-2 py-1">{{ tituloMes(m.mes) }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternarMes(m.mes)">{{ mesAberto(m.mes) ? 'esconder' : 'mostrar' }}</button></td>
+                  <td class="px-2 py-1 text-right tabular-nums">{{ m.dias.length - diasComPendencia(m.dias) }} de {{ m.dias.length }} dias</td>
+                  <td class="px-2 py-1 text-right tabular-nums">{{ somaDosDias(m.dias, (d) => d.sem_movimento) }}</td>
+                  <td class="px-2 py-1 text-right tabular-nums">{{ somaDosDias(m.dias, (d) => d.aguardando_repasse) }}</td>
+                  <td class="px-2 py-1 text-right tabular-nums" :class="diasComPendencia(m.dias) ? 'text-amber-700' : ''">{{ somaDosDias(m.dias, (d) => d.com_pendencia) }}</td>
+                  <td class="px-2 py-1">
+                    <span v-if="diasComPendencia(m.dias)" class="inline-block rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ diasComPendencia(m.dias) }} {{ diasComPendencia(m.dias) === 1 ? 'dia' : 'dias' }} com pendência</span>
+                    <span v-else class="inline-block rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">todos fechados</span>
+                  </td>
+                </tr>
+                <tr v-for="d in m.dias" v-show="mesAberto(m.mes)" :key="d.dia" class="cursor-pointer border-b hover:bg-muted/40" :class="d.dia === dados.dia && 'bg-amber-50 dark:bg-amber-950/20'" @click="escolherDia(d.dia)">
+                  <td class="whitespace-nowrap px-2 py-1 pl-4 font-bold">{{ fmtDia(d.dia + 'T12:00:00') }}<span v-if="d.dia === ontemISO()" class="font-normal text-muted-foreground"> (ontem)</span></td>
                   <td class="px-2 py-1 text-right tabular-nums">{{ d.fechados }}</td>
                   <td class="px-2 py-1 text-right tabular-nums">{{ d.sem_movimento }}</td>
                   <td class="px-2 py-1 text-right tabular-nums">{{ d.aguardando_repasse }}</td>
@@ -541,10 +569,11 @@ onMounted(() => {
                     <span v-if="d.obs.length" class="text-muted-foreground"><span v-if="d.pendentes.length"> · </span>obs: {{ d.obs.join(' · ') }}</span>
                   </td>
                 </tr>
+                </template>
               </tbody>
             </table>
           </div>
-          <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Cada linha é um dia: quantas lojas fecharam, quantas não tiveram movimento, quantas esperam o repasse da TikTok e quantas ainda têm pendência (linha sem dono, saldo diferente, extrato não lido ou pronto pra fechar). "Como ficou" diz o nome das lojas com pendência e a obs do que aconteceu no dia.</div>
+          <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Na linha do mês, Fechados conta os dias sem pendência; as outras colunas somam os dias. Cada dia mostra quantas lojas fecharam, quantas não tiveram movimento, quantas esperam o repasse da TikTok e quantas ainda têm pendência (linha sem dono, saldo diferente, extrato não lido ou pronto pra fechar). "Como ficou" diz o nome das lojas com pendência e a obs do que aconteceu no dia.</div>
           </div>
 
           <!-- 19/10 (Vinicius): o que a plataforma tira SEM pedido tem que aparecer em algum lugar -->

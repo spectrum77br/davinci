@@ -233,7 +233,7 @@ async def test_quais_caixas_aceitam_foto(db, make_user):
     pos, _ = await _cenario(db, make_user, plataforma="ml", canal="pos_venda", externo="p1")
     assert foto.motivo_sem_foto(pos) is None and foto.legenda_obrigatoria(pos)
     amazon, _ = await _cenario(db, make_user, plataforma="amazon", canal="email", externo="a1")
-    assert foto.motivo_sem_foto(amazon)
+    assert "não veio de um comprador" in foto.motivo_sem_foto(amazon)
 
 
 # ─────────────── travas: nada sobe ───────────────
@@ -659,8 +659,8 @@ def _jpgs(n: int) -> list[bytes]:
 def test_quantas_e_como_vao_por_caixa():
     from types import SimpleNamespace
 
-    def conv(plataforma, canal):
-        return SimpleNamespace(plataforma=plataforma, canal=canal)
+    def conv(plataforma, canal, comprador_id=None):
+        return SimpleNamespace(plataforma=plataforma, canal=canal, comprador_id=comprador_id)
 
     assert (
         foto.numa_mensagem(conv("ml", "pos_venda")),
@@ -673,9 +673,12 @@ def test_quantas_e_como_vao_por_caixa():
     for plataforma, canal in (("shopee", "chat"), ("tiktok", "chat"), ("whatsapp", "zap")):
         assert foto.numa_mensagem(conv(plataforma, canal)) is False
         assert foto.max_anexos(conv(plataforma, canal)) == foto.MAX_ANEXOS_DE_UMA_VEZ
-    # Sem anexo aqui (pergunta do ML, Amazon): nenhuma.
+    # Sem anexo aqui (pergunta do ML, e-mail da Amazon sem comprador): nenhuma.
     assert foto.max_anexos(conv("ml", "pergunta")) == 0
     assert foto.max_anexos(conv("amazon", "email")) == 0
+    # A Amazon com o comprador (05/11/2026): todas no mesmo e-mail.
+    relay = "abc@marketplace.amazon.com.br"
+    assert foto.max_anexos(conv("amazon", "email", relay)) == foto.MAX_ANEXOS_NUMA_MENSAGEM
 
 
 async def test_ml_varias_fotos_vao_numa_mensagem_na_ordem(db, make_user, monkeypatch):

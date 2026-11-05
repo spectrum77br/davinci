@@ -66,12 +66,16 @@ def _chave(item: dict[str, Any]) -> str:
     )
 
 
+# O bloco "Dias" traz meses inteiros desde 05/11; o vigia segue olhando 15 dias.
+_DIAS_OLHADOS = 15
+
+
 def _dias_antigos_abertos(resumo: dict[str, Any]) -> list[dict[str, Any]]:
     """Itens no formato do "Onde agir" pros dias ANTES de ontem que o bloco "Dias" ainda
     mostra pendentes por trabalho de pessoa no Extrato (16/10, revisão: o cashback de
     14/10 do mini sumia da Ouvidoria no dia seguinte sem ninguém ter resolvido)."""
     itens: list[dict[str, Any]] = []
-    for bloco in resumo.get("dias") or []:
+    for bloco in (resumo.get("dias") or [])[:_DIAS_OLHADOS]:
         dia = str(bloco.get("dia") or "")
         if not dia or dia >= str(resumo.get("dia") or ""):
             continue  # ontem já veio pelo "Onde agir"

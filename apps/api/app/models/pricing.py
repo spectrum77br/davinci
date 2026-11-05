@@ -260,6 +260,14 @@ class PricingProduct(Base, TimestampMixin):
     # do pedido no Bling pra essa tag ANTES da emissão de NF, se o SKU alvo
     # existir no Bling com saldo virtual suficiente. NULL = sem prioridade.
     prioridade_estoque: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    # Certificado do produto (Tabela de Preços › Produtos, migration 0457):
+    # escolhido na coluna Modelo. NULL = ainda sem vínculo — a tela tenta o
+    # código no fim do nome ("… - USM003"), como no 1º dia.
+    certificacao_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("financeiro_suprimentos.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
 
 class PricingOverride(Base, TimestampMixin):

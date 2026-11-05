@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -244,11 +244,26 @@ class PricingProductPatch(BaseModel):
     fotos_url: str | None = None
     product_id: UUID | None = None
     prioridade_estoque: str | None = None
+    # Coluna Modelo da aba Produtos: a linha da Certificações escolhida.
+    # null = sem vínculo gravado (volta a valer o código no nome).
+    certificacao_id: UUID | None = None
 
     @field_validator("prioridade_estoque")
     @classmethod
     def _valida_prioridade(cls, v: str | None) -> str | None:
         return _norm_prioridade_estoque(v)
+
+
+class CertificacaoDoProdutoOut(BaseModel):
+    """A linha da Certificações do produto: a gravada (certificacao_id) ou a
+    achada pelo código no nome (services/certificacao_produto.py). Só saída."""
+
+    id: UUID
+    produto: str | None = None
+    modelo: str | None = None
+    certificado: str | None = None  # anatel / inmetro / isento
+    numero: str | None = None
+    fim: date | None = None  # validade (coluna Fim da Certificações)
 
 
 class PricingProductOut(PricingProductBase):
@@ -269,6 +284,12 @@ class PricingProductOut(PricingProductBase):
     embalagens_path: str | None = None
     embalagens_count: int | None = None
     midias_contadas_em: datetime | None = None
+    # Colunas Modelo / Nº do certificado / Validade da aba Produtos
+    # (05/11/2026): o certificado gravado (certificacao_id) ou, sem ele, o
+    # achado pelo código no nome (certificacao_pelo_nome=True).
+    certificacao_id: UUID | None = None
+    certificacao: CertificacaoDoProdutoOut | None = None
+    certificacao_pelo_nome: bool = False
 
 
 class PricingProductImportItem(BaseModel):

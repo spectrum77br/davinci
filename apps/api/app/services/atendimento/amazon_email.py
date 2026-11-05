@@ -158,6 +158,8 @@ _LOCAIS_SEM_RESPOSTA = ("donotreply", "do-not-reply", "noreply", "no-reply")
 
 # ID de pedido da Amazon: 3-7-7 dígitos (ex.: 701-1234567-1234567).
 RE_PEDIDO = re.compile(r"\b\d{3}-\d{7}-\d{7}\b")
+# `conversa.dados`: True = o pedido da conversa só veio do texto do comprador.
+CHAVE_PEDIDO_DO_TEXTO = "amazon_pedido_do_texto"
 
 # E-mail sem nº do pedido e sem In-Reply-To conhecido cai na conversa mais
 # recente do mesmo endereço de retransmissão — se ela teve movimento neste
@@ -772,6 +774,8 @@ class EmailAmazon:
     # Do rodapé: o "não precisa de resposta" da Amazon e o id do caso.
     link_sem_resposta: str | None = None
     caso_id: str | None = None
+    # O nº do pedido veio SÓ do que o comprador escreveu (`_pedido_do_email`).
+    pedido_do_texto: bool = False
 
     @property
     def conversa_externo_id(self) -> str:
@@ -829,6 +833,27 @@ def _data(msg: Message) -> datetime | None:
     return quando.astimezone(UTC)
 
 
+def _pedido_do_email(assunto: str, corpo: str) -> tuple[str | None, bool]:
+    """(o nº do pedido, veio SÓ do que o comprador escreveu?).
+
+    O assunto e o MODELO da Amazon (fora do miolo) mandam: é a Amazon dizendo de
+    que pedido é a mensagem (medido em 05/11/2026 na caixa, desde 01/10: as 63
+    mensagens de comprador com pedido trazem o nº no modelo). O número só no
+    miolo é o que o comprador digitou: liga a conversa para a pessoa ver o
+    pedido, mas a NF não sai por ele (`danfe.nf_da_conversa`) — a DANFE tem
+    nome, endereço e CPF, e o número digitado pode ser de outra pessoa.
+    """
+    achado = RE_PEDIDO.search(assunto)
+    if achado is None:
+        fatias = _fatiar(corpo)
+        texto = unicodedata.normalize("NFC", corpo or "").replace("\r\n", "\n").replace("\r", "\n")
+        achado = RE_PEDIDO.search(texto.replace(fatias.miolo, " ", 1) if fatias.miolo else texto)
+    if achado is not None:
+        return achado.group(0), False
+    do_texto = RE_PEDIDO.search(corpo)
+    return (do_texto.group(0), True) if do_texto else (None, False)
+
+
 def interpretar_email(bruto: bytes, *, uid: int | None = None) -> EmailAmazon | None:
     """E-mail cru → mensagem de comprador, ou None se não é de comprador.
 
@@ -848,7 +873,7 @@ def interpretar_email(bruto: bytes, *, uid: int | None = None) -> EmailAmazon | 
     plain, html, anexos = _partes_de_texto(msg)
     corpo = _corpo(plain, html)
     link_sem_resposta, caso_id = _links_do_rodape(plain, html, endereco)
-    achado = RE_PEDIDO.search(assunto) or RE_PEDIDO.search(corpo)
+    pedido, pedido_do_texto = _pedido_do_email(assunto, corpo)
     return EmailAmazon(
         link_sem_resposta=link_sem_resposta,
         caso_id=caso_id,
@@ -857,7 +882,8 @@ def interpretar_email(bruto: bytes, *, uid: int | None = None) -> EmailAmazon | 
         remetente_nome=_nome_do_comprador(nome),
         tag=_tag_do_destinatario(msg),
         assunto=assunto,
-        pedido=achado.group(0) if achado else None,
+        pedido=pedido,
+        pedido_do_texto=pedido_do_texto,
         enviada_em=_data(msg),
         texto=extrair_mensagem(corpo),
         anexos=anexos,
@@ -1146,8 +1172,13 @@ def montar_resposta(
     pedido: str | None,
     em_resposta_a: str | None,
     message_id: str | None = None,
+    anexos: Sequence[tuple[str, bytes, str]] = (),
 ) -> EmailMessage:
     """O e-mail de resposta, texto puro, pronto para o SMTP.
+
+    `anexos` = (nome, bytes, tipo): a NF em PDF, foto (05/11/2026). A Amazon
+    repassa o anexo ao comprador junto da mensagem (PDF, JPG e PNG; a mensagem
+    inteira até 10 MB — `foto.MAX_BYTES_EMAIL_AMAZON`).
 
     - De: o e-mail AUTORIZADO no Seller Central (de outro endereço, a Amazon
       descarta sem avisar); Para: o endereço de retransmissão do comprador.
@@ -1171,6 +1202,9 @@ def montar_resposta(
         msg["References"] = anterior
     # quoted-printable: acento chega inteiro mesmo em servidor sem 8BITMIME.
     msg.set_content(corpo, subtype="plain", charset="utf-8", cte="quoted-printable")
+    for nome, dados, mime in anexos:
+        principal, _, sub = mime.partition("/")
+        msg.add_attachment(dados, maintype=principal, subtype=sub, filename=nome)
     return msg
 
 
@@ -2621,6 +2655,12 @@ def _dados_do_email(em: EmailAmazon, atuais: dict, *, mais_nova: bool) -> dict:
     if em.caso_id and (mais_nova or not atuais.get("amazon_caso_id")):
         dados["amazon_caso_id"] = em.caso_id
         dados["amazon_link_caso"] = em.link_caso
+    # O pedido da conversa só pelo que o comprador digitou segura a NF; o modelo da
+    # Amazon, em qualquer e-mail da conversa, confirma o pedido de vez.
+    if em.pedido and not em.pedido_do_texto:
+        dados[CHAVE_PEDIDO_DO_TEXTO] = False
+    elif em.pedido_do_texto and CHAVE_PEDIDO_DO_TEXTO not in atuais:
+        dados[CHAVE_PEDIDO_DO_TEXTO] = True
     return dados
 
 
@@ -2902,8 +2942,13 @@ async def enviar_texto(
     integration: Integration | None,
     cliente: Any,
     texto: str,
+    *,
+    anexos: Sequence[tuple[str, bytes, str]] = (),
 ) -> ResultadoEnvio:
     """Responde por SMTP ao endereço de retransmissão. Nunca levanta.
+
+    `anexos` (05/11/2026, a NF): vêm prontos do `foto.enviar_imagem`, na mesma
+    mensagem do texto — é o mesmo envio, com a mesma régua de resultado.
 
     ok → `externo_id` = o nosso Message-ID. Recusa do servidor (código de
     erro, antes ou no DATA) → ok=False. Queda/timeout depois de começar o
@@ -2925,6 +2970,7 @@ async def enviar_texto(
             texto=texto,
             pedido=conversa.pedido_marketplace,
             em_resposta_a=dados.get("ultimo_message_id"),
+            anexos=anexos,
         )
     except (ValueError, TypeError) as exc:
         return ResultadoEnvio(ok=False, erro=f"email_invalido: {type(exc).__name__}")

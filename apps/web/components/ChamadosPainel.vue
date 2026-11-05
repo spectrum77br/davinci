@@ -2148,7 +2148,8 @@ async function confirmarExcluir() {
           <span class="text-muted-foreground">a Revisão mostra como estão hoje<template v-if="diaResumo.concluidos"> · {{ diaResumo.concluidos }} já {{ diaResumo.concluidos === 1 ? 'concluído' : 'concluídos' }}</template></span>
           <button type="button" class="ml-auto text-primary underline" @click="diaEscolhido = null">voltar pra lista de hoje</button>
         </div>
-        <div class="max-h-[60vh] overflow-auto focus:outline-none" tabindex="0">
+        <!-- 10 linhas de 40px + o cabeçalho: o painel de meses fica à vista; o resto rola aqui dentro. -->
+        <div class="max-h-[448px] overflow-auto focus:outline-none" tabindex="0">
           <table class="w-full min-w-[1240px] table-fixed border-collapse text-[11.5px]">
             <colgroup>
               <col class="w-[48px]"><col class="w-[60px]"><col class="w-[96px]"><col class="w-[17.5%]">

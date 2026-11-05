@@ -685,14 +685,94 @@ type PricingProduct = {
   embalagens_count: number | null
   midias_contadas_em: string | null
   prioridade_estoque: string | null
+  // Colunas Modelo / Nº do certificado / Validade (05/11/2026): a linha da
+  // Certificações achada pelo código no nome ("… - USM003"). Só leitura.
+  certificacao?: CertificacaoDoProduto | null
+  // Vínculo gravado (migration 0457), escolhido na coluna Modelo. Sem ele,
+  // o servidor tenta o código no nome e marca certificacao_pelo_nome.
+  certificacao_id?: string | null
+  certificacao_pelo_nome?: boolean
   created_at: string
   updated_at: string
+}
+type CertificacaoDoProduto = {
+  id: string
+  produto: string | null
+  modelo: string | null
+  certificado: string | null
+  numero: string | null
+  fim: string | null
 }
 
 // Tags de estoque válidas pra coluna Prioridade (mesmo conjunto dos sufixos
 // de SKU: dg053.ci, dg053.sp…). Eduardo (2026-08-27): "a tag que eu colocar
 // la, o sku com a tag, ja deve trocar, porque a prioridade e ele".
 const TAGS_PRIORIDADE = ['ci', 'pi', 'ra', 'sa', 'sp', 'us', 'cd'] as const
+
+// Certificado na aba Produtos (Celular e Eletro; Mala não tem certificado).
+// O servidor acha a linha da Certificações pelo código no nome do produto.
+const mostraCertificado = computed(() => department.value !== 'mala')
+function certNumero(c: CertificacaoDoProduto | null | undefined): string {
+  if (!c) return '—'
+  if (c.numero?.trim()) return c.numero
+  return c.certificado === 'isento' ? 'Isento' : 'sem número'
+}
+// Validade em DIAS que faltam (Eduardo, 05/11/2026: "coloque a validade por
+// dias"); a data fica no balão. Conta pelo dia de hoje em São Paulo.
+function certDias(c: CertificacaoDoProduto | null | undefined): number | null {
+  if (!c?.fim) return null
+  const dia = (iso: string) => { const [a, m, d] = iso.split('-').map(Number); return Date.UTC(a, m - 1, d) }
+  return Math.round((dia(c.fim) - dia(isoToday())) / 86_400_000)
+}
+function certValidade(c: CertificacaoDoProduto | null | undefined): string {
+  const n = certDias(c)
+  if (n === null) return '—'
+  if (n === 0) return 'vence hoje'
+  if (n < 0) return `vencido há ${-n} ${n === -1 ? 'dia' : 'dias'}`
+  return `${n.toLocaleString('pt-BR')} ${n === 1 ? 'dia' : 'dias'}`
+}
+// Mesmas cores da Certificações: vermelho vencido, âmbar a menos de 30 dias.
+function certValidadeClasse(c: CertificacaoDoProduto | null | undefined): string {
+  const n = certDias(c)
+  if (n === null) return ''
+  if (n < 0) return 'text-red-700 font-medium'
+  return n < 30 ? 'text-amber-700 font-medium' : ''
+}
+// Coluna Modelo (05/11/2026, à tarde): os nomes foram limpos ("uranyx A17 pro
+// max 12.128", sem o "- USM003") e o certificado passou a ser escolhido aqui
+// e gravado na linha. Opções = as linhas da Certificações.
+const certOpcoes = ref<CertificacaoDoProduto[]>([])
+async function loadCertOpcoes() {
+  try {
+    certOpcoes.value = await api<CertificacaoDoProduto[]>('/api/pricing/certificacoes')
+  } catch { /* sem opções: a coluna segue mostrando o que veio no produto */ }
+}
+function certOpcaoRotulo(c: CertificacaoDoProduto): string {
+  const modelo = c.modelo?.trim() || 'sem modelo'
+  return `${modelo} — ${c.produto || 'sem produto'}${c.numero?.trim() ? ` (${c.numero})` : ''}`
+}
+async function setCertificacao(p: PricingProduct, id: string) {
+  const antes = { certificacao_id: p.certificacao_id, certificacao: p.certificacao, certificacao_pelo_nome: p.certificacao_pelo_nome }
+  const escolhido = certOpcoes.value.find((c) => c.id === id) ?? null
+  Object.assign(p, { certificacao_id: id || null, certificacao: escolhido, certificacao_pelo_nome: false }) // otimista
+  try {
+    const updated = await api<PricingProduct>(`/api/pricing/products/${p.id}`, {
+      method: 'PATCH',
+      body: { certificacao_id: id || null },
+    })
+    Object.assign(p, updated)
+    flash(p.id, 'certificacao_id')
+  } catch (e: any) {
+    Object.assign(p, antes)
+    productsErr.value = e?.data?.detail?.code ?? 'save_failed'
+  }
+}
+function certTitulo(c: CertificacaoDoProduto | null | undefined): string {
+  if (!c) return 'Nenhum certificado da Certificações com o código do nome deste produto (ex.: "… - USM003").'
+  const tipo = c.certificado ? ` · ${c.certificado === 'isento' ? 'isento' : c.certificado.toUpperCase()}` : ''
+  const fim = c.fim ? ` Válido até ${c.fim.split('-').reverse().join('/')}.` : ''
+  return `Da Certificações: ${c.produto || 'sem produto'}${tipo}.${fim} Muda lá, muda aqui.`
+}
 
 const products = ref<PricingProduct[]>([])
 const productsLoading = ref(false)
@@ -806,6 +886,7 @@ async function loadProducts() {
   productsErr.value = null
   try {
     products.value = await api<PricingProduct[]>('/api/pricing/products')
+    if (canEditProdutos.value) void loadCertOpcoes()
   } catch (e: any) {
     productsErr.value = e?.data?.detail?.code ?? 'load_failed'
   } finally {
@@ -4987,6 +5068,21 @@ watch(department, async () => {
                 <th class="text-left px-2 py-2 font-medium border-b border-border">Descrição</th>
                 <th class="text-left px-2 py-2 font-medium border-b border-border">Modelo</th>
               </template>
+              <template v-if="mostraCertificado">
+                <th
+                  class="text-left px-2 py-2 font-medium border-b border-border min-w-[90px]"
+                  title="Modelo do certificado: escolha a linha da Certificações (Importação › Certificações) e o Nº e a Validade vêm junto. Sem escolha, vale o código no fim do nome (ex.: “… - USM003”)."
+                  data-col-cert-modelo
+                >Modelo</th>
+                <th
+                  class="text-left px-2 py-2 font-medium border-b border-border min-w-[120px]"
+                  title="Número do certificado (Anatel/Inmetro), copiado da Certificações."
+                >Nº certificado</th>
+                <th
+                  class="text-right px-2 py-2 font-medium border-b border-border w-24"
+                  title="Quantos dias faltam para o certificado vencer (coluna Fim da Certificações; a data aparece ao passar o mouse). Vermelho = vencido; âmbar = vence em menos de 30 dias."
+                >Validade</th>
+              </template>
               <th v-for="k in kitCount" :key="`kith-${k}`" class="text-right px-2 py-2 font-medium border-b border-border w-24" :title="kitTitulo(k)">
                 Kit {{ k }}
                 <span v-if="kitNome(k)" class="block text-[9px] font-normal text-muted-foreground leading-tight whitespace-normal">{{ kitNome(k) }}</span>
@@ -5013,12 +5109,12 @@ watch(department, async () => {
           </thead>
           <tbody>
             <tr v-if="productsLoading && !products.length">
-              <td colSpan="18" class="text-center py-6 text-muted-foreground">
+              <td colSpan="999" class="text-center py-6 text-muted-foreground">
                 <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
               </td>
             </tr>
             <tr v-else-if="!productsCurrent.length && !showAddProd">
-              <td colSpan="18" class="text-center py-6 text-muted-foreground">
+              <td colSpan="999" class="text-center py-6 text-muted-foreground">
                 {{ filtroMidias || searchProdutos.trim() ? 'Nenhum produto com esse filtro.' : 'Nenhum produto neste departamento.' }}
               </td>
             </tr>
@@ -5057,6 +5153,10 @@ watch(department, async () => {
                 <td class="border border-border px-1 py-1">
                   <input v-model="newProd.model" type="text" placeholder="Modelo" class="w-full text-xs border rounded px-1.5 py-1 bg-background" />
                 </td>
+              </template>
+              <!-- Certificado: vem sozinho pelo código no nome, depois de salvar. -->
+              <template v-if="mostraCertificado">
+                <td v-for="i in 3" :key="`newcert-${i}`" class="border border-border px-1 py-1 text-center text-xs text-muted-foreground">—</td>
               </template>
               <td v-for="k in kitCount" :key="`newkit-${k}`" class="border border-border px-1 py-1">
                 <input v-model="(newProd as any)[`cost_kit${k}`]" type="text" inputmode="decimal" :placeholder="k === 1 ? '0.00' : ''" class="w-full text-xs border rounded px-1.5 py-1 bg-background text-right" />
@@ -5173,6 +5273,49 @@ watch(department, async () => {
                   />
                   <span v-else>{{ p.model || '—' }}</span>
                 </td>
+              </template>
+              <template v-if="mostraCertificado">
+                <td
+                  class="border border-border text-xs"
+                  :class="[
+                    canEditProdutos ? 'px-1 py-1' : 'px-2 py-1.5',
+                    { 'text-muted-foreground': !p.certificacao, 'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'certificacao_id') },
+                  ]"
+                  :title="certTitulo(p.certificacao) + (p.certificacao_pelo_nome ? ' Achado pelo código no nome; escolha na lista para gravar.' : '')"
+                  data-cert-modelo
+                >
+                  <select
+                    v-if="canEditProdutos"
+                    class="w-full max-w-[150px] text-xs border rounded px-1 py-0.5 bg-background cursor-pointer"
+                    :class="p.certificacao_pelo_nome ? 'italic text-muted-foreground' : ''"
+                    data-cert-escolha
+                    @change="setCertificacao(p, ($event.target as HTMLSelectElement).value)"
+                  >
+                    <!-- :selected por opção (como a Prioridade): as opções chegam
+                         depois dos produtos e o :value no select não se reaplica. -->
+                    <option value="" :selected="!p.certificacao_id">{{ p.certificacao_pelo_nome && p.certificacao ? `${p.certificacao.modelo || p.certificacao.produto} (pelo nome)` : '—' }}</option>
+                    <!-- Lista ainda carregando (ou falhou): o gravado aparece mesmo assim. -->
+                    <option
+                      v-if="p.certificacao_id && p.certificacao && !certOpcoes.some((c) => c.id === p.certificacao_id)"
+                      :value="p.certificacao_id"
+                      selected
+                    >{{ certOpcaoRotulo(p.certificacao) }}</option>
+                    <option v-for="c in certOpcoes" :key="c.id" :value="c.id" :selected="c.id === p.certificacao_id">{{ certOpcaoRotulo(c) }}</option>
+                  </select>
+                  <template v-else>{{ p.certificacao ? (p.certificacao.modelo || p.certificacao.produto || '—') : '—' }}</template>
+                </td>
+                <td
+                  class="border border-border px-2 py-1.5 text-xs font-mono whitespace-nowrap"
+                  :class="{ 'text-muted-foreground': !p.certificacao?.numero }"
+                  :title="certTitulo(p.certificacao)"
+                  data-cert-numero
+                >{{ certNumero(p.certificacao) }}</td>
+                <td
+                  class="border border-border px-2 py-1.5 text-xs whitespace-nowrap text-right tabular-nums"
+                  :class="p.certificacao?.fim ? certValidadeClasse(p.certificacao) : 'text-muted-foreground'"
+                  :title="certTitulo(p.certificacao)"
+                  data-cert-validade
+                >{{ certValidade(p.certificacao) }}</td>
               </template>
               <td
                 v-for="k in kitCount" :key="`kit-${k}`"

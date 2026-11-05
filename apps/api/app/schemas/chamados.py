@@ -159,13 +159,18 @@ class RevisaoOut(BaseModel):
 
 
 class RevisaoDiaOut(BaseModel):
-    """Uma linha do painel Dias. Abertos, novos e concluídos saem dos próprios
-    chamados; a revisão só existe do dia em que a foto começou (`tem_registro`)."""
+    """Uma linha do painel por mês. Abertos, novos e concluídos saem dos próprios
+    chamados; a revisão só existe do dia em que a foto começou (`tem_registro`).
+    `lucro` e `prejuizo` (negativo) somam o valor informado ao concluir, no dia da
+    conclusão; `acumulado` é lucro + prejuízo desde o dia 1 do mês."""
 
     dia: date
     abertos: int
     novos: int
     concluidos: int
+    lucro: float = 0
+    prejuizo: float = 0
+    acumulado: float = 0
     tem_registro: bool = False
     conferido: int = 0
     revisar: int = 0
@@ -178,11 +183,6 @@ class RevisaoDiaOut(BaseModel):
 
 class RevisaoDiasOut(BaseModel):
     dias: list[RevisaoDiaOut]
-    novos: int
-    concluidos: int
-    novos_por_dia: float
-    # Quanto os abertos andaram no período (positivo = acumulou).
-    saldo: int
 
 
 class JuridicoIn(BaseModel):
@@ -808,6 +808,11 @@ class AgentChamadoAnaliseOut(BaseModel):
     # 25/09: todos os arquivos do chamado (sem conteúdo) — a IA escolhe as
     # fotos do "Upload Evidence" da Shopee e baixa por /agent/anexos/{id}.
     anexos: list[ChamadoAnexoOut] = []
+    # 05/11 (300121): a TikTok não abre link do MEGA e pediu o arquivo do vídeo; a IA
+    # só via o link que estivesse no texto da abertura. `link_envio` = como embalamos,
+    # `link_abertura` = abertura do pacote devolvido. A IA baixa e anexa.
+    link_envio: str | None = None
+    link_abertura: str | None = None
     replicas_robo: int = 0
     analises: int = 0
 

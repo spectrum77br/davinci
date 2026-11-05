@@ -76,7 +76,9 @@ nova):
 
 Mais: `instrucao` (pedido de pessoa ainda não atendido), `bloqueio` (nossa fala
 presa porque a plataforma não libera pela API) e `valor_sugerido`. Quando o
-chamado não tem foto, `anexos` traz as fotos da linha da devolução.
+chamado não tem foto, `anexos` traz as fotos da linha da devolução. Em caso de
+devolução vêm também `link_envio` (vídeo de como embalamos) e `link_abertura`
+(vídeo da abertura do pacote devolvido); vazio = não temos esse vídeo.
 
 ## Como decidir — nesta ordem
 
@@ -143,6 +145,7 @@ ferramentas/tela <perfil> anexar "#4" "fotos e videos subir chamado/envio 290968
 ferramentas/tela - entrada                       # arquivos da pasta de entrada (nome, MB)
 ferramentas/tela - encolher "fotos e videos subir chamado/x.MOV" 720   # cópia menor em tmp/ (720, 540 ou 480)
 ferramentas/tela - apagar "fotos e videos subir chamado/x.MOV"        # só depois de enviado
+ferramentas/tela - mega "https://mega.nz/file/…#…"   # baixa o vídeo pra tmp/ (devolve arquivo e MB)
 ferramentas/tela <perfil> captcha                # tem "não sou robô" na tela?
 ferramentas/tela <perfil> vivo                   # responde "Sim" ao aviso de inatividade do chat
 ferramentas/tela <perfil> js "expressão"         # só pra ler/depurar
@@ -173,6 +176,14 @@ python3 ferramentas/adspower.py fechar <perfil>
   de `tmp/`. Depois de **enviado com prova na tela**, `apagar` o arquivo da
   entrada (regra do Vinicius: nada de cliente fica no Mac) e diga no `resumo` que
   apagou. Não enviou? Não apague.
+- **A plataforma pediu vídeo e não aceita link** (regra do Vinicius, 05/11; vale sem
+  instrução de pessoa): baixe o vídeo do chamado com `mega`. Use o `link_envio`
+  quando pedirem como embalamos ou a etiqueta do envio, e o `link_abertura` quando
+  pedirem como o produto chegou. Reduza com `encolher` até caber no limite da caixa
+  (comece em 720; o arquivo de `tmp/` serve), anexe, confira no print que entrou e
+  envie. O que está em `tmp/` a rodada apaga; o da pasta de entrada, `apagar` depois
+  de enviado. Se o chamado não tiver o vídeo, diga isso em vez de insistir: `humano`
+  dizendo qual vídeo falta. Vídeo grande demora a baixar: espere o comando terminar.
 - **Vídeo na contestação da TikTok** (Ver detalhes da contestação › "Compartilhe
   mais informações"): a caixa só aceita .jpg/.jpeg/.png/.mp4 e recusa vídeo
   grande **sem avisar** (07/10, 290968: 33 MB recusado, 17 MB aceito). Vídeo

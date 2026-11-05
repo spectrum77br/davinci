@@ -219,16 +219,45 @@ async def test_resposta_lida_depois_da_analise_acorda_a_ia(client, db):
     assert not await _ia_ve(db, ch)
 
 
-async def test_outra_plataforma_segue_pela_hora_da_tela(client, db):
-    """O ajuste da IA é só da Amazon: ML e Shopee continuam como estavam."""
-    ch = await _caso_amazon(db, plataforma="shopee")
-    agora = datetime.now(UTC)
-    await _analise(db, ch, agora - timedelta(hours=1))
+async def _fala_antiga(db, ch: Chamado, quando: datetime, *, canal: str) -> ChamadoMensagem:
+    """Fala que chegou agora, com a hora da plataforma antes da última análise."""
     m = svc.nova_mensagem(
         ch, texto=RESPOSTA, tipo="resposta", direcao="recebida", autor_nome="x", status="registrada"
     )
-    m.created_at = m.enviada_at = agora - timedelta(hours=2)
+    m.canal = canal
+    m.created_at = m.enviada_at = quando
     db.add(m)
+    await db.commit()
+    return m
+
+
+@pytest.mark.parametrize("plataforma", ["shopee", "Mercado Livre"])
+async def test_fala_lida_na_tela_acorda_a_ia_no_ml_e_na_shopee(db, plataforma):
+    ch = await _caso_amazon(db, plataforma=plataforma)
+    agora = datetime.now(UTC)
+    await _analise(db, ch, agora - timedelta(hours=1))
+    await _fala_antiga(db, ch, agora - timedelta(hours=2), canal="robo")
+    assert await _ia_ve(db, ch)
+
+
+async def test_fala_da_api_segue_pela_hora_da_plataforma(db):
+    """A fala da API é regravada quando o link assinado muda: pela hora da gravação
+    ela acordaria a IA a cada passada (TikTok, 303842)."""
+    ch = await _caso_amazon(db, plataforma="tiktok")
+    agora = datetime.now(UTC)
+    await _analise(db, ch, agora - timedelta(hours=1))
+    await _fala_antiga(db, ch, agora - timedelta(hours=2), canal="api")
+    assert not await _ia_ve(db, ch)
+
+
+async def test_lixeirinha_nao_acorda_a_ia(db):
+    """Esconder a fala mexe na linha, e isso não é resposta nova."""
+    ch = await _caso_amazon(db)
+    agora = datetime.now(UTC)
+    m = await _fala_antiga(db, ch, agora - timedelta(hours=2), canal="robo")
+    await _analise(db, ch, datetime.now(UTC) + timedelta(seconds=1))
+    assert not await _ia_ve(db, ch)
+    m.excluida_at = datetime.now(UTC) + timedelta(seconds=2)
     await db.commit()
     assert not await _ia_ve(db, ch)
 

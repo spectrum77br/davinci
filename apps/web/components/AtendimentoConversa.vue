@@ -2728,7 +2728,7 @@ async function enviarFoto(opcoes?: { confirmar?: boolean; so?: number }) {
   if (!d || enviandoFoto.value || motivoSemFoto.value) return
   const legenda = legendaFoto.value.trim()
   if (envioFoto.value?.legenda_obrigatoria && !legenda) {
-    toasts.error('No Mercado Livre o anexo vai junto de um texto', 'Escreva uma frase para acompanhar o anexo.')
+    toasts.error('Nesta plataforma o anexo vai junto de um texto', 'Escreva uma frase para acompanhar o anexo.')
     return
   }
   const todos = aEnviar.value
@@ -3928,7 +3928,7 @@ watch(() => props.conversaId, (novo, velho) => {
               v-model="legendaFoto"
               :maxlength="envioFoto?.legenda_max || limite || 350"
               class="h-7 w-full rounded-md border bg-background px-2 text-xs"
-              :placeholder="envioFoto?.legenda_obrigatoria ? 'Texto que vai junto da foto (obrigatório no Mercado Livre)' : 'Legenda (opcional) — vai junto da foto'"
+              :placeholder="envioFoto?.legenda_obrigatoria ? 'Texto que vai junto do anexo (obrigatório aqui)' : 'Legenda (opcional) — vai junto da foto'"
               aria-label="texto que vai junto da foto"
             />
             <div v-if="motivoSemFoto" class="text-amber-800 dark:text-amber-300">{{ motivoSemFoto }}</div>

@@ -2486,7 +2486,12 @@ async def _chamar_plataforma_foto(
         # Cinto: o Zap sem o destino das travas nunca cai em outro adaptador.
         return ResultadoEnvio(ok=False, erro="zap_sem_destino")
     try:
-        cliente = await clientes.cliente_da_integracao(integration)
+        # Amazon: o anexo vai no e-mail (SMTP), como o texto — sem a API da loja.
+        cliente = (
+            None
+            if conversa.plataforma == "amazon"
+            else await clientes.cliente_da_integracao(integration)
+        )
     except Exception as e:  # noqa: BLE001
         return ResultadoEnvio(ok=False, erro=f"cliente_indisponivel: {type(e).__name__}")
     # Reclamação (28/10/2026): o anexo vai na mensagem ao comprador/mediador.

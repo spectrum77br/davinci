@@ -139,6 +139,14 @@ def _saida_normal(xml: bytes | None) -> bool:
 
 async def nf_da_conversa(session: AsyncSession, conversa: AtendimentoConversa) -> NfDoPedido:
     """A nota cheia autorizada do pedido da conversa; levanta `NfIndisponivel`."""
+    if isinstance(conversa.dados, dict) and conversa.dados.get("amazon_pedido_do_texto") is True:
+        # Amazon (05/11/2026): o nº só veio do que o comprador escreveu, sem o modelo
+        # da Amazon confirmar — pode ser o pedido de outra pessoa (a DANFE tem CPF).
+        raise NfIndisponivel(
+            "nf_pedido_do_texto",
+            "O pedido desta conversa veio do texto do comprador, sem a Amazon confirmar. "
+            "Confira no Seller Central de quem é o pedido e anexe pelo botão Anexar.",
+        )
     pedido = await _pedido_bling_da_conversa(session, conversa)
     if not pedido:
         raise NfIndisponivel(

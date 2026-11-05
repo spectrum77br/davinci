@@ -679,6 +679,8 @@ async def test_primeira_rodada_so_leitura_e_cada_email_na_sua_conta(
     assert maria.comprador_nome == "Maria Silva"
     assert maria.pedido_marketplace == PEDIDO_KFA
     assert maria.dados == {
+        # O pedido veio do modelo/assunto da Amazon: confirmado (a NF pode sair).
+        amazon_email.CHAVE_PEDIDO_DO_TEXTO: False,
         "assunto": f"Pergunta sobre o pedido {PEDIDO_KFA}",
         "ultimo_message_id": "<m1@amazon.com.br>",
     }

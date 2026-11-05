@@ -9,7 +9,7 @@ const { parse, compileTemplate } = require('vue/compiler-sfc')
 const transpile = source => ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText
-const filename = path.join(__dirname, '../pages/financeiro/suprimentos.vue')
+const filename = path.join(__dirname, '../components/CertificacoesPainel.vue')
 const { descriptor, errors } = parse(fs.readFileSync(filename, 'utf8'), { filename })
 assert.deepEqual(errors, [])
 const compiled = compileTemplate({ source: descriptor.template.content, filename, id: 'anatel-check' })
@@ -17,8 +17,9 @@ assert.deepEqual(compiled.errors, [])
 const rendered = {}
 new Function('exports', 'require', transpile(compiled.code))(rendered, require)
 const utilitySource = fs.readFileSync(path.join(__dirname, '../utils/certificacoesAutosave.ts'), 'utf8')
-const pageScript = descriptor.scriptSetup.content.replace(/^import .*$/gm, '').replace('await load()', '')
+const pageScript = descriptor.scriptSetup.content.replace(/^import .*$/gm, '').replace('await load()', '').replace(/^defineProps.*$/m, '')
 const exportsForTest = `return {
+  embutido: false,
   rows, mobileTableMode, loading, errorText, statusError, syncMessage, exporting, adding, synchronizing,
   anatelStatus, selectedRow, detailsDialog, rowBusy, busy, hasBusyRow, canEdit, canDelete, canAttach,
   inmetroStatus, inmetroStatusError, inmetroSyncMessage, inmetroSyncError, synchronizingInmetro,
