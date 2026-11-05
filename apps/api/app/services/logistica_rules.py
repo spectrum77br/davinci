@@ -749,16 +749,15 @@ def retorno_em_transito(plataforma: str | None, status: dict[str, str] | None) -
 # 290327 voltou dia 09/09 e a aba continuava contando "25d" como se estivesse
 # na rua). Dois caminhos, porque a devolução do ML tem dois formatos: o envio
 # ORIGINAL que volta (`ship_substatus = returned`, caso do 290327) e o envio da
-# DEVOLUÇÃO do claim (`return_status = DELIVERED`). No TikTok o caso fechado já
-# significa item recebido — EXCETO quando o caso é só reembolso (return_type
-# REFUND): fechou com o dinheiro devolvido e nenhum pacote a caminho. A Shopee
-# fica DE FORA de propósito: o vocabulário dela (PROCESSING/JUDGING/ACCEPTED/
-# REFUND_PAID) fala do CASO, não do pacote — melhor a coluna vazia que uma
-# data inventada.
+# DEVOLUÇÃO do claim (`return_status = DELIVERED`). Shopee e TikTok ficam DE
+# FORA de propósito: o vocabulário deles fala do CASO, não do pacote — melhor a
+# coluna vazia que uma data inventada. No TikTok, caso concluído quer dizer
+# reembolso pago, e a plataforma paga sozinha com o pacote na rua (301193,
+# 05/11: tela "Reembolso concluído" + logística "Em trânsito"; 300899, Correios
+# "Objeto em transferência"). A chegada deles vem de `pacote_entregue_em`.
 _SHIP_SUBSTATUS_CHEGOU = frozenset({"returned"})
 _RETURN_STATUS_CHEGOU: dict[str, frozenset[str]] = {
     "ml": frozenset({"DELIVERED"}),
-    "tiktok": frozenset(_TIKTOK_RETURN_CONCLUIDO),
     "amazon": frozenset({"DELIVERED"}),  # relatório de devoluções / 17track da volta
 }
 
@@ -787,8 +786,6 @@ def data_retorno_concluido(
     p = (plataforma or "").strip().lower()
     if p in _ML_PLATAFORMAS:
         chave = "ml"
-    elif p in _TIKTOK_PLATAFORMAS:
-        chave = "tiktok"
     elif p in _AMAZON_PLATAFORMAS:
         chave = "amazon"
     else:
@@ -804,8 +801,6 @@ def data_retorno_concluido(
         sub = str(ms.get("ship_substatus") or "").strip().lower()
         if sub in _SHIP_SUBSTATUS_CHEGOU:
             return _carimbo("ship_substatus")
-    if chave == "tiktok" and _tiktok_so_reembolso(ms):
-        return None
     # ML com revisão (`intermediate_check`): a perna atual vai pro galpão do
     # ML e "delivered" ali é o pacote em Cajamar — a loja só recebe na perna
     # seguinte (`return_from_triage` → seller_address), que troca o

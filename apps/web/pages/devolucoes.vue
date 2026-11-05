@@ -2734,7 +2734,7 @@ async function backfillAddresses() {
           <option value="15">parados 15+ dias</option>
           <option value="30">parados 30+ dias</option>
         </select>
-        <select v-model="acompChegadaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Devolvido = a plataforma confirmou que o pacote de volta chegou aqui (coluna Chegou em). Não Devolvido = sem confirmação ainda, não quer dizer que está a caminho.">
+        <select v-model="acompChegadaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Devolvido = a plataforma ou o rastreio confirmou que o pacote de volta chegou aqui (coluna Chegou em). Não Devolvido = sem confirmação ainda, não quer dizer que está a caminho.">
           <option value="all">Todos Status</option>
           <option value="chegou">Devolvido</option>
           <option value="pendente">Não Devolvido</option>
@@ -2769,7 +2769,7 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[45px]">Qtd</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[125px]" title="Dia em que o pedido entrou em Aguardando Devolução">Em devolução desde</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]" title="Há quantos dias o pedido está aguardando devolução">Dias</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Dia em que o marketplace confirmou que o pacote de volta chegou aqui. Vazio = ainda não chegou (ou a plataforma não informa).">Chegou em</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Dia em que a plataforma ou o rastreio confirmou que o pacote de volta chegou aqui. Vazio = sem confirmação ainda. Reembolso pago ou caso fechado não contam como chegada.">Chegou em</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-red-50 dark:bg-red-900/20" title="Até quando a plataforma espera uma resposta da loja neste caso (TikTok: confirmar/recusar o pacote recebido, responder ao reembolso; Shopee: conferir o pacote recebido em 3 dias, enviar evidências, responder à proposta). Mercado Livre: revisar a devolução recebida — prazo calculado, entrega + 3 dias). Passado o prazo ela decide sozinha. Vermelho = menos de 24 h ou vencido. Passe o mouse na célula pra ver o que fazer.">Prazo p/ responder</th>
               <!-- Reembolso (17/09): "estamos com o dinheiro ainda ou já devolveu
                    pro cliente?" — Sim = saiu do nosso (valor e data embaixo);
@@ -2851,7 +2851,7 @@ async function backfillAddresses() {
                 <span
                   v-if="row.devolucao_chegou_em"
                   class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
-                  title="O marketplace já confirmou que o pacote voltou pra você"
+                  title="A plataforma ou o rastreio confirmou que o pacote voltou pra você"
                 >
                   <CheckCircle2 class="size-3" />
                   {{ fmtDateOnly(row.devolucao_chegou_em) }}

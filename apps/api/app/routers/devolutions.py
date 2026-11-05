@@ -845,10 +845,10 @@ def _data_entrada(
 
 # Status da devolução (devolucao_rastreio.devolucao_status_auto) que já
 # significam "o pacote chegou aqui" — o outro caminho da mesma pergunta, pra
-# quando o sinal veio da returns API e não do envio da Logística.
+# quando o sinal veio da returns API e não do envio da Logística. TikTok fica de
+# fora: caso concluído é reembolso pago, não pacote recebido (301193, 05/11).
 _STATUS_AUTO_CHEGOU = {
     "ml": {"DELIVERED"},
-    "tiktok": {"RETURN_OR_REFUND_REQUEST_SUCCESS", "RETURN_OR_REFUND_REQUEST_COMPLETE"},
     "amazon": {"DELIVERED"},  # relatório de devoluções (02/10)
 }
 # `return_type` em que NÃO vem pacote (TikTok REFUND; Shopee needs_logistics
@@ -908,6 +908,11 @@ def _chegou_em(
     (`reverse_logistics_status = LOGISTICS_DELIVERY_DONE`): o sync grava esse
     instante em `pacote_entregue_em` e ele manda aqui, por ser a fonte mais
     direta (Eduardo, 10/09, pedido 291516).
+
+    TikTok (05/11, pedido 301193): só `pacote_entregue_em`, que vem do rastreio
+    da volta. O caso concluído não prova chegada: a plataforma aprova sozinha e
+    paga o cliente com o pacote ainda em trânsito. Rastreio que não é dos
+    Correios não tem quem carimbe, e a coluna fica vazia.
 
     ML com revisão (Vinicius 19/09, 2000014922944893 e mais 3): a perna atual
     vai pro GALPÃO do ML (`devolucao_destino_auto = warehouse`) — "entregue"
