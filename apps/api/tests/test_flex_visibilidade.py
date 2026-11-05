@@ -1,10 +1,11 @@
-"""Quem vê o Flex (`flex_usuarios`, Eduardo 05/10/2026: "por enquanto somente
-os usuários heisenberg e o thorfinn podem ver").
+"""Quem vê o Flex: só admin ativo (Eduardo, 05/11/2026: "libere o flex somente
+para os admin"; de 05/10 a 05/11 era a lista `flex_usuarios` — heisenberg e
+thorfinn).
 
-Para quem não está na lista — inclusive admin — o Flex não existe: toda rota
-/api/flex/* é o 404 de rota desconhecida, a Logística não tem `?envio=flex`
-nem o selo (`envio_flex`/`envio_tipo` saem vazios) e o Controle de Estoque não
-marca pedido Flex.
+Para quem não é admin o Flex não existe: toda rota /api/flex/* é o 404 de rota
+desconhecida, a Logística não tem `?envio=flex` nem o selo
+(`envio_flex`/`envio_tipo` saem vazios) e o Controle de Estoque não marca
+pedido Flex.
 """
 
 from __future__ import annotations
@@ -16,28 +17,40 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import Settings, get_settings
+from app.config import Settings
 from app.models import BlingOrder, FlexPedido, Logistica, UserRole, UserStatus
 from app.services import flex_config
 
+# Usuário comum com tudo que as telas pedem — o que barra o Flex é o papel.
+PERMS = {
+    "logistica": {"view": True, "edit": True},
+    "controle_estoque": {"view": True, "edit": True},
+}
+
 
 async def _pessoa(db, make_user, nome, *, role=UserRole.ADMIN, status=UserStatus.ACTIVE):
-    u = await make_user(role=role, status=status)
+    u = await make_user(role=role, status=status, permissions=PERMS)
     u.name = nome
     await db.commit()
     await db.refresh(u)
     return u
 
 
-@pytest.fixture
-def lista(monkeypatch):
-    monkeypatch.setattr(get_settings(), "flex_usuarios", " Heisenberg, thorfinn ,")
+def test_lista_de_nomes_saiu():
+    # A regra é o papel, não o nome: a chave velha do .env não volta a valer.
+    assert "flex_usuarios" not in Settings.model_fields
+    assert not hasattr(flex_config, "usuarios")
 
 
-def test_padrao_ninguem_ve():
-    assert Settings.model_fields["flex_usuarios"].default == ""
-    assert flex_config.usuarios("") == frozenset()
-    assert flex_config.usuarios(" Heisenberg, thorfinn ,") == {"heisenberg", "thorfinn"}
+def test_pode_ver_so_admin_ativo():
+    class U:
+        def __init__(self, role, status=UserStatus.ACTIVE):
+            self.role, self.status, self.name = role, status, "heisenberg"
+
+    assert flex_config.pode_ver(U(UserRole.ADMIN)) is True
+    assert flex_config.pode_ver(U(UserRole.USER)) is False
+    assert flex_config.pode_ver(U(UserRole.ADMIN, UserStatus.SUSPENDED)) is False
+    assert flex_config.pode_ver(None) is False
 
 
 ROTAS = [
@@ -55,20 +68,22 @@ ROTAS = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("metodo", "rota"), ROTAS)
-async def test_admin_fora_da_lista_recebe_404_de_rota_que_nao_existe(
-    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable, lista, metodo, rota
+async def test_quem_nao_e_admin_recebe_404_de_rota_que_nao_existe(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable, metodo, rota
 ):
-    auth_as(await _pessoa(db, make_user, "eduardo felipe"))
+    # Usuário comum, mesmo com a permissão da Logística e o nome da lista velha.
+    auth_as(await _pessoa(db, make_user, "thorfinn", role=UserRole.USER))
     r = await client.request(metodo, rota)
     assert r.status_code == 404
     assert r.json() == {"detail": "Not Found"}
 
 
 @pytest.mark.asyncio
-async def test_quem_esta_na_lista_ve(
-    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable, lista
+async def test_admin_ve(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable
 ):
-    auth_as(await _pessoa(db, make_user, "HEISENBERG"))
+    # Qualquer admin — não só os nomes da lista velha.
+    auth_as(await _pessoa(db, make_user, "joana dark"))
     assert (await client.get("/api/flex/acesso")).json() == {
         "ok": True,
         # O local de saída (de fábrica): os textos da Logística dizem de onde sai.
@@ -76,22 +91,14 @@ async def test_quem_esta_na_lista_ve(
         "lote": "sp",
     }
     assert (await client.get("/api/flex/config")).status_code == 200
-    auth_as(await _pessoa(db, make_user, "thorfinn", role=UserRole.USER))
-    # Na lista, mas as rotas continuam pedindo a permissão da Logística.
-    assert (await client.get("/api/flex/acesso")).status_code == 200
-    assert (await client.get("/api/flex/config")).status_code == 403
 
 
 @pytest.mark.asyncio
-async def test_na_lista_mas_suspenso_ou_lista_vazia_nao_ve(
-    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable, monkeypatch
+async def test_admin_suspenso_nao_ve(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable
 ):
-    monkeypatch.setattr(get_settings(), "flex_usuarios", "heisenberg")
     auth_as(await _pessoa(db, make_user, "heisenberg", status=UserStatus.SUSPENDED))
-    assert (await client.get("/api/flex/acesso")).status_code == 404
-    monkeypatch.setattr(get_settings(), "flex_usuarios", "")
-    auth_as(await _pessoa(db, make_user, "heisenberg"))
-    assert (await client.get("/api/flex/acesso")).status_code == 404
+    assert (await client.get("/api/flex/acesso")).status_code in (401, 403, 404)
 
 
 @pytest.mark.asyncio
@@ -125,10 +132,10 @@ async def _linhas_logistica(db: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_logistica_sem_selo_e_sem_aba_para_quem_nao_ve(
-    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable, lista
+    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable
 ):
     await _linhas_logistica(db)
-    auth_as(await _pessoa(db, make_user, "eduardo felipe"))
+    auth_as(await _pessoa(db, make_user, "eduardo felipe", role=UserRole.USER))
     r = await client.get("/api/logistica?plataforma=ml")
     assert r.status_code == 200
     por_pedido = {c["pedido_bling"]: c for c in r.json()}
@@ -141,7 +148,7 @@ async def test_logistica_sem_selo_e_sem_aba_para_quem_nao_ve(
 
 @pytest.mark.asyncio
 async def test_logistica_com_selo_para_quem_ve(
-    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable, lista
+    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable
 ):
     await _linhas_logistica(db)
     auth_as(await _pessoa(db, make_user, "heisenberg"))
@@ -157,7 +164,7 @@ async def test_logistica_com_selo_para_quem_ve(
 
 @pytest.mark.asyncio
 async def test_controle_de_estoque_so_marca_flex_para_quem_ve(
-    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable, lista
+    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable
 ):
     d = date(2026, 5, 28)
     db.add_all(
@@ -165,7 +172,7 @@ async def test_controle_de_estoque_so_marca_flex_para_quem_ve(
             BlingOrder(
                 bling_id=940001,
                 numero="940001",
-                item_codigo="sku-1",
+                item_codigo="a003.ci",
                 item_index=0,
                 situacao="15",
                 em_andamento_data=d,
@@ -176,10 +183,13 @@ async def test_controle_de_estoque_so_marca_flex_para_quem_ve(
     await db.commit()
     url = "/api/estoque/pedidos?data_inicio=2026-05-28&data_fim=2026-05-28"
 
-    auth_as(await _pessoa(db, make_user, "eduardo felipe"))
+    comum = await _pessoa(db, make_user, "eduardo felipe", role=UserRole.USER)
+    comum.stock_tags = ["ci"]  # o Controle de Estoque pede uma tag a quem não é admin
+    await db.commit()
+    auth_as(comum)
     r = await client.get(url)
     assert r.status_code == 200, r.text
-    assert {linha["flex"] for linha in r.json()["data"]} == {False}
+    assert [linha["flex"] for linha in r.json()["data"]] == [False]
 
     auth_as(await _pessoa(db, make_user, "thorfinn"))
     r = await client.get(url)

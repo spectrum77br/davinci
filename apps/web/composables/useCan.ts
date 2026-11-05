@@ -32,6 +32,7 @@ export type Resource =
   | 'atendimento_email'
   | 'atendimento_email_aba'
   | 'atendimento_email_leitura'
+  | 'atendimento_email_operacao'
   | 'sincronizacoes'
   | 'sync_logs'
   | 'integracoes'
@@ -107,7 +108,7 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     resources: [
       'devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados',
       'garantias', 'garantias_atendimento', 'garantias_cpf',
-      'atendimento_email', 'atendimento_email_aba', 'atendimento_email_leitura',
+      'atendimento_email', 'atendimento_email_aba', 'atendimento_email_leitura', 'atendimento_email_operacao',
     ],
   },
   {
@@ -198,6 +199,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   atendimento_email: 'Atendimento — aba E-mail (desde 30/10/2026 só admin: esta permissão não abre mais a aba)',
   atendimento_email_aba: 'Atendimento — ver a aba E-mail (só ler, nas lojas da pessoa; as ações seguem de admin)',
   atendimento_email_leitura: 'Atendimento — caixa de e-mail (somente leitura)',
+  atendimento_email_operacao: 'Atendimento — operar e-mail (editar: enviar; excluir: lixeira local)',
   sincronizacoes: 'Sincronizações',
   sync_logs: 'Sync Logs',
   integracoes: 'Integrações',

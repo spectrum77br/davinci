@@ -263,6 +263,8 @@ app.include_router(nfse_router.router_desbloqueio)  # POST /api/nfse/unlock (sem
 app.include_router(nfse_router.router_arquivos)  # PDF/XML: a chave OU o link de 60 s
 app.include_router(nfse_router.router)
 app.include_router(nfse_compras_router.router)  # Contabilidade › Compra (mesma trava)
+# 04/11/2026: robô da compra (/api/nf-cadastro/agent/compras/*), FORA da senha extra
+app.include_router(nfse_compras_router.agent_router)
 app.include_router(redes_sociais_router.router)
 app.include_router(email_padroes_router.router)
 app.include_router(marca_emails_router.router)

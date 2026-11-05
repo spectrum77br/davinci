@@ -124,7 +124,9 @@ def test_todas_as_rotas_da_emissao_exigem_a_chave():
     assert len(rotas) >= 25, len(rotas)
     for r in rotas:
         deps = [d.call for d in r.dependant.dependencies]
-        if r.path.endswith(("/pdf", "/xml")):
+        # O XML e a DANFE (PDF) da NF de compra (04/11) ficam atrás da chave inteira,
+        # como a planilha.
+        if r.path.endswith(("/pdf", "/xml")) and not r.path.startswith("/api/nfse/compras/"):
             # PDF/XML: a chave OU o link de 60 s daquele arquivo.
             assert any(getattr(d, "__qualname__", "").startswith("_trava_arquivo") for d in deps), (
                 r.path

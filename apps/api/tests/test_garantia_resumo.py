@@ -1,15 +1,17 @@
 """Resumo do Painel de Garantia (28/10/2026): a garantia POR PRODUTO — uma
 linha por produto da Tabela de Preços (o modelo, com as cores juntas), as
-vendas com garantia e os PEDIDOS de garantia (a porcentagem da tela é pediram ÷
-vendidas), e o total por departamento (Celular, Eletro, Acessórios) pela
-categoria do item no pedido do Bling — a mesma do Faturamento."""
+vendas com garantia e o SALDO delas, os PEDIDOS de garantia (de onde vieram) e
+a manutenção com o GASTO da tela Reembolso; e o total por departamento.
+
+As 3 partes (04/11/2026): o Resumo é só do admin, os departamentos são os da
+Tabela de Preços (Celular, Mala, Eletro — a raiz do segmento da linha; fora da
+Tabela, a maioria das vendas) e a % da tela é gasto ÷ saldo × 100."""
 
 import uuid
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
 
 from app.models import (
     BlingOrder,
@@ -47,17 +49,37 @@ def _hoje(monkeypatch):
     monkeypatch.setattr(svc, "hoje", lambda: HOJE)
 
 
+@pytest.fixture(autouse=True)
+def _mapa_novo():
+    """O mapa garantia → linha → departamento é guardado por 60 s: cada teste
+    começa sem ele."""
+    resumo.limpar_cache()
+    yield
+    resumo.limpar_cache()
+
+
 def test_departamento_pela_categoria_e_pela_familia():
+    # 04/11/2026: Celular, Mala e Eletro (o acessório do celular é Celular).
+    assert resumo.DEPARTAMENTOS == {"celular": "Celular", "mala": "Mala", "eletro": "Eletro"}
+    assert list(resumo.DEPARTAMENTOS) == ["celular", "mala", "eletro"]
     assert resumo.departamento_da_categoria("Celular Kit") == "celular"
     assert resumo.departamento_da_categoria("Celular Usado") == "celular"
+    assert resumo.departamento_da_categoria("Acessórios Celular") == "celular"
     assert resumo.departamento_da_categoria("Eletro") == "eletro"
-    assert resumo.departamento_da_categoria("Acessórios Celular") == "acessorios"
-    assert resumo.departamento_da_categoria("Mala Kit") == "outros"
+    assert resumo.departamento_da_categoria("Mala Kit") == "mala"
+    assert resumo.departamento_da_categoria("Embalagem") is None
     assert resumo.departamento_da_categoria("  ") is None
     assert resumo.departamento_da_familia("dg101.pi") == "celular"
+    assert resumo.departamento_da_familia("a001.sp") == "celular"
     assert resumo.departamento_da_familia("u015") == "eletro"
-    assert resumo.departamento_da_familia("a001.sp") == "acessorios"
-    assert resumo.departamento_da_familia("b021") == "outros"
+    assert resumo.departamento_da_familia("b021") == "mala"
+    assert resumo.departamento_da_familia("bp3.sp") == "mala"
+    assert resumo.departamento_da_familia("x99") is None
+    # A venda: a categoria do pedido, a do cadastro, a família; sem nada, Celular.
+    assert resumo.departamento_da_venda("Eletro Kit", "Mala", "dg053") == "eletro"
+    assert resumo.departamento_da_venda("Embalagem", "Mala", "dg053") == "mala"
+    assert resumo.departamento_da_venda(None, None, "b021") == "mala"
+    assert resumo.departamento_da_venda(None, None, "zz9") == "celular"
     assert resumo.produto_base("dg053.sp+a001.sp") == "dg053"
     assert resumo.produto_base("dg053.ci") == "dg053"
     # Voltagem e outro produto não são lote: ficam separados.
@@ -81,26 +103,46 @@ def test_departamento_pela_categoria_e_pela_familia():
 
 
 async def _garantia(
-    db, numero, sku, descricao, categoria=None, *, entrega=date(2026, 10, 5), nf=None, pedido=None
+    db,
+    numero,
+    sku,
+    descricao,
+    categoria=None,
+    *,
+    entrega=date(2026, 10, 5),
+    nf=None,
+    pedido=None,
+    base=1000,
+    comissao=None,
+    frete=None,
+    custo=None,
+    compra=datetime(2026, 10, 1, tzinfo=UTC),
+    situacao="15",
 ):
     db.add(
         BlingOrder(
             numero=numero,
             numeroloja=f"MKT{numero}",
             loja="L1",
-            data=datetime(2026, 10, 1, tzinfo=UTC),
+            data=compra,
             total=1000,
-            situacao="15",
+            situacao=situacao,
             item_index=0,
             item_codigo=sku,
             item_descricao=descricao,
             item_quantidade=1,
+            itemvalor=base,
+            valorbase=base,
+            taxacomissao=comissao,
+            custofrete=frete,
+            preco_custo=custo,
             categoria_nome=categoria,
         )
     )
     g = Garantia(
         origem="robo",
         pedido_bling=numero,
+        pedido_marketplace=f"MKT{numero}",
         nf_numero=nf or ("9" + numero[-3:]),
         cliente_nome="Cliente",
         cpf=_cpf(),
@@ -118,11 +160,17 @@ async def _garantia(
     return g
 
 
-async def _tabela(db, dono, *linhas):
-    """Linhas da Tabela de Preços: (skus separados por vírgula, nome)."""
-    seg = Segment(name="Celular", slug=f"celular-{dono.id.hex[:6]}")
+async def _raiz(db, slug, pai=None) -> Segment:
+    seg = Segment(name=slug.title(), slug=slug, parent_id=pai.id if pai else None)
     db.add(seg)
     await db.flush()
+    return seg
+
+
+async def _tabela(db, dono, *linhas, segmento=None):
+    """Linhas da Tabela de Preços: (skus separados por vírgula, nome) — na raiz
+    "celular" (o departamento), ou no `segmento` dado."""
+    seg = segmento or await _raiz(db, "celular")
     for skus, nome in linhas:
         db.add(PricingProduct(user_id=dono.id, sku=skus, name=nome, segment_id=seg.id))
     await db.commit()
@@ -135,28 +183,44 @@ async def test_resumo_por_produto(client, db, make_user, auth_as):
     db.add(ProductCategory(bling_category_id=8680318, name="Celular"))
     db.add(Product(user_id=dono.id, sku="dg101.pi", name="Uranyx T8", category="8680318"))
     await db.commit()
-    # A Tabela de Preços: o A17 com as cores juntas; o kit não rouba o SKU puro.
+    # A Tabela de Preços (04/11/2026): o departamento é a RAIZ do segmento —
+    # o fone no segmento "acessorios" debaixo de "celular" é Celular.
+    celular = await _raiz(db, "celular")
+    acessorios = await _raiz(db, "acessorios", celular)
+    eletro = await _raiz(db, "eletro")
+    mala = await _raiz(db, "mala")
+    # O A17 com as cores juntas; o kit não rouba o SKU puro.
     await _tabela(
         db,
         dono,
         ("dg052,dg053,dg054", "uranyx A17 pro max 12.128"),
         ("dg053+a003", "kit A17 + fone"),
-        ("u015", "airfryer 4L"),
+        segmento=celular,
     )
-    await _garantia(
+    await _tabela(db, dono, ("a001", "fone com fio"), segmento=acessorios)
+    await _tabela(db, dono, ("u015", "airfryer 4L"), segmento=eletro)
+    await _tabela(db, dono, ("b021", "mala de bordo"), segmento=mala)
+    g1 = await _garantia(
         db,
         "300001",
         "dg053.sp+a001.sp",
         "A17 Pro Max - Laranja + Fone",
         "Celular Kit",
         pedido="mensagem",
+        comissao=150,
+        frete=50,
     )
-    await _garantia(db, "300002", "dg054.ci", "A17 Pro Max - Branco", "Celular")
+    await _garantia(db, "300002", "dg054.ci", "A17 Pro Max - Branco", "Celular", base=900)
     g3 = await _garantia(
         db, "300003", "dg101.pi", "Uranyx T8 - Preto", None, entrega=None, pedido="sac"
     )
     g4 = await _garantia(db, "300004", "u015", "Air Fryer 4L", "Eletro", pedido="atendimento")
-    await _garantia(db, "300005", "a001.sp", "Fone com fio", None)  # sem categoria nenhuma
+    await _garantia(db, "300005", "a001.sp", "Fone com fio", None)
+    await _garantia(db, "300006", "b021", "Mala de bordo", "Mala", pedido="devolucao")
+    # Fora da Tabela, a maioria das vendas decide: 2 Mala × 1 Eletro.
+    await _garantia(db, "300007", "u777", "Mala grande", "Mala Kit")
+    await _garantia(db, "300008", "u777.sp", "Mala grande", "Mala")
+    await _garantia(db, "300009", "u777", "Mala grande", "Eletro", situacao="12")
     db.add(
         GarantiaAtendimento(
             garantia_id=g4.id,
@@ -176,64 +240,106 @@ async def test_resumo_por_produto(client, db, make_user, auth_as):
     r = await client.post("/api/garantias/resumo", json={})
     assert r.status_code == 200, r.text
     h = r.json()
-    assert (h["vendidas"], h["pediram"]) == (5, 3)
-    # As pílulas: o total por departamento, em ordem de pedidos.
-    assert [(d["chave"], d["vendidas"], d["pediram"]) for d in h["departamentos"]] == [
-        ("celular", 3, 2),
-        ("eletro", 1, 1),
-        ("acessorios", 1, 0),
-    ]
-    por = {p["chave"].split(":", 1)[0] + ":" + p["skus"][0]: p for p in h["produtos"]}
-    a17 = next(p for p in h["produtos"] if p["skus"] == ["dg052", "dg053", "dg054"])
+    assert (h["vendidas"], h["pediram"], h["ve_valores"]) == (9, 4, True)
+    por = {p["skus"][0]: p for p in h["produtos"]}
+    a17, t8, fone, ar, mala_b, u777 = (
+        por["dg052"],
+        por["dg101"],
+        por["a001"],
+        por["u015"],
+        por["b021"],
+        por["u777"],
+    )
     assert (a17["nome"], a17["na_tabela"], a17["departamento"]) == (
         "uranyx A17 pro max 12.128",
         True,
         "celular",
     )
-    assert (a17["vendidas"], a17["pediram"], a17["origens"]["mensagem"]) == (2, 1, 1)
-    assert a17["status"]["ativa"] == 1 and len(a17["pedidos"]) == 1
-    # Fora da Tabela de Preços: pelo SKU, com a descrição da venda.
-    t8 = por["sku:dg101"]
-    assert (t8["na_tabela"], t8["nome"], t8["pediram"]) == (False, "Uranyx T8 - Preto", 1)
-    assert t8["status"]["aguardando_entrega"] == 1 and t8["pedidos"] == [g3.id]
-    ar = next(p for p in h["produtos"] if p["skus"] == ["u015"])
-    assert (ar["departamento"], ar["com_atendimento"], ar["atendimentos_hardware"]) == (
+    assert (fone["departamento"], ar["departamento"], mala_b["departamento"]) == (
+        "celular",
         "eletro",
-        1,
-        1,
+        "mala",
     )
-    # Em ordem de pedidos; o produto sem pedido fica no fim.
-    assert h["produtos"][-1]["pediram"] == 0
-    # O número da célula abre só os pedidos dele (30/10/2026): os ids por
-    # coluna da tela — o "Outros" junta atendimento, cadastro à mão e equipe.
-    assert a17["pedidos_por_coluna"] == {"ativa": a17["pedidos"], "mensagem": a17["pedidos"]}
-    assert t8["pedidos_por_coluna"] == {"aguardando": [g3.id], "sac": [g3.id]}
-    assert ar["pedidos_por_coluna"] == {
-        "ativa": [g4.id],
-        "outros": [g4.id],
-        "atendimentos": [g4.id],
-    }
-    # O número da célula é o tamanho da lista que ela abre.
+    # Fora da Tabela de Preços: pelo SKU, com a descrição da venda.
+    assert (t8["na_tabela"], t8["nome"], t8["departamento"]) == (
+        False,
+        "Uranyx T8 - Preto",
+        "celular",
+    )
+    assert (u777["na_tabela"], u777["departamento"], u777["vendidas"]) == (False, "mala", 3)
+    # As pílulas: os três departamentos sempre, nesta ordem (a soma das linhas).
+    assert [(d["chave"], d["nome"], d["vendidas"], d["pediram"]) for d in h["departamentos"]] == [
+        ("celular", "Celular", 4, 2),
+        ("mala", "Mala", 4, 1),
+        ("eletro", "Eletro", 1, 1),
+    ]
+    # O SALDO de todas as vendas: base − comissão − frete (o A17: 800 + 900);
+    # o pedido cancelado (12) não tem saldo.
+    assert (a17["saldo"], u777["saldo"], ar["saldo"]) == (1700.0, 2000.0, 1000.0)
+    # A pílula soma as linhas do departamento (o A17, o T8 e o fone).
+    assert [d["saldo"] for d in h["departamentos"]] == [3700.0, 3000.0, 1000.0]
+    assert [d["gasto"] for d in h["departamentos"]] == [0.0, 0.0, 0.0]
+    assert (a17["vendidas"], a17["pediram"], a17["origens"]) == (
+        2,
+        1,
+        {"mensagem": 1, "sac": 0, "devolucao": 0},
+    )
+    # Ordem: vendidas, depois o nome.
+    assert [p["skus"][0] for p in h["produtos"]] == [
+        "u777",
+        "dg052",
+        "u015",
+        "a001",
+        "b021",
+        "dg101",
+    ]
+    # Saiu (04/11/2026): a situação de quem pediu, os atendimentos, o "Outros"
+    # e o "No técnico".
     for p in h["produtos"]:
-        col = {k: len(v) for k, v in p["pedidos_por_coluna"].items()}
-        o, st = p["origens"], p["status"]
-        assert col.get("mensagem", 0) == o["mensagem"]
-        assert col.get("sac", 0) == o["sac"]
-        assert col.get("devolucao", 0) == o["devolucao"]
-        assert col.get("outros", 0) == o["atendimento"] + o["manual"] + o["pessoa"]
-        assert col.get("ativa", 0) == st["ativa"]
-        assert col.get("aguardando", 0) == st["aguardando_entrega"] + st["entregue_sem_data"]
-        assert col.get("atendimentos", 0) == p["com_atendimento"]
+        for campo in (
+            "status",
+            "com_atendimento",
+            "atendimentos_hardware",
+            "atendimentos_software",
+            "no_tecnico",
+            "no_tecnico_vencidos",
+            "consertados",
+            "consertados_sem_custo",
+            "valor_no_tecnico",
+        ):
+            assert campo not in p, campo
+        assert set(p["origens"]) == {"mensagem", "sac", "devolucao"}
+    # O número da célula abre só os pedidos dele: as origens com coluna
+    # (o atendimento registrado não tem coluna).
+    assert a17["pedidos"] == [g1.id] and a17["pedidos_por_coluna"] == {"mensagem": [g1.id]}
+    assert t8["pedidos_por_coluna"] == {"sac": [g3.id]}
+    assert ar["pedidos"] == [g4.id] and ar["pedidos_por_coluna"] == {}
+    assert set(mala_b["pedidos_por_coluna"]) == {"devolucao"}
 
     # Os filtros da barra valem nas vendidas e nos pedidos: só as aguardando entrega.
     r = await client.post("/api/garantias/resumo", json={"status": "aguardando_entrega"})
     assert (r.json()["vendidas"], r.json()["pediram"]) == (1, 1)
-    assert r.json()["produtos"][0]["skus"] == ["dg101"]
+    assert [p["skus"] for p in r.json()["produtos"]] == [["dg101"]]
+    assert [d["chave"] for d in r.json()["departamentos"]] == ["celular", "mala", "eletro"]
     # A linha abre os pedidos dela na lista.
     itens = (await client.post("/api/garantias/lista", json={"ids": a17["pedidos"]})).json()[
         "itens"
     ]
     assert [i["pedido_bling"] for i in itens] == ["300001"]
+
+
+async def test_resumo_so_para_admin(client, db, make_user, auth_as):
+    """04/11/2026: "resumo vai aparecer só para os admin"."""
+    await _garantia(db, "300050", "dg053.sp", "A17", "Celular", pedido="mensagem")
+    auth_as(await make_user(permissions={"garantias": {"view": True, "edit": True}}))
+    r = await client.post("/api/garantias/resumo", json={})
+    assert r.status_code == 403
+    assert r.json()["detail"] == {"code": "so_admin"}
+    # A lista continua aberta para quem consulta.
+    assert (await client.post("/api/garantias/lista", json={})).status_code == 200
+    auth_as(await make_user())
+    r = await client.post("/api/garantias/resumo", json={})
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "forbidden"
 
 
 async def test_resumo_sem_as_descartadas_e_sem_o_nao_e_pedido(client, db, make_user, auth_as):
@@ -246,12 +352,16 @@ async def test_resumo_sem_as_descartadas_e_sem_o_nao_e_pedido(client, db, make_u
     await db.commit()
     h = (await client.post("/api/garantias/resumo", json={})).json()
     assert (h["vendidas"], h["pediram"]) == (1, 0)
-    assert h["departamentos"][0]["chave"] == "eletro" and len(h["produtos"]) == 1
+    assert len(h["produtos"]) == 1 and h["produtos"][0]["departamento"] == "eletro"
+    assert [(d["chave"], d["vendidas"]) for d in h["departamentos"]] == [
+        ("celular", 0),
+        ("mala", 0),
+        ("eletro", 1),
+    ]
 
 
 async def test_periodo_pelo_pedido_conta_so_os_pedidos(client, db, make_user, auth_as):
-    """O período pela data do pedido filtra os PEDIDOS; as vendidas são todas
-    (senão a porcentagem daria 100%)."""
+    """O período pela data do pedido filtra os PEDIDOS; as vendidas são todas."""
     auth_as(await make_user(role=UserRole.ADMIN))
     await _garantia(db, "300020", "dg053.sp", "A17", "Celular", pedido="mensagem")  # 12/10
     await _garantia(db, "300021", "dg054.sp", "A17 Branco", "Celular")
@@ -266,20 +376,6 @@ async def test_periodo_pelo_pedido_conta_so_os_pedidos(client, db, make_user, au
     assert [i["pedido_bling"] for i in itens] == ["300020"]
 
 
-async def test_entregue_sem_data_fica_fora_do_aguardando(client, db, make_user, auth_as):
-    auth_as(await make_user(role=UserRole.ADMIN))
-    await _garantia(db, "300030", "dg053.sp", "A17", "Celular", entrega=None, pedido="mensagem")
-    await _garantia(db, "300031", "dg053.ci", "A17", "Celular", entrega=None, pedido="mensagem")
-    linha = (await db.execute(select(BlingOrder).where(BlingOrder.numero == "300031"))).scalar_one()
-    linha.situacao = "83953"  # Entregue no Bling, sem data no DaVinci
-    await db.commit()
-    [p] = (await client.post("/api/garantias/resumo", json={})).json()["produtos"]
-    st = p["status"]
-    assert (st["aguardando_entrega"], st["entregue_sem_data"]) == (1, 1)
-    # Na tela os dois são o "Aguardando": a célula abre os dois.
-    assert sorted(p["pedidos_por_coluna"]["aguardando"]) == sorted(p["pedidos"])
-
-
 async def _devolucao(
     db,
     pedido,
@@ -291,128 +387,145 @@ async def _devolucao(
     custo=100.0,
     conserto=None,
     prazo=None,
+    em=None,
 ):
-    db.add(
-        Devolution(
-            pedido_bling=pedido,
-            conta="Loja X",
-            sku=sku,
-            condicao_produto=condicao,
-            manutencao=manutencao,
-            manutencao_destino=destino,
-            custo_produto=custo,
-            custo_manutencao=conserto,
-            prazo=prazo,
-        )
+    d = Devolution(
+        pedido_bling=pedido,
+        conta="Loja X",
+        sku=sku,
+        condicao_produto=condicao,
+        manutencao=manutencao,
+        manutencao_destino=destino,
+        custo_produto=custo,
+        custo_manutencao=conserto,
+        prazo=prazo,
     )
+    if em is not None:
+        d.created_at = em
+    db.add(d)
     await db.commit()
+    return d
 
 
-async def test_manutencao_e_perdas_dos_que_pediram(client, db, make_user, auth_as):
-    """30/10/2026 ("em garantias precisamos do que realmente foi perdido e o
-    que está na manutenção — o que foi gasto de dinheiro"): dos que PEDIRAM, o
-    aparelho da garantia na tela Devoluções. O fone do kit no mesmo pedido
-    não conta; o conserto de R$ 1 (para tirar da Manutenção) não é gasto."""
+async def _reembolso(
+    db, pedido, tipo, *, reembolso=0.0, prejuizo=None, em=None, mkt=None, conferido=False
+):
+    r = Refund(
+        pedido_bling=pedido,
+        pedido_marketplace=mkt,
+        conta="Loja X",
+        tipo=tipo,
+        reembolso=reembolso,
+        prejuizo=prejuizo,
+        conferido=conferido,
+    )
+    if em is not None:
+        r.created_at = em
+    db.add(r)
+    await db.commit()
+    return r
+
+
+def _em(dia: int, hora: int = 12) -> datetime:
+    return datetime(2026, 10, dia, hora, tzinfo=UTC)
+
+
+async def test_manutencao_e_o_gasto_da_tela_reembolso(client, db, make_user, auth_as):
+    """04/11/2026 ("manutenção, o gasto é baseado na tabela de reembolso"): dos
+    que PEDIRAM, os consertos e os perdidos pelo aparelho na tela Devoluções; o
+    gasto da tela Reembolso — o conserto (o −1 de tirar da Manutenção não), o
+    aparelho perdido (menos o que a plataforma cobriu) e o reembolso ao
+    cliente. O fone do kit no mesmo pedido não conta; Logística não é gasto."""
     dono = await make_user(role=UserRole.ADMIN)
     auth_as(dono)
     await _tabela(db, dono, ("dg052,dg053,dg054", "uranyx A17 pro max 12.128"))
-    # No técnico, com o prazo de 30 dias vencido; o fone do kit, Extraviado, fica de fora.
+    # 1: no técnico, vencido; o conserto (a linha do Reembolso nasceu com a
+    # devolução do celular) conta; o fone do kit extraviado não.
     g1 = await _garantia(
         db, "300101", "dg053.sp+a001.sp", "A17 + Fone", "Celular Kit", pedido="mensagem"
     )
-    await _devolucao(
-        db,
-        "300101",
-        "dg053.sp",
-        "Manutenção",
-        custo=600,
-        prazo=datetime(2026, 9, 30, 15, tzinfo=UTC),
-    )
-    await _devolucao(db, "300101", "a001.sp", "Extraviado", custo=4.5)
-    # Consertados: um com o conserto de verdade, outro só com o R$ 1.
+    await _devolucao(db, "300101", "dg053.sp", "Manutenção", custo=600, prazo=_em(1, 15), em=_em(1))
+    await _reembolso(db, "300101", "Manutenção", reembolso=-150, prejuizo=0, em=_em(1))
+    await _devolucao(db, "300101", "a001.sp", "Extraviado", custo=4.5, em=_em(2))
+    await _reembolso(db, "300101", "Extraviado", prejuizo=4.5, em=_em(2))
+    # 2: consertado, R$ 229; 3: consertado só com o −1 (sem custo lançado).
     g2 = await _garantia(db, "300102", "dg052.ci", "A17 Preto", "Celular", pedido="devolucao")
-    await _devolucao(db, "300102", "dg052.ci", "Usado", manutencao=True, conserto=229)
+    await _devolucao(db, "300102", "dg052.ci", "Usado", manutencao=True, conserto=229, em=_em(3))
+    await _reembolso(db, "300102", "Manutenção", reembolso=-229, em=_em(3), conferido=True)
     g3 = await _garantia(db, "300103", "dg054.pi", "A17 Branco", "Celular", pedido="devolucao")
-    await _devolucao(db, "300103", "dg054.pi", "Novo", manutencao=True, conserto=1)
-    # Perdido pelo destino Sucata do modal (a condição continua Manutenção).
+    await _devolucao(db, "300103", "dg054.pi", "Novo", manutencao=True, conserto=1, em=_em(4))
+    await _reembolso(db, "300103", "Manutenção", reembolso=-1, em=_em(4))
+    # 4: perdido pelo destino Sucata; a plataforma cobriu R$ 100 dos 560; e o
+    # conserto que não deu certo (R$ 80).
     g4 = await _garantia(db, "300104", "dg053.ci", "A17 Laranja", "Celular", pedido="mensagem")
     await _devolucao(
-        db, "300104", "dg053.ci", "Manutenção", destino="Sucata", custo=560, conserto=80
+        db, "300104", "dg053.ci", "Manutenção", destino="Sucata", custo=560, conserto=80, em=_em(5)
     )
-    # Voltou Novo sem manutenção: só "Seguiram". A venda SEM pedido com o
-    # aparelho perdido: fora. "Não devolvido" (o cliente ficou com ele) e o
-    # pedido só no chat (sem devolução): pediram, mas não seguiram.
+    await _reembolso(db, "300104", "Manutenção", reembolso=-80, em=_em(5))
+    await _reembolso(db, "300104", "Sucata", prejuizo=560, reembolso=100, em=_em(6))
+    # 5: voltou Novo, sem manutenção; o frete (Logística) e a linha sem tipo não são gasto.
     g5 = await _garantia(db, "300105", "dg053.sp", "A17", "Celular", pedido="mensagem")
-    await _devolucao(db, "300105", "dg053.sp", "Novo")
+    await _devolucao(db, "300105", "dg053.sp", "Novo", em=_em(7))
+    await _reembolso(db, "300105", "Logistica", reembolso=-12, prejuizo=12)
+    await _reembolso(db, "300105", None, reembolso=-40)
+    # 6: a venda SEM pedido com o aparelho perdido: fora.
     await _garantia(db, "300106", "dg053.sp", "A17", "Celular")
     await _devolucao(db, "300106", "dg053.sp", "Extraviado", custo=600)
-    await _garantia(db, "300107", "dg053.ci", "A17", "Celular", pedido="mensagem")
+    await _reembolso(db, "300106", "Extraviado", prejuizo=600)
+    # 7: "Não devolvido" e o reembolso ao cliente.
+    g7 = await _garantia(db, "300107", "dg053.ci", "A17", "Celular", pedido="mensagem")
     await _devolucao(db, "300107", "dg053.ci", "Não devolvido")
-    await _garantia(db, "300108", "dg053.pi", "A17", "Celular", pedido="mensagem")
+    await _reembolso(db, "300107", "Cliente", reembolso=-30)
+    # 8: o reembolso ao cliente lançado sem o pedido do Bling: pelo da
+    # plataforma; o de OUTRO pedido do Bling com o mesmo nº da plataforma não.
+    g8 = await _garantia(db, "300108", "dg053.pi", "A17", "Celular", pedido="mensagem")
+    await _reembolso(db, " ", "Cliente", reembolso=-45, mkt=" MKT300108 ")
+    await _reembolso(db, "999999", "Cliente", reembolso=-99, mkt="MKT300108")
 
     h = (await client.post("/api/garantias/resumo", json={})).json()
     assert h["ve_valores"] is True
     [a17] = h["produtos"]
-    # A % certa é dos que DEVOLVERAM (30/10/2026): 5 dos 7 que pediram.
-    assert (a17["vendidas"], a17["pediram"], a17["seguiram"]) == (8, 7, 5)
-    assert (h["seguiram"], h["departamentos"][0]["seguiram"]) == (5, 5)
-    seguiram = [g1.id, g2.id, g3.id, g4.id, g5.id]
-    assert sorted(a17["pedidos_por_coluna"]["seguiram"]) == sorted(seguiram)
-    assert (a17["no_tecnico"], a17["no_tecnico_vencidos"]) == (1, 1)
-    assert (a17["consertados"], a17["consertados_sem_custo"]) == (2, 1)
-    assert a17["perdidos"] == 1
-    # Gasto = o conserto de verdade (229 + 80; o R$ 1 não) + o aparelho perdido (560).
-    assert (a17["gasto"], a17["gasto_conserto"], a17["gasto_perdidos"]) == (869.0, 309.0, 560.0)
-    assert a17["valor_no_tecnico"] == 600.0
+    assert (a17["vendidas"], a17["pediram"], a17["seguiram"]) == (8, 7, 7)
+    assert (a17["consertos"], a17["perdidos"]) == (2, 1)
+    # Conserto 150 + 229 + 0 + 80; perdido 560 − 100; cliente 30 + 45.
+    assert (
+        a17["gasto"],
+        a17["gasto_conserto"],
+        a17["gasto_perdidos"],
+        a17["gasto_cliente"],
+    ) == (994.0, 459.0, 460.0, 75.0)
+    assert h["departamentos"][0]["gasto"] == 994.0
     col = a17["pedidos_por_coluna"]
-    assert col["no_tecnico"] == [g1.id]
-    assert sorted(col["consertados"]) == sorted([g2.id, g3.id])
+    assert sorted(col["consertos"]) == sorted([g2.id, g3.id])
     assert col["perdidos"] == [g4.id]
-    assert sorted(col["gasto"]) == sorted([g2.id, g4.id])
-    assert all(
-        g5.id not in v
-        for k, v in col.items()
-        if k in ("no_tecnico", "consertados", "perdidos", "gasto")
-    )
+    assert sorted(col["gasto"]) == sorted([g1.id, g2.id, g4.id, g7.id, g8.id])
+    assert set(col) == {"mensagem", "devolucao", "consertos", "perdidos", "gasto"}
 
-    # Na lista, o selo do aparelho — com os reais para o admin.
-    corpo = {"ids": [g1.id, g2.id, g3.id, g4.id, g5.id]}
+    # Na lista, o selo do aparelho com o MESMO gasto (o da tela Reembolso).
+    corpo = {"ids": [g.id for g in (g1, g2, g3, g4, g5, g7, g8)]}
     itens = (await client.post("/api/garantias/lista", json=corpo)).json()["itens"]
     selo = {
         i["pedido_bling"]: (i["devolucao_situacao"], i["devolucao_rotulo"], i["devolucao_gasto"])
         for i in itens
     }
-    assert selo["300101"] == ("no_tecnico", "No técnico · vencido há 20 dias", 0.0)
+    assert selo["300101"] == ("no_tecnico", "No técnico · vencido há 19 dias · R$ 150,00", 150.0)
     assert selo["300102"] == ("consertado", "Consertado (Usado) · R$ 229,00", 229.0)
     assert selo["300103"] == ("consertado", "Consertado (Novo) · sem custo lançado", 0.0)
-    assert selo["300104"] == ("perdido", "Perdido (Sucata) · R$ 640,00", 640.0)
+    assert selo["300104"] == ("perdido", "Perdido (Sucata) · R$ 540,00", 540.0)
     assert selo["300105"] == ("devolvido", "Devolvido (Novo)", 0.0)
-    vencido = {i["pedido_bling"]: i["devolucao_vencido"] for i in itens}
-    assert vencido == {
-        "300101": True,
-        "300102": False,
-        "300103": False,
-        "300104": False,
-        "300105": False,
-    }
-
-    # "Não devolvido" não tem selo; o topo do painel também conta os que seguiram.
+    assert selo["300107"] == ("reembolso", "Reembolso ao cliente · R$ 30,00", 30.0)
+    assert selo["300108"] == ("reembolso", "Reembolso ao cliente · R$ 45,00", 45.0)
+    # O topo da lista não tem mais o "seguiram" (04/11/2026).
     lista = (await client.post("/api/garantias/lista", json={})).json()
-    assert {i["pedido_bling"]: i["devolucao_situacao"] for i in lista["itens"]}["300107"] is None
-    assert (lista["indicadores"]["total"], lista["indicadores"]["seguiram"]) == (7, 5)
+    assert "seguiram" not in lista["indicadores"]
 
-    # Quem não é admin vê as quantidades e o selo, sem os reais.
+    # Quem não é admin vê o selo, sem os reais (e não abre o Resumo).
     auth_as(await make_user(permissions={"garantias": {"view": True}}))
-    h = (await client.post("/api/garantias/resumo", json={})).json()
-    assert h["ve_valores"] is False
-    [a17] = h["produtos"]
-    assert (a17["no_tecnico"], a17["consertados"], a17["perdidos"]) == (1, 2, 1)
-    assert a17["gasto"] is None and a17["valor_no_tecnico"] is None
-    assert "gasto" not in a17["pedidos_por_coluna"]
     itens = (await client.post("/api/garantias/lista", json=corpo)).json()["itens"]
     selo = {i["pedido_bling"]: (i["devolucao_rotulo"], i["devolucao_gasto"]) for i in itens}
     assert selo["300102"] == ("Consertado (Usado)", None)
     assert selo["300104"] == ("Perdido (Sucata)", None)
+    assert selo["300107"] == ("Reembolso ao cliente", None)
 
 
 def test_rotulo_do_prazo_de_quem_esta_no_tecnico():
@@ -434,10 +547,14 @@ def test_rotulo_do_prazo_de_quem_esta_no_tecnico():
     assert (
         resumo.rotulo_do_desfecho(sem_condicao, HOJE, False) == "Devolvido · sem condição lançada"
     )
-    # O conserto lançado numa linha antiga (sem "passou em manutenção") é conserto.
+    # O conserto da tela Reembolso sem a devolução lançada.
     gasto = resumo.Desfecho(conserto=1234.5)
     assert resumo.rotulo_do_desfecho(gasto, HOJE, True) == "Conserto · R$ 1.234,50"
     assert resumo.rotulo_do_desfecho(gasto, HOJE, False) is None
+    assert resumo.rotulo_do_desfecho(resumo.Desfecho(perdido=12.5), HOJE, True) == (
+        "Gasto · R$ 12,50"
+    )
+    assert resumo.Desfecho(conserto=10, perdido=20.25, cliente=5).gasto == 35.25
 
 
 def _linha_dev(
@@ -449,6 +566,7 @@ def _linha_dev(
     custo=600.0,
     conserto=None,
     prazo=None,
+    em=None,
 ):
     return SimpleNamespace(
         sku=sku,
@@ -458,20 +576,31 @@ def _linha_dev(
         custo_produto=custo,
         custo_manutencao=conserto,
         prazo=prazo,
+        created_at=em,
+    )
+
+
+def _linha_reemb(tipo, reembolso=0.0, prejuizo=None, em=None, i=None):
+    return SimpleNamespace(
+        id=i or uuid.uuid4(), tipo=tipo, reembolso=reembolso, prejuizo=prejuizo, created_at=em
     )
 
 
 def test_o_prazo_vence_pelo_dia_em_sao_paulo_e_so_de_quem_esta_no_tecnico():
     """Revisão 30/10: o vencido é pelo dia em São Paulo (como o selo e a tela
     Devoluções — no dia do prazo é "vence hoje"); e a garantia em Perdidos
-    não entra no "vencido" nem nos reais do No técnico."""
+    não entra no "vencido"."""
     tabela = {"dg053": ("1", "A17", ["dg053"])}
     # Prazo hoje às 08:00 em São Paulo (11:00 UTC): ainda não venceu.
     hoje_cedo = datetime(2026, 10, 30, 11, tzinfo=UTC)
+    lancada = datetime(2026, 9, 30, 11, tzinfo=UTC)
     f = resumo.desfecho(
-        [_linha_dev("Manutenção", prazo=hoje_cedo)], "tabela:1", tabela, date(2026, 10, 30)
+        [_linha_dev("Manutenção", prazo=hoje_cedo, em=lancada)],
+        "tabela:1",
+        tabela,
+        date(2026, 10, 30),
     )
-    assert (f.situacao, f.vencido, f.no_tecnico) == ("no_tecnico", False, 600.0)
+    assert (f.situacao, f.vencido, f.desde) == ("no_tecnico", False, lancada)
     assert resumo.rotulo_do_desfecho(f, date(2026, 10, 30), False) == "No técnico · vence hoje"
     f = resumo.desfecho(
         [_linha_dev("Manutenção", prazo=hoje_cedo)], "tabela:1", tabela, date(2026, 10, 31)
@@ -482,7 +611,8 @@ def test_o_prazo_vence_pelo_dia_em_sao_paulo_e_so_de_quem_esta_no_tecnico():
         == "No técnico · vencido há 1 dia"
     )
     # Um aparelho perdido e outro (do mesmo produto) no técnico, vencido: a
-    # garantia é Perdidos — sem vencido e sem os reais do técnico.
+    # garantia é Perdidos — sem vencido. O gasto vem da tela Reembolso (sem
+    # linha lá, sem gasto).
     ontem = datetime(2026, 10, 1, 15, tzinfo=UTC)
     f = resumo.desfecho(
         [_linha_dev("Extraviado", custo=560), _linha_dev("Manutenção", prazo=ontem)],
@@ -490,13 +620,12 @@ def test_o_prazo_vence_pelo_dia_em_sao_paulo_e_so_de_quem_esta_no_tecnico():
         tabela,
         date(2026, 10, 30),
     )
-    assert (f.situacao, f.condicao, f.vencido, f.no_tecnico, f.prazo, f.gasto) == (
+    assert (f.situacao, f.condicao, f.vencido, f.prazo, f.gasto) == (
         "perdido",
         "Extraviado",
         False,
-        0.0,
         None,
-        560.0,
+        0.0,
     )
     # O fone do kit no mesmo pedido (outro produto) não decide nada.
     f = resumo.desfecho(
@@ -508,25 +637,181 @@ def test_o_prazo_vence_pelo_dia_em_sao_paulo_e_so_de_quem_esta_no_tecnico():
     hoje = date(2026, 10, 30)
     f = resumo.desfecho([_linha_dev("Não devolvido")], "tabela:1", tabela, hoje)
     assert (f.situacao, f.devolveu) == (None, False)
-    f = resumo.desfecho([_linha_dev(None)], "tabela:1", tabela, hoje)
-    assert (f.situacao, f.condicao, f.devolveu) == ("devolvido", None, True)
+    f = resumo.desfecho([_linha_dev(None, em=lancada)], "tabela:1", tabela, hoje)
+    assert (f.situacao, f.condicao, f.devolveu, f.desde) == ("devolvido", None, True, lancada)
     f = resumo.desfecho([_linha_dev("Extraviado", custo=560)], "tabela:1", tabela, hoje)
     assert (f.situacao, f.devolveu, f.seguiu) == ("perdido", True, True)
     # Seguiu fora da tela Devoluções (a plataforma ou o Reembolso): sem selo
-    # do aparelho, o selo é o do caminho.
-    f = resumo.desfecho([], "tabela:1", tabela, hoje, "a_caminho")
-    assert (f.situacao, f.devolveu, f.seguiu) == ("a_caminho", False, True)
+    # do aparelho, o selo é o do caminho — desde o caso.
+    f = resumo.desfecho([], "tabela:1", tabela, hoje, "a_caminho", fora_desde=lancada)
+    assert (f.situacao, f.devolveu, f.seguiu, f.desde) == ("a_caminho", False, True, lancada)
     f = resumo.desfecho([_linha_dev("Não devolvido")], "tabela:1", tabela, hoje, "reembolso")
-    assert (f.situacao, f.devolveu, f.seguiu) == ("reembolso", False, True)
+    assert (f.situacao, f.devolveu, f.seguiu, f.desde) == ("reembolso", False, True, None)
+    # O aparelho na tela Devoluções decide o selo, mesmo com o reembolso pago.
     f = resumo.desfecho([_linha_dev("Manutenção")], "tabela:1", tabela, hoje, "reembolso")
     assert (f.situacao, f.seguiu) == ("no_tecnico", True)
+
+
+def test_gasto_da_tela_reembolso():
+    """Cada tipo da tela Reembolso vale uma conta, nunca negativa; o −1 de
+    tirar da Manutenção não é conserto; Logística, Frete e sem tipo não são
+    gasto."""
+    v = resumo.valor_do_reembolso
+    assert resumo.TIPOS_DO_GASTO == ("Manutenção", "Extraviado", "Sucata", "Cliente")
+    assert v("Manutenção", 0, -150) == (150.0, 0.0, 0.0)
+    assert v("Manutenção", 0, -1) == (0.0, 0.0, 0.0)
+    assert v("Manutenção", 0, -0.5) == (0.0, 0.0, 0.0)
+    assert v("Manutenção", 0, 20) == (0.0, 0.0, 0.0)
+    assert v("Manutenção", None, None) == (0.0, 0.0, 0.0)
+    assert v("Extraviado", 600, 0) == (0.0, 600.0, 0.0)
+    assert v("Extraviado", 600, 200) == (0.0, 400.0, 0.0)
+    assert v("Extraviado", 600, 700) == (0.0, 0.0, 0.0)
+    assert v("Extraviado", 600, -50) == (0.0, 600.0, 0.0)
+    assert v("Sucata", 560, None) == (0.0, 560.0, 0.0)
+    assert v("Cliente", 0, -30) == (0.0, 0.0, 30.0)
+    assert v("Cliente", 0, 30) == (0.0, 0.0, 0.0)
+    for tipo in ("Logistica", "Frete", None):
+        assert v(tipo, 50, -50) == (0.0, 0.0, 0.0)
+
+    # A linha que nasceu com a devolução de OUTRO produto do pedido (o fone do
+    # kit) fica de fora; a da devolução do mesmo produto, a de devolução sem
+    # SKU e a sem devolução junto entram.
+    tabela = {"dg053": ("1", "A17", ["dg053"])}
+    t1, t2, t3, t4 = (datetime(2026, 10, d, 12, tzinfo=UTC) for d in (1, 2, 3, 4))
+    devs = [
+        _linha_dev("Manutenção", "dg053.sp", em=t1),
+        _linha_dev("Extraviado", "a001.sp", em=t2),
+        _linha_dev("Extraviado", None, em=t3),
+    ]
+    reembs = [
+        _linha_reemb("Manutenção", -150, em=t1, i=1),
+        _linha_reemb("Extraviado", 0, 4.5, em=t2, i=2),
+        _linha_reemb("Extraviado", 0, 600, em=t3, i=3),
+        _linha_reemb("Cliente", -30, em=t4, i=4),
+        _linha_reemb("Logistica", -12, 12, em=t4, i=5),
+    ]
+    assert resumo.gasto_dos_reembolsos(reembs, devs, "tabela:1", tabela) == (
+        150.0,
+        600.0,
+        30.0,
+        [1, 3, 4],
+    )
+    # Do ponto de vista do fone (a outra linha), só o dele e os do pedido.
+    assert resumo.gasto_dos_reembolsos(reembs, devs, "sku:a001", tabela) == (
+        0.0,
+        604.5,
+        30.0,
+        [2, 3, 4],
+    )
+
+
+def test_saldo_da_linha():
+    """04/11/2026 ("saldo → valor de saldo de todos os itens com base na
+    planilha de rentabilidade"): base − comissão − frete − custo do pedido
+    (a conta da rentabilidade desde 05/11), na parte da linha pelo valor dos
+    itens."""
+    tabela = {"dg053": ("1", "A17", ["dg053"]), "u015": ("2", "Air Fryer", ["u015"])}
+
+    def item(sku, valor, qtd=1, *, base=1000, comissao=100, frete=0, custo=None, situacao="9"):
+        return SimpleNamespace(
+            item_codigo=sku,
+            itemvalor=valor,
+            item_quantidade=qtd,
+            valorbase=base,
+            taxacomissao=comissao,
+            custofrete=frete,
+            preco_custo=custo,
+            situacao=situacao,
+        )
+
+    s = resumo.saldo_da_linha
+    # Um item só: o saldo inteiro (1000 − 150 − 50).
+    assert s([item("dg053.sp", 1000, comissao=150, frete=50)], "tabela:1", tabela) == 800.0
+    # O kit num item só é da linha do aparelho.
+    assert s([item("dg053.sp+a001.sp", 1000)], "tabela:1", tabela) == 900.0
+    # Dois produtos no pedido: a base, a comissão e o frete se repetem nas
+    # linhas do pedido (contam uma vez); a parte é pelo valor × quantidade.
+    pedido = [item("dg053.sp", 900), item("u015", 50, 2)]
+    assert s(pedido, "tabela:1", tabela) == 810.0
+    assert s(pedido, "tabela:2", tabela) == 90.0
+    assert s(pedido, "sku:b021", tabela) == 0.0
+    # O fone separado do kit (outra linha) fica com a parte dele.
+    kit = [item("dg053.sp", 800), item("a003.ci", 40, 2)]
+    assert s(kit, "tabela:1", tabela) == round(900 * 800 / 880, 2)
+    # Sem valor nos itens: pelo número de itens.
+    sem_valor = [item("dg053.sp", None), item("u015", 0)]
+    assert s(sem_valor, "tabela:1", tabela) == 450.0
+    # Quantidade em branco vale 1; base em branco vale 0.
+    assert s([item("dg053.sp", 10, None, base=None, comissao=None)], "tabela:1", tabela) == 0.0
+    # Cancelado (12) e excluído do Bling: sem saldo; o aguardando cancelamento tem.
+    assert s([item("dg053.sp", 1000, situacao="12")], "tabela:1", tabela) == 0.0
+    assert s([item("dg053.sp", 1000, situacao="excluido")], "tabela:1", tabela) == 0.0
+    assert s([item("dg053.sp", 1000, situacao="83955")], "tabela:1", tabela) == 900.0
+    assert s([], "tabela:1", tabela) == 0.0
+    # A conta da rentabilidade (ligada em 05/11/2026, "somente o que sobrou"):
+    # tira também o custo dos produtos do pedido antes de dividir; com
+    # menos_custo=False, fica o Saldo Bling.
+    assert resumo.SALDO_MENOS_CUSTO is True
+    custo = [item("dg053.sp", 900, custo=500), item("u015", 100, custo=60)]
+    assert s(custo, "tabela:1", tabela) == round((900 - 560) * 0.9, 2)
+    assert s(custo, "tabela:1", tabela, menos_custo=False) == 810.0
+    # O custo conta a quantidade (2 × 60): (1000 − 100 − 620) × 100/1000.
+    dois = [item("dg053.sp", 900, custo=500), item("u015", 50, 2, custo=60)]
+    assert s(dois, "tabela:2", tabela) == 28.0
+
+
+async def test_saldo_da_rentabilidade_e_periodo_da_venda(client, db, make_user, auth_as):
+    """05/11/2026: o Saldo é a conta da rentabilidade (base − comissão − frete
+    − custo) e o período pela data da VENDA ("se eu colocar uma data, filtra o
+    saldo daqueles dias") filtra o Resumo e a lista: as vendas daqueles dias."""
+    dono = await make_user(role=UserRole.ADMIN)
+    auth_as(dono)
+    await _tabela(db, dono, ("dg052,dg053,dg054", "uranyx A17 pro max 12.128"))
+    caro = {"comissao": 100, "frete": 50, "custo": 600}
+    await _garantia(
+        db,
+        "300401",
+        "dg053.sp",
+        "A17",
+        "Celular",
+        **caro,
+        compra=datetime(2026, 10, 1, 15, tzinfo=UTC),
+    )
+    g2 = await _garantia(
+        db,
+        "300402",
+        "dg053.sp",
+        "A17",
+        "Celular",
+        **caro,
+        compra=datetime(2026, 10, 20, 15, tzinfo=UTC),
+    )
+    [a17] = (await client.post("/api/garantias/resumo", json={})).json()["produtos"]
+    # 2 × (1000 − 100 − 50 − 600)
+    assert (a17["vendidas"], a17["saldo"]) == (2, 500.0)
+    corpo = {"periodo": "venda", "de": "2026-10-15", "ate": "2026-10-31"}
+    [a17] = (await client.post("/api/garantias/resumo", json=corpo)).json()["produtos"]
+    assert (a17["vendidas"], a17["saldo"]) == (1, 250.0)
+    lista = (await client.post("/api/garantias/lista", json={**corpo, "mostrar": "todas"})).json()
+    assert [i["id"] for i in lista["itens"]] == [g2.id]
+    # Só o "até" (o dia inteiro em São Paulo): a venda de 01/10.
+    [a17] = (
+        await client.post("/api/garantias/resumo", json={"periodo": "venda", "ate": "2026-10-01"})
+    ).json()["produtos"]
+    assert (a17["vendidas"], a17["saldo"]) == (1, 250.0)
+    # Só o "de": a venda de 20/10.
+    [a17] = (
+        await client.post("/api/garantias/resumo", json={"periodo": "venda", "de": "2026-10-20"})
+    ).json()["produtos"]
+    assert (a17["vendidas"], a17["saldo"]) == (1, 250.0)
 
 
 async def test_duas_garantias_do_mesmo_pedido_contam_o_aparelho_uma_vez(
     client, db, make_user, auth_as
 ):
     """Revisão 30/10: o mesmo pedido com duas notas (uma garantia por nota)
-    olha as mesmas devoluções — o aparelho perdido conta uma vez só."""
+    olha as mesmas devoluções — o aparelho perdido (e o gasto, e o saldo) conta
+    uma vez só."""
     dono = await make_user(role=UserRole.ADMIN)
     auth_as(dono)
     await _tabela(db, dono, ("dg052,dg053,dg054", "uranyx A17 pro max 12.128"))
@@ -547,10 +832,19 @@ async def test_duas_garantias_do_mesmo_pedido_contam_o_aparelho_uma_vez(
     g2.fim_hardware, g2.fim_software = svc.calcular_prazos(date(2026, 10, 5))
     db.add(g2)
     await db.commit()
-    await _devolucao(db, "300301", "dg053.sp", "Extraviado", custo=600)
+    await _devolucao(db, "300301", "dg053.sp", "Extraviado", custo=600, em=_em(3))
+    await _reembolso(db, "300301", "Extraviado", prejuizo=600, em=_em(3))
     [a17] = (await client.post("/api/garantias/resumo", json={})).json()["produtos"]
-    assert (a17["pediram"], a17["perdidos"], a17["gasto"], a17["seguiram"]) == (2, 1, 600.0, 1)
+    assert (a17["vendidas"], a17["pediram"], a17["perdidos"], a17["gasto"], a17["seguiram"]) == (
+        2,
+        2,
+        1,
+        600.0,
+        1,
+    )
+    assert a17["saldo"] == 1000.0
     assert a17["pedidos_por_coluna"]["perdidos"] == [g1.id]
+    assert a17["pedidos_por_coluna"]["gasto"] == [g1.id]
 
 
 def test_caso_da_plataforma_que_seguiu():
@@ -636,19 +930,18 @@ async def test_seguiram_fora_da_tela_devolucoes(client, db, make_user, auth_as):
 
     h = (await client.post("/api/garantias/resumo", json={})).json()
     [a17] = h["produtos"]
-    seguiram = sorted(gs[n].id for n in (1, 3, 7, 8))
     assert (a17["pediram"], a17["seguiram"]) == (9, 4)
-    assert sorted(a17["pedidos_por_coluna"]["seguiram"]) == seguiram
     assert h["seguiram"] == 4
-    # Na lista, o selo diz o caminho; e o topo conta igual.
+    # O reembolso ao cliente da tela Reembolso é gasto; o pago pela plataforma não.
+    assert (a17["gasto_cliente"], a17["pedidos_por_coluna"]["gasto"]) == (30.0, [gs[1].id])
+    # Na lista, o selo diz o caminho.
     lista = (await client.post("/api/garantias/lista", json={})).json()
     selo = {i["pedido_bling"]: i["devolucao_rotulo"] for i in lista["itens"]}
-    assert selo["300401"] == "Reembolso ao cliente"
+    assert selo["300401"] == "Reembolso ao cliente · R$ 30,00"
     assert selo["300403"] == "Devolução a caminho"
     assert selo["300407"] == "Devolução a caminho"
     assert selo["300408"] == "Reembolso ao cliente"
     assert all(selo[f"30040{n}"] is None for n in (2, 4, 5, 6, 9))
-    assert lista["indicadores"]["seguiram"] == 4
 
 
 def test_casos_do_pedido_reembolso_pago_conta_sempre_e_a_caminho_pelo_mais_novo():
@@ -674,7 +967,8 @@ def test_casos_do_pedido_reembolso_pago_conta_sempre_e_a_caminho_pelo_mais_novo(
     assert resumo._casos_do_pedido([c(1, "ACCEPTED", 10), c(2, "CANCELLED", 20)]) == "reembolso"
     # O "a caminho" antigo, parado, não vale se o novo foi cancelado.
     assert resumo._casos_do_pedido([c(1, "PROCESSING", 10), c(2, "CANCELLED", 20)]) is None
-    assert resumo._casos_do_pedido([c(1, "CANCELLED", 10), c(2, "PROCESSING", 20)]) == "a_caminho"
+    novo = c(2, "PROCESSING", 20)
+    assert resumo._decisao_dos_casos([c(1, "CANCELLED", 10), novo]) == ("a_caminho", novo)
     # A disputa sozinha não conta; o ML vale caso a caso.
     assert resumo._casos_do_pedido([c(1, "JUDGING", 12, tipo="reclamacao")]) is None
     ml = [
@@ -682,3 +976,28 @@ def test_casos_do_pedido_reembolso_pago_conta_sempre_e_a_caminho_pelo_mais_novo(
         c(2, "opened", 9, plataforma="ml", tipo="reclamacao"),
     ]
     assert resumo._casos_do_pedido(ml) == "a_caminho"
+
+
+async def test_mapa_das_linhas_guardado_e_refeito_quando_muda(db, make_user):
+    """O mapa garantia → linha → departamento fica guardado (lê todas as
+    garantias) e é refeito na hora quando entra garantia nova ou muda a
+    Tabela de Preços."""
+    dono = await make_user(role=UserRole.ADMIN)
+    g1 = await _garantia(db, "300501", "dg053.sp", "A17", "Celular")
+    m1 = await resumo.mapa_das_linhas(db)
+    assert m1.linha_da_garantia == {g1.id: "sku:dg053"}
+    assert await resumo.mapa_das_linhas(db) is m1
+    # A linha entra na Tabela de Preços (raiz Eletro, de propósito): refaz.
+    await _tabela(db, dono, ("dg053", "A17"), segmento=await _raiz(db, "eletro"))
+    m2 = await resumo.mapa_das_linhas(db)
+    assert m2 is not m1
+    [chave] = set(m2.linha_da_garantia.values())
+    assert chave.startswith("tabela:") and m2.departamento_da_linha[chave] == "eletro"
+    g2 = await _garantia(db, "300502", "b021", "Mala", None)
+    m3 = await resumo.mapa_das_linhas(db)
+    assert m3.departamento_do_id(g2.id) == "mala"
+    assert sorted(m3.ids_do_departamento("eletro")) == [g1.id]
+    assert m3.ids_da_linha("sku:b021") == [g2.id]
+    # Guardado, mas por pouco tempo.
+    resumo._cache["em"] -= resumo.CACHE_SEGUNDOS + 1
+    assert await resumo.mapa_das_linhas(db) is not m3

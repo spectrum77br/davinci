@@ -103,12 +103,12 @@ def _leitura_email_concedida(user: User, recurso: str) -> bool:
 def ve_caixa_email(user: User) -> bool:
     """A caixa completa: admin ou leitura explícita, ainda limitada por caixa.
 
-    A permissão da aba/Filas sozinha não abre mensagens da Central. Enviar,
-    configurar e administrar continuam exclusivos de administradores.
+    A permissão da aba/Filas sozinha não abre mensagens da Central. Operações
+    exigem concessão própria; configurar e administrar continuam de admin.
     """
     return user.role == UserRole.ADMIN or _leitura_email_concedida(
         user, "atendimento_email_leitura"
-    )
+    ) or _leitura_email_concedida(user, "atendimento_email_operacao")
 
 
 def ve_aba_email(user: User) -> bool:
@@ -136,13 +136,21 @@ def le_filas_email(user: User) -> bool:
     return pode_mexer(user) or so_le_filas_email(user)
 
 
-def responde_email(user: User) -> bool:
-    """Responde e-mail pela caixa crua (a Central da aba E-mail) sem ser dono/admin.
+def opera_caixa_email(user: User, *, excluir: bool = False) -> bool:
+    """Operação explícita das caixas já autorizadas, sem conceder administração."""
+    if user.status != UserStatus.ACTIVE:
+        return False
+    if user.role == UserRole.ADMIN:
+        return True
+    grant = (user.permissions or {}).get("atendimento_email_operacao")
+    return (
+        isinstance(grant, dict)
+        and grant.get("view") is True
+        and grant.get("edit") is True
+        and (not excluir or grant.get("delete") is True)
+    )
 
-    28–29/10/2026 era quem não é admin com `atendimento_email` ver+editar (o
-    marrocos). Desde 30/10/2026 a aba é só do admin ("o email ninguém pode ver
-    a não ser admin") e ninguém mais ganha esse atalho: responder na Central
-    volta a ser do dono/admin de sempre (`mail_central.allowed`) e, na caixa da
-    empresa, de quem mexe (`pode_mexer`). Fica a função para os chamadores
-    (`mail_admin.pode_responder_caixa`, `caixa.bloqueia_resposta`)."""
-    return False
+
+def responde_email(user: User) -> bool:
+    """A concessão nova habilita envio sem reativar permissões antigas."""
+    return user.role != UserRole.ADMIN and opera_caixa_email(user)

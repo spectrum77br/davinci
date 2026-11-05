@@ -789,7 +789,9 @@ const lookupResults = ref<LookupRow[]>([])
 const lookupError = ref<string | null>(null)
 const creating = ref(false)
 const drafts = ref<DevolutionDraft[]>([])
-const addedThisSession = ref<Set<string>>(new Set())
+// Uma entrada por produto criado nesta busca (pedido|sku, repetida se o pedido
+// tem a mesma peça mais de uma vez — o "já feito" conta unidades, 302146).
+const addedThisSession = ref<string[]>([])
 
 const dirtyRows = ref<Set<string>>(new Set())
 const savingRows = ref<Set<string>>(new Set())
@@ -966,22 +968,31 @@ const expandedLookupResults = computed<LookupRow[]>(() => {
   return rows
 })
 
-const alreadyAddedKeys = computed(() => {
-  const keys = new Set<string>()
-  for (const row of items.value) {
-    keys.add(`${row.pedido_bling}|${row.sku}`)
+// Unidades já lançadas. O backend marca as que já tinham devolução na hora da
+// busca (por unidade, não por SKU); aqui entram as criadas depois dela, uma
+// unidade por produto criado. Antes a tabela carregada marcava pedido+sku
+// inteiro: kit com 3 malas iguais e uma excluída não deixava relançar (302146).
+const alreadyAddedRows = computed(() => {
+  const restantes = new Map<string, number>()
+  for (const k of addedThisSession.value) restantes.set(k, (restantes.get(k) ?? 0) + 1)
+  const marcadas = new Set<LookupRow>()
+  for (const row of expandedLookupResults.value) {
+    if (row.ja_devolvido === true) {
+      marcadas.add(row)
+      continue
+    }
+    const k = `${row.pedido_bling}|${row.sku}`
+    const n = restantes.get(k) ?? 0
+    if (n > 0) {
+      marcadas.add(row)
+      restantes.set(k, n - 1)
+    }
   }
-  for (const k of addedThisSession.value) {
-    keys.add(k)
-  }
-  return keys
+  return marcadas
 })
 
 function isAlreadyAdded(row: LookupRow) {
-  // O backend já marca itens com devolução lançada (não depende da página
-  // carregada da tabela); mantemos os keys locais p/ o que foi criado agora.
-  return row.ja_devolvido === true
-    || alreadyAddedKeys.value.has(`${row.pedido_bling}|${row.sku}`)
+  return alreadyAddedRows.value.has(row)
 }
 // Produtos do pedido ainda não adicionados — todos entram de uma vez no rascunho.
 const selectableLookupCount = computed(
@@ -1770,7 +1781,7 @@ function openAdd() {
   lookupResults.value = []
   lookupError.value = null
   drafts.value = []
-  addedThisSession.value = new Set()
+  addedThisSession.value = []
 }
 function closeAdd() {
   addOpen.value = false
@@ -1778,7 +1789,7 @@ function closeAdd() {
   lookupResults.value = []
   lookupError.value = null
   drafts.value = []
-  addedThisSession.value = new Set()
+  addedThisSession.value = []
 }
 
 function openCorrecao() {
@@ -1899,6 +1910,9 @@ async function lookupOrder() {
   lookupError.value = null
   lookupResults.value = []
   drafts.value = []
+  // A busca nova já traz do backend o que foi lançado até agora; contar de
+  // novo o que foi criado nesta sessão esconderia unidades a mais.
+  addedThisSession.value = []
   try {
     const res = await api<LookupRow[]>(`/api/devolutions/order-lookup?pedido=${encodeURIComponent(pedido)}`)
     lookupResults.value = res
@@ -2023,7 +2037,9 @@ async function createAllDevolutions() {
         }
         if (page.value === 1) items.value = [created, ...items.value].slice(0, PAGE_SIZE)
         total.value += 1
-        addedThisSession.value = new Set([...addedThisSession.value, `${created.pedido_bling}|${created.sku}`])
+        // Chave da LINHA DA BUSCA de onde o rascunho veio (o servidor limpa o
+        // SKU — espaço, vazio — e aí a unidade criada não seria contada).
+        addedThisSession.value = [...addedThisSession.value, `${d.pedido_bling}|${d.sku}`]
         added += 1
         if (estoqueSr) showStockToast(estoqueSr, createdId, created)
         if (created.estoque_status === 'falhou' || created.estoque_status === 'conferindo') pendentesNoAdd += 1
@@ -2564,6 +2580,15 @@ async function removeRow(row: DevolutionRow) {
     total.value = Math.max(0, total.value - 1)
     void refreshTotals()
     if (res) avisarExclusao(row, res)
+    // "Adicionar pedido" aberto no mesmo pedido (excluir para relançar como
+    // Usado, 302146): busca de novo para a unidade excluída voltar na hora —
+    // só sem rascunho na tela, que a busca descartaria.
+    if (
+      addOpen.value && !drafts.value.length && row.pedido_bling
+      && lookupResults.value.some((r) => r.pedido_bling === row.pedido_bling)
+    ) {
+      void lookupOrder()
+    }
   } catch (e: any) {
     error.value = apiError(e)
     // O servidor pode ter marcado a linha (estorno que pode ter saído): relê
@@ -2734,7 +2759,7 @@ async function backfillAddresses() {
           <option value="15">parados 15+ dias</option>
           <option value="30">parados 30+ dias</option>
         </select>
-        <select v-model="acompChegadaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Devolvido = a plataforma confirmou que o pacote de volta chegou aqui (coluna Chegou em). Não Devolvido = sem confirmação ainda, não quer dizer que está a caminho.">
+        <select v-model="acompChegadaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Devolvido = a plataforma ou o rastreio confirmou que o pacote de volta chegou aqui (coluna Chegou em). Não Devolvido = sem confirmação ainda, não quer dizer que está a caminho.">
           <option value="all">Todos Status</option>
           <option value="chegou">Devolvido</option>
           <option value="pendente">Não Devolvido</option>
@@ -2769,7 +2794,7 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[45px]">Qtd</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[125px]" title="Dia em que o pedido entrou em Aguardando Devolução">Em devolução desde</th>
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]" title="Há quantos dias o pedido está aguardando devolução">Dias</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Dia em que o marketplace confirmou que o pacote de volta chegou aqui. Vazio = ainda não chegou (ou a plataforma não informa).">Chegou em</th>
+              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Dia em que a plataforma ou o rastreio confirmou que o pacote de volta chegou aqui. Vazio = sem confirmação ainda. Reembolso pago ou caso fechado não contam como chegada.">Chegou em</th>
               <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-red-50 dark:bg-red-900/20" title="Até quando a plataforma espera uma resposta da loja neste caso (TikTok: confirmar/recusar o pacote recebido, responder ao reembolso; Shopee: conferir o pacote recebido em 3 dias, enviar evidências, responder à proposta). Mercado Livre: revisar a devolução recebida — prazo calculado, entrega + 3 dias). Passado o prazo ela decide sozinha. Vermelho = menos de 24 h ou vencido. Passe o mouse na célula pra ver o que fazer.">Prazo p/ responder</th>
               <!-- Reembolso (17/09): "estamos com o dinheiro ainda ou já devolveu
                    pro cliente?" — Sim = saiu do nosso (valor e data embaixo);
@@ -2851,7 +2876,7 @@ async function backfillAddresses() {
                 <span
                   v-if="row.devolucao_chegou_em"
                   class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
-                  title="O marketplace já confirmou que o pacote voltou pra você"
+                  title="A plataforma ou o rastreio confirmou que o pacote voltou pra você"
                 >
                   <CheckCircle2 class="size-3" />
                   {{ fmtDateOnly(row.devolucao_chegou_em) }}
@@ -3109,8 +3134,8 @@ async function backfillAddresses() {
           </thead>
           <tbody>
             <tr
-              v-for="row in expandedLookupResults"
-              :key="`${row.pedido_bling}-${row.sku}-${row.conta}`"
+              v-for="(row, i) in expandedLookupResults"
+              :key="`${row.pedido_bling}-${row.sku}-${row.conta}-${i}`"
               class="border-t"
               :class="isAlreadyAdded(row) ? 'opacity-50' : ''"
             >

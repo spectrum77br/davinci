@@ -114,7 +114,7 @@ const can = loadLib('../composables/useCan.ts', { useAuthStore: lojaFalsa })
   // Garantias (07/10/2026) entra no grupo com as três permissões do documento.
   // Preserva a permissão de Filas e acrescenta a leitura específica da Central.
   // O recurso legado continua listado, mas não reabre a aba.
-  assert.deepEqual(posVenda.resources, ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados', 'garantias', 'garantias_atendimento', 'garantias_cpf', 'atendimento_email', 'atendimento_email_aba', 'atendimento_email_leitura'],
+  assert.deepEqual(posVenda.resources, ['devolucoes', 'reembolso', 'logistica', 'notas_fiscais', 'chamados', 'garantias', 'garantias_atendimento', 'garantias_cpf', 'atendimento_email', 'atendimento_email_aba', 'atendimento_email_leitura', 'atendimento_email_operacao'],
     'o recurso continua fora da tela de Permissões (quem vê e quem mexe vêm do /me)')
   assert.equal(can.RESOURCE_LABELS.atendimento_email_leitura, 'Atendimento — caixa de e-mail (somente leitura)')
   assert.equal(can.RESOURCE_LABELS.atendimento_email_aba, 'Atendimento — ver a aba E-mail (só ler, nas lojas da pessoa; as ações seguem de admin)')

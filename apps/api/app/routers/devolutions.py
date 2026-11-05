@@ -845,10 +845,10 @@ def _data_entrada(
 
 # Status da devolução (devolucao_rastreio.devolucao_status_auto) que já
 # significam "o pacote chegou aqui" — o outro caminho da mesma pergunta, pra
-# quando o sinal veio da returns API e não do envio da Logística.
+# quando o sinal veio da returns API e não do envio da Logística. TikTok fica de
+# fora: caso concluído é reembolso pago, não pacote recebido (301193, 05/11).
 _STATUS_AUTO_CHEGOU = {
     "ml": {"DELIVERED"},
-    "tiktok": {"RETURN_OR_REFUND_REQUEST_SUCCESS", "RETURN_OR_REFUND_REQUEST_COMPLETE"},
     "amazon": {"DELIVERED"},  # relatório de devoluções (02/10)
 }
 # `return_type` em que NÃO vem pacote (TikTok REFUND; Shopee needs_logistics
@@ -908,6 +908,11 @@ def _chegou_em(
     (`reverse_logistics_status = LOGISTICS_DELIVERY_DONE`): o sync grava esse
     instante em `pacote_entregue_em` e ele manda aqui, por ser a fonte mais
     direta (Eduardo, 10/09, pedido 291516).
+
+    TikTok (05/11, pedido 301193): só `pacote_entregue_em`, que vem do rastreio
+    da volta. O caso concluído não prova chegada: a plataforma aprova sozinha e
+    paga o cliente com o pacote ainda em trânsito. Rastreio que não é dos
+    Correios não tem quem carimbe, e a coluna fica vazia.
 
     ML com revisão (Vinicius 19/09, 2000014922944893 e mais 3): a perna atual
     vai pro GALPÃO do ML (`devolucao_destino_auto = warehouse`) — "entregue"
@@ -1936,29 +1941,33 @@ async def lookup_devolution_order(
     # esmaecer. Antes o "já feito" olhava só a página carregada da tabela, então
     # um item devolvido cedo (empurrado pra fora da página) reaparecia como
     # disponível — ex.: acessórios de um kit lançados antes do item principal.
+    # Conta por UNIDADE, não por SKU (302146, 05/11): kit com 3 malas b056.24,
+    # uma linha excluída para relançar como Usado — com o "já feito" por
+    # pedido+sku as 3 ficavam esmaecidas e a excluída não voltava.
     pedidos = sorted({p for r in expanded if (p := (r.get("pedido_bling") or "").strip())})
-    devolvidos: set[tuple[str, str]] = set()
+    lancadas: dict[tuple[str, str], list[float | None]] = {}
     if pedidos:
         dev_rows = (
             await session.execute(
                 text(
                     f"""
-                    SELECT DISTINCT pedido_bling::text AS pedido_bling,
-                           lower(btrim(sku)) AS sku
+                    SELECT pedido_bling::text AS pedido_bling,
+                           COALESCE(sku, '') AS sku,
+                           custo_produto::double precision AS custo,
+                           GREATEST(1, COALESCE(quantidade, 1)) AS qtd
                     FROM "{SCHEMA}".devolutions
                     WHERE pedido_bling::text = ANY(:pedidos)
-                      AND sku IS NOT NULL
                     """  # noqa: S608
                 ),
                 {"pedidos": pedidos},
             )
         ).mappings().all()
-        devolvidos = {(d["pedido_bling"], d["sku"]) for d in dev_rows}
-    for r in expanded:
-        r["ja_devolvido"] = (
-            (r.get("pedido_bling") or "").strip(),
-            (r.get("sku") or "").strip().lower(),
-        ) in devolvidos
+        for d in dev_rows:
+            # SKU limpo do mesmo jeito que o das linhas (strip do Python tira
+            # TAB/NBSP; o btrim do banco não).
+            chave = ((d["pedido_bling"] or "").strip(), d["sku"].strip().lower())
+            lancadas.setdefault(chave, []).extend([d["custo"]] * int(d["qtd"]))
+    _marcar_unidades_lancadas(expanded, lancadas)
     # Situação atual no Bling (seletor "Status Bling" já no lançamento).
     situacoes = await _situacoes_por_pedido(session, {r.get("pedido_bling") for r in expanded})
     for r in expanded:
@@ -1966,6 +1975,47 @@ async def lookup_devolution_order(
         r["situacao_bling_id"], r["situacao_bling_nome"] = sid, nome
 
     return [DevolutionLookupOut.model_validate({k: v for k, v in r.items() if not k.startswith("_")}) for r in expanded]
+
+
+def _marcar_unidades_lancadas(
+    rows: list[dict], lancadas: dict[tuple[str, str], list[float | None]]
+) -> None:
+    """Marca `ja_devolvido` em N unidades de cada pedido+sku, N = unidades já
+    lançadas. Primeiro as de custo igual ao da linha lançada (no kit + avulsa
+    do 302146 o custo é o que separa as unidades: a que sobra é a excluída),
+    depois as restantes na ordem."""
+    por_chave: dict[tuple[str, str], list[dict]] = {}
+    for r in rows:
+        r["ja_devolvido"] = False
+        chave = ((r.get("pedido_bling") or "").strip(), (r.get("sku") or "").strip().lower())
+        por_chave.setdefault(chave, []).append(r)
+    for chave, unidades in por_chave.items():
+        custos = list(lancadas.get(chave, []))
+        if not custos:
+            continue
+        sem_custo = 0
+        for custo in custos:
+            par = None
+            if custo is not None:
+                par = next(
+                    (
+                        u for u in unidades
+                        if not u["ja_devolvido"]
+                        and u.get("custo_produto") is not None
+                        and abs(float(u["custo_produto"]) - custo) < 0.005
+                    ),
+                    None,
+                )
+            if par is None:
+                sem_custo += 1
+            else:
+                par["ja_devolvido"] = True
+        for u in unidades:
+            if sem_custo <= 0:
+                break
+            if not u["ja_devolvido"]:
+                u["ja_devolvido"] = True
+                sem_custo -= 1
 
 
 async def _kit_components_for_skus(

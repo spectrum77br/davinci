@@ -128,7 +128,8 @@ const agora = useRelogio()
 // Sem acesso, links para `?tab=mail` e `abrirAba('mail')` voltam à Caixa.
 const podeVerAbaEmail = useCan('atendimento_email_aba', 'view')
 const podeLerCaixaEmail = useCan('atendimento_email_leitura', 'view')
-const veAbaEmail = computed(() => ehAdmin.value || podeVerAbaEmail.value || podeLerCaixaEmail.value)
+const podeOperarCaixaEmail = useCan('atendimento_email_operacao', 'view')
+const veAbaEmail = computed(() => ehAdmin.value || podeVerAbaEmail.value || podeLerCaixaEmail.value || podeOperarCaixaEmail.value)
 // Quem lê TODAS as Filas (04/11/2026): quem mexe, e quem não é admin e tem a
 // permissão da aba, nas lojas dele (a mesma conta de `acesso.le_filas_email`).
 const leFilasEmail = computed(() => (mexe.value && ehAdmin.value) || (!ehAdmin.value && podeVerAbaEmail.value))

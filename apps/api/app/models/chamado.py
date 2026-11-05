@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -143,6 +144,17 @@ class Chamado(Base, TimestampMixin):
     juridico_obs: Mapped[str | None] = mapped_column(Text, nullable=True)
     juridico_token: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     juridico_destinatarios: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Revisão do dia (Vinicius 05/11/2026, migration 0451): a marca ATUAL da pessoa
+    # na coluna Revisão — `conferido`/`revisar` valem só em `revisao_dia`; `fixo`
+    # vale até `revisao_ate`, com o motivo. A virada do dia é só comparar a data
+    # com hoje (sem cron). Quem marcou e quando; o que já foi marcado fica em
+    # `chamado_revisoes`. Ver `services/chamados_revisao.py`.
+    revisao_tipo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revisao_dia: Mapped[date | None] = mapped_column(Date, nullable=True)
+    revisao_ate: Mapped[date | None] = mapped_column(Date, nullable=True)
+    revisao_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revisao_por_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    revisao_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     mensagens: Mapped[list["ChamadoMensagem"]] = relationship(
         back_populates="chamado",
@@ -154,6 +166,53 @@ class Chamado(Base, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="ChamadoAnexo.created_at",
     )
+
+
+class ChamadoRevisao(Base, TimestampMixin):
+    """Registro de cada marca da coluna Revisão (05/11/2026): as colunas `revisao_*`
+    do chamado guardam só a de agora; aqui fica quem marcou o quê em cada dia.
+    `tipo` = conferido | revisar | fixo | limpo (a pessoa tirou) | convertido
+    (anotação da Observação virou marca na migration 0451 — `observacao_antes`
+    guarda o texto original)."""
+
+    __tablename__ = "chamado_revisoes"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    chamado_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("chamados.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    tipo: Mapped[str] = mapped_column(Text, nullable=False)
+    dia: Mapped[date] = mapped_column(Date, nullable=False)
+    ate: Mapped[date | None] = mapped_column(Date, nullable=True)
+    motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    autor_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    autor_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    observacao_antes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ChamadoRevisaoDia(Base, TimestampMixin):
+    """Foto de como ficou a revisão de cada dia (painel Dias, 05/11/2026). Regravada
+    de hora em hora: a última do dia é a que fica. `falta` = sem marca; `prazos` =
+    Fixo que pede olhar. `faltaram` = ids dos dois, pro clique no dia na tela;
+    `por_status` conta só os sem marca."""
+
+    __tablename__ = "chamado_revisao_dias"
+
+    dia: Mapped[date] = mapped_column(Date, primary_key=True)
+    conferido: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    revisar: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    fixo: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    falta: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    prazos: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    por_status: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    faltaram: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
 
 
 class ChamadoMensagem(Base, TimestampMixin):

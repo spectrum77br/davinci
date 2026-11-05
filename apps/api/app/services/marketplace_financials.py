@@ -577,6 +577,7 @@ async def run_ml_cancelados_resync(
     now = datetime.now(UTC)
     mof = MarketplaceOrderFinancial
     ml_cancelamento = mof.raw["ml_cancelamento"]
+    n_desfeitas = func.coalesce(func.jsonb_array_length(ml_cancelamento["desfeitas"]), 0)
     stmt = (
         select(mof.bling_id)
         .where(mof.platform == IntegrationPlatform.ML)
@@ -584,26 +585,31 @@ async def run_ml_cancelados_resync(
         .where(mof.created_at >= now - timedelta(days=ML_CANCELADOS_JANELA_DIAS))
         .where(
             or_(
-                ~mof.raw.has_key("ml_cancelamento"),
+                # desfeita gravada antes de 04/11: sem a conta original nem a troca
+                and_(n_desfeitas > 0, ~mof.raw.has_key("conta_antes_de_desfazer")),
                 and_(
-                    func.coalesce(func.jsonb_array_length(ml_cancelamento["desfeitas"]), 0) == 0,
                     or_(
-                        mof.fetched_at.is_(None),
-                        mof.fetched_at < now - timedelta(hours=ML_CANCELADOS_RELEITURA_HORAS),
+                        ~mof.raw.has_key("ml_cancelamento"),
+                        and_(
+                            n_desfeitas == 0,
+                            or_(
+                                mof.fetched_at.is_(None),
+                                mof.fetched_at
+                                < now - timedelta(hours=ML_CANCELADOS_RELEITURA_HORAS),
+                            ),
+                        ),
                     ),
-                ),
-            )
-        )
-        .where(
-            or_(
-                mof.raw["order"]["status"].astext == "cancelled",
-                exists().where(
-                    BlingOrder.bling_id == mof.bling_id,
-                    BlingOrder.situacao == str(SITUACAO_CANCELADO),
-                ),
-                exists().where(
-                    Logistica.pedido_bling == mof.pedido_bling,
-                    Logistica.meli_status["order_status"].astext == "cancelled",
+                    or_(
+                        mof.raw["order"]["status"].astext == "cancelled",
+                        exists().where(
+                            BlingOrder.bling_id == mof.bling_id,
+                            BlingOrder.situacao == str(SITUACAO_CANCELADO),
+                        ),
+                        exists().where(
+                            Logistica.pedido_bling == mof.pedido_bling,
+                            Logistica.meli_status["order_status"].astext == "cancelled",
+                        ),
+                    ),
                 ),
             )
         )
@@ -1574,7 +1580,19 @@ async def _fetch_ml(
     # bolso e o nosso dinheiro não saiu (ver chamados_pagamento_ml).
     desfeitas = [o for o in matched_orders if _ml_venda_desfeita(o)]
     estorno: Decimal | None = None
+    conta_desfeita: dict[str, str | None] | None = None
+    ml_troca: dict[str, Any] | None = None
     if gross is not None and matched_orders and len(desfeitas) == len(matched_orders):
+        # 04/11 (Vinicius, 305862: "não existe pedido ML sem tarifa"): a Margem zera a
+        # venda desfeita, mas a Conciliação precisa da conta que ela tinha — é com ela
+        # que o que o ML liberou se compara. Guardada ANTES de zerar.
+        conta_desfeita = {
+            "tarifa": str(commission),
+            "frete": str(freight) if freight is not None else None,
+            "cupom": str(discount) if discount is not None else None,
+            "liquido": str(net) if net is not None else None,
+        }
+        ml_troca = await _ml_troca_da_venda(client, matched_orders)
         commission = Decimal("0")
         freight = Decimal("0")
         discount = None
@@ -1653,6 +1671,10 @@ async def _fetch_ml(
                 "desfeitas": [_text_value(o.get("id")) for o in desfeitas],
                 "estorno": str(estorno) if estorno is not None else None,
             },
+            # Presentes em toda leitura depois de 04/11: a varredura relê a venda
+            # desfeita gravada sem a conta original.
+            "conta_antes_de_desfazer": conta_desfeita,
+            "ml_troca": ml_troca,
             "order": order,
             "billing": billing,
             "billing_error": billing_error,
@@ -1674,6 +1696,47 @@ async def _fetch_ml(
         freight_reconciliation_checked=True,
         error=None if has_billing else billing_error or "ML billing detail not posted yet",
     )
+
+
+async def _ml_troca_da_venda(
+    client: MercadoLivreClient, orders: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """A troca por trás da venda desfeita, se houver.
+
+    Na troca o ML desfaz o pedido antigo e cria outro pro produto novo, com outro
+    pagamento: no Bling viram dois pedidos, e a tela do ML só mostra o pagamento novo
+    (305862 → 306420, 04/11). O caminho é o da documentação do ML: a reclamação do
+    pedido, `related_entities` com "changes" e aí `/claims/{id}/changes`. Uma falha
+    aqui não derruba a leitura da venda — fica sem a troca, com o erro guardado."""
+    try:
+        for order in orders:
+            order_id = _text_value(order.get("id"))
+            ids = [m.get("id") if isinstance(m, dict) else m for m in order.get("mediations") or []]
+            if not ids and order_id:
+                achadas = await client.buscar_reclamacoes_do_recurso("order", order_id)
+                ids = [c.get("id") for c in achadas]
+            for claim_id in filter(None, ids):
+                claim = await client.get_claim(claim_id)
+                if "changes" not in (claim.get("related_entities") or []):
+                    continue
+                corpo = await client.get_claim_changes(claim_id)
+                for troca in corpo if isinstance(corpo, list) else [corpo]:
+                    novos = [
+                        novo
+                        for x in (troca.get("new_orders_ids") or [])
+                        if (novo := _text_value(x))
+                    ]
+                    if novos:
+                        return {
+                            "reclamacao": _text_value(claim_id),
+                            "tipo": troca.get("type"),
+                            "status": troca.get("status"),
+                            "novos_pedidos": novos,
+                        }
+    except Exception as e:  # noqa: BLE001
+        logger.warning("ml_troca_leitura_falhou", err=str(e)[:300])
+        return {"erro": str(e)[:300]}
+    return None
 
 
 async def _fetch_ml_freight_reconciliations(

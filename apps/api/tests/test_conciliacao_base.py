@@ -1598,6 +1598,7 @@ async def test_painel_raio_x_junta_as_quatro_versoes_e_os_movimentos(
         "recebido": 610.65,
         # 15/10: frete do comprador (bruto − valor da venda; sem bruto no teste = None)
         "frete_comprador": None,
+        "juros_comprador": None,
         "produtos": None,
         "frete_liquido": 62.33,
     }
@@ -4100,3 +4101,320 @@ async def test_venda_devolvida_que_bateu_nao_finaliza_sozinha(db, make_user):
     await db.commit()
     p = await _conciliado(db, "302216")
     assert p.etapa == "pendencia"
+
+
+# --- 04/11: Raio-X do ML (troca 305862 → 306420, juros, linhas que somam) ---------------
+
+
+def _lib(loja, data, pedido, *, credito, bruto, tarifa, frete, parcelamento=None, numero=None):
+    m = _mov(
+        loja,
+        "venda_liberada",
+        data,
+        credito=credito,
+        pedido_mkt=pedido,
+        pedido_bling=numero,
+        frete=frete,
+        tarifa=tarifa,
+        parcelamento=parcelamento,
+    )
+    m.bruto = Decimal(bruto)
+    return m
+
+
+def _por_chave(corpo: dict) -> dict[str, dict]:
+    return {x["chave"]: x for x in corpo["comparativo"]["linhas"]}
+
+
+@pytest.mark.parametrize(
+    ("valor", "tarifa_venda", "bruto", "tarifa", "parcelamento", "juros", "frete"),
+    [
+        # 305862: o comprador parcelou com juros, sem pagar frete
+        ("799.28", "99.06", "880.09", "-99.06", "-80.81", "80.81", "0"),
+        # venda desfeita lida antes de 04/11: a tarifa da venda veio zerada
+        ("799.28", "0", "880.09", "-99.06", "-80.81", "80.81", "0"),
+        # 306528: juros e frete do comprador no mesmo pagamento
+        ("1000.00", "120.00", "1114.28", "-120.00", "-86.29", "86.29", "27.99"),
+        # 305861: frete do comprador, sem parcelamento
+        ("500.00", "60.00", "530.99", "-60.00", None, "0", "30.99"),
+        # 301744: parcelamento bancado pela loja, fora do bruto
+        ("830.00", "156.56", "830.00", "-98.88", "-57.68", "0", "0"),
+        # loja banca o parcelamento e o comprador paga um frete maior que ele
+        ("850.00", "120.00", "880.99", "-100.00", "-20.00", "0", "30.99"),
+        # loja banca o parcelamento, com a tarifa da venda zerada: o bruto não cabe nele
+        ("850.00", "0", "880.99", "-100.00", "-60.00", "0", "30.99"),
+    ],
+)
+def test_juros_do_comprador_nao_sao_frete(
+    valor, tarifa_venda, bruto, tarifa, parcelamento, juros, frete
+):
+    lib = ConciliacaoMovimento(
+        bruto=Decimal(bruto),
+        tarifa=Decimal(tarifa),
+        parcelamento=Decimal(parcelamento) if parcelamento else None,
+    )
+    venda = MarketplaceOrderFinancial(gross_amount=Decimal(valor), fee_amount=Decimal(tarifa_venda))
+    assert calc.juros_do_comprador(Decimal(valor), Decimal(tarifa_venda), [lib]) == Decimal(juros)
+    assert calc.frete_do_comprador(venda, [lib]) == Decimal(frete)
+
+
+async def _troca_305862(db, loja, *, com_conta: bool = True) -> None:
+    d = lambda h, mi: datetime(2026, 11, 3, h, mi, tzinfo=UTC)  # noqa: E731
+    velho, novo = "2000015686572621", "2000015750280215"
+    db.add(_pedido_bling("305862", velho, datetime(2026, 10, 24, 12, tzinfo=UTC), "799.28", 440.0))
+    db.add(_pedido_bling("306420", novo, datetime(2026, 10, 28, 12, tzinfo=UTC), "799.28", 440.0))
+    raw_velho: dict = {"order": {"id": 2000019150957778}}
+    if com_conta:
+        raw_velho |= {
+            "conta_antes_de_desfazer": {
+                "tarifa": "99.06",
+                "frete": "67.88",
+                "cupom": None,
+                "liquido": "632.34",
+            },
+            "ml_troca": {"tipo": "change", "novos_pedidos": ["2000019217755594"]},
+        }
+    fin_velho = _fin(
+        loja.integration_id,
+        velho,
+        gross="799.28",
+        fee="0",
+        freight="0",
+        net="0",
+        refund="799.28",
+        raw=raw_velho,
+    )
+    fin_novo = _fin(
+        loja.integration_id,
+        novo,
+        gross="799.28",
+        fee="151.86",
+        freight="0",
+        net="647.42",
+        raw={"order": {"id": 2000019217755594}},
+    )
+    fin_velho.pedido_bling, fin_novo.pedido_bling = "305862", "306420"
+    db.add_all([fin_velho, fin_novo])
+    db.add_all(
+        [
+            _mov(loja, "estorno", d(20, 12), credito="179.87", pedido_mkt=velho),
+            _mov(loja, "mediacao", d(20, 12), debito="173.63", pedido_mkt=velho),
+            _mov(loja, "mediacao", d(20, 13), debito="632.34", pedido_mkt=velho),
+            _lib(
+                loja,
+                d(20, 13),
+                velho,
+                credito="632.34",
+                bruto="880.09",
+                tarifa="-99.06",
+                frete="-67.88",
+                parcelamento="-80.81",
+            ),
+        ]
+    )
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 4, 12, tzinfo=UTC))
+    await db.commit()
+
+
+async def test_venda_desfeita_do_ml_mantem_a_conta_que_tinha(db, make_user, auth_as, client):
+    """04/11 (Vinicius, 305862): "não existe pedido ML sem tarifa". A Margem zera a venda
+    desfeita; o previsto continua sendo a conta dela, e o estorno aparece à parte."""
+    loja, _ = await _loja(db, make_user, inicio=date(2026, 10, 24))
+    await _troca_305862(db, loja)
+    p = await _conciliado(db, "305862")
+    assert (p.venda_tarifa, p.venda_frete) == (Decimal("99.06"), Decimal("67.88"))
+    assert p.venda_liquido == Decimal("632.34") and p.previsto_na_venda is None
+    assert p.situacao == "estornado_depois" and p.recebido == Decimal("6.24")
+    assert p.dif_previsto_recebido == Decimal("-626.10")
+    assert p.motivo == "troca no ML: ficou 6.24 com a loja"
+
+    auth_as(await make_user(permissions={"margem": {"view": True}}))
+    r = await client.get("/api/conciliacao/pedidos/305862", params={"loja": "jlas2"})
+    corpo = r.json()
+    assert corpo["pedido"]["venda_extras"] == 0.0  # a grade mostrava Extras 799,28
+    linhas = _por_chave(corpo)
+    assert list(linhas) == [
+        "produtos",
+        "juros",
+        "total",
+        "tarifa",
+        "juros_saida",
+        "frete",
+        "cupom",
+        "a_parte",
+        "liquido",
+        "depois",
+        "ficou",
+    ]
+    for chave, previsto in (
+        ("produtos", 799.28),
+        ("total", 880.09),
+        ("tarifa", 99.06),
+        ("frete", 67.88),
+        ("liquido", 632.34),
+    ):
+        assert (linhas[chave]["previsto"], linhas[chave]["real"]) == (previsto, previsto)
+        assert linhas[chave]["dif"] == 0.0
+    # a coluna soma de cima a baixo
+    assert linhas["juros"]["real"] == linhas["juros_saida"]["real"] == 80.81
+    assert linhas["depois"]["real"] == -626.10 and linhas["ficou"]["real"] == 6.24
+    assert corpo["comparativo"]["comparar"] is True
+    assert "conta que ela tinha" in corpo["comparativo"]["nota"]
+    # a linha mostra a conta, mas o ML devolveu tudo: nada disso entra nos totais
+    resumo = (await client.get("/api/conciliacao/pedidos", params={"loja": "jlas2"})).json()[
+        "resumo"
+    ]
+    assert resumo["tarifas_frete"] == 151.86 and resumo["previsto"] == 647.42
+    fechamento = (
+        await client.get("/api/conciliacao/fechamento", params={"loja": "jlas2", "mes": "2026-10"})
+    ).json()
+    assert fechamento["vendas"]["tarifa"] == 151.86 and fechamento["vendas"]["frete"] == 0.0
+    assert fechamento["vendas"]["previsto"] == 647.42
+
+
+async def test_troca_do_ml_liga_os_dois_pedidos(db, make_user, auth_as, client):
+    """A tela do ML é uma só e mostra o pagamento novo; no Bling são dois pedidos."""
+    loja, _ = await _loja(db, make_user, inicio=date(2026, 10, 24))
+    await _troca_305862(db, loja)
+    auth_as(await make_user(permissions={"margem": {"view": True}}))
+    antigo = (
+        await client.get("/api/conciliacao/pedidos/305862", params={"loja": "jlas2"})
+    ).json()["troca"]
+    assert antigo["papel"] == "antigo" and antigo["outro"]["pedido_bling"] == "306420"
+    assert antigo["venda_inteira"] == 653.66 and antigo["falta_liberar"] is True
+    novo = (
+        await client.get("/api/conciliacao/pedidos/306420", params={"loja": "jlas2"})
+    ).json()["troca"]
+    assert novo["papel"] == "novo" and novo["outro"]["pedido_bling"] == "305862"
+    assert novo["venda_inteira"] == 653.66
+
+
+async def test_venda_desfeita_sem_a_conta_original_nao_compara(db, make_user, auth_as, client):
+    """Leitura de antes de 04/11, até a varredura reler: sem conta, sem vermelho falso."""
+    loja, _ = await _loja(db, make_user, inicio=date(2026, 10, 24))
+    await _troca_305862(db, loja, com_conta=False)
+    assert (await _conciliado(db, "305862")).motivo == "venda desfeita: ficou 6.24 com a loja"
+    auth_as(await make_user(permissions={"margem": {"view": True}}))
+    corpo = (
+        await client.get("/api/conciliacao/pedidos/305862", params={"loja": "jlas2"})
+    ).json()
+    assert corpo["comparativo"]["comparar"] is False and corpo["troca"] is None
+    assert "venda desfeita" in corpo["comparativo"]["nota"]
+
+
+async def test_venda_normal_com_juros_nao_pinta_tarifa_nem_frete(db, make_user, auth_as, client):
+    """Pedido de pé: antes a tarifa dava +80,81 e o frete −80,81 com o líquido certo."""
+    loja, _ = await _loja(db, make_user, inicio=date(2026, 10, 24))
+    numero = "2000015000000001"
+    dia = datetime(2026, 11, 3, 12, tzinfo=UTC)
+    db.add(_pedido_bling("305900", numero, dia - timedelta(days=9), "799.28", 440.0))
+    db.add(
+        _fin(
+            loja.integration_id,
+            numero,
+            gross="799.28",
+            fee="99.06",
+            freight="67.88",
+            net="632.34",
+        )
+    )
+    db.add(
+        _lib(
+            loja,
+            dia,
+            numero,
+            credito="632.34",
+            bruto="880.09",
+            tarifa="-99.06",
+            frete="-67.88",
+            parcelamento="-80.81",
+        )
+    )
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=dia + timedelta(hours=1))
+    await db.commit()
+    assert (await _conciliado(db, "305900")).situacao == "bateu"
+    auth_as(await make_user(permissions={"margem": {"view": True}}))
+    corpo = (
+        await client.get("/api/conciliacao/pedidos/305900", params={"loja": "jlas2"})
+    ).json()
+    linhas = _por_chave(corpo)
+    assert linhas["tarifa"]["dif"] == 0.0 and linhas["frete"]["dif"] == 0.0
+    assert linhas["liquido"]["dif"] == 0.0 and "frete_comprador" not in linhas
+    assert "ficou" not in linhas and corpo["troca"] is None
+
+
+async def test_parcelamento_da_loja_continua_na_tarifa(db, make_user, auth_as, client):
+    """301744 (19/10): a tarifa do ML é MP_FEE + FINANCING_FEE quando a loja banca."""
+    loja, _ = await _loja(db, make_user, inicio=date(2026, 10, 24))
+    numero = "2000015000000002"
+    dia = datetime(2026, 11, 3, 12, tzinfo=UTC)
+    db.add(_pedido_bling("305901", numero, dia - timedelta(days=9), "830.00", 400.0))
+    db.add(
+        _fin(
+            loja.integration_id,
+            numero,
+            gross="830.00",
+            fee="156.56",
+            freight="30.00",
+            net="643.44",
+        )
+    )
+    db.add(
+        _lib(
+            loja,
+            dia,
+            numero,
+            credito="643.44",
+            bruto="830.00",
+            tarifa="-98.88",
+            frete="-30.00",
+            parcelamento="-57.68",
+        )
+    )
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=dia + timedelta(hours=1))
+    await db.commit()
+    auth_as(await make_user(permissions={"margem": {"view": True}}))
+    corpo = (
+        await client.get("/api/conciliacao/pedidos/305901", params={"loja": "jlas2"})
+    ).json()
+    linhas = _por_chave(corpo)
+    assert linhas["tarifa"]["real"] == 156.56 and linhas["tarifa"]["dif"] == 0.0
+    assert linhas["parcelamento"]["real"] == 57.68
+    assert "juros" not in linhas and "juros_saida" not in linhas
+
+
+def test_raio_x_ml_soma_o_que_saiu_no_mesmo_minuto_da_liberacao():
+    """306037 (04/11): só a mediação de −6,24 caía em "depois"; as do minuto da liberação
+    e o estorno da tarifa ficavam escondidos e a coluna não somava (−0,71 × −6,95)."""
+    from app.models import ConciliacaoPedido
+    from app.routers.conciliacao import _comparativo
+
+    d = datetime(2026, 11, 3, 15, tzinfo=UTC)
+    loja = ConciliacaoLoja(integration_id=None, platform=IntegrationPlatform.ML, conta="kfa")
+    movs = [
+        _mov(loja, "venda_liberada", d, credito="11.53"),
+        _mov(loja, "estorno", d, credito="2.52"),
+        _mov(loja, "mediacao", d, debito="0.71"),
+        _mov(loja, "mediacao", d, debito="2.52"),
+        _mov(loja, "mediacao", d, debito="11.53"),
+        _mov(loja, "mediacao", d + timedelta(hours=2), debito="6.24"),
+    ]
+    p = ConciliacaoPedido(
+        platform=IntegrationPlatform.ML,
+        pedido_bling="306037",
+        situacao="estornado_depois",
+        venda_liquido=Decimal("11.53"),
+        liberado_valor=Decimal("11.53"),
+        liberado_em=d,
+        recebido=Decimal("-6.95"),
+    )
+    versoes = {
+        "venda": {"valor": 21.0, "tarifa": 2.52, "frete": 6.95, "liquido": 11.53},
+        "extrato": {"valor": 21.0, "liquido": 11.53},
+    }
+    linhas = {x["chave"]: x for x in _comparativo(p, versoes, movs)["linhas"]}
+    assert linhas["liquido"]["real"] == 11.53 and linhas["liquido"]["dif"] == 0.0
+    assert linhas["depois"]["real"] == -18.48 and linhas["ficou"]["real"] == -6.95

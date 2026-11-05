@@ -8,6 +8,9 @@
 // as permissões do §6 (sem "Registrar atendimento" o botão não aparece; a trava de só leitura do
 // Atendimento não bloqueia quem tem a permissão da garantia). O contrato é conferido contra
 // apps/api/app/schemas/garantia.py e as regras contra apps/api/app/services/garantia.py.
+// As 3 partes (04/11/2026): as pílulas Celular/Mala/Eletro e as abas Resumo (só admin) · Garantia ·
+// Atendimento (?aba=, ?dept=), o Resumo com Saldo e a % = gasto ÷ saldo × 100, a coluna Loja, o selo
+// do Atendimento e o cartão do pedido que a busca achou sem garantia.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -103,7 +106,9 @@ const VAZIOS = ['GarantiaStatus', 'GarantiaAparelho', 'GarantiaCobertura', 'Gara
 function appCom(C, props, g = {}, extras = {}) {
   const app = Vue.createSSRApp(C, props)
   for (const [n, c] of Object.entries(STUBS)) app.component(n, c)
-  for (const n of VAZIOS) app.component(n, extras[n] ? componente(extras[n], g) : { render: () => null })
+  for (const n of VAZIOS) if (!extras[n]) app.component(n, { render: () => null })
+  // Os de verdade (também os que não estão nos vazios, como o GarantiaResumo na página).
+  for (const [n, rel] of Object.entries(extras)) app.component(n, componente(rel, g))
   return app
 }
 const html = async (app) => (await renderToString(app)).replace(/<!--[\s\S]*?-->/g, '')
@@ -124,6 +129,14 @@ const CONSULTA = { id: 'c', role: 'user', permissions: { garantias: { view: true
 const CADASTRA = { id: 'k', role: 'user', permissions: { garantias: { view: true, edit: true } } }
 const REGISTRA = { id: 'r', role: 'user', permissions: { garantias_atendimento: { view: true, edit: true } } }
 const COMUM = { id: 'u', role: 'user', permissions: {} }
+
+// O pedido da busca que ainda não tem garantia (04/11/2026; o exemplo da SPEC:
+// o pedido do ML de antes de o robô começar). Sem CPF nem nome.
+const PEDIDO_SEM_GARANTIA = {
+  pedido_bling: '288113', pedido_marketplace: '2000017677253868', plataforma: 'ml', conta: 'Loja X', data: '2026-07-30T14:00:00Z',
+  situacao: 'Entregue', produto_uranyx: true, motivo: 'antes_das_notas',
+  motivo_texto: 'o pedido é de antes de 19/08/2026, quando o robô começou a criar a garantia pela NF.', pode_cadastrar: true,
+}
 
 const LINHA = {
   id: 7, cliente_nome: 'João Silva', cpf_mascarado: '***.982.247-**', nf_numero: '10234', nf_serie: '1',
@@ -242,19 +255,62 @@ const LINHA = {
   assert.deepEqual(L.corpoDaLista(f0), { limite: 100, offset: 0 })
   assert.deepEqual(L.corpoDaLista({ ...f0, busca: ' João ', status: 'expirada', periodo: 'entrega', de: '2026-01-01', ate: '', com_atendimento_no_mes: true }, 100),
     { limite: 100, offset: 100, busca: 'João', status: 'expirada', periodo: 'entrega', de: '2026-01-01', com_atendimento_no_mes: true })
-  // Resumo por departamento (28/10/2026): as porcentagens e o corpo do POST.
-  assert.equal(L.pct(4640, 5992), '77,4%')
-  assert.equal(L.pct(6, 5992), '0,1%')
-  assert.equal(L.pct(1, 5992), '<0,1%')
-  assert.equal(L.pct(5, 5), '100%')
-  assert.equal(L.pct(0, 10), '0%')
-  assert.equal(L.pct(3, 0), '0%')
+  // Resumo por departamento (28/10/2026): o corpo do POST.
   assert.equal(L.largura(1, 5992), 1.5, 'o que não é zero aparece')
   assert.equal(L.largura(0, 10), 0)
   assert.equal(L.numeroBR(5992), (5992).toLocaleString('pt-BR'))
   assert.deepEqual(L.corpoDoResumo({ ...f0, busca: '306200', ordem: 'atividade', com_conversa: true }), {}, 'a busca e o "só com conversa" são da lista')
   assert.deepEqual(L.corpoDoResumo({ ...f0, status: 'ativa', periodo: 'entrega', de: '2026-10-01', ate: '', origem: 'robo' }),
     { status: 'ativa', periodo: 'entrega', de: '2026-10-01', origem: 'robo' })
+  // As 3 partes (04/11/2026): os cartões ficam na aba Garantia — o "Atendimentos
+  // no mês" não vai para o Resumo (lá ninguém vê o cartão ligado); nem a
+  // pílula, nem o produto, nem o Atendimento.
+  assert.deepEqual(L.corpoDoResumo({ ...f0, com_atendimento_no_mes: true, departamento: 'eletro', produto: 'tabela:1', em_atendimento: true, ids: [1] }), {})
+  // A % do Resumo: gasto ÷ saldo × 100, 2 casas com vírgula; sem saldo, "—".
+  assert.equal(L.pctDoGasto(229.4, 6650), '3,45%')
+  assert.equal(L.pctDoGasto(0, 1000), '0,00%')
+  assert.equal(L.pctDoGasto(12345.6, 100), '12.345,60%')
+  assert.equal(L.pctDoGasto(5, -100), '-5,00%', 'saldo negativo: a conta como ela é')
+  assert.equal(L.pctDoGasto(0, -100), '0,00%', 'nunca "-0,00%"')
+  assert.equal(L.pctDoGasto(10, 0), '—')
+  assert.equal(L.pctDoGasto(null, null), '—')
+  // O corpo da lista: o departamento da pílula, o produto da linha do Resumo e
+  // a aba Atendimento.
+  assert.deepEqual(L.corpoDaLista({ ...f0, departamento: 'mala', produto: 'tabela:1', em_atendimento: true }),
+    { limite: 100, offset: 0, departamento: 'mala', produto: 'tabela:1', em_atendimento: true })
+  assert.deepEqual(L.corpoDaLista({ ...f0, departamento: null, produto: null, em_atendimento: false }), { limite: 100, offset: 0 })
+  // Os departamentos (a ordem fixa da SPEC) e a aba/departamento da URL: o
+  // Resumo é só do admin.
+  assert.deepEqual(L.DEPARTAMENTOS.map((d) => [d.chave, d.nome]), [['celular', 'Celular'], ['mala', 'Mala'], ['eletro', 'Eletro']])
+  assert.equal(L.abaDaUrl(undefined, true), 'resumo', 'o admin abre no Resumo')
+  assert.equal(L.abaDaUrl(undefined, false), 'garantia', 'os outros, na Garantia')
+  assert.equal(L.abaDaUrl('resumo', false), 'garantia', 'quem não é admin nunca cai no Resumo')
+  assert.equal(L.abaDaUrl('resumo', true), 'resumo')
+  assert.equal(L.abaDaUrl('atendimento', false), 'atendimento')
+  assert.equal(L.abaDaUrl(['garantia'], true), 'garantia', 'a query repetida vale a 1ª')
+  assert.equal(L.abaDaUrl('xyz', true), 'resumo')
+  assert.equal(L.departamentoDaUrl('mala'), 'mala')
+  assert.equal(L.departamentoDaUrl(['eletro', 'mala']), 'eletro')
+  assert.equal(L.departamentoDaUrl('acessorios'), 'celular', 'o que não é departamento vira o Celular')
+  assert.equal(L.departamentoDaUrl(undefined), 'celular')
+  // A coluna Loja: plataforma · conta.
+  assert.equal(L.lojaDaGarantia({ plataforma: 'ml', conta: 'Loja X' }), 'Mercado Livre · Loja X')
+  assert.equal(L.lojaDaGarantia({ plataforma: 'shopee', conta: null }), 'Shopee')
+  assert.equal(L.lojaDaGarantia({ plataforma: null, conta: null }), '—')
+  // O selo da aba Atendimento: o motivo e há quanto tempo (o dia em São Paulo).
+  assert.equal(L.haQuantoTempo('2026-11-01T15:00:00Z', '2026-11-04'), 'há 3 dias')
+  assert.equal(L.haQuantoTempo('2026-11-03T15:00:00Z', '2026-11-04'), 'há 1 dia')
+  assert.equal(L.haQuantoTempo('2026-11-04T02:00:00Z', '2026-11-04'), 'há 1 dia', '23h de 03/11 em SP')
+  assert.equal(L.haQuantoTempo('2026-11-04T12:00:00Z', '2026-11-04'), 'hoje')
+  assert.equal(L.haQuantoTempo(null, '2026-11-04'), '')
+  assert.equal(L.seloDoAtendimento({ motivo: 'no_tecnico', rotulo: 'No técnico · vencido', desde: '2026-10-03T12:00:00Z', vencido: true }, '2026-11-04'), 'No técnico · há 32 dias · prazo vencido')
+  assert.equal(L.seloDoAtendimento({ motivo: 'plataforma_decidindo', rotulo: 'Plataforma decidindo', desde: null, vencido: false }, '2026-11-04'), 'Plataforma decidindo')
+  // O pedido que a busca achou sem garantia (nunca CPF nem nome).
+  assert.equal(L.textoPedidoSemGarantia(PEDIDO_SEM_GARANTIA),
+    'Pedido 288113 · Mercado Livre Loja X · nº na plataforma 2000017677253868 · compra 30/07/2026 · Entregue — ainda sem garantia: o pedido é de antes de 19/08/2026, quando o robô começou a criar a garantia pela NF.')
+  assert.equal(L.textoPedidoSemGarantia({ ...PEDIDO_SEM_GARANTIA, pedido_marketplace: null, plataforma: null, conta: null, data: null, situacao: null, motivo: 'outro', motivo_texto: 'não achei o motivo.' }),
+    'Pedido 288113 — ainda sem garantia: não achei o motivo.')
+  assert.ok(L.ERROS.so_admin, 'o 403 do Resumo tem frase')
   // Pedido de garantia (28/10): a data do pedido é o dia em São Paulo (às
   // 22h30 de 27/10 em SP já é 28/10 em UTC).
   assert.equal(L.rotuloDoPedido({ pedido_em: '2026-10-28T01:30:00Z', pedido_origem: 'mensagem', nao_e_pedido: false }), 'Mensagem do cliente · 27/10/2026')
@@ -341,14 +397,17 @@ const LINHA = {
   assert.equal(L.rotuloNota({ numero: '10234', serie: '1', chave: 'x', emitida_em: null, valor: 1299, papel: 'produto' }), 'NF 10234 · série 1 · produto · R$ 1.299,00')
 
   // §6: as permissões.
-  assert.deepEqual(L.acessoGarantia(ADMIN), { consulta: true, cadastra: true, registra: true, veCpf: true, ve: true, log: true })
-  assert.deepEqual(L.acessoGarantia(CONSULTA), { consulta: true, cadastra: false, registra: false, veCpf: false, ve: true, log: false })
-  assert.deepEqual(L.acessoGarantia(REGISTRA), { consulta: false, cadastra: false, registra: true, veCpf: false, ve: true, log: false })
-  assert.deepEqual(L.acessoGarantia(COMUM), { consulta: false, cadastra: false, registra: false, veCpf: false, ve: false, log: false })
+  // O Resumo (a garantia por produto, com os reais): só admin (04/11/2026).
+  assert.deepEqual(L.acessoGarantia(ADMIN), { consulta: true, cadastra: true, registra: true, veCpf: true, ve: true, log: true, resumo: true })
+  assert.deepEqual(L.acessoGarantia(CONSULTA), { consulta: true, cadastra: false, registra: false, veCpf: false, ve: true, log: false, resumo: false })
+  assert.deepEqual(L.acessoGarantia(CADASTRA), { consulta: true, cadastra: true, registra: false, veCpf: false, ve: true, log: false, resumo: false })
+  assert.deepEqual(L.acessoGarantia(REGISTRA), { consulta: false, cadastra: false, registra: true, veCpf: false, ve: true, log: false, resumo: false })
+  assert.deepEqual(L.acessoGarantia(COMUM), { consulta: false, cadastra: false, registra: false, veCpf: false, ve: false, log: false, resumo: false })
   assert.equal(L.acessoGarantia({ role: 'user', permissions: { garantias_cpf: { view: true } } }).veCpf, true)
   assert.equal(L.acessoGarantia(null).ve, false)
   // Só o `view` de "Registrar atendimento": não vê nada (o backend também recusa).
-  assert.deepEqual(L.acessoGarantia({ role: 'user', permissions: { garantias_atendimento: { view: true } } }), { consulta: false, cadastra: false, registra: false, veCpf: false, ve: false, log: false })
+  assert.deepEqual(L.acessoGarantia({ role: 'user', permissions: { garantias_atendimento: { view: true } } }), { consulta: false, cadastra: false, registra: false, veCpf: false, ve: false, log: false, resumo: false })
+  assert.equal(L.acessoGarantia(null).resumo, false)
 }
 
 // ═══════════════════════════════════════════════════════════════ contrato com o backend
@@ -356,15 +415,21 @@ const LINHA = {
   const schemas = api('schemas/garantia.py')
   const servico = api('services/garantia.py')
   const rotas = api('routers/garantias.py')
-  const camposPy = (classe) => {
+  const blocoPy = (classe) => {
     const ini = schemas.indexOf(`\nclass ${classe}(`)
-    assert.ok(ini >= 0, `classe ${classe}`)
+    if (ini < 0) return null
     const fim = schemas.indexOf('\n\n\nclass ', ini + 1)
-    const bloco = schemas.slice(ini + 1, fim < 0 ? undefined : fim)
+    return schemas.slice(ini + 1, fim < 0 ? undefined : fim)
+  }
+  const camposPy = (classe) => {
+    const bloco = blocoPy(classe)
+    assert.ok(bloco, `classe ${classe}`)
     const base = /^class \w+\((\w+)\):/.exec(bloco)[1]
     const proprios = [...bloco.matchAll(/^ {4}(\w+): /gm)].map((x) => x[1]).filter((n) => n !== 'model_config')
     return base === 'BaseModel' ? proprios : [...camposPy(base), ...proprios]
   }
+  // A classe de um campo ("atendimento: AtendimentoAgoraOut | None" → a classe).
+  const tipoPy = (classe, campo) => (new RegExp(`^ {4}${campo}: (?:list\\[|dict\\[str, )?(\\w+)`, 'm').exec(blocoPy(classe) || '') || [])[1]
   const fonteLib = ler('../lib/garantias.ts')
   const camposTs = (tipo) => {
     const m = new RegExp(`export type ${tipo} = (?:(\\w+) & )?\\{`).exec(fonteLib)
@@ -384,14 +449,63 @@ const LINHA = {
     return m[1] ? [...camposTs(m[1]), ...proprios] : proprios
   }
   for (const [py, tsTipo] of [
-    ['GarantiaLinhaOut', 'GarantiaLinha'], ['IndicadoresOut', 'Indicadores'], ['GarantiaListaOut', 'GarantiaLista'],
     ['PrazoOut', 'Prazo'], ['EntregaOut', 'Entrega'], ['ItemOut', 'ItemPedido'], ['AnexoOut', 'AnexoGarantia'],
-    ['AtendimentoOut', 'AtendimentoGarantia'], ['PermissoesOut', 'PermissoesGarantia'], ['GarantiaSalvaOut', 'GarantiaDetalhe'],
+    ['AtendimentoOut', 'AtendimentoGarantia'], ['PermissoesOut', 'PermissoesGarantia'],
     ['LogOut', 'LogLinha'], ['NotaSugeridaOut', 'NotaDoPedido'], ['PedidoParaCadastroOut', 'PedidoParaCadastro'],
     ['VinculoOut', 'Vinculo'], ['SituacaoConversaOut', 'SituacaoConversa'], ['RegrasOut', 'Regras'],
-    ['ListaFiltro', 'CorpoLista'],
   ]) {
     assert.deepEqual(camposTs(tsTipo).sort(), camposPy(py).sort(), `${tsTipo} = ${py}`)
+  }
+  // As 3 partes do painel (04/11/2026): o contrato novo, campo a campo como a
+  // SPEC manda. A tela é conferida contra esta lista; o servidor também, assim
+  // que o schemas/garantia.py tiver o contrato novo (a lista ganha o
+  // `em_atendimento`) — daí em diante qualquer diferença quebra aqui.
+  const LINHA_ANTES = ['id', 'cliente_nome', 'cpf_mascarado', 'nf_numero', 'nf_serie', 'pedido_bling', 'pedido_marketplace', 'plataforma', 'conta',
+    'data_inicio', 'fim_hardware', 'fim_software', 'status', 'status_rotulo', 'entregue_sem_data', 'atendimentos', 'criado_em', 'origem',
+    'pedido_em', 'pedido_origem', 'pedido_origem_rotulo', 'nao_e_pedido', 'pedido_trecho', 'conversas', 'devolucao_situacao', 'devolucao_rotulo',
+    'devolucao_vencido', 'devolucao_gasto', 'ultima_mensagem_em', 'ultima_previa', 'ultima_autor', 'ultima_plataforma']
+  const SPEC = {
+    ListaFiltro: ['busca', 'status', 'periodo', 'de', 'ate', 'com_atendimento_no_mes', 'ordem', 'com_conversa', 'origem', 'mostrar', 'ids', 'limite', 'offset',
+      'departamento', 'produto', 'em_atendimento'],
+    GarantiaLinhaOut: [...LINHA_ANTES, 'departamento', 'atendimento'],
+    IndicadoresOut: ['ativas', 'somente_software', 'hw_vence_30d', 'atendimentos_no_mes', 'aguardando_entrega', 'entregue_sem_data', 'expiradas', 'total', 'vendidas'],
+    GarantiaListaOut: ['itens', 'total', 'indicadores', 'hoje', 'abas', 'pedido_sem_garantia'],
+    ResumoOut: ['vendidas', 'pediram', 'seguiram', 'hoje', 've_valores', 'departamentos', 'produtos'],
+    ResumoDepartamentoOut: ['chave', 'nome', 'vendidas', 'pediram', 'saldo', 'gasto'],
+    ResumoProdutoOut: ['chave', 'departamento', 'nome', 'skus', 'na_tabela', 'vendidas', 'pediram', 'seguiram', 'origens', 'consertos', 'perdidos',
+      'gasto', 'gasto_conserto', 'gasto_perdidos', 'gasto_cliente', 'saldo', 'pedidos', 'pedidos_por_coluna'],
+  }
+  const SPEC_ANINHADOS = {
+    // GarantiaLinhaOut.atendimento e GarantiaListaOut.pedido_sem_garantia (a classe é a do campo).
+    atendimento: ['motivo', 'rotulo', 'desde', 'vencido'],
+    pedido_sem_garantia: ['pedido_bling', 'pedido_marketplace', 'plataforma', 'conta', 'data', 'situacao', 'produto_uranyx', 'motivo', 'motivo_texto', 'pode_cadastrar'],
+  }
+  for (const [py, tsTipo] of [
+    ['ListaFiltro', 'CorpoLista'], ['GarantiaLinhaOut', 'GarantiaLinha'], ['IndicadoresOut', 'Indicadores'], ['GarantiaListaOut', 'GarantiaLista'],
+    ['ResumoOut', 'Resumo'], ['ResumoDepartamentoOut', 'ResumoDepartamento'], ['ResumoProdutoOut', 'ResumoProduto'],
+  ]) {
+    assert.deepEqual(camposTs(tsTipo).sort(), [...SPEC[py]].sort(), `${tsTipo} = SPEC de ${py}`)
+  }
+  assert.deepEqual(camposTs('AtendimentoAgora').sort(), [...SPEC_ANINHADOS.atendimento].sort())
+  assert.deepEqual(camposTs('PedidoSemGarantia').sort(), [...SPEC_ANINHADOS.pedido_sem_garantia].sort())
+  assert.deepEqual(camposTs('ContagemDaAba').sort(), ['atendimento', 'garantias'], 'abas: {garantias, atendimento} por departamento')
+  // O "seguiram" saiu da tela (04/11/2026): nem nos indicadores, nem nas colunas.
+  assert.ok(!camposTs('Indicadores').includes('seguiram'))
+  // O detalhe é a linha + o resto (GarantiaSalvaOut herda a GarantiaLinhaOut).
+  const doDetalhe = camposTs('GarantiaDetalhe').filter((c) => !SPEC.GarantiaLinhaOut.includes(c))
+  if (camposPy('ListaFiltro').includes('em_atendimento')) {
+    for (const py of Object.keys(SPEC)) assert.deepEqual(camposPy(py).sort(), [...SPEC[py]].sort(), `${py} = SPEC`)
+    assert.deepEqual(camposTs('GarantiaDetalhe').sort(), camposPy('GarantiaSalvaOut').sort(), 'GarantiaDetalhe = GarantiaSalvaOut')
+    // O objeto de dentro, quando é uma classe do schemas/garantia.py (um dict solto não tem o que conferir).
+    for (const [campo, classe] of [['atendimento', 'GarantiaLinhaOut'], ['pedido_sem_garantia', 'GarantiaListaOut']]) {
+      const nome = tipoPy(classe, campo)
+      if (nome && blocoPy(nome)) assert.deepEqual(camposPy(nome).sort(), [...SPEC_ANINHADOS[campo]].sort(), `${nome} = SPEC`)
+    }
+  } else {
+    // Até lá, o servidor de hoje continua preso: a linha é a de antes e o detalhe bate (fora a linha).
+    assert.deepEqual(camposPy('GarantiaLinhaOut').sort(), [...LINHA_ANTES].sort(), 'GarantiaLinhaOut de antes')
+    assert.deepEqual(doDetalhe.sort(), camposPy('GarantiaSalvaOut').filter((c) => !LINHA_ANTES.includes(c)).sort(), 'GarantiaDetalhe = GarantiaSalvaOut (fora a linha)')
+    console.log('aviso: apps/api/app/schemas/garantia.py ainda sem o contrato das 3 partes (04/11/2026) — a tela foi conferida contra a SPEC; o servidor entra na conferência quando tiver o `em_atendimento`')
   }
   // O que a tela MANDA = o que o backend aceita (extra="forbid").
   assert.deepEqual(camposPy('GarantiaCreate').sort(), ['cliente_nome', 'cpf', 'nf_numero', 'nf_serie', 'pedido'])
@@ -478,204 +592,510 @@ const LINHA = {
 
 // ═══════════════════════════════════════════════════════════════ página /garantias
 async function testarPagina() {
+  // As 3 partes (04/11/2026): o que o servidor manda — a lista da aba Garantia
+  // (com os números das pílulas e das abas), a do Atendimento (em_atendimento)
+  // e a busca que não acha garantia, mas acha o pedido.
+  const ABAS_CONTAGEM = { celular: { garantias: 1234, atendimento: 7 }, mala: { garantias: 0, atendimento: 0 }, eletro: { garantias: 1, atendimento: 1 } }
   const LISTA = {
-    itens: [LINHA, { ...LINHA, id: 8, cliente_nome: 'Maria Souza', cpf_mascarado: '***.111.222-**', nf_numero: '10198', nf_serie: '', data_inicio: '2026-06-02', fim_hardware: '2026-09-02', fim_software: '2027-06-02', status: 'somente_software', status_rotulo: 'Somente software', atendimentos: 0 }],
+    itens: [LINHA, { ...LINHA, id: 8, cliente_nome: 'Maria Souza', cpf_mascarado: '***.111.222-**', nf_numero: '10198', nf_serie: '', plataforma: 'shopee', conta: null, data_inicio: '2026-06-02', fim_hardware: '2026-09-02', fim_software: '2027-06-02', status: 'somente_software', status_rotulo: 'Somente software', atendimentos: 0 }],
     total: 2,
-    indicadores: { ativas: 128, somente_software: 342, hw_vence_30d: 17, atendimentos_no_mes: 23, aguardando_entrega: 4, entregue_sem_data: 3, expiradas: 9, total: 503 },
-    hoje: '2026-10-07',
+    indicadores: { ativas: 128, somente_software: 342, hw_vence_30d: 17, atendimentos_no_mes: 23, aguardando_entrega: 4, entregue_sem_data: 3, expiradas: 9, total: 503, vendidas: 5992 },
+    hoje: '2026-11-04',
+    abas: ABAS_CONTAGEM,
+    pedido_sem_garantia: null,
   }
-  const chamadas = []
-  const fakeApi = async (url, opts = {}) => {
-    chamadas.push({ url, opts })
-    if (url === '/api/garantias/lista' && opts.method === 'POST') return LISTA
+  const EM_ATENDIMENTO = {
+    ...LISTA,
+    itens: [
+      { ...LINHA, id: 9, cliente_nome: 'Ana Lima', atendimento: { motivo: 'no_tecnico', rotulo: 'No técnico · vencido', desde: '2026-10-03T12:00:00Z', vencido: true }, devolucao_situacao: 'no_tecnico', devolucao_rotulo: 'No técnico · vencido há 2 dias', devolucao_vencido: true },
+      { ...LINHA, id: 10, cliente_nome: 'Bruno Reis', atendimento: { motivo: 'pedido_sem_resposta', rotulo: 'Pedido de garantia sem resposta', desde: '2026-11-03T15:00:00Z', vencido: false } },
+    ],
+    total: 2,
+  }
+  const VAZIA = { ...LISTA, itens: [], total: 0 }
+  const RESUMO_PAGINA = { vendidas: 0, pediram: 0, seguiram: 0, hoje: '2026-11-04', ve_valores: true, departamentos: [], produtos: [] }
+  const BUSCA_PEDIDO = '2000017677253868'
+  let semGarantia = PEDIDO_SEM_GARANTIA
+  const responder = (url, opts = {}) => {
+    if (url === '/api/garantias/lista' && opts.method === 'POST') {
+      const b = opts.body
+      if (b.departamento === 'mala') return VAZIA
+      if (b.em_atendimento) return EM_ATENDIMENTO
+      if (b.busca === BUSCA_PEDIDO) return { ...VAZIA, pedido_sem_garantia: semGarantia }
+      return LISTA
+    }
+    if (url === '/api/garantias/resumo' && opts.method === 'POST') return RESUMO_PAGINA
     if (url === '/api/garantias/regras') return { ...L.REGRAS_PADRAO, status: {}, coberturas: {}, origens_entrega: {} }
     throw new Error(`chamada inesperada ${url}`)
   }
+  const espera = (ms) => new Promise((r) => setTimeout(r, ms))
+  // A página com a pessoa e a URL; as chamadas e os replace da URL de cada uma.
+  function pagina(user, query = {}) {
+    const chamadas = []
+    const replaces = []
+    const g = { user, api: async (url, opts = {}) => { chamadas.push({ url, opts }); return responder(url, opts) }, route: { query }, router: { replace: async (x) => replaces.push(x) } }
+    const listas = () => chamadas.filter((c) => c.url === '/api/garantias/lista')
+    return { g, chamadas, replaces, listas, corpo: () => listas().at(-1)?.opts.body, m: montar('../pages/garantias.vue', {}, g) }
+  }
   // O middleware de permissão: Consultar.
   {
-    const g = { user: CONSULTA, api: fakeApi }
-    componente('../pages/garantias.vue', g)
     const pg = sfc('../pages/garantias.vue')
     let meta
     new Function('definePageMeta', (pg.descriptor.scriptSetup.content.match(/definePageMeta\([^\n]*\)\n/) || [''])[0])((m) => { meta = m })
     assert.deepEqual(meta, { middleware: ['permission'], permission: { resource: 'garantias', action: 'view' } })
-  }
-  // Carrega a lista e os indicadores; os cartões filtram.
-  const replaces = []
-  const m = montar('../pages/garantias.vue', {}, { user: CONSULTA, api: fakeApi, route: { query: {} }, router: { replace: async (x) => replaces.push(x) } })
-  await m.montar()
-  await new Promise((r) => setTimeout(r, 0))
-  assert.equal(m.estado.itens.length, 2)
-  assert.equal(m.estado.indicadores.ativas, 128)
-  // Garantia por produto (29/10/2026): a tela abre nela; a lista de Conversas
-  // (mais nova em cima) abre pelo produto clicado, pela busca ou pelo "ver
-  // todos os pedidos". Pedido de garantia (28/10): a lista é só dos PEDIDOS (o
-  // servidor filtra sem precisar do campo). A Tabela é a lista de antes, com o
-  // "Mostrar" (todas as vendas manda mostrar=todas).
-  assert.deepEqual(chamadas.find((c) => c.url === '/api/garantias/lista').opts, { method: 'POST', body: { limite: 100, offset: 0 } })
-  assert.equal(m.estado.vista, 'resumo')
-  // Cada troca relê a lista UMA vez, já com tudo trocado (revisão 29/10: a
-  // busca mandava 2-3 pedidos — o CPF colado contava 2-3 vezes no teto).
-  const listas = () => chamadas.filter((c) => c.url === '/api/garantias/lista')
-  const espera = (ms) => new Promise((r) => setTimeout(r, ms))
-  assert.equal(listas().length, 1, 'abrir a tela lê a lista uma vez')
-  let n = listas().length
-  m.estado.abrirProduto({ nome: 'A17', ids: [7, 8] })
-  await espera(0)
-  assert.equal(m.estado.vista, 'conversas')
-  assert.equal(listas().length, n + 1, 'abrir o produto: uma leitura')
-  assert.deepEqual(listas().at(-1).opts.body, { limite: 100, offset: 0, ordem: 'atividade', ids: [7, 8] })
-  n = listas().length
-  m.estado.voltarParaProdutos()
-  await espera(0)
-  assert.equal(m.estado.vista, 'resumo')
-  assert.equal(m.estado.filtros.ids, undefined)
-  assert.equal(listas().length, n + 1, 'voltar: uma leitura')
-  assert.equal(m.estado.selecionadaId, null, 'na garantia por produto nada fica aberto escondido')
-  n = listas().length
-  m.estado.verTodosOsPedidos()
-  await espera(0)
-  assert.equal(m.estado.vista, 'conversas')
-  assert.equal(m.estado.abertoPor, 'todos')
-  assert.equal(listas().length, n + 1, 'ver todos: uma leitura')
-  m.estado.voltarParaProdutos()
-  await espera(0)
-  // Buscar na garantia por produto abre a lista com o que achou — depois da
-  // pausa, com uma leitura só e o termo inteiro; apagar volta.
-  n = listas().length
-  m.estado.filtros.busca = 'm'
-  await espera(50)
-  m.estado.filtros.busca = 'maria'
-  await espera(0)
-  assert.equal(listas().length, n, 'nada sai enquanto digita')
-  assert.equal(m.estado.vista, 'resumo')
-  await espera(350)
-  assert.equal(m.estado.vista, 'conversas')
-  assert.equal(m.estado.abertoPor, 'busca')
-  assert.equal(listas().length, n + 1, 'a busca: uma leitura só')
-  assert.equal(listas().at(-1).opts.body.busca, 'maria', 'com o termo inteiro')
-  m.estado.filtros.busca = ''
-  await espera(350)
-  assert.equal(m.estado.vista, 'resumo')
-  // O número de uma coluna (30/10/2026) abre só os pedidos dela, com o aviso "produto · coluna".
-  n = listas().length
-  m.estado.abrirProduto({ nome: 'A17', ids: [8], coluna: 'Devolução' })
-  await espera(0)
-  assert.equal(m.estado.produtoAberto, 'A17 · Devolução')
-  assert.equal(listas().length, n + 1, 'abrir a célula: uma leitura')
-  assert.deepEqual(listas().at(-1).opts.body.ids, [8])
-  m.estado.voltarParaProdutos()
-  await espera(0)
-  assert.equal(m.estado.produtoAberto, '')
-  // O seletor não tem "Conversas": na lista aberta ele mostra a garantia por produto.
-  m.estado.abrirProduto({ nome: 'A17', ids: [7] })
-  await espera(0)
-  assert.equal(m.estado.vistaDoSeletor, 'resumo')
-  m.estado.vistaDoSeletor = 'tabela'
-  await espera(0)
-  assert.equal(m.estado.vista, 'tabela')
-  assert.equal(m.estado.filtros.ids, undefined, 'a Tabela não fica presa no produto')
-  // O "Mostrar" é da Tabela (as regras falsas estão com o robô desligado: ela
-  // abre em "todas as vendas"); trocar relê uma vez.
-  assert.equal(m.estado.mostrar, 'todas')
-  assert.deepEqual(listas().at(-1).opts.body, { limite: 100, offset: 0, mostrar: 'todas' })
-  n = listas().length
-  m.estado.mostrar = 'pedidos'
-  await espera(0)
-  assert.equal(listas().length, n + 1, 'o Mostrar relê a Tabela uma vez')
-  assert.deepEqual(listas().at(-1).opts.body, { limite: 100, offset: 0 })
-  m.estado.mostrar = 'todas'
-  await espera(0)
-  // A busca (nome/CPF) vai no corpo, nunca na URL.
-  m.estado.filtros.busca = '529.982.247-25'
-  await m.estado.carregar()
-  const comBusca = chamadas.filter((c) => c.url === '/api/garantias/lista').at(-1)
-  assert.equal(comBusca.opts.body.busca, '529.982.247-25')
-  assert.ok(chamadas.every((c) => !c.url.includes('?') && !c.opts.query), 'nada na query string')
-  m.estado.filtros.busca = ''
-  m.estado.clicarCartao('hw_vence_30d')
-  assert.equal(m.estado.filtros.status, 'hw_vence_30d')
-  await new Promise((r) => setTimeout(r, 0))
-  assert.equal(chamadas.filter((c) => c.url === '/api/garantias/lista').at(-1).opts.body.status, 'hw_vence_30d', 'o cartão relê a lista filtrada')
-  m.estado.limparFiltros()
-  assert.equal(m.estado.filtros.status, 'todos')
-  // Abrir a linha põe a garantia na URL (?garantia=7).
-  m.estado.abrir(7)
-  await new Promise((r) => setTimeout(r, 0))
-  assert.equal(replaces.at(-1).query.garantia, '7')
-
-  // ?novo=<pedido>: só quem cadastra abre o formulário.
-  for (const [u, abre] of [[CADASTRA, true], [CONSULTA, false]]) {
-    const x = montar('../pages/garantias.vue', {}, { user: u, api: fakeApi, route: { query: { novo: '55001' } }, router: { replace: async () => {} } })
-    await x.montar()
-    assert.equal(x.estado.formAberto, abre, `${u.id}: ?novo abre o cadastro = ${abre}`)
-    if (abre) assert.equal(x.estado.pedidoInicial, '55001')
+    // Sem o seletor "Visualização" nem a vista guardada no navegador (04/11/2026: as abas).
+    const fonte = pg.descriptor.scriptSetup.content + pg.descriptor.template.content
+    assert.ok(!/localStorage|garantias\.vista|Visualização|vistaDoSeletor/.test(fonte), 'as abas substituem o seletor de Visualização')
   }
 
-  // A tela renderizada (SSR não roda o onMounted: carrega à mão e renderiza de novo com o estado):
-  // cabeçalho, + Nova garantia só para quem cadastra, os 4 cartões e a tabela do §4.1.
-  const ST = { GarantiaStatus: '../components/GarantiaStatus.vue' }
+  // ── quem não é admin: abre na Garantia; o Resumo não existe para ele ──
   {
-    const g = { user: CADASTRA, api: fakeApi, route: { query: {} }, router: { replace: async () => {} } }
-    const cx = comEstado(componente('../pages/garantias.vue', g))
-    await html(appCom(cx.C, {}, g, ST))
+    const p = pagina(CONSULTA)
+    await p.m.montar()
+    await espera(0)
+    assert.equal(p.m.estado.aba, 'garantia')
+    assert.equal(p.m.estado.departamento, 'celular', 'o Celular é o padrão')
+    assert.deepEqual(p.m.estado.abasVisiveis.map((t) => t.chave), ['garantia', 'atendimento'])
+    assert.equal(p.listas().length, 1, 'abrir a tela lê a lista uma vez')
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, mostrar: 'todas', departamento: 'celular' }, 'a Garantia abre em todas as vendas com nota')
+    assert.equal(p.m.estado.mostrar, 'todas')
+    assert.equal(p.replaces.length, 0, 'sem nada na URL, a URL fica como está')
+    p.m.estado.trocarAba('resumo')
+    await espera(0)
+    assert.equal(p.m.estado.aba, 'garantia', 'nem trocando de aba')
+    assert.equal(p.listas().length, 1)
+    assert.ok(!p.chamadas.some((c) => c.url === '/api/garantias/resumo'))
+  }
+  // ?aba=resumo de quem não é admin cai na Garantia e a URL é corrigida (o
+  // resto da query fica); ?dept= que não é departamento vira o Celular.
+  {
+    const p = pagina(CONSULTA, { aba: 'resumo', dept: 'acessorios', x: '1' })
+    await p.m.montar()
+    await espera(0)
+    assert.equal(p.m.estado.aba, 'garantia')
+    assert.equal(p.m.estado.departamento, 'celular')
+    assert.deepEqual(p.replaces.at(-1).query, { aba: 'garantia', dept: 'celular', x: '1' })
+  }
+  // ?aba=atendimento&dept=eletro&garantia=7: abre ali, com o detalhe aberto.
+  {
+    const p = pagina(CADASTRA, { aba: 'atendimento', dept: 'eletro', garantia: '7' })
+    await p.m.montar()
+    await espera(0)
+    assert.equal(p.m.estado.aba, 'atendimento')
+    assert.equal(p.m.estado.departamento, 'eletro')
+    assert.equal(p.m.estado.abertaId, 7, '?garantia= abre o detalhe')
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, departamento: 'eletro', em_atendimento: true })
+    assert.deepEqual(p.replaces.at(-1).query, { aba: 'atendimento', dept: 'eletro', garantia: '7' })
+  }
+
+  // ── o admin: abre no Resumo; cada troca relê a lista UMA vez (ou nenhuma) ──
+  {
+    const p = pagina(ADMIN)
+    const { m } = p
+    await m.montar()
+    await espera(0)
+    assert.equal(m.estado.aba, 'resumo', 'o admin abre no Resumo')
+    assert.deepEqual(m.estado.abasVisiveis.map((t) => t.chave), ['resumo', 'garantia', 'atendimento'])
+    assert.equal(p.listas().length, 1, 'no Resumo a lista vem uma vez: os números das pílulas e das abas')
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, departamento: 'celular' }, 'no Resumo a lista leva só o que as pílulas precisam')
+    assert.deepEqual(m.estado.abas, ABAS_CONTAGEM)
+    assert.deepEqual(m.estado.contagem, { garantias: 1234, atendimento: 7 })
+    // A pílula no Resumo: nada a reler (o Resumo traz os 3 departamentos); a URL guarda.
+    m.estado.trocarDepartamento('eletro')
+    await espera(0)
+    assert.equal(p.listas().length, 1)
+    assert.deepEqual(p.replaces.at(-1).query, { aba: 'resumo', dept: 'eletro' })
+    assert.deepEqual(m.estado.contagem, { garantias: 1, atendimento: 1 })
+    // A aba Garantia: uma leitura, do departamento da pílula.
+    m.estado.trocarAba('garantia')
+    await espera(0)
+    assert.equal(p.listas().length, 2)
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, mostrar: 'todas', departamento: 'eletro' })
+    assert.deepEqual(p.replaces.at(-1).query, { aba: 'garantia', dept: 'eletro' })
+    assert.equal(m.estado.emConversas, false, 'a Garantia é a Tabela')
+    assert.equal(m.estado.selecionadaId, null, 'na Tabela nada fica aberto escondido')
+    m.estado.filtros.status = 'expirada'
+    await espera(0)
+    assert.equal(p.listas().length, 3, 'o filtro da barra relê a lista uma vez')
+    assert.equal(p.corpo().status, 'expirada')
+    // O Atendimento: só quem está em atendimento agora — a barra não vale lá.
+    m.estado.trocarAba('atendimento')
+    await espera(0)
+    assert.equal(p.listas().length, 4)
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, departamento: 'eletro', em_atendimento: true })
+    assert.equal(m.estado.emConversas, true)
+    assert.equal(m.estado.selecionadaId, 9, 'na lista de Conversas a primeira já vem aberta (tela larga)')
+    m.estado.trocarDepartamento('celular')
+    await espera(0)
+    assert.equal(p.listas().length, 5, 'a pílula relê uma vez')
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, departamento: 'celular', em_atendimento: true })
+    // De volta ao Resumo: nada a reler; o "limpar filtros" de lá também não relê a lista.
+    m.estado.trocarAba('resumo')
+    await espera(0)
+    m.estado.limparFiltros()
+    await espera(0)
+    assert.equal(p.listas().length, 5)
+    assert.equal(m.estado.filtros.status, 'todos')
+
+    // A linha do Resumo abre a aba Garantia na lista de Conversas: todas as garantias do produto.
+    m.estado.abrirProduto({ nome: 'A17 pro max', chave: 'tabela:1' })
+    await espera(0)
+    assert.equal(m.estado.aba, 'garantia')
+    assert.equal(m.estado.abertoPor, 'produto')
+    assert.equal(m.estado.produtoAberto, 'A17 pro max')
+    assert.equal(m.estado.emConversas, true)
+    assert.equal(p.listas().length, 6, 'abrir o produto: uma leitura')
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, ordem: 'atividade', mostrar: 'todas', departamento: 'celular', produto: 'tabela:1' })
+    // Um filtro da barra com o produto aberto: o produto fica (é filtro de verdade).
+    m.estado.filtros.origem = 'robo'
+    await espera(0)
+    assert.equal(p.listas().length, 7)
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, ordem: 'atividade', origem: 'robo', mostrar: 'todas', departamento: 'celular', produto: 'tabela:1' })
+    m.estado.filtros.origem = 'todas'
+    await espera(0)
+    m.estado.voltarParaResumo()
+    await espera(0)
+    assert.equal(m.estado.aba, 'resumo')
+    assert.equal(m.estado.abertoPor, null)
+    assert.equal(m.estado.filtros.produto, null)
+    // O número de uma coluna: só aqueles pedidos, com o aviso "produto · coluna".
+    let n = p.listas().length
+    m.estado.abrirProduto({ nome: 'A17 pro max', ids: [5, 6], coluna: 'Devolução' })
+    await espera(0)
+    assert.equal(m.estado.produtoAberto, 'A17 pro max · Devolução')
+    assert.equal(p.listas().length, n + 1, 'abrir a célula: uma leitura')
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, ordem: 'atividade', mostrar: 'todas', ids: [5, 6], departamento: 'celular' })
+    // Os ids são uma foto: mexer na barra volta para todos os pedidos — na mesma releitura.
+    m.estado.filtros.status = 'ativa'
+    await espera(0)
+    assert.equal(p.listas().length, n + 2)
+    assert.equal(m.estado.abertoPor, 'todos')
+    assert.equal(m.estado.filtros.ids, undefined)
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, status: 'ativa', ordem: 'atividade', departamento: 'celular' })
+    // "voltar para a tabela": a Tabela da aba Garantia.
+    m.estado.voltarParaTabela()
+    await espera(0)
+    assert.equal(m.estado.abertoPor, null)
+    assert.equal(m.estado.emConversas, false)
+    assert.equal(p.listas().length, n + 3)
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, status: 'ativa', mostrar: 'todas', departamento: 'celular' })
+    m.estado.limparFiltros()
+    await espera(0)
+    assert.equal(p.listas().length, n + 4, 'limpar: uma leitura')
+    // "ver todos os pedidos de garantia" (a ação da aba Garantia): os pedidos, na lista de Conversas.
+    m.estado.verTodosOsPedidos()
+    await espera(0)
+    assert.equal(m.estado.abertoPor, 'todos')
+    assert.equal(p.listas().length, n + 5)
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, ordem: 'atividade', departamento: 'celular' })
+    // A pílula com "todos os pedidos" aberto: continua, com os do departamento novo.
+    m.estado.trocarDepartamento('eletro')
+    await espera(0)
+    assert.equal(m.estado.abertoPor, 'todos')
+    assert.equal(p.listas().length, n + 6)
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, ordem: 'atividade', departamento: 'eletro' })
+    m.estado.trocarDepartamento('celular')
+    await espera(0)
+    // A busca filtra a Tabela: a lista de Conversas fecha — depois da pausa, uma leitura só, com o termo inteiro.
+    n = p.listas().length
+    m.estado.filtros.busca = 'm'
+    await espera(50)
+    m.estado.filtros.busca = 'maria'
+    await espera(0)
+    assert.equal(p.listas().length, n, 'nada sai enquanto digita')
+    await espera(350)
+    assert.equal(m.estado.abertoPor, null, 'a busca fecha a lista de Conversas')
+    assert.equal(p.listas().length, n + 1, 'a busca: uma leitura só')
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, busca: 'maria', mostrar: 'todas', departamento: 'celular' })
+    m.estado.filtros.busca = ''
+    await espera(350)
+    // O "Mostrar": só pedidos de garantia → uma leitura (sem o mostrar).
+    n = p.listas().length
+    m.estado.mostrar = 'pedidos'
+    await espera(0)
+    assert.equal(p.listas().length, n + 1, 'o Mostrar relê a Tabela uma vez')
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, departamento: 'celular' })
+    m.estado.mostrar = 'todas'
+    await espera(0)
+    // A busca (nome/CPF) vai no corpo, nunca na URL.
+    m.estado.filtros.busca = '529.982.247-25'
+    await espera(350)
+    assert.equal(p.corpo().busca, '529.982.247-25')
+    assert.ok(p.chamadas.every((c) => !c.url.includes('?') && !c.opts.query), 'nada na query string')
+    assert.ok(p.replaces.every((r) => !JSON.stringify(r).includes('529')), 'nem na URL da página')
+    m.estado.filtros.busca = ''
+    await espera(350)
+    // Os cartões filtram; abrir a linha põe a garantia na URL.
+    m.estado.clicarCartao('hw_vence_30d')
+    assert.equal(m.estado.filtros.status, 'hw_vence_30d')
+    await espera(0)
+    assert.equal(p.corpo().status, 'hw_vence_30d', 'o cartão relê a lista filtrada')
+    m.estado.limparFiltros()
+    assert.equal(m.estado.filtros.status, 'todos')
+    await espera(0)
+    // A pílula com o produto aberto: o produto é do outro departamento — fecha (a Tabela do novo).
+    m.estado.abrirProduto({ nome: 'A17 pro max', chave: 'tabela:1' })
+    await espera(0)
+    n = p.listas().length
+    m.estado.trocarDepartamento('eletro')
+    await espera(0)
+    assert.equal(p.listas().length, n + 1)
+    assert.deepEqual([m.estado.abertoPor, m.estado.filtros.produto, m.estado.emConversas], [null, null, false])
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, mostrar: 'todas', departamento: 'eletro' })
+    m.estado.abrir(7)
+    await espera(0)
+    assert.deepEqual(p.replaces.at(-1).query, { aba: 'garantia', dept: 'eletro', garantia: '7' })
+  }
+
+  // O que fica para trás na aba Garantia não vale no Resumo (revisão 04/11): o
+  // CPF da busca (escondida lá) não volta no "atualizar" — contaria no teto e
+  // no log —, e o cartão "Atendimentos no mês" não corta a lista que o Resumo abre.
+  {
+    const p = pagina(ADMIN, { aba: 'garantia' })
+    const { m } = p
+    await m.montar()
+    await espera(0)
+    m.estado.filtros.busca = '529.982.247-25'
+    await espera(350)
+    assert.equal(p.corpo().busca, '529.982.247-25', 'na Garantia a busca vale')
+    m.estado.trocarAba('resumo')
+    await espera(0)
+    let n = p.listas().length
+    await m.estado.carregar() // o "atualizar" (e o salvar/corrigir) no Resumo
+    assert.equal(p.listas().length, n + 1)
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, departamento: 'celular' }, 'sem a busca escondida')
+    assert.ok(p.listas().slice(n).every((c) => !JSON.stringify(c.opts.body).includes('529')), 'o CPF não volta no Resumo')
+    assert.equal(m.estado.filtros.busca, '529.982.247-25', 'a busca continua lá para quando voltar à Garantia')
+    m.estado.trocarAba('garantia')
+    await espera(0)
+    assert.equal(p.corpo().busca, '529.982.247-25')
+    m.estado.filtros.busca = ''
+    await espera(350)
+    m.estado.clicarCartao('atendimentos_no_mes')
+    await espera(0)
+    assert.equal(p.corpo().com_atendimento_no_mes, true, 'o cartão filtra a Tabela')
+    m.estado.trocarAba('resumo')
+    await espera(0)
+    await m.estado.carregar()
+    assert.equal(p.corpo().com_atendimento_no_mes, undefined, 'nem o cartão no Resumo')
+    n = p.listas().length
+    m.estado.abrirProduto({ nome: 'A17 pro max', chave: 'tabela:1' })
+    await espera(0)
+    assert.equal(p.listas().length, n + 1, 'abrir o produto: uma leitura')
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, ordem: 'atividade', mostrar: 'todas', departamento: 'celular', produto: 'tabela:1' }, 'a lista aberta é a do número do Resumo')
+    assert.equal(m.estado.ativo, null, 'o cartão saiu')
+    // O "ver todos os pedidos de garantia" também: são todos.
+    m.estado.voltarParaTabela()
+    await espera(0)
+    m.estado.clicarCartao('atendimentos_no_mes')
+    await espera(0)
+    n = p.listas().length
+    m.estado.verTodosOsPedidos()
+    await espera(0)
+    assert.equal(p.listas().length, n + 1)
+    assert.deepEqual(p.corpo(), { limite: 100, offset: 0, ordem: 'atividade', departamento: 'celular' })
+  }
+
+  // ?novo=<pedido>: só quem cadastra abre o formulário; o ?novo= sai da URL.
+  for (const [u, abre] of [[CADASTRA, true], [CONSULTA, false]]) {
+    const p = pagina(u, { novo: '55001' })
+    await p.m.montar()
+    assert.equal(p.m.estado.formAberto, abre, `${u.id}: ?novo abre o cadastro = ${abre}`)
+    if (abre) assert.equal(p.m.estado.pedidoInicial, '55001')
+    assert.equal(p.replaces.at(-1).query.novo, undefined)
+  }
+
+  // A tela renderizada (SSR não roda o onMounted: carrega à mão e renderiza de novo com o estado).
+  const EXTRAS = { GarantiaStatus: '../components/GarantiaStatus.vue', GarantiaResumo: '../components/GarantiaResumo.vue' }
+  const abrir = async (user, query = {}) => {
+    const p = pagina(user, query)
+    const cx = comEstado(componente('../pages/garantias.vue', p.g))
+    await html(appCom(cx.C, {}, p.g, EXTRAS))
     await cx.estado.carregar()
-    // A lista de Conversas (aberta pelo "ver todos os pedidos"): no estilo do
-    // Atendimento, com a garantia aberta e o caminho de volta.
-    cx.estado.verTodosOsPedidos()
-    await new Promise((r) => setTimeout(r, 0))
-    const hc = await html(appCom(cx.mesmo, {}, g, ST))
-    assert.match(hc, /voltar para a garantia por produto/)
-    assert.match(hc, /data-vista-conversas/)
-    assert.match(hc, /data-lista-conversas/)
-    assert.equal(cx.estado.selecionadaId, 7, 'a primeira garantia já vem aberta')
-    assert.ok(!/<th/.test(hc), 'sem a tabela na vista Conversas')
-    // A vista Tabela: a de antes.
-    cx.estado.vista = 'tabela'
-    cx.estado.aplicarVista()
-    const h = await html(appCom(cx.mesmo, {}, g, ST))
+    return { ...p, cx, h: async () => html(appCom(cx.mesmo, {}, p.g, EXTRAS)) }
+  }
+  const abertura = (h, attr) => [...h.matchAll(/<(?:button|div|span|th|p)\b[^>]*>/g)].map((x) => x[0]).filter((t) => t.includes(attr))
+  const classe = (tag) => (/ class="([^"]*)"/.exec(tag || '') || [])[1] || ''
+  // O admin no Resumo: as pílulas (com os números) e as abas, como na Tabela de Preços; o Resumo lê o /resumo.
+  {
+    const t = await abrir(ADMIN)
+    const h = await t.h()
     assert.match(h, /Painel de Garantia — Uranyx/)
     assert.match(h, /data-nova-garantia/)
+    const pilulas = [...h.matchAll(/<button\b[^>]*data-departamento="(\w+)"[^>]*>([\s\S]*?)<\/button>/g)].map((x) => [x[1], texto(x[2])])
+    assert.deepEqual(pilulas, [['celular', 'Celular (1.234 garantias)'], ['mala', 'Mala (0 garantias)'], ['eletro', 'Eletro (1 garantia)']])
+    const [celular, mala] = abertura(h, 'data-departamento=')
+    assert.match(classe(celular), /\bbg-primary text-primary-foreground border-primary\b/, 'a pílula escolhida')
+    assert.match(classe(mala), /\bborder-border hover:bg-muted\b/)
+    assert.ok(!/bg-primary/.test(classe(mala)))
+    assert.match(classe(abertura(h, 'data-abas')[0]), /^flex flex-wrap gap-1 rounded-md bg-muted\/40 p-1 w-fit$/, 'a barra de abas da Tabela de Preços')
+    const abas = [...h.matchAll(/<button\b[^>]*data-aba="(\w+)"[^>]*>([\s\S]*?)<\/button>/g)].map((x) => [x[1], texto(x[2])])
+    assert.deepEqual(abas, [['resumo', 'Resumo'], ['garantia', 'Garantia (1.234)'], ['atendimento', 'Atendimento (7)']])
+    const tagsAba = abertura(h, 'data-aba=')
+    assert.match(classe(tagsAba[0]), /\bbg-background shadow-sm\b/, 'a aba escolhida')
+    assert.match(classe(tagsAba[1]), /\btext-muted-foreground hover:text-foreground\b/)
+    assert.match(h, /data-garantia-resumo/, 'o Resumo na tela')
+    assert.ok(t.chamadas.some((c) => c.url === '/api/garantias/resumo'), 'o admin lê o /resumo')
+    assert.ok(!/id="gar-busca"/.test(h), 'a busca é da aba Garantia')
+    assert.match(h, /id="gar-status"/, 'status e período valem no Resumo')
+    // O período ao lado das abas (05/11/2026), sempre pela data da venda: o
+    // "Período por" saiu ("exclua isso também"); ficam só as datas.
+    const linhaAbas = (h.match(/data-linha-abas[^>]*>([\s\S]*?)data-barra/) || [])[1] || ''
+    assert.match(linhaAbas, /data-abas[\s\S]*data-periodo[\s\S]*id="gar-de"[\s\S]*id="gar-ate"/, 'o período fica ao lado das abas')
+    assert.ok(!/id="gar-periodo"|Período por/.test(h), 'sem o "Período por"')
+    assert.ok(!/id="gar-origem"|data-origem/.test(h), 'sem a Origem (05/11/2026, "excluir origem também")')
+    assert.match(linhaAbas, /<label for="gar-de"[^>]*>Vendas de<\/label>/)
+    assert.equal(t.cx.estado.filtros.periodo, 'venda')
+    assert.equal(L.FILTROS_PADRAO.periodo, 'venda')
+    assert.ok(!/data-indicadores/.test(h), 'os cartões são da aba Garantia')
+    assert.ok(!/seguiram/i.test(texto(h)), 'nada de "seguiram" na tela')
+    // "Como funciona": as 3 partes, o Resumo só para admin, a % e o Atendimento.
+    t.cx.estado.regrasAbertas = true
+    const regras = texto(await t.h())
+    for (const trecho of ['3 partes', 'Resumo (só para administradores)', 'só os produtos da Tabela de Preços › Produtos', 'A % é gasto ÷ saldo × 100',
+      'saldo = base − comissão − frete − custo do produto, a conta da planilha de rentabilidade (o que sobrou)',
+      'Com o período pela data da venda, tudo é só das vendas daqueles dias',
+      'gasto = tela Reembolso (conserto + perdidos + reembolso ao cliente) de quem pediu garantia',
+      'Atendimento = quem pediu garantia e ainda tem algo em aberto (no técnico, chegou sem condição, voltando, plataforma decidindo, pedido de garantia que ainda não respondemos) — sai sozinho quando termina']) {
+      assert.ok(regras.includes(trecho), `Como funciona: ${trecho}`)
+    }
+    assert.ok(!/Seguiram ÷ Vendidas/.test(regras))
+  }
+  // Quem não é admin: sem a aba Resumo e sem /resumo — nem com ?aba=resumo.
+  {
+    const t = await abrir(CONSULTA, { aba: 'resumo' })
+    const h = await t.h()
+    const abas = [...h.matchAll(/<button\b[^>]*data-aba="(\w+)"[^>]*>([\s\S]*?)<\/button>/g)].map((x) => [x[1], texto(x[2])])
+    assert.deepEqual(abas, [['garantia', 'Garantia (1.234)'], ['atendimento', 'Atendimento (7)']])
+    assert.ok(!/data-garantia-resumo/.test(h))
+    assert.ok(!t.chamadas.some((c) => c.url === '/api/garantias/resumo'), 'quem não é admin não chama o /resumo')
+    assert.ok(!/data-nova-garantia/.test(h), 'sem Cadastrar, sem o + Nova garantia')
+  }
+  // A aba Garantia: a barra, os cartões, a linha do resumo (sem "seguiram") e a Tabela com a Loja.
+  {
+    const t = await abrir(CADASTRA, { aba: 'garantia' })
+    const h = await t.h()
     assert.match(h, /placeholder="Nome \/ CPF \/ NF \/ Pedido"/)
+    assert.deepEqual([...h.matchAll(/<select id="gar-mostrar"[\s\S]*?<\/select>/g)].map((x) => [...x[0].matchAll(/<option[^>]*>([^<]*)</g)].map((o) => o[1])),
+      [['todas as vendas com nota', 'só pedidos de garantia']])
+    assert.equal(t.cx.estado.mostrar, 'todas', 'o padrão da aba Garantia')
     const ths = [...h.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/g)].map((x) => texto(x[1]))
-    assert.deepEqual(ths, ['Nome', 'Pedido de garantia', 'CPF', 'NF', 'Entrega', 'Fim HW', 'Fim SW', 'Status', 'Atend.'])
-    // A venda sem pedido (busca ou "todas as vendas") diz que não tem pedido.
-    assert.match(h, /sem pedido de garantia/)
+    assert.deepEqual(ths, ['Nome', 'Pedido de garantia', 'Loja', 'CPF', 'NF', 'Entrega', 'Fim HW', 'Fim SW', 'Status', 'Atend.'])
+    assert.deepEqual([...h.matchAll(/<td[^>]*data-loja[^>]*>([\s\S]*?)<\/td>/g)].map((x) => texto(x[1])), ['Mercado Livre · Loja X', 'Shopee'])
+    assert.deepEqual([...h.matchAll(/<div[^>]*data-loja[^>]*>([\s\S]*?)<\/div>/g)].map((x) => texto(x[1])), ['Loja: Mercado Livre · Loja X', 'Loja: Shopee'], 'a Loja também nos cartões do celular')
+    assert.match(h, /sem pedido de garantia/, 'a venda sem pedido diz que não tem pedido')
     assert.match(h, /\*\*\*\.982\.247-\*\*/, 'CPF mascarado na lista')
     assert.ok(!/529\.982\.247-25|52998224725/.test(h), 'nunca o CPF completo na lista')
     assert.match(texto(h), /07\/10\/26 07\/01\/27 07\/10\/27/, 'Entrega, Fim HW e Fim SW em dd/mm/aa')
     assert.match(h, /data-status-garantia[^>]*>Ativa</)
-    assert.match(h, /data-status-garantia[^>]*>Somente software</)
     const cartoes = [...h.matchAll(/data-cartao="([a-z_0-9]+)"[\s\S]*?<\/button>/g)].map((x) => [x[1], texto(x[0].replace(/^[^>]*>/, ''))])
     assert.deepEqual(cartoes, [['ativas', 'Ativas 128'], ['somente_software', 'Só software 342'], ['hw_vence_30d', 'HW vence em 30d 17'], ['atendimentos_no_mes', 'Atendimentos no mês 23']])
     assert.match(h, /data-cartoes-garantias/, 'cartões no celular')
-    assert.match(texto(h), /4 sem data de entrega \( 3 já entregues no Bling \)/, 'os já entregues sem data aparecem à parte')
+    const linha = texto((h.match(/<p[^>]*data-resumo-linha[^>]*>([\s\S]*?)<\/p>/) || [])[1] || '')
+    assert.equal(linha, '503 pedidos de garantia em 5.992 vendas com nota · 4 sem data de entrega ( 3 já entregues no Bling ) · 9 expiradas · ver todos os pedidos de garantia')
+    assert.ok(!/seguiram|seguiu/i.test(texto(h)), 'sem o "seguiram"')
+    assert.ok(!/data-vista-conversas/.test(h), 'a Garantia abre na Tabela')
+    // Aberta pelo Resumo (o produto): a lista de Conversas, com o aviso e os caminhos de volta.
+    t.cx.estado.abrirProduto({ nome: 'A17 pro max', chave: 'tabela:1' })
+    await espera(0)
+    const hc = await t.h()
+    assert.match(hc, /data-vista-conversas/)
+    assert.match(hc, /data-lista-conversas/)
+    assert.ok(!/<th/.test(hc), 'sem a tabela na lista de Conversas')
+    assert.match(texto((hc.match(/<p[^>]*data-lista-aberta[^>]*>([\s\S]*?)<\/p>/) || [])[1] || ''),
+      /^Produto: A17 pro max · 2 garantias ver todos os pedidos voltar para a tabela$/, 'quem não é admin não tem o "voltar para o resumo"')
+    assert.ok(!/id="gar-mostrar"/.test(hc), 'o Mostrar é da Tabela')
   }
-  // Sem Cadastrar: sem o + Nova garantia. Carregando e vazio têm estado próprio.
+  // O admin com a lista aberta pelo Resumo tem o "voltar para o resumo".
   {
-    const g = { user: CONSULTA, api: async (url) => (url === '/api/garantias/lista' ? { ...LISTA, itens: [], total: 0 } : L.REGRAS_PADRAO) }
-    const cx = comEstado(componente('../pages/garantias.vue', g))
-    // A tela abre na garantia por produto (ela tem o próprio "montando…").
-    const inicioHtml = await html(appCom(cx.C, {}, g))
-    assert.match(inicioHtml, /<GarantiaResumo/)
-    assert.ok(!/data-nova-garantia/.test(inicioHtml))
-    // A lista (Tabela/Conversas) tem o "carregando" dela.
-    cx.estado.vista = 'tabela'
-    const carregandoHtml = await html(appCom(cx.mesmo, {}, g))
-    assert.match(carregandoHtml, /data-carregando/)
+    const t = await abrir(ADMIN)
+    t.cx.estado.abrirProduto({ nome: 'A17 pro max', ids: [7], coluna: 'Mensagem' })
+    await espera(0)
+    const hc = await t.h()
+    assert.match(texto((hc.match(/<p[^>]*data-lista-aberta[^>]*>([\s\S]*?)<\/p>/) || [])[1] || ''),
+      /^Produto: A17 pro max · Mensagem · 2 pedidos de garantia ver todos os pedidos voltar para a tabela voltar para o resumo$/)
+    assert.match(hc, /data-voltar-resumo/)
+  }
+  // A aba Atendimento: a lista de Conversas, cada uma com o selo do motivo e há quanto tempo (o vencido no tom de erro).
+  {
+    const t = await abrir(ADMIN, { aba: 'atendimento' })
+    const h = await t.h()
+    assert.match(h, /data-vista-conversas/)
+    assert.ok(!/id="gar-busca"|id="gar-status"|data-indicadores/.test(h), 'o Atendimento não tem barra nem cartões')
+    const selos = [...h.matchAll(/<span\b([^>]*data-atendimento="(\w+)"[^>]*)>([\s\S]*?)<\/span>/g)].map((x) => ({ motivo: x[2], texto: texto(x[3]), classe: classe(`<span ${x[1]}>`) }))
+    assert.deepEqual(selos.map((s) => [s.motivo, s.texto]), [['no_tecnico', 'No técnico · há 32 dias · prazo vencido'], ['pedido_sem_resposta', 'Pedido de garantia sem resposta · há 1 dia']])
+    assert.match(selos[0].classe, /text-destructive/, 'o vencido no tom de erro')
+    assert.ok(!/destructive/.test(selos[1].classe))
+    assert.equal(t.cx.estado.aparelhoRepetido(EM_ATENDIMENTO.itens[0]), true, 'o selo do aparelho repetiria o "No técnico"')
+    assert.equal(t.cx.estado.aparelhoRepetido(EM_ATENDIMENTO.itens[1]), false)
+    // Nada em atendimento (a Mala): o vazio diz isso e lembra que a garantia é da Uranyx.
+    t.cx.estado.trocarDepartamento('mala')
+    await t.cx.estado.carregar({ trocouFiltro: true })
+    assert.equal(texto((await t.h()).match(/data-empty[^>]*>([\s\S]*?)<\/div>/)?.[1] || ''),
+      'Nada em atendimento agora neste departamento. A garantia do DaVinci hoje é só da linha Uranyx (celular e eletro).')
+  }
+  // A busca que não acha garantia, mas acha o pedido: o cartão — com o "Cadastrar garantia" só para quem pode.
+  {
+    const t = await abrir(CADASTRA, { aba: 'garantia' })
+    // (no SSR os watchers não rodam: a busca que assentou é a releitura)
+    t.cx.estado.filtros.busca = BUSCA_PEDIDO
+    await t.cx.estado.carregar({ trocouFiltro: true })
+    assert.equal(t.corpo().busca, BUSCA_PEDIDO)
+    const h = await t.h()
+    assert.equal(texto((h.match(/<p[^>]*data-pedido-sem-garantia-texto[^>]*>([\s\S]*?)<\/p>/) || [])[1] || ''),
+      'Pedido 288113 · Mercado Livre Loja X · nº na plataforma 2000017677253868 · compra 30/07/2026 · Entregue — ainda sem garantia: o pedido é de antes de 19/08/2026, quando o robô começou a criar a garantia pela NF.')
+    assert.match(texto((h.match(/<button[^>]*data-cadastrar-garantia[^>]*>([\s\S]*?)<\/button>/) || [])[1] || ''), /^Cadastrar garantia$/)
+    assert.ok(!/data-empty/.test(h), 'o cartão no lugar do vazio')
+    // O botão abre o cadastro de sempre, já com o pedido.
+    assert.match(sfc('../pages/garantias.vue').descriptor.template.content, /data-cadastrar-garantia @click="novaGarantia\(cartaoSemGarantia\.pedido_bling\)"/)
+    t.cx.estado.novaGarantia(t.cx.estado.cartaoSemGarantia.pedido_bling)
+    assert.deepEqual([t.cx.estado.formAberto, t.cx.estado.pedidoInicial], [true, '288113'])
+    t.cx.estado.formAberto = false
+    semGarantia = { ...PEDIDO_SEM_GARANTIA, pode_cadastrar: false }
+    await t.cx.estado.carregar({ trocouFiltro: true })
+    const h2 = await t.h()
+    assert.match(texto(h2), /ainda sem garantia: o pedido é de antes de 19\/08\/2026/)
+    assert.ok(!/data-cadastrar-garantia/.test(h2), 'sem poder cadastrar, sem o botão')
+    // Sem o pedido (a busca não achou nada): o vazio diz que a busca é só do
+    // departamento da pílula e oferece a mesma busca nos outros dois.
+    semGarantia = null
+    await t.cx.estado.carregar({ trocouFiltro: true })
+    const h3 = await t.h()
+    assert.ok(!/data-pedido-sem-garantia/.test(h3))
+    assert.match(texto(h3), /Nenhuma garantia com esses filtros em Celular A busca procura só em Celular: se a garantia for de Mala ou Eletro, procure na pílula dela\. Ou mude a busca, o status ou o período\./)
+    assert.deepEqual([...h3.matchAll(/<button\b[^>]*data-buscar-em="(\w+)"[^>]*>([\s\S]*?)<\/button>/g)].map((x) => [x[1], texto(x[2])]),
+      [['mala', 'procurar em Mala'], ['eletro', 'procurar em Eletro']])
+    assert.match(sfc('../pages/garantias.vue').descriptor.template.content, /:data-buscar-em="d\.chave" @click="trocarDepartamento\(d\.chave\)"/)
+    const n = t.listas().length
+    t.cx.estado.trocarDepartamento('eletro')
+    await espera(0)
+    assert.equal(t.listas().length, n + 1, 'procurar na outra pílula: uma leitura')
+    assert.deepEqual(t.corpo(), { limite: 100, offset: 0, busca: BUSCA_PEDIDO, mostrar: 'todas', departamento: 'eletro' }, 'a mesma busca, no outro departamento')
+    t.cx.estado.trocarDepartamento('celular')
+    await espera(0)
+    // Sem busca, o vazio não oferece as outras pílulas.
+    t.cx.estado.filtros.busca = ''
+    await t.cx.estado.carregar({ trocouFiltro: true })
+    assert.ok(!t.cx.estado.vazio.buscaNosOutros)
+    semGarantia = PEDIDO_SEM_GARANTIA
+  }
+  // Carregando e vazio têm estado próprio; a Mala lembra que a garantia é da Uranyx.
+  {
+    const p = pagina(CONSULTA, { dept: 'mala' })
+    const cx = comEstado(componente('../pages/garantias.vue', p.g))
+    const inicio = await html(appCom(cx.C, {}, p.g, EXTRAS))
+    assert.match(inicio, /data-carregando/)
+    assert.ok(!/data-nova-garantia/.test(inicio))
     await cx.estado.carregar()
-    // Pedido de garantia (28/10): o Painel vazio fala dos PEDIDOS e oferece
-    // mostrar todas as vendas.
-    cx.estado.vista = 'tabela'
+    const vazio = texto((await html(appCom(cx.mesmo, {}, p.g, EXTRAS))).match(/data-empty[^>]*>([\s\S]*?)<\/div>/)?.[1] || '')
+    assert.equal(vazio, 'Nenhuma garantia neste departamento ainda A garantia do DaVinci hoje é só da linha Uranyx (celular e eletro).', 'a Mala não manda cadastrar')
+    // (no SSR os watchers não rodam: o "Mostrar" trocado é a releitura)
+    cx.estado.mostrar = 'pedidos'
     cx.estado.aplicarVista()
-    const vazioPedidos = await html(appCom(cx.mesmo, {}, g))
-    assert.match(vazioPedidos, /Nenhum pedido de garantia ainda/)
-    assert.match(vazioPedidos, /data-mostrar-todas/)
-    cx.estado.mostrar = 'todas'
-    cx.estado.vista = 'tabela'
-    cx.estado.aplicarVista()
-    const vazioHtml = await html(appCom(cx.mesmo, {}, g))
-    assert.match(vazioHtml, /Nenhuma garantia cadastrada ainda/)
+    await cx.estado.carregar({ trocouFiltro: true })
+    const soPedidos = await html(appCom(cx.mesmo, {}, p.g, EXTRAS))
+    assert.match(texto(soPedidos), /Nenhum pedido de garantia ainda/)
+    assert.match(soPedidos, /data-mostrar-todas/)
   }
   // Erro de carga: a frase e o "tentar de novo".
   {
@@ -1045,73 +1465,161 @@ async function testarBloco() {
   assert.ok(!/<AtendimentoGarantia[^>]*canEdit/.test(pedido), 'o bloco não usa o canEdit')
 }
 
-// ═══════════════════════════════════════════════════════════════ garantia por produto
+// ═══════════════════════════════════════════════════════════════ garantia por produto (aba Resumo)
 async function testarResumo() {
-  // 30/10/2026: o número da célula abre só os pedidos dela; Manutenção e perdas
-  // (o aparelho de quem pediu na tela Devoluções); o Gasto em reais só para admin.
+  // 04/11/2026 (as 3 partes): a aba Resumo, só do admin — Vendas (Vendidas,
+  // Saldo e a % = gasto ÷ saldo × 100), Atendimento (como pediu) e Manutenção
+  // (só o Gasto da tela Reembolso desde 05/11/2026: "em manutenção deixe
+  // somente o gasto"). A pílula fica na página.
   const produto = {
     chave: 'tabela:1', departamento: 'celular', nome: 'A17 pro max', skus: ['dg052', 'dg053'], na_tabela: true,
     vendidas: 100, pediram: 6, seguiram: 2,
-    status: { aguardando_entrega: 0, ativa: 5, somente_software: 0, expirada: 0, entregue_sem_data: 1 },
-    origens: { mensagem: 4, sac: 0, devolucao: 2, atendimento: 0, manual: 0, pessoa: 0 },
-    com_atendimento: 0, atendimentos_hardware: 0, atendimentos_software: 0,
+    origens: { mensagem: 4, sac: 0, devolucao: 2 },
+    consertos: 1, perdidos: 0,
+    gasto: 229.4, gasto_conserto: 200, gasto_perdidos: 0, gasto_cliente: 29.4, saldo: 6650,
     pedidos: [1, 2, 3, 4, 5, 6],
-    pedidos_por_coluna: { mensagem: [1, 2, 3, 4], devolucao: [5, 6], seguiram: [5, 6], ativa: [1, 2, 3, 4, 5], aguardando: [6], no_tecnico: [5], consertados: [6], gasto: [6] },
-    no_tecnico: 1, no_tecnico_vencidos: 1, consertados: 1, consertados_sem_custo: 0, perdidos: 0,
-    gasto: 229.4, gasto_conserto: 229.4, gasto_perdidos: 0, valor_no_tecnico: 600,
+    pedidos_por_coluna: { mensagem: [1, 2, 3, 4], devolucao: [5, 6], consertos: [6], gasto: [5, 6] },
   }
-  const RESUMO = { vendidas: 100, pediram: 6, seguiram: 2, hoje: '2026-10-30', ve_valores: true, departamentos: [{ chave: 'celular', nome: 'Celular', vendidas: 100, pediram: 6, seguiram: 2 }], produtos: [produto] }
-  const montarResumo = async (resumo) => {
+  const outro = {
+    chave: 'tabela:2', departamento: 'celular', nome: 'DG019', skus: ['dg019'], na_tabela: true,
+    vendidas: 300, pediram: 1, seguiram: 0, origens: { mensagem: 1 }, consertos: 0, perdidos: 1,
+    gasto: 120.6, gasto_conserto: 0, gasto_perdidos: 120.6, gasto_cliente: 0, saldo: 15000.4,
+    pedidos: [7], pedidos_por_coluna: { mensagem: [7], perdidos: [7], gasto: [7] },
+  }
+  const semSaldo = {
+    chave: 'tabela:3', departamento: 'eletro', nome: 'U9', skus: ['u9'], na_tabela: true, vendidas: 3, pediram: 0, seguiram: 0,
+    origens: {}, consertos: 0, perdidos: 0, gasto: 0, gasto_conserto: 0, gasto_perdidos: 0, gasto_cliente: 0, saldo: 0, pedidos: [], pedidos_por_coluna: {},
+  }
+  // Vendido fora da Tabela de Preços (05/11/2026): não aparece no Resumo nem no rodapé.
+  const fora = {
+    chave: 'sku:dg1028', departamento: 'celular', nome: 'Uranyx C57S AVULSO', skus: ['dg1028'], na_tabela: false,
+    vendidas: 50, pediram: 2, seguiram: 0, origens: { mensagem: 2 }, consertos: 0, perdidos: 0,
+    gasto: 40, gasto_conserto: 0, gasto_perdidos: 0, gasto_cliente: 40, saldo: 20000, pedidos: [8, 9], pedidos_por_coluna: { mensagem: [8, 9], gasto: [9] },
+  }
+  const RESUMO = {
+    vendidas: 403, pediram: 7, seguiram: 2, hoje: '2026-11-04', ve_valores: true,
+    departamentos: [
+      { chave: 'celular', nome: 'Celular', vendidas: 400, pediram: 7, saldo: 21650.4, gasto: 350 },
+      { chave: 'mala', nome: 'Mala', vendidas: 0, pediram: 0, saldo: 0, gasto: 0 },
+      { chave: 'eletro', nome: 'Eletro', vendidas: 3, pediram: 0, saldo: 0, gasto: 0 },
+    ],
+    produtos: [outro, produto, semSaldo, fora],
+  }
+  const montarResumo = async (resumo, departamento = 'celular', filtros = {}) => {
     const emitidos = []
+    const todos = []
     const g = { user: ADMIN, api: async (url) => { assert.equal(url, '/api/garantias/resumo'); return resumo } }
     const cx = comEstado(componente('../components/GarantiaResumo.vue', g))
-    const props = { filtros: { ...L.FILTROS_PADRAO }, onAbrir: (x) => emitidos.push(x) }
+    const props = { filtros: { ...L.FILTROS_PADRAO, ...filtros }, departamento, onAbrir: (x) => emitidos.push(x), onTodos: () => todos.push(1) }
     await html(appCom(cx.C, props, g))
     await new Promise((r) => setTimeout(r, 0))
-    return { cx, emitidos, h: await html(appCom(cx.mesmo, props, g)) }
+    return { cx, emitidos, todos, h: await html(appCom(cx.mesmo, props, g)) }
   }
-  const { cx, emitidos, h } = await montarResumo(RESUMO)
+  const { cx, emitidos, todos, h } = await montarResumo(RESUMO)
   const col = (k) => cx.estado.colunas.find((c) => c.chave === k)
-  assert.deepEqual(cx.estado.colunas.slice(-4).map((c) => c.rotulo), ['No técnico', 'Consertos', 'Perdidos', 'Gasto R$'])
-  assert.match(h, /data-grupo="perdas"[^>]*>Manutenção e perdas</)
-  assert.match(h, /min-w-\[1607px\]/, 'com o Gasto, a tabela fica mais larga')
-  // A % certa (30/10/2026): Seguiram ÷ Vendidas — quem só pediu no chat fica na dica.
-  assert.deepEqual(cx.estado.colunas.slice(0, 4).map((c) => c.rotulo), ['Vendidas', 'Pediram', 'Seguiram', '%'])
-  assert.match(texto((h.match(/data-celula="pct"[^>]*>([\s\S]*?)<\/td>/) || [])[1] || ''), /^2%$/)
-  assert.match(texto((h.match(/data-departamento="celular"[^>]*>([\s\S]*?)<\/button>/) || [])[1] || ''), /^Celular · 2% \(2 de 100\)$/)
-  assert.equal(cx.estado.dicaDaPct(produto), '1,0x a média do Celular (2%) · pediram: 6% (6 de 100)')
-  assert.match(texto((h.match(/data-celula="gasto"[^>]*>([\s\S]*?)<\/td>/) || [])[1] || ''), /^229$/, 'o Gasto sem centavos na célula')
-  // O número abre só os pedidos dele; o zero não abre; Vendidas é o clique da linha.
-  const clique = (k) => { let parou = false; cx.estado.clicarCelula({ stopPropagation: () => { parou = true } }, produto, col(k)); return parou }
-  assert.equal(clique('devolucao'), true)
-  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [5, 6], coluna: 'Devolução' })
-  assert.equal(clique('pediram'), true)
-  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [1, 2, 3, 4, 5, 6], coluna: undefined })
-  const antes = emitidos.length
-  assert.equal(clique('sac'), true, 'o zero não deixa o clique virar o da linha')
-  assert.equal(emitidos.length, antes, 'o zero não abre nada')
-  assert.equal(clique('vendidas'), false, 'Vendidas não é pedido: o clique é o da linha')
+  const celula = (html, chave, k) => {
+    const linha = (html.match(new RegExp(`<tr[^>]*data-produto="${chave}"[^>]*>([\\s\\S]*?)</tr>`)) || [])[1] || ''
+    const td = new RegExp(`<td([^>]*data-celula="${k}"[^>]*)>([\\s\\S]*?)</td>`).exec(linha)
+    return td ? { texto: texto(td[2]), titulo: (/ title="([^"]*)"/.exec(td[1]) || [])[1] } : null
+  }
+  const total = (html, k) => texto((html.match(new RegExp(`<td[^>]*data-total="${k}"[^>]*>([\\s\\S]*?)</td>`)) || [])[1] || '')
+  // As colunas, na ordem da SPEC — e as que saíram não voltam.
+  const titulos = [...h.matchAll(/<th[^>]*data-coluna="\w+"[^>]*>([\s\S]*?)<\/th>/g)].map((x) => texto(x[1]))
+  assert.deepEqual(titulos, ['SKU', 'Produto', 'Vendidas', 'Saldo', '%', 'Mensagem', 'SAC', 'Devolução', 'Gasto R$'])
+  const grupos = [...h.matchAll(/<th([^>]*data-grupo="(\w+)"[^>]*)>([\s\S]*?)<\/th>/g)].map((x) => [x[2], texto(x[3]), Number((/colspan="(\d+)"/.exec(x[1]) || [])[1])])
+  assert.deepEqual(grupos, [['venda', 'Vendas', 3], ['atendimento', 'Atendimento', 3], ['manutencao', 'Manutenção', 1]])
+  for (const saiu of ['Pediram', 'Seguiram', 'Outros', 'Ativa', 'Só software', 'Aguardando', 'Expirada', 'Atendidos', 'No técnico', 'Consertos', 'Perdidos', 'Como pediu', 'Situação de quem pediu', 'Manutenção e perdas']) {
+    assert.ok(!titulos.includes(saiu) && !grupos.some((g) => g[1] === saiu), `sem "${saiu}"`)
+  }
+  assert.equal((/<th[^>]*title="([^"]*)"[^>]*data-coluna="pct"/.exec(h) || [])[1], 'Gasto ÷ Saldo × 100')
+  assert.ok(!/data-departamento=/.test(h), 'as pílulas ficam na página')
+  // A largura mínima é a conta das colunas na tela (112 + 186 + 7 × 77).
+  assert.match(h, /<table[^>]*style="min-width:837px;?"/)
+  // Só o departamento da pílula; Vendidas (maior em cima) é a ordem padrão.
+  assert.deepEqual([...h.matchAll(/<tr[^>]*data-produto="([^"]+)"/g)].map((x) => x[1]), ['tabela:2', 'tabela:1'])
+  assert.ok(!/fora da Tabela de Preços|Uranyx C57S AVULSO/.test(h), 'o vendido fora da Tabela de Preços não aparece')
+  assert.match(h, /aria-sort="descending"[^>]*data-coluna="vendidas"/)
+  // Os números: o Saldo e o Gasto em reais sem os centavos (o exato no mouse); a % com 2 casas.
+  assert.deepEqual(celula(h, 'tabela:1', 'saldo'), { texto: '6.650', titulo: 'R$ 6.650,00' })
+  assert.deepEqual(celula(h, 'tabela:1', 'pct'), { texto: '3,45%', titulo: 'gasto R$ 229,40 ÷ saldo R$ 6.650,00 × 100' })
+  assert.equal(celula(h, 'tabela:2', 'pct').texto, '0,80%')
+  assert.equal(celula(h, 'tabela:2', 'saldo').texto, '15.000')
+  assert.deepEqual(celula(h, 'tabela:1', 'gasto'), {
+    texto: '229',
+    titulo: 'ver os 2 pedidos de garantia — Gasto R$ · R$ 229,40: conserto R$ 200,00 + perdidos R$ 0,00 + reembolso ao cliente R$ 29,40 — da tela Reembolso',
+  })
+  assert.deepEqual(['vendidas', 'mensagem', 'sac', 'devolucao'].map((k) => celula(h, 'tabela:1', k).texto), ['100', '4', '0', '2'])
+  for (const k of ['consertos', 'perdidos']) assert.equal(celula(h, 'tabela:1', k), null, `sem a célula ${k}`)
+  assert.equal(celula(h, 'tabela:1', 'sac').titulo, 'nenhum pedido nesta coluna', 'o zero não herda o "ver as N garantias" da linha')
+  assert.equal(celula(h, 'tabela:1', 'mensagem').titulo, 'ver os 4 pedidos de garantia — Mensagem')
+  // O rodapé: as somas; a % = Σgasto ÷ Σsaldo × 100.
+  assert.deepEqual(['vendidas', 'saldo', 'pct', 'mensagem', 'sac', 'devolucao', 'gasto'].map((k) => total(h, k)),
+    ['400', '21.650', '1,62%', '5', '0', '2', '350'])
+  assert.ok(!/data-total="(consertos|perdidos)"/.test(h), 'sem Consertos e Perdidos no rodapé')
+  assert.match(h, /title="R\$ 350,00: conserto R\$ 200,00 \+ perdidos R\$ 120,60 \+ reembolso ao cliente R\$ 29,40 — da tela Reembolso"/, 'o Gasto do rodapé aberto no mouse')
+  assert.match(texto((h.match(/<tr[^>]*data-total-departamento[^>]*>([\s\S]*?)<\/tr>/) || [])[1] || ''), /^Total — Celular /)
+  // A conta da %, discreta; a busca por SKU ou produto continua.
+  assert.equal(texto((h.match(/<span[^>]*data-calculo[^>]*>([\s\S]*?)<\/span>/) || [])[1] || ''), '% = gasto ÷ saldo × 100')
+  assert.match(h, /placeholder="buscar SKU ou produto…"/)
+  // Os cliques: a linha (e Vendidas, Saldo, %) abre todas as garantias do produto (a chave); o
+  // número das outras colunas, só aqueles pedidos (os ids); o zero não abre nada.
+  const clique = (p, k) => { let parou = false; cx.estado.clicarCelula({ stopPropagation: () => { parou = true } }, p, col(k)); return parou }
+  cx.estado.abrir(produto)
+  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', chave: 'tabela:1' })
+  let antes = emitidos.length
+  for (const k of ['vendidas', 'saldo', 'pct']) assert.equal(clique(produto, k), false, `${k}: o clique é o da linha`)
   assert.equal(emitidos.length, antes)
-  clique('no_tecnico')
-  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [5], coluna: 'No técnico' })
-  clique('seguiram')
-  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [5, 6], coluna: 'Seguiram' })
-  // Com o mouse: o vencido e os reais.
-  assert.equal(cx.estado.dicaDaCelula(produto, col('no_tecnico')), 'ver o pedido de garantia — No técnico · 1 com o prazo de 30 dias vencido · R$ 600,00 em aparelhos no técnico')
-  assert.equal(cx.estado.dicaDaCelula(produto, col('gasto')), 'ver o pedido de garantia — Gasto R$ · R$ 229,40: conserto R$ 229,40 + aparelhos perdidos R$ 0,00')
-  assert.equal(cx.estado.dicaDaCelula(produto, col('perdidos')), 'nenhum pedido nesta coluna', 'o zero não herda o "ver os N pedidos" da linha')
-  assert.equal(cx.estado.dicaDaCelula(produto, col('vendidas')), undefined, 'Vendidas fica com a dica da linha')
-  // Quem não é admin: sem o Gasto (o servidor não manda os reais).
-  const semValores = { ...produto, gasto: null, gasto_conserto: null, gasto_perdidos: null, valor_no_tecnico: null, pedidos_por_coluna: { ...produto.pedidos_por_coluna, gasto: undefined } }
+  assert.equal(clique(produto, 'devolucao'), true)
+  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [5, 6], coluna: 'Devolução' })
+  clique(produto, 'gasto')
+  assert.deepEqual(emitidos.at(-1), { nome: 'A17 pro max', ids: [5, 6], coluna: 'Gasto R$' })
+  clique(outro, 'gasto')
+  assert.deepEqual(emitidos.at(-1), { nome: 'DG019', ids: [7], coluna: 'Gasto R$' })
+  assert.equal(col('consertos'), undefined)
+  assert.equal(col('perdidos'), undefined)
+  antes = emitidos.length
+  assert.equal(clique(produto, 'sac'), true, 'o zero não deixa o clique virar o da linha')
+  assert.equal(emitidos.length, antes, 'o zero não abre nada')
+  // A linha sem venda nenhuma não abre; o "Ver todos os pedidos de garantia" continua.
+  cx.estado.abrir({ ...produto, vendidas: 0 })
+  assert.equal(emitidos.length, antes)
+  assert.equal(cx.estado.dicaDaLinha(produto), 'ver as 100 garantias de A17 pro max')
+  assert.match(h, /data-ver-todos/)
+  // Ordenar pela %: o maior gasto sobre o saldo em cima.
+  cx.estado.ordenar('pct')
+  assert.deepEqual(cx.estado.linhas.map((p) => p.chave), ['tabela:1', 'tabela:2'])
+  // O Eletro (sem saldo): a % é "—", na linha e no rodapé.
+  const eletro = await montarResumo(RESUMO, 'eletro')
+  assert.equal(celula(eletro.h, 'tabela:3', 'pct').texto, '—')
+  assert.equal(total(eletro.h, 'pct'), '—')
+  assert.match(texto((eletro.h.match(/<tr[^>]*data-total-departamento[^>]*>([\s\S]*?)<\/tr>/) || [])[1] || ''), /^Total — Eletro /)
+  // O período pela data da venda (05/11/2026): o título diz de quais vendas são os números.
+  assert.ok(!/data-periodo-vendas/.test(h), 'sem datas, sem o período no título')
+  const comDatas = await montarResumo(RESUMO, 'celular', { periodo: 'venda', de: '2026-11-01', ate: '2026-11-05' })
+  assert.equal(texto((comDatas.h.match(/<span[^>]*data-periodo-vendas[^>]*>([\s\S]*?)<\/span>/) || [])[1] || ''), '· vendas de 01/11/2026 a 05/11/2026')
+  const soAte = await montarResumo(RESUMO, 'celular', { periodo: 'venda', ate: '2026-11-05' })
+  assert.match(soAte.h, /vendas até 05\/11\/2026/)
+  const peloPedido = await montarResumo(RESUMO, 'celular', { periodo: 'pedido', de: '2026-11-01', ate: '2026-11-05' })
+  assert.ok(!/data-periodo-vendas/.test(peloPedido.h), 'pela data do pedido, o título não fala de vendas')
+  // A Mala, sem venda: o vazio lembra que a garantia é da Uranyx.
+  const mala = await montarResumo(RESUMO, 'mala')
+  assert.equal(texto((mala.h.match(/<td[^>]*data-sem-produtos[^>]*>([\s\S]*?)<\/td>/) || [])[1] || ''),
+    'Nenhuma venda neste departamento com esses filtros. A garantia do DaVinci hoje é só da linha Uranyx (celular e eletro).')
+  // Sem os reais (o servidor não mandou): sem Saldo, % e Gasto — nenhum real na tela.
+  const semValores = { ...produto, gasto: null, gasto_conserto: null, gasto_perdidos: null, gasto_cliente: null, saldo: null, pedidos_por_coluna: { ...produto.pedidos_por_coluna, gasto: undefined } }
   const r2 = await montarResumo({ ...RESUMO, ve_valores: false, produtos: [semValores] })
-  assert.ok(!r2.cx.estado.colunas.some((c) => c.chave === 'gasto'))
-  assert.ok(!/data-coluna="gasto"/.test(r2.h) && /min-w-\[1530px\]/.test(r2.h))
-  assert.equal(r2.cx.estado.dicaDaCelula(semValores, r2.cx.estado.colunas.find((c) => c.chave === 'no_tecnico')), 'ver o pedido de garantia — No técnico · 1 com o prazo de 30 dias vencido')
-  assert.ok(!/R\$/.test(texto(r2.h)), 'nenhum real na tela de quem não é admin')
-  // A conta da %, discreta ao lado das pílulas (30/10/2026: "bem sutil, só para mim não esquecer").
-  assert.match(texto((h.match(/data-calculo[^>]*>([\s\S]*?)<\/span>/) || [])[1] || ''), /^% = seguiram ÷ vendidas · seguiram = o aparelho voltou, está voltando ou teve reembolso/)
-  assert.ok(!/data-como-calcula/.test(h), 'sem botão')
+  assert.deepEqual(r2.cx.estado.colunas.map((c) => c.rotulo), ['Vendidas', 'Mensagem', 'SAC', 'Devolução'])
+  assert.match(r2.h, /<table[^>]*style="min-width:606px;?"/, 'a largura acompanha as colunas')
+  // Sem o Gasto a Manutenção fica sem coluna: o título do grupo some junto.
+  assert.deepEqual([...r2.h.matchAll(/data-grupo="(\w+)"/g)].map((x) => x[1]), ['venda', 'atendimento'])
+  assert.ok(!/R\$/.test(texto(r2.h)), 'nenhum real na tela de quem não vê os valores')
+  // O 403 de quem não é admin vira frase (a página nem chama, mas se chamar).
+  const erro403 = comEstado(componente('../components/GarantiaResumo.vue', { user: CONSULTA, api: async () => { throw Object.assign(new Error('403'), { statusCode: 403, data: { detail: { code: 'so_admin' } } }) } }))
+  await html(appCom(erro403.C, { filtros: { ...L.FILTROS_PADRAO }, departamento: 'celular' }, {}))
+  await new Promise((r) => setTimeout(r, 0))
+  assert.equal(erro403.estado.erro, L.ERROS.so_admin)
   assert.equal(L.reaisBR(1234.5), 'R$ 1.234,50')
+  void todos
 
   // O selo do aparelho: o vencido (o servidor diz) na cor do perdido; corta
   // com "…" numa coluna estreita (o texto inteiro no mouse); sem texto, nada.

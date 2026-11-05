@@ -977,13 +977,8 @@ class Settings(BaseSettings):
     flex_shopee_canais: str = "90022"
     flex_shopee_escrita: bool = False
     flex_intervalo_min: int = 15
-    # Quem VÊ o Flex (Eduardo, 05/10/2026: "por enquanto somente os usuários
-    # heisenberg e o thorfinn podem ver"): nomes de usuário (users.name),
-    # separados por vírgula, sem diferença de maiúscula. Para os outros —
-    # inclusive admin — /api/flex/* responde o 404 de rota que não existe, a
-    # aba Flex some da Logística e o selo "Flex" some dos pedidos (Logística e
-    # Controle de Estoque). Vazio = ninguém vê.
-    flex_usuarios: str = ""
+    # Quem VÊ o Flex: só admin (services/flex_config.pode_ver, 05/11/2026).
+    # A lista `FLEX_USUARIOS` de 05/10 saiu; variável velha no .env é ignorada.
     # Pedido Flex SEMPRE sai do .sp (etapa 2, services/prioridade_estoque): o
     # robô de prioridade leva cada item do pedido Flex para o lote .sp, acima
     # do mapa de prioridades, da trava anti-volta e do pedido num estoque só;

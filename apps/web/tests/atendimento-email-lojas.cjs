@@ -831,7 +831,7 @@ async function principal() {
     // Filas e Central têm concessões separadas; o recurso legado não abre a aba.
     assert.match(pagina, /const podeVerAbaEmail = useCan\('atendimento_email_aba', 'view'\)/)
     assert.match(pagina, /const podeLerCaixaEmail = useCan\('atendimento_email_leitura', 'view'\)/)
-    assert.match(pagina, /const veAbaEmail = computed\(\(\) => ehAdmin\.value \|\| podeVerAbaEmail\.value \|\| podeLerCaixaEmail\.value\)\n/)
+    assert.match(pagina, /const veAbaEmail = computed\(\(\) => ehAdmin\.value \|\| podeVerAbaEmail\.value \|\| podeLerCaixaEmail\.value \|\| podeOperarCaixaEmail\.value\)\n/)
     assert.doesNotMatch(pagina, /useCan\('atendimento_email'/, 'a permissão não abre mais a aba')
 
     // ── a aba E-mail só para quem a vê, de verdade (o trecho da página com dublês)
@@ -884,6 +884,7 @@ async function principal() {
       assert.equal(acesso.value, false, 'edit/delete sem view não concedem leitura')
       assert.equal(ve({ role: 'user', permissions: {} }), false)
       assert.equal(ve(null), false)
+      assert.equal(ve({ role: 'user', permissions: { atendimento_email_operacao: { view: true, edit: true } } }), true, 'operação abre a caixa')
       // A tela de Permissões: o recurso no grupo Pós-venda, com o rótulo do "ver".
       const posVenda = can.RESOURCE_GROUPS.find((g) => g.label === 'Pós-venda')
       assert.ok(posVenda.resources.includes('atendimento_email_leitura'))

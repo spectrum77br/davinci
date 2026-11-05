@@ -235,6 +235,7 @@ async def test_filtered_grant_revokes_composer_and_pending_new_mail(client, acco
     # Administrators intentionally bypass mailbox filters. Keep ownership but
     # remove admin status before applying the limited message grant.
     account["admin"].role = UserRole.USER
+    account["admin"].permissions = {"atendimento_email_operacao": {"view": True, "edit": True}}
     db.add(
         MailAcesso(
             mailbox_id=UUID(account["mailbox"]["id"]), user_id=account["admin"].id, modo="padrao"

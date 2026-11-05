@@ -115,6 +115,7 @@ def test_chegou_em_ignora_todos_os_caminhos_enquanto_a_perna_e_do_galpao():
         plataforma="TikTok", meli_status=None, status_datas=None, fonte_auto="tiktok",
         devolucao_status_auto="RETURN_OR_REFUND_REQUEST_SUCCESS",
         devolucao_atualizada_em=GALPAO_EM, devolucao_destino_auto=None,
+        pacote_entregue_em=GALPAO_EM,
     ) == date(2026, 9, 18)
 
 

@@ -31,7 +31,25 @@ def test_so_reembolso_pago_nao_carimba_chegada_por_nenhum_caminho():
     ) is None
 
 
-def test_devolucao_com_pacote_continua_carimbando():
+def test_devolucao_reembolsada_com_pacote_na_rua_nao_carimba_chegada():
+    """301193 (05/11): o TikTok aprovou sozinho e pagou o cliente, com a
+    logística "Em trânsito". Caso fechado não é pacote recebido."""
+    caso = {
+        "plataforma": "TikTok",
+        "meli_status": {"order_status": "COMPLETED", "return_status": COMPLETE},
+        "status_datas": DATAS,
+        "devolucao_status_auto": COMPLETE,
+        "fonte_auto": "tiktok",
+        "devolucao_atualizada_em": PAGO_EM,
+    }
+    assert _chegou_em(**caso, devolucao_tipo_auto="RETURN_AND_REFUND") is None
+    # Sem tipo (sync antigo) também não.
+    assert _chegou_em(**caso) is None
+
+
+def test_devolucao_tiktok_chega_pelo_rastreio_mesmo_depois_de_reembolsada():
+    """A entrega confirmada pelo rastreio manda, com a data dela, e não a do
+    reembolso."""
     chegou = _chegou_em(
         plataforma="TikTok",
         meli_status={"order_status": "COMPLETED", "return_status": COMPLETE},
@@ -39,19 +57,10 @@ def test_devolucao_com_pacote_continua_carimbando():
         devolucao_status_auto=COMPLETE,
         fonte_auto="tiktok",
         devolucao_atualizada_em=PAGO_EM,
-        pacote_entregue_em=None,
+        pacote_entregue_em=datetime(2026, 9, 20, 15, 0, tzinfo=UTC),
         devolucao_tipo_auto="RETURN_AND_REFUND",
     )
-    assert chegou is not None and chegou.isoformat() == "2026-09-15"
-    # Sem tipo (sync antigo) vale o de sempre.
-    assert _chegou_em(
-        plataforma="TikTok",
-        meli_status={"order_status": "COMPLETED", "return_status": COMPLETE},
-        status_datas=DATAS,
-        devolucao_status_auto=COMPLETE,
-        fonte_auto="tiktok",
-        devolucao_atualizada_em=PAGO_EM,
-    ) is not None
+    assert chegou is not None and chegou.isoformat() == "2026-09-20"
 
 
 def test_localizacao_fala_de_reembolso_e_nao_de_devolucao():

@@ -246,31 +246,18 @@ def compra_da_garantia():
     )
 
 
-async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tuple]:
-    """A 1ª mensagem do cliente, depois da compra, que pede a garantia — nas
-    conversas ligadas (fora as do SAC, que contam pelo formulário). A compra é
-    a HORA do pedido no índice do comprador (Shopee/TikTok); sem ela, o dia do
-    pedido no Bling (00:00 de São Paulo). Na conversa do comprador (uma para
-    todos os pedidos dele: a do índice e o chat da Shopee/TikTok, também
-    quando ligou pelo nº do pedido), só até o PRÓXIMO pedido dele — pelo índice
-    ou, sem índice, pela próxima compra do mesmo CPF na mesma loja: dali para
-    baixo pode ser sobre o outro (revisões de 28/10)."""
-    if not ids:
-        return {}
-    g, gc, c, m, p = (
-        Garantia,
-        GarantiaConversa,
-        AtendimentoConversa,
-        AtendimentoMensagem,
-        AtendimentoPedidoComprador,
-    )
+def base_das_garantias(ids: list[int]):
+    """As garantias (`ids`) com a hora da COMPRA (CTE `base`: gid, cpf, loja,
+    pedido, compra): a HORA do pedido no índice do comprador (Shopee/TikTok);
+    sem ela, o dia do pedido no Bling (00:00 de São Paulo); sem ele, INICIO."""
+    g, p = Garantia, AtendimentoPedidoComprador
     hora_do_pedido = (
         select(func.min(p.criado_em))
         .where(p.pedido == g.pedido_marketplace)
         .correlate(g)
         .scalar_subquery()
     )
-    base = (
+    return (
         select(
             g.id.label("gid"),
             g.cpf.label("cpf"),
@@ -281,7 +268,18 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
         .where(g.id.in_(ids))
         .cte("base")
     )
-    quando = func.coalesce(m.enviada_em, m.created_at)
+
+
+def no_trecho_do_pedido(base, quando):
+    """A hora `quando` (de uma fala do cliente numa conversa ligada à garantia
+    da `base` — `base_das_garantias`, juntada a `garantia_conversas` e a
+    `atendimento_conversas`) é do pedido da garantia: depois da compra e, na
+    conversa do COMPRADOR (uma para todos os pedidos dele: a do índice e o
+    chat da Shopee/TikTok, também quando ligou pelo nº do pedido), antes do
+    PRÓXIMO pedido dele — pelo índice ou, sem índice, pela próxima compra do
+    mesmo CPF na mesma loja: dali para baixo pode ser sobre o outro (revisões
+    de 28/10). A conversa de um pedido só (ML pós-venda, e-mail) não corta."""
+    gc, c, p = GarantiaConversa, AtendimentoConversa, AtendimentoPedidoComprador
     # O próximo pedido do comprador: pelo índice do comprador (Shopee, com a
     # hora) e, sem ele (o TikTok não tem índice), pela próxima compra do MESMO
     # CPF na MESMA loja (a compra em outra loja não é deste chat).
@@ -319,6 +317,18 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
         gc.como == "comprador",
         and_(c.plataforma.in_(("shopee", "tiktok")), c.canal == "chat"),
     )
+    return and_(quando >= base.c.compra, or_(~do_comprador, proximo.is_(None), quando < proximo))
+
+
+async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tuple]:
+    """A 1ª mensagem do cliente, depois da compra, que pede a garantia — nas
+    conversas ligadas (fora as do SAC, que contam pelo formulário). Na conversa
+    do comprador, só até o PRÓXIMO pedido dele (`no_trecho_do_pedido`)."""
+    if not ids:
+        return {}
+    gc, c, m = GarantiaConversa, AtendimentoConversa, AtendimentoMensagem
+    base = base_das_garantias(ids)
+    quando = func.coalesce(m.enviada_em, m.created_at)
     q = (
         select(base.c.gid, m.id, m.texto, quando.label("quando"), c.plataforma)
         .select_from(base)
@@ -330,8 +340,7 @@ async def _por_mensagem(session: AsyncSession, ids: list[int]) -> dict[int, tupl
             m.autor == "cliente",
             m.tipo == "texto",
             m.texto.is_not(None),
-            quando >= base.c.compra,
-            or_(~do_comprador, proximo.is_(None), quando < proximo),
+            no_trecho_do_pedido(base, quando),
         )
         .order_by(base.c.gid, quando, m.id)
     )

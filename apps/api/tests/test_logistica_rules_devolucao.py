@@ -57,15 +57,16 @@ def test_tiktok_so_reembolso_tem_texto_proprio():
     )
 
 
-def test_tiktok_so_reembolso_nunca_chegou():
-    """`data_retorno_concluido`: caso só-reembolso fechado NÃO é pacote que
-    chegou — a coluna "Chegou em" fica vazia."""
+def test_tiktok_caso_fechado_nunca_e_chegada():
+    """`data_retorno_concluido`: caso fechado no TikTok é reembolso pago, não
+    pacote recebido, com ou sem devolução (301193, 05/11: o TikTok pagou com a
+    logística "Em trânsito"). A chegada vem só do rastreio."""
     from app.services.logistica_rules import data_retorno_concluido
 
     datas = {"return_status": {"em": "2026-09-16T02:29:54+00:00", "fonte": "davinci"}}
     com_pacote = {"return_status": "RETURN_OR_REFUND_REQUEST_COMPLETE", "return_type": "RETURN_AND_REFUND"}
     so_reembolso = {**com_pacote, "return_type": "REFUND"}
-    assert data_retorno_concluido("TikTok", com_pacote, datas) == "2026-09-16T02:29:54+00:00"
+    assert data_retorno_concluido("TikTok", com_pacote, datas) is None
     assert data_retorno_concluido("TikTok", so_reembolso, datas) is None
 
 

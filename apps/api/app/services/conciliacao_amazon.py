@@ -33,7 +33,13 @@ from app.services.conciliacao_shopee import inserir_movimentos
 logger = structlog.get_logger()
 BRT = ZoneInfo("America/Sao_Paulo")
 ROTA_TRANSACOES = "/finances/2024-06-19/transactions"
+ROTA_GRUPOS = "/finances/v0/financialEventGroups"
 ZERO = Decimal("0")
+# Janelas conferidas em 05/11: grupo aberto velho volta mesmo com janela curta (Poofy, Amex
+# aberto desde 31/03 veio com 3 e 12 dias); o preso mais antigo da Poofy era de 13/10
+JANELA_GRUPOS_DIAS = 12
+JANELA_RETIDO_DIAS = 120
+MAX_PAGINAS_GRUPOS = 10
 TIPOS = {
     "Shipment": "venda_liberada",
     "Refund": "estorno",
@@ -343,18 +349,25 @@ async def ler_transacoes(
     *,
     ate: datetime | None = None,
     max_paginas: int = MAX_PAGINAS_TRANSACOES,
+    situacao: str | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Todas as transações lançadas desde `de` (Finances 2024-06-19), paginando.
     Devolve (transações, cortado): `cortado` = bateu em `max_paginas` com `nextToken`
-    ainda na mão (16/10, revisão: antes cortava em silêncio)."""
+    ainda na mão (16/10, revisão: antes cortava em silêncio). `situacao` filtra pela
+    situação na Amazon (DEFERRED = ainda retido)."""
     out: list[dict[str, Any]] = []
     token: str | None = None
+    filtro: dict[str, Any] = (
+        {"transactionStatus": situacao, "marketplaceId": cliente.marketplace_id}
+        if situacao
+        else {}
+    )
     for _ in range(max_paginas):
-        params: dict[str, Any] = {"postedAfter": de.astimezone(UTC).isoformat()}
+        params: dict[str, Any] = {"postedAfter": de.astimezone(UTC).isoformat(), **filtro}
         if ate is not None:
             params["postedBefore"] = ate.astimezone(UTC).isoformat()
         if token:
-            params = {"nextToken": token, "postedAfter": params["postedAfter"]}
+            params = {"nextToken": token, "postedAfter": params["postedAfter"], **filtro}
         r = await cliente._request("GET", ROTA_TRANSACOES, params=params)
         if r.status_code != 200:
             raise RuntimeError(f"amazon transacoes: HTTP {r.status_code} {r.text[:200]}")
@@ -366,6 +379,53 @@ async def ler_transacoes(
         if not token or not lista:
             return out, False
     return out, token is not None
+
+
+async def _ler_disponivel(cliente: Any, agora: datetime) -> Decimal:
+    """O que está liberado na Amazon = soma dos grupos de repasse ABERTOS. Paginado de
+    verdade: a primeira página da Poofy não trazia o grupo do Boleto (1.797,89)."""
+    de = agora - timedelta(days=JANELA_GRUPOS_DIAS)
+    params: dict[str, Any] = {
+        "FinancialEventGroupStartedAfter": de.astimezone(UTC).isoformat(),
+        "MaxResultsPerPage": 100,
+    }
+    total = ZERO
+    for _ in range(MAX_PAGINAS_GRUPOS):
+        r = await cliente._request("GET", ROTA_GRUPOS, params=params)
+        if r.status_code != 200:
+            raise RuntimeError(f"amazon grupos: HTTP {r.status_code} {r.text[:200]}")
+        payload = (r.json() or {}).get("payload") or {}
+        for g in payload.get("FinancialEventGroupList") or []:
+            if str(g.get("ProcessingStatus") or "").lower() == "open":
+                total += Decimal(str((g.get("OriginalTotal") or {}).get("CurrencyAmount") or 0))
+        token = payload.get("NextToken")
+        if not token:
+            return total
+        params = {"NextToken": token}
+    raise RuntimeError(f"amazon grupos: passou de {MAX_PAGINAS_GRUPOS} páginas")
+
+
+async def ler_saldo_da_amazon(cliente: Any, agora: datetime) -> dict[str, Any]:
+    """O saldo como a Amazon informa, sem somar do zero (05/11, Vinicius: o painel partia
+    de zero em 24/10 e faltavam R$ 38.652,04 na KIA). Disponível = grupos abertos, igual
+    a "Fundos disponíveis"; retido = transações DEFERRED, igual à lista "Transações
+    adiadas" (Poofy: 116 linhas, 26.651,39 nas duas). Só o cartão do painel de pagamentos
+    deles mostrou R$ 601,00 a mais que a própria lista."""
+    disponivel = await _ler_disponivel(cliente, agora)
+    de = agora - timedelta(days=JANELA_RETIDO_DIAS)
+    txs, cortado = await ler_transacoes(cliente, de, situacao="DEFERRED")
+    if cortado:
+        raise RuntimeError("amazon retido: leitura cortada")
+    retido = sum(
+        (Decimal(str((t.get("totalAmount") or {}).get("currencyAmount") or 0)) for t in txs),
+        ZERO,
+    )
+    return {
+        "disponivel": str(disponivel),
+        "retido": str(retido),
+        "retido_linhas": len(txs),
+        "lido_em": agora.isoformat(),
+    }
 
 
 async def recalcular_saldo(session: AsyncSession, loja: ConciliacaoLoja) -> Decimal:
@@ -557,7 +617,12 @@ async def run_amazon_sync(
     row.lido_em = agora
     row.erro = aviso  # None quando a leitura veio inteira
     row.linhas = len(movs)
-    row.detalhe = {**resumo, "saldo": str(saldo)}
+    try:
+        saldo_amazon = await ler_saldo_da_amazon(cliente, agora)
+    except Exception as e:  # noqa: BLE001 — as linhas lidas valem mesmo sem o saldo
+        saldo_amazon = None
+        logger.warning("conciliacao_amazon_saldo_falhou", loja=loja.conta, erro=str(e)[:300])
+    row.detalhe = {**resumo, "saldo": str(saldo), "saldo_amazon": saldo_amazon}
     loja.ultimo_extrato_em = agora
     await session.flush()
     resumo["saldo"] = float(saldo)

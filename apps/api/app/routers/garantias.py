@@ -14,7 +14,9 @@ Permissões (§6 — Cadastrar, Consultar, Registrar atendimento; e o CPF):
   * `garantias_cpf` view = vê o CPF COMPLETO no detalhe (a lista é sempre
     mascarada). Admin tem as três. Só o GET do detalhe devolve o CPF completo
     — e grava "consultou"; cadastrar/corrigir/conferir respondem mascarado.
-  * O log de quem consultou/alterou (`/{id}/log`) é do admin.
+  * O log de quem consultou/alterou (`/{id}/log`) é do admin. O Resumo (a
+    garantia por produto, com o saldo e o gasto em reais) também, desde
+    04/11/2026 (403 `so_admin` para os outros).
 
 LGPD no transporte: a lista e a busca do vínculo são POST com o termo no
 CORPO (nome e CPF digitados não vão para o log de acesso do uvicorn/Caddy,
@@ -31,13 +33,15 @@ a garantia guarda uma CÓPIA do atendimento.
 
 import logging
 import re
+from collections import Counter
 from datetime import UTC, datetime, time, timedelta
 from typing import Annotated
 from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import and_, false, func, or_, select, true
+from sqlalchemy import Integer, and_, any_, false, func, literal, or_, select, true
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,12 +68,17 @@ from app.models.atendimento import (
     AtendimentoPedidoComprador,
 )
 from app.models.devolution import Devolution
-from app.models.garantia import GarantiaConversa
+from app.models.enums import IntegrationPlatform
+from app.models.garantia import GarantiaConversa, GarantiaPendencia
+from app.models.marketplace_financial import MarketplaceOrderFreightReconciliation
 from app.schemas.garantia import (
+    AbaOut,
+    AbasOut,
     AnexoOut,
     AtendimentoCreate,
     AtendimentoOut,
     BuscaVinculo,
+    EmAtendimentoOut,
     EntregaOut,
     GarantiaCreate,
     GarantiaLinhaOut,
@@ -87,6 +96,7 @@ from app.schemas.garantia import (
     NotaSugeridaOut,
     PedidoMarcar,
     PedidoParaCadastroOut,
+    PedidoSemGarantiaOut,
     PermissoesOut,
     PessoaRef,
     PrazoOut,
@@ -331,7 +341,13 @@ async def _linhas(
     user: User | None = None,
     *,
     com_aparelho: bool = False,
+    mapa=None,
+    leitura=None,
 ) -> list[GarantiaLinhaOut]:
+    """`mapa` (`garantia_resumo.mapa_das_linhas`) = o departamento de cada
+    uma; `leitura` (`garantia_atendimento.em_atendimento`) = o motivo de quem
+    está em atendimento agora e o desfecho já lido de quem pediu. Só a lista
+    manda os dois."""
     from app.services import garantia_resumo
 
     contagem = await _contagem_atendimentos(session, [g.id for g in garantias])
@@ -339,16 +355,26 @@ async def _linhas(
     conversas = await _conversas_das(session, [g.id for g in garantias], user)
     trechos = await _trechos_do_pedido(session, garantias, user)
     # O aparelho (30/10/2026): o selo "No técnico", "Consertado", "Perdido",
-    # "Reembolso ao cliente", "Devolução a caminho"; os reais só para admin. Só
-    # a tela de Garantias mostra (`com_aparelho`): a conversa do Atendimento, a
-    # busca para vincular e o cadastro não pagam essa leitura.
-    desfechos = (
-        await garantia_resumo.desfechos(session, garantias, dia) if com_aparelho else {}
-    )
+    # "Reembolso ao cliente", "Devolução a caminho"; os reais (o gasto da tela
+    # Reembolso, o mesmo do Resumo) só para admin. Só a tela de Garantias
+    # mostra (`com_aparelho`): a conversa do Atendimento, a busca para vincular
+    # e o cadastro não pagam essa leitura. O desfecho de quem pediu já veio na
+    # `leitura` do Atendimento: aqui só o das outras (a venda sem pedido, em
+    # "Mostrar: todas as vendas").
+    desfechos: dict = {}
+    if com_aparelho:
+        ja = leitura.desfechos if leitura is not None else {}
+        lidas = leitura.lidas if leitura is not None else frozenset()
+        faltam = [g for g in garantias if g.id not in lidas]
+        tabela = mapa.tabela if mapa is not None else None
+        novos = (
+            await garantia_resumo.desfechos(session, faltam, dia, tabela=tabela) if faltam else {}
+        )
+        desfechos = {g.id: f for g in garantias if (f := novos.get(g.id) or ja.get(g.id))}
     com_valor = user is not None and user.role == UserRole.ADMIN
 
     def do_aparelho(g: Garantia) -> dict:
-        if not (f := desfechos.get(g.id)):
+        if not (f := desfechos.get(g.id)) or not (f.situacao or f.gasto):
             return {}
         return {
             "devolucao_situacao": f.situacao,
@@ -356,6 +382,16 @@ async def _linhas(
             "devolucao_vencido": f.vencido,
             "devolucao_gasto": f.gasto if com_valor else None,
         }
+
+    def das_partes(g: Garantia) -> dict:
+        extra = {}
+        if mapa is not None:
+            extra["departamento"] = mapa.departamento(g)
+        if leitura is not None and (a := leitura.em_aberto.get(g.id)) is not None:
+            extra["atendimento"] = EmAtendimentoOut(
+                motivo=a.motivo, rotulo=a.rotulo, desde=a.desde, vencido=a.vencido
+            )
+        return extra
 
     return [
         _linha(
@@ -367,6 +403,7 @@ async def _linhas(
                 **(conversas.get(g.id) or {}),
                 "pedido_trecho": trechos.get(g.id),
                 **do_aparelho(g),
+                **das_partes(g),
             },
         )
         for g in garantias
@@ -588,10 +625,25 @@ def _nota_out(n: svc.NotaDoPedido | None) -> NotaSugeridaOut | None:
 # ── Busca ───────────────────────────────────────────────────────────────────
 
 
+# O nº da compra no Mercado Livre (o pedido ou o PACK, a compra com vários
+# pedidos): 16 dígitos começando por 2000.
+_RX_NUMERO_ML = re.compile(r"2000\d{12}")
+
+
+def _pedidos_do_pack(termo: str):
+    """Os pedidos do ML de um pack (04/11/2026: o SAC procura pelo nº que o ML
+    mostra, e o Bling guarda ora o pack, ora o pedido)."""
+    r = MarketplaceOrderFreightReconciliation
+    return select(r.external_order_id).where(
+        r.platform == IntegrationPlatform.ML, r.pack_id == termo
+    )
+
+
 def _filtro_busca(termo: str | None):
     """Nome (sem acento nem caixa), CPF (os 11 dígitos, válido), NF ou pedido
-    (Bling ou marketplace). CPF parcial não busca: a lista mostra o CPF
-    mascarado e pedaço de CPF serviria para adivinhar os dígitos escondidos."""
+    (Bling ou marketplace — o pack do ML acha o pedido dele). CPF parcial não
+    busca: a lista mostra o CPF mascarado e pedaço de CPF serviria para
+    adivinhar os dígitos escondidos."""
     t = (termo or "").strip()
     if not t:
         return None
@@ -608,14 +660,27 @@ def _filtro_busca(termo: str | None):
         if nf and len(nf) <= 9:
             conds.append(Garantia.nf_numero == nf)
         conds.append(Garantia.pedido_bling == digitos)
+    if _RX_NUMERO_ML.fullmatch(t):
+        conds.append(Garantia.pedido_marketplace.in_(_pedidos_do_pack(t)))
     return or_(*conds)
 
 
-async def _indicadores(session: AsyncSession, escopo, dia) -> IndicadoresOut:
+def _entre(ids) -> object:
+    """`Garantia.id` numa lista que pode ser grande (todas as de um
+    departamento): um parâmetro só (o asyncpg aceita até 32.767)."""
+    return Garantia.id == any_(literal(sorted(ids), ARRAY(Integer)))
+
+
+async def _indicadores(session: AsyncSession, escopo, dia, do_departamento=None) -> IndicadoresOut:
     """Os cartões do topo contam os PEDIDOS de garantia (28/10/2026); `vendidas`
-    = todas as vendas com garantia que a pessoa enxerga."""
+    = todas as vendas com garantia que a pessoa enxerga. Com a pílula
+    (04/11/2026, `do_departamento` = a condição dela), só as do departamento:
+    os cartões e a linha embaixo deles batem com o "Garantia (N)" da aba e com
+    a Tabela que o cartão filtra. Os filtros da barra continuam fora."""
     vivas = [escopo] if escopo is not None else []
     vivas.append(Garantia.descartada_em.is_(None))
+    if do_departamento is not None:
+        vivas.append(do_departamento)
     vendidas = (
         await session.execute(select(func.count()).select_from(Garantia).where(*vivas))
     ).scalar_one()
@@ -649,14 +714,124 @@ async def _indicadores(session: AsyncSession, escopo, dia) -> IndicadoresOut:
             *base,
         )
     )
-    from app.services import garantia_resumo
-
     return IndicadoresOut(
         **{k: getattr(linha, k) for k in contar},
         total=linha.total,
         vendidas=vendidas,
-        seguiram=await garantia_resumo.contar_seguiram(session, base, dia),
         atendimentos_no_mes=(await session.execute(q)).scalar_one(),
+    )
+
+
+async def _abas(session: AsyncSession, escopo, mapa, em_aberto: dict) -> AbasOut:
+    """As pílulas e as abas (04/11/2026): por departamento, todas as garantias
+    vivas que a pessoa enxerga e as em atendimento agora (`em_aberto`, já do
+    escopo dela) — sem os filtros da barra, como os cartões."""
+    vivas = [Garantia.descartada_em.is_(None)]
+    if escopo is not None:
+        vivas.append(escopo)
+    ids = (await session.execute(select(Garantia.id).where(*vivas))).scalars()
+    garantias = Counter(mapa.departamento_do_id(gid) for gid in ids)
+    atendimento = Counter(mapa.departamento_do_id(gid) for gid in em_aberto)
+    return AbasOut(
+        **{
+            dep: AbaOut(garantias=garantias.get(dep, 0), atendimento=atendimento.get(dep, 0))
+            for dep in ("celular", "mala", "eletro")
+        }
+    )
+
+
+# ── O pedido que ainda não tem garantia (04/11/2026) ────────────────────────
+
+
+async def _pedido_da_busca(session: AsyncSession, termo: str) -> svc.PedidoInfo | None:
+    """O pedido pelo nº do Bling ou da plataforma; o pack do ML (o nº que o ML
+    mostra na compra com vários pedidos) pelo pedido dele."""
+    pedido = await svc.buscar_pedido(session, termo)
+    if pedido is None and _RX_NUMERO_ML.fullmatch(termo):
+        for numero in (await session.execute(_pedidos_do_pack(termo).distinct())).scalars():
+            if (pedido := await svc.buscar_pedido(session, numero)) is not None:
+                break
+    return pedido
+
+
+_SEM_GARANTIA_CANCELADO = {
+    "12": "O pedido foi cancelado no Bling, e pedido cancelado não tem garantia.",
+    "83955": "O pedido está aguardando o cancelamento no Bling, e pedido cancelado não tem "
+    "garantia.",
+    "excluido": "O pedido foi excluído do Bling, e pedido cancelado não tem garantia.",
+}
+
+
+async def _por_que_sem_garantia(session: AsyncSession, pedido: svc.PedidoInfo) -> tuple[str, str]:
+    """(motivo, a frase da tela): o 1º que vale — cancelado, nenhum item
+    Uranyx, comprado antes das notas fiscais de produto do DaVinci, o robô já
+    olhou e anotou a pendência, sem a NF de produto, ou outro."""
+    from app.services import garantia_auto
+
+    situacao = str(pedido.situacao_id or "")
+    if situacao in garantia_auto.SITUACOES_FORA:
+        return "cancelado", _SEM_GARANTIA_CANCELADO.get(
+            situacao, "O pedido está cancelado no Bling, e pedido cancelado não tem garantia."
+        )
+    if not pedido.produto_uranyx:
+        return (
+            "sem_produto_uranyx",
+            "Nenhum item do pedido é da linha Uranyx, e a garantia do DaVinci é só da linha "
+            "Uranyx.",
+        )
+    inicio = garantia_auto.INICIO_DAS_NOTAS
+    if pedido.data is not None and svc.dia_em_sp(pedido.data) < inicio:
+        return (
+            "antes_das_notas",
+            f"A compra é de {svc._br(svc.dia_em_sp(pedido.data))}, antes de {svc._br(inicio)}: "
+            "o DaVinci só tem a nota fiscal de produto desde essa data, e a garantia "
+            "automática nasce dela.",
+        )
+    pendencia = await session.get(GarantiaPendencia, pedido.numero)
+    if pendencia is not None:
+        o_que = garantia_auto.MOTIVOS.get(pendencia.motivo, pendencia.motivo)
+        return (
+            "pendencia",
+            f"O robô da garantia já olhou este pedido e não criou a garantia: {o_que}.",
+        )
+    if pedido.nota_produto is None:
+        return (
+            "sem_nf_produto",
+            "O pedido ainda não tem a nota fiscal de produto no DaVinci, e a garantia "
+            "automática nasce dela.",
+        )
+    return "outro", "O robô da garantia ainda não criou a garantia deste pedido."
+
+
+async def _pedido_sem_garantia(
+    session: AsyncSession, termo: str, scope: TeamScope, user: User
+) -> PedidoSemGarantiaOut | None:
+    """A busca não achou garantia: o PEDIDO (no escopo da pessoa) e por que ele
+    ainda não tem garantia — o SAC procura pelo nº da plataforma de um pedido
+    que o robô não pegou. O pedido que já tem garantia (fora dos filtros da
+    barra) não entra. Nunca CPF nem nome."""
+    pedido = await _pedido_da_busca(session, termo)
+    if pedido is None or not _pedido_no_escopo(scope, pedido.loja):
+        return None
+    tem = await session.scalar(
+        select(func.count())
+        .select_from(Garantia)
+        .where(Garantia.pedido_bling == pedido.numero, Garantia.descartada_em.is_(None))
+    )
+    if tem:
+        return None
+    motivo, texto = await _por_que_sem_garantia(session, pedido)
+    return PedidoSemGarantiaOut(
+        pedido_bling=pedido.numero,
+        pedido_marketplace=pedido.numeroloja,
+        plataforma=pedido.plataforma,
+        conta=pedido.conta,
+        data=pedido.data,
+        situacao=pedido.situacao,
+        produto_uranyx=pedido.produto_uranyx,
+        motivo=motivo,
+        motivo_texto=texto,
+        pode_cadastrar=_pode(user, "garantias", "edit"),
     )
 
 
@@ -737,7 +912,19 @@ def _filtros_do_painel(body: ListaFiltro, escopo, dia) -> list:
     if body.status != "todos":
         filtros.append(svc.filtro_status(body.status, dia))
     de, ate = body.de, body.ate
-    if (de or ate) and body.periodo != "pedido":
+    if (de or ate) and body.periodo == "venda":
+        # As vendas feitas no período (05/11/2026): o dia da compra no Bling em
+        # São Paulo, de `de` a `ate` inclusive — a mesma data da planilha de
+        # rentabilidade. No Resumo, Vendidas, Saldo, pedidos e Gasto são todos
+        # dessas vendas. Sem o pedido no Bling, o dia do cadastro.
+        compra = func.coalesce(garantia_pedido.compra_da_garantia(), Garantia.criado_em)
+        if de:
+            filtros.append(compra >= datetime.combine(de, time(), svc.SAO_PAULO))
+        if ate:
+            filtros.append(
+                compra < datetime.combine(ate + timedelta(days=1), time(), svc.SAO_PAULO)
+            )
+    elif (de or ate) and body.periodo != "pedido":
         if body.periodo == "entrega":
             if de:
                 filtros.append(Garantia.data_inicio >= de)
@@ -771,13 +958,24 @@ def _filtros_do_pedido(body: ListaFiltro) -> list:
         return []
     filtros = []
     if body.de:
-        filtros.append(
-            Garantia.solicitada_em >= datetime.combine(body.de, time(), svc.SAO_PAULO)
-        )
+        filtros.append(Garantia.solicitada_em >= datetime.combine(body.de, time(), svc.SAO_PAULO))
     if body.ate:
         fim = datetime.combine(body.ate + timedelta(days=1), time(), svc.SAO_PAULO)
         filtros.append(Garantia.solicitada_em < fim)
     return filtros
+
+
+def _vendidas_do_periodo(body: ListaFiltro) -> list:
+    """Com o período pela data do PEDIDO, as vendidas são as compradas até o
+    fim dele (a compra no Bling): o pedido do período não se divide pela venda
+    que veio depois (revisão 28/10). A coluna Vendidas do Resumo e a linha
+    dele aberta na lista (04/11/2026: "todas as garantias do produto") usam a
+    mesma conta."""
+    if body.periodo != "pedido" or not body.ate:
+        return []
+    fim = datetime.combine(body.ate + timedelta(days=1), time(), svc.SAO_PAULO)
+    compra = func.coalesce(garantia_pedido.compra_da_garantia(), Garantia.criado_em)
+    return [compra < fim]
 
 
 @router.post("/resumo", response_model=ResumoOut)
@@ -788,25 +986,23 @@ async def resumo(
 ) -> ResumoOut:
     """Resumo (28/10/2026): a garantia por produto — as vendas com garantia e
     os pedidos de garantia por produto da Tabela de Preços e por departamento,
-    com os filtros da barra (período, origem, status). Só contagens — sem nome
-    nem CPF."""
+    com os filtros da barra (período, origem, status). Sem nome nem CPF. Só
+    para admin desde 04/11/2026 ("resumo vai aparecer só para os admin": tem
+    o saldo e o gasto em reais). Os três departamentos vêm sempre (a tela
+    escolhe pela pílula); departamento, produto e atendimento são da lista."""
     from app.services import garantia_resumo
 
+    if user.role != UserRole.ADMIN:
+        raise _erro(403, "so_admin")
     dia = svc.hoje()
     escopo = _clausula(await escopo_do_atendimento(session, user))
-    filtros = _filtros_do_painel(body, escopo, dia)
-    if body.periodo == "pedido" and body.ate:
-        # As vendidas até o fim do período (a compra no Bling): o pedido do
-        # período não se divide pela venda que veio depois (revisão 28/10).
-        fim = datetime.combine(body.ate + timedelta(days=1), time(), svc.SAO_PAULO)
-        compra = func.coalesce(garantia_pedido.compra_da_garantia(), Garantia.criado_em)
-        filtros.append(compra < fim)
+    filtros = [*_filtros_do_painel(body, escopo, dia), *_vendidas_do_periodo(body)]
     dados = await garantia_resumo.resumo(
         session,
         filtros,
         dia,
         pedido=_filtros_do_pedido(body),
-        # O Gasto em reais (o custo do produto nas Devoluções é só do admin).
+        # O saldo e o gasto em reais (só do admin).
         com_valores=user.role == UserRole.ADMIN,
     )
     return ResumoOut(**dados)
@@ -819,60 +1015,102 @@ async def listar(
     user: Annotated[User, Depends(_consultar)],
 ) -> GarantiaListaOut:
     """A tela principal (§4.1). CPF sempre mascarado. Os indicadores do topo
-    contam tudo o que a pessoa enxerga (sem os filtros), como os cartões que
-    filtram ao clicar. POST: a busca (nome/CPF) vai no corpo, fora do log de
-    acesso."""
+    contam tudo o que a pessoa enxerga no departamento da pílula (sem os
+    filtros da barra), como os cartões que filtram ao clicar. POST: a busca
+    (nome/CPF) vai no corpo, fora do log de acesso.
+
+    As 3 partes (04/11/2026): `departamento` (a pílula) e `produto` (a linha
+    do Resumo) filtram pela linha do produto da garantia; `em_atendimento` (a
+    aba Atendimento) mostra só quem está em atendimento agora, o vencido e o
+    mais antigo primeiro. As `abas` contam, por departamento, o que a pessoa
+    enxerga. A busca que não achou garantia, mas achou o pedido, diz por que
+    ele ainda não tem (`pedido_sem_garantia`)."""
+    from app.services import garantia_atendimento, garantia_resumo
+
     dia = svc.hoje()
-    escopo = _clausula(await escopo_do_atendimento(session, user))
+    scope = await escopo_do_atendimento(session, user)
+    escopo = _clausula(scope)
     cpf = svc.cpf_da_busca(body.busca)
     if cpf:
         await _teto_da_busca_por_cpf(user)
     filtros = _filtros_do_painel(body, escopo, dia)
     if body.ids:
         filtros.append(Garantia.id.in_(body.ids))
+    # A linha do Resumo aberta (o produto com "todas as vendas"): as MESMAS
+    # vendas da coluna Vendidas — com o período pela data do pedido, as
+    # compradas até o fim dele, e não só quem pediu no período.
+    linha_do_resumo = bool(body.produto) and body.mostrar == "todas"
+    do_pedido = [] if linha_do_resumo else _filtros_do_pedido(body)
     if (f := _filtro_busca(body.busca)) is not None:
         filtros.append(f)
-    elif body.mostrar == "pedidos" or _filtros_do_pedido(body):
+    elif body.mostrar == "pedidos" or do_pedido:
         # O Painel é dos PEDIDOS de garantia (28/10/2026); a busca acha todas
         # (o cliente que liga e ainda não tem pedido).
         filtros.append(garantia_pedido.filtro_pedido())
-    filtros.extend(_filtros_do_pedido(body))
+    filtros.extend(_vendidas_do_periodo(body) if linha_do_resumo else do_pedido)
     if body.com_conversa:
         filtros.append(
             select(GarantiaConversa.garantia_id)
             .where(GarantiaConversa.garantia_id == Garantia.id)
             .exists()
         )
-    total = (
-        await session.execute(select(func.count()).select_from(Garantia).where(*filtros))
-    ).scalar_one()
-    ordem = [Garantia.criado_em.desc(), Garantia.id.desc()]
-    if body.ordem == "atividade":
-        # A vista "Conversas": a garantia com mensagem mais nova em cima (como
-        # a Caixa do Atendimento); sem conversa, pela data de cadastro.
-        ultima = (
-            select(func.max(AtendimentoConversa.ultima_mensagem_em))
-            .join(GarantiaConversa, GarantiaConversa.conversa_id == AtendimentoConversa.id)
-            .where(GarantiaConversa.garantia_id == Garantia.id)
-            .scalar_subquery()
-        )
-        ordem = [ultima.desc().nulls_last(), *ordem]
-    garantias = list(
-        (
-            await session.execute(
-                select(Garantia)
-                .where(*filtros)
-                .order_by(*ordem)
-                .limit(body.limite)
-                .offset(body.offset)
-            )
-        ).scalars()
+    mapa = await garantia_resumo.mapa_das_linhas(session)
+    do_departamento = (
+        _entre(mapa.ids_do_departamento(body.departamento)) if body.departamento else None
     )
+    if do_departamento is not None:
+        filtros.append(do_departamento)
+    if body.produto:
+        filtros.append(_entre(mapa.ids_da_linha(body.produto)))
+    # Quem está em atendimento agora, entre as que a pessoa enxerga (as abas
+    # contam; a aba Atendimento lista; a linha leva o selo e o aparelho).
+    vivas = [escopo] if escopo is not None else []
+    leitura = await garantia_atendimento.em_atendimento(session, vivas, dia, tabela=mapa.tabela)
+    em_aberto = leitura.em_aberto
+    if body.em_atendimento:
+        filtros.append(_entre(em_aberto))
+        todas = list((await session.execute(select(Garantia).where(*filtros))).scalars())
+        todas.sort(key=lambda g: garantia_atendimento.urgencia(em_aberto[g.id], g.id))
+        total = len(todas)
+        garantias = todas[body.offset : body.offset + body.limite]
+    else:
+        total = (
+            await session.execute(select(func.count()).select_from(Garantia).where(*filtros))
+        ).scalar_one()
+        ordem = [Garantia.criado_em.desc(), Garantia.id.desc()]
+        if body.ordem == "atividade":
+            # A vista "Conversas": a garantia com mensagem mais nova em cima
+            # (como a Caixa do Atendimento); sem conversa, pela data de cadastro.
+            ultima = (
+                select(func.max(AtendimentoConversa.ultima_mensagem_em))
+                .join(GarantiaConversa, GarantiaConversa.conversa_id == AtendimentoConversa.id)
+                .where(GarantiaConversa.garantia_id == Garantia.id)
+                .scalar_subquery()
+            )
+            ordem = [ultima.desc().nulls_last(), *ordem]
+        garantias = list(
+            (
+                await session.execute(
+                    select(Garantia)
+                    .where(*filtros)
+                    .order_by(*ordem)
+                    .limit(body.limite)
+                    .offset(body.offset)
+                )
+            ).scalars()
+        )
+    sem_garantia = None
+    if body.busca and not total and not cpf:
+        sem_garantia = await _pedido_sem_garantia(session, body.busca, scope, user)
     resposta = GarantiaListaOut(
-        itens=await _linhas(session, garantias, dia, user, com_aparelho=True),
+        itens=await _linhas(
+            session, garantias, dia, user, com_aparelho=True, mapa=mapa, leitura=leitura
+        ),
         total=total,
-        indicadores=await _indicadores(session, escopo, dia),
+        indicadores=await _indicadores(session, escopo, dia, do_departamento),
         hoje=dia,
+        abas=await _abas(session, escopo, mapa, em_aberto),
+        pedido_sem_garantia=sem_garantia,
     )
     if cpf:
         await _registrar_busca_por_cpf(session, user, cpf, escopo, "busca na lista")
@@ -1106,9 +1344,7 @@ async def cadastrar(
     svc.aplicar_entrega(g, entrega)
     g.entrega_verificada_em = datetime.now(UTC)
     # Quem cadastra à mão atende um pedido de garantia.
-    garantia_pedido.marcar_pela_pessoa(
-        g, g.entrega_verificada_em, garantia_pedido.ORIGEM_MANUAL
-    )
+    garantia_pedido.marcar_pela_pessoa(g, g.entrega_verificada_em, garantia_pedido.ORIGEM_MANUAL)
     session.add(g)
     try:
         await session.flush()
@@ -1701,9 +1937,7 @@ async def marcar_pedido(
             return await _detalhe(session, g, user)
         g.nao_solicitada_em = agora
         g.nao_solicitada_por = user.id
-        svc.registrar_log(
-            session, g.id, "tirou_pedido", user, detalhe="não é pedido de garantia"
-        )
+        svc.registrar_log(session, g.id, "tirou_pedido", user, detalhe="não é pedido de garantia")
     g.atualizado_em = agora
     g.atualizado_por = user.id
     await session.commit()

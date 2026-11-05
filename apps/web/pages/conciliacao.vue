@@ -120,7 +120,8 @@ type Versao = Record<string, number | string | null | undefined>
 type LinhaComparativo = { chave: string; rotulo: string; previsto: number | null; real: number | null; dif: number | null; estilo: string }
 type Comparativo = { linhas: LinhaComparativo[]; real_rotulo: string; rodape: string | null; comparar: boolean; nota: string | null; frete_liquido_loja: number | null }
 type FretePago = { fonte: string; servico: string | null; status: string | null; rastreio: string | null; preco: number | null; desconto: number | null; conferencia: number | null; frete_pago: number | null; pago_em: string | null; postado_em: string | null; cancelado_em: string | null }
-type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'extrato', Versao>; comparativo: Comparativo; movimentos: Movimento[]; frete_pago?: FretePago[] }
+type Troca = { papel: 'antigo' | 'novo'; outro: Pedido | null; venda_inteira: number | null; falta_liberar?: boolean }
+type RaioX = { pedido: Pedido; versoes: Record<'bling' | 'venda' | 'fatura' | 'extrato', Versao>; comparativo: Comparativo; movimentos: Movimento[]; frete_pago?: FretePago[]; troca?: Troca | null }
 
 const { api } = useApi()
 const canEdit = useCan('conciliacao', 'edit')
@@ -171,6 +172,10 @@ const dataFiltro = ref<'pedido' | 'liberacao'>('pedido')
 const situacao = ref('')
 const etapa = ref('')
 const q = ref('')
+// 05/11 (botão Conciliação do histórico do chamado): pedido que veio no link em
+// `?q=`. Achou, vai pra loja dele com o Raio-X aberto; não achou, avisa por quê.
+const pedidoDoLink = ref('')
+const avisoPedido = ref('')
 const page = ref(1)
 const SIZE = 100
 const itens = ref<Pedido[]>([])
@@ -418,6 +423,7 @@ async function carregar() {
     itens.value = r.itens
     total.value = r.total
     resumo.value = r.resumo
+    if (pedidoDoLink.value) abrirPedidoDoLink()
     if (selecionado.value && !itens.value.some((i) => i.pedido_bling === selecionado.value?.pedido_bling)) {
       raioxSeq++ // Raio-X em voo de um pedido que saiu da lista não vale mais
       selecionado.value = null
@@ -429,6 +435,19 @@ async function carregar() {
   } finally {
     if (seq === carregarSeq) loading.value = false
   }
+}
+
+function abrirPedidoDoLink() {
+  const pedido = pedidoDoLink.value
+  pedidoDoLink.value = ''
+  const p = itens.value.find((i) => i.pedido_bling === pedido)
+  if (!p) {
+    const desde = inicioDaAba.value ? ` Ela só tem pedidos desde ${fmtDia(`${inicioDaAba.value}T12:00:00`)}.` : ''
+    avisoPedido.value = `O pedido ${pedido} não está na Conciliação.${desde}`
+    return
+  }
+  irParaLoja(contaDoPedido(p))
+  abrir(p)
 }
 
 async function abrir(p: Pedido) {
@@ -634,6 +653,7 @@ function extrasTitulo(p: Pedido) {
 }
 
 function limpar() {
+  avisoPedido.value = ''
   situacao.value = ''
   etapa.value = ''
   q.value = ''
@@ -691,6 +711,10 @@ if (typeof q0.loja === 'string') {
   }
 }
 if (typeof q0.situacao === 'string') situacao.value = q0.situacao
+if (typeof q0.q === 'string' && q0.q.trim()) {
+  q.value = q0.q.trim()
+  pedidoDoLink.value = q.value
+}
 if (typeof q0.etapa === 'string') etapa.value = q0.etapa
 if (q0.visao === 'extrato') {
   extratoDia.value = diaValido(q0.dia) ? q0.dia : '' // 16/10, revisão: valor inválido é ignorado (cai em ontem)
@@ -785,6 +809,7 @@ await carregar()
     <MargemPainel v-if="visao === 'margem'" embutido />
 
     <template v-if="visao === 'pedidos'">
+    <div v-if="avisoPedido" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:bg-amber-950/20 dark:text-amber-300">{{ avisoPedido }}</div>
     <div class="flex flex-wrap items-center gap-2 text-xs">
       <label class="inline-flex items-center gap-1 rounded-md border bg-card px-2 py-1">
         <span class="font-semibold text-muted-foreground">Loja</span>
@@ -979,6 +1004,18 @@ await carregar()
             <span>Liberado {{ fmtDia(raiox.pedido.liberado_em) }}<span v-if="raiox.pedido.previsao_liberacao && !raiox.pedido.liberado_em && raiox.pedido.situacao !== 'cancelado'"> (prev. {{ fmtDia(raiox.pedido.previsao_liberacao) }})</span></span>
             <span>Bling: {{ raiox.pedido.situacao_bling || '—' }}</span>
             <span><span class="rounded px-1.5 py-0.5 font-bold" :class="sitCls(raiox.pedido.situacao)">● {{ raiox.pedido.situacao_label }}</span> <span class="rounded px-1.5 py-0.5 font-bold" :class="etapaCls(raiox.pedido.etapa)">{{ raiox.pedido.etapa_label }}</span></span>
+          </div>
+          <div v-if="raiox.troca" class="rounded border border-amber-300 bg-amber-50 px-2 py-1.5 dark:border-amber-800 dark:bg-amber-950/30">
+            <div class="font-bold text-amber-800 dark:text-amber-300">Troca no Mercado Livre</div>
+            <template v-if="raiox.troca.outro">
+              <div>
+                {{ raiox.troca.papel === 'antigo' ? 'Este é o pedido do produto que voltou. O produto novo está no pedido' : 'Este é o pedido do produto novo. O produto que voltou está no pedido' }}
+                <button type="button" class="font-bold underline" @click="abrir(raiox.troca.outro)">{{ raiox.troca.outro.pedido_bling }}</button>.
+                A tela do ML mostra só o pagamento novo.
+              </div>
+              <div class="font-bold">Venda inteira: {{ fmtMoney(raiox.troca.venda_inteira) }}<span v-if="raiox.troca.falta_liberar" class="font-normal text-muted-foreground"> (conta o previsto do que ainda não liberou)</span></div>
+            </template>
+            <div v-else>O ML criou um pedido novo para esta troca, mas ele ainda não está no painel.</div>
           </div>
           <table class="w-full border-collapse">
             <thead class="bg-muted text-[10px] uppercase text-muted-foreground">

@@ -7,6 +7,14 @@ envio, rascunhos, exclusão ou configurações. Ser responsável pela caixa ou t
 apenas permissões antigas de leitor não abre a Central. Revogar a nova permissão
 fecha também os links diretos. O conector do Tuta continua sincronizando.
 
+Desde 05/11/2026, `atendimento_email_operacao` com **ver + editar** permite
+responder, compor, encaminhar, anexar arquivos e gerir os próprios rascunhos e
+envios nas caixas já autorizadas. **Excluir** também libera excluir e restaurar
+mensagens pela **Lixeira desta caixa**. Essa concessão não altera o papel da
+pessoa, as lojas, as caixas ou o acesso às configurações e credenciais. A
+permissão de leitura e as permissões antigas, sozinhas, continuam sem enviar.
+O conector revalida a concessão antes de despachar cada mensagem.
+
 A aba **E-mail → Administração** fica disponível para administradores que
 podem operar o Atendimento. As regras abaixo controlam mensagens vinculadas
 às lojas e vendas; elas não concedem acesso à caixa completa.
@@ -52,9 +60,11 @@ controla o que cada pessoa consegue ler no DaVinci.
 
 ## Lixeira do DaVinci
 
-No detalhe da mensagem em **Caixas**, um administrador pode escolher
+No detalhe da mensagem em **Caixas**, um administrador ou operador com
+a permissão de exclusão pode escolher
 **Excluir do DaVinci**, conferir a mensagem selecionada e informar um motivo.
-Essa exclusão é reversível em **Administração → Lixeira do DaVinci**.
+Essa exclusão é reversível em **Lixeira desta caixa**. Administradores também
+podem restaurar em **Administração → Lixeira do DaVinci**.
 
 O original e as pastas do Tuta não são alterados. A sincronização e o
 reprocessamento não desfazem uma exclusão local. O conteúdo cifrado permanece

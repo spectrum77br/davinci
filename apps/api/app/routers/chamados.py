@@ -11,7 +11,7 @@ app.services.chamados; aqui é CRUD + histórico + anexos + os botões.
 import hashlib
 import secrets
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated
 from uuid import UUID
@@ -49,6 +49,7 @@ from app.models import (
     ChamadoLeitor,
     ChamadoMensagem,
     ChamadoPedido,
+    ChamadoRevisaoDia,
     DevolucaoAnexo,
     Devolution,
     Logistica,
@@ -116,6 +117,10 @@ from app.schemas.chamados import (
     JuridicoIn,
     JuridicoOut,
     ResolverIn,
+    RevisaoDiaOut,
+    RevisaoDiasOut,
+    RevisaoIn,
+    RevisaoOut,
     SituacoesOut,
 )
 from app.services import chamados as svc
@@ -125,6 +130,7 @@ from app.services import (
     chamados_ia_aviso,
     chamados_juridico,
     chamados_leitura,
+    chamados_revisao,
     devolucao_exclusao,
 )
 from app.services.devolution_delete import (
@@ -304,6 +310,7 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
         for u in (await session.execute(select(User).where(User.id.in_(quem_ids)))).scalars():
             nomes[u.id] = u.name or u.email
 
+    hoje = chamados_revisao.hoje_sp()
     out: list[ChamadoOut] = []
     for r in rows:
         msgs = mensagens_do_caso(r)
@@ -355,6 +362,12 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
                 if r.status_plataforma == svc.STATUS_ENCERRADO
                 else None
             ),
+        )
+        o.revisao_estado = chamados_revisao.estado_da_revisao(
+            r,
+            ultima_resposta_at=o.ultima_resposta_at,
+            ultima_resposta_direcao=o.ultima_resposta_direcao,
+            hoje=hoje,
         )
         o.auto_proximo_envio_at = svc.auto_proximo_envio(r)
         o.anexos_auto = anexos_auto.get(r.id, [])
@@ -582,6 +595,92 @@ async def delete_anexo(
 # ------------------------------------------------------------- listagem / CRUD
 
 
+async def _abertos_com_estado(session: AsyncSession, conds: list) -> list[ChamadoOut]:
+    """Os chamados abertos com o status da aba e o estado da revisão calculados."""
+    rows = list(
+        (await session.execute(select(Chamado).where(Chamado.resolvido.is_(False), *conds)))
+        .scalars()
+        .all()
+    )
+    return await _to_out(session, rows)
+
+
+async def fotografar_revisao(session: AsyncSession) -> dict:
+    """Grava como a revisão de hoje está agora (cron de hora em hora)."""
+    resumo = chamados_revisao.resumir_dia(await _abertos_com_estado(session, []))
+    await chamados_revisao.gravar_foto(session, chamados_revisao.hoje_sp(), resumo)
+    return resumo
+
+
+@router.get("/dias", response_model=RevisaoDiasOut)
+async def dias_da_revisao(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "view"))],
+    limite: int = Query(8, ge=1, le=31),
+) -> RevisaoDiasOut:
+    """Painel Dias (Vinicius 05/11/2026): quantos abriram e fecharam em cada dia e como
+    ficou a revisão. Abertos, novos e concluídos saem de `created_at`/`resolvido_at`,
+    com a cerca da equipe. A foto é da empresa inteira, então quem tem equipe vê a
+    revisão só de hoje (calculada com a cerca); hoje é sempre ao vivo."""
+    equipe = await _clausula_do_usuario(session, user)
+    conds = [] if equipe is None else [equipe]
+    hoje = chamados_revisao.hoje_sp()
+    dias = [hoje - timedelta(days=i) for i in range(limite)]
+
+    def dia_sp(quando: datetime) -> date:
+        return quando.astimezone(svc.SAO_PAULO).date()
+
+    pares = [
+        (dia_sp(criado), (dia_sp(fechado) if fechado else date.min) if resolvido else None)
+        for criado, resolvido, fechado in (
+            await session.execute(
+                select(Chamado.created_at, Chamado.resolvido, Chamado.resolvido_at).where(*conds)
+            )
+        ).all()
+    ]
+
+    def abertos_em(dia: date) -> int:
+        return sum(
+            1 for aberto, fechado in pares if aberto <= dia and (fechado is None or fechado > dia)
+        )
+
+    fotos: dict[date, dict] = {}
+    if equipe is None:
+        for foto in (
+            await session.execute(select(ChamadoRevisaoDia).where(ChamadoRevisaoDia.dia.in_(dias)))
+        ).scalars():
+            fotos[foto.dia] = {
+                "conferido": foto.conferido,
+                "revisar": foto.revisar,
+                "fixo": foto.fixo,
+                "falta": foto.falta,
+                "prazos": foto.prazos,
+                "por_status": foto.por_status,
+                "faltaram": foto.faltaram,
+            }
+    fotos[hoje] = chamados_revisao.resumir_dia(await _abertos_com_estado(session, conds))
+
+    saida = [
+        RevisaoDiaOut(
+            dia=dia,
+            abertos=abertos_em(dia),
+            novos=sum(1 for aberto, _ in pares if aberto == dia),
+            concluidos=sum(1 for _, fechado in pares if fechado == dia),
+            tem_registro=dia in fotos,
+            **fotos.get(dia, {}),
+        )
+        for dia in dias
+    ]
+    novos = sum(d.novos for d in saida)
+    return RevisaoDiasOut(
+        dias=saida,
+        novos=novos,
+        concluidos=sum(d.concluidos for d in saida),
+        novos_por_dia=round(novos / limite, 1),
+        saldo=saida[0].abertos - abertos_em(dias[-1] - timedelta(days=1)),
+    )
+
+
 @router.get("", response_model=ChamadoPage)
 async def list_chamados(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -669,6 +768,17 @@ async def list_chamados(
     if cond_plataforma is not None:
         q_contas = q_contas.where(cond_plataforma)
     contas = [c for c in (await session.execute(q_contas)).scalars() if c]
+    # Abas de plataforma (05/11/2026): os mesmos filtros, menos o de plataforma.
+    plataforma_totais: dict[str, int] = {}
+    nome_plataforma = func.lower(func.trim(func.coalesce(Chamado.plataforma, "")))
+    for p, n in await session.execute(
+        select(nome_plataforma, func.count())
+        .where(*[c for c in conds if c is not cond_plataforma])
+        .group_by(nome_plataforma)
+    ):
+        if p:
+            canonica = svc.plataforma_canonica(p)
+            plataforma_totais[canonica] = plataforma_totais.get(canonica, 0) + int(n)
     return ChamadoPage(
         items=await _to_out(session, rows),
         total=total,
@@ -676,6 +786,7 @@ async def list_chamados(
         offset=offset,
         plataformas=plataformas,
         contas=contas,
+        plataforma_totais=plataforma_totais,
     )
 
 
@@ -1516,6 +1627,57 @@ async def reler_na_plataforma(
             422, detail={"code": r.get("erro") or "chamado_sem_api", "plataforma": r.get("plataforma")}
         )
     return await _one_out(session, ch)
+
+
+@router.post("/{chamado_id}/revisao", response_model=RevisaoOut)
+async def marcar_revisao(
+    chamado_id: UUID,
+    body: RevisaoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+) -> RevisaoOut:
+    """05/11/2026 (Vinicius): coluna Revisão — Conferido e Revisar valem no dia,
+    Fixo até a data. A marca vale pro CASO: as linhas abertas irmãs (mesma consulta
+    do ML) levam junto, senão ele teria de marcar pedido por pedido. Concluído não
+    entra na revisão do dia: 422 `revisao_chamado_concluido`."""
+    ch = await _get_da_equipe(session, user, chamado_id)
+    if ch.resolvido:
+        raise HTTPException(422, detail={"code": "revisao_chamado_concluido"})
+    hoje = chamados_revisao.hoje_sp()
+    if body.tipo == chamados_revisao.FIXO:
+        if body.ate is None or body.ate <= hoje:
+            raise HTTPException(422, detail={"code": "revisao_data_invalida"})
+        if not body.motivo:
+            raise HTTPException(422, detail={"code": "revisao_motivo_vazio"})
+    linhas = [ch]
+    ids = await _ids_do_caso(session, ch)
+    if len(ids) > 1:
+        linhas += list(
+            (
+                await session.execute(
+                    select(Chamado)
+                    .where(Chamado.id.in_(ids), Chamado.id != ch.id, Chamado.resolvido.is_(False))
+                    .order_by(Chamado.created_at)
+                )
+            ).scalars()
+        )
+    for linha in linhas:
+        session.add(
+            chamados_revisao.marcar(
+                linha,
+                tipo=body.tipo,
+                ate=body.ate,
+                motivo=body.motivo,
+                autor_nome=_autor(user),
+                autor_id=user.id,
+                hoje=hoje,
+            )
+        )
+    await session.commit()
+    for linha in linhas:
+        await session.refresh(linha)
+    logger.info("chamado_revisao", chamado_id=str(ch.id), tipo=body.tipo, linhas=len(linhas))
+    return RevisaoOut(itens=await _to_out(session, linhas))
 
 
 @router.post("/{chamado_id}/instrucao", response_model=ChamadoOut)
