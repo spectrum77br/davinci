@@ -284,9 +284,11 @@ function linhasCom({ detalhe, abas, ativa }) {
   const abasDados = Vue.ref(abas)
   const abaAtual = Vue.computed(() => A.abasVisiveis(abasDados.value).find((a) => a.chave === ativa) ?? null)
   const naAbaDaConversa = Vue.computed(() => !abaAtual.value || abaAtual.value.chave === abasDados.value?.aba_da_conversa)
-  return new Function('computed', 'detalhe', 'agora', 'rotuloDia', 'abasDados', 'abaAtual', 'naAbaDaConversa', 'conversaDaAba', 'rotuloDaOrigem', js)(
+  return new Function('computed', 'detalhe', 'agora', 'rotuloDia', 'abasDados', 'abaAtual', 'naAbaDaConversa', 'conversaDaAba', 'rotuloDaOrigem', 'filas', 'absorvidas', 'respondePorOutra', 'baloesVisiveis', 'normalizarTexto', js)(
     Vue.computed, Vue.ref(detalhe), Vue.ref(Date.parse('2026-10-02T15:00:00Z')), (iso) => `dia ${iso.slice(0, 10)}`,
     abasDados, abaAtual, naAbaDaConversa, A.conversaDaAba, A.rotuloDaOrigem,
+    // A fila de envio (06/11/2026) vazia: os balões estão no atendimento-fila-envio.cjs.
+    new Map(), new Set(), Vue.ref(false), () => [], (t) => t,
   ).value
 }
 const resumo = (linhas) => linhas.map((l) => (l.tipo === 'dia' ? l.texto : l.tipo === 'msg' ? `${l.m.id}${l.de ? `<${l.de}` : ''}` : l.tipo === 'origem' ? `[${l.texto}]` : l.h.id))

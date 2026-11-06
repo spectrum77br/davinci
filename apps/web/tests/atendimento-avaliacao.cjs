@@ -49,6 +49,10 @@ const api = (rel) => fs.readFileSync(path.resolve(__dirname, '../../api/app', re
 const aval = sfc('../components/AtendimentoAvaliacao.vue')
 const A = exportsDe(aval.descriptor)
 const P = exportsDe(sfc('../components/AtendimentoPlataforma.vue').descriptor)
+// A fila de envio (06/11/2026): só as regras puras dela, sem import nenhum.
+const filaMod = { exports: {} }
+new Function('module', 'exports', transpile(fs.readFileSync(path.resolve(__dirname, '../lib/atendimentoFilaEnvio.ts'), 'utf8')))(filaMod, filaMod.exports)
+const F = filaMod.exports
 const conversa = sfc('../components/AtendimentoConversa.vue')
 const lista = sfc('../components/AtendimentoLista.vue')
 const L = exportsDe(lista.descriptor)
@@ -547,6 +551,7 @@ async function testarCaixaDeBaixo() {
   function montar({ canal, confirmar }) {
     const perguntas = []
     const chamadas = []
+    const naFila = []
     const detalhe = Vue.ref({ conversa: { id: 'conv-x', canal, plataforma: 'shopee' }, mensagens: [], rascunho: null })
     const x = new Function(
       'detalhe', 'podeEnviar', 'lacunas', 'erroEnvio', 'titulo', 'texto', 'baseRascunhoId', 'ultimaVista',
@@ -556,6 +561,8 @@ async function testarCaixaDeBaixo() {
       'extrasDoEmail', 'CODIGOS_CONFIRMAVEIS',
       // Reclamação do ML (28/10/2026): o destino da caixa — nenhum fora dela.
       'destinosReclamacao', 'destinoCaixa', 'mostrarAbaDoDestino',
+      // A fila de envio (06/11/2026): o chat entra nela; a avaliação, nunca.
+      'filaVale', 'porNaFila',
       js,
     )(
       detalhe, Vue.ref(true), Vue.ref([]), Vue.ref(null), () => 'Fulano', Vue.ref('  Obrigado pela avaliação!  '), Vue.ref(null), () => null,
@@ -565,8 +572,9 @@ async function testarCaixaDeBaixo() {
       (t) => { perguntas.push(t); return confirmar },
       () => ({}), new Set(['remetente_nao_responde', 'ja_respondido_pela_caixa']),
       Vue.ref([]), Vue.ref(null), async () => {},
+      Vue.ref(F.filaValeNoCanal(canal)), () => { naFila.push(canal) },
     )
-    return { ...x, perguntas, chamadas }
+    return { ...x, perguntas, chamadas, naFila }
   }
   // Desistiu: nada sai.
   {
@@ -589,12 +597,13 @@ async function testarCaixaDeBaixo() {
     assert.equal(m.chamadas.length, 2)
     assert.equal(m.chamadas[1].opts.body.confirmar, true)
   }
-  // Chat: sem pergunta.
+  // Chat: sem pergunta, e entra na fila de envio (06/11/2026, atendimento-fila-envio.cjs).
   {
     const m = montar({ canal: 'chat', confirmar: false })
     await m.enviar()
     assert.deepEqual(m.perguntas, [])
-    assert.equal(m.chamadas.length, 1)
+    assert.deepEqual(m.naFila, ['chat'])
+    assert.equal(m.chamadas.length, 0, 'quem manda é a fila')
   }
   // Ctrl+Enter passa pelo enviar(); o "tentar de novo" pergunta antes da API.
   assert.match(trecho(setup, 'function aoTeclar', '\n}'), /void enviar\(\)/)

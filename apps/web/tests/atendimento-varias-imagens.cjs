@@ -74,6 +74,8 @@ const CHAVE_ANEXAR = Symbol('anexarNaCaixa')
 function montar({ envio, respostas = [], confirmar = true, modo = 'responder' }) {
   const chamadas = []
   const providos = new Map()
+  const fins = []
+  let andou = 0
   const toasts = { ok: [], erro: [], aviso: [] }
   const detalhe = Vue.ref({ conversa: { id: 'c1', plataforma: envio.plataforma || 'shopee', somente_leitura: false }, mensagens: [{ id: '00000000-0000-4000-8000-000000000001', criada_em: '2026-11-03T10:00:00Z' }] })
   let n = 0
@@ -85,7 +87,7 @@ function montar({ envio, respostas = [], confirmar = true, modo = 'responder' })
   }
   const nomes = ['ref', 'computed', 'onBeforeUnmount', 'envioFoto', 'motivoSemFoto', 'MAX_FOTO', 'TIPOS_FOTO', 'escolherAnexos', 'toasts', 'modoCaixa', 'respondePorOutra', 'canalExterno', 'props', 'detalhe',
     'tituloDaNf', 'painelCarregando', 'LEGENDA_NF', 'erroDaApi', 'api', 'destinosReclamacao', 'destinoCaixa', 'rolarProFim', 'erroEnvioLegivel', 'statusDoErro', 'ultimaVista', 'RE_UUID', 'aberta', 'enviandoIds', 'envioSimulado', 'carregar', 'confirm', 'FormData',
-    'provide', 'CHAVE_ANEXAR_NA_CAIXA']
+    'provide', 'CHAVE_ANEXAR_NA_CAIXA', 'fimDoEnvioDeAnexos', 'andarFila']
   const valores = [Vue.ref, Vue.computed, () => {}, Vue.ref({ pode: true, max_bytes: 10 * 1024 * 1024, ...envio }), Vue.ref(''), 10 * 1024 * 1024, TIPOS, C.escolherAnexos,
     { success: (t) => toasts.ok.push(t), error: (t, l) => toasts.erro.push([t, l]), warning: (t, l) => toasts.aviso.push([t, l]) },
     Vue.ref(modo), Vue.ref(false), Vue.ref(false), { canEdit: true, flags: null }, detalhe,
@@ -94,9 +96,9 @@ function montar({ envio, respostas = [], confirmar = true, modo = 'responder' })
     api, Vue.ref([]), Vue.ref(''), () => {}, (e) => `recusou: ${e}`, (e) => e?.status ?? null,
     (d) => d.mensagens[d.mensagens.length - 1].id, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
     (id) => id === 'c1', new Set(), () => false, async () => {}, () => confirmar, FD,
-    (k, v) => providos.set(k, v), CHAVE_ANEXAR]
+    (k, v) => providos.set(k, v), CHAVE_ANEXAR, (_, __, resultado) => fins.push(resultado), () => { andou++ }]
   const t = new Function(...nomes, js)(...valores)
-  return { t, chamadas, toasts, detalhe, providos }
+  return { t, chamadas, toasts, detalhe, providos, fins, andou: () => andou }
 }
 const fotos = (n) => Array.from({ length: n }, (_, i) => ({ name: `f${i + 1}.jpg`, type: 'image/jpeg', size: 500 + i, lastModified: i }))
 
@@ -115,6 +117,9 @@ async function principal() {
     assert.equal(m.chamadas[2].fd.um('ultima_vista_id'), '00000000-0000-4000-8000-000000000102')
     assert.equal(m.t.anexos.value.length, 0, 'tudo saiu: a lista some')
     assert.deepEqual(m.toasts.ok, ['3 anexos enviados'])
+    // O que a fila de texto ouve (06/11/2026, atendimento-fila-envio.cjs): saiu tudo.
+    assert.deepEqual(m.fins, [{ previstos: 3, saidos: 3, restantes: 0 }])
+    assert.equal(m.andou(), 1, 'a fila de texto é avisada, mesmo com a conversa desmontada')
   }
 
   // A 2ª recusada pela plataforma: a 3ª segue; a lista mostra qual falhou e
@@ -130,6 +135,7 @@ async function principal() {
     await m.t.enviarFoto({ so: m.t.anexos.value[1].id })
     assert.deepEqual(m.chamadas.slice(3).map((c) => c.fd.todos('arquivo')), [['f2.jpg']])
     assert.equal(m.t.anexos.value.length, 0)
+    assert.deepEqual(m.fins, [{ previstos: 3, saidos: 2, restantes: 1 }, { previstos: 1, saidos: 1, restantes: 0 }], 'o texto esperando só segue no fim')
   }
 
   // Sem resposta do servidor (pode ter saído): PARA — o resto não vai, e a
@@ -142,6 +148,7 @@ async function principal() {
     assert.deepEqual(m.t.anexos.value.map((a) => a.estado), ['enviada', 'incerta', 'pendente'])
     assert.deepEqual(m.t.aEnviar.value.map((a) => a.arquivo.name), ['f3.jpg'])
     assert.equal(m.toasts.aviso.length, 1)
+    assert.deepEqual(m.fins, [{ previstos: 3, saidos: 1, restantes: 2 }], 'a incerta e a que não foi seguram o texto')
   }
 
   // A trava de repetida do servidor (a mesma imagem há menos de 2 min): não
@@ -154,6 +161,7 @@ async function principal() {
     assert.equal(m.chamadas.length, 2)
     assert.equal(m.t.anexos.value.length, 0)
     assert.deepEqual(m.toasts.ok, ['Anexo enviado'])
+    assert.deepEqual(m.fins, [{ previstos: 2, saidos: 2, restantes: 0 }], 'a repetida já tinha saído: conta como saída')
   }
 
   // Trava que vale para todas (envio desligado): para na 1ª.
