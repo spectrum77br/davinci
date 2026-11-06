@@ -274,6 +274,12 @@ const mesmoPy = (a, b, msg) => {
 
   // Barra de dias restantes (§4.2).
   assert.deepEqual(L.barraPrazo({ fim: '2027-01-07', dias_total: 92, dias_restantes: 92, coberto_hoje: true }), { pct: 100, texto: '92 dias restantes', nivel: 'folga' })
+  // A coluna Garantia em dias (06/11/2026).
+  assert.deepEqual(L.diasDaGarantia({ fim_garantia: '2027-11-05', garantia_meses: 12 }, '2026-11-06'), { texto: '364 dias', tom: 'normal', titulo: 'prazo do produto: 12 meses · até 05/11/27' })
+  assert.equal(L.diasDaGarantia({ fim_garantia: '2026-11-20', garantia_meses: 3 }, '2026-11-06').tom, 'perto')
+  assert.equal(L.diasDaGarantia({ fim_garantia: '2026-11-06', garantia_meses: 3 }, '2026-11-06').texto, 'vence hoje')
+  assert.equal(L.diasDaGarantia({ fim_garantia: '2026-11-05', garantia_meses: 3 }, '2026-11-06').texto, 'vencida há 1 dia')
+  assert.equal(L.diasDaGarantia({ fim_garantia: null, garantia_meses: 12 }, '2026-11-06').texto, 'aguarda entrega')
   assert.equal(L.barraPrazo({ fim: '2027-01-07', dias_total: 92, dias_restantes: 10, coberto_hoje: true }).nivel, 'perto', 'últimos 30 dias')
   assert.equal(L.barraPrazo({ fim: '2027-01-07', dias_total: 92, dias_restantes: 0, coberto_hoje: true }).texto, 'último dia hoje')
   assert.deepEqual(L.barraPrazo({ fim: '2027-01-07', dias_total: 92, dias_restantes: 0, coberto_hoje: false }), { pct: 0, texto: 'terminou em 07/01/2027', nivel: 'acabou' })
@@ -1209,7 +1215,7 @@ async function testarPagina() {
     assert.match(h, /Painel de Garantia — Uranyx/)
     assert.match(h, /data-nova-garantia/)
     const pilulas = [...h.matchAll(/<button\b[^>]*data-departamento="(\w+)"[^>]*>([\s\S]*?)<\/button>/g)].map((x) => [x[1], texto(x[2])])
-    assert.deepEqual(pilulas, [['celular', 'Celular (1.234 garantias)'], ['mala', 'Mala (0 garantias)'], ['eletro', 'Eletro (1 garantia)']])
+    assert.deepEqual(pilulas, [['celular', 'Celular'], ['mala', 'Mala'], ['eletro', 'Eletro']])
     const [celular, mala] = abertura(h, 'data-departamento=')
     assert.match(classe(celular), /\bbg-primary text-primary-foreground border-primary\b/, 'a pílula escolhida')
     assert.match(classe(mala), /\bborder-border hover:bg-muted\b/)
@@ -1271,12 +1277,12 @@ async function testarPagina() {
       const h = await t.h()
       const tabela = (h.match(/<table[^>]*data-tabela-garantias[\s\S]*?<\/table>/) || [])[0] || ''
       const tds = (k) => [...tabela.matchAll(new RegExp(`<td[^>]*data-${k}[^>]*>([\\s\\S]*?)</td>`, 'g'))].map((x) => texto(x[1]))
-      assert.deepEqual(tds('garantia-total'), ['—'])
-      assert.deepEqual(tds('garantia-meses'), ['sem garantia'])
+      assert.deepEqual(tds('garantia'), ['sem garantia'])
+      assert.deepEqual(tds('prazo-garantia'), ['—'])
       assert.ok(!/data-sem-prazo|aria-label="prazo não cadastrado"/.test(tabela), 'sem o alerta de prazo não cadastrado')
       assert.match(tabela, /data-sem-garantia/)
       const cel = (h.match(/<ul[^>]*data-cartoes-garantias[\s\S]*?<\/ul>/) || [])[0] || ''
-      assert.match(texto(cel), /Garantia total — Garantia sem garantia/)
+      assert.match(texto(cel), /Garantia sem garantia Prazo de garantia —/)
       assert.ok(!/prazo não cadastrado|text-amber-700/.test(cel), 'no celular também sem o alerta')
       const linha = texto((h.match(/<p[^>]*data-resumo-linha[^>]*>([\s\S]*?)<\/p>/) || [])[1] || '')
       assert.match(linha, / · 9 expiradas · 2 sem garantia$/)
@@ -1307,7 +1313,7 @@ async function testarPagina() {
     assert.match(h, /id="gar-status"/, 'o Status fica na aba Garantia')
     // As 10 colunas de 06/11/2026, na ordem da especificação.
     const ths = [...h.matchAll(/<th[^>]*>([\s\S]*?)<\/th>/g)].map((x) => texto(x[1]))
-    assert.deepEqual(ths, ['Nome', 'Pedido', 'Plataforma', 'Loja', 'Produto', 'Entrega', 'Garantia total', 'Garantia', 'Status do pedido', 'Atendimento'])
+    assert.deepEqual(ths, ['Nome', 'Pedido', 'Plataforma', 'Loja', 'Produto', 'Entrega', 'Garantia', 'Prazo de garantia', 'Status do pedido', 'Atendimento'])
     const tabela = (h.match(/<table[^>]*data-tabela-garantias[\s\S]*?<\/table>/) || [])[0] || ''
     const tds = (k) => [...tabela.matchAll(new RegExp(`<td[^>]*data-${k}[^>]*>([\\s\\S]*?)</td>`, 'g'))].map((x) => texto(x[1]))
     assert.deepEqual(tds('nome'), ['João Silva', 'Maria Souza'], 'o nome sem o apelido')
@@ -1316,9 +1322,12 @@ async function testarPagina() {
     assert.deepEqual(tds('loja'), ['Loja X', '—'])
     assert.deepEqual(tds('produto'), ['A17 pro max', 'Uranyx C57S AVULSO fora da Tabela'], 'fora da Tabela de Preços: o nome da nota com o aviso')
     assert.deepEqual(tds('entrega'), ['07/10/26', '02/06/26'])
-    assert.deepEqual(tds('garantia-total'), ['07/10/27', '—'])
-    assert.deepEqual(tds('garantia-meses'), ['12 meses', '—'])
-    assert.equal((tabela.match(/data-sem-prazo/g) || []).length, 2, 'sem prazo: o aviso nas duas colunas')
+    // 06/11/2026 ("aqui vai garantia e prazo de garantia, baseado nela"): o prazo do
+    // produto e os dias que faltam por ele (a data final fica no balão).
+    assert.deepEqual(tds('garantia'), ['12 meses', '—'])
+    assert.deepEqual(tds('prazo-garantia'), ['337 dias', '—'])
+    assert.match(tabela, /title="prazo do produto: 12 meses · até 07\/10\/27"/)
+    assert.equal((tabela.match(/data-sem-prazo/g) || []).length, 1, 'sem prazo: o aviso na coluna Garantia')
     assert.deepEqual(tds('status-pedido'), ['Atendido', 'Excluído no Bling'])
     assert.deepEqual(tds('atendimento-sac'), ['US-26-0031 03/11/2026', 'Garantia acionada abrir o caso'], 'sem "Registrar atendimento", sem o Confirmar')
     assert.ok(!/data-confirmar-sac/.test(tabela))

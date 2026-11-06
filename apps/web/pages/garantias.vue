@@ -4,7 +4,7 @@
 // [+ Nova garantia], busca (Nome / CPF / NF / Pedido), Status, Período, os 4
 // indicadores (06/11/2026: Ativas · Vence em 30 dias · Sem prazo cadastrado ·
 // Atendimentos no mês — clicar filtra) e a tabela Nome | Pedido | Plataforma |
-// Loja | Produto | Entrega | Garantia total | Garantia | Status do pedido |
+// Loja | Produto | Entrega | Garantia | Prazo de garantia | Status do pedido |
 // Atendimento. Clicar na linha abre o detalhe (§4.2).
 // Permissões (§6): a página pede "Consultar" (garantias.view); "Cadastrar"
 // (garantias.edit) mostra o + Nova garantia e o Corrigir; o CPF completo só no
@@ -30,7 +30,7 @@
 // Garantia × SAC (06/11/2026, "Painel de Garantia: alterações" v3): o prazo é
 // ÚNICO por produto (Tabela de Preços › Produtos) — sem hardware/software no
 // painel; a Tabela tem as 10 colunas da especificação (Nome sem apelido,
-// Pedido, Plataforma, Loja, Produto, Entrega, Garantia total, Garantia, Status
+// Pedido, Plataforma, Loja, Produto, Entrega, Garantia, Prazo de garantia, Status
 // do pedido no Bling, Atendimento); o atendimento abre SÓ pelo formulário do
 // SAC do site: a linha mostra o protocolo e o botão Confirmar, e o confirmado
 // vira "Garantia acionada" e vai para a aba Atendimento até alguém encerrar
@@ -39,7 +39,7 @@
 // mão. O Resumo perdeu o Status e o "Ver todos os pedidos de garantia".
 import type { Component } from 'vue'
 import type { LocationQueryRaw } from 'vue-router'
-import { AlertCircle, ArrowLeft, BarChart3, Briefcase, Headset, Info, Loader2, Plus, RefreshCw, Search, ShieldCheck, Smartphone, Sparkles, Zap } from 'lucide-vue-next'
+import { AlertCircle, ArrowLeft, BarChart3, Briefcase, ChevronLeft, ChevronRight, Headset, Info, Loader2, Plus, RefreshCw, Search, ShieldCheck, Smartphone, Sparkles, Zap } from 'lucide-vue-next'
 import {
   CARTOES,
   DEPARTAMENTOS,
@@ -64,6 +64,7 @@ import {
   situacaoDoSac,
   tempoEmAberto,
   textoMeses,
+  diasDaGarantia,
   textoPedidoSemGarantia,
   vendidoSemGarantia,
   type Aba,
@@ -117,6 +118,14 @@ const departamento = ref<Departamento>(departamentoDaUrl(route.query.dept))
 // números das pílulas e das abas. Vem com a lista.
 const abas = ref<Record<Departamento, ContagemDaAba> | null>(null)
 const contagem = computed(() => abas.value?.[departamento.value] ?? null)
+// A coluna Garantia em dias: vencida em vermelho, 30 dias ou menos em âmbar,
+// "aguarda entrega" apagado (as cores ficam aqui: o Tailwind não lê lib/).
+const TOM_DIAS = {
+  normal: '',
+  perto: 'text-amber-700 dark:text-amber-300',
+  vencida: 'text-destructive',
+  espera: 'text-muted-foreground',
+} as const
 const NOTA_MALA = 'A garantia do DaVinci hoje é só da linha Uranyx (celular e eletro).'
 
 // A lista de Conversas na aba Garantia: aberta pela linha do Resumo (o
@@ -170,6 +179,19 @@ const sacSemPedidoAberto = ref(false)
 let casoParaAbrir: GarantiaLinha | null = null
 const carregando = ref(false)
 const carregandoMais = ref(false)
+// A Tabela da aba Garantia em PÁGINAS (06/11/2026, Eduardo: "deixe paginado
+// também a parte garantias, não mais 100 mais 100"). A lista de conversas
+// (aba Atendimento, produto aberto) continua com o "mais N".
+const pagina = ref(1)
+const paginado = computed(() => aba.value === 'garantia' && !emConversas.value)
+const totalPaginas = computed(() => Math.max(1, Math.ceil(total.value / LIMITE_PAGINA)))
+const tabelaTopo = ref<HTMLElement | null>(null)
+function irParaPagina(p: number) {
+  const alvo = Math.min(Math.max(1, p), totalPaginas.value)
+  if (alvo === pagina.value || carregando.value) return
+  pagina.value = alvo
+  void carregar().then(() => tabelaTopo.value?.scrollIntoView({ block: 'start', behavior: 'smooth' }))
+}
 const carregado = ref(false)
 const erro = ref('')
 let geracao = 0
@@ -184,9 +206,18 @@ async function carregar(opcoes?: { trocouFiltro?: boolean }) {
   carregando.value = true
   erro.value = ''
   try {
-    const limite = trocouFiltro ? LIMITE_PAGINA : Math.min(500, Math.max(LIMITE_PAGINA, itens.value.length))
-    const r = await api<GarantiaLista>('/api/garantias/lista', { method: 'POST', body: corpo(0, limite) })
+    if (trocouFiltro) pagina.value = 1
+    const porPagina = paginado.value
+    const limite = porPagina || trocouFiltro ? LIMITE_PAGINA : Math.min(500, Math.max(LIMITE_PAGINA, itens.value.length))
+    const offset = porPagina ? (pagina.value - 1) * LIMITE_PAGINA : 0
+    const r = await api<GarantiaLista>('/api/garantias/lista', { method: 'POST', body: corpo(offset, limite) })
     if (g !== geracao) return
+    // A lista encolheu (outra pessoa mexeu, a garantia saiu do filtro) e a
+    // página passou do fim: volta para a última que existe.
+    if (porPagina && pagina.value > 1 && !r.itens.length && r.total) {
+      pagina.value = Math.max(1, Math.ceil(r.total / LIMITE_PAGINA))
+      return void carregar()
+    }
     itens.value = r.itens
     total.value = r.total
     indicadores.value = r.indicadores
@@ -698,7 +729,8 @@ function aoVincularSac() {
         @click="trocarDepartamento(d.chave)"
       >
         <component :is="ICONE_DEPARTAMENTO[d.chave]" class="h-4 w-4" />
-        {{ d.nome }}<template v-if="abas"> ({{ numeroBR(abas[d.chave]?.garantias ?? 0) }} {{ abas[d.chave]?.garantias === 1 ? 'garantia' : 'garantias' }})</template>
+        <!-- Só o nome (06/11/2026, Eduardo: "tire a quantidade de garantias da categoria"). -->
+        {{ d.nome }}
       </button>
     </div>
 
@@ -937,7 +969,7 @@ function aoVincularSac() {
       <template v-else-if="carregado">
         <!-- tabela (tela larga): as 10 colunas de 06/11/2026, na ordem da especificação -->
         <div class="hidden overflow-x-auto rounded-lg border md:block">
-          <table class="w-full text-sm" data-tabela-garantias>
+          <table ref="tabelaTopo" class="w-full text-sm" data-tabela-garantias>
             <thead class="bg-muted">
               <tr class="text-left">
                 <th class="px-3 py-2.5 font-medium" title="o nome do comprador na venda, sem o apelido">Nome</th>
@@ -946,8 +978,8 @@ function aoVincularSac() {
                 <th class="px-3 py-2.5 font-medium" title="a conta que vendeu">Loja</th>
                 <th class="px-3 py-2.5 font-medium" title="o nome do produto na Tabela de Preços › Produtos, pelo SKU">Produto</th>
                 <th class="px-3 py-2.5 font-medium" title="a data de entrega (o início da garantia)">Entrega</th>
-                <th class="whitespace-nowrap px-3 py-2.5 font-medium" title="a data final da garantia: entrega + o prazo do produto">Garantia total</th>
-                <th class="px-3 py-2.5 font-medium" title="o prazo do produto, em meses (Tabela de Preços › Produtos)">Garantia</th>
+                <th class="px-3 py-2.5 font-medium" title="o prazo da garantia do produto (Tabela de Preços › Produtos)">Garantia</th>
+                <th class="whitespace-nowrap px-3 py-2.5 font-medium" title="os dias que faltam da garantia, contados da entrega pelo prazo do produto (a data final fica no balão)">Prazo de garantia</th>
                 <th class="whitespace-nowrap px-3 py-2.5 font-medium" title="a situação do pedido no Bling">Status do pedido</th>
                 <th class="px-3 py-2.5 font-medium" title="o SAC do site: protocolo e Confirmar; confirmado, Garantia acionada">Atendimento</th>
               </tr>
@@ -973,16 +1005,16 @@ function aoVincularSac() {
                   <span v-if="g.produto_nome && g.produto_na_tabela === false" class="ml-1 inline-flex items-center gap-0.5 rounded-full border border-amber-300 bg-amber-50 px-1.5 py-px text-[10px] text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-300" title="o SKU não está na Tabela de Preços › Produtos: o nome é o da nota fiscal" data-produto-fora>fora da Tabela</span>
                 </td>
                 <td class="whitespace-nowrap px-3 py-2.5 tabular-nums" data-entrega>{{ g.data_inicio ? dataCurta(g.data_inicio) : g.entregue_sem_data ? 'sem data' : '—' }}</td>
-                <td class="whitespace-nowrap px-3 py-2.5 tabular-nums" data-garantia-total>
-                  <template v-if="g.fim_garantia">{{ dataCurta(g.fim_garantia) }}</template>
-                  <template v-else-if="vendidoSemGarantia(g)">—</template>
-                  <span v-else-if="!g.garantia_meses" class="text-amber-700 dark:text-amber-300" title="o produto não tem o prazo da garantia na Tabela de Preços › Produtos" data-sem-prazo>— <AlertCircle class="inline size-3.5" aria-label="prazo não cadastrado" /></span>
-                  <template v-else>—</template>
-                </td>
-                <td class="whitespace-nowrap px-3 py-2.5 tabular-nums" data-garantia-meses>
+                <!-- 06/11/2026 (Eduardo: "aqui vai garantia e prazo de garantia, baseado nela"):
+                     Garantia = o prazo do produto; Prazo de garantia = os dias que faltam por ele. -->
+                <td class="whitespace-nowrap px-3 py-2.5 tabular-nums" data-garantia>
                   <span v-if="vendidoSemGarantia(g)" class="text-muted-foreground" title="o produto foi vendido sem garantia (prazo 0 na Tabela de Preços › Produtos)" data-sem-garantia>sem garantia</span>
                   <template v-else-if="g.garantia_meses">{{ textoMeses(g.garantia_meses) }}</template>
                   <span v-else class="text-amber-700 dark:text-amber-300" title="prazo não cadastrado na Tabela de Preços › Produtos" data-sem-prazo>— <AlertCircle class="inline size-3.5" aria-label="prazo não cadastrado" /></span>
+                </td>
+                <td class="whitespace-nowrap px-3 py-2.5 tabular-nums" data-prazo-garantia>
+                  <span v-if="g.garantia_meses" :class="TOM_DIAS[diasDaGarantia(g, hoje).tom]" :title="diasDaGarantia(g, hoje).titulo" data-garantia-dias>{{ diasDaGarantia(g, hoje).texto }}</span>
+                  <template v-else>—</template>
                 </td>
                 <td class="whitespace-nowrap px-3 py-2.5 text-xs" data-status-pedido>{{ g.status_pedido || '—' }}</td>
                 <td class="px-3 py-2.5 text-xs" data-atendimento-sac>
@@ -1021,8 +1053,8 @@ function aoVincularSac() {
               </div>
               <div class="grid grid-cols-3 gap-1 text-xs">
                 <div><div class="text-muted-foreground">Entrega</div><div class="tabular-nums">{{ dataCurta(g.data_inicio) }}</div></div>
-                <div><div class="text-muted-foreground">Garantia total</div><div class="tabular-nums" :class="g.garantia_meses != null ? '' : 'text-amber-700 dark:text-amber-300'">{{ g.fim_garantia ? dataCurta(g.fim_garantia) : '—' }}</div></div>
                 <div><div class="text-muted-foreground">Garantia</div><div class="tabular-nums" :class="vendidoSemGarantia(g) ? 'text-muted-foreground' : g.garantia_meses ? '' : 'text-amber-700 dark:text-amber-300'" :data-sem-garantia="vendidoSemGarantia(g) ? '' : undefined">{{ vendidoSemGarantia(g) ? 'sem garantia' : g.garantia_meses ? textoMeses(g.garantia_meses) : '— prazo não cadastrado' }}</div></div>
+                <div><div class="text-muted-foreground">Prazo de garantia</div><div class="tabular-nums" :class="g.garantia_meses ? TOM_DIAS[diasDaGarantia(g, hoje).tom] : ''">{{ g.garantia_meses ? diasDaGarantia(g, hoje).texto : '—' }}</div></div>
               </div>
             </button>
             <div v-if="g.sac" class="flex flex-wrap items-center gap-2 border-t px-3 py-2 text-xs" data-atendimento-sac>
@@ -1039,7 +1071,19 @@ function aoVincularSac() {
           </li>
         </ul>
 
-        <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+        <div v-if="paginado" class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground" data-paginacao>
+          <span>{{ numeroBR(total ? (pagina - 1) * LIMITE_PAGINA + 1 : 0) }}–{{ numeroBR((pagina - 1) * LIMITE_PAGINA + itens.length) }} de {{ numeroBR(total) }}</span>
+          <div v-if="totalPaginas > 1" class="flex items-center gap-2">
+            <button type="button" class="inline-flex items-center rounded-md border px-2 py-1 text-sm hover:bg-muted disabled:opacity-50" :disabled="pagina <= 1 || carregando" aria-label="página anterior" data-pagina-anterior @click="irParaPagina(pagina - 1)">
+              <ChevronLeft class="h-4 w-4" />
+            </button>
+            <span class="text-sm" data-pagina>Página {{ numeroBR(pagina) }} de {{ numeroBR(totalPaginas) }}</span>
+            <button type="button" class="inline-flex items-center rounded-md border px-2 py-1 text-sm hover:bg-muted disabled:opacity-50" :disabled="pagina >= totalPaginas || carregando" aria-label="próxima página" data-pagina-proxima @click="irParaPagina(pagina + 1)">
+              <ChevronRight class="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+        <div v-else class="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
           <span>{{ itens.length }} de {{ total }}</span>
           <Button v-if="itens.length < total" size="sm" variant="outline" :disabled="carregandoMais" @click="carregarMais">
             <Loader2 v-if="carregandoMais" class="mr-1 size-4 animate-spin" /> carregar mais {{ Math.min(LIMITE_PAGINA, total - itens.length) }}

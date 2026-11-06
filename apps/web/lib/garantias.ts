@@ -941,6 +941,29 @@ export function prazoUnico(g: Pick<GarantiaLinha, 'data_inicio' | 'fim_garantia'
   return { fim: g.fim_garantia, dias_total: total, dias_restantes: restantes, coberto_hoje: coberto(g.fim_garantia, hoje, ultimoDiaCoberto) }
 }
 /** "12 meses" / "1 mês" / "sem garantia" (0) / "—" (sem prazo cadastrado). */
+/**
+ * A coluna Garantia em DIAS (06/11/2026, Eduardo: "e a garantia deixe em
+ * dias"): os dias que faltam até a Garantia total, contados do `hoje` do
+ * servidor (São Paulo), como a Validade do certificado na Tabela de Preços.
+ * Sem entrega ainda, "aguarda entrega" (o prazo só começa na entrega); o
+ * prazo do produto vai no balão. Sem garantia (0) e sem prazo ficam com o
+ * texto deles, fora daqui. PURA.
+ */
+export function diasDaGarantia(
+  g: { fim_garantia?: string | null; garantia_meses?: number | null },
+  hoje: string | null | undefined,
+): { texto: string; tom: 'normal' | 'perto' | 'vencida' | 'espera'; titulo: string } {
+  const prazo = textoMeses(g.garantia_meses)
+  if (!g.fim_garantia || !hoje) {
+    return { texto: 'aguarda entrega', tom: 'espera', titulo: `prazo do produto: ${prazo} — começa a contar na entrega` }
+  }
+  const dia = (v: string) => Date.UTC(Number(v.slice(0, 4)), Number(v.slice(5, 7)) - 1, Number(v.slice(8, 10)))
+  const n = Math.round((dia(g.fim_garantia) - dia(hoje)) / 86_400_000)
+  const titulo = `prazo do produto: ${prazo} · até ${dataCurta(g.fim_garantia)}`
+  if (n < 0) return { texto: `vencida há ${-n} ${-n === 1 ? 'dia' : 'dias'}`, tom: 'vencida', titulo }
+  if (n === 0) return { texto: 'vence hoje', tom: 'perto', titulo }
+  return { texto: `${n} ${n === 1 ? 'dia' : 'dias'}`, tom: n <= 30 ? 'perto' : 'normal', titulo }
+}
 export function textoMeses(n: number | null | undefined): string {
   if (n == null) return '—'
   if (n === 0) return 'sem garantia'
