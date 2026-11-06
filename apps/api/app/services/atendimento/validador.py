@@ -386,14 +386,21 @@ _POR_FORA = (
 
 # A recusa não é negociação (06/11/2026): desde 20/09 a regra só barrou 4 rascunhos, todos
 # recusando ("não passamos contato fora da plataforma", "pagar a diferença por fora da Shopee
-# não é possível", "não é preciso comprar por fora"). Vale a oração onde "por fora" está; com
-# vantagem na oração ("não tem taxa comprando por fora"), é oferta, com ou sem negação.
-_NEGADO_ANTES_DO_POR_FORA = re.compile(r"\b(?:nao|nem|nunca|jamais|sem)\b(?:\s+\w+){0,10}?\s*$")
-_NEGADO_DEPOIS_DO_POR_FORA = re.compile(
-    r"^(?:\s+\w+){0,3}?\s+nao\s+(?:e\s+(?:possivel|permitid\w*|aceit\w*)|pode\w*|permit\w*"
-    r"|aceit\w*|trabalh\w*|faz\w*|conseg\w*|realiz\w*)\b"
+# não é possível", "não é preciso comprar por fora"). Só vale a negação ligada ao verbo de quem
+# recusa, na oração onde "por fora" está: "não tem problema pagar por fora" e "se não conseguir,
+# fechamos por fora" continuam oferta. Com vantagem na oração ("não tem taxa"), é oferta sempre.
+_NEGADO_ANTES_DO_POR_FORA = re.compile(
+    r"(?<!\bse\s)(?<!\bcaso\s)(?<!\bque\s)\b(?:nao|nunca|jamais)\s+"
+    r"(?:e\s+(?:possivel|preciso|permitid\w*|necessari\w*)|passamos|fazemos|negociamos|vendemos"
+    r"|trabalhamos|conseguimos|aceitamos|realizamos|permitimos|permitem?|podemos|damos|temos\s+como"
+    r"|precisa\s+(?:comprar|pagar))\b"
+    r"(?:\s+(?!pode\w*\b|vamos\b|basta\b|porque\b|pois\b|entao\b|que\b|se\b|gente\b)\w+){0,10}?\s*$"
 )
-_VANTAGEM_POR_FORA = re.compile(r"\b(?:barat\w*|desconto|taxa|economi\w*|vantag\w*|menos)\b")
+_NEGADO_DEPOIS_DO_POR_FORA = re.compile(
+    r"^(?:\s+(?!se\b|que\b|e\b|caso\b)\w+){0,3}?\s+nao\s+"
+    r"(?:e\s+(?:possivel|permitid\w*|aceit\w*)|permit\w*|aceit\w*|existe)\b"
+)
+_VANTAGEM_POR_FORA = re.compile(r"\b(?:barat\w*|desconto|taxa|juros|economi\w*|vantag\w*|menos)\b")
 _FIM_DA_ORACAO_DO_POR_FORA = re.compile(r"[.!?;:,\n]|\s(?:mas|porem)\s")
 
 

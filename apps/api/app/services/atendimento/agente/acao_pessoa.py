@@ -654,11 +654,11 @@ _DIFERENCA = re.compile(
 # "Cupom de desconto", "frete grátis": não são pedido de desconto nem de brinde.
 _NAO_E_PEDIDO = re.compile(
     r"\bcupo(?:m|ns)\s+de\s+desconto\b|\bdesconto\s+do\s+cupom\b"
-    # "Vem com fone ou compro por fora?" (06/11/2026): comprar à parte, não pagar por fora.
+    # "Vem com fone ou compro por fora?" (06/11/2026): comprar à parte, não pagar por fora. Só
+    # essa forma: "posso comprar por fora com vocês esse fone?" segue sendo o pedido.
     r"|\b(?:fones?|carregador\w*|capas?|capinhas?|peliculas?|cabos?|adaptador\w*)\b"
-    r"[^.?!\n]{0,60}?\bcompr\w*\s+(?:\w+\s+){0,2}?por\s+fora\b"
-    r"|\bcompr\w*\s+(?:\w+\s+){0,2}?por\s+fora\b[^.?!\n]{0,40}?"
-    r"\b(?:fones?|carregador\w*|capas?|capinhas?|peliculas?|cabos?|adaptador\w*)\b"
+    r"[^.!\n]{0,40}?\bou\s+(?:\w+\s+){0,3}?compr\w*\s+(?:\w+\s+){0,2}?por\s+fora\b"
+    r"(?![^.!\n]{0,30}\b(?:voces|direto|whats\w*|zap|pix)\b)"
     r"|\b(?:frete|entrega|envio)\s+(?:(?:e|eh|sai|fica|vai\s+ser)\s+)?(?:gratis|de\s+graca)\b"
     # "A troca é grátis?", "a devolução é de graça?": a política, não pedido.
     r"|\b(?:troca|devolucao|reembolso|postagem|envio\s+da\s+devolucao)\s+(?:\w+\s+){0,2}?"
