@@ -951,6 +951,24 @@ def numero_na_plataforma(conversa: AtendimentoConversa, pedido: PedidoBling | No
     return next((n for n in (_numero_seguro(c) for c in candidatos) if n), None)
 
 
+def link_na_plataforma(
+    plataforma: str,
+    integration_id: UUID | None,
+    numero: Any,
+    ids_shopee: links_shopee.IdsShopee | None = None,
+) -> dict | None:
+    """`{url, rotulo}` do "Abrir na plataforma" de UM pedido, ou None (só nº limpo)."""
+    limpo = _numero_seguro(numero)
+    if limpo is None or plataforma not in _PLATAFORMAS_COM_LINK:
+        return None
+    if plataforma == "shopee":
+        order_id = ids_shopee.pedido(integration_id, limpo) if ids_shopee else None
+        url = links_shopee.url_pedido_shopee(limpo, order_id)
+    else:
+        url = URL_PEDIDO_PLATAFORMA[plataforma].format(limpo)
+    return {"url": url, "rotulo": _ROTULO_PLATAFORMA[plataforma]} if url else None
+
+
 def links_do_pedido(
     conversa: AtendimentoConversa,
     pedido: PedidoBling | None,
@@ -964,16 +982,12 @@ def links_do_pedido(
     conversa (o caso no Seller Central, o portal, o Seller Center): aqui não
     repete.
     """
-    plataforma = None
     numero = numero_na_plataforma(conversa, pedido)
-    if numero:
-        if conversa.plataforma == "shopee":
-            order_id = ids_shopee.pedido(conversa.integration_id, numero) if ids_shopee else None
-            url = links_shopee.url_pedido_shopee(numero, order_id)
-        else:
-            url = URL_PEDIDO_PLATAFORMA[conversa.plataforma].format(numero)
-        if url:
-            plataforma = {"url": url, "rotulo": _ROTULO_PLATAFORMA[conversa.plataforma]}
+    plataforma = (
+        link_na_plataforma(conversa.plataforma, conversa.integration_id, numero, ids_shopee)
+        if numero
+        else None
+    )
     return {
         "bling": link_bling(pedido.bling_id) if pedido is not None else None,
         "plataforma": plataforma,

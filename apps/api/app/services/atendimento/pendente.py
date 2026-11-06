@@ -504,6 +504,14 @@ def do_numero(conversa: Any) -> bool:
     return do_chat(conversa) or reclamacao_no_numero(conversa)
 
 
+def fora_do_numero(conversa: Any) -> bool:
+    """A pergunta do anúncio no ML (`FORA_DO_NUMERO`)? PURA. É do chat e segue no
+    "Falta responder", mas não soma no número da loja: a linha fica com a bolinha
+    de antes, a da fila (06/11/2026, a bolinha dela não aparecia em "Todas")."""
+    onde = (getattr(conversa, "plataforma", None), getattr(conversa, "canal", None))
+    return onde in FORA_DO_NUMERO
+
+
 def resposta_de_pessoa(mensagem: Any) -> bool:
     """A mensagem é RESPOSTA DE PESSOA da loja para o número? PURA — a gêmea do
     `pessoa` de `nao_lidas_duoke_sql`.
@@ -612,8 +620,7 @@ def entra_no_numero(conversa: Any, agora: datetime | None = None) -> bool:
     """
     if not do_numero(conversa):
         return False
-    onde = (getattr(conversa, "plataforma", None), getattr(conversa, "canal", None))
-    if onde in FORA_DO_NUMERO:
+    if fora_do_numero(conversa):
         return False
     if getattr(conversa, "situacao", None) == CONVERSA_FECHADA:
         return False

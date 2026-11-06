@@ -168,6 +168,7 @@ from app.schemas.atendimento import (
     CanalOut,
     CanalPatch,
     CategoriaOut,
+    CompraAtualizadaOut,
     ConferirIn,
     ConferirOut,
     ConversaDetalheOut,
@@ -201,6 +202,7 @@ from app.schemas.atendimento import (
     ModeloOut,
     ModeloPatch,
     ModelosEquipesOut,
+    OutrasComprasOut,
     PedidoAtualizarOut,
     PlataformaResumoOut,
     RascunhoOut,
@@ -212,6 +214,8 @@ from app.schemas.atendimento import (
     ResponderOut,
     RespostaRealOut,
     ResumoOut,
+    RetratosDasComprasIn,
+    RetratosDasComprasOut,
     SincronizarOut,
     SugestaoOut,
 )
@@ -369,6 +373,9 @@ ROTAS_DE_QUEM_LE = frozenset(
         ("POST", "/api/atendimento/rascunhos/{rascunho_id}/avaliacao"),
         ("POST", "/api/atendimento/automacoes/previa"),
         ("POST", "/api/atendimento/adspower/aberto"),
+        # Os cartões das outras compras do comprador (06/11/2026): é POST só por levar
+        # a lista de pedidos. Lê a loja (com teto) e não grava nada: abrir a aba Pedido.
+        ("POST", "/api/atendimento/conversas/{conversa_id}/pedidos-comprador/retratos"),
         # O "visto no DaVinci" ao abrir a conversa (28/10/2026, o Eduardo: "as
         # notificações devem sumir se clicado em algum atendimento"): só a
         # marca do DaVinci que apaga o número; nada vai à plataforma.
@@ -418,6 +425,8 @@ ROTAS_DE_QUEM_RESPONDE = frozenset(
         ("PATCH", "/api/atendimento/conversas/{conversa_id}"),
         ("POST", "/api/atendimento/conversas/{conversa_id}/lida"),
         ("POST", "/api/atendimento/conversas/{conversa_id}/pedido/atualizar"),
+        # O "atualizar" do cartão das outras compras (06/11/2026): o mesmo do pedido.
+        ("POST", "/api/atendimento/conversas/{conversa_id}/pedidos-comprador/{pedido}/atualizar"),
         ("POST", "/api/atendimento/conversas/{conversa_id}/amazon-copia"),
         ("POST", "/api/atendimento/rascunhos/{rascunho_id}/descartar"),
         ("POST", "/api/atendimento/mensagens/{mensagem_id}/conferir"),
@@ -700,6 +709,13 @@ JANELA_LIMITE_PEDIDO_S = 60
 # importa o sync ao subir).
 _CANAL_DESLIGADO = "desligado"
 
+# As outras compras do comprador (06/11/2026): a abertura da aba Pedido com retrato
+# faltando, e cada cartão que entra depois na tela, custam UMA ida à loja (até 50
+# pedidos). Teto próprio por loja, por minuto:
+# percorrer conversas não pode gastar o teto do "atualizar" do pedido da conversa.
+LIMITE_RETRATOS_COMPRA_POR_LOJA = 20
+_PEDIDOS_COMPRADOR = "app.services.atendimento.pedidos_comprador"
+
 # Parte 2: módulos de outros lotes, importados na hora de usar e pelo NOME
 # (como o enriquecimento) — o router sobe sem eles, e o teste troca o módulo
 # inteiro em `sys.modules`.
@@ -725,6 +741,14 @@ def _chave_limite_loja(integration_id: UUID) -> str:
 
 def _chave_limite_pessoa(user_id: UUID) -> str:
     return f"atd:pedido:atualizar:pessoa:{user_id}"
+
+
+def _chave_pedido_da_compra(conversa_id: UUID, pedido: str) -> str:
+    return f"atd:pedido:atualizar:{conversa_id}:{pedido}"
+
+
+def _chave_limite_retratos(integration_id: UUID) -> str:
+    return f"atd:pedido:retratos:loja:{integration_id}"
 
 
 # "Sugerir agora" (28/10/2026, o dono: "tire total essa trava"): sem limite de
@@ -1554,9 +1578,12 @@ def _resumo_dict(
         # bolinha da linha na Caixa, com ou sem a marca do "Falta responder".
         # None fora do número (avaliação, reclamação da Shopee…: a bolinha de
         # antes) e quando quem chama não calculou. A reclamação do ML está no
-        # número (15/10/2026, `pendente.do_numero`: o Duoke a junta ao pack).
+        # número (15/10/2026, `pendente.do_numero`: o Duoke a junta ao pack). A
+        # pergunta do ML é do chat e está fora do número (`pendente.fora_do_numero`).
         "numero_duoke": (
-            int(numero_duoke or 0) if numero_duoke is not None and pendente.do_numero(c) else None
+            int(numero_duoke or 0)
+            if numero_duoke is not None and pendente.do_numero(c) and not pendente.fora_do_numero(c)
+            else None
         ),
         "tem_rascunho": bool(tem_rascunho),
         "atribuido_a": c.atribuido_a,
@@ -3924,6 +3951,47 @@ async def _dentro_do_limite_pedido(integration_id: UUID, user_id: UUID) -> bool:
     return await _contar_na_janela(_chave_limite_pessoa(user_id)) <= LIMITE_PEDIDO_POR_PESSOA
 
 
+async def _loja_que_le_o_pedido(session: AsyncSession, c: AtendimentoConversa) -> Integration:
+    """A loja da conversa, se o pedido pode ser lido nela agora; senão, o 409 da recusa.
+
+    Os portões do "atualizar": plataforma com retrato, loja conectada, leitura ligada e
+    canal não desligado — o interruptor que se usa quando a plataforma devolve 429.
+    """
+    if c.plataforma not in PLATAFORMAS_COM_PEDIDO:
+        raise _sem_pedido_na_plataforma(c.plataforma)
+    integration = (
+        await session.get(Integration, c.integration_id) if c.integration_id is not None else None
+    )
+    if integration is None or integration.archived_at is not None:
+        raise HTTPException(
+            409,
+            detail={
+                "code": enviar.RECUSA_SEM_INTEGRACAO,
+                "detail": "A loja desta conversa não está mais conectada ao DaVinci.",
+            },
+        )
+    if not get_settings().atendimento_leitura_ativa:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "leitura_desligada",
+                "detail": "A leitura das lojas está desligada no DaVinci: o painel fica com o "
+                "último retrato do pedido.",
+            },
+        )
+    canal = await session.get(AtendimentoCanal, c.canal_id) if c.canal_id is not None else None
+    if canal is not None and canal.status == _CANAL_DESLIGADO:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "canal_desligado",
+                "detail": "A leitura desta loja está desligada: o painel fica com o último "
+                "retrato do pedido.",
+            },
+        )
+    return integration
+
+
 @router.post("/conversas/{conversa_id}/pedido/atualizar", response_model=PedidoAtualizarOut)
 async def atualizar_pedido(
     conversa_id: str,
@@ -3960,38 +4028,7 @@ async def atualizar_pedido(
         raise _sem_pedido_na_plataforma(instagram.PLATAFORMA)
     scope = await escopo_do_atendimento(session, user)
     c = await _conversa_ou_404(session, conversa_id, scope)
-    if c.plataforma not in PLATAFORMAS_COM_PEDIDO:
-        raise _sem_pedido_na_plataforma(c.plataforma)
-    integration = (
-        await session.get(Integration, c.integration_id) if c.integration_id is not None else None
-    )
-    if integration is None or integration.archived_at is not None:
-        raise HTTPException(
-            409,
-            detail={
-                "code": enviar.RECUSA_SEM_INTEGRACAO,
-                "detail": "A loja desta conversa não está mais conectada ao DaVinci.",
-            },
-        )
-    if not get_settings().atendimento_leitura_ativa:
-        raise HTTPException(
-            409,
-            detail={
-                "code": "leitura_desligada",
-                "detail": "A leitura das lojas está desligada no DaVinci: o painel fica com o "
-                "último retrato do pedido.",
-            },
-        )
-    canal = await session.get(AtendimentoCanal, c.canal_id) if c.canal_id is not None else None
-    if canal is not None and canal.status == _CANAL_DESLIGADO:
-        raise HTTPException(
-            409,
-            detail={
-                "code": "canal_desligado",
-                "detail": "A leitura desta loja está desligada: o painel fica com o último "
-                "retrato do pedido.",
-            },
-        )
+    integration = await _loja_que_le_o_pedido(session, c)
 
     chave = _chave_pedido(c.id)
     try:
@@ -4078,6 +4115,179 @@ async def atualizar_pedido(
         atualizado=atualizado,
         motivo=motivo,
     )
+
+
+# ─── as outras compras do comprador (06/11/2026) ────────────────────────────
+# A aba Pedido, no chat de um comprador por loja (Shopee e TikTok): a lista na hora, só
+# do banco (`pedidos_comprador`), e os cartões completos depois, à parte, em lote. Nada
+# disso grava na conversa: o pedido dela, os carimbos e a etiqueta seguem como estão.
+
+
+@router.get("/conversas/{conversa_id}/pedidos-comprador", response_model=OutrasComprasOut)
+async def outras_compras_do_comprador(
+    conversa_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_view)],
+) -> OutrasComprasOut:
+    """As outras compras de quem está neste chat, a mais nova primeiro. Só banco."""
+    scope = await escopo_do_atendimento(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    svc = importlib.import_module(_PEDIDOS_COMPRADOR)
+    return OutrasComprasOut(**await svc.outras_compras(session, c))
+
+
+async def _cabe_retrato_da_loja(integration_id: UUID) -> bool:
+    """Cabe mais uma ida à loja neste minuto? Sem Redis, não vai (como a trava do botão)."""
+    try:
+        return await _contar_na_janela(_chave_limite_retratos(integration_id)) <= (
+            LIMITE_RETRATOS_COMPRA_POR_LOJA
+        )
+    except Exception as e:  # noqa: BLE001 — sem o teto, a rajada iria toda à loja
+        logger.warning("atendimento_compras_limite_falhou", err=type(e).__name__)
+        return False
+
+
+@router.post(
+    "/conversas/{conversa_id}/pedidos-comprador/retratos",
+    response_model=RetratosDasComprasOut,
+)
+async def retratos_das_compras(
+    conversa_id: str,
+    body: RetratosDasComprasIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_view)],
+) -> RetratosDasComprasOut:
+    """Os retratos dos cartões, em lote: Redis e, para o que falta, UMA ida à loja.
+
+    Só os pedidos deste comprador nesta loja: quem não for fica fora, sem erro. Nunca
+    falha por causa da loja: leitura desligada, teto do minuto, TikTok (sem retrato pela
+    API) e erro da plataforma devolvem o que houver, e o cartão fica com o do índice. O
+    que falhou há menos de 5 min (a loja não devolve, erro dela) não volta à loja ao
+    reabrir a aba: só o "atualizar" do cartão ignora essa marca.
+    """
+    scope = await escopo_do_atendimento(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    svc = importlib.import_module(_PEDIDOS_COMPRADOR)
+    enriquecer_svc = importlib.import_module(_ENRIQUECER)
+    pedidos = (await svc.do_comprador(session, c, body.pedidos))[
+        : enriquecer_svc.MAX_RETRATOS_POR_ABERTURA
+    ]
+    retratos = await enriquecer_svc.retratos_em_cache(c.integration_id, pedidos)
+    faltam = await enriquecer_svc.sem_falha_recente(
+        c.integration_id, [p for p in pedidos if p not in retratos]
+    )
+    if not faltam:
+        return RetratosDasComprasOut(retratos=retratos)
+    try:
+        integration = await _loja_que_le_o_pedido(session, c)
+    except HTTPException:
+        return RetratosDasComprasOut(retratos=retratos)
+    if not await _cabe_retrato_da_loja(integration.id):
+        logger.info(
+            "atendimento_compras_limite", conversa_id=str(c.id), integration_id=str(integration.id)
+        )
+        return RetratosDasComprasOut(retratos=retratos)
+    ids_log = {"conversa_id": str(c.id), "integration_id": str(integration.id)}
+    try:
+        cliente = await clientes.cliente_da_integracao(integration)
+        # Não segura a conexão do banco enquanto a loja responde (nada a gravar aqui).
+        await session.commit()
+        retratos.update(await enriquecer_svc.retratos_da_loja(integration.id, cliente, faltam))
+    except Exception as e:  # noqa: BLE001 — o cartão fica com o do índice
+        logger.warning("atendimento_compras_retratos_falhou", **ids_log, err=type(e).__name__)
+        await enriquecer_svc.marcar_falha_de_retrato(integration.id, faltam)
+    logger.info(
+        "atendimento_compras_retratos", **ids_log, pedidos=len(pedidos), veio=len(retratos)
+    )
+    return RetratosDasComprasOut(retratos=retratos)
+
+
+@router.post(
+    "/conversas/{conversa_id}/pedidos-comprador/{pedido}/atualizar",
+    response_model=CompraAtualizadaOut,
+)
+async def atualizar_pedido_da_compra(
+    conversa_id: str,
+    pedido: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_responde)],
+) -> CompraAtualizadaOut:
+    """Relê UM cartão das outras compras, ignorando o cache (o "atualizar" do cartão).
+
+    A mesma trava do "atualizar" do pedido da conversa: os portões
+    (`_loja_que_le_o_pedido`, os mesmos 409), uma ida por minuto (por cartão, para não
+    prender o botão do pedido da conversa) e os tetos do minuto por loja e por pessoa.
+    Falha da loja não é erro HTTP: volta 200 com o que já havia e o `motivo`. Sem trava
+    da linha da conversa: nada aqui escreve nela.
+    """
+    scope = await escopo_do_atendimento(session, user)
+    c = await _conversa_ou_404(session, conversa_id, scope)
+    svc = importlib.import_module(_PEDIDOS_COMPRADOR)
+    enriquecer_svc = importlib.import_module(_ENRIQUECER)
+    if not await svc.do_comprador(session, c, [pedido]):
+        raise HTTPException(404, detail={"code": "pedido_nao_encontrado"})
+    integration = await _loja_que_le_o_pedido(session, c)
+
+    async def resposta(
+        retrato: dict[str, Any] | None, atualizado: bool, motivo: str | None
+    ) -> CompraAtualizadaOut:
+        if retrato is None:
+            retrato = (await enriquecer_svc.retratos_em_cache(c.integration_id, [pedido])).get(
+                pedido
+            )
+        itens = (await svc.outras_compras(session, c, so_pedido=pedido))["itens"]
+        return CompraAtualizadaOut(
+            retrato=retrato, item=itens[0] if itens else None, atualizado=atualizado, motivo=motivo
+        )
+
+    chave = _chave_pedido_da_compra(c.id, pedido)
+    try:
+        pegou = await redis.set(chave, "1", nx=True, ex=TRAVA_PEDIDO_S)
+    except Exception as e:  # noqa: BLE001
+        # Sem a trava não há como segurar a rajada na API da loja: melhor não ir.
+        logger.warning("atendimento_pedido_trava_falhou", err=type(e).__name__)
+        raise HTTPException(503, detail={"code": "trava_indisponivel"}) from e
+    if not pegou:
+        return await resposta(None, False, "recente")
+    try:
+        cabe = await _dentro_do_limite_pedido(integration.id, user.id)
+    except Exception as e:  # noqa: BLE001
+        await _soltar_trava_pedido(chave)
+        logger.warning("atendimento_pedido_limite_falhou", err=type(e).__name__)
+        raise HTTPException(503, detail={"code": "trava_indisponivel"}) from e
+    if not cabe:
+        await _soltar_trava_pedido(chave)
+        logger.info(
+            "atendimento_pedido_limite",
+            conversa_id=str(c.id),
+            integration_id=str(integration.id),
+            user_id=str(user.id),
+        )
+        return await resposta(None, False, "limite")
+
+    ids_log = {"conversa_id": str(c.id), "integration_id": str(integration.id), "pedido": pedido}
+    novo: dict[str, Any] | None = None
+    motivo: str | None = None
+    try:
+        cliente = await clientes.cliente_da_integracao(integration)
+        await session.commit()
+        novo = (await enriquecer_svc.retratos_da_loja(integration.id, cliente, [pedido])).get(
+            pedido
+        )
+        if novo is None:
+            motivo = "sem_alteracao"
+    except Exception as e:  # noqa: BLE001 — o cartão fica com o que tinha
+        motivo = "falhou"
+        logger.warning("atendimento_compra_atualizar_falhou", **ids_log, err=type(e).__name__)
+        await enriquecer_svc.marcar_falha_de_retrato(integration.id, [pedido])
+    logger.info(
+        "atendimento_compra_atualizada",
+        **ids_log,
+        atualizado=novo is not None,
+        motivo=motivo,
+        user_id=str(user.id),
+    )
+    return await resposta(novo, novo is not None, motivo)
 
 
 async def _ligar_conta_amazon(

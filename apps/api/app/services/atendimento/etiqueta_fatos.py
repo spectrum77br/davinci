@@ -588,6 +588,31 @@ async def pedido_bling_da_conversa(
     return await pedido_bling(session, chaves)
 
 
+async def pedidos_bling_por_numeroloja(
+    session: AsyncSession, numeros: Iterable[str]
+) -> dict[str, PedidoBling]:
+    """{nº na plataforma: pedido do Bling} em lote, sem a trilha da Margem nem os fatos da NF.
+
+    As outras compras do comprador (06/11/2026): só número, situação, id para os links e SKUs.
+    Só pelo `numeroloja` (o nº do Bling de outro pedido não pode casar aqui).
+    """
+    lista = sorted({str(n).strip() for n in numeros if str(n or "").strip()})
+    saida: dict[str, PedidoBling] = {}
+    for i in range(0, len(lista), _CHAVES_POR_CONSULTA):
+        parte = lista[i : i + _CHAVES_POR_CONSULTA]
+        por_loja: dict[str, list[Any]] = {}
+        linhas = await session.execute(
+            select(*_COLUNAS_BLING).where(BlingOrder.numeroloja.in_(parte))
+        )
+        for linha in linhas.all():
+            por_loja.setdefault(linha.numeroloja, []).append(linha)
+        for numero, do_pedido in por_loja.items():
+            pedido = _pedido_das_linhas([numero], do_pedido)
+            if pedido is not None:
+                saida[numero] = pedido
+    return saida
+
+
 # Teto de pedidos da lista Ag. cancelamento (em produção são 10 a 20).
 MAX_PEDIDOS_83955 = 300
 

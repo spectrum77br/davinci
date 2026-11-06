@@ -24,7 +24,11 @@ O que estes testes garantem:
   evento certo — sem evento, None, nunca um chute pelo status;
 - cada retrato que dá certo alimenta o índice de pedidos do comprador
   (`indice.registrar_pedido`) com o id do comprador na plataforma, que NÃO
-  entra no retrato; índice ausente ou quebrado não derruba o retrato.
+  entra no retrato; índice ausente ou quebrado não derruba o retrato;
+- as outras compras do comprador (06/11/2026, `retratos_da_loja`): UMA chamada por
+  lote, sem as idas do rastreio, o mesmo mapa do retrato da conversa, o motivo do
+  cancelamento, 30 min no pedido vivo e 24 h no final; falha vira {} sem levantar, e
+  o que falhou ou não veio ganha a marca de 5 min, à parte do retrato.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ import sys
 import types
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -397,6 +402,12 @@ class ShopeeFalso:
         if isinstance(p, Exception):
             raise p
         return p or {}
+
+    async def get_order_detail_lote(self, order_sns: list[str]) -> list[dict]:
+        self.chamadas.append(("lote", ",".join(order_sns)))
+        if isinstance(self.pedidos.get("*"), Exception):
+            raise self.pedidos["*"]
+        return [self.pedidos[sn] for sn in order_sns if isinstance(self.pedidos.get(sn), dict)]
 
     async def get_item_base_info(self, item_ids: list) -> list[dict]:
         self.chamadas.append(("produto", ",".join(str(i) for i in item_ids)))
@@ -2062,6 +2073,145 @@ async def test_foto_do_catalogo_do_ml_em_https_e_no_tamanho_maior(
     assert cache["imagem"] == c2["imagem"]
 
 
+# ─────────────── as outras compras do comprador (06/11/2026) ───────────────
+
+
+async def test_retratos_da_loja_uma_chamada_e_o_mesmo_mapa_do_retrato(db, make_user, relogio):
+    """O cartão é o retrato de hoje, sem as duas idas do rastreio por pedido."""
+    integ = await _integ(db, await make_user(), IntegrationPlatform.SHOPEE, "Loja")
+    f = ShopeeFalso()
+    f.pedidos["P1"] = pedido_shopee("P1", status="SHIPPED", logistica="LOGISTICS_PICKUP_DONE")
+    f.pedidos["P2"] = {
+        **pedido_shopee("P2", status="CANCELLED", logistica="LOGISTICS_NOT_START"),
+        "cancel_reason": "Out of Stock",
+    }
+    f.pedidos["P3"] = {
+        **pedido_shopee("P3", status="CANCELLED", logistica="LOGISTICS_NOT_START"),
+        "cancel_reason": "",
+        "buyer_cancel_reason": "Need to change delivery address",
+    }
+
+    r = await enriquecer.retratos_da_loja(integ.id, f, ["P1", "P2", "P3", "NAO_EXISTE"])
+
+    assert f.chamadas == [("lote", "P1,P2,P3,NAO_EXISTE")], "uma chamada só, sem rastreio"
+    assert set(r) == {"P1", "P2", "P3"}, "o que a Shopee não devolve fica de fora"
+    assert (r["P2"]["status"], r["P2"]["status_texto"]) == ("CANCELLED", "Cancelado")
+    assert r["P2"]["cancelamento"] == "Out of Stock"
+    assert r["P3"]["cancelamento"] == "Need to change delivery address"
+    assert r["P1"]["cancelamento"] is None
+    (item,) = r["P1"]["itens"]
+    assert (item["titulo"], item["imagem"], item["variacao"], item["sku"], item["quantidade"]) == (
+        "Mala de Bordo ABS Rodinhas 360 Cadeado TSA",
+        FOTO_SHOPEE,
+        "Preta,P",
+        "MALA-PRETA-P",
+        1,
+    )
+    assert r["P1"]["pagamento_metodo"] == "Cartão de crédito" and r["P1"]["valor_pago"] == 766.19
+    log = r["P1"]["logistica"]
+    assert log["transportadora"] == "Shopee Xpress"
+    assert (log["status"], log["status_texto"]) == ("LOGISTICS_PICKUP_DONE", "Coletado")
+    assert log["rastreio"] is None, "o cartão não mostra rastreio: não gasta as idas"
+    # O mesmo mapa do retrato de hoje (só o rastreio e o motivo diferem).
+    f.rastreios["P1"] = (None, {})
+    igual = await enriquecer.retrato_pedido(db, integ, f, "shopee", "P1")
+    assert {k: v for k, v in r["P1"].items() if k != "cancelamento"} == igual
+    _sem_pessoais(r)
+
+
+async def test_retratos_da_loja_cache_de_30_min_no_vivo_e_24h_no_final(db, make_user, redis_falso):
+    integ = await _integ(db, await make_user(), IntegrationPlatform.SHOPEE, "Loja")
+    f = ShopeeFalso()
+    for sn, status in (
+        ("VIVO", "SHIPPED"),
+        ("AGUARDA", "IN_CANCEL"),
+        ("CANCELADO", "CANCELLED"),
+        ("CONCLUIDO", "COMPLETED"),
+    ):
+        f.pedidos[sn] = pedido_shopee(sn, status=status)
+
+    await enriquecer.retratos_da_loja(integ.id, f, list(f.pedidos))
+
+    def ttl(sn: str) -> int | None:
+        return redis_falso.ttl[enriquecer.chave_retrato_compra(integ.id, sn)]
+
+    assert ttl("VIVO") == 30 * 60 and ttl("AGUARDA") == 30 * 60
+    assert ttl("CANCELADO") == 24 * 3600 and ttl("CONCLUIDO") == 24 * 3600
+    # Volta do cache por loja e pedido, sem ir à loja.
+    f.chamadas.clear()
+    lidos = await enriquecer.retratos_em_cache(integ.id, ["VIVO", "CANCELADO", "OUTRO"])
+    assert set(lidos) == {"VIVO", "CANCELADO"} and f.chamadas == []
+    assert lidos["CANCELADO"]["status"] == "CANCELLED"
+    assert await enriquecer.retratos_em_cache(uuid4(), ["VIVO"]) == {}, "de outra loja, nada"
+
+
+async def test_retratos_da_loja_teto_do_lote_e_falha_nao_levanta(db, make_user, monkeypatch):
+    integ = await _integ(db, await make_user(), IntegrationPlatform.SHOPEE, "Loja")
+    f = ShopeeFalso()
+    numeros = [f"P{i}" for i in range(60)]
+    await enriquecer.retratos_da_loja(integ.id, f, numeros + ["P1", "", " "])
+    assert f.chamadas == [("lote", ",".join(numeros[:50]))], "só o teto, sem repetir nem vazio"
+
+    assert await enriquecer.retratos_da_loja(integ.id, None, ["P1"]) == {}
+    assert await enriquecer.retratos_da_loja(integ.id, f, []) == {}
+    f.pedidos["*"] = RuntimeError("shopee_order_detail_lote error_server: fora")
+    assert await enriquecer.retratos_da_loja(integ.id, f, ["P1"]) == {}
+    # Cliente sem o método (a outra plataforma) também não levanta.
+    assert await enriquecer.retratos_da_loja(integ.id, object(), ["P1"]) == {}
+
+    monkeypatch.setattr(enriquecer, "redis", RedisFora())
+    assert await enriquecer.retratos_em_cache(integ.id, ["P1"]) == {}, "sem Redis, nada no cache"
+    del f.pedidos["*"]
+    f.pedidos["P1"] = pedido_shopee("P1")
+    assert set(await enriquecer.retratos_da_loja(integ.id, f, ["P1"])) == {"P1"}, "sem Redis, vai"
+
+
+async def test_retratos_da_loja_marca_a_falha_por_5_min(db, make_user, redis_falso, monkeypatch):
+    integ = await _integ(db, await make_user(), IntegrationPlatform.SHOPEE, "Loja")
+    f = ShopeeFalso()
+    f.pedidos["OK"] = pedido_shopee("OK")
+    chave = enriquecer.chave_falha_retrato_compra
+
+    # O que a loja não devolve ganha a marca; o que veio, não.
+    await enriquecer.retratos_da_loja(integ.id, f, ["OK", "SUMIU"])
+    assert redis_falso.ttl[chave(integ.id, "SUMIU")] == 5 * 60
+    assert chave(integ.id, "OK") not in redis_falso.dados
+    assert await enriquecer.sem_falha_recente(integ.id, ["SUMIU", "OK", "NOVO"]) == ["OK", "NOVO"]
+    assert await enriquecer.sem_falha_recente(uuid4(), ["SUMIU"]) == ["SUMIU"], "é por loja"
+
+    # A chave é à parte: a marca nem aparece como retrato, nem apaga o que já havia.
+    assert await enriquecer.retratos_em_cache(integ.id, ["SUMIU"]) == {}
+    assert set(await enriquecer.retratos_em_cache(integ.id, ["OK"])) == {"OK"}
+
+    # Erro da loja: o lote inteiro. E esta função não olha a marca (o botão passa por aqui).
+    f.pedidos["*"] = RuntimeError("shopee_order_detail_lote error_server: fora")
+    await enriquecer.retratos_da_loja(integ.id, f, ["OK", "SUMIU"])
+    assert f.chamadas[-1] == ("lote", "OK,SUMIU")
+    assert await enriquecer.sem_falha_recente(integ.id, ["OK", "SUMIU"]) == []
+    assert set(await enriquecer.retratos_em_cache(integ.id, ["OK"])) == {"OK"}
+
+    # Sem cliente não foi à loja: nada a marcar.
+    await enriquecer.retratos_da_loja(integ.id, None, ["SEM_CLIENTE"])
+    assert chave(integ.id, "SEM_CLIENTE") not in redis_falso.dados
+
+    # Sem Redis: nenhuma marca vale, e nada levanta.
+    monkeypatch.setattr(enriquecer, "redis", RedisFora())
+    assert await enriquecer.sem_falha_recente(integ.id, ["OK", "SUMIU"]) == ["OK", "SUMIU"]
+    await enriquecer.marcar_falha_de_retrato(integ.id, ["OK"])
+
+
+async def test_motivo_do_cancelamento_com_dado_pessoal_fica_de_fora(db, make_user):
+    integ = await _integ(db, await make_user(), IntegrationPlatform.SHOPEE, "Loja")
+    f = ShopeeFalso()
+    f.pedidos["P1"] = {
+        **pedido_shopee("P1", status="CANCELLED"),
+        "cancel_reason": f"cliente {NOME_REAL} CPF {CPF}",
+    }
+    r = await enriquecer.retratos_da_loja(integ.id, f, ["P1"])
+    assert r["P1"]["cancelamento"] is None
+    _sem_pessoais(r)
+
+
 # ─────────────── os clientes de verdade: só GET, parâmetros certos ───────────────
 
 
@@ -2132,6 +2282,37 @@ async def test_shopee_de_verdade_so_le_e_nao_pede_dado_pessoal(db, make_user, mo
     base = next(p for p in feitos if p.url.path.endswith("/get_item_base_info"))
     assert base.url.params["item_id_list"] == "4112503530"
     _sem_pessoais(r)
+
+
+async def test_shopee_de_verdade_lote_so_le_e_pede_o_motivo(monkeypatch):
+    """O lote das outras compras: GET, os números juntos e nada de dado pessoal."""
+
+    def api(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"error": "", "message": "", "response": {"order_list": [pedido_shopee("A")]}},
+        )
+
+    feitos = _transporte(monkeypatch, api)
+    cliente = ShopeeClient({"shop_id": SHOP, "access_token": "t", "expires_at": 9_999_999_999})
+
+    assert await cliente.get_order_detail_lote([]) == []
+    assert feitos == [], "sem número, sem chamada"
+    lidos = await cliente.get_order_detail_lote(["A", " B ", "", *[f"N{i}" for i in range(60)]])
+
+    assert [o["order_sn"] for o in lidos] == ["A"]
+    (pedido,) = feitos
+    assert pedido.method == "GET" and pedido.url.path == "/api/v2/order/get_order_detail"
+    numeros = pedido.url.params["order_sn_list"].split(",")
+    assert numeros[:2] == ["A", "B"] and len(numeros) == 50
+    campos = pedido.url.params["response_optional_fields"].split(",")
+    assert {"item_list", "total_amount", "payment_method", "package_list", "shipping_carrier",
+            "cancel_reason", "buyer_cancel_reason"} <= set(campos)
+    assert not [
+        c
+        for c in campos
+        if c in ("buyer_username", "buyer_cpf_id") or "recipient" in c or "address" in c
+    ]
 
 
 async def test_ml_de_verdade_so_le_com_formato_novo_do_envio(db, make_user, monkeypatch):

@@ -571,6 +571,62 @@ class PedidoAtualizarOut(BaseModel):
     motivo: str | None = None
 
 
+class BlingDaCompraOut(BaseModel):
+    """A linha do Bling de uma das outras compras do comprador (06/11/2026)."""
+
+    numero: str
+    situacao_id: str | None = None
+    # O mesmo texto do painel do pedido (`situacao_bling.nome`).
+    situacao: str | None = None
+    link: str | None = None
+    # Os SKUs dos itens (`bling_orders.item_codigo`): a busca da lista casa neles, na tela.
+    skus: list[str] = Field(default_factory=list)
+
+
+class LinkPlataformaOut(BaseModel):
+    url: str
+    rotulo: str
+
+
+class OutraCompraOut(BaseModel):
+    """Uma das outras compras do comprador, como está no índice e no espelho do Bling."""
+
+    pedido: str
+    status: str | None = None
+    status_texto: str | None = None
+    criado_em: datetime | None = None
+    total: float | None = None
+    itens_resumo: str | None = None
+    bling: BlingDaCompraOut | None = None
+    link_plataforma: LinkPlataformaOut | None = None
+
+
+class OutrasComprasOut(BaseModel):
+    """As outras compras do comprador na loja (só Shopee e TikTok), a mais nova primeiro."""
+
+    itens: list[OutraCompraOut] = Field(default_factory=list)
+
+
+class RetratosDasComprasIn(BaseModel):
+    pedidos: list[str] = Field(default_factory=list, max_length=200)
+
+
+class RetratosDasComprasOut(BaseModel):
+    """{pedido: retrato}: o que não veio fica de fora e o cartão segue com o do índice."""
+
+    retratos: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class CompraAtualizadaOut(BaseModel):
+    """Resultado do "atualizar" do cartão de uma das outras compras."""
+
+    retrato: dict[str, Any] | None = None
+    item: OutraCompraOut | None = None
+    atualizado: bool = False
+    # Os mesmos do `PedidoAtualizarOut`: `recente`, `limite`, `sem_alteracao`, `falhou`.
+    motivo: str | None = None
+
+
 class ConversaUnicaOut(BaseModel):
     conversa: ConversaOut
 

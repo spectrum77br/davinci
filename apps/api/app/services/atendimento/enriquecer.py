@@ -59,6 +59,16 @@ cartão "Cliente" precisa do histórico de compra. Cada retrato que dá certo
 grava a linha do pedido (`indice.registrar_pedido`) com o id do comprador na
 PLATAFORMA — número, não dado pessoal —, que nunca entra no retrato.
 
+Outras compras do comprador (06/11/2026, `retratos_da_loja`): o chat da Shopee é
+um por comprador e o painel só tinha o retrato do ÚLTIMO pedido. Os cartões das
+outras compras saem do MESMO retrato (`_montar_retrato_shopee`), mas NUNCA na
+conversa: nem `dados.pedido_mkt`, nem `pedido_marketplace`, nem carimbo, nem
+etiqueta — isso mudaria o pedido da conversa e o agente. Ficam só no Redis, por
+loja e pedido. Uma chamada só por abertura (`get_order_detail` aceita 50 números)
+e sem as duas idas do rastreio por pedido: o cartão não mostra rastreio. O que a loja
+não devolve, ou o erro dela, fica 5 min numa marca à parte (`sem_falha_recente`):
+reabrir a aba não volta à loja; o "atualizar" do cartão não olha essa marca.
+
 Log só com ids (conversa, pedido, anúncio) — nunca texto de comprador.
 """
 
@@ -144,6 +154,14 @@ ESPERA_NAO_ENCONTRADO = timedelta(hours=24)
 JANELA_SEM_RETRATO = timedelta(days=7)
 # Pack do ML (carrinho) com muitos pedidos: cada pedido é uma ida ao /orders.
 MAX_PEDIDOS_PACK = 10
+# As outras compras do comprador (06/11/2026): os cartões de UMA abertura cabem
+# numa chamada (o limite do `get_order_detail` da Shopee); o maior comprador em
+# produção tem 21 pedidos. O status final não muda mais: fica 24 h.
+MAX_RETRATOS_POR_ABERTURA = 50
+CACHE_RETRATO_COMPRA_VIVO_S = int(RENOVAR_DEPOIS_DE.total_seconds())
+CACHE_RETRATO_COMPRA_FINAL_S = 24 * 3600
+STATUS_COMPRA_FINAL = frozenset({"CANCELLED", "COMPLETED"})
+CACHE_FALHA_RETRATO_COMPRA_S = 5 * 60
 
 # ── Textos em português (os códigos crus continuam no campo `status`) ─────
 STATUS_PEDIDO_SHOPEE = {
@@ -539,7 +557,7 @@ def chave_produto(plataforma: str, integration_id: Any, item_id: str) -> str:
     return f"atd:prod:{plataforma}:{integration_id}:{item_id}"
 
 
-async def _cache_ler(chave: str) -> dict | None:
+async def _cache_ler_json(chave: str) -> dict | None:
     try:
         bruto = await redis.get(chave)
     except Exception as exc:  # noqa: BLE001 — sem Redis, vai à loja (com a cota)
@@ -548,10 +566,15 @@ async def _cache_ler(chave: str) -> dict | None:
     if not bruto:
         return None
     try:
-        cartao = json.loads(bruto)
+        valor = json.loads(bruto)
     except (TypeError, ValueError):
         return None
-    return cartao if isinstance(cartao, dict) and cartao.get("tipo") == "produto" else None
+    return valor if isinstance(valor, dict) else None
+
+
+async def _cache_ler(chave: str) -> dict | None:
+    cartao = await _cache_ler_json(chave)
+    return cartao if cartao is not None and cartao.get("tipo") == "produto" else None
 
 
 async def _cache_gravar(chave: str, cartao: dict, validade: int = CACHE_PRODUTO_S) -> None:
@@ -976,7 +999,21 @@ async def _retrato_shopee(cliente: Any, pedido: str) -> tuple[dict | None, list[
             logger.info(
                 "atendimento_enriquecer_rastreio_falhou", pedido=pedido, erro=_erro_curto(exc)
             )
-    status_log = (_texto(eventos.get("logistics_status")) or "").upper() or status_log
+    return _montar_retrato_shopee(detalhe, pedido, rastreio=rastreio, eventos=eventos)
+
+
+def _montar_retrato_shopee(
+    detalhe: dict, pedido: str, *, rastreio: str | None = None, eventos: dict | None = None
+) -> tuple[dict, list[_LinhaIndice]]:
+    """O detalhe do pedido (e o rastreio, se foi buscado) → (retrato, linha do índice), sem I/O."""
+    eventos = eventos or {}
+    status = (_texto(detalhe.get("order_status")) or "").upper() or None
+    pacote = next(iter(_lista(detalhe.get("package_list"))), {})
+    status_log = (
+        (_texto(eventos.get("logistics_status")) or "").upper()
+        or (_texto(pacote.get("logistics_status")) or "").upper()
+        or None
+    )
     ultimo = max(
         _lista(eventos.get("tracking_info")),
         key=lambda e: _inteiro(e.get("update_time")) or 0,
@@ -1397,6 +1434,99 @@ async def retrato_pedido(
     if retrato is not None:
         await _indexar(session, integration, plataforma, linhas, comprador_id)
     return retrato
+
+
+# ── As outras compras do comprador (06/11/2026) ───────────────────────────
+
+
+def chave_retrato_compra(integration_id: Any, pedido: str) -> str:
+    return f"atd:compra:{integration_id}:{pedido}"
+
+
+def chave_falha_retrato_compra(integration_id: Any, pedido: str) -> str:
+    # Chave à parte: a falha de agora não apaga o retrato que já está no Redis.
+    return f"atd:compra:falha:{integration_id}:{pedido}"
+
+
+async def marcar_falha_de_retrato(integration_id: Any, pedidos: list[str]) -> None:
+    """Não voltar à loja por estes pedidos por 5 min. Sem Redis, só não marca."""
+    for pedido in pedidos:
+        await _cache_gravar(
+            chave_falha_retrato_compra(integration_id, pedido),
+            {"falhou": True},
+            CACHE_FALHA_RETRATO_COMPRA_S,
+        )
+
+
+async def sem_falha_recente(integration_id: Any, pedidos: list[str]) -> list[str]:
+    """Os pedidos sem falha nos últimos 5 min, na ordem. Sem Redis, todos. Nunca levanta."""
+    return [
+        pedido
+        for pedido in pedidos
+        if await _cache_ler_json(chave_falha_retrato_compra(integration_id, pedido)) is None
+    ]
+
+
+def _cancelamento_shopee(detalhe: dict) -> str | None:
+    """O motivo do cancelamento como a Shopee o manda (sem dado pessoal), ou None."""
+    return _descricao_segura(detalhe.get("cancel_reason")) or _descricao_segura(
+        detalhe.get("buyer_cancel_reason")
+    )
+
+
+async def retratos_em_cache(integration_id: Any, pedidos: list[str]) -> dict[str, dict]:
+    """{pedido: retrato} do que está no Redis. Sem Redis, vazio. Nunca levanta."""
+    saida: dict[str, dict] = {}
+    for pedido in pedidos:
+        retrato = await _cache_ler_json(chave_retrato_compra(integration_id, pedido))
+        if retrato is not None:
+            saida[pedido] = retrato
+    return saida
+
+
+async def retratos_da_loja(
+    integration_id: Any, cliente: Any, pedidos: list[str]
+) -> dict[str, dict]:
+    """{pedido: retrato} direto da Shopee, numa chamada só, e o Redis renovado.
+
+    Só o que foi pedido entra (até `MAX_RETRATOS_POR_ABERTURA`); o que a Shopee não
+    devolve fica de fora. Nada aqui grava no banco: nem a conversa, nem o índice.
+    Falha da loja vira {} e log só com ids: o cartão fica com o que tem. Nunca levanta.
+    Quem não veio, por falha ou por a loja não devolver, ganha a marca de 5 min
+    (`marcar_falha_de_retrato`). Esta função não olha a marca: quem filtra é a rota da
+    abertura da aba, e o "atualizar" do cartão vem direto para cá.
+    """
+    lote = list(dict.fromkeys(n for n in (_texto(p) for p in pedidos) if n))
+    lote = lote[:MAX_RETRATOS_POR_ABERTURA]
+    if not lote or cliente is None:
+        return {}
+    try:
+        detalhes = await cliente.get_order_detail_lote(lote)
+    except Exception as exc:  # noqa: BLE001 — falha da loja nunca derruba o painel
+        logger.info(
+            "atendimento_compras_retratos_falhou",
+            integration_id=str(integration_id),
+            pedidos=len(lote),
+            erro=_erro_curto(exc),
+        )
+        await marcar_falha_de_retrato(integration_id, lote)
+        return {}
+    saida: dict[str, dict] = {}
+    for detalhe in _lista(detalhes):
+        numero = _texto(detalhe.get("order_sn"))
+        if numero not in lote:
+            continue
+        retrato, _ = _montar_retrato_shopee(detalhe, numero)
+        retrato["cancelamento"] = _cancelamento_shopee(detalhe)
+        saida[numero] = retrato
+        validade = (
+            CACHE_RETRATO_COMPRA_FINAL_S
+            if retrato.get("status") in STATUS_COMPRA_FINAL
+            else CACHE_RETRATO_COMPRA_VIVO_S
+        )
+        await _cache_gravar(chave_retrato_compra(integration_id, numero), retrato, validade)
+    await marcar_falha_de_retrato(integration_id, [p for p in lote if p not in saida])
+    return saida
 
 
 # ── A conversa ────────────────────────────────────────────────────────────

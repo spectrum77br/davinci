@@ -313,6 +313,8 @@ const conversa = sfc('../components/AtendimentoConversa.vue')
     'POST /api/atendimento/adspower/aberto',
     'POST /api/atendimento/automacoes/previa',
     'POST /api/atendimento/conversas/{conversa_id}/nao-lida',
+    // 06/11/2026: os cartões das outras compras (POST só por levar a lista; lê e não grava).
+    'POST /api/atendimento/conversas/{conversa_id}/pedidos-comprador/retratos',
     'POST /api/atendimento/conversas/{conversa_id}/rascunho',
     'POST /api/atendimento/conversas/{conversa_id}/visto',
     'POST /api/atendimento/rascunhos/{rascunho_id}/avaliacao',
@@ -323,6 +325,7 @@ const conversa = sfc('../components/AtendimentoConversa.vue')
   assert.match(fonte('AtendimentoAvaliarIa.vue'), /\/api\/atendimento\/rascunhos\/\$\{encodeURIComponent\(id\)\}\/avaliacao`, \{ method: 'POST'/)
   assert.match(fonte('AtendimentoAutomaticas.vue'), /'\/api\/atendimento\/automacoes\/previa', \{\s*method: 'POST'/)
   assert.match(fonte('AtendimentoAbrirPlataforma.vue'), /'\/api\/atendimento\/adspower\/aberto', \{\s*method: 'POST'/)
+  assert.match(fonte('AtendimentoOutrasCompras.vue'), /`\$\{base\.value\}\/retratos`, \{\s*method: 'POST'/)
 }
 
 // ------------------------------------------------ AtendimentoAvaliarIa: a nota de outra pessoa (setup de verdade, API falsa)

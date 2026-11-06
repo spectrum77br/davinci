@@ -403,6 +403,9 @@ const props = defineProps<{
   // A Caixa fica montada (v-show) enquanto a pessoa está em outra aba da
   // página — aí a conversa não precisa ficar se relendo.
   ativa?: boolean
+  // O termo da busca da lista (06/11/2026): só passa para o painel do pedido, onde o
+  // pedido pesquisado aparece com destaque.
+  termoBusca?: string | null
 }>()
 const emit = defineEmits<{
   (e: 'mudou', c: ConversaResumo): void
@@ -4316,6 +4319,7 @@ watch(() => props.conversaId, (novo, velho) => {
         :garantia-erro="garantiaErro"
         :garantia-acesso="garantiaAcesso"
         :emails-sinal="emailsSinal"
+        :termo-busca="termoBusca"
         @vincular-garantia="vincularAberto = true"
         @recarregar-garantia="carregarGarantia(detalhe!.conversa.id)"
         @fechar="alternarPedido"
