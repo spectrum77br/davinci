@@ -11,6 +11,11 @@ Ele fazia isso à mão na Observação ("5-ok", "5-revisar", "25/11 - até essa 
 Nada roda à meia-noite: a marca guarda a data e `estado_da_revisao` compara com hoje
 (fuso de São Paulo) a cada listagem. A marca fica gravada mesmo depois de vencer —
 é o `revisao_estado` que diz o que a linha mostra.
+
+Fechar dia (Cairo, 06/11/2026): "fica ruim ... vai parecer sempre que eu não conferi".
+Quem sai antes do fim do dia dá o dia por encerrado e ele fica verde, mas os pendentes
+seguem na conta: "vai ser fechado mas vai aparecer ali 6 pendentes". Por isso a foto
+não congela; fechar só registra quem e quando.
 """
 
 from __future__ import annotations
@@ -131,8 +136,23 @@ def resumir_dia(linhas: Iterable[LinhaDoDia]) -> dict:
     return resumo
 
 
+def fechar_dia(foto: ChamadoRevisaoDia, *, autor_nome: str, autor_id: UUID) -> None:
+    """Quem fechou primeiro fica: clicar de novo não troca o nome nem a hora."""
+    if foto.fechado_at is not None:
+        return
+    foto.fechado_at = datetime.now(UTC)
+    foto.fechado_por_nome = autor_nome
+    foto.fechado_por_id = autor_id
+
+
+def reabrir_dia(foto: ChamadoRevisaoDia) -> None:
+    foto.fechado_at = None
+    foto.fechado_por_nome = None
+    foto.fechado_por_id = None
+
+
 async def gravar_foto(session: AsyncSession, dia: date, resumo: dict) -> None:
-    """Regrava a foto do dia: a última do dia é a que vale."""
+    """Regrava a foto do dia: a última do dia é a que vale. Não toca no `fechado_*`."""
     valores = {
         "conferido": resumo[CONFERIDO],
         "revisar": resumo[REVISAR],

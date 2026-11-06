@@ -571,6 +571,7 @@ _CLEANUP_TABLES = (
     "margens",
     "chamado_anexo",
     "chamado_mensagem",
+    "chamado_revisao_dias",
     "chamados",
     "chamados_cerebros",
     "chamados_leitores",

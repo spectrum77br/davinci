@@ -466,3 +466,150 @@ def test_resumo_do_dia_separa_falta_de_prazo():
     assert (r["conferido"], r["revisar"], r["fixo"], r["falta"], r["prazos"]) == (1, 1, 1, 2, 2)
     assert r["por_status"] == {"aguard_plataforma": 1, "analise_humano": 1}
     assert len(r["faltaram"]) == 4
+
+
+# --- Fechar dia (Cairo 06/11/2026) ---------------------------------------------
+
+
+async def _dias(client) -> dict:
+    return (await client.get("/api/chamados/dias", params={"meses": 2})).json()
+
+
+async def _usuario(make_user, db, nome="cairo sa", equipes=None):
+    user = await make_user(role="user", permissions=PERM)
+    user.name = nome
+    user.sales_teams = equipes
+    await db.commit()
+    return user
+
+
+@pytest.mark.asyncio
+async def test_fechar_hoje_antes_da_primeira_foto_e_pendente_segue_na_conta(
+    client, make_user, auth_as, db
+):
+    """"vai ser fechado mas vai aparecer ali 6 pendentes": o que chega depois conta."""
+    from app.routers.chamados import fotografar_revisao
+
+    user = await _usuario(make_user, db)
+    auth_as(user)
+    ch = await _chamado(client)
+    await client.post(f"/api/chamados/{ch['id']}/revisao", json={"tipo": "conferido"})
+    assert (await _dias(client))["pode_fechar"] is True
+
+    hoje = rev.hoje_sp().isoformat()
+    assert (await client.post(f"/api/chamados/dias/{hoje}/fechar")).status_code == 204
+
+    await _chamado(client, pedido_bling="301909")
+    dia = (await _dias(client))["dias"][0]
+    assert dia["fechado_por_nome"] == "cairo sa" and dia["fechado_at"]
+    assert (dia["conferido"], dia["falta"]) == (1, 1)
+
+    # A foto de hora em hora atualiza o número e não apaga quem fechou.
+    await fotografar_revisao(db)
+    await db.commit()
+    foto = (await db.execute(select(ChamadoRevisaoDia))).scalar_one()
+    await db.refresh(foto)
+    assert foto.falta == 1 and foto.fechado_por_nome == "cairo sa"
+    assert foto.fechado_por_id == user.id
+
+
+@pytest.mark.asyncio
+async def test_fechar_dia_que_passou_e_reabrir(client, make_user, auth_as, db):
+    auth_as(await _usuario(make_user, db))
+    ontem = rev.hoje_sp() - timedelta(days=1)
+    db.add(_ch(id=uuid4(), created_at=datetime.now(UTC) - timedelta(days=3)))
+    db.add(
+        ChamadoRevisaoDia(
+            dia=ontem, conferido=62, revisar=0, fixo=0, falta=6, prazos=0,
+            por_status={"analise_humano": 6}, faltaram=[],
+        )
+    )
+    await db.commit()
+
+    caminho = f"/api/chamados/dias/{ontem.isoformat()}/fechar"
+    assert (await client.post(caminho)).status_code == 204
+    dia = (await _dias(client))["dias"][1]
+    assert dia["fechado_por_nome"] == "cairo sa" and dia["falta"] == 6
+
+    assert (await client.delete(caminho)).status_code == 204
+    dia = (await _dias(client))["dias"][1]
+    assert dia["fechado_por_nome"] is None and dia["fechado_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_fechar_de_novo_mantem_quem_fechou_primeiro(client, make_user, auth_as, db):
+    primeiro = await _usuario(make_user, db)
+    segundo = await _usuario(make_user, db, "eduardo")
+    hoje = rev.hoje_sp().isoformat()
+
+    auth_as(primeiro)
+    await client.post(f"/api/chamados/dias/{hoje}/fechar")
+    antes = (await _dias(client))["dias"][0]["fechado_at"]
+
+    auth_as(segundo)
+    assert (await client.post(f"/api/chamados/dias/{hoje}/fechar")).status_code == 204
+    dia = (await _dias(client))["dias"][0]
+    assert (dia["fechado_por_nome"], dia["fechado_at"]) == ("cairo sa", antes)
+
+
+@pytest.mark.asyncio
+async def test_fechar_recusa_dia_futuro_e_dia_sem_foto(client, make_user, auth_as):
+    auth_as(await make_user(role="user", permissions=PERM))
+    amanha = (rev.hoje_sp() + timedelta(days=1)).isoformat()
+    sem_foto = (rev.hoje_sp() - timedelta(days=9)).isoformat()
+
+    r = await client.post(f"/api/chamados/dias/{amanha}/fechar")
+    assert (r.status_code, r.json()["detail"]["code"]) == (422, "dia_futuro")
+    r = await client.post(f"/api/chamados/dias/{sem_foto}/fechar")
+    assert (r.status_code, r.json()["detail"]["code"]) == (404, "dia_sem_registro")
+    assert (await client.delete(f"/api/chamados/dias/{sem_foto}/fechar")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_so_quem_edita_e_ve_todas_as_lojas_fecha(client, make_user, auth_as, db):
+    hoje = rev.hoje_sp().isoformat()
+
+    auth_as(await make_user(role="user", permissions={"chamados": {"view": True}}))
+    assert (await _dias(client))["pode_fechar"] is False
+    assert (await client.post(f"/api/chamados/dias/{hoje}/fechar")).status_code == 403
+
+    auth_as(await _usuario(make_user, db, "londres", equipes=[101]))
+    assert (await _dias(client))["pode_fechar"] is False
+    assert (await client.post(f"/api/chamados/dias/{hoje}/fechar")).status_code == 403
+    assert (await client.delete(f"/api/chamados/dias/{hoje}/fechar")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_migration_fecha_05_11_na_ultima_marca_do_cairo(db, make_user):
+    caminho = Path(__file__).parents[1] / "alembic/versions/0458_chamados_fechar_dia.py"
+    spec = importlib.util.spec_from_file_location("migration_0458", caminho)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    schema = (await db.execute(text("select current_schema()"))).scalar_one()
+    cairo = await make_user(role="user", email="sa.geral@tutamail.com")
+    db.add_all(
+        ChamadoRevisaoDia(
+            dia=dia, conferido=62, revisar=0, fixo=0, falta=6, prazos=0, por_status={}, faltaram=[]
+        )
+        for dia in (date(2026, 11, 4), date(2026, 11, 5))
+    )
+    await db.commit()
+
+    conn = await db.connection()
+    assert await conn.run_sync(lambda c: m._fechar_05_11(c, schema)) == 1
+    await db.commit()
+
+    fotos = {f.dia: f for f in (await db.execute(select(ChamadoRevisaoDia))).scalars()}
+    for foto in fotos.values():
+        await db.refresh(foto)
+    fechado = fotos[date(2026, 11, 5)]
+    assert fechado.fechado_at.astimezone(svc.SAO_PAULO).strftime("%d/%m %H:%M:%S") == (
+        "05/11 16:32:53"
+    )
+    assert (fechado.fechado_por_nome, fechado.fechado_por_id) == ("cairo sa", cairo.id)
+    assert fechado.falta == 6
+    assert fotos[date(2026, 11, 4)].fechado_at is None
+
+    # Rodar de novo não troca quem já fechou.
+    conn = await db.connection()
+    assert await conn.run_sync(lambda c: m._fechar_05_11(c, schema)) == 0

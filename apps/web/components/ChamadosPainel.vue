@@ -488,6 +488,14 @@ async function carregarDias() {
     diasRevisao.value = null
   }
 }
+async function fecharDia(dia: RevisaoDia, method: 'POST' | 'DELETE') {
+  try {
+    await api(`/api/chamados/dias/${dia.dia}/fechar`, { method })
+    await carregarDias()
+  } catch (e: any) {
+    toasts.error(method === 'POST' ? 'Não foi possível fechar o dia' : 'Não foi possível reabrir o dia', apiError(e))
+  }
+}
 // Marcar várias linhas seguidas: o painel relê uma vez só, quando a pessoa para.
 let diasTimer: ReturnType<typeof setTimeout> | null = null
 function atualizarDias() {
@@ -2150,21 +2158,22 @@ async function confirmarExcluir() {
         </div>
         <!-- 10 linhas de 40px + o cabeçalho: o painel de meses fica à vista; o resto rola aqui dentro. -->
         <div class="max-h-[448px] overflow-auto focus:outline-none" tabindex="0">
-          <table class="w-full min-w-[1240px] table-fixed border-collapse text-[11.5px]">
+          <table class="w-full min-w-[1486px] table-fixed border-collapse text-[11.5px]">
             <colgroup>
-              <col class="w-[48px]"><col class="w-[60px]"><col class="w-[96px]"><col class="w-[17.5%]">
+              <col class="w-[48px]"><col class="w-[60px]"><col class="w-[146px]"><col class="w-[96px]"><col class="w-[17.5%]">
               <col class="w-[70px]"><col class="w-[104px]"><col class="w-[46px]"><col class="w-[130px]"><col class="w-[12%]"><col class="w-[9%]">
               <col class="w-[214px]">
             </colgroup>
             <thead class="sticky top-0 z-10 bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
               <tr>
-                <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="4">Identificação</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="5">Identificação</th>
                 <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="6">Chamado</th>
                 <th class="sticky right-0 border-b border-l border-l-slate-300 bg-muted px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Hoje</th>
               </tr>
               <tr>
                 <th class="border-b px-1.5 py-1 text-center font-semibold">Data</th>
                 <th class="border-b px-1.5 py-1 text-center font-semibold">Pedido</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold">Pedido marketplace</th>
                 <th class="border-b px-1.5 py-1 text-center font-semibold">Conta</th>
                 <th class="border-b px-1.5 py-1 text-left font-semibold">Produto</th>
                 <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Origem</th>
@@ -2178,13 +2187,13 @@ async function confirmarExcluir() {
             </thead>
             <tbody>
               <tr v-if="loading && !items.length">
-                <td colspan="11" class="py-8 text-center text-muted-foreground">
+                <td colspan="12" class="py-8 text-center text-muted-foreground">
                   <Loader2 class="size-4 inline animate-spin mr-1.5" />
                   carregando…
                 </td>
               </tr>
               <tr v-else-if="!visiveis.length">
-                <td colspan="11" class="py-8 text-center text-muted-foreground">{{ items.length ? 'nenhum chamado com esse filtro nesta página' : 'sem chamados' }}</td>
+                <td colspan="12" class="py-8 text-center text-muted-foreground">{{ items.length ? 'nenhum chamado com esse filtro nesta página' : 'sem chamados' }}</td>
               </tr>
               <tr
                 v-for="row in visiveis"
@@ -2196,6 +2205,8 @@ async function confirmarExcluir() {
               >
                 <td class="px-1.5 text-center text-muted-foreground" :title="fmtDate(row.data)">{{ fmtDate(row.data).slice(0, 5) }}</td>
                 <td class="px-1.5 text-center font-mono font-bold">{{ row.pedido_bling || '—' }}</td>
+                <!-- Cairo 06/11: usam esse número pra procurar; um clique seleciona pra copiar, sem abrir o Raio-X. -->
+                <td class="px-1.5 text-center font-mono"><span class="cursor-text select-all" @click.stop>{{ row.pedido_marketplace || '—' }}</span></td>
                 <td class="truncate px-1.5 text-center" :title="row.conta || ''">{{ row.conta || '—' }}</td>
                 <td class="truncate px-1.5" :title="row.produto || ''">{{ row.produto || '—' }}</td>
                 <td class="border-l border-l-slate-300 px-1.5 text-center dark:border-l-slate-600">{{ origemLabel(row.origem) }}</td>
@@ -2237,7 +2248,7 @@ async function confirmarExcluir() {
         </div>
         <div class="mt-auto border-t px-3 py-1.5 text-center text-[11px] text-muted-foreground">Clique na linha abre o Raio-X do chamado à direita. Conferido e Revisar valem só no dia; Fixo vale até a data. Cada dia a lista recomeça.</div>
       </div>
-      <ChamadosDias v-if="tab === 'chamados' && diasRevisao" :dados="diasRevisao" :escolhido="diaEscolhido?.dia || null" :status-label="statusLabelDe" @escolher="escolherDia" />
+      <ChamadosDias v-if="tab === 'chamados' && diasRevisao" :dados="diasRevisao" :escolhido="diaEscolhido?.dia || null" :status-label="statusLabelDe" @escolher="escolherDia" @fechar="(d) => fecharDia(d, 'POST')" @reabrir="(d) => fecharDia(d, 'DELETE')" />
       </div>
 
       <div class="flex min-w-0 flex-col gap-3">
