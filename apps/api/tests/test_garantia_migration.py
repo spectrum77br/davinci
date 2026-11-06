@@ -1,6 +1,6 @@
 """As migrations 0380 (Painel de Garantia Uranyx), 0434 (garantia automática),
-0439 (pedido de garantia) e 0459 (prazo por produto e o caso do SAC) criam
-EXATAMENTE o que o model declara.
+0439 (pedido de garantia), 0459 (prazo por produto e o caso do SAC) e 0460
+(prazo 0 = sem garantia) criam EXATAMENTE o que o model declara.
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Aqui a 0380 roda de verdade num schema descartável e o catálogo do
@@ -147,6 +147,14 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     # desiste em vez de enfileirar a API atrás dela (como 0449/0451).
     for passo in (mod_sac.upgrade, mod_sac.downgrade):
         assert "SET LOCAL lock_timeout" in inspect.getsource(passo)
+    # O prazo 0 (06/11/2026, "se for avulso não tem garantia").
+    mod_zero = _carregar("0460_garantia_sem_garantia")
+    assert (mod_zero.revision, mod_zero.down_revision) == (
+        "0460_garantia_sem_garantia",
+        "0459_garantia_sac",
+    )
+    for passo in (mod_zero.upgrade, mod_zero.downgrade):
+        assert "SET LOCAL lock_timeout" in inspect.getsource(passo)
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
@@ -170,12 +178,14 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     mod_auto.SCHEMA = rascunho
     mod_pedido.SCHEMA = rascunho
     mod_sac.SCHEMA = rascunho
+    mod_zero.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade")
         await conn.run_sync(_rodar, "upgrade", mod_auto)
         await conn.run_sync(_rodar, "upgrade", mod_pedido)
         await conn.run_sync(_rodar, "upgrade", mod_sac)
+        await conn.run_sync(_rodar, "upgrade", mod_zero)
         await db.commit()
 
         da_migration = await _catalogo(db, rascunho)
@@ -200,7 +210,22 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         )
         do_rascunho = (await db.execute(prazo_do_produto, {"schema": rascunho})).all()
         assert do_rascunho == (await db.execute(prazo_do_produto, {"schema": schema_model})).all()
-        assert len(do_rascunho) == 1 and "120" in do_rascunho[0][2]
+        assert len(do_rascunho) == 1 and "garantia_meses >= 0" in do_rascunho[0][2]
+        # 0 (sem garantia) entra; 121 e -1 não.
+        produto = uuid.uuid4()
+        await db.execute(
+            text(
+                f'INSERT INTO "{rascunho}".pricing_products (id, garantia_meses)'
+                f" VALUES ('{produto}', 0)"
+            )
+        )
+        await db.commit()
+        for ruim in (121, -1):
+            with pytest.raises(Exception, match="ck_pricing_products_garantia_meses"):
+                await db.execute(
+                    text(f'UPDATE "{rascunho}".pricing_products SET garantia_meses = {ruim}')
+                )
+            await db.rollback()
         nomes = {c[1] for c in da_migration["constraints"]}
         assert {
             "pk_garantias",
@@ -334,6 +359,19 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             )
         await db.rollback()
         await db.execute(text(f'DELETE FROM "{rascunho}".garantias'))
+        await db.commit()
+
+        # A volta da 0460: o 0 vira NULL (o CHECK antigo, 1..120, não aceita o 0).
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", mod_zero)
+        await db.commit()
+        assert (
+            await db.execute(text(f'SELECT garantia_meses FROM "{rascunho}".pricing_products'))
+        ).all() == [(None,)]
+        with pytest.raises(Exception, match="ck_pricing_products_garantia_meses"):
+            await db.execute(text(f'UPDATE "{rascunho}".pricing_products SET garantia_meses = 0'))
+        await db.rollback()
+        await db.execute(text(f'UPDATE "{rascunho}".pricing_products SET garantia_meses = 12'))
         await db.commit()
 
         # O downgrade tira tudo o que a 0459, a 0439, a 0434 e a 0380 puseram.

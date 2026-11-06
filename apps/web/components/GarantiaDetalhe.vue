@@ -4,8 +4,9 @@
 //   outros veem mascarado), NF, pedido, data de cadastro, cadastrado por.
 // - Prazo: início (a entrega, com a origem) e o fim ÚNICO da garantia (desde
 //   06/11/2026: entrega + o prazo do produto na Tabela de Preços › Produtos),
-//   com a barra de dias restantes — ou "Prazo não cadastrado". Sem hardware
-//   nem software no painel.
+//   com a barra de dias restantes — ou "Prazo não cadastrado", ou "Sem
+//   garantia" (o prazo 0: o produto vendido sem garantia, 06/11/2026). Sem
+//   hardware nem software no painel.
 // - Atendimentos: linha do tempo dos atendimentos vindos do /atendimento
 //   ("Vincular à garantia"), cada um Coberto ou Fora da garantia, com o
 //   resumo, a solução, as mensagens e os anexos copiados. Só se adiciona —
@@ -32,6 +33,7 @@ import {
   tamanhoLegivel,
   textoAviso,
   textoNf,
+  vendidoSemGarantia,
   type GarantiaDetalhe,
   type LogLinha,
   type Regras,
@@ -273,10 +275,14 @@ onKeyStroke('Escape', () => emit('fechar'))
               <p class="text-xs text-muted-foreground">
                 <template v-if="g.entrega.data">Entrega {{ dataBR(g.entrega.data) }}<template v-if="g.entrega.origem_rotulo"> — {{ g.entrega.origem_rotulo }}</template>.</template>
                 <template v-else-if="g.entregue_sem_data"><span data-entregue-sem-data-texto>O Bling já dá o pedido como entregue, mas nenhuma fonte do DaVinci tem a data de entrega (a Logística guarda a data só desde 15/07/2026). Sem ela não há prazo — a data inicial não se digita; o DaVinci confere de hora em hora.</span></template>
+                <template v-else-if="vendidoSemGarantia(g)">O pedido ainda não tem data de entrega.</template>
                 <template v-else>O pedido ainda não tem data de entrega: o prazo entra sozinho quando ela aparecer (o DaVinci confere de hora em hora).</template>
                 <template v-if="g.entrega.verificada_em"> Conferida em {{ dataHoraBR(g.entrega.verificada_em) }}.</template>
               </p>
-              <GarantiaPrazoBarra v-if="g.garantia_meses" titulo="Garantia" :meses="g.garantia_meses" :prazo="prazo" />
+              <div v-if="vendidoSemGarantia(g)" class="flex items-start gap-1.5 rounded-md border bg-muted/40 px-2.5 py-2 text-xs text-muted-foreground" data-sem-garantia>
+                <span><strong class="text-foreground">Sem garantia</strong> — o produto foi vendido sem garantia (prazo 0 na Tabela de Preços › Produtos, como o avulso).</span>
+              </div>
+              <GarantiaPrazoBarra v-else-if="g.garantia_meses" titulo="Garantia" :meses="g.garantia_meses" :prazo="prazo" />
               <div v-else class="flex items-start gap-1.5 rounded-md border border-amber-300/70 bg-amber-50 px-2.5 py-2 text-xs text-amber-900 dark:border-amber-800/60 dark:bg-amber-900/25 dark:text-amber-200" data-sem-prazo>
                 <TriangleAlert class="mt-px size-3.5 shrink-0" aria-hidden="true" />
                 <span><strong>Prazo não cadastrado</strong> — o produto não tem o prazo da garantia na Tabela de Preços › Produtos (coluna Garantia, em meses). Sem ele a garantia fica sem data final.</span>

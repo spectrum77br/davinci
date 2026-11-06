@@ -12,8 +12,10 @@
 // (o botão Confirmar da aba Garantia) até alguém encerrar ou o caso terminar.
 
 // ─── contrato da API (/api/garantias) ───────────────────────────────────────
-// O status do PAINEL (06/11/2026): pelo fim único da garantia.
-export type StatusGarantia = 'aguardando_entrega' | 'ativa' | 'expirada' | 'sem_prazo'
+// O status do PAINEL (06/11/2026): pelo fim único da garantia. `sem_garantia`
+// (decisão do dono, 06/11/2026: "se for avulso não tem garantia") = o prazo 0
+// na Tabela de Preços — vale antes dos outros (com ou sem entrega).
+export type StatusGarantia = 'aguardando_entrega' | 'ativa' | 'expirada' | 'sem_prazo' | 'sem_garantia'
 export type FiltroStatus = 'todos' | StatusGarantia | 'entregue_sem_data' | 'vence_30d'
 export type Cobertura = 'coberto' | 'fora_da_garantia' | 'sem_data_de_entrega'
 export type TipoProblema = 'hardware' | 'software'
@@ -231,6 +233,8 @@ export type Indicadores = {
   vence_30d: number
   sem_prazo: number
   atendimentos_no_mes: number
+  // O prazo 0 (vendido sem garantia): não é cartão, só a linha embaixo deles.
+  sem_garantia: number
   acionadas: number
   aguardando_entrega: number
   entregue_sem_data: number
@@ -480,6 +484,10 @@ export const STATUS: Record<StatusGarantia, { rotulo: string; dica: string }> = 
     rotulo: 'Prazo não cadastrado',
     dica: 'o produto não tem o prazo da garantia na Tabela de Preços › Produtos (coluna Garantia, em meses) — sem ele não há data final',
   },
+  sem_garantia: {
+    rotulo: 'Sem garantia',
+    dica: 'o produto foi vendido sem garantia (prazo 0 na Tabela de Preços › Produtos, como o avulso)',
+  },
 }
 // O "Aguardando entrega" de pedido que o Bling já dá como entregue (o
 // DaVinci não tem a data: a Logística só guarda a data desde 15/07/2026).
@@ -502,6 +510,7 @@ export const FILTROS_STATUS: { value: FiltroStatus; label: string }[] = [
   { value: 'entregue_sem_data', label: 'Entregue — sem data no DaVinci' },
   { value: 'vence_30d', label: 'Vence em 30 dias' },
   { value: 'sem_prazo', label: 'Sem prazo cadastrado' },
+  { value: 'sem_garantia', label: 'Sem garantia' },
 ]
 
 export const COBERTURA: Record<Cobertura, { rotulo: string }> = {
@@ -584,6 +593,8 @@ export const CAMPOS_LOG: Record<string, string> = {
   // O Confirmar com a garantia já vencida (o "Confirmar mesmo assim?"): o fim
   // que a tela avisou.
   garantia_vencida: 'Confirmou com a garantia já vencida (fim)',
+  // O Confirmar do produto vendido sem garantia (prazo 0, 06/11/2026).
+  sem_garantia: 'Confirmou com o produto vendido sem garantia (prazo)',
   entrega_origem: 'Origem da entrega',
   // O pedido de garantia que o robô tinha achado, desfeito ao corrigir o pedido.
   pedido_de_garantia: 'Pedido de garantia',
@@ -619,6 +630,7 @@ export const ERROS: Record<string, string> = {
   sac_nao_encontrado: 'Caso do SAC não encontrado (ou de uma loja fora da sua equipe).',
   sac_sem_garantia: 'Este SAC ainda não está ligado a uma venda — vincule em "SAC sem pedido" antes de confirmar.',
   garantia_vencida: 'A garantia desta venda já venceu.',
+  produto_sem_garantia: 'Este produto foi vendido sem garantia.',
   sac_nao_confirmado: 'O atendimento ainda não foi confirmado — confirme na aba Garantia antes de encerrar.',
   sac_ja_confirmado: 'Este SAC já foi confirmado em outra garantia — não dá para mudar o vínculo.',
   sac_restrito: 'Só quem enxerga todas as lojas vincula o SAC do site à mão.',
@@ -811,14 +823,16 @@ export function coberto(fim: string | null | undefined, dia: string, ultimoDiaCo
  * a mesma conta do servidor (services/garantia.py `cobertura_em`, revisão
  * 06/11/2026): com o prazo do produto, o fim ÚNICO (`fim_garantia`), qualquer
  * que seja o tipo; sem prazo cadastrado, o fim antigo do tipo. Sem o tipo e
- * sem o prazo não dá para dizer: null.
+ * sem o prazo não dá para dizer: null. Produto vendido sem garantia (prazo 0):
+ * fora da garantia, sem fim.
  */
 export function previaCobertura(
-  g: Pick<GarantiaLinha, 'data_inicio' | 'fim_hardware' | 'fim_software' | 'fim_garantia'>,
+  g: Pick<GarantiaLinha, 'data_inicio' | 'fim_hardware' | 'fim_software' | 'fim_garantia' | 'garantia_meses'>,
   tipo: TipoProblema | null,
   quando: string | null,
   ultimoDiaCoberto = true,
 ): { cobertura: Cobertura; fim: string | null; dia: string | null } | null {
+  if (vendidoSemGarantia(g)) return { cobertura: 'fora_da_garantia', fim: null, dia: diaEmSP(quando) || hojeSP() }
   if (!g.data_inicio) return { cobertura: 'sem_data_de_entrega', fim: null, dia: diaEmSP(quando) }
   const fim = g.fim_garantia || (tipo === 'hardware' ? g.fim_hardware : tipo === 'software' ? g.fim_software : undefined)
   if (fim === undefined) return null
@@ -926,10 +940,19 @@ export function prazoUnico(g: Pick<GarantiaLinha, 'data_inicio' | 'fim_garantia'
   const restantes = Math.max(0, Math.min(_dias(hoje, g.fim_garantia), total))
   return { fim: g.fim_garantia, dias_total: total, dias_restantes: restantes, coberto_hoje: coberto(g.fim_garantia, hoje, ultimoDiaCoberto) }
 }
-/** "12 meses" / "1 mês" / "—" (sem prazo cadastrado). */
+/** "12 meses" / "1 mês" / "sem garantia" (0) / "—" (sem prazo cadastrado). */
 export function textoMeses(n: number | null | undefined): string {
-  if (!n) return '—'
+  if (n == null) return '—'
+  if (n === 0) return 'sem garantia'
   return n === 1 ? '1 mês' : `${n} meses`
+}
+/**
+ * O produto vendido sem garantia (06/11/2026, "se for avulso não tem
+ * garantia"): o prazo 0 na Tabela de Preços — diferente do vazio (null, "prazo
+ * não cadastrado").
+ */
+export function vendidoSemGarantia(g: { garantia_meses?: number | null } | null | undefined): boolean {
+  return g?.garantia_meses === 0
 }
 
 // ─── lista ──────────────────────────────────────────────────────────────────

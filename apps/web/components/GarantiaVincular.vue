@@ -262,7 +262,7 @@ onKeyStroke('Escape', () => { if (!salvando.value) emit('fechar') })
                 >outro pedido</span>
                 <span class="w-full text-xs text-muted-foreground">
                   #{{ r.id }} · NF {{ textoNf(r.nf_numero, r.nf_serie) }} · pedido {{ r.pedido_bling }} ·
-                  <template v-if="r.fim_garantia">garantia até {{ dataCurta(r.fim_garantia) }}</template><template v-else-if="r.data_inicio && !r.garantia_meses">prazo não cadastrado</template><template v-else>garantia até —</template>
+                  <template v-if="r.fim_garantia">garantia até {{ dataCurta(r.fim_garantia) }}</template><template v-else-if="r.garantia_meses === 0">sem garantia</template><template v-else-if="r.data_inicio && !r.garantia_meses">prazo não cadastrado</template><template v-else>garantia até —</template>
                 </span>
               </button>
             </li>
@@ -295,7 +295,8 @@ onKeyStroke('Escape', () => { if (!salvando.value) emit('fechar') })
         <!-- cobertura antes de salvar -->
         <GarantiaCobertura v-if="previa" :cobertura="previa.cobertura" bloco data-previa-cobertura>
           <span class="text-xs">
-            <template v-if="previa.cobertura === 'sem_data_de_entrega'">a garantia ainda espera a data de entrega do pedido.</template>
+            <template v-if="escolhida?.garantia_meses === 0">atendimento em {{ dataBR(quando) }} · o produto foi vendido sem garantia (prazo 0 na Tabela de Preços › Produtos).</template>
+            <template v-else-if="previa.cobertura === 'sem_data_de_entrega'">a garantia ainda espera a data de entrega do pedido.</template>
             <template v-else-if="escolhida?.fim_garantia">atendimento em {{ dataBR(quando) }} · garantia até {{ dataBR(previa.fim) }}.</template>
             <template v-else>atendimento em {{ dataBR(quando) }} · o produto não tem prazo na Tabela de Preços › Produtos: vale o prazo antigo deste tipo, até {{ dataBR(previa.fim) }}.</template>
           </span>

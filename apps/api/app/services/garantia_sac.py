@@ -145,6 +145,33 @@ ARQUIVOS: tuple[tuple[str, str], ...] = (
     ("Comprovante", r"Comprovante(?: d[ae] compra)?" + _PARENTESES),
     ("Vídeo", r"V[íi]deo" + _PARENTESES),
 )
+# O site renomeia cada anexo do e-mail pelo protocolo e pelo campo
+# ("US-26-0005-01-produto.jpg", "…-03-defeito-1.jpg", "…-05-video.mp4" — visto
+# no teste de 06/11/2026); o corpo do e-mail não repete o nome do arquivo.
+_RX_ANEXO_DO_SITE = re.compile(
+    r"-\d{2}-(produto|etiqueta|embalagem|comprovante|defeito-(\d+)|video)\.[a-z0-9]{2,5}$",
+    re.IGNORECASE,
+)
+_PAPEL_DO_ANEXO = {
+    "produto": "Foto do produto",
+    "etiqueta": "Foto da etiqueta",
+    "embalagem": "Foto da embalagem",
+    "comprovante": "Comprovante",
+    "video": "Vídeo",
+}
+
+
+def papel_do_arquivo(nome: str | None) -> str | None:
+    """O papel do anexo pelo nome que o site dá ("…-03-defeito-1.jpg" → "Foto
+    do defeito 1"). None se o nome não segue o padrão. PURA."""
+    m = _RX_ANEXO_DO_SITE.search((nome or "").strip())
+    if not m:
+        return None
+    if m.group(2):
+        return f"Foto do defeito {int(m.group(2))}"
+    return _PAPEL_DO_ANEXO[m.group(1).lower()]
+
+
 CHAVES_DO_FORMULARIO = ("protocolo", "aberto_em", *(c for c, _ in _ROTULOS))
 _RX_ROTULOS = [
     (chave, re.compile(rf"^\s*{rx}\s*:?\s*(.*)$", re.IGNORECASE)) for chave, rx in _ROTULOS

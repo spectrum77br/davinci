@@ -86,7 +86,7 @@ const semGarantia = computed(() => {
             <NuxtLink v-if="podeAbrir" :to="`/garantias?garantia=${g.id}`" target="_blank" class="ml-auto inline-flex items-center gap-0.5 text-primary hover:underline" title="abrir a garantia (outra aba)">abrir<ExternalLink class="size-3" /></NuxtLink>
           </div>
           <div class="text-muted-foreground">{{ g.cliente_nome }} · {{ g.cpf_mascarado || '—' }}</div>
-          <div class="text-muted-foreground" data-fim-garantia><template v-if="g.fim_garantia">garantia até {{ dataCurta(g.fim_garantia) }}</template><template v-else-if="g.data_inicio && !g.garantia_meses">prazo não cadastrado</template><template v-else>garantia até —</template> · {{ g.atendimentos }} atend.</div>
+          <div class="text-muted-foreground" data-fim-garantia><template v-if="g.fim_garantia">garantia até {{ dataCurta(g.fim_garantia) }}</template><template v-else-if="g.garantia_meses === 0">sem garantia</template><template v-else-if="g.data_inicio && !g.garantia_meses">prazo não cadastrado</template><template v-else>garantia até —</template> · {{ g.atendimentos }} atend.</div>
         </li>
       </ul>
       <p v-else-if="!s.alerta_cpf_sem_garantia && semGarantia" class="text-xs text-muted-foreground">{{ semGarantia }}</p>

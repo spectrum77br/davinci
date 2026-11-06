@@ -692,9 +692,10 @@ type PricingProduct = {
   // o servidor tenta o código no nome e marca certificacao_pelo_nome.
   certificacao_id?: string | null
   certificacao_pelo_nome?: boolean
-  // Prazo da garantia do produto, em meses (1..120; NULL = sem prazo
-  // cadastrado). Coluna "Garantia (meses)" da aba Produtos (06/11/2026): o
-  // painel de Garantia calcula o fim de cada venda por este número.
+  // Prazo da garantia do produto, em meses (0..120; 0 = sem garantia, "se for
+  // avulso não tem garantia"; NULL = sem prazo cadastrado). Coluna "Garantia
+  // (meses)" da aba Produtos (06/11/2026): o painel de Garantia calcula o fim
+  // de cada venda por este número.
   garantia_meses: number | null
   created_at: string
   updated_at: string
@@ -1729,16 +1730,16 @@ function classeEtiquetaMidia(tom: 'vazio' | 'ver' | 'ambar' | 'ok' | 'enviando')
 // =========================================================== product inline edit
 
 // Coluna "Garantia (meses)" (06/11/2026): o texto digitado vira o número que
-// vai no PATCH. Vazio/"-"/"—" = null (apaga o prazo); inteiro de 1 a 120 = o
-// número; qualquer outra coisa (0, 121, "12,5", "abc") = undefined, e a
-// célula não envia nada e avisa.
+// vai no PATCH. Vazio/"-"/"—" = null (apaga o prazo); inteiro de 0 a 120 = o
+// número (0 = sem garantia, "se for avulso não tem garantia"); qualquer outra
+// coisa (121, "12,5", "abc") = undefined, e a célula não envia nada e avisa.
 const GARANTIA_MESES_MAX = 120
 function lerGarantiaMeses(raw: string): number | null | undefined {
   const t = raw.trim()
   if (!t || t === '-' || t === '—') return null
   if (!/^\d+$/.test(t)) return undefined
   const n = parseInt(t, 10)
-  if (!Number.isFinite(n) || n < 1 || n > GARANTIA_MESES_MAX) return undefined
+  if (!Number.isFinite(n) || n < 0 || n > GARANTIA_MESES_MAX) return undefined
   return n
 }
 
@@ -1811,7 +1812,7 @@ async function _patchProduct(id: string, field: string, raw: string) {
   } else if (field === 'garantia_meses') {
     const n = lerGarantiaMeses(raw)
     if (n === undefined) {
-      productsErr.value = `Garantia: prazo inválido ("${raw}") — use um número inteiro de meses, de 1 a ${GARANTIA_MESES_MAX}, ou deixe vazio para tirar o prazo`
+      productsErr.value = `Garantia: prazo inválido ("${raw}") — use um número inteiro de meses, de 0 (sem garantia) a ${GARANTIA_MESES_MAX}, ou deixe vazio para tirar o prazo`
       return
     }
     // Sem mudança não manda PATCH: o servidor grava a vigência a cada troca.
@@ -5121,7 +5122,7 @@ watch(department, async () => {
               >Catálogo</th>
               <th
                 class="text-right px-2 py-2 font-medium border-b border-border w-24"
-                title="Prazo da garantia do produto, em meses. Aumentar vale para todas as vendas; diminuir vale só para as vendas a partir da mudança."
+                title="Prazo da garantia do produto, em meses (0 = sem garantia). Aumentar vale para todas as vendas; diminuir só para as vendas a partir da mudança; corrigir no mesmo dia desfaz o valor anterior."
                 data-col-garantia-meses
               >Garantia (meses)</th>
               <th
@@ -5391,7 +5392,8 @@ watch(department, async () => {
               </td>
               <!-- Garantia (meses), 06/11/2026: prazo único do produto, em
                    todos os segmentos. Edita quem edita produtos (mesmo PATCH
-                   das outras células); vazio = "—" (sem prazo cadastrado). -->
+                   das outras células); vazio = "—" (sem prazo cadastrado);
+                   0 = "sem garantia" (o avulso). -->
               <td
                 class="border border-border px-2 py-1.5 text-xs text-right"
                 :class="{
@@ -5399,7 +5401,7 @@ watch(department, async () => {
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'garantia_meses'),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'garantia_meses'),
                 }"
-                :title="p.garantia_meses == null ? 'Prazo da garantia não cadastrado' : `Garantia de ${p.garantia_meses} ${p.garantia_meses === 1 ? 'mês' : 'meses'}`"
+                :title="p.garantia_meses == null ? 'Prazo da garantia não cadastrado' : p.garantia_meses === 0 ? 'Sem garantia (0 = sem garantia)' : `Garantia de ${p.garantia_meses} ${p.garantia_meses === 1 ? 'mês' : 'meses'}`"
                 data-col-garantia-meses
                 @click="canEditProdutos && !isEditing(p.id, 'garantia_meses') && startEditProduct(p, 'garantia_meses')"
               >
@@ -5411,7 +5413,7 @@ watch(department, async () => {
                   class="w-full text-xs bg-transparent outline-none text-right"
                   @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
                 />
-                <span v-else :class="{ 'text-muted-foreground': p.garantia_meses == null }">{{ p.garantia_meses == null ? '—' : p.garantia_meses }}</span>
+                <span v-else :class="{ 'text-muted-foreground': p.garantia_meses == null || p.garantia_meses === 0 }">{{ p.garantia_meses == null ? '—' : p.garantia_meses === 0 ? 'sem garantia' : p.garantia_meses }}</span>
               </td>
               <!-- Fotos: etiqueta com texto (quantas fotos/vídeos, pasta vazia,
                    sem pasta). O clique abre o painel de mídias na aba Fotos —

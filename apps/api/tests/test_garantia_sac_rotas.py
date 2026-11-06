@@ -213,6 +213,38 @@ async def test_confirmar_avisa_a_vencida_e_aciona_a_garantia(client, db, make_us
     assert (await client.post(url, json={"enviar_email": True})).status_code == 422
 
 
+async def test_confirmar_produto_vendido_sem_garantia(client, db, make_user, auth_as):
+    """Prazo 0 (06/11/2026, "se for avulso não tem garantia"): o Confirmar avisa
+    antes (409 produto_sem_garantia) e confirma de novo com a pessoa ciente; o
+    log guarda que foi sem garantia."""
+    g = await _garantia(db, entrega=_hoje() - timedelta(days=10), prazo=0)
+    assert g.fim_garantia is None
+    caso = await _caso(db, g)
+    url = f"/api/garantias/sac/{caso.id}/confirmar"
+    atendente = await make_user(permissions=ATENDENTE)
+    auth_as(atendente)
+    r = await client.post(url, json={})
+    assert (r.status_code, r.json()["detail"]) == (409, {"code": "produto_sem_garantia"})
+    assert (await db.get(GarantiaSac, caso.id)).confirmado_em is None
+    assert await _logs(db, g.id, "confirmou_atendimento") == []
+    r = await client.post(url, json={"ciente_vencida": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["confirmado_por"]["id"] == str(atendente.id)
+    [log] = await _logs(db, g.id, "confirmou_atendimento")
+    assert (log.user_id, log.campo, log.valor_novo, log.detalhe) == (
+        atendente.id,
+        "sem_garantia",
+        "0 meses",
+        "US-26-0101",
+    )
+    h = await _lista(client, mostrar="acionada")
+    assert [i["id"] for i in h["itens"]] == [g.id]
+    assert (h["itens"][0]["status"], h["itens"][0]["status_rotulo"]) == (
+        "sem_garantia",
+        "Sem garantia",
+    )
+
+
 async def test_confirmar_sem_garantia_e_encerrar(client, db, make_user, auth_as):
     sem = await _caso(db, protocolo="US-26-0102")
     g = await _garantia(db, entrega=_hoje() - timedelta(days=10))
@@ -485,8 +517,9 @@ async def test_lista_com_as_colunas_novas(client, db, make_user, auth_as):
     assert b["status_pedido"] == "Excluído no Bling" and b["sac"] is None
     assert b["conta"] == "loja teste"  # sem a loja em store_info, o nome gravado
     ind = h["indicadores"]
-    assert (ind["ativas"], ind["sem_prazo"], ind["total"]) == (1, 1, 2)
+    assert (ind["ativas"], ind["sem_prazo"], ind["sem_garantia"], ind["total"]) == (1, 1, 0, 2)
     assert [i["id"] for i in (await _lista(client, status="sem_prazo"))["itens"]] == [fora.id]
+    assert (await _lista(client, status="sem_garantia"))["itens"] == []
     # O detalhe tem as mesmas colunas.
     d = (await client.get(f"/api/garantias/{na_tabela.id}")).json()
     assert (d["nome"], d["produto_nome"], d["sac"]["protocolo"]) == (
@@ -494,6 +527,56 @@ async def test_lista_com_as_colunas_novas(client, db, make_user, auth_as):
         "Uranyx T8",
         "US-26-0101",
     )
+
+
+async def test_lista_com_o_produto_sem_garantia(client, db, make_user, auth_as):
+    """Prazo 0 (06/11/2026): o status "Sem garantia" vale antes de aguardando,
+    ativa e expirada; o filtro novo acha só elas; "Sem prazo cadastrado"
+    continua só o vazio; aguardando e "entregue sem data" não contam o 0."""
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    hoje = _hoje()
+    entregue = await _garantia(db, "600031", entrega=hoje - timedelta(days=10), prazo=0)
+    # Sem entrega, com o Bling dizendo entregue: não é "aguardando".
+    sem_entrega = await _garantia(db, "600032", prazo=0, situacao="83953")
+    ativa = await _garantia(db, "600033", entrega=hoje - timedelta(days=10), prazo=12)
+    aguardando = await _garantia(db, "600034", prazo=12, situacao="83953")
+    vazio = await _garantia(db, "600035", entrega=hoje - timedelta(days=10), prazo=None)
+    h = await _lista(client)
+    por_id = {i["id"]: i for i in h["itens"]}
+    for g in (entregue, sem_entrega):
+        linha = por_id[g.id]
+        assert (linha["status"], linha["status_rotulo"]) == ("sem_garantia", "Sem garantia")
+        assert (linha["garantia_meses"], linha["fim_garantia"]) == (0, None)
+        assert linha["entregue_sem_data"] is False
+    assert por_id[ativa.id]["status"] == "ativa"
+    assert (por_id[aguardando.id]["status"], por_id[aguardando.id]["entregue_sem_data"]) == (
+        "aguardando_entrega",
+        True,
+    )
+    assert por_id[vazio.id]["status"] == "sem_prazo"
+    ind = h["indicadores"]
+    assert (
+        ind["sem_garantia"],
+        ind["sem_prazo"],
+        ind["aguardando_entrega"],
+        ind["entregue_sem_data"],
+        ind["ativas"],
+        ind["expiradas"],
+        ind["total"],
+    ) == (2, 1, 1, 1, 1, 0, 5)
+
+    async def ids(status):
+        return sorted(i["id"] for i in (await _lista(client, status=status))["itens"])
+
+    assert await ids("sem_garantia") == sorted([entregue.id, sem_entrega.id])
+    assert await ids("sem_prazo") == [vazio.id]
+    assert await ids("aguardando_entrega") == [aguardando.id]
+    assert await ids("entregue_sem_data") == [aguardando.id]
+    assert await ids("expirada") == []
+    # O detalhe: sem a barra de prazo (sem fim) e com o mesmo status.
+    d = (await client.get(f"/api/garantias/{entregue.id}")).json()
+    assert (d["status"], d["garantia_meses"], d["fim_garantia"]) == ("sem_garantia", 0, None)
 
 
 async def test_a_conversa_do_sac_aparece_para_a_equipe(client, db, make_user, auth_as):

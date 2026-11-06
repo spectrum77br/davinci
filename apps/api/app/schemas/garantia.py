@@ -66,8 +66,8 @@ class AtendimentoCreate(BaseModel):
 
 # Filtro de status da lista (06/11/2026, o prazo único por produto): Ativa ·
 # Expirada · Aguardando entrega · Entregue — sem data no DaVinci · Vence em 30
-# dias · Sem prazo cadastrado. Saem "Somente software" e "Hardware vence em 30
-# dias".
+# dias · Sem prazo cadastrado · Sem garantia (o prazo 0: "se for avulso não tem
+# garantia"). Saem "Somente software" e "Hardware vence em 30 dias".
 StatusFiltro = Literal[
     "todos",
     "ativa",
@@ -76,6 +76,7 @@ StatusFiltro = Literal[
     "entregue_sem_data",
     "vence_30d",
     "sem_prazo",
+    "sem_garantia",
 ]
 
 
@@ -261,6 +262,9 @@ class IndicadoresOut(BaseModel):
     vence_30d: int
     sem_prazo: int
     atendimentos_no_mes: int
+    # O prazo 0 na Tabela de Preços (vendido sem garantia): não é cartão, só
+    # entra na linha embaixo deles.
+    sem_garantia: int = 0
     # As garantias com o SAC confirmado (Garantia acionada).
     acionadas: int = 0
     aguardando_entrega: int

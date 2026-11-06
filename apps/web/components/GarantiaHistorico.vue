@@ -77,11 +77,7 @@ async function carregar() {
     if (g !== geracao) return
     historico.value = h
     await nextTick()
-    // Abre na mensagem em que o cliente pediu a garantia (destacada); sem
-    // ela, no fim, como o Atendimento.
-    const pedido = rolagem.value?.querySelector('[data-pedido-garantia]')
-    if (pedido) pedido.scrollIntoView({ block: 'center' })
-    else if (rolagem.value) rolagem.value.scrollTop = rolagem.value.scrollHeight
+    rolarParaOCaso()
   } catch (e) {
     if (g !== geracao) return
     erro.value = errosDaApi(e).geral || 'Não consegui carregar o histórico.'
@@ -94,6 +90,16 @@ async function carregar() {
 // "consultou" de novo).
 watch([() => props.garantia.id, () => props.versao], () => { historico.value = null; void carregar() }, { immediate: true })
 
+// Abre no formulário do SAC (o começo do caso, com as fotos e o vídeo —
+// 06/11/2026); sem ele, na mensagem em que o cliente pediu a garantia
+// (destacada); sem ela, no fim, como o Atendimento.
+function rolarParaOCaso() {
+  const caixa = rolagem.value
+  if (!caixa) return
+  const alvo = caixa.querySelector('[data-sac-formulario]') ?? caixa.querySelector('[data-pedido-garantia]')
+  if (alvo) alvo.scrollIntoView({ block: 'start' })
+  else caixa.scrollTop = caixa.scrollHeight
+}
 // ─── o caso do SAC do site (06/11/2026) ─────────────────────────────────────
 // GET /api/garantias/{id}/sac: o formulário lido (o Resumo do SAC), a
 // conversa do protocolo (a resposta por e-mail sai por ela) e quem
@@ -101,6 +107,12 @@ watch([() => props.garantia.id, () => props.versao], () => { historico.value = n
 const sac = ref<SacDetalhe | null>(null)
 const erroSac = ref('')
 let geracaoSac = 0
+// O formulário do caso está na linha do tempo: o Resumo do SAC vai dentro do
+// cartão dele (sem repetir no topo).
+const formularioNaLinha = computed(() => {
+  const c = sac.value?.conversa_id
+  return !!c && !!historico.value?.mensagens.some((m) => m.formulario_sac && m.conversa_id === c)
+})
 async function carregarSac() {
   const g = ++geracaoSac
   erroSac.value = ''
@@ -112,6 +124,8 @@ async function carregarSac() {
     const r = await api<SacDetalhe | null>(`/api/garantias/${props.garantia.id}/sac`)
     if (g !== geracaoSac) return
     sac.value = r ?? null
+    await nextTick()
+    if (historico.value) rolarParaOCaso()
   } catch (e) {
     if (g !== geracaoSac) return
     sac.value = null
@@ -356,6 +370,7 @@ function aoRegistrar(_a: AtendimentoGarantia) {
         <span data-fim-garantia>
           <span class="text-muted-foreground">Fim da garantia</span>
           <span v-if="garantia.fim_garantia" class="ml-1 tabular-nums">{{ dataCurta(garantia.fim_garantia) }} ({{ textoMeses(garantia.garantia_meses) }})</span>
+          <span v-else-if="garantia.garantia_meses === 0" class="ml-1" title="o produto foi vendido sem garantia (prazo 0 na Tabela de Preços › Produtos)" data-sem-garantia>Sem garantia</span>
           <span v-else-if="!garantia.garantia_meses" class="ml-1 text-amber-700 dark:text-amber-300" title="o produto não tem o prazo da garantia na Tabela de Preços › Produtos">— prazo não cadastrado</span>
           <span v-else class="ml-1 tabular-nums">—</span>
         </span>
@@ -385,7 +400,7 @@ function aoRegistrar(_a: AtendimentoGarantia) {
       <div v-if="carregando && !historico" class="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground"><Loader2 class="size-4 animate-spin" /> lendo as conversas…</div>
       <p v-else-if="erro" role="alert" class="flex items-center justify-center gap-2 py-10 text-sm text-destructive"><AlertCircle class="size-4" /> {{ erro }}</p>
       <template v-else-if="historico">
-        <GarantiaSacResumo v-if="sac" :sac="sac" />
+        <GarantiaSacResumo v-if="sac && !formularioNaLinha" :sac="sac" />
         <p v-else-if="erroSac" class="text-center text-xs text-destructive">{{ erroSac }}</p>
         <div v-if="historico.cortadas" class="flex justify-center">
           <span class="rounded-full bg-background px-2.5 py-0.5 text-[11px] text-muted-foreground shadow-sm">mostrando as mensagens mais recentes — as mais antigas estão no Atendimento</span>
@@ -424,12 +439,16 @@ function aoRegistrar(_a: AtendimentoGarantia) {
               <div class="mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
                 <span class="font-semibold text-amber-900 dark:text-amber-200">Formulário do SAC do site · protocolo {{ protocoloDa(l.m) }}</span>
                 <span class="text-muted-foreground">{{ hora(l.m.enviada_em) }}</span>
-                <a :href="linkDa(l.m)" target="_blank" rel="noopener" class="ml-auto inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-xs hover:bg-muted" title="abre o e-mail no Atendimento, com os links das fotos e do vídeo (válidos por 30 dias)">
-                  <ExternalLink class="size-3" /> ver o e-mail completo (fotos e vídeo)
+                <a :href="linkDa(l.m)" target="_blank" rel="noopener" class="ml-auto inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-xs hover:bg-muted" title="abre o e-mail original no Atendimento">
+                  <ExternalLink class="size-3" /> e-mail original
                 </a>
               </div>
-              <div class="whitespace-pre-wrap break-words text-[13px] leading-relaxed" :class="sacAberto.has(l.m.id) ? '' : 'max-h-64 overflow-hidden'">{{ formularioSacLegivel(l.m.texto) }}</div>
-              <button type="button" class="mt-1 text-xs text-primary underline-offset-2 hover:underline" @click="alternarSac(l.m.id)">{{ sacAberto.has(l.m.id) ? 'mostrar menos' : 'ler o formulário inteiro' }}</button>
+              <!-- O caso desta conversa: os dados organizados e as fotos e o vídeo AQUI (06/11/2026). -->
+              <GarantiaSacResumo v-if="sac && l.m.conversa_id === sac.conversa_id" :sac="sac" embutido />
+              <template v-else>
+                <div class="whitespace-pre-wrap break-words text-[13px] leading-relaxed" :class="sacAberto.has(l.m.id) ? '' : 'max-h-64 overflow-hidden'">{{ formularioSacLegivel(l.m.texto) }}</div>
+                <button type="button" class="mt-1 text-xs text-primary underline-offset-2 hover:underline" @click="alternarSac(l.m.id)">{{ sacAberto.has(l.m.id) ? 'mostrar menos' : 'ler o formulário inteiro' }}</button>
+              </template>
             </div>
           </div>
           <div v-else-if="ladoDaMensagem(l.m) === 'sistema'" class="flex justify-center">

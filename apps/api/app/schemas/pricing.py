@@ -211,8 +211,9 @@ class PricingProductBase(BaseModel):
     # la, o sku com a tag, ja deve trocar, porque a prioridade e ele").
     prioridade_estoque: str | None = None
     # Prazo da garantia do produto, em meses (coluna "Garantia (meses)",
-    # 06/11/2026). None = sem prazo cadastrado.
-    garantia_meses: int | None = Field(None, ge=1, le=120)
+    # 06/11/2026). None = sem prazo cadastrado; 0 = sem garantia ("se for
+    # avulso não tem garantia", 06/11/2026).
+    garantia_meses: int | None = Field(None, ge=0, le=120)
 
     @field_validator("prioridade_estoque")
     @classmethod
@@ -250,8 +251,9 @@ class PricingProductPatch(BaseModel):
     # Coluna Modelo da aba Produtos: a linha da Certificações escolhida.
     # null = sem vínculo gravado (volta a valer o código no nome).
     certificacao_id: UUID | None = None
-    # Coluna "Garantia (meses)" (06/11/2026): 1 a 120; null apaga o prazo.
-    garantia_meses: int | None = Field(None, ge=1, le=120)
+    # Coluna "Garantia (meses)" (06/11/2026): 0 a 120 (0 = sem garantia);
+    # null apaga o prazo.
+    garantia_meses: int | None = Field(None, ge=0, le=120)
 
     @field_validator("prioridade_estoque")
     @classmethod

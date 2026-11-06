@@ -7,6 +7,10 @@ Produtos" — a coluna Garantia (meses), `pricing_products.garantia_meses`.
   * Cálculo: fim da garantia = data de entrega + prazo do produto (RN04: o dia
     que não existe vira o último; vale até a data final, inclusive).
   * Produto sem prazo: a garantia fica sem data final ("Prazo não cadastrado").
+  * Prazo 0 (decisão do Eduardo, 06/11/2026: "se for avulso não tem
+    garantia"): o produto é vendido SEM GARANTIA — a venda fica "Sem garantia"
+    e sem data final. 0 é um prazo de verdade (não é "vazio"): conta como
+    qualquer outro na regra abaixo.
   * Mudança de prazo: "se o prazo aumentar, vale para todas as vendas do
     produto. Se diminuir, vale só para as vendas feitas a partir da mudança,
     para não encurtar garantias já vendidas."
@@ -20,9 +24,12 @@ cada mudança fica gravada (`pricing_garantia_prazo`, a vigência e o log): o
 robô da garantia cria a venda de até 45 dias atrás, e a venda feita antes de
 uma redução, mesmo criada depois dela, continua com o prazo maior.
 
-Atenção: um número digitado errado e corrigido logo depois (120 no lugar de
-12) também vale para as vendas anteriores — a regra é o maior prazo que o
-produto teve.
+Correção no mesmo dia (decisão do Eduardo, 06/11/2026: "correção no mesmo
+dia anula"): o prazo trocado por outro NO MESMO DIA (o dia em São Paulo em que
+ele começou = o dia da mudança seguinte) não conta — vale como se nunca
+tivesse existido. Assim o 120 digitado no lugar de 12 e corrigido logo depois
+não alonga as vendas anteriores. Corrigido num dia seguinte, ele valeu um
+tempo e continua contando no maior.
 
 Data da venda = o dia da compra no Bling (`garantia_pedido.compra_da_garantia`);
 sem o pedido no espelho, o dia do cadastro da garantia.
@@ -59,17 +66,39 @@ _LOTE = 1000
 Vigencia = tuple[datetime, int | None]
 
 
+def _dia_da_vigencia(desde: datetime) -> date | None:
+    """O dia (São Paulo) em que a vigência começou; None = desde sempre."""
+    try:
+        return svc.dia_em_sp(desde)
+    except OverflowError:  # `_DESDE_SEMPRE` não cabe no fuso de São Paulo
+        return None
+
+
+def _sem_as_corrigidas_no_dia(lista: list[Vigencia]) -> list[Vigencia]:
+    """Tira a vigência trocada por outra no mesmo dia (São Paulo): "correção no
+    mesmo dia anula" (06/11/2026) — como se ela nunca tivesse existido. `lista`
+    em ordem de `vale desde`. PURA."""
+    dias = [_dia_da_vigencia(desde) for desde, _meses in lista]
+    return [
+        v
+        for i, v in enumerate(lista)
+        if not (i + 1 < len(lista) and dias[i] is not None and dias[i] == dias[i + 1])
+    ]
+
+
 def prazo_da_venda(vigencias: Iterable[Vigencia], venda_dia: date) -> int | None:
     """O prazo (meses) da venda feita em `venda_dia`: o maior prazo que valeu em
     algum instante desde 00:00 desse dia (São Paulo) até agora. `vigencias` =
     (vale desde, meses), cada uma valendo até a seguinte; meses None = sem
-    prazo (não conta). None = o produto nunca teve prazo nesse tempo. PURA."""
+    prazo (não conta); 0 = sem garantia (conta: é um prazo). A vigência
+    trocada por outra no mesmo dia não conta (correção no mesmo dia anula).
+    None = o produto nunca teve prazo nesse tempo. PURA."""
     inicio = datetime.combine(venda_dia, time(), svc.SAO_PAULO)
-    lista = sorted(vigencias, key=lambda v: v[0])
+    lista = _sem_as_corrigidas_no_dia(sorted(vigencias, key=lambda v: v[0]))
     vale: list[int] = []
     for i, (_desde, meses) in enumerate(lista):
         ate = lista[i + 1][0] if i + 1 < len(lista) else None
-        if meses and (ate is None or ate > inicio):
+        if meses is not None and (ate is None or ate > inicio):
             vale.append(int(meses))
     return max(vale, default=None)
 
@@ -252,10 +281,16 @@ async def aplicar_prazos(
                 "recalculou",
                 ator,
                 campo="prazo_meses",
-                anterior=str(r.prazo_meses) if r.prazo_meses else None,
-                novo=str(prazo) if prazo else None,
+                anterior=None if r.prazo_meses is None else str(r.prazo_meses),
+                novo=None if prazo is None else str(prazo),
                 detalhe="prazo do produto na Tabela de Preços"
-                + (f": {prazo} meses" if prazo else ": sem prazo cadastrado")
+                + (
+                    ": sem prazo cadastrado"
+                    if prazo is None
+                    else ": sem garantia (0 meses)"
+                    if prazo == 0
+                    else f": {prazo} meses"
+                )
                 + (f" · fim {svc._br(fim)}" if fim else ""),
                 robo=ROTULO_ROBO,
             )

@@ -65,6 +65,7 @@ import {
   tempoEmAberto,
   textoMeses,
   textoPedidoSemGarantia,
+  vendidoSemGarantia,
   type Aba,
   type Cartao,
   type ContagemDaAba,
@@ -507,7 +508,9 @@ function aoSalvar(g: GarantiaDetalhe) {
   const era = corrigindo.value
   formAberto.value = false
   corrigindo.value = null
-  toasts.success(era ? `Garantia #${g.id} corrigida` : `Garantia #${g.id} cadastrada`, g.data_inicio
+  toasts.success(era ? `Garantia #${g.id} corrigida` : `Garantia #${g.id} cadastrada`, vendidoSemGarantia(g)
+    ? 'O produto foi vendido sem garantia (prazo 0 na Tabela de Preços › Produtos).'
+    : g.data_inicio
     ? (g.fim_garantia ? `Garantia até ${dataBR(g.fim_garantia)}.` : 'O produto não tem prazo da garantia na Tabela de Preços › Produtos: a garantia fica sem data final até ele ser cadastrado.')
     : g.entregue_sem_data
       ? 'O pedido já consta como entregue no Bling, mas o DaVinci não tem a data de entrega: a garantia fica sem prazo.'
@@ -576,8 +579,9 @@ const CARTAO_ALERTA: Cartao[] = ['vence_30d', 'sem_prazo']
 // ─── o SAC do site na coluna Atendimento (06/11/2026) ───────────────────────
 // Confirmar: a garantia fica "acionada" e o caso vai para a aba Atendimento.
 // Nenhum e-mail sai nesse clique (a resposta é pela aba Atendimento). Com a
-// garantia vencida o servidor recusa (409 garantia_vencida) e a pessoa
-// confirma de novo sabendo disso.
+// garantia vencida (409 garantia_vencida) ou o produto vendido sem garantia
+// (409 produto_sem_garantia, o prazo 0) o servidor recusa e a pessoa confirma
+// de novo sabendo disso.
 const confirmando = ref<number | null>(null)
 async function confirmar(g: GarantiaLinha) {
   const sac = g.sac
@@ -590,9 +594,14 @@ async function confirmar(g: GarantiaLinha) {
       r = await api<SacOut>(url, { method: 'POST', body: { ciente_vencida: false } })
     } catch (e: any) {
       const det = e?.data?.detail
-      if (det?.code !== 'garantia_vencida') throw e
-      const fim = typeof det.fim_garantia === 'string' ? det.fim_garantia : g.fim_garantia
-      if (!window.confirm(`A garantia venceu em ${dataBR(fim)}. Confirmar mesmo assim?`)) return
+      if (det?.code === 'produto_sem_garantia') {
+        if (!window.confirm('Este produto foi vendido sem garantia. Confirmar mesmo assim?')) return
+      } else if (det?.code === 'garantia_vencida') {
+        const fim = typeof det.fim_garantia === 'string' ? det.fim_garantia : g.fim_garantia
+        if (!window.confirm(`A garantia venceu em ${dataBR(fim)}. Confirmar mesmo assim?`)) return
+      } else {
+        throw e
+      }
       r = await api<SacOut>(url, { method: 'POST', body: { ciente_vencida: true } })
     }
     // A linha já fica "Garantia acionada" com a resposta (a lista relê atrás).
@@ -663,13 +672,13 @@ function aoVincularSac() {
         <li>O painel tem <strong class="text-foreground">3 partes</strong>, por departamento (Celular, Mala, Eletro — as pílulas em cima): <strong class="text-foreground">Resumo</strong> (só para administradores) — a visão por produto; <strong class="text-foreground">Garantia</strong> — todas as garantias (as vendas com nota de todas as plataformas), com a busca, os filtros e os cartões; <strong class="text-foreground">Atendimento</strong> — só o que está em atendimento agora.</li>
         <li>A <strong class="text-foreground">data inicial</strong> é a data de entrega do pedido (não se edita). O fim da garantia = entrega + o <strong class="text-foreground">prazo do produto na Tabela de Preços › Produtos</strong> (coluna Garantia, em meses). Se o dia não existe no mês final, vale o último dia (30/11 + 3 meses = 28/02).</li>
         <li>{{ regras.ultimo_dia_coberto ? 'A garantia vale até a data final, inclusive.' : 'A garantia termina no dia anterior à data final.' }}</li>
-        <li>Produto sem prazo na Tabela de Preços: a garantia fica sem data final, com o aviso "prazo não cadastrado". Se o prazo do produto aumentar, vale para todas as vendas dele; se diminuir, só para as vendas a partir da mudança (as já vendidas não encurtam). A mudança fica no log.</li>
+        <li>Produto sem prazo na Tabela de Preços: a garantia fica sem data final, com o aviso "prazo não cadastrado". Prazo <strong class="text-foreground">0</strong> = o produto foi vendido <strong class="text-foreground">sem garantia</strong> (como o avulso): a venda fica "Sem garantia", sem data final. Se o prazo do produto aumentar, vale para todas as vendas dele; se diminuir, só para as vendas a partir da mudança (as já vendidas não encurtam); se for corrigido no mesmo dia, o valor anterior não conta (como se não tivesse existido). A mudança fica no log.</li>
         <li>{{ regras.cadastro_antes_da_entrega ? 'Pode cadastrar antes da entrega: fica Aguardando entrega e o prazo entra sozinho quando a data aparecer.' : 'Só dá para cadastrar depois da entrega.' }}</li>
         <li>{{ regras.garantia_por === 'nf' ? 'Uma garantia por NF (o mesmo CPF não se repete na mesma NF); os itens da NF aparecem no detalhe.' : 'Uma garantia por produto.' }}</li>
         <li v-if="regras.vinculo_automatico">A garantia <strong class="text-foreground">cai sozinha</strong>: todo pedido com produto Uranyx que tem a nota fiscal de PRODUTO no DaVinci vira garantia (com o selo “criada sozinha pela NF”), com o nome e o CPF da nota. A nota de embalagem nunca vira garantia. Se faltar algo (CPF que é CNPJ, nota repetida), o pedido fica para o cadastro manual. As conversas do pedido (Shopee, TikTok, Mercado Livre, Amazon) entram sozinhas no histórico, com fotos e vídeos.</li>
         <li v-else>O vínculo com o Atendimento é manual: o atendente clica em "Vincular à garantia" e busca por CPF, NF ou pedido (a busca já vem com o pedido da conversa).</li>
         <li>{{ regras.recalcular_quando_entrega_mudar ? 'Se a data de entrega for corrigida, a garantia é recalculada sozinha (fica no log).' : 'A data de entrega corrigida depois não muda a garantia.' }}</li>
-        <li>Status: Ativa · Expirada · Aguardando entrega · Prazo não cadastrado — ou "Entregue — sem data no DaVinci", quando o Bling já dá o pedido como entregue mas nenhuma fonte tem a data (a Logística guarda a data só desde 15/07/2026). Na lista fica o Status do pedido no Bling; o da garantia fica no filtro, nos cartões e nos Detalhes. O CPF e a NF ficam nos Detalhes e na busca.</li>
+        <li>Status: Ativa · Expirada · Aguardando entrega · Prazo não cadastrado · Sem garantia (prazo 0) — ou "Entregue — sem data no DaVinci", quando o Bling já dá o pedido como entregue mas nenhuma fonte tem a data (a Logística guarda a data só desde 15/07/2026). Na lista fica o Status do pedido no Bling; o da garantia fica no filtro, nos cartões e nos Detalhes. O CPF e a NF ficam nos Detalhes e na busca.</li>
         <li><strong class="text-foreground">SAC do site</strong>: o atendimento abre só pelo formulário uranyx.com.br/sac (o e-mail com o protocolo, US-26-NNNN, que chega no sac@). O DaVinci liga o SAC à venda pelo nº do pedido na plataforma, depois pela nota fiscal, depois pelo CPF + produto; sem achar, ele fica em "SAC sem pedido" para ligar à mão. Na coluna Atendimento aparecem o protocolo, a data e o botão <strong class="text-foreground">Confirmar</strong> — confirmado, a venda fica "Garantia acionada" (o log guarda quem confirmou). Confirmar não manda e-mail. Os outros e-mails do sac@ continuam na fila de E-mail do Atendimento.</li>
         <li><strong class="text-foreground">Resumo</strong>: só os produtos da Tabela de Preços › Produtos. A % é gasto ÷ saldo × 100 — saldo = base − comissão − frete − custo do produto, a conta da planilha de rentabilidade (o que sobrou), das vendas do produto; gasto = tela Reembolso (conserto + perdidos + reembolso ao cliente) de quem pediu garantia. Com o período pela data da venda, tudo é só das vendas daqueles dias. O que cada coluna conta aparece com o mouse no título dela.</li>
         <li><strong class="text-foreground">Atendimento</strong> = só os casos com Garantia acionada (o SAC confirmado), o mais antigo em cima, com o tempo em aberto desde o formulário. A resposta ao cliente é só por e-mail, pelo sac@ com a assinatura de Cadastros › E-mails; o chat da plataforma aparece só para leitura. O caso sai quando alguém clica em "Encerrar atendimento" ou quando termina sozinho (técnico, devolução, decisão da plataforma).</li>
@@ -806,6 +815,9 @@ function aoVincularSac() {
             (<button type="button" class="underline-offset-2 hover:underline" data-entregue-sem-data @click="filtros.status = 'entregue_sem_data'; filtros.com_atendimento_no_mes = false">{{ indicadores.entregue_sem_data }} já {{ indicadores.entregue_sem_data === 1 ? 'entregue' : 'entregues' }} no Bling</button>)
           </template> ·
           <button type="button" class="underline-offset-2 hover:underline" @click="filtros.status = 'expirada'; filtros.com_atendimento_no_mes = false">{{ indicadores.expiradas }} expiradas</button>
+          <template v-if="indicadores.sem_garantia"> ·
+            <button type="button" class="underline-offset-2 hover:underline" title="produto vendido sem garantia (prazo 0 na Tabela de Preços › Produtos)" data-sem-garantia @click="filtros.status = 'sem_garantia'; filtros.com_atendimento_no_mes = false">{{ numeroBR(indicadores.sem_garantia) }} sem garantia</button>
+          </template>
         </p>
       </template>
       <p v-else class="-mt-1 text-xs text-muted-foreground" data-atendimento-explica>
@@ -963,11 +975,13 @@ function aoVincularSac() {
                 <td class="whitespace-nowrap px-3 py-2.5 tabular-nums" data-entrega>{{ g.data_inicio ? dataCurta(g.data_inicio) : g.entregue_sem_data ? 'sem data' : '—' }}</td>
                 <td class="whitespace-nowrap px-3 py-2.5 tabular-nums" data-garantia-total>
                   <template v-if="g.fim_garantia">{{ dataCurta(g.fim_garantia) }}</template>
+                  <template v-else-if="vendidoSemGarantia(g)">—</template>
                   <span v-else-if="!g.garantia_meses" class="text-amber-700 dark:text-amber-300" title="o produto não tem o prazo da garantia na Tabela de Preços › Produtos" data-sem-prazo>— <AlertCircle class="inline size-3.5" aria-label="prazo não cadastrado" /></span>
                   <template v-else>—</template>
                 </td>
                 <td class="whitespace-nowrap px-3 py-2.5 tabular-nums" data-garantia-meses>
-                  <template v-if="g.garantia_meses">{{ textoMeses(g.garantia_meses) }}</template>
+                  <span v-if="vendidoSemGarantia(g)" class="text-muted-foreground" title="o produto foi vendido sem garantia (prazo 0 na Tabela de Preços › Produtos)" data-sem-garantia>sem garantia</span>
+                  <template v-else-if="g.garantia_meses">{{ textoMeses(g.garantia_meses) }}</template>
                   <span v-else class="text-amber-700 dark:text-amber-300" title="prazo não cadastrado na Tabela de Preços › Produtos" data-sem-prazo>— <AlertCircle class="inline size-3.5" aria-label="prazo não cadastrado" /></span>
                 </td>
                 <td class="whitespace-nowrap px-3 py-2.5 text-xs" data-status-pedido>{{ g.status_pedido || '—' }}</td>
@@ -1007,8 +1021,8 @@ function aoVincularSac() {
               </div>
               <div class="grid grid-cols-3 gap-1 text-xs">
                 <div><div class="text-muted-foreground">Entrega</div><div class="tabular-nums">{{ dataCurta(g.data_inicio) }}</div></div>
-                <div><div class="text-muted-foreground">Garantia total</div><div class="tabular-nums" :class="g.garantia_meses ? '' : 'text-amber-700 dark:text-amber-300'">{{ g.fim_garantia ? dataCurta(g.fim_garantia) : '—' }}</div></div>
-                <div><div class="text-muted-foreground">Garantia</div><div class="tabular-nums" :class="g.garantia_meses ? '' : 'text-amber-700 dark:text-amber-300'">{{ g.garantia_meses ? textoMeses(g.garantia_meses) : '— prazo não cadastrado' }}</div></div>
+                <div><div class="text-muted-foreground">Garantia total</div><div class="tabular-nums" :class="g.garantia_meses != null ? '' : 'text-amber-700 dark:text-amber-300'">{{ g.fim_garantia ? dataCurta(g.fim_garantia) : '—' }}</div></div>
+                <div><div class="text-muted-foreground">Garantia</div><div class="tabular-nums" :class="vendidoSemGarantia(g) ? 'text-muted-foreground' : g.garantia_meses ? '' : 'text-amber-700 dark:text-amber-300'" :data-sem-garantia="vendidoSemGarantia(g) ? '' : undefined">{{ vendidoSemGarantia(g) ? 'sem garantia' : g.garantia_meses ? textoMeses(g.garantia_meses) : '— prazo não cadastrado' }}</div></div>
               </div>
             </button>
             <div v-if="g.sac" class="flex flex-wrap items-center gap-2 border-t px-3 py-2 text-xs" data-atendimento-sac>

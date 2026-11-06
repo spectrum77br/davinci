@@ -225,6 +225,10 @@ const mesmoPy = (a, b, msg) => {
   assert.equal(L.previaCobertura(gp, 'software', '2027-10-08T12:00:00Z').cobertura, 'fora_da_garantia', 'depois do fim único')
   assert.equal(L.previaCobertura({ ...g, fim_garantia: null }, null, '2027-01-08T12:00:00Z'), null, 'sem prazo e sem tipo: não dá para dizer')
   assert.deepEqual(L.previaCobertura({ ...g, fim_garantia: null }, 'hardware', '2027-01-08T12:00:00Z'), { cobertura: 'fora_da_garantia', fim: '2027-01-07', dia: '2027-01-08' }, 'sem prazo: o fim antigo do tipo')
+  // Prazo 0 (06/11/2026, "se for avulso não tem garantia"): fora da garantia, sem fim — mesmo com o
+  // prazo antigo do tipo gravado (a IA usa) e mesmo sem a entrega.
+  assert.deepEqual(L.previaCobertura({ ...g, fim_garantia: null, garantia_meses: 0 }, 'hardware', '2027-01-07T12:00:00Z'), { cobertura: 'fora_da_garantia', fim: null, dia: '2027-01-07' })
+  assert.equal(L.previaCobertura({ data_inicio: null, fim_hardware: null, fim_software: null, fim_garantia: null, garantia_meses: 0 }, null, '2026-10-07T12:00:00Z').cobertura, 'fora_da_garantia')
   // O tipo é só a categoria: os rótulos sem hardware/software (o valor gravado continua o mesmo).
   assert.deepEqual(L.TIPOS_PROBLEMA.map((t) => [t.value, t.label]), [['hardware', 'Defeito no aparelho'], ['software', 'Sistema / aplicativo']])
   assert.ok(!L.TIPOS_PROBLEMA.some((t) => /hardware|software|\bHW\b|\bSW\b/i.test(`${t.label} ${t.dica}`)))
@@ -280,10 +284,11 @@ const mesmoPy = (a, b, msg) => {
   assert.ok(!/['"]\.\/lib\//.test(ler('../tailwind.config.ts')), '(lib/ fora do content do Tailwind — por isso as cores ficam nos componentes)')
   for (const c of ['GarantiaStatus', 'GarantiaCobertura']) assert.match(ler(`../components/${c}.vue`), /dark:bg-emerald-500\/15/, `${c}: cor do tema escuro`)
   assert.match(ler('../components/GarantiaStatus.vue'), /sem_prazo: '[^']*dark:bg-orange-500\/15/, 'o "Prazo não cadastrado" com a cor do tema escuro')
+  assert.match(ler('../components/GarantiaStatus.vue'), /sem_garantia: '[^']*dark:bg-slate-500\/15/, 'o "Sem garantia" com a cor do tema escuro')
   // Status com a cor do documento, sem emoji (29/10/2026: "igual aos nossos painéis"); desde
   // 06/11/2026 pelo prazo único — o "Somente software" saiu, entrou o "Prazo não cadastrado".
   assert.deepEqual(Object.fromEntries(Object.entries(L.STATUS).map(([k, v]) => [k, v.rotulo])), {
-    aguardando_entrega: 'Aguardando entrega', ativa: 'Ativa', expirada: 'Expirada', sem_prazo: 'Prazo não cadastrado',
+    aguardando_entrega: 'Aguardando entrega', ativa: 'Ativa', expirada: 'Expirada', sem_prazo: 'Prazo não cadastrado', sem_garantia: 'Sem garantia',
   })
   const EMOJI = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B50}\u{2B55}]/u
   const TELAS = ['../components/GarantiaStatus.vue', '../components/GarantiaCobertura.vue', '../components/GarantiaResumo.vue', '../components/GarantiaHistorico.vue', '../components/GarantiaAparelho.vue',
@@ -307,8 +312,10 @@ const mesmoPy = (a, b, msg) => {
   assert.equal(L.statusInfo('aguardando_entrega').rotulo, 'Aguardando entrega')
   assert.equal(L.statusInfo('ativa', true).rotulo, 'Ativa', 'só vale para o aguardando')
   assert.deepEqual(L.FILTROS_STATUS.map((f) => [f.value, f.label]), [['todos', 'Todos'], ['ativa', 'Ativa'], ['expirada', 'Expirada'], ['aguardando_entrega', 'Aguardando entrega'],
-    ['entregue_sem_data', 'Entregue — sem data no DaVinci'], ['vence_30d', 'Vence em 30 dias'], ['sem_prazo', 'Sem prazo cadastrado']])
+    ['entregue_sem_data', 'Entregue — sem data no DaVinci'], ['vence_30d', 'Vence em 30 dias'], ['sem_prazo', 'Sem prazo cadastrado'], ['sem_garantia', 'Sem garantia']])
   assert.equal(L.statusInfo('sem_prazo').rotulo, 'Prazo não cadastrado')
+  assert.equal(L.statusInfo('sem_garantia').rotulo, 'Sem garantia')
+  assert.equal(L.statusInfo('sem_garantia', true).rotulo, 'Sem garantia', 'o "entregue sem data" só vale para o aguardando')
   // O nome sem o apelido do fim (a mesma regra do servidor), inclusive o cortado sem ")".
   assert.equal(L.nomeSemApelido('Maria Souza (maria123)'), 'Maria Souza')
   assert.equal(L.nomeSemApelido('Maria Souza (maria12'), 'Maria Souza', 'o cortado sem o ")"')
@@ -331,7 +338,9 @@ const mesmoPy = (a, b, msg) => {
   assert.equal(L.prazoUnico({ data_inicio: '2026-11-30', fim_garantia: '2027-02-28' }, '2027-03-01').coberto_hoje, false)
   assert.equal(L.prazoUnico({ data_inicio: '2026-11-30', fim_garantia: null }, '2026-12-01'), null, 'sem prazo, sem barra')
   assert.equal(L.prazoUnico({ data_inicio: null, fim_garantia: null }, '2026-12-01'), null)
-  assert.deepEqual([L.textoMeses(12), L.textoMeses(1), L.textoMeses(null)], ['12 meses', '1 mês', '—'])
+  assert.deepEqual([L.textoMeses(12), L.textoMeses(1), L.textoMeses(null), L.textoMeses(0)], ['12 meses', '1 mês', '—', 'sem garantia'])
+  // O 0 é "vendido sem garantia"; o vazio é "prazo não cadastrado".
+  assert.deepEqual([{ garantia_meses: 0 }, { garantia_meses: null }, { garantia_meses: 12 }, {}, null].map(L.vendidoSemGarantia), [true, false, false, false, false])
 
   // Lista: o corpo do POST /lista (a busca nunca vai na URL) e os cartões que filtram.
   const f0 = { ...L.FILTROS_PADRAO }
@@ -456,11 +465,13 @@ const mesmoPy = (a, b, msg) => {
   assert.equal(L.filtroDoCartao(L.filtroDoCartao(f0, 'sem_prazo'), 'sem_prazo').status, 'todos')
   assert.deepEqual(L.CARTOES.map((c) => [c.chave, c.rotulo]), [['ativas', 'Ativas'], ['vence_30d', 'Vence em 30 dias'], ['sem_prazo', 'Sem prazo cadastrado'], ['atendimentos_no_mes', 'Atendimentos no mês']], 'os 4 de 06/11/2026')
   // Os erros do SAC têm frase.
-  for (const c of ['sac_sem_garantia', 'garantia_vencida', 'sac_nao_confirmado', 'sac_ja_confirmado', 'sac_outra_pessoa']) assert.ok(L.ERROS[c], `frase para ${c}`)
+  for (const c of ['sac_sem_garantia', 'garantia_vencida', 'produto_sem_garantia', 'sac_nao_confirmado', 'sac_ja_confirmado', 'sac_outra_pessoa']) assert.ok(L.ERROS[c], `frase para ${c}`)
   // O vincular com outra pessoa na conversa (revisão 06/11/2026, C6): o 409 vira frase na tela.
   assert.match(L.errosDaApi({ statusCode: 409, data: { detail: { code: 'sac_outra_pessoa' } } }).geral, /^Outra pessoa escreveu na conversa deste SAC/)
   // O Confirmar com a garantia vencida grava o fim no log (campo garantia_vencida): tem rótulo.
   assert.equal(L.CAMPOS_LOG.garantia_vencida, 'Confirmou com a garantia já vencida (fim)')
+  // E o do produto vendido sem garantia (prazo 0, 06/11/2026).
+  assert.equal(L.CAMPOS_LOG.sem_garantia, 'Confirmou com o produto vendido sem garantia (prazo)')
   // O caso do servidor (SacOut) vira só o da linha.
   assert.deepEqual(L.sacDaLinha({ ...SAC_ACIONADO, garantia_id: 9, conversa_id: 'c', vinculo: 'pedido', encerrado_por: null }), SAC_ACIONADO)
 
@@ -574,7 +585,8 @@ const mesmoPy = (a, b, msg) => {
       'departamento', 'produto', 'em_atendimento'],
     // 06/11/2026: o nome sem apelido, o produto da Tabela de Preços, o prazo único, o status do pedido no Bling e o SAC.
     GarantiaLinhaOut: [...LINHA_ANTES, 'departamento', 'atendimento', 'nome', 'produto_nome', 'produto_na_tabela', 'garantia_meses', 'fim_garantia', 'status_pedido', 'sac'],
-    IndicadoresOut: ['ativas', 'vence_30d', 'sem_prazo', 'atendimentos_no_mes', 'acionadas', 'aguardando_entrega', 'entregue_sem_data', 'expiradas', 'total', 'vendidas'],
+    // 06/11/2026: + as "sem garantia" (o prazo 0) na linha embaixo dos cartões.
+    IndicadoresOut: ['ativas', 'vence_30d', 'sem_prazo', 'sem_garantia', 'atendimentos_no_mes', 'acionadas', 'aguardando_entrega', 'entregue_sem_data', 'expiradas', 'total', 'vendidas'],
     GarantiaListaOut: ['itens', 'total', 'indicadores', 'hoje', 'abas', 'pedido_sem_garantia', 'sac_sem_pedido'],
     ResumoOut: ['vendidas', 'pediram', 'seguiram', 'hoje', 've_valores', 'departamentos', 'produtos'],
     ResumoDepartamentoOut: ['chave', 'nome', 'vendidas', 'pediram', 'saldo', 'gasto'],
@@ -677,6 +689,7 @@ const mesmoPy = (a, b, msg) => {
     .filter((f) => fs.existsSync(path.resolve(__dirname, '../../api/app', f))).map(api)]
   const camposDoLog = [...new Set(fontesDoLog.flatMap((f) => [...f.matchAll(/\bcampo="([a-z_]+)"/g)].map((m) => m[1])))]
   assert.ok(camposDoLog.includes('garantia_vencida') || !rotas.includes('ciente_vencida'), 'o campo do Confirmar vencido')
+  conferirPy(camposDoLog.includes('sem_garantia'), 'routers/garantias.py: o Confirmar do produto sem garantia grava o campo sem_garantia no log')
   for (const c of camposDoLog) assert.ok(L.CAMPOS_LOG[c], `rótulo do campo ${c} no log`)
   assert.deepEqual(Object.keys(L.ACOES_LOG).slice(-3), ['confirmou_atendimento', 'encerrou_atendimento', 'vinculou_sac'])
   // As rotas que a tela chama existem (lista e busca são POST: o termo vai no corpo).
@@ -746,7 +759,7 @@ async function testarPagina() {
     itens: [LINHA, { ...LINHA, id: 8, cliente_nome: 'Maria Souza (maria123)', nome: 'Maria Souza', cpf_mascarado: '***.111.222-**', nf_numero: '10198', nf_serie: '', plataforma: 'shopee', conta: null, data_inicio: '2026-06-02', fim_hardware: '2026-09-02', fim_software: '2027-06-02',
       status: 'sem_prazo', status_rotulo: 'Prazo não cadastrado', atendimentos: 0, produto_nome: 'Uranyx C57S AVULSO', produto_na_tabela: false, garantia_meses: null, fim_garantia: null, status_pedido: 'Excluído no Bling', sac: SAC_ACIONADO }],
     total: 2,
-    indicadores: { ativas: 128, vence_30d: 17, sem_prazo: 5, atendimentos_no_mes: 23, acionadas: 3, aguardando_entrega: 4, entregue_sem_data: 3, expiradas: 9, total: 5992, vendidas: 5992 },
+    indicadores: { ativas: 128, vence_30d: 17, sem_prazo: 5, sem_garantia: 0, atendimentos_no_mes: 23, acionadas: 3, aguardando_entrega: 4, entregue_sem_data: 3, expiradas: 9, total: 5992, vendidas: 5992 },
     hoje: '2026-11-04',
     abas: ABAS_CONTAGEM,
     pedido_sem_garantia: null,
@@ -767,6 +780,10 @@ async function testarPagina() {
   let semGarantia = PEDIDO_SEM_GARANTIA
   // O Confirmar: a 1ª tentativa com a garantia vencida recebe o 409 (com o fim); a 2ª, ciente, passa.
   let vencida = false
+  // O produto vendido sem garantia (prazo 0): o 409 produto_sem_garantia até a pessoa confirmar ciente.
+  let produtoSemGarantia = false
+  // A Tabela com outra lista (a linha do produto sem garantia).
+  let listaGarantia = null
   // O Encerrar (revisão 06/11/2026): a releitura da aba Atendimento já sem o caso 9; e a lista que
   // demora a voltar (para ver a linha mudar antes dela).
   let semCaso9 = false
@@ -774,11 +791,13 @@ async function testarPagina() {
   const responder = (url, opts = {}) => {
     if (/^\/api\/garantias\/sac\/\d+\/confirmar$/.test(url) && opts.method === 'POST') {
       if (vencida && !opts.body?.ciente_vencida) throw Object.assign(new Error('409'), { statusCode: 409, data: { detail: { code: 'garantia_vencida', fim_garantia: '2026-10-07' } } })
+      if (produtoSemGarantia && !opts.body?.ciente_vencida) throw Object.assign(new Error('409'), { statusCode: 409, data: { detail: { code: 'produto_sem_garantia' } } })
       return { ...SAC_RECEBIDO, confirmado_em: '2026-11-04T15:00:00Z', confirmado_por: { id: 'k', nome: 'Kátia' } }
     }
     if (url === '/api/garantias/lista' && opts.method === 'POST') {
       const b = opts.body
       if (segurarLista) return segurarLista
+      if (listaGarantia && !b.em_atendimento) return listaGarantia
       if (b.departamento === 'mala') return VAZIA
       if (b.em_atendimento) return semCaso9 ? { ...EM_ATENDIMENTO, itens: EM_ATENDIMENTO.itens.filter((x) => x.id !== 9), total: 1 } : EM_ATENDIMENTO
       if (b.busca === BUSCA_PEDIDO) return { ...VAZIA, pedido_sem_garantia: semGarantia }
@@ -1103,6 +1122,22 @@ async function testarPagina() {
       globalThis.window = antes
       vencida = false
     }
+    // O produto vendido sem garantia (prazo 0, 06/11/2026): outra pergunta, o mesmo caminho (repete ciente).
+    produtoSemGarantia = true
+    const perguntasSem = []
+    try {
+      globalThis.window = { confirm: (t) => { perguntasSem.push(t); return perguntasSem.length === 1 }, matchMedia: () => ({ matches: true }) }
+      let k = p.chamadas.length
+      await m.estado.confirmar(LINHA)
+      assert.deepEqual(perguntasSem, ['Este produto foi vendido sem garantia. Confirmar mesmo assim?'])
+      assert.deepEqual(p.chamadas.slice(k).filter((c) => c.url.includes('/confirmar')).map((c) => c.opts.body), [{ ciente_vencida: false }, { ciente_vencida: true }])
+      k = p.chamadas.length
+      await m.estado.confirmar(LINHA)
+      assert.deepEqual(p.chamadas.slice(k).filter((c) => c.url.includes('/confirmar')).map((c) => c.opts.body), [{ ciente_vencida: false }], 'desistiu: sem a 2ª tentativa')
+    } finally {
+      globalThis.window = antes
+      produtoSemGarantia = false
+    }
     assert.ok(!p.chamadas.some((c) => /responder|email/.test(c.url)), 'confirmar não manda e-mail')
     // "abrir o caso": a aba Atendimento já com esta garantia aberta (mesmo que ela não esteja na lista).
     const acionada = LISTA.itens[1]
@@ -1212,7 +1247,9 @@ async function testarPagina() {
       'gasto = tela Reembolso (conserto + perdidos + reembolso ao cliente) de quem pediu garantia',
       'O fim da garantia = entrega + o prazo do produto na Tabela de Preços › Produtos (coluna Garantia, em meses)',
       'Se o prazo do produto aumentar, vale para todas as vendas dele; se diminuir, só para as vendas a partir da mudança',
-      'Status: Ativa · Expirada · Aguardando entrega · Prazo não cadastrado',
+      'Status: Ativa · Expirada · Aguardando entrega · Prazo não cadastrado · Sem garantia (prazo 0)',
+      'Prazo 0 = o produto foi vendido sem garantia (como o avulso)',
+      'se for corrigido no mesmo dia, o valor anterior não conta',
       'pelo nº do pedido na plataforma, depois pela nota fiscal, depois pelo CPF + produto',
       'Confirmar não manda e-mail',
       'Atendimento = só os casos com Garantia acionada (o SAC confirmado), o mais antigo em cima',
@@ -1222,6 +1259,32 @@ async function testarPagina() {
     assert.ok(!/Seguiram ÷ Vendidas/.test(regras))
     assert.ok(!/hardware|software/i.test(texto((hr.match(/data-regras[^>]*>([\s\S]*?)<\/section>/) || [])[1] || '')), 'o "Como funciona" sem hardware/software')
     assert.ok(!/hardware|software/i.test(texto(hr.match(/<header[\s\S]*?<\/header>/)?.[0] || '')), 'o cabeçalho também')
+  }
+  // O produto vendido sem garantia (prazo 0, 06/11/2026: "se for avulso não tem garantia"): a coluna
+  // Garantia diz "sem garantia" sem o alerta de prazo; a Garantia total fica "—" sem alerta; a linha
+  // embaixo dos cartões conta as "sem garantia" (não é cartão) e o clique filtra.
+  {
+    const SEM = { ...LINHA, id: 11, status: 'sem_garantia', status_rotulo: 'Sem garantia', garantia_meses: 0, fim_garantia: null }
+    listaGarantia = { ...LISTA, itens: [SEM], total: 1, indicadores: { ...LISTA.indicadores, sem_garantia: 2 } }
+    try {
+      const t = await abrir(CADASTRA, { aba: 'garantia' })
+      const h = await t.h()
+      const tabela = (h.match(/<table[^>]*data-tabela-garantias[\s\S]*?<\/table>/) || [])[0] || ''
+      const tds = (k) => [...tabela.matchAll(new RegExp(`<td[^>]*data-${k}[^>]*>([\\s\\S]*?)</td>`, 'g'))].map((x) => texto(x[1]))
+      assert.deepEqual(tds('garantia-total'), ['—'])
+      assert.deepEqual(tds('garantia-meses'), ['sem garantia'])
+      assert.ok(!/data-sem-prazo|aria-label="prazo não cadastrado"/.test(tabela), 'sem o alerta de prazo não cadastrado')
+      assert.match(tabela, /data-sem-garantia/)
+      const cel = (h.match(/<ul[^>]*data-cartoes-garantias[\s\S]*?<\/ul>/) || [])[0] || ''
+      assert.match(texto(cel), /Garantia total — Garantia sem garantia/)
+      assert.ok(!/prazo não cadastrado|text-amber-700/.test(cel), 'no celular também sem o alerta')
+      const linha = texto((h.match(/<p[^>]*data-resumo-linha[^>]*>([\s\S]*?)<\/p>/) || [])[1] || '')
+      assert.match(linha, / · 9 expiradas · 2 sem garantia$/)
+      assert.deepEqual([...h.matchAll(/data-cartao="([a-z_0-9]+)"/g)].map((x) => x[1]), ['ativas', 'vence_30d', 'sem_prazo', 'atendimentos_no_mes'], 'não é cartão novo')
+      assert.match(sfc('../pages/garantias.vue').descriptor.template.content, /data-sem-garantia @click="filtros\.status = 'sem_garantia'; filtros\.com_atendimento_no_mes = false"/, 'o clique filtra')
+    } finally {
+      listaGarantia = null
+    }
   }
   // Quem não é admin: sem a aba Resumo e sem /resumo — nem com ?aba=resumo.
   {
@@ -1613,6 +1676,15 @@ async function testarDetalhe() {
   assert.equal((h4.match(/role="progressbar"/g) || []).length, 0)
   assert.match(texto(h4), /Prazo não cadastrado — o produto não tem o prazo da garantia na Tabela de Preços › Produtos/)
   assert.match(h4, /data-status-garantia[^>]*>Prazo não cadastrado</)
+
+  // Produto vendido sem garantia (prazo 0, 06/11/2026): "Sem garantia" no lugar da barra, sem o alerta.
+  const d5 = await abrirDetalhe(CONSULTA, { ...DET2, garantia_meses: 0, fim_garantia: null, status: 'sem_garantia', status_rotulo: 'Sem garantia' })
+  const h5 = await d5.aba('dados')
+  assert.equal((h5.match(/role="progressbar"/g) || []).length, 0)
+  assert.match(h5, /data-sem-garantia/)
+  assert.match(texto(h5), /Sem garantia — o produto foi vendido sem garantia \(prazo 0 na Tabela de Preços › Produtos/)
+  assert.ok(!/data-sem-prazo|Prazo não cadastrado/.test(h5), 'não é "prazo não cadastrado"')
+  assert.match(h5, /data-status-garantia[^>]*>Sem garantia</)
 }
 
 // ═══════════════════════════════════════════════════════════════ /atendimento: Vincular à garantia (§5)
@@ -1766,6 +1838,10 @@ async function testarBloco() {
   const semPrazo = await renderizar('../components/AtendimentoGarantia.vue', { situacao: { ...SIT, alerta_cpf_sem_garantia: false, garantias: [{ ...LINHA, status: 'sem_prazo', status_rotulo: 'Prazo não cadastrado', garantia_meses: null, fim_garantia: null }] }, podeVincular: false, podeAbrir: true, podeCadastrar: false }, {}, extras)
   assert.match(texto(semPrazo), /Prazo não cadastrado #7 · NF 10234 · série 1/, 'o status novo do painel no selo')
   assert.match(texto(semPrazo), /prazo não cadastrado · 2 atend\./)
+  const semGarantia = await renderizar('../components/AtendimentoGarantia.vue', { situacao: { ...SIT, alerta_cpf_sem_garantia: false, garantias: [{ ...LINHA, status: 'sem_garantia', status_rotulo: 'Sem garantia', garantia_meses: 0, fim_garantia: null }] }, podeVincular: false, podeAbrir: true, podeCadastrar: false }, {}, extras)
+  assert.match(texto(semGarantia), /Sem garantia #7 · NF 10234 · série 1/)
+  assert.match(texto(semGarantia), /sem garantia · 2 atend\./)
+  assert.ok(!/prazo não cadastrado/.test(texto(semGarantia)))
   const semEntrega = await renderizar('../components/AtendimentoGarantia.vue', { situacao: { ...SIT, alerta_cpf_sem_garantia: false, garantias: [{ ...LINHA, status: 'aguardando_entrega', status_rotulo: 'Aguardando entrega', data_inicio: null, fim_garantia: null }] }, podeVincular: false, podeAbrir: true, podeCadastrar: false }, {}, extras)
   assert.match(texto(semEntrega), /Aguardando entrega[\s\S]*garantia até — · 2 atend\./)
   const outro = await renderizar('../components/AtendimentoGarantia.vue', { situacao: { ...SIT, alerta_cpf_sem_garantia: false, garantias: [{ ...LINHA, pedido_bling: '99999', status: 'aguardando_entrega', entregue_sem_data: true }] }, podeVincular: true, podeAbrir: true, podeCadastrar: false }, {}, extras)
@@ -2166,6 +2242,16 @@ async function testarSac() {
     assert.match(texto((h.match(/<p[^>]*data-caso-sac[^>]*>([\s\S]*?)<\/p>/) || [])[1] || ''), /^Aberto há 12 dias · SAC US-26-0032 · enviado em 23\/10\/2026 · confirmado .* por Ana$/)
     assert.match(h, /data-encerrar-atendimento/)
     assert.match(texto(h), /Fim da garantia 07\/10\/27 \(12 meses\)/)
+    // O produto vendido sem garantia (prazo 0): "Sem garantia" no cabeçalho, sem "prazo não cadastrado".
+    {
+      const cxs = comEstado(componente('../components/GarantiaHistorico.vue', g))
+      const propsSem = { ...props, garantia: { ...CASO, garantia_meses: 0, fim_garantia: null, status: 'sem_garantia' } }
+      await html(appCom(cxs.C, propsSem, g))
+      await new Promise((r) => setTimeout(r, 0))
+      const hs = await html(appCom(cxs.mesmo, propsSem, g))
+      const fim = texto((hs.match(/<span[^>]*data-fim-garantia[^>]*>([\s\S]*?)<\/span>\s*<\/span>/) || [])[1] || '')
+      assert.equal(fim, 'Fim da garantia Sem garantia')
+    }
     assert.ok(!/Fim HW|Fim SW|hardware|software/i.test(texto(h)), 'sem hardware/software no cabeçalho')
     assert.match(h, /data-resposta-email/, 'a resposta por e-mail no fim da conversa')
     assert.equal(cx.estado.conversaDoSac, 'conv-sac-32', 'só pela conversa do SAC')

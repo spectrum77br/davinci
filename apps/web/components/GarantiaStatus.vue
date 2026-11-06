@@ -3,7 +3,8 @@
 // (29/10/2026: "igual aos nossos painéis do DaVinci"): Aguardando entrega
 // (âmbar) · Ativa (verde) · Expirada (vermelho) · Prazo não cadastrado
 // (laranja; desde 06/11/2026 o prazo é único, por produto — o "Somente
-// software" saiu).
+// software" saiu) · Sem garantia (cinza; o prazo 0, o produto vendido sem
+// garantia).
 // `entregueSemData`: o "Aguardando entrega" de pedido que o Bling já dá como
 // entregue vira "Entregue — sem data no DaVinci".
 import { statusInfo } from '~/lib/garantias'
@@ -16,6 +17,7 @@ const CORES: Record<string, string> = {
   ativa: 'border-emerald-400/60 bg-emerald-50 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/15 dark:text-emerald-300',
   sem_prazo: 'border-orange-400/60 bg-orange-50 text-orange-800 dark:border-orange-500/40 dark:bg-orange-500/15 dark:text-orange-300',
   expirada: 'border-red-400/60 bg-red-50 text-red-800 dark:border-red-500/40 dark:bg-red-500/15 dark:text-red-300',
+  sem_garantia: 'border-slate-400/60 bg-slate-100 text-slate-700 dark:border-slate-500/40 dark:bg-slate-500/15 dark:text-slate-300',
 }
 const cor = computed(() => CORES[props.status || ''] || 'border-border bg-muted text-muted-foreground')
 </script>

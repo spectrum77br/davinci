@@ -180,10 +180,11 @@ class PricingProduct(Base, TimestampMixin):
         UniqueConstraint(
             "user_id", "sku", "department", name="uq_pricing_products_user_sku_dept"
         ),
-        # Prazo da garantia do produto (06/11/2026, migration 0459): 1 a 120
-        # meses; NULL = sem prazo cadastrado.
+        # Prazo da garantia do produto (06/11/2026, migration 0459): 0 a 120
+        # meses (0 = sem garantia, migration 0460: "se for avulso não tem
+        # garantia"); NULL = sem prazo cadastrado.
         CheckConstraint(
-            "garantia_meses IS NULL OR garantia_meses BETWEEN 1 AND 120",
+            "garantia_meses IS NULL OR garantia_meses BETWEEN 0 AND 120",
             name="garantia_meses",
         ),
     )
@@ -280,15 +281,18 @@ class PricingProduct(Base, TimestampMixin):
     # Prazo da garantia do produto, em meses (coluna "Garantia (meses)" da aba
     # Produtos, 06/11/2026 — "cada produto tem um prazo único de garantia").
     # Aumentar vale para todas as vendas; diminuir, só para as vendas a partir
-    # da mudança: quem decide é a vigência (`PricingGarantiaPrazo`, gravada a
-    # cada mudança) e services/garantia_prazo.py. NULL = sem prazo cadastrado.
+    # da mudança; corrigir no mesmo dia desfaz o valor anterior: quem decide é
+    # a vigência (`PricingGarantiaPrazo`, gravada a cada mudança) e
+    # services/garantia_prazo.py. NULL = sem prazo cadastrado; 0 = sem
+    # garantia (o produto avulso).
     garantia_meses: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
 
 class PricingGarantiaPrazo(Base):
     """Cada mudança do prazo da garantia de um produto (06/11/2026): a vigência
     (o prazo vale desde `vale_desde`) e o log (quem mudou, de quanto para
-    quanto). Só recebe linha nova. `meses` NULL = apagou o prazo."""
+    quanto). Só recebe linha nova. `meses` NULL = apagou o prazo; 0 = sem
+    garantia."""
 
     __tablename__ = "pricing_garantia_prazo"
     __table_args__ = (

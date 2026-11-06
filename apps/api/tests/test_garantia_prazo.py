@@ -1,7 +1,9 @@
 """Prazo da garantia por produto (06/11/2026): a coluna Garantia (meses) da
 Tabela de Preços → Produtos, a vigência de cada mudança e o fim único da
 garantia ("se o prazo aumentar, vale para todas as vendas do produto. Se
-diminuir, vale só para as vendas feitas a partir da mudança")."""
+diminuir, vale só para as vendas feitas a partir da mudança"). E as decisões
+do mesmo dia: o prazo 0 = sem garantia ("se for avulso não tem garantia") e a
+correção no mesmo dia anula o valor anterior."""
 
 from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
@@ -57,6 +59,76 @@ def test_prazo_da_venda_e_o_maior_desde_o_dia_da_venda():
     assert gp.prazo_da_venda([], date(2026, 10, 1)) is None
 
 
+def test_prazo_zero_e_um_prazo_de_verdade():
+    """O 0 (sem garantia) conta como prazo: não é "vazio" como o None."""
+    assert gp.prazo_da_venda([(SEMPRE, 0)], date(2026, 10, 1)) == 0
+    # Passou de 12 para 0 (vendido avulso daqui em diante): quem comprou antes
+    # fica com os 12; quem compra a partir do dia seguinte, sem garantia.
+    vig = [(SEMPRE, 12), (_sp(2026, 10, 10, 15), 0)]
+    assert gp.prazo_da_venda(vig, date(2026, 10, 1)) == 12
+    assert gp.prazo_da_venda(vig, date(2026, 10, 11)) == 0
+    # De 0 para 6: aumentou, vale para todas.
+    assert gp.prazo_da_venda([(SEMPRE, 0), (_sp(2026, 10, 10), 6)], date(2026, 10, 1)) == 6
+    # 0 e depois apagado: o 0 valeu e conta; depois de apagado, nada.
+    apagado = [(SEMPRE, 0), (_sp(2026, 10, 10), None)]
+    assert gp.prazo_da_venda(apagado, date(2026, 10, 1)) == 0
+    assert gp.prazo_da_venda(apagado, date(2026, 10, 11)) is None
+
+
+def test_correcao_no_mesmo_dia_anula_o_valor_anterior():
+    """06/11/2026, "correção no mesmo dia anula": o prazo trocado por outro no
+    mesmo dia (São Paulo) não conta — como se nunca tivesse existido."""
+    # 120 digitado no lugar de 12 e corrigido 5 minutos depois: ninguém fica
+    # com os 120.
+    vig = [
+        (SEMPRE, None),
+        (_sp(2026, 9, 1), 12),
+        (_sp(2026, 10, 10, 14), 120),
+        (datetime(2026, 10, 10, 14, 5, tzinfo=SP), 12),
+    ]
+    for dia in (date(2026, 9, 5), date(2026, 10, 10), date(2026, 10, 11)):
+        assert gp.prazo_da_venda(vig, dia) == 12
+    # Diminuiu por engano (12 → 3) e voltou no mesmo dia: o 3 não existiu.
+    vig = [(SEMPRE, 12), (_sp(2026, 10, 10, 9), 3), (_sp(2026, 10, 10, 18), 12)]
+    assert gp.prazo_da_venda(vig, date(2026, 10, 11)) == 12
+    # Várias trocas no mesmo dia: só a última vale.
+    vig = [
+        (SEMPRE, None),
+        (_sp(2026, 10, 10, 9), 24),
+        (_sp(2026, 10, 10, 10), 0),
+        (_sp(2026, 10, 10, 11), 6),
+    ]
+    assert gp.prazo_da_venda(vig, date(2026, 10, 1)) == 6
+    # O dia é o de São Paulo: 23h de 10/10 e 01h de 11/10 (UTC 02h e 04h do
+    # dia 11) não são o mesmo dia — o 120 valeu e conta.
+    vig = [
+        (SEMPRE, 12),
+        (datetime(2026, 10, 11, 2, tzinfo=UTC), 120),
+        (datetime(2026, 10, 11, 4, tzinfo=UTC), 12),
+    ]
+    assert gp.prazo_da_venda(vig, date(2026, 10, 10)) == 120
+    # E 21h e 23h de SP (UTC 00h e 02h do dia seguinte) são o mesmo dia.
+    vig = [
+        (SEMPRE, 12),
+        (datetime(2026, 10, 11, 0, tzinfo=UTC), 120),
+        (datetime(2026, 10, 11, 2, tzinfo=UTC), 12),
+    ]
+    assert gp.prazo_da_venda(vig, date(2026, 10, 1)) == 12
+
+
+def test_corrigido_no_dia_seguinte_continua_valendo_o_maior():
+    """Corrigido num dia seguinte, o valor valeu um tempo: continua no maior
+    para as vendas de antes da correção."""
+    vig = [(SEMPRE, 12), (_sp(2026, 10, 10, 22), 120), (_sp(2026, 10, 11, 8), 12)]
+    assert gp.prazo_da_venda(vig, date(2026, 10, 1)) == 120
+    assert gp.prazo_da_venda(vig, date(2026, 10, 11)) == 120  # o 120 valia às 00:00
+    assert gp.prazo_da_venda(vig, date(2026, 10, 12)) == 12
+    # Diminuiu e só corrigiu no dia seguinte: a redução não encurta ninguém.
+    vig = [(SEMPRE, 12), (_sp(2026, 10, 10, 9), 3), (_sp(2026, 10, 11, 9), 12)]
+    assert gp.prazo_da_venda(vig, date(2026, 10, 1)) == 12
+    assert gp.prazo_da_venda(vig, date(2026, 10, 11)) == 12
+
+
 def test_vigencias_do_produto():
     agora = _sp(2026, 11, 6)
     # Sem mudança gravada: o valor de hoje vale desde sempre.
@@ -82,6 +154,29 @@ def test_fim_da_garantia_e_status_do_painel():
     assert svc.status_painel(date(2026, 8, 6), 3, date(2026, 11, 6), dia) == "ativa"  # inclusive
     assert svc.status_painel(date(2026, 8, 5), 3, date(2026, 11, 5), dia) == "expirada"
     assert svc.STATUS_PAINEL_ROTULOS["sem_prazo"] == "Prazo não cadastrado"
+    # Prazo 0 = sem garantia: sem fim, e o status vale antes de tudo (com ou
+    # sem a entrega).
+    assert svc.fim_da_garantia(date(2026, 11, 30), 0) is None
+    assert svc.status_painel(None, 0, None, dia) == "sem_garantia"
+    assert svc.status_painel(date(2026, 10, 1), 0, None, dia) == "sem_garantia"
+    assert svc.STATUS_PAINEL_ROTULOS["sem_garantia"] == "Sem garantia"
+
+
+def test_cobertura_do_produto_sem_garantia():
+    """Prazo 0: o atendimento registrado é fora da garantia, sem fim — mesmo
+    com o prazo antigo de hardware/software ainda gravado (a IA usa)."""
+    quando = datetime(2026, 11, 6, 15, tzinfo=UTC)
+    g = Garantia(prazo_meses=0)
+    svc.aplicar_entrega(g, svc.Entrega(datetime(2026, 10, 30, 12, tzinfo=UTC), "shopee"))
+    assert g.fim_garantia is None and g.fim_hardware is not None
+    assert svc.cobertura_em(g, "hardware", quando) == (svc.FORA_DA_GARANTIA, None)
+    assert svc.cobertura_em(Garantia(prazo_meses=0), "software", quando) == (
+        svc.FORA_DA_GARANTIA,
+        None,
+    )
+    com = Garantia(prazo_meses=12)
+    svc.aplicar_entrega(com, svc.Entrega(datetime(2026, 10, 30, 12, tzinfo=UTC), "shopee"))
+    assert svc.cobertura_em(com, "hardware", quando) == (svc.COBERTO, date(2027, 10, 30))
 
 
 def test_nome_sem_apelido():
@@ -210,6 +305,14 @@ async def test_patch_da_tabela_grava_a_vigencia_e_recalcula(client, db, make_use
     assert r.status_code == 200, r.text
     assert r.json()["garantia_meses"] == 12
     assert await _prazos(db, antes, depois) == [(12, date(2027, 10, 5)), (12, None)]
+    # O 12 entrou anteontem (a troca no mesmo dia desfaria o 12: o teste
+    # abaixo).
+    await db.execute(
+        PricingGarantiaPrazo.__table__.update()
+        .where(PricingGarantiaPrazo.__table__.c.pricing_product_id == p.id)
+        .values(vale_desde=datetime.combine(hoje - timedelta(days=2), time(10), SP))
+    )
+    await db.commit()
 
     # Diminuir: a venda de antes fica com 12; a de amanhã passa a 3.
     r = await client.patch(f"/api/pricing/products/{p.id}", json={"garantia_meses": 3})
@@ -240,17 +343,19 @@ async def test_patch_da_tabela_grava_a_vigencia_e_recalcula(client, db, make_use
     ).scalar_one()
     assert (log.valor_anterior, log.valor_novo, log.user_id) == ("12", "3", dono.id)
 
-    # Fora de 1..120: recusa. Mudar outra coisa da linha não grava vigência.
-    for ruim in (0, 121):
+    # Fora de 0..120: recusa. Mudar outra coisa da linha não grava vigência.
+    for ruim in (-1, 121):
         r = await client.patch(f"/api/pricing/products/{p.id}", json={"garantia_meses": ruim})
         assert r.status_code == 422
     assert (
         await client.patch(f"/api/pricing/products/{p.id}", json={"name": "T8"})
     ).status_code == 200
-    # null apaga: a vigência guarda o apagar; a venda de antes mantém o 12.
+    # null apaga: a vigência guarda o apagar; a venda de antes mantém o 12. O
+    # 3 foi apagado no mesmo dia em que entrou: não conta (a de amanhã fica
+    # sem prazo).
     r = await client.patch(f"/api/pricing/products/{p.id}", json={"garantia_meses": None})
     assert r.status_code == 200 and r.json()["garantia_meses"] is None
-    assert await _prazos(db, antes) == [(12, date(2027, 10, 5))]
+    assert await _prazos(db, antes, depois) == [(12, date(2027, 10, 5)), (None, None)]
     n = await db.scalar(
         select(PricingGarantiaPrazo.meses)
         .where(PricingGarantiaPrazo.pricing_product_id == p.id)
@@ -259,6 +364,71 @@ async def test_patch_da_tabela_grava_a_vigencia_e_recalcula(client, db, make_use
     )
     assert n is None
     assert len((await db.execute(select(PricingGarantiaPrazo))).all()) == 3
+
+
+async def test_patch_aceita_zero_sem_garantia(client, db, make_user, auth_as):
+    """06/11/2026, "se for avulso não tem garantia": a coluna aceita 0 (0..120)
+    e a venda fica "Sem garantia", sem data final."""
+    dono = await make_user(role=UserRole.ADMIN)
+    auth_as(dono)
+    p = await _produto(db, dono)
+    pid, seg_id = p.id, p.segment_id
+    hoje = svc.hoje()
+    amanha = datetime.combine(hoje + timedelta(days=1), time(10), SP)
+    venda = await _venda(db, "500041", amanha, entrega=None)
+    r = await client.patch(f"/api/pricing/products/{pid}", json={"garantia_meses": 0})
+    assert r.status_code == 200, r.text
+    assert r.json()["garantia_meses"] == 0
+    assert await _prazos(db, venda) == [(0, None)]
+    assert svc.status_painel_da(venda) == "sem_garantia"
+    log = (
+        await db.execute(
+            select(GarantiaLog)
+            .where(GarantiaLog.garantia_id == venda.id, GarantiaLog.campo == "prazo_meses")
+            .order_by(GarantiaLog.id.desc())
+            .limit(1)
+        )
+    ).scalar_one()
+    assert (log.valor_anterior, log.valor_novo) == (None, "0")
+    assert "sem garantia" in log.detalhe
+    # 121 não entra; a vigência guardou o 0 (e não o "vazio").
+    r = await client.patch(f"/api/pricing/products/{pid}", json={"garantia_meses": 121})
+    assert r.status_code == 422
+    vig = (
+        await db.execute(
+            select(PricingGarantiaPrazo.meses, PricingGarantiaPrazo.meses_anterior).where(
+                PricingGarantiaPrazo.pricing_product_id == pid
+            )
+        )
+    ).all()
+    assert vig == [(0, None)]
+    # Produto novo já com 0.
+    r = await client.post(
+        "/api/pricing/products",
+        json={"sku": "dg555", "name": "Avulso", "segment_id": str(seg_id), "garantia_meses": 0},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["garantia_meses"] == 0
+
+
+async def test_patch_corrigido_no_mesmo_dia_nao_alonga_as_vendas(client, db, make_user, auth_as):
+    """O 120 digitado no lugar de 12 e corrigido no mesmo dia: a venda de antes
+    não fica com os 120 (06/11/2026, "correção no mesmo dia anula")."""
+    dono = await make_user(role=UserRole.ADMIN)
+    auth_as(dono)
+    p = await _produto(db, dono, meses=12)
+    db.add(PricingGarantiaPrazo(pricing_product_id=p.id, meses=12, vale_desde=_sp(2026, 8, 1)))
+    await db.commit()
+    antes = await _venda(db, "500051", _sp(2026, 9, 1), entrega=date(2026, 9, 5))
+    await gp.aplicar_prazos(db, ids=[antes.id])
+    await db.commit()
+    assert await _prazos(db, antes) == [(12, date(2027, 9, 5))]
+    r = await client.patch(f"/api/pricing/products/{p.id}", json={"garantia_meses": 120})
+    assert r.status_code == 200, r.text
+    assert await _prazos(db, antes) == [(120, date(2036, 9, 5))]  # aumentou: vale para todas
+    r = await client.patch(f"/api/pricing/products/{p.id}", json={"garantia_meses": 12})
+    assert r.status_code == 200, r.text
+    assert await _prazos(db, antes) == [(12, date(2027, 9, 5))]  # o 120 não existiu
 
 
 async def test_produto_novo_com_prazo_e_sku_trocado(client, db, make_user, auth_as):

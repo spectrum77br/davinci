@@ -1478,6 +1478,28 @@ _MAIL_PONTE_TRAVA = "davinci:mail:ponte:trava"
 _MAIL_PONTE_TRAVA_TTL_S = 300
 
 
+async def _sac_na_hora() -> None:
+    """O formulário do SAC do site aparece na Garantia com o Confirmar logo
+    depois que a ponte grava o e-mail (06/11/2026, Eduardo: "não temos como
+    aumentar a velocidade?"): antes só a volta de 15 min da garantia ligava.
+    Só as conversas de protocolo mexidas nos últimos 10 min; falha aqui não
+    atrapalha a ponte (a volta de 15 min liga de novo)."""
+    if not get_settings().garantia_automatica:
+        return
+    from app.services import garantia_sac
+
+    try:
+        async with session_scope() as s:
+            r = await garantia_sac.sincronizar_sac(
+                s, desde=datetime.now(UTC) - timedelta(minutes=10)
+            )
+            await s.commit()
+        if r.get("casos_novos") or r.get("ligados") or r.get("desligados"):
+            logger.info("sac_na_hora", **r)
+    except Exception as e:  # noqa: BLE001 — a volta de 15 min tenta de novo
+        logger.warning("sac_na_hora_falhou", err=type(e).__name__)
+
+
 async def mail_ponte(ctx: dict) -> dict | None:  # noqa: ARG001
     """A cada minuto: os e-mails novos da Central → a conversa do /atendimento.
 
@@ -1504,6 +1526,7 @@ async def mail_ponte(ctx: dict) -> dict | None:  # noqa: ARG001
         # A volta terminou: o carimbo que a faixa "sem ler" olha (a ponte parada
         # com e-mail esperando acende a faixa — saude.caixas_paradas).
         await _mail_saude.carimbar_ponte()
+        await _sac_na_hora()
         return resumo
     except Exception as e:  # noqa: BLE001 — a próxima volta tenta de novo
         logger.error("mail_ponte_falhou", err=type(e).__name__)

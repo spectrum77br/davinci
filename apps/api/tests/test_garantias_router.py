@@ -725,6 +725,7 @@ async def test_filtro_por_status_periodo_e_indicadores(client, db, make_user, au
         "ativas": 1,
         "vence_30d": 0,
         "sem_prazo": 0,
+        "sem_garantia": 0,  # o prazo 0 (06/11/2026): só na linha embaixo dos cartões
         "atendimentos_no_mes": 0,
         "acionadas": 0,
         "aguardando_entrega": 1,
@@ -1029,6 +1030,51 @@ async def test_cobertura_pelo_fim_unico_com_o_prazo_do_produto(client, db, make_
     )
 
 
+@pytest.mark.parametrize("situacao", ["15", "83953"])  # a caminho | o Bling diz entregue
+async def test_vendido_sem_garantia_nao_avisa_da_entrega(client, db, make_user, auth_as, situacao):
+    """Prazo 0 (06/11/2026): o produto vendido sem garantia não espera a
+    entrega. Sem a data, nem a prévia, nem o cadastro, nem a correção que troca
+    para esse pedido avisam "aguardando entrega" ou "entregue sem data" (os
+    Detalhes mostravam a promessa de prazo ao lado do "Sem garantia")."""
+    await _pedido(db, situacao=situacao)
+    await _pedido(db, numero="300002", numeroloja="251007ZZZZ0002", sku="dg054")
+    await _entrega(db, "300002")
+    await _prazo_do_produto(db, 0)
+    await _prazo_do_produto(db, 12, sku="dg054")
+    await _admin(make_user, auth_as)
+    entrega = {"aguardando_entrega", "entregue_sem_data"}
+    previa = (await client.get("/api/garantias/pedido", params={"numero": "300001"})).json()
+    assert previa["prazos"]["status"] == "sem_garantia"
+    assert not entrega & set(previa["avisos"])
+    g = await _cadastrar(client)
+    assert (g["status"], g["garantia_meses"], g["entregue_sem_data"]) == ("sem_garantia", 0, False)
+    assert not entrega & set(g["avisos"])
+    # A correção que troca para o pedido sem garantia (sem data de entrega).
+    outra = await _cadastrar(client, pedido="300002", nf="5678")
+    assert outra["status"] == "ativa"
+    r = await client.put(f"/api/garantias/{outra['id']}", json={"pedido": "300001"})
+    assert r.status_code == 200, r.text
+    assert (r.json()["status"], r.json()["garantia_meses"]) == ("sem_garantia", 0)
+    assert not entrega & set(r.json()["avisos"])
+
+
+async def test_correcao_para_pedido_sem_entrega_avisa_com_prazo(client, db, make_user, auth_as):
+    """O aviso de entrega da correção sai depois do prazo do produto novo: com
+    prazo (12 meses) e sem a data, a troca de pedido continua avisando."""
+    await _pedido(db)
+    await _pedido(db, numero="300002", numeroloja="251007ZZZZ0002", sku="dg054")
+    await _entrega(db)
+    await _prazo_do_produto(db, 0)
+    await _prazo_do_produto(db, 12, sku="dg054")
+    await _admin(make_user, auth_as)
+    g = await _cadastrar(client)
+    assert (g["status"], g["avisos"]) == ("sem_garantia", [])
+    r = await client.put(f"/api/garantias/{g['id']}", json={"pedido": "300002"})
+    assert r.status_code == 200, r.text
+    assert (r.json()["status"], r.json()["garantia_meses"]) == ("aguardando_entrega", 12)
+    assert "aguardando_entrega" in r.json()["avisos"]
+
+
 async def test_atendimento_antes_da_entrega_e_cobertura_de_hoje(client, db, make_user, auth_as):
     await _pedido(db)
     await _admin(make_user, auth_as)
@@ -1289,12 +1335,14 @@ async def test_regras_para_a_tela(client, make_user, auth_as):
     j = r.json()
     assert (j["meses_hardware"], j["meses_software"], j["ultimo_dia_coberto"]) == (3, 12, True)
     assert j["dias_pausa_atendimento"] == svc.DIAS_PAUSA_NOVO_ATENDIMENTO == 7
-    # O status do painel (06/11/2026): o prazo único, sem "somente software".
+    # O status do painel (06/11/2026): o prazo único, sem "somente software"; o
+    # prazo 0 = "Sem garantia".
     assert j["status"] == {
         "aguardando_entrega": "Aguardando entrega",
         "ativa": "Ativa",
         "expirada": "Expirada",
         "sem_prazo": "Prazo não cadastrado",
+        "sem_garantia": "Sem garantia",
     }
     assert j["origens_entrega"]["shopee"]
 

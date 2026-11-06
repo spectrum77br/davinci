@@ -12,7 +12,10 @@ import { onKeyStroke } from '@vueuse/core'
 import { ChevronDown, ChevronRight, ClipboardList, Download, FileText, Loader2, Video } from 'lucide-vue-next'
 import { dataHoraBR, errosDaApi, tamanhoLegivel, type SacAnexo, type SacDetalhe } from '~/lib/garantias'
 
-const props = defineProps<{ sac: SacDetalhe }>()
+// `embutido` (06/11/2026, Eduardo: "as fotos não apareceram… preciso que
+// apareça tudo ali"): dentro do cartão do formulário na linha do tempo, sem a
+// moldura própria.
+const props = defineProps<{ sac: SacDetalhe; embutido?: boolean }>()
 
 const { api } = useApi()
 const toasts = useToasts()
@@ -108,10 +111,11 @@ function rotulo(a: SacAnexo): string {
 </script>
 
 <template>
-  <section class="rounded-lg border border-amber-300/70 bg-amber-50/60 text-sm dark:border-amber-800/60 dark:bg-amber-900/20" data-sac-resumo>
+  <section class="text-sm" :class="embutido ? '' : 'rounded-lg border border-amber-300/70 bg-amber-50/60 dark:border-amber-800/60 dark:bg-amber-900/20'" data-sac-resumo>
     <button
       type="button"
-      class="flex w-full items-center gap-1.5 px-3 py-2 text-left"
+      class="flex w-full items-center gap-1.5 py-2 text-left"
+      :class="embutido ? '' : 'px-3'"
       :aria-expanded="aberto"
       data-sac-resumo-alternar
       @click="aberto = !aberto"
@@ -122,7 +126,7 @@ function rotulo(a: SacAnexo): string {
       <span class="font-semibold text-amber-900 dark:text-amber-200">Resumo do SAC</span>
       <span class="text-xs text-muted-foreground">protocolo {{ sac.protocolo }} · {{ dataHoraBR(sac.recebido_em) }}</span>
     </button>
-    <div v-if="aberto" class="space-y-3 border-t border-amber-300/50 px-3 py-2.5 dark:border-amber-800/40" data-sac-resumo-corpo>
+    <div v-if="aberto" class="space-y-3 border-t border-amber-300/50 py-2.5 dark:border-amber-800/40" :class="embutido ? '' : 'px-3'" data-sac-resumo-corpo>
       <div class="grid gap-3 lg:grid-cols-2">
         <div v-for="sec in sac.secoes" :key="sec.titulo" class="space-y-1" :data-sac-secao="sec.titulo">
           <h3 class="text-xs font-semibold uppercase tracking-wide text-muted-foreground">{{ sec.titulo }}</h3>

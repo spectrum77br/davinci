@@ -92,11 +92,17 @@ DIAS_ALERTA_HARDWARE = 30
 # ponto 1 continuam). Hardware/software (acima) continuam calculados e
 # gravados: a IA do Atendimento usa os dois.
 STATUS_SEM_PRAZO = "sem_prazo"
+# Prazo 0 na Tabela de Preços (decisão do Eduardo, 06/11/2026: "se for avulso
+# não tem garantia"): a venda não tem garantia. Vale antes de qualquer outro
+# status (com ou sem entrega, não há prazo para correr). O "Sem prazo
+# cadastrado" continua sendo só o prazo vazio (NULL).
+STATUS_SEM_GARANTIA = "sem_garantia"
 STATUS_PAINEL_ROTULOS = {
     STATUS_AGUARDANDO: "Aguardando entrega",
     STATUS_ATIVA: "Ativa",
     STATUS_EXPIRADA: "Expirada",
     STATUS_SEM_PRAZO: "Prazo não cadastrado",
+    STATUS_SEM_GARANTIA: "Sem garantia",
 }
 # Cartão e filtro "Vence em 30 dias".
 DIAS_ALERTA_VENCIMENTO = 30
@@ -298,9 +304,12 @@ def status_da(g: Garantia, dia: date | None = None) -> str:
 
 
 def status_painel(inicio: date | None, prazo_meses: int | None, fim: date | None, dia: date) -> str:
-    """O status do painel (06/11/2026): sem entrega, "Aguardando entrega"; com
-    entrega e sem prazo do produto, "Prazo não cadastrado"; senão ativa até o
-    fim (inclusive, ponto 1) e expirada depois. PURA."""
+    """O status do painel (06/11/2026): prazo 0, "Sem garantia" (antes de
+    tudo); sem entrega, "Aguardando entrega"; com entrega e sem prazo do
+    produto, "Prazo não cadastrado"; senão ativa até o fim (inclusive, ponto
+    1) e expirada depois. PURA."""
+    if prazo_meses == 0:
+        return STATUS_SEM_GARANTIA
     if inicio is None:
         return STATUS_AGUARDANDO
     if prazo_meses is None or fim is None:
@@ -313,8 +322,9 @@ def status_painel_da(g: Garantia, dia: date | None = None) -> str:
 
 
 def fim_da_garantia(inicio: date | None, prazo_meses: int | None) -> date | None:
-    """Entrega + o prazo do produto (RN04). Sem um dos dois, sem fim. PURA."""
-    if inicio is None or not prazo_meses:
+    """Entrega + o prazo do produto (RN04). Sem um dos dois, sem fim; prazo 0
+    (sem garantia), sem fim também. PURA."""
+    if inicio is None or prazo_meses is None or prazo_meses == 0:
         return None
     return somar_meses(inicio, prazo_meses)
 
@@ -425,7 +435,10 @@ def cobertura_em(g: Garantia, tipo: str, quando: datetime) -> tuple[str, date | 
     da garantia. Sem entrega ainda: sem data. Com o prazo do produto (o fim
     único, 06/11/2026) vale o fim único e o tipo só descreve o problema — o
     painel mostra "Ativa até …" e o atendimento gravado não pode dizer outra
-    coisa. Sem o prazo cadastrado, o fim do tipo informado (como antes)."""
+    coisa. Sem o prazo cadastrado, o fim do tipo informado (como antes).
+    Produto vendido sem garantia (prazo 0): fora da garantia, sem fim."""
+    if g.prazo_meses == 0:
+        return FORA_DA_GARANTIA, None
     if g.data_inicio is None:
         return SEM_DATA_DE_ENTREGA, None
     if g.fim_garantia is not None:
@@ -457,10 +470,12 @@ def _coberto_sql(coluna, dia: date):
 def filtro_status(status: str, dia: date):
     """O filtro Status da aba Garantia e os cartões (06/11/2026: o prazo
     único — sai "Somente software"; "Hardware vence em 30 dias" vira "Vence em
-    30 dias"; entra "Sem prazo cadastrado")."""
+    30 dias"; entram "Sem prazo cadastrado" e "Sem garantia"). O prazo 0 (sem
+    garantia) não é aguardando nem entregue sem data: não há prazo a correr."""
     g = Garantia
+    com_garantia = g.prazo_meses.is_distinct_from(0)
     if status == STATUS_AGUARDANDO:
-        return g.data_inicio.is_(None)
+        return and_(g.data_inicio.is_(None), com_garantia)
     if status == STATUS_ATIVA:
         return and_(
             g.data_inicio.is_not(None),
@@ -476,8 +491,10 @@ def filtro_status(status: str, dia: date):
         )
     if status == STATUS_SEM_PRAZO:
         return g.prazo_meses.is_(None)
+    if status == STATUS_SEM_GARANTIA:
+        return g.prazo_meses == 0
     if status == "entregue_sem_data":
-        return and_(g.data_inicio.is_(None), _pedido_entregue_no_bling())
+        return and_(g.data_inicio.is_(None), com_garantia, _pedido_entregue_no_bling())
     raise ValueError(status)
 
 
@@ -485,6 +502,7 @@ def status_sql(dia: date):
     """CASE com o status do painel (para ordenar/contar no banco)."""
     g = Garantia
     return case(
+        (g.prazo_meses == 0, literal(STATUS_SEM_GARANTIA)),
         (g.data_inicio.is_(None), literal(STATUS_AGUARDANDO)),
         (or_(g.prazo_meses.is_(None), g.fim_garantia.is_(None)), literal(STATUS_SEM_PRAZO)),
         (_coberto_sql(g.fim_garantia, dia), literal(STATUS_ATIVA)),

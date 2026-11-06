@@ -270,7 +270,7 @@ onKeyStroke('Escape', () => { if (!salvando.value) emit('fechar') })
           <div class="col-span-2 sm:col-span-2">
             <div class="flex items-center gap-1 text-xs font-medium text-muted-foreground"><Lock class="size-3" aria-hidden="true" /> Fim da garantia</div>
             <div class="mt-1 flex h-10 items-center rounded-md border bg-muted/50 px-3 tabular-nums" :class="prazos?.fim_garantia ? 'text-sm' : 'text-xs text-muted-foreground'" data-fim-garantia>
-              {{ prazos?.fim_garantia ? dataBR(prazos.fim_garantia) : prazos?.data_inicio ? 'pelo prazo do produto, ao salvar' : '—' }}
+              {{ prazos?.fim_garantia ? dataBR(prazos.fim_garantia) : prazos?.status === 'sem_garantia' ? 'sem garantia' : prazos?.data_inicio ? 'pelo prazo do produto, ao salvar' : '—' }}
             </div>
           </div>
           <div class="col-span-2 sm:col-span-1">

@@ -258,9 +258,12 @@ def _linha(
     conversa: dict | None = None,
 ) -> GarantiaLinhaOut:
     """A linha da lista. O status é o do PAINEL (06/11/2026, o prazo único):
-    aguardando entrega, ativa, expirada ou "Prazo não cadastrado"."""
+    aguardando entrega, ativa, expirada, "Prazo não cadastrado" ou "Sem
+    garantia" (o prazo 0 — nunca é "entregue sem data": não há prazo a correr)."""
     st = svc.status_painel_da(g, dia)
-    sem_data = svc.entregue_sem_data(g.data_inicio, situacao_bling)
+    sem_data = st != svc.STATUS_SEM_GARANTIA and svc.entregue_sem_data(
+        g.data_inicio, situacao_bling
+    )
     conversa = conversa or {}
     return GarantiaLinhaOut(
         id=g.id,
@@ -797,11 +800,11 @@ def _sac_confirmado_no_mes(dia):
 async def _indicadores(session: AsyncSession, escopo, dia, do_departamento=None) -> IndicadoresOut:
     """Os cartões do topo (06/11/2026): Ativas · Vence em 30 dias · Sem prazo
     cadastrado · Atendimentos no mês (os casos do SAC CONFIRMADOS no mês), mais
-    as acionadas e a linha embaixo. A base são todas as vendas vivas que a
-    pessoa enxerga (não mais só quem pediu). Com a pílula (04/11/2026,
-    `do_departamento` = a condição dela), só as do departamento: os cartões e
-    a linha embaixo deles batem com o "Garantia (N)" da aba. Os filtros da
-    barra continuam fora."""
+    as acionadas e a linha embaixo (com as "sem garantia", o prazo 0). A base
+    são todas as vendas vivas que a pessoa enxerga (não mais só quem pediu).
+    Com a pílula (04/11/2026, `do_departamento` = a condição dela), só as do
+    departamento: os cartões e a linha embaixo deles batem com o "Garantia
+    (N)" da aba. Os filtros da barra continuam fora."""
     vivas = [escopo] if escopo is not None else []
     vivas.append(Garantia.descartada_em.is_(None))
     if do_departamento is not None:
@@ -810,6 +813,7 @@ async def _indicadores(session: AsyncSession, escopo, dia, do_departamento=None)
         "ativas": svc.filtro_status(svc.STATUS_ATIVA, dia),
         "vence_30d": svc.filtro_status("vence_30d", dia),
         "sem_prazo": svc.filtro_status(svc.STATUS_SEM_PRAZO, dia),
+        "sem_garantia": svc.filtro_status(svc.STATUS_SEM_GARANTIA, dia),
         "aguardando_entrega": svc.filtro_status(svc.STATUS_AGUARDANDO, dia),
         "entregue_sem_data": svc.filtro_status("entregue_sem_data", dia),
         "expiradas": svc.filtro_status(svc.STATUS_EXPIRADA, dia),
@@ -1285,7 +1289,7 @@ async def pedido_para_cadastro(
     # O status da prévia é o do painel (o prazo do produto na Tabela de Preços).
     prazo = await garantia_prazo.prazo_dos_itens(session, pedido.itens, pedido.data)
     st = svc.status_painel(inicio, prazo, svc.fim_da_garantia(inicio, prazo), dia)
-    sem_data = svc.entregue_sem_data(inicio, pedido.situacao_id)
+    sem_data = st != svc.STATUS_SEM_GARANTIA and svc.entregue_sem_data(inicio, pedido.situacao_id)
     nome, nome_origem = pedido.nome
     cpf = pedido.cpf
     existentes = await svc.garantias_do_cpf_ou_pedido(
@@ -1294,7 +1298,8 @@ async def pedido_para_cadastro(
     avisos = []
     if not pedido.produto_uranyx:
         avisos.append("pedido_sem_produto_uranyx")
-    if entrega is None:
+    # O produto vendido sem garantia (prazo 0) não espera a entrega para nada.
+    if entrega is None and st != svc.STATUS_SEM_GARANTIA:
         avisos.append(pedido.aviso_sem_entrega)  # aguardando_entrega | entregue_sem_data
     if existentes:
         avisos.append("pedido_ja_tem_garantia")
@@ -1485,6 +1490,9 @@ async def cadastrar(
         raise _erro(409, "garantia_duplicada", "nf_numero") from e
     # O prazo do produto na Tabela de Preços (06/11/2026): nasce com ele.
     await garantia_prazo.aplicar_prazos(session, ids=[g.id], registrar=False)
+    # O UPDATE do aplicar_prazos não mexe no objeto: relê o prazo (o aviso de
+    # entrega lá embaixo depende dele).
+    await session.refresh(g, ["prazo_meses"])
     svc.registrar_log(
         session,
         g.id,
@@ -1497,7 +1505,9 @@ async def cadastrar(
     await session.commit()
     await _religar_conversas(session, g)
     avisos = svc.avisos_do_cadastro(pedido, cpf, nota, outras_do_pedido=outras)
-    if entrega is None:
+    # O produto vendido sem garantia (prazo 0) não espera a entrega para nada
+    # (a regra da prévia).
+    if entrega is None and g.prazo_meses != 0:
         avisos.append(pedido.aviso_sem_entrega)
     return await _detalhe(session, g, user, avisos=avisos)
 
@@ -1664,14 +1674,20 @@ async def confirmar_sac(
     """Confirmar atendimento: a garantia vira "Garantia acionada" e o caso entra
     na aba Atendimento; o log guarda quem confirmou e quando. Com a garantia
     vencida, a tela avisa antes (409 `garantia_vencida`) e repete com
-    `ciente_vencida`. Não manda e-mail. Clicar de novo não muda nada."""
+    `ciente_vencida`. O produto vendido sem garantia (prazo 0, 06/11/2026:
+    "se for avulso não tem garantia") também avisa antes (409
+    `produto_sem_garantia`) e repete do mesmo jeito. Não manda e-mail. Clicar
+    de novo não muda nada."""
     caso, g = await _caso_visivel(session, sac_id, user, travar=True)
     if g is None:
         raise _erro(409, "sac_sem_garantia")
     if caso.confirmado_em is not None:
         return await _sac_out(session, caso)
     dia = svc.hoje()
+    sem_garantia = g.prazo_meses == 0
     vencida = g.fim_garantia is not None and not svc.coberto(g.fim_garantia, dia)
+    if sem_garantia and not body.ciente_vencida:
+        raise _erro(409, "produto_sem_garantia")
     if vencida and not body.ciente_vencida:
         raise _erro(409, "garantia_vencida", fim_garantia=g.fim_garantia.isoformat())
     agora = datetime.now(UTC)
@@ -1684,16 +1700,28 @@ async def confirmar_sac(
         g.solicitacao_ref = caso.protocolo[:64]
     g.nao_solicitada_em = None
     g.nao_solicitada_por = None
-    # Confirmou ciente da garantia vencida: o fim que a tela avisou fica no log.
-    svc.registrar_log(
-        session,
-        g.id,
-        "confirmou_atendimento",
-        user,
-        campo="garantia_vencida" if vencida else None,
-        novo=svc._br(g.fim_garantia) if vencida else None,
-        detalhe=caso.protocolo,
-    )
+    # Confirmou ciente: do produto vendido sem garantia, o prazo 0; da garantia
+    # vencida, o fim que a tela avisou.
+    if sem_garantia:
+        svc.registrar_log(
+            session,
+            g.id,
+            "confirmou_atendimento",
+            user,
+            campo="sem_garantia",
+            novo="0 meses",
+            detalhe=caso.protocolo,
+        )
+    else:
+        svc.registrar_log(
+            session,
+            g.id,
+            "confirmou_atendimento",
+            user,
+            campo="garantia_vencida" if vencida else None,
+            novo=svc._br(g.fim_garantia) if vencida else None,
+            detalhe=caso.protocolo,
+        )
     await session.commit()
     return await _sac_out(session, caso)
 
@@ -2174,10 +2202,13 @@ async def _anexos_do_sac(session: AsyncSession, caso: GarantiaSac, user: User) -
                 nome=nome,
                 tipo=info.get("content_type"),
                 tamanho=x.size,
-                papel=papeis.get(str(nome or "").strip().lower()),
+                papel=papeis.get(str(nome or "").strip().lower())
+                or garantia_sac.papel_do_arquivo(nome),
                 url=f"/api/garantias/sac/{caso.id}/anexos/{x.id}",
             )
         )
+    # Na ordem do formulário (o site numera: 01-produto, 02-etiqueta, …).
+    saida.sort(key=lambda s: (s.nome or "").lower())
     return saida
 
 
@@ -2290,8 +2321,6 @@ async def corrigir(
             nota,
             outras_do_pedido=await _outras_do_pedido(session, novo_pedido.numero, g.id),
         )
-        if g.data_inicio is None:
-            avisos.append(novo_pedido.aviso_sem_entrega)
     if muda_nf:
         svc.aplicar_nf(g, nf_final, serie_final, nota)
         if nf_final != nf_antes:
@@ -2313,6 +2342,12 @@ async def corrigir(
     if novo_pedido is not None:
         # Outro pedido = outro produto: o prazo da Tabela de Preços é relido.
         await garantia_prazo.aplicar_prazos(session, ids=[g.id], ator=user)
+        # O aviso de entrega só depois do prazo do produto novo (relido: o
+        # UPDATE do aplicar_prazos não mexe no objeto). O vendido sem garantia
+        # (prazo 0) não espera a entrega (a regra da prévia).
+        await session.refresh(g, ["prazo_meses"])
+        if g.data_inicio is None and g.prazo_meses != 0:
+            avisos.append(novo_pedido.aviso_sem_entrega)
         # O caso do SAC (revisão de 06/11/2026). O CONFIRMADO fica: a pessoa já
         # decidiu que o caso é desta garantia (é a mesma compra, corrigida), e
         # a conversa dele continua no histórico. O não confirmado volta para
