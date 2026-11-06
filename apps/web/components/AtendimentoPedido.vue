@@ -551,7 +551,9 @@ const davinciAberto = ref(!pm.value || chamados.value.length > 0)
 
 // Links para as telas que já existem: Chamados aceita ?search=, Logística
 // aceita ?tab=<plataforma>&q=<busca> (é o que a Ouvidoria já usa).
-const buscaPedido = computed(() => numeroMarketplace.value || (pedido.value?.numero ? String(pedido.value.numero) : ''))
+// No ML, Logística e Chamados guardam o nº do Bling na plataforma (o pack), e a reclamação guarda a
+// order: pela order os links abriam vazios (06/11/2026, 88 reclamações com os dois diferentes).
+const buscaPedido = computed(() => (props.conversa.plataforma === 'ml' && pedido.value?.numeroloja) || numeroMarketplace.value || (pedido.value?.numero ? String(pedido.value.numero) : ''))
 const linkChamados = computed(() => (buscaPedido.value ? `/chamados?search=${encodeURIComponent(buscaPedido.value)}` : '/chamados'))
 // Só as plataformas que têm aba na Logística: nas outras (Magalu, as lojas
 // do robô) o link abria a busca na aba do ML, que não acha nada — some.

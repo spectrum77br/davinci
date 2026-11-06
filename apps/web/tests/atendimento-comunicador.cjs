@@ -97,9 +97,11 @@ const setup = conversaSfc.scriptSetup.content
   // Sem as abas (RF2, 02/10/2026; atendimento-abas.cjs cobre com elas): a
   // linha do tempo de sempre.
   const AB = exportsDe(sfc('../components/AtendimentoAbas.vue'))
-  const linhas = new Function('computed', 'detalhe', 'agora', 'rotuloDia', 'abasDados', 'abaAtual', 'naAbaDaConversa', 'conversaDaAba', 'rotuloDaOrigem', js)(
+  const linhas = new Function('computed', 'detalhe', 'agora', 'rotuloDia', 'abasDados', 'abaAtual', 'naAbaDaConversa', 'conversaDaAba', 'rotuloDaOrigem', 'filas', 'absorvidas', 'respondePorOutra', 'baloesVisiveis', 'normalizarTexto', js)(
     Vue.computed, detalhe, Vue.ref(Date.parse('2026-10-01T15:00:00Z')), (iso) => `dia ${iso.slice(0, 10)}`,
     Vue.ref(null), Vue.computed(() => null), Vue.computed(() => true), AB.conversaDaAba, AB.rotuloDaOrigem,
+    // A fila de envio (06/11/2026) vazia: os balões estão no atendimento-fila-envio.cjs.
+    new Map(), new Set(), Vue.ref(false), () => [], (t) => t,
   )
   const msg = (id, em) => ({ id, enviada_em: em, autor: 'cliente', origem: 'cliente', tipo: 'texto', texto: id, anexos: [], status: 'recebida' })
   const etq = (id, em, de, para) => ({ id, em, de, para, de_rotulo: de, para_rotulo: para, motivo: null, por_user_id: null, por_nome: null })

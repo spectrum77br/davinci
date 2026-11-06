@@ -152,6 +152,7 @@ from app.models.garantia import (
     GarantiaConversa,
     GarantiaLog,
     GarantiaPendencia,
+    GarantiaSac,
 )
 from app.models.imagem_publica import ImagemPublica
 from app.models.imobilizado import IMOBILIZADO_STATUS, Imobilizado, ImobilizadoHistorico
@@ -283,6 +284,7 @@ from app.models.ouvidoria import (
 from app.models.pricing import (
     AuditDismissedSku,
     PricingAccount,
+    PricingGarantiaPrazo,
     PricingOverride,
     PricingProduct,
     PricingPushConfirmacao,
@@ -535,6 +537,7 @@ __all__ = [
     "RedeSocialPlataforma",
     "PricingAccount",
     "PricingConferencia",
+    "PricingGarantiaPrazo",
     "PricingOverride",
     "PricingPlatform",
     "PricingProduct",
@@ -576,6 +579,7 @@ __all__ = [
     "GarantiaConversa",
     "GarantiaLog",
     "GarantiaPendencia",
+    "GarantiaSac",
     "IMOBILIZADO_STATUS",
     "Imobilizado",
     "ImobilizadoHistorico",

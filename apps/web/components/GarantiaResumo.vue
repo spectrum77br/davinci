@@ -42,8 +42,8 @@ const emit = defineEmits<{
   // A linha do produto (`chave`): todas as garantias dele; o número de uma
   // coluna, só os pedidos daquela coluna (`ids`; `coluna` = o nome na tela).
   (e: 'abrir', produto: { nome: string; chave?: string; ids?: number[]; coluna?: string }): void
-  // Todos os pedidos de garantia do departamento (sem escolher produto).
-  (e: 'todos'): void
+  // O "Ver todos os pedidos de garantia" saiu em 06/11/2026 ("excluir o
+  // botão": dependia da detecção pelas conversas).
 }>()
 
 const { api } = useApi()
@@ -235,7 +235,6 @@ function textoDaCelula(p: ResumoProduto, c: Coluna) {
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <button type="button" class="btn btn-sm" data-ver-todos @click="emit('todos')">Ver todos os pedidos de garantia</button>
           <input v-model="busca" placeholder="buscar SKU ou produto…" class="w-56 rounded border bg-background px-2 py-1 text-sm" data-busca-produto>
         </div>
       </div>

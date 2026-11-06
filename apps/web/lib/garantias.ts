@@ -5,10 +5,16 @@
 // (apps/api/app/schemas/garantia.py), os rótulos e as contas que a TELA faz
 // só para mostrar antes de salvar (máscara do CPF, prévia da cobertura) — o
 // que vale é sempre o que o servidor devolve.
+// Garantia × SAC (06/11/2026, "Painel de Garantia: alterações" v3): prazo
+// ÚNICO por produto (Tabela de Preços › Produtos, `garantia_meses`) — o painel
+// não fala mais de hardware nem de software (a IA do Atendimento continua com
+// os dois prazos, no servidor); o Atendimento é só o SAC do site CONFIRMADO
+// (o botão Confirmar da aba Garantia) até alguém encerrar ou o caso terminar.
 
 // ─── contrato da API (/api/garantias) ───────────────────────────────────────
-export type StatusGarantia = 'aguardando_entrega' | 'ativa' | 'somente_software' | 'expirada'
-export type FiltroStatus = 'todos' | StatusGarantia | 'entregue_sem_data' | 'hw_vence_30d'
+// O status do PAINEL (06/11/2026): pelo fim único da garantia.
+export type StatusGarantia = 'aguardando_entrega' | 'ativa' | 'expirada' | 'sem_prazo'
+export type FiltroStatus = 'todos' | StatusGarantia | 'entregue_sem_data' | 'vence_30d'
 export type Cobertura = 'coberto' | 'fora_da_garantia' | 'sem_data_de_entrega'
 export type TipoProblema = 'hardware' | 'software'
 
@@ -64,6 +70,20 @@ export type GarantiaLinha = {
   // para quem está em atendimento agora, o motivo (o selo da aba Atendimento).
   departamento?: Departamento | null
   atendimento?: AtendimentoAgora | null
+  // Garantia × SAC (06/11/2026): o nome do comprador sem o apelido do fim
+  // ("Maria Souza (maria123)" → "Maria Souza"); o produto como está na Tabela
+  // de Preços pelo SKU (fora dela, o nome da nota, com o aviso); o prazo
+  // único do produto e o fim; a situação do pedido no Bling; e o caso do SAC
+  // do site — o mesmo que a aba Atendimento usa (revisão 06/11): o confirmado
+  // e aberto mais antigo; senão o aberto sem confirmação mais antigo; senão o
+  // encerrado mais recente.
+  nome?: string
+  produto_nome?: string | null
+  produto_na_tabela?: boolean
+  garantia_meses?: number | null
+  fim_garantia?: string | null
+  status_pedido?: string | null
+  sac?: SacDaLinha | null
 }
 export type DesfechoAparelho = 'no_tecnico' | 'consertado' | 'perdido' | 'devolvido' | 'reembolso' | 'a_caminho'
 
@@ -72,6 +92,107 @@ export type DesfechoAparelho = 'no_tecnico' | 'consertado' | 'perdido' | 'devolv
 // rótulo vem pronto do servidor; `desde` = quando o motivo começou.
 export type MotivoAtendimento = 'no_tecnico' | 'sem_condicao' | 'voltando' | 'plataforma_decidindo' | 'pedido_sem_resposta'
 export type AtendimentoAgora = { motivo: MotivoAtendimento; rotulo: string; desde: string | null; vencido: boolean }
+
+// O caso do SAC do site na linha (06/11/2026): recebido (protocolo, data e o
+// botão Confirmar) ou confirmado ("Garantia acionada", vai para a aba
+// Atendimento até encerrar).
+export type SacDaLinha = {
+  id: number
+  protocolo: string
+  recebido_em: string
+  confirmado_em: string | null
+  confirmado_por: PessoaRef | null
+  encerrado_em: string | null
+  encerrado_motivo: string | null
+}
+// A resposta do Confirmar, do Encerrar e do vincular (SacOut): o caso como
+// ficou — a tela atualiza a linha com ela (revisão 06/11: depois do Encerrar o
+// painel continuava com o caso aberto até alguém trocar de garantia).
+export type SacOut = SacDaLinha & {
+  garantia_id: number | null
+  conversa_id: string
+  vinculo: string | null
+  encerrado_por: PessoaRef | null
+}
+/** Só os campos da linha (SacDaLinha) de um caso que veio do servidor. */
+export function sacDaLinha(s: SacDaLinha): SacDaLinha {
+  return {
+    id: s.id,
+    protocolo: s.protocolo,
+    recebido_em: s.recebido_em,
+    confirmado_em: s.confirmado_em ?? null,
+    confirmado_por: s.confirmado_por ?? null,
+    encerrado_em: s.encerrado_em ?? null,
+    encerrado_motivo: s.encerrado_motivo ?? null,
+  }
+}
+export type SituacaoDoSac = 'sem' | 'recebido' | 'acionada'
+export function situacaoDoSac(s: SacDaLinha | null | undefined): SituacaoDoSac {
+  if (!s) return 'sem'
+  return s.confirmado_em ? 'acionada' : 'recebido'
+}
+
+// O resumo do SAC (GET /api/garantias/{id}/sac): o formulário do site lido em
+// seções (Atendimento, Comprador, Compra, Produto, Defeito) e os anexos do
+// e-mail (Documentação), que abrem no próprio painel. O CPF já vem mascarado
+// do servidor para quem não tem "Ver o CPF completo".
+export type SacCampo = { rotulo: string; valor: string | null }
+export type SacSecao = { titulo: string; campos: SacCampo[] }
+export type SacAnexo = { id: string; nome: string | null; tipo: string | null; tamanho: number | null; papel: string | null; url: string }
+export type SacDetalhe = {
+  id: number
+  protocolo: string
+  recebido_em: string
+  conversa_id: string
+  confirmado_em: string | null
+  confirmado_por: PessoaRef | null
+  encerrado_em: string | null
+  encerrado_por: PessoaRef | null
+  encerrado_motivo: string | null
+  secoes: SacSecao[]
+  anexos: SacAnexo[]
+}
+
+// "SAC sem pedido" (GET /api/garantias/sac/sem-pedido): o formulário que o
+// robô não ligou a nenhuma venda (nº de pedido, NF e CPF + produto não
+// acharam exatamente uma). Sem CPF. Só quem enxerga todas as lojas vê.
+export type SacSemPedido = {
+  id: number
+  protocolo: string
+  recebido_em: string
+  nome: string | null
+  pedido_citado: string | null
+  nota_fiscal: string | null
+  modelo: string | null
+  local_compra: string | null
+  loja_vendedor: string | null
+}
+export type SacSemPedidoLista = { itens: SacSemPedido[]; total: number }
+
+/** O nome sem o apelido do fim (a mesma regra do servidor): "Maria Souza (maria123)" e o cortado "Maria Souza (maria12" → "Maria Souza". */
+export function nomeSemApelido(nome: string | null | undefined): string {
+  const original = nome || ''
+  const sem = original.replace(/\s*\([^()]*\)?\s*$/, '')
+  return sem.trim() ? sem : original
+}
+/** O nome da linha: o que o servidor manda (`nome`); sem ele, o da NF sem o apelido. */
+export function nomeDaLinha(g: Pick<GarantiaLinha, 'cliente_nome' | 'nome'>): string {
+  return g.nome || nomeSemApelido(g.cliente_nome)
+}
+
+/** "Aberto há 12 dias" — do formulário até o encerramento (ou hoje, o dia em São Paulo). */
+export function tempoEmAberto(s: Pick<SacDaLinha, 'recebido_em' | 'encerrado_em'> | null | undefined, hoje: string = hojeSP()): string {
+  if (!s) return ''
+  const ini = diaEmSP(s.recebido_em)
+  const fim = diaEmSP(s.encerrado_em) || hoje
+  if (!ini) return ''
+  const dias = Math.round((Date.parse(`${fim}T00:00:00Z`) - Date.parse(`${ini}T00:00:00Z`)) / 86_400_000)
+  if (!Number.isFinite(dias)) return ''
+  const n = Math.max(0, dias)
+  if (s.encerrado_em) return n === 1 ? 'Ficou aberto 1 dia' : n === 0 ? 'Encerrado no mesmo dia' : `Ficou aberto ${n} dias`
+  if (n === 0) return 'Aberto hoje'
+  return n === 1 ? 'Aberto há 1 dia' : `Aberto há ${n} dias`
+}
 
 export type OrigemPedido = 'mensagem' | 'sac' | 'devolucao' | 'atendimento' | 'manual' | 'pessoa'
 // Sem emoji (29/10/2026: "igual aos nossos painéis do DaVinci").
@@ -102,16 +223,20 @@ export function rotuloDoPedidoComTrecho(g: Pick<GarantiaLinha, 'pedido_em' | 'pe
 
 // Os cartões da aba Garantia e a linha embaixo deles: do departamento da
 // pílula (04/11/2026), sem os filtros da barra.
+// Desde 06/11/2026 a base são TODAS as vendas que a pessoa enxerga na pílula
+// (`total`); `acionadas` = com o SAC confirmado; `atendimentos_no_mes` = casos
+// do SAC confirmados no mês.
 export type Indicadores = {
   ativas: number
-  somente_software: number
-  hw_vence_30d: number
+  vence_30d: number
+  sem_prazo: number
   atendimentos_no_mes: number
+  acionadas: number
   aguardando_entrega: number
   entregue_sem_data: number
   expiradas: number
   total: number
-  // As vendas com garantia (com e sem pedido) que a pessoa enxerga.
+  // As vendas com garantia que a pessoa enxerga.
   vendidas?: number
 }
 
@@ -128,6 +253,9 @@ export type GarantiaLista = {
   // A busca não achou garantia, mas achou o pedido (dentro da equipe): o
   // cartão diz por que ele ainda não tem garantia.
   pedido_sem_garantia?: PedidoSemGarantia | null
+  // Quantos SAC do site o robô não ligou a nenhuma venda (só para quem
+  // enxerga todas as lojas: o SAC não tem loja).
+  sac_sem_pedido?: number
 }
 
 // Por que o pedido ainda não tem garantia (04/11/2026): o SAC busca o nº da
@@ -264,7 +392,7 @@ export type PedidoParaCadastro = {
   itens: ItemPedido[]
   produto_uranyx: boolean
   entrega: Entrega
-  prazos: { data_inicio: string | null; fim_hardware: string | null; fim_software: string | null; status: StatusGarantia; status_rotulo: string; entregue_sem_data: boolean }
+  prazos: { data_inicio: string | null; fim_hardware: string | null; fim_software: string | null; status: StatusGarantia; status_rotulo: string; entregue_sem_data: boolean; fim_garantia?: string | null; prazo_meses?: number | null }
   notas: NotaDoPedido[]
   nf_sugerida: NotaDoPedido | null
   nome_sugerido: string | null
@@ -342,15 +470,15 @@ export const STATUS: Record<StatusGarantia, { rotulo: string; dica: string }> = 
   },
   ativa: {
     rotulo: 'Ativa',
-    dica: 'hoje está dentro do prazo de hardware (hardware e software cobertos)',
-  },
-  somente_software: {
-    rotulo: 'Somente software',
-    dica: 'o prazo de hardware acabou; o de software continua',
+    dica: 'hoje está dentro do prazo da garantia (entrega + o prazo do produto)',
   },
   expirada: {
     rotulo: 'Expirada',
-    dica: 'os dois prazos acabaram',
+    dica: 'o prazo da garantia acabou',
+  },
+  sem_prazo: {
+    rotulo: 'Prazo não cadastrado',
+    dica: 'o produto não tem o prazo da garantia na Tabela de Preços › Produtos (coluna Garantia, em meses) — sem ele não há data final',
   },
 }
 // O "Aguardando entrega" de pedido que o Bling já dá como entregue (o
@@ -369,11 +497,11 @@ export function statusInfo(s: string | null | undefined, entregueSemData = false
 export const FILTROS_STATUS: { value: FiltroStatus; label: string }[] = [
   { value: 'todos', label: 'Todos' },
   { value: 'ativa', label: 'Ativa' },
-  { value: 'somente_software', label: 'Somente software' },
   { value: 'expirada', label: 'Expirada' },
   { value: 'aguardando_entrega', label: 'Aguardando entrega' },
   { value: 'entregue_sem_data', label: 'Entregue — sem data no DaVinci' },
-  { value: 'hw_vence_30d', label: 'Hardware vence em 30 dias' },
+  { value: 'vence_30d', label: 'Vence em 30 dias' },
+  { value: 'sem_prazo', label: 'Sem prazo cadastrado' },
 ]
 
 export const COBERTURA: Record<Cobertura, { rotulo: string }> = {
@@ -385,16 +513,24 @@ export function coberturaInfo(c: string | null | undefined) {
   return COBERTURA[(c || '') as Cobertura] ?? { rotulo: c || '—' }
 }
 
+// O tipo do problema do "Registrar atendimento" (revisão 06/11/2026): só uma
+// categoria — a cobertura é pelo fim único da garantia (o servidor só cai no
+// prazo antigo do tipo quando o produto não tem prazo cadastrado). O valor
+// gravado continua hardware/software (a coluna e a trava do banco não
+// mudaram); a tela não mostra essas palavras.
 export const TIPOS_PROBLEMA: { value: TipoProblema; label: string; dica: string }[] = [
-  { value: 'hardware', label: 'Hardware', dica: 'defeito físico: tela, bateria, carregamento, botão, placa…' },
-  { value: 'software', label: 'Software', dica: 'sistema, app, atualização, configuração…' },
+  { value: 'hardware', label: 'Defeito no aparelho', dica: 'parte física: tela, bateria, carregamento, botão, placa…' },
+  { value: 'software', label: 'Sistema / aplicativo', dica: 'sistema, app, atualização, configuração…' },
 ]
+export function rotuloDoTipo(t: string | null | undefined): string {
+  return TIPOS_PROBLEMA.find((x) => x.value === t)?.label || t || '—'
+}
 
 // Avisos que não bloqueiam (GET /pedido e POST/PUT).
 export const AVISOS: Record<string, string> = {
   pedido_sem_produto_uranyx: 'O pedido não tem produto Uranyx (SKU u…, dg… ou a0…). Confira se é o pedido certo.',
-  aguardando_entrega: 'O pedido ainda não tem data de entrega: a garantia fica "Aguardando entrega" e os prazos entram sozinhos quando a entrega aparecer.',
-  entregue_sem_data: 'O Bling já dá o pedido como entregue, mas o DaVinci não tem a data de entrega (a Logística só guarda a data desde 15/07/2026). A garantia fica sem prazos até a data aparecer — a data inicial não se digita.',
+  aguardando_entrega: 'O pedido ainda não tem data de entrega: a garantia fica "Aguardando entrega" e o prazo entra sozinho quando a entrega aparecer.',
+  entregue_sem_data: 'O Bling já dá o pedido como entregue, mas o DaVinci não tem a data de entrega (a Logística só guarda a data desde 15/07/2026). A garantia fica sem prazo até a data aparecer — a data inicial não se digita.',
   pedido_ja_tem_garantia: 'Este pedido já tem garantia cadastrada (em outra NF) — confira se não é o mesmo aparelho.',
   cpf_diferente_do_pedido: 'O CPF informado é diferente do CPF que está no pedido.',
   nf_nao_e_do_pedido: 'A NF informada não está entre as notas deste pedido.',
@@ -428,6 +564,10 @@ export const ACOES_LOG: Record<string, string> = {
   pedido_automatico: 'Pedido de garantia (achado pelo robô)',
   marcou_pedido: 'Marcou como pedido de garantia',
   tirou_pedido: 'Não é pedido de garantia',
+  // Garantia × SAC (06/11/2026).
+  confirmou_atendimento: 'Confirmou o atendimento (SAC do site)',
+  encerrou_atendimento: 'Encerrou o atendimento',
+  vinculou_sac: 'Ligou o SAC do site a esta garantia',
 }
 export const CAMPOS_LOG: Record<string, string> = {
   pedido: 'Pedido',
@@ -436,9 +576,17 @@ export const CAMPOS_LOG: Record<string, string> = {
   cpf: 'CPF',
   cliente_nome: 'Nome do cliente',
   data_inicio: 'Data inicial (entrega)',
-  fim_hardware: 'Fim do hardware',
-  fim_software: 'Fim do software',
+  // O log antigo (antes do prazo único de 06/11/2026) continua com os dois.
+  fim_hardware: 'Fim do prazo antigo (3 meses)',
+  fim_software: 'Fim do prazo antigo (12 meses)',
+  prazo_meses: 'Prazo da garantia (meses)',
+  fim_garantia: 'Fim da garantia',
+  // O Confirmar com a garantia já vencida (o "Confirmar mesmo assim?"): o fim
+  // que a tela avisou.
+  garantia_vencida: 'Confirmou com a garantia já vencida (fim)',
   entrega_origem: 'Origem da entrega',
+  // O pedido de garantia que o robô tinha achado, desfeito ao corrigir o pedido.
+  pedido_de_garantia: 'Pedido de garantia',
 }
 
 const NOMES_PLATAFORMA: Record<string, string> = {
@@ -467,6 +615,15 @@ export const ERROS: Record<string, string> = {
   anexo_nao_encontrado: 'Anexo não encontrado.',
   muitas_buscas_por_cpf: 'Muitas buscas pelo CPF completo em pouco tempo — espere um pouco ou busque pelo pedido, pela NF ou pelo nome.',
   so_admin: 'O Resumo da garantia é só para administradores.',
+  // Garantia × SAC (06/11/2026).
+  sac_nao_encontrado: 'Caso do SAC não encontrado (ou de uma loja fora da sua equipe).',
+  sac_sem_garantia: 'Este SAC ainda não está ligado a uma venda — vincule em "SAC sem pedido" antes de confirmar.',
+  garantia_vencida: 'A garantia desta venda já venceu.',
+  sac_nao_confirmado: 'O atendimento ainda não foi confirmado — confirme na aba Garantia antes de encerrar.',
+  sac_ja_confirmado: 'Este SAC já foi confirmado em outra garantia — não dá para mudar o vínculo.',
+  sac_restrito: 'Só quem enxerga todas as lojas vincula o SAC do site à mão.',
+  sac_outra_pessoa: 'Outra pessoa escreveu na conversa deste SAC (ou ela junta e-mails de mais de um cliente): o DaVinci não liga à venda, para não mostrar os dados de um cliente na garantia de outro. Confira a conversa no Atendimento.',
+  anexo_restrito: 'Sem acesso a este arquivo.',
   forbidden: 'Sem permissão para isso.',
 }
 
@@ -477,7 +634,7 @@ const MSG_PYDANTIC: [RegExp, string][] = [
   [/at least 11 characters/i, 'CPF incompleto.'],
   [/at most (\d+) characters/i, 'Texto longo demais.'],
   [/field required/i, 'Campo obrigatório.'],
-  [/input should be 'hardware' or 'software'/i, 'Escolha Hardware ou Software.'],
+  [/input should be 'hardware' or 'software'/i, 'Escolha o tipo do problema.'],
 ]
 
 /**
@@ -649,15 +806,22 @@ export function coberto(fim: string | null | undefined, dia: string, ultimoDiaCo
   return ultimoDiaCoberto ? dia <= fim : dia < fim
 }
 
-/** §5.2 antes de salvar: Coberto se o dia do atendimento ≤ fim do tipo informado. */
+/**
+ * §5.2 antes de salvar: Coberto se o dia do atendimento ≤ fim da garantia —
+ * a mesma conta do servidor (services/garantia.py `cobertura_em`, revisão
+ * 06/11/2026): com o prazo do produto, o fim ÚNICO (`fim_garantia`), qualquer
+ * que seja o tipo; sem prazo cadastrado, o fim antigo do tipo. Sem o tipo e
+ * sem o prazo não dá para dizer: null.
+ */
 export function previaCobertura(
-  g: Pick<GarantiaLinha, 'data_inicio' | 'fim_hardware' | 'fim_software'>,
-  tipo: TipoProblema,
+  g: Pick<GarantiaLinha, 'data_inicio' | 'fim_hardware' | 'fim_software' | 'fim_garantia'>,
+  tipo: TipoProblema | null,
   quando: string | null,
   ultimoDiaCoberto = true,
-): { cobertura: Cobertura; fim: string | null; dia: string | null } {
+): { cobertura: Cobertura; fim: string | null; dia: string | null } | null {
   if (!g.data_inicio) return { cobertura: 'sem_data_de_entrega', fim: null, dia: diaEmSP(quando) }
-  const fim = tipo === 'hardware' ? g.fim_hardware : g.fim_software
+  const fim = g.fim_garantia || (tipo === 'hardware' ? g.fim_hardware : tipo === 'software' ? g.fim_software : undefined)
+  if (fim === undefined) return null
   const dia = diaEmSP(quando) || hojeSP()
   return { cobertura: coberto(fim, dia, ultimoDiaCoberto) ? 'coberto' : 'fora_da_garantia', fim, dia }
 }
@@ -750,6 +914,24 @@ export function barraPrazo(p: Prazo | null | undefined): { pct: number; texto: s
   return { pct: Math.max(pct, 2), texto, nivel: d <= 30 ? 'perto' : 'folga' }
 }
 
+const _dias = (a: string, b: string) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86_400_000)
+/**
+ * A barra do prazo único (06/11/2026), a mesma conta do servidor
+ * (services/garantia.prazo_info): do início (a entrega) ao fim da garantia.
+ * Sem entrega ou sem prazo do produto, nada (null).
+ */
+export function prazoUnico(g: Pick<GarantiaLinha, 'data_inicio' | 'fim_garantia'>, hoje: string = hojeSP(), ultimoDiaCoberto = true): Prazo | null {
+  if (!g.data_inicio || !g.fim_garantia) return null
+  const total = _dias(g.data_inicio, g.fim_garantia)
+  const restantes = Math.max(0, Math.min(_dias(hoje, g.fim_garantia), total))
+  return { fim: g.fim_garantia, dias_total: total, dias_restantes: restantes, coberto_hoje: coberto(g.fim_garantia, hoje, ultimoDiaCoberto) }
+}
+/** "12 meses" / "1 mês" / "—" (sem prazo cadastrado). */
+export function textoMeses(n: number | null | undefined): string {
+  if (!n) return '—'
+  return n === 1 ? '1 mês' : `${n} meses`
+}
+
 // ─── lista ──────────────────────────────────────────────────────────────────
 export type FiltrosLista = {
   busca: string
@@ -766,20 +948,21 @@ export type FiltrosLista = {
   ordem?: 'cadastro' | 'atividade'
   com_conversa?: boolean
   origem?: 'todas' | 'robo' | 'manual'
-  // Pedido de garantia (28/10/2026): o Painel é dos pedidos; "todas" mostra
-  // também a venda sem pedido.
-  mostrar?: 'pedidos' | 'todas'
+  // O "Mostrar" (06/11/2026): todas as vendas com nota (o padrão) ou só as
+  // de garantia acionada (o SAC confirmado, encerrado ou não).
+  mostrar?: 'todas' | 'acionada'
   // A garantia por produto: o número de uma coluna abre só os pedidos dela.
   ids?: number[]
   // As 3 partes do painel (04/11/2026): o departamento da pílula; a linha do
   // Resumo (a `chave` do produto: todas as garantias dele); e a aba
-  // Atendimento (só quem está em atendimento agora, o mais urgente em cima).
+  // Atendimento (desde 06/11/2026: só os casos do SAC confirmados e abertos,
+  // o mais antigo em cima).
   departamento?: Departamento | null
   produto?: string | null
   em_atendimento?: boolean
 }
 
-export const FILTROS_PADRAO: FiltrosLista = { busca: '', status: 'todos', periodo: 'venda', de: '', ate: '', com_atendimento_no_mes: false, mostrar: 'pedidos' }
+export const FILTROS_PADRAO: FiltrosLista = { busca: '', status: 'todos', periodo: 'venda', de: '', ate: '', com_atendimento_no_mes: false, mostrar: 'todas' }
 
 export const LIMITE_PAGINA = 100
 
@@ -795,7 +978,7 @@ export type CorpoLista = {
   ordem?: 'cadastro' | 'atividade'
   com_conversa?: boolean
   origem?: 'robo' | 'manual'
-  mostrar?: 'todas'
+  mostrar?: 'todas' | 'acionada'
   ids?: number[]
   departamento?: Departamento
   produto?: string
@@ -822,7 +1005,8 @@ export function corpoDaLista(f: FiltrosLista, offset = 0, limite = LIMITE_PAGINA
   // quer achar a garantia mesmo sem conversa nenhuma.
   if (f.com_conversa && !busca) q.com_conversa = true
   if (f.origem && f.origem !== 'todas') q.origem = f.origem
-  if (f.mostrar === 'todas') q.mostrar = 'todas'
+  // "todas" é o padrão do servidor: só a "garantia acionada" vai no corpo.
+  if (f.mostrar === 'acionada') q.mostrar = 'acionada'
   if (f.ids?.length) q.ids = f.ids
   if (f.departamento) q.departamento = f.departamento
   if (f.produto) q.produto = f.produto
@@ -930,11 +1114,12 @@ export type ResumoProduto = {
 }
 export type Resumo = { vendidas: number; pediram: number; seguiram: number; hoje: string; ve_valores: boolean; departamentos: ResumoDepartamento[]; produtos: ResumoProduto[] }
 
-// O corpo do resumo: os filtros da barra que a aba Resumo mostra (período,
-// origem, status). A busca, o "Mostrar" e os cartões são da aba Garantia.
+// O corpo do resumo: os filtros que a aba Resumo mostra (o período; a origem
+// se vier). O Status saiu do Resumo em 06/11/2026 ("excluir o filtro
+// Status"): um status ligado na aba Garantia não vai para o /resumo. A busca,
+// o "Mostrar" e os cartões são da aba Garantia.
 export function corpoDoResumo(f: FiltrosLista): Partial<CorpoLista> {
   const q: Partial<CorpoLista> = {}
-  if (f.status && f.status !== 'todos') q.status = f.status
   if (f.de || f.ate) {
     q.periodo = f.periodo
     if (f.de) q.de = f.de
@@ -1028,7 +1213,13 @@ const ROTULOS_SAC = [
 // uma linha em branco entre os campos): a continuação da descrição fica como o
 // cliente escreveu ("Correios entregou…" não vira "Cor: reios…"). Na tela, um
 // campo por linha, com a linha em branco só antes de cada seção ("2. Dados…").
-export function formularioSacLegivel(texto: string | null | undefined): string {
+// O CPF do formulário sai mascarado (06/11/2026: "o CPF fica mascarado, como
+// no resto do painel"); o completo, para quem pode, fica no Resumo do SAC.
+const RE_CPF_TEXTO = /\b(\d{3})[.\s]?(\d{3})[.\s]?(\d{3})[-.\s]?(\d{2})\b/g
+export function mascararCpfNoTexto(t: string): string {
+  return t.replace(RE_CPF_TEXTO, (_x, _a, b, c) => `***.${b}.${c}-**`)
+}
+export function formularioSacLegivel(texto: string | null | undefined, mascarar = true): string {
   const usados = new Set<string>()
   let anterior = ''
   const linhas = (texto || '').split(/\r?\n/).map((linha, i) => {
@@ -1038,8 +1229,9 @@ export function formularioSacLegivel(texto: string | null | undefined): string {
     if (!r) return linha
     usados.add(r)
     const resto = linha.slice(r.length)
-    if (!resto || /^\s*:/.test(resto)) return linha
-    return `${r}${r.endsWith('?') ? '' : ':'} ${resto.trimStart()}`
+    if (!resto || /^\s*:/.test(resto)) return mascarar && r === 'CPF' ? mascararCpfNoTexto(linha) : linha
+    const valor = mascarar && r === 'CPF' ? mascararCpfNoTexto(resto.trimStart()) : resto.trimStart()
+    return `${r}${r.endsWith('?') ? '' : ':'} ${valor}`
   })
   const saida: string[] = []
   for (const linha of linhas) {
@@ -1147,13 +1339,13 @@ export const CANAL_ROTULO: Record<string, string> = {
   avaliacao: 'avaliação',
 }
 
-// Os 4 cartões do §4.1 — clicar filtra a lista.
-export type Cartao = 'ativas' | 'somente_software' | 'hw_vence_30d' | 'atendimentos_no_mes'
+// Os 4 cartões (06/11/2026) — clicar filtra a lista.
+export type Cartao = 'ativas' | 'vence_30d' | 'sem_prazo' | 'atendimentos_no_mes'
 export const CARTOES: { chave: Cartao; rotulo: string; dica: string }[] = [
-  { chave: 'ativas', rotulo: 'Ativas', dica: 'hardware e software cobertos hoje' },
-  { chave: 'somente_software', rotulo: 'Só software', dica: 'o hardware acabou, o software continua' },
-  { chave: 'hw_vence_30d', rotulo: 'HW vence em 30d', dica: 'ativas cujo hardware termina nos próximos 30 dias' },
-  { chave: 'atendimentos_no_mes', rotulo: 'Atendimentos no mês', dica: 'garantias com atendimento vinculado neste mês' },
+  { chave: 'ativas', rotulo: 'Ativas', dica: 'dentro do prazo da garantia hoje' },
+  { chave: 'vence_30d', rotulo: 'Vence em 30 dias', dica: 'ativas cuja garantia termina nos próximos 30 dias' },
+  { chave: 'sem_prazo', rotulo: 'Sem prazo cadastrado', dica: 'o produto ainda não tem o prazo na Tabela de Preços › Produtos' },
+  { chave: 'atendimentos_no_mes', rotulo: 'Atendimentos no mês', dica: 'casos do SAC do site confirmados neste mês' },
 ]
 
 /** O filtro que o cartão liga (clicar de novo desliga). */
@@ -1166,7 +1358,7 @@ export function filtroDoCartao(f: FiltrosLista, c: Cartao): FiltrosLista {
 export function cartaoAtivo(f: FiltrosLista): Cartao | null {
   if (f.com_atendimento_no_mes) return 'atendimentos_no_mes'
   if (f.status === 'ativa') return 'ativas'
-  if (f.status === 'somente_software' || f.status === 'hw_vence_30d') return f.status
+  if (f.status === 'vence_30d' || f.status === 'sem_prazo') return f.status
   return null
 }
 

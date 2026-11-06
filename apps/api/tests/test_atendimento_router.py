@@ -1573,9 +1573,9 @@ async def test_busca_acha_a_reclamacao_do_ml_pelo_pack_e_pela_order(client, db, 
         plataforma="ml",
         canal_nome="reclamacao",
         externo_id="5606787505",
-        pedido_marketplace="2000019302717656",
+        pedido_marketplace="2000000000007656",
         comprador_nome="Comprador",
-        dados={"pack_id": "2000015829180301", "order_id": "2000019302717656"},
+        dados={"pack_id": "2000000000000301", "order_id": "2000000000007656"},
     )
     # O chat do carrinho guarda só o pack: os pedidos vêm no retrato.
     chat, _ = await gravar.upsert_conversa(
@@ -1592,13 +1592,26 @@ async def test_busca_acha_a_reclamacao_do_ml_pelo_pack_e_pela_order(client, db, 
             "pedido_mkt": {"pedido": "2000000000000001", "pedidos": ["2000011", "2000022"]},
         },
     )
+    # O retrato antigo, ainda sem `pedidos`: a order está em `pedido`.
+    antigo, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal,
+        integration=integ,
+        plataforma="ml",
+        canal_nome="pos_venda",
+        externo_id="2000000000000002",
+        pedido_marketplace="2000000000000002",
+        comprador_nome="Comprador",
+        dados={"pack_id": "2000000000000002", "pedido_mkt": {"pedido": "2000033"}},
+    )
     await db.commit()
 
-    for numero in ("2000015829180301", "2000019302717656"):
+    for numero in ("2000000000000301", "2000000000007656"):
         assert _ids(await client.get(f"{URL}/conversas?filtro=todas&q={numero}")) == [
             str(conversa.id)
         ]
     for numero in ("2000011", "2000022", "2000000000000001"):
         assert _ids(await client.get(f"{URL}/conversas?filtro=todas&q={numero}")) == [str(chat.id)]
-    assert _ids(await client.get(f"{URL}/conversas?filtro=todas&q=2000015829180302")) == []
+    assert _ids(await client.get(f"{URL}/conversas?filtro=todas&q=2000033")) == [str(antigo.id)]
+    assert _ids(await client.get(f"{URL}/conversas?filtro=todas&q=2000000000000302")) == []
 

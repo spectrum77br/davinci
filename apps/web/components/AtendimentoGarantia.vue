@@ -5,8 +5,13 @@
 // alerta de CPF sem garantia (§5.3) — o CPF nunca vem para a tela. O botão
 // "Vincular à garantia" só aparece para quem tem "Registrar atendimento" e
 // NÃO depende da trava de só leitura do Atendimento.
+// Garantia × SAC (revisão 06/11/2026): a linha das garantias usa o status e o
+// fim ÚNICO do painel (o prazo do produto na Tabela de Preços › Produtos) —
+// "garantia até …" ou "prazo não cadastrado", sem os dois prazos antigos, que
+// davam outra resposta ao lado do selo. O tipo do atendimento vinculado vem
+// com o rótulo do modal (Defeito no aparelho / Sistema / aplicativo).
 import { ExternalLink, Loader2, RotateCcw, ShieldAlert, ShieldCheck } from 'lucide-vue-next'
-import { dataCurta, dataHoraBR, textoNf, type SituacaoConversa } from '~/lib/garantias'
+import { dataCurta, dataHoraBR, rotuloDoTipo, textoNf, type SituacaoConversa } from '~/lib/garantias'
 
 const props = defineProps<{
   situacao: SituacaoConversa | null
@@ -27,7 +32,6 @@ const emit = defineEmits<{
 const s = computed(() => props.situacao)
 // Sem nada a mostrar e sem poder vincular: o bloco nem aparece.
 const visivel = computed(() => props.podeVincular || !!props.erro || !!(s.value && (s.value.garantias.length || s.value.alerta_cpf_sem_garantia || s.value.vinculos.length)))
-const TIPO: Record<string, string> = { hardware: 'Hardware', software: 'Software' }
 const semGarantia = computed(() => {
   const x = s.value
   if (!x) return ''
@@ -82,7 +86,7 @@ const semGarantia = computed(() => {
             <NuxtLink v-if="podeAbrir" :to="`/garantias?garantia=${g.id}`" target="_blank" class="ml-auto inline-flex items-center gap-0.5 text-primary hover:underline" title="abrir a garantia (outra aba)">abrir<ExternalLink class="size-3" /></NuxtLink>
           </div>
           <div class="text-muted-foreground">{{ g.cliente_nome }} · {{ g.cpf_mascarado || '—' }}</div>
-          <div class="text-muted-foreground">HW até {{ dataCurta(g.fim_hardware) }} · SW até {{ dataCurta(g.fim_software) }} · {{ g.atendimentos }} atend.</div>
+          <div class="text-muted-foreground" data-fim-garantia><template v-if="g.fim_garantia">garantia até {{ dataCurta(g.fim_garantia) }}</template><template v-else-if="g.data_inicio && !g.garantia_meses">prazo não cadastrado</template><template v-else>garantia até —</template> · {{ g.atendimentos }} atend.</div>
         </li>
       </ul>
       <p v-else-if="!s.alerta_cpf_sem_garantia && semGarantia" class="text-xs text-muted-foreground">{{ semGarantia }}</p>
@@ -91,7 +95,7 @@ const semGarantia = computed(() => {
         <div class="text-muted-foreground">Esta conversa já foi vinculada:</div>
         <div v-for="v in s.vinculos" :key="v.atendimento_id" class="flex flex-wrap items-center gap-1">
           <span class="tabular-nums">{{ dataHoraBR(v.data_atendimento) }}</span>
-          <span>· {{ TIPO[v.tipo_problema] || v.tipo_problema }} ·</span>
+          <span>· {{ rotuloDoTipo(v.tipo_problema) }} ·</span>
           <GarantiaCobertura :cobertura="v.cobertura" :rotulo="v.cobertura_rotulo" pequeno />
           <span class="text-muted-foreground">(#{{ v.garantia_id }})</span>
         </div>

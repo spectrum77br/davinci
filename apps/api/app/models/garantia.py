@@ -33,6 +33,17 @@ conversas do pedido sozinho:
 * `garantia_pendencias` — o pedido que o robô viu e NÃO criou (motivo), para
   não reler a cada volta e para a tela de exceções.
 
+Garantia × SAC (06/11/2026, migration 0459): o prazo passa a ser UM por
+produto (`pricing_products.garantia_meses`, a coluna "Garantia (meses)" da
+Tabela de Preços) e a garantia guarda o prazo da venda e o fim dele
+(`prazo_meses`, `fim_garantia`). `fim_hardware`/`fim_software` continuam
+gravados como antes: a IA do Atendimento lê os dois.
+
+* `garantia_sac` — um caso do SAC do site (uranyx.com.br/sac) por conversa
+  de protocolo: o formulário lido (`campos`), a garantia ligada (pelo robô
+  ou à mão), quem CONFIRMOU ("Garantia acionada", entra na aba Atendimento)
+  e quem ENCERROU (a pessoa, ou o robô quando o caso terminou sozinho).
+
 LGPD: as quatro ficam FORA do gatilho do Histórico (`historico/sql.py`,
 EXCLUIDAS) — senão CPF, nome e o texto do comprador seriam copiados para
 `historico_alteracao` por 365 dias. O Histórico geral continua registrando
@@ -52,6 +63,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -90,6 +102,12 @@ GARANTIA_LOG_ACOES = (
     "pedido_automatico",
     "marcou_pedido",
     "tirou_pedido",
+    # Garantia × SAC (06/11/2026): a pessoa confirmou o atendimento do SAC
+    # ("Garantia acionada"), encerrou o caso (ou o robô, quando terminou
+    # sozinho) e o SAC foi ligado à garantia (pelo robô ou à mão).
+    "confirmou_atendimento",
+    "encerrou_atendimento",
+    "vinculou_sac",
 )
 GARANTIA_ORIGENS = ("manual", "robo")
 # De onde veio o pedido de garantia (`garantia_pedido`).
@@ -98,6 +116,15 @@ GARANTIA_PEDIDO_ORIGENS = ("mensagem", "sac", "devolucao", "atendimento", "manua
 # índice comprador × pedido da loja (`comprador` — Shopee/TikTok, uma conversa
 # por comprador com todos os pedidos dele).
 GARANTIA_LIGACOES = ("pedido", "comprador")
+# Como o caso do SAC chegou à garantia (06/11/2026, a ordem da busca do
+# robô): o nº do pedido da plataforma, o nº da NF, o CPF + o produto — ou a
+# pessoa ("SAC sem pedido" → vincular).
+GARANTIA_SAC_VINCULOS = ("pedido", "nf", "cpf_produto", "manual")
+# Quem encerrou o caso: a pessoa (botão "Encerrar atendimento") ou o robô,
+# quando o caso terminou sozinho (técnico, devolução, decisão da plataforma).
+GARANTIA_SAC_ENCERRAMENTOS = ("pessoa", "terminou")
+# O prazo do produto, em meses (a coluna da Tabela de Preços).
+GARANTIA_MESES_MAX = 120
 # As tabelas que só recebem linha nova (gatilho `garantia_so_insercao`).
 GARANTIA_TABELAS_SO_INSERCAO = (
     "garantia_atendimentos",
@@ -174,6 +201,12 @@ class Garantia(Base):
             "data_inicio IS NULL OR (fim_hardware > data_inicio AND fim_software >= fim_hardware)",
             name="prazos_em_ordem",
         ),
+        # O fim único (06/11/2026) só existe com a entrega e o prazo do produto.
+        CheckConstraint(
+            "fim_garantia IS NULL OR (data_inicio IS NOT NULL AND prazo_meses IS NOT NULL"
+            " AND fim_garantia > data_inicio)",
+            name="fim_garantia_ok",
+        ),
         # O robô cria sem pessoa; o cadastro na tela sempre tem quem cadastrou.
         CheckConstraint(f"origem IN ({_lista_sql(GARANTIA_ORIGENS)})", name="origem_valida"),
         CheckConstraint("origem <> 'manual' OR criado_por IS NOT NULL", name="manual_tem_autor"),
@@ -194,6 +227,7 @@ class Garantia(Base):
         Index("ix_garantias_pedido_marketplace", "pedido_marketplace"),
         Index("ix_garantias_nf_numero", "nf_numero"),
         Index("ix_garantias_loja", "loja"),
+        Index("ix_garantias_fim_garantia", "fim_garantia"),
     )
 
     # "ID da garantia" do documento.
@@ -220,6 +254,13 @@ class Garantia(Base):
     data_inicio: Mapped[date | None] = mapped_column(Date, nullable=True)
     fim_hardware: Mapped[date | None] = mapped_column(Date, nullable=True)  # RN02/RN04
     fim_software: Mapped[date | None] = mapped_column(Date, nullable=True)  # RN03/RN04
+    # O prazo ÚNICO da venda (06/11/2026): o maior prazo que o produto teve na
+    # Tabela de Preços desde o dia da venda (services/garantia_prazo.py). NULL
+    # = o produto não tem prazo cadastrado ("Prazo não cadastrado").
+    prazo_meses: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    # Entrega + prazo_meses (RN04: o dia que não existe vira o último; vale
+    # até ele, inclusive). NULL sem entrega ou sem prazo.
+    fim_garantia: Mapped[date | None] = mapped_column(Date, nullable=True)
     # De onde veio a data (services/garantia.FONTES_ENTREGA) e o instante
     # cru da fonte — é com ele que o robô percebe a correção (ponto 5).
     entrega_origem: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -397,6 +438,84 @@ class GarantiaConversa(Base):
     como: Mapped[str] = mapped_column(String(16), nullable=False)
     ligada_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class GarantiaSac(Base):
+    """Um caso do SAC do site (06/11/2026): o formulário de uranyx.com.br/sac
+    que a ponte do e-mail gravou numa conversa de protocolo
+    (`mail-protocolo:US-26-NNNN`). Só o formulário abre caso — o e-mail comum
+    de sac@ (Reclame Aqui, proposta comercial) fica na fila de E-mail.
+
+    O robô (`garantia_sac.sincronizar_sac`) liga o caso à garantia pelo nº do
+    pedido da plataforma, pela NF ou pelo CPF + o produto; o que não liga fica
+    em "SAC sem pedido" (garantia NULL) para a pessoa vincular. Confirmar =
+    "Garantia acionada" (entra na aba Atendimento); encerrar tira da aba.
+    `campos` tem CPF e endereço: a tabela fica fora do Histórico geral
+    (`historico/sql.py`, EXCLUIDAS)."""
+
+    __tablename__ = "garantia_sac"
+    __table_args__ = (
+        CheckConstraint(
+            f"vinculo IS NULL OR vinculo IN ({_lista_sql(GARANTIA_SAC_VINCULOS)})",
+            name="vinculo_valido",
+        ),
+        CheckConstraint(
+            f"encerrado_motivo IS NULL OR encerrado_motivo IN "
+            f"({_lista_sql(GARANTIA_SAC_ENCERRAMENTOS)})",
+            name="encerrado_motivo_valido",
+        ),
+        # Só se confirma o caso ligado a uma garantia; só se encerra o confirmado.
+        CheckConstraint(
+            "confirmado_em IS NULL OR garantia_id IS NOT NULL", name="confirmado_com_garantia"
+        ),
+        CheckConstraint(
+            "encerrado_em IS NULL OR confirmado_em IS NOT NULL", name="encerrado_confirmado"
+        ),
+        CheckConstraint(
+            "(encerrado_em IS NULL) = (encerrado_motivo IS NULL)", name="encerrado_com_motivo"
+        ),
+        Index("ix_garantia_sac_garantia_id", "garantia_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    conversa_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_conversas.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    # A mensagem do formulário na conversa (sem FK: a conversa manda).
+    mensagem_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    protocolo: Mapped[str] = mapped_column(Text, nullable=False)
+    # A hora do formulário (o "Aberto há N dias" conta daqui).
+    recebido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # O formulário lido (`garantia_sac.campos_do_formulario`).
+    campos: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
+    garantia_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("garantias.id", ondelete="SET NULL"), nullable=True
+    )
+    vinculo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    vinculado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    vinculado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    confirmado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    confirmado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    encerrado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    encerrado_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    encerrado_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
 

@@ -412,9 +412,10 @@ async def test_lista_conversas_em_cima_e_sem_as_descartadas(client, db, make_use
         msgs=[("cliente", "chegou quebrado", COMPRA + timedelta(days=5), ())],
     )
     await _rodar(db)
-    # O Painel é dos pedidos de garantia: "chegou quebrado" é pedido (28/10).
+    # "chegou quebrado" é pedido de garantia (28/10) — e desde 06/11/2026 a
+    # lista mostra todas as vendas com nota por padrão.
     r = await client.post("/api/garantias/lista", json={"ordem": "atividade"})
-    assert [i["pedido_bling"] for i in r.json()["itens"]] == ["310003"]
+    assert [i["pedido_bling"] for i in r.json()["itens"]] == ["310003", "310001"]
     assert r.json()["itens"][0]["pedido_origem"] == "mensagem"
     r = await client.post("/api/garantias/lista", json={"ordem": "atividade", "mostrar": "todas"})
     itens = r.json()["itens"]

@@ -811,7 +811,6 @@ async def _dois_em_falta(db, c):
         (_rastreio, "rastreio", None),
         (_saiu, "pedido_saiu", None),
         (_dobro, "pedido_em_dobro", None),
-        (_prazo, "prazo_vencido", None),
         (_dois_em_falta, "outro_item_sem_estoque", None),
         (None, "sugestao_invalida", "i223.sa"),
         (None, "kit_lotes_misturados", "dg054.sp+a001.ci"),
@@ -837,6 +836,20 @@ async def test_trava_do_banco_recusa_sem_escrever(
     # Nada no Bling (nem GET: a conferência ao vivo nem começa) e nenhuma linha.
     assert c.bling.chamadas == []
     assert await _trocas(db) == []
+
+
+async def test_prazo_vencido_nao_segura_a_pessoa_so_o_robo_de_lote(db, make_user, monkeypatch):
+    """O dono, 06/11/2026: "tem q deixar trocar pq as vez passa da data mesmo e n ta deixando"."""
+    c = await _cenario(db, make_user, monkeypatch)
+    await _prazo(db, c)
+    pv = await _previa(db, c)
+    assert pv["pode"] is True and [t["code"] for t in pv["travas"] if not t["ok"]] == []
+    assert "atrasado" in pv["aviso_prazo"]
+    p = await troca._carregar(db, NUMERO)
+    pessoa = await troca.travas_do_pedido(db, p)
+    assert next(t for t in pessoa if t["code"] == "prazo_vencido")["ok"] is True
+    robo = await troca.travas_do_pedido(db, p, automatica=True)
+    assert next(t for t in robo if t["code"] == "prazo_vencido")["ok"] is False
 
 
 async def test_trava_custo_acima(db, make_user, monkeypatch):
