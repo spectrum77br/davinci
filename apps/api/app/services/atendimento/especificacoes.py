@@ -4,10 +4,11 @@ Não há tabela de especificação no DaVinci. A decisão 3 do dono (20/10/2026)
 "o site às vezes não tem exatamente o que o anúncio tem, por isso é
 interessante ver o anúncio do produto que está sendo conversado". A ordem:
 
-  0. "equipe": só em `nfc` e `rede_5g`, o que a equipe da loja disse do modelo
-     (`recursos_equipe`, a decisão do dono de 05/11/2026): vale mais que todas,
-     até contra o título do anúncio (`aplicar_a_equipe`). Sem veredito, ou com
-     o anúncio ligando 2+ modelos, não muda nada;
+  0. "equipe": em `nfc` e `rede_5g` (a decisão do dono de 05/11/2026), no que vem
+     na caixa e nos fatos da mala (06/11/2026), o que a equipe da loja disse do
+     modelo (`recursos_equipe`): vale mais que todas, até contra o título do
+     anúncio (`aplicar_a_equipe`). Sem veredito, ou com o anúncio ligando 2+
+     modelos, não muda nada;
   1. "anuncio": o anúncio da conversa — o título atual, os atributos e a
      descrição LIMPA da ficha (`ficha.ficha_do_anuncio`). A ficha de OUTRO
      anúncio do mesmo produto só dá o título (o kit e a descrição variam por
@@ -55,8 +56,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models import Product, ProductLink
 from app.models.enums import IntegrationPlatform
+from app.services.atendimento import condicao_anuncio, recursos_equipe, sites_marca
 from app.services.atendimento import ficha as ficha_svc
-from app.services.atendimento import recursos_equipe, sites_marca
 from app.services.atendimento.ficha_respostas import REGRAS_APROVADAS
 from app.services.atendimento.troca_sugestoes import _RE_5G, _RE_SPEC
 from app.services.atendimento.validador import plano_de
@@ -91,6 +92,15 @@ CAMPOS = (
     "tamanho",
     "material",
     "carga_maxima",
+    # Só com a fonte "equipe" (`aplicar_a_equipe`): nenhuma outra fonte diz estes.
+    "carregador",
+    "capinha",
+    "cabo",
+    "pelicula",
+    "chave_chip",
+    "vende_acessorio_avulso",
+    "rodas_removiveis",
+    "padrao_anac",
 )
 MAX_PRODUTOS = 24
 MAX_CHARS_VALOR = 120
@@ -111,8 +121,30 @@ NOTA_WIFI = "Wi-Fi de 5 GHz não é rede móvel 5G"
 NOTA_RAM_SEM_SEPARAR = "a fonte não diz se inclui RAM virtual"
 NOTA_VARIA = "varia conforme a variação"
 NOTA_EQUIPE = "a equipe da loja confirma, mesmo com o anúncio dizendo outra coisa"
+NOTA_MEDIDAS = "as medidas do anúncio já incluem as rodinhas"
+# Com "nem" em cada um: o `checagens._textos_de` lê a nota como dado, e o "fone" solto contaria
+# como o que o anúncio traz.
+# Sem o fone: o Fone Bluetooth UFB10 está à venda, vivo e com estoque (06/11/2026).
+NOTA_AVULSO = "a loja não vende capinha nem película nem chip avulso"
 # Os campos em que a equipe vale, e o recurso de `recursos_equipe` de cada um.
 _RECURSO_DA_EQUIPE = {"nfc": recursos_equipe.NFC, "rede_5g": recursos_equipe.G5}
+# O que vem na caixa, com o valor por extenso: o `checagens._mencao_na_fonte` lê "capinha: não vem
+# na caixa" como negado, e o "capinha: não" como citada.
+VEM_NA_CAIXA = "vem na caixa"
+NAO_VEM_NA_CAIXA = "não vem na caixa"
+_DA_CAIXA = frozenset(
+    {
+        recursos_equipe.CARREGADOR,
+        recursos_equipe.CAPINHA,
+        recursos_equipe.CABO,
+        recursos_equipe.PELICULA,
+        recursos_equipe.CHAVE_CHIP,
+    }
+)
+_VALOR_DA_ANAC = {
+    recursos_equipe.BORDO: "padrão ANAC de bordo",
+    recursos_equipe.DESPACHO: "padrão de despacho, não vai a bordo",
+}
 
 
 def _aprovado(trecho: str) -> bool:
@@ -919,36 +951,106 @@ def _variacao_selecionada(ficha: Mapping[str, Any] | None) -> str | None:
     return None
 
 
-def aplicar_a_equipe(resultado: dict, titulo: str | None, variacao: str | None = None) -> dict:
+def _anuncio_nao_e_novo(ficha: Mapping[str, Any] | None) -> bool:
+    """A ficha declara usado ou se contradiz sobre ser novo (`condicao_anuncio`)? PURA."""
+    condicao = (ficha or {}).get("condicao")
+    novo = condicao.get("novo") if isinstance(condicao, Mapping) else None
+    return isinstance(novo, Mapping) and novo.get("valor") in (False, condicao_anuncio.CONFLITO)
+
+
+# "Caixa Slim, o aparelho acompanha apenas o cabo de carregamento": 120 anúncios da Shopee dizem
+# isso, 30 deles de modelo que a equipe confirma (06/11/2026). O comprador lê a mesma descrição:
+# aí a palavra da equipe não põe o carregador na caixa, e a resposta fica como antes.
+_SO_O_CABO = re.compile(r"\b(?:apenas|somente|so)\s+(?:o\s+|um\s+)?cabo\b|\bcaixa\s+slim\b")
+
+
+def _anuncio_so_com_o_cabo(ficha: Mapping[str, Any] | None) -> bool:
+    """A descrição do anúncio diz que vem só o cabo? PURA."""
+    return bool(_SO_O_CABO.search(_plano(str((ficha or {}).get("descricao") or ""))))
+
+
+def _linhas_da_caixa(fatos: Mapping[str, bool | str]) -> list[tuple[str, str, str | None]]:
+    """(campo, valor, nota) de cada item de `recursos_equipe.fatos_da_equipe`. PURA."""
+    linhas: list[tuple[str, str, str | None]] = []
+    for campo, dito in fatos.items():
+        if campo in _DA_CAIXA:
+            linhas.append((campo, VEM_NA_CAIXA if dito else NAO_VEM_NA_CAIXA, None))
+        elif campo == recursos_equipe.VENDE_AVULSO:
+            linhas.append((campo, SIM if dito else NAO, NOTA_AVULSO))
+        elif campo == recursos_equipe.RODAS:
+            linhas.append((campo, SIM if dito else NAO, NOTA_MEDIDAS))
+        elif campo == recursos_equipe.PADRAO_ANAC:
+            linhas.append((campo, _VALOR_DA_ANAC[str(dito)], None))
+        else:
+            linhas.append((campo, str(dito), None))
+    return linhas
+
+
+def _mesmo_valor(campo: str, a: Any, b: Any) -> bool:
+    """O material comparado pela forma ("Polipropileno (PP)" é polipropileno). PURA."""
+    if campo == "material":
+        return sites_marca._material(str(a)) == sites_marca._material(str(b))
+    return a == b
+
+
+def _por_cima(campos: list[dict], campo: str, valor: str, nota: str | None = None) -> None:
+    """A linha da equipe no lugar da linha do campo, ou na ordem de `CAMPOS`. A nota do que o
+    anúncio dizia diferente vale mais que `nota`. Muda `campos`."""
+    antiga = next((c for c in campos if c.get("campo") == campo), None)
+    linha: dict[str, Any] = {"campo": campo, "valor": valor, "fonte": FONTE_EQUIPE}
+    if nota:
+        linha["nota"] = nota
+    if (
+        antiga is not None
+        and antiga.get("fonte") == FONTE_ANUNCIO
+        and not _mesmo_valor(campo, antiga.get("valor"), valor)
+    ):
+        linha["nota"] = NOTA_EQUIPE
+    if antiga is not None:
+        campos[campos.index(antiga)] = linha
+        return
+    ordem = CAMPOS.index(campo)
+    depois = next(
+        (i for i, c in enumerate(campos) if CAMPOS.index(c["campo"]) > ordem), len(campos)
+    )
+    campos.insert(depois, linha)
+
+
+def aplicar_a_equipe(
+    resultado: dict,
+    titulo: str | None,
+    variacao: str | None = None,
+    plataforma: Any = None,
+    *,
+    sem_a_caixa: bool = False,
+    sem_carregador: bool = False,
+) -> dict:
     """A palavra da equipe nos campos dela, por cima do que se juntou (ver o topo). PURA.
 
-    Com veredito, a linha do campo passa a ser SIM ou NAO com a fonte "equipe": sai o conflito do
-    anúncio e o conflito entre fontes daquele campo, e a nota diz quando o anúncio dizia outra
-    coisa. Quem chama não passa aqui o anúncio de 2+ modelos."""
+    Com veredito, a linha do campo passa a ter a fonte "equipe": sai o conflito do anúncio e o
+    conflito entre fontes daquele campo, e a nota diz quando o anúncio dizia outra coisa. Sem
+    veredito, nenhuma linha nova. Quem chama não passa aqui o anúncio de 2+ modelos. `plataforma` =
+    a do catálogo: a película e a chave do chip dependem dela. `sem_a_caixa` = a ficha ou o cadastro
+    dizem o que o título não diz: o anúncio não é novo ou é de outro modelo
+    (`recursos_equipe.fatos_da_equipe` não vê os dois)."""
     campos = list(resultado.get("campos") or [])
     conflitos = list(resultado.get("conflitos") or [])
     for campo, recurso in _RECURSO_DA_EQUIPE.items():
         veredito = recursos_equipe.o_que_a_equipe_diz(recurso, titulo, variacao)
         if veredito is None:
             continue
-        valor = SIM if veredito else NAO
-        antiga = next((c for c in campos if c.get("campo") == campo), None)
-        linha: dict[str, Any] = {"campo": campo, "valor": valor, "fonte": FONTE_EQUIPE}
-        if (
-            antiga is not None
-            and antiga.get("fonte") == FONTE_ANUNCIO
-            and antiga.get("valor") != valor
-        ):
-            linha["nota"] = NOTA_EQUIPE
-        if antiga is not None:
-            campos[campos.index(antiga)] = linha
-        else:
-            ordem = CAMPOS.index(campo)
-            depois = next(
-                (i for i, c in enumerate(campos) if CAMPOS.index(c["campo"]) > ordem), len(campos)
-            )
-            campos.insert(depois, linha)
+        _por_cima(campos, campo, SIM if veredito else NAO)
         conflitos = [c for c in conflitos if c.get("campo") != campo]
+    fatos = {} if sem_a_caixa else recursos_equipe.fatos_da_equipe(titulo, variacao, plataforma)
+    if sem_carregador:
+        fatos.pop(recursos_equipe.CARREGADOR, None)
+    for campo, valor, nota in _linhas_da_caixa(fatos):
+        _por_cima(campos, campo, valor, nota)
+        conflitos = [c for c in conflitos if c.get("campo") != campo]
+    if recursos_equipe.RODAS in fatos:
+        campos = [
+            {**c, "nota": NOTA_MEDIDAS} if c.get("campo") == "dimensoes" else c for c in campos
+        ]
     return {
         **resultado,
         "campos": campos,
@@ -1007,6 +1109,7 @@ async def especificacoes_do_produto(
     ficha: Mapping[str, Any] | None,
     produto_ids: Iterable[UUID | str],
     titulo: str | None,
+    plataforma: Any = None,
 ) -> dict:
     """As especificações do produto do anúncio, com a fonte de cada campo.
 
@@ -1016,8 +1119,10 @@ async def especificacoes_do_produto(
     slug|None}`. `ficha` = a de `ficha.ficha_do_anuncio` (ou None; os
     `produtos_vinculados` dela com UM produto = a variação selecionada);
     `produto_ids` = os produtos vinculados ao anúncio inteiro
-    (`produtos_do_anuncio`); `titulo` = o título ATUAL do anúncio. Os modelos
-    do anúncio: ver "Os modelos do anúncio". Só leitura; erro de banco sobe.
+    (`produtos_do_anuncio`); `titulo` = o título ATUAL do anúncio;
+    `plataforma` = a do catálogo, para a palavra da equipe que depende dela. Os
+    modelos do anúncio: ver "Os modelos do anúncio". Só leitura; erro de banco
+    sobe.
     """
     ficha = ficha if isinstance(ficha, Mapping) else None
     titulo_atual = titulo or (ficha or {}).get("titulo")
@@ -1059,5 +1164,13 @@ async def especificacoes_do_produto(
     if varios:
         marcar_varia_por_modelo(resultado)
     else:
-        resultado = aplicar_a_equipe(resultado, titulo_atual, _variacao_selecionada(ficha))
+        resultado = aplicar_a_equipe(
+            resultado,
+            titulo_atual,
+            _variacao_selecionada(ficha),
+            plataforma,
+            sem_a_caixa=_anuncio_nao_e_novo(ficha)
+            or recursos_equipe.nao_casa_com_o_cadastro(titulo_atual, nomes),
+            sem_carregador=_anuncio_so_com_o_cabo(ficha),
+        )
     return {**resultado, "site": slug}

@@ -893,7 +893,7 @@ async def dados_ver_anuncio(
             s, plat, ctx.integration_id, item, titulo, conferida=True
         )
         produtos = await especificacoes.produtos_do_anuncio(s, plat, ctx.integration_id, item)
-        espec = await especificacoes.especificacoes_do_produto(s, f, produtos, titulo)
+        espec = await especificacoes.especificacoes_do_produto(s, f, produtos, titulo, plat)
         # D3 do dono (04/11/2026): só o anúncio com vínculo vivo DESTA loja, nunca o cartão de
         # outro vendedor que o cliente mandou.
         shop_id = await _shop_id_do_link(s, ctx)

@@ -966,7 +966,9 @@ async def _com_fontes(session: AsyncSession, conversa: Any, fichas: list[dict]) 
 
         async def _espec(item: str = item, titulo: str | None = titulo, f: dict = f) -> dict:
             produtos = await especificacoes.produtos_do_anuncio(session, plataforma, integ, item)
-            return await especificacoes.especificacoes_do_produto(session, f, produtos, titulo)
+            return await especificacoes.especificacoes_do_produto(
+                session, f, produtos, titulo, plataforma
+            )
 
         restricao = await contexto_svc._seguro(
             session, "agente_restricao", _restricao, None, conversa.id
