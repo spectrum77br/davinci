@@ -578,7 +578,20 @@ def _cortar_dif(valor: float | None) -> float | None:
     return round(valor, 1) if valor is not None else None
 
 
-async def travas_do_pedido(session: AsyncSession, p: _Pedido) -> list[dict[str, Any]]:
+def _prazo_vencido(p: _Pedido) -> bool:
+    """O prazo de envio venceu (ou vence em menos da folga)?"""
+    folga = timedelta(hours=float(get_settings().atendimento_troca_folga_prazo_horas))
+    return p.prazo is not None and p.prazo < _agora() + folga
+
+
+def _aviso_do_prazo(p: _Pedido) -> str:
+    """A frase do prazo vencido (ou vencendo) na prévia e na trava que passa."""
+    return f"O prazo de envio é {_hora(p.prazo)}: o pedido está atrasado ou quase."
+
+
+async def travas_do_pedido(
+    session: AsyncSession, p: _Pedido, *, automatica: bool = False
+) -> list[dict[str, Any]]:
     """As travas do banco que valem para o PEDIDO inteiro (não dependem do produto).
 
     A plataforma (só a Shopee na v1), a NF (emitida ou na fila), a etiqueta,
@@ -587,7 +600,6 @@ async def travas_do_pedido(session: AsyncSession, p: _Pedido) -> list[dict[str, 
     "Trocar" (`situacao_da_troca`) conferem estas antes: oferecer o que a
     troca recusa com certeza seria prometer à toa.
     """
-    s = get_settings()
     travas: list[dict[str, Any]] = []
     travas.append(
         _trava(
@@ -654,17 +666,23 @@ async def travas_do_pedido(session: AsyncSession, p: _Pedido) -> list[dict[str, 
     travas.append(
         _trava("pedido_em_dobro", not dobro, None if dobro else "Um pedido só com este número.")
     )
-    folga = timedelta(hours=float(s.atendimento_troca_folga_prazo_horas))
-    vencido = p.prazo is not None and p.prazo < _agora() + folga
-    travas.append(
-        _trava(
-            "prazo_vencido",
-            not vencido,
-            None
-            if vencido
-            else (f"Enviar até {_hora(p.prazo)}." if p.prazo else "Sem prazo de envio gravado."),
+    # O prazo só segura o robô de lote (o dono, 06/11/2026: "tem q deixar trocar pq as vez passa da
+    # data mesmo"). A pessoa troca e oferece: quem diz se o pedido segue vivo é a Shopee, ao vivo.
+    vencido = _prazo_vencido(p)
+    if vencido and automatica:
+        travas.append(_trava("prazo_vencido", False))
+    else:
+        travas.append(
+            _trava(
+                "prazo_vencido",
+                True,
+                _aviso_do_prazo(p)
+                if vencido
+                else (
+                    f"Enviar até {_hora(p.prazo)}." if p.prazo else "Sem prazo de envio gravado."
+                ),
+            )
         )
-    )
     return travas
 
 
@@ -708,7 +726,7 @@ async def _travas_banco(
             else "Só este item falta.",
         )
     )
-    travas += await travas_do_pedido(session, p)
+    travas += await travas_do_pedido(session, p, automatica=automatica)
     misturado = len(_lotes(sku_antigo)) > 1 or len(_lotes(sku_novo)) > 1
     travas.append(
         _trava(
@@ -1358,7 +1376,13 @@ async def previa(
         ),
         "passos_previstos": passos,
         "aviso_nf": _aviso_nf(p),
-        "aviso_prazo": None if p.prazo else "Sem prazo de envio gravado: confira na Shopee.",
+        "aviso_prazo": (
+            _aviso_do_prazo(p)
+            if _prazo_vencido(p)
+            else None
+            if p.prazo
+            else "Sem prazo de envio gravado: confira na Shopee."
+        ),
         "dif_custo_pct": escolha.dif_custo_pct if ve and escolha else None,
         "aceites_possiveis": aceites,
         "aceite_max_dias": int(get_settings().atendimento_troca_aceite_max_dias),
