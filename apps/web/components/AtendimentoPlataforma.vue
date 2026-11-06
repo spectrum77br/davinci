@@ -102,6 +102,7 @@ export type ResumoPlataforma = {
   // Os chats de AFILIADO da Shopee abertos (29/10/2026): o número do filtro
   // "Afiliados" do menu Filtrar. A API antiga não manda (sem número).
   afiliados?: number
+  aguardando_pagamento?: number
 }
 // `nao_lidas` = o número da PLATAFORMA (o mesmo contador vermelho do Duoke) e
 // `status_canal` = a saúde da leitura da loja (spec Duoke 2.4). Opcionais: a
@@ -139,6 +140,7 @@ export type ResumoLoja = {
   nao_lidas_duoke?: number
   // Os chats de afiliado abertos da loja (ver ResumoPlataforma).
   afiliados?: number
+  aguardando_pagamento?: number
 }
 export type Resumo = {
   plataformas: ResumoPlataforma[]
@@ -154,6 +156,7 @@ export type Resumo = {
   nao_lidas_duoke?: number
   // Os chats de afiliado abertos somando as plataformas (29/10/2026).
   afiliados?: number
+  aguardando_pagamento?: number
   // Lojas sem ler além do limite (05/10/2026): a faixa da Caixa e a marca
   // da aba "Lojas e modo". Opcional: a API antiga não manda (sem faixa).
   leitura_parada?: LeituraParada[]
