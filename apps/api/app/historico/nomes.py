@@ -222,6 +222,7 @@ ACOES: dict[tuple[str, str], str] = {
     # endereço do formulário); quem e o quê, no log da garantia.
     ("POST", "/api/garantias/sac/{sac_id}/confirmar"): "confirmou o atendimento do SAC (garantia)",
     ("POST", "/api/garantias/sac/{sac_id}/encerrar"): "encerrou o atendimento do SAC (garantia)",
+    ("POST", "/api/garantias/sac/{sac_id}/reabrir"): "reabriu o atendimento do SAC (garantia)",
     ("POST", "/api/garantias/sac/{sac_id}/vincular"): "vinculou o SAC a uma garantia",
     # Zap — a tela "Números do WhatsApp" (Onda 4, 27/10/2026, docs/zap/desenho.md
     # §8.5). O app, a conta e o número têm o gatilho (o que mudou aparece; os

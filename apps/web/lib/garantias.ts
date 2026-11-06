@@ -580,6 +580,8 @@ export const ACOES_LOG: Record<string, string> = {
 }
 export const CAMPOS_LOG: Record<string, string> = {
   pedido: 'Pedido',
+  // Reabrir atendimento (06/11/2026): encerrado → reaberto.
+  atendimento: 'Atendimento',
   nf_numero: 'NF',
   nf_serie: 'Série da NF',
   cpf: 'CPF',

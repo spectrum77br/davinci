@@ -274,6 +274,22 @@ async def test_confirmar_sem_garantia_e_encerrar(client, db, make_user, auth_as)
     assert h["itens"] == [] and h["abas"]["celular"]["atendimento"] == 0
     assert [i["id"] for i in (await _lista(client, mostrar="acionada"))["itens"]] == [g.id]
 
+    # Reabrir (06/11/2026): volta para a aba Atendimento, o log guarda quem reabriu.
+    rea = f"/api/garantias/sac/{caso.id}/reabrir"
+    r = await client.post(rea)
+    assert r.status_code == 200, r.text
+    assert (r.json()["encerrado_em"], r.json()["encerrado_motivo"]) == (None, None)
+    assert (await client.post(rea)).status_code == 200  # de novo: nada muda
+    [log] = [x for x in await _logs(db, g.id, "alterou") if x.campo == "atendimento"]
+    assert (log.valor_anterior, log.valor_novo) == ("encerrado", "reaberto")
+    assert log.user_id == atendente.id
+    h = await _lista(client, em_atendimento=True)
+    assert [i["id"] for i in h["itens"]] == [g.id] and h["abas"]["celular"]["atendimento"] == 1
+    # Caso não confirmado não reabre.
+    outro = await _caso(db, await _garantia(db, "600099"), protocolo="US-26-0199")
+    r = await client.post(f"/api/garantias/sac/{outro.id}/reabrir")
+    assert (r.status_code, r.json()["detail"]["code"]) == (409, "sac_nao_confirmado")
+
     auth_as(await make_user(role=UserRole.ADMIN))
     r = await client.post(f"/api/garantias/sac/{sem.id}/confirmar", json={})
     assert (r.status_code, r.json()["detail"]["code"]) == (409, "sac_sem_garantia")

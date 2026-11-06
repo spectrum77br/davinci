@@ -677,6 +677,13 @@ function aoMudarCaso(sac?: SacDaLinha) {
   atualizarSac(sac)
   void carregar()
 }
+// O caso aberto pelo "ver o caso (encerrado)" não é da lista da aba (ela só
+// tem os abertos): ele entra em cima, para dar para abrir e Reabrir
+// (06/11/2026, "queria ver ele em atendimentos de volta").
+const listaDeConversas = computed(() => {
+  const s = selecionadaLinha.value
+  return s && !itens.value.some((g) => g.id === s.id) ? [s, ...itens.value] : itens.value
+})
 function aoVincularSac() {
   void carregar()
 }
@@ -880,7 +887,7 @@ function aoVincularSac() {
         </Button>
       </div>
       <EmptyState
-        v-else-if="carregado && !itens.length"
+        v-else-if="carregado && !itens.length && !(emConversas && selecionadaLinha)"
         :icon="aba === 'atendimento' ? Headset : ShieldCheck"
         :title="vazio.titulo"
         :description="vazio.descricao"
@@ -903,7 +910,7 @@ function aoVincularSac() {
       <div v-else-if="carregado && emConversas" class="grid gap-3 md:h-[calc(100vh-15rem)] md:min-h-[520px] md:grid-cols-[minmax(280px,360px)_1fr]" data-vista-conversas>
         <div class="flex min-h-0 flex-col overflow-hidden rounded-lg border bg-card" :class="historicoNoCelular ? 'hidden md:flex' : ''">
           <ul class="min-h-0 flex-1 divide-y overflow-y-auto" data-lista-conversas>
-            <li v-for="g in itens" :key="g.id">
+            <li v-for="g in listaDeConversas" :key="g.id">
               <button
                 type="button"
                 class="flex w-full gap-2.5 px-3 py-2.5 text-left hover:bg-muted/50"

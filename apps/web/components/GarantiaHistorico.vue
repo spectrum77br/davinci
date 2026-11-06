@@ -20,7 +20,7 @@
 // fica só para leitura (continua sendo respondido no Atendimento). Sem
 // hardware/software: a linha de prazos mostra o fim único da garantia.
 import { onKeyStroke } from '@vueuse/core'
-import { AlertCircle, CheckCircle2, ExternalLink, FileText, Loader2, Mail, MessageSquare, RefreshCw, Send, ShieldCheck, Sparkles, Video } from 'lucide-vue-next'
+import { AlertCircle, CheckCircle2, ExternalLink, FileText, Loader2, Mail, MessageSquare, RefreshCw, RotateCcw, Send, ShieldCheck, Sparkles, Video } from 'lucide-vue-next'
 import type { ConversaDetalhe, Mensagem } from '~/components/AtendimentoPlataforma.vue'
 import { AVISO_EMAIL_NA_FILA, LIMITE_RESPOSTA_EMAIL, corpoDoEmail } from '~/components/AtendimentoEmailResposta.vue'
 import {
@@ -144,6 +144,28 @@ const casoAberto = computed(() => {
 const emAberto = computed(() => (props.garantia.sac?.confirmado_em ? tempoEmAberto(props.garantia.sac, props.hoje) : ''))
 
 const encerrando = ref(false)
+// O caso encerrado aberto pelo "ver o caso (encerrado)" (06/11/2026, Eduardo:
+// "queria ver ele em atendimentos de volta"): Reabrir atendimento.
+const casoEncerrado = computed(() => {
+  const s = props.garantia.sac
+  return !!s && !!s.confirmado_em && !!s.encerrado_em
+})
+const reabrindo = ref(false)
+async function reabrir() {
+  const s = props.garantia.sac
+  if (!s || reabrindo.value) return
+  if (!window.confirm(`Reabrir o atendimento ${s.protocolo} de ${nomeDaLinha(props.garantia)}? O caso volta para a aba Atendimento.`)) return
+  reabrindo.value = true
+  try {
+    const r = await api<SacOut>(`/api/garantias/sac/${s.id}/reabrir`, { method: 'POST' })
+    toasts.success(`Atendimento ${s.protocolo} reaberto`, 'O caso voltou para a aba Atendimento (o log guarda quem reabriu).')
+    emit('mudou', r)
+  } catch (e) {
+    toasts.error('Não deu para reabrir', errosDaApi(e).geral)
+  } finally {
+    reabrindo.value = false
+  }
+}
 async function encerrar() {
   const s = props.garantia.sac
   if (!s || encerrando.value) return
@@ -351,6 +373,7 @@ function aoRegistrar(_a: AtendimentoGarantia) {
             <span v-if="emAberto" class="font-medium" data-tempo-em-aberto>{{ emAberto }}</span>
             <span class="text-muted-foreground">· SAC {{ garantia.sac.protocolo }} · enviado em {{ dataBR(garantia.sac.recebido_em) }}</span>
             <span v-if="garantia.sac.confirmado_em" class="text-muted-foreground">· confirmado {{ dataHoraBR(garantia.sac.confirmado_em) }}<template v-if="garantia.sac.confirmado_por"> por {{ garantia.sac.confirmado_por.nome }}</template></span>
+            <span v-if="garantia.sac.encerrado_em" class="font-medium text-muted-foreground" data-caso-encerrado>· encerrado {{ dataHoraBR(garantia.sac.encerrado_em) }}</span>
             <span v-if="garantia.sac.encerrado_em" class="text-muted-foreground">· encerrado {{ dataHoraBR(garantia.sac.encerrado_em) }}<template v-if="garantia.sac.encerrado_motivo === 'terminou'"> (terminou sozinho)</template></span>
           </p>
         </div>
@@ -363,6 +386,9 @@ function aoRegistrar(_a: AtendimentoGarantia) {
         </Button>
         <Button v-if="casoAberto && acesso.registra" size="sm" variant="outline" class="h-8" :disabled="encerrando" title="o caso sai da aba Atendimento e o tempo em aberto para de contar (fica no log)" data-encerrar-atendimento @click="encerrar">
           <Loader2 v-if="encerrando" class="mr-1 size-4 animate-spin" /><CheckCircle2 v-else class="mr-1 size-4" /> Encerrar atendimento
+        </Button>
+        <Button v-if="casoEncerrado && acesso.registra" size="sm" variant="outline" class="h-8" :disabled="reabrindo" title="o caso volta para a aba Atendimento (fica no log)" data-reabrir-atendimento @click="reabrir">
+          <Loader2 v-if="reabrindo" class="mr-1 size-4 animate-spin" /><RotateCcw v-else class="mr-1 size-4" /> Reabrir atendimento
         </Button>
       </div>
       <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">

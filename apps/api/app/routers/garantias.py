@@ -1747,6 +1747,38 @@ async def encerrar_sac(
     return await _sac_out(session, caso)
 
 
+@router.post("/sac/{sac_id}/reabrir", response_model=SacOut)
+async def reabrir_sac(
+    sac_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_registrar)],
+) -> SacOut:
+    """Reabrir atendimento (06/11/2026, Eduardo: "queria ver ele em
+    atendimentos de volta"): o caso encerrado volta para a aba Atendimento e o
+    tempo em aberto volta a contar desde o formulário. O log registra quem
+    reabriu (`alterou`, campo `atendimento`: encerrado → reaberto)."""
+    caso, g = await _caso_visivel(session, sac_id, user, travar=True)
+    if caso.confirmado_em is None or g is None:
+        raise _erro(409, "sac_nao_confirmado")
+    if caso.encerrado_em is None:
+        return await _sac_out(session, caso)
+    caso.encerrado_em = None
+    caso.encerrado_por = None
+    caso.encerrado_motivo = None
+    svc.registrar_log(
+        session,
+        g.id,
+        "alterou",
+        user,
+        campo="atendimento",
+        anterior="encerrado",
+        novo="reaberto",
+        detalhe=caso.protocolo,
+    )
+    await session.commit()
+    return await _sac_out(session, caso)
+
+
 @router.post("/sac/{sac_id}/vincular", response_model=SacOut)
 async def vincular_sac(
     sac_id: int,
