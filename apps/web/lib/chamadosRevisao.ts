@@ -31,8 +31,10 @@ export type RevisaoDia = {
   prazos: number
   por_status: Record<string, number>
   faltaram: string[]
+  fechado_at: string | null
+  fechado_por_nome: string | null
 }
-export type RevisaoDias = { dias: RevisaoDia[] }
+export type RevisaoDias = { dias: RevisaoDia[]; pode_fechar: boolean }
 
 // `tipo` nulo tira a marca; `ate` e `motivo` só no Fixo.
 export type RevisaoMarca = { tipo: RevisaoTipo | null; ate?: string; motivo?: string }

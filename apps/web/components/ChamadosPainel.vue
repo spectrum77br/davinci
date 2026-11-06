@@ -488,6 +488,14 @@ async function carregarDias() {
     diasRevisao.value = null
   }
 }
+async function fecharDia(dia: RevisaoDia, method: 'POST' | 'DELETE') {
+  try {
+    await api(`/api/chamados/dias/${dia.dia}/fechar`, { method })
+    await carregarDias()
+  } catch (e: any) {
+    toasts.error(method === 'POST' ? 'Não foi possível fechar o dia' : 'Não foi possível reabrir o dia', apiError(e))
+  }
+}
 // Marcar várias linhas seguidas: o painel relê uma vez só, quando a pessoa para.
 let diasTimer: ReturnType<typeof setTimeout> | null = null
 function atualizarDias() {
@@ -2237,7 +2245,7 @@ async function confirmarExcluir() {
         </div>
         <div class="mt-auto border-t px-3 py-1.5 text-center text-[11px] text-muted-foreground">Clique na linha abre o Raio-X do chamado à direita. Conferido e Revisar valem só no dia; Fixo vale até a data. Cada dia a lista recomeça.</div>
       </div>
-      <ChamadosDias v-if="tab === 'chamados' && diasRevisao" :dados="diasRevisao" :escolhido="diaEscolhido?.dia || null" :status-label="statusLabelDe" @escolher="escolherDia" />
+      <ChamadosDias v-if="tab === 'chamados' && diasRevisao" :dados="diasRevisao" :escolhido="diaEscolhido?.dia || null" :status-label="statusLabelDe" @escolher="escolherDia" @fechar="(d) => fecharDia(d, 'POST')" @reabrir="(d) => fecharDia(d, 'DELETE')" />
       </div>
 
       <div class="flex min-w-0 flex-col gap-3">

@@ -11,7 +11,11 @@ const props = defineProps<{
   statusLabel: (codigo: string) => string
 }>()
 
-const emit = defineEmits<{ (e: 'escolher', dia: RevisaoDia): void }>()
+const emit = defineEmits<{
+  (e: 'escolher', dia: RevisaoDia): void
+  (e: 'fechar', dia: RevisaoDia): void
+  (e: 'reabrir', dia: RevisaoDia): void
+}>()
 
 const SEMANA = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb']
 const hoje = hojeISO()
@@ -38,10 +42,23 @@ function pendentes(d: RevisaoDia): number {
 }
 // Dia que já passou sem nenhuma marca da pessoa (fim de semana, feriado) não é pendente.
 function semRevisao(d: RevisaoDia): boolean {
-  return d.tem_registro && d.dia !== hoje && d.conferido + d.revisar === 0
+  return d.tem_registro && d.dia !== hoje && d.conferido + d.revisar === 0 && !d.fechado_at
 }
 function podeAbrir(d: RevisaoDia): boolean {
   return d.tem_registro && !semRevisao(d) && pendentes(d) > 0
+}
+// Cairo 06/11: Fechar dia. Hoje aparece sempre, pra fechar antes de sair; dia que passou,
+// só se ficou pendente. O número segue em Pendentes: fechar muda só como o dia aparece.
+function mostraFechar(d: RevisaoDia): boolean {
+  return props.dados.pode_fechar && d.tem_registro && !d.fechado_at && (d.dia === hoje || podeAbrir(d))
+}
+// Fechado depois do dia (esqueceu de apertar) mostra a data também.
+function quandoFechou(d: RevisaoDia): string {
+  const quando = new Date(d.fechado_at || '')
+  const fuso = { timeZone: 'America/Sao_Paulo' }
+  const hora = quando.toLocaleTimeString('pt-BR', { ...fuso, hour: '2-digit', minute: '2-digit' })
+  const dia = quando.toLocaleDateString('en-CA', fuso)
+  return dia === d.dia ? `às ${hora}` : `em ${diaMes(dia)} às ${hora}`
 }
 function detalhe(d: RevisaoDia): string {
   const partes = Object.entries(d.por_status)
@@ -54,11 +71,11 @@ function detalhe(d: RevisaoDia): string {
 function soma(dias: RevisaoDia[], f: (d: RevisaoDia) => number): number {
   return dias.reduce((s, d) => s + f(d), 0)
 }
-function diasConferidos(dias: RevisaoDia[]): number {
-  return dias.filter((d) => d.tem_registro && !semRevisao(d) && !pendentes(d)).length
+function diasOk(dias: RevisaoDia[]): number {
+  return dias.filter((d) => d.tem_registro && !semRevisao(d) && (!pendentes(d) || d.fechado_at)).length
 }
 function diasComPendente(dias: RevisaoDia[]): number {
-  return dias.filter(podeAbrir).length
+  return dias.filter((d) => podeAbrir(d) && !d.fechado_at).length
 }
 function plural(n: number, texto: string): string {
   return `${n} ${n === 1 ? 'dia' : 'dias'} ${texto}`
@@ -114,8 +131,8 @@ function corValor(v: number): string {
               <td class="border-l border-l-slate-300 px-2.5 text-right font-normal text-muted-foreground dark:border-l-slate-600">—</td>
               <td class="px-2.5 text-right font-normal text-muted-foreground">—</td>
               <td class="whitespace-nowrap border-l border-l-slate-300 px-2.5 dark:border-l-slate-600">
-                <span v-if="diasComPendente(m.dias)" class="rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ plural(diasComPendente(m.dias), 'com pendente') }}</span>
-                <span v-else-if="diasConferidos(m.dias)" class="rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">{{ plural(diasConferidos(m.dias), diasConferidos(m.dias) === 1 ? 'conferido' : 'conferidos') }}</span>
+                <span v-if="diasComPendente(m.dias)" class="rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ plural(diasComPendente(m.dias), 'com pendência') }}</span>
+                <span v-else-if="diasOk(m.dias)" class="rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">{{ plural(diasOk(m.dias), 'ok') }}</span>
                 <span v-else class="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">sem registro</span>
               </td>
               <td class="border-l border-l-slate-300 px-2.5 text-right dark:border-l-slate-600" :class="corValor(soma(m.dias, (d) => d.lucro))">{{ valor(soma(m.dias, (d) => d.lucro)) }}</td>
@@ -139,7 +156,7 @@ function corValor(v: number): string {
               <td class="px-2.5 text-right" :class="d.concluidos ? 'font-semibold text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'">{{ d.concluidos ? `−${d.concluidos}` : 0 }}</td>
               <template v-if="d.tem_registro">
                 <td class="border-l border-l-slate-300 px-2.5 text-right dark:border-l-slate-600">{{ revisados(d) }}</td>
-                <td class="px-2.5 text-right font-bold" :class="!semRevisao(d) && pendentes(d) ? 'text-amber-700 dark:text-amber-300' : ''">{{ semRevisao(d) ? '—' : pendentes(d) }}</td>
+                <td class="px-2.5 text-right font-bold" :class="!semRevisao(d) && !d.fechado_at && pendentes(d) ? 'text-amber-700 dark:text-amber-300' : ''">{{ semRevisao(d) ? '—' : pendentes(d) }}</td>
               </template>
               <template v-else>
                 <td class="border-l border-l-slate-300 px-2.5 text-right text-muted-foreground dark:border-l-slate-600">—</td>
@@ -147,12 +164,17 @@ function corValor(v: number): string {
               </template>
               <td class="whitespace-nowrap border-l border-l-slate-300 px-2.5 dark:border-l-slate-600">
                 <span v-if="!d.tem_registro" class="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">sem registro</span>
-                <span v-else-if="semRevisao(d)" class="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">sem revisão</span>
-                <span v-else-if="!pendentes(d)" class="rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">tudo conferido</span>
-                <template v-else>
-                  <span class="mr-1.5 rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">falta conferir {{ pendentes(d) }}</span>
+                <template v-else-if="d.fechado_at">
+                  <span class="mr-1.5 rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">dia fechado</span>
+                  <span class="mr-1.5 text-muted-foreground">por {{ d.fechado_por_nome }} {{ quandoFechou(d) }}</span>
+                  <button v-if="dados.pode_fechar" type="button" class="mr-1.5 text-primary underline" @click.stop="emit('reabrir', d)">reabrir</button>
                   <span class="text-muted-foreground">{{ detalhe(d) }}</span>
                 </template>
+                <span v-else-if="semRevisao(d)" class="rounded bg-slate-200 px-1.5 py-0.5 font-semibold text-slate-600 dark:bg-slate-700 dark:text-slate-300">sem revisão</span>
+                <span v-else-if="!pendentes(d)" class="mr-1.5 rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">tudo conferido</span>
+                <span v-else class="mr-1.5 rounded bg-amber-100 px-1.5 py-0.5 font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">falta conferir {{ pendentes(d) }}</span>
+                <button v-if="mostraFechar(d)" type="button" class="mr-1.5 text-primary underline" @click.stop="emit('fechar', d)">fechar dia</button>
+                <span v-if="d.tem_registro && !d.fechado_at && !semRevisao(d) && pendentes(d)" class="text-muted-foreground">{{ detalhe(d) }}</span>
               </td>
               <td class="border-l border-l-slate-300 px-2.5 text-right dark:border-l-slate-600" :class="corValor(d.lucro)">{{ valor(d.lucro) }}</td>
               <td class="px-2.5 text-right" :class="corValor(d.prejuizo)">{{ valor(d.prejuizo) }}</td>
@@ -162,6 +184,6 @@ function corValor(v: number): string {
         </tbody>
       </table>
     </div>
-    <div class="mt-auto border-t px-3 py-1.5 text-[11px] text-muted-foreground">Abertos = como o mês ou o dia terminou. Novos = chamados abertos. Concluídos = fechados por uma pessoa. Lucro e Prejuízo = valor informado ao concluir, no dia da conclusão. Acumulado = lucro menos prejuízo desde o dia 1. A revisão conta a partir de 05/11.</div>
+    <div class="mt-auto border-t px-3 py-1.5 text-[11px] text-muted-foreground">Abertos = como o mês ou o dia terminou. Novos = chamados abertos. Concluídos = fechados por uma pessoa. Lucro e Prejuízo = valor informado ao concluir, no dia da conclusão. Acumulado = lucro menos prejuízo desde o dia 1. A revisão conta a partir de 05/11. Fechar dia = a pessoa encerrou o dia; o que chegar depois continua em Pendentes.</div>
   </div>
 </template>

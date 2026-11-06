@@ -684,8 +684,14 @@ async def dias_da_revisao(
                 "prazos": foto.prazos,
                 "por_status": foto.por_status,
                 "faltaram": foto.faltaram,
+                "fechado_at": foto.fechado_at,
+                "fechado_por_nome": foto.fechado_por_nome,
             }
-    fotos[hoje] = chamados_revisao.resumir_dia(await _abertos_com_estado(session, conds))
+    # Hoje é ao vivo, mas quem fechou está na foto.
+    fotos[hoje] = {
+        **fotos.get(hoje, {}),
+        **chamados_revisao.resumir_dia(await _abertos_com_estado(session, conds)),
+    }
 
     saida = [
         RevisaoDiaOut(
@@ -701,7 +707,52 @@ async def dias_da_revisao(
         )
         for dia in dias
     ]
-    return RevisaoDiasOut(dias=saida)
+    pode_fechar = equipe is None and _pode(user, "chamados", "edit")
+    return RevisaoDiasOut(dias=saida, pode_fechar=pode_fechar)
+
+
+async def _exigir_ver_o_dia_inteiro(session: AsyncSession, user: User) -> None:
+    """O dia é da empresa inteira: quem tem equipe só enxerga as lojas dela."""
+    if await _clausula_do_usuario(session, user) is not None:
+        raise _fora_da_equipe("Só quem vê todas as lojas fecha o dia.")
+
+
+@router.post("/dias/{dia}/fechar", status_code=status.HTTP_204_NO_CONTENT)
+async def fechar_dia(
+    dia: date,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+) -> None:
+    """Cairo 06/11/2026: dá o dia por encerrado (hoje ou um dia que passou, pra quem
+    esqueceu de apertar). Os pendentes continuam na conta; só muda como o dia aparece."""
+    await _exigir_ver_o_dia_inteiro(session, user)
+    hoje = chamados_revisao.hoje_sp()
+    if dia > hoje:
+        raise HTTPException(422, detail={"code": "dia_futuro"})
+    if dia == hoje:
+        # A primeira foto do dia só sai no :50; fechar antes disso precisa da linha.
+        await fotografar_revisao(session)
+    foto = await session.get(ChamadoRevisaoDia, dia)
+    if foto is None:
+        raise HTTPException(404, detail={"code": "dia_sem_registro"})
+    chamados_revisao.fechar_dia(foto, autor_nome=_autor(user), autor_id=user.id)
+    await session.commit()
+    logger.info("chamados_dia_fechado", dia=dia.isoformat(), por=foto.fechado_por_nome)
+
+
+@router.delete("/dias/{dia}/fechar", status_code=status.HTTP_204_NO_CONTENT)
+async def reabrir_dia(
+    dia: date,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+) -> None:
+    await _exigir_ver_o_dia_inteiro(session, user)
+    foto = await session.get(ChamadoRevisaoDia, dia)
+    if foto is None:
+        raise HTTPException(404, detail={"code": "dia_sem_registro"})
+    chamados_revisao.reabrir_dia(foto)
+    await session.commit()
+    logger.info("chamados_dia_reaberto", dia=dia.isoformat(), por=_autor(user))
 
 
 @router.get("", response_model=ChamadoPage)

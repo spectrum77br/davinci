@@ -201,7 +201,8 @@ class ChamadoRevisaoDia(Base, TimestampMixin):
     """Foto de como ficou a revisão de cada dia (painel Dias, 05/11/2026). Regravada
     de hora em hora: a última do dia é a que fica. `falta` = sem marca; `prazos` =
     Fixo que pede olhar. `faltaram` = ids dos dois, pro clique no dia na tela;
-    `por_status` conta só os sem marca."""
+    `por_status` conta só os sem marca. `fechado_*` (06/11/2026): quem deu o dia por
+    encerrado; a foto segue regravando, então o pendente continua na conta."""
 
     __tablename__ = "chamado_revisao_dias"
 
@@ -213,6 +214,13 @@ class ChamadoRevisaoDia(Base, TimestampMixin):
     prazos: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     por_status: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
     faltaram: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    fechado_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fechado_por_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fechado_por_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
 
 class ChamadoMensagem(Base, TimestampMixin):

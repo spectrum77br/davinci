@@ -179,10 +179,14 @@ class RevisaoDiaOut(BaseModel):
     prazos: int = 0
     por_status: dict[str, int] = Field(default_factory=dict)
     faltaram: list[str] = Field(default_factory=list)
+    fechado_at: datetime | None = None
+    fechado_por_nome: str | None = None
 
 
 class RevisaoDiasOut(BaseModel):
     dias: list[RevisaoDiaOut]
+    # Fechar dia: edita chamados e vê todas as lojas (o dia é da empresa inteira).
+    pode_fechar: bool = False
 
 
 class JuridicoIn(BaseModel):
