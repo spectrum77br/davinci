@@ -326,6 +326,14 @@ export function situacaoDoSaldo(it: Pick<ItemEstoque, 'existe' | 'saldo' | 'quan
 //   valores, como no Duoke, ou antes do "sem retrato" quando ainda não há
 //   retrato (o bloco não pode sumir junto). Só leitura. Os dados vêm da mesma
 //   resposta do cartão do topo, que encolhe para a linha do título.
+// - Outras compras (06/11/2026; o dono, com o Duoke ao lado: "aparece o código só do
+//   último e não o histórico inteiro"): no fim da aba Pedido, as outras compras de
+//   quem está neste chat (AtendimentoOutrasCompras). Só no chat de um comprador por
+//   loja (Shopee e TikTok), só ver. Tudo o que está acima segue igual e é do pedido da
+//   conversa; a lista busca sozinha e, se falhar, some sem mexer no resto. O termo da
+//   busca da lista vem até aqui: o pedido pesquisado aparece lá, com destaque, ou no
+//   bloco de cima, se for o da conversa. Com compras na lista, o "Conversa sem pedido
+//   ligado" sai: acima dela, parecia contradizê-la.
 import {
   CheckCircle2,
   ChevronDown,
@@ -382,6 +390,7 @@ import {
 } from '~/components/AtendimentoPlataforma.vue'
 import { ordenarReclamacoes, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
 import type { AcessoGarantia, SituacaoConversa } from '~/lib/garantias'
+import { pareceCodigoDeCompra, termoEhDoPedido } from '~/components/AtendimentoOutrasCompras.vue'
 import { quemTroca, rotuloEstado, useAcessoDaTroca, type EscolhaTroca } from '~/components/AtendimentoTroca.vue'
 
 const props = withDefaults(defineProps<{
@@ -423,10 +432,12 @@ const props = withDefaults(defineProps<{
   // As reclamações e devoluções (GET /conversas/{id}/reclamacoes, que o cartão
   // do topo busca). null = ainda não veio (ou falhou): o bloco não aparece.
   reclamacoes?: ReclamacoesResposta | null
+  // O termo da busca da lista de conversas (`filtros.q` da página).
+  termoBusca?: string | null
 }>(), {
   cliente: null, leituraAtiva: true, atualizavel: null, painel: null, painelCarregando: false, painelErro: null, avaliacoes: null,
   garantia: null, garantiaCarregando: false, garantiaErro: null, garantiaAcesso: null, emailsSinal: 0,
-  reclamacoes: null,
+  reclamacoes: null, termoBusca: null,
 })
 const emit = defineEmits<{
   (e: 'fechar'): void
@@ -452,6 +463,13 @@ const ABAS: { v: Aba; l: string }[] = [
   { v: 'produto', l: 'Produto' },
   { v: 'cupom', l: 'Cupom' },
 ]
+// ─── outras compras do comprador (06/11/2026) ───────────────────────────────
+// O chat de UM comprador por loja: `PLATAFORMAS_CHAT_DO_COMPRADOR` e a régua de
+// `pedidos_comprador.aplica` no backend, que confere de novo (aqui é só não pedir à toa).
+const temOutrasCompras = computed(() => ['shopee', 'tiktok'].includes(props.conversa.plataforma)
+  && props.conversa.canal === 'chat'
+  && !props.conversa.afiliado
+  && !!props.conversa.comprador_id)
 // Pergunta do ML (pré-venda) não tem pedido: abre no Produto.
 const aba = ref<Aba>(
   props.conversa.canal === 'pergunta' || (!props.pedidoMkt && !props.conversa.pedido_marketplace && !props.contexto?.pedido && (props.produto || props.conversa.anuncio_titulo))
@@ -477,7 +495,8 @@ const temRetratoNaApi = computed(() => ['shopee', 'ml'].includes(props.conversa.
 // `canal_desligado` = só esta loja. A frase do painel sem retrato depende disso.
 const recusa = ref<'leitura_desligada' | 'canal_desligado' | null>(null)
 const leituraDesligada = computed(() => props.leituraAtiva === false || recusa.value !== null)
-const podeAtualizar = computed(() => props.canEdit && temRetratoNaApi.value && !leituraDesligada.value && props.atualizavel !== false && !props.conversa.somente_leitura && !!(props.conversa.pedido_marketplace || pm.value?.pedido))
+const lePedidoDaLoja = computed(() => props.canEdit && temRetratoNaApi.value && !leituraDesligada.value && props.atualizavel !== false && !props.conversa.somente_leitura)
+const podeAtualizar = computed(() => lePedidoDaLoja.value && !!(props.conversa.pedido_marketplace || pm.value?.pedido))
 const atualizando = ref(false)
 async function atualizar() {
   if (atualizando.value) return
@@ -720,6 +739,12 @@ const linkMargem = computed(() => {
   return n ? `/conciliacao?visao=margem&pedido=${encodeURIComponent(n)}` : '/conciliacao?visao=margem'
 })
 
+// ─── outras compras do comprador (06/11/2026) ───────────────────────────────
+// Quantas a lista trouxe (o evento dela). Com alguma e sem pedido ligado, a frase do
+// "sem retrato" (o bloco tracejado inteiro, que só teria o ícone) sai.
+const comprasNaLista = ref(0)
+const semPedidoComCompras = computed(() => comprasNaLista.value > 0 && temRetratoNaApi.value && !numeroMarketplace.value)
+
 // ─── avaliação de venda (RF8) ───────────────────────────────────────────────
 const agora = useRelogio()
 const avaliacoesPainel = computed<AvaliacaoLoja[]>(() =>
@@ -736,6 +761,20 @@ const avaliacoesPendentes = computed(() => avaliacoesDoPedido.value.filter((a) =
 const devolucoesDoPedido = computed(() => ordenarReclamacoes(props.reclamacoes?.itens || [])
   .filter((r) => r.do_pedido && r.aberta && r.pedido_marketplace === props.conversa.pedido_marketplace))
 const rolagemPainel = ref<HTMLElement | null>(null)
+const DESTAQUE_PESQUISADO = 'scroll-mt-2 rounded-md ring-2 ring-primary/70 ring-offset-2 ring-offset-card'
+// O código de uma compra digitado com o chat aberto em outra aba: é no Pedido que ela
+// aparece, e a lista só monta nessa aba. O nome do comprador não muda de aba.
+watch(() => props.termoBusca, (termo) => {
+  if (temOutrasCompras.value && pareceCodigoDeCompra(termo)) aba.value = 'pedido'
+})
+// A busca da lista é o pedido da conversa (o nº na plataforma ou o do Bling): o destaque
+// fica no bloco de cima, e a tela volta até ele se estava mais abaixo (06/11/2026).
+const pedidoPesquisado = computed(() => temOutrasCompras.value && termoEhDoPedido(props.termoBusca, [numeroMarketplace.value, pedido.value?.numero, pnl.value?.pedido?.numero_bling]))
+watch(pedidoPesquisado, async (sim) => {
+  if (!sim) return
+  await nextTick()
+  rolagemPainel.value?.querySelector('[data-pedido-pesquisado]')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+})
 // O "ver no pedido" do cartão do topo: volta para a aba Pedido e rola até o bloco.
 async function mostrarDevolucao(id: string) {
   aba.value = 'pedido'
@@ -816,7 +855,7 @@ defineExpose({ mostrarDevolucao })
         </div>
 
         <template v-if="pm">
-          <section class="space-y-1">
+          <section class="space-y-1" :class="pedidoPesquisado ? DESTAQUE_PESQUISADO : ''" :data-pedido-pesquisado="pedidoPesquisado ? '' : undefined">
             <div class="flex items-center gap-2">
               <span v-if="pm.status_texto || pm.status" class="rounded border px-1.5 py-px text-xs" :class="statusPedidoCls(pm.status, pm.status_texto)">{{ pm.status_texto || pm.status }}</span>
               <button
@@ -974,7 +1013,12 @@ defineExpose({ mostrarDevolucao })
             :perfil="pnl?.adspower ?? null"
             :conversa-id="conversa.id"
           />
-          <div class="space-y-2 rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">
+          <div
+            v-if="!semPedidoComCompras"
+            class="space-y-2 rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground"
+            :class="pedidoPesquisado ? DESTAQUE_PESQUISADO : ''"
+            :data-pedido-pesquisado="pedidoPesquisado ? '' : undefined"
+          >
             <Package class="mx-auto size-6 opacity-60" />
             <div>{{ semRetrato }}</div>
             <div v-if="numeroMarketplace" class="flex items-center justify-center gap-1 font-mono text-foreground">
@@ -1367,6 +1411,18 @@ defineExpose({ mostrarDevolucao })
             </section>
           </div>
         </section>
+
+        <!-- OUTRAS COMPRAS deste comprador nesta loja: só ver, depois de tudo do pedido da conversa -->
+        <AtendimentoOutrasCompras
+          v-if="temOutrasCompras"
+          :conversa-id="conversa.id"
+          :plataforma="conversa.plataforma"
+          :pedido-da-conversa="conversa.pedido_marketplace"
+          :pode-atualizar="lePedidoDaLoja"
+          :perfil="pnl?.adspower ?? null"
+          :termo-busca="termoBusca"
+          @compras="comprasNaLista = $event"
+        />
       </div>
 
       <!-- ═══ PRODUTO ═══ -->

@@ -1831,9 +1831,36 @@ def _fichas_com_variacoes(valor: Any) -> Iterator[Mapping]:
             yield from _fichas_com_variacoes(v)
 
 
+def _palavra_da_equipe(valor: Any) -> Iterator[dict]:
+    """De cada ficha (a do pacote, o `ver_anuncio`), as linhas das especificações de fonte "equipe"
+    (06/11/2026). As chaves em ordem alfabética põem a descrição antes delas e o corte as comia:
+    "acompanha carregador" ficava sem lastro, com a linha no pacote. PURA."""
+    if isinstance(valor, Mapping):
+        espec = valor.get("especificacoes")
+        if isinstance(espec, Mapping):
+            da_equipe = [
+                c
+                for c in espec.get("campos") or []
+                if isinstance(c, Mapping) and c.get("fonte") == "equipe"
+            ]
+            if da_equipe:
+                yield {
+                    "item_id": valor.get("item_id"),
+                    "titulo": valor.get("titulo"),
+                    "especificacoes": {"campos": da_equipe},
+                }
+            return
+        for v in valor.values():
+            yield from _palavra_da_equipe(v)
+    elif isinstance(valor, list):
+        for v in valor:
+            yield from _palavra_da_equipe(v)
+
+
 def _com_as_variacoes(textos: Sequence[str]) -> list[str]:
     """As evidências e, logo depois de cada uma que o corte de `MAX_CHARS_EVIDENCIA`
-    cortaria, a lista inteira das variações de cada ficha dela (item 3). PURA."""
+    cortaria, a lista inteira das variações de cada ficha dela (item 3) e a palavra da equipe
+    (`_palavra_da_equipe`). PURA."""
     saida_: list[str] = []
     for bruto in textos:
         saida_.append(bruto)
@@ -1842,6 +1869,8 @@ def _com_as_variacoes(textos: Sequence[str]) -> list[str]:
         for dado in _dados_da_evidencia(bruto):
             for ficha_ in _fichas_com_variacoes(dado):
                 so = {k: ficha_[k] for k in _CHAVES_DAS_VARIACOES if k in ficha_}
+                saida_.append(json.dumps(so, ensure_ascii=False, sort_keys=True))
+            for so in _palavra_da_equipe(dado):
                 saida_.append(json.dumps(so, ensure_ascii=False, sort_keys=True))
     return saida_
 

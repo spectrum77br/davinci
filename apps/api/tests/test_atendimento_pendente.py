@@ -976,11 +976,16 @@ async def test_a_linha_mostra_o_numero_da_conversa(client, db, make_user, auth_a
     avaliacao = await _cena(
         db, integ, canal, "kia:avaliacao", ("cliente", 60), dados=vez, canal_nome="avaliacao"
     )
+    pergunta_ml = await _cena(
+        db, integ, canal, "kia:pergunta", ("cliente", 30), plataforma="ml", canal_nome="pergunta"
+    )
     auth_as(await make_user(email="quem.mexe@davinci-test.com", role=UserRole.ADMIN))
 
     async def ver() -> tuple[int, dict[str, dict]]:
         r = (await client.get(f"{URL}/resumo")).json()
-        (kia,) = [lj for lj in r["lojas"] if lj["conta"] == "kia"]
+        (kia,) = [
+            lj for lj in r["lojas"] if lj["conta"] == "kia" and lj["plataforma"] == "shopee"
+        ]
         itens = (await client.get(f"{URL}/conversas", params={"limite": 100})).json()["itens"]
         return kia["nao_lidas_duoke"], {i["id"]: i for i in itens}
 
@@ -993,6 +998,11 @@ async def test_a_linha_mostra_o_numero_da_conversa(client, db, make_user, auth_a
     # Fora do chat: sem número (a tela usa a bolinha de antes); a marca fica.
     linha_avaliacao = itens[str(avaliacao.id)]
     assert linha_avaliacao["numero_duoke"] is None and linha_avaliacao["falta_responder"] is True
+    # A pergunta do ML (06/11/2026, a bolinha não aparecia em "Todas"): é do chat e fica
+    # fora do número. Com None, a tela usa a bolinha da fila; com 0, ela sumiria.
+    linha_pergunta = itens[str(pergunta_ml.id)]
+    assert linha_pergunta["numero_duoke"] is None
+    assert linha_pergunta["falta_responder"] is True and linha_pergunta["pendentes"] == 1
     assert n == sum(i["numero_duoke"] or 0 for i in itens.values())
     # Abriu a conversa: o número dela zera na loja e na linha; a marca fica.
     r = await client.post(f"{URL}/conversas/{aberta.id}/visto")

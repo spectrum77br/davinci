@@ -142,6 +142,7 @@ from app.services.atendimento import (
     constantes,
     evidencias,
     recursos_equipe,
+    sites_marca,
     validador,
 )
 from app.services.atendimento import especificacoes as especificacoes_svc
@@ -1475,7 +1476,8 @@ def _textos_do(valor: Any) -> Iterator[str]:
 def _do_registro(ctx: ContextoAgente | None) -> list[Any]:
     """O que as ferramentas devolveram (o JSON do registro), já lido."""
     saida = []
-    for texto in ctx.registro.textos if ctx is not None else []:
+    registro = getattr(ctx, "registro", None)
+    for texto in registro.textos if registro is not None else []:
         try:
             saida.append(json.loads(texto))
         except (TypeError, ValueError):
@@ -1729,13 +1731,18 @@ def _negado(texto: str, inicio: int, fim: int) -> bool:
     )
 
 
-def _mencoes_do_objeto(objeto: str, texto: str) -> list[bool]:
-    """Cada menção do objeto no texto: True = negada ("sem fone", "não vem fone")."""
+def _mencoes_das_formas(formas: Sequence[str], texto: str) -> list[bool]:
+    """Cada menção de alguma das formas no texto: True = negada ("sem fone", "não vem fone")."""
     return [
         _negado(texto, m.start(), m.end())
-        for forma in _OBJETOS[objeto]
+        for forma in formas
         for m in re.finditer(rf"\b{re.escape(forma)}\b", texto)
     ]
+
+
+def _mencoes_do_objeto(objeto: str, texto: str) -> list[bool]:
+    """Cada menção do objeto (`_OBJETOS`) no texto."""
+    return _mencoes_das_formas(_OBJETOS[objeto], texto)
 
 
 def _mencao_na_fonte(objeto: str, fontes: Sequence[str]) -> tuple[bool, bool]:
@@ -1781,14 +1788,19 @@ def negados_pela_lista_exclusiva(texto: str, fontes: Sequence[str]) -> list[str]
     return list(dict.fromkeys(saida))
 
 
-def _nega_o_que_o_anuncio_cita(texto: str, fontes: Sequence[str]) -> bool:
+def _nega_o_que_o_anuncio_cita(
+    texto: str, fontes: Sequence[str], com_veredito: Collection[str] = frozenset()
+) -> bool:
     """O texto diz que um objeto NÃO vem (toda menção dele negada) e a fonte o cita sem
-    negar? PURA (a liberação L1)."""
+    negar? PURA (a liberação L1). `com_veredito` = os objetos em que a resposta diz o mesmo que a
+    equipe, que vale até contra o anúncio (`_objetos_conferidos`)."""
     planas = [_plano(f) for f in fontes if isinstance(f, str)]
     for sentenca, pergunta in _sentencas(_plano(texto)):
         if pergunta:
             continue
         for objeto in _objetos(sentenca):
+            if objeto in com_veredito:
+                continue
             mencoes = _mencoes_do_objeto(objeto, sentenca)
             if mencoes and all(mencoes) and _mencao_na_fonte(objeto, planas)[0]:
                 return True
@@ -1796,18 +1808,24 @@ def _nega_o_que_o_anuncio_cita(texto: str, fontes: Sequence[str]) -> bool:
 
 
 def _acompanha(
-    texto: str, fontes: Sequence[str], do_par: Collection[str] = frozenset()
+    texto: str,
+    fontes: Sequence[str],
+    do_par: Collection[str] = frozenset(),
+    com_veredito: Collection[str] = frozenset(),
 ) -> list[PendenciaAgente]:
     """`do_par` (revisão do item 32, 22/10/2026) = os objetos que uma resposta da equipe
     CITADA, que vale para produto, AFIRMA que acompanham (`objetos_afirmados_no_par`):
     só resolvem o "acompanha X" quando nenhuma fonte do anúncio cita X — a negação da
     ficha ("Não acompanha capa") continua contradizendo, e o par nunca sustenta o "não
-    acompanha"."""
+    acompanha". `com_veredito` = os objetos em que a resposta diz o mesmo que a equipe (06/11/2026,
+    `_objetos_conferidos`): ela é a fonte, até contra a ficha."""
     saida = []
     for sentenca, pergunta in _sentencas(_plano(texto)):
         if pergunta or not _ACOMPANHA.search(sentenca) or _NAO_AFIRMA.search(sentenca):
             continue
         for objeto in _objetos(sentenca):
+            if objeto in com_veredito:
+                continue
             negada = all(_mencoes_do_objeto(objeto, sentenca))
             positiva_fonte, negada_fonte = _mencao_na_fonte(objeto, fontes)
             if not negada and positiva_fonte:
@@ -2055,7 +2073,8 @@ def conferir_fonte_produto(
     nunca título (a água continua só pelo título), nunca contra a ficha.
 
     `textos_cliente` = as falas do turno: dizem de que recurso e de que modelo fala a resposta
-    que não os repete ("Sim, tem."), para a palavra da equipe (`_contra_a_equipe`).
+    que não os repete ("Sim, tem."), para a palavra da equipe (`_contra_a_equipe`,
+    `_caixa_contra_a_equipe`, `_mala_contra_a_equipe`, `_contra_a_equipe_de_outro_modelo`).
     """
     if not (texto or "").strip():
         return []
@@ -2063,6 +2082,14 @@ def conferir_fonte_produto(
         *(f for f in fichas if isinstance(f, Mapping)),
         *_sem_os_anuncios(_do_registro(ctx), sem_os_anuncios),
     ]
+    # A palavra da equipe (06/11/2026): o que ela diz da conversa, antes de os dados perderem a
+    # linha que não vale para o turno (ver "A caixa e a mala contra a equipe").
+    plano_da_caixa = _plano_da_caixa(texto)
+    falas = _falas_planas(textos_cliente)
+    modelos = _modelos_dos_anuncios(dados)
+    da_conversa = _da_equipe_na_conversa(dados, fontes_extra)
+    do_turno = _da_equipe_do_turno(dados, fontes_extra, plano_da_caixa, falas)
+    dados = _so_a_palavra_que_vale(dados, do_turno)
     especs = _especificacoes(dados)
     cruas = [t for d in dados for t in _textos_do(d) if isinstance(t, str)]
     cruas += [t for t in fontes_extra if isinstance(t, str) and t.strip()]
@@ -2157,7 +2184,12 @@ def conferir_fonte_produto(
                 f"afirma {rotulo} ('{achado.valor}') sem fonte (anúncio, especificações ou fato)",
             )
         )
-    saida += _acompanha(texto, fontes, objetos_afirmados_no_par(pares_do_produto))
+    saida += _acompanha(
+        plano_da_caixa if recursos_equipe.CAPINHA in do_turno else texto,
+        fontes,
+        objetos_afirmados_no_par(pares_do_produto),
+        _objetos_conferidos(plano_da_caixa, do_turno, modelos, falas),
+    )
     titulos = [_plano(t) for d in dados for t in _titulos_do(d)]
     titulos += [_plano(t) for t in fontes_extra if isinstance(t, str) and t.strip()]
     saida += _por_termo(texto, titulos, fontes)
@@ -2169,6 +2201,11 @@ def conferir_fonte_produto(
         fontes_extra,
         textos_cliente,
         saida,
+    )
+    saida += _caixa_contra_a_equipe(texto, da_conversa, modelos, textos_cliente)
+    saida += _mala_contra_a_equipe(texto, da_conversa, modelos, textos_cliente)
+    saida += _contra_a_equipe_de_outro_modelo(
+        texto, modelos, textos_cliente, getattr(ctx, "plataforma", None), titulos
     )
     return _sem_repetir(saida)
 
@@ -10064,6 +10101,11 @@ def conferir_outro_produto_da_loja(
         a for b in ctx.buscas_catalogo if not b.get("achados") for a in b.get("sem_no_titulo") or []
     }
     dos_fatos = _fatos_que_negam(fatos_citados)
+    # 06/11/2026: "a loja não vende capinha, película nem fone avulso" é a palavra da equipe.
+    if recursos_equipe.VENDE_AVULSO in _da_equipe_na_conversa(
+        [*_sem_os_anuncios(fichas, fora), *_sem_os_anuncios(_do_registro(ctx), fora)], fontes_extra
+    ):
+        dos_fatos |= {"capa", "pelicula", "fone"}
     sinal = _sinal_de_nome(texto, ctx)
     saida: list[PendenciaAgente] = []
     # O "esgotado" vale para a resposta inteira ("é vendido separadamente na nossa loja…;
@@ -10759,6 +10801,883 @@ def _contra_a_equipe(
                 )
             )
     return saida
+
+
+# ── A caixa e a mala contra a equipe (o dono, 06/11/2026) ──
+#
+# Medição de 05/11 no ML: "Acompanha carregador?" → "O carregador não aparece", "vem capinha?" →
+# "capinha não consta", e a equipe responde sim; a pergunta do ML é pública e irreversível. O dado
+# são as linhas de fonte "equipe" das especificações (já veem a plataforma e a variação). Sem linha,
+# nada muda. Cada oração fala do modelo da conversa; a que cita outro, de outra marca, de outra
+# versão, a que fala de servir ou de comprar à parte, ou de outra coisa do item ("a potência do
+# carregador"), não fala do que vem na caixa. O engano aqui leva a resposta a uma pessoa, nunca a
+# solta.
+#
+# A linha da equipe só dispensa as conferências de sempre (`_acompanha`, a liberação L1) no que a
+# leitura daqui confirmou (`_itens_conferidos`, `_leitura_da_mala`): o que ela não lê fica como era
+# antes da linha. Com outro modelo no turno a linha sai dos dados (`_so_a_palavra_que_vale`): não
+# empresta nada a ele, e vale o que a equipe diz DELE (`_contra_a_equipe_de_outro_modelo`).
+
+
+@dataclass(frozen=True)
+class ItemDaCaixa:
+    """`campo` é o das especificações, `formas` é como o texto plano o nomeia e `objeto` é o nome
+    em `_OBJETOS`. A chave do chip não está lá: entrar mudaria o `_acompanha` de quem não tem
+    veredito."""
+
+    campo: str
+    rotulo: str
+    formas: tuple[str, ...]
+    objeto: str | None = None
+
+
+ITENS_DA_CAIXA: tuple[ItemDaCaixa, ...] = (
+    ItemDaCaixa(recursos_equipe.CARREGADOR, "o carregador", _OBJETOS["carregador"], "carregador"),
+    ItemDaCaixa(recursos_equipe.CAPINHA, "a capinha", _OBJETOS["capa"], "capa"),
+    ItemDaCaixa(recursos_equipe.CABO, "o cabo", _OBJETOS["cabo"], "cabo"),
+    ItemDaCaixa(recursos_equipe.PELICULA, "a película", _OBJETOS["película"], "película"),
+    ItemDaCaixa(
+        recursos_equipe.CHAVE_CHIP,
+        "a chave do chip",
+        # A equipe escreve "chave chip" (38 de 41 vezes em 120 dias).
+        (
+            "chave do chip",
+            "chave chip",
+            "chave de chip",
+            "chave para chip",
+            "chave para o chip",
+            "chave ejetora",
+            "chavinha do chip",
+            "chavinha de chip",
+        ),
+    ),
+)
+_CAMPOS_DA_CAIXA_E_DA_MALA = frozenset(
+    {
+        *(i.campo for i in ITENS_DA_CAIXA),
+        recursos_equipe.VENDE_AVULSO,
+        recursos_equipe.RODAS,
+        recursos_equipe.MATERIAL,
+        recursos_equipe.PADRAO_ANAC,
+    }
+)
+# A oração do que vem: "e o"/"e a" separam o que se afirma ("o cabo vem e a capinha não consta"), e
+# o "só" separa o que vem do que não vem ("não vem com carregador, só o cabo").
+_ORACAO_DA_CAIXA = re.compile(
+    r"([,;\n]|\.(?!\d)|\b(?:mas|porem|so|apenas|somente)\b"
+    r"|\be\s+(?:o|a|os|as|esse|essa|este|esta)\b|\be\s+(?=nao\b))"
+)
+_SEPARA_O_QUE_VEM = frozenset({"so", "apenas", "somente"})
+_SEPARA_O_ASSUNTO = frozenset({"mas", "porem"})
+# O que `_NEGA_A_CAIXA` e `_NAO_ACOMPANHA` não leem.
+_FICA_DE_FORA = re.compile(
+    r"\bnao\s+(?:faz|fazem)\s+parte\b|\bfica(?:m)?\s+de\s+fora\b"
+    r"|\bnao\s+(?:esta|estao)\s+(?:inclus\w*|incluid\w*|listad\w*|mencionad\w*|citad\w*"
+    r"|na\s+caixa|no\s+kit|na\s+lista|entre)\b"
+    r"|\bnao\s*$"
+)
+# Não saber do item. O `_NAO_AFIRMA` inteiro não serve: o "verifique" e o "caso tenha" dele falam de
+# tomada e de defeito ("Verifique se o carregador está conectado"), não do que vem.
+_NAO_SABE_DO_ITEM = re.compile(
+    r"\bnao\s+(?:temos|tenho|ha|existe|consta|encontr\w*|sei|sabemos|achamos|achei|localiz\w*|vi"
+    r"|vejo)\s+(?:[a-z0-9]+\s+){0,3}?(?:informac\w*|dados?|certeza|confirmac\w*|detalhes?|mencao"
+    r"|indicac\w*|referencia)"
+    r"|\bnao\s+(?:consigo|conseguimos|da\s+para|podemos|posso)\s+(?:[a-z0-9]+\s+){0,2}?"
+    r"(?:confirmar|informar|garantir|dizer|afirmar|assegurar)\b"
+)
+_SE_VEM = re.compile(
+    r"\bse\s+(?:[a-z0-9]+\s+){0,3}?(?:vem|veem|acompanha\w*|inclui|traz)\b"
+    r"|\bse\s+(?:(?:ele|ela|o\s+aparelho|o\s+celular|o\s+kit)\s+)?(?:tem|possui)\b"
+)
+_VERBOS_DE_TER = r"tem|possui|possuem|ha|conta\s+com"
+_COM_O_ITEM_VEM = re.compile(
+    r"\b(?:vem|veem|vao|vai|segue|seguem|faz\s+parte|fazem\s+parte|mand\w+|envi\w+|ganha\w*"
+    r"|receb\w+|sai(?:m)?\s+de\s+fabrica|junto)\b"
+)
+# A lista sem verbo: "Na caixa: aparelho, capinha e cabo".
+_LISTA_DA_CAIXA = re.compile(r"\bna\s+caixa\b|\bno\s+kit\b|\bcontem\b")
+_SIM_NA_ORACAO = re.compile(r"\bsim\b")
+# Servir (a capinha do iPhone) e comprar à parte não dizem o que vem na caixa.
+_NAO_E_A_CAIXA = re.compile(
+    r"\b(?:serv\w*|cabe|cabem|caib\w*|encaix\w*|compativ\w*|avuls\w*|separad\w*|compr\w*|procur\w*)\b"
+)
+# O "sem carregador de fábrica" do brinde também não (fatos 30 e 45: "enviamos de brinde").
+_DE_FABRICA = re.compile(r"\bde\s+fabrica\b")
+# Dizer que o item se compra à parte é dizer que ele não vem, a não ser para quem quer comprar.
+_VENDIDO_A_PARTE = re.compile(
+    r"\bvendid[oa]s?\s+(?:separad\w*|a\s+parte|avuls\w*)"
+    r"|\bcompr\w*\b[^,;.!?\n]{0,30}?\b(?:separad\w*|a\s+parte|avuls\w*)"
+    r"|\bfica(?:m)?\s+a\s+parte\b"
+    r"|\b(?:precis\w+|tem\s+que|tera\s+que|deve)\s+comprar\b"
+)
+_E_A_PARTE = re.compile(r"\b(?:e|sao)\s+a\s+parte\b")
+_LINK = re.compile(r"\bhttps?://\S+|\bwww\.\S+")
+_QUER_COMPRAR = re.compile(r"\b(?:compr\w*|vend\w*|avuls\w*|separad\w*)\b")
+# "O anúncio não informa a potência do carregador", "Não consta se o carregador é bivolt".
+_OUTRA_COISA_DO_ITEM = (
+    r"\b(?!informac|mencao|indicac|referencia|dados?\b|detalhes?\b|nada\b|respeito\b|alem\b|junto\b"
+    r"|dentro\b|fora\b|presenca\b)[a-z0-9]+\s+d[oa]s?\s+(?:{alvo})\b"
+    r"|\b(?:se|caso)\s+(?:o|a|os|as)\s+(?:{alvo})\s+(?!vem\b|veem\b|acompanha)[a-z0-9]+"
+)
+_VERBO_NA_ORACAO = re.compile(
+    r"\b(?:e|sao|esta|estao|foi|foram|funciona\w*|parece\w*|tem|chegou|veio)\b"
+)
+# "Vem sim", "Vai junto", "Enviamos sim". Curta de verdade: "A mensagem foi recebida" e "Enviamos
+# amanhã" não respondem nada.
+_CURTA_QUE_VEM = re.compile(
+    r"\b(?:vem|veem|acompanha|acompanham|traz|inclui)\b"
+    r"|\b(?:vai|segue|seguem|envi\w+|mand\w+|ganha\w*|receb\w+)\s+(?:sim|junto)\b|\bjunto\s*$"
+)
+_PALAVRAS_DA_CURTA = 5
+# "Vem com todos os acessórios", "vem tudo": sem o nome, mas cobre o item.
+_COBRE_TUDO = re.compile(r"\b(?:todos\s+os\s+acessorios|tudo|completo)\b")
+_SIM_SOLTO = re.compile(r"\b(?:e|sao|da|sai|saem|pode|podem)\s+sim\b")
+_NAO_SOLTO = re.compile(
+    r"^(?:(?:infelizmente|desculpe|lamento)\s+)?nao\s+(?:e|sao|da|sai|saem|pode|podem)$"
+)
+# "Vem só o aparelho", "O kit contém o aparelho": a lista, não a resposta curta.
+_APARELHO = re.compile(r"\b(?:aparelho|celular|smartphone|telefone)\b")
+_VEM_O_APARELHO = re.compile(
+    r"\b(?:vem|veem|acompanha\w*|contem|traz|trazem|inclui\w*)\s+(?:(?:apenas|somente|so)\s+)?"
+    r"(?:(?:com|o|a|os|as|um|uma)\s+){0,2}(?:aparelho|celular|smartphone|telefone)\b"
+)
+# "Vem de brinde só na versão Premium" diz onde vem, não é a lista do que vem.
+_SO_ONDE = re.compile(r"\b(?:apenas|somente|so)\s+(?:na|no|nas|nos|em|para|quando|se)\b")
+# "Esta versão vem com capinha" é a do anúncio da conversa, não outra.
+_ESTA_VERSAO = re.compile(r"\b(?:n?est[ae]|n?ess[ae]|dest[ae]|dess[ae])\s+(?:versao|variacao)\b")
+# "Somente o tamanho 18 polegadas tem rodas removíveis" (a equipe, no M2 de 20).
+_SO_NO_TAMANHO = re.compile(
+    r"\b(?:somente|apenas|so)\s+(?:(?:o|a|os|as|no|na|nos|nas|de|da|do)\s+)?(?:tamanhos?\b|\d)"
+)
+# O "Redmi 14C" não tem código: o único Redmi da tabela é o 15C.
+_OUTRO_REDMI = re.compile(r"\bredmi\s+(?!15\s*c\b)\d")
+# O estojo do fone do kit ("case de carregamento") não é a capinha.
+_CASE_DO_FONE = re.compile(r"\bcases?\s+(?:de\s+)?(?:carregamento|recarga|carga)\b")
+# A fala que cita o item e não pergunta se ele vem: comprar ("vc tem a capinha"), a cor, a queixa de
+# quem já recebeu.
+_FALA_FORA_DA_CAIXA = re.compile(
+    _NAO_E_A_CAIXA.pattern + r"|\b(?:vend\w*|colorid\w*|cor|cores|faltou|faltando|cade)\b"
+    r"|\b(?:voce|voces|vc|vcs)\s+tem\b|\bnao\s+(?:veio|recebi|chegou)\b|\bveio\s+sem\b"
+)
+
+
+def _plano_da_caixa(texto: str | None) -> str:
+    """O texto plano sem o link (o "...-p3-polipropileno" não é modelo citado), sem o estojo do
+    fone, e o "é à parte" sem o "e a" que `_ORACAO_DA_CAIXA` corta. PURA."""
+    plano = _LINK.sub(" ", _plano(texto))
+    return _E_A_PARTE.sub("fica a parte", _CASE_DO_FONE.sub("estojo", plano))
+
+
+def _alvo(formas: Sequence[str]) -> str:
+    return "|".join(re.escape(f) for f in formas)
+
+
+def _anuncios_em(dados: Iterable[Any]) -> Iterator[Mapping]:
+    """Os anúncios dos dados (a ficha, o `ver_anuncio`, a lista do JSON do pacote); nunca o pedido,
+    a busca nem o manual, que não têm o `item_id` na raiz. PURA."""
+    for dado in dados:
+        if isinstance(dado, Mapping):
+            if dado.get("item_id"):
+                yield dado
+        elif isinstance(dado, list):
+            yield from _anuncios_em(dado)
+
+
+def _modelos_dos_anuncios(dados: Iterable[Any]) -> set[str]:
+    """Os códigos de modelo e as marcas ("Xiaomi Redmi 15c") dos títulos dos anúncios lidos.
+    PURA."""
+    return {
+        c
+        for anuncio in _anuncios_em(dados)
+        for t in _titulos_do(anuncio)
+        for c in (
+            *recursos_equipe.codigos_do(t),
+            *(m.group(0) for m in recursos_equipe._OUTRA_MARCA.finditer(_plano(t))),
+        )
+    }
+
+
+def _cita_outro_modelo(plano: str, modelos: Collection[str]) -> bool:
+    """O texto plano cita modelo ou marca que não são os de `_modelos_dos_anuncios`? PURA."""
+    return bool(
+        recursos_equipe.codigos_de_outro(plano, modelos)
+        or {m.group(0) for m in recursos_equipe._OUTRA_MARCA.finditer(plano)} - set(modelos)
+        or _OUTRO_REDMI.search(plano)
+    )
+
+
+def _da_equipe_na_conversa(
+    dados: Iterable[Any], fontes_extra: Sequence[str] = ()
+) -> dict[str, str]:
+    """{campo: valor} das linhas de fonte "equipe" que valem para a conversa. Com 2+ anúncios, só o
+    que todos dizem igual (o de um sem veredito pode ser o de quem se fala). O pedido de outro
+    modelo (`fontes_extra`) também tira tudo; o título sem código não diz que o pedido é outro.
+    PURA."""
+    dados = list(dados)
+    por_anuncio: dict[str, dict[str, str]] = {}
+    for anuncio in _anuncios_em(dados):
+        linhas = por_anuncio.setdefault(str(anuncio["item_id"]), {})
+        for bloco in _especificacoes([anuncio]):
+            for c in bloco["campos"]:
+                if isinstance(c, Mapping) and c.get("fonte") == especificacoes_svc.FONTE_EQUIPE:
+                    linhas[str(c.get("campo"))] = str(c.get("valor"))
+    if not por_anuncio:
+        return {}
+    modelos = _modelos_dos_anuncios(dados)
+    if modelos and any(
+        _cita_outro_modelo(_plano(extra), modelos)
+        for extra in fontes_extra
+        if isinstance(extra, str)
+    ):
+        return {}
+    primeiro, *resto = por_anuncio.values()
+    return {c: v for c, v in primeiro.items() if all(o.get(c) == v for o in resto)}
+
+
+def _da_equipe_do_turno(
+    dados: Iterable[Any], fontes_extra: Sequence[str], plano: str, falas: Sequence[str]
+) -> dict[str, str]:
+    """`_da_equipe_na_conversa`, vazio quando a fala ou a resposta cita outro modelo: a linha é do
+    modelo da conversa e não vale para ele. PURA."""
+    dados = list(dados)
+    modelos = _modelos_dos_anuncios(dados)
+    if any(_cita_outro_modelo(t, modelos) for t in (plano, *falas)):
+        return {}
+    return _da_equipe_na_conversa(dados, fontes_extra)
+
+
+def _so_a_linha_que_vale(valor: Any, da_equipe: Mapping[str, str]) -> Any:
+    if isinstance(valor, Mapping):
+        campos = valor.get("campos")
+        if not (isinstance(campos, list) and isinstance(valor.get("conflitos"), list)):
+            return {k: _so_a_linha_que_vale(v, da_equipe) for k, v in valor.items()}
+        saida = []
+        for c in campos:
+            if not isinstance(c, Mapping):
+                saida.append(c)
+            elif (
+                c.get("fonte") != especificacoes_svc.FONTE_EQUIPE
+                or c.get("campo") not in _CAMPOS_DA_CAIXA_E_DA_MALA
+                or c.get("campo") in da_equipe
+            ):
+                nota = c.get("nota") in (
+                    especificacoes_svc.NOTA_MEDIDAS,
+                    especificacoes_svc.NOTA_AVULSO,
+                )
+                saida.append({k: v for k, v in c.items() if not (nota and k == "nota")})
+        return {**valor, "campos": saida}
+    if isinstance(valor, list):
+        return [_so_a_linha_que_vale(v, da_equipe) for v in valor]
+    return valor
+
+
+def _so_a_palavra_que_vale(dados: Iterable[Any], da_equipe: Mapping[str, str]) -> list[Any]:
+    """Os dados (fichas, JSON do registro) sem as linhas da caixa e da mala que não valem para o
+    turno: o "capinha: vem na caixa" do A17 não é fonte do que se diz do WP60. E sem as notas, que
+    são para o modelo ler: o "as medidas já incluem as rodinhas" não é fonte da rodinha. PURA."""
+    saida: list[Any] = []
+    for dado in dados:
+        if not isinstance(dado, str):
+            saida.append(_so_a_linha_que_vale(dado, da_equipe))
+            continue
+        try:
+            lido = json.loads(dado)
+        except (TypeError, ValueError):
+            saida.append(dado)
+            continue
+        novo = _so_a_linha_que_vale(lido, da_equipe)
+        saida.append(dado if novo == lido else json.dumps(novo, ensure_ascii=False))
+    return saida
+
+
+def _oracoes_da_caixa(sentenca: str) -> Iterator[tuple[str, str]]:
+    """(o separador de antes, a oração) da frase plana. PURA."""
+    partes = _ORACAO_DA_CAIXA.split(sentenca)
+    separador = ""
+    for i, parte in enumerate(partes):
+        if i % 2:
+            separador = parte.strip()
+        elif parte.strip():
+            yield separador, parte.strip()
+
+
+def _fala_de_outro_produto(oracao: str, modelos: Collection[str]) -> bool:
+    """A oração fala de outro modelo, marca, versão ou tamanho que não o da conversa? PURA."""
+    return bool(
+        _cita_outro_modelo(oracao, modelos)
+        or _OUTRO_NO_TEXTO.search(oracao)
+        or _SO_NO_TAMANHO.search(oracao)
+        or _APONTA_A_ALTERNATIVA.search(_ESTA_VERSAO.sub(" ", oracao))
+    )
+
+
+def _nao_consta_na_oracao(oracao: str) -> bool:
+    """ "Não consta", "não informa", "não consigo confirmar", "se vem". Fora o "sem X": ele é de um
+    objeto só, e `_negado` o lê. PURA."""
+    return bool(
+        any(not m.group(0).startswith("sem") for m in _NEGA_A_CAIXA.finditer(oracao))
+        or _NAO_INFORMA.search(oracao)
+        or _NAO_SABE_DO_ITEM.search(oracao)
+        or _SE_VEM.search(oracao)
+    )
+
+
+def _tem_o_item(formas: Sequence[str], oracao: str) -> bool:
+    """O "tem" antes do item ("a capinha tem cor preta" não diz que a capinha vem) e o "Com capinha
+    transparente." sem verbo. PURA."""
+    alvo = _alvo(formas)
+    return bool(
+        re.search(rf"\b(?:{_VERBOS_DE_TER})\s+(?:[a-z0-9]+\s+){{0,3}}?(?:{alvo})\b", oracao)
+        or re.search(rf"\b(?:{alvo})\s+tem\s*$", oracao)
+        or re.match(rf"com\s+(?:[a-z0-9]+\s+){{0,2}}?(?:{alvo})\b", oracao)
+    )
+
+
+def _nao_tem_o_item(formas: Sequence[str], oracao: str) -> bool:
+    """ "Não tem capinha", "não possui", "não enviamos", "mas não a película", "sem capinha nem
+    película": `_negado` só conhece acompanha, vem, inclui e traz, e o "sem" junto do item. PURA."""
+    alvo = _alvo(formas)
+    return bool(
+        re.search(
+            rf"\bnao\s+(?:[a-z0-9]+\s+)?(?:{_VERBOS_DE_TER}|envi\w+|mand\w+|ganha\w*|receb\w+"
+            rf"|segue\w*|sai\w*)\s+(?:[a-z0-9]+\s+){{0,3}}?(?:{alvo})\b",
+            oracao,
+        )
+        or re.search(rf"\b(?:{alvo})\s+nao\s+(?:tem|ha|possui)\s*$", oracao)
+        or re.match(rf"nao\s+(?:(?:o|a|os|as|com)\s+)?(?:{alvo})\b", oracao)
+        or re.search(
+            rf"\b(?:sem|nao)\b[^,;.!?\n]*\bnem\s+(?:(?:o|a|os|as|um|uma|com)\s+)?(?:{alvo})\b"
+            rf"|\bsem\b[^,;.!?\n]*\be\s+(?:(?:o|a|os|as|um|uma)\s+)?(?:{alvo})\b",
+            oracao,
+        )
+    )
+
+
+def _polaridade_da_caixa(oracao: str, formas: Sequence[str]) -> bool | None:
+    """A oração diz que vem (True), nega ou não confirma (False), ou nada (None)? O "não informa" e
+    o "se vem" contam como False: só contrariam o que a equipe confirma, nunca o que ela nega.
+    PURA."""
+    mencoes = _mencoes_das_formas(formas, oracao)
+    if (
+        (mencoes and all(mencoes))
+        or _nao_consta_na_oracao(oracao)
+        or _FICA_DE_FORA.search(oracao)
+        or (mencoes and _nao_tem_o_item(formas, oracao))
+    ):
+        return False
+    if (
+        _COMECA_COM_SIM.search(oracao)
+        or _ACOMPANHA.search(oracao)
+        or _ACOMPANHA_NA_EQUIPE.search(oracao)
+        or _LISTA_DA_CAIXA.search(oracao)
+        or (_SIM_NA_ORACAO.search(oracao) and _CURTA_QUE_VEM.search(oracao))
+        or (
+            mencoes
+            and (
+                _COM_O_ITEM_VEM.search(oracao)
+                or _SIM_NA_ORACAO.search(oracao)
+                or _tem_o_item(formas, oracao)
+            )
+        )
+    ):
+        return True
+    return None
+
+
+def _o_que_o_texto_diz(
+    formas: Sequence[str],
+    plano: str,
+    modelos: Collection[str],
+    falas: Sequence[str] = (),
+) -> set[bool]:
+    """O que o texto plano afirma (True) ou nega (False) do item. A enumeração leva o que a oração
+    de antes disse ("acompanha capinha, carregador"), e o item citado sem verbo, o que a seguinte
+    diz ("Sobre o cabo, o anúncio não informa"). PURA."""
+    quer_comprar = any(_cita_o_item(formas, f) and _QUER_COMPRAR.search(f) for f in falas)
+    outra_coisa = _OUTRA_COISA_DO_ITEM.replace("{alvo}", _alvo(formas))
+    ditos: set[bool] = set()
+    for sentenca, pergunta in _sentencas(plano):
+        if pergunta or acao_pessoa.pede_evidencia(sentenca):
+            continue
+        polaridade: bool | None = None
+        pendente = False
+        for separador, oracao in _oracoes_da_caixa(sentenca):
+            if separador in _SEPARA_O_QUE_VEM:
+                polaridade, pendente = True, False
+            elif separador in _SEPARA_O_ASSUNTO:
+                polaridade, pendente = None, False
+            mencoes = _mencoes_das_formas(formas, oracao)
+            if mencoes and _fala_de_outro_produto(oracao, modelos):
+                continue
+            if (
+                mencoes
+                and not quer_comprar
+                and _VENDIDO_A_PARTE.search(oracao)
+                and not _NEGA_TERMO.search(oracao)
+            ):
+                ditos.add(False)
+                continue
+            if mencoes and (
+                _NAO_E_A_CAIXA.search(oracao)
+                or _LOJA_TEM.search(oracao)
+                or _LOJA_NAO_TEM.search(oracao)
+                or re.search(outra_coisa, oracao)
+                or (all(mencoes) and _DE_FABRICA.search(oracao))
+            ):
+                continue
+            dita = _polaridade_da_caixa(oracao, formas)
+            if dita is not None:
+                polaridade = dita
+            if mencoes:
+                if polaridade is not None:
+                    ditos.add(polaridade)
+                else:
+                    pendente = len(oracao.split()) <= 6 and not _VERBO_NA_ORACAO.search(oracao)
+            elif pendente and dita is not None and not _NAO_E_A_CAIXA.search(oracao):
+                ditos.add(dita)
+                pendente = False
+    return ditos
+
+
+def _curta_da_caixa(plano: str) -> bool | None:
+    """A resposta sem o nome do item ("Sim, vem.", "Não acompanha.", "Não.", "Não consta.", "É
+    sim."): diz o quê? PURA."""
+    for sentenca, pergunta in _sentencas(plano):
+        if pergunta:
+            continue
+        for parte in _ORACAO_DO_RECURSO.split(sentenca):
+            oracao = parte.strip()
+            if not oracao:
+                continue
+            if (
+                _NAO_ACOMPANHA.search(oracao)
+                or _nao_consta_na_oracao(oracao)
+                or _NAO_SOLTO.search(oracao)
+            ):
+                return False
+            curta = _resposta_curta(oracao, fala_nega=False)
+            if curta is not None:
+                return curta
+            if _SIM_SOLTO.search(oracao) or _COBRE_TUDO.search(oracao):
+                return True
+            if _CURTA_QUE_VEM.search(oracao) and len(oracao.split()) <= _PALAVRAS_DA_CURTA:
+                return True
+    return None
+
+
+def _cita_o_item(formas: Sequence[str], plano: str) -> bool:
+    return any(re.search(rf"\b{re.escape(f)}\b", plano) for f in formas)
+
+
+def _falas_planas(textos_cliente: Sequence[str | None]) -> list[str]:
+    return [_plano(t) for t in textos_cliente if isinstance(t, str) and t.strip()]
+
+
+def _pergunta_o_item(formas: Sequence[str], fala: str) -> bool:
+    """A fala pergunta se o item vem: com o verbo ("acompanha carregador?"), com o "tem" antes dele
+    ("tem capinha?") ou sem verbo nenhum ("Com carregador?", "e o carregador?", "Caixa sem
+    carregador??"). Medido em 90 dias:
+    das 815 falas curtas que citam o item, 383 não têm verbo e 127 só têm o "tem". PURA."""
+    if not _cita_o_item(formas, fala) or _FALA_FORA_DA_CAIXA.search(fala):
+        return False
+    # "O carregador veio errado" conta o que veio; "veio carregador?" pergunta.
+    if re.search(r"\bveio\b", fala) and "?" not in fala:
+        return False
+    alvo = _alvo(formas)
+    if (
+        _VERBO_DA_PERGUNTA.search(fala)
+        or re.search(rf"\b(?:tem|possui)\s+(?:[a-z0-9]+\s+){{0,3}}?(?:{alvo})\b", fala)
+        or ("?" in fala and re.search(rf"\b(?:sem|com)\s+(?:[a-z0-9]+\s+)?(?:{alvo})\b", fala))
+    ):
+        return True
+    so_o_item = (
+        r"\W*(?:(?:e|com|o|a|os|as|um|uma|ele|ela|esse|essa|este|esta|ja|tambem)\s+)*"
+        rf"(?:{alvo})(?:\s+(?:tambem|junto|inclus\w+))?\W*"
+    )
+    return any(re.fullmatch(so_o_item, parte.strip()) for parte in _ORACAO_DO_RECURSO.split(fala))
+
+
+def _leitura_do_item(
+    item: ItemDaCaixa, plano: str, falas: Sequence[str], modelos: Collection[str]
+) -> set[bool]:
+    """O que a resposta diz do item: com o nome dele, ou a resposta curta à pergunta sobre ele. Sem
+    o nome, com outro objeto ou o aparelho na lista, ela não respondeu. PURA."""
+    ditos = _o_que_o_texto_diz(item.formas, plano, modelos, falas)
+    if ditos:
+        return ditos
+    afirmadas = " ".join(s for s, pergunta in _sentencas(plano) if not pergunta)
+    if (
+        afirmadas
+        and not _cita_o_item(item.formas, afirmadas)
+        and not _objetos(afirmadas)
+        and not _VEM_O_APARELHO.search(afirmadas)
+        and any(_pergunta_o_item(item.formas, f) for f in falas)
+    ):
+        curta = _curta_da_caixa(plano)
+        if curta is not None:
+            return {curta}
+    return set()
+
+
+def _itens_conferidos(
+    plano: str, da_equipe: Mapping[str, str], modelos: Collection[str], falas: Sequence[str]
+) -> list[ItemDaCaixa]:
+    """Os itens em que a resposta, lida aqui, diz só o que a equipe diz. PURA."""
+    return [
+        item
+        for item in ITENS_DA_CAIXA
+        if (valor := da_equipe.get(item.campo)) is not None
+        and _leitura_do_item(item, plano, falas, modelos)
+        == {valor == especificacoes_svc.VEM_NA_CAIXA}
+    ]
+
+
+def _objetos_conferidos(
+    plano: str, da_equipe: Mapping[str, str], modelos: Collection[str], falas: Sequence[str]
+) -> frozenset[str]:
+    """Os objetos de `_OBJETOS` em `_itens_conferidos`: neles a equipe é a fonte, até contra a
+    ficha. PURA."""
+    return frozenset(
+        i.objeto for i in _itens_conferidos(plano, da_equipe, modelos, falas) if i.objeto
+    )
+
+
+def acompanha_pela_equipe(
+    plano: str, da_equipe: Mapping[str, str], modelos: Collection[str], falas: Sequence[str]
+) -> list[str]:
+    """O dado que a palavra da equipe dá às conferências termo a termo ("acompanha capa",
+    "não acompanha pelicula"), no nome que elas procuram (o 1º de `_OBJETOS`): o campo diz
+    "capinha", e o termo é "capa". Só de `_itens_conferidos`. PURA."""
+    saida = []
+    for item in _itens_conferidos(plano, da_equipe, modelos, falas):
+        vem = da_equipe[item.campo] == especificacoes_svc.VEM_NA_CAIXA
+        saida.append(f"{'acompanha' if vem else 'não acompanha'} {item.formas[0]}")
+        if vem and item.campo == recursos_equipe.CABO:
+            saida.append("acompanha cabo de carregamento")
+    return saida
+
+
+def _termos_da_equipe(
+    plano: str, da_equipe: Mapping[str, str], modelos: Collection[str], falas: Sequence[str]
+) -> frozenset[str]:
+    """Os termos das conferências termo a termo que a linha "equipe" responde: só do que a leitura
+    daqui confirmou, e a conferência não lê o "não" do termo que o campo nomeia. PURA."""
+    termos = {f for i in _itens_conferidos(plano, da_equipe, modelos, falas) for f in i.formas}
+    _contra, iguais = _leitura_da_mala(plano, da_equipe, modelos, falas)
+    if recursos_equipe.RODAS in iguais:
+        termos |= {"roda", "rodas", "rodinha", "rodinhas"}
+    if recursos_equipe.PADRAO_ANAC in iguais:
+        termos |= {"anac", "bagagem de mao", "cabine"}
+    if recursos_equipe.MATERIAL in iguais:
+        termos |= {"material", "polipropileno", "abs", "policarbonato"}
+    return frozenset(termos)
+
+
+# Sem veredito e fora de `_OBJETOS`: "acompanha capinha, carregador e relógio".
+_FORA_DA_TABELA_NA_LISTA = re.compile(r"\b(?:relogio|relogios|smartwatch|air\s*tag|tag)\b")
+
+
+def _lista_o_que_a_equipe_nao_diz(
+    plano: str,
+    textos_do_citado: Sequence[str],
+    conferidos: Collection[str],
+    pares_do_produto: Sequence[str],
+) -> bool:
+    """A lista do que vem junta o que a equipe confirma e o que ela não diz (fone, relógio), sem
+    fonte? A conferência termo a termo só lê o "fone" da oração com o verbo, e a capinha da lista
+    já tem dado: "Sim, acompanha capinha, carregador e fone" não pode sair pelo anúncio. PURA."""
+    fontes = [_plano(t) for t in textos_do_citado]
+    if _acompanha(plano, fontes, objetos_afirmados_no_par(pares_do_produto), conferidos):
+        return True
+    return any(
+        not pergunta
+        and _ACOMPANHA.search(sentenca)
+        and (m := _FORA_DA_TABELA_NA_LISTA.search(sentenca))
+        and not any(m.group(0) in f for f in fontes)
+        for sentenca, pergunta in _sentencas(plano)
+    )
+
+
+def _caixa_contra_a_equipe(
+    texto: str,
+    da_equipe: Mapping[str, str],
+    modelos: Collection[str],
+    textos_cliente: Sequence[str | None],
+) -> list[PendenciaAgente]:
+    """O que a resposta diz do que vem na caixa e da venda avulsa contra a linha "equipe" → pessoa
+    (ver acima). `modelos` = os do anúncio da conversa. O cliente que fala de outro modelo, e a
+    resposta é dele: nada aqui (`_contra_a_equipe_de_outro_modelo`). PURA."""
+    if not da_equipe:
+        return []
+    plano = _plano_da_caixa(texto)
+    falas = _falas_planas(textos_cliente)
+    if any(_cita_outro_modelo(f, modelos) for f in falas):
+        return []
+    afirmadas = [s for s, pergunta in _sentencas(plano) if not pergunta]
+    listas = [
+        m.group(0)
+        for s in afirmadas
+        for m in _LISTA_EXCLUSIVA.finditer(s)
+        if (_objetos(m.group(0)) or _APARELHO.search(m.group(0)))
+        and not _SO_ONDE.search(m.group(0))
+    ]
+    saida: list[PendenciaAgente] = []
+    for item in ITENS_DA_CAIXA:
+        valor = da_equipe.get(item.campo)
+        if valor is None:
+            continue
+        vem = valor == especificacoes_svc.VEM_NA_CAIXA
+        ditos = _leitura_do_item(item, plano, falas, modelos)
+        contra = (not vem) in ditos
+        if vem and not ditos:
+            # "Acompanha carregador?" → "O kit traz o aparelho e o fone": a omissão é o "não".
+            contra = any(not _cita_o_item(item.formas, lista) for lista in listas) or (
+                bool(afirmadas)
+                and not _cita_o_item(item.formas, " ".join(afirmadas))
+                and any(_pergunta_o_item(item.formas, f) for f in falas)
+            )
+        if contra:
+            saida.append(
+                _contradiz(
+                    CONTRA_A_EQUIPE,
+                    f"diz que {item.rotulo} não vem, mas a equipe diz que vem neste modelo"
+                    if vem
+                    else f"diz que {item.rotulo} vem, mas a equipe diz que não vem neste modelo",
+                )
+            )
+    if recursos_equipe.VENDE_AVULSO in da_equipe and _vende_avulso(afirmadas, modelos):
+        saida.append(
+            _contradiz(
+                CONTRA_A_EQUIPE,
+                "diz que a loja vende capinha, película, fone ou chip avulso, mas a equipe diz "
+                "que não vende",
+            )
+        )
+    return saida
+
+
+_ACESSORIO_NOMEADO = r"(?:capas?|capinhas?|peliculas?|chips?)"
+_VENDE_O_ACESSORIO = re.compile(
+    r"\b(?:temos|vendemos|trabalhamos\s+com)\s+(?:(?:sim|a|o|as|os|um|uma)\s+)*"
+    + _ACESSORIO_NOMEADO
+    + r"\b"
+    r"|\b" + _ACESSORIO_NOMEADO + r"\b[^,;.!?\n]{0,40}?\b(?:a\s+venda|vendid[oa]s?|avuls[oa]s?)\b"
+)
+# "Temos capinha de brinde", "Temos fone no kit": o que vem, não o que se vende.
+_VEM_NO_KIT = re.compile(r"\bbrinde\w*|\bkit\b|\bvem\b|\bacompanha\w*|\bna\s+caixa\b|\bjunto\b")
+
+
+def _vende_avulso(afirmadas: Sequence[str], modelos: Collection[str]) -> bool:
+    """Alguma oração diz que a loja vende o acessório à parte? PURA."""
+    for sentenca in afirmadas:
+        for parte in _PARTES_DA_FRASE.split(sentenca):
+            if (
+                _VENDE_O_ACESSORIO.search(parte)
+                and not _VEM_NO_KIT.search(parte)
+                and not _LOJA_NAO_TEM.search(parte)
+                and not _NEGA_TERMO.search(parte)
+                and not _cita_outro_modelo(parte, modelos)
+            ):
+                return True
+    return False
+
+
+# A rodinha removível, o padrão ANAC e o material.
+_RODA = r"rod(?:a|as|inha|inhas)"
+_RODA_REMOVIVEL = re.compile(
+    rf"\b{_RODA}\b[^,;.!?\n]{{0,50}}?\b(?:remov\w*|destac\w*|tirar|retirar|fix[ao]s?|sa[ei]m?"
+    rf"|soltam?|desmont\w*|desencaix\w*)\b"
+    rf"|\b(?:remov\w*|destac\w*|tirar|retirar|soltar|desmontar)\b[^,;.!?\n]{{0,25}}\b{_RODA}\b"
+)
+_RODA_FIXA = re.compile(r"\bfix[ao]s?\b")
+_FALA_DE_BORDO = re.compile(
+    r"\banac\b|\bde\s+bordo\b|\ba\s+bordo\b|\bbagagem\s+de\s+mao\b|\bcabine\b"
+)
+_FALA_DE_DESPACHO = re.compile(r"\bdespach\w*")
+# A negação perto do que nega: em "a mala de bordo não vem com cadeado", "de bordo" é só o nome.
+_NEGA_PERTO = r"\b(?:nao|nem|sem)\b(?:\s+\S+){0,5}?\s+"
+_NEGA_O_BORDO = re.compile(_NEGA_PERTO + r"(?:" + _FALA_DE_BORDO.pattern + r")")
+_NEGA_O_DESPACHO = re.compile(_NEGA_PERTO + _FALA_DE_DESPACHO.pattern)
+_FALA_DO_MATERIAL = re.compile(
+    r"\bmateria(?:l|is)\b|\b(?:feit|fabricad)[ao]s?\s+(?:de|em|com)\b"
+    r"|\b(?:e|sao)\s+(?:de|em)\s+(?:abs|policarbonato|plastico)\b"
+)
+# O que afirma: "para mala de bordo até 20 polegadas" é a regra, não diz nada desta mala.
+_AFIRMA_O_BORDO = re.compile(
+    r"\b(?:e|sao|vai|vao|pode|podem|serve|servem|cabe|cabem|lev\w*|entr\w*|liberad\w*|padrao"
+    r"|aceit\w*)\b.*(?:" + _FALA_DE_BORDO.pattern + r")"
+)
+_AFIRMA_O_DESPACHO = re.compile(
+    r"\b(?:e|sao|precis\w*|tem\s+que|tera\s+que|dev\w*|so|somente|apenas|vai|padrao)\b.*"
+    + _FALA_DE_DESPACHO.pattern
+)
+# Não saber da mala: "Confira as regras da ANAC" não diz nada dela, "confira se é de bordo" diz.
+_EVITA_A_MALA = re.compile(_NAO_SABE_DO_ITEM.pattern + r"|\bse\s+(?:[a-z0-9]+\s+){0,3}?(?:e|sao)\b")
+
+
+def _nao_confirma(oracao: str) -> bool:
+    return bool(_NEGA_TERMO.search(oracao) or _EVITA_A_MALA.search(oracao))
+
+
+def _rodas_na_oracao(oracao: str) -> bool | None:
+    """A oração diz que a rodinha sai (True), que não sai ou não confirma (False), ou nada? PURA."""
+    if not _RODA_REMOVIVEL.search(oracao):
+        return None
+    return not (_nao_confirma(oracao) or _RODA_FIXA.search(oracao))
+
+
+def _anac_na_oracao(oracao: str, veredito: str) -> bool:
+    """A oração contraria o padrão da equipe (`BORDO`, `DESPACHO`)? O "não informa se é padrão ANAC"
+    contraria o de bordo, que a equipe confirma. PURA."""
+    bordo, despacho = _FALA_DE_BORDO.search(oracao), _FALA_DE_DESPACHO.search(oracao)
+    evita = _EVITA_A_MALA.search(oracao)
+    nega_bordo = bool(bordo and (evita or _NEGA_O_BORDO.search(oracao)))
+    nega_despacho = bool(despacho and (evita or _NEGA_O_DESPACHO.search(oracao)))
+    if veredito == recursos_equipe.BORDO:
+        return nega_bordo or bool(
+            despacho and _AFIRMA_O_DESPACHO.search(oracao) and not nega_despacho and not bordo
+        )
+    return (
+        bool(bordo and _AFIRMA_O_BORDO.search(oracao) and not despacho and not nega_bordo)
+        or nega_despacho
+    )
+
+
+def _leitura_da_mala(
+    plano: str, da_equipe: Mapping[str, str], modelos: Collection[str], falas: Sequence[str]
+) -> tuple[dict[str, str], set[str]]:
+    """({campo: o motivo} do que contraria a linha "equipe", os campos em que a resposta diz o mesmo
+    que ela). O que a oração não lê não entra em nenhum dos dois. PURA."""
+    rodas = da_equipe.get(recursos_equipe.RODAS)
+    anac = da_equipe.get(recursos_equipe.PADRAO_ANAC)
+    material = da_equipe.get(recursos_equipe.MATERIAL)
+    contra: dict[str, str] = {}
+    iguais: set[str] = set()
+    if rodas is None and anac is None and material is None:
+        return contra, iguais
+    tem_rodas = rodas == especificacoes_svc.SIM
+    e_bordo = bool(anac) and _plano(anac) == _plano(
+        especificacoes_svc._VALOR_DA_ANAC[recursos_equipe.BORDO]
+    )
+    veredito_anac = recursos_equipe.BORDO if e_bordo else recursos_equipe.DESPACHO
+    motivo_rodas = (
+        "diz que a rodinha não é removível, mas a equipe diz que é neste modelo"
+        if tem_rodas
+        else "diz que a rodinha é removível, mas a equipe diz que não é neste modelo"
+    )
+    motivo_anac = f"contraria o padrão da mala: a equipe diz '{anac}'"
+    motivo_material = f"contraria o material da mala: a equipe diz '{material}'"
+
+    def _marcar(campo: str, igual: bool, motivo: str) -> None:
+        if igual:
+            iguais.add(campo)
+        else:
+            contra[campo] = motivo
+
+    disse_rodas = disse_anac = disse_material = False
+    for sentenca, pergunta in _sentencas(plano):
+        if pergunta:
+            continue
+        for parte in _ORACAO_DO_RECURSO.split(sentenca):
+            oracao = parte.strip()
+            if not oracao or _fala_de_outro_produto(oracao, modelos):
+                continue
+            na_oracao = _rodas_na_oracao(oracao)
+            if na_oracao is not None:
+                disse_rodas = True
+                if rodas is not None:
+                    _marcar(recursos_equipe.RODAS, na_oracao is tem_rodas, motivo_rodas)
+            if _FALA_DE_BORDO.search(oracao) or _FALA_DE_DESPACHO.search(oracao):
+                disse_anac = True
+                if anac is not None:
+                    _marcar(
+                        recursos_equipe.PADRAO_ANAC,
+                        not _anac_na_oracao(oracao, veredito_anac),
+                        motivo_anac,
+                    )
+            if material is None:
+                continue
+            dito = sites_marca._material(oracao)
+            if dito:
+                disse_material = True
+                # "É ABS", "ABS.", "não é polipropileno". "Não é ABS" diz o mesmo que a equipe.
+                igual = dito == _plano(material)
+                if igual is bool(_NEGA_TERMO.search(oracao)):
+                    contra[recursos_equipe.MATERIAL] = motivo_material
+                elif igual:
+                    iguais.add(recursos_equipe.MATERIAL)
+            elif _FALA_DO_MATERIAL.search(oracao):
+                disse_material = True
+                if _nao_consta_na_oracao(oracao):
+                    contra[recursos_equipe.MATERIAL] = motivo_material
+    # A resposta curta ("Sim.", "Não.", "O anúncio não informa."), sem repetir de que fala.
+    curta = _curta_da_caixa(plano) if falas else None
+    if curta is None:
+        return contra, iguais - set(contra)
+    if rodas is not None and not disse_rodas and any(_RODA_REMOVIVEL.search(f) for f in falas):
+        _marcar(recursos_equipe.RODAS, curta is tem_rodas, motivo_rodas)
+    if anac is not None and not disse_anac:
+        de_bordo = any(_FALA_DE_BORDO.search(f) for f in falas)
+        de_despacho = any(_FALA_DE_DESPACHO.search(f) for f in falas)
+        if de_bordo is not de_despacho:
+            _marcar(
+                recursos_equipe.PADRAO_ANAC,
+                curta is (e_bordo if de_bordo else not e_bordo),
+                motivo_anac,
+            )
+    if material is not None and not disse_material:
+        perguntados = {sites_marca._material(f) for f in falas} - {None}
+        if len(perguntados) == 1:
+            igual = perguntados == {_plano(material)}
+            _marcar(recursos_equipe.MATERIAL, curta is igual, motivo_material)
+        elif not curta and any(_FALA_DO_MATERIAL.search(f) for f in falas):
+            contra[recursos_equipe.MATERIAL] = motivo_material
+    return contra, iguais - set(contra)
+
+
+def _mala_contra_a_equipe(
+    texto: str,
+    da_equipe: Mapping[str, str],
+    modelos: Collection[str],
+    textos_cliente: Sequence[str | None],
+) -> list[PendenciaAgente]:
+    """A rodinha removível, o padrão ANAC e o material contra a linha "equipe" → pessoa (ver acima).
+    PURA."""
+    falas = _falas_planas(textos_cliente)
+    if any(_cita_outro_modelo(f, modelos) for f in falas):
+        return []
+    contra, _iguais = _leitura_da_mala(_plano_da_caixa(texto), da_equipe, modelos, falas)
+    return [_contradiz(CONTRA_A_EQUIPE, motivo) for motivo in sorted(contra.values())]
+
+
+def _contra_a_equipe_de_outro_modelo(
+    texto: str,
+    modelos: Collection[str],
+    textos_cliente: Sequence[str | None],
+    plataforma: Any,
+    titulos: Sequence[str],
+) -> list[PendenciaAgente]:
+    """O turno fala de UM outro modelo: a linha da conversa não vale para ele, e vale o que a equipe
+    diz DELE, como no `_contra_a_equipe`. "o WP60 vem capinha?" → "Sim, vem com capinha", no anúncio
+    do A17. Sem veredito dele, nada aqui. `titulos` = os da conversa: o "P7" da mala é a mala.
+    PURA."""
+    falas = _falas_planas(textos_cliente)
+    afirmadas = (s for s, pergunta in _sentencas(_plano_da_caixa(texto)) if not pergunta)
+    textos = [*falas, *afirmadas]
+    outros = {c for t in textos for c in recursos_equipe.codigos_de_outro(t, modelos)}
+    if len(outros) != 1:
+        return []
+    (outro,) = outros
+    trecho = next(t for t in textos if outro in recursos_equipe.codigos_do(t))
+    mala = any(recursos_equipe._BAGAGEM.search(_plano(t)) for t in titulos)
+    linhas = especificacoes_svc.aplicar_a_equipe(
+        {"campos": [], "conflitos": []}, f"mala {trecho}" if mala else trecho, None, plataforma
+    )["campos"]
+    da_outro = {c["campo"]: c["valor"] for c in linhas if c["campo"] in _CAMPOS_DA_CAIXA_E_DA_MALA}
+    return [
+        *_caixa_contra_a_equipe(texto, da_outro, {outro}, textos_cliente),
+        *_mala_contra_a_equipe(texto, da_outro, {outro}, textos_cliente),
+    ]
 
 
 def tipo_do_titulo(titulo: Any) -> str | None:
@@ -11561,9 +12480,11 @@ def _curta_com_o_dado(
     textos_cliente: Sequence[str],
     fichas: Sequence[Any],
     nomes_de_produto: Sequence[Any],
+    ja_conferidos: Collection[str] = frozenset(),
 ) -> bool:
     """A resposta curta ("Sim!", "Tem sim", "Não") à pergunta de característica tem o termo
-    perguntado no dado, do mesmo lado? Sem resposta curta, True. PURA."""
+    perguntado no dado, do mesmo lado? Sem resposta curta, True. `ja_conferidos` =
+    `_termos_da_equipe`. PURA."""
     nomes = _nomes_de_produto(nomes_de_produto, fichas)
     cabecas = _cabecas(nomes_de_produto, fichas)
     plano = _sem_as_cabecas(_sem_os_nomes(_plano(_com_eh(texto)), nomes), cabecas)
@@ -11577,6 +12498,9 @@ def _curta_com_o_dado(
     if not curtas:
         return True
     perguntados = _termos_perguntados(textos_cliente, fichas, nomes_de_produto)
+    if ja_conferidos and all(t in ja_conferidos for t in perguntados):
+        return True
+    perguntados = [t for t in perguntados if t not in ja_conferidos]
     if not perguntados:
         # A pergunta pela forma ("pode usar tranquilo?", "é novo?") não tem termo para
         # achar: a resposta curta só com a afirmação inteira junto ("Sim, ele é novo", que
@@ -11669,14 +12593,27 @@ def liberacao_pelo_anuncio(
         return False
     if _condicao_alem_do_anuncio(texto, dados):
         return False
+    # A palavra da equipe: só o que vale para o turno, e só dispensa o que a leitura confirmou.
+    plano_da_caixa = _plano_da_caixa(texto)
+    falas = _falas_planas(textos_cliente)
+    modelos = _modelos_dos_anuncios(dados)
+    da_equipe = _da_equipe_do_turno(dados, fontes_extra, plano_da_caixa, falas)
+    dados = _so_a_palavra_que_vale(dados, da_equipe)
     textos_do_citado = [t for t in _textos_de(list(dados)) if isinstance(t, str)]
     # Revisão L1–L3: o "não vem fone" com o fone no título/descrição do anúncio citado (a
     # `_acompanha` só lê a oração com o verbo de acompanhar; "não vem X" passava).
-    if _nega_o_que_o_anuncio_cita(texto, textos_do_citado):
+    conferidos = _objetos_conferidos(plano_da_caixa, da_equipe, modelos, falas)
+    if _nega_o_que_o_anuncio_cita(texto, textos_do_citado, conferidos):
         return False
+    if conferidos and _lista_o_que_a_equipe_nao_diz(
+        plano_da_caixa, textos_do_citado, conferidos, pares_do_produto
+    ):
+        return False
+    ja_conferidos = _termos_da_equipe(plano_da_caixa, da_equipe, modelos, falas)
     extra = [
         *sorted(condicao_provada(texto, fichas)),
         *acompanha_pelo_par(pares_do_produto, fichas, ctx, fontes_extra=nomes),
+        *acompanha_pela_equipe(plano_da_caixa, da_equipe, modelos, falas),
         # Revisão L1–L3 (achado 7): o "não vem X" pela lista exclusiva do anúncio citado.
         *negados_pela_lista_exclusiva(texto, textos_do_citado),
     ]
@@ -11688,7 +12625,11 @@ def liberacao_pelo_anuncio(
         fatos_citados=fatos_citados,
         textos_cliente=textos_cliente,
     )
-    if [f for f in fora if not _oracao_com_as_palavras_no_dado(f, [*dados, *extra])]:
+    if [
+        f
+        for f in fora
+        if f not in ja_conferidos and not _oracao_com_as_palavras_no_dado(f, [*dados, *extra])
+    ]:
         return False
     if _numeros_fora_do_dado(texto, [*dados, *extra, *fatos_citados]):
         return False
@@ -11708,6 +12649,7 @@ def liberacao_pelo_anuncio(
         textos_cliente=textos_cliente,
         fichas=fichas,
         nomes_de_produto=nomes,
+        ja_conferidos=ja_conferidos,
     )
 
 
@@ -12090,21 +13032,34 @@ def conferir(
             sem_os_anuncios=de_fora,
             textos_cliente=clientes,
         )
+        # A palavra da equipe do turno (06/11/2026): "A caixa e a mala contra a equipe".
+        plano_da_caixa = _plano_da_caixa(texto)
+        falas_da_caixa = _falas_planas(clientes)
+        dados_da_caixa = [*fichas_do_produto, *_sem_os_anuncios(_do_registro(ctx), de_fora)]
+        da_equipe = _da_equipe_do_turno(dados_da_caixa, da_base, plano_da_caixa, falas_da_caixa)
         # A marca L1/L2 (`ctx.produto_pelo_anuncio`, calculada acima, antes das variações).
         if ctx.modo == constantes.MODO_AUTO and not ctx.produto_pelo_anuncio:
             pendencias += conferir_ficha_no_automatico(
                 texto,
-                fichas_do_produto,
+                _so_a_palavra_que_vale(fichas_do_produto, da_equipe),
                 textos_cliente=clientes,
                 nomes_de_produto=da_base,
                 assunto=conferida.categoria,
                 # Fontes v1.3, item 10: a condição que o anúncio da conversa declara
                 # e o texto afirma igual ("novo", "lacrado", "original") é dado.
                 dados_extra=[
-                    *_sem_os_anuncios(ctx.registro.textos, de_fora),
+                    *_so_a_palavra_que_vale(
+                        _sem_os_anuncios(ctx.registro.textos, de_fora), da_equipe
+                    ),
                     *da_base,
                     *sorted(condicao_provada(texto, fichas)),
                     *acompanha_pelo_par(dos_pares, fichas, ctx, fontes_extra=da_base),
+                    *acompanha_pela_equipe(
+                        plano_da_caixa,
+                        da_equipe,
+                        _modelos_dos_anuncios(dados_da_caixa),
+                        falas_da_caixa,
+                    ),
                 ],
                 # Kia ao vivo (21/10/2026): o fato aprovado citado é fonte.
                 fatos_citados=ctx.fatos_citados(proposta.evidencias),
@@ -12342,6 +13297,7 @@ def conferir(
                     str(par.get("id"))
                     for par in ctx.pares_citados(proposta.evidencias, de_produto=True)
                 ],
+                da_equipe=da_equipe,
             )
         # Item 6 da rodada "redondo" (23/10/2026): G1 — o outro produto da loja só com a
         # busca no catálogo; o "não temos" só com o fato aprovado ou a busca vazia.
@@ -12510,7 +13466,8 @@ DURAS: frozenset[str] = frozenset(
         ACAO_DE_PESSOA,
         # (h) a restrição de região contrariada.
         REGIAO_CONTRADIZ,
-        # O dono, 05/11/2026: sobre NFC, 5G e zíper vale o que a equipe diz.
+        # O dono, 05/11/2026: sobre NFC, 5G e zíper vale o que a equipe diz (06/11/2026: e sobre o
+        # que vem na caixa e os fatos da mala).
         CONTRA_A_EQUIPE,
         # (k) contato/caminho fora da plataforma, dado interno, remetente, recado, "sou humano".
         CAMINHO_FORA_DA_PLATAFORMA,
@@ -12930,8 +13887,9 @@ _OBJETO_DA_CAIXA = (
     r"(?:capinha|capa|case|pelicula|carregador|fonte|fone|cabo|brinde\w*|estojo|acessorio\w*"
     r"|adaptador|pulseira)"
 )
+_VERBO_DA_PERGUNTA = re.compile(r"\b(?:vem|vai|acompanha\w*|veio|traz|inclu\w*|ganha|junto)\b")
 _PERGUNTA_DA_CAIXA = re.compile(
-    rf"\b(?:vem|vai|acompanha\w*|veio|traz|inclu\w*|ganha|junto)\b.{{0,40}}\b{_OBJETO_DA_CAIXA}"
+    rf"{_VERBO_DA_PERGUNTA.pattern}.{{0,40}}\b{_OBJETO_DA_CAIXA}"
     rf"|\b{_OBJETO_DA_CAIXA}\b.{{0,30}}\b(?:vem|vai|acompanha|junto|inclus\w*|de\s+brinde)\b"
 )
 _NEGA_A_CAIXA = re.compile(
@@ -12944,6 +13902,25 @@ _NEGA_A_CAIXA = re.compile(
 )
 
 
+def _so_nega_o_que_a_equipe_nega(
+    plano: str, da_equipe: Mapping[str, str], modelos: Collection[str]
+) -> bool:
+    """O texto nega algum item que a equipe nega, e todo outro objeto negado tem o veredito dela?
+    PURA."""
+    com_veredito = [i for i in ITENS_DA_CAIXA if i.campo in da_equipe]
+    if not any(
+        da_equipe[i.campo] == especificacoes_svc.NAO_VEM_NA_CAIXA
+        and False in _o_que_o_texto_diz(i.formas, plano, modelos)
+        for i in com_veredito
+    ):
+        return False
+    cobertas = {f for i in com_veredito for f in i.formas}
+    return not any(
+        m.group(0) not in cobertas and False in _o_que_o_texto_diz((m.group(0),), plano, modelos)
+        for m in re.finditer(rf"\b{_OBJETO_DA_CAIXA}\b", plano)
+    )
+
+
 def conferir_conteudo_sem_o_dado(
     texto: str,
     textos_cliente: Sequence[str],
@@ -12951,15 +13928,22 @@ def conferir_conteudo_sem_o_dado(
     acao: str,
     pares_de_produto: Sequence[str] = (),
     fichas: Sequence[Any] = (),
+    da_equipe: Mapping[str, str] | None = None,
 ) -> list[PendenciaAgente]:
     """3. (ver acima) → DURA. PURA. Com a resposta da equipe do mesmo produto citada, ou com a
-    lista exclusiva do anúncio que deixa o objeto de fora ("acompanha apenas o cabo"), não."""
+    lista exclusiva do anúncio que deixa o objeto de fora ("acompanha apenas o cabo"), não. Nem
+    quando a negativa é a do que a equipe nega (`da_equipe`, `_da_equipe_na_conversa`): o que ela
+    confirma é o `_caixa_contra_a_equipe`, sem o dado continua aqui."""
     if acao != "responder" or pares_de_produto:
         return []
     fontes = [t for f in fichas for t in _textos_do(f)] if fichas else []
     if fontes and negados_pela_lista_exclusiva(texto, fontes):
         return []
     plano = _plano(texto)
+    if da_equipe and _so_nega_o_que_a_equipe_nega(
+        _plano_da_caixa(texto), da_equipe, _modelos_dos_anuncios(fichas)
+    ):
+        return []
     turno = " ".join(_plano(t) for t in textos_cliente if isinstance(t, str))
     if not plano or not _PERGUNTA_DA_CAIXA.search(turno):
         return []

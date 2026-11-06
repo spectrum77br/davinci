@@ -216,6 +216,8 @@ def test_trava_em_todas_as_rotas_e_a_lista_de_quem_le_existe():
         f"{URL}/conversas/{{conversa_id}}/visto",
         # 03/11/2026: o "marcar como não lida" (o contrário do visto, para todos).
         f"{URL}/conversas/{{conversa_id}}/nao-lida",
+        # 06/11/2026: os cartões das outras compras (POST só por levar a lista; lê e não grava).
+        f"{URL}/conversas/{{conversa_id}}/pedidos-comprador/retratos",
     }
     # A nota interna, o responder, a foto, a etiqueta etc. NÃO entram no de quem lê:
     # são de quem RESPONDE (28/10/2026), outra lista, também de rotas de verdade.

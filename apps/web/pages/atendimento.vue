@@ -1476,6 +1476,7 @@ onBeforeUnmount(() => {
           :meu-id="auth.user?.id || null"
           :lojas="resumo?.lojas || []"
           :ativa="naCaixa && !emailNaTela"
+          :termo-busca="filtros.q"
           @mudou="aoMudarConversa"
           @voltar="selecionada = null"
           @abrir-aba="abrirAba"

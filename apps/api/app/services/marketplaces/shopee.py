@@ -1181,6 +1181,33 @@ class ShopeeClient:
                 return o
         return {}
 
+    # As outras compras do comprador no painel (06/11/2026,
+    # `enriquecer.retratos_da_loja`): os mesmos campos e o motivo do cancelamento,
+    # que o retrato da conversa não pede. O que não se pede não chega.
+    _CAMPOS_PEDIDO_OUTRAS_COMPRAS = (
+        f"{_CAMPOS_PEDIDO_ATENDIMENTO},cancel_reason,buyer_cancel_reason"
+    )
+
+    async def get_order_detail_lote(self, order_sns: list[str]) -> list[dict]:
+        """Até 50 pedidos numa chamada só (GET /api/v2/order/get_order_detail,
+        `order_sn_list`), no formato de `get_order_detail_completo`.
+
+        Devolve só os pedidos que a Shopee achou. Levanta `RuntimeError` com o
+        código da Shopee em erro de API (e `httpx.HTTPError` em erro de rede)."""
+        lote = [str(sn).strip() for sn in order_sns if str(sn or "").strip()][:50]
+        if not lote:
+            return []
+        resp = await self._call(
+            "GET",
+            "/api/v2/order/get_order_detail",
+            params={
+                "order_sn_list": ",".join(lote),
+                "response_optional_fields": self._CAMPOS_PEDIDO_OUTRAS_COMPRAS,
+            },
+            what="shopee_order_detail_lote",
+        )
+        return [o for o in resp.get("order_list") or [] if isinstance(o, dict)]
+
     async def get_item_base_info(self, item_ids: list[int | str]) -> list[dict]:
         """Título, fotos (`image.image_url_list`) e, no anúncio SEM variação,
         o preço (`price_info`) de até 50 anúncios

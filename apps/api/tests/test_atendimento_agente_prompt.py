@@ -94,7 +94,10 @@ from tests.test_atendimento_ia import (
 # 28/10/2026 (o dono: "temos que perder essa trava"): a devolução/reclamação é tratada
 # como a equipe da loja trata, o cliente decide — no lugar do "nunca desestimule
 # reclamação" (antes "633eaf94186a21ee").
-RETRATO_BLOCO_GERAL = "831bbe85cb904340"
+# 06/11/2026 (o dono: o que vem na caixa e os fatos da mala, "confie no q a eqpe diz sempre"): a
+# fonte "equipe" do `_PRODUTO` deixa de dizer só "(NFC, 5G)" — 10 caracteres a menos, no teto
+# (antes "831bbe85cb904340").
+RETRATO_BLOCO_GERAL = "bec37e50297479b0"
 
 
 def _geral() -> str:
@@ -421,6 +424,14 @@ def test_tamanho_do_bloco_geral():
     # Nada que muda por conversa e nenhum prazo de garantia em número.
     assert not re.search(r"\b\d+ (meses|dias)\b", _geral())
     assert not re.search(r"\b20[2-3]\d\b", _geral())
+
+
+def test_a_fonte_equipe_nao_e_so_nfc_e_5g():
+    # O dono, 06/11/2026: o que vem na caixa e os fatos da mala também são dela. A lista fechada
+    # dizia ao modelo que o campo "carregador" de fonte "equipe" não valia mais que o anúncio.
+    produto = _secao("# PRODUTO: DE ONDE VEM O DADO")
+    assert '1. a fonte "equipe": vale mais que todas, até contra o título;' in produto
+    assert "Nunca cite o site nem a equipe ao cliente." in produto
 
 
 def test_retrato_do_bloco_geral():
