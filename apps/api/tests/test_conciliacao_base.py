@@ -4430,3 +4430,57 @@ def test_raio_x_ml_soma_o_que_saiu_no_mesmo_minuto_da_liberacao():
     linhas = {x["chave"]: x for x in _comparativo(p, versoes, movs)["linhas"]}
     assert linhas["liquido"]["real"] == 11.53 and linhas["liquido"]["dif"] == 0.0
     assert linhas["depois"]["real"] == -18.48 and linhas["ficou"]["real"] == -6.95
+
+
+@pytest.mark.asyncio
+async def test_resumo_cobrancas_por_mes(db, make_user, auth_as, client, monkeypatch):
+    """Cairo 06/11/2026: "por mês igual no de cima". Cada mês com empresa, marketplace e
+    loja, pelo mês de Brasília, até o mesmo fim do bloco de dias."""
+    monkeypatch.setattr("app.routers.conciliacao._ontem", lambda: date(2026, 11, 2))
+    loja, _integ = await _loja(db, make_user)
+    shopee = await _loja_extra(db, make_user, "kfa", IntegrationPlatform.SHOPEE)
+
+    def imposto(de, quando, valor):
+        m = _mov(de, "imposto", quando, debito=valor)
+        m.classificacao = "imposto"
+        return m
+
+    db.add_all(
+        [
+            imposto(shopee, datetime(2026, 10, 10, 15, tzinfo=UTC), "10.00"),
+            # 01/11 às 01h em UTC ainda é 31/10 em Brasília
+            imposto(shopee, datetime(2026, 11, 1, 1, tzinfo=UTC), "5.00"),
+            imposto(shopee, datetime(2026, 11, 2, 15, tzinfo=UTC), "7.50"),
+            # depois do fim do bloco de dias: não entra
+            imposto(shopee, datetime(2026, 11, 3, 15, tzinfo=UTC), "99.00"),
+            _mov(loja, "ajuste_shopee", datetime(2026, 11, 2, 15, tzinfo=UTC), debito="20.00"),
+            # venda com pedido não é cobrança
+            _mov(
+                loja,
+                "venda_liberada",
+                datetime(2026, 11, 2, 15, tzinfo=UTC),
+                credito="100.00",
+                pedido_bling="301102",
+            ),
+        ]
+    )
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+
+    # O dia escolhido não muda o quadro, igual ao bloco de dias.
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-20"})
+    assert r.status_code == 200, r.text
+    novembro, outubro = r.json()["cobrancas_meses"]
+
+    assert novembro["mes"] == "2026-11"
+    assert novembro["empresa"]["imposto"] == 7.5
+    assert novembro["empresa"]["penalidades"] == 20.0
+    assert novembro["empresa"]["sem_dono"] == 1
+    assert novembro["por_plataforma"]["shopee"]["imposto"] == 7.5
+    assert novembro["por_plataforma"]["ml"]["penalidades"] == 20.0
+    assert novembro["lojas"]["kfa"]["imposto"] == 7.5
+    assert novembro["lojas"]["jlas2"]["sem_dono"] == 1
+
+    assert outubro["mes"] == "2026-10"
+    assert outubro["empresa"]["imposto"] == 15.0
+    assert list(outubro["por_plataforma"]) == ["shopee"]

@@ -70,6 +70,7 @@ type Cobrancas = {
   anteriores_saiu: number
   anteriores_linhas: number
 }
+type CobrancasMes = { mes: string; empresa: Cobrancas; por_plataforma: Record<string, Cobrancas>; lojas: Record<string, Cobrancas> }
 // Coluna "Cobranças extras (sem pedido)" do bloco Dias (19/10): positivo = a plataforma tirou
 type CobrancasExtras = { total: number; sem_dono: number; imposto: number; publicidade: number; penalidades: number; fatura_ml: number }
 // Bloco "Resultado do mês" (maquete de 19/10; ainda escondido na tela)
@@ -132,6 +133,7 @@ type Resumo = {
   cartoes: Record<string, number>
 
   dias: DiaResumo[]
+  cobrancas_meses?: CobrancasMes[]
 }
 
 const PLATAFORMAS: Array<{ key: string; label: string }> = [
@@ -151,6 +153,14 @@ const MOSTRAR_MES = false
 const abertosCob = ref<Record<string, boolean>>({})
 function alternarCob(k: string) {
   abertosCob.value[k] = !abertosCob.value[k]
+}
+// Por mês (Cairo 06/11), igual ao bloco de dias: o mês do dia escolhido abre sozinho.
+const abertosMesCob = ref<Record<string, boolean>>({})
+function mesCobAberto(mes: string) {
+  return abertosMesCob.value[mes] ?? dados.value?.dia.slice(0, 7) === mes
+}
+function alternarMesCob(mes: string) {
+  abertosMesCob.value = { ...abertosMesCob.value, [mes]: !mesCobAberto(mes) }
 }
 const COB_COLS = ['imposto', 'publicidade', 'penalidades', 'fatura_ml'] as const
 function fmtCob(v: number | null | undefined) {
@@ -200,15 +210,6 @@ function fmtSinal(v: number | null | undefined) {
   if (v === null || v === undefined || Math.abs(v) < 0.005) return '—'
   return v > 0 ? `+ ${fmtMoney(v)}` : `− ${fmtMoney(-v)}`
 }
-const mesLabel = computed(() => {
-  const m = dados.value?.mes
-  if (!m) return ''
-  // 28/10: o painel recomeçou em 24/10 — no mês do início, o quadro diz "de 24/10"
-  const ini = dados.value?.inicio
-  if (ini && ini.slice(0, 7) === m && ini.slice(8) !== '01') return `de ${fmtDia(ini + 'T12:00:00')}`
-  const [y, mm] = m.split('-')
-  return new Date(Number(y), Number(mm) - 1, 1).toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })
-})
 // Bloco "Dinheiro nas plataformas": cada marketplace começa fechado (só o total); "mostrar" abre as lojas.
 const abertos = ref<Record<string, boolean>>({})
 function alternar(key: string) {
@@ -579,14 +580,14 @@ onMounted(() => {
           <!-- 19/10 (Vinicius): o que a plataforma tira SEM pedido tem que aparecer em algum lugar -->
           <div class="flex min-w-0 flex-col rounded-md border bg-card">
             <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
-              <span>Cobranças da plataforma sem pedido — {{ mesLabel }} até {{ fmtDia(dados.dia + 'T12:00:00') }}</span>
+              <span>Cobranças da plataforma sem pedido — por mês<template v-if="dados.dias[0]"> até {{ fmtDia(dados.dias[0].dia + 'T12:00:00') }}</template></span>
               <span class="text-[10px] font-normal text-white/80">pela data do movimento · não entra no resultado dos pedidos</span>
             </div>
             <div class="overflow-x-auto">
               <table class="w-full text-xs">
                 <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                   <tr>
-                    <th class="border-b px-2 py-1 text-left">Marketplace / loja</th>
+                    <th class="border-b px-2 py-1 text-left">Mês / marketplace / loja</th>
                     <th class="border-b px-2 py-1 text-right">Impostos (ICMS DIFAL)</th>
                     <th class="border-b px-2 py-1 text-right">Publicidade (Ads)</th>
                     <th class="border-b px-2 py-1 text-right">Penalidades e ajustes</th>
@@ -594,30 +595,32 @@ onMounted(() => {
                   </tr>
                 </thead>
                 <tbody>
-                  <template v-for="g in grupos" :key="'c' + g.key">
+                  <template v-for="m in dados.cobrancas_meses || []" :key="'c' + m.mes">
                     <tr class="border-b bg-muted/60 font-bold">
-                      <td class="px-2 py-1">{{ g.label }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternarCob(g.key)">{{ abertosCob[g.key] ? 'esconder' : 'mostrar' }}</button></td>
-                      <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(dados.por_plataforma[g.key]?.cobrancas?.[k])">
-                        {{ fmtCob(dados.por_plataforma[g.key]?.cobrancas?.[k]) }}<span v-if="k === 'penalidades' && dados.por_plataforma[g.key]?.cobrancas?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" title="linhas que ainda ninguém classificou">{{ dados.por_plataforma[g.key]?.cobrancas?.sem_dono }} sem dono</span>
+                      <td class="px-2 py-1">{{ tituloMes(m.mes) }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternarMesCob(m.mes)">{{ mesCobAberto(m.mes) ? 'esconder' : 'mostrar' }}</button></td>
+                      <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(m.empresa[k])">
+                        {{ fmtCob(m.empresa[k]) }}<span v-if="k === 'penalidades' && m.empresa.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" title="linhas que ainda ninguém classificou">{{ m.empresa.sem_dono }} sem dono</span>
                       </td>
                     </tr>
-                    <tr v-for="l in g.lojas" v-show="abertosCob[g.key]" :key="'c' + l.conta" class="border-b">
-                      <td class="px-2 py-1 pl-4 font-bold">{{ l.conta }}</td>
-                      <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(l.cobrancas?.[k])">
-                        {{ fmtCob(l.cobrancas?.[k]) }}<span v-if="k === 'penalidades' && l.cobrancas?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ l.cobrancas?.sem_dono }} sem dono</span>
-                      </td>
-                    </tr>
+                    <template v-for="g in grupos" :key="'c' + m.mes + g.key">
+                      <tr v-show="mesCobAberto(m.mes)" class="border-b font-semibold">
+                        <td class="px-2 py-1 pl-4">{{ g.label }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternarCob(m.mes + g.key)">{{ abertosCob[m.mes + g.key] ? 'esconder' : 'mostrar' }}</button></td>
+                        <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(m.por_plataforma[g.key]?.[k])">
+                          {{ fmtCob(m.por_plataforma[g.key]?.[k]) }}<span v-if="k === 'penalidades' && m.por_plataforma[g.key]?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" title="linhas que ainda ninguém classificou">{{ m.por_plataforma[g.key]?.sem_dono }} sem dono</span>
+                        </td>
+                      </tr>
+                      <tr v-for="l in g.lojas" v-show="mesCobAberto(m.mes) && abertosCob[m.mes + g.key]" :key="'c' + m.mes + l.conta" class="border-b">
+                        <td class="px-2 py-1 pl-7">{{ l.conta }}</td>
+                        <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(m.lojas[l.conta]?.[k])">
+                          {{ fmtCob(m.lojas[l.conta]?.[k]) }}<span v-if="k === 'penalidades' && m.lojas[l.conta]?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ m.lojas[l.conta]?.sem_dono }} sem dono</span>
+                        </td>
+                      </tr>
+                    </template>
                   </template>
-                  <tr class="bg-muted/40 font-bold">
-                    <td class="px-2 py-1">Empresa</td>
-                    <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(dados.empresa.cobrancas?.[k])">
-                      {{ fmtCob(dados.empresa.cobrancas?.[k]) }}<span v-if="k === 'penalidades' && dados.empresa.cobrancas?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ dados.empresa.cobrancas?.sem_dono }} sem dono</span>
-                    </td>
-                  </tr>
                 </tbody>
               </table>
             </div>
-            <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Vermelho = a plataforma tirou; verde = devolveu. Impostos (ICMS DIFAL da Shopee) e Publicidade (recarga de Ads) o robô classifica sozinho. Penalidades e ajustes ficam sem dono até alguém classificar no Extrato do dia — "N sem dono" é dinheiro que saiu e ninguém olhou. Fatura do ML = cobrada do saldo + segurada pra dívida, sem contar duas vezes.</div>
+            <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Vermelho = a plataforma tirou; verde = devolveu. Impostos (ICMS DIFAL da Shopee) e Publicidade (recarga de Ads) o robô classifica sozinho. Penalidades e ajustes ficam sem dono até alguém classificar no Extrato do dia — "N sem dono" é dinheiro que saiu e ninguém olhou. Fatura do ML = cobrada do saldo + segurada pra dívida, sem contar duas vezes.<template v-if="dados.inicio"> A conta começa em {{ fmtDia(dados.inicio + 'T12:00:00') }}.</template></div>
           </div>
         </div>
 

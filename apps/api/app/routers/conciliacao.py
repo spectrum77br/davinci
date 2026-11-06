@@ -28,7 +28,7 @@ import math
 import re
 import time
 from collections import Counter, defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
@@ -3972,6 +3972,40 @@ async def _resultado_mes(
     }
 
 
+def _somar_cobrancas(rows: Iterable[Sequence[Any]]) -> dict[str, Any]:
+    """Soma nos baldes do quadro. Cada linha: tipo, classificação, tem pedido, quantas,
+    crédito, débito e o que foi pago com o segurado."""
+    out: dict[str, Any] = {
+        "imposto": 0.0,
+        "publicidade": 0.0,
+        "penalidades": 0.0,
+        "penalidades_linhas": 0,
+        "sem_dono": 0,
+        "sem_dono_valor": 0.0,
+        "fatura_ml": 0.0,
+        "anteriores_entrou": 0.0,
+        "anteriores_saiu": 0.0,
+        "anteriores_linhas": 0,
+    }
+    for tipo, classificacao, com_pedido, n, c, d, pago_res in rows:
+        balde = _balde_cobranca(tipo, classificacao, com_pedido)
+        if balde is None:
+            continue
+        if balde == "anteriores":
+            out["anteriores_entrou"] += float(c or 0)
+            out["anteriores_saiu"] += float(d or 0)
+            out["anteriores_linhas"] += n
+            continue
+        saiu = _saiu_da_cobranca(tipo, c, d, pago_res)
+        out[balde] += saiu
+        if balde == "penalidades":
+            out["penalidades_linhas"] += n
+            if classificacao is None:
+                out["sem_dono"] += n
+                out["sem_dono_valor"] += saiu
+    return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in out.items()}
+
+
 async def _cobrancas_da_plataforma(
     session: AsyncSession, loja: ConciliacaoLoja, ini: date, fim: date
 ) -> dict[str, Any]:
@@ -4008,35 +4042,65 @@ async def _cobrancas_da_plataforma(
             .group_by(mov.tipo, mov.classificacao, mov.pedido_bling.isnot(None))
         )
     ).all()
-    out: dict[str, Any] = {
-        "imposto": 0.0,
-        "publicidade": 0.0,
-        "penalidades": 0.0,
-        "penalidades_linhas": 0,
-        "sem_dono": 0,
-        "sem_dono_valor": 0.0,
-        "fatura_ml": 0.0,
-        "anteriores_entrou": 0.0,
-        "anteriores_saiu": 0.0,
-        "anteriores_linhas": 0,
-    }
-    for tipo, classificacao, com_pedido, n, c, d, pago_res in rows:
-        balde = _balde_cobranca(tipo, classificacao, com_pedido)
-        if balde is None:
-            continue
-        if balde == "anteriores":
-            out["anteriores_entrou"] += float(c or 0)
-            out["anteriores_saiu"] += float(d or 0)
-            out["anteriores_linhas"] += n
-            continue
-        saiu = _saiu_da_cobranca(tipo, c, d, pago_res)
-        out[balde] += saiu
-        if balde == "penalidades":
-            out["penalidades_linhas"] += n
-            if classificacao is None:
-                out["sem_dono"] += n
-                out["sem_dono_valor"] += saiu
-    return {k: (round(v, 2) if isinstance(v, float) else v) for k, v in out.items()}
+    return _somar_cobrancas(rows)
+
+
+async def _cobrancas_por_mes(
+    session: AsyncSession, lojas: list[ConciliacaoLoja], ate: date
+) -> list[dict[str, Any]]:
+    """Quadro "Cobranças da plataforma" por mês (Cairo 06/11/2026: "por mês igual no de
+    cima"): os mesmos meses e o mesmo fim do bloco de dias, do mais novo pro mais velho.
+    Cada mês traz a empresa, o marketplace e a loja, pra tela abrir um dentro do outro."""
+    from sqlalchemy import Numeric, cast
+
+    por_integracao = {loja.integration_id: loja for loja in lojas}
+    if not por_integracao:
+        return []
+    mov = ConciliacaoMovimento
+    ini_dt, _ = _janela_dia(_primeiro_dia_do_resumo(lojas, ate))
+    _, fim_dt = _janela_dia(ate)
+    mes_local = func.to_char(func.timezone(_FUSO_SQL, mov.data), literal_column("'YYYY-MM'"))
+    com_pedido = mov.pedido_bling.isnot(None)
+    pago = cast(func.coalesce(mov.raw["_pago_com_reserva"].astext, "0"), Numeric(14, 2))
+    linhas: dict[tuple[str, Any], list[Sequence[Any]]] = defaultdict(list)
+    for iid, mes, *resto in (
+        await session.execute(
+            select(
+                mov.integration_id,
+                mes_local,
+                mov.tipo,
+                mov.classificacao,
+                com_pedido,
+                func.count(),
+                func.sum(mov.credito),
+                func.sum(mov.debito),
+                func.sum(pago),
+            )
+            .where(
+                mov.integration_id.in_(por_integracao),
+                mov.origem.in_(ORIGENS_EXTRATO),
+                mov.data >= ini_dt,
+                mov.data < fim_dt,
+            )
+            .group_by(mov.integration_id, mes_local, mov.tipo, mov.classificacao, com_pedido)
+        )
+    ).all():
+        linhas[mes, iid].append(resto)
+    meses: dict[str, dict[str, Any]] = {}
+    for (mes, iid), da_loja in linhas.items():
+        loja = por_integracao[iid]
+        plataforma = getattr(loja.platform, "value", str(loja.platform))
+        cobrancas = _somar_cobrancas(da_loja)
+        bloco = meses.setdefault(
+            mes, {"mes": mes, "empresa": {}, "por_plataforma": {}, "lojas": {}}
+        )
+        bloco["lojas"][loja.conta] = cobrancas
+        for soma in (bloco["empresa"], bloco["por_plataforma"].setdefault(plataforma, {})):
+            _soma_dict(soma, cobrancas)
+            for k, v in soma.items():
+                if isinstance(v, float):
+                    soma[k] = round(v, 2)
+    return [meses[m] for m in sorted(meses, reverse=True)]
 
 
 @router.get("/resumo")
@@ -4112,6 +4176,16 @@ def _obs_de_eventos(ev: dict[str, int]) -> list[str]:
     return [f"{ev[k]} {_ROTULO_EVENTO[k]}" for k, _c, _cond in _EVENTOS_DIA if ev.get(k)]
 
 
+def _primeiro_dia_do_resumo(lojas: list[ConciliacaoLoja], ate: date) -> date:
+    mes_inicial = ate.year * 12 + ate.month - _MESES_NO_RESUMO
+    de = date(mes_inicial // 12, mes_inicial % 12 + 1, 1)
+    if lojas:
+        # 28/10 (Vinicius: "deixa como se tivesse início dia 24/10"): antes do início de
+        # todas as lojas não há dia — a lista não mostra "todos fechados" vazios
+        de = max(de, min(loja.inicio for loja in lojas))
+    return de
+
+
 async def _resumo_dos_dias(
     session: AsyncSession, lojas: list[ConciliacaoLoja], ate: date
 ) -> list[dict[str, Any]]:
@@ -4119,12 +4193,7 @@ async def _resumo_dos_dias(
     quantas não tiveram movimento, quantas esperam o repasse da TikTok e quantas ainda
     têm pendência (com o nome e o motivo), mais a obs do que aconteceu no dia. Desde
     05/11 a tela junta por mês: vêm os meses inteiros (`_MESES_NO_RESUMO`)."""
-    mes_inicial = ate.year * 12 + ate.month - _MESES_NO_RESUMO
-    de = date(mes_inicial // 12, mes_inicial % 12 + 1, 1)
-    if lojas:
-        # 28/10 (Vinicius: "deixa como se tivesse início dia 24/10"): antes do início de
-        # todas as lojas não há dia — a lista não mostra "todos fechados" vazios
-        de = max(de, min(loja.inicio for loja in lojas))
+    de = _primeiro_dia_do_resumo(lojas, ate)
     ini_dt, _ = _janela_dia(de)
     _, fim_dt = _janela_dia(ate)
     agora = datetime.now(UTC)
@@ -4719,6 +4788,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         # a lista fica fixa nos últimos 15 dias até ontem (clicar num dia só troca a
         # tabela de cima; antes cada clique empurrava a lista pro passado — 16/10)
         "dias": await _resumo_dos_dias(session, lojas, max(dia, _ontem())),
+        "cobrancas_meses": await _cobrancas_por_mes(session, lojas, max(dia, _ontem())),
         "agir": agir,
         "por_plataforma": por_plataforma,
         "empresa": empresa,
