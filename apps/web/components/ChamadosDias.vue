@@ -22,13 +22,10 @@ const hoje = hojeISO()
 
 const meses = computed(() => porMes(props.dados.dias))
 
-// O mês de hoje abre sozinho; o resto começa fechado.
+// Todo mês começa fechado (Cairo 06/11: "sempre que clicar para abrir o painel ele vir assim").
 const abertos = ref<Record<string, boolean>>({})
-function aberto(mes: string) {
-  return abertos.value[mes] ?? hoje.slice(0, 7) === mes
-}
 function alternar(mes: string) {
-  abertos.value = { ...abertos.value, [mes]: !aberto(mes) }
+  abertos.value = { ...abertos.value, [mes]: !abertos.value[mes] }
 }
 
 function semana(dia: string): string {
@@ -124,7 +121,7 @@ function corValor(v: number): string {
         <tbody>
           <template v-for="m in meses" :key="m.mes">
             <tr class="h-[30px] border-b bg-muted/60 font-bold tabular-nums">
-              <td class="whitespace-nowrap px-2.5">{{ tituloMes(m.mes) }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternar(m.mes)">{{ aberto(m.mes) ? 'esconder' : 'mostrar' }}</button></td>
+              <td class="whitespace-nowrap px-2.5">{{ tituloMes(m.mes) }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternar(m.mes)">{{ abertos[m.mes] ? 'esconder' : 'mostrar' }}</button></td>
               <td class="border-l border-l-slate-300 px-2.5 text-right dark:border-l-slate-600">{{ m.dias[0]?.abertos }}</td>
               <td class="px-2.5 text-right text-blue-700 dark:text-blue-300">+{{ soma(m.dias, (d) => d.novos) }}</td>
               <td class="px-2.5 text-right text-emerald-700 dark:text-emerald-300">−{{ soma(m.dias, (d) => d.concluidos) }}</td>
@@ -141,7 +138,7 @@ function corValor(v: number): string {
             </tr>
             <tr
               v-for="d in m.dias"
-              v-show="aberto(m.mes)"
+              v-show="abertos[m.mes]"
               :key="d.dia"
               class="h-[30px] border-b tabular-nums"
               :class="[

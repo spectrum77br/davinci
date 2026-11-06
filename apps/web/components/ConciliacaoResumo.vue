@@ -154,14 +154,6 @@ const abertosCob = ref<Record<string, boolean>>({})
 function alternarCob(k: string) {
   abertosCob.value[k] = !abertosCob.value[k]
 }
-// Por mês (Cairo 06/11), igual ao bloco de dias: o mês do dia escolhido abre sozinho.
-const abertosMesCob = ref<Record<string, boolean>>({})
-function mesCobAberto(mes: string) {
-  return abertosMesCob.value[mes] ?? dados.value?.dia.slice(0, 7) === mes
-}
-function alternarMesCob(mes: string) {
-  abertosMesCob.value = { ...abertosMesCob.value, [mes]: !mesCobAberto(mes) }
-}
 const COB_COLS = ['imposto', 'publicidade', 'penalidades', 'fatura_ml'] as const
 function fmtCob(v: number | null | undefined) {
   if (v === null || v === undefined || Math.abs(v) < 0.005) return '—'
@@ -215,15 +207,12 @@ const abertos = ref<Record<string, boolean>>({})
 function alternar(key: string) {
   abertos.value = { ...abertos.value, [key]: !abertos.value[key] }
 }
-// Bloco de dias por mês (05/11, Vinicius): o mês do dia escolhido abre sozinho; o resto
-// começa fechado. O clique em "mostrar"/"esconder" vale até recarregar.
+// Bloco de dias por mês (05/11, Vinicius). Todo mês começa fechado, aqui e nas cobranças
+// (Cairo 06/11: "sempre que clicar para abrir o painel ele vir assim").
 const mesesDoResumo = computed(() => porMes(dados.value?.dias || []))
 const abertosMes = ref<Record<string, boolean>>({})
-function mesAberto(mes: string) {
-  return abertosMes.value[mes] ?? dados.value?.dia.slice(0, 7) === mes
-}
 function alternarMes(mes: string) {
-  abertosMes.value = { ...abertosMes.value, [mes]: !mesAberto(mes) }
+  abertosMes.value = { ...abertosMes.value, [mes]: !abertosMes.value[mes] }
 }
 function somaDosDias(dias: DiaResumo[], f: (d: DiaResumo) => number) {
   return dias.reduce((s, d) => s + f(d), 0)
@@ -547,7 +536,7 @@ onMounted(() => {
               <tbody>
                 <template v-for="m in mesesDoResumo" :key="m.mes">
                 <tr class="border-b bg-muted/60 font-bold">
-                  <td class="whitespace-nowrap px-2 py-1">{{ tituloMes(m.mes) }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternarMes(m.mes)">{{ mesAberto(m.mes) ? 'esconder' : 'mostrar' }}</button></td>
+                  <td class="whitespace-nowrap px-2 py-1">{{ tituloMes(m.mes) }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternarMes(m.mes)">{{ abertosMes[m.mes] ? 'esconder' : 'mostrar' }}</button></td>
                   <td class="px-2 py-1 text-right tabular-nums">{{ m.dias.length - diasComPendencia(m.dias) }} de {{ m.dias.length }} dias</td>
                   <td class="px-2 py-1 text-right tabular-nums">{{ somaDosDias(m.dias, (d) => d.sem_movimento) }}</td>
                   <td class="px-2 py-1 text-right tabular-nums">{{ somaDosDias(m.dias, (d) => d.aguardando_repasse) }}</td>
@@ -557,7 +546,7 @@ onMounted(() => {
                     <span v-else class="inline-block rounded bg-emerald-100 px-1.5 py-0.5 font-semibold text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300">todos fechados</span>
                   </td>
                 </tr>
-                <tr v-for="d in m.dias" v-show="mesAberto(m.mes)" :key="d.dia" class="cursor-pointer border-b hover:bg-muted/40" :class="d.dia === dados.dia && 'bg-amber-50 dark:bg-amber-950/20'" @click="escolherDia(d.dia)">
+                <tr v-for="d in m.dias" v-show="abertosMes[m.mes]" :key="d.dia" class="cursor-pointer border-b hover:bg-muted/40" :class="d.dia === dados.dia && 'bg-amber-50 dark:bg-amber-950/20'" @click="escolherDia(d.dia)">
                   <td class="whitespace-nowrap px-2 py-1 pl-4 font-bold">{{ fmtDia(d.dia + 'T12:00:00') }}<span v-if="d.dia === ontemISO()" class="font-normal text-muted-foreground"> (ontem)</span></td>
                   <td class="px-2 py-1 text-right tabular-nums">{{ d.fechados }}</td>
                   <td class="px-2 py-1 text-right tabular-nums">{{ d.sem_movimento }}</td>
@@ -597,19 +586,19 @@ onMounted(() => {
                 <tbody>
                   <template v-for="m in dados.cobrancas_meses || []" :key="'c' + m.mes">
                     <tr class="border-b bg-muted/60 font-bold">
-                      <td class="px-2 py-1">{{ tituloMes(m.mes) }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternarMesCob(m.mes)">{{ mesCobAberto(m.mes) ? 'esconder' : 'mostrar' }}</button></td>
+                      <td class="px-2 py-1">{{ tituloMes(m.mes) }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternarCob(m.mes)">{{ abertosCob[m.mes] ? 'esconder' : 'mostrar' }}</button></td>
                       <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(m.empresa[k])">
                         {{ fmtCob(m.empresa[k]) }}<span v-if="k === 'penalidades' && m.empresa.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" title="linhas que ainda ninguém classificou">{{ m.empresa.sem_dono }} sem dono</span>
                       </td>
                     </tr>
                     <template v-for="g in grupos" :key="'c' + m.mes + g.key">
-                      <tr v-show="mesCobAberto(m.mes)" class="border-b font-semibold">
+                      <tr v-show="abertosCob[m.mes]" class="border-b font-semibold">
                         <td class="px-2 py-1 pl-4">{{ g.label }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="alternarCob(m.mes + g.key)">{{ abertosCob[m.mes + g.key] ? 'esconder' : 'mostrar' }}</button></td>
                         <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(m.por_plataforma[g.key]?.[k])">
                           {{ fmtCob(m.por_plataforma[g.key]?.[k]) }}<span v-if="k === 'penalidades' && m.por_plataforma[g.key]?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300" title="linhas que ainda ninguém classificou">{{ m.por_plataforma[g.key]?.sem_dono }} sem dono</span>
                         </td>
                       </tr>
-                      <tr v-for="l in g.lojas" v-show="mesCobAberto(m.mes) && abertosCob[m.mes + g.key]" :key="'c' + m.mes + l.conta" class="border-b">
+                      <tr v-for="l in g.lojas" v-show="abertosCob[m.mes] && abertosCob[m.mes + g.key]" :key="'c' + m.mes + l.conta" class="border-b">
                         <td class="px-2 py-1 pl-7">{{ l.conta }}</td>
                         <td v-for="k in COB_COLS" :key="k" class="whitespace-nowrap px-2 py-1 text-right tabular-nums" :class="cobCls(m.lojas[l.conta]?.[k])">
                           {{ fmtCob(m.lojas[l.conta]?.[k]) }}<span v-if="k === 'penalidades' && m.lojas[l.conta]?.sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ m.lojas[l.conta]?.sem_dono }} sem dono</span>
