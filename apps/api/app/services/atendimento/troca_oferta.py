@@ -24,7 +24,9 @@ AS TRAVAS DA OFERTA vêm antes das do envio (nada sai; 409 `{code, detail}`):
   as do PEDIDO que a troca recusaria com certeza (`troca.travas_do_pedido`,
       com o código da troca): `plataforma_sem_conferencia` (só a Shopee na
       v1), `nf_emitida`, `em_fila_nf`, `etiqueta_gerada`, `rastreio`,
-      `pedido_saiu`, `pedido_em_dobro`, `prazo_vencido`;
+      `pedido_saiu`, `pedido_em_dobro`. Com o prazo de envio vencido (06/11/2026), a
+      Shopee ao vivo: `cancelado_na_plataforma`, `plataforma_status`,
+      `plataforma_indisponivel`;
   sem_conversa — o pedido não tem conversa no DaVinci (abrir a conversa
       pelo DaVinci fica fora da 4d); a conversa de E-MAIL da ponte não conta
       (`separa_email`, 13/10/2026: o pedido só com ela não tem conversa);
@@ -374,6 +376,14 @@ def _conferir_kit(sku_antigo: str, sku_novo: str) -> None:
 async def _conferir_pedido(session: AsyncSession, p: Any) -> None:
     """As travas do PEDIDO que a troca recusaria com certeza (`troca.travas_do_pedido`)."""
     falha = troca._primeira_falha(await troca.travas_do_pedido(session, p))
+    if falha is None and troca._prazo_vencido(p):
+        # O prazo não segura mais a pessoa (o dono, 06/11/2026), mas ele é quando a Shopee
+        # costuma cancelar, e o retrato do pedido pode estar velho: confere na hora para não
+        # oferecer a troca de um pedido morto. A troca confere de novo no clique.
+        try:
+            falha = troca._primeira_falha(await troca._shopee_ao_vivo(session, p))
+        except troca._Indisponivel as e:
+            raise OfertaRecusada(e.code, troca.TEXTOS[e.code]) from e
     if falha is not None:
         raise OfertaRecusada(str(falha["code"]), str(falha["texto"]))
 

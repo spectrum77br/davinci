@@ -976,6 +976,64 @@ async def test_travas_do_pedido_que_a_troca_recusaria(
     await _nada_saiu(db, c, chat)
 
 
+@pytest.mark.parametrize(
+    ("resposta", "code"),
+    [
+        ({"order_status": "CANCELLED"}, "cancelado_na_plataforma"),
+        ({"order_status": "SHIPPED"}, "plataforma_status"),
+        (None, "plataforma_indisponivel"),
+    ],
+)
+async def test_oferta_com_prazo_vencido_confere_a_shopee_ao_vivo(
+    db, client, auth_as, make_user, monkeypatch, envio, chat, resposta, code
+):
+    """O prazo não segura mais a pessoa (06/11/2026), mas pedido morto não recebe oferta."""
+    c = await _cenario(db, make_user, monkeypatch)
+    auth_as(c.adm)
+    await db.execute(
+        update(BlingOrder)
+        .where(BlingOrder.numero == NUMERO)
+        .values(marketplace_ship_deadline=AGORA - timedelta(days=5))
+    )
+    await db.commit()
+
+    class _Shopee:
+        async def get_order_detail_completo(self, _numero):
+            return resposta
+
+    async def _cliente(_session, _p):
+        return _Shopee()
+
+    monkeypatch.setattr(troca, "_cliente_shopee", _cliente)
+    r = await client.post(URL, json={"sku_novo": c.novo})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == code
+    await _nada_saiu(db, c, chat)
+
+
+async def test_oferta_com_prazo_vencido_sai_com_o_pedido_vivo_na_shopee(
+    db, client, auth_as, make_user, monkeypatch, envio, chat
+):
+    c = await _cenario(db, make_user, monkeypatch)
+    auth_as(c.adm)
+    await db.execute(
+        update(BlingOrder)
+        .where(BlingOrder.numero == NUMERO)
+        .values(marketplace_ship_deadline=AGORA - timedelta(days=5))
+    )
+    await db.commit()
+
+    class _Shopee:
+        async def get_order_detail_completo(self, _numero):
+            return {"order_status": "READY_TO_SHIP"}
+
+    async def _cliente(_session, _p):
+        return _Shopee()
+
+    monkeypatch.setattr(troca, "_cliente_shopee", _cliente)
+    r = await client.post(URL, json={"sku_novo": c.novo})
+    assert r.status_code == 200, r.text
+
+
 def test_kit_de_lotes_misturados_nao_tem_oferta():
     with pytest.raises(troca_oferta.OfertaRecusada) as e:
         troca_oferta._conferir_kit("dg057.ci+a001.sp", "dg057.sp+a001.sp")
