@@ -392,6 +392,22 @@ async function principal() {
     const caixas = [...grupo.matchAll(/data-email-grupo="([^"]+)"[^>]*>([\s\S]*?)<\/button>/g)].map((m) => [m[1], m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()])
     assert.deepEqual(caixas, [['sac', 'SAC 2 7'], ['admin', 'Admin 2']])
     assert.match(html, /data-stub-caixa="admin" data-total="2"/)
+    // A bolinha do site na linha dele (06/11/2026): a soma das caixas, seta fechada ou aberta.
+    const comNaoLidas = (sac, admin) => [{ ...SITES[0], grupos: { sac: { ...conta(97, 5), nao_lidas: sac }, admin: { ...conta(22), nao_lidas: admin } } }]
+    assert.equal(LJ.naoLidasDoSite(comNaoLidas(48, 1)[0]), 49)
+    assert.equal(LJ.naoLidasDoSite(comNaoLidas(0, 0)[0]), 0, 'no site vale a não lida, não o aguardando')
+    assert.equal(LJ.naoLidasDoSite(SITES[0]), 2, 'sem a não lida, o aguardando, como a caixa')
+    assert.equal(LJ.naoLidasDoSite(SITES[1]), 0)
+    assert.equal(LJ.naoLidasDoSite(null), 0)
+    const bolinha = (h) => (h.match(/title="(\d+) e-mail\(s\) não lido\(s\) nas caixas do site"\s+data-site-nao-lidas[^>]*>([^<]+)</) || []).slice(1)
+    assert.deepEqual(bolinha(await renderizarBarra({ ...base, sitesEmail: comNaoLidas(48, 1) })), ['49', '49'], 'seta fechada')
+    assert.deepEqual(bolinha(await renderizarBarra({ ...base, sitesEmail: comNaoLidas(48, 1), emailsAbertos: ['ext:site:charlots'] })), ['49', '49'], 'seta aberta')
+    assert.deepEqual(bolinha(await renderizarBarra({ ...base, sitesEmail: comNaoLidas(48, 1), recolhida: true })), ['49', '49'], 'barra recolhida')
+    assert.doesNotMatch(await renderizarBarra({ ...base, sitesEmail: comNaoLidas(0, 0) }), /data-site-nao-lidas/, 'sem não lida, sem bolinha')
+    assert.doesNotMatch(await renderizarBarra({ ...base, sitesEmail: comNaoLidas(48, 1), emails: null, numero: 'humano' }), /data-site-nao-lidas/, 'sem `emails`, sem bolinha')
+    assert.doesNotMatch(await renderizarBarra(base), /data-site-nao-lidas/, 'sem `sitesEmail`, sem bolinha')
+    // Só o site: a loja com e-mail esperando continua com o número dela.
+    assert.equal((await renderizarBarra({ ...base, sitesEmail: comNaoLidas(1, 0) })).match(/data-site-nao-lidas/g).length, 1)
     // Recolhida, na Caixa Humano (sem `emails`): nada.
     assert.doesNotMatch(await renderizarBarra({ ...base, sitesEmail: SITES, recolhida: true }), /data-ampliar-emails/)
     assert.doesNotMatch(await renderizarBarra({ ...base, emails: null, sitesEmail: SITES, numero: 'humano' }), /data-ampliar-emails/)
