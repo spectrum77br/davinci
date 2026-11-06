@@ -1157,6 +1157,10 @@ async def _retrato_ml(
     Carrinho com vários pedidos: itens de todos, total e valor pago somados,
     e o número mostrado é o do pack (é o que agrupa a compra). Com um pedido
     só, o número é o do pedido. O índice ganha uma linha por pedido.
+
+    Cada item leva o nº exato do pedido dele (`pedido`), `pedidos` traz os do carrinho e
+    `pack` o nº do carrinho quando o número mostrado é outro (o dono, 06/11/2026: "linkar
+    todos os pedidos exatos do ml com cada produto"; a busca da lista usa `pedidos`).
     """
     ordens, envio_id = await _pedidos_ml(cliente, numero, pack=pack)
     if not ordens:
@@ -1203,6 +1207,7 @@ async def _retrato_ml(
         item = _dict(ln.get("item"))
         cartao = cartoes.get(_texto(item.get("id")) or "") or {}
         linha_item = {
+            "pedido": ordem_id or None,
             "item_id": _texto(item.get("id")),
             "titulo": _texto(item.get("title")) or cartao.get("titulo"),
             "imagem": cartao.get("imagem"),
@@ -1218,9 +1223,13 @@ async def _retrato_ml(
     status_envio = (_texto(envio.get("status")) or "").lower() or None
     substatus = (_texto(envio.get("substatus")) or "").lower()
     enviado_em, concluido_em = _datas_ml(principal, envio, tem_envio=envio_id is not None)
+    mostrado = (_texto(principal.get("id")) or numero) if len(ordens) == 1 else numero
+    carrinho = _texto(principal.get("pack_id")) or (numero if pack else None)
     retrato = {
         "fonte": "ml",
-        "pedido": (_texto(principal.get("id")) or numero) if len(ordens) == 1 else numero,
+        "pedido": mostrado,
+        "pedidos": [i for o in ordens if (i := _texto(o.get("id")))],
+        "pack": carrinho if carrinho != mostrado else None,
         "status": status,
         "status_texto": STATUS_PEDIDO_ML.get(status or "", status),
         "criado_em": criados[0] if criados else None,

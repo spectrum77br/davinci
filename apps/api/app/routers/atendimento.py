@@ -2746,6 +2746,9 @@ async def _listar_marketplace(
                 # pack do Bling e do ML: a reclamação guarda a order e não aparecia).
                 AtendimentoConversa.dados["pack_id"].astext == termo_exato,
                 AtendimentoConversa.dados["order_id"].astext == termo_exato,
+                # Qualquer pedido do carrinho do ML: o chat guarda só o pack (o retrato traz
+                # os pedidos, `enriquecer._retrato_ml`).
+                AtendimentoConversa.dados.contains({"pedido_mkt": {"pedidos": [termo_exato]}}),
                 # Qualquer pedido do comprador (03/11/2026): o chat dele na
                 # loja, mesmo ligado a outro pedido (`_chat_do_comprador_do_pedido`).
                 _chat_do_comprador_do_pedido(termo_exato),

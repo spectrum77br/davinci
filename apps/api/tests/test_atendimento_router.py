@@ -1577,11 +1577,28 @@ async def test_busca_acha_a_reclamacao_do_ml_pelo_pack_e_pela_order(client, db, 
         comprador_nome="Comprador",
         dados={"pack_id": "2000015829180301", "order_id": "2000019302717656"},
     )
+    # O chat do carrinho guarda só o pack: os pedidos vêm no retrato.
+    chat, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal,
+        integration=integ,
+        plataforma="ml",
+        canal_nome="pos_venda",
+        externo_id="2000000000000001",
+        pedido_marketplace="2000000000000001",
+        comprador_nome="Comprador",
+        dados={
+            "pack_id": "2000000000000001",
+            "pedido_mkt": {"pedido": "2000000000000001", "pedidos": ["2000011", "2000022"]},
+        },
+    )
     await db.commit()
 
     for numero in ("2000015829180301", "2000019302717656"):
         assert _ids(await client.get(f"{URL}/conversas?filtro=todas&q={numero}")) == [
             str(conversa.id)
         ]
+    for numero in ("2000011", "2000022", "2000000000000001"):
+        assert _ids(await client.get(f"{URL}/conversas?filtro=todas&q={numero}")) == [str(chat.id)]
     assert _ids(await client.get(f"{URL}/conversas?filtro=todas&q=2000015829180302")) == []
 

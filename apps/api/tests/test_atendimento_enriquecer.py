@@ -1088,7 +1088,10 @@ async def test_retrato_ml_valores_envio_e_foto(db, make_user, relogio):
 
     r = await enriquecer.retrato_pedido(db, integ, f, "ml", ORDEM)
 
-    assert set(r) == CHAVES_RETRATO and set(r["logistica"]) == CHAVES_LOGISTICA
+    # O carrinho do ML (06/11/2026): `pedidos` e `pack` só existem neste retrato.
+    assert set(r) == CHAVES_RETRATO | {"pedidos", "pack"}
+    assert set(r["logistica"]) == CHAVES_LOGISTICA
+    assert (r["pedidos"], r["pack"]) == ([ORDEM], PACK)
     assert (r["fonte"], r["pedido"], r["status"], r["status_texto"]) == (
         "ml",
         ORDEM,
@@ -1101,6 +1104,7 @@ async def test_retrato_ml_valores_envio_e_foto(db, make_user, relogio):
     assert r["pago_em"] == "2026-09-27T16:00:30+00:00"
     (item,) = r["itens"]
     assert item == {
+        "pedido": ORDEM,
         "item_id": ITEM_ML,  # order_items[].item.id
         "titulo": "Fone Bluetooth Sem Fio Cancelamento de Ruído",
         "imagem": FOTO_ML_GRANDE,  # secure_thumbnail com -I → -O
@@ -1851,6 +1855,10 @@ async def test_ml_pack_com_varios_pedidos_junta_itens_e_valores(db, make_user):
 
     assert r["pedido"] == PACK  # o carrinho é mostrado pelo pack
     assert [i["sku"] for i in r["itens"]] == ["FONE-PT", "CAPA"]
+    # Cada produto com o nº exato do pedido dele (06/11/2026).
+    assert [i["pedido"] for i in r["itens"]] == [ORDEM, segunda]
+    assert r["pedidos"] == [ORDEM, segunda]
+    assert r["pack"] is None  # o número mostrado já é o do carrinho
     assert (r["total"], r["valor_pago"], r["frete"]) == (249.9, 274.8, 24.9)
     assert f.chamadas[:3] == [("pack", PACK), ("pedido", ORDEM), ("pedido", segunda)]
     assert f.contagem("envio") == 1  # um envio para o carrinho inteiro
