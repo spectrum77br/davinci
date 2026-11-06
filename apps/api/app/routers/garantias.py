@@ -18,6 +18,12 @@ Permissões (§6 — Cadastrar, Consultar, Registrar atendimento; e o CPF):
     garantia por produto, com o saldo e o gasto em reais) também, desde
     04/11/2026 (403 `so_admin` para os outros).
 
+Garantia × SAC (06/11/2026, "Painel de Garantia: alterações"): o prazo único do
+produto (Tabela de Preços → Produtos) e o caso do SAC do site. Confirmar e
+Encerrar o atendimento são de quem REGISTRA atendimento (`garantias_atendimento`
+edit), na garantia que a pessoa enxerga; o SAC sem pedido (o SAC do site não tem
+loja) só para quem tem escopo irrestrito.
+
 LGPD no transporte: a lista e a busca do vínculo são POST com o termo no
 CORPO (nome e CPF digitados não vão para o log de acesso do uvicorn/Caddy,
 que gravam a query); `mascarar_query_no_access_log` cobre o resto. A busca
@@ -36,6 +42,7 @@ import re
 from collections import Counter
 from datetime import UTC, datetime, time, timedelta
 from typing import Annotated
+from urllib.parse import quote
 from uuid import UUID
 
 import structlog
@@ -68,9 +75,10 @@ from app.models.atendimento import (
     AtendimentoPedidoComprador,
 )
 from app.models.devolution import Devolution
-from app.models.enums import IntegrationPlatform
-from app.models.garantia import GarantiaConversa, GarantiaPendencia
-from app.models.marketplace_financial import MarketplaceOrderFreightReconciliation
+from app.models.garantia import GarantiaConversa, GarantiaPendencia, GarantiaSac
+from app.models.mail import MailAttachment
+from app.models.mail_atendimento import MailMessageMeta
+from app.models.pricing import StoreInfo
 from app.schemas.garantia import (
     AbaOut,
     AbasOut,
@@ -103,15 +111,27 @@ from app.schemas.garantia import (
     PrazosPreviaOut,
     RegrasOut,
     ResumoOut,
+    SacAnexoOut,
+    SacCampoOut,
+    SacConfirmar,
+    SacDaLinhaOut,
+    SacDetalheOut,
+    SacOut,
+    SacSecaoOut,
+    SacSemPedidoListaOut,
+    SacSemPedidoOut,
+    SacVincular,
     SituacaoConversaOut,
     VinculoOut,
 )
+from app.security.cipher import decrypt_bytes, decrypt_json
 from app.services import garantia as svc
-from app.services import garantia_pedido, garantia_sac
+from app.services import garantia_pedido, garantia_prazo, garantia_sac
 from app.services.atendimento import acesso, cartoes_plataforma, separa_email
 from app.services.atendimento.contexto import _chaves_do_pedido
 from app.services.atendimento.escopo import escopo_do_atendimento
 from app.services.mail_atendimento import administracao as mail_admin
+from app.services.mail_atendimento.constantes import ESTADOS_COM_TEXTO
 from app.services.rate_limit import RateLimitError, sliding_window_check
 
 logger = structlog.get_logger()
@@ -237,24 +257,29 @@ def _linha(
     situacao_bling: str | None = None,
     conversa: dict | None = None,
 ) -> GarantiaLinhaOut:
-    st = svc.status_da(g, dia)
+    """A linha da lista. O status é o do PAINEL (06/11/2026, o prazo único):
+    aguardando entrega, ativa, expirada ou "Prazo não cadastrado"."""
+    st = svc.status_painel_da(g, dia)
     sem_data = svc.entregue_sem_data(g.data_inicio, situacao_bling)
     conversa = conversa or {}
     return GarantiaLinhaOut(
         id=g.id,
         cliente_nome=g.cliente_nome,
+        nome=svc.nome_sem_apelido(g.cliente_nome),
+        garantia_meses=g.prazo_meses,
+        fim_garantia=g.fim_garantia,
         cpf_mascarado=svc.mascarar_cpf(g.cpf),
         nf_numero=g.nf_numero,
         nf_serie=g.nf_serie,
         pedido_bling=g.pedido_bling,
         pedido_marketplace=g.pedido_marketplace,
         plataforma=g.plataforma,
-        conta=g.conta,
+        conta=conversa.pop("conta", None) or g.conta,
         data_inicio=g.data_inicio,
         fim_hardware=g.fim_hardware,
         fim_software=g.fim_software,
         status=st,
-        status_rotulo=svc.rotulo_do_status(st, sem_data),
+        status_rotulo=svc.rotulo_do_painel(st, sem_data),
         entregue_sem_data=sem_data,
         atendimentos=n_atend,
         criado_em=g.criado_em,
@@ -327,10 +352,68 @@ async def _conversas_das(
     return saida
 
 
-async def _situacoes(session: AsyncSession, garantias: list[Garantia]) -> dict[str, str]:
-    """A situação no Bling só das que estão sem data (as outras não precisam)."""
-    return await svc.situacoes_dos_pedidos(
-        session, [g.pedido_bling for g in garantias if g.data_inicio is None]
+async def _situacoes(
+    session: AsyncSession, garantias: list[Garantia]
+) -> dict[str, tuple[str, str]]:
+    """A situação do pedido no Bling (o id e o nome) de TODAS as garantias:
+    a coluna "Status do pedido" (06/11/2026) e o "Entregue — sem data"."""
+    return await svc.situacoes_com_nome(session, [g.pedido_bling for g in garantias])
+
+
+async def _contas_ao_vivo(session: AsyncSession, garantias: list[Garantia]) -> dict[str, str]:
+    """loja do Bling → o nome da conta HOJE em `store_info` (06/11/2026: as
+    contas renomeadas — Jlas → Atlas, Kia → Fiore — aparecem com o nome novo;
+    sem a loja, fica o nome gravado na garantia). A loja ativa vence a
+    arquivada."""
+    lojas = sorted({g.loja for g in garantias if g.loja})
+    if not lojas:
+        return {}
+    saida: dict[str, str] = {}
+    for loja, conta in (
+        await session.execute(
+            select(StoreInfo.bling_store_id, StoreInfo.account_name)
+            .where(StoreInfo.bling_store_id.in_(lojas), StoreInfo.account_name.is_not(None))
+            .order_by(StoreInfo.bling_store_id, StoreInfo.archived_at.desc().nulls_first())
+        )
+    ).all():
+        if (conta or "").strip():
+            saida.setdefault(str(loja), conta.strip())
+    return saida
+
+
+async def _sacs_das(session: AsyncSession, ids: list[int]) -> dict[int, SacDaLinhaOut]:
+    """O caso do SAC de cada garantia (06/11/2026): o confirmado e aberto mais
+    antigo (o da aba Atendimento); senão o aberto; senão o encerrado mais
+    recente (`garantia_sac.ordem_dos_casos`)."""
+    if not ids:
+        return {}
+    s = GarantiaSac
+    casos = list(
+        (
+            await session.execute(
+                select(s)
+                .where(s.garantia_id.in_(ids))
+                .order_by(s.garantia_id, *garantia_sac.ordem_dos_casos(s))
+            )
+        ).scalars()
+    )
+    pessoas = await _pessoas(session, {k.confirmado_por for k in casos})
+    saida: dict[int, SacDaLinhaOut] = {}
+    for k in casos:
+        if k.garantia_id not in saida:
+            saida[k.garantia_id] = _sac_da_linha(k, pessoas)
+    return saida
+
+
+def _sac_da_linha(k: GarantiaSac, pessoas: dict[UUID, User]) -> SacDaLinhaOut:
+    return SacDaLinhaOut(
+        id=k.id,
+        protocolo=k.protocolo,
+        recebido_em=k.recebido_em,
+        confirmado_em=k.confirmado_em,
+        confirmado_por=_ref(pessoas, k.confirmado_por) if k.confirmado_em else None,
+        encerrado_em=k.encerrado_em,
+        encerrado_motivo=k.encerrado_motivo,
     )
 
 
@@ -354,6 +437,27 @@ async def _linhas(
     situacoes = await _situacoes(session, garantias)
     conversas = await _conversas_das(session, [g.id for g in garantias], user)
     trechos = await _trechos_do_pedido(session, garantias, user)
+    contas = await _contas_ao_vivo(session, garantias)
+    sacs = await _sacs_das(session, [g.id for g in garantias])
+    # O produto pelo SKU (06/11/2026): o nome da linha da Tabela de Preços;
+    # fora dela, a descrição do item principal (com o alerta na tela).
+    tabela = mapa.tabela if mapa is not None else await garantia_resumo._tabela_de_precos(session)
+    nomes_da_tabela = {pid: nome for pid, nome, _bases in tabela.values()}
+
+    def do_produto(g: Garantia) -> dict:
+        item = garantia_resumo.item_principal(g.itens) or {}
+        chave = (
+            mapa.linha(g)
+            if mapa is not None
+            else garantia_resumo._linha_do_sku(item.get("sku"), tabela)
+        )
+        if chave.startswith("tabela:") and (nome := nomes_da_tabela.get(chave.split(":", 1)[1])):
+            return {"produto_nome": nome, "produto_na_tabela": True}
+        return {
+            "produto_nome": garantia_resumo.nome_do_produto(item.get("descricao")) or None,
+            "produto_na_tabela": False,
+        }
+
     # O aparelho (30/10/2026): o selo "No técnico", "Consertado", "Perdido",
     # "Reembolso ao cliente", "Devolução a caminho"; os reais (o gasto da tela
     # Reembolso, o mesmo do Resumo) só para admin. Só a tela de Garantias
@@ -398,12 +502,16 @@ async def _linhas(
             g,
             contagem.get(g.id, 0),
             dia,
-            situacoes.get(g.pedido_bling),
+            (situacoes.get(g.pedido_bling) or (None, None))[0],
             {
                 **(conversas.get(g.id) or {}),
                 "pedido_trecho": trechos.get(g.id),
                 **do_aparelho(g),
                 **das_partes(g),
+                **do_produto(g),
+                "status_pedido": (situacoes.get(g.pedido_bling) or (None, None))[1],
+                "conta": contas.get(g.loja or ""),
+                "sac": sacs.get(g.id),
             },
         )
         for g in garantias
@@ -582,8 +690,7 @@ async def _detalhe(
     pessoas = await _pessoas(session, {g.criado_por, g.atualizado_por})
     ve_cpf = _ve_cpf(user)
     completo = revelar_cpf and ve_cpf
-    situacoes = await _situacoes(session, [g])
-    base = _linha(g, len(atend), dia, situacoes.get(g.pedido_bling)).model_dump()
+    base = (await _linhas(session, [g], dia, user))[0].model_dump()
     return GarantiaSalvaOut(
         **base,
         cpf=svc.formatar_cpf(g.cpf) if completo else svc.mascarar_cpf(g.cpf),
@@ -633,10 +740,7 @@ _RX_NUMERO_ML = re.compile(r"2000\d{12}")
 def _pedidos_do_pack(termo: str):
     """Os pedidos do ML de um pack (04/11/2026: o SAC procura pelo nº que o ML
     mostra, e o Bling guarda ora o pack, ora o pedido)."""
-    r = MarketplaceOrderFreightReconciliation
-    return select(r.external_order_id).where(
-        r.platform == IntegrationPlatform.ML, r.pack_id == termo
-    )
+    return svc.pedidos_do_pack(termo)
 
 
 def _filtro_busca(termo: str | None):
@@ -671,27 +775,45 @@ def _entre(ids) -> object:
     return Garantia.id == any_(literal(sorted(ids), ARRAY(Integer)))
 
 
+def _acionada():
+    """A garantia com o SAC confirmado (encerrado ou não): "Garantia acionada"."""
+    return (
+        select(GarantiaSac.id)
+        .where(GarantiaSac.garantia_id == Garantia.id, GarantiaSac.confirmado_em.is_not(None))
+        .exists()
+    )
+
+
+def _sac_confirmado_no_mes(dia):
+    """As garantias com caso do SAC confirmado no mês (em São Paulo)."""
+    ini, fim = svc.mes_atual(dia)
+    return Garantia.id.in_(
+        select(GarantiaSac.garantia_id).where(
+            GarantiaSac.confirmado_em >= ini, GarantiaSac.confirmado_em < fim
+        )
+    )
+
+
 async def _indicadores(session: AsyncSession, escopo, dia, do_departamento=None) -> IndicadoresOut:
-    """Os cartões do topo contam os PEDIDOS de garantia (28/10/2026); `vendidas`
-    = todas as vendas com garantia que a pessoa enxerga. Com a pílula
-    (04/11/2026, `do_departamento` = a condição dela), só as do departamento:
-    os cartões e a linha embaixo deles batem com o "Garantia (N)" da aba e com
-    a Tabela que o cartão filtra. Os filtros da barra continuam fora."""
+    """Os cartões do topo (06/11/2026): Ativas · Vence em 30 dias · Sem prazo
+    cadastrado · Atendimentos no mês (os casos do SAC CONFIRMADOS no mês), mais
+    as acionadas e a linha embaixo. A base são todas as vendas vivas que a
+    pessoa enxerga (não mais só quem pediu). Com a pílula (04/11/2026,
+    `do_departamento` = a condição dela), só as do departamento: os cartões e
+    a linha embaixo deles batem com o "Garantia (N)" da aba. Os filtros da
+    barra continuam fora."""
     vivas = [escopo] if escopo is not None else []
     vivas.append(Garantia.descartada_em.is_(None))
     if do_departamento is not None:
         vivas.append(do_departamento)
-    vendidas = (
-        await session.execute(select(func.count()).select_from(Garantia).where(*vivas))
-    ).scalar_one()
-    base = [*vivas, garantia_pedido.filtro_pedido()]
     contar = {
         "ativas": svc.filtro_status(svc.STATUS_ATIVA, dia),
-        "somente_software": svc.filtro_status(svc.STATUS_SOMENTE_SOFTWARE, dia),
-        "hw_vence_30d": svc.filtro_status("hw_vence_30d", dia),
+        "vence_30d": svc.filtro_status("vence_30d", dia),
+        "sem_prazo": svc.filtro_status(svc.STATUS_SEM_PRAZO, dia),
         "aguardando_entrega": svc.filtro_status(svc.STATUS_AGUARDANDO, dia),
         "entregue_sem_data": svc.filtro_status("entregue_sem_data", dia),
         "expiradas": svc.filtro_status(svc.STATUS_EXPIRADA, dia),
+        "acionadas": _acionada(),
     }
     linha = (
         await session.execute(
@@ -700,32 +822,29 @@ async def _indicadores(session: AsyncSession, escopo, dia, do_departamento=None)
                 *[func.count().filter(f).label(k) for k, f in contar.items()],
             )
             .select_from(Garantia)
-            .where(*base)
+            .where(*vivas)
         )
     ).one()
     ini, fim = svc.mes_atual(dia)
     q = (
         select(func.count())
-        .select_from(GarantiaAtendimento)
-        .join(Garantia, Garantia.id == GarantiaAtendimento.garantia_id)
-        .where(
-            GarantiaAtendimento.data_atendimento >= ini,
-            GarantiaAtendimento.data_atendimento < fim,
-            *base,
-        )
+        .select_from(GarantiaSac)
+        .join(Garantia, Garantia.id == GarantiaSac.garantia_id)
+        .where(GarantiaSac.confirmado_em >= ini, GarantiaSac.confirmado_em < fim, *vivas)
     )
     return IndicadoresOut(
         **{k: getattr(linha, k) for k in contar},
         total=linha.total,
-        vendidas=vendidas,
+        vendidas=linha.total,
         atendimentos_no_mes=(await session.execute(q)).scalar_one(),
     )
 
 
 async def _abas(session: AsyncSession, escopo, mapa, em_aberto: dict) -> AbasOut:
     """As pílulas e as abas (04/11/2026): por departamento, todas as garantias
-    vivas que a pessoa enxerga e as em atendimento agora (`em_aberto`, já do
-    escopo dela) — sem os filtros da barra, como os cartões."""
+    vivas que a pessoa enxerga e os casos em atendimento agora (`em_aberto` =
+    os casos do SAC confirmados e abertos, já do escopo dela) — sem os filtros
+    da barra, como os cartões."""
     vivas = [Garantia.descartada_em.is_(None)]
     if escopo is not None:
         vivas.append(escopo)
@@ -938,15 +1057,8 @@ def _filtros_do_painel(body: ListaFiltro, escopo, dia) -> list:
                 fim = datetime.combine(ate + timedelta(days=1), time(), svc.SAO_PAULO)
                 filtros.append(Garantia.criado_em < fim)
     if body.com_atendimento_no_mes:
-        ini, fim = svc.mes_atual(dia)
-        filtros.append(
-            Garantia.id.in_(
-                select(GarantiaAtendimento.garantia_id).where(
-                    GarantiaAtendimento.data_atendimento >= ini,
-                    GarantiaAtendimento.data_atendimento < fim,
-                )
-            )
-        )
+        # O cartão "Atendimentos no mês" (06/11/2026): o SAC confirmado no mês.
+        filtros.append(_sac_confirmado_no_mes(dia))
     return filtros
 
 
@@ -1043,10 +1155,12 @@ async def listar(
     do_pedido = [] if linha_do_resumo else _filtros_do_pedido(body)
     if (f := _filtro_busca(body.busca)) is not None:
         filtros.append(f)
-    elif body.mostrar == "pedidos" or do_pedido:
-        # O Painel é dos PEDIDOS de garantia (28/10/2026); a busca acha todas
-        # (o cliente que liga e ainda não tem pedido).
+    elif do_pedido:
+        # O período pela data do PEDIDO de garantia: só quem pediu. Desde
+        # 06/11/2026 a lista mostra todas as vendas com nota por padrão.
         filtros.append(garantia_pedido.filtro_pedido())
+    if body.mostrar == "acionada":
+        filtros.append(_acionada())
     filtros.extend(_vendidas_do_periodo(body) if linha_do_resumo else do_pedido)
     if body.com_conversa:
         filtros.append(
@@ -1062,15 +1176,16 @@ async def listar(
         filtros.append(do_departamento)
     if body.produto:
         filtros.append(_entre(mapa.ids_da_linha(body.produto)))
-    # Quem está em atendimento agora, entre as que a pessoa enxerga (as abas
-    # contam; a aba Atendimento lista; a linha leva o selo e o aparelho).
+    # Os casos em atendimento agora (o SAC confirmado e não encerrado), entre
+    # as que a pessoa enxerga (as abas contam; a aba Atendimento lista, o mais
+    # antigo primeiro; a linha leva o selo e o aparelho).
     vivas = [escopo] if escopo is not None else []
     leitura = await garantia_atendimento.em_atendimento(session, vivas, dia, tabela=mapa.tabela)
-    em_aberto = leitura.em_aberto
+    casos = leitura.casos
     if body.em_atendimento:
-        filtros.append(_entre(em_aberto))
+        filtros.append(_entre(casos))
         todas = list((await session.execute(select(Garantia).where(*filtros))).scalars())
-        todas.sort(key=lambda g: garantia_atendimento.urgencia(em_aberto[g.id], g.id))
+        todas.sort(key=lambda g: (casos[g.id].recebido_em, casos[g.id].sac_id, g.id))
         total = len(todas)
         garantias = todas[body.offset : body.offset + body.limite]
     else:
@@ -1109,12 +1224,25 @@ async def listar(
         total=total,
         indicadores=await _indicadores(session, escopo, dia, do_departamento),
         hoje=dia,
-        abas=await _abas(session, escopo, mapa, em_aberto),
+        abas=await _abas(session, escopo, mapa, casos),
         pedido_sem_garantia=sem_garantia,
+        sac_sem_pedido=await _contar_sac_sem_pedido(session, scope),
     )
     if cpf:
         await _registrar_busca_por_cpf(session, user, cpf, escopo, "busca na lista")
     return resposta
+
+
+async def _contar_sac_sem_pedido(session: AsyncSession, scope: TeamScope) -> int:
+    """Os casos do SAC sem garantia ligada — só para quem tem escopo irrestrito
+    (o SAC do site não tem loja: quem é de equipe não vê nenhum)."""
+    if not scope.unrestricted:
+        return 0
+    return (
+        await session.execute(
+            select(func.count()).select_from(GarantiaSac).where(GarantiaSac.garantia_id.is_(None))
+        )
+    ).scalar_one()
 
 
 @router.get("/regras", response_model=RegrasOut)
@@ -1131,7 +1259,8 @@ async def regras(_u: Annotated[User, Depends(_consultar_ou_registrar)]) -> Regra
         recalcular_quando_entrega_mudar=svc.RECALCULAR_QUANDO_ENTREGA_MUDAR,
         dias_alerta_hardware=svc.DIAS_ALERTA_HARDWARE,
         dias_pausa_atendimento=svc.DIAS_PAUSA_NOVO_ATENDIMENTO,
-        status=svc.STATUS_ROTULOS,
+        # O status do painel (06/11/2026, o prazo único por produto).
+        status=svc.STATUS_PAINEL_ROTULOS,
         coberturas=svc.COBERTURA_ROTULOS,
         origens_entrega=svc.ORIGEM_ROTULOS,
     )
@@ -1153,7 +1282,9 @@ async def pedido_para_cadastro(
     dia = svc.hoje()
     inicio = entrega.dia if entrega else None
     fim_hw, fim_sw = svc.calcular_prazos(inicio) if inicio else (None, None)
-    st = svc.status_em(inicio, fim_hw, fim_sw, dia)
+    # O status da prévia é o do painel (o prazo do produto na Tabela de Preços).
+    prazo = await garantia_prazo.prazo_dos_itens(session, pedido.itens, pedido.data)
+    st = svc.status_painel(inicio, prazo, svc.fim_da_garantia(inicio, prazo), dia)
     sem_data = svc.entregue_sem_data(inicio, pedido.situacao_id)
     nome, nome_origem = pedido.nome
     cpf = pedido.cpf
@@ -1187,7 +1318,7 @@ async def pedido_para_cadastro(
             fim_hardware=fim_hw,
             fim_software=fim_sw,
             status=st,
-            status_rotulo=svc.rotulo_do_status(st, sem_data),
+            status_rotulo=svc.rotulo_do_painel(st, sem_data),
             entregue_sem_data=sem_data,
         ),
         notas=[_nota_out(n) for n in pedido.notas],
@@ -1352,6 +1483,8 @@ async def cadastrar(
         # Duas pessoas cadastrando a mesma NF ao mesmo tempo.
         await session.rollback()
         raise _erro(409, "garantia_duplicada", "nf_numero") from e
+    # O prazo do produto na Tabela de Preços (06/11/2026): nasce com ele.
+    await garantia_prazo.aplicar_prazos(session, ids=[g.id], registrar=False)
     svc.registrar_log(
         session,
         g.id,
@@ -1439,6 +1572,232 @@ async def _outras_do_pedido(session: AsyncSession, pedido_bling: str, ignorar_id
             .where(Garantia.pedido_bling == pedido_bling, Garantia.id != ignorar_id)
         )
     ).scalar_one()
+
+
+# ── O caso do SAC (06/11/2026) ──────────────────────────────────────────────
+# Especificação "Painel de Garantia: alterações": a coluna Atendimento mostra o
+# protocolo, a data e o botão Confirmar; confirmado, "Garantia acionada" e o caso
+# entra na aba Atendimento até encerrar. "Nenhum e-mail é enviado ao cliente
+# nesse clique." O SAC que o robô não ligou fica em "SAC sem pedido".
+
+
+async def _caso_visivel(
+    session: AsyncSession, sac_id: int, user: User, *, travar: bool = False
+) -> tuple[GarantiaSac, Garantia | None]:
+    """O caso e a garantia dele — a garantia tem de estar no escopo da pessoa;
+    o caso sem garantia, só para quem tem escopo irrestrito. Fora disso, 404
+    (não diz que o caso existe)."""
+    caso = await session.get(GarantiaSac, sac_id, with_for_update=travar)
+    if caso is None:
+        raise _erro(404, "sac_nao_encontrado")
+    if caso.garantia_id is None:
+        if not (await escopo_do_atendimento(session, user)).unrestricted:
+            raise _erro(404, "sac_nao_encontrado")
+        return caso, None
+    try:
+        g = await _garantia_visivel(session, caso.garantia_id, user, travar=travar)
+    except HTTPException as e:
+        raise _erro(404, "sac_nao_encontrado") from e
+    return caso, g
+
+
+async def _sac_out(session: AsyncSession, caso: GarantiaSac) -> SacOut:
+    pessoas = await _pessoas(session, {caso.confirmado_por, caso.encerrado_por})
+    return SacOut(
+        **_sac_da_linha(caso, pessoas).model_dump(),
+        garantia_id=caso.garantia_id,
+        conversa_id=caso.conversa_id,
+        vinculo=caso.vinculo,
+        encerrado_por=_ref(pessoas, caso.encerrado_por),
+    )
+
+
+@router.get("/sac/sem-pedido", response_model=SacSemPedidoListaOut)
+async def sac_sem_pedido(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_consultar_ou_registrar)],
+) -> SacSemPedidoListaOut:
+    """O "SAC sem pedido": o formulário que o robô não ligou a nenhuma
+    garantia (pedido, NF e CPF + produto não acharam uma só — inclusive a
+    compra em outro vendedor). Só para quem tem escopo irrestrito: o SAC do
+    site não tem loja. Sem CPF."""
+    if not (await escopo_do_atendimento(session, user)).unrestricted:
+        return SacSemPedidoListaOut(itens=[], total=0)
+    sem = GarantiaSac.garantia_id.is_(None)
+    total = (
+        await session.execute(select(func.count()).select_from(GarantiaSac).where(sem))
+    ).scalar_one()
+    casos = (
+        await session.execute(
+            select(GarantiaSac)
+            .where(sem)
+            .order_by(GarantiaSac.recebido_em.desc(), GarantiaSac.id.desc())
+            .limit(200)
+        )
+    ).scalars()
+    itens = []
+    for k in casos:
+        c = k.campos if isinstance(k.campos, dict) else {}
+        itens.append(
+            SacSemPedidoOut(
+                id=k.id,
+                protocolo=k.protocolo,
+                recebido_em=k.recebido_em,
+                nome=c.get("nome"),
+                pedido_citado=c.get("pedido"),
+                nota_fiscal=c.get("nota_fiscal"),
+                modelo=c.get("modelo"),
+                local_compra=c.get("local_compra"),
+                loja_vendedor=c.get("loja_vendedor"),
+            )
+        )
+    return SacSemPedidoListaOut(itens=itens, total=total)
+
+
+@router.post("/sac/{sac_id}/confirmar", response_model=SacOut)
+async def confirmar_sac(
+    sac_id: int,
+    body: SacConfirmar,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_registrar)],
+) -> SacOut:
+    """Confirmar atendimento: a garantia vira "Garantia acionada" e o caso entra
+    na aba Atendimento; o log guarda quem confirmou e quando. Com a garantia
+    vencida, a tela avisa antes (409 `garantia_vencida`) e repete com
+    `ciente_vencida`. Não manda e-mail. Clicar de novo não muda nada."""
+    caso, g = await _caso_visivel(session, sac_id, user, travar=True)
+    if g is None:
+        raise _erro(409, "sac_sem_garantia")
+    if caso.confirmado_em is not None:
+        return await _sac_out(session, caso)
+    dia = svc.hoje()
+    vencida = g.fim_garantia is not None and not svc.coberto(g.fim_garantia, dia)
+    if vencida and not body.ciente_vencida:
+        raise _erro(409, "garantia_vencida", fim_garantia=g.fim_garantia.isoformat())
+    agora = datetime.now(UTC)
+    caso.confirmado_em = agora
+    caso.confirmado_por = user.id
+    # O SAC confirmado é pedido de garantia (o Resumo conta em "pediram").
+    if g.solicitada_em is None:
+        g.solicitada_em = caso.recebido_em
+        g.solicitacao_origem = garantia_pedido.ORIGEM_SAC
+        g.solicitacao_ref = caso.protocolo[:64]
+    g.nao_solicitada_em = None
+    g.nao_solicitada_por = None
+    # Confirmou ciente da garantia vencida: o fim que a tela avisou fica no log.
+    svc.registrar_log(
+        session,
+        g.id,
+        "confirmou_atendimento",
+        user,
+        campo="garantia_vencida" if vencida else None,
+        novo=svc._br(g.fim_garantia) if vencida else None,
+        detalhe=caso.protocolo,
+    )
+    await session.commit()
+    return await _sac_out(session, caso)
+
+
+@router.post("/sac/{sac_id}/encerrar", response_model=SacOut)
+async def encerrar_sac(
+    sac_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_registrar)],
+) -> SacOut:
+    """Encerrar atendimento: o caso sai da aba Atendimento, o tempo em aberto
+    para e o log registra quem encerrou e quando. Só o caso confirmado."""
+    caso, g = await _caso_visivel(session, sac_id, user, travar=True)
+    if caso.confirmado_em is None or g is None:
+        raise _erro(409, "sac_nao_confirmado")
+    if caso.encerrado_em is not None:
+        return await _sac_out(session, caso)
+    caso.encerrado_em = datetime.now(UTC)
+    caso.encerrado_por = user.id
+    caso.encerrado_motivo = "pessoa"
+    svc.registrar_log(session, g.id, "encerrou_atendimento", user, detalhe=caso.protocolo)
+    await session.commit()
+    return await _sac_out(session, caso)
+
+
+@router.post("/sac/{sac_id}/vincular", response_model=SacOut)
+async def vincular_sac(
+    sac_id: int,
+    body: SacVincular,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_registrar)],
+) -> SacOut:
+    """O SAC sem pedido ligado à mão (a busca da tela escolhe a garantia). Só
+    quem tem escopo irrestrito (o SAC do site não tem loja), na garantia que
+    enxerga. O caso já confirmado em outra garantia não muda (409)."""
+    if not (await escopo_do_atendimento(session, user)).unrestricted:
+        raise _erro(404, "sac_nao_encontrado")
+    caso = await session.get(GarantiaSac, sac_id, with_for_update=True)
+    if caso is None:
+        raise _erro(404, "sac_nao_encontrado")
+    g = await _garantia_visivel(session, body.garantia_id, user)
+    if g.descartada_em is not None:
+        raise _erro(404, "garantia_nao_encontrada")
+    if caso.garantia_id == g.id:
+        return await _sac_out(session, caso)
+    if caso.confirmado_em is not None:
+        raise _erro(409, "sac_ja_confirmado")
+    # Outra pessoa escreveu com o protocolo (o alerta da ponte): a conversa não
+    # é só do cliente do formulário — não vai para o histórico de uma garantia
+    # (revisão de 06/11/2026; a tela mostra a frase).
+    conv = await session.get(AtendimentoConversa, caso.conversa_id)
+    if conv is not None and _com_outra_pessoa_no_sac(conv):
+        raise _erro(409, "sac_outra_pessoa")
+    if caso.garantia_id is not None:
+        await garantia_sac.desligar_conversa(session, caso)
+    await garantia_sac.ligar_conversa(session, caso, g.id, "manual", ator=user)
+    await session.commit()
+    return await _sac_out(session, caso)
+
+
+@router.get("/sac/{sac_id}/anexos/{attachment_id}")
+async def anexo_do_sac(
+    sac_id: int,
+    attachment_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_consultar_ou_registrar)],
+) -> Response:
+    """Um arquivo do e-mail do caso (as fotos, o vídeo e o comprovante do
+    formulário), aberto no próprio painel. Só os anexos das mensagens da
+    conversa do caso, com a trava de quem lê o e-mail. Foto, vídeo e PDF abrem
+    (inline); o resto baixa. CSP sandbox sempre: o arquivo veio do cliente."""
+    caso, _g = await _caso_visivel(session, sac_id, user)
+    a = await session.get(MailAttachment, attachment_id)
+    meta = await session.get(MailMessageMeta, a.message_id) if a is not None else None
+    if (
+        # Quem não lê a conversa do caso (a trava do Resumo do SAC e do
+        # /historico) não baixa os arquivos dela.
+        not await _caso_legivel(session, caso, user)
+        or a is None
+        or meta is None
+        or meta.conversa_id != caso.conversa_id
+        or meta.estado not in ESTADOS_COM_TEXTO
+    ):
+        raise _erro(404, "anexo_nao_encontrado")
+    try:
+        await mail_admin.exigir_mensagem(session, user, a.message_id)
+    except HTTPException as e:
+        raise _erro(404, "anexo_nao_encontrado") from e
+    info = decrypt_json(a.metadata_enc)
+    nome = str(info.get("filename") or "anexo").replace("\\", "/").rsplit("/", 1)[-1] or "anexo"
+    tipo = str(info.get("content_type") or "application/octet-stream").split(";")[0]
+    tipo = tipo.strip().lower() or "application/octet-stream"
+    inline = svc.tipo_de_anexo_aceito(tipo)
+    return Response(
+        content=decrypt_bytes(a.content_enc),
+        media_type=tipo if inline else "application/octet-stream",
+        headers={
+            "Content-Disposition": f"{'inline' if inline else 'attachment'};"
+            f" filename*=UTF-8''{quote(nome, safe='')}",
+            "Content-Security-Policy": "sandbox",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 # ── Rotas de uma garantia ───────────────────────────────────────────────────
@@ -1533,7 +1892,7 @@ async def historico(
                 tipo="atendimento",
                 em=a.data_atendimento,
                 texto=f"Atendimento registrado por {a.atendente_nome} — "
-                f"{'Hardware' if a.tipo_problema == 'hardware' else 'Software'}"
+                f"{svc.TIPO_PROBLEMA_ROTULOS.get(a.tipo_problema, a.tipo_problema)}"
                 f" · {svc.COBERTURA_ROTULOS.get(a.cobertura, a.cobertura)} · {a.solucao}",
                 atendimento_id=a.id,
             )
@@ -1553,6 +1912,19 @@ async def historico(
 
     scope = await escopo_do_atendimento(session, user)
     c, gc = AtendimentoConversa, GarantiaConversa
+    # A conversa do caso do SAC ligado a ESTA garantia (06/11/2026) aparece
+    # para quem vê a garantia, mesmo de equipe: o SAC do site não tem loja
+    # (integração), e a garantia já está no escopo da pessoa. A trava de quem
+    # lê o e-mail (`filtro_conversa`) continua valendo.
+    casos_daqui = (
+        await session.execute(
+            select(GarantiaSac.conversa_id, GarantiaSac.confirmado_em, GarantiaSac.vinculo).where(
+                GarantiaSac.garantia_id == g.id
+            )
+        )
+    ).all()
+    do_caso = {cid for cid, _conf, _vinc in casos_daqui}
+    decididos = {cid for cid, conf, vinc in casos_daqui if _sac_decidido(conf, vinc)}
     ligadas = [
         (conv, como)
         for conv, como in (
@@ -1563,9 +1935,11 @@ async def historico(
                 .order_by(c.ultima_mensagem_em.desc().nulls_last())
             )
         ).all()
-        if _conversa_no_escopo(scope, conv.integration_id)
-        # O SAC em que outra pessoa escreveu sai já (o robô desliga na volta).
-        and not (garantia_sac.protocolo_da_conversa(conv) and garantia_sac.com_outra_pessoa(conv))
+        if (_conversa_no_escopo(scope, conv.integration_id) or conv.id in do_caso)
+        # O SAC em que outra pessoa escreveu sai já (o robô desliga na volta)
+        # — menos o caso que a pessoa já decidiu (confirmou ou vinculou à mão):
+        # o robô não desfaz e a conversa continua na linha do tempo.
+        and (conv.id in decididos or not _com_outra_pessoa_no_sac(conv))
     ]
     if not ligadas:
         out.restrito = bool(
@@ -1679,6 +2053,190 @@ async def historico(
     return out
 
 
+# O Resumo do SAC (06/11/2026): as seções e os rótulos da especificação
+# ("Resumo do SAC"); a Documentação são os anexos. (seção, [(rótulo, campo)])
+_SECAO_DO_CASO = "Atendimento"
+_SECOES_DO_SAC = (
+    (_SECAO_DO_CASO, (("Protocolo", "protocolo"), ("Data de envio", "data_de_envio"))),
+    (
+        "Comprador",
+        (
+            ("Nome", "nome"),
+            ("CPF", "cpf"),
+            ("E-mail", "email"),
+            ("Telefone/WhatsApp", "telefone"),
+            ("CEP", "cep"),
+            ("Endereço", "endereco"),
+        ),
+    ),
+    (
+        "Compra",
+        (
+            ("Local da compra", "local_compra"),
+            ("Loja/vendedor", "loja_vendedor"),
+            ("Número do pedido", "pedido"),
+            ("Data da compra", "data_compra"),
+            ("Data de recebimento", "data_recebimento"),
+            ("Nota fiscal", "nota_fiscal"),
+            ("Valor pago", "valor_pago"),
+        ),
+    ),
+    (
+        "Produto",
+        (
+            ("Modelo", "modelo"),
+            ("Cor", "cor"),
+            ("Voltagem", "voltagem"),
+            ("Número de série ou lote", "serie"),
+        ),
+    ),
+    (
+        "Defeito",
+        (
+            ("Data do problema", "data_problema"),
+            ("Descrição", "descricao"),
+            ("Sofreu queda, contato com líquido ou voltagem errada", "queda_liquido_voltagem"),
+            ("Tipo de conexão", "tipo_conexao"),
+        ),
+    ),
+)
+
+
+async def _caso_legivel(session: AsyncSession, caso: GarantiaSac, user: User) -> bool:
+    """A pessoa lê a conversa do caso? A mesma trava do /historico (revisão de
+    06/11/2026): lê o Atendimento (`acesso.pode_ver`), a caixa/e-mail da
+    conversa não está bloqueada para ela (`filtro_conversa`) e, se outra
+    pessoa escreveu no protocolo, o caso já foi decidido (confirmado ou
+    vinculado à mão)."""
+    if not acesso.pode_ver(user):
+        return False
+    c = AtendimentoConversa
+    conv = (
+        await session.execute(
+            select(c).where(c.id == caso.conversa_id, mail_admin.filtro_conversa(user, c))
+        )
+    ).scalar_one_or_none()
+    if conv is None:
+        return False
+    return _sac_decidido(caso.confirmado_em, caso.vinculo) or not _com_outra_pessoa_no_sac(conv)
+
+
+def _sac_decidido(confirmado_em, vinculo: str | None) -> bool:
+    """A pessoa já decidiu que o caso é desta garantia (confirmou ou vinculou à
+    mão): o alerta de outra pessoa no protocolo não tira mais a conversa."""
+    return confirmado_em is not None or vinculo == "manual"
+
+
+def _com_outra_pessoa_no_sac(conv: AtendimentoConversa) -> bool:
+    return bool(garantia_sac.protocolo_da_conversa(conv)) and garantia_sac.com_outra_pessoa(conv)
+
+
+def _cpf_do_sac(cpf: str | None, ve: bool) -> str | None:
+    """O CPF do formulário como o resto do painel: mascarado; completo só para
+    quem tem `garantias_cpf`. O que não é CPF de 11 dígitos não sai."""
+    if not cpf:
+        return None
+    return svc.formatar_cpf(cpf) if ve and len(svc.so_digitos(cpf)) == 11 else svc.mascarar_cpf(cpf)
+
+
+async def _anexos_do_sac(session: AsyncSession, caso: GarantiaSac, user: User) -> list[SacAnexoOut]:
+    """Os arquivos do e-mail do formulário (a mensagem do caso), com o papel de
+    cada um pelo nome que o formulário cita depois do rótulo da foto."""
+    if caso.mensagem_id is None:
+        return []
+    m, a = MailMessageMeta, MailAttachment
+    linhas = (
+        await session.execute(
+            select(a)
+            .join(m, m.message_id == a.message_id)
+            .where(
+                m.mensagem_id == caso.mensagem_id,
+                m.conversa_id == caso.conversa_id,
+                m.estado.in_(ESTADOS_COM_TEXTO),
+                mail_admin.filtro_mensagem(user, m.message_id),
+            )
+            .order_by(a.id)
+        )
+    ).scalars()
+    campos = caso.campos if isinstance(caso.campos, dict) else {}
+    papeis = {
+        str(nome).strip().lower(): papel
+        for papel, nome in (campos.get("arquivos") or {}).items()
+        if nome
+    }
+    saida = []
+    for x in linhas:
+        info = decrypt_json(x.metadata_enc)
+        nome = info.get("filename")
+        saida.append(
+            SacAnexoOut(
+                id=str(x.id),
+                nome=nome,
+                tipo=info.get("content_type"),
+                tamanho=x.size,
+                papel=papeis.get(str(nome or "").strip().lower()),
+                url=f"/api/garantias/sac/{caso.id}/anexos/{x.id}",
+            )
+        )
+    return saida
+
+
+@router.get("/{garantia_id}/sac", response_model=SacDetalheOut | None)
+async def sac_da_garantia(
+    garantia_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_consultar_ou_registrar)],
+) -> SacDetalheOut | None:
+    """O Resumo do SAC no topo da conversa: o que o cliente preencheu no
+    formulário, com os anexos — o MESMO caso da linha (`_sacs_das`: o
+    confirmado e aberto mais antigo; senão o aberto; senão o encerrado mais
+    recente). CPF mascarado como no resto do painel. O formulário (e-mail,
+    telefone, endereço, descrição) segue a trava do /historico: quem não lê a
+    conversa do caso recebe só o protocolo, as datas e o estado."""
+    g = await _garantia_visivel(session, garantia_id, user)
+    s = GarantiaSac
+    caso = (
+        await session.execute(
+            select(s)
+            .where(s.garantia_id == g.id)
+            .order_by(*garantia_sac.ordem_dos_casos(s))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if caso is None:
+        return None
+    legivel = await _caso_legivel(session, caso, user)
+    campos = dict(caso.campos) if isinstance(caso.campos, dict) and legivel else {}
+    campos["protocolo"] = caso.protocolo
+    campos["data_de_envio"] = caso.recebido_em.astimezone(svc.SAO_PAULO).strftime("%d/%m/%Y %H:%M")
+    campos["cpf"] = _cpf_do_sac(campos.get("cpf"), _ve_cpf(user))
+    pessoas = await _pessoas(session, {caso.confirmado_por, caso.encerrado_por})
+    return SacDetalheOut(
+        id=caso.id,
+        protocolo=caso.protocolo,
+        recebido_em=caso.recebido_em,
+        conversa_id=caso.conversa_id,
+        confirmado_em=caso.confirmado_em,
+        confirmado_por=_ref(pessoas, caso.confirmado_por) if caso.confirmado_em else None,
+        encerrado_em=caso.encerrado_em,
+        encerrado_por=_ref(pessoas, caso.encerrado_por),
+        encerrado_motivo=caso.encerrado_motivo,
+        secoes=[
+            SacSecaoOut(
+                titulo=titulo,
+                campos=[
+                    SacCampoOut(rotulo=rotulo, valor=str(v) if (v := campos.get(chave)) else None)
+                    for rotulo, chave in itens
+                ],
+            )
+            for titulo, itens in _SECOES_DO_SAC
+            # Sem a leitura da conversa: só a seção Atendimento (protocolo e data).
+            if legivel or titulo == _SECAO_DO_CASO
+        ],
+        anexos=await _anexos_do_sac(session, caso, user) if legivel else [],
+    )
+
+
 @router.put("/{garantia_id}", response_model=GarantiaSalvaOut)
 async def corrigir(
     garantia_id: int,
@@ -1753,14 +2311,34 @@ async def corrigir(
     for campo, de, para in mudancas:
         svc.registrar_log(session, g.id, "alterou", user, campo=campo, anterior=de, novo=para)
     if novo_pedido is not None:
-        # As conversas eram do pedido ANTIGO (pode ser outra pessoa): saem
-        # junto com a troca, com o robô ligado ou não.
-        await session.execute(
-            GarantiaConversa.__table__.delete().where(GarantiaConversa.garantia_id == g.id)
+        # Outro pedido = outro produto: o prazo da Tabela de Preços é relido.
+        await garantia_prazo.aplicar_prazos(session, ids=[g.id], ator=user)
+        # O caso do SAC (revisão de 06/11/2026). O CONFIRMADO fica: a pessoa já
+        # decidiu que o caso é desta garantia (é a mesma compra, corrigida), e
+        # a conversa dele continua no histórico. O não confirmado volta para
+        # "SAC sem pedido" (sem garantia e sem vínculo): o robô reavalia pelo
+        # formulário e pode ligar de novo.
+        casos = list(
+            (
+                await session.execute(
+                    select(GarantiaSac).where(GarantiaSac.garantia_id == g.id).with_for_update()
+                )
+            ).scalars()
         )
+        confirmadas = {k.conversa_id for k in casos if k.confirmado_em is not None}
+        for k in casos:
+            if k.confirmado_em is None:
+                await garantia_sac.desligar_conversa(session, k)
+        # As outras conversas eram do pedido ANTIGO (pode ser outra pessoa):
+        # saem junto com a troca, com o robô ligado ou não.
+        apagar = GarantiaConversa.__table__.delete().where(GarantiaConversa.garantia_id == g.id)
+        if confirmadas:
+            apagar = apagar.where(GarantiaConversa.conversa_id.not_in(confirmadas))
+        await session.execute(apagar)
         # O pedido de garantia que o robô achou nelas (mensagem, SAC,
-        # devolução) também era do pedido antigo: o robô reavalia o novo.
-        if g.solicitacao_origem in garantia_pedido.ORIGENS_DO_ROBO:
+        # devolução) também era do pedido antigo: o robô reavalia o novo —
+        # menos com o caso do SAC confirmado (a garantia foi acionada).
+        if g.solicitacao_origem in garantia_pedido.ORIGENS_DO_ROBO and not confirmadas:
             svc.registrar_log(
                 session,
                 g.id,
@@ -1904,7 +2482,8 @@ async def registrar_atendimento(
         g.id,
         "registrou_atendimento",
         user,
-        detalhe=f"atendimento #{at.id} · {body.tipo_problema} · "
+        detalhe=f"atendimento #{at.id} · "
+        f"{svc.TIPO_PROBLEMA_ROTULOS.get(body.tipo_problema, body.tipo_problema)} · "
         f"{svc.COBERTURA_ROTULOS[cobertura]} · conversa {c.plataforma}",
     )
     await session.commit()

@@ -233,9 +233,11 @@ async def test_sac_ligado_marca_o_pedido(db):
     assert g.solicitacao_origem == gp.ORIGEM_SAC
 
 
-async def test_painel_so_pedidos_busca_acha_todas_e_a_pessoa_corrige(
-    client, db, make_user, auth_as
-):
+async def test_a_pessoa_corrige_o_pedido_de_garantia(client, db, make_user, auth_as):
+    """O pedido de garantia (a marcação do robô e a correção da pessoa) continua
+    — o Resumo conta "pediram" por ele —, mas desde 06/11/2026 não filtra mais
+    a lista: ela mostra todas as vendas com nota ("garantia acionada" é o SAC
+    confirmado)."""
     auth_as(await make_user(role=UserRole.ADMIN))
     await _pedido(db)
     await _nf(db)
@@ -247,36 +249,37 @@ async def test_painel_so_pedidos_busca_acha_todas_e_a_pessoa_corrige(
         assert r.status_code == 200, r.text
         return r.json()
 
-    # Sem pedido: fora do Painel; a busca e o "todas" acham.
-    assert (await lista())["itens"] == []
-    assert (await lista())["indicadores"]["vendidas"] == 1
-    [item] = (await lista(busca="310001"))["itens"]
+    # Sem pedido: na lista (todas as vendas), sem a marca.
+    [item] = (await lista())["itens"]
     assert (item["pedido_em"], item["nao_e_pedido"]) == (None, False)
-    assert len((await lista(mostrar="todas"))["itens"]) == 1
+    assert (await lista())["indicadores"]["vendidas"] == 1
+    assert (await lista(mostrar="acionada"))["itens"] == []
 
-    # A pessoa marca: entra no Painel.
+    # A pessoa marca.
     r = await client.put(f"/api/garantias/{g.id}/pedido", json={"pedido": True})
     assert r.status_code == 200, r.text
     assert r.json()["pedido_origem"] == gp.ORIGEM_PESSOA
-    assert [i["id"] for i in (await lista())["itens"]] == [g.id]
+    [item] = (await lista())["itens"]
+    assert item["pedido_origem"] == gp.ORIGEM_PESSOA
 
-    # "Não é pedido de garantia": sai, e o robô não marca de novo nem com defeito novo.
+    # "Não é pedido de garantia": o robô não marca de novo nem com defeito novo.
     r = await client.put(f"/api/garantias/{g.id}/pedido", json={"pedido": False})
     assert r.json()["nao_e_pedido"] is True
-    assert (await lista())["itens"] == []
     await _conversa(
         db,
         pedido="261001ABCD1234",
         msgs=[("cliente", "parou de funcionar", COMPRA + timedelta(days=12), ())],
     )
     await _rodar(db)
-    assert (await lista())["itens"] == []
+    [item] = (await lista())["itens"]
+    assert item["nao_e_pedido"] is True
     acoes = list(
         (
             await db.execute(select(GarantiaLog.acao).where(GarantiaLog.garantia_id == g.id))
         ).scalars()
     )
     assert {"marcou_pedido", "tirou_pedido"} <= set(acoes)
+    assert "pedido_automatico" not in acoes
     assert (
         await client.put(f"/api/garantias/{g.id}/pedido", json={"pedido": "talvez"})
     ).status_code == 422

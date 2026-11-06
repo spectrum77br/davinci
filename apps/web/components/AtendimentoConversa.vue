@@ -234,6 +234,13 @@ export function rotuloEnviarAnexos(itens: { pdf: boolean }[]): string {
 //   escolhido e o "enviar mesmo assim" do "não responder" — para a fila da
 //   Central, que o Mac envia. O chamado do site (RF6) ganha a faixa com o
 //   protocolo, o tipo e o "agrupar" (AtendimentoEmailChamado).
+// - FILA DE ENVIO (06/11/2026, lib/atendimentoFilaEnvio.ts): no chat, no
+//   pós-venda, na reclamação e no Zap, o Enter limpa a caixa na hora e a mensagem
+//   vira um balão na conversa (AtendimentoFilaBalao): "enviando…", "na fila" ou
+//   "não saiu". A pessoa já escreve a próxima; sai uma de cada vez, na ordem. Na
+//   pergunta do ML, na avaliação e no e-mail fica como sempre foi (botão girando
+//   e caixa travada). A memória dela fica fora do componente
+//   (lib/atendimentoFilaMemoria.ts): voltar para a lista não a perde.
 import {
   Archive,
   ArrowLeft,
@@ -296,10 +303,47 @@ import { CLS_AG_CANCELAMENTO, leituraAgCancelamento } from '~/components/Atendim
 import { CHAVE_ANEXAR_NA_CAIXA } from '~/components/AtendimentoTrocaSugestoes.vue'
 import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
 import { criarMarcadorDeLida, rotaAoAbrir } from '~/lib/atendimentoLida'
+import {
+  INTERVALO_RETENTATIVA_MS,
+  MOTIVO_ANEXO_COM_FILA,
+  MOTIVO_ANEXO_NAO_SAIU,
+  MOTIVO_PARADA_A_CONFERIR,
+  abaSegueODestino,
+  anexosDeixamSeguir,
+  baloesVisiveis,
+  caixaTemEscrita,
+  conferidaNaLeitura,
+  corpoDeSaida,
+  decidirPelaLeitura,
+  descartarDaFila,
+  devolverComoFalhou,
+  editarMudariaDestino,
+  entrarNaFila,
+  filaParada,
+  filaValeNoCanal,
+  marcarEditando,
+  marcarEnviando,
+  marcarFalhou,
+  marcarIncerto,
+  marcarRetentativa,
+  novoItem,
+  paraNovaTentativa,
+  podeRetentar,
+  proximoParaSair,
+  temItemVivo,
+  textoAoEditar,
+  tipoDaFalha,
+  tirarItem,
+  voltarParaFila,
+  type CorpoDoItem,
+  type ErroDoItem,
+  type ItemFila,
+} from '~/lib/atendimentoFilaEnvio'
+import { memoriaDaFila, type TelaDaFila } from '~/lib/atendimentoFilaMemoria'
 import { AVISO_RESPOSTA_PUBLICA, perguntaRespostaPublica, type AvaliacoesResposta } from '~/components/AtendimentoAvaliacao.vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { onKeyStroke, useMediaQuery } from '@vueuse/core'
-import { errosDaApi as errosDaGarantia, type AtendimentoGarantia as AtendimentoDaGarantia, type SituacaoConversa } from '~/lib/garantias'
+import { errosDaApi as errosDaGarantia, rotuloDoTipo, type AtendimentoGarantia as AtendimentoDaGarantia, type SituacaoConversa } from '~/lib/garantias'
 import {
   AVISO_MODERACAO_MAGALU,
   AVISO_SO_LEITURA,
@@ -573,6 +617,7 @@ async function carregar(id: string, silencioso = false) {
     erro.value = null
     // Envio que ficou sem resposta do servidor: agora a conversa diz se saiu.
     resolverIncerto(detalhe.value)
+    resolverFilaNaLeitura(detalhe.value)
     // A sugestão que a pessoa estava usando sumiu (foi enviada, substituída
     // por resposta de fora, descartada): o envio não pode citar um id velho.
     if (baseRascunhoId.value && d.rascunho?.id !== baseRascunhoId.value) {
@@ -598,11 +643,11 @@ const atualizacaoFalhou = ref(false)
 
 function avisarRespostaAlheia(antes: Detalhe, d: Detalhe) {
   const vistas = new Set(antes.mensagens.map((m) => m.id))
-  const minha = normalizarTexto(texto.value, d.conversa.plataforma)
+  const minhas = new Set([normalizarTexto(texto.value, d.conversa.plataforma), ...(filas.get(d.conversa.id) ?? []).map((i) => normalizarTexto(i.texto, d.conversa.plataforma))])
   const alheias = (d.mensagens || []).filter((m) =>
     !vistas.has(m.id) && m.autor === 'loja' && m.status !== 'falhou'
-    // o próprio envio (incerto/atrasado) desta pessoa não é "de outro"
-    && normalizarTexto(m.texto || '', d.conversa.plataforma) !== minha)
+    // o próprio envio (incerto/atrasado, ou na fila) desta pessoa não é "de outro"
+    && !minhas.has(normalizarTexto(m.texto || '', d.conversa.plataforma)))
   if (!alheias.length) return
   const ultima = alheias[alheias.length - 1]
   const quem = ultima.origem === 'davinci_ia'
@@ -836,17 +881,26 @@ function aoResponderPelaAba() {
   void carregar(props.conversaId, true)
 }
 
+// A fila de envio, POR CONVERSA (a pessoa pode ir para outra com a fila andando),
+// numa memória fora do componente (lib/atendimentoFilaMemoria.ts: a Caixa desmonta
+// a conversa ao voltar para a lista). Fica aqui em cima porque a linha do tempo já
+// a lê durante o setup.
+const { filas, absorvidas, gravadasDaFila, sugestoesLevadas, retencoes, telasDaFila, novoNumeroDaFila, avisoAoFechar } = memoriaDaFila
+const filaDaConversa = computed(() => filas.get(props.conversaId) ?? [])
+
 // ─── linha do tempo ─────────────────────────────────────────────────────────
 // As mensagens e as MUDANÇAS DE ETIQUETA (`detalhe.etiqueta_historico`), pela
 // hora; no empate, a mensagem antes (quase sempre foi ela que mudou o status).
 // Com as abas (RF2): `de` = a conversa de origem da mensagem que é de OUTRA
 // conversa (sem ações nela: conferir, tentar de novo e a IA são desta); o
-// divisor `origem` marca onde muda a conversa de origem.
+// divisor `origem` marca onde muda a conversa de origem. `fila` = o balão da
+// mensagem que ainda não virou linha no servidor (a seção "fila de envio").
 type Linha =
   | { tipo: 'dia'; chave: string; texto: string }
   | { tipo: 'origem'; chave: string; id: string; texto: string; aberta: boolean }
   | { tipo: 'msg'; chave: string; m: Mensagem; de: string | null }
   | { tipo: 'etiqueta'; chave: string; h: EtiquetaHistorico }
+  | { tipo: 'fila'; chave: string; item: ItemFila }
 function tsIso(iso: string | null | undefined) {
   const t = iso ? new Date(iso).getTime() : NaN
   return Number.isNaN(t) ? Number.POSITIVE_INFINITY : t
@@ -865,7 +919,7 @@ const linhas = computed<Linha[]>(() => {
     // as mensagens das OUTRAS conversas desta aba.
     const fora = abasDados.value?.fora_da_aba || {}
     itens = [
-      ...(d?.mensagens || []).filter((m) => !fora[m.id]).map((m): Item => ({ t: ts(m), iso: m.enviada_em, linha: { tipo: 'msg', chave: m.id, m, de: null } })),
+      ...(d?.mensagens || []).filter((m) => !fora[m.id] && !absorvidas.has(m.id)).map((m): Item => ({ t: ts(m), iso: m.enviada_em, linha: { tipo: 'msg', chave: m.id, m, de: null } })),
       ...(d?.etiqueta_historico || []).map((h): Item => ({ t: tsIso(h.em), iso: h.em, linha: { tipo: 'etiqueta', chave: `etiqueta-${h.id}`, h } })),
       ...(aba?.mensagens || []).filter((m) => m.conversa_id !== propria).map((m): Item => ({ t: ts(m), iso: m.enviada_em, linha: { tipo: 'msg', chave: `aba-${m.id}`, m, de: m.conversa_id } })),
     ]
@@ -873,7 +927,7 @@ const linhas = computed<Linha[]>(() => {
     // Outra aba: as mensagens daquela parte. As desta conversa vêm na versão
     // do detalhe (relida a cada 15 s), com as ações de sempre.
     const minhas = new Map((d?.mensagens || []).map((m) => [m.id, m]))
-    itens = (aba?.mensagens || []).map((m): Item => {
+    itens = (aba?.mensagens || []).filter((m) => !absorvidas.has(m.id)).map((m): Item => {
       const daAberta = m.conversa_id === propria
       const mm = (daAberta && minhas.get(m.id)) || m
       return { t: ts(mm), iso: mm.enviada_em, linha: { tipo: 'msg', chave: daAberta ? mm.id : `aba-${m.id}`, m: mm, de: daAberta ? null : m.conversa_id } }
@@ -903,6 +957,21 @@ const linhas = computed<Linha[]>(() => {
       origem = de
     }
     out.push(it.linha)
+  }
+  // A fila fica sempre no fim, na ordem em que a pessoa apertou. Na aba em que
+  // quem responde é OUTRA conversa, os balões desta não entram.
+  const daFila = respondePorOutra.value ? [] : baloesVisiveis(filas.get(propria) ?? [], d?.mensagens, normalizarTexto)
+  for (const item of daFila) {
+    const dd = new Date(item.criadoEm).toDateString()
+    if (dd !== dia && !out.some((l) => l.chave === `dia-${dd}`)) {
+      out.push({ tipo: 'dia', chave: `dia-${dd}`, texto: rotuloDia(item.criadoEm, agora.value) })
+      dia = dd
+    }
+    if (origem !== undefined && origem !== null) {
+      out.push({ tipo: 'origem', chave: `origem-${item.id}`, id: propria, texto: 'Esta conversa', aberta: true })
+      origem = null
+    }
+    out.push({ tipo: 'fila', chave: item.id, item })
   }
   return out
 })
@@ -1550,6 +1619,12 @@ const bloqueioEnvio = computed(() => {
   }
   if (d.envio.pode_enviar) return ''
   const codigo = d.envio.codigo || ''
+  // Fila de envio (06/11/2026): com uma linha `enviando` no servidor, o detalhe vem
+  // com `envio_em_andamento`. Ela é quase sempre a própria mensagem da fila: travar
+  // aqui prenderia a caixa até a fila esvaziar. O backend segue como trava, e a
+  // recusa temporária já cobre o envio de outra pessoa. Esta recusa é a última que o
+  // backend confere, então nenhuma outra trava fica escondida por ela.
+  if (codigo === 'envio_em_andamento' && filaValeNoCanal(d.conversa.canal)) return ''
   // Zap (26/10/2026): as travas que reusam um código genérico (observar, sem
   // integração, bloqueada, só pessoa) trazem a frase do NÚMERO no backend — a
   // da tela fala de "loja". As próprias do Zap têm frase em ERROS.
@@ -1583,7 +1658,7 @@ const tamanho = computed(() => tamanhoDoEnvio(texto.value, conversa.value?.plata
 const acimaDoLimite = computed(() => !!limite.value && tamanho.value > limite.value)
 const lacunas = computed(() => lacunasAbertas(texto.value))
 const podeEnviar = computed(() =>
-  podeDigitar.value && !!tamanho.value && !acimaDoLimite.value && !lacunas.value.length && !enviando.value && !incertos.has(props.conversaId))
+  podeDigitar.value && !!tamanho.value && !acimaDoLimite.value && !lacunas.value.length && !caixaPresa.value && !incertos.has(props.conversaId))
 
 function titulo(c: ConversaDetalhe) {
   return c.comprador_nome || (c.pedido_marketplace ? `Pedido ${c.pedido_marketplace}` : 'Comprador')
@@ -1606,7 +1681,7 @@ async function copiarTexto(t: string | null | undefined, rotulo: string) {
 // assim" confirma ESSE aviso (não o da conversa que mudou).
 type ErroEnvio = { texto: string; motivos: string[]; confirmar?: boolean; naoResponde?: boolean }
 type Sugestao = { id: string; usada: boolean }
-const enviandoIds = reactive(new Set<string>())
+const enviandoIds = memoriaDaFila.enviandoIds
 const enviando = computed(() => enviandoIds.has(props.conversaId))
 const erroEnvio = ref<ErroEnvio | null>(null)
 const errosGuardados = new Map<string, ErroEnvio>()
@@ -1715,6 +1790,356 @@ function resolverIncerto(d: Detalhe) {
   mostrarErroEnvio(id, { texto: 'A resposta não saiu', motivos: ['O envio não chegou ao servidor (ela não aparece na conversa). O texto continua na caixa — pode enviar de novo.'] })
 }
 
+// ─── fila de envio ──────────────────────────────────────────────────────────
+// 06/11/2026, o dono: ao enviar, em vez de carregar na caixa, mostrar carregando
+// na conversa, "pra poder enviar outra pra entrar na fila já". As regras puras
+// estão em lib/atendimentoFilaEnvio.ts; aqui, quem fala com a API. Tudo POR
+// CONVERSA, como o `enviandoIds`: a resposta da A nunca entra na B.
+// Um POST por vez por conversa (o backend só aceita um em voo). `enviandoIds`
+// segura a conversa enquanto o POST está no ar: é o que para o polling (e só
+// então; no intervalo das recusas temporárias a tela segue relendo) e o que faz o
+// texto esperar um envio de anexos em voo.
+// A memória fica fora do componente (lib/atendimentoFilaMemoria.ts): a Caixa
+// desmonta a conversa ao voltar para a lista, e o que já foi apertado continua
+// saindo. Por isso o que é da tela passa pelas `telasDaFila`: quem anda a fila
+// pode ser uma instância que já desmontou. Fechar a aba com item vivo pergunta
+// antes (`beforeunload`).
+const filaVale = computed(() => filaValeNoCanal(conversa.value?.canal, ehEmail.value))
+// Onde a fila vale, o envio em voo não prende a caixa. Fora dela, como sempre.
+const caixaPresa = computed(() => enviando.value && !filaVale.value)
+const filaDaConversaParada = computed(() => filaEstaParada(props.conversaId))
+// O que segura a fila, quando não é a mensagem de cima que diz (o primeiro balão mostra).
+const motivoDaParada = computed(() => {
+  const ret = retencoes.get(props.conversaId)
+  if (ret?.tipo === 'anexo') return ret.motivo
+  return ret?.tipo === 'conferir' ? MOTIVO_PARADA_A_CONFERIR : ''
+})
+const podeSoltarFila = computed(() => retencoes.get(props.conversaId)?.tipo === 'anexo')
+function telasDe(id: string) {
+  return [...telasDaFila].filter((t) => t.aberta(id))
+}
+function naTela(id: string) {
+  return telasDe(id).some((t) => t.visivel(id))
+}
+function filaEstaParada(id: string) {
+  return filaParada(filas.get(id) ?? []) || retencoes.has(id)
+}
+function fecharFilaSeVazia(id: string) {
+  if (filas.get(id)?.length) return
+  filas.delete(id)
+  gravadasDaFila.delete(id)
+  retencoes.delete(id)
+  if (!telasDaFila.size && !temItemVivo(filas.values())) window.removeEventListener('beforeunload', avisoAoFechar)
+}
+
+function porNaFila(d: Detalhe, confirmar: boolean) {
+  const id = d.conversa.id
+  const corpo: CorpoDoItem = { texto: texto.value.trim() }
+  // Reclamação do ML: a quem vai (a aba da caixa), fica no item.
+  if (destinosReclamacao.value.length && destinoCaixa.value) corpo.para = destinoCaixa.value
+  // Só o item que usou a sugestão leva o `rascunho_id` (a caixa limpa logo abaixo).
+  if (baseRascunhoId.value && d.rascunho?.id === baseRascunhoId.value) corpo.rascunho_id = baseRascunhoId.value
+  const sugestaoNaTela = d.rascunho?.texto ? d.rascunho.id : null
+  const sugestao = sugestaoNaTela && sugestoesLevadas.get(id) !== sugestaoNaTela ? { id: sugestaoNaTela, usada: !!corpo.rascunho_id } : null
+  if (sugestao) sugestoesLevadas.set(id, sugestao.id)
+  const item = novoItem(novoNumeroDaFila(), {
+    conversaId: id,
+    corpo,
+    sugestao,
+    nome: titulo(d.conversa),
+    plataforma: d.conversa.plataforma,
+    antes: d.mensagens.map((x) => x.id),
+    vista: ultimaVista(d),
+    confirmar,
+    criadoEm: new Date().toISOString(),
+  })
+  filas.set(id, entrarNaFila(filas.get(id) ?? [], item))
+  erroEnvio.value = null
+  limparCaixa(id, sugestaoNaTela)
+  rolarProFim()
+  void nextTick(() => caixa.value?.focus())
+  void andarFila(id)
+}
+
+// A linha que o POST devolveu entra na tela no mesmo tique em que o balão sai,
+// sem piscar. A leitura que partiu antes do POST responder é descartada: ela não
+// tem esta linha e a apagaria da tela até a próxima leitura.
+function mostrarRealNaTela(id: string, m: Mensagem) {
+  const d = detalhe.value
+  if (d?.conversa.id !== id) {
+    // Voltou para a conversa e a leitura dela ainda não chegou: lê de novo.
+    if (aberta(id)) void carregar(id, true)
+    return
+  }
+  geracao++
+  carregando.value = false
+  const estavaNoFim = pertoDoFim()
+  d.mensagens = d.mensagens.some((x) => x.id === m.id) ? d.mensagens.map((x) => (x.id === m.id ? m : x)) : [...d.mensagens, m]
+  if (estavaNoFim) rolarProFim()
+}
+
+function falharItem(item: ItemFila, erro: ErroDoItem, opcoes: { permiteConfirmar?: boolean; realId?: string | null; podeAparecer?: boolean }, aviso: string, detalhes: string[]) {
+  const id = item.conversaId
+  filas.set(id, marcarFalhou(filas.get(id) ?? [], item.id, erro, opcoes))
+  if (naTela(id)) {
+    toasts.error(aviso, detalhes)
+    return
+  }
+  // A conversa não está na tela: o balão com as ações espera ela abrir.
+  const fim = (filas.get(id)?.length ?? 0) > 1 ? 'Ela e as seguintes não saíram. Estão esperando na conversa: abra para resolver.' : 'Ela não saiu e está esperando na conversa: abra para resolver.'
+  toasts.error(aviso, [...detalhes, fim])
+}
+
+// O item terminou com a linha gravada: a resposta do POST ou, no incerto, a
+// conversa relida. A mensagem pode ter vindo `falhou` (a plataforma recusou).
+function concluirItem(item: ItemFila, m: Mensagem | null) {
+  const id = item.conversaId
+  const onde = naTela(id) ? '' : ` (${item.nome})`
+  if (m?.id && RE_UUID.test(m.id)) gravadasDaFila.set(id, m.id)
+  if (m?.status === 'falhou') {
+    absorvidas.add(m.id)
+    const motivo = erroDoBalao(m)
+    falharItem(
+      item,
+      { texto: 'A plataforma recusou: a resposta NÃO chegou ao comprador.', motivos: motivo ? [motivo] : [] },
+      { realId: m.id },
+      `A plataforma recusou a resposta${onde}`,
+      motivo ? [motivo] : [],
+    )
+    return
+  }
+  filas.set(id, tirarItem(filas.get(id) ?? [], item.id, m?.id))
+  if (item.sugestao) (telasDe(id)[0]?.pedirAvaliacao ?? pedirAvaliacao)(id, item.sugestao)
+  // A plataforma não confirmou: não dá para saber se saiu. Quem vem depois espera
+  // a pessoa marcar no balão (como os anexos: "confira antes de mandar o resto").
+  if (m?.status === 'revisar') {
+    if (filas.get(id)?.length) retencoes.set(id, { tipo: 'conferir', mensagemId: m.id, item })
+    toasts.warning(`Não deu para confirmar o envio${onde}`, item.plataforma === 'whatsapp' ? ZAP_REVISAR.toast : 'Pode ter saído. Confira na plataforma e marque no balão se saiu: o DaVinci não tenta de novo sozinho.')
+    return
+  }
+  // Com a conversa aberta, o balão já mostra: toast só do que ele não diz.
+  const sim = envioSimulado(m, props.flags, item.plataforma) ? ' (simulador: não chegou ao comprador)' : ''
+  const detalheEnvio = sim || (passaPelaModeracao(item.plataforma) ? MODERACAO_MAGALU_ENVIADA : '')
+  if (!m || m.status === 'enviada') {
+    if (onde || detalheEnvio) toasts.success(`Resposta enviada${onde}`, detalheEnvio || undefined)
+  } else if (onde) {
+    toasts.info(`Resposta saindo${onde}`, 'Acompanhe o status no balão.')
+  }
+}
+
+function recusarItem(item: ItemFila, e: any) {
+  const id = item.conversaId
+  const code = e?.data?.detail?.code
+  const tipo = tipoDaFalha(code, statusDoErro(e))
+  if (tipo === 'temporaria' && podeRetentar(item)) {
+    // Outro envio ou a rodada do sync segurando a conversa: sem erro na tela.
+    filas.set(id, marcarRetentativa(filas.get(id) ?? [], item.id))
+    setTimeout(() => {
+      const atuais = filas.get(id)
+      if (!atuais?.some((x) => x.id === item.id)) return
+      filas.set(id, voltarParaFila(atuais, item.id))
+      void andarFila(id)
+    }, INTERVALO_RETENTATIVA_MS)
+    return
+  }
+  if (tipo === 'incerto') {
+    // Pode ter saído: a fila para e quem decide é a conversa relida.
+    filas.set(id, marcarIncerto(filas.get(id) ?? [], item.id, Date.now()))
+    if (!naTela(id)) toasts.warning(`Não deu para confirmar o envio (${item.nome})`, 'Abra a conversa para ver se a resposta saiu antes de mandar de novo.')
+    return
+  }
+  const er = erroDaApi(e, 'Não consegui enviar')
+  falharItem(
+    item,
+    er,
+    { permiteConfirmar: code === 'conversa_mudou' || CODIGOS_CONFIRMAVEIS.has(code) },
+    naTela(id) ? 'Não consegui enviar' : `Não consegui enviar (${item.nome})`,
+    [er.texto, ...er.motivos],
+  )
+}
+
+async function andarFila(id: string) {
+  if (enviandoIds.has(id) || retencoes.has(id)) return
+  const itens = filas.get(id) ?? []
+  const item = proximoParaSair(itens)
+  if (!item) return
+  filas.set(id, marcarEnviando(itens, item.id))
+  enviandoIds.add(id)
+  let resposta: { mensagem: Mensagem } | null = null
+  let falha: { e: unknown } | null = null
+  try {
+    resposta = await api<{ mensagem: Mensagem }>(`/api/atendimento/conversas/${encodeURIComponent(id)}/responder`, { method: 'POST', body: corpoDeSaida(item, gravadasDaFila.get(id)) })
+  } catch (e) {
+    falha = { e }
+  }
+  enviandoIds.delete(id)
+  // A pessoa saiu da conta com o POST no ar: a memória foi limpa (só isso tira da fila
+  // um item `enviando`). Ele terminou no servidor, e quem entrou não vê balão, toast
+  // nem pergunta dele. A fila de quem entrou pode estar esperando este POST acabar.
+  if (!filas.get(id)?.some((x) => x.id === item.id)) {
+    void andarFila(id)
+    return
+  }
+  if (falha) {
+    recusarItem(item, falha.e)
+  } else {
+    const m = resposta?.mensagem ?? null
+    if (m) for (const t of telasDe(id)) t.mostrarReal(id, m)
+    concluirItem(item, m)
+  }
+  if (!filas.get(id)?.length) {
+    // A fila esvaziou: agora sim relê (e não a cada item), e mostra a aba do destino.
+    fecharFilaSeVazia(id)
+    await Promise.all(telasDe(id).map((t) => t.aoEsvaziar(id, item.corpo.para)))
+    return
+  }
+  // Parou: relê para mostrar o de agora (o item incerto se resolve nessa leitura).
+  if (filaEstaParada(id)) await Promise.all(telasDe(id).map((t) => t.reler(id)))
+  void andarFila(id)
+}
+async function aoEsvaziarFila(id: string, para?: string) {
+  await carregar(id, true)
+  if (para) await mostrarAbaDoDestino(id, para, () => abaSegueODestino(para, destinoCaixa.value, caixaTemEscrita(texto.value, prefill.value)))
+}
+// O anexo ou o "tentar de novo" terminou: a fila daquela conversa anda.
+watch(() => [...enviandoIds], () => {
+  for (const id of filas.keys()) void andarFila(id)
+})
+// Saiu mensagem por outro caminho com texto esperando (anexo, "tentar de novo" da
+// mensagem antiga): a próxima da fila vai com ela como "vista", senão a própria
+// mensagem viraria `conversa_mudou`.
+function anotarSaidaDeFora(id: string, mensagemId: string | null | undefined) {
+  if (mensagemId && RE_UUID.test(mensagemId) && filas.get(id)?.length) gravadasDaFila.set(id, mensagemId)
+}
+// O envio de anexos terminou com texto esperando. Saiu tudo: segue. Não saiu: o
+// texto para, porque "segue a foto" sem a foto chegaria errado ao comprador. A
+// pessoa reenvia o anexo (a fila anda quando ele sair) ou manda o texto mesmo assim.
+function fimDoEnvioDeAnexos(id: string, vista: string | null, resultado: { previstos: number; saidos: number; restantes: number }) {
+  anotarSaidaDeFora(id, vista)
+  if (!filas.get(id)?.length) return
+  if (!anexosDeixamSeguir(resultado)) retencoes.set(id, { tipo: 'anexo', motivo: MOTIVO_ANEXO_NAO_SAIU })
+  else if (retencoes.get(id)?.tipo === 'anexo') retencoes.delete(id)
+}
+function soltarFila(id: string) {
+  if (retencoes.get(id)?.tipo !== 'anexo') return
+  retencoes.delete(id)
+  void andarFila(id)
+}
+
+// Cada conversa relida: o que ela diz sobre a fila.
+function resolverFilaNaLeitura(d: Detalhe) {
+  const id = d.conversa.id
+  if (!filas.has(id)) return
+  // A resposta "a conferir" foi marcada. Saiu: a fila segue. Não saiu: o item volta
+  // para a frente, vermelho e com as ações dele, porque a seguinte não sai sem a
+  // pessoa decidir o que fazer com esta.
+  const ret = retencoes.get(id)
+  if (ret?.tipo === 'conferir') {
+    const conferida = conferidaNaLeitura(ret.mensagemId, d.mensagens)
+    if (conferida !== 'fica') retencoes.delete(id)
+    if (conferida === 'nao_saiu') {
+      absorvidas.add(ret.mensagemId)
+      filas.set(id, devolverComoFalhou(filas.get(id) ?? [], ret.item, { texto: 'Esta resposta NÃO chegou ao comprador (marcada na conferência).', motivos: [] }, ret.mensagemId))
+    }
+  }
+  // Sem resposta do servidor: a mesma regra do `resolverIncerto`. Achou a linha com
+  // resultado, sai da fila e segue; com a linha ainda `enviando`, espera. Não achou,
+  // vira "não saiu", com o "Tentar de novo" da pessoa, e continua de olho: a linha
+  // pode aparecer na leitura seguinte. Nunca reenvia sozinho.
+  const item = filas.get(id)?.find((x) => x.estado === 'incerto' || (x.estado === 'falhou' && x.podeAparecer))
+  if (item) {
+    const decisao = decidirPelaLeitura(item, d.mensagens, normalizarTexto, Date.now())
+    if (decisao.acao === 'concluir') {
+      concluirItem(item, decisao.m)
+    } else if (decisao.acao === 'esperar') {
+      if (item.estado === 'falhou') filas.set(id, marcarIncerto(filas.get(id) ?? [], item.id, Date.now()))
+    } else if (decisao.acao === 'presa') {
+      const motivos = ['O envio ficou preso no servidor. Confira na plataforma antes de tentar de novo: se ela saiu, o comprador recebe duas vezes.']
+      falharItem(item, { texto: 'Não deu para saber se esta resposta saiu', motivos }, { realId: decisao.m.id }, 'Não deu para saber se a resposta saiu', motivos)
+    } else if (item.estado === 'incerto') {
+      const motivos = ['O envio não chegou ao servidor (ela não aparece na conversa). Pode tentar de novo.']
+      falharItem(item, { texto: 'A resposta não saiu', motivos }, { podeAparecer: true }, 'A resposta não saiu', motivos)
+    }
+  }
+  fecharFilaSeVazia(id)
+  void andarFila(id)
+}
+
+// As ações do balão. Resolvido, a fila anda sozinha.
+function aindaFalhado(item: ItemFila) {
+  return !!filas.get(item.conversaId)?.some((x) => x.id === item.id && x.estado === 'falhou')
+}
+function tentarItemDeNovo(item: ItemFila) {
+  if (!aindaFalhado(item)) return
+  filas.set(item.conversaId, paraNovaTentativa(filas.get(item.conversaId) ?? [], item.id))
+  void andarFila(item.conversaId)
+}
+function largarItem(item: ItemFila) {
+  const id = item.conversaId
+  filas.set(id, descartarDaFila(filas.get(id) ?? [], item.id))
+  if (item.sugestao) sugestoesLevadas.delete(id)
+  fecharFilaSeVazia(id)
+  void andarFila(id)
+}
+// O que não saiu, o lugar guardado pelo "Editar" e o que espera numa fila parada:
+// dá para tirar o que vem atrás antes de resolver a primeira, sem a ordem se inverter.
+function descartarItem(item: ItemFila) {
+  const atual = filas.get(item.conversaId)?.find((x) => x.id === item.id)
+  if (!atual) return
+  if (atual.estado === 'falhou' || atual.estado === 'editando' || (atual.estado === 'na_fila' && filaEstaParada(item.conversaId))) largarItem(item)
+}
+// Põe o texto na caixa. Com texto escrito, acrescenta numa linha nova (nunca apaga o
+// que a pessoa escreveu); com a caixa vazia ou só a sugestão intocada, a sugestão
+// que o item usou volta a contar para o envio.
+// Com mensagem esperando atrás, o item fica guardando o lugar (`editando`): a fila
+// segue parada até o texto sair de novo ou a pessoa descartar. A segunda não sai
+// antes da primeira corrigida.
+function editarItem(item: ItemFila) {
+  if (!aindaFalhado(item)) return
+  const id = item.conversaId
+  const d = detalhe.value
+  const escrita = caixaTemEscrita(texto.value, prefill.value)
+  if (editarMudariaDestino(item, destinoCaixa.value, escrita)) {
+    toasts.warning('A caixa tem um texto para o outro destino', 'Envie ou apague esse texto antes de editar esta mensagem: os dois juntos iriam para um destino só.')
+    return
+  }
+  texto.value = textoAoEditar(texto.value, prefill.value, item.texto)
+  if (!escrita) {
+    if (baseRascunhoId.value) rejeitadaId.value = baseRascunhoId.value
+    prefill.value = ''
+    baseRascunhoId.value = item.corpo.rascunho_id && d?.rascunho?.id === item.corpo.rascunho_id ? item.corpo.rascunho_id : null
+  }
+  if (item.corpo.para && destinosReclamacao.value.some((x) => x.chave === item.corpo.para)) destinoCaixa.value = item.corpo.para
+  modoCaixa.value = 'responder'
+  void nextTick(() => caixa.value?.focus())
+  if ((filas.get(id)?.length ?? 0) > 1) {
+    filas.set(id, marcarEditando(filas.get(id) ?? [], item.id))
+    if (item.sugestao) sugestoesLevadas.delete(id)
+    return
+  }
+  largarItem(item)
+}
+
+// Esta instância na lista das telas da fila. Ao montar, retoma o que ficou parado
+// esperando alguém (um "tentar de novo" que terminou com a conversa desmontada).
+const estaTela: TelaDaFila<Mensagem> = {
+  aberta,
+  visivel: (id) => aberta(id) && props.ativa !== false,
+  mostrarReal: mostrarRealNaTela,
+  pedirAvaliacao,
+  reler: (id) => carregar(id, true),
+  aoEsvaziar: aoEsvaziarFila,
+}
+onMounted(() => {
+  telasDaFila.add(estaTela)
+  window.addEventListener('beforeunload', avisoAoFechar)
+  for (const id of filas.keys()) void andarFila(id)
+})
+onBeforeUnmount(() => {
+  telasDaFila.delete(estaTela)
+  if (!telasDaFila.size && !temItemVivo(filas.values())) window.removeEventListener('beforeunload', avisoAoFechar)
+})
+
 // `opcoes` (e não um booleano solto) porque o @click passa o evento como
 // primeiro argumento — um evento não pode virar "confirmar".
 async function enviar(opcoes?: { confirmar?: boolean; confirmarNaoResponde?: boolean }) {
@@ -1727,6 +2152,11 @@ async function enviar(opcoes?: { confirmar?: boolean; confirmarNaoResponde?: boo
   // mesma pergunta do cartão, por qualquer caminho (botão, Ctrl+Enter,
   // "enviar mesmo assim", sugestão da IA usada). Desistiu: nada sai, o texto fica.
   if (!confirmaSePublica(d.conversa.canal, texto.value.trim())) return
+  // Chat, pós-venda, reclamação e Zap: entra na fila e a caixa fica livre.
+  if (filaVale.value) {
+    porNaFila(d, opcoes?.confirmar === true)
+    return
+  }
   const id = d.conversa.id
   const nome = titulo(d.conversa)
   const body: { texto: string; rascunho_id?: string; ultima_vista_id?: string; confirmar?: boolean; mail_message_id?: string; confirmar_nao_responde?: boolean; para?: string } = { texto: texto.value.trim() }
@@ -2439,7 +2869,7 @@ async function carregarGarantia(id: string) {
 const podeVincularGarantia = computed(() => garantiaAcesso.value.registra && !!conversa.value && !conversa.value.id.startsWith('ig:'))
 function aoVincularGarantia(a: AtendimentoDaGarantia) {
   vincularAberto.value = false
-  toasts.success(`Vinculado à garantia #${a.garantia_id}`, `${a.tipo_problema === 'hardware' ? 'Hardware' : 'Software'} · ${a.cobertura_rotulo}`)
+  toasts.success(`Vinculado à garantia #${a.garantia_id}`, `${rotuloDoTipo(a.tipo_problema)} · ${a.cobertura_rotulo}`)
   void carregarGarantia(props.conversaId)
 }
 // Aguardando Cancelamento (item 4): a faixa lê o MESMO bloco do painel — o
@@ -2471,11 +2901,13 @@ function escolherDestino(chave: string) {
 }
 // Depois de mandar: as abas relidas (a primeira fala ao mediador cria a aba
 // Mediador) e a da conversa com o destino aberta — é lá que a mensagem mora.
-async function mostrarAbaDoDestino(id: string, chave: string) {
+// `podeTrocar`: a fila de envio pergunta na hora de trocar, porque a caixa fica livre
+// durante o envio e trocar a aba troca junto o destino da caixa.
+async function mostrarAbaDoDestino(id: string, chave: string, podeTrocar?: () => boolean) {
   if (!aberta(id)) return
   await carregarAbas(id)
   const aba = ABA_DO_DESTINO[chave]
-  if (aberta(id) && aba && aba !== abaAtiva.value && abasDaBarra.value.some((a) => a.chave === aba)) trocarAba(aba)
+  if (aberta(id) && aba && aba !== abaAtiva.value && abasDaBarra.value.some((a) => a.chave === aba) && (!podeTrocar || podeTrocar())) trocarAba(aba)
 }
 function aoCriarNota(m: Mensagem) {
   const d = detalhe.value
@@ -2514,7 +2946,15 @@ const motivoSemFoto = computed(() => {
   if (d.conversa.somente_leitura || sellerCenterDe(d.conversa.plataforma)) return bloqueioEnvio.value || 'Esta conversa é só de leitura aqui.'
   const ef = envioFoto.value
   if (!ef) return painelCarregando.value ? 'Conferindo se a foto pode sair…' : 'Não consegui conferir se a foto pode sair agora.'
+  // Texto na fila: o anexo sai pelo caminho dele, sem fila, e passaria na frente. A
+  // não ser que o texto esteja esperando justamente este anexo: aí a ordem é essa.
+  if (filaDaConversa.value.length && retencoes.get(props.conversaId)?.tipo !== 'anexo') return MOTIVO_ANEXO_COM_FILA
   if (ef.pode) return ''
+  // O painel lido com uma linha `enviando` guarda este código, e ele envelhece: a fila
+  // esvazia e o painel só é relido em 2 min. Sem nada no ar nesta conversa ele não vale
+  // (a mesma regra da caixa, no `bloqueioEnvio`). O backend segue como trava, e esta é
+  // a última recusa que ele confere: nenhuma outra fica escondida por ela.
+  if (ef.codigo === 'envio_em_andamento' && filaVale.value && !enviando.value) return ''
   if (ef.codigo && ERROS[ef.codigo]) return ERROS[ef.codigo]
   return ef.motivo ? bloqueioLegivel(motivoLegivel(ef.motivo)) : 'A foto não pode sair por aqui agora.'
 })
@@ -2798,7 +3238,13 @@ async function enviarFoto(opcoes?: { confirmar?: boolean; so?: number }) {
     // O que não chegou a ir (parou no meio) volta a pendente.
     for (const a of anexos.value) if (a.estado === 'enviando') a.estado = 'pendente'
     enviandoFoto.value = false
+    fimDoEnvioDeAnexos(id, vista, {
+      previstos: lotes.reduce((n, lote) => n + lote.length, 0),
+      saidos: saiu + repetidas,
+      restantes: anexos.value.filter((a) => a.estado !== 'enviada').length,
+    })
     enviandoIds.delete(id)
+    void andarFila(id)
   }
   const sim = simulada ? 'simulador: não chegou ao comprador' : undefined
   if (!aberta(id)) return
@@ -2829,7 +3275,8 @@ function podeTentarDeNovo(m: Mensagem): boolean {
   // A apagada (03/11/2026) saiu e foi apagada de propósito: mandar de novo não.
   if (m.apagada) return false
   if (m.origem !== 'davinci_humano' && m.origem !== 'davinci_ia') return false
-  if (enviando.value || incertos.has(d.conversa.id)) return false
+  // Com mensagem na fila, o de novo passaria na frente dela.
+  if (enviando.value || incertos.has(d.conversa.id) || filaDaConversa.value.length) return false
   const t = ts(m)
   // A apagada depois desta (03/11/2026) também conta como tentativa que saiu:
   // ela chegou ao comprador e foi tirada de propósito — sem isto, apagar a
@@ -2855,6 +3302,7 @@ async function tentarDeNovo(m: Mensagem) {
   try {
     const r = await api<{ mensagem: Mensagem }>(`/api/atendimento/conversas/${encodeURIComponent(id)}/responder`, { method: 'POST', body })
     const nova = r?.mensagem
+    anotarSaidaDeFora(id, nova?.id)
     if (nova?.status === 'falhou') toasts.error('A plataforma recusou de novo', erroDoBalao(nova))
     else if (nova?.status === 'revisar') toasts.warning('Não deu para confirmar o envio', ehZap.value ? ZAP_REVISAR.toast : 'Pode ter saído. Confira na plataforma e marque no balão se saiu.')
     else if (nova?.status === 'enviando' && nova.email?.tipo === 'resposta') toasts.info(AVISO_EMAIL_NA_FILA.titulo, AVISO_EMAIL_NA_FILA.texto)
@@ -3609,6 +4057,18 @@ watch(() => props.conversaId, (novo, velho) => {
               <button v-if="!l.aberta" type="button" class="shrink-0 underline hover:text-foreground" title="abrir esta conversa" @click="emit('abrirConversa', l.id)">abrir</button>
               <span class="h-px flex-1 bg-border" aria-hidden="true" />
             </div>
+            <!-- a mensagem na fila de envio: o balão no lugar dela até virar linha no servidor -->
+            <AtendimentoFilaBalao
+              v-else-if="l.tipo === 'fila'"
+              :item="l.item"
+              :parada="filaDaConversaParada"
+              :motivo-parada="filaDaConversa[0]?.id === l.item.id ? motivoDaParada : ''"
+              :pode-soltar="filaDaConversa[0]?.id === l.item.id && podeSoltarFila"
+              @tentar="tentarItemDeNovo(l.item)"
+              @editar="editarItem(l.item)"
+              @descartar="descartarItem(l.item)"
+              @soltar="soltarFila(l.item.conversaId)"
+            />
             <!-- nota interna: amarela, só a equipe vê -->
             <div v-else-if="lado(l.m) === 'nota'" :data-msg-id="l.m.id">
               <AtendimentoNota :mensagem="l.m" />
@@ -4184,7 +4644,7 @@ watch(() => props.conversaId, (novo, velho) => {
               ref="caixa"
               v-model="texto"
               rows="3"
-              :disabled="!podeDigitar || enviando"
+              :disabled="!podeDigitar || caixaPresa"
               class="block max-h-[40vh] min-h-[76px] w-full resize-y rounded-md border bg-background px-2.5 py-2 text-sm [field-sizing:content] focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
               :placeholder="podeDigitar ? (conversa.canal === 'avaliacao' ? `Escreva a resposta PÚBLICA à avaliação… (/ respostas prontas · ${dicaDoEnvio})` : rotuloDestino ? `${rotuloDestino}: escreva a mensagem… (/ respostas prontas · ${dicaDoEnvio})` : `Escreva a resposta… (/ respostas prontas · ${dicaDoEnvio})`) : 'Resposta desabilitada nesta conversa'"
               aria-label="resposta ao comprador"
@@ -4278,7 +4738,7 @@ watch(() => props.conversaId, (novo, velho) => {
               :title="incertos.has(conversaId) ? 'travado até a conversa mostrar se o último envio saiu' : `enviar (${ehEmail ? 'Ctrl+Enter' : 'Enter'})`"
               @click="enviar()"
             >
-              <Loader2 v-if="enviando" class="mr-1.5 size-4 animate-spin" />
+              <Loader2 v-if="caixaPresa" class="mr-1.5 size-4 animate-spin" />
               <Send v-else class="mr-1.5 size-4" />
               Enviar
             </Button>

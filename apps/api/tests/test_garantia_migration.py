@@ -1,5 +1,6 @@
-"""As migrations 0380 (Painel de Garantia Uranyx), 0434 (garantia automática) e
-0439 (pedido de garantia) criam EXATAMENTE o que o model declara.
+"""As migrations 0380 (Painel de Garantia Uranyx), 0434 (garantia automática),
+0439 (pedido de garantia) e 0459 (prazo por produto e o caso do SAC) criam
+EXATAMENTE o que o model declara.
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Aqui a 0380 roda de verdade num schema descartável e o catálogo do
@@ -12,6 +13,7 @@ desfaz tudo, inclusive a função do gatilho.
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import uuid
 from pathlib import Path
 
@@ -30,11 +32,13 @@ TABELAS = [
     "garantia_conversas",
     "garantia_log",
     "garantia_pendencias",
+    "garantia_sac",
     "garantias",
+    "pricing_garantia_prazo",
 ]
 _FILTRO = (
     "('garantias', 'garantia_atendimentos', 'garantia_atendimento_anexos', 'garantia_log',"
-    " 'garantia_conversas', 'garantia_pendencias')"
+    " 'garantia_conversas', 'garantia_pendencias', 'garantia_sac', 'pricing_garantia_prazo')"
 )
 
 
@@ -134,6 +138,15 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     assert mod_auto.down_revision == "0433_atendimento_zap_saude"
     mod_pedido = _carregar("0439_garantia_pedido")
     assert mod_pedido.down_revision == "0438_mail_composer"
+    mod_sac = _carregar("0459_garantia_sac")
+    assert (mod_sac.revision, mod_sac.down_revision) == (
+        "0459_garantia_sac",
+        "0458_chamados_fechar_dia",
+    )
+    # As tabelas quentes (garantias, pricing_products, garantia_log): a 0459
+    # desiste em vez de enfileirar a API atrás dela (como 0449/0451).
+    for passo in (mod_sac.upgrade, mod_sac.downgrade):
+        assert "SET LOCAL lock_timeout" in inspect.getsource(passo)
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
@@ -144,6 +157,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     await db.execute(
         text(f'CREATE TABLE "{rascunho}".atendimento_pedidos_comprador (pedido varchar(64))')
     )
+    # A 0459 põe o prazo na linha da Tabela de Preços (e a vigência aponta para ela).
+    await db.execute(text(f'CREATE TABLE "{rascunho}".pricing_products (id uuid PRIMARY KEY)'))
     await db.commit()
 
     def _rodar(conn, passo: str, modulo=None) -> None:
@@ -154,11 +169,13 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     mod.SCHEMA = rascunho
     mod_auto.SCHEMA = rascunho
     mod_pedido.SCHEMA = rascunho
+    mod_sac.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade")
         await conn.run_sync(_rodar, "upgrade", mod_auto)
         await conn.run_sync(_rodar, "upgrade", mod_pedido)
+        await conn.run_sync(_rodar, "upgrade", mod_sac)
         await db.commit()
 
         da_migration = await _catalogo(db, rascunho)
@@ -170,6 +187,20 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert da_migration["indices"] == do_model["indices"]
         assert da_migration["gatilhos"] == do_model["gatilhos"]
         assert da_migration["funcoes"] == ["garantia_so_insercao"]
+        # A coluna e o CHECK do prazo na linha da Tabela de Preços (0459).
+        prazo_do_produto = text(
+            "SELECT c.udt_name, c.is_nullable, pg_get_constraintdef(co.oid)"
+            " FROM information_schema.columns c"
+            " JOIN pg_namespace n ON n.nspname = c.table_schema"
+            " JOIN pg_class cl ON cl.relnamespace = n.oid AND cl.relname = c.table_name"
+            " JOIN pg_constraint co ON co.conrelid = cl.oid"
+            "  AND co.conname = 'ck_pricing_products_garantia_meses'"
+            " WHERE c.table_schema = :schema AND c.table_name = 'pricing_products'"
+            "  AND c.column_name = 'garantia_meses'"
+        )
+        do_rascunho = (await db.execute(prazo_do_produto, {"schema": rascunho})).all()
+        assert do_rascunho == (await db.execute(prazo_do_produto, {"schema": schema_model})).all()
+        assert len(do_rascunho) == 1 and "120" in do_rascunho[0][2]
         nomes = {c[1] for c in da_migration["constraints"]}
         assert {
             "pk_garantias",
@@ -182,6 +213,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             "ck_garantia_log_acao_valida",
             "ck_garantias_solicitacao_origem_valida",
             "fk_garantias_nao_solicitada_por_users",
+            "ck_garantias_fim_garantia_ok",
+            "uq_garantia_sac_conversa_id",
+            "ck_garantia_sac_confirmado_com_garantia",
+            "ck_garantia_sac_encerrado_confirmado",
+            "ck_garantia_sac_encerrado_com_motivo",
+            "fk_garantia_sac_garantia_id_garantias",
         } <= nomes
         # O nome da FK do anexo passa de 63 caracteres (o SQLAlchemy encurta):
         # confere pelo que ela faz.
@@ -268,8 +305,40 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await db.execute(text(f'DELETE FROM "{rascunho}".garantias'))
         await db.commit()
 
-        # O downgrade tira tudo o que a 0439, a 0434 e a 0380 puseram.
+        # O fim único sem prazo, e o caso confirmado sem garantia: o banco recusa.
+        await db.execute(
+            text(
+                f'INSERT INTO "{rascunho}".garantias'
+                " (pedido_bling, nf_numero, cliente_nome, cpf, origem)"
+                " VALUES ('5', '14', 'Fulano', '52998224725', 'robo')"
+            )
+        )
+        await db.commit()
+        with pytest.raises(Exception, match="ck_garantias_fim_garantia_ok"):
+            await db.execute(
+                text(f"UPDATE \"{rascunho}\".garantias SET fim_garantia = '2027-01-01'")
+            )
+        await db.rollback()
+        conversa = uuid.uuid4()
+        await db.execute(
+            text(f"INSERT INTO \"{rascunho}\".atendimento_conversas (id) VALUES ('{conversa}')")
+        )
+        await db.commit()
+        with pytest.raises(Exception, match="ck_garantia_sac_confirmado_com_garantia"):
+            await db.execute(
+                text(
+                    f'INSERT INTO "{rascunho}".garantia_sac'
+                    " (conversa_id, protocolo, recebido_em, confirmado_em)"
+                    f" VALUES ('{conversa}', 'US-26-0001', now(), now())"
+                )
+            )
+        await db.rollback()
+        await db.execute(text(f'DELETE FROM "{rascunho}".garantias'))
+        await db.commit()
+
+        # O downgrade tira tudo o que a 0459, a 0439, a 0434 e a 0380 puseram.
         conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", mod_sac)
         await conn.run_sync(_rodar, "downgrade", mod_pedido)
         await conn.run_sync(_rodar, "downgrade", mod_auto)
         await conn.run_sync(_rodar, "downgrade")

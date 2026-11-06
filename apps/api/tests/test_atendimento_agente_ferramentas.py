@@ -654,6 +654,15 @@ async def test_ver_anuncio_kia_bordo_e_fone(
     # O dono, 05/11/2026: sobre o NFC do modelo vale a equipe, e aqui ela e o anúncio concordam.
     assert campos["nfc"]["valor"] == "sim" and campos["nfc"]["fonte"] == "equipe"
     assert "nota" not in campos["nfc"]
+    # O dono, 06/11/2026: o que vem na caixa também, com a plataforma da conversa (Shopee: a
+    # película não vem, a chave do chip não tem veredito).
+    assert campos["carregador"] == {
+        "campo": "carregador",
+        "valor": "vem na caixa",
+        "fonte": "equipe",
+    }
+    assert campos["pelicula"]["valor"] == "não vem na caixa"
+    assert "chave_chip" not in campos
     # Liberação L3 do dono (23/10/2026): sem restrição e com a descrição lida, a PROVA de
     # que nenhuma fonte restringe (o "Enviamos para todo o Brasil" só sai com ela).
     assert dados["restricao_envio"] == {

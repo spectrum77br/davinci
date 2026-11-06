@@ -154,6 +154,11 @@ equipe); responder só isso; e falta de dado não é motivo de pessoa quando dá
 que se sabe e onde o cliente vê o resto no app (pessoa só nas ações essenciais da régua ou
 na decisão da loja). As regras da busca no catálogo (G1) vão na descrição da ferramenta. O
 bloco 1 não muda (o "# SEMPRE" das 3 linhas do Haiku vale igual no Sonnet).
+
+06/11/2026 (o dono, sobre o que vem na caixa e os fatos da mala: "confie no q a eqpe diz sempre"):
+a fonte "equipe" do `_PRODUTO` deixa de dizer só "(NFC, 5G)", e o bloco 1 fica 10 caracteres menor.
+O dado chega ao modelo como linha das especificações, no pacote (`pacote._com_fontes`) e no
+`ver_anuncio`, sem ferramenta nova.
 """
 
 from __future__ import annotations
@@ -636,7 +641,7 @@ _FERRAMENTAS = """# AS FERRAMENTAS (só leitura)
 "dado indisponível agora" = siga sem o dado (pergunte ou encaminhe), sem inventar."""
 
 _PRODUTO = """# PRODUTO: DE ONDE VEM O DADO
-1. a fonte "equipe" (NFC, 5G): vale mais que todas, até contra o título;
+1. a fonte "equipe": vale mais que todas, até contra o título;
 2. o anúncio da conversa (ou do item do pedido): título, atributos, descrição, variações;
 3. o cadastro da loja (fonte "davinci": RAM e armazenamento pelo nome do produto, 5G, fatos \
 aprovados);

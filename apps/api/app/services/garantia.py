@@ -26,7 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import BlingOrder, Logistica, SituacaoBling, User
 from app.models.atendimento import AtendimentoConversa, AtendimentoMensagem
 from app.models.bling_nota import BlingNotaEmitida
+from app.models.enums import IntegrationPlatform
 from app.models.garantia import Garantia, GarantiaLog
+from app.models.marketplace_financial import MarketplaceOrderFreightReconciliation
 from app.models.nf import NfNota
 from app.models.pricing import StoreInfo
 from app.services.pos_vendas import _FRACAO_EMBALAGEM_MAX, _FRACAO_PRODUTO_MIN
@@ -82,6 +84,23 @@ STATUS_ROTULOS = {
 # Indicador "HW vence em 30d" do topo do painel.
 DIAS_ALERTA_HARDWARE = 30
 
+# ══ PRAZO ÚNICO (06/11/2026) — "Painel de Garantia: alterações" ══════════════
+# "Cada produto tem um prazo único de garantia, informado na Tabela de Preços →
+# Produtos. Deixa de existir a separação entre hardware e software." O PAINEL
+# (lista, filtro, cartões, Detalhes) usa só o prazo do produto: o fim é
+# `garantias.fim_garantia` = entrega + `garantias.prazo_meses` (RN04 e o
+# ponto 1 continuam). Hardware/software (acima) continuam calculados e
+# gravados: a IA do Atendimento usa os dois.
+STATUS_SEM_PRAZO = "sem_prazo"
+STATUS_PAINEL_ROTULOS = {
+    STATUS_AGUARDANDO: "Aguardando entrega",
+    STATUS_ATIVA: "Ativa",
+    STATUS_EXPIRADA: "Expirada",
+    STATUS_SEM_PRAZO: "Prazo não cadastrado",
+}
+# Cartão e filtro "Vence em 30 dias".
+DIAS_ALERTA_VENCIMENTO = 30
+
 # "Aguardando entrega" de um pedido que o BLING já dá como entregue: nenhuma
 # fonte do DaVinci tem a data (a Logística guarda a data só desde 15/07/2026,
 # e o TikTok que já passou para COMPLETED perdeu o carimbo de entregue). O
@@ -103,6 +122,13 @@ COBERTURA_ROTULOS = {
     COBERTO: "Coberto",
     FORA_DA_GARANTIA: "Fora da garantia",
     SEM_DATA_DE_ENTREGA: "Sem data de entrega",
+}
+# O tipo do atendimento registrado como o painel mostra (06/11/2026: sem
+# hardware/software no painel; o valor gravado continua o mesmo, a trava
+# `tipo_valido`). Os mesmos rótulos de `TIPOS_PROBLEMA` em lib/garantias.ts.
+TIPO_PROBLEMA_ROTULOS = {
+    "hardware": "Defeito no aparelho",
+    "software": "Sistema / aplicativo",
 }
 
 # Produto Uranyx = SKU no recorte da Uranyx: eletro `u*`, celulares
@@ -271,6 +297,28 @@ def status_da(g: Garantia, dia: date | None = None) -> str:
     return status_em(g.data_inicio, g.fim_hardware, g.fim_software, dia or hoje())
 
 
+def status_painel(inicio: date | None, prazo_meses: int | None, fim: date | None, dia: date) -> str:
+    """O status do painel (06/11/2026): sem entrega, "Aguardando entrega"; com
+    entrega e sem prazo do produto, "Prazo não cadastrado"; senão ativa até o
+    fim (inclusive, ponto 1) e expirada depois. PURA."""
+    if inicio is None:
+        return STATUS_AGUARDANDO
+    if prazo_meses is None or fim is None:
+        return STATUS_SEM_PRAZO
+    return STATUS_ATIVA if coberto(fim, dia) else STATUS_EXPIRADA
+
+
+def status_painel_da(g: Garantia, dia: date | None = None) -> str:
+    return status_painel(g.data_inicio, g.prazo_meses, g.fim_garantia, dia or hoje())
+
+
+def fim_da_garantia(inicio: date | None, prazo_meses: int | None) -> date | None:
+    """Entrega + o prazo do produto (RN04). Sem um dos dois, sem fim. PURA."""
+    if inicio is None or not prazo_meses:
+        return None
+    return somar_meses(inicio, prazo_meses)
+
+
 def entregue_sem_data(data_inicio: date | None, situacao_bling: str | None) -> bool:
     """Sem data de entrega, mas o Bling já dá o pedido como entregue."""
     return data_inicio is None and str(situacao_bling or "") in SITUACOES_BLING_ENTREGUE
@@ -280,6 +328,13 @@ def rotulo_do_status(status: str, sem_data_entregue: bool = False) -> str:
     if status == STATUS_AGUARDANDO and sem_data_entregue:
         return ROTULO_ENTREGUE_SEM_DATA
     return STATUS_ROTULOS[status]
+
+
+def rotulo_do_painel(status: str, sem_data_entregue: bool = False) -> str:
+    """O rótulo do status NOVO (o do painel)."""
+    if status == STATUS_AGUARDANDO and sem_data_entregue:
+        return ROTULO_ENTREGUE_SEM_DATA
+    return STATUS_PAINEL_ROTULOS[status]
 
 
 def _pedido_entregue_no_bling():
@@ -307,17 +362,76 @@ async def situacoes_dos_pedidos(session: AsyncSession, numeros: list[str]) -> di
     return {str(n): s for n, s in linhas.all() if s}
 
 
+# O pedido apagado no Bling (`bling_orders.situacao = 'excluido'`) não está no
+# catálogo de situações.
+ROTULO_EXCLUIDO_NO_BLING = "Excluído no Bling"
+
+
+async def situacoes_com_nome(
+    session: AsyncSession, numeros: list[str]
+) -> dict[str, tuple[str, str]]:
+    """pedido → (id da situação no Bling, o nome dela) — a coluna "Status do
+    pedido" (06/11/2026: "situação do pedido no Bling"), como a tela Reembolso
+    mostra (`refunds._situacoes_by_pedido`). Sem nome no catálogo, o id."""
+    lista = sorted({n for n in numeros if n})
+    saida: dict[str, tuple[str, str]] = {}
+    for i in range(0, len(lista), 1000):
+        sub = (
+            select(BlingOrder.numero, func.max(BlingOrder.situacao).label("situacao"))
+            .where(BlingOrder.numero.in_(lista[i : i + 1000]))
+            .group_by(BlingOrder.numero)
+            .subquery()
+        )
+        linhas = await session.execute(
+            select(sub.c.numero, sub.c.situacao, SituacaoBling.nome).outerjoin(
+                SituacaoBling, cast(SituacaoBling.id, Text) == sub.c.situacao
+            )
+        )
+        for numero, situacao, nome in linhas.all():
+            if not situacao:
+                continue
+            if situacao == "excluido":
+                nome = ROTULO_EXCLUIDO_NO_BLING
+            saida[str(numero)] = (str(situacao), nome or str(situacao))
+    return saida
+
+
+def pedidos_do_pack(termo: str):
+    """Os pedidos do ML de um pack (04/11/2026: o SAC procura pelo nº que o ML
+    mostra, e o Bling guarda ora o pack, ora o pedido)."""
+    r = MarketplaceOrderFreightReconciliation
+    return select(r.external_order_id).where(
+        r.platform == IntegrationPlatform.ML, r.pack_id == termo
+    )
+
+
+def pack_do_pedido(termo: str):
+    """O pack do ML de um pedido (o contrário de `pedidos_do_pack`)."""
+    r = MarketplaceOrderFreightReconciliation
+    return select(r.pack_id).where(
+        r.platform == IntegrationPlatform.ML,
+        r.external_order_id == termo,
+        r.pack_id.is_not(None),
+    )
+
+
 def dia_em_sp(quando: datetime) -> date:
     q = quando if quando.tzinfo else quando.replace(tzinfo=UTC)
     return q.astimezone(SAO_PAULO).date()
 
 
 def cobertura_em(g: Garantia, tipo: str, quando: datetime) -> tuple[str, date | None]:
-    """§5.2: Coberto se a data do atendimento ≤ fim da garantia do tipo
-    informado; senão Fora da garantia. Sem entrega ainda: sem data."""
+    """§5.2: Coberto se a data do atendimento ≤ fim da garantia; senão Fora
+    da garantia. Sem entrega ainda: sem data. Com o prazo do produto (o fim
+    único, 06/11/2026) vale o fim único e o tipo só descreve o problema — o
+    painel mostra "Ativa até …" e o atendimento gravado não pode dizer outra
+    coisa. Sem o prazo cadastrado, o fim do tipo informado (como antes)."""
     if g.data_inicio is None:
         return SEM_DATA_DE_ENTREGA, None
-    fim = g.fim_hardware if tipo == "hardware" else g.fim_software
+    if g.fim_garantia is not None:
+        fim = g.fim_garantia
+    else:
+        fim = g.fim_hardware if tipo == "hardware" else g.fim_software
     return (COBERTO if coberto(fim, dia_em_sp(quando)) else FORA_DA_GARANTIA), fim
 
 
@@ -341,36 +455,39 @@ def _coberto_sql(coluna, dia: date):
 
 
 def filtro_status(status: str, dia: date):
+    """O filtro Status da aba Garantia e os cartões (06/11/2026: o prazo
+    único — sai "Somente software"; "Hardware vence em 30 dias" vira "Vence em
+    30 dias"; entra "Sem prazo cadastrado")."""
     g = Garantia
     if status == STATUS_AGUARDANDO:
         return g.data_inicio.is_(None)
     if status == STATUS_ATIVA:
-        return and_(g.data_inicio.is_not(None), _coberto_sql(g.fim_hardware, dia))
-    if status == STATUS_SOMENTE_SOFTWARE:
         return and_(
             g.data_inicio.is_not(None),
-            ~_coberto_sql(g.fim_hardware, dia),
-            _coberto_sql(g.fim_software, dia),
+            g.fim_garantia.is_not(None),
+            _coberto_sql(g.fim_garantia, dia),
         )
     if status == STATUS_EXPIRADA:
-        return and_(g.data_inicio.is_not(None), ~_coberto_sql(g.fim_software, dia))
-    if status == "hw_vence_30d":
+        return and_(g.fim_garantia.is_not(None), ~_coberto_sql(g.fim_garantia, dia))
+    if status == "vence_30d":
         return and_(
             filtro_status(STATUS_ATIVA, dia),
-            g.fim_hardware <= dia + timedelta(days=DIAS_ALERTA_HARDWARE),
+            g.fim_garantia <= dia + timedelta(days=DIAS_ALERTA_VENCIMENTO),
         )
+    if status == STATUS_SEM_PRAZO:
+        return g.prazo_meses.is_(None)
     if status == "entregue_sem_data":
         return and_(g.data_inicio.is_(None), _pedido_entregue_no_bling())
     raise ValueError(status)
 
 
 def status_sql(dia: date):
-    """CASE com o status (para ordenar/contar no banco)."""
+    """CASE com o status do painel (para ordenar/contar no banco)."""
     g = Garantia
     return case(
         (g.data_inicio.is_(None), literal(STATUS_AGUARDANDO)),
-        (_coberto_sql(g.fim_hardware, dia), literal(STATUS_ATIVA)),
-        (_coberto_sql(g.fim_software, dia), literal(STATUS_SOMENTE_SOFTWARE)),
+        (or_(g.prazo_meses.is_(None), g.fim_garantia.is_(None)), literal(STATUS_SEM_PRAZO)),
+        (_coberto_sql(g.fim_garantia, dia), literal(STATUS_ATIVA)),
         else_=literal(STATUS_EXPIRADA),
     )
 
@@ -443,6 +560,20 @@ def normalizar_serie(v: Any) -> str:
 
 def normalizar_nome(v: Any) -> str:
     return re.sub(r"\s+", " ", str(v or "")).strip()
+
+
+# O apelido da plataforma no fim do nome ("Maria Souza (maria123)"); o \)?
+# cobre o nome cortado pelo limite de 60 caracteres da NF, sem o ")".
+_RX_APELIDO_NO_FIM = re.compile(r"\s*\([^()]*\)?\s*$")
+
+
+def nome_sem_apelido(nome: str | None) -> str:
+    """A coluna Nome (06/11/2026): o nome do comprador sem o apelido do fim
+    ("Maria Souza (maria123)" → "Maria Souza"). Se não sobrar nada, o
+    original. Só na exibição: o `cliente_nome` gravado não muda. PURA."""
+    original = normalizar_nome(nome)
+    limpo = _RX_APELIDO_NO_FIM.sub("", original).strip()
+    return limpo or original
 
 
 _ACENTOS = "áàâãäéèêëíìîïóòôõöúùûüçñ"
@@ -547,13 +678,18 @@ async def resolver_entrega(
 
 
 def aplicar_entrega(g: Garantia, entrega: Entrega | None) -> None:
+    """A entrega e os prazos: os de hardware/software (a IA do Atendimento) e
+    o fim único com o prazo da venda que a garantia já tem (`prazo_meses`,
+    services/garantia_prazo.py)."""
     if entrega is None:
         g.data_inicio = g.fim_hardware = g.fim_software = None
+        g.fim_garantia = None
         g.entrega_origem = None
         g.entrega_em = None
         return
     g.data_inicio = entrega.dia
     g.fim_hardware, g.fim_software = calcular_prazos(entrega.dia)
+    g.fim_garantia = fim_da_garantia(entrega.dia, g.prazo_meses)
     g.entrega_origem = entrega.origem
     g.entrega_em = entrega.em
 

@@ -9,35 +9,58 @@
 // como prova é o "Registrar atendimento", que baixa e congela.
 // "Registrar atendimento" abre o mesmo modal do Atendimento (GarantiaVincular)
 // já com esta garantia e a conversa escolhida.
+// Garantia × SAC (06/11/2026, "Painel de Garantia: alterações" v3): o caso do
+// SAC do site — no cabeçalho o nome COMPLETO (sem apelido, sem cortar), o
+// pedido do Bling, o tempo em aberto (do formulário até o encerramento) e o
+// "Encerrar atendimento"; no topo da conversa o Resumo do SAC
+// (GarantiaSacResumo); no fim, a resposta SÓ por e-mail, pela conversa do
+// protocolo, com a mesma prévia e o mesmo envio do Atendimento
+// (AtendimentoEmailResposta + POST /api/atendimento/conversas/{id}/responder:
+// sai do sac@ com a assinatura de Cadastros › E-mails). O chat da plataforma
+// fica só para leitura (continua sendo respondido no Atendimento). Sem
+// hardware/software: a linha de prazos mostra o fim único da garantia.
 import { onKeyStroke } from '@vueuse/core'
-import { AlertCircle, ExternalLink, FileText, Loader2, MessageSquare, RefreshCw, ShieldCheck, Sparkles, Video } from 'lucide-vue-next'
+import { AlertCircle, CheckCircle2, ExternalLink, FileText, Loader2, Mail, MessageSquare, RefreshCw, Send, ShieldCheck, Sparkles, Video } from 'lucide-vue-next'
 import type { ConversaDetalhe, Mensagem } from '~/components/AtendimentoPlataforma.vue'
+import { AVISO_EMAIL_NA_FILA, LIMITE_RESPOSTA_EMAIL, corpoDoEmail } from '~/components/AtendimentoEmailResposta.vue'
 import {
   CANAL_ROTULO,
+  dataBR,
   dataCurta,
+  dataHoraBR,
   errosDaApi,
   formularioSacLegivel,
   rotuloDoPedido,
   ladoDaMensagem,
   linhasDoHistorico,
+  nomeDaLinha,
   nomePlataforma,
   pecasDoHistorico,
-  textoNf,
+  tempoEmAberto,
+  textoMeses,
   type AtendimentoGarantia,
   type GarantiaLinha,
   type Historico,
   type HistoricoConversa,
   type HistoricoMensagem,
+  type SacDaLinha,
+  type SacDetalhe,
+  type SacOut,
   type SituacaoConversa,
 } from '~/lib/garantias'
 
 // `automatico`: o robô está ligado (GET /regras) — só então a tela promete
-// que a conversa "aparece aqui sozinha".
-const props = defineProps<{ garantia: GarantiaLinha; versao?: number; automatico?: boolean }>()
-const emit = defineEmits<{ (e: 'detalhes', id: number): void; (e: 'mudou'): void }>()
+// que a conversa "aparece aqui sozinha". `hoje`: o dia do servidor (o "Aberto
+// há N dias").
+const props = defineProps<{ garantia: GarantiaLinha; versao?: number; automatico?: boolean; hoje?: string }>()
+// 'mudou' com o caso: o Encerrar devolve o caso como ficou e a página põe na
+// linha aberta (revisão 06/11/2026); sem o caso (registrou atendimento), a
+// página só relê a lista — o histórico se relê aqui mesmo.
+const emit = defineEmits<{ (e: 'detalhes', id: number): void; (e: 'mudou', sac?: SacDaLinha): void }>()
 
 const { api } = useApi()
 const acesso = useGarantiaAcesso()
+const toasts = useToasts()
 
 const historico = ref<Historico | null>(null)
 const carregando = ref(false)
@@ -70,6 +93,96 @@ async function carregar() {
 // objeto da mesma garantia, e isso não pode reler o histórico nem gravar
 // "consultou" de novo).
 watch([() => props.garantia.id, () => props.versao], () => { historico.value = null; void carregar() }, { immediate: true })
+
+// ─── o caso do SAC do site (06/11/2026) ─────────────────────────────────────
+// GET /api/garantias/{id}/sac: o formulário lido (o Resumo do SAC), a
+// conversa do protocolo (a resposta por e-mail sai por ela) e quem
+// confirmou/encerrou. Só quando a linha tem caso (sem caso, nada a ler).
+const sac = ref<SacDetalhe | null>(null)
+const erroSac = ref('')
+let geracaoSac = 0
+async function carregarSac() {
+  const g = ++geracaoSac
+  erroSac.value = ''
+  if (!props.garantia.sac) {
+    sac.value = null
+    return
+  }
+  try {
+    const r = await api<SacDetalhe | null>(`/api/garantias/${props.garantia.id}/sac`)
+    if (g !== geracaoSac) return
+    sac.value = r ?? null
+  } catch (e) {
+    if (g !== geracaoSac) return
+    sac.value = null
+    erroSac.value = errosDaApi(e).geral || 'Não consegui ler o resumo do SAC.'
+  }
+}
+// O Encerrar não relê (revisão 06/11/2026): o Resumo do SAC não muda, e com
+// outro formulário aberto na mesma garantia o GET /sac já traria o OUTRO caso
+// embaixo do cabeçalho deste.
+watch([() => props.garantia.id, () => props.versao, () => props.garantia.sac?.id ?? null], () => { void carregarSac() }, { immediate: true })
+// O caso aberto (confirmado e não encerrado): é ele que tem o Encerrar e a resposta.
+const casoAberto = computed(() => {
+  const s = props.garantia.sac
+  return !!s && !!s.confirmado_em && !s.encerrado_em
+})
+const emAberto = computed(() => (props.garantia.sac?.confirmado_em ? tempoEmAberto(props.garantia.sac, props.hoje) : ''))
+
+const encerrando = ref(false)
+async function encerrar() {
+  const s = props.garantia.sac
+  if (!s || encerrando.value) return
+  if (!window.confirm(`Encerrar o atendimento ${s.protocolo} de ${nomeDaLinha(props.garantia)}? O caso sai da aba Atendimento e o tempo em aberto para de contar.`)) return
+  encerrando.value = true
+  try {
+    // A resposta é o caso encerrado: a linha aberta passa a mostrá-lo assim
+    // (sem o Encerrar e sem a resposta por e-mail) sem reler o histórico —
+    // cada leitura dele grava "consultou" no log.
+    const r = await api<SacOut>(`/api/garantias/sac/${s.id}/encerrar`, { method: 'POST' })
+    toasts.success(`Atendimento ${s.protocolo} encerrado`, 'O caso saiu da aba Atendimento (o log guarda quem encerrou).')
+    emit('mudou', r)
+  } catch (e) {
+    toasts.error('Não deu para encerrar', errosDaApi(e).geral)
+  } finally {
+    encerrando.value = false
+  }
+}
+
+// A resposta por e-mail: só pela conversa do protocolo (a do caso; sem o
+// resumo, a conversa do histórico que tem o protocolo).
+const conversaDoSac = computed(() => sac.value?.conversa_id || conversas.value.find((c) => c.protocolo)?.id || null)
+const resposta = ref('')
+const confirmouNaoResponde = ref(false)
+const travaEmail = ref<string | null>(null)
+const enviando = ref(false)
+const podeResponder = computed(() => casoAberto.value && acesso.value.registra && !!conversaDoSac.value && !historico.value?.restrito)
+const motivoSemEnvio = computed(() => {
+  if (travaEmail.value === null) return 'a prévia do e-mail ainda não carregou'
+  return travaEmail.value
+})
+async function responder() {
+  const id = conversaDoSac.value
+  const texto = resposta.value.trim()
+  if (!id || !texto || enviando.value || motivoSemEnvio.value) return
+  enviando.value = true
+  try {
+    await api(`/api/atendimento/conversas/${encodeURIComponent(id)}/responder`, {
+      method: 'POST',
+      body: { texto, ...corpoDoEmail(null, confirmouNaoResponde.value) },
+    })
+    resposta.value = ''
+    confirmouNaoResponde.value = false
+    toasts.info(AVISO_EMAIL_NA_FILA.titulo, AVISO_EMAIL_NA_FILA.texto)
+    void carregar()
+  } catch (e: any) {
+    const det = e?.data?.detail
+    const texto = typeof det?.texto === 'string' ? det.texto : typeof det?.message === 'string' ? det.message : errosDaApi(e).geral
+    toasts.error('A resposta não saiu', texto)
+  } finally {
+    enviando.value = false
+  }
+}
 
 const linhas = computed(() => (historico.value ? linhasDoHistorico(historico.value) : []))
 const conversas = computed(() => historico.value?.conversas || [])
@@ -213,26 +326,39 @@ function aoRegistrar(_a: AtendimentoGarantia) {
     <header class="space-y-2 border-b px-4 py-3">
       <div class="flex flex-wrap items-start gap-2">
         <div class="min-w-0 flex-1">
-          <h2 class="truncate text-base font-semibold">{{ garantia.cliente_nome }}</h2>
+          <h2 class="break-words text-base font-semibold" data-nome-caso>{{ nomeDaLinha(garantia) }}</h2>
           <p class="text-xs text-muted-foreground">
-            pedido {{ garantia.pedido_bling }}<template v-if="garantia.pedido_marketplace"> ({{ garantia.pedido_marketplace }})</template>
+            pedido <span class="font-medium text-foreground" data-pedido-bling>{{ garantia.pedido_bling }}</span><template v-if="garantia.pedido_marketplace"> ({{ garantia.pedido_marketplace }})</template>
             <template v-if="garantia.plataforma"> · {{ nomePlataforma(garantia.plataforma) }}</template>
             <template v-if="garantia.conta"> · {{ garantia.conta }}</template>
-            · NF {{ textoNf(garantia.nf_numero, garantia.nf_serie) }}
+            <template v-if="garantia.status_pedido"> · {{ garantia.status_pedido }}</template>
+          </p>
+          <p v-if="garantia.sac" class="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs" data-caso-sac>
+            <span v-if="emAberto" class="font-medium" data-tempo-em-aberto>{{ emAberto }}</span>
+            <span class="text-muted-foreground">· SAC {{ garantia.sac.protocolo }} · enviado em {{ dataBR(garantia.sac.recebido_em) }}</span>
+            <span v-if="garantia.sac.confirmado_em" class="text-muted-foreground">· confirmado {{ dataHoraBR(garantia.sac.confirmado_em) }}<template v-if="garantia.sac.confirmado_por"> por {{ garantia.sac.confirmado_por.nome }}</template></span>
+            <span v-if="garantia.sac.encerrado_em" class="text-muted-foreground">· encerrado {{ dataHoraBR(garantia.sac.encerrado_em) }}<template v-if="garantia.sac.encerrado_motivo === 'terminou'"> (terminou sozinho)</template></span>
           </p>
         </div>
         <GarantiaStatus :status="garantia.status" :entregue-sem-data="garantia.entregue_sem_data" />
-        <Button size="sm" variant="ghost" class="h-8" :disabled="carregando" title="ler de novo" @click="carregar">
+        <Button size="sm" variant="ghost" class="h-8" :disabled="carregando" title="ler de novo" @click="carregar(); carregarSac()">
           <RefreshCw class="size-4" :class="{ 'animate-spin': carregando }" />
         </Button>
         <Button size="sm" variant="outline" class="h-8" data-abrir-detalhe @click="emit('detalhes', garantia.id)">
           <FileText class="mr-1 size-4" /> Detalhes
         </Button>
+        <Button v-if="casoAberto && acesso.registra" size="sm" variant="outline" class="h-8" :disabled="encerrando" title="o caso sai da aba Atendimento e o tempo em aberto para de contar (fica no log)" data-encerrar-atendimento @click="encerrar">
+          <Loader2 v-if="encerrando" class="mr-1 size-4 animate-spin" /><CheckCircle2 v-else class="mr-1 size-4" /> Encerrar atendimento
+        </Button>
       </div>
       <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
         <span><span class="text-muted-foreground">Entrega</span> <span class="tabular-nums">{{ dataCurta(garantia.data_inicio) }}</span></span>
-        <span><span class="text-muted-foreground">Fim HW</span> <span class="tabular-nums">{{ dataCurta(garantia.fim_hardware) }}</span></span>
-        <span><span class="text-muted-foreground">Fim SW</span> <span class="tabular-nums">{{ dataCurta(garantia.fim_software) }}</span></span>
+        <span data-fim-garantia>
+          <span class="text-muted-foreground">Fim da garantia</span>
+          <span v-if="garantia.fim_garantia" class="ml-1 tabular-nums">{{ dataCurta(garantia.fim_garantia) }} ({{ textoMeses(garantia.garantia_meses) }})</span>
+          <span v-else-if="!garantia.garantia_meses" class="ml-1 text-amber-700 dark:text-amber-300" title="o produto não tem o prazo da garantia na Tabela de Preços › Produtos">— prazo não cadastrado</span>
+          <span v-else class="ml-1 tabular-nums">—</span>
+        </span>
         <span v-if="garantia.origem === 'robo'" class="inline-flex items-center gap-1 rounded-full bg-violet-500/10 px-2 py-0.5 text-violet-700 dark:text-violet-300" title="criada sozinha pelo DaVinci com a nota fiscal de produto do pedido" data-selo-robo>
           <Sparkles class="size-3" /> criada sozinha pela NF
         </span>
@@ -259,6 +385,8 @@ function aoRegistrar(_a: AtendimentoGarantia) {
       <div v-if="carregando && !historico" class="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground"><Loader2 class="size-4 animate-spin" /> lendo as conversas…</div>
       <p v-else-if="erro" role="alert" class="flex items-center justify-center gap-2 py-10 text-sm text-destructive"><AlertCircle class="size-4" /> {{ erro }}</p>
       <template v-else-if="historico">
+        <GarantiaSacResumo v-if="sac" :sac="sac" />
+        <p v-else-if="erroSac" class="text-center text-xs text-destructive">{{ erroSac }}</p>
         <div v-if="historico.cortadas" class="flex justify-center">
           <span class="rounded-full bg-background px-2.5 py-0.5 text-[11px] text-muted-foreground shadow-sm">mostrando as mensagens mais recentes — as mais antigas estão no Atendimento</span>
         </div>
@@ -338,6 +466,35 @@ function aoRegistrar(_a: AtendimentoGarantia) {
         </template>
       </template>
     </div>
+
+    <!-- a resposta: só por e-mail, pela conversa do SAC (o chat da plataforma fica só para leitura) -->
+    <footer v-if="podeResponder && conversaDoSac" class="space-y-1.5 border-t bg-card px-3 py-2" data-resposta-email>
+      <AtendimentoEmailResposta
+        v-model:confirmou-nao-responde="confirmouNaoResponde"
+        v-model:trava="travaEmail"
+        :conversa-id="conversaDoSac"
+        :mail-message-id="null"
+        :versao="historico?.mensagens.length ?? 0"
+      />
+      <form class="flex items-end gap-2" @submit.prevent="responder">
+        <textarea
+          v-model="resposta"
+          rows="3"
+          :maxlength="LIMITE_RESPOSTA_EMAIL"
+          class="min-h-[4.5rem] flex-1 resize-y rounded-md border bg-background px-3 py-2 text-sm"
+          placeholder="Responder o cliente por e-mail (sai do sac@ com a assinatura)"
+          aria-label="resposta por e-mail ao cliente"
+          data-resposta-texto
+          @keydown.ctrl.enter.prevent="responder"
+          @keydown.meta.enter.prevent="responder"
+        />
+        <Button type="submit" size="sm" class="h-9" :disabled="enviando || !resposta.trim() || !!motivoSemEnvio" :title="motivoSemEnvio || 'enviar por e-mail (Ctrl+Enter)'" data-enviar-email>
+          <Loader2 v-if="enviando" class="mr-1 size-4 animate-spin" /><Send v-else class="mr-1 size-4" /> Enviar
+        </Button>
+      </form>
+      <p v-if="motivoSemEnvio && travaEmail !== null" class="flex items-start gap-1 text-[11px] text-amber-800 dark:text-amber-300"><Mail class="mt-px size-3 shrink-0" aria-hidden="true" />{{ motivoSemEnvio }}</p>
+      <p class="text-[11px] text-muted-foreground">O chat da plataforma aparece aqui só para leitura: ele continua sendo respondido no Atendimento.</p>
+    </footer>
 
     <!-- foto grande -->
     <div v-if="imagemAberta" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4" role="dialog" aria-label="foto" @click.self="imagemAberta = null">
