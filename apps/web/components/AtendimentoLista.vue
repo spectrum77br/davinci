@@ -56,6 +56,9 @@ export const FILTROS_MENU: OpcaoFiltro[] = [
   // pra ver no comunicador e no duoke dá, queria que desse pra ver ali
   // também"): os abertos, como o selo "parceiro" do Duoke (`filtro=afiliado`).
   { value: 'afiliado', label: 'Afiliados', hint: 'chat de afiliado da Shopee (o criador de conteúdo que divulga a loja): responda por aqui — só pessoa, a IA e as automações não entram' },
+  // A oferta do brinde sem pagamento (06/11/2026, o dono: "da pra botar um filtro a
+  // mais ali em filtros aguardando pagamento pra gente ver essas").
+  { value: 'aguardando_pagamento', label: 'Aguardando pagamento', hint: 'o robô ofereceu o brinde (compra não finalizada, Shopee e TikTok) e o pedido segue sem pagamento' },
   // (13/10/2026: o "E-mail sem vínculo" saiu do menu — o e-mail não está mais
   // na Caixa; a fila dele é E-mail › Filas › Sem vínculo.)
   // Pela ETIQUETA (status atual, 01/10/2026), da mais urgente para a menos —
@@ -83,7 +86,9 @@ export const FILTROS_RAPIDOS: OpcaoFiltro[] = [...ABAS_LISTA, ...FILTROS_MENU]
 // nela: a fechada, o carrinho do site e as redes (Mídia) — o servidor só põe
 // lá o que falta responder num canal que tem resposta.
 // O chat de afiliado também (29/10/2026): a IA nunca o pega, então nunca está lá.
-export const FILTROS_FORA_DA_HUMANO = new Set(['fechadas', 'carrinho', 'midia', 'afiliado'])
+// A oferta do brinde sem pagamento (06/11/2026): é a lista de quem o robô chamou, e o
+// número dela é o da Caixa (quem respondeu entra na Humano pelas regras de lá).
+export const FILTROS_FORA_DA_HUMANO = new Set(['fechadas', 'carrinho', 'midia', 'afiliado', 'aguardando_pagamento'])
 export function opcoesDoFiltrar(caixa: string | null | undefined): OpcaoFiltro[] {
   return caixa === 'humano' ? FILTROS_MENU.filter((f) => !FILTROS_FORA_DA_HUMANO.has(f.value)) : FILTROS_MENU
 }
@@ -274,6 +279,12 @@ function afiliadosDe(linhas: { afiliados?: number }[]): number | null {
   if (!linhas.every((x) => typeof x?.afiliados === 'number')) return null
   return linhas.reduce((s, x) => s + (Number(x.afiliados) || 0), 0)
 }
+// A oferta do brinde sem pagamento (06/11/2026), a mesma conta dos afiliados.
+function aguardandoPagamentoDe(linhas: { aguardando_pagamento?: number }[]): number | null {
+  if (!linhas.length) return 0
+  if (!linhas.every((x) => typeof x?.aguardando_pagamento === 'number')) return null
+  return linhas.reduce((s, x) => s + (Number(x.aguardando_pagamento) || 0), 0)
+}
 const contagem = computed((): Record<string, number | null> => {
   const r = props.resumo
   if (!r) return {}
@@ -295,6 +306,7 @@ const contagem = computed((): Record<string, number | null> => {
       a_conferir: semIntegracao.a_conferir ?? null,
       humano: naHumano([semIntegracao]),
       afiliado: semIntegracao.afiliados ?? null,
+      aguardando_pagamento: semIntegracao.aguardando_pagamento ?? null,
       ...porEtiqueta([semIntegracao.etiquetas]),
     }
   }
@@ -307,6 +319,7 @@ const contagem = computed((): Record<string, number | null> => {
       a_conferir: l?.a_conferir ?? null,
       humano: l ? naHumano([l]) : 0,
       afiliado: l ? (l.afiliados ?? null) : 0,
+      aguardando_pagamento: l ? (l.aguardando_pagamento ?? null) : 0,
       ...porEtiqueta(l ? [l.etiquetas] : []),
     }
   }
@@ -322,6 +335,7 @@ const contagem = computed((): Record<string, number | null> => {
     humano: f.plataforma ? (ps.length ? naHumano(ps) : 0) : naHumano([r]),
     // Os chats de afiliado abertos (29/10/2026); a API antiga não manda: sem número.
     afiliado: f.plataforma ? afiliadosDe(ps) : (r.afiliados ?? null),
+    aguardando_pagamento: f.plataforma ? aguardandoPagamentoDe(ps) : (r.aguardando_pagamento ?? null),
     // Sem plataforma escolhida, o total do topo; com ela, o da plataforma
     // (a que não tem conversa não manda `etiquetas`: conta zero).
     ...(f.plataforma
@@ -536,6 +550,7 @@ const VAZIO: Record<string, string> = {
   minhas: 'Nenhuma conversa atribuída a você.',
   fechadas: 'Nenhuma conversa fechada com esses filtros.',
   afiliado: 'Nenhum chat de afiliado aberto com esses filtros.',
+  aguardando_pagamento: 'Nenhuma oferta de brinde esperando pagamento com esses filtros.',
   todas: 'Nenhuma conversa com esses filtros.',
 }
 // Os comentários das redes não entram no "Falta responder" (só o chat,

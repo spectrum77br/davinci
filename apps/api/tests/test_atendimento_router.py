@@ -26,11 +26,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import worker_pool
 from app.config import get_settings
 from app.models import (
+    AtendimentoAutomacaoRegistro,
     AtendimentoAvaliacao,
     AtendimentoCanal,
     AtendimentoConversa,
     AtendimentoMensagem,
+    AtendimentoPedidoComprador,
     AtendimentoRascunho,
+    BlingOrder,
     DmConversa,
     DmMensagem,
     Integration,
@@ -838,6 +841,8 @@ async def test_instagram_aparece_so_leitura(client, db, make_user, pessoa):
         "nao_lidas_duoke": 1,
         # 29/10/2026: o chat de afiliado é só da Shopee.
         "afiliados": 0,
+        # 06/11/2026: a oferta do brinde é da Shopee e do TikTok.
+        "aguardando_pagamento": 0,
     } in resumo["plataformas"]
 
 
@@ -1472,3 +1477,85 @@ async def test_metricas_com_mais_de_32767_conversas(client, db, make_user, pesso
     await db.commit()
     r = await client.get(f"{URL}/metricas", params={"dias": 90})
     assert r.status_code == 200
+
+
+async def test_filtro_aguardando_pagamento_so_a_oferta_sem_pagamento(
+    client, db, make_user, pessoa
+):
+    """06/11/2026, o dono: "da pra botar um filtro a mais ali em filtros aguardando
+    pagamento pra gente ver essas". Entra quem recebeu a oferta do brinde e segue sem
+    pagar; o número do filtro vem no /resumo, pela mesma régua."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono, modo="humano")
+
+    async def caso(nome, *, estado="enviado", status="UNPAID", dias=0, automacao="shopee"):
+        pedido = f"P{nome}"
+        c = await _conversa(db, integ, canal, nome, cliente_ha=timedelta(hours=2), pedido=pedido)
+        db.add(
+            AtendimentoPedidoComprador(
+                integration_id=integ.id,
+                plataforma="shopee",
+                comprador_id=nome,
+                pedido=pedido,
+                status=status,
+                criado_em=datetime.now(UTC) - timedelta(days=dias, hours=4),
+            )
+        )
+        if estado:
+            db.add(
+                AtendimentoAutomacaoRegistro(
+                    automacao=f"{automacao}_nao_pago_brinde",
+                    integration_id=integ.id,
+                    plataforma="shopee",
+                    alvo="pedido",
+                    chave=f"pedido:{pedido}",
+                    pedido=pedido,
+                    conversa_id=c.id,
+                    devido_em=datetime.now(UTC),
+                    estado=estado,
+                )
+            )
+        await db.commit()
+        return c
+
+    espera = await caso("espera")
+    incerta = await caso("incerta", estado="revisar")
+    do_tiktok = await caso("tiktok", automacao="tiktok")
+    await caso("sem_oferta", estado=None)
+    await caso("pulada", estado="pulado")
+    await caso("pagou_indice", status="PROCESSED")
+    await caso("cancelou", status="CANCELLED")
+    await caso("velho", dias=4)
+    no_bling = await caso("no_bling")
+    db.add(
+        BlingOrder(
+            bling_id=991,
+            item_index=0,
+            numero="1",
+            numeroloja="Pno_bling",
+            situacao="6",
+            loja="7302",
+            item_codigo="dg002.sp",
+            item_quantidade=1,
+            itemvalor=909,
+            data=datetime.now(UTC),
+        )
+    )
+    await db.commit()
+
+    esperados = {str(espera.id), str(incerta.id), str(do_tiktok.id)}
+    assert set(_ids(await client.get(f"{URL}/conversas?filtro=aguardando_pagamento"))) == esperados
+    r = (await client.get(f"{URL}/resumo")).json()
+    shopee = next(p for p in r["plataformas"] if p["plataforma"] == "shopee")
+    (loja,) = r["lojas"]
+    assert (r["aguardando_pagamento"], shopee["aguardando_pagamento"]) == (3, 3)
+    assert loja["aguardando_pagamento"] == 3
+    assert str(no_bling.id) in _ids(await client.get(f"{URL}/conversas"))
+
+    # Fechada sai do filtro e do número, como em "todas".
+    espera.situacao = "fechada"
+    await db.commit()
+    assert set(_ids(await client.get(f"{URL}/conversas?filtro=aguardando_pagamento"))) == (
+        esperados - {str(espera.id)}
+    )
+    assert (await client.get(f"{URL}/resumo")).json()["aguardando_pagamento"] == 2

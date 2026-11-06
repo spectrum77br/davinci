@@ -373,6 +373,39 @@ async def segurados_pela_oferta(session: AsyncSession, numeros: list[str]) -> se
     return {n for n in linhas.scalars() if n}
 
 
+# ── O filtro "Aguardando pagamento" ─────────────
+# O dono, 06/11/2026: "da pra botar um filtro a mais ali em filtros aguardando
+# pagamento pra gente ver essas". Quem ainda pode pagar: nos 30 dias medidos
+# (05/10 a 02/11), 3 dias cobrem todos os pagamentos depois das 3 h (144 de 144),
+# e a Shopee e o TikTok cancelam o não pago em cerca de 1 dia. O prazo protege
+# do índice que não relê o pedido: o do TikTok só viu sair de `UNPAID` o cancelado.
+JANELA_AGUARDANDO_PAGAMENTO = timedelta(days=3)
+
+
+def aguardando_pagamento_sql(agora: datetime, c: Any = AtendimentoConversa) -> Any:
+    """A conversa recebeu a oferta e o pedido dela segue não pago? Nunca NULL.
+
+    Não pago = `UNPAID` no índice, dentro de `JANELA_AGUARDANDO_PAGAMENTO` e fora
+    do Bling (o Bling só recebe pedido pago, e o índice é lido de hora em hora).
+    A oferta vale como em `_oferta` (`ESTADOS_OFERTA_BRINDE`). Subconsulta sem
+    correlação: o /resumo conta por ela em cada loja e ela só roda uma vez.
+    """
+    r = AtendimentoAutomacaoRegistro
+    p = AtendimentoPedidoComprador
+    return c.id.in_(
+        select(r.conversa_id)
+        .join(p, and_(p.integration_id == r.integration_id, p.pedido == r.pedido))
+        .where(
+            r.automacao.in_(AUTOMACOES_BRINDE),
+            r.estado.in_(ESTADOS_OFERTA_BRINDE),
+            r.conversa_id.is_not(None),
+            p.status == "UNPAID",
+            p.criado_em >= agora - JANELA_AGUARDANDO_PAGAMENTO,
+            ~select(BlingOrder.id).where(BlingOrder.numeroloja == r.pedido).exists(),
+        )
+    )
+
+
 # ── As leituras ───────────────────────────────────────────────────────────
 
 

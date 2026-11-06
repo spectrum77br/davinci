@@ -1154,6 +1154,8 @@ class PlataformaResumoOut(BaseModel):
     # não tá dando pra ver no comunicador e no duoke dá") — o número do filtro
     # "Afiliados" do menu Filtrar (`filtro=afiliado`).
     afiliados: int = 0
+    # A oferta do brinde sem pagamento (06/11/2026): `filtro=aguardando_pagamento`.
+    aguardando_pagamento: int = 0
 
 
 class LojaResumoOut(BaseModel):
@@ -1203,6 +1205,8 @@ class LojaResumoOut(BaseModel):
     etiquetas: dict[str, int] = Field(default_factory=dict)
     # Chats de afiliado não fechados da loja (ver PlataformaResumoOut).
     afiliados: int = 0
+    # A oferta do brinde sem pagamento (06/11/2026): `filtro=aguardando_pagamento`.
+    aguardando_pagamento: int = 0
     # Na Caixa Humano (ver PlataformaResumoOut).
     humano: int = 0
 
@@ -1280,6 +1284,8 @@ class ResumoOut(BaseModel):
     nao_lidas_duoke: int = 0
     # Chats de afiliado não fechados, somando as plataformas (29/10/2026).
     afiliados: int = 0
+    # A oferta do brinde sem pagamento (06/11/2026): `filtro=aguardando_pagamento`.
+    aguardando_pagamento: int = 0
     lojas: list[LojaResumoOut]
     canais: list[CanalOut]
     flags: FlagsOut

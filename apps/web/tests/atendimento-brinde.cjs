@@ -70,4 +70,20 @@ assert.ok(pedido.template.content.includes(`@mudou="emit('recarregarPainel', fal
 const pagina = fs.readFileSync(path.resolve(__dirname, '../pages/atendimento.vue'), 'utf8')
 assert.ok(pagina.includes('<AtendimentoBrindesLista @abrir-conversa="abrirConversaNaCaixa"'))
 
+// O filtro "Aguardando pagamento" (06/11/2026): no menu da Caixa, antes das etiquetas,
+// com o número do /resumo e a frase da lista vazia.
+const listaDaCaixa = sfc('../components/AtendimentoLista.vue')
+const caixa = exportsDe({ script: { content: listaDaCaixa.script.content.replace(/^import .*$/gm, '') } })
+const opcao = caixa.FILTROS_MENU.find((f) => f.value === 'aguardando_pagamento')
+assert.equal(opcao.label, 'Aguardando pagamento')
+assert.match(opcao.hint, /ofereceu o brinde/)
+const valores = caixa.FILTROS_MENU.map((f) => f.value)
+assert.ok(valores.indexOf('aguardando_pagamento') < valores.indexOf('reclamacao'), 'antes das etiquetas')
+assert.ok(!caixa.FILTROS_ETIQUETA.has('aguardando_pagamento'))
+assert.ok(caixa.opcoesDoFiltrar('').some((f) => f.value === 'aguardando_pagamento'))
+assert.ok(!caixa.opcoesDoFiltrar('humano').some((f) => f.value === 'aguardando_pagamento'))
+const fonteDaLista = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoLista.vue'), 'utf8')
+assert.match(fonteDaLista, /aguardando_pagamento: f\.plataforma \? aguardandoPagamentoDe\(ps\) : \(r\.aguardando_pagamento \?\? null\)/)
+assert.match(fonteDaLista, /aguardando_pagamento: 'Nenhuma oferta de brinde esperando pagamento/)
+
 console.log('atendimento-brinde: ok')
