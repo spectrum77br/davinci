@@ -2531,7 +2531,7 @@ def test_o_anuncio_que_diz_so_o_cabo(descricao, so_cabo):
 
 
 def test_o_anuncio_so_com_o_cabo_tira_so_o_carregador_da_equipe():
-    """06/11/2026: 120 anúncios da Shopee dizem "apenas o cabo". O comprador lê a mesma descrição."""
+    """06/11/2026: 120 anúncios da Shopee dizem "apenas o cabo", e o comprador lê a descrição."""
     com = e.aplicar_a_equipe({"campos": [], "conflitos": []}, A17_ML, None, "ml")
     sem = e.aplicar_a_equipe(
         {"campos": [], "conflitos": []}, A17_ML, None, "ml", sem_carregador=True
