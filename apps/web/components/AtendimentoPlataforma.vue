@@ -469,7 +469,7 @@ export function destinoDaCaixa(destinos: DestinoReclamacao[] | null | undefined,
 // Vêm das APIs das lojas (só leitura) e podem chegar incompletos: tudo é
 // opcional e a tela desenha só o que tiver. Nada de endereço, CPF ou telefone.
 export type ItemPedidoMkt = {
-  // O nº exato do pedido deste produto (o carrinho do ML tem um por produto).
+  // O nº exato do pedido deste produto (no ML, cada produto pode ter o seu).
   pedido?: string | null
   titulo: string | null
   imagem: string | null
@@ -508,10 +508,9 @@ export type LogisticaMkt = {
 export type PedidoMkt = {
   fonte?: string | null
   pedido: string | null
-  // Carrinho do ML (06/11/2026): os pedidos dele e o nº do carrinho quando o
-  // número mostrado é outro. Cada item traz o pedido exato (`ItemPedidoMkt.pedido`).
+  // Os pedidos do ML por trás do número (06/11/2026). Cada item traz o exato
+  // (`ItemPedidoMkt.pedido`).
   pedidos?: string[]
-  pack?: string | null
   status?: string | null
   status_texto?: string | null
   criado_em?: string | null
@@ -1847,7 +1846,6 @@ export function retratoDe(bruto: unknown): PedidoMkt | null {
     fonte: textoOuNull(o.fonte),
     pedido: textoOuNull(o.pedido),
     pedidos: Array.isArray(o.pedidos) ? o.pedidos.map(textoOuNull).filter((x): x is string => !!x) : [],
-    pack: textoOuNull(o.pack),
     status: textoOuNull(o.status),
     status_texto: textoOuNull(o.status_texto),
     criado_em: textoOuNull(o.criado_em),

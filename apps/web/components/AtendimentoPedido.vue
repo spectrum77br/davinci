@@ -461,8 +461,8 @@ const aba = ref<Aba>(
 
 const pm = computed(() => retratoDoPedido(props.pedidoMkt, props.conversa))
 const itensPm = computed(() => pm.value?.itens || [])
-// Os pedidos do carrinho do ML: com mais de um, cada produto mostra o dele.
-const noCarrinho = computed(() => pm.value?.pedidos?.length || 0)
+// Os pedidos do ML por trás do número: com mais de um, cada produto mostra o dele.
+const variosPedidos = computed(() => pm.value?.pedidos?.length || 0)
 const log = computed(() => pm.value?.logistica || null)
 const moeda = computed(() => pm.value?.moeda || 'BRL')
 
@@ -829,18 +829,12 @@ defineExpose({ mostrarDevolucao })
                 <RotateCcw class="size-4" :class="{ 'animate-spin': atualizando }" />
               </button>
             </div>
-            <div v-if="pm.pedido" class="flex items-center gap-1 font-medium">
+            <!-- Com mais de um pedido (06/11/2026), o nº de cada um vai no produto dele. -->
+            <div v-if="pm.pedido && variosPedidos <= 1" class="flex items-center gap-1 font-medium">
               <span class="min-w-0 truncate font-mono text-[13px]" :title="pm.pedido">{{ pm.pedido }}</span>
               <button type="button" class="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground" title="copiar nº do pedido" aria-label="copiar nº do pedido" @click="copiarTexto(pm.pedido, 'Nº do pedido')"><Copy class="size-3.5" /></button>
             </div>
             <div v-if="pm.criado_em" class="text-xs text-muted-foreground">{{ fmtDataPlataforma(pm.criado_em) }} (UTC-03:00)</div>
-            <!-- Carrinho do ML (06/11/2026): o nº do carrinho e cada produto com o pedido exato. -->
-            <div v-if="noCarrinho > 1" class="text-xs text-muted-foreground" data-carrinho-ml>Carrinho com {{ noCarrinho }} pedidos</div>
-            <div v-if="pm.pack" class="flex items-center gap-1 text-xs text-muted-foreground" data-carrinho-ml-pack>
-              <span class="shrink-0">Nº do carrinho:</span>
-              <span class="min-w-0 truncate font-mono" :title="pm.pack">{{ pm.pack }}</span>
-              <button type="button" class="shrink-0 rounded p-0.5 hover:bg-muted hover:text-foreground" title="copiar nº do carrinho" aria-label="copiar nº do carrinho" @click="copiarTexto(pm.pack, 'Nº do carrinho')"><Copy class="size-3" /></button>
-            </div>
           </section>
 
           <!-- itens -->
@@ -867,7 +861,7 @@ defineExpose({ mostrarDevolucao })
                   </div>
                 </div>
                 <div v-if="it.variacao" class="mt-0.5 truncate text-muted-foreground" :title="it.variacao">Variação: {{ it.variacao }}</div>
-                <div v-if="it.pedido && noCarrinho > 1" class="mt-0.5 flex items-center gap-1 text-muted-foreground" data-pedido-do-item>
+                <div v-if="it.pedido && variosPedidos > 1" class="mt-0.5 flex items-center gap-1 text-muted-foreground" data-pedido-do-item>
                   <span class="shrink-0">Pedido:</span>
                   <span class="min-w-0 truncate font-mono" :title="it.pedido">{{ it.pedido }}</span>
                   <button type="button" class="shrink-0 rounded p-0.5 hover:bg-muted hover:text-foreground" title="copiar nº do pedido deste produto" aria-label="copiar nº do pedido deste produto" @click="copiarTexto(it.pedido, 'Nº do pedido')"><Copy class="size-3" /></button>
