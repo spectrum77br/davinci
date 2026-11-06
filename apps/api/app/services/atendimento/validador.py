@@ -384,6 +384,36 @@ _POR_FORA = (
     ),
 )
 
+# A recusa não é negociação (06/11/2026): desde 20/09 a regra só barrou 4 rascunhos, todos
+# recusando ("não passamos contato fora da plataforma", "pagar a diferença por fora da Shopee
+# não é possível", "não é preciso comprar por fora"). Vale a oração onde "por fora" está; com
+# vantagem na oração ("não tem taxa comprando por fora"), é oferta, com ou sem negação.
+_NEGADO_ANTES_DO_POR_FORA = re.compile(r"\b(?:nao|nem|nunca|jamais|sem)\b(?:\s+\w+){0,10}?\s*$")
+_NEGADO_DEPOIS_DO_POR_FORA = re.compile(
+    r"^(?:\s+\w+){0,3}?\s+nao\s+(?:e\s+(?:possivel|permitid\w*|aceit\w*)|pode\w*|permit\w*"
+    r"|aceit\w*|trabalh\w*|faz\w*|conseg\w*|realiz\w*)\b"
+)
+_VANTAGEM_POR_FORA = re.compile(r"\b(?:barat\w*|desconto|taxa|economi\w*|vantag\w*|menos)\b")
+_FIM_DA_ORACAO_DO_POR_FORA = re.compile(r"[.!?;:,\n]|\s(?:mas|porem)\s")
+
+
+def _negocia_por_fora(plano: str) -> bool:
+    """O texto oferece negociar fora da plataforma? PURA. A recusa não conta (ver acima)."""
+    for padrao in (_FORA_DA_PLATAFORMA, *_POR_FORA):
+        for achado in padrao.finditer(plano):
+            cortes = [c.end() for c in _FIM_DA_ORACAO_DO_POR_FORA.finditer(plano[: achado.start()])]
+            inicio = cortes[-1] if cortes else 0
+            depois = _FIM_DA_ORACAO_DO_POR_FORA.search(plano, achado.end())
+            fim = depois.start() if depois else len(plano)
+            if _VANTAGEM_POR_FORA.search(plano[inicio:fim]):
+                return True
+            if not _NEGADO_ANTES_DO_POR_FORA.search(
+                plano[inicio : achado.start()]
+            ) and not _NEGADO_DEPOIS_DO_POR_FORA.search(plano[achado.end() : fim]):
+                return True
+    return False
+
+
 # Pedir/condicionar avaliação. "Avaliação técnica do produto" (devolução) e
 # "nota fiscal" NÃO são avaliação — as regras abaixo evitam os dois.
 _NAO_AVALIACAO = r"(?!\s+(?:do|da|dos|das|de|tecnica|interna)\b)"
@@ -1322,7 +1352,7 @@ def validar(
         motivos.append(_MOTIVO_ZAP_PIX if zap else _MOTIVO_PIX)
     if _algum(_BANCO, plano) and pix_e_conta_valem:
         motivos.append(_MOTIVO_ZAP_CONTA if zap else _MOTIVO_BANCO)
-    if _FORA_DA_PLATAFORMA.search(plano) or _algum(_POR_FORA, plano):
+    if _negocia_por_fora(plano):
         motivos.append(_MOTIVO_POR_FORA)
     if zap:
         # A política do WhatsApp (pessoa e IA): conta, documento, pedido.
@@ -1409,8 +1439,7 @@ def contato_fora_da_loja(texto: str) -> bool:
         or _algum(_REDE_SOCIAL, plano)
         or _PIX.search(plano)
         or _algum(_BANCO, plano)
-        or _FORA_DA_PLATAFORMA.search(plano)
-        or _algum(_POR_FORA, plano)
+        or _negocia_por_fora(plano)
     )
 
 

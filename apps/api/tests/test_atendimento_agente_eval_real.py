@@ -703,8 +703,6 @@ def test_5_o_caminho_para_fora_continua_bloqueado(texto):
         "A compra é feita direto com a loja pelo próprio app da Shopee.",
         "Você pode comprar direto com a loja pelo próprio app da Shopee.",
         "Pode comprar direto conosco aqui na Shopee.",
-        "Não fazemos venda por fora: a compra é feita pela loja pelo próprio app da Shopee.",
-        "Não vendemos fora da plataforma; a compra é só pelo app da Shopee.",
     ],
 )
 async def test_5_negociacao_por_fora_so_aparente_continua_no_agente(texto):
@@ -715,6 +713,22 @@ async def test_5_negociacao_por_fora_so_aparente_continua_no_agente(texto):
     legado, agente = await _as_duas_conferencias(texto)
     assert validador.MOTIVO_POR_FORA in legado.erros and legado.precisa_humano
     assert validador.MOTIVO_POR_FORA in agente.erros, agente.erros
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Não fazemos venda por fora: a compra é feita pela loja pelo próprio app da Shopee.",
+        "Não vendemos fora da plataforma; a compra é só pelo app da Shopee.",
+    ],
+)
+async def test_5_recusar_negociar_por_fora_passa_nas_duas_conferencias(texto):
+    """06/11/2026: a recusa saiu da regra no `validar`, que é o mesmo do envio, então agora
+    tem efeito de ponta a ponta (o que faltava à isenção do r5a). Desde 20/09 a regra só
+    barrou 4 rascunhos, todos recusando."""
+    legado, agente = await _as_duas_conferencias(texto)
+    assert validador.MOTIVO_POR_FORA not in legado.erros
+    assert validador.MOTIVO_POR_FORA not in agente.erros, agente.erros
 
 
 @pytest.mark.parametrize(

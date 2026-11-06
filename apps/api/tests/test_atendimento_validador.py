@@ -819,3 +819,33 @@ def test_marketplace_e_zap_antigo_iguais():
     for texto in ("Me passa o número do cartão", "o cartão é 4111 1111 1111 1111"):
         assert not any("a Meta proíbe" in m for m in _v(texto)), texto
     assert "pagamento fora da plataforma (PIX)" in _v("pode pagar no pix", origem=ORIGEM_IA)
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "o atendimento é feito somente por este chat, e não passamos contato fora da plataforma.",
+        "O Uranyx WP60 vem com um fone com fio, então não é preciso comprar por fora.",
+        "Olá! Pagar a diferença por fora da Shopee não é possível: a compra é pelo app.",
+        "Não conseguimos fazer a troca com pagamento de diferença por fora da Shopee.",
+        "Não negociamos fora da plataforma.",
+    ],
+)
+def test_recusar_negociar_por_fora_nao_e_negociacao(texto):
+    """06/11/2026: desde 20/09 a regra só barrou 4 rascunhos, todos recusando."""
+    assert "negociação fora da plataforma" not in _v(texto, origem=ORIGEM_IA)
+
+
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Não tem taxa comprando por fora.",
+        "Não paga pelo app, paga por fora.",
+        "Não precisa da Shopee, mas podemos fechar negócio por fora.",
+        "compra por fora sem taxa",
+        "se comprar por fora sai mais barato",
+        "resolvemos fora do Mercado Livre",
+    ],
+)
+def test_oferecer_por_fora_continua_barrado_mesmo_com_negacao_perto(texto):
+    assert "negociação fora da plataforma" in _v(texto, origem=ORIGEM_IA)

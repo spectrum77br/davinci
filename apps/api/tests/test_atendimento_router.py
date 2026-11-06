@@ -1559,3 +1559,29 @@ async def test_filtro_aguardando_pagamento_so_a_oferta_sem_pagamento(
         esperados - {str(espera.id)}
     )
     assert (await client.get(f"{URL}/resumo")).json()["aguardando_pagamento"] == 2
+
+
+async def test_busca_acha_a_reclamacao_do_ml_pelo_pack_e_pela_order(client, db, make_user, pessoa):
+    """06/11/2026, o dono: o nº do pack (o do Bling e o do ML) não achava a reclamação, que
+    guarda a order em `pedido_marketplace`."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono, modo="humano")
+    conversa, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal,
+        integration=integ,
+        plataforma="ml",
+        canal_nome="reclamacao",
+        externo_id="5606787505",
+        pedido_marketplace="2000019302717656",
+        comprador_nome="Comprador",
+        dados={"pack_id": "2000015829180301", "order_id": "2000019302717656"},
+    )
+    await db.commit()
+
+    for numero in ("2000015829180301", "2000019302717656"):
+        assert _ids(await client.get(f"{URL}/conversas?filtro=todas&q={numero}")) == [
+            str(conversa.id)
+        ]
+    assert _ids(await client.get(f"{URL}/conversas?filtro=todas&q=2000015829180302")) == []
+
