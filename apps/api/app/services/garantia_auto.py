@@ -53,6 +53,7 @@ from app.models.garantia import (
     GarantiaAtendimento,
     GarantiaConversa,
     GarantiaPendencia,
+    GarantiaSac,
 )
 from app.models.nf import NfNota
 from app.services import garantia as svc
@@ -98,6 +99,10 @@ class Resultado:
     descartadas: int = 0
     reativadas: int = 0
     pedidos: int = 0
+    # Garantia × SAC (06/11/2026): garantias com o prazo/fim mudado e casos
+    # do SAC encerrados sozinhos.
+    prazos: int = 0
+    encerrados: int = 0
     ids_criados: list[int] = field(default_factory=list)
 
     def como_dict(self) -> dict:
@@ -109,6 +114,8 @@ class Resultado:
             "descartadas": self.descartadas,
             "reativadas": self.reativadas,
             "pedidos": self.pedidos,
+            "prazos": self.prazos,
+            "encerrados": self.encerrados,
         }
 
 
@@ -387,8 +394,12 @@ async def ligar_conversas(
 
 async def descartar_canceladas(session: AsyncSession, *, agora: datetime | None = None) -> int:
     """A garantia DO ROBÔ cujo pedido foi cancelado no Bling antes de qualquer
-    atendimento registrado sai da lista (não se apaga). A manual e a que já
-    tem atendimento ficam como estão — quem decide é a pessoa."""
+    atendimento sai da lista (não se apaga). A manual e a que já tem
+    atendimento — registrado, ou o caso do SAC confirmado ("Garantia
+    acionada", aberto ou encerrado; revisão de 06/11/2026: o cancelamento
+    depois do reembolso sumia com o caso da aba Atendimento, sem
+    encerramento) — ficam como estão: quem decide é a pessoa. O caso do SAC
+    ainda não confirmado da descartada volta para "SAC sem pedido"."""
     agora = agora or datetime.now(UTC)
     ids = list(
         (
@@ -401,6 +412,10 @@ async def descartar_canceladas(session: AsyncSession, *, agora: datetime | None 
                         BlingOrder.situacao == str(SITUACAO_CANCELADO),
                     ),
                     ~exists().where(GarantiaAtendimento.garantia_id == Garantia.id),
+                    ~exists().where(
+                        GarantiaSac.garantia_id == Garantia.id,
+                        GarantiaSac.confirmado_em.is_not(None),
+                    ),
                 )
             )
         ).scalars()
@@ -412,6 +427,16 @@ async def descartar_canceladas(session: AsyncSession, *, agora: datetime | None 
         .where(Garantia.id.in_(ids))
         .values(descartada_em=agora, descartada_motivo=MOTIVO_CANCELADO)
     )
+    from app.services import garantia_sac
+
+    for caso in (
+        await session.execute(
+            select(GarantiaSac)
+            .where(GarantiaSac.garantia_id.in_(ids), GarantiaSac.confirmado_em.is_(None))
+            .with_for_update()
+        )
+    ).scalars():
+        await garantia_sac.desligar_conversa(session, caso)
     for gid in ids:
         svc.registrar_log(
             session, gid, "descartou", None, detalhe="pedido cancelado no Bling", robo=ROTULO_ROBO
@@ -482,13 +507,19 @@ async def rodar(
         else:
             r.criadas += 1
             r.ids_criados.append(resultado.id)
+    # O prazo do produto na Tabela de Preços (06/11/2026): a venda nova nasce
+    # com ele (sem linha "recalculou" no log).
+    from app.services import garantia_prazo
+
+    await garantia_prazo.aplicar_prazos(session, ids=r.ids_criados, registrar=False)
     r.conversas_ligadas += await ligar_conversas(session, garantia_ids=r.ids_criados)
     r.conversas_ligadas += await ligar_conversas(session, desde=agora - JANELA_LIGACAO)
-    # O SAC do site (28/10/2026): o protocolo liga pelo CPF + NF/pedido do
-    # formulário (services/garantia_sac.py).
+    # O SAC do site (06/11/2026): o caso de cada formulário, ligado à garantia
+    # pelo pedido, pela NF ou pelo CPF + o produto (services/garantia_sac.py).
     from app.services import garantia_sac
 
-    r.conversas_ligadas += await garantia_sac.ligar_sac(session, desde=agora - JANELA_LIGACAO)
+    sac = await garantia_sac.sincronizar_sac(session, desde=agora - JANELA_LIGACAO)
+    r.conversas_ligadas += sac["ligados"]
     r.descartadas = await descartar_canceladas(session, agora=agora)
     r.reativadas = await reativar_descancelados(session)
     # O pedido de garantia (28/10/2026): o Painel mostra só quem PEDIU
@@ -496,6 +527,11 @@ async def rodar(
     from app.services import garantia_pedido
 
     r.pedidos = await garantia_pedido.marcar_pedidos(session, desde=agora - JANELA_LIGACAO)
+    # O prazo do produto (06/11/2026): a rede de segurança do gancho da Tabela
+    # de Preços (a mudança feita por fora da tela), e o caso do SAC que
+    # terminou sozinho sai da aba Atendimento.
+    r.prazos = await garantia_prazo.aplicar_prazos(session)
+    r.encerrados = await garantia_sac.encerrar_terminados(session)
     return r
 
 
@@ -517,11 +553,11 @@ async def retroativo(session: AsyncSession, *, desde: date = INICIO_DAS_NOTAS) -
         if r.avaliados < LOTE:
             break
     total.conversas_ligadas += await ligar_conversas(session)
-    from app.services import garantia_sac
+    from app.services import garantia_pedido, garantia_prazo, garantia_sac
 
-    total.conversas_ligadas += await garantia_sac.ligar_sac(session)
-    from app.services import garantia_pedido
-
+    total.conversas_ligadas += (await garantia_sac.sincronizar_sac(session))["ligados"]
     total.pedidos += await garantia_pedido.marcar_pedidos(session)
+    total.prazos += await garantia_prazo.aplicar_prazos(session)
+    total.encerrados += await garantia_sac.encerrar_terminados(session)
     await session.commit()
     return total

@@ -299,7 +299,7 @@ import { criarMarcadorDeLida, rotaAoAbrir } from '~/lib/atendimentoLida'
 import { AVISO_RESPOSTA_PUBLICA, perguntaRespostaPublica, type AvaliacoesResposta } from '~/components/AtendimentoAvaliacao.vue'
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from 'reka-ui'
 import { onKeyStroke, useMediaQuery } from '@vueuse/core'
-import { errosDaApi as errosDaGarantia, type AtendimentoGarantia as AtendimentoDaGarantia, type SituacaoConversa } from '~/lib/garantias'
+import { errosDaApi as errosDaGarantia, rotuloDoTipo, type AtendimentoGarantia as AtendimentoDaGarantia, type SituacaoConversa } from '~/lib/garantias'
 import {
   AVISO_MODERACAO_MAGALU,
   AVISO_SO_LEITURA,
@@ -2436,7 +2436,7 @@ async function carregarGarantia(id: string) {
 const podeVincularGarantia = computed(() => garantiaAcesso.value.registra && !!conversa.value && !conversa.value.id.startsWith('ig:'))
 function aoVincularGarantia(a: AtendimentoDaGarantia) {
   vincularAberto.value = false
-  toasts.success(`Vinculado à garantia #${a.garantia_id}`, `${a.tipo_problema === 'hardware' ? 'Hardware' : 'Software'} · ${a.cobertura_rotulo}`)
+  toasts.success(`Vinculado à garantia #${a.garantia_id}`, `${rotuloDoTipo(a.tipo_problema)} · ${a.cobertura_rotulo}`)
   void carregarGarantia(props.conversaId)
 }
 // Aguardando Cancelamento (item 4): a faixa lê o MESMO bloco do painel — o

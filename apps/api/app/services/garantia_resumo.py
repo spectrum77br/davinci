@@ -792,7 +792,10 @@ async def _tabela_de_precos(session: AsyncSession) -> dict[str, tuple[str, str, 
     O SKU "puro" da linha vale antes do SKU de kit (`dg053+a003` também daria
     `dg053`)."""
     # Ordem fixa: o mesmo SKU em duas linhas fica sempre na mesma (a ativa e a
-    # mais antiga primeiro).
+    # mais antiga primeiro). Desde 06/11/2026 a linha de Celular, Mala ou
+    # Eletro vem antes da do Catálogo/Shein com o mesmo SKU: é nela que se
+    # digita o prazo da garantia (services/garantia_prazo.py), e o nome e o
+    # departamento do produto saem da mesma linha.
     linhas = (
         await session.execute(
             select(PricingProduct.id, PricingProduct.sku, PricingProduct.name).order_by(
@@ -800,6 +803,8 @@ async def _tabela_de_precos(session: AsyncSession) -> dict[str, tuple[str, str, 
             )
         )
     ).all()
+    do_departamento = await _departamentos_da_tabela(session)
+    linhas = sorted(linhas, key=lambda r: str(r[0]) not in do_departamento)
     puros: dict[str, tuple[str, str, list[str]]] = {}
     de_kit: dict[str, tuple[str, str, list[str]]] = {}
     for pid, skus, nome in linhas:

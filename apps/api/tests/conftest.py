@@ -528,6 +528,10 @@ _CLEANUP_TABLES = (
     # pendências do robô (sem FK).
     "garantia_conversas",
     "garantia_pendencias",
+    # Garantia × SAC (0459): o caso do SAC (CASCADE na conversa, SET NULL na
+    # garantia) e a vigência do prazo do produto (CASCADE no produto).
+    "garantia_sac",
+    "pricing_garantia_prazo",
     "garantias",
     "imobilizado_historico",  # FK RESTRICT -> imobilizado/users
     "imobilizado",  # FK RESTRICT -> users

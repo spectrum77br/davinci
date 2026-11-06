@@ -36,6 +36,7 @@ from app.models import (
     Integration,
     IntegrationPlatform,
     PricingAccount,
+    PricingGarantiaPrazo,
     PricingOverride,
     PricingPlatform,
     PricingProduct,
@@ -794,6 +795,17 @@ async def create_product(
     row = PricingProduct(user_id=user.id, **data)
     session.add(row)
     try:
+        await session.flush()
+        # O produto novo já com prazo (ou com o SKU de vendas que já têm
+        # garantia): a vigência e o recálculo das garantias, no mesmo commit.
+        await _garantia_do_produto(
+            session,
+            row,
+            user,
+            meses_antes=None,
+            mudou_meses=row.garantia_meses is not None,
+            skus_mexidos=[row.sku],
+        )
         await session.commit()
     except IntegrityError as e:
         await session.rollback()
@@ -803,6 +815,45 @@ async def create_product(
     await session.refresh(row)
     _, leaves_by_id, _ = await _segment_index(session)
     return _product_out(row, leaves_by_id, await carregar_certificacoes(session))
+
+
+async def _garantia_do_produto(
+    session: AsyncSession,
+    row: PricingProduct,
+    user: User,
+    *,
+    meses_antes: int | None,
+    mudou_meses: bool,
+    skus_mexidos: list[str | None] | None = None,
+) -> None:
+    """A coluna Garantia (meses) (06/11/2026): cada mudança do prazo vira uma
+    linha da vigência (`pricing_garantia_prazo`: quem, de quanto para quanto,
+    desde quando) e as garantias do produto são recalculadas na mesma
+    transação — "se o prazo aumentar, vale para todas as vendas do produto. Se
+    diminuir, vale só para as vendas feitas a partir da mudança"
+    (services/garantia_prazo.py). A linha nova ou o SKU que mudou
+    (`skus_mexidos`, o de antes e o de depois): a ligação venda → produto
+    dessas vendas pode mudar, e elas são recalculadas também. Não commita."""
+    from app.services import garantia_prazo
+
+    if mudou_meses:
+        session.add(
+            PricingGarantiaPrazo(
+                pricing_product_id=row.id,
+                meses=row.garantia_meses,
+                meses_anterior=meses_antes,
+                user_id=user.id,
+                user_nome=user.name or user.email,
+            )
+        )
+        await session.flush()
+    ids: set[int] = set()
+    if mudou_meses:
+        ids |= set(await garantia_prazo.ids_do_produto(session, row.id))
+    if skus_mexidos:
+        ids |= set(await garantia_prazo.ids_dos_skus(session, skus_mexidos))
+    if ids:
+        await garantia_prazo.aplicar_prazos(session, ids=sorted(ids), ator=user)
 
 
 @router.patch("/products/{product_id}", response_model=PricingProductOut)
@@ -866,9 +917,19 @@ async def patch_product(
         if sid is None:
             raise HTTPException(400, detail={"code": "invalid_segment"})
         data["segment_id"] = sid
+    meses_antes, sku_antes = row.garantia_meses, row.sku
     for k, v in data.items():
         setattr(row, k, v)
     try:
+        await session.flush()
+        await _garantia_do_produto(
+            session,
+            row,
+            user,
+            meses_antes=meses_antes,
+            mudou_meses="garantia_meses" in data and row.garantia_meses != meses_antes,
+            skus_mexidos=[sku_antes, row.sku] if row.sku != sku_antes else None,
+        )
         await session.commit()
     except IntegrityError as e:
         await session.rollback()

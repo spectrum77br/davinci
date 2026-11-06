@@ -7,12 +7,17 @@
 //    mesmo CPF em outro pedido é outro aparelho, aparece com "outro pedido"
 //    e a pessoa escolhe — atendimento vinculado não se apaga. A busca é POST
 //    (o termo, que pode ser CPF, vai no corpo, fora do log de acesso).
-// 2. Tipo do problema (Hardware / Software), resumo (vazio = as últimas falas
-//    do cliente), as mensagens a copiar (nenhuma marcada = as 100 mais
-//    recentes) e os anexos que vão junto, e a solução/encaminhamento.
-// 3. Antes de salvar mostra se fica Coberto ou Fora da garantia (a data do
-//    atendimento contra o fim do tipo escolhido); quem grava é o servidor
-//    (POST /api/garantias/{id}/atendimentos), que copia tudo da conversa.
+// 2. Tipo do problema (Defeito no aparelho / Sistema / aplicativo — só a
+//    categoria; o valor gravado continua hardware/software, a trava do
+//    banco), resumo (vazio = as últimas falas do cliente), as mensagens a
+//    copiar (nenhuma marcada = as 100 mais recentes) e os anexos que vão
+//    junto, e a solução/encaminhamento.
+// 3. Antes de salvar mostra se fica Coberto ou Fora da garantia: a data do
+//    atendimento contra o fim ÚNICO da garantia (revisão 06/11/2026, o prazo do
+//    produto na Tabela de Preços — o tipo não muda nada); só sem prazo
+//    cadastrado vale o fim antigo do tipo, como no servidor. Quem grava é o
+//    servidor (POST /api/garantias/{id}/atendimentos), que copia tudo da
+//    conversa.
 // Atendimento só se ADICIONA: não há editar nem apagar depois (§5.3).
 // Quem pode: "Registrar atendimento" (garantias_atendimento.edit) — vale
 // mesmo para quem só LÊ a caixa do Atendimento (fase de observação).
@@ -139,7 +144,9 @@ function soDoCliente() {
 const copiadas = computed(() => mensagensDoVinculo(props.mensagens, escolhidas.value))
 const anexos = computed(() => anexosDasMensagens(copiadas.value))
 const quando = computed(() => dataDoAtendimento(props.mensagens, escolhidas.value, props.conversa.ultima_mensagem_em, Date.now(), regras.value.dias_pausa_atendimento))
-const previa = computed(() => (escolhida.value && tipo.value ? previaCobertura(escolhida.value, tipo.value, quando.value, regras.value.ultimo_dia_coberto) : null))
+// Com o prazo do produto a prévia já sai (o tipo não muda o fim); sem prazo,
+// só depois do tipo.
+const previa = computed(() => (escolhida.value ? previaCobertura(escolhida.value, tipo.value, quando.value, regras.value.ultimo_dia_coberto) : null))
 
 // ─── 3. salvar ──────────────────────────────────────────────────────────────
 const salvando = ref(false)
@@ -150,7 +157,7 @@ async function vincular() {
   if (salvando.value) return
   const e: Record<string, string> = {}
   if (!escolhida.value) e.garantia = 'Escolha a garantia na lista.'
-  if (!tipo.value) e.tipo_problema = 'Escolha Hardware ou Software.'
+  if (!tipo.value) e.tipo_problema = 'Escolha o tipo do problema.'
   const sol = solucao.value.trim()
   if (sol.length < 3) e.solucao = sol ? 'Mínimo de 3 caracteres.' : 'Informe a solução ou o encaminhamento.'
   else if (sol.length > 4000) e.solucao = 'Máximo de 4000 caracteres.'
@@ -255,7 +262,7 @@ onKeyStroke('Escape', () => { if (!salvando.value) emit('fechar') })
                 >outro pedido</span>
                 <span class="w-full text-xs text-muted-foreground">
                   #{{ r.id }} · NF {{ textoNf(r.nf_numero, r.nf_serie) }} · pedido {{ r.pedido_bling }} ·
-                  HW até {{ dataCurta(r.fim_hardware) }} · SW até {{ dataCurta(r.fim_software) }}
+                  <template v-if="r.fim_garantia">garantia até {{ dataCurta(r.fim_garantia) }}</template><template v-else-if="r.data_inicio && !r.garantia_meses">prazo não cadastrado</template><template v-else>garantia até —</template>
                 </span>
               </button>
             </li>
@@ -289,10 +296,11 @@ onKeyStroke('Escape', () => { if (!salvando.value) emit('fechar') })
         <GarantiaCobertura v-if="previa" :cobertura="previa.cobertura" bloco data-previa-cobertura>
           <span class="text-xs">
             <template v-if="previa.cobertura === 'sem_data_de_entrega'">a garantia ainda espera a data de entrega do pedido.</template>
-            <template v-else>atendimento em {{ dataBR(quando) }} · {{ tipo === 'hardware' ? 'hardware' : 'software' }} até {{ dataBR(previa.fim) }}.</template>
+            <template v-else-if="escolhida?.fim_garantia">atendimento em {{ dataBR(quando) }} · garantia até {{ dataBR(previa.fim) }}.</template>
+            <template v-else>atendimento em {{ dataBR(quando) }} · o produto não tem prazo na Tabela de Preços › Produtos: vale o prazo antigo deste tipo, até {{ dataBR(previa.fim) }}.</template>
           </span>
         </GarantiaCobertura>
-        <p v-else-if="escolhida" class="text-xs text-muted-foreground">Escolha o tipo para ver se fica Coberto ou Fora da garantia.</p>
+        <p v-else-if="escolhida" class="text-xs text-muted-foreground" data-previa-sem-tipo>O produto não tem prazo na Tabela de Preços › Produtos: escolha o tipo do problema para ver se fica Coberto ou Fora da garantia.</p>
 
         <!-- mensagens -->
         <section class="space-y-2">

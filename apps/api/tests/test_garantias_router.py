@@ -24,7 +24,8 @@ from app.models.atendimento import AtendimentoConversa, AtendimentoMensagem
 from app.models.enums import IntegrationPlatform
 from app.models.integration import Integration
 from app.models.nf import NfNota
-from app.models.pricing import StoreInfo
+from app.models.pricing import PricingProduct, StoreInfo
+from app.models.segment import Segment
 from app.routers import garantias as rota
 from app.security.cipher import encrypt_json
 from app.services import garantia as svc
@@ -200,6 +201,27 @@ def make_user(db):
     return _f
 
 
+async def _prazo_do_produto(db, meses=12, sku="dg053"):
+    """O prazo da garantia do produto na Tabela de Preços (06/11/2026: o prazo
+    único — sem ele a garantia fica "Prazo não cadastrado")."""
+    seg = (
+        await db.execute(
+            select(Segment).where(Segment.slug == "celular", Segment.parent_id.is_(None))
+        )
+    ).scalar_one_or_none()
+    if seg is None:
+        seg = Segment(name="Celular", slug="celular")
+        db.add(seg)
+        await db.flush()
+    dono = await _make_user(db, role=UserRole.ADMIN)
+    db.add(
+        PricingProduct(
+            user_id=dono.id, sku=sku, name="Uranyx U1", segment_id=seg.id, garantia_meses=meses
+        )
+    )
+    await db.commit()
+
+
 async def _admin(make_user, auth_as):
     u = await make_user(role=UserRole.ADMIN, email=f"adm-{uuid.uuid4().hex[:6]}@davinci-test.com")
     auth_as(u)
@@ -306,6 +328,7 @@ async def _log(db, garantia_id):
 
 async def test_informar_o_pedido_preenche_a_entrega_e_os_prazos(client, db, make_user, auth_as):
     await _pedido(db)
+    await _prazo_do_produto(db, 12)
     await _entrega(db, quando=datetime(2026, 10, 8, 1, 30, tzinfo=UTC))  # 07/10 22:30 em SP
     await _nf(db, valor=1000)
     await _nf(db, numero="88", serie="2", valor=3)  # a de embalagem
@@ -338,6 +361,8 @@ async def test_informar_o_pedido_preenche_a_entrega_e_os_prazos(client, db, make
     assert g["data_inicio"] == "2026-10-07"
     assert g["fim_hardware"] == "2027-01-07"
     assert g["fim_software"] == "2027-10-07"
+    # O prazo único (06/11/2026): o do produto na Tabela de Preços.
+    assert (g["garantia_meses"], g["fim_garantia"]) == (12, "2027-10-07")
     assert g["entrega"]["origem"] == "shopee"
     assert g["status"] == "ativa"
     assert g["nf_chave"] and g["nf_serie"] == "1"
@@ -483,13 +508,15 @@ async def test_avisos_que_nao_bloqueiam(client, db, make_user, auth_as):
 async def test_status_muda_sozinho_conforme_a_data(client, db, make_user, auth_as, monkeypatch):
     await _pedido(db)
     await _entrega(db, quando=datetime(2026, 10, 7, 15, tzinfo=UTC))
+    await _prazo_do_produto(db, 3)
     await _admin(make_user, auth_as)
     g = await _cadastrar(client)
+    # O prazo único do produto (06/11/2026): 3 meses, e não há mais "somente
+    # software".
     esperado = [
-        (date(2027, 1, 7), "ativa"),  # último dia do hardware, inclusive
-        (date(2027, 1, 8), "somente_software"),
-        (date(2027, 10, 7), "somente_software"),
-        (date(2027, 10, 8), "expirada"),
+        (date(2026, 12, 20), "ativa"),
+        (date(2027, 1, 7), "ativa"),  # o último dia, inclusive
+        (date(2027, 1, 8), "expirada"),
     ]
     for dia, status in esperado:
         monkeypatch.setattr(svc, "hoje", lambda dia=dia: dia)
@@ -505,6 +532,7 @@ async def test_status_muda_sozinho_conforme_a_data(client, db, make_user, auth_a
 
 async def test_aguardando_entrega_e_o_robo_completa_e_corrige(client, db, make_user, auth_as):
     await _pedido(db)
+    await _prazo_do_produto(db, 12)
     await _admin(make_user, auth_as)
     g = await _cadastrar(client)
     assert g["status"] == "aguardando_entrega"
@@ -526,9 +554,10 @@ async def test_aguardando_entrega_e_o_robo_completa_e_corrige(client, db, make_u
     assert (await svc.recalcular_todas(db))["corrigidas"] == 1
     await db.commit()
     d = (await client.get(f"/api/garantias/{g['id']}")).json()
-    assert (d["data_inicio"], d["fim_hardware"], d["fim_software"]) == (
+    assert (d["data_inicio"], d["fim_hardware"], d["fim_software"], d["fim_garantia"]) == (
         "2026-10-04",
         "2027-01-04",
+        "2027-10-04",
         "2027-10-04",
     )
     robo = [x for x in await _log(db, g["id"]) if x.acao == "recalculou"]
@@ -635,8 +664,9 @@ async def _tres_garantias(client, db):
     await _pedido(db, nome="João da Silva")
     await _pedido(db, numero="300002", numeroloja="251007ZZZZ0002", cpf=CPF_2, nome="Maria Souza")
     await _pedido(db, numero="300003", numeroloja="251007YYYY0003", cpf=CPF_3, nome="Pedro Lima")
+    await _prazo_do_produto(db, 3)
     await _entrega(db, "300001", datetime(2026, 10, 1, 15, tzinfo=UTC))  # ativa
-    await _entrega(db, "300002", datetime(2026, 6, 2, 15, tzinfo=UTC))  # só software
+    await _entrega(db, "300002", datetime(2026, 6, 2, 15, tzinfo=UTC))  # expirada (3 meses)
     a = await _cadastrar(client)
     b = await _cadastrar(client, pedido="300002", nf="10198", cpf=CPF_2, nome="Maria Souza")
     c = await _cadastrar(client, pedido="251007YYYY0003", nf="555", cpf=CPF_3, nome="Pedro Lima")
@@ -674,10 +704,12 @@ async def test_filtro_por_status_periodo_e_indicadores(client, db, make_user, au
         return r.json()
 
     assert [i["id"] for i in (await lista(status="ativa"))["itens"]] == [a["id"]]
-    assert [i["id"] for i in (await lista(status="somente_software"))["itens"]] == [b["id"]]
+    assert [i["id"] for i in (await lista(status="expirada"))["itens"]] == [b["id"]]
     assert [i["id"] for i in (await lista(status="aguardando_entrega"))["itens"]] == [c["id"]]
-    assert (await lista(status="expirada"))["itens"] == []
-    assert (await client.post("/api/garantias/lista", json={"status": "x"})).status_code == 422
+    assert (await lista(status="sem_prazo"))["itens"] == []
+    for velho in ("x", "somente_software", "hw_vence_30d"):
+        r = await client.post("/api/garantias/lista", json={"status": velho})
+        assert r.status_code == 422, velho
     # Período pela entrega.
     entrega = await lista(periodo="entrega", de="2026-09-01", ate="2026-10-31")
     assert [i["id"] for i in entrega["itens"]] == [a["id"]]
@@ -691,20 +723,21 @@ async def test_filtro_por_status_periodo_e_indicadores(client, db, make_user, au
     ind = (await lista(busca="joao"))["indicadores"]  # o topo ignora os filtros
     assert ind == {
         "ativas": 1,
-        "somente_software": 1,
-        "hw_vence_30d": 0,
+        "vence_30d": 0,
+        "sem_prazo": 0,
         "atendimentos_no_mes": 0,
+        "acionadas": 0,
         "aguardando_entrega": 1,
         "entregue_sem_data": 0,  # o pedido 300003 está Em andamento no Bling
-        "expiradas": 0,
+        "expiradas": 1,
         "total": 3,
         "vendidas": 3,
     }
-    # Entrega 01/10 → hardware até 01/01/2027: em 15/12 faltam ≤ 30 dias.
+    # Entrega 01/10 + 3 meses → até 01/01/2027: em 15/12 faltam ≤ 30 dias.
     monkeypatch.setattr(svc, "hoje", lambda: date(2026, 12, 15))
     ind = (await lista())["indicadores"]
-    assert ind["hw_vence_30d"] == 1 and ind["ativas"] == 1
-    assert [i["id"] for i in (await lista(status="hw_vence_30d"))["itens"]] == [a["id"]]
+    assert ind["vence_30d"] == 1 and ind["ativas"] == 1
+    assert [i["id"] for i in (await lista(status="vence_30d"))["itens"]] == [a["id"]]
 
 
 async def test_lista_mostra_cpf_mascarado(client, db, make_user, auth_as):
@@ -918,6 +951,18 @@ async def test_vincular_atendimento_copia_a_conversa(client, db, make_user, auth
     assert d["atendimentos_lista"][0]["anexos"][0]["baixado"] is True
     log = [x for x in await _log(db, g["id"]) if x.acao == "registrou_atendimento"]
     assert log[0].user_id == atendente.id
+    # Sem hardware/software no painel (06/11/2026): o log e o marco do
+    # histórico dizem o tipo com o rótulo da tela (o valor gravado não muda).
+    assert "Defeito no aparelho" in log[0].detalhe
+    assert "hardware" not in log[0].detalhe.lower()
+    h = (await client.get(f"/api/garantias/{g['id']}/historico")).json()
+    marco = next(m for m in h["marcos"] if m["tipo"] == "atendimento")
+    assert "Defeito no aparelho" in marco["texto"]
+    assert "hardware" not in marco["texto"].lower()
+    assert svc.TIPO_PROBLEMA_ROTULOS == {
+        "hardware": "Defeito no aparelho",
+        "software": "Sistema / aplicativo",
+    }
     # Nada foi gravado nas tabelas do /atendimento.
     assert (
         await db.execute(
@@ -950,6 +995,38 @@ async def test_cobertura_fora_da_garantia_pelo_tipo(client, db, make_user, auth_
     assert sw.json()["fim_considerado"] == "2027-06-01"
     lista = (await client.get(f"/api/garantias/{g['id']}")).json()["atendimentos_lista"]
     assert len(lista) == 2  # uma garantia, vários atendimentos
+
+
+async def test_cobertura_pelo_fim_unico_com_o_prazo_do_produto(client, db, make_user, auth_as):
+    """Revisão de 06/11/2026: com o prazo do produto na Tabela de Preços vale o
+    fim único — o painel mostra "Ativa até 01/06/2027" e o atendimento gravado
+    não pode dizer "Fora da garantia" pelos 3 meses do hardware. O tipo fica
+    só como categoria do problema. O bloco Garantia da conversa (Atendimento)
+    recebe o mesmo fim único."""
+    await _pedido(db)
+    await _prazo_do_produto(db, 12)
+    # Entrega em 01/06/2026: o hardware antigo ia até 01/09/2026.
+    await _entrega(db, quando=datetime(2026, 6, 1, 15, tzinfo=UTC))
+    await _admin(make_user, auth_as)
+    g = await _cadastrar(client)
+    assert (g["garantia_meses"], g["fim_garantia"]) == (12, "2027-06-01")
+    c, _ = await _conversa(db)
+    hw = await client.post(
+        f"/api/garantias/{g['id']}/atendimentos",
+        json={"conversa_id": str(c.id), "tipo_problema": "hardware", "solucao": "orçamento"},
+    )
+    assert hw.status_code == 201, hw.text
+    assert (hw.json()["cobertura"], hw.json()["fim_considerado"]) == ("coberto", "2027-06-01")
+    assert hw.json()["tipo_problema"] == "hardware"
+    [at] = (await client.get(f"/api/garantias/{g['id']}")).json()["atendimentos_lista"]
+    assert (at["cobertura"], at["cobertura_hoje"]) == ("coberto", "coberto")
+    bloco = (await client.get(f"/api/garantias/conversa/{c.id}")).json()
+    [linha] = bloco["garantias"]
+    assert (linha["fim_garantia"], linha["garantia_meses"], linha["status"]) == (
+        "2027-06-01",
+        12,
+        "ativa",
+    )
 
 
 async def test_atendimento_antes_da_entrega_e_cobertura_de_hoje(client, db, make_user, auth_as):
@@ -1132,13 +1209,15 @@ async def test_vinculos_da_conversa_aparecem_no_bloco(client, db, make_user, aut
     ).json()
     s = (await client.get(f"/api/garantias/conversa/{c.id}")).json()
     assert [(v["atendimento_id"], v["garantia_id"]) for v in s["vinculos"]] == [(a["id"], g["id"])]
-    ind = (await client.post("/api/garantias/lista", json={})).json()["indicadores"]
-    assert ind["atendimentos_no_mes"] == 1
+    lista = (await client.post("/api/garantias/lista", json={})).json()
+    assert lista["itens"][0]["atendimentos"] == 1
+    # Desde 06/11/2026 o cartão "Atendimentos no mês" conta o SAC confirmado
+    # (tests/test_garantia_sac_rotas.py), não o "Registrar atendimento".
+    assert lista["indicadores"]["atendimentos_no_mes"] == 0
     lista = (
         await client.post("/api/garantias/lista", json={"com_atendimento_no_mes": True})
     ).json()
-    assert [i["id"] for i in lista["itens"]] == [g["id"]]
-    assert lista["itens"][0]["atendimentos"] == 1
+    assert lista["itens"] == []
 
 
 # ── Escopo por pessoa (30/10/2026; antes, por equipe) ─────────────────────────
@@ -1210,7 +1289,13 @@ async def test_regras_para_a_tela(client, make_user, auth_as):
     j = r.json()
     assert (j["meses_hardware"], j["meses_software"], j["ultimo_dia_coberto"]) == (3, 12, True)
     assert j["dias_pausa_atendimento"] == svc.DIAS_PAUSA_NOVO_ATENDIMENTO == 7
-    assert j["status"]["somente_software"] == "Somente software"
+    # O status do painel (06/11/2026): o prazo único, sem "somente software".
+    assert j["status"] == {
+        "aguardando_entrega": "Aguardando entrega",
+        "ativa": "Ativa",
+        "expirada": "Expirada",
+        "sem_prazo": "Prazo não cadastrado",
+    }
     assert j["origens_entrega"]["shopee"]
 
 
@@ -1223,6 +1308,7 @@ async def test_entregue_no_bling_sem_data_no_davinci(client, db, make_user, auth
     tela diz que já foi entregue — não "aguardando"."""
     await _pedido(db, situacao="83953")
     await _pedido(db, numero="300002", numeroloja="251007ZZZZ0002", cpf=CPF_2)  # Em andamento
+    await _prazo_do_produto(db, 12)
     await _admin(make_user, auth_as)
     p = (await client.get("/api/garantias/pedido", params={"numero": "300001"})).json()
     assert "entregue_sem_data" in p["avisos"] and "aguardando_entrega" not in p["avisos"]

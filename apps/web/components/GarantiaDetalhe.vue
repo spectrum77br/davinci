@@ -2,8 +2,10 @@
 // Detalhe da garantia (§4.2), aberto ao clicar na linha do painel.
 // - Dados: nome, CPF (completo só para quem tem "Ver o CPF completo"; os
 //   outros veem mascarado), NF, pedido, data de cadastro, cadastrado por.
-// - Prazos: início (a entrega, com a origem), fim do hardware e do software,
-//   cada um com a barra de dias restantes.
+// - Prazo: início (a entrega, com a origem) e o fim ÚNICO da garantia (desde
+//   06/11/2026: entrega + o prazo do produto na Tabela de Preços › Produtos),
+//   com a barra de dias restantes — ou "Prazo não cadastrado". Sem hardware
+//   nem software no painel.
 // - Atendimentos: linha do tempo dos atendimentos vindos do /atendimento
 //   ("Vincular à garantia"), cada um Coberto ou Fora da garantia, com o
 //   resumo, a solução, as mensagens e os anexos copiados. Só se adiciona —
@@ -22,7 +24,10 @@ import {
   dataHoraBR,
   ehImagem,
   errosDaApi,
+  hojeSP,
+  nomeDaLinha,
   nomePlataforma,
+  prazoUnico,
   rotuloDoPedido,
   tamanhoLegivel,
   textoAviso,
@@ -152,7 +157,8 @@ const abas = computed<{ v: Aba; l: string }[]>(() => {
   return out
 })
 
-const TIPO_ROTULO: Record<string, string> = { hardware: 'Hardware', software: 'Software' }
+// A barra do prazo único (a mesma conta do servidor; o dia em São Paulo).
+const prazo = computed(() => (g.value ? prazoUnico(g.value, hojeSP(), props.regras.ultimo_dia_coberto) : null))
 const AUTOR_ROTULO: Record<string, string> = { cliente: 'Cliente', loja: 'Loja', mediador: 'Mediador', sistema: 'Sistema', equipe: 'Equipe' }
 
 onKeyStroke('Escape', () => emit('fechar'))
@@ -171,7 +177,7 @@ onKeyStroke('Escape', () => emit('fechar'))
       <div class="flex shrink-0 items-start gap-2 border-b px-4 py-3">
         <div class="min-w-0 flex-1">
           <div class="text-xs text-muted-foreground">Garantia #{{ garantiaId }}</div>
-          <h2 id="garantia-detalhe-titulo" class="truncate text-base font-semibold">{{ g?.cliente_nome || (carregando ? 'carregando…' : 'Garantia') }}</h2>
+          <h2 id="garantia-detalhe-titulo" class="break-words text-base font-semibold">{{ g ? nomeDaLinha(g) : (carregando ? 'carregando…' : 'Garantia') }}</h2>
           <div v-if="g" class="mt-1 flex flex-wrap items-center gap-1.5">
             <GarantiaStatus :status="g.status" :entregue-sem-data="g.entregue_sem_data" />
             <span class="text-xs text-muted-foreground">NF {{ textoNf(g.nf_numero, g.nf_serie) }} · pedido {{ g.pedido_bling }}</span>
@@ -230,6 +236,21 @@ onKeyStroke('Escape', () => emit('fechar'))
                 <span class="font-mono">{{ g.pedido_bling }}</span> <span class="text-xs text-muted-foreground">(Bling)</span>
                 <div v-if="g.pedido_marketplace" class="text-xs"><span class="font-mono">{{ g.pedido_marketplace }}</span> <span class="text-muted-foreground">{{ nomePlataforma(g.plataforma) }}<template v-if="g.conta"> · {{ g.conta }}</template></span></div>
               </dd>
+              <dt class="text-muted-foreground">Produto</dt>
+              <dd data-produto>
+                {{ g.produto_nome || '—' }}
+                <span v-if="g.produto_nome && g.produto_na_tabela === false" class="ml-1 text-xs text-amber-700 dark:text-amber-300" title="o SKU não está na Tabela de Preços › Produtos: o nome é o da nota fiscal">(fora da Tabela de Preços)</span>
+              </dd>
+              <template v-if="g.status_pedido">
+                <dt class="text-muted-foreground">Status do pedido</dt><dd data-status-pedido>{{ g.status_pedido }} <span class="text-xs text-muted-foreground">(Bling)</span></dd>
+              </template>
+              <template v-if="g.sac">
+                <dt class="text-muted-foreground">SAC do site</dt>
+                <dd data-sac-detalhe>
+                  {{ g.sac.protocolo }} · {{ dataBR(g.sac.recebido_em) }}
+                  <span class="text-xs text-muted-foreground">— {{ g.sac.encerrado_em ? `encerrado em ${dataBR(g.sac.encerrado_em)}` : g.sac.confirmado_em ? 'garantia acionada' : 'aguardando confirmar' }}</span>
+                </dd>
+              </template>
               <dt class="text-muted-foreground">Pedido de garantia</dt>
               <dd data-pedido-de-garantia>
                 <span :class="g.pedido_em && !g.nao_e_pedido ? '' : 'text-muted-foreground'">{{ rotuloDoPedido(g) }}</span>
@@ -244,7 +265,7 @@ onKeyStroke('Escape', () => emit('fechar'))
 
             <section class="space-y-3 rounded-lg border p-3" data-prazos>
               <div class="flex flex-wrap items-baseline justify-between gap-2">
-                <h3 class="text-sm font-semibold">Prazos</h3>
+                <h3 class="text-sm font-semibold">Prazo da garantia</h3>
                 <span class="text-xs text-muted-foreground">
                   início <strong class="text-foreground">{{ g.data_inicio ? dataBR(g.data_inicio) : g.entregue_sem_data ? 'sem data de entrega' : 'aguardando entrega' }}</strong>
                 </span>
@@ -252,11 +273,14 @@ onKeyStroke('Escape', () => emit('fechar'))
               <p class="text-xs text-muted-foreground">
                 <template v-if="g.entrega.data">Entrega {{ dataBR(g.entrega.data) }}<template v-if="g.entrega.origem_rotulo"> — {{ g.entrega.origem_rotulo }}</template>.</template>
                 <template v-else-if="g.entregue_sem_data"><span data-entregue-sem-data-texto>O Bling já dá o pedido como entregue, mas nenhuma fonte do DaVinci tem a data de entrega (a Logística guarda a data só desde 15/07/2026). Sem ela não há prazo — a data inicial não se digita; o DaVinci confere de hora em hora.</span></template>
-                <template v-else>O pedido ainda não tem data de entrega: os prazos entram sozinhos quando ela aparecer (o DaVinci confere de hora em hora).</template>
+                <template v-else>O pedido ainda não tem data de entrega: o prazo entra sozinho quando ela aparecer (o DaVinci confere de hora em hora).</template>
                 <template v-if="g.entrega.verificada_em"> Conferida em {{ dataHoraBR(g.entrega.verificada_em) }}.</template>
               </p>
-              <GarantiaPrazoBarra titulo="Hardware" :meses="regras.meses_hardware" :prazo="g.hardware" />
-              <GarantiaPrazoBarra titulo="Software" :meses="regras.meses_software" :prazo="g.software" />
+              <GarantiaPrazoBarra v-if="g.garantia_meses" titulo="Garantia" :meses="g.garantia_meses" :prazo="prazo" />
+              <div v-else class="flex items-start gap-1.5 rounded-md border border-amber-300/70 bg-amber-50 px-2.5 py-2 text-xs text-amber-900 dark:border-amber-800/60 dark:bg-amber-900/25 dark:text-amber-200" data-sem-prazo>
+                <TriangleAlert class="mt-px size-3.5 shrink-0" aria-hidden="true" />
+                <span><strong>Prazo não cadastrado</strong> — o produto não tem o prazo da garantia na Tabela de Preços › Produtos (coluna Garantia, em meses). Sem ele a garantia fica sem data final.</span>
+              </div>
             </section>
 
             <section v-if="g.itens.length" class="space-y-1.5">
@@ -303,7 +327,6 @@ onKeyStroke('Escape', () => emit('fechar'))
                 <div class="space-y-2 rounded-lg border p-3">
                   <div class="flex flex-wrap items-center gap-1.5">
                     <span class="text-sm font-medium tabular-nums">{{ dataHoraBR(a.data_atendimento) }}</span>
-                    <span class="rounded bg-muted px-1.5 py-px text-xs">{{ TIPO_ROTULO[a.tipo_problema] || a.tipo_problema }}</span>
                     <GarantiaCobertura :cobertura="a.cobertura" :rotulo="a.cobertura_rotulo" />
                   </div>
                   <div class="text-xs text-muted-foreground">
@@ -311,7 +334,7 @@ onKeyStroke('Escape', () => emit('fechar'))
                     <template v-if="a.conversa_pedido"> · pedido {{ a.conversa_pedido }}</template>
                   </div>
                   <p v-if="a.fim_considerado" class="text-xs text-muted-foreground">
-                    Fim do {{ (TIPO_ROTULO[a.tipo_problema] || a.tipo_problema).toLowerCase() }} na hora do vínculo: {{ dataBR(a.fim_considerado) }}.
+                    Fim considerado na hora do vínculo: {{ dataBR(a.fim_considerado) }}.
                   </p>
                   <p v-if="a.cobertura_hoje !== a.cobertura" class="text-xs text-amber-800 dark:text-amber-300" data-cobertura-hoje>
                     Com os prazos de hoje (entrega corrigida depois): {{ a.cobertura_hoje_rotulo }}.

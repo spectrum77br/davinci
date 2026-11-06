@@ -1,8 +1,9 @@
 <script setup lang="ts">
 // Cadastro da garantia (§3) e correção do que foi INFORMADO.
 // - Nº do pedido → GET /api/garantias/pedido: a data de entrega vira a data
-//   inicial (RN01, travada — não é campo), com o fim do hardware (+3 meses) e
-//   do software (+12 meses) e o status já calculados; o pedido também sugere a
+//   inicial (RN01, travada — não é campo), com o fim da garantia (desde
+//   06/11/2026: entrega + o prazo do produto na Tabela de Preços › Produtos;
+//   o servidor calcula ao salvar) e o status; o pedido também sugere a
 //   NF de produto, o nome e (para quem vê CPF) o CPF — a pessoa confere.
 // - NF, nome e CPF são obrigatórios; o CPF tem máscara e passa pelo dígito
 //   verificador antes de sair (RN06; o backend confere de novo).
@@ -130,7 +131,7 @@ onMounted(() => {
 const prazos = computed(() => {
   if (consulta.value) return consulta.value.prazos
   const g = props.garantia
-  if (g) return { data_inicio: g.data_inicio, fim_hardware: g.fim_hardware, fim_software: g.fim_software, status: g.status, status_rotulo: g.status_rotulo, entregue_sem_data: g.entregue_sem_data }
+  if (g) return { data_inicio: g.data_inicio, fim_hardware: g.fim_hardware, fim_software: g.fim_software, status: g.status, status_rotulo: g.status_rotulo, entregue_sem_data: g.entregue_sem_data, fim_garantia: g.fim_garantia ?? null, prazo_meses: g.garantia_meses ?? null }
   return null
 })
 const entrega = computed(() => consulta.value?.entrega ?? props.garantia?.entrega ?? null)
@@ -266,13 +267,11 @@ onKeyStroke('Escape', () => { if (!salvando.value) emit('fechar') })
               {{ prazos?.data_inicio ? dataBR(prazos.data_inicio) : prazos?.entregue_sem_data ? 'sem data de entrega' : prazos ? 'aguardando entrega' : 'informe o pedido' }}
             </div>
           </div>
-          <div>
-            <div class="flex items-center gap-1 text-xs font-medium text-muted-foreground"><Lock class="size-3" aria-hidden="true" /> Fim hardware</div>
-            <div class="mt-1 flex h-10 items-center rounded-md border bg-muted/50 px-3 text-sm tabular-nums">{{ prazos?.fim_hardware ? dataBR(prazos.fim_hardware) : '—' }}</div>
-          </div>
-          <div>
-            <div class="flex items-center gap-1 text-xs font-medium text-muted-foreground"><Lock class="size-3" aria-hidden="true" /> Fim software</div>
-            <div class="mt-1 flex h-10 items-center rounded-md border bg-muted/50 px-3 text-sm tabular-nums">{{ prazos?.fim_software ? dataBR(prazos.fim_software) : '—' }}</div>
+          <div class="col-span-2 sm:col-span-2">
+            <div class="flex items-center gap-1 text-xs font-medium text-muted-foreground"><Lock class="size-3" aria-hidden="true" /> Fim da garantia</div>
+            <div class="mt-1 flex h-10 items-center rounded-md border bg-muted/50 px-3 tabular-nums" :class="prazos?.fim_garantia ? 'text-sm' : 'text-xs text-muted-foreground'" data-fim-garantia>
+              {{ prazos?.fim_garantia ? dataBR(prazos.fim_garantia) : prazos?.data_inicio ? 'pelo prazo do produto, ao salvar' : '—' }}
+            </div>
           </div>
           <div class="col-span-2 sm:col-span-1">
             <div class="text-xs font-medium text-muted-foreground">Status</div>
@@ -283,7 +282,7 @@ onKeyStroke('Escape', () => { if (!salvando.value) emit('fechar') })
           </div>
           <p class="col-span-2 text-xs text-muted-foreground sm:col-span-4">
             <template v-if="entrega?.data">Entrega em {{ dataBR(entrega.data) }}<template v-if="entrega.origem_rotulo"> — {{ entrega.origem_rotulo }}</template>. </template>
-            Início = data de entrega (não editável) · hardware +{{ regras.meses_hardware }} meses · software +{{ regras.meses_software }} meses<template v-if="regras.ultimo_dia_coberto"> · vale até o último dia, inclusive</template>.
+            Início = data de entrega (não editável) · fim = entrega + o prazo do produto na Tabela de Preços › Produtos<template v-if="regras.ultimo_dia_coberto"> · vale até o último dia, inclusive</template>.
           </p>
         </section>
 

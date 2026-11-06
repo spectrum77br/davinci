@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -11,9 +12,11 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
@@ -177,6 +180,12 @@ class PricingProduct(Base, TimestampMixin):
         UniqueConstraint(
             "user_id", "sku", "department", name="uq_pricing_products_user_sku_dept"
         ),
+        # Prazo da garantia do produto (06/11/2026, migration 0459): 1 a 120
+        # meses; NULL = sem prazo cadastrado.
+        CheckConstraint(
+            "garantia_meses IS NULL OR garantia_meses BETWEEN 1 AND 120",
+            name="garantia_meses",
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
@@ -268,6 +277,43 @@ class PricingProduct(Base, TimestampMixin):
         ForeignKey("financeiro_suprimentos.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Prazo da garantia do produto, em meses (coluna "Garantia (meses)" da aba
+    # Produtos, 06/11/2026 — "cada produto tem um prazo único de garantia").
+    # Aumentar vale para todas as vendas; diminuir, só para as vendas a partir
+    # da mudança: quem decide é a vigência (`PricingGarantiaPrazo`, gravada a
+    # cada mudança) e services/garantia_prazo.py. NULL = sem prazo cadastrado.
+    garantia_meses: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+
+
+class PricingGarantiaPrazo(Base):
+    """Cada mudança do prazo da garantia de um produto (06/11/2026): a vigência
+    (o prazo vale desde `vale_desde`) e o log (quem mudou, de quanto para
+    quanto). Só recebe linha nova. `meses` NULL = apagou o prazo."""
+
+    __tablename__ = "pricing_garantia_prazo"
+    __table_args__ = (
+        Index(
+            "ix_pricing_garantia_prazo_pricing_product_id_vale_desde",
+            "pricing_product_id",
+            "vale_desde",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    pricing_product_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("pricing_products.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    meses: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    meses_anterior: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    vale_desde: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    user_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    user_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PricingOverride(Base, TimestampMixin):

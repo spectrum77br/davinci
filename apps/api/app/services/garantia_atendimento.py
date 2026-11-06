@@ -23,6 +23,16 @@ está em atendimento quando:
 Termina sozinho: o aparelho consertado ou perdido, a condição lançada, o
 reembolso pago, a reclamação encerrada, o pedido respondido.
 
+Garantia × SAC (06/11/2026, especificação "Painel de Garantia: alterações"): "a
+aba lista SOMENTE os casos com Garantia acionada. Isso substitui a regra atual
+(quem pediu garantia e ainda tem algo em aberto)". A base passa a ser o caso
+do SAC confirmado e ainda não encerrado (`garantia_sac`); o motivo acima vira
+só o SELO do caso — o caso fica na aba até a pessoa encerrar ou até terminar
+sozinho (`garantia_sac.encerrar_terminados`, que grava o encerramento). "Os
+casos abertos pela regra antiga (54 em Celular e 8 em Eletro em 05/11) não são
+migrados ... e saem da aba. Os dados não são apagados." O pedido sem resposta
+do caso é o formulário do SAC sem resposta da loja na conversa dele.
+
 O desfecho do aparelho é o da lista (`garantia_resumo.desfechos`: a tela
 Devoluções, o Reembolso e os casos da plataforma) — lido aqui e reaproveitado
 no selo dela (`LeituraDoAtendimento`). Só leitura.
@@ -30,7 +40,7 @@ no selo dela (`LeituraDoAtendimento`). Só leitura.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
@@ -40,7 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.models.atendimento import AtendimentoConversa, AtendimentoMensagem
-from app.models.garantia import Garantia
+from app.models.garantia import Garantia, GarantiaSac
 from app.services import garantia_pedido, garantia_resumo, garantia_sac
 from app.services.atendimento.constantes import AUTOR_LOJA, TIPO_NOTA
 
@@ -75,16 +85,30 @@ class EmAtendimento:
 
 
 @dataclass(frozen=True)
+class CasoAberto:
+    """O caso do SAC confirmado e ainda aberto de uma garantia (o mais antigo,
+    se ela tiver mais de um)."""
+
+    sac_id: int
+    recebido_em: datetime
+    confirmado_em: datetime
+    conversa_id: UUID
+
+
+@dataclass(frozen=True)
 class LeituraDoAtendimento:
-    """O que `em_atendimento` leu: quem está em atendimento agora
-    (`em_aberto`) e o desfecho do aparelho das garantias lidas (`lidas` = as
-    que pediram, entre os filtros; `desfechos` = só as que têm alguma coisa).
-    A lista reaproveita os desfechos no selo do aparelho: a tela Devoluções, o
-    Reembolso e os casos da plataforma são lidos uma vez só por lista."""
+    """O que `em_atendimento` leu: os casos abertos (`casos` — a aba
+    Atendimento e a contagem dela), o selo de cada um (`em_aberto`, o motivo
+    em aberto, quando há) e o desfecho do aparelho das garantias lidas
+    (`lidas` = as dos casos, entre os filtros; `desfechos` = só as que têm
+    alguma coisa). A lista reaproveita os desfechos no selo do aparelho: a
+    tela Devoluções, o Reembolso e os casos da plataforma são lidos uma vez só
+    por lista."""
 
     em_aberto: dict[int, EmAtendimento]
     desfechos: dict[int, garantia_resumo.Desfecho]
     lidas: frozenset[int]
+    casos: dict[int, CasoAberto] = field(default_factory=dict)
 
 
 def terminou(f: garantia_resumo.Desfecho) -> bool:
@@ -194,6 +218,60 @@ async def pedido_sem_resposta(session: AsyncSession, registros) -> dict[int, dat
     return saida
 
 
+async def casos_abertos(session: AsyncSession, filtros: list) -> dict[int, CasoAberto]:
+    """garantia → o caso do SAC confirmado e não encerrado (o mais antigo — a
+    mesma escolha da linha e do Resumo do SAC, `garantia_sac.ordem_dos_casos`),
+    entre as garantias vivas dos `filtros` (o escopo da pessoa)."""
+    s, g = GarantiaSac, Garantia
+    linhas = (
+        await session.execute(
+            select(s.garantia_id, s.id, s.recebido_em, s.confirmado_em, s.conversa_id)
+            .join(g, g.id == s.garantia_id)
+            .where(
+                *filtros,
+                g.descartada_em.is_(None),
+                s.confirmado_em.is_not(None),
+                s.encerrado_em.is_(None),
+            )
+            .order_by(*garantia_sac.ordem_dos_casos(s))
+        )
+    ).all()
+    saida: dict[int, CasoAberto] = {}
+    for gid, sid, recebido, confirmado, conversa in linhas:
+        saida.setdefault(gid, CasoAberto(sid, recebido, confirmado, conversa))
+    return saida
+
+
+async def sac_sem_resposta(
+    session: AsyncSession, casos: dict[int, CasoAberto]
+) -> dict[int, datetime]:
+    """garantia → quando o formulário chegou, se a loja ainda não respondeu na
+    conversa do SAC depois dele (nota interna não conta)."""
+    if not casos:
+        return {}
+    m = AtendimentoMensagem
+    quando = func.coalesce(m.enviada_em, m.created_at)
+    ultima = dict(
+        (
+            await session.execute(
+                select(m.conversa_id, func.max(quando))
+                .where(
+                    m.conversa_id.in_({c.conversa_id for c in casos.values()}),
+                    m.autor == AUTOR_LOJA,
+                    m.tipo.is_distinct_from(TIPO_NOTA),
+                )
+                .group_by(m.conversa_id)
+            )
+        ).all()
+    )
+    saida: dict[int, datetime] = {}
+    for gid, c in casos.items():
+        respondeu = ultima.get(c.conversa_id)
+        if respondeu is None or respondeu <= c.recebido_em:
+            saida[gid] = c.recebido_em
+    return saida
+
+
 async def em_atendimento(
     session: AsyncSession,
     filtros: list,
@@ -201,32 +279,26 @@ async def em_atendimento(
     *,
     tabela: dict[str, Any] | None = None,
 ) -> LeituraDoAtendimento:
-    """As garantias em atendimento agora entre as `filtros` (o escopo da
-    pessoa): as que pediram, sem as descartadas — com o desfecho de cada uma,
-    que a lista reaproveita (`LeituraDoAtendimento`). `tabela` = a Tabela de
-    Preços já lida (`garantia_resumo.mapa_das_linhas`)."""
+    """Os casos em atendimento agora entre as `filtros` (o escopo da pessoa):
+    as garantias com o SAC confirmado e não encerrado — com o selo (o motivo em
+    aberto, quando há) e o desfecho de cada uma, que a lista reaproveita
+    (`LeituraDoAtendimento`). `tabela` = a Tabela de Preços já lida
+    (`garantia_resumo.mapa_das_linhas`)."""
+    casos = await casos_abertos(session, filtros)
+    if not casos:
+        return LeituraDoAtendimento({}, {}, frozenset(), {})
     g = Garantia
     registros = (
         await session.execute(
-            select(
-                g.id,
-                g.pedido_bling,
-                g.pedido_marketplace,
-                g.itens,
-                g.solicitacao_origem,
-                g.solicitacao_ref,
-                g.solicitada_em,
-            )
-            .where(*filtros, g.descartada_em.is_(None), garantia_pedido.filtro_pedido())
+            select(g.id, g.pedido_bling, g.pedido_marketplace, g.itens)
+            .where(g.id.in_(list(casos)))
             .order_by(g.id)
         )
     ).all()
-    if not registros:
-        return LeituraDoAtendimento({}, {}, frozenset())
     desfechos = await garantia_resumo.desfechos(session, registros, dia, tabela=tabela)
-    sem_resposta = await pedido_sem_resposta(session, registros)
+    sem_resposta = await sac_sem_resposta(session, casos)
     em_aberto: dict[int, EmAtendimento] = {}
     for r in registros:
         if (a := motivo_do_atendimento(desfechos.get(r.id), sem_resposta.get(r.id))) is not None:
             em_aberto[r.id] = a
-    return LeituraDoAtendimento(em_aberto, desfechos, frozenset(r.id for r in registros))
+    return LeituraDoAtendimento(em_aberto, desfechos, frozenset(r.id for r in registros), casos)

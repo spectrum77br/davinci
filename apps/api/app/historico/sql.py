@@ -137,8 +137,13 @@ EXCLUIDAS = re.compile(
     r"|mail_(message_meta|folders|agente_v2|message_tuta|reconciliation|caixa_indice|bridge_identities)$"
     # Garantias: nome, CPF e texto do comprador (trilha própria em garantia_log)
     # (28/10/2026: o ponteiro conversa × garantia e as pendências do robô —
-    # escritos pela máquina)
-    r"|garantias$|garantia_(atendimentos|atendimento_anexos|log|conversas|pendencias)$)"
+    # escritos pela máquina; 06/11/2026: o caso do SAC, com o CPF e o endereço
+    # do formulário — quem confirmou e encerrou fica no garantia_log)
+    r"|garantias$|garantia_(atendimentos|atendimento_anexos|log|conversas|pendencias|sac)$"
+    # Prazo da garantia por produto (06/11/2026): a vigência JÁ É a trilha da
+    # mudança (quem, de quanto para quanto); a mudança da pessoa na linha da
+    # Tabela (`pricing_products.garantia_meses`) continua no Histórico.
+    r"|pricing_garantia_prazo$)"
     r"|(_bak|bkp|backup)",
     re.I,
 )

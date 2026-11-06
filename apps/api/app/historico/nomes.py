@@ -218,6 +218,11 @@ ACOES: dict[tuple[str, str], str] = {
     ("PUT", "/api/garantias/{garantia_id}"): "corrigiu uma garantia",
     ("POST", "/api/garantias/{garantia_id}/recalcular"): "conferiu a entrega de uma garantia",
     ("POST", "/api/garantias/{garantia_id}/atendimentos"): "vinculou atendimento a uma garantia",
+    # Garantia × SAC (06/11/2026): o caso do SAC fica fora do gatilho (CPF e
+    # endereço do formulário); quem e o quê, no log da garantia.
+    ("POST", "/api/garantias/sac/{sac_id}/confirmar"): "confirmou o atendimento do SAC (garantia)",
+    ("POST", "/api/garantias/sac/{sac_id}/encerrar"): "encerrou o atendimento do SAC (garantia)",
+    ("POST", "/api/garantias/sac/{sac_id}/vincular"): "vinculou o SAC a uma garantia",
     # Zap — a tela "Números do WhatsApp" (Onda 4, 27/10/2026, docs/zap/desenho.md
     # §8.5). O app, a conta e o número têm o gatilho (o que mudou aparece; os
     # `*_enc` saem como arquivo); a frase diz o que a pessoa fez, inclusive

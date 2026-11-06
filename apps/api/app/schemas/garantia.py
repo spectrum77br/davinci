@@ -64,16 +64,18 @@ class AtendimentoCreate(BaseModel):
     _v_texto = field_validator("solucao", "resumo", "conversa_id", mode="before")(_texto)
 
 
-# Filtro de status da lista: os 4 do documento, o recorte "HW vence em 30d"
-# do cartão e o "Aguardando" de pedido que o Bling já dá como entregue.
+# Filtro de status da lista (06/11/2026, o prazo único por produto): Ativa ·
+# Expirada · Aguardando entrega · Entregue — sem data no DaVinci · Vence em 30
+# dias · Sem prazo cadastrado. Saem "Somente software" e "Hardware vence em 30
+# dias".
 StatusFiltro = Literal[
     "todos",
+    "ativa",
+    "expirada",
     "aguardando_entrega",
     "entregue_sem_data",
-    "ativa",
-    "somente_software",
-    "expirada",
-    "hw_vence_30d",
+    "vence_30d",
+    "sem_prazo",
 ]
 
 
@@ -99,9 +101,10 @@ class ListaFiltro(BaseModel):
     ordem: Literal["cadastro", "atividade"] = "cadastro"
     com_conversa: bool = False
     origem: Literal["todas", "robo", "manual"] = "todas"
-    # Pedido de garantia (28/10/2026): o Painel mostra só quem PEDIU; "todas"
-    # mostra também a venda sem pedido. A busca procura em todas.
-    mostrar: Literal["pedidos", "todas"] = "pedidos"
+    # 06/11/2026: "todas as vendas com nota" (o padrão) ou "garantia acionada"
+    # (a garantia com o SAC confirmado, encerrado ou não). Sai o "só pedidos de
+    # garantia", que dependia da detecção pelas conversas.
+    mostrar: Literal["todas", "acionada"] = "todas"
     # A garantia por produto (28/10/2026): a linha do produto abre os pedidos
     # dela (os ids que o Resumo mandou).
     ids: list[int] | None = Field(default=None, max_length=2000)
@@ -109,6 +112,8 @@ class ListaFiltro(BaseModel):
     # produto decide — `garantia_resumo.mapa_das_linhas`), a linha do Resumo
     # (a `chave` dela: todas as garantias daquele produto) e a aba Atendimento
     # (só quem está em atendimento agora, o mais urgente primeiro).
+    # A aba Atendimento (06/11/2026): só os casos do SAC confirmados e não
+    # encerrados, o mais antigo (o formulário) primeiro.
     departamento: Literal["celular", "mala", "eletro"] | None = None
     produto: str | None = Field(default=None, max_length=200)
     em_atendimento: bool = False
@@ -164,6 +169,22 @@ class EmAtendimentoOut(BaseModel):
     vencido: bool = False
 
 
+class SacDaLinhaOut(BaseModel):
+    """O caso do SAC da linha (06/11/2026): o confirmado e aberto mais
+    antigo; senão o aberto sem confirmação mais antigo; senão o encerrado mais
+    recente (`garantia_sac.ordem_dos_casos`). Sem confirmação: o protocolo, a
+    data e o botão Confirmar; com: "Garantia acionada"."""
+
+    id: int
+    protocolo: str
+    recebido_em: datetime
+    confirmado_em: datetime | None = None
+    confirmado_por: PessoaRef | None = None
+    encerrado_em: datetime | None = None
+    # pessoa | terminou
+    encerrado_motivo: str | None = None
+
+
 class GarantiaLinhaOut(BaseModel):
     id: int
     cliente_nome: str
@@ -216,27 +237,44 @@ class GarantiaLinhaOut(BaseModel):
     # atendimento agora, o motivo (o selo da aba Atendimento).
     departamento: str | None = None
     atendimento: EmAtendimentoOut | None = None
+    # As colunas da lista (06/11/2026, "Painel de Garantia: alterações"):
+    # o nome sem o apelido do fim ("Maria Souza (maria123)" → "Maria Souza"),
+    # o produto da Tabela de Preços pelo SKU (fora dela, a descrição do item,
+    # com `produto_na_tabela` False — o alerta), o prazo do produto e o fim
+    # único, a situação do pedido no Bling (o nome) e o caso do SAC.
+    nome: str = ""
+    produto_nome: str | None = None
+    produto_na_tabela: bool = False
+    garantia_meses: int | None = None
+    fim_garantia: date | None = None
+    status_pedido: str | None = None
+    sac: SacDaLinhaOut | None = None
 
 
 class IndicadoresOut(BaseModel):
-    """Os cartões da aba Garantia e a linha embaixo deles. Com a pílula
-    (04/11/2026), só o departamento dela — sem os filtros da barra."""
+    """Os cartões da aba Garantia e a linha embaixo deles (06/11/2026): Ativas
+    · Vence em 30 dias · Sem prazo cadastrado · Atendimentos no mês (os casos
+    do SAC confirmados no mês). Com a pílula, só o departamento dela — sem os
+    filtros da barra. A base são todas as vendas vivas que a pessoa enxerga."""
 
     ativas: int
-    somente_software: int
-    hw_vence_30d: int
+    vence_30d: int
+    sem_prazo: int
     atendimentos_no_mes: int
+    # As garantias com o SAC confirmado (Garantia acionada).
+    acionadas: int = 0
     aguardando_entrega: int
     # Dentro de `aguardando_entrega`: as que o Bling já dá como entregues.
     entregue_sem_data: int
     expiradas: int
     total: int
-    # As vendas com garantia (com e sem pedido) que a pessoa enxerga.
+    # As vendas com garantia que a pessoa enxerga (= `total` desde 06/11).
     vendidas: int = 0
 
 
 class AbaOut(BaseModel):
-    # Todas as garantias (as vendas com nota) e as em atendimento agora.
+    # Todas as garantias (as vendas com nota) e os casos em atendimento agora
+    # (o SAC confirmado e não encerrado, 06/11/2026).
     garantias: int = 0
     atendimento: int = 0
 
@@ -283,6 +321,9 @@ class GarantiaListaOut(BaseModel):
     hoje: date
     abas: AbasOut
     pedido_sem_garantia: PedidoSemGarantiaOut | None = None
+    # Os casos do SAC sem garantia ligada (o contador "SAC sem pedido"): só
+    # para quem tem escopo irrestrito — o SAC do site não tem loja.
+    sac_sem_pedido: int = 0
 
 
 class ItemOut(BaseModel):
@@ -591,3 +632,93 @@ class RegrasOut(BaseModel):
     status: dict[str, str]
     coberturas: dict[str, str]
     origens_entrega: dict[str, str]
+
+
+# ── Garantia × SAC (06/11/2026) ──────────────────────────────────────────────
+
+
+class SacConfirmar(BaseModel):
+    """POST /api/garantias/sac/{id}/confirmar: com a garantia vencida, a tela
+    pergunta antes e manda `ciente_vencida`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ciente_vencida: bool = False
+
+
+class SacVincular(BaseModel):
+    """POST /api/garantias/sac/{id}/vincular: o SAC sem pedido ligado à mão."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    garantia_id: int
+
+
+class SacOut(SacDaLinhaOut):
+    """O caso depois de confirmar, encerrar ou vincular."""
+
+    garantia_id: int | None = None
+    conversa_id: UUID
+    # pedido | nf | cpf_produto | manual
+    vinculo: str | None = None
+    encerrado_por: PessoaRef | None = None
+
+
+class SacSemPedidoOut(BaseModel):
+    """Um SAC sem garantia ligada (o painel "SAC sem pedido"). Sem CPF."""
+
+    id: int
+    protocolo: str
+    recebido_em: datetime
+    nome: str | None = None
+    pedido_citado: str | None = None
+    nota_fiscal: str | None = None
+    modelo: str | None = None
+    local_compra: str | None = None
+    loja_vendedor: str | None = None
+
+
+class SacSemPedidoListaOut(BaseModel):
+    itens: list[SacSemPedidoOut]
+    total: int
+
+
+class SacCampoOut(BaseModel):
+    rotulo: str
+    valor: str | None = None
+
+
+class SacSecaoOut(BaseModel):
+    titulo: str
+    campos: list[SacCampoOut]
+
+
+class SacAnexoOut(BaseModel):
+    """Um arquivo do e-mail do formulário (a Documentação do Resumo do SAC).
+    `papel` = qual foto é, pelo nome que o formulário cita depois do rótulo."""
+
+    id: str
+    nome: str | None = None
+    tipo: str | None = None
+    tamanho: int | None = None
+    papel: str | None = None
+    # GET autenticado (/api/garantias/sac/{id}/anexos/{anexo}).
+    url: str
+
+
+class SacDetalheOut(BaseModel):
+    """GET /api/garantias/{id}/sac: o Resumo do SAC no topo da conversa (o
+    caso mais recente da garantia). CPF mascarado (completo só com
+    `garantias_cpf`)."""
+
+    id: int
+    protocolo: str
+    recebido_em: datetime
+    conversa_id: UUID
+    confirmado_em: datetime | None = None
+    confirmado_por: PessoaRef | None = None
+    encerrado_em: datetime | None = None
+    encerrado_por: PessoaRef | None = None
+    encerrado_motivo: str | None = None
+    secoes: list[SacSecaoOut]
+    anexos: list[SacAnexoOut]

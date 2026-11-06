@@ -11,18 +11,17 @@ import uuid
 from datetime import UTC, date, datetime
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
-from app.models import BlingOrder, Garantia, GarantiaAtendimento, UserRole
+from app.models import BlingOrder, Garantia, GarantiaLog, UserRole
 from app.models.atendimento import (
     AtendimentoConversa,
     AtendimentoMensagem,
-    AtendimentoPedidoComprador,
     AtendimentoReclamacao,
 )
 from app.models.devolution import Devolution
 from app.models.enums import IntegrationPlatform
-from app.models.garantia import GarantiaConversa, GarantiaPendencia
+from app.models.garantia import GarantiaConversa, GarantiaPendencia, GarantiaSac
 from app.models.marketplace_financial import (
     MarketplaceOrderFinancial,
     MarketplaceOrderFreightReconciliation,
@@ -34,7 +33,7 @@ from app.models.segment import Segment
 from app.routers import garantias as rota
 from app.services import garantia as svc
 from app.services import garantia_atendimento as atend
-from app.services import garantia_auto
+from app.services import garantia_auto, garantia_sac
 from app.services import garantia_resumo as resumo
 from app.services.atendimento import escopo
 from tests.conftest import _make_user
@@ -165,6 +164,8 @@ async def _venda(
         entrega_origem="shopee",
     )
     g.fim_hardware, g.fim_software = svc.calcular_prazos(date(2026, 10, 5))
+    # O prazo único do produto (06/11/2026): 12 meses.
+    g.prazo_meses, g.fim_garantia = 12, svc.fim_da_garantia(date(2026, 10, 5), 12)
     if pediu:
         g.solicitada_em = _em(10, 12, 15)
         g.solicitacao_origem = "mensagem"
@@ -286,6 +287,54 @@ async def _pedido_por_mensagem(db, g, conversa, pediu_em, *, respondida_em=None,
     await db.commit()
 
 
+async def _acionar(
+    db, g, recebido, *, confirmado=None, encerrado=None, respondida_em=None, protocolo=None
+):
+    """O caso do SAC da garantia (06/11/2026): o formulário recebido, confirmado
+    ("Garantia acionada") e, se for o caso, encerrado pela pessoa e respondido
+    pela loja na conversa do protocolo."""
+    protocolo = protocolo or f"US-26-{g.id:04d}"
+    c = AtendimentoConversa(
+        plataforma="site",
+        canal="email",
+        conta="uranyx",
+        externo_id=f"mail-protocolo:{protocolo}",
+        ultima_mensagem_em=recebido,
+    )
+    db.add(c)
+    await db.flush()
+    m = AtendimentoMensagem(
+        conversa_id=c.id, autor="cliente", origem="cliente", texto="formulário", enviada_em=recebido
+    )
+    db.add(m)
+    if respondida_em is not None:
+        db.add(
+            AtendimentoMensagem(
+                conversa_id=c.id,
+                autor="loja",
+                origem="davinci_humano",
+                texto="resposta",
+                enviada_em=respondida_em,
+            )
+        )
+    await db.flush()
+    db.add(GarantiaConversa(garantia_id=g.id, conversa_id=c.id, como="pedido"))
+    caso = GarantiaSac(
+        conversa_id=c.id,
+        mensagem_id=m.id,
+        protocolo=protocolo,
+        recebido_em=recebido,
+        garantia_id=g.id,
+        vinculo="pedido",
+        confirmado_em=confirmado,
+        encerrado_em=encerrado,
+        encerrado_motivo="pessoa" if encerrado else None,
+    )
+    db.add(caso)
+    await db.commit()
+    return caso
+
+
 async def _lista(client, **corpo):
     r = await client.post("/api/garantias/lista", json=corpo)
     assert r.status_code == 200, r.text
@@ -305,6 +354,10 @@ async def test_departamento_produto_e_as_abas(client, db, make_user, auth_as):
     m1 = await _venda(db, "400005", "b021", pediu=False)
     x1 = await _venda(db, "400006", "dg053.ci", loja="L2")
     await _venda(db, "400007", "dg053.sp", descartada=True)
+    # Os casos do SAC confirmados (06/11/2026): o de Celular em outubro e o de
+    # Eletro neste mês (o "Atendimentos no mês").
+    await _acionar(db, c3, _em(10, 27), confirmado=_em(10, 30))
+    await _acionar(db, e1, _em(11, 1), confirmado=_em(11, 2))
 
     def ids(h):
         return sorted(i["id"] for i in h["itens"])
@@ -312,8 +365,12 @@ async def test_departamento_produto_e_as_abas(client, db, make_user, auth_as):
     h = await _lista(client, departamento="celular", mostrar="todas")
     assert ids(h) == sorted([c1.id, c2.id, c3.id, x1.id]) and h["total"] == 4
     assert {i["departamento"] for i in h["itens"]} == {"celular"}
-    # O padrão continua sendo só quem pediu.
-    assert ids(await _lista(client, departamento="celular")) == sorted([c1.id, c3.id, x1.id])
+    # O padrão (06/11/2026) é "todas as vendas com nota"; "garantia acionada"
+    # é a do SAC confirmado. O "só pedidos de garantia" saiu.
+    assert ids(await _lista(client, departamento="celular")) == ids(h)
+    assert ids(await _lista(client, departamento="celular", mostrar="acionada")) == [c3.id]
+    r = await client.post("/api/garantias/lista", json={"mostrar": "pedidos"})
+    assert r.status_code == 422
     h = await _lista(client, departamento="eletro", mostrar="todas")
     assert ids(h) == [e1.id] and h["itens"][0]["departamento"] == "eletro"
     assert ids(await _lista(client, departamento="mala", mostrar="todas")) == [m1.id]
@@ -325,16 +382,18 @@ async def test_departamento_produto_e_as_abas(client, db, make_user, auth_as):
     # A busca dentro do departamento.
     assert ids(await _lista(client, departamento="celular", busca="400001")) == [c1.id]
     assert (await _lista(client, departamento="eletro", busca="400001"))["itens"] == []
-    # O selo de quem está em atendimento agora vem na linha.
-    por_id = {i["id"]: i for i in (await _lista(client, departamento="celular"))["itens"]}
+    # O selo do caso em atendimento vem na linha.
+    h = await _lista(client, departamento="celular")
+    por_id = {i["id"]: i for i in h["itens"]}
     assert por_id[c3.id]["atendimento"]["motivo"] == "no_tecnico"
-    assert por_id[c1.id]["atendimento"] is None
+    assert por_id[c3.id]["sac"]["protocolo"] == f"US-26-{c3.id:04d}"
+    assert por_id[c1.id]["atendimento"] is None and por_id[c1.id]["sac"] is None
 
     # As pílulas e as abas: o que a pessoa enxerga, sem os filtros da barra.
     abas = {
         "celular": {"garantias": 4, "atendimento": 1},
         "mala": {"garantias": 1, "atendimento": 0},
-        "eletro": {"garantias": 1, "atendimento": 0},
+        "eletro": {"garantias": 1, "atendimento": 1},
     }
     assert h["abas"] == abas
     h = await _lista(client, status="expirada", departamento="celular")
@@ -343,44 +402,35 @@ async def test_departamento_produto_e_as_abas(client, db, make_user, auth_as):
     r = await client.post("/api/garantias/lista", json={"departamento": "acessorios"})
     assert r.status_code == 422
 
-    # Os cartões e a linha embaixo deles (revisão 04/11): só o departamento da
-    # pílula, sem os filtros da barra — batem com o "Garantia (N)" da aba e
-    # com a Tabela que o cartão filtra. Sem pílula, tudo o que a pessoa vê.
-    # (O atendimento do mês é de uma garantia de Eletro.)
-    db.add(
-        GarantiaAtendimento(
-            garantia_id=e1.id,
-            data_atendimento=_em(11, 2),
-            atendente_id=admin.id,
-            atendente_nome="Admin",
-            conversa_id=uuid.uuid4(),
-            conversa_link="/atendimento",
-            resumo="não liga",
-            tipo_problema="hardware",
-            cobertura="coberto",
-            solucao="troca",
-        )
-    )
-    await db.commit()
-
+    # Os cartões e a linha embaixo deles: só o departamento da pílula, sem os
+    # filtros da barra — a base são todas as vendas vivas (06/11/2026).
     def cartoes(h):
         i = h["indicadores"]
-        return (i["vendidas"], i["total"], i["ativas"], i["atendimentos_no_mes"])
+        return (i["vendidas"], i["total"], i["ativas"], i["atendimentos_no_mes"], i["acionadas"])
 
-    assert cartoes(await _lista(client, departamento="celular", mostrar="todas")) == (4, 3, 3, 0)
-    assert cartoes(await _lista(client, departamento="celular", status="expirada")) == (4, 3, 3, 0)
-    assert cartoes(await _lista(client, departamento="eletro")) == (1, 1, 1, 1)
-    assert cartoes(await _lista(client, departamento="mala", mostrar="todas")) == (1, 0, 0, 0)
-    assert cartoes(await _lista(client, mostrar="todas")) == (6, 4, 4, 1)
+    assert cartoes(await _lista(client, departamento="celular")) == (4, 4, 4, 0, 1)
+    assert cartoes(await _lista(client, departamento="celular", status="expirada")) == (
+        4,
+        4,
+        4,
+        0,
+        1,
+    )
+    assert cartoes(await _lista(client, departamento="eletro")) == (1, 1, 1, 1, 1)
+    assert cartoes(await _lista(client, departamento="mala")) == (1, 1, 1, 0, 0)
+    assert cartoes(await _lista(client)) == (6, 6, 6, 1, 2)
     h = await _lista(client, departamento="celular", status="ativa")
-    assert h["total"] == h["indicadores"]["ativas"] == 3, "o cartão Ativas = os pedidos filtrados"
+    assert h["total"] == h["indicadores"]["ativas"] == 4, "o cartão Ativas = as filtradas"
+    # O cartão "Atendimentos no mês" filtra o SAC confirmado no mês.
+    h = await _lista(client, com_atendimento_no_mes=True)
+    assert ids(h) == [e1.id]
 
     # Quem não é admin conta só as lojas dele.
     auth_as(await make_user(permissions=CONSULTA))
     h = await _lista(client, departamento="celular", mostrar="todas")
     assert ids(h) == sorted([c1.id, c2.id, c3.id])
     assert h["abas"]["celular"] == {"garantias": 3, "atendimento": 1}
-    assert cartoes(h) == (3, 2, 2, 0)
+    assert cartoes(h) == (3, 3, 3, 0, 1)
 
 
 async def test_a_linha_do_resumo_abre_as_vendidas_dela(client, db, make_user, auth_as):
@@ -434,9 +484,9 @@ async def test_a_linha_do_resumo_abre_as_vendidas_dela(client, db, make_user, au
 
 
 async def test_a_lista_le_o_desfecho_uma_vez_so(client, db, make_user, auth_as, monkeypatch):
-    """O desfecho de quem pediu (a tela Devoluções, o Reembolso e os casos da
-    plataforma) é lido uma vez por lista: o Atendimento lê e o selo do
-    aparelho reaproveita; só a venda sem pedido da página é lida à parte."""
+    """O desfecho do caso em atendimento (a tela Devoluções, o Reembolso e os
+    casos da plataforma) é lido uma vez por lista: o Atendimento lê e o selo do
+    aparelho reaproveita; só a venda sem caso da página é lida à parte."""
     admin = await make_user(role=UserRole.ADMIN)
     auth_as(admin)
     await _tabela(db, admin)
@@ -451,9 +501,10 @@ async def test_a_lista_le_o_desfecho_uma_vez_so(client, db, make_user, auth_as, 
         lidas.append(sorted(g.id for g in garantias))
         return await original(session, garantias, dia, **kw)
 
+    await _acionar(db, c1, _em(10, 26), confirmado=_em(10, 27))
     monkeypatch.setattr(resumo, "desfechos", espiao)
     h = await _lista(client, departamento="celular", mostrar="todas")
-    assert lidas == [[c1.id], [c2.id]], "quem pediu uma vez; a venda sem pedido à parte"
+    assert lidas == [[c1.id], [c2.id]], "o caso do SAC uma vez; a venda sem caso à parte"
     por_id = {i["id"]: i for i in h["itens"]}
     assert (por_id[c1.id]["devolucao_situacao"], por_id[c1.id]["atendimento"]["motivo"]) == (
         "no_tecnico",
@@ -465,203 +516,125 @@ async def test_a_lista_le_o_desfecho_uma_vez_so(client, db, make_user, auth_as, 
         "Devolvido (Novo)",
     )
     assert por_id[c2.id]["atendimento"] is None
-    # Só os pedidos (o padrão): uma leitura só.
+    # Só a garantia acionada: uma leitura só.
     lidas.clear()
-    h = await _lista(client, departamento="celular")
+    h = await _lista(client, departamento="celular", mostrar="acionada")
     assert lidas == [[c1.id]]
     assert [i["id"] for i in h["itens"]] == [c1.id]
     assert h["itens"][0]["devolucao_situacao"] == "no_tecnico"
 
 
-async def test_em_atendimento_cada_motivo_e_quem_ja_terminou(client, db, make_user, auth_as):
-    """Só quem pediu e tem um caso de garantia andando: no técnico (o vencido
-    primeiro), chegou sem a condição, voltando, a plataforma decidindo, o
-    pedido de garantia que a loja ainda não respondeu (mensagem ou SAC). Sai
-    sozinho quando termina. A conversa comum esperando a loja não entra."""
+async def test_em_atendimento_so_os_casos_acionados(client, db, make_user, auth_as):
+    """06/11/2026: "a aba lista SOMENTE os casos com Garantia acionada" — o SAC
+    confirmado e não encerrado, o mais antigo (o formulário) primeiro. O
+    motivo (no técnico, pedido sem resposta…) vira só o selo: o caso fica na
+    aba até encerrar. Os casos da regra antiga (quem pediu pela conversa, sem
+    SAC) saem da aba — nada é apagado."""
     admin = await make_user(role=UserRole.ADMIN)
     auth_as(admin)
     await _tabela(db, admin)
-    integ, _ficha = await _loja_padrao(db)
     g = {}
-    for n in range(1, 21):
-        numero = f"4001{n:02d}"
-        g[n] = await _venda(
-            db,
-            numero,
-            loja="L2" if n == 18 else "L1",
-            pediu=n != 13,
-            descartada=n == 14,
-        )
-    # 1: no técnico, prazo vencido; 2: no técnico, no prazo.
+    for n in range(1, 9):
+        g[n] = await _venda(db, f"4001{n:02d}", loja="L2" if n == 7 else "L1", descartada=n == 8)
+    # 1: acionado, no técnico com o prazo vencido.
     await _devolucao(db, "400101", "Manutenção", prazo=_em(10, 20), em=_em(10, 10))
+    await _acionar(db, g[1], _em(10, 5), confirmado=_em(10, 6))
+    # 2: no técnico e pediu pela conversa, mas sem SAC: a regra antiga — fora.
     await _devolucao(db, "400102", "Manutenção", prazo=_em(11, 20), em=_em(10, 25))
-    # 3: chegou, sem a condição lançada.
-    await _devolucao(db, "400103", None, em=_em(10, 28))
-    # 4: devolução aceita na Shopee, o aparelho voltando.
-    await _caso(db, "shopee", "devolucao", "PROCESSING", _em(10, 30), pedido_mkt="MKT400104")
-    # 5: reclamação aberta no ML (ligada pelo pedido do Bling dos dados).
-    await _caso(
-        db,
-        "ml",
-        "reclamacao",
-        "opened",
-        _em(10, 29),
-        pedido_mkt="2000000000400105",
-        pedido_bling="400105",
-    )
-    # 6: o pedido de garantia por mensagem que a loja ainda não respondeu (a
-    # nota interna não é resposta).
-    c6 = await _conversa(db, g[6], cliente_em=_em(11, 2))
-    await _pedido_por_mensagem(db, g[6], c6, _em(11, 2), nota_em=_em(11, 2, 14))
-    # 7: no técnico + reclamação + pedido sem resposta: vale o 1º motivo.
-    await _devolucao(db, "400107", "Manutenção", prazo=_em(11, 30), em=_em(10, 31))
-    await _caso(db, "ml", "mediacao", "opened", _em(10, 20), pedido_mkt="MKT400107")
-    c7 = await _conversa(db, g[7], cliente_em=_em(10, 15))
-    await _pedido_por_mensagem(db, g[7], c7, _em(10, 15))
-    # Terminaram: 8 consertado (mesmo com o pedido sem resposta), 9 perdido,
-    # 10 devolvido com a condição, 11 reembolso ao cliente (mesmo com a
-    # reclamação aberta).
-    await _devolucao(db, "400108", "Usado", manutencao=True, em=_em(10, 20))
-    c8 = await _conversa(db, g[8], cliente_em=_em(11, 3))
-    await _pedido_por_mensagem(db, g[8], c8, _em(11, 3))
-    await _devolucao(db, "400109", "Extraviado", em=_em(10, 20))
-    await _devolucao(db, "400110", "Novo", em=_em(10, 20))
-    db.add(Refund(pedido_bling="400111", conta="Loja X", tipo="Cliente", reembolso=-50))
-    await db.commit()
-    await _caso(db, "ml", "reclamacao", "opened", _em(10, 21), pedido_mkt="MKT400111")
-    # 12: o pedido já respondido; 13: não pediu; 14: descartada; 16: reclamação
-    # encerrada.
-    c12 = await _conversa(db, g[12], aguardando=False, cliente_em=_em(11, 1))
-    await _pedido_por_mensagem(db, g[12], c12, _em(11, 1), respondida_em=_em(11, 1, 15))
-    await _devolucao(db, "400113", "Manutenção", em=_em(10, 20))
-    await _devolucao(db, "400114", "Manutenção", em=_em(10, 20))
-    await _caso(
-        db,
-        "ml",
-        "reclamacao",
-        "closed",
-        _em(10, 22),
-        pedido_mkt="MKT400116",
-        encerrada=_em(10, 25),
-    )
-    # 15: a conversa comum esperando a loja (o cliente agradeceu depois do
-    # pedido já respondido) NÃO é caso de garantia andando.
-    comprador = "comprador-15"
-    db.add(
-        AtendimentoPedidoComprador(
-            integration_id=integ.id,
-            plataforma="shopee",
-            comprador_id=comprador,
-            pedido="OUTRO-15",
-            criado_em=_em(11, 1),
-        )
-    )
-    c15 = await _conversa(
-        db,
-        g[15],
-        cliente_em=_em(11, 3),
-        plataforma="shopee",
-        canal="chat",
-        como="comprador",
-        comprador_id=comprador,
-        integration_id=integ.id,
-    )
-    await _pedido_por_mensagem(db, g[15], c15, _em(10, 30), respondida_em=_em(10, 30, 16))
-    # 17: o pedido no chat do comprador, sem resposta.
-    c17 = await _conversa(db, g[17], cliente_em=_em(11, 2, 18), plataforma="shopee", canal="chat")
-    await _pedido_por_mensagem(db, g[17], c17, _em(11, 2, 18))
-    # 18: no técnico em outra loja (L2).
-    await _devolucao(db, "400118", "Manutenção", prazo=_em(11, 30), em=_em(11, 3))
-    # 19: no técnico com o cliente já reembolsado: o técnico ainda é da loja.
-    await _devolucao(db, "400119", "Manutenção", prazo=_em(11, 30), em=_em(10, 26))
-    db.add(Refund(pedido_bling="400119", conta="Loja X", tipo="Cliente", reembolso=-80))
-    await db.commit()
-    # 20: o SAC do site (o formulário do protocolo) sem resposta da loja.
-    sac = AtendimentoConversa(
-        plataforma="site",
-        canal="email",
-        conta="uranyx",
-        externo_id="mail-protocolo:US-26-0099",
-        ultima_do_cliente_em=_em(11, 3, 9),
-        ultima_mensagem_em=_em(11, 3, 9),
-    )
-    db.add(sac)
-    await db.flush()
-    db.add(GarantiaConversa(garantia_id=g[20].id, conversa_id=sac.id, como="pedido"))
-    db.add(
-        AtendimentoMensagem(
-            conversa_id=sac.id,
-            autor="cliente",
-            origem="cliente",
-            texto="formulário",
-            enviada_em=_em(11, 3, 9),
-        )
-    )
-    g[20].solicitada_em = _em(11, 3, 9)
-    g[20].solicitacao_origem = "sac"
-    g[20].solicitacao_ref = "US-26-0099"
-    await db.commit()
+    c2 = await _conversa(db, g[2], cliente_em=_em(11, 2))
+    await _pedido_por_mensagem(db, g[2], c2, _em(11, 2))
+    # 3: acionado, o formulário sem resposta da loja.
+    await _acionar(db, g[3], _em(10, 20), confirmado=_em(10, 21))
+    # 4: acionado e respondido: continua na aba (sem selo) até encerrar.
+    await _acionar(db, g[4], _em(10, 12), confirmado=_em(10, 13), respondida_em=_em(10, 13, 15))
+    # 5: acionado e encerrado: fora.
+    await _acionar(db, g[5], _em(10, 1), confirmado=_em(10, 2), encerrado=_em(10, 9))
+    # 6: SAC recebido e não confirmado: fora (o botão Confirmar fica na lista).
+    await _acionar(db, g[6], _em(10, 3))
+    # 7: acionado em outra loja (L2); 8: acionado com a garantia descartada.
+    await _acionar(db, g[7], _em(10, 15), confirmado=_em(10, 16))
+    await _acionar(db, g[8], _em(10, 2), confirmado=_em(10, 3))
 
     h = await _lista(client, em_atendimento=True, departamento="celular")
-    ordem = [1, 2, 19, 3, 5, 4, 7, 6, 17, 20, 18]
+    ordem = [1, 4, 7, 3]
     assert [i["id"] for i in h["itens"]] == [g[n].id for n in ordem]
-    assert h["total"] == 11 and h["abas"]["celular"]["atendimento"] == 11
-    selo = {
-        i["id"]: (
-            i["atendimento"]["motivo"],
-            i["atendimento"]["rotulo"],
-            datetime.fromisoformat(i["atendimento"]["desde"]),
-            i["atendimento"]["vencido"],
-        )
-        for i in h["itens"]
+    assert h["total"] == 4 and h["abas"]["celular"]["atendimento"] == 4
+    por_id = {i["id"]: i for i in h["itens"]}
+    assert por_id[g[1].id]["atendimento"] == {
+        "motivo": "no_tecnico",
+        "rotulo": "No técnico · vencido",
+        "desde": _em(10, 10).isoformat().replace("+00:00", "Z"),
+        "vencido": True,
     }
-    assert selo[g[1].id] == ("no_tecnico", "No técnico · vencido", _em(10, 10), True)
-    assert selo[g[2].id] == ("no_tecnico", "No técnico", _em(10, 25), False)
-    assert selo[g[3].id] == ("sem_condicao", "Chegou — falta a condição", _em(10, 28), False)
-    assert selo[g[4].id] == ("voltando", "Voltando", _em(10, 30), False)
-    assert selo[g[5].id] == ("plataforma_decidindo", "Plataforma decidindo", _em(10, 29), False)
-    assert selo[g[6].id] == (
-        "pedido_sem_resposta",
-        "Pedido de garantia sem resposta",
-        _em(11, 2),
-        False,
-    )
-    assert selo[g[7].id] == ("no_tecnico", "No técnico", _em(10, 31), False)
-    assert selo[g[19].id] == ("no_tecnico", "No técnico", _em(10, 26), False)
-    assert selo[g[17].id][0] == "pedido_sem_resposta"
-    assert selo[g[20].id] == (
-        "pedido_sem_resposta",
-        "Pedido de garantia sem resposta",
-        _em(11, 3, 9),
-        False,
-    )
-    # A página (o mais urgente primeiro, sempre).
-    h = await _lista(client, em_atendimento=True, departamento="celular", limite=3, offset=3)
-    assert [i["id"] for i in h["itens"]] == [g[n].id for n in (3, 5, 4)] and h["total"] == 11
+    assert por_id[g[3].id]["atendimento"]["motivo"] == "pedido_sem_resposta"
+    assert datetime.fromisoformat(por_id[g[3].id]["atendimento"]["desde"]) == _em(10, 20)
+    assert por_id[g[4].id]["atendimento"] is None
+    assert por_id[g[4].id]["sac"]["confirmado_em"] is not None
+    # A página (o mais antigo primeiro, sempre).
+    h = await _lista(client, em_atendimento=True, departamento="celular", limite=2, offset=1)
+    assert [i["id"] for i in h["itens"]] == [g[4].id, g[7].id] and h["total"] == 4
     assert (await _lista(client, em_atendimento=True, departamento="eletro"))["itens"] == []
     # A busca também vale dentro da aba.
-    h = await _lista(client, em_atendimento=True, busca="400106")
-    assert [i["id"] for i in h["itens"]] == [g[6].id]
-
-    # O SAC respondido sai sozinho.
+    h = await _lista(client, em_atendimento=True, busca="400103")
+    assert [i["id"] for i in h["itens"]] == [g[3].id]
+    # O SAC respondido perde o selo, mas o caso continua na aba.
     db.add(
         AtendimentoMensagem(
-            conversa_id=sac.id,
+            conversa_id=(await db.get(GarantiaSac, por_id[g[3].id]["sac"]["id"])).conversa_id,
             autor="loja",
             origem="davinci_humano",
             texto="resposta",
-            enviada_em=_em(11, 3, 11),
+            enviada_em=_em(10, 22),
         )
     )
     await db.commit()
     h = await _lista(client, em_atendimento=True, departamento="celular")
-    assert g[20].id not in [i["id"] for i in h["itens"]] and h["total"] == 10
+    assert {i["id"]: i["atendimento"] for i in h["itens"]}[g[3].id] is None
+    assert h["total"] == 4
 
     # Quem não é admin: só a loja dele.
     auth_as(await make_user(permissions=CONSULTA))
     h = await _lista(client, em_atendimento=True, departamento="celular")
-    assert [i["id"] for i in h["itens"]] == [g[n].id for n in ordem if n not in (18, 20)]
-    assert h["abas"]["celular"]["atendimento"] == 9
+    assert [i["id"] for i in h["itens"]] == [g[n].id for n in ordem if n != 7]
+    assert h["abas"]["celular"]["atendimento"] == 3
+
+
+async def test_o_caso_que_terminou_depois_de_confirmar_encerra_sozinho(db, make_user):
+    """O caso termina sozinho (consertado, perdido, devolvido com a condição)
+    DEPOIS da confirmação: o robô encerra (motivo 'terminou') e grava no log.
+    O conserto de antes da confirmação e o reembolso (sem data) não encerram:
+    fica para a pessoa."""
+    admin = await make_user(role=UserRole.ADMIN)
+    await _tabela(db, admin)
+    depois = await _venda(db, "400201")
+    antes = await _venda(db, "400202")
+    reembolso = await _venda(db, "400203")
+    no_tecnico = await _venda(db, "400204")
+    k1 = await _acionar(db, depois, _em(10, 10), confirmado=_em(10, 11))
+    await _devolucao(db, "400201", "Usado", manutencao=True, em=_em(10, 20))
+    k2 = await _acionar(db, antes, _em(10, 10), confirmado=_em(10, 11))
+    await _devolucao(db, "400202", "Usado", manutencao=True, em=_em(10, 1))
+    k3 = await _acionar(db, reembolso, _em(10, 10), confirmado=_em(10, 11))
+    db.add(Refund(pedido_bling="400203", conta="Loja X", tipo="Cliente", reembolso=-50))
+    await db.commit()
+    k4 = await _acionar(db, no_tecnico, _em(10, 10), confirmado=_em(10, 11))
+    await _devolucao(db, "400204", "Manutenção", prazo=_em(11, 30), em=_em(10, 20))
+    assert await garantia_sac.encerrar_terminados(db, HOJE) == 1
+    await db.commit()
+    for k in (k1, k2, k3, k4):
+        await db.refresh(k)
+    assert (k1.encerrado_motivo, k1.encerrado_por) == ("terminou", None)
+    assert [k.encerrado_em for k in (k2, k3, k4)] == [None, None, None]
+    log = (
+        await db.execute(
+            select(GarantiaLog).where(
+                GarantiaLog.garantia_id == depois.id, GarantiaLog.acao == "encerrou_atendimento"
+            )
+        )
+    ).scalar_one()
+    assert log.user_id is None and "terminou sozinho" in log.detalhe
+    # De novo: nada muda.
+    assert await garantia_sac.encerrar_terminados(db, HOJE) == 0
 
 
 def test_motivo_do_atendimento_e_a_ordem():
