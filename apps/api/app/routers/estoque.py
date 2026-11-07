@@ -69,7 +69,7 @@ from app.services.bling_situacoes import (
 from app.services.estoque_relatorio_pdf import relatorio_pedidos_pdf
 from app.services.link_mega import com_https, erro_link_mega
 from app.services.nf_etiqueta_declaracao import ItemDeclaracao, reescrever_declaracao
-from app.services.nf_etiqueta_itens import itens_dos_pedidos
+from app.services.nf_etiqueta_itens import itens_para_declaracao
 from app.services.nf_etiqueta_juntar import (
     EtiquetaJuntarError,
     juntar_etiqueta_nf,
@@ -1281,8 +1281,11 @@ async def get_pedidos_etiquetas_lote(
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
 
     # Itens do Bling de todos os pedidos do lote numa consulta só, SEM a cerca
-    # de tag (a declaração vai inteira na caixa).
-    itens_por_pedido = await itens_dos_pedidos(session, [r.pedido_bling for r in ordenados])
+    # de tag (a declaração vai inteira na caixa). Falha na consulta = imprime
+    # a declaração como está (nunca derruba o lote).
+    itens_por_pedido = await itens_para_declaracao(
+        session, [r.pedido_bling for r in ordenados], origem="impressao_lote"
+    )
     try:
         partes = [
             _pdf_para_impressao(r, itens_por_pedido.get(r.pedido_bling))
@@ -1355,7 +1358,9 @@ async def get_pedido_etiqueta(
         # Sem etiqueta ainda (a NF pode ter chegado antes, mas não há o que
         # imprimir sem a etiqueta que cola no volume).
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
-    itens_por_pedido = await itens_dos_pedidos(session, [row.pedido_bling])
+    itens_por_pedido = await itens_para_declaracao(
+        session, [row.pedido_bling], origem="impressao"
+    )
     conteudo = _pdf_para_impressao(row, itens_por_pedido.get(row.pedido_bling))
     if row.impressa_em is None and carimbar:
         # Abrir a etiqueta é imprimir — carimba pra tela marcar "Impressa"

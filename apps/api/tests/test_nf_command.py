@@ -1905,3 +1905,97 @@ async def test_agent_etiqueta_lote_grava_declaracao_com_o_item_do_bling(
         ItemDeclaracao("b026.18", "Mala Chanfrada M3 tamanho 18", "Prata", 1),
         ItemDeclaracao("b027.24", "Mala Chanfrada M3 tamanho 24", "Branca", 1),
     ]
+
+
+async def _consulta_que_aborta(session: AsyncSession, numeros) -> dict:
+    """Erro de BANCO de verdade (aborta a transação): sem o savepoint, o
+    upsert da etiqueta depois daria InFailedSQLTransaction."""
+    from sqlalchemy import text
+
+    await session.execute(text("SELECT 1/0"))
+    return {}
+
+
+async def _consulta_que_levanta(session: AsyncSession, numeros) -> dict:
+    raise RuntimeError("consulta dos itens falhou")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("falha", [_consulta_que_aborta, _consulta_que_levanta])
+async def test_agent_etiqueta_sobe_quando_a_busca_dos_itens_falha(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch, falha
+):
+    """A consulta dos itens nunca trava a subida: falhou = grava a etiqueta com
+    a declaração como veio do transform."""
+    from app.services import nf_etiqueta_itens
+    from app.services.nf_etiqueta_declaracao import ler_declaracao
+
+    await _seed_pedido(
+        db, numero="870111", loja="930101", sku="b027.24",
+        nome="Mala Chanfrada M3 tamanho 24 - Branca", unit=413, bling_id=970111,
+    )
+    await db.commit()
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    monkeypatch.setattr(nf_etiqueta_itens, "itens_dos_pedidos", falha)
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870111"},
+        files={"file": ("etq.pdf", _etiqueta_com_declaracao(), "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    assert [i.sku for i in ler_declaracao(await _blob_etiqueta(db, "870111"))] == ["b036.24"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("falha", [_consulta_que_aborta, _consulta_que_levanta])
+async def test_agent_etiqueta_lote_sobe_quando_a_busca_dos_itens_falha(
+    db: AsyncSession, client: AsyncClient, admin: User, monkeypatch: pytest.MonkeyPatch, falha
+):
+    from app.services import nf_etiqueta_itens
+    from app.services.nf_etiqueta_declaracao import ler_declaracao
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    fake = _FakeBlingSituacao()
+
+    async def _fake_client(_session):
+        return fake
+
+    monkeypatch.setattr(nf_emissao_gerar, "_bling_client_opt", _fake_client)
+    monkeypatch.setattr(nf_etiqueta_itens, "itens_dos_pedidos", falha)
+    await _seed_pedido(
+        db, numero="890111", loja="930101", sku="b026.18",
+        nome="Mala Chanfrada M3 tamanho 18 - Prata", unit=350,
+        bling_id=920111, numeroloja="260808LOTE78",
+    )
+    await db.commit()
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta-lote",
+        files={"file": ("lote.pdf", _etiqueta_com_declaracao(pedido_loja="260808LOTE78"),
+                        "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["casadas"] == ["890111"]
+    assert [i.sku for i in ler_declaracao(await _blob_etiqueta(db, "890111"))] == ["b036.24"]
+
+
+def test_declaracao_com_erro_na_subida_loga_warning():
+    """'erro' na subida (layout que não deu pra ler, exceção) é warning, como
+    na impressão — o blob fica com a declaração do anúncio e tem que aparecer
+    no filtro de warning. Os outros status continuam info."""
+    import structlog
+
+    from app.routers import nf as nf_router
+    from app.services.nf_etiqueta_declaracao import formatar_item
+
+    item = [formatar_item("b027.24", "Mala Chanfrada M3 tamanho 24 - Branca", 1)]
+    with structlog.testing.capture_logs() as logs:
+        assert nf_router._declaracao_do_bling(b"nao sou pdf", "870199", item, "upload") == (
+            b"nao sou pdf"
+        )
+        nf_router._declaracao_do_bling(_etiqueta_com_declaracao(), "870199", [], "upload")
+    niveis = {
+        e["status"]: e["log_level"] for e in logs if e.get("event") == "nf_etiqueta_declaracao"
+    }
+    assert niveis == {"erro": "warning", "sem_itens": "info"}

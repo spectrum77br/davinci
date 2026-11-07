@@ -335,6 +335,19 @@ def _localizar(hits: list, words: list, desenhos: list[dict]) -> _Tabela | None:
         return _Tabela(erro="sem_linha_do_cabecalho")
     y_cab = abaixo[0]
     tot = [w for w in words if w[4] == "Total" and w[1] > y_cab and b[3] - 1 <= w[0] <= b[4] + 1]
+
+    def linha_de_item(c: tuple) -> bool:
+        """'Total' DENTRO de uma linha de item (variação "Protecao Total",
+        "Total Black") não é o Total: a linha de item tem o Nº (só dígitos)
+        na 1ª coluna; a do Total tem a data ('02-10-2026') ou nada."""
+        y0 = max([y for y in hy if y <= c[1] + 0.3], default=y_cab)
+        y1 = min([y for y in hy if y >= c[3] - 0.3], default=c[3])
+        return any(
+            y0 < (w[1] + w[3]) / 2 < y1 and b[0] - 0.5 <= w[0] < b[1] - 0.5 and w[4].isdigit()
+            for w in words
+        )
+
+    tot = [w for w in tot if not linha_de_item(w)]
     if not tot:
         return _Tabela(erro="sem_total_na_pagina")
     t = min(tot, key=lambda w: w[1])
@@ -468,21 +481,58 @@ def total_declaracao(pdf_bytes: bytes) -> int | None:
 # ---------------------------------------------------------------------------
 
 
+# Largura de 1 caractere em 1 pt, por fonte (só Latin-1: o que o
+# _texto_imprimivel deixa passar — o cache fica limitado a 2×256 entradas).
+_LARGURA_CH: dict[tuple[str, str], float] = {}
+
+
+def _largura(texto: str, fonte: str, fs: float) -> float:
+    """Largura do texto como o `insert_text` desenha: a soma da largura de
+    cada caractere (Base14 não tem kerning).
+
+    NÃO medir com `fitz.get_text_length` na string inteira: no PyMuPDF 1.28
+    ela pula o caractere seguinte a cada não-ASCII ('éx' mede só o 'é',
+    'Acessórios' dá 41 pt e o papel ocupa 44 pt) e a linha estoura a coluna.
+    Com o cache, medir é O(L) — palavra anômala de centenas de caracteres não
+    trava o endpoint async que chama a reescrita."""
+    total = 0.0
+    for ch in texto:
+        w = _LARGURA_CH.get((fonte, ch))
+        if w is None:
+            w = fitz.get_text_length(ch, fontname=fonte, fontsize=1.0)
+            if ord(ch) < 256:
+                _LARGURA_CH[(fonte, ch)] = w
+        total += w
+    return total * fs
+
+
+def _partir(p: str, larg: float, fs: float, fonte: str) -> list[str]:
+    """Palavra maior que a coluna → pedaços no caractere, cada um o maior que
+    cabe em `larg`; o último é a sobra (cabe). Uma passada só: O(L)."""
+    pedacos: list[str] = []
+    ini, acc = 0, 0.0
+    for i, ch in enumerate(p):
+        w = _largura(ch, fonte, fs)
+        if i > ini and acc + w > larg:
+            pedacos.append(p[ini:i])
+            ini, acc = i, 0.0
+        acc += w
+    pedacos.append(p[ini:])
+    return pedacos
+
+
 def _quebrar_palavras(texto: str, larg: float, fs: float, fonte: str) -> list[str]:
     linhas: list[str] = []
     atual = ""
     for p in (texto or "").split():
-        while fitz.get_text_length(p, fontname=fonte, fontsize=fs) > larg and len(p) > 1:
-            k = len(p)  # palavra maior que a coluna: parte no caractere
-            while k > 1 and fitz.get_text_length(p[:k], fontname=fonte, fontsize=fs) > larg:
-                k -= 1
-            if atual:
+        if len(p) > 1 and _largura(p, fonte, fs) > larg:
+            *cheios, p = _partir(p, larg, fs, fonte)  # maior que a coluna: parte no caractere
+            if cheios and atual:
                 linhas.append(atual)
                 atual = ""
-            linhas.append(p[:k])
-            p = p[k:]
+            linhas += cheios
         teste = f"{atual} {p}".strip()
-        if not atual or fitz.get_text_length(teste, fontname=fonte, fontsize=fs) <= larg:
+        if not atual or _largura(teste, fonte, fs) <= larg:
             atual = teste
         else:
             linhas.append(atual)
@@ -507,18 +557,15 @@ def _quebrar_sku(sku: str, larg: float, fs: float, fonte: str) -> list[str]:
     linhas: list[str] = []
     atual = ""
     for p in partes:
-        if atual and fitz.get_text_length(atual + p, fontname=fonte, fontsize=fs) > larg:
+        if atual and _largura(atual + p, fonte, fs) > larg:
             linhas.append(atual)
             atual = ""
-        while fitz.get_text_length(p, fontname=fonte, fontsize=fs) > larg and len(p) > 1:
-            k = len(p)
-            while k > 1 and fitz.get_text_length(p[:k], fontname=fonte, fontsize=fs) > larg:
-                k -= 1
-            if atual:
+        if len(p) > 1 and _largura(p, fonte, fs) > larg:
+            *cheios, p = _partir(p, larg, fs, fonte)
+            if cheios and atual:
                 linhas.append(atual)
                 atual = ""
-            linhas.append(p[:k])
-            p = p[k:]
+            linhas += cheios
         atual += p
     if atual:
         linhas.append(atual)
@@ -729,7 +776,7 @@ def _reescrever_pagina(
             for j, t in enumerate(linhas):
                 if not t:
                     continue
-                larg_t = fitz.get_text_length(t, fontname=fonte, fontsize=fs)
+                larg_t = _largura(t, fonte, fs)
                 if k == 0:
                     x = min(b[0] + p.x_num, b[1] - 1.5 - larg_t)
                 elif k == 4:
@@ -768,9 +815,7 @@ def _reescrever_pagina(
     else:
         q_fs, q_f = 7.0 if not p.celulas else 6.5, p.fonte_qtd
         q_dir, q_base = b[5] - p.qtd_pad, yt0 + (yt1 - yt0) * 0.75
-    textos.append(
-        (q_dir - fitz.get_text_length(total, fontname=q_f, fontsize=q_fs), q_base, total, q_fs, q_f)
-    )
+    textos.append((q_dir - _largura(total, q_f, q_fs), q_base, total, q_fs, q_f))
     for x, yb, t, size, fonte in textos:
         page.insert_text(
             (x, yb), _texto_imprimivel(t), fontsize=size, fontname=fonte, color=(0, 0, 0)
@@ -832,7 +877,9 @@ def _reescrever(pdf_bytes: bytes, itens: Sequence[ItemDeclaracao]) -> tuple[byte
         return pdf_bytes, st, det
     _gravar_marca(doc, assinatura)
     return (
-        doc.tobytes(garbage=3, deflate=True),
+        # no_new_id: sem /ID novo a cada gravação, a mesma entrada com os
+        # mesmos itens dá os MESMOS bytes (como em atendimento/danfe.py).
+        doc.tobytes(garbage=3, deflate=True, no_new_id=True),
         "ok",
         f"pagina={page.number} {det} {_MARCA}{assinatura}",
     )

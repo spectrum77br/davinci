@@ -96,7 +96,7 @@ from app.services.melhor_envio import (
     MelhorEnvioConfigError,
 )
 from app.services.nf_etiqueta_declaracao import ItemDeclaracao, reescrever_declaracao
-from app.services.nf_etiqueta_itens import itens_do_pedido, itens_dos_pedidos
+from app.services.nf_etiqueta_itens import itens_para_declaracao
 from app.services.nf_etiqueta_transform import (
     EtiquetaTransformError,
     transformar_etiqueta,
@@ -2423,12 +2423,15 @@ def _declaracao_do_bling(
     """Reescreve a DECLARAÇÃO DE CONTEÚDO com os itens atuais do pedido no
     Bling (Eduardo, 06/11/2026: o papel na caixa mostra o item do pedido, não
     o do anúncio). Nunca trava a subida: qualquer status que não seja 'ok'
-    guarda a etiqueta como veio do transform."""
+    guarda a etiqueta como veio do transform. 'erro' (exceção, grade que não
+    deu pra ler — ex. o Upseller mudou o layout) é warning, como na impressão:
+    o blob fica com a declaração do anúncio e precisa aparecer no filtro."""
     try:
         novo, status, detalhe = reescrever_declaracao(pdf, itens)
     except Exception as exc:  # noqa: BLE001 — reescrever_declaracao já não levanta
         novo, status, detalhe = pdf, "erro", f"{type(exc).__name__}: {exc}"[:300]
-    logger.info(
+    log = logger.warning if status == "erro" else logger.info
+    log(
         "nf_etiqueta_declaracao",
         pedido=numero, status=status, detalhe=detalhe, origem=origem,
     )
@@ -2466,8 +2469,9 @@ async def nf_agent_etiqueta(
         )
     except EtiquetaTransformError as exc:
         raise HTTPException(422, detail={"code": "nf_etiqueta_invalida", "erro": str(exc)}) from exc
+    itens = await itens_para_declaracao(session, [pedido_bling], origem="upload")
     transformado = _declaracao_do_bling(
-        transformado, pedido_bling, await itens_do_pedido(session, pedido_bling), "upload"
+        transformado, pedido_bling, itens.get(pedido_bling, []), "upload"
     )
 
     filename = f"etiqueta_{pedido_bling}.pdf"
@@ -2611,8 +2615,11 @@ async def nf_agent_etiqueta_lote(
             continue
         casadas.append((fatia, numero, nome))
 
-    # Itens do Bling de todos os casados numa consulta só (declaração).
-    itens_por_pedido = await itens_dos_pedidos(session, [n for _f, n, _nm in casadas])
+    # Itens do Bling de todos os casados numa consulta só (declaração). Falha
+    # na consulta = sobe com a declaração como veio (nunca derruba o lote).
+    itens_por_pedido = await itens_para_declaracao(
+        session, [n for _f, n, _nm in casadas], origem="upload_lote"
+    )
     for fatia, numero, nome in casadas:
         try:
             transformado = transformar_etiqueta(

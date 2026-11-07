@@ -14,6 +14,11 @@ o que o robô de prioridade e o Atendimento atualizam direto na troca; o JSONB
   propósito: devolve [] e a declaração do marketplace fica como veio.
 
 Lista vazia = não mexer na declaração (`reescrever_declaracao` → sem_itens).
+
+Os endpoints (subida e impressão) chamam `itens_para_declaracao`, que NUNCA
+levanta: a consulta roda num SAVEPOINT e qualquer falha vira "sem itens" (a
+etiqueta sobe/imprime com a declaração como está) — esta regra não pode
+derrubar uma impressão ou uma subida que funcionavam sem ela.
 """
 
 from __future__ import annotations
@@ -21,11 +26,14 @@ from __future__ import annotations
 from collections.abc import Iterable
 from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingOrder
 from app.services.nf_etiqueta_declaracao import ItemDeclaracao, formatar_item
+
+logger = structlog.get_logger()
 
 _ANTIGO = datetime.min.replace(tzinfo=UTC)
 
@@ -89,3 +97,31 @@ async def itens_do_pedido(session: AsyncSession, numero: str | None) -> list[Ite
     if not numero:
         return []
     return (await itens_dos_pedidos(session, [numero])).get(numero, [])
+
+
+async def itens_para_declaracao(
+    session: AsyncSession, numeros: Iterable[str | None], *, origem: str
+) -> dict[str, list[ItemDeclaracao]]:
+    """`itens_dos_pedidos` para os endpoints: NUNCA levanta.
+
+    A consulta roda num SAVEPOINT: um erro do banco nela (timeout da consulta,
+    erro de SQL) aborta só o savepoint, e a transação de quem chamou continua
+    servindo o carimbo `impressa_em` da impressão e o upsert da subida. Na
+    falha devolve {} — a declaração fica como está, como num pedido sem
+    espelho — e loga warning. (Conexão caída derruba o resto do endpoint de
+    qualquer jeito, com ou sem esta regra.)"""
+    nums = [n for n in dict.fromkeys(numeros) if n]
+    if not nums:
+        return {}
+    try:
+        async with session.begin_nested():
+            return await itens_dos_pedidos(session, nums)
+    except Exception as exc:  # noqa: BLE001 — a declaração nunca trava o fluxo
+        logger.warning(
+            "nf_etiqueta_declaracao_itens_falhou",
+            origem=origem,
+            pedidos=nums[:20],
+            total=len(nums),
+            erro=f"{type(exc).__name__}: {exc}"[:300],
+        )
+        return {}

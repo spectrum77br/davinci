@@ -648,3 +648,50 @@ async def test_operador_cercado_imprime_declaracao_com_todos_os_itens(
         ItemDeclaracao("a055.sa", "Cadeado TSA", "Preto", 1),
         ItemDeclaracao("dg053.ci+a001.ci", "Uranyx A17 Pro Max 12.128", "Laranja + Fone", 1),
     ]
+
+
+async def _consulta_que_aborta(session: AsyncSession, numeros) -> dict:
+    """Erro de BANCO de verdade: aborta a transação (sem o savepoint, o
+    carimbo `impressa_em` depois daria InFailedSQLTransaction)."""
+    from sqlalchemy import text
+
+    await session.execute(text("SELECT 1/0"))
+    return {}
+
+
+async def _consulta_que_levanta(session: AsyncSession, numeros) -> dict:
+    raise RuntimeError("consulta dos itens falhou")
+
+
+async def _impressa_em(db: AsyncSession, pedido: str):
+    return (
+        await db.execute(
+            select(NfEtiquetaArquivo.impressa_em).where(NfEtiquetaArquivo.pedido_bling == pedido)
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("falha", [_consulta_que_aborta, _consulta_que_levanta])
+async def test_impressao_sai_quando_a_busca_dos_itens_falha(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None], pedido_trocado: None,
+    monkeypatch: pytest.MonkeyPatch, falha,
+):
+    """A consulta nova dos itens não derruba a impressão (unitária nem lote):
+    falhou = imprime a declaração como está e o carimbo continua valendo."""
+    from app.services import nf_etiqueta_itens
+
+    monkeypatch.setattr(nf_etiqueta_itens, "itens_dos_pedidos", falha)
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/950001/etiqueta")
+    assert r.status_code == 200, r.text
+    assert [i.sku for i in ler_declaracao(r.content)] == ["b026.18.24"]  # a do anúncio
+    assert await _impressa_em(db, "950001") is not None
+    r = await client.post(
+        "/api/estoque/pedidos/etiquetas", json={"pedidos": ["950001", "950002"]}
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["x-etiquetas-total"] == "2"
+    assert await _impressa_em(db, "950002") is not None
+    assert await _blob_no_banco(db, "950001") == _DECL_ANUNCIO

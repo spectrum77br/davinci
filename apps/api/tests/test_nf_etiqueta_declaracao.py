@@ -8,6 +8,8 @@ SINTÉTICAS montadas na geometria medida (`tests/declaracao_sintetica.py`).
 
 from __future__ import annotations
 
+import time
+
 import fitz  # PyMuPDF
 import pytest
 
@@ -365,6 +367,143 @@ def test_sobrevive_ao_transform_e_ao_redimensionamento_da_impressao():
     impresso = redimensionar_para_etiqueta(out)
     txt = "".join(p.get_text() for p in fitz.open(stream=impresso, filetype="pdf"))
     assert "b027.24" in txt and "b036.24" not in txt
+
+
+# --- 'Total' dentro de uma linha de item (revisão 07/11) --------------------
+
+_FONE = formatar_item("a001.sp", "Fone Bluetooth - Preto", 1)
+_CAPA_TOTAL = formatar_item("c010.sp", "Capa Silicone A17 - Protecao Total", 3)
+_OUTRO = formatar_item("a002.sp", "Fone Outro - Branco", 1)
+
+
+def _layouts() -> list[tuple[str, bytes]]:
+    return [
+        ("upseller", declaracao_upseller(_ANUNCIO)),
+        ("tiktok", declaracao_upseller(_ANUNCIO, com_rabo=False)),
+        ("nossa", declaracao_nossa([("b036.24", "Mala De Viagem Despacho - Roxo", 1)])),
+    ]
+
+
+@pytest.mark.parametrize(("nome", "raw"), _layouts(), ids=[n for n, _ in _layouts()])
+def test_total_na_variacao_do_item_nao_e_o_total(nome, raw):
+    """Variação "Protecao Total" escreve um 2º 'Total' na coluna VARIAÇÃO. A
+    linha do Total é a que NÃO tem o Nº: senão a reimpressão lia a tabela
+    pela metade (linha velha ficava, QTD dela virava a soma) ou dava erro."""
+    # 'Total' na 2ª linha
+    up, st, det = reescrever_declaracao(raw, [_FONE, _CAPA_TOTAL])
+    assert st == "ok", det
+    assert ler_declaracao(up) == [_FONE, _CAPA_TOTAL]
+    assert total_declaracao(up) == 4
+    # Bling mudou depois: a impressão troca as DUAS linhas e o Total
+    imp, st, det = reescrever_declaracao(up, [_OUTRO])
+    assert st == "ok", det
+    assert ler_declaracao(imp) == [_OUTRO] and total_declaracao(imp) == 1
+    txt = texto_da_tabela(imp)
+    assert "c010.sp" not in txt and "Protecao" not in txt and "a001.sp" not in txt
+    # troca só o fone: a capa continua, sem 'nao_coube'
+    imp2, st, det = reescrever_declaracao(up, [_OUTRO, _CAPA_TOTAL])
+    assert st == "ok", det
+    assert ler_declaracao(imp2) == [_OUTRO, _CAPA_TOTAL] and total_declaracao(imp2) == 4
+    # 'Total' na 1ª (e única) linha
+    up1, st, det = reescrever_declaracao(raw, [_CAPA_TOTAL])
+    assert st == "ok", det
+    imp1, st, det = reescrever_declaracao(up1, [_FONE])
+    assert st == "ok", det
+    assert ler_declaracao(imp1) == [_FONE] and total_declaracao(imp1) == 1
+
+
+def test_total_na_variacao_do_anuncio():
+    """O 'Total' a mais pode vir do próprio Upseller (variação do anúncio)."""
+    raw = declaracao_upseller(
+        [("c010.sp", "Capa Silicone", "Protecao Total", 1), ("a001.sp", "Fone", "Total Black", 2)]
+    )
+    assert [i.variacao for i in ler_declaracao(raw)] == ["Protecao Total", "Total Black"]
+    assert total_declaracao(raw) == 3
+    out, st, det = reescrever_declaracao(raw, [_BRANCA])
+    assert st == "ok", det
+    assert ler_declaracao(out) == [_BRANCA] and total_declaracao(out) == 1
+    assert "Protecao" not in texto_da_tabela(out)
+
+
+def test_so_total_de_item_na_pagina_e_multipagina():
+    """Página cuja tabela continua na seguinte (sem o Total de verdade), mas com
+    um item 'Total Black': não confunde o item com o Total."""
+    raw = declaracao_upseller([("a001.sp", "Fone", "Total Black", 1)], com_total=False)
+    out, st, _ = reescrever_declaracao(raw, [_BRANCA])
+    assert (st, out) == ("multipagina", raw)
+
+
+# --- desempenho, determinismo e largura do texto (revisão 07/11) -----------
+
+
+def test_palavra_enorme_nao_trava():
+    """Palavra sem espaço maior que a coluna parte no caractere em O(L): antes
+    eram O(L²) medições por pedaço, por tamanho de fonte (600 caracteres
+    levavam ~150 s dentro do endpoint async)."""
+    raw = declaracao_upseller(_ANUNCIO)
+    t0 = time.perf_counter()
+    out, st, _ = reescrever_declaracao(raw, [ItemDeclaracao("s" * 600, "X" * 600, "V" * 600, 1)])
+    assert (st, out) == ("nao_coube", raw)
+    _o, st, det = reescrever_declaracao(raw, [ItemDeclaracao("a001", "X" * 200, "Preto", 1)])
+    assert st == "ok", det
+    out, st, _ = reescrever_declaracao(
+        raw, [ItemDeclaracao(f"a00{k}", "Y" * 120, "W" * 120, 1) for k in range(6)]
+    )
+    assert st == "nao_coube"
+    assert time.perf_counter() - t0 < 5.0
+
+
+def test_palavra_enorme_parte_sem_perder_caractere():
+    it = ItemDeclaracao("a001", "Mala " + "X" * 70 + " Azul", "Preto", 1)
+    out, st, det = reescrever_declaracao(declaracao_upseller(_ANUNCIO), [it])
+    assert st == "ok", det
+    _doc, page = abrir_tabela(out)
+    ws = page.get_text("words")
+    y_total = min(w[1] for w in ws if w[4] == "Total")
+    pedacos = [w for w in ws if 82.0 < w[0] < 208.3 and 104.5 < w[1] < y_total]
+    assert "".join(w[4] for w in pedacos if set(w[4]) == {"X"}) == "X" * 70
+    assert all(w[2] <= 208.3 - 4.5 + 0.01 for w in pedacos)
+
+
+def test_saida_deterministica():
+    """Mesma entrada + mesmos itens = MESMOS bytes (sem /ID novo a cada
+    gravação): md5 de blob e comparação de bytes continuam valendo."""
+    for raw in (declaracao_upseller(_ANUNCIO), declaracao_nossa([("b036.24", "Mala", 1)])):
+        a = reescrever_declaracao(raw, [_BRANCA, _FONE])
+        b = reescrever_declaracao(raw, [_BRANCA, _FONE])
+        assert a[1] == b[1] == "ok"
+        assert a[0] == b[0]
+
+
+@pytest.mark.parametrize(("nome", "raw"), _layouts(), ids=[n for n, _ in _layouts()])
+def test_texto_acentuado_nao_estoura_a_coluna(nome, raw):
+    """A largura é medida caractere a caractere: `fitz.get_text_length` na
+    string inteira pula o caractere depois de cada acento (PyMuPDF 1.28) e a
+    linha passava da borda da coluna ('Ação' terminando dentro da VARIAÇÃO)."""
+    assert fitz.get_text_length("éx", fontname="helv", fontsize=9) < 9.0  # o bug, documentado
+    it = formatar_item(
+        "z0217",
+        "Ação Ação Ação Ação Ação Ação Ação Ação Ação Pelúcia Pelúcia - Ébano Pêssego Lilás",
+        1,
+    )
+    out, st, det = reescrever_declaracao(raw, [it])
+    assert st == "ok", det
+    assert ler_declaracao(out) == [it]
+    _doc, page = abrir_tabela(out)
+    ws = page.get_text("words")
+    hits = page.search_for("IDENTIFICAÇÃO DOS BENS")
+    y_total = min(w[1] for w in ws if w[4] == "Total")
+    cab = {w[4]: w for w in ws if w[4] in ("SKU", "DESCRIÇÃO", "VARIAÇÃO", "QTD")}
+    # bordas da coluna = início do rótulo seguinte (folga de 1 pt)
+    limites = [
+        (cab["DESCRIÇÃO"][0] - 2, cab["VARIAÇÃO"][0] - 2),
+        (cab["VARIAÇÃO"][0] - 2, cab["QTD"][0] - 2),
+    ]
+    corpo = [w for w in ws if hits[0].y1 + 10 < w[1] < y_total]
+    for x0, x1 in limites:
+        col = [w for w in corpo if x0 <= w[0] < x1]
+        assert col
+        assert all(w[2] <= x1 + 1 for w in col), [(w[4], round(w[2], 1)) for w in col]
 
 
 # --- a nossa (Temu/AliExpress) ----------------------------------------------
