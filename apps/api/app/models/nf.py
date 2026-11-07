@@ -297,7 +297,12 @@ class NfImpressao(Base, TimestampMixin):
 
     3 tipos iniciais (spec 25/07):
     - `agencia`: pega etiqueta + declaração no upseller → Controle de Estoque
-      (usa_etiqueta + usa_declaracao). Declaração NÃO é alterada.
+      (usa_etiqueta + usa_declaracao). Na declaração, a tabela
+      "IDENTIFICAÇÃO DOS BENS" é REESCRITA com os itens atuais do pedido no
+      Bling (06/11/2026: SKU, descrição/variação do item do pedido, QTD e
+      Total) — na subida da etiqueta e de novo na impressão, se o pedido
+      mudou depois (`services/nf_etiqueta_declaracao.py`). O resto da
+      declaração fica como veio.
     - `correios`: pega etiqueta + NF no upseller (Correios não aceita
       declaração, só NF) → usa_etiqueta + usa_nota. Usado pelo Mercado Livre.
     - `proprio`: faz a etiqueta no Melhor Envio (só a Amazon), confere o valor

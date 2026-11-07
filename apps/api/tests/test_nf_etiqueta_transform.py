@@ -344,5 +344,8 @@ def test_duimp_no_rodape_da_etiqueta():
     t_sem = fitz.open(stream=sem, filetype="pdf")[0].get_text()
     t_com = fitz.open(stream=com, filetype="pdf")[0].get_text()
     assert "DUIMP" not in t_sem
-    assert "DUIMP: 26BR00012345678 | 26BR00098765432" in t_com
+    # 07c9c665: uma linha por DUIMP (o caller junta várias com " | ").
+    assert "DUIMP: 26BR00012345678" in t_com
+    assert "DUIMP: 26BR00098765432" in t_com
+    assert "26BR00012345678 | 26BR00098765432" not in t_com
     assert "Fulano De Tal" in t_com  # o nome do destinatário continua no remetente

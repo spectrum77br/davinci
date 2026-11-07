@@ -68,6 +68,8 @@ from app.services.bling_situacoes import (
 )
 from app.services.estoque_relatorio_pdf import relatorio_pedidos_pdf
 from app.services.link_mega import com_https, erro_link_mega
+from app.services.nf_etiqueta_declaracao import ItemDeclaracao, reescrever_declaracao
+from app.services.nf_etiqueta_itens import itens_dos_pedidos
 from app.services.nf_etiqueta_juntar import (
     EtiquetaJuntarError,
     juntar_etiqueta_nf,
@@ -1059,8 +1061,16 @@ async def list_estoque_pedidos(
     }
 
 
-def _pdf_para_impressao(row: NfEtiquetaArquivo) -> bytes:
+def _pdf_para_impressao(
+    row: NfEtiquetaArquivo, itens: list[ItemDeclaracao] | None = None
+) -> bytes:
     """PDF final de UM pedido: etiqueta, ou etiqueta + NF quando é correios.
+
+    06/11/2026: antes de tudo, a DECLARAÇÃO DE CONTEÚDO do blob guardado é
+    alinhada com os `itens` atuais do pedido no Bling (troca feita depois da
+    subida). Só a cópia que vai pra impressora muda — o blob NÃO é regravado —
+    e só a página da etiqueta: as NFs juntadas são documento fiscal e ficam
+    como estão. Qualquer falha imprime o blob como está.
 
     A presença de `nf_pdf` é o sinal do fluxo correios/ML (não aceita declaração
     de conteúdo, vai a NF junto). Falha na junção degrada pra só a etiqueta —
@@ -1072,13 +1082,30 @@ def _pdf_para_impressao(row: NfEtiquetaArquivo) -> bytes:
     (`nf_caixa_pdf`), sem nenhuma marca no papel — quem avisa é a tela. Cada
     junção degrada sozinha: falhar a da caixa não tira a de 1%.
     """
+    base = row.blob
+    if itens:
+        try:
+            base, status, detalhe = reescrever_declaracao(row.blob, itens)
+        except Exception as exc:  # noqa: BLE001 — nunca trava a impressão
+            base, status, detalhe = row.blob, "erro", f"{type(exc).__name__}: {exc}"[:300]
+        # 'igual' (blob já alinhado) e 'sem_declaracao' (Amazon, SEDEX) são o
+        # normal e não logam. 'ok' aqui = o blob guardado estava com item velho
+        # (troca depois da subida, ou etiqueta de antes desta regra).
+        log = {
+            "pedido": row.pedido_bling, "status": status,
+            "detalhe": detalhe, "origem": "impressao",
+        }
+        if status == "erro":
+            logger.warning("nf_etiqueta_declaracao", **log)
+        elif status not in ("igual", "sem_declaracao"):
+            logger.info("nf_etiqueta_declaracao", **log)
     try:
-        pdf = redimensionar_para_etiqueta(row.blob)
+        pdf = redimensionar_para_etiqueta(base)
     except EtiquetaJuntarError:
         logger.warning(
             "nf_etiqueta_redimensionar_falhou", pedido_bling=row.pedido_bling
         )
-        pdf = row.blob
+        pdf = base
     for evento, nota in (
         ("nf_etiqueta_juntar_falhou", row.nf_pdf),
         ("nf_etiqueta_juntar_caixa_falhou", row.nf_caixa_pdf),
@@ -1253,8 +1280,14 @@ async def get_pedidos_etiquetas_lote(
     if not ordenados:
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
 
+    # Itens do Bling de todos os pedidos do lote numa consulta só, SEM a cerca
+    # de tag (a declaração vai inteira na caixa).
+    itens_por_pedido = await itens_dos_pedidos(session, [r.pedido_bling for r in ordenados])
     try:
-        partes = [_pdf_para_impressao(r) for r in ordenados]
+        partes = [
+            _pdf_para_impressao(r, itens_por_pedido.get(r.pedido_bling))
+            for r in ordenados
+        ]
         if payload.incluir_relatorio:
             impressos = [r.pedido_bling for r in ordenados]
             linhas = await _linhas_relatorio(session, impressos)
@@ -1322,7 +1355,8 @@ async def get_pedido_etiqueta(
         # Sem etiqueta ainda (a NF pode ter chegado antes, mas não há o que
         # imprimir sem a etiqueta que cola no volume).
         raise HTTPException(status_code=404, detail="nf_etiqueta_nao_encontrada")
-    conteudo = _pdf_para_impressao(row)
+    itens_por_pedido = await itens_dos_pedidos(session, [row.pedido_bling])
+    conteudo = _pdf_para_impressao(row, itens_por_pedido.get(row.pedido_bling))
     if row.impressa_em is None and carimbar:
         # Abrir a etiqueta é imprimir — carimba pra tela marcar "Impressa"
         # (mesma regra do lote: só a primeira vez).

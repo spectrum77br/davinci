@@ -1770,3 +1770,138 @@ async def test_agent_etiqueta_lote_sem_token_401(
     )
     assert r.status_code == 401
 
+
+# --- Declaração de conteúdo com os itens do pedido no Bling (06/11/2026) ----
+
+
+def _etiqueta_com_declaracao(*, pedido_loja: str | None = None) -> bytes:
+    """Etiqueta (1ª página) + declaração do ANÚNCIO no layout Upseller."""
+    import fitz
+
+    from tests.declaracao_sintetica import pagina_upseller
+
+    doc = fitz.open()
+    page = doc.new_page(width=300, height=442)
+    linhas = ["DESTINATÁRIO", "Fulano De Tal"]
+    if pedido_loja:
+        linhas.append(f"Pedido: {pedido_loja}")
+    for k, txt in enumerate(linhas):
+        page.insert_text((20, 20 + 12 * k), txt, fontsize=7, fontname="helv")
+    page.insert_text((20, 280), "REMETENTE", fontsize=7, fontname="helv")
+    page.insert_text((20, 294), "Loja Origem XYZ", fontsize=8, fontname="helv")
+    pagina_upseller(doc, [("b036.24", ["Mala De Viagem Despacho", "Antiga Roxo"], ["M3 Roxo"], 1)])
+    return doc.tobytes()
+
+
+async def _blob_etiqueta(db: AsyncSession, pedido: str) -> bytes:
+    from app.models import NfEtiquetaArquivo
+
+    db.expire_all()
+    return (
+        await db.execute(
+            select(NfEtiquetaArquivo.blob).where(NfEtiquetaArquivo.pedido_bling == pedido)
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_grava_declaracao_com_o_item_do_bling(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """A declaração do anúncio (SKU/título do marketplace) sai com o item do
+    pedido no Bling: SKU, descrição sem o código do fornecedor, variação depois
+    do último ' - ', Total somado. O blob guardado já vem certo e marcado."""
+    import fitz
+
+    from app.services.nf_etiqueta_declaracao import (
+        ItemDeclaracao,
+        assinatura_itens,
+        ler_declaracao,
+        total_declaracao,
+    )
+
+    await _seed_pedido(
+        db, numero="870101", loja="930101", sku="b027.24",
+        nome="Mala Chanfrada M3 tamanho 24 - Branca (DT - PPDT802 - DT01) AVULSO",
+        unit=413, bling_id=970101,
+    )
+    await db.commit()
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870101"},
+        files={"file": ("etq.pdf", _etiqueta_com_declaracao(), "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    blob = await _blob_etiqueta(db, "870101")
+    esperado = [ItemDeclaracao("b027.24", "Mala Chanfrada M3 tamanho 24", "Branca", 1)]
+    assert ler_declaracao(blob) == esperado
+    assert total_declaracao(blob) == 1
+    doc = fitz.open(stream=blob, filetype="pdf")
+    assert f"davinci-decl:{assinatura_itens(esperado)}" in doc.metadata["keywords"]
+    txt = doc[1].get_text()
+    assert "b036.24" not in txt and "PPDT802" not in txt
+    assert "Loja Origem" not in doc[0].get_text()  # o transform continua valendo
+    assert r.json()["size_bytes"] == len(blob)
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_sem_espelho_mantem_a_declaracao(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Pedido ainda sem linha em bling_orders: a declaração fica como veio."""
+    from app.services.nf_etiqueta_declaracao import ler_declaracao
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870102"},
+        files={"file": ("etq.pdf", _etiqueta_com_declaracao(), "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    assert [i.sku for i in ler_declaracao(await _blob_etiqueta(db, "870102"))] == ["b036.24"]
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_lote_grava_declaracao_com_o_item_do_bling(
+    db: AsyncSession, client: AsyncClient, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """No lote, cada fatia casada sai com a declaração dos itens do Bling (uma
+    consulta só pra todos os pedidos do lote)."""
+    from app.services.nf_etiqueta_declaracao import ItemDeclaracao, ler_declaracao
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    fake = _FakeBlingSituacao()
+
+    async def _fake_client(_session):
+        return fake
+
+    monkeypatch.setattr(nf_emissao_gerar, "_bling_client_opt", _fake_client)
+    await _seed_pedido(
+        db, numero="890101", loja="930101", sku="b026.18",
+        nome="Mala Chanfrada M3 tamanho 18 - Prata", unit=350,
+        bling_id=920101, numeroloja="260808LOTE77",
+    )
+    db.add(BlingOrder(
+        bling_id=920101, numero="890101", numeroloja="260808LOTE77",
+        data=datetime(2026, 6, 23, tzinfo=UTC), loja="930101", situacao="15",
+        item_index=1, item_codigo="b027.24",
+        item_descricao="Mala Chanfrada M3 tamanho 24 - Branca", item_quantidade=1,
+        itemvalor=350,
+    ))
+    await db.commit()
+
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta-lote",
+        files={"file": ("lote.pdf", _etiqueta_com_declaracao(pedido_loja="260808LOTE77"),
+                        "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["casadas"] == ["890101"]
+    assert ler_declaracao(await _blob_etiqueta(db, "890101")) == [
+        ItemDeclaracao("b026.18", "Mala Chanfrada M3 tamanho 18", "Prata", 1),
+        ItemDeclaracao("b027.24", "Mala Chanfrada M3 tamanho 24", "Branca", 1),
+    ]

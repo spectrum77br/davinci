@@ -20,6 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingOrder, User, UserRole, UserStatus
 from app.models.nf import NfEtiquetaArquivo
+from app.services.nf_etiqueta_declaracao import (
+    ItemDeclaracao,
+    ler_declaracao,
+    total_declaracao,
+)
+from tests.declaracao_sintetica import declaracao_upseller
 
 PERM_VIEW = {"controle_estoque": {"view": True, "edit": False, "delete": False}}
 
@@ -96,7 +102,8 @@ async def test_serve_etiqueta_blob(
     auth_as: Callable[[User | None], None], dois_pedidos: None,
 ):
     """PDF que o fitz não redimensiona (sem páginas) degrada pro blob exato,
-    com content-type + inline disposition."""
+    com content-type + inline disposition — mesmo com itens no Bling (a
+    reescrita da declaração falha calada e devolve o blob)."""
     auth_as(admin_view)
     r = await client.get("/api/estoque/pedidos/920001/etiqueta")
     assert r.status_code == 200, r.text
@@ -474,3 +481,170 @@ async def test_consulta_nao_carimba_primeira_impressao(
     assert (await client.get("/api/estoque/pedidos/920001/etiqueta")).status_code == 200
     await db.refresh(row)
     assert row.impressa_em is not None
+
+
+# --- Declaração de conteúdo com os itens do pedido no Bling (06/11/2026) ----
+#
+# Na impressão, a tabela "IDENTIFICAÇÃO DOS BENS" do blob guardado é alinhada
+# com os itens ATUAIS do pedido no espelho do Bling (troca feita depois da
+# subida). Só a cópia que vai pra impressora muda: o blob fica como está.
+
+# Declaração do anúncio: 1 linha de kit com SKU velho (caso 306622).
+_DECL_ANUNCIO = declaracao_upseller(
+    [("b026.18.24", ["Kit 2 Malas de Viagem", "18 e 24 Polegadas"], ["M3 Prata"], 1)]
+)
+
+
+def _texto(pdf: bytes) -> str:
+    """Texto do PDF inteiro com as quebras de linha viradas espaço (a descrição
+    quebra dentro da célula)."""
+    import fitz
+
+    return " ".join(" ".join(p.get_text().split()) for p in fitz.open(stream=pdf, filetype="pdf"))
+
+
+async def _blob_no_banco(db: AsyncSession, pedido: str) -> bytes:
+    """A coluna direto do banco (sem expire_all: o User do auth_as é da mesma
+    sessão e expirar ele quebra a requisição seguinte)."""
+    return (
+        await db.execute(
+            select(NfEtiquetaArquivo.blob).where(NfEtiquetaArquivo.pedido_bling == pedido)
+        )
+    ).scalar_one()
+
+
+@pytest_asyncio.fixture
+async def pedido_trocado(db: AsyncSession) -> None:
+    """950001: no Bling o kit virou 2 itens (versão viva, bling_id 950011); a
+    versão excluída (reimportado) ainda tem o SKU velho e não pode contar.
+    950002: pedido fake (de propósito) com a mesma declaração do anúncio."""
+    d = date(2026, 6, 2)
+    db.add_all([
+        BlingOrder(
+            bling_id=950010, numero="950001", item_codigo="b036.24",
+            item_descricao="Mala Antiga - Roxo", item_quantidade=1,
+            item_index=0, situacao="excluido", em_andamento_data=d,
+        ),
+        BlingOrder(
+            bling_id=950011, numero="950001", item_codigo="b026.18",
+            item_descricao="Mala Chanfrada M3 tamanho 18 - Prata (DT - PPDT802 - DT01) AVULSO",
+            item_quantidade=1, item_index=0, situacao="15", em_andamento_data=d,
+        ),
+        BlingOrder(
+            bling_id=950011, numero="950001", item_codigo="b027.24",
+            item_descricao="Mala Chanfrada M3 tamanho 24 - Branca", item_quantidade=2,
+            item_index=1, situacao="15", em_andamento_data=d,
+        ),
+        BlingOrder(
+            bling_id=950012, numero="950002", item_codigo="fake.fake",
+            item_descricao="Fake CD", item_quantidade=1,
+            item_index=0, situacao="15", em_andamento_data=d,
+        ),
+    ])
+    for n in ("950001", "950002"):
+        db.add(NfEtiquetaArquivo(
+            pedido_bling=n, filename=f"etiqueta_{n}.pdf", content_type="application/pdf",
+            size_bytes=len(_DECL_ANUNCIO), blob=_DECL_ANUNCIO,
+        ))
+    await db.commit()
+
+
+def _assert_declaracao_do_bling(pdf: bytes) -> None:
+    txt = _texto(pdf)
+    assert "b026.18" in txt and "b027.24" in txt
+    assert "Mala Chanfrada M3 tamanho 18" in txt and "Prata" in txt and "Branca" in txt
+    for velho in ("b026.18.24", "b036.24", "Kit 2 Malas", "PPDT802", "AVULSO"):
+        assert velho not in txt
+    # a tabela continua legível depois do redimensionamento da impressão
+    assert ler_declaracao(pdf) == [
+        ItemDeclaracao("b026.18", "Mala Chanfrada M3 tamanho 18", "Prata", 1),
+        ItemDeclaracao("b027.24", "Mala Chanfrada M3 tamanho 24", "Branca", 2),
+    ]
+    assert total_declaracao(pdf) == 3
+
+
+@pytest.mark.asyncio
+async def test_serve_declaracao_com_o_item_do_bling_sem_gravar(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None], pedido_trocado: None,
+):
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/950001/etiqueta")
+    assert r.status_code == 200, r.text
+    _assert_declaracao_do_bling(r.content)
+    assert _paginas_tamanho(r.content) == [(_ETQ_W, _ETQ_H)] * 2
+    assert "Total" in _texto(r.content)
+    # o blob guardado NÃO muda (só a cópia impressa)
+    assert await _blob_no_banco(db, "950001") == _DECL_ANUNCIO
+    # carimbar=false continua só consultando, com a declaração alinhada
+    r2 = await client.get("/api/estoque/pedidos/950001/etiqueta?carimbar=false")
+    assert r2.status_code == 200
+    _assert_declaracao_do_bling(r2.content)
+
+
+@pytest.mark.asyncio
+async def test_lote_declaracao_com_o_item_do_bling_sem_gravar(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None], pedido_trocado: None,
+):
+    auth_as(admin_view)
+    r = await client.post(
+        "/api/estoque/pedidos/etiquetas", json={"pedidos": ["950001", "950002"]}
+    )
+    assert r.status_code == 200, r.text
+    assert r.headers["x-etiquetas-total"] == "2"
+    import fitz
+
+    doc = fitz.open(stream=r.content, filetype="pdf")
+    assert doc.page_count == 4
+    primeiro = fitz.open()
+    primeiro.insert_pdf(doc, from_page=0, to_page=1)
+    _assert_declaracao_do_bling(primeiro.tobytes())
+    # o fake mantém a declaração do marketplace
+    fake_txt = doc[3].get_text()
+    assert "b026.18.24" in fake_txt and "fake" not in fake_txt
+    assert await _blob_no_banco(db, "950001") == _DECL_ANUNCIO
+    assert await _blob_no_banco(db, "950002") == _DECL_ANUNCIO
+
+
+@pytest.mark.asyncio
+async def test_pedido_fake_mantem_a_declaracao_do_marketplace(
+    client: AsyncClient, admin_view: User,
+    auth_as: Callable[[User | None], None], pedido_trocado: None,
+):
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/950002/etiqueta")
+    assert r.status_code == 200, r.text
+    txt = _texto(r.content)
+    assert "b026.18.24" in txt and "Kit 2 Malas" in txt
+    assert "fake" not in txt.lower()
+
+
+@pytest.mark.asyncio
+async def test_operador_cercado_imprime_declaracao_com_todos_os_itens(
+    client: AsyncClient, db: AsyncSession, user_sa: User,
+    auth_as: Callable[[User | None], None],
+):
+    """A cerca de tag só filtra a LISTA: a declaração que vai na caixa leva
+    os itens dos dois armazéns."""
+    d = date(2026, 6, 3)
+    for i, (sku, desc) in enumerate((
+        ("a055.sa", "Cadeado TSA - Preto"),
+        ("dg053.ci+a001.ci", "Uranyx A17 Pro Max 12.128 - Laranja + Fone"),
+    )):
+        db.add(BlingOrder(
+            bling_id=950021, numero="950021", item_codigo=sku, item_descricao=desc,
+            item_quantidade=1, item_index=i, situacao="15", em_andamento_data=d,
+        ))
+    db.add(NfEtiquetaArquivo(
+        pedido_bling="950021", filename="etiqueta_950021.pdf",
+        content_type="application/pdf", size_bytes=len(_DECL_ANUNCIO), blob=_DECL_ANUNCIO,
+    ))
+    await db.commit()
+    auth_as(user_sa)
+    r = await client.get("/api/estoque/pedidos/950021/etiqueta")
+    assert r.status_code == 200, r.text
+    assert ler_declaracao(r.content) == [
+        ItemDeclaracao("a055.sa", "Cadeado TSA", "Preto", 1),
+        ItemDeclaracao("dg053.ci+a001.ci", "Uranyx A17 Pro Max 12.128", "Laranja + Fone", 1),
+    ]

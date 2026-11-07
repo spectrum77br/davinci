@@ -95,6 +95,8 @@ from app.services.melhor_envio import (
     MelhorEnvioClient,
     MelhorEnvioConfigError,
 )
+from app.services.nf_etiqueta_declaracao import ItemDeclaracao, reescrever_declaracao
+from app.services.nf_etiqueta_itens import itens_do_pedido, itens_dos_pedidos
 from app.services.nf_etiqueta_transform import (
     EtiquetaTransformError,
     transformar_etiqueta,
@@ -2415,6 +2417,24 @@ async def _duimp_do_pedido(session: AsyncSession, numero: str | None) -> str | N
     return " | ".join(textos) or None
 
 
+def _declaracao_do_bling(
+    pdf: bytes, numero: str, itens: list[ItemDeclaracao], origem: str
+) -> bytes:
+    """Reescreve a DECLARAÇÃO DE CONTEÚDO com os itens atuais do pedido no
+    Bling (Eduardo, 06/11/2026: o papel na caixa mostra o item do pedido, não
+    o do anúncio). Nunca trava a subida: qualquer status que não seja 'ok'
+    guarda a etiqueta como veio do transform."""
+    try:
+        novo, status, detalhe = reescrever_declaracao(pdf, itens)
+    except Exception as exc:  # noqa: BLE001 — reescrever_declaracao já não levanta
+        novo, status, detalhe = pdf, "erro", f"{type(exc).__name__}: {exc}"[:300]
+    logger.info(
+        "nf_etiqueta_declaracao",
+        pedido=numero, status=status, detalhe=detalhe, origem=origem,
+    )
+    return novo
+
+
 @router.post(
     "/agent/etiqueta",
     dependencies=[Depends(_require_nf_agent_token)],
@@ -2427,7 +2447,8 @@ async def nf_agent_etiqueta(
 ) -> dict:
     """Recebe o PDF CRU da etiqueta (a marionete pega no Upseller/Correios),
     aplica a regra de visualização (item 2: remetente=destinatário, sem bloco NF,
-    sem logo do marketplace) e faz UPSERT do PDF transformado em
+    sem logo do marketplace), reescreve a DECLARAÇÃO DE CONTEÚDO com os itens
+    atuais do pedido no Bling (06/11/2026) e faz UPSERT do PDF transformado em
     `nf_etiqueta_arquivo` por pedido — de onde o Controle de Estoque serve o botão
     "Imprimir Etiqueta". O nome do destinatário é lido da própria etiqueta quando
     `destinatario_nome` não vem.
@@ -2445,6 +2466,9 @@ async def nf_agent_etiqueta(
         )
     except EtiquetaTransformError as exc:
         raise HTTPException(422, detail={"code": "nf_etiqueta_invalida", "erro": str(exc)}) from exc
+    transformado = _declaracao_do_bling(
+        transformado, pedido_bling, await itens_do_pedido(session, pedido_bling), "upload"
+    )
 
     filename = f"etiqueta_{pedido_bling}.pdf"
     row = (
@@ -2478,7 +2502,8 @@ async def nf_agent_etiqueta_lote(
 ) -> dict:
     """Recebe o PDF ÚNICO da impressão em LOTE do Upseller (todas as etiquetas
     marcadas de uma vez), fatia em uma etiqueta por pedido, casa cada fatia com
-    o pedido do davinci, transforma (mesma regra do /agent/etiqueta) e grava.
+    o pedido do davinci, transforma (mesma regra do /agent/etiqueta, inclusive
+    a declaração com os itens do Bling) e grava.
     Pros pedidos gravados: status_etiqueta='ok', fecha os comandos
     `imprimir_etiqueta` cobertos e move pra "Em digitação" (21) no Bling.
 
@@ -2559,6 +2584,7 @@ async def nf_agent_etiqueta_lote(
     gravadas: list[str] = []
     nao_casadas: list[dict] = []
     falhas: list[dict] = []
+    casadas: list[tuple[nf_etiqueta_lote.EtiquetaFatia, str, str | None]] = []
     for i, fatia in enumerate(fatias):
         numero: str | None = None
         nome: str | None = None
@@ -2583,6 +2609,11 @@ async def nf_agent_etiqueta_lote(
                 }
             )
             continue
+        casadas.append((fatia, numero, nome))
+
+    # Itens do Bling de todos os casados numa consulta só (declaração).
+    itens_por_pedido = await itens_dos_pedidos(session, [n for _f, n, _nm in casadas])
+    for fatia, numero, nome in casadas:
         try:
             transformado = transformar_etiqueta(
                 fatia.pdf,
@@ -2592,6 +2623,9 @@ async def nf_agent_etiqueta_lote(
         except EtiquetaTransformError as exc:
             falhas.append({"numero": numero, "erro": str(exc)})
             continue
+        transformado = _declaracao_do_bling(
+            transformado, numero, itens_por_pedido.get(numero, []), "upload_lote"
+        )
         row = (
             await session.execute(
                 select(NfEtiquetaArquivo).where(
