@@ -1,9 +1,9 @@
 <script setup lang="ts">
 // Detalhe da garantia (§4.2), aberto ao clicar na linha do painel.
 // - Dados: nome, CPF (completo só para quem tem "Ver o CPF completo"; os
-//   outros veem mascarado), o e-mail e o WhatsApp do comprador (09/11/2026:
-//   do formulário do SAC ou do cadastro do contato no Bling; mascarados como
-//   o CPF), NF, pedido, data de cadastro, cadastrado por.
+//   outros veem mascarado), o e-mail e o WhatsApp (ou o telefone fixo) do
+//   comprador (09/11/2026: do formulário do SAC ou do cadastro do contato no
+//   Bling; mascarados como o CPF), NF, pedido, data de cadastro, cadastrado por.
 // - Prazo: início (a entrega, com a origem) e o fim ÚNICO da garantia (desde
 //   06/11/2026: entrega + o prazo do produto na Tabela de Preços › Produtos),
 //   com a barra de dias restantes — ou "Prazo não cadastrado", ou "Sem
@@ -233,26 +233,28 @@ onKeyStroke('Escape', () => emit('fechar'))
                 <span v-if="!g.cpf_completo" class="ml-1 inline-flex items-center gap-0.5 font-sans text-[11px] text-muted-foreground" title="o CPF completo só aparece para quem tem a permissão 'Ver o CPF completo'"><Lock class="size-3" /> mascarado</span>
               </dd>
               <!-- O contato do comprador (09/11/2026): do SAC do site ou do Bling -->
-              <template v-if="g.contato && (g.contato.email || g.contato.whatsapp)">
+              <template v-if="g.contato && (g.contato.email || g.contato.telefone)">
                 <dt class="text-muted-foreground">E-mail</dt>
                 <dd class="break-all" data-contato-email>
                   <template v-if="g.contato.email">
                     <a v-if="g.contato.completo" :href="`mailto:${g.contato.email}`" class="underline-offset-2 hover:underline">{{ g.contato.email }}</a>
                     <span v-else>{{ g.contato.email }}</span>
                     <span class="ml-1 text-xs text-muted-foreground">({{ FONTE_DO_CONTATO[g.contato.email_fonte || ''] }})</span>
+                    <span v-if="!g.contato.completo" class="ml-1 inline-flex items-center gap-0.5 text-[11px] text-muted-foreground" title="o contato completo só aparece para quem tem a permissão 'Ver o CPF completo'"><Lock class="size-3" /> mascarado</span>
                     <div v-if="g.contato.email_repassador" class="break-normal text-xs text-muted-foreground">e-mail da {{ nomePlataforma(g.plataforma) || 'plataforma' }}: só entrega a mensagem pela {{ nomePlataforma(g.plataforma) || 'plataforma' }}</div>
                   </template>
                   <span v-else class="text-muted-foreground">—</span>
                 </dd>
-                <dt class="text-muted-foreground">WhatsApp</dt>
-                <dd data-contato-whatsapp>
-                  <template v-if="g.contato.whatsapp">
-                    <a v-if="g.contato.whatsapp_link" :href="g.contato.whatsapp_link" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 rounded border border-emerald-400/70 px-1.5 py-0.5 text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-900/30" title="abrir a conversa no WhatsApp"><MessageCircle class="size-3.5" aria-hidden="true" />{{ g.contato.whatsapp }}</a>
-                    <span v-else class="font-mono">{{ g.contato.whatsapp }}</span>
-                    <span class="ml-1 text-xs text-muted-foreground">({{ FONTE_DO_CONTATO[g.contato.whatsapp_fonte || ''] }})</span>
+                <dt class="text-muted-foreground">{{ g.contato.telefone && !g.contato.celular ? 'Telefone' : 'WhatsApp' }}</dt>
+                <dd data-contato-telefone>
+                  <template v-if="g.contato.telefone">
+                    <a v-if="g.contato.whatsapp_link" :href="g.contato.whatsapp_link" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 rounded border border-emerald-400/70 px-1.5 py-0.5 text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-900/30" title="abrir a conversa no WhatsApp"><MessageCircle class="size-3.5" aria-hidden="true" />{{ g.contato.telefone }}</a>
+                    <span v-else class="font-mono">{{ g.contato.telefone }}</span>
+                    <span class="ml-1 text-xs text-muted-foreground">({{ FONTE_DO_CONTATO[g.contato.telefone_fonte || ''] }})</span>
+                    <span v-if="!g.contato.completo" class="ml-1 inline-flex items-center gap-0.5 text-[11px] text-muted-foreground" title="o contato completo só aparece para quem tem a permissão 'Ver o CPF completo'"><Lock class="size-3" /> mascarado</span>
+                    <div v-else-if="!g.contato.celular" class="text-xs text-muted-foreground">telefone fixo: sem WhatsApp</div>
                   </template>
                   <span v-else class="text-muted-foreground">—</span>
-                  <span v-if="!g.contato.completo" class="ml-1 inline-flex items-center gap-0.5 text-[11px] text-muted-foreground" title="o contato completo só aparece para quem tem a permissão 'Ver o CPF completo'"><Lock class="size-3" /> mascarado</span>
                 </dd>
               </template>
               <template v-else-if="g.contato">

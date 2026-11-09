@@ -15,9 +15,9 @@ import httpx
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import text, update
+from sqlalchemy import select, text, update
 
-from app.models import BlingOrder, UserRole
+from app.models import BlingOrder, Garantia, GarantiaSac, UserRole
 from app.models.base import Base
 from app.services import garantia_contato as contato
 from tests.test_garantia_sac import _formulario
@@ -39,27 +39,43 @@ _VERSOES = Path(__file__).resolve().parent.parent / "alembic" / "versions"
 
 
 @pytest.mark.parametrize(
-    ("telefone", "esperado"),
+    ("texto", "esperado"),
     [
         ("(19) 98888-7777", "5519988887777"),
-        ("(19) 3433-1234", "551934331234"),
+        ("(19) 3433-1234", "551934331234"),  # fixo
         ("19988887777", "5519988887777"),
         ("+55 19 98888-7777", "5519988887777"),
         ("5519988887777", "5519988887777"),
         ("(19) 98888-7777 — https://wa.me/5519988887777", "5519988887777"),
+        # O 0 de longa distância e o código da operadora (revisão de 09/11/2026).
+        ("(019) 98888-7777", "5519988887777"),
+        ("019 98888-7777", "5519988887777"),
+        ("0xx19 98888-7777", "5519988887777"),
+        ("015 19 98888-7777", "5519988887777"),
+        ("+55 (019) 98888-7777", "5519988887777"),
+        ("(19) 98888-7777 ramal 12", "5519988887777"),
+        ("(19) 3433-1234 r. 205", "551934331234"),
+        # O celular de antes do 9º dígito ganha o 9.
+        ("(19) 8888-7777", "5519988887777"),
+        # DDD 55 (RS) não é confundido com o código do país.
+        ("(55) 99999-8888", "5555999998888"),
         ("98888-7777", None),  # sem DDD
-        ("(019) 98888-7777", None),
+        ("(20) 98888-7777", None),  # DDD que não existe
+        ("(19) 88888-7777", None),  # 11 dígitos sem o 9
+        ("+1 415 555 2671", None),  # outro país
+        ("0800 123 4567", None),
         ("(19) 9****-7777", None),  # mascarado pela plataforma
         ("(11) 99999-9999", None),  # cara de número de teste
         ("", None),
         (None, None),
     ],
 )
-async def test_whatsapp(telefone, esperado):
-    assert contato.whatsapp(telefone) == esperado
+async def test_telefone(texto, esperado):
+    assert contato.telefone(texto) == esperado
 
 
 async def test_formatos_e_mascaras():
+    assert contato.eh_celular("5519988887777") and not contato.eh_celular("551934331234")
     assert contato.telefone_legivel("5519988887777") == "(19) 98888-7777"
     assert contato.telefone_legivel("551934331234") == "(19) 3433-1234"
     assert contato.telefone_mascarado("5519988887777") == "(19) 9****-7777"
@@ -210,9 +226,10 @@ async def test_detalhe_mostra_o_contato_completo_so_para_quem_ve_o_cpf(
         "email": "abc@marketplace.amazon.com.br",
         "email_repassador": True,
         "email_fonte": "bling",
-        "whatsapp": "(19) 98888-7777",
+        "telefone": "(19) 98888-7777",
+        "telefone_fonte": "bling",
+        "celular": True,
         "whatsapp_link": "https://wa.me/5519988887777",
-        "whatsapp_fonte": "bling",
         "completo": True,
         "vazio": None,
     }
@@ -220,7 +237,7 @@ async def test_detalhe_mostra_o_contato_completo_so_para_quem_ve_o_cpf(
     auth_as(await make_user(permissions=CONSULTA))
     r = await client.get(f"/api/garantias/{g.id}")
     c = r.json()["contato"]
-    assert (c["whatsapp"], c["whatsapp_link"], c["email"], c["completo"]) == (
+    assert (c["telefone"], c["whatsapp_link"], c["email"], c["completo"]) == (
         "(19) 9****-7777",
         None,
         "a***@marketplace.amazon.com.br",
@@ -250,7 +267,21 @@ async def test_o_sac_vale_mais_que_o_bling_e_os_motivos_do_vazio(client, db, mak
         "sac",
         False,
     )
-    assert (c["whatsapp"], c["whatsapp_fonte"]) == ("(19) 98888-7777", "sac")
+    assert (c["telefone"], c["telefone_fonte"], c["celular"]) == ("(19) 98888-7777", "sac", True)
+
+    # O celular vale mais que o fixo: o fixo do SAC perde para o celular do Bling.
+    caso = (
+        await db.execute(select(GarantiaSac).where(GarantiaSac.garantia_id == g.id))
+    ).scalar_one()
+    caso.campos = {**caso.campos, "telefone": "(19) 3433-1234"}
+    await db.commit()
+    c = (await client.get(f"/api/garantias/{g.id}")).json()["contato"]
+    assert (c["telefone"], c["telefone_fonte"]) == ("(19) 91111-2222", "bling")
+    # Só o fixo: "Telefone", sem o link do WhatsApp.
+    g.contato_telefone = None
+    await db.commit()
+    c = (await client.get(f"/api/garantias/{g.id}")).json()["contato"]
+    assert (c["telefone"], c["celular"], c["whatsapp_link"]) == ("(19) 3433-1234", False, None)
 
     # Shopee sem SAC: a plataforma não informa.
     s = await _com_plataforma(db, await _garantia(db, "600002"), "shopee")
@@ -258,9 +289,10 @@ async def test_o_sac_vale_mais_que_o_bling_e_os_motivos_do_vazio(client, db, mak
         "email": None,
         "email_repassador": False,
         "email_fonte": None,
-        "whatsapp": None,
+        "telefone": None,
+        "telefone_fonte": None,
+        "celular": False,
         "whatsapp_link": None,
-        "whatsapp_fonte": None,
         "completo": True,
         "vazio": "plataforma",
     }
@@ -270,6 +302,65 @@ async def test_o_sac_vale_mais_que_o_bling_e_os_motivos_do_vazio(client, db, mak
     a.contato_lido_em = datetime.now(UTC)
     await db.commit()
     assert (await client.get(f"/api/garantias/{a.id}")).json()["contato"]["vazio"] == "sem_cadastro"
+
+
+async def test_trocar_o_pedido_apaga_o_contato_do_pedido_antigo(client, db, make_user, auth_as):
+    """O pedido trocado pode ser de outra pessoa: o contato lido no Bling sai,
+    a tela volta a "buscando" e o robô lê o do pedido novo (revisão de
+    09/11/2026)."""
+    g = await _com_plataforma(
+        db, await _garantia(db, entrega=_hoje() - timedelta(days=10)), "amazon"
+    )
+    g.contato_telefone, g.contato_email = "5519988887777", "antigo@marketplace.amazon.com.br"
+    g.contato_lido_em = datetime.now(UTC)
+    db.add(
+        BlingOrder(
+            numero="600009",
+            numeroloja="702-1234567-1234567",
+            loja="L1",
+            data=datetime.now(UTC) - timedelta(days=30),
+            total=1000,
+            situacao="83953",
+            item_index=0,
+            item_codigo="dg053",
+            item_descricao="Celular Uranyx T8 128GB",
+            item_quantidade=1,
+            bling_id=9,
+        )
+    )
+    await db.commit()
+    auth_as(await make_user(role=UserRole.ADMIN))
+    r = await client.put(f"/api/garantias/{g.id}", json={"pedido": "600009"})
+    assert r.status_code == 200, r.text
+    c = (await client.get(f"/api/garantias/{g.id}")).json()["contato"]
+    assert (c["telefone"], c["email"], c["vazio"]) == (None, None, "lendo")
+    await db.refresh(g)
+    assert g.contato_lido_em is None
+    bling = _Bling({9: {"email": "", "telefone": "", "celular": "(21) 97777-6666"}})
+    await contato.preencher(db, client=bling)
+    await db.commit()
+    await db.refresh(g)
+    assert g.contato_telefone == "5521977776666"
+
+
+async def test_robo_nao_grava_se_o_pedido_mudou_durante_a_leitura(db):
+    g = await _com_plataforma(db, await _garantia(db, "700001"), "amazon")
+    await _espelho(db, "700001", 1)
+
+    class _BlingQueTroca(_Bling):
+        async def get_contato(self, contato_id):
+            # Enquanto o Bling responde, alguém corrige o pedido da garantia.
+            await db.execute(
+                update(Garantia).where(Garantia.id == g.id).values(pedido_bling="700099")
+            )
+            return await super().get_contato(contato_id)
+
+    bling = _BlingQueTroca({1: {"email": "", "telefone": "", "celular": "(19) 98888-7777"}})
+    r = await contato.preencher(db, client=bling)
+    await db.commit()
+    assert r["lidos"] == 0
+    await db.refresh(g)
+    assert (g.pedido_bling, g.contato_telefone, g.contato_lido_em) == ("700099", None, None)
 
 
 # ── Migration ────────────────────────────────────────────────────────────────

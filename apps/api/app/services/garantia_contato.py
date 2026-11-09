@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 
 import httpx
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.garantia import Garantia
@@ -48,20 +48,66 @@ _DOMINIOS_REPASSADORES = (
 _RX_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-def whatsapp(telefone: str | None) -> str | None:
-    """O telefone no formato do wa.me: só dígitos, com o 55 na frente.
-    Aceita "(19) 98888-7777", "+55 19 98888-7777" e o que vem antes do link
-    que o e-mail do SAC às vezes cola ("… — https://wa.me/…"). Sem DDD, com
-    zero na frente, mascarado ou com cara de número de teste → None. PURA."""
-    texto = re.split(r"\s[—–]\s|https?://", telefone or "", maxsplit=1)[0]
-    if "*" in texto:
+# Os DDDs que existem (Anatel).
+DDDS = frozenset(
+    {11, 12, 13, 14, 15, 16, 17, 18, 19, 21, 22, 24, 27, 28}
+    | set(range(31, 36))
+    | {37, 38}
+    | set(range(41, 47))
+    | {47, 48, 49, 51, 53, 54, 55}
+    | set(range(61, 70))
+    | {71, 73, 74, 75, 77, 79}
+    | set(range(81, 90))
+    | set(range(91, 100))
+)
+_RX_RAMAL = re.compile(r"\s*(?:ramal|ext\.?|r\.)\s*\d.*$", re.IGNORECASE | re.DOTALL)
+_RX_OPERADORA_XX = re.compile(r"^\s*0\s*x\s*x\s*", re.IGNORECASE)
+
+
+def telefone(texto: str | None) -> str | None:
+    """O telefone brasileiro só com dígitos e o 55 na frente (o formato do
+    wa.me): "5519988887777". Aceita "(19) 98888-7777", "+55 19 98888-7777",
+    "(019) 98888-7777" (o 0 de longa distância), "0xx19…" e "015 19 …" (o
+    código da operadora), e o que vem antes do link que o e-mail do SAC às
+    vezes cola ("… — https://wa.me/…"); o ramal sai. O celular antigo sem o 9
+    ganha o 9. Sem DDD, DDD que não existe, número estrangeiro, mascarado
+    ("9****-7777") ou com cara de número de teste → None. PURA."""
+    t = re.split(r"\s[—–]\s|https?://", texto or "", maxsplit=1)[0]
+    t = _RX_RAMAL.sub("", t)
+    if "*" in t:
         return None
-    d = svc.so_digitos(texto)
-    if len(d) in (12, 13) and d.startswith("55"):
+    t = _RX_OPERADORA_XX.sub("0", t).strip()
+    d = svc.so_digitos(t)
+    # Número de outro país: "+1 …", "00 1 …".
+    if (t.startswith("+") and not d.startswith("55")) or (
+        d.startswith("00") and not d.startswith("0055")
+    ):
+        return None
+    if d.startswith("0055"):
         d = d[2:]
-    if len(d) not in (10, 11) or d.startswith("0") or len(set(d[2:])) <= 2:
+    if d.startswith("55") and (len(d) in (12, 13) or (len(d) == 14 and d[2] == "0")):
+        d = d[2:]  # o 55 do país ("+55 (019) …" traz o 0 junto)
+    if len(d) in (11, 12) and d.startswith("0"):  # 0 + DDD + número
+        d = d[1:]
+    elif len(d) in (13, 14) and d.startswith("0"):  # 0 + operadora + DDD + número
+        d = d[3:]
+    if len(d) not in (10, 11) or not d[:2].isdigit() or int(d[:2]) not in DDDS:
         return None
-    return "55" + d
+    numero = d[2:]
+    if len(numero) == 9 and numero[0] != "9":
+        return None  # 9 dígitos é celular, e o celular começa com 9
+    if len(numero) == 8 and numero[0] in "6789":
+        numero = "9" + numero  # o celular de antes do 9º dígito
+    elif len(numero) == 8 and numero[0] not in "2345":
+        return None
+    if len(set(numero[1:])) <= 1:
+        return None  # "99999-9999", "3333-3333"
+    return "55" + d[:2] + numero
+
+
+def eh_celular(numero: str) -> bool:
+    """O telefone (já no formato de `telefone`) é celular — o que tem WhatsApp."""
+    return len(numero) == 13
 
 
 def telefone_legivel(numero: str) -> str:
@@ -95,8 +141,8 @@ def email_mascarado(email: str) -> str:
 
 
 async def ler_do_bling(client, bling_id: int) -> tuple[str | None, str | None]:
-    """(telefone no formato do wa.me, e-mail) do cadastro do contato do pedido
-    no Bling. O celular vale mais que o telefone fixo."""
+    """(telefone no formato de `telefone`, e-mail) do cadastro do contato do
+    pedido no Bling. O celular vale mais que o telefone fixo."""
     r = await client._request("GET", f"/pedidos/vendas/{bling_id}")
     r.raise_for_status()
     pedido = r.json().get("data") or {}
@@ -108,9 +154,11 @@ async def ler_do_bling(client, bling_id: int) -> tuple[str | None, str | None]:
     if not contato_id:
         return None, None
     c = await client.get_contato(contato_id)
-    telefone = whatsapp(c.get("celular")) or whatsapp(c.get("telefone"))
+    fones = [f for f in (telefone(c.get("celular")), telefone(c.get("telefone"))) if f]
+    # O celular (o que tem WhatsApp) vale mais que o fixo, venha de qual campo vier.
+    fone = next((f for f in fones if eh_celular(f)), fones[0] if fones else None)
     email = email_valido(c.get("email")) or email_valido(c.get("emailNotaFiscal"))
-    return telefone, email
+    return fone, email
 
 
 async def preencher(session: AsyncSession, *, limite: int = POR_RODADA, client=None) -> dict:
@@ -161,22 +209,34 @@ async def preencher(session: AsyncSession, *, limite: int = POR_RODADA, client=N
             # O espelho do pedido ainda não chegou: tenta na próxima volta.
             resumo["sem_pedido"] += 1
             continue
+        pedido_lido = g.pedido_bling
         try:
-            telefone, email = await ler_do_bling(client, bling_id)
+            fone, email = await ler_do_bling(client, bling_id)
         except httpx.HTTPStatusError as e:
             if e.response.status_code != 404:
                 resumo["falhas"] += 1
                 continue
-            telefone, email = None, None  # pedido apagado no Bling: nada a ler
+            fone, email = None, None  # pedido apagado no Bling: nada a ler
         except Exception as e:  # noqa: BLE001 — rede/Bling fora: próxima volta
             resumo["falhas"] += 1
             logger.warning("garantia_contato_falhou", garantia=g.id, err=str(e)[:200])
             continue
-        g.contato_telefone = telefone
-        g.contato_email = email
-        g.contato_lido_em = datetime.now(UTC)
+        # Só grava se ninguém trocou o pedido enquanto o Bling respondia: o
+        # contato lido é do pedido de antes (revisão de 09/11/2026).
+        gravou = await session.execute(
+            update(Garantia)
+            .where(
+                Garantia.id == g.id,
+                Garantia.pedido_bling == pedido_lido,
+                Garantia.contato_lido_em.is_(None),
+            )
+            .values(contato_telefone=fone, contato_email=email, contato_lido_em=datetime.now(UTC))
+            .execution_options(synchronize_session=False)
+        )
+        if not gravou.rowcount:
+            continue
         resumo["lidos"] += 1
-        resumo["com_telefone"] += telefone is not None
+        resumo["com_telefone"] += fone is not None
         resumo["com_email"] += email is not None
     await session.flush()
     return resumo

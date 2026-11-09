@@ -370,7 +370,7 @@ export type GarantiaDetalhe = GarantiaLinha & {
 
 // O contato do comprador (09/11/2026): do formulário do SAC do site (o que o
 // cliente digitou) ou do cadastro do contato do pedido no Bling (hoje só a
-// Amazon tem). Completo só para quem vê o CPF completo; senão, mascarado e
+// Amazon tem); o celular vale mais que o fixo. Completo só para quem vê o CPF completo; senão, mascarado e
 // sem link. `vazio`: por que não tem — "plataforma" (Mercado Livre, Shopee e
 // TikTok não informam), "lendo" (o robô ainda não leu o Bling) ou
 // "sem_cadastro" (o Bling não tem).
@@ -378,9 +378,12 @@ export type ContatoGarantia = {
   email: string | null
   email_repassador: boolean
   email_fonte: 'sac' | 'bling' | null
-  whatsapp: string | null
+  telefone: string | null
+  telefone_fonte: 'sac' | 'bling' | null
+  // Celular = tem WhatsApp (a linha se chama "WhatsApp"); fixo = "Telefone".
+  celular: boolean
+  // Só do celular e com o contato completo.
   whatsapp_link: string | null
-  whatsapp_fonte: 'sac' | 'bling' | null
   completo: boolean
   vazio: 'plataforma' | 'lendo' | 'sem_cadastro' | null
 }

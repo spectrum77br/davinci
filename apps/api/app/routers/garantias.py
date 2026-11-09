@@ -722,12 +722,12 @@ async def _detalhe(
 
 
 async def _contato(session: AsyncSession, g: Garantia, user: User, *, completo: bool) -> ContatoOut:
-    """O e-mail e o WhatsApp da aba Dados (09/11/2026): o que o cliente
+    """O e-mail e o telefone da aba Dados (09/11/2026): o que o cliente
     digitou no formulário do SAC (se a pessoa lê o formulário — a trava do
-    /historico) vale mais que o cadastro do contato no Bling. Sem o contato
-    completo (quem não vê o CPF completo, ou a resposta de um POST), sai
-    mascarado e sem link."""
-    sac_email = sac_tel = None
+    /historico) vale mais que o cadastro do contato no Bling; o celular (o
+    que tem WhatsApp) vale mais que o fixo. Sem o contato completo (quem não
+    vê o CPF completo, ou a resposta de um POST), sai mascarado e sem link."""
+    sac_email = sac_fone = None
     s = GarantiaSac
     caso = (
         await session.execute(
@@ -743,10 +743,14 @@ async def _contato(session: AsyncSession, g: Garantia, user: User, *, completo: 
         and await _caso_legivel(session, caso, user)
     ):
         sac_email = garantia_contato.email_valido(caso.campos.get("email"))
-        sac_tel = garantia_contato.whatsapp(caso.campos.get("telefone"))
+        sac_fone = garantia_contato.telefone(caso.campos.get("telefone"))
     email, email_fonte = (sac_email, "sac") if sac_email else (g.contato_email, "bling")
-    tel, tel_fonte = (sac_tel, "sac") if sac_tel else (g.contato_telefone, "bling")
-    if not email and not tel:
+    fones = [(f, fonte) for f, fonte in ((sac_fone, "sac"), (g.contato_telefone, "bling")) if f]
+    fone, fone_fonte = next(
+        (x for x in fones if garantia_contato.eh_celular(x[0])),
+        fones[0] if fones else (None, None),
+    )
+    if not email and not fone:
         if g.plataforma in garantia_contato.PLATAFORMAS_SEM_CONTATO:
             vazio = "plataforma"
         elif g.contato_lido_em is None:
@@ -754,21 +758,23 @@ async def _contato(session: AsyncSession, g: Garantia, user: User, *, completo: 
         else:
             vazio = "sem_cadastro"
         return ContatoOut(completo=completo, vazio=vazio)
+    celular = bool(fone) and garantia_contato.eh_celular(fone)
     return ContatoOut(
         email=(email if completo else garantia_contato.email_mascarado(email)) if email else None,
         email_repassador=bool(email) and garantia_contato.email_repassador(email),
         email_fonte=email_fonte if email else None,
-        whatsapp=(
+        telefone=(
             (
-                garantia_contato.telefone_legivel(tel)
+                garantia_contato.telefone_legivel(fone)
                 if completo
-                else garantia_contato.telefone_mascarado(tel)
+                else garantia_contato.telefone_mascarado(fone)
             )
-            if tel
+            if fone
             else None
         ),
-        whatsapp_link=f"https://wa.me/{tel}" if tel and completo else None,
-        whatsapp_fonte=tel_fonte if tel else None,
+        telefone_fonte=fone_fonte,
+        celular=celular,
+        whatsapp_link=f"https://wa.me/{fone}" if celular and completo else None,
         completo=completo,
     )
 

@@ -396,7 +396,7 @@ class PermissoesOut(BaseModel):
 
 
 class ContatoOut(BaseModel):
-    """O contato do comprador na aba Dados (09/11/2026): o e-mail e o WhatsApp.
+    """O contato do comprador na aba Dados (09/11/2026): o e-mail e o telefone.
     Vem do formulário do SAC do site (o que o cliente digitou) ou do cadastro
     do contato do pedido no Bling (hoje só a Amazon tem). Completo só para
     quem vê o CPF completo; senão, mascarado e sem link."""
@@ -407,12 +407,14 @@ class ContatoOut(BaseModel):
     # "sac" | "bling"
     email_fonte: str | None = None
     # "(19) 98888-7777" (mascarado: "(19) 9****-7777").
-    whatsapp: str | None = None
-    # https://wa.me/55… — só com o contato completo.
+    telefone: str | None = None
+    telefone_fonte: str | None = None
+    # Celular = o que tem WhatsApp (a tela chama de "WhatsApp"); fixo = "Telefone".
+    celular: bool = False
+    # https://wa.me/55… — só do celular e com o contato completo.
     whatsapp_link: str | None = None
-    whatsapp_fonte: str | None = None
     completo: bool = False
-    # Sem e-mail e sem WhatsApp, por quê: "plataforma" (Mercado Livre, Shopee
+    # Sem e-mail e sem telefone, por quê: "plataforma" (Mercado Livre, Shopee
     # e TikTok não informam), "lendo" (o robô ainda não leu o Bling) ou
     # "sem_cadastro" (o Bling não tem).
     vazio: str | None = None

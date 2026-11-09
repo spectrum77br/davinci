@@ -1055,7 +1055,12 @@ def aplicar_pedido(
     serie: str,
     nota: NotaDoPedido | None,
 ) -> None:
-    """Copia o pedido (nº, loja, plataforma, itens) e a NF para a garantia."""
+    """Copia o pedido (nº, loja, plataforma, itens) e a NF para a garantia.
+    Pedido trocado: o contato do comprador lido no Bling era do pedido antigo
+    (pode ser outra pessoa) — sai, e o robô lê o do novo
+    (services/garantia_contato.py; revisão de 09/11/2026)."""
+    if g.pedido_bling != pedido.numero:
+        g.contato_telefone = g.contato_email = g.contato_lido_em = None
     g.pedido_bling = pedido.numero
     g.pedido_marketplace = pedido.numeroloja
     g.loja = pedido.loja
