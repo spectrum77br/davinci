@@ -68,6 +68,9 @@ class SuprimentosOut(BaseModel):
     inmetro_dados: dict | None = None
     inmetro_consultado_em: datetime | None = None
     inmetro_encontrado: bool | None = None
+    # Garantia (meses) do certificado (06/11/2026): vale para todos os
+    # produtos da Tabela de Preços dele. None = não define; 0 = sem garantia.
+    garantia_meses: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -81,6 +84,9 @@ class SuprimentosPatch(BaseModel):
     valor: Decimal | None = None
     inicio: date | None = None
     fim: date | None = None
+    # 0 a 120 (0 = sem garantia); null = o certificado não define o prazo (os
+    # produtos ficam com o que têm).
+    garantia_meses: int | None = Field(None, ge=0, le=120)
 
 
 class CertificacoesFonteStatusOut(BaseModel):

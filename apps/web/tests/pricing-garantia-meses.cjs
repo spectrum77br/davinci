@@ -65,7 +65,7 @@ const iGar = ths.indexOf('Garantia (meses)')
 assert.ok(iGar > 0, 'cabeçalho Garantia (meses) existe')
 assert.equal(ths[iGar - 1], 'Catálogo')
 assert.equal(ths[iGar + 1], 'Fotos')
-assert.match(cab, /title="Prazo da garantia do produto, em meses \(0 = sem garantia\)\. Aumentar vale para todas as vendas; diminuir só para as vendas a partir da mudança; corrigir no mesmo dia desfaz o valor anterior\."[\s\S]*?>Garantia \(meses\)<\/th>/)
+assert.match(cab, /title="Prazo da garantia do produto, em meses \(0 = sem garantia\)\. Aumentar vale para todas as vendas; diminuir só para as vendas a partir da mudança; corrigir no mesmo dia desfaz o valor anterior\. Produto cujo certificado tem garantia: o prazo vem do certificado, e mudar aqui muda para todos os produtos dele\."[\s\S]*?>Garantia \(meses\)<\/th>/)
 // O cabeçalho não está dentro de <template v-if>: o último <template> aberto
 // antes dele já fechou.
 const antesDoTh = cab.slice(0, cab.indexOf('Garantia (meses)</th>'))
@@ -80,7 +80,10 @@ assert.ok(corpo.indexOf("isEditing(p.id, 'preco_catalogo')") < corpo.indexOf("is
 assert.match(celula, /@click="canEditProdutos && !isEditing\(p\.id, 'garantia_meses'\) && startEditProduct\(p, 'garantia_meses'\)"/)
 assert.match(celula, /'cursor-pointer': canEditProdutos/)
 assert.match(celula, /p\.garantia_meses == null \? '—' : p\.garantia_meses === 0 \? 'sem garantia' : p\.garantia_meses/)
-assert.match(celula, /p\.garantia_meses === 0 \? 'Sem garantia \(0 = sem garantia\)'/, 'o title da célula explica o 0')
+// O title da célula vem do helper (que explica o 0 e o prazo do certificado:
+// tests/pricing-certificado-garantia.cjs roda o helper de verdade).
+assert.match(celula, /:title="garantiaTitulo\(p\)"/, 'o title da célula vem do helper')
+assert.match(pega('garantiaTitulo'), /'Sem garantia \(0 = sem garantia\)'/, 'o title explica o 0')
 assert.match(celula, /@blur="commitEditProduct"/)
 
 // 4) o SFC inteiro compila (script + template).

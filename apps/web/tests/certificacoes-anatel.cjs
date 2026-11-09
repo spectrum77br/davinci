@@ -27,7 +27,8 @@ const exportsForTest = `return {
   exportTable, load, loadAnatelStatus, loadInmetroStatus,
   attachPdf, addRow, removeRow, downloadCertificate, rowStatusClass, officialSituation,
   officialSituationClass, isLinked, isOfficialField, hasManualOfficialFields, officialSource, officialData,
-  isMissingSource, officialAlerts, fieldSourceTitle, openDetails, formatTimestamp, formatDate, formatCnpj
+  isMissingSource, officialAlerts, fieldSourceTitle, openDetails, formatTimestamp, formatDate, formatCnpj,
+  GARANTIA_MESES_MAX, lerGarantiaMeses, salvarGarantia
 }`
 
 function page(auth = { isAdmin: true }) {
@@ -59,6 +60,7 @@ const row = (values = {}) => ({
   inicio: '2026-07-30', fim: '2028-07-30', tem_pdf: true, pdf_nome: 'certificado.pdf', campos_manuais: null,
   anatel_numero: null, anatel_dados: null, anatel_consultado_em: null, anatel_encontrado: null,
   inmetro_chave: null, inmetro_dados: null, inmetro_consultado_em: null, inmetro_encontrado: null,
+  garantia_meses: null,
   ...values,
 })
 const source = (values = {}) => ({
@@ -220,7 +222,7 @@ async function run() {
     s.selectedRow.value = saved
     const html = await render(s)
     const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
-    assert.equal(controls.length, 8)
+    assert.equal(controls.length, 9, 'os 8 campos do cadastro + Garantia (meses)')
     for (const control of controls) assert.doesNotMatch(control, /readonly|disabled/)
     const dialog = html.slice(html.indexOf('<dialog'))
     assert.match(dialog, /Dados da fonte original/)
@@ -234,9 +236,10 @@ async function run() {
     const current = row({ anatel_numero: '07197-26-18234', anatel_dados: source() })
     const previous = structuredClone(current)
     s.rows.value = [current]
-    for (const field of ['produto', 'modelo', 'nome_comercial', 'certificado', 'numero', 'valor', 'inicio', 'fim']) {
+    for (const field of ['produto', 'modelo', 'nome_comercial', 'certificado', 'numero', 'valor', 'inicio', 'fim', 'garantia_meses']) {
       s.scheduleSave(current, field, 'unauthorized change')
     }
+    s.salvarGarantia(current, '12')
     await s.syncAnatel()
     assert.equal(calls.length, 0)
     assert.deepEqual(current, previous)
@@ -245,7 +248,7 @@ async function run() {
     assert.match(html, /Baixar tabela em PDF/)
     assert.match(html, /Baixar PDF de Telefone/)
     const controls = html.match(/<(?:input|select)\b[^>]*class="cell-input\b[^"]*"[^>]*>/g)
-    assert.equal(controls.length, 8)
+    assert.equal(controls.length, 9, 'os 8 campos do cadastro + Garantia (meses)')
     for (const control of controls) assert.match(control, /disabled/)
   }
   {
@@ -302,6 +305,60 @@ async function run() {
     }
     assert.deepEqual(current, previous, 'source field editing must retain busy guards')
     assert.equal(calls.length, 0)
+  }
+  {
+    // Garantia (meses) do certificado (06/11/2026): salva ao sair do campo;
+    // vazio = não define (null); 0..120; o resto avisa e não salva. Vale para
+    // todos os produtos do certificado (quem propaga é o servidor).
+    const { state: s, calls } = page()
+    const current = row({ anatel_numero: '07197-26-18234', anatel_dados: source() })
+    s.rows.value = [current]
+    assert.equal(s.lerGarantiaMeses(''), null)
+    assert.equal(s.lerGarantiaMeses(' 0 '), 0, '0 = sem garantia (não é vazio)')
+    assert.equal(s.lerGarantiaMeses('120'), 120)
+    for (const ruim of ['121', '-1', '12.5', '1e2', 'abc', '12e', '12 meses', 'doze']) assert.equal(s.lerGarantiaMeses(ruim), undefined, ruim)
+    s.salvarGarantia(current, '121')
+    assert.match(s.errorText.value, /^Garantia: prazo inválido \("121"\)/)
+    assert.equal(current.garantia_meses, null, 'inválido não muda a linha')
+    // Revisão de 06/11/2026: texto digitado chega como texto (o campo não é
+    // type="number", que entregaria "" e apagaria a garantia).
+    current.garantia_meses = 6
+    s.salvarGarantia(current, '12e')
+    assert.match(s.errorText.value, /^Garantia: prazo inválido \("12e"\)/)
+    assert.equal(current.garantia_meses, 6, '"12e" não apaga a garantia')
+    current.garantia_meses = null
+    s.salvarGarantia(current, '12')
+    assert.equal(s.errorText.value, null, 'o valor certo limpa o aviso')
+    assert.equal(current.garantia_meses, 12)
+    assert.deepEqual(current.campos_manuais, ['garantia_meses'])
+    s.salvarGarantia(current, '12')  // igual: nada novo
+    const loading = s.load()
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].url, `/api/financeiro/suprimentos/${current.id}`)
+    assert.deepEqual(calls[0].options.body, { garantia_meses: 12 })
+    calls[0].resolve({ ...current })
+    await settle()
+    calls.find(c => c.url === '/api/financeiro/suprimentos').resolve([{ ...current }])
+    calls.find(c => c.url.endsWith('/anatel/status')).resolve(status())
+    calls.find(c => c.url.endsWith('/inmetro/status')).resolve(status())
+    await loading
+    // Apagar = null (o certificado deixa de definir; os produtos ficam como estão).
+    s.salvarGarantia(s.rows.value[0], '')
+    assert.equal(s.rows.value[0].garantia_meses, null)
+    // Campo editado à mão que não é da fonte oficial: não marca "Cadastro editado".
+    assert.doesNotMatch(s.officialSituation(s.rows.value[0]), /Cadastro editado/)
+    const html = await render(s)
+    assert.match(html, /<th class="text-right" data-col-garantia-meses[^>]*title="Prazo da garantia, em meses \(0 = sem garantia\)\. Mudar aqui muda a Garantia \(meses\) de todos os produtos deste certificado na Tabela de Preços\.[^"]*"[^>]*>Garantia \(meses\)<\/th>/)
+    const cell = html.match(/<input[^>]*data-cert-garantia[^>]*>/)
+    assert.ok(cell, 'célula da garantia')
+    assert.match(cell[0], /type="text"/)
+    assert.match(cell[0], /inputmode="numeric"/)
+    assert.doesNotMatch(cell[0], /type="number"/, 'number entrega "" para "12e" e apagaria a garantia')
+    // Cartão do celular mostra a garantia.
+    s.rows.value[0].garantia_meses = 0
+    assert.match(await render(s), /<dt class="text-muted-foreground">Garantia<\/dt><dd class="text-right">Sem garantia<\/dd>/)
+    s.rows.value[0].garantia_meses = 18
+    assert.match(await render(s), /<dd class="text-right">18 meses<\/dd>/)
   }
   console.log('PASS: Anatel editing, saved patches, official data isolation, permissions and synchronization scenarios')
 }

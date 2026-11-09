@@ -707,6 +707,9 @@ type CertificacaoDoProduto = {
   certificado: string | null
   numero: string | null
   fim: string | null
+  // Garantia (meses) do certificado (06/11/2026). Com valor, a coluna
+  // Garantia (meses) do produto vem dele; null = o produto tem a dele.
+  garantia_meses?: number | null
 }
 
 // Tags de estoque válidas pra coluna Prioridade (mesmo conjunto dos sufixos
@@ -777,6 +780,70 @@ function certTitulo(c: CertificacaoDoProduto | null | undefined): string {
   const tipo = c.certificado ? ` · ${c.certificado === 'isento' ? 'isento' : c.certificado.toUpperCase()}` : ''
   const fim = c.fim ? ` Válido até ${c.fim.split('-').reverse().join('/')}.` : ''
   return `Da Certificações: ${c.produto || 'sem produto'}${tipo}.${fim} Muda lá, muda aqui.`
+}
+// Garantia e Validade pelo certificado (06/11/2026, Eduardo: "em
+// certificações adicione o campo garantia, e aí ele passa a mudar de acordo
+// com o certificado"; "deixe a opção de editar na tabela de preços"). O
+// servidor decide para onde vai a edição (PATCH do produto): a Garantia de
+// produto cujo certificado tem garantia e a Validade gravam NO CERTIFICADO e
+// valem para todos os produtos dele.
+function garantiaDoCertificado(p: PricingProduct): boolean {
+  return p.certificacao?.garantia_meses != null
+}
+function garantiaTitulo(p: PricingProduct): string {
+  const base = p.garantia_meses == null
+    ? 'Prazo da garantia não cadastrado'
+    : p.garantia_meses === 0
+      ? 'Sem garantia (0 = sem garantia)'
+      : `Garantia de ${p.garantia_meses} ${p.garantia_meses === 1 ? 'mês' : 'meses'}`
+  if (!garantiaDoCertificado(p)) return base
+  const modelo = p.certificacao?.modelo?.trim() || p.certificacao?.produto || 'sem modelo'
+  return `${base} — vem do certificado ${modelo}: vale para todos os produtos dele.`
+}
+function validadeTitulo(p: PricingProduct): string {
+  if (!p.certificacao) return 'Sem certificado: escolha o certificado na coluna Modelo para ter a validade.'
+  if (!canEditProdutos.value) return certTitulo(p.certificacao)
+  return `${certTitulo(p.certificacao)} Clique para mudar a data (o Fim do certificado): vale para todos os produtos dele.`
+}
+// O input de data da Validade com data incompleta ou que não existe: o
+// navegador mostra o que foi digitado, mas o value vem "" (igual ao campo
+// apagado) e só validity.badInput avisa.
+const VALIDADE_INCOMPLETA = 'Validade: data incompleta ou que não existe — escolha a data no calendário, ou apague a data inteira para tirar a validade'
+function dataIncompleta(el: HTMLInputElement | HTMLSelectElement | null): boolean {
+  return !!el && (el as HTMLInputElement).type === 'date' && !!el.validity?.badInput
+}
+// Os 422 da Garantia e da Validade viram frase (o resto mostra o código).
+const GARANTIA_DO_CERTIFICADO = 'Garantia: o prazo deste produto vem do certificado e vale para todos os produtos dele — para tirar, apague na Certificações (ou use 0 = sem garantia)'
+function erroDoProduto(code: string | undefined): string {
+  if (code === 'garantia_do_certificado') return GARANTIA_DO_CERTIFICADO
+  if (code === 'sem_certificado') return 'Validade: o produto não tem certificado — escolha o certificado na coluna Modelo'
+  return code ?? 'save_failed'
+}
+// Validade digitada (input de data, AAAA-MM-DD): vazio apaga a data (null);
+// data que não existe ("2026-02-30") = undefined, e a célula não envia.
+function lerDataValidade(raw: string): string | null | undefined {
+  const t = raw.trim()
+  if (!t) return null
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t)
+  if (!m) return undefined
+  const [a, mes, d] = [Number(m[1]), Number(m[2]), Number(m[3])]
+  const dt = new Date(Date.UTC(a, mes - 1, d))
+  if (dt.getUTCFullYear() !== a || dt.getUTCMonth() !== mes - 1 || dt.getUTCDate() !== d) return undefined
+  return t
+}
+// Depois de gravar no certificado: as outras linhas do MESMO certificado
+// mostram a validade/garantia nova sem recarregar a tabela. `prazoTambem` =
+// a edição foi da Garantia; o prazo só vai para as outras linhas quando o
+// certificado da RESPOSTA tem garantia (aí o servidor passou o prazo a todos
+// os produtos dele).
+function espelharCertificado(updated: PricingProduct, prazoTambem: boolean) {
+  const c = updated.certificacao
+  if (!c) return
+  for (const x of [...products.value, ...(grid.value?.products ?? [])]) {
+    if (x.id === updated.id || x.certificacao?.id !== c.id) continue
+    x.certificacao = { ...c }
+    if (prazoTambem && c.garantia_meses != null) x.garantia_meses = c.garantia_meses
+  }
 }
 
 const products = ref<PricingProduct[]>([])
@@ -1754,8 +1821,10 @@ function startEditProduct(p: PricingProduct, field: string) {
   ) {
     commitEditProduct()
   }
+  // Validade: só produto com certificado (a data é o Fim do certificado).
+  if (field === 'certificado_fim' && !p.certificacao) return
   editing.value = { id: p.id, field }
-  const raw = (p as any)[field]
+  const raw = field === 'certificado_fim' ? p.certificacao?.fim : (p as any)[field]
   editValue.value = raw == null ? '' : String(raw)
   focusEditInput()
 }
@@ -1771,6 +1840,14 @@ function commitEditProduct(): void {
   const raw = editValue.value.trim()
   editing.value = null
   editValue.value = ''
+  // Validade: o <input type="date"> entrega "" tanto para o campo apagado
+  // quanto para a data incompleta ou que não existe (30/02) — só
+  // validity.badInput separa os dois. Data ruim avisa e não envia; senão
+  // apagaria o Fim do certificado de todos os produtos dele.
+  if (field === 'certificado_fim' && dataIncompleta(editInputRef.value)) {
+    productsErr.value = VALIDADE_INCOMPLETA
+    return
+  }
   void _patchProduct(id, field, raw)
 }
 
@@ -1818,7 +1895,24 @@ async function _patchProduct(id: string, field: string, raw: string) {
     // Sem mudança não manda PATCH: o servidor grava a vigência a cada troca.
     if (productsErr.value?.startsWith('Garantia:')) productsErr.value = null
     if ((p.garantia_meses ?? null) === n) return
+    // Apagar o prazo que vem do certificado tiraria o de todos os produtos
+    // dele: não manda (o servidor também recusa, 422 garantia_do_certificado).
+    if (n === null && garantiaDoCertificado(p)) {
+      productsErr.value = GARANTIA_DO_CERTIFICADO
+      return
+    }
     payload.garantia_meses = n
+  } else if (field === 'certificado_fim') {
+    // Validade (06/11/2026): grava o Fim do certificado do produto.
+    if (!p.certificacao) return
+    const fim = lerDataValidade(raw)
+    if (fim === undefined) {
+      productsErr.value = `Validade: data inválida ("${raw}") — escolha a data no calendário, ou apague para tirar a validade`
+      return
+    }
+    if (productsErr.value?.startsWith('Validade:')) productsErr.value = null
+    if ((p.certificacao.fim ?? null) === fim) return
+    payload.certificado_fim = fim
   } else if (field === 'description' || field === 'model' || field === 'ean') {
     payload[field] = raw || null
   } else {
@@ -1828,9 +1922,14 @@ async function _patchProduct(id: string, field: string, raw: string) {
   // Optimistic update: paint the new value immediately, both on the
   // products list and the grid mirror, so the user sees the change without
   // waiting on the network. Failures revert via loadGrid below.
-  Object.assign(p, payload)
-  const gp0 = grid.value?.products.find((x) => x.id === id)
-  if (gp0 && gp0 !== p) Object.assign(gp0, payload)
+  // A Validade não é campo da linha: pinta o Fim do certificado dela.
+  if (field === 'certificado_fim') {
+    if (p.certificacao) p.certificacao = { ...p.certificacao, fim: payload.certificado_fim as string | null }
+  } else {
+    Object.assign(p, payload)
+    const gp0 = grid.value?.products.find((x) => x.id === id)
+    if (gp0 && gp0 !== p) Object.assign(gp0, payload)
+  }
   const mudaPreco = field.startsWith('cost_kit') || field === 'preco_catalogo'
   if (mudaPreco) recomputeCellsForProduct(id)
 
@@ -1842,6 +1941,13 @@ async function _patchProduct(id: string, field: string, raw: string) {
     Object.assign(p, updated)
     const gp = grid.value?.products.find((x) => x.id === id)
     if (gp && gp !== p) Object.assign(gp, updated)
+    // As outras linhas do mesmo certificado, pelo que o SERVIDOR devolveu (o
+    // certificado pode ter ganhado ou perdido a garantia depois que a tela
+    // abriu): a Garantia só vai para todas quando a resposta diz que o
+    // certificado tem garantia — aí o servidor passou o prazo a todos.
+    if (field === 'certificado_fim' || field === 'garantia_meses') {
+      espelharCertificado(updated, field === 'garantia_meses')
+    }
     flash(id, field)
     // SSH parity: do NOT reload the whole grid after a cost edit. The
     // server response already carries the canonical row, and recomputing
@@ -1851,7 +1957,7 @@ async function _patchProduct(id: string, field: string, raw: string) {
     // it snapped back to 4000" bug.
     if (mudaPreco) recomputeCellsForProduct(id)
   } catch (e: any) {
-    productsErr.value = e?.data?.detail?.code ?? 'save_failed'
+    productsErr.value = erroDoProduto(e?.data?.detail?.code)
     // Revert the optimistic update on failure by re-fetching.
     if (grid.value) await loadGrid()
     else await loadProducts()
@@ -5109,7 +5215,8 @@ watch(department, async () => {
                 >Nº certificado</th>
                 <th
                   class="text-right px-2 py-2 font-medium border-b border-border w-24"
-                  title="Quantos dias faltam para o certificado vencer (coluna Fim da Certificações; a data aparece ao passar o mouse). Vermelho = vencido; âmbar = vence em menos de 30 dias."
+                  title="Quantos dias faltam para o certificado vencer (coluna Fim da Certificações; a data aparece ao passar o mouse). Vermelho = vencido; âmbar = vence em menos de 30 dias. Clique para mudar a data: grava no Fim do certificado e vale para todos os produtos dele."
+                  data-col-cert-validade
                 >Validade</th>
               </template>
               <th v-for="k in kitCount" :key="`kith-${k}`" class="text-right px-2 py-2 font-medium border-b border-border w-24" :title="kitTitulo(k)">
@@ -5122,7 +5229,7 @@ watch(department, async () => {
               >Catálogo</th>
               <th
                 class="text-right px-2 py-2 font-medium border-b border-border w-24"
-                title="Prazo da garantia do produto, em meses (0 = sem garantia). Aumentar vale para todas as vendas; diminuir só para as vendas a partir da mudança; corrigir no mesmo dia desfaz o valor anterior."
+                title="Prazo da garantia do produto, em meses (0 = sem garantia). Aumentar vale para todas as vendas; diminuir só para as vendas a partir da mudança; corrigir no mesmo dia desfaz o valor anterior. Produto cujo certificado tem garantia: o prazo vem do certificado, e mudar aqui muda para todos os produtos dele."
                 data-col-garantia-meses
               >Garantia (meses)</th>
               <th
@@ -5346,12 +5453,34 @@ watch(department, async () => {
                   :title="certTitulo(p.certificacao)"
                   data-cert-numero
                 >{{ certNumero(p.certificacao) }}</td>
+                <!-- Validade (06/11/2026): editável por quem edita produtos,
+                     quando o produto tem certificado. Mostra os dias; ao
+                     clicar edita a data Fim DO CERTIFICADO (vale para todos
+                     os produtos dele). Sem certificado: só leitura. -->
                 <td
                   class="border border-border px-2 py-1.5 text-xs whitespace-nowrap text-right tabular-nums"
-                  :class="p.certificacao?.fim ? certValidadeClasse(p.certificacao) : 'text-muted-foreground'"
-                  :title="certTitulo(p.certificacao)"
+                  :class="[
+                    p.certificacao?.fim ? certValidadeClasse(p.certificacao) : 'text-muted-foreground',
+                    {
+                      'cursor-pointer': canEditProdutos && !!p.certificacao,
+                      'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'certificado_fim'),
+                      'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'certificado_fim'),
+                    },
+                  ]"
+                  :title="validadeTitulo(p)"
                   data-cert-validade
-                >{{ certValidade(p.certificacao) }}</td>
+                  @click="canEditProdutos && p.certificacao && !isEditing(p.id, 'certificado_fim') && startEditProduct(p, 'certificado_fim')"
+                >
+                  <input
+                    v-if="isEditing(p.id, 'certificado_fim')"
+                    :ref="setEditInputRef"
+                    v-model="editValue" type="date"
+                    class="w-full min-w-[118px] text-xs bg-transparent outline-none text-right"
+                    data-cert-validade-data
+                    @blur="commitEditProduct" @keydown.enter.prevent="commitEditProduct" @keydown.escape.prevent="cancelEdit"
+                  />
+                  <template v-else>{{ certValidade(p.certificacao) }}</template>
+                </td>
               </template>
               <td
                 v-for="k in kitCount" :key="`kit-${k}`"
@@ -5393,7 +5522,9 @@ watch(department, async () => {
               <!-- Garantia (meses), 06/11/2026: prazo único do produto, em
                    todos os segmentos. Edita quem edita produtos (mesmo PATCH
                    das outras células); vazio = "—" (sem prazo cadastrado);
-                   0 = "sem garantia" (o avulso). -->
+                   0 = "sem garantia" (o avulso). Produto cujo certificado
+                   tem garantia: o servidor grava no certificado e o prazo
+                   vale para todos os produtos dele (title avisa). -->
               <td
                 class="border border-border px-2 py-1.5 text-xs text-right"
                 :class="{
@@ -5401,7 +5532,7 @@ watch(department, async () => {
                   'ring-2 ring-blue-500 ring-inset bg-background': isEditing(p.id, 'garantia_meses'),
                   'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(p.id, 'garantia_meses'),
                 }"
-                :title="p.garantia_meses == null ? 'Prazo da garantia não cadastrado' : p.garantia_meses === 0 ? 'Sem garantia (0 = sem garantia)' : `Garantia de ${p.garantia_meses} ${p.garantia_meses === 1 ? 'mês' : 'meses'}`"
+                :title="garantiaTitulo(p)"
                 data-col-garantia-meses
                 @click="canEditProdutos && !isEditing(p.id, 'garantia_meses') && startEditProduct(p, 'garantia_meses')"
               >

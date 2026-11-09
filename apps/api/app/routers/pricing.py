@@ -7,6 +7,7 @@ the data plane.
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import date
 from typing import Annotated
 from uuid import UUID
 
@@ -36,7 +37,6 @@ from app.models import (
     Integration,
     IntegrationPlatform,
     PricingAccount,
-    PricingGarantiaPrazo,
     PricingOverride,
     PricingPlatform,
     PricingProduct,
@@ -79,10 +79,15 @@ from app.schemas.pricing import (
 )
 from app.schemas.products import JobCreatedOut
 from app.security.cipher import decrypt, encrypt
+from app.services import garantia_prazo
 from app.services.certificacao_produto import (
     Certificacao,
     carregar_certificacoes,
-    certificacao_do_produto,
+    certificado_de_cada_produto,
+    certificado_efetivo,
+    garantia_de_quem_trocou_de_certificado,
+    gravar_no_certificado,
+    passar_garantia_aos_produtos,
 )
 from app.services.mega_fotos import MegaError, sidecar_request
 from app.services.mega_midias import RAIZ_POR_DEPARTAMENTO
@@ -492,17 +497,20 @@ def _product_out(
     # Certificações — o certificado gravado na linha (migration 0457) ou, sem
     # ele, o achado pelo código no nome. A grade não passa a lista e fica sem.
     if certificacoes is not None:
-        if row.certificacao_id is not None:
-            cert = next((c for c in certificacoes if c.id == row.certificacao_id), None)
-        else:
-            cert = certificacao_do_produto(row.name, certificacoes)
-            out.certificacao_pelo_nome = cert is not None
+        cert, out.certificacao_pelo_nome = certificado_efetivo(
+            row.certificacao_id, row.name, certificacoes
+        )
         if cert is not None:
-            out.certificacao = CertificacaoDoProdutoOut(
-                id=cert.id, produto=cert.produto, modelo=cert.modelo,
-                certificado=cert.certificado, numero=cert.numero, fim=cert.fim,
-            )
+            out.certificacao = _certificacao_out(cert)
     return out
+
+
+def _certificacao_out(cert: Certificacao) -> CertificacaoDoProdutoOut:
+    return CertificacaoDoProdutoOut(
+        id=cert.id, produto=cert.produto, modelo=cert.modelo,
+        certificado=cert.certificado, numero=cert.numero, fim=cert.fim,
+        garantia_meses=cert.garantia_meses,
+    )
 
 
 # =============================================================================
@@ -729,13 +737,7 @@ async def list_certificacoes_para_produtos(
     quem edita a Tabela de Preços não precisa ver a tela de Certificações)."""
     certs = await carregar_certificacoes(session)
     certs.sort(key=lambda c: ((c.produto or "").lower(), (c.modelo or "").lower()))
-    return [
-        CertificacaoDoProdutoOut(
-            id=c.id, produto=c.produto, modelo=c.modelo,
-            certificado=c.certificado, numero=c.numero, fim=c.fim,
-        )
-        for c in certs
-    ]
+    return [_certificacao_out(c) for c in certs]
 
 
 @router.get("/products", response_model=list[PricingProductOut])
@@ -793,17 +795,21 @@ async def create_product(
             raise HTTPException(400, detail={"code": "invalid_segment"})
         data["segment_id"] = sid
     row = PricingProduct(user_id=user.id, **data)
+    # O nome já acha um certificado que tem garantia (06/11/2026): o produto
+    # nasce com o prazo dele ("ele passa a mudar de acordo com o certificado").
+    certs = await carregar_certificacoes(session)
+    cert, _ = certificado_efetivo(None, row.name, certs)
+    if cert is not None and cert.garantia_meses is not None:
+        row.garantia_meses = cert.garantia_meses
     session.add(row)
     try:
         await session.flush()
         # O produto novo já com prazo (ou com o SKU de vendas que já têm
         # garantia): a vigência e o recálculo das garantias, no mesmo commit.
-        await _garantia_do_produto(
+        await garantia_prazo.registrar_mudancas(
             session,
-            row,
+            [(row, None)] if row.garantia_meses is not None else [],
             user,
-            meses_antes=None,
-            mudou_meses=row.garantia_meses is not None,
             skus_mexidos=[row.sku],
         )
         await session.commit()
@@ -815,45 +821,6 @@ async def create_product(
     await session.refresh(row)
     _, leaves_by_id, _ = await _segment_index(session)
     return _product_out(row, leaves_by_id, await carregar_certificacoes(session))
-
-
-async def _garantia_do_produto(
-    session: AsyncSession,
-    row: PricingProduct,
-    user: User,
-    *,
-    meses_antes: int | None,
-    mudou_meses: bool,
-    skus_mexidos: list[str | None] | None = None,
-) -> None:
-    """A coluna Garantia (meses) (06/11/2026): cada mudança do prazo vira uma
-    linha da vigência (`pricing_garantia_prazo`: quem, de quanto para quanto,
-    desde quando) e as garantias do produto são recalculadas na mesma
-    transação — "se o prazo aumentar, vale para todas as vendas do produto. Se
-    diminuir, vale só para as vendas feitas a partir da mudança"
-    (services/garantia_prazo.py). A linha nova ou o SKU que mudou
-    (`skus_mexidos`, o de antes e o de depois): a ligação venda → produto
-    dessas vendas pode mudar, e elas são recalculadas também. Não commita."""
-    from app.services import garantia_prazo
-
-    if mudou_meses:
-        session.add(
-            PricingGarantiaPrazo(
-                pricing_product_id=row.id,
-                meses=row.garantia_meses,
-                meses_anterior=meses_antes,
-                user_id=user.id,
-                user_nome=user.name or user.email,
-            )
-        )
-        await session.flush()
-    ids: set[int] = set()
-    if mudou_meses:
-        ids |= set(await garantia_prazo.ids_do_produto(session, row.id))
-    if skus_mexidos:
-        ids |= set(await garantia_prazo.ids_dos_skus(session, skus_mexidos))
-    if ids:
-        await garantia_prazo.aplicar_prazos(session, ids=sorted(ids), ator=user)
 
 
 @router.patch("/products/{product_id}", response_model=PricingProductOut)
@@ -917,17 +884,71 @@ async def patch_product(
         if sid is None:
             raise HTTPException(400, detail={"code": "invalid_segment"})
         data["segment_id"] = sid
-    meses_antes, sku_antes = row.garantia_meses, row.sku
+    # Garantia (meses) e Validade (06/11/2026) passam pelo certificado do
+    # produto: não são gravadas direto na linha (abaixo).
+    pediu_meses = "garantia_meses" in data
+    meses_pedidos = data.pop("garantia_meses", None)
+    pediu_fim = "certificado_fim" in data
+    fim_pedido = data.pop("certificado_fim", None)
+    certs = await carregar_certificacoes(session)
+    cert_antes, _ = certificado_efetivo(row.certificacao_id, row.name, certs)
+    # O certificado do produto DEPOIS desta edição (a coluna Modelo ou o nome
+    # podem mudar nela mesma).
+    cert, _ = certificado_efetivo(
+        data.get("certificacao_id", row.certificacao_id), data.get("name", row.name), certs
+    )
+    if pediu_fim and cert is None:
+        raise HTTPException(422, detail={"code": "sem_certificado"})
+    # A linha da Certificações é travada ANTES de gravar a do produto: a mesma
+    # ordem do PATCH da Certificações (certificado → produtos), para os dois
+    # ao mesmo tempo não travarem um ao outro.
+    sup = None
+    if cert is not None and (pediu_fim or pediu_meses):
+        sup = (
+            await session.execute(
+                select(FinanceiroSuprimentos)
+                .where(FinanceiroSuprimentos.id == cert.id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if sup is None and pediu_fim:  # excluído no meio da edição
+            raise HTTPException(422, detail={"code": "sem_certificado"})
+        # A garantia deste produto é a do certificado (revisão de 06/11/2026):
+        # apagar aqui tiraria o prazo do certificado de todos os produtos dele,
+        # e a Tabela não conseguiria religar. Tirar o prazo de todos = apagar
+        # na Certificações; 0 = sem garantia (vale para todos).
+        if (
+            pediu_meses
+            and meses_pedidos is None
+            and sup is not None
+            and sup.garantia_meses is not None
+        ):
+            raise HTTPException(422, detail={"code": "garantia_do_certificado"})
+    # A Validade muda o Fim do certificado, e quem acha certificado pelo nome
+    # pode trocar de certificado (o desempate é pela validade mais longa): o
+    # retrato de antes diz quem trocou — inclusive esta linha, se o nome ou a
+    # coluna Modelo mudaram junto.
+    antes = await certificado_de_cada_produto(session) if pediu_fim else None
+    trocou = cert is not None and cert.id != getattr(cert_antes, "id", None)
+    sku_antes = row.sku
     for k, v in data.items():
         setattr(row, k, v)
     try:
         await session.flush()
-        await _garantia_do_produto(
+        mudancas = await _garantia_e_validade_pelo_certificado(
             session,
             row,
+            sup,
+            trocou_para=cert if trocou and antes is None else None,
+            meses=(pediu_meses, meses_pedidos),
+            fim=(pediu_fim, fim_pedido),
+        )
+        if antes is not None:
+            mudancas += await garantia_de_quem_trocou_de_certificado(session, antes)
+        await garantia_prazo.registrar_mudancas(
+            session,
+            mudancas,
             user,
-            meses_antes=meses_antes,
-            mudou_meses="garantia_meses" in data and row.garantia_meses != meses_antes,
             skus_mexidos=[sku_antes, row.sku] if row.sku != sku_antes else None,
         )
         await session.commit()
@@ -939,6 +960,60 @@ async def patch_product(
     await session.refresh(row)
     _, leaves_by_id, _ = await _segment_index(session)
     return _product_out(row, leaves_by_id, await carregar_certificacoes(session))
+
+
+async def _garantia_e_validade_pelo_certificado(
+    session: AsyncSession,
+    row: PricingProduct,
+    sup: FinanceiroSuprimentos | None,
+    *,
+    trocou_para: Certificacao | None,
+    meses: tuple[bool, int | None],
+    fim: tuple[bool, date | None],
+) -> list[garantia_prazo.Mudanca]:
+    """Garantia (meses) e Validade da aba Produtos (06/11/2026, Eduardo: "em
+    certificações adicione o campo garantia, e aí ele passa a mudar de acordo
+    com o certificado"; "deixe a opção de editar na tabela de preços"):
+
+    * Validade: grava o Fim do CERTIFICADO do produto (marcado como editado à
+      mão, para a sincronização oficial não sobrescrever) — vale para todos os
+      produtos dele.
+    * Garantia de produto cujo certificado tem garantia: grava no CERTIFICADO
+      e todos os produtos dele passam a ter o prazo. Apagar (vazio) não chega
+      aqui: o PATCH devolve 422 garantia_do_certificado (apaga-se na
+      Certificações).
+    * Produto sem certificado (ou com certificado sem garantia): o prazo é o
+      da linha, como antes.
+    * Trocou de certificado (coluna Modelo ou nome) para um que tem garantia:
+      o produto pega a garantia dele.
+
+    `sup` = a linha da Certificações do produto, já travada (None = sem
+    certificado, ou nem Garantia nem Validade na edição); a decisão (o
+    certificado tem garantia?) olha o valor dela, o de agora. `trocou_para` =
+    o certificado novo quando a edição trocou o do produto.
+
+    Devolve as mudanças de prazo para `garantia_prazo.registrar_mudancas`.
+    NÃO commita."""
+    pediu_meses, meses_pedidos = meses
+    pediu_fim, fim_pedido = fim
+    if pediu_fim and sup is not None:
+        gravar_no_certificado(sup, "fim", fim_pedido)
+    if pediu_meses:
+        if sup is None or sup.garantia_meses is None:
+            return garantia_prazo.trocar_prazo([row], meses_pedidos)
+        gravar_no_certificado(sup, "garantia_meses", meses_pedidos)
+        await session.flush()
+        # Relê os certificados: a Validade editada junto pode mudar quem acha
+        # o certificado pelo nome (desempate pela validade mais longa).
+        mudancas = await passar_garantia_aos_produtos(
+            session, sup.id, meses_pedidos, await carregar_certificacoes(session)
+        )
+        if all(linha.id != row.id for linha, _ in mudancas):
+            mudancas += garantia_prazo.trocar_prazo([row], meses_pedidos)
+        return mudancas
+    if trocou_para is not None and trocou_para.garantia_meses is not None:
+        return garantia_prazo.trocar_prazo([row], trocou_para.garantia_meses)
+    return []
 
 
 @router.delete("/products/{product_id}")

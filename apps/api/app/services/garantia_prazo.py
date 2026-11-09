@@ -59,6 +59,9 @@ from app.services import garantia_pedido, garantia_resumo
 # Quem "recalculou" no log da garantia quando a mudança não é de uma pessoa
 # (o robô de 15 min, a carga do deploy).
 ROTULO_ROBO = "Sistema (prazo da Tabela de Preços)"
+# Quem mudou o prazo na vigência quando foi a sincronização oficial das
+# Certificações (o produto passou a outro certificado com garantia).
+ROTULO_CERTIFICADO = "Sistema (certificado do produto)"
 # O começo de tudo: o prazo que o produto tinha antes da 1ª mudança gravada.
 _DESDE_SEMPRE = datetime.min.replace(tzinfo=UTC)
 _LOTE = 1000
@@ -179,10 +182,21 @@ async def prazo_dos_itens(session: AsyncSession, itens: Any, venda: datetime | N
 async def ids_do_produto(session: AsyncSession, pricing_product_id: UUID | str) -> list[int]:
     """As garantias cujo item principal é desta linha da Tabela de Preços (o
     gancho da coluna Garantia (meses))."""
+    return await ids_dos_produtos(session, [pricing_product_id])
+
+
+async def ids_dos_produtos(
+    session: AsyncSession, pricing_product_ids: Iterable[UUID | str]
+) -> list[int]:
+    """As garantias cujo item principal é de uma destas linhas da Tabela de
+    Preços, numa leitura só (o certificado que muda o prazo de vários produtos
+    de uma vez)."""
+    alvos = {str(p) for p in pricing_product_ids}
+    if not alvos:
+        return []
     tabela = await garantia_resumo._tabela_de_precos(session)
-    alvo = str(pricing_product_id)
     linhas = (await session.execute(select(Garantia.id, Garantia.itens))).all()
-    return [gid for gid, itens in linhas if _produto_da_garantia(itens, tabela) == alvo]
+    return [gid for gid, itens in linhas if _produto_da_garantia(itens, tabela) in alvos]
 
 
 def _bases(skus: Iterable[str | None]) -> set[str]:
@@ -307,3 +321,64 @@ async def aplicar_prazos(
                 robo=ROTULO_ROBO,
             )
     return mudaram
+
+
+# ── A mudança do prazo na Tabela de Preços ──────────────────────────────────
+
+# (a linha da Tabela já com o prazo novo, o prazo que ela tinha antes)
+Mudanca = tuple[PricingProduct, int | None]
+
+
+def trocar_prazo(linhas: Iterable[PricingProduct], meses: int | None) -> list[Mudanca]:
+    """Põe `meses` na coluna Garantia (meses) de cada linha e devolve as que
+    mudaram, com o prazo de antes — o que `registrar_mudancas` grava. A linha
+    que já está com `meses` fica de fora (não vira vigência nova). Não lê nem
+    grava no banco (a sessão grava no próximo flush)."""
+    mudancas: list[Mudanca] = []
+    vistas: set[UUID] = set()
+    for linha in linhas:
+        if linha.id in vistas:
+            continue
+        vistas.add(linha.id)
+        if linha.garantia_meses == meses:
+            continue
+        mudancas.append((linha, linha.garantia_meses))
+        linha.garantia_meses = meses
+    return mudancas
+
+
+async def registrar_mudancas(
+    session: AsyncSession,
+    mudancas: list[Mudanca],
+    ator: User | None,
+    *,
+    skus_mexidos: Iterable[str | None] | None = None,
+) -> None:
+    """O caminho único de toda mudança do prazo (06/11/2026): o PATCH e o
+    cadastro do produto na Tabela de Preços e o prazo do CERTIFICADO, que muda
+    todos os produtos dele. Cada mudança vira uma linha da vigência
+    (`pricing_garantia_prazo`: quem, de quanto para quanto, desde quando) e as
+    garantias desses produtos são recalculadas na mesma transação, numa volta
+    só. `skus_mexidos` (a linha nova, ou o SKU de antes e o de depois): a
+    ligação venda → produto dessas vendas pode ter mudado e elas são
+    recalculadas também. `ator` None = o robô (a sincronização oficial das
+    Certificações). NÃO commita."""
+    for linha, antes in mudancas:
+        session.add(
+            PricingGarantiaPrazo(
+                pricing_product_id=linha.id,
+                meses=linha.garantia_meses,
+                meses_anterior=antes,
+                user_id=ator.id if ator is not None else None,
+                user_nome=(ator.name or ator.email) if ator is not None else ROTULO_CERTIFICADO,
+            )
+        )
+    if mudancas:
+        await session.flush()
+    ids: set[int] = set()
+    if mudancas:
+        ids |= set(await ids_dos_produtos(session, [linha.id for linha, _ in mudancas]))
+    if skus_mexidos:
+        ids |= set(await ids_dos_skus(session, skus_mexidos))
+    if ids:
+        await aplicar_prazos(session, ids=sorted(ids), ator=ator)

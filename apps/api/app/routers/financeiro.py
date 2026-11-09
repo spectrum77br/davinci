@@ -73,6 +73,11 @@ from app.schemas.financeiro import (
 )
 from app.security import senha_extra
 from app.services.bling_situacoes import SITUACOES_ENVIADO_ETIQUETA_STR
+from app.services.certificacao_produto import (
+    CAMPOS_DO_CASAMENTO,
+    Retrato,
+    certificado_de_cada_produto,
+)
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/financeiro", tags=["financeiro"])
@@ -353,15 +358,64 @@ async def download_suprimentos_pdf(
     )
 
 
+async def _garantia_aos_produtos(
+    session: AsyncSession,
+    row: FinanceiroSuprimentos,
+    user: User,
+    *,
+    passar: bool,
+    antes: Retrato | None,
+) -> None:
+    """Garantia (meses) do certificado (06/11/2026, "em certificações adicione
+    o campo garantia, e aí ele passa a mudar de acordo com o certificado"):
+
+    * `passar`: todos os produtos da Tabela de Preços deste certificado (o
+      gravado na coluna Modelo ou, sem ele, o achado pelo código no nome)
+      passam a ter o prazo dele. Vazio (NULL) não mexe nos produtos.
+    * `antes` (o retrato de antes da mudança: Fim, Modelo ou Nº editados,
+      certificado novo ou excluído): o produto que passou a OUTRO certificado
+      com garantia pega a garantia dele.
+
+    Pelo mesmo caminho do PATCH do produto (vigência + recálculo das
+    garantias). NÃO commita."""
+    from app.services import garantia_prazo
+    from app.services.certificacao_produto import (
+        garantia_de_quem_trocou_de_certificado,
+        passar_garantia_aos_produtos,
+    )
+
+    await session.flush()
+    mudancas: list[garantia_prazo.Mudanca] = []
+    if passar:
+        mudancas += await passar_garantia_aos_produtos(session, row.id, row.garantia_meses)
+    if antes is not None:
+        mudancas += await garantia_de_quem_trocou_de_certificado(session, antes)
+    await garantia_prazo.registrar_mudancas(session, mudancas, user)
+    if mudancas:
+        logger.info(
+            "certificacao.garantia_aos_produtos",
+            suprimento_id=str(row.id),
+            meses=row.garantia_meses,
+            produtos=len(mudancas),
+            user_id=str(user.id),
+        )
+
+
 @router.post("/suprimentos", response_model=SuprimentosOut, status_code=status.HTTP_201_CREATED)
 async def create_suprimentos(
     body: SuprimentosPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "edit"))],
+    user: Annotated[User, Depends(require_permission("financeiro_suprimentos", "edit"))],
 ) -> SuprimentosOut:
     values = body.model_dump(exclude_unset=True)
+    # O certificado novo pode tirar produtos de outro (achados pelo nome):
+    # o retrato de antes diz quem trocou.
+    antes = await certificado_de_cada_produto(session)
     row = FinanceiroSuprimentos(**values, campos_manuais=sorted(values) or None)
     session.add(row)
+    await _garantia_aos_produtos(
+        session, row, user, passar=row.garantia_meses is not None, antes=antes
+    )
     await session.commit()
     await session.refresh(row)
     return SuprimentosOut.model_validate(row, from_attributes=True)
@@ -372,7 +426,7 @@ async def patch_suprimentos(
     row_id: UUID,
     body: SuprimentosPatch,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "edit"))],
+    user: Annotated[User, Depends(require_permission("financeiro_suprimentos", "edit"))],
 ) -> SuprimentosOut:
     row = (
         await session.execute(
@@ -384,10 +438,18 @@ async def patch_suprimentos(
         raise HTTPException(404, detail={"code": "suprimentos_not_found"})
     values = body.model_dump(exclude_unset=True)
     changed = {key for key, value in values.items() if getattr(row, key) != value}
+    # Fim, Modelo ou Nº mudando: quem acha o certificado pelo nome pode trocar
+    # de certificado — o retrato de antes diz quem trocou.
+    antes = await certificado_de_cada_produto(session) if changed & CAMPOS_DO_CASAMENTO else None
     if changed:
         row.campos_manuais = sorted(set(row.campos_manuais or []) | changed)
     for k, v in values.items():
         setattr(row, k, v)
+    # Garantia enviada (mesmo igual à de antes: refaz o acerto de quem tinha
+    # ficado diferente) → vale para todos os produtos do certificado.
+    passar = values.get("garantia_meses") is not None
+    if passar or antes is not None:
+        await _garantia_aos_produtos(session, row, user, passar=passar, antes=antes)
     await session.commit()
     await session.refresh(row)
     return SuprimentosOut.model_validate(row, from_attributes=True)
@@ -397,7 +459,7 @@ async def patch_suprimentos(
 async def delete_suprimentos(
     row_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
-    _u: Annotated[User, Depends(require_permission("financeiro_suprimentos", "delete"))],
+    user: Annotated[User, Depends(require_permission("financeiro_suprimentos", "delete"))],
 ) -> None:
     row = (
         await session.execute(
@@ -409,7 +471,11 @@ async def delete_suprimentos(
         raise HTTPException(404, detail={"code": "suprimentos_not_found"})
     if row.anatel_numero or row.inmetro_chave:
         raise HTTPException(409, detail={"code": "certificacao_automatica"})
+    # Os produtos deste certificado voltam a ser achados pelo nome e podem
+    # cair noutro certificado, com garantia (o retrato de antes diz quem).
+    antes = await certificado_de_cada_produto(session)
     await session.delete(row)
+    await _garantia_aos_produtos(session, row, user, passar=False, antes=antes)
     await session.commit()
     return None
 

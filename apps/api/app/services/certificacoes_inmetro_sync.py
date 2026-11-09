@@ -15,6 +15,10 @@ from app.models.financeiro import (
     CertificacoesSyncState,
     FinanceiroSuprimentos,
 )
+from app.services.certificacao_produto import (
+    certificado_de_cada_produto,
+    garantia_apos_sincronizacao,
+)
 from app.services.certificacoes_edicao import aplicar_campos_oficiais
 
 STATE_ID = "inmetro_makisa"
@@ -244,9 +248,14 @@ async def sincronizar_certificacoes(session: AsyncSession, *, force: bool = Fals
         if (source_updated_at and state.source_updated_at
                 and source_updated_at < state.source_updated_at):
             raise ValueError("source_older_than_last_success")
+        # O retrato de quem tem qual certificado ANTES de aplicar a fonte: o
+        # produto que passar a outro certificado com garantia pega a garantia
+        # dele (06/11/2026; falhar nisso não derruba a sincronização).
+        antes = await certificado_de_cada_produto(session)
         async with session.begin_nested():
             result = await _aplicar(session, records, now)
             await session.flush()
+        await garantia_apos_sincronizacao(session, antes)
     except Exception:
         logger.exception("certificacoes_inmetro_sync_failed")
         state.erro = ERRO_CONSULTA

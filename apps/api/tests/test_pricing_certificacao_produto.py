@@ -215,6 +215,7 @@ async def test_produtos_trazem_o_certificado_e_acompanham_a_certificacoes(
         "certificado": "anatel",
         "numero": "07197-26-18234",
         "fim": "2028-07-30",
+        "garantia_meses": None,
     }
     pid = r.json()["id"]
 

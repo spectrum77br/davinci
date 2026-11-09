@@ -97,6 +97,9 @@ type Row = {
   inmetro_dados: InmetroRecord | null
   inmetro_consultado_em: string | null
   inmetro_encontrado: boolean | null
+  // Garantia (meses) do certificado (06/11/2026): vale para todos os produtos
+  // dele na Tabela de Preços. null = não define; 0 = sem garantia.
+  garantia_meses: number | null
 }
 
 const rows = ref<Row[]>([])
@@ -183,6 +186,34 @@ function scheduleSave(row: Row, field: keyof Row, value: any) {
   if (row[field] !== value) row.campos_manuais = [...new Set([...(row.campos_manuais || []), field])]
   ;(row as any)[field] = value
   autosave.schedule(row.id, field, value)
+}
+
+// Garantia (meses) do certificado (06/11/2026, Eduardo: "em certificações
+// adicione o campo garantia, e aí ele passa a mudar de acordo com o
+// certificado"). Mudar aqui muda a Garantia (meses) de TODOS os produtos deste
+// certificado na Tabela de Preços (o servidor grava a vigência e recalcula as
+// garantias). Por isso salva no @change (ao sair do campo), não a cada tecla.
+// Vazio = o certificado não define (os produtos ficam com o deles); inteiro
+// de 0 a 120 (0 = sem garantia); o resto não salva e avisa. O campo é texto
+// (inputmode numérico), como a Garantia da Tabela de Preços: o type="number"
+// entrega "" para "12e" ou "doze", e isso apagaria a garantia do certificado.
+const GARANTIA_MESES_MAX = 120
+function lerGarantiaMeses(raw: string): number | null | undefined {
+  const t = raw.trim()
+  if (!t) return null
+  if (!/^\d+$/.test(t)) return undefined
+  const n = parseInt(t, 10)
+  return n <= GARANTIA_MESES_MAX ? n : undefined
+}
+function salvarGarantia(row: Row, raw: string) {
+  const n = lerGarantiaMeses(raw)
+  if (n === undefined) {
+    errorText.value = `Garantia: prazo inválido ("${raw}") — use um número inteiro de meses, de 0 (sem garantia) a ${GARANTIA_MESES_MAX}, ou deixe vazio.`
+    return
+  }
+  if (errorText.value?.startsWith('Garantia:')) errorText.value = null
+  if ((row.garantia_meses ?? null) === n) return
+  scheduleSave(row, 'garantia_meses', n)
 }
 
 async function syncAnatel() {
@@ -533,7 +564,7 @@ const totalRows = computed(() => rows.value.length)
     <p v-if="inmetroSyncError" role="alert" class="text-sm text-destructive">{{ inmetroSyncError }}</p>
     <div v-if="errorText" role="alert" class="text-sm text-destructive">{{ errorText }}</div>
 
-    <p v-if="canEdit" class="text-xs text-muted-foreground">Todos os campos do cadastro podem ser editados. As alterações são salvas automaticamente e preservadas nas próximas consultas.</p>
+    <p v-if="canEdit" class="text-xs text-muted-foreground">Todos os campos do cadastro podem ser editados. As alterações são salvas automaticamente e preservadas nas próximas consultas. A Garantia (meses) e o Fim valem para todos os produtos do certificado na Tabela de Preços.</p>
 
     <div class="flex justify-end lg:hidden">
       <button class="rounded-lg border px-3 py-2 text-xs" :aria-pressed="mobileTableMode" @click="mobileTableMode = !mobileTableMode">{{ mobileTableMode ? 'Ver cartões' : 'Ver tabela' }}</button>
@@ -546,6 +577,7 @@ const totalRows = computed(() => rows.value.length)
         </div>
         <dl class="mt-3 space-y-2 text-xs">
           <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Validade</dt><dd class="text-right font-medium">{{ formatDate(row.fim) }}</dd></div>
+          <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Garantia</dt><dd class="text-right">{{ row.garantia_meses == null ? 'Não definida' : row.garantia_meses === 0 ? 'Sem garantia' : `${row.garantia_meses} ${row.garantia_meses === 1 ? 'mês' : 'meses'}` }}</dd></div>
           <div class="flex justify-between gap-3"><dt class="text-muted-foreground">Situação oficial</dt><dd class="text-right" :class="officialSituationClass(row)">{{ officialSituation(row) }}</dd></div>
         </dl>
         <p v-if="isMissingSource(row)" class="mt-2 text-xs text-amber-700 dark:text-amber-400">Não localizado na última consulta · dados anteriores</p>
@@ -580,6 +612,8 @@ const totalRows = computed(() => rows.value.length)
             <th class="text-right">Valor</th>
             <th class="text-left">Início</th>
             <th class="text-left">Fim</th>
+            <th class="text-right" data-col-garantia-meses
+              title="Prazo da garantia, em meses (0 = sem garantia). Mudar aqui muda a Garantia (meses) de todos os produtos deste certificado na Tabela de Preços. Vazio = o certificado não define (cada produto fica com o seu).">Garantia (meses)</th>
             <th class="text-left">Situação oficial</th>
             <th class="text-left">PDF do certificado</th>
             <th v-if="canDelete" class="w-8"></th>
@@ -587,7 +621,7 @@ const totalRows = computed(() => rows.value.length)
         </thead>
         <tbody>
           <tr v-if="!loading && rows.length === 0">
-            <td :colspan="canDelete ? 11 : 10" class="py-6 text-center text-muted-foreground">
+            <td :colspan="canDelete ? 12 : 11" class="py-6 text-center text-muted-foreground">
               Nenhuma certificação. Clique em "Nova certificação" para começar.
             </td>
           </tr>
@@ -633,6 +667,13 @@ const totalRows = computed(() => rows.value.length)
               <input type="date" class="cell-input" :value="row.fim ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
                 :title="fieldSourceTitle(row, 'fim')"
                 @input="(e) => scheduleSave(row, 'fim', (e.target as HTMLInputElement).value || null)" />
+            </td>
+            <td>
+              <input type="text" inputmode="numeric" placeholder="—" class="cell-input text-right"
+                :value="row.garantia_meses ?? ''" :disabled="!canEdit || busy || rowBusy[row.id]"
+                title="Vale para todos os produtos deste certificado na Tabela de Preços (0 = sem garantia; vazio = não define)."
+                data-cert-garantia
+                @change="(e) => salvarGarantia(row, (e.target as HTMLInputElement).value)" />
             </td>
             <td class="official-status-cell">
               <div class="flex items-center gap-2">

@@ -4,12 +4,14 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
     Integer,
     LargeBinary,
     Numeric,
+    SmallInteger,
     Text,
     func,
 )
@@ -43,6 +45,14 @@ class FinanceiroConsorcio(Base, TimestampMixin):
 
 class FinanceiroSuprimentos(Base, TimestampMixin):
     __tablename__ = "financeiro_suprimentos"
+    __table_args__ = (
+        # Prazo da garantia do certificado (06/11/2026, migration 0461): 0 a
+        # 120 meses (0 = sem garantia), como a coluna da Tabela de Preços.
+        CheckConstraint(
+            "garantia_meses IS NULL OR garantia_meses BETWEEN 0 AND 120",
+            name="garantia_meses",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     produto: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -70,6 +80,13 @@ class FinanceiroSuprimentos(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True,
     )
     inmetro_encontrado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Garantia (meses) do certificado (06/11/2026, "em certificações adicione
+    # o campo garantia, e aí ele passa a mudar de acordo com o certificado"):
+    # mudar aqui muda a Garantia (meses) de todos os produtos da Tabela de
+    # Preços deste certificado (services/certificacao_produto.py). NULL = o
+    # certificado não define o prazo (os produtos ficam com o deles); 0 = sem
+    # garantia. A sincronização da Anatel/Inmetro não mexe neste campo.
+    garantia_meses: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
     @property
     def tem_pdf(self) -> bool:

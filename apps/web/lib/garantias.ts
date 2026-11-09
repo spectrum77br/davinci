@@ -1388,23 +1388,25 @@ export const CANAL_ROTULO: Record<string, string> = {
 }
 
 // Os 4 cartões (06/11/2026) — clicar filtra a lista.
-export type Cartao = 'ativas' | 'vence_30d' | 'sem_prazo' | 'atendimentos_no_mes'
+export type Cartao = 'ativas' | 'vence_30d' | 'sem_prazo' | 'atendimentos'
 export const CARTOES: { chave: Cartao; rotulo: string; dica: string }[] = [
   { chave: 'ativas', rotulo: 'Ativas', dica: 'dentro do prazo da garantia hoje' },
   { chave: 'vence_30d', rotulo: 'Vence em 30 dias', dica: 'ativas cuja garantia termina nos próximos 30 dias' },
   { chave: 'sem_prazo', rotulo: 'Sem prazo cadastrado', dica: 'o produto ainda não tem o prazo na Tabela de Preços › Produtos' },
-  { chave: 'atendimentos_no_mes', rotulo: 'Atendimentos no mês', dica: 'casos do SAC do site confirmados neste mês' },
+  // 06/11/2026 (Eduardo: "deixe como atendimento somente, não precisa deixar atendimento do mês"):
+  // todas as garantias acionadas (o SAC confirmado), de qualquer mês.
+  { chave: 'atendimentos', rotulo: 'Atendimentos', dica: 'garantias acionadas: o SAC do site confirmado, de qualquer mês' },
 ]
 
 /** O filtro que o cartão liga (clicar de novo desliga). */
 export function filtroDoCartao(f: FiltrosLista, c: Cartao): FiltrosLista {
   const ativo = cartaoAtivo(f) === c
-  if (c === 'atendimentos_no_mes') return { ...f, status: 'todos', com_atendimento_no_mes: !ativo }
+  if (c === 'atendimentos') return { ...f, status: 'todos', com_atendimento_no_mes: false, mostrar: ativo ? 'todas' : 'acionada' }
   const status: FiltroStatus = c === 'ativas' ? 'ativa' : c
   return { ...f, status: ativo ? 'todos' : status, com_atendimento_no_mes: false }
 }
 export function cartaoAtivo(f: FiltrosLista): Cartao | null {
-  if (f.com_atendimento_no_mes) return 'atendimentos_no_mes'
+  if (f.mostrar === 'acionada' && f.status === 'todos' && !f.com_atendimento_no_mes) return 'atendimentos'
   if (f.status === 'ativa') return 'ativas'
   if (f.status === 'vence_30d' || f.status === 'sem_prazo') return f.status
   return null

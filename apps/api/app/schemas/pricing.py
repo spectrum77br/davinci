@@ -252,8 +252,14 @@ class PricingProductPatch(BaseModel):
     # null = sem vínculo gravado (volta a valer o código no nome).
     certificacao_id: UUID | None = None
     # Coluna "Garantia (meses)" (06/11/2026): 0 a 120 (0 = sem garantia);
-    # null apaga o prazo.
+    # null apaga o prazo. Produto cujo certificado tem garantia: grava no
+    # CERTIFICADO e vale para todos os produtos dele (null aí = 422
+    # garantia_do_certificado: apaga-se na Certificações).
     garantia_meses: int | None = Field(None, ge=0, le=120)
+    # Coluna Validade (06/11/2026, "deixe a opção de editar na tabela de
+    # preços"): o Fim do certificado do produto — vale para todos os produtos
+    # dele. null apaga a data. Produto sem certificado: 422 sem_certificado.
+    certificado_fim: date | None = None
 
     @field_validator("prioridade_estoque")
     @classmethod
@@ -271,6 +277,9 @@ class CertificacaoDoProdutoOut(BaseModel):
     certificado: str | None = None  # anatel / inmetro / isento
     numero: str | None = None
     fim: date | None = None  # validade (coluna Fim da Certificações)
+    # Garantia (meses) do certificado (06/11/2026). Com valor, a coluna
+    # Garantia (meses) do produto vem dele; None = o produto tem a dele.
+    garantia_meses: int | None = None
 
 
 class PricingProductOut(PricingProductBase):

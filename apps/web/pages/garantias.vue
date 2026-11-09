@@ -3,7 +3,7 @@
 // Documento "Painel de Garantia — Uranyx (DaVinci)", tela do §4.1:
 // [+ Nova garantia], busca (Nome / CPF / NF / Pedido), Status, Período, os 4
 // indicadores (06/11/2026: Ativas · Vence em 30 dias · Sem prazo cadastrado ·
-// Atendimentos no mês — clicar filtra) e a tabela Nome | Pedido | Plataforma |
+// Atendimentos — clicar filtra) e a tabela Nome | Pedido | Plataforma |
 // Loja | Produto | Entrega | Garantia | Prazo de garantia | Status do pedido |
 // Atendimento. Clicar na linha abre o detalhe (§4.2).
 // Permissões (§6): a página pede "Consultar" (garantias.view); "Cadastrar"
@@ -381,7 +381,11 @@ watch(mostrar, () => {
 
 const ativo = computed(() => cartaoAtivo(filtros))
 function clicarCartao(c: Cartao) {
-  Object.assign(filtros, filtroDoCartao(filtros, c))
+  const novo = filtroDoCartao(filtros, c)
+  // O "Mostrar" tem o select dele (a ref `mostrar`): o cartão Atendimentos
+  // troca por ele, e o watch relê a lista.
+  if (novo.mostrar && novo.mostrar !== mostrar.value) mostrar.value = novo.mostrar
+  Object.assign(filtros, { ...novo, mostrar: filtros.mostrar })
 }
 // Os filtros que a aba mostra: o Resumo só tem o período (o Status saiu em
 // 06/11/2026); a Garantia, também o status, a busca e os cartões.
@@ -602,7 +606,7 @@ const STATUS_CARTAO: Record<Cartao, keyof Indicadores> = {
   ativas: 'ativas',
   vence_30d: 'vence_30d',
   sem_prazo: 'sem_prazo',
-  atendimentos_no_mes: 'atendimentos_no_mes',
+  atendimentos: 'acionadas',
 }
 // O número em âmbar: o que pede ação (vence logo; produto sem prazo).
 const CARTAO_ALERTA: Cartao[] = ['vence_30d', 'sem_prazo']
