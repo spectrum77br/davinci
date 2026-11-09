@@ -282,8 +282,21 @@ async def sync_all_run(
                 # tem de ir a zero, e o webhook do Bling não avisa de produto
                 # apagado (09/11/2026: 1.353 anúncios de excluídos com 10+
                 # ficavam fora da varredura com o número antigo).
+                # Também quem tem anúncio zerado por exclusão: se o SKU voltou
+                # a valer por fora (refresh, importador), o anúncio recebe o
+                # estoque de volta em vez de ficar em 0.
+                zerado_por_exclusao = (
+                    select(ProductLink.id)
+                    .where(
+                        ProductLink.product_id == Product.id,
+                        ProductLink.last_error.like("sku_excluido%"),
+                    )
+                    .exists()
+                )
                 baixo = or_(
-                    Product.stock < SYNC_ALL_LOW_STOCK_THRESHOLD, Product.situacao == "E"
+                    Product.stock < SYNC_ALL_LOW_STOCK_THRESHOLD,
+                    Product.situacao == "E",
+                    zerado_por_exclusao,
                 )
                 prefixos_familia = _prefixos_familia()
                 if prefixos_familia:

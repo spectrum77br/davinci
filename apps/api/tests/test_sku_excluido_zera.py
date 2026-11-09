@@ -29,6 +29,7 @@ from app.models import (
     BackgroundJobStatus,
     BackgroundJobType,
     IntegrationPlatform,
+    LinkSyncStatus,
     Product,
     ProductLink,
     User,
@@ -180,6 +181,8 @@ class _Session:
             return _Rows([lk for lk in self.h.links if lk.product_id == product_id])
         if "lower_1" in params:  # outro produto ativo com o mesmo SKU?
             return _Rows(self.h.outro_ativo)
+        if params.get("platform_1") == IntegrationPlatform.BLING:  # conta do Bling
+            return _Rows(self.h.conta_bling)
         return _Rows([])
 
     def add(self, row):
@@ -221,6 +224,7 @@ class _H:
     def __init__(self, monkeypatch):
         self.products, self.links, self.integrations, self.logs = {}, [], {}, []
         self.outro_ativo: list = []
+        self.conta_bling: list = []
         self.smart: dict | Exception = {}
         self.bling, self.loja = _Bling(self), _Loja()
         self.session = _Session(self)
@@ -301,6 +305,8 @@ async def test_apagado_no_bling_zera_todos_os_anuncios(h, mode):
     )
     assert p.situacao == "E" and p.stock == 0
     assert all(lk.stock == 0 and lk.last_sync_status.value == "ok" for lk in lojas)
+    # A marca faz a varredura voltar no anúncio se o SKU reviver por fora.
+    assert all(lk.last_error.startswith("sku_excluido:") for lk in lojas)
     bling = next(lk for lk in h.links if lk.platform == IntegrationPlatform.BLING)
     assert bling.last_error.startswith("sku_excluido: apagado no Bling")
 
@@ -356,13 +362,63 @@ async def test_recriado_com_o_mesmo_sku_publica_o_novo(h, mode):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["sequential", "parallel"])
-async def test_recriado_mas_o_sku_ja_e_de_outro_produto_segue_zerado(h, mode):
-    p, _ = h.produto(situacao="E", stock=0)
+@pytest.mark.parametrize("situacao", ["E", "A"])
+async def test_recriado_mas_o_sku_ja_e_de_outro_produto_segue_zerado(h, mode, situacao):
+    """A cópia velha não é apontada para o id do outro produto (seriam dois
+    produtos com um id só): fica excluída e pede troca de vínculo."""
+    p, _ = h.produto(situacao=situacao, stock=8)
     h.outro_ativo = [uuid4()]
     h.smart = {"stock": 6, "raw": {"id": 99}, "found_via": "sku_search", "bling_product_id": 99}
-    await h.run(mode, force=True)
-    assert p.situacao == "E"
+    await h.run(mode)
+    assert p.situacao == "E" and p.bling_product_id is None
+    bling = next(lk for lk in h.links if lk.platform == IntegrationPlatform.BLING)
+    assert bling.external_id == "1"
+    assert "outro produto ativo" in bling.last_error
     assert h.loja.calls == [(IntegrationPlatform.ML, 0, True)]
+
+
+def _conta_bling():
+    return SimpleNamespace(
+        id=uuid4(), platform=IntegrationPlatform.BLING, archived_at=None, vacation_mode=False
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sequential", "parallel"])
+async def test_sem_vinculo_reconfere_no_bling_e_zera(h, mode):
+    p, (ml,) = h.produto(situacao="E", stock=12, bling=False)
+    p.bling_product_id = 55
+    h.conta_bling = [_conta_bling()]
+    h.smart = {"stock": 0, "raw": {}, "found_via": "excluido", "excluido": True}
+    await h.run(mode)
+    assert h.loja.calls == [(IntegrationPlatform.ML, 0, True)]
+    assert p.stock == 0 and ml.stock == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sequential", "parallel"])
+async def test_sem_vinculo_recriado_no_bling_volta_a_vender(h, mode):
+    """SKU recriado no Bling com id novo: o 'E' sem vínculo não fica zerado
+    para sempre — volta a 'A' e publica o saldo do novo."""
+    p, _ = h.produto(situacao="E", stock=0, bling=False)
+    p.bling_product_id = 55
+    h.conta_bling = [_conta_bling()]
+    h.smart = {"stock": 6, "raw": {"id": 99}, "found_via": "sku_search", "bling_product_id": 99}
+    await h.run(mode)
+    assert p.situacao == "A" and p.bling_product_id == 99 and p.stock == 6
+    assert h.loja.calls == [(IntegrationPlatform.ML, 6, False)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["sequential", "parallel"])
+async def test_sem_vinculo_com_bling_fora_nao_zera(h, mode):
+    p, (ml,) = h.produto(situacao="E", stock=12, bling=False)
+    p.bling_product_id = 55
+    h.conta_bling = [_conta_bling()]
+    h.smart = RuntimeError("Bling fora")
+    await h.run(mode, force=True)
+    assert h.loja.calls == []
+    assert ml.stock == 30
 
 
 @pytest.mark.asyncio
@@ -461,8 +517,8 @@ async def _reconciliar(db, user, cliente, monkeypatch):
     job = BackgroundJob(type=BackgroundJobType.SYNC_ALL, created_by=user.id)
     db.add(job)
     await db.commit()
-    zerar = AsyncMock(return_value=1)
-    monkeypatch.setattr(refresh, "_enfileirar_zeragem", zerar)
+    zerar = AsyncMock(side_effect=lambda _s, produtos, _u, _t: len(produtos))
+    monkeypatch.setattr(refresh, "_enfileirar_envio", zerar)
     monkeypatch.setattr(refresh, "_RECONCILE_SLEEP", 0)
     summary = {"reconciled_excluido": 0, "reconciled_healed": 0}
     await refresh._reconcile_excluidos(
@@ -478,7 +534,8 @@ async def test_refresh_que_rebaixa_para_excluido_zera_na_hora(
 ):
     p, zerar, summary = await _reconciliar(db, user, _ClienteReconcilia(None), monkeypatch)
     assert p.situacao == "E"
-    assert [x.id for x in zerar.await_args.args[1]] == [p.id]
+    _s, produtos, _u, trigger = zerar.await_args_list[0].args
+    assert ([x[0] for x in produtos], trigger) == ([p.id], "sku_excluido")
     assert summary["zeragem_enfileirada"] == 1
 
 
@@ -488,15 +545,73 @@ async def test_refresh_com_erro_na_busca_nao_rebaixa(db: AsyncSession, user: Use
         db, user, _ClienteReconcilia(httpx.ConnectTimeout("429")), monkeypatch
     )
     assert p.situacao == "A"
-    assert zerar.await_args.args[1] == []
+    assert zerar.await_args_list[0].args[1] == []
+
+
+class _ClienteLixeira(_ClienteReconcilia):
+    async def get_product(self, bpid):
+        return {"id": bpid, "situacao": "E"}
 
 
 @pytest.mark.asyncio
-async def test_zeragem_enfileira_o_envio_do_produto(db: AsyncSession, user: User, monkeypatch):
-    p = _prod(user, f"zz-q-{uuid.uuid4().hex[:6]}", "E", 0, bpid=5)
+async def test_refresh_lixeira_com_ativo_do_mesmo_sku_cura(
+    db: AsyncSession, user: User, monkeypatch
+):
+    p, _, summary = await _reconciliar(db, user, _ClienteLixeira({"id": 777001}), monkeypatch)
+    assert p.situacao == "A" and p.bling_product_id == 777001
+    assert summary["reconciled_healed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_refresh_nao_aponta_para_id_de_outro_produto(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """O ativo do mesmo SKU já é outro produto do DaVinci: este é a cópia
+    velha e vira 'E' (apontar criaria dois produtos com um id só)."""
+    outro = _prod(user, f"zz-o-{uuid.uuid4().hex[:6]}", "A", 5, bpid=888001)
+    db.add(outro)
+    p = _prod(user, f"zz-c-{uuid.uuid4().hex[:6]}", "A", 15, bpid=888002)
     db.add(p)
-    await db.flush()
-    from app.models import Company, Integration, LinkSyncStatus, Marketplace, Store, StoreStatus
+    job = BackgroundJob(type=BackgroundJobType.SYNC_ALL, created_by=user.id)
+    db.add(job)
+    await db.commit()
+    monkeypatch.setattr(refresh, "_enfileirar_envio", AsyncMock(return_value=0))
+    monkeypatch.setattr(refresh, "_RECONCILE_SLEEP", 0)
+    summary = {"reconciled_excluido": 0, "reconciled_healed": 0}
+    await refresh._reconcile_excluidos(
+        db,
+        [_ClienteReconcilia({"id": 888001})],
+        {888001: outro, 888002: p},
+        {888001},
+        job,
+        summary,
+    )
+    await db.refresh(p)
+    assert p.situacao == "E" and p.bling_product_id == 888002
+
+
+@pytest.mark.asyncio
+async def test_refresh_que_revive_republica(db: AsyncSession, user: User, monkeypatch):
+    p = _prod(user, f"zz-v-{uuid.uuid4().hex[:6]}", "E", 15, bpid=999001)
+    db.add(p)
+    job = BackgroundJob(type=BackgroundJobType.SYNC_ALL, created_by=user.id)
+    db.add(job)
+    await db.commit()
+    envio = AsyncMock(side_effect=lambda _s, produtos, _u, _t: len(produtos))
+    monkeypatch.setattr(refresh, "_enfileirar_envio", envio)
+    summary = {"reconciled_excluido": 0, "reconciled_healed": 0}
+    await refresh._reconcile_excluidos(
+        db, [_ClienteReconcilia(None)], {999001: p}, {999001}, job, summary
+    )
+    await db.refresh(p)
+    assert p.situacao == "A"
+    _s, produtos, _u, trigger = envio.await_args_list[1].args
+    assert ([x[0] for x in produtos], trigger) == ([p.id], "sku_voltou")
+    assert summary["volta_enfileirada"] == 1
+
+
+async def _conta_ml(db: AsyncSession, user: User):
+    from app.models import Company, Integration, Marketplace, Store, StoreStatus
     from app.security.cipher import encrypt_json
 
     company = Company(
@@ -519,6 +634,15 @@ async def test_zeragem_enfileira_o_envio_do_produto(db: AsyncSession, user: User
     )
     db.add(integ)
     await db.flush()
+    return store, integ
+
+
+@pytest.mark.asyncio
+async def test_zeragem_enfileira_o_envio_do_produto(db: AsyncSession, user: User, monkeypatch):
+    p = _prod(user, f"zz-q-{uuid.uuid4().hex[:6]}", "E", 0, bpid=5)
+    db.add(p)
+    await db.flush()
+    store, integ = await _conta_ml(db, user)
     vivo = ProductLink(
         user_id=user.id,
         product_id=p.id,
@@ -546,7 +670,8 @@ async def test_zeragem_enfileira_o_envio_do_produto(db: AsyncSession, user: User
     import app.worker_pool as wp
 
     monkeypatch.setattr(wp, "get_arq_sync_pool", AsyncMock(return_value=pool))
-    assert await refresh._enfileirar_zeragem(db, [p], user.id) == 1
+    alvo = [(p.id, p.user_id, p.sku)]
+    assert await refresh._enfileirar_envio(db, alvo, user.id, "sku_excluido") == 1
     nome, job_id, uid, pid, link_ids = pool.enqueue_job.await_args.args
     assert (nome, uid, pid, link_ids) == (
         "sync_product_run",
@@ -558,3 +683,63 @@ async def test_zeragem_enfileira_o_envio_do_produto(db: AsyncSession, user: User
         await db.execute(select(BackgroundJob).where(BackgroundJob.id == uuid.UUID(job_id)))
     ).scalar_one()
     assert job.type == BackgroundJobType.SYNC_PRODUCT and job.payload["trigger"] == "sku_excluido"
+
+    # Falha ao enfileirar um não derruba o resto (valores simples, sem ORM
+    # expirado depois do rollback — revisão de 09/11/2026).
+    pool.enqueue_job = AsyncMock(
+        side_effect=[RuntimeError("redis fora"), SimpleNamespace(job_id="arq-2")]
+    )
+    assert await refresh._enfileirar_envio(db, alvo + alvo, user.id, "sku_excluido") == 1
+
+
+@pytest.mark.asyncio
+async def test_varredura_volta_no_anuncio_zerado_de_sku_que_reviveu(
+    db: AsyncSession, user: User, monkeypatch
+):
+    """O SKU voltou a 'A' por fora (refresh, importador) com estoque alto: o
+    anúncio zerado por exclusão entra na varredura e recebe o estoque."""
+    from app import worker
+
+    sfx = uuid.uuid4().hex[:6]
+    revivido = _prod(user, f"zz-rv-{sfx}", "A", 40)
+    alto = _prod(user, f"zz-al-{sfx}", "A", 40)
+    db.add_all([revivido, alto])
+    await db.flush()
+    store, integ = await _conta_ml(db, user)
+    for prod, erro in ((revivido, "sku_excluido: SKU excluído: anúncio com 0"), (alto, None)):
+        db.add(
+            ProductLink(
+                user_id=user.id,
+                product_id=prod.id,
+                integration_id=integ.id,
+                store_id=store.id,
+                platform=IntegrationPlatform.ML,
+                external_id=f"MLB-{prod.sku}",
+                stock=0,
+                last_sync_status=LinkSyncStatus.OK,
+                last_error=erro,
+            )
+        )
+    job = BackgroundJob(
+        type=BackgroundJobType.SYNC_ALL,
+        status=BackgroundJobStatus.PENDING,
+        created_by=user.id,
+        payload={"trigger": "teste"},
+    )
+    db.add(job)
+    await db.commit()
+
+    @asynccontextmanager
+    async def scope():
+        yield db
+
+    vistos: list = []
+
+    async def capturar(self, pids, *, only_link_ids=None, **kw):
+        vistos.extend(pids)
+        return module.OrchestratorReport()
+
+    monkeypatch.setattr(worker, "session_scope", scope)
+    monkeypatch.setattr(module.SyncOrchestrator, "run_with_retry", capturar)
+    await worker.sync_all_run({}, str(job.id), str(user.id), None)
+    assert revivido.id in vistos and alto.id not in vistos

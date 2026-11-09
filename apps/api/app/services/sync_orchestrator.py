@@ -110,12 +110,6 @@ def _confirmed_bling_stock(result: SyncResult) -> bool:
     )
 
 
-def _excluido_sem_bling(product: Product, bling_links: list) -> bool:
-    """Produto 'E' sem vínculo com o Bling: não há o que reconferir, o 'E' do
-    DaVinci basta para o zero passar pela trava do ML/Magalu (09/11/2026)."""
-    return not bling_links and product.situacao == "E"
-
-
 class SyncOrchestrator:
     def __init__(
         self,
@@ -149,6 +143,8 @@ class SyncOrchestrator:
         self._familia_cache: dict[str, int] = {}
         self._integration_cache: dict[UUID, Integration] = {}
         self._store_cache: dict[UUID, Store] = {}
+        # A conta do Bling para reconferir 'E' sem vínculo (lida uma vez).
+        self._integ_bling: list[Integration] | None = None
         # SSH delta #1 — populated by run_parallel after each pass so
         # run_with_retry knows which products to re-sync.
         self._last_round_retryable_ids: list[UUID] = []
@@ -231,30 +227,50 @@ class SyncOrchestrator:
                 error_code="invalid_external_id",
                 error_detail=f"external_id={link.external_id!r}",
             )
+        return await self._ler_bling(client, product, link, bling_product_id)
+
+    async def _ler_bling(
+        self,
+        client: BlingClient,
+        product: Product,
+        link: ProductLink | None,
+        bling_product_id: int,
+    ) -> SyncResult:
+        """Lê o saldo no Bling e espelha no produto (e no vínculo Bling, se
+        houver — sem vínculo é a reconferência de um 'E', ver
+        `_excluido_sem_vinculo`)."""
         try:
             smart = await client.get_product_stock_smart(
                 bling_product_id, sku=product.sku
             )
-            raw = smart.get("raw") or {}
-            # If product was found via SKU search (deleted/inactive in Bling),
-            # update the link's external_id to point to the active product.
-            if smart.get("found_via") in ("sku_search", "sku_search_inactive"):
-                new_bling_id = smart.get("bling_product_id")
-                if new_bling_id:
-                    link.external_id = str(new_bling_id)
-                    product.bling_product_id = int(new_bling_id)
         except Exception as e:  # noqa: BLE001
             return SyncResult(
                 status=SyncStatus.RETRYABLE,
                 error_code="bling_get_product_failed",
                 error_detail=str(e)[:500],
             )
+        raw = smart.get("raw") or {}
+        # If product was found via SKU search (deleted/inactive in Bling),
+        # update the link's external_id to point to the active product.
+        if smart.get("found_via") in ("sku_search", "sku_search_inactive"):
+            if await self._sku_em_outro_ativo(product):
+                # O SKU vivo já é de OUTRO produto do DaVinci: apontar este para
+                # o mesmo id do Bling criaria dois produtos com um id só. Este
+                # é a cópia velha — segue excluído, e o anúncio pede troca de
+                # vínculo (revisão de 09/11/2026).
+                smart = {"stock": 0, "raw": {}, "excluido": True, "duplicado": True}
+            else:
+                new_bling_id = smart.get("bling_product_id")
+                if new_bling_id:
+                    if link is not None:
+                        link.external_id = str(new_bling_id)
+                    product.bling_product_id = int(new_bling_id)
         if smart.get("excluido"):
             return self._marcar_excluido(product, link, smart)
-        await self._reviver_se_voltou(product, smart)
+        self._reviver_se_voltou(product, smart)
         parsed = parse_bling_product(raw) if raw else {}
         new_stock = smart.get("stock") if smart.get("stock") is not None else parsed.get("stock")
-        qty_before = link.stock
+        qty_before = link.stock if link is not None else product.stock
         if new_stock is None:
             return SyncResult(
                 status=SyncStatus.SKIPPED,
@@ -266,7 +282,8 @@ class SyncOrchestrator:
         # reject negative quantities, so a negative bling stock counts as 0
         # for both the local cache and the outbound push.
         clamped = max(0, int(new_stock))
-        link.stock = clamped
+        if link is not None:
+            link.stock = clamped
         if clamped != (product.stock or 0):
             # O total da família guardado nesta passada ficou velho: o irmão
             # seguinte recalcula (pesa em família de 4 lotes, como a003).
@@ -321,13 +338,15 @@ class SyncOrchestrator:
         if chave is not None:
             self._familia_cache.pop(chave, None)
 
-    def _marcar_excluido(self, product: Product, link: ProductLink, smart: dict) -> SyncResult:
+    def _marcar_excluido(
+        self, product: Product, link: ProductLink | None, smart: dict
+    ) -> SyncResult:
         """O SKU saiu do Bling — apagado (404) ou na lixeira — e não há produto
         ativo com o mesmo código: o produto vira 'E' e os anúncios publicam 0
         (`saldo_publicavel`), em vez de ficarem para sempre com o número antigo
         (09/11/2026: 180 SKUs apagados com 274 anúncios parados desde maio).
         O espelho guarda o saldo que o Bling ainda informa (0 se apagado)."""
-        qty_before = link.stock
+        qty_before = link.stock if link is not None else product.stock
         saldo = max(0, int(smart.get("stock") or 0))
         if product.situacao != "E":
             logger.info(
@@ -340,40 +359,45 @@ class SyncOrchestrator:
             product.situacao = "E"
             self._esquecer_familia(product)
         product.stock = saldo
-        link.stock = saldo
+        if link is not None:
+            link.stock = saldo
+        if smart.get("duplicado"):
+            motivo = "o SKU está em outro produto ativo do DaVinci, troque o vínculo"
+        elif smart.get("raw"):
+            motivo = "na lixeira do Bling"
+        else:
+            motivo = "apagado no Bling"
         return SyncResult(
             status=SyncStatus.OK,
             qty_before=qty_before,
             qty_after=saldo,
             error_code="sku_excluido",
-            error_detail=(
-                "apagado no Bling" if not smart.get("raw") else "na lixeira do Bling"
-            )
-            + ": os anúncios publicam 0",
+            error_detail=f"{motivo}: os anúncios publicam 0",
             payload={"source": "bling_refresh", "excluido_no_bling": True},
         )
 
-    async def _reviver_se_voltou(self, product: Product, smart: dict) -> None:
+    async def _sku_em_outro_ativo(self, product: Product) -> bool:
+        outro = (
+            await self.session.execute(
+                select(Product.id)
+                .where(
+                    func.lower(Product.sku) == (product.sku or "").strip().lower(),
+                    Product.situacao == "A",
+                    Product.id != product.id,
+                )
+                .limit(1)
+            )
+        ).scalars().all()
+        return bool(outro)
+
+    def _reviver_se_voltou(self, product: Product, smart: dict) -> None:
         """Produto 'E' aqui que o Bling diz estar vivo de novo: volta a publicar
-        estoque. Achado por SKU num produto ativo → 'A' (salvo se outro produto
-        ativo do DaVinci já tem esse SKU: aí o anúncio certo é o dele e este
-        segue excluído). Lido direto como ativo/inativo → espelha."""
+        estoque. Achado por SKU num produto ativo → 'A' (o caso do SKU em outro
+        produto ativo do DaVinci já virou excluído em `_ler_bling`). Lido
+        direto como ativo/inativo → espelha."""
         if product.situacao != "E":
             return
         if smart.get("found_via") in ("sku_search", "sku_search_inactive"):
-            outro = (
-                await self.session.execute(
-                    select(Product.id)
-                    .where(
-                        func.lower(Product.sku) == (product.sku or "").strip().lower(),
-                        Product.situacao == "A",
-                        Product.id != product.id,
-                    )
-                    .limit(1)
-                )
-            ).scalars().all()
-            if outro:
-                return
             nova = "A"
         else:
             nova = ((smart.get("raw") or {}).get("situacao") or "").upper()[:1]
@@ -384,6 +408,43 @@ class SyncOrchestrator:
         )
         product.situacao = nova
         self._esquecer_familia(product)
+
+    async def _integracao_bling(self) -> Integration | None:
+        if self._integ_bling is None:
+            self._integ_bling = (
+                await self.session.execute(
+                    select(Integration)
+                    .where(
+                        Integration.platform == IntegrationPlatform.BLING,
+                        Integration.archived_at.is_(None),
+                    )
+                    .order_by(Integration.created_at)
+                    .limit(1)
+                )
+            ).scalars().all()
+        return self._integ_bling[0] if self._integ_bling else None
+
+    async def _excluido_sem_vinculo(self, product: Product) -> tuple[bool, bool]:
+        """(falhou, zero_confirmado) de um produto SEM vínculo Bling nesta
+        passada. Só o 'E' muda algo: antes de zerar, confere no Bling pelo id
+        do produto (SKU recriado no Bling com id novo volta a vender — revisão
+        de 09/11/2026). Sem id ou sem conta do Bling, vale o 'E' do DaVinci;
+        Bling fora do ar não zera nem publica."""
+        if product.situacao != "E":
+            return False, False
+        integ = await self._integracao_bling() if product.bling_product_id else None
+        client = await self._client(integ) if integ is not None else None
+        if not isinstance(client, BlingClient):
+            return False, True
+        r = await self._ler_bling(client, product, None, int(product.bling_product_id))
+        logger.info(
+            "sku_excluido_reconferido",
+            product_id=str(product.id),
+            sku=product.sku,
+            status=r.status.value,
+            situacao=product.situacao,
+        )
+        return r.status in (SyncStatus.FATAL, SyncStatus.RETRYABLE), _confirmed_bling_stock(r)
 
     async def _tratar_sku_trocado(
         self,
@@ -409,7 +470,8 @@ class SyncOrchestrator:
                 self.session, alvo, cache=self._familia_cache
             )
             novo = await client.update_stock(
-                link, qty_novo, bling_store_id=bling_store_id, force=self.force,
+                link, qty_novo, bling_store_id=bling_store_id,
+                force=self.force or (qty_novo == 0 and alvo.situacao == "E"),
                 sku_esperado=alvo.sku,
             )
             logger.info(
@@ -583,6 +645,17 @@ class SyncOrchestrator:
                             ),
                             **extra,
                         )
+                        if (
+                            product.situacao == "E"
+                            and qty == 0
+                            and result.status == SyncStatus.OK
+                            and not result.error_code
+                        ):
+                            # Marca do zero por exclusão: se o SKU voltar a
+                            # valer por fora (refresh, importador), a varredura
+                            # das 03:00 volta neste anúncio e republica.
+                            result.error_code = "sku_excluido"
+                            result.error_detail = "SKU excluído: anúncio com 0"
                         if result.error_code == "sku_trocado":
                             # The replacement SKU can have a different quantity.
                             # Its result records the quantity actually requested.
@@ -813,6 +886,8 @@ class SyncOrchestrator:
                 processed += 1
                 if processed % HEARTBEAT_EVERY == 0:
                     await self._heartbeat(processed)
+            if not bling_links and other_links:
+                bling_failed, bling_stock_confirmed = await self._excluido_sem_vinculo(product)
             for link in other_links:
                 await self._process_link(
                     product, link,
@@ -821,8 +896,7 @@ class SyncOrchestrator:
                         and bool(bling_links)
                         and not bling_stock_confirmed
                     ),
-                    bling_stock_confirmed=bling_stock_confirmed
-                    or _excluido_sem_bling(product, bling_links),
+                    bling_stock_confirmed=bling_stock_confirmed,
                 )
                 processed += 1
                 if processed % HEARTBEAT_EVERY == 0:
@@ -933,6 +1007,11 @@ class SyncOrchestrator:
                                 SyncStatus.RETRYABLE,
                             ):
                                 bling_failed = True
+                        if not bling_links and other_links:
+                            (
+                                bling_failed,
+                                bling_stock_confirmed,
+                            ) = await sub_orch._excluido_sem_vinculo(p)
                         for link in other_links:
                             await sub_orch._process_link(
                                 p, link,
@@ -943,8 +1022,7 @@ class SyncOrchestrator:
                                     and bool(bling_links)
                                     and not bling_stock_confirmed
                                 ),
-                                bling_stock_confirmed=bling_stock_confirmed
-                                or _excluido_sem_bling(p, bling_links),
+                                bling_stock_confirmed=bling_stock_confirmed,
                             )
                         # Advance the shared job's processed counter once per
                         # product (relative bump, atomic across tasks) and let

@@ -145,7 +145,7 @@ async def _reconcile_excluidos(
         if bpid not in seen_bpids and (p.situacao in ("A", None))
     ]
     summary["reconcile_candidates"] = len(candidates)
-    if not candidates:
+    if not candidates and not resurrected:
         return
 
     demoted_skus: list[str] = []
@@ -181,18 +181,12 @@ async def _reconcile_excluidos(
                 resolved = True  # rede/etc → não rebaixa
                 break
 
-        if resolved:
-            if bling_excluido:
-                p.situacao = "E"
-                summary["reconciled_excluido"] += 1
-                demoted.append(p)
-                if len(demoted_skus) < 200:
-                    demoted_skus.append(p.sku)
-        elif deleted_404:
-            # Sumiu por id em todas as integrações. Pode ter sido recriado
-            # sob id novo com o mesmo SKU — nesse caso é cura, não exclusão.
-            # Busca estrita e pelo código exato: um 429 na busca virava "não
-            # existe" e rebaixava produto vivo — e 'E' agora zera o anúncio.
+        if bling_excluido or (deleted_404 and not resolved):
+            # Apagado (404 em todas as integrações) ou na lixeira. Pode ter
+            # sido recriado sob id novo com o mesmo SKU — nesse caso é cura,
+            # não exclusão. Busca estrita e pelo código exato: um 429 na busca
+            # virava "não existe" e rebaixava produto vivo — e 'E' agora zera
+            # o anúncio (revisão de 09/11/2026).
             active = None
             incerto = False
             for client in clients:
@@ -207,10 +201,16 @@ async def _reconcile_excluidos(
                     break
             if incerto:
                 pass  # não sei → não mexe; a próxima execução confere de novo
-            elif active and active.get("id"):
+            elif (
+                active
+                and active.get("id")
+                and product_by_bpid.get(int(active["id"]), p) is p
+            ):
                 p.bling_product_id = int(active["id"])
                 summary["reconciled_healed"] += 1
             else:
+                # Sem ativo — ou o ativo já é OUTRO produto do DaVinci (cópia
+                # velha do mesmo SKU: apontar para o mesmo id criaria dois).
                 p.situacao = "E"
                 summary["reconciled_excluido"] += 1
                 demoted.append(p)
@@ -224,7 +224,13 @@ async def _reconcile_excluidos(
 
     summary["excluido_skus"] = demoted_skus
     await session.commit()
-    summary["zeragem_enfileirada"] = await _enfileirar_zeragem(session, demoted, job.created_by)
+    # Os dois lados mexem no anúncio: quem virou 'E' vai a zero, quem voltou de
+    # 'E' recebe o estoque de volta (senão ficava em 0 até alguém vender).
+    quem = job.created_by
+    zerar = [(p.id, p.user_id, p.sku) for p in demoted]
+    voltar = [(p.id, p.user_id, p.sku) for p in resurrected]
+    summary["zeragem_enfileirada"] = await _enfileirar_envio(session, zerar, quem, "sku_excluido")
+    summary["volta_enfileirada"] = await _enfileirar_envio(session, voltar, quem, "sku_voltou")
     logger.info(
         "reconcile_excluidos_done",
         candidates=len(candidates),
@@ -235,24 +241,29 @@ async def _reconcile_excluidos(
     )
 
 
-async def _enfileirar_zeragem(
-    session: AsyncSession, produtos: list[Product], user_id: UUID
+async def _enfileirar_envio(
+    session: AsyncSession,
+    produtos: list[tuple[UUID, UUID, str]],
+    user_id: UUID,
+    trigger: str,
 ) -> int:
-    """Produto que acabou de virar 'E': os anúncios vão a zero agora, sem
-    esperar a varredura da madrugada (09/11/2026, "se tá excluído, zera o
-    estoque"). Mesmo caminho do webhook: o envio relê o Bling antes de zerar.
-    Falha ao enfileirar não derruba o refresh — a varredura pega depois."""
-    from app.worker_pool import get_arq_sync_pool  # tardio: só quando há o que zerar
+    """Envia agora o estoque de quem mudou de situação — virou 'E' (zera) ou
+    voltou de 'E' (republica) —, sem esperar a varredura da madrugada
+    (09/11/2026, "se tá excluído, zera o estoque"). Mesmo caminho do webhook:
+    o envio relê o Bling antes. `produtos` = (id, dono, sku) em valores
+    simples: depois de um rollback aqui os objetos do ORM expiram. Falha ao
+    enfileirar não derruba o refresh — a varredura pega depois."""
+    from app.worker_pool import get_arq_sync_pool  # tardio: só quando há o que enviar
 
     enfileirados = 0
-    for p in produtos:
+    for pid, dono, sku in produtos:
         try:
             link_ids = [
                 str(i)
                 for i in (
                     await session.execute(
                         select(ProductLink.id).where(
-                            ProductLink.product_id == p.id,
+                            ProductLink.product_id == pid,
                             ProductLink.last_sync_status != LinkSyncStatus.FATAL,
                             ProductLink.morto_desde.is_(None),
                         )
@@ -267,17 +278,17 @@ async def _enfileirar_zeragem(
                 created_by=user_id,
                 total=len(link_ids),
                 payload={
-                    "trigger": "sku_excluido",
-                    "product_id": str(p.id),
+                    "trigger": trigger,
+                    "product_id": str(pid),
                     "link_ids": link_ids,
-                    "sku": p.sku,
+                    "sku": sku,
                 },
             )
             session.add(job)
             await session.flush()
             pool = await get_arq_sync_pool()
             arq = await pool.enqueue_job(
-                "sync_product_run", str(job.id), str(p.user_id), str(p.id), link_ids
+                "sync_product_run", str(job.id), str(dono), str(pid), link_ids
             )
             if arq is not None:
                 job.arq_job_id = arq.job_id
@@ -285,7 +296,7 @@ async def _enfileirar_zeragem(
             enfileirados += 1
         except Exception as e:  # noqa: BLE001
             await session.rollback()
-            logger.warning("sku_excluido_zeragem_nao_enfileirada", sku=p.sku, err=str(e)[:200])
+            logger.warning("envio_nao_enfileirado", trigger=trigger, sku=sku, err=str(e)[:200])
     return enfileirados
 
 
