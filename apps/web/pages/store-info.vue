@@ -851,6 +851,24 @@ watch(canEdit, (allowed) => {
 async function copyText(text: string) {
   await navigator.clipboard.writeText(text)
 }
+
+const copiedAddress = ref<string | null>(null)
+async function copyAddress(row: StoreInfo, field: 'shipping_address' | 'return_address') {
+  const address = row[field]
+  if (!address) return
+  const key = `${row.id}:${field}`
+  const copyError = 'Não foi possível copiar o endereço. Verifique a permissão de cópia do navegador e tente novamente.'
+  try {
+    // Copy the stored value, including line breaks, rather than the clipped cell.
+    await copyText(address)
+    if (error.value === copyError) error.value = null
+    copiedAddress.value = key
+    setTimeout(() => { if (copiedAddress.value === key) copiedAddress.value = null }, 1500)
+  } catch {
+    copiedAddress.value = null
+    error.value = copyError
+  }
+}
 </script>
 
 <template>
@@ -929,8 +947,22 @@ async function copyText(text: string) {
                 <div><dt>Etiqueta</dt><dd>{{ nfLabel(etiquetas, row.nf_etiqueta_id) }}</dd></div>
                 <div><dt>Horários da etiqueta</dt><dd>{{ row.etiqueta_horarios || 'Contínuo' }}</dd><dd v-if="row.etiqueta_sabado_horario">Sábado: {{ row.etiqueta_sabado_horario }}{{ row.etiqueta_sabado_tags ? ' · ' + row.etiqueta_sabado_tags : '' }}</dd></div>
                 <div><dt>Impressão</dt><dd>{{ nfLabel(impressoes, row.nf_impressao_id) }}</dd></div>
-                <div><dt>Endereço de envio</dt><dd class="whitespace-pre-wrap">{{ row.shipping_address || '—' }}</dd></div>
-                <div><dt>Endereço de devolução</dt><dd class="whitespace-pre-wrap">{{ row.return_address || '—' }}</dd></div>
+                <div>
+                  <dt>Endereço de envio</dt><dd class="whitespace-pre-wrap select-text">{{ row.shipping_address || '—' }}</dd>
+                  <Button v-if="row.shipping_address" size="sm" variant="outline" class="mt-1" aria-label="Copiar endereço de envio" @click.stop="copyAddress(row, 'shipping_address')">
+                    <Check v-if="copiedAddress === `${row.id}:shipping_address`" class="mr-1 h-3 w-3 text-emerald-600" />
+                    <Copy v-else class="mr-1 h-3 w-3" />
+                    {{ copiedAddress === `${row.id}:shipping_address` ? 'Copiado!' : 'Copiar endereço' }}
+                  </Button>
+                </div>
+                <div>
+                  <dt>Endereço de devolução</dt><dd class="whitespace-pre-wrap select-text">{{ row.return_address || '—' }}</dd>
+                  <Button v-if="row.return_address" size="sm" variant="outline" class="mt-1" aria-label="Copiar endereço de devolução" @click.stop="copyAddress(row, 'return_address')">
+                    <Check v-if="copiedAddress === `${row.id}:return_address`" class="mr-1 h-3 w-3 text-emerald-600" />
+                    <Copy v-else class="mr-1 h-3 w-3" />
+                    {{ copiedAddress === `${row.id}:return_address` ? 'Copiado!' : 'Copiar endereço' }}
+                  </Button>
+                </div>
                 <div><dt>Observação</dt><dd class="whitespace-pre-wrap">{{ row.observation || '—' }}</dd></div>
                 <div><dt>Integração vinculada</dt><dd>{{ integrationFor(row)?.name || (row.integration_id ? 'Vinculada' : 'Nenhuma') }}</dd></div>
                 <div><dt>Bling ID</dt><dd>{{ row.bling_store_id || '—' }}</dd></div>
@@ -1391,7 +1423,7 @@ async function copyText(text: string) {
                 </button>
               </div>
             </td>
-            <!-- shipping_address (compact: truncate + tooltip) -->
+            <!-- Full address copy is available to every reader, without opening an editor. -->
             <td
               class="border border-border px-2 py-1.5 text-xs max-w-[140px]"
               :class="{
@@ -1409,9 +1441,15 @@ async function copyText(text: string) {
                 class="w-full text-xs bg-transparent outline-none"
                 @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
               />
-              <span v-else class="block truncate" :class="{ 'text-muted-foreground': !row.shipping_address }">
-                {{ row.shipping_address || '—' }}
-              </span>
+              <div v-else class="flex items-center gap-1">
+                <span class="min-w-0 flex-1 truncate" :class="{ 'text-muted-foreground': !row.shipping_address }">
+                  {{ row.shipping_address || '—' }}
+                </span>
+                <button v-if="row.shipping_address" type="button" class="shrink-0 rounded p-1 hover:bg-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring" aria-label="Copiar endereço de envio" :title="copiedAddress === `${row.id}:shipping_address` ? 'Copiado!' : 'Copiar endereço de envio completo'" @click.stop="copyAddress(row, 'shipping_address')">
+                  <Check v-if="copiedAddress === `${row.id}:shipping_address`" class="h-3 w-3 text-emerald-600" />
+                  <Copy v-else class="h-3 w-3" />
+                </button>
+              </div>
             </td>
             <!-- return_address (compact: truncate + tooltip) -->
             <td
@@ -1431,9 +1469,15 @@ async function copyText(text: string) {
                 class="w-full text-xs bg-transparent outline-none"
                 @blur="commitEdit" @keydown.enter.prevent="commitEdit" @keydown.escape.prevent="cancelEdit"
               />
-              <span v-else class="block truncate" :class="{ 'text-muted-foreground': !row.return_address }">
-                {{ row.return_address || '—' }}
-              </span>
+              <div v-else class="flex items-center gap-1">
+                <span class="min-w-0 flex-1 truncate" :class="{ 'text-muted-foreground': !row.return_address }">
+                  {{ row.return_address || '—' }}
+                </span>
+                <button v-if="row.return_address" type="button" class="shrink-0 rounded p-1 hover:bg-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring" aria-label="Copiar endereço de devolução" :title="copiedAddress === `${row.id}:return_address` ? 'Copiado!' : 'Copiar endereço de devolução completo'" @click.stop="copyAddress(row, 'return_address')">
+                  <Check v-if="copiedAddress === `${row.id}:return_address`" class="h-3 w-3 text-emerald-600" />
+                  <Copy v-else class="h-3 w-3" />
+                </button>
+              </div>
             </td>
             <!-- observation -->
             <td

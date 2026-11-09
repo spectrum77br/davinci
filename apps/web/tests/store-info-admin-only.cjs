@@ -18,13 +18,14 @@ const store = {
   email: 'loja@example.com', phone: '11999999999', cpf_name: 'Responsável', cnpj: '11222333000100', server: 'Servidor',
   has_pricing: true, has_integration: true, integration_id: 'integration1', nf_faturador_id: 'nf1', nf_faturador_por_tipo: { celular: 'nf1', eletro: 'nf2' },
   nf_faturador_produto_id: null, nf_etiqueta_id: null, nf_impressao_id: null, etiqueta_horarios: '10:00, 15:00', etiqueta_sabado_horario: '11:00', etiqueta_sabado_tags: 'ci',
-  shipping_address: 'Endereço completo', return_address: 'Endereço de devolução', observation: 'Observação', bling_store_id: 'bling1',
+  shipping_address: 'Rua dos Ipês, 123 — bloco A, apartamento 456\nBairro Jardim das Flores, São Paulo/SP\nCEP 01234-567\nReferência: portaria lateral, entregar ao responsável pelo recebimento',
+  return_address: 'Avenida da Devolução, 9876\r\nGalpão 12, entrada B — setor de conferência\r\nBairro Industrial, Campinas/SP — CEP 13000-000', observation: 'Observação', bling_store_id: 'bling1',
   upseseller: true, duoker: false, uf_restrictions: ['AC', 'AM'], excecoes: [{ tipo: 'sku', termos: ['modelo-original'] }], commercial_team: 1,
 }
-async function mount(admin = false) {
+async function mount(admin = false, { clipboardError = null } = {}) {
   const calls = [], confirmations = [], copied = []
   const auth = Vue.reactive({ user: { role: admin ? 'admin' : 'user', permissions: { lojas_info: { view: true, edit: true, delete: true } } } })
-  let state
+  let state, vnodeTree
   const globals = {
     ref: Vue.ref, reactive: Vue.reactive, computed: Vue.computed, watch: Vue.watch, nextTick: Vue.nextTick,
     onMounted: () => {}, onBeforeUnmount: () => {}, definePageMeta: () => {},
@@ -40,7 +41,10 @@ async function mount(admin = false) {
       return { ...structuredClone(store), ...(options.body || {}) }
     } }),
     confirm: (message) => { confirmations.push(message); return true },
-    navigator: { clipboard: { writeText: async (value) => copied.push(value) } },
+    navigator: { clipboard: { writeText: async (value) => {
+      if (clipboardError) throw clipboardError
+      copied.push(value)
+    } } },
     document: { addEventListener: () => {}, removeEventListener: () => {}, getElementById: () => null },
     setTimeout: () => 1,
   }
@@ -57,14 +61,27 @@ async function mount(admin = false) {
   async function render() {
     const tmod = { exports: {} }
     new Function('require', 'module', 'exports', transpile(template.code))(requireMock, tmod, tmod.exports)
-    const component = { ...module.exports.default, setup: () => raw, render: tmod.exports.render }
+    const component = { ...module.exports.default, setup: () => raw, render(...args) {
+      vnodeTree = tmod.exports.render.apply(this, args)
+      return vnodeTree
+    } }
     const app = Vue.createSSRApp(component)
     app.component('RouteTabs', { render: () => Vue.h('nav') })
     app.component('PageHeader', { props: ['title', 'description'], setup: (props, { slots }) => () => Vue.h('header', [Vue.h('h1', props.title), Vue.h('p', props.description), slots.actions?.()]) })
     app.component('Button', { props: ['disabled', 'size', 'variant'], setup: (props, { slots }) => () => Vue.h('button', { disabled: props.disabled }, slots.default?.()) })
     return renderToString(app)
   }
-  return { state, auth, calls, confirmations, copied, render }
+  function addressButtons() {
+    const found = []
+    function visit(node) {
+      if (!node || typeof node !== 'object') return
+      if (/^Copiar endereço de (envio|devolução)$/.test(node.props?.['aria-label'] || '')) found.push(node)
+      if (Array.isArray(node.children)) node.children.forEach(visit)
+    }
+    visit(vnodeTree)
+    return found
+  }
+  return { state, auth, calls, confirmations, copied, render, addressButtons }
 }
 async function run() {
   const user = await mount(false)
@@ -102,6 +119,18 @@ async function run() {
   assert.deepEqual(user.copied, ['local-test-password', 'loja@example.com'])
   assert.equal(user.calls.filter((call) => call.options.method).length, 0, 'reading and clipboard access remain read-only')
 
+  // Copy the stored address, not the clipped cell or a normalized one-line value.
+  await s.copyAddress(row, 'shipping_address')
+  assert.equal(user.copied.at(-1), store.shipping_address, 'shipping copy preserves every character and LF')
+  assert.equal(s.copiedAddress, 'store1:shipping_address')
+  await s.copyAddress(row, 'return_address')
+  assert.equal(user.copied.at(-1), store.return_address, 'return copy preserves every character and CRLF')
+  assert.equal(s.copiedAddress, 'store1:return_address')
+  assert.equal(s.editing, null, 'read-only users do not enter the editor when copying')
+  assert.equal(user.calls.filter((call) => call.options.method).length, 0)
+  await s.startEdit(row, 'shipping_address'); await s.startEdit(row, 'return_address')
+  assert.equal(s.editing, null, 'copying does not grant address editing')
+
   // Stale editor/popover state must never resurrect writable controls.
   s.editing = { id: row.id, field: 'password' }; s.showAdd = true
   s.openUfRowId = row.id; s.openHorRowId = row.id; s.openExcRowId = row.id
@@ -115,15 +144,48 @@ async function run() {
   assert.match(html, /AC, AM/)
   assert.match(html, /SKU modelo-original/)
   assert.match(html, /loja@example.com/)
+  assert.equal((html.match(/aria-label="Copiar endereço de envio"/g) || []).length, 2, 'shipping copy appears in mobile cards and the desktop table')
+  assert.equal((html.match(/aria-label="Copiar endereço de devolução"/g) || []).length, 2, 'return copy appears in mobile cards and the desktop table')
   s.mobileTableView = true
   html = await user.render()
   assert.doesNotMatch(html, /colunas de edição|clique em qualquer célula para editar/)
+  assert.equal((html.match(/aria-label="Copiar endereço de envio"/g) || []).length, 1, 'table-only mode retains shipping copy')
+  assert.equal((html.match(/aria-label="Copiar endereço de devolução"/g) || []).length, 1, 'table-only mode retains return copy')
+
+  const denied = await mount(false, { clipboardError: new Error('NotAllowedError') })
+  denied.state.copiedAddress = 'store1:shipping_address'
+  await denied.state.copyAddress(denied.state.items[0], 'return_address')
+  assert.deepEqual(denied.copied, [])
+  assert.equal(denied.state.copiedAddress, null, 'clipboard rejection cannot leave a success indicator')
+  assert.match(denied.state.error, /Não foi possível copiar o endereço/)
+  const deniedHtml = await denied.render()
+  assert.match(deniedHtml, /Não foi possível copiar o endereço/, 'clipboard failure is visible')
+  assert.doesNotMatch(deniedHtml, /Copiado!/)
+  assert.equal(denied.calls.filter((call) => call.options.method).length, 0)
 
   const admin = await mount(true), a = admin.state, adminRow = a.items[0]
   assert.equal(a.canEdit, true); assert.equal(a.canDelete, true)
   a.mobileTableView = true
   const adminHtml = await admin.render()
   assert.match(adminHtml, /Nova loja/); assert.match(adminHtml, /Excluir/); assert.match(adminHtml, /Arquivar/)
+  // Invoke the compiled template handlers: the copy click must not bubble to
+  // the editable table cell (or change editor state) even for administrators.
+  for (const tableOnly of [true, false]) {
+    a.mobileTableView = tableOnly
+    await admin.render()
+    const buttons = admin.addressButtons()
+    assert.equal(buttons.length, tableOnly ? 2 : 4)
+    for (const button of buttons) {
+      let stopped = false
+      await button.props.onClick({ stopPropagation() { stopped = true } })
+      assert.equal(stopped, true, 'copy handles the click instead of opening the cell editor')
+      assert.equal(a.editing, null)
+      const expected = button.props['aria-label'].endsWith('envio') ? store.shipping_address : store.return_address
+      assert.equal(admin.copied.at(-1), expected)
+    }
+  }
+  assert.equal(admin.calls.filter((call) => call.options.method).length, 0, 'admin address copying is also read-only')
+  a.mobileTableView = true
   await a.startEdit(adminRow, 'email'); a.editValue = 'admin-changed@example.com'; await a.commitEdit()
   assert.ok(admin.calls.some((call) => call.options.method === 'PATCH' && call.options.body.email === 'admin-changed@example.com'))
   a.openAdd(); assert.equal(a.showAdd, true)
@@ -138,6 +200,6 @@ async function run() {
   assert.equal(a.tipoPopoverFor, null); assert.equal(a.fatPopoverFor, null)
   await a.commitEdit(); await a.archiveRow(adminRow); await a.remove(adminRow)
   assert.equal(admin.calls.filter((call) => call.options.method).length, before)
-  console.log('store-info admin-only: all mutation handlers guarded; desktop/mobile read+copy preserved; revoked role closes editors.')
+  console.log('store-info admin-only: mutation guards preserved; full multiline addresses copy on desktop/mobile without editing; clipboard failure visible; revoked role closes editors.')
 }
 run().catch((error) => { console.error(error); process.exitCode = 1 })
