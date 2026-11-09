@@ -56,7 +56,11 @@ def ml_charges(erp, number, freight, coupon):
         )
         db.execute(
             "INSERT OR REPLACE INTO store_tracking VALUES ('ml','conta',?,?,?)",
-            (number, json.dumps({"status": "ready_to_ship", "cost": freight}), "2026-11-09"),
+            (
+                number,
+                json.dumps({"status": "ready_to_ship", "cost": freight, "seller_coupon": coupon}),
+                "2026-11-09",
+            ),
         )
 
 

@@ -1,6 +1,7 @@
 """Stock proof against Bling, and Mercado Livre shipments that already left."""
 
 import json
+from decimal import Decimal
 
 from test_store_sales import observe
 
@@ -88,3 +89,38 @@ def test_stock_report_lists_what_sales_do_not_explain(erp):
 def test_stock_report_waits_for_two_snapshots(erp):
     with erp.connection() as db:
         assert stock_check.report(db) == {"state": "waiting", "snapshots": 0}
+
+
+def test_seller_share_of_coupons_is_what_bling_takes_off():
+    payload = {
+        "details": [
+            {"type": "coupon", "items": [{"amounts": {"total": 3.0, "seller": 3.0}}]},
+            {"type": "coupon", "items": [{"amounts": {"total": 35.2, "seller": 0.0}}]},
+            {"type": "discount", "items": [{"amounts": {"total": 29.8, "seller": 29.8}}]},
+        ]
+    }
+    assert ml_shipping.seller_coupon(payload) == 3
+
+
+def test_discounts_are_read_after_the_freight_and_404_means_none(erp):
+    observe(erp, "M3", "paid", created="2026-11-09T10:00:00+00:00")
+    observe(erp, "M4", "paid", created="2026-11-09T10:00:00+00:00")
+    with erp.connection() as db:
+        for number in ("M3", "M4"):
+            db.execute(
+                "INSERT INTO store_tracking VALUES ('ml','conta',?,?,?)",
+                (number, json.dumps({"status": "shipped", "cost": "9.99"}), "2026-11-09"),
+            )
+        assert ml_shipping.discounts_due(db) == {"conta": {"M3": "M3", "M4": "M4"}}
+
+    def reader(**request):
+        assert request["mode"] == "discounts"
+        coupon = {"type": "coupon", "items": [{"amounts": {"seller": 12.0}}]}
+        return {"M3": {"details": [coupon]}, "M4": {"error": "Client error '404 Not Found'"}}
+
+    assert ml_shipping.sync_discounts(erp, reader) == {"stores": 1, "sales": 2, "failed": 0}
+    with erp.connection() as db:
+        assert ml_shipping.discounts_due(db) == {}
+        unit = native_ingest._units(db, "ml", "conta")["M3"]
+        charges = native_ingest.ml_charges(db, "conta", "M3", list(unit.values()))
+    assert charges == {"freight": Decimal("9.99"), "coupon": Decimal("12.0")}

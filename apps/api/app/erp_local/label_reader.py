@@ -84,6 +84,9 @@ async def one(client, channel, c, settings, ref, mode):
 
     if channel == "ml":
         call = ml_call(client, c)
+        if mode == "discounts":
+            # Who pays each discount (seller or Mercado Livre): Bling takes off the seller's part.
+            return await call("GET", f"/orders/{ref}/discounts")
         if mode == "tracking":
             s = await call("GET", f"/shipments/{ref}", headers={"x-format-new": "true"})
             option = s.get("lead_time") or s.get("shipping_option") or {}

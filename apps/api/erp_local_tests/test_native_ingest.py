@@ -355,9 +355,11 @@ def observe_orders(erp, channel, store, *orders):
                 # Mercado Livre's freight comes from the shipment, read apart from the order.
                 key = str(order.get("pack_id") or order["id"])
                 cost = order.get("_freight") or "0"
+                coupon = str((order.get("coupon") or {}).get("amount") or "0")
+                data = {"status": "ready_to_ship", "cost": cost, "seller_coupon": coupon}
                 db.execute(
                     "INSERT OR REPLACE INTO store_tracking VALUES ('ml',?,?,?,?)",
-                    (store, key, json.dumps({"status": "ready_to_ship", "cost": cost}), stamp),
+                    (store, key, json.dumps(data), stamp),
                 )
 
 

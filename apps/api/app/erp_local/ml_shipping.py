@@ -4,6 +4,7 @@ shipment tells whether a sale still waits to ship. Read only, from the shipment 
 
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from app.erp_local import native_ingest
 
@@ -76,4 +77,73 @@ def sync(erp, reader, now=None):
                 )
                 report["read"] += 1
                 report["left"] += str(data.get("status") or "").lower() in LEFT
+    return report
+
+
+def seller_coupon(payload):
+    """The seller's share of the coupons in /orders/{id}/discounts. Price discounts are already in
+    the item price, and coupons Mercado Livre pays stay out of Bling's total (37 of 37, 09/11)."""
+    total = Decimal(0)
+    for detail in (payload or {}).get("details") or []:
+        if detail.get("type") != "coupon":
+            continue
+        for item in detail.get("items") or []:
+            total += Decimal(str((item.get("amounts") or {}).get("seller") or 0))
+    return total
+
+
+def discounts_due(db):
+    """Sales whose shipment was read but whose seller coupons were not: store → order → sale."""
+    wanted = {}
+    for row in db.execute(
+        "SELECT store,number,data FROM store_tracking WHERE channel='ml'"
+    ).fetchall():
+        data = json.loads(row["data"])
+        if "cost" not in data or "seller_coupon" in data:
+            continue
+        unit = native_ingest._units(db, "ml", row["store"]).get(row["number"]) or {}
+        orders = wanted.setdefault(row["store"], {})
+        if len(orders) + len(unit) > PER_STORE:
+            continue
+        for external in unit:
+            orders[str(external)] = row["number"]
+    return {store: orders for store, orders in wanted.items() if orders}
+
+
+def sync_discounts(erp, reader):
+    """Read who pays each coupon and keep the seller's share with the sale."""
+    with erp.connection() as db:
+        plan = discounts_due(db)
+    report = {"stores": len(plan), "sales": 0, "failed": 0}
+    for store, orders in plan.items():
+        try:
+            got = reader(channel="ml", store=store, refs=list(orders), mode="discounts")
+        except Exception:  # noqa: BLE001 - one store failing must not stop the others
+            report["failed"] += len(orders)
+            continue
+        per_sale, broken = {}, set()
+        for external, number in orders.items():
+            reply = got.get(external) or {}
+            if "error" in reply and "404" not in str(reply["error"]):
+                broken.add(number)
+                continue
+            # 404: Mercado Livre has no discount for this order.
+            per_sale[number] = per_sale.get(number, Decimal(0)) + (
+                Decimal(0) if "error" in reply else seller_coupon(reply)
+            )
+        with erp.connection() as db:
+            for number, value in per_sale.items():
+                if number in broken:
+                    continue
+                row = db.execute(
+                    "SELECT data FROM store_tracking WHERE channel='ml' AND store=? AND number=?",
+                    (store, number),
+                ).fetchone()
+                data = {**json.loads(row["data"]), "seller_coupon": str(value)}
+                db.execute(
+                    "UPDATE store_tracking SET data=? WHERE channel='ml' AND store=? AND number=?",
+                    (json.dumps(data), store, number),
+                )
+                report["sales"] += 1
+        report["failed"] += len(broken)
     return report

@@ -371,21 +371,17 @@ def _price(item):
 
 def ml_charges(db, store, key, orders):
     """Mercado Livre: Bling's total is the products, plus the freight the buyer paid, minus the
-    seller's coupon (40 of 40 sales checked on 09/11/2026). Freight comes from the shipment and
-    the coupon from the order; None while either is still unread."""
-    if any("coupon" not in order for order in orders):
-        return None
+    seller's share of the coupons (37 of 37 sales checked on 09/11/2026). Both are read apart
+    from the order: freight from the shipment, coupons from /orders/{id}/discounts; None while
+    either is unread."""
     row = db.execute(
         "SELECT data FROM store_tracking WHERE channel='ml' AND store=? AND number=?",
         (store, key),
     ).fetchone()
-    cost = json.loads(row["data"]).get("cost") if row else None
-    if cost in (None, ""):
+    data = json.loads(row["data"]) if row else {}
+    if data.get("cost") in (None, "") or data.get("seller_coupon") in (None, ""):
         return None
-    coupon = sum(
-        (Decimal(str((o.get("coupon") or {}).get("amount") or 0)) for o in orders), Decimal(0)
-    )
-    return {"freight": Decimal(str(cost)), "coupon": coupon}
+    return {"freight": Decimal(str(data["cost"])), "coupon": Decimal(str(data["seller_coupon"]))}
 
 
 def store_charges(db, channel, store, key, orders):

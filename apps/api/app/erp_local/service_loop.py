@@ -108,6 +108,9 @@ def main():
 
             try:
                 log.info("envios ML %s", ml_shipping.sync(erp, store_labels.host_reader()))
+                log.info(
+                    "cupons ML %s", ml_shipping.sync_discounts(erp, store_labels.host_reader())
+                )
             except (ERPError, OSError, ValueError) as error:
                 log.warning("envios ML não lidos: %s", type(error).__name__)
         time.sleep(max(60, args.every))
