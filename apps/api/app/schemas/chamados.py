@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.schemas.atendimento_painel import AdsPowerOut
+
 Origem = Literal["margem", "logistica", "devolucao", "vendas"]
 Canal = Literal["api", "robo", "manual"]
 
@@ -329,6 +331,16 @@ class ChamadoLookupOut(BaseModel):
     produto: str | None = None
     sku: str | None = None
     status_bling: str | None = None
+
+
+class ChamadoAdsPowerOut(AdsPowerOut):
+    """Botão Servidor (09/11/2026): o perfil do AdsPower da loja + a página da
+    plataforma a abrir (o `chamado_url` ou, sem ele, a montada pelo número da
+    devolução/caso/pedido); `destino_tipo`: chamado | consulta | devolução |
+    caso | pedido; sem página, None (o perfil abre na página inicial)."""
+
+    destino: str | None = None
+    destino_tipo: str | None = None
 
 
 class AtualizarOut(BaseModel):

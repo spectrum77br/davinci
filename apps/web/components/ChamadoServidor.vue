@@ -22,10 +22,22 @@ const props = defineProps<{
   destino: string | null
 }>()
 
+// 09/11/2026 (301908): sem o link guardado, a API monta a página pelo número da
+// devolução/caso/pedido (`destino`, `destino_tipo`) — antes o perfil abria na
+// página inicial em 58 dos 67 abertos.
+type PerfilChamado = PerfilAdsPower & { destino?: string | null; destino_tipo?: string | null }
+const PAGINA_DE: Record<string, string> = {
+  chamado: 'na página do chamado',
+  consulta: 'na página da consulta',
+  caso: 'na página do caso',
+  'devolução': 'na lista de devoluções, já buscando a devolução',
+  pedido: 'na página do pedido',
+}
+
 const { api } = useApi()
 const toasts = useToasts()
 
-const perfil = ref<PerfilAdsPower | null>(null)
+const perfil = ref<PerfilChamado | null>(null)
 const carregando = ref(false)
 const erroPerfil = ref('')
 const abrindo = ref(false)
@@ -38,7 +50,7 @@ async function carregar(id: string) {
   erroPerfil.value = ''
   carregando.value = true
   try {
-    const p = await api<PerfilAdsPower>(`/api/chamados/${encodeURIComponent(id)}/adspower`)
+    const p = await api<PerfilChamado>(`/api/chamados/${encodeURIComponent(id)}/adspower`)
     if (props.chamadoId === id) perfil.value = p
   } catch {
     if (props.chamadoId === id) erroPerfil.value = 'Não consegui ler o cadastro da loja agora.'
@@ -49,7 +61,8 @@ async function carregar(id: string) {
 watch(() => props.chamadoId, (id) => { if (id) carregar(id) }, { immediate: true })
 
 const url = computed(() => urlIniciar(perfil.value))
-const pagina = computed(() => destinoPermitido(props.destino))
+const pagina = computed(() => destinoPermitido(perfil.value?.destino || props.destino))
+const ondeAbre = computed(() => PAGINA_DE[perfil.value?.destino_tipo || 'chamado'] || 'na página do chamado')
 const motivo = computed(() => {
   if (carregando.value) return 'Procurando o perfil da loja…'
   if (erroPerfil.value) return erroPerfil.value
@@ -61,7 +74,7 @@ const titulo = computed(() => {
   if (motivo.value) return motivo.value
   const p = perfil.value
   const loja = p?.loja ? ` (${p.loja}${p.perfil_nome ? ` · ${p.perfil_nome}` : ''})` : ''
-  const onde = pagina.value ? ', já na página do chamado' : ' (o chamado não tem o link da plataforma: abre na página inicial)'
+  const onde = pagina.value ? `, já ${ondeAbre.value}` : ' (não deu pra montar a página do chamado: abre na página inicial)'
   const base = `Abre o perfil ${p?.perfil || p?.perfil_id} do AdsPower${loja} neste computador${onde}. Na primeira vez o Chrome pede para o site acessar a rede local: aceite.`
   return p?.aviso ? `${base} Atenção: ${p.aviso}` : base
 })
@@ -76,12 +89,12 @@ async function abrir() {
       const r = await abrirPaginaNoPerfil(perfil.value, pagina.value)
       if (!r) return
       if (r.status === 'erro') toasts.error(r.titulo, r.detalhe)
-      else if (r.copiado) toasts.info(r.titulo, r.detalhe)
-      else toasts.info(r.titulo, 'Se o perfil estava fechado, ele abre já na página do chamado. Se já estava aberto, ele só vem para frente: copie o link de "abrir na plataforma" e cole na barra do perfil.')
+      else if (r.copiado) toasts.info(r.titulo, `Se o perfil estava fechado, ele abre já ${ondeAbre.value}. Se já estava aberto, ele só vem para frente: o link foi copiado — cole na barra de endereço do perfil.`)
+      else toasts.info(r.titulo, `Se o perfil estava fechado, ele abre já ${ondeAbre.value}. Se já estava aberto, ele só vem para frente e fica na página em que estava.`)
     } else {
       const r = await abrirNoAdsPower(u)
       if (r.status === 'erro') toasts.error(r.titulo, r.detalhe)
-      else toasts.info('Abrindo o perfil da loja (AdsPower)', 'Este chamado não tem o link da plataforma: o perfil abre na página inicial. Se já estava aberto, ele só vem para frente.')
+      else toasts.info('Abrindo o perfil da loja (AdsPower)', 'Não deu pra montar a página deste chamado (sem link e sem nº do pedido): o perfil abre na página inicial. Se já estava aberto, ele só vem para frente.')
     }
   } finally {
     abrindo.value = false

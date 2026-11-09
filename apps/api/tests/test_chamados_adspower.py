@@ -139,6 +139,8 @@ async def test_perfil_pela_loja_do_pedido(
     p = await _perfil(client, cenario["ids"]["pedido"])
     assert p["perfil"] == "136" and p["fonte"] == "pedido" and p["codigo"] is None
     assert p["store_info_id"] and p["motivo"] is None and p["robo"] is False
+    # Sem link guardado nem nº da devolução: a página do pedido buscando o nº.
+    assert p["destino_tipo"] == "pedido" and p["destino"].endswith("order?search=MK877001")
 
 
 async def test_perfil_pela_conta_sem_pedido_no_espelho(
@@ -175,3 +177,47 @@ async def test_chamado_de_outra_equipe_da_403(
     assert r.json()["detail"]["code"] == "pedido_de_outra_equipe"
     # A conta "Shopee Vortan" (sem pedido) é de Israel: abre.
     assert (await _perfil(client, cenario["ids"]["conta"]))["perfil"] == "50"
+
+
+# ─── A página que o botão abre (09/11/2026, 301908) ──────────────────────
+
+
+def _ch(**kw) -> Chamado:
+    base = {"origem": "devolucao", "canal": "manual", "chamado_de_tela": False}
+    base.update(kw)
+    return Chamado(**base)
+
+
+def test_destino_usa_o_link_guardado_e_monta_quando_falta():
+    from app.services.chamados_adspower import destino_do_chamado
+
+    # O link guardado manda.
+    url = "https://www.mercadolivre.com.br/cases/detail/483241217"
+    assert destino_do_chamado(_ch(plataforma="ml", chamado_url=url)) == (url, "chamado")
+    # 301908: Shopee com o nº da devolução → a lista de devoluções buscando ele.
+    d, t = destino_do_chamado(
+        _ch(plataforma="shopee", chamado="2610260N6GMARW6", pedido_marketplace="26100719629GUA")
+    )
+    assert t == "devolução"
+    assert d == (
+        "https://seller.shopee.com.br/portal/sale/returnrefundcancel"
+        "?keyword=2610260N6GMARW6&keywordType=return_sn"
+    )
+    # Shopee sem o nº da devolução → a lista de pedidos buscando o pedido.
+    d, t = destino_do_chamado(_ch(plataforma="Shopee", origem="logistica", pedido_marketplace="2610204DDTYU1Y"))
+    assert (d, t) == ("https://seller.shopee.com.br/portal/sale/order?search=2610204DDTYU1Y", "pedido")
+    # TikTok e ML → a página do pedido; Amazon → o pedido no Seller Central.
+    assert destino_do_chamado(
+        _ch(plataforma="tiktok", chamado="404283897103", pedido_marketplace="586792101607277770")
+    ) == ("https://seller-br.tiktok.com/order/detail?order_no=586792101607277770", "pedido")
+    assert destino_do_chamado(
+        _ch(plataforma="Mercado Livre", chamado="5601924125", pedido_marketplace="2000015300605585")
+    ) == ("https://www.mercadolivre.com.br/vendas/2000015300605585/detalhe", "pedido")
+    assert destino_do_chamado(
+        _ch(plataforma="amazon", pedido_marketplace="702-4461180-4591462")
+    ) == ("https://sellercentral.amazon.com.br/orders-v3/order/702-4461180-4591462", "pedido")
+    # Caso do suporte da Amazon (nº de 11 dígitos) → a página do caso.
+    assert destino_do_chamado(_ch(plataforma="amazon", chamado="23057891781"))[1] == "caso"
+    # Nada pra montar (ou nº com caractere estranho): None.
+    assert destino_do_chamado(_ch(plataforma="shopee")) == (None, None)
+    assert destino_do_chamado(_ch(plataforma="tiktok", pedido_marketplace="58 67/../x")) == (None, None)

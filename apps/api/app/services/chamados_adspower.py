@@ -16,13 +16,15 @@ a conta da linha pela plataforma + nome (`team_scope.conta_no_escopo`).
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.deps.team_scope import TeamScope, _chave_da_conta, conta_no_escopo
+from app.deps.team_scope import TeamScope, _chave_da_conta, conta_no_escopo, plataforma_canonica
 from app.models import BlingOrder, Chamado, ChamadoPedido, StoreInfo
+from app.services import chamados_leitura, links_shopee
 from app.services.atendimento.painel import (
     MOTIVO_SEM_CADASTRO,
     MOTIVO_SEM_PERFIL,
@@ -37,6 +39,60 @@ MOTIVO_AMBIGUO = (
     "Este chamado bate com mais de uma loja do cadastro, com perfis diferentes no "
     "AdsPower (campo Servidor) — não dá para saber qual abrir."
 )
+
+
+# ------------------------------------------------------------- a página a abrir
+# 09/11/2026 (Vinicius, 301908: "não abriu dentro do chamado"): só 9 dos 67 abertos
+# tinham o `chamado_url`; os outros têm só o número (devolução da Shopee, caso da
+# TikTok, reclamação do ML) e o perfil abria na página inicial. Sem o link, a
+# página sai do que o chamado já tem, com os mesmos endereços das outras telas:
+# consulta do Portal / caso da Amazon / consulta do ML pelo número; Shopee =
+# a lista de devoluções buscando o return_sn (ou a de pedidos buscando o
+# pedido, `links_shopee`); TikTok e ML = a página do pedido, que mostra a
+# devolução/reclamação; Amazon = o pedido no Seller Central.
+_NUMERO_URL = re.compile(r"^[A-Za-z0-9-]{3,64}$")
+_PEDIDO_AMAZON = re.compile(r"^\d{3}-\d{7}-\d{7}$")
+URL_PEDIDO_TIKTOK = "https://seller-br.tiktok.com/order/detail?order_no={}"
+URL_PEDIDO_ML = "https://www.mercadolivre.com.br/vendas/{}/detalhe"
+URL_PEDIDO_AMAZON = "https://sellercentral.amazon.com.br/orders-v3/order/{}"
+
+
+def _seguro(valor: str | None) -> str | None:
+    s = (valor or "").strip()
+    return s if _NUMERO_URL.match(s) else None
+
+
+def destino_do_chamado(ch: Chamado) -> tuple[str | None, str | None]:
+    """(endereço, o que é) da página da plataforma que o botão Servidor abre;
+    (None, None) quando não há o que montar (o perfil abre na página inicial)."""
+    url = (ch.chamado_url or "").strip()
+    if url.startswith("https://"):
+        return url, "chamado"
+    plat = plataforma_canonica(ch.plataforma)
+    protocolo = _seguro(ch.chamado)
+    pedido = _seguro(ch.pedido_marketplace)
+    if plat == "shopee":
+        consulta = chamados_leitura.consulta_do_portal(ch)
+        if consulta and _seguro(consulta):
+            return chamados_leitura.PORTAL_SHOPEE_URL.format(consulta), "consulta"
+        if protocolo and protocolo != pedido and ch.origem == "devolucao":
+            return links_shopee.url_devolucao_shopee(protocolo), "devolução"
+        if pedido:
+            return links_shopee.url_pedido_shopee(pedido), "pedido"
+    elif plat == "ml":
+        if protocolo and chamados_leitura.e_consulta_ml(ch):
+            return chamados_leitura.url_da_consulta_ml(ch), "consulta"
+        if pedido and pedido.isdigit():
+            return URL_PEDIDO_ML.format(pedido), "pedido"
+    elif plat == "tiktok":
+        if pedido and pedido.isdigit():
+            return URL_PEDIDO_TIKTOK.format(pedido), "pedido"
+    elif plat == "amazon":
+        if protocolo and chamados_leitura.e_caso_amazon(ch):
+            return chamados_leitura.url_do_caso_amazon(ch), "caso"
+        if pedido and _PEDIDO_AMAZON.match(pedido):
+            return URL_PEDIDO_AMAZON.format(pedido), "pedido"
+    return None, None
 
 
 async def _lojas_pelo_pedido(session: AsyncSession, ch: Chamado) -> tuple[bool, list[StoreInfo]]:
@@ -113,7 +169,8 @@ async def _lojas_pela_conta(session: AsyncSession, ch: Chamado) -> list[StoreInf
 async def perfil_do_chamado(session: AsyncSession, ch: Chamado) -> dict[str, Any]:
     """Qual perfil do AdsPower abre a loja deste chamado. A saída é a do
     Atendimento (`painel.perfil_adspower`): `{perfil, perfil_id, perfil_nome,
-    loja, store_info_id, fonte, robo, aviso, motivo, codigo, no_espelho}`; sem
+    loja, store_info_id, fonte, robo, aviso, motivo, codigo, no_espelho}` + a
+    página a abrir (`destino`, `destino_tipo`, `destino_do_chamado`); sem
     perfil, `perfil` None e o `motivo` (a frase do botão desligado)."""
     saida: dict[str, Any] = {
         "perfil": None,
@@ -128,6 +185,7 @@ async def perfil_do_chamado(session: AsyncSession, ch: Chamado) -> dict[str, Any
         "codigo": None,
         "no_espelho": None,
     }
+    saida["destino"], saida["destino_tipo"] = destino_do_chamado(ch)
     no_espelho, lojas = await _lojas_pelo_pedido(session, ch)
     if no_espelho:
         saida["fonte"] = "pedido"

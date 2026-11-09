@@ -67,7 +67,6 @@ from app.models import (
 )
 from app.models.chamado import CANAIS, ORIGENS
 from app.redis_client import redis
-from app.schemas.atendimento_painel import AdsPowerOut
 from app.schemas.chamados import (
     AgentAbrirMlIn,
     AgentAbrirMlResultadoIn,
@@ -111,6 +110,7 @@ from app.schemas.chamados import (
     AlterarStatusOut,
     AtualizarOut,
     AtualizarStatusOut,
+    ChamadoAdsPowerOut,
     ChamadoAnexoOut,
     ChamadoCreate,
     ChamadoLookupOut,
@@ -1205,17 +1205,17 @@ async def _mensagens_do_caso(
 # ------------------------------------------------------------- histórico / réplica
 
 
-@router.get("/{chamado_id}/adspower", response_model=AdsPowerOut)
+@router.get("/{chamado_id}/adspower", response_model=ChamadoAdsPowerOut)
 async def perfil_adspower_do_chamado(
     chamado_id: UUID,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("chamados", "view"))],
-) -> AdsPowerOut:
+) -> ChamadoAdsPowerOut:
     """Botão Servidor do histórico (09/11/2026): QUAL perfil do AdsPower abre a
     loja do chamado (campo Servidor da loja). Quem abre é o navegador de quem
     clicou, no AdsPower do computador dele — o DaVinci não fala com o AdsPower."""
     ch = await _get_da_equipe(session, user, chamado_id)
-    return AdsPowerOut(**await chamados_adspower.perfil_do_chamado(session, ch))
+    return ChamadoAdsPowerOut(**await chamados_adspower.perfil_do_chamado(session, ch))
 
 
 @router.get("/{chamado_id}/mensagens", response_model=list[ChamadoMensagemOut])
