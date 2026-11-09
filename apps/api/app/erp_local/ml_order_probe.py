@@ -131,6 +131,8 @@ def project(raw, seller_id, start, end):
         "total": monetary(raw.get("total_amount"), currency),
         # What the buyer paid, shipping included: Bling keeps this as the order total.
         "paid": monetary(raw.get("paid_amount"), currency),
+        # The seller's coupon: Bling takes it off the order total.
+        "coupon": monetary((raw.get("coupon") or {}).get("amount") or 0, currency),
         "items": items,
         "within_window": stamp(start) <= updated <= stamp(end),
     }

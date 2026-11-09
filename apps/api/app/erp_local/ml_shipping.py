@@ -45,7 +45,9 @@ def due(db, now=None):
                 continue
             shipment = live[0].get("shipping_id")
             data, read_at = known.get((store, number), ({}, ""))
-            if not shipment or str(data.get("status") or "").lower() in LEFT or read_at > stale:
+            gone = str(data.get("status") or "").lower() in LEFT
+            # A shipment that left is read once more only to learn the freight the buyer paid.
+            if not shipment or (gone and "cost" in data) or (not gone and read_at > stale):
                 continue
             wanted.setdefault(store, {})[str(shipment)] = number
     return {store: dict(list(refs.items())[:PER_STORE]) for store, refs in wanted.items()}

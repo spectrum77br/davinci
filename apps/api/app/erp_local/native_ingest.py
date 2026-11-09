@@ -333,11 +333,38 @@ def _price(item):
     return item.get("unit_price") or item.get("sale_price")
 
 
-def _value_adjustment(orders, items):
+def ml_charges(db, store, key, orders):
+    """Mercado Livre: Bling's total is the products, plus the freight the buyer paid, minus the
+    seller's coupon (40 of 40 sales checked on 09/11/2026). Freight comes from the shipment and
+    the coupon from the order; None while either is still unread."""
+    if any("coupon" not in order for order in orders):
+        return None
+    row = db.execute(
+        "SELECT data FROM store_tracking WHERE channel='ml' AND store=? AND number=?",
+        (store, key),
+    ).fetchone()
+    cost = json.loads(row["data"]).get("cost") if row else None
+    if cost in (None, ""):
+        return None
+    coupon = sum(
+        (Decimal(str((o.get("coupon") or {}).get("amount") or 0)) for o in orders), Decimal(0)
+    )
+    return {"freight": Decimal(str(cost)), "coupon": coupon}
+
+
+def _value_adjustment(orders, items, charges=None):
     """Discount or freight that takes the items to the total the store reports for the order.
 
     That header total equals Bling's on 94% to 100% of Shopee, TikTok, Amazon and Magalu sales.
+    Mercado Livre passes its freight and coupon instead (see `ml_charges`).
     """
+    if charges is not None:
+        result = {}
+        if charges["freight"] > 0:
+            result["freight"] = str(charges["freight"].quantize(Decimal("0.01")))
+        if charges["coupon"] > 0:
+            result["discount"] = str(charges["coupon"].quantize(Decimal("0.01")))
+        return result
     headers = [(order.get("paid") or order.get("total") or {}).get("amount") for order in orders]
     if not headers or any(amount is None for amount in headers):
         return {}
@@ -364,6 +391,8 @@ def _unit_reasons(db, channel, store, account, key, unit):
 
         if ml_shipping.left(db, store, key):
             reasons.add("not_open")
+    if channel == "ml" and ml_charges(db, store, key, live) is None:
+        reasons.add("total_unknown")
     if (live[0].get("pack_id") or live[0].get("cart_id")) and not _settled(account, orders):
         reasons.add("cart_waiting")
     items = [item for order in live for item in order.get("items") or []]
@@ -569,7 +598,14 @@ def promote(erp, channel, store, external, *, depot):
         "recipient": recipient_capture.order_recipient(captured),
     }
     orders = list(unit.values())
-    payload.update(_value_adjustment([o for o in orders if not _is_cancelled(o)], items))
+    live = [o for o in orders if not _is_cancelled(o)]
+    charges = None
+    if channel == "ml":
+        with erp.connection() as db:
+            charges = ml_charges(db, store, key, live)
+        if charges is None:
+            raise ERPError("ingest_total", "Frete ou cupom do Mercado Livre ainda não lidos.", 409)
+    payload.update(_value_adjustment(live, items, charges))
     if any(
         o.get("logistic_type") in {"self_service", "flex"} or o.get("fulfillment") == "flex"
         for o in orders

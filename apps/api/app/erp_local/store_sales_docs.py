@@ -88,8 +88,19 @@ def detail(db, channel, store, number):
                 }
             )
     items_total = sum((i["total"] for i in items if i["total"] is not None), Decimal(0))
-    headers = [_amount(o.get("paid") or o.get("total")) for o in orders]
-    order_total = None if any(h is None for h in headers) else sum(headers, Decimal(0))
+    live = [o for o in orders if not native_ingest._is_cancelled(o)] or orders
+    charges = native_ingest.ml_charges(db, store, number, live) if channel == "ml" else None
+    if channel == "ml":
+        # Mercado Livre: products + freight the buyer paid - seller's coupon, as Bling keeps it.
+        order_total = (
+            None if charges is None else items_total + charges["freight"] - charges["coupon"]
+        )
+    else:
+        headers = [_amount(o.get("paid") or o.get("total")) for o in orders]
+        order_total = None if any(h is None for h in headers) else sum(headers, Decimal(0))
+    gap = None if order_total is None or charges else order_total - items_total
+    freight = charges["freight"] if charges else (gap if gap is not None and gap > 0 else None)
+    discount = charges["coupon"] if charges else (-gap if gap is not None and gap < 0 else None)
     return {
         "number": str(number),
         "channel": channel,
@@ -109,6 +120,8 @@ def detail(db, channel, store, number):
         "items_total": items_total,
         "order_total": order_total,
         "adjustment": None if order_total is None else order_total - items_total,
+        "freight": freight,
+        "discount": discount,
         "buyer": (captured or {}).get("buyer") or {},
         "recipient": (captured or {}).get("recipient") or {},
         "missing": (captured or {}).get("missing")

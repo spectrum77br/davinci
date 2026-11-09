@@ -86,11 +86,19 @@ async def one(client, channel, c, settings, ref, mode):
         call = ml_call(client, c)
         if mode == "tracking":
             s = await call("GET", f"/shipments/{ref}", headers={"x-format-new": "true"})
+            option = s.get("lead_time") or s.get("shipping_option") or {}
             return {
                 "tracking_number": s.get("tracking_number") or "",
                 "carrier": (s.get("logistic") or {}).get("type") or s.get("tracking_method") or "",
                 "status": s.get("status") or "",
                 "substatus": s.get("substatus") or "",
+                # What the buyer paid for shipping and its list price: Bling's order total
+                # for Mercado Livre carries shipping beyond the products.
+                "cost": str(option.get("cost")) if option.get("cost") is not None else "",
+                "list_cost": str(option.get("list_cost"))
+                if option.get("list_cost") is not None
+                else "",
+                "base_cost": str(s.get("base_cost")) if s.get("base_cost") is not None else "",
             }
         return await channel_labels.fetch_label("ml", ref, call=call, download_only=True)
     if channel == "shopee":

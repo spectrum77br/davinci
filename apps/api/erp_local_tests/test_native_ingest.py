@@ -344,6 +344,14 @@ def observe_orders(erp, channel, store, *orders):
                 f"VALUES ({','.join('?' * len(columns))})",
                 [values.get(c, "x") for c in columns],
             )
+            if channel == "ml" and order.get("_freight") is not False:
+                # Mercado Livre's freight comes from the shipment, read apart from the order.
+                key = str(order.get("pack_id") or order["id"])
+                cost = order.get("_freight") or "0"
+                db.execute(
+                    "INSERT OR REPLACE INTO store_tracking VALUES ('ml',?,?,?,?)",
+                    (store, key, json.dumps({"status": "ready_to_ship", "cost": cost}), stamp),
+                )
 
 
 def sale(identifier, *, status="paid", pack=None, sku="demo.aparelho", created=None):
@@ -352,6 +360,7 @@ def sale(identifier, *, status="paid", pack=None, sku="demo.aparelho", created=N
         "status": status,
         "pack_id": pack,
         "created_at": (created or NOW - timedelta(hours=2)).isoformat(),
+        "coupon": _money("0"),
         "items": [
             {
                 "line_id": f"{identifier}:1",
@@ -541,13 +550,13 @@ def test_order_cancelled_at_the_store_is_flagged_and_keeps_its_reservation(ml_ac
     assert balance(ml_account) == before
 
 
-def test_order_keeps_the_total_the_store_reports(ml_account):
+def test_ml_total_is_products_plus_buyer_freight_minus_coupon(ml_account):
     observe_orders(
         ml_account,
         "ml",
         ML_STORE,
-        {**sale("A1"), "total": _money("7.50")},
-        {**sale("A2"), "total": _money("13.00")},
+        {**sale("A1"), "coupon": _money("2.50")},
+        {**sale("A2"), "_freight": "3.00"},
     )
     capture_buyer(ml_account, "A1")
     capture_buyer(ml_account, "A2")
@@ -626,15 +635,23 @@ def test_tiktok_lines_count_one_unit_and_use_the_sale_price(erp):
     assert "quantity_unknown" not in plan["blocked"] and "price_unknown" not in plan["blocked"]
 
 
-def test_paid_total_with_shipping_wins_over_the_items_total(ml_account):
+def test_ml_freight_and_coupon_both_show_like_bling(ml_account):
     observe_orders(
         ml_account,
         "ml",
         ML_STORE,
-        {**sale("A1"), "total": _money("10.00"), "paid": _money("33.99")},
+        {**sale("A1"), "paid": _money("10.00"), "_freight": "27.99", "coupon": _money("4.00")},
     )
     capture_buyer(ml_account, "A1")
     created = native_ingest.promote(ml_account, "ml", ML_STORE, "A1", depot="geral")
     with ml_account.connection() as db:
         _, data = ml_account.document(db, created["id"], "order")
-    assert data["total"] == "33.99" and data["freight"] == "23.99"
+    assert data["total"] == "33.99" and data["freight"] == "27.99" and data["discount"] == "4.00"
+
+
+def test_ml_sale_without_freight_read_waits(ml_account):
+    observe_orders(ml_account, "ml", ML_STORE, {**sale("A1"), "_freight": False})
+    capture_buyer(ml_account, "A1")
+    assert plan_of(ml_account)["blocked"] == {"total_unknown": 1}
+    with pytest.raises(ERPError, match="Frete ou cupom"):
+        native_ingest.promote(ml_account, "ml", ML_STORE, "A1", depot="geral")

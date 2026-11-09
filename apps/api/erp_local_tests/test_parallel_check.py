@@ -77,7 +77,7 @@ def test_buyer_name_counts_when_bling_keeps_the_buyer():
     assert pc.compare({"P1": other}, pr.summarize([ROW]))["ml"]["nome_igual"] == 1
 
 
-def test_old_ml_reading_without_paid_amount_is_counted_apart():
+def test_ml_sale_without_freight_read_is_counted_apart():
     report = pc.compare({"P1": sale(total=None)}, pr.summarize([ROW]))["ml"]
-    assert report["total_leitura_antiga"] == 1
+    assert report["total_sem_frete_lido"] == 1
     assert "total_diferente" not in report and "total_igual" not in report

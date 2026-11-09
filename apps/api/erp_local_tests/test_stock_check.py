@@ -35,7 +35,7 @@ def test_shipped_ml_sale_stops_being_open_and_shows_posted(erp):
 
     def reader(**request):
         calls.append(request)
-        return {"S1": {"status": "shipped", "tracking_number": "MEL1"}}
+        return {"S1": {"status": "shipped", "tracking_number": "MEL1", "cost": "0"}}
 
     report = ml_shipping.sync(erp, reader)
     assert report == {"stores": 1, "read": 1, "left": 1, "failed": 0}

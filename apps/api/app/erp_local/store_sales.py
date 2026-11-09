@@ -19,6 +19,7 @@ REASONS = {
     "quantity_unknown": "Quantidade não informada",
     "price_unknown": "Preço não informado",
     "recipient_missing": "Comprador não guardado",
+    "total_unknown": "Frete ou cupom ainda não lidos",
 }
 SETTLED = {"cursor": "9999-12-31T00:00:00+00:00"}
 

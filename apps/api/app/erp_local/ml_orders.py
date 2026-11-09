@@ -36,6 +36,7 @@ ORDER_FIELDS = {
     "fulfilled_by",
     "total",
     "paid",
+    "coupon",
     "items",
     "within_window",
 }
@@ -206,6 +207,7 @@ def validate(read):
                 money(order["total"])
                 if order["paid"] is not None:
                     money(order["paid"])
+                money(order["coupon"])
                 for index, item in enumerate(order["items"]):
                     if (
                         not isinstance(item, dict)

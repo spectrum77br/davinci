@@ -63,14 +63,19 @@ def local_sales(db, mapping=None, available=None):
             if not live:
                 continue
             items, total = Counter(), Decimal(0)
-            # Mercado Livre read before 06/11 kept no paid amount (freight and discounts).
-            unread = channel == "ml" and any(o.get("paid") is None for o in live)
+            # Mercado Livre: products + freight the buyer paid - coupon, once both were read.
+            charges = native_ingest.ml_charges(db, store, key, live) if channel == "ml" else None
+            unread = channel == "ml" and charges is None
             for order in live:
-                header = order.get("paid") or order.get("total") or {}
-                total += Decimal(str(header.get("amount") or 0))
+                if charges is None:
+                    header = order.get("paid") or order.get("total") or {}
+                    total += Decimal(str(header.get("amount") or 0))
                 for item in order.get("items") or []:
                     resolved = native_ingest._resolve(db, store, item, channel)
                     quantity = native_ingest._quantity(channel, item) or 0
+                    if charges is not None:
+                        price = native_ingest._price(item) or {}
+                        total += Decimal(str(price.get("amount") or 0)) * Decimal(str(quantity))
                     sku = resolved["sku"] or item.get("seller_sku") or "?"
                     if mapping and resolved["sku"]:
                         sku = stock_priority.preferred(sku, mapping, available, quantity)
@@ -81,7 +86,9 @@ def local_sales(db, mapping=None, available=None):
             sales[key] = {
                 "channel": channel,
                 "items": dict(items),
-                "total": None if unread else str(total),
+                "total": None
+                if unread
+                else str(total + charges["freight"] - charges["coupon"] if charges else total),
                 "document": fingerprint(buyer.get("document"), digits=True),
                 "name": fingerprint(delivery.get("name")),
                 "buyer_name": fingerprint(buyer.get("name")),
@@ -109,7 +116,7 @@ def compare(local, bling):
         else:
             entry["itens_diferentes"] += 1
         if sale["total"] is None:
-            entry["total_leitura_antiga"] += 1
+            entry["total_sem_frete_lido"] += 1
         else:
             entry[
                 "total_igual"

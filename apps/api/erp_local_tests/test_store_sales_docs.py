@@ -45,15 +45,34 @@ def keep_recipient(erp, external):
         )
 
 
+def ml_charges(erp, number, freight, coupon):
+    with erp.connection() as db:
+        row = db.execute(
+            "SELECT id,data FROM native_order_observations WHERE external_id=?", (number,)
+        ).fetchone()
+        data = {**json.loads(row["data"]), "coupon": {"amount": coupon, "currency": "BRL"}}
+        db.execute(
+            "UPDATE native_order_observations SET data=? WHERE id=?", (json.dumps(data), row["id"])
+        )
+        db.execute(
+            "INSERT OR REPLACE INTO store_tracking VALUES ('ml','conta',?,?,?)",
+            (number, json.dumps({"status": "ready_to_ship", "cost": freight}), "2026-11-09"),
+        )
+
+
 def test_detail_shows_items_totals_and_kept_buyer(erp):
     observe(erp, "D1", "paid")
     keep_recipient(erp, "D1")
     with erp.connection() as db:
+        unread = store_sales_docs.detail(db, "ml", "conta", "D1")
+    assert unread["order_total"] is None and unread["freight"] is None
+    ml_charges(erp, "D1", "23.99", "3")
+    with erp.connection() as db:
         sale = store_sales_docs.as_json(store_sales_docs.detail(db, "ml", "conta", "D1"))
     assert sale["store"] == "ML Teste" and sale["orders"] == ["D1"]
     assert sale["item_count"] == 1 and sale["quantity_sum"] == "1"
-    assert sale["items_total"] == "10.00" and sale["order_total"] == "10.00"
-    assert sale["adjustment"] == "0.00"
+    assert sale["items_total"] == "10.00" and sale["order_total"] == "30.99"
+    assert sale["freight"] == "23.99" and sale["discount"] == "3.00"
     assert sale["buyer"]["name"] == "Comprador Teste" and sale["recipient"]["city"] == "São Paulo"
     assert sale["missing"] == []
 

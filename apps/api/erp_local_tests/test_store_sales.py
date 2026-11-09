@@ -56,7 +56,8 @@ def test_each_sale_shows_store_status_and_what_stops_it(erp):
         result = store_sales.listing(db)
     assert result["total"] == 3 and [s["number"] for s in result["items"]] == ["A1", "A2", "A3"]
     first, cancelled, unlinked = result["items"]
-    assert first["store"] == "ML Teste" and first["blocked"] == ["Comprador não guardado"]
+    assert first["store"] == "ML Teste"
+    assert first["blocked"] == ["Comprador não guardado", "Frete ou cupom ainda não lidos"]
     assert cancelled["blocked"] == ["Cancelado na loja"]
     assert "Item sem vínculo com o catálogo" in unlinked["blocked"]
     assert first["buyer"] == ""
