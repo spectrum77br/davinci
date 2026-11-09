@@ -110,7 +110,8 @@ async def pedidos_da_shopee(
 ) -> set[str]:
     """Números (de `numeros`) cujo pedido é da Shopee — só eles ganham o rodapé
     de picking na impressão quando o blob guardado não tem (etiquetas subidas
-    entre 04/08 e 09/11/2026, quando o transform só apagava).
+    entre 04/08 e 09/11/2026, quando o transform só apagava; o
+    `escrever_picking` ainda confere o rastro do rodapé apagado no blob).
 
     Pela loja do pedido: `bling_orders.loja` → `store_info.bling_store_id` →
     `platform` (mesma ligação do lease do executor). Loja que não está em

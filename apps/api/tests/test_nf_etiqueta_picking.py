@@ -466,3 +466,213 @@ def test_rodape_legivel_depois_do_redimensionamento_da_impressao():
 )
 def test_parece_pedido_shopee(numeroloja, esperado):
     assert parece_pedido_shopee(numeroloja) is esperado
+
+
+# --- revisão 09/11: casos de borda ------------------------------------------
+
+
+def _tinta_por_linha(pdf: bytes) -> list[tuple[float, float, str]]:
+    """(topo, fundo, texto) da tinta de cada linha do rodapé (sem DUIMP)."""
+    return [(a, b, t) for a, b, t, _y in _linhas_do_pe(pdf) if not t.startswith("DUIMP")]
+
+
+def _sem_sobrepor_linhas(pdf: bytes) -> None:
+    linhas = sorted(_tinta_por_linha(pdf))
+    for (a0, a1, ta), (b0, _b1, tb) in zip(linhas, linhas[1:], strict=False):
+        if abs(a0 - b0) < 0.5:  # mesma linha (SKU e quantidade)
+            continue
+        assert a1 < b0, (ta, a1, tb, b0)
+
+
+def _com_ref(raw: bytes, ref: str):
+    from dataclasses import replace
+
+    return replace(ler_picking(raw), ref=ref)
+
+
+def test_ref_comprida_encolhe_o_cabecalho_sem_encostar_no_item():
+    """Cabeçalho largo (ref ~6 caracteres maior que as reais) encolhe; o 1º
+    item desce o que a tinta das duas fontes pede — não encosta."""
+    raw = etiqueta_shopee([("dg062.pi+a003.pi", 1)])
+    rodape = _com_ref(raw, "UP2NYY264253-" + "X" * 30)
+    novo, st, det = escrever_picking(transformar_etiqueta(raw), [_item("dg062.pi+a003.pi")], rodape)
+    assert st == "ok", det
+    _sem_sobrepor_linhas(novo)
+    page = fitz.open(stream=novo, filetype="pdf")[0]
+    assert max(w[2] for w in page.get_text("words") if w[1] > 380) <= page.rect.width - 4.9
+    r = ler_picking(novo)
+    assert r.itens == (("dg062.pi+a003.pi", 1),) and r.fs_cab >= 6.0
+    assert escrever_picking(novo, [_item("dg062.pi+a003.pi")], r)[1] == "igual"
+
+
+def test_ref_enorme_perde_o_deadline_e_encurta_o_ref_dentro_da_pagina():
+    raw = etiqueta_shopee([("dg062.pi+a003.pi", 1)])
+    novo, st, det = escrever_picking(
+        transformar_etiqueta(raw), [_item("a1")], _com_ref(raw, "X" * 60)
+    )
+    assert st == "ok", det
+    r = ler_picking(novo)
+    assert "Deadline" not in r.cabecalho
+    assert r.ref.startswith("XXXX") and r.ref.endswith("...")
+    assert r.fs_cab == pytest.approx(6.0)
+    page = fitz.open(stream=novo, filetype="pdf")[0]
+    assert max(w[2] for w in page.get_text("words") if w[1] > 380) <= page.rect.width - 4.9
+    _sem_sobrepor_linhas(novo)
+    # relido (ref encurtada) e reescrito com os mesmos itens: não mexe
+    assert escrever_picking(novo, [_item("a1")], r)[1] == "igual"
+
+
+def _escalada(pdf: bytes, largura: float, altura: float) -> bytes:
+    """A etiqueta inteira desenhada numa página de outro tamanho (outra
+    impressora/layout): o texto continua extraível."""
+    src = fitz.open(stream=pdf, filetype="pdf")
+    out = fitz.open()
+    for k in range(src.page_count):
+        out.new_page(width=largura, height=altura).show_pdf_page(
+            fitz.Rect(0, 0, largura, altura), src, k
+        )
+    return out.tobytes()
+
+
+def test_pagina_estreita_cabecalho_menor_que_os_itens_nao_sobrepoe():
+    raw = _escalada(etiqueta_shopee([("dg054.ci+a001.ci", 1)]), 200, 295)
+    rodape = ler_picking(raw)
+    assert rodape is not None
+    novo, st, det = escrever_picking(
+        transformar_etiqueta(raw), [_item("dg054.sp+a001.sp"), _item("a003.pi", 2)], rodape
+    )
+    assert st == "ok", det
+    r = ler_picking(novo)
+    assert r.itens == (("dg054.sp+a001.sp", 1), ("a003.pi", 2))
+    assert r.fs_cab < r.fs_itens  # o cabeçalho encolheu mais que os itens
+    _sem_sobrepor_linhas(novo)
+
+
+def test_pagina_girada_nao_e_erro_e_nao_mexe():
+    """Nunca vista nas reais: não escreve e não vira `erro` (que loga warning
+    a cada impressão)."""
+    doc = fitz.open(stream=etiqueta_shopee(), filetype="pdf")
+    doc[0].set_rotation(90)
+    raw = doc.tobytes()
+    rodape = ler_picking(raw)
+    assert rodape is not None
+    t = transformar_etiqueta(raw)
+    novo, st, det = escrever_picking(t, [_item("dg054.sp+a001.sp")], rodape)
+    assert (st, novo) == ("nao_coube", t) and "girada" in det
+    doc = fitz.open(stream=_blob_antigo(), filetype="pdf")
+    doc[0].set_rotation(90)
+    antigo = doc.tobytes()
+    novo, st, det = escrever_picking(antigo, [_item("a1")], None, criar_se_faltar=True)
+    assert (st, novo) == ("sem_rodape", antigo) and "girada" in det
+
+
+def _com_texto(pdf: bytes, x: float, y: float, texto: str, fs: float = 8.0) -> bytes:
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    doc[0].insert_text((x, y), texto, fontsize=fs, fontname="helv")
+    return doc.tobytes()
+
+
+@pytest.mark.parametrize("y", [391.5, 401.4])  # na linha do cabeçalho / do item
+def test_texto_colado_na_linha_do_rodape_nao_e_do_rodape(y):
+    """Carimbo no meio da linha do rodapé: não entra no SKU lido (nem na
+    reserva da subida) e a reescrita desiste em vez de apagá-lo."""
+    raw = _com_texto(etiqueta_shopee([("dg062.pi+a003.pi", 1)]), 150, y, "LADO")
+    r = ler_picking(raw)
+    assert r.itens == (("dg062.pi+a003.pi", 1),)
+    assert r.linhas == (("1. dg062.pi+a003.pi", "*1"),)
+    assert "LADO" not in r.cabecalho
+    novo, st, det = escrever_picking(raw, [_item("dg054.sp")], r)
+    assert (st, novo) == ("nao_coube", raw) and "faixa_ocupada" in det
+    assert "LADO" in _texto(novo, 0)
+
+
+def test_rodape_com_deadline_vazio_volta_com_deadline_vazio():
+    """O Upseller imprime 'Deadline: -' sem data: a reserva (sem itens do
+    Bling) devolve o cabeçalho igual, e com os itens do Bling também fica."""
+    raw = etiqueta_shopee([("b020.12", 8)], ref="UP2NYY000001", deadline=None)
+    cru = ler_picking(raw)
+    assert cru.cabecalho.endswith("; Deadline: -") and cru.sem_prazo
+    reserva, st, _ = _subida(raw, [])
+    assert st == "ok"
+    assert ler_picking(reserva).cabecalho == cru.cabecalho
+    assert ler_picking(reserva).linhas == cru.linhas
+    com_bling, st, _ = _subida(raw, [_item("b020.12.18", 8)])
+    assert st == "ok"
+    r = ler_picking(com_bling)
+    assert r.cabecalho == "SKU: 1; Total Items: 8; #UP2NYY000001; Deadline: -"
+    assert escrever_picking(com_bling, [_item("b020.12.18", 8)], r)[1] == "igual"
+
+
+# --- ordem: a mesma da declaração da etiqueta --------------------------------
+
+
+def _subida_completa(raw: bytes, itens) -> bytes:
+    """Subida como a do router: transform → declaração → rodapé."""
+    rodape = ler_picking(raw)
+    t, st_d, _ = reescrever_declaracao(transformar_etiqueta(raw), itens)
+    assert st_d == "ok"
+    novo, st, det = escrever_picking(t, itens, rodape)
+    assert st == "ok", det
+    return novo
+
+
+def _ordem(pdf: bytes) -> tuple[list[tuple[str, int]], list[tuple[str, int]]]:
+    decl = [(i.sku, i.quantidade) for i in ler_declaracao(pdf)]
+    return decl, list(ler_picking(pdf).itens)
+
+
+_A = formatar_item("dg062.pi+a003.pi", "Uranyx A17 Pro Max 12.128 - Branco + Fone", 1)
+_B = formatar_item("b005.8", "Mala Chanfrada M3 tamanho 18 - Prata", 2)
+
+
+def test_bling_inverteu_a_ordem_rodape_continua_na_ordem_da_declaracao():
+    """A declaração não reescreve quando só a ordem muda (igual) — o rodapé
+    também não: '1.'/'2.' do rodapé batem com o Nº da tabela."""
+    blob = _subida_completa(etiqueta_shopee([("dg062.pi+a003.pi", 1)]), [_A, _B])
+    assert _ordem(blob) == ([("dg062.pi+a003.pi", 1), ("b005.8", 2)],) * 2
+    base, st_d, _ = reescrever_declaracao(blob, [_B, _A])
+    assert st_d == "igual"
+    novo, st, _ = escrever_picking(base, [_B, _A], ler_picking(base))
+    assert st == "igual" and novo is base
+    decl, rod = _ordem(novo)
+    assert decl == rod
+
+
+def test_declaracao_reescrita_na_ordem_nova_leva_o_rodape_junto():
+    """Mudou a descrição (a declaração reescreve, na ordem do Bling) e a ordem:
+    o rodapé sai na mesma ordem da tabela."""
+    blob = _subida_completa(etiqueta_shopee([("dg062.pi+a003.pi", 1)]), [_A, _B])
+    a2 = formatar_item("dg062.pi+a003.pi", "Uranyx A17 Pro Max 12.128 - Preto + Fone", 1)
+    base, st_d, _ = reescrever_declaracao(blob, [_B, a2])
+    assert st_d == "ok"
+    novo, st, _ = escrever_picking(base, [_B, a2], ler_picking(base))
+    assert st == "ok"
+    decl, rod = _ordem(novo)
+    assert decl == rod == [("b005.8", 2), ("dg062.pi+a003.pi", 1)]
+
+
+def test_sem_declaracao_legivel_a_ordem_e_a_do_rodape_impresso():
+    blob = _subida_completa(etiqueta_shopee([("dg062.pi+a003.pi", 1)]), [_A, _B])
+    doc = fitz.open(stream=blob, filetype="pdf")
+    doc.delete_page(1)  # sem a página da declaração
+    so_etiqueta = doc.tobytes()
+    novo, st, _ = escrever_picking(so_etiqueta, [_B, _A], ler_picking(so_etiqueta))
+    assert st == "igual" and novo is so_etiqueta
+    # conteúdo diferente: ordem do Bling
+    novo, st, _ = escrever_picking(so_etiqueta, [_B, _item("a009")], ler_picking(so_etiqueta))
+    assert st == "ok"
+    assert ler_picking(novo).itens == (("b005.8", 2), ("a009", 1))
+
+
+# --- criar só onde o transform apagou ----------------------------------------
+
+
+def test_criar_se_faltar_so_onde_o_transform_apagou_um_rodape():
+    """Layout da Shopee que nunca teve rodapé (DANFE no pé, PAC): o transform
+    não apagou nada ali, a impressão não inventa rodapé."""
+    nunca_teve = transformar_etiqueta(etiqueta_shopee(None))
+    novo, st, det = escrever_picking(nunca_teve, [_item("a1")], None, criar_se_faltar=True)
+    assert (st, novo) == ("sem_rodape", nunca_teve) and "sem_rastro" in det
+    # a etiqueta que tinha rodapé (apagado pelo transform) ganha
+    apagado = _blob_antigo()
+    assert escrever_picking(apagado, [_item("a1")], None, criar_se_faltar=True)[1] == "ok"

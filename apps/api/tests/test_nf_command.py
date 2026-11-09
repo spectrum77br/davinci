@@ -2160,3 +2160,59 @@ def test_picking_na_subida_loga_e_nunca_trava():
         nf_router._picking_do_bling(raw, "870399", item, rodape, "upload")
     niveis = {e["status"]: e["log_level"] for e in logs if e.get("event") == "nf_etiqueta_picking"}
     assert niveis == {"erro": "warning", "ok": "info"}
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_pedido_fake_rodape_e_declaracao_como_o_upseller(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Pedido fake ('fake.*' no Bling) é de propósito: a declaração fica como o
+    marketplace mandou e o rodapé volta com o SKU que o Upseller imprimiu."""
+    from app.services.nf_etiqueta_declaracao import ler_declaracao
+    from app.services.nf_etiqueta_picking import ler_picking
+    from app.services.nf_etiqueta_transform import transformar_etiqueta
+    from tests.declaracao_sintetica import etiqueta_shopee
+
+    await _seed_pedido(
+        db, numero="870304", loja="930304", sku="fake.pi",
+        nome="Pedido fake", unit=1, bling_id=970304,
+    )
+    await db.commit()
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    raw = etiqueta_shopee([("dg054.ci+a001.ci", 1)], ref="UP2NYY000304")
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870304"},
+        files={"file": ("etq.pdf", raw, "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    blob = await _blob_etiqueta(db, "870304")
+    rodape, cru = ler_picking(blob), ler_picking(raw)
+    assert rodape is not None
+    assert rodape.cabecalho == cru.cabecalho
+    assert rodape.linhas == cru.linhas == (("1. dg054.ci+a001.ci", "*1"),)
+    assert ler_declaracao(blob) == ler_declaracao(transformar_etiqueta(raw))
+    assert "fake" not in " ".join(i.sku for i in ler_declaracao(blob))
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_shopee_deadline_vazio_volta_como_o_upseller(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """'Deadline: -' (o Upseller sem data) não some do cabeçalho."""
+    from app.services.nf_etiqueta_picking import ler_picking
+    from tests.declaracao_sintetica import etiqueta_shopee
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    raw = etiqueta_shopee([("b020.12", 8)], ref="UP2NYY000305", deadline=None)
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870305"},
+        files={"file": ("etq.pdf", raw, "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    rodape = ler_picking(await _blob_etiqueta(db, "870305"))
+    assert rodape.cabecalho == ler_picking(raw).cabecalho
+    assert rodape.cabecalho.endswith("; Deadline: -")

@@ -2452,8 +2452,9 @@ def _picking_do_bling(
     com o #ref e o Deadline que o Upseller imprimiu. `rodape` é o que
     `ler_picking` leu no PDF CRU, antes do transform: sem ele (TikTok, ML,
     Amazon…) nada muda. Sem itens do Bling (pedido fake, consulta que
-    falhou) o rodapé volta como o Upseller imprimiu. Nunca trava a subida:
-    qualquer status que não seja 'ok' guarda a etiqueta como estava."""
+    falhou) o rodapé volta com os itens, o #ref e o Deadline (inclusive o
+    "Deadline: -") que o Upseller imprimiu. Nunca trava a subida: qualquer
+    status que não seja 'ok' guarda a etiqueta como estava."""
     if rodape is None:
         return pdf
     try:

@@ -1069,16 +1069,19 @@ def _picking_para_impressao(
     (09/11/2026): o rodapé que já está no blob é realinhado (troca depois da
     subida) e, em pedido da Shopee, a etiqueta antiga sem rodapé (subida entre
     04/08 e hoje, quando o transform só apagava) ganha um — sem #ref/Deadline,
-    e só se a faixa de baixo da etiqueta estiver vazia. Qualquer falha imprime
-    como estava."""
+    só onde o transform apagou um rodapé (layout da Shopee que nunca teve,
+    como o de DANFE no pé, fica sem) e se a faixa de baixo da etiqueta
+    estiver vazia. Qualquer falha imprime como estava."""
     try:
-        novo, status, detalhe = escrever_picking(
-            pdf, itens, ler_picking(pdf), criar_se_faltar=shopee
-        )
+        rodape = ler_picking(pdf)
+        if rodape is None and not shopee:
+            return pdf  # TikTok/ML/Amazon: nada a fazer, sem ler a página de novo
+        novo, status, detalhe = escrever_picking(pdf, itens, rodape, criar_se_faltar=shopee)
     except Exception as exc:  # noqa: BLE001 — nunca trava a impressão
         novo, status, detalhe = pdf, "erro", f"{type(exc).__name__}: {exc}"[:300]
     # 'igual' (blob já alinhado) e 'sem_rodape' (TikTok, ML, Amazon, Shopee
-    # com a faixa ocupada) são o normal e não logam.
+    # sem rastro do rodapé apagado ou com a faixa ocupada) são o normal e não
+    # logam.
     log = {"pedido": pedido, "status": status, "detalhe": detalhe, "origem": "impressao"}
     if status == "erro":
         logger.warning("nf_etiqueta_picking", **log)

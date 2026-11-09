@@ -29,28 +29,43 @@ Camada PURA (sem banco, sem rede), como `nf_etiqueta_declaracao`:
   é DECLARAÇÃO DE CONTEÚDO): o cru do Upseller E o que nós mesmos
   escrevemos (pra reescrever depois). None = sem rodapé.
 - `escrever_picking(pdf, itens, rodape, criar_se_faltar=False)` apaga o
-  rodapé atual (só ele: da linha "SKU:" até o fim da última linha de item) e
+  rodapé atual (só ele: os spans da linha "SKU:" e das linhas de item —
+  texto que não é do rodapé na mesma faixa faz desistir com `nao_coube`) e
   escreve o novo em Helvetica (cabeçalho e quantidade em negrito, como o
   Upseller), no MESMO topo. Nunca invade as linhas "DUIMP:" que o
   transform carimba no pé da etiqueta nem a borda da página: encolhe a
   fonte até 6 pt e, se ainda não couber, resume o que sobra numa última
-  linha "+N itens".
+  linha "+N itens". Cabeçalho largo demais (ref comprida) encolhe até 6 pt,
+  depois perde o Deadline e por fim encurta o #ref com "...".
+- ORDEM dos itens: a da DECLARAÇÃO na mesma etiqueta quando ela tem os
+  mesmos (SKU, quantidade) — a declaração não reescreve quando só a ordem
+  muda, e o papel não pode ter "1." e "2." trocados entre o rodapé e a
+  tabela —; senão, a do rodapé que já está no papel (mesmo conteúdo); senão,
+  a do Bling.
 
 Quem chama:
 
 - SUBIDA (`/agent/etiqueta` e `/agent/etiqueta-lote`): `ler_picking` no PDF
   CRU (antes do transform apagar) e `escrever_picking` no transformado,
   depois da declaração. Sem itens do Bling (pedido fake, consulta que
-  falhou) o rodapé volta exatamente como o Upseller imprimiu.
+  falhou) o rodapé volta com os mesmos itens, #ref e Deadline (inclusive o
+  "Deadline: -") que o Upseller imprimiu.
 - IMPRESSÃO (Controle de Estoque): sobre a cópia do blob que vai pra
   impressora, depois da declaração — realinha com os itens ATUAIS (troca
   depois da subida) e, em pedido da Shopee, `criar_se_faltar=True` devolve o
-  rodapé às etiquetas guardadas entre 04/08 e hoje (sem #ref/Deadline), só
-  se a faixa de baixo da etiqueta estiver vazia. O blob NÃO é regravado.
+  rodapé às etiquetas guardadas entre 04/08 e hoje (sem #ref/Deadline). Só
+  onde o transform APAGOU um rodapé — o retângulo branco da largura toda
+  até a borda que a regra 4 deixa (no levantamento: 595 de 595 Shopee com
+  rodapé têm, nenhuma das 16 Shopee sem rodapé nem das 2209 de outros
+  marketplaces tem) — e se a faixa de baixo estiver vazia. Layout da Shopee
+  que nunca teve rodapé (DANFE no pé, PAC) fica como está. O blob NÃO é
+  regravado.
 
 IDEMPOTENTE: rodar de novo com os mesmos itens devolve `igual` e os MESMOS
 bytes (a comparação é pelo texto que já está no papel). Nunca levanta
 exceção: qualquer falha devolve os bytes de ENTRADA com status `erro`.
+Página girada (nunca vista nas reais) não é escrita: `nao_coube`/`sem_rodape`
+com detalhe "girada", sem virar `erro`.
 """
 
 from __future__ import annotations
@@ -67,6 +82,7 @@ from app.services.nf_etiqueta_declaracao import (
     _largura,
     _quantidade,
     _texto_imprimivel,
+    ler_declaracao,
 )
 
 ANCORA = "Total Items"
@@ -81,9 +97,15 @@ _FAIXA_LIVRE = 0.86
 # Geometria medida no rodapé do Upseller (página 300×442).
 _X_ESQ = 5.0
 _X_QTD = 263.3 / 300.0  # fração da largura: a quantidade começa aqui
+# Na leitura: a linha do rodapé começa na margem (x 5 de 300 no Upseller) e a
+# coluna da quantidade fica à direita disto; span solto entre as duas (ou
+# longe do vizinho) NÃO é do rodapé.
+_X_INICIO = 0.10
+_X_CORTE = 0.75
+_GRUDADO = 1.5  # vão máximo (× fs) entre spans do mesmo pedaço da linha
 _FS_CAB = 9.0
 _FS_ITEM = 8.0
-_FS_MIN = 6.0  # até onde os itens encolhem antes de resumir em "+N itens"
+_FS_MIN = 6.0  # até onde os itens (e o cabeçalho) encolhem
 # O Upseller engrossa (pinta + contorna) o cabeçalho e a quantidade; o SKU é
 # normal. Aqui: Helvetica-Bold e Helvetica (Base14, texto extraível).
 _FONTE_CAB = "hebo"
@@ -92,6 +114,9 @@ _FONTE_QTD = "hebo"
 _SOBE = 0.767  # tinta acima da baseline (× fs): 391,5 − 384,6 = 6,9 em 9 pt
 _DESCE = 0.23  # tinta abaixo da baseline (× fs): 403,2 − 401,4 = 1,8 em 8 pt
 _PASSO_CAB = 1.1  # baseline do cabeçalho → 1º item (× fs do cabeçalho): 9,9
+# Vão mínimo de tinta entre o cabeçalho e o 1º item quando o cabeçalho
+# encolhe mais que os itens (no Upseller: 393,6 → 395,3).
+_FOLGA_LINHA = 1.2
 _PASSO_ITEM = 1.225  # item → item (× fs do item): 9,8
 # Folga mínima até a 1ª linha DUIMP e até a borda de baixo da página.
 _FOLGA_DUIMP = 2.5
@@ -103,6 +128,7 @@ _RE_CAB = re.compile(r"^SKU:\s*(\d+)\s*;\s*Total Items:\s*(\d+)\s*(.*)$", re.IGN
 _RE_ITEM = re.compile(r"^(\d+)\.\s*(.*?)\s*$")
 _RE_MAIS = re.compile(r"^\+\s*(\d+)\s+ite(?:m|ns)\b", re.IGNORECASE)
 _RE_QTD = re.compile(r"\*\s*(\d+)")
+_RE_PRAZO_VAZIO = re.compile(r"^deadline:\s*-?\s*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -114,7 +140,7 @@ class PickingRodape:
     topo: float  # topo da tinta da linha "SKU: …; Total Items: …"
     fundo: float  # fim da tinta da última linha do rodapé
     ref: str | None  # "UP2NYY264253" (sem o '#')
-    deadline: str | None  # "09/11/2026"; "Deadline: -" vira None
+    deadline: str | None  # "09/11/2026"; "Deadline: -" vira None (e sem_prazo)
     itens: tuple[tuple[str, int], ...]  # (sku, quantidade), na ordem do papel
     mais: int = 0  # itens resumidos na linha "+N itens"
     total_skus: int = 0  # o "SKU: N" do cabeçalho
@@ -126,6 +152,7 @@ class PickingRodape:
     fs_ultima: float = _FS_ITEM
     cabecalho: str = ""  # texto da linha do cabeçalho, como está
     linhas: tuple[tuple[str, str], ...] = ()  # (esquerda, direita) de cada linha
+    sem_prazo: bool = False  # o cabeçalho tem "Deadline: -" (sem data): volta igual
 
     def itens_declaracao(self) -> list[ItemDeclaracao]:
         """Os itens do papel no formato da declaração (só SKU e quantidade):
@@ -158,9 +185,14 @@ def _pagina_da_etiqueta(doc: fitz.Document) -> int | None:
     return None
 
 
+# Texto sem os bytes das imagens: os spans saem IGUAIS (conferido em 2654
+# páginas reais) e a leitura fica 5–20× mais rápida — roda em toda impressão.
+_FLAGS_TEXTO = fitz.TEXTFLAGS_DICT & ~fitz.TEXT_PRESERVE_IMAGES
+
+
 def _spans(page: fitz.Page) -> list[dict]:
     out = []
-    for bl in page.get_text("dict")["blocks"]:
+    for bl in page.get_text("dict", flags=_FLAGS_TEXTO)["blocks"]:
         for ln in bl.get("lines", []):
             for s in ln["spans"]:
                 if s["text"].strip():
@@ -216,19 +248,64 @@ def _e_duimp(s: dict) -> bool:
     return s["text"].strip().upper().startswith("DUIMP")
 
 
+def _fs(spans: list[dict]) -> float:
+    return max(float(s["size"]) for s in spans)
+
+
+def _pedacos(ln: _Linha, w: float) -> tuple[list[dict], list[dict]]:
+    """(esquerda, direita) de uma linha do rodapé. A esquerda começa na margem
+    (x < 10% da largura) e segue enquanto os spans estão colados; a direita é
+    a coluna da quantidade (x ≥ 75%), também colada. Qualquer outro span da
+    linha (carimbo, coluna extra, texto por cima) NÃO é do rodapé: não entra
+    no SKU lido e, na escrita, conta como ocupante da faixa (→ `nao_coube`)."""
+    corte = w * _X_CORTE
+
+    def colado(ant: dict, s: dict) -> bool:
+        vao = float(s["bbox"][0]) - float(ant["bbox"][2])
+        return -1.0 <= vao <= _GRUDADO * float(s["size"])
+
+    esq: list[dict] = []
+    for s in ln.spans:  # já em ordem de x
+        x0 = float(s["bbox"][0])
+        if not esq:
+            if x0 >= w * _X_INICIO:
+                break
+        elif x0 >= corte or not colado(esq[-1], s):
+            break
+        esq.append(s)
+    dir_: list[dict] = []
+    for s in ln.spans:
+        if float(s["bbox"][0]) < corte or any(s is e for e in esq):
+            continue
+        if dir_ and not colado(dir_[-1], s):
+            break
+        dir_.append(s)
+    return esq, dir_
+
+
 def _ler_pagina(page: fitz.Page, spans: list[dict]) -> PickingRodape | None:
+    return _ler(page, spans)[0]
+
+
+def _ler(page: fitz.Page, spans: list[dict]) -> tuple[PickingRodape | None, list[dict]]:
+    """(rodapé, os spans que são dele). Só esses spans são apagados na
+    reescrita; o resto da faixa é ocupante."""
     h, w = page.rect.height, page.rect.width
     linhas = _linhas(spans)
     for k, ln in enumerate(linhas):
         if ln.base - _SOBE * ln.fs < h * _MIN_TOPO:
             continue
-        cab = _juntar(ln.spans)
+        esq_cab, _ = _pedacos(ln, w)
+        if not esq_cab:
+            continue
+        cab = _juntar(esq_cab)
         if ANCORA.lower() not in cab.lower():
             continue
         m = _RE_CAB.match(cab)
         if not m:
             continue
         ref = deadline = None
+        sem_prazo = False
         for parte in m.group(3).split(";"):
             parte = parte.strip()
             if parte.startswith("#"):
@@ -236,18 +313,20 @@ def _ler_pagina(page: fitz.Page, spans: list[dict]) -> PickingRodape | None:
             elif parte.lower().startswith("deadline:"):
                 d = parte.split(":", 1)[1].strip()
                 deadline = d if d and d != "-" else None
+                sem_prazo = deadline is None and bool(_RE_PRAZO_VAZIO.match(parte))
+        fs_cab = _fs(esq_cab)
+        do_rodape: list[dict] = list(esq_cab)
         itens: list[tuple[str, int]] = []
         texto_linhas: list[tuple[str, str]] = []
         mais = 0
-        ultima = ln
-        corte = w * 0.75  # quantidade fica na direita (x 263 de 300)
+        ultima, fs_ultima, fs_itens = ln, fs_cab, _FS_ITEM
         for nxt in linhas[k + 1 :]:
-            if nxt.base - ultima.base > 1.6 * max(nxt.fs, ultima.fs) or any(
+            if nxt.base - ultima.base > 1.6 * max(nxt.fs, fs_ultima) or any(
                 _e_duimp(s) for s in nxt.spans
             ):
                 break
-            esq = _juntar([s for s in nxt.spans if s["bbox"][0] < corte])
-            dir_ = _juntar([s for s in nxt.spans if s["bbox"][0] >= corte])
+            pe, pd = _pedacos(nxt, w)
+            esq, dir_ = _juntar(pe), _juntar(pd)
             mm = _RE_MAIS.match(esq)
             mi = _RE_ITEM.match(esq)
             if mm and not dir_:
@@ -257,30 +336,35 @@ def _ler_pagina(page: fitz.Page, spans: list[dict]) -> PickingRodape | None:
                 itens.append((mi.group(2), int(q.group(1)) if q else 1))
             else:
                 break
+            if not texto_linhas:
+                fs_itens = _fs(pe + pd)
             texto_linhas.append((esq, dir_))
-            ultima = nxt
+            do_rodape.extend(pe + pd)
+            ultima, fs_ultima = nxt, _fs(pe + pd)
             if mais:
                 break  # "+N itens" é sempre a última
-        return PickingRodape(
+        rodape = PickingRodape(
             pagina=page.number,
             altura_pagina=h,
-            topo=ln.base - _SOBE * ln.fs,
-            fundo=ultima.base + _DESCE * ultima.fs,
+            topo=ln.base - _SOBE * fs_cab,
+            fundo=ultima.base + _DESCE * fs_ultima,
             ref=ref,
             deadline=deadline,
             itens=tuple(itens),
             mais=mais,
             total_skus=int(m.group(1)),
             total_itens=int(m.group(2)),
-            fs_cab=ln.fs,
-            fs_itens=linhas[k + 1].fs if texto_linhas else _FS_ITEM,
+            fs_cab=fs_cab,
+            fs_itens=fs_itens,
             base_cab=ln.base,
             base_ultima=ultima.base,
-            fs_ultima=ultima.fs,
+            fs_ultima=fs_ultima,
             cabecalho=cab,
             linhas=tuple(texto_linhas),
+            sem_prazo=sem_prazo,
         )
-    return None
+        return rodape, do_rodape
+    return None, []
 
 
 # Nº do pedido da Shopee ('261107NM1344HA'): AAMMDD + 8 letras/dígitos.
@@ -349,13 +433,54 @@ class _Plano:
     mais: int
 
 
-def _cabecalho(itens: Sequence[tuple[str, int]], ref: str | None, deadline: str | None) -> str:
+def _cabecalho(
+    itens: Sequence[tuple[str, int]],
+    ref: str | None,
+    deadline: str | None,
+    sem_prazo: bool = False,
+) -> str:
     cab = f"SKU: {len(itens)}; Total Items: {sum(q for _s, q in itens)}"
     if ref:
         cab += f"; #{_norm(ref)}"
     if deadline:
         cab += f"; Deadline:{_norm(deadline)}"
+    elif sem_prazo:
+        cab += "; Deadline: -"  # como o Upseller imprime quando não tem data
     return cab
+
+
+def _cabecalho_que_cabe(
+    itens: Sequence[tuple[str, int]],
+    ref: str | None,
+    deadline: str | None,
+    sem_prazo: bool,
+    largura: float,
+    fs_max: float,
+) -> tuple[str, float] | None:
+    """(texto, fonte) do cabeçalho na largura da página: encolhe de `fs_max`
+    até 6 pt; se nem assim couber (ref comprida — as reais têm 12
+    caracteres e o maior cabeçalho mede 260 de 290 pt), sai o Deadline e
+    depois o #ref encurta com "...". O texto encurtado relido e replanejado
+    dá o mesmo texto (idempotente). None = nem "SKU: N; Total Items: N" cabe."""
+    larg = largura - 2 * _X_ESQ
+    cab = _cabecalho(itens, ref, deadline, sem_prazo)
+    fs = fs_max
+    while fs >= _FS_MIN - 1e-6:
+        if _largura(cab, _FONTE_CAB, fs) <= larg:
+            return cab, fs
+        fs -= 0.5
+    fs = _FS_MIN
+    sem_data = _cabecalho(itens, ref, None)
+    if _largura(sem_data, _FONTE_CAB, fs) <= larg:
+        return sem_data, fs
+    base = _cabecalho(itens, None, None)
+    r = _norm(ref or "")
+    while r:
+        r = r[:-1]
+        cab = f"{base}; #{r}..." if r else base
+        if _largura(cab, _FONTE_CAB, fs) <= larg:
+            return cab, fs
+    return (base, fs) if _largura(base, _FONTE_CAB, fs) <= larg else None
 
 
 def _planejar(
@@ -365,20 +490,28 @@ def _planejar(
     topo: float,
     limite: float,
     largura: float,
+    sem_prazo: bool = False,
 ) -> _Plano | None:
     """Maior fonte (8 → 6 pt) em que o cabeçalho e TODAS as linhas cabem entre
     `topo` e `limite`; a 6 pt, o que não couber vira "+N itens" na última
-    linha. None = nem o cabeçalho + 1 item cabem."""
-    cab = _cabecalho(itens, ref, deadline)
+    linha. None = nem o cabeçalho + 1 item cabem (ou o cabeçalho não cabe
+    na largura)."""
     x_qtd = largura * _X_QTD
     larg_esq = x_qtd - 3.0 - _X_ESQ
     fs = _FS_ITEM
     while True:
-        fs_cab = min(_FS_CAB, fs + 1.0)
-        while fs_cab > 5.0 and _largura(cab, _FONTE_CAB, fs_cab) > largura - 2 * _X_ESQ:
-            fs_cab -= 0.5
+        cabe = _cabecalho_que_cabe(
+            itens, ref, deadline, sem_prazo, largura, min(_FS_CAB, fs + 1.0)
+        )
+        if cabe is None:
+            return None
+        cab, fs_cab = cabe
         base_cab = topo + _SOBE * fs_cab
-        primeira = base_cab + _PASSO_CAB * fs_cab
+        # 1º item: o passo do Upseller (9,9 em 9 pt) ou, se o cabeçalho
+        # encolheu mais que os itens, o que a tinta das duas fontes pede.
+        primeira = base_cab + max(
+            _PASSO_CAB * fs_cab, _DESCE * fs_cab + _FOLGA_LINHA + _SOBE * fs
+        )
         cabem = 0
         if base_cab + _DESCE * fs_cab <= limite:
             while primeira + cabem * _PASSO_ITEM * fs + _DESCE * fs <= limite:
@@ -460,6 +593,28 @@ def _ocupantes(
     return achados
 
 
+def _rastro_do_transform(page: fitz.Page) -> bool:
+    """A etiqueta teve um rodapé de picking que o transform APAGOU: a regra 4
+    redige de "Total Items" até a borda, na largura toda, e a redação deixa
+    um retângulo branco exatamente assim. No levantamento das etiquetas
+    cruas transformadas: 595 de 595 Shopee com rodapé têm; nenhuma das 16
+    Shopee sem rodapé (DANFE no pé) nem das 2209 de outros marketplaces."""
+    w, h = page.rect.width, page.rect.height
+    for d in page.get_drawings():
+        r = d["rect"]
+        if (
+            "f" in (d.get("type") or "")
+            and d.get("fill") is not None
+            and _branco(d.get("fill"))
+            and r.x0 <= 1.0
+            and r.x1 >= w - 1.0
+            and r.y1 >= h - 1.0
+            and h * _MIN_TOPO - 2.0 <= r.y0 < h - 1.0
+        ):
+            return True
+    return False
+
+
 def _duimp(spans: list[dict], altura: float) -> tuple[float | None, float | None]:
     """(topo da tinta, topo da caixa do glifo) da 1ª linha DUIMP do pé da
     página (o transform carimba de baixo pra cima a partir da borda)."""
@@ -485,6 +640,47 @@ def _itens_limpos(itens: Sequence[ItemDeclaracao]) -> list[tuple[str, int]]:
     return out
 
 
+def _chave(sku: str) -> str:
+    # A declaração lê o SKU sem espaço (ele quebra entre linhas na célula).
+    return "".join((sku or "").split())
+
+
+def _na_ordem_de(
+    lista: list[tuple[str, int]], referencia: Sequence[tuple[str, int]]
+) -> list[tuple[str, int]] | None:
+    """`lista` na ordem de `referencia` quando as duas têm exatamente os
+    mesmos (SKU, quantidade) e só a ordem muda. None = conteúdo diferente."""
+    if len(lista) != len(referencia):
+        return None
+    sobra: dict[tuple[str, int], list[int]] = {}
+    for k, (sku, q) in enumerate(lista):
+        sobra.setdefault((_chave(sku), q), []).append(k)
+    out: list[tuple[str, int]] = []
+    for sku, q in referencia:
+        ks = sobra.get((_chave(sku), int(q)))
+        if not ks:
+            return None
+        out.append(lista[ks.pop(0)])
+    return out
+
+
+def _ordem_do_papel(
+    pdf_bytes: bytes, lista: list[tuple[str, int]], atual: PickingRodape | None
+) -> list[tuple[str, int]]:
+    """A ordem em que os itens saem no rodapé. Com o mesmo conteúdo, a do
+    papel: primeiro a da DECLARAÇÃO desta etiqueta (que não reescreve quando
+    só a ordem muda — 'o Bling e o marketplace às vezes invertem'), depois a
+    do rodapé que já está impresso. Conteúdo diferente: a ordem dada (Bling),
+    que é a mesma em que a declaração acabou de ser reescrita."""
+    if len(lista) < 2:
+        return lista
+    decl = ler_declaracao(pdf_bytes) or []
+    ordem = _na_ordem_de(lista, [(i.sku, i.quantidade) for i in decl])
+    if ordem is None and atual is not None and not atual.mais:
+        ordem = _na_ordem_de(lista, atual.itens)
+    return ordem if ordem is not None else lista
+
+
 def _escrever(
     pdf_bytes: bytes,
     itens: Sequence[ItemDeclaracao] | None,
@@ -506,11 +702,20 @@ def _escrever(
         return pdf_bytes, "sem_rodape", "so_declaracao"
     page = doc[idx]
     spans = _spans(page)
-    atual = _ler_pagina(page, spans)
+    atual, spans_do_rodape = _ler(page, spans)
     if atual is None and rodape is None and not criar_se_faltar:
         return pdf_bytes, "sem_rodape", ""
+    # Criando do zero (etiqueta antiga da Shopee): só onde o transform apagou
+    # um rodapé. Layout que nunca teve (DANFE no pé, PAC) fica como está.
+    criando = atual is None and rodape is None
     if page.rotation:
-        return pdf_bytes, "erro", f"pagina={idx} girada {page.rotation}"
+        # Nunca visto nas reais: as coordenadas do texto lido não batem com
+        # as da escrita. Não escreve, e não é erro (não loga warning a cada
+        # impressão).
+        status = "sem_rodape" if criando else "nao_coube"
+        return pdf_bytes, status, f"pagina={idx} girada {page.rotation}"
+    if criando and not _rastro_do_transform(page):
+        return pdf_bytes, "sem_rodape", f"pagina={idx} sem_rastro"
     w, h = page.rect.width, page.rect.height
 
     if atual is not None:
@@ -522,29 +727,24 @@ def _escrever(
     fonte = rodape or atual
     ref = fonte.ref if fonte else None
     deadline = fonte.deadline if fonte else None
+    sem_prazo = bool(fonte.sem_prazo) if fonte else False
+    lista = _ordem_do_papel(pdf_bytes, lista, atual)
 
     duimp_tinta, duimp_glifo = _duimp(spans, h)
     limite = h - _MARGEM_PAGINA
     if duimp_tinta is not None:
         limite = min(limite, duimp_tinta - _FOLGA_DUIMP)
-    plano = _planejar(lista, ref, deadline, topo, limite, w)
+    plano = _planejar(lista, ref, deadline, topo, limite, w, sem_prazo)
     if plano is None:
         return pdf_bytes, "nao_coube", f"pagina={idx} itens={len(lista)} limite={limite:.1f}"
     if atual is not None and _mesmo_texto(atual, plano) and atual.fundo <= limite + 0.05:
         return pdf_bytes, "igual", f"pagina={idx}"
 
-    # A faixa onde o rodapé vai precisa estar vazia (fora o rodapé atual e as
-    # linhas DUIMP). Criando do zero numa etiqueta antiga, a faixa inteira de
-    # baixo (0,86 da altura até a DUIMP ou a borda).
-    do_rodape: set[int] = set()
-    if atual is not None:
-        base_fim = atual.base_ultima + 0.3
-        do_rodape = {
-            id(s)
-            for s in spans
-            if atual.base_cab - 0.8 <= float(s["origin"][1]) <= base_fim and not _e_duimp(s)
-        }
-    criando = atual is None and rodape is None
+    # A faixa onde o rodapé vai precisa estar vazia (fora os spans do rodapé
+    # atual e as linhas DUIMP): qualquer outro texto nela — até na mesma
+    # linha do rodapé — faz desistir. Criando do zero numa etiqueta antiga,
+    # a faixa inteira de baixo (0,86 da altura até a DUIMP ou a borda).
+    do_rodape = {id(s) for s in spans_do_rodape}
     if criando:
         faixa = fitz.Rect(0, h * _FAIXA_LIVRE, w, duimp_tinta if duimp_tinta is not None else h)
     else:
@@ -558,12 +758,15 @@ def _escrever(
     if atual is not None:
         # Só o texto do rodapé: da tinta do cabeçalho até a baseline da última
         # linha (a caixa do glifo de qualquer caractere tocado some inteira),
-        # parando antes da caixa do glifo da 1ª DUIMP.
+        # parando antes da caixa do glifo da 1ª DUIMP; na largura, só até
+        # onde vão os spans do rodapé.
         y0 = atual.base_cab - 0.75 * atual.fs_cab
         y1 = atual.base_ultima + 0.1 * atual.fs_ultima
         if duimp_glifo is not None:
             y1 = min(y1, duimp_glifo - 0.5)
-        page.add_redact_annot(fitz.Rect(0, y0, w, y1), fill=False)
+        x0 = max(0.0, min(float(s["bbox"][0]) for s in spans_do_rodape) - 1.0)
+        x1 = min(w, max(float(s["bbox"][2]) for s in spans_do_rodape) + 1.0)
+        page.add_redact_annot(fitz.Rect(x0, y0, x1, y1), fill=False)
         page.apply_redactions(
             images=fitz.PDF_REDACT_IMAGE_NONE,
             graphics=fitz.PDF_REDACT_LINE_ART_NONE,
@@ -602,18 +805,22 @@ def escrever_picking(
     *,
     criar_se_faltar: bool = False,
 ) -> tuple[bytes, str, str]:
-    """Escreve o rodapé de picking com `itens` (na ordem dada) na página da
-    etiqueta. `rodape` = o que `ler_picking` leu ANTES (o cru da subida: dá o
-    topo, o #ref e o Deadline quando o PDF de agora já não tem rodapé).
+    """Escreve o rodapé de picking com `itens` na página da etiqueta — na
+    ordem da declaração desta etiqueta (ou do rodapé impresso) quando o
+    conteúdo é o mesmo, senão na ordem dada. `rodape` = o que `ler_picking`
+    leu ANTES (o cru da subida: dá o topo, o #ref e o Deadline quando o PDF
+    de agora já não tem rodapé).
 
     Devolve (bytes, status, detalhe). Só `ok` devolve bytes novos; os outros
     devolvem os bytes de ENTRADA intactos:
 
     - `igual`: o papel já mostra exatamente este rodapé;
     - `sem_rodape`: o PDF não tem rodapé, não veio `rodape` e não é pra criar
-      — ou é pra criar mas a faixa de baixo da etiqueta está ocupada;
+      — ou é pra criar mas o transform não apagou rodapé nenhum ali
+      (`sem_rastro`), a faixa de baixo está ocupada ou a página é girada;
     - `sem_itens`: `itens` vazio/None (o rodapé que houver fica como está);
-    - `nao_coube`: nem a 6 pt com "+N itens" (ou a faixa está ocupada);
+    - `nao_coube`: nem a 6 pt com "+N itens", a faixa tem outro texto (até
+      na mesma linha do rodapé) ou a página é girada;
     - `erro`: qualquer exceção (detalhe diz).
     """
     try:

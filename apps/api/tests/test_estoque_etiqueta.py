@@ -900,3 +900,72 @@ async def test_impressao_sai_quando_a_busca_da_plataforma_falha(
     assert ler_picking(r.content) is None
     assert [i.sku for i in ler_declaracao(r.content)] == ["dg054.sp+a001.sp"]
     assert await _impressa_em(db, "960008") is not None
+
+
+@pytest.mark.asyncio
+async def test_impressao_shopee_que_nunca_teve_rodape_continua_sem(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None],
+):
+    """Layout da Shopee que o Upseller imprime SEM rodapé (DANFE no pé, PAC):
+    o transform não apagou nada ali e a impressão não inventa rodapé."""
+    from app.services.nf_etiqueta_picking import ler_picking
+    from app.services.nf_etiqueta_transform import transformar_etiqueta
+    from tests.declaracao_sintetica import etiqueta_shopee
+
+    blob = transformar_etiqueta(etiqueta_shopee(None))
+    await _seed_shopee(db, admin_view, "960009", blob)
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/960009/etiqueta")
+    assert r.status_code == 200, r.text
+    assert ler_picking(r.content) is None
+    assert "Total Items" not in _texto(r.content)
+    assert [i.sku for i in ler_declaracao(r.content)] == ["dg054.sp+a001.sp"]
+    assert await _blob_no_banco(db, "960009") == blob
+
+
+@pytest.mark.asyncio
+async def test_impressao_bling_inverteu_a_ordem_rodape_na_ordem_da_declaracao(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None],
+):
+    """Subiu com [A, B]; depois o Bling inverteu pra [B, A]. A declaração não
+    reescreve (só a ordem mudou) e o rodapé também não: o '1.'/'2.' do
+    rodapé bate com o Nº da tabela no papel impresso."""
+    from app.services.nf_etiqueta_declaracao import formatar_item, reescrever_declaracao
+    from app.services.nf_etiqueta_picking import escrever_picking, ler_picking
+    from app.services.nf_etiqueta_transform import transformar_etiqueta
+    from tests.declaracao_sintetica import etiqueta_shopee
+
+    a = ("dg062.pi+a003.pi", "Uranyx A17 Pro Max 12.128 - Branco + Fone", 1)
+    b = ("b005.8", "Mala Chanfrada M3 tamanho 18 - Prata", 2)
+    itens = [formatar_item(*a), formatar_item(*b)]
+    raw = etiqueta_shopee([("dg062.pi+a003.pi", 1)], ref="UP2NYY000510")
+    t, st_d, _ = reescrever_declaracao(transformar_etiqueta(raw), itens)
+    blob, st, _ = escrever_picking(t, itens, ler_picking(raw))
+    assert (st_d, st) == ("ok", "ok")
+    await _seed_shopee(db, admin_view, "960010", blob, itens=(b, a))  # Bling: [B, A]
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/960010/etiqueta")
+    assert r.status_code == 200, r.text
+    decl = [(i.sku, i.quantidade) for i in ler_declaracao(r.content)]
+    rodape = ler_picking(r.content)
+    assert decl == list(rodape.itens) == [("dg062.pi+a003.pi", 1), ("b005.8", 2)]
+    assert rodape.ref == "UP2NYY000510"
+    assert await _blob_no_banco(db, "960010") == blob
+
+
+def test_impressao_nao_shopee_sem_rodape_nem_tenta_escrever(monkeypatch: pytest.MonkeyPatch):
+    """TikTok/ML/Amazon (sem rodapé e não é Shopee): sai na hora, sem ler a
+    página de novo — a impressão em lote roda dentro do endpoint async."""
+    from app.routers import estoque as estoque_router
+    from app.services.nf_etiqueta_transform import transformar_etiqueta
+    from tests.declaracao_sintetica import sem_declaracao
+
+    def _nao_chame(*_a, **_k):
+        raise AssertionError("escrever_picking não devia rodar")
+
+    monkeypatch.setattr(estoque_router, "escrever_picking", _nao_chame)
+    blob = transformar_etiqueta(sem_declaracao())
+    itens = [ItemDeclaracao("b027.24", "Mala", "Branca", 1)]
+    assert estoque_router._picking_para_impressao(blob, "960011", itens, shopee=False) is blob
