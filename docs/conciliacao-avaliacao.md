@@ -800,3 +800,22 @@ Caso Poofy 306443: "não entendo como pode ter um pedido sem valor previsto". En
 - **Efeito no "A liberar":** enquanto a compensação não vem, o pedido segue "aguardando" e o previsto conta no quadro. Se ela não vier, vence pelo prazo e vira cartão, em vez de sumir com previsto zero.
 
 O 306443 fica com 0,00: o valor antigo não ficou guardado. Referência: líquido do Bling, R$ 128,50.
+
+## 45. Fim da coluna "Fatura do ML": o Ads vai pra Publicidade (09/11)
+
+Vinicius: "precisamos acabar com esse fatura ML, cada coisa tem que se encaixar nos pedidos". Conferido nas 22 lojas do ML: a fatura lista tudo o que o ML cobrou no período (tarifa de venda, frete, parcelamento, devolução, Ads), mas quase tudo já saiu de cada venda na liberação (`payment_collected.operation_discount`). Nas faturas de chave out/26, o que sobrou pra pagar do saldo foi Product Ads 23.191,69 e outras cobranças 55,38. Exemplo jlas2 23/09→22/10: 45.243,20 = 42.717,49 descontado das vendas + 725,28 de nota de crédito + 1.800,43 de Ads.
+
+- **Publicidade (Ads) do ML:** vem das linhas `PADS` da fatura (`ml_fatura`, tipo `fatura_publicidade`), pela data de cada cobrança, igual à recarga de Ads da Shopee e da Amazon. O quadro de cobranças lê o extrato e essas linhas (`_filtro_cobrancas`).
+- **Pagamento da fatura no saldo** (`fatura_cobrada` e `cobranca_divida` classificados "Fatura do ML"): sai do quadro de cobranças, porque é o Ads já contado. Continua no Extrato do dia e na prova dos nove do saldo. A coluna "Fatura do ML" saiu da tela.
+- **Segurado pra dívida maior que a fatura:** a linha `reserve_for_debt_payment` que o robô classificou e que passa do devido (pago + em aberto) da fatura do período da linha mais o da anterior, + R$ 1, volta a sem dono e o dia reabre (`_soltar_reserva_maior_que_a_fatura`). Sem fatura lida, não mexe; o que uma pessoa classificou fica. No quadro, pagamento/segurado sem classificação conta em "Penalidades e ajustes" como sem dono. Caso: jlas2 08/11 07:32, o saldo inteiro (17.353,77) segurado com a fatura devendo 1.136,40.
+- **ICMS DIFAL na fatura do ML** (`CDIFAL`): caía em frete pelo prefixo "CD". Agora é `fatura_imposto` e fica no pedido (em "outros" da fatura). Não vai pro quadro: sai da venda como o resto, e contar de novo seria em dobro.
+
+## 46. ICMS DIFAL vai pro pedido; sai a coluna Impostos (09/11)
+
+Vinicius: "jogar o difal pra cada pedido" e, com isso, a coluna de impostos não precisa mais existir. A linha de DIFAL da carteira da Shopee (`ADJUSTMENT_CENTER_DEDUCT`) vem sem `order_sn`, mas o texto termina em "… cobrada pelo fisco governamental durante fiscalização referente ao pedido <order_sn>". Desde 24/10 foram 45 linhas (R$ 247,34), cobradas em 03 e 04/11, todas de pedidos de agosto e setembro.
+
+- **Leitura:** `pedido_do_difal` tira o nº do texto; toda linha de DIFAL vira tipo `imposto`, sem classificação, com o nº em `pedido_marketplace`.
+- **Recálculo (passo 0d, antes da conta dos pedidos):** `ligar_difal_aos_pedidos` liga a linha ao pedido do Bling. Pedido de antes do início vira "pedido anterior ao início", com o nº. A linha gravada pela regra de 19/10 (classificada "imposto") entra junto; o que uma pessoa mexeu fica. Sem nº no texto, fica sem dono.
+- **No pedido:** `conciliacao_pedidos.imposto` (mig 0463) soma o DIFAL e desconta do Sobrou (`sobrou_e_margem(..., imposto=)`), fora do recebido e da situação. DIFAL que chega depois do pedido finalizado reabre com o motivo "ICMS DIFAL de X cobrado em dd/mm", e só a pessoa fecha. A grade marca "DIFAL" no Sobrou, o Raio-X mostra "− ICMS DIFAL" na conta do Sobrou e o Excel ganha a coluna "ICMS DIFAL (Shopee)".
+- **Quadro de cobranças:** sai a coluna Impostos; a classificação "Imposto" sai das opções; o que já estava classificado "imposto" à mão cai em "Penalidades e ajustes".
+- **ML:** o DIFAL (`CDIFAL`) sai da venda e já está no dinheiro do pedido (seção 45).

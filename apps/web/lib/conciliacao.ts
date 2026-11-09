@@ -72,6 +72,7 @@ export const TIPOS_MOV: Record<string, string> = {
   fatura_parcelamento_comprador: 'Fatura: parcelamento pago pelo comprador',
   fatura_frete: 'Fatura: Mercado Envios',
   fatura_publicidade: 'Fatura: publicidade',
+  fatura_imposto: 'Fatura: ICMS DIFAL',
   fatura_bonificacao: 'Fatura: bonificação (devolução de tarifa)',
   fatura_outro: 'Fatura: outra cobrança',
 }

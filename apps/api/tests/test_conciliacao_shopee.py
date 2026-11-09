@@ -504,75 +504,124 @@ def test_comparativo_shopee_com_as_linhas_da_tela():
     assert "Detalhes de Renda" in c["rodape"]
 
 
-async def test_difal_da_shopee_e_imposto_classificado_pelo_robo(db, make_user):
-    """19/10 (Vinicius): "Débito por diferencial de alíquota do ICMS" vem sem nº do
-    pedido — 75 linhas de centavos sem dono em 6 lojas. Vira imposto, classificado
-    sozinho (a soma aparece no quadro do Resumo); penalidade continua sem dono."""
-    from app.models import ConciliacaoMovimento
+async def test_difal_da_shopee_vai_pro_pedido_do_texto(db, make_user):
+    """09/11 (Vinicius: "jogar o difal pra cada pedido"): o DIFAL vem sem o nº no campo
+    do pedido, mas o texto diz "… referente ao pedido <order_sn>". A linha vai pro
+    pedido: o de pedido da Conciliação entra no Sobrou (fora do recebido e da situação);
+    o de antes do início vira "pedido anterior ao início". Sem nº nenhum, sem dono."""
+    from app.models import ConciliacaoMovimento, ConciliacaoPedido
     from app.services.conciliacao_calculo import recalcular_loja
 
-    d = date(2026, 10, 10)
+    d = date(2026, 10, 20)
+    texto = (
+        "Débito por diferencial de alíquota do ICMS (DIFAL) cobrada pelo fisco governamental "
+        "durante fiscalização referente ao pedido {}"
+    )
     difal = transacao_para_movimento(
         _tx(
             91,
             "ADJUSTMENT_CENTER_DEDUCT",
-            -2.57,
+            -9.9,
             100.0,
             _epoch(d, 10),
-            description="Débito por diferencial de alíquota do ICMS (DIFAL) - Pedido 2610...",
+            description=texto.format("261012ABCDEF12"),
         )
     )
-    assert difal["tipo"] == "imposto" and difal["classificacao"] == "imposto"
-    assert difal["debito"] == Decimal("2.57")
-    penalidade = transacao_para_movimento(
+    assert difal["tipo"] == "imposto" and difal["classificacao"] is None
+    assert difal["pedido_marketplace"] == "261012ABCDEF12" and difal["debito"] == Decimal("9.90")
+    sem_numero = transacao_para_movimento(
         _tx(
             92,
             "ADJUSTMENT_CENTER_DEDUCT",
-            -250.0,
+            -2.57,
             100.0,
             _epoch(d, 11),
+            description="Débito por diferencial de alíquota do ICMS (DIFAL) - Pedido 2610...",
+        )
+    )
+    assert sem_numero["tipo"] == "imposto" and sem_numero["classificacao"] is None
+    assert sem_numero["pedido_marketplace"] is None
+    penalidade = transacao_para_movimento(
+        _tx(
+            93,
+            "ADJUSTMENT_CENTER_DEDUCT",
+            -250.0,
+            100.0,
+            _epoch(d, 12),
             description="Cobrança de taxa referente ao atingimento de meta de pedidos",
         )
     )
     assert penalidade["tipo"] == "ajuste_shopee" and penalidade["classificacao"] is None
-    # DIFAL com nº do pedido vai pro pedido (não é "sem dono")
-    com_pedido = transacao_para_movimento(
-        _tx(
-            93,
-            "ADJUSTMENT_CENTER_DEDUCT",
-            -2.57,
-            100.0,
-            _epoch(d, 12),
-            order_sn="261006VX383P9J",
-            description="Débito por diferencial de alíquota do ICMS",
+
+    loja = await _loja_shopee(db, make_user)  # início 10/10; o 310001 é de 06/10
+    db.add(
+        BlingOrder(
+            bling_id=5002,
+            numero="310002",
+            numeroloja="261012ABCDEF12",
+            data=datetime(2026, 10, 12, 12, tzinfo=UTC),
+            total=Decimal("150"),
+            totalprodutos=Decimal("150"),
+            situacao="Atendido",
+            loja="204000002",
+            item_index=0,
+            preco_custo=100.0,
+            item_quantidade=1,
+            item_codigo="i223.sa",
         )
     )
-    assert com_pedido["tipo"] == "ajuste_shopee" and com_pedido["classificacao"] is None
-    # linha gravada antes da regra, sem dono: o recálculo classifica
-    loja = await _loja_shopee(db, make_user)
-    antiga = ConciliacaoMovimento(
-        integration_id=loja.integration_id,
-        platform=loja.platform,
-        **{k: v for k, v in difal.items() if k not in ("tipo", "classificacao")},
-        tipo="ajuste_shopee",
-        classificacao=None,
+
+    def gravada(mov: dict, **kw) -> ConciliacaoMovimento:
+        return ConciliacaoMovimento(
+            integration_id=loja.integration_id, platform=loja.platform, **{**mov, **kw}
+        )
+
+    renda = transacao_para_movimento(
+        _tx(
+            94, "ESCROW_VERIFIED_ADD", 130.0, 230.0, _epoch(date(2026, 10, 18), 9), "261012ABCDEF12"
+        )
     )
-    mexida = ConciliacaoMovimento(
-        integration_id=loja.integration_id,
-        platform=loja.platform,
-        **{k: v for k, v in penalidade.items() if k not in ("classificacao",)},
-        classificacao="outro",
+    # DIFAL do pedido de dentro: chega já ligado pelo nº do texto
+    db.add(gravada(renda))
+    db.add(gravada(difal))
+    # DIFAL do pedido de antes do início, gravado pela regra de 19/10 (imposto classificado,
+    # sem o nº)
+    antiga = gravada(
+        {
+            **difal,
+            "id_externo": "95",
+            "pedido_marketplace": None,
+            "descricao": texto.format("261006VX383P9J"),
+        },
+        tipo="imposto",
+        classificacao="imposto",
     )
-    mexida.vinculado_por = "cairo"
-    db.add_all([antiga, mexida])
+    db.add(antiga)
+    db.add(gravada(sem_numero))
     await db.commit()
-    res = await recalcular_loja(db, loja, agora=datetime(2026, 10, 19, 12, tzinfo=UTC))
+    res = await recalcular_loja(db, loja, agora=datetime(2026, 10, 21, 12, tzinfo=UTC))
     await db.commit()
-    assert res["imposto_classificado"] == 1
+    assert res["difal_ligado"] == 2
     await db.refresh(antiga)
-    await db.refresh(mexida)
-    assert antiga.tipo == "imposto" and antiga.classificacao == "imposto"
-    assert mexida.classificacao == "outro"  # o que a pessoa mexeu fica
+    assert antiga.pedido_bling == "310001" and antiga.classificacao == "anterior_ao_inicio"
+    assert antiga.pedido_marketplace == "261006VX383P9J"
+    p = (
+        await db.execute(
+            select(ConciliacaoPedido).where(ConciliacaoPedido.pedido_bling == "310002")
+        )
+    ).scalar_one()
+    assert p.recebido == Decimal("130.00")  # o DIFAL não mexe no recebido
+    assert p.imposto == Decimal("9.90")
+    assert p.sobrou == Decimal("20.10")  # 130 − custo 100 − DIFAL 9,90
+    sem = (
+        await db.execute(
+            select(ConciliacaoMovimento).where(ConciliacaoMovimento.id_externo == "92")
+        )
+    ).scalar_one()
+    assert sem.classificacao is None and sem.pedido_bling is None  # sem dono
+    # rodada seguinte: nada a ligar
+    res = await recalcular_loja(db, loja, agora=datetime(2026, 10, 21, 13, tzinfo=UTC))
+    assert "difal_ligado" not in res
 
 
 async def test_saldo_que_pula_nao_ganha_ajuste_e_os_do_robo_saem(db, make_user):

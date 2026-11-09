@@ -14,6 +14,7 @@ um dia; linha repetida é barrada pelo unique `transaction_id`) até ontem.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -22,11 +23,12 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    BlingOrder,
     ConciliacaoDia,
     ConciliacaoLoja,
     ConciliacaoMovimento,
@@ -79,11 +81,23 @@ def _dinheiro(v: Any) -> Decimal:
 
 def e_imposto_difal(descricao: str | None) -> bool:
     """ "Débito por diferencial de alíquota do ICMS (DIFAL)": a Shopee cobra por pedido,
-    mas a linha vem sem o nº do pedido. 19/10 (Vinicius): classificar "imposto" sozinho
-    — 75 linhas de centavos sem dono em 6 lojas — e mostrar a soma no quadro "Cobranças
-    da plataforma" do Resumo, pra ninguém deixar de ver."""
+    sem o nº no campo do pedido. 19/10 (Vinicius): era classificado "imposto" e somado no
+    quadro do Resumo. 09/11 ("cada coisa tem que se encaixar nos pedidos"): o nº vem no
+    texto e a linha vai pro pedido (`pedido_do_difal`, `ligar_difal_aos_pedidos`)."""
     d = (descricao or "").lower()
     return "diferencial de al" in d and "icms" in d
+
+
+_PEDIDO_NO_TEXTO = re.compile(r"pedido\s+([0-9A-Z]{12,20})\b", re.IGNORECASE)
+
+
+def pedido_do_difal(descricao: str | None) -> str | None:
+    """O nº do pedido no texto do DIFAL: "… cobrada pelo fisco governamental durante
+    fiscalização referente ao pedido 260831R8U3CKK1" (09/11: as 45 linhas desde 24/10)."""
+    if not e_imposto_difal(descricao):
+        return None
+    achado = _PEDIDO_NO_TEXTO.search(descricao or "")
+    return achado.group(1).upper() if achado else None
 
 
 def transacao_para_movimento(t: dict[str, Any]) -> dict[str, Any] | None:
@@ -104,8 +118,11 @@ def transacao_para_movimento(t: dict[str, Any]) -> dict[str, Any] | None:
     )
     saldo = t.get("current_balance")
     classificacao = None if order_sn else CLASSIFICACAO_AUTOMATICA.get(tipo)
-    if tipo == "ajuste_shopee" and not order_sn and e_imposto_difal(descricao):
-        tipo, classificacao = "imposto", "imposto"
+    if tipo == "ajuste_shopee" and e_imposto_difal(descricao):
+        # 09/11: vai pro pedido — o nº vem no campo ou no texto; sem dono até o recálculo
+        # ligar (sem nº nenhum, fica sem dono pra uma pessoa ver)
+        tipo, classificacao = "imposto", None
+        order_sn = order_sn or pedido_do_difal(descricao)
     return {
         "origem": ORIGEM_CARTEIRA,
         "id_externo": str(tid),
@@ -169,9 +186,15 @@ async def renomear_tipos_novos(session: AsyncSession, loja: ConciliacaoLoja) -> 
     return len(rows)
 
 
-async def classificar_impostos(session: AsyncSession, loja: ConciliacaoLoja) -> int:
-    """Linha de DIFAL já gravada como "ajuste da Shopee" sem dono (antes da regra de
-    19/10): vira imposto, classificada. O que uma pessoa mexeu fica como está."""
+async def ligar_difal_aos_pedidos(
+    session: AsyncSession, loja: ConciliacaoLoja, lojas_bling: set[str], inicio: datetime
+) -> int:
+    """ICMS DIFAL da carteira vai pro pedido do nº que vem no texto (09/11, Vinicius:
+    "jogar o difal pra cada pedido"). Roda antes da conta dos pedidos: o de pedido da
+    Conciliação entra no Sobrou dele (`conciliacao_calculo.e_difal_do_pedido`); o de
+    pedido de antes do início vira "pedido anterior ao início", com o nº. A linha gravada
+    como "ajuste da Shopee" ou classificada "imposto" pelo robô (regra de 19/10) entra
+    junto; o que uma pessoa mexeu fica como está. Sem o nº no texto, fica sem dono."""
     mov = ConciliacaoMovimento
     rows = (
         (
@@ -179,26 +202,59 @@ async def classificar_impostos(session: AsyncSession, loja: ConciliacaoLoja) -> 
                 select(mov).where(
                     mov.integration_id == loja.integration_id,
                     mov.origem == ORIGEM_CARTEIRA,
-                    mov.tipo == "ajuste_shopee",
-                    mov.pedido_bling.is_(None),
+                    mov.tipo.in_(("ajuste_shopee", "imposto")),
                     mov.vinculado_por.is_(None),
-                    mov.classificacao.is_(None),
                     mov.descricao.ilike("%diferencial de al%"),
+                    or_(
+                        mov.tipo == "ajuste_shopee",
+                        mov.classificacao == "imposto",
+                        mov.pedido_bling.is_(None),
+                    ),
                 )
             )
         )
         .scalars()
         .all()
     )
-    n = 0
+    rows = [m for m in rows if e_imposto_difal(m.descricao)]
+    if not rows:
+        return 0
     for m in rows:
-        if e_imposto_difal(m.descricao):
-            m.tipo = "imposto"
-            m.classificacao = "imposto"
-            n += 1
-    if n:
-        await session.flush()
-    return n
+        m.tipo = "imposto"
+        if m.classificacao == "imposto":
+            m.classificacao = None
+        if not m.pedido_marketplace:
+            m.pedido_marketplace = pedido_do_difal(m.descricao)
+    sns = {m.pedido_marketplace for m in rows if m.pedido_marketplace}
+    mapa = await resolver_pedidos_bling(session, sns, lojas_bling) if sns else {}
+    numeros = {achado[0] for achado in mapa.values()}
+    datas = (
+        {
+            str(n): d
+            for n, d in (
+                await session.execute(
+                    select(BlingOrder.numero, func.min(BlingOrder.data))
+                    .where(BlingOrder.numero.in_(numeros), BlingOrder.loja.in_(lojas_bling))
+                    .group_by(BlingOrder.numero)
+                )
+            ).all()
+            if n
+        }
+        if numeros
+        else {}
+    )
+    ligadas = 0
+    for m in rows:
+        achado = None if m.pedido_bling else mapa.get(m.pedido_marketplace or "")
+        if not achado:
+            continue
+        m.pedido_bling, m.bling_id = str(achado[0]), achado[1]
+        d = datas.get(str(achado[0]))
+        if d is not None and d < inicio and m.classificacao is None:
+            m.classificacao = "anterior_ao_inicio"
+        ligadas += 1
+    await session.flush()
+    return ligadas
 
 
 async def ler_carteira(

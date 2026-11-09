@@ -47,6 +47,9 @@ SUBTIPOS = {
     "CXDED": "fatura_frete",
     "CXDID": "fatura_frete",
     "PADS": "fatura_publicidade",  # Product Ads (sem pedido)
+    # ICMS DIFAL do pedido (09/11: 5 linhas, R$ 332,74 em out–nov/26): começa com "CD" e
+    # caía em frete pelo prefixo. Sai da venda como o resto — é do pedido, não do quadro.
+    "CDIFAL": "fatura_imposto",
 }
 PAUSA_PADRAO = 15.0  # s entre chamadas: 5/min é o limite (e a Margem divide o balde)
 LIMITE_PAGINA = 1000

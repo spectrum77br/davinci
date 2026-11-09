@@ -59,20 +59,18 @@ type Mes = {
 type Dinheiro = { na_conta: number | null; saldo_em: string | null; a_liberar: number; a_liberar_pedidos: number; reservado: number | null; preso?: number | null; a_receber?: number | null; nota?: string | null }
 // Quadro "Cobranças da plataforma sem pedido" (19/10): o que a plataforma tirou (positivo = saiu) sem pedido no mês
 type Cobrancas = {
-  imposto: number
   publicidade: number
   penalidades: number
   penalidades_linhas: number
   sem_dono: number
   sem_dono_valor: number
-  fatura_ml: number
   anteriores_entrou: number
   anteriores_saiu: number
   anteriores_linhas: number
 }
 type CobrancasMes = { mes: string; empresa: Cobrancas; por_plataforma: Record<string, Cobrancas>; lojas: Record<string, Cobrancas> }
 // Coluna "Cobranças extras (sem pedido)" do bloco Dias (19/10): positivo = a plataforma tirou
-type CobrancasExtras = { total: number; sem_dono: number; imposto: number; publicidade: number; penalidades: number; fatura_ml: number }
+type CobrancasExtras = { total: number; sem_dono: number; publicidade: number; penalidades: number }
 // Bloco "Resultado do mês" (maquete de 19/10; ainda escondido na tela)
 type ResultadoMes = {
   entrou_pedidos_mes: number
@@ -154,7 +152,10 @@ const abertosCob = ref<Record<string, boolean>>({})
 function alternarCob(k: string) {
   abertosCob.value[k] = !abertosCob.value[k]
 }
-const COB_COLS = ['imposto', 'publicidade', 'penalidades', 'fatura_ml'] as const
+// 09/11 (Vinicius: "precisamos acabar com esse fatura ML"): o pagamento da fatura do ML não é custo
+// à parte — o que sobra nela é o Product Ads, que agora cai em Publicidade pela data da cobrança.
+// O ICMS DIFAL também saiu: vai pro pedido (Shopee pelo nº no texto; no ML já sai da venda).
+const COB_COLS = ['publicidade', 'penalidades'] as const
 function fmtCob(v: number | null | undefined) {
   if (v === null || v === undefined || Math.abs(v) < 0.005) return '—'
   return v > 0 ? `− ${fmtMoney(v)}` : `+ ${fmtMoney(-v)}`
@@ -180,7 +181,7 @@ function anterioresLiquido(key: string) {
 }
 function cobrancasTotal(key: string) {
   const c = cbm(key)
-  return (c.imposto || 0) + (c.publicidade || 0) + (c.penalidades || 0) + (c.fatura_ml || 0)
+  return (c.publicidade || 0) + (c.penalidades || 0)
 }
 function entrouLiquido(key: string) {
   return (rm(key).entrou_pedidos_mes || 0) + anterioresLiquido(key) - cobrancasTotal(key)
@@ -577,10 +578,8 @@ onMounted(() => {
                 <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                   <tr>
                     <th class="border-b px-2 py-1 text-left">Mês / marketplace / loja</th>
-                    <th class="border-b px-2 py-1 text-right">Impostos (ICMS DIFAL)</th>
                     <th class="border-b px-2 py-1 text-right">Publicidade (Ads)</th>
                     <th class="border-b px-2 py-1 text-right">Penalidades e ajustes</th>
-                    <th class="border-b px-2 py-1 text-right">Fatura do ML</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -609,7 +608,7 @@ onMounted(() => {
                 </tbody>
               </table>
             </div>
-            <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Vermelho = a plataforma tirou; verde = devolveu. Impostos (ICMS DIFAL da Shopee) e Publicidade (recarga de Ads) o robô classifica sozinho. Penalidades e ajustes ficam sem dono até alguém classificar no Extrato do dia — "N sem dono" é dinheiro que saiu e ninguém olhou. Fatura do ML = cobrada do saldo + segurada pra dívida, sem contar duas vezes.<template v-if="dados.inicio"> A conta começa em {{ fmtDia(dados.inicio + 'T12:00:00') }}.</template></div>
+            <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">Vermelho = a plataforma tirou; verde = devolveu. Publicidade o robô classifica sozinho — na Shopee e na Amazon é a recarga de Ads; no ML é o Product Ads de cada dia, que vem na fatura. A fatura do ML não aparece aqui: tarifa, frete, parcelamento, devolução e ICMS DIFAL já saíram de cada venda, e o pagamento dela no saldo é o Ads já contado. O ICMS DIFAL da Shopee vai pro pedido (o nº vem no texto da linha); o de pedido de antes do início aparece como pedido anterior ao início. Penalidades e ajustes ficam sem dono até alguém classificar no Extrato do dia — "N sem dono" é dinheiro que saiu e ninguém olhou (inclui dinheiro segurado pra dívida maior do que a fatura do ML deve).<template v-if="dados.inicio"> A conta começa em {{ fmtDia(dados.inicio + 'T12:00:00') }}.</template></div>
           </div>
         </div>
 
@@ -689,7 +688,7 @@ onMounted(() => {
               <tr class="border-b bg-muted/60 font-bold text-[#1f3a5f] dark:text-slate-200"><td class="px-2 py-1.5" :colspan="COLS_MES.length + 1">1. Caixa do mês — o que se mexeu nas contas das plataformas (pela data do movimento)</td></tr>
               <tr class="border-b"><td class="px-2 py-1">Entrou de pedidos do mês (líquido, já com estornos e mediações)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right text-emerald-700">{{ fmtSinal(rm(c.key).entrou_pedidos_mes) }}</td></tr>
               <tr class="border-b"><td class="px-2 py-1">Entrou de pedidos de ANTES do início do painel <span class="block text-[10px] text-muted-foreground">entrou − saiu dessas vendas; não é conferido pedido a pedido e o custo não está no painel</span></td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right" :class="cobCls(-anterioresLiquido(c.key))">{{ fmtSinal(anterioresLiquido(c.key)) }}</td></tr>
-              <tr class="border-b"><td class="px-2 py-1">Cobranças sem pedido: impostos, Ads, penalidades e ajustes, fatura do ML <span class="block text-[10px] text-muted-foreground">o quadro "Cobranças da plataforma"; ao lado, quantas linhas ainda estão sem dono</span></td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right" :class="cobCls(cobrancasTotal(c.key))">{{ fmtCob(cobrancasTotal(c.key)) }}<span v-if="cbm(c.key).sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ cbm(c.key).sem_dono }} sem dono</span></td></tr>
+              <tr class="border-b"><td class="px-2 py-1">Cobranças sem pedido: Ads, penalidades e ajustes <span class="block text-[10px] text-muted-foreground">o quadro "Cobranças da plataforma"; ao lado, quantas linhas ainda estão sem dono</span></td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right" :class="cobCls(cobrancasTotal(c.key))">{{ fmtCob(cobrancasTotal(c.key)) }}<span v-if="cbm(c.key).sem_dono" class="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">{{ cbm(c.key).sem_dono }} sem dono</span></td></tr>
               <tr class="border-b text-muted-foreground"><td class="px-2 py-1">Preso na reserva da Amazon (lançado, ainda não liberado — não conta como entrou)</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right">{{ fmtMoney(presoDe(c.key)) }}</td></tr>
               <tr class="border-b bg-muted/40 font-bold"><td class="px-2 py-1">= Entrou líquido nas plataformas no mês</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right" :class="cobCls(-entrouLiquido(c.key))">{{ fmtSinal(entrouLiquido(c.key)) }}</td></tr>
               <tr class="border-b text-muted-foreground"><td class="px-2 py-1">Repasses pro banco (saques) no mês — informação, não é ganho</td><td v-for="c in COLS_MES" :key="c.key" class="whitespace-nowrap px-2 py-1 text-right">{{ fmtMoney(rm(c.key).saques) }}</td></tr>

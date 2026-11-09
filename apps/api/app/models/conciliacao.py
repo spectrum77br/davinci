@@ -250,6 +250,9 @@ class ConciliacaoPedido(Base, TimestampMixin):
     custo_zerado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     custo_zerado_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
     reembolso: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    # ICMS DIFAL cobrado à parte do pedido (Shopee, linha da carteira com o nº no texto):
+    # entra no Sobrou, não no recebido nem na situação (09/11, mig 0463)
+    imposto: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     sobrou: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     margem: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
     # Conciliação

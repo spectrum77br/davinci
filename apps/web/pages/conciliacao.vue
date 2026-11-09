@@ -65,6 +65,8 @@ type Pedido = {
   custo_zerado_em: string | null
   custo_zerado_motivo: string | null
   reembolso: number | null
+  // ICMS DIFAL da Shopee cobrado à parte do pedido (09/11): entra no Sobrou
+  imposto: number | null
   sobrou: number | null
   margem: number | null
   dif_bling_venda: number | null
@@ -965,7 +967,7 @@ await carregar()
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1 text-right tabular-nums">{{ fmtMoney(p.custo) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right tabular-nums" :class="p.reembolso && p.reembolso > 0 ? 'text-red-600' : ''">{{ fmtMoney(p.reembolso) }}</td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums" :class="[sinal(p.sobrou, { pos: 'text-emerald-700', neg: 'text-red-600' }), !p.liberado_em && 'font-normal text-muted-foreground']">
-{{ fmtMoney(p.sobrou) }}
+{{ fmtMoney(p.sobrou) }}<span v-if="p.imposto" class="ml-1 cursor-help text-[10px] font-normal text-red-600" :title="`ICMS DIFAL cobrado à parte pela Shopee: ${fmtMoney(p.imposto)} (já descontado do Sobrou)`">DIFAL</span>
                 </td>
                 <td class="whitespace-nowrap px-1.5 py-1 text-right font-bold tabular-nums" >{{ fmtPct(p.margem) }}</td>
                 <td class="whitespace-nowrap border-l-2 px-1.5 py-1"><span class="rounded px-1.5 py-0.5 text-[10px] font-bold" :class="sitCls(p.situacao)">● {{ p.situacao_label }}</span></td>
@@ -980,7 +982,7 @@ await carregar()
           </table>
         </div>
         <div class="flex items-center justify-between border-t px-3 py-1.5 text-[11px] text-muted-foreground">
-          <span>Sobrou = Recebido (ou previsto, em cinza, enquanto não libera) − custo dos produtos − reembolsos do painel Reembolso − frete pago fora da plataforma (Melhor Envio, marcado ME). Margem = Sobrou ÷ custo.</span>
+          <span>Sobrou = Recebido (ou previsto, em cinza, enquanto não libera) − custo dos produtos − reembolsos do painel Reembolso − frete pago fora da plataforma (Melhor Envio, marcado ME) − ICMS DIFAL cobrado à parte pela Shopee (marcado DIFAL). Margem = Sobrou ÷ custo.</span>
           <span class="inline-flex items-center gap-2">
             <button type="button" class="rounded border px-2 py-0.5 disabled:opacity-40" :disabled="page <= 1" @click="page--">‹</button>
             página {{ page }} de {{ totalPages }}
@@ -1094,7 +1096,7 @@ await carregar()
           <div class="rounded border px-2 py-1.5" :class="['recebido_a_menos', 'vencido', 'estornado_depois', 'em_disputa'].includes(raiox.pedido.situacao) ? 'border-red-300 bg-red-50 dark:bg-red-950/20' : 'border-emerald-300 bg-emerald-50 dark:bg-emerald-950/20'">
             <b>Previsto {{ fmtMoney(raiox.pedido.venda_liquido) }} · Recebido {{ fmtMoney(raiox.pedido.recebido) }} · Diferença {{ fmtMoney(raiox.pedido.dif_previsto_recebido) }}</b>
             <span v-if="raiox.pedido.motivo"> — {{ raiox.pedido.motivo }}</span><br />
-            <b v-if="raiox.pedido.recebido != null">Sobrou: {{ fmtMoney(raiox.pedido.recebido) }} − custo {{ fmtMoney(raiox.pedido.custo) }} − reembolso {{ fmtMoney(raiox.pedido.reembolso) }}<template v-if="raiox.pedido.venda_frete_pago != null"> − frete pago (Melhor Envio) {{ fmtMoney(raiox.pedido.venda_frete_pago) }}</template> = {{ fmtMoney(raiox.pedido.sobrou) }} · margem {{ fmtPct(raiox.pedido.margem) }}</b><b v-else class="font-normal text-muted-foreground">Resultado de verdade: só depois que o dinheiro entrar</b>
+            <b v-if="raiox.pedido.recebido != null">Sobrou: {{ fmtMoney(raiox.pedido.recebido) }} − custo {{ fmtMoney(raiox.pedido.custo) }} − reembolso {{ fmtMoney(raiox.pedido.reembolso) }}<template v-if="raiox.pedido.venda_frete_pago != null"> − frete pago (Melhor Envio) {{ fmtMoney(raiox.pedido.venda_frete_pago) }}</template><template v-if="raiox.pedido.imposto"> − ICMS DIFAL {{ fmtMoney(raiox.pedido.imposto) }}</template> = {{ fmtMoney(raiox.pedido.sobrou) }} · margem {{ fmtPct(raiox.pedido.margem) }}</b><b v-else class="font-normal text-muted-foreground">Resultado de verdade: só depois que o dinheiro entrar</b>
             <div v-if="raiox.pedido.custo_regra === 'manual'" class="mt-1 text-muted-foreground">custo zerado à mão por {{ raiox.pedido.custo_zerado_por }} em {{ fmtDiaHora(raiox.pedido.custo_zerado_em) }}: {{ raiox.pedido.custo_zerado_motivo }}</div>
             <div v-else-if="raiox.pedido.custo_regra === 'manutencao'" class="mt-1 text-muted-foreground">custo zero: Bling em Manutenção (o produto ainda é nosso)</div>
             <div v-if="raiox.pedido.etapa_por" class="mt-1 text-muted-foreground">etapa {{ raiox.pedido.etapa_label }} por {{ raiox.pedido.etapa_por }} em {{ fmtDiaHora(raiox.pedido.etapa_em) }}<span v-if="raiox.pedido.etapa_motivo">: {{ raiox.pedido.etapa_motivo }}</span></div>

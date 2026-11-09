@@ -713,6 +713,7 @@ from app.models import ConciliacaoLoja, ConciliacaoMovimento, ConciliacaoPedido 
 from app.models.conciliacao import (  # noqa: E402
     ORIGEM_AMAZON,
     ORIGEM_EXTRATO,
+    ORIGEM_FATURA,
     ORIGEM_TIKTOK,
     ORIGENS_EXTRATO,
 )
@@ -777,6 +778,7 @@ _CAMPOS_PEDIDO = (
     "custo_zerado_por",
     "custo_zerado_motivo",
     "reembolso",
+    "imposto",
     "sobrou",
     "margem",
     "dif_bling_venda",
@@ -2379,6 +2381,7 @@ async def _zerar_custo(
         p.reembolso or Decimal("0"),
         p.venda_frete_pago,
         cancelado=p.situacao == "cancelado",
+        imposto=p.imposto,
     )
 
 
@@ -2413,6 +2416,7 @@ _COLUNAS_XLSX = [
     ("Custo: de onde vem", "custo_regra"),
     ("Custo zerado à mão (motivo)", "custo_zerado_motivo"),
     ("Reembolso", "reembolso"),
+    ("ICMS DIFAL (Shopee)", "imposto"),
     ("Sobrou", "sobrou"),
     ("Margem", "margem"),
     ("Situação", "situacao_label"),
@@ -2526,7 +2530,6 @@ CLASSIFICACOES = (
     "saque",
     "fatura_ml",
     "publicidade",
-    "imposto",
     "anterior_ao_inicio",
     "reserva",
     "venda_desfeita",
@@ -2537,7 +2540,6 @@ CLASSIFICACAO_LABELS = {
     "saque": "Saque",
     "fatura_ml": "Fatura do ML",
     "publicidade": "Publicidade",
-    "imposto": "Imposto (ICMS DIFAL)",
     "anterior_ao_inicio": "Pedido anterior ao início",
     "reserva": "Reserva (vai e volta)",
     "venda_desfeita": "Venda desfeita (sem pedido no Bling)",
@@ -3812,9 +3814,18 @@ _TIPOS_SEM_PEDIDO_QUE_SAO_COBRANCA = (
 )
 
 
+_TIPOS_PAGAMENTO_DA_FATURA = ("fatura_cobrada", "cobranca_divida")
+
+
 def _balde_cobranca(tipo: str, classificacao: str | None, com_pedido: bool) -> str | None:
     """Em que balde do quadro "Cobranças da plataforma" a linha cai; None = não é cobrança
-    sem pedido (venda com pedido, saque, reserva, venda desfeita)."""
+    sem pedido (venda com pedido, saque, reserva, venda desfeita).
+
+    09/11 (Vinicius: "precisamos acabar com esse fatura ML"): o pagamento da fatura do ML
+    no saldo do MP não é custo — tarifa, frete, parcelamento e devolução já saíram de cada
+    venda, e o que sobra pra pagar é o Product Ads, que entra em Publicidade pelas linhas
+    da própria fatura (`_filtro_cobrancas`). Contar o pagamento seria contar duas vezes.
+    Pagamento/segurado SEM classificação (maior que a dívida da fatura) é sem dono."""
     if classificacao == "anterior_ao_inicio":
         return "anteriores"
     if com_pedido or classificacao in _CLASSIFICACOES_QUE_NAO_SAO_COBRANCA:
@@ -3822,11 +3833,15 @@ def _balde_cobranca(tipo: str, classificacao: str | None, com_pedido: bool) -> s
     if tipo in TIPOS_RESERVA_SET or tipo == "saque":
         return None
     if classificacao == "imposto":
-        return "imposto"
+        # 09/11: o DIFAL vai pro pedido; o que ficou classificado "imposto" à mão (antes
+        # de a opção sair) cai junto das penalidades e ajustes
+        return "penalidades"
     if classificacao == "publicidade":
         return "publicidade"
     if classificacao == "fatura_ml":
-        return "fatura_ml"
+        return None
+    if tipo in _TIPOS_PAGAMENTO_DA_FATURA and classificacao is None:
+        return "penalidades"
     if tipo in _TIPOS_SEM_PEDIDO_QUE_SAO_COBRANCA or classificacao in ("ajuste", "outro"):
         return "penalidades"
     return None
@@ -3843,11 +3858,22 @@ def _saiu_da_cobranca(tipo: str, c: Any, d: Any, pago_res: Any) -> float:
 _EXTRAS_VAZIO = {
     "total": 0.0,
     "sem_dono": 0,
-    "imposto": 0.0,
     "publicidade": 0.0,
     "penalidades": 0.0,
-    "fatura_ml": 0.0,
 }
+
+
+def _filtro_cobrancas() -> Any:
+    """Linhas que o quadro de cobranças lê: o extrato (caixa) e, do ML, o Product Ads
+    linha a linha da fatura, pela data da cobrança (09/11) — no ML o Ads não sai do saldo
+    à parte, vem dentro do pagamento da fatura."""
+    from sqlalchemy import and_, or_
+
+    mov = ConciliacaoMovimento
+    return or_(
+        mov.origem.in_(ORIGENS_EXTRATO),
+        and_(mov.origem == ORIGEM_FATURA, mov.tipo == "fatura_publicidade"),
+    )
 
 
 async def _cobrancas_extras_por_dia(
@@ -3877,7 +3903,7 @@ async def _cobrancas_extras_por_dia(
             )
             .where(
                 mov.integration_id.in_(ids),
-                mov.origem.in_(ORIGENS_EXTRATO),
+                _filtro_cobrancas(),
                 mov.data >= ini_dt,
                 mov.data < fim_dt,
             )
@@ -3976,13 +4002,11 @@ def _somar_cobrancas(rows: Iterable[Sequence[Any]]) -> dict[str, Any]:
     """Soma nos baldes do quadro. Cada linha: tipo, classificação, tem pedido, quantas,
     crédito, débito e o que foi pago com o segurado."""
     out: dict[str, Any] = {
-        "imposto": 0.0,
         "publicidade": 0.0,
         "penalidades": 0.0,
         "penalidades_linhas": 0,
         "sem_dono": 0,
         "sem_dono_valor": 0.0,
-        "fatura_ml": 0.0,
         "anteriores_entrou": 0.0,
         "anteriores_saiu": 0.0,
         "anteriores_linhas": 0,
@@ -4011,11 +4035,11 @@ async def _cobrancas_da_plataforma(
 ) -> dict[str, Any]:
     """Quadro "Cobranças da plataforma" (19/10, Vinicius): o que a plataforma tirou (ou
     devolveu) SEM pedido no período, pela data do movimento — não entra no resultado dos
-    pedidos e por isso tinha que aparecer em algum lugar. Imposto (ICMS DIFAL da Shopee)
-    e publicidade são classificados pelo robô; penalidades e ajustes ficam sem dono até
-    alguém classificar (contados à parte); a fatura do ML soma a cobrança do saldo e o
-    segurado pra dívida sem contar duas vezes (raw._pago_com_reserva); e o que é de
-    pedido anterior ao início (01/10) aparece como entrou/saiu à parte."""
+    pedidos e por isso tinha que aparecer em algum lugar. Publicidade é classificada pelo
+    robô (o Ads do ML vem das linhas da fatura, pela data da cobrança); penalidades e
+    ajustes ficam sem dono até alguém classificar (contados à parte); o pagamento da
+    fatura do ML não entra (09/11: é o Ads já contado), nem o ICMS DIFAL (09/11: vai pro
+    pedido); e o que é de pedido anterior ao início aparece como entrou/saiu à parte."""
     from sqlalchemy import Numeric, cast
 
     mov = ConciliacaoMovimento
@@ -4035,7 +4059,7 @@ async def _cobrancas_da_plataforma(
             )
             .where(
                 mov.integration_id == loja.integration_id,
-                mov.origem.in_(ORIGENS_EXTRATO),
+                _filtro_cobrancas(),
                 mov.data >= ini_dt,
                 mov.data < fim_dt,
             )
@@ -4078,7 +4102,7 @@ async def _cobrancas_por_mes(
             )
             .where(
                 mov.integration_id.in_(por_integracao),
-                mov.origem.in_(ORIGENS_EXTRATO),
+                _filtro_cobrancas(),
                 mov.data >= ini_dt,
                 mov.data < fim_dt,
             )

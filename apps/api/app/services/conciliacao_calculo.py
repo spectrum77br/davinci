@@ -43,6 +43,7 @@ from app.models import (
 )
 from app.models.conciliacao import (
     ETAPA_PELO_ROBO,
+    ORIGEM_CARTEIRA,
     ORIGEM_EXTRATO,
     ORIGEM_FATURA,
     ORIGEM_TIKTOK,
@@ -111,6 +112,11 @@ def _previsao_do_billing(raw: Any) -> datetime | None:
                     continue
                 return d if d.tzinfo else d.replace(tzinfo=BRT)
     return None
+
+
+def e_difal_do_pedido(m: Any) -> bool:
+    """Linha de ICMS DIFAL da carteira da Shopee (09/11): vai pro Sobrou do pedido."""
+    return m.origem == ORIGEM_CARTEIRA and m.tipo == "imposto"
 
 
 def _venda_cancelada(fin: MarketplaceOrderFinancial | None) -> bool:
@@ -792,11 +798,14 @@ def sobrou_e_margem(
     frete_pago: Decimal | None,
     *,
     cancelado: bool,
+    imposto: Decimal | None = None,
 ) -> tuple[Decimal | None, Decimal | None]:
-    """Sobrou = recebido − custo − reembolso − frete pago fora; margem = sobrou ÷ custo."""
+    """Sobrou = recebido − custo − reembolso − frete pago fora − ICMS DIFAL cobrado à
+    parte (09/11); margem = sobrou ÷ custo."""
+    fora = (frete_pago or ZERO) + (imposto or ZERO)
     if cancelado:
-        return (base or ZERO) - reembolso - (frete_pago or ZERO), None
-    sobrou = (base - custo - reembolso - (frete_pago or ZERO)) if base is not None else None
+        return (base or ZERO) - reembolso - fora, None
+    sobrou = (base - custo - reembolso - fora) if base is not None else None
     margem = (
         (sobrou / custo).quantize(Decimal("0.0001"))
         if (sobrou is not None and custo > ZERO)
@@ -1047,8 +1056,9 @@ def etapa_do_pedido(
         and (
             atual.etapa_por != ETAPA_PELO_ROBO
             # 22/10: reaberto porque o custo mudou com o Bling — o dinheiro pode continuar
-            # batendo, então só a pessoa fecha (manter ou zerar o custo)
-            or (atual.etapa_motivo or "").startswith("custo ")
+            # batendo, então só a pessoa fecha (manter ou zerar o custo); 09/11: idem o
+            # ICMS DIFAL cobrado depois de finalizado
+            or (atual.etapa_motivo or "").startswith(("custo ", "ICMS DIFAL"))
         )
     ):
         # 16/10 (revisão, aprovado): o que a pessoa reabriu só a pessoa fecha — o robô
@@ -1247,6 +1257,103 @@ async def _soltar_cobrancas_da_plataforma(session: AsyncSession, loja: Conciliac
     return len(linhas)
 
 
+def _devido_da_fatura(resumo: dict[str, Any]) -> tuple[date, date, Decimal] | None:
+    """Período da fatura do ML e o que ela cobrou do saldo (pago + em aberto): o que não
+    saiu das vendas. Sem período legível, None."""
+    periodo = resumo.get("period") or {}
+    try:
+        de = date.fromisoformat(str(periodo.get("date_from") or "")[:10])
+        ate = date.fromisoformat(str(periodo.get("date_to") or "")[:10])
+    except ValueError:
+        return None
+    pago = resumo.get("payment_collected") or {}
+    devido = abs(_d(pago.get("total_payment")) or ZERO) + abs(_d(pago.get("total_debt")) or ZERO)
+    return de, ate, devido
+
+
+async def _soltar_reserva_maior_que_a_fatura(session: AsyncSession, loja: ConciliacaoLoja) -> int:
+    """Dinheiro segurado pra dívida (`reserve_for_debt_payment`) maior do que a fatura do
+    ML cobra do saldo não é a fatura: volta a sem dono e o dia reabre (09/11, jlas2
+    08/11 07:32: o saldo inteiro, 17.353,77, segurado com a fatura devendo 1.136,40 —
+    Vinicius: "temos que analisar esse"). O limite é o devido da fatura do período da
+    linha mais o da anterior; sem as duas faturas lidas, não mexe. Só o que o robô
+    classificou."""
+    from app.models import ConciliacaoSync
+
+    resumos = (
+        (
+            await session.execute(
+                select(ConciliacaoSync).where(
+                    ConciliacaoSync.integration_id == loja.integration_id,
+                    ConciliacaoSync.origem == ORIGEM_FATURA,
+                    ConciliacaoSync.chave.like("%|resumo"),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    periodos = sorted(
+        p
+        for p in (
+            _devido_da_fatura((r.detalhe or {}).get("resumo") or {})
+            for r in resumos
+            if isinstance(r.detalhe, dict)
+        )
+        if p is not None
+    )
+    if not periodos:
+        return 0
+    mov = ConciliacaoMovimento
+    linhas = (
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem.in_(ORIGENS_EXTRATO),
+                    mov.tipo == "cobranca_divida",
+                    mov.classificacao == "fatura_ml",
+                    mov.vinculado_por.is_(None),
+                    mov.pedido_bling.is_(None),
+                    mov.debito > 0,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    soltas = []
+    for m in linhas:
+        dia = m.data.astimezone(BRT).date()
+        ate_o_dia = [p for p in periodos if p[0] <= dia]
+        if len(ate_o_dia) < 2:
+            continue
+        anterior, atual = ate_o_dia[-2], ate_o_dia[-1]
+        if (atual[0] - anterior[1]).days > 3:
+            # a fatura do período anterior não foi lida (inova/barbosa/kfa2 em 09/11): sem
+            # ela não dá pra saber quanto a loja devia — não mexe
+            continue
+        limite = anterior[2] + atual[2] + Decimal("1.00")
+        if m.debito > limite:
+            m.classificacao = None
+            soltas.append(m)
+            logger.warning(
+                "conciliacao_reserva_maior_que_a_fatura",
+                loja=loja.conta,
+                valor=str(m.debito),
+                limite=str(limite),
+                dia=dia.isoformat(),
+            )
+    if soltas:
+        await reabrir_dias(
+            session,
+            loja,
+            {m.data.astimezone(BRT).date() for m in soltas},
+            motivo="segurado pra dívida maior que a fatura do ML",
+        )
+    return len(soltas)
+
+
 async def _classificar_zeradas(session: AsyncSession, loja: ConciliacaoLoja) -> int:
     """Linha do extrato de R$ 0,00 sem pedido no Bling (03/11, poofy: "Tarifa da Amazon ·
     Subscription" zerada travava o 02/11): não é dinheiro, não pode travar o dia — o robô
@@ -1295,11 +1402,15 @@ async def recalcular_loja(
     # linha `release` com crédito, bruto e nº da venda é liberação — renomeia pra que
     # o pedido compare o valor em vez de dizer "nada liberou e entrou X"
     liberacoes_renomeadas = await _renomear_liberacoes_sem_nome(session, loja)
+    difal_ligado = 0
     if plataforma_loja == "shopee":
         # 0c. Liberação negativa e compensação da Shopee gravadas como "outro" (22/10)
-        from app.services.conciliacao_shopee import renomear_tipos_novos
+        from app.services.conciliacao_shopee import ligar_difal_aos_pedidos, renomear_tipos_novos
 
         liberacoes_renomeadas += await renomear_tipos_novos(session, loja)
+        # 0d. ICMS DIFAL vai pro pedido do nº que vem no texto (09/11) — antes da conta
+        # dos pedidos, pra entrar no Sobrou já nesta rodada
+        difal_ligado = await ligar_difal_aos_pedidos(session, loja, lojas_bling, inicio_dt)
 
     # 1. Pedidos do Bling da loja desde o início (uma linha por item → agrupa por número).
     rows = (
@@ -1446,6 +1557,13 @@ async def recalcular_loja(
         venda = fin_por_numeroloja.get(numeroloja) if numeroloja else None
         meus = movs_por_numero.get(numero, [])
         extrato = [m for m in meus if m.origem in ORIGENS_EXTRATO]
+        # ICMS DIFAL da Shopee ligado ao pedido (09/11): vai pro Sobrou, fora do recebido
+        # e da situação — é imposto, não a Shopee tomando a venda de volta
+        difal = [m for m in extrato if e_difal_do_pedido(m)]
+        extrato = [m for m in extrato if not e_difal_do_pedido(m)]
+        imposto = (
+            _soma([m.debito for m in difal]) - _soma([m.credito for m in difal]) if difal else None
+        )
         if plataforma_loja == "tiktok" and liquidacao_negativa_tiktok(extrato):
             contagem["liquidacao_negativa"] += 1
         fatura_movs = [m for m in meus if m.origem == ORIGEM_FATURA]
@@ -1465,7 +1583,11 @@ async def recalcular_loja(
                 [m.credito for m in fatura_movs if m.tipo == "fatura_bonificacao"]
             ),
             "outros": _soma(
-                [m.debito for m in fatura_movs if m.tipo in ("fatura_outro", "fatura_publicidade")]
+                [
+                    m.debito
+                    for m in fatura_movs
+                    if m.tipo in ("fatura_outro", "fatura_publicidade", "fatura_imposto")
+                ]
             ),
         }
         bling_total = _d(cab.total)
@@ -1578,6 +1700,20 @@ async def recalcular_loja(
             com_dinheiro=calc["recebido"] is not None,
             devolvido=calc["recebido"] is not None and calc["recebido"] <= ZERO,
         )
+        if difal and etapa.get("etapa") == "finalizado" and atual is not None and atual.etapa_em:
+            # DIFAL cobrado depois de finalizado (a Shopee cobrou em 03–04/11 o de pedidos de
+            # ago/set): o Sobrou muda — volta pra uma pessoa ver, como movimento novo
+            chegou = max(_entrou_em(m) for m in difal)
+            if chegou > atual.etapa_em:
+                etapa.update(
+                    etapa="reaberto",
+                    etapa_em=agora,
+                    etapa_por=ETAPA_PELO_ROBO,
+                    etapa_motivo=(
+                        f"ICMS DIFAL de {imposto or ZERO:.2f} cobrado em "
+                        f"{chegou.astimezone(BRT):%d/%m}"
+                    ),
+                )
         reembolso = reembolso_por_numero.get(numero, ZERO)
         # Venda sem valor ainda (Shopee antes de calcular o escrow): não grava tarifa/líquido 0,00
         venda_ok = venda if calc["situacao"] != "sem_venda" else None
@@ -1664,6 +1800,7 @@ async def recalcular_loja(
             reembolso,
             frete_pago,
             cancelado=calc["situacao"] == "cancelado",
+            imposto=imposto,
         )
         # 22/10 (Vinicius): o Bling mudou (Manutenção → Perdimento, por exemplo) e com ele
         # o custo de um pedido finalizado — reabre, como faz quando cai dinheiro novo.
@@ -1793,6 +1930,7 @@ async def recalcular_loja(
             "custo": custo,
             "custo_regra": regra,
             "reembolso": reembolso,
+            "imposto": imposto,
             "sobrou": sobrou,
             "margem": margem,
             "dif_bling_venda": calc["dif_bling_venda"],
@@ -1930,14 +2068,11 @@ async def recalcular_loja(
         gravadas = await _gravar_pago_com_reserva(session, loja)
         if gravadas:
             contagem["pago_com_reserva_gravado"] = gravadas
-    if plataforma_loja == "shopee":
-        # 19/10 (Vinicius): ICMS DIFAL da Shopee é imposto por pedido, sem nº do pedido
-        # na linha — classifica sozinho (a soma aparece no quadro do Resumo)
-        from app.services.conciliacao_shopee import classificar_impostos
-
-        impostos = await classificar_impostos(session, loja)
-        if impostos:
-            contagem["imposto_classificado"] = impostos
+        soltas_reserva = await _soltar_reserva_maior_que_a_fatura(session, loja)
+        if soltas_reserva:
+            contagem["reserva_maior_que_a_fatura"] = soltas_reserva
+    if difal_ligado:
+        contagem["difal_ligado"] = difal_ligado
     # Linha sem nº de venda mas do MESMO pagamento de uma linha já ligada a um pedido
     # (16/10: relatório antigo da aguiar sem ORDER_ID; reservas/estornos sem o nº):
     # herda o pedido da irmã.

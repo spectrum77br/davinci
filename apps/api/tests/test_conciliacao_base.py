@@ -789,6 +789,8 @@ def test_detalhe_para_movimento_mapeia_subtipos():
     assert fat.tipo_do_detalhe("CHARGE", "CVVFNU") == "fatura_parcelamento"
     assert fat.tipo_do_detalhe("CHARGE", "CDSDB") == "fatura_frete"
     assert fat.tipo_do_detalhe("CHARGE", "CXDED") == "fatura_frete"
+    # 09/11: ICMS DIFAL começa com "CD" mas não é frete
+    assert fat.tipo_do_detalhe("CHARGE", "CDIFAL") == "fatura_imposto"
     assert fat.tipo_do_detalhe("BONUS", "BFONPN") == "fatura_bonificacao"
     assert fat.tipo_do_detalhe("CHARGE", "ZZZ") == "fatura_outro"
 
@@ -3581,6 +3583,13 @@ async def test_resumo_quadro_cobrancas_da_plataforma_sem_pedido(
     segurado.classificacao = "fatura_ml"
     fatura_direta = _mov(loja, "fatura_cobrada", d + timedelta(days=1), debito="377.27")
     fatura_direta.classificacao = "fatura_ml"
+    # 09/11: o Product Ads do ML vem das linhas da fatura, pela data da cobrança
+    ads_ml = _mov(loja, "fatura_publicidade", d, debito="45.10", origem="ml_fatura")
+    ads_ml.classificacao = "publicidade"
+    # cobrança da fatura (não Ads) não entra: já saiu da venda
+    tarifa_ml = _mov(loja, "fatura_tarifa_venda", d, debito="80.00", origem="ml_fatura")
+    # segurado pra dívida que o robô soltou (maior que a fatura): sem dono
+    segurado_solto = _mov(loja, "cobranca_divida", d + timedelta(days=1), debito="1000.00")
     antes_entrou = _mov(loja, "venda_liberada", d, credito="500.00", pedido_bling="290000")
     antes_entrou.classificacao = "anterior_ao_inicio"
     antes_saiu = _mov(loja, "mediacao", d, debito="200.00", pedido_bling="290000")
@@ -3600,6 +3609,9 @@ async def test_resumo_quadro_cobrancas_da_plataforma_sem_pedido(
             fatura,
             segurado,
             fatura_direta,
+            ads_ml,
+            tarifa_ml,
+            segurado_solto,
             antes_entrou,
             antes_saiu,
             saque,
@@ -3615,13 +3627,14 @@ async def test_resumo_quadro_cobrancas_da_plataforma_sem_pedido(
     assert r.status_code == 200, r.text
     corpo = r.json()
     esperado = {
-        "imposto": 2.57,
-        "publicidade": 2000.0,
-        "penalidades": 150.0,  # 250 tirados − 100 devolvidos
-        "penalidades_linhas": 2,
-        "sem_dono": 1,
-        "sem_dono_valor": 250.0,
-        "fatura_ml": 739.59,  # 362,32 (paga com o segurado: conta uma vez) + 377,27 direta
+        "publicidade": 2045.1,  # recarga 2.000 + Product Ads do ML 45,10 (da fatura)
+        # 250 tirados − 100 devolvidos + 1.000 segurado sem dono + 2,57 classificado
+        # "imposto" à mão antes de a opção sair (09/11); o pagamento da fatura do ML
+        # (362,32 + 377,27) não entra: é o Ads já contado (09/11)
+        "penalidades": 1152.57,
+        "penalidades_linhas": 4,
+        "sem_dono": 2,
+        "sem_dono_valor": 1250.0,
         "anteriores_entrou": 500.0,
         "anteriores_saiu": 200.0,
         "anteriores_linhas": 2,
@@ -3632,14 +3645,12 @@ async def test_resumo_quadro_cobrancas_da_plataforma_sem_pedido(
     # bloco Dias: a coluna "Cobranças extras (sem pedido)" do dia 10 e do dia 11
     por_dia = {x["dia"]: x["cobrancas_extras"] for x in corpo["dias"]}
     assert por_dia["2026-10-10"] == {
-        "total": 2514.89,  # 2,57 + 2.000 + 150 + 362,32 (segurado; a fatura paga com ele = 0)
+        "total": 2197.67,  # 2.045,10 + 150 + 2,57
         "sem_dono": 1,
-        "imposto": 2.57,
-        "publicidade": 2000.0,
-        "penalidades": 150.0,
-        "fatura_ml": 362.32,
+        "publicidade": 2045.1,
+        "penalidades": 152.57,
     }
-    assert por_dia["2026-10-11"]["total"] == 377.27 and por_dia["2026-10-11"]["sem_dono"] == 0
+    assert por_dia["2026-10-11"]["total"] == 1000.0 and por_dia["2026-10-11"]["sem_dono"] == 1
     assert por_dia["2026-10-12"]["total"] == 0.0
     # bloco "Resultado do mês" (ainda escondido na tela): o pedido 301102 liberou em 10/10
     rm = corpo["lojas"][0]["resultado_mes"]
@@ -3689,6 +3700,79 @@ async def test_recalculo_grava_quanto_da_fatura_foi_pago_com_o_segurado(db, make
     # rodada seguinte: nada muda
     res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 19, 13, tzinfo=UTC))
     assert "pago_com_reserva_gravado" not in res
+
+
+async def test_recalculo_solta_segurado_maior_que_a_fatura(db, make_user):
+    """09/11 (jlas2 08/11 07:32): o MP segurou o saldo inteiro (17.353,77) pra dívida com a
+    fatura do ML devendo 1.136,40 — não é a fatura: volta a sem dono e o dia reabre. O
+    segurado que cabe na fatura segue "Fatura do ML"; o que uma pessoa classificou fica."""
+    from app.models import ConciliacaoDia
+
+    loja, _integ = await _loja(db, make_user)
+
+    def resumo(chave: str, de: str, ate: str, pago: float, divida: float) -> ConciliacaoSync:
+        return ConciliacaoSync(
+            integration_id=loja.integration_id,
+            origem="ml_fatura",
+            chave=f"{chave}|resumo",
+            status="lido",
+            lido_em=datetime(2026, 11, 9, 9, tzinfo=UTC),
+            detalhe={
+                "resumo": {
+                    "period": {"key": chave, "date_from": de, "date_to": ate},
+                    "payment_collected": {"total_payment": -pago, "total_debt": divida},
+                }
+            },
+        )
+
+    quando = datetime(2026, 11, 8, 10, 32, tzinfo=UTC)
+    grande = _mov(loja, "cobranca_divida", quando, debito="17353.77")
+    grande.classificacao = "fatura_ml"
+    cabe = _mov(loja, "cobranca_divida", quando, debito="900.00")
+    cabe.classificacao = "fatura_ml"
+    da_pessoa = _mov(loja, "cobranca_divida", quando, debito="20000.00")
+    da_pessoa.classificacao, da_pessoa.vinculado_por = "fatura_ml", "cairo sa"
+    # no 1º período lido não há fatura anterior pra comparar: não mexe
+    sem_anterior = _mov(
+        loja, "cobranca_divida", datetime(2026, 9, 25, 12, tzinfo=UTC), debito="5000.00"
+    )
+    sem_anterior.classificacao = "fatura_ml"
+    db.add_all(
+        [
+            resumo("2026-10-01", "2026-09-23", "2026-10-22", 1800.43, 0.0),
+            resumo("2026-11-01", "2026-10-23", "2026-11-22", 0.0, 1136.40),
+            grande,
+            cabe,
+            da_pessoa,
+            sem_anterior,
+            ConciliacaoDia(
+                integration_id=loja.integration_id,
+                dia=date(2026, 11, 8),
+                fechado_em=datetime(2026, 11, 9, 9, tzinfo=UTC),
+                fechado_por="robô",
+            ),
+        ]
+    )
+    await db.commit()
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 9, 12, tzinfo=UTC))
+    await db.commit()
+    assert res["reserva_maior_que_a_fatura"] == 1
+    for m in (grande, cabe, da_pessoa, sem_anterior):
+        await db.refresh(m)
+    assert grande.classificacao is None
+    assert cabe.classificacao == "fatura_ml" and da_pessoa.classificacao == "fatura_ml"
+    assert sem_anterior.classificacao == "fatura_ml"
+    dia = (
+        await db.execute(
+            __import__("sqlalchemy")
+            .select(ConciliacaoDia)
+            .where(ConciliacaoDia.integration_id == loja.integration_id)
+        )
+    ).scalar_one()
+    assert dia.fechado_em is None and "maior que a fatura" in (dia.reaberto_motivo or "")
+    # rodada seguinte: nada muda
+    res = await calc.recalcular_loja(db, loja, agora=datetime(2026, 11, 9, 13, tzinfo=UTC))
+    assert "reserva_maior_que_a_fatura" not in res
 
 
 async def test_recalcular_loja_renomeia_liberacao_gravada_como_outro(db, make_user):
@@ -4440,19 +4524,19 @@ async def test_resumo_cobrancas_por_mes(db, make_user, auth_as, client, monkeypa
     loja, _integ = await _loja(db, make_user)
     shopee = await _loja_extra(db, make_user, "kfa", IntegrationPlatform.SHOPEE)
 
-    def imposto(de, quando, valor):
-        m = _mov(de, "imposto", quando, debito=valor)
-        m.classificacao = "imposto"
+    def ads(de, quando, valor):
+        m = _mov(de, "publicidade", quando, debito=valor)
+        m.classificacao = "publicidade"
         return m
 
     db.add_all(
         [
-            imposto(shopee, datetime(2026, 10, 10, 15, tzinfo=UTC), "10.00"),
+            ads(shopee, datetime(2026, 10, 10, 15, tzinfo=UTC), "10.00"),
             # 01/11 às 01h em UTC ainda é 31/10 em Brasília
-            imposto(shopee, datetime(2026, 11, 1, 1, tzinfo=UTC), "5.00"),
-            imposto(shopee, datetime(2026, 11, 2, 15, tzinfo=UTC), "7.50"),
+            ads(shopee, datetime(2026, 11, 1, 1, tzinfo=UTC), "5.00"),
+            ads(shopee, datetime(2026, 11, 2, 15, tzinfo=UTC), "7.50"),
             # depois do fim do bloco de dias: não entra
-            imposto(shopee, datetime(2026, 11, 3, 15, tzinfo=UTC), "99.00"),
+            ads(shopee, datetime(2026, 11, 3, 15, tzinfo=UTC), "99.00"),
             _mov(loja, "ajuste_shopee", datetime(2026, 11, 2, 15, tzinfo=UTC), debito="20.00"),
             # venda com pedido não é cobrança
             _mov(
@@ -4473,14 +4557,14 @@ async def test_resumo_cobrancas_por_mes(db, make_user, auth_as, client, monkeypa
     novembro, outubro = r.json()["cobrancas_meses"]
 
     assert novembro["mes"] == "2026-11"
-    assert novembro["empresa"]["imposto"] == 7.5
+    assert novembro["empresa"]["publicidade"] == 7.5
     assert novembro["empresa"]["penalidades"] == 20.0
     assert novembro["empresa"]["sem_dono"] == 1
-    assert novembro["por_plataforma"]["shopee"]["imposto"] == 7.5
+    assert novembro["por_plataforma"]["shopee"]["publicidade"] == 7.5
     assert novembro["por_plataforma"]["ml"]["penalidades"] == 20.0
-    assert novembro["lojas"]["kfa"]["imposto"] == 7.5
+    assert novembro["lojas"]["kfa"]["publicidade"] == 7.5
     assert novembro["lojas"]["jlas2"]["sem_dono"] == 1
 
     assert outubro["mes"] == "2026-10"
-    assert outubro["empresa"]["imposto"] == 15.0
+    assert outubro["empresa"]["publicidade"] == 15.0
     assert list(outubro["por_plataforma"]) == ["shopee"]
