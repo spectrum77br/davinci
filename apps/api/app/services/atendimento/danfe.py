@@ -137,6 +137,22 @@ def _saida_normal(xml: bytes | None) -> bool:
     return _t(ide, "n:tpNF") == "1" and _t(ide, "n:finNFe") in ("", "1")
 
 
+def _do_produto(xml: bytes | None) -> bool:
+    """A NF traz o produto, e não só a linha "embalagem" do faturador (`nf_emissao`). PURA.
+
+    09/11/2026, o dono (Amazon 701-5139609-4145029): a Kia na Amazon emite o celular
+    pelo valor cheio com o item "embalagem" (faturador por tipo "bling 100% embalagem"),
+    e o comunicador mandava essa como a NF do pedido. Só a escolha do comunicador muda:
+    a emissão continua como está. Sem item no XML, vale como antes.
+    """
+    try:
+        inf = ElementTree.fromstring(xml or b"").find(".//n:infNFe", NS)  # noqa: S314 — nf_nota
+    except ElementTree.ParseError:
+        return False
+    nomes = [_t(d, "n:prod/n:xProd") for d in (inf.findall("n:det", NS) if inf is not None else [])]
+    return not nomes or any(n and not n.strip().lower().startswith("embalagem") for n in nomes)
+
+
 async def nf_da_conversa(session: AsyncSession, conversa: AtendimentoConversa) -> NfDoPedido:
     """A nota cheia autorizada do pedido da conversa; levanta `NfIndisponivel`."""
     if isinstance(conversa.dados, dict) and conversa.dados.get("amazon_pedido_do_texto") is True:
@@ -191,7 +207,11 @@ async def nf_da_conversa(session: AsyncSession, conversa: AtendimentoConversa) -
             f"O pedido {pedido} ainda não tem NF autorizada no DaVinci (o XML pode não ter "
             "chegado). Baixe a DANFE no Bling e anexe pelo botão Anexar.",
         )
-    cheias = [n for n in notas if _eh_cheia(n.valor, total) and _saida_normal(n.xml)]
+    cheias = [
+        n
+        for n in notas
+        if _eh_cheia(n.valor, total) and _saida_normal(n.xml) and _do_produto(n.xml)
+    ]
     if not cheias:
         raise NfIndisponivel(
             "nf_so_embalagem",
