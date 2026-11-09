@@ -9,7 +9,7 @@ from app.erp_local import native_ingest
 
 LEFT = {"shipped", "delivered", "not_delivered", "cancelled"}
 RECHECK_MINUTES = 30
-WINDOW_DAYS = 30
+WINDOW_DAYS = 90
 PER_STORE = 50
 
 

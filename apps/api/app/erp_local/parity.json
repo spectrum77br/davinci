@@ -29,7 +29,7 @@
       "module": "Estoque: entrada, saída e balanço",
       "behavior": "E acrescenta, S retira e B ajusta pela diferença até o saldo informado.",
       "status": "tested_local",
-      "remaining": "Escolha manual do lote de saída própria, com reserva atômica, composição real, versão e histórico, foi testada. Prioridade automática, Flex, soma publicável por família, lotes/séries, segregação por empresa e reservas históricas ainda exigem implementação/conciliação.",
+      "remaining": "Abertura de 05/11 confere com o Bling em 718 de 718 produtos simples. Desde 09/11 o servidor guarda de hora em hora o disponível do Bling e grava por dia a conferência com o que as vendas lidas explicam, por família (conferencia-estoque). Até a troca o saldo do ERP não acompanha as vendas: o Bling é o dono. Prioridade automática com pedidos reais, lotes/séries, segregação por empresa e reservas de pedidos fora das lojas lidas (malas b005.8/b021.8) ainda pendentes.",
       "assets": [
         {
           "path": "output/bling-validacao-2026-11-05/assets/templates/form.estoque-1793218339.js",
@@ -38,7 +38,8 @@
       ],
       "tests": [
         "apps/api/erp_local_tests/test_core.py",
-        "apps/api/erp_local_tests/test_channels.py"
+        "apps/api/erp_local_tests/test_channels.py",
+        "apps/api/erp_local_tests/test_stock_check.py"
       ]
     },
     {
@@ -91,7 +92,7 @@
       "module": "Pedidos e situações por loja",
       "behavior": "Preservar a identificação por loja e a configuração de situação; os mapeamentos não são universais.",
       "status": "partial",
-      "remaining": "Entrada durável e sequência testadas localmente. Leitura de identidade/catálogo em 55 contas; pedidos nativos preparados em seis canais. Leituras pontuais não ativam eventos contínuos. Conciliação histórica, regras por situação/fulfillment, carrinhos, escopos por conta, recepção contínua e mudança de autoridade ainda pendentes. Em 06/11: motor de recepção contínua com cursor, janela sobreposta, retomada, espera crescente, releitura diária e plano de promoção, testado com provedor simulado. Desligado em todas as contas. Faltam adaptar os leitores de cada canal a janela de datas, agendamento no servidor e promoção real a pedido.",
+      "remaining": "Recepção contínua ligada no servidor (erp_worker) desde 09/11, lendo as 52 contas a cada 5 minutos; conferência diária com o Bling. Situação compatível (relógio do Bling) feita na lista. Falta a troca de autoridade por loja: até lá o Bling continua mudando as situações.",
       "assets": [],
       "tests": [
         "apps/api/erp_local_tests/test_channels.py",
@@ -143,7 +144,7 @@
       "module": "Logística e etiquetas",
       "behavior": "Conferência, volumes, objetos, remessas, documentos e rastreio são etapas distintas. O checkout pode registrar início de separação já na primeira leitura; finalizar pode acionar automações fiscais e logísticas.",
       "status": "partial",
-      "remaining": "Conferência, volumes, remessas, rastreio e arquivo de documento têm testes locais. Devoluções parciais por componente, inspeção mista, quarentena e reembolsos separados também testados. Frete, etiqueta autorizada, coleta/reversa no canal e homologação por conta ainda pendentes.",
+      "remaining": "Conferência, volumes, remessas próprias e rastreio com testes locais. Objetos de postagem das lojas com etiqueta, rastreio e situação vinda da loja; envio do Mercado Livre lido do próprio envio desde 09/11 (o pedido fica pago depois de enviado). Gerar envio na loja pelo ERP, frete, Amazon/Magalu/Carrefour, coleta/reversa e homologação por conta ainda pendentes.",
       "assets": [
         {
           "path": "output/bling-validacao-2026-11-05/assets/libs/api/v3/logisticas.api-1793218339.js",
@@ -173,7 +174,9 @@
       "tests": [
         "apps/api/erp_local_tests/test_logistics.py",
         "apps/api/erp_local_tests/test_api.py",
-        "apps/api/erp_local_tests/ui.cjs"
+        "apps/api/erp_local_tests/ui.cjs",
+        "apps/api/erp_local_tests/test_store_objects.py",
+        "apps/api/erp_local_tests/test_stock_check.py"
       ]
     },
     {
@@ -471,7 +474,7 @@
       "module": "Pedidos nativos das lojas",
       "behavior": "Observação direta, identidade por conta/anúncio e processamento operacional são etapas separadas. A leitura histórica não duplica reservas controladas pelo Bling.",
       "status": "partial",
-      "remaining": "Leituras nativas em 55 contas: Amazon 4/31 pedidos; Shopee 14/779 na rodada paginada (780 no histórico); TikTok 8/148; Carrefour 2/zero na janela; Magalu 3/13 na amostra sem filtro temporal; Mercado Livre 24/245, com cinco retornados fora da janela. Magalu preserva SKU cru e normalizador explícito; ML verifica vendedor e mantém carrinho separado. Famílias identificam 47 trocas históricas de lote na Shopee, 23 TikTok e 19 ML, sem fundir reservas. ML tem 136 membros de carrinho para conciliação do conjunto e 12 vínculos pendentes; quantidade TikTok segue desconhecida. Nenhuma leitura ativa venda/reserva/conta. Recebimento contínuo, membros completos de carrinho, histórico, transição de autoridade, escopos de escrita, fiscal/logística e Temu/Shein/AliExpress ainda pendentes.",
+      "remaining": "Leitura contínua no servidor em 52 contas (Mercado Livre, Shopee, TikTok, Amazon, Magalu, Carrefour) desde 09/11. Conferência de 09/11 com o Bling: itens iguais ML 202+31 com troca de lote de 235, Shopee 483+95 de 627, TikTok 134+65 de 200; a troca de lote é feita pelo robô de prioridade no Bling. Temu, Shein e AliExpress ainda não são lidos.",
       "assets": [],
       "tests": [
         "apps/api/erp_local_tests/test_native_orders.py",
@@ -599,7 +602,7 @@
       "module": "Etiquetas emitidas pelas lojas",
       "behavior": "Mercado Livre, Shopee e TikTok seguem a sequência documentada, fechados até ligar a chave do servidor. Canal sem conector recusa.",
       "status": "partial",
-      "remaining": "Testado só contra loja simulada; nenhuma etiqueta real foi gerada. Faltam Amazon, Magalu, Carrefour, coleta, cancelamento, reversa e homologação por conta.",
+      "remaining": "Etiquetas reais baixadas de Mercado Livre, Shopee e TikTok (só download, sem gerar envio), em lote num PDF só, e rastreio lido da loja. Gerar o envio pela loja (organizar envio), Amazon, Magalu, Carrefour, cancelamento e reversa ainda pendentes.",
       "assets": [],
       "tests": [
         "apps/api/erp_local_tests/test_channel_labels.py"
@@ -621,7 +624,7 @@
       "module": "Comprador e destinatário no pedido",
       "behavior": "Guarda comprador e destinatário enquanto a loja mostra; leitura mascarada nunca apaga uma completa; pedido sem comprador completo não vira pedido próprio.",
       "status": "partial",
-      "remaining": "Testado com dados sintéticos. Falta ver um pedido real sem máscara e confirmar a posição dos campos da Shopee e do TikTok.",
+      "remaining": "Compradores reais guardados no servidor: na conferência com o Bling, nome, documento e CEP iguais em 228 de 228 vendas do ML, 77 de 77 da Shopee e 83 de 84 do TikTok. Shopee liberada nas 14 lojas (declaração de dados pessoais). Magalu: o Bling não guarda CEP em 4 de 6; Amazon depende de papel restrito.",
       "assets": [],
       "tests": [
         "apps/api/erp_local_tests/test_recipient_capture.py",
@@ -700,7 +703,7 @@
       "module": "Pedido vindo da loja",
       "behavior": "Carrinho vira uma venda só, com o número da loja; só entra o que a loja liberou, como configurado no Bling; o valor segue o total informado pela loja; cancelamento na loja vira Verificar Cancelamento, sem soltar estoque sozinho.",
       "status": "partial",
-      "remaining": "Regra aplicada só sobre leituras guardadas, sem criar pedido real. No Mercado Livre, o total do Bling soma algo além dos produtos em 103 de 220 vendas, provavelmente frete, a confirmar.",
+      "remaining": "Regra aplicada sobre as leituras guardadas, sem criar pedido real. Total do Mercado Livre passou a usar o valor pago (com frete) em 06/11; na conferência de 09/11 ainda há 112 de 235 vendas do ML com total diferente, de leituras anteriores à mudança, a confirmar nas próximas conferências. Shopee 36 de 627 e TikTok 7 de 200 com total diferente.",
       "assets": [],
       "tests": [
         "apps/api/erp_local_tests/test_native_ingest.py"
