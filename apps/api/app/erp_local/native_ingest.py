@@ -306,12 +306,17 @@ def _settled(account, orders):
 
 
 def _resolve(db, store, item, channel):
-    """The listing link first. Failing that, the seller's own code when it is exactly a product."""
+    """The seller's own code when it is exactly a product, as Bling does; else the listing link.
+
+    On 09/11/2026 the code the store sends matched Bling's item family in 607 of 674 Shopee sales
+    against 562 through DaVinci's listing links (links go stale when a variation's code changes,
+    e.g. a phone sold "AVULSO" still linked to its kit with earphones), and made none worse.
+    """
     resolved = native_orders.resolve_item(db, store, item, channel=channel)
-    if resolved["state"] != "missing" or not item.get("seller_sku"):
+    if not item.get("seller_sku"):
         return resolved
     row = db.execute("SELECT sku,kind FROM products WHERE sku=?", (item["seller_sku"],)).fetchone()
-    if not row:
+    if not row or (resolved["state"] == "matched" and resolved.get("sku") == row["sku"]):
         return resolved
     origin = db.execute("SELECT data FROM catalog_origin WHERE sku=?", (row["sku"],)).fetchone()
     ready = not origin or json.loads(origin[0])["catalog_state"] == "ready"

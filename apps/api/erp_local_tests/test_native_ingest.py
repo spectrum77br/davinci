@@ -655,3 +655,18 @@ def test_ml_sale_without_freight_read_waits(ml_account):
     assert plan_of(ml_account)["blocked"] == {"total_unknown": 1}
     with pytest.raises(ERPError, match="Frete ou cupom"):
         native_ingest.promote(ml_account, "ml", ML_STORE, "A1", depot="geral")
+
+
+def test_store_code_wins_over_a_stale_listing_link(erp, monkeypatch):
+    from app.erp_local import native_orders
+
+    monkeypatch.setattr(
+        native_orders,
+        "resolve_item",
+        lambda *_a, **_k: {"sku": "demo.kit", "kind": "kit", "state": "matched"},
+    )
+    with erp.connection() as db:
+        own = native_ingest._resolve(db, "s", {"seller_sku": "demo.aparelho"}, "shopee")
+        unknown = native_ingest._resolve(db, "s", {"seller_sku": "nao-existe"}, "shopee")
+    assert own["sku"] == "demo.aparelho" and own["state"] == "matched"
+    assert unknown["sku"] == "demo.kit"
