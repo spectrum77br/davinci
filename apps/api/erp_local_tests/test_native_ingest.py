@@ -2,6 +2,7 @@
 
 import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from test_core import balance, run
@@ -670,3 +671,14 @@ def test_store_code_wins_over_a_stale_listing_link(erp, monkeypatch):
         unknown = native_ingest._resolve(db, "s", {"seller_sku": "nao-existe"}, "shopee")
     assert own["sku"] == "demo.aparelho" and own["state"] == "matched"
     assert unknown["sku"] == "demo.kit"
+
+
+def test_tiktok_total_is_products_plus_buyer_shipping_without_handling_fee(erp):
+    with erp.connection() as db:
+        paid = {"shipping_fee": _money("10.17"), "total": _money("2789.94")}
+        assert native_ingest.store_charges(db, "tiktok", "s", "K", [paid]) == {
+            "freight": Decimal("10.17"),
+            "coupon": Decimal(0),
+        }
+        assert native_ingest.store_charges(db, "tiktok", "s", "K", [{"total": _money("1")}]) is None
+        assert native_ingest.store_charges(db, "shopee", "s", "K", [paid]) is None

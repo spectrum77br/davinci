@@ -64,8 +64,8 @@ def local_sales(db, mapping=None, available=None):
                 continue
             items, total = Counter(), Decimal(0)
             # Mercado Livre: products + freight the buyer paid - coupon, once both were read.
-            charges = native_ingest.ml_charges(db, store, key, live) if channel == "ml" else None
-            unread = channel == "ml" and charges is None
+            charges = native_ingest.store_charges(db, channel, store, key, live)
+            unread = channel in native_ingest.CHARGED and charges is None
             for order in live:
                 if charges is None:
                     header = order.get("paid") or order.get("total") or {}

@@ -216,6 +216,8 @@ def project(raw, shop_id, start, end):
             "FULFILLMENT_BY_TIKTOK": "TIKTOK",
         }.get(raw.get("fulfillment_type")),
         "total": monetary(payment.get("total_amount"), payment.get("currency")),
+        # Bling keeps products + this shipping, without TikTok's handling fee (27 of 27, 09/11).
+        "shipping_fee": monetary(payment.get("shipping_fee") or 0, payment.get("currency")),
         "items": items,
         "within_window": start <= raw["update_time"] < end,
     }

@@ -34,6 +34,7 @@ ORDER_FIELDS = {
     "status",
     "fulfilled_by",
     "total",
+    "shipping_fee",
     "items",
     "within_window",
 }
@@ -221,6 +222,7 @@ def validate(read):
                 ):
                     raise ValueError
                 money(order["total"])
+                money(order["shipping_fee"])
                 lines = set()
                 for item in order["items"]:
                     if not isinstance(item, dict) or set(item) != ITEM_FIELDS:

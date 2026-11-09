@@ -112,11 +112,21 @@ async def one(client, channel, c, settings, ref, mode):
                 "carrier": "",
                 "status": "",
             }
+        if mode == "money":
+            # Seller and Shopee vouchers, coins and shipping: what Bling's total is made of.
+            escrow = await call(
+                "GET", "/api/v2/payment/get_escrow_detail", params={"order_sn": ref}
+            )
+            income = escrow.get("order_income") or {}
+            return {k: str(v) for k, v in income.items() if isinstance(v, int | float)}
         return await channel_labels.fetch_label("shopee", ref, call=call, download_only=True)
     call = tiktok_call(client, c)
     detail = await call("GET", "/order/202309/orders", {"ids": ref})
     order = (detail.get("orders") or [{}])[0]
     packages = order.get("packages") or []
+    if mode == "money":
+        payment = order.get("payment") or {}
+        return {k: str(v) for k, v in payment.items() if isinstance(v, str | int | float)}
     if mode == "tracking":
         return {
             "tracking_number": order.get("tracking_number") or "",

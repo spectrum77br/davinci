@@ -357,6 +357,28 @@ def ml_charges(db, store, key, orders):
     return {"freight": Decimal(str(cost)), "coupon": coupon}
 
 
+def store_charges(db, channel, store, key, orders):
+    """Freight and seller coupon that Bling adds to the products, per store, or None if unread.
+
+    Mercado Livre: freight from the shipment, coupon from the order. TikTok: the buyer's
+    shipping, without the handling fee TikTok puts in its own total.
+    """
+    if channel == "ml":
+        return ml_charges(db, store, key, orders)
+    if channel == "tiktok":
+        if any("shipping_fee" not in order for order in orders):
+            return None
+        freight = sum(
+            (Decimal(str((o["shipping_fee"] or {}).get("amount") or 0)) for o in orders),
+            Decimal(0),
+        )
+        return {"freight": freight, "coupon": Decimal(0)}
+    return None
+
+
+CHARGED = {"ml", "tiktok"}
+
+
 def _value_adjustment(orders, items, charges=None):
     """Discount or freight that takes the items to the total the store reports for the order.
 
@@ -396,7 +418,7 @@ def _unit_reasons(db, channel, store, account, key, unit):
 
         if ml_shipping.left(db, store, key):
             reasons.add("not_open")
-    if channel == "ml" and ml_charges(db, store, key, live) is None:
+    if channel in CHARGED and store_charges(db, channel, store, key, live) is None:
         reasons.add("total_unknown")
     if (live[0].get("pack_id") or live[0].get("cart_id")) and not _settled(account, orders):
         reasons.add("cart_waiting")
@@ -605,11 +627,11 @@ def promote(erp, channel, store, external, *, depot):
     orders = list(unit.values())
     live = [o for o in orders if not _is_cancelled(o)]
     charges = None
-    if channel == "ml":
+    if channel in CHARGED:
         with erp.connection() as db:
-            charges = ml_charges(db, store, key, live)
+            charges = store_charges(db, channel, store, key, live)
         if charges is None:
-            raise ERPError("ingest_total", "Frete ou cupom do Mercado Livre ainda não lidos.", 409)
+            raise ERPError("ingest_total", "Frete ou cupom da loja ainda não lidos.", 409)
     payload.update(_value_adjustment(live, items, charges))
     if any(
         o.get("logistic_type") in {"self_service", "flex"} or o.get("fulfillment") == "flex"

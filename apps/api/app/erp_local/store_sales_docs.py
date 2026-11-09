@@ -89,8 +89,8 @@ def detail(db, channel, store, number):
             )
     items_total = sum((i["total"] for i in items if i["total"] is not None), Decimal(0))
     live = [o for o in orders if not native_ingest._is_cancelled(o)] or orders
-    charges = native_ingest.ml_charges(db, store, number, live) if channel == "ml" else None
-    if channel == "ml":
+    charges = native_ingest.store_charges(db, channel, store, number, live)
+    if channel in native_ingest.CHARGED:
         # Mercado Livre: products + freight the buyer paid - seller's coupon, as Bling keeps it.
         order_total = (
             None if charges is None else items_total + charges["freight"] - charges["coupon"]
