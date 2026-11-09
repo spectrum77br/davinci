@@ -488,7 +488,8 @@ async def test_midia_que_a_meta_ja_apagou_expira_depois_dos_7_dias(db, recebida,
 
 
 async def test_grande_demais_pelo_tamanho_da_meta_nem_baixa(db, recebida, graph, uploads, zap):
-    _meta_da_midia(graph, tamanho=33 * 1024 * 1024)
+    # O teto é de 100 MB desde 09/11/2026 (o vídeo de 30+ MB do cliente).
+    _meta_da_midia(graph, tamanho=101 * 1024 * 1024)
     _cdn(graph)
     assert await _baixar(recebida.id) == "grande_demais"
     assert [r.url.host for r in graph.chamadas] == ["graph.facebook.com"]
