@@ -158,3 +158,26 @@ def test_ml_label_not_yet_printed_is_left_alone_when_asked(monkeypatch):
     with pytest.raises(ERPError, match="não impressa"):
         asyncio.run(channel_labels.fetch_label("ml", "123", call=call, only_printed=True))
     assert downloads == []
+
+
+def test_download_only_needs_no_write_switch_and_never_arranges(monkeypatch):
+    monkeypatch.delenv(channel_labels.WRITES_ENV, raising=False)
+    calls = []
+
+    async def call(method, path, **kw):
+        calls.append(path)
+        if path.startswith("/shipments/"):
+            return {"status": "ready_to_ship", "substatus": "ready_to_print"}
+        if path.endswith("get_tracking_number"):
+            return {"tracking_number": "BR1"}
+        if path.endswith("get_shipping_document_result"):
+            return {"result_list": [{"status": "READY"}]}
+        return b"%PDF" if kw.get("binary") else {}
+
+    async def nap(_):
+        return None
+
+    with pytest.raises(ERPError, match="não impressa"):
+        go(channel_labels.fetch_label("ml", "1", call=call, download_only=True))
+    go(channel_labels.fetch_label("shopee", "SN", call=call, download_only=True, sleep=nap))
+    assert not any("ship_order" in p or "shipment_labels" in p for p in calls)

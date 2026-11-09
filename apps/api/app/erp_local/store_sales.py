@@ -50,6 +50,7 @@ def listing(db, query="", offset=0, limit=50):
                 {
                     "number": key,
                     "channel": channel,
+                    "store_id": store,
                     "store": names.get((channel, store), store),
                     "created_at": min((o.get("created_at") or "") for o in orders),
                     "status": ", ".join(sorted({str(o.get("status") or "") for o in orders})),

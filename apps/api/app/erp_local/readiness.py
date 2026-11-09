@@ -127,8 +127,10 @@ def gates(db):
             "area": "Logística",
             "title": "Etiquetas e frete reais por canal",
             "state": PENDING,
-            "detail": "Conferência, volumes e remessas prontos. Faltam conectores de etiqueta, "
-            "coleta e reversa, e homologação por conta.",
+            "detail": "Em 09/11 a etiqueta real veio direto de Mercado Livre, Shopee e TikTok, em "
+            "PDF, para "
+            "pedidos já organizados, sem mudar o envio. Faltam organizar envio pelo ERP, fila de "
+            "impressão, Amazon, Magalu e Carrefour.",
         },
         {
             "id": "priority",

@@ -20,12 +20,13 @@ def writes_open():
     return os.environ.get(WRITES_ENV) == "1"
 
 
-def _guard(channel, fmt):
+def _guard(channel, fmt, *, download_only=False):
     if channel not in SUPPORTED:
         raise ERPError("label_channel", "Etiqueta deste canal ainda não tem conector próprio.", 409)
     if fmt not in FORMATS:
         raise ERPError("label_format", "Escolha PDF ou ZPL.")
-    if not writes_open():
+    # Downloading the label of a shipment the store already has arranged changes nothing there.
+    if not download_only and not writes_open():
         raise ERPError(
             "label_writes_closed",
             "Gerar etiqueta altera o envio na loja e segue desligado até a homologação da conta.",
@@ -112,8 +113,12 @@ async def tiktok_label(call, package_id, *, fetch_url):
     }
 
 
-async def fetch_label(channel, reference, *, call, fmt="pdf", **options):
-    _guard(channel, fmt)
+async def fetch_label(channel, reference, *, call, fmt="pdf", download_only=False, **options):
+    _guard(channel, fmt, download_only=download_only)
+    if download_only and channel == "ml":
+        options["only_printed"] = True
+    if download_only and channel == "shopee":
+        options["arrange"] = False
     if channel == "ml":
         return await ml_label(call, reference, fmt, **options)
     if channel == "shopee":

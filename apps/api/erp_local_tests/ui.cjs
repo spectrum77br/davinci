@@ -1141,3 +1141,25 @@ test('the clock beside the status changes the situation like in Bling',async()=>
   assert.deepEqual(requests.at(-1),{...requests.at(-1),kind:'order.compat_situation',payload:{id:'o1',situation_id:83962}});
 });
 
+test('read sales can be picked and printed together, and tracking is asked per sale',async()=>{
+  const {dom,document:d,requests}=await setup({});
+  dom.window.fetch=async (url,options)=>{
+    if(options?.method==='POST'){requests.push({url,body:JSON.parse(options.body)});return {ok:true,status:200,headers:{get:()=> '0'},json:async()=>({tracking_number:'BR1'}),blob:async()=>new dom.window.Blob(['%PDF'])};}
+    if(url.includes('/store-sales'))return {ok:true,status:200,json:async()=>({total:1,offset:0,items:[{number:'P1',channel:'ml',store_id:'c1',store:'ML',created_at:'2026-11-09',status:'paid',total:'10.00',buyer:'',skus:[],blocked:[]}]})};
+    return {ok:true,status:200,json:async()=>({})};
+  };
+  dom.window.URL.createObjectURL=()=> 'blob:x';
+  d.querySelector('[data-menu-target="orders"]')?.click();
+  dom.window.eval("salesView='store'");
+  d.querySelector('[data-sales-view="store"]').click();
+  await new Promise(r=>setTimeout(r,20));
+  const pick=d.querySelector('[data-label-pick]');
+  pick.checked=true;pick.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  d.getElementById('store-labels-print').click();
+  await new Promise(r=>setTimeout(r,20));
+  assert.deepEqual(requests.at(-1),{url:'/api/erp-local/store-sales/labels',body:{items:[{channel:'ml',store:'c1',number:'P1'}]}});
+  d.querySelector('[data-tracking]').click();
+  await new Promise(r=>setTimeout(r,20));
+  assert.equal(requests.at(-1).url,'/api/erp-local/store-sales/tracking');
+});
+

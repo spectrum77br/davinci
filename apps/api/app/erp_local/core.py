@@ -143,6 +143,7 @@ class LocalERP:
             sellers,
             stock_allocation,
             stock_priority,
+            store_labels,
         )
 
         self.database = Path(database).resolve()
@@ -184,6 +185,7 @@ class LocalERP:
                 + access.SCHEMA
                 + inbound_invoices.SCHEMA
                 + inbound_sync.SCHEMA
+                + store_labels.SCHEMA
                 + bank_statements.SCHEMA
                 + stock_priority.SCHEMA
                 + logistics.SCHEMA

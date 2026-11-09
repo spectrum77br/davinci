@@ -418,6 +418,28 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         with erp.connection() as db:
             return store_sales.listing(db, q, offset, limit)
 
+    @app.post("/api/erp-local/store-sales/labels")
+    def store_sales_labels(body: dict = Body(...)):
+        from app.erp_local import store_labels
+
+        pdf, failures = store_labels.batch(erp, body.get("items"))
+        return Response(
+            pdf,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": 'attachment; filename="etiquetas.pdf"',
+                "X-Labels-Missing": str(len(failures)),
+            },
+        )
+
+    @app.post("/api/erp-local/store-sales/tracking")
+    def store_sales_tracking(body: dict = Body(...)):
+        from app.erp_local import store_labels
+
+        return store_labels.tracking(
+            erp, str(body.get("channel")), str(body.get("store")), str(body.get("number"))
+        )
+
     @app.get("/api/erp-local/guides")
     def guides(date_from: str, date_to: str):
         from app.erp_local import tax_guides
