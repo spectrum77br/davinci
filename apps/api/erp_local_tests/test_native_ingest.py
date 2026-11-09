@@ -182,10 +182,14 @@ def test_lookback_reads_recent_days_daily_without_moving_the_cursor(account):
     assert (
         run_lookback(account, CHANNEL, ACCOUNT, provider, now=NOW, importer=importer)["added"] == 1
     )
-    assert provider.calls[0][0] == NOW - native_ingest.LOOKBACK_WINDOW
+    # The first re-read covers a month; the daily ones after it, a week.
+    assert provider.calls[0][0] == NOW - native_ingest.FIRST_LOOKBACK_WINDOW
     assert state_of(account)["cursor"] == cursor
     early = NOW + timedelta(hours=1)
     assert run_lookback(account, CHANNEL, ACCOUNT, provider, now=early)["state"] == "not_due"
+    later, daily = NOW + timedelta(days=1), Provider(fake_read())
+    run_lookback(account, CHANNEL, ACCOUNT, daily, now=later, importer=importer)
+    assert daily.calls[0][0] == later - native_ingest.LOOKBACK_WINDOW
 
 
 def test_one_failing_account_does_not_stop_the_pass(account):

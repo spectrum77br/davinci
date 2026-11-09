@@ -32,6 +32,9 @@ FIRST_WINDOW = timedelta(days=1)
 MAX_WINDOW = timedelta(hours=24)
 LOOKBACK_EVERY = timedelta(hours=24)
 LOOKBACK_WINDOW = timedelta(days=7)
+# The first re-read of an account covers a month, so sales read before the reading gained a
+# field (Mercado Livre coupon, TikTok shipping) get it too.
+FIRST_LOOKBACK_WINDOW = timedelta(days=30)
 LEASE = timedelta(minutes=10)
 MAX_READS = 20
 BACKOFF_BASE = 60
@@ -247,7 +250,7 @@ def run_lookback(erp, channel, store, provider, *, now=None, importer=None):
     done = _when(row["lookback_at"])
     if not row["enabled"] or (done and now - done < LOOKBACK_EVERY):
         return {"state": "not_due"}
-    start, end = now - LOOKBACK_WINDOW, now - SAFETY_LAG
+    start, end = now - (LOOKBACK_WINDOW if done else FIRST_LOOKBACK_WINDOW), now - SAFETY_LAG
     try:
         state, _, (reads, observed, added), _ = _read_window(
             erp, channel, store, start, end, provider, importer
@@ -491,6 +494,9 @@ def sync_promoted(erp, channel, store):
 def service_round(erp, channel, store, provider, *, reader=None, now=None):
     """Read the store, keep the buyers it still shows and flag what was cancelled."""
     report = {"reception": run_account(erp, channel, store, provider, now=now)}
+    if channel in CHARGED:
+        # Daily re-read of recent days: freight and coupons change after the sale is placed.
+        report["lookback"] = run_lookback(erp, channel, store, provider, now=now)
     if reader is not None:
         report["recipients"] = recipient_capture.read_due(erp, channel, store, reader, now=now)
     report["status"] = sync_promoted(erp, channel, store)
