@@ -1,7 +1,9 @@
 <script setup lang="ts">
 // Detalhe da garantia (§4.2), aberto ao clicar na linha do painel.
 // - Dados: nome, CPF (completo só para quem tem "Ver o CPF completo"; os
-//   outros veem mascarado), NF, pedido, data de cadastro, cadastrado por.
+//   outros veem mascarado), o e-mail e o WhatsApp do comprador (09/11/2026:
+//   do formulário do SAC ou do cadastro do contato no Bling; mascarados como
+//   o CPF), NF, pedido, data de cadastro, cadastrado por.
 // - Prazo: início (a entrega, com a origem) e o fim ÚNICO da garantia (desde
 //   06/11/2026: entrega + o prazo do produto na Tabela de Preços › Produtos),
 //   com a barra de dias restantes — ou "Prazo não cadastrado", ou "Sem
@@ -16,10 +18,11 @@
 // Só o GET traz o CPF completo: a resposta do "Conferir entrega agora" vem
 // mascarada, e a tela mantém o CPF que o GET já mostrou.
 import { onKeyStroke } from '@vueuse/core'
-import { AlertCircle, ExternalLink, FileText, Loader2, Lock, MessagesSquare, Pencil, RefreshCw, TriangleAlert, X } from 'lucide-vue-next'
+import { AlertCircle, ExternalLink, FileText, Loader2, Lock, MessageCircle, MessagesSquare, Pencil, RefreshCw, TriangleAlert, X } from 'lucide-vue-next'
 import {
   ACOES_LOG,
   CAMPOS_LOG,
+  FONTE_DO_CONTATO,
   MOTIVOS_ANEXO,
   dataBR,
   dataHoraBR,
@@ -28,6 +31,7 @@ import {
   hojeSP,
   nomeDaLinha,
   nomePlataforma,
+  porqueSemContato,
   prazoUnico,
   rotuloDoPedido,
   tamanhoLegivel,
@@ -90,7 +94,7 @@ async function conferirEntrega() {
   const antes = g.value.data_inicio
   try {
     const r = await api<GarantiaDetalhe>(`/api/garantias/${g.value.id}/recalcular`, { method: 'POST' })
-    g.value = { ...r, cpf: g.value.cpf, cpf_completo: g.value.cpf_completo }
+    g.value = { ...r, cpf: g.value.cpf, cpf_completo: g.value.cpf_completo, contato: g.value.contato }
     log.value = null
     if (r.data_inicio !== antes) {
       toasts.success('Entrega atualizada', r.data_inicio ? `Início ${dataBR(r.data_inicio)} — prazos recalculados.` : 'O pedido ficou sem data de entrega.')
@@ -112,7 +116,7 @@ async function marcarPedido(pedido: boolean) {
   marcando.value = true
   try {
     const r = await api<GarantiaDetalhe>(`/api/garantias/${g.value.id}/pedido`, { method: 'PUT', body: { pedido } })
-    g.value = { ...r, cpf: g.value.cpf, cpf_completo: g.value.cpf_completo }
+    g.value = { ...r, cpf: g.value.cpf, cpf_completo: g.value.cpf_completo, contato: g.value.contato }
     log.value = null
     toasts.success(pedido ? 'Marcada como pedido de garantia' : 'Não é pedido de garantia', pedido ? 'A garantia entra no Painel.' : 'Sai do Painel (continua na busca) e o robô não marca de novo.')
     emit('mudou', r)
@@ -228,6 +232,33 @@ onKeyStroke('Escape', () => emit('fechar'))
                 {{ g.cpf || '—' }}
                 <span v-if="!g.cpf_completo" class="ml-1 inline-flex items-center gap-0.5 font-sans text-[11px] text-muted-foreground" title="o CPF completo só aparece para quem tem a permissão 'Ver o CPF completo'"><Lock class="size-3" /> mascarado</span>
               </dd>
+              <!-- O contato do comprador (09/11/2026): do SAC do site ou do Bling -->
+              <template v-if="g.contato && (g.contato.email || g.contato.whatsapp)">
+                <dt class="text-muted-foreground">E-mail</dt>
+                <dd class="break-all" data-contato-email>
+                  <template v-if="g.contato.email">
+                    <a v-if="g.contato.completo" :href="`mailto:${g.contato.email}`" class="underline-offset-2 hover:underline">{{ g.contato.email }}</a>
+                    <span v-else>{{ g.contato.email }}</span>
+                    <span class="ml-1 text-xs text-muted-foreground">({{ FONTE_DO_CONTATO[g.contato.email_fonte || ''] }})</span>
+                    <div v-if="g.contato.email_repassador" class="break-normal text-xs text-muted-foreground">e-mail da {{ nomePlataforma(g.plataforma) || 'plataforma' }}: só entrega a mensagem pela {{ nomePlataforma(g.plataforma) || 'plataforma' }}</div>
+                  </template>
+                  <span v-else class="text-muted-foreground">—</span>
+                </dd>
+                <dt class="text-muted-foreground">WhatsApp</dt>
+                <dd data-contato-whatsapp>
+                  <template v-if="g.contato.whatsapp">
+                    <a v-if="g.contato.whatsapp_link" :href="g.contato.whatsapp_link" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 rounded border border-emerald-400/70 px-1.5 py-0.5 text-emerald-800 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-900/30" title="abrir a conversa no WhatsApp"><MessageCircle class="size-3.5" aria-hidden="true" />{{ g.contato.whatsapp }}</a>
+                    <span v-else class="font-mono">{{ g.contato.whatsapp }}</span>
+                    <span class="ml-1 text-xs text-muted-foreground">({{ FONTE_DO_CONTATO[g.contato.whatsapp_fonte || ''] }})</span>
+                  </template>
+                  <span v-else class="text-muted-foreground">—</span>
+                  <span v-if="!g.contato.completo" class="ml-1 inline-flex items-center gap-0.5 text-[11px] text-muted-foreground" title="o contato completo só aparece para quem tem a permissão 'Ver o CPF completo'"><Lock class="size-3" /> mascarado</span>
+                </dd>
+              </template>
+              <template v-else-if="g.contato">
+                <dt class="text-muted-foreground">Contato</dt>
+                <dd class="text-muted-foreground" data-contato-vazio>{{ porqueSemContato(g.contato, g.plataforma) }}</dd>
+              </template>
               <dt class="text-muted-foreground">NF</dt>
               <dd>
                 <span class="font-mono">{{ textoNf(g.nf_numero, g.nf_serie) }}</span>

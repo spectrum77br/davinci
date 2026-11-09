@@ -86,6 +86,7 @@ from app.schemas.garantia import (
     AtendimentoCreate,
     AtendimentoOut,
     BuscaVinculo,
+    ContatoOut,
     EmAtendimentoOut,
     EntregaOut,
     GarantiaCreate,
@@ -126,7 +127,7 @@ from app.schemas.garantia import (
 )
 from app.security.cipher import decrypt_bytes, decrypt_json
 from app.services import garantia as svc
-from app.services import garantia_pedido, garantia_prazo, garantia_sac
+from app.services import garantia_contato, garantia_pedido, garantia_prazo, garantia_sac
 from app.services.atendimento import acesso, cartoes_plataforma, separa_email
 from app.services.atendimento.contexto import _chaves_do_pedido
 from app.services.atendimento.escopo import escopo_do_atendimento
@@ -709,6 +710,7 @@ async def _detalhe(
         atualizado_em=g.atualizado_em,
         atualizado_por=_ref(pessoas, g.atualizado_por),
         atendimentos_lista=atend,
+        contato=await _contato(session, g, user, completo=completo),
         permissoes=PermissoesOut(
             cadastrar=_pode(user, "garantias", "edit"),
             registrar_atendimento=_pode(user, "garantias_atendimento", "edit"),
@@ -716,6 +718,58 @@ async def _detalhe(
             ver_log=user.role == UserRole.ADMIN,
         ),
         avisos=avisos or [],
+    )
+
+
+async def _contato(session: AsyncSession, g: Garantia, user: User, *, completo: bool) -> ContatoOut:
+    """O e-mail e o WhatsApp da aba Dados (09/11/2026): o que o cliente
+    digitou no formulário do SAC (se a pessoa lê o formulário — a trava do
+    /historico) vale mais que o cadastro do contato no Bling. Sem o contato
+    completo (quem não vê o CPF completo, ou a resposta de um POST), sai
+    mascarado e sem link."""
+    sac_email = sac_tel = None
+    s = GarantiaSac
+    caso = (
+        await session.execute(
+            select(s)
+            .where(s.garantia_id == g.id)
+            .order_by(*garantia_sac.ordem_dos_casos(s))
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if (
+        caso is not None
+        and isinstance(caso.campos, dict)
+        and await _caso_legivel(session, caso, user)
+    ):
+        sac_email = garantia_contato.email_valido(caso.campos.get("email"))
+        sac_tel = garantia_contato.whatsapp(caso.campos.get("telefone"))
+    email, email_fonte = (sac_email, "sac") if sac_email else (g.contato_email, "bling")
+    tel, tel_fonte = (sac_tel, "sac") if sac_tel else (g.contato_telefone, "bling")
+    if not email and not tel:
+        if g.plataforma in garantia_contato.PLATAFORMAS_SEM_CONTATO:
+            vazio = "plataforma"
+        elif g.contato_lido_em is None:
+            vazio = "lendo"
+        else:
+            vazio = "sem_cadastro"
+        return ContatoOut(completo=completo, vazio=vazio)
+    return ContatoOut(
+        email=(email if completo else garantia_contato.email_mascarado(email)) if email else None,
+        email_repassador=bool(email) and garantia_contato.email_repassador(email),
+        email_fonte=email_fonte if email else None,
+        whatsapp=(
+            (
+                garantia_contato.telefone_legivel(tel)
+                if completo
+                else garantia_contato.telefone_mascarado(tel)
+            )
+            if tel
+            else None
+        ),
+        whatsapp_link=f"https://wa.me/{tel}" if tel and completo else None,
+        whatsapp_fonte=tel_fonte if tel else None,
+        completo=completo,
     )
 
 

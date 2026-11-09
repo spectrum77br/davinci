@@ -261,6 +261,13 @@ class Garantia(Base):
     # Entrega + prazo_meses (RN04: o dia que não existe vira o último; vale
     # até ele, inclusive). NULL sem entrega ou sem prazo.
     fim_garantia: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # O contato do comprador lido no Bling (09/11/2026, aba Dados): o
+    # telefone só com dígitos e o 55 na frente (o formato do wa.me) e o
+    # e-mail; `contato_lido_em` NULL = o robô ainda não leu
+    # (services/garantia_contato.py).
+    contato_telefone: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contato_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    contato_lido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # De onde veio a data (services/garantia.FONTES_ENTREGA) e o instante
     # cru da fonte — é com ele que o robô percebe a correção (ponto 5).
     entrega_origem: Mapped[str | None] = mapped_column(String(20), nullable=True)

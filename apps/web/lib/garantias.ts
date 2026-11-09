@@ -363,7 +363,32 @@ export type GarantiaDetalhe = GarantiaLinha & {
   atualizado_por: PessoaRef | null
   atendimentos_lista: AtendimentoGarantia[]
   permissoes: PermissoesGarantia
+  // O e-mail e o WhatsApp do comprador (09/11/2026), na aba Dados.
+  contato?: ContatoGarantia | null
   avisos?: string[]
+}
+
+// O contato do comprador (09/11/2026): do formulário do SAC do site (o que o
+// cliente digitou) ou do cadastro do contato do pedido no Bling (hoje só a
+// Amazon tem). Completo só para quem vê o CPF completo; senão, mascarado e
+// sem link. `vazio`: por que não tem — "plataforma" (Mercado Livre, Shopee e
+// TikTok não informam), "lendo" (o robô ainda não leu o Bling) ou
+// "sem_cadastro" (o Bling não tem).
+export type ContatoGarantia = {
+  email: string | null
+  email_repassador: boolean
+  email_fonte: 'sac' | 'bling' | null
+  whatsapp: string | null
+  whatsapp_link: string | null
+  whatsapp_fonte: 'sac' | 'bling' | null
+  completo: boolean
+  vazio: 'plataforma' | 'lendo' | 'sem_cadastro' | null
+}
+export const FONTE_DO_CONTATO: Record<string, string> = { sac: 'SAC do site', bling: 'Bling' }
+export function porqueSemContato(c: ContatoGarantia, plataforma: string | null): string {
+  if (c.vazio === 'plataforma') return `${nomePlataforma(plataforma)} não informa o e-mail nem o telefone do comprador.`
+  if (c.vazio === 'lendo') return 'Buscando no Bling — aparece em até 10 minutos.'
+  return 'O Bling não tem e-mail nem telefone deste comprador.'
 }
 
 export type LogLinha = {

@@ -3687,6 +3687,20 @@ async def garantias_automaticas(ctx: dict) -> None:
     logger.info("garantias_automaticas", **r.como_dict())
 
 
+async def garantias_contato_bling(ctx: dict) -> None:
+    """O contato do comprador na aba Dados da garantia (09/11/2026): lê no
+    Bling o telefone e o e-mail do cadastro do contato do pedido, UMA vez por
+    garantia, até 40 por volta (2 GETs cada, dentro do limite do Bling). Só
+    as plataformas cujo contato o Bling tem (hoje, a Amazon)."""
+    if not get_settings().garantia_automatica:
+        return
+    from app.services import garantia_contato
+
+    async with session_scope() as s:
+        r = await garantia_contato.preencher(s)
+    logger.info("garantias_contato_bling", **r)
+
+
 async def garantias_conversas_diario(ctx: dict) -> None:
     """Garantia automática: uma vez por dia, liga TODAS as conversas aos
     pedidos das garantias (a volta de 15 min só olha as conversas mexidas nas
@@ -5355,6 +5369,7 @@ class WorkerSettings:
         historico_manutencao,
         garantias_recalcular_entrega,
         garantias_automaticas,
+        garantias_contato_bling,
         garantias_conversas_diario,
         condicao_especial_gc,
         func(mega_midias_recontar, timeout=2400),
@@ -5713,6 +5728,7 @@ class WorkerSettings:
         # fecham a hora com a entrega mais nova). Só banco, segundos.
         cron(garantias_recalcular_entrega, minute=57, run_at_startup=False),
         cron(garantias_automaticas, minute={7, 22, 37, 52}, run_at_startup=False),
+        cron(garantias_contato_bling, minute={4, 14, 24, 34, 44, 54}, run_at_startup=False),
         cron(garantias_conversas_diario, hour=7, minute=43, run_at_startup=False),
         # Condição Especial de segmento encerrada há 30d (services/condicao_especial).
         cron(condicao_especial_gc, hour=6, minute=10, run_at_startup=False),  # 03:10 BRT

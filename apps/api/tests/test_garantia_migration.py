@@ -1,6 +1,7 @@
 """As migrations 0380 (Painel de Garantia Uranyx), 0434 (garantia automática),
-0439 (pedido de garantia), 0459 (prazo por produto e o caso do SAC) e 0460
-(prazo 0 = sem garantia) criam EXATAMENTE o que o model declara.
+0439 (pedido de garantia), 0459 (prazo por produto e o caso do SAC), 0460
+(prazo 0 = sem garantia) e 0462 (o contato do comprador) criam EXATAMENTE o
+que o model declara.
 
 O conftest monta o schema de teste pelo `create_all` do model, nunca pela
 migration. Aqui a 0380 roda de verdade num schema descartável e o catálogo do
@@ -155,6 +156,13 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     )
     for passo in (mod_zero.upgrade, mod_zero.downgrade):
         assert "SET LOCAL lock_timeout" in inspect.getsource(passo)
+    # O contato do comprador na aba Dados (09/11/2026). A 0461 é da
+    # Certificações (financeiro_suprimentos), fora daqui.
+    mod_contato = _carregar("0462_garantia_contato")
+    assert (mod_contato.revision, mod_contato.down_revision) == (
+        "0462_garantia_contato",
+        "0461_certificacao_garantia",
+    )
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
@@ -179,6 +187,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     mod_pedido.SCHEMA = rascunho
     mod_sac.SCHEMA = rascunho
     mod_zero.SCHEMA = rascunho
+    mod_contato.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade")
@@ -186,6 +195,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await conn.run_sync(_rodar, "upgrade", mod_pedido)
         await conn.run_sync(_rodar, "upgrade", mod_sac)
         await conn.run_sync(_rodar, "upgrade", mod_zero)
+        await conn.run_sync(_rodar, "upgrade", mod_contato)
         await db.commit()
 
         da_migration = await _catalogo(db, rascunho)
@@ -360,6 +370,16 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await db.rollback()
         await db.execute(text(f'DELETE FROM "{rascunho}".garantias'))
         await db.commit()
+
+        # A volta da 0462 tira só as 3 colunas do contato.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", mod_contato)
+        await db.commit()
+        colunas_contato = text(
+            "SELECT count(*) FROM information_schema.columns WHERE table_schema = :s"
+            " AND table_name = 'garantias' AND column_name LIKE 'contato%'"
+        )
+        assert (await db.execute(colunas_contato, {"s": rascunho})).scalar_one() == 0
 
         # A volta da 0460: o 0 vira NULL (o CHECK antigo, 1..120, não aceita o 0).
         conn = await db.connection()

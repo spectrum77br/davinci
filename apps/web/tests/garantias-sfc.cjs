@@ -611,6 +611,8 @@ const mesmoPy = (a, b, msg) => {
     secoes: { de: ['SacDetalheOut', 'secoes'], ts: 'SacSecao', campos: ['titulo', 'campos'] },
     campos: { de: ['SacSecaoOut', 'campos'], ts: 'SacCampo', campos: ['rotulo', 'valor'] },
     anexos: { de: ['SacDetalheOut', 'anexos'], ts: 'SacAnexo', campos: ['id', 'nome', 'tipo', 'tamanho', 'papel', 'url'] },
+    // 09/11/2026: o e-mail e o WhatsApp do comprador na aba Dados.
+    contato: { de: ['GarantiaDetalheOut', 'contato'], ts: 'ContatoGarantia', campos: ['email', 'email_repassador', 'email_fonte', 'whatsapp', 'whatsapp_link', 'whatsapp_fonte', 'completo', 'vazio'] },
   }
   for (const [py, tsTipo] of [
     ['ListaFiltro', 'CorpoLista'], ['GarantiaLinhaOut', 'GarantiaLinha'], ['IndicadoresOut', 'Indicadores'], ['GarantiaListaOut', 'GarantiaLista'],

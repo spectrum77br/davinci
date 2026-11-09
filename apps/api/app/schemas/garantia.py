@@ -395,6 +395,29 @@ class PermissoesOut(BaseModel):
     ver_log: bool
 
 
+class ContatoOut(BaseModel):
+    """O contato do comprador na aba Dados (09/11/2026): o e-mail e o WhatsApp.
+    Vem do formulário do SAC do site (o que o cliente digitou) ou do cadastro
+    do contato do pedido no Bling (hoje só a Amazon tem). Completo só para
+    quem vê o CPF completo; senão, mascarado e sem link."""
+
+    email: str | None = None
+    # O e-mail da plataforma que só repassa a mensagem por ela (o da Amazon).
+    email_repassador: bool = False
+    # "sac" | "bling"
+    email_fonte: str | None = None
+    # "(19) 98888-7777" (mascarado: "(19) 9****-7777").
+    whatsapp: str | None = None
+    # https://wa.me/55… — só com o contato completo.
+    whatsapp_link: str | None = None
+    whatsapp_fonte: str | None = None
+    completo: bool = False
+    # Sem e-mail e sem WhatsApp, por quê: "plataforma" (Mercado Livre, Shopee
+    # e TikTok não informam), "lendo" (o robô ainda não leu o Bling) ou
+    # "sem_cadastro" (o Bling não tem).
+    vazio: str | None = None
+
+
 class GarantiaDetalheOut(GarantiaLinhaOut):
     # Completo só para quem pode ver (`garantias_cpf`); senão, mascarado.
     cpf: str | None
@@ -410,6 +433,7 @@ class GarantiaDetalheOut(GarantiaLinhaOut):
     atualizado_por: PessoaRef | None = None
     atendimentos_lista: list[AtendimentoOut]
     permissoes: PermissoesOut
+    contato: ContatoOut | None = None
 
 
 class GarantiaSalvaOut(GarantiaDetalheOut):
