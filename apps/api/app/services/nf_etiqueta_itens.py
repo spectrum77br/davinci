@@ -19,6 +19,11 @@ Os endpoints (subida e impressão) chamam `itens_para_declaracao`, que NUNCA
 levanta: a consulta roda num SAVEPOINT e qualquer falha vira "sem itens" (a
 etiqueta sobe/imprime com a declaração como está) — esta regra não pode
 derrubar uma impressão ou uma subida que funcionavam sem ela.
+
+Os mesmos itens alimentam o rodapé de picking da Shopee (09/11/2026,
+`nf_etiqueta_picking`). `pedidos_da_shopee` diz, na impressão, quais pedidos
+são da Shopee (só eles ganham rodapé quando o blob guardado não tem) — com a
+mesma regra de nunca levantar.
 """
 
 from __future__ import annotations
@@ -27,11 +32,12 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import BlingOrder
+from app.models import BlingOrder, StoreInfo
 from app.services.nf_etiqueta_declaracao import ItemDeclaracao, formatar_item
+from app.services.nf_etiqueta_picking import parece_pedido_shopee
 
 logger = structlog.get_logger()
 
@@ -97,6 +103,65 @@ async def itens_do_pedido(session: AsyncSession, numero: str | None) -> list[Ite
     if not numero:
         return []
     return (await itens_dos_pedidos(session, [numero])).get(numero, [])
+
+
+async def pedidos_da_shopee(
+    session: AsyncSession, numeros: Iterable[str | None], *, origem: str
+) -> set[str]:
+    """Números (de `numeros`) cujo pedido é da Shopee — só eles ganham o rodapé
+    de picking na impressão quando o blob guardado não tem (etiquetas subidas
+    entre 04/08 e 09/11/2026, quando o transform só apagava).
+
+    Pela loja do pedido: `bling_orders.loja` → `store_info.bling_store_id` →
+    `platform` (mesma ligação do lease do executor). Loja que não está em
+    `store_info`: pelo formato do nº da Shopee (`parece_pedido_shopee`). Uma
+    consulta só, num SAVEPOINT; NUNCA levanta — na falha devolve vazio (a
+    etiqueta antiga imprime sem rodapé, como hoje) e loga warning."""
+    nums = [n for n in dict.fromkeys(numeros) if n]
+    if not nums:
+        return set()
+    try:
+        async with session.begin_nested():
+            rows = (
+                await session.execute(
+                    select(
+                        BlingOrder.numero,
+                        BlingOrder.numeroloja,
+                        func.lower(func.trim(StoreInfo.platform)).label("plataforma"),
+                    )
+                    .select_from(BlingOrder)
+                    .join(StoreInfo, StoreInfo.bling_store_id == BlingOrder.loja, isouter=True)
+                    .where(
+                        BlingOrder.numero.in_(nums),
+                        BlingOrder.situacao.is_distinct_from("excluido"),
+                    )
+                )
+            ).all()
+    except Exception as exc:  # noqa: BLE001 — o rodapé nunca trava a impressão
+        logger.warning(
+            "nf_etiqueta_picking_plataforma_falhou",
+            origem=origem,
+            pedidos=nums[:20],
+            total=len(nums),
+            erro=f"{type(exc).__name__}: {exc}"[:300],
+        )
+        return set()
+    plataformas: dict[str, set[str]] = {}
+    numerolojas: dict[str, set[str]] = {}
+    for r in rows:
+        if r.plataforma:
+            plataformas.setdefault(r.numero, set()).add(r.plataforma)
+        if r.numeroloja:
+            numerolojas.setdefault(r.numero, set()).add(r.numeroloja)
+    out: set[str] = set()
+    for n in nums:
+        plats = plataformas.get(n)
+        if plats:
+            if "shopee" in plats:
+                out.add(n)
+        elif any(parece_pedido_shopee(x) for x in numerolojas.get(n, ())):
+            out.add(n)
+    return out
 
 
 async def itens_para_declaracao(

@@ -13,8 +13,11 @@ Agência, ela passa por uma limpeza pra NÃO expor a origem real do envio:
 2. Sem NF — apaga o bloco DANFE SIMPLIFICADO (número, série, emissão, a chave
    de acesso em texto E o código de barras da chave).
 3. Sem marketplace — remove o logo do marketplace (imagem pequena no topo).
-4. Sem picking — apaga o rodapé "SKU: N; Total Items: N; #PEDIDO; Deadline:..."
-   e a linha de itens abaixo (a Declaração de Conteúdo já traz SKU e descrição).
+4. Picking do Upseller sai — apaga o rodapé "SKU: N; Total Items: N; #PEDIDO;
+   Deadline:..." e as linhas de itens abaixo (SKU do ANÚNCIO). Desde 09/11/2026
+   ele VOLTA redesenhado por `nf_etiqueta_picking` com o SKU e a quantidade do
+   pedido no Bling (quem sobe lê o rodapé cru com `ler_picking` antes daqui e
+   escreve depois; esta função continua pura e só apaga).
 
 O que é PRESERVADO: QR codes, código de barras de rastreio dos Correios, blocos
 de roteirização (agência/rota) e a Declaração de Conteúdo. O nome do destinatário
@@ -275,7 +278,9 @@ def _remover_logo_marketplace(page: fitz.Page) -> None:
 def _remover_picking(page: fitz.Page) -> None:
     """Redige o rodapé de picking da etiqueta (SKU/Total Items/pedido/Deadline
     + a linha de itens abaixo). A âncora é "Total Items", que só existe nesse
-    rodapé — a Declaração de Conteúdo tem a coluna "SKU", mas não esse rótulo."""
+    rodapé — a Declaração de Conteúdo tem a coluna "SKU", mas não esse rótulo.
+    O rodapé com os itens do Bling é redesenhado depois, fora daqui
+    (`nf_etiqueta_picking.escrever_picking`)."""
     anchors = page.search_for("Total Items")
     if not anchors:
         return
@@ -289,6 +294,10 @@ def transformar_etiqueta(
     pdf_bytes: bytes, destinatario_nome: str | None = None, duimp: str | None = None
 ) -> bytes:
     """Aplica as 4 regras de visualização e devolve os bytes do PDF transformado.
+
+    Continua PURA e só APAGA o rodapé de picking: quem sobe a etiqueta lê o
+    rodapé cru antes (`nf_etiqueta_picking.ler_picking`) e o redesenha depois
+    com os itens do Bling, desviando das linhas DUIMP carimbadas aqui.
 
     `duimp` (Eduardo 09/09: "colocar o número da DUIMP nas etiquetas também"):
     texto pequeno no rodapé da 1ª página (a etiqueta), depois das redações.

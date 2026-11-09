@@ -14,6 +14,8 @@ página é montada com a GEOMETRIA medida nas etiquetas reais e dados fictícios
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import fitz  # PyMuPDF
 
 _XS = (5.5, 21.7, 82.0, 208.3, 257.1, 291.5)
@@ -278,3 +280,87 @@ def abrir_tabela(pdf: bytes) -> tuple[fitz.Document, fitz.Page]:
 def texto_da_tabela(pdf: bytes) -> str:
     _doc, page = abrir_tabela(pdf)
     return page.get_text()
+
+
+# --- etiqueta da Shopee com o rodapé de picking (Upseller) ------------------
+
+CHAVE_FICTICIA = "35261100000000000000550050000001031000000000"
+
+
+def _imagem(page: fitz.Page, rect: tuple[float, float, float, float], larg: int, alt: int) -> None:
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, larg, alt), False)
+    pix.set_rect(pix.irect, (0, 0, 0))
+    page.insert_image(fitz.Rect(*rect), pixmap=pix)
+
+
+def texto_qtd_upseller(q: int) -> str:
+    return "*1" if q == 1 else f"( *{q} )"
+
+
+def pagina_etiqueta_shopee(
+    doc: fitz.Document,
+    rodape: list[tuple[str, int]] | None,
+    *,
+    ref: str = "UP2NYY000001",
+    deadline: str | None = "09/11/2026",
+    pedido_loja: str = "261107AB12CD34",
+) -> None:
+    """Página da ETIQUETA da Shopee (Upseller, 300×442) na geometria medida
+    nas etiquetas reais (dados fictícios): fundo branco 15..282 × 10..386,
+    QR, código de barras de rastreio, bloco DANFE SIMPLIFICADO com a chave e
+    o código de barras dela, e o rodapé de picking — cabeçalho 9 pt na
+    baseline 391,5 e itens 8 pt de 9,8 em 9,8 a partir de 401,4, quantidade
+    em x 263,3 ("*1" / "( *2 )"). Fonte Helvetica (a ArialUnicodeMS do
+    Upseller não embute). `rodape=None` = sem rodapé."""
+    p = doc.new_page(width=300, height=442)
+    p.draw_rect(fitz.Rect(15.2, 10.4, 282.5, 386.0), color=None, fill=(1, 1, 1), width=0)
+
+    def t(x: float, y: float, s: str, fs: float = 7, fonte: str = "helv") -> None:
+        p.insert_text((x, y), s, fontsize=fs, fontname=fonte)
+
+    t(20, 20, "DESTINATÁRIO")
+    t(20, 32, "Fulano De Tal", 8)
+    t(20, 44, "Rua Exemplo, 100 - Cidade Teste", 7)
+    t(20, 56, f"Pedido: {pedido_loja}", 7)
+    _imagem(p, (209.8, 30.3, 268.3, 88.9), 40, 40)  # QR
+    _imagem(p, (32.7, 226.2, 185.5, 261.9), 200, 40)  # rastreio
+    t(20, 280, "REMETENTE")
+    t(20, 294, "Shopee Loja Teste", 8)
+    t(27.9, 317.8, "CEP: 00000000", 6.73)
+    t(27.9, 326.5, "Envio previsto: 09/11/2026", 6.73)
+    p.draw_rect(fitz.Rect(15.2, 329.2, 282.5, 330.6), color=None, fill=(0, 0, 0), width=0)
+    t(92.3, 336.6, "DANFE SIMPLIFICADO - ETIQUETA", 6.73, "hebo")
+    t(62.2, 343.4, "NF: 103", 5.39)
+    t(82.9, 350.1, CHAVE_FICTICIA, 5.39)
+    _imagem(p, (28.0, 353.5, 269.7, 373.7), 240, 20)  # barras da chave
+    if rodape is None:
+        return
+    cab = f"SKU: {len(rodape)}; Total Items: {sum(q for _s, q in rodape)}; #{ref}"
+    cab += f"; Deadline:{deadline}" if deadline else "; Deadline: -"
+    t(5.0, 391.5, cab, 9.0)
+    for i, (sku, q) in enumerate(rodape):
+        y = 401.4 + 9.8 * i
+        t(5.0, y, f"{i + 1}. {sku}", 8.0)
+        t(263.3, y, texto_qtd_upseller(q), 8.0)
+
+
+def etiqueta_shopee(
+    rodape: Sequence[tuple[str, int]] | None = (("dg054.ci+a001.ci", 1),),
+    *,
+    ref: str = "UP2NYY000001",
+    deadline: str | None = "09/11/2026",
+    pedido_loja: str = "261107AB12CD34",
+    declaracao: list[Linha] | None = None,
+) -> bytes:
+    """Etiqueta da Shopee como sai do Upseller: página da etiqueta (com o
+    rodapé de picking do ANÚNCIO) + declaração de conteúdo."""
+    doc = fitz.open()
+    pagina_etiqueta_shopee(
+        doc, list(rodape) if rodape is not None else None,
+        ref=ref, deadline=deadline, pedido_loja=pedido_loja,
+    )
+    linhas = declaracao or [
+        ("dg054.ci+a001.ci", ["Uranyx A17 Pro Max", "12.128"], ["Branco + Fone"], 1)
+    ]
+    pagina_upseller(doc, linhas)
+    return doc.tobytes()

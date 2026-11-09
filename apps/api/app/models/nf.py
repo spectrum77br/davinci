@@ -342,6 +342,12 @@ class NfEtiquetaArquivo(Base, TimestampMixin):
     destinatário, sem número/cód. barras/chave da NF, sem nome do marketplace)
     guardada por pedido, pronta pra impressão em Controle de Estoque → Pedidos.
 
+    A DECLARAÇÃO DE CONTEÚDO (06/11/2026) e o rodapé de picking da Shopee
+    (09/11/2026: o transform apaga o do Upseller e `nf_etiqueta_picking`
+    redesenha com o SKU/quantidade do pedido no Bling) já saem da subida com
+    os itens do Bling; a impressão realinha a CÓPIA impressa com os itens
+    atuais (troca depois da subida) sem regravar este blob.
+
     O blob fica no próprio banco (bytea), servido por endpoint autenticado por
     cookie — mesmo desenho de `logistica_status_anexo`. Chaveada por
     `pedido_bling` (igual `nf_faturamento`): uma etiqueta por pedido, a etapa de

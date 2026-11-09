@@ -97,6 +97,7 @@ from app.services.melhor_envio import (
 )
 from app.services.nf_etiqueta_declaracao import ItemDeclaracao, reescrever_declaracao
 from app.services.nf_etiqueta_itens import itens_para_declaracao
+from app.services.nf_etiqueta_picking import PickingRodape, escrever_picking, ler_picking
 from app.services.nf_etiqueta_transform import (
     EtiquetaTransformError,
     transformar_etiqueta,
@@ -2438,6 +2439,36 @@ def _declaracao_do_bling(
     return novo
 
 
+def _picking_do_bling(
+    pdf: bytes,
+    numero: str,
+    itens: list[ItemDeclaracao],
+    rodape: PickingRodape | None,
+    origem: str,
+) -> bytes:
+    """Devolve o RODAPÉ DE PICKING da etiqueta da Shopee (Eduardo, 07/11 e
+    09/11/2026) com o SKU e a quantidade do pedido no Bling — o transform
+    apaga o do Upseller (regra 4) e aqui ele é redesenhado no mesmo lugar,
+    com o #ref e o Deadline que o Upseller imprimiu. `rodape` é o que
+    `ler_picking` leu no PDF CRU, antes do transform: sem ele (TikTok, ML,
+    Amazon…) nada muda. Sem itens do Bling (pedido fake, consulta que
+    falhou) o rodapé volta como o Upseller imprimiu. Nunca trava a subida:
+    qualquer status que não seja 'ok' guarda a etiqueta como estava."""
+    if rodape is None:
+        return pdf
+    try:
+        novo, status, detalhe = escrever_picking(pdf, itens or rodape.itens_declaracao(), rodape)
+    except Exception as exc:  # noqa: BLE001 — escrever_picking já não levanta
+        novo, status, detalhe = pdf, "erro", f"{type(exc).__name__}: {exc}"[:300]
+    log = logger.warning if status == "erro" else logger.info
+    log(
+        "nf_etiqueta_picking",
+        pedido=numero, status=status, detalhe=detalhe, origem=origem,
+        itens_do_bling=bool(itens),
+    )
+    return novo
+
+
 @router.post(
     "/agent/etiqueta",
     dependencies=[Depends(_require_nf_agent_token)],
@@ -2450,8 +2481,10 @@ async def nf_agent_etiqueta(
 ) -> dict:
     """Recebe o PDF CRU da etiqueta (a marionete pega no Upseller/Correios),
     aplica a regra de visualização (item 2: remetente=destinatário, sem bloco NF,
-    sem logo do marketplace), reescreve a DECLARAÇÃO DE CONTEÚDO com os itens
-    atuais do pedido no Bling (06/11/2026) e faz UPSERT do PDF transformado em
+    sem logo do marketplace, sem o rodapé de picking do Upseller), reescreve a
+    DECLARAÇÃO DE CONTEÚDO com os itens atuais do pedido no Bling (06/11/2026),
+    redesenha o rodapé de picking da Shopee com o SKU/quantidade do Bling
+    (09/11/2026, `nf_etiqueta_picking`) e faz UPSERT do PDF transformado em
     `nf_etiqueta_arquivo` por pedido — de onde o Controle de Estoque serve o botão
     "Imprimir Etiqueta". O nome do destinatário é lido da própria etiqueta quando
     `destinatario_nome` não vem.
@@ -2461,6 +2494,9 @@ async def nf_agent_etiqueta(
         raise HTTPException(400, detail={"code": "nf_etiqueta_vazia"})
     if len(raw) > _ETIQUETA_MAX_BYTES:
         raise HTTPException(413, detail={"code": "nf_etiqueta_grande"})
+    # Rodapé de picking (Shopee) lido no CRU: o transform apaga e ele volta
+    # depois da declaração, com os itens do Bling.
+    rodape = ler_picking(raw)
     try:
         transformado = transformar_etiqueta(
             raw,
@@ -2470,9 +2506,9 @@ async def nf_agent_etiqueta(
     except EtiquetaTransformError as exc:
         raise HTTPException(422, detail={"code": "nf_etiqueta_invalida", "erro": str(exc)}) from exc
     itens = await itens_para_declaracao(session, [pedido_bling], origem="upload")
-    transformado = _declaracao_do_bling(
-        transformado, pedido_bling, itens.get(pedido_bling, []), "upload"
-    )
+    itens_pedido = itens.get(pedido_bling, [])
+    transformado = _declaracao_do_bling(transformado, pedido_bling, itens_pedido, "upload")
+    transformado = _picking_do_bling(transformado, pedido_bling, itens_pedido, rodape, "upload")
 
     filename = f"etiqueta_{pedido_bling}.pdf"
     row = (
@@ -2507,7 +2543,7 @@ async def nf_agent_etiqueta_lote(
     """Recebe o PDF ÚNICO da impressão em LOTE do Upseller (todas as etiquetas
     marcadas de uma vez), fatia em uma etiqueta por pedido, casa cada fatia com
     o pedido do davinci, transforma (mesma regra do /agent/etiqueta, inclusive
-    a declaração com os itens do Bling) e grava.
+    a declaração e o rodapé de picking da Shopee com os itens do Bling) e grava.
     Pros pedidos gravados: status_etiqueta='ok', fecha os comandos
     `imprimir_etiqueta` cobertos e move pra "Em digitação" (21) no Bling.
 
@@ -2621,6 +2657,7 @@ async def nf_agent_etiqueta_lote(
         session, [n for _f, n, _nm in casadas], origem="upload_lote"
     )
     for fatia, numero, nome in casadas:
+        rodape = ler_picking(fatia.pdf)  # na fatia CRUA, antes do transform
         try:
             transformado = transformar_etiqueta(
                 fatia.pdf,
@@ -2630,8 +2667,10 @@ async def nf_agent_etiqueta_lote(
         except EtiquetaTransformError as exc:
             falhas.append({"numero": numero, "erro": str(exc)})
             continue
-        transformado = _declaracao_do_bling(
-            transformado, numero, itens_por_pedido.get(numero, []), "upload_lote"
+        itens_pedido = itens_por_pedido.get(numero, [])
+        transformado = _declaracao_do_bling(transformado, numero, itens_pedido, "upload_lote")
+        transformado = _picking_do_bling(
+            transformado, numero, itens_pedido, rodape, "upload_lote"
         )
         row = (
             await session.execute(

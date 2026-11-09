@@ -695,3 +695,208 @@ async def test_impressao_sai_quando_a_busca_dos_itens_falha(
     assert r.headers["x-etiquetas-total"] == "2"
     assert await _impressa_em(db, "950002") is not None
     assert await _blob_no_banco(db, "950001") == _DECL_ANUNCIO
+
+
+# --- Rodapé de picking da Shopee com os itens do Bling (09/11/2026) ---------
+#
+# Na impressão, o rodapé que já está no blob é realinhado com os itens ATUAIS
+# do Bling; etiqueta da Shopee guardada SEM rodapé (subida entre 04/08 e
+# 09/11, quando o transform só apagava) ganha um. Só a cópia impressa muda.
+
+
+def _etiqueta_shopee_antiga() -> bytes:
+    """Blob como as subidas de 04/08 a 09/11 deixaram: transformado, sem rodapé."""
+    from app.services.nf_etiqueta_transform import transformar_etiqueta
+    from tests.declaracao_sintetica import etiqueta_shopee
+
+    return transformar_etiqueta(etiqueta_shopee([("dg054.ci+a001.ci", 1)]))
+
+
+def _etiqueta_shopee_com_rodape(sku_rodape: str) -> bytes:
+    """Blob subido já com a regra nova (rodapé nosso com `sku_rodape`)."""
+    from app.services.nf_etiqueta_picking import escrever_picking, ler_picking
+    from app.services.nf_etiqueta_transform import transformar_etiqueta
+    from tests.declaracao_sintetica import etiqueta_shopee
+
+    raw = etiqueta_shopee([("dg054.ci+a001.ci", 1)], ref="UP2NYY000501")
+    novo, st, _ = escrever_picking(
+        transformar_etiqueta(raw), [ItemDeclaracao(sku_rodape, "", "", 1)], ler_picking(raw)
+    )
+    assert st == "ok"
+    return novo
+
+
+async def _seed_shopee(
+    db: AsyncSession, dono: User, numero: str, blob: bytes, *,
+    plataforma: str | None = "shopee", numeroloja: str = "261107AB12CD34",
+    itens: tuple[tuple[str, str, int], ...] = (
+        ("dg054.sp+a001.sp", "Uranyx A17 Pro Max 12.128 - Branco + Fone", 1),
+    ),
+    nf_pdf: bytes | None = None,
+) -> None:
+    from app.models import StoreInfo
+
+    loja = f"95{numero}"
+    if plataforma is not None:
+        db.add(StoreInfo(
+            user_id=dono.id, platform=plataforma, account_name=f"loja-{numero}",
+            bling_store_id=loja,
+        ))
+    for i, (sku, desc, q) in enumerate(itens):
+        db.add(BlingOrder(
+            bling_id=int(numero), numero=numero, numeroloja=numeroloja, loja=loja,
+            item_codigo=sku, item_descricao=desc, item_quantidade=q, item_index=i,
+            situacao="15", em_andamento_data=date(2026, 11, 9),
+        ))
+    db.add(NfEtiquetaArquivo(
+        pedido_bling=numero, filename=f"etiqueta_{numero}.pdf",
+        content_type="application/pdf", size_bytes=len(blob), blob=blob,
+        nf_pdf=nf_pdf, nf_size_bytes=len(nf_pdf) if nf_pdf else None,
+    ))
+    await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_impressao_shopee_antiga_ganha_rodape_sem_gravar(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None],
+):
+    from app.services.nf_etiqueta_picking import ler_picking
+
+    blob = _etiqueta_shopee_antiga()
+    assert ler_picking(blob) is None
+    await _seed_shopee(db, admin_view, "960001", blob, itens=(
+        ("dg054.sp+a001.sp", "Uranyx A17 Pro Max 12.128 - Branco + Fone", 1),
+        ("a003.pi", "Fone U9 - Branco", 2),
+    ))
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/960001/etiqueta")
+    assert r.status_code == 200, r.text
+    rodape = ler_picking(r.content)
+    assert rodape is not None
+    assert rodape.itens == (("dg054.sp+a001.sp", 1), ("a003.pi", 2))
+    assert rodape.cabecalho == "SKU: 2; Total Items: 3"  # sem #ref/Deadline (perdidos)
+    # a declaração saiu junto com os mesmos itens, e o blob NÃO muda
+    assert [i.sku for i in ler_declaracao(r.content)] == ["dg054.sp+a001.sp", "a003.pi"]
+    assert await _blob_no_banco(db, "960001") == blob
+
+
+@pytest.mark.asyncio
+async def test_impressao_shopee_pelo_formato_do_numero_quando_a_loja_nao_esta_cadastrada(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None],
+):
+    from app.services.nf_etiqueta_picking import ler_picking
+
+    await _seed_shopee(db, admin_view, "960002", _etiqueta_shopee_antiga(), plataforma=None)
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/960002/etiqueta")
+    assert r.status_code == 200, r.text
+    assert ler_picking(r.content).itens == (("dg054.sp+a001.sp", 1),)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("plataforma", "numeroloja"),
+    [("tiktok", "579876543210987654"), (None, "2000012345678901")],
+)
+async def test_impressao_nao_shopee_nao_cria_rodape(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None], plataforma, numeroloja,
+):
+    """Loja que não é Shopee (ou nº que não tem o formato da Shopee): a
+    etiqueta sem rodapé sai sem rodapé."""
+    from app.services.nf_etiqueta_picking import ler_picking
+
+    numero = "960003" if plataforma else "960004"
+    await _seed_shopee(
+        db, admin_view, numero, _etiqueta_shopee_antiga(),
+        plataforma=plataforma, numeroloja=numeroloja,
+    )
+    auth_as(admin_view)
+    r = await client.get(f"/api/estoque/pedidos/{numero}/etiqueta")
+    assert r.status_code == 200, r.text
+    assert ler_picking(r.content) is None
+    assert "Total Items" not in _texto(r.content)
+
+
+@pytest.mark.asyncio
+async def test_impressao_realinha_o_rodape_com_a_troca_depois_da_subida(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None],
+):
+    """Subiu com dg054.ci; depois o Bling trocou pra dg054.sp: a cópia
+    impressa sai com o SKU novo e mantém o #ref/Deadline; o blob fica."""
+    from app.services.nf_etiqueta_picking import ler_picking
+
+    blob = _etiqueta_shopee_com_rodape("dg054.ci+a001.ci")
+    await _seed_shopee(db, admin_view, "960005", blob)
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/960005/etiqueta")
+    assert r.status_code == 200, r.text
+    rodape = ler_picking(r.content)
+    assert rodape.itens == (("dg054.sp+a001.sp", 1),)
+    assert rodape.ref == "UP2NYY000501" and rodape.deadline == "09/11/2026"
+    assert "dg054.ci" not in _texto(r.content)
+    assert await _blob_no_banco(db, "960005") == blob
+
+
+@pytest.mark.asyncio
+async def test_impressao_lote_rodape_e_nf_juntada_intocada(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None],
+):
+    """Lote: a Shopee antiga ganha rodapé, a TikTok não; a NF juntada depois
+    da etiqueta (documento fiscal) sai como veio."""
+    import fitz
+
+    from app.services.nf_etiqueta_picking import ler_picking
+
+    nf = _pdf("NOTA FISCAL 1%")
+    antiga = _etiqueta_shopee_antiga()
+    await _seed_shopee(db, admin_view, "960006", antiga, nf_pdf=nf)
+    await _seed_shopee(
+        db, admin_view, "960007", antiga, plataforma="tiktok", numeroloja="579876543210987600"
+    )
+    auth_as(admin_view)
+    r = await client.post(
+        "/api/estoque/pedidos/etiquetas", json={"pedidos": ["960006", "960007"]}
+    )
+    assert r.status_code == 200, r.text
+    doc = fitz.open(stream=r.content, filetype="pdf")
+    assert doc.page_count == 5  # etiqueta + declaração + NF; etiqueta + declaração
+    primeira = fitz.open()
+    primeira.insert_pdf(doc, from_page=0, to_page=1)
+    assert ler_picking(primeira.tobytes()).itens == (("dg054.sp+a001.sp", 1),)
+    assert doc[2].get_text().strip() == "NOTA FISCAL 1%"
+    assert (round(doc[2].rect.width, 1), round(doc[2].rect.height, 1)) == (300.0, 442.0)
+    segunda = fitz.open()
+    segunda.insert_pdf(doc, from_page=3, to_page=4)
+    assert ler_picking(segunda.tobytes()) is None
+    assert await _blob_no_banco(db, "960006") == antiga
+    assert await _blob_no_banco(db, "960007") == antiga
+
+
+@pytest.mark.asyncio
+async def test_impressao_sai_quando_a_busca_da_plataforma_falha(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None], monkeypatch: pytest.MonkeyPatch,
+):
+    """A consulta da plataforma nunca derruba a impressão: falhou = a etiqueta
+    antiga sai sem rodapé (como antes), o carimbo continua valendo."""
+    from app.services import nf_etiqueta_itens
+    from app.services.nf_etiqueta_picking import ler_picking
+
+    await _seed_shopee(db, admin_view, "960008", _etiqueta_shopee_antiga())
+
+    class _Quebra:
+        def __getattr__(self, _nome):
+            raise RuntimeError("store_info indisponível")
+
+    monkeypatch.setattr(nf_etiqueta_itens, "StoreInfo", _Quebra())
+    auth_as(admin_view)
+    r = await client.get("/api/estoque/pedidos/960008/etiqueta")
+    assert r.status_code == 200, r.text
+    assert ler_picking(r.content) is None
+    assert [i.sku for i in ler_declaracao(r.content)] == ["dg054.sp+a001.sp"]
+    assert await _impressa_em(db, "960008") is not None

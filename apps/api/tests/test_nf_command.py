@@ -1999,3 +1999,164 @@ def test_declaracao_com_erro_na_subida_loga_warning():
         e["status"]: e["log_level"] for e in logs if e.get("event") == "nf_etiqueta_declaracao"
     }
     assert niveis == {"erro": "warning", "sem_itens": "info"}
+
+
+# --- Rodapé de picking da Shopee com os itens do Bling (09/11/2026) ---------
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_shopee_rodape_com_o_sku_do_bling(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """O transform apaga o rodapé de picking do Upseller (SKU do anúncio) e a
+    subida redesenha no mesmo lugar com o SKU do pedido no Bling, mantendo o
+    #ref e o Deadline. A declaração também sai com o item do Bling."""
+    from app.services.nf_etiqueta_declaracao import ler_declaracao
+    from app.services.nf_etiqueta_picking import ler_picking
+    from tests.declaracao_sintetica import etiqueta_shopee
+
+    await _seed_pedido(
+        db, numero="870301", loja="930301", sku="dg054.sp+a001.sp",
+        nome="Uranyx A17 Pro Max 12.128 - Branco + Fone", unit=900, bling_id=970301,
+    )
+    await db.commit()
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    raw = etiqueta_shopee([("dg054.ci+a001.ci", 1)], ref="UP2NYY000301")
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870301"},
+        files={"file": ("etq.pdf", raw, "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    blob = await _blob_etiqueta(db, "870301")
+    rodape = ler_picking(blob)
+    assert rodape is not None
+    assert rodape.itens == (("dg054.sp+a001.sp", 1),)
+    assert rodape.ref == "UP2NYY000301" and rodape.deadline == "09/11/2026"
+    assert rodape.cabecalho == "SKU: 1; Total Items: 1; #UP2NYY000301; Deadline:09/11/2026"
+    import fitz
+
+    txt = fitz.open(stream=blob, filetype="pdf")[0].get_text()
+    assert "dg054.ci" not in txt
+    assert [i.sku for i in ler_declaracao(blob)] == ["dg054.sp+a001.sp"]
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_shopee_sem_espelho_rodape_como_o_upseller(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """Sem itens no Bling (pedido ainda sem espelho, fake, consulta falhou) o
+    rodapé volta exatamente como o Upseller imprimiu."""
+    from app.services.nf_etiqueta_picking import ler_picking
+    from tests.declaracao_sintetica import etiqueta_shopee
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    raw = etiqueta_shopee([("b020.12", 8)], ref="UP2NYY000302")
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870302"},
+        files={"file": ("etq.pdf", raw, "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    rodape = ler_picking(await _blob_etiqueta(db, "870302"))
+    cru = ler_picking(raw)
+    assert rodape is not None and cru is not None
+    assert rodape.cabecalho == cru.cabecalho
+    assert rodape.linhas == cru.linhas == (("1. b020.12", "( *8 )"),)
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_sem_rodape_no_cru_continua_sem(
+    db: AsyncSession, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+):
+    """TikTok/ML/Amazon (sem rodapé no cru): a subida não inventa rodapé."""
+    from app.services.nf_etiqueta_picking import ler_picking
+
+    await _seed_pedido(
+        db, numero="870303", loja="930303", sku="b027.24",
+        nome="Mala Chanfrada M3 tamanho 24 - Branca", unit=413, bling_id=970303,
+    )
+    await db.commit()
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta",
+        data={"pedido_bling": "870303"},
+        files={"file": ("etq.pdf", _etiqueta_com_declaracao(), "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    blob = await _blob_etiqueta(db, "870303")
+    assert ler_picking(blob) is None
+    import fitz
+
+    assert "Total Items" not in fitz.open(stream=blob, filetype="pdf")[0].get_text()
+
+
+@pytest.mark.asyncio
+async def test_agent_etiqueta_lote_shopee_rodape_com_o_sku_do_bling(
+    db: AsyncSession, client: AsyncClient, admin: User, monkeypatch: pytest.MonkeyPatch
+):
+    """No lote, o rodapé é lido em cada fatia CRUA e redesenhado com os itens
+    do Bling do pedido casado."""
+    from app.services.nf_etiqueta_picking import ler_picking
+    from tests.declaracao_sintetica import etiqueta_shopee
+
+    monkeypatch.setattr(get_settings(), "nf_agent_token", _TOKEN)
+    fake = _FakeBlingSituacao()
+
+    async def _fake_client(_session):
+        return fake
+
+    monkeypatch.setattr(nf_emissao_gerar, "_bling_client_opt", _fake_client)
+    await _seed_pedido(
+        db, numero="890301", loja="930301", sku="b026.18",
+        nome="Mala Chanfrada M3 tamanho 18 - Prata", unit=350,
+        bling_id=920301, numeroloja="260808LOTE91",
+    )
+    db.add(BlingOrder(
+        bling_id=920301, numero="890301", numeroloja="260808LOTE91",
+        data=datetime(2026, 6, 23, tzinfo=UTC), loja="930301", situacao="15",
+        item_index=1, item_codigo="b027.24",
+        item_descricao="Mala Chanfrada M3 tamanho 24 - Branca", item_quantidade=2,
+        itemvalor=350,
+    ))
+    await db.commit()
+    raw = etiqueta_shopee(
+        [("b036.24", 1)], ref="UP2NYY000391", pedido_loja="260808LOTE91"
+    )
+    r = await client.post(
+        "/api/nf-cadastro/agent/etiqueta-lote",
+        files={"file": ("lote.pdf", raw, "application/pdf")},
+        headers={"X-Agent-Token": _TOKEN},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["casadas"] == ["890301"]
+    rodape = ler_picking(await _blob_etiqueta(db, "890301"))
+    assert rodape is not None
+    assert rodape.itens == (("b026.18", 1), ("b027.24", 2))
+    assert rodape.cabecalho == "SKU: 2; Total Items: 3; #UP2NYY000391; Deadline:09/11/2026"
+
+
+def test_picking_na_subida_loga_e_nunca_trava():
+    """'erro' é warning (como a declaração); sem rodapé no cru não loga nem
+    mexe; os outros status são info."""
+    import structlog
+
+    from app.routers import nf as nf_router
+    from app.services.nf_etiqueta_declaracao import formatar_item
+    from app.services.nf_etiqueta_picking import ler_picking
+    from tests.declaracao_sintetica import etiqueta_shopee
+
+    raw = etiqueta_shopee()
+    rodape = ler_picking(raw)
+    item = [formatar_item("dg054.sp+a001.sp", "Uranyx A17 - Branco", 1)]
+    with structlog.testing.capture_logs() as logs:
+        assert nf_router._picking_do_bling(b"nao sou pdf", "870399", item, rodape, "upload") == (
+            b"nao sou pdf"
+        )
+        assert nf_router._picking_do_bling(raw, "870399", item, None, "upload") is raw
+        nf_router._picking_do_bling(raw, "870399", item, rodape, "upload")
+    niveis = {e["status"]: e["log_level"] for e in logs if e.get("event") == "nf_etiqueta_picking"}
+    assert niveis == {"erro": "warning", "ok": "info"}

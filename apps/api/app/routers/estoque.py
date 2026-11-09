@@ -69,13 +69,14 @@ from app.services.bling_situacoes import (
 from app.services.estoque_relatorio_pdf import relatorio_pedidos_pdf
 from app.services.link_mega import com_https, erro_link_mega
 from app.services.nf_etiqueta_declaracao import ItemDeclaracao, reescrever_declaracao
-from app.services.nf_etiqueta_itens import itens_para_declaracao
+from app.services.nf_etiqueta_itens import itens_para_declaracao, pedidos_da_shopee
 from app.services.nf_etiqueta_juntar import (
     EtiquetaJuntarError,
     juntar_etiqueta_nf,
     juntar_varios,
     redimensionar_para_etiqueta,
 )
+from app.services.nf_etiqueta_picking import escrever_picking, ler_picking
 from app.services.sku_tags import VALID_TAGS as _VALID_TAGS
 from app.services.sku_tags import classify_sku_tag as _classify_sku_tag
 from app.services.sku_tags import sql_clause_for_tag as _sql_clause_for_tag
@@ -1061,8 +1062,36 @@ async def list_estoque_pedidos(
     }
 
 
+def _picking_para_impressao(
+    pdf: bytes, pedido: str, itens: list[ItemDeclaracao], *, shopee: bool
+) -> bytes:
+    """Rodapé de picking da cópia impressa com os itens ATUAIS do Bling
+    (09/11/2026): o rodapé que já está no blob é realinhado (troca depois da
+    subida) e, em pedido da Shopee, a etiqueta antiga sem rodapé (subida entre
+    04/08 e hoje, quando o transform só apagava) ganha um — sem #ref/Deadline,
+    e só se a faixa de baixo da etiqueta estiver vazia. Qualquer falha imprime
+    como estava."""
+    try:
+        novo, status, detalhe = escrever_picking(
+            pdf, itens, ler_picking(pdf), criar_se_faltar=shopee
+        )
+    except Exception as exc:  # noqa: BLE001 — nunca trava a impressão
+        novo, status, detalhe = pdf, "erro", f"{type(exc).__name__}: {exc}"[:300]
+    # 'igual' (blob já alinhado) e 'sem_rodape' (TikTok, ML, Amazon, Shopee
+    # com a faixa ocupada) são o normal e não logam.
+    log = {"pedido": pedido, "status": status, "detalhe": detalhe, "origem": "impressao"}
+    if status == "erro":
+        logger.warning("nf_etiqueta_picking", **log)
+    elif status not in ("igual", "sem_rodape"):
+        logger.info("nf_etiqueta_picking", **log)
+    return novo
+
+
 def _pdf_para_impressao(
-    row: NfEtiquetaArquivo, itens: list[ItemDeclaracao] | None = None
+    row: NfEtiquetaArquivo,
+    itens: list[ItemDeclaracao] | None = None,
+    *,
+    shopee: bool = False,
 ) -> bytes:
     """PDF final de UM pedido: etiqueta, ou etiqueta + NF quando é correios.
 
@@ -1071,6 +1100,10 @@ def _pdf_para_impressao(
     subida). Só a cópia que vai pra impressora muda — o blob NÃO é regravado —
     e só a página da etiqueta: as NFs juntadas são documento fiscal e ficam
     como estão. Qualquer falha imprime o blob como está.
+
+    09/11/2026: depois da declaração, o RODAPÉ DE PICKING da etiqueta (Shopee)
+    sai com o SKU/quantidade dos mesmos `itens` (`_picking_para_impressao`;
+    `shopee` = o pedido é da Shopee e pode ganhar rodapé se o blob não tem).
 
     A presença de `nf_pdf` é o sinal do fluxo correios/ML (não aceita declaração
     de conteúdo, vai a NF junto). Falha na junção degrada pra só a etiqueta —
@@ -1099,6 +1132,7 @@ def _pdf_para_impressao(
             logger.warning("nf_etiqueta_declaracao", **log)
         elif status not in ("igual", "sem_declaracao"):
             logger.info("nf_etiqueta_declaracao", **log)
+        base = _picking_para_impressao(base, row.pedido_bling, itens, shopee=shopee)
     try:
         pdf = redimensionar_para_etiqueta(base)
     except EtiquetaJuntarError:
@@ -1286,9 +1320,15 @@ async def get_pedidos_etiquetas_lote(
     itens_por_pedido = await itens_para_declaracao(
         session, [r.pedido_bling for r in ordenados], origem="impressao_lote"
     )
+    # Quais são da Shopee (rodapé de picking nas etiquetas antigas sem ele).
+    shopee = await pedidos_da_shopee(
+        session, [r.pedido_bling for r in ordenados], origem="impressao_lote"
+    )
     try:
         partes = [
-            _pdf_para_impressao(r, itens_por_pedido.get(r.pedido_bling))
+            _pdf_para_impressao(
+                r, itens_por_pedido.get(r.pedido_bling), shopee=r.pedido_bling in shopee
+            )
             for r in ordenados
         ]
         if payload.incluir_relatorio:
@@ -1361,7 +1401,10 @@ async def get_pedido_etiqueta(
     itens_por_pedido = await itens_para_declaracao(
         session, [row.pedido_bling], origem="impressao"
     )
-    conteudo = _pdf_para_impressao(row, itens_por_pedido.get(row.pedido_bling))
+    shopee = await pedidos_da_shopee(session, [row.pedido_bling], origem="impressao")
+    conteudo = _pdf_para_impressao(
+        row, itens_por_pedido.get(row.pedido_bling), shopee=row.pedido_bling in shopee
+    )
     if row.impressa_em is None and carimbar:
         # Abrir a etiqueta é imprimir — carimba pra tela marcar "Impressa"
         # (mesma regra do lote: só a primeira vez).
