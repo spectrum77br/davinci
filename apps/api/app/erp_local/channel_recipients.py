@@ -120,7 +120,7 @@ def from_magalu(order):
             "complement": _clean(address.get("complement")),
             "district": _clean(address.get("district")),
             "city": _clean(address.get("city")),
-            "state": _clean(address.get("state")),
+            "state": _uf(address.get("state")),
             "postal_code": _digits(address.get("zipcode")),
             "phone": "",
         },
@@ -128,20 +128,20 @@ def from_magalu(order):
 
 
 def from_tiktok(order):
-    """The level names in district_info are the store's; a level not found stays empty."""
+    """Levels seen on 09/11/2026: L1 'state' (UF), L2 'municipality'. Unknown levels stay empty."""
     address = order.get("recipient_address") or {}
-    levels = {
-        str(row.get("address_level_name") or "").casefold(): _clean(row.get("address_name"))
-        for row in address.get("district_info") or []
-    }
-    iso = next(
-        (
-            _clean(row.get("iso_code"))
-            for row in address.get("district_info") or []
-            if _clean(row.get("iso_code")).startswith("BR-")
-        ),
-        "",
-    )
+    by_level, by_name, iso = {}, {}, ""
+    for row in address.get("district_info") or []:
+        value = _clean(row.get("address_name"))
+        code = _clean(row.get("iso_code"))
+        iso = code if code.startswith("BR-") else iso
+        if row.get("address_level"):
+            by_level[str(row["address_level"])] = (value, code)
+        by_name[str(row.get("address_level_name") or "").casefold()] = value
+    state_name = by_level.get("L1", ("", ""))[0] or by_name.get("state", "")
+    state = _uf(state_name) or _uf(iso.removeprefix("BR-"))
+    city = by_level.get("L2", ("", ""))[0] or by_name.get("municipality") or by_name.get("city", "")
+    district = by_level.get("L3", ("", ""))[0] or by_name.get("district", "")
     return _finish(
         {
             "name": _clean(order.get("cpf_name")) or _clean(address.get("name")),
@@ -152,9 +152,9 @@ def from_tiktok(order):
             "street": _clean(address.get("address_line1")) or _clean(address.get("address_detail")),
             "number": _clean(address.get("address_line2")) or "S/N",
             "complement": _clean(address.get("address_line4")),
-            "district": _clean(address.get("address_line3")) or levels.get("district", ""),
-            "city": levels.get("city", ""),
-            "state": iso.removeprefix("BR-"),
+            "district": _clean(address.get("address_line3")) or district,
+            "city": city,
+            "state": state,
             "postal_code": _digits(address.get("postal_code")),
             "phone": "",
         },

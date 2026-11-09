@@ -221,3 +221,10 @@ def test_real_store_and_order_ids_fit_the_operation_key(erp):
     store = "3d5dc93a-3344-4d63-9465-03afdf1ac1b5"
     assert rc.capture(erp, CHANNEL, store, "2611091234ABCDE", open_order())["ready"] is True
 
+
+def test_same_incomplete_reading_repeated_records_nothing_new(erp):
+    store = "3d5dc93a-3344-4d63-9465-03afdf1ac1b5"
+    first = rc.capture(erp, CHANNEL, store, "R1", masked_order())
+    again = rc.capture(erp, CHANNEL, store, "R1", masked_order())
+    assert first["ready"] is False and again["kept"] is True
+    assert rc.capture(erp, CHANNEL, store, "R1", open_order())["ready"] is True

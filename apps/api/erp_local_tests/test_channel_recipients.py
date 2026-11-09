@@ -118,3 +118,63 @@ def test_tiktok_uses_cpf_fields_and_ignores_the_masked_phone():
 def test_empty_reply_lists_everything_missing():
     result = cr.from_tiktok({})
     assert result["ready"] is False and {"documento", "nome", "CEP"} <= set(result["missing"])
+
+
+def test_tiktok_levels_as_the_store_sends_them():
+    order = {
+        "cpf": CPF,
+        "cpf_name": "Ana",
+        "recipient_address": {
+            "name": "Bia",
+            "address_line1": "Rua A",
+            "address_line2": "20",
+            "address_line3": "Centro",
+            "postal_code": "30110000",
+            "district_info": [
+                {
+                    "address_level_name": "Country",
+                    "address_level": "L0",
+                    "address_name": "Brasil",
+                    "iso_code": "BR",
+                },
+                {
+                    "address_level_name": "state",
+                    "address_level": "L1",
+                    "address_name": "MG",
+                    "iso_code": "BR-MG",
+                },
+                {
+                    "address_level_name": "municipality",
+                    "address_level": "L2",
+                    "address_name": "Belo Horizonte",
+                },
+            ],
+        },
+    }
+    result = cr.from_tiktok(order)
+    assert result["ready"] is True, result["missing"]
+    assert result["recipient"]["state"] == "MG" and result["recipient"]["ibge_code"] == "3106200"
+
+
+def test_magalu_state_by_name_is_accepted():
+    order = {
+        "customer": {"name": "Ana", "document_number": CPF},
+        "deliveries": [
+            {
+                "shipping": {
+                    "recipient": {
+                        "name": "Bia",
+                        "address": {
+                            "street": "Rua A",
+                            "number": "1",
+                            "district": "Centro",
+                            "city": "São Paulo",
+                            "state": "São Paulo",
+                            "zipcode": "01001000",
+                        },
+                    }
+                }
+            }
+        ],
+    }
+    assert cr.from_magalu(order)["recipient"]["state"] == "SP"

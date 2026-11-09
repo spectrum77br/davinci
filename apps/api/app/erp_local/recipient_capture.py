@@ -60,7 +60,18 @@ def apply(erp, db, p):
 
 def capture(erp, channel, store, external, raw, *, status=None, now=None):
     projection = channel_recipients.project(channel, raw)
-    digest = hashlib.sha256(dumps(projection).encode()).hexdigest()
+    with erp.connection() as db:
+        stored = for_order(db, channel, store, external)
+    if stored and (stored["ready"] or not projection["ready"]):
+        same = {"buyer": stored["buyer"], "recipient": stored["recipient"]} == {
+            "buyer": projection["buyer"],
+            "recipient": projection["recipient"],
+        }
+        # The same reading every five minutes would only pile up identical records.
+        if same or stored["ready"] and not projection["ready"]:
+            return {"kept": True, "ready": stored["ready"]}
+    moment = (now or datetime.now(UTC)).isoformat()
+    digest = hashlib.sha256(dumps([projection, status, moment]).encode()).hexdigest()
     return erp.command(
         f"recipient-v1:{channel}:{store}:{external}:{digest[:32]}",
         "recipient.capture",
@@ -69,7 +80,7 @@ def capture(erp, channel, store, external, raw, *, status=None, now=None):
             "store": store,
             "external_id": external,
             "read_status": status,
-            "captured_at": (now or datetime.now(UTC)).isoformat(),
+            "captured_at": moment,
             "projection": projection,
         },
         actor="recepção de pedidos",

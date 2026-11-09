@@ -408,6 +408,15 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             },
         )
 
+    @app.get("/api/erp-local/store-sales")
+    def store_sales_list(
+        q: str = "", offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)
+    ):
+        from app.erp_local import store_sales
+
+        with erp.connection() as db:
+            return store_sales.listing(db, q, offset, limit)
+
     @app.get("/api/erp-local/guides")
     def guides(date_from: str, date_to: str):
         from app.erp_local import tax_guides
