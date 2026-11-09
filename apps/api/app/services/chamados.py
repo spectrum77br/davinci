@@ -1319,6 +1319,15 @@ def status_e_motivo_da_aba(
     )
     if ch.status_plataforma == STATUS_PROVA and not nossa_fala_depois_do_status:
         return ABA_ANALISE_HUMANO, ch.status_plataforma_at, "Shopee pediu prova adicional"
+    # 09/11/2026 (304026, 307410 e mais 10): a nossa fala não saiu (tarefa "abrir à
+    # mão", "humano: não achei o perfil", envio que falhou) e DEPOIS a IA de Chamado
+    # fez na tela e mandou aguardar — a bola está com a plataforma, não com gente.
+    ia_mandou_aguardar = analise_pede_esperar and analise_depois
+    aguardando_pela_ia = (
+        ABA_AGUARD_PLATAFORMA,
+        ultima_analise.created_at if ultima_analise is not None else None,
+        "a IA fez a tarefa na tela e decidiu aguardar a plataforma",
+    )
     if ultima_fala is not None and ultima_fala.direcao == "enviada":
         erro = (ultima_fala.erro or "").strip()
         st = ultima_fala.status
@@ -1337,6 +1346,8 @@ def status_e_motivo_da_aba(
                     "robô procura outro caminho",
                 )
             if _erro_pede_humano(erro):
+                if ia_mandou_aguardar:
+                    return aguardando_pela_ia
                 return ABA_ANALISE_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
             quem = "na fila do robô" if (ultima_fala.canal or "") == "robo" else "saindo pela API"
             tentativas = ultima_fala.tentativas or 0
@@ -1347,6 +1358,8 @@ def status_e_motivo_da_aba(
                 )
             return ABA_ANALISE_ROBO, fala_em, quem
         if st == "falhou":
+            if ia_mandou_aguardar and (_erro_pede_humano(erro) or erro not in ERROS_ACOMPANHADOS):
+                return aguardando_pela_ia
             if _erro_pede_humano(erro):
                 return ABA_ANALISE_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
             if erro not in ERROS_ACOMPANHADOS:
@@ -1356,14 +1369,8 @@ def status_e_motivo_da_aba(
                     f"envio falhou: {erro[:80]}" if erro else "envio falhou",
                 )
         if st == "registrada" and _erro_pede_humano(erro):
-            # 09/11/2026 (304026/305794): a tarefa "abrir à mão" ficava em Análise
-            # Humano mesmo depois de a IA fazer na tela e mandar aguardar.
-            if analise_pede_esperar and analise_depois:
-                return (
-                    ABA_AGUARD_PLATAFORMA,
-                    ultima_analise.created_at,
-                    "a IA fez a tarefa na tela e decidiu aguardar a plataforma",
-                )
+            if ia_mandou_aguardar:
+                return aguardando_pela_ia
             return ABA_ANALISE_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
     if ch.status_plataforma:
         if (
@@ -1380,6 +1387,8 @@ def status_e_motivo_da_aba(
             MOTIVO_STATUS_OFICIAL.get(ch.status_plataforma),
         )
     if ultima_fala is None:
+        if ia_mandou_aguardar:
+            return aguardando_pela_ia
         return ABA_ANALISE_HUMANO, None, "registrado à mão — acompanhar no site"
     if ultima_fala.direcao == "recebida":
         if analise_pede_esperar and analise_depois:

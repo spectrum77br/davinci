@@ -340,3 +340,29 @@ def test_ultima_acao_conta_o_que_a_ia_fez_e_nao_a_tarefa_a_mao():
     # Fala nossa que não saiu não é ação.
     presa = _msg("enviada", status="pendente", minutos=700)
     assert svc.ultima_acao(msgs + [resp, presa])[1] == "plataforma"
+
+
+def test_fala_que_nao_saiu_e_a_ia_mandou_aguardar_e_aguard_plataforma():
+    """09/11/2026 (307410 e mais 10): a abertura/réplica não saiu ("humano: não
+    achei o perfil", envio que falhou) e DEPOIS a IA fez na tela e mandou
+    aguardar: Aguard. Plataforma. Sem a análise depois, segue Análise Humano."""
+    ch = _ch(canal="robo")
+    aguardar = _msg("sistema", tipo="analise", minutos=60, texto="Feito na tela … → aguardar a plataforma")
+    velha = _msg("sistema", tipo="analise", minutos=-5, texto="… → aguardar a plataforma")
+    casos = [
+        _msg("enviada", status="falhou", erro="humano: não achei o perfil da loja victor mei"),
+        _msg("enviada", status="falhou", erro="chamado_sem_acao"),
+        _msg("enviada", status="pendente", erro="sem_perfil_adspower"),
+    ]
+    for fala in casos:
+        cod, quando, motivo = _status(ch, fala, aguardar, esperar=True)
+        assert cod == svc.ABA_AGUARD_PLATAFORMA and quando == aguardar.created_at, fala.erro
+        assert "aguardar" in motivo
+        assert _status(ch, fala, velha, esperar=True)[0] == svc.ABA_ANALISE_HUMANO, fala.erro
+        assert _status(ch, fala)[0] == svc.ABA_ANALISE_HUMANO, fala.erro
+    # Registrado à mão (sem fala nenhuma): a IA mandou aguardar → Aguard.
+    assert _status(_ch(canal="manual"), None, aguardar, esperar=True)[0] == svc.ABA_AGUARD_PLATAFORMA
+    assert _status(_ch(canal="manual"), None)[0] == svc.ABA_ANALISE_HUMANO
+    # A IA pediu gente depois da fala presa: humano.
+    pede = _msg("sistema", tipo="analise", minutos=60, texto="… → precisa de humano")
+    assert _status(ch, casos[0], pede, humano=True)[0] == svc.ABA_ANALISE_HUMANO
