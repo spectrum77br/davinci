@@ -367,7 +367,22 @@ def _order_detail(erp, db, doc):
         "observacoesInternas": data.get("internal_notes", ""),
         "outrasDespesas": _float(data.get("charges")),
         "itens": items,
-        "parcelas": [],
+        # A store sale is paid at once: one installment with the order total, as Bling keeps it.
+        "parcelas": [
+            {
+                "id": numeric_id(db, "installment", doc["id"] + ":0"),
+                "dataVencimento": data.get("date", ""),
+                "valor": _float(data.get("total")),
+                "observacoes": "",
+                "formaPagamento": {
+                    "id": numeric_id(db, "payment_method", data["payment_method_id"])
+                    if data.get("payment_method_id")
+                    else 0
+                },
+            }
+        ]
+        if data.get("total") is not None
+        else [],
         "taxas": {
             "valorBase": _float(fees.get("base")),
             "custoFrete": _float(fees.get("shipping_cost")),

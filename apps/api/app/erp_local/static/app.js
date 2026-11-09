@@ -137,7 +137,7 @@ function channels(){
 function parity(){
   const p=state.parity;
   if(!p)return panel('Referência REA','', '<p>Carregando os contratos funcionais.</p>');
-  const labels={tested_local:'Testado localmente',partial:'Parcial',mapped:'Mapeado'};
+  const labels={tested_local:'Testado localmente',partial:'Parcial',mapped:'Mapeado',not_used:'Não usado no Bling'};
   return panel('Critério de equivalência','A implementação acompanha o comportamento observado. As regras internas não reveladas pelo levantamento permanecem como pendências explícitas.',`<div class="source-line">${esc(p.scope)}<br>Levantamento de ${esc(p.basis_date)} · revisão do REA <span class="small-code">${esc(p.rea_commit.slice(0,12))}</span></div>`)+
   panel('Acompanhamento por módulo','Testado localmente indica o recorte descrito, sem declarar substituição completa do módulo em produção.','<div class="parity-table">'+table(['Módulo / situação','Comportamento observado','O que ainda falta'],p.contracts.map(c=>`<tr><td><strong>${esc(c.module)}</strong><small><span class="badge ${c.status==='tested_local'?'good':c.status==='partial'?'warn':'dim'}">${labels[c.status]}</span></small></td><td>${esc(c.behavior)}<small>${c.assets.map(a=>esc(a.path.split('/').pop())+' · '+esc(a.sha256.slice(0,12))).join('<br>')}</small></td><td>${esc(c.remaining)}</td></tr>`).join(''))+'</div>')+
   panel('Rastreabilidade','Os arquivos analisados, seus resumos e testes estão preservados no repositório.',`<p class="small-code">${p.evidence_ids.map(esc).join('<br>')}</p>`);

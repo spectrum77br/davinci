@@ -223,8 +223,8 @@
       "id": "inventory",
       "module": "Conferência de estoque",
       "behavior": "Leituras são persistidas; gerar balanço é uma etapa distinta. Reiniciar a conferência não altera o saldo físico.",
-      "status": "partial",
-      "remaining": "Leitura por SKU/GTIN, recusa de ambiguidade, sessões por depósito, contagem zero, reinício com histórico e balanço atômico testados. Movimentação física exige recontagem e reservas são preservadas. Lotes, séries, aplicativo móvel e conciliação histórica pendentes.",
+      "status": "not_used",
+      "remaining": "Conferido no Bling em 09/11/2026 (só leitura): nenhuma conferência de estoque registrada. Módulo pronto no ERP.",
       "assets": [
         {
           "path": "output/bling-estoque-producao-2026-11-05/assets/estoque.conferencia.api.js",
@@ -245,7 +245,7 @@
       "module": "Edição de produtos e identificadores",
       "behavior": "Unidade, GTIN, situação, preços, características, descrições, DUN, tags, limites de estoque e tipo são dados distintos, versionados e com histórico; atualização cadastral não altera pedidos anteriores ou custo médio do estoque.",
       "status": "partial",
-      "remaining": "Cadastro, características observadas no Bling (condição, produção, validade, frete grátis, pesos líquido/bruto, dimensões com unidade, volumes, itens por caixa, departamento, DUN, descrições HTML com lista permitida, link, vídeo, observações, tags, categoria no formulário, mínimo/máximo/crossdocking) e serviço sem estoque testados e validados no Chrome em dados fictícios. Variações, conversão geral de formato, controle por lote, grupos de tags, painel de validação por loja e migração integral dos metadados reais pendentes. Valor ausente segue desconhecido; não vira zero nem padrão.",
+      "remaining": "Cadastro, características observadas no Bling (condição, produção, validade, frete grátis, pesos líquido/bruto, dimensões com unidade, volumes, itens por caixa, departamento, DUN, descrições HTML com lista permitida, link, vídeo, observações, tags, categoria no formulário, mínimo/máximo/crossdocking) e serviço sem estoque testados e validados no Chrome em dados fictícios. conversão geral de formato, controle por lote, grupos de tags, painel de validação por loja e migração integral dos metadados reais pendentes. Valor ausente segue desconhecido; não vira zero nem padrão. Variações: não usadas no Bling (0 produtos com variação em 09/11; 893 simples e 1.700 kits ativos).",
       "assets": [],
       "tests": [
         "apps/api/erp_local_tests/test_product_details.py",
@@ -273,8 +273,8 @@
       "id": "production",
       "module": "Ordens de produção",
       "behavior": "Salvar planeja; iniciar reserva insumos; entregar movimenta insumos e produto acabado. Cancelar não estorna entregas.",
-      "status": "partial",
-      "remaining": "Planejamento, receita física persistente com aplicação explícita e versão, início/pausa, entrega parcial, custo e estorno testados. Perdas, desmontagem, lotes/séries e homologação histórica pendentes.",
+      "status": "not_used",
+      "remaining": "Conferido no Bling em 09/11/2026 (só leitura): nenhuma ordem de produção. Módulo pronto no ERP; não entra na troca.",
       "assets": [
         {
           "path": "output/bling-estoque-producao-2026-11-05/assets/form.ordens.producao-1793218339.js",
@@ -307,8 +307,8 @@
       "id": "price_lists",
       "module": "Listas de preços",
       "behavior": "A lista escolhida calcula preços explícitos e preserva versão, bases e contexto no pedido.",
-      "status": "partial",
-      "remaining": "Percentual, valor, preços por SKU, escopo e vigência por data testados; prévia é conferida ao salvar. Precedência automática da origem, horários, aplicação por vendedor e publicação em lojas ainda pendentes.",
+      "status": "not_used",
+      "remaining": "Conferido no Bling em 09/11/2026 (só leitura): 0 listas de preços. Preço vem da Tabela de Preços do DaVinci.",
       "assets": [
         {
           "path": "output/bling-complementos-2026-11-05/assets/form.listas.precos-1793218339.js",
@@ -324,8 +324,8 @@
       "id": "sellers",
       "module": "Vendedores e comissões",
       "behavior": "Comissões têm regras de liberação distintas; pagamento e estorno são fatos separados.",
-      "status": "partial",
-      "remaining": "Cadastro próprio, alíquota fixa, vínculo congelado, quatro liberações e proteção financeira testados. Faixas por desconto, limite de desconto, contratos, ajustes, acesso do vendedor, exportação e homologação histórica pendentes.",
+      "status": "not_used",
+      "remaining": "Conferido no Bling em 09/11/2026 (só leitura): 1 vendedor e comissões zeradas. Não entra na troca.",
       "assets": [
         {
           "path": "output/bling-vendedores-propostas-2026-11-05/assets/form.vendedores-1793218339.js",
@@ -362,8 +362,8 @@
       "id": "returns",
       "module": "Devoluções parciais e reembolsos",
       "behavior": "Frete reverso, recebimento físico e obrigação de reembolso são etapas distintas.",
-      "status": "partial",
-      "remaining": "Peças de kits, recebimento parcial/misto, quarentena, estorno de recebimento, conclusão e teto de reembolso testados. Frete reverso real, assistência fiscal, inspeção/reparo formal e regras de comissão após reembolso parcial ainda pendentes.",
+      "status": "not_used",
+      "remaining": "Conferido no Bling em 09/11/2026 (só leitura): 0 logísticas reversas no Bling; as devoluções são tratadas no DaVinci. O ERP mantém o fluxo testado localmente.",
       "assets": [
         {
           "path": "output/bling-reversa-2026-11-05/assets/form.logisticas.reversas.js",
@@ -379,8 +379,8 @@
       "id": "proposals",
       "module": "Propostas comerciais e versões",
       "behavior": "Propostas têm condições e revisões próprias. Gerar venda abre a revisão do pedido; a origem fica protegida após registrar a venda.",
-      "status": "partial",
-      "remaining": "Cadastro/edição, histórico, versões, total, condições, impressão, exportação, situação em lote e conversão revisada testados. Itens/serviços não cadastrados são preservados na proposta e bloqueados na conversão. Endereço alternativo, anexos, formatação rica, condições avançadas e homologação comercial ainda pendentes.",
+      "status": "not_used",
+      "remaining": "Conferido no Bling em 09/11/2026 (só leitura): 0 propostas. Módulo pronto no ERP; não entra na troca.",
       "assets": [
         {
           "path": "output/bling-vendedores-propostas-2026-11-05/assets/orcamentos.api-1793218339.js",
@@ -400,8 +400,8 @@
       "id": "cash_register",
       "module": "Controle físico de caixa e conferência",
       "behavior": "Troco, vendas por forma de pagamento, suprimento e sangria compõem o fechamento. Abrir/fechar e conferir são etapas distintas.",
-      "status": "partial",
-      "remaining": "Abertura, operações físicas, fechamento/conferência, retirada de conferência com motivo e histórico, reembolsos em dinheiro parciais/integralizados no período da baixa e preservação do fechamento anterior testados. Contrapartida financeira opcional de sangrias/suprimentos, outros meios de reembolso, crédito parcialmente recebido, permissões, categorias e conectores ainda pendentes.",
+      "status": "not_used",
+      "remaining": "Conferido no Bling em 09/11/2026 (só leitura): 2 controles de caixa no total. Módulo pronto no ERP; não entra na troca.",
       "assets": [
         {
           "path": "output/bling-pdv-caixa-2026-11-05/assets/form.frente.caixa.js",
@@ -426,8 +426,8 @@
       "id": "pos",
       "module": "Frente de caixa e checkout",
       "behavior": "Digitação e finalização são etapas distintas. Itens, cliente, parcelas, caixa e troco compõem o checkout; fiscal e pagamentos integrados têm conectores próprios.",
-      "status": "partial",
-      "remaining": "Checkout local com pagamentos mistos, parcelas, recebimento manual, troco, saída física/financeira atômica, comprovante e reembolsos em dinheiro parciais/complementares após caixa conferido testados. NFC-e, Pix/POS reais, correções de recebimento, crédito parcial, outros meios de reembolso, delivery, balança, lotes, favoritos, impressão térmica e equivalência visual integral pendentes.",
+      "status": "not_used",
+      "remaining": "Conferido no Bling em 09/11/2026 (só leitura): frente de caixa vazia e 0 NFC-e. A venda presencial (12 pedidos em 30 dias) entra como pedido da loja \"Venda Presencial\". NFC-e só se a operação passar a usar.",
       "assets": [
         {
           "path": "output/bling-pdv-caixa-2026-11-05/assets/form.frente.caixa.js",
@@ -474,7 +474,7 @@
       "module": "Pedidos nativos das lojas",
       "behavior": "Observação direta, identidade por conta/anúncio e processamento operacional são etapas separadas. A leitura histórica não duplica reservas controladas pelo Bling.",
       "status": "partial",
-      "remaining": "Leitura contínua no servidor em 52 contas (Mercado Livre, Shopee, TikTok, Amazon, Magalu, Carrefour) desde 09/11. Conferência de 09/11 com o Bling: itens iguais ML 202+31 com troca de lote de 235, Shopee 483+95 de 627, TikTok 134+65 de 200; a troca de lote é feita pelo robô de prioridade no Bling. Temu, Shein e AliExpress ainda não são lidos.",
+      "remaining": "Leitura contínua no servidor nas 52 contas do DaVinci (ML 21, Shopee 14, TikTok 8, Amazon 4, Magalu 3, Carrefour 2) desde 09/11, com conferência diária com o Bling. Fora disso, nos últimos 30 dias o Bling teve 43 pedidos da Temu (Barbosa, Eron, Jlas), 1 Shein e 1 AliExpress: a Temu precisa das credenciais das lojas no DaVinci; Shein e AliExpress podem ser lançados à mão.",
       "assets": [],
       "tests": [
         "apps/api/erp_local_tests/test_native_orders.py",
@@ -571,7 +571,7 @@
       "module": "API compatível com Bling v3 para o DaVinci",
       "behavior": "Os serviços do DaVinci mantêm o cliente Bling e trocam apenas o endereço base. Ids existentes continuam; toda gravação passa pelos comandos do ERP. Situação sem efeito de estoque é só rótulo; cancelamento libera reserva.",
       "status": "partial",
-      "remaining": "Cliente real BlingClient exercitado em processo contra o ERP: produtos, estruturas em duas etapas, preço, estoque, categorias, fornecedores, contatos, situações, pedidos, observações e contas a pagar. Não ligado no DaVinci, sem deploy. Faltam objetos logísticos, parcelas e nota no pedido, idLoja em preço, listas completas de filtros, ids reais de depósito, host/token para o servidor, webhooks e conferência em paralelo contra o Bling.",
+      "remaining": "As 24 chamadas que o DaVinci faz ao Bling hoje (conferido no código de 09/11) têm rota no ERP, inclusive objetos logísticos, nota no pedido, saldos e a parcela com o total (usada na conferência do brinde). Os avisos ao DaVinci (pedido.alteracao e estoque.alteracao, assinados) já ficam numa fila. Falta só, na troca de cada loja: endereço e token do ERP no DaVinci e ligar o envio dos avisos.",
       "assets": [
         {
           "path": "output/bling-rea-2026-11-05/bling-openapi.json",
@@ -591,7 +591,7 @@
       "module": "Prioridade de estoque e Flex",
       "behavior": "Pedido Flex sai do lote SP ou para uma pessoa; pedido com vários itens fica num lote quando um cobre tudo; senão vale a prioridade de cada item; sem saldo no alvo nada muda.",
       "status": "partial",
-      "remaining": "Regras do robô atual do DaVinci reproduzidas em teste, com reserva para Flex e trava contra troca repetida. Falta operar com pedidos reais, publicar Flex por anúncio e carregar as regras reais.",
+      "remaining": "Regras do robô reproduzidas e testadas. Desde 09/11 o ERP lê a Tabela de Preços → Prioridade do DaVinci pela referência (mesma leitura do robô: listas com vírgula, conflitos descartados), mantém as regras iguais e aplica a escolha de lote na conferência diária com o Bling (com a guarda de saldo disponível). Falta o Flex vindo da loja e o pedido num estoque só na conferência; depende da atualização do erp_worker.",
       "assets": [],
       "tests": [
         "apps/api/erp_local_tests/test_stock_priority.py"
@@ -602,7 +602,7 @@
       "module": "Etiquetas emitidas pelas lojas",
       "behavior": "Mercado Livre, Shopee e TikTok seguem a sequência documentada, fechados até ligar a chave do servidor. Canal sem conector recusa.",
       "status": "partial",
-      "remaining": "Etiquetas reais baixadas de Mercado Livre, Shopee e TikTok (só download, sem gerar envio), em lote num PDF só, e rastreio lido da loja. Gerar o envio pela loja (organizar envio), Amazon, Magalu, Carrefour, cancelamento e reversa ainda pendentes.",
+      "remaining": "Etiquetas reais baixadas de Mercado Livre, Shopee e TikTok (só download, sem gerar envio), em lote num PDF só, e rastreio lido da loja; envio do ML lido do próprio envio. Amazon (365 pedidos em 30 dias): a etiqueta DBA vem num relatório com dados do comprador e depende do papel restrito no app da Amazon. Magalu (1 pedido em 30 dias) e Carrefour (0) ficam para depois. Gerar o envio pela loja só na troca.",
       "assets": [],
       "tests": [
         "apps/api/erp_local_tests/test_channel_labels.py"
@@ -669,8 +669,8 @@
       "id": "tax_guides",
       "module": "GNRE e DIFAL",
       "behavior": "DIFAL e FCP por estado lidos das notas, com lote TLote_GNRE 2.00.",
-      "status": "partial",
-      "remaining": "Lote não passou pelo portal de testes da GNRE; os campos variam por estado. DARE-SP sem arquivo: as 22 emissoras são de SP, sem DIFAL para o próprio estado.",
+      "status": "not_used",
+      "remaining": "Conferido no Bling em 09/11/2026 (só leitura): 0 GNRE/DARE emitidas no Bling. O cálculo de DIFAL por nota fica no ERP; a guia segue fora do Bling como hoje.",
       "assets": [],
       "tests": [
         "apps/api/erp_local_tests/test_tax_guides.py"
@@ -703,7 +703,7 @@
       "module": "Pedido vindo da loja",
       "behavior": "Carrinho vira uma venda só, com o número da loja; só entra o que a loja liberou, como configurado no Bling; o valor segue o total informado pela loja; cancelamento na loja vira Verificar Cancelamento, sem soltar estoque sozinho.",
       "status": "partial",
-      "remaining": "Regra aplicada sobre as leituras guardadas, sem criar pedido real. Total do Mercado Livre passou a usar o valor pago (com frete) em 06/11; na conferência de 09/11 ainda há 112 de 235 vendas do ML com total diferente, de leituras anteriores à mudança, a confirmar nas próximas conferências. Shopee 36 de 627 e TikTok 7 de 200 com total diferente.",
+      "remaining": "Regra aplicada sobre as leituras guardadas, sem criar pedido real. Mercado Livre: todas as vendas lidas depois de 06/11 têm o total igual ao do Bling (valor pago, com frete e desconto); as 112 diferentes de 09/11 eram leituras antigas sem esse valor e agora aparecem como \"leitura antiga\". Shopee 36 de 627 e TikTok 7 de 200 com total diferente a explicar.",
       "assets": [],
       "tests": [
         "apps/api/erp_local_tests/test_native_ingest.py"

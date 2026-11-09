@@ -343,6 +343,8 @@ def test_davinci_real_order_mapper_reads_what_the_compat_api_returns(erp, client
     )
     rows = go(client.list_pedidos_vendas(numeros_lojas=["LOJA-1"]))
     raw = go(client.get_order(rows[0]["id"]))
+    # One installment carrying the order total, as the gift check in DaVinci reads it.
+    assert len(raw["parcelas"]) == 1 and raw["parcelas"][0]["valor"] == raw["total"]
     # In its own process: the real mapper imports production settings, kept out of these tests.
     script = (
         "import json,sys\n"
