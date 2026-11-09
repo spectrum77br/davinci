@@ -62,7 +62,7 @@ def capture(erp, channel, store, external, raw, *, status=None, now=None):
     projection = channel_recipients.project(channel, raw)
     digest = hashlib.sha256(dumps(projection).encode()).hexdigest()
     return erp.command(
-        f"recipient-v1:{channel}:{store}:{external}:{digest}",
+        f"recipient-v1:{channel}:{store}:{external}:{digest[:32]}",
         "recipient.capture",
         {
             "channel": channel,

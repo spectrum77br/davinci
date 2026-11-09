@@ -215,3 +215,9 @@ def test_shopee_reader_skips_a_refused_batch(monkeypatch):
     monkeypatch.setattr(ror, "BASE", "https://x", raising=False)
     client = Client({"/v2/order/get_order_detail": Reply({"error": "error_auth"})})
     assert asyncio.run(ror.recipients_shopee(client, {}, None, ["S1"])) == {}
+
+
+def test_real_store_and_order_ids_fit_the_operation_key(erp):
+    store = "3d5dc93a-3344-4d63-9465-03afdf1ac1b5"
+    assert rc.capture(erp, CHANNEL, store, "2611091234ABCDE", open_order())["ready"] is True
+
