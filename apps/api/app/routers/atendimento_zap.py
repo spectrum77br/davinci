@@ -7,10 +7,11 @@ Onda 3 (27/10/2026) com SÓ a rota da mídia; o cadastro, a saúde e o "pausar"
   GET /api/atendimento/zap/midia/{id}   a NOSSA cópia da foto, áudio, vídeo ou
        documento (`services/atendimento/zap_midia.py`), para o `<img>`,
        `<audio>`, `<video>` e o link do balão. Autenticação pelo cookie (o
-       `<img src>` funciona); só ADMINISTRADOR (decisão do Eduardo de
-       26/10/2026: quem não é admin nem sabe que o Zap existe — 404, como a
-       conversa do Zap no `routers/atendimento.py`) e no escopo da conversa
-       (`_conversa_ou_404`). O `Content-Type` é o da NOSSA lista (pelo
+       `<img src>` funciona); quem vê a conversa (`_conversa_ou_404`, com a
+       régua do Zap da tela: desde 03/11/2026 todo vendedor com loja, o
+       `escopo.ZAP_PARA_TODOS`). Até 09/11/2026 era só ADMINISTRADOR, e o
+       vendedor via o balão sem conseguir ouvir o áudio nem ver a foto.
+       O `Content-Type` é o da NOSSA lista (pelo
        `mime_detectado`, a assinatura do arquivo — nunca o que o cliente
        declarou), com `X-Content-Type-Options: nosniff` e
        `Content-Security-Policy: sandbox`; `inline` só imagem, áudio e vídeo,
@@ -149,18 +150,11 @@ def _nao_encontrada() -> HTTPException:
     return HTTPException(404, detail=_NAO_ENCONTRADA)
 
 
-async def _admin_do_zap(user: Annotated[User, Depends(require_active_user)]) -> User:
-    """Só administrador vê o Zap (26/10/2026). Quem não é: 404 — o Zap nem existe para ela."""
-    if user.role != UserRole.ADMIN:
-        raise _nao_encontrada()
-    return user
-
-
 @router.get("/midia/{midia_id}")
 async def midia(
     midia_id: str,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_admin_do_zap)],
+    user: Annotated[User, Depends(require_active_user)],
 ) -> FileResponse:
     """A cópia da mídia do Zap (§5.5). 404 para o que não está `baixada` ou não é desta pessoa."""
     try:

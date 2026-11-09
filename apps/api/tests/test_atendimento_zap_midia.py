@@ -57,6 +57,7 @@ import app.db as _db
 from app.config import get_settings
 from app.models import (
     AtendimentoCanal,
+    AtendimentoLojaPessoa,
     AtendimentoMensagem,
     AtendimentoZapConta,
     AtendimentoZapMidia,
@@ -69,6 +70,7 @@ from app.services.atendimento import (
     canais_externos,
     clientes,
     enviar,
+    escopo,
     foto,
     zap_entrada,
     zap_midia,
@@ -700,11 +702,22 @@ async def test_rota_entrega_a_imagem_com_os_cabecalhos(client, admin, baixada):
     assert r.headers["cache-control"].startswith("private")
 
 
-async def test_rota_so_admin_e_404_para_os_outros(client, make_user, auth_as, baixada):
+async def test_rota_vale_para_quem_ve_a_conversa_e_404_para_os_outros(
+    db, client, make_user, auth_as, baixada
+):
     # Sem login: 401.
     r = await client.get(f"{URL}/zap/midia/{baixada.id}")
     assert r.status_code == 401
-    # Quem mexe na caixa mas não é admin: 404 (o Zap nem existe para ela).
+    # 09/11/2026, o Israel: o vendedor vê o Zap desde 03/11 (`escopo.ZAP_PARA_TODOS`) e
+    # o áudio e a foto davam erro. Com loja no atendimento, a mídia abre.
+    vendedor = await make_user(permissions=PODE_TUDO, role=UserRole.USER)
+    loja = escopo.chave(escopo.INTEGRACAO, uuid4())
+    db.add(AtendimentoLojaPessoa(user_id=vendedor.id, chave=loja))
+    await db.commit()
+    auth_as(vendedor)
+    r = await client.get(f"{URL}/zap/midia/{baixada.id}")
+    assert r.status_code == 200 and r.headers["content-type"] == "image/jpeg"
+    # Sem loja nenhuma no atendimento: 404 (o Zap nem existe para ela).
     u = await make_user(permissions=PODE_TUDO, role=UserRole.USER)
     auth_as(u)
     r = await client.get(f"{URL}/zap/midia/{baixada.id}")
