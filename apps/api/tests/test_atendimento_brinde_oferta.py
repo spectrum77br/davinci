@@ -13,13 +13,14 @@ from __future__ import annotations
 from datetime import UTC, datetime, time, timedelta
 from types import SimpleNamespace
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from app.models import AtendimentoPedidoComprador, BlingOrder
 from app.services.atendimento import automacoes, clientes, enviar, ia
 from app.services.atendimento import automacoes_catalogo as cat
-from app.services.atendimento.constantes import AUTOMACOES_BRINDE
+from app.services.atendimento.constantes import AUTOMACOES_BRINDE, AUTOMACOES_NAO_PAGO_AVISO
 from tests.test_atendimento_automacoes_motor import (
     DESDE,
     T,
@@ -29,8 +30,10 @@ from tests.test_atendimento_automacoes_motor import (
     _linhas,
     _loja,
     _n_mensagens,
-    _regra,
     _rodada,
+)
+from tests.test_atendimento_automacoes_motor import (
+    _regra as _regra_motor,
 )
 from tests.test_atendimento_automacoes_simulacao import (  # noqa: F401 — as fixtures
     _bling_pago,
@@ -55,7 +58,16 @@ TEXTO_CHAVEIRO = (
     "Oi! Vimos que seu pedido ainda está aguardando pagamento. Finalizando o pagamento, "
     "você ganha 1 chaveiro exclusivo de presente, enviado junto com a sua mala. 🎁"
 )
+# 09/11/2026, o dono: o brinde vai às 20 h (às 3 h, o lembrete sem brinde).
 ATRASO = timedelta(minutes=180)
+
+
+async def _regra(db, integ, codigo, modo="simular", **campos):
+    """As regras destes testes com o atraso de antes (3 h): o mecanismo da oferta não muda
+    com a hora. As 20 h e a madrugada (09/11/2026) têm os testes delas."""
+    if codigo in ("shopee_nao_pago_brinde", "tiktok_nao_pago_brinde"):
+        campos.setdefault("atraso_min", 180)
+    return await _regra_motor(db, integ, codigo, modo, **campos)
 
 
 async def _nao_pago(
@@ -171,11 +183,12 @@ def test_catalogo_da_oferta():
         cat.GATILHO_NAO_PAGO,
         cat.ALVO_PEDIDO,
         "chat",
-        180,
+        1200,
     )
     assert aut.campanha and aut.duoke_nao_manda and aut.so_simular is None
     assert aut.janela == (time(9, 0), time(21, 0))
-    assert aut.validade >= timedelta(hours=12), "cobre a madrugada"
+    # A madrugada volta para a véspera (`antes_da_noite`): a Shopee cancela com 24 h.
+    assert aut.antes_da_noite and aut.validade >= timedelta(hours=12), "cobre a madrugada"
     assert aut.condicoes["um_por_comprador_h"] == 168
     assert [p["tipo"] for p in aut.partes] == ["cartao_pedido", "texto"]
     # Todas as lojas Shopee de produção, com os nomes antigos e os novos.
@@ -511,6 +524,121 @@ async def _em_enviar(db, nome="barbosa", enviar_desde=T - timedelta(hours=1)):
     return integ, canal
 
 
+def test_madrugada_volta_para_a_vespera():
+    """09/11/2026, o dono: o brinde às 20 h. A Shopee cancela com 24 h: o que cairia de
+    madrugada sai às 20h59 da véspera, nunca na abertura do dia seguinte."""
+    janela = (time(9, 0), time(21, 0))
+    sp = ZoneInfo("America/Sao_Paulo")
+
+    def em(dia, hora, minuto=0):
+        return datetime(2026, 11, dia, hora, minuto, tzinfo=sp)
+
+    assert cat.devido_antes_da_noite(em(10, 15), janela) == em(10, 15)
+    assert cat.devido_antes_da_noite(em(10, 9), janela) == em(10, 9)
+    assert cat.devido_antes_da_noite(em(10, 21), janela) == em(10, 20, 59)
+    assert cat.devido_antes_da_noite(em(10, 23, 30), janela) == em(10, 20, 59)
+    assert cat.devido_antes_da_noite(em(10, 5), janela) == em(9, 20, 59)
+    assert cat.devido_antes_da_noite(em(10, 8, 59), janela) == em(9, 20, 59)
+    assert cat.devido_antes_da_noite(em(10, 3), None) == em(10, 3)
+    # Pedido das 6h: 20 h depois seria 2h, volta para as 20h59 do mesmo dia (15 h).
+    criado = em(10, 6)
+    devido = cat.devido_antes_da_noite(criado + timedelta(hours=20), janela)
+    assert devido == em(10, 20, 59) and criado < devido < criado + timedelta(hours=24)
+
+
+@pytest.mark.parametrize(
+    ("hora", "minuto", "esperado"),
+    [
+        # 20 h depois cai às 8h30: as 9h vêm com 20h30 de pedido, antes do cancelamento.
+        (12, 30, (11, 9, 0)),
+        # 20 h depois cai às 5h30: as 9h seriam 23h30 de pedido, volta para a véspera.
+        (9, 30, (10, 20, 59)),
+        # 20 h depois cai às 2h: volta para as 20h59 do mesmo dia (15 h de pedido).
+        (6, 0, (10, 20, 59)),
+        # Dentro da janela: 20 h cravadas.
+        (15, 0, (11, 11, 0)),
+    ],
+)
+def test_o_brinde_de_20_h_nunca_passa_do_cancelamento(hora, minuto, esperado):
+    sp = ZoneInfo("America/Sao_Paulo")
+    aut = cat.CATALOGO[BRINDE]
+    regra = SimpleNamespace(atraso_min=1200, janela_inicio=time(9, 0), janela_fim=time(21, 0))
+    criado = datetime(2026, 11, 10, hora, minuto, tzinfo=sp)
+    # Quando sai: o `devido` gravado, andado para a abertura se cair de madrugada.
+    sai = cat.ajustar_janela(automacoes._devido_do_nao_pago(aut, regra, criado), time(9), time(21))
+    dia, h, m = esperado
+    assert sai == datetime(2026, 11, dia, h, m, tzinfo=sp)
+    assert sai < criado + timedelta(hours=23)
+
+
+def test_catalogo_do_lembrete():
+    for codigo, plataforma in (
+        ("shopee_nao_pago_lembrete", "shopee"),
+        ("tiktok_nao_pago_lembrete", "tiktok"),
+    ):
+        aut = cat.CATALOGO[codigo]
+        assert (aut.tipo, aut.gatilho, aut.plataforma, aut.atraso_min) == (
+            cat.TIPO_NAO_PAGO_LEMBRETE,
+            cat.GATILHO_NAO_PAGO,
+            plataforma,
+            180,
+        )
+        assert aut.janela == (time(9, 0), time(21, 0)) and not aut.antes_da_noite
+        assert "brinde_oferta" not in (aut.lacunas or ())
+        assert "AirTag" not in str(aut.partes) and "brinde" not in str(aut.partes)
+        # Não é oferta: a IA segue respondendo e o botão do brinde não aparece.
+        assert codigo not in AUTOMACOES_BRINDE and codigo in AUTOMACOES_NAO_PAGO_AVISO
+    assert cat.CATALOGO["tiktok_nao_pago_brinde"].atraso_min == 1200
+
+
+async def test_o_brinde_de_20_h_nasce_com_a_vespera(db, sem_plataforma):  # noqa: F811
+    dono = await _dono(db)
+    integ, _ = await _loja(db, dono, "barbosa")
+    regra = await _regra_motor(db, integ, BRINDE)
+    assert regra.atraso_min == 1200
+    criado = T - timedelta(minutes=70)
+    await _nao_pago(db, integ, "ACEL", criado=criado)
+    await _rodada()
+    [x] = await _linhas(db, automacao=BRINDE)
+    assert x.estado == "agendado"
+    assert x.devido_em == automacoes._devido_do_nao_pago(cat.CATALOGO[BRINDE], regra, criado)
+    sai = cat.ajustar_janela(x.devido_em, time(9), time(21))
+    assert criado + timedelta(hours=8) < sai < criado + timedelta(hours=23)
+
+
+async def test_lembrete_das_3_h_sem_brinde(db, tudo_ligado, monkeypatch):  # noqa: F811
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono, "barbosa")
+    await _regra(
+        db, integ, "shopee_nao_pago_lembrete", modo="enviar", enviar_desde=T - timedelta(hours=1)
+    )
+    conversa = await _conversa(db, integ, canal, comprador="901", pedido="ACEL")
+    # O relógio também recebe: o lembrete não depende de ter brinde.
+    await _nao_pago(db, integ, "ACEL", itens=RELOGIO)
+    perguntados = _cliente_ao_vivo(monkeypatch)
+    await _rodada()
+    [x] = await _linhas(db, automacao="shopee_nao_pago_lembrete")
+    assert (x.estado, x.conversa_id) == ("enviado", conversa.id)
+    assert perguntados == ["ACEL"], "confere na Shopee que segue não pago"
+    assert tudo_ligado.partes == ["cartao_pedido"]
+    assert tudo_ligado.auto_replies == [cat.TEXTO_NAO_PAGO_LEMBRETE]
+
+
+async def test_lembrete_nao_vai_para_quem_ja_pagou(db, tudo_ligado, monkeypatch):  # noqa: F811
+    dono = await _dono(db)
+    integ, canal = await _loja(db, dono, "barbosa")
+    await _regra(
+        db, integ, "shopee_nao_pago_lembrete", modo="enviar", enviar_desde=T - timedelta(hours=1)
+    )
+    await _conversa(db, integ, canal, comprador="901", pedido="ACEL")
+    await _nao_pago(db, integ, "ACEL")
+    _cliente_ao_vivo(monkeypatch, status="READY_TO_SHIP")
+    await _rodada()
+    [x] = await _linhas(db, automacao="shopee_nao_pago_lembrete")
+    assert (x.estado, x.motivo) == ("pulado", "status_mudou")
+    assert tudo_ligado.auto_replies == []
+
+
 async def test_envia_quando_a_shopee_confirma_unpaid(db, tudo_ligado, monkeypatch):  # noqa: F811
     integ, canal = await _em_enviar(db)
     # A leitura da loja está velha: a transição do Duoke seguraria outra automação.
@@ -667,7 +795,7 @@ async def test_lista_e_botao_de_simular_em_todas(db, client, pessoa):  # noqa: F
     assert set(aut["placeholders"]) == {"comprador", "brinde_oferta"}
     for loja in aut["lojas"]:
         assert loja["regra"]["modo"] == "simular"
-        assert loja["regra"]["atraso_min"] == 180
+        assert loja["regra"]["atraso_min"] == 1200
         # Sem critério de troca: nada a comparar com o Duoke.
         assert loja["pode_trocar"] is True and loja["por_que_nao_trocar"] == []
 

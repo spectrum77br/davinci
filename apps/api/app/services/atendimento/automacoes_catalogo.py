@@ -135,6 +135,13 @@ TIPO_POS = "pos"
 TIPO_NAO_PAGO = "nao_pago"
 # O brinde do pedido não pago (05/11/2026): nunca casa com modelo do Duoke (`automacao_do_modelo`).
 TIPO_NAO_PAGO_BRINDE = "nao_pago_brinde"
+# O lembrete do não pago (o dono, 09/11/2026): 3 h depois, sem brinde; o brinde vai às 20 h.
+TIPO_NAO_PAGO_LEMBRETE = "nao_pago_lembrete"
+# A Shopee e o TikTok cancelam o não pago com 24 h exatas (453 de 453 e 155 de 155
+# medidos): a mensagem depois disso não acha mais o pedido. 1 h de folga.
+ULTIMA_HORA_NAO_PAGO = timedelta(hours=23)
+# Os do não pago que conferem na plataforma, na hora, que o pedido segue não pago.
+TIPOS_NAO_PAGO_AO_VIVO = (TIPO_NAO_PAGO_BRINDE, TIPO_NAO_PAGO_LEMBRETE)
 TIPO_AVALIACAO_BOA = "avaliacao_boa"
 TIPO_AVALIACAO_RUIM = "avaliacao_ruim"
 
@@ -389,6 +396,10 @@ TEXTO_NAO_PAGO = (
 )
 # O brinde do pedido não pago (o dono, 05/11/2026): 3 h depois da criação, sem
 # cupom. A lacuna é o que muda entre celular e mala (`BRINDE_OFERTA`).
+TEXTO_NAO_PAGO_LEMBRETE = (
+    "Oi! Vimos que tem um pedido seu aguardando pagamento. Aconteceu algum problema ou "
+    "ficou alguma dúvida? Se quiser, a gente te ajuda a finalizar 😊"
+)
 TEXTO_NAO_PAGO_BRINDE = (
     "Oi! Vimos que seu pedido ainda está aguardando pagamento. Finalizando o pagamento, "
     "você ganha {brinde_oferta} 🎁"
@@ -692,6 +703,9 @@ class Automacao:
     # da transição, o "o Duoke já mandou") e a linha nem entra no comparador. As
     # chaves gerais e a regra em `enviar` continuam obrigatórias.
     duoke_nao_manda: bool = False
+    # O que cairia fora da janela VOLTA para o fim da janela anterior em vez de esperar a
+    # abertura (`devido_antes_da_noite`): o brinde do não pago às 20 h (09/11/2026).
+    antes_da_noite: bool = False
     # Do pedido, mas comparada com o Duoke NA CONVERSA (o TikTok: o aviso de
     # pedido da TikTok não traz o nº, e a conversa é a do comprador).
     compara_na_conversa: bool = False
@@ -1008,15 +1022,21 @@ def _montar() -> dict[str, Automacao]:
             alvo=ALVO_PEDIDO,
             familia=FAMILIA_PEDIDO,
             descricao=(
-                "Pedido criado e ainda não pago → 3 h depois da criação, das 9h às 21h, uma vez "
+                "Pedido criado e ainda não pago → 20 h depois da criação, das 9h às 21h (de "
+                "madrugada, espera as 9h; se passar de 23 h de pedido, sai às 20h59 da véspera: a "
+                "Shopee cancela com 24 h), uma vez "
                 "por pedido e uma por comprador em 7 dias: 1 AirTag para celular, 1 chaveiro para "
                 "mala. Em Enviar, confere na Shopee, na hora, que o pedido segue não pago. O Duoke "
                 "não manda esta mensagem. Depois dela, a IA não responde sozinha por 7 dias."
             ),
             partes=(dict(PARTE_CARTAO), _texto(TEXTO_NAO_PAGO_BRINDE)),
-            atraso_min=180,
-            # A espera da madrugada: o que vence às 21h01 sai às 9h (12 h depois).
+            # 09/11/2026, o dono: 3 h vai o lembrete (`shopee_nao_pago_lembrete`), o brinde
+            # depois. Às 24 h a Shopee já cancelou (453 de 453 medidos): 20 h.
+            atraso_min=1200,
+            # A espera da madrugada: até 9h se vier antes das 23 h de pedido (`antes_da_noite`
+            # volta para a véspera o que passaria). A conferência ao vivo segura o cancelado.
             validade=_h(14),
+            antes_da_noite=True,
             lojas_duoke=SHOPEE_BRINDE,
             janela=(time(9, 0), time(21, 0)),
             # Em TODAS as lojas (o dono), a IA no automático também: em produção, 420
@@ -1025,6 +1045,32 @@ def _montar() -> dict[str, Automacao]:
             condicoes={"um_por_comprador_h": 168, "com_ia_no_automatico": True},
             campanha=True,
             lacunas=("brinde_oferta",),
+            duoke_nao_manda=True,
+        ),
+        # ── O lembrete do não pago (o dono, 09/11/2026) ─────────────────────
+        Automacao(
+            codigo="shopee_nao_pago_lembrete",
+            plataforma="shopee",
+            canal=CANAL_CHAT,
+            nome="Pedido não pago, lembrete (sem brinde)",
+            tipo=TIPO_NAO_PAGO_LEMBRETE,
+            gatilho=GATILHO_NAO_PAGO,
+            alvo=ALVO_PEDIDO,
+            familia=FAMILIA_PEDIDO,
+            descricao=(
+                "Pedido criado e ainda não pago → 3 h depois da criação, das 9h às 21h, uma vez "
+                "por pedido e uma por comprador em 7 dias: pergunta se aconteceu algum problema, "
+                "sem brinde (o brinde vai às 20 h). Em Enviar, confere na Shopee, na hora, que o "
+                "pedido segue não pago. O Duoke não manda esta mensagem."
+            ),
+            partes=(dict(PARTE_CARTAO), _texto(TEXTO_NAO_PAGO_LEMBRETE)),
+            atraso_min=180,
+            # A espera da madrugada: o que vence às 21h01 sai às 9h (12 h depois).
+            validade=_h(14),
+            lojas_duoke=SHOPEE_BRINDE,
+            janela=(time(9, 0), time(21, 0)),
+            condicoes={"um_por_comprador_h": 168, "com_ia_no_automatico": True},
+            campanha=True,
             duoke_nao_manda=True,
         ),
         Automacao(
@@ -1214,21 +1260,51 @@ def _montar() -> dict[str, Automacao]:
             alvo=ALVO_PEDIDO,
             familia=FAMILIA_PEDIDO,
             descricao=(
-                "Pedido criado e ainda não pago → 3 h depois da criação, das 9h às 21h, uma vez "
+                "Pedido criado e ainda não pago → 20 h depois da criação, das 9h às 21h (de "
+                "madrugada, espera as 9h; se passar de 23 h de pedido, sai às 20h59 da véspera: o "
+                "TikTok cancela com 24 h), uma vez "
                 "por pedido e uma por comprador em 7 dias: 1 AirTag para celular, 1 chaveiro para "
                 "mala. Só para quem já tem conversa com a loja. Em Enviar, confere no TikTok, na "
                 "hora, que o pedido segue não pago. O Duoke não manda esta mensagem. Depois dela, "
                 "a IA não responde sozinha por 7 dias."
             ),
             partes=(_texto(TEXTO_NAO_PAGO_BRINDE),),
-            atraso_min=180,
-            # A espera da madrugada, como na Shopee. O TikTok cancela às 24 h da criação
-            # (155 de 155 medidos): o que vence às 21h01 sai às 9h, com 15 h de pedido.
+            # 09/11/2026, o dono: 3 h o lembrete, o brinde às 20 h. O TikTok cancela às 24 h
+            # da criação (155 de 155 medidos).
+            atraso_min=1200,
+            # A espera da madrugada: até 9h se vier antes das 23 h de pedido (`antes_da_noite`
+            # volta para a véspera o que passaria). A conferência ao vivo segura o cancelado.
             validade=_h(14),
+            antes_da_noite=True,
             lojas_duoke=TIKTOK_BRINDE,
             janela=(time(9, 0), time(21, 0)),
             condicoes={"um_por_comprador_h": 168, "com_ia_no_automatico": True},
             lacunas=("brinde_oferta",),
+            duoke_nao_manda=True,
+        ),
+        Automacao(
+            codigo="tiktok_nao_pago_lembrete",
+            plataforma="tiktok",
+            canal=CANAL_CHAT,
+            nome="Pedido não pago, lembrete (sem brinde)",
+            tipo=TIPO_NAO_PAGO_LEMBRETE,
+            gatilho=GATILHO_NAO_PAGO,
+            alvo=ALVO_PEDIDO,
+            familia=FAMILIA_PEDIDO,
+            descricao=(
+                "Pedido criado e ainda não pago → 3 h depois da criação, das 9h às 21h, uma vez "
+                "por pedido e uma por comprador em 7 dias: pergunta se aconteceu algum problema, "
+                "sem brinde (o brinde vai às 20 h). Só para quem já tem conversa com a loja. Em "
+                "Enviar, confere no TikTok, na hora, que o pedido segue não pago. O Duoke não "
+                "manda esta mensagem."
+            ),
+            partes=(_texto(TEXTO_NAO_PAGO_LEMBRETE),),
+            atraso_min=180,
+            # O que vence às 21h01 sai às 9h, com 15 h de pedido (o TikTok cancela às 24 h).
+            validade=_h(14),
+            lojas_duoke=TIKTOK_BRINDE,
+            janela=(time(9, 0), time(21, 0)),
+            condicoes={"um_por_comprador_h": 168, "com_ia_no_automatico": True},
             duoke_nao_manda=True,
         ),
         Automacao(
@@ -1718,6 +1794,27 @@ def ajustar_janela(devido: datetime, inicio: time | None, fim: time | None) -> d
     if local < abre:
         return abre.astimezone(UTC)
     return (abre + timedelta(days=1)).astimezone(UTC)
+
+
+def devido_antes_da_noite(devido: datetime, janela: tuple[time, time] | None) -> datetime:
+    """O `devido` que cai fora da janela VOLTA para 1 min antes de ela fechar (São Paulo). PURA.
+
+    O brinde do não pago às 20 h (o dono, 09/11/2026): a Shopee e o TikTok cancelam o
+    não pago com 24 h exatas, e esperar a abertura da manhã passaria do cancelamento.
+    """
+    devido = _utc(devido)
+    if not janela:
+        return devido
+    inicio, fim = janela
+    local = devido.astimezone(SP)
+    abre = local.replace(hour=inicio.hour, minute=inicio.minute, second=0, microsecond=0)
+    fecha = local.replace(hour=fim.hour, minute=fim.minute, second=0, microsecond=0)
+    if abre <= local < fecha:
+        return devido
+    ultimo = fecha - timedelta(minutes=1)
+    if local < abre:
+        ultimo -= timedelta(days=1)
+    return ultimo.astimezone(UTC)
 
 
 def validade_ate(aut: Automacao, devido: datetime, janela: tuple[time, time] | None) -> datetime:
@@ -2489,7 +2586,7 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
     if (
         f.get("canal_auto")
         and aut.alvo != ALVO_AVALIACAO
-        and not (aut.tipo == TIPO_NAO_PAGO_BRINDE and _cond(regra, aut, "com_ia_no_automatico"))
+        and not (aut.tipo in TIPOS_NAO_PAGO_AO_VIVO and _cond(regra, aut, "com_ia_no_automatico"))
     ):
         # A avaliação na loja com a IA no automático é só o CHAT dela
         # (`chat_segurado_pela_ia`, abaixo): a pública não passa pela IA. O brinde
@@ -2585,7 +2682,7 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
         # Um por comprador em 24 h (`UM_POR_COMPRADOR_H`, medido no Duoke).
         if f.get("ja_recebeu"):
             return "ja_recebeu"
-    elif aut.tipo == TIPO_NAO_PAGO_BRINDE:
+    elif aut.tipo in TIPOS_NAO_PAGO_AO_VIVO:
         # 05/11/2026: o status precisa ser UNPAID (o índice que sumiu não é "não
         # pago"). O índice pode estar velho às 3 h: no modo enviar, o motor ainda
         # confere na plataforma (`automacoes._status_ao_vivo`). O cancelado já saiu acima.
@@ -2593,7 +2690,7 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
             return "pedido_pago"
         if f.get("status_pedido") != "UNPAID":
             return "status_mudou"
-        if f.get("brinde") not in BRINDE_OFERTA:
+        if aut.tipo == TIPO_NAO_PAGO_BRINDE and f.get("brinde") not in BRINDE_OFERTA:
             return "sem_brinde"
         if f.get("ja_recebeu"):
             return "ja_recebeu"
@@ -2634,6 +2731,7 @@ _TIPOS_CAMPANHA = (
     TIPO_POS,
     TIPO_NAO_PAGO,
     TIPO_NAO_PAGO_BRINDE,
+    TIPO_NAO_PAGO_LEMBRETE,
 )
 
 

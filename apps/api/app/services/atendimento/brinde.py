@@ -81,6 +81,7 @@ from app.services.atendimento import troca as _troca
 from app.services.atendimento.automacoes_catalogo import ESTADOS_OFERTA_BRINDE, brinde_do_resumo
 from app.services.atendimento.constantes import (
     AUTOMACOES_BRINDE,
+    AUTOMACOES_NAO_PAGO_AVISO,
     BRINDE_SEGURA_NF_H,
     BRINDE_SKU,
     BRINDE_VALOR_NF,
@@ -383,7 +384,7 @@ JANELA_AGUARDANDO_PAGAMENTO = timedelta(days=3)
 
 
 def aguardando_pagamento_sql(agora: datetime, c: Any = AtendimentoConversa) -> Any:
-    """A conversa recebeu a oferta e o pedido dela segue não pago? Nunca NULL.
+    """A conversa recebeu o lembrete ou a oferta e o pedido segue não pago? Nunca NULL.
 
     Não pago = `UNPAID` no índice, dentro de `JANELA_AGUARDANDO_PAGAMENTO` e fora
     do Bling (o Bling só recebe pedido pago, e o índice é lido de hora em hora).
@@ -396,7 +397,7 @@ def aguardando_pagamento_sql(agora: datetime, c: Any = AtendimentoConversa) -> A
         select(r.conversa_id)
         .join(p, and_(p.integration_id == r.integration_id, p.pedido == r.pedido))
         .where(
-            r.automacao.in_(AUTOMACOES_BRINDE),
+            r.automacao.in_(AUTOMACOES_NAO_PAGO_AVISO),
             r.estado.in_(ESTADOS_OFERTA_BRINDE),
             r.conversa_id.is_not(None),
             p.status == "UNPAID",

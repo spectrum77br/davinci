@@ -34,8 +34,10 @@ from tests.test_atendimento_automacoes_motor import (
     _linhas,
     _loja,
     _n_mensagens,
-    _regra,
     _rodada,
+)
+from tests.test_atendimento_automacoes_motor import (
+    _regra as _regra_motor,
 )
 from tests.test_atendimento_automacoes_simulacao import (  # noqa: F401 — as fixtures
     _bling_pago,
@@ -55,6 +57,14 @@ TEXTO_AIRTAG = (
     "você ganha 1 AirTag Uranyx de presente, enviado junto com o seu celular. 🎁"
 )
 ATRASO = timedelta(minutes=180)
+
+
+async def _regra(db, integ, codigo, modo="simular", **campos):
+    """As regras destes testes com o atraso de antes (3 h): o mecanismo da oferta não muda
+    com a hora. As 20 h e a madrugada (09/11/2026) têm os testes delas."""
+    if codigo in ("shopee_nao_pago_brinde", "tiktok_nao_pago_brinde"):
+        campos.setdefault("atraso_min", 180)
+    return await _regra_motor(db, integ, codigo, modo, **campos)
 
 
 async def _nao_pago(

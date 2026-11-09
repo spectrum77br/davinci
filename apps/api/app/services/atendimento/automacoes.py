@@ -1120,7 +1120,7 @@ async def descobrir_nao_pagos(
                     chave=f"pedido:{r.pedido}",
                     agora=agora,
                     evento_em=criado,
-                    devido_em=criado + timedelta(minutes=regra.atraso_min),
+                    devido_em=_devido_do_nao_pago(aut, regra, criado),
                     conversa_id=conversas.get((r.integration_id, r.pedido))
                     or pelo_comprador.get((r.integration_id, r.comprador_id)),
                     pedido=r.pedido,
@@ -1838,6 +1838,17 @@ async def _chats_duoke_da_avaliacao(
     return saida
 
 
+def _devido_do_nao_pago(aut: Any, regra: Any, criado: datetime) -> datetime:
+    """Quando sai a do não pago: a criação mais o atraso da regra. O brinde de 20 h
+    (`antes_da_noite`, 09/11/2026) que cairia de madrugada espera a abertura da manhã
+    se ela vier antes do cancelamento da plataforma; senão, volta para a véspera."""
+    devido = criado + timedelta(minutes=regra.atraso_min)
+    janela = cat.janela_da_regra(regra, aut) if aut.antes_da_noite else None
+    if janela and cat.ajustar_janela(devido, *janela) > criado + cat.ULTIMA_HORA_NAO_PAGO:
+        devido = cat.devido_antes_da_noite(devido, janela)
+    return devido
+
+
 async def _ja_recebeu_carrinho(
     session: AsyncSession,
     linha: AtendimentoAutomacaoRegistro,
@@ -1943,20 +1954,20 @@ async def _extras(
                 extras["nao_e_primeira"] = await _nao_e_primeira(session, linha)
         if aut is not None and aut.tipo in (cat.TIPO_DUVIDA_1, cat.TIPO_DUVIDA_2):
             extras["ja_comprou"] = await _ja_comprou(session, linha, conversa)
-        if aut is not None and aut.tipo in (cat.TIPO_NAO_PAGO, cat.TIPO_NAO_PAGO_BRINDE):
+        if aut is not None and aut.tipo in (cat.TIPO_NAO_PAGO, *cat.TIPOS_NAO_PAGO_AO_VIVO):
             regra = ctx.regras.get((linha.automacao, linha.integration_id))
             horas = float(cat._cond(regra, aut, "um_por_comprador_h", cat.UM_POR_COMPRADOR_H))
             extras["ja_recebeu"] = await _ja_recebeu_carrinho(
                 session,
                 linha,
                 horas,
-                so_reais=aut.tipo == cat.TIPO_NAO_PAGO_BRINDE
+                so_reais=aut.tipo in cat.TIPOS_NAO_PAGO_AO_VIVO
                 and regra is not None
                 and _modo_efetivo(regra)[0] == cat.MODO_ENVIAR,
             )
         if (
             aut is not None
-            and aut.tipo == cat.TIPO_NAO_PAGO_BRINDE
+            and aut.tipo in cat.TIPOS_NAO_PAGO_AO_VIVO
             and await _comprador_pagou_outro(session, linha, agora=ctx.agora)
         ):
             extras["pedido_pago"] = True
@@ -2319,7 +2330,7 @@ def _avaliar(
             valores = {"valor_cupom": str(valor)}
     if aut.tipo == cat.TIPO_NAO_PAGO_BRINDE and fatos.get("brinde") in cat.BRINDE_OFERTA:
         valores = {"brinde_oferta": cat.BRINDE_OFERTA[fatos["brinde"]]}
-    if aut.tipo in (cat.TIPO_NAO_PAGO, cat.TIPO_NAO_PAGO_BRINDE):
+    if aut.tipo in (cat.TIPO_NAO_PAGO, *cat.TIPOS_NAO_PAGO_AO_VIVO):
         if linha.comprador_id and not fatos.get("ja_recebeu"):
             # Um por comprador no intervalo da regra, também no mesmo lote.
             janela = timedelta(
@@ -2390,7 +2401,7 @@ def _avaliar(
     # no modo seco também, para a simulação não prometer os ~21 por dia quando só os ~5
     # com conversa sairiam. A API não tem o `to_id` da Shopee.
     abre_conversa_tiktok = (
-        aut.plataforma == "tiktok" and aut.tipo == cat.TIPO_NAO_PAGO_BRINDE and conversa is None
+        aut.plataforma == "tiktok" and aut.tipo in cat.TIPOS_NAO_PAGO_AO_VIVO and conversa is None
     )
     if abre_conversa_tiktok and not (
         get_settings().atendimento_tiktok_criar_conversa and ctx.compradores.get(linha.id)
@@ -2683,7 +2694,7 @@ async def _enviar(
         )
         await session.commit()
         return
-    if aut.tipo == cat.TIPO_NAO_PAGO_BRINDE:
+    if aut.tipo in cat.TIPOS_NAO_PAGO_AO_VIVO:
         # A promessa do brinde só vai para quem AINDA não pagou (05/11/2026): a
         # conferência na Shopee, logo antes de marcar `enviando`.
         status = await _status_ao_vivo(session, linha)
@@ -2702,7 +2713,7 @@ async def _enviar(
             return
     partes = veredito.partes
     conversa = novo.conversas.get(linha.conversa_id) if linha.conversa_id else None
-    if conversa is None and aut.plataforma == "tiktok" and aut.tipo == cat.TIPO_NAO_PAGO_BRINDE:
+    if conversa is None and aut.plataforma == "tiktok" and aut.tipo in cat.TIPOS_NAO_PAGO_AO_VIVO:
         # Só chega aqui com a chave ligada (`_avaliar`), depois da conferência ao vivo.
         conversa = await _abrir_conversa_tiktok(session, novo, aut, regra, linha)
         if conversa is None:
@@ -2934,7 +2945,7 @@ async def _decidir_uma(
     )
     ctx.contagem[(regra.integration_id, aut.familia, "seco")] += 1
     ctx.contagem[(regra.integration_id, aut.codigo, "seco")] += 1
-    if aut.tipo in (cat.TIPO_NAO_PAGO, cat.TIPO_NAO_PAGO_BRINDE) and linha.comprador_id:
+    if aut.tipo in (cat.TIPO_NAO_PAGO, *cat.TIPOS_NAO_PAGO_AO_VIVO) and linha.comprador_id:
         # O próximo do mesmo comprador no lote já vê este.
         ctx.recebidos.setdefault(
             (linha.automacao, linha.integration_id, linha.comprador_id), []

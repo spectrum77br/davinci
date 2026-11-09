@@ -1355,6 +1355,8 @@ MENSAGENS_DAVINCI_FORA: tuple[str, ...] = (
     r"^ja segue nossa loja aqui",
     # A oferta do brinde do pedido não pago (05/11/2026, `TEXTO_NAO_PAGO_BRINDE`).
     r"^oi! vimos que seu pedido ainda esta aguardando pagamento",
+    # O lembrete do não pago, sem brinde (09/11/2026).
+    r"^oi! vimos que tem um pedido seu aguardando pagamento",
     # O agradecimento da 4–5★ e a pergunta da 1–3★ no chat (29/10/2026,
     # `automacoes_catalogo.TEXTO_AGRADECER_CHAT`/`TEXTO_ENTENDER_CHAT`), com e
     # sem o nome ("Oi, fulana! …" / "Oi! …").
@@ -1672,6 +1674,12 @@ def e_pergunta(texto: str | None) -> bool:
 # chaveiro exclusivo para mala. Quem finaliza ganha o item no MESMO pedido do
 # Bling, pelo botão do Comunicador (`services/atendimento/brinde.py`).
 AUTOMACOES_BRINDE = frozenset({"shopee_nao_pago_brinde", "tiktok_nao_pago_brinde"})
+# 09/11/2026, o dono: às 3 h vai o lembrete (sem brinde); o brinde, às 20 h. O filtro
+# "Aguardando pagamento" mostra quem recebeu qualquer um dos dois.
+AUTOMACOES_NAO_PAGO_AVISO = AUTOMACOES_BRINDE | {
+    "shopee_nao_pago_lembrete",
+    "tiktok_nao_pago_lembrete",
+}
 # O SKU base de cada brinde. O AirTag tem lotes (a019.cd/.ci/.pi/.ra/.sa/.sp) e
 # sai do lote do item vendido; `a019.us` e `a075.us` são capas de iPhone, outro
 # produto: `.us` nunca é lote de brinde.
