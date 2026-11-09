@@ -22,8 +22,38 @@ def fingerprint(value, *, digits=False):
     return hashlib.sha256(text.encode()).hexdigest()[:16] if text else ""
 
 
-def local_sales(db):
-    """What the ERP would turn into orders, in the shape the comparison needs."""
+def robot_view(db):
+    """DaVinci's lot priorities and Bling's available balance, from the read-only reference."""
+    import sqlite3
+
+    from app.erp_local import stock_priority
+
+    try:
+        rows = {
+            kind: [
+                json.loads(r[0])
+                for r in db.execute("SELECT data FROM reference_rows WHERE kind=?", (kind,))
+            ]
+            for kind in ("priorities", "products")
+        }
+    except sqlite3.OperationalError:
+        return {}, None
+    available = {
+        str(p.get("sku") or "").lower(): p.get("stock")
+        for p in rows["products"]
+        if p.get("sku") and p.get("stock") is not None
+    }
+    return stock_priority.map_from_rows(rows["priorities"]), available
+
+
+def local_sales(db, mapping=None, available=None):
+    """What the ERP would turn into orders, in the shape the comparison needs.
+
+    With DaVinci's priorities, each item goes to the lot the robot would choose, as the ERP will
+    do once it owns the store.
+    """
+    from app.erp_local import stock_priority
+
     sales = {}
     for channel, store in db.execute(
         "SELECT DISTINCT channel,store FROM native_order_observations"
@@ -33,21 +63,25 @@ def local_sales(db):
             if not live:
                 continue
             items, total = Counter(), Decimal(0)
+            # Mercado Livre read before 06/11 kept no paid amount (freight and discounts).
+            unread = channel == "ml" and any(o.get("paid") is None for o in live)
             for order in live:
                 header = order.get("paid") or order.get("total") or {}
                 total += Decimal(str(header.get("amount") or 0))
                 for item in order.get("items") or []:
                     resolved = native_ingest._resolve(db, store, item, channel)
-                    items[resolved["sku"] or item.get("seller_sku") or "?"] += (
-                        native_ingest._quantity(channel, item) or 0
-                    )
+                    quantity = native_ingest._quantity(channel, item) or 0
+                    sku = resolved["sku"] or item.get("seller_sku") or "?"
+                    if mapping and resolved["sku"]:
+                        sku = stock_priority.preferred(sku, mapping, available, quantity)
+                    items[sku] += quantity
             captured = native_ingest._unit_recipient(db, channel, store, unit)
             buyer = (captured or {}).get("buyer") or {}
             delivery = (captured or {}).get("recipient") or {}
             sales[key] = {
                 "channel": channel,
                 "items": dict(items),
-                "total": str(total),
+                "total": None if unread else str(total),
                 "document": fingerprint(buyer.get("document"), digits=True),
                 "name": fingerprint(delivery.get("name")),
                 "buyer_name": fingerprint(buyer.get("name")),
@@ -74,11 +108,14 @@ def compare(local, bling):
             entry["itens_iguais_com_troca_de_lote"] += 1
         else:
             entry["itens_diferentes"] += 1
-        entry[
-            "total_igual"
-            if Decimal(sale["total"]) == Decimal(str(other["total"]))
-            else "total_diferente"
-        ] += 1
+        if sale["total"] is None:
+            entry["total_leitura_antiga"] += 1
+        else:
+            entry[
+                "total_igual"
+                if Decimal(sale["total"]) == Decimal(str(other["total"]))
+                else "total_diferente"
+            ] += 1
         if not sale["document"]:
             entry["sem_comprador_no_erp"] += 1
             continue

@@ -75,3 +75,9 @@ def test_empty_field_on_bling_is_a_gap_not_a_difference():
 def test_buyer_name_counts_when_bling_keeps_the_buyer():
     other = sale(name=pc.fingerprint("Outra Pessoa"), buyer_name=pc.fingerprint("ana souza"))
     assert pc.compare({"P1": other}, pr.summarize([ROW]))["ml"]["nome_igual"] == 1
+
+
+def test_old_ml_reading_without_paid_amount_is_counted_apart():
+    report = pc.compare({"P1": sale(total=None)}, pr.summarize([ROW]))["ml"]
+    assert report["total_leitura_antiga"] == 1
+    assert "total_diferente" not in report and "total_igual" not in report

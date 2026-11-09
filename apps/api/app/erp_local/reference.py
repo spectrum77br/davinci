@@ -86,6 +86,8 @@ FIELDS = {
         "name",
         "updated_at",
     },
+    # Tabela de Preços → Prioridade: the stock lot DaVinci's robot moves each product to.
+    "priorities": {"id", "sku", "priority"},
 }
 ITEM_FIELDS = {"sku", "product_id", "name", "quantity", "unit_price"}
 ROOT_FIELDS = {"version", "source", "read_only", "captured_at", "coverage", *FIELDS}

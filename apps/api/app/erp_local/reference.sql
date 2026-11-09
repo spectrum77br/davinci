@@ -52,6 +52,9 @@ SELECT json_build_object(
    SELECT s.id::text,s.marketplace::text,s.status::text,s.integration_id::text,
    s.bling_store_id::text,coalesce(s.apelido_override,c.apelido) AS name,s.updated_at
    FROM davinci.stores s JOIN davinci.companies c ON c.id=s.company_id
-   ORDER BY s.marketplace,s.id) t)
+   ORDER BY s.marketplace,s.id) t),
+ 'priorities',(SELECT coalesce(json_agg(t),'[]') FROM (
+   SELECT id::text,sku,prioridade_estoque::text AS priority FROM davinci.pricing_products
+   WHERE prioridade_estoque IS NOT NULL ORDER BY id) t)
 );
 ROLLBACK;

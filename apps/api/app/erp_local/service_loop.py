@@ -45,7 +45,7 @@ def daily_check(erp, output):
 
     try:
         with erp.connection() as db:
-            local = parallel_check.local_sales(db)
+            local = parallel_check.local_sales(db, *parallel_check.robot_view(db))
         script = (Path(parallel_check.__file__).parent / "parallel_check_read.py").read_bytes()
         keys, bling = sorted(local), {}
         for start in range(0, len(keys), 500):
@@ -88,6 +88,11 @@ def main():
                 from app.erp_local import stock_check
 
                 stock_check.take(erp, store.all_rows("products"))
+                from app.erp_local import stock_priority
+
+                log.info(
+                    "prioridades %s", stock_priority.sync_rules(erp, store.all_rows("priorities"))
+                )
             except ERPError as error:
                 log.warning("referência não atualizada: %s", error.code)
         rounds += 1

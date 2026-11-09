@@ -310,3 +310,62 @@ def sweep(erp, *, new_key):
 
 def snapshot(db):
     return [dict(r) for r in db.execute("SELECT * FROM stock_priority_rules ORDER BY base")]
+
+
+def map_from_rows(rows):
+    """The robot's map, base → lot, from Tabela de Preços → Prioridade.
+
+    Same reading as DaVinci's `_mapa_prioridades`: a cell may list several SKUs separated by
+    commas, with or without lot; bases whose rows disagree are dropped, since moving to the
+    wrong lot is worse than not moving.
+    """
+    mapping, conflict = {}, set()
+    for row in rows:
+        target = str(row.get("priority") or "").strip().lower()
+        if not target:
+            continue
+        for entry in str(row.get("sku") or "").split(","):
+            head = entry.strip().lower().split("+")[0].strip()
+            found = lot(head)
+            base = head[: -(len(found) + 1)] if found else head
+            if not base:
+                continue
+            if base in mapping and mapping[base] != target:
+                conflict.add(base)
+                continue
+            mapping[base] = target
+    for base in conflict:
+        mapping.pop(base, None)
+    return mapping
+
+
+def sync_rules(erp, rows):
+    """Keep the ERP's rules equal to DaVinci's table, through the ordinary rule command."""
+    wanted = {b: t for b, t in map_from_rows(rows).items() if t in SALE_LOTS}
+    with erp.connection() as db:
+        current = dict(db.execute("SELECT base,lot FROM stock_priority_rules").fetchall())
+    changes = {b: t for b, t in wanted.items() if current.get(b) != t}
+    changes.update({b: "" for b in current if b not in wanted})
+    for base, target in sorted(changes.items()):
+        key = "priority-sync-v1:" + base[:60] + ":" + (target or "none") + ":" + erp.now()[:13]
+        erp.command(key, "stock.priority.rule", {"base": base, "lot": target or None})
+    return {"rules": len(wanted), "changed": len(changes)}
+
+
+def preferred(sku, mapping, available=None, quantity=1):
+    """The SKU the robot would move this item to, or the same SKU when nothing moves.
+
+    `available` (sku → Bling's virtual balance) is the robot's guard: the target lot must cover
+    the quantity, otherwise the item stays where it is.
+    """
+    current = lot_of(sku)
+    base = base_of(sku)
+    target = mapping.get(base or "")
+    if not current or not target or target == current or target not in SALE_LOTS:
+        return sku
+    moved = in_lot(sku, current, target)
+    if available is not None:
+        balance = available.get(moved.lower())
+        if balance is None or Decimal(str(balance)) < Decimal(str(quantity)):
+            return sku
+    return moved

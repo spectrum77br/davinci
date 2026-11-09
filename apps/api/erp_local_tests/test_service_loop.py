@@ -78,7 +78,7 @@ def test_daily_check_writes_counts_and_never_raises(erp, tmp_path, monkeypatch):
     monkeypatch.setattr(
         parallel_check,
         "local_sales",
-        lambda _db: {
+        lambda _db, *_robot: {
             "A": {
                 "channel": "ml",
                 "items": {},

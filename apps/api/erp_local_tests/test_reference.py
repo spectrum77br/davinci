@@ -61,6 +61,7 @@ def capture():
         "links": [],
         "integrations": [],
         "stores": [],
+        "priorities": [],
         "coverage": {
             "products_total": 3,
             "orders_total": 0,
