@@ -432,6 +432,31 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             },
         )
 
+    @app.get("/api/erp-local/store-sales/detail")
+    def store_sale_detail(channel: str, store: str, number: str):
+        from app.erp_local import store_sales_docs
+
+        with erp.connection() as db:
+            return store_sales_docs.as_json(store_sales_docs.detail(db, channel, store, number))
+
+    @app.post("/api/erp-local/store-sales/papers/{kind}")
+    def store_sale_papers(kind: str, body: dict = Body(...)):
+        from app.erp_local import store_sales_docs
+
+        makers = {
+            "sheet": (store_sales_docs.sheet_csv, "text/csv", "vendas.csv"),
+            "addresses": (store_sales_docs.addresses_csv, "text/csv", "enderecos.csv"),
+            "production": (store_sales_docs.production_html, "text/html", ""),
+            "declarations": (store_sales_docs.declaration_html, "text/html", ""),
+        }
+        if kind not in makers:
+            raise ERPError("paper_unknown", "Documento não disponível.", 404)
+        make, media, filename = makers[kind]
+        with erp.connection() as db:
+            content = make(db, body.get("items"))
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'} if filename else {}
+        return Response(content, media_type=media + "; charset=utf-8", headers=headers)
+
     @app.post("/api/erp-local/store-sales/tracking")
     def store_sales_tracking(body: dict = Body(...)):
         from app.erp_local import store_labels
@@ -930,8 +955,9 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 except (InvalidOperation, TypeError):
                     item["unit_cost"] = None
                 items.append(item)
-        entries = sum((Decimal(r["physical_delta"]) for r in rows if Decimal(r["physical_delta"]) > 0), Decimal(0))
-        exits = sum((-Decimal(r["physical_delta"]) for r in rows if Decimal(r["physical_delta"]) < 0), Decimal(0))
+        deltas = [Decimal(r["physical_delta"]) for r in rows]
+        entries = sum((d for d in deltas if d > 0), Decimal(0))
+        exits = sum((-d for d in deltas if d < 0), Decimal(0))
         return {
             "items": list(reversed(items[-100:])),
             "total": len(rows),

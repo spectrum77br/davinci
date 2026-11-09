@@ -1,6 +1,8 @@
 'use strict';
 let salesView='own',storeSales=null,storeSalesQuery='',storeSalesOffset=0;
 const storeLabelPicks=new Map();
+let storeSaleDetail=null;
+const channelNames={ml:'Mercado Livre',shopee:'Shopee',tiktok:'TikTok Shop',amazon:'Amazon',magalu:'Magalu',carrefour:'Carrefour',temu:'Temu',shein:'Shein',aliexpress:'AliExpress'};
 // Own simple marks in each marketplace's color, so the store reads at a glance like in Bling.
 const storeMarks={
   ml:['#ffe600','<path d="M5 11c2-2 4-2 7 0s5 2 7 0" stroke="#2d3277" stroke-width="1.8" fill="none"/><path d="M8 13l2 2 2-2 2 2" stroke="#2d3277" stroke-width="1.4" fill="none"/>','Mercado Livre'],
@@ -21,9 +23,10 @@ async function loadStoreSales(){
   try{const r=await fetch(`/api/erp-local/store-sales?q=${encodeURIComponent(storeSalesQuery)}&offset=${storeSalesOffset}&limit=50`);if(r.ok){storeSales=await r.json();if(page==='orders'&&salesView==='store')render();}}catch{}
 }
 function storeSalesPage(){
+  if(storeSaleDetail)return storeSaleDetailPage(storeSaleDetail);
   if(!storeSales){loadStoreSales();return panel('Lidos das lojas','Carregando as vendas lidas…',salesTabs());}
   const v=storeSales,day=d=>d?d.slice(0,10).split('-').reverse().join('/'):'Não informada';
-  const rows=rowsHtml(v.items.map(s=>[`<input type="checkbox" data-label-pick='${esc(JSON.stringify({channel:s.channel,store:s.store_id,number:s.number}))}' ${storeLabelPicks.has(s.number)?'checked':''} aria-label="Selecionar ${esc(s.number)}">`,esc(s.number),esc(day(s.created_at)),s.buyer?esc(s.buyer):'<span class="dim">Não guardado</span>',brl(s.total),esc(s.status),storeMark(s.channel)+esc(s.store)+`<button type="button" class="action" data-tracking='${esc(JSON.stringify({channel:s.channel,store:s.store_id,number:s.number}))}'>Rastreio</button>`,s.blocked.length?esc(s.blocked.join(' · ')):'<span class="badge good">Pronto para a troca</span>']));
+  const rows=rowsHtml(v.items.map(s=>[`<input type="checkbox" data-label-pick='${esc(JSON.stringify({channel:s.channel,store:s.store_id,number:s.number}))}' ${storeLabelPicks.has(s.number)?'checked':''} aria-label="Selecionar ${esc(s.number)}">`,`<button type="button" class="contact-name" data-store-sale='${esc(JSON.stringify({channel:s.channel,store:s.store_id,number:s.number}))}'>${esc(s.number)}</button>`,esc(day(s.created_at)),s.buyer?esc(s.buyer):'<span class="dim">Não guardado</span>',brl(s.total),esc(s.status),storeMark(s.channel)+esc(s.store)+`<button type="button" class="action" data-tracking='${esc(JSON.stringify({channel:s.channel,store:s.store_id,number:s.number}))}'>Rastreio</button>`,s.blocked.length?esc(s.blocked.join(' · ')):'<span class="badge good">Pronto para a troca</span>']));
   const pager=`<div class="form-footer"><span>${v.total?`${v.offset+1}–${Math.min(v.offset+50,v.total)} de ${v.total}`:'Nenhuma venda lida'}</span><button type="button" class="secondary" data-store-sales-page="-50" ${v.offset?'':'disabled'}>Anterior</button><button type="button" class="secondary" data-store-sales-page="50" ${v.offset+50<v.total?'':'disabled'}>Próxima</button></div>`;
   return panel('Lidos das lojas','Vendas como a loja mostra. Só consulta: não são pedidos próprios, não reservam estoque e só viram pedido na troca de cada loja.',`${salesTabs()}<form id="store-sales-search"><div class="forms"><label>Pesquisar<input name="q" value="${esc(storeSalesQuery)}" placeholder="Número, loja, SKU, comprador ou situação"></label></div></form><div class="form-footer"><span>${storeLabelPicks.size} selecionadas</span><button type="button" id="store-labels-print" ${storeLabelPicks.size?'':'disabled'}>Imprimir etiquetas selecionadas</button></div>${table(['','Número','Data','Comprador','Total (R$)','Situação na loja','Loja','O que falta'],rows)}${pager}`);
 }
@@ -56,7 +59,55 @@ document.addEventListener('click',async e=>{
 });
 document.addEventListener('click',e=>{
   const set=e.target.closest('[data-set-situation]');if(set){set.closest('details')?.removeAttribute('open');command('order.compat_situation',{id:set.dataset.order,situation_id:Number(set.dataset.setSituation)});}
-  const tab=e.target.closest('[data-sales-view]');if(tab){salesView=tab.dataset.salesView;render();}
+  const tab=e.target.closest('[data-sales-view]');if(tab){salesView=tab.dataset.salesView;storeSaleDetail=null;render();}
   const step=e.target.closest('[data-store-sales-page]');if(step){storeSalesOffset=Math.max(0,storeSalesOffset+Number(step.dataset.storeSalesPage));storeSales=null;render();}
 });
 document.addEventListener('submit',e=>{if(e.target.getAttribute('id')==='store-sales-search'){e.preventDefault();storeSalesQuery=new FormData(e.target).get('q')||'';storeSalesOffset=0;storeSales=null;render();}});
+
+function salesMoreMenu(){
+  const pick=(id,label,ok=true,why='')=>`<button type="button" class="rail-link" ${ok?`data-paper="${id}"`:`disabled title="${esc(why)}"`}>${label}</button>`;
+  return `<h4>Gerar</h4>${pick('','NFC-es selecionadas',false,'NFC-e fica para a última etapa')}${pick('','Comprovantes selecionados',false,'Modelo de comprovante ainda pendente')}${pick('','Ordens de produção',false,'Produção própria ainda não usada nas lojas')}<h4>Exportar</h4>${pick('sheet','Dados para planilha')}${pick('addresses','Endereços selecionados')}<a class="rail-link" href="/api/erp-local/orders.csv">Pedidos próprios (todos)</a><h4>Imprimir</h4>${pick('labels','Etiquetas selecionadas')}${pick('production','Relatório de produção')}${pick('declarations','Declarações de conteúdo')}<h4>Outras</h4>${pick('','Faturar pedidos selecionados',false,'Emissão própria de NF-e ainda em homologação')}`;
+}
+function paperPicks(){
+  if(salesView==='store')return storeSaleDetail?[{channel:storeSaleDetail.channel,store:storeSaleDetail.store_id,number:storeSaleDetail.number}]:[...storeLabelPicks.values()];
+  return (state.orders||[]).filter(o=>salesSelection.has(o.id)&&o.data.channel&&o.data.external_id).map(o=>({channel:o.data.channel,store:o.data.store,number:o.data.external_id}));
+}
+function storeSaleDetailPage(d){
+  const f=(label,value,wide)=>`<div class="detail-field${wide?' wide':''}"><span>${label}</span><strong>${value===undefined||value===null||value===''?'—':esc(String(value))}</strong></div>`;
+  const grid=fields=>`<div class="detail-grid">${fields.join('')}</div>`,r=d.recipient||{},b=d.buyer||{},money=v=>v===null||v===undefined?'—':brl(v).replace(/^R\$\s*/,'');
+  const pickJson=esc(JSON.stringify({channel:d.channel,store:d.store_id,number:d.number}));
+  const adjust=d.adjustment===null?null:Number(d.adjustment);
+  const items=rowsHtml(d.items.map(i=>[esc(i.name||i.seller_sku||'Sem descrição')+(i.linked?'':' <span class="badge warn">sem vínculo</span>'),esc(i.sku||i.seller_sku||'—'),'UN',esc(i.quantity||'—'),money(i.unit_price),money(i.total)]));
+  return `<section class="panel sale-detail"><div class="sale-detail-head"><button type="button" class="secondary" id="store-sale-back">Voltar</button><h2>Pedido de venda - ${esc(d.number)}</h2><span class="store-cell">${storeMark(d.channel)}${esc(d.store)}</span></div>
+<h3>Dados do cliente</h3>${grid([f('Cliente',b.name,true),f('CPF/CNPJ',b.document),f('Loja',d.store),f('Situação na loja',d.status)])}
+<div class="reference-tabs"><button class="active">Itens do pedido de venda</button></div>${table(['Descrição','Código','Un','Quantidade','Preço un','Preço total'],items)}
+<h3>Totais</h3>${grid([f('Nº de itens',d.item_count),f('Soma das quantidades',d.quantity_sum),f('Total dos itens',money(d.items_total)),f(adjust!==null&&adjust>0?'Frete / acréscimo':'Desconto',adjust===null?'—':money(Math.abs(adjust))),f('Total da venda',money(d.order_total))])}
+<h3>Detalhes da venda</h3>${grid([f('Número do pedido',d.number),f('Data da venda',d.created_at?d.created_at.slice(0,10).split('-').reverse().join('/'):''),f('Número loja virtual',d.orders.join(', '),true),f('Origem canal venda',channelNames[d.channel]||d.channel)])}
+<h3>Transportador</h3>${grid([f('Logística',d.fulfilled_by.split(', ').map(v=>({MERCHANT:'Envio pelo vendedor',SELLER:'Envio pelo vendedor',FULFILLMENT:'Full (estoque na loja)',FULL:'Full (estoque na loja)',FBA:'Full (estoque na loja)',PLATFORM:'Full (estoque na loja)'}[v.toUpperCase()]||v)).join(', ')),f('Serviço',channelNames[d.channel]?'Logística '+channelNames[d.channel]:'')])}<div class="form-footer"><button type="button" class="secondary" data-tracking='${pickJson}'>Rastreio</button><button type="button" data-detail-label='${pickJson}'>Imprimir etiqueta</button></div>
+<h3>Endereço de entrega</h3>${grid([f('Nome',r.name,true),f('CEP',r.postal_code),f('UF',r.state),f('Cidade',r.city),f('Bairro',r.district),f('Endereço',r.street,true),f('Número',r.number),f('Complemento',r.complement),f('Telefone',r.phone)])}
+<h3>Dados adicionais</h3>${grid([f('Comprador guardado em',d.captured_at?when(d.captured_at):''),f('O que falta na leitura',(d.missing||[]).join(', ')||'Nada',true)])}
+<p class="source-line">Somente consulta. Enquanto o Bling cuida desta loja, mudanças no pedido continuam sendo feitas lá.</p></section>`;
+}
+async function downloadBlob(r,name){const url=URL.createObjectURL(await r.blob()),a=document.createElement('a');a.href=url;a.download=name;document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),5000);}
+document.addEventListener('click',async e=>{
+  const open=e.target.closest('[data-store-sale]');
+  if(open){const p=JSON.parse(open.dataset.storeSale);const r=await fetch(`/api/erp-local/store-sales/detail?channel=${encodeURIComponent(p.channel)}&store=${encodeURIComponent(p.store)}&number=${encodeURIComponent(p.number)}`);const reply=await r.json();if(!r.ok){message(reply.message||'Venda indisponível.',true);return;}storeSaleDetail=reply;render();window.scrollTo(0,0);}
+  if(e.target.closest('#store-sale-back')){storeSaleDetail=null;render();}
+  const one=e.target.closest('[data-detail-label]');
+  if(one){const r=await storePost('/api/erp-local/store-sales/labels',{items:[JSON.parse(one.dataset.detailLabel)]});if(!r.ok){const reply=await r.json();message(reply.message||'Etiqueta indisponível.',true);return;}if(Number(r.headers.get('X-Labels-Missing')||0)){message('Etiqueta ainda não disponível na loja.',true);return;}await downloadBlob(r,'etiqueta.pdf');}
+  const paper=e.target.closest('[data-paper]');
+  if(paper){
+    const kind=paper.dataset.paper;
+    if(kind==='labels'){document.getElementById(salesView==='store'?'store-labels-print':'sales-transport-labels')?.click();return;}
+    const items=paperPicks();if(!items.length){message('Selecione vendas das lojas.',true);return;}
+    const file=kind==='sheet'||kind==='addresses',w=file?null:window.open('','_blank');
+    const r=await storePost('/api/erp-local/store-sales/papers/'+kind,{items});
+    if(!r.ok){w?.close();const reply=await r.json().catch(()=>({}));message(reply.message||'Documento indisponível.',true);return;}
+    if(file){await downloadBlob(r,kind==='sheet'?'vendas.csv':'enderecos.csv');return;}
+    const html=(await r.text()).replace('<meta charset="utf-8">',`<meta charset="utf-8"><base href="${location.origin}/">`);
+    if(w){w.opener=null;w.document.open();w.document.write(html);w.document.close();return;}
+    document.querySelector('.print-frame')?.remove();
+    const frame=document.createElement('iframe');frame.className='print-frame';frame.title='Documento para impressão';frame.srcdoc=html;
+    frame.addEventListener('load',()=>frame.contentWindow.print(),{once:true});document.body.append(frame);
+  }
+});
