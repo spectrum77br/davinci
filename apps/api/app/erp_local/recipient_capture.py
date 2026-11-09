@@ -23,8 +23,6 @@ CREATE TABLE IF NOT EXISTS native_order_recipients (
 COMMANDS = {"recipient.capture"}
 CAPTURE_ENV = "ERP_RECIPIENT_CAPTURE"
 BATCH = 50
-# Shopee only answers in these statuses; asking later would just bring masks.
-OPEN_ONLY = {"shopee": {"INVOICE_PENDING", "READY_TO_SHIP", "PROCESSED", "RETRY_SHIP"}}
 CLOSED = {"cancelled", "canceled", "delivered", "completed", "complete", "returned", "refunded"}
 ADDRESS = ["street", "number", "complement", "district", "city", "state", "postal_code"]
 
@@ -119,12 +117,15 @@ def due(db, channel, store):
             (channel, store),
         )
     }
-    allowed = OPEN_ONLY.get(channel)
+    from app.erp_local.native_ingest import OPEN_STATUS
+
+    # Stores only show the buyer while the sale is released for shipping; unpaid shows nothing.
+    allowed = OPEN_STATUS.get(channel)
     result = {}
     for external, status in sorted(latest.items()):
         if external in done or str(status or "").casefold() in CLOSED:
             continue
-        if allowed is None or status in allowed:
+        if allowed is None or str(status or "").upper() in allowed:
             result[external] = status
     return result
 

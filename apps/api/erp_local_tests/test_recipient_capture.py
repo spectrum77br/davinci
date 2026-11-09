@@ -228,3 +228,25 @@ def test_same_incomplete_reading_repeated_records_nothing_new(erp):
     again = rc.capture(erp, CHANNEL, store, "R1", masked_order())
     assert first["ready"] is False and again["kept"] is True
     assert rc.capture(erp, CHANNEL, store, "R1", open_order())["ready"] is True
+
+
+def test_unpaid_sale_is_not_read_for_its_buyer(erp):
+    with erp.connection() as db:
+        db.execute("PRAGMA foreign_keys=OFF")
+        columns = [r[1] for r in db.execute("PRAGMA table_info(native_order_observations)")]
+        for external, status in [("T1", "UNPAID"), ("T2", "AWAITING_SHIPMENT")]:
+            values = {
+                "id": external,
+                "channel": "tiktok",
+                "store": STORE,
+                "external_id": external,
+                "updated_at": "2026-11-09",
+                "captured_at": "2026-11-09",
+                "data": json.dumps({"status": status}),
+            }
+            db.execute(
+                f"INSERT INTO native_order_observations({','.join(columns)}) "  # noqa: S608
+                f"VALUES ({','.join('?' * len(columns))})",
+                [values.get(c, "x") for c in columns],
+            )
+        assert rc.due(db, "tiktok", STORE) == {"T2": "AWAITING_SHIPMENT"}

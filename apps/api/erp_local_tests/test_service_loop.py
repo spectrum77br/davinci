@@ -70,3 +70,33 @@ def test_one_round_serves_enabled_accounts_and_isolates_failures(erp, monkeypatc
     assert report["ml:ok"]["reception"]["state"] == "complete"
     assert report["shopee:falha"]["reception"]["state"] != "complete"
     json.dumps(report)
+
+
+def test_daily_check_writes_counts_and_never_raises(erp, tmp_path, monkeypatch):
+    from app.erp_local import parallel_check
+
+    monkeypatch.setattr(
+        parallel_check,
+        "local_sales",
+        lambda _db: {
+            "A": {
+                "channel": "ml",
+                "items": {},
+                "total": "1",
+                "document": "",
+                "name": "",
+                "postal_code": "",
+            }
+        },
+    )
+    monkeypatch.setattr(native_ingest, "run_on_host", lambda *a, **k: {})
+    out = tmp_path / "conferencia.json"
+    service_loop.daily_check(erp, out)
+    assert json.loads(out.read_text())["ml"]["fora_do_bling"] == 1
+
+    def broken(*a, **k):
+        raise OSError("fora do ar")
+
+    monkeypatch.setattr(native_ingest, "run_on_host", broken)
+    service_loop.daily_check(erp, tmp_path / "outra.json")
+    assert not (tmp_path / "outra.json").exists()

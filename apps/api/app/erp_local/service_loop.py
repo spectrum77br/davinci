@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from app.erp_local import channel_recipients, native_ingest, recipient_capture
-from app.erp_local.core import ERPError, LocalERP
+from app.erp_local.core import ERPError, LocalERP, dumps
 
 log = logging.getLogger("erp.service")
 REFRESH_EVERY = 12
@@ -39,6 +39,23 @@ def once(erp, *, provider_for=native_ingest.ssh_provider, reader=None):
     return report
 
 
+def daily_check(erp, output):
+    """Once a day, the sales read so far side by side with Bling, in counts only."""
+    from app.erp_local import parallel_check
+
+    try:
+        with erp.connection() as db:
+            local = parallel_check.local_sales(db)
+        script = (Path(parallel_check.__file__).parent / "parallel_check_read.py").read_bytes()
+        keys, bling = sorted(local), {}
+        for start in range(0, len(keys), 500):
+            bling.update(native_ingest.run_on_host(script, {"keys": keys[start : start + 500]}))
+        output.write_text(dumps(parallel_check.compare(local, bling)) + "\n", "utf-8")
+        log.info("conferência gravada em %s", output.name)
+    except (ERPError, OSError, ValueError) as error:
+        log.warning("conferência não concluída: %s", type(error).__name__)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Recepção contínua das lojas")
     parser.add_argument("--database", required=True, type=Path)
@@ -46,7 +63,7 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     erp = LocalERP(args.database)
-    rounds = 0
+    rounds, checked_on = 0, None
     while True:
         if os.environ.get("ERP_READ_TRANSPORT") == "local" and rounds % REFRESH_EVERY == 0:
             # Stores, listings and links change in DaVinci; keep the copy here fresh.
@@ -57,6 +74,10 @@ def main():
             except ERPError as error:
                 log.warning("referência não atualizada: %s", error.code)
         rounds += 1
+        today = time.strftime("%Y-%m-%d")
+        if os.environ.get("ERP_READ_TRANSPORT") == "local" and today != checked_on:
+            checked_on = today
+            daily_check(erp, args.database.parent / f"conferencia-{today}.json")
         for account, result in once(erp).items():
             log.info("%s %s", account, result.get("reception", result).get("state"))
         time.sleep(max(60, args.every))
