@@ -207,6 +207,9 @@ async def _reconcile_excluidos(
                 and product_by_bpid.get(int(active["id"]), p) is p
             ):
                 p.bling_product_id = int(active["id"])
+                # Outro candidato do mesmo SKU nesta rodada não cura para o
+                # mesmo id (seriam dois produtos com um id só).
+                product_by_bpid[int(active["id"])] = p
                 summary["reconciled_healed"] += 1
             else:
                 # Sem ativo — ou o ativo já é OUTRO produto do DaVinci (cópia
