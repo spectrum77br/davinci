@@ -72,6 +72,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -476,6 +477,24 @@ def _anexos(m: dict) -> list[dict]:
     return saida
 
 
+# 09/11/2026, o dono: a fala do mediador do ML às vezes vem em HTML ("<p dir="ltr">",
+# "&aacute;") e aparecia crua na conversa (61 mensagens em 30 dias, todas do mediador).
+_PARECE_HTML = re.compile(
+    r"<\s*/?\s*(?:p|br|div|span|a|b|strong|em|i|u|ul|ol|li|table|tr|td|h[1-6])\b[^>]*>"
+    r"|&(?:[a-z]+|#\d+);",
+    re.IGNORECASE,
+)
+
+
+def texto_sem_html(texto: str | None) -> str | None:
+    """O texto legível de uma fala do ML que veio em HTML; o resto, como veio. PURA."""
+    if not texto or not _PARECE_HTML.search(texto):
+        return texto
+    from app.services.atendimento.amazon_email import html_para_texto
+
+    return html_para_texto(texto) or texto
+
+
 def mensagem_da_reclamacao(m: dict) -> MensagemReclamacao | None:
     """Uma mensagem da reclamação → o que o `gravar` recebe. Sem data nem texto/anexo → None.
 
@@ -514,7 +533,8 @@ def mensagem_da_reclamacao(m: dict) -> MensagemReclamacao | None:
     return MensagemReclamacao(
         externo_id=chave[:191],
         autor=AUTOR_DO_PAPEL.get(papel, AUTOR_SISTEMA),
-        texto=texto,
+        # A chave sem hash continua pelo texto CRU (acima): a de sempre, sem duplicar.
+        texto=texto_sem_html(texto),
         enviada_em=quando,
         tipo=tipo,
         anexos=anexos,

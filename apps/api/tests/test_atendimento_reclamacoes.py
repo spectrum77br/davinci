@@ -61,6 +61,7 @@ from app.services.atendimento.reclamacoes import (
     acao_pendente,
     data_ml,
     mensagem_da_reclamacao,
+    texto_sem_html,
     tipo_da_reclamacao,
 )
 from app.services.marketplaces.ml import MercadoLivreClient
@@ -1056,6 +1057,23 @@ def test_mensagem_sem_hash_tem_chave_estavel():
     assert mensagem_da_reclamacao(vazia) is None
     foto = {**m, "message": None, "attachments": [{"filename": "f.jpg", "type": "image/jpeg"}]}
     assert mensagem_da_reclamacao(foto).tipo == "imagem"
+
+
+def test_fala_do_mediador_em_html_vira_texto():
+    """09/11/2026, o dono: a fala do mediador vinha com o HTML junto na conversa."""
+    html = (
+        '<p dir="ltr"><span style="white-space: pre-wrap;">Ol&aacute;, Marquezini.</span></p>'
+        "<p><br></p><p>Verifiquei que o comprador devolveu o produto.</p>"
+    )
+    m = _msg(1, "mediator", "respondent", html, "2026-09-25T15:46:56.070-04:00", hash_="")
+    a = mensagem_da_reclamacao(m)
+    assert a.texto == "Olá, Marquezini.\n\nVerifiquei que o comprador devolveu o produto."
+    # A chave sem hash é a do texto cru: a mensagem já gravada não duplica.
+    cru = mensagem_da_reclamacao({**m, "message": html})
+    assert cru.externo_id == a.externo_id
+    # Texto comum (com "<" de verdade ou "**negrito**") fica como veio.
+    for t in ("Valor < R$ 100, ok?", "Sobre a **Mala M6**, o comprador", "A & B"):
+        assert texto_sem_html(t) == t
 
 
 async def test_cliente_ml_so_le(monkeypatch):
