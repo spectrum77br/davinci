@@ -24,6 +24,13 @@ REASONS = {
 SETTLED = {"cursor": "9999-12-31T00:00:00+00:00"}
 
 
+def _situation_id(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _names(db):
     return {
         (row["channel"], row["store"]): json.loads(row["data"]).get("name") or row["store"]
@@ -31,8 +38,24 @@ def _names(db):
     }
 
 
-def listing(db, query="", offset=0, limit=50):
-    names, sales = _names(db), []
+def _bling_orders(db):
+    """Bling's own number and situation for each store sale, from the read-only reference."""
+    import sqlite3
+
+    try:
+        rows = db.execute("SELECT data FROM reference_rows WHERE kind='orders'").fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    seen = {}
+    for row in rows:
+        order = json.loads(row[0])
+        if order.get("store_number"):
+            seen[str(order["store_number"])] = order
+    return seen
+
+
+def listing(db, query="", offset=0, limit=50, situation=None):
+    names, sales, bling = _names(db), [], _bling_orders(db)
     accounts = db.execute("SELECT DISTINCT channel,store FROM native_order_observations").fetchall()
     for channel, store in accounts:
         try:
@@ -59,6 +82,8 @@ def listing(db, query="", offset=0, limit=50):
                     "buyer": (captured or {}).get("buyer", {}).get("name") or "",
                     "skus": skus,
                     "blocked": [REASONS.get(r, r) for r in sorted(reasons)],
+                    "bling_number": str((bling.get(key) or {}).get("number") or ""),
+                    "bling_situation": _situation_id((bling.get(key) or {}).get("situation")),
                 }
             )
     text = (query or "").strip().casefold()
@@ -69,5 +94,7 @@ def listing(db, query="", offset=0, limit=50):
             if text
             in " ".join([s["number"], s["store"], s["status"], s["buyer"], *s["skus"]]).casefold()
         ]
+    if situation is not None:
+        sales = [s for s in sales if s["bling_situation"] == situation]
     sales.sort(key=lambda s: s["created_at"], reverse=True)
     return {"items": sales[offset : offset + limit], "total": len(sales), "offset": offset}

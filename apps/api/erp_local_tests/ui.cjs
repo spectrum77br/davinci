@@ -1132,13 +1132,21 @@ test('multi-company screen adopts a company only after the technical contact exi
 
 test('the clock beside the status changes the situation like in Bling',async()=>{
   const order={id:'o1',status:'reserved',data:{external_id:'P-1',items:[],total:'10',channel:'ml',store:'loja',created_at:'2026-11-09T10:00:00'}};
-  const {document:d,requests}=await setup({orders:[order],situations:{names:{'6':'Em aberto','83962':'Verificar Cancelamento'},orders:{}}});
+  const {dom,document:d,requests}=await setup({orders:[order],situations:{names:{'6':'Em aberto','83962':'Verificar Cancelamento'},orders:{}}});
+  const base=dom.window.fetch;
+  dom.window.fetch=async(url,options)=>String(url).includes('/occurrences')?{ok:true,status:200,json:async()=>({situation_id:6,items:[{id:7,occurred_at:'2026-11-06T13:48:00-03:00',text:'Situação alterada via API v3',actor:'HEISENBERG',situation_id:6,situation:'Em aberto'}]})}:base(url,options);
   d.querySelector('[data-menu-target="orders"]').click();
-  const option=d.querySelector('[data-set-situation="83962"]');
-  assert.ok(option,'menu de situações na linha');
-  option.click();
-  await new Promise(r=>setImmediate(r));
-  assert.deepEqual(requests.at(-1),{...requests.at(-1),kind:'order.compat_situation',payload:{id:'o1',situation_id:83962}});
+  d.querySelector('[data-occurrences="o1"]').click();
+  await new Promise(r=>setTimeout(r,10));
+  const modal=d.querySelector('.occ-modal');
+  assert.ok(modal&&modal.textContent.includes('Ocorrências')&&modal.textContent.includes('Situação alterada via API v3'),'histórico de ocorrências');
+  const form=d.getElementById('occurrence-form');
+  form.querySelector('[name=situation_id]').value='83962';
+  form.querySelector('[name=text]').value='Cliente pediu cancelamento';
+  form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setTimeout(r,10));
+  const sent=requests.find(r=>r.kind==='order.occurrence');
+  assert.equal(sent.payload.id,'o1');assert.equal(sent.payload.situation_id,83962);assert.equal(sent.payload.text,'Cliente pediu cancelamento');
 });
 
 test('read sales can be picked and printed together, and tracking is asked per sale',async()=>{

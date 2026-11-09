@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS compat_outbox (
 CREATE TABLE IF NOT EXISTS compat_order_situations (
  order_id TEXT PRIMARY KEY, situation_id INTEGER NOT NULL, operation_key TEXT NOT NULL,
  updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS order_occurrences (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, order_id TEXT NOT NULL, operation_key TEXT NOT NULL,
+ occurred_at TEXT NOT NULL, text TEXT NOT NULL, situation_id INTEGER, actor TEXT NOT NULL,
+ created_at TEXT NOT NULL, removed_at TEXT, removed_by TEXT);
 """
 FIRST_OWN_ID = 900_000_000_000
 TOKEN_ENV = "ERP_COMPAT_TOKEN"  # noqa: S105 - environment variable name
@@ -405,7 +409,40 @@ def _command(erp, kind, payload):
     return erp.command(str(uuid4()), kind, payload, actor="integração davinci")
 
 
-def _set_situation(erp, db, doc, situation):
+def _actor(db, key):
+    row = (
+        db.execute("SELECT actor FROM events WHERE operation_key=?", (key,)).fetchone()
+        if key
+        else None
+    )
+    return row["actor"] if row else "integração davinci"
+
+
+def _occurrence(erp, db, doc_id, *, key, text, situation, occurred_at=None, actor=None):
+    db.execute(
+        "INSERT INTO order_occurrences(order_id,operation_key,occurred_at,text,situation_id,"
+        "actor,created_at) VALUES (?,?,?,?,?,?,?)",
+        (
+            doc_id,
+            key or str(uuid4()),
+            occurred_at or erp.now(),
+            text,
+            situation,
+            actor or _actor(db, key),
+            erp.now(),
+        ),
+    )
+
+
+def _set_situation(erp, db, doc, situation, *, key=None, note=None):
+    """Bling keeps every situation change as an occurrence: who, when and to what."""
+    if _current_situation(db, doc) != situation:
+        text = (
+            note
+            if note is not None
+            else ("Situação alterada" if key else "Situação alterada via API v3")
+        )
+        _occurrence(erp, db, doc["id"], key=key, text=text, situation=situation)
     db.execute(
         "INSERT INTO compat_order_situations VALUES (?,?,?,?) ON CONFLICT(order_id) DO UPDATE SET "
         "situation_id=excluded.situation_id,operation_key=excluded.operation_key,"
@@ -428,8 +465,86 @@ def apply_situation(erp, db, key, p):
                 "order_shipped", "Pedido já despachado: registre a devolução para desfazer.", 409
             )
         erp.apply(db, key, "order.cancel", {"id": doc["id"]})
-    _set_situation(erp, db, doc, situation)
+    _set_situation(erp, db, doc, situation, key=key)
     return {"id": doc["id"], "situation_id": situation, "external_writes": False}
+
+
+def apply_occurrence(erp, db, key, p):
+    """Ocorrências, as in Bling: a dated note by a person, which may also change the situation."""
+    import re
+
+    if not isinstance(p, dict) or set(p) != {"id", "date", "time", "text", "situation_id"}:
+        raise ERPError("order_occurrence", "Informe pedido, data, hora, ocorrência e situação.")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(p["date"])) or not re.fullmatch(
+        r"\d{2}:\d{2}", str(p["time"])
+    ):
+        raise ERPError("order_occurrence", "Data ou hora inválida.")
+    note = p["text"]
+    if not isinstance(note, str) or len(note) > 500:
+        raise ERPError("order_occurrence", "A ocorrência precisa ser texto de até 500 caracteres.")
+    situation = p["situation_id"]
+    if type(situation) is not int or situation not in SITUATIONS:
+        raise ERPError("order_situation", "A situação informada não existe.")
+    doc, _ = erp.document(db, p["id"], "order")
+    from datetime import UTC, datetime
+
+    try:
+        moment = datetime.fromisoformat(f"{p['date']}T{p['time']}:00-03:00")
+    except ValueError:
+        raise ERPError("order_occurrence", "Data ou hora inválida.") from None
+    when = moment.astimezone(UTC).isoformat()
+    if _current_situation(db, doc) != situation:
+        apply_situation(erp, db, key, {"id": doc["id"], "situation_id": situation})
+        last = db.execute(
+            "SELECT id FROM order_occurrences WHERE operation_key=? ORDER BY id DESC LIMIT 1",
+            (key,),
+        ).fetchone()
+        db.execute(
+            "UPDATE order_occurrences SET text=?,occurred_at=? WHERE id=?",
+            (note.strip() or "Situação alterada", when, last["id"]),
+        )
+    else:
+        if not note.strip():
+            raise ERPError("order_occurrence", "Escreva a ocorrência ou escolha outra situação.")
+        _occurrence(
+            erp, db, doc["id"], key=key, text=note.strip(), situation=situation, occurred_at=when
+        )
+    return {"id": doc["id"], "situation_id": situation, "external_writes": False}
+
+
+def remove_occurrence(erp, db, key, p):
+    """The trash can in Ocorrências: hidden from the list, kept for the audit."""
+    if not isinstance(p, dict) or set(p) != {"id", "occurrence_id"}:
+        raise ERPError("order_occurrence", "Informe o pedido e a ocorrência.")
+    row = db.execute(
+        "SELECT id FROM order_occurrences WHERE id=? AND order_id=? AND removed_at IS NULL",
+        (p["occurrence_id"], p["id"]),
+    ).fetchone()
+    if not row:
+        raise ERPError("order_occurrence", "Ocorrência não encontrada.", 404)
+    db.execute(
+        "UPDATE order_occurrences SET removed_at=?,removed_by=? WHERE id=?",
+        (erp.now(), _actor(db, key), row["id"]),
+    )
+    return {"id": p["id"], "occurrence_id": row["id"], "external_writes": False}
+
+
+def occurrences(db, order_id):
+    return [
+        {
+            "id": r["id"],
+            "occurred_at": r["occurred_at"],
+            "text": r["text"],
+            "actor": r["actor"],
+            "situation_id": r["situation_id"],
+            "situation": SITUATIONS.get(r["situation_id"], ""),
+        }
+        for r in db.execute(
+            "SELECT * FROM order_occurrences WHERE order_id=? AND removed_at IS NULL "
+            "ORDER BY occurred_at DESC,id DESC",
+            (order_id,),
+        )
+    ]
 
 
 def situations_snapshot(db):
@@ -1122,6 +1237,8 @@ ORDER_EVENTS = {
     "order.save",
     "order.confirm",
     "order.situation",
+    "order.compat_situation",
+    "order.occurrence",
     "order.cancel",
     "order.ship",
     "order.return",

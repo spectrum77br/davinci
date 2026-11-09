@@ -46,3 +46,56 @@ def test_unknown_situation_and_shipped_cancel_are_refused(erp):
     erp.command("t2", "order.ship", {"id": order})
     with pytest.raises(ERPError, match="despachado"):
         erp.command("t3", "order.compat_situation", {"id": order, "situation_id": 12})
+
+
+def history(erp, order):
+    with erp.connection() as db:
+        return bling_compat.occurrences(db, order)
+
+
+def test_occurrences_keep_who_when_and_the_situation_like_bling(erp):
+    order = sale(erp)
+    erp.command("c1", "order.compat_situation", {"id": order, "situation_id": 15}, actor="ana")
+    erp.command(
+        "c2",
+        "order.occurrence",
+        {"id": order, "date": "2030-01-02", "time": "14:44", "text": "Ligou", "situation_id": 15},
+        actor="ana",
+    )
+    erp.command(
+        "c3",
+        "order.occurrence",
+        {"id": order, "date": "2030-01-02", "time": "15:00", "text": "", "situation_id": 83962},
+        actor="bia",
+    )
+    rows = history(erp, order)
+    assert [(r["text"], r["situation_id"], r["actor"]) for r in rows] == [
+        ("Situação alterada", 83962, "bia"),
+        ("Ligou", 15, "ana"),
+        ("Situação alterada", 15, "ana"),
+    ]
+    assert rows[0]["occurred_at"].startswith("2030-01-02T18:00")
+    assert current(erp, order)[0] == 83962
+
+
+def test_empty_note_without_change_is_refused_and_removal_keeps_the_audit(erp):
+    order = sale(erp)
+    with pytest.raises(ERPError):
+        erp.command(
+            "e1",
+            "order.occurrence",
+            {"id": order, "date": "2026-11-09", "time": "10:00", "text": " ", "situation_id": 6},
+        )
+    erp.command(
+        "e2",
+        "order.occurrence",
+        {"id": order, "date": "2026-11-09", "time": "10:00", "text": "Nota", "situation_id": 6},
+    )
+    first = history(erp, order)[0]["id"]
+    erp.command("e3", "order.occurrence.remove", {"id": order, "occurrence_id": first})
+    assert history(erp, order) == []
+    with erp.connection() as db:
+        kept = db.execute(
+            "SELECT removed_by FROM order_occurrences WHERE id=?", (first,)
+        ).fetchone()
+    assert kept["removed_by"] == "operador local"

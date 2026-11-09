@@ -411,12 +411,15 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
 
     @app.get("/api/erp-local/store-sales")
     def store_sales_list(
-        q: str = "", offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)
+        q: str = "",
+        offset: int = Query(0, ge=0),
+        limit: int = Query(50, ge=1, le=100),
+        situation: int | None = None,
     ):
         from app.erp_local import store_sales
 
         with erp.connection() as db:
-            return store_sales.listing(db, q, offset, limit)
+            return store_sales.listing(db, q, offset, limit, situation)
 
     @app.post("/api/erp-local/store-sales/labels")
     def store_sales_labels(body: dict = Body(...)):
@@ -431,6 +434,20 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "X-Labels-Missing": str(len(failures)),
             },
         )
+
+    @app.get("/api/erp-local/orders/{order_id}/occurrences")
+    def order_occurrences(order_id: str):
+        from app.erp_local import bling_compat
+
+        with erp.connection() as db:
+            erp.document(db, order_id, "order")
+            current = db.execute(
+                "SELECT situation_id FROM compat_order_situations WHERE order_id=?", (order_id,)
+            ).fetchone()
+            return {
+                "items": bling_compat.occurrences(db, order_id),
+                "situation_id": current["situation_id"] if current else None,
+            }
 
     @app.get("/api/erp-local/store-objects")
     def store_objects_list(
