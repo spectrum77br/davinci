@@ -9,6 +9,10 @@ RUN pnpm install --frozen-lockfile || pnpm install
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# O build do Nuxt passou dos 2 GB de memória que o Node usa por padrão e parava
+# com "JavaScript heap out of memory" (09/11/2026). Vale só para montar a tela:
+# o estágio runtime abaixo não herda esta variável.
+ENV NODE_OPTIONS=--max-old-space-size=4096
 RUN pnpm build
 
 FROM node:20-alpine AS runtime
