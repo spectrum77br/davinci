@@ -99,7 +99,8 @@ async def test_produto_excluido_nao_promete_o_estoque_dos_irmaos(db: AsyncSessio
     await _p(db, u, "dg099.sp", 50)
     ativo = await _p(db, u, "dg099.pi", 3)
     await db.commit()
-    assert await estoque_familia.saldo_publicavel(db, excluido) == 2
+    # Excluído não vende nem o próprio saldo: o anúncio vai a zero (09/11/2026).
+    assert await estoque_familia.saldo_publicavel(db, excluido) == 0
     assert await estoque_familia.saldo_publicavel(db, ativo) == 53
 
 

@@ -126,6 +126,7 @@ SP_TZ = ZoneInfo("America/Sao_Paulo")
 # Daily `sync_all_run` only processes products at risk of stockout. Items
 # with `products.stock >= 10` are skipped — webhooks keep their stock fresh
 # inline anyway, and high-stock items rarely cause real-world divergence.
+# SKU excluído (situacao 'E') entra sempre: o anúncio dele tem de ir a zero.
 # Hora em que a varredura diária roda para quem ligou e não escolheu hora.
 DAILY_SYNC_HORA_PADRAO = time(3, 0)
 SYNC_ALL_LOW_STOCK_THRESHOLD = 10
@@ -277,7 +278,13 @@ async def sync_all_run(
                 # número publicado depende do IRMÃO, e o webhook do irmão não
                 # avisa este produto — então quem está numa linha com a soma
                 # ligada entra na varredura mesmo com estoque alto.
-                baixo = Product.stock < SYNC_ALL_LOW_STOCK_THRESHOLD
+                # SKU excluído entra sempre, com qualquer estoque: o anúncio
+                # tem de ir a zero, e o webhook do Bling não avisa de produto
+                # apagado (09/11/2026: 1.353 anúncios de excluídos com 10+
+                # ficavam fora da varredura com o número antigo).
+                baixo = or_(
+                    Product.stock < SYNC_ALL_LOW_STOCK_THRESHOLD, Product.situacao == "E"
+                )
                 prefixos_familia = _prefixos_familia()
                 if prefixos_familia:
                     where.append(

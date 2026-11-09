@@ -133,6 +133,12 @@ async def saldo_publicavel(
     juntar"): dg053.ci e dg053.sp são o mesmo celular no mesmo galpão, ainda que
     registrados em nomes diferentes.
     """
+    if product.situacao == "E":
+        # SKU excluído não vende: o anúncio vai a zero mesmo que o espelho
+        # guarde saldo (09/11/2026, "se tá excluído, zera o estoque"). Quem
+        # tem vínculo com o Bling é reconferido no envio (`_refresh_bling`
+        # volta para 'A' se o Bling disser que está ativo).
+        return 0
     proprio = max(0, int(product.stock or 0))
     s = get_settings()
     if not getattr(s, "estoque_familia_ativo", False):

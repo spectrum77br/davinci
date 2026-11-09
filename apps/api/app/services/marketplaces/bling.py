@@ -753,15 +753,20 @@ class BlingClient:
         """Smart stock fetch: if the product is deleted/inactive in Bling,
         search by SKU to find the active replacement.
 
-        Returns dict with keys: stock, bling_product_id, found_via, raw
-        Raises RuntimeError if product cannot be resolved.
+        Returns dict with keys: stock, bling_product_id, found_via, raw — and
+        `excluido=True` (stock 0) when the SKU is gone from Bling: apagado
+        (404) ou na lixeira (situação E) e sem produto ATIVO com exatamente o
+        mesmo SKU. Antes o apagado levantava RuntimeError e o anúncio ficava
+        para sempre com o número antigo, vendendo o que não existe ("se tá
+        excluído, zera o estoque", Eduardo, 09/11/2026). Erro na busca pelo SKU
+        (429, timeout, 5xx) SOBE: na dúvida não zera nada.
         """
         try:
             raw = await self.get_product(bling_product_id)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404 and sku:
                 # Product deleted — try to find active one by SKU
-                active = await self.find_active_product_by_sku(sku)
+                active = await self.find_active_product_by_sku(sku, estrito=True, exato=True)
                 if active:
                     return {
                         "stock": active.get("stock"),
@@ -769,9 +774,13 @@ class BlingClient:
                         "found_via": "sku_search",
                         "raw": active,
                     }
-                raise RuntimeError(
-                    f"Product {bling_product_id} deleted and no active product found for SKU {sku}"
-                ) from e
+                return {
+                    "stock": 0,
+                    "bling_product_id": bling_product_id,
+                    "found_via": "excluido",
+                    "raw": {},
+                    "excluido": True,
+                }
             raise
 
         # 200 with an empty `data` payload (get_product coalesces to {}):
@@ -793,13 +802,23 @@ class BlingClient:
 
         # If product is inactive/excluded, search by SKU
         if situacao in ("I", "E", "INATIVO", "EXCLUIDO") and sku:
-            active = await self.find_active_product_by_sku(sku)
+            active = await self.find_active_product_by_sku(sku, estrito=True, exato=True)
             if active:
                 return {
                     "stock": active.get("stock"),
                     "bling_product_id": active.get("id"),
                     "found_via": "sku_search_inactive",
                     "raw": active,
+                }
+            if situacao in ("E", "EXCLUIDO"):
+                # Na lixeira do Bling: o saldo dele (raw) fica no espelho
+                # local, mas o anúncio publica zero.
+                return {
+                    "stock": parsed.get("stock"),
+                    "bling_product_id": bling_product_id,
+                    "found_via": "excluido",
+                    "raw": raw,
+                    "excluido": True,
                 }
 
         return {
@@ -809,7 +828,9 @@ class BlingClient:
             "raw": raw,
         }
 
-    async def find_active_product_by_sku(self, sku: str, *, estrito: bool = False) -> dict | None:
+    async def find_active_product_by_sku(
+        self, sku: str, *, estrito: bool = False, exato: bool = False
+    ) -> dict | None:
         """Search Bling for an active product matching the given SKU.
 
         Bling's /produtos endpoint supports filtering by codigo (SKU).
@@ -819,6 +840,11 @@ class BlingClient:
         5xx) SOBE em vez de virar None — para quem precisa separar "não sei"
         de "não existe / sem saldo" (robô de prioridade: o None de um 429 virava
         "lote sem peça" e o pedido ia para o lote irmão e voltava, 28/09/2026).
+
+        `exato=True`: só vale o item cujo código é exatamente o SKU (sem
+        diferenciar maiúscula) — o filtro `codigo` não garante isso, e quem
+        decide "excluído → zera" não pode trocar o anúncio de produto por um
+        código parecido (como `cost_by_skus` já faz).
         """
         if not sku:
             return None
@@ -831,6 +857,9 @@ class BlingClient:
             r.raise_for_status()
             items = r.json().get("data") or []
             for item in items:
+                codigo = (item.get("codigo") or "").strip().casefold()
+                if exato and codigo != sku.strip().casefold():
+                    continue
                 situacao = (item.get("situacao") or "").upper()
                 if situacao in ("A", "ATIVO", ""):
                     # Get full product details including stock

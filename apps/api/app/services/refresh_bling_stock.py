@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
+    BackgroundJobType,
     Integration,
     IntegrationPlatform,
     LinkSyncStatus,
@@ -148,6 +149,7 @@ async def _reconcile_excluidos(
         return
 
     demoted_skus: list[str] = []
+    demoted: list[Product] = []
     checked = 0
     for p in candidates:
         if checked >= RECONCILE_MAX:
@@ -183,25 +185,35 @@ async def _reconcile_excluidos(
             if bling_excluido:
                 p.situacao = "E"
                 summary["reconciled_excluido"] += 1
+                demoted.append(p)
                 if len(demoted_skus) < 200:
                     demoted_skus.append(p.sku)
         elif deleted_404:
             # Sumiu por id em todas as integrações. Pode ter sido recriado
             # sob id novo com o mesmo SKU — nesse caso é cura, não exclusão.
+            # Busca estrita e pelo código exato: um 429 na busca virava "não
+            # existe" e rebaixava produto vivo — e 'E' agora zera o anúncio.
             active = None
+            incerto = False
             for client in clients:
                 try:
-                    active = await client.find_active_product_by_sku(p.sku)
+                    active = await client.find_active_product_by_sku(
+                        p.sku, estrito=True, exato=True
+                    )
                 except Exception:  # noqa: BLE001
-                    active = None
+                    incerto = True
+                    break
                 if active:
                     break
-            if active and active.get("id"):
+            if incerto:
+                pass  # não sei → não mexe; a próxima execução confere de novo
+            elif active and active.get("id"):
                 p.bling_product_id = int(active["id"])
                 summary["reconciled_healed"] += 1
             else:
                 p.situacao = "E"
                 summary["reconciled_excluido"] += 1
+                demoted.append(p)
                 if len(demoted_skus) < 200:
                     demoted_skus.append(p.sku)
 
@@ -212,6 +224,7 @@ async def _reconcile_excluidos(
 
     summary["excluido_skus"] = demoted_skus
     await session.commit()
+    summary["zeragem_enfileirada"] = await _enfileirar_zeragem(session, demoted, job.created_by)
     logger.info(
         "reconcile_excluidos_done",
         candidates=len(candidates),
@@ -220,6 +233,60 @@ async def _reconcile_excluidos(
         healed=summary.get("reconciled_healed", 0),
         truncated=summary.get("reconcile_truncated", False),
     )
+
+
+async def _enfileirar_zeragem(
+    session: AsyncSession, produtos: list[Product], user_id: UUID
+) -> int:
+    """Produto que acabou de virar 'E': os anúncios vão a zero agora, sem
+    esperar a varredura da madrugada (09/11/2026, "se tá excluído, zera o
+    estoque"). Mesmo caminho do webhook: o envio relê o Bling antes de zerar.
+    Falha ao enfileirar não derruba o refresh — a varredura pega depois."""
+    from app.worker_pool import get_arq_sync_pool  # tardio: só quando há o que zerar
+
+    enfileirados = 0
+    for p in produtos:
+        try:
+            link_ids = [
+                str(i)
+                for i in (
+                    await session.execute(
+                        select(ProductLink.id).where(
+                            ProductLink.product_id == p.id,
+                            ProductLink.last_sync_status != LinkSyncStatus.FATAL,
+                            ProductLink.morto_desde.is_(None),
+                        )
+                    )
+                ).scalars()
+            ]
+            if not link_ids:
+                continue
+            job = BackgroundJob(
+                type=BackgroundJobType.SYNC_PRODUCT,
+                status=BackgroundJobStatus.PENDING,
+                created_by=user_id,
+                total=len(link_ids),
+                payload={
+                    "trigger": "sku_excluido",
+                    "product_id": str(p.id),
+                    "link_ids": link_ids,
+                    "sku": p.sku,
+                },
+            )
+            session.add(job)
+            await session.flush()
+            pool = await get_arq_sync_pool()
+            arq = await pool.enqueue_job(
+                "sync_product_run", str(job.id), str(p.user_id), str(p.id), link_ids
+            )
+            if arq is not None:
+                job.arq_job_id = arq.job_id
+            await session.commit()
+            enfileirados += 1
+        except Exception as e:  # noqa: BLE001
+            await session.rollback()
+            logger.warning("sku_excluido_zeragem_nao_enfileirada", sku=p.sku, err=str(e)[:200])
+    return enfileirados
 
 
 async def run_refresh_bling_stock(
