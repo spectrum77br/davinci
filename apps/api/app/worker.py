@@ -36,6 +36,7 @@ from app.models import (
 from app.redis_client import redis
 from app.security.cipher import decrypt_json, encrypt_json
 from app.services import (
+    chamados_atualizar,
     chamados_devolucao,
     chamados_devolucao_sync,
     chamados_pendencias,
@@ -2113,6 +2114,24 @@ async def marketing_postagens_metricas_recentes(ctx: dict) -> None:
     await _rodar_metricas("recentes")
 
 
+async def chamados_atualizar_api(ctx: dict) -> dict[str, int]:
+    """Botão Atualizar da aba Chamados (fila UI, 09/11/2026): a leitura pela API
+    de todos os chamados abertos — a mesma passada do :25 (`sync_respostas`),
+    na hora. A trava de 15 min do clique fica no router; esta é a de não ler
+    junto com o cron. RETORNA o resumo, que o GET /atualizar/{job_id} entrega
+    pra tela."""
+    async with _trava_com_heartbeat(
+        ctx.get("redis"), chamados_atualizar.TRAVA_SYNC, nome="chamados_atualizar"
+    ) as livre:
+        if not livre:
+            logger.info("chamados_atualizar_pulado", reason="leitura_em_andamento")
+            return {"pulado_ja_rodando": 1}
+        async with session_scope() as s:
+            resumo = await chamados_devolucao_sync.sync_respostas(s)
+        logger.info("chamados_atualizar_done", **resumo)
+        return {k: v for k, v in resumo.items() if isinstance(v, int)}
+
+
 async def marketing_postagens_metricas_agora(ctx: dict) -> None:
     """O botão "Atualizar agora" da tela (fila UI, não cron).
 
@@ -2660,9 +2679,16 @@ async def chamados_replica_automatica(ctx: dict) -> None:
         varridas = await devolucao_mensagem_comprador.varrer_sem_mensagem(s)
     logger.info("devolucao_mensagem_comprador_varredura_done", **varridas)
     # Resposta da plataforma (TikTok/Shopee/ML) cai no histórico e fecha o chamado.
-    async with session_scope() as s:
-        resp = await chamados_devolucao_sync.sync_respostas(s)
-    logger.info("chamados_devolucao_sync_done", **resp)
+    # 09/11/2026: a mesma trava do botão Atualizar da aba — nunca duas leituras juntas.
+    async with _trava_com_heartbeat(
+        ctx.get("redis"), chamados_atualizar.TRAVA_SYNC, nome="chamados_sync"
+    ) as livre:
+        if livre:
+            async with session_scope() as s:
+                resp = await chamados_devolucao_sync.sync_respostas(s)
+            logger.info("chamados_devolucao_sync_done", **resp)
+        else:
+            logger.info("chamados_devolucao_sync_pulado", reason="botao_atualizar_rodando")
     # 07/10 (296301): recurso mandado pela tela depois da decisão — 3 dias sem
     # novidade, a IA de Chamado ganha uma instrução pra conferir na tela.
     async with session_scope() as s:
@@ -6207,6 +6233,9 @@ class WorkerSettingsUI:
         # fila mataria a leitura: são até 120 posts, com 1 s entre páginas do
         # TikTok.
         func(marketing_postagens_metricas_agora, timeout=600),
+        # Botão Atualizar da aba Chamados (09/11/2026): a leitura pela API de
+        # todos os abertos passa fácil do 60 s da fila.
+        func(chamados_atualizar_api, timeout=chamados_atualizar.TIMEOUT_JOB_S),
     ]
     queue_name = ARQ_UI_QUEUE
     # Concorrência baixa — jobs UI são curtos (1-2 chamadas Bling) e

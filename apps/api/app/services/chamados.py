@@ -1356,6 +1356,14 @@ def status_e_motivo_da_aba(
                     f"envio falhou: {erro[:80]}" if erro else "envio falhou",
                 )
         if st == "registrada" and _erro_pede_humano(erro):
+            # 09/11/2026 (304026/305794): a tarefa "abrir à mão" ficava em Análise
+            # Humano mesmo depois de a IA fazer na tela e mandar aguardar.
+            if analise_pede_esperar and analise_depois:
+                return (
+                    ABA_AGUARD_PLATAFORMA,
+                    ultima_analise.created_at,
+                    "a IA fez a tarefa na tela e decidiu aguardar a plataforma",
+                )
             return ABA_ANALISE_HUMANO, fala_em, MOTIVO_DO_ERRO.get(erro, erro[:80])
     if ch.status_plataforma:
         if (
@@ -1388,6 +1396,89 @@ def _quando(m: ChamadoMensagem | None) -> datetime | None:
     if m is None:
         return None
     return m.enviada_at or m.created_at
+
+
+# ------------------------------------------------------------- coluna Última ação
+# 09/11/2026 (Vinicius, 304026: "a última atitude não foi dia 05/11, foi depois"):
+# a coluna "Últ. resposta" só via FALA (nossa ou da plataforma) — o que a IA de
+# Chamado faz na tela (abrir SAFE-T, responder na consulta, pedir 2ª disputa) fica
+# gravado como ANÁLISE e não contava; o aviso "abrir à mão" (fala registrada com
+# erro, tarefa da equipe) contava como se tivesse saído. Agora a coluna é a
+# última AÇÃO do caso: fala entregue, instrução de pessoa ou análise em que a IA
+# FEZ algo — "só quando fez algo" (escolha dele): a conferência sem novidade não
+# conta. A IA não manda um "fiz" estruturado; o texto dela diz. A regra abaixo foi
+# medida nas 441 análises dos 67 abertos em 09/11 (0 falso positivo no começo
+# "Feito…"; 2 duvidosos na frase que começa com o verbo). Desde 09/11 o
+# CLAUDE.md da IA manda começar por "Feito na tela" quando ela agiu.
+_CORPO_ANALISE = re.compile(r"^An[aá]lise d[ao] (?:IA de Chamado|robô)\s*(?:\[[^\]]*\])?:\s*", re.I)
+_IA_NAO_FEZ = re.compile(r"^(?:n[ãa]o\b|nada\b|sem novidade|tentei|fui |parei|perfil em uso)", re.I)
+_IA_FEZ_INICIO = re.compile(
+    r"^(?:feit[oa]\b|respondid[oa]\b|abert[oa] (?:na tela|pela)\b|2ª disputa pedida"
+    r"|contesta[çc][ãa]o da devolu[çc][ãa]o\b.{0,140}?\baberta (?:na \w+ )?hoje)",
+    re.I,
+)
+# Primeira pessoa do SINGULAR no começo de frase ("Hoje 18:10 pedi…", "Abri o
+# Recorrer…", "Pela instrução do Cairo, respondi…"). O plural fica de fora: é a
+# voz do rascunho da resposta ("Pedimos o reembolso…"), não o que foi feito.
+_IA_FEZ_VERBO = re.compile(
+    r"(?:^|[.:;]\s+|,\s*(?:ent[ãa]o\s+|e\s+)?)(?:hoje(?: [àa]s)?(?: \d{1,2}[:h]\d{2})?,? )?"
+    r"(?:abri|pedi|respondi|mandei|enviei|anexei|contestei|recorri|reabri|retomamos)\b",
+    re.I,
+)
+
+
+def corpo_da_analise(texto: str | None) -> str:
+    """O texto da análise sem o "Análise da IA de Chamado [classe]: " da frente."""
+    return _CORPO_ANALISE.sub("", (texto or "").strip(), count=1)
+
+
+def ia_fez_algo(texto: str | None) -> bool:
+    """A análise conta que a IA AGIU na plataforma (e não só leu/conferiu)?"""
+    corpo = corpo_da_analise(texto)
+    if not corpo or _IA_NAO_FEZ.match(corpo):
+        return False
+    return bool(_IA_FEZ_INICIO.match(corpo) or _IA_FEZ_VERBO.search(corpo))
+
+
+def ultima_acao(msgs: list[ChamadoMensagem]) -> tuple[datetime, str, str | None, str | None] | None:
+    """(quando, tipo, quem, resumo) da última ação do caso; None sem nenhuma.
+
+    tipo: `plataforma` (fala recebida), `nos` (fala nossa que saiu ou foi
+    registrada por pessoa), `ia` (análise em que a IA fez algo na tela) ou
+    `instrucao` (instrução de pessoa pro robô; o lembrete automático não). A fala nossa que não saiu
+    (pendente/falhou/cancelada) e o registro com erro (a tarefa "abrir à mão"
+    da plataforma sem API) não são ação."""
+    melhor: tuple[datetime, str, str | None, str | None] | None = None
+    for m in msgs:
+        quando = None
+        if m.direcao in ("enviada", "recebida"):
+            if m.status in ("pendente", "enviando", "falhou", "cancelada"):
+                continue
+            if m.status == "registrada" and (m.erro or "").strip():
+                continue
+            quando = _quando(m)
+            item = (
+                quando,
+                "plataforma" if m.direcao == "recebida" else "nos",
+                m.autor_nome,
+                None,
+            )
+        elif m.tipo == "analise" and ia_fez_algo(m.texto):
+            quando = m.created_at
+            item = (quando, "ia", m.autor_nome, corpo_da_analise(m.texto)[:200])
+        elif (
+            m.tipo == "instrucao"
+            and m.direcao == "sistema"
+            # o lembrete automático (`lembrar_recursos`) não é atitude de ninguém
+            and (m.autor_nome or "").strip().lower() not in ("", "sistema")
+        ):
+            quando = m.created_at
+            item = (quando, "instrucao", m.autor_nome, (m.texto or "").strip()[:200])
+        else:
+            continue
+        if quando is not None and (melhor is None or quando >= melhor[0]):
+            melhor = item
+    return melhor
 
 
 def ml_beneficiado(claim: dict) -> str:

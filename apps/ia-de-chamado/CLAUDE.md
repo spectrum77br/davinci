@@ -123,6 +123,11 @@ ela mostra; persistindo a dúvida, `humano` explicando a contradição.
   caracteres. Em `humano`, diga **o que a pessoa precisa fazer**. Não escreva a
   hora em que você conferiu (o DaVinci já carimba a decisão); hora de fala da
   plataforma ou do comprador, só a que você leu.
+- **Agiu na plataforma** (enviou, respondeu, abriu consulta/disputa/SAFE-T,
+  anexou, pediu atendente ou revisão) e saiu: comece o `resumo` por
+  **"Feito na tela (loja):"** — sempre assim, e só nesse caso. É por esse começo
+  que a coluna "Última ação" da aba sabe que o caso andou. Só leu ou conferiu:
+  comece por "Conferido na tela" ou "Sem novidade". Tentou e não saiu: "Não saiu:".
 
 ## Tela da loja (AdsPower no Mac dos robôs)
 

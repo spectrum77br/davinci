@@ -18,6 +18,7 @@ from typing import Annotated
 from uuid import UUID
 
 import structlog
+from arq.jobs import Job, JobStatus
 from fastapi import (
     APIRouter,
     Depends,
@@ -39,7 +40,13 @@ from sqlalchemy.orm import defer, selectinload
 from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_permission
-from app.deps.team_scope import TeamScope, clausula_conta, resolve_team_scope
+from app.deps.team_scope import (
+    TeamScope,
+    clausula_conta,
+    escopo_das_equipes,
+    nome_da_equipe,
+    resolve_team_scope,
+)
 from app.models import (
     BlingOrder,
     Chamado,
@@ -54,10 +61,13 @@ from app.models import (
     DevolucaoAnexo,
     Devolution,
     Logistica,
+    StoreInfo,
     User,
     UserRole,
 )
 from app.models.chamado import CANAIS, ORIGENS
+from app.redis_client import redis
+from app.schemas.atendimento_painel import AdsPowerOut
 from app.schemas.chamados import (
     AgentAbrirMlIn,
     AgentAbrirMlResultadoIn,
@@ -99,6 +109,8 @@ from app.schemas.chamados import (
     AgentTarefaOut,
     AlterarStatusIn,
     AlterarStatusOut,
+    AtualizarOut,
+    AtualizarStatusOut,
     ChamadoAnexoOut,
     ChamadoCreate,
     ChamadoLookupOut,
@@ -126,6 +138,8 @@ from app.schemas.chamados import (
 )
 from app.services import chamados as svc
 from app.services import (
+    chamados_adspower,
+    chamados_atualizar,
     chamados_devolucao,
     chamados_devolucao_sync,
     chamados_ia_aviso,
@@ -147,6 +161,7 @@ from app.services.devolution_stock_return import (
     status_estoque,
 )
 from app.services.texto_html import limpar_html
+from app.worker_pool import get_arq_ui_pool
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/chamados", tags=["chamados"])
@@ -311,11 +326,14 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
         for u in (await session.execute(select(User).where(User.id.in_(quem_ids)))).scalars():
             nomes[u.id] = u.name or u.email
 
+    equipes = await _equipes_dos_chamados(session, ids)
+
     hoje = chamados_revisao.hoje_sp()
     out: list[ChamadoOut] = []
     for r in rows:
         msgs = mensagens_do_caso(r)
         o = ChamadoOut.model_validate(r)
+        o.equipes = equipes.get(r.id, [])
         o.status_bling_atual = status_map.get(r.pedido_bling or "") or r.status_bling
         o.custo_produto, o.custo_detalhe = custo_map.get(r.pedido_bling or "", (None, None))
         o.mensagens_total = len(msgs)
@@ -331,6 +349,11 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
             o.ultima_resposta_at = u.enviada_at or u.created_at
             o.ultima_resposta_direcao = u.direcao
             o.ultima_resposta_autor = u.autor_nome
+        # 09/11/2026: coluna Última ação (o que a IA fez na tela conta; ver
+        # `svc.ultima_acao`). Os campos de cima seguem: a Revisão usa a fala.
+        acao = svc.ultima_acao(msgs)
+        if acao is not None:
+            o.ultima_acao_at, o.ultima_acao_tipo, o.ultima_acao_autor, o.ultima_acao_resumo = acao
         analises = [m for m in msgs if m.tipo == "analise"]
         ultima_analise = analises[-1] if analises else None
         instrucao = _instrucao_pendente(msgs)
@@ -445,6 +468,34 @@ def _clausula_equipe(scope: TeamScope):
     if pela_conta is not None:
         ors.append(and_(~pedido_da_linha.exists(), ~pedido_do_lote.exists(), pela_conta))
     return or_(*ors) if ors else false()
+
+
+async def _equipes_dos_chamados(session: AsyncSession, ids: list[UUID]) -> dict[UUID, list[str]]:
+    """Coluna Equipe da aba (09/11/2026, Vinicius: "colocar equipes logo depois
+    da data"): o nome de cada equipe cuja cerca deixa ver o chamado. A régua é
+    a MESMA `_clausula_equipe` da lista, rodada pra cada equipe que tem loja —
+    a coluna nunca diz Londres num chamado que a cerca mostra só pra Israel.
+    Sem equipe (loja sem cadastro, conta que não casa): lista vazia."""
+    if not ids:
+        return {}
+    numeros = (
+        await session.execute(
+            select(StoreInfo.sales_team)
+            .where(StoreInfo.sales_team.is_not(None))
+            .distinct()
+            .order_by(StoreInfo.sales_team)
+        )
+    ).scalars().all()
+    out: dict[UUID, list[str]] = {}
+    for numero in numeros:
+        clausula = _clausula_equipe(await escopo_das_equipes(session, {numero}))
+        if clausula is None:
+            continue
+        for cid in (
+            await session.execute(select(Chamado.id).where(Chamado.id.in_(ids), clausula))
+        ).scalars():
+            out.setdefault(cid, []).append(nome_da_equipe(numero))
+    return out
 
 
 async def _clausula_do_usuario(session: AsyncSession, user: User):
@@ -755,6 +806,95 @@ async def reabrir_dia(
     logger.info("chamados_dia_reaberto", dia=dia.isoformat(), por=_autor(user))
 
 
+# ------------------------------------------------------------- botão Atualizar
+# 09/11/2026 (Vinicius): "um botão atualizar aqui fora — faz a leitura de todos os
+# chamados e atualiza tudo". Só a leitura pela API (ver `services/chamados_atualizar`).
+
+
+@router.post("/atualizar", response_model=AtualizarOut)
+async def atualizar_todos(
+    user: Annotated[User, Depends(require_permission("chamados", "edit"))],
+) -> AtualizarOut:
+    """Pede a leitura geral pela API agora, em vez de esperar o :25. Uma a cada
+    15 min para a empresa inteira: dentro desse tempo devolve a que já foi
+    pedida (`enfileirado=False`, com o job pra acompanhar)."""
+    agora = chamados_atualizar.agora_utc()
+    por = _autor(user)
+    chave = chamados_atualizar.CHAVE_PEDIDO
+    try:
+        pegou = await redis.set(
+            chave,
+            chamados_atualizar.valor_do_pedido(pedido_em=agora, por=por, job_id=None),
+            nx=True,
+            ex=chamados_atualizar.INTERVALO_S,
+        )
+        if not pegou:
+            antes = chamados_atualizar.ler_pedido(await redis.get(chave))
+            ttl = await redis.ttl(chave)
+            return AtualizarOut(
+                enfileirado=False,
+                job_id=antes.get("job_id"),
+                pedido_em=antes.get("pedido_em"),
+                por=antes.get("por"),
+                pode_atualizar_em=chamados_atualizar.pode_de_novo_em(agora, ttl),
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("chamados_atualizar_redis_falhou", err=str(e)[:200])
+        raise HTTPException(503, detail={"code": "fila_indisponivel"}) from e
+    try:
+        # Fila UI: a default pode estar horas atrás dos webhooks.
+        job = await (await get_arq_ui_pool()).enqueue_job(chamados_atualizar.JOB)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("chamados_atualizar_fila_falhou", err=str(e)[:200])
+        # Não enfileirou: solta a trava, senão o botão ficaria 15 min parado à toa.
+        try:
+            await redis.delete(chave)
+        except Exception:  # noqa: BLE001, S110 — o TTL solta sozinho
+            pass
+        raise HTTPException(503, detail={"code": "fila_indisponivel"}) from e
+    job_id = getattr(job, "job_id", None)
+    try:
+        await redis.set(
+            chave,
+            chamados_atualizar.valor_do_pedido(pedido_em=agora, por=por, job_id=job_id),
+            xx=True,
+            keepttl=True,
+        )
+    except Exception:  # noqa: BLE001, S110 — só quem clicar de novo deixa de acompanhar
+        pass
+    logger.info("chamados_atualizar_enfileirado", job_id=job_id, autor=por)
+    return AtualizarOut(
+        enfileirado=True,
+        job_id=job_id,
+        pedido_em=agora,
+        por=por,
+        pode_atualizar_em=chamados_atualizar.pode_de_novo_em(agora, chamados_atualizar.INTERVALO_S),
+    )
+
+
+@router.get("/atualizar/{job_id}", response_model=AtualizarStatusOut)
+async def atualizar_status(
+    job_id: str,
+    _user: Annotated[User, Depends(require_permission("chamados", "view"))],
+) -> AtualizarStatusOut:
+    """Andamento da leitura geral (a tela consulta até terminar e mostra o resumo)."""
+    job = Job(job_id, await get_arq_ui_pool())
+    st = await job.status()
+    if st == JobStatus.complete:
+        info = await job.result_info()
+        if info is None:
+            return AtualizarStatusOut(status="not_found")
+        if not info.success:
+            return AtualizarStatusOut(status="failed")
+        resumo = (
+            {k: v for k, v in info.result.items() if isinstance(v, int)}
+            if isinstance(info.result, dict)
+            else None
+        )
+        return AtualizarStatusOut(status="complete", resumo=resumo)
+    return AtualizarStatusOut(status=st.value)
+
+
 @router.get("", response_model=ChamadoPage)
 async def list_chamados(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -1063,6 +1203,19 @@ async def _mensagens_do_caso(
 
 
 # ------------------------------------------------------------- histórico / réplica
+
+
+@router.get("/{chamado_id}/adspower", response_model=AdsPowerOut)
+async def perfil_adspower_do_chamado(
+    chamado_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("chamados", "view"))],
+) -> AdsPowerOut:
+    """Botão Servidor do histórico (09/11/2026): QUAL perfil do AdsPower abre a
+    loja do chamado (campo Servidor da loja). Quem abre é o navegador de quem
+    clicou, no AdsPower do computador dele — o DaVinci não fala com o AdsPower."""
+    ch = await _get_da_equipe(session, user, chamado_id)
+    return AdsPowerOut(**await chamados_adspower.perfil_do_chamado(session, ch))
 
 
 @router.get("/{chamado_id}/mensagens", response_model=list[ChamadoMensagemOut])

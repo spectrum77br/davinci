@@ -43,7 +43,7 @@ const props = defineProps<{ modo?: 'juridico' }>()
 // 17/09 (Vinicius): o grupo "Réplica" (botão responder + réplica automática)
 // saiu da tabela — a réplica automática nunca foi ligada e a resposta manual
 // continua dentro do histórico. No lugar: Status (o que a plataforma diz do
-// chamado, e desde quando) e Últ. resposta (quando e quem falou por último).
+// chamado, e desde quando) e Última ação (quando e quem fez a última coisa no caso).
 // 19/09 (Vinicius, Chamados v2): os 13 status da coluna viraram 5, por QUEM
 // está com a bola — Análise Humano, Análise Robô, Aguard. Plataforma,
 // Encerrado (a plataforma fechou, falta uma pessoa dar lucro/prejuízo) e
@@ -106,10 +106,13 @@ function nomePlataforma(p: string | null | undefined): string {
   const k = (p || '').trim().toLowerCase()
   return APELIDOS_PLATAFORMA[k] || k
 }
-// Quem falou por último, pra coluna Últ. resposta: "nós · robô" / "plataforma · Shopee".
+// Quem falou por último, pra coluna Última ação: "nós · robô" / "plataforma · Shopee".
 function quemRespondeu(row: ChamadoRow): string {
-  const autor = (row.ultima_resposta_autor || '').trim()
-  if (row.ultima_resposta_direcao === 'recebida') {
+  return quemFalou(row, row.ultima_resposta_direcao, row.ultima_resposta_autor)
+}
+function quemFalou(row: ChamadoRow, direcao: string | null | undefined, autorNome: string | null | undefined): string {
+  const autor = (autorNome || '').trim()
+  if (direcao === 'recebida') {
     const plat = autor && autor !== 'monitor' ? autor : (nomePlataforma(row.plataforma) || 'plataforma').toUpperCase()
     return `plataforma · ${plat}`
   }
@@ -172,6 +175,8 @@ type ChamadoRow = {
   resolvido: boolean
   resolvido_at: string | null
   observacao: string | null
+  // 09/11: equipes de vendas que veem o chamado (Londres / Israel / Marrocos) — coluna Equipe.
+  equipes?: string[]
   juridico_enviado_at?: string | null
   juridico_enviado_por_nome?: string | null
   juridico_obs?: string | null
@@ -194,10 +199,16 @@ type ChamadoRow = {
   custo_detalhe?: string | null
   valor_sugerido?: number | string | null
   instrucao_pendente?: string | null
-  // Última FALA real (nossa ou da plataforma) — coluna Últ. resposta.
+  // Última FALA real (nossa ou da plataforma) — a Revisão usa.
   ultima_resposta_at: string | null
   ultima_resposta_direcao: 'enviada' | 'recebida' | null
   ultima_resposta_autor: string | null
+  // 09/11/2026: coluna Última ação — a fala, a instrução de pessoa ou o que a IA de
+  // Chamado FEZ na tela (abrir SAFE-T, responder…); a conferência sem novidade não conta.
+  ultima_acao_at?: string | null
+  ultima_acao_tipo?: 'plataforma' | 'nos' | 'ia' | 'instrucao' | null
+  ultima_acao_autor?: string | null
+  ultima_acao_resumo?: string | null
   anexos_auto: Anexo[]
 } & RevisaoCampos
 type Page = { items: ChamadoRow[]; total: number; limit: number; offset: number; plataformas: string[]; contas: string[]; plataforma_totais?: Record<string, number> }
@@ -496,6 +507,87 @@ async function fecharDia(dia: RevisaoDia, method: 'POST' | 'DELETE') {
     toasts.error(method === 'POST' ? 'Não foi possível fechar o dia' : 'Não foi possível reabrir o dia', apiError(e))
   }
 }
+// ----------------------------------------------------------------- botão Atualizar
+// 09/11/2026 (Vinicius): o Recarregar "não fazia nada" (só relia a lista, sem aviso)
+// e virou Atualizar: pede às plataformas, pela API, a leitura de todos os chamados (a
+// passada que o robô faz de hora em hora no :25), espera terminar, recarrega a lista
+// e diz ao lado o que mudou. Uma leitura a cada 15 min pra empresa inteira: quem clica
+// nesse tempo acompanha a que já foi pedida. Casos de TELA ficam com o robô de leitura
+// (abrir dezenas de sessões de loja seguidas é risco de bloqueio da conta).
+type AtualizarPedido = { enfileirado: boolean; job_id: string | null; pedido_em: string | null; por: string | null; pode_atualizar_em: string | null }
+type AtualizarAndamento = { status: string; resumo?: Record<string, number> | null }
+const atualizando = ref(false)
+const atualizadoTexto = ref('')
+let atualizarTimer: ReturnType<typeof setTimeout> | null = null
+onBeforeUnmount(() => { if (atualizarTimer) clearTimeout(atualizarTimer) })
+
+function horaSP(d: Date | string | null | undefined): string {
+  if (!d) return ''
+  return new Date(d).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Sao_Paulo' })
+}
+function qtd(n: number, um: string, varios: string): string {
+  return `${n} ${n === 1 ? um : varios}`
+}
+async function recarregarLista() {
+  await Promise.all([load(), carregarDias()])
+}
+async function esperarLeitura(jobId: string): Promise<AtualizarAndamento> {
+  const limite = Date.now() + 20 * 60_000
+  while (Date.now() < limite) {
+    try {
+      const st = await api<AtualizarAndamento>(`/api/chamados/atualizar/${encodeURIComponent(jobId)}`)
+      if (['complete', 'failed', 'not_found'].includes(st.status)) return st
+    } catch {
+      // uma consulta que falhou não encerra a espera
+    }
+    await new Promise<void>((ok) => { atualizarTimer = setTimeout(ok, 3000) })
+  }
+  return { status: 'demorou' }
+}
+function textoDaLeitura(p: AtualizarPedido, st: AtualizarAndamento | null): string {
+  const agora = `atualizado às ${horaSP(new Date())}`
+  const outra = p.enfileirado ? '' : ` · leitura pedida por ${p.por || 'alguém'} às ${horaSP(p.pedido_em)}`
+  const proxima = !p.enfileirado && p.pode_atualizar_em ? ` · próxima leitura a partir das ${horaSP(p.pode_atualizar_em)}` : ''
+  if (!st || st.status === 'not_found') return `${agora}${outra}${proxima}`
+  if (st.status === 'failed') return `${agora} · a leitura das plataformas deu erro (a lista foi recarregada)`
+  if (st.status === 'demorou') return `${agora} · a leitura das plataformas ainda não terminou`
+  const r = st.resumo || {}
+  if (r.pulado_ja_rodando) return `${agora} · o robô do :25 estava lendo agora mesmo`
+  const partes = [
+    qtd(r.verificados || 0, 'chamado lido na plataforma', 'chamados lidos na plataforma'),
+    qtd(r.novos || 0, 'mensagem nova', 'mensagens novas'),
+    qtd(r.encerrados || 0, 'encerrado', 'encerrados'),
+  ]
+  if (r.falhas) partes.push(qtd(r.falhas, 'com erro', 'com erro'))
+  return `${agora} · ${partes.join(' · ')}${outra}${proxima}`
+}
+async function atualizarTudo() {
+  if (atualizando.value) return
+  atualizando.value = true
+  atualizadoTexto.value = ''
+  try {
+    if (!canEdit.value) {
+      await recarregarLista()
+      atualizadoTexto.value = `atualizado às ${horaSP(new Date())}`
+      return
+    }
+    let pedido: AtualizarPedido
+    try {
+      pedido = await api<AtualizarPedido>('/api/chamados/atualizar', { method: 'POST' })
+    } catch (e: any) {
+      await recarregarLista()
+      atualizadoTexto.value = `lista recarregada às ${horaSP(new Date())} · não consegui pedir a leitura às plataformas (${apiError(e)})`
+      return
+    }
+    atualizadoTexto.value = 'lendo as plataformas…'
+    const st = pedido.job_id ? await esperarLeitura(pedido.job_id) : null
+    await recarregarLista()
+    atualizadoTexto.value = textoDaLeitura(pedido, st)
+  } finally {
+    atualizando.value = false
+  }
+}
+
 // Marcar várias linhas seguidas: o painel relê uma vez só, quando a pessoa para.
 let diasTimer: ReturnType<typeof setTimeout> | null = null
 function atualizarDias() {
@@ -512,10 +604,27 @@ function linkConciliacao(row: ChamadoRow) {
   return { path: '/conciliacao', query: { visao: 'pedidos', tab: aba, loja: 'todas', q: row.pedido_bling } }
 }
 
-// Coluna Últ. resposta: sem fala real, a data do status (Encerrado/Concluído).
+// Coluna Última ação (09/11/2026, era "Últ. resposta"): a última coisa FEITA no caso —
+// a plataforma ou nós falando, a instrução de uma pessoa ou a IA de Chamado agindo na
+// tela. Sem nada disso, a data do status (Encerrado/Concluído).
 function ultimaTexto(row: ChamadoRow): string {
+  const at = row.ultima_acao_at
+  if (at) {
+    const quando = fmtCurto(at)
+    // curto: a coluna tem ~170 px; o que a IA fez vai no balão
+    if (row.ultima_acao_tipo === 'ia') return `${quando} · nós · IA`
+    if (row.ultima_acao_tipo === 'instrucao') return `${quando} · instrução · ${(row.ultima_acao_autor || '').trim() || 'equipe'}`
+    const direcao = row.ultima_acao_tipo === 'plataforma' ? 'recebida' : 'enviada'
+    return `${quando} · ${quemFalou(row, direcao, row.ultima_acao_autor).replace(/mercado livre/i, 'ML')}`
+  }
   if (row.ultima_resposta_at) return `${fmtCurto(row.ultima_resposta_at)} · ${quemRespondeu(row).replace(/mercado livre/i, 'ML')}`
   return mostraDataStatus(row) ? fmtCurto(row.status_aba_at) : '—'
+}
+// O balão da coluna: o que foi feito (o começo do texto da IA ou da instrução).
+function ultimaTitulo(row: ChamadoRow): string {
+  const base = ultimaTexto(row)
+  const resumo = (row.ultima_acao_resumo || '').trim()
+  return resumo ? `${base}\n${resumo}` : base
 }
 const rangeStart = computed(() => (total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1))
 const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
@@ -1155,6 +1264,36 @@ const bolhas = computed<Bolha[]>(() => {
   }
   itens.sort((a, b) => a.t - b.t || a.ord - b.ord)
   return itens.map(x => x.b)
+})
+
+// 09/11/2026 (dono, pelo Vinicius): o histórico em duas colunas — à esquerda a conversa
+// com a plataforma (o problema, ela, nós e os avisos), à direita tudo da IA de Chamado
+// (decisões, o que ela fez, instruções da equipe e os avisos dela, tipo "parou no
+// captcha"). As duas na ordem de data, a mais nova embaixo, e abrem lá embaixo.
+function daColunaIa(b: Bolha): boolean {
+  if (b.lado === 'ia' || b.lado === 'instrucao') return true
+  if (b.lado !== 'sistema') return false
+  return b.origem?.tipo === 'analise' || /^IA de Chamado\b/i.test((b.texto || '').trim())
+}
+const colunasHist = computed(() => {
+  const conversa: Bolha[] = []
+  const ia: Bolha[] = []
+  for (const b of bolhas.value) (daColunaIa(b) ? ia : conversa).push(b)
+  return [
+    { chave: 'conversa', titulo: 'Conversa com a plataforma', vazio: 'sem mensagens ainda', bolhas: conversa },
+    { chave: 'ia', titulo: 'IA de Chamado', vazio: 'a IA ainda não analisou este caso', bolhas: ia },
+  ]
+})
+const colunaHistEls: Record<string, HTMLElement | null> = {}
+function rolarHistoricoProFim() {
+  nextTick(() => {
+    for (const el of Object.values(colunaHistEls)) if (el) el.scrollTop = el.scrollHeight
+  })
+}
+// Abriu, carregou ou chegou mensagem nova (réplica, instrução, Atualizar): os dois lados
+// vão pra mais nova.
+watch(() => [hist.open, hist.loading, hist.row?.id, bolhas.value.length], () => {
+  if (hist.open && !hist.loading) rolarHistoricoProFim()
 })
 
 async function openHistorico(row: ChamadoRow, focoReplica = false) {
@@ -1936,8 +2075,17 @@ async function confirmarExcluir() {
         </div>
       </div>
       <div class="ml-auto flex items-center justify-end gap-1.5 text-xs font-semibold">
-        <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50" :disabled="loading" @click="load(); carregarDias()">
-          <RotateCcw class="size-3.5" :class="{ 'animate-spin': loading }" /> Recarregar
+        <span v-if="atualizadoTexto" class="max-w-[560px] truncate text-[11px] font-normal text-muted-foreground" :title="atualizadoTexto">{{ atualizadoTexto }}</span>
+        <button
+          type="button"
+          class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
+          :disabled="loading || atualizando"
+          :title="canEdit
+            ? 'Lê agora, pela API, os chamados da Shopee, TikTok e Mercado Livre (o robô faz isso sozinho de hora em hora, no :25) e recarrega a lista. Os casos lidos pela tela (abertos no Seller Center, Amazon, consulta do Portal) seguem com o robô de leitura: pra um deles, use o Atualizar do histórico.'
+            : 'Recarrega a lista'"
+          @click="atualizarTudo"
+        >
+          <RotateCcw class="size-3.5" :class="{ 'animate-spin': loading || atualizando }" /> Atualizar
         </button>
         <button type="button" class="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-primary px-2.5 py-1 text-primary-foreground disabled:opacity-50" :disabled="!canEdit" @click="openAdd">
           <Plus class="size-3.5" /> novo chamado
@@ -2158,20 +2306,23 @@ async function confirmarExcluir() {
         </div>
         <!-- 10 linhas de 40px + o cabeçalho: o painel de meses fica à vista; o resto rola aqui dentro. -->
         <div class="max-h-[448px] overflow-auto focus:outline-none" tabindex="0">
-          <table class="w-full min-w-[1486px] table-fixed border-collapse text-[11.5px]">
+          <!-- 09/11 (Vinicius): Equipe logo depois da Data; a Observação saiu da tabela (ficava
+               esmagada) e mora só no Raio-X. min-w = colunas fixas ÷ (1 − soma das %). -->
+          <table class="w-full min-w-[1393px] table-fixed border-collapse text-[11.5px]">
             <colgroup>
-              <col class="w-[48px]"><col class="w-[60px]"><col class="w-[146px]"><col class="w-[96px]"><col class="w-[17.5%]">
-              <col class="w-[70px]"><col class="w-[104px]"><col class="w-[46px]"><col class="w-[130px]"><col class="w-[12%]"><col class="w-[9%]">
+              <col class="w-[48px]"><col class="w-[68px]"><col class="w-[60px]"><col class="w-[146px]"><col class="w-[96px]"><col class="w-[17.5%]">
+              <col class="w-[70px]"><col class="w-[104px]"><col class="w-[46px]"><col class="w-[130px]"><col class="w-[12%]">
               <col class="w-[214px]">
             </colgroup>
             <thead class="sticky top-0 z-10 bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
               <tr>
-                <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="5">Identificação</th>
-                <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="6">Chamado</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="6">Identificação</th>
+                <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="5">Chamado</th>
                 <th class="sticky right-0 border-b border-l border-l-slate-300 bg-muted px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Hoje</th>
               </tr>
               <tr>
                 <th class="border-b px-1.5 py-1 text-center font-semibold">Data</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold" title="Equipe de vendas da loja do pedido (Lojas › Equipe)">Equipe</th>
                 <th class="border-b px-1.5 py-1 text-center font-semibold">Pedido</th>
                 <th class="border-b px-1.5 py-1 text-center font-semibold">Pedido marketplace</th>
                 <th class="border-b px-1.5 py-1 text-center font-semibold">Conta</th>
@@ -2180,8 +2331,7 @@ async function confirmarExcluir() {
                 <th class="border-b px-1.5 py-1 text-center font-semibold">Protocolo</th>
                 <th class="border-b px-1.5 py-1 text-center font-semibold">Msgs</th>
                 <th class="border-b px-1.5 py-1 text-center font-semibold" title="Quem está com a bola (o porquê fica no tooltip do chip)">Status</th>
-                <th class="border-b px-1.5 py-1 text-center font-semibold">Últ. resposta</th>
-                <th class="border-b px-1.5 py-1 text-center font-semibold">Observação</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold" title="A última coisa feita no caso: a plataforma ou nós falando, a instrução de uma pessoa ou a IA de Chamado agindo na tela (a conferência sem novidade não conta)">Última ação</th>
                 <th class="sticky right-0 border-b border-l border-l-slate-300 bg-muted px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Revisão</th>
               </tr>
             </thead>
@@ -2204,6 +2354,7 @@ async function confirmarExcluir() {
                 @click="abrirRaio(row)"
               >
                 <td class="px-1.5 text-center text-muted-foreground" :title="fmtDate(row.data)">{{ fmtDate(row.data).slice(0, 5) }}</td>
+                <td class="truncate px-1.5 text-center" :title="row.equipes?.length ? row.equipes.join(' · ') : 'sem equipe: a loja do pedido não tem equipe em Lojas'">{{ row.equipes?.length ? row.equipes.join(' · ') : '—' }}</td>
                 <td class="px-1.5 text-center font-mono font-bold">{{ row.pedido_bling || '—' }}</td>
                 <!-- Cairo 06/11: usam esse número pra procurar; um clique seleciona pra copiar, sem abrir o Raio-X. -->
                 <td class="px-1.5 text-center font-mono"><span class="cursor-text select-all" @click.stop>{{ row.pedido_marketplace || '—' }}</span></td>
@@ -2223,20 +2374,7 @@ async function confirmarExcluir() {
                 <td class="px-1.5 text-center">
                   <span class="inline-block w-[124px] rounded py-0.5 text-center text-[11px] font-semibold" :class="statusInfo(row).cls" :title="statusTitle(row)">{{ statusInfo(row).label }}</span>
                 </td>
-                <td class="truncate px-1.5 text-center text-[11px] text-muted-foreground" :title="ultimaTexto(row)">{{ ultimaTexto(row) }}</td>
-                <!-- 18/09: a célula mostra só o começo; clicou, abre o balão. O motivo do Fixo
-                     aparece aqui quando a Observação está vazia. -->
-                <td class="px-0.5 text-center text-[11px] text-muted-foreground" @click.stop>
-                  <ObservacaoPopover
-                    :model-value="row.observacao"
-                    :disabled="!canEdit"
-                    :placeholder="row.revisao_motivo || ''"
-                    :titulo="`Observação · ${row.pedido_bling || row.pedido_marketplace || 'chamado'}`"
-                    centro
-                    @update:model-value="(v) => setRowText(row, 'observacao', v)"
-                    @save="saveRow(row)"
-                  />
-                </td>
+                <td class="truncate px-1.5 text-center text-[11px] text-muted-foreground" :title="ultimaTitulo(row)">{{ ultimaTexto(row) }}</td>
                 <!-- fica presa à direita: em tela menor a tabela rola, mas a Revisão continua à vista -->
                 <td class="sticky right-0 border-l border-l-slate-300 px-1.5 text-center dark:border-l-slate-600" :class="row.id === raioId ? 'bg-blue-50 dark:bg-blue-950' : 'bg-card'" @click.stop>
                   <ChamadoRevisaoSeletor v-if="!row.resolvido" :revisao="row" :disabled="!canEdit" @marcar="(m) => marcarRevisao(row, m)" />
@@ -2263,6 +2401,7 @@ async function confirmarExcluir() {
           :status-cls="statusInfo(raioRow).cls"
           :status-titulo="statusTitle(raioRow)"
           :ultima-resposta="ultimaTexto(raioRow)"
+          :ultima-resposta-titulo="ultimaTitulo(raioRow)"
           :canais="CANAIS"
           :situacoes="situacoes"
           :instruir="(texto: string) => instruirERevisar(raioRow!, texto)"
@@ -2374,7 +2513,9 @@ async function confirmarExcluir() {
 
     <!-- modal: histórico + réplica -->
     <div v-if="hist.open && hist.row" class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" @click.self="closeHistorico">
-      <div class="chamado-dialog w-full max-w-3xl max-h-[90vh] flex flex-col rounded-lg border bg-background shadow-xl">
+      <!-- 09/11/2026 (dono, pelo Vinicius): "deixa o histórico maior, quase tela toda; de um
+           lado a conversa com o marketplace, do outro a IA". Antes: max-w-3xl (768 px). -->
+      <div class="chamado-dialog flex h-[94vh] w-[96vw] max-w-[1800px] flex-col rounded-lg border bg-background shadow-xl">
         <div class="shrink-0 flex items-start justify-between gap-3 border-b px-4 py-3">
           <div>
             <!-- 21/09 (Vinicius): o pedido do marketplace junto do Bling — é o número
@@ -2403,6 +2544,9 @@ async function confirmarExcluir() {
             </div>
           </div>
           <div class="flex items-center gap-2">
+            <!-- 09/11 (Vinicius): abre o perfil da loja no AdsPower DESTE computador, já na
+                 página do chamado (cada um no seu). -->
+            <ChamadoServidor :chamado-id="hist.row.id" :destino="hist.row.chamado_url" />
             <!-- 07/10 (Vinicius): atalho pra Devoluções numa aba nova, já na aba
                  Lançamentos e buscando este pedido (é lá que fica o motivo). -->
             <NuxtLink
@@ -2493,14 +2637,25 @@ async function confirmarExcluir() {
           </div>
         </details>
 
-        <!-- 19/09: o histórico cresce até ocupar tudo acima do rodapé (flex-1 min-h-0). -->
-        <div class="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
+        <!-- 09/11/2026: duas colunas, cada uma rola sozinha e abre na mais nova (embaixo):
+             à esquerda a conversa com a plataforma (o problema, ela, nós); à direita tudo da
+             IA de Chamado (decisões, o que ela fez, as instruções da equipe). Mesma ordem de
+             data nas duas — a última de cada lado é a de baixo. -->
+        <div class="grid min-h-0 flex-1 grid-rows-2 md:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)] md:grid-rows-1">
+         <div
+          v-for="col in colunasHist"
+          :key="col.chave"
+          class="flex min-h-0 flex-col"
+          :class="col.chave === 'ia' ? 'border-t bg-muted/30 md:border-l md:border-t-0' : ''"
+         >
+          <div class="shrink-0 border-b px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{{ col.titulo }}</div>
+        <div :ref="(el) => { colunaHistEls[col.chave] = el as HTMLElement | null }" class="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
           <div v-if="hist.loading" class="text-sm text-muted-foreground"><Loader2 class="size-4 inline animate-spin mr-1.5" />carregando histórico…</div>
-          <div v-else-if="!hist.mensagens.length" class="text-sm text-muted-foreground">sem mensagens ainda</div>
+          <div v-else-if="!col.bolhas.length" class="text-sm text-muted-foreground">{{ col.vazio }}</div>
           <!-- Conversa em balões (Eduardo 10/09: "como se fosse um whatsapp"):
                nossas falas à direita, plataforma à esquerda, sistema no meio. -->
           <div
-            v-for="b in bolhas"
+            v-for="b in col.bolhas"
             :key="b.chave"
             class="group flex"
             :class="{
@@ -2522,7 +2677,7 @@ async function confirmarExcluir() {
             <!-- 24/09: decisão da IA de Chamado, no meio da conversa, com ✓/✗ -->
             <div
               v-else-if="b.lado === 'ia'"
-              class="w-[88%] rounded-xl border border-violet-300/60 bg-violet-50/60 px-3 py-2 dark:border-violet-800/60 dark:bg-violet-900/15"
+              class="w-full rounded-xl border border-violet-300/60 bg-violet-50/60 px-3 py-2 dark:border-violet-800/60 dark:bg-violet-900/15"
             >
               <div class="flex flex-wrap items-center gap-x-2 text-[11px]">
                 <span class="inline-flex items-center gap-1 font-medium text-violet-700 dark:text-violet-300"><Bot class="size-3" /> {{ b.autor }} · decisão</span>
@@ -2613,6 +2768,8 @@ async function confirmarExcluir() {
             </button>
           </div>
         </div>
+         </div>
+        </div>
 
         <!-- 19/09 (Vinicius): "réplica manual muito grande; campo pequeno que abre o
              balão, igual às observações; histórico aproveita o espaço". Rodapé em UMA
@@ -2624,7 +2781,7 @@ async function confirmarExcluir() {
              o balão não apaga. Os dois botões de enviar são iguais (azul). Em Concluído
              (fechado por pessoa) a API devolve 422 chamado_concluido — a réplica some e
              fica só o aviso pra reabrir. -->
-        <div v-if="hist.row.resolvido" class="shrink-0 grid gap-4 border-t px-4 py-3 md:grid-cols-2">
+        <div v-if="hist.row.resolvido" class="shrink-0 grid gap-4 border-t px-4 py-3 md:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
           <div class="min-w-0">
             <!-- 23/09 (Vinicius): a Observação da coluna, aqui também. -->
             <div class="flex items-center gap-2 min-w-0">
@@ -2646,7 +2803,7 @@ async function confirmarExcluir() {
             Chamado concluído — reabra o chamado pra instruir o robô.
           </div>
         </div>
-        <div v-else class="shrink-0 grid gap-4 border-t px-4 py-3 md:grid-cols-2">
+        <div v-else class="shrink-0 grid gap-4 border-t px-4 py-3 md:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
           <!-- coluna esquerda: réplica manual -->
           <div class="space-y-2 min-w-0">
             <div class="text-xs font-medium truncate">Réplica manual <span class="text-muted-foreground font-normal">— resposta à plataforma pelo canal <b>{{ hist.row.canal }}</b></span></div>

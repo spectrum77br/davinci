@@ -90,6 +90,9 @@ class ChamadoOut(BaseModel):
     resolvido: bool = False
     resolvido_at: datetime | None = None
     observacao: str | None = None
+    # Coluna Equipe (09/11/2026): o nome das equipes de vendas cuja cerca deixa
+    # ver o chamado (Londres / Israel / Marrocos); vazia = sem equipe.
+    equipes: list[str] = []
     # Resultado do chamado em R$ — coluna "Valor" do Controle (Eduardo 03/09):
     # positivo = lucro, negativo = prejuízo (15/09); None = ainda sem valor.
     valor_recuperado: Decimal | None = None
@@ -123,6 +126,13 @@ class ChamadoOut(BaseModel):
     ultima_resposta_at: datetime | None = None
     ultima_resposta_direcao: str | None = None
     ultima_resposta_autor: str | None = None
+    # 09/11/2026: coluna "Última ação" — a fala acima OU a análise em que a IA de
+    # Chamado fez algo na tela OU a instrução de pessoa (`services.chamados.ultima_acao`).
+    # tipo: plataforma | nos | ia | instrucao; resumo = o começo do texto (balão).
+    ultima_acao_at: datetime | None = None
+    ultima_acao_tipo: str | None = None
+    ultima_acao_autor: str | None = None
+    ultima_acao_resumo: str | None = None
     anexos_auto: list[ChamadoAnexoOut] = []
     # Jurídico (migration 0248)
     juridico_enviado_at: datetime | None = None
@@ -319,6 +329,27 @@ class ChamadoLookupOut(BaseModel):
     produto: str | None = None
     sku: str | None = None
     status_bling: str | None = None
+
+
+class AtualizarOut(BaseModel):
+    """Botão Atualizar (09/11/2026): a leitura geral pela API foi pedida agora
+    (`enfileirado`) ou já tinha sido pedida nos últimos 15 min — aí vem o job
+    dela (pra acompanhar) e quem pediu, e a lista só é recarregada."""
+
+    enfileirado: bool
+    job_id: str | None = None
+    pedido_em: datetime | None = None
+    por: str | None = None
+    pode_atualizar_em: datetime | None = None
+
+
+class AtualizarStatusOut(BaseModel):
+    """Andamento da leitura geral: o estado do job no arq (queued / deferred /
+    in_progress / complete / failed / not_found). Pronto, `resumo` traz os
+    números da passada (verificados, novos, encerrados, falhas)."""
+
+    status: str
+    resumo: dict[str, int] | None = None
 
 
 class SituacoesOut(BaseModel):

@@ -258,3 +258,85 @@ def test_recusa_registrada_e_aguardando_plataforma_com_motivo():
     # nota antiga do comprador (anterior à recusa) não muda nada
     cod, _, _ = _status(ch, _msg("recebida", status="registrada", minutos=-600))
     assert cod == svc.ABA_AGUARD_PLATAFORMA
+
+
+def test_tarefa_sem_api_que_a_ia_fez_e_mandou_aguardar_e_aguard_plataforma():
+    """09/11/2026 (304026/305794, Amazon Poofy): o aviso "abrir a SAFE-T à mão"
+    deixava o chamado em Análise Humano mesmo depois de a IA abrir na tela e
+    mandar aguardar. Análise ANTERIOR ao aviso não destrava."""
+    fala = _msg("enviada", status="registrada", erro="plataforma_sem_api", minutos=0)
+    analise = _msg("sistema", tipo="analise", minutos=60,
+                   texto="Análise da IA de Chamado [x]: Feito na tela … → aguardar a plataforma")
+    cod, quando, motivo = _status(_ch(canal="manual"), fala, analise, esperar=True)
+    assert cod == svc.ABA_AGUARD_PLATAFORMA and quando == analise.created_at
+    assert "aguardar" in motivo
+    velha = _msg("sistema", tipo="analise", minutos=-5, texto="… → aguardar a plataforma")
+    assert _status(_ch(canal="manual"), fala, velha, esperar=True)[0] == svc.ABA_ANALISE_HUMANO
+    # A IA pediu gente depois do aviso: segue humano.
+    assert _status(_ch(canal="manual"), fala, analise, humano=True)[0] == svc.ABA_ANALISE_HUMANO
+
+
+# ─── coluna Última ação (09/11/2026) ─────────────────────────────────────
+
+FEZ = [
+    # frases reais das análises de 09/11 (o começo)
+    "Análise da IA de Chamado [amazon_safet_aberta_mala_danificada]: Feito na tela (Poofy - Amazon), pela instrução do Cairo: a Amazon reembolsou … abri a SAFE-T 17991-75373-0306254 → aguardar a plataforma",
+    "Análise da IA de Chamado [x]: Pela instrução do Cairo (prazo hoje 06/11), respondi ao mediador na reclamação 5595136030",
+    "Análise da IA de Chamado [x]: A resposta pela API falhou, então mandei pela tela (Marquezini - Mercado Livre)",
+    "Análise da IA de Chamado [x]: Respondido e negado (perfil 74, Forpaper - Mercado Livre): a consulta nova é a 493505447",
+    "Análise da IA de Chamado [x]: Aberto na tela (perfil 91, Dream 2 - Mercado Livre), pela instrução do Israel: consulta 492602634",
+    "Análise da IA de Chamado [x]: 2ª disputa pedida e aberta: no Assistente do Vendedor (Vortan - Shopee)",
+    "Análise da IA de Chamado [x]: Contestação da devolução do Uranyx F105 12.64 Preto (voltou com a tela quebrada) aberta hoje às 12:54 na Shopee",
+    "Análise da IA de Chamado [x]: 2ª disputa rejeitada em 04/11 (falta prova da preparação do envio). Hoje 18:10 pedi a reavaliação à atendente",
+    "Análise da IA de Chamado [x]: A TikTok decidiu a arbitragem a favor do comprador em 26/10 15:28 e reembolsou R$ 801,64. Abri o Recorrer (Gerenciar devoluções)",
+]
+SO_LEU = [
+    "Análise da IA de Chamado [x]: Conferido na tela (perfil 72, Aguiar - Mercado Livre), pela instrução do Cairo: as vendas …",
+    "Análise da IA de Chamado [x]: Sem novidade: a contestação da devolução, aberta hoje às 09:41 com 6 fotos",
+    "Análise da IA de Chamado [x]: Ganhamos: a Shopee reconheceu que enviamos o pacote corretamente",
+    "Análise da IA de Chamado [x]: O comprador pediu a devolução alegando celular diferente do comprado",
+    "Análise da IA de Chamado [x]: Tentei de novo (Barbosa - Shopee); nada saiu. Erros: 1) Assistente: pedi atendente 3 vezes",
+    "Análise da IA de Chamado [x]: Não saiu: na reclamação 5595136030 a caixa existe, escrevi o texto e anexei as 4 fotos",
+    "Análise da IA de Chamado [x]: Fui abrir o caso no suporte ao vendedor (KFA - Amazon), mas nada saiu.",
+    "Análise da IA de Chamado [x]: Perfil em uso, tento na próxima rodada: o Mega - Shopee foi aberto por outro robô",
+    "Análise da IA de Chamado [x]: Na tela (Atv - Tiktok) o reembolso segue. Pedimos o reembolso de R$ 220,00. → precisa de humano",
+    "Análise da IA de Chamado [x]: Se pedir evidência (Upload Evidence), mandamos as fotos. → aguardar a plataforma",
+    "Análise do robô [manual_confirmacao]: ML só confirmou/está analisando — aguardando → aguardar a plataforma",
+]
+
+
+def test_ia_fez_algo_pelo_texto_da_analise():
+    for t in FEZ:
+        assert svc.ia_fez_algo(t), t
+    for t in SO_LEU:
+        assert not svc.ia_fez_algo(t), t
+
+
+def test_ultima_acao_conta_o_que_a_ia_fez_e_nao_a_tarefa_a_mao():
+    """304026: aviso "abrir à mão" (05/11) → instrução do Cairo → a IA abriu a
+    SAFE-T na tela (06/11): a última ação é a da IA, não o aviso."""
+    aviso = _msg("enviada", status="registrada", erro="plataforma_sem_api", minutos=0)
+    aviso.autor_nome = "sistema"
+    instr = _msg("sistema", tipo="instrucao", status="registrada", minutos=60, texto="revisar na tela")
+    instr.autor_nome = "cairo sa"
+    feito = _msg("sistema", tipo="analise", status="registrada", minutos=72, texto=FEZ[0])
+    feito.autor_nome = "IA de Chamado"
+    conferiu = _msg("sistema", tipo="analise", status="registrada", minutos=500, texto=SO_LEU[0])
+    msgs = [aviso, instr, feito, conferiu]
+    quando, tipo, quem, resumo = svc.ultima_acao(msgs)
+    assert (quando, tipo, quem) == (feito.created_at, "ia", "IA de Chamado")
+    assert resumo.startswith("Feito na tela")
+    # Só o aviso e a instrução: vale a instrução.
+    assert svc.ultima_acao([aviso, instr])[1:3] == ("instrucao", "cairo sa")
+    # Só o aviso (tarefa que ninguém fez): nenhuma ação. O lembrete automático
+    # (instrução do "sistema") também não é ação.
+    assert svc.ultima_acao([aviso]) is None
+    lembrete = _msg("sistema", tipo="instrucao", status="registrada", minutos=900, texto="conferir o recurso")
+    lembrete.autor_nome = "sistema"
+    assert svc.ultima_acao(msgs + [lembrete])[1] == "ia"
+    # A plataforma falando depois ganha.
+    resp = _msg("recebida", status="recebida", minutos=600)
+    assert svc.ultima_acao(msgs + [resp])[1] == "plataforma"
+    # Fala nossa que não saiu não é ação.
+    presa = _msg("enviada", status="pendente", minutos=700)
+    assert svc.ultima_acao(msgs + [resp, presa])[1] == "plataforma"

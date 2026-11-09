@@ -257,6 +257,32 @@ async def test_lista_so_os_chamados_da_equipe(
     assert body["plataformas"] == [] and body["contas"] == []
 
 
+async def test_coluna_equipe_usa_a_regua_da_cerca(
+    client: AsyncClient, auth_as: Callable[[User | None], None], cenario: dict
+):
+    """09/11/2026 (Vinicius): coluna Equipe logo depois da Data. O nome sai da
+    MESMA régua da cerca: o pedido manda (D pelo lote, G pelo pedido de Israel
+    com conta de Londres digitada), sem pedido no espelho vale a conta (E, F, I)
+    e a loja sem cadastro fica sem equipe (H)."""
+    esperado = {letra: ["Londres"] for letra in DE_LONDRES}
+    esperado |= {letra: ["Israel"] for letra in DE_ISRAEL}
+    esperado["H"] = []
+    por_id = {str(v): k for k, v in cenario["ids"].items()}
+
+    auth_as(cenario["admin"])
+    body = await _lista(client)
+    assert {por_id[i["id"]]: i["equipes"] for i in body["items"]} == esperado
+
+    # Quem é de uma equipe vê a própria em todas as linhas.
+    auth_as(cenario["londres"])
+    body = await _lista(client)
+    assert {tuple(i["equipes"]) for i in body["items"]} == {("Londres",)}
+
+    # A resposta de uma edição traz a equipe (a linha não perde a coluna).
+    r = await client.patch(f"/api/chamados/{cenario['ids']['D']}", json={"observacao": "x"})
+    assert r.status_code == 200 and r.json()["equipes"] == ["Londres"], r.text
+
+
 async def test_filtros_continuam_dentro_da_equipe(
     client: AsyncClient, auth_as: Callable[[User | None], None], cenario: dict, db: AsyncSession
 ):

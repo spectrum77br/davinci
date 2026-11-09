@@ -23,6 +23,7 @@ type Linha = RevisaoCampos & {
   valor_recuperado: number | null
   resolvido: boolean
   mensagens_total: number
+  observacao: string | null
 }
 
 const props = defineProps<{
@@ -35,6 +36,7 @@ const props = defineProps<{
   statusCls: string
   statusTitulo: string
   ultimaResposta: string
+  ultimaRespostaTitulo?: string
   canais: { value: string; label: string; hint: string }[]
   situacoes: string[]
   // Devolve o erro, ou null se a instrução foi registrada.
@@ -115,13 +117,27 @@ async function enviarInstrucao() {
           </dd>
           <dt class="text-muted-foreground">Status</dt>
           <dd><span class="inline-block w-[124px] rounded py-0.5 text-center text-[11px] font-semibold" :class="statusCls" :title="statusTitulo">{{ statusLabel }}</span></dd>
-          <dt class="text-muted-foreground">Últ. resposta</dt><dd class="truncate font-semibold" :title="ultimaResposta">{{ ultimaResposta }}</dd>
+          <dt class="text-muted-foreground">Última ação</dt><dd class="truncate font-semibold" :title="ultimaRespostaTitulo || ultimaResposta">{{ ultimaResposta }}</dd>
         </dl>
         <div class="mt-1.5 flex justify-center">
           <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 font-semibold hover:bg-muted" @click="emit('historico')">
             <History class="size-3.5" /> abrir histórico ({{ row.mensagens_total }})
           </button>
         </div>
+      </section>
+
+      <!-- 09/11 (Vinicius): a Observação saiu da tabela (ficava esmagada) e mora só aqui,
+           com o texto inteiro à vista. Grava ao sair do campo, como o Protocolo. -->
+      <section class="border-t pt-2">
+        <h4 class="mb-1 text-center font-bold text-[#1f3a5f] dark:text-slate-200">Observação</h4>
+        <textarea
+          :value="row.observacao || ''"
+          :disabled="!canEdit"
+          rows="3"
+          class="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-xs disabled:opacity-70"
+          placeholder="anotação do caso…"
+          @change="(e) => emit('salvar', { observacao: (e.target as HTMLTextAreaElement).value.trim() || null })"
+        />
       </section>
 
       <section v-if="!row.resolvido" class="border-t pt-2">
