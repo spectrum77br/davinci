@@ -89,6 +89,14 @@ def chaves_da_pessoa_sql(user_id: UUID):
 # Zap (30/10/2026) fica desligado. As chaves "c:" dos números continuam
 # gravadas: voltar ao recorte é este `False`.
 ZAP_PARA_TODOS = True
+# Quem, mesmo com o Zap para todos, vê SÓ os números dele (as chaves "c:"). 09/11/2026,
+# o Eduardo: "tire o zap de marrocos de todas essas lojas" (16 números).
+ZAP_SO_OS_NUMEROS_DELA = frozenset({UUID("8731f741-396d-4b86-9969-b4f2638d2cc6")})  # marrocos
+
+
+def _zap_para_todos(user: User) -> bool:
+    """A pessoa vê todos os números do Zap (`ZAP_PARA_TODOS`), fora quem só vê os dela."""
+    return ZAP_PARA_TODOS and user.id not in ZAP_SO_OS_NUMEROS_DELA
 
 
 async def _canais_do_zap(session: AsyncSession) -> set[UUID]:
@@ -114,7 +122,7 @@ async def pode_o_zap(session: AsyncSession, user: User | None, canal_id: UUID | 
     if user.role == UserRole.ADMIN:
         return True
     chaves = await chaves_da_pessoa(session, user.id)
-    if ZAP_PARA_TODOS:
+    if _zap_para_todos(user):
         return bool(chaves)
     return canal_id is not None and chave(CANAL, canal_id) in chaves
 
@@ -129,7 +137,7 @@ async def escopo_do_atendimento(session: AsyncSession, user: User) -> TeamScope:
     integracoes = _ids(chaves, INTEGRACAO)
     fichas = _ids(chaves, FICHA)
     scope = TeamScope(unrestricted=False, email_user=user, canal_ids=_ids(chaves, CANAL))
-    if ZAP_PARA_TODOS and chaves:
+    if _zap_para_todos(user) and chaves:
         scope.canal_ids |= await _canais_do_zap(session)
     if integracoes or fichas:
         da_integracao = await rotear.integracoes_das_fichas(session)

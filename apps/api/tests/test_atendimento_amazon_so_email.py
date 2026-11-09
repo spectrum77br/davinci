@@ -377,6 +377,29 @@ async def test_zap_por_vendedor_volta_com_a_chave(db, make_user, client, auth_as
     assert await enviar._responde_o_zap(db, israel, conversa) is False
 
 
+async def test_quem_so_ve_os_numeros_dela(db, make_user, client, auth_as, monkeypatch):
+    """09/11/2026, o Eduardo: "tire o zap de marrocos de todas essas lojas". Com o Zap para
+    todos, a pessoa da lista vê só os números dela (as chaves "c:"); os outros, todos."""
+    canal, conversa = await _zap_mini(db)
+    marrocos, israel = await make_user(), await make_user()
+    monkeypatch.setattr(escopo, "ZAP_SO_OS_NUMEROS_DELA", frozenset({marrocos.id}))
+    await dar_lojas(db, marrocos, escopo.chave(escopo.FICHA, canal.id))
+    await dar_lojas(db, israel, escopo.chave(escopo.FICHA, canal.id))
+    url = f"/api/atendimento/conversas/{conversa.id}"
+    auth_as(marrocos)
+    assert (await client.get(url)).status_code == 404
+    r = (await client.get("/api/atendimento/resumo")).json()
+    assert "Mini" not in [lj["conta"] for lj in r["lojas"]]
+    assert await enviar._responde_o_zap(db, marrocos, conversa) is False
+    auth_as(israel)
+    assert (await client.get(url)).status_code == 200
+    # Com o número dele, volta a ver.
+    await dar_lojas(db, marrocos, escopo.chave(escopo.CANAL, canal.id))
+    auth_as(marrocos)
+    assert (await client.get(url)).status_code == 200
+    assert await enviar._responde_o_zap(db, marrocos, conversa) is True
+
+
 async def test_marcar_como_nao_lida_volta_a_bolinha_para_todos(db, make_user, client, auth_as):
     """03/11/2026: abrir apaga a bolinha (o visto); "não lida" a traz de volta — no
     número da conversa e no "Falta responder" — para todos, sem ir à plataforma."""
