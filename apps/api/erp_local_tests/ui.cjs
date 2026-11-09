@@ -1163,3 +1163,21 @@ test('read sales can be picked and printed together, and tracking is asked per s
   assert.equal(requests.at(-1).url,'/api/erp-local/store-sales/tracking');
 });
 
+test('order rows show the store mark, store number, Flex and first sale like Bling',async()=>{
+  const base={status:'reserved',data:{items:[],total:'10',created_at:'2026-11-09T10:00:00'}};
+  const orders=[
+    {...base,id:'a',data:{...base.data,external_id:'ML-1',channel:'ml',store:'c',customer_name:'Ana',fulfillment_mode:'flex'}},
+    {...base,id:'b',data:{...base.data,external_id:'SH-1',channel:'shopee',store:'s',customer_name:'Bia'}},
+    {...base,id:'c',data:{...base.data,external_id:'SH-2',channel:'shopee',store:'s',customer_name:'Bia'}},
+  ];
+  const {document:d,requests}=await setup({orders});
+  d.querySelector('[data-menu-target="orders"]').click();
+  const rows=[...d.querySelectorAll('tbody tr')];
+  const cell=id=>rows.find(r=>r.textContent.includes(id));
+  assert.equal(cell('ML-1').querySelector('.store-mark').title,'Mercado Livre');
+  assert.ok(cell('ML-1').querySelector('.flex-pin'));
+  assert.ok(cell('ML-1').querySelector('.first-sale'));
+  assert.equal(cell('SH-1').querySelector('.store-mark').title,'Shopee');
+  assert.equal(cell('SH-1').querySelector('.first-sale'),null);
+});
+

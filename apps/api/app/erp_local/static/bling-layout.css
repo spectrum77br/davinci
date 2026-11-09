@@ -155,4 +155,8 @@ body[data-screen=products] #subtitle{display:none}
 .situation-dot{display:inline-block;width:9px;height:9px;border-radius:50%;flex:none;background:#7d8796}
 .situation-badge{display:inline-flex;align-items:center;gap:6px}
 .tone-open{background:#e7b416}.tone-done{background:#3f9d5a}.tone-cancel{background:#d34a3d}.tone-progress{background:#3b6fd8}.tone-typing{background:#9aa3ae}.tone-warn{background:#e07b24}.tone-other{background:#6c7fa0}
+.store-mark{display:inline-flex;width:18px;height:18px;vertical-align:middle;margin-right:6px;flex:none}
+.store-mark svg{width:18px;height:18px}
+.first-sale{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:9px;background:#8c939d;color:#fff;font-size:10px;font-weight:600}
+.flex-pin{margin-left:5px;color:#1a9e8f;font-size:12px}
 
