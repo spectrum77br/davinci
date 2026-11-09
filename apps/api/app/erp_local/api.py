@@ -432,6 +432,19 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             },
         )
 
+    @app.get("/api/erp-local/store-objects")
+    def store_objects_list(
+        channel: str = "",
+        store: str = "",
+        q: str = "",
+        offset: int = Query(0, ge=0),
+        limit: int = Query(100, ge=1, le=200),
+    ):
+        from app.erp_local import store_objects
+
+        with erp.connection() as db:
+            return store_objects.listing(db, channel, store, q, offset, limit)
+
     @app.get("/api/erp-local/store-sales/detail")
     def store_sale_detail(channel: str, store: str, number: str):
         from app.erp_local import store_sales_docs

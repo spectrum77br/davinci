@@ -34,7 +34,7 @@ test('shipping scan and volume closure never send a dispatch command implicitly'
   const o=ownOrder('P1','A');
   const s={id:o.id,stage:'picking',data:{...o.data,service:'Entrega local de teste',cycle:1,packages:[]},scanned:{}};
   const {dom,document:d,requests}=await setup({orders:[o],logistics:{shipments:[s],labels:[],manifests:[],tracking_events:[]}});
-  d.querySelector('nav [data-page=logistics]').click();
+  d.querySelector('nav [data-page=logistics]').click();d.querySelector('[data-logistics-view=own]').click();
   d.querySelector('#shipping-scan [name=sku]').value='demo.aparelho';
   d.querySelector('#shipping-scan').dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
   await new Promise(r=>setImmediate(r));
@@ -52,7 +52,7 @@ test('shipping scan and volume closure never send a dispatch command implicitly'
 test('reset conference button does not also submit the scan form',async()=>{
   const o=ownOrder('P1','A');
   const {dom,document:d,requests}=await setup({orders:[o],logistics:{shipments:[{id:o.id,stage:'picking',data:{...o.data,cycle:1,service:'Teste',packages:[]},scanned:{}}],manifests:[],labels:[],tracking_events:[]}});
-  d.querySelector('nav [data-page=logistics]').click();
+  d.querySelector('nav [data-page=logistics]').click();d.querySelector('[data-logistics-view=own]').click();
   d.querySelector('[data-command="logistics.reset"]').click();
   await new Promise(r=>setImmediate(r));
   assert.deepEqual(requests.map(r=>r.kind),['logistics.reset']);

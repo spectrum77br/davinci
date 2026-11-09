@@ -70,6 +70,7 @@ ROUTE_AREAS = {
     "/api/erp-local/inbound": "compras",
     "/api/erp-local/finance": "financeiro",
     "/api/erp-local/store-sales": "expedicao",
+    "/api/erp-local/store-objects": "expedicao",
     "/api/erp-local/invoices": "fiscal",
     "/api/erp-local/catalog": "cadastros",
     "/api/erp-local/logistics": "expedicao",

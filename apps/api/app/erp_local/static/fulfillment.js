@@ -34,6 +34,7 @@ function salesPage(){
 }
 
 function logisticsPage(){
+  if(logisticsView==='objects')return objectsPage();
   const l=shipping();
   manifestSelection=new Set([...manifestSelection].filter(id=>l.shipments.some(s=>s.id===id&&s.stage==='packed'&&!s.data.manifest_id)));
   if(!l.shipments.some(s=>s.id===selectedShipment))selectedShipment=l.shipments[0]?.id||'';
@@ -41,7 +42,7 @@ function logisticsPage(){
   const stats=`<div class="stats">${[['Separação','picking'],['Embalados','packed'],['Despachados','dispatched'],['Devolvidos','returned']].map(([label,stage])=>`<div class="stat"><span>${label}</span><strong>${l.shipments.filter(s=>s.stage===stage).length}</strong><small>Banco próprio</small></div>`).join('')}</div>`;
   const list=panel('Objetos de envio','Cada objeto mantém pedido, conta, depósito, serviço, conferência e volumes. Etiqueta e remessa externas exigem conector homologado.',table(['Remessa','Pedido / conta','Serviço / depósito','Etapa','Rastreio informado','Abrir'],l.shipments.map(r=>`<tr><td><input type="checkbox" data-manifest-select="${esc(r.id)}" aria-label="Incluir ${esc(r.data.external_id)} na remessa" ${r.stage!=='packed'||r.data.manifest_id?'disabled':''} ${manifestSelection.has(r.id)?'checked':''}></td><td><strong>${esc(r.data.external_id)}</strong><small>${esc(r.data.channel)} · ${esc(r.data.store)}</small></td><td>${esc(r.data.service)}<small>${esc(r.data.depot)}</small></td><td>${shippingBadge(r.stage)}</td><td>${esc(trackingNames[r.data.tracking?.status]||'Sem evento')}<small>${r.data.tracking?'Informado localmente':''}</small></td><td><button class="action" data-open-shipment="${esc(r.id)}">Abrir objeto</button></td></tr>`).join('')||empty(6,'Prepare um pedido na tela Pedidos para iniciar a separação.'))+`<div class="form-footer"><span>Agrupamento por conta, depósito e serviço. Não envia remessa ao canal.</span><button id="manifest-create" ${manifestSelection.size?'':'disabled'}>Preparar remessa local (${manifestSelection.size})</button></div>`);
   const manifests=panel('Remessas próprias','Preparar agrupa os volumes. Despachar confirma a saída física e cria a conta a receber uma única vez.',table(['Remessa','Conta / serviço','Pedidos','Situação','Ações'],l.manifests.map(m=>`<tr><td>${esc(m.id.slice(0,8))}</td><td>${m.data.binding.map(esc).join(' · ')}</td><td>${m.data.ids.length}</td><td>${esc(m.status==='prepared'?'Preparada':m.status==='dispatched'?'Despachada':'Cancelada')}</td><td>${m.status==='prepared'?`<form class="compact-form" data-manifest-dispatch="${esc(m.id)}"><input name="proof" aria-label="Comprovante da remessa" placeholder="Comprovante local" required maxlength="120"><button>Confirmar despacho local</button></form>${button('Desfazer agrupamento','logistics.manifest.cancel',m.id)}`:'—'}</td></tr>`).join('')||empty(5,'Nenhuma remessa própria preparada.')));
-  return stats+list+(s?shipmentDetail(s):'')+manifests;
+  return logisticsTabs()+stats+list+(s?shipmentDetail(s):'')+manifests;
 }
 
 function shipmentDetail(s){
