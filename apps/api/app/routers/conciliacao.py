@@ -3705,13 +3705,18 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
         )
     ).one()
     # 19/10 (revisão): toda reserva retida conta (reclamação, estorno, frete de
-    # devolução, pagamento) — só a reserva pro saque fica fora (é o saque em andamento)
+    # devolução, pagamento) — só a reserva pro saque fica fora (é o saque em andamento).
+    # 09/11 (Vinicius): o segurado pra dívida que a pessoa marcou "Reserva" (as contas
+    # do ML bloqueadas, saldo inteiro segurado em 08/11) também é dinheiro retido.
     reservado = (
         await session.execute(
             select(func.sum(mov.debito - mov.credito)).where(
                 mov.integration_id == loja.integration_id,
                 mov.origem.in_(ORIGENS_EXTRATO),
-                mov.tipo.in_(_RESERVAS_RETIDAS),
+                or_(
+                    mov.tipo.in_(_RESERVAS_RETIDAS),
+                    (mov.tipo == "cobranca_divida") & (mov.classificacao == "reserva"),
+                ),
             )
         )
     ).scalar_one()

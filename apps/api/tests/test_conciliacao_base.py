@@ -2065,6 +2065,24 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(
     assert linha["dinheiro"]["a_liberar"] == 0.0 and linha["dinheiro"]["a_liberar_pedidos"] == 0
     assert linha["dinheiro"]["reservado"] == 0.0
     assert corpo["empresa"]["dinheiro"]["na_conta"] == 200.46
+    # 09/11: o segurado pra dívida marcado "Reserva" à mão (conta do ML bloqueada) entra
+    # no reservado; o mesmo segurado como "Fatura do ML" não
+    segurado = _mov(
+        loja, "cobranca_divida", datetime(2026, 10, 12, 15, tzinfo=UTC), debito="350.00"
+    )
+    segurado.classificacao, segurado.vinculado_por = "reserva", "cairo sa"
+    da_fatura = _mov(
+        loja, "cobranca_divida", datetime(2026, 10, 12, 16, tzinfo=UTC), debito="80.00"
+    )
+    da_fatura.classificacao = "fatura_ml"
+    db.add_all([segurado, da_fatura])
+    await db.commit()
+    r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-13"})
+    assert r.json()["lojas"][0]["dinheiro"]["reservado"] == 350.0
+    # o resto do teste olha o dia 12/10 sem movimento: as duas linhas saem
+    await db.delete(segurado)
+    await db.delete(da_fatura)
+    await db.commit()
 
     # extrato parado há mais de 36 h: vira "extrato não lido" e pede pra sincronizar
     loja.ultimo_extrato_em = datetime.now(UTC) - timedelta(days=3)
