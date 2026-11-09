@@ -624,3 +624,17 @@ def test_tiktok_lines_count_one_unit_and_use_the_sale_price(erp):
     )
     plan = plan_of(erp, "tiktok", "conta")
     assert "quantity_unknown" not in plan["blocked"] and "price_unknown" not in plan["blocked"]
+
+
+def test_paid_total_with_shipping_wins_over_the_items_total(ml_account):
+    observe_orders(
+        ml_account,
+        "ml",
+        ML_STORE,
+        {**sale("A1"), "total": _money("10.00"), "paid": _money("33.99")},
+    )
+    capture_buyer(ml_account, "A1")
+    created = native_ingest.promote(ml_account, "ml", ML_STORE, "A1", depot="geral")
+    with ml_account.connection() as db:
+        _, data = ml_account.document(db, created["id"], "order")
+    assert data["total"] == "33.99" and data["freight"] == "23.99"

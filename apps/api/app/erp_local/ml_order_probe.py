@@ -129,6 +129,8 @@ def project(raw, seller_id, start, end):
         "status": status(raw.get("status")),
         "fulfilled_by": None,
         "total": monetary(raw.get("total_amount"), currency),
+        # What the buyer paid, shipping included: Bling keeps this as the order total.
+        "paid": monetary(raw.get("paid_amount"), currency),
         "items": items,
         "within_window": stamp(start) <= updated <= stamp(end),
     }

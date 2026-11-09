@@ -34,7 +34,8 @@ def local_sales(db):
                 continue
             items, total = Counter(), Decimal(0)
             for order in live:
-                total += Decimal(str((order.get("total") or {}).get("amount") or 0))
+                header = order.get("paid") or order.get("total") or {}
+                total += Decimal(str(header.get("amount") or 0))
                 for item in order.get("items") or []:
                     resolved = native_ingest._resolve(db, store, item, channel)
                     items[resolved["sku"] or item.get("seller_sku") or "?"] += (
@@ -49,6 +50,7 @@ def local_sales(db):
                 "total": str(total),
                 "document": fingerprint(buyer.get("document"), digits=True),
                 "name": fingerprint(delivery.get("name")),
+                "buyer_name": fingerprint(buyer.get("name")),
                 "postal_code": fingerprint(delivery.get("postal_code"), digits=True),
             }
     return sales
@@ -81,7 +83,12 @@ def compare(local, bling):
             entry["sem_comprador_no_erp"] += 1
             continue
         for field, label in (("document", "documento"), ("name", "nome"), ("postal_code", "cep")):
-            entry[f"{label}_{'igual' if sale[field] == other[field] else 'diferente'}"] += 1
+            # An empty field on Bling's copy is a gap there, not a difference.
+            if not other[field]:
+                entry[f"{label}_vazio_no_bling"] += 1
+                continue
+            mine = {sale[field], sale.get("buyer_name")} if field == "name" else {sale[field]}
+            entry[f"{label}_{'igual' if other[field] in mine else 'diferente'}"] += 1
     return {channel: dict(counts) for channel, counts in report.items()}
 
 

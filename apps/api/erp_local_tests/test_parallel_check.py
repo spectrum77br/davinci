@@ -64,3 +64,14 @@ def test_binary_float_total_is_read_in_cents():
     row = {**ROW, "total": 479.66000000000002501110429875552654266357421875}
     assert pr.summarize([row])["P1"]["total"] == "479.66"
 
+
+def test_empty_field_on_bling_is_a_gap_not_a_difference():
+    bling = pr.summarize([{**ROW, "cep_destino": "", "documento_destinatario": None}])
+    report = pc.compare({"P1": sale()}, bling)["ml"]
+    assert report["cep_vazio_no_bling"] == 1 and report["documento_vazio_no_bling"] == 1
+    assert "cep_diferente" not in report
+
+
+def test_buyer_name_counts_when_bling_keeps_the_buyer():
+    other = sale(name=pc.fingerprint("Outra Pessoa"), buyer_name=pc.fingerprint("ana souza"))
+    assert pc.compare({"P1": other}, pr.summarize([ROW]))["ml"]["nome_igual"] == 1

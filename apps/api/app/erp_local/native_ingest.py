@@ -338,7 +338,7 @@ def _value_adjustment(orders, items):
 
     That header total equals Bling's on 94% to 100% of Shopee, TikTok, Amazon and Magalu sales.
     """
-    headers = [(order.get("total") or {}).get("amount") for order in orders]
+    headers = [(order.get("paid") or order.get("total") or {}).get("amount") for order in orders]
     if not headers or any(amount is None for amount in headers):
         return {}
     gap = sum((Decimal(str(amount)) for amount in headers), Decimal(0)) - sum(

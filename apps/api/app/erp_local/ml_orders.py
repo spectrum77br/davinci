@@ -35,6 +35,7 @@ ORDER_FIELDS = {
     "status",
     "fulfilled_by",
     "total",
+    "paid",
     "items",
     "within_window",
 }
@@ -203,6 +204,8 @@ def validate(read):
                 seen_orders.add(order["id"])
                 probe.status(order["status"])
                 money(order["total"])
+                if order["paid"] is not None:
+                    money(order["paid"])
                 for index, item in enumerate(order["items"]):
                     if (
                         not isinstance(item, dict)
