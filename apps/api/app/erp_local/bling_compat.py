@@ -399,6 +399,31 @@ def _set_situation(erp, db, doc, situation):
     )
 
 
+def apply_situation(erp, db, key, p):
+    """The clock beside the status, as in Bling. Cancelling releases stock; the rest is a label."""
+    if not isinstance(p, dict) or set(p) != {"id", "situation_id"}:
+        raise ERPError("order_situation", "Informe o pedido e a situação.")
+    situation = p["situation_id"]
+    if type(situation) is not int or situation not in SITUATIONS:
+        raise ERPError("order_situation", "A situação informada não existe.")
+    doc, _ = erp.document(db, p["id"], "order")
+    if situation == 12 and doc["status"] != "cancelled":
+        if doc["status"] not in {"draft", "reserved"}:
+            raise ERPError(
+                "order_shipped", "Pedido já despachado: registre a devolução para desfazer.", 409
+            )
+        erp.apply(db, key, "order.cancel", {"id": doc["id"]})
+    _set_situation(erp, db, doc, situation)
+    return {"id": doc["id"], "situation_id": situation, "external_writes": False}
+
+
+def situations_snapshot(db):
+    return {
+        "names": {str(k): v for k, v in SITUATIONS.items()},
+        "orders": dict(db.execute("SELECT order_id,situation_id FROM compat_order_situations")),
+    }
+
+
 def router(erp):
     api = APIRouter(prefix="/api/erp-local/bling/v3")
 

@@ -1130,3 +1130,14 @@ test('multi-company screen adopts a company only after the technical contact exi
   assert.equal(requests.length,0);
 });
 
+test('the clock beside the status changes the situation like in Bling',async()=>{
+  const order={id:'o1',status:'reserved',data:{external_id:'P-1',items:[],total:'10',channel:'ml',store:'loja',created_at:'2026-11-09T10:00:00'}};
+  const {document:d,requests}=await setup({orders:[order],situations:{names:{'6':'Em aberto','83962':'Verificar Cancelamento'},orders:{}}});
+  d.querySelector('[data-menu-target="orders"]').click();
+  const option=d.querySelector('[data-set-situation="83962"]');
+  assert.ok(option,'menu de situações na linha');
+  option.click();
+  await new Promise(r=>setImmediate(r));
+  assert.deepEqual(requests.at(-1),{...requests.at(-1),kind:'order.compat_situation',payload:{id:'o1',situation_id:83962}});
+});
+

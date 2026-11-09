@@ -186,6 +186,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "access": access.snapshot(db),
                 "inbound": inbound_invoices.snapshot(db),
                 "multi_company": multi_company.snapshot(db),
+                "situations": bling_compat.situations_snapshot(db),
                 "statements": bank_statements.snapshot(db),
             }
         payload = {

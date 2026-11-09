@@ -460,6 +460,11 @@ class LocalERP:
         if kind in payment_methods.COMMANDS:
             return payment_methods.apply(self, db, p)
 
+        if kind == "order.compat_situation":
+            from app.erp_local.bling_compat import apply_situation
+
+            return apply_situation(self, db, key, p)
+
         if kind == "ingest.account.set":
             from app.erp_local import native_ingest
 
