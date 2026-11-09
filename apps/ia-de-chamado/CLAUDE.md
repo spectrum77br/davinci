@@ -206,7 +206,8 @@ Quebra-cabeça, CAPTCHA, tela de login, senha, código por SMS/e-mail: **não te
 passar**. Os comandos de tela avisam sozinhos (`captcha: "desafio"`/`"caixa"` ou
 a linha "⚠ CAPTCHA NA TELA"); o print também mostra. Quando aparecer:
 
-1. Não clique em mais nada. Tire um `foto` da tela.
+1. Não clique em mais nada. Tire um `foto` da tela. Com captcha, o `foto` e os
+   outros comandos trazem essa aba pra frente sozinhos, pra pessoa achar.
 2. Deixe o perfil **aberto** nessa tela (não feche no fim da rodada).
 3. `decidir` com `"acao": "humano"` e **`"parado": "captcha"`** (ou `"login"`),
    dizendo no `resumo` exatamente onde parou e o que já estava preenchido. O

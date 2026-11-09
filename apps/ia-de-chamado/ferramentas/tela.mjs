@@ -119,6 +119,8 @@ function captchaNaPagina() {
     /deslize para completar/i,
     /slide to complete the puzzle/i,
     /complete o quebra-cabe[çc]a/i,
+    /arraste para completar/i,
+    /verifique para continuar/i,
   ].find((re) => re.test(t));
   return frase ? `texto: ${t.match(frase)[0]}` : null;
 }
@@ -460,7 +462,14 @@ try {
   if (!(n >= 0 && n < paginas.length)) n = paginas.length - 1;
   const page = paginas[n];
   const saida = (o) => console.log(typeof o === "string" ? o : JSON.stringify(o, null, 1));
-  const captcha = () => page.evaluate(captchaNaPagina).catch(() => null);
+  // 06/11 (301908): o Threema dizia que o perfil ficou no quebra-cabeça, o Cairo foi ao
+  // Mac mini e não viu nada: a janela tinha duas abas com o mesmo título, e o formulário
+  // com o quebra-cabeça estava na de trás. Quem chama pessoa tem de deixar a aba à vista.
+  const captcha = async () => {
+    const c = await page.evaluate(captchaNaPagina).catch(() => null);
+    if (c) await page.bringToFront().catch(() => {});
+    return c;
+  };
   const avisoCaptcha = (c) => `\n⚠ CAPTCHA NA TELA (${c}) — pare aqui, não tente passar (CLAUDE.md).`;
   // 05/11 (288967): quadros (iframe) que importam = os visíveis e da MESMA loja. O
   // de outro site (reCAPTCHA, anúncio) fica de fora: quem cuida dele é o `captcha`.
@@ -522,6 +531,7 @@ try {
   // timed out" e o chat da TikTok fechava por inatividade; só andava se a IA tirasse
   // um print no meio. Posição + clique do mouse funcionam escondida, como no `ponto`.
   // A janela não vem pra frente de propósito: a Denúncia usa mouse e janela de verdade.
+  // A exceção é o captcha, que precisa de gente (ver `captcha` acima).
   const clicarNa = async (h) => {
     await h.evaluate((e) => e.scrollIntoView({ block: "center", behavior: "instant" }));
     const caixa = await h.boundingBox();
@@ -745,6 +755,7 @@ try {
     saida(r);
   } else if (cmd === "foto") {
     fs.mkdirSync(path.dirname(args[0]) || ".", { recursive: true });
+    await captcha(); // o print é o 1º passo de quem parou no captcha (CLAUDE.md)
     await page.screenshot({ path: args[0] });
     saida(args[0]);
   } else if (cmd === "js") {

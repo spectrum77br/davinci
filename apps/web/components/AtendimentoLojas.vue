@@ -220,6 +220,14 @@ export function esperandoDoGrupo(e: EmailsDaLoja | null | undefined, g: string):
   if (conta && typeof conta.nao_lidas === 'number') return Number(conta.nao_lidas) || 0
   return Number(conta?.aguardando) || 0
 }
+// A bolinha do site na linha dele: a soma das caixas (SAC + Admin). 06/11/2026, o dono:
+// "nos sites tem que aparecer a bolinha perto do negócio de expandir, site é diferente,
+// não tem atendimento". Fica na linha com a seta fechada ou aberta, como o número das lojas.
+export function naoLidasDoSite(s: SiteDaBarra | null | undefined): number {
+  if (!s) return 0
+  const e = emailsDoSite(s)
+  return gruposDoSite(s).reduce((soma, g) => soma + esperandoDoGrupo(e, g.chave), 0)
+}
 // Abriu um e-mail NÃO LIDO da caixa de um site: a bolinha baixa na hora (a
 // releitura dos números, depois do visto gravado, confirma). PURA: os sites novos.
 export function sitesSemANaoLida<T extends { site: string; grupos: Partial<Record<string, ContaDoGrupo>> }>(sites: readonly T[], site: string, grupo: string): T[] {
@@ -873,6 +881,10 @@ function emailsDe(l: LojaBarra): EmailsDaLoja | null {
   if (l.so_email) return l.emails || null
   return emailsDaLoja(props.emails, l)
 }
+// A bolinha do site também com a barra recolhida, onde não há seta (`emailsDe`).
+function bolinhaDoSite(l: LojaBarra): number {
+  return props.emails ? naoLidasDoSite(siteDaLinha(props.sitesEmail, l)) : 0
+}
 // As caixas embaixo da linha: as do site (SAC · Admin) ou as pastas das lojas.
 function gruposDe(l: LojaBarra): GrupoDaBarra[] {
   const site = siteDaLinha(props.sitesEmail, l)
@@ -1053,6 +1065,13 @@ function idDaCaixa(l: LojaBarra, g: string): string {
             >
               <AtendimentoIconePlataforma :plataforma="l.plataforma" :tamanho="recolhida ? 18 : 15" decorativo />
               <span v-if="!recolhida" class="min-w-0 flex-1 truncate">{{ l.conta }}</span>
+              <span
+                v-if="bolinhaDoSite(l)"
+                class="flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] font-semibold leading-none text-white tabular-nums"
+                :class="recolhida ? 'h-4 min-w-4 px-0.5 text-[9px]' : ''"
+                :title="`${bolinhaDoSite(l)} e-mail(s) não lido(s) nas caixas do site`"
+                data-site-nao-lidas
+              >{{ contador(bolinhaDoSite(l)) }}</span>
               <template v-if="l.so_email || modo === 'emails'">
                 <ChevronRight v-if="!recolhida && emailsDe(l)" class="size-3.5 shrink-0 transition-transform" :class="emailsAbertosDe(l) ? 'rotate-90' : ''" aria-hidden="true" />
               </template>
