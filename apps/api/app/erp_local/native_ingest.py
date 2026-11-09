@@ -155,13 +155,22 @@ def _backoff(failures, retry_after=None):
     return timedelta(seconds=max(wait, retry_after or 0))
 
 
-def _read_window(erp, channel, store, start, end, provider, importer):
-    """Read until the window is complete. Returns (state, cursor to resume from, totals)."""
+def _read_window(erp, channel, store, start, end, provider, importer, *, partial_ok=False):
+    """Read until the window is complete. Returns (state, cursor to resume from, totals).
+
+    `partial_ok` is for re-reads only, which never move the cursor: what a partial reading
+    brought is kept (observations are keyed by content), and the window counts as read.
+    """
     reads = observed = added = 0
     while reads < MAX_READS:
         read = provider(channel=channel, store=store, date_from=start, date_to=end)
         reads += 1
         account = next(a for a in read["accounts"] if a["integration_id"] == store)
+        if partial_ok and account["state"] == "partial_read" and account.get("orders"):
+            result = importer(erp, read)
+            observed += len(account["orders"])
+            added += 0 if result.get("replayed") else result.get("observations_added", 0)
+            return "partial_kept", end, (reads, observed, added), None
         if account["state"] != "read_ok":
             return account["state"], start, (reads, observed, added), account.get("retry_after")
         result = importer(erp, read)
@@ -250,24 +259,32 @@ def run_lookback(erp, channel, store, provider, *, now=None, importer=None):
     done = _when(row["lookback_at"])
     if not row["enabled"] or (done and now - done < LOOKBACK_EVERY):
         return {"state": "not_due"}
-    start, end = now - (LOOKBACK_WINDOW if done else FIRST_LOOKBACK_WINDOW), now - SAFETY_LAG
+    with erp.connection() as db:
+        first = not db.execute(
+            "SELECT 1 FROM ingest_runs WHERE channel=? AND store=? AND kind='lookback' "
+            "AND state IN ('complete','partial_kept') LIMIT 1",
+            (channel, store),
+        ).fetchone()
+    start, end = now - (FIRST_LOOKBACK_WINDOW if first else LOOKBACK_WINDOW), now - SAFETY_LAG
     # One day per read, like the reception: the store readers refuse longer windows.
-    state, reads, observed, added, position = "complete", 0, 0, 0, start
+    state, reads, observed, added, position, kept = "complete", 0, 0, 0, start, False
     while position < end:
         stop = min(position + MAX_WINDOW, end)
         try:
             state, _, (r, o, a), _ = _read_window(
-                erp, channel, store, position, stop, provider, importer
+                erp, channel, store, position, stop, provider, importer, partial_ok=True
             )
         except (ERPError, ValueError, KeyError, TypeError, StopIteration, OSError):
             state, r, o, a = "invalid_response", 0, 0, 0
         reads, observed, added = reads + r, observed + o, added + a
-        if state != "complete":
+        kept = kept or state == "partial_kept"
+        if state not in {"complete", "partial_kept"}:
             break
         position = stop
-    if state == "complete":
+    if state in {"complete", "partial_kept"}:
+        state = "partial_kept" if kept else "complete"
         _save(erp, channel, store, lookback_at=_iso(now))
-    elif not done:
+    elif first:
         # A failed first re-read waits an hour instead of starting over every round.
         _save(erp, channel, store, lookback_at=_iso(now - LOOKBACK_EVERY + timedelta(hours=1)))
     _record(erp, channel, store, "lookback", now, state, reads, observed, added, start, end)

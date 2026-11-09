@@ -688,3 +688,22 @@ def test_tiktok_total_is_products_plus_buyer_shipping_without_handling_fee(erp):
         }
         assert native_ingest.store_charges(db, "tiktok", "s", "K", [{"total": _money("1")}]) is None
         assert native_ingest.store_charges(db, "shopee", "s", "K", [paid]) is None
+
+
+def test_re_read_keeps_what_a_partial_reading_brought_and_goes_on(account):
+    go(account, Provider(fake_read()))
+    days = native_ingest.FIRST_LOOKBACK_WINDOW.days + 1
+    partial = fake_read(state="partial_read", orders=[{"updated_at": NOW.isoformat()}])
+    provider = Provider(partial, *[fake_read()] * days)
+    result = native_ingest.run_lookback(
+        account, CHANNEL, ACCOUNT, provider, now=NOW, importer=importer
+    )
+    assert result["state"] == "partial_kept" and result["added"] == 1
+    assert len(provider.calls) == native_ingest.FIRST_LOOKBACK_WINDOW.days
+
+
+def test_own_order_numbers_start_after_bling_range():
+    from app.erp_local import bling_compat
+
+    assert bling_compat.own_number(bling_compat.FIRST_OWN_ID + 1) == 900_001
+    assert bling_compat.own_number(27263613894) == 27263613894

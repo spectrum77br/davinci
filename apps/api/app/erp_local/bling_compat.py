@@ -39,6 +39,9 @@ CREATE TABLE IF NOT EXISTS order_occurrences (
  created_at TEXT NOT NULL, removed_at TEXT, removed_by TEXT);
 """
 FIRST_OWN_ID = 900_000_000_000
+# Own orders are numbered from 900.001: Bling keeps numbering the stores it still runs (308 mil
+# in 11/2026, a few thousand a month), and DaVinci keys chamados, labels and notes by number.
+OWN_NUMBER_START = 900_000
 TOKEN_ENV = "ERP_COMPAT_TOKEN"  # noqa: S105 - environment variable name
 MODULE_SALES = 98310
 SITUATIONS = {
@@ -310,7 +313,7 @@ def _order_base(erp, db, doc):
     number_id = numeric_id(db, "order", doc["id"])
     return {
         "id": number_id,
-        "numero": number_id - FIRST_OWN_ID if number_id > FIRST_OWN_ID else number_id,
+        "numero": own_number(number_id),
         "numeroLoja": data.get("external_id", ""),
         "data": data.get("date") or str(data.get("created_at", ""))[:10] or "0000-00-00",
         "dataSaida": data.get("shipped_on", "0000-00-00"),
@@ -547,10 +550,18 @@ def occurrences(db, order_id):
     ]
 
 
+def own_number(number_id):
+    return OWN_NUMBER_START + number_id - FIRST_OWN_ID if number_id > FIRST_OWN_ID else number_id
+
+
 def situations_snapshot(db):
     return {
         "names": {str(k): v for k, v in SITUATIONS.items()},
         "orders": dict(db.execute("SELECT order_id,situation_id FROM compat_order_situations")),
+        "numbers": {
+            r[0]: own_number(r[1])
+            for r in db.execute("SELECT local_id,numeric_id FROM compat_ids WHERE kind='order'")
+        },
     }
 
 
