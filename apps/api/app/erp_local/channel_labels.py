@@ -33,10 +33,13 @@ def _guard(channel, fmt):
         )
 
 
-async def ml_label(call, shipment_id, fmt="pdf"):
+async def ml_label(call, shipment_id, fmt="pdf", *, only_printed=False):
     shipment = await call("GET", f"/shipments/{shipment_id}", headers={"x-format-new": "true"})
     if shipment.get("status") != "ready_to_ship":
         raise ERPError("label_shipment_state", "O envio não está pronto para etiqueta.", 409)
+    # Downloading a label not yet printed marks it printed at the store.
+    if only_printed and shipment.get("substatus") != "printed":
+        raise ERPError("label_not_printed", "Etiqueta ainda não impressa pela operação.", 409)
     if (shipment.get("logistic") or {}).get("mode") == "me1":
         raise ERPError("label_channel", "Envio sem etiqueta do Mercado Livre.", 409)
     body = await call(
@@ -51,7 +54,9 @@ async def ml_label(call, shipment_id, fmt="pdf"):
     return {"format": fmt, "content": body, "provenance": "ml_shipment_labels"}
 
 
-async def shopee_label(call, order_sn, *, package_number=None, pickup=None, sleep=asyncio.sleep):
+async def shopee_label(
+    call, order_sn, *, package_number=None, pickup=None, arrange=True, sleep=asyncio.sleep
+):
     order = {"order_sn": order_sn}
     if package_number:
         order["package_number"] = package_number
@@ -60,7 +65,9 @@ async def shopee_label(call, order_sn, *, package_number=None, pickup=None, slee
         shipment["pickup"] = pickup
     else:
         shipment["dropoff"] = {}
-    await call("POST", "/api/v2/logistics/ship_order", json=shipment)
+    # Arranging chooses pickup or drop-off at the store; an arranged order only needs the file.
+    if arrange:
+        await call("POST", "/api/v2/logistics/ship_order", json=shipment)
     tracking = await call("GET", "/api/v2/logistics/get_tracking_number", params=order)
     number = tracking.get("tracking_number")
     if not number:
@@ -108,7 +115,7 @@ async def tiktok_label(call, package_id, *, fetch_url):
 async def fetch_label(channel, reference, *, call, fmt="pdf", **options):
     _guard(channel, fmt)
     if channel == "ml":
-        return await ml_label(call, reference, fmt)
+        return await ml_label(call, reference, fmt, **options)
     if channel == "shopee":
         return await shopee_label(call, reference, **options)
     return await tiktok_label(call, reference, **options)

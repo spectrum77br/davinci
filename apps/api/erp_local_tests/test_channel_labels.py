@@ -118,3 +118,43 @@ def test_tiktok_downloads_the_document_it_was_given(open_writes):
 
     label = go(channel_labels.fetch_label("tiktok", "P1", call=store, fetch_url=fetch_url))
     assert label["content"] == b"%PDF"
+
+
+def test_shopee_already_arranged_order_only_downloads(monkeypatch):
+    import asyncio
+
+    monkeypatch.setenv(channel_labels.WRITES_ENV, "1")
+    calls = []
+
+    async def call(method, path, **kw):
+        calls.append(path)
+        if path.endswith("get_tracking_number"):
+            return {"tracking_number": "BR1"}
+        if path.endswith("get_shipping_document_result"):
+            return {"result_list": [{"status": "READY"}]}
+        return b"%PDF" if kw.get("binary") else {}
+
+    async def nap(_):
+        return None
+
+    result = asyncio.run(
+        channel_labels.fetch_label("shopee", "SN1", call=call, arrange=False, sleep=nap)
+    )
+    assert result["content"] == b"%PDF" and not any("ship_order" in p for p in calls)
+
+
+def test_ml_label_not_yet_printed_is_left_alone_when_asked(monkeypatch):
+    import asyncio
+
+    monkeypatch.setenv(channel_labels.WRITES_ENV, "1")
+    downloads = []
+
+    async def call(method, path, **kw):
+        if path.startswith("/shipments/"):
+            return {"status": "ready_to_ship", "substatus": "ready_to_print"}
+        downloads.append(path)
+        return b"%PDF"
+
+    with pytest.raises(ERPError, match="não impressa"):
+        asyncio.run(channel_labels.fetch_label("ml", "123", call=call, only_printed=True))
+    assert downloads == []
