@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DaVinci · ERP local</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <link rel="stylesheet" href="/assets/bling-layout.css">
+  <script src="/assets/chrome.js" defer></script>
+  <script src="/assets/operations.js" defer></script>
+  <script src="/assets/fulfillment.js" defer></script>
+  <script src="/assets/catalog.js" defer></script>
+  <script src="/assets/integrations.js" defer></script>
+  <script src="/assets/contacts.js" defer></script>
+  <script src="/assets/returns.js" defer></script>
+  <script src="/assets/deposits.js" defer></script>
+  <script src="/assets/sellers.js" defer></script>
+  <script src="/assets/inventory.js" defer></script>
+  <script src="/assets/product-characteristics.js" defer></script>
+  <script src="/assets/product-details.js" defer></script>
+  <script src="/assets/product-list.js" defer></script>
+  <script src="/assets/price-lists.js" defer></script>
+  <script src="/assets/categories.js" defer></script>
+  <script src="/assets/production.js" defer></script>
+  <script src="/assets/payment-methods.js" defer></script>
+  <script src="/assets/cash-register.js" defer></script>
+  <script src="/assets/pos.js" defer></script>
+  <script src="/assets/proposals.js" defer></script>
+  <script src="/assets/sales-form.js" defer></script>
+  <script src="/assets/access.js" defer></script>
+  <script src="/assets/inbound.js" defer></script>
+  <script src="/assets/tax-guides.js" defer></script>
+  <script src="/assets/companies.js" defer></script>
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <a class="brand" href="/"><img src="/assets/logo-mark.svg" width="28" height="28" alt=""><span>DaVinci<small>ERP em preparação</small></span></a>
+    <p class="nav-label">OPERAÇÃO</p>
+    <nav aria-label="Navegação do ERP">
+      <button data-page="overview" class="active">Visão geral</button>
+      <button data-page="products">Produtos e kits</button>
+      <button data-page="contacts">Clientes e fornecedores</button>
+      <button data-page="stock">Estoque</button>
+      <button data-page="inventory">Conferência de estoque</button>
+      <button data-page="orders">Pedidos</button>
+      <button data-page="logistics">Logística</button>
+      <button data-page="purchases">Compras</button>
+      <button data-page="accounts">Financeiro</button>
+      <button data-page="costs">Custos e recebimentos</button>
+      <button data-page="fiscal">Fiscal e DANFE</button>
+      <button data-page="channels">Eventos e lojas</button>
+      <button data-page="integrations">Integrações</button>
+      <button data-page="history">Histórico</button>
+      <button data-page="connections">Conexões</button>
+      <span class="nav-subtitle">TRANSIÇÃO</span>
+      <button data-page="reference">Conferência da origem</button>
+      <button data-page="parity">Equivalência REA</button>
+      <button data-page="release">Preparação para produção</button>
+    </nav>
+    <div class="sidebar-foot"><span class="dot"></span> Banco local separado<small>Testes sem movimentar as lojas</small><small id="reference-age"></small></div>
+  </aside>
+  <div class="workspace">
+    <div class="erp-topbar"><div class="top-menus"><button type="button" data-top-menu="cadastros" aria-expanded="false" aria-controls="top-menu-cadastros">Cadastros <span>⌄</span></button><button type="button" data-top-menu="vendas" aria-expanded="false" aria-controls="top-menu-vendas">Vendas <span>⌄</span></button><button type="button" data-top-menu="estoque" aria-expanded="false" aria-controls="top-menu-estoque">Estoque <span>⌄</span></button><button type="button" data-top-menu="financeiro" aria-expanded="false" aria-controls="top-menu-financeiro">Financeiro <span>⌄</span></button></div><form id="quick-search"><input name="query" placeholder="Pesquisar" aria-label="Pesquisa rápida"><button aria-label="Buscar na operação">⌕</button></form><div class="top-tools"><button data-page="parity" aria-label="Ajuda">?</button><button data-page="connections" aria-label="Configurações">⚙</button><span class="profile-dot">D</span></div></div>
+    <div class="environment" id="environment"><span>ERP EM PREPARAÇÃO</span> Carregando o banco local…</div>
+    <header><div><p class="eyebrow">DAVINCI / ERP</p><h1 id="title">Controle da operação</h1><p id="subtitle">Teste o caminho do produto ao recebimento, com histórico de cada ação.</p></div><button id="refresh" class="secondary">Atualizar</button></header>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <main id="content" aria-label="Conteúdo do ERP"></main>
+    <aside id="action-rail" aria-label="Ações da tela"></aside>
+    <footer>ERP próprio em preparação · Nenhuma alteração daqui é enviada ao Bling ou às lojas.</footer>
+  </div>
+</body>
+</html>

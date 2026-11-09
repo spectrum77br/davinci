@@ -1,0 +1,192 @@
+{
+ "source": "Alíquotas e base do DIFAL observadas em 1.449 NF-e autorizadas nos últimos 60 dias (06/11/2026). Dado observado, não parecer fiscal; conferir antes de produção. AC ficou sem amostra suficiente da base.",
+ "origin": {
+  "SP": {
+   "internal": "18.00",
+   "destinations": {
+    "AC": {
+     "dest": "19.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": null
+    },
+    "AL": {
+     "dest": "20.50",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "AM": {
+     "dest": "20.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "AP": {
+     "dest": "18.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "BA": {
+     "dest": "20.50",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "single"
+    },
+    "CE": {
+     "dest": "20.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "DF": {
+     "dest": "20.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "single"
+    },
+    "ES": {
+     "dest": "17.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "single"
+    },
+    "GO": {
+     "dest": "19.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "MA": {
+     "dest": "23.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "MG": {
+     "dest": "18.00",
+     "inter": "12.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "MS": {
+     "dest": "17.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "MT": {
+     "dest": "17.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "single"
+    },
+    "PA": {
+     "dest": "19.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "PB": {
+     "dest": "20.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "single"
+    },
+    "PE": {
+     "dest": "20.50",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "PI": {
+     "dest": "22.50",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "PR": {
+     "dest": "19.50",
+     "inter": "12.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "single"
+    },
+    "RJ": {
+     "dest": "20.00",
+     "inter": "12.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "RN": {
+     "dest": "20.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "single"
+    },
+    "RO": {
+     "dest": "19.50",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    },
+    "RR": {
+     "dest": "20.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "single"
+    },
+    "RS": {
+     "dest": "17.00",
+     "inter": "12.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "single"
+    },
+    "SC": {
+     "dest": "17.00",
+     "inter": "12.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "single"
+    },
+    "SE": {
+     "dest": "19.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "single"
+    },
+    "TO": {
+     "dest": "20.00",
+     "inter": "7.00",
+     "fcp": "0.00",
+     "part": "100.00",
+     "difal_base": "double"
+    }
+   }
+  }
+ }
+}

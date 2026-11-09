@@ -42,8 +42,73 @@ services:
         required: false
         format: raw
 
+  # ERP próprio. Fica fora de qualquer deploy até alguém subir com --profile erp, e guarda
+  # os segredos num arquivo do servidor, nunca no .env dividido com os workers.
+  erp:
+    profiles: ["erp"]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command:
+      - uv
+      - run
+      - python
+      - -m
+      - app.erp_local
+      - --database
+      - /var/lib/davinci-erp/erp.sqlite3
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8765"
+      - --empty
+    env_file:
+      - path: /etc/davinci/erp/runtime.env
+        required: false
+        format: raw
+    environment:
+      ERP_ALLOWED_HOSTS: erp
+      ERP_TRUST_PROXY: "1"
+    volumes:
+      - type: bind
+        source: /var/lib/davinci-erp
+        target: /var/lib/davinci-erp
+        bind:
+          create_host_path: true
+      - type: bind
+        source: /etc/davinci/erp
+        target: /etc/davinci/erp
+        read_only: true
+        bind:
+          create_host_path: true
+    networks:
+      davinci_net:
+        aliases:
+          - erp
+
   # Magalu-only egress through the owner's Mac. No public port: the TCP bridge
   # reaches a private Unix socket forwarded by SSH to the authenticated Mac proxy.
+  erp_worker:
+    profiles: ["erp"]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["uv", "run", "python", "-m", "app.erp_local.service_loop", "--database", "/var/lib/davinci-erp/erp.sqlite3"]
+    env_file:
+      - path: /etc/davinci/erp/runtime.env
+        required: false
+        format: raw
+    environment:
+      ERP_READ_TRANSPORT: local
+    volumes:
+      - type: bind
+        source: /var/lib/davinci-erp
+        target: /var/lib/davinci-erp
+    networks:
+      - davinci_net
+
   magalu_proxy:
     build:
       context: ./infra/magalu-proxy

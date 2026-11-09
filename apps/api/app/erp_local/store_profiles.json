@@ -1,0 +1,2612 @@
+{
+  "version": 1,
+  "observed_on": "2026-11-05",
+  "source": "observed_bling_forms",
+  "profiles": [
+    {
+      "bling_store_id": "204437662",
+      "provider_type": "25",
+      "name": "ML Nexus AG",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "15 dias",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204437662/25"
+    },
+    {
+      "bling_store_id": "204437665",
+      "provider_type": "25",
+      "name": "ML Forpaper AG",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "15 dias",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Loja Oficial": "Selecione",
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204437665/25"
+    },
+    {
+      "bling_store_id": "204438129",
+      "provider_type": "92",
+      "name": "Amazon KFA",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas /  Importação automática de taxas  Novo Importe as taxas que estão no marketplace sem precisar adicionar manualmente": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Data da venda": "Data atual",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF-e apenas quando a etiqueta DBA estiver disponível.": 0,
+        "Produtos / Atualização de estoque": 0,
+        "Produtos / Utilizar data personalizada da promoção": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204438129/92"
+    },
+    {
+      "bling_store_id": "204438130",
+      "provider_type": "92",
+      "name": "Amazon Inova",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas /  Importação automática de taxas  Novo Importe as taxas que estão no marketplace sem precisar adicionar manualmente": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Data da venda": "Data atual",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF-e apenas quando a etiqueta DBA estiver disponível.": 0,
+        "Produtos / Atualização de estoque": 0,
+        "Produtos / Utilizar data personalizada da promoção": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204438130/92"
+    },
+    {
+      "bling_store_id": "204707201",
+      "provider_type": "25",
+      "name": "ML Velasco AG",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "15 dias",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204707201/25"
+    },
+    {
+      "bling_store_id": "204707235",
+      "provider_type": "25",
+      "name": "ML Kia",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "15 dias",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Devolução",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Cancelado",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204707235/25"
+    },
+    {
+      "bling_store_id": "204713113",
+      "provider_type": "92",
+      "name": "Amazon Kia",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas /  Importação automática de taxas  Novo Importe as taxas que estão no marketplace sem precisar adicionar manualmente": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Data da venda": "Data atual",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF-e apenas quando a etiqueta DBA estiver disponível.": 0,
+        "Produtos / Atualização de estoque": 0,
+        "Produtos / Utilizar data personalizada da promoção": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204713113/92"
+    },
+    {
+      "bling_store_id": "204782511",
+      "provider_type": "25",
+      "name": "ML Marquezini AG",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "15 dias",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Loja Oficial": "Selecione",
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204782511/25"
+    },
+    {
+      "bling_store_id": "204782738",
+      "provider_type": "316",
+      "name": "Shopee Mega",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204782738/316"
+    },
+    {
+      "bling_store_id": "204808793",
+      "provider_type": "14849079421",
+      "name": "Shein KFA",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Todos",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Enviar dados fiscais ao emitir NF": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Todos",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204808793/14849079421"
+    },
+    {
+      "bling_store_id": "204897261",
+      "provider_type": "25",
+      "name": "ML Aguiar AG",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "15 dias",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204897261/25"
+    },
+    {
+      "bling_store_id": "204931983",
+      "provider_type": "25",
+      "name": "ML Mini AG",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "15 dias",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204931983/25"
+    },
+    {
+      "bling_store_id": "204951049",
+      "provider_type": "25",
+      "name": "ML Vita AG",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "15 dias",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204951049/25"
+    },
+    {
+      "bling_store_id": "204956735",
+      "provider_type": "25",
+      "name": "ML Luminin AG",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "15 dias",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/204956735/25"
+    },
+    {
+      "bling_store_id": "205050265",
+      "provider_type": "92",
+      "name": "Amazon Jlas",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas /  Importação automática de taxas  Novo Importe as taxas que estão no marketplace sem precisar adicionar manualmente": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Data da venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF-e apenas quando a etiqueta DBA estiver disponível.": 0,
+        "Produtos / Atualização de estoque": 0,
+        "Produtos / Utilizar data personalizada da promoção": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205050265/92"
+    },
+    {
+      "bling_store_id": "205100563",
+      "provider_type": "25",
+      "name": "ML KFA AG",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Loja Oficial": "Selecione",
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205100563/25"
+    },
+    {
+      "bling_store_id": "205142800",
+      "provider_type": "316",
+      "name": "Shopee Mini",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 0,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205142800/316"
+    },
+    {
+      "bling_store_id": "205268839",
+      "provider_type": "25",
+      "name": "ML Jlas AG",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205268839/25"
+    },
+    {
+      "bling_store_id": "205295441",
+      "provider_type": "13485688333",
+      "name": "Aliexpress Vita",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Aguardando remessa",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Deduzir estoque": "Após pagamento confirmado",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Aguardando remessa",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205295441/13485688333"
+    },
+    {
+      "bling_store_id": "205349270",
+      "provider_type": "25",
+      "name": "ML Inova",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205349270/25"
+    },
+    {
+      "bling_store_id": "205350445",
+      "provider_type": "25",
+      "name": "ML Lucas Mei",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205350445/25"
+    },
+    {
+      "bling_store_id": "205350662",
+      "provider_type": "25",
+      "name": "ML Victor Mei",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205350662/25"
+    },
+    {
+      "bling_store_id": "205366833",
+      "provider_type": "25",
+      "name": "ML Injox",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205366833/25"
+    },
+    {
+      "bling_store_id": "205370233",
+      "provider_type": "25",
+      "name": "ML Counhago",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205370233/25"
+    },
+    {
+      "bling_store_id": "205437320",
+      "provider_type": "25",
+      "name": "ML KFA 2",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205437320/25"
+    },
+    {
+      "bling_store_id": "205437520",
+      "provider_type": "25",
+      "name": "ML Barbosa",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205437520/25"
+    },
+    {
+      "bling_store_id": "205468332",
+      "provider_type": "316",
+      "name": "Shopee Jlas",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data atual",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205468332/316"
+    },
+    {
+      "bling_store_id": "205491209",
+      "provider_type": "25",
+      "name": "ML Jlas 2",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 0,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Considerar dimensões ao exportar produto": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 0,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205491209/25"
+    },
+    {
+      "bling_store_id": "205857211",
+      "provider_type": "316",
+      "name": "Shopee Vortan",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205857211/316"
+    },
+    {
+      "bling_store_id": "205857216",
+      "provider_type": "316",
+      "name": "Shopee Fiore",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205857216/316"
+    },
+    {
+      "bling_store_id": "205857316",
+      "provider_type": "316",
+      "name": "Shopee Inova",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205857316/316"
+    },
+    {
+      "bling_store_id": "205857331",
+      "provider_type": "316",
+      "name": "Shopee Minas",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205857331/316"
+    },
+    {
+      "bling_store_id": "205885110",
+      "provider_type": "316",
+      "name": "Shopee Vita",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205885110/316"
+    },
+    {
+      "bling_store_id": "205907852",
+      "provider_type": "14849079543",
+      "name": "Tiktok Poofy",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Aguardando Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 1,
+        "Vendas / Enviar Dados Fiscais ao emitir NF": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Natureza de operação para presentes": "Selecione uma natureza",
+        "Vendas / Natureza de operação para amostras": "Selecione uma natureza",
+        "Vendas / Preço do produto para pedidos de amostra e presentes": "Preço de venda",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Depósito padrão do TikTok": "Poofy Malas",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Aguardando Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205907852/14849079543"
+    },
+    {
+      "bling_store_id": "205925313",
+      "provider_type": "316",
+      "name": "Shopee Barbosa",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205925313/316"
+    },
+    {
+      "bling_store_id": "205925390",
+      "provider_type": "14849083398",
+      "name": "Temu Barbosa",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Todos",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 0,
+        "Vendas / Depósito padrão da Temu para envio de remessas": "casa",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Todos",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205925390/14849083398"
+    },
+    {
+      "bling_store_id": "205945426",
+      "provider_type": "316",
+      "name": "Shopee Atv",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205945426/316"
+    },
+    {
+      "bling_store_id": "205945435",
+      "provider_type": "316",
+      "name": "Shopee Victor Mei",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/205945435/316"
+    },
+    {
+      "bling_store_id": "206053536",
+      "provider_type": "14849079543",
+      "name": "Tiktok Inova",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Aguardando Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 1,
+        "Vendas / Enviar Dados Fiscais ao emitir NF": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Natureza de operação para presentes": "Selecione uma natureza",
+        "Vendas / Natureza de operação para amostras": "Selecione uma natureza",
+        "Vendas / Preço do produto para pedidos de amostra e presentes": "Preço de venda",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Depósito padrão do TikTok": "sala b64",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Aguardando Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206053536/14849079543"
+    },
+    {
+      "bling_store_id": "206053624",
+      "provider_type": "14849079543",
+      "name": "Tiktok Eron",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Aguardando Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 1,
+        "Vendas / Enviar Dados Fiscais ao emitir NF": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Natureza de operação para presentes": "Selecione uma natureza",
+        "Vendas / Natureza de operação para amostras": "Selecione uma natureza",
+        "Vendas / Preço do produto para pedidos de amostra e presentes": "Preço de venda",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Depósito padrão do TikTok": "Balaminut",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Aguardando Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206053624/14849079543"
+    },
+    {
+      "bling_store_id": "206053879",
+      "provider_type": "14849079543",
+      "name": "Tiktok Atv",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Aguardando Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 1,
+        "Vendas / Enviar Dados Fiscais ao emitir NF": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Natureza de operação para presentes": "Selecione uma natureza",
+        "Vendas / Natureza de operação para amostras": "Selecione uma natureza",
+        "Vendas / Preço do produto para pedidos de amostra e presentes": "Preço de venda",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Depósito padrão do TikTok": "Balaminut",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Aguardando Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206053879/14849079543"
+    },
+    {
+      "bling_store_id": "206053991",
+      "provider_type": "14849079543",
+      "name": "Tiktok Barbosa",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Aguardando Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 1,
+        "Vendas / Enviar Dados Fiscais ao emitir NF": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Natureza de operação para presentes": "Selecione uma natureza",
+        "Vendas / Natureza de operação para amostras": "Selecione uma natureza",
+        "Vendas / Preço do produto para pedidos de amostra e presentes": "Preço de venda",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Depósito padrão do TikTok": "Balaminut",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Aguardando Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206053991/14849079543"
+    },
+    {
+      "bling_store_id": "206064394",
+      "provider_type": "92",
+      "name": "Amazon Nexus",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas /  Importação automática de taxas  Novo Importe as taxas que estão no marketplace sem precisar adicionar manualmente": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Data da venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF-e apenas quando a etiqueta DBA estiver disponível.": 0,
+        "Produtos / Atualização de estoque": 1,
+        "Produtos / Utilizar data personalizada da promoção": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Geral",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206064394/92"
+    },
+    {
+      "bling_store_id": "206064401",
+      "provider_type": "316",
+      "name": "Shopee Lucas Mei",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206064401/316"
+    },
+    {
+      "bling_store_id": "206064425",
+      "provider_type": "25",
+      "name": "ML Eron",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 1,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Considerar dimensões ao exportar produto": 1,
+        "Produtos / Atualizar dimensões ao exportar produto ": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 1,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206064425/25"
+    },
+    {
+      "bling_store_id": "206064438",
+      "provider_type": "25",
+      "name": "ML Aguiar 2",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 1,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Considerar dimensões ao exportar produto": 1,
+        "Produtos / Atualizar dimensões ao exportar produto ": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 1,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206064438/25"
+    },
+    {
+      "bling_store_id": "206079143",
+      "provider_type": "25",
+      "name": "ML Poofy",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 1,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Considerar dimensões ao exportar produto": 1,
+        "Produtos / Atualizar dimensões ao exportar produto ": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 1,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Loja Oficial": "Selecione",
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206079143/25"
+    },
+    {
+      "bling_store_id": "206079662",
+      "provider_type": "169",
+      "name": "Magalu Poofy",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Aprovado",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 0,
+        "Vendas / Importar Pedidos Fulfillment ": 1,
+        "Vendas / Enviar automaticamente os dados fiscais após a autorização da NF-e": 1,
+        "Vendas / Enviar automaticamente o rastreio após a autorização da NF-e": 1,
+        "Vendas / Data a ser considerada": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Aprovado",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206079662/169"
+    },
+    {
+      "bling_store_id": "206080480",
+      "provider_type": "14849079421",
+      "name": "Shein Kia",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "A enviar",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 0,
+        "Vendas / Importar Pedidos Fulfillment ": 1,
+        "Vendas / Enviar dados fiscais ao emitir NF": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "A enviar",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206080480/14849079421"
+    },
+    {
+      "bling_store_id": "206081849",
+      "provider_type": "25",
+      "name": "ML Mega",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 1,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Considerar dimensões ao exportar produto": 1,
+        "Produtos / Atualizar dimensões ao exportar produto ": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 1,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206081849/25"
+    },
+    {
+      "bling_store_id": "206081880",
+      "provider_type": "316",
+      "name": "Shopee Luno GO",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206081880/316"
+    },
+    {
+      "bling_store_id": "206081896",
+      "provider_type": "316",
+      "name": "Shopee Oliveira PR",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206081896/316"
+    },
+    {
+      "bling_store_id": "206081909",
+      "provider_type": "316",
+      "name": "Shopee Sal MG",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206081909/316"
+    },
+    {
+      "bling_store_id": "206081922",
+      "provider_type": "14849079543",
+      "name": "Tiktok Injox",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Aguardando Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 1,
+        "Vendas / Enviar Dados Fiscais ao emitir NF": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Natureza de operação para presentes": "Selecione uma natureza",
+        "Vendas / Natureza de operação para amostras": "Selecione uma natureza",
+        "Vendas / Preço do produto para pedidos de amostra e presentes": "Preço de venda",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Depósito padrão do TikTok": "Balaminut",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Aguardando Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206081922/14849079543"
+    },
+    {
+      "bling_store_id": "206081932",
+      "provider_type": "14849079543",
+      "name": "Tiktok Jlas",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Aguardando Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 1,
+        "Vendas / Enviar Dados Fiscais ao emitir NF": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Natureza de operação para presentes": "Selecione uma natureza",
+        "Vendas / Natureza de operação para amostras": "Selecione uma natureza",
+        "Vendas / Preço do produto para pedidos de amostra e presentes": "Preço de venda",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Depósito padrão do TikTok": "Balaminut",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Aguardando Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206081932/14849079543"
+    },
+    {
+      "bling_store_id": "206089821",
+      "provider_type": "14849079543",
+      "name": "Tiktok Mini",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Aguardando Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 1,
+        "Vendas / Enviar Dados Fiscais ao emitir NF": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Natureza de operação para presentes": "Selecione uma natureza",
+        "Vendas / Natureza de operação para amostras": "Selecione uma natureza",
+        "Vendas / Preço do produto para pedidos de amostra e presentes": "Preço de venda",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Depósito padrão do TikTok": "Balaminut",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Aguardando Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206089821/14849079543"
+    },
+    {
+      "bling_store_id": "206092178",
+      "provider_type": "316",
+      "name": "Shopee Aguiar",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206092178/316"
+    },
+    {
+      "bling_store_id": "206094727",
+      "provider_type": "316",
+      "name": "Shopee Injox",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 0,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Enviar dados fiscais dos produtos": 0,
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206094727/316"
+    },
+    {
+      "bling_store_id": "206095202",
+      "provider_type": "25",
+      "name": "ML Dream 2",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 1,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Considerar dimensões ao exportar produto": 1,
+        "Produtos / Atualizar dimensões ao exportar produto ": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 1,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206095202/25"
+    },
+    {
+      "bling_store_id": "206099015",
+      "provider_type": "92",
+      "name": "Amazon Poofy",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para envio",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Verificar Cancelamento"
+        }
+      ],
+      "parameters": {
+        "Vendas /  Importação automática de taxas  Novo Importe as taxas que estão no marketplace sem precisar adicionar manualmente": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 1,
+        "Vendas / Data da venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF-e apenas quando a etiqueta DBA estiver disponível.": 0,
+        "Produtos / Atualização de estoque": 1,
+        "Produtos / Utilizar data personalizada da promoção": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Geral",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para envio",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Verificar Cancelamento"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206099015/92"
+    },
+    {
+      "bling_store_id": "206148901",
+      "provider_type": "316",
+      "name": "Shopee KFA",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 1,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Enviar dados fiscais dos produtos": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206148901/316"
+    },
+    {
+      "bling_store_id": "206204227",
+      "provider_type": "316",
+      "name": "Shopee Poofy",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pronto para Envio",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar Pedidos Fulfillment ": 0,
+        "Vendas / Importar arquivo XML de Notas Fiscais para pedidos Fulfillment ": 1,
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Importar imagens do canal de venda": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Enviar dados fiscais dos produtos": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pronto para Envio",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206204227/316"
+    },
+    {
+      "bling_store_id": "206288651",
+      "provider_type": "14849083398",
+      "name": "Temu Jlas",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Todos",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 0,
+        "Vendas / Data a ser considerada": "Data do pedido",
+        "Vendas / Depósito padrão da Temu para envio de remessas": "Balaminut",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Todos",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206288651/14849083398"
+    },
+    {
+      "bling_store_id": "206288703",
+      "provider_type": "14849083398",
+      "name": "Temu atv",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Todos",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 0,
+        "Vendas / Data a ser considerada": "Data do pedido",
+        "Vendas / Depósito padrão da Temu para envio de remessas": "Balaminut - Leonardo",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Todos",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206288703/14849083398"
+    },
+    {
+      "bling_store_id": "206288707",
+      "provider_type": "14849083398",
+      "name": "Temu eron",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Todos",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 0,
+        "Vendas / Data a ser considerada": "Data do pedido",
+        "Vendas / Depósito padrão da Temu para envio de remessas": "Barracão",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "Produtos / Importar imagens do canal de venda": 0,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Todos",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206288707/14849083398"
+    },
+    {
+      "bling_store_id": "206343613",
+      "provider_type": "25",
+      "name": "ML VR",
+      "source_stock_enabled": true,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Pago",
+          "bling": "Em aberto"
+        },
+        {
+          "origem": "Cancelado",
+          "bling": "Cancelado"
+        },
+        {
+          "origem": "Devolução",
+          "bling": "Cancelado"
+        }
+      ],
+      "parameters": {
+        "Vendas / Importar taxas do Marketplace": 1,
+        "Vendas / Importar n° do pedido nas observações de pagamento": 0,
+        "Vendas / Importar valor do frete": 1,
+        "Vendas / Importar dados de faturamento": 0,
+        "Vendas / Importar XML de NFe (Faturador)": 0,
+        "Vendas / Cancelar NFe automaticamente (Faturador)": 0,
+        "Vendas / Importar XML de NFe de Entrada": 0,
+        "Vendas / Importar XML de NFe de Transferência Fulfillment": 0,
+        "Vendas / Importar pedidos/notas fiscais do Mercado Shops": 1,
+        "Vendas / Enviar os dados fiscais para o canal de venda ao emitir NF": 1,
+        "Vendas / Enviar mensagem com os dados fiscais para o canal de venda (observar limite de mensagens por pedido)": 0,
+        "Vendas / Enviar mensagem de recebimento do pedido para o canal de venda (Logística Própria e Entrega a combinar apenas)": 0,
+        "Vendas / Utilizar sincronizações de rastreamento e status de pedido para logísticas da modalidade ME1": 0,
+        "Vendas / Exibir apelido": "Exibir",
+        "Vendas / Utilizar a data atual ou a data do pedido de venda": "Data do pedido",
+        "Vendas / Importação de pedidos": "Todos os pedidos",
+        "Vendas / Limite de dias para importação": "Sem limite",
+        "NF-e / Automatizar emissão de nota fiscal": 0,
+        "NF-e / Gerar e emitir NF ao disponibilizar o pedido para envio.": 0,
+        "Produtos / Ativar/inativar produto": 1,
+        "Produtos / Atualizar o estoque no canal de venda": 1,
+        "Produtos / Considerar dimensões ao exportar produto": 1,
+        "Produtos / Atualizar dimensões ao exportar produto ": 0,
+        "Produtos / Ao Exportar o Produto Substituir as Imagens na Plataforma Virtual": 1,
+        "Produtos / Mostrar atributos escondidos na vinculação de campos personalizados de categorias": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "Produtos / Modalidade padrão dos anúncios": "Grátis",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Pago",
+        "pedidos / seleção 2": "Em aberto",
+        "pedidos / seleção 3": "Cancelado",
+        "pedidos / seleção 4": "Cancelado",
+        "pedidos / seleção 5": "Devolução",
+        "pedidos / seleção 6": "Cancelado"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206343613/25"
+    },
+    {
+      "bling_store_id": "206354372",
+      "provider_type": "137",
+      "name": "Carrefour Poofy",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Em Envio pelo Lojista",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 0,
+        "Vendas / Enviar automaticamente os dados da NF-e e rastreamento automaticamente": 0,
+        "Vendas / Data a ser considerada": "Data do pedido",
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Em Envio pelo Lojista",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206354372/137"
+    },
+    {
+      "bling_store_id": "206354394",
+      "provider_type": "137",
+      "name": "Carrefour VR",
+      "source_stock_enabled": false,
+      "automatic_orders": true,
+      "status_mapping": [
+        {
+          "origem": "Em Envio pelo Lojista",
+          "bling": "Em aberto"
+        }
+      ],
+      "parameters": {
+        "Vendas / Aplicar taxas de marketplace": 0,
+        "Vendas / Enviar automaticamente os dados da NF-e e rastreamento automaticamente": 0,
+        "Vendas / Data a ser considerada": "Data do pedido",
+        "Produtos / Atualizar o estoque no canal de venda": 0,
+        "Produtos / Atualizar o estoque com o saldo no depósito": "Todos os depósitos",
+        "pedidos / Situação da importação automática de pedidos": 1,
+        "pedidos / seleção 1": "Em Envio pelo Lojista",
+        "pedidos / seleção 2": "Em aberto"
+      },
+      "source_url": "https://www.bling.com.br/configuracoes.integracoes.lojas.virtuais.php#edit/206354394/137"
+    }
+  ]
+}

@@ -1,0 +1,714 @@
+{
+  "version": 1,
+  "basis_date": "2026-11-06",
+  "rea_commit": "fe677f6cf9853fb12490dfb8ef23ccae3a551049",
+  "evidence_ids": [
+    "ev_032f6f8a88e9bcdc0ef9ec375c8cc02adee8835929072dd885776243d064db69",
+    "ev_2512b03169e09ec16e980b031be0127bf5780d831667450db55dbabb44e2ba67",
+    "ev_b36789b3ba00f382f5e6fe6c1856d7d16dcc13602c289e1e97b7f495e2eabd90",
+    "ev_c40d92b900f265c53747a9cf8bd9ca66d92f6e0af1e57fa02a8f1c4dabff8a56",
+    "ev_f90861b0e577fdb356ea76294e32be6ea65ff21f77003edbe6cf08f1b5ba0b2e",
+    "ev_a907ef0731d2402d999466d8e1116e20727bbcfd68e490b924805b474e173b6e",
+    "ev_8abe562bc23510039d5eefa66137d66e5521851d26471a9ada30b2bd7edb2203",
+    "ev_aed7d8793f26165fa5fff12c80b61202dec877ac2d0ed22fc8000d807cc90ebc",
+    "ev_04f7e59117853e7f5ab81624217d0254cd95e77dd0ebcf30a21eee93dc4e10ce",
+    "ev_87ed3d959044979c170adb5c55fe88044be439d7fdf8f59e9cb4fc8c6b4044e5",
+    "ev_ebb31349d9202638b6851e51316064c03f9119a704f507b6a135f403e2eff786",
+    "ev_fe560d03dc02e1a60f371cb4a0eb845245a033d1642b01a15aebde24c0ea547d"
+  ],
+  "scope": "Código cliente público analisado pelo REA, telas observadas e testes locais. Código interno do servidor e filas do Bling não foram obtidos. A fila do Davinci é implementação própria.",
+  "observations": [
+    "docs/bling/lojas-configuracoes-2026-11-05.md",
+    "docs/bling/validacao-2026-11-05.md",
+    "docs/bling/logistica-pedidos-producao-2026-11-05.md",
+    "docs/bling/inventario-completo-2026-11-05.md"
+  ],
+  "contracts": [
+    {
+      "id": "stock",
+      "module": "Estoque: entrada, saída e balanço",
+      "behavior": "E acrescenta, S retira e B ajusta pela diferença até o saldo informado.",
+      "status": "tested_local",
+      "remaining": "Escolha manual do lote de saída própria, com reserva atômica, composição real, versão e histórico, foi testada. Prioridade automática, Flex, soma publicável por família, lotes/séries, segregação por empresa e reservas históricas ainda exigem implementação/conciliação.",
+      "assets": [
+        {
+          "path": "output/bling-validacao-2026-11-05/assets/templates/form.estoque-1793218339.js",
+          "sha256": "034c14c1cf72e91a4aa1c3bc7d7fc1e05b4bef443f9cd11a7cc13d5b9e8b75ed"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_core.py",
+        "apps/api/erp_local_tests/test_channels.py"
+      ]
+    },
+    {
+      "id": "kits",
+      "module": "Kits e peças compartilhadas",
+      "behavior": "Kits virtuais usam as peças da composição; a reserva e a baixa recaem nos componentes.",
+      "status": "tested_local",
+      "remaining": "Kits virtuais e montagens físicas têm caminhos próprios testados. Produção parcial e estorno disponíveis para SKU físico; perdas, desmontagem e lotes/séries ainda pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-validacao-2026-11-05/assets/templates/form.venda.item.estrutura-1793218339.js",
+          "sha256": "44c85d61d2c2cd93cb6033a566cd3716da08ee16f0c76b83ab36b9843936fb1b"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_core.py",
+        "apps/api/erp_local_tests/test_reference.py",
+        "apps/api/erp_local_tests/test_channels.py"
+      ]
+    },
+    {
+      "id": "purchases",
+      "module": "Compras em etapas separadas",
+      "behavior": "Salvar a compra, lançar estoque e lançar contas são ações diferentes; os estornos também são separados.",
+      "status": "partial",
+      "remaining": "Cadastro/edição, fornecedor e pagamento congelados, parcelas exatas, recebimento/custo/contas separados e lotes atômicos testados. Referências por produto/fornecedor, código, descrição e garantia ficam congelados, com atualização explícita e impressão. Código do fornecedor não muda preço efetivo nem custo médio. Tributos por item, anexos, etiquetas, NF-e de entrada e equivalência visual integral ainda pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-validacao-2026-11-05/assets/libs/api/v3/pedido.compras.api.js",
+          "sha256": "15984b3b05e9feda5d40afc40e5638789eb6916d0ebef3c64d3ee063400ae3b7"
+        },
+        {
+          "path": "output/bling-validacao-2026-11-05/assets/templates/form.pedidos.compra-1793218339.js",
+          "sha256": "08b36e4ac8c855fb700b30b2d57eed94ebae8f8bf25da9529903c86e85defd6f"
+        },
+        {
+          "path": "output/bling-compras-pagamento-2026-11-05/assets/frame.pagamento-1793811729.js",
+          "sha256": "cfad67460b2366f0a3c212b7ba9e38a3e9b1080c1eeefcb47ec02364c3fb0157"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_core.py",
+        "apps/api/erp_local_tests/ui.cjs",
+        "apps/api/erp_local_tests/test_procurement_finance.py",
+        "apps/api/erp_local_tests/test_purchase_documents.py"
+      ]
+    },
+    {
+      "id": "store_events",
+      "module": "Pedidos e situações por loja",
+      "behavior": "Preservar a identificação por loja e a configuração de situação; os mapeamentos não são universais.",
+      "status": "partial",
+      "remaining": "Entrada durável e sequência testadas localmente. Leitura de identidade/catálogo em 55 contas; pedidos nativos preparados em seis canais. Leituras pontuais não ativam eventos contínuos. Conciliação histórica, regras por situação/fulfillment, carrinhos, escopos por conta, recepção contínua e mudança de autoridade ainda pendentes. Em 06/11: motor de recepção contínua com cursor, janela sobreposta, retomada, espera crescente, releitura diária e plano de promoção, testado com provedor simulado. Desligado em todas as contas. Faltam adaptar os leitores de cada canal a janela de datas, agendamento no servidor e promoção real a pedido.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_channels.py",
+        "apps/api/erp_local_tests/test_native_ingest.py",
+        "apps/api/erp_local_tests/test_payment_methods.py",
+        "apps/api/erp_local_tests/test_sales.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "publication",
+      "module": "Estoque nos anúncios",
+      "behavior": "O disponível deve refletir as peças compartilhadas e respeitar a configuração de publicação de cada loja.",
+      "status": "partial",
+      "remaining": "Há prévias locais e substituição de prévias antigas, sem envio. Leitura de identidade/catálogo não comprova permissão de publicação. Políticas por canal, confirmação do estoque remoto, preço e troca de autoridade ainda pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-validacao-2026-11-05/assets/libs/api/v3/estoques.api.js",
+          "sha256": "a0b83ca4b6e37bc98c9409809301e3df308e485c799944ffd078a6aa2b61a181"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_channels.py"
+      ]
+    },
+    {
+      "id": "fiscal",
+      "module": "Notas fiscais",
+      "behavior": "Salvar já persiste; emitir e autorizar são passos distintos. A validação do cliente limita a carga a 8 MiB UTF-8.",
+      "status": "partial",
+      "remaining": "Arquivo XML próprio e DANFE compartilham o parser e gerador existentes do Comunicador, com regressão local. Emissão de NF-e própria, senha interna A1, assinatura e autorização/cancelamento ainda precisam de homologação. Em 06/11: emissor próprio com empresas, numeração, XML 4.00, assinatura, cliente SEFAZ e histórico de envio. O gerador reproduz a NF-e 2009 autorizada e a regra de DIFAL confere com 1.449 notas autorizadas, sem divergência. Nenhuma nota foi enviada à SEFAZ: homologação real depende do certificado no servidor. Cancelamento, carta de correção, inutilização, XSD oficial e notas com valor diferente do pedido seguem pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-validacao-2026-11-05/assets/templates/form.notas.fiscais.rt.v2.js",
+          "sha256": "664e2dc1732fab97e8c5f6d8a7c45826a19a495146429e66558cd1c937bdff17"
+        },
+        {
+          "path": "output/bling-validacao-2026-11-05/assets/templates/form.nota.fiscal.validacao.payload.js",
+          "sha256": "2f82a38a157ce2410d26fad1588e5b5ce58104a41835fdb912e8cb6eae911297"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_nfe.py",
+        "apps/api/erp_local_tests/test_shared_fiscal.py"
+      ]
+    },
+    {
+      "id": "logistics",
+      "module": "Logística e etiquetas",
+      "behavior": "Conferência, volumes, objetos, remessas, documentos e rastreio são etapas distintas. O checkout pode registrar início de separação já na primeira leitura; finalizar pode acionar automações fiscais e logísticas.",
+      "status": "partial",
+      "remaining": "Conferência, volumes, remessas, rastreio e arquivo de documento têm testes locais. Devoluções parciais por componente, inspeção mista, quarentena e reembolsos separados também testados. Frete, etiqueta autorizada, coleta/reversa no canal e homologação por conta ainda pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-validacao-2026-11-05/assets/libs/api/v3/logisticas.api-1793218339.js",
+          "sha256": "4d0a2b509ec46eab136057bd789b7296ea9598aee92438a603f61e8d8db6c2f3"
+        },
+        {
+          "path": "output/bling-validacao-2026-11-05/assets/libs/api/v3/logisticas.internal.api-1793218339.js",
+          "sha256": "2dee50a9f82441aa58a4b27515ca2b70632361ce84b0f8a66b2a01953d501b4f"
+        },
+        {
+          "path": "output/bling-logistica-2026-11-05/assets/form.logisticas.integracoes.gerais.js",
+          "sha256": "0a6b5359b0754ee8998681edf9311eded7e3dd7b7ebb0725736c85e401073a00"
+        },
+        {
+          "path": "output/bling-logistica-2026-11-05/assets/checkout.bundle.js",
+          "sha256": "f905df2e90121ca15e654c128916fb9ef6ae2e1034e063bc2fa2939e93489713"
+        },
+        {
+          "path": "output/bling-logistica-2026-11-05/assets/form.integracoes.logisticas.uteis.js",
+          "sha256": "694d44c8394c8d4f184ede855b5dac9454a168af012192aa35bb1037db1b5898"
+        },
+        {
+          "path": "output/bling-logistica-2026-11-05/assets/form.integracoes.logisticas.objs.js",
+          "sha256": "09eebfa4f376f2537d25e8ba12f27b004d47faaa776791a47dfd7dec67291dac"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_logistics.py",
+        "apps/api/erp_local_tests/test_api.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "finance",
+      "module": "Financeiro completo",
+      "behavior": "Salvar conta e dar baixa são ações distintas. Parcela divide o total; recorrência repete o valor em datas programadas.",
+      "status": "partial",
+      "remaining": "Contas manuais, parcelamento em centavos, repetições finitas, busca, filtros, baixas, taxas, caixa, conciliação e estorno testados localmente. Repetição indefinida, feriados, categorias completas, anexos, recibos, bancos e histórico real ainda pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-validacao-2026-11-05/assets/libs/api/v3/pedido.compras.api.js",
+          "sha256": "15984b3b05e9feda5d40afc40e5638789eb6916d0ebef3c64d3ee063400ae3b7"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_core.py",
+        "apps/api/erp_local_tests/test_procurement_finance.py",
+        "apps/api/erp_local_tests/test_manual_finance.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "contacts",
+      "module": "Clientes e fornecedores",
+      "behavior": "Nome, identificação, endereço, contatos, tipos e situação pertencem ao cadastro. Pedidos registrados preservam os dados usados na venda.",
+      "status": "partial",
+      "remaining": "Cadastro, edição com versão, CPF/CNPJ inclusive alfanumérico, filtros e vínculo congelado no pedido testados localmente. Campos adicionais, crédito, vendedor, anexos, etiquetas, compras e migração histórica ainda pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-cadastros-2026-11-05/assets/contatos.api.js",
+          "sha256": "bdcf926de72063846696b499ec4e587984a992aa1d4e3cd0954fb5d25ca7c5e5"
+        },
+        {
+          "path": "output/bling-cadastros-2026-11-05/assets/form.contatos-1793218339.js",
+          "sha256": "e13ff419b55ec213ec7cb91aa749d9da9b9c7ae936b8dc5f3d46aed17c0ed0e5"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_contacts.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "inventory",
+      "module": "Conferência de estoque",
+      "behavior": "Leituras são persistidas; gerar balanço é uma etapa distinta. Reiniciar a conferência não altera o saldo físico.",
+      "status": "partial",
+      "remaining": "Leitura por SKU/GTIN, recusa de ambiguidade, sessões por depósito, contagem zero, reinício com histórico e balanço atômico testados. Movimentação física exige recontagem e reservas são preservadas. Lotes, séries, aplicativo móvel e conciliação histórica pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-estoque-producao-2026-11-05/assets/estoque.conferencia.api.js",
+          "sha256": "10509148d9216cda1bcb2457aa83046bcd31cced7c5d10ae0ecaca455e5df30b"
+        },
+        {
+          "path": "output/bling-estoque-producao-2026-11-05/assets/form.estoque.conferencias.js",
+          "sha256": "431cd08a950f4f0dda4aee33f5373bf80e65614c223757521c687987fd965ab8"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_inventory.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "product_details",
+      "module": "Edição de produtos e identificadores",
+      "behavior": "Unidade, GTIN, situação, preços, características, descrições, DUN, tags, limites de estoque e tipo são dados distintos, versionados e com histórico; atualização cadastral não altera pedidos anteriores ou custo médio do estoque.",
+      "status": "partial",
+      "remaining": "Cadastro, características observadas no Bling (condição, produção, validade, frete grátis, pesos líquido/bruto, dimensões com unidade, volumes, itens por caixa, departamento, DUN, descrições HTML com lista permitida, link, vídeo, observações, tags, categoria no formulário, mínimo/máximo/crossdocking) e serviço sem estoque testados e validados no Chrome em dados fictícios. Variações, conversão geral de formato, controle por lote, grupos de tags, painel de validação por loja e migração integral dos metadados reais pendentes. Valor ausente segue desconhecido; não vira zero nem padrão.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_product_details.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "payment_methods",
+      "module": "Formas de pagamento",
+      "behavior": "Condições, taxas e prazos são cadastros próprios; vendas preservam a versão e o plano usados.",
+      "status": "partial",
+      "remaining": "Cadastro, edição/inativação, aplicabilidade, taxas previstas e calendário explícito testados localmente. Adquirentes, POS, boletos/Pix reais e homologação fiscal continuam pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-cadastros-2026-11-05/assets/form.formas.pagamento-1793218339.js",
+          "sha256": "d3764cb6f4bd6d6f95c33498ed4a64884c8ff09479569d81c5faa61b7f4fd6a8"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_payment_methods.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "production",
+      "module": "Ordens de produção",
+      "behavior": "Salvar planeja; iniciar reserva insumos; entregar movimenta insumos e produto acabado. Cancelar não estorna entregas.",
+      "status": "partial",
+      "remaining": "Planejamento, receita física persistente com aplicação explícita e versão, início/pausa, entrega parcial, custo e estorno testados. Perdas, desmontagem, lotes/séries e homologação histórica pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-estoque-producao-2026-11-05/assets/form.ordens.producao-1793218339.js",
+          "sha256": "f0fd74112b66e4a87c7a55e3ad10a82d61d8709397d576d6ac6e0ee84653ba82"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_production.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "categories",
+      "module": "Categorias e vínculos dos produtos",
+      "behavior": "Categorias formam uma hierarquia; o vínculo local de produto não publica no canal.",
+      "status": "partial",
+      "remaining": "Hierarquia sem ciclos, edição com versão, atribuição atômica em lote e caminhos congelados no pedido testados. Vínculos exatos por conta ficam preparados. Taxonomia e publicação no canal, campos adicionais e migração pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-complementos-2026-11-05/assets/form.categorias.produtos-1793218339.js",
+          "sha256": "51fabd7967d7f35e107c015810ee87b21caa0424e97f0b098e388c3f5e16145f"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_categories.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "price_lists",
+      "module": "Listas de preços",
+      "behavior": "A lista escolhida calcula preços explícitos e preserva versão, bases e contexto no pedido.",
+      "status": "partial",
+      "remaining": "Percentual, valor, preços por SKU, escopo e vigência por data testados; prévia é conferida ao salvar. Precedência automática da origem, horários, aplicação por vendedor e publicação em lojas ainda pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-complementos-2026-11-05/assets/form.listas.precos-1793218339.js",
+          "sha256": "973118df37097694f8b632f93fd5eff0d5fe324ddbce9776f996a8587aea1227"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_price_lists.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "sellers",
+      "module": "Vendedores e comissões",
+      "behavior": "Comissões têm regras de liberação distintas; pagamento e estorno são fatos separados.",
+      "status": "partial",
+      "remaining": "Cadastro próprio, alíquota fixa, vínculo congelado, quatro liberações e proteção financeira testados. Faixas por desconto, limite de desconto, contratos, ajustes, acesso do vendedor, exportação e homologação histórica pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-vendedores-propostas-2026-11-05/assets/form.vendedores-1793218339.js",
+          "sha256": "40e2b86fcec126b2330ca68730a25c803a9a088e97810d80f4d162ad6f7494d8"
+        },
+        {
+          "path": "output/bling-vendedores-propostas-2026-11-05/assets/form.comissoes-1793218339.js",
+          "sha256": "b5e4c615b2586af6e09c11b21a5973d58ae9191d01c9d9290168410447f5d6d4"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_sellers.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "deposits",
+      "module": "Depósitos e quarentena",
+      "behavior": "Desconsiderar saldo altera o somatório geral; quarentena própria bloqueia novas vendas e prévias sem apagar o saldo físico.",
+      "status": "partial",
+      "remaining": "Cadastro/edição, padrão, inativação, exclusão do total e quarentena testados. Vínculos operacionais por empresa/loja e conciliação histórica pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-estoque-producao-2026-11-05/assets/form.depositos-1793218339.js",
+          "sha256": "772aec63bb6dcf93d653e198731ff32ad25432affb5fbcf160720225da17c8c7"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_deposits.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "returns",
+      "module": "Devoluções parciais e reembolsos",
+      "behavior": "Frete reverso, recebimento físico e obrigação de reembolso são etapas distintas.",
+      "status": "partial",
+      "remaining": "Peças de kits, recebimento parcial/misto, quarentena, estorno de recebimento, conclusão e teto de reembolso testados. Frete reverso real, assistência fiscal, inspeção/reparo formal e regras de comissão após reembolso parcial ainda pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-reversa-2026-11-05/assets/form.logisticas.reversas.js",
+          "sha256": "44b55cf8627cc25203368df34e1ae9171fa04028bbd71f94df894f67317cabbd"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_returns.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "proposals",
+      "module": "Propostas comerciais e versões",
+      "behavior": "Propostas têm condições e revisões próprias. Gerar venda abre a revisão do pedido; a origem fica protegida após registrar a venda.",
+      "status": "partial",
+      "remaining": "Cadastro/edição, histórico, versões, total, condições, impressão, exportação, situação em lote e conversão revisada testados. Itens/serviços não cadastrados são preservados na proposta e bloqueados na conversão. Endereço alternativo, anexos, formatação rica, condições avançadas e homologação comercial ainda pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-vendedores-propostas-2026-11-05/assets/orcamentos.api-1793218339.js",
+          "sha256": "f9221125a64f77a4107e3957ffe243239ade8765b1816aa249b9e8513a79f0bc"
+        },
+        {
+          "path": "output/bling-vendedores-propostas-2026-11-05/assets/form.orcamento-1793798721.js",
+          "sha256": "2754e8a03a644193c08288a4322f987042f87223929e5f3a6dede5728a561ddc"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_proposals.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "cash_register",
+      "module": "Controle físico de caixa e conferência",
+      "behavior": "Troco, vendas por forma de pagamento, suprimento e sangria compõem o fechamento. Abrir/fechar e conferir são etapas distintas.",
+      "status": "partial",
+      "remaining": "Abertura, operações físicas, fechamento/conferência, retirada de conferência com motivo e histórico, reembolsos em dinheiro parciais/integralizados no período da baixa e preservação do fechamento anterior testados. Contrapartida financeira opcional de sangrias/suprimentos, outros meios de reembolso, crédito parcialmente recebido, permissões, categorias e conectores ainda pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-pdv-caixa-2026-11-05/assets/form.frente.caixa.js",
+          "sha256": "fa135996c09bf5371578e024aedd7425d606d5737b69d4e8a8a4e3a03e44de3e"
+        },
+        {
+          "path": "output/bling-pdv-caixa-2026-11-05/assets/form.controle.caixa.js",
+          "sha256": "892f4cd784e11001f5e04275dfd2279ba6b87eacf0c140debb49953398533fe3"
+        },
+        {
+          "path": "output/bling-pdv-caixa-2026-11-05/assets/controle.caixa.api.js",
+          "sha256": "1c4e814130b0aebc118e01cddb2c528ace2f987f418bef5c4417a2f8787c4cb2"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_cash_register.py",
+        "apps/api/erp_local_tests/test_cash_refunds.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "pos",
+      "module": "Frente de caixa e checkout",
+      "behavior": "Digitação e finalização são etapas distintas. Itens, cliente, parcelas, caixa e troco compõem o checkout; fiscal e pagamentos integrados têm conectores próprios.",
+      "status": "partial",
+      "remaining": "Checkout local com pagamentos mistos, parcelas, recebimento manual, troco, saída física/financeira atômica, comprovante e reembolsos em dinheiro parciais/complementares após caixa conferido testados. NFC-e, Pix/POS reais, correções de recebimento, crédito parcial, outros meios de reembolso, delivery, balança, lotes, favoritos, impressão térmica e equivalência visual integral pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-pdv-caixa-2026-11-05/assets/form.frente.caixa.js",
+          "sha256": "fa135996c09bf5371578e024aedd7425d606d5737b69d4e8a8a4e3a03e44de3e"
+        },
+        {
+          "path": "output/bling-pdv-caixa-2026-11-05/assets/form.controle.caixa.pdv.js",
+          "sha256": "fde2b4721dd7ebc6a4b03788c0a87f8088790d7d6c6b11ec4effeb9c81e1c3ca"
+        },
+        {
+          "path": "output/bling-pdv-caixa-2026-11-05/assets/pdv.api.js",
+          "sha256": "38718dfa1001ac2027a268f5962d25cbc0cd026be61dad21668f0da9bbc2db1a"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_pos.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "product_structures",
+      "module": "Estruturas de kits e receitas físicas",
+      "behavior": "Estoque virtual usa as peças; composição física prepara uma receita de montagem. Mudanças versionadas preservam os componentes de documentos anteriores.",
+      "status": "partial",
+      "remaining": "Edição atômica com cadastro, estruturas aninhadas sem ciclos, histórico, recálculo de ancestrais/prévias e receita congelada na produção testados. Conversão de formato físico/virtual com histórico, variações, migração de estruturas originais e homologação integral ainda pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-produtos-estruturas-2026-11-05/assets/form.produtos-1793901879.js",
+          "sha256": "dcc2b1db431cb351e3c4001d2fc8c4803110558331aeac782d72d07dc74be328"
+        },
+        {
+          "path": "output/bling-produtos-estruturas-2026-11-05/assets/form.produtos.api-1793218339.js",
+          "sha256": "0bd397816e22d7a6eeb74fa28bd2288f906801d924d7b4d2092af7ff870f43ae"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_product_structures.py",
+        "apps/api/erp_local_tests/test_production.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "native_orders",
+      "module": "Pedidos nativos das lojas",
+      "behavior": "Observação direta, identidade por conta/anúncio e processamento operacional são etapas separadas. A leitura histórica não duplica reservas controladas pelo Bling.",
+      "status": "partial",
+      "remaining": "Leituras nativas em 55 contas: Amazon 4/31 pedidos; Shopee 14/779 na rodada paginada (780 no histórico); TikTok 8/148; Carrefour 2/zero na janela; Magalu 3/13 na amostra sem filtro temporal; Mercado Livre 24/245, com cinco retornados fora da janela. Magalu preserva SKU cru e normalizador explícito; ML verifica vendedor e mantém carrinho separado. Famílias identificam 47 trocas históricas de lote na Shopee, 23 TikTok e 19 ML, sem fundir reservas. ML tem 136 membros de carrinho para conciliação do conjunto e 12 vínculos pendentes; quantidade TikTok segue desconhecida. Nenhuma leitura ativa venda/reserva/conta. Recebimento contínuo, membros completos de carrinho, histórico, transição de autoridade, escopos de escrita, fiscal/logística e Temu/Shein/AliExpress ainda pendentes.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_native_orders.py",
+        "apps/api/erp_local_tests/ui.cjs",
+        "apps/api/erp_local_tests/test_shopee_orders.py",
+        "apps/api/erp_local_tests/test_tiktok_orders.py",
+        "apps/api/erp_local_tests/test_native_reconciliation.py",
+        "apps/api/erp_local_tests/test_carrefour_orders.py",
+        "apps/api/erp_local_tests/test_magalu_orders.py",
+        "apps/api/erp_local_tests/test_ml_orders.py",
+        "apps/api/erp_local_tests/test_stock_families.py"
+      ]
+    },
+    {
+      "id": "stock_allocation",
+      "module": "Escolha do lote de saída",
+      "behavior": "Preserva o item comercial; move somente a reserva própria às peças do lote escolhido. Mesma família exige composição física equivalente e preço/quantidade permanecem congelados.",
+      "status": "partial",
+      "remaining": "Escolha manual com composição, versão, motivo, histórico e bloqueios testada. Preserva cadastros fiscais distintos do item vendido e do lote de saída; diferença/ausência fica para conferência na emissão. Prioridade automática, pedido num estoque só, Flex, trava contra troca repetida, prioridades reais e publicação por família ainda pendentes.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_stock_allocation.py",
+        "apps/api/erp_local_tests/test_stock_families.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "product_suppliers",
+      "module": "Fornecedores por produto e referências da compra",
+      "behavior": "Uma linha por fornecedor, um padrão, descrição e código próprios, compra e custo separados, garantia em meses. Documento já salvo mantém a versão usada até atualização explícita.",
+      "status": "partial",
+      "remaining": "Cadastro/edição atômicos com metadados do produto, versão, histórico, padrão, duplicidade e tipos de contato testados. Compra congela e imprime referências sem mudar o preço efetivo. Vínculos originais, atualização em lote, múltiplos fornecedores na seleção de compras e migração histórica pendentes.",
+      "assets": [
+        {
+          "path": "output/bling-rea-2026-11-05/assets/templates/form.produtos-1793218339.js",
+          "sha256": "ab1ea86a366e7a382403334abe478c874b1931e54a3411fcf30beff6b8c9d1c6"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_product_suppliers.py",
+        "apps/api/erp_local_tests/test_purchase_documents.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "product_tax",
+      "module": "Tributação no cadastro do produto",
+      "behavior": "Preserva origem, códigos, tipo do item, percentuais/valores informados e observações fiscais com versão/histórico, sem inferir origem nacional ou imposto zero. Pedido já salvo mantém a referência usada.",
+      "status": "partial",
+      "remaining": "Campos observados do produto, formatos, precisão, salvamento atômico, histórico e referência congelada testados. Validação de tabelas vigentes NCM/CEST/TIPI, regras por empresa/regime/operação, reforma tributária, cálculo, assinatura e autorização próprios ainda pendentes. Cadastro fiscal não equivale a emissão homologada.",
+      "assets": [
+        {
+          "path": "output/bling-rea-2026-11-05/assets/templates/form.produtos-1793218339.js",
+          "sha256": "ab1ea86a366e7a382403334abe478c874b1931e54a3411fcf30beff6b8c9d1c6"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_product_tax.py",
+        "apps/api/erp_local_tests/test_stock_allocation.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "product_images",
+      "module": "Imagens do produto e biblioteca",
+      "behavior": "Envio armazena o arquivo local; salvar produto confirma vínculos e ordem. A primeira é principal e remover vínculo preserva arquivo e histórico.",
+      "status": "partial",
+      "remaining": "JPG/PNG/WebP estáticos, 3 MB, validação real do arquivo, deduplicação, biblioteca, principal, reordenação, descrição, histórico e restauração testados. Migração de imagens originais, modo externo, exclusão definitiva e integração com canais pendentes. Seletor automatizado do Chrome bloqueado por permissão; envio validado pela API própria e vínculos/histórico na interface.",
+      "assets": [
+        {
+          "path": "output/bling-produtos-estruturas-2026-11-05/assets/form.anexos.produto-1793218339.js",
+          "sha256": "df1a7d1180e3eeacb7e9fdae758104372cdba7e42e74cf3858a758267e4d84ee"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_product_images.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "product_actions",
+      "module": "Listagem de produtos e ações em lote",
+      "behavior": "Filtros observados no Bling; mudar situação, incluir tags, reajustar preço, clonar, excluir e restaurar agem só nos selecionados e confirmam tudo ou nada. Excluir é reversível e recusa produto com estoque ou em composição.",
+      "status": "partial",
+      "remaining": "Filtros de situação, estoque, imagens, tags, categoria, NCM, classificação, tipo, marca e fornecedor; reajuste por R$ ou %; clonagem sem GTIN/DUN/estoque; exportações em planilha testados e exercitados no Chrome em dados fictícios. Filtros Lote e Lojas virtuais, período, transferência em lote, etiquetas, sacola, importação multiloja e publicação de preço pendentes. Clonar cria direto e abre a edição, diferente da origem, que só grava ao salvar.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_product_details.py",
+        "apps/api/erp_local_tests/ui.cjs"
+      ]
+    },
+    {
+      "id": "bling_compat",
+      "module": "API compatível com Bling v3 para o DaVinci",
+      "behavior": "Os serviços do DaVinci mantêm o cliente Bling e trocam apenas o endereço base. Ids existentes continuam; toda gravação passa pelos comandos do ERP. Situação sem efeito de estoque é só rótulo; cancelamento libera reserva.",
+      "status": "partial",
+      "remaining": "Cliente real BlingClient exercitado em processo contra o ERP: produtos, estruturas em duas etapas, preço, estoque, categorias, fornecedores, contatos, situações, pedidos, observações e contas a pagar. Não ligado no DaVinci, sem deploy. Faltam objetos logísticos, parcelas e nota no pedido, idLoja em preço, listas completas de filtros, ids reais de depósito, host/token para o servidor, webhooks e conferência em paralelo contra o Bling.",
+      "assets": [
+        {
+          "path": "output/bling-rea-2026-11-05/bling-openapi.json",
+          "sha256": "acadd51a045644fd8f87577f3f89cfdfaef9449c8372d93b78173f35536486bb"
+        },
+        {
+          "path": "output/bling-rea-2026-11-05/davinci-dependencies.json",
+          "sha256": "39fff45d234f9ede0e640b875ee78d314274fe23f2752b37b16da8a955afc6fb"
+        }
+      ],
+      "tests": [
+        "apps/api/erp_local_tests/test_bling_compat.py"
+      ]
+    },
+    {
+      "id": "stock_priority",
+      "module": "Prioridade de estoque e Flex",
+      "behavior": "Pedido Flex sai do lote SP ou para uma pessoa; pedido com vários itens fica num lote quando um cobre tudo; senão vale a prioridade de cada item; sem saldo no alvo nada muda.",
+      "status": "partial",
+      "remaining": "Regras do robô atual do DaVinci reproduzidas em teste, com reserva para Flex e trava contra troca repetida. Falta operar com pedidos reais, publicar Flex por anúncio e carregar as regras reais.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_stock_priority.py"
+      ]
+    },
+    {
+      "id": "channel_labels",
+      "module": "Etiquetas emitidas pelas lojas",
+      "behavior": "Mercado Livre, Shopee e TikTok seguem a sequência documentada, fechados até ligar a chave do servidor. Canal sem conector recusa.",
+      "status": "partial",
+      "remaining": "Testado só contra loja simulada; nenhuma etiqueta real foi gerada. Faltam Amazon, Magalu, Carrefour, coleta, cancelamento, reversa e homologação por conta.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_channel_labels.py"
+      ]
+    },
+    {
+      "id": "cutover",
+      "module": "Virada e prontidão",
+      "behavior": "Pedidos abertos mantêm o id, saldo físico vem do Bling e toda diferença é listada. A tela de prontidão só marca comprovado o que tem prova.",
+      "status": "partial",
+      "remaining": "Testado com pedidos sintéticos. Não executado com dados reais.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_cutover.py"
+      ]
+    },
+    {
+      "id": "recipient_capture",
+      "module": "Comprador e destinatário no pedido",
+      "behavior": "Guarda comprador e destinatário enquanto a loja mostra; leitura mascarada nunca apaga uma completa; pedido sem comprador completo não vira pedido próprio.",
+      "status": "partial",
+      "remaining": "Testado com dados sintéticos. Falta ver um pedido real sem máscara e confirmar a posição dos campos da Shopee e do TikTok.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_recipient_capture.py",
+        "apps/api/erp_local_tests/test_channel_recipients.py"
+      ]
+    },
+    {
+      "id": "access_profiles",
+      "module": "Usuários e perfis",
+      "behavior": "Perfis por módulo atrás da porta de acesso; quem não tem perfil não vê nada e módulos bloqueados chegam em branco.",
+      "status": "partial",
+      "remaining": "Sem deploy. Filtros por loja e por registro, que o Bling tem em alguns perfis, não foram feitos.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_access.py"
+      ]
+    },
+    {
+      "id": "inbound_invoices",
+      "module": "Notas fiscais de entrada",
+      "behavior": "Importa o XML do fornecedor, vincula itens com conversão de unidade e lança compra, estoque e contas com o total da nota. Busca na SEFAZ e manifestação do destinatário.",
+      "status": "partial",
+      "remaining": "Busca e manifestação só testadas com SEFAZ simulada; endereços nacionais a confirmar em homologação.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_inbound_invoices.py",
+        "apps/api/erp_local_tests/test_inbound_sync.py"
+      ]
+    },
+    {
+      "id": "bank_statements",
+      "module": "Extrato bancário",
+      "behavior": "Lê OFX e CSV sem baixar nada; sugere conciliação com valor exato, mesma conta, data próxima e uma única baixa possível.",
+      "status": "partial",
+      "remaining": "Sem conector direto com banco. Boletos e Pix reais dependem de banco e contrato.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_bank_statements.py"
+      ]
+    },
+    {
+      "id": "tax_guides",
+      "module": "GNRE e DIFAL",
+      "behavior": "DIFAL e FCP por estado lidos das notas, com lote TLote_GNRE 2.00.",
+      "status": "partial",
+      "remaining": "Lote não passou pelo portal de testes da GNRE; os campos variam por estado. DARE-SP sem arquivo: as 22 emissoras são de SP, sem DIFAL para o próprio estado.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_tax_guides.py"
+      ]
+    },
+    {
+      "id": "multi_company",
+      "module": "Multiempresa",
+      "behavior": "22 emissoras lidas das notas, com regime e numeração; cadastro só por decisão de uma pessoa; empresa por loja e tipo de produto; certificado por CNPJ. Nota sempre com valor e item reais.",
+      "status": "partial",
+      "remaining": "Faltam responsável técnico, certificados e empresa de cada loja. O fluxo de nf_faturador por percentual não é reproduzido.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_multi_company.py"
+      ]
+    },
+    {
+      "id": "return_invoice",
+      "module": "NF-e de devolução",
+      "behavior": "Nota de entrada vinculada à venda autorizada, parcial ou total, sem passar do vendido e com numeração própria.",
+      "status": "partial",
+      "remaining": "CFOP e tratamento por regime precisam do contador e de homologação. Não há nota real de referência.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_nfe.py"
+      ]
+    },
+    {
+      "id": "sale_from_store",
+      "module": "Pedido vindo da loja",
+      "behavior": "Carrinho vira uma venda só, com o número da loja; só entra o que a loja liberou, como configurado no Bling; o valor segue o total informado pela loja; cancelamento na loja vira Verificar Cancelamento, sem soltar estoque sozinho.",
+      "status": "partial",
+      "remaining": "Regra aplicada só sobre leituras guardadas, sem criar pedido real. No Mercado Livre, o total do Bling soma algo além dos produtos em 103 de 220 vendas, provavelmente frete, a confirmar.",
+      "assets": [],
+      "tests": [
+        "apps/api/erp_local_tests/test_native_ingest.py"
+      ]
+    }
+  ],
+  "reused_modules": [
+    "apps/api/app/services/danfe_render.py",
+    "apps/api/app/services/nf_xml.py"
+  ]
+}
