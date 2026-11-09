@@ -930,9 +930,13 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 except (InvalidOperation, TypeError):
                     item["unit_cost"] = None
                 items.append(item)
+        entries = sum((Decimal(r["physical_delta"]) for r in rows if Decimal(r["physical_delta"]) > 0), Decimal(0))
+        exits = sum((-Decimal(r["physical_delta"]) for r in rows if Decimal(r["physical_delta"]) < 0), Decimal(0))
         return {
             "items": list(reversed(items[-100:])),
             "total": len(rows),
+            "entries": str(entries),
+            "exits": str(exits),
             "sku": sku,
             "depot": depot,
         }

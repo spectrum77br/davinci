@@ -160,3 +160,5 @@ body[data-screen=products] #subtitle{display:none}
 .first-sale{display:inline-block;margin-left:6px;padding:1px 7px;border-radius:9px;background:#8c939d;color:#fff;font-size:10px;font-weight:600}
 .flex-pin{margin-left:5px;color:#1a9e8f;font-size:12px}
 
+
+.stock-title{color:#2e9b49;font-size:18px;font-weight:600;margin:14px 0 10px}.stock-title small{color:#7a8797;font-size:12px;font-weight:400;margin-left:6px}.rail-table{width:100%;border-collapse:collapse;font-size:13px}.rail-table th{color:#7a8797;font-weight:500;text-align:left;padding:4px 0;border-bottom:1px solid #ecf0f5}.rail-table td{padding:5px 0;border-bottom:1px solid #f3f5f8}.rail-table td:last-child,.rail-table th:last-child{text-align:right}
