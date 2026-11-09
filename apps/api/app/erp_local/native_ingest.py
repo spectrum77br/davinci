@@ -359,6 +359,11 @@ def _unit_reasons(db, channel, store, account, key, unit):
     allowed = OPEN_STATUS.get(channel)
     if allowed is None or any(str(o.get("status") or "").upper() not in allowed for o in live):
         reasons.add("not_open")
+    elif channel == "ml":
+        from app.erp_local import ml_shipping
+
+        if ml_shipping.left(db, store, key):
+            reasons.add("not_open")
     if (live[0].get("pack_id") or live[0].get("cart_id")) and not _settled(account, orders):
         reasons.add("cart_waiting")
     items = [item for order in live for item in order.get("items") or []]

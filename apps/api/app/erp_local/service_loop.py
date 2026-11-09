@@ -56,6 +56,19 @@ def daily_check(erp, output):
         log.warning("conferência não concluída: %s", type(error).__name__)
 
 
+def stock_daily(erp, output):
+    """Once a day, Bling's available balance change against what the sales read explain."""
+    from app.erp_local import stock_check
+
+    try:
+        with erp.connection() as db:
+            result = stock_check.report(db)
+        output.write_text(dumps(result) + "\n", "utf-8")
+        log.info("conferência de estoque gravada em %s", output.name)
+    except (ERPError, OSError, ValueError, StopIteration) as error:
+        log.warning("conferência de estoque não concluída: %s", type(error).__name__)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Recepção contínua das lojas")
     parser.add_argument("--database", required=True, type=Path)
@@ -70,7 +83,11 @@ def main():
             from app.erp_local.reference import LocalReference, ReferenceStore
 
             try:
-                ReferenceStore(erp, LocalReference()).refresh()
+                store = ReferenceStore(erp, LocalReference())
+                store.refresh()
+                from app.erp_local import stock_check
+
+                stock_check.take(erp, store.all_rows("products"))
             except ERPError as error:
                 log.warning("referência não atualizada: %s", error.code)
         rounds += 1
@@ -78,8 +95,16 @@ def main():
         if os.environ.get("ERP_READ_TRANSPORT") == "local" and today != checked_on:
             checked_on = today
             daily_check(erp, args.database.parent / f"conferencia-{today}.json")
+            stock_daily(erp, args.database.parent / f"conferencia-estoque-{today}.json")
         for account, result in once(erp).items():
             log.info("%s %s", account, result.get("reception", result).get("state"))
+        if os.environ.get(recipient_capture.CAPTURE_ENV) == "1":
+            from app.erp_local import ml_shipping, store_labels
+
+            try:
+                log.info("envios ML %s", ml_shipping.sync(erp, store_labels.host_reader()))
+            except (ERPError, OSError, ValueError) as error:
+                log.warning("envios ML não lidos: %s", type(error).__name__)
         time.sleep(max(60, args.every))
 
 

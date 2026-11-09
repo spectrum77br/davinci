@@ -6,9 +6,16 @@ already read. Nothing here goes to the stores: tracking is refreshed only on req
 
 import json
 
-from app.erp_local import native_ingest, store_sales
+from app.erp_local import ml_shipping, native_ingest, store_sales
 
-POSTED = {"SHIPPED", "IN_TRANSIT", "TO_CONFIRM_RECEIVE", "HANDED_OVER", "READY_FOR_PICKUP"}
+POSTED = {
+    "SHIPPED",
+    "IN_TRANSIT",
+    "TO_CONFIRM_RECEIVE",
+    "HANDED_OVER",
+    "READY_FOR_PICKUP",
+    "NOT_DELIVERED",
+}
 DELIVERED = {"DELIVERED", "COMPLETED", "COMPLETE", "CONCLUDED"}
 SERVICES = {
     "ml": "Mercado Envios",
@@ -55,6 +62,8 @@ def listing(db, channel="", store="", query="", offset=0, limit=100):
             statuses = {str(o.get("status") or "") for o in orders} - {""}
             key = (ch, st, number)
             in_phase = {s.upper() for s in statuses} & native_ingest.OPEN_STATUS.get(ch, set())
+            if in_phase and ch == "ml" and ml_shipping.left(db, st, number):
+                in_phase = set()
             if not (in_phase or key in labels or key in tracks):
                 continue
             captured = native_ingest._unit_recipient(db, ch, st, unit) or {}
