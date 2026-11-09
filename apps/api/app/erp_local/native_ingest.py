@@ -251,14 +251,25 @@ def run_lookback(erp, channel, store, provider, *, now=None, importer=None):
     if not row["enabled"] or (done and now - done < LOOKBACK_EVERY):
         return {"state": "not_due"}
     start, end = now - (LOOKBACK_WINDOW if done else FIRST_LOOKBACK_WINDOW), now - SAFETY_LAG
-    try:
-        state, _, (reads, observed, added), _ = _read_window(
-            erp, channel, store, start, end, provider, importer
-        )
-    except (ERPError, ValueError, KeyError, TypeError, StopIteration, OSError):
-        state, reads, observed, added = "invalid_response", 0, 0, 0
+    # One day per read, like the reception: the store readers refuse longer windows.
+    state, reads, observed, added, position = "complete", 0, 0, 0, start
+    while position < end:
+        stop = min(position + MAX_WINDOW, end)
+        try:
+            state, _, (r, o, a), _ = _read_window(
+                erp, channel, store, position, stop, provider, importer
+            )
+        except (ERPError, ValueError, KeyError, TypeError, StopIteration, OSError):
+            state, r, o, a = "invalid_response", 0, 0, 0
+        reads, observed, added = reads + r, observed + o, added + a
+        if state != "complete":
+            break
+        position = stop
     if state == "complete":
         _save(erp, channel, store, lookback_at=_iso(now))
+    elif not done:
+        # A failed first re-read waits an hour instead of starting over every round.
+        _save(erp, channel, store, lookback_at=_iso(now - LOOKBACK_EVERY + timedelta(hours=1)))
     _record(erp, channel, store, "lookback", now, state, reads, observed, added, start, end)
     return {"state": state, "reads": reads, "observed": observed, "added": added}
 

@@ -177,17 +177,19 @@ def test_lease_blocks_a_second_worker_and_expires(account):
 def test_lookback_reads_recent_days_daily_without_moving_the_cursor(account):
     go(account, Provider(fake_read()))
     cursor = state_of(account)["cursor"]
-    provider = Provider(fake_read(orders=[{"updated_at": NOW.isoformat()}]))
+    days = native_ingest.FIRST_LOOKBACK_WINDOW.days + 1
+    provider = Provider(fake_read(orders=[{"updated_at": NOW.isoformat()}]), *[fake_read()] * days)
     run_lookback = native_ingest.run_lookback
     assert (
         run_lookback(account, CHANNEL, ACCOUNT, provider, now=NOW, importer=importer)["added"] == 1
     )
-    # The first re-read covers a month; the daily ones after it, a week.
+    # The first re-read covers a month, one day per read; the daily ones after it, a week.
     assert provider.calls[0][0] == NOW - native_ingest.FIRST_LOOKBACK_WINDOW
+    assert all(b - a <= native_ingest.MAX_WINDOW for a, b in provider.calls)
     assert state_of(account)["cursor"] == cursor
     early = NOW + timedelta(hours=1)
     assert run_lookback(account, CHANNEL, ACCOUNT, provider, now=early)["state"] == "not_due"
-    later, daily = NOW + timedelta(days=1), Provider(fake_read())
+    later, daily = NOW + timedelta(days=1), Provider(*[fake_read()] * 8)
     run_lookback(account, CHANNEL, ACCOUNT, daily, now=later, importer=importer)
     assert daily.calls[0][0] == later - native_ingest.LOOKBACK_WINDOW
 
