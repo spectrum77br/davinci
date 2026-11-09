@@ -161,7 +161,9 @@ async def read(request):
                     )
                 except Exception as error:
                     result[str(ref)] = {
-                        "error": str(getattr(error, "code", type(error).__name__))[:60]
+                        "error": str(getattr(error, "code", "") or error or type(error).__name__)[
+                            :60
+                        ]
                     }
                     continue
                 if "content" in got:
