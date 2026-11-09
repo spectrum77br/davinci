@@ -1490,7 +1490,13 @@ async def _nota_unica(session: AsyncSession, nf: danfe.NfDoPedido) -> str | None
             )
         )
     ).all()
-    cheias = [n for n in notas if danfe._eh_cheia(n.valor, total) and danfe._saida_normal(n.xml)]
+    cheias = [
+        n
+        for n in notas
+        if danfe._eh_cheia(n.valor, total)
+        and danfe._saida_normal(n.xml)
+        and danfe._do_produto(n.xml)
+    ]
     if len(cheias) != 1:
         return "mais_de_uma_nf_cheia"
     valor = Decimal(str(cheias[0].valor or 0))

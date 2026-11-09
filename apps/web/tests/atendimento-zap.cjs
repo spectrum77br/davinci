@@ -562,7 +562,7 @@ const zapConversa = { id: 'cv1', plataforma: 'whatsapp', canal: 'zap', conta: '(
   const zapMidia = api('services/atendimento/zap_midia.py')
   assert.match(zapMidia, /^ROTA_MIDIA = "\/api\/atendimento\/zap\/midia"$/m)
   // O template: áudio/vídeo só carregam no play; o documento BAIXA (nunca abre aqui).
-  assert.match(tela, /<audio v-else-if="pc\.tipo === 'audio'" :src="pc\.url" controls preload="none"/)
+  assert.match(tela, /<audio v-else-if="pc\.tipo === 'audio'" :src="pc\.url" controls preload="metadata"/)
   assert.match(tela, /<video v-else-if="pc\.tipo === 'video'" :src="pc\.url" controls preload="none"/)
   assert.match(tela, /v-else-if="pc\.tipo === 'documento'"\s+:href="pc\.url"\s+download/)
   // A foto de saída do Zap: legenda OPCIONAL com o teto do servidor (1.024).

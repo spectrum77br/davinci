@@ -4138,8 +4138,9 @@ watch(() => props.conversaId, (novo, velho) => {
                     >
                       <img :src="pc.url" :alt="pc.nome" loading="lazy" referrerpolicy="no-referrer" class="size-28 object-cover" @error="fotoFalhou[pc.chave] = true" />
                     </button>
-                    <!-- Zap (Onda 3): a nossa cópia — áudio e vídeo só carregam no play; o documento baixa (nunca abre aqui). -->
-                    <audio v-else-if="pc.tipo === 'audio'" :src="pc.url" controls preload="none" class="h-10 w-64 max-w-full" :title="pc.nome" data-midia-zap="audio" />
+                    <!-- Zap (Onda 3): a nossa cópia — o vídeo só carrega no play; o áudio já traz a duração
+                         (09/11/2026, o dono: "0:00" parecia quebrado); o documento baixa (nunca abre aqui). -->
+                    <audio v-else-if="pc.tipo === 'audio'" :src="pc.url" controls preload="metadata" class="h-10 w-64 max-w-full" :title="pc.nome" data-midia-zap="audio" />
                     <video v-else-if="pc.tipo === 'video'" :src="pc.url" controls preload="none" playsinline class="max-h-64 w-64 max-w-full rounded-md border bg-black" :title="pc.nome" data-midia-zap="video" />
                     <a
                       v-else-if="pc.tipo === 'documento'"

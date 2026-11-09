@@ -143,7 +143,7 @@ async def _cenario(
             data=datetime.now(UTC) - timedelta(days=5),
         )
     )
-    for _tipo, numero, valor in notas:
+    for tipo, numero, valor in notas:
         db.add(
             NfNota(
                 chave=_chave(numero),
@@ -154,7 +154,12 @@ async def _cenario(
                 valor=Decimal(valor),
                 data_emissao=datetime.now(UTC) - timedelta(days=4, minutes=numero % 60),
                 situacao="100",
-                xml=_xml(chave=_chave(numero), numero=str(numero), v_nf=valor),
+                xml=_xml(
+                    chave=_chave(numero),
+                    numero=str(numero),
+                    v_nf=valor,
+                    nome="embalagem" if tipo == "embalagem" else None,
+                ),
             )
         )
     if dono is not None:
@@ -1615,6 +1620,24 @@ async def test_nota_unica_e_do_tamanho_do_pedido(
     r = await _rascunho(db, conversa, gatilho)
     await ia._talvez_enviar(db, conversa, r)
     assert _decisao(r) == esperado and plataforma == []
+
+
+async def test_a_cheia_de_embalagem_nao_conta(db, make_user, ligado, plataforma):
+    """09/11/2026 (Amazon, Kia): a NF pelo valor cheio com o item "embalagem" não é a do
+    produto — nem a segunda cheia que seguraria, nem a que vai sozinha."""
+    notas = (("cheia", 1883, "424.00"), ("embalagem", 1890, "424.00"))
+    conversa, gatilho = await _cenario(db, make_user, notas=notas)
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+    assert plataforma
+
+
+async def test_so_a_cheia_de_embalagem_segura(db, make_user, ligado, plataforma):
+    conversa, gatilho = await _cenario(db, make_user, notas=(("embalagem", 1890, "424.00"),))
+    r = await _rascunho(db, conversa, gatilho)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r).startswith("nf:") and plataforma == [], _decisao(r)
 
 
 async def test_nf_de_antes_do_pedido_segura(db, make_user, ligado, plataforma):

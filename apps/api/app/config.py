@@ -554,7 +554,8 @@ class Settings(BaseSettings):
     atendimento_zap_destinos_teste: str = ""
     atendimento_zap_max_dia_numero: int = 300
     atendimento_zap_max_contato_10min: int = 8
-    atendimento_zap_midia_max_mb: int = 32
+    # 09/11/2026, o dono: o vídeo do cliente passava de 32 MB e ficava "grande demais".
+    atendimento_zap_midia_max_mb: int = 100
     # Versão da Graph API PRÓPRIA do Zap: subir a do Instagram
     # (`meta_graph_version`) não muda os payloads do WhatsApp sem aviso.
     meta_whatsapp_graph_version: str = "v26.0"

@@ -46,6 +46,7 @@ def _xml(
     tp_nf: str = "1",
     fin_nfe: str = "1",
     duplicatas: int = 0,
+    nome: str | None = None,
 ) -> bytes:
     cobr = (
         "<cobr>"
@@ -57,9 +58,10 @@ def _xml(
         if duplicatas
         else ""
     )
+    longo = "com um nome\n        comprido o bastante para quebrar a linha da descrição"
     det = "".join(
-        f"""<det nItem="{i}"><prod><cProd>b096.{i}</cProd><xProd>Mala de teste {i} com um nome
-        comprido o bastante para quebrar a linha da descrição</xProd><NCM>42021210</NCM>
+        f"""<det nItem="{i}"><prod><cProd>b096.{i}</cProd>
+        <xProd>{nome or f"Mala de teste {i} {longo}"}</xProd><NCM>42021210</NCM>
         <CFOP>5102</CFOP><uCom>UN</uCom><qCom>1.0000</qCom><vUnCom>424.0000000000</vUnCom>
         <vProd>424.00</vProd></prod><imposto><ICMS><ICMSSN102><orig>0</orig><CSOSN>102</CSOSN>
         </ICMSSN102></ICMS></imposto></det>"""
@@ -241,7 +243,15 @@ async def _pedido(db, numero: str, numeroloja: str, total: str, situacao: str = 
 
 
 async def _nota(
-    db, pedido: str, numero: str, valor: str, *, chave: str, quando=AGORA, tp_nf: str = "1"
+    db,
+    pedido: str,
+    numero: str,
+    valor: str,
+    *,
+    chave: str,
+    quando=AGORA,
+    tp_nf: str = "1",
+    nome: str | None = None,
 ):
     db.add(
         NfNota(
@@ -252,7 +262,7 @@ async def _nota(
             valor=Decimal(valor),
             data_emissao=quando,
             situacao="100",
-            xml=_xml(chave=chave, numero=numero, v_nf=valor, tp_nf=tp_nf),
+            xml=_xml(chave=chave, numero=numero, v_nf=valor, tp_nf=tp_nf, nome=nome),
         )
     )
     await db.commit()
@@ -268,6 +278,31 @@ async def test_escolhe_a_nota_cheia_nunca_a_de_embalagem(db, make_user):
     assert (nf.numero, nf.pedido_bling, nf.nome_arquivo) == ("11", "900101", "NF_11.pdf")
     texto = _texto(await danfe.pdf_da_nf(db, nf))
     assert danfe.chave_formatada("1" * 44) in texto
+
+
+async def test_a_cheia_so_com_embalagem_nao_e_a_nf_do_produto(db, make_user):
+    """09/11/2026, o dono (Amazon 701-5139609-4145029): a Kia emite o celular pelo valor
+    cheio com o item "embalagem"; o comunicador manda só a NF que traz o produto."""
+    assert danfe._do_produto(_xml(nome="Embalagem")) is False
+    assert danfe._do_produto(_xml(nome="Uranyx A17 Pro Max 12.64 - Laranja")) is True
+    assert danfe._do_produto(_xml()) is True
+    conversa = await _conversa(db, make_user, pedido="701-5139609-4145029")
+    await _pedido(db, "302099", "701-5139609-4145029", "834.60")
+    await _nota(db, "302099", "1345", "834.60", chave="5" * 44, nome="embalagem")
+    with pytest.raises(danfe.NfIndisponivel) as e:
+        await danfe.nf_da_conversa(db, conversa)
+    assert e.value.code == "nf_so_embalagem"
+    # A do produto chega depois (mais velha que a de embalagem, mesmo assim é ela).
+    await _nota(
+        db,
+        "302099",
+        "5702",
+        "834.60",
+        chave="6" * 44,
+        quando=AGORA - timedelta(hours=3),
+        nome="Uranyx A17 Pro Max 12.64 - Laranja",
+    )
+    assert (await danfe.nf_da_conversa(db, conversa)).numero == "5702"
 
 
 async def test_sem_pedido_sem_nf_ou_so_embalagem_dizem_o_porque(db, make_user):

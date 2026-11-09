@@ -17,7 +17,7 @@ PADROES = {
     "atendimento_zap_destinos_teste": "",
     "atendimento_zap_max_dia_numero": 300,
     "atendimento_zap_max_contato_10min": 8,
-    "atendimento_zap_midia_max_mb": 32,
+    "atendimento_zap_midia_max_mb": 100,
     "meta_whatsapp_graph_version": "v26.0",
     "atendimento_zap_retencao_eventos_dias": 30,
     "atendimento_zap_retencao_midia_dias": 180,
