@@ -6,7 +6,7 @@ already read. Nothing here goes to the stores: tracking is refreshed only on req
 
 import json
 
-from app.erp_local import ml_shipping, native_ingest, store_sales
+from app.erp_local import ml_shipping, native_ingest, stock_families, store_sales
 
 POSTED = {
     "SHIPPED",
@@ -41,7 +41,7 @@ def situation(channel, statuses, tracking):
     return ", ".join(sorted(statuses)) or "Sem situação"
 
 
-def listing(db, channel="", store="", query="", offset=0, limit=100):
+def listing(db, channel="", store="", query="", offset=0, limit=100, lot=""):
     names = store_sales._names(db)
     labels = {
         (r["channel"], r["store"], r["number"]): r["fetched_at"]
@@ -67,6 +67,20 @@ def listing(db, channel="", store="", query="", offset=0, limit=100):
             if not (in_phase or key in labels or key in tracks):
                 continue
             captured = native_ingest._unit_recipient(db, ch, st, unit) or {}
+            # The lot each item leaves from (.ci, .ra, .sa, .pi, .sp): how the shipping is split.
+            lots = sorted(
+                {
+                    stock_families.lot(part.strip().lower()) or "sem lote"
+                    for o in orders
+                    for item in o.get("items") or []
+                    for part in (native_ingest._resolve(db, st, item, ch).get("sku") or "").split(
+                        "+"
+                    )
+                    if part.strip()
+                }
+            )
+            if lot and lot not in lots:
+                continue
             track = tracks.get(key) or {}
             objects.append(
                 {
@@ -81,6 +95,7 @@ def listing(db, channel="", store="", query="", offset=0, limit=100):
                     "situation": situation(ch, statuses, track),
                     "label_at": labels.get(key) or "",
                     "tracking_at": bool(track),
+                    "lots": lots,
                 }
             )
     text = (query or "").strip().casefold()

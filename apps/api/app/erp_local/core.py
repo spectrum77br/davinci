@@ -467,6 +467,11 @@ class LocalERP:
 
             return apply_situation(self, db, key, p)
 
+        if kind == "catalog.follow.add":
+            from app.erp_local import catalog_follow
+
+            return catalog_follow.apply(self, db, key, kind, p)
+
         if kind in {"order.occurrence", "order.occurrence.remove"}:
             from app.erp_local.bling_compat import apply_occurrence, remove_occurrence
 

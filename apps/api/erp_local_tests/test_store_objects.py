@@ -55,3 +55,12 @@ def test_listing_writes_nothing(erp):
         before = db.execute("SELECT count(*) FROM documents").fetchone()[0]
         store_objects.listing(db)
         assert db.execute("SELECT count(*) FROM documents").fetchone()[0] == before
+
+
+def test_objects_show_and_filter_the_lot_each_item_leaves_from(erp):
+    observe(erp, "L1", "paid", sku="demo.aparelho")
+    with erp.connection() as db:
+        everything = store_objects.listing(db)
+        none_sp = store_objects.listing(db, lot="sp")
+    assert everything["items"][0]["lots"] == ["sem lote"]
+    assert none_sp["total"] == 0

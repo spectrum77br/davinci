@@ -456,11 +456,12 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         q: str = "",
         offset: int = Query(0, ge=0),
         limit: int = Query(100, ge=1, le=200),
+        lot: str = Query("", max_length=8),
     ):
         from app.erp_local import store_objects
 
         with erp.connection() as db:
-            return store_objects.listing(db, channel, store, q, offset, limit)
+            return store_objects.listing(db, channel, store, q, offset, limit, lot)
 
     @app.get("/api/erp-local/store-sales/detail")
     def store_sale_detail(channel: str, store: str, number: str):

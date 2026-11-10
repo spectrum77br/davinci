@@ -361,17 +361,16 @@ test('cloning opens a draft and preserves original quantities and prices before 
   dom.window.close();
 });
 
-test('batch business situation is explicit rather than inferred from warehouse preparation',async()=>{
-  const {dom,document:d,requests}=await setup({orders:[ownOrder('P1','A')]});
+test('batch situation uses Bling situations, one change per selected order',async()=>{
+  const {dom,document:d,requests}=await setup({orders:[ownOrder('P1','A')],situations:{names:{'6':'Em aberto','21':'Em digitação'},orders:{}}});
   d.querySelector('nav [data-page=orders]').click();
   d.querySelector('#sales-all').checked=true;
   d.querySelector('#sales-all').dispatchEvent(new dom.window.Event('change',{bubbles:true}));
-  d.querySelector('#batch-situation').value='draft';
-  d.querySelector('[data-sales-batch=situation]').click();
-  await new Promise(r=>setImmediate(r));
-  assert.equal(requests[0].kind,'orders.batch');
-  assert.equal(requests[0].payload.action,'situation');
-  assert.equal(requests[0].payload.status,'draft');
+  d.querySelector('#batch-bling-situation').value='21';
+  d.querySelector('#batch-situation-apply').click();
+  await new Promise(r=>setTimeout(r,10));
+  assert.equal(requests[0].kind,'order.compat_situation');
+  assert.equal(requests[0].payload.situation_id,21);
   dom.window.close();
 });
 

@@ -93,6 +93,14 @@ def main():
                 log.info(
                     "prioridades %s", stock_priority.sync_rules(erp, store.all_rows("priorities"))
                 )
+                from app.erp_local import catalog_follow
+
+                log.info(
+                    "cadastro %s",
+                    catalog_follow.follow(
+                        erp, store.all_rows("products"), store.all_rows("components")
+                    ),
+                )
             except ERPError as error:
                 log.warning("referência não atualizada: %s", error.code)
         rounds += 1
