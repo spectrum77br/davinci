@@ -28,7 +28,7 @@ log = logging.getLogger("erp.homolog")
 SCHEMA = "CREATE TABLE IF NOT EXISTS homolog_info (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
 # What the stores and DaVinci send, followed from the real base. "ignore" keeps the first copy of a
 # row (reads and observations are keyed by content); "replace" follows changes (a buyer read again,
-# a tracking update, a key shredded by the 30-day rule).
+# a tracking update, a key shredded by the 30-day rule); "mirror" takes the whole table as it is.
 FOLLOW = {
     "native_order_reads": ("ignore", "captured_at"),
     "native_order_observations": ("ignore", "captured_at"),
@@ -37,6 +37,9 @@ FOLLOW = {
     "pii_keys": ("replace", None),
     "store_policies": ("ignore", None),
     "ingest_runs": ("ignore", "started_at"),
+    # Bling's situation of each store sale, as the real base follows it: the list shows it beside
+    # what the ERP does, so the day can be compared order by order.
+    "bling_mirror_orders": ("mirror", None),
 }
 # The reception state shown on the screen; who owns the store stays "own" here.
 ACCOUNT_STATE = (
@@ -107,6 +110,13 @@ def follow(erp, live, *, since=None, reference=False):
             db.execute("BEGIN IMMEDIATE")
             for table, (mode, moment) in FOLLOW.items():
                 mine, theirs = _columns(db, "main", table), set(_columns(db, "live", table))
+                if theirs and not mine:
+                    # A table the real base gained after the copy (the Bling mirror's, say).
+                    made = db.execute(
+                        "SELECT sql FROM live.sqlite_master WHERE type='table' AND name=?", (table,)
+                    ).fetchone()
+                    db.execute(made[0])
+                    mine = _columns(db, "main", table)
                 if not mine or not theirs:
                     continue
                 cols = ",".join(c for c in mine if c in theirs)
@@ -115,6 +125,9 @@ def follow(erp, live, *, since=None, reference=False):
                     where = f" WHERE {moment} > strftime('%Y-%m-%dT%H:%M:%S', ?, '-20 minutes')"
                     args = (since,)
                 verb = "INSERT OR IGNORE" if mode == "ignore" else "INSERT OR REPLACE"
+                if mode == "mirror":
+                    db.execute(f"DELETE FROM main.{table}")  # noqa: S608
+                    verb = "INSERT"
                 before = db.total_changes
                 # Table and column names come from FOLLOW and the schema, never from a request.
                 sql = f"{verb} INTO main.{table}({cols}) SELECT {cols} FROM live.{table}{where}"  # noqa: S608

@@ -53,6 +53,11 @@ def test_follow_brings_new_reads_and_keeps_what_was_done_in_the_copy(tmp_path):
     _observe(live, "d0", "PED-0", (now - timedelta(days=2)).isoformat())
     with live.connection() as db:
         db.execute("UPDATE ingest_accounts SET last_state='partial_read',failures=3")
+        db.executescript(
+            "CREATE TABLE IF NOT EXISTS bling_mirror_orders (store_number TEXT PRIMARY KEY,"
+            " number TEXT NOT NULL, situation TEXT NOT NULL);"
+            "INSERT INTO bling_mirror_orders VALUES ('PED-1','900','21');"
+        )
     got = homolog.follow(copy, live.database, since=(now - timedelta(minutes=1)).isoformat())
     assert got["native_order_observations"] == 1
     with copy.connection() as db:
@@ -62,6 +67,8 @@ def test_follow_brings_new_reads_and_keeps_what_was_done_in_the_copy(tmp_path):
     assert "PED-1" in ids and "PED-0" not in ids
     assert tuple(account) == ("own", "partial_read", 3)
     assert contacts == 1
+    with copy.connection() as db:
+        assert db.execute("SELECT situation FROM bling_mirror_orders").fetchall()[0][0] == "21"
     homolog.follow(copy, live.database)
     with copy.connection() as db:
         assert (
