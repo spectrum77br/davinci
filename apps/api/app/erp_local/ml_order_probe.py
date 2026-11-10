@@ -11,7 +11,7 @@ import json
 import logging
 import re
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
@@ -19,6 +19,7 @@ WINDOW = None
 BASE = "https://api.mercadolibre.com"
 PAGE_SIZE, MAX_PAGES = 50, 10
 LIMIT = PAGE_SIZE * MAX_PAGES
+INDEX_SKEW = timedelta(hours=2)
 
 
 class ReadError(ValueError):
@@ -224,11 +225,15 @@ async def read_account(client, credentials, *, now):
             break
         offset += len(rows)
         await asyncio.sleep(0.25)
+    # Mercado Livre's search index trails the orders: one updated again after the window comes back
+    # with its newer time, and one can come back minutes before the start. Neither is a gap. Only an
+    # order far before the window means the date filter was not applied.
+    earliest = stamp(start) - INDEX_SKEW
     review = (
         len(totals) != 1
         or (not more and len(orders) != total)
         or (more and not rows)
-        or any(not o["within_window"] for o in orders)
+        or any(stamp(o["updated_at"]) < earliest for o in orders)
     )
     return {
         "state": "partial_read" if review else "read_ok",

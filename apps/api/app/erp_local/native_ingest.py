@@ -567,7 +567,11 @@ def run_on_host(script, request, *, alias="davinci-prod", timeout=300):
             alias,
             "docker exec -i davinci-api-1 uv run python - " + encoded,
         ]
-    done = subprocess.run(command, input=script, capture_output=True, timeout=timeout)  # noqa: S603
+    # Locally the read runs beside DaVinci: lower priority, so DaVinci always gets the CPU first.
+    nicer = (lambda: os.nice(10)) if os.environ.get("ERP_READ_TRANSPORT") == "local" else None
+    done = subprocess.run(  # noqa: S603
+        command, input=script, capture_output=True, timeout=timeout, preexec_fn=nicer
+    )
     if done.returncode:
         raise OSError("leitura indisponível")
     return json.loads(done.stdout)
