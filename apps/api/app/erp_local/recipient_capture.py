@@ -237,6 +237,36 @@ def order_recipient(captured):
     return {"name": delivery.get("name") or "", **{f: delivery.get(f) or "" for f in ADDRESS}}
 
 
+# Channels whose buyer comes from DaVinci's copy of Bling while Bling is on (no own access yet).
+# Amazon: buyer and address need restricted roles; at the switch they come from our own app.
+FROM_BLING = {"amazon"}
+AMAZON_ID = re.compile(r"\d{3}-\d{7}-\d{7}")
+BLING_COPY_SQL = (
+    "SELECT coalesce(json_agg(t),'[]') FROM (SELECT DISTINCT ON (numeroloja)"
+    " numeroloja::text AS order_id, nome_destinatario AS name,"
+    " documento_destinatario AS document, endereco_destino AS street,"
+    " numero_destino AS number, complemento_destino AS complement,"
+    " bairro_destino AS district, cidade_destino AS city, uf_destino AS state,"
+    " cep_destino AS postal_code FROM davinci.bling_orders WHERE numeroloja IN ({ids})"
+    " ORDER BY numeroloja, updated_at DESC) t"
+)
+
+
+def bling_copy_reader(read=None):
+    """Reads the buyer of these sales from DaVinci's copy of Bling, read only, by order number."""
+    if read is None:
+        from app.erp_local.bling_mirror import read_local as read
+
+    def reader(*, channel, store, ids):
+        valid = [i for i in ids if AMAZON_ID.fullmatch(str(i))]
+        if channel not in FROM_BLING or not valid:
+            return {}
+        rows = read(BLING_COPY_SQL.format(ids=",".join(f"'{i}'" for i in valid)))
+        return {str(r["order_id"]): r for r in rows if r.get("name") or r.get("document")}
+
+    return reader
+
+
 def ssh_reader(alias="davinci-prod"):
     """Brings buyer data to wherever the ERP runs, so it opens only where that is the server."""
     from pathlib import Path

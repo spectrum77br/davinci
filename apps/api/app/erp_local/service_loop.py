@@ -21,8 +21,10 @@ def once(erp, *, provider_for=native_ingest.ssh_provider, reader=None):
         accounts = db.execute(
             "SELECT channel,store FROM ingest_accounts WHERE enabled=1 ORDER BY channel,store"
         ).fetchall()
+    copy_reader = None
     if reader is None and os.environ.get(recipient_capture.CAPTURE_ENV) == "1":
         reader = recipient_capture.ssh_reader()
+        copy_reader = recipient_capture.bling_copy_reader()
     report = {}
     for row in accounts:
         channel, store = row["channel"], row["store"]
@@ -32,7 +34,11 @@ def once(erp, *, provider_for=native_ingest.ssh_provider, reader=None):
                 channel,
                 store,
                 provider_for(channel),
-                reader=reader if channel in channel_recipients.READERS else None,
+                reader=(copy_reader or reader)
+                if channel in recipient_capture.FROM_BLING
+                else reader
+                if channel in channel_recipients.READERS
+                else None,
             )
         except (ERPError, OSError, ValueError) as error:
             report[f"{channel}:{store}"] = {"state": "error", "code": type(error).__name__}

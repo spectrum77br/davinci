@@ -210,11 +210,33 @@ def from_shopee(order):
     )
 
 
+def from_bling_copy(row):
+    """A sale as DaVinci's copy of Bling has it (bling_orders): used for Amazon while Bling is on,
+    since Amazon only opens the buyer to approved restricted roles. Bling keeps one name, the
+    recipient's, which is also the buyer on the invoice."""
+    name = _clean(row.get("name"))
+    return _finish(
+        {"name": name, "document": _digits(row.get("document"))},
+        {
+            "name": name,
+            "street": _clean(row.get("street")),
+            "number": _clean(row.get("number")) or "S/N",
+            "complement": _clean(row.get("complement")),
+            "district": _clean(row.get("district")),
+            "city": _clean(row.get("city")),
+            "state": _uf(row.get("state")),
+            "postal_code": _digits(row.get("postal_code")),
+            "phone": "",
+        },
+    )
+
+
 READERS = {
     "ml": lambda raw: from_ml(raw.get("billing"), raw.get("shipment")),
     "shopee": from_shopee,
     "tiktok": from_tiktok,
     "magalu": from_magalu,
+    "amazon": from_bling_copy,
 }
 
 

@@ -148,7 +148,7 @@ def test_channel_without_reader_is_reported_not_read(erp):
     def reader(**_):
         raise AssertionError("não deveria ler")
 
-    assert rc.read_due(erp, "amazon", STORE, reader)["state"] == "not_supported"
+    assert rc.read_due(erp, "carrefour", STORE, reader)["state"] == "not_supported"
 
 
 def test_summary_has_counts_only(erp):
@@ -250,3 +250,43 @@ def test_unpaid_sale_is_not_read_for_its_buyer(erp):
                 [values.get(c, "x") for c in columns],
             )
         assert rc.due(db, "tiktok", STORE) == {"T2": "AWAITING_SHIPMENT"}
+
+
+BLING_ROW = {
+    "order_id": "701-0682183-0588210",
+    "name": "Ana Souza",
+    "document": "529.982.247-25",
+    "street": "Rua Exemplo",
+    "number": "20",
+    "complement": "Casa 2",
+    "district": "Centro",
+    "city": "Belo Horizonte",
+    "state": "MG",
+    "postal_code": "30110-000",
+}
+
+
+def test_amazon_buyer_comes_from_the_bling_copy_while_bling_is_on():
+    projection = cr.project("amazon", BLING_ROW)
+    assert projection["ready"] is True and projection["missing"] == []
+    assert projection["buyer"] == {"name": "Ana Souza", "document": CPF}
+    assert projection["recipient"]["postal_code"] == "30110000"
+    assert projection["recipient"]["ibge_code"]
+
+
+def test_bling_copy_reader_asks_only_for_valid_amazon_numbers():
+    asked = []
+
+    def read(sql):
+        asked.append(sql)
+        return [BLING_ROW, {"order_id": "701-0000000-0000000", "name": None, "document": None}]
+
+    reader = rc.bling_copy_reader(read)
+    replies = reader(
+        channel="amazon",
+        store=STORE,
+        ids=["701-0682183-0588210", "x'); drop", "701-0000000-0000000"],
+    )
+    assert list(replies) == ["701-0682183-0588210"]
+    assert "'701-0682183-0588210'" in asked[0] and "drop" not in asked[0]
+    assert reader(channel="shopee", store=STORE, ids=["701-0682183-0588210"]) == {}
