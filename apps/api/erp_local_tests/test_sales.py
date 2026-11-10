@@ -175,3 +175,26 @@ def test_business_situation_is_separate_from_stock_and_batch_failure_is_atomic(e
     assert doc(erp, first)["data"]["situation"] == "shipped"
     run(erp, "order.situation", {"id": second, "status": "draft"})
     assert doc(erp, second)["status"] == "draft"
+
+
+def test_order_keeps_transport_intermediary_and_purchase_order(erp):
+    identifier = run(
+        erp,
+        "order.save",
+        body(
+            transport={
+                "carrier": "Transp X",
+                "freight_mode": "1",
+                "volumes": "2",
+                "gross_weight": "1,5",
+            },
+            intermediary={"cnpj": "03.007.331/0001-41", "account": "V1"},
+            purchase_order="PC-77",
+        ),
+    )["id"]
+    data = doc(erp, identifier)["data"]
+    assert data["transport"]["freight_mode"] == "1" and data["transport"]["volumes"] == "2"
+    assert data["intermediary"] == {"cnpj": "03007331000141", "account": "V1"}
+    assert data["purchase_order"] == "PC-77"
+    with pytest.raises(ERPError):
+        run(erp, "order.save", body(external_id="M-2", transport={"freight_mode": "7"}))

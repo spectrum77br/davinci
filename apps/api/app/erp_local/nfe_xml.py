@@ -335,6 +335,14 @@ def build(spec):
         + _total(sums)
         + f"<transp>{_tag('modFrete', spec['freight_mode'])}{carrier}{volume}</transp>"
         + f"<pag>{payments}</pag>"
+        + (
+            "<infIntermed>"
+            + _tag("CNPJ", spec["intermediary_info"]["cnpj"])
+            + _tag("idCadIntTran", spec["intermediary_info"].get("account") or "0")
+            + "</infIntermed>"
+            if spec.get("intermediary_info")
+            else ""
+        )
         + (f"<infAdic>{_tag('infCpl', spec['notes'])}</infAdic>" if spec.get("notes") else "")
         + "<infRespTec>"
         + _tag("CNPJ", technical["cnpj"])

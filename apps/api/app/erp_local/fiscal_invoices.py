@@ -297,12 +297,15 @@ def build_spec(company, order, *, number, code, issued_at, environment="homologa
         "issued_at": issued_at,
         "nature": profile["nature"],
         "presence": profile["presence"],
-        "freight_mode": profile["freight_mode"],
+        "freight_mode": (order.get("transport") or {}).get("freight_mode")
+        or profile["freight_mode"],
         "software": SOFTWARE,
         "payments": [{"type": profile["payment"], "description": "Outros", "amount": sums["vNF"]}]
         if profile["payment"] == "99"
         else [{"type": profile["payment"], "amount": sums["vNF"]}],
-        "transport": {"net_weight": weights[0], "gross_weight": weights[1]},
+        "transport": _order_transport(order, weights),
+        "intermediary": "1" if order.get("intermediary") else "0",
+        "intermediary_info": order.get("intermediary"),
         "notes": order.get("notes") or "",
         "technical": company["technical"],
     }
@@ -912,3 +915,14 @@ def snapshot(db):
             for r in db.execute("SELECT * FROM fiscal_invoices ORDER BY rowid DESC LIMIT 500")
         ],
     }
+
+
+def _order_transport(order, weights):
+    """Volumes, weight and carrier typed on the order win over the product weights."""
+    typed = order.get("transport") or {}
+    out = {"net_weight": weights[0], "gross_weight": typed.get("gross_weight") or weights[1]}
+    if typed.get("volumes"):
+        out["volumes"] = typed["volumes"]
+    if typed.get("carrier") and typed.get("carrier_cnpj"):
+        out["carrier"] = {"cnpj": typed["carrier_cnpj"], "name": typed["carrier"]}
+    return out

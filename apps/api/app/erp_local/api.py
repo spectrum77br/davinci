@@ -1,6 +1,7 @@
 """Separate local entry point; never mounted by app.main."""
 
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -971,7 +972,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             if depot:
                 erp.depot(db, depot)
             rows = db.execute(
-                "SELECT m.*,e.kind FROM movements m "
+                "SELECT m.*,e.kind,e.payload FROM movements m "
                 "JOIN events e ON e.operation_key=m.operation_key "
                 "WHERE m.sku=? AND (?='' OR m.depot=?) ORDER BY m.id",
                 (sku, depot, depot),
@@ -980,6 +981,8 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             for row in rows:
                 running += Decimal(row["physical_delta"])
                 item = {**dict(row), "balance": str(running)}
+                payload = json.loads(item.pop("payload") or "{}")
+                item["purchase_price"] = payload.get("purchase_price") or None
                 try:
                     cost = Decimal(row["unit_cost"])
                     item["unit_cost"] = str(cost) if cost.is_finite() else None
@@ -997,6 +1000,80 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             "sku": sku,
             "depot": depot,
         }
+
+    @app.get("/api/erp-local/orders/{order_id}/print")
+    def print_one_order(order_id: str, mode: str = "detail"):
+        """Bling's "Imprimir c/ detalhes" and "Imprimir comprovante" for one order."""
+        from html import escape
+
+        from app.erp_local import bling_compat
+
+        if mode not in {"detail", "receipt"}:
+            raise ERPError("print_mode", "Escolha detalhes ou comprovante.", 404)
+        with erp.connection() as db:
+            doc, data = erp.document(db, order_id, "order")
+            number = bling_compat.own_number(bling_compat.numeric_id(db, "order", doc["id"]))
+            db.commit()
+        e = lambda v: escape(str(v if v is not None else ""))  # noqa: E731
+        money = lambda v: e(f"{float(v or 0):.2f}".replace(".", ","))  # noqa: E731
+        place = data.get("recipient") or data.get("contact") or {}
+        address = " · ".join(
+            x
+            for x in [
+                ", ".join(p for p in [place.get("street"), place.get("number")] if p),
+                place.get("complement"),
+                place.get("district"),
+                " / ".join(p for p in [place.get("city"), place.get("state")] if p),
+                place.get("postal_code"),
+            ]
+            if x
+        )
+        snaps = data.get("product_snapshots") or {}
+        rows = ""
+        for i in data["items"]:
+            name = (snaps.get(i["sku"]) or {}).get("name") or i["sku"]
+            line = float(i["quantity"]) * float(i["unit_price"])
+            cells = [e(name), e(i["sku"]), e(i["quantity"]), money(i["unit_price"]), money(line)]
+            rows += "<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>"
+        payment = e((data.get("payment_method") or {}).get("name")) or "—"
+        transport = data.get("transport") or {}
+        carrier = e(transport.get("carrier")) or "—"
+        volumes = e(transport.get("volumes")) or "—"
+        when = e(data.get("date"))
+        head = (
+            f"<p>Pedido nº {e(number)} · loja {e(data.get('external_id'))} · data {when}</p>"
+            f"<p>Cliente: {e(data.get('customer_name'))}<br>Entrega: {e(address) or '—'}</p>"
+        )
+        total = money(data.get("total"))
+        if mode == "receipt":
+            body = (
+                head
+                + f"<p>Total: R$ {total} · Pagamento: {payment}</p>"
+                + "<p>Recebi os produtos deste pedido em perfeito estado.</p>"
+                + "<p>Data: ____/____/______ &nbsp; Assinatura: ______________________________</p>"
+            )
+            title = "Comprovante do pedido"
+        else:
+            sums = (
+                f"Itens: R$ {money(data.get('subtotal'))} · Frete: R$ {money(data.get('freight'))}"
+                f" · Desconto: R$ {money(data.get('discount'))} · Total: R$ {total}"
+            )
+            body = (
+                head
+                + "<table><thead><tr><th>Descrição</th><th>Código</th><th>Qtd</th>"
+                + f"<th>Preço un</th><th>Total</th></tr></thead><tbody>{rows}</tbody></table>"
+                + f"<p>{sums}</p>"
+                + f"<p>Pagamento: {payment} · Transportador: {carrier} · Volumes: {volumes}</p>"
+                + (f"<p>Observações: {e(data.get('notes'))}</p>" if data.get("notes") else "")
+            )
+            title = "Pedido de venda"
+        return Response(
+            '<!doctype html><html lang="pt-BR"><meta charset="utf-8">'
+            f"<title>DaVinci · {title}</title>"
+            '<link rel="stylesheet" href="/assets/print.css">'
+            f"<h1>DaVinci · {title}</h1>{body}",
+            media_type="text/html; charset=utf-8",
+        )
 
     @app.get("/api/erp-local/orders/print")
     def print_orders(ids: str):

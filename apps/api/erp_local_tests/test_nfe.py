@@ -829,3 +829,22 @@ def test_sale_note_can_still_be_prepared_after_a_return_of_another_order(erp, in
             key="repete",
         )
     assert invoice_row(erp, result["id"])["status"] == "draft"
+
+
+def test_order_transport_and_intermediary_reach_the_note():
+    spec = spec_for(
+        "4",
+        transport={
+            "freight_mode": "1",
+            "volumes": "2",
+            "gross_weight": "1.5",
+            "carrier": "Transp X",
+            "carrier_cnpj": "11222333000181",
+        },
+        intermediary={"cnpj": "03007331000141", "account": "VENDEDOR-1"},
+    )
+    xml = nfe_xml.build(spec)["xml"]
+    assert "<modFrete>1</modFrete>" in xml and "<qVol>2</qVol>" in xml
+    assert "<pesoB>1.500</pesoB>" in xml and "<xNome>Transp X</xNome>" in xml
+    assert "<indIntermed>1</indIntermed>" in xml
+    assert "<infIntermed><CNPJ>03007331000141</CNPJ><idCadIntTran>VENDEDOR-1</idCadIntTran>" in xml

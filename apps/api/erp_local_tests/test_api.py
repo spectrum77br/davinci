@@ -170,6 +170,13 @@ def test_selected_order_print_escapes_customer_and_excludes_other_orders(tmp_pat
         assert "<script>never()" not in response.text and "UNSELECTED" not in response.text
         assert erp.snapshot() == before
         assert c.get("/api/erp-local/orders/print", params={"ids": "absent"}).status_code == 404
+        one = f"/api/erp-local/orders/{selected['id']}/print"
+        detail = c.get(one, params={"mode": "detail"})
+        receipt = c.get(one, params={"mode": "receipt"})
+        assert detail.status_code == 200 and "Pedido de venda" in detail.text
+        assert "demo.kit" in detail.text and "&lt;script&gt;" in detail.text
+        assert receipt.status_code == 200 and "Comprovante do pedido" in receipt.text
+        assert c.get(one, params={"mode": "carne"}).status_code == 404
 
 
 def test_purchase_exports_preserve_selection_escape_content_and_do_not_post_effects(tmp_path):
@@ -278,3 +285,30 @@ def test_app_start_recovers_durable_unprocessed_receipts(tmp_path, monkeypatch):
         state = c.get("/api/erp-local/state").json()
         assert state["channels"]["inbox_counts"] == {"processed": 1}
         assert len(state["orders"]) == 1
+
+
+def test_stock_entry_keeps_the_purchase_price_in_the_history(tmp_path):
+    from app.erp_local.core import LocalERP
+
+    database = tmp_path / "price.sqlite3"
+    erp = LocalERP(database)
+    erp.command("seed", "demo.seed", {})
+    erp.command(
+        "e1",
+        "stock.post",
+        {
+            "sku": "demo.aparelho",
+            "depot": "geral",
+            "type": "E",
+            "quantity": "2",
+            "reason": "compra",
+            "unit_cost": "40",
+            "purchase_price": "38.5",
+        },
+    )
+    with TestClient(create_app(database), base_url="http://127.0.0.1:8765") as c:
+        items = c.get("/api/erp-local/stock-movements", params={"sku": "demo.aparelho"}).json()[
+            "items"
+        ]
+    entry = next(i for i in items if i["reason"] == "compra")
+    assert entry["purchase_price"] == "38.5" and float(entry["unit_cost"]) == 40

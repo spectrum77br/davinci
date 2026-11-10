@@ -44,7 +44,60 @@ SAVE_FIELDS = {
     "seller_id",
     "proposal_id",
     "proposal_version",
+    "transport",
+    "intermediary",
+    "purchase_order",
 }
+FREIGHT_MODES = {"0", "1", "2", "3", "4", "9"}
+
+
+def _transport(raw):
+    """Transportador block of Bling's order: who carries, who pays the freight, volumes, weight."""
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, dict) or set(raw) - {
+        "carrier",
+        "carrier_cnpj",
+        "freight_mode",
+        "volumes",
+        "gross_weight",
+        "service",
+    }:
+        raise ERPError("sale_transport", "Dados do transportador não reconhecidos.")
+    mode = str(raw.get("freight_mode") or "")
+    if mode and mode not in FREIGHT_MODES:
+        raise ERPError("sale_transport", "Escolha a modalidade do frete.")
+    cnpj = "".join(c for c in str(raw.get("carrier_cnpj") or "") if c.isdigit())
+    if cnpj and len(cnpj) != 14:
+        raise ERPError("sale_transport", "CNPJ do transportador inválido.")
+    volumes = str(raw.get("volumes") or "").strip()
+    if volumes and (not volumes.isdigit() or int(volumes) > 9999):
+        raise ERPError("sale_transport", "Quantidade de volumes inválida.")
+    weight = str(raw.get("gross_weight") or "").strip().replace(",", ".")
+    if weight:
+        weight = str(number(weight, zero=True))
+    out = {
+        "carrier": str(raw.get("carrier") or "").strip()[:120],
+        "carrier_cnpj": cnpj,
+        "freight_mode": mode,
+        "volumes": volumes,
+        "gross_weight": weight,
+        "service": str(raw.get("service") or "").strip()[:120],
+    }
+    return {k: v for k, v in out.items() if v} or None
+
+
+def _intermediary(raw):
+    """The marketplace that sold for us: NF-e asks its CNPJ and the seller's id there."""
+    if raw in (None, ""):
+        return None
+    if not isinstance(raw, dict) or set(raw) - {"cnpj", "account"}:
+        raise ERPError("sale_intermediary", "Dados do intermediador não reconhecidos.")
+    cnpj = "".join(c for c in str(raw.get("cnpj") or "") if c.isdigit())
+    if cnpj and len(cnpj) != 14:
+        raise ERPError("sale_intermediary", "CNPJ do intermediador inválido.")
+    account = str(raw.get("account") or "").strip()[:60]
+    return {"cnpj": cnpj, "account": account} if cnpj else None
 
 
 def receipt(db, identifier):
@@ -219,6 +272,14 @@ def apply(erp, db, key, kind, p, *, pos_cash_id=None):
             },
             "situation": status,
         }
+        for field, value in (
+            ("transport", _transport(p.get("transport"))),
+            ("intermediary", _intermediary(p.get("intermediary"))),
+            ("purchase_order", str(p.get("purchase_order") or "").strip()[:60]),
+        ):
+            data.pop(field, None)
+            if value:
+                data[field] = value
         data.pop("seller", None)
         seller = sellers.bind(db, p.get("seller_id"), old, subtotal, amounts["discount"])
         if seller:

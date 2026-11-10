@@ -638,6 +638,7 @@ class LocalERP:
                 "reason",
                 "destination",
                 "unit_cost",
+                "purchase_price",
             },
             "stock.transfer": {"sku", "depot", "type", "quantity", "reason", "destination"},
             "order.import": {
@@ -803,6 +804,9 @@ class LocalERP:
                     if p.get("unit_cost") not in (None, "")
                     else None
                 )
+                # Bling's "Preço de compra" of the entry: kept with the operation, shown in history.
+                if p.get("purchase_price") not in (None, ""):
+                    number(p["purchase_price"], unit=True, zero=True)
                 self.move(db, key, sku, depot, delta, Decimal(0), reason, cost)
             return {"sku": sku, "depot": depot}
         if kind == "order.import":
