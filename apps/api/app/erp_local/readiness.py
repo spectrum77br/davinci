@@ -103,8 +103,9 @@ def gates(db):
             "area": "Lojas",
             "title": "Temu, Shein e AliExpress",
             "state": PENDING,
-            "detail": "Temu: 43 pedidos em 30 dias, precisa conectar as 3 lojas no DaVinci. "
-            "Shein e AliExpress: 1 por mês cada, lançados à mão.",
+            "detail": "Temu (41 pedidos em 30 dias, 4 lojas): aparece pela cópia do Bling enquanto "
+            "ele estiver ligado; na troca, o nosso app próprio (Stock Sync Hub) é autorizado "
+            "e a chave fica no servidor do ERP. Shein e AliExpress: 1 por mês, à mão.",
         },
         {
             "id": "nfe_homologation",

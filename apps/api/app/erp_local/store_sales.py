@@ -22,6 +22,11 @@ REASONS = {
     "total_unknown": "Frete ou cupom ainda não lidos",
 }
 SETTLED = {"cursor": "9999-12-31T00:00:00+00:00"}
+# Stores the ERP does not read yet, shown from DaVinci's copy of Bling (hourly reference) while
+# Bling owns them. Temu: no own app authorized yet; at the switch our own app is authorized and
+# its key stays on the ERP server (Bling's key belongs to Bling's app and leaves with it).
+COPIED = {"temu": lambda number: number.startswith("PO-")}
+COPY_NOTE = "Pela cópia do Bling: o ERP ainda não lê esta loja direto"
 
 
 def _situation_id(value):
@@ -60,6 +65,43 @@ def _bling_orders(db):
     return seen
 
 
+def _copied(db, bling):
+    """Sales of stores the ERP does not read yet, as DaVinci's copy of Bling has them."""
+    import sqlite3
+
+    try:
+        rows = db.execute("SELECT data FROM reference_rows WHERE kind='orders'").fetchall()
+    except sqlite3.OperationalError:
+        return []
+    found = []
+    for row in rows:
+        order = json.loads(row[0])
+        number = str(order.get("store_number") or "")
+        channel = next((c for c, match in COPIED.items() if number and match(number)), None)
+        if not channel:
+            continue
+        live = bling.get(number) or {}
+        store = str(order.get("store") or "")
+        found.append(
+            {
+                "number": number,
+                "channel": channel,
+                "store_id": store,
+                "store": f"Temu · loja {store} no Bling" if channel == "temu" else store,
+                "created_at": str(order.get("date") or ""),
+                "status": "Cópia do Bling",
+                "total": f"{float(order.get('total') or 0):.2f}",
+                "buyer": "",
+                "skus": sorted({str(i.get("sku") or "") for i in order.get("items") or []} - {""}),
+                "blocked": [COPY_NOTE],
+                "bling_number": str(live.get("number") or order.get("number") or ""),
+                "bling_situation": _situation_id(live.get("situation") or order.get("situation")),
+                "source": "bling_copy",
+            }
+        )
+    return found
+
+
 def listing(db, query="", offset=0, limit=50, situation=None):
     names, sales, bling = _names(db), [], _bling_orders(db)
     accounts = db.execute("SELECT DISTINCT channel,store FROM native_order_observations").fetchall()
@@ -92,6 +134,7 @@ def listing(db, query="", offset=0, limit=50, situation=None):
                     "bling_situation": _situation_id((bling.get(key) or {}).get("situation")),
                 }
             )
+    sales.extend(_copied(db, bling))
     text = (query or "").strip().casefold()
     if text:
         sales = [

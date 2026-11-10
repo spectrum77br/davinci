@@ -97,3 +97,32 @@ def test_list_shows_bling_number_and_situation_and_filters_like_bling(erp):
     assert first["bling_number"] == "307565" and first["bling_situation"] == 6
     assert everything["items"][1]["bling_situation"] is None
     assert [s["number"] for s in open_only["items"]] == ["B1"]
+
+
+def test_temu_sales_come_from_the_bling_copy_until_the_erp_reads_temu(erp):
+    temu = {
+        "store_number": "PO-029-08888714599033690",
+        "number": "303455",
+        "situation": "15",
+        "store": "205925390",
+        "date": "2026-11-09T03:00:00+00:00",
+        "total": "47.93",
+        "items": [{"sku": "a076", "quantity": 1, "unit_price": "37.93"}],
+    }
+    with erp.connection() as db:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS reference_rows (kind TEXT, id TEXT, data TEXT, search TEXT)"
+        )
+        db.execute("INSERT INTO reference_rows VALUES ('orders','9',?,'')", (json.dumps(temu),))
+        db.execute(
+            "INSERT INTO reference_rows VALUES ('orders','8',?,'')",
+            (json.dumps({"store_number": "2000009", "number": "1", "situation": "6"}),),
+        )
+        result = store_sales.listing(db)
+        found = store_sales.listing(db, query="po-029-0888")
+    (sale,) = result["items"]
+    assert sale["channel"] == "temu" and sale["source"] == "bling_copy"
+    assert sale["bling_number"] == "303455" and sale["bling_situation"] == 15
+    assert sale["skus"] == ["a076"] and sale["total"] == "47.93"
+    assert sale["blocked"] == [store_sales.COPY_NOTE]
+    assert found["total"] == 1

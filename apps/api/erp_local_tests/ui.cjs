@@ -1170,6 +1170,24 @@ test('read sales can be picked and printed together, and tracking is asked per s
   assert.equal(requests.at(-1).url,'/api/erp-local/store-sales/tracking');
 });
 
+test('Temu sales from the Bling copy show without labels, tracking or detail',async()=>{
+  const {dom,document:d}=await setup({});
+  dom.window.fetch=async (url)=>{
+    if(url.includes('/store-sales'))return {ok:true,status:200,json:async()=>({total:1,offset:0,items:[{number:'PO-029-1',channel:'temu',store_id:'205925390',store:'Temu · loja 205925390 no Bling',created_at:'2026-11-09',status:'Cópia do Bling',total:'47.93',buyer:'',skus:['a076'],blocked:['Pela cópia do Bling'],bling_number:'303455',bling_situation:15,source:'bling_copy'}]})};
+    return {ok:true,status:200,json:async()=>({})};
+  };
+  d.querySelector('[data-menu-target="orders"]')?.click();
+  dom.window.eval("salesView='store'");
+  d.querySelector('[data-sales-view="store"]').click();
+  await new Promise(r=>setTimeout(r,20));
+  assert.ok(d.body.textContent.includes('PO-029-1'));
+  assert.ok(d.body.textContent.includes('303455'));
+  assert.equal(d.querySelector('[data-label-pick]'),null);
+  assert.equal(d.querySelector('[data-tracking]'),null);
+  assert.equal(d.querySelector('[data-store-sale]'),null);
+  assert.ok(d.querySelector('.store-mark[title="Temu"]'));
+});
+
 test('order rows show the store mark, store number, Flex and first sale like Bling',async()=>{
   const base={status:'reserved',data:{items:[],total:'10',created_at:'2026-11-09T10:00:00'}};
   const orders=[
