@@ -106,3 +106,16 @@ def test_situation_stops_once_a_store_is_switched(erp):
         )
     report = catalog_follow.follow_status(erp, [row("100", "demo.aparelho", situacao="E")])
     assert report == {"state": "stopped"} and status(erp, "demo.aparelho") == "active"
+
+
+def test_new_products_stop_coming_from_bling_once_a_store_is_switched(erp):
+    with erp.connection() as db:
+        columns = [r[1] for r in db.execute("PRAGMA table_info(ingest_accounts)")]
+        values = {"channel": "ml", "store": "c", "enabled": 1, "authority": "own", "failures": 0}
+        db.execute(
+            f"INSERT INTO ingest_accounts({','.join(columns)}) "  # noqa: S608
+            f"VALUES ({','.join('?' * len(columns))})",
+            [values.get(c, "2026-11-10") for c in columns],
+        )
+    assert catalog_follow.follow(erp, [row("900", "novo.ci")], []) == {"state": "stopped"}
+    assert kind(erp, "novo.ci") is None

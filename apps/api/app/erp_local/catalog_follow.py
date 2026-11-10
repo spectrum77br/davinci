@@ -125,9 +125,14 @@ def follow_status(erp, products):
 
 
 def follow(erp, products, components):
-    """One pass over DaVinci's mirror of Bling: what came in, and what a person must look at."""
+    """One pass over DaVinci's mirror of Bling: what came in, and what a person must look at.
+    Once a store is switched the catalog is the ERP's: nothing more comes from Bling."""
+    from app.erp_local import bling_mirror
+
     report = {"created": 0, "refused": {}}
     with erp.connection() as db:
+        if bling_mirror.switched(db):
+            return {"state": "stopped"}
         origin = {}
         for row in db.execute("SELECT sku,data FROM catalog_origin"):
             source = json.loads(row["data"]).get("bling_product_id")

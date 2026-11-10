@@ -132,3 +132,34 @@ def test_inactive_product_sends_zero(erp):
     assert result["iguais"] == 1
     assert result["diferencas"][0]["erp_mandaria"] == 0
     assert result["diferencas"][0]["motivo"] == preview.REASONS["inativo"]
+
+
+def test_without_davinci_keys_the_family_rule_of_10_11_is_used_and_named(monkeypatch):
+    import os
+
+    for name in list(os.environ):
+        if name.upper().startswith("ESTOQUE_FAMILIA_"):
+            monkeypatch.delenv(name)
+    family = preview.family_settings()
+    assert family["active"] is True and family["minimum"] == 5
+    assert family["source"] == "DaVinci em 10/11"
+
+
+def test_daily_preview_is_written_beside_the_database(erp, tmp_path):
+    from app.erp_local import service_loop
+
+    def reader(sql):
+        return [link("demo.aparelho", 8)] if sql == preview.LINKS_SQL else []
+
+    output = tmp_path / "previa-anuncios-2026-11-10.json"
+    service_loop.listing_preview(erp, output, reader)
+    written = json.loads(output.read_text("utf-8"))
+    assert written["iguais"] == 1 and written["soma_da_familia"]["origem"]
+
+    def broken(sql):
+        from app.erp_local.core import ERPError
+
+        raise ERPError("source_unavailable", "fora")
+
+    service_loop.listing_preview(erp, tmp_path / "nada.json", broken)
+    assert not (tmp_path / "nada.json").exists()

@@ -42,8 +42,18 @@ REASONS = {
 }
 
 
+# The family sum as DaVinci's workers ran it on 10/11/2026 (on, every line, floor 5). The ERP
+# worker does not carry DaVinci's ESTOQUE_FAMILIA_* keys; when they are absent these are used and
+# the report says so, so a change in DaVinci shows up as a family difference, not silence.
+FAMILY_10_11 = {"active": True, "prefixes": (), "minimum": 5, "source": "DaVinci em 10/11"}
+
+
 def family_settings():
-    """The family-sum switches DaVinci runs with; off when they cannot be read."""
+    """The family-sum switches DaVinci runs with."""
+    import os
+
+    if not any(name.upper().startswith("ESTOQUE_FAMILIA_") for name in os.environ):
+        return dict(FAMILY_10_11)
     try:
         from app.config import get_settings
 
@@ -56,9 +66,10 @@ def family_settings():
                 if p.strip()
             ),
             "minimum": int(getattr(s, "estoque_familia_minimo", 0) or 0),
+            "source": "configuração",
         }
     except Exception:  # noqa: BLE001 - outside DaVinci the sum is simply off
-        return {"active": False, "prefixes": (), "minimum": 0}
+        return {"active": False, "prefixes": (), "minimum": 0, "source": "sem configuração"}
 
 
 def _int(value):
@@ -218,6 +229,7 @@ def compare(db, links, davinci_products, family):
             "ligada": family["active"],
             "prefixos": list(family["prefixes"]),
             "minimo": family["minimum"],
+            "origem": family.get("source", "informada"),
         },
         "lojas": [
             {"canal": ch, "loja": st, **dict(counts)} for (ch, st), counts in sorted(stores.items())

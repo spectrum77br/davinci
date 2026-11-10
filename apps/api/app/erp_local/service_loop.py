@@ -69,6 +69,21 @@ def stock_daily(erp, output):
         log.warning("conferência de estoque não concluída: %s", type(error).__name__)
 
 
+def listing_preview(erp, output, reader=None):
+    """Once a day, right after the Bling mirror: the stock each listing would get from the ERP."""
+    from app.erp_local import stock_publish_preview
+
+    try:
+        result = stock_publish_preview.run(erp, reader)
+        output.write_text(dumps(result) + "\n", "utf-8")
+        log.info(
+            "prévia dos anúncios %s",
+            {k: result[k] for k in ("anuncios", "iguais", "diferentes", "motivos")},
+        )
+    except (ERPError, OSError, ValueError) as error:
+        log.warning("prévia dos anúncios não concluída: %s", type(error).__name__)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Recepção contínua das lojas")
     parser.add_argument("--database", required=True, type=Path)
@@ -76,7 +91,7 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     erp = LocalERP(args.database)
-    rounds, checked_on = 0, None
+    rounds, checked_on, previewed_on = 0, None, None
     while True:
         if os.environ.get("ERP_READ_TRANSPORT") == "local" and rounds % REFRESH_EVERY == 0:
             # Stores, listings and links change in DaVinci; keep the copy here fresh.
@@ -119,6 +134,9 @@ def main():
             from app.erp_local import bling_mirror
 
             log.info("espelho do Bling %s", bling_mirror.run(erp))
+            if today != previewed_on:
+                previewed_on = today
+                listing_preview(erp, args.database.parent / f"previa-anuncios-{today}.json")
         if os.environ.get(recipient_capture.CAPTURE_ENV) == "1":
             from app.erp_local import ml_shipping, store_labels
 
