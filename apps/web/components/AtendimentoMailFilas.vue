@@ -11,6 +11,8 @@
 // mesmas filas, as pastas e a saúde — a API já recorta pelas lojas dele e pelos
 // e-mails sem loja — e, sem `podeMexer`, nenhuma ação aparece: escolher a loja,
 // vincular, tirar da fila, reprocessar, Saiu/Não saiu, mudar pastas e palavras.
+// A marca de leitura das conversas é a exceção: quem pode ler pode registrar
+// que leu, pela mesma rota usada ao abrir a conversa.
 //
 // O E-MAIL SAIU DA CAIXA (13/10/2026 — o dono: "o e-mail aparece só na aba de
 // e-mail; a do chat aparece só no chat"): as conversas de e-mail da ponte não
@@ -278,7 +280,7 @@ export const ESTADO_DA_CAIXA: Record<string, string> = {
 </script>
 
 <script setup lang="ts">
-import { ChevronDown, ChevronUp, Download, ExternalLink, Loader2, MailWarning, RefreshCw, RotateCcw, ShieldAlert, TriangleAlert } from 'lucide-vue-next'
+import { Check, ChevronDown, ChevronUp, Download, ExternalLink, Loader2, MailCheck, MailWarning, RefreshCw, RotateCcw, ShieldAlert, TriangleAlert } from 'lucide-vue-next'
 import { erroDaApi, fmtDataHora, plataformaInfo, prazoDe } from '~/components/AtendimentoPlataforma.vue'
 import { avisosDeProtecao, destinoDaLoja, remetenteLegivel, tamanhoLegivel, urlDoAnexo, type CartaoEmail } from '~/components/AtendimentoEmailCartao.vue'
 
@@ -492,6 +494,39 @@ async function abrir(item: ItemFila) {
       const er = erroDaApi(e, 'Não consegui abrir o e-mail')
       toasts.error(er.texto, er.motivos)
     }
+  }
+}
+
+// A leitura é local ao DaVinci. Usa o limite da lista para não consumir uma
+// mensagem que chegou durante o clique; não responde nem fecha o chamado.
+async function marcarComoLido(c: ConversaResumo) {
+  if (ocupado.value || carregando.value || c.email_lido === true) return
+  ocupado.value = `lido:${c.id}`
+  try {
+    let ate = c.email_visto_ate
+    if (!ate) {
+      // Compatibilidade durante a publicação: a API antiga só informa o
+      // horário de chegada no detalhe, nunca em ultima_mensagem_em.
+      const d = await api<{ visto_ate?: string | null }>(`/api/atendimento/conversas/${encodeURIComponent(c.id)}`)
+      ate = d.visto_ate
+    }
+    if (!ate) {
+      toasts.info('Esta conversa ainda não tem mensagens para marcar como lidas.')
+      return
+    }
+    const r = await api<{ conversa?: ConversaResumo | null }>(`/api/atendimento/conversas/${encodeURIComponent(c.id)}/visto`, { method: 'POST', body: { ate } })
+    if (r.conversa?.id === c.id) {
+      conversas.value = conversas.value.map((item) => item.id === c.id ? { ...item, ...r.conversa } : item)
+    } else {
+      await carregar()
+    }
+    toasts.success('Marcado como lido no DaVinci')
+    await carregarContagens()
+  } catch (e: any) {
+    const er = erroDaApi(e, 'Não consegui marcar o e-mail como lido')
+    toasts.error(er.texto, er.motivos)
+  } finally {
+    ocupado.value = null
   }
 }
 
@@ -727,6 +762,10 @@ const curto = (p: string) => plataformaInfo(p).curto
           <div v-if="c.ultima_mensagem_resumo" class="line-clamp-2 break-words text-muted-foreground">{{ c.ultima_mensagem_resumo }}</div>
           <div class="flex flex-wrap items-center gap-2 pt-1">
             <button type="button" class="underline" data-abrir-conversa-email @click="emit('abrirConversa', c.id)">abrir a conversa</button>
+            <span v-if="c.email_lido === true" class="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-300" title="Lido no DaVinci" data-email-lido><Check class="size-3.5" />Lido</span>
+            <button v-else type="button" class="inline-flex items-center gap-1 rounded border px-2 py-1 hover:bg-muted disabled:opacity-50" :disabled="!!ocupado || carregando" title="Marca a leitura no DaVinci; o chamado continua aberto e a resposta pendente permanece." data-marcar-email-lido @click="marcarComoLido(c)">
+              <Loader2 v-if="ocupado === `lido:${c.id}`" class="size-3.5 animate-spin" /><MailCheck v-else class="size-3.5" />{{ ocupado === `lido:${c.id}` ? 'Marcando…' : 'Marcar como lido' }}
+            </button>
             <span v-if="c.email?.alias" class="ml-auto break-all text-muted-foreground">para {{ c.email.alias }}</span>
           </div>
         </li>

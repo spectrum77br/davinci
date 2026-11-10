@@ -174,6 +174,11 @@ class ConversaResumoOut(BaseModel):
     # mensagem do comprador que chegou depois dele; a tela relê o /resumo
     # quando ele muda. None = ninguém abriu (e no Direct).
     visto_em: datetime | None = None
+    # Nas filas de e-mail, a chegada mais recente é o limite do POST /visto.
+    # O horário de envio (`ultima_mensagem_em`) pode ser antigo numa importação.
+    # None nos outros canais; ler não resolve nem fecha a conversa.
+    email_visto_ate: datetime | None = None
+    email_lido: bool | None = None
     # Uma migração conferida inicia um controle próprio de leitura. O ID
     # impede que um POST da tela anterior consuma mensagens da nova base.
     notificacoes_migracao_id: str | None = None

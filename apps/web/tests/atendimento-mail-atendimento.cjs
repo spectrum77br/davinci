@@ -134,6 +134,58 @@ const H = requerer('~/components/AtendimentoEmailChamado.vue')
 const P = requerer('~/components/AtendimentoPlataforma.vue')
 
 async function principal() {
+  // Marcar lido sem abrir a conversa: persistência, paginação, falha e uma
+  // mensagem que chega durante o clique (não fica lida por acidente).
+  {
+    const limite = '2026-11-10T12:00:00Z'
+    const c = { id: 'read-1', plataforma: 'site', canal: 'email', comprador_nome: 'Cliente', email: {}, email_lido: false, email_visto_ate: limite, ultima_mensagem_em: '2026-11-01T12:00:00Z', aguardando_resposta: true, situacao: 'aberta' }
+    let atual = { ...c }
+    let falha = false
+    let chegouNova = false
+    const m = montar('../components/AtendimentoMailFilas.vue', { isAdmin: false, podeMexer: false, lojas: [] }, { respostas: {
+      '/api/atendimento/conversas/read-1/visto': () => {
+        if (falha) return new Error('Falha de rede')
+        atual = { ...atual, email_lido: !chegouNova, visto_em: limite, email_visto_ate: chegouNova ? '2026-11-10T12:00:01Z' : limite }
+        return { conversa: atual }
+      },
+      '/api/atendimento/conversas/read-1': { visto_ate: limite },
+      '/api/atendimento/conversas?caixa=email&plataforma=site&filtro=todas&limite=50': () => ({ itens: [atual], proximo: null }),
+      '/api/atendimento/email/contagens': { chamados: 1, aguardando: 1, chamados_por_tipo: { sac: 1 } },
+    } })
+    await m.montar()
+    assert.match(await m.html(), /data-marcar-email-lido[^>]*>[\s\S]*?Marcar como lido/)
+    m.estado.conversas.push({ ...c, id: 'pagina-2' })
+    m.estado.proximo = 'mais'
+    await Promise.all([m.estado.marcarComoLido(c), m.estado.marcarComoLido(c)])
+    const posts = m.chamadas.filter((x) => x.metodo === 'POST')
+    assert.equal(posts.length, 1, 'clique duplicado não duplica a ação')
+    assert.deepEqual(posts[0], { url: '/api/atendimento/conversas/read-1/visto', metodo: 'POST', body: { ate: limite } }, 'limite usa chegada, não a data de envio')
+    assert.equal(m.estado.conversas.length, 2, 'preserva páginas já carregadas')
+    assert.equal(m.estado.proximo, 'mais')
+    assert.equal(m.estado.conversas[0].aguardando_resposta, true)
+    assert.equal(m.estado.conversas[0].situacao, 'aberta')
+    assert.equal(m.estado.contagens.chamados, 1, 'lido não encerra chamado')
+    assert.match(await m.html(), /data-email-lido/)
+    await m.estado.carregar()
+    assert.equal(m.estado.conversas[0].email_lido, true, 'continua lido após recarregar')
+    assert.doesNotMatch(await m.html(), /data-marcar-email-lido/)
+    assert.ok(!m.chamadas.some((x) => /\/lida$|\/responder|\/fechar/.test(x.url)), 'sem alteração de plataforma ou resposta')
+
+    atual = { ...c }; falha = true
+    await m.estado.carregar()
+    await m.estado.marcarComoLido(atual)
+    assert.equal(m.estado.conversas[0].email_lido, false, 'falha não simula sucesso')
+    assert.equal(m.estado.ocupado, null)
+    assert.ok(m.avisos.some(([tipo]) => tipo === 'erro'))
+    falha = false; chegouNova = true
+    await m.estado.marcarComoLido(atual)
+    assert.equal(m.estado.conversas[0].email_lido, false, 'nova mensagem permanece não lida')
+    assert.match(await m.html(), /data-marcar-email-lido/)
+
+    chegouNova = false
+    await m.estado.marcarComoLido({ ...c, email_visto_ate: undefined })
+    assert.ok(m.chamadas.some((x) => x.url === '/api/atendimento/conversas/read-1' && x.metodo === 'GET'), 'API antiga fornece o limite no detalhe')
+  }
   {
     // Os três tipos vêm da API, filtram no servidor e preservam o caso.
     const tipos = ['informativo', 'chamado', 'venda']

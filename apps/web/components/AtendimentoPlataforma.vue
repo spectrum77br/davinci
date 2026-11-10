@@ -207,6 +207,9 @@ export type ConversaResumo = {
   // comprador que chegou depois dele; a página relê o /resumo quando ele
   // muda. A API antiga não manda.
   visto_em?: string | null
+  // Leitura das conversas de e-mail, pelo horário de chegada no DaVinci.
+  email_visto_ate?: string | null
+  email_lido?: boolean | null
   notificacoes_migracao_id?: string | null
   notificacoes_visto_em?: string | null
   // O número DESTA conversa na Caixa (15/10/2026): a mesma régua do número da

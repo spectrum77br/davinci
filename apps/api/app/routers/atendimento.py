@@ -1732,7 +1732,37 @@ async def _conversa_out(session: AsyncSession, c: AtendimentoConversa) -> Conver
     # `_nomes_das_lojas`).
     await _com_nome_da_loja(session, [base])
     await _com_estrelas_da_avaliacao(session, [base])
+    await _com_leitura_do_email(session, [base])
     return ConversaOut(**base)
+
+
+async def _com_leitura_do_email(session: AsyncSession, itens: list[dict[str, Any]]) -> None:
+    """Leitura local dos e-mails, em uma consulta para a página inteira.
+
+    A chegada (`created_at`), não o envio do e-mail, delimita o que a pessoa
+    está marcando. Uma mensagem importada depois do clique continua não lida,
+    mesmo se foi enviada antes. O POST /visto usa e devolve a mesma régua.
+    """
+    emails = [i for i in itens if i.get("email") is not None]
+    if not emails:
+        return
+    chegadas = dict(
+        (
+            await session.execute(
+                select(
+                    AtendimentoMensagem.conversa_id,
+                    func.max(AtendimentoMensagem.created_at),
+                )
+                .where(AtendimentoMensagem.conversa_id.in_([UUID(i["id"]) for i in emails]))
+                .group_by(AtendimentoMensagem.conversa_id)
+            )
+        ).all()
+    )
+    for item in emails:
+        ate = _utc(chegadas.get(UUID(item["id"])))
+        visto = _utc(item.get("visto_em"))
+        item["email_visto_ate"] = ate
+        item["email_lido"] = visto is not None and (ate is None or ate <= visto)
 
 
 async def _com_estrelas_da_avaliacao(session: AsyncSession, itens: list[dict[str, Any]]) -> None:
@@ -3156,6 +3186,7 @@ async def listar_conversas(
     # Só as da página: os nomes são resolvidos em lote.
     await _com_nome_da_loja(session, pagina)
     await _com_estrelas_da_avaliacao(session, pagina)
+    await _com_leitura_do_email(session, pagina)
     return ListaConversasOut(itens=pagina, proximo=proximo)
 
 
