@@ -66,6 +66,12 @@ def _kits(db):
 
 def _expand(kits, sku, quantity, out, depth=0):
     kind, parts = kits.get(sku, ("simple", []))
+    pieces = [p.strip() for p in sku.split("+") if p.strip()]
+    if kind == "simple" and len(pieces) > 1 and all(p in kits for p in pieces) and depth < 4:
+        # A combo kept simple here takes its parts, as Bling's balance of it follows them.
+        for piece in pieces:
+            _expand(kits, piece, quantity, out, depth + 1)
+        return
     if kind == "kit" and parts and depth < 4:
         for part in parts:
             _expand(kits, part["sku"], quantity * Decimal(str(part["quantity"])), out, depth + 1)
@@ -73,17 +79,39 @@ def _expand(kits, sku, quantity, out, depth=0):
         out[sku] += quantity
 
 
-def explained(db, start, end):
-    """Units each product should lose between two moments, from the paid sales read."""
+def _moment(value):
+    """Any timestamp as an aware datetime in UTC; the oldest possible when unreadable."""
+    from datetime import UTC, datetime
+
+    text = str(value or "").strip().replace(" ", "T")
+    if text.endswith("+00"):
+        text += ":00"
+    try:
+        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=UTC)
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
+def explained(db, start, end, bling_window=frozenset(), in_copy=frozenset()):
+    """Units each product should lose between two moments, from the paid sales read.
+
+    A sale counts in the window of its time at the store or, when Bling's copy shows Bling took it
+    inside the window (`bling_window`, store numbers), in that one: Bling's balance moves when
+    Bling takes the sale, which can be later than the store's time."""
     kits, units, counted, unlinked = _kits(db), defaultdict(Decimal), 0, 0
     for channel, store in db.execute(
         "SELECT DISTINCT channel,store FROM native_order_observations"
     ).fetchall():
-        for unit in native_ingest._units(db, channel, store).values():
-            for order in unit.values():
+        for key, unit in native_ingest._units(db, channel, store).items():
+            for external, order in unit.items():
                 created = (order.get("created_at") or "")[:19]
                 status = str(order.get("status") or "").upper()
-                if not start[:19] < created <= end[:19]:
+                if key in in_copy or external in in_copy:
+                    # Bling has this sale: its time at Bling decides, as Bling's balance moved then.
+                    if not (key in bling_window or external in bling_window):
+                        continue
+                elif not start[:19] < created <= end[:19]:
                     continue
                 if status in native_ingest.CANCELLED or status in UNPAID:
                     continue
@@ -100,8 +128,10 @@ def explained(db, start, end):
 
 OUTSIDE_SQL = (
     "SELECT coalesce(json_agg(t),'[]') FROM (SELECT coalesce(numeroloja,'')::text AS key,"
-    " numero::text AS number, item_codigo::text AS sku, item_quantidade AS quantity"
-    " FROM davinci.bling_orders WHERE created_at > '{start}' AND created_at <= '{end}'"
+    " numero::text AS number, item_codigo::text AS sku, item_quantidade AS quantity,"
+    " created_at::text AS taken_at"
+    " FROM davinci.bling_orders WHERE created_at > ('{start}'::timestamptz - interval '15 days')"
+    " AND created_at <= ('{end}'::timestamptz + interval '1 day')"
     " AND item_codigo IS NOT NULL AND coalesce(situacao,'') <> '12') t"
 )
 
@@ -114,17 +144,36 @@ def outside_reader(read=None):
 
     def outside(start, end, known):
         rows = read(OUTSIDE_SQL.format(start=start.replace("'", ""), end=end.replace("'", "")))
-        units = defaultdict(Decimal)
-        orders = set()
+        units, every = defaultdict(Decimal), defaultdict(Decimal)
+        orders, keys, present = set(), set(), set()
+        lower, upper = _moment(start), _moment(end)
+        # The first Bling order of a store number is the sale itself; a later one with the same
+        # number (exchange, resend) is Bling stock the store sale does not explain.
+        first = {}
         for row in rows:
-            if row.get("key") and row["key"] in known:
+            if row.get("key") and row.get("number"):
+                number = str(row["number"])
+                current = first.get(row["key"])
+                if current is None or (len(number), number) < (len(current), current):
+                    first[row["key"]] = number
+        for row in rows:
+            if row.get("key"):
+                present.add(row["key"])
+            if not lower < _moment(row.get("taken_at")) <= upper:
                 continue
             quantity = _number(row.get("quantity"))
             if quantity is None or not row.get("sku"):
                 continue
-            units[str(row["sku"]).strip().lower()] += quantity
+            sku = str(row["sku"]).strip().lower()
+            every[sku] += quantity
+            if row.get("key"):
+                keys.add(row["key"])
+            extra_order = row.get("key") and str(row.get("number")) != first.get(row["key"])
+            if row.get("key") and row["key"] in known and not extra_order:
+                continue
+            units[sku] += quantity
             orders.add(row.get("number"))
-        return units, len(orders)
+        return units, len(orders), every, (keys, present)
 
     return outside
 
@@ -141,9 +190,10 @@ def report(db, start=None, end=None, outside=None):
     else:
         first = next(r for r in rows if r["taken_at"] == start)
     before, after = json.loads(first["data"]), json.loads(last["data"])
-    units, counted, unlinked = explained(db, first["taken_at"], last["taken_at"])
     kits = _kits(db)
     outside_orders = 0
+    bling_sales = None
+    window = in_copy = frozenset()
     if outside is not None:
         known = set()
         for channel, store in db.execute(
@@ -153,7 +203,17 @@ def report(db, start=None, end=None, outside=None):
                 known.add(key)
                 known.update(unit)
         by_lower = {sku.lower(): sku for sku in kits}
-        extra, outside_orders = outside(first["taken_at"], last["taken_at"], known)
+        extra, outside_orders, every, (window, in_copy) = outside(
+            first["taken_at"], last["taken_at"], known
+        )
+        window, in_copy = frozenset(window), frozenset(in_copy)
+        # What Bling's own orders in the window explain, read the same way: when the ERP agrees
+        # with them, a remaining gap is stock that moved without a sale in Bling.
+        bling_sales = defaultdict(Decimal)
+        for sku, quantity in every.items():
+            _expand(kits, by_lower.get(sku, sku), quantity, bling_sales)
+    units, counted, unlinked = explained(db, first["taken_at"], last["taken_at"], window, in_copy)
+    if outside is not None:
         for sku, quantity in extra.items():
             if sku in by_lower:
                 _expand(kits, by_lower[sku], quantity, units)
@@ -178,14 +238,28 @@ def report(db, start=None, end=None, outside=None):
     families = sorted(set(bling) | set(erp))
     moved = [f for f in families if bling[f] or erp[f]]
     same = [f for f in moved if bling[f] == erp[f]]
-    differences = sorted(
-        (
-            {"family": f, "bling": str(bling[f]), "erp": str(erp[f]), "gap": str(bling[f] - erp[f])}
-            for f in moved
-            if bling[f] != erp[f]
-        ),
-        key=lambda d: -abs(Decimal(d["gap"])),
-    )
+    by_sales = defaultdict(Decimal)
+    for sku, quantity in (bling_sales or {}).items():
+        family = stock_families.key(sku) or sku
+        by_sales[family] -= quantity
+    differences, without_sale = [], []
+    for f in moved:
+        if bling[f] == erp[f]:
+            continue
+        row = {
+            "family": f,
+            "bling": str(bling[f]),
+            "erp": str(erp[f]),
+            "gap": str(bling[f] - erp[f]),
+        }
+        if bling_sales is not None:
+            row["bling_sales"] = str(by_sales[f])
+        if bling_sales is not None and by_sales[f] == erp[f]:
+            without_sale.append(row)
+        else:
+            differences.append(row)
+    differences.sort(key=lambda d: -abs(Decimal(d["gap"])))
+    without_sale.sort(key=lambda d: -abs(Decimal(d["gap"])))
     return {
         "state": "ok",
         "from": first["taken_at"],
@@ -196,6 +270,10 @@ def report(db, start=None, end=None, outside=None):
         "items_unlinked": unlinked,
         "families_moved": len(moved),
         "families_equal": len(same),
+        # The ERP explains the same as Bling's own orders; Bling's balance also moved by an entry,
+        # a return, a manual adjustment or a late copy.
+        "families_moved_without_sale": len(without_sale),
+        "moved_without_sale": without_sale[:60],
         "differences": differences[:60],
     }
 
