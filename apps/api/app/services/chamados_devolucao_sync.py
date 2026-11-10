@@ -1222,32 +1222,59 @@ def _le_na_varredura(agora: datetime):
     )
 
 
-def _lembrete_recurso_txt(ch: Chamado, desde: datetime) -> str:
-    decisao = chamados_svc.MOTIVO_FINAL.get(ch.status_plataforma or "", ch.status_plataforma or "")
-    dia = ch.status_plataforma_at.astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m")
+def _lembrete_txt(ch: Chamado, desde: datetime) -> str:
+    dias = chamados_svc.LEMBRETE_ESPERA.days
     ultima = desde.astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m")
+    if (
+        ch.status_plataforma in chamados_svc.STATUS_DECIDIDOS
+        and ch.status_plataforma_at is not None
+        and desde > ch.status_plataforma_at
+    ):
+        decisao = chamados_svc.MOTIVO_FINAL.get(ch.status_plataforma or "", ch.status_plataforma or "")
+        dia = ch.status_plataforma_at.astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m")
+        return (
+            f"Lembrete automático: depois do \"{decisao}\" de {dia} o caso seguiu (recurso) e a "
+            f"última análise, de {ultima}, foi aguardar a plataforma. Já passaram {dias} dias sem "
+            "novidade pela API — confira na tela da plataforma se saiu a decisão e diga o "
+            "resultado."
+        )
     return (
-        f"Lembrete automático: depois do \"{decisao}\" de {dia} o caso seguiu (recurso) e a "
-        f"última análise, de {ultima}, foi aguardar a plataforma. Já passaram 3 dias sem "
-        "novidade pela API — confira na tela da plataforma se saiu a decisão e diga o "
-        "resultado."
+        f"Lembrete automático: a última análise, de {ultima}, foi aguardar a plataforma e já "
+        f"passaram {dias} dias sem novidade — confira na tela da plataforma se houve resposta "
+        "ou decisão e diga o resultado. Se ainda está em análise dentro do prazo que a "
+        "plataforma deu, só confirme o prazo."
+    )
+
+
+def _fora_do_fixo(hoje):
+    """Fixo com data (Revisão do painel) é a pessoa dizendo "até tal dia não precisa
+    olhar": sem lembrete até a data chegar."""
+    return or_(
+        Chamado.revisao_tipo.is_(None),
+        Chamado.revisao_tipo != "fixo",
+        Chamado.revisao_ate.is_(None),
+        Chamado.revisao_ate <= hoje,
     )
 
 
 async def lembrar_recursos(session: AsyncSession, *, agora: datetime | None = None) -> dict:
     """07/10 (Vinicius, 296301): recurso mandado pela TELA depois de a plataforma
-    decidir (`caso_seguiu_apos_decisao`) — a API pode nunca mostrar o resultado.
-    Passados RECURSO_LEMBRETE desde a última análise ("aguardar a plataforma") sem
-    fala nova da plataforma nem instrução, entra uma INSTRUÇÃO do sistema pra IA de
-    Chamado conferir na tela (mesmo caminho da instrução de pessoa: passa na frente
-    da fila e a análise consome). Uma por análise — a resposta da IA zera o relógio.
-    Commita."""
+    decidir — a API pode nunca mostrar o resultado. 10/11 (Vinicius, 301908): vale
+    pra TODO chamado aberto cuja última análise foi "aguardar a plataforma", com ou
+    sem decisão antes (o caso que esperava a primeira resposta ficava parado dias).
+    Passados LEMBRETE_ESPERA desde essa análise sem fala nova da plataforma nem
+    instrução, entra uma INSTRUÇÃO do sistema pra IA de Chamado conferir na tela
+    (mesmo caminho da instrução de pessoa: passa na frente da fila e a análise
+    consome). Uma por análise — a resposta da IA zera o relógio. Fixo com data no
+    futuro fica de fora até a data. Commita."""
     ref = agora or datetime.now(UTC)
+    hoje = ref.astimezone(chamados_svc.SAO_PAULO).date()
     chs = (
         await session.execute(
             select(Chamado).where(
                 Chamado.resolvido.is_(False),
-                chamados_svc.caso_seguiu_apos_decisao_sql(ref),
+                chamados_svc.ultima_analise_espera_sql(),
+                _fora_do_fixo(hoje),
             )
         )
     ).scalars().all()
@@ -1260,7 +1287,7 @@ async def lembrar_recursos(session: AsyncSession, *, agora: datetime | None = No
                 )
             )
         ).scalar_one_or_none()
-        if ultima is None or ref - ultima < chamados_svc.RECURSO_LEMBRETE:
+        if ultima is None or ref - ultima < chamados_svc.LEMBRETE_ESPERA:
             continue
         depois = (
             await session.execute(
@@ -1279,7 +1306,7 @@ async def lembrar_recursos(session: AsyncSession, *, agora: datetime | None = No
         session.add(
             chamados_svc.nova_mensagem(
                 ch,
-                texto=_lembrete_recurso_txt(ch, ultima),
+                texto=_lembrete_txt(ch, ultima),
                 tipo="instrucao",
                 direcao="sistema",
                 autor_nome=chamados_svc.AUTOR_SISTEMA,

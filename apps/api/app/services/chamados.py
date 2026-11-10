@@ -98,13 +98,17 @@ NAO_ENCERRADO_SQL = or_(
 # Ganhamos/perdemos eram finais pra sempre — o status não saía do Encerrado e a
 # leitura de hora em hora parava. Agora: se a ÚLTIMA análise da IA veio DEPOIS da
 # decisão e diz "aguardar a plataforma", o caso SEGUIU — a coluna mostra Aguard.
-# Plataforma, a plataforma continua sendo lida e, passados RECURSO_LEMBRETE sem
+# Plataforma, a plataforma continua sendo lida e, passados LEMBRETE_ESPERA sem
 # novidade, a IA ganha um lembrete pra conferir na tela. Vale até RELER_RECURSO
 # depois da decisão (a TikTok dá ~14 dias pro recurso e até 3 dias úteis pra julgar).
 ACAO_ESPERAR_TXT = "aguardar a plataforma"
 STATUS_DECIDIDOS = (STATUS_GANHAMOS, STATUS_PERDEMOS)
 RELER_RECURSO = timedelta(days=21)
-RECURSO_LEMBRETE = timedelta(days=3)
+# 10/11/2026 (Vinicius, 301908): o lembrete era só pro recurso depois de uma
+# decisão. Caso que esperava a PRIMEIRA resposta ficava parado dias sem ninguém
+# olhar (301908, 300978, 306057, 304737, 302103: 4 a 7 dias). Agora vale pra todo
+# chamado aberto cuja última análise mandou aguardar a plataforma; "coloca 2 dias".
+LEMBRETE_ESPERA = timedelta(days=2)
 
 
 def caso_seguiu_apos_decisao(
@@ -155,6 +159,29 @@ def caso_seguiu_apos_decisao_sql(agora: datetime):
             )
             .correlate(Chamado)
         ),
+    )
+
+
+def ultima_analise_espera_sql():
+    """A ÚLTIMA análise da IA no chamado termina em "aguardar a plataforma" (com
+    ou sem decisão antes). Base do lembrete de `LEMBRETE_ESPERA`."""
+    ana = aliased(ChamadoMensagem)
+    ultima = (
+        select(func.max(ana.created_at))
+        .where(ana.chamado_id == Chamado.id, ana.tipo == "analise")
+        .correlate(Chamado)
+        .scalar_subquery()
+    )
+    esp = aliased(ChamadoMensagem)
+    return exists(
+        select(esp.id)
+        .where(
+            esp.chamado_id == Chamado.id,
+            esp.tipo == "analise",
+            esp.created_at == ultima,
+            esp.texto.like(f"%{ACAO_ESPERAR_TXT}"),
+        )
+        .correlate(Chamado)
     )
 
 # 22/09 (Vinicius, 292592): o número em `chamados.chamado` foi capturado pelo robô

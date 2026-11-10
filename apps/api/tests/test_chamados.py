@@ -2029,7 +2029,7 @@ async def test_recurso_depois_do_perdemos_volta_pra_aguard_plataforma(
     agora = datetime.now(UTC)
     decidido = agora - timedelta(days=4)
     ch = await _recurso_296301(
-        db, decidido_em=decidido, analise_em=agora - timedelta(days=2),
+        db, decidido_em=decidido, analise_em=agora - timedelta(days=1),
         analise_txt="Recurso enviado na TikTok Barbosa … → aguardar a plataforma",
     )
     row = next(i for i in (await client.get("/api/chamados")).json()["items"] if i["id"] == str(ch.id))
@@ -2042,7 +2042,7 @@ async def test_recurso_depois_do_perdemos_volta_pra_aguard_plataforma(
     ).scalars().all()
     assert ch.id in lidos
 
-    # 2 dias desde a análise: sem lembrete; 3 dias: um lembrete (instrução) e só um
+    # 1 dia desde a análise: sem lembrete; 2 dias (10/11): um lembrete (instrução) e só um
     assert (await sync.lembrar_recursos(db, agora=agora))["lembrados"] == 0
     depois = agora + timedelta(days=1, minutes=1)
     assert (await sync.lembrar_recursos(db, agora=depois))["lembrados"] == 1
@@ -2056,6 +2056,7 @@ async def test_recurso_depois_do_perdemos_volta_pra_aguard_plataforma(
     ).scalars().all()
     assert len(instr) == 1 and instr[0].autor_nome == "sistema"
     assert "confira na tela da plataforma" in instr[0].texto
+    assert "o caso seguiu (recurso)" in instr[0].texto and "2 dias" in instr[0].texto
     # com o lembrete pendente a linha é do robô (a instrução passa na frente)
     row = next(i for i in (await client.get("/api/chamados")).json()["items"] if i["id"] == str(ch.id))
     assert row["status_aba"] == "analise_robo", row
@@ -2089,4 +2090,77 @@ async def test_perdemos_sem_recurso_continua_encerrado(client, make_user, auth_a
         (await db.execute(select(Chamado.id).where(sync._le_na_varredura(agora)))).scalars()
     )
     assert not lidos & {fechar.id, antes.id, velho.id}
-    assert (await sync.lembrar_recursos(db, agora=agora))["lembrados"] == 0
+    # 10/11: o lembrete agora vale pra todo caso esperando a plataforma. Só o `velho`
+    # (IA mandou aguardar há 20 dias e nada mais chegou) é lembrado; o `antes` tem a
+    # fala da decisão depois da análise (a IA já tem o que ler) e o `fechar` não espera.
+    assert (await sync.lembrar_recursos(db, agora=agora))["lembrados"] == 1
+    lembrados = set(
+        (
+            await db.execute(
+                select(ChamadoMensagem.chamado_id).where(ChamadoMensagem.tipo == "instrucao")
+            )
+        ).scalars()
+    )
+    assert lembrados == {velho.id}
+
+
+async def test_lembrete_vale_pra_quem_espera_a_primeira_resposta(db):
+    """10/11 (Vinicius, 301908): sem decisão nenhuma da plataforma, a IA mandou
+    aguardar e ninguém voltou ao caso por 4 dias. Agora: 2 dias sem novidade, a IA
+    ganha o lembrete; Fixo com data futura, caso já resolvido, fala nova depois da
+    análise e análise que não manda aguardar ficam de fora."""
+    from app.services import chamados_devolucao_sync as sync
+
+    agora = datetime.now(UTC)
+    hoje = agora.astimezone(svc.SAO_PAULO).date()
+
+    async def caso(pedido, *, analise_em, txt="Formulário enviado … → aguardar a plataforma", **kw):
+        ch = Chamado(
+            id=uuid4(), origem="devolucao", plataforma="shopee", conta="Shopee Mini",
+            canal="robo", pedido_bling=pedido, **kw,
+        )
+        db.add(ch)
+        await db.flush()
+        db.add(ChamadoMensagem(
+            chamado_id=ch.id, direcao="sistema", tipo="analise", status="registrada",
+            canal="robo", texto=f"Análise da IA de Chamado [x]: {txt}",
+            autor_nome="IA de Chamado", created_at=analise_em,
+        ))
+        return ch
+
+    esperando = await caso("301908", analise_em=agora - timedelta(days=4))
+    recente = await caso("300001", analise_em=agora - timedelta(days=1))
+    fixo = await caso(
+        "300002", analise_em=agora - timedelta(days=5),
+        revisao_tipo="fixo", revisao_dia=hoje, revisao_ate=hoje + timedelta(days=3),
+    )
+    fixo_venceu = await caso(
+        "300003", analise_em=agora - timedelta(days=5),
+        revisao_tipo="fixo", revisao_dia=hoje - timedelta(days=9), revisao_ate=hoje,
+    )
+    conferido = await caso(
+        "300004", analise_em=agora - timedelta(days=3), revisao_tipo="conferido", revisao_dia=hoje,
+    )
+    resolvido = await caso("300005", analise_em=agora - timedelta(days=4), resolvido=True)
+    humano = await caso("300006", analise_em=agora - timedelta(days=4), txt="Parei no captcha → precisa de humano")
+    respondeu = await caso("300007", analise_em=agora - timedelta(days=4))
+    db.add(ChamadoMensagem(
+        chamado_id=respondeu.id, direcao="recebida", tipo="resposta", status="registrada",
+        canal="api", texto="Shopee: disputa em análise.", autor_nome="Shopee",
+        created_at=agora - timedelta(days=1),
+    ))
+    await db.commit()
+
+    assert (await sync.lembrar_recursos(db, agora=agora))["lembrados"] == 3
+    instr = (
+        await db.execute(select(ChamadoMensagem).where(ChamadoMensagem.tipo == "instrucao"))
+    ).scalars().all()
+    assert {m.chamado_id for m in instr} == {esperando.id, fixo_venceu.id, conferido.id}
+    assert not {m.chamado_id for m in instr} & {
+        recente.id, fixo.id, resolvido.id, humano.id, respondeu.id
+    }
+    txt = next(m.texto for m in instr if m.chamado_id == esperando.id)
+    assert txt.startswith("Lembrete automático: a última análise, de ")
+    assert "2 dias sem novidade" in txt and "recurso" not in txt
+    # um por análise: a próxima passada não repete
+    assert (await sync.lembrar_recursos(db, agora=agora + timedelta(hours=1)))["lembrados"] == 0

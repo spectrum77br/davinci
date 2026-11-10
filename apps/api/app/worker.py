@@ -2689,8 +2689,9 @@ async def chamados_replica_automatica(ctx: dict) -> None:
             logger.info("chamados_devolucao_sync_done", **resp)
         else:
             logger.info("chamados_devolucao_sync_pulado", reason="botao_atualizar_rodando")
-    # 07/10 (296301): recurso mandado pela tela depois da decisão — 3 dias sem
-    # novidade, a IA de Chamado ganha uma instrução pra conferir na tela.
+    # 07/10 (296301): recurso mandado pela tela depois da decisão — sem novidade,
+    # a IA de Chamado ganha uma instrução pra conferir na tela. 10/11: vale pra todo
+    # caso esperando a plataforma, a cada 2 dias (`LEMBRETE_ESPERA`).
     async with session_scope() as s:
         lembretes = await chamados_devolucao_sync.lembrar_recursos(s)
     logger.info("chamados_recurso_lembrete_done", **lembretes)
