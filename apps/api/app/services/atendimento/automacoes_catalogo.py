@@ -1846,10 +1846,13 @@ def vale_depois_de_fechar(
     if aut.tipo not in TIPOS_NAO_PAGO_AO_VIVO or not janela:
         return False
     devido = _utc(devido)
-    return (
-        ajustar_janela(devido, *janela) == devido
-        and _utc(agora) - devido <= TOLERANCIA_DEPOIS_DE_FECHAR
-    )
+    if ajustar_janela(devido, *janela) != devido:
+        return False
+    # Contado do FECHAMENTO do dia em que venceu (não do `devido`): a de 20h45 que as
+    # rodadas até 20h58 não alcançaram também sai até 21h15.
+    fim = janela[1]
+    fecha = devido.astimezone(SP).replace(hour=fim.hour, minute=fim.minute, second=0, microsecond=0)
+    return _utc(agora) <= fecha + TOLERANCIA_DEPOIS_DE_FECHAR
 
 
 def validade_ate(aut: Automacao, devido: datetime, janela: tuple[time, time] | None) -> datetime:

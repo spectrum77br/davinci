@@ -626,7 +626,7 @@ def test_lembrete_da_noite_sai_antes_de_fechar(hora, minuto, esperado):
 
 def test_o_nao_pago_das_20h59_ainda_sai_na_rodada_das_21h():
     """10/11/2026: o motor roda nos minutos pares; o que vence às 20h59 só é visto às
-    21h00, já fechado, e às 9h o pedido já foi cancelado. Sai até 15 min depois."""
+    21h00, já fechado, e às 9h o pedido já foi cancelado. Sai até 15 min depois de fechar."""
     sp = ZoneInfo("America/Sao_Paulo")
     janela = (time(9, 0), time(21, 0))
 
@@ -637,8 +637,11 @@ def test_o_nao_pago_das_20h59_ainda_sai_na_rodada_das_21h():
     lembrete = cat.CATALOGO["shopee_nao_pago_lembrete"]
     for aut in (brinde, lembrete):
         assert cat.vale_depois_de_fechar(aut, em(20, 59), em(21, 0, 3), janela)
-        assert cat.vale_depois_de_fechar(aut, em(20, 59), em(21, 14), janela)
-        assert not cat.vale_depois_de_fechar(aut, em(20, 59), em(21, 15), janela)
+        assert cat.vale_depois_de_fechar(aut, em(20, 59), em(21, 15), janela)
+        assert not cat.vale_depois_de_fechar(aut, em(20, 59), em(21, 15, 1), janela)
+        # Contado do fechamento: a de 20h45 que as rodadas até 20h58 não alcançaram.
+        assert cat.vale_depois_de_fechar(aut, em(20, 45), em(21, 0, 3), janela)
+        assert cat.vale_depois_de_fechar(aut, em(20, 45), em(21, 14), janela)
         # Venceu já fechado (o motor parado, a leitura atrasada): espera a manhã.
         assert not cat.vale_depois_de_fechar(aut, em(21, 2), em(21, 4), janela)
         assert not cat.vale_depois_de_fechar(aut, em(20, 59), em(21, 0), None)
