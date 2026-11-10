@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { AlertTriangle, Camera, CameraOff, ExternalLink, Loader2, Power, RefreshCw, ShieldCheck, Smartphone } from 'lucide-vue-next'
+import { AlertTriangle, Camera, CameraOff, Copy, ExternalLink, Link, Loader2, Power, RefreshCw, ShieldCheck, Smartphone, X } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['admin'] })
 
@@ -31,6 +31,8 @@ type Phone = {
 type PhoneList = { enabled: boolean; stream_enabled?: boolean; phones: Phone[] }
 type Action = 'start' | 'stop' | 'restart'
 type Session = { url: string; ticket: string }
+type GuestInvite = { invite_id: string; expires_at: string; url?: string }
+const guestStorageKey = 'davinci-phone-guest-references-v1'
 
 const { api } = useApi()
 const config = useRuntimeConfig()
@@ -41,7 +43,10 @@ const stale = ref(false)
 const error = ref('')
 const notice = ref('')
 const lastUpdated = ref<Date | null>(null)
-const activeAction = ref<{ name: string; action: Action | 'open' } | null>(null)
+const activeAction = ref<{ name: string; action: Action | 'open' | 'invite' | 'revoke' } | null>(null)
+const guestInvites = ref<Record<string, GuestInvite>>({})
+const clockNow = ref(Date.now())
+let guestClock: ReturnType<typeof setInterval> | undefined
 let poll: ReturnType<typeof setInterval> | undefined
 let disposed = false
 let sessionWindow: Window | null = null
@@ -240,7 +245,122 @@ async function openPhone(phone: Phone) {
   }
 }
 
+function guestActive(phone: Phone) {
+  const invite = guestInvites.value[phone.name]
+  return !!invite && Date.parse(invite.expires_at) > clockNow.value
+}
+
+function guestExpiry(phone: Phone) {
+  const value = guestInvites.value[phone.name]?.expires_at
+  return value ? new Date(value).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''
+}
+
+function saveGuestReferences() {
+  // Keep only public references for cancellation after a reload; never persist the link/proof.
+  try {
+    const references = Object.fromEntries(Object.entries(guestInvites.value)
+      .filter(([, invite]) => Date.parse(invite.expires_at) > Date.now())
+      .map(([phone, invite]) => [phone, { invite_id: invite.invite_id, expires_at: invite.expires_at }]))
+    window.sessionStorage.setItem(guestStorageKey, JSON.stringify({ endpoint: sessionEndpoint.value, references }))
+  } catch { /* A private browser can block storage; the invitation remains cancellable in this tab. */ }
+}
+
+function restoreGuestReferences() {
+  try {
+    const raw = window.sessionStorage.getItem(guestStorageKey)
+    if (!raw || raw.length > 24000) return
+    const saved = JSON.parse(raw)
+    if (saved.endpoint !== sessionEndpoint.value || !saved.references || typeof saved.references !== 'object') return
+    for (const [name, item] of Object.entries(saved.references).slice(0, 100)) {
+      const invite = item as GuestInvite
+      if (/^[a-z][a-z0-9_-]{0,39}$/.test(name) && invite && /^[A-Za-z0-9_-]{22}$/.test(invite.invite_id)
+        && typeof invite.expires_at === 'string' && Date.parse(invite.expires_at) > Date.now()
+        && Date.parse(invite.expires_at) <= Date.now() + 20 * 60 * 1000) {
+        guestInvites.value[name] = { invite_id: invite.invite_id, expires_at: invite.expires_at }
+      }
+    }
+  } catch { /* Invalid or unavailable storage grants no access. */ }
+}
+
+async function guestCommand(phone: Phone, action: 'invite' | 'revoke', inviteId?: string) {
+  const endpoint = sessionEndpoint.value
+  if (!endpoint) throw new Error('guest_unavailable')
+  if (action === 'revoke' && !/^[A-Za-z0-9_-]{22}$/.test(inviteId || '')) throw new Error('invalid_invite')
+  const path = `/api/celulares/${encodeURIComponent(phone.name)}/guest-invites`
+    + (action === 'revoke' ? `/${inviteId}/revoke` : '')
+  const command = await api<Session>(path, { method: 'POST', timeout: 15000, retry: 0 })
+  const trustedUrl = new URL(`/guest/admin/${action}`, endpoint).href
+  if (command.url !== trustedUrl || typeof command.ticket !== 'string' || !command.ticket || command.ticket.length > 4096) {
+    throw new Error('invalid_guest_command')
+  }
+  // The dedicated command is sent only to the configured phone gateway, without DaVinci cookies or JWT.
+  const result = await fetch(trustedUrl, {
+    method: 'POST', mode: 'cors', credentials: 'omit', cache: 'no-store', redirect: 'error',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ ticket: command.ticket }), signal: AbortSignal.timeout(15000),
+  })
+  if (!result.ok) throw new Error('guest_command_failed')
+  return result.json()
+}
+
+async function createGuestInvite(phone: Phone) {
+  if (!canOpen(phone) || phone.read_only || phone.name === 'vrcamera' || guestActive(phone)) return
+  activeAction.value = { name: phone.name, action: 'invite' }
+  error.value = ''
+  notice.value = ''
+  try {
+    const result = await guestCommand(phone, 'invite') as GuestInvite
+    const url = new URL(result.url || '')
+    const expiry = Date.parse(result.expires_at)
+    if (!/^[A-Za-z0-9_-]{22}$/.test(result.invite_id) || url.origin !== new URL(sessionEndpoint.value!).origin
+      || url.pathname !== '/guest' || url.search || url.username || url.password
+      || !new RegExp(`^#${result.invite_id}\\.[A-Za-z0-9_-]{43}$`).test(url.hash)
+      || !Number.isFinite(expiry) || expiry <= Date.now() || expiry > Date.now() + 20 * 60 * 1000 + 5000) {
+      throw new Error('invalid_guest_invite')
+    }
+    guestInvites.value[phone.name] = { invite_id: result.invite_id, expires_at: result.expires_at, url: url.href }
+    saveGuestReferences()
+    if (!disposed) notice.value = 'Convite criado. Envie o link à pessoa e encerre seu próprio acesso ao celular antes do teste.'
+  } catch (cause) {
+    if (!disposed) error.value = userError(cause, 'Não foi possível gerar o convite. Verifique se o celular está disponível e tente novamente.')
+  } finally {
+    activeAction.value = null
+  }
+}
+
+async function copyGuestInvite(phone: Phone) {
+  const url = guestInvites.value[phone.name]?.url
+  if (!isAdmin.value || !url || !guestActive(phone)) return
+  try {
+    await navigator.clipboard.writeText(url)
+    notice.value = 'Link copiado. Ele vence 20 minutos após a geração e só permite uma entrada.'
+  } catch {
+    error.value = 'Não foi possível copiar automaticamente. Selecione e copie o link no campo do convite.'
+  }
+}
+
+async function revokeGuestInvite(phone: Phone) {
+  const invite = guestInvites.value[phone.name]
+  if (!isAdmin.value || busy.value || !invite || !sessionEndpoint.value) return
+  activeAction.value = { name: phone.name, action: 'revoke' }
+  error.value = ''
+  notice.value = ''
+  try {
+    const result = await guestCommand(phone, 'revoke', invite.invite_id)
+    if (result.revoked !== true) throw new Error('revoke_unconfirmed')
+    delete guestInvites.value[phone.name]
+    saveGuestReferences()
+    if (!disposed) notice.value = 'Convite cancelado e acesso do convidado encerrado.'
+  } catch (cause) {
+    if (!disposed) error.value = userError(cause, 'Não foi possível confirmar o cancelamento. Tente novamente; o prazo original continua valendo.')
+  } finally {
+    activeAction.value = null
+  }
+}
+
 onMounted(() => {
+  restoreGuestReferences()
+  guestClock = setInterval(() => { clockNow.value = Date.now() }, 1000)
   void refresh()
   poll = setInterval(() => {
     if (!document.hidden && enabled.value && !busy.value) void refresh(true)
@@ -250,6 +370,7 @@ onMounted(() => {
 onUnmounted(() => {
   disposed = true
   if (poll) clearInterval(poll)
+  if (guestClock) clearInterval(guestClock)
   sessionWindow?.close()
 })
 </script>
@@ -327,6 +448,23 @@ onUnmounted(() => {
             {{ isCameraTest(phone) ? 'Abrir teste' : 'Abrir celular' }}
           </Button>
           <p class="text-center text-xs text-muted-foreground">{{ openHint(phone) }}</p>
+          <div v-if="!phone.read_only && phone.name !== 'vrcamera'" class="space-y-3 rounded-xl border bg-muted/20 p-3">
+            <p class="text-sm font-medium">Acesso para convidado</p>
+            <p class="text-xs text-muted-foreground">A pessoa entra direto neste celular, sem acesso às outras áreas do DaVinci. O link vence 20 minutos após ser gerado e só permite uma entrada.</p>
+            <template v-if="guestActive(phone)">
+              <p role="status" class="text-xs font-medium">Convite válido até {{ guestExpiry(phone) }}.</p>
+              <input v-if="guestInvites[phone.name]?.url" :value="guestInvites[phone.name].url" aria-label="Link do convite" readonly class="w-full rounded-md border bg-background px-2 py-2 text-xs" @focus="($event.target as HTMLInputElement).select()" />
+              <p v-else class="text-xs text-muted-foreground">O link não é guardado após recarregar. Você ainda pode cancelar este convite e gerar outro.</p>
+              <Button v-if="guestInvites[phone.name]?.url" variant="outline" size="sm" class="w-full" @click="copyGuestInvite(phone)"><Copy class="mr-1.5 size-3.5" />Copiar link</Button>
+              <Button variant="outline" size="sm" class="w-full" :disabled="busy" @click="revokeGuestInvite(phone)">
+                <Loader2 v-if="activeAction?.name === phone.name && activeAction?.action === 'revoke'" class="mr-1.5 size-3.5 animate-spin" /><X v-else class="mr-1.5 size-3.5" />Cancelar e encerrar acesso
+              </Button>
+            </template>
+            <Button v-else variant="outline" size="sm" class="w-full" :disabled="!canOpen(phone)" @click="createGuestInvite(phone)">
+              <Loader2 v-if="activeAction?.name === phone.name && activeAction?.action === 'invite'" class="mr-1.5 size-3.5 animate-spin" /><Link v-else class="mr-1.5 size-3.5" />Gerar link de 20 minutos
+            </Button>
+            <p class="text-xs text-muted-foreground">A sessão dura até 15 minutos, sem ultrapassar o vencimento do convite. Encerre seu acesso ao celular antes de a pessoa entrar.</p>
+          </div>
           <div v-if="!phone.read_only && phone.name !== 'vrcamera'" class="grid grid-cols-2 gap-2">
             <Button variant="outline" size="sm" :disabled="!canAct()" @click="runAction(phone, phone.running ? 'stop' : 'start')">
               <Loader2 v-if="activeAction?.name === phone.name && ['start', 'stop'].includes(activeAction?.action || '')" class="mr-1.5 size-3.5 animate-spin" />

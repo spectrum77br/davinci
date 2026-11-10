@@ -1,5 +1,6 @@
 """Piloto dos celulares: somente administradores ativos e aparelhos liberados."""
 
+import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response
@@ -26,6 +27,16 @@ def _public_error(exc: celulares.CelularesError) -> HTTPException:
         exc.status, detail={"code": exc.code, "message": exc.message},
         headers=PRIVATE_HEADERS,
     )
+
+
+def _regular_ready(name: str, phone: dict) -> bool:
+    isolation = phone.get("isolamento")
+    if not isinstance(isolation, dict):
+        isolation = {}
+    return (name != "vrcamera" and phone.get("read_only") is not True
+            and phone.get("egress") == "proxy"
+            and all(isolation.get(key) is True
+                    for key in ("celguard", "bridge_ipv6_off", "dns_proprio")))
 
 
 @router.get("", response_model=celulares.PhonesOut)
@@ -78,15 +89,8 @@ async def open_session(name: str, response: Response, admin: Admin) -> dict[str,
         _agent, phone = await celulares.verificar_aparelho(name)
     except celulares.CelularesError as exc:
         raise _public_error(exc) from None
-    isolation = phone.get("isolamento")
-    if not isinstance(isolation, dict):
-        isolation = {}
-    regular_ready = (name != "vrcamera" and phone.get("read_only") is not True
-                     and phone.get("egress") == "proxy"
-                     and all(isolation.get(key) is True
-                             for key in ("celguard", "bridge_ipv6_off", "dns_proprio")))
     if (phone.get("running") is not True or phone.get("boot_completed") is not True
-            or not (regular_ready or celulares.is_camera_pilot(phone))):
+            or not (_regular_ready(name, phone) or celulares.is_camera_pilot(phone))):
         raise HTTPException(
             409, detail={"code": "celular_nao_pronto",
                          "message": "Aguarde o aparelho iniciar e confirmar o isolamento "
@@ -106,3 +110,62 @@ async def open_session(name: str, response: Response, admin: Admin) -> dict[str,
             headers=PRIVATE_HEADERS,
         ) from None
     return {"url": origin + "/session", "ticket": ticket}
+
+
+async def _guest_command(
+    name: str, admin: User, *, action: str, invite_id: str | None = None,
+) -> dict[str, str]:
+    config = celulares_stream.configuration()
+    if config is None:
+        raise HTTPException(
+            503, detail={"code": "celulares_acesso_em_preparacao",
+                         "message": "O acesso remoto ainda está em preparação."},
+            headers=PRIVATE_HEADERS,
+        )
+    if invite_id is not None and not re.fullmatch(r"[A-Za-z0-9_-]{22}", invite_id):
+        raise HTTPException(
+            404, detail={"code": "convite_nao_encontrado"}, headers=PRIVATE_HEADERS,
+        )
+    try:
+        _agent, phone = await celulares.verificar_aparelho(name)
+    except celulares.CelularesError as exc:
+        raise _public_error(exc) from None
+    # The offline camera pilot is an administrator diagnostic, never a guest phone.
+    if action == "invite" and (
+        phone.get("running") is not True or phone.get("boot_completed") is not True
+        or not _regular_ready(name, phone)
+    ):
+        raise HTTPException(
+            409, detail={"code": "celular_nao_pronto",
+                         "message": "Aguarde o celular ficar pronto para gerar o convite."},
+            headers=PRIVATE_HEADERS,
+        )
+    origin, key = config
+    try:
+        ticket = celulares_stream.issue_guest_command(
+            user_id=str(admin.id), phone=name, udid=str(phone.get("adb_serial") or ""),
+            key=key, action=action, invite_id=invite_id,
+        )
+    except ValueError:
+        raise HTTPException(
+            502, detail={"code": "celular_acesso_invalido",
+                         "message": "Não foi possível preparar o acesso ao aparelho."},
+            headers=PRIVATE_HEADERS,
+        ) from None
+    return {"url": origin + "/guest/admin/" + action, "ticket": ticket}
+
+
+@router.post("/{name}/guest-invites")
+async def create_guest_invite(name: str, response: Response, admin: Admin) -> dict[str, str]:
+    _headers(response)
+    return await _guest_command(name, admin, action="invite")
+
+
+@router.post("/{name}/guest-invites/{invite_id}/revoke")
+async def revoke_guest_invite(
+    name: str, invite_id: str, response: Response, admin: Admin,
+) -> dict[str, str]:
+    _headers(response)
+    # Revocation must remain available after stopping the Android or losing its
+    # readiness flags, while still checking the managed-phone allowlist/target.
+    return await _guest_command(name, admin, action="revoke", invite_id=invite_id)

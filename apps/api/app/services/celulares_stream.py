@@ -59,19 +59,54 @@ def configuration() -> tuple[str, str] | None:
     return origin, key
 
 
-def issue_ticket(*, user_id: str, phone: str, udid: str, key: str, now: int | None = None) -> str:
+def _validate_ticket_identity(*, user_id: str, phone: str, udid: str, key: str) -> None:
     if (not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", user_id)
             or not re.fullmatch(r"[a-z][a-z0-9_-]{0,39}", phone)
             or not re.fullmatch(r"127\.0\.0\.1:[1-9][0-9]{3,4}", udid)
             or int(udid.rsplit(":", 1)[1]) > 65535 or len(key.encode()) < 32):
         raise ValueError("invalid stream configuration")
-    issued = int(time.time()) if now is None else now
-    payload = {"aud": "davinci-celulares", "sub": user_id, "phone": phone, "udid": udid,
-               "iat": issued, "exp": issued + 60, "jti": secrets.token_urlsafe(24)}
 
+
+def _sign_ticket(payload: dict[str, object], key: str) -> str:
     def encode(value: bytes) -> str:
         return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
 
     body = "v1." + encode(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode())
     signature = encode(hmac.new(key.encode(), body.encode(), hashlib.sha256).digest())
     return body + "." + signature
+
+
+def issue_ticket(*, user_id: str, phone: str, udid: str, key: str, now: int | None = None) -> str:
+    _validate_ticket_identity(user_id=user_id, phone=phone, udid=udid, key=key)
+    issued = int(time.time()) if now is None else now
+    payload = {"aud": "davinci-celulares", "sub": user_id, "phone": phone, "udid": udid,
+               "iat": issued, "exp": issued + 60, "jti": secrets.token_urlsafe(24)}
+    return _sign_ticket(payload, key)
+
+
+def issue_guest_command(
+    *, user_id: str, phone: str, udid: str, key: str, action: str,
+    invite_id: str | None = None, now: int | None = None,
+) -> str:
+    """One-use administrator command; it is never a viewer or DaVinci login ticket.
+
+    The gateway creates the invitation and starts its fixed twenty-minute clock.
+    The command itself is usable for at most sixty seconds and is bound to the
+    phone, its configured target, and the requested operation.
+    """
+    _validate_ticket_identity(user_id=user_id, phone=phone, udid=udid, key=key)
+    if action not in {"invite", "revoke"}:
+        raise ValueError("invalid guest action")
+    if ((action == "invite" and invite_id is not None)
+            or (action == "revoke" and (not isinstance(invite_id, str)
+                                       or not re.fullmatch(r"[A-Za-z0-9_-]{22}", invite_id)))):
+        raise ValueError("invalid guest invitation")
+    issued = int(time.time()) if now is None else now
+    payload: dict[str, object] = {
+        "aud": "davinci-celulares-guest-admin", "sub": user_id, "phone": phone,
+        "udid": udid, "action": action, "iat": issued, "exp": issued + 60,
+        "jti": secrets.token_urlsafe(24),
+    }
+    if invite_id is not None:
+        payload["invite_id"] = invite_id
+    return _sign_ticket(payload, key)
