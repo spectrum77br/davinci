@@ -712,6 +712,16 @@ def _sem_perna_reversa(det: dict | None, info: ReturnInfo) -> bool:
 _CARRIER_IDA = "Shopee Xpress (volta pela ida)"
 
 
+def _tipo_com_pacote_pela_ida(tipo: str | None) -> str | None:
+    """Caso "só reembolso" (`needs_logistics=false` → "REFUND") cujo pacote
+    VOLTA pelo envio de ida ("Pedido será devolvido ao vendedor"): tem pacote,
+    então não é Fraude (Cairo, 10/11/2026, pedido 303572 — alguém teve de
+    mover na mão pra Devoluções). Mesmo conserto do ML em
+    `logistica_meli._com_pacote_voltando`. None = a plataforma não separa;
+    o painel fica Devoluções e o "Chegou em" vem do evento da SPX."""
+    return None if (tipo or "").strip().upper() == "REFUND" else tipo
+
+
 async def _rts_da_ida_do_pedido(client: ShopeeClient, linha: Logistica) -> ReturnInfo | None:
     """Consulta o rastreio da IDA de uma linha cuja entrega falhou e devolve um
     `ReturnInfo` da volta ao remetente (status sintético `STATUS_RTS`), ou None
@@ -1009,6 +1019,7 @@ async def returns_por_pedido(
                     info = info._replace(
                         tracking=info.tracking or (r.rastreio or "").strip() or None,
                         carrier=info.carrier or _CARRIER_IDA,
+                        return_type=_tipo_com_pacote_pela_ida(info.return_type),
                     )
                 else:
                     rts = await _rts_da_ida_do_pedido(client, r)
@@ -1022,6 +1033,7 @@ async def returns_por_pedido(
                             entregue_em=rts.entregue_em,
                             localizacao=rts.localizacao,
                             localizacao_em=rts.localizacao_em,
+                            return_type=_tipo_com_pacote_pela_ida(info.return_type),
                         )
                 # Caso ENCERRADO (CANCELLED/CLOSED) não pinta a aba
                 # (devolucao_status_pt → None) e esconderia a volta pela SPX

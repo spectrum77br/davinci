@@ -29,6 +29,7 @@ from app.models import (
     Refund,
     SituacaoBling,
     User,
+    UserRole,
 )
 from app.schemas.devolutions import (
     AcompanhamentoItemOut,
@@ -872,6 +873,16 @@ def _devolucao_no_galpao(fonte_auto: str | None, destino_auto: str | None) -> bo
 _FILAS = ("acompanhamento", "fraude")
 
 
+def _pode_mover_painel(user: User) -> bool:
+    """Mudar o painel (Devoluções ↔ Fraude, ou soltar pra regra) é de admin ou
+    de quem tem `devolucoes_mover` (edit) — Cairo, 10/11/2026: a equipe ficava
+    passando o mesmo pedido de um painel pro outro. Editar o resto da linha
+    segue com `devolucoes` (edit)."""
+    if user.role == UserRole.ADMIN:
+        return True
+    return bool(((user.permissions or {}).get("devolucoes_mover") or {}).get("edit"))
+
+
 def _fila(fila_manual: str | None, devolucao_tipo_auto: str | None) -> tuple[str, bool]:
     """Painel do pedido na tela Devoluções (Vinicius 17/09): "Acompanhamento"
     = volta pacote (uma pessoa cuida do que foi/vai ser devolvido); "Fraude" =
@@ -1419,12 +1430,24 @@ async def patch_acompanhamento_rastreio(
     if not exists:
         raise HTTPException(404, detail={"code": "pedido_not_found"})
 
+    data = body.model_dump(exclude_unset=True)
+    if data.get("fila") and not _pode_mover_painel(user):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "mover_painel_sem_permissao",
+                "message": (
+                    "Só o admin ou quem tem a permissão \"mover entre Acompanhamento "
+                    "e Fraude\" muda o painel do pedido"
+                ),
+            },
+        )
+
     row = await session.get(DevolucaoRastreio, pedido_bling)
     if row is None:
         row = DevolucaoRastreio(pedido_bling=pedido_bling)
         session.add(row)
 
-    data = body.model_dump(exclude_unset=True)
     if "rastreio" in data:
         row.rastreio = (data["rastreio"] or "").strip() or None
     if "localizacao" in data:
@@ -1440,10 +1463,19 @@ async def patch_acompanhamento_rastreio(
         row.observacao = (data["observacao"] or "").strip() or None
     if data.get("fila"):
         # Mover entre os painéis (17/09): fixa a escolha; a regra automática
-        # (tipo do caso) não mexe mais neste pedido.
-        if data["fila"] != row.fila_manual:
-            row.fila_manual = data["fila"]
-            row.fila_manual_at = datetime.now(UTC)
+        # (tipo do caso) não mexe mais neste pedido. "regra" (10/11) desfaz:
+        # o pedido volta pro painel que a plataforma indica.
+        nova = None if data["fila"] == "regra" else data["fila"]
+        if nova != row.fila_manual:
+            logger.info(
+                "devolucao_painel_mudado",
+                pedido_bling=pedido_bling,
+                de=row.fila_manual or "regra",
+                para=nova or "regra",
+                user_id=str(user.id),
+            )
+            row.fila_manual = nova
+            row.fila_manual_at = datetime.now(UTC) if nova else None
     row.updated_by = user.id
     await session.commit()
     await session.refresh(row)

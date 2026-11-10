@@ -19,7 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import DevolucaoRastreio
+from app.models import DevolucaoRastreio, UserRole
 from app.routers.devolutions import _fila
 from app.services import logistica_meli, logistica_shopee
 
@@ -49,8 +49,11 @@ def test_ml_mediacao_sem_devolucao_e_so_dinheiro():
     assert info.return_type == "REFUND"
 
 
-def _perms() -> dict:
-    return {"devolucoes": {"view": True, "edit": True, "delete": True}}
+def _perms(mover: bool = True) -> dict:
+    p = {"devolucoes": {"view": True, "edit": True, "delete": True}}
+    if mover:
+        p["devolucoes_mover"] = {"view": True, "edit": True, "delete": False}
+    return p
 
 
 async def _monta(db: AsyncSession, pedidos: list[str]) -> None:
@@ -130,5 +133,57 @@ async def test_get_classifica_e_patch_move_entre_os_paineis(client, db, make_use
         row = await db.get(DevolucaoRastreio, nada)
         await db.refresh(row)
         assert row.fila_manual == "fraude" and row.fila_manual_at is not None
+    finally:
+        await _derruba_view(db)
+
+
+async def test_mover_painel_so_admin_ou_quem_tem_permissao(client, db, make_user, auth_as):
+    """Cairo 10/11: a equipe ficava passando o mesmo pedido de um painel pro
+    outro. Quem só tem `devolucoes` edita a linha mas não muda o painel."""
+    equipe = await make_user(permissions=_perms(mover=False))
+    auth_as(equipe)
+    vazio = f"4{uuid4().hex[:6]}"
+    await _monta(db, [vazio])
+    db.add(DevolucaoRastreio(pedido_bling=vazio, fonte_auto="shopee", devolucao_tipo_auto="REFUND"))
+    await db.commit()
+    try:
+        r = await client.patch(f"/api/devolutions/acompanhamento/{vazio}", json={"fila": "acompanhamento", "observacao": "x"})
+        assert r.status_code == 403 and r.json()["detail"]["code"] == "mover_painel_sem_permissao"
+        r = await client.patch(f"/api/devolutions/acompanhamento/{vazio}", json={"fila": "regra"})
+        assert r.status_code == 403
+        # o resto da linha continua editável
+        r = await client.patch(f"/api/devolutions/acompanhamento/{vazio}", json={"observacao": "conferido"})
+        assert r.status_code == 200 and (r.json()["fila"], r.json()["fila_manual"]) == ("fraude", False)
+        row = await db.get(DevolucaoRastreio, vazio)
+        await db.refresh(row)
+        assert row.fila_manual is None and row.observacao == "conferido"
+
+        admin = await make_user(role=UserRole.ADMIN)
+        auth_as(admin)
+        r = await client.patch(f"/api/devolutions/acompanhamento/{vazio}", json={"fila": "acompanhamento"})
+        assert r.status_code == 200 and r.json()["fila"] == "acompanhamento"
+    finally:
+        await _derruba_view(db)
+
+
+async def test_soltar_volta_pra_regra(client, db, make_user, auth_as):
+    """"regra" desfaz o mover: o pedido volta pro painel que a plataforma indica."""
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    vazio = f"4{uuid4().hex[:6]}"
+    await _monta(db, [vazio])
+    db.add(DevolucaoRastreio(pedido_bling=vazio, fonte_auto="tiktok", devolucao_tipo_auto="REFUND",
+                             fila_manual="acompanhamento", fila_manual_at=datetime.now(UTC)))
+    await db.commit()
+    try:
+        r = await client.patch(f"/api/devolutions/acompanhamento/{vazio}", json={"fila": "regra"})
+        assert r.status_code == 200, r.text
+        assert (r.json()["fila"], r.json()["fila_manual"]) == ("fraude", False)
+        row = await db.get(DevolucaoRastreio, vazio)
+        await db.refresh(row)
+        assert row.fila_manual is None and row.fila_manual_at is None
+        r = await client.get("/api/devolutions/acompanhamento")
+        por = {i["pedido_bling"]: i for i in r.json()["items"]}
+        assert (por[vazio]["fila"], por[vazio]["fila_manual"]) == ("fraude", False)
     finally:
         await _derruba_view(db)

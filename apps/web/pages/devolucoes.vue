@@ -455,6 +455,8 @@ const TECNICOS = [
 const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
 const canDelete = useCan('devolucoes', 'delete')
+// Mudar o painel (Acompanhamento ↔ Fraude): admin ou `devolucoes_mover`.
+const canMover = useCan('devolucoes_mover', 'edit')
 const isAdmin = useIsAdmin()
 
 // Modal do botão Informar (Threema) — só admins veem o botão.
@@ -1631,9 +1633,13 @@ async function saveRastreio(
 
 // Mover o pedido pro outro painel (17/09): fixa a escolha no servidor (a regra
 // automática não mexe mais) e a linha some desta aba na hora — todas as
-// linhas do mesmo pedido vão juntas.
-async function moverFila(row: AcompanhamentoRow, destino: Fila) {
-  if (!canEdit.value || !row.pedido_bling || row.fila === destino) return
+// linhas do mesmo pedido vão juntas. 'regra' (10/11) solta o pedido: volta pro
+// painel que a plataforma indica. Só admin ou `devolucoes_mover` (Cairo, 10/11:
+// a equipe ficava passando o mesmo pedido de um painel pro outro).
+async function moverFila(row: AcompanhamentoRow, destino: Fila | 'regra') {
+  if (!canMover.value || !row.pedido_bling) return
+  if (destino !== 'regra' && row.fila === destino) return
+  if (destino === 'regra' && !row.fila_manual) return
   const key = `${row.pedido_bling}|fila`
   if (acompSaving.value.has(key)) return
   acompSaving.value = new Set([...acompSaving.value, key])
@@ -1650,7 +1656,9 @@ async function moverFila(row: AcompanhamentoRow, destino: Fila) {
     }
     pushToast({
       kind: 'success',
-      title: destino === 'fraude' ? 'Movido para Fraude' : 'Movido para Acompanhamento',
+      title: destino === 'regra'
+        ? `Solto: segue a plataforma (${res.fila === 'fraude' ? 'Fraude' : 'Acompanhamento'})`
+        : destino === 'fraude' ? 'Movido para Fraude' : 'Movido para Acompanhamento',
       lines: [`Pedido ${row.pedido_bling}`],
     })
   } catch (e: any) {
@@ -2814,7 +2822,7 @@ async function backfillAddresses() {
               <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[95px] bg-emerald-50 dark:bg-emerald-900/20">Lançada</th>
               <!-- Painel (17/09): botão pra mover o pedido pro outro painel quando a
                    plataforma classificou errado (a regra automática não mexe mais). -->
-              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-emerald-50 dark:bg-emerald-900/20" title="Acompanhamento = volta pacote; Fraude = só dinheiro (chegou vazio, reembolso sem devolução). A plataforma decide sozinha pelo tipo do caso; o botão fixa o painel na mão.">Painel</th>
+              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-emerald-50 dark:bg-emerald-900/20" title="Acompanhamento = volta pacote; Fraude = só dinheiro (chegou vazio, reembolso sem devolução). A plataforma decide sozinha pelo tipo do caso; o botão fixa o painel na mão e o ↶ solta de volta pra plataforma. Só admin ou quem tem a permissão de mover muda o painel.">Painel</th>
             </tr>
           </thead>
           <tbody>
@@ -3060,17 +3068,40 @@ async function backfillAddresses() {
                 </Button>
               </td>
               <td class="px-1 py-0.5 text-center bg-emerald-50/40 dark:bg-emerald-900/10">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  class="h-6 px-2 text-[11px]"
-                  :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'fila')"
-                  :title="(row.fila_manual ? 'Movido na mão. ' : 'Classificado pela plataforma. ') + (row.fila === 'fraude' ? 'Mandar de volta pro Acompanhamento (volta pacote)' : 'Mandar pra Fraude (só dinheiro, não volta pacote)')"
-                  @click="moverFila(row, row.fila === 'fraude' ? 'acompanhamento' : 'fraude')"
+                <!-- Cairo 10/11: mudar o painel é só de admin ou de quem tem
+                     "mover entre Acompanhamento e Fraude"; os demais só veem
+                     se o pedido segue a plataforma ou foi fixado na mão. -->
+                <div v-if="canMover" class="inline-flex items-center gap-1">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    class="h-6 px-2 text-[11px]"
+                    :disabled="isSavingRastreio(row.pedido_bling, 'fila')"
+                    :title="(row.fila_manual ? 'Movido na mão. ' : 'Classificado pela plataforma. ') + (row.fila === 'fraude' ? 'Mandar de volta pro Acompanhamento (volta pacote)' : 'Mandar pra Fraude (só dinheiro, não volta pacote)')"
+                    @click="moverFila(row, row.fila === 'fraude' ? 'acompanhamento' : 'fraude')"
+                  >
+                    <ArrowRightLeft class="size-3 mr-1" />
+                    {{ row.fila === 'fraude' ? 'Acompanhamento' : 'Fraude' }}
+                  </Button>
+                  <Button
+                    v-if="row.fila_manual"
+                    size="sm"
+                    variant="ghost"
+                    class="h-6 w-6 p-0"
+                    :disabled="isSavingRastreio(row.pedido_bling, 'fila')"
+                    title="Soltar: o pedido foi fixado na mão neste painel. Soltando, ele volta pro painel que a plataforma indica e acompanha as mudanças do caso."
+                    @click="moverFila(row, 'regra')"
+                  >
+                    <Undo2 class="size-3" />
+                  </Button>
+                </div>
+                <span
+                  v-else
+                  class="text-[11px] text-muted-foreground"
+                  :title="row.fila_manual ? 'Fixado neste painel na mão. Só o admin ou quem tem a permissão de mover muda o painel.' : 'O painel segue a plataforma: Fraude = não volta pacote (só dinheiro). Só o admin ou quem tem a permissão de mover muda.'"
                 >
-                  <ArrowRightLeft class="size-3 mr-1" />
-                  {{ row.fila === 'fraude' ? 'Acompanhamento' : 'Fraude' }}
-                </Button>
+                  {{ row.fila_manual ? 'fixado na mão' : 'automático' }}
+                </span>
               </td>
             </tr>
           </tbody>

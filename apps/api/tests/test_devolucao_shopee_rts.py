@@ -168,6 +168,37 @@ async def test_caso_so_reembolso_com_ida_falhada_le_a_volta_pela_spx(shopee_clie
     assert info.updated_at == datetime.fromtimestamp(1789565570, tz=UTC)  # evento da SPX manda
     assert ("track", "260909HMCYJ1DP") in client.calls
     assert ("number", "260909HMCYJ1DP") not in client.calls  # a linha já tinha o código
+    # Cairo 10/11 (303572): tem pacote voltando → não é mais "só reembolso" (Fraude).
+    assert info.return_type is None
+
+
+@pytest.mark.asyncio
+async def test_so_reembolso_com_ida_voltando_sai_da_fraude_e_sem_volta_fica(shopee_client):
+    """Cairo 10/11 (303572): o caso "não recebi" aceito como só reembolso caía
+    em Fraude mesmo com a SPX mostrando "Pedido será devolvido ao vendedor".
+    Com o evento de volta → Acompanhamento; ida falhada SEM evento de volta
+    ainda → continua só reembolso (Fraude)."""
+    voltando = {**_CASO_SO_REEMBOLSO, "return_sn": "2611VOLTA", "order_sn": "2611VOLTASN"}
+    parado = {**_CASO_SO_REEMBOLSO, "return_sn": "2611PARADO", "order_sn": "2611PARADOSN"}
+    sem_volta = {"logistics_status": "LOGISTICS_DELIVERY_FAILED", "tracking_info": [
+        {"update_time": 1789008462, "logistics_status": "PICKED_UP", "description": "Seu pedido chegou ao centro logístico: Louveira - SP"},
+    ]}
+    client = _FakeShopee(
+        returns=[voltando, parado],
+        details={"2611VOLTA": voltando, "2611PARADO": parado},
+        tracking={"2611VOLTASN": _IDA_VOLTANDO, "2611PARADOSN": sem_volta},
+    )
+    shopee_client["client"] = client
+    linhas = [
+        _linha("303572", "2611VOLTASN", logistics_status="LOGISTICS_DELIVERY_FAILED", rastreio="BR269302215356P"),
+        _linha("301793", "2611PARADOSN", logistics_status="LOGISTICS_DELIVERY_FAILED", rastreio="BR264522937333H"),
+    ]
+
+    out = await logistica_shopee.returns_por_pedido(None, linhas)
+
+    assert out["303572"].return_type is None
+    assert out["303572"].localizacao == "Pedido será devolvido ao vendedor"
+    assert out["301793"].return_type == "REFUND"
 
 
 @pytest.mark.asyncio
@@ -307,6 +338,7 @@ async def test_depois_da_chegada_mantem_codigo_e_transportadora_sem_api(shopee_c
     assert info.tracking == "BR264343187915J"
     assert info.carrier == logistica_shopee._CARRIER_IDA
     assert info.status == "ACCEPTED"
+    assert info.return_type is None  # o pacote voltou: segue fora da Fraude nas rodadas seguintes
     assert not [c for c in client.calls if c[0] != "list"]
 
 

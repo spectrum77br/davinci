@@ -535,8 +535,10 @@ class AcompanhamentoRastreioPatch(BaseModel):
     # Observação livre (10/09): "" limpa; omitido não mexe.
     observacao: str | None = None
     # Mover entre os painéis (17/09): 'acompanhamento' | 'fraude'. Omitido não
-    # mexe. Fixa a escolha (vale mais que a regra automática).
-    fila: FilaDevolucao | None = None
+    # mexe. Fixa a escolha (vale mais que a regra automática). 'regra'
+    # (10/11) solta o pedido: volta pro painel que a plataforma indica. Só
+    # admin ou quem tem `devolucoes_mover` (edit).
+    fila: FilaDevolucao | Literal["regra"] | None = None
 
 
 class AcompanhamentoRastreioOut(BaseModel):

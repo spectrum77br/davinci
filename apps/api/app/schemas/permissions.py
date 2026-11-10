@@ -24,6 +24,13 @@ Resource = Literal[
     "faturamento",
     "controle_estoque",
     "devolucoes",
+    # Devoluções › mover o pedido entre os painéis Devoluções e Fraude
+    # (Cairo, 10/11/2026: a equipe ficava passando pedido de um painel pro
+    # outro). Só `edit` vale; admin sempre pode. Quem tem só `devolucoes`
+    # continua editando a linha, mas não muda o painel. Lida em
+    # routers/devolutions.py:patch_acompanhamento_rastreio; mesmo nome no
+    # useCan.ts.
+    "devolucoes_mover",
     "reembolso",
     # Logística — casos de pós-venda a acompanhar + aba Status. Sugestão de
     # status Bling a partir da assinatura de status do Meli.
