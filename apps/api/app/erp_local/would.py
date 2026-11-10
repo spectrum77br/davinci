@@ -7,6 +7,7 @@ tudo fica registrado no dia, para comparar com o que a equipe fez no Bling.
 
 import json
 import os
+import re
 
 from app.erp_local import native_ingest, recipient_capture
 from app.erp_local.core import ERPError
@@ -148,7 +149,12 @@ def invoice_plan(db, identifier):
     company, data = json.loads(row["company"]), json.loads(row["data"])
     uf = (company.get("address") or {}).get("uf") or "?"
     total = data.get("total") or (data.get("totals") or {}).get("invoice") or ""
-    recipient = (data.get("recipient") or {}).get("name") or ""
+    recipient = data.get("recipient") or ""
+    if isinstance(recipient, dict):
+        recipient = recipient.get("name") or ""
+    xml = row["xml"] or ""
+    cfops = sorted(set(re.findall(r"<CFOP>(\d{4})</CFOP>", xml)))
+    place = re.search(r"<dest>.*?<UF>([A-Z]{2})</UF>", xml, re.S)
     if row["status"] == "authorized":
         would = "Nada: esta nota já está autorizada."
     elif row["status"] not in {"draft", "sending"}:
@@ -156,8 +162,10 @@ def invoice_plan(db, identifier):
     else:
         would = (
             f"Assinaria com o certificado de {company.get('name') or company.get('cnpj')} e "
-            f"enviaria a nota {row['number']} (série {row['series']}) à SEFAZ de {uf} "
-            "em produção. Depois guardaria o protocolo e mandaria a nota à loja."
+            f"enviaria a nota {row['number']} (série {row['series']}) de R$ {total}"
+            f"{', CFOP ' + '/'.join(cfops) if cfops else ''}"
+            f"{', para ' + place.group(1) if place else ''}, à SEFAZ de {uf} em produção. "
+            "Depois guardaria o protocolo e mandaria a nota à loja."
         )
     if not company.get("technical") and row["status"] in {"draft", "sending"}:
         would += " Antes, faltaria informar o responsável técnico da emissão (decisão pendente)."
@@ -168,6 +176,7 @@ def invoice_plan(db, identifier):
         "company": company.get("name") or company.get("cnpj"),
         "recipient": recipient,
         "total": str(total),
+        "cfops": cfops,
         "status": row["status"],
         "would": would,
     }

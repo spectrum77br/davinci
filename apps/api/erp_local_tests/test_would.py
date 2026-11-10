@@ -145,3 +145,26 @@ def test_outside_homologation_the_technical_contact_is_still_required(erp, monke
         )
     with pytest.raises(ERPError, match="responsável técnico"):
         erp.command("adopt", "fiscal.company.adopt", {"cnpj": "11222333000181"})
+
+
+def test_invoice_plan_reads_value_cfop_and_destination_from_the_note(erp, homolog):
+    from app.erp_local import fiscal_invoices as fi
+
+    with erp.connection() as db:
+        db.executescript(fi.SCHEMA)
+        db.execute(
+            "INSERT INTO fiscal_companies VALUES ('c1',1,?,?)",
+            ('{"name":"Empresa","cnpj":"11222333000181","address":{"uf":"SP"}}', erp.now()),
+        )
+        xml = (
+            "<NFe><det><prod><CFOP>6102</CFOP></prod></det>"
+            "<dest><enderDest><UF>MG</UF></enderDest></dest></NFe>"
+        )
+        db.execute(
+            "INSERT INTO fiscal_invoices VALUES "
+            "('n1','o1','c1',2,1004,'k','draft',1,?,?,NULL,NULL,?)",
+            ('{"total":"1094.74","recipient":"Comprador"}', xml, erp.now()),
+        )
+        plan = would.invoice_plan(db, "n1")
+    assert plan["recipient"] == "Comprador" and plan["cfops"] == ["6102"]
+    assert "R$ 1094.74, CFOP 6102, para MG, à SEFAZ de SP" in plan["would"]
