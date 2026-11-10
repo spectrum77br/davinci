@@ -21,5 +21,10 @@
 3. DaVinci: criar um banco vazio (`createdb -U pguser davinci_restauro`), carregar `restic dump latest davinci.sql --tag davinci | docker exec -i pg18 psql -U pguser -d davinci_restauro`, conferir contagens das tabelas principais e só então trocar o nome dos bancos, com a api e os workers parados.
 4. Teste de restauração completo: uma vez por mês, restaurar o ERP inteiro e uma tabela grande do DaVinci num banco temporário e registrar o tempo gasto aqui.
 
+## Destino
+- MEGA da conta que o DaVinci já usa, pasta `/davinci-backups` (repositório restic em `/davinci-backups/restic`). A pasta é servida por WebDAV só em 127.0.0.1 dentro do sidecar `davinci-megacmd-1`; o restic roda na rede do sidecar (nsenter). Nada fica aberto na rede do Docker. Os servidores do MEGA ficam fora da Hetzner (outro local).
+- Configuração no servidor: `/etc/davinci/backup/backup.env` (BACKUP_VIA=megacmd) e `restic.pass` (600). Agendamento: `/etc/cron.d/davinci-backup`, 07:00 UTC (04:00 em Brasília), log em `/var/log/davinci-backup.log`.
+- Trava: não começa com menos de 3 GB livres no disco do servidor.
+
 ## Histórico
-- 10/11/2026: script e passo a passo escritos; destino ainda não escolhido; nada agendado no servidor.
+- 10/11/2026: script e passo a passo escritos. Destino MEGA escolhido pelo Eduardo. restic e rclone instalados; repositório criado; primeira cópia do ERP (d45fefc1, 159 MiB → 23 MB no MEGA) e restauração conferida (soma e contagens) em 4 s. Teste de 600 MB: o envio pelo MEGAcmd é síncrono e o disco livre caiu no máximo 1,2 GB durante o envio. Cópia diária agendada; a primeira do DaVinci roda em 11/11 às 04:00.

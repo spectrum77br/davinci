@@ -53,6 +53,9 @@ if [ "${BACKUP_VIA:-}" = megacmd ]; then
 fi
 
 log "início $stamp"
+# Trava: o disco do servidor também guarda o banco; com menos de 3 GB livres a cópia não começa.
+free_mb=$(df -BM --output=avail / | tail -1 | tr -dc 0-9)
+[ "$free_mb" -ge 3000 ] || { log "disco com ${free_mb} MB livres: cópia adiada"; exit 4; }
 
 # 1) DaVinci, em fluxo: pg_dump -> restic (sem arquivo intermediário no disco).
 # ONLY=erp pula o DaVinci (teste de dia, sem pesar no banco).
