@@ -109,6 +109,30 @@ services:
     networks:
       - davinci_net
 
+  # Homologação do ERP: cópia da base real recebendo os pedidos das lojas a cada minuto, com o ERP
+  # como dono das lojas. Só abre pelo túnel SSH (127.0.0.1:8765). Sem env_file e fora da davinci_net:
+  # nenhuma chave de loja, do Bling, da SEFAZ ou do DaVinci entra aqui, e a base real é só lida.
+  erp_homolog:
+    profiles: ["erp"]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["uv", "run", "python", "-m", "app.erp_local.homolog", "--live", "/var/lib/davinci-erp/erp.sqlite3", "--database", "/var/lib/davinci-erp-homolog/erp.sqlite3", "--host", "0.0.0.0", "--port", "8765"]
+    environment:
+      ERP_HOMOLOG: "1"
+    ports:
+      - "127.0.0.1:8765:8765"
+    volumes:
+      - type: bind
+        source: /var/lib/davinci-erp
+        target: /var/lib/davinci-erp
+      - type: bind
+        source: /var/lib/davinci-erp-homolog
+        target: /var/lib/davinci-erp-homolog
+        bind:
+          create_host_path: true
+
   magalu_proxy:
     build:
       context: ./infra/magalu-proxy

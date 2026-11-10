@@ -19,7 +19,8 @@ REFRESH_EVERY = 12
 
 
 # Stores read every minute, like Bling takes their orders; the others keep the slower pace their
-# platforms allow (Amazon's order quota is shared with DaVinci, Magalu goes through the owner's Mac).
+# platforms allow (Amazon's order quota is shared with DaVinci; Magalu goes through the owner's
+# Mac).
 FAST_CHANNELS = frozenset({"ml", "shopee", "tiktok"})
 
 

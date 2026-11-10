@@ -86,7 +86,8 @@ def test_archived_stores_are_skipped_and_light_rounds_read_only_fast_channels(er
             ("ativa", {"id": "ativa", "status": "active", "archived_at": None}),
         ]:
             db.execute(
-                "INSERT INTO reference_rows VALUES ('integrations',?,?,'')", (store, json.dumps(data))
+                "INSERT INTO reference_rows VALUES ('integrations',?,?,'')",
+                (store, json.dumps(data)),
             )
         for channel, store in [("ml", "banida"), ("ml", "ativa"), ("amazon", "lenta")]:
             db.execute(
