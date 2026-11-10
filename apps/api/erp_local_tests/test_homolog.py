@@ -100,3 +100,14 @@ def test_auto_import_takes_only_sales_made_since_the_test_began(tmp_path, monkey
     result = homolog.auto_import(copy, began.isoformat())
     assert promoted == [("ml", "loja", "nova", "geral")]
     assert result == {"imported": 1, "waiting": {"ingest_not_open": 1}}
+
+
+def test_the_state_goes_compressed(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from app.erp_local.api import create_app
+
+    LocalERP(tmp_path / "erp.sqlite3").command("seed", "demo.seed", {})
+    client = TestClient(create_app(tmp_path / "erp.sqlite3"), base_url="http://localhost")
+    response = client.get("/api/erp-local/state", headers={"Accept-Encoding": "gzip"})
+    assert response.status_code == 200 and response.headers.get("content-encoding") == "gzip"

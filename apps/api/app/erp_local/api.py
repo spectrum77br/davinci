@@ -11,6 +11,7 @@ from fastapi import Body, FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.erp_local import access
@@ -64,6 +65,9 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", *extra_hosts]
     )
+    # The state of a real base is several megabytes of JSON: compressed it crosses an SSH tunnel or
+    # a slow link about ten times faster.
+    app.add_middleware(GZipMiddleware, minimum_size=4096)
 
     def _access_denied(request):
         """Behind the gate every call is someone's. The command route checks the kind itself."""

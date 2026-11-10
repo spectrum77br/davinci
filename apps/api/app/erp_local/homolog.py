@@ -13,6 +13,7 @@ Uso: python -m app.erp_local.homolog --live <base real> --database <cópia> [--p
 import argparse
 import contextlib
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -229,6 +230,12 @@ def main():
     parser.add_argument("--every", type=int, default=60)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
+    # The copy holds buyers: only root reads it, like the real base.
+    os.umask(0o077)
+    args.database.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(args.database.parent, 0o700)
+    for path in args.database.parent.glob(args.database.name + "*"):
+        os.chmod(path, 0o600)
     if seed(args.live, args.database):
         log.info("cópia criada a partir da base real")
     threading.Thread(target=loop, args=(args.database, args.live, args.every), daemon=True).start()
