@@ -703,6 +703,56 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             headers={"Content-Disposition": 'attachment; filename="pedidos-proprios.csv"'},
         )
 
+    @app.get("/api/erp-local/contacts.csv")
+    def export_contacts():
+        import csv
+        import io
+
+        stream = io.StringIO()
+        writer = csv.writer(stream, delimiter=";")
+        writer.writerow(
+            ["Código", "Nome", "Fantasia", "CPF/CNPJ", "E-mail", "Telefone", "Cidade", "UF"]
+            + ["Tipos", "Situação"]
+        )
+        roles = {
+            "customer": "Cliente",
+            "supplier": "Fornecedor",
+            "carrier": "Transportador",
+            "technician": "Técnico",
+            "accountant": "Contador",
+            "seller": "Vendedor",
+        }
+        states = {"active": "Ativo", "inactive": "Inativo", "idle": "Sem movimento"}
+        from app.erp_local import contacts as contact_register
+
+        with erp.connection() as db:
+            rows = contact_register.snapshot(db)
+        for row in rows:
+            d = row["data"]
+            values = [
+                row.get("code", ""),
+                d.get("name", ""),
+                d.get("trade_name", ""),
+                d.get("document", ""),
+                d.get("email", ""),
+                d.get("phone") or d.get("mobile") or "",
+                d.get("city", ""),
+                d.get("state", ""),
+                ", ".join(roles.get(r, r) for r in d.get("roles") or []),
+                states.get(d.get("status"), d.get("status", "")),
+            ]
+            writer.writerow(
+                [
+                    "'" + str(v) if str(v).lstrip().startswith(("=", "+", "-", "@")) else v
+                    for v in values
+                ]
+            )
+        return Response(
+            stream.getvalue().encode("utf-8-sig"),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="contatos.csv"'},
+        )
+
     @app.get("/api/erp-local/purchases.csv")
     def export_purchases():
         import csv

@@ -296,12 +296,39 @@ def reverse_receipt(erp, db, key, identifier):
     return {"id": identifier, "status": "reversed"}
 
 
+def _change_situation(erp, db, key, identifier, action):
+    document, data = erp.document(db, identifier, "purchase")
+    if action == "cancel":
+        if document["status"] == "cancelled":
+            return {"id": identifier, "status": "cancelled", "changed": False}
+        return apply(
+            erp,
+            db,
+            key,
+            "purchase.cancel",
+            {
+                "id": identifier,
+                "version": data.get("version", 0),
+                "reason": "Situação alterada em lote",
+            },
+        )
+    if document["status"] == "cancelled":
+        raise ERPError("purchase_batch", "Compra cancelada não pode ser atendida.", 409)
+    if not data.get("stock_posted"):
+        apply(erp, db, key, "purchase.stock", {"id": identifier})
+    _, data = erp.document(db, identifier, "purchase")
+    if not data.get("accounts_posted"):
+        apply(erp, db, key, "purchase.accounts", {"id": identifier})
+    return {"id": identifier, "status": "received", "changed": True}
+
+
 def apply(erp, db, key, kind, p):
     if kind == "purchases.batch":
         if (
             not isinstance(p, dict)
             or set(p) != {"ids", "action"}
-            or p["action"] not in {"stock", "reverse_stock", "accounts", "reverse_accounts"}
+            or p["action"]
+            not in {"stock", "reverse_stock", "accounts", "reverse_accounts", "attend", "cancel"}
         ):
             raise ERPError("purchase_batch", "Ação do lote de compras inválida.")
         identifiers = p["ids"]
@@ -314,6 +341,12 @@ def apply(erp, db, key, kind, p):
             raise ERPError("purchase_batch", "Selecione de 1 a 200 compras distintas.")
         # The enclosing ERP command owns one transaction. Any failed purchase
         # rolls back the entire selection, including its receipts and accounts.
+        if p["action"] in {"attend", "cancel"}:
+            # Bling's "Mudar situação": Atendido receives what is left and posts the accounts;
+            # Cancelado cancels. Each step keeps its own rules (a received purchase cannot be
+            # cancelled before its receipts are reversed).
+            results = [_change_situation(erp, db, key, i, p["action"]) for i in identifiers]
+            return {"purchases": results, "action": p["action"], "external_writes": False}
         results = [apply(erp, db, key, "purchase." + p["action"], {"id": i}) for i in identifiers]
         return {"purchases": results, "action": p["action"], "external_writes": False}
     allowed = {

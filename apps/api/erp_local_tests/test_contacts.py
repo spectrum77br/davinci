@@ -102,3 +102,28 @@ def test_foreign_document_is_scoped_by_country(erp):
     save(erp, person_type="E", country="Espanha", document="LOCAL-123")
     with erp.connection() as db:
         assert len(contacts.snapshot(db)) == 2
+
+
+def test_contacts_export_is_a_spreadsheet_safe_against_formulas(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from app.erp_local.api import create_app
+
+    with TestClient(create_app(tmp_path / "c.sqlite3"), base_url="http://127.0.0.1:8765") as c:
+        erp = c.app.state.erp
+        run(
+            erp,
+            "contact.save",
+            {
+                "data": {
+                    "name": "=HYPERLINK(1)",
+                    "email": "cliente@exemplo.com",
+                    "roles": ["customer"],
+                }
+            },
+        )
+        csv = c.get("/api/erp-local/contacts.csv")
+    assert csv.status_code == 200 and "contatos.csv" in csv.headers["content-disposition"]
+    assert (
+        "'=HYPERLINK(1)" in csv.text and "cliente@exemplo.com" in csv.text and "Cliente" in csv.text
+    )

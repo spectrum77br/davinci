@@ -1229,3 +1229,55 @@ test('stock transfer sends only the transfer fields, and an entry keeps the cost
   assert.equal(requests.find(r=>r.kind==='stock.post').payload.unit_cost,'42.5');
   dom.window.close();
 });
+
+test('contacts search by e-mail, newest first and export like Bling',async()=>{
+  const contacts=[{id:'c1',code:1,version:1,data:{name:'Primeiro',email:'um@exemplo.com',roles:['customer'],status:'active'}},{id:'c2',code:2,version:1,data:{name:'Segundo',email:'dois@exemplo.com',roles:['supplier'],status:'inactive'}}];
+  const {dom,document:d}=await setup({contacts});
+  d.querySelector('nav [data-page=contacts]').click();
+  await new Promise(r=>setImmediate(r));
+  assert.ok(d.querySelector('a[href="/api/erp-local/contacts.csv"]'));
+  const status=d.getElementById('contacts-status');status.value='recent';status.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  await new Promise(r=>setImmediate(r));
+  const names=[...d.querySelectorAll('[data-edit-contact].contact-name')].map(b=>b.textContent);
+  assert.deepEqual(names,['Segundo','Primeiro']);
+  const form=d.getElementById('contacts-query');form.querySelector('[name=query]').value='dois@exemplo';
+  form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  assert.deepEqual([...d.querySelectorAll('[data-edit-contact].contact-name')].map(b=>b.textContent),['Segundo']);
+});
+
+test('purchases show internal note, Bling situation names, links and change situation in batch',async()=>{
+  const purchases=[{id:'p1',status:'received',version:1,data:{number:'117',supplier:'Fornecedor',total:'10',date:'2026-11-05',items:[],internal_notes:'Pagar na entrega',stock_posted:true,accounts_posted:true}},{id:'p2',status:'partial',version:1,data:{number:'118',supplier:'Outro',total:'5',date:'2026-11-06',items:[]}}];
+  const {dom,document:d,requests}=await setup({purchases,inbound:{invoices:[{key:'35261100000000000000550010000001231000001234',number:'123',purchase_id:'p1'}]}});
+  d.querySelector('nav [data-page=purchases]').click();
+  await new Promise(r=>setImmediate(r));
+  const text=d.body.textContent;
+  assert.ok(text.includes('Observação interna')&&text.includes('Pagar na entrega'));
+  assert.ok(text.includes('Atendido')&&text.includes('Em andamento')&&text.includes('Vinculado')&&text.includes('Não vinculado'));
+  const pick=d.querySelector('[data-purchase-select="p2"]');pick.checked=true;pick.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  await new Promise(r=>setImmediate(r));
+  d.querySelector('[data-purchase-batch="cancel"]').click();
+  await new Promise(r=>setImmediate(r));
+  assert.deepEqual(requests.at(-1).payload,{ids:['p2'],action:'cancel'});
+});
+
+test('output notes filter by store, recipient document and situation',async()=>{
+  const orders=[{id:'o1',status:'reserved',data:{channel:'ml',store:'Loja A',external_id:'2000-1',items:[{sku:'demo.aparelho',quantity:'1'}],contact:{name:'Ana',document:'52998224725',state:'MG'},total:'10'}},{id:'o2',status:'reserved',data:{channel:'shopee',store:'Loja B',external_id:'261110X',items:[],contact:{name:'Bia',document:'11144477735',state:'SP'},total:'5'}}];
+  const invoicing={companies:[],invoices:[{id:'n1',order_id:'o1',status:'authorized',access_key:'K1',updated_at:'2026-11-10T10:00:00',data:{number:'10',series:'1',company:'E',recipient:'Ana',total:'10'}},{id:'n2',order_id:'o2',status:'draft',access_key:'K2',updated_at:'2026-11-10T11:00:00',data:{number:'11',series:'1',company:'E',recipient:'Bia',total:'5'}}]};
+  const {dom,document:d}=await setup({orders,invoicing});
+  d.querySelector('nav [data-page=fiscal]').click();
+  await new Promise(r=>setImmediate(r));
+  const store=d.getElementById('fiscal-store');assert.ok(store&&store.options.length===3);
+  const search=d.getElementById('invoice-query');search.querySelector('[name=query]').value='529.982';
+  search.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  assert.equal(d.querySelectorAll('[data-invoice-transmit]').length,1);
+  d.getElementById('invoice-clear').click();
+  await new Promise(r=>setImmediate(r));
+  const filters=d.getElementById('invoice-filters');filters.querySelector('[name=status]').value='draft';
+  filters.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  const rows=[...d.querySelectorAll('[data-invoice-transmit]')].map(b=>b.closest('tr').textContent);
+  assert.equal(rows.length,1);assert.ok(rows[0].includes('Bia'));
+  store.value=store.options[1].value;store.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+});
