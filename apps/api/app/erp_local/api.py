@@ -174,6 +174,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             returns,
             sellers,
             stock_priority,
+            would,
         )
 
         with erp.connection() as db:
@@ -192,6 +193,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "finance": finance.snapshot(db),
                 "finance_categories": finance_categories.snapshot(db),
                 "homolog": homolog.info(db),
+                "would": would.listing(db) if would.active() else [],
                 "procurement": procurement.snapshot(erp, db),
                 "fiscal": fiscal.snapshot(db, getattr(app.state, "fiscal_readiness", None)),
                 "invoicing": fiscal_invoices.snapshot(db),
@@ -313,6 +315,11 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
 
     @app.post("/api/erp-local/fiscal/invoices/{identifier}/transmit")
     def invoice_transmit(identifier: str):
+        from app.erp_local import would
+
+        if would.active():
+            # Homologation: says what would be signed and sent, and keeps it for the day.
+            return would.transmit(erp, identifier)
         return fiscal_invoices.transmit(
             erp, identifier, *fiscal_context(*invoice_place(identifier))
         )

@@ -99,6 +99,11 @@ def batch(erp, items, reader=None):
     if not isinstance(items, list) or not 1 <= len(items) <= MAX_BATCH:
         raise ERPError("label_batch", f"Selecione de 1 a {MAX_BATCH} vendas.")
     keys = [(str(i["channel"]), str(i["store"]), str(i["number"])) for i in items]
+    from app.erp_local import would
+
+    if would.active() and reader is None:
+        # Homologation: nothing is asked of the store; each page says what would be printed.
+        return would.label_pdf(erp, keys), {}
     failures = _fetch(erp, keys, reader or host_reader())
     import fitz
 

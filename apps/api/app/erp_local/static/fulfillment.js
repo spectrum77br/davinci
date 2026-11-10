@@ -113,7 +113,8 @@ function saleRowExtras(o){
   const names=(state.situations||{}).names||{},current=(state.situations||{}).orders?.[o.id];
   const prints=`<button type="button" data-order-print="${esc(o.id)}">Imprimir</button><button type="button" data-order-print-one="${esc(o.id)}" data-mode="receipt">Imprimir comprovante</button><button type="button" data-order-print-one="${esc(o.id)}" data-mode="detail">Imprimir c/ detalhes</button>${store?`<button type="button" data-one-label='${store}'>Imprimir etiqueta de envio</button><button type="button" data-one-paper="declarations" data-pick='${store}'>Imprimir declaração de conteúdo</button><button type="button" data-one-paper="production" data-pick='${store}'>Relatório de produção</button>`:''}`;
   const situations=Object.entries(names).filter(([id])=>Number(id)!==current).map(([id,name])=>`<button type="button" data-set-situation="${esc(id)}" data-order="${esc(o.id)}"><span class="situation-dot tone-${situationTone[id]||'other'}"></span>${esc(name)}</button>`).join('');
-  return `<button type="button" disabled title="Emissão própria de NF-e ainda em homologação">Gerar nota fiscal</button>${prints}<button type="button" data-occurrences="${esc(o.id)}">Ocorrências</button><div class="row-menu-group">Situação</div>${situations}`;
+  const invoice=state.homolog?`<button type="button" data-invoice-for="${esc(o.id)}">Gerar nota fiscal</button>`:'<button type="button" disabled title="Emissão própria de NF-e ainda em homologação">Gerar nota fiscal</button>';
+  return `${invoice}${prints}<button type="button" data-occurrences="${esc(o.id)}">Ocorrências</button><div class="row-menu-group">Situação</div>${situations}`;
 }
 document.addEventListener('click',async e=>{
   const pr=e.target.closest('[data-order-print]');if(pr){window.open(`/api/erp-local/orders/print?ids=${encodeURIComponent(pr.dataset.orderPrint)}`,'_blank','noopener');}
@@ -152,3 +153,16 @@ document.addEventListener('click',async e=>{
 });
 
 document.addEventListener('click',e=>{const d=e.target.closest('[data-order-discard]');if(d)command('order.discard',{id:d.dataset.orderDiscard,reason:'Excluído pela lista de pedidos'});});
+
+function wouldPanel(){
+  if(!state.homolog)return '';
+  const hour=at=>new Date(at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  const rows=(state.would||[]).map(w=>`<tr><td>${esc(hour(w.at))}</td><td>${esc(w.name)}</td><td>${esc(w.target)}</td><td class="would-text">${esc(w.detail?.would||'')}</td></tr>`);
+  return panel('O que o ERP faria hoje','Na homologação, cada ação que sairia para as lojas ou para a SEFAZ fica aqui com o que seria mandado. Nada foi enviado.',rows.length?table(['Hora','Ação','Pedido ou nota','O que faria'],rows.join('')):'<p class="empty">Nenhuma ação ainda. Imprima uma etiqueta ou envie uma NF-e para ver o que o ERP faria.</p>');
+}
+document.addEventListener('click',e=>{
+  const button=e.target.closest('[data-invoice-for]');if(!button)return;
+  const id=button.dataset.invoiceFor;
+  document.querySelector('nav [data-page=fiscal]')?.click();
+  setTimeout(()=>{const select=document.querySelector('#invoice-prepare [name=order_id]');if(!select)return;if(![...select.options].some(o=>o.value===id)){message('Este pedido ainda não pode ter nota: ele precisa estar reservado no ERP.',true);return;}select.value=id;select.closest('.panel')?.scrollIntoView({block:'start'});},0);
+});

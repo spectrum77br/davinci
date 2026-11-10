@@ -1335,3 +1335,21 @@ test('homologation shows in the status strip and the sidebar, without a block th
   assert.equal(d.getElementById('foot-title').textContent,'Homologação');
   assert.equal(d.body.firstElementChild.tagName,'ASIDE');
 });
+
+test('homologation lists what the ERP would do and lets an order go to its invoice',async()=>{
+  const would=[{at:'2026-11-10T18:40:00+00:00',action:'label',name:'Etiqueta de envio',target:'Shopee 261111ABC',detail:{would:'Baixaria da Shopee a etiqueta do envio 261111ABC e a imprimiria aqui.'}}];
+  const {document:d}=await setup({homolog:{started_at:'2026-11-10T18:13:20+00:00'},would,orders:[ownOrder('P1','A')]});
+  d.querySelector('nav [data-page=overview]').click();
+  assert.match(d.body.textContent,/O que o ERP faria hoje/);
+  assert.match(d.body.textContent,/Baixaria da Shopee a etiqueta do envio 261111ABC/);
+  d.querySelector('nav [data-page=orders]').click();
+  assert.ok(d.querySelector('[data-invoice-for="P1"]'));
+  assert.equal(d.querySelector('[data-invoice-for="P1"]').disabled,false);
+});
+
+test('outside homologation the invoice button stays off and no panel appears',async()=>{
+  const {document:d}=await setup({orders:[ownOrder('P1','A')]});
+  d.querySelector('nav [data-page=overview]').click();
+  assert.doesNotMatch(d.body.textContent,/O que o ERP faria hoje/);
+  assert.equal(d.querySelector('[data-invoice-for]'),null);
+});

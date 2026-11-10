@@ -171,3 +171,4 @@ body[data-screen=products] #subtitle{display:none}
 .lot-pill{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:10px;background:#eef3ff;color:var(--accent);font-size:11px;font-weight:600}
 
 .environment.homolog{background:#fff3cd;color:#664d03;border-bottom-color:#e6c65c;font-weight:600}
+.would-text{white-space:normal;min-width:280px}

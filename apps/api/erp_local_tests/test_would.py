@@ -1,0 +1,83 @@
+"""Homologação: o que sairia para fora vira uma resposta do que seria feito, sem sair."""
+
+import pytest
+from fastapi.testclient import TestClient
+
+from app.erp_local import (
+    fiscal_invoices,
+    native_ingest,
+    recipient_capture,
+    store_labels,
+    would,
+)
+from app.erp_local.api import create_app
+from app.erp_local.core import ERPError
+
+
+@pytest.fixture
+def homolog(monkeypatch):
+    monkeypatch.setenv("ERP_HOMOLOG", "1")
+
+
+def test_labels_become_pages_saying_what_would_be_printed(erp, homolog, monkeypatch):
+    unit = {"261111ABC": {"261111ABC": {"items": [{"seller_sku": "mala.p", "quantity": 2}]}}}
+    monkeypatch.setattr(native_ingest, "_units", lambda db, channel, store: unit)
+    monkeypatch.setattr(store_labels, "reference", lambda db, c, s, n: "SHP-77")
+    monkeypatch.setattr(
+        recipient_capture, "for_order", lambda db, c, s, n: {"name": "Comprador", "city": "X"}
+    )
+
+    def never(**_kw):
+        raise AssertionError("a loja não pode ser chamada na homologação")
+
+    monkeypatch.setattr(store_labels, "host_reader", lambda: never)
+    pdf, failures = store_labels.batch(
+        erp, [{"channel": "shopee", "store": "loja", "number": "261111ABC"}]
+    )
+    assert pdf.startswith(b"%PDF") and failures == {}
+    with erp.connection() as db:
+        done = would.listing(db)
+    assert done[0]["action"] == "label" and "envio SHP-77" in done[0]["detail"]["would"]
+    assert done[0]["detail"]["items"] == ["2 × mala.p"]
+
+
+def test_a_label_the_store_has_not_arranged_says_why(erp, homolog, monkeypatch):
+    monkeypatch.setattr(native_ingest, "_units", lambda db, channel, store: {})
+    monkeypatch.setattr(recipient_capture, "for_order", lambda *a: None)
+
+    def not_ready(*_a):
+        raise ERPError("label_reference", "A loja ainda não organizou o envio.", 409)
+
+    monkeypatch.setattr(store_labels, "reference", not_ready)
+    store_labels.batch(erp, [{"channel": "ml", "store": "loja", "number": "1"}])
+    with erp.connection() as db:
+        assert would.listing(db)[0]["detail"]["would"].startswith("Não pediria etiqueta")
+
+
+def test_outside_homologation_labels_still_go_to_the_store(erp, monkeypatch):
+    monkeypatch.delenv("ERP_HOMOLOG", raising=False)
+    with pytest.raises(ERPError, match="compradores"):
+        store_labels.batch(erp, [{"channel": "ml", "store": "loja", "number": "1"}])
+
+
+def test_sending_a_note_says_what_would_go_to_sefaz(tmp_path, homolog, monkeypatch):
+    plan = {"number": 12, "series": 1, "status": "draft", "would": "Assinaria e enviaria."}
+    monkeypatch.setattr(would, "invoice_plan", lambda db, identifier: plan)
+
+    def never(*_a, **_k):
+        raise AssertionError("a SEFAZ não pode ser chamada na homologação")
+
+    monkeypatch.setattr(fiscal_invoices, "transmit", never)
+    client = TestClient(create_app(tmp_path / "erp.sqlite3"), base_url="http://localhost")
+    reply = client.post(
+        "/api/erp-local/fiscal/invoices/nota-1/transmit", headers={"X-ERP-Local": "1"}
+    )
+    assert reply.status_code == 200
+    assert reply.json() == {
+        "id": "nota-1",
+        "status": "draft",
+        "would": True,
+        "message": "Assinaria e enviaria.",
+    }
+    state = client.get("/api/erp-local/state").json()
+    assert state["would"][0]["target"] == "NF 12/1"

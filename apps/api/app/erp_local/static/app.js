@@ -86,7 +86,7 @@ function overview() {
   const physical = state.products.filter(p=>p.kind==='simple');
   const free = physical.reduce((s,p)=>s+p.balances.reduce((v,b)=>v+(b.available===null?0:Number(b.available)),0),0);
   const stats = [[physical.length,'Produtos físicos','Estoque próprio'],[state.products.length-physical.length,'Kits','Capacidade calculada'],[qty(free),'Peças com saldo conhecido','Saldos ausentes aparecem como —'],[state.orders.filter(o=>o.status==='reserved').length,'Pedidos reservados','Aguardando despacho local']];
-  return importSummary()+`<div class="stats">${stats.map(([n,label,sub])=>`<div class="stat"><span>${label}</span><strong>${n}</strong><small>${sub}</small></div>`).join('')}</div><div class="steps">${[
+  return wouldPanel()+importSummary()+`<div class="stats">${stats.map(([n,label,sub])=>`<div class="stat"><span>${label}</span><strong>${n}</strong><small>${sub}</small></div>`).join('')}</div><div class="steps">${[
     ['01 / CADASTRAR','Produtos e kits','Crie o catálogo e a composição de cada kit.','products'],
     ['02 / RECEBER','Compras e estoque','Receba peças e gere contas separadamente.','purchases'],
     ['03 / RESERVAR','Pedidos','Teste a disputa pelas mesmas peças.','orders'],
