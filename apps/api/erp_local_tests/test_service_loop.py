@@ -72,13 +72,64 @@ def test_one_round_serves_enabled_accounts_and_isolates_failures(erp, monkeypatc
     json.dumps(report)
 
 
+def test_archived_stores_are_skipped_and_light_rounds_read_only_fast_channels(erp, monkeypatch):
+    from app.erp_local import native_orders
+
+    monkeypatch.setattr(native_orders, "import_read", lambda _erp, read: {"observations_added": 0})
+    with erp.connection() as db:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS reference_rows (kind TEXT, id TEXT, data TEXT NOT NULL,"
+            " search TEXT NOT NULL, PRIMARY KEY(kind,id))"
+        )
+        for store, data in [
+            ("banida", {"id": "banida", "status": "active", "archived_at": "2026-11-09T21:41:52"}),
+            ("ativa", {"id": "ativa", "status": "active", "archived_at": None}),
+        ]:
+            db.execute(
+                "INSERT INTO reference_rows VALUES ('integrations',?,?,'')", (store, json.dumps(data))
+            )
+        for channel, store in [("ml", "banida"), ("ml", "ativa"), ("amazon", "lenta")]:
+            db.execute(
+                "INSERT INTO store_policies VALUES (?,?,'identity_review','{}',?)",
+                (channel, store, erp.now()),
+            )
+            db.execute(
+                "INSERT INTO ingest_accounts(channel,store,enabled,authority,failures,updated_at) "
+                "VALUES (?,?,1,'bling',0,?)",
+                (channel, store, erp.now()),
+            )
+    asked = []
+
+    def provider_for(_platform):
+        def read(*, channel, store, date_from, date_to):
+            asked.append(store)
+            account = {"integration_id": store, "state": "read_ok", "orders": [], "has_more": False}
+            return {"accounts": [account]}
+
+        return read
+
+    light = service_loop.once(erp, provider_for=provider_for, channels=service_loop.FAST_CHANNELS)
+    assert light["ml:banida"] == {"state": "archived"} and "amazon:lenta" not in light
+    assert set(asked) == {"ativa"}
+    full = service_loop.once(erp, provider_for=provider_for)
+    assert full["amazon:lenta"]["reception"]["state"] == "complete"
+
+
+def test_local_reads_run_at_lower_priority(monkeypatch):
+    calls = []
+    monkeypatch.setenv("ERP_READ_TRANSPORT", "local")
+    monkeypatch.setattr(subprocess, "run", lambda cmd, **kw: calls.append(kw) or Done(b"{}"))
+    native_ingest.run_on_host(b"", {})
+    assert callable(calls[0]["preexec_fn"])
+
+
 def test_daily_check_writes_counts_and_never_raises(erp, tmp_path, monkeypatch):
     from app.erp_local import parallel_check
 
     monkeypatch.setattr(
         parallel_check,
         "local_sales",
-        lambda _db, *_robot: {
+        lambda _db, *_robot, **_at: {
             "A": {
                 "channel": "ml",
                 "items": {},

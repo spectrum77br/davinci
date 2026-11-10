@@ -102,3 +102,71 @@ def test_foreign_document_is_scoped_by_country(erp):
     save(erp, person_type="E", country="Espanha", document="LOCAL-123")
     with erp.connection() as db:
         assert len(contacts.snapshot(db)) == 2
+
+
+def test_contacts_export_is_a_spreadsheet_safe_against_formulas(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from app.erp_local.api import create_app
+
+    with TestClient(create_app(tmp_path / "c.sqlite3"), base_url="http://127.0.0.1:8765") as c:
+        erp = c.app.state.erp
+        run(
+            erp,
+            "contact.save",
+            {
+                "data": {
+                    "name": "=HYPERLINK(1)",
+                    "email": "cliente@exemplo.com",
+                    "roles": ["customer"],
+                }
+            },
+        )
+        csv = c.get("/api/erp-local/contacts.csv")
+    assert csv.status_code == 200 and "contatos.csv" in csv.headers["content-disposition"]
+    assert (
+        "'=HYPERLINK(1)" in csv.text and "cliente@exemplo.com" in csv.text and "Cliente" in csv.text
+    )
+
+
+def test_trash_restore_and_blocked_edit_like_bling(erp):
+    created = save(erp, roles=["customer"])
+    deleted = run(erp, "contact.delete", {"id": created["id"], "version": created["version"]})
+    with erp.connection() as db:
+        row = contacts.snapshot(db)[0]
+    assert row["data"]["status"] == "deleted" and deleted["version"] == created["version"] + 1
+    with pytest.raises(ERPError, match="Restaure"):
+        run(
+            erp,
+            "contact.save",
+            {"id": created["id"], "version": deleted["version"], "data": {"name": "X"}},
+        )
+    with pytest.raises(ERPError, match="Ative"):
+        with erp.connection() as db:
+            contacts.document_snapshot(db, created["id"])
+    restored = run(erp, "contact.restore", {"id": created["id"], "version": deleted["version"]})
+    with erp.connection() as db:
+        assert contacts.snapshot(db)[0]["data"]["status"] == "active"
+    assert restored["version"] == deleted["version"] + 1
+
+
+def test_birth_date_and_seller_link_in_batch(erp):
+    seller = run(
+        erp,
+        "seller.save",
+        {
+            "contact": {"data": {"name": "Vendedora", "person_type": "F"}},
+            "data": {"rate": "5", "release": "proportional"},
+        },
+    )["id"]
+    first = save(erp, name="Ana", birth_date="1990-11-20")
+    second = save(erp, name="Bia")
+    run(erp, "contact.link_seller", {"ids": [first["id"], second["id"]], "seller_id": seller})
+    with erp.connection() as db:
+        rows = {c["id"]: c["data"] for c in contacts.snapshot(db)}
+    assert rows[first["id"]]["seller_id"] == seller and rows[second["id"]]["seller_id"] == seller
+    assert rows[first["id"]]["birth_date"] == "1990-11-20"
+    with pytest.raises(ERPError, match="Vendedor"):
+        run(erp, "contact.link_seller", {"ids": [first["id"]], "seller_id": "nao-existe"})
+    with pytest.raises(ERPError, match="nascimento"):
+        save(erp, name="Caio", birth_date="20/11/1990")

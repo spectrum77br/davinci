@@ -232,8 +232,8 @@ def test_ml_orders_outside_the_requested_window_are_retained_with_coverage_revie
         now = datetime.now(UTC)
         raw = raw_order()
         raw.update(
-            date_created=(now - timedelta(hours=26)).isoformat(),
-            date_last_updated=(now - timedelta(hours=25)).isoformat(),
+            date_created=(now - timedelta(hours=31)).isoformat(),
+            date_last_updated=(now - timedelta(hours=30)).isoformat(),
         )
 
         def handler(request):
@@ -251,5 +251,46 @@ def test_ml_orders_outside_the_requested_window_are_retained_with_coverage_revie
             got = await probe.read_account(client, CREDS, now=now)
         assert got["state"] == "partial_read" and got["coverage_review"]
         assert len(got["orders"]) == 1 and got["orders"][0]["within_window"] is False
+
+    asyncio.run(check())
+
+
+def test_ml_search_index_drift_does_not_hold_the_window():
+    """Seen on 09/11: the search returns an order updated again after the window, and one stamped
+    minutes before its start. Both are kept and the window counts as read."""
+
+    async def check():
+        now = datetime.now(UTC)
+        later, early = raw_order("2000011234567891"), raw_order("2000011234567892")
+        later.update(
+            date_created=(now - timedelta(days=3)).isoformat(),
+            date_last_updated=(now - timedelta(minutes=1)).isoformat(),
+        )
+        early.update(
+            date_created=(now - timedelta(days=3)).isoformat(),
+            date_last_updated=(now - timedelta(hours=24, minutes=30)).isoformat(),
+        )
+        window = {"from": int((now - timedelta(hours=24)).timestamp()),
+                  "to": int((now - timedelta(minutes=5)).timestamp())}
+
+        def handler(request):
+            if request.url.path == "/users/me":
+                return httpx.Response(200, json={"id": SELLER, "site_id": "MLB"})
+            return httpx.Response(
+                200,
+                json={
+                    "results": [json.loads(json.dumps(o, default=str)) for o in (later, early)],
+                    "paging": {"total": 2, "offset": 0, "limit": 50},
+                },
+            )
+
+        probe.WINDOW = window
+        try:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                got = await probe.read_account(client, CREDS, now=now)
+        finally:
+            probe.WINDOW = None
+        assert got["state"] == "read_ok" and not got["coverage_review"]
+        assert [o["within_window"] for o in got["orders"]] == [False, False]
 
     asyncio.run(check())

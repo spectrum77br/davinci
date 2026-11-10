@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from calendar import monthrange
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -53,6 +54,12 @@ ENTRY_FIELDS = {
     "document_number",
     "occurrence",
     "count",
+    # As Bling's account form: bank slip line and tax guide data, kept for paying it later.
+    "barcode",
+    "tax_code",
+    "tax_period",
+    # Bling's "Conta financeira": the bank account or cash this entry is paid from or into.
+    "bank_id",
 }
 MONTH_INTERVALS = {"monthly": 1, "bimonthly": 2, "quarterly": 3, "semiannual": 6, "annual": 12}
 
@@ -104,6 +111,19 @@ def create_entry(erp, db, p):
         else ""
         for k in ("history", "payment_method", "category", "document_number")
     }
+    barcode = re.sub(r"\D", "", str(p.get("barcode") or ""))
+    if barcode and len(barcode) not in {44, 47, 48}:
+        raise ERPError("entry_barcode", "A linha digitável tem 44, 47 ou 48 números.")
+    if barcode:
+        metadata["barcode"] = barcode
+    for k in ("tax_code", "tax_period"):
+        if p.get(k):
+            metadata[k] = text(p.get(k), k, 40)
+    if p.get("bank_id"):
+        bank = text(p["bank_id"], "conta financeira")
+        if not db.execute("SELECT 1 FROM finance_banks WHERE id=?", (bank,)).fetchone():
+            raise ERPError("entry_bank", "Conta financeira não encontrada.", 404)
+        metadata["bank_id"] = bank
     dates = {k: day(p.get(k)) for k in ("issued_on", "competence_on", "due_date")}
     occurrence, count = p.get("occurrence", "once"), p.get("count", 1)
     plan = entry_plan(value, dates["due_date"], occurrence, count)

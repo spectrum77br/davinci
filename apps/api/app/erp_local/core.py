@@ -117,6 +117,7 @@ class LocalERP:
             contacts,
             deposits,
             finance,
+            finance_categories,
             fiscal,
             fiscal_invoices,
             inbound_invoices,
@@ -161,6 +162,7 @@ class LocalERP:
                 + deposits.SCHEMA
                 + categories.SCHEMA
                 + contacts.SCHEMA
+                + finance_categories.SCHEMA
                 + sellers.SCHEMA
                 + product_details.SCHEMA
                 + bling_compat.SCHEMA
@@ -439,6 +441,7 @@ class LocalERP:
             contacts,
             deposits,
             finance,
+            finance_categories,
             fiscal,
             fiscal_invoices,
             integration_registry,
@@ -608,7 +611,10 @@ class LocalERP:
             return product_structures.apply(self, db, key, p)
 
         if kind in contacts.COMMANDS:
-            return contacts.apply(self, db, p)
+            return contacts.apply(self, db, p, kind)
+
+        if kind in finance_categories.COMMANDS:
+            return finance_categories.apply(self, db, kind, p)
 
         if kind in inventory.COMMANDS:
             return inventory.apply(self, db, key, kind, p)

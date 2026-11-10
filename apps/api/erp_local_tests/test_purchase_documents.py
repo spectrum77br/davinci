@@ -278,3 +278,17 @@ def test_invalid_purchase_metadata_does_not_create_a_document(erp, extra):
     with pytest.raises(ERPError):
         purchase(erp, **extra)
     assert erp.snapshot() == before
+
+
+def test_change_situation_in_batch_like_bling(erp):
+    first, _ = purchase(erp, "SIT-1")
+    second, _ = purchase(erp, "SIT-2")
+    erp.command("attend", "purchases.batch", {"ids": [first["id"]], "action": "attend"})
+    status = {p["id"]: (p["status"], p["data"]) for p in erp.snapshot()["purchases"]}
+    assert status[first["id"]][0] == "received"
+    assert status[first["id"]][1]["stock_posted"] and status[first["id"]][1]["accounts_posted"]
+    erp.command("cancel", "purchases.batch", {"ids": [second["id"]], "action": "cancel"})
+    assert {p["id"]: p["status"] for p in erp.snapshot()["purchases"]}[second["id"]] == "cancelled"
+    # A cancelled purchase cannot become Atendido, and the whole selection rolls back.
+    with pytest.raises(ERPError):
+        erp.command("attend-2", "purchases.batch", {"ids": [second["id"]], "action": "attend"})

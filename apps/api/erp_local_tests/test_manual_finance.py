@@ -111,3 +111,40 @@ def test_invalid_series_rolls_back_all_accounts_and_events(erp, changes):
         run(erp, "finance.entry.create", payload(**changes))
     assert erp.snapshot() == before
     assert not state(erp)["manual_documents"]
+
+
+def test_bank_slip_line_and_tax_guide_are_kept_like_bling(erp):
+    line = "23793.38128 60000.000003 00000.000400 1 84340000010001"
+    run(
+        erp,
+        "finance.entry.create",
+        payload(barcode=line, tax_code="2089", tax_period="10/2026", occurrence="once", count=1),
+    )
+    with erp.connection() as db:
+        data = next(
+            d
+            for d in (dict(r) for r in db.execute("SELECT data FROM documents"))
+            if "barcode" in d["data"]
+        )
+    assert "".join(c for c in line if c.isdigit()) in data["data"]
+    assert '"tax_code":"2089"' in data["data"] and '"tax_period":"10/2026"' in data["data"]
+    with pytest.raises(ERPError, match="linha digitável"):
+        run(
+            erp,
+            "finance.entry.create",
+            payload(reference="X-2", barcode="123", occurrence="once", count=1),
+        )
+
+
+def test_financial_account_is_kept_and_must_exist(erp):
+    run(erp, "bank.create", {"id": "caixa-loja", "name": "Caixa da loja", "opening": "0"})
+    run(erp, "finance.entry.create", payload(bank_id="caixa-loja", occurrence="once", count=1))
+    with erp.connection() as db:
+        stored = [r[0] for r in db.execute("SELECT data FROM documents") if "caixa-loja" in r[0]]
+    assert stored and '"bank_id":"caixa-loja"' in stored[0]
+    with pytest.raises(ERPError, match="Conta financeira"):
+        run(
+            erp,
+            "finance.entry.create",
+            payload(reference="X-3", bank_id="nao-existe", occurrence="once", count=1),
+        )

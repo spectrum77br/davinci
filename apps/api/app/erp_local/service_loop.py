@@ -4,8 +4,10 @@ Buyers are kept only where ERP_RECIPIENT_CAPTURE=1. One account failing never st
 """
 
 import argparse
+import json
 import logging
 import os
+import sqlite3
 import time
 from pathlib import Path
 
@@ -16,11 +18,34 @@ log = logging.getLogger("erp.service")
 REFRESH_EVERY = 12
 
 
-def once(erp, *, provider_for=native_ingest.ssh_provider, reader=None):
+# Stores read every minute, like Bling takes their orders; the others keep the slower pace their
+# platforms allow (Amazon's order quota is shared with DaVinci, Magalu goes through the owner's Mac).
+FAST_CHANNELS = frozenset({"ml", "shopee", "tiktok"})
+
+
+def archived_stores(db):
+    """Stores DaVinci archived or turned off (a banned or closed account): there is nothing to read
+    and their tokens no longer work, so they are skipped instead of failing every round."""
+    try:
+        rows = db.execute("SELECT data FROM reference_rows WHERE kind='integrations'").fetchall()
+    except sqlite3.Error:
+        return set()
+    out = set()
+    for row in rows:
+        data = json.loads(row[0])
+        if data.get("archived_at") or data.get("status") not in (None, "active"):
+            out.add(str(data.get("id")))
+    return out
+
+
+def once(erp, *, provider_for=native_ingest.ssh_provider, reader=None, channels=None):
     with erp.connection() as db:
         accounts = db.execute(
             "SELECT channel,store FROM ingest_accounts WHERE enabled=1 ORDER BY channel,store"
         ).fetchall()
+        archived = archived_stores(db)
+    if channels is not None:
+        accounts = [a for a in accounts if a["channel"] in channels]
     copy_reader = None
     if reader is None and os.environ.get(recipient_capture.CAPTURE_ENV) == "1":
         reader = recipient_capture.ssh_reader()
@@ -28,6 +53,9 @@ def once(erp, *, provider_for=native_ingest.ssh_provider, reader=None):
     report = {}
     for row in accounts:
         channel, store = row["channel"], row["store"]
+        if store in archived:
+            report[f"{channel}:{store}"] = {"state": "archived"}
+            continue
         try:
             report[f"{channel}:{store}"] = native_ingest.service_round(
                 erp,
@@ -51,7 +79,9 @@ def daily_check(erp, output):
 
     try:
         with erp.connection() as db:
-            local = parallel_check.local_sales(db, *parallel_check.robot_view(db))
+            local = parallel_check.local_sales(
+                db, *parallel_check.robot_view(db), at=parallel_check.balance_at(db)
+            )
         script = (Path(parallel_check.__file__).parent / "parallel_check_read.py").read_bytes()
         keys, bling = sorted(local), {}
         for start in range(0, len(keys), 500):
@@ -68,7 +98,7 @@ def stock_daily(erp, output):
 
     try:
         with erp.connection() as db:
-            result = stock_check.report(db)
+            result = stock_check.report(db, outside=stock_check.outside_reader())
         output.write_text(dumps(result) + "\n", "utf-8")
         log.info("conferência de estoque gravada em %s", output.name)
     except (ERPError, OSError, ValueError, StopIteration) as error:
@@ -93,12 +123,25 @@ def listing_preview(erp, output, reader=None):
 def main():
     parser = argparse.ArgumentParser(description="Recepção contínua das lojas")
     parser.add_argument("--database", required=True, type=Path)
-    parser.add_argument("--every", type=int, default=300)
+    parser.add_argument("--every", type=int, default=300, help="Rodada completa, em segundos")
+    parser.add_argument(
+        "--orders-every", type=int, default=60, help="Pedidos de ML, Shopee e TikTok, em segundos"
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     erp = LocalERP(args.database)
-    rounds, checked_on, previewed_on = 0, None, None
+    rounds, checked_on, previewed_on, last_full = 0, None, None, None
     while True:
+        full = last_full is None or time.monotonic() - last_full >= max(60, args.every)
+        if not full:
+            # Between full rounds only the stores whose orders must arrive within minutes.
+            for account, result in once(erp, channels=FAST_CHANNELS).items():
+                state = result.get("reception", result).get("state")
+                if state not in {"complete", "waiting", "archived"}:
+                    log.info("%s %s", account, state)
+            time.sleep(max(30, args.orders_every))
+            continue
+        last_full = time.monotonic()
         if os.environ.get("ERP_READ_TRANSPORT") == "local" and rounds % REFRESH_EVERY == 0:
             # Stores, listings and links change in DaVinci; keep the copy here fresh.
             from app.erp_local.reference import LocalReference, ReferenceStore
@@ -159,7 +202,7 @@ def main():
                 )
             except (ERPError, OSError, ValueError) as error:
                 log.warning("envios ML não lidos: %s", type(error).__name__)
-        time.sleep(max(60, args.every))
+        time.sleep(max(30, args.orders_every))
 
 
 if __name__ == "__main__":
