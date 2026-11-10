@@ -123,6 +123,6 @@ def test_temu_sales_come_from_the_bling_copy_until_the_erp_reads_temu(erp):
     (sale,) = result["items"]
     assert sale["channel"] == "temu" and sale["source"] == "bling_copy"
     assert sale["bling_number"] == "303455" and sale["bling_situation"] == 15
-    assert sale["skus"] == ["a076"] and sale["total"] == "47.93"
+    assert sale["skus"] == ["a076"] and sale["total"] == "47.93" and sale["store"] == "Barbosa"
     assert sale["blocked"] == [store_sales.COPY_NOTE]
     assert found["total"] == 1

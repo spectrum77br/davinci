@@ -27,6 +27,13 @@ SETTLED = {"cursor": "9999-12-31T00:00:00+00:00"}
 # its key stays on the ERP server (Bling's key belongs to Bling's app and leaves with it).
 COPIED = {"temu": lambda number: number.startswith("PO-")}
 COPY_NOTE = "Pela cópia do Bling: o ERP ainda não lê esta loja direto"
+# Bling store code -> store, as DaVinci's store_info has it (10/11/2026). Temporary like the bridge.
+COPIED_STORES = {
+    "205925390": "Barbosa",
+    "206288707": "Eron",
+    "206288651": "JLAS",
+    "206288703": "Atv",
+}
 
 
 def _situation_id(value):
@@ -87,7 +94,7 @@ def _copied(db, bling):
                 "number": number,
                 "channel": channel,
                 "store_id": store,
-                "store": f"Temu · loja {store} no Bling" if channel == "temu" else store,
+                "store": COPIED_STORES.get(store) or f"Temu · loja {store} no Bling",
                 "created_at": str(order.get("date") or ""),
                 "status": "Cópia do Bling",
                 "total": f"{float(order.get('total') or 0):.2f}",
