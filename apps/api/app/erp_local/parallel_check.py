@@ -46,6 +46,22 @@ def robot_view(db):
     return stock_priority.map_from_rows(rows["priorities"]), available
 
 
+def _is_flex(db, channel, store, key, orders):
+    """Mercado Livre Flex: the shipment read from the store is self_service."""
+    if any(
+        o.get("logistic_type") in {"self_service", "flex"} or o.get("fulfillment") == "flex"
+        for o in orders
+    ):
+        return True
+    if channel != "ml":
+        return False
+    row = db.execute(
+        "SELECT data FROM store_tracking WHERE channel='ml' AND store=? AND number=?",
+        (store, key),
+    ).fetchone()
+    return bool(row) and json.loads(row["data"]).get("carrier") == "self_service"
+
+
 def local_sales(db, mapping=None, available=None):
     """What the ERP would turn into orders, in the shape the comparison needs.
 
@@ -66,6 +82,7 @@ def local_sales(db, mapping=None, available=None):
             # Mercado Livre: products + freight the buyer paid - coupon, once both were read.
             charges = native_ingest.store_charges(db, channel, store, key, live)
             unread = channel in native_ingest.CHARGED and charges is None
+            lines, unresolved = [], Counter()
             for order in live:
                 if charges is None:
                     header = order.get("paid") or order.get("total") or {}
@@ -76,10 +93,21 @@ def local_sales(db, mapping=None, available=None):
                     if charges is not None:
                         price = native_ingest._price(item) or {}
                         total += Decimal(str(price.get("amount") or 0)) * Decimal(str(quantity))
-                    sku = resolved["sku"] or item.get("seller_sku") or "?"
-                    if mapping and resolved["sku"]:
-                        sku = stock_priority.preferred(sku, mapping, available, quantity)
-                    items[sku] += quantity
+                    if resolved["sku"]:
+                        lines.append((resolved["sku"], quantity))
+                    else:
+                        unresolved[item.get("seller_sku") or "?"] += quantity
+            # The lot the robot would choose for the whole sale: Flex, one lot, then priority.
+            chosen = (
+                stock_priority.preferred_order(
+                    lines, mapping, available, flex=_is_flex(db, channel, store, key, live)
+                )
+                if mapping is not None
+                else [sku for sku, _ in lines]
+            )
+            for sku, (_, quantity) in zip(chosen, lines, strict=True):
+                items[sku] += quantity
+            items.update(unresolved)
             captured = native_ingest._unit_recipient(db, channel, store, unit)
             buyer = (captured or {}).get("buyer") or {}
             delivery = (captured or {}).get("recipient") or {}

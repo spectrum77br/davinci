@@ -369,3 +369,61 @@ def preferred(sku, mapping, available=None, quantity=1):
         if balance is None or Decimal(str(balance)) < Decimal(str(quantity)):
             return sku
     return moved
+
+
+def preferred_order(lines, mapping, available=None, flex=False):
+    """The robot's choice for a whole read sale, in the same order as `plan`.
+
+    `lines` are (sku, quantity). A Flex sale leaves from the Flex lot, or stays as it is when that
+    lot does not cover it (the robot stops for a person). A sale of several items in sale lots stays
+    in one lot that covers them all: the priority most items vote for, then the lot with more
+    balance. Otherwise each item follows its own priority. `available` is Bling's virtual balance.
+    """
+    kept = [sku for sku, _ in lines]
+
+    def covers(sku, quantity):
+        if available is None:
+            return True
+        balance = available.get(sku.lower())
+        return balance is not None and Decimal(str(balance)) >= Decimal(str(quantity))
+
+    def toward(sku, target):
+        current = lot_of(sku)
+        return sku if current == target else in_lot(sku, current, target)
+
+    if flex:
+        if any(not lot_of(sku) for sku in kept):
+            return kept
+        moved = [toward(sku, FLEX_LOT) for sku in kept]
+        if all(covers(t, q) for t, (_, q) in zip(moved, lines, strict=True)):
+            return moved
+        return kept
+    if len(lines) >= 2 and all(lot_of(sku) in SALE_LOTS for sku in kept):
+        votes = Counter(mapping[base_of(s)] for s in kept if base_of(s) in (mapping or {}))
+        present = {lot_of(sku) for sku in kept}
+        options = {}
+        for candidate in sorted((present | set(votes)) & SALE_LOTS):
+            moved = [toward(sku, candidate) for sku in kept]
+            if all(covers(t, q) for t, (_, q) in zip(moved, lines, strict=True)):
+                total = sum(
+                    (Decimal(str((available or {}).get(t.lower()) or 0)) for t in moved),
+                    Decimal(0),
+                )
+                swaps = sum(1 for t, s in zip(moved, kept, strict=True) if t != s)
+                options[candidate] = (moved, total, swaps)
+        current = next(iter(present)) if len(present) == 1 else None
+
+        def best(names):
+            if current in names:
+                return current
+            return max(sorted(names), key=lambda n: (options[n][1], -options[n][2]))
+
+        for count in sorted(set(votes.values()), reverse=True):
+            names = [n for n, v in votes.items() if v == count and n in options]
+            if names:
+                return options[best(names)][0]
+        if current in options:
+            return kept
+        if options:
+            return options[best(list(options))][0]
+    return [preferred(sku, mapping or {}, available, q) for sku, q in lines]

@@ -138,10 +138,10 @@ def gates(db):
             "area": "Estoque",
             "title": "Prioridade de estoque e Flex",
             "state": LOCAL,
-            "detail": "Regras do robô reproduzidas; desde 09/11 o ERP lê a Prioridade da Tabela "
-            "de Preços do DaVinci e aplica na conferência (troca de lote sem "
-            "explicação caiu de 95 para 22 na Shopee). Flex e pedido num estoque só "
-            "ainda não entram na conferência; falta operar com pedidos reais.",
+            "detail": "Regras do robô reproduzidas e aplicadas na conferência: Prioridade da "
+            "Tabela de Preços do DaVinci, Flex saindo do .sp e pedido num lote só (10/11). "
+            "Com o saldo da hora da venda (fotos de hora em hora desde 09/11), o lote "
+            "escolhido bate com o Bling em 86 de 87 vendas; falta operar com pedidos reais.",
         },
         {
             "id": "bridge",
@@ -199,8 +199,9 @@ def gates(db):
             "area": "DaVinci",
             "title": "Usuários e perfis por módulo",
             "state": LOCAL,
-            "detail": "Perfis prontos e testados. A porta passa a aceitar qualquer usuário do "
-            "DaVinci, e quem não tem perfil não vê nada. Falta deploy.",
+            "detail": "Perfis prontos e testados. Admin do DaVinci administra; a equipe acompanha "
+            "só lendo enquanto o Bling cuida das lojas e opera pedidos, situações, estoque e "
+            "expedição depois da troca (fiscal e financeiro por perfil). Falta a etapa 2.",
         },
         {
             "id": "nfce",

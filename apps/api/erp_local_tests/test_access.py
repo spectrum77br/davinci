@@ -141,3 +141,23 @@ def test_davinci_roles_map_to_erp_access_while_bling_owns_the_stores(erp):
         with pytest.raises(ERPError, match="só administradores"):
             access.check_command(db, "equipe@exemplo.com", "order.save", "user")
         assert access.check_command(db, "dono@exemplo.com", "order.save", "admin")
+
+
+def test_team_operates_once_a_store_is_switched_but_fiscal_stays_by_profile(erp):
+    from app.erp_local import access
+    from app.erp_local.core import ERPError
+
+    with erp.connection() as db:
+        columns = [r[1] for r in db.execute("PRAGMA table_info(ingest_accounts)")]
+        values = {"channel": "ml", "store": "c", "enabled": 1, "authority": "own", "failures": 0}
+        db.execute(
+            f"INSERT INTO ingest_accounts({','.join(columns)}) "  # noqa: S608
+            f"VALUES ({','.join('?' * len(columns))})",
+            [values.get(c, "2026-11-10") for c in columns],
+        )
+        team = access.who(db, "equipe@exemplo.com", "user")
+        assert team["profile"] == access.OPERATE and not team.get("read_only")
+        assert access.require(db, "equipe@exemplo.com", "vendas", role="user", write=True)
+        assert access.check_command(db, "equipe@exemplo.com", "order.save", "user")
+        with pytest.raises(ERPError, match="perfil"):
+            access.require(db, "equipe@exemplo.com", "fiscal", role="user", write=True)

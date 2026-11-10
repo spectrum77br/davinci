@@ -49,8 +49,12 @@ PROFILES = {
     "consulta": [],
     # Active DaVinci users while Bling owns the stores: they see and print labels, never post.
     "acompanhamento": ["cadastros", "vendas", "estoque", "expedicao", "integracoes"],
+    # The same DaVinci users once a store is switched: they run orders, situations, stock and
+    # shipping as they do in Bling today. Fiscal and finance stay with a profile given here.
+    "operacao": ["cadastros", "vendas", "estoque", "expedicao", "integracoes"],
 }
 FOLLOW = "acompanhamento"
+OPERATE = "operacao"
 # Reading actions a follower may still run: labels, tracking and papers of the stores' sales.
 FOLLOW_POSTS = ("/api/erp-local/store-sales/",)
 # What each area keeps out of the page data for people without it.
@@ -106,7 +110,8 @@ def profiles(db):
 
 def who(db, actor, role=None):
     """Administrators named on the server, or admins in DaVinci, always get in, so nobody is locked
-    out of granting. Other active DaVinci users without a profile here follow, read-only."""
+    out of granting. Other active DaVinci users without a profile here follow, read-only, while
+    Bling owns the stores, and operate once a store is switched."""
     admins = {a.strip().casefold() for a in os.environ.get(ADMINS_ENV, "").split(",") if a.strip()}
     if actor and (actor.casefold() in admins or role == "admin"):
         return {"actor": actor, "profile": ADMIN, "areas": PROFILES[ADMIN], "admin": True}
@@ -115,6 +120,15 @@ def who(db, actor, role=None):
     ).fetchone()
     if not row:
         if actor and role == "user":
+            from app.erp_local.bling_mirror import switched
+
+            if switched(db):
+                return {
+                    "actor": actor,
+                    "profile": OPERATE,
+                    "areas": PROFILES[OPERATE],
+                    "admin": False,
+                }
             return {
                 "actor": actor,
                 "profile": FOLLOW,
