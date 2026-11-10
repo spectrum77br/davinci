@@ -51,7 +51,9 @@ def daily_check(erp, output):
 
     try:
         with erp.connection() as db:
-            local = parallel_check.local_sales(db, *parallel_check.robot_view(db))
+            local = parallel_check.local_sales(
+                db, *parallel_check.robot_view(db), at=parallel_check.balance_at(db)
+            )
         script = (Path(parallel_check.__file__).parent / "parallel_check_read.py").read_bytes()
         keys, bling = sorted(local), {}
         for start in range(0, len(keys), 500):

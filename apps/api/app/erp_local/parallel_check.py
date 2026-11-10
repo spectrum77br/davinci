@@ -6,9 +6,11 @@ stock priority robot does that on purpose.
 """
 
 import argparse
+import bisect
 import hashlib
 import json
 from collections import Counter, defaultdict
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -46,6 +48,56 @@ def robot_view(db):
     return stock_priority.map_from_rows(rows["priorities"]), available
 
 
+def _utc(value):
+    """Any store's time as UTC text, so times from different time zones compare correctly."""
+    try:
+        moment = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).isoformat()
+
+
+def balance_at(db):
+    """Bling's available balance by SKU at the last hourly snapshot before a moment, or None.
+
+    The robot chose the lot with the balance it saw when the sale came in; comparing with
+    today's balance blames the rule for what was only a change in stock since then."""
+    import sqlite3
+
+    try:
+        rows = db.execute("SELECT taken_at,data FROM stock_snapshots ORDER BY taken_at").fetchall()
+        products = [
+            json.loads(r[0])
+            for r in db.execute("SELECT data FROM reference_rows WHERE kind='products'")
+        ]
+    except sqlite3.OperationalError:
+        return None
+    if not rows:
+        return None
+    sku_of = {
+        str(p["bling_product_id"]): str(p["sku"]).lower()
+        for p in products
+        if p.get("bling_product_id") and p.get("sku")
+    }
+    times = [_utc(r[0]) for r in rows]
+    cache = {}
+
+    def at(moment):
+        when = _utc(moment)
+        index = bisect.bisect_right(times, when) - 1 if when else -1
+        if index < 0:
+            return None
+        if index not in cache:
+            cache[index] = {
+                sku_of[b]: v for b, v in json.loads(rows[index][1]).items() if b in sku_of
+            }
+        return cache[index]
+
+    return at
+
+
 def _is_flex(db, channel, store, key, orders):
     """Mercado Livre Flex: the shipment read from the store is self_service."""
     if any(
@@ -62,7 +114,7 @@ def _is_flex(db, channel, store, key, orders):
     return bool(row) and json.loads(row["data"]).get("carrier") == "self_service"
 
 
-def local_sales(db, mapping=None, available=None):
+def local_sales(db, mapping=None, available=None, at=None):
     """What the ERP would turn into orders, in the shape the comparison needs.
 
     With DaVinci's priorities, each item goes to the lot the robot would choose, as the ERP will
@@ -97,10 +149,15 @@ def local_sales(db, mapping=None, available=None):
                         lines.append((resolved["sku"], quantity))
                     else:
                         unresolved[item.get("seller_sku") or "?"] += quantity
-            # The lot the robot would choose for the whole sale: Flex, one lot, then priority.
+            # The lot the robot would choose for the whole sale: Flex, one lot, then priority,
+            # with the balance of the hour of the sale when that hour was photographed.
+            seen = at(min((o.get("created_at") or "") for o in live)) if at else None
             chosen = (
                 stock_priority.preferred_order(
-                    lines, mapping, available, flex=_is_flex(db, channel, store, key, live)
+                    lines,
+                    mapping,
+                    seen if seen is not None else available,
+                    flex=_is_flex(db, channel, store, key, live),
                 )
                 if mapping is not None
                 else [sku for sku, _ in lines]

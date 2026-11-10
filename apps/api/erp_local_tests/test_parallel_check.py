@@ -81,3 +81,31 @@ def test_ml_sale_without_freight_read_is_counted_apart():
     report = pc.compare({"P1": sale(total=None)}, pr.summarize([ROW]))["ml"]
     assert report["total_sem_frete_lido"] == 1
     assert "total_diferente" not in report and "total_igual" not in report
+
+
+def test_balance_at_the_hour_of_the_sale_in_any_time_zone(erp):
+    import json as _json
+
+    from app.erp_local import parallel_check, stock_check
+
+    with erp.connection() as db:
+        db.executescript(stock_check.SCHEMA)
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS reference_rows (kind TEXT, id TEXT, data TEXT, search TEXT)"
+        )
+        db.execute(
+            "INSERT INTO reference_rows VALUES ('products','1',?,'')",
+            (_json.dumps({"bling_product_id": "7", "sku": "DG1.SP"}),),
+        )
+        for taken, balance in (
+            ("2026-11-09T16:00:00+00:00", "0"),
+            ("2026-11-09T18:00:00+00:00", "4"),
+        ):
+            db.execute(
+                "INSERT INTO stock_snapshots VALUES (?,?)", (taken, _json.dumps({"7": balance}))
+            )
+        at = parallel_check.balance_at(db)
+    # 14:30 in Brazil is 17:30 UTC: the 16:00 photo, when the Flex lot was empty.
+    assert at("2026-11-09T14:30:00.000-03:00") == {"dg1.sp": "0"}
+    assert at("2026-11-09T18:30:00Z") == {"dg1.sp": "4"}
+    assert at("2026-11-09T10:00:00+00:00") is None and at("") is None
