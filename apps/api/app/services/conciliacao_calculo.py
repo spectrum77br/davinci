@@ -35,6 +35,7 @@ from app.models import (
     ConciliacaoLoja,
     ConciliacaoMovimento,
     ConciliacaoPedido,
+    Devolution,
     Integration,
     Logistica,
     MarketplaceOrderFinancial,
@@ -59,6 +60,7 @@ from app.services.conciliacao_extrato import (
     resolver_pedidos_bling,
 )
 from app.services.conciliacao_fatura import tipo_do_detalhe
+from app.services.devolution_stock_return import ESTOQUE_OK, status_estoque
 
 logger = structlog.get_logger()
 BRT = ZoneInfo("America/Sao_Paulo")
@@ -571,6 +573,18 @@ def situacao_do_pedido(
     saidas_depois = _soma([m.debito for m in fora]) if liberado_em else None
     ultimo_mov = max((_entrou_em(m) for m in movs_extrato), default=None)
     cancelada = _venda_cancelada(venda)
+    # 10/11 (jlas2 307414, Vinicius: "era pra receber 628 e tá recebido a mais"): o ML
+    # devolveu parte da tarifa ANTES de liberar a venda (mediação fechou com reembolso
+    # parcial ao comprador). Não é "recebido a mais": a venda ainda libera na data dela,
+    # com o reembolso descontado — segue aguardando, e o motivo conta o que já entrou.
+    tarifa_devolvida = (
+        plataforma == "ml"
+        and not liberacoes
+        and not cancelada
+        and not bling_cancelado
+        and mexeu_sem_liberar > TOLERANCIA
+        and all(_e_tarifa_devolvida(m) for m in dinheiro if not m.tipo.startswith("frete"))
+    )
     venda_valor = _d(venda.gross_amount) if venda else None
     venda_liquido = _d(venda.net_amount) if venda else None
     if liquido_previsto is not None:
@@ -609,7 +623,7 @@ def situacao_do_pedido(
             situacao = "aguardando"
             preso = _soma([m.credito for m in presas]) - _soma([m.debito for m in presas])
             motivo = f"preso na reserva da Amazon: {preso:.2f}"
-        elif dinheiro and abs(mexeu_sem_liberar) > TOLERANCIA:
+        elif dinheiro and abs(mexeu_sem_liberar) > TOLERANCIA and not tarifa_devolvida:
             # 16/10 (revisão, aprovado): nada liberou e mesmo assim saiu (ou entrou)
             # dinheiro — devolvido antes de liquidar na TikTok, frete de devolução… Não é
             # "aguardando" (ia pro A liberar negativo) nem "zero a zero".
@@ -646,6 +660,9 @@ def situacao_do_pedido(
             motivo = f"libera em {previsao.astimezone(BRT):%d/%m}{estimada}" if previsao else None
             if sem_margem and venda is None and not dinheiro and not presas:
                 motivo = "sem lançamento no arquivo da Amazon ainda"
+        if tarifa_devolvida:
+            extra = f"o ML já devolveu {mexeu_sem_liberar:.2f} de tarifa (reembolso ao comprador)"
+            motivo = f"{motivo} · {extra}" if motivo else extra
     else:
         assert recebido is not None and liberado_valor is not None
         if cancelada and abs(recebido) <= TOLERANCIA:
@@ -718,12 +735,13 @@ def situacao_do_pedido(
     # 19/10 (revisão): a coluna "Dif." ficava vazia justo quando o dinheiro saiu depois
     # (estornado depois, "nada liberou e saiu X", recebido a mais sem liberação) — quem
     # ordena pela coluna ou soma no Excel não via a diferença. Venda desfeita (cancelado)
-    # continua sem Dif.: não há previsto a cobrar.
+    # continua sem Dif.: não há previsto a cobrar. 10/11: aguardando também — a venda
+    # ainda não liberou (tarifa devolvida antes, 307414), comparar seria −613 de mentira.
     if (
         dif is None
         and recebido is not None
         and venda_liquido is not None
-        and situacao not in ("cancelado", "sem_venda")
+        and situacao not in ("cancelado", "sem_venda", "aguardando")
     ):
         dif = recebido - venda_liquido
     # 19/10 (revisão): reserva por reclamação/estorno que saiu e não voltou é dinheiro
@@ -777,18 +795,57 @@ def custo_dos_itens(itens: list[BlingOrder]) -> Decimal:
     )
 
 
-def regra_do_custo(*, situacao: str, estado_bling: str | None, zerado_a_mao: bool) -> str:
+def regra_do_custo(
+    *,
+    situacao: str,
+    estado_bling: str | None,
+    zerado_a_mao: bool,
+    voltou_ao_estoque: bool = False,
+) -> str:
     """De onde vem o custo do pedido no Sobrou (22/10, Vinicius): a pessoa que zerou ao
     finalizar manda; venda desfeita (cancelado) e Manutenção no Bling zeram; o resto —
     Resolvido inclusive ("no resolvido acontece de tudo"), Perdimento, Extraviado,
-    Aguardando Devolução — conta o custo cheio."""
+    Aguardando Devolução — conta o custo cheio. 10/11 (Vinicius, "Sim, faz"): venda
+    devolvida cujo produto voltou todo, novo, ao estoque pelo painel Devoluções também
+    zera (`voltou_ao_estoque`, ver `voltou_tudo_ao_estoque`)."""
     if zerado_a_mao:
         return "manual"
     if situacao == "cancelado":
         return "cancelado"
     if (estado_bling or "").strip().lower() in _BLING_CUSTO_ZERO:
         return "manutencao"
+    if voltou_ao_estoque:
+        return "devolvido"
     return "cheio"
+
+
+def _de_volta_novo(d: Devolution) -> bool:
+    """A linha de Devoluções pôs o produto de volta no estoque do Bling como novo: a
+    entrada confirmada (ok) e não estornada depois."""
+    return (
+        bool(d.devolver_estoque)
+        and (d.condicao_produto or "").strip().lower() == "novo"
+        and status_estoque(d) == ESTOQUE_OK
+        and d.estoque_mov_revertido_at is None
+    )
+
+
+def voltou_tudo_ao_estoque(itens: list[BlingOrder], devolucoes: list[Devolution]) -> bool:
+    """10/11 (Inova 306421/306331, kfa 305961): o comprador mudou de ideia, a Shopee
+    devolveu o dinheiro (a loja ficou com −0,49) e as malas voltaram novas ao estoque.
+    O custo não é perda. Vale só quando TODA linha de Devoluções do pedido voltou nova
+    ao estoque e as unidades cobrem as do pedido; uma unidade danificada, ou faltando,
+    deixa a decisão com a pessoa. Casa pelo nº da venda, porque o nº do Bling se repete
+    entre contas."""
+    numeroloja = next((str(i.numeroloja).strip() for i in itens if i.numeroloja), None)
+    if not numeroloja:
+        return False
+    do_pedido = [d for d in devolucoes if (d.pedido_marketplace or "").strip() == numeroloja]
+    if not do_pedido or not all(_de_volta_novo(d) for d in do_pedido):
+        return False
+    vendidas = sum(int(i.item_quantidade or 1) for i in itens)
+    voltaram = sum(int(d.quantidade or 1) for d in do_pedido)
+    return voltaram >= vendidas
 
 
 def sobrou_e_margem(
@@ -846,6 +903,22 @@ def liquidacao_negativa_tiktok(extrato: list[ConciliacaoMovimento]) -> bool:
 
 def _presa_na_reserva(m: ConciliacaoMovimento) -> bool:
     return m.tipo == "venda_liberada" and (m.sub_tipo or "") == "DEFERRED"
+
+
+def _e_tarifa_devolvida(m: ConciliacaoMovimento) -> bool:
+    """Linha "refund" do Mercado Pago que só devolve tarifa (10/11, jlas2 307414): bruto
+    zero, nenhum débito, e o crédito é a tarifa + parcelamento (+ frete) da própria
+    linha — 15,00 = 6,62 + 8,38. Estorno com bruto é dinheiro de venda, não tarifa."""
+    credito = m.credito or ZERO
+    # o sinal das colunas de tarifa muda com o tipo da linha no relatório do MP
+    devolvida = abs(m.tarifa or ZERO) + abs(m.parcelamento or ZERO) + abs(m.frete or ZERO)
+    return (
+        m.tipo == "estorno"
+        and not (m.bruto or ZERO)
+        and not (m.debito or ZERO)
+        and credito > ZERO
+        and abs(credito - devolvida) <= TOLERANCIA
+    )
 
 
 def _quando_liberou(m: ConciliacaoMovimento) -> datetime:
@@ -1512,6 +1585,14 @@ async def recalcular_loja(
     for numero, valor in reembolsos:
         if numero and valor:
             reembolso_por_numero[str(numero)] -= _d(valor) or ZERO
+    # 10/11: produto da venda devolvida que voltou ao estoque pelo painel Devoluções
+    devolucoes_por_numero: dict[str, list[Devolution]] = defaultdict(list)
+    for dev in (
+        await session.execute(
+            select(Devolution).where(Devolution.pedido_bling.in_(numeros or {"-"}))
+        )
+    ).scalars():
+        devolucoes_por_numero[str(dev.pedido_bling)].append(dev)
     nomes_situacao = {
         str(i): n
         for i, n in (await session.execute(select(SituacaoBling.id, SituacaoBling.nome))).all()
@@ -1691,6 +1772,22 @@ async def recalcular_loja(
                     calc["situacao"] = "falta_frete"
                     calc["motivo"] = "sem o frete do Melhor Envio"
         atual = existentes.get(numero)
+        devolvido = calc["recebido"] is not None and calc["recebido"] <= ZERO
+        # 10/11 (Vinicius, "Sim, faz"): bateu, recebeu zero ou menos e o produto voltou
+        # todo, novo, ao estoque → custo zero e segue como qualquer "bateu" (o robô
+        # finaliza depois dos dias sem novidade). Pedido finalizado com custo de outra
+        # regra não muda: a pessoa já decidiu.
+        voltou_ao_estoque = (
+            devolvido
+            and calc["situacao"] == "bateu"
+            and (atual is None or atual.etapa != "finalizado" or atual.custo_regra == "devolvido")
+            and voltou_tudo_ao_estoque(itens, devolucoes_por_numero.get(numero, []))
+        )
+        if voltou_ao_estoque:
+            aviso_estoque = "o produto voltou novo ao estoque (Devoluções): custo zero"
+            calc["motivo"] = (
+                f"{calc['motivo']} · {aviso_estoque}" if calc["motivo"] else aviso_estoque
+            )
         etapa = etapa_do_pedido(
             agora=agora,
             atual=atual,
@@ -1698,7 +1795,7 @@ async def recalcular_loja(
             ultimo_movimento_em=calc["ultimo_movimento_em"],
             zero_a_zero=calc["zero_a_zero"],
             com_dinheiro=calc["recebido"] is not None,
-            devolvido=calc["recebido"] is not None and calc["recebido"] <= ZERO,
+            devolvido=devolvido and not voltou_ao_estoque,
         )
         if difal and etapa.get("etapa") == "finalizado" and atual is not None and atual.etapa_em:
             # DIFAL cobrado depois de finalizado (a Shopee cobrou em 03–04/11 o de pedidos de
@@ -1777,7 +1874,9 @@ async def recalcular_loja(
             }
         # Resultado de VERDADE: só com o dinheiro que entrou. Enquanto não libera, sobrou
         # e margem ficam vazios (15/10, Vinicius: "não precisa aparecer previsto nem margem").
-        base_resultado = calc["recebido"]
+        # 10/11: aguardando com tarifa já devolvida (307414) tem "recebido" de 15,00 — o
+        # Sobrou também fica vazio até liberar, senão mostrava −489,50 de mentira
+        base_resultado = None if calc["situacao"] == "aguardando" else calc["recebido"]
         # Amazon: frete pago fora da plataforma (Melhor Envio) — entra no Sobrou, não
         # no Líquido; envio próprio sem ele não pode ser "bateu" (15/10, Vinicius)
         frete_pago = fretes_pagos.get(numero) if plataforma_loja == "amazon" else None
@@ -1789,11 +1888,14 @@ async def recalcular_loja(
             situacao=calc["situacao"],
             estado_bling=estado_bling,
             zerado_a_mao=bool(atual is not None and atual.custo_zerado_em),
+            voltou_ao_estoque=voltou_ao_estoque,
         )
         if regra != "cheio":
             custo = ZERO
         if regra == "manutencao":
             contagem["custo_zero_manutencao"] += 1
+        if regra == "devolvido":
+            contagem["custo_zero_devolvido"] += 1
         sobrou, margem = sobrou_e_margem(
             base_resultado,
             custo,
@@ -1820,6 +1922,25 @@ async def recalcular_loja(
                 "etapa_por": ETAPA_PELO_ROBO,
                 "etapa_motivo": (
                     f"custo {verbo}: Bling em {nome_bling or '—'} "
+                    f"({atual.custo or ZERO:.2f} → {custo:.2f})"
+                ),
+            }
+            contagem["reaberto_pelo_custo"] += 1
+        elif (
+            atual is not None
+            and atual.custo_regra == "devolvido"
+            and regra == "cheio"
+            and etapa.get("etapa") == "finalizado"
+        ):
+            # 10/11: finalizou com custo zero porque o produto tinha voltado ao estoque e
+            # a devolução saiu de lá (estornada, virou danificado) — uma pessoa olha
+            etapa = {
+                **etapa,
+                "etapa": "reaberto",
+                "etapa_em": agora,
+                "etapa_por": ETAPA_PELO_ROBO,
+                "etapa_motivo": (
+                    "custo voltou: a devolução não está mais no estoque "
                     f"({atual.custo or ZERO:.2f} → {custo:.2f})"
                 ),
             }

@@ -23,6 +23,7 @@ from app.models import (
     ConciliacaoMovimento,
     ConciliacaoPedido,
     ConciliacaoSync,
+    Devolution,
     Integration,
     IntegrationPlatform,
     MarketplaceOrderFinancial,
@@ -1131,6 +1132,16 @@ async def test_recalcular_loja_classifica_as_situacoes(db, make_user):
             ),
             _mov(loja, "mediacao", d(12), debito="459.00", pedido_mkt="2000018737867860"),
             _mov(loja, "estorno", d(12, 11), credito="97.62", pedido_mkt="2000018737867860"),
+            # 10/11 (307414): tarifa devolvida antes de liberar não tira do aguardando
+            _mov(
+                loja,
+                "estorno",
+                d(13, 9),
+                credito="2.50",
+                pedido_mkt="2000018999",
+                tarifa="1.10",
+                parcelamento="1.40",
+            ),
             _mov(
                 loja,
                 "venda_liberada",
@@ -1192,6 +1203,8 @@ async def test_recalcular_loja_classifica_as_situacoes(db, make_user):
     assert esperando.situacao == "aguardando" and esperando.etapa == "aguardando"
     assert esperando.previsao_liberacao is not None and "libera em 25/10" in esperando.motivo
     assert esperando.sobrou is None and esperando.margem is None  # só com dinheiro que entrou
+    assert "o ML já devolveu 2.50 de tarifa" in esperando.motivo
+    assert esperando.recebido == Decimal("2.50") and esperando.dif_previsto_recebido is None
 
     estornado = pedidos["299520"]
     assert estornado.situacao == "estornado_depois" and estornado.etapa == "pendencia"
@@ -2599,6 +2612,75 @@ def test_situacao_nada_liberou_mas_mexeu_dinheiro_e_bling_excluido_e_previsao_es
     # ML não ganha estimativa (a plataforma diz a data)
     out = calc.situacao_do_pedido(movs_extrato=[], plataforma="ml", **com_venda)
     assert out["situacao"] == "aguardando" and out["motivo"] is None
+
+
+def test_ml_tarifa_devolvida_antes_de_liberar_segue_aguardando():
+    """jlas2 307414 (10/11): a mediação fechou com reembolso parcial ao comprador e o ML
+    devolveu 15,00 de tarifa (6,62 + 8,38) antes de liberar os 628,06. É aguardando
+    (libera em 02/12), não "recebido a mais", e sem Dif. até liberar."""
+    loja = ConciliacaoLoja(platform=IntegrationPlatform.ML, conta="x", inicio=date(2026, 10, 24))
+    loja.integration_id = None
+    venda = MarketplaceOrderFinancial(
+        gross_amount=Decimal("745.93"),
+        net_amount=Decimal("628.06"),
+        fee_amount=Decimal("94.62"),
+        raw={},
+    )
+    base = {
+        "agora": datetime(2026, 11, 10, 12, tzinfo=UTC),
+        "data_pedido": datetime(2026, 11, 4, 3, tzinfo=UTC),
+        "bling_total": Decimal("745.93"),
+        "venda": venda,
+        "previsao": datetime(2026, 12, 2, 21, 34, tzinfo=UTC),
+        "fatura": {},
+        "plataforma": "ml",
+    }
+    refund = _mov(
+        loja,
+        "estorno",
+        datetime(2026, 11, 10, 0, 32, tzinfo=UTC),
+        credito="15.00",
+        tarifa="6.62",
+        parcelamento="8.38",
+        frete="0",
+    )
+    refund.bruto = Decimal("0")
+    out = calc.situacao_do_pedido(movs_extrato=[refund], **base)
+    assert out["situacao"] == "aguardando"
+    assert out["motivo"] == (
+        "libera em 02/12 · o ML já devolveu 15.00 de tarifa (reembolso ao comprador)"
+    )
+    assert out["recebido"] == Decimal("15.00")
+    assert out["dif_previsto_recebido"] is None
+    assert out["nada_liberou"] is True
+
+    # a previsão passou e não liberou: vencido (a tarifa continua no motivo)
+    depois = {**base, "agora": datetime(2026, 12, 6, 12, tzinfo=UTC)}
+    out = calc.situacao_do_pedido(movs_extrato=[refund], **depois)
+    assert out["situacao"] == "vencido"
+    assert out["motivo"] == (
+        "previsão de liberação era 02/12 · o ML já devolveu 15.00 de tarifa "
+        "(reembolso ao comprador)"
+    )
+
+    # estorno com bruto é dinheiro de venda, não tarifa: regra antiga
+    venda_estorno = _mov(
+        loja, "estorno", datetime(2026, 11, 10, 0, 32, tzinfo=UTC), credito="40.00"
+    )
+    venda_estorno.bruto = Decimal("40.00")
+    out = calc.situacao_do_pedido(movs_extrato=[venda_estorno], **base)
+    assert out["situacao"] == "recebido_a_mais"
+    assert out["motivo"] == "nada liberou e entrou 40.00"
+
+    # venda desfeita no Bling continua como era (não é "aguardando")
+    out = calc.situacao_do_pedido(
+        movs_extrato=[refund], bling_cancelado=True, bling_situacao="cancelado", **base
+    )
+    assert out["situacao"] == "recebido_a_mais"
+
+    # a regra é só do ML
+    out = calc.situacao_do_pedido(movs_extrato=[refund], **{**base, "plataforma": "shopee"})
+    assert out["situacao"] == "recebido_a_mais"
 
 
 def test_etapa_reaberto_pela_pessoa_fica_e_bateu_em_zera():
@@ -4215,6 +4297,92 @@ async def test_venda_devolvida_que_bateu_nao_finaliza_sozinha(db, make_user, aut
     await db.commit()
     corpo = (await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-10"})).json()
     assert not [a for a in corpo["agir"] if "devolvida" in a["titulo"]]
+
+
+def _devolucao(pedido: str, venda: str, sku: str, **extra) -> Devolution:
+    campos = {
+        "pedido_bling": pedido,
+        "pedido_marketplace": venda,
+        "conta": "jlas2",
+        "sku": sku,
+        "condicao_produto": "Novo",
+        "devolver_estoque": True,
+        "estoque_status": "ok",
+        "quantidade": 1,
+        **extra,
+    }
+    return Devolution(**campos)
+
+
+async def test_venda_devolvida_com_produto_de_volta_ao_estoque_zera_o_custo(db, make_user):
+    """10/11 (Inova 306421, Vinicius: "Sim, faz"): o comprador mudou de ideia, a loja
+    ficou com −0,49 e as duas malas voltaram novas ao estoque pelo painel Devoluções.
+    Custo zero, sai da pendência e o robô finaliza como qualquer "bateu"."""
+    loja, _ = await _loja(db, make_user)
+    d = lambda dia: datetime(2026, 10, dia, 12, tzinfo=UTC)  # noqa: E731
+
+    def pedido(numero: str, venda: str, itens: list[tuple[str, float]]) -> None:
+        for i, (sku, custo) in enumerate(itens):
+            linha = _pedido_bling(numero, venda, d(6), "216.00", custo)
+            linha.bling_id = int(numero) * 10 + i
+            linha.item_index = i
+            linha.item_codigo = sku
+            db.add(linha)
+        db.add(
+            _fin(loja.integration_id, venda, gross="0", fee="0.49", freight="0", net="-0.49")
+        )
+        liberou = _mov(loja, "venda_liberada", d(10), debito="0.49", pedido_mkt=venda)
+        liberou.created_at = d(10)  # lido no dia (senão conta como "movimento novo")
+        db.add(liberou)
+
+    # as duas malas voltaram novas
+    pedido("306421", "2000030642100001", [("b009.18", 100.0), ("b009.12", 31.0)])
+    db.add(_devolucao("306421", "2000030642100001", "b009.18"))
+    db.add(_devolucao("306421", "2000030642100001", "b009.12"))
+    # só uma das duas voltou: a pessoa decide
+    pedido("306422", "2000030642200001", [("b009.18", 100.0), ("b009.12", 31.0)])
+    db.add(_devolucao("306422", "2000030642200001", "b009.18"))
+    # voltou danificada: a pessoa decide
+    pedido("306423", "2000030642300001", [("b108.20", 135.0)])
+    db.add(_devolucao("306423", "2000030642300001", "b108.20", condicao_produto="Danificado"))
+    # mesmo nº do Bling, mas devolução de OUTRA venda (outra conta): não conta
+    pedido("306424", "2000030642400001", [("b108.20", 135.0)])
+    db.add(_devolucao("306424", "2000099999999999", "x045.ra"))
+    await db.commit()
+
+    await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 12, 12, tzinfo=UTC))
+    await db.commit()
+    p = await _conciliado(db, "306421")
+    assert p.situacao == "bateu" and p.etapa == "conciliado"
+    assert p.custo == Decimal("0") and p.custo_regra == "devolvido"
+    assert p.sobrou == Decimal("-0.49")
+    assert "o produto voltou novo ao estoque (Devoluções): custo zero" in p.motivo
+    for numero, custo in (("306422", "131.00"), ("306423", "135.00"), ("306424", "135.00")):
+        outro = await _conciliado(db, numero)
+        assert outro.etapa == "pendencia" and outro.custo_regra == "cheio", numero
+        assert outro.custo == Decimal(custo), numero
+        assert outro.etapa_motivo.startswith("venda devolvida"), numero
+
+    # 7 dias sem novidade: finaliza sozinho, como qualquer "bateu"
+    await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 20, 12, tzinfo=UTC))
+    await db.commit()
+    p = await _conciliado(db, "306421")
+    assert p.etapa == "finalizado" and p.etapa_por == "robô" and p.custo == Decimal("0")
+
+    # a entrada de uma mala foi estornada: o custo volta e uma pessoa olha
+    from sqlalchemy import select
+
+    mala = (
+        await db.execute(select(Devolution).where(Devolution.sku == "b009.12"))
+    ).scalars().first()
+    mala.estoque_mov_revertido_at = datetime(2026, 10, 21, 9, tzinfo=UTC)
+    await db.commit()
+    await calc.recalcular_loja(db, loja, agora=datetime(2026, 10, 21, 12, tzinfo=UTC))
+    await db.commit()
+    p = await _conciliado(db, "306421")
+    await db.refresh(p)
+    assert p.etapa == "reaberto" and p.custo_regra == "cheio" and p.custo == Decimal("131.00")
+    assert p.etapa_motivo == "custo voltou: a devolução não está mais no estoque (0.00 → 131.00)"
 
 
 # --- 04/11: Raio-X do ML (troca 305862 → 306420, juros, linhas que somam) ---------------
