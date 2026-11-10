@@ -280,7 +280,7 @@ export const ESTADO_DA_CAIXA: Record<string, string> = {
 </script>
 
 <script setup lang="ts">
-import { Check, ChevronDown, ChevronUp, Download, ExternalLink, Loader2, MailCheck, MailWarning, RefreshCw, RotateCcw, ShieldAlert, TriangleAlert } from 'lucide-vue-next'
+import { Check, ChevronDown, ChevronUp, Download, ExternalLink, Loader2, MailCheck, MailWarning, RefreshCw, RotateCcw, ShieldAlert, Trash2, TriangleAlert } from 'lucide-vue-next'
 import { erroDaApi, fmtDataHora, plataformaInfo, prazoDe } from '~/components/AtendimentoPlataforma.vue'
 import { avisosDeProtecao, destinoDaLoja, remetenteLegivel, tamanhoLegivel, urlDoAnexo, type CartaoEmail } from '~/components/AtendimentoEmailCartao.vue'
 
@@ -293,6 +293,7 @@ const props = defineProps<{
   // Só ver (04/11/2026, `atendimento_email_aba`): todas as filas, as pastas e a
   // saúde, recortadas pela API; as ações continuam em `podeMexer`.
   podeLerFilas?: boolean
+  podeExcluir?: boolean
   // A página mostra uma conversa de e-mail por cima (a aba E-mail, 13/10/2026):
   // esta tela fica montada, escondida; na volta, a fila e os números de novo.
   pausado?: boolean
@@ -311,6 +312,7 @@ const toasts = useToasts()
 
 const mexe = computed(() => props.podeMexer !== false)
 const le = computed(() => mexe.value || props.podeLerFilas === true)
+const exclui = computed(() => props.podeExcluir === true || (props.isAdmin && mexe.value))
 const filasVisiveis = computed(() => filasDaPessoa(le.value))
 const fila = ref<Fila>(le.value ? 'sem_loja' : 'chamados')
 const contagensFilas = ref<Record<string, number> | null>(null)
@@ -530,6 +532,66 @@ async function marcarComoLido(c: ConversaResumo) {
   }
 }
 
+async function marcarTodosComoLidos() {
+  if (ocupado.value || carregando.value || pastasAbertas.value || !FILAS_DE_CONVERSA.has(fila.value) || !conversas.value.length) return
+  const body = {
+    fila: fila.value,
+    tipo_chamado: fila.value === 'chamados' ? tipoChamado.value || null : null,
+    tipo_email: tipoEmail.value || null,
+    q: busca.value.slice(0, 200) || null,
+    fechadas: fila.value === 'todas' && fechadas.value,
+  }
+  ocupado.value = 'lidos:todos'
+  try {
+    const r = await api<{ conversas: number }>('/api/atendimento/email/marcar-todos-lidos', { method: 'POST', body })
+    toasts.success(r.conversas ? `${r.conversas} conversa(s) marcada(s) como lidas no DaVinci` : 'Todos os e-mails desta seleção já estão lidos')
+    await Promise.all([carregar(), carregarContagens()])
+  } catch (e: any) {
+    const er = erroDaApi(e, 'Não consegui marcar todos como lidos')
+    toasts.error(er.texto, er.motivos)
+  } finally {
+    ocupado.value = null
+  }
+}
+
+async function excluirConversa(c: ConversaResumo) {
+  if (!exclui.value || ocupado.value || carregando.value) return
+  if (!confirm('Enviar os e-mails desta conversa para a Lixeira do DaVinci? Você pode restaurá-los em Caixas → Lixeira desta caixa. Os originais continuam no Tuta.')) return
+  ocupado.value = `excluir:${c.id}`
+  try {
+    let ate = c.email_visto_ate
+    if (!ate) ate = (await api<{ visto_ate?: string | null }>(`/api/atendimento/conversas/${encodeURIComponent(c.id)}`)).visto_ate
+    if (!ate) {
+      toasts.info('Esta conversa ainda não tem e-mails para excluir.')
+      return
+    }
+    await api(`/api/atendimento/email/conversas/${encodeURIComponent(c.id)}/lixeira`, { method: 'POST', body: { ate } })
+    toasts.success('E-mails enviados para a Lixeira do DaVinci')
+    await Promise.all([carregar(), carregarContagens()])
+  } catch (e: any) {
+    if (e?.data?.detail?.code === 'email_conversa_mudou') {
+      toasts.info('A conversa recebeu uma atualização. Confira a lista antes de excluir novamente.')
+      await carregar()
+    } else if (e?.data?.detail?.code === 'email_envio_pendente') {
+      toasts.info('Há uma resposta em envio ou aguardando conferência. Resolva esse envio antes de excluir.')
+    } else {
+      const er = erroDaApi(e, 'Não consegui excluir os e-mails')
+      toasts.error(er.texto, er.motivos)
+    }
+  } finally {
+    ocupado.value = null
+  }
+}
+
+function excluirEmail(e: ItemFila) {
+  if (!exclui.value || ocupado.value) return
+  if (!confirm('Enviar este e-mail para a Lixeira do DaVinci? Você pode restaurá-lo em Caixas → Lixeira desta caixa. O original continua no Tuta.')) return
+  return acao(`excluir:${e.id}`, async () => {
+    await api(`/api/mail/messages/${encodeURIComponent(e.id)}/trash`, { method: 'POST', body: {} })
+    if (aberto.value === e.id) { aberto.value = null; detalhe.value = null }
+  }, 'E-mail enviado para a Lixeira do DaVinci')
+}
+
 // Toda ação: uma por vez, com o aviso e a fila relida (o e-mail sai dela).
 async function acao(chave: string, fn: () => Promise<unknown>, ok: string) {
   if (ocupado.value) return
@@ -648,6 +710,9 @@ const curto = (p: string) => plataformaInfo(p).curto
 
     <div v-if="!pastasAbertas" class="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
       <span>{{ dicaDaFila(filaInfo, mexe) }}</span>
+      <button v-if="FILAS_DE_CONVERSA.has(fila)" type="button" class="ml-auto inline-flex items-center gap-1 rounded border px-3 py-1.5 text-foreground hover:bg-muted disabled:opacity-50" :disabled="!!ocupado || carregando || !conversas.length" title="Marca todas as conversas desta fila que correspondem aos filtros e à busca, incluindo as próximas páginas." data-marcar-todos-email-lidos @click="marcarTodosComoLidos">
+        <Loader2 v-if="ocupado === 'lidos:todos'" class="size-3.5 animate-spin" /><MailCheck v-else class="size-3.5" />{{ ocupado === 'lidos:todos' ? 'Marcando…' : 'Marcar todos como lidos' }}
+      </button>
       <button v-if="acoes.reprocessarFila" type="button" class="ml-auto inline-flex items-center gap-1 rounded border px-2 py-0.5 text-foreground hover:bg-muted" :disabled="!!ocupado" title="depois de corrigir o cadastro (Cadastros › Lojas), passa a fila de novo pela ponte" @click="reprocessarFila">
         <RotateCcw class="size-3.5" /> reprocessar a fila
       </button>
@@ -767,6 +832,7 @@ const curto = (p: string) => plataformaInfo(p).curto
               <Loader2 v-if="ocupado === `lido:${c.id}`" class="size-3.5 animate-spin" /><MailCheck v-else class="size-3.5" />{{ ocupado === `lido:${c.id}` ? 'Marcando…' : 'Marcar como lido' }}
             </button>
             <span v-if="c.email?.alias" class="ml-auto break-all text-muted-foreground">para {{ c.email.alias }}</span>
+            <button v-if="exclui" type="button" class="inline-flex items-center gap-1 rounded border px-2 py-1 text-destructive hover:bg-destructive/10 disabled:opacity-50" :disabled="!!ocupado || carregando" data-excluir-conversa-email @click="excluirConversa(c)"><Loader2 v-if="ocupado === `excluir:${c.id}`" class="size-3.5 animate-spin" /><Trash2 v-else class="size-3.5" />Excluir</button>
           </div>
         </li>
       </ul>
@@ -837,6 +903,7 @@ const curto = (p: string) => plataformaInfo(p).curto
               <component :is="aberto === e.id ? ChevronUp : ChevronDown" class="size-3" />{{ aberto === e.id ? 'fechar o e-mail' : 'ver o e-mail' }}
             </button>
             <button v-if="e.conversa_id" type="button" class="underline" @click="emit('abrirConversa', e.conversa_id)">abrir a conversa</button>
+            <button v-if="exclui" type="button" class="inline-flex items-center gap-1 rounded border px-2 py-1 text-destructive hover:bg-destructive/10 disabled:opacity-50" :disabled="!!ocupado" data-excluir-email-fila @click="excluirEmail(e)"><Trash2 class="size-3.5" />Excluir</button>
             <button v-if="acoes.reprocessar" type="button" class="underline disabled:opacity-50" :disabled="!!ocupado" title="de novo pela ponte (depois de corrigir o cadastro)" @click="reprocessar(e)">reprocessar</button>
             <button v-if="acoes.ignorar" type="button" class="ml-auto text-muted-foreground underline disabled:opacity-50" :disabled="!!ocupado" @click="ignorar(e)">{{ fila === 'sem_loja' ? 'não é de loja nenhuma' : 'tirar da fila' }}</button>
           </div>

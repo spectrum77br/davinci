@@ -203,7 +203,14 @@ def test_trava_em_todas_as_rotas_e_a_lista_de_quem_le_existe():
     assert len(rotas) >= 40
     for r in rotas:
         deps = [d.call for d in r.dependant.dependencies]
-        assert rota._so_admin in deps, f"{sorted(r.methods)} {r.path} sem a trava da caixa"
+        if r.path == f"{URL}/email/conversas/{{conversa_id}}/lixeira":
+            # Operação da mesma lixeira das Caixas: concessão explícita com
+            # delete, sem conceder as demais ações administrativas das Filas.
+            from app.routers.mail import require_mail_manager
+
+            assert require_mail_manager in deps
+        else:
+            assert rota._so_admin in deps, f"{sorted(r.methods)} {r.path} sem a trava da caixa"
     # Cada escrita liberada para quem lê é uma rota de verdade (molde + método).
     existentes = {(m, r.path) for r in rotas for m in r.methods}
     assert rota.ROTAS_DE_QUEM_LE <= existentes, rota.ROTAS_DE_QUEM_LE - existentes
@@ -214,6 +221,7 @@ def test_trava_em_todas_as_rotas_e_a_lista_de_quem_le_existe():
         f"{URL}/adspower/aberto",
         # 28/10/2026: abrir a conversa apaga a notificação dela (só o visto no DaVinci).
         f"{URL}/conversas/{{conversa_id}}/visto",
+        f"{URL}/email/marcar-todos-lidos",
         # 03/11/2026: o "marcar como não lida" (o contrário do visto, para todos).
         f"{URL}/conversas/{{conversa_id}}/nao-lida",
         # 06/11/2026: os cartões das outras compras (POST só por levar a lista; lê e não grava).
@@ -269,6 +277,14 @@ async def test_quem_so_le_le_tudo_e_nao_mexe_em_nada(client, make_user, auth_as,
             # Administração de acesso/lixeira (19/10): nem leitura do painel
             # fica disponível a leitores ou a admins fora da lista operacional.
             assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
+        elif molde == f"{URL}/email/conversas/{{conversa_id}}/lixeira":
+            assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
+            esperado = (
+                "atendimento_permission_required"
+                if quem == "admin_fora_da_lista"
+                else "admin_only"
+            )
+            assert r.json()["detail"]["code"] == esperado, (metodo, caminho)
         elif (metodo, molde) in rota_email.LEITURAS_SO_DE_ADMIN:
             # A aba E-mail é só de admin (27/10/2026; de 28 a 30/10 também da
             # permissão `atendimento_email`, que desde 30/10 não abre mais).

@@ -46,7 +46,7 @@ type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: 
 // this visit to /atendimento: the page keeps it, since this component mounts
 // again every time the E-mail tab opens.
 type Section = 'mailboxes' | 'queues' | 'admin'
-const props = withDefaults(defineProps<{ isAdmin: boolean; canOperate?: boolean; canReadQueues?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; conversationCounts?: ContagensDeConversa | null; refreshConversationCounts?: () => Promise<void>; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
+const props = withDefaults(defineProps<{ isAdmin: boolean; canOperate?: boolean; canReadQueues?: boolean; canManageQueues?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; conversationCounts?: ContagensDeConversa | null; refreshConversationCounts?: () => Promise<void>; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
 const emit = defineEmits<{ (e: 'openConversation', id: string): void; (e: 'update:rememberedSection', value: Section): void }>()
 const { api, url } = useApi()
 const mailboxes = ref<Mailbox[]>([])
@@ -802,6 +802,7 @@ onBeforeUnmount(() => {
       :is-admin="isAdmin"
       :pode-mexer="!!canOperate"
       :pode-ler-filas="!!canReadQueues"
+      :pode-excluir="!!canManageQueues"
       :lojas="stores || []"
       :pausado="!!paused"
       :tique="refreshTick"

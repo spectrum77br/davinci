@@ -129,6 +129,9 @@ const agora = useRelogio()
 const podeVerAbaEmail = useCan('atendimento_email_aba', 'view')
 const podeLerCaixaEmail = useCan('atendimento_email_leitura', 'view')
 const podeOperarCaixaEmail = useCan('atendimento_email_operacao', 'view')
+const podeEditarCaixaEmail = useCan('atendimento_email_operacao', 'edit')
+const podeApagarCaixaEmail = useCan('atendimento_email_operacao', 'delete')
+const podeExcluirNasFilasEmail = computed(() => ehAdmin.value ? mexe.value : podeOperarCaixaEmail.value && podeEditarCaixaEmail.value && podeApagarCaixaEmail.value)
 const veAbaEmail = computed(() => ehAdmin.value || podeVerAbaEmail.value || podeLerCaixaEmail.value || podeOperarCaixaEmail.value)
 // Quem lê TODAS as Filas (04/11/2026): quem mexe, e quem não é admin e tem a
 // permissão da aba, nas lojas dele (a mesma conta de `acesso.le_filas_email`).
@@ -1569,6 +1572,7 @@ onBeforeUnmount(() => {
         :is-admin="isAdmin"
         :can-operate="mexe && ehAdmin"
         :can-read-queues="leFilasEmail"
+        :can-manage-queues="podeExcluirNasFilasEmail"
         :can-view="canSugerir"
         :stores="resumo?.lojas || []"
         :waiting="emailEsperando"

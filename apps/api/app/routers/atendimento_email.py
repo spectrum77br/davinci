@@ -101,14 +101,14 @@ POST /api/atendimento/conversas/{id}/responder (com `mail_message_id` e
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import quote
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import and_, case, exists, func, literal, literal_column, not_, or_, select, update
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -140,10 +140,12 @@ from app.models.mail_atendimento import (
 from app.routers.atendimento import (
     ABA_EMAIL_SO_ADMIN,
     TIPOS_CHAMADO,
+    _busca_conversa_sql,
     _clausula_escopo,
     _conversa_no_escopo,
     _conversa_ou_404,
     _nomes_das_lojas,
+    _quem_le,
     _so_admin,
     _tipo_do_chamado,
     _tipo_do_email_sql,
@@ -667,6 +669,80 @@ def _filtro_da_fila(fila: str):
             func.nullif(MailMessageMeta.protocolo, "").is_(None),
         )
     return (MailMessageMeta.estado == fila,)
+
+
+class MarcarTodosLidosIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fila: Literal["chamados", "aguardando", "todas"]
+    tipo_chamado: Literal["sac", "atacado", "duvidas"] | None = None
+    tipo_email: Literal["informativo", "chamado", "venda"] | None = None
+    q: str | None = Field(default=None, max_length=200, strict=True)
+    fechadas: bool = Field(default=False, strict=True)
+
+    @model_validator(mode="after")
+    def filtros_da_fila(self):
+        if self.tipo_chamado is not None and self.fila != "chamados":
+            raise ValueError("tipo_chamado só se aplica à fila chamados")
+        if self.fechadas and self.fila != "todas":
+            raise ValueError("fechadas só se aplica à fila todas")
+        return self
+
+
+@router.post("/marcar-todos-lidos")
+async def marcar_todos_lidos(
+    body: MarcarTodosLidosIn,
+    session: Session,
+    user: Annotated[User, Depends(_quem_le)],
+) -> dict[str, int]:
+    """Marca toda a fila filtrada como vista no DaVinci, sem limite de página.
+
+    O snapshot e a escrita acontecem numa instrução: a chegada mais recente
+    de cada conversa é o limite do visto, inclusive para mensagens importadas
+    com data de envio antiga. Uma chegada posterior continua não lida. Não
+    fecha, resolve, muda a ordem da fila nem escreve no Tuta.
+    """
+    _aba_inteira(user)
+    scope = await escopo_do_atendimento(session, user)
+    visao = await administracao.visao_rapida(session, user)
+    await session.execute(sql_text("SET LOCAL jit = off"))
+    c, m = AtendimentoConversa, AtendimentoMensagem
+    filtros = [separa_email.conversa_de_email_sql(), visao.filtro_conversa()]
+    cond = _clausula_escopo(scope, c.integration_id)
+    if cond is not None:
+        filtros.append(cond)
+    if body.fila == "aguardando":
+        filtros.append(c.aguardando_resposta.is_(True))
+    else:
+        filtros.append(
+            c.situacao == CONVERSA_FECHADA if body.fechadas else c.situacao != CONVERSA_FECHADA
+        )
+    if body.fila == "chamados":
+        filtros.append(c.plataforma == PLATAFORMA_SITE)
+    if body.tipo_chamado:
+        filtros.append(_tipo_do_chamado() == body.tipo_chamado)
+    if body.tipo_email:
+        filtros.append(_tipo_do_email_sql() == body.tipo_email)
+    if body.q and body.q.strip():
+        filtros.append(_busca_conversa_sql(body.q))
+    alvos = (
+        select(c.id.label("id"), func.max(m.created_at).label("ate"))
+        .join(m, m.conversa_id == c.id)
+        .where(*filtros)
+        .group_by(c.id)
+        .cte("emails_da_fila")
+    )
+    marco = func.least(alvos.c.ate, func.statement_timestamp())
+    marcadas = (
+        update(c)
+        .where(c.id == alvos.c.id, or_(c.visto_em.is_(None), c.visto_em < marco))
+        .values(visto_em=func.greatest(c.visto_em, marco), updated_at=c.updated_at)
+        .returning(c.id)
+        .cte("emails_marcados")
+    )
+    total = int(await session.scalar(select(func.count()).select_from(marcadas)) or 0)
+    await session.commit()
+    return {"conversas": total}
 
 
 @router.get("/filas")

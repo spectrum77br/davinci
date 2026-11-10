@@ -592,6 +592,8 @@ def _acoes_do_email() -> list[tuple[str, str]]:
         if isinstance(r, APIRoute) and r.path.startswith(f"{EMAIL}/")
         for metodo in r.methods
         if metodo not in ("GET", "HEAD", "OPTIONS") and "/admin/" not in r.path
+        # A leitura local em lote tem a mesma permissão do /visto individual.
+        and r.path != f"{EMAIL}/marcar-todos-lidos"
     )
 
 
@@ -632,7 +634,14 @@ async def test_toda_acao_da_aba_e_403_e_nao_muda_nada(mundo, client, db, cena):
             corpo = {"categoria": None, "ignorar": True}
         r = await client.request(metodo, caminho, json=corpo)
         assert r.status_code == 403, (metodo, molde, r.text)
-        assert r.json()["detail"]["code"] == "atendimento_so_leitura", (metodo, molde)
+        # A lixeira reutiliza a permissão explícita de operação das Caixas;
+        # a concessão de somente leitura da aba também não passa por ela.
+        esperado = (
+            "admin_only"
+            if molde == f"{EMAIL}/conversas/{{conversa_id}}/lixeira"
+            else "atendimento_so_leitura"
+        )
+        assert r.json()["detail"]["code"] == esperado, (metodo, molde)
     pasta_id = mundo.avisos.id
     db.expire_all()
     meta = await db.get(MailMessageMeta, dele.uuid)

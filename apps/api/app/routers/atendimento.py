@@ -380,6 +380,7 @@ ROTAS_DE_QUEM_LE = frozenset(
         # notificações devem sumir se clicado em algum atendimento"): só a
         # marca do DaVinci que apaga o número; nada vai à plataforma.
         ("POST", "/api/atendimento/conversas/{conversa_id}/visto"),
+        ("POST", "/api/atendimento/email/marcar-todos-lidos"),
         # O "marcar como não lida" (03/11/2026): o contrário do visto, para todos.
         ("POST", "/api/atendimento/conversas/{conversa_id}/nao-lida"),
     }
@@ -2562,6 +2563,62 @@ async def _leitura_parada(
 # ── Lista e detalhe ───────────────────────────────────────────────────────
 
 
+def _busca_conversa_sql(q: str):
+    """A busca da lista, compartilhada pelas ações da fila inteira."""
+    termo_exato = q.strip()
+    termo = f"%{_escapar_like(termo_exato)}%"
+    no_bling = select(_busca_no_bling(termo_exato).c.numeroloja)
+    return or_(
+        *(
+            col.ilike(termo, escape="\\")
+            for col in (
+                AtendimentoConversa.comprador_nome,
+                AtendimentoConversa.pedido_marketplace,
+                AtendimentoConversa.anuncio_titulo,
+                AtendimentoConversa.conta,
+                AtendimentoConversa.externo_id,
+                AtendimentoConversa.ultima_mensagem_resumo,
+            )
+        ),
+        # O nº do Bling e o SKU (01/10/2026): o pedido achado no
+        # espelho do Bling, pelo nº na plataforma (ou o pack/order do ML).
+        AtendimentoConversa.pedido_marketplace.in_(no_bling),
+        AtendimentoConversa.dados["pack_id"].astext.in_(no_bling),
+        AtendimentoConversa.dados["order_id"].astext.in_(no_bling),
+        # O nº digitado é o do pack ou o da order do ML (06/11/2026, o dono, com o
+        # pack do Bling e do ML: a reclamação guarda a order e não aparecia).
+        AtendimentoConversa.dados["pack_id"].astext == termo_exato,
+        AtendimentoConversa.dados["order_id"].astext == termo_exato,
+        # O nº do retrato do ML e qualquer pedido do carrinho: o chat guarda só o pack
+        # (`enriquecer._retrato_ml`). O `pedido` vale para o retrato ainda não relido.
+        AtendimentoConversa.dados[("pedido_mkt", "pedido")].astext == termo_exato,
+        AtendimentoConversa.dados[("pedido_mkt", "pedido")].astext.in_(no_bling),
+        AtendimentoConversa.dados.contains({"pedido_mkt": {"pedidos": [termo_exato]}}),
+        # Qualquer pedido do comprador (03/11/2026): o chat dele na
+        # loja, mesmo ligado a outro pedido (`_chat_do_comprador_do_pedido`).
+        _chat_do_comprador_do_pedido(termo_exato),
+        # O nº da devolução da Shopee (04/11/2026): o caso que está no chat do
+        # comprador não tem mais a conversa com esse número (`foco_devolucao`).
+        AtendimentoConversa.id.in_(
+            select(AtendimentoReclamacao.conversa_id).where(
+                AtendimentoReclamacao.plataforma == foco_devolucao.PLATAFORMA,
+                AtendimentoReclamacao.externo_id == termo_exato,
+                AtendimentoReclamacao.conversa_id.is_not(None),
+            )
+        ),
+        # Os chamados dos sites (RF6): TODOS os protocolos do chamado —
+        # o principal e os agrupados nele (o 2º sumia de "Todas" assim
+        # que chegava mensagem nova: só o resumo da última o achava).
+        AtendimentoConversa.dados["mail"]["protocolo"].astext.ilike(
+            termo, escape="\\"
+        ),
+        AtendimentoConversa.dados["mail"]["protocolos"].astext.ilike(
+            termo, escape="\\"
+        ),
+        AtendimentoConversa.dados["mail"]["caso_id"].astext.ilike(termo, escape="\\"),
+    )
+
+
 async def _listar_marketplace(
     session: AsyncSession,
     *,
@@ -2778,60 +2835,7 @@ async def _listar_marketplace(
             _tipo_do_chamado() == tipo_chamado,
         )
     if q and q.strip():
-        termo_exato = q.strip()
-        termo = f"%{_escapar_like(termo_exato)}%"
-        no_bling = select(_busca_no_bling(termo_exato).c.numeroloja)
-        consulta = consulta.where(
-            or_(
-                *(
-                    col.ilike(termo, escape="\\")
-                    for col in (
-                        AtendimentoConversa.comprador_nome,
-                        AtendimentoConversa.pedido_marketplace,
-                        AtendimentoConversa.anuncio_titulo,
-                        AtendimentoConversa.conta,
-                        AtendimentoConversa.externo_id,
-                        AtendimentoConversa.ultima_mensagem_resumo,
-                    )
-                ),
-                # O nº do Bling e o SKU (01/10/2026): o pedido achado no
-                # espelho do Bling, pelo nº na plataforma (ou o pack/order do ML).
-                AtendimentoConversa.pedido_marketplace.in_(no_bling),
-                AtendimentoConversa.dados["pack_id"].astext.in_(no_bling),
-                AtendimentoConversa.dados["order_id"].astext.in_(no_bling),
-                # O nº digitado é o do pack ou o da order do ML (06/11/2026, o dono, com o
-                # pack do Bling e do ML: a reclamação guarda a order e não aparecia).
-                AtendimentoConversa.dados["pack_id"].astext == termo_exato,
-                AtendimentoConversa.dados["order_id"].astext == termo_exato,
-                # O nº do retrato do ML e qualquer pedido do carrinho: o chat guarda só o pack
-                # (`enriquecer._retrato_ml`). O `pedido` vale para o retrato ainda não relido.
-                AtendimentoConversa.dados[("pedido_mkt", "pedido")].astext == termo_exato,
-                AtendimentoConversa.dados[("pedido_mkt", "pedido")].astext.in_(no_bling),
-                AtendimentoConversa.dados.contains({"pedido_mkt": {"pedidos": [termo_exato]}}),
-                # Qualquer pedido do comprador (03/11/2026): o chat dele na
-                # loja, mesmo ligado a outro pedido (`_chat_do_comprador_do_pedido`).
-                _chat_do_comprador_do_pedido(termo_exato),
-                # O nº da devolução da Shopee (04/11/2026): o caso que está no chat do
-                # comprador não tem mais a conversa com esse número (`foco_devolucao`).
-                AtendimentoConversa.id.in_(
-                    select(AtendimentoReclamacao.conversa_id).where(
-                        AtendimentoReclamacao.plataforma == foco_devolucao.PLATAFORMA,
-                        AtendimentoReclamacao.externo_id == termo_exato,
-                        AtendimentoReclamacao.conversa_id.is_not(None),
-                    )
-                ),
-                # Os chamados dos sites (RF6): TODOS os protocolos do chamado —
-                # o principal e os agrupados nele (o 2º sumia de "Todas" assim
-                # que chegava mensagem nova: só o resumo da última o achava).
-                AtendimentoConversa.dados["mail"]["protocolo"].astext.ilike(
-                    termo, escape="\\"
-                ),
-                AtendimentoConversa.dados["mail"]["protocolos"].astext.ilike(
-                    termo, escape="\\"
-                ),
-                AtendimentoConversa.dados["mail"]["caso_id"].astext.ilike(termo, escape="\\"),
-            )
-        )
+        consulta = consulta.where(_busca_conversa_sql(q))
     if caixa_humano:
         # A Caixa Humano (14/10/2026, o dono: "a mais recente lá em cima e
         # não embaixo"), com qualquer filtro: o turno mais novo primeiro (a

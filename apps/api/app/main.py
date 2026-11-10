@@ -21,6 +21,7 @@ from app.routers import atendimento_avaliacoes as atendimento_avaliacoes_router
 from app.routers import atendimento_brinde as atendimento_brinde_router
 from app.routers import atendimento_carrinhos as atendimento_carrinhos_router
 from app.routers import atendimento_email as atendimento_email_router
+from app.routers import atendimento_email_lixeira as atendimento_email_lixeira_router
 from app.routers import atendimento_lida as atendimento_lida_router
 from app.routers import atendimento_lojas_pessoa as atendimento_lojas_pessoa_router
 from app.routers import atendimento_painel as atendimento_painel_router
@@ -317,6 +318,7 @@ app.include_router(mail_agent_v2_router.router)
 # os cartões da conversa, as filas sem loja/sem vínculo, a prévia da resposta,
 # os chamados dos sites (RF6), as pastas e a saúde. Mesma trava da caixa.
 app.include_router(atendimento_email_router.router)
+app.include_router(atendimento_email_lixeira_router.router)
 # Comunicador (01/10/2026): o painel do pedido (estoque, margem, Observações
 # do Bling, links, AdsPower), a nota interna e a foto; e o cartão das
 # reclamações/devoluções da plataforma (só leitura). Mesmo prefixo e a mesma

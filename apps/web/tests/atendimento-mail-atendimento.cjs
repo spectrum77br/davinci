@@ -134,6 +134,66 @@ const H = requerer('~/components/AtendimentoEmailChamado.vue')
 const P = requerer('~/components/AtendimentoPlataforma.vue')
 
 async function principal() {
+  // A ação coletiva usa os filtros aplicados no servidor, nunca só os IDs
+  // da primeira página. Exclusão segue a Lixeira local e as permissões.
+  {
+    const c = { id: 'bulk-1', plataforma: 'site', canal: 'email', comprador_nome: 'Cliente', email: {}, email_lido: false, email_visto_ate: '2026-11-10T12:00:00Z' }
+    let falhar = false
+    let cancelar = false
+    let apagada = false
+    const m = montar('../components/AtendimentoMailFilas.vue', { isAdmin: true, lojas: [] }, { confirmar: () => !cancelar, respostas: {
+      '/api/atendimento/email/filas': {},
+      '/api/atendimento/email/saude': { caixas: [] },
+      '/api/atendimento/email/emails': { itens: [], proximo: null },
+      '/api/atendimento/email/contagens': { chamados: 105, aguardando: 80, chamados_por_tipo: { sac: 105 } },
+      '/api/atendimento/conversas': () => ({ itens: apagada ? [] : [c], proximo: apagada ? null : 'pagina-2' }),
+      '/api/atendimento/email/marcar-todos-lidos': () => falhar ? new Error('Rede indisponível') : { conversas: 105 },
+      '/api/atendimento/email/conversas/bulk-1/lixeira': () => { apagada = true; return { emails: 1 } },
+      '/api/mail/messages/email-1/trash': { alterado: true },
+    } })
+    await m.montar()
+    assert.doesNotMatch(await m.html(), /data-marcar-todos-email-lidos/, 'não confunde fila sem loja com conversa')
+    m.estado.fila = 'chamados'; m.estado.tipoChamado = 'sac'; m.estado.tipoEmail = 'chamado'; m.estado.busca = 'protocolo'; m.estado.buscaTexto = 'ainda não aplicado'
+    await Vue.nextTick(); await esperar()
+    assert.match(await m.html(), /data-marcar-todos-email-lidos[^>]*>[\s\S]*?Marcar todos como lidos/)
+    await Promise.all([m.estado.marcarTodosComoLidos(), m.estado.marcarTodosComoLidos()])
+    const posts = m.chamadas.filter((x) => x.metodo === 'POST')
+    assert.equal(posts.length, 1)
+    assert.deepEqual(posts[0], { url: '/api/atendimento/email/marcar-todos-lidos', metodo: 'POST', body: { fila: 'chamados', tipo_chamado: 'sac', tipo_email: 'chamado', q: 'protocolo', fechadas: false } })
+    assert.ok(m.avisos.some(([, t]) => t.includes('105 conversa(s)')))
+    assert.equal(m.estado.proximo, 'pagina-2')
+    m.estado.fila = 'todas'; m.estado.fechadas = true
+    await Vue.nextTick(); await esperar()
+    await m.estado.marcarTodosComoLidos()
+    assert.deepEqual(m.chamadas.filter((x) => x.metodo === 'POST').at(-1).body, { fila: 'todas', tipo_chamado: null, tipo_email: 'chamado', q: 'protocolo', fechadas: true })
+    m.estado.busca = 'x'.repeat(250)
+    await m.estado.marcarTodosComoLidos()
+    assert.equal(m.chamadas.filter((x) => x.metodo === 'POST').at(-1).body.q, 'x'.repeat(200), 'mesmo limite da busca na lista')
+    falhar = true
+    await m.estado.marcarTodosComoLidos()
+    assert.equal(m.estado.ocupado, null)
+    assert.ok(m.avisos.some(([tipo]) => tipo === 'erro'))
+    assert.equal(m.estado.conversas.length, 1, 'falha preserva a lista')
+    cancelar = true
+    await m.estado.excluirConversa(c)
+    assert.ok(!m.chamadas.some((x) => x.url.endsWith('/lixeira')))
+    cancelar = false
+    await m.estado.excluirConversa(c)
+    assert.deepEqual(m.chamadas.filter((x) => x.metodo === 'POST').at(-1), { url: '/api/atendimento/email/conversas/bulk-1/lixeira', metodo: 'POST', body: { ate: c.email_visto_ate } })
+    assert.equal(m.estado.conversas.length, 0, 'lista é relida depois da exclusão')
+    await m.estado.excluirEmail({ id: 'email-1' })
+    assert.equal(m.chamadas.filter((x) => x.metodo === 'POST').at(-1).url, '/api/mail/messages/email-1/trash')
+    m.reativo.isAdmin = false
+    m.reativo.podeMexer = false
+    const antes = m.chamadas.length
+    await m.estado.excluirEmail({ id: 'email-1' })
+    await m.estado.excluirConversa(c)
+    assert.equal(m.chamadas.length, antes, 'leitor não exclui nem por chamada direta')
+    m.estado.conversas = [c]
+    assert.doesNotMatch(await m.html(), /data-excluir-conversa-email/)
+    m.reativo.podeExcluir = true
+    assert.match(await m.html(), /data-excluir-conversa-email/, 'concessão explícita permite excluir sem tornar admin')
+  }
   // Marcar lido sem abrir a conversa: persistência, paginação, falha e uma
   // mensagem que chega durante o clique (não fica lida por acidente).
   {
@@ -360,7 +420,7 @@ async function principal() {
     // A página passa quem mexe, quem vê, as lojas e o "abrir a conversa" — que
     // abre a conversa de e-mail NA aba E-mail (13/10/2026), nunca na Caixa.
     const paginaTpl = sfc('../pages/atendimento.vue').descriptor.template.content
-    assert.match(paginaTpl, /<LazyAtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe && ehAdmin"\s+:can-read-queues="leFilasEmail"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:waiting-ready="emailContagensProntas"\s+:conversation-counts="emailContagens"\s+:refresh-conversation-counts="carregarContagensEmail"\s+:paused="!!emailConversa"\s+:refresh-tick="emailTique"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
+    assert.match(paginaTpl, /<LazyAtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe && ehAdmin"\s+:can-read-queues="leFilasEmail"\s+:can-manage-queues="podeExcluirNasFilasEmail"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:waiting-ready="emailContagensProntas"\s+:conversation-counts="emailContagens"\s+:refresh-conversation-counts="carregarContagensEmail"\s+:paused="!!emailConversa"\s+:refresh-tick="emailTique"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
     // O número da aba E-mail (o e-mail saiu da Caixa Humano): o que falta responder nele.
     assert.match(paginaTpl, /v-if="a\.value === 'mail' && emailEsperando"[\s\S]*?data-marca-email\s*>\{\{ emailEsperando > 99 \? '99\+' : emailEsperando \}\}<\/span>/)
     // (27/10/2026: a aba E-mail só para admin; 28/10: ou a permissão atendimento_email.)
