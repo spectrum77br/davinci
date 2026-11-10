@@ -59,6 +59,8 @@ function railContent(){
 }
 function applyBlingLayout(){
   ensureTopMenus();
+  document.getElementById('homolog-banner')?.remove();
+  if(state.homolog)document.body.insertAdjacentHTML('afterbegin',`<div id="homolog-banner" role="status">Homologação: cópia da base real desde ${esc(String(state.homolog.started_at||'').slice(0,16).replace('T',' '))} UTC. Os pedidos das lojas chegam a cada minuto; nada sai daqui para lojas, Bling ou SEFAZ.</div>`);
   document.body.dataset.screen=page;
   document.body.dataset.productEditor=String(page==='products'&&!!editingProduct);
   document.getElementById('action-rail').innerHTML=railContent();

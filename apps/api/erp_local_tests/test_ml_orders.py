@@ -270,8 +270,10 @@ def test_ml_search_index_drift_does_not_hold_the_window():
             date_created=(now - timedelta(days=3)).isoformat(),
             date_last_updated=(now - timedelta(hours=24, minutes=30)).isoformat(),
         )
-        window = {"from": int((now - timedelta(hours=24)).timestamp()),
-                  "to": int((now - timedelta(minutes=5)).timestamp())}
+        window = {
+            "from": int((now - timedelta(hours=24)).timestamp()),
+            "to": int((now - timedelta(minutes=5)).timestamp()),
+        }
 
         def handler(request):
             if request.url.path == "/users/me":

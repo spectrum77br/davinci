@@ -169,3 +169,6 @@ body[data-screen=products] #subtitle{display:none}
 .situation-clock.is-off{color:#b4bfcd;cursor:default}.store-cell small{display:block;color:var(--muted);font-size:11px}.store-cell{display:inline-flex;flex-wrap:wrap;align-items:center;gap:2px 6px}.store-warn{color:#e07b24;display:inline-flex}.filter-chip{display:inline-flex;align-items:center;gap:6px;color:#334155}.filter-chip button{background:none;border:0;color:var(--accent);cursor:pointer;font-size:15px}
 .row-menu-group{font-size:11px;color:var(--muted);padding:8px 10px 2px;text-transform:uppercase;letter-spacing:.04em}
 .lot-pill{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:10px;background:#eef3ff;color:var(--accent);font-size:11px;font-weight:600}
+
+#homolog-banner{background:#fff3cd;color:#664d03;border-bottom:1px solid #e6c65c;padding:6px 16px;font-size:13px;text-align:center}
+@media (prefers-color-scheme:dark){#homolog-banner{background:#3d3200;color:#ffe69c;border-color:#806a00}}
