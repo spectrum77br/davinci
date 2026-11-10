@@ -124,6 +124,10 @@ def _situation_letter(status):
 
 
 def _available(product):
+    # Inactive or excluded: nothing for sale, so the listings fed from here get 0.
+    # The physical balance stays in saldoFisico.
+    if product["details"]["status"] != "active":
+        return 0.0
     rows = [b for b in product["balances"] if b.get("in_total") is not False]
     if not rows or any(b["available"] is None for b in rows):
         return 0.0
@@ -1178,11 +1182,12 @@ def router(erp):
                 identifier = numeric_id(db, "product", product["sku"])
                 if wanted and str(identifier) not in wanted:
                     continue
+                active = product["details"]["status"] == "active"
                 depots = [
                     {
                         "id": numeric_id(db, "depot", b["depot"]),
                         "saldoFisico": _float(b["physical"]),
-                        "saldoVirtual": _float(b["available"]),
+                        "saldoVirtual": _float(b["available"]) if active else 0.0,
                     }
                     for b in product["balances"]
                 ]

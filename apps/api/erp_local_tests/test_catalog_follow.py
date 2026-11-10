@@ -64,3 +64,45 @@ def test_combos_stay_kits_and_a_new_combo_without_parts_is_reported(erp):
     )
     assert report["created"] == 0 and "x1.ci+a1.ci" in report["refused"]
     assert kind(erp, "demo.kit") == "kit" and kind(erp, "x1.ci+a1.ci") is None
+
+
+def status(erp, sku):
+    from app.erp_local import product_details
+
+    with erp.connection() as db:
+        return product_details.details(db, sku)["status"]
+
+
+def test_situation_follows_bling_and_listings_get_zero(erp):
+    from app.erp_local.channels import preview_quantity
+
+    link(erp, "demo.aparelho", "100")
+    excluded = [row("100", "demo.aparelho", situacao="E")]
+    assert catalog_follow.follow_status(erp, excluded) == {"changed": 1, "refused": {}}
+    assert status(erp, "demo.aparelho") == "inactive"
+    with erp.connection() as db:
+        assert preview_quantity(erp, db, "demo.aparelho", "geral") == ("0", "product_inactive")
+        origin = json.loads(
+            db.execute("SELECT data FROM catalog_origin WHERE sku='demo.aparelho'").fetchone()[0]
+        )
+    assert origin["source_status"] == "E" and origin["sellable"] is False
+    assert catalog_follow.follow_status(erp, excluded)["changed"] == 0
+    # A duplicate active row in DaVinci keeps it active; Bling reactivating brings it back.
+    back = [row("100", "demo.aparelho", situacao="I"), row("100", "demo.aparelho")]
+    back[1]["updated_at"] = "2026-11-10T09:00:00+00:00"
+    assert catalog_follow.follow_status(erp, back)["changed"] == 1
+    assert status(erp, "demo.aparelho") == "active"
+
+
+def test_situation_stops_once_a_store_is_switched(erp):
+    link(erp, "demo.aparelho", "100")
+    with erp.connection() as db:
+        columns = [r[1] for r in db.execute("PRAGMA table_info(ingest_accounts)")]
+        values = {"channel": "ml", "store": "c", "enabled": 1, "authority": "own", "failures": 0}
+        db.execute(
+            f"INSERT INTO ingest_accounts({','.join(columns)}) "  # noqa: S608
+            f"VALUES ({','.join('?' * len(columns))})",
+            [values.get(c, "2026-11-10") for c in columns],
+        )
+    report = catalog_follow.follow_status(erp, [row("100", "demo.aparelho", situacao="E")])
+    assert report == {"state": "stopped"} and status(erp, "demo.aparelho") == "active"

@@ -115,3 +115,20 @@ def test_run_reads_only_and_writes_nothing(erp):
     assert preview.run(erp, reader, OFF)["iguais"] == 1
     with erp.connection() as db:
         assert db.execute("SELECT count(*) FROM events").fetchone()[0] == before
+
+
+def test_inactive_product_sends_zero(erp):
+    from app.erp_local import catalog_follow
+
+    with erp.connection() as db:
+        db.execute(
+            "INSERT INTO catalog_origin VALUES (?,?)",
+            ("demo.fone", json.dumps({"bling_product_id": "55", "stock_state": "known"})),
+        )
+    catalog_follow.follow_status(erp, [{"bling_product_id": "55", "situacao": "E"}])
+    links = [link("demo.fone", 5, situation="E"), link("demo.fone", 0, situation="E")]
+    with erp.connection() as db:
+        result = preview.compare(db, links, [], OFF)
+    assert result["iguais"] == 1
+    assert result["diferencas"][0]["erp_mandaria"] == 0
+    assert result["diferencas"][0]["motivo"] == preview.REASONS["inativo"]

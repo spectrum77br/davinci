@@ -477,7 +477,7 @@ class LocalERP:
 
             return bling_mirror.apply_command(self, db, key, p)
 
-        if kind == "catalog.follow.add":
+        if kind in {"catalog.follow.add", "catalog.follow.status"}:
             from app.erp_local import catalog_follow
 
             return catalog_follow.apply(self, db, key, kind, p)

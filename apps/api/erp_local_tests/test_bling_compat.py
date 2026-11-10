@@ -471,3 +471,22 @@ def test_real_catalog_shape_is_covered_by_the_compat_detail(erp, client):
         "descricaoCompletaArmamento",
         "grupoProduto",
     }
+
+
+def test_inactive_product_offers_nothing_but_keeps_its_physical_balance(erp, client):
+    from app.erp_local import catalog_follow
+
+    with erp.connection() as db:
+        db.execute(
+            "INSERT OR REPLACE INTO catalog_origin VALUES (?,?)",
+            ("demo.aparelho", json.dumps({"bling_product_id": "77", "stock_state": "known"})),
+        )
+    catalog_follow.follow_status(erp, [{"bling_product_id": "77", "situacao": "I"}])
+    with erp.connection() as db:
+        from app.erp_local.bling_compat import numeric_id
+
+        part = numeric_id(db, "product", "demo.aparelho")
+    response = go(client._request("GET", "/estoques/saldos", params=[("idsProdutos[]", str(part))]))
+    row = response.json()["data"][0]
+    assert row["saldoVirtualTotal"] == 0.0 and row["depositos"][0]["saldoVirtual"] == 0.0
+    assert row["saldoFisicoTotal"] == 8.0

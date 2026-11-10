@@ -35,6 +35,7 @@ REASONS = {
     "fora_do_erp": "Produto não está no ERP",
     "fora_do_erp_inativo": "Produto inativo ou excluído no Bling, fora do ERP",
     "saldo_desconhecido": "ERP ainda não sabe o saldo",
+    "inativo": "Produto inativo no ERP: anúncio vai a 0",
     "kit": "Kit: saldo calculado pelas peças diferente",
     "familia": "Soma da família diferente",
     "simples": "Saldo do produto diferente",
@@ -172,11 +173,15 @@ def compare(db, links, davinci_products, family):
                 ("fora_do_erp" if link.get("situation") == "A" else "fora_do_erp_inativo"),
                 None,
             )
+        elif not active[erp_sku]:
+            # Inactive or excluded here: the listing gets 0 (channels.preview_quantity).
+            erp = 0
+            reason = "igual" if today == 0 else "inativo"
         elif available.get(erp_sku) is None:
             reason, erp = "saldo_desconhecido", None
         else:
             own = _int(available[erp_sku])
-            erp = published(erp_sku, own, active[erp_sku], erp_stock, family)
+            erp = published(erp_sku, own, True, erp_stock, family)
             if erp == today:
                 reason = "igual"
             elif max(0, own) != max(0, _int(link.get("product_stock"))):

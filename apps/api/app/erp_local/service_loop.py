@@ -101,6 +101,10 @@ def main():
                         erp, store.all_rows("products"), store.all_rows("components")
                     ),
                 )
+                log.info(
+                    "situação do cadastro %s",
+                    catalog_follow.follow_status(erp, store.all_rows("products")),
+                )
             except ERPError as error:
                 log.warning("referência não atualizada: %s", error.code)
         rounds += 1

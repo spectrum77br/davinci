@@ -71,7 +71,7 @@ def test_inactivation_blocks_new_sales_without_changing_existing_reservations(er
     with pytest.raises(ERPError, match="inativo"):
         order(erp, external="NEW", sku="demo.aparelho")
     with erp.connection() as db:
-        assert preview_quantity(erp, db, "demo.aparelho", "geral") == (None, "product_inactive")
+        assert preview_quantity(erp, db, "demo.aparelho", "geral") == ("0", "product_inactive")
     run(erp, "order.cancel", {"id": o["id"]})
     update(erp, version=1, status="active")
     assert order(erp, external="NEW", sku="demo.aparelho")["id"]

@@ -77,7 +77,8 @@ def preview_quantity(erp, db, sku, depot):
     if settings["status"] != "active" or settings["purpose"] == "quarantine":
         return None, "depot_unavailable"
     if details(db, sku)["status"] != "active":
-        return None, "product_inactive"
+        # An inactive or excluded product promises nothing: its listings go to 0.
+        return "0", "product_inactive"
     product = erp.product(db, sku)
     if product["kind"] == "service":
         return None, "product_service"
