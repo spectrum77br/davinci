@@ -93,3 +93,55 @@ def test_a_sale_the_store_has_not_released_has_no_label_yet(erp, homolog, monkey
         text = would.listing(db)[0]["detail"]["would"]
     assert text.startswith("Não pediria etiqueta: a loja ainda não liberou o envio")
     assert "UNPAID" in text
+
+
+def test_homologation_adopts_a_company_without_technical_and_the_note_omits_it(erp, homolog):
+    from app.erp_local import multi_company, nfe_xml
+
+    with erp.connection() as db:
+        db.executescript(multi_company.SCHEMA)
+    candidate = {
+        "cnpj": "11222333000181",
+        "name": "Empresa da loja",
+        "fantasy": "",
+        "ie": "123456789012",
+        "crt": "1",
+        "address": {
+            "street": "Rua A",
+            "number": "1",
+            "complement": "",
+            "district": "Centro",
+            "city_code": "3550308",
+            "city": "São Paulo",
+            "uf": "SP",
+            "zip": "01001000",
+            "phone": "",
+        },
+        "series": 2,
+        "last_number": 41,
+        "notes_30_days": 3,
+        "last_note_on": "2026-11-10",
+    }
+    erp.command("cand", "fiscal.candidates.load", {"rows": [candidate]})
+    erp.command("adopt", "fiscal.company.adopt", {"cnpj": "11222333000181"})
+    with erp.connection() as db:
+        company = db.execute("SELECT data FROM fiscal_companies").fetchone()[0]
+    assert '"technical":{}' in company and '"next_number":42' in company
+    from erp_local_tests.test_nfe import spec_for
+
+    spec = {**spec_for(), "technical": {}}
+    assert "infRespTec" not in nfe_xml.build(spec)["xml"]
+    assert "infRespTec" in nfe_xml.build(spec_for())["xml"]
+
+
+def test_outside_homologation_the_technical_contact_is_still_required(erp, monkeypatch):
+    from app.erp_local import multi_company
+
+    monkeypatch.delenv("ERP_HOMOLOG", raising=False)
+    with erp.connection() as db:
+        db.executescript(multi_company.SCHEMA)
+        db.execute(
+            "INSERT INTO fiscal_company_candidates VALUES ('11222333000181','{}','2026-11-10')"
+        )
+    with pytest.raises(ERPError, match="responsável técnico"):
+        erp.command("adopt", "fiscal.company.adopt", {"cnpj": "11222333000181"})

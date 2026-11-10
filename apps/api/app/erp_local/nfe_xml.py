@@ -344,12 +344,17 @@ def build(spec):
             else ""
         )
         + (f"<infAdic>{_tag('infCpl', spec['notes'])}</infAdic>" if spec.get("notes") else "")
-        + "<infRespTec>"
-        + _tag("CNPJ", technical["cnpj"])
-        + _tag("xContato", technical["contact"])
-        + _tag("email", technical["email"])
-        + _tag("fone", technical["phone"])
-        + "</infRespTec>"
+        + (
+            "<infRespTec>"
+            + _tag("CNPJ", technical["cnpj"])
+            + _tag("xContato", technical["contact"])
+            + _tag("email", technical["email"])
+            + _tag("fone", technical["phone"])
+            + "</infRespTec>"
+            # Empty only in homologation, where the company may be adopted before that choice.
+            if technical
+            else ""
+        )
     )
     xml = f'<NFe xmlns="{NFE_NS}"><infNFe versao="4.00" Id="NFe{key}">{inf}</infNFe></NFe>'
     return {"xml": xml, "key": key, "totals": {k: str(v) for k, v in sums.items()}}

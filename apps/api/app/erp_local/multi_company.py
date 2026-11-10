@@ -102,8 +102,10 @@ def _adopt(erp, db, p):
     ).fetchone()
     if not row:
         raise ERPError("fiscal_candidate", "Empresa não encontrada nas notas lidas.", 404)
+    from app.erp_local import would
+
     technical = db.execute("SELECT data FROM fiscal_technical WHERE id=1").fetchone()
-    if not technical:
+    if not technical and not would.active():
         raise ERPError("fiscal_technical", "Informe antes o responsável técnico da emissão.", 409)
     candidate = json.loads(row["data"])
     existing = _company_id(db, candidate["cnpj"])
@@ -115,7 +117,8 @@ def _adopt(erp, db, p):
                 for k in ("cnpj", "name", "fantasy", "ie", "crt", "address", "series")
             },
             "next_number": next_number,
-            "technical": json.loads(technical["data"]),
+            # Homologation only: the owner still has to choose who answers for the software.
+            "technical": json.loads(technical["data"]) if technical else {},
         }
     }
     if existing:

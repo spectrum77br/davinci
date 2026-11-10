@@ -108,6 +108,10 @@ def _company_data(raw):
     if type(data["next_number"]) is not int or not 1 <= data["next_number"] <= 999999999:
         raise ERPError("fiscal_company_number", "Próximo número fora do intervalo aceito.")
     technical = data["technical"]
+    from app.erp_local import would
+
+    if not technical and would.active():
+        return data
     if set(technical) != {"cnpj", "contact", "email", "phone"} or not cnpj_rules.is_valid(
         _digits(technical.get("cnpj"))
     ):

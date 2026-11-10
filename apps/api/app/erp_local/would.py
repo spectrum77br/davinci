@@ -159,6 +159,8 @@ def invoice_plan(db, identifier):
             f"enviaria a nota {row['number']} (série {row['series']}) à SEFAZ de {uf} "
             "em produção. Depois guardaria o protocolo e mandaria a nota à loja."
         )
+    if not company.get("technical") and row["status"] in {"draft", "sending"}:
+        would += " Antes, faltaria informar o responsável técnico da emissão (decisão pendente)."
     return {
         "number": row["number"],
         "series": row["series"],
