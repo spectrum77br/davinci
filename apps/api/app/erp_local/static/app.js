@@ -157,7 +157,10 @@ async function flowAction(action,payload={}){
 
 function render() {
   const [title,sub]=titles[page];
-  document.getElementById('environment').textContent=page==='reference'?'REFERÊNCIA REAL · Somente leitura · Bling segue operando':state.catalog_import?'NÚCLEO PRÓPRIO · Carga inicial real · Operações locais sem envio às lojas':'SIMULAÇÃO LOCAL · Dados fictícios · Nenhuma loja conectada';
+  const homologSince=state.homolog?new Date(state.homolog.started_at).toLocaleString('pt-BR',{dateStyle:'short',timeStyle:'short'}):'';
+  document.getElementById('environment').classList.toggle('homolog',!!state.homolog);
+  for(const [id,text] of [['foot-title',state.homolog?'Homologação':'Banco local separado'],['foot-note',state.homolog?'Pedidos reais a cada minuto; nada sai daqui':'Testes sem movimentar as lojas']]){const el=document.getElementById(id);if(el)el.textContent=text;}
+  document.getElementById('environment').textContent=state.homolog?`HOMOLOGAÇÃO · Cópia da base real desde ${homologSince} · Pedidos das lojas chegam a cada minuto · Nada sai para lojas, Bling ou SEFAZ`:page==='reference'?'REFERÊNCIA REAL · Somente leitura · Bling segue operando':state.catalog_import?'NÚCLEO PRÓPRIO · Carga inicial real · Operações locais sem envio às lojas':'SIMULAÇÃO LOCAL · Dados fictícios · Nenhuma loja conectada';
   document.getElementById('title').textContent=title;
   document.getElementById('subtitle').textContent=sub;
   document.querySelectorAll('nav [data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));

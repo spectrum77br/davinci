@@ -170,5 +170,4 @@ body[data-screen=products] #subtitle{display:none}
 .row-menu-group{font-size:11px;color:var(--muted);padding:8px 10px 2px;text-transform:uppercase;letter-spacing:.04em}
 .lot-pill{display:inline-block;margin-left:6px;padding:1px 6px;border-radius:10px;background:#eef3ff;color:var(--accent);font-size:11px;font-weight:600}
 
-#homolog-banner{background:#fff3cd;color:#664d03;border-bottom:1px solid #e6c65c;padding:6px 16px;font-size:13px;text-align:center}
-@media (prefers-color-scheme:dark){#homolog-banner{background:#3d3200;color:#ffe69c;border-color:#806a00}}
+.environment.homolog{background:#fff3cd;color:#664d03;border-bottom-color:#e6c65c;font-weight:600}

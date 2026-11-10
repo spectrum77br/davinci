@@ -1326,3 +1326,12 @@ test('accounts filter by financial account and change categories of the selected
   await new Promise(r=>setImmediate(r));
   assert.deepEqual(requests.at(-1).payload,{account_ids:['a1'],category_id:'k1'});
 });
+
+test('homologation shows in the status strip and the sidebar, without a block that pushes the layout',async()=>{
+  const {document:d}=await setup({homolog:{started_at:'2026-11-10T18:13:20+00:00'}});
+  const env=d.getElementById('environment');
+  assert.ok(env.classList.contains('homolog'));
+  assert.match(env.textContent,/^HOMOLOGAÇÃO · Cópia da base real desde/);
+  assert.equal(d.getElementById('foot-title').textContent,'Homologação');
+  assert.equal(d.body.firstElementChild.tagName,'ASIDE');
+});
