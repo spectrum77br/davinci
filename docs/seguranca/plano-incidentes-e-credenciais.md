@@ -50,5 +50,5 @@ Rascunho de 10/11/2026 para aprovação do Eduardo. Vale para o DaVinci, o ERP p
 ## 3. Pendências para a Amazon
 - Cópias cifradas fora do servidor, com teste de restauração (`scripts/backup-offsite.sh`, aguardando o destino).
 - Alerta de atividade suspeita: SSH novo, muitas falhas de login, fail2ban e acessos fora do normal **[a fazer]**.
-- Verificação de dependências (Python e Node) com prazo de correção: crítica em 7 dias, alta em 30 **[a fazer]**.
+- Verificação de dependências: `scripts/security-scan.sh` (Python da api/ERP com pip-audit e Node do site com pnpm audit), toda segunda-feira, com o resultado em `docs/seguranca/varreduras/`. Prazo de correção: crítica em 7 dias e alta em 30. Primeira varredura em 10/11: 9 bibliotecas Python com falha (todas com correção disponível) e 121 falhas no site (7 críticas e 56 altas). A correção ainda não foi feita **[a fazer]**.
 - FileVault no Mac mini e os itens [a fazer] acima.
