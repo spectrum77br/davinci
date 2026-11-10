@@ -37,7 +37,8 @@ type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: 
 // here (site tickets, waiting for a reply) — only those. `stores` = the stores
 // of the /atendimento summary, to pick one for an email without store.
 // `waiting` (13/10/2026) = email conversations waiting for a reply (GET
-// /api/atendimento/email/contagens, read by the page): the number on "Filas".
+// /api/atendimento/email/contagens, read by the page): initial section only.
+// The badge uses conversationCounts.nao_lidas; reading never closes a ticket.
 // `paused` = the page shows an email conversation over this component (kept
 // mounted, hidden): no background refresh while nobody sees it.
 // `refreshTick` = goes up on every 30 s poll of the page (the number of the
@@ -47,6 +48,7 @@ type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: 
 // again every time the E-mail tab opens.
 type Section = 'mailboxes' | 'queues' | 'admin'
 const props = withDefaults(defineProps<{ isAdmin: boolean; canOperate?: boolean; canReadQueues?: boolean; canManageQueues?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; conversationCounts?: ContagensDeConversa | null; refreshConversationCounts?: () => Promise<void>; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
+const unreadCount = computed(() => props.conversationCounts?.nao_lidas?.total || 0)
 const emit = defineEmits<{ (e: 'openConversation', id: string): void; (e: 'update:rememberedSection', value: Section): void }>()
 const { api, url } = useApi()
 const mailboxes = ref<Mailbox[]>([])
@@ -785,12 +787,12 @@ onBeforeUnmount(() => {
       >
         Filas
         <span
-          v-if="waiting"
+          v-if="unreadCount"
           class="ml-1 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white tabular-nums"
-          :title="`${waiting} e-mail(s) esperando resposta`"
-          :aria-label="`${waiting} e-mail(s) esperando resposta`"
-          data-mail-waiting
-        >{{ waiting > 99 ? '99+' : waiting }}</span>
+          :title="`${unreadCount} conversa(s) de e-mail não lida(s)`"
+          :aria-label="`${unreadCount} conversa(s) de e-mail não lida(s)`"
+          data-mail-unread
+        >{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
       </button>
       <button v-if="canAdminister" type="button" role="tab" :aria-selected="section === 'admin'" :disabled="sending || deleting || !!resolving" class="-mb-px shrink-0 border-b-2 px-3 py-1.5 text-sm" :class="section === 'admin' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" data-mail-admin-tab @click="chooseSection('admin')">Administração</button>
     </div>

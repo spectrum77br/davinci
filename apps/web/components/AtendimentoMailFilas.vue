@@ -114,7 +114,8 @@ export const TIPOS_CHAMADO: { value: string; label: string; hint: string }[] = [
 // ampliável de e-mails da barra de lojas da Caixa (AtendimentoLojas).
 // `grupos_na_barra`: as pastas que a barra mostra embaixo de cada loja (a
 // escolha do dono, na API) com o status de cada uma na ponte; `dias`: a janela.
-export type ContagensDeConversa = { aguardando: number; chamados: number; chamados_por_tipo: Record<string, number>; por_tipo_email?: Record<string, number>; por_loja?: EmailsDaLoja[]; grupos_na_barra?: GrupoDaBarra[]; sites_na_barra?: SiteDaBarra[]; dias?: number }
+export type NaoLidasDeEmail = { total: number; aguardando: number; chamados: number; chamados_por_tipo: Record<string, number>; por_tipo_email: Record<string, number> }
+export type ContagensDeConversa = { aguardando: number; chamados: number; chamados_por_tipo: Record<string, number>; por_tipo_email?: Record<string, number>; nao_lidas?: NaoLidasDeEmail; por_loja?: EmailsDaLoja[]; grupos_na_barra?: GrupoDaBarra[]; sites_na_barra?: SiteDaBarra[]; dias?: number }
 export function juntarContagens(filas: Record<string, number> | null, conversas: ContagensDeConversa | null): Record<string, number> {
   return { ...(filas || {}), ...(conversas ? { chamados: conversas.chamados, aguardando: conversas.aguardando } : {}) }
 }
@@ -320,6 +321,15 @@ const contagensConversaLocal = ref<ContagensDeConversa | null>(null)
 const contagensCompartilhadas = computed(() => !!props.atualizarContagensDeConversa)
 const contagensConversa = computed(() => contagensCompartilhadas.value ? props.contagensDeConversa ?? null : contagensConversaLocal.value)
 const contagens = computed(() => juntarContagens(contagensFilas.value, contagensConversa.value))
+// Totais mantêm o estado da fila; o aviso conta só o que ainda não foi lido.
+// Durante a publicação, não substitui não lidas pelo total da API antiga.
+const naoLidas = computed(() => contagensConversa.value?.nao_lidas)
+const notificacoes = computed<Record<string, number>>(() => ({
+  ...(contagensFilas.value || {}),
+  chamados: naoLidas.value?.chamados || 0,
+  aguardando: naoLidas.value?.aguardando || 0,
+  todas: naoLidas.value?.total || 0,
+}))
 // As filas de conversa (chamados dos sites, falta responder): linhas da lista.
 const conversas = ref<ConversaResumo[]>([])
 // O chip do tipo do chamado ('' = todos) e a busca das filas de conversa
@@ -788,7 +798,7 @@ const curto = (p: string) => plataformaInfo(p).curto
         @click="verFila(f.value)"
       >
         {{ f.label }}
-        <span v-if="contagens[f.value]" class="rounded-full bg-background px-1.5 text-[10px] tabular-nums ring-1 ring-border">{{ contagens[f.value] }}</span>
+        <span v-if="notificacoes[f.value]" class="rounded-full bg-background px-1.5 text-[10px] tabular-nums ring-1 ring-border" :title="FILAS_DE_CONVERSA.has(f.value) ? `${notificacoes[f.value]} conversa(s) de e-mail não lida(s)` : `${notificacoes[f.value]} e-mail(s) nesta fila`" :data-notificacao-fila="f.value">{{ notificacoes[f.value] }}</span>
       </button>
       <button
         v-if="le"
@@ -832,7 +842,7 @@ const curto = (p: string) => plataformaInfo(p).curto
       <div class="flex flex-wrap items-center gap-1 text-[11px]" role="group" aria-label="tipo de e-mail" data-chips-tipo-email>
         <button type="button" class="rounded-full border px-2 py-0.5" :class="!tipoEmail ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted'" :aria-pressed="!tipoEmail" data-tipo-email="" @click="escolherTipoEmail('')">Todos</button>
         <button v-for="t in TIPOS_EMAIL" :key="t.value" type="button" class="rounded-full border px-2 py-0.5" :class="tipoEmail === t.value ? 'border-primary bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted'" :aria-pressed="tipoEmail === t.value" :data-tipo-email="t.value" @click="escolherTipoEmail(t.value)">
-          {{ t.label }}<span v-if="fila === 'todas' && !fechadas && contagensConversa?.por_tipo_email" class="ml-1 tabular-nums">{{ contagensConversa.por_tipo_email[t.value] || 0 }}</span>
+          {{ t.label }}<span v-if="fila === 'todas' && !fechadas && naoLidas?.por_tipo_email[t.value]" class="ml-1 tabular-nums" :title="`${naoLidas.por_tipo_email[t.value]} conversa(s) de e-mail não lida(s)`">{{ naoLidas.por_tipo_email[t.value] }}</span>
         </button>
       </div>
       <p class="text-[11px] text-muted-foreground">Nas pastas criadas, o tipo vem da categoria da pasta (Pastas e regras); a Entrada segue como hoje, pelo conteúdo. Os avisos de pastas em “só contar” continuam na Central de e-mail.</p>
@@ -888,16 +898,17 @@ const curto = (p: string) => plataformaInfo(p).curto
           class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 transition-colors"
           :class="tipoChamado === t.value ? 'border-teal-600 bg-teal-500/15 text-teal-800 dark:text-teal-300' : 'text-muted-foreground hover:bg-muted'"
           :aria-pressed="tipoChamado === t.value"
-          :title="contagensConversa ? `${t.hint} — ${contagensConversa.chamados_por_tipo?.[t.value] ?? 0} aberto(s)` : t.hint"
+          :title="contagensConversa ? `${t.hint} — ${contagensConversa.chamados_por_tipo?.[t.value] ?? 0} aberto(s), ${naoLidas?.chamados_por_tipo[t.value] || 0} não lido(s)` : t.hint"
           :data-tipo-chamado="t.value"
           @click="escolherTipo(t.value)"
         >
           {{ t.label }}
           <span
-            v-if="contagensConversa"
-            class="min-w-[16px] rounded-full px-1 text-center text-[10px] font-semibold tabular-nums"
-            :class="contagensConversa.chamados_por_tipo?.[t.value] ? 'bg-teal-600 text-white' : 'bg-muted text-muted-foreground'"
-          >{{ contagensConversa.chamados_por_tipo?.[t.value] ?? 0 }}</span>
+            v-if="naoLidas?.chamados_por_tipo[t.value]"
+            class="min-w-[16px] rounded-full bg-teal-600 px-1 text-center text-[10px] font-semibold tabular-nums text-white"
+            :title="`${naoLidas.chamados_por_tipo[t.value]} chamado(s) não lido(s)`"
+            :data-notificacao-chamado="t.value"
+          >{{ naoLidas.chamados_por_tipo[t.value] }}</span>
         </button>
       </div>
       <div v-if="fila === 'todas'" class="flex flex-wrap items-center gap-1 text-[11px]" role="group" aria-label="abertas ou fechadas" data-chips-situacao>

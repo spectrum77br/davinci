@@ -46,7 +46,10 @@ async def test_marcar_lido_respeita_a_chegada_e_nao_resolve_o_chamado(db, cena, 
     assert r.json()["conversa"]["email_lido"] is True
     assert _data(r.json()["conversa"]["email_visto_ate"]) == chegada
     assert (await _linha(client, cid))["email_lido"] is True
-    assert (await client.get(f"{URL}/email/contagens")).json() == contagens
+    depois = (await client.get(f"{URL}/email/contagens")).json()
+    assert {k: v for k, v in depois.items() if k != "nao_lidas"} == {
+        k: v for k, v in contagens.items() if k != "nao_lidas"
+    }
     assert r.json()["conversa"]["aguardando_resposta"] is True
     assert r.json()["conversa"]["situacao"] == linha["situacao"]
     assert (await db.get(MailMessage, UUID(ids["sac"]))).content_enc == original

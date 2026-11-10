@@ -230,13 +230,9 @@ async function zerarNaoLidas() {
   }
 }
 
-// O número da aba E-mail (13/10/2026): o e-mail saiu da Caixa e da Caixa
-// Humano, e o que falta responder nele acende AQUI (e em E-mail › Filas) —
-// GET /api/atendimento/email/contagens, no escopo da equipe. É ajuda: sem
-// ele, a aba fica sem número. O número é o `aguardando` (o e-mail esperando
-// resposta: o chamado do site que espera já está nele — os `chamados` são os
-// ABERTOS, respondidos ou não, e não somam); quem só lê vê "Falta responder"
-// com essas mesmas conversas, do escopo dele. Relido junto com o /resumo
+// A aba E-mail avisa quantas conversas ainda não foram lidas no DaVinci.
+// `aguardando` continua indicando trabalho pendente, sem virar notificação
+// depois de marcar como lido. Relido junto com o /resumo
 // (o polling de 30 s, o "atualizar") e quando a conversa de e-mail muda.
 // Na Caixa (27/10/2026) a MESMA leitura traz também os números por loja
 // (`?por_loja=true`): o ampliável de e-mails da barra de lojas.
@@ -253,6 +249,7 @@ const emailSitesNaBarra = ref<SiteDaBarra[]>([])
 const emailDias = ref(30)
 const emailContagensProntas = ref(false)
 const emailEsperando = computed(() => emailContagens.value?.aguardando || 0)
+const emailNaoLidas = computed(() => emailContagens.value?.nao_lidas?.total || 0)
 // Sobe a cada tique do polling: as Filas da aba E-mail se releem junto com o número.
 const emailTique = ref(0)
 // A seção da aba E-mail que a pessoa escolheu nesta visita (Caixas | Filas):
@@ -735,8 +732,10 @@ function aoMudarConversaDoEmail(c: ConversaResumo) {
   }
   const antes = emailConversaLinha.value
   emailConversaLinha.value = c
-  // Respondeu, fechou, reabriu: o número da aba E-mail na hora.
-  if (antes && (!!antes.aguardando_resposta !== !!c.aguardando_resposta || antes.situacao !== c.situacao)) void carregarContagensEmail()
+  // A abertura marca visto; leitura, nova chegada e mudanças no atendimento
+  // atualizam o aviso sem esperar o próximo polling.
+  if (!antes || !!antes.aguardando_resposta !== !!c.aguardando_resposta || antes.situacao !== c.situacao
+    || antes.visto_em !== c.visto_em || antes.email_lido !== c.email_lido || antes.email_visto_ate !== c.email_visto_ate) void carregarContagensEmail()
 }
 // Vinculou ao pedido: as mensagens podem ter ido para a conversa de e-mail do
 // pedido (outra); na mesma, relê do zero.
@@ -1090,7 +1089,7 @@ const marcasNaBarra = computed(() => {
   const m: Partial<Record<Aba, { n: number; titulo: string }>> = {}
   if (naoLidasDuoke.value) m.caixa = { n: naoLidasDuoke.value, titulo: `${naoLidasDuoke.value} mensagem(ns) não lida(s): o chat de todas as plataformas` }
   if (resumo.value?.humano) m.humano = { n: resumo.value.humano, titulo: `${resumo.value.humano} conversa(s) esperando uma pessoa: falta responder e a IA não pode` }
-  if (emailEsperando.value) m.mail = { n: emailEsperando.value, titulo: `${emailEsperando.value} e-mail(s) esperando resposta` }
+  if (emailNaoLidas.value) m.mail = { n: emailNaoLidas.value, titulo: `${emailNaoLidas.value} conversa(s) de e-mail não lida(s)` }
   if (semLer.value.length) m.lojas = { n: semLer.value.length, titulo: tituloLeituraParada(semLer.value) }
   return m
 })
@@ -1319,14 +1318,14 @@ onBeforeUnmount(() => {
           :aria-label="tituloLeituraParada(semLer)"
           data-marca-leitura-parada
         >{{ semLer.length }}</span>
-        <!-- E-mail: quantos e-mails esperam resposta (o e-mail saiu da Caixa Humano, 13/10/2026) -->
+        <!-- E-mail: não lidas, independentemente de ainda faltar responder. -->
         <span
-          v-if="a.value === 'mail' && emailEsperando"
+          v-if="a.value === 'mail' && emailNaoLidas"
           class="ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white tabular-nums"
-          :title="`${emailEsperando} e-mail(s) esperando resposta: em E-mail › Filas › Falta responder`"
-          :aria-label="`${emailEsperando} e-mail(s) esperando resposta`"
+          :title="`${emailNaoLidas} conversa(s) de e-mail não lida(s): em E-mail › Filas`"
+          :aria-label="`${emailNaoLidas} conversa(s) de e-mail não lida(s)`"
           data-marca-email
-        >{{ emailEsperando > 99 ? '99+' : emailEsperando }}</span>
+        >{{ emailNaoLidas > 99 ? '99+' : emailNaoLidas }}</span>
       </button>
     </div>
 

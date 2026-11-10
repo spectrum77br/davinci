@@ -134,6 +134,78 @@ const H = requerer('~/components/AtendimentoEmailChamado.vue')
 const P = requerer('~/components/AtendimentoPlataforma.vue')
 
 async function principal() {
+  // Ler apaga os avisos sem fechar chamados ou zerar trabalho pendente.
+  {
+    let n = 104, lido = false, refreshes = 0
+    let marco = '2026-11-10T12:00:00Z'
+    const counts = () => ({ chamados: 104, aguardando: 80, chamados_por_tipo: { sac: 104 }, por_tipo_email: { chamado: 104 }, nao_lidas: { total: n, chamados: n, aguardando: Math.min(80, n), chamados_por_tipo: { sac: n }, por_tipo_email: { chamado: n } } })
+    const emailContagens = Vue.ref(counts())
+    const pagina = sfc('../pages/atendimento.vue')
+    const js = trecho(pagina.descriptor.scriptSetup.content, 'const emailNaoLidas = computed', '// Sobe a cada tique') + '\nreturn emailNaoLidas'
+    const emailNaoLidas = new Function('computed', 'emailContagens', js)(Vue.computed, emailContagens)
+    const tpl = pagina.descriptor.template.content
+    const pos = tpl.indexOf('data-marca-email')
+    const fragmento = tpl.slice(tpl.lastIndexOf('<span', pos), tpl.indexOf('</span>', pos) + 7)
+    const compiled = compileTemplate({ source: fragmento, filename: 'badge-email.vue', id: 'badge-email' })
+    assert.deepEqual(compiled.errors, [])
+    const mod = { exports: {} }
+    new Function('require', 'module', 'exports', transpile(compiled.code))(requerer, mod, mod.exports)
+    const topo = () => renderToString(Vue.createSSRApp({ render: mod.exports.render, setup: () => ({ a: { value: 'mail' }, emailNaoLidas }) }))
+    const central = montar('../components/AtendimentoMail.vue', { isAdmin: false, canView: true, stores: [], waiting: 80, conversationCounts: counts() }, { filhos: { AtendimentoMailFilas: { render: () => Vue.h('div') } } })
+    const linha = () => ({ id: 'naolida-1', plataforma: 'site', canal: 'email', situacao: 'aberta', comprador_nome: 'Cliente', aguardando_resposta: true, email: { tipo_email: 'chamado', tipo: 'sac', tipo_rotulo: 'SAC' }, email_visto_ate: marco, email_lido: lido })
+    const refresh = async () => {
+      refreshes++
+      emailContagens.value = counts()
+      central.reativo.conversationCounts = counts()
+      filas.reativo.contagensDeConversa = counts()
+    }
+    const filas = montar('../components/AtendimentoMailFilas.vue', { isAdmin: false, podeMexer: false, lojas: [], contagensDeConversa: counts(), atualizarContagensDeConversa: refresh, tique: 0 }, { respostas: {
+      '/api/atendimento/conversas/naolida-1/visto': () => { n = 0; lido = true; return { conversa: linha() } },
+      '/api/atendimento/conversas': () => ({ itens: [linha()], proximo: null }),
+      '/api/atendimento/email/marcar-todos-lidos': () => { n = 0; lido = true; return { conversas: 104 } },
+    } })
+    await filas.montar()
+    assert.equal(refreshes, 0)
+    assert.match(await topo(), /data-marca-email[^>]*>99\+<\/span>/)
+    assert.match(await central.html(), /data-mail-unread[^>]*>99\+<\/span>/)
+    let html = await filas.html()
+    assert.match(html, /data-notificacao-fila="chamados"[^>]*>104<\/span>/)
+    assert.match(html, /data-notificacao-chamado="sac"[^>]*>104<\/span>/)
+    await filas.estado.marcarTodosComoLidos()
+    assert.equal(refreshes, 1, 'ação atualiza a resposta compartilhada uma vez')
+    assert.equal(emailNaoLidas.value, 0)
+    assert.doesNotMatch(await topo(), /data-marca-email/)
+    assert.doesNotMatch(await central.html(), /data-mail-unread/)
+    html = await filas.html()
+    assert.doesNotMatch(html, /data-notificacao-fila="(?:chamados|aguardando|todas)"|data-notificacao-chamado="sac"/)
+    assert.match(html, /104 aberto\(s\), 0 não lido\(s\)/)
+    assert.equal(filas.estado.conversas.length, 1)
+    assert.equal(filas.estado.conversas[0].situacao, 'aberta')
+    assert.equal(filas.estado.conversas[0].aguardando_resposta, true)
+    assert.equal(filas.estado.contagens.aguardando, 80)
+    assert.equal(filas.estado.contagens.chamados, 104)
+    assert.equal(central.estado.section, 'queues')
+    filas.estado.fila = 'todas'; await Vue.nextTick(); await esperar()
+    assert.doesNotMatch(await filas.html(), /data-tipo-email="chamado"[^>]*>Chamados<span/)
+    n = 1; lido = false; marco = '2026-11-10T12:05:00Z'
+    await refresh(); filas.reativo.tique++
+    await Vue.nextTick(); await esperar()
+    assert.equal(emailNaoLidas.value, 1)
+    assert.match(await topo(), /data-marca-email[^>]*>1<\/span>/)
+    assert.match(await central.html(), /data-mail-unread[^>]*>1<\/span>/)
+    html = await filas.html()
+    assert.match(html, /data-notificacao-fila="todas"[^>]*>1<\/span>/)
+    assert.match(html, /data-tipo-email="chamado"[^>]*>Chamados<span[^>]*>1<\/span>/)
+    assert.equal(filas.estado.conversas[0].email_lido, false)
+    await filas.estado.marcarComoLido(filas.estado.conversas[0])
+    assert.equal(emailNaoLidas.value, 0, 'leitura individual também atualiza avisos')
+    assert.equal(filas.estado.contagens.aguardando, 80)
+    central.reativo.conversationCounts = { chamados: 104, aguardando: 80, chamados_por_tipo: { sac: 104 } }
+    filas.reativo.contagensDeConversa = central.reativo.conversationCounts
+    assert.doesNotMatch(await central.html(), /data-mail-unread/, 'API antiga não transforma total em não lidas')
+    assert.equal(filas.estado.notificacoes.chamados, 0)
+    assert.equal(filas.estado.contagens.chamados, 104)
+  }
   // Seleção explícita de toda a fila: inclui páginas não carregadas e
   // preserva o snapshot selecionado quando chegam mensagens posteriores.
   {
@@ -559,7 +631,7 @@ async function principal() {
     const paginaTpl = sfc('../pages/atendimento.vue').descriptor.template.content
     assert.match(paginaTpl, /<LazyAtendimentoMail\s+v-show="!emailConversa"\s+:is-admin="isAdmin"\s+:can-operate="mexe && ehAdmin"\s+:can-read-queues="leFilasEmail"\s+:can-manage-queues="podeExcluirNasFilasEmail"\s+:can-view="canSugerir"\s+:stores="resumo\?\.lojas \|\| \[\]"\s+:waiting="emailEsperando"\s+:waiting-ready="emailContagensProntas"\s+:conversation-counts="emailContagens"\s+:refresh-conversation-counts="carregarContagensEmail"\s+:paused="!!emailConversa"\s+:refresh-tick="emailTique"\s+v-model:remembered-section="emailSecao"\s+@open-conversation="abrirConversaDoEmail"\s+\/>/)
     // O número da aba E-mail (o e-mail saiu da Caixa Humano): o que falta responder nele.
-    assert.match(paginaTpl, /v-if="a\.value === 'mail' && emailEsperando"[\s\S]*?data-marca-email\s*>\{\{ emailEsperando > 99 \? '99\+' : emailEsperando \}\}<\/span>/)
+    assert.match(paginaTpl, /v-if="a\.value === 'mail' && emailNaoLidas"[\s\S]*?data-marca-email\s*>\{\{ emailNaoLidas > 99 \? '99\+' : emailNaoLidas \}\}<\/span>/)
     // (27/10/2026: a aba E-mail só para admin; 28/10: ou a permissão atendimento_email.)
     assert.match(paginaTpl, /<template v-if="aba === 'mail' && veAbaEmail">\s+<div v-if="emailConversa"[^>]*data-conversa-de-email>\s+<AtendimentoEmailConversaBarra/)
     assert.match(paginaTpl, /<AtendimentoEmailConversaBarra\s+:conversa="emailConversaLinha"\s+:pode-mexer="ehAdmin && mexe"\s+:com-chat="!!chatDeOrigem"\s+@voltar="fecharConversaDoEmail"\s+@voltar-ao-chat="voltarAoChat"\s+@vinculado="aoVincularConversaDoEmail"\s+\/>/)
@@ -591,11 +663,15 @@ async function principal() {
     // A linha que a conversa manda: a de e-mail fica (a barra lê), a de CHAT vai para a Caixa.
     f.aoMudarConversaDoEmail({ id: 'c-email', email: { protocolo: null }, aguardando_resposta: true, situacao: 'aberta' })
     assert.equal(st.emailConversaLinha.value.id, 'c-email')
-    assert.equal(st.contagensLidas, 0, 'a primeira linha: o número já é o da aba')
+    assert.equal(st.contagensLidas, 1, 'a primeira linha pode gravar visto: atualiza o aviso')
     f.aoMudarConversaDoEmail({ id: 'c-email', email: { protocolo: null }, aguardando_resposta: false, situacao: 'respondida' })
-    assert.equal(st.contagensLidas, 1, 'respondeu: o número da aba E-mail na hora')
+    assert.equal(st.contagensLidas, 2, 'respondeu: o número da aba E-mail na hora')
     f.aoMudarConversaDoEmail({ id: 'c-email', email: { protocolo: null }, aguardando_resposta: false, situacao: 'respondida' })
-    assert.equal(st.contagensLidas, 1, 'nada mudou na fila: não relê')
+    assert.equal(st.contagensLidas, 2, 'nada mudou na fila: não relê')
+    f.aoMudarConversaDoEmail({ ...st.emailConversaLinha.value, visto_em: '2026-11-10T12:00:00Z', email_lido: true })
+    assert.equal(st.contagensLidas, 3, 'leitura sem responder atualiza o aviso')
+    f.aoMudarConversaDoEmail({ ...st.emailConversaLinha.value, email_visto_ate: '2026-11-10T12:05:00Z', email_lido: false })
+    assert.equal(st.contagensLidas, 4, 'chegada nova atualiza o aviso')
     f.abrirConversaDoEmail('c-chat')
     assert.equal(st.emailConversaLinha.value, null, 'outra conversa: a linha de antes sai')
     f.aoMudarConversaDoEmail({ id: 'c-chat', email: null })
@@ -918,19 +994,19 @@ async function principal() {
     // com as de conversa só (a Filas recebe `podeMexer` falso).
     {
       const filhosLe = { ...filhos, AtendimentoMailFilas: { props: ['isAdmin', 'lojas', 'podeMexer'], setup: (p) => () => Vue.h('div', { 'data-filas-stub': '', 'data-pode-mexer': String(p.podeMexer) }) } }
-      const m = montar('../components/AtendimentoMail.vue', { isAdmin: false, canView: true, stores: [], waiting: 3 }, { respostas: { '/api/mail/mailboxes': { items: [] } }, filhos: filhosLe })
+      const m = montar('../components/AtendimentoMail.vue', { isAdmin: false, canView: true, stores: [], waiting: 3, conversationCounts: { nao_lidas: { total: 2 } } }, { respostas: { '/api/mail/mailboxes': { items: [] } }, filhos: filhosLe })
       const html = await m.html()
       assert.equal(m.estado.section, 'queues')
       assert.match(html, /data-mail-sections/)
-      // O número de "Filas": os e-mails esperando resposta (a página lê /email/contagens).
-      assert.match(html, />\s*Filas\s*<span[^>]*data-mail-waiting[^>]*>3<\/span>/)
+      // O aviso de Filas usa não lidas, separado dos 3 esperando resposta.
+      assert.match(html, />\s*Filas\s*<span[^>]*data-mail-unread[^>]*>2<\/span>/)
       assert.match(html, /data-filas-stub data-pode-mexer="false"/)
       assert.match(html, /Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail\./)
     }
     // Sem e-mail esperando: "Filas" sem número.
     {
       const m = montar('../components/AtendimentoMail.vue', { isAdmin: false, canOperate: true, stores: [], waiting: 0 }, { respostas: { '/api/mail/mailboxes': { items: [] } }, filhos })
-      assert.doesNotMatch(await m.html(), /data-mail-waiting/)
+      assert.doesNotMatch(await m.html(), /data-mail-unread/)
     }
     // Pausada (a conversa de e-mail aberta por cima, componente escondido):
     // nada se atualiza sem ninguém ver; voltou aos e-mails, atualiza na hora.
@@ -1150,7 +1226,7 @@ async function principal() {
     const email = (o = {}) => ({ protocolo: null, tipo: null, tipo_rotulo: null, marca: null, alias: null, destaque: false, ...o })
     const chamado = { id: 'cv1', plataforma: 'site', canal: 'email', conta: 'Uranyx', comprador_nome: 'Maria <b>', pedido_marketplace: null, ultima_mensagem_em: '2026-10-13T09:00:00Z', ultima_mensagem_resumo: 'Quero trocar', aguardando_resposta: true, prazo_resposta_em: null, situacao: 'aberta', email: email({ protocolo: 'US-26-0007', tipo: 'sac', tipo_rotulo: 'SAC', marca: 'Uranyx', alias: 'sac@uranyx.com.br' }) }
     const esperando = { ...chamado, id: 'cv2', plataforma: 'shopee', conta: 'Barbosa', comprador_nome: 'João', email: email({ alias: '21max@tuta.com' }) }
-    const contagens = { aguardando: 2, chamados: 1, chamados_por_tipo: { sac: 1, atacado: 0, duvidas: 0 } }
+    const contagens = { aguardando: 2, chamados: 1, chamados_por_tipo: { sac: 1, atacado: 0, duvidas: 0 }, nao_lidas: { total: 2, aguardando: 2, chamados: 1, chamados_por_tipo: { sac: 1 }, por_tipo_email: {} } }
     const respostas = {
       '/api/atendimento/email/contagens': contagens,
       '/api/atendimento/conversas?caixa=email&plataforma=site&filtro=todas&limite=50': { itens: [chamado], proximo: null },
@@ -1203,7 +1279,7 @@ async function principal() {
     await Vue.nextTick(); await esperar()
     assert.deepEqual(r.estado.conversas.map((c) => c.id), ['cv2'])
     html = await r.html()
-    assert.match(html, /data-fila="todas"[^>]*>\s*Todas as conversas\s*<\/button>/, 'sem número')
+    assert.match(html, /data-fila="todas"[^>]*>\s*Todas as conversas\s*<span[^>]*>2<\/span>/, 'aviso de não lidas')
     assert.match(html, /data-chips-situacao[\s\S]*aria-pressed="true"[^>]*data-situacao="abertas"/)
     assert.doesNotMatch(html, /data-chips-chamado/, 'o tipo do chamado é só dos chamados')
     r.estado.verFechadas(true)
@@ -1241,7 +1317,7 @@ async function principal() {
     // resposta — o número da aba sobe e o chip e a lista de "Falta responder"
     // acompanham (o e-mail saiu da Caixa, que se relê sozinha).
     {
-      let servidor = { ...contagens, aguardando: 1 }
+      let servidor = { ...contagens, aguardando: 1, nao_lidas: { ...contagens.nao_lidas, aguardando: 1 } }
       let lista = [esperando]
       let maisPaginas = false
       const URL_AG = '/api/atendimento/conversas?caixa=email&filtro=aguardando&limite=50'
@@ -1259,7 +1335,7 @@ async function principal() {
       const linhas = (h) => (h.match(/data-conversa-email="/g) || []).length
       let h = await p.html()
       assert.deepEqual([chip(h), linhas(h)], ['1', 1])
-      servidor = { ...servidor, aguardando: 2 }
+      servidor = { ...servidor, aguardando: 2, nao_lidas: { ...servidor.nao_lidas, aguardando: 2 } }
       lista = [esperando, { ...esperando, id: 'cv9', comprador_nome: 'Novo' }]
       let antes = p.chamadas.length
       p.reativo.tique = 1

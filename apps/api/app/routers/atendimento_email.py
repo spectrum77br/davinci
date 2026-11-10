@@ -1278,8 +1278,9 @@ async def contagens(
     response.headers["Cache-Control"] = "no-store"
     visao = await administracao.visao_rapida(session, user)
     await session.execute(sql_text("SET LOCAL jit = off"))
+    nao_lidas = await _contagens_nao_lidas(session, scope, visao)
     if por_loja:
-        return await _contagens_por_loja(session, user, scope, visao)
+        return {**await _contagens_por_loja(session, user, scope, visao), "nao_lidas": nao_lidas}
     chamado = and_(c.plataforma == PLATAFORMA_SITE, aberta)
     tipo = _tipo_do_chamado()
     tipo_email = _tipo_do_email_sql()
@@ -1294,11 +1295,61 @@ async def contagens(
     aguardando, chamados, *resto = (await session.execute(q)).one()
     por_tipo, por_tipo_email = resto[: len(TIPOS_CHAMADO)], resto[len(TIPOS_CHAMADO) :]
     return {
+        "nao_lidas": nao_lidas,
         "aguardando": int(aguardando or 0),
         "chamados": int(chamados or 0),
         "chamados_por_tipo": {t: int(n or 0) for t, n in zip(TIPOS_CHAMADO, por_tipo, strict=True)},
         "por_tipo_email": {
             t: int(n or 0) for t, n in zip(classificacao.TIPOS_EMAIL, por_tipo_email, strict=True)
+        },
+    }
+
+
+async def _contagens_nao_lidas(
+    session: AsyncSession, scope: TeamScope, visao: administracao.VisaoRapida
+) -> dict[str, Any]:
+    """Notificações das filas, com a mesma leitura local de `email_lido`.
+
+    O visto compara a CHEGADA mais recente, de qualquer autor, não o envio
+    nem a pendência de resposta. Sem visto é não lida, mesmo sem mensagem;
+    com visto e sem mensagens é lida. EXISTS é equivalente ao max(created_at)
+    da lista e pode parar na primeira chegada nova, usando o índice da conversa.
+    Uma consulta, sem carregar textos ou fazer consultas por item. Os totais
+    operacionais das filas continuam separados deste bloco.
+    """
+    c, m = AtendimentoConversa, AtendimentoMensagem
+    nova = exists(select(literal(1)).where(m.conversa_id == c.id, m.created_at > c.visto_em))
+    aberta = c.situacao != CONVERSA_FECHADA
+    chamado = and_(c.plataforma == PLATAFORMA_SITE, aberta)
+    tipo_chamado = _tipo_do_chamado()
+    tipo_email = _tipo_do_email_sql()
+    q = select(
+        func.count().filter(aberta),
+        func.count().filter(chamado),
+        func.count().filter(c.aguardando_resposta.is_(True)),
+        *[func.count().filter(chamado, tipo_chamado == t) for t in TIPOS_CHAMADO],
+        *[
+            func.count().filter(aberta, tipo_email == t)
+            for t in classificacao.TIPOS_EMAIL
+        ],
+    ).where(
+        separa_email.conversa_de_email_sql(), visao.filtro_conversa(),
+        or_(c.visto_em.is_(None), nova),
+    )
+    cond = _clausula_escopo(scope, c.integration_id)
+    if cond is not None:
+        q = q.where(cond)
+    total, chamados, aguardando, *resto = (await session.execute(q)).one()
+    por_chamado, por_email = resto[: len(TIPOS_CHAMADO)], resto[len(TIPOS_CHAMADO) :]
+    return {
+        "total": int(total or 0),
+        "chamados": int(chamados or 0),
+        "aguardando": int(aguardando or 0),
+        "chamados_por_tipo": {
+            t: int(n or 0) for t, n in zip(TIPOS_CHAMADO, por_chamado, strict=True)
+        },
+        "por_tipo_email": {
+            t: int(n or 0) for t, n in zip(classificacao.TIPOS_EMAIL, por_email, strict=True)
         },
     }
 
