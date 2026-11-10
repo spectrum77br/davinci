@@ -20,7 +20,8 @@ def homolog(monkeypatch):
 
 
 def test_labels_become_pages_saying_what_would_be_printed(erp, homolog, monkeypatch):
-    unit = {"261111ABC": {"261111ABC": {"items": [{"seller_sku": "mala.p", "quantity": 2}]}}}
+    order = {"status": "READY_TO_SHIP", "items": [{"seller_sku": "mala.p", "quantity": 2}]}
+    unit = {"261111ABC": {"261111ABC": order}}
     monkeypatch.setattr(native_ingest, "_units", lambda db, channel, store: unit)
     monkeypatch.setattr(store_labels, "reference", lambda db, c, s, n: "SHP-77")
     monkeypatch.setattr(
@@ -81,3 +82,14 @@ def test_sending_a_note_says_what_would_go_to_sefaz(tmp_path, homolog, monkeypat
     }
     state = client.get("/api/erp-local/state").json()
     assert state["would"][0]["target"] == "NF 12/1"
+
+
+def test_a_sale_the_store_has_not_released_has_no_label_yet(erp, homolog, monkeypatch):
+    unit = {"9": {"9": {"status": "UNPAID", "items": []}}}
+    monkeypatch.setattr(native_ingest, "_units", lambda db, channel, store: unit)
+    monkeypatch.setattr(recipient_capture, "for_order", lambda *a: None)
+    store_labels.batch(erp, [{"channel": "shopee", "store": "loja", "number": "9"}])
+    with erp.connection() as db:
+        text = would.listing(db)[0]["detail"]["would"]
+    assert text.startswith("Não pediria etiqueta: a loja ainda não liberou o envio")
+    assert "UNPAID" in text

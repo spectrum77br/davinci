@@ -76,18 +76,30 @@ def label_plan(db, channel, store, number):
     }
     from app.erp_local import store_labels
 
-    try:
-        reference = store_labels.reference(db, channel, store, number)
+    unit = native_ingest._units(db, channel, store).get(number) or {}
+    live = [o for o in unit.values() if not native_ingest._is_cancelled(o)]
+    allowed = native_ingest.OPEN_STATUS.get(channel) or set()
+    statuses = sorted({str(o.get("status") or "").upper() for o in live})
+    if unit and not live:
+        plan["would"] = "Não pediria etiqueta: a venda foi cancelada na loja."
+    elif live and any(s not in allowed for s in statuses):
         plan["would"] = (
-            f"Baixaria da {plan['channel']} a etiqueta do envio {reference} e a imprimiria aqui."
+            "Não pediria etiqueta: a loja ainda não liberou o envio "
+            f"(situação na loja: {', '.join(statuses)})."
         )
-        plan["reference"] = str(reference)
-    except ERPError as error:
-        plan["would"] = f"Não pediria etiqueta: {error.message}"
+    else:
+        try:
+            reference = store_labels.reference(db, channel, store, number)
+            plan["would"] = (
+                f"Baixaria da {plan['channel']} a etiqueta do envio {reference} "
+                "e a imprimiria aqui."
+            )
+            plan["reference"] = str(reference)
+        except ERPError as error:
+            plan["would"] = f"Não pediria etiqueta: {error.message}"
     buyer = recipient_capture.for_order(db, channel, store, number) or {}
     plan["buyer"] = buyer.get("name") or "comprador ainda não lido"
     plan["place"] = _place(buyer)
-    unit = native_ingest._units(db, channel, store).get(number) or {}
     plan["items"] = [
         f"{native_ingest._quantity(channel, item) or '?'} × "
         f"{item.get('seller_sku') or item.get('sku') or 'sem SKU'}"
