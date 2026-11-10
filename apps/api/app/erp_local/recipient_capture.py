@@ -11,15 +11,18 @@ import os
 import re
 from datetime import UTC, datetime
 
-from app.erp_local import channel_recipients
+from app.erp_local import channel_recipients, pii
 from app.erp_local.core import ERPError, dumps, text
 
-SCHEMA = """
+SCHEMA = (
+    """
 CREATE TABLE IF NOT EXISTS native_order_recipients (
  channel TEXT NOT NULL, store TEXT NOT NULL, external_id TEXT NOT NULL, ready INTEGER NOT NULL,
  missing TEXT NOT NULL, data TEXT NOT NULL, read_status TEXT, captured_at TEXT NOT NULL,
  PRIMARY KEY(channel,store,external_id));
 """
+    + pii.SCHEMA
+)
 COMMANDS = {"recipient.capture"}
 CAPTURE_ENV = "ERP_RECIPIENT_CAPTURE"
 BATCH = 50
@@ -48,7 +51,12 @@ def apply(erp, db, p):
             external,
             int(ready),
             dumps(projection.get("missing") or []),
-            dumps({"buyer": projection["buyer"], "recipient": projection["recipient"]}),
+            # Sealed when the server has a master key: the log and the table keep ciphertext.
+            dumps(
+                projection["sealed"]
+                if pii.is_sealed(projection.get("sealed"))
+                else {"buyer": projection["buyer"], "recipient": projection["recipient"]}
+            ),
             p["read_status"],
             p["captured_at"],
         ),
@@ -70,6 +78,25 @@ def capture(erp, channel, store, external, raw, *, status=None, now=None):
             return {"kept": True, "ready": stored["ready"]}
     moment = (now or datetime.now(UTC)).isoformat()
     digest = hashlib.sha256(dumps([projection, status, moment]).encode()).hexdigest()
+    ref = f"{channel}:{store}:{external}"
+    try:
+        with erp.connection() as db:
+            sealed = pii.seal(
+                db,
+                ref,
+                channel,
+                {"buyer": projection["buyer"], "recipient": projection["recipient"]},
+            )
+    except ERPError as error:
+        if error.code in {"pii_key_missing", "pii_purged"}:
+            return {"kept": False, "ready": False, "state": error.code}
+        raise
+    if pii.is_sealed(sealed):
+        projection = {
+            "ready": projection.get("ready"),
+            "missing": projection.get("missing") or [],
+            "sealed": sealed,
+        }
     return erp.command(
         f"recipient-v1:{channel}:{store}:{external}:{digest[:32]}",
         "recipient.capture",
@@ -92,8 +119,12 @@ def for_order(db, channel, store, external):
     ).fetchone()
     if not row:
         return None
+    data = pii.open_value(db, json.loads(row["data"]))
+    if data is None:
+        # Erased by the retention window, or sealed and the master key is absent.
+        return None
     return {
-        **json.loads(row["data"]),
+        **data,
         "ready": bool(row["ready"]),
         "missing": json.loads(row["missing"]),
         "captured_at": row["captured_at"],

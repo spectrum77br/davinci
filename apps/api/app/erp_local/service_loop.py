@@ -126,6 +126,12 @@ def main():
         today = time.strftime("%Y-%m-%d")
         if os.environ.get("ERP_READ_TRANSPORT") == "local" and today != checked_on:
             checked_on = today
+            from app.erp_local import pii
+
+            try:
+                log.info("proteção de dados %s", pii.purge(erp))
+            except (ERPError, OSError, ValueError) as error:
+                log.warning("proteção de dados não concluída: %s", type(error).__name__)
             daily_check(erp, args.database.parent / f"conferencia-{today}.json")
             stock_daily(erp, args.database.parent / f"conferencia-estoque-{today}.json")
         for account, result in once(erp).items():
