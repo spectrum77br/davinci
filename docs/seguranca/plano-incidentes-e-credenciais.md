@@ -48,7 +48,8 @@ Rascunho de 10/11/2026 para aprovação do Eduardo. Vale para o DaVinci, o ERP p
 - Disco cifrado. **[a fazer]:** ligar o FileVault no Mac mini.
 
 ## 3. Pendências para a Amazon
-- Cópias cifradas fora do servidor, com teste de restauração (`scripts/backup-offsite.sh`, aguardando o destino).
-- Alerta de atividade suspeita: SSH novo, muitas falhas de login, fail2ban e acessos fora do normal **[a fazer]**.
+- Cópias cifradas fora do servidor: feito em 10/11 (`scripts/backup-offsite.sh` → MEGA, diária às 04:00, restauração do ERP conferida). A primeira cópia do DaVinci é em 11/11.
+- Alerta de atividade suspeita: `scripts/security-monitor.sh` (só lê registros do servidor; não toca no DaVinci). Avisa SSH com usuário/chave nunca vistos, mudança em authorized_keys, /etc/passwd, /etc/group e sudoers, rajada de falhas (>300 em 10 min) ou de bloqueios do fail2ban (>20), e porta pública nova. Base aprendida em 10/11 (6 identidades). Testado com dados simulados (cada aviso sai uma vez só). Avisos em /var/log/davinci-security-alerts.log. Agendado a cada 10 minutos em 10/11 (/etc/cron.d/davinci-security, OK do Eduardo); primeira rodada automática às 14:30 UTC, sem avisos. **[a fazer]:** escolher por onde o aviso chega (hoje só no arquivo).
 - Verificação de dependências: `scripts/security-scan.sh` (Python da api/ERP com pip-audit e Node do site com pnpm audit), toda segunda-feira, com o resultado em `docs/seguranca/varreduras/`. Prazo de correção: crítica em 7 dias e alta em 30. Primeira varredura em 10/11: 9 bibliotecas Python com falha (todas com correção disponível) e 121 falhas no site (7 críticas e 56 altas). A correção ainda não foi feita **[a fazer]**.
 - FileVault no Mac mini e os itens [a fazer] acima.
+- 10/11: atualização das bibliotecas do Python preparada só numa cópia temporária (apagada) e PARADA a pedido do Eduardo ("não mexer no DaVinci"). As bibliotecas do ERP são as mesmas da api do DaVinci (mesmo apps/api), então corrigir as 9 falhas mexe no DaVinci; fica para quando ele liberar.
