@@ -86,3 +86,10 @@ Colar no perfil de desenvolvedor (solutionproviderportal.amazon.com/developer/re
 - Plano de incidentes: só o Eduardo como responsável, sem substituto.
 - FileVault no Mac mini: não agora.
 - Risco: 3 dos 6 pontos da negativa (credenciais 1.4, vulnerabilidades 2.7 e a parte de máquinas de desenvolvimento em rede 1.1) continuam fracos; a chance de nova negativa nesses pontos é alta. Os outros 3 (cópias 2.1/2.7, monitoramento 2.6, incidentes 1.6) agora têm controles reais.
+
+## Recurso enviado (10/11/2026, 12:07 BRT) — caso 23182699251
+- Enviado no Solution Provider Portal da KFA com OK do Eduardo. Estado: "em análise". Enquanto analisa, o portal não deixa adicionar novos clientes de aplicativo de produção; os apps atuais seguem.
+- Funções: as que já existiam + Envio direto para o consumidor (Restrito) e Faturamento de impostos (Restrito).
+- O questionário de dados restritos veio preenchido do envio negado com afirmações falsas (senha de 12 com expiração de 90 dias, firewall com negação padrão e WAF, registros centralizados por 12 meses, teste de intrusão, pipeline que bloqueia segredos, retenção acima de 180 dias). Todas foram reescritas com a verdade.
+- Sim/não enviados: rede (firewall/IDS/antivírus/segmentação) NÃO; acesso por função SIM; criptografia em trânsito SIM; plano de incidentes SIM; aviso à Amazon em 24 h SIM; senha 12+MFA+expiração NÃO; credenciais seguras SIM; retenção de PII 31 a 90 dias; política documentada de tratamento NÃO; criptografia em repouso SIM; acesso refinado SIM; registros com revisão quinzenal e 12 meses NÃO; mudanças testadas antes SIM; varredura mensal + teste de intrusão anual NÃO; varredura do código a cada versão NÃO; processo formal de mudanças SIM.
+- Mantidos como estavam: dados da organização, contato principal e ponto de contato de incidentes já cadastrados no perfil. Fontes externas: declarado que, na migração, lemos os nossos pedidos da Amazon no Bling.

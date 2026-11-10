@@ -22,7 +22,7 @@ Rascunho de 10/11/2026 para aprovação do Eduardo. Vale para o DaVinci, o ERP p
 
 **Contatos:** Eduardo (telefone e e-mail **[preencher]**); Hetzner (painel e suporte); Amazon security@amazon.com.
 
-**Teste:** uma simulação por ano **[a fazer]**.
+**Revisão:** o plano é revisto a cada 6 meses (próxima em 05/2027) e depois de qualquer incidente.
 
 ## 2. Política de credenciais
 
