@@ -638,7 +638,11 @@ async def test_toda_acao_da_aba_e_403_e_nao_muda_nada(mundo, client, db, cena):
         # a concessão de somente leitura da aba também não passa por ela.
         esperado = (
             "admin_only"
-            if molde == f"{EMAIL}/conversas/{{conversa_id}}/lixeira"
+            if molde in {
+                f"{EMAIL}/conversas/{{conversa_id}}/lixeira",
+                f"{EMAIL}/lixeira-lote",
+                f"{EMAIL}/lixeira-selecao",
+            }
             else "atendimento_so_leitura"
         )
         assert r.json()["detail"]["code"] == esperado, (metodo, molde)

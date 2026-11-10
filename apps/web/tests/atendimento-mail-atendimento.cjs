@@ -75,7 +75,7 @@ function montar(rel, props, { respostas = {}, confirmar = true, filhos = {} } = 
     chamadas.push({ url, metodo: opts.method || 'GET', body: opts.body })
     for (const [chave, valor] of Object.entries(respostas)) {
       if (url === chave || url.startsWith(`${chave}?`)) {
-        const v = typeof valor === 'function' ? valor(url, opts) : valor
+        const v = await (typeof valor === 'function' ? valor(url, opts) : valor)
         if (v instanceof Error) throw v
         return structuredClone(v)
       }
@@ -134,6 +134,143 @@ const H = requerer('~/components/AtendimentoEmailChamado.vue')
 const P = requerer('~/components/AtendimentoPlataforma.vue')
 
 async function principal() {
+  // Seleção explícita de toda a fila: inclui páginas não carregadas e
+  // preserva o snapshot selecionado quando chegam mensagens posteriores.
+  {
+    const ate = '2026-11-10T12:00:00Z'
+    const lista = Array.from({ length: 205 }, (_, i) => ({ id: `selecao-${i}`, ate }))
+    const linha = () => ({ id: lista[0].id, plataforma: 'site', canal: 'email', comprador_nome: 'Pessoa', email: {}, email_visto_ate: ate })
+    let cancelar = false
+    let parcial = true
+    const removidos = new Set()
+    const m = montar('../components/AtendimentoMailFilas.vue', { isAdmin: true, lojas: [], tique: 1 }, { confirmar: () => !cancelar, respostas: {
+      '/api/atendimento/email/filas': {}, '/api/atendimento/email/saude': { caixas: [] },
+      '/api/atendimento/email/contagens': { chamados: 205, aguardando: 0, chamados_por_tipo: {} },
+      '/api/atendimento/email/emails': { itens: [], proximo: null },
+      '/api/atendimento/conversas': () => ({ itens: removidos.has(lista[0].id) ? [] : [linha()], proximo: 'mais-paginas' }),
+      '/api/atendimento/email/lixeira-selecao': { tipo: 'conversas', itens: lista },
+      '/api/atendimento/email/lixeira-lote': (_, { body }) => {
+        const falhas = parcial ? body.itens.filter((x) => ['selecao-0', 'selecao-204'].includes(x.id)).map((x) => ({ id: x.id, code: x.id === 'selecao-0' ? 'email_conversa_mudou' : 'email_envio_pendente' })) : []
+        const excluidos = body.itens.filter((x) => !falhas.some((f) => f.id === x.id)).map((x) => x.id)
+        excluidos.forEach((id) => removidos.add(id))
+        return { excluidos, falhas }
+      },
+    } })
+    await m.montar()
+    m.estado.fila = 'chamados'; m.estado.tipoChamado = 'sac'; m.estado.tipoEmail = 'chamado'
+    m.estado.busca = 'x'.repeat(230); m.estado.buscaTexto = 'texto ainda não aplicado'
+    await Vue.nextTick(); await esperar()
+    const html = await m.html()
+    assert.match(html, /data-selecionar-todos-emails/)
+    assert.match(html, /data-excluir-selecionados-emails/)
+    assert.match(html, /data-selecionar-conversa-email/)
+    m.estado.selecionarItem(linha()); assert.equal(m.estado.quantidadeSelecionada, 1)
+    m.estado.selecionarItem(linha()); assert.equal(m.estado.quantidadeSelecionada, 0)
+    await Promise.all([m.estado.selecionarTodos(), m.estado.selecionarTodos()])
+    assert.equal(m.chamadas.filter((x) => x.url.endsWith('/lixeira-selecao')).length, 1)
+    assert.deepEqual(m.chamadas.find((x) => x.url.endsWith('/lixeira-selecao')).body, { fila: 'chamados', tipo_chamado: 'sac', tipo_email: 'chamado', q: 'x'.repeat(200), fechadas: false })
+    assert.equal(m.estado.quantidadeSelecionada, 205, 'inclui páginas não carregadas')
+    assert.equal(m.estado.todosSelecionados, true)
+    assert.match(await m.html(), /todas as páginas desta fila e filtros/)
+    const consultas = () => m.chamadas.filter((x) => x.url.startsWith('/api/atendimento/conversas?')).length
+    const antes = consultas()
+    m.reativo.tique++; await Vue.nextTick(); await esperar()
+    assert.equal(consultas(), antes, 'polling suspenso enquanto há seleção')
+    m.estado.conversas = [{ ...linha(), email_visto_ate: '2026-11-10T12:05:00Z' }]
+    cancelar = true; await m.estado.excluirSelecionados()
+    assert.equal(m.chamadas.filter((x) => x.url.endsWith('/lixeira-lote')).length, 0)
+    assert.equal(m.estado.quantidadeSelecionada, 205)
+    assert.match(m.perguntas.at(-1), /205 conversa\(s\)/)
+    assert.match(m.perguntas.at(-1), /todas as páginas/)
+    cancelar = false
+    await Promise.all([m.estado.excluirSelecionados(), m.estado.excluirSelecionados()])
+    const lotes = m.chamadas.filter((x) => x.url.endsWith('/lixeira-lote'))
+    assert.deepEqual(lotes.map((x) => x.body.itens.length), [100, 100, 5])
+    assert.ok(lotes.every((x) => x.body.tipo === 'conversas'))
+    assert.equal(lotes[0].body.itens[0].ate, ate, 'não amplia o snapshot selecionado')
+    assert.equal(m.estado.quantidadeSelecionada, 2)
+    assert.deepEqual(Object.keys(m.estado.selecionados), ['selecao-0', 'selecao-204'])
+    assert.equal(m.estado.ocupado, null)
+    assert.ok(m.avisos.some(([t, v]) => t === 'ok' && v.includes('203')))
+    assert.ok(m.avisos.some(([t, v]) => t === 'info' && v.includes('atualização recente') && v.includes('resposta em envio')))
+    parcial = false; await m.estado.excluirSelecionados()
+    assert.deepEqual(m.chamadas.filter((x) => x.url.endsWith('/lixeira-lote')).at(-1).body.itens.map((x) => x.id), ['selecao-0', 'selecao-204'])
+    assert.equal(m.estado.quantidadeSelecionada, 0)
+    await m.estado.selecionarTodos(); m.estado.tipoEmail = 'informativo'
+    assert.equal(m.estado.quantidadeSelecionada, 0)
+    await m.estado.selecionarTodos(); m.estado.pastasAbertas = true
+    assert.equal(m.estado.quantidadeSelecionada, 0)
+    m.estado.pastasAbertas = false
+    await m.estado.selecionarTodos(); m.reativo.pausado = true
+    assert.equal(m.estado.quantidadeSelecionada, 0)
+    m.reativo.pausado = false; await Vue.nextTick(); await esperar()
+    await m.estado.selecionarTodos(); m.reativo.isAdmin = false; m.reativo.podeMexer = false
+    assert.equal(m.estado.quantidadeSelecionada, 0, 'revogar acesso limpa seleção')
+    assert.doesNotMatch(await m.html(), /data-selecao-email|data-selecionar-conversa-email/)
+    const antesLeitor = m.chamadas.length
+    m.estado.selecionarItem(linha()); await m.estado.selecionarTodos(); await m.estado.excluirSelecionados()
+    assert.equal(m.chamadas.length, antesLeitor, 'leitor não atua por chamada direta')
+  }
+  {
+    // Resposta de seleção antiga não contamina a nova fila. Rede interrompida
+    // conserva somente IDs que não tiveram sucesso confirmado no lote.
+    const ate = '2026-11-10T12:00:00Z'
+    const lista = Array.from({ length: 105 }, (_, i) => ({ id: `rede-${i}`, ate }))
+    let resolverSelecao
+    let esperarSelecao = true
+    let falharSegundo = true
+    let chamadasLote = 0
+    const m = montar('../components/AtendimentoMailFilas.vue', { isAdmin: true, lojas: [] }, { respostas: {
+      '/api/atendimento/email/filas': {}, '/api/atendimento/email/saude': { caixas: [] },
+      '/api/atendimento/email/contagens': { chamados: 105, aguardando: 0, chamados_por_tipo: {} },
+      '/api/atendimento/email/emails': { itens: [], proximo: null },
+      '/api/atendimento/conversas': { itens: [{ id: 'rede-0', email_visto_ate: ate }], proximo: 'pagina-2' },
+      '/api/atendimento/email/lixeira-selecao': () => esperarSelecao ? new Promise((r) => { resolverSelecao = r }) : { tipo: 'conversas', itens: lista },
+      '/api/atendimento/email/lixeira-lote': (_, { body }) => {
+        chamadasLote++
+        if (falharSegundo && chamadasLote === 2) return new Error('Rede indisponível')
+        return { excluidos: body.itens.map((x) => x.id), falhas: [] }
+      },
+    } })
+    await m.montar(); m.estado.fila = 'chamados'; await Vue.nextTick(); await esperar()
+    const pendente = m.estado.selecionarTodos()
+    m.estado.fila = 'todas'
+    resolverSelecao({ tipo: 'conversas', itens: lista })
+    await pendente; await Vue.nextTick(); await esperar()
+    assert.equal(m.estado.quantidadeSelecionada, 0, 'ignora resposta do filtro antigo')
+    esperarSelecao = false
+    await m.estado.selecionarTodos(); await m.estado.excluirSelecionados()
+    assert.equal(m.estado.quantidadeSelecionada, 5, 'falha no lote 2 preserva não confirmados')
+    assert.equal(m.estado.ocupado, null)
+    assert.ok(m.avisos.some(([t, v]) => t === 'erro' && v.includes('100 item(ns) já enviado(s)')))
+    falharSegundo = false; await m.estado.excluirSelecionados()
+    assert.equal(m.chamadas.filter((x) => x.url.endsWith('/lixeira-lote')).at(-1).body.itens.length, 5)
+    assert.equal(m.estado.quantidadeSelecionada, 0)
+  }
+  {
+    // Filas avulsas não herdam filtros escondidos das conversas. Revisar
+    // envio possui IDs de jobs, que não são e-mails a excluir.
+    const m = montar('../components/AtendimentoMailFilas.vue', { isAdmin: false, podeMexer: false, podeLerFilas: true, podeExcluir: true, lojas: [] }, { respostas: {
+      '/api/atendimento/email/filas': {}, '/api/atendimento/email/saude': { caixas: [] },
+      '/api/atendimento/email/contagens': { chamados: 0, aguardando: 0, chamados_por_tipo: {} },
+      '/api/atendimento/email/emails': { itens: [{ id: 'avulso-1', assunto: 'Mensagem', sugestoes: [], alertas: [] }], proximo: null },
+      '/api/atendimento/email/envios': { itens: [] },
+      '/api/atendimento/email/lixeira-selecao': { tipo: 'emails', itens: [{ id: 'avulso-1' }] },
+      '/api/atendimento/email/lixeira-lote': (_, { body }) => ({ excluidos: body.itens.map((x) => x.id), falhas: [] }),
+    } })
+    await m.montar()
+    m.estado.busca = 'invisível'; m.estado.tipoChamado = 'sac'; m.estado.fechadas = true; m.estado.tipoEmail = 'informativo'
+    await m.estado.selecionarTodos()
+    assert.deepEqual(m.chamadas.find((x) => x.url.endsWith('/lixeira-selecao')).body, { fila: 'sem_loja', tipo_chamado: null, tipo_email: 'informativo', q: null, fechadas: false })
+    assert.match(await m.html(), /data-selecionar-email-fila/)
+    await m.estado.excluirSelecionados()
+    assert.deepEqual(m.chamadas.find((x) => x.url.endsWith('/lixeira-lote')).body, { tipo: 'emails', itens: [{ id: 'avulso-1' }] })
+    m.estado.fila = 'revisar_envio'; await Vue.nextTick(); await esperar()
+    assert.doesNotMatch(await m.html(), /data-selecao-email/)
+    const antes = m.chamadas.length
+    await m.estado.selecionarTodos(); await m.estado.excluirSelecionados()
+    assert.equal(m.chamadas.length, antes)
+  }
   // A ação coletiva usa os filtros aplicados no servidor, nunca só os IDs
   // da primeira página. Exclusão segue a Lixeira local e as permissões.
   {

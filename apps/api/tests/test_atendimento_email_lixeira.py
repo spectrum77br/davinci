@@ -17,8 +17,10 @@ from app.routers import atendimento_email_lixeira as router
 from app.security.cipher import encrypt_json
 from app.services.atendimento import gravar
 from tests.lojas_da_pessoa import dar_lojas
-from tests.test_mail_ponte import AGORA, _config, cena
+from tests.test_mail_ponte import AGORA, _config, cena, entrar
 from tests.test_mail_venda_rotas import _caso, _chat
+
+LOTE = "/api/atendimento/email/lixeira-lote"
 
 
 def _url(conversa_id):
@@ -153,6 +155,14 @@ async def test_leitor_e_operador_sem_delete_nao_excluem(
     auth_as(pessoa)
     response = await client.post(_url(meta.conversa_id), json=await _snapshot(db, meta.conversa_id))
     assert response.status_code == 403
+    response = await client.post(
+        LOTE,
+        json={
+            "tipo": "emails",
+            "itens": [{"id": str(meta.message_id)}],
+        },
+    )
+    assert response.status_code == 403
     assert await _excluidos(db) == set()
 
 
@@ -169,6 +179,15 @@ async def test_admin_fora_da_lista_de_operacao_nao_exclui(
     auth_as(cena.dono)
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", "outro@teste.invalid")
     response = await client.post(_url(meta.conversa_id), json=await _snapshot(db, meta.conversa_id))
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "atendimento_permission_required"
+    response = await client.post(
+        LOTE,
+        json={
+            "tipo": "emails",
+            "itens": [{"id": str(meta.message_id)}],
+        },
+    )
     assert response.status_code == 403
     assert response.json()["detail"]["code"] == "atendimento_permission_required"
     assert await _excluidos(db) == set()
@@ -298,3 +317,240 @@ async def test_snapshot_e_relido_depois_de_esperar_a_trava_do_sync(
         if not task.done():
             task.cancel()
         await db.rollback()
+
+
+async def test_lote_conversas_preserva_atualizada_pendente_e_inexistente(
+    db,
+    cena,
+    client,
+    auth_as,
+):
+    bom = await _caso(db, cena, caso="11111111")
+    atualizado = await _caso(db, cena, caso="22222222")
+    pendente = await _caso(db, cena, caso="33333333")
+    itens = [
+        {"id": str(meta.conversa_id), **await _snapshot(db, meta.conversa_id)}
+        for meta in (bom, atualizado, pendente)
+    ]
+    novo = await _caso(db, cena, caso="22222222", recebido_em=AGORA - timedelta(minutes=20))
+    db.add(
+        MailOutbox(
+            mailbox_id=cena.geral.id,
+            message_id=pendente.message_id,
+            author_user_id=cena.dono.id,
+            request_id=uuid4(),
+            content_enc=encrypt_json({}),
+            status="queued",
+        )
+    )
+    await db.commit()
+    desconhecido = str(uuid4())
+    itens.append({"id": desconhecido, "ate": AGORA.isoformat()})
+    auth_as(cena.dono)
+    response = await client.post(LOTE, json={"tipo": "conversas", "itens": itens})
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "excluidos": [str(bom.conversa_id)],
+        "falhas": [
+            {"id": str(atualizado.conversa_id), "code": "email_conversa_mudou"},
+            {"id": str(pendente.conversa_id), "code": "email_envio_pendente"},
+            {"id": desconhecido, "code": "conversa_nao_encontrada"},
+        ],
+    }
+    assert await _excluidos(db) == {bom.message_id}
+    assert await db.get(MailMessage, novo.message_id) is not None
+    assert await _na_fila(client, atualizado.conversa_id)
+    assert (await client.post(f"/api/mail/messages/{bom.message_id}/restore")).status_code == 200
+    assert await _na_fila(client, bom.conversa_id)
+
+
+@pytest.mark.parametrize("estado", ["queued", "leased", "uncertain"])
+async def test_lote_emails_nao_inclui_novas_chegadas_e_pode_restaurar(
+    db,
+    cena,
+    client,
+    auth_as,
+    estado,
+):
+    bom, pendente = await entrar(db, cena.geral), await entrar(db, cena.geral)
+    original = bytes((await db.get(MailMessage, bom)).content_enc)
+    itens = [{"id": str(bom)}, {"id": str(pendente)}]
+    novo = await entrar(db, cena.geral)
+    job = MailOutbox(
+        mailbox_id=cena.geral.id,
+        message_id=pendente,
+        author_user_id=cena.dono.id,
+        request_id=uuid4(),
+        content_enc=encrypt_json({}),
+        status=estado,
+    )
+    db.add(job)
+    await db.commit()
+    auth_as(cena.dono)
+    for _ in range(2):
+        response = await client.post(LOTE, json={"tipo": "emails", "itens": itens})
+        assert response.status_code == 200, response.text
+        assert response.json() == {
+            "excluidos": [str(bom)],
+            "falhas": [{"id": str(pendente), "code": "email_envio_pendente"}],
+        }
+    assert await _excluidos(db) == {bom}
+    assert await db.get(MailMessage, novo) is not None
+    await db.refresh(job)
+    assert job.status == estado
+    assert (await client.post(f"/api/mail/messages/{bom}/restore")).status_code == 200
+    assert bytes((await db.get(MailMessage, bom)).content_enc) == original
+    assert await _excluidos(db) == set()
+
+
+@pytest.mark.parametrize("tipo", ["conversas", "emails"])
+@pytest.mark.parametrize("restricao", ["nenhuma", "caixa", "politica", "loja"])
+async def test_lote_mantem_permissao_e_escopo_da_operacao_individual(
+    db,
+    cena,
+    client,
+    auth_as,
+    make_user,
+    tipo,
+    restricao,
+):
+    meta = await _caso(db, cena)
+    pessoa = await make_user(
+        role=UserRole.USER,
+        permissions={
+            "atendimento_email_operacao": {"view": True, "edit": True, "delete": True},
+        },
+    )
+    await dar_lojas(db, pessoa, cena.oliveira_ml if restricao == "loja" else cena.ml)
+    if restricao != "caixa":
+        cfg = await db.get(MailMailboxSettings, cena.geral.id)
+        cfg.leitores = [str(pessoa.id)]
+    if restricao == "politica":
+        db.add(MailAcesso(mailbox_id=cena.geral.id, user_id=pessoa.id, modo="bloqueado"))
+    await db.commit()
+    auth_as(pessoa)
+    ident = meta.conversa_id if tipo == "conversas" else meta.message_id
+    item = {"id": str(ident), **await _snapshot(db, meta.conversa_id)}
+    response = await client.post(LOTE, json={"tipo": tipo, "itens": [item]})
+    assert response.status_code == 200, response.text
+    # E-mail original segue o mesmo grant de sua Caixa inteira; conversa
+    # segue também o recorte por lojas do Atendimento.
+    permitido = restricao == "nenhuma" or (tipo == "emails" and restricao == "loja")
+    assert response.json()["excluidos"] == ([str(ident)] if permitido else [])
+    assert len(response.json()["falhas"]) == (0 if permitido else 1)
+    assert await _excluidos(db) == ({meta.message_id} if permitido else set())
+
+
+@pytest.mark.parametrize(
+    "invalido",
+    [
+        "vazio",
+        "limite",
+        "duplicado",
+        "duplicado_caixa",
+        "sem_ate",
+        "ate_sem_fuso",
+        "extra",
+        "extra_item",
+        "tipo",
+        "id",
+    ],
+)
+async def test_lote_valida_corpo_inteiro_antes_de_qualquer_exclusao(
+    db,
+    cena,
+    client,
+    auth_as,
+    invalido,
+):
+    mid = await entrar(db, cena.geral)
+    item = {"id": str(mid)}
+    body = {"tipo": "emails", "itens": [item]}
+    if invalido == "vazio":
+        body["itens"] = []
+    elif invalido == "limite":
+        body["itens"] = [item, *({"id": str(uuid4())} for _ in range(100))]
+    elif invalido in ("duplicado", "duplicado_caixa"):
+        body["itens"].append(
+            {"id": str(mid).upper() if invalido == "duplicado_caixa" else str(mid)}
+        )
+    elif invalido in ("sem_ate", "ate_sem_fuso"):
+        body["tipo"] = "conversas"
+        if invalido == "ate_sem_fuso":
+            item["ate"] = "2026-11-10T00:00:00"
+    elif invalido == "extra":
+        body["todos"] = True
+    elif invalido == "extra_item":
+        item["todos"] = True
+    elif invalido == "tipo":
+        body["tipo"] = "todos"
+    else:
+        body["itens"].append({"id": "nao-e-uuid"})
+    auth_as(cena.dono)
+    response = await client.post(LOTE, json=body)
+    assert response.status_code == 422, response.text
+    assert await _excluidos(db) == set()
+
+
+async def test_lote_falha_no_meio_da_conversa_desfaz_item_mas_preserva_outro(
+    db,
+    cena,
+    client,
+    auth_as,
+    monkeypatch,
+):
+    primeiro = await _caso(db, cena, caso="11111111")
+    segundo = await _caso(db, cena, caso="11111111")
+    bom = await _caso(db, cena, caso="22222222")
+    ids_falhos = sorted([primeiro.message_id, segundo.message_id])
+    original = router.administracao.mudar_lixeira
+
+    async def falhar_no_segundo(session, message_id, *args, **kwargs):
+        if message_id == ids_falhos[1]:
+            raise HTTPException(
+                409,
+                detail={
+                    "code": "email_envio_pendente",
+                    "detail": "corpo privado que não deve sair",
+                },
+            )
+        return await original(session, message_id, *args, **kwargs)
+
+    monkeypatch.setattr(router.administracao, "mudar_lixeira", falhar_no_segundo)
+    auth_as(cena.dono)
+    response = await client.post(
+        LOTE,
+        json={
+            "tipo": "conversas",
+            "itens": [
+                {"id": str(meta.conversa_id), **await _snapshot(db, meta.conversa_id)}
+                for meta in (primeiro, bom)
+            ],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "excluidos": [str(bom.conversa_id)],
+        "falhas": [{"id": str(primeiro.conversa_id), "code": "email_envio_pendente"}],
+    }
+    assert "corpo privado" not in response.text
+    assert await _excluidos(db) == {bom.message_id}
+    events = list(await db.scalars(select(MailAdminEvento)))
+    assert len(events) == 1 and events[0].dados == {"message_id": str(bom.message_id)}
+
+
+async def test_lote_erro_inesperado_desfaz_todos_os_itens(db, cena, client, auth_as, monkeypatch):
+    ids = sorted([await entrar(db, cena.geral), await entrar(db, cena.geral)])
+    original = router.administracao.mudar_lixeira
+
+    async def falhar_no_segundo(session, message_id, *args, **kwargs):
+        if message_id == ids[1]:
+            raise RuntimeError("falha simulada")
+        return await original(session, message_id, *args, **kwargs)
+
+    monkeypatch.setattr(router.administracao, "mudar_lixeira", falhar_no_segundo)
+    auth_as(cena.dono)
+    with pytest.raises(RuntimeError, match="falha simulada"):
+        await client.post(LOTE, json={"tipo": "emails", "itens": [{"id": str(mid)} for mid in ids]})
+    assert await _excluidos(db) == set()
+    assert await db.scalar(select(func.count()).select_from(MailAdminEvento)) == 0

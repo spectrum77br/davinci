@@ -203,7 +203,11 @@ def test_trava_em_todas_as_rotas_e_a_lista_de_quem_le_existe():
     assert len(rotas) >= 40
     for r in rotas:
         deps = [d.call for d in r.dependant.dependencies]
-        if r.path == f"{URL}/email/conversas/{{conversa_id}}/lixeira":
+        if r.path in {
+            f"{URL}/email/conversas/{{conversa_id}}/lixeira",
+            f"{URL}/email/lixeira-lote",
+            f"{URL}/email/lixeira-selecao",
+        }:
             # Operação da mesma lixeira das Caixas: concessão explícita com
             # delete, sem conceder as demais ações administrativas das Filas.
             from app.routers.mail import require_mail_manager
@@ -277,7 +281,11 @@ async def test_quem_so_le_le_tudo_e_nao_mexe_em_nada(client, make_user, auth_as,
             # Administração de acesso/lixeira (19/10): nem leitura do painel
             # fica disponível a leitores ou a admins fora da lista operacional.
             assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
-        elif molde == f"{URL}/email/conversas/{{conversa_id}}/lixeira":
+        elif molde in {
+            f"{URL}/email/conversas/{{conversa_id}}/lixeira",
+            f"{URL}/email/lixeira-lote",
+            f"{URL}/email/lixeira-selecao",
+        }:
             assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
             esperado = (
                 "atendimento_permission_required"

@@ -346,6 +346,100 @@ let geracao = 0
 const acoes = computed(() => acoesDaFila(fila.value, props.isAdmin, mexe.value))
 // "Pastas e regras" não é fila: a aba ao lado das filas (a fila fica guardada).
 const pastasAbertas = ref(false)
+type ItemSelecionado = { id: string; ate?: string }
+const selecionados = ref<Record<string, ItemSelecionado>>({})
+const quantidadeSelecionada = computed(() => Object.keys(selecionados.value).length)
+const todosSelecionados = ref(false)
+const progressoExclusao = ref(0)
+const totalExclusao = ref(0)
+let geracaoSelecao = 0
+const filtrosDaSelecao = computed(() => ({
+  fila: fila.value,
+  tipo_chamado: fila.value === 'chamados' ? tipoChamado.value || null : null,
+  tipo_email: tipoEmail.value || null,
+  q: FILAS_DE_CONVERSA.has(fila.value) ? busca.value.slice(0, 200) || null : null,
+  fechadas: fila.value === 'todas' && fechadas.value,
+}))
+function limparSelecao() {
+  geracaoSelecao++
+  selecionados.value = {}
+  todosSelecionados.value = false
+}
+watch(() => JSON.stringify([filtrosDaSelecao.value, pastasAbertas.value, props.pausado, exclui.value]), limparSelecao, { flush: 'sync' })
+
+function selecionarItem(item: ConversaResumo | ItemFila) {
+  if (!exclui.value || ocupado.value || carregando.value || pastasAbertas.value || fila.value === 'revisar_envio') return
+  const novos = { ...selecionados.value }
+  if (novos[item.id]) delete novos[item.id]
+  else if (FILAS_DE_CONVERSA.has(fila.value)) {
+    const ate = (item as ConversaResumo).email_visto_ate
+    if (!ate) { toasts.info('Atualize a fila antes de selecionar esta conversa.'); return }
+    novos[item.id] = { id: item.id, ate }
+  } else novos[item.id] = { id: item.id }
+  selecionados.value = novos
+  todosSelecionados.value = false
+}
+
+async function selecionarTodos() {
+  if (!exclui.value || ocupado.value || carregando.value || pastasAbertas.value || fila.value === 'revisar_envio') return
+  const g = geracaoSelecao
+  const tipo = FILAS_DE_CONVERSA.has(fila.value) ? 'conversas' : 'emails'
+  ocupado.value = 'selecionar:todos'
+  try {
+    const r = await api<{ tipo: string; itens: ItemSelecionado[] }>('/api/atendimento/email/lixeira-selecao', { method: 'POST', body: { ...filtrosDaSelecao.value } })
+    if (g !== geracaoSelecao) return
+    if (r.tipo !== tipo || r.itens.some((x) => !x.id || (tipo === 'conversas' && !x.ate))) throw new Error('Seleção inválida')
+    selecionados.value = Object.fromEntries(r.itens.map((x) => [x.id, tipo === 'conversas' ? { id: x.id, ate: x.ate } : { id: x.id }]))
+    todosSelecionados.value = r.itens.length > 0
+    if (!r.itens.length) toasts.info('Não há e-mails nesta seleção.')
+  } catch (e: any) {
+    if (g !== geracaoSelecao) return
+    if (e?.data?.detail?.code === 'email_selecao_grande') toasts.info('A seleção tem mais de 10 mil itens. Use os filtros para selecionar uma parte por vez.')
+    else { const er = erroDaApi(e, 'Não consegui selecionar todos os e-mails'); toasts.error(er.texto, er.motivos) }
+  } finally {
+    ocupado.value = null
+  }
+}
+
+async function excluirSelecionados() {
+  if (!exclui.value || ocupado.value || carregando.value || !quantidadeSelecionada.value || pastasAbertas.value || fila.value === 'revisar_envio') return
+  const tipo = FILAS_DE_CONVERSA.has(fila.value) ? 'conversas' : 'emails'
+  const alvos = Object.values(selecionados.value)
+  if (!confirm(`Enviar ${alvos.length} ${tipo === 'conversas' ? 'conversa(s) selecionada(s), com seus e-mails,' : 'e-mail(s) selecionado(s)'} para a Lixeira do DaVinci?${todosSelecionados.value ? '\nA seleção inclui todas as páginas da fila filtrada.' : ''}\n\nVocê pode restaurá-los em Caixas → Lixeira desta caixa. Os originais continuam no Tuta.`)) return
+  const g = geracaoSelecao
+  ocupado.value = 'excluir:lote'
+  progressoExclusao.value = 0
+  totalExclusao.value = alvos.length
+  let excluidos = 0
+  const falhas: { id: string; code: string }[] = []
+  try {
+    for (let i = 0; i < alvos.length; i += 100) {
+      const r = await api<{ excluidos: string[]; falhas: { id: string; code: string }[] }>('/api/atendimento/email/lixeira-lote', { method: 'POST', body: { tipo, itens: alvos.slice(i, i + 100) } })
+      excluidos += r.excluidos.length
+      falhas.push(...r.falhas)
+      progressoExclusao.value = Math.min(i + 100, alvos.length)
+      if (g === geracaoSelecao) {
+        const restantes = { ...selecionados.value }
+        for (const id of r.excluidos) delete restantes[id]
+        selecionados.value = restantes
+        todosSelecionados.value = false
+      }
+    }
+    if (excluidos) toasts.success(`${excluidos} ${tipo === 'conversas' ? 'conversa(s) enviada(s)' : 'e-mail(s) enviado(s)'} para a Lixeira do DaVinci`)
+    if (falhas.length) {
+      const pendentes = falhas.filter((x) => x.code === 'email_envio_pendente').length
+      const atualizadas = falhas.filter((x) => x.code === 'email_conversa_mudou').length
+      toasts.info(`${falhas.length} item(ns) não excluído(s).${pendentes ? ` ${pendentes} com resposta em envio ou aguardando conferência.` : ''}${atualizadas ? ` ${atualizadas} com atualização recente; limpe a seleção e confira novamente.` : ''}${g === geracaoSelecao ? ' Os itens não excluídos continuam selecionados.' : ' Confira os itens na fila original.'}`)
+    }
+  } catch (e: any) {
+    const er = erroDaApi(e, 'A exclusão foi interrompida. Confira a fila antes de tentar novamente.')
+    toasts.error(excluidos ? `${excluidos} item(ns) já enviado(s) para a Lixeira. ${er.texto}` : er.texto, er.motivos)
+  } finally {
+    if (g === geracaoSelecao) { aberto.value = null; detalhe.value = null }
+    await Promise.allSettled([carregar(), carregarContagens()])
+    ocupado.value = null
+  }
+}
 function verFila(f: Fila) {
   pastasAbertas.value = false
   fila.value = f
@@ -414,6 +508,8 @@ async function carregar(mais = false, automatico = false) {
 const informativosAbertos = computed(() => le.value && tipoEmail.value === 'informativo' && !pastasAbertas.value && fila.value !== 'revisar_envio')
 const sinalInformativos = ref(0)
 async function atualizar() {
+  if (ocupado.value) return
+  limparSelecao()
   sinalInformativos.value++
   await Promise.all([carregar(), carregarContagens(), carregarSaude()])
 }
@@ -475,7 +571,7 @@ watch(() => props.tique, () => {
   if (props.pausado) return
   if (!contagensCompartilhadas.value) void carregarContagensDeConversa()
   if (pastasAbertas.value || !FILAS_DE_CONVERSA.has(fila.value)) return
-  if (paginasExtras || ocupado.value || carregando.value) return
+  if (paginasExtras || ocupado.value || carregando.value || quantidadeSelecionada.value) return
   void carregar(false, true)
 })
 
@@ -566,6 +662,10 @@ async function excluirConversa(c: ConversaResumo) {
       return
     }
     await api(`/api/atendimento/email/conversas/${encodeURIComponent(c.id)}/lixeira`, { method: 'POST', body: { ate } })
+    const restantes = { ...selecionados.value }
+    delete restantes[c.id]
+    selecionados.value = restantes
+    todosSelecionados.value = false
     toasts.success('E-mails enviados para a Lixeira do DaVinci')
     await Promise.all([carregar(), carregarContagens()])
   } catch (e: any) {
@@ -598,6 +698,7 @@ async function acao(chave: string, fn: () => Promise<unknown>, ok: string) {
   ocupado.value = chave
   try {
     await fn()
+    limparSelecao()
     toasts.success(ok)
     await Promise.all([carregar(), carregarContagens()])
   } catch (e: any) {
@@ -700,7 +801,7 @@ const curto = (p: string) => plataformaInfo(p).curto
         data-fila="pastas"
         @click="pastasAbertas = true"
       >Pastas e regras</button>
-      <button v-if="!pastasAbertas" type="button" class="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" :disabled="carregando" @click="atualizar">
+      <button v-if="!pastasAbertas" type="button" class="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground" :disabled="carregando || !!ocupado" @click="atualizar">
         <RefreshCw class="size-3.5" :class="{ 'animate-spin': carregando }" /> atualizar
       </button>
     </div>
@@ -719,6 +820,13 @@ const curto = (p: string) => plataformaInfo(p).curto
     </div>
 
     <div v-if="erro && !pastasAbertas" class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">{{ erro }}</div>
+
+    <div v-if="exclui && !pastasAbertas && fila !== 'revisar_envio'" class="flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs" role="group" aria-label="Seleção de e-mails" data-selecao-email>
+      <button type="button" class="inline-flex items-center gap-1 rounded border bg-background px-3 py-1.5 hover:bg-muted disabled:opacity-50" :disabled="!!ocupado || carregando" @click="selecionarTodos" data-selecionar-todos-emails><Loader2 v-if="ocupado === 'selecionar:todos'" class="size-3.5 animate-spin" />{{ ocupado === 'selecionar:todos' ? 'Selecionando…' : 'Selecionar todos' }}</button>
+      <span aria-live="polite">{{ quantidadeSelecionada }} selecionado(s){{ todosSelecionados ? ' · todas as páginas desta fila e filtros' : '' }}</span>
+      <button v-if="quantidadeSelecionada" type="button" class="underline disabled:opacity-50" :disabled="!!ocupado" @click="limparSelecao">Limpar seleção</button>
+      <button type="button" class="ml-auto inline-flex items-center gap-1 rounded border border-destructive/40 px-3 py-1.5 text-destructive hover:bg-destructive/10 disabled:opacity-50" :disabled="!quantidadeSelecionada || !!ocupado || carregando" @click="excluirSelecionados" data-excluir-selecionados-emails><Loader2 v-if="ocupado === 'excluir:lote'" class="size-3.5 animate-spin" /><Trash2 v-else class="size-3.5" />{{ ocupado === 'excluir:lote' ? `Excluindo… ${progressoExclusao}/${totalExclusao}` : 'Excluir selecionados' }}</button>
+    </div>
 
     <div v-if="!pastasAbertas && fila !== 'revisar_envio'" class="space-y-1">
       <div class="flex flex-wrap items-center gap-1 text-[11px]" role="group" aria-label="tipo de e-mail" data-chips-tipo-email>
@@ -814,6 +922,7 @@ const curto = (p: string) => plataformaInfo(p).curto
       <ul v-else class="space-y-2">
         <li v-for="c in conversas" :key="c.id" class="space-y-1 rounded-lg border p-2.5 text-xs" :data-conversa-email="c.id">
           <div class="flex flex-wrap items-center gap-1.5">
+            <input v-if="exclui" type="checkbox" class="size-4 accent-primary" :checked="!!selecionados[c.id]" :disabled="!!ocupado || carregando || !c.email_visto_ate" :aria-label="`Selecionar conversa de ${c.comprador_nome || 'Cliente'}`" @change="selecionarItem(c)" data-selecionar-conversa-email />
             <span v-if="rotuloTipoEmail(c.email?.tipo_email)" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground" :title="dicaTipoEmail(c.email?.tipo_email_inferido)" data-conversa-tipo-email>{{ rotuloTipoEmail(c.email?.tipo_email) }}</span>
             <span v-if="c.email?.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300" data-conversa-caso-email>Chamado {{ c.email.caso_id }}</span>
             <span v-if="c.email?.protocolo && !c.email?.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">{{ c.email.protocolo }}</span>
@@ -848,6 +957,7 @@ const curto = (p: string) => plataformaInfo(p).curto
       <ul v-else class="space-y-2">
         <li v-for="e in itens" :key="e.id" class="space-y-1 rounded-lg border p-2.5 text-xs" :data-email-fila="e.id">
           <div class="flex flex-wrap items-center gap-1.5">
+            <input v-if="exclui" type="checkbox" class="size-4 accent-primary" :checked="!!selecionados[e.id]" :disabled="!!ocupado || carregando" :aria-label="`Selecionar e-mail ${e.assunto || 'sem assunto'}`" @change="selecionarItem(e)" data-selecionar-email-fila />
             <span v-if="rotuloTipoEmail(e.tipo_email)" class="rounded bg-muted px-1.5 py-px text-[11px] text-muted-foreground" :title="dicaTipoEmail(e.tipo_email_inferido, e.tipo_pela_pasta, e.pasta)" data-fila-tipo-email>{{ rotuloTipoEmail(e.tipo_email) }}</span>
             <span v-if="e.caso_id" class="rounded bg-teal-500/15 px-1.5 py-px text-[11px] text-teal-800 dark:text-teal-300">Chamado {{ e.caso_id }}</span>
             <span class="rounded px-1.5 py-px text-[11px]" :class="e.destaque ? 'bg-red-500/15 text-red-700 dark:text-red-300' : 'bg-muted text-muted-foreground'">{{ e.pasta || 'sem pasta' }}</span>
