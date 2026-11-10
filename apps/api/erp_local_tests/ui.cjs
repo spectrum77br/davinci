@@ -1281,3 +1281,48 @@ test('output notes filter by store, recipient document and situation',async()=>{
   assert.equal(rows.length,1);assert.ok(rows[0].includes('Bia'));
   store.value=store.options[1].value;store.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
 });
+
+test('contacts go to the trash, come back and get a seller in batch',async()=>{
+  const contacts=[{id:'c1',code:1,version:3,data:{name:'Ana',roles:['customer'],status:'active',birth_date:'1990-'+new Date().toISOString().slice(5,7)+'-20'}},{id:'c2',code:2,version:1,data:{name:'Bia',roles:['customer'],status:'deleted'}}];
+  const sellers={sellers:[{id:'v1',contact:{data:{name:'Vendedora'}},data:{}}],commissions:[]};
+  const {dom,document:d,requests}=await setup({contacts,sellers});
+  d.querySelector('nav [data-page=contacts]').click();
+  await new Promise(r=>setImmediate(r));
+  assert.deepEqual([...d.querySelectorAll('.contact-name[data-edit-contact]')].map(b=>b.textContent),['Ana']);
+  d.querySelector('[data-contact-delete="c1"]').click();
+  await new Promise(r=>setImmediate(r));
+  assert.equal(requests.at(-1).kind,'contact.delete');assert.deepEqual(requests.at(-1).payload,{id:'c1',version:3});
+  const pick=d.querySelector('[data-contact-select="c1"]');pick.checked=true;pick.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  await new Promise(r=>setImmediate(r));
+  d.getElementById('contacts-seller').value='v1';d.getElementById('contacts-seller-apply').click();
+  await new Promise(r=>setImmediate(r));
+  assert.deepEqual(requests.at(-1).payload,{ids:['c1'],seller_id:'v1'});
+  d.getElementById('contacts-birthdays').click();
+  await new Promise(r=>setImmediate(r));
+  assert.deepEqual([...d.querySelectorAll('.contact-name[data-edit-contact]')].map(b=>b.textContent),['Ana']);
+  const status=d.getElementById('contacts-status');status.value='deleted';status.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  await new Promise(r=>setImmediate(r));
+  d.querySelector('[data-contact-restore="c2"]').click();
+  await new Promise(r=>setImmediate(r));
+  assert.equal(requests.at(-1).kind,'contact.restore');
+});
+
+test('accounts filter by financial account and change categories of the selected',async()=>{
+  const documents=[{id:'d1',kind:'financial',status:'open',data:{party:'Fornecedor',history:'Aluguel',bank_id:'caixa'}},{id:'d2',kind:'financial',status:'open',data:{party:'Outro',history:'Luz'}}];
+  const accounts=[{id:'a1',document_id:'d1',kind:'payable',amount:'10',status:'open'},{id:'a2',document_id:'d2',kind:'payable',amount:'5',status:'open'}];
+  const finance={banks:[{id:'caixa',name:'Caixa da loja',balance:'0'}],installments:[{id:'i1',account_id:'a1',kind:'payable',amount:'10',remaining:'10',paid:'0',due_date:'2026-12-10',account_status:'open'},{id:'i2',account_id:'a2',kind:'payable',amount:'5',remaining:'5',paid:'0',due_date:'2026-12-11',account_status:'open'}],payments:[],matches:[],manual_documents:documents};
+  const finance_categories={categories:[{id:'k1',name:'Aluguel',kind:'expense',active:true,version:1,path:'Aluguel'}],assignments:{a1:'k1'}};
+  const {dom,document:d,requests}=await setup({accounts,finance,finance_categories,events:[],documents});
+  d.querySelector('[data-menu-target="accounts"][data-menu-context="payable"]').click();
+  await new Promise(r=>setImmediate(r));
+  assert.ok(d.body.textContent.includes('Categoria: Aluguel'));
+  const bank=d.getElementById('finance-bank');assert.ok(bank);
+  bank.value='caixa';bank.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  await new Promise(r=>setImmediate(r));
+  assert.equal(d.querySelectorAll('[data-finance-select]').length,1);
+  const pick=d.querySelector('[data-finance-select="i1"]');pick.checked=true;pick.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  await new Promise(r=>setImmediate(r));
+  d.getElementById('finance-category-apply').click();
+  await new Promise(r=>setImmediate(r));
+  assert.deepEqual(requests.at(-1).payload,{account_ids:['a1'],category_id:'k1'});
+});

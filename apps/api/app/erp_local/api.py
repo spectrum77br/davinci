@@ -116,6 +116,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "/api/erp-local/fiscal/xml",
                 "/api/erp-local/inbound/xml",
                 "/api/erp-local/finance/statements",
+                "/api/erp-local/finance/import",
             }:
                 limit = 8 * 1024 * 1024
             elif request.url.path == "/api/erp-local/catalog/images":
@@ -150,6 +151,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             categories,
             contacts,
             finance,
+            finance_categories,
             fiscal,
             fiscal_invoices,
             inbound_invoices,
@@ -183,6 +185,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "returns": returns.snapshot(erp, db),
                 "sellers": sellers.snapshot(db),
                 "finance": finance.snapshot(db),
+                "finance_categories": finance_categories.snapshot(db),
                 "procurement": procurement.snapshot(erp, db),
                 "fiscal": fiscal.snapshot(db, getattr(app.state, "fiscal_readiness", None)),
                 "invoicing": fiscal_invoices.snapshot(db),
@@ -539,6 +542,28 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             "bank.statement.import",
             {"bank_id": bank_id, "content": content},
         )
+
+    @app.post("/api/erp-local/finance/import")
+    async def import_accounts(
+        request: Request, commit: int = Query(0), kind: str = Query("payable")
+    ):
+        """Bling's spreadsheet import: preview first (nothing written), then import."""
+        from app.erp_local import finance_import
+
+        raw = await request.body()
+        try:
+            content = raw.decode("utf-8-sig")
+        except UnicodeError:
+            content = raw.decode("latin-1")
+        lines = finance_import.parse(content, "receivable" if kind == "receivable" else "payable")
+        if commit:
+            return finance_import.commit(erp, lines)
+        rows = finance_import.preview(erp, lines)
+        return {
+            "lines": rows,
+            "valid": sum(1 for r in rows if r["ok"]),
+            "refused": sum(1 for r in rows if not r["ok"]),
+        }
 
     def _adopted_companies():
         import json

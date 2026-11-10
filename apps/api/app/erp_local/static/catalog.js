@@ -2,7 +2,7 @@
 let selectedStockSku='', selectedStockDepot='', stockQuery='', stockHistory=null;
 let productSelection=new Set();
 let financeLedgerKind='payable', financeLedgerQuery='';
-let financeFilters={from:'',to:'',status:''},financeSelection=new Set(),financeGrouped=false;
+let financeFilters={from:'',to:'',status:'',bank:''},financeSelection=new Set(),financeGrouped=false;
 let purchaseQuery='', fiscalQuery='';
 const movementOrigin=kind=>({'catalog.bootstrap':'Abertura de estoque','demo.seed':'Abertura da simulação','inventory.generate':'Balanço da conferência','stock.post':'Lançamento manual','stock.transfer':'Transferência','order.import':'Reserva de venda','order.ship':'Despacho de venda','order.cancel':'Cancelamento de venda','order.return':'Devolução de venda','purchase.receive':'Recebimento de compra','purchase.stock':'Recebimento de compra','purchase.reverse_receipt':'Estorno de recebimento','logistics.dispatch':'Despacho logístico','logistics.manifest.dispatch':'Despacho de remessa','logistics.return.receive':'Recebimento de devolução','orders.batch':'Operação em lote'}[kind]||'Operação própria');
 function listToolbar(formId,query,label,filterButton=''){
@@ -14,7 +14,7 @@ function financeMatches(){
     const who=(state.contacts||[]).find(c=>c.id===d?.data.contact_id)?.data||d?.data.contact||{};
     const text=(d?.data.party||d?.data.supplier||d?.data.customer_name||'')+' '+(d?.data.history||'')+' '+docLabel(a?.document_id)+' '+financeKind(i.kind)+' '+(who.document||'')+' '+String(who.document||'').replace(/\D/g,'')+' '+(who.email||'');
     const status=i.account_status==='cancelled'?'cancelled':Number(i.remaining)===0?'paid':Number(i.paid)>0?'partial':i.due_date<localDay()?'late':'open';
-    return (!financeLedgerKind||i.kind===financeLedgerKind)&&text.toLowerCase().includes(financeLedgerQuery.toLowerCase())&&(!financeFilters.from||i.due_date>=financeFilters.from)&&(!financeFilters.to||i.due_date<=financeFilters.to)&&(!financeFilters.status||status===financeFilters.status);
+    return (!financeLedgerKind||i.kind===financeLedgerKind)&&text.toLowerCase().includes(financeLedgerQuery.toLowerCase())&&(!financeFilters.from||i.due_date>=financeFilters.from)&&(!financeFilters.to||i.due_date<=financeFilters.to)&&(!financeFilters.status||status===financeFilters.status)&&(!financeFilters.bank||d?.data.bank_id===financeFilters.bank);
   });
 }
 function financeParty(i){
@@ -30,7 +30,7 @@ function financeLedgerTable(f){
     const a=state.accounts.find(a=>a.id===i.account_id),d=ownDoc(a?.document_id),party=a?.kind==='commission'?d?.data.seller?.contact?.name||'Não informado':d?.data.party||d?.data.supplier||d?.data.customer_name||'Não informado';
     const status=i.account_status==='cancelled'?'Cancelada':Number(i.remaining)===0?'Baixada':Number(i.paid)>0?(i.kind==='receivable'?'Recebida parcialmente':'Paga parcialmente'):i.due_date<localDay()?'Atrasada':i.due_date===localDay()?'Vence hoje':'Em aberto';
     const actions=`${Number(i.remaining)>0&&i.account_status!=='cancelled'&&(i.kind!=='commission'||Number(i.released_remaining)>0)?`<button type="button" data-finance-payment="${esc(i.id)}">Registrar baixa</button>`:''}${d?.kind==='financial'&&i.account_status!=='cancelled'&&Number(i.paid)===0?button('Cancelar conta','finance.entry.cancel',d.id):''}`;
-    return `<tr><td><input type="checkbox" data-finance-select="${esc(i.id)}" aria-label="Selecionar ${esc(docLabel(a?.document_id))} ${esc(i.due_date)}" ${financeSelection.has(i.id)?'checked':''}></td><td>${esc(party)}</td><td>${esc(d?.data.history||docLabel(a?.document_id))}${d?.data.count>1?` <small class="inline-detail">(${d.data.sequence}/${d.data.count})</small>`:''}</td><td>${esc(typeof d?.data.payment_method==='object'?d.data.payment_method?.name||'—':d?.data.payment_method||'—')}</td><td>${esc(i.due_date.split('-').reverse().join('/'))}</td><td class="num" title="Valor original: ${esc(brl(i.amount))}">${brl(Number(i.remaining)>0?i.remaining:i.amount).replace(/^R\$\s*/,'')}</td><td><span class="badge ${status==='Atrasada'?'late':status==='Baixada'?'settled':'warn'}">${status}</span>${d?.data.occurrence&&d.data.occurrence!=='once'&&d.data.occurrence!=='installments'?`<span class="recurrence-icon" title="Conta recorrente">${icon('reload')}</span>`:''}</td><td><details class="row-menu"><summary aria-label="Ações da conta ${esc(docLabel(a?.document_id))} ${esc(i.due_date)}">${icon('more')}</summary><div><p>Valor original: ${brl(i.amount)}<br>Baixado: ${brl(i.paid)}<br>Saldo: ${brl(i.remaining)}</p>${actions||'Sem ação disponível'}</div></details></td></tr>`;
+    return `<tr><td><input type="checkbox" data-finance-select="${esc(i.id)}" aria-label="Selecionar ${esc(docLabel(a?.document_id))} ${esc(i.due_date)}" ${financeSelection.has(i.id)?'checked':''}></td><td>${esc(party)}</td><td>${esc(d?.data.history||docLabel(a?.document_id))}${d?.data.count>1?` <small class="inline-detail">(${d.data.sequence}/${d.data.count})</small>`:''}${(financeCategoryOf(i.account_id)||d?.data.category)?`<small>Categoria: ${esc(financeCategoryOf(i.account_id)||d.data.category)}</small>`:''}</td><td>${esc(typeof d?.data.payment_method==='object'?d.data.payment_method?.name||'—':d?.data.payment_method||'—')}</td><td>${esc(i.due_date.split('-').reverse().join('/'))}</td><td class="num" title="Valor original: ${esc(brl(i.amount))}">${brl(Number(i.remaining)>0?i.remaining:i.amount).replace(/^R\$\s*/,'')}</td><td><span class="badge ${status==='Atrasada'?'late':status==='Baixada'?'settled':'warn'}">${status}</span>${d?.data.occurrence&&d.data.occurrence!=='once'&&d.data.occurrence!=='installments'?`<span class="recurrence-icon" title="Conta recorrente">${icon('reload')}</span>`:''}</td><td><details class="row-menu"><summary aria-label="Ações da conta ${esc(docLabel(a?.document_id))} ${esc(i.due_date)}">${icon('more')}</summary><div><p>Valor original: ${brl(i.amount)}<br>Baixado: ${brl(i.paid)}<br>Saldo: ${brl(i.remaining)}</p>${actions||'Sem ação disponível'}</div></details></td></tr>`;
   }).map((html,index,all)=>{
     if(!financeGrouped)return html;
     const party=financeParty(rows[index]),next=rows[index+1];
@@ -93,7 +93,7 @@ document.addEventListener('click',async e=>{
   if(e.target.closest('#finance-print-grouped')){financeGrouped=true;render();setTimeout(()=>{window.print();financeGrouped=false;render();},50);return;}
   if(financeKindButton){financeLedgerKind=financeKindButton.dataset.financeKind;financeSelection.clear();render();}
   if(e.target.closest('#finance-filter-toggle')){const box=document.getElementById('finance-filter-options');box.hidden=!box.hidden;}
-  if(e.target.closest('#finance-clear')){financeFilters={from:'',to:'',status:''};financeLedgerQuery='';financeSelection.clear();render();}
+  if(e.target.closest('#finance-clear')){financeFilters={from:'',to:'',status:'',bank:financeFilters.bank};financeLedgerQuery='';financeSelection.clear();render();}
   const payment=e.target.closest('[data-finance-payment]');
   if(payment){const form=document.getElementById('payment-form');form.closest('.panel').classList.add('form-open');form.querySelector('[name=installment_id]').value=payment.dataset.financePayment;form.querySelector('[name=installment_id]').dispatchEvent(new Event('change',{bubbles:true}));form.scrollIntoView({behavior:'smooth'});}
   const product=e.target.closest('[data-stock-product]');
@@ -104,6 +104,7 @@ document.addEventListener('click',async e=>{
   }
 });
 document.addEventListener('change',e=>{
+  if(e.target.id==='finance-bank'){financeFilters.bank=e.target.value;financeSelection.clear();render();}
   if(e.target.matches('[data-finance-select]')){e.target.checked?financeSelection.add(e.target.dataset.financeSelect):financeSelection.delete(e.target.dataset.financeSelect);render();}
   if(e.target.id==='finance-all'){const checked=e.target.checked;financeMatches().forEach(i=>checked?financeSelection.add(i.id):financeSelection.delete(i.id));render();}
   if(e.target.matches('[data-product-select]')){e.target.checked?productSelection.add(e.target.dataset.productSelect):productSelection.delete(e.target.dataset.productSelect);render();}

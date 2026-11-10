@@ -134,3 +134,17 @@ def test_bank_slip_line_and_tax_guide_are_kept_like_bling(erp):
             "finance.entry.create",
             payload(reference="X-2", barcode="123", occurrence="once", count=1),
         )
+
+
+def test_financial_account_is_kept_and_must_exist(erp):
+    run(erp, "bank.create", {"id": "caixa-loja", "name": "Caixa da loja", "opening": "0"})
+    run(erp, "finance.entry.create", payload(bank_id="caixa-loja", occurrence="once", count=1))
+    with erp.connection() as db:
+        stored = [r[0] for r in db.execute("SELECT data FROM documents") if "caixa-loja" in r[0]]
+    assert stored and '"bank_id":"caixa-loja"' in stored[0]
+    with pytest.raises(ERPError, match="Conta financeira"):
+        run(
+            erp,
+            "finance.entry.create",
+            payload(reference="X-3", bank_id="nao-existe", occurrence="once", count=1),
+        )

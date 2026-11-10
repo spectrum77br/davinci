@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS own_contacts (
  document TEXT UNIQUE, status TEXT NOT NULL, data TEXT NOT NULL,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 """
-COMMANDS = {"contact.save"}
+COMMANDS = {"contact.save", "contact.delete", "contact.restore", "contact.link_seller"}
 STATES = set(
     "AC AL AM AP BA CE DF ES GO MA MG MS MT PA PB PE PI PR RJ RN RO RR RS SC SE SP TO EX".split()
 )
@@ -51,6 +51,8 @@ FIELDS = {
     "customer_since",
     "status",
     "roles",
+    "seller_id",
+    "birth_date",
 }
 
 
@@ -108,13 +110,83 @@ def normalize(raw):
         )
     except (ValueError, TypeError):
         raise ERPError("contact_date", "Data do cadastro inválida.") from None
+    try:
+        data["birth_date"] = (
+            date.fromisoformat(raw["birth_date"]).isoformat() if raw.get("birth_date") else ""
+        )
+    except (ValueError, TypeError):
+        raise ERPError("contact_date", "Data de nascimento inválida.") from None
+    data["seller_id"] = text(raw["seller_id"], "vendedor") if raw.get("seller_id") else ""
     return data
 
 
-def apply(erp, db, p):
+def _seller_exists(db, identifier):
+    try:
+        return bool(db.execute("SELECT 1 FROM own_sellers WHERE id=?", (identifier,)).fetchone())
+    except Exception:  # noqa: BLE001 - the seller register appears with its own schema
+        return False
+
+
+def _store(erp, db, row, data, status):
+    version = row["version"] + 1
+    db.execute(
+        "UPDATE own_contacts SET version=?,status=?,data=?,updated_at=? WHERE id=?",
+        (version, status, dumps(data), erp.now(), row["id"]),
+    )
+    return {"id": row["id"], "code": row["code"], "version": version, "external_writes": False}
+
+
+def _change(erp, db, p, kind):
+    """Bling's trash (excluir/restaurar) and the link to a seller, many contacts at once."""
+    if kind == "contact.link_seller":
+        if not isinstance(p, dict) or set(p) != {"ids", "seller_id"}:
+            raise ERPError("contact_fields", "Informe os contatos e o vendedor.")
+        ids = p["ids"]
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 500 or len(set(ids)) != len(ids):
+            raise ERPError("contact_fields", "Selecione de 1 a 500 contatos.")
+        seller = text(p["seller_id"], "vendedor") if p["seller_id"] else ""
+        if seller and not _seller_exists(db, seller):
+            raise ERPError("contact_seller", "Vendedor não encontrado.", 404)
+        results = []
+        for identifier in ids:
+            row = db.execute("SELECT * FROM own_contacts WHERE id=?", (identifier,)).fetchone()
+            if not row:
+                raise ERPError("contact_not_found", "Contato não encontrado.", 404)
+            if row["status"] == "deleted":
+                raise ERPError("contact_deleted", "Restaure o contato antes de alterar.", 409)
+            data = {**json.loads(row["data"]), "seller_id": seller}
+            results.append(_store(erp, db, row, data, row["status"]))
+        return {"contacts": results, "external_writes": False}
+    if not isinstance(p, dict) or set(p) != {"id", "version"}:
+        raise ERPError("contact_fields", "Informe o contato e a versão.")
+    row = db.execute(
+        "SELECT * FROM own_contacts WHERE id=?", (text(p["id"], "contato"),)
+    ).fetchone()
+    if not row:
+        raise ERPError("contact_not_found", "Contato não encontrado.", 404)
+    if isinstance(p["version"], bool) or p["version"] != row["version"]:
+        raise ERPError("contact_conflict", "O contato mudou. Atualize a tela antes.", 409)
+    data = json.loads(row["data"])
+    if kind == "contact.delete":
+        if row["status"] == "deleted":
+            raise ERPError("contact_deleted", "O contato já está na lixeira.", 409)
+        # Documents keep their own copy of the contact; the register only leaves the lists.
+        data = {**data, "status_before": row["status"], "status": "deleted"}
+        return _store(erp, db, row, data, "deleted")
+    if row["status"] != "deleted":
+        raise ERPError("contact_not_deleted", "O contato não está na lixeira.", 409)
+    status = data.pop("status_before", "active")
+    return _store(erp, db, row, {**data, "status": status}, status)
+
+
+def apply(erp, db, p, kind="contact.save"):
+    if kind != "contact.save":
+        return _change(erp, db, p, kind)
     if not isinstance(p, dict) or set(p) - {"id", "version", "data"}:
         raise ERPError("contact_fields", "Campos do cadastro não reconhecidos.")
     data = normalize(p.get("data"))
+    if data["seller_id"] and not _seller_exists(db, data["seller_id"]):
+        raise ERPError("contact_seller", "Vendedor não encontrado.", 404)
     previous = None
     if p.get("id"):
         previous = db.execute(
@@ -122,6 +194,8 @@ def apply(erp, db, p):
         ).fetchone()
         if not previous:
             raise ERPError("contact_not_found", "Contato não encontrado.", 404)
+        if previous["status"] == "deleted":
+            raise ERPError("contact_deleted", "Restaure o contato antes de editar.", 409)
         if isinstance(p.get("version"), bool) or p.get("version") != previous["version"]:
             raise ERPError(
                 "contact_conflict", "O contato mudou. Atualize a tela antes de salvar.", 409
