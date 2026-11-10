@@ -31,14 +31,14 @@ alert() {
 ssh_log() { journalctl -u ssh --since "$1" --no-pager -q 2>/dev/null || true; }
 
 # 1) Identidades de SSH (usuário + impressão da chave).
-identities() { grep "Accepted publickey" | sed -nE 's/.*Accepted publickey for ([^ ]+) from .* (SHA256:[A-Za-z0-9+\/=]+).*/\1 \2/p' | sort -u; }
+identities() { { grep "Accepted publickey" || true; } | sed -nE 's/.*Accepted publickey for ([^ ]+) from .* (SHA256:[A-Za-z0-9+\/=]+).*/\1 \2/p' | sort -u; }
 touch "$state/identities"
 if [ "${1:-}" = "--seed" ]; then
   ssh_log "-30d" | identities | sort -u "$state/identities" - -o "$state/identities"
 else
   ssh_log "$since" | identities | while read -r user key; do
     if ! grep -qxF "$user $key" "$state/identities"; then
-      ip=$(ssh_log "$since" | grep "Accepted publickey for $user " | grep -F "$key" | grep -oE "from [0-9a-f.:]+" | tail -1)
+      ip=$(ssh_log "$since" | { grep "Accepted publickey for $user " || true; } | { grep -F "$key" || true; } | { grep -oE "from [0-9a-f.:]+" || true; } | tail -1)
       alert "SSH com identidade nova: usuário $user, chave $key, $ip"
       echo "$user $key" >> "$state/identities"
     fi
@@ -49,9 +49,9 @@ fi
 files=(/etc/passwd /etc/group /etc/sudoers /root/.ssh/authorized_keys)
 for home in /home/*; do [ -f "$home/.ssh/authorized_keys" ] && files+=("$home/.ssh/authorized_keys"); done
 for f in /etc/sudoers.d/*; do [ -f "$f" ] && files+=("$f"); done
-sha256sum "${files[@]}" 2>/dev/null | sort -k2 > "$state/files.new"
+{ sha256sum "${files[@]}" 2>/dev/null || true; } | sort -k2 > "$state/files.new"
 if [ -s "$state/files" ] && [ "${1:-}" != "--seed" ]; then
-  diff "$state/files" "$state/files.new" | sed -nE 's/^> [0-9a-f]+  (.*)/\1/p' | while read -r changed; do
+  { diff "$state/files" "$state/files.new" || true; } | sed -nE 's/^> [0-9a-f]+  (.*)/\1/p' | while read -r changed; do
     alert "arquivo de acesso mudou: $changed"
   done
 fi
@@ -60,13 +60,13 @@ mv "$state/files.new" "$state/files"
 # 4) Rajadas de tentativas.
 fails=$(ssh_log "$since" | grep -cE "Invalid user|authenticating user .* \[preauth\]|Failed password" || true)
 [ "${1:-}" != "--seed" ] && [ "${fails:-0}" -gt 300 ] && alert "rajada de SSH: $fails tentativas falhas desde $since"
-total=$(fail2ban-client status sshd 2>/dev/null | sed -nE 's/.*Total banned:\s*([0-9]+).*/\1/p')
+total=$(fail2ban-client status sshd 2>/dev/null | sed -nE 's/.*Total banned:[[:space:]]*([0-9]+).*/\1/p')
 before=$(cat "$state/banned" 2>/dev/null || echo "${total:-0}")
 [ "${1:-}" != "--seed" ] && [ $(( ${total:-0} - before )) -gt 20 ] && alert "fail2ban bloqueou $(( ${total:-0} - before )) IPs desde $since"
 echo "${total:-0}" > "$state/banned"
 
 # 5) Portas públicas.
-ports=$(ss -tlnH | awk '{print $4}' | grep -vE '^(127\.|\[::1\]|172\.|10\.)' | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | tr '\n' ' ')
+ports=$(ss -tlnH | awk '{print $4}' | { grep -vE '^(127\.|\[::1\]|172\.|10\.)' || true; } | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | tr '\n' ' ')
 touch "$state/ports"
 for p in $ports; do
   case " 22 80 443 " in *" $p "*) continue ;; esac
