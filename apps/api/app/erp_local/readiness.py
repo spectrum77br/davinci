@@ -43,20 +43,19 @@ def gates(db):
             "id": "recipient_ml_tiktok_magalu",
             "area": "Lojas",
             "title": "Mercado Livre, TikTok e Magalu entregam CPF e endereço",
-            "state": LOCAL,
-            "detail": "Sondagem real de 06/11 mostrou os campos presentes. Falta provar a "
-            "correspondência na operação em paralelo. TikTok tem o telefone mascarado.",
+            "state": OK,
+            "detail": "Provado em paralelo com o Bling (10/11): Mercado Livre com nome, "
+            "documento e CEP iguais em 1.612 a 1.621 de 1.675 vendas; TikTok 94 de "
+            "95. Magalu: o Bling não guarda o CEP em 4 de 6.",
         },
         {
             "id": "recipient_shopee",
             "area": "Lojas",
             "title": "Shopee entrega nome e endereço (58% dos pedidos)",
-            "state": DECISION,
-            "detail": "CPF vem aberto até o envio; nome e endereço vêm mascarados em quase todos. "
-            "O Bling recebe tudo. O guia da Shopee para o Brasil promete nome, endereço e CPF ao "
-            "vendedor CNPJ de INVOICE_PENDING até PROCESSED e em devolução, com a declaração "
-            "ligada e os IPs informados. Na Mini, o primeiro pedido aberto veio sem máscara, "
-            "1 de 1. Falta confirmar com mais pedidos e estender às outras 13 lojas.",
+            "state": OK,
+            "detail": "Declaração de dados pessoais ligada nas 14 lojas (09/11). Pedidos "
+            "abertos vêm sem máscara (69 de 69) e, na conferência de 10/11, documento "
+            "e CEP iguais ao Bling em 123 de 123.",
         },
         {
             "id": "recipient_amazon",
@@ -64,8 +63,8 @@ def gates(db):
             "title": "Amazon entrega nome e endereço (6% dos pedidos)",
             "state": DECISION,
             "detail": "Só vêm cidade, UF, CEP e dados fiscais. Depende de solicitar à Amazon as "
-            "funções restritas Direct-to-Consumer Shipping e Tax Invoicing, com revisão de "
-            "segurança.",
+            "funções restritas Direct-to-Consumer Shipping e Tax Invoicing, com "
+            "revisão de segurança.",
         },
         {
             "id": "recipient_carrefour",
@@ -78,9 +77,10 @@ def gates(db):
             "id": "ingest",
             "area": "Lojas",
             "title": "Entrada contínua de pedidos por loja",
-            "state": LOCAL,
-            "detail": "Leitura real concluída em 06/11 numa conta por canal. Ciclo para o servidor "
-            "pronto e testado, sem deploy.",
+            "state": OK,
+            "detail": "No servidor desde 09/11: as 52 contas do DaVinci lidas a cada 5 minutos, "
+            "com releitura diária de 7 dias (30 na primeira) para Mercado Livre e "
+            "TikTok, envio e cupom do ML lidos à parte.",
         },
         {
             "id": "promotion",
@@ -95,15 +95,16 @@ def gates(db):
             "area": "Lojas",
             "title": "Estoque e preço publicados nas lojas",
             "state": PENDING,
-            "detail": "O DaVinci já publica pelos próprios clientes; falta homologar saldo do ERP "
-            "como fonte, conta a conta.",
+            "detail": "O DaVinci já publica pelos próprios clientes; falta homologar saldo do "
+            "ERP como fonte, conta a conta.",
         },
         {
             "id": "new_channels",
             "area": "Lojas",
             "title": "Temu, Shein e AliExpress",
             "state": PENDING,
-            "detail": "Sem conector próprio completo.",
+            "detail": "Temu: 43 pedidos em 30 dias, precisa conectar as 3 lojas no DaVinci. "
+            "Shein e AliExpress: 1 por mês cada, lançados à mão.",
         },
         {
             "id": "nfe_homologation",
@@ -119,58 +120,61 @@ def gates(db):
             "title": "Notas de faturador por percentual",
             "state": DECISION,
             "detail": "O emissor só emite com o valor e o item reais da venda. O fluxo por "
-            "percentual, com "
-            "SKU, nome e NCM trocados, não será reproduzido. Precisa de decisão com o contador.",
+            "percentual, com SKU, nome e NCM trocados, não será reproduzido. Precisa "
+            "de decisão com o contador.",
         },
         {
             "id": "labels",
             "area": "Logística",
             "title": "Etiquetas e frete reais por canal",
             "state": PENDING,
-            "detail": "Em 09/11 a etiqueta real veio direto de Mercado Livre, Shopee e TikTok, em "
-            "PDF, para "
-            "pedidos já organizados, sem mudar o envio. Faltam organizar envio pelo ERP, fila de "
-            "impressão, Amazon, Magalu e Carrefour.",
+            "detail": "Etiqueta real baixada de Mercado Livre, Shopee e TikTok (09/11), em lote "
+            "num PDF, rastreio lido, Objetos de postagem com lote de saída. Faltam "
+            "organizar o envio pelo ERP (só na troca), Amazon (papel restrito), "
+            "Magalu e Carrefour.",
         },
         {
             "id": "priority",
             "area": "Estoque",
             "title": "Prioridade de estoque e Flex",
             "state": LOCAL,
-            "detail": "Regras do robô atual reproduzidas em teste. Falta operar com pedidos reais.",
+            "detail": "Regras do robô reproduzidas; desde 09/11 o ERP lê a Prioridade da Tabela "
+            "de Preços do DaVinci e aplica na conferência (troca de lote sem "
+            "explicação caiu de 95 para 22 na Shopee). Flex e pedido num estoque só "
+            "ainda não entram na conferência; falta operar com pedidos reais.",
         },
         {
             "id": "bridge",
             "area": "DaVinci",
             "title": "DaVinci lendo e escrevendo no ERP",
             "state": LOCAL,
-            "detail": "API compatível testada com o cliente e o mapeador reais; chave pronta e "
-            "desligada. Falta rodar em paralelo contra o Bling.",
+            "detail": "As 24 chamadas que o DaVinci faz ao Bling (conferido no código em 09/11) "
+            "têm rota no ERP, com parcela, nota no pedido, objetos logísticos e "
+            "avisos (webhooks) na fila. Falta ligar endereço e token na troca.",
         },
         {
             "id": "service",
             "area": "DaVinci",
             "title": "ERP no servidor, com acesso e cópias",
             "state": LOCAL,
-            "detail": "Serviço, porta de acesso e rota preparados, sem deploy. Faltam certificado, "
-            "chaves e cópias no servidor.",
+            "detail": "Serviço, porta de acesso e rota preparados, sem deploy. Faltam "
+            "certificado, chaves e cópias no servidor.",
         },
         {
             "id": "finance_banks",
             "area": "Financeiro",
             "title": "Bancos, boletos e Pix reais",
             "state": PENDING,
-            "detail": "Extrato OFX e CSV com sugestão de conciliação pronto. Faltam boletos e Pix "
-            "reais, que "
-            "dependem de qual banco e contrato usar.",
+            "detail": "Extrato OFX e CSV com sugestão de conciliação pronto. Faltam boletos e "
+            "Pix reais, que dependem de qual banco e contrato usar.",
         },
         {
             "id": "inbound",
             "area": "Fiscal",
             "title": "Notas fiscais de entrada",
             "state": LOCAL,
-            "detail": "Importa o XML, vincula itens e lança compra, estoque e contas. A busca na "
-            "SEFAZ e a manifestação estão prontas, testadas só com SEFAZ simulada.",
+            "detail": "Importa o XML, vincula itens e lança compra, estoque e contas. A busca "
+            "na SEFAZ e a manifestação estão prontas, testadas só com SEFAZ simulada.",
         },
         {
             "id": "multi_company",
@@ -178,16 +182,17 @@ def gates(db):
             "title": "Multiempresa: 22 CNPJs emissores",
             "state": DECISION,
             "detail": "Empresas lidas das notas, com regime e numeração. Para cadastrar, falta "
-            "definir o responsável técnico e, para emitir, os certificados e a empresa de cada "
-            "loja.",
+            "definir o responsável técnico e, para emitir, os certificados e a "
+            "empresa de cada loja.",
         },
         {
             "id": "guides",
             "area": "Fiscal",
             "title": "GNRE e DARE-SP",
             "state": LOCAL,
-            "detail": "DIFAL por estado e lote GNRE gerados das notas. Falta validar no portal de "
-            "testes da GNRE. As 22 emissoras são de SP, sem DIFAL para o próprio estado.",
+            "detail": "DIFAL por estado e lote GNRE gerados das notas. Falta validar no portal "
+            "de testes da GNRE. As 22 emissoras são de SP, sem DIFAL para o próprio "
+            "estado.",
         },
         {
             "id": "access_profiles",
@@ -209,16 +214,21 @@ def gates(db):
             "id": "parallel_run",
             "area": "Virada",
             "title": "Operação em paralelo conferida",
-            "state": PENDING,
-            "detail": "Conferência automática com o Bling pronta (itens, lote, total, comprador "
-            "por hash), testada só com dados sintéticos. Falta rodar com dados reais.",
+            "state": LOCAL,
+            "detail": "Rodando todo dia com dados reais desde 09/11: itens iguais 98,7% a 99,8% "
+            "(contando troca de lote), total igual ML 97,7%, TikTok 99,7%, Shopee "
+            "94,5%, Amazon e Magalu 100%. Conferência diária de estoque começou em "
+            "10/11. Falta fechar a regra da Shopee e acompanhar o estoque por alguns "
+            "dias.",
         },
         {
             "id": "visual",
             "area": "Telas",
             "title": "Telas aprovadas uma a uma",
             "state": PENDING,
-            "detail": "Produtos comparados. Faltam as demais e Contas a Receber, negada no Bling.",
+            "detail": "Comparados com o Bling: pedidos (lista, detalhe, Ocorrências, menu da "
+            "linha, filtros), estoque, objetos de postagem, produtos. Faltam notas "
+            "fiscais, contas a pagar e receber, e a aprovação de quem usa.",
         },
     ]
 

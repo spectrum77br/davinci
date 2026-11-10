@@ -107,7 +107,5 @@ def test_readiness_never_declares_ready_on_local_evidence(erp):
     with erp.connection() as db:
         result = readiness.report(db)
     assert result["ready_to_replace"] is False
-    assert {"nfe_value_rule", "recipient_shopee", "recipient_amazon", "nfe_homologation"} <= set(
-        result["needs_owner"]
-    )
+    assert {"nfe_value_rule", "recipient_amazon", "nfe_homologation"} <= set(result["needs_owner"])
     assert all(g["state"] != "ok" for g in result["gates"] if g["id"] in {"labels", "parallel_run"})

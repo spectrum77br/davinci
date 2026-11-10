@@ -236,7 +236,7 @@ document.addEventListener('submit',event=>{
   }
   if(form.getAttribute('id')==='product-form'){
     command('product.create',{sku:payload.product_sku,name:payload.name,kind:payload.kind,price:payload.price,cost_price:payload.cost_price,unit:payload.unit,gtin:payload.gtin,gtin_tax:payload.gtin_tax,components:payload.kind==='kit'?formItems(form).map(({sku,quantity})=>({sku,quantity})):[]});
-  }else if(form.getAttribute('id')==='stock-form')command(payload.type==='T'?'stock.transfer':'stock.post',payload);
+  }else if(form.getAttribute('id')==='stock-form'){if(payload.type==='T'||payload.unit_cost==='')delete payload.unit_cost;command(payload.type==='T'?'stock.transfer':'stock.post',payload);}
   else if(form.getAttribute('id')==='depot-form')command('depot.create',payload);
   else if(form.getAttribute('id')==='order-form')submitSaleForm(form);
   else if(form.getAttribute('id')==='purchase-form')submitPurchaseForm(form);

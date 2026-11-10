@@ -1188,3 +1188,26 @@ test('order rows show the store mark, store number, Flex and first sale like Bli
   assert.equal(cell('SH-1').querySelector('.first-sale'),null);
 });
 
+
+test('stock transfer sends only the transfer fields, and an entry keeps the cost',async()=>{
+  const {dom,document:d,requests}=await setup({});
+  d.querySelector('nav [data-page=stock]').click();
+  const f=d.getElementById('stock-form');
+  f.querySelector('[name=type]').value='T';
+  f.querySelector('[name=type]').dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  f.querySelector('[name=quantity]').value='2';
+  f.querySelector('[name=reason]').value='teste';
+  f.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setTimeout(r,10));
+  const transfer=requests.find(r=>r.kind==='stock.transfer');
+  assert.ok(transfer&&!('unit_cost' in transfer.payload));
+  const g=d.getElementById('stock-form');
+  g.querySelector('[name=type]').value='E';
+  g.querySelector('[name=type]').dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  g.querySelector('[name=unit_cost]').value='42.5';
+  g.querySelector('[name=reason]').value='compra';
+  g.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setTimeout(r,10));
+  assert.equal(requests.find(r=>r.kind==='stock.post').payload.unit_cost,'42.5');
+  dom.window.close();
+});
