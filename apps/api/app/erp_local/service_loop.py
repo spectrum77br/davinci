@@ -111,6 +111,10 @@ def main():
             stock_daily(erp, args.database.parent / f"conferencia-estoque-{today}.json")
         for account, result in once(erp).items():
             log.info("%s %s", account, result.get("reception", result).get("state"))
+        if os.environ.get("ERP_READ_TRANSPORT") == "local":
+            from app.erp_local import bling_mirror
+
+            log.info("espelho do Bling %s", bling_mirror.run(erp))
         if os.environ.get(recipient_capture.CAPTURE_ENV) == "1":
             from app.erp_local import ml_shipping, store_labels
 

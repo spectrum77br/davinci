@@ -467,6 +467,16 @@ class LocalERP:
 
             return apply_situation(self, db, key, p)
 
+        if kind == "order.discard":
+            from app.erp_local.bling_compat import discard
+
+            return discard(self, db, key, p)
+
+        if kind == "stock.mirror":
+            from app.erp_local import bling_mirror
+
+            return bling_mirror.apply_command(self, db, key, p)
+
         if kind == "catalog.follow.add":
             from app.erp_local import catalog_follow
 

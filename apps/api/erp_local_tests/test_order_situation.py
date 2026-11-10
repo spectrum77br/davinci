@@ -99,3 +99,15 @@ def test_empty_note_without_change_is_refused_and_removal_keeps_the_audit(erp):
             "SELECT removed_by FROM order_occurrences WHERE id=?", (first,)
         ).fetchone()
     assert kept["removed_by"] == "operador local"
+
+
+def test_only_a_cancelled_order_without_effects_goes_to_the_trash(erp):
+    order = sale(erp, "d1")
+    with pytest.raises(ERPError, match="cancelado"):
+        erp.command("d2", "order.discard", {"id": order, "reason": "teste"})
+    erp.command("d3", "order.cancel", {"id": order})
+    erp.command("d4", "order.discard", {"id": order, "reason": "pedido de teste"})
+    with erp.connection() as db:
+        _, data = erp.document(db, order, "order")
+    assert data["discarded"]["reason"] == "pedido de teste"
+    assert all(o["id"] != order for o in bling_compat._orders(erp))

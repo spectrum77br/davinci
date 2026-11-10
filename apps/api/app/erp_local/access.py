@@ -47,7 +47,12 @@ PROFILES = {
     "financeiro": ["financeiro"],
     "expedicao": ["expedicao"],
     "consulta": [],
+    # Active DaVinci users while Bling owns the stores: they see and print labels, never post.
+    "acompanhamento": ["cadastros", "vendas", "estoque", "expedicao", "integracoes"],
 }
+FOLLOW = "acompanhamento"
+# Reading actions a follower may still run: labels, tracking and papers of the stores' sales.
+FOLLOW_POSTS = ("/api/erp-local/store-sales/",)
 # What each area keeps out of the page data for people without it.
 STATE_AREAS = {
     "finance": "financeiro",
@@ -99,15 +104,24 @@ def profiles(db):
     return {**PROFILES, **stored, ADMIN: PROFILES[ADMIN]}
 
 
-def who(db, actor):
-    """Administrators named on the server always get in, so nobody is locked out of granting."""
+def who(db, actor, role=None):
+    """Administrators named on the server, or admins in DaVinci, always get in, so nobody is locked
+    out of granting. Other active DaVinci users without a profile here follow, read-only."""
     admins = {a.strip().casefold() for a in os.environ.get(ADMINS_ENV, "").split(",") if a.strip()}
-    if actor and actor.casefold() in admins:
+    if actor and (actor.casefold() in admins or role == "admin"):
         return {"actor": actor, "profile": ADMIN, "areas": PROFILES[ADMIN], "admin": True}
     row = db.execute(
         "SELECT profile FROM access_users WHERE actor=? AND active=1", (actor or "",)
     ).fetchone()
     if not row:
+        if actor and role == "user":
+            return {
+                "actor": actor,
+                "profile": FOLLOW,
+                "areas": PROFILES[FOLLOW],
+                "admin": False,
+                "read_only": True,
+            }
         return None
     known = profiles(db)
     return {
@@ -118,19 +132,23 @@ def who(db, actor):
     }
 
 
-def require(db, actor, area, *, admin_only=False):
-    person = who(db, actor)
+def require(db, actor, area, *, admin_only=False, role=None, write=False):
+    person = who(db, actor, role)
     if not person:
         raise ERPError("access_unknown", "Usuário sem acesso ao ERP.", 403)
     if person["admin"]:
         return person
+    if write and person.get("read_only"):
+        raise ERPError(
+            "access_follow", "Enquanto o Bling cuida das lojas, só administradores lançam.", 403
+        )
     if admin_only or area is None or area not in person["areas"]:
         raise ERPError("access_denied", "Seu perfil não permite esta operação.", 403)
     return person
 
 
-def check_command(db, actor, kind):
-    return require(db, actor, area_of(kind))
+def check_command(db, actor, kind, role=None):
+    return require(db, actor, area_of(kind), role=role, write=True)
 
 
 def blank(value):

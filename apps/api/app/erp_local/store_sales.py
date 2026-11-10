@@ -39,8 +39,14 @@ def _names(db):
 
 
 def _bling_orders(db):
-    """Bling's own number and situation for each store sale, from the read-only reference."""
+    """Bling's own number and situation for each store sale: the live mirror, else the reference."""
     import sqlite3
+
+    from app.erp_local import bling_mirror
+
+    live = bling_mirror.orders(db)
+    if live:
+        return live
 
     try:
         rows = db.execute("SELECT data FROM reference_rows WHERE kind='orders'").fetchall()

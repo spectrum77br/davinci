@@ -20,7 +20,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from app.erp_local import categories, contacts, product_details, product_structures
-from app.erp_local.core import ERPError
+from app.erp_local.core import ERPError, text
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS compat_ids (
@@ -405,7 +405,32 @@ def _order_detail(erp, db, doc):
 
 
 def _orders(erp):
-    return erp.snapshot()["orders"]
+    return [o for o in erp.snapshot()["orders"] if not o["data"].get("discarded")]
+
+
+def discard(erp, db, key, p):
+    """Bling's trash can on an order: only a cancelled one with no account, note or shipment.
+    It leaves the lists; the document and its history stay for the audit."""
+    if not isinstance(p, dict) or set(p) != {"id", "reason"}:
+        raise ERPError("order_discard", "Informe o pedido e o motivo.")
+    doc, data = erp.document(db, p["id"], "order")
+    if doc["status"] != "cancelled":
+        raise ERPError("order_discard", "Só pedido cancelado pode ir para a lixeira.", 409)
+    blockers = (
+        ("SELECT 1 FROM accounts WHERE document_id=? AND status!='cancelled'", "conta"),
+        ("SELECT 1 FROM logistics_shipments WHERE id=?", "envio"),
+        ("SELECT 1 FROM fiscal_invoices WHERE order_id=?", "nota fiscal"),
+    )
+    for sql, label in blockers:
+        try:
+            found = db.execute(sql, (doc["id"],)).fetchone()
+        except Exception:  # noqa: BLE001 - a module never used here has no table yet
+            found = None
+        if found:
+            raise ERPError("order_discard", f"O pedido tem {label}; não vai para a lixeira.", 409)
+    data["discarded"] = {"at": erp.now(), "reason": text(p["reason"], "motivo", 200)}
+    erp.update_document(db, doc["id"], doc["status"], data)
+    return {"id": doc["id"], "discarded": True, "external_writes": False}
 
 
 def _command(erp, kind, payload):

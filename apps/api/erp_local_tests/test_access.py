@@ -125,3 +125,19 @@ def test_outside_the_gate_nothing_changes(tmp_path, monkeypatch):
     monkeypatch.delenv("ERP_TRUST_PROXY", raising=False)
     client = TestClient(create_app(tmp_path / "a.sqlite3"), base_url="http://127.0.0.1:8765")
     assert client.get("/api/erp-local/state").status_code == 200
+
+
+def test_davinci_roles_map_to_erp_access_while_bling_owns_the_stores(erp):
+    from app.erp_local import access
+    from app.erp_local.core import ERPError
+
+    with erp.connection() as db:
+        boss = access.who(db, "dono@exemplo.com", "admin")
+        team = access.who(db, "equipe@exemplo.com", "user")
+        assert boss["admin"] and boss["profile"] == access.ADMIN
+        assert team["profile"] == access.FOLLOW and team["read_only"]
+        assert access.who(db, "anonimo@exemplo.com", None) is None
+        assert access.require(db, "equipe@exemplo.com", "vendas", role="user")
+        with pytest.raises(ERPError, match="só administradores"):
+            access.check_command(db, "equipe@exemplo.com", "order.save", "user")
+        assert access.check_command(db, "dono@exemplo.com", "order.save", "admin")

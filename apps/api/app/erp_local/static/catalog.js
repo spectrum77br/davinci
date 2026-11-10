@@ -51,7 +51,7 @@ async function loadStockHistory(){
 function stockRailInfo(){
   const product=state.products.find(p=>p.sku===selectedStockSku);if(!product)return '';
   const balances=product.balances.filter(b=>!selectedStockDepot||b.depot===selectedStockDepot),name=id=>state.deposits.find(d=>d.id===id)?.name||id;
-  const facts=[['Entradas',stockHistory?qty(stockHistory.entries):'…'],['Saídas',stockHistory?qty(stockHistory.exits):'…'],['Saldo atual',qty(visibleStockTotal(balances,'physical'))],['Reservado',qty(visibleStockTotal(balances,'reserved'))],['Disponível',qty(visibleStockTotal(balances,'available'))]];
+  const bling=stockHistory?.bling,facts=[['Entradas',stockHistory?qty(stockHistory.entries):'…'],['Saídas',stockHistory?qty(stockHistory.exits):'…'],['Saldo atual',qty(visibleStockTotal(balances,'physical'))],...(bling?[['Reservado no Bling',qty(bling.reserved)],['Disponível no Bling',qty(bling.available)]]:[['Reservado',qty(visibleStockTotal(balances,'reserved'))],['Disponível',qty(visibleStockTotal(balances,'available'))]])];
   const depots=product.balances.map(b=>`<tr><td>${esc(name(b.depot))}</td><td>${qty(b.physical)}</td></tr>`).join('');
   return `<div class="rail-info"><h3>Informações</h3>${facts.map(([k,v])=>`<p>${k}</p><strong>${v}</strong>`).join('')}</div><div class="rail-info"><h3>Saldos por depósito</h3><table class="rail-table"><thead><tr><th>Depósito</th><th>Saldo</th></tr></thead><tbody>${depots}<tr><td>Todos</td><td>${qty(visibleStockTotal(product.balances,'physical'))}</td></tr></tbody></table></div>`;
 }

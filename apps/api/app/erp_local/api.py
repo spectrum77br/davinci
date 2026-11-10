@@ -75,13 +75,20 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         ):
             return None
         actor = request.headers.get("x-erp-actor")
+        role = request.headers.get("x-erp-role")
         try:
             with erp.connection() as db:
                 if request.method in {"GET", "HEAD", "OPTIONS"} or path.endswith("/commands"):
-                    if not access.who(db, actor):
+                    if not access.who(db, actor, role):
                         raise ERPError("access_unknown", "Usuário sem acesso ao ERP.", 403)
                 else:
-                    access.require(db, actor, access.route_area(path))
+                    access.require(
+                        db,
+                        actor,
+                        access.route_area(path),
+                        role=role,
+                        write=not path.startswith(access.FOLLOW_POSTS),
+                    )
         except ERPError as error:
             return JSONResponse({"code": error.code, "message": error.message}, status_code=403)
         return None
@@ -200,7 +207,9 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         if not access.enforced():
             return payload
         with erp.connection() as db:
-            person = access.who(db, request.headers.get("x-erp-actor"))
+            person = access.who(
+                db, request.headers.get("x-erp-actor"), request.headers.get("x-erp-role")
+            )
             payload["access"] = access.snapshot(db)
         return {**access.filter_state(payload, person), "me": person}
 
@@ -650,7 +659,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         actor = forwarded if forwarded and os.environ.get("ERP_TRUST_PROXY") == "1" else None
         if actor:
             with erp.connection() as db:
-                access.check_command(db, actor, body.kind)
+                access.check_command(db, actor, body.kind, request.headers.get("x-erp-role"))
             return erp.command(body.operation_key, body.kind, body.payload, actor=actor)
         return erp.command(body.operation_key, body.kind, body.payload)
 
@@ -992,9 +1001,14 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         deltas = [Decimal(r["physical_delta"]) for r in rows]
         entries = sum((d for d in deltas if d > 0), Decimal(0))
         exits = sum((-d for d in deltas if d < 0), Decimal(0))
+        from app.erp_local import bling_mirror
+
+        with erp.connection() as db:
+            bling = bling_mirror.stock_of(db, sku)
         return {
             "items": list(reversed(items[-100:])),
             "total": len(rows),
+            "bling": bling,
             "entries": str(entries),
             "exits": str(exits),
             "sku": sku,
