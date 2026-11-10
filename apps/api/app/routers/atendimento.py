@@ -249,6 +249,7 @@ from app.services.atendimento.constantes import (
     ASSUNTOS_SO_PESSOA_NO_AGENTE,
     AUTOR_CLIENTE,
     AUTOR_LOJA,
+    AUTOR_MEDIADOR,
     AUTOR_SISTEMA,
     CANAIS_POR_PLATAFORMA,
     CANAIS_SEMPRE_POS_VENDA,
@@ -1849,6 +1850,17 @@ def _entrega_do_zap(m: AtendimentoMensagem) -> dict[str, Any]:
     }
 
 
+def _texto_do_mediador(m: AtendimentoMensagem, texto: str | None) -> str | None:
+    """A fala do mediador do ML gravada em HTML antes de 09/11/2026 sai como texto
+    (10/11/2026, o dono: "veio com essa questão o html"). A linha gravada não muda;
+    as novas já chegam limpas (`reclamacoes.mensagem_da_reclamacao`)."""
+    if m.autor != AUTOR_MEDIADOR:
+        return texto
+    from app.services.atendimento.reclamacoes import texto_sem_html
+
+    return texto_sem_html(texto)
+
+
 def _mensagem_out(
     m: AtendimentoMensagem, *, conversa: AtendimentoConversa, nomes: dict[UUID, str | None]
 ) -> MensagemOut:
@@ -1876,7 +1888,7 @@ def _mensagem_out(
         # da plataforma gravado só com o rótulo ("[Mensagem]") — o pedido de
         # devolução/reembolso, o envio, o convite para avaliar, a variação — sai
         # com o texto dele; a linha gravada não muda.
-        texto=cartoes_plataforma.texto_para_exibir(m),
+        texto=_texto_do_mediador(m, cartoes_plataforma.texto_para_exibir(m)),
         anexos=list(m.anexos or []),
         # Resposta que não saiu não tem relógio da plataforma: vale a hora
         # em que a pessoa apertou "Enviar".

@@ -1076,6 +1076,19 @@ def test_fala_do_mediador_em_html_vira_texto():
         assert texto_sem_html(t) == t
 
 
+def test_fala_antiga_do_mediador_sai_como_texto_na_tela():
+    """10/11/2026, o dono: a fala gravada em HTML antes da correção de 09/11 aparecia crua."""
+    from types import SimpleNamespace
+
+    from app.routers.atendimento import _texto_do_mediador
+
+    html = '<p><span style="white-space: pre-wrap;">Ol&aacute;, Equipe Marquezini.&nbsp;</span></p>'
+    assert _texto_do_mediador(SimpleNamespace(autor="mediador"), html) == "Olá, Equipe Marquezini."
+    # Só a do mediador: o cliente e a loja saem como foram gravados.
+    assert _texto_do_mediador(SimpleNamespace(autor="cliente"), html) == html
+    assert _texto_do_mediador(SimpleNamespace(autor="mediador"), None) is None
+
+
 async def test_cliente_ml_so_le(monkeypatch):
     feitas: list[tuple[str, str, dict]] = []
 
