@@ -526,7 +526,8 @@ async def _em_enviar(db, nome="barbosa", enviar_desde=T - timedelta(hours=1)):
 
 def test_madrugada_volta_para_a_vespera():
     """09/11/2026, o dono: o brinde às 20 h. A Shopee cancela com 24 h: o que cairia de
-    madrugada sai às 20h59 da véspera, nunca na abertura do dia seguinte."""
+    madrugada sai às 20h45 da véspera, nunca na abertura do dia seguinte. 10/11/2026: 20h45
+    e não 20h59 — o motor roda nos minutos pares e a 20h59 só era vista às 21h00, fechada."""
     janela = (time(9, 0), time(21, 0))
     sp = ZoneInfo("America/Sao_Paulo")
 
@@ -535,15 +536,15 @@ def test_madrugada_volta_para_a_vespera():
 
     assert cat.devido_antes_da_noite(em(10, 15), janela) == em(10, 15)
     assert cat.devido_antes_da_noite(em(10, 9), janela) == em(10, 9)
-    assert cat.devido_antes_da_noite(em(10, 21), janela) == em(10, 20, 59)
-    assert cat.devido_antes_da_noite(em(10, 23, 30), janela) == em(10, 20, 59)
-    assert cat.devido_antes_da_noite(em(10, 5), janela) == em(9, 20, 59)
-    assert cat.devido_antes_da_noite(em(10, 8, 59), janela) == em(9, 20, 59)
+    assert cat.devido_antes_da_noite(em(10, 21), janela) == em(10, 20, 45)
+    assert cat.devido_antes_da_noite(em(10, 23, 30), janela) == em(10, 20, 45)
+    assert cat.devido_antes_da_noite(em(10, 5), janela) == em(9, 20, 45)
+    assert cat.devido_antes_da_noite(em(10, 8, 59), janela) == em(9, 20, 45)
     assert cat.devido_antes_da_noite(em(10, 3), None) == em(10, 3)
-    # Pedido das 6h: 20 h depois seria 2h, volta para as 20h59 do mesmo dia (15 h).
+    # Pedido das 6h: 20 h depois seria 2h, volta para as 20h45 do mesmo dia (15 h).
     criado = em(10, 6)
     devido = cat.devido_antes_da_noite(criado + timedelta(hours=20), janela)
-    assert devido == em(10, 20, 59) and criado < devido < criado + timedelta(hours=24)
+    assert devido == em(10, 20, 45) and criado < devido < criado + timedelta(hours=24)
 
 
 @pytest.mark.parametrize(
@@ -552,9 +553,9 @@ def test_madrugada_volta_para_a_vespera():
         # 20 h depois cai às 8h30: as 9h vêm com 20h30 de pedido, antes do cancelamento.
         (12, 30, (11, 9, 0)),
         # 20 h depois cai às 5h30: as 9h seriam 23h30 de pedido, volta para a véspera.
-        (9, 30, (10, 20, 59)),
-        # 20 h depois cai às 2h: volta para as 20h59 do mesmo dia (15 h de pedido).
-        (6, 0, (10, 20, 59)),
+        (9, 30, (10, 20, 45)),
+        # 20 h depois cai às 2h: volta para as 20h45 do mesmo dia (15 h de pedido).
+        (6, 0, (10, 20, 45)),
         # Dentro da janela: 20 h cravadas.
         (15, 0, (11, 11, 0)),
     ],
@@ -584,11 +585,74 @@ def test_catalogo_do_lembrete():
             180,
         )
         assert aut.janela == (time(9, 0), time(21, 0)) and not aut.antes_da_noite
+        assert aut.antes_da_noite_desde == timedelta(hours=1)
         assert "brinde_oferta" not in (aut.lacunas or ())
         assert "AirTag" not in str(aut.partes) and "brinde" not in str(aut.partes)
         # Não é oferta: a IA segue respondendo e o botão do brinde não aparece.
         assert codigo not in AUTOMACOES_BRINDE and codigo in AUTOMACOES_NAO_PAGO_AVISO
     assert cat.CATALOGO["tiktok_nao_pago_brinde"].atraso_min == 1200
+
+
+@pytest.mark.parametrize(
+    ("hora", "minuto", "esperado"),
+    [
+        # 10/11/2026, o dono: o pedido das 18h38 levava o lembrete às 9h04 e o brinde às
+        # 14h40. Agora o lembrete sai às 20h45 da mesma noite, longe do brinde.
+        (18, 38, (10, 20, 45)),
+        # Com 1 h cravada de pedido ainda vai.
+        (19, 45, (10, 20, 45)),
+        # Menos de 1 h de pedido às 20h45: espera as 9h, como antes.
+        (19, 50, (11, 9, 0)),
+        (22, 30, (11, 9, 0)),
+        # De madrugada: 3 h depois ainda é antes das 9h, sai às 9h (nunca na véspera).
+        (5, 0, (10, 9, 0)),
+        # Dentro da janela: 3 h cravadas.
+        (15, 0, (10, 18, 0)),
+        (17, 59, (10, 20, 59)),
+    ],
+)
+def test_lembrete_da_noite_sai_antes_de_fechar(hora, minuto, esperado):
+    sp = ZoneInfo("America/Sao_Paulo")
+    for codigo in ("shopee_nao_pago_lembrete", "tiktok_nao_pago_lembrete"):
+        aut = cat.CATALOGO[codigo]
+        regra = SimpleNamespace(atraso_min=180, janela_inicio=time(9, 0), janela_fim=time(21, 0))
+        criado = datetime(2026, 11, 10, hora, minuto, tzinfo=sp)
+        devido = automacoes._devido_do_nao_pago(aut, regra, criado)
+        sai = cat.ajustar_janela(devido, time(9), time(21))
+        dia, h, m = esperado
+        assert sai == datetime(2026, 11, dia, h, m, tzinfo=sp), codigo
+        assert sai >= criado + timedelta(hours=1)
+
+
+def test_o_nao_pago_das_20h59_ainda_sai_na_rodada_das_21h():
+    """10/11/2026: o motor roda nos minutos pares; o que vence às 20h59 só é visto às
+    21h00, já fechado, e às 9h o pedido já foi cancelado. Sai até 15 min depois."""
+    sp = ZoneInfo("America/Sao_Paulo")
+    janela = (time(9, 0), time(21, 0))
+
+    def em(hora, minuto=0, segundo=0):
+        return datetime(2026, 11, 10, hora, minuto, segundo, tzinfo=sp)
+
+    brinde = cat.CATALOGO[BRINDE]
+    lembrete = cat.CATALOGO["shopee_nao_pago_lembrete"]
+    for aut in (brinde, lembrete):
+        assert cat.vale_depois_de_fechar(aut, em(20, 59), em(21, 0, 3), janela)
+        assert cat.vale_depois_de_fechar(aut, em(20, 59), em(21, 14), janela)
+        assert not cat.vale_depois_de_fechar(aut, em(20, 59), em(21, 15), janela)
+        # Venceu já fechado (o motor parado, a leitura atrasada): espera a manhã.
+        assert not cat.vale_depois_de_fechar(aut, em(21, 2), em(21, 4), janela)
+        assert not cat.vale_depois_de_fechar(aut, em(20, 59), em(21, 0), None)
+    # As outras automações seguem o horário à risca.
+    outra = next(a for a in cat.CATALOGO.values() if a.tipo not in cat.TIPOS_NAO_PAGO_AO_VIVO)
+    assert not cat.vale_depois_de_fechar(outra, em(20, 59), em(21, 0, 3), janela)
+
+    regra = SimpleNamespace(atraso_min=1200, janela_inicio=time(9, 0), janela_fim=time(21, 0))
+    linha = SimpleNamespace(devido_em=em(20, 59))
+    agora = em(21, 0, 3)
+    _, abre = automacoes._validade_e_abertura(brinde, regra, linha, agora)
+    assert abre == agora
+    _, abre = automacoes._validade_e_abertura(brinde, regra, linha, em(21, 20))
+    assert abre == datetime(2026, 11, 11, 9, 0, tzinfo=sp)
 
 
 async def test_o_brinde_de_20_h_nasce_com_a_vespera(db, sem_plataforma):  # noqa: F811

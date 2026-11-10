@@ -1841,11 +1841,20 @@ async def _chats_duoke_da_avaliacao(
 def _devido_do_nao_pago(aut: Any, regra: Any, criado: datetime) -> datetime:
     """Quando sai a do não pago: a criação mais o atraso da regra. O brinde de 20 h
     (`antes_da_noite`, 09/11/2026) que cairia de madrugada espera a abertura da manhã
-    se ela vier antes do cancelamento da plataforma; senão, volta para a véspera."""
+    se ela vier antes do cancelamento da plataforma; senão, volta para a véspera. O
+    lembrete de 3 h (`antes_da_noite_desde`, 10/11/2026) que passaria das 21h sai antes
+    de fechar se o pedido já tiver 1 h; senão, espera a manhã."""
     devido = criado + timedelta(minutes=regra.atraso_min)
-    janela = cat.janela_da_regra(regra, aut) if aut.antes_da_noite else None
-    if janela and cat.ajustar_janela(devido, *janela) > criado + cat.ULTIMA_HORA_NAO_PAGO:
-        devido = cat.devido_antes_da_noite(devido, janela)
+    janela = cat.janela_da_regra(regra, aut)
+    if not janela:
+        return devido
+    if aut.antes_da_noite:
+        if cat.ajustar_janela(devido, *janela) > criado + cat.ULTIMA_HORA_NAO_PAGO:
+            devido = cat.devido_antes_da_noite(devido, janela)
+    elif aut.antes_da_noite_desde is not None:
+        antes = cat.devido_antes_da_noite(devido, janela)
+        if antes < devido and antes >= criado + aut.antes_da_noite_desde:
+            devido = antes
     return devido
 
 
@@ -2205,6 +2214,8 @@ def _validade_e_abertura(
     janela = cat.janela_da_regra(regra, aut)
     validade = cat.validade_ate(aut, linha.devido_em, janela)
     abre = cat.ajustar_janela(agora, *janela) if janela else agora
+    if abre > agora and cat.vale_depois_de_fechar(aut, linha.devido_em, agora, janela):
+        abre = agora
     return validade, abre
 
 

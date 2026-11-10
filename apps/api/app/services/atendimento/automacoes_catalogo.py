@@ -142,6 +142,13 @@ TIPO_NAO_PAGO_LEMBRETE = "nao_pago_lembrete"
 ULTIMA_HORA_NAO_PAGO = timedelta(hours=23)
 # Os do não pago que conferem na plataforma, na hora, que o pedido segue não pago.
 TIPOS_NAO_PAGO_AO_VIVO = (TIPO_NAO_PAGO_BRINDE, TIPO_NAO_PAGO_LEMBRETE)
+# O que volta para antes da noite (`devido_antes_da_noite`) sai este tanto antes de a
+# janela fechar: o motor roda de 2 em 2 min e a última rodada aberta é a das 20h58 —
+# a 20h59 de antes (09/11/2026) só era vista às 21h00, já fechada (10/11/2026).
+ANTES_DE_FECHAR = timedelta(minutes=15)
+# O não pago que venceu dentro da janela e a última rodada não alcançou ainda sai até
+# este tanto depois de fechar (`vale_depois_de_fechar`).
+TOLERANCIA_DEPOIS_DE_FECHAR = timedelta(minutes=15)
 TIPO_AVALIACAO_BOA = "avaliacao_boa"
 TIPO_AVALIACAO_RUIM = "avaliacao_ruim"
 
@@ -706,6 +713,10 @@ class Automacao:
     # O que cairia fora da janela VOLTA para o fim da janela anterior em vez de esperar a
     # abertura (`devido_antes_da_noite`): o brinde do não pago às 20 h (09/11/2026).
     antes_da_noite: bool = False
+    # O que cairia DEPOIS de fechar sai antes de fechar (`devido_antes_da_noite`) se ainda
+    # ficar este tanto depois do evento; senão espera a abertura. O lembrete do não pago
+    # (10/11/2026, o dono): o pedido das 18h38 levava o lembrete às 9h e o brinde às 14h38.
+    antes_da_noite_desde: timedelta | None = None
     # Do pedido, mas comparada com o Duoke NA CONVERSA (o TikTok: o aviso de
     # pedido da TikTok não traz o nº, e a conversa é a do comprador).
     compara_na_conversa: bool = False
@@ -1023,7 +1034,7 @@ def _montar() -> dict[str, Automacao]:
             familia=FAMILIA_PEDIDO,
             descricao=(
                 "Pedido criado e ainda não pago → 20 h depois da criação, das 9h às 21h (de "
-                "madrugada, espera as 9h; se passar de 23 h de pedido, sai às 20h59 da véspera: a "
+                "madrugada, espera as 9h; se passar de 23 h de pedido, sai às 20h45 da véspera: a "
                 "Shopee cancela com 24 h), uma vez "
                 "por pedido e uma por comprador em 7 dias: 1 AirTag para celular, 1 chaveiro para "
                 "mala. Em Enviar, confere na Shopee, na hora, que o pedido segue não pago. O Duoke "
@@ -1058,14 +1069,17 @@ def _montar() -> dict[str, Automacao]:
             alvo=ALVO_PEDIDO,
             familia=FAMILIA_PEDIDO,
             descricao=(
-                "Pedido criado e ainda não pago → 3 h depois da criação, das 9h às 21h, uma vez "
+                "Pedido criado e ainda não pago → 3 h depois da criação, das 9h às 21h (o que "
+                "passaria das 21h sai às 20h45, se o pedido tiver 1 h; senão, às 9h), uma vez "
                 "por pedido e uma por comprador em 7 dias: pergunta se aconteceu algum problema, "
                 "sem brinde (o brinde vai às 20 h). Em Enviar, confere na Shopee, na hora, que o "
                 "pedido segue não pago. O Duoke não manda esta mensagem."
             ),
             partes=(dict(PARTE_CARTAO), _texto(TEXTO_NAO_PAGO_LEMBRETE)),
             atraso_min=180,
-            # A espera da madrugada: o que vence às 21h01 sai às 9h (12 h depois).
+            # A noite (10/11/2026): o que passaria das 21h sai às 20h45 com 1 h de pedido
+            # (`antes_da_noite_desde`), longe do brinde; o resto espera as 9h.
+            antes_da_noite_desde=_h(1),
             validade=_h(14),
             lojas_duoke=SHOPEE_BRINDE,
             janela=(time(9, 0), time(21, 0)),
@@ -1261,7 +1275,7 @@ def _montar() -> dict[str, Automacao]:
             familia=FAMILIA_PEDIDO,
             descricao=(
                 "Pedido criado e ainda não pago → 20 h depois da criação, das 9h às 21h (de "
-                "madrugada, espera as 9h; se passar de 23 h de pedido, sai às 20h59 da véspera: o "
+                "madrugada, espera as 9h; se passar de 23 h de pedido, sai às 20h45 da véspera: o "
                 "TikTok cancela com 24 h), uma vez "
                 "por pedido e uma por comprador em 7 dias: 1 AirTag para celular, 1 chaveiro para "
                 "mala. Só para quem já tem conversa com a loja. Em Enviar, confere no TikTok, na "
@@ -1292,7 +1306,8 @@ def _montar() -> dict[str, Automacao]:
             alvo=ALVO_PEDIDO,
             familia=FAMILIA_PEDIDO,
             descricao=(
-                "Pedido criado e ainda não pago → 3 h depois da criação, das 9h às 21h, uma vez "
+                "Pedido criado e ainda não pago → 3 h depois da criação, das 9h às 21h (o que "
+                "passaria das 21h sai às 20h45, se o pedido tiver 1 h; senão, às 9h), uma vez "
                 "por pedido e uma por comprador em 7 dias: pergunta se aconteceu algum problema, "
                 "sem brinde (o brinde vai às 20 h). Só para quem já tem conversa com a loja. Em "
                 "Enviar, confere no TikTok, na hora, que o pedido segue não pago. O Duoke não "
@@ -1300,7 +1315,8 @@ def _montar() -> dict[str, Automacao]:
             ),
             partes=(_texto(TEXTO_NAO_PAGO_LEMBRETE),),
             atraso_min=180,
-            # O que vence às 21h01 sai às 9h, com 15 h de pedido (o TikTok cancela às 24 h).
+            # A noite como na Shopee (10/11/2026): 20h45 com 1 h de pedido, senão as 9h.
+            antes_da_noite_desde=_h(1),
             validade=_h(14),
             lojas_duoke=TIKTOK_BRINDE,
             janela=(time(9, 0), time(21, 0)),
@@ -1797,7 +1813,8 @@ def ajustar_janela(devido: datetime, inicio: time | None, fim: time | None) -> d
 
 
 def devido_antes_da_noite(devido: datetime, janela: tuple[time, time] | None) -> datetime:
-    """O `devido` que cai fora da janela VOLTA para 1 min antes de ela fechar (São Paulo). PURA.
+    """O `devido` que cai fora da janela VOLTA para `ANTES_DE_FECHAR` antes de ela fechar
+    (São Paulo). PURA.
 
     O brinde do não pago às 20 h (o dono, 09/11/2026): a Shopee e o TikTok cancelam o
     não pago com 24 h exatas, e esperar a abertura da manhã passaria do cancelamento.
@@ -1811,10 +1828,28 @@ def devido_antes_da_noite(devido: datetime, janela: tuple[time, time] | None) ->
     fecha = local.replace(hour=fim.hour, minute=fim.minute, second=0, microsecond=0)
     if abre <= local < fecha:
         return devido
-    ultimo = fecha - timedelta(minutes=1)
+    ultimo = fecha - ANTES_DE_FECHAR
     if local < abre:
         ultimo -= timedelta(days=1)
     return ultimo.astimezone(UTC)
+
+
+def vale_depois_de_fechar(
+    aut: Automacao, devido: datetime, agora: datetime, janela: tuple[time, time] | None
+) -> bool:
+    """O não pago que venceu DENTRO da janela ainda sai até `TOLERANCIA_DEPOIS_DE_FECHAR`
+    depois de ela fechar. PURA.
+
+    10/11/2026: o motor roda nos minutos pares — o que vence às 20h59 só é visto às 21h00,
+    com a janela fechada, e esperar as 9h passa do cancelamento da plataforma (24 h).
+    """
+    if aut.tipo not in TIPOS_NAO_PAGO_AO_VIVO or not janela:
+        return False
+    devido = _utc(devido)
+    return (
+        ajustar_janela(devido, *janela) == devido
+        and _utc(agora) - devido <= TOLERANCIA_DEPOIS_DE_FECHAR
+    )
 
 
 def validade_ate(aut: Automacao, devido: datetime, janela: tuple[time, time] | None) -> datetime:
