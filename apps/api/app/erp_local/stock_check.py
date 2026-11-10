@@ -98,7 +98,38 @@ def explained(db, start, end):
     return units, counted, unlinked
 
 
-def report(db, start=None, end=None):
+OUTSIDE_SQL = (
+    "SELECT coalesce(json_agg(t),'[]') FROM (SELECT coalesce(numeroloja,'')::text AS key,"
+    " numero::text AS number, item_codigo::text AS sku, item_quantidade AS quantity"
+    " FROM davinci.bling_orders WHERE created_at > '{start}' AND created_at <= '{end}'"
+    " AND item_codigo IS NOT NULL AND coalesce(situacao,'') <> '12') t"
+)
+
+
+def outside_reader(read=None):
+    """Sales Bling took in a window that did not come from a store the ERP reads (Temu,
+    internal orders, manual and in-person sales), from DaVinci's copy of Bling, read only."""
+    if read is None:
+        from app.erp_local.bling_mirror import read_local as read
+
+    def outside(start, end, known):
+        rows = read(OUTSIDE_SQL.format(start=start.replace("'", ""), end=end.replace("'", "")))
+        units = defaultdict(Decimal)
+        orders = set()
+        for row in rows:
+            if row.get("key") and row["key"] in known:
+                continue
+            quantity = _number(row.get("quantity"))
+            if quantity is None or not row.get("sku"):
+                continue
+            units[str(row["sku"]).strip().lower()] += quantity
+            orders.add(row.get("number"))
+        return units, len(orders)
+
+    return outside
+
+
+def report(db, start=None, end=None, outside=None):
     db.executescript(SCHEMA)
     rows = db.execute("SELECT taken_at,data FROM stock_snapshots ORDER BY taken_at").fetchall()
     if len(rows) < 2:
@@ -111,15 +142,35 @@ def report(db, start=None, end=None):
         first = next(r for r in rows if r["taken_at"] == start)
     before, after = json.loads(first["data"]), json.loads(last["data"])
     units, counted, unlinked = explained(db, first["taken_at"], last["taken_at"])
+    kits = _kits(db)
+    outside_orders = 0
+    if outside is not None:
+        known = set()
+        for channel, store in db.execute(
+            "SELECT DISTINCT channel,store FROM native_order_observations"
+        ).fetchall():
+            for key, unit in native_ingest._units(db, channel, store).items():
+                known.add(key)
+                known.update(unit)
+        by_lower = {sku.lower(): sku for sku in kits}
+        extra, outside_orders = outside(first["taken_at"], last["taken_at"], known)
+        for sku, quantity in extra.items():
+            if sku in by_lower:
+                _expand(kits, by_lower[sku], quantity, units)
     origin = {}
     for row in db.execute("SELECT sku,data FROM catalog_origin"):
         source = json.loads(row["data"]).get("bling_product_id")
         if source:
             origin[row["sku"]] = str(source)
-    kits = _kits(db)
     bling, erp = defaultdict(Decimal), defaultdict(Decimal)
+    derived = set()
     for sku, source in origin.items():
         if kits.get(sku, ("simple",))[0] != "simple" or source not in before or source not in after:
+            continue
+        if "+" in sku:
+            # A combo kept simple here: Bling's balance follows its parts, so it is not stock of
+            # its own to explain. Its parts are compared in their own families.
+            derived.add(stock_families.key(sku) or sku)
             continue
         family = stock_families.key(sku) or sku
         bling[family] += Decimal(after[source]) - Decimal(before[source])
@@ -140,6 +191,8 @@ def report(db, start=None, end=None):
         "from": first["taken_at"],
         "to": last["taken_at"],
         "sales_counted": counted,
+        "outside_orders": outside_orders,
+        "combos_derived": len(derived),
         "items_unlinked": unlinked,
         "families_moved": len(moved),
         "families_equal": len(same),

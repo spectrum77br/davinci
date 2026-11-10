@@ -70,7 +70,7 @@ def stock_daily(erp, output):
 
     try:
         with erp.connection() as db:
-            result = stock_check.report(db)
+            result = stock_check.report(db, outside=stock_check.outside_reader())
         output.write_text(dumps(result) + "\n", "utf-8")
         log.info("conferência de estoque gravada em %s", output.name)
     except (ERPError, OSError, ValueError, StopIteration) as error:

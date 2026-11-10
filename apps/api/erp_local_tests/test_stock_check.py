@@ -124,3 +124,39 @@ def test_discounts_are_read_after_the_freight_and_404_means_none(erp):
         unit = native_ingest._units(db, "ml", "conta")["M3"]
         charges = native_ingest.ml_charges(db, "conta", "M3", list(unit.values()))
     assert charges == {"freight": Decimal("9.99"), "coupon": Decimal("12.0")}
+
+
+def test_sales_outside_the_read_stores_explain_their_part_and_read_ones_count_once(erp):
+    link(erp, "demo.aparelho", "100")
+    stock_check.take(erp, [{"bling_product_id": "100", "stock": "10"}], "2026-11-09T08:00:00+00:00")
+    observe(erp, "V1", "paid", created="2026-11-09T09:00:00+00:00")
+    stock_check.take(erp, [{"bling_product_id": "100", "stock": "7"}], "2026-11-09T10:00:00+00:00")
+    asked = []
+
+    def read(sql):
+        asked.append(sql)
+        return [
+            # The read sale again (same store number): must not count twice.
+            {"key": "V1", "number": "300001", "sku": "DEMO.APARELHO", "quantity": 1},
+            # Temu and an internal order: only Bling's copy has them.
+            {"key": "PO-029-1", "number": "300002", "sku": "demo.aparelho", "quantity": 1},
+            {"key": "", "number": "300003", "sku": "demo.aparelho", "quantity": 1},
+        ]
+
+    with erp.connection() as db:
+        alone = stock_check.report(db)
+        together = stock_check.report(db, outside=stock_check.outside_reader(read))
+    assert alone["families_equal"] == 0
+    assert together["families_equal"] == 1 and together["outside_orders"] == 2
+    assert "2026-11-09T08:00:00+00:00" in asked[0] and "'12'" in asked[0]
+
+
+def test_combo_kept_simple_follows_its_parts_and_is_not_a_difference(erp):
+    with erp.connection() as db:
+        db.execute("INSERT INTO products VALUES ('dg1.ci+a1.ci','Combo','simple','[]')")
+    link(erp, "dg1.ci+a1.ci", "200")
+    stock_check.take(erp, [{"bling_product_id": "200", "stock": "10"}], "2026-11-09T08:00:00+00:00")
+    stock_check.take(erp, [{"bling_product_id": "200", "stock": "4"}], "2026-11-09T10:00:00+00:00")
+    with erp.connection() as db:
+        result = stock_check.report(db)
+    assert result["differences"] == [] and result["combos_derived"] == 1
