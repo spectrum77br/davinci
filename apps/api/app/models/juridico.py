@@ -181,6 +181,8 @@ class JuridicoPedido(Base):
     # 'cron' | 'botao'
     origem: Mapped[str] = mapped_column(Text, nullable=False)
     jusbrasil: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    # 11/11: o Atualizar da janela de um processo pede só ele (vazio = todos os processos com nº)
+    processo_id: Mapped[int | None] = mapped_column(BigInteger)
     pego_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     progresso: Mapped[str | None] = mapped_column(Text)
     terminado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

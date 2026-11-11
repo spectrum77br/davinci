@@ -292,6 +292,8 @@ def main():
         pid = ped.get("id")
         log("início do pedido", pid, ped.get("origem"))
         procs = davinci("GET", "/api/juridico/sync/processos")["processos"]
+        if ped.get("processo_id"):  # o Atualizar da janela de um processo: só ele
+            procs = [p for p in procs if p["id"] == ped["processo_id"]]
         d = ler_diario(pid, procs)
         resultado = "Diário: %d nova(s)" % d["novas"]
         ok = True

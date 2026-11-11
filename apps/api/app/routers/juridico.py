@@ -614,7 +614,8 @@ def _pedido_dict(ped: JuridicoPedido | None) -> dict | None:
         return None
     return {
         "id": ped.id, "origem": ped.origem, "pedido_por": ped.pedido_por,
-        "jusbrasil": ped.jusbrasil, "pedido_em": ped.pedido_em.isoformat(),
+        "jusbrasil": ped.jusbrasil, "processo_id": ped.processo_id,
+        "pedido_em": ped.pedido_em.isoformat(),
         "pego_em": ped.pego_em.isoformat() if ped.pego_em else None,
         "progresso": ped.progresso,
         "terminado_em": ped.terminado_em.isoformat() if ped.terminado_em else None,
@@ -630,6 +631,22 @@ async def pedir_atualizacao(
     """Botão Atualizar: o Diário o navegador busca na hora; aqui só o pedido do Jusbrasil ao
     Mac mini (no máximo um a cada 2 h)."""
     ped, motivo = await juridico_diario.pedir_leitura(session, "botao", _nome(u))
+    await session.commit()
+    return {"pedido": _pedido_dict(ped), "motivo": motivo}
+
+
+@router.post("/processos/{processo_id}/atualizar")
+async def pedir_atualizacao_do_processo(
+    processo_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+) -> dict:
+    """Atualizar da janela do processo: o Diário o navegador busca na hora; aqui o pedido do
+    Jusbrasil SÓ deste processo ao Mac mini (no máximo um a cada 30 min por processo)."""
+    p = await _processo(session, processo_id)
+    if not juridico_diario.numero_20(p.numero):
+        raise HTTPException(422, detail={"code": "juridico_sem_numero"})
+    ped, motivo = await juridico_diario.pedir_leitura(session, "botao", _nome(u), processo=p)
     await session.commit()
     return {"pedido": _pedido_dict(ped), "motivo": motivo}
 

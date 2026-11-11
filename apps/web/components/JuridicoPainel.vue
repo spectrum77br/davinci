@@ -317,19 +317,36 @@ function alternarTexto(id: number) {
   else n.add(id)
   abertas.value = n
 }
-async function buscarDiario() {
+// 11/11 (Vinicius, na janela do Caso 009: "coloca Atualizar, que atualize Diário e Jusbrasil"):
+// o Diário deste processo o navegador busca na hora; o Jusbrasil dele é pedido ao Mac mini (só
+// este processo, no máximo a cada 30 min) — a janela se atualiza sozinha quando o mini terminar
+async function atualizarProcesso() {
   if (!aberto.value) return
+  const id = aberto.value.id
   buscandoDiario.value = true
   avisoDiario.value = ''
   erroRaio.value = ''
+  const partes: string[] = []
   try {
     const r = await diarioDoProcesso(aberto.value)
-    avisoDiario.value = r.novas
-      ? `${r.novas} publicação(ões) nova(s) no Diário`
-      : r.publicacoes ? 'nada novo no Diário' : 'o Diário ainda não tem publicação deste processo'
-    await carregar()
+    partes.push(r.novas ? `Diário: ${r.novas} nova(s)` : 'Diário: nada novo')
   } catch (e) {
-    erroRaio.value = `Diário: ${(e as Error)?.message || erroDe(e)}`
+    partes.push(`Diário não respondeu (${(e as Error)?.message || erroDe(e)})`)
+  }
+  try {
+    const r = await api<{ pedido: Pedido | null; motivo: string }>(`/api/juridico/processos/${id}/atualizar`, { method: 'POST' })
+    if (r.pedido) pedido.value = r.pedido
+    partes.push(
+      r.motivo === 'pedido' ? 'Jusbrasil: pedido ao Mac mini (uns 2 min)'
+        : r.motivo === 'em_andamento' ? 'Jusbrasil: o Mac mini já está lendo'
+          : 'Jusbrasil: lido há menos de 30 min',
+    )
+  } catch (e) {
+    partes.push(`Jusbrasil: ${erroDe(e)}`)
+  }
+  avisoDiario.value = partes.join(' · ')
+  try {
+    await carregar()
   } finally {
     buscandoDiario.value = false
   }
@@ -770,12 +787,12 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
                 type="button"
                 class="ml-auto inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-semibold hover:bg-muted disabled:opacity-50"
                 :disabled="buscandoDiario || !aberto.numero"
-                :title="aberto.numero ? 'lê agora no Diário de Justiça Eletrônico Nacional (o Mac mini faz sozinho todo dia às 06:00)' : 'preencha o nº do processo primeiro'"
-                @click="buscarDiario"
+                :title="aberto.numero ? 'Atualiza este processo: o Diário (CNJ) na hora e o Jusbrasil pelo Mac mini (uns 2 min). Todo dia às 06:00 isso acontece sozinho.' : 'preencha o nº do processo primeiro'"
+                @click="atualizarProcesso"
               >
                 <Loader2 v-if="buscandoDiario" class="size-3 animate-spin" />
                 <RotateCcw v-else class="size-3" />
-                buscar no Diário
+                Atualizar
               </button>
             </div>
             <div v-if="avisoDiario" class="mb-1 text-center text-[11px] text-emerald-700 dark:text-emerald-300">{{ avisoDiario }}</div>

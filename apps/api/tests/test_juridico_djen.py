@@ -215,3 +215,23 @@ async def test_falha_do_robo_no_jusbrasil_fica_no_processo(client, editor):
     p = next(x for x in (await client.get("/api/juridico/processos")).json()["itens"] if x["id"] == pid)
     assert p["jusbrasil_erro"] is None and p["jusbrasil_link"] == LINK_JB
 
+
+@pytest.mark.asyncio
+async def test_atualizar_da_janela_pede_so_aquele_processo(client, editor):
+    """11/11 (Vinicius, na janela do Caso 009): "coloca Atualizar, que atualize Diário e Jusbrasil"."""
+    pid = await _processo(client)
+    sem = await _processo(client, numero="")
+    assert (await client.post(f"/api/juridico/processos/{sem}/atualizar")).status_code == 422
+
+    r = await client.post(f"/api/juridico/processos/{pid}/atualizar")
+    assert r.status_code == 200 and r.json()["motivo"] == "pedido"
+    assert r.json()["pedido"]["processo_id"] == pid
+    ped = (await client.get("/api/juridico/sync/pedido", headers=H)).json()["pedido"]
+    assert ped["processo_id"] == pid  # o mini lê só este
+    await client.post(f"/api/juridico/sync/processos/{pid}/jusbrasil", json={"link": LINK_JB, "andamentos": ANDAMENTOS[:1]}, headers=H)
+    await client.post(f"/api/juridico/sync/pedido/{ped['id']}", json={"terminado": True, "ok": True}, headers=H)
+
+    # o Jusbrasil deste processo acabou de ser lido: não pede de novo antes de 30 min
+    r = await client.post(f"/api/juridico/processos/{pid}/atualizar")
+    assert r.json() == {"pedido": None, "motivo": "jusbrasil_lido_ha_pouco"}
+

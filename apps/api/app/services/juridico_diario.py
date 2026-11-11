@@ -176,6 +176,8 @@ async def registrar_leitura(
 _LINK_JUSBRASIL = re.compile(r"^https://(www\.)?jusbrasil\.com\.br/processos/\d+/")
 JUSBRASIL_INTERVALO_BOTAO = timedelta(hours=2)
 PEDIDO_MORTO = timedelta(hours=3)
+# o Atualizar da janela de um processo: o Jusbrasil daquele processo no máximo a cada 30 min
+JUSBRASIL_INTERVALO_PROCESSO = timedelta(minutes=30)
 
 
 def _data_br(v: Any) -> date | None:
@@ -247,7 +249,11 @@ async def pedido_aberto(
 
 
 async def pedir_leitura(
-    session: AsyncSession, origem: str, por: str | None = None, agora: datetime | None = None
+    session: AsyncSession,
+    origem: str,
+    por: str | None = None,
+    agora: datetime | None = None,
+    processo: JuridicoProcesso | None = None,
 ) -> tuple[JuridicoPedido | None, str]:
     """Cria o pedido ao Mac mini. Às 06:00 ('cron') sempre com Jusbrasil; no botão ('botao'), o
     Jusbrasil só se a última leitura dele (ou pedido) tiver mais de 2 h — senão não pede nada (o
@@ -256,6 +262,16 @@ async def pedir_leitura(
     aberto = await pedido_aberto(session, agora)
     if aberto is not None:
         return aberto, "em_andamento"
+    if processo is not None:  # o Atualizar da janela do processo: só ele
+        t = processo.jusbrasil_tentado_em
+        if t is not None and t >= agora - JUSBRASIL_INTERVALO_PROCESSO:
+            return None, "jusbrasil_lido_ha_pouco"
+        ped = JuridicoPedido(
+            origem=origem, pedido_por=por, jusbrasil=True, pedido_em=agora, processo_id=processo.id
+        )
+        session.add(ped)
+        await session.flush()
+        return ped, "pedido"
     if origem == "botao":
         limite = agora - JUSBRASIL_INTERVALO_BOTAO
         recente = (
