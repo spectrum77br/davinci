@@ -215,7 +215,12 @@ const error = ref<string | null>(null)
 
 const opcoes = ref<Opcoes>({ field_order: [], field_labels: {}, field_options: {}, status_bling_options: [] })
 
+// Duas cargas ao mesmo tempo (a do setup, sempre em ML, e a da aba que o link
+// `?tab=…` pede no onMounted): vale só a ÚLTIMA pedida. Antes a resposta lenta
+// do ML chegava depois e a aba Shopee mostrava pedidos do ML (visto em 11/11/2026).
+let refreshSeq = 0
 async function refresh() {
+  const seq = ++refreshSeq
   loading.value = true
   error.value = null
   try {
@@ -226,11 +231,12 @@ async function refresh() {
     const plat = tab.value === 'status' ? 'ml' : tab.value
     const url = plat === 'flex' ? '/api/logistica?envio=flex' : `/api/logistica?plataforma=${plat}`
     carregarResumoFlex()
-    rows.value = await api<Logistica[]>(url)
+    const dados = await api<Logistica[]>(url)
+    if (seq === refreshSeq) rows.value = dados
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    if (seq === refreshSeq) error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
-    loading.value = false
+    if (seq === refreshSeq) loading.value = false
   }
 }
 
