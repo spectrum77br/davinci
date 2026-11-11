@@ -333,14 +333,30 @@ def price_sync(erp):
                     "sku": sku,
                     "preco_no_anuncio": str(current) if current is not None else "",
                     "erp_mandaria": str(own),
+                    "alerta": "preço de cadastro de R$ 1,00 ou menos" if own <= 1 else "",
                 }
             )
     _keep(erp, "price", rows)
+    placeholder = sum(1 for r in rows if r["alerta"])
+    unknown = sum(1 for r in rows if not r["preco_no_anuncio"])
     text = (
-        f"Mandaria o preço de cadastro do ERP a {considered - missing} anúncios: {same} já estão "
-        f"com esse preço e {len(rows)} mudariam de preço. Hoje o preço dos anúncios vem da "
-        "precificação do DaVinci, então ligar isto sobrescreveria esses preços. "
-        f"Sem preço no ERP: {missing}. Nada foi enviado às lojas."
+        f"Mandaria o preço de cadastro do ERP a {considered - missing} anúncios"
+        + (f" ({same} já com esse preço)" if same else "")
+        + "."
+        + (
+            f" Atenção: em {placeholder} deles esse preço é R$ 1,00 ou menos (o valor de cadastro "
+            "que veio do Bling, não o preço de venda): ligar isto colocaria esses anúncios "
+            "a R$ 1,00."
+            if placeholder
+            else ""
+        )
+        + (
+            f" O preço atual de {unknown} anúncios não fica no cadastro do anúncio: quem define é "
+            "a precificação do DaVinci, por isso não dá para comparar."
+            if unknown
+            else ""
+        )
+        + f" Sem preço no ERP: {missing}. Nada foi enviado às lojas."
     )
     record(
         erp,
@@ -350,6 +366,7 @@ def price_sync(erp):
             "anuncios": considered,
             "iguais": same,
             "diferentes": len(rows),
+            "a_um_real": placeholder,
             "sem_preco": missing,
             "would": text,
         },

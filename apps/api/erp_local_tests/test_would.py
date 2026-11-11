@@ -228,12 +228,17 @@ def test_stock_and_price_sync_say_what_each_listing_would_get(erp, homolog):
     stock = would.stock_sync(erp)
     assert stock["would"] and "Mandaria o estoque do ERP a 2 anúncios" in stock["message"]
     price = would.price_sync(erp)
-    assert "1 mudariam de preço" in price["message"] and "Sem preço no ERP: 1" in price["message"]
+    assert "Mandaria o preço de cadastro do ERP a 1 anúncios." in price["message"]
+    assert "Sem preço no ERP: 1" in price["message"] and "R$ 1,00" not in price["message"]
+    with erp.connection() as db:
+        db.execute("UPDATE product_pricing SET price='1.00' WHERE sku='demo.aparelho'")
+    warned = would.price_sync(erp)["message"]
+    assert "em 1 deles esse preço é R$ 1,00 ou menos" in warned
     with erp.connection() as db:
         csv_text = would.plan_csv(db, "price")
         actions = [w["action"] for w in would.listing(db)]
-    assert "A1;;demo.aparelho;99.90;120.00" in csv_text
-    assert actions[:2] == ["price", "stock"]
+    assert "A1;;demo.aparelho;99.90;1.00;preço de cadastro de R$ 1,00 ou menos" in csv_text
+    assert actions[:3] == ["price", "price", "stock"]
 
 
 def test_sync_routes_exist_only_in_homologation(tmp_path, monkeypatch):
