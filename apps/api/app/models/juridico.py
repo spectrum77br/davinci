@@ -87,8 +87,12 @@ class JuridicoProcesso(Base):
 
 
 class JuridicoMovimentacao(Base):
-    """Andamento do processo. Hoje é digitado; quando o Jusbrasil for ligado, `fonte` =
-    'jusbrasil'. A coluna "Última movimentação" é a mais nova (data, id)."""
+    """Andamento do processo. A coluna "Última movimentação" é a mais nova (data, id).
+
+    `fonte`: 'manual' (digitada) ou 'djen' — 11/11/2026, o Vigia do Jurídico lê todo dia no
+    Diário de Justiça Eletrônico Nacional (CNJ) as publicações de cada processo com nº
+    (intimação, decisão, citação, distribuição) e lança aqui; `externo_id` (id da comunicação no
+    DJEN) não deixa lançar duas vezes."""
 
     __tablename__ = "juridico_movimentacoes"
 
@@ -98,11 +102,27 @@ class JuridicoMovimentacao(Base):
     )
     data: Mapped[date] = mapped_column(Date, nullable=False)
     texto: Mapped[str] = mapped_column(Text, nullable=False)
-    # 'manual' | 'jusbrasil' | 'davinci'
+    # 'manual' | 'djen'
     fonte: Mapped[str] = mapped_column(Text, nullable=False, server_default="manual")
+    externo_id: Mapped[str | None] = mapped_column(Text)
+    # do DJEN: órgão que publicou, tipo (Intimação, Lista de distribuição…), o texto inteiro
+    # (sem HTML) e o link do documento no tribunal
+    orgao: Mapped[str | None] = mapped_column(Text)
+    tipo: Mapped[str | None] = mapped_column(Text)
+    texto_completo: Mapped[str | None] = mapped_column(Text)
+    link: Mapped[str | None] = mapped_column(Text)
     criado_por: Mapped[str | None] = mapped_column(Text)
     criado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
-    __table_args__ = (Index("ix_juridico_movimentacoes_processo", "processo_id"),)
+    __table_args__ = (
+        Index("ix_juridico_movimentacoes_processo", "processo_id"),
+        Index(
+            "uq_juridico_movimentacoes_externo",
+            "processo_id",
+            "externo_id",
+            unique=True,
+            postgresql_where=text("externo_id IS NOT NULL"),
+        ),
+    )

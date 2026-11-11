@@ -24,6 +24,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
+import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -36,7 +37,7 @@ from app.models.denuncia import DenunciaCaso, DenunciaJuridicoPasta
 from app.models.juridico import LADOS, SITUACOES, JuridicoMovimentacao, JuridicoProcesso
 from app.models.user import User
 from app.routers import denuncia as den
-from app.services import chamados_juridico
+from app.services import chamados_juridico, vigia_juridico
 
 router = APIRouter(prefix="/api/juridico", tags=["juridico"])
 
@@ -188,13 +189,16 @@ async def sincronizar(session: AsyncSession) -> int:
     return novos
 
 
-def _mov_dict(m: JuridicoMovimentacao | None) -> dict | None:
+def _mov_dict(m: JuridicoMovimentacao | None, completo: bool = False) -> dict | None:
     if m is None:
         return None
-    return {
+    out = {
         "id": m.id, "data": m.data.isoformat(), "texto": m.texto, "fonte": m.fonte,
-        "criado_por": m.criado_por,
+        "criado_por": m.criado_por, "orgao": m.orgao, "tipo": m.tipo, "link": m.link,
     }
+    if completo:  # o texto inteiro da publicação só na janela do processo
+        out["texto_completo"] = m.texto_completo
+    return out
 
 
 def _dict(
@@ -296,7 +300,7 @@ async def ver_processo(
     ).scalars().all()
     codigos = await _codigos_casos(session, {p.denuncia_caso_id} if p.denuncia_caso_id else set())
     out = _dict(p, movs[0] if movs else None, codigos.get(p.denuncia_caso_id))
-    out["movimentacoes"] = [_mov_dict(m) for m in movs]
+    out["movimentacoes"] = [_mov_dict(m, completo=True) for m in movs]
     docs: dict[str, Any] = {"pasta": None, "pasta_url": None, "dossie_url": None}
     if p.denuncia_caso_id:
         pasta = (
@@ -410,6 +414,27 @@ async def apagar_processo(
     await session.delete(p)
     await session.commit()
     return {"ok": True}
+
+
+@router.post("/processos/{processo_id}/diario")
+async def buscar_no_diario(
+    processo_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_editar)],
+) -> dict:
+    """Botão "buscar no Diário": lê agora no DJEN as publicações deste processo (o Vigia do
+    Jurídico faz isso sozinho todo dia às 07:30)."""
+    p = await _processo(session, processo_id)
+    try:
+        res = await vigia_juridico.atualizar_processo(session, p)
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            502, detail={"code": "juridico_djen_indisponivel", "erro": str(e)[:200]}
+        ) from None
+    if not res["ok"]:
+        raise HTTPException(422, detail={"code": "juridico_sem_numero"})
+    await session.commit()
+    return res
 
 
 @router.post("/processos/{processo_id}/movimentacoes")

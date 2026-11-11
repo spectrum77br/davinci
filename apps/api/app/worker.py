@@ -4490,6 +4490,23 @@ async def vigia_conciliacao_tick(ctx: dict) -> None:
         logger.exception("vigia_conciliacao_unhandled")
 
 
+async def vigia_juridico_tick(ctx: dict) -> None:
+    """Vigia do Jurídico (Ouvidoria): 07:30 BRT, as publicações novas do Diário oficial (DJEN)
+    de cada processo do painel Jurídico entram no histórico. `desligado` no painel: não roda."""
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_juridico")
+        if modo == "desligado":
+            logger.debug("vigia_juridico_desligado")
+            return
+        from app.services.vigia_juridico import vigia_juridico_sweep
+
+        summary = await vigia_juridico_sweep() or {}
+        logger.info("vigia_juridico_done", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_juridico_unhandled")
+
+
 async def vigia_nota_cheia_tick(ctx: dict) -> None:
     """Vigia de Nota Cheia (robô da Ouvidoria): pedido enviado sem a NF
     produto (nota cheia) no painel Notas fiscais — uma ocorrência por dia de
@@ -5487,6 +5504,7 @@ class WorkerSettings:
         vigia_etiquetas_tick,
         vigia_nota_cheia_tick,
         vigia_conciliacao_tick,
+        vigia_juridico_tick,
         conciliacao_fatura_tick,
         conciliacao_extrato_tick,
         func(conciliacao_sincronizar_loja, timeout=3600),
@@ -6159,6 +6177,8 @@ class WorkerSettings:
         cron(vigia_nota_cheia_tick, minute=8, run_at_startup=False, timeout=600),
         # Vigia de Conciliação: 07:00 BRT (10:00 UTC), depois da rodada de madrugada.
         cron(vigia_conciliacao_tick, hour=10, minute=0, run_at_startup=False, timeout=600),
+        # Vigia do Jurídico: 07:30 BRT (10:30 UTC), publicações do DJEN dos processos com nº
+        cron(vigia_juridico_tick, hour=10, minute=30, run_at_startup=False, timeout=1800),
         cron(conciliacao_amazon_csv_tick, hour=9, minute=0, run_at_startup=False, timeout=120),
         # Conciliação (14/10/2026, Vinicius: "é tudo do dia anterior; uma vez só de
         # madrugada"): UMA rodada por dia. 06:00 BRT pede o extrato de ontem ao

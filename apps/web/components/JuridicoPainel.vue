@@ -14,7 +14,11 @@ import { isoToday } from '~/lib/date'
 
 type Origem = 'denuncia' | 'logistica' | 'manual'
 type Situacao = 'aguardando_numero' | 'em_andamento' | 'audiencia' | 'sentenca' | 'encerrado'
-type Mov = { id: number; data: string; texto: string; fonte: string; criado_por: string | null }
+// fonte 'djen' = lida no Diário de Justiça Eletrônico Nacional pelo Vigia do Jurídico (07:30)
+type Mov = {
+  id: number; data: string; texto: string; fonte: string; criado_por: string | null
+  orgao?: string | null; tipo?: string | null; link?: string | null; texto_completo?: string | null
+}
 type Processo = {
   id: number
   origem: Origem
@@ -87,6 +91,8 @@ function erroDe(e: unknown): string {
       juridico_data_invalida: 'data inválida',
       juridico_movimentacao_vazia: 'escreva o que aconteceu',
       juridico_processo_automatico: 'esse processo veio de um caso/chamado e voltaria sozinho; não dá pra apagar',
+      juridico_sem_numero: 'preencha o nº do processo (20 dígitos) para buscar no Diário',
+      juridico_djen_indisponivel: 'o Diário (DJEN) não respondeu agora; tente de novo em alguns minutos',
       forbidden: 'sem permissão',
     }[code] || code
   }
@@ -171,6 +177,10 @@ const movForm = ref({ data: isoToday(), texto: '' })
 
 async function abrir(id: number, mostrarCarregando = true) {
   novo.value = false
+  if (aberto.value?.id !== id) {
+    avisoDiario.value = ''
+    abertas.value = new Set()
+  }
   erroRaio.value = ''
   if (mostrarCarregando) abrindo.value = true
   try {
@@ -244,6 +254,33 @@ async function apagarMov(m: Mov) {
     await carregar()
   } catch (e) {
     erroRaio.value = erroDe(e)
+  }
+}
+// 11/11: "buscar no Diário" — lê agora no DJEN (o Vigia do Jurídico faz sozinho todo dia às 07:30)
+const buscandoDiario = ref(false)
+const avisoDiario = ref('')
+const abertas = ref<Set<number>>(new Set())
+function alternarTexto(id: number) {
+  const n = new Set(abertas.value)
+  if (n.has(id)) n.delete(id)
+  else n.add(id)
+  abertas.value = n
+}
+async function buscarDiario() {
+  if (!aberto.value) return
+  buscandoDiario.value = true
+  avisoDiario.value = ''
+  erroRaio.value = ''
+  try {
+    const r = await api<{ novas: number; publicacoes: number }>(`/api/juridico/processos/${aberto.value.id}/diario`, { method: 'POST' })
+    avisoDiario.value = r.novas
+      ? `${r.novas} publicação(ões) nova(s) no Diário`
+      : r.publicacoes ? 'nada novo no Diário' : 'o Diário ainda não tem publicação deste processo'
+    await carregar()
+  } catch (e) {
+    erroRaio.value = erroDe(e)
+  } finally {
+    buscandoDiario.value = false
   }
 }
 const podeApagarAberto = computed(() => !!aberto.value && !aberto.value.denuncia_caso_id && !aberto.value.chamado_id && podeApagar.value)
@@ -425,7 +462,7 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
                 <td class="px-1.5">
                   <template v-if="p.ultima_mov">
                     <div class="truncate" :title="p.ultima_mov.texto">{{ p.ultima_mov.texto }}</div>
-                    <div class="truncate text-[10.5px] text-muted-foreground">{{ dm(p.ultima_mov.data) }}{{ p.ultima_mov.fonte === 'jusbrasil' ? ' · lido do Jusbrasil' : '' }}</div>
+                    <div class="truncate text-[10.5px] text-muted-foreground">{{ dm(p.ultima_mov.data) }}{{ p.ultima_mov.fonte === 'djen' ? ' · Diário oficial' : '' }}</div>
                   </template>
                   <span v-else class="text-muted-foreground">—</span>
                 </td>
@@ -548,7 +585,22 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
           </div>
           <div class="min-w-0 space-y-2.5">
           <section class="border-t pt-2">
-            <h4 class="mb-1 text-center font-bold text-[#1f3a5f] dark:text-slate-200">Movimentações<span v-if="aberto.movimentacoes.length" class="font-normal text-muted-foreground"> ({{ aberto.movimentacoes.length }})</span></h4>
+            <div class="mb-1 flex items-center justify-center gap-2">
+              <h4 class="font-bold text-[#1f3a5f] dark:text-slate-200">Movimentações<span v-if="aberto.movimentacoes.length" class="font-normal text-muted-foreground"> ({{ aberto.movimentacoes.length }})</span></h4>
+              <button
+                v-if="podeEditar"
+                type="button"
+                class="ml-auto inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-semibold hover:bg-muted disabled:opacity-50"
+                :disabled="buscandoDiario || !aberto.numero"
+                :title="aberto.numero ? 'lê agora no Diário de Justiça Eletrônico Nacional (o robô faz sozinho todo dia às 07:30)' : 'preencha o nº do processo primeiro'"
+                @click="buscarDiario"
+              >
+                <Loader2 v-if="buscandoDiario" class="size-3 animate-spin" />
+                <RotateCcw v-else class="size-3" />
+                buscar no Diário
+              </button>
+            </div>
+            <div v-if="avisoDiario" class="mb-1 text-center text-[11px] text-emerald-700 dark:text-emerald-300">{{ avisoDiario }}</div>
             <div v-if="podeEditar" class="mb-1.5 flex gap-1">
               <input v-model="movForm.data" type="date" :class="[inputBase, 'w-[130px] shrink-0']">
               <input v-model="movForm.texto" :class="inputCls" placeholder="o que aconteceu" @keydown.enter.prevent="adicionarMov">
@@ -562,14 +614,21 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
                 <div class="flex items-center gap-1.5">
                   <span class="font-semibold tabular-nums">{{ dma(m.data) }}</span>
                   <span v-if="i === 0" class="rounded bg-sky-500/15 px-1 text-[10px] font-semibold text-sky-700 dark:text-sky-300">última</span>
-                  <span class="ml-auto truncate text-[10px] text-muted-foreground">{{ m.fonte === 'jusbrasil' ? 'Jusbrasil' : m.criado_por ? `lançado por ${m.criado_por}` : 'lançado à mão' }}</span>
-                  <button v-if="podeEditar" type="button" class="invisible shrink-0 text-muted-foreground hover:text-red-600 group-hover:visible" title="apagar esta movimentação" @click="apagarMov(m)"><X class="size-3.5" /></button>
+                  <span v-if="m.fonte === 'djen'" class="ml-auto shrink-0 rounded bg-violet-500/10 px-1 text-[10px] font-semibold text-violet-700 dark:text-violet-300" title="lida no Diário de Justiça Eletrônico Nacional (CNJ)">Diário oficial</span>
+                  <span v-else class="ml-auto truncate text-[10px] text-muted-foreground">{{ m.criado_por ? `lançado por ${m.criado_por}` : 'lançado à mão' }}</span>
+                  <button v-if="podeEditar && m.fonte !== 'djen'" type="button" class="invisible shrink-0 text-muted-foreground hover:text-red-600 group-hover:visible" title="apagar esta movimentação" @click="apagarMov(m)"><X class="size-3.5" /></button>
                 </div>
                 <div class="mt-0.5 leading-snug" :class="i === 0 ? '' : 'text-muted-foreground'">{{ m.texto }}</div>
+                <div v-if="m.fonte === 'djen'" class="mt-0.5 flex flex-wrap items-center gap-x-2 text-[10.5px] text-muted-foreground">
+                  <span v-if="m.orgao && !m.texto.includes(m.orgao)" class="truncate">{{ m.orgao }}</span>
+                  <button v-if="m.texto_completo" type="button" class="text-primary hover:underline" @click="alternarTexto(m.id)">{{ abertas.has(m.id) ? 'esconder o texto' : 'ver o texto' }}</button>
+                  <a v-if="m.link" :href="m.link" target="_blank" rel="noopener" class="text-primary hover:underline">documento ↗</a>
+                </div>
+                <div v-if="abertas.has(m.id) && m.texto_completo" class="mt-1 max-h-[260px] overflow-auto whitespace-pre-wrap rounded border bg-muted/40 px-2 py-1.5 text-[11px] leading-snug text-foreground">{{ m.texto_completo }}</div>
               </li>
             </ol>
             <div v-else class="text-center text-muted-foreground">nenhuma movimentação ainda</div>
-            <div class="mt-1 text-center text-[10.5px] text-muted-foreground">Com o Jusbrasil ligado, as movimentações entram sozinhas (em breve).</div>
+            <div class="mt-1 text-center text-[10.5px] text-muted-foreground">As publicações do Diário oficial (intimação, decisão, citação) entram sozinhas todo dia às 07:30, nos processos com nº.</div>
           </section>
 
           <section v-if="aberto.documentos.pasta_url || aberto.documentos.dossie_url || aberto.denuncia_caso_id" class="border-t pt-2">

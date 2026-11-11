@@ -445,6 +445,27 @@ ROBOS: dict[str, RoboDef] = {
             "cadencia_min": Parametro("Cadência esperada", 60, 48 * 60, "min"),
         },
     ),
+    # 11/11/2026 (Vinicius: "vincular esse jusbrasil … deixar atualizando os últimos passos
+    # sozinho"): a fonte é o Diário oficial do CNJ (DJEN) — o Jusbrasil só por contrato.
+    "vigia_juridico": RoboDef(
+        chave="vigia_juridico",
+        nome="Vigia do Jurídico",
+        descricao=(
+            "Lê no Diário de Justiça Eletrônico Nacional (DJEN, do CNJ) as publicações de cada "
+            "processo do painel Jurídico que já tem nº — intimação, decisão, citação, "
+            "distribuição — e lança as novas no histórico do processo, com o texto inteiro e o "
+            "link do documento. Só lança; não abre ocorrência nem manda Threema."
+        ),
+        area="juridico",
+        cadencia_texto="1× por dia (07:30)",
+        plataformas=(),
+        config_padrao={"cadencia_min": 24 * 60},
+        env_threema_recipients=None,
+        contexto="juridico",
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 60, 48 * 60, "min"),
+        },
+    ),
 }
 
 # Threema ID: 8 caracteres (A-Z, 0-9); ID de gateway começa com "*".
