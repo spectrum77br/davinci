@@ -70,6 +70,8 @@ from app.models import (
 from app.models.flex import FLEX_ACOES
 from app.schemas.flex import (
     FlexAcertoOut,
+    FlexAjustesIn,
+    FlexAjustesOut,
     FlexAnuncioOut,
     FlexAnunciosOut,
     FlexAprovarOut,
@@ -305,14 +307,74 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
         max_anuncios_por_familia=cfg.max_anuncios_por_familia,
         teto_escritas_por_rodada=max(0, int(s.flex_teto_escritas_por_rodada or 0)),
         shopee_canais=sorted(flex_envio.canais_shopee_flex()),
-        shopee_escrita=bool(s.flex_shopee_escrita),
+        shopee_escrita=flex_config.shopee_escrita(),
         intervalo_min=max(1, int(s.flex_intervalo_min or 15)),
-        pedido_no_sp=bool(s.flex_pedido_no_sp),
+        pedido_no_sp=flex_config.pedido_no_sp(),
         local=await _local_out(session, flex_local.atual()),
         pode_alterar_local=_pode_alterar_local(user),
         cidades_vistas=sorted(vistas, key=flex_local.normalizar_cidade),
         lotes=list(flex_local.LOTES),
+        ajustes=await _ajustes_out(session),
+        pode_ajustar=flex_config.pode_ajustar(user),
     )
+
+
+async def _ajustes_out(session: AsyncSession) -> FlexAjustesOut:
+    a = flex_config.ajustes()
+    nome = None
+    if a.atualizado_por is not None:
+        quem = await session.get(User, a.atualizado_por)
+        nome = (quem.name or quem.email) if quem is not None else None
+    return FlexAjustesOut(
+        modo_origem=flex_config.origem("modo"),
+        shopee_escrita_origem=flex_config.origem("shopee_escrita"),
+        pedido_no_sp_origem=flex_config.origem("pedido_no_sp"),
+        atualizado_em=a.atualizado_em,
+        atualizado_por=nome,
+    )
+
+
+@router.put("/ajustes", response_model=FlexAjustesOut)
+async def trocar_ajustes(body: FlexAjustesIn, session: Sessao, user: Agir) -> FlexAjustesOut:
+    """Troca o modo do Flex, a escrita da Shopee e o pedido Flex no .sp
+    (11/11/2026: antes só no .env do servidor). Só admin e o gerente. Vale na
+    próxima rodada do robô (até 15 min) — o "Sincronizar Flex" aplica na hora."""
+    if not flex_config.pode_ajustar(user):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "so_admin",
+                "detalhe": "só um admin (ou o gerente) troca o modo do Flex",
+            },
+        )
+    # Trava a linha (dentro de `salvar`) e relê: quem abriu o formulário com
+    # outro valor na tela não sobrescreve a troca de outra pessoa.
+    await flex_config.carregar(forcar=True)
+    antes = (flex_config.modo(), flex_config.shopee_escrita(), flex_config.pedido_no_sp())
+    mostrado = (body.modo_antes, body.shopee_escrita_antes, body.pedido_no_sp_antes)
+    if any(m is not None and m != a for m, a in zip(mostrado, antes, strict=True)):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "ajuste_mudou",
+                "detalhe": "alguém trocou essas chaves agora há pouco — reabra e confira",
+            },
+        )
+    try:
+        novo = await flex_config.salvar(
+            session,
+            modo_novo=body.modo,
+            shopee_escrita_nova=body.shopee_escrita,
+            pedido_no_sp_novo=body.pedido_no_sp,
+            por=user.id,
+        )
+    except flex_config.AjusteInvalidoError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail={"code": e.codigo, "detalhe": e.detalhe}
+        ) from e
+    await session.commit()
+    flex_config.usar(novo)
+    return await _ajustes_out(session)
 
 
 def _importado_do_estado():

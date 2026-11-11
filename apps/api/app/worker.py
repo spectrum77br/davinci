@@ -4063,7 +4063,9 @@ async def flex_motor_tick(ctx: dict) -> None:
     hora, sem tocar no banco além da leitura da configuração. Nos outros
     modos o motor decide, lê o estado real e — só em piloto/ativo — desliga
     sozinho e liga o que uma pessoa aprovou. Uma rodada de cada vez (trava
-    no banco): se o botão "Sincronizar" estiver rodando, esta sai."""
+    no banco): se o botão "Sincronizar" estiver rodando, esta sai. O modo
+    pode vir da tela (flex_ajuste, 11/11/2026): relê antes de decidir."""
+    await flex_config.carregar(forcar=True)
     if flex_config.modo() == flex_config.MODO_DESLIGADO:
         logger.debug("flex_motor_desligado")
         return
@@ -4083,6 +4085,7 @@ async def flex_motor_run(ctx: dict, por: str | None = None) -> dict:
         quem = UUID(por) if por else None
     except ValueError:
         quem = None
+    await flex_config.carregar(forcar=True)
     return await flex_motor.rodar_motor(origem="manual", por=quem, reler_contas=True)
 
 
@@ -4094,6 +4097,7 @@ async def flex_reavaliar_run(ctx: dict) -> dict:
     da varredura para fechar a torneira. Ligar continua com a varredura +
     aprovação. Se a rodada inteira estiver em andamento, tenta de novo em 1
     min (o saldo dela pode ser de antes do pedido)."""
+    await flex_config.carregar(forcar=True)
     resumo = await flex_motor.rodar_motor(ler=False, so_desligar=True, origem="evento")
     if resumo.get("ocupado"):
         raise Retry(defer=60)
@@ -4114,6 +4118,7 @@ async def flex_aprovado_run(
         quem = UUID(por) if por else None
     except ValueError:
         return {"motivo": "id inválido"}
+    await flex_config.carregar(forcar=True)
     res = await flex_motor.aplicar_aprovado(iid, external_id, por=quem)
     if res.get("ocupado"):
         raise Retry(defer=60)
@@ -4124,6 +4129,7 @@ async def flex_emergencia_run(ctx: dict, emergencia_id: int) -> dict:
     """Botão "Desligar tudo (emergência)": o job que desliga o Flex das
     contas (POST /api/flex/emergencia já tirou as aprovações e criou a
     linha). O andamento fica em `flex_emergencia.resumo` — a tela consulta."""
+    await flex_config.carregar(forcar=True)
     return await flex_motor.executar_emergencia(int(emergencia_id))
 
 

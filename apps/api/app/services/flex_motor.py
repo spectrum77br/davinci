@@ -2466,7 +2466,7 @@ async def _aplicar(
                     )
         return
 
-    shopee_escreve = bool(get_settings().flex_shopee_escrita)
+    shopee_escreve = flex_config.shopee_escrita()
     teto = max(0, int(get_settings().flex_teto_escritas_por_rodada or 0))
     escritas = 0
     ignoradas: list[_Acao] = []
@@ -2663,7 +2663,7 @@ async def _rodada(
         anuncios = [a for a in anuncios if a.integration_id in integracoes]
         anuncios = _com_status(anuncios, vistos, agora)
         anuncios = _com_contas(
-            anuncios, contas_flex, shopee_escreve=bool(get_settings().flex_shopee_escrita)
+            anuncios, contas_flex, shopee_escreve=flex_config.shopee_escrita()
         )
         saldos = await calcular_saldos(s, _skus_sp(anuncios, cfg))
     resumo["contas"] = len(integracoes)
@@ -2721,7 +2721,7 @@ async def aprovar(integration_id: UUID, external_id: str, *, por: UUID | None) -
         if est is None:
             raise FlexRegraError("nao_avaliado", "o motor ainda não avaliou este anúncio")
         shopee = est.plataforma == flex_envio.PLATAFORMA_SHOPEE
-        if shopee and not get_settings().flex_shopee_escrita:
+        if shopee and not flex_config.shopee_escrita():
             # Aprovar não ligaria nada (e a aprovação ficaria pendurada até
             # alguém ligar a escrita da Shopee — aí dispararia sozinha).
             raise FlexRegraError(
@@ -3018,7 +3018,7 @@ async def _executar_emergencia(
     # vê quantos alvos há (e que o job está vivo) antes da primeira escrita.
     await _gravar_andamento(emergencia_id, resumo)
 
-    shopee_escreve = bool(get_settings().flex_shopee_escrita)
+    shopee_escreve = flex_config.shopee_escrita()
     logs: list[FlexLog] = []
     trava_andamento = asyncio.Lock()
     ultimo = [time.monotonic()]

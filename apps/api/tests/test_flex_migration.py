@@ -29,7 +29,10 @@ _VERSOES = Path(__file__).resolve().parent.parent / "alembic" / "versions"
 _MIGRATION = _VERSOES / "0367_flex.py"
 # 0385 (08/10/2026): a origem da assinatura do Flex, o local de saída e o lote do pedido.
 _MIGRATION_ORIGEM = _VERSOES / "0385_flex_origem.py"
+# 0474 (11/11/2026): o modo, a escrita da Shopee e o pedido no .sp na tela.
+_MIGRATION_AJUSTE = _VERSOES / "0474_flex_ajuste.py"
 TABELAS = [
+    "flex_ajuste",  # 0474: os ajustes da tela (editados por pessoas)
     "flex_anuncio_estado",
     "flex_conta",
     "flex_emergencia",
@@ -115,6 +118,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     origem = _carregar(_MIGRATION_ORIGEM)
     assert origem.revision == "0385_flex_origem"
     assert origem.down_revision == "0384_redes_sociais_loja_shopee"
+    ajuste = _carregar(_MIGRATION_AJUSTE)
+    assert ajuste.revision == "0474_flex_ajuste"
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
@@ -127,12 +132,15 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     def _rodar(conn, passo: str) -> None:
         ctx = MigrationContext.configure(conn, opts={"target_metadata": Base.metadata})
         with Operations.context(ctx):
-            # A 0367 cria; a 0385 completa a flex_conta (o model é o das duas).
-            for m in [mod, origem] if passo == "upgrade" else [origem, mod]:
+            # A 0367 cria; a 0385 completa a flex_conta (o model é o das duas);
+            # a 0474 cria a flex_ajuste.
+            ordem = [mod, origem, ajuste]
+            for m in ordem if passo == "upgrade" else list(reversed(ordem)):
                 getattr(m, passo)()
 
     mod.SCHEMA = rascunho
     origem.SCHEMA = rascunho
+    ajuste.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade")
@@ -203,6 +211,20 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
             await db.execute(text(f"UPDATE \"{rascunho}\".flex_local SET lote = 'xx'"))
         await db.rollback()
 
+        # 0474: nasce VAZIA (nada muda no deploy: vale o .env) e o modo só
+        # aceita os quatro valores, numa linha só.
+        assert (
+            await db.execute(text(f'SELECT count(*) FROM "{rascunho}".flex_ajuste'))
+        ).scalar() == 0
+        with pytest.raises(Exception, match="ck_flex_ajuste_modo"):
+            await db.execute(
+                text(f"INSERT INTO \"{rascunho}\".flex_ajuste (id, modo) VALUES (1, 'turbo')")
+            )
+        await db.rollback()
+        with pytest.raises(Exception, match="ck_flex_ajuste_uma_linha"):
+            await db.execute(text(f'INSERT INTO "{rascunho}".flex_ajuste (id) VALUES (2)'))
+        await db.rollback()
+
         # O CHECK segura valor fora da lista (TEXT, não enum).
         await db.execute(
             text(
@@ -233,10 +255,10 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
 
 
 def test_historico_fica_fora_das_tabelas_do_flex():
-    # As da máquina ficam fora; o local de saída (trocado por uma pessoa na
-    # aba Flex) fica COM o gatilho — o Histórico mostra quem trocou.
+    # As da máquina ficam fora; o local de saída e os ajustes (trocados por
+    # uma pessoa na aba Flex) ficam COM o gatilho — o Histórico mostra quem trocou.
     nomes = [*TABELAS, "logistica"]
-    assert hsql.a_cobrir(nomes) == ["flex_local", "logistica"]
+    assert hsql.a_cobrir(nomes) == ["flex_ajuste", "flex_local", "logistica"]
 
 
 def test_alembic_tem_uma_ponta_so():

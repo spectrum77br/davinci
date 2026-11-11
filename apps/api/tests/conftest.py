@@ -591,6 +591,7 @@ _CLEANUP_TABLES = (
     # Flex (0367): FK → integrations (CASCADE/SET NULL) e users (SET NULL).
     "flex_emergencia",
     "flex_local",  # o local de saída que um teste trocou volta ao de fábrica
+    "flex_ajuste",  # o modo / a Shopee / o pedido no .sp que um teste trocou
     "flex_conta",
     "flex_log",
     "flex_anuncio_estado",
@@ -756,11 +757,13 @@ def _flex_local_de_fabrica():
     """O local de saída do Flex (services/flex_local) fica num cache do
     processo: cada teste começa — e termina — sem ele (vale o de fábrica,
     São Bernardo do Campo / .sp, até o teste gravar outro no banco)."""
-    from app.services import flex_local
+    from app.services import flex_config, flex_local
 
     flex_local.limpar_cache()
+    flex_config.limpar_cache()  # os ajustes da tela (modo, Shopee, pedido no .sp)
     yield
     flex_local.limpar_cache()
+    flex_config.limpar_cache()
 
 
 @pytest.fixture(autouse=True)

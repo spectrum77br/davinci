@@ -1,7 +1,7 @@
 """Respostas da API do Flex por anúncio (routers/flex.py)."""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -68,6 +68,29 @@ class FlexLocalIn(BaseModel):
     lote_antes: str | None = Field(default=None, max_length=3)
 
 
+class FlexAjustesOut(BaseModel):
+    """De onde vêm o modo, a escrita da Shopee e o pedido no .sp: "tela"
+    (trocado na aba Flex) ou "servidor" (o .env) — e quem trocou por último."""
+
+    modo_origem: str = "servidor"
+    shopee_escrita_origem: str = "servidor"
+    pedido_no_sp_origem: str = "servidor"
+    atualizado_em: datetime | None = None
+    atualizado_por: str | None = None  # nome de quem trocou
+
+
+class FlexAjustesIn(BaseModel):
+    """Troca na tela (11/11/2026). Os valores que a tela mostrava ao abrir o
+    formulário vão junto: se alguém trocou nesse meio tempo, 409."""
+
+    modo: Literal["desligado", "observar", "piloto", "ativo"]
+    shopee_escrita: bool
+    pedido_no_sp: bool
+    modo_antes: str | None = Field(default=None, max_length=20)
+    shopee_escrita_antes: bool | None = None
+    pedido_no_sp_antes: bool | None = None
+
+
 class FlexConfigOut(BaseModel):
     """A configuração em vigor — os números como o motor os usa (já
     normalizados). Nenhum segredo."""
@@ -90,6 +113,9 @@ class FlexConfigOut(BaseModel):
     pode_alterar_local: bool = False
     cidades_vistas: list[str] = []
     lotes: list[str] = []
+    # Modo / escrita da Shopee / pedido no .sp trocados na tela (11/11/2026).
+    ajustes: FlexAjustesOut | None = None
+    pode_ajustar: bool = False
 
 
 class FlexAnuncioOut(BaseModel):

@@ -336,6 +336,39 @@ class FlexLocal(Base):
     atualizado_por: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
 
 
+class FlexAjuste(Base):
+    """As chaves do Flex que mandam o robô ESCREVER (Vinicius, 11/11/2026:
+    "e se precisar tirar de onde tá e colocar onde nós conseguimos ver?").
+    Uma linha só (id = 1), trocada na aba Flex por admin ou pelo gerente:
+
+    - `modo`: desligado / observar / piloto / ativo (o `flex_modo` do .env);
+    - `shopee_escrita`: o motor liga/desliga a Entrega Direta nos anúncios
+      da Shopee (o `flex_shopee_escrita`);
+    - `pedido_no_sp`: o robô de prioridade leva o pedido Flex para o lote do
+      local de saída (o `flex_pedido_no_sp`, com a espera da NF junto).
+
+    Campo NULL = vale o .env (services/flex_config) — sem linha, nada muda.
+    Editada por pessoas: fica COM o gatilho do Histórico."""
+
+    __tablename__ = "flex_ajuste"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="uma_linha"),
+        CheckConstraint(_in("modo", FLEX_MODOS), name="modo"),
+    )
+
+    id: Mapped[int] = mapped_column(
+        SmallInteger, primary_key=True, autoincrement=False, server_default=text("1")
+    )
+    modo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    shopee_escrita: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    pedido_no_sp: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    # Quem trocou (sem FK, como o log: sobrevive ao usuário apagado).
+    atualizado_por: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+
+
 class FlexEmergencia(Base):
     """Um clique no "Desligar tudo (emergência)". O pedido HTTP só tira as
     aprovações (na hora: nada volta a ligar) e põe o job na fila; o worker

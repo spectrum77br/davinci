@@ -127,7 +127,13 @@ def _da_linha(linha: FlexLocal | None) -> LocalFlex:
 async def carregar(*, forcar: bool = False) -> LocalFlex:
     """Relê do banco se o cache tem mais de `_VALIDADE_S` (ou `forcar`). Usa
     sessão PRÓPRIA: um erro aqui não aborta a transação de quem chamou.
-    Banco fora: fica o que já estava no cache (ou o padrão)."""
+    Banco fora: fica o que já estava no cache (ou o padrão).
+
+    Relê junto os ajustes da tela (modo, escrita da Shopee, pedido no .sp —
+    services/flex_config): quem já relê o local passa a ver os ajustes também."""
+    from app.services import flex_config
+
+    await flex_config.carregar(forcar=forcar)
     fixo = _da_rodada.get()
     if fixo is not None and not forcar:
         return fixo  # dentro de uma rodada: o local dela, sem reler

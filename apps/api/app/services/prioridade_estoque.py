@@ -884,7 +884,7 @@ async def _esperando_tipo_envio(
     transação, a partir da mesma leitura) ou a Logística já tem o tipo.
     A espera tem teto (`flex_espera_envio_min`, contado de quando o pedido
     entrou no espelho): conta sem acesso à API não segura pedido para sempre."""
-    minutos = int(getattr(get_settings(), "flex_espera_envio_min", 0) or 0)
+    minutos = flex_config.espera_envio_min()
     if minutos <= 0 or not numeros:
         return set()
     corte = agora - timedelta(minutes=minutos)
@@ -1276,7 +1276,7 @@ async def _aplicar_prioridade_estoque(
         return summary
     substituir_item = bool(get_settings().prioridade_substitui_item)
     estoque_unico = bool(getattr(get_settings(), "prioridade_pedido_estoque_unico", True))
-    flex_ligado = bool(getattr(get_settings(), "flex_pedido_no_sp", True))
+    flex_ligado = flex_config.pedido_no_sp()
     mapa = await _mapa_prioridades(session)
     if not mapa and not estoque_unico and not flex_ligado:
         return summary  # ninguém preencheu Prioridade — no-op barato

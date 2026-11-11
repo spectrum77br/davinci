@@ -135,6 +135,7 @@ from app.models.financeiro import (
     NCMCache,
 )
 from app.models.flex import (
+    FlexAjuste,
     FlexAnuncioEstado,
     FlexConta,
     FlexEmergencia,
@@ -467,6 +468,7 @@ __all__ = [
     "ListingRequest",
     "ListingRequestStatus",
     "ListingStatus",
+    "FlexAjuste",
     "FlexAnuncioEstado",
     "FlexConta",
     "FlexEmergencia",

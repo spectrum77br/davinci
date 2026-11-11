@@ -87,6 +87,16 @@ type FlexConfig = {
   pode_alterar_local: boolean
   cidades_vistas: string[]
   lotes: string[]
+  // 11/11/2026: modo, escrita da Shopee e pedido no .sp trocados na tela
+  // ("tela") ou ainda do .env do servidor ("servidor").
+  ajustes?: {
+    modo_origem: string
+    shopee_escrita_origem: string
+    pedido_no_sp_origem: string
+    atualizado_em: string | null
+    atualizado_por: string | null
+  } | null
+  pode_ajustar?: boolean
 }
 type FlexAnuncio = {
   integration_id: string
@@ -1170,6 +1180,84 @@ const contasProntasTotal = computed(() => {
   return { prontas: todas.filter((c) => contasProntas.value.has(c.id)).length, total: todas.length }
 })
 
+// ---- Chaves do Flex na tela (11/11/2026) ----
+// Antes só no .env do servidor (só o Eduardo mexia). Troca: admin e o gerente
+// (cairo SA). Nasce como está no servidor; vale na próxima rodada do robô.
+const MODOS_OPCOES = [
+  { v: 'desligado', t: 'Desligado — não confere nem mexe' },
+  { v: 'observar', t: 'Só observando — confere e mostra, não mexe' },
+  { v: 'piloto', t: 'Piloto — desliga sozinho, liga com aprovação' },
+  { v: 'ativo', t: 'Ativo — igual ao piloto' },
+]
+const editandoAjustes = ref(false)
+const salvandoAjustes = ref(false)
+const ajusteForm = ref({ modo: 'observar', shopee_escrita: false, pedido_no_sp: false })
+function abrirAjustes() {
+  const c = config.value
+  if (!c) return
+  ajusteForm.value = { modo: c.modo, shopee_escrita: !!c.shopee_escrita, pedido_no_sp: !!c.pedido_no_sp }
+  editandoAjustes.value = true
+}
+function simNao(v: boolean) {
+  return v ? 'SIM' : 'NÃO'
+}
+async function salvarAjustes() {
+  const c = config.value
+  if (!c) return
+  const f = ajusteForm.value
+  const mudancas: string[] = []
+  if (f.modo !== c.modo) mudancas.push(`• Modo: ${MODO_CHIP[c.modo]?.texto || c.modo} → ${MODO_CHIP[f.modo]?.texto || f.modo}`)
+  if (f.shopee_escrita !== c.shopee_escrita) mudancas.push(`• DaVinci liga/desliga na Shopee: ${simNao(c.shopee_escrita)} → ${simNao(f.shopee_escrita)}`)
+  if (f.pedido_no_sp !== c.pedido_no_sp) mudancas.push(`• Pedido Flex vai para o .${localLote.value}: ${simNao(c.pedido_no_sp)} → ${simNao(f.pedido_no_sp)}`)
+  if (!mudancas.length) {
+    editandoAjustes.value = false
+    return
+  }
+  const avisos: string[] = []
+  if (f.modo === 'piloto' || f.modo === 'ativo')
+    avisos.push(`Em ${f.modo}, o sistema DESLIGA sozinho o Flex dos anúncios sem peça em ${localCidade.value} (nas contas prontas). Ligar continua precisando de Aprovar.`)
+  if (f.shopee_escrita && (f.modo === 'piloto' || f.modo === 'ativo'))
+    avisos.push('Na Shopee o sistema passa a ligar/desligar a Entrega Direta nos anúncios. Aprove UM primeiro e confira no Seller Center se a Shopee Xpress continuou ligada.')
+  if (f.pedido_no_sp)
+    avisos.push(`O robô de prioridade passa a levar todo pedido Flex para o estoque .${localLote.value}, e a NF automática espera o tipo de envio ser lido.`)
+  const ok = confirm(
+    `Trocar as chaves do Flex?\n\n${mudancas.join('\n')}` +
+      (avisos.length ? `\n\n${avisos.join('\n\n')}` : '') +
+      `\n\nVale na próxima conferência (até ${c.intervalo_min} min) ou ao clicar em Sincronizar Flex.`,
+  )
+  if (!ok) return
+  salvandoAjustes.value = true
+  try {
+    await api('/api/flex/ajustes', {
+      method: 'PUT',
+      body: {
+        ...f,
+        modo_antes: c.modo,
+        shopee_escrita_antes: c.shopee_escrita,
+        pedido_no_sp_antes: c.pedido_no_sp,
+      },
+    })
+    toasts.success('Chaves do Flex trocadas', mudancas.map((m) => m.replace('• ', '')))
+    editandoAjustes.value = false
+    emit('mudou')
+    await carregarTudo()
+  } catch (e: any) {
+    const d = e?.data?.detail
+    const code = typeof d === 'object' && d && !Array.isArray(d) ? d.code : null
+    const msg: Record<string, string> = {
+      so_admin: 'Só um admin (ou o gerente) troca as chaves do Flex.',
+      ajuste_mudou: 'Alguém trocou essas chaves agora há pouco — confira e tente de novo.',
+    }
+    toasts.error('Chaves do Flex', (code && msg[code]) || (typeof d === 'object' && d?.detalhe) || e?.message || 'erro')
+    if (code === 'ajuste_mudou') {
+      editandoAjustes.value = false
+      await carregarConfig()
+    }
+  } finally {
+    salvandoAjustes.value = false
+  }
+}
+
 defineExpose({ recarregar: carregarTudo })
 </script>
 
@@ -1658,15 +1746,67 @@ defineExpose({ recarregar: carregarTudo })
 
         <div class="flex min-w-0 flex-1 flex-col rounded-md border bg-card" data-flex-regra>
           <div class="rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-center text-xs font-semibold text-white">Como o sistema decide</div>
-          <div v-if="config" class="space-y-1 px-3 py-2 text-[11.5px]">
+          <div v-if="config" class="space-y-2 px-3 py-2 text-[11.5px]">
+            <!-- As 3 chaves que mandam o robô escrever (11/11/2026: saíram do .env para cá) -->
+            <div class="space-y-0.5 rounded-md border px-2 py-1.5" data-flex-ajustes>
+              <div class="flex items-center gap-2">
+                <span class="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Chaves do Flex</span>
+                <button
+                  v-if="config.pode_ajustar && canEdit && !editandoAjustes"
+                  type="button"
+                  class="ml-auto text-[11px] font-medium text-primary underline underline-offset-2"
+                  data-flex-ajustes-alterar
+                  @click="abrirAjustes"
+                >alterar</button>
+              </div>
+              <template v-if="!editandoAjustes">
+                <div class="flex items-center gap-1.5">
+                  <span class="text-muted-foreground">Modo:</span>
+                  <span class="rounded px-1.5 text-[10.5px] font-semibold" :class="modoChip.cls">{{ modoChip.texto }}</span>
+                </div>
+                <div>
+                  <span class="text-muted-foreground">DaVinci liga/desliga na Shopee:&nbsp;</span>
+                  <b :class="config.shopee_escrita ? 'text-emerald-700 dark:text-emerald-400' : ''">{{ config.shopee_escrita ? 'SIM' : 'NÃO' }}</b>
+                </div>
+                <div>
+                  <span class="text-muted-foreground">Pedido Flex vai para o .{{ localLote }}:&nbsp;</span>
+                  <b :class="config.pedido_no_sp ? 'text-emerald-700 dark:text-emerald-400' : ''">{{ config.pedido_no_sp ? 'SIM' : 'NÃO' }}</b>
+                </div>
+                <div class="text-[10.5px] text-muted-foreground">
+                  <template v-if="config.ajustes?.atualizado_por">
+                    trocado por {{ config.ajustes.atualizado_por }} {{ fmtDesde(config.ajustes.atualizado_em) }}
+                  </template>
+                  <template v-else>como está na configuração do servidor (ninguém trocou na tela ainda)</template>
+                </div>
+              </template>
+              <div v-else class="space-y-1.5" data-flex-ajustes-form>
+                <label class="block text-[11px]">
+                  Modo
+                  <select v-model="ajusteForm.modo" class="mt-0.5 block w-full rounded border bg-background px-1.5 py-1 text-xs">
+                    <option v-for="o in MODOS_OPCOES" :key="o.v" :value="o.v">{{ o.t }}</option>
+                  </select>
+                </label>
+                <label class="flex items-center gap-1.5 text-[11px]">
+                  <input v-model="ajusteForm.shopee_escrita" type="checkbox" />
+                  DaVinci liga/desliga a Entrega Direta nos anúncios da Shopee
+                </label>
+                <label class="flex items-center gap-1.5 text-[11px]">
+                  <input v-model="ajusteForm.pedido_no_sp" type="checkbox" />
+                  Pedido Flex vai para o estoque .{{ localLote }} ({{ localCidade }})
+                </label>
+                <div class="flex gap-1.5">
+                  <button type="button" class="rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground disabled:opacity-50" :disabled="salvandoAjustes" @click="salvarAjustes">Salvar</button>
+                  <button type="button" class="rounded-md border px-2.5 py-1 text-[11px] font-semibold disabled:opacity-50" :disabled="salvandoAjustes" @click="editandoAjustes = false">Cancelar</button>
+                </div>
+                <div class="text-[10.5px] text-muted-foreground">
+                  Pede confirmação antes. Vale na próxima conferência (até {{ config.intervalo_min }} min) ou ao clicar em Sincronizar Flex.
+                </div>
+              </div>
+            </div>
             <div>{{ regraTexto }}</div>
             <div v-if="!config.shopee_escrita">Na Shopee o sistema só confere: ligar ou desligar lá é feito à mão no Seller Center.</div>
-            <div>
-              Pedido Flex vai para o estoque .{{ localLote }}:
-              <b>{{ config.pedido_no_sp ? 'sim' : 'NÃO (desligado na configuração)' }}</b>.
-            </div>
             <div class="text-[10.5px] text-muted-foreground">
-              O modo e as contas liberadas ficam na configuração do servidor — para mudar, peça ao responsável técnico.
+              A lista de contas liberadas fica na configuração do servidor.
               <template v-if="contasFantasma"> {{ contasFantasma }} conta(s) da configuração não existem mais no DaVinci.</template>
             </div>
           </div>

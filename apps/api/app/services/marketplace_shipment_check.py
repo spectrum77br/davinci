@@ -706,6 +706,7 @@ async def _reavaliar_flex() -> None:
     só DESLIGA). Um por minuto no máximo (id do job pelo minuto). Com
     `flex_modo=desligado` nem enfileira. Falha aqui não atrapalha nada: a
     varredura de 15 em 15 min cobre."""
+    await flex_config.carregar()  # o modo pode vir da tela (flex_ajuste)
     if flex_config.modo() == flex_config.MODO_DESLIGADO:
         return
     try:
