@@ -1,8 +1,8 @@
-"""Quem vê o Flex: só admin ativo (Eduardo, 05/11/2026: "libere o flex somente
+"""Quem vê o Flex: admin ativo (Eduardo, 05/11/2026: "libere o flex somente
 para os admin"; de 05/10 a 05/11 era a lista `flex_usuarios` — heisenberg e
-thorfinn).
+thorfinn) e, desde 11/11/2026, cairo SA (pelo e-mail) e churchill (pelo nome).
 
-Para quem não é admin o Flex não existe: toda rota /api/flex/* é o 404 de rota
+Para os outros o Flex não existe: toda rota /api/flex/* é o 404 de rota
 desconhecida, a Logística não tem `?envio=flex` nem o selo
 (`envio_flex`/`envio_tipo` saem vazios) e o Controle de Estoque não marca
 pedido Flex.
@@ -28,8 +28,10 @@ PERMS = {
 }
 
 
-async def _pessoa(db, make_user, nome, *, role=UserRole.ADMIN, status=UserStatus.ACTIVE):
-    u = await make_user(role=role, status=status, permissions=PERMS)
+async def _pessoa(
+    db, make_user, nome, *, role=UserRole.ADMIN, status=UserStatus.ACTIVE, email=None
+):
+    u = await make_user(role=role, status=status, permissions=PERMS, email=email)
     u.name = nome
     await db.commit()
     await db.refresh(u)
@@ -42,15 +44,28 @@ def test_lista_de_nomes_saiu():
     assert not hasattr(flex_config, "usuarios")
 
 
-def test_pode_ver_so_admin_ativo():
-    class U:
-        def __init__(self, role, status=UserStatus.ACTIVE):
-            self.role, self.status, self.name = role, status, "heisenberg"
+class _U:
+    def __init__(self, role, status=UserStatus.ACTIVE, name="heisenberg", email="x@y.com"):
+        self.role, self.status, self.name, self.email = role, status, name, email
 
-    assert flex_config.pode_ver(U(UserRole.ADMIN)) is True
-    assert flex_config.pode_ver(U(UserRole.USER)) is False
-    assert flex_config.pode_ver(U(UserRole.ADMIN, UserStatus.SUSPENDED)) is False
+
+def test_pode_ver_admin_ativo():
+    assert flex_config.pode_ver(_U(UserRole.ADMIN)) is True
+    assert flex_config.pode_ver(_U(UserRole.USER)) is False
+    assert flex_config.pode_ver(_U(UserRole.ADMIN, UserStatus.SUSPENDED)) is False
     assert flex_config.pode_ver(None) is False
+
+
+def test_pode_ver_cairo_sa_e_churchill():
+    # 11/11/2026: cairo SA pelo e-mail (há outro "cairo", que segue sem ver) e
+    # churchill pelo nome — a mesma régua da aba Estoque Negativo.
+    assert flex_config.pode_ver(_U(UserRole.USER, name="cairo sa", email="SA.Geral@tutamail.com"))
+    assert flex_config.pode_ver(_U(UserRole.USER, name="Churchill ")) is True
+    assert flex_config.pode_ver(_U(UserRole.USER, name="cairo", email="outro@tuta.com")) is False
+    assert flex_config.pode_ver(_U(UserRole.USER, name="churchil")) is False
+    assert (
+        flex_config.pode_ver(_U(UserRole.USER, UserStatus.SUSPENDED, name="churchill")) is False
+    )
 
 
 ROTAS = [
@@ -91,6 +106,22 @@ async def test_admin_ve(
         "lote": "sp",
     }
     assert (await client.get("/api/flex/config")).status_code == 200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("nome", "email"), [("cairo sa", "sa.geral@tutamail.com"), ("churchill", None)]
+)
+async def test_cairo_sa_e_churchill_veem(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable, nome, email
+):
+    auth_as(await _pessoa(db, make_user, nome, role=UserRole.USER, email=email))
+    assert (await client.get("/api/flex/acesso")).status_code == 200
+    assert (await client.get("/api/flex/config")).status_code == 200
+    assert (await client.get("/api/flex/anuncios")).status_code == 200
+    # Trocar o local de saída continua só para admin.
+    r = await client.put("/api/flex/local", json={"cidade": "Piracicaba", "lote": "pi"})
+    assert r.status_code == 403
 
 
 @pytest.mark.asyncio

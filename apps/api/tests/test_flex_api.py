@@ -220,7 +220,7 @@ async def test_config_sem_segredo(client: AsyncClient, cena, auth_as: Callable):
     assert r.status_code == 200
     c = r.json()
     assert (c["modo"], c["pode_escrever"]) == ("observar", False)
-    assert (c["n_liga"], c["n_desliga"], c["max_anuncios_por_familia"]) == (3, 1, 2)
+    assert (c["n_liga"], c["n_desliga"], c["max_anuncios_por_familia"]) == (3, 1, 0)
     assert c["shopee_canais"] == ["90022"]
     contas = {x["id"]: x for x in c["contas"]}
     assert contas[str(cena["conta_id"])] == {

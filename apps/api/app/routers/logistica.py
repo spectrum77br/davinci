@@ -112,7 +112,7 @@ from app.worker_pool import get_arq_marketplace_pool
 
 logger = structlog.get_logger()
 
-# Quem vê o Flex (só admin, `flex_config.pode_ver`): para os outros a linha sai sem
+# Quem vê o Flex (admin + cairo SA e churchill, `flex_config.pode_ver`): para os outros a linha sai sem
 # `envio_tipo`/`envio_flex` (sem selo "Flex") e `?envio=flex` é 404. Marcado
 # uma vez por pedido (dependência do router, async: roda na mesma tarefa da
 # rota) e lido em `_to_out` — que tem muitos chamadores e nenhum usuário.

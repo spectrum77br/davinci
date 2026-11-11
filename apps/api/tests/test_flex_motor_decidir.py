@@ -334,13 +334,22 @@ def test_limite_conta_cada_familia_do_anuncio():
     assert "dg053" in dec[(CONTA, "D")].motivo
 
 
-def test_limite_zero_nao_liga_nada_e_familias_diferentes_nao_brigam():
+def test_familias_diferentes_nao_brigam():
     anuncios = [_anuncio("dg053.ci", ext="A"), _anuncio("dg054.ci", ext="B")]
     saldos = _saldos(dg053_sp=10, dg054_sp=10)
-    dec = decidir_lote(anuncios, saldos, ConfigFlex(max_anuncios_por_familia=0))
-    assert {d.desejado for d in dec.values()} == {"desligado"}
     dec = decidir_lote(anuncios, saldos, ConfigFlex(max_anuncios_por_familia=1))
     assert {d.desejado for d in dec.values()} == {"ligado"}
+
+
+def test_limite_zero_e_sem_limite_o_padrao():
+    # 11/11/2026 (Vinicius: "esse vamos tirar por enquanto"): 0 = sem limite,
+    # e é o padrão — todos os anúncios da família que passam na regra ligam.
+    assert ConfigFlex().max_anuncios_por_familia == 0
+    anuncios = [_anuncio("dg053.ci", ext=f"MLB{i}") for i in range(5)]
+    for cfg in (ConfigFlex(), ConfigFlex(max_anuncios_por_familia=0)):
+        dec = decidir_lote(anuncios, _saldos(dg053_sp=10), cfg)
+        assert {d.desejado for d in dec.values()} == {"ligado"}
+        assert not any("limite" in (d.motivo or "") for d in dec.values())
 
 
 # ---- saldo: pedidos Flex que ainda devem ao .sp ---------------------------------

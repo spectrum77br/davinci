@@ -15,7 +15,8 @@ def test_padroes_das_decisoes_de_02_10(monkeypatch):
     assert padrao["flex_contas"] == ""
     assert (padrao["flex_n_liga"], padrao["flex_n_desliga"]) == (3, 1)
     assert padrao["flex_kits"] is False
-    assert padrao["flex_max_anuncios_por_familia"] == 2
+    # 11/11/2026: sem limite de anúncios com Flex por família (era 2).
+    assert padrao["flex_max_anuncios_por_familia"] == 0
     assert padrao["flex_teto_escritas_por_rodada"] == 50
     assert padrao["flex_shopee_canais"] == "90022"
     assert padrao["flex_shopee_escrita"] is False

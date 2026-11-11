@@ -25,7 +25,8 @@ REGRA (função pura `decidir`, testada em tabela):
   • estoque desconhecido (família sem .sp ativo) NUNCA liga;
   • no máximo flex_max_anuncios_por_familia anúncios com Flex por família
     (`decidir_lote`) — o mesmo .sp aparece em N anúncios (clássico, premium,
-    várias contas) e cada um pode vender tudo.
+    várias contas) e cada um pode vender tudo. 0 = sem limite, o padrão
+    desde 11/11/2026 (Vinicius: "esse vamos tirar por enquanto"; era 2).
   • negação por padrão: nas contas permitidas, o que não é elegível deve
     ficar DESLIGADO — inclusive anúncio sem vínculo vivo (vem da tabela de
     anúncios importados ou de um estado antigo).
@@ -244,7 +245,8 @@ class ConfigFlex:
     n_liga: int = 3
     n_desliga: int = 1
     kits: bool = False
-    max_anuncios_por_familia: int = 2
+    # 0 = sem limite (de fábrica desde 11/11/2026; antes 2).
+    max_anuncios_por_familia: int = 0
 
     def __post_init__(self) -> None:
         # Ligar com saldo 0 nunca; e o piso de desligar não passa o de ligar
@@ -547,9 +549,12 @@ def _ordem_limite(anuncio: Anuncio) -> tuple:
 def decidir_lote(
     anuncios: Iterable[Anuncio], saldos: Mapping[str, SaldoSp], cfg: ConfigFlex
 ) -> dict[tuple[UUID, str], Decisao]:
-    """`decidir` de cada anúncio + o limite de anúncios ligados por família."""
+    """`decidir` de cada anúncio + o limite de anúncios ligados por família
+    (0 = sem limite)."""
     lista = list(anuncios)
     decisoes = {a.chave: decidir(a, saldos, cfg) for a in lista}
+    if cfg.max_anuncios_por_familia <= 0:
+        return decisoes
     contagem: Counter[str] = Counter()
     for a in sorted((a for a in lista if decisoes[a.chave].desejado == LIGADO), key=_ordem_limite):
         d = decisoes[a.chave]

@@ -55,10 +55,22 @@ def pode_escrever(modo_atual: str | None = None) -> bool:
     return modo(modo_atual) in MODOS_QUE_ESCREVEM
 
 
+# Além dos admin, quem vê o Flex (Vinicius, 11/11/2026: "libera para cairo e
+# churchil, vamos ver e começar a arrumar"). Mesma régua da aba Estoque
+# Negativo (routers/estoque): cairo SA pelo e-mail (há outro "cairo"),
+# churchill pelo nome.
+_VEEM_EMAILS = frozenset({"sa.geral@tutamail.com"})
+_VEEM_NOMES = frozenset({"churchill"})
+
+
 def pode_ver(user) -> bool:
     """Quem vê o Flex: admin ativo (Eduardo, 05/11/2026: "libere o flex
-    somente para os admin"). Até então era a lista `flex_usuarios` do .env
-    (heisenberg e thorfinn, 05/10/2026)."""
+    somente para os admin") e, desde 11/11/2026, cairo SA e churchill. De
+    05/10 a 05/11 era a lista `flex_usuarios` do .env (heisenberg e thorfinn)."""
     if user is None or getattr(user, "status", None) != UserStatus.ACTIVE:
         return False
-    return getattr(user, "role", None) == UserRole.ADMIN
+    if getattr(user, "role", None) == UserRole.ADMIN:
+        return True
+    email = (getattr(user, "email", None) or "").strip().lower()
+    nome = (getattr(user, "name", None) or "").strip().lower()
+    return email in _VEEM_EMAILS or nome in _VEEM_NOMES

@@ -25,7 +25,7 @@ emergência); admin passa sempre (`require_permission`).
   POST /api/flex/pedidos/{bling_id}/acertado   a pessoa acertou o estoque
                                no Bling (o saldo Flex para de descontar)
 
-Quem vê: só admin (`flex_config.pode_ver`, 05/11/2026; de 05/10 a 05/11 era
+Quem vê: admin + cairo SA e churchill (`flex_config.pode_ver`, 05/11 e 11/11/2026; de 05/10 a 05/11 era
 a lista `flex_usuarios`) — para os outros TODA rota daqui responde o 404 de
 rota que não existe (como Sistema › Histórico) e o router fica fora da
 documentação (/api/docs).
@@ -89,7 +89,7 @@ logger = structlog.get_logger()
 
 
 async def _so_quem_ve(user: Annotated[User | None, Depends(get_current_user)]) -> None:
-    # Igual ao 404 do FastAPI para rota desconhecida: quem não é admin não
+    # Igual ao 404 do FastAPI para rota desconhecida: quem não vê o Flex não
     # descobre nem que o Flex existe.
     if not flex_config.pode_ver(user):
         raise HTTPException(404, detail="Not Found")

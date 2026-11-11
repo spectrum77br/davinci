@@ -44,7 +44,7 @@ const PLATAFORMA_TABS = [
   { key: 'flex', label: 'Flex' },
 ] as const
 type PlataformaTab = (typeof PLATAFORMA_TABS)[number]['key']
-// Quem vê o Flex: só admin (05/11/2026; antes a lista `flex_usuarios` do .env).
+// Quem vê o Flex: admin + cairo SA e churchill (05/11 e 11/11/2026; antes a lista `flex_usuarios` do .env).
 // /api/flex/acesso responde 200 só para eles; para os outros a aba Flex não
 // aparece e o selo/aviso "Flex" some dos pedidos (a API da Logística também já
 // manda a linha sem o tipo de envio).

@@ -964,6 +964,7 @@ class Settings(BaseSettings):
     #   max_anuncios_por_familia  quantos anúncios com Flex ligado por
     #               família: o mesmo .sp aparece em N anúncios (clássico,
     #               premium, várias contas) e cada um pode vender tudo.
+    #               0 = sem limite — o padrão desde 11/11/2026 (era 2).
     #   teto_escritas_por_rodada  máximo de chamadas de escrita por rodada
     #               (1/5 dele, no mínimo 1, fica guardado para os LIGAR que
     #               uma pessoa aprovou — não esperam a fila de desligar).
@@ -982,12 +983,13 @@ class Settings(BaseSettings):
     flex_n_liga: int = 3
     flex_n_desliga: int = 1
     flex_kits: bool = False
-    flex_max_anuncios_por_familia: int = 2
+    flex_max_anuncios_por_familia: int = 0
     flex_teto_escritas_por_rodada: int = 50
     flex_shopee_canais: str = "90022"
     flex_shopee_escrita: bool = False
     flex_intervalo_min: int = 15
-    # Quem VÊ o Flex: só admin (services/flex_config.pode_ver, 05/11/2026).
+    # Quem VÊ o Flex: admin + cairo SA e churchill (services/flex_config.pode_ver,
+    # 05/11 e 11/11/2026).
     # A lista `FLEX_USUARIOS` de 05/10 saiu; variável velha no .env é ignorada.
     # Pedido Flex SEMPRE sai do .sp (etapa 2, services/prioridade_estoque): o
     # robô de prioridade leva cada item do pedido Flex para o lote .sp, acima

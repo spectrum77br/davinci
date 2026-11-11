@@ -518,7 +518,9 @@ const regraTexto = computed(() => {
   const pecas = (n: number) => (n === 1 ? '1 peça livre' : `${n} peças livres`)
   return (
     `Liga com ${pecas(c.n_liga)} ou mais em ${localCidade.value} (estoque .${localLote.value}) e desliga com menos de ${c.n_desliga}. ` +
-    `No máximo ${c.max_anuncios_por_familia} anúncio(s) com Flex por família. ` +
+    (c.max_anuncios_por_familia > 0
+      ? `No máximo ${c.max_anuncios_por_familia} anúncio(s) com Flex por família. `
+      : 'Sem limite de anúncios com Flex por família. ') +
     `Kits ${c.kits ? 'entram' : 'não entram'}. ` +
     `Confere sozinho a cada ${c.intervalo_min} min` +
     (c.pode_escrever ? `, mudando até ${c.teto_escritas_por_rodada} anúncios por vez.` : '.')
