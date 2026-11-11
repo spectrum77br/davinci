@@ -411,8 +411,13 @@ def decidir(anuncio: Anuncio, saldos: Mapping[str, SaldoSp], cfg: ConfigFlex) ->
     `decidir_lote`). Pura: nada de banco, nada de API."""
     if anuncio.bloqueio:
         # A conta não pode ter Flex: nada por anúncio adianta (nem pedir
-        # aprovação — a aprovação não ligaria nada).
-        return Decisao(INELEGIVEL, anuncio.bloqueio)
+        # aprovação — a aprovação não ligaria nada). A decisão e o motivo são
+        # os da CONTA, mas as famílias e as peças em São Bernardo vêm da regra
+        # de sempre (11/11/2026): sem isso a tela mostrava "—" em 22 mil linhas
+        # e não dava para ver quais anúncios teriam Flex quando a conta ficar
+        # pronta (saída do Flex trocada, Entrega Direta ligada na loja).
+        base = decidir(replace(anuncio, bloqueio=None), saldos, cfg)
+        return Decisao(INELEGIVEL, anuncio.bloqueio, base.familias, base.saldo, base.skus_sp)
     if not anuncio.variacoes:
         if not anuncio.conhecido:
             return Decisao(DESLIGADO, MOTIVO_FORA_DO_DAVINCI)

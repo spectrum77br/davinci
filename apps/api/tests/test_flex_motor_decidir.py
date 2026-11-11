@@ -257,6 +257,19 @@ def test_recusa_da_plataforma_segura_so_o_ligar():
     assert d.desejado == "desligado"
 
 
+def test_conta_bloqueada_anota_familias_e_pecas():
+    # 11/11/2026: a decisão e o motivo são os da conta (não pode ter Flex), mas
+    # as famílias e as peças vêm da regra — a tela mostra o que teria Flex
+    # quando a conta ficar pronta.
+    a = replace(_anuncio("dg053.ci"), bloqueio="conta sem Flex ativo no ML (status out)")
+    d = decidir(a, _saldos(dg053_sp=7), CFG)
+    assert (d.desejado, d.motivo) == ("inelegivel", "conta sem Flex ativo no ML (status out)")
+    assert (d.familias, d.saldo) == (("dg053",), 7)
+    # Sem .sp conhecido continua sem peças (e sem ligar, claro).
+    d = decidir(replace(_anuncio("zz999.ci"), bloqueio="x"), _saldos(dg053_sp=7), CFG)
+    assert (d.desejado, d.motivo, d.saldo) == ("inelegivel", "x", None)
+
+
 def test_config_normaliza():
     c = ConfigFlex(n_liga=0, n_desliga=5, max_anuncios_por_familia=-1)
     assert (c.n_liga, c.n_desliga, c.max_anuncios_por_familia) == (1, 1, 0)

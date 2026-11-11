@@ -25,8 +25,8 @@ emergência); admin passa sempre (`require_permission`).
   POST /api/flex/pedidos/{bling_id}/acertado   a pessoa acertou o estoque
                                no Bling (o saldo Flex para de descontar)
 
-Quem vê: admin + cairo SA e churchill (`flex_config.pode_ver`, 05/11 e 11/11/2026; de 05/10 a 05/11 era
-a lista `flex_usuarios`) — para os outros TODA rota daqui responde o 404 de
+Quem vê: admin + cairo SA e churchill (`flex_config.pode_ver`, 05/11 e 11/11/2026;
+de 05/10 a 05/11 era a lista `flex_usuarios`) — para os outros TODA rota daqui responde o 404 de
 rota que não existe (como Sistema › Histórico) e o router fica fora da
 documentação (/api/docs).
 `GET /api/flex/acesso` é como a tela descobre se mostra a aba.
@@ -419,13 +419,28 @@ def _aguardando(permitidas: frozenset[UUID]):
     return and_(est.aguardando_aprovacao.is_(True), est.integration_id.in_(list(permitidas)))
 
 
+def _com_peca():
+    """Anúncio com peça livre no estoque do local de saída (.sp). Desde
+    11/11/2026 o motor anota as peças também nas contas que não estão prontas."""
+    return FlexAnuncioEstado.saldo_sp >= 1
+
+
+def _conta_nao_pronta(liberadas: frozenset[UUID]):
+    """Com peça, mas numa conta em que o robô não mexe (fora de flex_contas, sem
+    Flex, ou a saída do Flex em outra cidade): falta arrumar a CONTA."""
+    if not liberadas:
+        return _com_peca()
+    return and_(_com_peca(), FlexAnuncioEstado.integration_id.not_in(list(liberadas)))
+
+
 async def _resumo(
     session: AsyncSession, escopo: frozenset[UUID] | None, permitidas: frozenset[UUID]
 ) -> FlexResumoOut:
-    liberadas = await _liberadas(session, permitidas)
     """O quadro do topo da tela: todos os anúncios avaliados, sem os filtros
     da lista (o dono vê de cara quantos esperam por ele) — dentro do escopo
     da equipe."""
+    liberadas = await _liberadas(session, permitidas)
+    n_liga = flex_motor.ConfigFlex.das_configuracoes().n_liga
     est = FlexAnuncioEstado
     q = select(
         func.count(),
@@ -434,6 +449,9 @@ async def _resumo(
         func.count().filter(_desligar(liberadas)),
         func.count().filter(est.observado.is_(None)),
         func.count().filter(_sem_controle(permitidas, liberadas)),
+        func.count().filter(_com_peca()),
+        func.count().filter(est.saldo_sp >= n_liga),
+        func.count().filter(_conta_nao_pronta(liberadas)),
     ).select_from(est)
     filtro = _no_escopo(est.integration_id, escopo)
     if filtro is not None:
@@ -446,6 +464,9 @@ async def _resumo(
         desligar=int(row[3] or 0),
         nao_lidos=int(row[4] or 0),
         sem_controle=int(row[5] or 0),
+        com_peca=int(row[6] or 0),
+        da_para_ter=int(row[7] or 0),
+        conta_nao_pronta=int(row[8] or 0),
     )
 
 
@@ -462,6 +483,11 @@ async def anuncios(
     # `desligar=true`: ligado na plataforma, mas a regra não quer — o mesmo
     # número do resumo ("ligados que deveriam desligar").
     desligar: bool = False,
+    # Peças no local de saída (11/11/2026): `com` = pelo menos 1 peça livre;
+    # `flex` = o bastante para ter Flex (n_liga). Os mesmos números do resumo.
+    pecas: Literal["com", "flex"] | None = None,
+    # Com peça, mas a conta ainda não está pronta (o robô não mexe nela).
+    conta_nao_pronta: bool = False,
     # Busca da tela: id do anúncio, família ou título (sem curinga: `%`/`_`
     # digitados são letras).
     busca: Annotated[str | None, Query(max_length=100)] = None,
@@ -471,6 +497,13 @@ async def anuncios(
     escopo = await _escopo(session, user)
     permitidas = await _permitidas(session)
     filtros = []
+    if pecas == "com":
+        filtros.append(_com_peca())
+    elif pecas == "flex":
+        n_liga = flex_motor.ConfigFlex.das_configuracoes().n_liga
+        filtros.append(FlexAnuncioEstado.saldo_sp >= n_liga)
+    if conta_nao_pronta:
+        filtros.append(_conta_nao_pronta(await _liberadas(session, permitidas)))
     if (f := _no_escopo(FlexAnuncioEstado.integration_id, escopo)) is not None:
         filtros.append(f)
     if integration_id is not None:
@@ -519,6 +552,8 @@ async def anuncios(
             case((_aguardando(permitidas), 0), else_=1),
             case((FlexAnuncioEstado.observado == "ligado", 0), else_=1),
             case((FlexAnuncioEstado.desejado == "ligado", 0), else_=1),
+            # Depois, quem tem mais peça no local de saída (sem peça por último).
+            FlexAnuncioEstado.saldo_sp.desc().nulls_last(),
             FlexAnuncioEstado.atualizado_em.desc(),
             FlexAnuncioEstado.external_id,
         )

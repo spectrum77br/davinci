@@ -151,11 +151,43 @@ async def test_anuncios_motivo_claro_e_resumo(client: AsyncClient, cena, auth_as
         "desligar": 1,
         "nao_lidos": 1,
         "sem_controle": 0,
+        # 11/11/2026: com peça (MLB1 tem 5, MLB2 tem 0), dá para ter Flex (>= 3)
+        # e, dos com peça, os de conta que não está pronta (a vita está).
+        "com_peca": 1,
+        "da_para_ter": 1,
+        "conta_nao_pronta": 0,
     }
     # O resumo é de tudo, mesmo com a lista filtrada.
     r = await client.get("/api/flex/anuncios?aguardando=true")
     assert r.json()["total"] == 1
     assert r.json()["resumo"]["avaliados"] == 3
+
+
+@pytest.mark.asyncio
+async def test_anuncios_filtro_pecas_e_conta_nao_pronta(
+    client: AsyncClient, db: AsyncSession, cena, auth_as: Callable
+):
+    """11/11/2026: a tela mostra de fábrica só os anúncios com peça em São
+    Bernardo; "conta não pronta" = com peça numa conta em que o robô não mexe."""
+    auth_as(cena["admin"])
+
+    async def ids(q: str) -> list[str]:
+        r = await client.get(f"/api/flex/anuncios?{q}")
+        assert r.status_code == 200, r.text
+        return sorted(i["external_id"] for i in r.json()["itens"])
+
+    assert await ids("pecas=com") == ["MLB1"]
+    assert await ids("pecas=flex") == ["MLB1"]
+    assert await ids("conta_nao_pronta=true") == []
+    assert (await client.get("/api/flex/anuncios?pecas=muitas")).status_code == 422
+    # A saída do Flex da conta vai para Piracicaba: a conta deixa de estar pronta.
+    conta = await db.get(FlexConta, cena["conta_id"])
+    conta.origem_cidade = "Piracicaba"
+    conta.origem_cep = "13421870"
+    await db.commit()
+    assert await ids("conta_nao_pronta=true") == ["MLB1"]
+    r = await client.get("/api/flex/anuncios")
+    assert r.json()["resumo"]["conta_nao_pronta"] == 1
 
 
 @pytest.mark.asyncio

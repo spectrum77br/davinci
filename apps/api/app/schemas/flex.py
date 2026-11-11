@@ -143,6 +143,12 @@ class FlexResumoOut(BaseModel):
     # sem Flex conferido, ou com a saída do Flex fora da cidade do local de
     # saída. Ninguém desliga sozinho — só a emergência ou uma pessoa.
     sem_controle: int = 0
+    # 11/11/2026 (tela no padrão de Chamados): anúncios com peça livre em São
+    # Bernardo (saldo >= 1), com peça para ter Flex (saldo >= n_liga) e, dos com
+    # peça, os de conta que ainda não está pronta (o robô não mexe nela).
+    com_peca: int = 0
+    da_para_ter: int = 0
+    conta_nao_pronta: int = 0
 
 
 class FlexAnunciosOut(BaseModel):
