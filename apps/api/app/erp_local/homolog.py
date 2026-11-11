@@ -40,6 +40,8 @@ FOLLOW = {
     # Bling's situation of each store sale, as the real base follows it: the list shows it beside
     # what the ERP does, so the day can be compared order by order.
     "bling_mirror_orders": ("mirror", None),
+    # The issuers and the numbering Bling and UpSeller used, so a prepared note takes the next one.
+    "fiscal_company_candidates": ("replace", None),
 }
 # The reception state shown on the screen; who owns the store stays "own" here.
 ACCOUNT_STATE = (
@@ -222,6 +224,9 @@ def loop(database, live, every=60):
             with erp.connection() as db:
                 began = (info(db) or {}).get("started_at", started)
             result = auto_import(erp, began)
+            from app.erp_local import multi_company
+
+            result["numeração"] = multi_company.follow_numbering(erp)
             log.info("seguiu %s importou %s", got, result)
             today = started[:10]
             if purged_on != today:

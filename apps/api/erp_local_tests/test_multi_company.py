@@ -166,3 +166,33 @@ def test_kind_comes_from_the_deepest_category(erp):
     )
     with erp.connection() as db:
         assert mc._item_type(db, "demo.aparelho") == "mala"
+
+
+def test_issuers_are_read_again_and_adopted_companies_follow_the_numbering(erp):
+    import copy
+    import json
+
+    asked = []
+
+    def reader(sql):
+        asked.append(sql)
+        return READ
+
+    assert mc.refresh(erp, reader) == {"empresas": 1, "replayed": False}
+    assert "nf_nota" in asked[0] and "upseller_pedido" in asked[0]
+    erp.command("t1", "fiscal.technical.save", TECHNICAL)
+    adopt(erp)
+    assert mc.follow_numbering(erp) == {"atualizadas": 0}
+    later = copy.deepcopy(READ)
+    later["stats"][1]["ultimo"] = 560
+    mc.refresh(erp, lambda sql: later)
+    assert mc.follow_numbering(erp) == {"atualizadas": 1}
+    assert mc.follow_numbering(erp) == {"atualizadas": 0}
+    with erp.connection() as db:
+        data = json.loads(db.execute("SELECT data FROM fiscal_companies").fetchone()[0])
+    assert data["next_number"] == 561
+
+
+def test_an_empty_issuers_read_changes_nothing(erp):
+    with pytest.raises(ERPError, match="vazia"):
+        mc.refresh(erp, lambda sql: {"emit": [], "stats": []})

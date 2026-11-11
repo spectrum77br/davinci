@@ -221,6 +221,62 @@ def snapshot(db):
     }
 
 
+# The issuers and their numbering, from the sale notes DaVinci keeps (Bling's and UpSeller's), read
+# only. Only notes tied to an order: a supplier's note never becomes an issuer. The <emit> block of
+# each company's latest note carries no buyer data.
+ISSUERS_SQL = (
+    "SELECT json_build_object('stats', coalesce((SELECT json_agg(s) FROM ("
+    "SELECT emitente_cnpj AS cnpj, serie, count(*) AS notas,"
+    " max(CASE WHEN numero ~ '^[0-9]+$' THEN numero::bigint END) AS ultimo,"
+    " max(data_emissao)::date::text AS ultima,"
+    " count(*) FILTER (WHERE data_emissao > now() - interval '30 days') AS ult30"
+    " FROM davinci.nf_nota WHERE coalesce(emitente_cnpj,'')<>''"
+    " AND (pedido_bling IS NOT NULL OR upseller_pedido IS NOT NULL)"
+    " AND data_emissao > now() - interval '120 days' GROUP BY emitente_cnpj, serie) s),'[]'),"
+    " 'emit', coalesce((SELECT json_agg(e) FROM ("
+    "SELECT n.emitente_cnpj AS cnpj,"
+    " substring(convert_from(n.xml,'UTF8') from '<emit>.*?</emit>') AS emit"
+    " FROM davinci.nf_nota n JOIN (SELECT DISTINCT ON (emitente_cnpj) id FROM davinci.nf_nota"
+    " WHERE coalesce(emitente_cnpj,'')<>'' AND xml IS NOT NULL"
+    " AND (pedido_bling IS NOT NULL OR upseller_pedido IS NOT NULL)"
+    " AND data_emissao > now() - interval '120 days'"
+    " ORDER BY emitente_cnpj, data_emissao DESC) l ON l.id=n.id) e),'[]'))::text"
+)
+
+
+def refresh(erp, reader=None):
+    """Read the issuers again: each company's next number follows what Bling and UpSeller used."""
+    if reader is None:
+        from app.erp_local.bling_mirror import read_local as reader
+    read = reader(ISSUERS_SQL)
+    rows = [r for r in candidates_from_read(read) if r["cnpj"]]
+    if not rows:
+        raise ERPError("fiscal_candidates_empty", "A leitura das empresas veio vazia.", 502)
+    digest = hashlib.sha256(dumps(rows).encode()).hexdigest()
+    result = erp.command("fiscal-candidates-" + digest, "fiscal.candidates.load", {"rows": rows})
+    return {"empresas": len(rows), "replayed": bool(result.get("replayed"))}
+
+
+def follow_numbering(erp):
+    """Adopted companies keep up with the numbering read: never issue a number already used."""
+    bumped = []
+    with erp.connection() as db:
+        candidates = {
+            r["cnpj"]: json.loads(r["data"])
+            for r in db.execute("SELECT cnpj,data FROM fiscal_company_candidates")
+        }
+        rows = db.execute("SELECT data FROM fiscal_companies").fetchall()
+        companies = [json.loads(r["data"]) for r in rows]
+    for company in companies:
+        candidate = candidates.get(company["cnpj"])
+        if not candidate or candidate["last_number"] + 1 <= company["next_number"]:
+            continue
+        key = f"fiscal-number-{company['cnpj']}-{candidate['series']}-{candidate['last_number']}"
+        erp.command(key, "fiscal.company.adopt", {"cnpj": company["cnpj"]})
+        bumped.append(company["cnpj"])
+    return {"atualizadas": len(bumped)}
+
+
 def load_file(erp, path):
     rows = candidates_from_read(json.loads(Path(path).read_text("utf-8")))
     digest = hashlib.sha256(dumps(rows).encode()).hexdigest()

@@ -170,6 +170,12 @@ def main():
                     "situação do cadastro %s",
                     catalog_follow.follow_status(erp, store.all_rows("products")),
                 )
+                from app.erp_local import multi_company
+
+                try:
+                    log.info("empresas emissoras %s", multi_company.refresh(erp))
+                except ERPError as error:
+                    log.warning("empresas emissoras não lidas: %s", error.code)
             except ERPError as error:
                 log.warning("referência não atualizada: %s", error.code)
         rounds += 1
