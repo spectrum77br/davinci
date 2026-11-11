@@ -232,6 +232,10 @@ def _dict(
         "vara": p.vara,
         "valor_causa": float(p.valor_causa) if p.valor_causa is not None else None,
         "jusbrasil_link": p.jusbrasil_link,
+        "jusbrasil_tentado_em": (
+            p.jusbrasil_tentado_em.isoformat() if p.jusbrasil_tentado_em else None
+        ),
+        "jusbrasil_erro": p.jusbrasil_erro,
         "observacao": p.observacao,
         "ultima_mov": _mov_dict(ultima),
         "criado_por": p.criado_por,
@@ -537,11 +541,19 @@ async def sync_lancar_do_jusbrasil(
     corpo: Annotated[dict, Body()],
 ) -> dict:
     """O que o robô do mini leu na página do processo no Jusbrasil: {link, andamentos: [{data
-    'dd/mm/aaaa', tipo, texto}]}. O link entra no campo Jusbrasil se estiver vazio."""
+    'dd/mm/aaaa', tipo, texto}]}. O link entra no campo Jusbrasil se estiver vazio. Com `erro`
+    (não achou o processo, a página falhou), só registra a tentativa — a coluna Jusbrasil mostra."""
     p = await _processo(session, processo_id)
     andamentos = corpo.get("andamentos")
     if not isinstance(andamentos, list):
         raise HTTPException(422, detail={"code": "juridico_itens_invalidos"})
+    p.jusbrasil_tentado_em = datetime.now(UTC)
+    erro = str(corpo.get("erro") or "").strip()[:300]
+    if erro:
+        p.jusbrasil_erro = erro
+        await session.commit()
+        return {"ok": True, "novas": 0, "andamentos": 0}
+    p.jusbrasil_erro = None
     novas = await juridico_diario.lancar_jusbrasil(session, p, corpo.get("link"), andamentos)
     await session.commit()
     return {"ok": True, "novas": novas, "andamentos": len(andamentos)}

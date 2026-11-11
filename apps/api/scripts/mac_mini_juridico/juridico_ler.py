@@ -192,6 +192,15 @@ def andamentos_do_historico(texto):
     return out
 
 
+def avisar_falha(proc_id, motivo):
+    """A tentativa que falhou fica no processo — a coluna Jusbrasil do painel mostra em vermelho."""
+    try:
+        davinci("POST", "/api/juridico/sync/processos/%s/jusbrasil" % proc_id,
+                {"andamentos": [], "erro": motivo[:300]})
+    except Exception as e:  # noqa: BLE001
+        log("não consegui registrar a falha do processo %s: %s" % (proc_id, e))
+
+
 def ler_jusbrasil(pid, procs, origem):
     sys.path.insert(0, FISCALIZACAO)
     os.chdir(FISCALIZACAO)
@@ -215,6 +224,7 @@ def ler_jusbrasil(pid, procs, origem):
                     pag = jan.execute_script(JS_TEXTO)
                     parou = bloqueio(pag)
                     if parou:
+                        avisar_falha(p["id"], parou)
                         break
                     # o resultado da busca aparece depois da página (11/11: o Caso 009 "não achou" na
                     # 1ª leitura, logo depois de abrir o perfil) — tenta até 3 vezes
@@ -227,6 +237,7 @@ def ler_jusbrasil(pid, procs, origem):
                         time.sleep(random.uniform(5, 8))
                     if not link:
                         log("processo %s: não achei no Jusbrasil" % p["id"])
+                        avisar_falha(p["id"], "a busca do Jusbrasil não achou o processo")
                         conta["falhas"] += 1
                         continue
                     time.sleep(random.uniform(8, 15))
@@ -236,6 +247,7 @@ def ler_jusbrasil(pid, procs, origem):
                 pag = jan.execute_script(JS_TEXTO)
                 parou = bloqueio(pag)
                 if parou:
+                    avisar_falha(p["id"], parou)
                     break
                 if not p.get("tem_jusbrasil"):  # primeira vez: o histórico inteiro
                     for _ in range(15):
@@ -253,6 +265,7 @@ def ler_jusbrasil(pid, procs, origem):
             except Exception as e:  # noqa: BLE001
                 conta["falhas"] += 1
                 log("Jusbrasil, processo %s: FALHOU %s" % (p["id"], e))
+                avisar_falha(p["id"], "a leitura falhou: %s" % str(e)[:200])
     finally:
         if parou:
             log("PAROU:", parou)  # a janela fica aberta na tela

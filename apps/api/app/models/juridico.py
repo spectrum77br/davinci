@@ -70,8 +70,12 @@ class JuridicoProcesso(Base):
     )
     vara: Mapped[str | None] = mapped_column(Text)
     valor_causa: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
-    # link de consulta no Jusbrasil; a leitura automática das movimentações vem depois
+    # link do processo no Jusbrasil (o robô do Mac mini acha pelo nº e grava aqui)
     jusbrasil_link: Mapped[str | None] = mapped_column(Text)
+    # 11/11 (Vinicius: "como vou saber se ele tentou atualizar o caso 9 e não conseguiu?"): a
+    # última tentativa do robô no Jusbrasil e, se falhou, o motivo — a coluna Jusbrasil mostra
+    jusbrasil_tentado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    jusbrasil_erro: Mapped[str | None] = mapped_column(Text)
     observacao: Mapped[str | None] = mapped_column(Text)
     criado_por: Mapped[str | None] = mapped_column(Text)
     criado_em: Mapped[datetime] = mapped_column(

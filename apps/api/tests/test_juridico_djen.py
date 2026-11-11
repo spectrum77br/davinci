@@ -198,3 +198,20 @@ async def test_pedido_das_6h_e_do_botao_ao_mac_mini(client, editor, db):
     ped2, motivo2 = await juridico_diario.pedir_leitura(db, "botao", "Teste", agora=datetime.now(UTC) + timedelta(hours=3))
     assert motivo2 == "pedido" and ped2.origem == "botao" and ped2.pedido_por == "Teste"
 
+
+@pytest.mark.asyncio
+async def test_falha_do_robo_no_jusbrasil_fica_no_processo(client, editor):
+    """11/11 (Vinicius: "como vou saber se ele tentou atualizar o caso 9 e não conseguiu?")."""
+    pid = await _processo(client)
+    r = await client.post(f"/api/juridico/sync/processos/{pid}/jusbrasil", json={"andamentos": [], "erro": "a busca do Jusbrasil não achou o processo"}, headers=H)
+    assert r.status_code == 200 and r.json()["novas"] == 0
+    p = next(x for x in (await client.get("/api/juridico/processos")).json()["itens"] if x["id"] == pid)
+    assert p["jusbrasil_erro"] == "a busca do Jusbrasil não achou o processo" and p["jusbrasil_tentado_em"]
+    assert p["jusbrasil_link"] is None
+
+    # na rodada seguinte achou: o erro some e o link entra
+    r = await client.post(f"/api/juridico/sync/processos/{pid}/jusbrasil", json={"link": LINK_JB, "andamentos": ANDAMENTOS[:1]}, headers=H)
+    assert r.json()["novas"] == 1
+    p = next(x for x in (await client.get("/api/juridico/processos")).json()["itens"] if x["id"] == pid)
+    assert p["jusbrasil_erro"] is None and p["jusbrasil_link"] == LINK_JB
+

@@ -40,6 +40,9 @@ type Processo = {
   vara: string | null
   valor_causa: number | null
   jusbrasil_link: string | null
+  // 11/11: a última tentativa do robô do Mac mini no Jusbrasil e, se falhou, o motivo
+  jusbrasil_tentado_em?: string | null
+  jusbrasil_erro?: string | null
   observacao: string | null
   ultima_mov: Mov | null
   criado_por: string | null
@@ -603,11 +606,33 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
                   <div v-if="p.advogado_escritorio" class="truncate text-[10.5px] text-muted-foreground">{{ p.advogado_escritorio }}</div>
                 </td>
                 <td class="truncate border-l border-l-slate-300 px-1.5 text-center dark:border-l-slate-600" :title="p.assunto || ''">{{ p.assunto || '—' }}</td>
+                <!-- 11/11 (Vinicius: "como vou saber se ele tentou o caso 9 e não conseguiu?"): a última
+                     tentativa do robô falhou → vermelho, com a hora e o motivo ao passar o mouse -->
                 <td class="px-1.5 text-center">
-                  <a v-if="p.jusbrasil_link" :href="p.jusbrasil_link" target="_blank" rel="noopener" class="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/5 px-1.5 py-px text-[11px] text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-300" title="abrir no Jusbrasil" @click.stop>
+                  <component
+                    :is="p.jusbrasil_link ? 'a' : 'span'"
+                    v-if="p.jusbrasil_erro"
+                    :href="p.jusbrasil_link || undefined"
+                    target="_blank"
+                    rel="noopener"
+                    class="inline-flex items-center gap-1 rounded border border-red-500/40 bg-red-500/10 px-1.5 py-px text-[11px] font-semibold text-red-700 dark:text-red-300"
+                    :title="`${p.jusbrasil_tentado_em ? quandoBr(p.jusbrasil_tentado_em) + ' · ' : ''}${p.jusbrasil_erro}`"
+                    @click.stop
+                  >
+                    <span class="size-[7px] rounded-full bg-red-600" /> {{ /não ach/i.test(p.jusbrasil_erro) ? 'não achou' : 'falhou' }}
+                  </component>
+                  <a
+                    v-else-if="p.jusbrasil_link"
+                    :href="p.jusbrasil_link"
+                    target="_blank"
+                    rel="noopener"
+                    class="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/5 px-1.5 py-px text-[11px] text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-300"
+                    :title="p.jusbrasil_tentado_em ? `abrir no Jusbrasil · lido pelo robô ${quandoBr(p.jusbrasil_tentado_em)}` : 'abrir no Jusbrasil'"
+                    @click.stop
+                  >
                     <span class="size-[7px] rounded-full bg-emerald-600" /> vinculado <ExternalLink class="size-3" />
                   </a>
-                  <span v-else class="inline-block rounded border px-1.5 py-px text-[11px] text-muted-foreground" title="colar o link na janela do processo">vincular</span>
+                  <span v-else class="inline-block rounded border px-1.5 py-px text-[11px] text-muted-foreground" :title="p.numero ? 'o robô do Mac mini procura no Jusbrasil às 06:00' : 'preencha o nº do processo'">vincular</span>
                 </td>
                 <td class="px-1.5 text-center">
                   <span class="inline-block w-[104px] rounded py-0.5 text-center text-[11px] font-semibold" :class="situacaoInfo(p.situacao).cls">{{ situacaoInfo(p.situacao).label }}</span>
