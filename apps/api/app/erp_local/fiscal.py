@@ -57,7 +57,7 @@ def apply(erp, db, p):
 
 
 def render(erp, identifier):
-    from app.services.danfe_render import gerar_pdf
+    from app.erp_local.danfe_draw import gerar_pdf
 
     with erp.connection() as db:
         row = db.execute("SELECT xml FROM fiscal_xml WHERE id=?", (identifier,)).fetchone()

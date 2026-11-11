@@ -246,6 +246,31 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             erp.product(db, sku)
             return {"sku": sku, "history": history(db, sku)}
 
+    @app.get("/api/erp-local/fiscal/invoices/{identifier}/danfe")
+    def invoice_danfe(identifier: str):
+        """The note as printed. A prepared note is drawn too, marked "SEM VALOR FISCAL"."""
+        from app.erp_local.danfe_draw import DanfeInvalida, gerar_pdf
+
+        with erp.connection() as db:
+            row = db.execute(
+                "SELECT xml,signed_xml,authorized_xml,number FROM fiscal_invoices WHERE id=?",
+                (identifier,),
+            ).fetchone()
+        if not row:
+            raise ERPError("fiscal_invoice", "Nota não encontrada.", 404)
+        content = row["authorized_xml"] or row["signed_xml"] or row["xml"]
+        try:
+            pdf = gerar_pdf(content.encode() if isinstance(content, str) else bytes(content))
+        except DanfeInvalida as error:
+            raise ERPError(
+                "fiscal_danfe", "Não foi possível desenhar a DANFE desta nota.", 409
+            ) from error
+        return Response(
+            pdf,
+            media_type="application/pdf",
+            headers={"Content-Disposition": f'inline; filename="DANFE-{row["number"]}.pdf"'},
+        )
+
     @app.get("/api/erp-local/fiscal/invoices/{identifier}/xml")
     def invoice_xml(identifier: str):
         with erp.connection() as db:

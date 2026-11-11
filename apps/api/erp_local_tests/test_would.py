@@ -246,3 +246,34 @@ def test_sync_routes_exist_only_in_homologation(tmp_path, monkeypatch):
     client = TestClient(create_app(tmp_path / "erp.sqlite3"), base_url="http://localhost")
     reply = client.post("/api/erp-local/homolog/stock-sync", headers={"X-ERP-Local": "1"})
     assert reply.status_code == 409
+
+
+def test_a_prepared_note_gets_a_danfe_marked_without_fiscal_value(tmp_path):
+    from app.erp_local import fiscal_invoices as fi
+    from app.erp_local import nfe_xml
+    from app.erp_local.danfe_draw import gerar_pdf
+    from erp_local_tests.test_nfe import spec_for
+
+    built = nfe_xml.build(spec_for())
+    pdf = gerar_pdf(built["xml"].encode())
+    assert pdf.startswith(b"%PDF")
+    import pymupdf
+
+    with pymupdf.open(stream=pdf, filetype="pdf") as document:
+        text = document[0].get_text()
+    assert "SEM VALOR FISCAL" in text
+
+    app = create_app(tmp_path / "erp.sqlite3")
+    erp = app.state.erp
+    with erp.connection() as db:
+        db.executescript(fi.SCHEMA)
+        db.execute("INSERT INTO fiscal_companies VALUES ('c1',1,'{}',?)", (erp.now(),))
+        db.execute(
+            "INSERT INTO fiscal_invoices VALUES "
+            "('n1','o1','c1',1,7,?,'draft',1,'{}',?,NULL,NULL,?)",
+            (built["key"], built["xml"], erp.now()),
+        )
+    client = TestClient(app, base_url="http://localhost")
+    reply = client.get("/api/erp-local/fiscal/invoices/n1/danfe")
+    assert reply.status_code == 200 and reply.content.startswith(b"%PDF")
+    assert client.get("/api/erp-local/fiscal/invoices/nada/danfe").status_code == 404
