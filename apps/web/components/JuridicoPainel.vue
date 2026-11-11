@@ -619,7 +619,7 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
                     :title="`${p.jusbrasil_tentado_em ? quandoBr(p.jusbrasil_tentado_em) + ' · ' : ''}${p.jusbrasil_erro}`"
                     @click.stop
                   >
-                    <span class="size-[7px] rounded-full bg-red-600" /> {{ /não ach/i.test(p.jusbrasil_erro) ? 'não achou' : 'falhou' }}
+                    <span class="size-[7px] rounded-full bg-red-600" /> falhou
                   </component>
                   <a
                     v-else-if="p.jusbrasil_link"
