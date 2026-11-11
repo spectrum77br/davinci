@@ -1219,6 +1219,16 @@ def _le_na_varredura(agora: datetime):
         # 07/10 (296301): ganhamos/perdemos em que a IA seguiu o caso (recurso) —
         # a plataforma continua sendo lida até a decisão nova.
         chamados_svc.caso_seguiu_apos_decisao_sql(agora),
+        # 11/11/2026 (Vinicius, 297650): no ML o mediador segue falando na reclamação
+        # depois da decisão (o Carlos pediu o valor das malas em 28/10, 22 dias depois
+        # do "perdemos"), e o limite de 21 dias cortou a leitura. Enquanto o chamado
+        # está aberto e a última análise da IA é "aguardar a plataforma", lê sem prazo.
+        and_(
+            func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
+                sorted(chamados_svc.PLATAFORMA_ML)
+            ),
+            chamados_svc.ultima_analise_espera_sql(),
+        ),
     )
 
 

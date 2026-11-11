@@ -165,7 +165,7 @@ async def _casos(
         minutos = _minutos(desde, agora)
         # 25/09 (292592): consulta do Portal de Atendimento também é da fila;
         # 30/09 (298394): e a consulta do formulário de ajuda do ML
-        ml = chamados_leitura.e_consulta_ml(ch)
+        ml = chamados_leitura.le_consulta_ml(ch)  # 11/11: também a ligada (297650)
         amazon = chamados_leitura.e_caso_amazon(ch)
         portal = not ml and not amazon and chamados_leitura.e_portal_shopee(ch)
         o_que = (

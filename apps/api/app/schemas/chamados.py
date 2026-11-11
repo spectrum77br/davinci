@@ -254,7 +254,9 @@ class ChamadoCreate(BaseModel):
 
 
 def _consulta_portal(value: str | None) -> str | None:
-    """25/09: aceita o link do Portal ou o número; guarda só o ID (vazio = limpa)."""
+    """25/09: aceita o link do Portal ou o número; guarda só o ID (vazio = limpa).
+    11/11/2026: também a consulta do ML (link `…/cases/detail/<N>` ou o número, 9
+    dígitos). O tamanho certo por plataforma é conferido no PATCH."""
     import re
 
     if value is None:
@@ -262,9 +264,9 @@ def _consulta_portal(value: str | None) -> str | None:
     v = str(value).strip()
     if not v:
         return ""
-    m = re.search(r"(\d{15,})", v)
+    m = re.search(r"cases/detail/(\d+)", v) or re.search(r"(\d{6,})", v)
     if m is None:
-        raise ValueError("consulta do Portal: cole o link ou o número da consulta")
+        raise ValueError("consulta: cole o link ou o número da consulta")
     return m.group(1)
 
 

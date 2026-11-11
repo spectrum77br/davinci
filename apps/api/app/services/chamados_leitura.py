@@ -340,10 +340,67 @@ def e_consulta_ml(ch: Chamado) -> bool:
 
 
 def url_da_consulta_ml(ch: Chamado) -> str:
+    ligada = consulta_ml_ligada(ch)
+    if ligada:
+        return CONSULTA_ML_URL.format(ligada)
     url = (ch.chamado_url or "").strip()
     if "mercadolivre.com.br/cases/" in url:
         return url
     return CONSULTA_ML_URL.format((ch.chamado or "").strip())
+
+
+# 11/11/2026 (Vinicius, 297650): a mediação 5584853622 é lida pela API, mas a
+# conversa que importava (Paulo, Carlos, Flavio, e as nossas cobranças) estava na
+# consulta 489678080, aberta pelo Fale conosco pra pedir revisão. Nada ligava a
+# consulta ao chamado: a coluna da conversa parava em 16/10 e só a IA, na tela,
+# sabia o que o ML dizia. Agora o chamado do ML guarda a consulta em
+# `consulta_portal` (o mesmo campo da Shopee) e o executor de leitura lê a página
+# dela como lê a consulta aberta na tela (`ml_consulta`).
+_LINK_CONSULTA_ML = re.compile(r"mercadolivre\.com\.br/cases/detail/(\d{6,12})")
+_ID_CONSULTA_ML = re.compile(
+    r"consulta\s+(?:n[º°o]\.?\s*|n[úu]mero\s*:?\s*)?(\d{6,12})\b", re.IGNORECASE
+)
+
+
+def e_ml(ch: Chamado) -> bool:
+    return (ch.plataforma or "").strip().lower() in chamados_svc.PLATAFORMA_ML
+
+
+def consulta_ml_ligada(ch: Chamado) -> str | None:
+    """A consulta do formulário de ajuda do ML ligada a um chamado do ML que NÃO é,
+    ele mesmo, essa consulta (mediação/reclamação pela API, 297650)."""
+    if not e_ml(ch) or e_consulta_ml(ch):
+        return None
+    v = (ch.consulta_portal or "").strip()
+    return v if re.match(_CONSULTA_ML, v) else None
+
+
+def le_consulta_ml(ch: Chamado) -> bool:
+    """O executor de leitura lê uma consulta do ML neste chamado (a própria ou a ligada)."""
+    return e_consulta_ml(ch) or consulta_ml_ligada(ch) is not None
+
+
+def numero_da_consulta_ml(ch: Chamado) -> str:
+    return consulta_ml_ligada(ch) or (ch.chamado or "").strip()
+
+
+def condicoes_consulta_ml_ligada() -> list:
+    """Chamado do ML com consulta ligada e sem pessoa ter concluído. Lida mesmo com
+    a mediação decidida: a consulta é o caminho da revisão depois do "perdemos"."""
+    return [
+        Chamado.resolvido.is_(False),
+        ~consulta_ml_sql(),
+        func.trim(func.coalesce(Chamado.consulta_portal, "")).op("~")(_CONSULTA_ML),
+        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(
+            sorted(chamados_svc.PLATAFORMA_ML)
+        ),
+    ]
+
+
+def extrair_consulta_ml(texto: str | None) -> str | None:
+    t = texto or ""
+    m = _LINK_CONSULTA_ML.search(t) or _ID_CONSULTA_ML.search(t)
+    return m.group(1) if m else None
 
 
 # ---------------------------------------------- caso do suporte da Amazon (05/11)
@@ -418,6 +475,7 @@ def condicoes_do_leitor(
         ramos.append(and_(*condicoes_consulta_ligada()))
     if ml:
         ramos.append(and_(*condicoes_consulta_ml()))
+        ramos.append(and_(*condicoes_consulta_ml_ligada()))
     if amazon:
         ramos.append(and_(*condicoes_caso_amazon()))
     return [or_(*ramos)]
@@ -460,9 +518,21 @@ def extrair_consulta_portal(texto: str | None) -> str | None:
 
 def ligar_consulta_do_texto(ch: Chamado, texto: str | None) -> bool:
     """Preenche `consulta_portal` a partir do texto (Observação/instrução) se o
-    chamado é da Shopee, ainda não tem consulta e o texto traz uma."""
+    chamado é da Shopee, ainda não tem consulta e o texto traz uma. 11/11/2026:
+    vale também pro chamado do ML ("consulta 489678080" ou o link da consulta),
+    menos quando o próprio chamado já é a consulta ou o número é o do chamado."""
     if (ch.consulta_portal or "").strip() or e_portal_shopee(ch):
         return False
+    if e_ml(ch):
+        if e_consulta_ml(ch):
+            return False
+        achada = extrair_consulta_ml(texto)
+        if not achada or achada == (ch.chamado or "").strip():
+            return False
+        ch.consulta_portal = achada
+        # lê no próximo poll do robô, sem esperar a cadência
+        ch.leitura_robo_at = None
+        return True
     if (ch.plataforma or "").strip().lower() not in chamados_svc.apelidos_da_plataforma("shopee"):
         return False
     achada = extrair_consulta_portal(texto)
@@ -555,6 +625,7 @@ async def fila_devolucao_shopee(
     lojas = sorted({loja_ml(x) for x in ml_lojas or []} - {""})
     if lojas:
         ramos.append(and_(*condicoes_consulta_ml(), loja_ml_sql().in_(lojas)))
+        ramos.append(and_(*condicoes_consulta_ml_ligada(), loja_ml_sql().in_(lojas)))
     lojas_amazon = sorted({loja_amazon(x) for x in amazon_lojas or []} - {""})
     if lojas_amazon:
         ramos.append(and_(*condicoes_caso_amazon(), loja_amazon_sql().in_(lojas_amazon)))

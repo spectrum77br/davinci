@@ -9,6 +9,7 @@ app.services.chamados; aqui é CRUD + histórico + anexos + os botões.
 """
 
 import hashlib
+import re
 import secrets
 from dataclasses import dataclass
 from collections import defaultdict
@@ -1072,6 +1073,15 @@ async def patch_chamado(
     ligando_auto = bool(data.get("auto_ligada")) and not ch.auto_ligada
     if data.get("consulta_portal") == "":
         data["consulta_portal"] = None  # campo apagado na tela
+    if data.get("consulta_portal"):
+        # 11/11/2026: no ML a consulta do Fale conosco (9 dígitos, 297650); na Shopee
+        # a do Portal (19). O validador só tira os dígitos do link.
+        plataforma = (data.get("plataforma") or ch.plataforma or "").strip().lower()
+        formato = r"^\d{6,12}$" if plataforma in svc.PLATAFORMA_ML else r"^\d{15,}$"
+        if not re.match(formato, data["consulta_portal"]):
+            raise HTTPException(422, detail={"code": "chamado_consulta_invalida"})
+        if data["consulta_portal"] != (ch.consulta_portal or ""):
+            ch.leitura_robo_at = None  # o robô lê a consulta nova no próximo poll
     for key, value in data.items():
         setattr(ch, key, value)
     if "observacao" in data and "consulta_portal" not in data:
@@ -2566,12 +2576,18 @@ async def agent_leitor_fila(
     )
     out: list[AgentCasoLeituraOut] = []
     for c in casos:
-        ml = chamados_leitura.e_consulta_ml(c)
+        # 11/11/2026 (297650): chamado do ML com consulta ligada vai como a própria
+        # consulta (`chamado` = nº da consulta): o executor só sabe ler a página dela.
+        ml = chamados_leitura.le_consulta_ml(c)
         if ml or chamados_leitura.e_caso_amazon(c):
             out.append(
                 AgentCasoLeituraOut(
                     chamado_id=c.id,
-                    chamado=(c.chamado or "").strip(),
+                    chamado=(
+                        chamados_leitura.numero_da_consulta_ml(c)
+                        if ml
+                        else (c.chamado or "").strip()
+                    ),
                     chamado_url=(
                         chamados_leitura.url_da_consulta_ml(c)
                         if ml
@@ -2627,7 +2643,7 @@ async def agent_leitor_resultado(
     if not (
         chamados_leitura.e_devolucao_shopee_da_api(ch)
         or chamados_leitura.consulta_do_portal(ch) is not None
-        or chamados_leitura.e_consulta_ml(ch)
+        or chamados_leitura.le_consulta_ml(ch)
         or chamados_leitura.e_caso_amazon(ch)
     ):
         raise HTTPException(409, detail={"code": "chamado_fora_do_leitor"})
@@ -3524,6 +3540,16 @@ async def agent_analise(
     )
     analise.canal = "robo"
     session.add(analise)
+    # 11/11/2026 (297650): a IA abre/retoma consulta pelo Fale conosco do ML e cita
+    # o número na análise; sem ligar, ninguém trazia a conversa dela pro chamado.
+    if chamados_leitura.e_ml(ch) and chamados_leitura.ligar_consulta_do_texto(ch, body.resumo):
+        session.add(
+            svc.registrar_sistema(
+                ch,
+                f"Consulta {ch.consulta_portal} do ML ligada ao chamado (citada pela IA de "
+                "Chamado): o robô de leitura passa a trazer a conversa dela pra cá",
+            )
+        )
     replica: ChamadoMensagem | None = None
     # `esperar`+`reabrir`: o monitor antigo fechava o chamado na 1ª leitura —
     # se o caso ainda está vivo no ML (só a abertura, ou fomos nós que falamos

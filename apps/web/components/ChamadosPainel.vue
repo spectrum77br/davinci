@@ -1490,6 +1490,17 @@ watch(
 function ehShopee(row: ChamadoRow): boolean {
   return /shopee/i.test(row.plataforma || '')
 }
+// 11/11/2026 (Vinicius, 297650): o chamado do ML (mediação pela API) também liga a
+// consulta do Fale conosco — a conversa com o atendente fica lá. Mesmo apelido do
+// `chamados_svc.PLATAFORMA_ML`.
+function ehMl(row: ChamadoRow): boolean {
+  return ['ml', 'mercado livre', 'mercadolivre', 'meli'].includes((row.plataforma || '').trim().toLowerCase())
+}
+function linkDaConsulta(row: ChamadoRow): string {
+  return ehMl(row)
+    ? `https://www.mercadolivre.com.br/cases/detail/${row.consulta_portal}`
+    : `https://seller-service.cs.shopee.com.br/detail/${row.consulta_portal}`
+}
 
 async function salvarConsulta() {
   const row = hist.row
@@ -1506,7 +1517,7 @@ async function salvarConsulta() {
     replaceRow(updated)
     hist.row = updated
     if (updated.consulta_portal) {
-      toasts.success('Consulta ligada ao chamado', 'O robô de leitura passa a ler essa consulta no Portal e traz a resposta pra cá.')
+      toasts.success('Consulta ligada ao chamado', 'O robô de leitura passa a ler essa consulta na plataforma e traz a conversa pra cá.')
     }
   } catch (e: any) {
     consultaErro.value = 'cole o link ou o número da consulta'
@@ -2542,8 +2553,8 @@ async function confirmarExcluir() {
             </div>
             <!-- 25/09 (294571): consulta aberta à mão no Portal de Atendimento — o
                  robô de leitura passa a ler lá também. Aceita o link ou o número. -->
-            <div v-if="ehShopee(hist.row) && !hist.row.chamado_de_tela" class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
-              <span class="text-muted-foreground">Consulta no Portal:</span>
+            <div v-if="(ehShopee(hist.row) || ehMl(hist.row)) && !hist.row.chamado_de_tela" class="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+              <span class="text-muted-foreground">{{ ehMl(hist.row) ? 'Consulta no Fale conosco:' : 'Consulta no Portal:' }}</span>
               <input
                 v-model="consultaDraft"
                 :disabled="!canEdit || salvandoConsulta"
@@ -2552,7 +2563,7 @@ async function confirmarExcluir() {
                 @keydown.enter.prevent="salvarConsulta"
                 @blur="salvarConsulta"
               />
-              <a v-if="hist.row.consulta_portal" :href="`https://seller-service.cs.shopee.com.br/detail/${hist.row.consulta_portal}`" target="_blank" rel="noopener" class="underline">abrir</a>
+              <a v-if="hist.row.consulta_portal" :href="linkDaConsulta(hist.row)" target="_blank" rel="noopener" class="underline">abrir</a>
               <span v-if="consultaErro" class="text-red-600">{{ consultaErro }}</span>
             </div>
           </div>
