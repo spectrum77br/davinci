@@ -172,3 +172,4 @@ body[data-screen=products] #subtitle{display:none}
 
 .environment.homolog{background:#fff3cd;color:#664d03;border-bottom-color:#e6c65c;font-weight:600}
 .would-text{white-space:normal;min-width:280px}
+.copy-text{background:none;border:0;padding:0;font:inherit;color:inherit;cursor:copy;text-align:left}.copy-text:hover{color:#2b62e1;text-decoration:underline dotted}

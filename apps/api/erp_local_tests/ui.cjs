@@ -1369,3 +1369,15 @@ test('outside homologation stock and price sync stay off',async()=>{
   d.querySelector('nav [data-page=products]').click();
   assert.equal(d.querySelector('[data-homolog-sync]'),null);
 });
+
+test('clicking an order number copies it and the customer name opens the order',async()=>{
+  const {document:d}=await setup({orders:[ownOrder('P1','A')]});
+  d.querySelector('nav [data-page=orders]').click();
+  const number=d.querySelector('.copy-text[data-copy="P1"]');
+  assert.ok(number,'número copiável');
+  number.click();
+  await new Promise(r=>setImmediate(r));
+  assert.match(d.getElementById('notice').textContent,/Copiado: P1/);
+  assert.ok(d.querySelector('[data-edit-sale]').textContent.length>0);
+  assert.ok(d.querySelector('.sales-store-name .copy-text'),'número da loja copiável');
+});

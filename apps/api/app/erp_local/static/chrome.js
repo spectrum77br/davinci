@@ -1,5 +1,5 @@
 'use strict';
-const iconPaths={
+const iconPaths={copy:'M9 9h11v11H9zM5 15H4V4h11v1',
   search:'M21 21l-5-5M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
   filter:'M3 5h18l-7 8v6l-4 2v-8z',
   calendar:'M5 5h14v16H5zM8 3v4m8-4v4M5 10h14M8 14h2m4 0h2m-8 3h2',
@@ -23,6 +23,14 @@ const iconPaths={
   chevron:'M9 5l7 7-7 7',
   download:'M12 3v12m-5-5l5 5 5-5M4 16v5h16v-5',
 };
+function copyText(value,label){return value?`<button type="button" class="copy-text" data-copy="${esc(String(value))}" title="Clique para copiar o ${esc(label)}">${esc(String(value))}</button>`:'<span class="dim">—</span>';}
+document.addEventListener('click',async e=>{
+  const button=e.target.closest('[data-copy]');if(!button)return;
+  e.preventDefault();e.stopPropagation();
+  const value=button.dataset.copy;
+  try{await navigator.clipboard.writeText(value);}catch(_){const area=document.createElement('textarea');area.value=value;document.body.append(area);area.select();try{document.execCommand('copy');}catch(__){}area.remove();}
+  message(`Copiado: ${value}`);
+},true);
 function icon(name){return `<svg class="ui-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${iconPaths[name]||iconPaths.file}"/></svg>`;}
 const pageIcons={overview:'list',products:'box',inventory:'box',contacts:'list',stock:'box',orders:'cart',logistics:'truck',purchases:'cart',accounts:'status',costs:'status',fiscal:'file',channels:'settings',history:'clock',connections:'settings',reference:'search',parity:'check',release:'check',integrations:'settings'};
 const primaryForms={cash_register:['cash-open-form','Abrir Caixa'],proposals:['proposal-form','Incluir proposta'],returns:['return-open-form','Incluir devolução'],deposits:['depot-settings-form','Incluir depósito'],sellers:['seller-form','Incluir um Vendedor'],price_lists:['price-list-form','Incluir lista de preços'],categories:['category-form','Incluir categoria'],production:['production-form','Incluir ordem'],payment_methods:['payment-method-form','Incluir forma de pagamento'],contacts:['contact-form','Incluir cadastro'],products:['product-form','Incluir cadastro'],stock:['stock-form','Incluir lançamento'],orders:['order-form','Incluir pedido'],purchases:['purchase-form','Incluir pedido'],accounts:['entry-form','Incluir conta'],costs:['valuation-form','Conferir custo'],fiscal:['xml-form','Importar XML'],channels:['channel-event-form','Testar evento']};
