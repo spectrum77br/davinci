@@ -9,6 +9,7 @@ import logging
 import os
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 
 from app.erp_local import channel_recipients, native_ingest, recipient_capture
@@ -37,6 +38,50 @@ def archived_stores(db):
         if data.get("archived_at") or data.get("status") not in (None, "active"):
             out.add(str(data.get("id")))
     return out
+
+
+# Reading stopped for these by the store's answer, not by a person: new credentials can fix them.
+RENEWABLE = {"auth_denied", "credentials_missing", "credential_unreadable"}
+
+
+def revive_renewed(erp):
+    """An account the reading stopped for its credentials reads again once DaVinci saved new ones.
+
+    DaVinci renews the store tokens itself; a token refused while it was being renewed (Shopee
+    Vita, 09/11/2026) stopped that store for good although DaVinci had a valid one hours later."""
+    with erp.connection() as db:
+        stopped = db.execute(
+            "SELECT channel,store,updated_at,last_state,failures FROM ingest_accounts "
+            "WHERE enabled=0"
+        ).fetchall()
+        try:
+            rows = db.execute(
+                "SELECT data FROM reference_rows WHERE kind='integrations'"
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+    davinci = {str(d.get("id")): d for d in (json.loads(r[0]) for r in rows)}
+    revived = []
+    for account in stopped:
+        found = davinci.get(account["store"])
+        if (
+            account["last_state"] not in RENEWABLE
+            or not account["failures"]
+            or not found
+            or found.get("archived_at")
+            or found.get("status") != "active"
+            or not found.get("updated_at")
+            or not account["updated_at"]
+        ):
+            continue
+        renewed = datetime.fromisoformat(str(found["updated_at"]).replace("Z", "+00:00"))
+        if renewed <= datetime.fromisoformat(account["updated_at"]):
+            continue
+        native_ingest._save(
+            erp, account["channel"], account["store"], enabled=1, failures=0, next_attempt_at=None
+        )
+        revived.append(f"{account['channel']}:{account['store']}")
+    return revived
 
 
 def once(erp, *, provider_for=native_ingest.ssh_provider, reader=None, channels=None):
@@ -196,6 +241,9 @@ def main():
                 log.warning("proteção de dados não concluída: %s", type(error).__name__)
             daily_check(erp, args.database.parent / f"conferencia-{today}.json")
             stock_daily(erp, args.database.parent / f"conferencia-estoque-{today}.json")
+        revived = revive_renewed(erp)
+        if revived:
+            log.info("contas religadas após credencial nova no DaVinci %s", revived)
         for account, result in once(erp).items():
             log.info("%s %s", account, result.get("reception", result).get("state"))
         if os.environ.get("ERP_READ_TRANSPORT") == "local":
