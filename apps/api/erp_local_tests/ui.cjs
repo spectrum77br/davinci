@@ -1353,3 +1353,19 @@ test('outside homologation the invoice button stays off and no panel appears',as
   assert.doesNotMatch(d.body.textContent,/O que o ERP faria hoje/);
   assert.equal(d.querySelector('[data-invoice-for]'),null);
 });
+
+test('homologation turns on stock and price sync and links the full list',async()=>{
+  const would=[{at:'2026-11-11T13:00:00+00:00',action:'stock',name:'Estoque nos anúncios',target:'Todos os anúncios',detail:{would:'Mandaria o estoque do ERP a 2 anúncios.'}}];
+  const {document:d}=await setup({homolog:{started_at:'2026-11-10T18:13:20+00:00'},would});
+  d.querySelector('nav [data-page=products]').click();
+  const stock=d.querySelector('[data-homolog-sync="stock"]'),price=d.querySelector('[data-homolog-sync="price"]');
+  assert.ok(stock&&price);assert.equal(stock.disabled,false);
+  d.querySelector('nav [data-page=overview]').click();
+  assert.ok(d.querySelector('a[href="/api/erp-local/homolog/plans/stock.csv"]'));
+});
+
+test('outside homologation stock and price sync stay off',async()=>{
+  const {document:d}=await setup({});
+  d.querySelector('nav [data-page=products]').click();
+  assert.equal(d.querySelector('[data-homolog-sync]'),null);
+});

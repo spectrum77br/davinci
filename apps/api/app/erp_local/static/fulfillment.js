@@ -157,7 +157,7 @@ document.addEventListener('click',e=>{const d=e.target.closest('[data-order-disc
 function wouldPanel(){
   if(!state.homolog)return '';
   const hour=at=>new Date(at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
-  const rows=(state.would||[]).map(w=>`<tr><td>${esc(hour(w.at))}</td><td>${esc(w.name)}</td><td>${esc(w.target)}</td><td class="would-text">${esc(w.detail?.would||'')}</td></tr>`);
+  const rows=(state.would||[]).map(w=>`<tr><td>${esc(hour(w.at))}</td><td>${esc(w.name)}</td><td>${esc(w.target)}</td><td class="would-text">${esc(w.detail?.would||'')}${['stock','price'].includes(w.action)?` <a href="/api/erp-local/homolog/plans/${w.action}.csv">Baixar a lista</a>`:''}</td></tr>`);
   return panel('O que o ERP faria hoje','Na homologação, cada ação que sairia para as lojas ou para a SEFAZ fica aqui com o que seria mandado. Nada foi enviado.',rows.length?table(['Hora','Ação','Pedido ou nota','O que faria'],rows.join('')):'<p class="empty">Nenhuma ação ainda. Imprima uma etiqueta ou envie uma NF-e para ver o que o ERP faria.</p>');
 }
 document.addEventListener('click',e=>{
@@ -165,4 +165,9 @@ document.addEventListener('click',e=>{
   const id=button.dataset.invoiceFor;
   document.querySelector('nav [data-page=fiscal]')?.click();
   setTimeout(()=>{const select=document.querySelector('#invoice-prepare [name=order_id]');if(!select)return;if(![...select.options].some(o=>o.value===id)){message('Este pedido ainda não pode ter nota: ele precisa estar reservado no ERP.',true);return;}select.value=id;select.closest('.panel')?.scrollIntoView({block:'start'});},0);
+});
+document.addEventListener('click',async e=>{
+  const button=e.target.closest('[data-homolog-sync]');if(!button)return;
+  button.disabled=true;message('Calculando o que seria enviado aos anúncios…');
+  try{const response=await fetch('/api/erp-local/homolog/'+encodeURIComponent(button.dataset.homologSync)+'-sync',{method:'POST',headers:{'X-ERP-Local':'1'}}),data=await response.json();if(!response.ok)throw Error(data.message||'Não foi possível calcular.');await refresh();message(`O que o ERP faria: ${data.message}`);}catch(error){message(error.message,true);}finally{button.disabled=false;}
 });

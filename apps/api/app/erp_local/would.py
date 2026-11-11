@@ -187,3 +187,190 @@ def transmit(erp, identifier):
         plan = invoice_plan(db, identifier)
     record(erp, "invoice", f"NF {plan['number']}/{plan['series']}", plan)
     return {"id": identifier, "status": plan["status"], "would": True, "message": plan["would"]}
+
+
+PLANS = """
+CREATE TABLE IF NOT EXISTS homolog_plans (
+ kind TEXT PRIMARY KEY, at TEXT NOT NULL, rows TEXT NOT NULL);
+"""
+ACTIONS.update({"stock": "Estoque nos anúncios", "price": "Preço nos anúncios"})
+
+
+def _listings(db):
+    """Listings as DaVinci knows them, from the reference copy this base follows."""
+    refs = {
+        kind: [
+            json.loads(r[0])
+            for r in db.execute("SELECT data FROM reference_rows WHERE kind=?", (kind,))
+        ]
+        for kind in ("links", "products", "integrations")
+    }
+    products = {str(p.get("id")): p for p in refs["products"]}
+    stores = {str(i.get("id")): i for i in refs["integrations"]}
+    links = []
+    for link in refs["links"]:
+        if link.get("platform") == "bling":
+            continue
+        product = products.get(str(link.get("product_id"))) or {}
+        store = stores.get(str(link.get("integration_id"))) or {}
+        links.append(
+            {
+                "channel": link.get("platform") or "",
+                "store": store.get("name") or "",
+                "listing": link.get("external_id") or "",
+                "variation": link.get("variation_id") or "",
+                "listing_stock": link.get("stock"),
+                "listing_price": link.get("price"),
+                "sku": product.get("sku") or "",
+                "product_stock": product.get("stock"),
+                "situation": product.get("situacao") or "A",
+                "bling_id": product.get("bling_product_id"),
+                # The copy does not carry DaVinci's dead-listing mark: those count as listings.
+                "dead": False,
+                "archived": bool(store.get("archived_at")),
+                "vacation": bool(store.get("vacation_mode")),
+            }
+        )
+    davinci_products = [
+        {"sku": str(p["sku"]).lower(), "stock": p.get("stock")}
+        for p in refs["products"]
+        if p.get("sku") and (p.get("situacao") or "A") == "A"
+    ]
+    return links, davinci_products
+
+
+def _keep(erp, kind, rows):
+    with erp.connection() as db:
+        db.executescript(PLANS)
+        db.execute(
+            "INSERT OR REPLACE INTO homolog_plans VALUES (?,?,?)",
+            (kind, erp.now(), json.dumps(rows, ensure_ascii=False)),
+        )
+
+
+def plan_rows(db, kind):
+    try:
+        row = db.execute("SELECT rows FROM homolog_plans WHERE kind=?", (kind,)).fetchone()
+    except Exception:  # noqa: BLE001 - the table appears with the first plan
+        return []
+    return json.loads(row[0]) if row else []
+
+
+def stock_sync(erp):
+    """What "Sincronizar estoque na loja virtual" would send, listing by listing."""
+    from app.erp_local import stock_publish_preview as preview
+
+    with erp.connection() as db:
+        links, products = _listings(db)
+        result = preview.compare(db, links, products, preview.family_settings())
+    _keep(erp, "stock", result["diferencas"])
+    reasons = [
+        f"{name}: {count}"
+        for name, count in result["motivos"].items()
+        if name != preview.REASONS["igual"]
+    ][:3]
+    text = (
+        f"Mandaria o estoque do ERP a {result['anuncios']} anúncios: {result['iguais']} com o "
+        f"mesmo número que o DaVinci manda hoje e {result['diferentes']} com número diferente"
+        + (f" ({'; '.join(reasons)})" if reasons else "")
+        + ". Nada foi enviado às lojas."
+    )
+    detail = {
+        k: result[k] for k in ("anuncios", "iguais", "diferentes", "motivos", "fora_da_conta")
+    }
+    record(erp, "stock", "Todos os anúncios", {**detail, "would": text})
+    return {"would": True, "message": text, "csv": "/api/erp-local/homolog/plans/stock.csv"}
+
+
+def _money(value):
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return number.quantize(Decimal("0.01")) if number.is_finite() else None
+
+
+def price_sync(erp):
+    """What "Sincronizar preços na loja virtual" would send: the ERP's own price for each listing.
+
+    The ERP has no store price list yet, so its price is the product's registered price. Today the
+    listings carry DaVinci's pricing, so every difference is a price this button would overwrite.
+    """
+    rows, same, missing, considered = [], 0, 0, 0
+    with erp.connection() as db:
+        links, _ = _listings(db)
+        by_bling = {}
+        for r in db.execute("SELECT sku,data FROM catalog_origin"):
+            source = json.loads(r["data"]).get("bling_product_id")
+            if source:
+                by_bling[str(source)] = r["sku"]
+        prices = {
+            r[0].lower(): (r[0], r[1]) for r in db.execute("SELECT sku,price FROM product_pricing")
+        }
+        for link in links:
+            if link["archived"] or link["vacation"]:
+                continue
+            considered += 1
+            sku = (
+                by_bling.get(str(link["bling_id"])) or (prices.get(link["sku"].lower()) or ("",))[0]
+            )
+            own = _money((prices.get(sku.lower()) or (None, None))[1]) if sku else None
+            current = _money(link["listing_price"])
+            if own is None:
+                missing += 1
+                continue
+            if current == own:
+                same += 1
+                continue
+            rows.append(
+                {
+                    "canal": link["channel"],
+                    "loja": link["store"],
+                    "anuncio": link["listing"],
+                    "variacao": link["variation"],
+                    "sku": sku,
+                    "preco_no_anuncio": str(current) if current is not None else "",
+                    "erp_mandaria": str(own),
+                }
+            )
+    _keep(erp, "price", rows)
+    text = (
+        f"Mandaria o preço de cadastro do ERP a {considered - missing} anúncios: {same} já estão "
+        f"com esse preço e {len(rows)} mudariam de preço. Hoje o preço dos anúncios vem da "
+        "precificação do DaVinci, então ligar isto sobrescreveria esses preços. "
+        f"Sem preço no ERP: {missing}. Nada foi enviado às lojas."
+    )
+    record(
+        erp,
+        "price",
+        "Todos os anúncios",
+        {
+            "anuncios": considered,
+            "iguais": same,
+            "diferentes": len(rows),
+            "sem_preco": missing,
+            "would": text,
+        },
+    )
+    return {"would": True, "message": text, "csv": "/api/erp-local/homolog/plans/price.csv"}
+
+
+def plan_csv(db, kind):
+    import csv
+    import io
+
+    rows = plan_rows(db, kind)
+    stream = io.StringIO()
+    if rows:
+        writer = csv.DictWriter(stream, fieldnames=list(rows[0]), delimiter=";")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(
+                {
+                    k: ("'" + str(v)) if str(v)[:1] in ("=", "+", "-", "@") else v
+                    for k, v in row.items()
+                }
+            )
+    return stream.getvalue()

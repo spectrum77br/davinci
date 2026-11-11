@@ -313,6 +313,32 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
         data = json.loads(row[0])
         return data["address"]["uf"], data["cnpj"]
 
+    @app.post("/api/erp-local/homolog/{kind}-sync")
+    def homolog_sync(kind: str):
+        from app.erp_local import would
+
+        if not would.active():
+            raise ERPError("homolog_only", "Só existe na homologação.", 409)
+        if kind == "stock":
+            return would.stock_sync(erp)
+        if kind == "price":
+            return would.price_sync(erp)
+        raise ERPError("homolog_kind", "Ação desconhecida.", 404)
+
+    @app.get("/api/erp-local/homolog/plans/{kind}.csv")
+    def homolog_plan(kind: str):
+        from app.erp_local import would
+
+        if kind not in {"stock", "price"}:
+            raise ERPError("homolog_kind", "Ação desconhecida.", 404)
+        with erp.connection() as db:
+            content = would.plan_csv(db, kind)
+        return Response(
+            "\ufeff" + content,
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="o-que-faria-{kind}.csv"'},
+        )
+
     @app.post("/api/erp-local/fiscal/invoices/{identifier}/transmit")
     def invoice_transmit(identifier: str):
         from app.erp_local import would

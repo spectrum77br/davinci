@@ -1,5 +1,7 @@
 """Homologação: o que sairia para fora vira uma resposta do que seria feito, sem sair."""
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -168,3 +170,74 @@ def test_invoice_plan_reads_value_cfop_and_destination_from_the_note(erp, homolo
         plan = would.invoice_plan(db, "n1")
     assert plan["recipient"] == "Comprador" and plan["cfops"] == ["6102"]
     assert "R$ 1094.74, CFOP 6102, para MG, à SEFAZ de SP" in plan["would"]
+
+
+def _reference(erp, links, products, stores):
+    with erp.connection() as db:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS reference_rows (kind TEXT, id TEXT, data TEXT NOT NULL,"
+            " search TEXT NOT NULL, PRIMARY KEY(kind,id))"
+        )
+        for kind, rows in (("links", links), ("products", products), ("integrations", stores)):
+            for row in rows:
+                db.execute(
+                    "INSERT INTO reference_rows VALUES (?,?,?,'')",
+                    (kind, str(row["id"]), json.dumps(row)),
+                )
+
+
+def test_stock_and_price_sync_say_what_each_listing_would_get(erp, homolog):
+    _reference(
+        erp,
+        links=[
+            {
+                "id": 1,
+                "product_id": 10,
+                "integration_id": "s1",
+                "platform": "shopee",
+                "external_id": "A1",
+                "variation_id": "",
+                "stock": 7,
+                "price": "99.90",
+            },
+            {
+                "id": 2,
+                "product_id": 11,
+                "integration_id": "s1",
+                "platform": "shopee",
+                "external_id": "A2",
+                "variation_id": "",
+                "stock": 0,
+                "price": "10.00",
+            },
+        ],
+        products=[
+            {
+                "id": 10,
+                "sku": "demo.aparelho",
+                "stock": 7,
+                "situacao": "A",
+                "bling_product_id": None,
+            },
+            {"id": 11, "sku": "fora.do.erp", "stock": 3, "situacao": "A", "bling_product_id": None},
+        ],
+        stores=[{"id": "s1", "name": "Loja teste", "archived_at": None, "vacation_mode": False}],
+    )
+    with erp.connection() as db:
+        db.execute("INSERT OR REPLACE INTO product_pricing VALUES ('demo.aparelho','120.00',NULL)")
+    stock = would.stock_sync(erp)
+    assert stock["would"] and "Mandaria o estoque do ERP a 2 anúncios" in stock["message"]
+    price = would.price_sync(erp)
+    assert "1 mudariam de preço" in price["message"] and "Sem preço no ERP: 1" in price["message"]
+    with erp.connection() as db:
+        csv_text = would.plan_csv(db, "price")
+        actions = [w["action"] for w in would.listing(db)]
+    assert "A1;;demo.aparelho;99.90;120.00" in csv_text
+    assert actions[:2] == ["price", "stock"]
+
+
+def test_sync_routes_exist_only_in_homologation(tmp_path, monkeypatch):
+    monkeypatch.delenv("ERP_HOMOLOG", raising=False)
+    client = TestClient(create_app(tmp_path / "erp.sqlite3"), base_url="http://localhost")
+    reply = client.post("/api/erp-local/homolog/stock-sync", headers={"X-ERP-Local": "1"})
+    assert reply.status_code == 409
