@@ -1,0 +1,461 @@
+"""Ouvidoria › Jurídico — os processos judiciais (11/11/2026).
+
+Vinicius: painel no padrão da Conciliação/Chamados, "de forma simples, sem informação
+desnecessária": data, nº do processo, origem (Denúncia / Logística / à mão), autor, réu,
+advogado, última movimentação, Jusbrasil; escolheu a Opção B (+ Assunto, Situação e
+Raio-X). No mesmo dia: o Próximo prazo saiu e entrou o Pedido / referência.
+
+De onde vêm as linhas:
+- **Denúncia** — todo caso que foi ao advogado entra sozinho quando a lista abre. O nº do
+  processo, o link do Jusbrasil e a última movimentação já digitados no caso vêm junto
+  na primeira vez; daí em diante quem manda é este painel. O Pedido é o da compra de
+  prova (o digitado na aba Casos ou o que o robô registrou).
+- **Logística** — os chamados encaminhados ao jurídico (Chamados › "Encaminhar ao
+  jurídico") entram sozinhos; um processo de uma venda também pode ser incluído à mão.
+- **Manual** — o "+ novo processo".
+
+Permissão: a mesma da Denúncia (`denuncia`), que já é quem vê o jurídico hoje.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, date, datetime
+from decimal import Decimal, InvalidOperation
+from typing import Annotated, Any
+from zoneinfo import ZoneInfo
+
+from fastapi import APIRouter, Body, Depends, HTTPException
+from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db import get_session
+from app.deps.auth import require_permission
+from app.models.chamado import Chamado
+from app.models.denuncia import DenunciaCaso, DenunciaJuridicoPasta
+from app.models.juridico import LADOS, SITUACOES, JuridicoMovimentacao, JuridicoProcesso
+from app.models.user import User
+from app.routers import denuncia as den
+from app.services import chamados_juridico
+
+router = APIRouter(prefix="/api/juridico", tags=["juridico"])
+
+_ver = require_permission("denuncia", "view")
+_editar = require_permission("denuncia", "edit")
+_apagar = require_permission("denuncia", "delete")
+
+_BRT = ZoneInfo("America/Sao_Paulo")
+
+# Os casos da Denúncia que já são do advogado (o status de cima do "Com jurídico" também)
+_STATUS_JURIDICO = ("Com jurídico", "Ajuizado")
+# Quem entra com o processo nos casos da Denúncia (o certificado Anatel e a marca são dela)
+AUTOR_DENUNCIA = "MAKISA Trading"
+
+_CAMPOS_TEXTO = (
+    "pedido", "numero", "autor", "autor_obs", "reu", "reu_obs", "advogado",
+    "advogado_escritorio", "assunto", "vara", "jusbrasil_link", "observacao",
+)
+_CAMPOS_DATA = ("encaminhado_em",)
+
+
+def _nome(u: User) -> str:
+    return u.name or u.email
+
+
+def _data(v: Any) -> date | None:
+    """'2026-10-13', '2026-10-13T09:00:00' ou datetime → date (no horário de Brasília)."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        return (v if v.tzinfo else v.replace(tzinfo=UTC)).astimezone(_BRT).date()
+    if isinstance(v, date):
+        return v
+    s = str(v).strip()
+    try:
+        if len(s) > 10:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return _data(dt) if dt.tzinfo else dt.date()
+        return datetime.strptime(s[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _pedido_do_caso(c: dict) -> str | None:
+    """O pedido da compra de prova: o digitado na aba Casos ou o que o robô registrou."""
+    extra = c.get("extra") or {}
+    v = (extra.get("compra_pedido") or "").strip() or ((c.get("compra") or {}).get("pedido") or "")
+    return str(v).strip() or None
+
+
+def _assunto_do_caso(c: dict) -> str:
+    """Caso com anúncio no certificado nosso = uso do certificado Anatel; sem ele (outro nº ou
+    nenhum), o caso é a marca Uranyx no título (ex.: Caso 004). Dá pra trocar no Raio-X."""
+    if (c.get("nosso") or 0) > 0 or c.get("grupo") == "GRUPO 1":
+        return "Certificado Anatel"
+    return "Marca Uranyx"
+
+
+async def sincronizar(session: AsyncSession) -> int:
+    """Põe no painel os casos da Denúncia que foram ao advogado e os chamados encaminhados ao
+    jurídico. Não muda o que já foi editado: só preenche o que está vazio. Devolve quantas
+    linhas novas entraram."""
+    novos = 0
+    existentes = {
+        p.denuncia_caso_id: p
+        for p in (
+            await session.execute(
+                select(JuridicoProcesso).where(JuridicoProcesso.denuncia_caso_id.is_not(None))
+            )
+        ).scalars()
+    }
+    casos = (await den._casos(session))["itens"]
+    for c in casos:
+        enviado = _data(c.get("juridico_enviado_em"))
+        if not enviado and c.get("status") not in _STATUS_JURIDICO:
+            continue
+        p = existentes.get(c["id"])
+        if p is not None:
+            # só o que está vazio (o caso pode ter recebido a data depois)
+            if p.encaminhado_em is None and enviado:
+                p.encaminhado_em = enviado
+            if not p.reu and c.get("loja"):
+                p.reu = c["loja"]
+                p.reu_obs = p.reu_obs or c.get("marketplace")
+            if not p.advogado and c.get("juridico"):
+                p.advogado = c["juridico"]
+            if not p.pedido and _pedido_do_caso(c):
+                p.pedido = _pedido_do_caso(c)
+            continue
+        extra = c.get("extra") or {}
+        numero = (extra.get("processo_numero") or "").strip() or None
+        ins = (
+            pg_insert(JuridicoProcesso)
+            .values(
+                origem="denuncia",
+                denuncia_caso_id=c["id"],
+                pedido=_pedido_do_caso(c),
+                encaminhado_em=enviado,
+                numero=numero,
+                lado="autor",
+                autor=AUTOR_DENUNCIA,
+                autor_obs="nós",
+                reu=c.get("loja"),
+                reu_obs=c.get("marketplace"),
+                advogado=c.get("juridico"),
+                assunto=_assunto_do_caso(c),
+                situacao="em_andamento" if numero else "aguardando_numero",
+                jusbrasil_link=(extra.get("processo_link") or "").strip() or None,
+                criado_por="DaVinci (caso da Denúncia)",
+            )
+            .on_conflict_do_nothing(
+                index_elements=["denuncia_caso_id"],
+                index_where=text("denuncia_caso_id IS NOT NULL"),
+            )
+            .returning(JuridicoProcesso.id)
+        )
+        pid = (await session.execute(ins)).scalar_one_or_none()
+        if pid is None:
+            continue
+        novos += 1
+        # a última movimentação que já estava digitada no caso
+        texto = (extra.get("mov_texto") or extra.get("mov_status") or "").strip()
+        if texto:
+            session.add(
+                JuridicoMovimentacao(
+                    processo_id=pid,
+                    data=_data(extra.get("mov_data")) or enviado or datetime.now(_BRT).date(),
+                    texto=texto,
+                    fonte="manual",
+                    criado_por=extra.get("atualizado_por"),
+                )
+            )
+
+    chamados = (
+        await session.execute(select(Chamado).where(Chamado.juridico_enviado_at.is_not(None)))
+    ).scalars().all()
+    for ch in chamados:
+        ins = (
+            pg_insert(JuridicoProcesso)
+            .values(
+                origem="logistica",
+                chamado_id=ch.id,
+                pedido=ch.pedido_bling,
+                encaminhado_em=_data(ch.juridico_enviado_at),
+                lado="autor",
+                assunto=None,
+                situacao="aguardando_numero",
+                observacao=ch.juridico_obs,
+                criado_por="DaVinci (chamado encaminhado ao jurídico)",
+            )
+            .on_conflict_do_nothing(
+                index_elements=["chamado_id"], index_where=text("chamado_id IS NOT NULL")
+            )
+            .returning(JuridicoProcesso.id)
+        )
+        if (await session.execute(ins)).scalar_one_or_none() is not None:
+            novos += 1
+    await session.commit()
+    return novos
+
+
+def _mov_dict(m: JuridicoMovimentacao | None) -> dict | None:
+    if m is None:
+        return None
+    return {
+        "id": m.id, "data": m.data.isoformat(), "texto": m.texto, "fonte": m.fonte,
+        "criado_por": m.criado_por,
+    }
+
+
+def _dict(
+    p: JuridicoProcesso, ultima: JuridicoMovimentacao | None, caso_codigo: str | None
+) -> dict:
+    return {
+        "id": p.id,
+        "origem": p.origem,
+        "denuncia_caso_id": p.denuncia_caso_id,
+        "caso_codigo": caso_codigo,
+        "chamado_id": str(p.chamado_id) if p.chamado_id else None,
+        "pedido": p.pedido,
+        "encaminhado_em": p.encaminhado_em.isoformat() if p.encaminhado_em else None,
+        "numero": p.numero,
+        "lado": p.lado,
+        "autor": p.autor,
+        "autor_obs": p.autor_obs,
+        "reu": p.reu,
+        "reu_obs": p.reu_obs,
+        "advogado": p.advogado,
+        "advogado_escritorio": p.advogado_escritorio,
+        "assunto": p.assunto,
+        "situacao": p.situacao,
+        "vara": p.vara,
+        "valor_causa": float(p.valor_causa) if p.valor_causa is not None else None,
+        "jusbrasil_link": p.jusbrasil_link,
+        "observacao": p.observacao,
+        "ultima_mov": _mov_dict(ultima),
+        "criado_por": p.criado_por,
+        "atualizado_por": p.atualizado_por,
+        "atualizado_em": p.atualizado_em.isoformat() if p.atualizado_em else None,
+    }
+
+
+async def _ultimas(session: AsyncSession, ids: list[int]) -> dict[int, JuridicoMovimentacao]:
+    if not ids:
+        return {}
+    mov = JuridicoMovimentacao
+    rows = (
+        await session.execute(
+            select(mov).where(mov.processo_id.in_(ids)).order_by(mov.data.desc(), mov.id.desc())
+        )
+    ).scalars().all()
+    out: dict[int, JuridicoMovimentacao] = {}
+    for m in rows:  # a primeira de cada processo é a mais nova
+        out.setdefault(m.processo_id, m)
+    return out
+
+
+async def _codigos_casos(session: AsyncSession, ids: set[int]) -> dict[int, str | None]:
+    if not ids:
+        return {}
+    q = select(DenunciaCaso.id, DenunciaCaso.codigo).where(DenunciaCaso.id.in_(ids))
+    return dict((await session.execute(q)).all())
+
+
+async def _processo(session: AsyncSession, processo_id: int) -> JuridicoProcesso:
+    p = await session.get(JuridicoProcesso, processo_id)
+    if p is None:
+        raise HTTPException(404, detail={"code": "juridico_processo_nao_encontrado"})
+    return p
+
+
+@router.get("/processos")
+async def listar_processos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+) -> dict:
+    await sincronizar(session)
+    procs = (
+        await session.execute(
+            select(JuridicoProcesso).order_by(
+                JuridicoProcesso.encaminhado_em.desc().nulls_last(), JuridicoProcesso.id.desc()
+            )
+        )
+    ).scalars().all()
+    ultimas = await _ultimas(session, [p.id for p in procs])
+    casos = {p.denuncia_caso_id for p in procs if p.denuncia_caso_id}
+    codigos = await _codigos_casos(session, casos)
+    return {
+        "hoje": datetime.now(_BRT).date().isoformat(),
+        "itens": [_dict(p, ultimas.get(p.id), codigos.get(p.denuncia_caso_id)) for p in procs],
+    }
+
+
+@router.get("/processos/{processo_id}")
+async def ver_processo(
+    processo_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_ver)],
+) -> dict:
+    p = await _processo(session, processo_id)
+    movs = (
+        await session.execute(
+            select(JuridicoMovimentacao)
+            .where(JuridicoMovimentacao.processo_id == p.id)
+            .order_by(JuridicoMovimentacao.data.desc(), JuridicoMovimentacao.id.desc())
+        )
+    ).scalars().all()
+    codigos = await _codigos_casos(session, {p.denuncia_caso_id} if p.denuncia_caso_id else set())
+    out = _dict(p, movs[0] if movs else None, codigos.get(p.denuncia_caso_id))
+    out["movimentacoes"] = [_mov_dict(m) for m in movs]
+    docs: dict[str, Any] = {"pasta": None, "pasta_url": None, "dossie_url": None}
+    if p.denuncia_caso_id:
+        pasta = (
+            await session.execute(
+                select(DenunciaJuridicoPasta)
+                .where(DenunciaJuridicoPasta.caso_id == p.denuncia_caso_id)
+                .order_by(DenunciaJuridicoPasta.id.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        docs["pasta"] = den._pasta_resumo(pasta)
+        if pasta is not None and pasta.arquivo_local:
+            docs["pasta_url"] = f"/api/denuncia/casos/{p.denuncia_caso_id}/pasta/arquivo"
+    if p.chamado_id:
+        ch = await session.get(Chamado, p.chamado_id)
+        if ch is not None and ch.juridico_token and ch.juridico_enviado_at:
+            docs["dossie_url"] = chamados_juridico.link_dossie(ch.juridico_token)
+    out["documentos"] = docs
+    return out
+
+
+def _aplicar(p: JuridicoProcesso, corpo: dict) -> None:
+    """Só os campos enviados mudam; "" apaga."""
+    for k in _CAMPOS_TEXTO:
+        if k in corpo:
+            v = str(corpo[k] or "").strip()[:2000]
+            setattr(p, k, v or None)
+    for k in _CAMPOS_DATA:
+        if k in corpo:
+            v = str(corpo[k] or "").strip()
+            if v and _data(v) is None:
+                raise HTTPException(422, detail={"code": "juridico_data_invalida", "campo": k})
+            setattr(p, k, _data(v))
+    if "lado" in corpo:
+        if corpo["lado"] not in LADOS:
+            raise HTTPException(422, detail={"code": "juridico_lado_invalido"})
+        p.lado = corpo["lado"]
+    if "valor_causa" in corpo:
+        v = corpo["valor_causa"]
+        if v is None or str(v).strip() == "":
+            p.valor_causa = None
+        else:
+            s = str(v).strip().replace("R$", "").replace(" ", "")
+            if "," in s:  # 1.249,90
+                s = s.replace(".", "").replace(",", ".")
+            try:
+                p.valor_causa = Decimal(s).quantize(Decimal("0.01"))
+            except InvalidOperation:
+                raise HTTPException(422, detail={"code": "juridico_valor_invalido"}) from None
+    if "situacao" in corpo:
+        if corpo["situacao"] not in SITUACOES:
+            raise HTTPException(422, detail={"code": "juridico_situacao_invalida"})
+        p.situacao = corpo["situacao"]
+    elif "numero" in corpo and p.numero and p.situacao == "aguardando_numero":
+        # chegou o nº: o processo passa a andar
+        p.situacao = "em_andamento"
+    if p.jusbrasil_link and not p.jusbrasil_link.startswith(("https://", "http://")):
+        raise HTTPException(422, detail={"code": "juridico_link_invalido"})
+
+
+@router.post("/processos")
+async def criar_processo(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """+ novo processo: origem 'manual' (padrão) ou 'logistica' (com o pedido)."""
+    origem = corpo.get("origem") or "manual"
+    if origem not in ("manual", "logistica"):
+        raise HTTPException(422, detail={"code": "juridico_origem_invalida"})
+    p = JuridicoProcesso(
+        origem=origem, lado="autor", situacao="aguardando_numero", criado_por=_nome(u),
+        atualizado_por=_nome(u), encaminhado_em=datetime.now(_BRT).date(),
+    )
+    _aplicar(p, {k: v for k, v in corpo.items() if k != "origem"})
+    if p.numero and "situacao" not in corpo:
+        p.situacao = "em_andamento"
+    session.add(p)
+    await session.commit()
+    await session.refresh(p)
+    return {"ok": True, "processo": _dict(p, None, None)}
+
+
+@router.put("/processos/{processo_id}")
+async def editar_processo(
+    processo_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    p = await _processo(session, processo_id)
+    _aplicar(p, corpo)
+    p.atualizado_por = _nome(u)
+    await session.commit()
+    await session.refresh(p)
+    ultima = (await _ultimas(session, [p.id])).get(p.id)
+    codigos = await _codigos_casos(session, {p.denuncia_caso_id} if p.denuncia_caso_id else set())
+    return {"ok": True, "processo": _dict(p, ultima, codigos.get(p.denuncia_caso_id))}
+
+
+@router.delete("/processos/{processo_id}")
+async def apagar_processo(
+    processo_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_apagar)],
+) -> dict:
+    """Só o que foi incluído à mão: o que veio de um caso ou de um chamado voltaria sozinho."""
+    p = await _processo(session, processo_id)
+    if p.denuncia_caso_id or p.chamado_id:
+        raise HTTPException(409, detail={"code": "juridico_processo_automatico"})
+    await session.delete(p)
+    await session.commit()
+    return {"ok": True}
+
+
+@router.post("/processos/{processo_id}/movimentacoes")
+async def nova_movimentacao(
+    processo_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    p = await _processo(session, processo_id)
+    texto = str(corpo.get("texto") or "").strip()[:2000]
+    if not texto:
+        raise HTTPException(422, detail={"code": "juridico_movimentacao_vazia"})
+    bruto = str(corpo.get("data") or "").strip()
+    data = _data(bruto) if bruto else datetime.now(_BRT).date()
+    if data is None:
+        raise HTTPException(422, detail={"code": "juridico_data_invalida", "campo": "data"})
+    m = JuridicoMovimentacao(
+        processo_id=p.id, data=data, texto=texto, fonte="manual", criado_por=_nome(u)
+    )
+    session.add(m)
+    p.atualizado_por = _nome(u)
+    await session.commit()
+    await session.refresh(m)
+    return {"ok": True, "movimentacao": _mov_dict(m)}
+
+
+@router.delete("/movimentacoes/{mov_id}")
+async def apagar_movimentacao(
+    mov_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _u: Annotated[User, Depends(_editar)],
+) -> dict:
+    m = await session.get(JuridicoMovimentacao, mov_id)
+    if m is None:
+        raise HTTPException(404, detail={"code": "juridico_movimentacao_nao_encontrada"})
+    await session.delete(m)
+    await session.commit()
+    return {"ok": True}

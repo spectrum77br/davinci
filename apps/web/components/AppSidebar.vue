@@ -6,7 +6,7 @@ import {
   Receipt, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Ship, Landmark, Headset,
-  ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, Smartphone, ShieldCheck, X, Scale,
+  ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, Smartphone, ShieldCheck, X, Scale, Gavel,
 } from 'lucide-vue-next'
 import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
 
@@ -267,6 +267,9 @@ const sections = computed<Section[]>(() => [
       // Makisa manda) + o Jurídico que saiu de Chamados. Vinicius: um item só,
       // com abas (Anúncios · Denúncias · Casos · Jurídico), dentro da Ouvidoria.
       { to: '/denuncia', label: 'Denúncia', icon: Flag, resource: 'denuncia' },
+      // Jurídico (11/11/2026): os processos judiciais num lugar só — os casos da Denúncia que
+      // foram ao advogado, os chamados encaminhados ao jurídico e os incluídos à mão.
+      { to: '/ouvidoria/juridico', label: 'Jurídico', icon: Gavel, resource: 'denuncia' },
     ],
   },
   {

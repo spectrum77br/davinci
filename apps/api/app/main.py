@@ -82,6 +82,7 @@ from app.routers import notas_fiscais as notas_fiscais_router
 from app.routers import oauth as oauth_router
 from app.routers import ouvidoria as ouvidoria_router
 from app.routers import denuncia as denuncia_router
+from app.routers import juridico as juridico_router
 from app.routers import pricing as pricing_router
 from app.routers import pricing_conferencia as pricing_conferencia_router
 from app.routers import pricing_mega as pricing_mega_router
@@ -380,6 +381,7 @@ app.include_router(ouvidoria_router.router)
 # Makisa manda (sync) + as três telas. O sync vem antes: rota fixa `/sync/…`.
 app.include_router(denuncia_router.sync_router)
 app.include_router(denuncia_router.router)
+app.include_router(juridico_router.router)
 # Sistema › Histórico (25/09/2026): invisível para quem não está na lista.
 app.include_router(historico_router.router)
 app.include_router(dev_router.router)

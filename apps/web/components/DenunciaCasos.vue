@@ -4,7 +4,7 @@
 // entrega), as provas obrigatórias e o envio ao advogado. Cópia só leitura
 // do sistema de Fiscalização do Mac mini da Makisa.
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ExternalLink, Trash2 } from 'lucide-vue-next'
+import { Trash2 } from 'lucide-vue-next'
 import {
   type FalhaCaso, type Prova, ativoSimNao, dataBr, dinheiro, nomeGrupo, numero, pillAtivo, pillGrupo, pillResultado,
   pillSituacaoDenuncia, pillStatusCompra, tamanho,
@@ -737,7 +737,7 @@ defineExpose({ carregar })
          apertado"): largura fixa por coluna (rola para o lado), Compra e Jurídico centralizados e
          os campos de texto no balão (ObservacaoPopover) — a linha não muda de altura. -->
     <div class="table-card overflow-x-auto">
-      <table class="w-full min-w-[2290px] table-fixed text-xs">
+      <table class="w-full min-w-[1668px] table-fixed text-xs">
         <!-- larguras fixas; só a coluna Caso (o produto) estica quando a tela é maior -->
         <colgroup>
           <col class="w-[40px]">
@@ -753,16 +753,12 @@ defineExpose({ carregar })
           <col class="w-[132px]">
           <col class="w-[96px]">
           <col class="w-[220px]">
-          <col class="w-[200px]">
-          <col class="w-[132px]">
-          <col class="w-[160px]">
-          <col class="w-[130px]">
         </colgroup>
         <thead>
           <tr>
             <th class="!py-1.5 text-[11px] font-semibold" colspan="7">Caso</th>
             <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-amber-50 dark:!bg-amber-900/20" colspan="5">Compra</th>
-            <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-emerald-50 dark:!bg-emerald-900/20" colspan="5">Jurídico</th>
+            <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-emerald-50 dark:!bg-emerald-900/20">Jurídico</th>
           </tr>
           <tr class="[&>th]:whitespace-nowrap">
             <th class="!px-0 !text-center"><input type="checkbox" class="size-4 align-middle" :checked="todosMarcados" title="marcar todos" @change="marcarTodos"></th>
@@ -778,18 +774,14 @@ defineExpose({ carregar })
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Previsão entrega</th>
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20" title="Status e último evento do rastreio, lidos pelo robô no pedido (passo 1)">Localização</th>
             <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20 border-l-[3px] border-l-gray-400 dark:border-l-gray-600" title="Quando o caso foi enviado ao advogado">Data</th>
-            <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20" title="Nº do processo">Protocolo</th>
-            <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20">Últ. movimentação</th>
-            <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20">Último status</th>
-            <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20" title="Link de consulta do processo no Jusbrasil">Jusbrasil</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="carregando && itens.length === 0">
-            <td colspan="17" class="text-center text-muted-foreground py-6">carregando…</td>
+            <td colspan="13" class="text-center text-muted-foreground py-6">carregando…</td>
           </tr>
           <tr v-else-if="visiveis.length === 0">
-            <td colspan="17" class="text-center text-muted-foreground py-6">nenhum caso</td>
+            <td colspan="13" class="text-center text-muted-foreground py-6">nenhum caso</td>
           </tr>
           <tr v-for="c in visiveis" :key="c.id" class="cursor-pointer [&>td]:align-middle [&>td]:!py-1.5" :class="selecionados.has(c.id) ? 'bg-primary/5' : ''" @click="abrir(c)">
             <td class="!px-0 text-center" @click.stop><input type="checkbox" class="size-4 align-middle" :checked="selecionados.has(c.id)" @change="marcar(c.id)"></td>
@@ -880,55 +872,12 @@ defineExpose({ carregar })
               />
               <div v-else class="text-center text-muted-foreground">—</div>
             </td>
-            <!-- Jurídico -->
+            <!-- Jurídico — 11/11 (Vinicius): fica só a data do envio ao jurídico; Protocolo, Últ.
+                 movimentação, Último status e Jusbrasil saíram da tabela (o processo vai para o
+                 painel Jurídico da Ouvidoria). Os dados seguem no extra e na ficha do caso. -->
             <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-l-gray-400 dark:border-l-gray-600 text-center whitespace-nowrap tabular-nums" @click.stop>
               <span v-if="c.juridico_enviado_em">{{ dataBr(c.juridico_enviado_em, false) }}</span>
               <Button v-else size="sm" variant="outline" class="h-7 px-3 text-xs" @click="abrir(c, true)">enviar</Button>
-            </td>
-            <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
-              <ObservacaoPopover
-                :model-value="valorCampo(c, 'processo_numero')"
-                :disabled="!podeAnexar"
-                :titulo="`Nº do processo · ${c.codigo}`"
-                placeholder="nº do processo"
-                centro
-                mono
-                @update:model-value="(v) => rascunhar(c, 'processo_numero', v)"
-                @save="salvarRascunho(c, 'processo_numero')"
-              />
-            </td>
-            <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
-              <input type="date" :value="c.extra.mov_data || ''" :disabled="!podeAnexar" :class="celula" @change="(e) => salvarCampo(c, 'mov_data', (e.target as HTMLInputElement).value)">
-            </td>
-            <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
-              <ObservacaoPopover
-                :model-value="valorCampo(c, 'mov_status')"
-                :disabled="!podeAnexar"
-                :titulo="`Último status · ${c.codigo}`"
-                :dica="c.extra.mov_texto || ''"
-                placeholder="ex.: em andamento"
-                centro
-                @update:model-value="(v) => rascunhar(c, 'mov_status', v)"
-                @save="salvarRascunho(c, 'mov_status')"
-              />
-            </td>
-            <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10" @click.stop>
-              <div class="flex items-center gap-1 min-w-0">
-                <div class="min-w-0 flex-1">
-                  <ObservacaoPopover
-                    :model-value="valorCampo(c, 'processo_link')"
-                    :disabled="!podeAnexar"
-                    :titulo="`Link do Jusbrasil · ${c.codigo}`"
-                    placeholder="colar o link"
-                    centro
-                    @update:model-value="(v) => rascunhar(c, 'processo_link', v)"
-                    @save="salvarRascunho(c, 'processo_link')"
-                  />
-                </div>
-                <a v-if="c.extra.processo_link" :href="c.extra.processo_link" target="_blank" rel="noopener noreferrer" class="shrink-0 text-primary" title="abrir no Jusbrasil">
-                  <ExternalLink class="size-3.5" />
-                </a>
-              </div>
             </td>
           </tr>
         </tbody>
@@ -1247,37 +1196,13 @@ defineExpose({ carregar })
               </li>
             </ul>
           </div>
-          <!-- 13/10 (Vinicius): o Processo fica por último (só é usado depois do envio ao advogado) -->
-          <!-- 01/10 (Vinicius): "nº do processo, última movimentação, status, link de consulta — vamos logar no Jusbrasil" -->
-          <div class="rounded-lg border px-3 py-2.5 space-y-2">
-            <div class="flex items-center gap-2 text-sm">
-              <span class="font-medium">Processo</span>
-              <span v-if="k.juridico_enviado_em" class="text-xs text-muted-foreground">enviado ao advogado em {{ dataBr(k.juridico_enviado_em, false) }}</span>
-              <span class="flex-1" />
-              <a v-if="extraForm.processo_link" :href="extraForm.processo_link" target="_blank" rel="noopener noreferrer" class="text-xs text-primary hover:underline">consultar no Jusbrasil</a>
-            </div>
-            <div class="grid gap-2 sm:grid-cols-2">
-              <label class="text-[11px] text-muted-foreground space-y-0.5">Nº do processo
-                <Input v-model="extraForm.processo_numero" :disabled="!podeAnexar" placeholder="0000000-00.0000.0.00.0000" class="font-mono" />
-              </label>
-              <label class="text-[11px] text-muted-foreground space-y-0.5">Link de consulta (Jusbrasil)
-                <Input v-model="extraForm.processo_link" :disabled="!podeAnexar" placeholder="https://www.jusbrasil.com.br/…" />
-              </label>
-              <label class="text-[11px] text-muted-foreground space-y-0.5">Última movimentação (data)
-                <Input v-model="extraForm.mov_data" :disabled="!podeAnexar" type="date" />
-              </label>
-              <label class="text-[11px] text-muted-foreground space-y-0.5">Status da última movimentação
-                <Input v-model="extraForm.mov_status" :disabled="!podeAnexar" placeholder="ex.: em andamento, audiência marcada" />
-              </label>
-              <label class="text-[11px] text-muted-foreground space-y-0.5 sm:col-span-2">O que aconteceu
-                <Input v-model="extraForm.mov_texto" :disabled="!podeAnexar" placeholder="ex.: petição inicial distribuída" />
-              </label>
-            </div>
-            <div v-if="podeAnexar" class="flex items-center gap-2">
-              <Button size="sm" :disabled="salvandoExtra" @click="salvarExtra">{{ salvandoExtra ? 'salvando…' : 'salvar' }}</Button>
-              <span v-if="extraSalvo" class="text-xs text-emerald-600">salvo ✓</span>
-              <span v-if="extraErro" class="text-xs text-red-600">{{ extraErro }}</span>
-            </div>
+          <!-- 11/11 (Vinicius): o processo (nº, Jusbrasil, movimentações, prazo) saiu do caso e mora
+               em Ouvidoria › Jurídico — o caso que foi ao advogado entra lá sozinho -->
+          <div class="rounded-lg border px-3 py-2.5 flex items-center gap-2 text-sm">
+            <span class="font-medium">Processo</span>
+            <span v-if="k.juridico_enviado_em" class="text-xs text-muted-foreground">enviado ao advogado em {{ dataBr(k.juridico_enviado_em, false) }}</span>
+            <span class="flex-1" />
+            <a href="/ouvidoria/juridico" target="_blank" rel="noopener" class="text-xs text-primary hover:underline">acompanhar no Jurídico (Ouvidoria) ↗</a>
           </div>
           <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
             <div><dt class="text-[10px] uppercase tracking-wider text-muted-foreground">Advogado</dt><dd>{{ k.juridico || '—' }}</dd></div>
