@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Eye, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine, Download } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine, Download } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
 definePageMeta({
@@ -412,7 +412,35 @@ const statusBlings = computed(() =>
   ),
 )
 
-const filteredRows = computed(() => {
+// ---- Padrão de Chamados/Conciliação (11/11/2026) ----
+// A lista passa por camadas: `baseRows` (tudo menos Status Bling e cartão),
+// depois o Status Bling (etiquetas) e o cartão clicado. Os cartões contam sem o
+// filtro de cartão e as etiquetas sem o de Status Bling — clicar num não zera
+// o outro (mesma régua do resumo do Chamados).
+type CartaoFiltro =
+  | 'all' | 'sem_regra' | 'monitorar' | 'problemas' | 'chamado'
+  | 'prazo' | 'previsao' | 'divergencia' | 'correios_parado'
+const cartaoFiltro = ref<CartaoFiltro>('all')
+const ehProprio = computed(() => tab.value === 'amazon' && amazonSub.value === 'proprio')
+function noCartao(c: Logistica, k: CartaoFiltro): boolean {
+  switch (k) {
+    case 'sem_regra': return precisaAtencao(c)
+    case 'monitorar': return !!c.acao_monitorar
+    case 'problemas': return normKey(c.status_bling) === 'problemas'
+    case 'chamado': return !!(c.chamado || c.chamado_aba)
+    case 'prazo': return prazoVencido(c)
+    case 'previsao': return previsaoVencida(c)
+    case 'divergencia': return !!c.divergencia
+    case 'correios_parado': return ehCorreios(c.rastreio) && !c.entregue_em && leituraVelha(c)
+    default: return true
+  }
+}
+const mostrarSel = computed({
+  get: () => (mostrarTudo.value ? 'tudo' : 'acompanhar'),
+  set: (v: string) => { mostrarTudo.value = v === 'tudo' },
+})
+
+const baseRows = computed(() => {
   const q = search.value.trim().toLowerCase()
   const di = dataInicioFilter.value
   const df = dataFimFilter.value
@@ -427,7 +455,6 @@ const filteredRows = computed(() => {
     if (tab.value === 'flex' && flexPlataformaFilter.value === 'ml' && !isMl(c)) return false
     if (tab.value === 'flex' && flexPlataformaFilter.value === 'shopee' && !isShopee(c)) return false
     if (contaFilter.value !== 'all' && (c.conta || '') !== contaFilter.value) return false
-    if (statusBlingFilter.value !== 'all' && (c.status_bling || '') !== statusBlingFilter.value) return false
     if (di && (!c.data || c.data < di)) return false
     if (df && (!c.data || c.data > df)) return false
     if (q) {
@@ -456,6 +483,132 @@ const filteredRows = computed(() => {
     return true
   })
 })
+function noStatusBling(c: Logistica): boolean {
+  return statusBlingFilter.value === 'all' || (c.status_bling || '') === statusBlingFilter.value
+}
+// Base dos cartões (sem o filtro de cartão) e das etiquetas (sem o de Status Bling).
+const semCartaoRows = computed(() => baseRows.value.filter(noStatusBling))
+const semStatusRows = computed(() => baseRows.value.filter((c) => noCartao(c, cartaoFiltro.value)))
+const filteredRows = computed(() => semCartaoRows.value.filter((c) => noCartao(c, cartaoFiltro.value)))
+
+const cartoes = computed(() => {
+  const base = semCartaoRows.value
+  const n = (k: CartaoFiltro) => base.filter((c) => noCartao(c, k)).length
+  const lista: Array<{ k: CartaoFiltro; label: string; n: number; cor: string; dica: string }> = [
+    { k: 'all', label: mostrarTudo.value ? 'Pedidos' : 'A acompanhar', n: base.length, cor: '', dica: 'mostrar todos' },
+    { k: 'sem_regra', label: 'Sem regra (decidir)', n: n('sem_regra'), cor: 'text-amber-600', dica: 'combinação que nenhuma regra da aba Status cobre' },
+    { k: 'monitorar', label: 'Monitorar', n: n('monitorar'), cor: 'text-blue-600', dica: 'a regra da aba Status pede acompanhar' },
+    { k: 'problemas', label: 'Problemas no Bling', n: n('problemas'), cor: 'text-red-600', dica: 'Status Bling = Problemas' },
+    { k: 'chamado', label: 'Com chamado', n: n('chamado'), cor: 'text-slate-700 dark:text-slate-300', dica: 'tem protocolo ou chamado na aba Chamados' },
+  ]
+  if (ehProprio.value) {
+    lista.push({ k: 'prazo', label: 'Prazo Amazon vencido', n: n('prazo'), cor: 'text-red-600', dica: 'passou a data máxima da Amazon e não foi entregue' })
+  }
+  return lista
+})
+function filtrarCartao(k: CartaoFiltro) {
+  cartaoFiltro.value = cartaoFiltro.value === k ? 'all' : k
+}
+
+// Cor do Status Bling (chip da tabela e bolinha das etiquetas).
+const SB_COR: Record<string, string> = {
+  problemas: 'bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300',
+  entregue: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300',
+  atendido: 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
+  'em andamento': 'bg-blue-100 text-blue-800 dark:bg-blue-950/50 dark:text-blue-300',
+  'aguardando devolução': 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300',
+  'aguardando cancelamento': 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300',
+  manutenção: 'bg-violet-100 text-violet-800 dark:bg-violet-950/50 dark:text-violet-300',
+  'em aberto': 'bg-sky-100 text-sky-800 dark:bg-sky-950/50 dark:text-sky-300',
+}
+const SB_DOT: Record<string, string> = {
+  problemas: 'bg-red-600', entregue: 'bg-emerald-600', atendido: 'bg-slate-400', 'em andamento': 'bg-blue-600',
+  'aguardando devolução': 'bg-amber-500', 'aguardando cancelamento': 'bg-amber-500', manutenção: 'bg-violet-500', 'em aberto': 'bg-sky-500',
+}
+function corStatusBling(s: string | null | undefined): string {
+  return SB_COR[normKey(s)] || 'bg-muted text-foreground'
+}
+const statusPills = computed(() => {
+  const cont = new Map<string, number>()
+  for (const r of semStatusRows.value) cont.set(r.status_bling || '', (cont.get(r.status_bling || '') || 0) + 1)
+  return [...cont.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([s, n]) => ({ s, n, rotulo: s || 'sem status', dot: SB_DOT[normKey(s)] || 'bg-slate-300' }))
+})
+function filtrarStatusBling(s: string) {
+  statusBlingFilter.value = statusBlingFilter.value === s ? 'all' : s
+}
+
+// Raio-X: a linha clicada abre à direita (antes abria direto o "Editar caso").
+const raioId = ref<string | null>(null)
+const raioRow = computed(() => (raioId.value ? rows.value.find((r) => r.id === raioId.value) || null : null))
+function abrirRaio(c: Logistica) {
+  raioId.value = raioId.value === c.id ? null : c.id
+}
+// Botão "Atualizar status" do Raio-X: o mesmo de antes, da plataforma da linha.
+function podeAtualizarStatus(c: Logistica): boolean {
+  return canEdit.value && !!c.pedido_marketplace && (isMl(c) || isShopee(c) || isTiktok(c) || isAmazon(c))
+}
+function atualizarStatusPlataforma(c: Logistica) {
+  if (isMl(c)) return atualizarMeli(c)
+  if (isShopee(c)) return atualizarShopee(c)
+  if (isTiktok(c)) return atualizarTiktok(c)
+  if (isAmazon(c)) return atualizarAmazon(c)
+}
+const RAIO_BTN =
+  'inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-semibold hover:bg-muted disabled:opacity-50'
+
+// "Onde agir hoje": o que é um a um (ocorrência grave, Flex sem peça,
+// suspensão que falhou) abre o Raio-X; o resto vira grupo e filtra o cartão.
+type AgirItem = { chave: string; dot: string; titulo: string; detalhe: string; acao: string; cartao?: CartaoFiltro; linha?: Logistica }
+const agirItens = computed<AgirItem[]>(() => {
+  const base = baseRows.value
+  const out: AgirItem[] = []
+  const pedidoDe = (c: Logistica) => c.pedido_bling || c.pedido_marketplace || 'pedido'
+  for (const c of base.filter((r) => r.volta_grave).slice(0, 3)) {
+    out.push({ chave: `grave-${c.id}`, dot: 'bg-red-600', titulo: `${pedidoDe(c)} · ${c.volta_localizacao || 'ocorrência grave'}`, detalhe: `${c.conta || '—'} · pacote da devolução`, acao: 'Abrir', linha: c })
+  }
+  for (const c of base.filter((r) => flexAlerta(r)).slice(0, 2)) {
+    out.push({ chave: `flex-${c.id}`, dot: 'bg-red-600', titulo: `${pedidoDe(c)} · Flex sem peça em ${flexLocal.value.cidade}`, detalhe: flexAlerta(c) || '', acao: 'Abrir', linha: c })
+  }
+  for (const c of base.filter((r) => r.suspensao_status === 'falhou').slice(0, 2)) {
+    out.push({ chave: `susp-${c.id}`, dot: 'bg-red-600', titulo: `${pedidoDe(c)} · suspensão falhou`, detalhe: resumoDetalheRobo(c.suspensao_detalhe) || 'tentar de novo', acao: 'Abrir', linha: c })
+  }
+  const grupo = (k: CartaoFiltro, dot: string, titulo: string, detalhe: (rs: Logistica[]) => string) => {
+    const rs = base.filter((c) => noCartao(c, k))
+    if (rs.length) out.push({ chave: `g-${k}`, dot, titulo: `${titulo} · ${rs.length}`, detalhe: detalhe(rs), acao: 'Ver', cartao: k })
+  }
+  const lista = (rs: Logistica[]) => rs.slice(0, 3).map(pedidoDe).join(' · ') + (rs.length > 3 ? ' …' : '')
+  if (ehProprio.value) {
+    grupo('prazo', 'bg-red-600', 'Prazo da Amazon vencido', () => 'a Amazon pode reembolsar o cliente')
+    grupo('previsao', 'bg-amber-500', 'Previsão da transportadora vencida', lista)
+  }
+  grupo('sem_regra', 'bg-amber-500', 'Sem regra', () => 'combinação nova: decidir na aba Status')
+  grupo('problemas', 'bg-red-600', 'Problemas no Bling', lista)
+  grupo('divergencia', 'bg-amber-500', 'Divergência', () => 'a plataforma e o rastreio dizem coisas diferentes')
+  grupo('correios_parado', 'bg-amber-500', 'Correios parados', () => `sem movimento há mais de ${LEITURA_VELHA_DIAS} dias`)
+  grupo('monitorar', 'bg-blue-600', 'Monitorar', () => 'a regra pede acompanhar')
+  return out
+})
+function agir(a: AgirItem) {
+  if (a.linha) raioId.value = a.linha.id
+  else if (a.cartao) filtrarCartao(a.cartao)
+}
+const tituloTabela = computed(() => {
+  const nome = tab.value === 'flex' ? 'Pedidos Flex' : PLATAFORMA_TABS.find((t) => t.key === tab.value)?.label || ''
+  const sub = tab.value === 'amazon' ? (amazonSub.value === 'proprio' ? ' · Envio próprio' : ' · Amazon DBA') : ''
+  return `${nome}${sub} — ${mostrarTudo.value ? 'todos os pedidos' : 'casos a acompanhar'}`
+})
+function produtoResumo(c: Logistica): string {
+  const ps = c.produtos || []
+  if (!ps.length) return '—'
+  const p = ps[0]
+  const q = p.quantidade && p.quantidade > 1 ? ` ×${p.quantidade}` : ''
+  return `${p.nome || '—'}${q}${ps.length > 1 ? ` +${ps.length - 1}` : ''}`
+}
+function produtoTitulo(c: Logistica): string {
+  return (c.produtos || []).map((p) => `${p.nome || '—'}${p.quantidade && p.quantidade > 1 ? ` ×${p.quantidade}` : ''}${p.sku ? ` (${p.sku})` : ''}`).join('\n')
+}
 
 function limparFiltros() {
   search.value = ''
@@ -464,6 +617,7 @@ function limparFiltros() {
   dataInicioFilter.value = ''
   dataFimFilter.value = ''
   flexPlataformaFilter.value = ''
+  cartaoFiltro.value = 'all'
 }
 
 // Contadores das sub-abas da Amazon (mesma base do painel: respeita "Mostrar tudo").
@@ -727,7 +881,7 @@ function goToPage(p: number) {
   page.value = Math.min(Math.max(1, p), totalPages.value)
 }
 // Filtros mudaram → volta pra 1ª página.
-watch([search, contaFilter, statusBlingFilter, dataInicioFilter, dataFimFilter, amazonSub, flexPlataformaFilter], () => {
+watch([search, contaFilter, statusBlingFilter, dataInicioFilter, dataFimFilter, amazonSub, flexPlataformaFilter, cartaoFiltro, mostrarTudo], () => {
   page.value = 1
 })
 // Recarregou dados / página ficou fora do intervalo → corrige.
@@ -742,6 +896,7 @@ const filtrosAtivos = computed(
     statusBlingFilter.value !== 'all' ||
     !!dataInicioFilter.value ||
     !!dataFimFilter.value ||
+    cartaoFiltro.value !== 'all' ||
     (tab.value === 'flex' && !!flexPlataformaFilter.value),
 )
 
@@ -1447,6 +1602,13 @@ watch(tab, (t) => {
     page.value = 1
     refresh()
   }
+  raioId.value = null
+  cartaoFiltro.value = 'all'
+})
+// O cartão "Prazo Amazon vencido" só existe no Envio próprio.
+watch(amazonSub, () => {
+  raioId.value = null
+  if (cartaoFiltro.value === 'prazo' || cartaoFiltro.value === 'previsao') cartaoFiltro.value = 'all'
 })
 
 // ---- Atualização automática (30s) ----
@@ -2194,81 +2356,166 @@ async function aplicarStatusBling(c: Logistica) {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="flex flex-wrap items-center gap-3">
-      <h1 class="text-2xl font-semibold">Logística</h1>
-    </div>
-
-    <!-- Tabs -->
-    <div class="flex flex-wrap gap-1 border-b">
-      <button
-        v-for="t in ABAS_VISIVEIS"
-        :key="t.key"
-        type="button"
-        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px"
-        :class="tab === t.key ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
-        @click="tab = t.key"
-      >
-        {{ t.label }}
-      </button>
-      <button
-        type="button"
-        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px"
-        :class="tab === 'status' ? 'border-primary text-foreground' : 'border-transparent text-muted-foreground hover:text-foreground'"
-        @click="tab = 'status'"
-      >
-        Status
-      </button>
-      <Button
-        v-if="isAdmin"
-        size="sm"
-        variant="outline"
-        class="ml-auto self-center mb-1"
-        title="Manda via Threema a lista dos pedidos acompanhados no painel (só admins)"
-        @click="informarOpen = true"
-      >
-        <Megaphone class="size-4 mr-1" /> Informar
-      </Button>
-    </div>
-
-    <!-- ============ ABA FLEX: sub-abas Pedidos × Anúncios ============ -->
-    <div v-if="tab === 'flex'" class="flex flex-wrap items-center gap-3">
-      <div class="flex items-center rounded-md border overflow-hidden text-sm" role="tablist">
+  <!-- 11/11/2026: padrão de Chamados/Conciliação — cabeçalho numa linha, filtros em
+       pílulas, cartões que filtram, etiquetas do Status Bling, tabela agrupada e,
+       à direita, "Onde agir hoje" + Raio-X da linha clicada. -->
+  <div class="min-w-0 space-y-2.5">
+    <div class="flex flex-wrap items-center gap-3 rounded-md border bg-card px-3 py-1.5">
+      <h1 class="text-[15px] font-bold">Logística</h1>
+      <div class="flex flex-wrap items-center gap-3.5 text-xs font-semibold">
+        <div class="flex flex-wrap gap-0.5">
+          <button
+            v-for="t in ABAS_VISIVEIS"
+            :key="t.key"
+            type="button"
+            class="border-b-2 px-2.5 py-1"
+            :class="tab === t.key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+            @click="tab = t.key"
+          >
+            {{ t.label }}
+            <span v-if="tab === t.key && !flexAnuncios" class="font-medium text-muted-foreground">{{ baseRows.length }}</span>
+          </button>
+          <button
+            type="button"
+            class="border-b-2 px-2.5 py-1"
+            :class="tab === 'status' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+            @click="tab = 'status'"
+          >
+            Status
+          </button>
+        </div>
+        <!-- Amazon: DBA × Envio próprio (dois painéis, como no Seller Central) -->
+        <div v-if="tab === 'amazon'" class="inline-flex rounded-md border p-px" role="tablist">
+          <button
+            type="button"
+            class="rounded px-2.5 py-1"
+            :class="amazonSub === 'dba' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+            title="Delivery by Amazon: a Amazon coleta e entrega"
+            @click="amazonSub = 'dba'"
+          >
+            Amazon DBA <span class="font-medium opacity-70">{{ amazonCounts.dba }}</span>
+          </button>
+          <button
+            type="button"
+            class="rounded px-2.5 py-1"
+            :class="amazonSub === 'proprio' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+            title="Envio próprio: postamos nos Correios e respondemos pela entrega"
+            @click="amazonSub = 'proprio'"
+          >
+            Envio próprio <span class="font-medium opacity-70">{{ amazonCounts.proprio }}</span>
+          </button>
+        </div>
+        <!-- Flex: Pedidos × Anúncios -->
+        <div v-if="tab === 'flex'" class="inline-flex rounded-md border p-px" role="tablist">
+          <button
+            type="button"
+            class="rounded px-2.5 py-1"
+            :class="flexSub === 'pedidos' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+            title="Pedidos Flex do Mercado Livre e da Shopee (também aparecem nas abas de cada plataforma, com o selo Flex)"
+            @click="flexSub = 'pedidos'"
+          >
+            Pedidos Flex <span class="font-medium opacity-70">{{ flexPedidosCount }}</span>
+          </button>
+          <button
+            type="button"
+            class="rounded px-2.5 py-1"
+            :class="flexSub === 'anuncios' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
+            title="Em quais anúncios o Flex está ligado, o que o sistema quer e o porquê — aprovar, sincronizar e emergência"
+            @click="flexSub = 'anuncios'"
+          >
+            Anúncios Flex
+            <span
+              v-if="flexAguardando"
+              class="ml-1 rounded-full bg-amber-400 px-1.5 text-[11px] font-semibold text-amber-950"
+              :title="`${flexAguardando} anúncio(s) esperando sua aprovação para ligar o Flex`"
+            >{{ flexAguardando }}</span>
+          </button>
+        </div>
+        <!-- Pedido Flex sem peça em SP: aviso fixo (o robô NÃO trocou o lote). -->
         <button
+          v-if="tab === 'flex' && Object.keys(flexAlertas).length && flexSub === 'pedidos'"
           type="button"
-          class="px-3 py-1.5"
-          :class="flexSub === 'pedidos' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted/40'"
-          title="Pedidos Flex do Mercado Livre e da Shopee (também aparecem nas abas de cada plataforma, com o selo Flex)"
-          @click="flexSub = 'pedidos'"
-        >
-          Pedidos Flex <span class="opacity-70">({{ flexPedidosCount }})</span>
-        </button>
-        <button
-          type="button"
-          class="px-3 py-1.5 border-l"
-          :class="flexSub === 'anuncios' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted/40'"
-          title="Em quais anúncios o Flex está ligado, o que o sistema quer e o porquê — aprovar, sincronizar e emergência"
+          class="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-50 px-2.5 py-1 text-rose-800 hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-300"
+          :title="`Ver a lista dos pedidos Flex sem peça em ${flexLocal.cidade} (na sub-aba Anúncios Flex)`"
           @click="flexSub = 'anuncios'"
         >
-          Anúncios Flex
-          <span
-            v-if="flexAguardando"
-            class="ml-1 rounded-full bg-amber-400 px-1.5 text-[11px] font-semibold text-amber-950"
-            :title="`${flexAguardando} anúncio(s) esperando sua aprovação para ligar o Flex`"
-          >{{ flexAguardando }}</span>
+          {{ Object.keys(flexAlertas).length }} pedido(s) Flex sem peça em {{ flexLocal.cidade }}
         </button>
       </div>
-      <!-- Pedido Flex sem peça em SP: aviso fixo (o robô NÃO trocou o lote). -->
-      <button
-        v-if="Object.keys(flexAlertas).length && flexSub === 'pedidos'"
-        type="button"
-        class="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-50 px-2.5 py-1 text-sm text-rose-800 hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-300"
-        :title="`Ver a lista dos pedidos Flex sem peça em ${flexLocal.cidade} (na sub-aba Anúncios Flex)`"
-        @click="flexSub = 'anuncios'"
-      >
-        {{ Object.keys(flexAlertas).length }} pedido(s) Flex sem peça em {{ flexLocal.cidade }}
-      </button>
+      <div class="ml-auto flex flex-wrap items-center justify-end gap-1.5 text-xs font-semibold">
+        <template v-if="tab !== 'status' && !flexAnuncios">
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
+            :disabled="loading || statusLoading || recarregando"
+            title="Relê as plataformas e recarrega a lista (a tela também se atualiza sozinha a cada 30 s)"
+            @click="recarregar"
+          >
+            <RefreshCw class="size-3.5" :class="loading || statusLoading || recarregando ? 'animate-spin' : ''" /> Atualizar
+          </button>
+          <!-- O robô já faz isso de 15 em 15 min; o botão é pra quando o operador
+               não quer esperar. Some na aba Flex: o Flex não passa pelos Correios. -->
+          <button
+            v-if="canEdit && tab !== 'flex'"
+            type="button"
+            class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
+            :disabled="atualizandoRastreio"
+            title="Busca agora a posição dos pacotes dos Correios. O sistema já faz isso sozinho a cada 15 minutos."
+            @click="atualizarRastreio"
+          >
+            <MapPin class="size-3.5" :class="atualizandoRastreio ? 'animate-pulse' : ''" />
+            {{ atualizandoRastreio ? 'Buscando…' : 'Correios' }}
+          </button>
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
+            :disabled="exportandoExcel || loading || !filteredRows.length"
+            :title="`Baixa em Excel os ${filteredRows.length} pedidos que estão aparecendo (todas as páginas, com os filtros da tela)`"
+            @click="exportarExcel"
+          >
+            <Download class="size-3.5" :class="exportandoExcel ? 'animate-pulse' : ''" />
+            {{ exportandoExcel ? 'Gerando…' : 'Excel' }}
+          </button>
+          <template v-if="tab === 'amazon' && canInformarAmazon">
+            <button
+              type="button"
+              class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted"
+              title="Quem recebe no Threema os avisos de prazo do Envio próprio (3 dias antes da data máxima da Amazon, previsão dos Correios vencida, prazo vencido) — e manda agora a lista dos pedidos em trânsito"
+              @click="informarAmazonOpen = true"
+            >
+              <Megaphone class="size-3.5" /> Avisos Amazon
+            </button>
+            <button
+              type="button"
+              class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted"
+              title="Textos dos e-mails que o robô manda ao comprador da Amazon (problema, atraso, entrega) e o envio de teste"
+              @click="mensagensClienteOpen = true"
+            >
+              <Mail class="size-3.5" /> Mensagens ao cliente
+            </button>
+          </template>
+        </template>
+        <button
+          v-if="isAdmin"
+          type="button"
+          class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted"
+          title="Manda via Threema a lista dos pedidos acompanhados no painel (só admins)"
+          @click="informarOpen = true"
+        >
+          <Megaphone class="size-3.5" /> Informar
+        </button>
+        <button
+          v-if="canEdit && tab !== 'status' && !flexAnuncios"
+          type="button"
+          class="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-primary px-2.5 py-1 text-primary-foreground"
+          :title="tab === 'flex' ? 'O caso criado à mão aparece na aba da plataforma (Mercado Livre ou Shopee), não na aba Flex.' : undefined"
+          @click="openNew"
+        >
+          <Plus class="size-3.5" /> novo caso
+        </button>
+      </div>
     </div>
+
     <LogisticaFlexAnuncios
       v-if="flexAnuncios"
       :can-edit="canEdit"
@@ -2278,94 +2525,6 @@ async function aplicarStatusBling(c: Logistica) {
 
     <!-- ============ ABAS DE MARKETPLACE (ML/Shopee/Amazon/TikTok/Flex) ============ -->
     <template v-if="tab !== 'status' && !flexAnuncios">
-      <div class="flex flex-wrap items-center gap-3">
-        <Button size="sm" variant="ghost" :disabled="loading || statusLoading || recarregando" @click="recarregar">
-          <RefreshCw class="size-4 mr-1" :class="loading || statusLoading || recarregando ? 'animate-spin' : ''" /> recarregar
-        </Button>
-        <Button
-          size="sm"
-          :variant="mostrarTudo ? 'default' : 'outline'"
-          title="Ligado = mostra também os pedidos que o painel esconde (resolvidos/desconsiderados)"
-          @click="mostrarTudo = !mostrarTudo"
-        >
-          <Eye class="size-4 mr-1" /> {{ mostrarTudo ? 'Mostrando tudo' : 'Mostrar tudo' }}
-        </Button>
-        <!-- O robô já faz isso de 15 em 15 min; o botão é pra quando o operador
-             não quer esperar (ou acabou de cadastrar um rastreio na mão). -->
-        <!-- Some na aba Flex: o Flex não passa pelos Correios. -->
-        <Button
-          v-if="canEdit && tab !== 'flex'"
-          size="sm"
-          variant="outline"
-          :disabled="atualizandoRastreio"
-          title="Busca agora a posição dos pacotes dos Correios. O sistema já faz isso sozinho a cada 15 minutos."
-          @click="atualizarRastreio"
-        >
-          <MapPin class="size-4 mr-1" :class="atualizandoRastreio ? 'animate-pulse' : ''" />
-          {{ atualizandoRastreio ? 'Buscando…' : 'Atualizar Correios' }}
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          :disabled="exportandoExcel || loading || !filteredRows.length"
-          :title="`Baixa em Excel os ${filteredRows.length} pedidos que estão aparecendo (todas as páginas, com os filtros da tela)`"
-          @click="exportarExcel"
-        >
-          <Download class="size-4 mr-1" :class="exportandoExcel ? 'animate-pulse' : ''" />
-          {{ exportandoExcel ? 'Gerando…' : 'Excel' }}
-        </Button>
-        <!-- Amazon: DBA × Envio próprio (dois painéis, como no Seller Central) -->
-        <template v-if="tab === 'amazon'">
-          <div class="flex items-center rounded-md border overflow-hidden text-sm" role="tablist">
-            <button
-              type="button"
-              class="px-3 py-1.5"
-              :class="amazonSub === 'dba' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted/40'"
-              title="Delivery by Amazon: a Amazon coleta e entrega"
-              @click="amazonSub = 'dba'"
-            >
-              Amazon DBA <span class="opacity-70">({{ amazonCounts.dba }})</span>
-            </button>
-            <button
-              type="button"
-              class="px-3 py-1.5 border-l"
-              :class="amazonSub === 'proprio' ? 'bg-primary text-primary-foreground' : 'hover:bg-muted/40'"
-              title="Envio próprio: postamos nos Correios e respondemos pela entrega"
-              @click="amazonSub = 'proprio'"
-            >
-              Envio próprio <span class="opacity-70">({{ amazonCounts.proprio }})</span>
-            </button>
-          </div>
-          <Button
-            v-if="canInformarAmazon"
-            size="sm"
-            variant="outline"
-            title="Quem recebe no Threema os avisos de prazo do Envio próprio (3 dias antes da data máxima da Amazon, previsão dos Correios vencida, prazo vencido) — e manda agora a lista dos pedidos em trânsito"
-            @click="informarAmazonOpen = true"
-          >
-            <Megaphone class="size-4 mr-1" /> Informar
-          </Button>
-          <Button
-            v-if="canInformarAmazon"
-            size="sm"
-            variant="outline"
-            title="Textos dos e-mails que o robô manda ao comprador da Amazon (problema, atraso, entrega) e o envio de teste"
-            @click="mensagensClienteOpen = true"
-          >
-            <Mail class="size-4 mr-1" /> Mensagens ao cliente
-          </Button>
-        </template>
-        <Button
-          v-if="canEdit"
-          size="sm"
-          class="ml-auto"
-          :title="tab === 'flex' ? 'O caso criado à mão aparece na aba da plataforma (Mercado Livre ou Shopee), não na aba Flex.' : undefined"
-          @click="openNew"
-        >
-          <Plus class="size-4 mr-1" /> Novo caso
-        </Button>
-      </div>
-
       <!-- Sem saldo no 17track a coluna Localização inteira congela. O aviso
            fica FIXO (não é toast) porque explica o estado atual do sistema e
            depende de uma ação fora do DaVinci: comprar créditos. -->
@@ -2381,452 +2540,511 @@ async function aplicarStatusBling(c: Logistica) {
         (entrar na conta → Quota).
       </div>
 
-      <p v-if="tab === 'flex'" class="text-sm text-muted-foreground">
-        Pedidos Flex do Mercado Livre (Envios Flex) e da Shopee (Entrega Direta): saem de {{ flexLocal.cidade }}
-        (estoque .{{ flexLocal.lote }}) e são entregues no mesmo dia ou no dia seguinte. Eles continuam aparecendo também nas
-        abas Mercado Livre e Shopee, com o selo Flex.
-      </p>
-      <p v-else class="text-sm text-muted-foreground">
-        Casos de pós-venda a acompanhar. Preencha os status do Meli no caso e o sistema
-        sugere os Status Bling que a planilha já viu pra aquela combinação — a decisão final é sua.
-      </p>
-
-      <!-- Busca + filtros -->
-      <div class="flex flex-wrap items-center gap-2">
-        <div class="relative">
-          <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-          <input
-            v-model="search"
-            class="h-9 w-72 rounded-md border bg-background pl-8 pr-3 text-sm"
-            placeholder="buscar pedido, produto, SKU, conta, rastreio…"
-          />
-        </div>
-        <label v-if="tab === 'flex'" class="flex items-center gap-1.5 text-sm text-muted-foreground">
-          Plataforma:
-          <select v-model="flexPlataformaFilter" class="h-9 rounded-md border bg-background px-2 text-sm text-foreground">
+      <!-- filtros (mesmo formato de Chamados/Conciliação) -->
+      <div class="flex flex-wrap items-center gap-1.5 text-xs">
+        <label v-if="tab === 'flex'" class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2">
+          <span class="font-semibold text-muted-foreground">Plataforma</span>
+          <select v-model="flexPlataformaFilter" class="bg-transparent outline-none">
             <option value="">Mercado Livre e Shopee</option>
             <option value="ml">Mercado Livre</option>
             <option value="shopee">Shopee</option>
           </select>
         </label>
-        <select v-model="contaFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
-          <option value="all">todas contas</option>
-          <option v-for="c in contas" :key="c" :value="c">{{ c }}</option>
-        </select>
-        <select v-model="statusBlingFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
-          <option value="all">todos status bling</option>
-          <option v-for="s in statusBlings" :key="s" :value="s">{{ s }}</option>
-        </select>
-        <div class="flex items-center gap-1.5 h-9 rounded-md border bg-background px-2" title="Período da data">
-          <span class="text-xs text-muted-foreground">de</span>
+        <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2">
+          <span class="font-semibold text-muted-foreground">Conta</span>
+          <select v-model="contaFilter" class="max-w-[150px] bg-transparent outline-none">
+            <option value="all">Todas</option>
+            <option v-for="c in contas" :key="c" :value="c">{{ c }}</option>
+          </select>
+        </label>
+        <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="A acompanhar: esconde os pedidos que já chegaram ao fim (resolvidos) e não pedem monitoramento">
+          <span class="font-semibold text-muted-foreground">Mostrar</span>
+          <select v-model="mostrarSel" class="bg-transparent outline-none">
+            <option value="acompanhar">A acompanhar</option>
+            <option value="tudo">Tudo</option>
+          </select>
+        </label>
+        <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2">
+          <span class="font-semibold text-muted-foreground">Status Bling</span>
+          <select v-model="statusBlingFilter" class="bg-transparent outline-none">
+            <option value="all">Todos</option>
+            <option v-for="s in statusBlings" :key="s" :value="s">{{ s }}</option>
+          </select>
+        </label>
+        <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="Período da data do pedido">
+          <span class="font-semibold text-muted-foreground">Período</span>
           <input
             v-model="dataInicioFilter"
             type="date"
             :max="dataFimFilter || undefined"
             title="Data inicial"
-            class="bg-transparent text-sm focus:outline-none"
+            class="bg-transparent outline-none"
           />
-          <span class="text-xs text-muted-foreground">até</span>
+          <span class="text-muted-foreground">até</span>
           <input
             v-model="dataFimFilter"
             type="date"
             :min="dataInicioFilter || undefined"
             title="Data final"
-            class="bg-transparent text-sm focus:outline-none"
+            class="bg-transparent outline-none"
           />
-        </div>
-        <Button v-if="filtrosAtivos" size="sm" variant="ghost" @click="limparFiltros">
-          <X class="size-4 mr-1" /> limpar
-        </Button>
-        <span class="text-xs text-muted-foreground ml-auto">
-          {{ filteredRows.length }} de {{ rows.length }}
-        </span>
+        </label>
+        <label class="inline-flex h-7 min-w-0 items-center gap-1 rounded-md border bg-card px-2">
+          <Search class="size-3.5 text-muted-foreground" />
+          <input v-model="search" class="w-64 bg-transparent outline-none" placeholder="buscar pedido, produto, SKU, conta, rastreio" />
+        </label>
+        <button v-if="filtrosAtivos" type="button" class="text-muted-foreground underline" @click="limparFiltros">limpar</button>
+        <span class="text-muted-foreground">{{ filteredRows.length }} de {{ rows.length }} pedidos</span>
+      </div>
+
+      <!-- cartões: clicar filtra a lista (clicar de novo tira o filtro) -->
+      <div class="grid grid-cols-2 gap-2" :class="cartoes.length > 5 ? 'lg:grid-cols-6' : 'lg:grid-cols-5'">
+        <button
+          v-for="k in cartoes"
+          :key="k.k"
+          type="button"
+          class="rounded-md border bg-card px-3 py-1.5 text-center hover:bg-muted/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          :class="k.k !== 'all' && cartaoFiltro === k.k ? 'ring-2 ring-primary' : ''"
+          :title="k.k === 'all' ? 'mostrar todos' : cartaoFiltro === k.k ? 'tirar o filtro' : `filtrar: ${k.dica}`"
+          @click="k.k === 'all' ? (cartaoFiltro = 'all') : filtrarCartao(k.k)"
+        >
+          <span class="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{{ k.label }}</span>
+          <span class="block text-xl font-bold leading-tight" :class="k.cor">{{ k.n }}</span>
+        </button>
+      </div>
+
+      <!-- Status Bling dos casos: clicar numa etiqueta filtra -->
+      <div v-if="statusPills.length" class="flex flex-wrap items-center gap-3 rounded-md border bg-card px-3 py-1.5 text-xs">
+        <span class="text-[13px] font-bold">Status Bling dos casos</span>
+        <button
+          v-for="sp in statusPills"
+          :key="sp.s"
+          type="button"
+          class="inline-flex items-center gap-1.5 rounded bg-muted px-2 py-0.5 font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          :class="statusBlingFilter === sp.s ? 'ring-2 ring-primary' : ''"
+          :title="statusBlingFilter === sp.s ? 'tirar o filtro' : `filtrar: ${sp.rotulo}`"
+          @click="filtrarStatusBling(sp.s)"
+        >
+          <span class="size-[7px] rounded-full" :class="sp.dot" />
+          {{ sp.n }} {{ sp.rotulo }}
+        </button>
+        <span class="ml-auto hidden text-[11px] text-muted-foreground lg:inline">clique numa etiqueta ou num cartão para filtrar</span>
       </div>
 
       <div v-if="error" class="text-sm text-red-500">erro: {{ error }}</div>
 
-      <!-- Desktop table -->
-      <div class="hidden md:block border rounded-md overflow-x-auto">
-        <table class="w-full text-sm min-w-[1200px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
-          <thead class="bg-muted/40 text-left">
-            <tr class="whitespace-nowrap">
-              <th class="px-3 py-2">Data</th>
-              <th class="px-3 py-2">Pedido Bling</th>
-              <th class="px-3 py-2">Pedido Marketplace</th>
-              <th class="px-3 py-2">Plataforma</th>
-              <th class="px-3 py-2">Produto</th>
-              <th class="px-3 py-2">SKU</th>
-              <th class="px-3 py-2">Conta</th>
-              <th class="px-3 py-2">Status Plataforma</th>
-              <th class="px-3 py-2">Rastreio</th>
-              <th class="px-3 py-2">Localização</th>
-              <!-- Só no Envio próprio: no DBA a Amazon entrega e responde pelo prazo. -->
-              <template v-if="tab === 'amazon' && amazonSub === 'proprio'">
-                <th class="px-3 py-2" title="Previsão de entrega da transportadora (objeto de postagem do Bling)">Previsão transportadora</th>
-                <th class="px-3 py-2" title="Data máxima de entrega da Amazon — depois dela a Amazon reembolsa o cliente">Entregar até (Amazon)</th>
-              </template>
-              <th class="px-3 py-2">Divergência</th>
-              <th class="px-3 py-2">Status Bling</th>
-              <th v-if="tab === 'amazon' && amazonSub === 'proprio'" class="px-3 py-2" title="Pede ao Melhor Envio a suspensão da entrega (o pacote volta)">Suspensão</th>
-              <th class="px-3 py-2">Chamado</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="c in pagedRows"
-              :key="c.id"
-              class="border-t cursor-pointer"
-              :class="precisaAtencao(c) ? 'bg-red-50 hover:bg-red-100 dark:bg-red-950/40' : 'hover:bg-muted/20'"
-              @click="openEdit(c)"
-            >
-              <td class="px-3 py-2 whitespace-nowrap">{{ fmtDate(c.data) }}</td>
-              <td class="px-3 py-2 whitespace-nowrap font-medium">{{ c.pedido_bling || '—' }}</td>
-              <td class="px-3 py-2 whitespace-nowrap">{{ c.pedido_marketplace || '—' }}</td>
-              <td class="px-3 py-2 whitespace-nowrap">
-                {{ c.plataforma || '—' }}
-                <span
-                  v-if="c.envio_flex && podeVerFlex && tab !== 'flex'"
-                  class="ml-1 text-[10px] px-1.5 py-0.5 rounded border border-violet-300 bg-violet-50 font-semibold text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
-                  :title="flexSeloTitulo(c)"
-                >Flex</span>
-                <!-- O robô não conseguiu passar o pedido Flex para o .sp. -->
-                <div
-                  v-if="flexAlerta(c)"
-                  class="mt-0.5 max-w-[200px] whitespace-normal text-[11px] font-medium text-rose-700 dark:text-rose-400"
-                  :title="flexAlerta(c) || ''"
-                >sem peça em {{ flexLocal.cidade }}</div>
-              </td>
-              <td class="px-3 py-2 text-xs max-w-[240px]">
-                <template v-if="c.produtos && c.produtos.length">
-                  <div
-                    v-for="(p, pi) in c.produtos"
-                    :key="pi"
-                    class="truncate"
-                    :class="pi > 0 ? 'mt-1' : ''"
-                    :title="p.nome || ''"
-                  >
-                    {{ p.nome || '—' }}<span v-if="p.quantidade && p.quantidade > 1"> ×{{ p.quantidade }}</span>
-                  </div>
-                </template>
-                <span v-else class="text-muted-foreground">—</span>
-              </td>
-              <td class="px-3 py-2 text-xs max-w-[140px]">
-                <template v-if="c.produtos && c.produtos.length">
-                  <div
-                    v-for="(p, pi) in c.produtos"
-                    :key="pi"
-                    class="font-mono truncate"
-                    :class="pi > 0 ? 'mt-1' : ''"
-                    :title="p.sku || ''"
-                  >
-                    {{ p.sku || '—' }}
-                  </div>
-                </template>
-                <span v-else class="text-muted-foreground">—</span>
-              </td>
-              <td class="px-3 py-2 whitespace-nowrap">{{ c.conta || '—' }}</td>
-              <td class="px-3 py-2 text-muted-foreground text-xs max-w-[280px] break-words">
-                <div class="flex items-start gap-1.5">
-                  <span
-                    class="flex-1 break-words"
-                    :class="statusTooltip(c) ? 'cursor-help' : ''"
-                    :title="statusTooltip(c)"
-                  >
-                    {{ assinatura(c) || '—' }}
-                    <!-- Desde quando o status está assim (o balãozinho abre a
-                         data campo a campo). "~" = data aproximada. -->
+      <!-- Desktop: tabela + Onde agir hoje / Raio-X -->
+      <div class="hidden items-stretch gap-3 md:grid xl:grid-cols-[minmax(0,1fr)_340px]">
+        <div class="flex min-w-0 flex-col rounded-md border bg-card">
+          <div class="relative flex items-center justify-center rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+            <span>{{ tituloTabela }}</span>
+            <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">o que a plataforma diz × o que está no Bling</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehProprio ? 'min-w-[1290px]' : 'min-w-[1080px]'">
+              <colgroup>
+                <col class="w-[46px]"><col :class="ehProprio ? 'w-[112px]' : 'w-[124px]'"><col :class="ehProprio ? 'w-[70px]' : 'w-[88px]'"><col>
+                <col :class="ehProprio ? 'w-[120px]' : 'w-[170px]'"><col :class="ehProprio ? 'w-[160px]' : 'w-[210px]'">
+                <template v-if="ehProprio"><col class="w-[80px]"><col class="w-[92px]"></template>
+                <col :class="ehProprio ? 'w-[100px]' : 'w-[104px]'"><col :class="ehProprio ? 'w-[90px]' : 'w-[120px]'">
+                <col :class="ehProprio ? 'w-[110px]' : 'w-[140px]'"><col :class="ehProprio ? 'w-[80px]' : 'w-[84px]'">
+                <col v-if="ehProprio" class="w-[100px]">
+              </colgroup>
+              <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="4">Pedido</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehProprio ? 4 : 2">Plataforma</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="2">Bling</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehProprio ? 3 : 2">Caso</th>
+                </tr>
+                <tr>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold">Data</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Pedido no Bling e, embaixo, o número na plataforma">Pedido</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold">Conta</th>
+                  <th class="border-b px-1.5 py-1 text-left font-semibold">Produto</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-left font-semibold dark:border-l-slate-600" title="Status na plataforma (passe o mouse para ver campo a campo e desde quando)">Status</th>
+                  <th class="border-b px-1.5 py-1 text-left font-semibold">Localização</th>
+                  <template v-if="ehProprio">
+                    <th class="border-b px-1.5 py-1 text-center font-semibold" title="Previsão de entrega da transportadora (objeto de postagem do Bling)">Previsão</th>
+                    <th class="border-b px-1.5 py-1 text-center font-semibold" title="Data máxima de entrega da Amazon — depois dela a Amazon reembolsa o cliente">Entregar até</th>
+                  </template>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Status Bling</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold">Divergência</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Chamado</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Regra da aba Status para a combinação deste pedido">Regra</th>
+                  <th v-if="ehProprio" class="border-b px-1.5 py-1 text-center font-semibold" title="Suspensão da entrega no Melhor Envio (o pacote volta)">Suspensão</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="loading && !rows.length">
+                  <td :colspan="ehProprio ? 13 : 10" class="py-8 text-center text-muted-foreground">
+                    <RefreshCw class="mr-1.5 inline size-4 animate-spin" /> carregando…
+                  </td>
+                </tr>
+                <tr
+                  v-for="c in pagedRows"
+                  :key="c.id"
+                  class="min-h-10 cursor-pointer border-b align-middle hover:bg-muted/40"
+                  :class="[
+                    c.id === raioId ? 'bg-blue-50 shadow-[inset_3px_0_0_hsl(var(--primary))] dark:bg-blue-950/30' : '',
+                    c.id !== raioId && precisaAtencao(c) ? 'bg-red-50/70 shadow-[inset_3px_0_0_#dc2626] dark:bg-red-950/30' : '',
+                  ]"
+                  :title="precisaAtencao(c) ? 'Sem regra na aba Status para esta combinação' : undefined"
+                  @click="abrirRaio(c)"
+                >
+                  <td class="px-1.5 py-1.5 text-center text-muted-foreground" :title="fmtDate(c.data)">{{ fmtDate(c.data).slice(0, 5) }}</td>
+                  <td class="px-1.5 py-1.5 text-center">
+                    <div class="font-mono font-bold">{{ c.pedido_bling || '—' }}</div>
+                    <!-- Um clique seleciona o nº da plataforma pra copiar, sem abrir o Raio-X. -->
+                    <div class="truncate font-mono text-[10.5px] text-muted-foreground"><span class="cursor-text select-all" @click.stop>{{ c.pedido_marketplace || '' }}</span></div>
+                  </td>
+                  <td class="px-1.5 py-1.5 text-center">
+                    <div class="truncate" :title="c.conta || ''">{{ c.conta || '—' }}</div>
                     <span
-                      v-if="statusResumoData(c)"
-                      class="block text-[10px] text-muted-foreground/80 mt-0.5 whitespace-nowrap"
-                    >{{ statusResumoData(c) }}</span>
-                    <!-- Última consulta ao marketplace (o motor lê a cada 5 min
-                         mesmo sem mudança) — prova de que está automático. -->
-                    <span
-                      v-if="c.status_lido_em"
-                      class="block text-[10px] text-muted-foreground/60 whitespace-nowrap"
-                      :title="'Última consulta ao marketplace: ' + fmtDataHora(c.status_lido_em)"
-                    >lido {{ fmtDesde(c.status_lido_em) }}</span>
-                  </span>
-                  <button
-                    v-if="assinatura(c)"
-                    class="shrink-0 text-muted-foreground hover:text-foreground"
-                    title="Copiar chave"
-                    @click.stop="copiarChave(c)"
-                  >
-                    <Copy class="size-3.5" />
-                  </button>
-                  <button
-                    v-if="canEdit && isMl(c) && c.pedido_marketplace"
-                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                    title="Atualizar status do Meli"
-                    :disabled="refreshingMeli.has(c.id)"
-                    @click.stop="atualizarMeli(c)"
-                  >
-                    <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
-                  </button>
-                  <button
-                    v-if="canEdit && isShopee(c) && c.pedido_marketplace"
-                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                    title="Atualizar status da Shopee"
-                    :disabled="refreshingMeli.has(c.id)"
-                    @click.stop="atualizarShopee(c)"
-                  >
-                    <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
-                  </button>
-                  <button
-                    v-if="canEdit && isTiktok(c) && c.pedido_marketplace"
-                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                    title="Atualizar status do TikTok"
-                    :disabled="refreshingMeli.has(c.id)"
-                    @click.stop="atualizarTiktok(c)"
-                  >
-                    <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
-                  </button>
-                  <button
-                    v-if="canEdit && isAmazon(c) && c.pedido_marketplace"
-                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                    title="Atualizar status da Amazon"
-                    :disabled="refreshingMeli.has(c.id)"
-                    @click.stop="atualizarAmazon(c)"
-                  >
-                    <RefreshCw class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-spin' : ''" />
-                  </button>
-                </div>
-              </td>
-              <td class="px-3 py-2 whitespace-nowrap">
-                <div>{{ c.rastreio || '—' }}</div>
-                <div
-                  v-if="c.volta_rastreio"
-                  class="text-[11px] text-muted-foreground"
-                  title="Código do pacote da devolução (volta pra loja)"
-                >volta: {{ c.volta_rastreio }}</div>
-              </td>
-              <td class="px-3 py-2 whitespace-nowrap">
-                <div class="leading-tight">
-                  <div
-                    v-if="c.volta_localizacao"
-                    class="max-w-[280px] truncate text-xs"
-                    :class="c.volta_grave ? 'text-rose-700 dark:text-rose-400 font-medium' : ''"
-                    :title="voltaTitulo(c)"
-                  >↩ Devolução: {{ c.volta_localizacao }}</div>
-                  <div class="flex items-start gap-1.5">
-                    <!-- Envio próprio sem …BR: a cidade é só o DESTINO (endereço da
-                         Amazon), não onde o pacote está — diz isso com todas as letras. -->
-                    <span
-                      v-if="proprioSemRastreio(c) && c.localizacao"
-                      class="flex-1"
-                      :title="DESTINO_TITLE"
-                    >Destino: {{ c.localizacao }}</span>
-                    <span
-                      v-else-if="!c.volta_localizacao || idaSeparada(c)"
-                      class="flex-1"
-                      :class="c.volta_localizacao ? 'text-[11px] text-muted-foreground' : ''"
-                    >{{ c.volta_localizacao ? 'Ida: ' : '' }}{{ c.localizacao || '—' }}</span>
-                    <span v-else class="flex-1" />
-                    <!-- Consulta os Correios agora (rastreio …BR; pode gastar 1 crédito do
-                         17track). No Envio próprio ainda sem …BR, antes busca o código no Bling. -->
-                    <button
-                      v-if="canEdit && (ehCorreios(c.rastreio) || (isAmazon(c) && c.amazon_canal === 'proprio'))"
-                      class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                      :title="tituloAtualizarLocalizacao(c)"
-                      :disabled="refreshingRastreio.has(c.id)"
-                      @click.stop="atualizarLocalizacao(c)"
-                    >
-                      <RefreshCw class="size-3.5" :class="refreshingRastreio.has(c.id) ? 'animate-spin' : ''" />
-                    </button>
-                  </div>
-                  <div
-                    v-if="proprioSemRastreio(c)"
-                    class="text-[11px] text-muted-foreground"
-                    :title="DESTINO_TITLE"
-                  >
-                    {{ blingLidoResumo(c) }}
-                  </div>
-                  <!-- A segunda linha só aparece pra envio dos CORREIOS: nas
-                       outras (Full, Flex, SPX…) nunca haverá leitura física, e o
-                       selo viraria ruído em milhares de linhas. -->
-                  <template v-if="ehCorreios(c.rastreio)">
+                      v-if="c.envio_flex && podeVerFlex && tab !== 'flex'"
+                      class="rounded border border-violet-300 bg-violet-50 px-1 text-[10px] font-semibold text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
+                      :title="flexSeloTitulo(c)"
+                    >Flex</span>
+                    <div v-if="flexAlerta(c)" class="text-[10.5px] font-medium text-rose-700 dark:text-rose-400" :title="flexAlerta(c) || ''">sem peça em {{ flexLocal.cidade }}</div>
+                  </td>
+                  <td class="truncate px-1.5 py-1.5" :title="produtoTitulo(c)">{{ produtoResumo(c) }}</td>
+                  <td class="border-l border-l-slate-300 px-1.5 py-1.5 dark:border-l-slate-600" :title="statusTooltip(c) || assinatura(c)">
+                    <div class="line-clamp-2 text-[11px] leading-tight">{{ assinatura(c) || '—' }}</div>
+                    <div v-if="statusResumoData(c)" class="truncate text-[10px] text-muted-foreground">{{ statusResumoData(c) }}</div>
+                  </td>
+                  <td class="px-1.5 py-1.5">
                     <div
-                      v-if="c.localizacao_at"
-                      class="text-[11px]"
-                      :class="leituraVelha(c) ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'"
-                      :title="`Lido nos Correios em ${fmtDataHora(c.rastreio_lido_em || c.localizacao_at)} · último movimento do pacote em ${fmtDataHora(c.localizacao_at)}`"
-                    >
-                      Correios · lido {{ fmtDesde(c.rastreio_lido_em || c.localizacao_at) }}
-                    </div>
+                      v-if="c.volta_localizacao"
+                      class="truncate text-[11px]"
+                      :class="c.volta_grave ? 'font-semibold text-rose-700 dark:text-rose-400' : ''"
+                      :title="voltaTitulo(c)"
+                    >↩ {{ c.volta_localizacao }}</div>
                     <div
                       v-else
-                      class="text-[11px] text-muted-foreground"
-                      title="Este pacote ainda não tem leitura dos Correios — o que aparece acima vem do marketplace."
-                    >
-                      sem leitura dos Correios ainda
-                    </div>
-                  </template>
-                </div>
-              </td>
-              <template v-if="tab === 'amazon' && amazonSub === 'proprio'">
-                <td class="px-3 py-2 whitespace-nowrap text-xs">
-                  <span
-                    v-if="c.entregue_em"
-                    class="text-emerald-700 dark:text-emerald-400"
-                    :title="`Entrega registrada em ${fmtDataHora(c.entregue_em)}`"
-                  >entregue {{ fmtQuando(c.entregue_em) }}</span>
-                  <template v-else-if="c.previsao_correios">
-                    <span
-                      :class="previsaoVencida(c) ? 'text-rose-700 dark:text-rose-400 font-medium' : ''"
-                      :title="c.postagem_data ? `Postado em ${fmtDia(c.postagem_data)}${c.servico_envio ? ' · ' + c.servico_envio : ''}` : ''"
-                    >{{ fmtDia(c.previsao_correios) }}</span>
-                    <div v-if="previsaoVencida(c)" class="text-[11px] text-rose-700 dark:text-rose-400">previsão vencida</div>
-                  </template>
-                  <span v-else class="text-muted-foreground">—</span>
-                </td>
-                <td class="px-3 py-2 whitespace-nowrap text-xs">
-                  <template v-if="c.prazo_entrega_amazon">
-                    <span :class="prazoVencido(c) ? 'text-rose-700 dark:text-rose-400 font-medium' : ''">{{ fmtDia(c.prazo_entrega_amazon) }}</span>
+                      class="truncate text-[11px]"
+                      :title="proprioSemRastreio(c) ? DESTINO_TITLE : c.localizacao || ''"
+                    >{{ proprioSemRastreio(c) && c.localizacao ? `Destino: ${c.localizacao}` : c.localizacao || '—' }}</div>
                     <div
-                      v-if="!c.entregue_em"
-                      class="text-[11px]"
-                      :class="prazoVencido(c) ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'"
-                    >{{ prazoResumo(c) }}</div>
+                      v-if="ehCorreios(c.rastreio)"
+                      class="truncate text-[10px]"
+                      :class="leituraVelha(c) ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'"
+                    >{{ c.localizacao_at ? `Correios · lido ${fmtDesde(c.rastreio_lido_em || c.localizacao_at)}` : 'sem leitura dos Correios ainda' }}</div>
+                  </td>
+                  <template v-if="ehProprio">
+                    <td class="px-1.5 py-1.5 text-center text-[11px]">
+                      <span v-if="c.entregue_em" class="text-emerald-700 dark:text-emerald-400" :title="`Entrega registrada em ${fmtDataHora(c.entregue_em)}`">entregue {{ fmtQuando(c.entregue_em) }}</span>
+                      <span v-else-if="c.previsao_correios" :class="previsaoVencida(c) ? 'font-semibold text-rose-700 dark:text-rose-400' : ''">{{ fmtDia(c.previsao_correios).slice(0, 5) }}</span>
+                      <span v-else class="text-muted-foreground">—</span>
+                    </td>
+                    <td class="px-1.5 py-1.5 text-center text-[11px]">
+                      <template v-if="c.prazo_entrega_amazon">
+                        <div :class="prazoVencido(c) ? 'font-semibold text-rose-700 dark:text-rose-400' : ''">{{ fmtDia(c.prazo_entrega_amazon).slice(0, 5) }}</div>
+                        <div v-if="!c.entregue_em" class="text-[10px]" :class="prazoVencido(c) ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'">{{ prazoResumo(c) }}</div>
+                      </template>
+                      <span v-else class="text-muted-foreground">—</span>
+                    </td>
                   </template>
-                  <span v-else class="text-muted-foreground">—</span>
-                  <div v-if="avisosResumo(c)" class="text-[11px] text-muted-foreground whitespace-normal max-w-[220px]" :title="avisosResumo(c)">{{ avisosResumo(c) }}</div>
-                  <div
-                    v-if="(c.mensagens_cliente || []).length"
-                    class="text-[11px] text-sky-700 dark:text-sky-400 whitespace-normal max-w-[220px]"
-                    :title="mensagensResumo(c)"
+                  <td class="border-l border-l-slate-300 px-1.5 py-1.5 text-center dark:border-l-slate-600">
+                    <span v-if="c.status_bling" class="inline-block w-[92px] truncate rounded py-0.5 text-[11px] font-semibold" :class="corStatusBling(c.status_bling)" :title="c.status_bling">{{ c.status_bling }}</span>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td class="truncate px-1.5 py-1.5 text-center text-[11px]" :class="c.divergencia ? 'font-semibold text-amber-700 dark:text-amber-400' : 'text-muted-foreground'" :title="c.divergencia || ''">{{ c.divergencia || '—' }}</td>
+                  <td class="border-l border-l-slate-300 px-1.5 py-1.5 text-center text-[11px] dark:border-l-slate-600">
+                    <div
+                      v-if="chamadoAbaResumo(c)"
+                      class="line-clamp-2 leading-tight"
+                      :class="chamadoAbaResumo(c)!.tom === 'pendente' ? 'text-amber-700 dark:text-amber-400' : chamadoAbaResumo(c)!.tom === 'encerrado' ? 'text-muted-foreground' : ''"
+                      :title="chamadoAbaResumo(c)!.texto"
+                    >{{ chamadoAbaResumo(c)!.texto }}</div>
+                    <div v-else class="truncate font-mono" :title="c.chamado || ''">{{ c.chamado || '—' }}</div>
+                    <div v-if="chamadoAutoAviso(c)" class="truncate text-[10px] text-amber-700 dark:text-amber-400" :title="chamadoAutoAviso(c) || ''">robô: {{ chamadoAutoAviso(c) }}</div>
+                  </td>
+                  <td class="px-1.5 py-1.5 text-center">
+                    <span v-if="precisaAtencao(c)" class="rounded bg-amber-100 px-1.5 py-0.5 text-[10.5px] font-semibold text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">sem regra</span>
+                    <span v-else-if="c.acao_monitorar" class="rounded bg-blue-100 px-1.5 py-0.5 text-[10.5px] font-semibold text-blue-800 dark:bg-blue-950/50 dark:text-blue-300">monitorar</span>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td v-if="ehProprio" class="truncate px-1.5 py-1.5 text-center text-[11px]" :title="c.suspensao_detalhe || ''">
+                    <span
+                      v-if="suspensaoResumo(c)"
+                      :class="c.suspensao_status === 'solicitada' ? 'text-emerald-700 dark:text-emerald-400' : c.suspensao_status === 'falhou' ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'"
+                    >{{ suspensaoResumo(c) }}</span>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
+                </tr>
+                <tr v-if="!loading && filteredRows.length === 0">
+                  <td :colspan="ehProprio ? 13 : 10" class="px-3 py-6 text-center text-muted-foreground">
+                    {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="mt-auto border-t px-3 py-1.5 text-center text-[11px] text-muted-foreground">
+            <template v-if="tab === 'flex'">Pedidos Flex saem de {{ flexLocal.cidade }} (estoque .{{ flexLocal.lote }}) e também aparecem nas abas Mercado Livre e Shopee, com o selo Flex. </template>
+            Clique na linha abre o Raio-X do pedido à direita (rastreio, SKU, histórico do status, chamado e as ações). Vermelho = combinação sem regra na aba Status.
+          </div>
+        </div>
+
+        <div class="flex min-w-0 flex-col gap-3">
+          <!-- Raio-X da linha clicada -->
+          <div v-if="raioRow" class="flex min-w-0 flex-1 flex-col rounded-md border bg-card">
+            <div class="relative flex items-center justify-center rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+              <span>Raio-X · {{ raioRow.pedido_bling || raioRow.pedido_marketplace || 'pedido' }}</span>
+              <button type="button" class="absolute right-2 rounded p-0.5 text-slate-300 hover:text-white" title="fechar o Raio-X" @click="raioId = null">
+                <X class="size-3.5" />
+              </button>
+            </div>
+            <div class="flex-1 space-y-3 p-3 text-xs">
+              <div>
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <b class="text-[13px]">{{ raioRow.conta || '—' }}</b>
+                  <span class="text-muted-foreground">· {{ raioRow.plataforma || '—' }} · {{ fmtDate(raioRow.data) }}</span>
+                  <span
+                    v-if="raioRow.envio_flex && podeVerFlex"
+                    class="rounded border border-violet-300 bg-violet-50 px-1 text-[10px] font-semibold text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300"
+                    :title="flexSeloTitulo(raioRow)"
+                  >Flex</span>
+                </div>
+                <div class="mt-0.5 text-muted-foreground">Pedido na plataforma: <span class="select-all font-mono text-foreground">{{ raioRow.pedido_marketplace || '—' }}</span></div>
+                <div v-if="raioRow.cliente_nome" class="text-muted-foreground">Cliente: <span class="text-foreground">{{ raioRow.cliente_nome }}</span></div>
+                <div v-if="flexAlerta(raioRow)" class="mt-0.5 font-medium text-rose-700 dark:text-rose-400">Flex sem peça em {{ flexLocal.cidade }}: {{ flexAlerta(raioRow) }}</div>
+              </div>
+
+              <section>
+                <h3 class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Produtos</h3>
+                <div v-for="(p, pi) in raioRow.produtos || []" :key="pi" class="flex gap-2">
+                  <span class="min-w-0 flex-1">{{ p.nome || '—' }}<span v-if="p.quantidade && p.quantidade > 1"> ×{{ p.quantidade }}</span></span>
+                  <span class="shrink-0 font-mono text-muted-foreground">{{ p.sku || '—' }}</span>
+                </div>
+                <div v-if="!(raioRow.produtos || []).length" class="text-muted-foreground">—</div>
+              </section>
+
+              <section>
+                <h3 class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Status na plataforma</h3>
+                <div class="whitespace-pre-line">{{ statusTooltip(raioRow) || assinatura(raioRow) || '—' }}</div>
+                <div v-if="raioRow.status_lido_em" class="text-[11px] text-muted-foreground" :title="'Última consulta ao marketplace: ' + fmtDataHora(raioRow.status_lido_em)">lido {{ fmtDesde(raioRow.status_lido_em) }}</div>
+                <div class="mt-1 flex flex-wrap gap-1.5">
+                  <button v-if="assinatura(raioRow)" type="button" :class="RAIO_BTN" title="Copiar a chave (Status Plataforma) para colar na aba Status" @click="copiarChave(raioRow)">
+                    <Copy class="size-3" /> Copiar chave
+                  </button>
+                  <button
+                    v-if="podeAtualizarStatus(raioRow)"
+                    type="button"
+                    :class="RAIO_BTN"
+                    title="Consulta agora o status na plataforma"
+                    :disabled="refreshingMeli.has(raioRow.id)"
+                    @click="atualizarStatusPlataforma(raioRow)"
                   >
+                    <RefreshCw class="size-3" :class="refreshingMeli.has(raioRow.id) ? 'animate-spin' : ''" /> Atualizar status
+                  </button>
+                </div>
+              </section>
+
+              <section>
+                <h3 class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Envio</h3>
+                <div
+                  v-if="raioRow.volta_localizacao || raioRow.volta_rastreio"
+                  :class="raioRow.volta_grave ? 'font-semibold text-rose-700 dark:text-rose-400' : ''"
+                  :title="voltaTitulo(raioRow)"
+                >↩ Devolução: {{ voltaTexto(raioRow) }}</div>
+                <div><span class="text-muted-foreground">{{ raioRow.volta_rastreio || raioRow.volta_localizacao ? 'Rastreio (ida)' : 'Rastreio' }}:</span> <span class="select-all font-mono">{{ raioRow.rastreio || '—' }}</span></div>
+                <div v-if="!raioRow.volta_localizacao || idaSeparada(raioRow)">
+                  <span class="text-muted-foreground">{{ proprioSemRastreio(raioRow) ? 'Destino' : raioRow.volta_localizacao ? 'Localização (ida)' : 'Localização' }}:</span>
+                  {{ raioRow.localizacao || '—' }}
+                </div>
+                <div
+                  v-if="ehCorreios(raioRow.rastreio)"
+                  class="text-[11px]"
+                  :class="leituraVelha(raioRow) ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'"
+                >{{ raioRow.localizacao_at ? `Correios · lido ${fmtDesde(raioRow.rastreio_lido_em || raioRow.localizacao_at)} · último movimento ${fmtDataHora(raioRow.localizacao_at)}` : 'sem leitura dos Correios ainda' }}</div>
+                <div v-if="proprioSemRastreio(raioRow)" class="text-[11px] text-muted-foreground" :title="DESTINO_TITLE">{{ blingLidoResumo(raioRow) }}</div>
+                <template v-if="isAmazon(raioRow) && raioRow.amazon_canal === 'proprio'">
+                  <div>
+                    <span class="text-muted-foreground">Previsão da transportadora:&nbsp;</span>
+                    <span v-if="raioRow.entregue_em" class="text-emerald-700 dark:text-emerald-400">entregue {{ fmtQuando(raioRow.entregue_em) }}</span>
+                    <span v-else :class="previsaoVencida(raioRow) ? 'font-semibold text-rose-700 dark:text-rose-400' : ''">{{ fmtDia(raioRow.previsao_correios) || '—' }}</span>
+                  </div>
+                  <div>
+                    <span class="text-muted-foreground">Entregar até (Amazon):&nbsp;</span>
+                    <span :class="prazoVencido(raioRow) ? 'font-semibold text-rose-700 dark:text-rose-400' : ''">{{ fmtDia(raioRow.prazo_entrega_amazon) || '—' }}</span>
+                    <span v-if="raioRow.prazo_entrega_amazon && !raioRow.entregue_em" class="text-muted-foreground"> · {{ prazoResumo(raioRow) }}</span>
+                  </div>
+                  <div v-if="avisosResumo(raioRow)" class="text-[11px] text-muted-foreground">{{ avisosResumo(raioRow) }}</div>
+                  <div v-if="(raioRow.mensagens_cliente || []).length" class="text-sky-700 dark:text-sky-400">
                     ✉ cliente:
-                    <span v-for="(m, i) in c.mensagens_cliente || []" :key="m.evento">
+                    <span v-for="(m, i) in raioRow.mensagens_cliente || []" :key="m.evento">
                       <span v-if="i" aria-hidden="true">· </span>{{ m.evento_label }}
                       <span class="whitespace-nowrap">{{ m.enviado_em ? fmtQuando(m.enviado_em) : '(falhou)' }}
-                        <!-- Reenvia essa mesma mensagem ao comprador (pergunta antes). -->
                         <button
                           v-if="canEdit && canInformarAmazon"
                           type="button"
-                          class="align-text-bottom px-0.5 text-sky-700/70 hover:text-sky-900 dark:text-sky-400/70 dark:hover:text-sky-200 disabled:opacity-50"
+                          class="align-text-bottom px-0.5 text-sky-700/70 hover:text-sky-900 disabled:opacity-50 dark:text-sky-400/70 dark:hover:text-sky-200"
                           :title="`Enviar de novo ao comprador: ${m.evento_label}`"
                           :aria-label="`Enviar de novo ao comprador: ${m.evento_label}`"
-                          :disabled="reenviandoMensagem.has(chaveMensagem(c, m.evento))"
-                          @click.stop="reenviarMensagemCliente(c, m)"
+                          :disabled="reenviandoMensagem.has(chaveMensagem(raioRow, m.evento))"
+                          @click="reenviarMensagemCliente(raioRow, m)"
                         >
-                          <RefreshCw class="size-3.5 inline" :class="reenviandoMensagem.has(chaveMensagem(c, m.evento)) ? 'animate-spin' : ''" />
+                          <RefreshCw class="inline size-3" :class="reenviandoMensagem.has(chaveMensagem(raioRow, m.evento)) ? 'animate-spin' : ''" />
                         </button>
                       </span>
                     </span>
                   </div>
-                </td>
-              </template>
-              <td class="px-3 py-2 text-xs max-w-[280px] break-words">
-                <span v-if="c.divergencia" class="text-amber-700 dark:text-amber-400" :title="c.divergencia">{{ c.divergencia }}</span>
-                <span v-else class="text-muted-foreground">—</span>
-              </td>
-              <td class="px-3 py-2 whitespace-nowrap">
-                <div class="flex items-center gap-1.5">
-                  <span v-if="c.status_bling" class="text-xs px-2 py-0.5 rounded border border-primary/50">{{ c.status_bling }}</span>
-                  <span v-else class="text-muted-foreground">—</span>
+                  <div
+                    v-if="suspensaoResumo(raioRow)"
+                    :class="raioRow.suspensao_status === 'solicitada' ? 'text-emerald-700 dark:text-emerald-400' : raioRow.suspensao_status === 'falhou' ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'"
+                    :title="raioRow.suspensao_detalhe || ''"
+                  >Suspensão: {{ suspensaoResumo(raioRow) }}</div>
+                </template>
+                <div class="mt-1 flex flex-wrap gap-1.5">
                   <button
-                    v-if="canEdit && c.pedido_bling && temStatusBlingAcao(c)"
-                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                    title="Alterar a situação do pedido no Bling conforme a regra da aba Status"
-                    :disabled="aplicandoStatus.has(c.id)"
-                    @click.stop="aplicarStatusBling(c)"
+                    v-if="canEdit && (ehCorreios(raioRow.rastreio) || (isAmazon(raioRow) && raioRow.amazon_canal === 'proprio'))"
+                    type="button"
+                    :class="RAIO_BTN"
+                    :title="tituloAtualizarLocalizacao(raioRow)"
+                    :disabled="refreshingRastreio.has(raioRow.id)"
+                    @click="atualizarLocalizacao(raioRow)"
                   >
-                    <ArrowLeftRight class="size-3.5" :class="aplicandoStatus.has(c.id) ? 'animate-pulse' : ''" />
+                    <RefreshCw class="size-3" :class="refreshingRastreio.has(raioRow.id) ? 'animate-spin' : ''" /> Atualizar localização
                   </button>
                   <button
-                    v-if="canEdit && c.pedido_bling && c.acao_resumo.includes('Mensagem Bling')"
-                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                    title="Aplicar Mensagem Bling nas Observações do pedido"
-                    :disabled="aplicandoBling.has(c.id)"
-                    @click.stop="aplicarMensagemBling(c)"
+                    v-if="podeSuspender(raioRow)"
+                    type="button"
+                    :class="[RAIO_BTN, 'border-rose-300 text-rose-700 hover:bg-rose-50 dark:border-rose-700 dark:text-rose-400 dark:hover:bg-rose-950/40']"
+                    title="Pede ao robô que solicite no Melhor Envio a suspensão da entrega (o pacote volta). Irreversível; o frete não é devolvido."
+                    :disabled="suspendendo.has(raioRow.id)"
+                    @click="suspenderEntrega(raioRow)"
                   >
-                    <NotebookPen class="size-3.5" :class="aplicandoBling.has(c.id) ? 'animate-pulse' : ''" />
-                  </button>
-                  <button
-                    v-if="canEdit && c.pedido_marketplace && c.acao_resumo.includes('Mensagem Threema')"
-                    class="shrink-0 text-muted-foreground hover:text-foreground disabled:opacity-50"
-                    title="Enviar aviso Threema deste pedido (com pedido e loja)"
-                    :disabled="refreshingMeli.has(c.id)"
-                    @click.stop="enviarThreemaPedido(c)"
-                  >
-                    <MessageCircle class="size-3.5" :class="refreshingMeli.has(c.id) ? 'animate-pulse' : ''" />
+                    <Ban class="size-3" :class="suspendendo.has(raioRow.id) ? 'animate-pulse' : ''" />
+                    {{ raioRow.suspensao_status === 'falhou' ? 'Suspender: tentar de novo' : 'Suspender entrega' }}
                   </button>
                 </div>
-              </td>
-              <td v-if="tab === 'amazon' && amazonSub === 'proprio'" class="px-3 py-2 text-xs">
-                <button
-                  v-if="podeSuspender(c)"
-                  class="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-700 dark:text-rose-400 dark:hover:bg-rose-950/40 whitespace-nowrap"
-                  title="Pede ao robô que solicite no Melhor Envio a suspensão da entrega (o pacote volta). Irreversível; o frete não é devolvido."
-                  :disabled="suspendendo.has(c.id)"
-                  @click.stop="suspenderEntrega(c)"
-                >
-                  <Ban class="size-3" :class="suspendendo.has(c.id) ? 'animate-pulse' : ''" />
-                  {{ c.suspensao_status === 'falhou' ? 'tentar de novo' : 'Suspender entrega' }}
-                </button>
+              </section>
+
+              <section>
+                <h3 class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Bling</h3>
+                <span class="inline-block rounded px-1.5 py-0.5 text-[11px] font-semibold" :class="corStatusBling(raioRow.status_bling)">{{ raioRow.status_bling || 'sem status' }}</span>
+                <div v-if="raioRow.divergencia" class="mt-1 text-amber-700 dark:text-amber-400">Divergência: {{ raioRow.divergencia }}</div>
+                <div class="mt-1">
+                  <span class="text-muted-foreground">Regra da aba Status:&nbsp;</span>
+                  <template v-if="precisaAtencao(raioRow)"><b class="text-amber-700 dark:text-amber-400">nenhuma</b> — combinação nova; decidir na aba Status.</template>
+                  <template v-else-if="raioRow.acao_resumo.length">{{ raioRow.acao_resumo.join(' · ') }}</template>
+                  <template v-else>—</template>
+                  <span v-if="raioRow.acao_monitorar" class="ml-1 rounded bg-blue-100 px-1 text-[10.5px] font-semibold text-blue-800 dark:bg-blue-950/50 dark:text-blue-300">monitorar</span>
+                </div>
+                <div class="mt-1 flex flex-wrap gap-1.5">
+                  <button
+                    v-if="canEdit && raioRow.pedido_bling && temStatusBlingAcao(raioRow)"
+                    type="button"
+                    :class="RAIO_BTN"
+                    title="Alterar a situação do pedido no Bling conforme a regra da aba Status"
+                    :disabled="aplicandoStatus.has(raioRow.id)"
+                    @click="aplicarStatusBling(raioRow)"
+                  >
+                    <ArrowLeftRight class="size-3" :class="aplicandoStatus.has(raioRow.id) ? 'animate-pulse' : ''" /> Aplicar status no Bling
+                  </button>
+                  <button
+                    v-if="canEdit && raioRow.pedido_bling && raioRow.acao_resumo.includes('Mensagem Bling')"
+                    type="button"
+                    :class="RAIO_BTN"
+                    title="Aplicar Mensagem Bling nas Observações do pedido"
+                    :disabled="aplicandoBling.has(raioRow.id)"
+                    @click="aplicarMensagemBling(raioRow)"
+                  >
+                    <NotebookPen class="size-3" :class="aplicandoBling.has(raioRow.id) ? 'animate-pulse' : ''" /> Mensagem Bling
+                  </button>
+                  <button
+                    v-if="canEdit && raioRow.pedido_marketplace && raioRow.acao_resumo.includes('Mensagem Threema')"
+                    type="button"
+                    :class="RAIO_BTN"
+                    title="Enviar aviso Threema deste pedido (com pedido e loja)"
+                    :disabled="refreshingMeli.has(raioRow.id)"
+                    @click="enviarThreemaPedido(raioRow)"
+                  >
+                    <MessageCircle class="size-3" :class="refreshingMeli.has(raioRow.id) ? 'animate-pulse' : ''" /> Avisar no Threema
+                  </button>
+                </div>
+              </section>
+
+              <section>
+                <h3 class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Chamado</h3>
                 <div
-                  v-if="suspensaoResumo(c)"
-                  class="text-[11px] whitespace-normal max-w-[200px]"
-                  :class="c.suspensao_status === 'solicitada' ? 'text-emerald-700 dark:text-emerald-400' : c.suspensao_status === 'falhou' ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'"
-                  :title="c.suspensao_detalhe || ''"
-                >{{ suspensaoResumo(c) }}</div>
-                <span v-if="!podeSuspender(c) && !suspensaoResumo(c)" class="text-muted-foreground">—</span>
-              </td>
-              <td class="px-3 py-2 whitespace-nowrap">
-                <div class="flex items-center gap-1.5">
-                  <span
-                    v-if="chamadoAbaResumo(c)"
-                    class="flex-1 max-w-[260px] whitespace-normal text-[12px] leading-tight"
-                    :class="chamadoAbaResumo(c)!.tom === 'pendente' ? 'text-amber-700 dark:text-amber-400' : chamadoAbaResumo(c)!.tom === 'encerrado' ? 'text-muted-foreground' : ''"
-                  >{{ chamadoAbaResumo(c)!.texto }}</span>
-                  <!-- Mesma largura máxima do resumo acima: sem ela o texto ocupava a
-                       célula inteira e empurrava o ↗ pra borda direita da coluna —
-                       "sumia" nas linhas com o chamado preenchido aqui (288184, 18/09). -->
-                  <span v-else class="flex-1 max-w-[260px] truncate" :title="c.chamado || undefined">{{ c.chamado || '—' }}</span>
-                  <!-- Ticket na aba Chamados: abre a aba já filtrada pelo pedido,
-                       em nova guia do navegador (Vinicius 17/09). -->
+                  v-if="chamadoAbaResumo(raioRow)"
+                  :class="chamadoAbaResumo(raioRow)!.tom === 'pendente' ? 'text-amber-700 dark:text-amber-400' : chamadoAbaResumo(raioRow)!.tom === 'encerrado' ? 'text-muted-foreground' : ''"
+                >{{ chamadoAbaResumo(raioRow)!.texto }}</div>
+                <div v-if="raioRow.chamado"><span class="text-muted-foreground">Protocolo:</span> <span class="select-all font-mono">{{ raioRow.chamado }}</span></div>
+                <div v-if="!raioRow.chamado && !chamadoAbaResumo(raioRow)" class="text-muted-foreground">sem chamado</div>
+                <div
+                  v-if="chamadoAutoAviso(raioRow)"
+                  class="text-[11px]"
+                  :class="raioRow.chamado_auto_erro === 'encaminhado_ao_robo' ? 'text-amber-700 dark:text-amber-400' : 'text-rose-700 dark:text-rose-400'"
+                >{{ chamadoAutoAviso(raioRow) }}</div>
+                <div class="mt-1 flex flex-wrap gap-1.5">
                   <a
-                    v-if="c.chamado_aba && c.pedido_bling"
-                    :href="`/chamados?search=${encodeURIComponent(c.pedido_bling)}`"
+                    v-if="raioRow.chamado_aba && raioRow.pedido_bling"
+                    :href="`/chamados?search=${encodeURIComponent(raioRow.pedido_bling)}`"
                     target="_blank"
                     rel="noopener"
-                    class="shrink-0 inline-flex items-center justify-center rounded border p-0.5 text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                    :class="RAIO_BTN"
                     title="Ver na aba Chamados (abre em nova guia)"
-                    @click.stop
                   >
-                    <ExternalLink class="size-3" />
+                    <ExternalLink class="size-3" /> Ver na aba Chamados
                   </a>
                   <button
-                    v-if="canEdit && isMl(c) && c.pedido_marketplace && c.acao_resumo.includes('Abrir chamado')"
-                    class="shrink-0 inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded border hover:bg-muted/40 disabled:opacity-50"
+                    v-if="canEdit && isMl(raioRow) && raioRow.pedido_marketplace && raioRow.acao_resumo.includes('Abrir chamado')"
+                    type="button"
+                    :class="RAIO_BTN"
                     title="Enviar chamado direto pro Mercado Livre"
-                    :disabled="sendingChamado.has(c.id)"
-                    @click.stop="enviarChamado(c)"
+                    :disabled="sendingChamado.has(raioRow.id)"
+                    @click="enviarChamado(raioRow)"
                   >
-                    <Send class="size-3" :class="sendingChamado.has(c.id) ? 'animate-pulse' : ''" />
-                    enviar
+                    <Send class="size-3" :class="sendingChamado.has(raioRow.id) ? 'animate-pulse' : ''" /> Enviar chamado ao ML
                   </button>
                 </div>
-                <div
-                  v-if="chamadoAutoAviso(c)"
-                  class="mt-0.5 max-w-[260px] whitespace-normal text-[11px] leading-tight"
-                  :class="c.chamado_auto_erro === 'encaminhado_ao_robo' ? 'text-amber-700 dark:text-amber-400' : 'text-rose-700 dark:text-rose-400'"
-                  :title="chamadoAutoAviso(c) || undefined"
-                >
-                  {{ chamadoAutoAviso(c) }}
-                </div>
-              </td>
-            </tr>
-            <tr v-if="!loading && filteredRows.length === 0">
-              <td :colspan="tab === 'amazon' && amazonSub === 'proprio' ? 16 : 13" class="px-3 py-6 text-center text-muted-foreground">
-                {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+              </section>
 
+              <section v-if="raioRow.observacao">
+                <h3 class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Observação</h3>
+                <div class="whitespace-pre-line">{{ raioRow.observacao }}</div>
+              </section>
+            </div>
+            <div class="flex items-center gap-1.5 border-t px-3 py-2">
+              <button type="button" :class="RAIO_BTN" @click="openEdit(raioRow)">
+                <NotebookPen class="size-3" /> {{ canEdit ? 'Editar caso' : 'Ver caso' }}
+              </button>
+              <button type="button" class="ml-auto text-[11px] text-muted-foreground underline" @click="raioId = null">fechar</button>
+            </div>
+          </div>
+
+          <template v-else>
+            <div class="flex min-w-0 flex-col rounded-md border bg-card">
+              <div class="rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-center text-xs font-semibold text-white">Onde agir hoje</div>
+              <div class="space-y-1.5 p-2">
+                <div v-for="a in agirItens" :key="a.chave" class="grid grid-cols-[12px_minmax(0,1fr)_58px] items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs">
+                  <span class="size-[7px] rounded-full" :class="a.dot" />
+                  <div class="min-w-0">
+                    <div class="truncate font-bold" :title="a.titulo">{{ a.titulo }}</div>
+                    <div class="truncate text-[11px] text-muted-foreground" :title="a.detalhe">{{ a.detalhe }}</div>
+                  </div>
+                  <button
+                    type="button"
+                    class="h-6 rounded-md border text-[11px] font-semibold hover:bg-muted"
+                    :class="a.cartao && cartaoFiltro === a.cartao ? 'ring-2 ring-primary' : ''"
+                    @click="agir(a)"
+                  >{{ a.acao }}</button>
+                </div>
+                <div v-if="!agirItens.length" class="rounded-md border px-2.5 py-3 text-center text-xs text-muted-foreground">nada pra agir agora</div>
+              </div>
+            </div>
+            <div class="flex min-w-0 flex-1 flex-col rounded-md border bg-card">
+              <div class="rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-center text-xs font-semibold text-white">Raio-X</div>
+              <div class="px-3 py-6 text-center text-xs text-muted-foreground">
+                clique num pedido pra ver o Raio-X:<br />rastreio de ida e de volta, SKU, histórico do status, chamado e as ações
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
       <!-- Mobile cards -->
       <div class="md:hidden space-y-2">
         <div
