@@ -2098,7 +2098,8 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(
     await db.commit()
 
     # extrato parado há mais de 36 h: vira "extrato não lido" e pede pra sincronizar
-    loja.ultimo_extrato_em = datetime.now(UTC) - timedelta(days=3)
+    # (11/11: só no dia que a última leitura não cobriu — a de 12/10 não cobre o 13/10)
+    loja.ultimo_extrato_em = datetime(2026, 10, 12, 12, tzinfo=UTC)
     await db.commit()
     r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-13"})
     linha = r.json()["lojas"][0]
@@ -2126,7 +2127,7 @@ async def test_resumo_le_o_dia_de_ontem_e_monta_onde_agir(
     r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-12"})
     assert f"erro: {erro_extrato}" in r.json()["lojas"][0]["problemas_dia"]
     loja.ultimo_erro = None
-    loja.ultimo_extrato_em = datetime.now(UTC) - timedelta(days=3)
+    loja.ultimo_extrato_em = datetime(2026, 10, 11, 12, tzinfo=UTC)
     await db.commit()
     # um dia sem movimento e sem leitura: "extrato não lido"; com leitura: "sem movimento"
     r = await client.get("/api/conciliacao/resumo", params={"dia": "2026-10-12"})

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import json
 import math
 import re
 import time
@@ -3517,10 +3518,44 @@ async def reabrir_dia(
 # e os dias fechados.
 
 _ETAPAS_PENDENTES = ("pendencia", "reaberto")
+# 11/11: vale também pra loja por arquivo — o robô baixa o CSV todo dia às 06:00 (eram
+# 7 dias, da época do envio à mão, e a KFA ficou 2 dias sem leitura contando "fechado")
 _ATRASO_EXTRATO = timedelta(hours=36)
 # fuso como literal: com parâmetro ligado o Postgres não acha timezone(varchar, timestamptz)
 _FUSO_SQL = literal_column("'America/Sao_Paulo'")
-_ATRASO_UPLOAD = timedelta(days=7)  # loja por arquivo: alguém envia o CSV de vez em quando
+
+
+def _extrato_nao_lido(loja: ConciliacaoLoja, dia: date, agora: datetime) -> bool:
+    """O extrato de `dia` ainda falta? (11/11, Vinicius, KFA Amazon: o robô do CSV falhou
+    2 dias com a Amazon pedindo login, o dia aparecia "sem movimento", contava como
+    fechado e ninguém foi avisado.) Falta quando a loja nunca foi lida, a última leitura
+    tem mais de 36 h ou a última tentativa do robô falhou — mas só nos dias que a última
+    leitura não cobriu inteiros: dia anterior à data dela já foi lido e segue "sem
+    movimento" (senão todo dia parado do mês virava "extrato não lido")."""
+    ultimo = loja.ultimo_extrato_em
+    if ultimo is None:
+        return True
+    if dia < ultimo.astimezone(_BRT).date():
+        return False
+    return agora - ultimo > _ATRASO_EXTRATO or (loja.ultimo_erro or "").startswith("robô:")
+
+
+def _erro_legivel(erro: str | None) -> str:
+    """O erro da loja pra tela. O do robô chega como JSON ('robô: {"ok":false,"reason":
+    "needs_manual_login: a Amazon pediu login…"}'): sai só o motivo, e o login pedido
+    diz o que fazer."""
+    if not (erro or "").startswith("robô:"):
+        return erro or ""
+    resto = (erro or "")[len("robô:") :].strip()
+    try:
+        motivo = str(json.loads(resto).get("reason") or resto)
+    except (ValueError, AttributeError):
+        motivo = resto  # cortado em 200 ou texto puro
+    if motivo.startswith("needs_manual_login"):
+        motivo = (
+            motivo.split(":", 1)[1].strip() if ":" in motivo else "a plataforma pediu login"
+        ) + " — alguém precisa entrar no perfil e digitar o código"
+    return f"robô: {motivo}"
 
 
 def _mes_range(mes: str | None) -> tuple[date, date]:
@@ -4304,8 +4339,7 @@ async def _resumo_dos_dias(
                 continue
             linhas = linhas_por.get((loja.integration_id, d))
             if not linhas:
-                limite = _ATRASO_UPLOAD if loja.modo_extrato == "upload" else _ATRASO_EXTRATO
-                atrasado = loja.ultimo_extrato_em is None or agora - loja.ultimo_extrato_em > limite
+                atrasado = _extrato_nao_lido(loja, d, agora)
                 plat = getattr(loja.platform, "value", str(loja.platform))
                 if atrasado:
                     pendentes.append({"conta": loja.conta, "motivo": "extrato não lido"})
@@ -4437,10 +4471,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         mes["ajustes_meses_anteriores"], mes["ajustes_qtd"] = await _ajustes_anteriores(
             session, loja, mes_ini, dia + timedelta(days=1)
         )
-        limite_atraso = _ATRASO_UPLOAD if loja.modo_extrato == "upload" else _ATRASO_EXTRATO
-        extrato_atrasado = dia >= loja.inicio and (
-            loja.ultimo_extrato_em is None or agora - loja.ultimo_extrato_em > limite_atraso
-        )
+        extrato_atrasado = dia >= loja.inicio and _extrato_nao_lido(loja, dia, agora)
         saldo_bate = totais["diferenca"] is not None and abs(totais["diferenca"]) <= 0.05
         sem_movimento = totais["linhas"] == 0
         nao_pagos = [m for m in movs if aguardando_repasse(m)]
@@ -4509,7 +4540,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
         if devolvidas:
             problemas.append(f"{devolvidas} venda(s) devolvida(s)")
         if loja.ultimo_erro:
-            problemas.append(f"erro: {loja.ultimo_erro[:80]}")
+            problemas.append(f"erro: {_erro_legivel(loja.ultimo_erro)[:120]}")
         # Só o dia (16/10, Vinicius): o que trava o dia e o que aconteceu nele
         problemas_dia: list[str] = []
         if contagem["pendente"]:
@@ -4522,7 +4553,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
             problemas_dia.append(fatura_problema)
         if loja.ultimo_erro and not (loja.ultimo_erro.startswith("fatura:") and fatura_problema):
             # 26/10 (Vinicius): inteiro — cortado em 80 sumia o "de quanto/que dia" do extrato
-            problemas_dia.append(f"erro: {loja.ultimo_erro}")
+            problemas_dia.append(f"erro: {_erro_legivel(loja.ultimo_erro)}")
         if fechado and not fechado.fechado_em and fechado.reaberto_motivo:
             problemas_dia.append(
                 f"dia reaberto por {fechado.reaberto_por}: {fechado.reaberto_motivo}"
@@ -4639,7 +4670,7 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                         if loja.ultimo_extrato_em
                         else "nunca lido"
                     )
-                    + (f" · {loja.ultimo_erro[:80]}" if loja.ultimo_erro else ""),
+                    + (f" · {_erro_legivel(loja.ultimo_erro)[:140]}" if loja.ultimo_erro else ""),
                     "acao": "sincronizar",
                     "dia": dia.isoformat(),
                 }

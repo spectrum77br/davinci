@@ -1622,3 +1622,56 @@ async def test_retido_cortado_nao_vira_saldo(monkeypatch):
     with pytest.raises(RuntimeError, match="cortada"):
         await ca.ler_saldo_da_amazon(cliente, AGORA)
 
+
+# --- 11/11: robô do CSV falhou = "extrato não lido" no mesmo dia --------------------
+
+
+async def test_robo_do_csv_falhou_vira_extrato_nao_lido_e_avisa(db, make_user, auth_as, client):
+    """KFA Amazon 10–11/11: o robô falhou 2 dias (a Amazon pediu login no AdsPower), o dia
+    aparecia "sem movimento", contava como fechado e o "Onde agir" não dizia nada — loja
+    por arquivo só ficava atrasada depois de 7 dias."""
+    from datetime import time
+    from zoneinfo import ZoneInfo
+
+    brt = ZoneInfo("America/Sao_Paulo")
+    hoje = datetime.now(brt).date()
+    loja = await _loja_amazon(db, make_user, inicio=hoje - timedelta(days=10))
+    loja.modo_extrato = "upload"
+    loja.ultimo_extrato_em = datetime.combine(hoje, time(0, 0, 1), tzinfo=brt)  # lido hoje
+    await db.commit()
+    auth_as(await make_user(permissions={"conciliacao": {"view": True}}))
+
+    async def kia(dia: date) -> tuple[dict, list[dict]]:
+        corpo = (
+            await client.get("/api/conciliacao/resumo", params={"dia": dia.isoformat()})
+        ).json()
+        return next(x for x in corpo["lojas"] if x["conta"] == "kia"), corpo["agir"]
+
+    linha, agir = await kia(hoje)
+    assert linha["dia"]["status"] == "sem_movimento"
+    assert linha["leituras"]["extrato_atrasado"] is False
+    loja.ultimo_erro = (
+        'robô: {"ok":false,"reason":"needs_manual_login: a Amazon pediu login/código '
+        'no perfil do AdsPower"}'
+    )
+    await db.commit()
+    linha, agir = await kia(hoje)
+    assert linha["dia"]["status"] == "extrato_nao_lido"
+    assert linha["leituras"]["extrato_atrasado"] is True
+    (cartao,) = [a for a in agir if a["titulo"] == "kia · extrato não lido"]
+    assert cartao["gravidade"] == "bad" and cartao["acao"] == "sincronizar"
+    assert (
+        "robô: a Amazon pediu login/código no perfil do AdsPower — alguém precisa entrar"
+        in cartao["detalhe"]
+    )
+    assert any(p.startswith("erro: robô: a Amazon pediu") for p in linha["problemas_dia"])
+    # o dia que a última leitura já cobriu continua "sem movimento"
+    linha, _ = await kia(hoje - timedelta(days=1))
+    assert linha["dia"]["status"] == "sem_movimento"
+    # loja por arquivo parada há 2 dias, sem erro, também avisa (eram 7 dias)
+    loja.ultimo_erro = None
+    loja.ultimo_extrato_em = datetime.now(UTC) - timedelta(days=2)
+    await db.commit()
+    linha, _ = await kia(hoje)
+    assert linha["leituras"]["extrato_atrasado"] is True
+    assert linha["dia"]["status"] == "extrato_nao_lido"
