@@ -419,8 +419,26 @@ const statusBlings = computed(() =>
 // o outro (mesma régua do resumo do Chamados).
 type CartaoFiltro =
   | 'all' | 'sem_regra' | 'monitorar' | 'problemas' | 'chamado'
-  | 'prazo' | 'previsao' | 'divergencia' | 'correios_parado'
+  | 'prazo' | 'previsao' | 'divergencia' | 'correios_parado' | 'problemas_sem_chamado'
 const cartaoFiltro = ref<CartaoFiltro>('all')
+// Chamado aberto = o ticket da aba Chamados ainda não encerrado (o backend manda
+// o aberto mais recente; sem aberto, o encerrado) — inclui o "robô abrindo".
+// Sem ticket na aba, vale o protocolo anotado na linha.
+function temChamadoAberto(c: Logistica): boolean {
+  if (c.chamado_aba) return !c.chamado_aba.resolvido
+  return !!(c.chamado || '').trim()
+}
+// Vinicius, 11/11/2026: "coisa que está no status Problemas e não tem chamado
+// não tem ninguém olhando, tá parado, perdido" — vai no topo do Onde agir hoje.
+function problemaSemChamado(c: Logistica): boolean {
+  return normKey(c.status_bling) === 'problemas' && !temChamadoAberto(c)
+}
+// "A acompanhar" esconde o que chegou ao fim da cadeia (resolvido) sem pedir
+// monitoramento — MENOS o Problemas sem chamado aberto: em 11/11 eram 4 do ML
+// (chamado encerrado, Bling ainda em Problemas) e 1 do TikTok que ninguém via.
+function escondido(c: Logistica): boolean {
+  return c.acao_resolvido && !c.acao_monitorar && !problemaSemChamado(c)
+}
 const ehProprio = computed(() => tab.value === 'amazon' && amazonSub.value === 'proprio')
 function noCartao(c: Logistica, k: CartaoFiltro): boolean {
   switch (k) {
@@ -432,6 +450,7 @@ function noCartao(c: Logistica, k: CartaoFiltro): boolean {
     case 'previsao': return previsaoVencida(c)
     case 'divergencia': return !!c.divergencia
     case 'correios_parado': return ehCorreios(c.rastreio) && !c.entregue_em && leituraVelha(c)
+    case 'problemas_sem_chamado': return problemaSemChamado(c)
     default: return true
   }
 }
@@ -448,7 +467,7 @@ const baseRows = computed(() => {
     // Painel de pendências: some quando já chegou ao fim da cadeia de status no
     // Bling (resolvido) E a regra casada não pede monitoramento — nada a fazer.
     // "Mostrar tudo" ligado ignora essa regra e exibe também os escondidos.
-    if (!mostrarTudo.value && c.acao_resolvido && !c.acao_monitorar) return false
+    if (!mostrarTudo.value && escondido(c)) return false
     // Aba Amazon: só a sub-aba escolhida (DBA / Envio próprio / sem classificação).
     if (tab.value === 'amazon' && amazonSubDe(c) !== amazonSub.value) return false
     // Aba Flex: filtro Plataforma (mesmos rótulos que o backend aceita).
@@ -560,11 +579,28 @@ const RAIO_BTN =
 
 // "Onde agir hoje": o que é um a um (ocorrência grave, Flex sem peça,
 // suspensão que falhou) abre o Raio-X; o resto vira grupo e filtra o cartão.
-type AgirItem = { chave: string; dot: string; titulo: string; detalhe: string; acao: string; cartao?: CartaoFiltro; linha?: Logistica }
+type AgirItem = {
+  chave: string; dot: string; titulo: string; detalhe: string; acao: string
+  cartao?: CartaoFiltro; linha?: Logistica; dica?: string; grave?: boolean
+}
 const agirItens = computed<AgirItem[]>(() => {
   const base = baseRows.value
   const out: AgirItem[] = []
   const pedidoDe = (c: Logistica) => c.pedido_bling || c.pedido_marketplace || 'pedido'
+  // Primeiro de tudo: Problemas sem chamado aberto (ninguém olhando).
+  const semChamado = base.filter(problemaSemChamado)
+  if (semChamado.length) {
+    out.push({
+      chave: 'g-problemas_sem_chamado',
+      dot: 'bg-red-600',
+      titulo: `Problemas sem chamado · ${semChamado.length}`,
+      detalhe: `ninguém olhando · ${semChamado.slice(0, 3).map(pedidoDe).join(' · ')}${semChamado.length > 3 ? ' …' : ''}`,
+      dica: `Status Bling "Problemas" e nenhum chamado aberto:\n${semChamado.map((c) => `${pedidoDe(c)} · ${c.conta || '—'}`).join('\n')}`,
+      acao: 'Ver',
+      cartao: 'problemas_sem_chamado',
+      grave: true,
+    })
+  }
   for (const c of base.filter((r) => r.volta_grave).slice(0, 3)) {
     out.push({ chave: `grave-${c.id}`, dot: 'bg-red-600', titulo: `${pedidoDe(c)} · ${c.volta_localizacao || 'ocorrência grave'}`, detalhe: `${c.conta || '—'} · pacote da devolução`, acao: 'Abrir', linha: c })
   }
@@ -584,7 +620,8 @@ const agirItens = computed<AgirItem[]>(() => {
     grupo('previsao', 'bg-amber-500', 'Previsão da transportadora vencida', lista)
   }
   grupo('sem_regra', 'bg-amber-500', 'Sem regra', () => 'combinação nova: decidir na aba Status')
-  grupo('problemas', 'bg-red-600', 'Problemas no Bling', lista)
+  // Problemas COM chamado aberto não entram: alguém já está no caso (aba
+  // Chamados) — o cartão "Problemas no Bling" continua mostrando todos.
   grupo('divergencia', 'bg-amber-500', 'Divergência', () => 'a plataforma e o rastreio dizem coisas diferentes')
   grupo('correios_parado', 'bg-amber-500', 'Correios parados', () => `sem movimento há mais de ${LEITURA_VELHA_DIAS} dias`)
   grupo('monitorar', 'bg-blue-600', 'Monitorar', () => 'a regra pede acompanhar')
@@ -624,7 +661,7 @@ function limparFiltros() {
 const amazonCounts = computed(() => {
   const n: Record<AmazonSub, number> = { dba: 0, proprio: 0 }
   for (const c of rows.value) {
-    if (!mostrarTudo.value && c.acao_resolvido && !c.acao_monitorar) continue
+    if (!mostrarTudo.value && escondido(c)) continue
     n[amazonSubDe(c)]++
   }
   return n
@@ -633,7 +670,7 @@ const amazonCounts = computed(() => {
 const flexPedidosCount = computed(() =>
   tab.value !== 'flex'
     ? 0
-    : rows.value.filter((c) => mostrarTudo.value || !c.acao_resolvido || c.acao_monitorar).length,
+    : rows.value.filter((c) => mostrarTudo.value || !escondido(c)).length,
 )
 
 // ---- Flex: avisos que vêm da tela de anúncios (02/10/2026) ----
@@ -2756,7 +2793,8 @@ async function aplicarStatusBling(c: Logistica) {
                       :class="chamadoAbaResumo(c)!.tom === 'pendente' ? 'text-amber-700 dark:text-amber-400' : chamadoAbaResumo(c)!.tom === 'encerrado' ? 'text-muted-foreground' : ''"
                       :title="chamadoAbaResumo(c)!.texto"
                     >{{ chamadoAbaResumo(c)!.texto }}</div>
-                    <div v-else class="truncate font-mono" :title="c.chamado || ''">{{ c.chamado || '—' }}</div>
+                    <div v-else-if="c.chamado || !problemaSemChamado(c)" class="truncate font-mono" :title="c.chamado || ''">{{ c.chamado || '—' }}</div>
+                    <div v-if="problemaSemChamado(c)" class="text-[10.5px] font-bold text-red-600 dark:text-red-400" title="Status Bling Problemas e nenhum chamado aberto: ninguém está olhando este pedido">sem chamado aberto</div>
                     <div v-if="chamadoAutoAviso(c)" class="truncate text-[10px] text-amber-700 dark:text-amber-400" :title="chamadoAutoAviso(c) || ''">robô: {{ chamadoAutoAviso(c) }}</div>
                   </td>
                   <td class="px-1.5 py-1.5 text-center">
@@ -2974,6 +3012,9 @@ async function aplicarStatusBling(c: Logistica) {
                 >{{ chamadoAbaResumo(raioRow)!.texto }}</div>
                 <div v-if="raioRow.chamado"><span class="text-muted-foreground">Protocolo:</span> <span class="select-all font-mono">{{ raioRow.chamado }}</span></div>
                 <div v-if="!raioRow.chamado && !chamadoAbaResumo(raioRow)" class="text-muted-foreground">sem chamado</div>
+                <div v-if="problemaSemChamado(raioRow)" class="mt-1 rounded border border-red-300 bg-red-50 px-2 py-1 font-semibold text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
+                  Status Problemas e nenhum chamado aberto — ninguém está olhando este pedido.
+                </div>
                 <div
                   v-if="chamadoAutoAviso(raioRow)"
                   class="text-[11px]"
@@ -3020,11 +3061,16 @@ async function aplicarStatusBling(c: Logistica) {
             <div class="flex min-w-0 flex-col rounded-md border bg-card">
               <div class="rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-center text-xs font-semibold text-white">Onde agir hoje</div>
               <div class="space-y-1.5 p-2">
-                <div v-for="a in agirItens" :key="a.chave" class="grid grid-cols-[12px_minmax(0,1fr)_58px] items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs">
+                <div
+                  v-for="a in agirItens"
+                  :key="a.chave"
+                  class="grid grid-cols-[12px_minmax(0,1fr)_58px] items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs"
+                  :class="a.grave ? 'border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-950/40' : ''"
+                >
                   <span class="size-[7px] rounded-full" :class="a.dot" />
-                  <div class="min-w-0">
-                    <div class="truncate font-bold" :title="a.titulo">{{ a.titulo }}</div>
-                    <div class="truncate text-[11px] text-muted-foreground" :title="a.detalhe">{{ a.detalhe }}</div>
+                  <div class="min-w-0" :title="a.dica || undefined">
+                    <div class="truncate font-bold" :class="a.grave ? 'text-red-700 dark:text-red-300' : ''" :title="a.dica ? undefined : a.titulo">{{ a.titulo }}</div>
+                    <div class="truncate text-[11px] text-muted-foreground" :title="a.dica ? undefined : a.detalhe">{{ a.detalhe }}</div>
                   </div>
                   <button
                     type="button"
