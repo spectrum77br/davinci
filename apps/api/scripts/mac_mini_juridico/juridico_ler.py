@@ -216,8 +216,15 @@ def ler_jusbrasil(pid, procs, origem):
                     parou = bloqueio(pag)
                     if parou:
                         break
-                    links = jan.execute_script(JS_LINKS) or []
-                    link = next((u for u in links if p["numero"] in re.sub(r"\D", "", u)), "")
+                    # o resultado da busca aparece depois da página (11/11: o Caso 009 "não achou" na
+                    # 1ª leitura, logo depois de abrir o perfil) — tenta até 3 vezes
+                    link = ""
+                    for _ in range(3):
+                        links = jan.execute_script(JS_LINKS) or []
+                        link = next((u for u in links if p["numero"] in re.sub(r"\D", "", u)), "")
+                        if link:
+                            break
+                        time.sleep(random.uniform(5, 8))
                     if not link:
                         log("processo %s: não achei no Jusbrasil" % p["id"])
                         conta["falhas"] += 1
