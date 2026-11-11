@@ -394,6 +394,37 @@ async def test_chamado_da_equipe_continua_funcionando(
             assert r.status_code == 200, (quem, letra, r.text)
 
 
+async def test_equipe_nao_encerra_marca_encerrar_e_quem_ve_tudo_conclui(
+    client: AsyncClient, auth_as: Callable[[User | None], None], cenario: dict, db: AsyncSession
+):
+    """11/11/2026 (Vinicius): "somente eu consigo encerrar. Eles vão acompanhar tudo,
+    resolver e colocar como Encerrar. Daí eu confiro e encerro." Israel no chamado
+    dela (I, sem pedido): marca Encerrar, não conclui (a linha fica aberta), reabre;
+    quem não tem equipe e o admin concluem. `pode_encerrar` esconde o resolver."""
+    i = cenario["ids"]["I"]
+    concluir = {"resolvido": True, "valor_recuperado": "12.5"}
+
+    auth_as(cenario["israel"])
+    assert (await _lista(client))["pode_encerrar"] is False
+    r = await client.post(f"/api/chamados/{i}/revisao", json={"tipo": "encerrar"})
+    assert r.status_code == 200 and r.json()["itens"][0]["revisao_estado"] == "encerrar", r.text
+    r = await client.post(f"/api/chamados/{i}/resolver", json=concluir)
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"]["code"] == "chamado_encerrar_so_sem_equipe"
+    ch = await db.get(Chamado, i, populate_existing=True)
+    assert ch is not None and ch.resolvido is False and ch.valor_recuperado is None
+
+    for quem in ("sem_equipe", "admin"):
+        auth_as(cenario[quem])
+        assert (await _lista(client))["pode_encerrar"] is True, quem
+        r = await client.post(f"/api/chamados/{i}/resolver", json=concluir)
+        assert r.status_code == 200 and r.json()["resolvido"] is True, (quem, r.text)
+        # Reabrir continua liberado pra equipe.
+        auth_as(cenario["israel"])
+        r = await client.post(f"/api/chamados/{i}/resolver", json={"resolvido": False})
+        assert r.status_code == 200 and r.json()["resolvido"] is False, (quem, r.text)
+
+
 # ─── Abrir chamado e trocar o pedido ─────────────────────────────────────
 
 

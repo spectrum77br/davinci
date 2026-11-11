@@ -16,6 +16,11 @@ Fechar dia (Cairo, 06/11/2026): "fica ruim ... vai parecer sempre que eu não co
 Quem sai antes do fim do dia dá o dia por encerrado e ele fica verde, mas os pendentes
 seguem na conta: "vai ser fechado mas vai aparecer ali 6 pendentes". Por isso a foto
 não congela; fechar só registra quem e quando.
+
+Encerrar (Vinicius, 11/11/2026): "eles vão acompanhar tudo, resolver e colocar como
+encerrar. Daí eu confiro e encerro". A equipe não conclui mais o chamado (o
+`/resolver` barra quem tem equipe); marca Encerrar e a marca fica até alguém
+concluir ou trocar a marca, sem sumir na virada do dia.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from app.services.chamados import SAO_PAULO
 CONFERIDO = "conferido"
 REVISAR = "revisar"
 FIXO = "fixo"
+ENCERRAR = "encerrar"
 # Só no registro (`chamado_revisoes`): a pessoa tirou a marca.
 LIMPO = "limpo"
 
@@ -62,7 +68,10 @@ def estado_da_revisao(
     ultima_resposta_direcao: str | None,
     hoje: date,
 ) -> str:
-    """Prazo vence antes de "respondeu": chegou a data, a linha volta de qualquer jeito."""
+    """Prazo vence antes de "respondeu": chegou a data, a linha volta de qualquer jeito.
+    Encerrar não vence: espera quem conclui."""
+    if ch.revisao_tipo == ENCERRAR:
+        return ENCERRAR
     if ch.revisao_tipo in (CONFERIDO, REVISAR):
         return ch.revisao_tipo if ch.revisao_dia == hoje else ESTADO_FALTA
     if ch.revisao_tipo != FIXO or ch.revisao_ate is None:
@@ -117,6 +126,7 @@ def resumir_dia(linhas: Iterable[LinhaDoDia]) -> dict:
         CONFERIDO: 0,
         REVISAR: 0,
         FIXO: 0,
+        ENCERRAR: 0,
         ESTADO_FALTA: 0,
         "prazos": 0,
         "por_status": {},
@@ -157,6 +167,7 @@ async def gravar_foto(session: AsyncSession, dia: date, resumo: dict) -> None:
         "conferido": resumo[CONFERIDO],
         "revisar": resumo[REVISAR],
         "fixo": resumo[FIXO],
+        "encerrar": resumo[ENCERRAR],
         "falta": resumo[ESTADO_FALTA],
         "prazos": resumo["prazos"],
         "por_status": resumo["por_status"],

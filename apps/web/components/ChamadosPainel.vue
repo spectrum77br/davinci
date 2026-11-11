@@ -211,7 +211,7 @@ type ChamadoRow = {
   ultima_acao_resumo?: string | null
   anexos_auto: Anexo[]
 } & RevisaoCampos
-type Page = { items: ChamadoRow[]; total: number; limit: number; offset: number; plataformas: string[]; contas: string[]; plataforma_totais?: Record<string, number> }
+type Page = { items: ChamadoRow[]; total: number; limit: number; offset: number; plataformas: string[]; contas: string[]; plataforma_totais?: Record<string, number>; pode_encerrar?: boolean }
 type Lookup = {
   data: string | null
   pedido_bling: string | null
@@ -285,6 +285,9 @@ const podeAvisoIa = computed(() => {
 })
 const avisoIaCfgOpen = ref(false)
 const canDelete = useCan('chamados', 'delete')
+// 11/11/2026 (Vinicius): "somente eu consigo encerrar". Vem da lista (`pode_encerrar`:
+// edita e vê todas as lojas); a equipe marca Encerrar na Revisão e não vê o resolver.
+const podeEncerrar = ref(false)
 const canConciliacao = useCan('conciliacao', 'view')
 
 const items = ref<ChamadoRow[]>([])
@@ -405,7 +408,8 @@ const revisaoResumo = computed(() => {
   const revisar = n(['revisar'])
   const conferido = n(['conferido'])
   const fixo = n(['fixo'])
-  return { prazos: n(REVISAO_PRECISA_VER), falta: n(['falta']), revisar, conferido, fixo, feitos: revisar + conferido + fixo, total: items.value.length }
+  const encerrar = n(['encerrar'])
+  return { prazos: n(REVISAO_PRECISA_VER), falta: n(['falta']), revisar, conferido, fixo, encerrar, feitos: revisar + conferido + fixo + encerrar, total: items.value.length }
 })
 const revisaoPct = computed(() => (revisaoResumo.value.total ? (revisaoResumo.value.feitos / revisaoResumo.value.total) * 100 : 0))
 const revisaoPills = computed(() => {
@@ -414,6 +418,7 @@ const revisaoPills = computed(() => {
     { key: 'prazos', n: r.prazos, label: r.prazos === 1 ? 'prazo pra ver' : 'prazos pra ver', dot: REVISAO_DOT.prazo_vencido },
     { key: 'falta', n: r.falta, label: 'falta revisar', dot: REVISAO_DOT.falta },
     { key: 'revisar', n: r.revisar, label: 'revisar', dot: REVISAO_DOT.revisar },
+    { key: 'encerrar', n: r.encerrar, label: 'pra encerrar', dot: REVISAO_DOT.encerrar },
     { key: 'conferido', n: r.conferido, label: 'conferido', dot: REVISAO_DOT.conferido },
     { key: 'fixo', n: r.fixo, label: 'fixo com data', dot: REVISAO_DOT.fixo },
   ]
@@ -445,7 +450,11 @@ const agirItens = computed<AgirItem[]>(() => {
     { chave: 'aguard_plataforma', titulo: `Aguard. Plataforma · ${faltam('aguard_plataforma')} sem revisão hoje`, detalhe: 'ver se a plataforma respondeu', dot: 'bg-sky-600', acao: 'Ver', status: 'aguard_plataforma', revisao: 'falta' },
     { chave: 'analise_robo', titulo: `Análise Robô · ${faltam('analise_robo')} sem revisão hoje`, detalhe: 'ver se o robô agiu', dot: 'bg-indigo-600', acao: 'Ver', status: 'analise_robo', revisao: 'falta' },
   ]
-  const contagem: Record<string, number> = { revisar: revisaoResumo.value.revisar }
+  // 11/11: o que a equipe deu por resolvido vem logo depois dos prazos pra quem conclui.
+  if (podeEncerrar.value) {
+    grupos.unshift({ chave: 'encerrar', titulo: `Encerrar · ${revisaoResumo.value.encerrar} ${revisaoResumo.value.encerrar === 1 ? 'marcado' : 'marcados'} pela equipe`, detalhe: 'conferir e encerrar com lucro/prejuízo', dot: REVISAO_DOT.encerrar, acao: 'Ver', status: 'all', revisao: 'encerrar' })
+  }
+  const contagem: Record<string, number> = { revisar: revisaoResumo.value.revisar, encerrar: revisaoResumo.value.encerrar }
   return [...prazos, ...grupos.filter((g) => (g.chave in contagem ? contagem[g.chave] : faltam(g.chave)) > 0)]
 })
 const fixosItens = computed(() =>
@@ -656,6 +665,8 @@ const ERROS: Record<string, string> = {
   chamado_valor_obrigatorio: 'informe o valor do chamado (lucro ou prejuízo) antes de resolver',
   // 19/09 (Vinicius): com pedido Bling, a nova situação é obrigatória ao resolver.
   chamado_situacao_obrigatoria: 'escolha a nova situação no Bling',
+  // 11/11 (Vinicius): a equipe não conclui; marca Encerrar e quem vê todas as lojas conclui.
+  chamado_encerrar_so_sem_equipe: 'quem tem equipe não encerra: marque Encerrar na coluna Revisão',
   // 19/09: instrução não entra em chamado Concluído — a pessoa reabre pela aba antes.
   chamado_concluido: 'chamado concluído — reabra pela aba pra instruir o robô',
   chamado_mensagem_abertura: 'a abertura do chamado não pode sair do histórico — sem ela o sistema para de acompanhar',
@@ -858,6 +869,7 @@ async function load() {
     plataformas.value = res.plataformas
     plataformaTotais.value = res.plataforma_totais || {}
     contas.value = res.contas || []
+    podeEncerrar.value = !!res.pode_encerrar
   } catch (e: any) {
     error.value = apiError(e)
   } finally {
@@ -2395,6 +2407,7 @@ async function confirmarExcluir() {
           :row="raioRow"
           :can-edit="canEdit"
           :can-delete="canDelete"
+          :pode-encerrar="podeEncerrar"
           :busy="busy.has(raioRow.id)"
           :origem="origemLabel(raioRow.origem)"
           :status-label="statusInfo(raioRow).label"
@@ -2864,7 +2877,8 @@ async function confirmarExcluir() {
               <span v-if="hist.erro" class="text-xs text-red-500">{{ hist.erro }}</span>
               <!-- 19/09 (Vinicius): resolver sem sair do histórico — abre a MESMA janela de
                    resolver por cima; ao confirmar, a linha sai dos abertos e este modal fecha. -->
-              <Button size="sm" variant="outline" class="ml-auto" :disabled="!canEdit || busy.has(hist.row.id)" title="marcar como resolvido (lucro/prejuízo + situação no Bling)" @click="openResolver(hist.row)">
+              <span v-if="!podeEncerrar" class="ml-auto" />
+              <Button v-else size="sm" variant="outline" class="ml-auto" :disabled="!canEdit || busy.has(hist.row.id)" title="marcar como resolvido (lucro/prejuízo + situação no Bling)" @click="openResolver(hist.row)">
                 <CheckCircle2 class="size-4 mr-1.5" />
                 Resolver
               </Button>

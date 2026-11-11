@@ -731,6 +731,7 @@ async def dias_da_revisao(
                 "conferido": foto.conferido,
                 "revisar": foto.revisar,
                 "fixo": foto.fixo,
+                "encerrar": foto.encerrar,
                 "falta": foto.falta,
                 "prazos": foto.prazos,
                 "por_status": foto.por_status,
@@ -1001,6 +1002,7 @@ async def list_chamados(
         plataformas=plataformas,
         contas=contas,
         plataforma_totais=plataforma_totais,
+        pode_encerrar=equipe is None and _pode(user, "chamados", "edit"),
     )
 
 
@@ -1547,8 +1549,21 @@ async def resolver(
     Resolvido / Perdimento) é OBRIGATÓRIA quando o chamado tem `pedido_bling` —
     Vinicius 19/09: a janela mostra "status atual do Bling e o que vai trocar,
     obrigatório" (422 `chamado_situacao_obrigatoria`); chamado sem pedido no
-    Bling não tem o que trocar, continua opcional. Reabrir não exige nada."""
+    Bling não tem o que trocar, continua opcional. Reabrir não exige nada.
+
+    11/11/2026 (Vinicius): "somente eu consigo encerrar". Quem tem equipe (Londres,
+    Israel, Marrocos) não conclui: marca Encerrar na Revisão e quem vê todas as
+    lojas confere e conclui (403 `chamado_encerrar_so_sem_equipe`). Reabrir segue
+    livre."""
     ch = await _get_da_equipe(session, user, chamado_id)
+    if body.resolvido and await _clausula_do_usuario(session, user) is not None:
+        raise HTTPException(
+            403,
+            detail={
+                "code": "chamado_encerrar_so_sem_equipe",
+                "message": "Quem tem equipe não encerra: marque Encerrar na coluna Revisão.",
+            },
+        )
     if body.resolvido and body.valor_recuperado is None:
         raise HTTPException(422, detail={"code": "chamado_valor_obrigatorio"})
     if body.resolvido and (ch.pedido_bling or "").strip() and not body.situacao:

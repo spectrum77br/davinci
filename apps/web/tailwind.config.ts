@@ -8,6 +8,8 @@ export default {
     './layouts/**/*.vue',
     './pages/**/*.vue',
     './plugins/**/*.{js,ts}',
+    // 11/11/2026: cores que só existem em lib/ (ex.: bolinha Encerrar da Revisão).
+    './lib/**/*.ts',
     './app.vue',
     './error.vue',
   ],

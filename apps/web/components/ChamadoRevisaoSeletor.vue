@@ -111,6 +111,12 @@ function fixar() {
             Fixar até uma data…
             <span class="ml-auto text-[10.5px] font-normal text-muted-foreground">volta na data</span>
           </button>
+          <!-- 11/11/2026: a equipe resolveu; fica marcado até alguém concluir. -->
+          <button type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs font-medium hover:bg-muted" @click="escolher('encerrar')">
+            <span class="size-[7px] shrink-0 rounded-full" :class="REVISAO_DOT.encerrar" />
+            Encerrar
+            <span class="ml-auto text-[10.5px] font-normal text-muted-foreground">fica até encerrar</span>
+          </button>
           <template v-if="revisao.revisao_tipo">
             <div class="my-1 border-t" />
             <button type="button" class="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-muted-foreground hover:bg-muted" @click="escolher(null)">

@@ -32,7 +32,7 @@ function semana(dia: string): string {
   return SEMANA[new Date(`${dia}T12:00:00`).getDay()] || ''
 }
 function revisados(d: RevisaoDia): number {
-  return d.conferido + d.revisar + d.fixo
+  return d.conferido + d.revisar + d.fixo + (d.encerrar || 0)
 }
 function pendentes(d: RevisaoDia): number {
   return d.falta + d.prazos

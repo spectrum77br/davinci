@@ -143,8 +143,8 @@ class ChamadoOut(BaseModel):
     juridico_link: str | None = None
     juridico_enviados: list[str] = []  # IDs Threema que receberam (CSV no banco)
     # Revisão do dia (05/11/2026): a marca gravada e `revisao_estado`, o que a linha
-    # mostra HOJE (falta | conferido | revisar | fixo | prazo_hoje | prazo_vencido |
-    # respondeu) — ver `services/chamados_revisao.estado_da_revisao`.
+    # mostra HOJE (falta | conferido | revisar | fixo | encerrar | prazo_hoje |
+    # prazo_vencido | respondeu) — ver `services/chamados_revisao.estado_da_revisao`.
     revisao_tipo: str | None = None
     revisao_dia: date | None = None
     revisao_ate: date | None = None
@@ -158,7 +158,7 @@ class RevisaoIn(BaseModel):
     """Marca da coluna Revisão. `tipo` nulo tira a marca; `fixo` exige data futura
     e motivo (conferido no POST /{id}/revisao, que devolve o código de erro)."""
 
-    tipo: Literal["conferido", "revisar", "fixo"] | None = None
+    tipo: Literal["conferido", "revisar", "fixo", "encerrar"] | None = None
     ate: date | None = None
     motivo: str | None = None
 
@@ -187,6 +187,7 @@ class RevisaoDiaOut(BaseModel):
     conferido: int = 0
     revisar: int = 0
     fixo: int = 0
+    encerrar: int = 0
     falta: int = 0
     prazos: int = 0
     por_status: dict[str, int] = Field(default_factory=dict)
@@ -320,6 +321,9 @@ class ChamadoPage(BaseModel):
     # filtros aplicados — o filtro de plataforma fica de fora, senão a aba
     # escolhida zerava as outras.
     plataforma_totais: dict[str, int] = Field(default_factory=dict)
+    # 11/11/2026 (Vinicius): só quem vê todas as lojas conclui o chamado; a equipe
+    # marca Encerrar na Revisão. A tela esconde o botão de resolver sem isto.
+    pode_encerrar: bool = False
 
 
 class ChamadoLookupOut(BaseModel):

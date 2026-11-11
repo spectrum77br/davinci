@@ -8,7 +8,7 @@ import importlib.util
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, text
@@ -53,6 +53,16 @@ def test_fixo_fica_ate_a_data_e_depois_avisa():
     assert _estado(ch, hoje=date(2026, 11, 24)) == "fixo"
     assert _estado(ch, hoje=date(2026, 11, 25)) == "prazo_hoje"
     assert _estado(ch, hoje=date(2026, 11, 26)) == "prazo_vencido"
+
+
+def test_encerrar_nao_some_na_virada_nem_cai_com_resposta():
+    """11/11 (Vinicius): a equipe marca Encerrar e espera ele conferir e concluir."""
+    marcado = datetime(2026, 11, 5, 12, tzinfo=UTC)
+    ch = _ch(revisao_tipo="encerrar", revisao_dia=HOJE, revisao_at=marcado)
+    assert _estado(ch) == "encerrar"
+    assert _estado(ch, hoje=HOJE + timedelta(days=6)) == "encerrar"
+    depois = marcado + timedelta(hours=1)
+    assert _estado(ch, at=depois, direcao="recebida") == "encerrar"
 
 
 def test_plataforma_respondeu_depois_da_marca_derruba_o_fixo():
@@ -457,6 +467,8 @@ def test_resumo_do_dia_separa_falta_de_prazo():
         Linha("conferido"),
         Linha("revisar"),
         Linha("fixo"),
+        Linha("encerrar"),
+        Linha("encerrar", "encerrado"),
         Linha("falta"),
         Linha("falta", "analise_humano"),
         Linha("prazo_vencido"),
@@ -464,6 +476,7 @@ def test_resumo_do_dia_separa_falta_de_prazo():
     ]
     r = rev.resumir_dia(linhas)
     assert (r["conferido"], r["revisar"], r["fixo"], r["falta"], r["prazos"]) == (1, 1, 1, 2, 2)
+    assert r["encerrar"] == 2
     assert r["por_status"] == {"aguard_plataforma": 1, "analise_humano": 1}
     assert len(r["faltaram"]) == 4
 
@@ -613,3 +626,54 @@ async def test_migration_fecha_05_11_na_ultima_marca_do_cairo(db, make_user):
     # Rodar de novo não troca quem já fechou.
     conn = await db.connection()
     assert await conn.run_sync(lambda c: m._fechar_05_11(c, schema)) == 0
+
+
+# --- Encerrar (Vinicius 11/11/2026) --------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_marcar_encerrar_conta_como_revisado_e_vai_pra_foto(client, make_user, auth_as, db):
+    """"eles vão acompanhar tudo, resolver e colocar como Encerrar. Daí eu confiro e
+    encerro": a marca vale pro caso, fica no registro e entra na foto do dia."""
+    from app.routers.chamados import fotografar_revisao
+
+    auth_as(await _usuario(make_user, db))
+    ch = await _chamado(client)
+    await _chamado(client, pedido_bling="301909")
+
+    r = await client.post(f"/api/chamados/{ch['id']}/revisao", json={"tipo": "encerrar"})
+    assert r.status_code == 200, r.text
+    item = r.json()["itens"][0]
+    assert (item["revisao_estado"], item["revisao_tipo"]) == ("encerrar", "encerrar")
+    assert item["revisao_por_nome"] == "cairo sa"
+    assert item["revisao_ate"] is None and item["revisao_motivo"] is None
+
+    registro = (
+        await db.execute(select(ChamadoRevisao).where(ChamadoRevisao.chamado_id == item["id"]))
+    ).scalar_one()
+    assert registro.tipo == "encerrar"
+
+    await fotografar_revisao(db)
+    await db.commit()
+    foto = (await db.execute(select(ChamadoRevisaoDia))).scalar_one()
+    await db.refresh(foto)
+    assert (foto.encerrar, foto.falta) == (1, 1)
+    dia = (await _dias(client))["dias"][0]
+    assert (dia["encerrar"], dia["falta"]) == (1, 1)
+
+
+@pytest.mark.asyncio
+async def test_encerrar_marcado_ontem_segue_amanha(client, make_user, auth_as, db):
+    """Conferido de ontem volta pra "falta"; Encerrar de ontem continua Encerrar."""
+    auth_as(await make_user(role="user", permissions=PERM))
+    ontem = rev.hoje_sp() - timedelta(days=1)
+    for tipo, pedido in (("encerrar", "301908"), ("conferido", "301909")):
+        ch = await _chamado(client, pedido_bling=pedido)
+        linha = await db.get(Chamado, UUID(ch["id"]))
+        linha.revisao_tipo, linha.revisao_dia = tipo, ontem
+    await db.commit()
+    estados = {
+        i["pedido_bling"]: i["revisao_estado"]
+        for i in (await client.get("/api/chamados")).json()["items"]
+    }
+    assert estados == {"301908": "encerrar", "301909": "falta"}

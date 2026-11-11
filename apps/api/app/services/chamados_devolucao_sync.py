@@ -1248,12 +1248,18 @@ def _lembrete_txt(ch: Chamado, desde: datetime) -> str:
 
 def _fora_do_fixo(hoje):
     """Fixo com data (Revisão do painel) é a pessoa dizendo "até tal dia não precisa
-    olhar": sem lembrete até a data chegar."""
+    olhar": sem lembrete até a data chegar. Encerrar (11/11/2026) é a equipe dizendo
+    que acabou e só falta concluir: sem lembrete enquanto a marca durar."""
     return or_(
         Chamado.revisao_tipo.is_(None),
-        Chamado.revisao_tipo != "fixo",
-        Chamado.revisao_ate.is_(None),
-        Chamado.revisao_ate <= hoje,
+        and_(
+            Chamado.revisao_tipo != "encerrar",
+            or_(
+                Chamado.revisao_tipo != "fixo",
+                Chamado.revisao_ate.is_(None),
+                Chamado.revisao_ate <= hoje,
+            ),
+        ),
     )
 
 

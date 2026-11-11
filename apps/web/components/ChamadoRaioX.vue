@@ -30,6 +30,8 @@ const props = defineProps<{
   row: Linha
   canEdit: boolean
   canDelete: boolean
+  // 11/11/2026 (Vinicius): só quem vê todas as lojas conclui; a equipe marca Encerrar.
+  podeEncerrar: boolean
   busy: boolean
   origem: string
   statusLabel: string
@@ -187,9 +189,10 @@ async function enviarInstrucao() {
           </label>
         </div>
         <div class="mt-1.5 flex items-center justify-center gap-1.5">
-          <button v-if="!row.resolvido" type="button" class="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 font-semibold text-primary-foreground disabled:opacity-40" :disabled="!canEdit || busy" @click="emit('resolver')">
+          <button v-if="!row.resolvido && podeEncerrar" type="button" class="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 font-semibold text-primary-foreground disabled:opacity-40" :disabled="!canEdit || busy" @click="emit('resolver')">
             <CheckCircle2 class="size-3.5" /> resolver
           </button>
+          <span v-else-if="!row.resolvido" class="text-[11px] text-muted-foreground">pra encerrar, marque Encerrar na Revisão</span>
           <button v-else type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 font-semibold hover:bg-muted disabled:opacity-40" :disabled="!canEdit || busy" @click="emit('reabrir')">
             <Undo2 class="size-3.5" /> reabrir
           </button>

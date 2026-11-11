@@ -171,7 +171,7 @@ class Chamado(Base, TimestampMixin):
 class ChamadoRevisao(Base, TimestampMixin):
     """Registro de cada marca da coluna Revisão (05/11/2026): as colunas `revisao_*`
     do chamado guardam só a de agora; aqui fica quem marcou o quê em cada dia.
-    `tipo` = conferido | revisar | fixo | limpo (a pessoa tirou) | convertido
+    `tipo` = conferido | revisar | fixo | encerrar (11/11) | limpo (a pessoa tirou) | convertido
     (anotação da Observação virou marca na migration 0451 — `observacao_antes`
     guarda o texto original)."""
 
@@ -210,6 +210,8 @@ class ChamadoRevisaoDia(Base, TimestampMixin):
     conferido: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     revisar: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     fixo: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Marcados Encerrar pela equipe, esperando quem conclui (11/11/2026, migration 0465).
+    encerrar: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     falta: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     prazos: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     por_status: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)

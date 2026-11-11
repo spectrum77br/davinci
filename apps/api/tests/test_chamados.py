@@ -2143,6 +2143,11 @@ async def test_lembrete_vale_pra_quem_espera_a_primeira_resposta(db):
     )
     resolvido = await caso("300005", analise_em=agora - timedelta(days=4), resolvido=True)
     humano = await caso("300006", analise_em=agora - timedelta(days=4), txt="Parei no captcha → precisa de humano")
+    # 11/11: Encerrar = a equipe deu por resolvido, só falta concluir; sem lembrete.
+    encerrar = await caso(
+        "300008", analise_em=agora - timedelta(days=4),
+        revisao_tipo="encerrar", revisao_dia=hoje - timedelta(days=2),
+    )
     respondeu = await caso("300007", analise_em=agora - timedelta(days=4))
     db.add(ChamadoMensagem(
         chamado_id=respondeu.id, direcao="recebida", tipo="resposta", status="registrada",
@@ -2157,7 +2162,7 @@ async def test_lembrete_vale_pra_quem_espera_a_primeira_resposta(db):
     ).scalars().all()
     assert {m.chamado_id for m in instr} == {esperando.id, fixo_venceu.id, conferido.id}
     assert not {m.chamado_id for m in instr} & {
-        recente.id, fixo.id, resolvido.id, humano.id, respondeu.id
+        recente.id, fixo.id, resolvido.id, humano.id, respondeu.id, encerrar.id
     }
     txt = next(m.texto for m in instr if m.chamado_id == esperando.id)
     assert txt.startswith("Lembrete automático: a última análise, de ")

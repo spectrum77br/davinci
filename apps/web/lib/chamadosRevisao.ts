@@ -1,8 +1,10 @@
 // Coluna Revisão da aba Chamados (Vinicius 05/11/2026): rótulos, cores e ordem
 // compartilhados pela tabela, pelo seletor e pelo Raio-X. O que a linha mostra hoje
 // vem pronto da API em `revisao_estado` (services/chamados_revisao.py).
+// Encerrar (11/11/2026): a equipe acabou e o caso espera quem conclui; não some no dia
+// seguinte.
 
-export type RevisaoTipo = 'conferido' | 'revisar' | 'fixo'
+export type RevisaoTipo = 'conferido' | 'revisar' | 'fixo' | 'encerrar'
 export type RevisaoEstado = 'falta' | RevisaoTipo | 'prazo_hoje' | 'prazo_vencido' | 'respondeu'
 
 export type RevisaoCampos = {
@@ -27,6 +29,7 @@ export type RevisaoDia = {
   conferido: number
   revisar: number
   fixo: number
+  encerrar: number
   falta: number
   prazos: number
   por_status: Record<string, number>
@@ -44,6 +47,7 @@ export const REVISAO_DOT: Record<RevisaoEstado, string> = {
   conferido: 'bg-emerald-600',
   revisar: 'bg-amber-600',
   fixo: 'bg-blue-600',
+  encerrar: 'bg-violet-600',
   prazo_hoje: 'bg-red-600',
   prazo_vencido: 'bg-red-600',
   respondeu: 'bg-red-600',
@@ -56,8 +60,9 @@ export const REVISAO_ORDEM: Record<RevisaoEstado, number> = {
   prazo_vencido: 0,
   falta: 1,
   revisar: 2,
-  conferido: 3,
-  fixo: 4,
+  encerrar: 3,
+  conferido: 4,
+  fixo: 5,
 }
 
 export const REVISAO_PRECISA_VER: RevisaoEstado[] = ['prazo_hoje', 'respondeu', 'prazo_vencido']
@@ -67,6 +72,7 @@ export const REVISAO_FILTROS: { value: string; label: string }[] = [
   { value: 'prazos', label: 'Prazos' },
   { value: 'falta', label: 'Falta revisar' },
   { value: 'revisar', label: 'Revisar' },
+  { value: 'encerrar', label: 'Encerrar' },
   { value: 'conferido', label: 'Conferido' },
   { value: 'fixo', label: 'Fixo com data' },
 ]
@@ -98,6 +104,8 @@ export function rotuloRevisao(r: RevisaoCampos): { texto: string; detalhe: strin
       return { texto: 'Conferido', detalhe: quem }
     case 'revisar':
       return { texto: 'Revisar', detalhe: quem }
+    case 'encerrar':
+      return { texto: 'Encerrar', detalhe: quem }
     case 'fixo':
       return { texto: `Fixo até ${diaMes(r.revisao_ate)}`, detalhe: '' }
     case 'prazo_hoje':
