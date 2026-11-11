@@ -4,8 +4,8 @@
 // simples sem informação desnecessária": data, nº do processo, origem (Denúncia / Logística / à
 // mão), autor ("beneficiário"), réu ("contra quem"), advogado, última movimentação e Jusbrasil.
 // Escolheu a Opção B: + Assunto, Situação e o Raio-X à direita. No mesmo dia: "esse prazo pode
-// tirar" (saiu o Próximo prazo) e, no lugar de só "Caso 010", o Pedido / referência — o pedido da
-// compra de prova (Denúncia), o do Bling (Logística) ou o que digitarem (Manual).
+// tirar" (saiu o Próximo prazo) e entrou o Pedido / referência — na Denúncia é o próprio caso (Caso 006:
+// "as denúncias não têm pedido, vai confundir"), na Logística o pedido do Bling, no Manual o que digitarem.
 // Os casos da Denúncia que foram ao advogado e os chamados encaminhados ao jurídico entram
 // sozinhos (backend: routers/juridico.py); o resto pelo "+ novo processo".
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
@@ -346,9 +346,9 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
         </div>
         <div class="overflow-auto">
           <!-- larguras fixas; só a Última movimentação estica (a janela do processo abre no meio) -->
-          <table class="w-full min-w-[1400px] table-fixed border-collapse text-[11.5px]">
+          <table class="w-full min-w-[1344px] table-fixed border-collapse text-[11.5px]">
             <colgroup>
-              <col class="w-[48px]"><col class="w-[178px]"><col class="w-[140px]"><col class="w-[150px]">
+              <col class="w-[48px]"><col class="w-[178px]"><col class="w-[130px]"><col class="w-[104px]">
               <col class="w-[130px]"><col class="w-[170px]"><col class="w-[116px]">
               <col class="w-[132px]"><col class="w-[92px]"><col class="w-[118px]"><col>
             </colgroup>
@@ -361,7 +361,7 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
               <tr>
                 <th class="border-b px-1.5 py-1 text-center font-semibold" title="Quando foi encaminhado ao jurídico">Data</th>
                 <th class="border-b px-1.5 py-1 text-center font-semibold">Nº do processo</th>
-                <th class="border-b px-1.5 py-1 text-center font-semibold" title="Denúncia: o pedido da compra de prova · Logística: o pedido do Bling · Manual: a referência que digitarem">Pedido / Ref.</th>
+                <th class="border-b px-1.5 py-1 text-center font-semibold" title="Denúncia: o caso · Logística: o pedido do Bling · Manual: a referência que digitarem">Pedido / Ref.</th>
                 <th class="border-b px-1.5 py-1 text-left font-semibold">Origem</th>
                 <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-left font-semibold dark:border-l-slate-600" title="Quem entra com o processo">Autor</th>
                 <th class="border-b px-1.5 py-1 text-left font-semibold" title="Contra quem é o processo">Réu</th>
@@ -393,12 +393,12 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
                   <span v-else class="italic text-muted-foreground">aguardando nº</span>
                 </td>
                 <td class="truncate px-1.5 text-center">
-                  <span v-if="p.pedido" class="cursor-text select-all font-mono text-[11px]" :title="p.pedido" @click.stop>{{ p.pedido }}</span>
+                  <a v-if="p.denuncia_caso_id" :href="casoUrl(p.denuncia_caso_id)" target="_blank" rel="noopener" class="font-medium hover:underline" title="abrir o caso numa nova aba" @click.stop>{{ p.caso_codigo || 'caso' }}</a>
+                  <span v-else-if="p.pedido" class="cursor-text select-all font-mono text-[11px]" :title="p.pedido" @click.stop>{{ p.pedido }}</span>
                   <span v-else class="text-muted-foreground">—</span>
                 </td>
                 <td class="truncate px-1.5">
                   <span class="rounded px-1.5 py-0.5 text-[11px] font-semibold" :class="origemInfo(p.origem).cls">{{ origemInfo(p.origem).label }}</span>
-                  <a v-if="p.denuncia_caso_id" :href="casoUrl(p.denuncia_caso_id)" target="_blank" rel="noopener" class="ml-1 text-muted-foreground hover:underline" title="abrir o caso numa nova aba" @click.stop>{{ p.caso_codigo || 'caso' }}</a>
                 </td>
                 <td class="border-l border-l-slate-300 px-1.5 dark:border-l-slate-600">
                   <div class="truncate" :title="p.autor || ''">{{ p.autor || '—' }}</div>
@@ -495,7 +495,8 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
               <dt class="text-muted-foreground">Nº</dt>
               <dd><input :value="aberto.numero || ''" :disabled="!podeEditar" :class="[inputCls, 'font-mono']" placeholder="0000000-00.0000.0.00.0000" @change="(e) => salvar({ numero: valorDe(e) })"></dd>
               <dt class="text-muted-foreground">Pedido / Ref.</dt>
-              <dd><input :value="aberto.pedido || ''" :disabled="!podeEditar || !!aberto.chamado_id" :class="[inputCls, 'font-mono']" :placeholder="aberto.origem === 'denuncia' ? 'pedido da compra de prova' : aberto.origem === 'logistica' ? 'nº do pedido no Bling' : 'nº de referência'" @change="(e) => salvar({ pedido: valorDe(e) })"></dd>
+              <dd v-if="aberto.denuncia_caso_id" class="px-2"><a :href="casoUrl(aberto.denuncia_caso_id)" target="_blank" rel="noopener" class="font-medium text-primary hover:underline">{{ aberto.caso_codigo || 'abrir o caso' }} ↗</a></dd>
+              <dd v-else><input :value="aberto.pedido || ''" :disabled="!podeEditar || !!aberto.chamado_id" :class="[inputCls, 'font-mono']" :placeholder="aberto.origem === 'logistica' ? 'nº do pedido no Bling' : 'nº de referência'" @change="(e) => salvar({ pedido: valorDe(e) })"></dd>
               <dt class="text-muted-foreground">Situação</dt>
               <dd>
                 <select :value="aberto.situacao" :disabled="!podeEditar" :class="selectCls" @change="(e) => salvar({ situacao: valorDe(e) })">
@@ -540,7 +541,6 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
               <dt class="text-muted-foreground">Origem</dt>
               <dd class="truncate">
                 <span class="rounded px-1.5 py-0.5 text-[11px] font-semibold" :class="origemInfo(aberto.origem).cls">{{ origemInfo(aberto.origem).label }}</span>
-                <a v-if="aberto.denuncia_caso_id" :href="casoUrl(aberto.denuncia_caso_id)" target="_blank" rel="noopener" class="ml-1 text-primary hover:underline">{{ aberto.caso_codigo || 'abrir o caso' }} ↗</a>
               </dd>
             </dl>
           </section>

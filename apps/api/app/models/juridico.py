@@ -37,7 +37,8 @@ class JuridicoProcesso(Base):
     denuncia_caso_id: Mapped[int | None] = mapped_column(BigInteger)
     chamado_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True))
     # Pedido / referência (11/11, Vinicius: "número pedido ou número referência"): o pedido do
-    # Bling (Logística), o pedido da compra de prova (Denúncia) ou o que digitarem (Manual)
+    # Bling (Logística) ou o que digitarem (Manual). Na Denúncia a referência é o caso (Caso 006),
+    # que a tela mostra a partir de denuncia_caso_id — aqui fica vazio.
     pedido: Mapped[str | None] = mapped_column(Text)
     # a coluna Data: quando foi encaminhado ao jurídico
     encaminhado_em: Mapped[date | None] = mapped_column(Date)

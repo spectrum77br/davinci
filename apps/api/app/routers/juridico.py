@@ -8,8 +8,8 @@ Raio-X). No mesmo dia: o Próximo prazo saiu e entrou o Pedido / referência.
 De onde vêm as linhas:
 - **Denúncia** — todo caso que foi ao advogado entra sozinho quando a lista abre. O nº do
   processo, o link do Jusbrasil e a última movimentação já digitados no caso vêm junto
-  na primeira vez; daí em diante quem manda é este painel. O Pedido é o da compra de
-  prova (o digitado na aba Casos ou o que o robô registrou).
+  na primeira vez; daí em diante quem manda é este painel. A referência dele é o próprio
+  caso (Caso 006) — 11/11, Vinicius: o pedido da compra de prova "vai confundir".
 - **Logística** — os chamados encaminhados ao jurídico (Chamados › "Encaminhar ao
   jurídico") entram sozinhos; um processo de uma venda também pode ser incluído à mão.
 - **Manual** — o "+ novo processo".
@@ -80,13 +80,6 @@ def _data(v: Any) -> date | None:
         return None
 
 
-def _pedido_do_caso(c: dict) -> str | None:
-    """O pedido da compra de prova: o digitado na aba Casos ou o que o robô registrou."""
-    extra = c.get("extra") or {}
-    v = (extra.get("compra_pedido") or "").strip() or ((c.get("compra") or {}).get("pedido") or "")
-    return str(v).strip() or None
-
-
 def _assunto_do_caso(c: dict) -> str:
     """Caso com anúncio no certificado nosso = uso do certificado Anatel; sem ele (outro nº ou
     nenhum), o caso é a marca Uranyx no título (ex.: Caso 004). Dá pra trocar no Raio-X."""
@@ -123,8 +116,6 @@ async def sincronizar(session: AsyncSession) -> int:
                 p.reu_obs = p.reu_obs or c.get("marketplace")
             if not p.advogado and c.get("juridico"):
                 p.advogado = c["juridico"]
-            if not p.pedido and _pedido_do_caso(c):
-                p.pedido = _pedido_do_caso(c)
             continue
         extra = c.get("extra") or {}
         numero = (extra.get("processo_numero") or "").strip() or None
@@ -133,7 +124,6 @@ async def sincronizar(session: AsyncSession) -> int:
             .values(
                 origem="denuncia",
                 denuncia_caso_id=c["id"],
-                pedido=_pedido_do_caso(c),
                 encaminhado_em=enviado,
                 numero=numero,
                 lado="autor",

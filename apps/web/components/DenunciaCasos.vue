@@ -737,7 +737,7 @@ defineExpose({ carregar })
          apertado"): largura fixa por coluna (rola para o lado), Compra e Jurídico centralizados e
          os campos de texto no balão (ObservacaoPopover) — a linha não muda de altura. -->
     <div class="table-card overflow-x-auto">
-      <table class="w-full min-w-[1668px] table-fixed text-xs">
+      <table class="w-full min-w-[1576px] table-fixed text-xs">
         <!-- larguras fixas; só a coluna Caso (o produto) estica quando a tela é maior -->
         <colgroup>
           <col class="w-[40px]">
@@ -746,19 +746,18 @@ defineExpose({ carregar })
           <col class="w-[170px]">
           <col class="w-[100px]">
           <col class="w-[176px]">
+          <col class="w-[128px]">
           <col class="w-[44px]">
           <col class="w-[132px]">
           <col class="w-[140px]">
           <col class="w-[150px]">
           <col class="w-[132px]">
           <col class="w-[96px]">
-          <col class="w-[220px]">
         </colgroup>
         <thead>
           <tr>
-            <th class="!py-1.5 text-[11px] font-semibold" colspan="7">Caso</th>
+            <th class="!py-1.5 text-[11px] font-semibold" colspan="8">Caso</th>
             <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-amber-50 dark:!bg-amber-900/20" colspan="5">Compra</th>
-            <th class="!py-1.5 !text-center text-[11px] font-semibold border-l-[3px] border-l-gray-400 dark:border-l-gray-600 !bg-emerald-50 dark:!bg-emerald-900/20">Jurídico</th>
           </tr>
           <tr class="[&>th]:whitespace-nowrap">
             <th class="!px-0 !text-center"><input type="checkbox" class="size-4 align-middle" :checked="todosMarcados" title="marcar todos" @change="marcarTodos"></th>
@@ -767,13 +766,13 @@ defineExpose({ carregar })
             <th>Loja</th>
             <th class="!text-center" title="Nosso = o anúncio usa a nossa homologação; Diversos = nº de outra empresa, sem nº ou nº inválido">Certificado</th>
             <th class="!text-center">Status</th>
+            <th class="!text-center" title="Quando o caso foi enviado ao advogado">Enviado ao jurídico</th>
             <th class="!px-0" />
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20 border-l-[3px] border-l-gray-400 dark:border-l-gray-600">Data</th>
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Loja</th>
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Pedido</th>
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20">Previsão entrega</th>
             <th class="!text-center !bg-amber-50 dark:!bg-amber-900/20" title="Status e último evento do rastreio, lidos pelo robô no pedido (passo 1)">Localização</th>
-            <th class="!text-center !bg-emerald-50 dark:!bg-emerald-900/20 border-l-[3px] border-l-gray-400 dark:border-l-gray-600" title="Quando o caso foi enviado ao advogado">Data</th>
           </tr>
         </thead>
         <tbody>
@@ -816,6 +815,12 @@ defineExpose({ carregar })
                 :salvando="trocandoStatus === c.id"
                 @trocar="(s, d) => trocarStatus(c.id, c.codigo, s, d)"
               />
+            </td>
+            <!-- 11/11 (Vinicius): do grupo Jurídico (verde) sobrou só a data do envio ao advogado — veio
+                 para logo depois do Status; o processo fica no painel Jurídico da Ouvidoria -->
+            <td class="!px-2 text-center whitespace-nowrap tabular-nums" @click.stop>
+              <span v-if="c.juridico_enviado_em">{{ dataBr(c.juridico_enviado_em, false) }}</span>
+              <Button v-else size="sm" variant="outline" class="h-7 px-3 text-xs" @click="abrir(c, true)">enviar</Button>
             </td>
             <td class="!px-0 text-center" @click.stop>
               <button
@@ -871,13 +876,6 @@ defineExpose({ carregar })
                 centro
               />
               <div v-else class="text-center text-muted-foreground">—</div>
-            </td>
-            <!-- Jurídico — 11/11 (Vinicius): fica só a data do envio ao jurídico; Protocolo, Últ.
-                 movimentação, Último status e Jusbrasil saíram da tabela (o processo vai para o
-                 painel Jurídico da Ouvidoria). Os dados seguem no extra e na ficha do caso. -->
-            <td class="!px-2 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-l-gray-400 dark:border-l-gray-600 text-center whitespace-nowrap tabular-nums" @click.stop>
-              <span v-if="c.juridico_enviado_em">{{ dataBr(c.juridico_enviado_em, false) }}</span>
-              <Button v-else size="sm" variant="outline" class="h-7 px-3 text-xs" @click="abrir(c, true)">enviar</Button>
             </td>
           </tr>
         </tbody>

@@ -1956,8 +1956,11 @@ async def ver_denuncia(
 # 06/10 (Vinicius: "clicar no status e conseguir trocar"): o escolhido à mão no DaVinci vale por
 # cima — o fato que o robô não vê (compra do TikTok, Shopee diz entregue e não chegou, envio sem
 # registro).
+# 11/11 (Vinicius: "pode tirar esse ajuizado, tem que deixar com jurídico"): o andamento depois
+# do advogado mora no painel Jurídico (Ouvidoria); "Ajuizado" (do mini ou marcado à mão) vira
+# "Com jurídico".
 STATUS_CASO = (
-    "Aberto", "Aguardando produto", "Produto recebido", "Com jurídico", "Ajuizado", "Encerrado",
+    "Aberto", "Aguardando produto", "Produto recebido", "Com jurídico", "Encerrado",
 )
 _ANTES_DO_JURIDICO = ("Aberto", "Aguardando produto", "Produto recebido")
 
@@ -1966,8 +1969,10 @@ def _status_caso(
     status: str | None, enviado_em: Any, compra: dict | None, manual: str | None = None
 ) -> str:
     if manual:
-        return manual
-    if status in ("Ajuizado", "Encerrado"):
+        return "Com jurídico" if manual == "Ajuizado" else manual
+    if status == "Ajuizado":
+        return "Com jurídico"
+    if status == "Encerrado":
         return status
     if enviado_em:
         return "Com jurídico"

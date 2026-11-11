@@ -159,9 +159,10 @@ export function prazoVencido(prazo: string | null | undefined, situacao: string 
 }
 
 // 01/10: o status do caso na tela sai dos fatos (API _status_caso): Aberto (sem compra) → Aguardando
-// produto → Produto recebido → Com jurídico (enviado ao advogado) → Ajuizado / Encerrado
+// produto → Produto recebido → Com jurídico (enviado ao advogado) → Encerrado
 // 06/10: dá pra trocar à mão (a mesma lista da API STATUS_CASO) — vale por cima dos fatos
-export const STATUS_CASO = ['Aberto', 'Aguardando produto', 'Produto recebido', 'Com jurídico', 'Ajuizado', 'Encerrado'] as const
+// 11/11: "Ajuizado" saiu (o andamento do processo fica no painel Jurídico da Ouvidoria)
+export const STATUS_CASO = ['Aberto', 'Aguardando produto', 'Produto recebido', 'Com jurídico', 'Encerrado'] as const
 
 export function pillStatusCaso(s: string | null | undefined): string {
   switch (s) {
@@ -173,8 +174,6 @@ export function pillStatusCaso(s: string | null | undefined): string {
       return 'pill-info'
     case 'Com jurídico':
       return 'pill-success'
-    case 'Ajuizado':
-      return 'pill-danger'
     default:
       return 'pill-muted'
   }

@@ -65,7 +65,7 @@ async def _casos(client):
         {"id": 12, "codigo": "Caso 012", "anuncio_id": "A12", "titulo": "Caso 12", "status": "Aberto",
          "aberto_em": "2026-10-20"},
     ])
-    # a compra de prova do Caso 006 (o pedido vira a referência do processo)
+    # a compra de prova do Caso 006 (o pedido dela NÃO vira a referência: a referência é o caso)
     await _sync(client, "compras", [{"id": 3, "anuncio_id": "A6", "caso_id": 6, "status": "Recebido",
                                      "pedido": "260929BFHR9PH3"}])
 
@@ -90,7 +90,7 @@ async def test_caso_que_foi_ao_advogado_entra_sozinho_com_o_que_ja_estava_no_cas
     assert len(itens) == 1  # o Caso 012 ainda não foi ao advogado
     p = itens[0]
     assert p["origem"] == "denuncia" and p["caso_codigo"] == "Caso 006" and p["denuncia_caso_id"] == 6
-    assert p["pedido"] == "260929BFHR9PH3"  # o pedido da compra de prova
+    assert p["pedido"] is None  # na Denúncia a referência é o caso, não o pedido da compra de prova
     assert p["encaminhado_em"] == "2026-10-13"
     assert p["autor"] == "MAKISA Trading" and p["lado"] == "autor"
     assert p["reu"] == "Express Eletrônicos" and p["reu_obs"] == "Shopee"
@@ -201,3 +201,17 @@ async def test_validacoes(client, editor):
 async def test_sem_permissao_da_denuncia_nao_ve(client, make_user, auth_as):
     auth_as(await make_user(permissions={"chamados": {"view": True}}))
     assert (await client.get("/api/juridico/processos")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_ajuizado_saiu_dos_casos_vira_com_juridico(client, editor):
+    """11/11 (Vinicius: "pode tirar esse ajuizado, tem que deixar com jurídico")."""
+    await _casos(client)
+    await _sync(client, "casos", [
+        {"id": 6, "codigo": "Caso 006", "anuncio_id": "A6", "titulo": "Caso 6", "status": "Ajuizado",
+         "aberto_em": "2026-09-29", "juridico": "Dr. Paulo Dias", "juridico_enviado_em": "2026-10-13 13:10:00"},
+    ])
+    casos = {c["codigo"]: c for c in (await client.get("/api/denuncia/casos")).json()["itens"]}
+    assert casos["Caso 006"]["status"] == "Com jurídico"
+    r = await client.put("/api/denuncia/casos/6/status", json={"status": "Ajuizado"})
+    assert r.status_code == 422
