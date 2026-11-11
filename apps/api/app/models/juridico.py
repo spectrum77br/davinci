@@ -17,7 +17,19 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import BigInteger, Date, DateTime, ForeignKey, Index, Numeric, Text, func, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Date,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -126,3 +138,48 @@ class JuridicoMovimentacao(Base):
             postgresql_where=text("externo_id IS NOT NULL"),
         ),
     )
+
+
+class JuridicoLeitura(Base):
+    """Cada vez que alguém leu o Diário oficial (DJEN) pelos processos: o Mac mini às 07:30
+    (`origem` 'mac_mini') ou o botão "Buscar no Diário" (`origem` 'navegador', `por` = quem).
+    O topo do painel mostra a última."""
+
+    __tablename__ = "juridico_leituras"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    quando: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    origem: Mapped[str] = mapped_column(Text, nullable=False)
+    por: Mapped[str | None] = mapped_column(Text)
+    processos: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    publicacoes: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    novas: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    falhas: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    erro: Mapped[str | None] = mapped_column(Text)
+
+
+class JuridicoPedido(Base):
+    """Pedido de leitura ao Mac mini (11/11/2026, Vinicius: "6 da manhã … chegar e ver tudo
+    pronto" + "no botão Atualizar, atualizar Jusbrasil e CNJ junto"). O DaVinci cria às 06:00
+    (`origem` 'cron') e no botão Atualizar ('botao', no máximo um Jusbrasil a cada 2 h); o vigia
+    do mini pega (`pego_em`), lê o Diário (CNJ) e — se `jusbrasil` — o Jusbrasil no perfil 50,
+    devagar, e vai contando o `progresso` até `terminado_em`."""
+
+    __tablename__ = "juridico_pedidos"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    pedido_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    pedido_por: Mapped[str | None] = mapped_column(Text)
+    # 'cron' | 'botao'
+    origem: Mapped[str] = mapped_column(Text, nullable=False)
+    jusbrasil: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    pego_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    progresso: Mapped[str | None] = mapped_column(Text)
+    terminado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ok: Mapped[bool | None] = mapped_column(Boolean)
+    resultado: Mapped[str | None] = mapped_column(Text)
+

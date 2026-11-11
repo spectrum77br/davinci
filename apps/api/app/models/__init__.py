@@ -178,7 +178,12 @@ from app.models.instagram_dm import (
     DmMensagem,
 )
 from app.models.integration import Integration, OAuthState
-from app.models.juridico import JuridicoMovimentacao, JuridicoProcesso
+from app.models.juridico import (
+    JuridicoLeitura,
+    JuridicoMovimentacao,
+    JuridicoPedido,
+    JuridicoProcesso,
+)
 from app.models.listing import Listing, ListingRequest
 from app.models.logistica import (
     Logistica,
@@ -432,7 +437,9 @@ __all__ = [
     "DenunciaRoboConfig",
     "DenunciaRoboTratada",
     "DenunciaVerificacao",
+    "JuridicoLeitura",
     "JuridicoMovimentacao",
+    "JuridicoPedido",
     "JuridicoProcesso",
     "DevolucaoAnexo",
     "DevolucaoMensagemComprador",

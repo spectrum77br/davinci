@@ -10,7 +10,7 @@
 // sozinhos (backend: routers/juridico.py); o resto pelo "+ novo processo".
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { AlertCircle, ExternalLink, Loader2, Plus, RotateCcw, Search, Trash2, X } from 'lucide-vue-next'
-import { isoToday } from '~/lib/date'
+import { isoDateBrt, isoToday } from '~/lib/date'
 
 type Origem = 'denuncia' | 'logistica' | 'manual'
 type Situacao = 'aguardando_numero' | 'em_andamento' | 'audiencia' | 'sentenca' | 'encerrado'
@@ -46,6 +46,10 @@ type Processo = {
   atualizado_por: string | null
   atualizado_em: string | null
 }
+type Leitura = {
+  quando: string; origem: string; por: string | null; processos: number; publicacoes: number
+  novas: number; falhas: number; erro: string | null
+}
 type Detalhe = Processo & {
   movimentacoes: Mov[]
   documentos: { pasta: { envio_em: string | null; pronta_em: string | null } | null; pasta_url: string | null; dossie_url: string | null }
@@ -71,6 +75,12 @@ const situacaoInfo = (s: Situacao) => SITUACOES.find((x) => x.value === s) || SI
 const origemInfo = (o: Origem) => ORIGENS.find((x) => x.value === o) || ORIGENS[2]!
 
 const itens = ref<Processo[]>([])
+type Pedido = {
+  id: number; origem: string; pedido_por: string | null; jusbrasil: boolean; pedido_em: string
+  pego_em: string | null; progresso: string | null; terminado_em: string | null; ok: boolean | null; resultado: string | null
+}
+const diario = ref<{ mac_mini: Leitura | null; navegador: Leitura | null; jusbrasil?: Leitura | null }>({ mac_mini: null, navegador: null, jusbrasil: null })
+const pedido = ref<Pedido | null>(null)
 const hoje = ref(isoToday())
 const carregando = ref(false)
 const erro = ref('')
@@ -103,8 +113,11 @@ async function carregar() {
   carregando.value = true
   erro.value = ''
   try {
-    const r = await api<{ hoje: string; itens: Processo[] }>('/api/juridico/processos')
+    const r = await api<{ hoje: string; itens: Processo[]; diario?: typeof diario.value; pedido?: Pedido | null }>('/api/juridico/processos')
     itens.value = r.itens
+    if (r.diario) diario.value = r.diario
+    pedido.value = r.pedido || null
+    vigiarPedido()
     hoje.value = r.hoje
     if (aberto.value && aberto.value.id) await abrir(aberto.value.id, false)
   } catch (e) {
@@ -256,7 +269,42 @@ async function apagarMov(m: Mov) {
     erroRaio.value = erroDe(e)
   }
 }
-// 11/11: "buscar no Diário" — lê agora no DJEN (o Vigia do Jurídico faz sozinho todo dia às 07:30)
+// ── Diário oficial (DJEN, CNJ) ───────────────────────────────────────────────
+// 11/11: o DJEN responde 403 ao servidor do DaVinci (fica fora do Brasil) e libera o navegador
+// (CORS aberto). Então quem consulta é o NAVEGADOR de quem clica, e manda as publicações à API.
+// Todo dia às 07:30 o Mac mini da Makisa faz o mesmo sozinho (juridico_diario.py no mini).
+const URL_DJEN = 'https://comunicaapi.pje.jus.br/api/v1/comunicacao'
+const PAUSA_DJEN_MS = 3200 // o DJEN aceita 20 consultas por minuto
+const dorme = (ms: number) => new Promise((r) => setTimeout(r, ms))
+const numero20 = (n: string | null | undefined) => {
+  const d = (n || '').replace(/\D/g, '')
+  return d.length === 20 ? d : null
+}
+async function lerDjen(numero: string): Promise<unknown[]> {
+  const todos: unknown[] = []
+  for (let pagina = 1; ; pagina++) {
+    const u = `${URL_DJEN}?numeroProcesso=${numero}&pagina=${pagina}&itensPorPagina=100`
+    let r = await fetch(u)
+    if (r.status === 429) {
+      await dorme(61000)
+      r = await fetch(u)
+    }
+    if (!r.ok) throw new Error(`o Diário respondeu ${r.status}`)
+    const d = (await r.json()) as { count?: number; items?: unknown[] }
+    const lote = d.items || []
+    todos.push(...lote)
+    if (!lote.length || todos.length >= (d.count || 0) || lote.length < 100) return todos
+    await dorme(PAUSA_DJEN_MS)
+  }
+}
+async function diarioDoProcesso(p: { id: number; numero: string | null }) {
+  const n = numero20(p.numero)
+  if (!n) throw new Error('sem nº de 20 dígitos')
+  const itens = await lerDjen(n)
+  return api<{ novas: number; publicacoes: number }>(`/api/juridico/processos/${p.id}/diario`, { method: 'POST', body: { itens } })
+}
+
+// botão da janela do processo
 const buscandoDiario = ref(false)
 const avisoDiario = ref('')
 const abertas = ref<Set<number>>(new Set())
@@ -272,17 +320,110 @@ async function buscarDiario() {
   avisoDiario.value = ''
   erroRaio.value = ''
   try {
-    const r = await api<{ novas: number; publicacoes: number }>(`/api/juridico/processos/${aberto.value.id}/diario`, { method: 'POST' })
+    const r = await diarioDoProcesso(aberto.value)
     avisoDiario.value = r.novas
       ? `${r.novas} publicação(ões) nova(s) no Diário`
       : r.publicacoes ? 'nada novo no Diário' : 'o Diário ainda não tem publicação deste processo'
     await carregar()
   } catch (e) {
-    erroRaio.value = erroDe(e)
+    erroRaio.value = `Diário: ${(e as Error)?.message || erroDe(e)}`
   } finally {
     buscandoDiario.value = false
   }
 }
+
+// ── botão Atualizar (11/11, Vinicius: "no botão atualizar, atualizar Jusbrasil e CNJ junto") ──
+// 1) recarrega; 2) o navegador busca o Diário (CNJ) de todos os processos com nº, um por vez;
+// 3) pede ao Mac mini a leitura do Jusbrasil (perfil 50, devagar) — no máximo uma a cada 2 h.
+// Todo dia às 06:00 o próprio DaVinci faz o pedido 3 sozinho, e o mini lê o Diário junto.
+const diarioTodos = ref<{ rodando: boolean; feitos: number; total: number; msg: string }>({ rodando: false, feitos: 0, total: 0, msg: '' })
+async function buscarDiarioTodos() {
+  const alvo = itens.value.filter((p) => numero20(p.numero) && p.situacao !== 'encerrado')
+  if (!alvo.length) return
+  diarioTodos.value = { rodando: true, feitos: 0, total: alvo.length, msg: '' }
+  let novas = 0
+  let publicacoes = 0
+  let falhas = 0
+  for (const [i, p] of alvo.entries()) {
+    if (i) await dorme(PAUSA_DJEN_MS)
+    try {
+      const r = await diarioDoProcesso(p)
+      novas += r.novas
+      publicacoes += r.publicacoes
+    } catch {
+      falhas += 1
+    }
+    diarioTodos.value.feitos = i + 1
+  }
+  try {
+    await api('/api/juridico/leituras', { method: 'POST', body: { processos: alvo.length - falhas, publicacoes, novas, falhas } })
+  } catch { /* a leitura em si já foi gravada processo a processo */ }
+  diarioTodos.value = {
+    rodando: false, feitos: alvo.length, total: alvo.length,
+    msg: `Diário: ${novas} nova(s)${falhas ? ` · ${falhas} sem resposta` : ''}`,
+  }
+}
+const atualizando = ref(false)
+async function atualizarTudo() {
+  if (atualizando.value) return
+  atualizando.value = true
+  try {
+    await carregar()
+    if (podeEditar.value) {
+      try {
+        const r = await api<{ pedido: Pedido | null; motivo: string }>('/api/juridico/atualizar', { method: 'POST' })
+        if (r.pedido) pedido.value = r.pedido
+      } catch { /* sem o pedido do Jusbrasil, o Diário segue */ }
+      await buscarDiarioTodos()
+      await carregar()
+    }
+  } finally {
+    atualizando.value = false
+  }
+}
+// enquanto o Mac mini lê o Jusbrasil, a lista se recarrega a cada 30 s (os andamentos vão entrando)
+let timerPedido: ReturnType<typeof setTimeout> | null = null
+const pedidoAndando = computed(() => {
+  const p = pedido.value
+  return !!p && !p.terminado_em && Date.now() - new Date(p.pedido_em).getTime() < 3 * 3600 * 1000
+})
+function vigiarPedido() {
+  if (timerPedido) clearTimeout(timerPedido)
+  timerPedido = null
+  if (pedidoAndando.value) timerPedido = setTimeout(() => { void carregar() }, 30000)
+}
+onBeforeUnmount(() => { if (timerPedido) clearTimeout(timerPedido) })
+
+// topo: a última leitura do Diário e do Jusbrasil. Mac mini sem ler há mais de 26 h = vermelho
+const quandoBr = (iso: string) => {
+  const d = new Date(iso)
+  const dia = isoDateBrt(d) === isoToday() ? 'hoje' : `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`
+  return `${dia} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+const velho = (iso: string) => Date.now() - new Date(iso).getTime() > 26 * 3600 * 1000
+const statusTopo = computed(() => {
+  const partes: { texto: string; alerta: boolean }[] = []
+  if (diarioTodos.value.rodando) partes.push({ texto: `Diário: buscando ${diarioTodos.value.feitos}/${diarioTodos.value.total}…`, alerta: false })
+  else if (diarioTodos.value.msg) partes.push({ texto: diarioTodos.value.msg, alerta: false })
+  else {
+    const m = diario.value.mac_mini
+    const n = diario.value.navegador
+    const ultimo = [m, n].filter(Boolean).sort((a, b) => (b!.quando > a!.quando ? 1 : -1))[0]
+    if (!ultimo) partes.push({ texto: 'Diário: ainda não lido', alerta: true })
+    else partes.push({ texto: `Diário ${quandoBr(ultimo.quando)}`, alerta: velho(ultimo.quando) || !!ultimo.erro })
+  }
+  const p = pedido.value
+  if (pedidoAndando.value && p) {
+    partes.push({ texto: p.pego_em ? `Jusbrasil: ${p.progresso || 'lendo…'}` : 'Jusbrasil: pedido enviado ao Mac mini…', alerta: false })
+  } else {
+    const j = diario.value.jusbrasil
+    if (p && p.terminado_em && p.ok === false) partes.push({ texto: `Jusbrasil: ${p.resultado || 'falhou'}`, alerta: true })
+    else if (j) partes.push({ texto: `Jusbrasil ${quandoBr(j.quando)} · ${j.novas} novo(s)`, alerta: velho(j.quando) || !!j.erro })
+    else partes.push({ texto: 'Jusbrasil: ainda não lido', alerta: false })
+  }
+  return partes
+})
+
 const podeApagarAberto = computed(() => !!aberto.value && !aberto.value.denuncia_caso_id && !aberto.value.chamado_id && podeApagar.value)
 async function apagarProcesso() {
   if (!aberto.value || !confirm('Apagar este processo do painel? Não dá pra desfazer.')) return
@@ -319,8 +460,20 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
         </button>
       </div>
       <div class="ml-auto flex items-center gap-1.5 text-xs font-semibold">
-        <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50" :disabled="carregando" @click="carregar">
-          <RotateCcw class="size-3.5" :class="{ 'animate-spin': carregando }" /> Atualizar
+        <span class="flex max-w-[460px] items-center gap-1.5 truncate text-[11px] font-normal" :title="'Diário (CNJ) e Jusbrasil: o Mac mini lê sozinho todo dia às 06:00; o Atualizar busca na hora (o Jusbrasil no máximo a cada 2 h)'">
+          <template v-for="(st, k) in statusTopo" :key="k">
+            <span v-if="k" class="text-muted-foreground">·</span>
+            <span :class="st.alerta ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ st.texto }}</span>
+          </template>
+        </span>
+        <button
+          type="button"
+          class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
+          :disabled="carregando || atualizando"
+          title="Recarrega, busca agora o Diário (CNJ) dos processos com nº e pede ao Mac mini a leitura do Jusbrasil (no máximo uma a cada 2 h)"
+          @click="atualizarTudo"
+        >
+          <RotateCcw class="size-3.5" :class="{ 'animate-spin': carregando || atualizando }" /> Atualizar
         </button>
         <button type="button" class="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-primary px-2.5 py-1 text-primary-foreground disabled:opacity-50" :disabled="!podeEditar" @click="abrirNovo">
           <Plus class="size-3.5" /> novo processo
@@ -462,7 +615,7 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
                 <td class="px-1.5">
                   <template v-if="p.ultima_mov">
                     <div class="truncate" :title="p.ultima_mov.texto">{{ p.ultima_mov.texto }}</div>
-                    <div class="truncate text-[10.5px] text-muted-foreground">{{ dm(p.ultima_mov.data) }}{{ p.ultima_mov.fonte === 'djen' ? ' · Diário oficial' : '' }}</div>
+                    <div class="truncate text-[10.5px] text-muted-foreground">{{ dm(p.ultima_mov.data) }}{{ p.ultima_mov.fonte === 'djen' ? ' · Diário oficial' : p.ultima_mov.fonte === 'jusbrasil' ? ' · Jusbrasil' : '' }}</div>
                   </template>
                   <span v-else class="text-muted-foreground">—</span>
                 </td>
@@ -592,7 +745,7 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
                 type="button"
                 class="ml-auto inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-semibold hover:bg-muted disabled:opacity-50"
                 :disabled="buscandoDiario || !aberto.numero"
-                :title="aberto.numero ? 'lê agora no Diário de Justiça Eletrônico Nacional (o robô faz sozinho todo dia às 07:30)' : 'preencha o nº do processo primeiro'"
+                :title="aberto.numero ? 'lê agora no Diário de Justiça Eletrônico Nacional (o Mac mini faz sozinho todo dia às 06:00)' : 'preencha o nº do processo primeiro'"
                 @click="buscarDiario"
               >
                 <Loader2 v-if="buscandoDiario" class="size-3 animate-spin" />
@@ -615,8 +768,9 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
                   <span class="font-semibold tabular-nums">{{ dma(m.data) }}</span>
                   <span v-if="i === 0" class="rounded bg-sky-500/15 px-1 text-[10px] font-semibold text-sky-700 dark:text-sky-300">última</span>
                   <span v-if="m.fonte === 'djen'" class="ml-auto shrink-0 rounded bg-violet-500/10 px-1 text-[10px] font-semibold text-violet-700 dark:text-violet-300" title="lida no Diário de Justiça Eletrônico Nacional (CNJ)">Diário oficial</span>
+                  <span v-else-if="m.fonte === 'jusbrasil'" class="ml-auto shrink-0 rounded bg-emerald-500/10 px-1 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300" title="andamento lido no Jusbrasil pelo Mac mini (perfil 50)">Jusbrasil</span>
                   <span v-else class="ml-auto truncate text-[10px] text-muted-foreground">{{ m.criado_por ? `lançado por ${m.criado_por}` : 'lançado à mão' }}</span>
-                  <button v-if="podeEditar && m.fonte !== 'djen'" type="button" class="invisible shrink-0 text-muted-foreground hover:text-red-600 group-hover:visible" title="apagar esta movimentação" @click="apagarMov(m)"><X class="size-3.5" /></button>
+                  <button v-if="podeEditar && m.fonte !== 'djen' && m.fonte !== 'jusbrasil'" type="button" class="invisible shrink-0 text-muted-foreground hover:text-red-600 group-hover:visible" title="apagar esta movimentação" @click="apagarMov(m)"><X class="size-3.5" /></button>
                 </div>
                 <div class="mt-0.5 leading-snug" :class="i === 0 ? '' : 'text-muted-foreground'">{{ m.texto }}</div>
                 <div v-if="m.fonte === 'djen'" class="mt-0.5 flex flex-wrap items-center gap-x-2 text-[10.5px] text-muted-foreground">
@@ -628,7 +782,7 @@ const selectCls = 'h-7 w-full rounded-md border bg-background px-1.5 text-xs dis
               </li>
             </ol>
             <div v-else class="text-center text-muted-foreground">nenhuma movimentação ainda</div>
-            <div class="mt-1 text-center text-[10.5px] text-muted-foreground">As publicações do Diário oficial (intimação, decisão, citação) entram sozinhas todo dia às 07:30, nos processos com nº.</div>
+            <div class="mt-1 text-center text-[10.5px] text-muted-foreground">O Diário oficial (CNJ) e o Jusbrasil entram sozinhos todo dia às 06:00 pelo Mac mini, nos processos com nº. O Atualizar do topo busca na hora.</div>
           </section>
 
           <section v-if="aberto.documentos.pasta_url || aberto.documentos.dossie_url || aberto.denuncia_caso_id" class="border-t pt-2">

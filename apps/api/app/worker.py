@@ -4490,21 +4490,19 @@ async def vigia_conciliacao_tick(ctx: dict) -> None:
         logger.exception("vigia_conciliacao_unhandled")
 
 
-async def vigia_juridico_tick(ctx: dict) -> None:
-    """Vigia do Jurídico (Ouvidoria): 07:30 BRT, as publicações novas do Diário oficial (DJEN)
-    de cada processo do painel Jurídico entram no histórico. `desligado` no painel: não roda."""
+async def juridico_pedido_tick(ctx: dict) -> None:
+    """Jurídico, 06:00 BRT (Vinicius 11/11: "chegar e ver tudo pronto"): pede ao Mac mini a
+    leitura do dia — o Diário (CNJ) e o Jusbrasil pelo perfil 50 — dos processos com nº. Quem
+    lê é o mini (o Diário dá 403 ao servidor, fora do Brasil); aqui só nasce o pedido."""
     try:
-        async with session_scope() as s:
-            modo = await ouvidoria_modo(s, "vigia_juridico")
-        if modo == "desligado":
-            logger.debug("vigia_juridico_desligado")
-            return
-        from app.services.vigia_juridico import vigia_juridico_sweep
+        from app.services.juridico_diario import pedir_leitura
 
-        summary = await vigia_juridico_sweep() or {}
-        logger.info("vigia_juridico_done", **summary)
+        async with session_scope() as s:
+            ped, motivo = await pedir_leitura(s, "cron")
+            await s.commit()
+        logger.info("juridico_pedido_tick", pedido=ped.id if ped else None, motivo=motivo)
     except Exception:  # noqa: BLE001
-        logger.exception("vigia_juridico_unhandled")
+        logger.exception("juridico_pedido_tick_falhou")
 
 
 async def vigia_nota_cheia_tick(ctx: dict) -> None:
@@ -5504,7 +5502,7 @@ class WorkerSettings:
         vigia_etiquetas_tick,
         vigia_nota_cheia_tick,
         vigia_conciliacao_tick,
-        vigia_juridico_tick,
+        juridico_pedido_tick,
         conciliacao_fatura_tick,
         conciliacao_extrato_tick,
         func(conciliacao_sincronizar_loja, timeout=3600),
@@ -6177,8 +6175,8 @@ class WorkerSettings:
         cron(vigia_nota_cheia_tick, minute=8, run_at_startup=False, timeout=600),
         # Vigia de Conciliação: 07:00 BRT (10:00 UTC), depois da rodada de madrugada.
         cron(vigia_conciliacao_tick, hour=10, minute=0, run_at_startup=False, timeout=600),
-        # Vigia do Jurídico: 07:30 BRT (10:30 UTC), publicações do DJEN dos processos com nº
-        cron(vigia_juridico_tick, hour=10, minute=30, run_at_startup=False, timeout=1800),
+        # Jurídico: 06:00 BRT (09:00 UTC) — pedido de leitura ao Mac mini (Diário + Jusbrasil)
+        cron(juridico_pedido_tick, hour=9, minute=0, run_at_startup=False, timeout=120),
         cron(conciliacao_amazon_csv_tick, hour=9, minute=0, run_at_startup=False, timeout=120),
         # Conciliação (14/10/2026, Vinicius: "é tudo do dia anterior; uma vez só de
         # madrugada"): UMA rodada por dia. 06:00 BRT pede o extrato de ontem ao

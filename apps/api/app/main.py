@@ -381,6 +381,7 @@ app.include_router(ouvidoria_router.router)
 # Makisa manda (sync) + as três telas. O sync vem antes: rota fixa `/sync/…`.
 app.include_router(denuncia_router.sync_router)
 app.include_router(denuncia_router.router)
+app.include_router(juridico_router.sync_router)
 app.include_router(juridico_router.router)
 # Sistema › Histórico (25/09/2026): invisível para quem não está na lista.
 app.include_router(historico_router.router)

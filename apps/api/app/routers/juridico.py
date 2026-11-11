@@ -24,7 +24,6 @@ from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 from zoneinfo import ZoneInfo
 
-import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -33,13 +32,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.models.chamado import Chamado
-from app.models.denuncia import DenunciaCaso, DenunciaJuridicoPasta
-from app.models.juridico import LADOS, SITUACOES, JuridicoMovimentacao, JuridicoProcesso
+from app.models.denuncia import DenunciaCaso, DenunciaJuridicoPasta, DenunciaRemetente
+from app.models.juridico import (
+    LADOS,
+    SITUACOES,
+    JuridicoLeitura,
+    JuridicoMovimentacao,
+    JuridicoPedido,
+    JuridicoProcesso,
+)
 from app.models.user import User
 from app.routers import denuncia as den
-from app.services import chamados_juridico, vigia_juridico
+from app.services import chamados_juridico, juridico_diario
 
 router = APIRouter(prefix="/api/juridico", tags=["juridico"])
+sync_router = APIRouter(prefix="/api/juridico/sync", tags=["juridico"], include_in_schema=False)
 
 _ver = require_permission("denuncia", "view")
 _editar = require_permission("denuncia", "edit")
@@ -278,9 +285,27 @@ async def listar_processos(
     ultimas = await _ultimas(session, [p.id for p in procs])
     casos = {p.denuncia_caso_id for p in procs if p.denuncia_caso_id}
     codigos = await _codigos_casos(session, casos)
+    leituras = {
+        origem: (
+            await session.execute(
+                select(JuridicoLeitura)
+                .where(JuridicoLeitura.origem == origem)
+                .order_by(JuridicoLeitura.quando.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        for origem in ("mac_mini", "navegador", "jusbrasil")
+    }
+    ultimo_pedido = (
+        await session.execute(select(JuridicoPedido).order_by(JuridicoPedido.id.desc()).limit(1))
+    ).scalar_one_or_none()
     return {
         "hoje": datetime.now(_BRT).date().isoformat(),
         "itens": [_dict(p, ultimas.get(p.id), codigos.get(p.denuncia_caso_id)) for p in procs],
+        # o topo do painel: a última leitura do Diário pelo Mac mini (07:30) e pelo botão
+        "diario": {k: _leitura_dict(v) for k, v in leituras.items()},
+        # o último pedido de leitura ao Mac mini (06:00 ou botão Atualizar) e como ele está
+        "pedido": _pedido_dict(ultimo_pedido),
     }
 
 
@@ -417,24 +442,206 @@ async def apagar_processo(
 
 
 @router.post("/processos/{processo_id}/diario")
-async def buscar_no_diario(
+async def lancar_do_diario(
     processo_id: int,
     session: Annotated[AsyncSession, Depends(get_session)],
     _u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
 ) -> dict:
-    """Botão "buscar no Diário": lê agora no DJEN as publicações deste processo (o Vigia do
-    Jurídico faz isso sozinho todo dia às 07:30)."""
+    """Botão "Buscar no Diário": o NAVEGADOR consulta o DJEN (o servidor leva 403, fica fora do
+    Brasil) e manda aqui as comunicações do processo — {itens: [...]}, como o DJEN devolve."""
     p = await _processo(session, processo_id)
     try:
-        res = await vigia_juridico.atualizar_processo(session, p)
-    except httpx.HTTPError as e:
-        raise HTTPException(
-            502, detail={"code": "juridico_djen_indisponivel", "erro": str(e)[:200]}
-        ) from None
-    if not res["ok"]:
-        raise HTTPException(422, detail={"code": "juridico_sem_numero"})
+        itens = juridico_diario.itens_validos(corpo)
+    except ValueError:
+        raise HTTPException(422, detail={"code": "juridico_itens_invalidos"}) from None
+    novas = await juridico_diario.lancar(session, p, itens)
     await session.commit()
-    return res
+    return {"ok": True, "novas": novas, "publicacoes": len(itens)}
+
+
+# ── Mac mini da Makisa (Vigia do Jurídico, 07:30): o mesmo token da cópia da Denúncia ─────────
+@sync_router.get("/processos")
+async def sync_processos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(den._remetente)],
+) -> dict:
+    """Os processos que o mini deve consultar no DJEN: com nº de 20 dígitos, fora os encerrados."""
+    procs = (
+        await session.execute(
+            select(JuridicoProcesso)
+            .where(JuridicoProcesso.numero.is_not(None), JuridicoProcesso.situacao != "encerrado")
+            .order_by(JuridicoProcesso.id)
+        )
+    ).scalars().all()
+    com_jus = set(
+        (
+            await session.execute(
+                select(JuridicoMovimentacao.processo_id)
+                .where(JuridicoMovimentacao.fonte == "jusbrasil")
+                .distinct()
+            )
+        ).scalars()
+    )
+    return {
+        "processos": [
+            {
+                "id": p.id,
+                "numero": juridico_diario.numero_20(p.numero),
+                "jusbrasil_link": p.jusbrasil_link,
+                # já leu o histórico inteiro no Jusbrasil uma vez? (senão carrega o "Mostrar mais")
+                "tem_jusbrasil": p.id in com_jus,
+            }
+            for p in procs
+            if juridico_diario.numero_20(p.numero)
+        ]
+    }
+
+
+@sync_router.post("/processos/{processo_id}/diario")
+async def sync_lancar_do_diario(
+    processo_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(den._remetente)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    p = await _processo(session, processo_id)
+    try:
+        itens = juridico_diario.itens_validos(corpo)
+    except ValueError:
+        raise HTTPException(422, detail={"code": "juridico_itens_invalidos"}) from None
+    novas = await juridico_diario.lancar(session, p, itens)
+    await session.commit()
+    return {"ok": True, "novas": novas, "publicacoes": len(itens)}
+
+
+@sync_router.post("/leitura")
+async def sync_leitura(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    r: Annotated[DenunciaRemetente, Depends(den._remetente)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """Fim de uma leitura do mini: {origem?, processos, publicacoes, novas, falhas, erro?} —
+    `origem` 'mac_mini' (o Diário, padrão) ou 'jusbrasil'."""
+    origem = "jusbrasil" if corpo.get("origem") == "jusbrasil" else "mac_mini"
+    await juridico_diario.registrar_leitura(session, origem, r.nome, corpo)
+    await session.commit()
+    return {"ok": True}
+
+
+@sync_router.post("/processos/{processo_id}/jusbrasil")
+async def sync_lancar_do_jusbrasil(
+    processo_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(den._remetente)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """O que o robô do mini leu na página do processo no Jusbrasil: {link, andamentos: [{data
+    'dd/mm/aaaa', tipo, texto}]}. O link entra no campo Jusbrasil se estiver vazio."""
+    p = await _processo(session, processo_id)
+    andamentos = corpo.get("andamentos")
+    if not isinstance(andamentos, list):
+        raise HTTPException(422, detail={"code": "juridico_itens_invalidos"})
+    novas = await juridico_diario.lancar_jusbrasil(session, p, corpo.get("link"), andamentos)
+    await session.commit()
+    return {"ok": True, "novas": novas, "andamentos": len(andamentos)}
+
+
+@sync_router.get("/pedido")
+async def sync_pegar_pedido(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(den._remetente)],
+) -> dict:
+    """O vigia do mini pergunta a cada minuto: o pedido mais antigo ainda não pego (≤ 3 h) é
+    dele — marca `pego_em` e devolve."""
+    agora = datetime.now(UTC)
+    ped = (
+        await session.execute(
+            select(JuridicoPedido)
+            .where(
+                JuridicoPedido.pego_em.is_(None),
+                JuridicoPedido.terminado_em.is_(None),
+                JuridicoPedido.pedido_em >= agora - juridico_diario.PEDIDO_MORTO,
+            )
+            .order_by(JuridicoPedido.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+    ).scalar_one_or_none()
+    if ped is None:
+        return {"pedido": None}
+    ped.pego_em = agora
+    ped.progresso = "o Mac mini pegou o pedido"
+    await session.commit()
+    return {"pedido": _pedido_dict(ped)}
+
+
+@sync_router.post("/pedido/{pedido_id}")
+async def sync_andamento_do_pedido(
+    pedido_id: int,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _r: Annotated[DenunciaRemetente, Depends(den._remetente)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """{progresso?, terminado?, ok?, resultado?} — o topo do painel mostra."""
+    ped = await session.get(JuridicoPedido, pedido_id)
+    if ped is None:
+        raise HTTPException(404, detail={"code": "juridico_pedido_nao_encontrado"})
+    if corpo.get("progresso"):
+        ped.progresso = str(corpo["progresso"])[:300]
+    if corpo.get("terminado"):
+        ped.terminado_em = datetime.now(UTC)
+        ped.ok = bool(corpo.get("ok", True))
+        ped.resultado = str(corpo.get("resultado") or "")[:500] or None
+    await session.commit()
+    return {"ok": True}
+
+
+def _pedido_dict(ped: JuridicoPedido | None) -> dict | None:
+    if ped is None:
+        return None
+    return {
+        "id": ped.id, "origem": ped.origem, "pedido_por": ped.pedido_por,
+        "jusbrasil": ped.jusbrasil, "pedido_em": ped.pedido_em.isoformat(),
+        "pego_em": ped.pego_em.isoformat() if ped.pego_em else None,
+        "progresso": ped.progresso,
+        "terminado_em": ped.terminado_em.isoformat() if ped.terminado_em else None,
+        "ok": ped.ok, "resultado": ped.resultado,
+    }
+
+
+@router.post("/atualizar")
+async def pedir_atualizacao(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+) -> dict:
+    """Botão Atualizar: o Diário o navegador busca na hora; aqui só o pedido do Jusbrasil ao
+    Mac mini (no máximo um a cada 2 h)."""
+    ped, motivo = await juridico_diario.pedir_leitura(session, "botao", _nome(u))
+    await session.commit()
+    return {"pedido": _pedido_dict(ped), "motivo": motivo}
+
+
+@router.post("/leituras")
+async def registrar_leitura_do_navegador(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    u: Annotated[User, Depends(_editar)],
+    corpo: Annotated[dict, Body()],
+) -> dict:
+    """Fim do "Buscar no Diário" do topo do painel: quantos processos, quantas publicações novas."""
+    await juridico_diario.registrar_leitura(session, "navegador", _nome(u), corpo)
+    await session.commit()
+    return {"ok": True}
+
+
+def _leitura_dict(lei: JuridicoLeitura | None) -> dict | None:
+    if lei is None:
+        return None
+    return {
+        "quando": lei.quando.isoformat(), "origem": lei.origem, "por": lei.por,
+        "processos": lei.processos, "publicacoes": lei.publicacoes, "novas": lei.novas,
+        "falhas": lei.falhas, "erro": lei.erro,
+    }
 
 
 @router.post("/processos/{processo_id}/movimentacoes")
