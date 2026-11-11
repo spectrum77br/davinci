@@ -15,8 +15,9 @@ O que se garante (27/10/2026) — um alarme quando:
 - o webhook do número aponta para outro lugar, ou há outro app inscrito (ou
   o nosso não está);
 - as respostas do mês chegam a 800 e a 1.000, ou o dia a 70 % do teto;
-- um número ATIVO com movimento em 24 h fica mais de 3 h sem webhook, só em
-  horário comercial.
+- um número ATIVO fica calado, em horário comercial, além do que o ritmo dele
+  (ou o do app inteiro) explica — o número de pouca mensagem não acende o dia
+  todo, e o "Testar conexão" que deu ok zera a conta (11/11/2026).
 E também:
 - o cron renova da Meta (só GET): a inspeção do token (1×/dia; recusa marca a
   conta, "não respondeu" vira alarme), os apps inscritos e a saúde do número;
@@ -44,6 +45,8 @@ from app.config import get_settings
 from app.models import (
     Alert,
     AtendimentoCanal,
+    AtendimentoConversa,
+    AtendimentoMensagem,
     AtendimentoZapApp,
     AtendimentoZapConta,
     AtendimentoZapEvento,
@@ -408,38 +411,254 @@ async def test_respostas_do_mes_conta_uma_vez_por_wamid(db, zap):
     assert r == {numero.canal_id: (3, 2)}
 
 
-async def test_sem_webhook_so_ativo_em_horario_comercial_com_movimento(db, zap):
-    _app, _c, numero = await cadastrar(db)
+# ── o silêncio de estranhar (11/11/2026) ─────────────────────────────────
+
+
+def _sp(dia: int, hora: int, minuto: int = 0) -> datetime:
+    """Um horário de outubro/2026 em São Paulo (UTC−3), em UTC."""
+    return datetime(2026, 10, dia, hora + 3, minuto, tzinfo=UTC)
+
+
+# Toda hora comercial de 21/10 (quarta) às 9 h de 28/10 com mensagem: o número
+# movimentado. Uma por dia, às 10 h: o número quieto (o normal em 11/11).
+CHEIO = [
+    _sp(d, h, 30)
+    for d in range(21, 29)
+    for h in range(8, 20)
+    if datetime(2026, 10, d).weekday() < 6 and _sp(d, h, 30) < _sp(28, 10)
+]
+QUIETO = [_sp(d, 10, 5) for d in (21, 22, 23, 24, 26, 27)]
+# Duas por dia (10 h e 15 h): ritmo bastante para julgar, mas folgado.
+MEIO = [_sp(d, h, 5) for d in (21, 22, 23, 24, 26, 27) for h in (10, 15)]
+
+
+def test_horas_comerciais():
+    # Sábado 19 h → segunda 9 h: 1 h no sábado, nada no domingo, 1 h na segunda.
+    assert zap_saude.horas_comerciais(_sp(31, 19), datetime(2026, 11, 2, 12, tzinfo=UTC)) == 2
+    # De madrugada a madrugada: as 12 h do dia.
+    assert zap_saude.horas_comerciais(_sp(28, 3), _sp(29, 3)) == 12
+    assert zap_saude.horas_comerciais(_sp(28, 14), _sp(28, 14)) == 0
+    assert zap_saude.horas_comerciais(_sp(28, 15), _sp(28, 14)) == 0
+
+
+def test_limite_do_silencio_pelo_ritmo():
+    # Toda hora com mensagem: o piso de 3 h.
+    assert zap_saude.limite_do_silencio(60, 60) == 3
+    # Metade das horas: ln(0,01)/ln(0,5) ≈ 6,6 h.
+    assert round(zap_saude.limite_do_silencio(30, 60), 1) == 6.6
+    # Uma hora a cada 12 (8 de 96): ~53 h — mais de quatro dias comerciais.
+    assert zap_saude.limite_do_silencio(8, 96) > 48
+    # Sem base: menos de 8 horas com mensagem (o número quieto de 11/11 — com
+    # 3 ou 4 mensagens soltas o ritmo sai inflado), ou menos de um dia de história.
+    assert zap_saude.limite_do_silencio(0, 72) is None
+    assert zap_saude.limite_do_silencio(7, 72) is None
+    assert zap_saude.limite_do_silencio(10, 11) is None
+
+
+def test_o_silencio_fica_fora_da_conta_do_ritmo():
+    """A história vai só até o último sinal: senão o próprio silêncio baixaria o ritmo."""
     agora = QUARTA_14H
+    s = zap_saude.avaliar_silencio(_sp(28, 10), agora, CHEIO, None)
+    assert s.estranho and s.limite_h == 3 and s.horas == 4 and s.desde == _sp(28, 10)
+    # A história é a semana que termina no sinal (21/10 10 h → 28/10 10 h): as
+    # 4 h caladas não entram (com elas, a base seria 76).
+    assert s.base_h == 72 and s.ativas == 72
+    # Calado há mais de uma semana: a história acabou, sem base.
+    s = zap_saude.avaliar_silencio(agora - timedelta(days=8), agora, CHEIO, None)
+    assert not s.estranho and s.limite_h is None
+    # Duas por dia, calado desde ontem às 15 h: normal no ritmo dele.
+    s = zap_saude.avaliar_silencio(_sp(27, 15, 5), agora, MEIO, None)
+    assert not s.estranho and s.limite_h > s.horas
+    # Uma por dia: ritmo de menos para julgar.
+    s = zap_saude.avaliar_silencio(_sp(27, 10, 5), agora, QUIETO, None)
+    assert not s.estranho and s.limite_h is None
+
+
+def test_a_historia_nao_encolhe_com_o_silencio():
+    """Revisão de 11/11: com a história presa em `agora`, quanto mais calado, menor
+    a base e maior o peso da última mensagem — o limite caía e acusava à toa."""
+    sinal = _sp(27, 15, 5)
+    limites = {
+        zap_saude.avaliar_silencio(sinal, quando, MEIO, None).limite_h
+        for quando in (_sp(28, 9), _sp(28, 18), _sp(29, 17), _sp(30, 12))
+    }
+    assert len(limites) == 1  # o mesmo limite, calado há 2 h ou há 2 dias
+
+
+def test_o_teste_ok_so_move_o_comeco_da_contagem():
+    """O "Testar conexão" ok zera a contagem, mas o ritmo segue o da semana antes do
+    último sinal REAL: o trecho calado até o teste não baixa o ritmo (revisão de 11/11)."""
+    sinal = _sp(27, 15, 5)  # 2 por dia: limite ≈ 25,3 h comerciais
+    antes = zap_saude.avaliar_silencio(sinal, _sp(29, 17), MEIO, None)
+    assert antes.estranho and 25 < antes.limite_h < 26
+    teste = _sp(29, 16)
+    depois = zap_saude.avaliar_silencio(teste, _sp(29, 17), MEIO, None, historia_ate=sinal)
+    assert not depois.estranho and depois.limite_h == antes.limite_h
+    # 26 h comerciais depois do teste (sábado 31/10, 18 h), ainda calado: volta a acusar.
+    volta = zap_saude.avaliar_silencio(teste, _sp(31, 18), MEIO, None, historia_ate=sinal)
+    assert volta.estranho and volta.limite_h == antes.limite_h
+
+
+def test_texto_do_ritmo_nunca_mostra_silencio_menor_que_o_limite():
+    s = zap_saude.Silencio(True, 6.8, 6.64, 30, 60)
+    texto = zap_saude.ritmo_em_texto(s)
+    assert "calado há 6 h comerciais (alarma a partir de 6 h)" in texto
+
+
+async def _historia(db, numero, momentos: list[datetime], conversa: str = "h") -> None:
+    """Mensagens de cliente no canal do número, nos horários dados."""
+    conversa = AtendimentoConversa(
+        canal_id=numero.canal_id,
+        plataforma="whatsapp",
+        canal="zap",
+        externo_id=f"{conversa}-{numero.id}",
+    )
+    db.add(conversa)
+    await db.flush()
+    for i, quando in enumerate(momentos):
+        db.add(
+            AtendimentoMensagem(
+                conversa_id=conversa.id,
+                externo_id=f"h{i}",
+                autor="cliente",
+                origem="cliente",
+                texto="oi",
+                enviada_em=quando,
+            )
+        )
+    await db.commit()
+
+
+async def _ativo(db, numero, *, sinal: datetime, criado: datetime, **mais) -> None:
     await _mudar(
         db,
         AtendimentoZapNumero,
         numero.id,
         etapa="ativo",
-        ultimo_recebido_em=agora - timedelta(hours=4),
+        ultimo_recebido_em=sinal,
+        ultimo_ok_em=sinal,
+        created_at=criado,
+        **mais,
     )
+    await _mudar(db, AtendimentoCanal, numero.canal_id, ultimo_ok_em=sinal)
+
+
+async def test_sem_webhook_pelo_ritmo_do_numero(db, zap):
+    _app, _c, numero = await cadastrar(db)
+    agora = QUARTA_14H
+    await _historia(db, numero, CHEIO)
+    await _ativo(db, numero, sinal=_sp(28, 10), criado=agora - timedelta(days=10))
     (a,) = [x for x in await _calcular(agora) if x.codigo == zap_saude.A_SEM_WEBHOOK]
-    assert "4 h" in a.frase
+    assert "4 h comerciais" in a.frase and "Testar conexão" in a.frase
     # De madrugada e no domingo, não.
     assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(QUARTA_03H))
     assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(DOMINGO_14H))
-    # Quieto há mais de 24 h (sem movimento): não.
-    await _mudar(
-        db, AtendimentoZapNumero, numero.id, ultimo_recebido_em=agora - timedelta(hours=30)
-    )
-    assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(agora))
     # Há 2 h: ainda não.
-    await _mudar(db, AtendimentoZapNumero, numero.id, ultimo_recebido_em=agora - timedelta(hours=2))
+    await _ativo(db, numero, sinal=agora - timedelta(hours=2), criado=agora - timedelta(days=10))
     assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(agora))
     # Número de teste (não ativo): nunca.
-    await _mudar(
-        db,
-        AtendimentoZapNumero,
-        numero.id,
-        etapa="teste",
-        ultimo_recebido_em=agora - timedelta(hours=4),
-    )
+    await _ativo(db, numero, sinal=_sp(28, 10), criado=agora - timedelta(days=10))
+    await _mudar(db, AtendimentoZapNumero, numero.id, etapa="teste")
     assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(agora))
+
+
+async def test_numero_quieto_nao_acende_o_dia_todo(db, zap):
+    """O caso de 11/11: 1 mensagem por dia, calado há 4 h ou há um dia — normal."""
+    _app, _c, numero = await cadastrar(db)
+    agora = QUARTA_14H
+    await _historia(db, numero, QUIETO)
+    await _ativo(db, numero, sinal=_sp(28, 10), criado=agora - timedelta(days=10))
+    assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(agora))
+    await _ativo(db, numero, sinal=_sp(27, 10, 5), criado=agora - timedelta(days=10))
+    assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(agora))
+    # Duas por dia, calado desde ontem às 15 h: também normal.
+    await _historia(db, numero, MEIO, conversa="meio")
+    await _ativo(db, numero, sinal=_sp(27, 15, 5), criado=agora - timedelta(days=10))
+    assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(agora))
+    # Sem história nenhuma (número novo): sem base, não alarma.
+    await _ativo(db, numero, sinal=_sp(28, 10), criado=agora - timedelta(hours=8))
+    assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(agora))
+
+
+async def test_testar_conexao_ok_zera_a_conta_do_silencio(db, zap):
+    _app, _c, numero = await cadastrar(db)
+    agora = QUARTA_14H
+    await _historia(db, numero, CHEIO)
+    teste = {"teste_ok_em": (agora - timedelta(hours=1)).isoformat()}
+    await _ativo(db, numero, sinal=_sp(28, 10), criado=agora - timedelta(days=10), saude=teste)
+    assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(agora))
+    # O teste também envelhece: 4 h depois dele, calado de novo, acusa.
+    teste = {"teste_ok_em": (agora - timedelta(hours=4)).isoformat()}
+    await _mudar(db, AtendimentoZapNumero, numero.id, saude=teste)
+    assert zap_saude.A_SEM_WEBHOOK in _codigos(await _calcular(agora))
+
+
+async def test_app_inteiro_calado_acusa_antes_do_numero_sozinho(db, zap):
+    """Dois números do mesmo app, cada um com mensagem em metade das horas (sozinho,
+    6,6 h de folga); somados, toda hora. Os dois calados há 4 h: acusa pelo app."""
+    _app, _c, um = await cadastrar(db)
+    _app, _c, outro = await cadastrar(
+        db, pnid="930000000000777", display="5511900000777", nome_na_barra="Outro · Zap"
+    )
+    agora = QUARTA_14H
+    pares = [t for t in CHEIO if t.hour % 2 == 0]
+    impares = [t for t in CHEIO if t.hour % 2 == 1]
+    await _historia(db, um, pares)
+    await _historia(db, outro, impares)
+    criado = agora - timedelta(days=10)
+    await _ativo(db, um, sinal=_sp(28, 10), criado=criado)
+    await _ativo(db, outro, sinal=_sp(28, 10), criado=criado)
+    async with _db.SessionLocal() as s:
+        numeros = list((await s.execute(select(AtendimentoZapNumero))).scalars().all())
+        calados = await zap_saude.silencios(s, numeros, agora)
+    assert calados.por_numero[um.id].estranho and calados.por_numero[um.id].pelo_app
+    assert calados.por_numero[outro.id].estranho and calados.por_numero[outro.id].pelo_app
+    assert calados.geral is None  # um app só: o do app já cobre
+    alertas = [x for x in await _calcular(agora) if x.codigo == zap_saude.A_SEM_WEBHOOK]
+    assert len(alertas) == 2 and all("mesmo app" in a.frase for a in alertas)
+    # O "Testar conexão" ok num deles vale para o app: os dois saem (revisão de 11/11).
+    teste = {"teste_ok_em": (agora - timedelta(minutes=10)).isoformat()}
+    await _mudar(db, AtendimentoZapNumero, um.id, saude=teste)
+    assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(agora))
+    await _mudar(db, AtendimentoZapNumero, um.id, saude={})
+    # O outro recebeu há 1 h: o app está vivo, e o primeiro (4 h) ainda está no ritmo dele.
+    await _ativo(db, outro, sinal=agora - timedelta(hours=1), criado=criado)
+    assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(agora))
+
+
+async def test_todos_os_numeros_calados_acusam_uma_linha_geral(db, zap):
+    """Dois apps, um número cada, cada um com mensagem em metade das horas: sozinhos,
+    4 h calados é normal; somados (toda hora), não — o webhook do DaVinci caiu?"""
+    _app, _c, um = await cadastrar(db)
+    _app, _c, outro = await cadastrar(
+        db,
+        app_id="910000000000777",
+        waba="920000000000777",
+        pnid="930000000000777",
+        display="5511900000777",
+        nome_na_barra="Outro · Zap",
+    )
+    agora = QUARTA_14H
+    criado = agora - timedelta(days=10)
+    await _historia(db, um, [t for t in CHEIO if t.hour % 2 == 0])
+    await _historia(db, outro, [t for t in CHEIO if t.hour % 2 == 1])
+    await _ativo(db, um, sinal=_sp(28, 10), criado=criado)
+    await _ativo(db, outro, sinal=_sp(28, 10), criado=criado)
+    alertas = [x for x in await _calcular(agora) if x.codigo == zap_saude.A_SEM_WEBHOOK]
+    assert len(alertas) == 1 and alertas[0].numero_ref is None
+    assert alertas[0].nivel == zap_saude.ERRO and "Nenhum número" in alertas[0].frase
+    (lp,) = await _parado(agora)
+    assert lp.tipo == vigia.TIPO_GERAL and lp.plataforma == "whatsapp"
+    assert lp.motivo == vigia.MOTIVO_GERAL_ZAP and lp.desde == _sp(28, 10)
+    # O "Testar conexão" não zera a linha geral: ele lê a Meta, não o nosso webhook.
+    teste = {"teste_ok_em": (agora - timedelta(minutes=10)).isoformat()}
+    await _mudar(db, AtendimentoZapNumero, um.id, saude=teste)
+    await _mudar(db, AtendimentoZapNumero, outro.id, saude=teste)
+    assert [lp.tipo for lp in await _parado(agora)] == [vigia.TIPO_GERAL]
+    # Um deles recebeu há 1 h: o webhook está vivo.
+    await _ativo(db, outro, sinal=agora - timedelta(hours=1), criado=criado)
+    assert zap_saude.A_SEM_WEBHOOK not in _codigos(await _calcular(agora))
+    assert await _parado(agora) == []
 
 
 # ═══════════════════════ avisar ══════════════════════════════════════════
@@ -707,20 +926,36 @@ async def _parado(agora) -> list:
         ]
 
 
-async def test_vigia_so_ativo_em_horario_comercial_e_com_movimento(db, zap):
+async def test_vigia_so_ativo_em_horario_comercial_e_pelo_ritmo(db, zap):
     _app, _c, numero = await cadastrar(db)
     agora = QUARTA_14H
-    await _mudar(db, AtendimentoCanal, numero.canal_id, ultimo_ok_em=agora - timedelta(hours=4))
+    criado = agora - timedelta(days=10)
+    await _historia(db, numero, CHEIO)
+    await _ativo(db, numero, sinal=_sp(28, 10), criado=criado)
     # Etapa teste: não vigia.
+    await _mudar(db, AtendimentoZapNumero, numero.id, etapa="teste")
     assert await _parado(agora) == []
     await _mudar(db, AtendimentoZapNumero, numero.id, etapa="ativo")
     (lp,) = await _parado(agora)
     assert lp.motivo == vigia.MOTIVO_ZAP and lp.limite_min == 180
+    assert "horas comerciais" in (lp.detalhe or "")
     assert await _parado(QUARTA_03H) == []
     assert await _parado(DOMINGO_14H) == []
-    await _mudar(db, AtendimentoCanal, numero.canal_id, ultimo_ok_em=agora - timedelta(hours=30))
+    await _ativo(db, numero, sinal=agora - timedelta(hours=2), criado=criado)
     assert await _parado(agora) == []
-    await _mudar(db, AtendimentoCanal, numero.canal_id, ultimo_ok_em=agora - timedelta(hours=2))
+
+
+async def test_vigia_nao_acende_o_numero_quieto(db, zap):
+    """O aviso de 11/11 ("Jlas2 sem ler há 15 h", com o teste dando ok): sai da faixa."""
+    _app, _c, numero = await cadastrar(db)
+    agora = QUARTA_14H
+    await _historia(db, numero, QUIETO)
+    # Calado há 4 h (dentro da janela da regra antiga, que acendia aqui).
+    await _ativo(db, numero, sinal=_sp(28, 10), criado=agora - timedelta(days=10))
+    assert await _parado(agora) == []
+    # E com duas por dia, calado desde ontem às 15 h: também não.
+    await _historia(db, numero, MEIO, conversa="meio")
+    await _ativo(db, numero, sinal=_sp(27, 15, 5), criado=agora - timedelta(days=10))
     assert await _parado(agora) == []
 
 

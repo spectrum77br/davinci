@@ -1009,8 +1009,17 @@ async def testar(session: AsyncSession, numero: AtendimentoZapNumero) -> dict[st
         await session.flush()
         raise Recusa("zap_meta_recusou", f"O teste falhou: {frase_da_meta(exc)}") from None
     conta.ultimo_ok_em = agora
+    frase = frase_do_teste(numero, fora)
+    if frase == FRASE_TESTE_OK and (conta.saude or {}).get("nosso_inscrito") is not False:
+        # O dono conferiu e deu ok: o alarme de silêncio deste número
+        # recomeça a contar daqui (`zap_saude.silencios`, 11/11/2026). Com o
+        # nosso app fora da conta, não: aí nada chega mesmo (A_NAO_INSCRITO).
+        numero.saude = {**(numero.saude or {}), "teste_ok_em": _iso(agora)}
     await session.flush()
-    return {"webhook_outro": [o["onde"] for o in fora], "frase": frase_do_teste(numero, fora)}
+    return {"webhook_outro": [o["onde"] for o in fora], "frase": frase}
+
+
+FRASE_TESTE_OK = "Conexão ok: a Meta respondeu e as mensagens deste número vêm para o DaVinci."
 
 
 def frase_do_teste(numero: AtendimentoZapNumero, fora: list[dict[str, str]]) -> str:
@@ -1021,7 +1030,7 @@ def frase_do_teste(numero: AtendimentoZapNumero, fora: list[dict[str, str]]) -> 
         partes.insert(0, webhook.rstrip("."))
     if partes:
         return "A Meta respondeu, mas: " + "; ".join(partes) + "."
-    return "Conexão ok: a Meta respondeu e as mensagens deste número vêm para o DaVinci."
+    return FRASE_TESTE_OK
 
 
 def normalizar_destinos(lista: list[str]) -> list[str]:

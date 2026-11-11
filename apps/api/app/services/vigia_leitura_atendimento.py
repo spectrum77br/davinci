@@ -38,9 +38,12 @@ gravada por quem lê:
   grava o `ultimo_ok_em` a cada evento. O webhook é EMPURRADO (a Meta manda
   quando o cliente escreve): número quieto à noite não é leitura parada. Por
   isso só entra o número `ativo` (no DaVinci de verdade), em horário
-  comercial (segunda a sábado, 8 h–20 h em SP) e com movimento nas últimas
-  24 h — e o limite é de 3 h ("a Meta parou de mandar?"). Só administrador
-  vê esta linha (o Zap é só deles, decisão de 26/10/2026);
+  comercial (segunda a sábado, 8 h–20 h em SP), e só quando o silêncio passa
+  do que o RITMO dele explica (11/11/2026, `zap_saude.silencios`: a regra
+  antiga — 3 h sem nada depois de movimento em 24 h — acendia o dia todo nos
+  números de 1 a 5 mensagens por dia). O "Testar conexão" que deu ok zera a
+  conta do número. Só administrador vê esta linha (o Zap é só deles, decisão
+  de 26/10/2026);
 - caixa de e-mail da EMPRESA com a ponte ligada (08/10/2026): o sinal do
   agente do Mac na Central de e-mail (`mail_mailboxes.last_seen_at`, a cada
   ≤ 3 min) — 30 min sem sinal, ou o agente pedindo login/avisando erro; o
@@ -61,7 +64,7 @@ token, a caixa `desligado` e a integração arquivada.
 
     loja por API 30 min · Magalu 6 h · robô 60 min · redes 60 min ·
     carrinho 2 h · reclamações 60 min · avaliações 2 h · e-mail 30 min ·
-    WhatsApp 3 h (só ativo, em horário comercial, com movimento em 24 h)
+    WhatsApp: o ritmo do número, nunca menos de 3 h (só ativo, em horário comercial)
 
 Medido em produção em 05/10 (13 h de log do worker): nenhuma loja por API
 passou de 6 min sem ler; o robô, 31 min (o perfil do AliExpress aberto por
@@ -156,16 +159,12 @@ LIMITES: dict[str, timedelta] = {
     CLASSE_ROBO: timedelta(minutes=60),
     CLASSE_SITE: timedelta(hours=2),
     CLASSE_REDES: timedelta(minutes=60),
-    # O Zap (27/10/2026): 3 h sem webhook, mas só no número ativo, em horário
-    # comercial e com movimento nas últimas 24 h (`ZAP_MOVIMENTO`).
+    # O Zap: o piso. O limite de verdade é o ritmo de cada número
+    # (`zap_saude.silencios`, 11/11/2026), só no ativo e em horário comercial.
     CLASSE_ZAP: timedelta(hours=3),
     RODADA_RECLAMACOES: timedelta(minutes=60),
     RODADA_AVALIACOES: timedelta(hours=2),
 }
-
-# O número quieto há mais de um dia não acusa (a noite e o domingo inteiros
-# também não): o alarme é para "estava movimentado e parou".
-ZAP_MOVIMENTO = timedelta(hours=24)
 
 # A linha da tela.
 TIPO_LOJA = "loja"
@@ -285,6 +284,8 @@ MOTIVO_GERAL_LOJAS = "nenhuma loja lê"
 MOTIVO_GERAL_ROBO = "Mac mini sem sinal"
 MOTIVO_RODADA = "rodada não termina lendo"
 MOTIVO_ZAP = "nenhuma mensagem chega"
+NOME_GERAL_ZAP = "WhatsApp"
+MOTIVO_GERAL_ZAP = "nenhum número do WhatsApp recebe mensagem"
 
 # Sem permissão (`sem_escopo`): o que falta depende da plataforma.
 ACAO_SEM_ESCOPO = {
@@ -345,6 +346,10 @@ ACAO_RODADA = (
 ACAO_ZAP = (
     "Abrir Lojas e modo › Números do WhatsApp e clicar em Testar conexão: a Meta parou "
     "de mandar? (o app inscrito na conta, o endereço do webhook, o token)"
+)
+ACAO_GERAL_ZAP = (
+    "Todos os números calados juntos: ver se o webhook do DaVinci está no ar (a api e o "
+    "worker do Zap). O Testar conexão não serve aqui: ele só lê a configuração na Meta"
 )
 # A caixa de e-mail da empresa (a Central de e-mail, lida pelo agente do Mac).
 PLATAFORMA_EMAIL = "email"
@@ -633,8 +638,10 @@ def _externos(caixas: list[_Caixa], corte: datetime | None) -> list[LeituraParad
 
 
 async def _zap(session: AsyncSession, caixas: list[_Caixa], agora: datetime) -> list[LeituraParada]:
-    """Os números do WhatsApp: só o `ativo`, em horário comercial, que tinha
-    movimento nas últimas 24 h e está há mais de 3 h sem nenhum evento."""
+    """Os números do WhatsApp: só o `ativo`, em horário comercial, calado além
+    do que o ritmo dele (ou o do app inteiro) explica — `zap_saude.silencios`
+    (11/11/2026; antes: 3 h sem evento depois de movimento em 24 h, que
+    acendia o dia todo nos números de pouca mensagem)."""
     if not caixas:
         return []
     from app.models import AtendimentoZapNumero
@@ -642,10 +649,10 @@ async def _zap(session: AsyncSession, caixas: list[_Caixa], agora: datetime) -> 
 
     if not zap_saude.em_horario_comercial(agora):
         return []
-    ativos = set(
+    numeros = list(
         (
             await session.execute(
-                select(AtendimentoZapNumero.canal_id).where(
+                select(AtendimentoZapNumero).where(
                     AtendimentoZapNumero.canal_id.in_([c.canal.id for c in caixas]),
                     AtendimentoZapNumero.etapa == "ativo",
                 )
@@ -654,15 +661,36 @@ async def _zap(session: AsyncSession, caixas: list[_Caixa], agora: datetime) -> 
         .scalars()
         .all()
     )
+    calados = await zap_saude.silencios(session, numeros, agora)
+    silencio_do_canal = {n.canal_id: calados.por_numero.get(n.id) for n in numeros}
     out: list[LeituraParada] = []
+    g = calados.geral
+    if g is not None and g.estranho and g.desde is not None:
+        out.append(
+            LeituraParada(
+                chave="geral:zap",
+                tipo=TIPO_GERAL,
+                # "whatsapp", não "interno": a rota esconde a linha do Zap de quem não é admin.
+                plataforma=PLATAFORMA_WHATSAPP,
+                loja=NOME_GERAL_ZAP,
+                motivo=MOTIVO_GERAL_ZAP,
+                acao=ACAO_GERAL_ZAP,
+                desde=g.desde,
+                nunca_leu=False,
+                minutos=_minutos(g.desde, agora),
+                limite_min=int((g.limite_h or 0) * 60),
+                detalhe=zap_saude.ritmo_em_texto(g),
+            )
+        )
     for c in caixas:
         idade = c.idade
+        silencio = silencio_do_canal.get(c.canal.id)
         if (
-            c.canal.id not in ativos
-            or not idade.parado
+            silencio is None
+            or not silencio.estranho
+            or silencio.limite_h is None
             or idade.nunca_leu
             or idade.desde is None
-            or agora - idade.desde > ZAP_MOVIMENTO
         ):
             continue
         erro = _texto_curto(c.canal.ultimo_erro)
@@ -677,10 +705,11 @@ async def _zap(session: AsyncSession, caixas: list[_Caixa], agora: datetime) -> 
                 desde=idade.desde,
                 nunca_leu=False,
                 minutos=idade.minutos,
-                limite_min=_limite_min(LIMITES[CLASSE_ZAP]),
+                limite_min=int(silencio.limite_h * 60),
                 canal_id=c.canal.id,
                 caixas=(c.rotulo,),
                 detalhe=canais_externos.descricao_da_origem(c.canal)
+                + f" · {zap_saude.ritmo_em_texto(silencio)}"
                 + (f" · {erro}" if erro else ""),
             )
         )

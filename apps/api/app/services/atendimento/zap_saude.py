@@ -22,8 +22,9 @@ Três partes:
        nosso não está inscrito;
      - as respostas do mês chegam a 800 e a 1.000, ou o dia chega a 70 % do
        teto do número;
-     - um número `ativo` com movimento nas últimas 24 h fica mais de 3 h sem
-       webhook em horário comercial ("a Meta parou de mandar?").
+     - um número `ativo` fica calado, em horário comercial, mais tempo do que
+       o ritmo DELE (ou o do app inteiro) explica ("a Meta parou de mandar?"
+       — `silencios`, 11/11/2026).
 
 2. **O cron `atendimento_zap_saude`** (`rodada`, a cada 15 min, só com a
    leitura do Zap ligada): renova da Meta o que só ela sabe (`renovar_da_meta`
@@ -49,9 +50,12 @@ o nome do número/conta/app da tela, contagens e a frase.
 
 from __future__ import annotations
 
+import math
 import time
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from collections import defaultdict
+from collections.abc import Iterable
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
@@ -64,6 +68,9 @@ from app.config import get_settings
 from app.models import (
     AlertSeverity,
     AlertType,
+    AtendimentoCanal,
+    AtendimentoConversa,
+    AtendimentoMensagem,
     AtendimentoZapApp,
     AtendimentoZapConta,
     AtendimentoZapEvento,
@@ -82,6 +89,7 @@ from app.services.atendimento import (
     zap_erros,
     zap_midia,
 )
+from app.services.atendimento.constantes import AUTOR_CLIENTE
 
 logger = structlog.get_logger()
 
@@ -99,8 +107,28 @@ MIDIA_AVISO = timedelta(hours=24)
 TOKEN_AVISO = timedelta(days=7)
 INSPECAO_A_CADA = timedelta(hours=24)
 TETO_AVISO = 0.7
+# O silêncio de estranhar (11/11/2026). Antes: número ativo com movimento em
+# 24 h e 3 h sem webhook = alarme. Com 1 a 5 mensagens de cliente por dia (o
+# normal dos números em 11/11), isso ficava aceso quase o dia todo — 80 h de
+# aviso em 12 dias no Inova, 60 h no Site Poofy, sem falha nenhuma (o "Testar
+# conexão" dava ok). Agora o limite é o RITMO do número (`limite_do_silencio`):
+# `p` = a fração das horas comerciais da última semana que tiveram mensagem de
+# cliente; um silêncio de `h` horas comerciais tem chance (1 − p)^h nesse
+# ritmo, e só alarma abaixo de 1 % — nunca antes de 3 h (`SEM_WEBHOOK`).
+# Três relógios (`silencios`): o número, o app (o webhook é do app) e TODOS os
+# números somados (o webhook do DaVinci fora do ar cala todos juntos). Medido
+# no histórico real de 30/10 a 11/11: 12 dias, 220 mensagens de cliente em 21
+# números — a regra antiga deu ~600 h de aviso; esta, 2 h por número e 1 h no
+# total, que acusaria o WhatsApp inteiro parado em 4 a 9 h comerciais.
 SEM_WEBHOOK = timedelta(hours=3)
-MOVIMENTO = timedelta(hours=24)
+SILENCIO_CHANCE = 0.01
+SILENCIO_JANELA = timedelta(days=7)
+# Menos de um dia comercial de história antes do silêncio: sem base (não alarma).
+SILENCIO_BASE_MINIMA_H = 12.0
+# Menos de 8 horas comerciais com mensagem na história: ritmo de menos para
+# julgar (com 3 ou 4 mensagens soltas o `p` sai inflado e acusa à toa — o Nexus,
+# 4 mensagens desde 06/11, acusaria depois de 39 h calado).
+SILENCIO_MINIMO_DE_HORAS = 8
 # Horário comercial (SP): segunda a sábado, das 8 h às 20 h.
 HORA_ABRE, HORA_FECHA = 8, 20
 QUALIDADE_RUIM = ("YELLOW", "RED")
@@ -225,6 +253,283 @@ def assinatura_falhando(app: AtendimentoZapApp, falhas: int, agora: datetime) ->
         return False
     ultimo = _utc(app.ultimo_evento_em)
     return ultimo is None or agora - ultimo > ASSINATURA_JANELA
+
+
+# ── O silêncio de estranhar (11/11/2026) ──────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Silencio:
+    """Um silêncio agora, medido no ritmo da história antes dele."""
+
+    estranho: bool
+    horas: float  # horas comerciais calado (desde o último sinal)
+    limite_h: float | None  # a partir de quantas horas comerciais estranhar (None = sem base)
+    ativas: int  # horas comerciais da história com mensagem de cliente
+    base_h: float  # horas comerciais da história
+    escopo: str = "numero"  # numero | app (o app inteiro calado) | geral (todos os números)
+    desde: datetime | None = None  # o último sinal (de onde conta o silêncio)
+
+    @property
+    def pelo_app(self) -> bool:
+        return self.escopo == ESCOPO_APP
+
+
+ESCOPO_NUMERO, ESCOPO_APP, ESCOPO_GERAL = "numero", "app", "geral"
+
+
+@dataclass(frozen=True)
+class Silencios:
+    """O que `silencios` devolve: o de cada número ativo e o de todos somados."""
+
+    por_numero: dict[UUID, Silencio]
+    # Todos os números ativos somados (o webhook do DaVinci fora do ar cala
+    # todos juntos). None com menos de dois apps — aí o do app já cobre.
+    geral: Silencio | None = None
+
+
+def horas_comerciais(inicio: datetime, fim: datetime) -> float:
+    """Quantas horas de [inicio, fim) caem no horário comercial (SP). PURA."""
+    inicio, fim = _utc(inicio), _utc(fim)
+    if inicio is None or fim is None or fim <= inicio:
+        return 0.0
+    total = 0.0
+    dia = inicio.astimezone(_SP).date()
+    ultimo = fim.astimezone(_SP).date()
+    while dia <= ultimo:
+        if dia.weekday() < 6:
+            abre = datetime(dia.year, dia.month, dia.day, HORA_ABRE, tzinfo=_SP)
+            fecha = datetime(dia.year, dia.month, dia.day, HORA_FECHA, tzinfo=_SP)
+            de, ate = max(abre, inicio), min(fecha, fim)
+            if ate > de:
+                total += (ate - de).total_seconds() / 3600
+        dia += timedelta(days=1)
+    return total
+
+
+def _hora_comercial(quando: datetime) -> tuple[date, int] | None:
+    """A hora comercial (dia, hora em SP) em que `quando` cai; fora dela, None. PURA."""
+    local = (_utc(quando) or quando).astimezone(_SP)
+    if local.weekday() < 6 and HORA_ABRE <= local.hour < HORA_FECHA:
+        return local.date(), local.hour
+    return None
+
+
+def limite_do_silencio(ativas: int, base_h: float) -> float | None:
+    """A partir de quantas horas comerciais calado o silêncio é de estranhar. PURA.
+
+    `p` = `ativas / base_h`, a fração das horas comerciais da história que
+    tiveram mensagem de cliente (a hora, não a mensagem: o cliente que manda
+    cinco seguidas conta uma vez). Calado `h` horas, a chance no ritmo do
+    número é (1 − p)^h: o limite é o `h` em que ela cai abaixo de
+    `SILENCIO_CHANCE` — nunca menos de `SEM_WEBHOOK`. História curta (menos de
+    `SILENCIO_BASE_MINIMA_H`) ou com menos de `SILENCIO_MINIMO_DE_HORAS` horas
+    com mensagem: None (ritmo de menos para julgar, não alarma).
+    """
+    if ativas < SILENCIO_MINIMO_DE_HORAS or base_h < SILENCIO_BASE_MINIMA_H:
+        return None
+    piso = SEM_WEBHOOK.total_seconds() / 3600
+    p = ativas / base_h
+    if p >= 1:
+        return piso
+    return max(piso, math.log(SILENCIO_CHANCE) / math.log(1 - p))
+
+
+def avaliar_silencio(
+    desde: datetime | None,
+    agora: datetime,
+    recebidas: Iterable[datetime],
+    inicio: datetime | None,
+    *,
+    historia_ate: datetime | None = None,
+) -> Silencio:
+    """O silêncio desde `desde`, no ritmo da semana ANTES do último sinal real. PURA.
+
+    `desde` é de onde conta o silêncio: o último sinal, ou o "Testar conexão"
+    que deu ok depois dele. `historia_ate` é o último sinal REAL (sem o teste;
+    padrão: `desde`) — a história do ritmo é a semana que termina nele
+    (`SILENCIO_JANELA`, nunca antes de `inicio`, o número cadastrado). Ancorada
+    no sinal e não em `agora`: o trecho calado nunca entra na conta (senão o
+    próprio silêncio — ou o teste que zerou a conta — baixaria o ritmo e
+    calaria o alarme), e a história não encolhe enquanto o silêncio cresce
+    (encolhendo, a última mensagem pesava cada vez mais e o limite caía —
+    revisão de 11/11). Sem sinal real há mais de uma semana: sem base, não alarma.
+    """
+    desde = _utc(desde)
+    if desde is None:
+        return Silencio(False, 0.0, None, 0, 0.0)
+    desde = min(desde, agora)
+    corte = min(_utc(historia_ate) or desde, desde)
+    calado = horas_comerciais(desde, agora)
+    if agora - corte > SILENCIO_JANELA:
+        return Silencio(False, calado, None, 0, 0.0, desde=desde)
+    ini = corte - SILENCIO_JANELA
+    if inicio is not None:
+        ini = max(ini, _utc(inicio) or ini)
+    base = horas_comerciais(ini, corte)
+    horas = set()
+    for quando in recebidas:
+        q = _utc(quando)
+        if q is not None and ini <= q <= corte:
+            hora = _hora_comercial(q)
+            if hora is not None:
+                horas.add(hora)
+    limite = limite_do_silencio(len(horas), base)
+    return Silencio(
+        limite is not None and calado >= limite, calado, limite, len(horas), base, desde=desde
+    )
+
+
+def _mais_novo(*datas: datetime | None) -> datetime | None:
+    validas = [d for d in (_utc(x) for x in datas) if d is not None]
+    return max(validas) if validas else None
+
+
+def teste_ok_em(numero: AtendimentoZapNumero) -> datetime | None:
+    """Quando o "Testar conexão" deste número deu ok pela última vez (`zap_cadastro.testar`)."""
+    return _data((numero.saude or {}).get("teste_ok_em"))
+
+
+async def _recebidas(
+    session: AsyncSession, canal_ids: list[UUID], agora: datetime
+) -> dict[UUID, list[datetime]]:
+    """Os horários das mensagens de CLIENTE de cada canal na janela (só leitura)."""
+    if not canal_ids:
+        return {}
+    quando = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    linhas = await session.execute(
+        select(AtendimentoConversa.canal_id, quando)
+        .join(AtendimentoConversa, AtendimentoConversa.id == AtendimentoMensagem.conversa_id)
+        .where(
+            AtendimentoConversa.canal_id.in_(canal_ids),
+            AtendimentoMensagem.autor == AUTOR_CLIENTE,
+            # Duas janelas: a história é a semana antes do último sinal, que
+            # pode ter sido até uma semana atrás (`avaliar_silencio`).
+            quando >= agora - 2 * SILENCIO_JANELA,
+            quando <= agora,
+        )
+    )
+    out: dict[UUID, list[datetime]] = defaultdict(list)
+    for canal_id, em in linhas.all():
+        out[canal_id].append(em)
+    return out
+
+
+async def silencios(
+    session: AsyncSession, numeros: list[AtendimentoZapNumero], agora: datetime
+) -> Silencios:
+    """O silêncio dos números ATIVOS com canal — o alarme "nenhuma mensagem chega".
+
+    Três relógios:
+    - o do NÚMERO: desde o último sinal dele (evento da Meta, mensagem
+      recebida, ou o "Testar conexão" que deu ok — o dono conferiu, a conta
+      recomeça dali), no ritmo dele;
+    - o do APP: o webhook é do app — se a Meta parou de mandar para ele, todos
+      os números dele calam juntos. Desde o último evento de qualquer número do
+      app (ou o teste ok de QUALQUER número dele: a condição é a mesma para
+      todos), no ritmo SOMADO deles. Basta um dos dois estranhar;
+    - o GERAL (`Silencios.geral`): todos os números somados, desde o último
+      evento de qualquer um — o webhook do DaVinci fora do ar. É o que acusa
+      cedo (4 a 9 h comerciais no ritmo de 11/11): número a número, o
+      movimento é pouco demais para julgar. O "Testar conexão" NÃO zera este:
+      ele lê a configuração na Meta e não enxerga o nosso webhook fora do ar.
+    O teste só move o começo da contagem: o ritmo é sempre o da semana antes
+    do último sinal REAL (`historia_ate`).
+    A configuração (inscrição, webhook do número, token) o cron confere a cada
+    rodada, com alarme próprio: este é só o "a Meta parou de mandar sem nada
+    mudar". Não olha o horário comercial (quem chama decide). Só leitura.
+    """
+    ativos = [n for n in numeros if n.etapa == "ativo" and n.canal_id is not None]
+    if not ativos:
+        return Silencios({})
+    canal_ids = [n.canal_id for n in ativos]
+    canal_ok = dict(
+        (
+            await session.execute(
+                select(AtendimentoCanal.id, AtendimentoCanal.ultimo_ok_em).where(
+                    AtendimentoCanal.id.in_(canal_ids)
+                )
+            )
+        ).all()
+    )
+    recebidas = await _recebidas(session, canal_ids, agora)
+    conta_app = dict(
+        (
+            await session.execute(
+                select(AtendimentoZapConta.id, AtendimentoZapConta.app_ref).where(
+                    AtendimentoZapConta.id.in_({n.conta_ref for n in ativos})
+                )
+            )
+        ).all()
+    )
+    evento_do_app = dict(
+        (
+            await session.execute(
+                select(AtendimentoZapApp.id, AtendimentoZapApp.ultimo_evento_em).where(
+                    AtendimentoZapApp.id.in_(set(conta_app.values()))
+                )
+            )
+        ).all()
+    )
+    sinal: dict[UUID, datetime | None] = {}
+    por_app: dict[UUID, list[AtendimentoZapNumero]] = defaultdict(list)
+    for n in ativos:
+        sinal[n.id] = _mais_novo(n.ultimo_ok_em, n.ultimo_recebido_em, canal_ok.get(n.canal_id))
+        app_ref = conta_app.get(n.conta_ref)
+        if app_ref is not None:
+            por_app[app_ref].append(n)
+    testes = {n.id: teste_ok_em(n) for n in ativos}
+    out: dict[UUID, Silencio] = {}
+    for n in ativos:
+        silencio = avaliar_silencio(
+            _mais_novo(sinal[n.id], testes[n.id]),
+            agora,
+            recebidas.get(n.canal_id, ()),
+            n.created_at,
+            historia_ate=sinal[n.id],
+        )
+        app_ref = conta_app.get(n.conta_ref)
+        irmaos = por_app.get(app_ref, []) if app_ref is not None else []
+        if not silencio.estranho and len(irmaos) > 1:
+            sinal_do_app = _mais_novo(*(sinal[i.id] for i in irmaos), evento_do_app.get(app_ref))
+            do_app = avaliar_silencio(
+                _mais_novo(sinal_do_app, *(testes[i.id] for i in irmaos)),
+                agora,
+                [t for i in irmaos for t in recebidas.get(i.canal_id, ())],
+                min((i.created_at for i in irmaos if i.created_at is not None), default=None),
+                historia_ate=sinal_do_app,
+            )
+            if do_app.estranho:
+                silencio = replace(do_app, escopo=ESCOPO_APP)
+        out[n.id] = silencio
+    geral = None
+    if len(por_app) > 1:
+        criados = [n.created_at for n in ativos if n.created_at is not None]
+        geral = replace(
+            avaliar_silencio(
+                _mais_novo(*sinal.values(), *evento_do_app.values()),
+                agora,
+                [t for lista in recebidas.values() for t in lista],
+                min(criados, default=None),
+            ),
+            escopo=ESCOPO_GERAL,
+        )
+    return Silencios(out, geral)
+
+
+def ritmo_em_texto(s: Silencio) -> str:
+    """A conta do alarme em linguagem de operação (sem dado de cliente). PURA."""
+    quem = {
+        ESCOPO_APP: "os números deste app, somados, tiveram",
+        ESCOPO_GERAL: "todos os números, somados, tiveram",
+    }.get(s.escopo, "teve")
+    # Os dois para baixo (int): o alarme acende com `horas >= limite_h`, então o
+    # texto nunca mostra um silêncio menor que o limite (revisão de 11/11).
+    limite = f"alarma a partir de {int(s.limite_h)} h" if s.limite_h is not None else "sem base"
+    return (
+        f"Na semana antes da última mensagem, {quem} mensagem de cliente em {s.ativas} de "
+        f"{int(s.base_h)} horas comerciais; calado há {int(s.horas)} h comerciais ({limite})"
+    )
 
 
 # ── A conexão de um número (a "pill" da tela) ─────────────────────────────
@@ -495,23 +800,42 @@ def _alertas_do_numero(numero: AtendimentoZapNumero, agora: datetime) -> list[Al
     ):
         if codigo in problemas:
             out.append(Alerta(alarme, AVISO, f"{nome}: {problemas[codigo]}.", numero_ref=numero.id))
-    ultimo = _utc(numero.ultimo_recebido_em)
-    if (
-        numero.etapa == "ativo"
-        and ultimo is not None
-        and SEM_WEBHOOK < agora - ultimo <= MOVIMENTO
-        and em_horario_comercial(agora)
-    ):
-        horas = int((agora - ultimo).total_seconds() // 3600)
+    return out
+
+
+async def _alertas_de_silencio(
+    session: AsyncSession, numeros: list[AtendimentoZapNumero], agora: datetime
+) -> list[Alerta]:
+    """O número ativo calado além do ritmo dele (ou do app inteiro), em horário comercial."""
+    if not em_horario_comercial(agora):
+        return []
+    calados = await silencios(session, numeros, agora)
+    out: list[Alerta] = []
+    g = calados.geral
+    if g is not None and g.estranho:
         out.append(
             Alerta(
                 A_SEM_WEBHOOK,
-                AVISO,
-                f"{nome}: nenhuma mensagem chega há {horas} h, e o número costuma ter "
-                "movimento. A Meta parou de mandar? Use Testar conexão.",
-                numero_ref=numero.id,
+                ERRO,
+                f"Nenhum número do WhatsApp recebe nada há {int(g.horas)} h comerciais. O "
+                "webhook do DaVinci está no ar? Veja a api e o worker (o Testar conexão "
+                f"lê só a Meta e não enxerga isso) ({ritmo_em_texto(g)}.)",
             )
         )
+    for n in numeros:
+        s = calados.por_numero.get(n.id)
+        if s is None or not s.estranho:
+            continue
+        nome = nome_do_numero(n)
+        frase = (
+            f"{nome}: nenhum número do mesmo app recebe nada há {int(s.horas)} h comerciais, "
+            "e somados eles costumam ter movimento. A Meta parou de mandar para o app? "
+            "Use Testar conexão."
+            if s.pelo_app
+            else f"{nome}: nenhuma mensagem chega há {int(s.horas)} h comerciais, mais do que "
+            "o ritmo do número explica. A Meta parou de mandar? Use Testar conexão."
+        )
+        out.append(Alerta(A_SEM_WEBHOOK, AVISO, f"{frase} ({ritmo_em_texto(s)}.)", numero_ref=n.id))
     return out
 
 
@@ -592,6 +916,7 @@ async def calcular(
         out += _alertas_da_conta(conta, conta.id in vivos, agora)
     for numero in numeros:
         out += _alertas_do_numero(numero, agora)
+    out += await _alertas_de_silencio(session, numeros, agora)
     out += await _alertas_de_volume(session, numeros, agora)
     return out
 

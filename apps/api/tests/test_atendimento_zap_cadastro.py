@@ -703,6 +703,19 @@ async def test_testar_conexao_le_a_saude_e_alerta_webhook_em_outro_lugar(
     assert corpo_r["numero"]["limite"] == "TIER_1K"
     pedido = next(c for c in graph.chamadas if c.url.path == f"/{V}/{NUM_TESTE}")
     assert "webhook_configuration" in pedido.url.params["fields"]
+    # Deu ok: o alarme de silêncio do número recomeça a contar daqui (11/11/2026).
+    assert corpo_r["frase"].startswith("Conexão ok")
+
+    async def _teste_ok_em():
+        saude = (
+            await db.execute(
+                select(AtendimentoZapNumero.saude).where(AtendimentoZapNumero.id == n["id"])
+            )
+        ).scalar_one()
+        return (saude or {}).get("teste_ok_em")
+
+    ok_em = await _teste_ok_em()
+    assert ok_em is not None
     # O Duoke deixou um endereço ALTERNATIVO no número: as mensagens vão para lá.
     _saude_do_numero(
         graph,
@@ -714,6 +727,8 @@ async def test_testar_conexao_le_a_saude_e_alerta_webhook_em_outro_lugar(
     r = await client.post(f"{URL}/numeros/{n['id']}/testar")
     assert r.json()["webhook_outro"] == ["phone_number"]
     assert "outro lugar" in r.json()["frase"]
+    # Teste que não deu ok não zera nada.
+    assert await _teste_ok_em() == ok_em
     tela = (await client.get(f"{URL}/numeros")).json()
     assert any(a["codigo"] == "webhook_em_outro_lugar" for a in tela["alertas"])
 
