@@ -78,9 +78,10 @@ def gates(db):
             "area": "Lojas",
             "title": "Entrada contínua de pedidos por loja",
             "state": OK,
-            "detail": "No servidor desde 09/11: as 52 contas do DaVinci lidas a cada 5 minutos, "
-            "com releitura diária de 7 dias (30 na primeira) para Mercado Livre e "
-            "TikTok, envio e cupom do ML lidos à parte.",
+            "detail": "No servidor desde 09/11: ML, Shopee e TikTok lidos a cada minuto e as "
+            "demais contas a cada 5, com releitura diária de 7 dias em todas as lojas (desde "
+            "11/11; antes só ML e TikTok, por isso 106 vendas de 04 a 09/11 ficaram de fora), "
+            "envio e cupom do ML lidos à parte.",
         },
         {
             "id": "promotion",

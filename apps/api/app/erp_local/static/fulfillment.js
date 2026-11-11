@@ -160,6 +160,18 @@ function wouldPanel(){
   const rows=(state.would||[]).map(w=>`<tr><td>${esc(hour(w.at))}</td><td>${esc(w.name)}</td><td>${esc(w.target)}</td><td class="would-text">${esc(w.detail?.would||'')}${['stock','price'].includes(w.action)?` <a href="/api/erp-local/homolog/plans/${w.action}.csv">Baixar a lista</a>`:''}</td></tr>`);
   return panel('O que o ERP faria hoje','Na homologação, cada ação que sairia para as lojas ou para a SEFAZ fica aqui com o que seria mandado. Nada foi enviado.',rows.length?table(['Hora','Ação','Pedido ou nota','O que faria'],rows.join('')):'<p class="empty">Nenhuma ação ainda. Imprima uma etiqueta ou envie uma NF-e para ver o que o ERP faria.</p>');
 }
+function coveragePanel(){
+  const c=state.bling_coverage;if(!c)return '';
+  const day=d=>d?d.split('-').reverse().slice(0,2).join('/'):'';
+  const when=new Date(c.taken_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+  const reading=r=>r==null?'<span class="badge warn">Não lida pelo ERP</span>':r==='complete'?'<span class="badge good">Lendo</span>':`<span class="badge warn">${esc((typeof authorizationLabels!=='undefined'&&authorizationLabels[r])||r)}</span>`;
+  const rows=(c.stores||[]).map(s=>{
+    const lines=[...(s.missing_list||[]).map(m=>`<li>Falta ${m.store_number?copyText(m.store_number,'número da loja'):'pedido sem número de loja'} · Bling ${esc(m.number)} · ${esc(day(m.day))} · ${esc(m.situation)} · ${brl(m.total)}</li>`),...(s.different_list||[]).map(m=>`<li>Valor ${copyText(m.store_number,'número da loja')} · Bling ${brl(m.total)} · ERP ${brl(m.erp_total)}</li>`)];
+    return `<tr><td>${esc(channelNames[s.channel]||s.channel||'Bling')} · ${esc(s.name)}<small>Loja ${esc(s.bling_store)} no Bling</small></td><td>${reading(s.reading)}</td><td class="num">${s.bling}</td><td class="num">${s.found}</td><td class="num">${s.missing?`<strong>${s.missing}</strong>`:'0'}</td><td>${s.equal} iguais · ${s.different} diferentes</td></tr>${lines.length?`<tr class="coverage-detail"><td colspan="6"><details><summary>Ver ${lines.length} ${lines.length===1?'pedido':'pedidos'}</summary><ul>${lines.join('')}</ul></details></td></tr>`:''}`;
+  });
+  const t=c.totals||{};
+  return panel('Conferência com o Bling',`Cada venda que o Bling tem de ${esc(day(c.from))} a ${esc(day(c.to))}, procurada no que o ERP leu da loja. Atualiza de hora em hora (última às ${esc(when)}): ${t.bling||0} no Bling, ${t.found||0} achadas, ${t.missing||0} faltando, ${t.different||0} com valor diferente. Canceladas no Bling não contam como falta.`,table(['Loja do Bling','Leitura no ERP','No Bling','Achadas','Faltando','Valor'],rows.join('')));
+}
 document.addEventListener('click',e=>{
   const button=e.target.closest('[data-invoice-for]');if(!button)return;
   const id=button.dataset.invoiceFor;

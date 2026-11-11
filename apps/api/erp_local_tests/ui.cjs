@@ -1347,6 +1347,19 @@ test('homologation lists what the ERP would do and lets an order go to its invoi
   assert.equal(d.querySelector('[data-invoice-for="P1"]').disabled,false);
 });
 
+test('the overview shows each Bling store against what the ERP read, with missing numbers to copy',async()=>{
+  const bling_coverage={taken_at:'2026-11-11T15:00:00+00:00',from:'2026-11-04',to:'2026-11-11',totals:{bling:3,found:1,missing:2,different:0},stores:[
+    {bling_store:'205857331',channel:'shopee',store:'s1',name:'Minas',reading:'auth_denied',bling:2,found:1,missing:1,cancelled:0,equal:1,different:0,missing_list:[{number:'307686',store_number:'261106KF7AJBM6',day:'2026-11-06',total:'99.90',situation:'Em andamento'}],different_list:[]},
+    {bling_store:'205925390',channel:null,store:null,name:'Temu',reading:null,bling:1,found:0,missing:1,cancelled:0,equal:0,different:0,missing_list:[],different_list:[]}]};
+  const {document:d}=await setup({bling_coverage});
+  d.querySelector('nav [data-page=overview]').click();
+  assert.match(d.body.textContent,/Conferência com o Bling/);
+  assert.match(d.body.textContent,/3 no Bling, 1 achadas, 2 faltando/);
+  assert.match(d.body.textContent,/Acesso recusado/);
+  assert.match(d.body.textContent,/Não lida pelo ERP/);
+  assert.equal(d.querySelector('.coverage-detail [data-copy]').dataset.copy,'261106KF7AJBM6');
+});
+
 test('outside homologation the invoice button stays off and no panel appears',async()=>{
   const {document:d}=await setup({orders:[ownOrder('P1','A')]});
   d.querySelector('nav [data-page=overview]').click();

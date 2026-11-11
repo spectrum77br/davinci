@@ -35,6 +35,10 @@ LOOKBACK_WINDOW = timedelta(days=7)
 # The first re-read of an account covers a month, so sales read before the reading gained a
 # field (Mercado Livre coupon, TikTok shipping) get it too.
 FIRST_LOOKBACK_WINDOW = timedelta(days=30)
+# Shopee, Amazon, Carrefour and Magalu gained the re-read on 11/11/2026. Their first one covers the
+# days before the reception ran on the server (04 to 09/11): sales never read and situations that
+# changed meanwhile. Ten one-day reads per account keep that first round short.
+CATCH_UP_LOOKBACK_WINDOW = timedelta(days=10)
 LEASE = timedelta(minutes=10)
 MAX_READS = 20
 BACKOFF_BASE = 60
@@ -250,6 +254,10 @@ def run_account(erp, channel, store, provider, *, now=None, importer=None):
     return {"state": state, "reads": reads, "observed": observed, "added": added}
 
 
+def first_lookback(channel):
+    return FIRST_LOOKBACK_WINDOW if channel in CHARGED else CATCH_UP_LOOKBACK_WINDOW
+
+
 def run_lookback(erp, channel, store, provider, *, now=None, importer=None):
     """Periodic re-read of recent days. Finds late changes and never moves the cursor."""
     now = now or datetime.now(UTC)
@@ -265,7 +273,7 @@ def run_lookback(erp, channel, store, provider, *, now=None, importer=None):
             "AND state IN ('complete','partial_kept') LIMIT 1",
             (channel, store),
         ).fetchone()
-    start, end = now - (FIRST_LOOKBACK_WINDOW if first else LOOKBACK_WINDOW), now - SAFETY_LAG
+    start, end = now - (first_lookback(channel) if first else LOOKBACK_WINDOW), now - SAFETY_LAG
     # One day per read, like the reception: the store readers refuse longer windows.
     state, reads, observed, added, position, kept = "complete", 0, 0, 0, start, False
     while position < end:
@@ -518,9 +526,10 @@ def sync_promoted(erp, channel, store):
 def service_round(erp, channel, store, provider, *, reader=None, now=None):
     """Read the store, keep the buyers it still shows and flag what was cancelled."""
     report = {"reception": run_account(erp, channel, store, provider, now=now)}
-    if channel in CHARGED:
-        # Daily re-read of recent days: freight and coupons change after the sale is placed.
-        report["lookback"] = run_lookback(erp, channel, store, provider, now=now)
+    # Daily re-read of recent days, every store: a sale the reception missed (the server was off,
+    # a store refused a read) comes back, and so do situations and, on Mercado Livre and TikTok,
+    # freight and coupons that change after the sale is placed.
+    report["lookback"] = run_lookback(erp, channel, store, provider, now=now)
     if reader is not None:
         report["recipients"] = recipient_capture.read_due(erp, channel, store, reader, now=now)
     report["status"] = sync_promoted(erp, channel, store)

@@ -114,6 +114,27 @@ def _is_flex(db, channel, store, key, orders):
     return bool(row) and json.loads(row["data"]).get("carrier") == "self_service"
 
 
+def sale_total(db, channel, store, key, live):
+    """The sale's total as Bling keeps it, as text, or None while freight or coupon are unread.
+
+    Mercado Livre and TikTok: products + freight the buyer paid - seller coupon. The other stores:
+    the total in the order header."""
+    charges = native_ingest.store_charges(db, channel, store, key, live)
+    if channel in native_ingest.CHARGED and charges is None:
+        return None
+    total = Decimal(0)
+    for order in live:
+        if charges is None:
+            header = order.get("paid") or order.get("total") or {}
+            total += Decimal(str(header.get("amount") or 0))
+            continue
+        for item in order.get("items") or []:
+            quantity = native_ingest._quantity(channel, item) or 0
+            price = native_ingest._price(item) or {}
+            total += Decimal(str(price.get("amount") or 0)) * Decimal(str(quantity))
+    return str(total + charges["freight"] - charges["coupon"] if charges else total)
+
+
 def local_sales(db, mapping=None, available=None, at=None):
     """What the ERP would turn into orders, in the shape the comparison needs.
 
@@ -130,21 +151,12 @@ def local_sales(db, mapping=None, available=None, at=None):
             live = [o for o in unit.values() if not native_ingest._is_cancelled(o)]
             if not live:
                 continue
-            items, total = Counter(), Decimal(0)
-            # Mercado Livre: products + freight the buyer paid - coupon, once both were read.
-            charges = native_ingest.store_charges(db, channel, store, key, live)
-            unread = channel in native_ingest.CHARGED and charges is None
+            items = Counter()
             lines, unresolved = [], Counter()
             for order in live:
-                if charges is None:
-                    header = order.get("paid") or order.get("total") or {}
-                    total += Decimal(str(header.get("amount") or 0))
                 for item in order.get("items") or []:
                     resolved = native_ingest._resolve(db, store, item, channel)
                     quantity = native_ingest._quantity(channel, item) or 0
-                    if charges is not None:
-                        price = native_ingest._price(item) or {}
-                        total += Decimal(str(price.get("amount") or 0)) * Decimal(str(quantity))
                     if resolved["sku"]:
                         lines.append((resolved["sku"], quantity))
                     else:
@@ -171,9 +183,7 @@ def local_sales(db, mapping=None, available=None, at=None):
             sales[key] = {
                 "channel": channel,
                 "items": dict(items),
-                "total": None
-                if unread
-                else str(total + charges["freight"] - charges["coupon"] if charges else total),
+                "total": sale_total(db, channel, store, key, live),
                 "document": fingerprint(buyer.get("document"), digits=True),
                 "name": fingerprint(delivery.get("name")),
                 "buyer_name": fingerprint(buyer.get("name")),

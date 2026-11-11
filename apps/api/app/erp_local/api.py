@@ -151,6 +151,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
     def snapshot(request: Request):
         from app.erp_local import (
             bank_statements,
+            bling_coverage,
             cash_register,
             categories,
             contacts,
@@ -193,6 +194,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "finance": finance.snapshot(db),
                 "finance_categories": finance_categories.snapshot(db),
                 "homolog": homolog.info(db),
+                "bling_coverage": bling_coverage.latest(db),
                 "would": would.listing(db) if would.active() else [],
                 "procurement": procurement.snapshot(erp, db),
                 "fiscal": fiscal.snapshot(db, getattr(app.state, "fiscal_readiness", None)),

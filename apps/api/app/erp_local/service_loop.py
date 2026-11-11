@@ -176,6 +176,12 @@ def main():
                     log.info("empresas emissoras %s", multi_company.refresh(erp))
                 except ERPError as error:
                     log.warning("empresas emissoras não lidas: %s", error.code)
+                from app.erp_local import bling_coverage
+
+                try:
+                    log.info("conferência com o Bling %s", bling_coverage.run(erp))
+                except (ERPError, OSError, ValueError) as error:
+                    log.warning("conferência com o Bling não feita: %s", type(error).__name__)
             except ERPError as error:
                 log.warning("referência não atualizada: %s", error.code)
         rounds += 1

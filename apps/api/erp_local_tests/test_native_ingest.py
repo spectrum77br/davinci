@@ -177,14 +177,17 @@ def test_lease_blocks_a_second_worker_and_expires(account):
 def test_lookback_reads_recent_days_daily_without_moving_the_cursor(account):
     go(account, Provider(fake_read()))
     cursor = state_of(account)["cursor"]
-    days = native_ingest.FIRST_LOOKBACK_WINDOW.days + 1
-    provider = Provider(fake_read(orders=[{"updated_at": NOW.isoformat()}]), *[fake_read()] * days)
+    first = native_ingest.first_lookback(CHANNEL)
+    provider = Provider(
+        fake_read(orders=[{"updated_at": NOW.isoformat()}]), *[fake_read()] * (first.days + 1)
+    )
     run_lookback = native_ingest.run_lookback
     assert (
         run_lookback(account, CHANNEL, ACCOUNT, provider, now=NOW, importer=importer)["added"] == 1
     )
-    # The first re-read covers a month, one day per read; the daily ones after it, a week.
-    assert provider.calls[0][0] == NOW - native_ingest.FIRST_LOOKBACK_WINDOW
+    # The first re-read covers ten days (a month on Mercado Livre and TikTok), one day per read;
+    # the daily ones after it, a week.
+    assert provider.calls[0][0] == NOW - first == NOW - native_ingest.CATCH_UP_LOOKBACK_WINDOW
     assert all(b - a <= native_ingest.MAX_WINDOW for a, b in provider.calls)
     assert state_of(account)["cursor"] == cursor
     early = NOW + timedelta(hours=1)
@@ -694,14 +697,14 @@ def test_tiktok_total_is_products_plus_buyer_shipping_without_handling_fee(erp):
 
 def test_re_read_keeps_what_a_partial_reading_brought_and_goes_on(account):
     go(account, Provider(fake_read()))
-    days = native_ingest.FIRST_LOOKBACK_WINDOW.days + 1
+    days = native_ingest.first_lookback(CHANNEL).days + 1
     partial = fake_read(state="partial_read", orders=[{"updated_at": NOW.isoformat()}])
     provider = Provider(partial, *[fake_read()] * days)
     result = native_ingest.run_lookback(
         account, CHANNEL, ACCOUNT, provider, now=NOW, importer=importer
     )
     assert result["state"] == "partial_kept" and result["added"] == 1
-    assert len(provider.calls) == native_ingest.FIRST_LOOKBACK_WINDOW.days
+    assert len(provider.calls) == native_ingest.first_lookback(CHANNEL).days
 
 
 def test_own_order_numbers_start_after_bling_range():

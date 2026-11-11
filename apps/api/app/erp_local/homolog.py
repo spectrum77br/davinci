@@ -42,6 +42,8 @@ FOLLOW = {
     "bling_mirror_orders": ("mirror", None),
     # The issuers and the numbering Bling and UpSeller used, so a prepared note takes the next one.
     "fiscal_company_candidates": ("replace", None),
+    # The hourly look-up of every Bling sale in what the ERP read, store by store.
+    "bling_coverage": ("mirror", None),
 }
 # The reception state shown on the screen; who owns the store stays "own" here.
 ACCOUNT_STATE = (
