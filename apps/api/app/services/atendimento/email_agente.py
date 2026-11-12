@@ -406,7 +406,7 @@ async def chave_liberada(session: AsyncSession, conversa: Any) -> Chave | None:
 
 def id_da_regra(regra: Any) -> str:
     """O id que o agente cita em `evidencias` quando segue a regra ("email:formulario_sac")."""
-    return f"email:{regra.chave or str(regra.id)[:8]}"
+    return f"email:{regra.chave or str(regra.id).replace('-', '')[-8:]}"
 
 
 def vale_no_site(regra: Any, site: str | None) -> bool:

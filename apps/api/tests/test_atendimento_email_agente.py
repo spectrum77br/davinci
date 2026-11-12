@@ -116,7 +116,7 @@ def test_bloco_do_pacote_tem_assinatura_formulario_e_regras():
     assert "E-MAIL" in bloco and "NÃO escreva assinatura" in bloco
     assert "NÃO veio pelo formulário" in bloco
     assert URL_URANYX in bloco and "número de série" in bloco
-    assert f"- [email:{str(regra.id)[:8]}] Regra X: Faça Y." in bloco
+    assert f"- [email:{regra.id.hex[-8:]}] Regra X: Faça Y." in bloco
     assert "https://uranyx.com.br" in bloco and "evidencias" in bloco
     andamento = email_agente.Chave(
         canal_id=uuid4(), modo=MODO_AUTO, site="uranyx", em_andamento=True
