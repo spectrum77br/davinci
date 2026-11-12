@@ -84,6 +84,36 @@ def revive_renewed(erp):
     return revived
 
 
+def deliver_notices(erp):
+    """Send DaVinci the notices Bling would (order and stock changes), once the switch turns it on.
+
+    Off until `ERP_COMPAT_WEBHOOK_URL` and the secret DaVinci checks (`ERP_COMPAT_WEBHOOK_SECRET` or
+    `_SECRET_FILE`, the same value as DaVinci's BLING_WEBHOOK_SECRET) exist on the server. Without
+    them only the stale notices are dropped."""
+    from app.erp_local import bling_compat
+
+    url = os.environ.get("ERP_COMPAT_WEBHOOK_URL", "").strip()
+    secret = os.environ.get("ERP_COMPAT_WEBHOOK_SECRET", "").strip()
+    secret_file = os.environ.get("ERP_COMPAT_WEBHOOK_SECRET_FILE", "").strip()
+    if not secret and secret_file:
+        try:
+            secret = Path(secret_file).read_text("utf-8").strip()
+        except OSError:
+            secret = ""
+    if not url or not secret:
+        return {"off": True, **bling_compat.prune_outbox(erp)}
+    import httpx
+
+    def send(raw, headers):
+        try:
+            reply = httpx.post(url, content=raw, headers=headers, timeout=10)
+        except httpx.HTTPError:
+            return False
+        return 200 <= reply.status_code < 300
+
+    return bling_compat.deliver_outbox(erp, send, secret)
+
+
 def once(erp, *, provider_for=native_ingest.ssh_provider, reader=None, channels=None):
     with erp.connection() as db:
         accounts = db.execute(
@@ -185,6 +215,9 @@ def main():
                 state = result.get("reception", result).get("state")
                 if state not in {"complete", "waiting", "archived"}:
                     log.info("%s %s", account, state)
+            notices = deliver_notices(erp)
+            if notices.get("delivered") or notices.get("pending"):
+                log.info("avisos ao DaVinci %s", notices)
             time.sleep(max(30, args.orders_every))
             continue
         last_full = time.monotonic()
@@ -241,6 +274,7 @@ def main():
                 log.warning("proteção de dados não concluída: %s", type(error).__name__)
             daily_check(erp, args.database.parent / f"conferencia-{today}.json")
             stock_daily(erp, args.database.parent / f"conferencia-estoque-{today}.json")
+        log.info("avisos ao DaVinci %s", deliver_notices(erp))
         revived = revive_renewed(erp)
         if revived:
             log.info("contas religadas após credencial nova no DaVinci %s", revived)

@@ -245,6 +245,26 @@ def test_order_reads_and_situations_match_the_client_expectations(erp, client):
     assert list(go(client.pedidos_por_numero_loja(["LOJA-777", "OUTRO"]))) == ["LOJA-777"]
     assert go(client.list_pedidos_vendas(id_situacao=12)) == []
     assert go(client.list_pedidos_vendas(data_inicial="2999-01-01")) == []
+    # The hourly re-read asks for what changed in the last hours (São Paulo time).
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    now = datetime.now(ZoneInfo("America/Sao_Paulo"))
+    fmt = "%Y-%m-%d %H:%M:%S"
+    recent = go(
+        client.list_pedidos_vendas(
+            data_alteracao_inicial=(now - timedelta(hours=2)).strftime(fmt),
+            data_alteracao_final=(now + timedelta(minutes=1)).strftime(fmt),
+        )
+    )
+    assert [r["numeroLoja"] for r in recent] == ["LOJA-777"]
+    old_window = go(
+        client.list_pedidos_vendas(
+            data_alteracao_inicial="2026-01-01 00:00:00",
+            data_alteracao_final="2026-01-02 00:00:00",
+        )
+    )
+    assert old_window == []
     identifier = rows[0]["id"]
     detail = go(client.get_order(identifier))
     assert detail["itens"][0]["codigo"] == "demo.aparelho" and detail["id"] == identifier
@@ -490,3 +510,76 @@ def test_inactive_product_offers_nothing_but_keeps_its_physical_balance(erp, cli
     row = response.json()["data"][0]
     assert row["saldoVirtualTotal"] == 0.0 and row["depositos"][0]["saldoVirtual"] == 0.0
     assert row["saldoFisicoTotal"] == 8.0
+
+
+def test_reads_do_not_wait_while_the_store_reception_writes(erp, client):
+    import sqlite3
+
+    part = go(client.find_active_product_by_sku("demo.aparelho"))["id"]
+    writer = sqlite3.connect(erp.database, timeout=0.1)
+    writer.execute("BEGIN IMMEDIATE")
+    try:
+        assert go(client.get_product(part))["id"] == part
+        assert go(client.list_pedidos_vendas(id_situacao=12)) == []
+    finally:
+        writer.rollback()
+        writer.close()
+
+
+def test_balances_copied_from_bling_queue_no_notice(erp):
+    with erp.connection() as db:
+        before = db.execute("SELECT count(*) FROM compat_outbox").fetchone()[0]
+    erp.command(
+        "mirror-v2:demo.aparelho:9:0:2026-11-12",
+        "stock.mirror",
+        {"sku": "demo.aparelho", "physical": "9", "reserved": "0"},
+    )
+    with erp.connection() as db:
+        assert db.execute("SELECT count(*) FROM compat_outbox").fetchone()[0] == before
+
+
+def test_a_notice_nobody_delivered_within_the_hour_is_dropped(erp):
+    from datetime import datetime, timedelta
+
+    from app.erp_local.bling_compat import deliver_outbox
+
+    order(erp, external="LOJA-9", sku="demo.aparelho")
+    later = (datetime.fromisoformat(erp.now()) + timedelta(hours=2)).isoformat()
+    sent = []
+    result = deliver_outbox(erp, lambda body, headers: sent.append(body) or True, "s", now=later)
+    assert result == {"delivered": 0, "pending": 0} and sent == []
+    with erp.connection() as db:
+        assert db.execute("SELECT count(*) FROM compat_outbox").fetchone()[0] == 0
+
+
+def test_notices_reach_davinci_only_once_the_switch_turns_them_on(erp, monkeypatch):
+    import httpx
+
+    from app.erp_local import service_loop
+
+    order(erp, external="LOJA-10", sku="demo.aparelho")
+    for name in ("ERP_COMPAT_WEBHOOK_URL", "ERP_COMPAT_WEBHOOK_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    assert service_loop.deliver_notices(erp)["off"] is True
+    monkeypatch.setenv("ERP_COMPAT_WEBHOOK_URL", "http://api:8000/api/webhooks/bling")
+    monkeypatch.setenv("ERP_COMPAT_WEBHOOK_SECRET", "segredo")
+
+    def down(*_a, **_k):
+        raise httpx.ConnectError("fora do ar")
+
+    monkeypatch.setattr(httpx, "post", down)
+    assert service_loop.deliver_notices(erp)["delivered"] == 0
+    with erp.connection() as db:
+        db.execute("UPDATE compat_outbox SET next_attempt_at=NULL")
+    posted = []
+
+    def accept(url, *, content, headers, timeout):
+        expected = hmac.new(b"segredo", content, hashlib.sha256).hexdigest()
+        assert headers["X-Bling-Signature"] == "sha256=" + expected
+        posted.append((url, headers["X-Bling-Event"]))
+        return httpx.Response(200)
+
+    monkeypatch.setattr(httpx, "post", accept)
+    assert service_loop.deliver_notices(erp)["delivered"] == len(posted) >= 1
+    assert {url for url, _ in posted} == {"http://api:8000/api/webhooks/bling"}
+    assert "pedido.alteracao" in {event for _, event in posted}

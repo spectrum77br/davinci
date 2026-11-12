@@ -6,15 +6,19 @@ ERP commands, so events, versions and stock rules stay the same. Situations that
 meaning are labels here: moving an order to them never moves stock.
 """
 
+import contextvars
+import functools
 import hashlib
 import hmac
 import json
 import os
 import re
+import sqlite3
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse, Response
@@ -75,6 +79,33 @@ DERIVED_SITUATION = {"draft": 6, "reserved": 6, "shipped": 9, "cancelled": 12, "
 UNIT_TO_BLING = {"m": 0, "cm": 1, "mm": 2}
 CONDITION_TO_BLING = {"unspecified": 0, "new": 1, "used": 2, "refurbished": 3}
 PRODUCTION_TO_BLING = {"own": "P", "third_party": "T", "": "P"}
+
+
+_WRITE_FIRST = contextvars.ContextVar("compat_write_first", default=False)
+
+
+def _begin_read(db):
+    """A read of the compatible API runs without the writer lock, so the store reception never
+    waits on DaVinci's queries. If it must give an object its first numeric id and another writer
+    got there first, `_read_retry` runs the whole read again holding the lock."""
+    db.execute("BEGIN IMMEDIATE" if _WRITE_FIRST.get() else "BEGIN")
+
+
+def _read_retry(handler):
+    @functools.wraps(handler)
+    def run(*args, **kwargs):
+        try:
+            return handler(*args, **kwargs)
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error) and "busy" not in str(error):
+                raise
+            token = _WRITE_FIRST.set(True)
+            try:
+                return handler(*args, **kwargs)
+            finally:
+                _WRITE_FIRST.reset(token)
+
+    return run
 
 
 def _error(status, message, *, code=None, field_code=None):
@@ -408,6 +439,57 @@ def _order_detail(erp, db, doc):
     }
 
 
+BLING_ZONE = ZoneInfo("America/Sao_Paulo")
+
+
+def _bling_moment(value, *, end):
+    """Bling's `dataAlteracao*` filters: "AAAA-MM-DD HH:MM:SS" (or only the day), São Paulo time."""
+    if not value:
+        return None
+    text_value = str(value).strip()
+    try:
+        if len(text_value) == 10:
+            day = datetime.fromisoformat(text_value)
+            moment = day + (timedelta(days=1) - timedelta(microseconds=1) if end else timedelta())
+        else:
+            moment = datetime.fromisoformat(text_value.replace(" ", "T"))
+    except ValueError:
+        raise ValueError("dataAlteracao") from None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=BLING_ZONE)
+    return moment.astimezone(UTC)
+
+
+def _changed_at(db):
+    """When each order last changed: its commands, its situation and its occurrences."""
+    latest = {}
+
+    def keep(identifier, value):
+        if not identifier or not value:
+            return
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        if identifier not in latest or moment > latest[identifier]:
+            latest[identifier] = moment
+
+    for identifier, value in db.execute(
+        "SELECT coalesce(json_extract(result,'$.id'),json_extract(payload,'$.id')),"
+        "max(created_at) FROM events WHERE kind LIKE 'order.%' GROUP BY 1"
+    ):
+        keep(identifier, value)
+    for identifier, value in db.execute(
+        "SELECT order_id,max(updated_at) FROM compat_order_situations GROUP BY 1"
+    ):
+        keep(identifier, value)
+    for identifier, value in db.execute(
+        "SELECT order_id,max(max(created_at),coalesce(removed_at,'')) FROM order_occurrences "
+        "GROUP BY 1"
+    ):
+        keep(identifier, value)
+    return latest
+
+
 def _orders(erp):
     return [o for o in erp.snapshot()["orders"] if not o["data"].get("discarded")]
 
@@ -609,6 +691,7 @@ def router(erp):
     guard = [Depends(gate)]
 
     @api.get("/canais-venda", dependencies=guard)
+    @_read_retry
     def channels(pagina: int = 1, limite: int = 100):
         with erp.connection() as db:
             rows = db.execute("SELECT channel,store,status,data FROM store_policies").fetchall()
@@ -629,6 +712,7 @@ def router(erp):
         return {"data": result[start : start + limite]}
 
     @api.get("/produtos", dependencies=guard)
+    @_read_retry
     def products(request: Request, pagina: int = 1, limite: int = 100):
         limite = max(1, min(limite, 100))
         query = request.query_params
@@ -640,7 +724,7 @@ def router(erp):
         codes = set(query.getlist("codigos[]"))
         rows = []
         with erp.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
             for product in erp.snapshot()["products"]:
                 if product["details"]["status"] == "deleted":
                     continue
@@ -659,12 +743,13 @@ def router(erp):
         return {"data": page}
 
     @api.get("/produtos/fornecedores", dependencies=guard)
+    @_read_retry
     def product_suppliers_list(
         product_filter: int | None = Query(None, alias="idProduto"),
         supplier_filter: int | None = Query(None, alias="idFornecedor"),
     ):
         with erp.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
             result = []
             for product in erp.snapshot()["products"]:
                 pid = numeric_id(db, "product", product["sku"])
@@ -763,14 +848,15 @@ def router(erp):
         return _save_supplier(await request.json(), link_id=link_id)
 
     @api.get("/produtos/{product_id}", dependencies=guard)
+    @_read_retry
     def product_detail(product_id: int):
         with erp.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
             sku = local_id(db, "product", product_id)
             db.commit()
             if not sku:
                 return _error(404, "O produto não foi encontrado.", code="RESOURCE_NOT_FOUND")
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
             product = next(p for p in erp.snapshot()["products"] if p["sku"] == sku)
             body = _product_detail(db, product)
             db.commit()
@@ -871,9 +957,10 @@ def router(erp):
         return {"data": {"id": product_id}}
 
     @api.get("/categorias/produtos", dependencies=guard)
+    @_read_retry
     def category_list(pagina: int = 1, limite: int = 100):
         with erp.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
             rows = categories.snapshot(db)
             start = (pagina - 1) * limite
             page = [
@@ -900,9 +987,10 @@ def router(erp):
         return {"data": {"id": identifier}}
 
     @api.get("/depositos", dependencies=guard)
+    @_read_retry
     def depots(pagina: int = 1, limite: int = 100):
         with erp.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
             rows = erp.snapshot()["deposits"]
             start = (pagina - 1) * limite
             page = [
@@ -942,9 +1030,10 @@ def router(erp):
         return {"data": {"id": int(uuid4().int >> 80)}}
 
     @api.get("/contatos", dependencies=guard)
+    @_read_retry
     def contacts_list(pesquisa: str = "", pagina: int = 1, limite: int = 100):
         with erp.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
             term = pesquisa.lower()
             rows = [c for c in contacts.snapshot(db) if term in c["data"]["name"].lower()]
             start = (pagina - 1) * limite
@@ -964,6 +1053,7 @@ def router(erp):
         return {"data": page}
 
     @api.get("/contatos/{contact_id}", dependencies=guard)
+    @_read_retry
     def contact_detail(contact_id: int):
         with erp.connection() as db:
             identifier = local_id(db, "contact", contact_id)
@@ -996,10 +1086,12 @@ def router(erp):
         }
 
     @api.get("/situacoes/modulos", dependencies=guard)
+    @_read_retry
     def situation_modules():
         return {"data": [{"id": MODULE_SALES, "nome": "Vendas", "criarSituacoes": False}]}
 
     @api.get("/situacoes/modulos/{module_id}", dependencies=guard)
+    @_read_retry
     def situation_list(module_id: int):
         if module_id != MODULE_SALES:
             return {"data": []}
@@ -1011,6 +1103,7 @@ def router(erp):
         }
 
     @api.get("/pedidos/vendas", dependencies=guard)
+    @_read_retry
     def order_list(request: Request, pagina: int = 1, limite: int = 100):
         query = request.query_params
         limite = max(1, min(limite, 100))
@@ -1018,10 +1111,22 @@ def router(erp):
         situation = query.get("idSituacao")
         store = query.get("idLoja")
         start_day, end_day = query.get("dataInicial"), query.get("dataFinal")
+        try:
+            changed_from = _bling_moment(query.get("dataAlteracaoInicial"), end=False)
+            changed_to = _bling_moment(query.get("dataAlteracaoFinal"), end=True)
+        except ValueError:
+            return _error(400, "Data de alteração inválida.", field_code="dataAlteracao")
         with erp.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
+            changed = _changed_at(db) if changed_from or changed_to else {}
             rows = []
             for doc in _orders(erp):
+                if changed_from or changed_to:
+                    moment = changed.get(doc["id"])
+                    if moment is None or (
+                        changed_from and moment < changed_from or changed_to and moment > changed_to
+                    ):
+                        continue
                 data = doc["data"]
                 day = data.get("date") or str(data.get("created_at", ""))[:10]
                 if numbers and str(data.get("external_id")) not in numbers:
@@ -1043,9 +1148,10 @@ def router(erp):
         return next((d for d in _orders(erp) if d["id"] == identifier), None)
 
     @api.get("/pedidos/vendas/{order_id}", dependencies=guard)
+    @_read_retry
     def order_detail(order_id: int):
         with erp.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
             doc = _find_order(db, order_id)
             if not doc:
                 db.rollback()
@@ -1144,6 +1250,7 @@ def router(erp):
         return {"data": {"id": identifier}}
 
     @api.get("/logisticas/objetos/{object_id}", dependencies=guard)
+    @_read_retry
     def logistics_object(object_id: int):
         with erp.connection() as db:
             identifier = local_id(db, "logistics_object", object_id)
@@ -1172,12 +1279,13 @@ def router(erp):
         }
 
     @api.get("/estoques/saldos", dependencies=guard)
+    @_read_retry
     def stock_balances(request: Request):
         wanted = {str(i) for i in request.query_params.getlist("idsProdutos[]")}
         depot_filter = request.query_params.get("idDeposito")
         result = []
         with erp.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
             for product in erp.snapshot()["products"]:
                 identifier = numeric_id(db, "product", product["sku"])
                 if wanted and str(identifier) not in wanted:
@@ -1227,13 +1335,14 @@ def router(erp):
         }
 
     @api.get("/nfe", dependencies=guard)
+    @_read_retry
     def invoice_list(request: Request, pagina: int = 1, limite: int = 100):
         query = request.query_params
         start_day = (query.get("dataEmissaoInicial") or "")[:10]
         end_day = (query.get("dataEmissaoFinal") or "")[:10]
         limite = max(1, min(limite, 100))
         with erp.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
             rows = [
                 row
                 for row in db.execute("SELECT * FROM fiscal_invoices ORDER BY rowid DESC")
@@ -1246,9 +1355,10 @@ def router(erp):
         return {"data": page}
 
     @api.get("/nfe/{invoice_id}", dependencies=guard)
+    @_read_retry
     def invoice_detail(invoice_id: int):
         with erp.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
+            _begin_read(db)
             identifier = local_id(db, "invoice", invoice_id)
             row = db.execute("SELECT * FROM fiscal_invoices WHERE id=?", (identifier,)).fetchone()
             if not row:
@@ -1321,7 +1431,12 @@ def _free_stock(db, skus):
 
 
 def capture_stock_events(erp, db, operation_key):
-    """Tell DaVinci the same stock news Bling would, including every kit using a moved part."""
+    """Tell DaVinci the same stock news Bling would, including every kit using a moved part.
+
+    A balance only copied from Bling (`mirror-…`, while Bling owns the stores) is news DaVinci
+    already got from Bling itself: it is not queued (48.994 such notices had piled up by 12/11)."""
+    if operation_key.startswith("mirror-"):
+        return
     moved = {
         r[0]
         for r in db.execute(
@@ -1370,9 +1485,31 @@ def capture_stock_events(erp, db, operation_key):
         )
 
 
+# A notice not delivered within the hour is dropped instead of sent late: DaVinci re-reads orders
+# changed in the last hours and the balances on its own schedule, so it would only repeat old news.
+STALE_NOTICE = timedelta(hours=1)
+KEEP_DELIVERED = timedelta(days=7)
+
+
+def prune_outbox(erp, *, now=None):
+    moment = datetime.fromisoformat(now or erp.now())
+    with erp.connection() as db:
+        db.executescript(SCHEMA)
+        stale = db.execute(
+            "DELETE FROM compat_outbox WHERE delivered_at IS NULL AND created_at<?",
+            ((moment - STALE_NOTICE).isoformat(),),
+        ).rowcount
+        old = db.execute(
+            "DELETE FROM compat_outbox WHERE delivered_at IS NOT NULL AND delivered_at<?",
+            ((moment - KEEP_DELIVERED).isoformat(),),
+        ).rowcount
+    return {"stale": stale, "old": old}
+
+
 def deliver_outbox(erp, send, secret, *, limit=100, now=None):
     """`send(body, headers)` returns True when the receiver accepted the event."""
     moment = now or erp.now()
+    prune_outbox(erp, now=moment)
     with erp.connection() as db:
         rows = db.execute(
             "SELECT * FROM compat_outbox WHERE delivered_at IS NULL "
