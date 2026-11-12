@@ -97,11 +97,16 @@ type FlexConfig = {
     shopee_escrita_origem: string
     pedido_no_sp_origem: string
     kits_origem?: string
+    contas_origem?: string
     atualizado_em: string | null
     atualizado_por: string | null
   } | null
   pode_ajustar?: boolean
+  // 12/11/2026: as contas ML/Shopee ativas para marcar nas Chaves do Flex (só
+  // para quem pode trocar). `no_flex`: está na lista em que o robô mexe.
+  contas_opcoes?: FlexContaOpcao[]
 }
+type FlexContaOpcao = { id: string; nome: string; plataforma: 'ml' | 'shopee' | string; no_flex: boolean }
 type FlexAnuncio = {
   integration_id: string
   conta: string | null
@@ -1487,11 +1492,39 @@ const MODOS_OPCOES = [
 ]
 const editandoAjustes = ref(false)
 const salvandoAjustes = ref(false)
-const ajusteForm = ref({ modo: 'observar', shopee_escrita: false, pedido_no_sp: false, kits: false })
+const ajusteForm = ref({ modo: 'observar', shopee_escrita: false, pedido_no_sp: false, kits: false, contas: [] as string[] })
+// As contas que podem entrar no Flex (12/11/2026: antes a lista só mudava no
+// servidor). Marcadas = as que estão na lista do robô agora.
+const contasOpcoes = computed(() => config.value?.contas_opcoes || [])
+const contasNoFlexAgora = computed(() => contasOpcoes.value.filter((o) => o.no_flex).map((o) => o.id))
+const contasOpcoesGrupos = computed(() =>
+  [
+    { chave: 'ml', titulo: 'Mercado Livre', contas: contasOpcoes.value.filter((o) => o.plataforma === 'ml') },
+    { chave: 'shopee', titulo: 'Shopee', contas: contasOpcoes.value.filter((o) => o.plataforma === 'shopee') },
+  ].filter((g) => g.contas.length),
+)
+function nomeOpcao(id: string) {
+  const o = contasOpcoes.value.find((x) => x.id === id)
+  return o ? `${o.nome.trim()} (${o.plataforma === 'ml' ? 'ML' : 'Shopee'})` : id.slice(0, 8)
+}
+// O que aparece fora do formulário: quantas contas de cada plataforma estão
+// na lista do robô (só as que existem).
+const contasNoFlexResumo = computed(() => {
+  const todas = (config.value?.contas || []).filter((c) => c.existe)
+  const ml = todas.filter((c) => c.plataforma === 'ml').map((c) => (c.nome || '').trim())
+  const shopee = todas.filter((c) => c.plataforma === 'shopee').map((c) => (c.nome || '').trim())
+  return { ml, shopee }
+})
 function abrirAjustes() {
   const c = config.value
   if (!c) return
-  ajusteForm.value = { modo: c.modo, shopee_escrita: !!c.shopee_escrita, pedido_no_sp: !!c.pedido_no_sp, kits: !!c.kits }
+  ajusteForm.value = {
+    modo: c.modo,
+    shopee_escrita: !!c.shopee_escrita,
+    pedido_no_sp: !!c.pedido_no_sp,
+    kits: !!c.kits,
+    contas: [...contasNoFlexAgora.value],
+  }
   editandoAjustes.value = true
 }
 function simNao(v: boolean) {
@@ -1506,6 +1539,12 @@ async function salvarAjustes() {
   if (f.shopee_escrita !== c.shopee_escrita) mudancas.push(`• DaVinci liga/desliga na Shopee: ${simNao(c.shopee_escrita)} → ${simNao(f.shopee_escrita)}`)
   if (f.pedido_no_sp !== c.pedido_no_sp) mudancas.push(`• Pedido Flex vai para o .${localLote.value}: ${simNao(c.pedido_no_sp)} → ${simNao(f.pedido_no_sp)}`)
   if (f.kits !== !!c.kits) mudancas.push(`• Kits entram: ${simNao(!!c.kits)} → ${simNao(f.kits)}`)
+  const antesContas = new Set(contasNoFlexAgora.value)
+  const depoisContas = new Set(f.contas)
+  const entram = f.contas.filter((id) => !antesContas.has(id))
+  const saem = contasNoFlexAgora.value.filter((id) => !depoisContas.has(id))
+  if (entram.length) mudancas.push(`• Conta(s) que entram no Flex: ${entram.map(nomeOpcao).join(', ')}`)
+  if (saem.length) mudancas.push(`• Conta(s) que saem do Flex: ${saem.map(nomeOpcao).join(', ')}`)
   if (!mudancas.length) {
     editandoAjustes.value = false
     return
@@ -1517,6 +1556,10 @@ async function salvarAjustes() {
     avisos.push('Na Shopee o sistema passa a ligar/desligar a Entrega Direta nos anúncios. Aprove UM primeiro e confira no Seller Center se a Shopee Xpress continuou ligada.')
   if (f.pedido_no_sp)
     avisos.push(`O robô de prioridade passa a levar todo pedido Flex para o estoque .${localLote.value}, e a NF automática espera o tipo de envio ser lido.`)
+  if (entram.some((id) => contasOpcoes.value.find((o) => o.id === id)?.plataforma === 'ml'))
+    avisos.push(`Conta do Mercado Livre só passa a ter Flex de verdade com o Flex ativo no ML e a saída em ${localCidade.value}. Senão ela aparece como "conta não pronta" e o sistema não mexe nela.`)
+  if (saem.length)
+    avisos.push('Tirar uma conta NÃO desliga o Flex que já está ligado nos anúncios dela — o sistema só para de mexer nela.')
   if (f.kits && !c.kits)
     avisos.push(`Kits entram: o anúncio de kit (celular + fone, relógio…) passa a valer pelo kit .${localLote.value} do Bling, que tem o estoque da peça mais escassa — sem o kit .${localLote.value} cadastrado, não liga. Nada liga sozinho: com peça, ele vai para "Esperando aprovação".`)
   const ok = confirm(
@@ -1535,6 +1578,8 @@ async function salvarAjustes() {
         shopee_escrita_antes: c.shopee_escrita,
         pedido_no_sp_antes: c.pedido_no_sp,
         kits_antes: !!c.kits,
+        // Só manda as contas quando a tela tem a lista (quem pode trocar).
+        ...(contasOpcoes.value.length ? { contas: f.contas, contas_antes: contasNoFlexAgora.value } : {}),
       },
     })
     toasts.success('Chaves do Flex trocadas', mudancas.map((m) => m.replace('• ', '')))
@@ -1547,6 +1592,7 @@ async function salvarAjustes() {
     const msg: Record<string, string> = {
       so_admin: 'Só um admin (ou o gerente) troca as chaves do Flex.',
       ajuste_mudou: 'Alguém trocou essas chaves agora há pouco — confira e tente de novo.',
+      conta_invalida: 'Só entra no Flex conta do Mercado Livre ou da Shopee que esteja ativa.',
     }
     toasts.error('Chaves do Flex', (code && msg[code]) || (typeof d === 'object' && d?.detalhe) || e?.message || 'erro')
     if (code === 'ajuste_mudou') {
@@ -2169,6 +2215,11 @@ defineExpose({ recarregar: carregarTudo })
                   <span class="text-muted-foreground">Kits entram:&nbsp;</span>
                   <b :class="config.kits ? 'text-emerald-700 dark:text-emerald-400' : ''">{{ config.kits ? 'SIM' : 'NÃO' }}</b>
                 </div>
+                <div data-flex-ajustes-contas :title="[...contasNoFlexResumo.ml.map((n) => `${n} (ML)`), ...contasNoFlexResumo.shopee.map((n) => `${n} (Shopee)`)].join('\n')">
+                  <span class="text-muted-foreground">Contas no Flex:&nbsp;</span>
+                  <b>{{ contasNoFlexResumo.ml.length }}</b> do ML<template v-if="contasNoFlexResumo.ml.length"> ({{ contasNoFlexResumo.ml.join(', ') }})</template>
+                  · <b>{{ contasNoFlexResumo.shopee.length }}</b> da Shopee
+                </div>
                 <div class="text-[10.5px] text-muted-foreground">
                   <template v-if="config.ajustes?.atualizado_por">
                     trocado por {{ config.ajustes.atualizado_por }} {{ fmtDesde(config.ajustes.atualizado_em) }}
@@ -2195,6 +2246,21 @@ defineExpose({ recarregar: carregarTudo })
                   <input v-model="ajusteForm.kits" type="checkbox" />
                   Kits entram (só com tudo no .{{ localLote }}: vale o kit .{{ localLote }} do Bling)
                 </label>
+                <div v-if="contasOpcoesGrupos.length" class="space-y-1 rounded border px-1.5 py-1" data-flex-ajustes-contas-form>
+                  <div class="text-[11px] font-medium">Contas em que o sistema mexe</div>
+                  <div v-for="g in contasOpcoesGrupos" :key="g.chave" class="space-y-0.5">
+                    <div class="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{{ g.titulo }}</div>
+                    <div class="grid grid-cols-2 gap-x-2 gap-y-0.5">
+                      <label v-for="o in g.contas" :key="o.id" class="flex min-w-0 items-center gap-1.5 text-[11px]" :data-flex-conta-opcao="o.nome.trim()">
+                        <input v-model="ajusteForm.contas" type="checkbox" :value="o.id" />
+                        <span class="truncate">{{ o.nome.trim() }}</span>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="text-[10.5px] text-muted-foreground">
+                    Desmarcar não desliga o Flex que já está ligado na conta — o sistema só para de mexer nela.
+                  </div>
+                </div>
                 <div class="flex gap-1.5">
                   <button type="button" class="rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground disabled:opacity-50" :disabled="salvandoAjustes" @click="salvarAjustes">Salvar</button>
                   <button type="button" class="rounded-md border px-2.5 py-1 text-[11px] font-semibold disabled:opacity-50" :disabled="salvandoAjustes" @click="editandoAjustes = false">Cancelar</button>
@@ -2211,8 +2277,9 @@ defineExpose({ recarregar: carregarTudo })
               </ol>
             </div>
             <div class="text-[10.5px] text-muted-foreground">
-              A lista de contas liberadas fica na configuração do servidor.
-              <template v-if="contasFantasma"> {{ contasFantasma }} conta(s) da configuração não existem mais no DaVinci.</template>
+              <template v-if="config.ajustes?.contas_origem === 'tela'">A lista de contas é a escolhida nas Chaves do Flex.</template>
+              <template v-else>A lista de contas liberadas ainda é a da configuração do servidor (troque em Chaves do Flex › alterar).</template>
+              <template v-if="contasFantasma"> {{ contasFantasma }} conta(s) da lista não existem mais no DaVinci.</template>
             </div>
           </div>
         </div>

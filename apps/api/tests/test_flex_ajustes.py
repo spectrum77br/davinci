@@ -7,7 +7,9 @@ Campo vazio na tela = vale o .env; sem linha nenhuma, nada muda.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import pytest
 from httpx import AsyncClient
@@ -15,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import worker
 from app.config import get_settings
-from app.models import FlexAjuste, UserRole
+from app.models import FlexAjuste, Integration, IntegrationPlatform, UserRole
+from app.security.cipher import encrypt_json
 from app.services import flex_config, flex_motor
 
 PERMS = {"logistica": {"view": True, "edit": True}}
@@ -216,3 +219,129 @@ async def test_tela_liga_os_kits_e_a_tela_antiga_nao_mexe(
     # Quem abriu com "kits NÃO" na tela não sobrescreve: 409.
     r = await client.put("/api/flex/ajustes", json={**base, "kits": False, "kits_antes": False})
     assert r.status_code == 409
+
+
+# ---- Contas do Flex na tela (0477, 12/11/2026) -----------------------------------
+
+
+def test_contas_da_tela_vencem_o_env(monkeypatch):
+    """Vinicius, 12/11/2026 ("Sim, na tela"): a atlas do ML entrou no DaVinci e
+    a lista de contas do Flex só mudava no .env. Vazio na tela = vale o .env;
+    lista vazia na tela = nenhuma conta."""
+    a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    monkeypatch.setattr(get_settings(), "flex_contas", f"{a},{b}")
+    assert flex_config.contas() == {a, b}
+    assert flex_config.origem("contas") == "servidor"
+    flex_config.usar(flex_config.Ajustes(contas=frozenset({c})))
+    assert flex_config.contas() == {c}
+    assert flex_config.origem("contas") == "tela"
+    # O valor passado à mão (o motor/testes) continua sendo lido como texto.
+    assert flex_config.contas(f"{b}") == {b}
+    flex_config.usar(flex_config.Ajustes(contas=frozenset()))
+    assert flex_config.contas() == frozenset()
+    flex_config.usar(flex_config.Ajustes(contas=None))
+    assert flex_config.contas() == {a, b}
+
+
+async def _contas_de_teste(db: AsyncSession, dono) -> dict[str, Integration]:
+    agora = datetime.now(UTC)
+    contas = {
+        "poofy": Integration(user_id=dono.id, platform=IntegrationPlatform.ML, name="Poofy"),
+        "atlas": Integration(user_id=dono.id, platform=IntegrationPlatform.ML, name="atlas"),
+        "fiore": Integration(user_id=dono.id, platform=IntegrationPlatform.SHOPEE, name="Fiore"),
+        "jlas": Integration(
+            user_id=dono.id, platform=IntegrationPlatform.ML, name="jlas", archived_at=agora
+        ),
+        "bling": Integration(user_id=dono.id, platform=IntegrationPlatform.BLING, name="Bling"),
+    }
+    for i in contas.values():
+        i.credentials = encrypt_json({"access_token": "t"})
+    db.add_all(list(contas.values()))
+    await db.commit()
+    return contas
+
+
+@pytest.mark.asyncio
+async def test_tela_escolhe_as_contas(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable, monkeypatch
+):
+    admin = await make_user(role=UserRole.ADMIN)
+    auth_as(admin)
+    k = await _contas_de_teste(db, admin)
+    fantasma = uuid.uuid4()
+    # O .env de hoje: Poofy, Fiore, uma arquivada (jlas) e um id que não existe.
+    monkeypatch.setattr(
+        get_settings(), "flex_contas", f"{k['poofy'].id},{k['fiore'].id},{k['jlas'].id},{fantasma}"
+    )
+    c = (await client.get("/api/flex/config")).json()
+    assert c["ajustes"]["contas_origem"] == "servidor"
+    # As opções: só ML/Shopee ATIVAS, ML primeiro; arquivada e Bling ficam fora.
+    ops = [(o["nome"], o["plataforma"], o["no_flex"]) for o in c["contas_opcoes"]]
+    assert ops == [("atlas", "ml", False), ("Poofy", "ml", True), ("Fiore", "shopee", True)]
+
+    base = {"modo": "observar", "shopee_escrita": False, "pedido_no_sp": False}
+    marcadas_antes = [str(k["poofy"].id), str(k["fiore"].id)]
+    novas = [*marcadas_antes, str(k["atlas"].id)]
+    r = await client.put(
+        "/api/flex/ajustes", json={**base, "contas": novas, "contas_antes": marcadas_antes}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["contas_origem"] == "tela"
+    # A lista inteira vira a da tela: a arquivada e o fantasma saem.
+    assert flex_config.contas() == {k["poofy"].id, k["fiore"].id, k["atlas"].id}
+    linha = await db.get(FlexAjuste, 1)
+    await db.refresh(linha)
+    assert set(linha.contas) == {k["poofy"].id, k["fiore"].id, k["atlas"].id}
+    c = (await client.get("/api/flex/config")).json()
+    assert {x["nome"] for x in c["contas"]} == {"Poofy", "Fiore", "atlas"}
+    assert all(o["no_flex"] for o in c["contas_opcoes"])
+
+    # Outro processo (o worker) relê do banco.
+    flex_config.limpar_cache()
+    await flex_config.carregar(forcar=True)
+    assert k["atlas"].id in flex_config.contas()
+
+    # A tela antiga (sem o campo) troca o resto e NÃO mexe nas contas.
+    r = await client.put("/api/flex/ajustes", json={**base, "modo": "piloto"})
+    assert r.status_code == 200, r.text
+    assert flex_config.contas() == {k["poofy"].id, k["fiore"].id, k["atlas"].id}
+
+    # Quem abriu com a lista velha não sobrescreve: 409.
+    r = await client.put(
+        "/api/flex/ajustes",
+        json={**base, "modo": "piloto", "contas": marcadas_antes, "contas_antes": marcadas_antes},
+    )
+    assert r.status_code == 409
+    # Conta arquivada ou do Bling não entra: 400.
+    for estranha in (k["jlas"], k["bling"]):
+        r = await client.put(
+            "/api/flex/ajustes",
+            json={
+                **base,
+                "modo": "piloto",
+                "contas": [*novas, str(estranha.id)],
+                "contas_antes": novas,
+            },
+        )
+        assert r.status_code == 400, r.text
+        assert r.json()["detail"]["code"] == "conta_invalida"
+    # Desmarcar tudo = nenhuma conta (o motor para de mexer em todas).
+    r = await client.put(
+        "/api/flex/ajustes",
+        json={**base, "modo": "piloto", "contas": [], "contas_antes": novas},
+    )
+    assert r.status_code == 200, r.text
+    assert flex_config.contas() == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_so_quem_ajusta_ve_as_opcoes_de_conta(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable
+):
+    admin = await make_user(role=UserRole.ADMIN)
+    await _contas_de_teste(db, admin)
+    churchill = await make_user(role=UserRole.USER, permissions=PERMS)
+    churchill.name = "churchill"
+    auth_as(churchill)
+    c = (await client.get("/api/flex/config")).json()
+    assert (c["pode_ajustar"], c["contas_opcoes"]) == (False, [])

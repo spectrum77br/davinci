@@ -49,7 +49,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -346,7 +346,8 @@ class FlexAjuste(Base):
       da Shopee (o `flex_shopee_escrita`);
     - `pedido_no_sp`: o robô de prioridade leva o pedido Flex para o lote do
       local de saída (o `flex_pedido_no_sp`, com a espera da NF junto);
-    - `kits` (0475, 12/11/2026): o anúncio de kit entra no Flex (o `flex_kits`).
+    - `kits` (0475, 12/11/2026): o anúncio de kit entra no Flex (o `flex_kits`);
+    - `contas` (0477, 12/11/2026): as contas em que o robô mexe (o `flex_contas`).
 
     Campo NULL = vale o .env (services/flex_config) — sem linha, nada muda.
     Editada por pessoas: fica COM o gatilho do Histórico."""
@@ -366,6 +367,11 @@ class FlexAjuste(Base):
     # 0475 (12/11/2026): kit entra no Flex (o `flex_kits`) — só com o kit .sp
     # cadastrado no Bling, que tem o estoque da peça mais escassa.
     kits: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # 0477 (12/11/2026): integration_id das contas em que o robô mexe (o
+    # `flex_contas`). Lista vazia = nenhuma conta; NULL = vale o .env.
+    contas: Mapped[list[UUID] | None] = mapped_column(
+        ARRAY(PG_UUID(as_uuid=True)), nullable=True
+    )
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

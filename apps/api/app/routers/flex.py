@@ -67,6 +67,7 @@ from app.models import (
     FlexLog,
     FlexPedido,
     Integration,
+    IntegrationPlatform,
     Listing,
     ProductLink,
     User,
@@ -81,6 +82,7 @@ from app.schemas.flex import (
     FlexAnunciosOut,
     FlexAprovarOut,
     FlexConfigOut,
+    FlexContaOpcaoOut,
     FlexContaOut,
     FlexDesligarOut,
     FlexEmergenciaOut,
@@ -149,6 +151,34 @@ def _no_escopo(coluna, escopo: frozenset[UUID] | None):
     if escopo is None:
         return None
     return coluna.in_(list(escopo)) if escopo else false()
+
+
+async def _contas_ativas(session: AsyncSession) -> dict[UUID, Integration]:
+    """Todas as contas que PODEM entrar no Flex: ML/Shopee e não arquivadas
+    (a mesma régua do motor, flex_motor.integracoes_permitidas)."""
+    rows = await session.execute(
+        select(Integration).where(
+            Integration.platform.in_([IntegrationPlatform.ML, IntegrationPlatform.SHOPEE]),
+            Integration.archived_at.is_(None),
+        )
+    )
+    return {i.id: i for i in rows.scalars().all()}
+
+
+async def _contas_opcoes(session: AsyncSession) -> list[FlexContaOpcaoOut]:
+    """As contas para marcar/desmarcar nas Chaves do Flex: ML primeiro, depois
+    Shopee, em ordem de nome."""
+    no_flex = flex_config.contas()
+    ops = [
+        FlexContaOpcaoOut(
+            id=i.id,
+            nome=(i.name or "").strip() or str(i.id)[:8],
+            plataforma=_plataforma_txt(i) or "",
+            no_flex=i.id in no_flex,
+        )
+        for i in (await _contas_ativas(session)).values()
+    ]
+    return sorted(ops, key=lambda o: (o.plataforma != "ml", o.nome.lower()))
 
 
 async def _permitidas(session: AsyncSession) -> frozenset[UUID]:
@@ -336,6 +366,9 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
         lotes=list(flex_local.LOTES),
         ajustes=await _ajustes_out(session),
         pode_ajustar=flex_config.pode_ajustar(user),
+        # Quem troca as chaves vê TODAS as contas que podem entrar (não só as
+        # do escopo): marcar/desmarcar grava a lista inteira.
+        contas_opcoes=await _contas_opcoes(session) if flex_config.pode_ajustar(user) else [],
     )
 
 
@@ -350,6 +383,7 @@ async def _ajustes_out(session: AsyncSession) -> FlexAjustesOut:
         shopee_escrita_origem=flex_config.origem("shopee_escrita"),
         pedido_no_sp_origem=flex_config.origem("pedido_no_sp"),
         kits_origem=flex_config.origem("kits"),
+        contas_origem=flex_config.origem("contas"),
         atualizado_em=a.atualizado_em,
         atualizado_por=nome,
     )
@@ -359,8 +393,12 @@ async def _ajustes_out(session: AsyncSession) -> FlexAjustesOut:
 async def trocar_ajustes(body: FlexAjustesIn, session: Sessao, user: Agir) -> FlexAjustesOut:
     """Troca o modo do Flex, a escrita da Shopee, o pedido Flex no .sp
     (11/11/2026: antes só no .env do servidor) e, desde 12/11/2026, "Kits
-    entram". Só admin e o gerente. Vale na próxima rodada do robô (até 15 min)
-    — o "Sincronizar Flex" aplica na hora."""
+    entram" e as contas em que o robô mexe. Só admin e o gerente. Vale na
+    próxima rodada do robô (até 15 min) — o "Sincronizar Flex" aplica na hora.
+
+    Contas: a lista enviada é a lista INTEIRA (só contas ML/Shopee ativas);
+    conta arquivada que estava no .env sai. Tirar uma conta não desliga o que
+    já está ligado nela — o robô só para de mexer."""
     if not flex_config.pode_ajustar(user):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
@@ -384,7 +422,19 @@ async def trocar_ajustes(body: FlexAjustesIn, session: Sessao, user: Agir) -> Fl
         body.pedido_no_sp_antes,
         body.kits_antes,
     )
-    if any(m is not None and m != a for m, a in zip(mostrado, antes, strict=True)):
+    # As contas: compara só as ATIVAS (as que a tela mostra para marcar) — id
+    # arquivado que ficou no .env não conta como "alguém trocou".
+    ativas = (
+        await _contas_ativas(session)
+        if body.contas is not None or body.contas_antes is not None
+        else {}
+    )
+    contas_mudou = body.contas_antes is not None and set(body.contas_antes) != (
+        flex_config.contas() & ativas.keys()
+    )
+    if contas_mudou or any(
+        m is not None and m != a for m, a in zip(mostrado, antes, strict=True)
+    ):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             detail={
@@ -392,6 +442,16 @@ async def trocar_ajustes(body: FlexAjustesIn, session: Sessao, user: Agir) -> Fl
                 "detalhe": "alguém trocou essas chaves agora há pouco — reabra e confira",
             },
         )
+    if body.contas is not None:
+        estranhas = [i for i in body.contas if i not in ativas]
+        if estranhas:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail={
+                    "code": "conta_invalida",
+                    "detalhe": "só entra no Flex conta do Mercado Livre ou da Shopee ativa",
+                },
+            )
     try:
         novo = await flex_config.salvar(
             session,
@@ -399,6 +459,7 @@ async def trocar_ajustes(body: FlexAjustesIn, session: Sessao, user: Agir) -> Fl
             shopee_escrita_nova=body.shopee_escrita,
             pedido_no_sp_novo=body.pedido_no_sp,
             kits_novo=body.kits,
+            contas_novas=body.contas,
             por=user.id,
         )
     except flex_config.AjusteInvalidoError as e:

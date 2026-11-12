@@ -79,6 +79,8 @@ class FlexAjustesOut(BaseModel):
     shopee_escrita_origem: str = "servidor"
     pedido_no_sp_origem: str = "servidor"
     kits_origem: str = "servidor"
+    # 0477 (12/11/2026): a lista de contas em que o robô mexe.
+    contas_origem: str = "servidor"
     atualizado_em: datetime | None = None
     atualizado_por: str | None = None  # nome de quem trocou
 
@@ -96,6 +98,21 @@ class FlexAjustesIn(BaseModel):
     shopee_escrita_antes: bool | None = None
     pedido_no_sp_antes: bool | None = None
     kits_antes: bool | None = None
+    # 0477 (12/11/2026): as contas em que o robô mexe (integration_id). Sem o
+    # campo (tela antiga) = não mexe. `contas_antes`: as marcadas que a tela
+    # mostrava (só as contas ativas — as de `contas_opcoes`).
+    contas: list[UUID] | None = Field(default=None, max_length=500)
+    contas_antes: list[UUID] | None = Field(default=None, max_length=500)
+
+
+class FlexContaOpcaoOut(BaseModel):
+    """Uma conta que PODE entrar no Flex (ML ou Shopee, ativa) — para quem
+    troca as chaves marcar/desmarcar. `no_flex`: está na lista do robô."""
+
+    id: UUID
+    nome: str
+    plataforma: str
+    no_flex: bool
 
 
 class FlexConfigOut(BaseModel):
@@ -123,6 +140,8 @@ class FlexConfigOut(BaseModel):
     # Modo / escrita da Shopee / pedido no .sp trocados na tela (11/11/2026).
     ajustes: FlexAjustesOut | None = None
     pode_ajustar: bool = False
+    # 0477: as contas ML/Shopee ativas para marcar (só para quem pode ajustar).
+    contas_opcoes: list[FlexContaOpcaoOut] = []
 
 
 class FlexAnuncioOut(BaseModel):
