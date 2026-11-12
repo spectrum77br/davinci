@@ -326,12 +326,12 @@ const MODOS: Record<string, { titulo: string; texto: string; cls: string }> = {
   },
   piloto: {
     titulo: 'Flex automático: PILOTO',
-    texto: 'O sistema DESLIGA sozinho o Flex dos anúncios sem peça suficiente em {local}, só nas contas liberadas abaixo com a saída do Flex em {local}. Para LIGAR, ele espera você aprovar.',
+    texto: 'O sistema DESLIGA sozinho o Flex dos anúncios sem peça suficiente em {local}, só nas contas prontas (quadro Contas, à direita). Para LIGAR, ele espera você aprovar.',
     cls: 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200',
   },
   ativo: {
     titulo: 'Flex automático: ATIVO',
-    texto: 'O sistema DESLIGA sozinho o Flex dos anúncios sem peça suficiente em {local}, nas contas liberadas abaixo com a saída do Flex em {local}. Para LIGAR, ele espera você aprovar.',
+    texto: 'O sistema DESLIGA sozinho o Flex dos anúncios sem peça suficiente em {local}, nas contas prontas (quadro Contas, à direita). Para LIGAR, ele espera você aprovar.',
     cls: 'border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200',
   },
 }
@@ -440,10 +440,12 @@ const gruposContas = computed<GrupoConta[]>(() => {
   const contas = config.value?.contas || []
   const cidade = localCidade.value
   const g: Record<string, GrupoConta> = {
+    // 12/11/2026: a loja Shopee com a Entrega Direta ligada também é pronta
+    // (antes caía em "Lojas da Shopee" e Prontas mostrava 0 com 8 prontas).
     prontas: {
       chave: 'prontas',
-      titulo: `Prontas — saída do Flex em ${cidade}`,
-      acao: 'O sistema controla o Flex dos anúncios destas contas.',
+      titulo: 'Prontas',
+      acao: `O sistema controla o Flex dos anúncios destas contas: Mercado Livre com a saída do Flex em ${cidade} e lojas da Shopee com a Entrega Direta ligada.`,
       cor: 'bg-emerald-500',
       contas: [],
     },
@@ -477,8 +479,8 @@ const gruposContas = computed<GrupoConta[]>(() => {
     },
     shopee: {
       chave: 'shopee',
-      titulo: 'Lojas da Shopee',
-      acao: 'Na Shopee o sistema só confere: a Entrega Direta é ligada à mão no Seller Center.',
+      titulo: 'Lojas da Shopee sem Entrega Direta',
+      acao: 'Ligue a Entrega Direta na loja, no Seller Center, e clique em Sincronizar Flex.',
       cor: 'bg-orange-400',
       contas: [],
     },
@@ -490,9 +492,8 @@ const gruposContas = computed<GrupoConta[]>(() => {
     const title = [info.title, descobertaTexto(c)].filter(Boolean).join(' · ')
     const item = (detalhe: string) => ({ id: c.id, nome, detalhe, title })
     if (c.plataforma === 'shopee') {
-      g.shopee!.contas.push(
-        item(c.flex_ativo === true ? 'Entrega Direta ligada' : c.flex_ativo === false ? 'desligada' : 'não conferida'),
-      )
+      if (c.flex_ativo === true) g.prontas!.contas.push(item('Shopee · Entrega Direta ligada'))
+      else g.shopee!.contas.push(item(c.flex_ativo === false ? 'desligada' : 'não conferida'))
     } else if (c.flex_ativo === null) {
       g.erro!.contas.push(item(c.flex_erro ? 'erro na conferência' : 'ainda não conferida'))
     } else if (c.flex_ativo === false) {
@@ -502,20 +503,11 @@ const gruposContas = computed<GrupoConta[]>(() => {
     } else if (c.flex_origem_ok === false) {
       g.lendo!.contas.push(item(''))
     } else {
-      g.prontas!.contas.push(item(''))
+      g.prontas!.contas.push(item(`Mercado Livre · saída em ${c.flex_origem_cidade || cidade}`))
     }
   }
-  const shopee = g.shopee!
-  if (shopee.contas.length && shopee.contas.every((x) => x.detalhe === 'desligada'))
-    shopee.titulo = 'Lojas da Shopee — Entrega Direta desligada em todas'
   // Prontas sempre aparece (mesmo com 0: é a meta); os outros, só com conta.
   return Object.values(g).filter((x) => x.chave === 'prontas' || x.contas.length)
-})
-// A linha fechada do quadro: quantas contas do ML o sistema já controla.
-const contasMl = computed(() => {
-  const ml = (config.value?.contas || []).filter((c) => c.existe && c.plataforma === 'ml')
-  const prontas = gruposContas.value.find((g) => g.chave === 'prontas')?.contas.length || 0
-  return { total: ml.length, prontas }
 })
 // Fechado de fábrica; abrir/fechar fica lembrado neste navegador.
 const QUADRO_CHAVE = 'flex:quadro-aberto'
@@ -629,6 +621,12 @@ function statusTexto(a: FlexAnuncio): string | null {
 // (a regra marca "não pode ter Flex" pela recusa): não repete a frase.
 function recusaAparte(a: FlexAnuncio): boolean {
   return !!a.recusa && !(a.motivo || '').startsWith('a plataforma recusou ligar')
+}
+// "Último erro" repetindo a recusa que o "Por quê" já explica em português
+// (12/11/2026: "ligar: 200 product.error_busi: …" embaixo da frase): esconde.
+function erroAparte(a: FlexAnuncio): boolean {
+  if (!a.ultimo_erro) return false
+  return !(a.recusa && a.ultimo_erro === `ligar: ${a.recusa}`)
 }
 function chave(a: FlexAnuncio): string {
   return `${a.integration_id}/${a.external_id}`
@@ -1268,7 +1266,8 @@ defineExpose({ recarregar: carregarTudo })
        fábrica a lista mostra só os anúncios com peça no local de saída. -->
   <div class="min-w-0 space-y-2.5">
     <div class="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-1.5 text-xs" role="status">
-      <span class="rounded px-2 py-0.5 text-[11px] font-semibold" :class="modoChip.cls" :title="modoInfo.texto">{{ modoChip.texto }}</span>
+      <!-- 12/11/2026: o modo (Piloto, Só observando…) sai daqui — ele já está
+           em "Como o sistema decide › Chaves do Flex", à direita. -->
       <span class="text-muted-foreground" :title="modoInfo.texto">{{ modoInfo.texto }}</span>
       <div class="ml-auto flex flex-wrap items-center gap-1.5 font-semibold">
         <button
@@ -1491,7 +1490,7 @@ defineExpose({ recarregar: carregarTudo })
                   <td class="px-1.5 py-1.5 text-[11px]">
                     <div class="line-clamp-2 leading-tight" :title="a.motivo_claro || a.motivo || ''">{{ a.motivo_claro || a.motivo || '—' }}</div>
                     <div v-if="recusaAparte(a)" class="truncate text-rose-700 dark:text-rose-400" :title="a.recusa || ''">A plataforma recusou ligar: {{ a.recusa }}</div>
-                    <div v-if="a.ultimo_erro" class="truncate text-rose-700 dark:text-rose-400" :title="a.ultimo_erro">
+                    <div v-if="erroAparte(a)" class="truncate text-rose-700 dark:text-rose-400" :title="a.ultimo_erro || ''">
                       Último erro: {{ a.ultimo_erro }}
                       <template v-if="a.proxima_tentativa"> · tenta de novo {{ fmtCurto(a.proxima_tentativa) }}</template>
                       <template v-else-if="a.proxima_leitura"> · confere de novo {{ fmtCurto(a.proxima_leitura) }}</template>
@@ -1552,7 +1551,7 @@ defineExpose({ recarregar: carregarTudo })
             </div>
             <div>{{ a.motivo_claro || a.motivo || '—' }}</div>
             <div v-if="recusaAparte(a)" class="text-rose-700 dark:text-rose-400">A plataforma recusou ligar: {{ a.recusa }}</div>
-            <div v-if="a.ultimo_erro" class="text-rose-700 dark:text-rose-400">Último erro: {{ a.ultimo_erro }}</div>
+            <div v-if="erroAparte(a)" class="text-rose-700 dark:text-rose-400">Último erro: {{ a.ultimo_erro }}</div>
             <button
               v-if="podeAprovar(a)"
               type="button"

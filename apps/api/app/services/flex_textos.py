@@ -28,6 +28,61 @@ def _local() -> str:
     return flex_local.cidade()
 
 
+# ---- Promoção da Shopee (12/11/2026) -------------------------------------------
+# A Shopee não deixa mudar o envio (`logistic_info`) de anúncio em promoção:
+# "Cannot update logistic info because the product has promotion". O motor lê
+# QUAL promoção (`get_item_promotion`) e grava no detalhe da recusa com este
+# prefixo; a tela diz o nome em português (Vinicius: "conseguimos saber se é
+# oferta relâmpago ou desconto da loja?").
+SHOPEE_RECUSA_PROMOCAO = "has promotion"
+PREFIXO_PROMOCAO = "em promoção na Shopee:"
+_NOMES_PROMOCAO = (
+    ("flash", "Oferta Relâmpago"),
+    ("discount", "Desconto da loja"),
+    ("campaign", "Campanha da Shopee"),
+    ("platform_sale", "Campanha da Shopee"),
+    ("brand", "Campanha da Shopee"),
+    ("bundle", "Leve Mais por Menos"),
+    ("add_on", "Compre Junto"),
+    ("add-on", "Compre Junto"),
+)
+
+
+def _quando(ts: object) -> str | None:
+    """Unix (segundos) → "30/11 23:59" no horário de Brasília."""
+    from datetime import UTC, datetime
+    from zoneinfo import ZoneInfo
+
+    try:
+        n = int(ts)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    d = datetime.fromtimestamp(n, UTC).astimezone(ZoneInfo("America/Sao_Paulo"))
+    return d.strftime("%d/%m %H:%M")
+
+
+def promocoes_shopee(promocoes: list[dict]) -> list[str]:
+    """As promoções de um anúncio (como o `get_item_promotion` manda) em
+    português, sem repetir: "Desconto da loja até 30/11 23:59", "Oferta
+    Relâmpago (agendada, começa 15/11 10:00)". Tipo desconhecido: como veio."""
+    out: list[str] = []
+    for p in promocoes:
+        tipo = str(p.get("promotion_type") or "").strip()
+        baixo = tipo.lower()
+        nome = next((n for chave, n in _NOMES_PROMOCAO if chave in baixo), tipo or "promoção")
+        if str(p.get("promotion_staging") or "").strip().lower() == "upcoming":
+            comeca = _quando(p.get("start_time"))
+            texto = f"{nome} (agendada{f', começa {comeca}' if comeca else ''})"
+        else:
+            ate = _quando(p.get("end_time"))
+            texto = f"{nome} até {ate}" if ate else nome
+        if texto not in out:
+            out.append(texto)
+    return out
+
+
 def _pecas(n: int) -> str:
     if n <= 0:
         return "nenhuma peça livre"
@@ -244,6 +299,23 @@ _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
     (
         re.compile(r"^(?P<sku>\S+): kit — kits fora do Flex nesta fase \(flex_kits\)$"),
         lambda m: f"O produto {m['sku']} é um kit — por enquanto kits não entram no Flex.",
+    ),
+    (
+        re.compile(r"^a plataforma recusou ligar: (?:\d+ )?em promoção na Shopee: (?P<p>.+)$"),
+        lambda m: (
+            f"A Shopee não deixa mudar o envio de anúncio em promoção — este está em "
+            f"{m['p']}. Tire o anúncio da promoção no Seller Center (ou espere ela acabar) "
+            "e clique em Tentar de novo."
+        ),
+    ),
+    (
+        # Recusa gravada antes de 12/11/2026 (sem o nome da promoção).
+        re.compile(r"^a plataforma recusou ligar: .*has promotion.*$"),
+        lambda m: (
+            "A Shopee não deixa mudar o envio de anúncio em promoção (desconto da loja, "
+            "Oferta Relâmpago ou campanha). Tire o anúncio da promoção no Seller Center e "
+            "clique em Tentar de novo — se ainda estiver em promoção, o sistema mostra qual."
+        ),
     ),
     (
         re.compile(r"^a plataforma recusou ligar: (?P<x>.+)$"),

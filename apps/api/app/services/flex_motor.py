@@ -129,7 +129,7 @@ from app.models import (
     ProductLink,
 )
 from app.models.flex import FLEX_STATUS_ANUNCIO
-from app.services import flex_config, flex_envio, flex_local
+from app.services import flex_config, flex_envio, flex_local, flex_textos
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.bling_situacoes import (
     SITUACAO_ATENDIDO,
@@ -2152,7 +2152,7 @@ async def _chamar(
         external_id, list(antes.canais or ()), ligar=ligar, canais_flex=canais
     )
     if not res.ok:
-        return res
+        return await _qual_promocao(cliente, external_id, res)
     depois = (await cliente.ler_canais_flex([external_id], canais)).get(external_id)
     if depois is None or not depois.ok:
         return flex_api.ResultadoFlex(
@@ -2163,6 +2163,29 @@ async def _chamar(
             flex_api.ERRO, detalhe="a Shopee aceitou, mas o canal Flex não mudou"
         )
     return flex_api.ResultadoFlex(flex_api.OK, has_flex=ligar, status_http=res.status_http)
+
+
+async def _qual_promocao(
+    cliente: Any, external_id: str, res: flex_api.ResultadoFlex
+) -> flex_api.ResultadoFlex:
+    """A Shopee recusou porque o anúncio está em promoção ("Cannot update
+    logistic info because the product has promotion" — 12/11/2026, 1º teste,
+    58202772455): lê QUAL promoção (`get_item_promotion`, só leitura) e põe o
+    nome em português no detalhe — a tela diz se é Desconto da loja, Oferta
+    Relâmpago ou campanha. Outra recusa, ou a leitura falhou: como veio (a
+    leitura que falha diz "não deu para ler qual")."""
+    if flex_textos.SHOPEE_RECUSA_PROMOCAO not in (res.detalhe or "").lower():
+        return res
+    nomes: list[str] = []
+    ler = getattr(cliente, "promocoes_dos_anuncios", None)
+    if ler is not None:
+        try:
+            promocoes, _ = await ler([external_id])
+            nomes = flex_textos.promocoes_shopee(promocoes.get(int(external_id)) or [])
+        except Exception as exc:  # noqa: BLE001 — sem o nome, fica o aviso genérico
+            logger.info("flex_promocao_nao_lida", item=external_id, erro=str(exc)[:200])
+    qual = "; ".join(nomes) if nomes else "não deu para ler qual"
+    return replace(res, detalhe=f"{flex_textos.PREFIXO_PROMOCAO} {qual}")
 
 
 def _aplicar_resultado(
