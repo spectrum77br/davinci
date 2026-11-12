@@ -40,6 +40,21 @@ def _guess(orders):
     return "loja sem cadastro no DaVinci"
 
 
+def _account_by_number(db, sales):
+    """The ERP account that read these sales, for a Bling store DaVinci never linked.
+
+    Carrefour Poofy got a new Bling store on 11/11 that DaVinci's store table does not name, yet the
+    ERP reads that store through DaVinci's Carrefour integration: the sale numbers tell which."""
+    for sale in [s for s in sales if s["store_number"]][:5]:
+        row = db.execute(
+            "SELECT channel,store FROM native_order_observations WHERE external_id=? LIMIT 1",
+            (sale["store_number"],),
+        ).fetchone()
+        if row:
+            return row[0], row[1]
+    return None
+
+
 def compare(db, orders, accounts):
     """`orders`: Bling's sales (see bling_coverage_read); `accounts`: {(channel, store): state}."""
     groups = {}
@@ -49,12 +64,18 @@ def compare(db, orders, accounts):
     for bling_store, sales in groups.items():
         first = sales[0]
         channel, store = first.get("channel"), first.get("store")
+        name = first.get("name")
+        if (channel, store) not in accounts:
+            found = _account_by_number(db, sales)
+            if found in accounts:
+                channel, store = found
+                name = name or f"{channel} (loja do Bling sem vínculo no DaVinci)"
         account = (channel, store) if (channel, store) in accounts else None
         row = {
             "bling_store": bling_store,
             "channel": channel,
             "store": store,
-            "name": first.get("name") or _guess(sales),
+            "name": name or _guess(sales),
             "reading": accounts.get(account) if account else None,
             "bling": len(sales),
             "cancelled": sum(1 for s in sales if s["situation"] in CANCELLED),

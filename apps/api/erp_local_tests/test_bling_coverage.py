@@ -74,3 +74,36 @@ def test_the_report_is_kept_shown_and_followed_by_the_homologation(tmp_path, mon
     shown = client.get("/api/erp-local/state").json()["bling_coverage"]
     assert shown["stores"][0]["missing_list"][0]["number"] == "1"
     assert homolog.FOLLOW["bling_coverage"] == ("mirror", None)
+
+
+def test_a_bling_store_davinci_never_linked_is_found_by_its_sale_numbers(erp, monkeypatch):
+    with erp.connection() as db:
+        db.execute("INSERT INTO native_order_reads VALUES ('d1','carrefour','2026-11-11','{}')")
+        db.execute(
+            "INSERT INTO native_order_observations VALUES ('o1','d1','carrefour',?,"
+            "'5778955150001-A','2026-11-11T10:00:00+00:00','2026-11-11T10:01:00+00:00','{}')",
+            (STORE,),
+        )
+    units = {"5778955150001-A": unit("SHIPPING")}
+    monkeypatch.setattr(native_ingest, "_units", lambda db, c, s: units)
+    monkeypatch.setattr(parallel_check, "sale_total", lambda *a: "363.45")
+    orders = [
+        sale(
+            "1",
+            "5778955150001-A",
+            bling_store="206354372",
+            store=None,
+            channel=None,
+            name=None,
+            total="363.45",
+        ),
+        sale("2", "PO-029-9", bling_store="205925390", store=None, channel=None, name=None),
+    ]
+    with erp.connection() as db:
+        report = bling_coverage.compare(db, orders, {("carrefour", STORE): "complete"})
+    by_store = {s["bling_store"]: s for s in report["stores"]}
+    carrefour = by_store["206354372"]
+    assert (carrefour["channel"], carrefour["found"], carrefour["missing"]) == ("carrefour", 1, 0)
+    assert carrefour["reading"] == "complete" and carrefour["equal"] == 1
+    assert "sem vínculo" in carrefour["name"]
+    assert by_store["205925390"]["name"] == "Temu" and by_store["205925390"]["missing"] == 1
