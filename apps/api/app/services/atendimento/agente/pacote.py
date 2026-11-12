@@ -56,6 +56,7 @@ from app.services.atendimento import (
     automacoes_catalogo,
     cartoes_plataforma,
     constantes,
+    email_agente,
     ia,
     validador,
 )
@@ -1279,6 +1280,21 @@ async def montar_pacote(
         partes.append("PRODUTO: " + PRODUTO_DO_PEDIDO)
     else:
         partes.append("PRODUTO: " + SEM_FICHA)
+    # O E-MAIL (12/11/2026, `email_agente`): o canal, a assinatura que o sistema põe,
+    # o formulário de SAC do site e as regras do e-mail (aba E-mail › Agente) — também
+    # como evidência para o verificador.
+    chave_email = email_agente.chave_da(conversa)
+    if chave_email is not None:
+        regras_email = await contexto_svc._seguro(
+            session,
+            "agente_regras_email",
+            lambda: email_agente.regras_ativas(session),
+            [],
+            conversa.id,
+        )
+        bloco_email = email_agente.bloco_do_pacote(chave_email, regras_email)
+        ctx.permitir(textos=[bloco_email])
+        partes.append("E-MAIL:\n" + bloco_email)
     # Kia ao vivo (21/10/2026, rascunho 610dcd76: "evidência citada sem prova
     # (regra:rastreio)" sem o `consultar_manual`): os ids que ESTES dados provam,
     # escritos — o modelo copia daqui (e das ferramentas), não adivinha.

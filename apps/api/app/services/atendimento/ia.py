@@ -267,7 +267,14 @@ from app.models import (
 )
 from app.redis_client import redis
 from app.services import dm_ia
-from app.services.atendimento import agente_config, ficha_loja, gravar, separa_email, validador
+from app.services.atendimento import (
+    agente_config,
+    email_agente,
+    ficha_loja,
+    gravar,
+    separa_email,
+    validador,
+)
 from app.services.atendimento import contexto as contexto_svc
 from app.services.atendimento import ficha as ficha_svc
 from app.services.atendimento import manual as manual_svc
@@ -2622,11 +2629,15 @@ def _avaliacao_vale_aqui(conversa: AtendimentoConversa, avaliador: Any, *, so_ad
 
 
 async def _canal_no_automatico(session: AsyncSession, conversa: AtendimentoConversa) -> bool:
-    """O canal da conversa está em `auto`? (lido do banco na hora da geração)"""
-    if conversa.canal_id is None:
+    """O canal da conversa está em `auto`? (lido do banco na hora da geração)
+
+    No e-mail liberado para o agente (12/11/2026), o canal da CHAVE da loja/site
+    (`email_agente.canal_id`)."""
+    canal_id = email_agente.canal_id(conversa)
+    if canal_id is None:
         return False
     modo = await session.scalar(
-        select(AtendimentoCanal.modo).where(AtendimentoCanal.id == conversa.canal_id)
+        select(AtendimentoCanal.modo).where(AtendimentoCanal.id == canal_id)
     )
     return modo == MODO_AUTO
 
@@ -2639,12 +2650,13 @@ async def _ia_e_o_atendente(session: AsyncSession, conversa: AtendimentoConversa
     de mandar para pessoa (ver `_gerar`). Copiloto, ou o assunto fora da
     lista: o pedido de atendente vai para pessoa, como antes.
     """
-    if conversa.canal_id is None:
+    canal_id = email_agente.canal_id(conversa)
+    if canal_id is None:
         return False
     linha = (
         await session.execute(
             select(AtendimentoCanal.modo, AtendimentoCanal.auto_categorias).where(
-                AtendimentoCanal.id == conversa.canal_id
+                AtendimentoCanal.id == canal_id
             )
         )
     ).one_or_none()
@@ -2666,14 +2678,15 @@ async def _agente_no_canal(session: AsyncSession, conversa: AtendimentoConversa)
     (`humano.triar_conversa`): a triagem e o rascunho seguem a mesma régua.
     """
     s = get_settings()
+    canal_id = email_agente.canal_id(conversa)
     if (
-        conversa.canal_id is None
+        canal_id is None
         or not s.atendimento_agente_ativo
         or agente_config.chave_do_agente(s) is None
     ):
         return False
     marcado = await session.scalar(
-        select(AtendimentoCanal.agente).where(AtendimentoCanal.id == conversa.canal_id)
+        select(AtendimentoCanal.agente).where(AtendimentoCanal.id == canal_id)
     )
     return agente_config.agente_ligado(s, {"agente": marcado})
 
@@ -5208,6 +5221,8 @@ async def conferir_saida(
         canal=conversa.canal,
         origem=ORIGEM_IA,
         prazos_de_garantia=prazos,
+        # E-mail do agente (12/11/2026): o link do formulário de SAC do site.
+        links_permitidos=email_agente.links_permitidos(conversa),
     )
     if agente and validador.MOTIVO_PRAZO in erros:
         # Rodada 4 (achado 12), só o agente: a negativa HONESTA do prazo ("Não
@@ -5875,10 +5890,16 @@ async def _gerar(
         # Sem a chave do legado, só o canal com o AGENTE segue (a chave Claude
         # é dele; 20/10/2026). Com a chave do legado, nem lê o canal aqui.
         return None
-    if motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados):
+    email_do_agente = email_agente.liberada(conversa)
+    if (
+        motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados)
+        and not email_do_agente
+    ):
         # E-mail do Tuta e Zap (05/10/2026): o envio deles ainda não existe no
         # DaVinci e o prompt é de marketplace — nem o cron, nem o "Sugerir",
         # nem o automático (`_talvez_enviar` só vem depois daqui) os pegam.
+        # Desde 12/11/2026 o e-mail da ponte com a chave do AGENTE ligada na
+        # loja/site é do agente (`email_agente.liberar`): só ele, nunca o legado.
         return None
     if conversa.ia_pausada or conversa.situacao in (CONVERSA_FECHADA, CONVERSA_BLOQUEADA):
         return None
@@ -5932,6 +5953,9 @@ async def _gerar(
     # canal com o agente quem decide o anexo é a régua dele (`acao_pessoa`:
     # depois de a loja pedir foto/vídeo, pessoa; sem o pedido, ele pergunta).
     agente_no_canal = await _agente_no_canal(session, conversa)
+    if email_do_agente and not agente_no_canal:
+        # O e-mail é só do AGENTE (12/11/2026): a chave desligou no meio — nada.
+        return None
 
     # A rajada que pede resposta: o que o cliente escreveu depois da última
     # resposta real da loja: o menu do Duoke não corta foto + texto
@@ -6064,6 +6088,9 @@ async def _gerar(
         categoria_basica = politica_aprovada.categoria
         texto_basico = politica_aprovada.texto
         fatos_gravados["politica_atendimento_aprovada"] = politica_aprovada.fato
+    if email_do_agente:
+        # E-mail (12/11/2026): os atalhos aprovados são frases de chat — o agente escreve.
+        categoria_basica = texto_basico = None
     nomes = (
         conversa.comprador_nome,
         conversa.comprador_id,
@@ -6922,15 +6949,19 @@ async def _talvez_enviar(
             motivo = "reclamacao_aberta"
         elif conversa.plataforma in PLATAFORMAS_SEM_AUTO:
             motivo = "plataforma_sem_auto"
-        elif motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados):
+        elif motivo_canal_sem_envio(
+            conversa.canal, conversa.plataforma, conversa.dados
+        ) and not email_agente.liberada(conversa):
             motivo = "canal_sem_envio"
         if motivo is not None:
             await _registrar_auto_envio(session, conversa, rascunho, motivo)
             return False
 
+        # No e-mail liberado (12/11/2026), o canal da CHAVE da loja/site.
+        canal_id = email_agente.canal_id(conversa)
         canal = (
-            await session.get(AtendimentoCanal, conversa.canal_id, populate_existing=True)
-            if conversa.canal_id is not None
+            await session.get(AtendimentoCanal, canal_id, populate_existing=True)
+            if canal_id is not None
             else None
         )
         if canal is None or canal.modo != MODO_AUTO:
@@ -6965,6 +6996,14 @@ async def _talvez_enviar(
                 in manual_svc.ids_so_humano(await manual_svc.categorias_ativas(session))
             ):
                 motivo = "assunto_so_humano"
+            if motivo in email_agente.TRAVAS_DO_ASSUNTO and await email_agente.sai_pelo_formulario(
+                session, conversa, rascunho.texto
+            ):
+                # E-mail do SAC do site (12/11/2026, a regra `formulario_sac`): o
+                # pedido de abrir pelo formulário sai sozinho no automático sem o
+                # assunto liberado — o resto das travas (verificador, turno, Caixa
+                # Humano, pausa) segue igual.
+                motivo = None
             if motivo is None:
                 # O verificador semântico (20/10/2026): obrigatório para sair sozinho.
                 from app.services.atendimento.agente import verificador
@@ -7590,6 +7629,9 @@ async def gerar_pendentes(session: AsyncSession, *, limite: int = 10) -> int:
             if MODO_AUTO in modos:
                 await manter_fila(session)
             geradas = await _gerar_pendentes(session, limite=limite, modos=modos)
+            # O E-MAIL das lojas/sites com a chave do agente ligada (12/11/2026):
+            # a mesma rodada, a mesma trava, o mesmo agente.
+            geradas += await email_agente.gerar_pendentes(session)
             if MODO_AUTO in modos:
                 geradas += await reavaliar_contextos(session)
                 geradas += await reavaliar_politicas(session)
@@ -7844,12 +7886,11 @@ def _sql_canal_sem_envio():
     )
 
 
-async def _gerar_pendentes(session: AsyncSession, *, limite: int, modos: tuple[str, ...]) -> int:
-    agora = datetime.now(UTC)
-    # "Já tratada" = existe rascunho cujo GATILHO é a última mensagem do
-    # cliente (mesma hora de plataforma que `ultima_do_cliente_em`, que sai
-    # dela). Nunca pela hora do rascunho: o sync atrasa a chegada da mensagem
-    # (ver `_cobre`).
+def _sql_ja_tratada():
+    """"Já tratada" = existe rascunho cujo GATILHO é a última mensagem do
+    cliente (mesma hora de plataforma que `ultima_do_cliente_em`, que sai
+    dela). Nunca pela hora do rascunho: o sync atrasa a chegada da mensagem
+    (ver `_cobre`). A rodada do e-mail do agente usa também (`email_agente`)."""
     rascunho = aliased(AtendimentoRascunho)
     gatilho = aliased(AtendimentoMensagem)
     avaliado = (
@@ -7857,7 +7898,7 @@ async def _gerar_pendentes(session: AsyncSession, *, limite: int, modos: tuple[s
         .where(AtendimentoAvaliacao.rascunho_id == rascunho.id)
         .exists()
     )
-    ja_tratada = (
+    return (
         select(rascunho.id)
         .join(gatilho, rascunho.mensagem_gatilho_id == gatilho.id)
         .where(
@@ -7868,6 +7909,11 @@ async def _gerar_pendentes(session: AsyncSession, *, limite: int, modos: tuple[s
         )
         .exists()
     )
+
+
+async def _gerar_pendentes(session: AsyncSession, *, limite: int, modos: tuple[str, ...]) -> int:
+    agora = datetime.now(UTC)
+    ja_tratada = _sql_ja_tratada()
     # O AGENTE (20/10/2026): a pausa só dele (limite, crédito, teto) tira os
     # canais dele — ou só a conversa do teto — da rodada; o legado segue.
     do_agente_fora: list[Any] = []

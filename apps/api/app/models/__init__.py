@@ -197,6 +197,7 @@ from app.models.logistica import (
 from app.models.mail import MailAttachment, MailMailbox, MailMessage, MailOutbox
 from app.models.mail_bridge import MailBridgeIdentity
 from app.models.mail_admin import MailAdminEvento, MailLeitorPastas, MailLixeira
+from app.models.mail_agente import MailAgenteRegra
 from app.models.mail_atendimento import (
     AtendimentoRegraPastaEmail,
     MailAgenteV2,
@@ -321,6 +322,7 @@ from app.models.user_settings import UserSettings
 __all__ = [
     "MailAdminEvento",
     "MailLeitorPastas",
+    "MailAgenteRegra",
     "MailLixeira",
     "MailMailbox",
     "MailBridgeIdentity",

@@ -74,7 +74,7 @@ import structlog
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
-from app.services.atendimento import cartoes_plataforma, constantes, ia, validador
+from app.services.atendimento import cartoes_plataforma, constantes, email_agente, ia, validador
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento import variacoes as variacoes_svc
 from app.services.atendimento.agente import acao_pessoa, checagens, custo, pacote, prompt, saida
@@ -2810,7 +2810,7 @@ def por_que_nao_verifica(
         return NAO_RODA_PLATAFORMA
     if constantes.motivo_canal_sem_envio(
         getattr(conversa, "canal", None), getattr(conversa, "plataforma", None), dados
-    ):
+    ) and not email_agente.liberada(conversa):
         return NAO_RODA_CANAL_SEM_ENVIO
     return None
 
@@ -2887,7 +2887,8 @@ async def _canal(session: AsyncSession, conversa: Any) -> Any:
     """O `AtendimentoCanal` da conversa (None sem canal ou se a leitura falhar)."""
     from app.models.atendimento import AtendimentoCanal
 
-    canal_id = getattr(conversa, "canal_id", None)
+    # No e-mail liberado (12/11/2026), o canal da CHAVE da loja/site.
+    canal_id = email_agente.canal_id(conversa)
     if canal_id is None:
         return None
     try:
@@ -2989,6 +2990,16 @@ async def no_rascunho(
                 canal,
                 checagens_feitas=checagens_feitas,
             )
+            chave_email = email_agente.chave_da(conversa)
+            if (
+                motivo in email_agente.TRAVAS_DO_ASSUNTO | {NAO_RODA_SO_HUMANO}
+                and chave_email is not None
+                and chave_email.modo == constantes.MODO_AUTO
+                and email_agente.pedido_do_formulario(final.texto, chave_email)
+            ):
+                # E-mail do SAC do site (12/11/2026): o pedido do formulário sai sem o
+                # assunto liberado (`ia._talvez_enviar`) — o verificador confere igual.
+                motivo = None
     except Exception as e:  # noqa: BLE001 — sem saber, não roda (e a trava barra)
         logger.warning("atendimento_agente_verificador_elegibilidade", err=type(e).__name__)
         motivo = NAO_RODA_FORA_DO_AUTO

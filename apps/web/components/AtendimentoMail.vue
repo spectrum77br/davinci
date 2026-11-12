@@ -46,7 +46,7 @@ type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: 
 // `rememberedSection` (v-model) = the section the person clicked earlier in
 // this visit to /atendimento: the page keeps it, since this component mounts
 // again every time the E-mail tab opens.
-type Section = 'mailboxes' | 'queues' | 'admin'
+type Section = 'mailboxes' | 'queues' | 'admin' | 'agente'
 const props = withDefaults(defineProps<{ isAdmin: boolean; isRoleAdmin?: boolean; canOperate?: boolean; canReadQueues?: boolean; canManageQueues?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; conversationCounts?: ContagensDeConversa | null; refreshConversationCounts?: () => Promise<void>; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
 const unreadCount = computed(() => props.conversationCounts?.nao_lidas?.total || 0)
 const emit = defineEmits<{ (e: 'openConversation', id: string): void; (e: 'update:rememberedSection', value: Section): void }>()
@@ -137,12 +137,14 @@ const canAdministerUsers = computed(() => props.isAdmin || !!props.isRoleAdmin)
 const initialSectionResolved = ref(props.waitingReady !== false)
 const chosenSection = ref<'' | Section>(props.rememberedSection || (initialSectionResolved.value && seesQueues.value && (props.waiting ?? 0) > 0 ? 'queues' : ''))
 function chooseSection(value: Section) {
-  if (sending.value || deleting.value || composerActive.value || resolving.value || (value === 'admin' && !canAdministerUsers.value)) return
+  if (sending.value || deleting.value || composerActive.value || resolving.value || ((value === 'admin' || value === 'agente') && !canAdministerUsers.value)) return
   chosenSection.value = value
   emit('update:rememberedSection', value)
 }
 const section = computed(() => {
   if (chosenSection.value === 'admin' && canAdministerUsers.value) return 'admin'
+  // O agente no e-mail (12/11/2026): só admin vê e mexe.
+  if (chosenSection.value === 'agente' && canAdministerUsers.value) return 'agente'
   if (chosenSection.value === 'queues' && seesQueues.value) return 'queues'
   if (chosenSection.value === 'mailboxes') return 'mailboxes'
   if (!initialSectionResolved.value) return 'loading'
@@ -751,6 +753,7 @@ onBeforeUnmount(() => {
         <h2 class="flex items-center gap-2 text-lg font-semibold"><Mail class="h-5 w-5" /> E-mail</h2>
         <p v-if="section === 'queues'" class="text-sm text-muted-foreground" data-mail-filas-descricao>{{ canOperate ? 'Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, chamados dos sites, falta responder, suspeitos, resumos e respostas a conferir.' : canReadQueues ? 'Os e-mails das suas lojas e os que ainda não têm loja: sem loja, sem vínculo, falta responder, suspeitos, resumos e respostas a conferir. Aqui você só vê.' : 'Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail.' }}</p>
         <p v-else-if="section === 'admin'" class="text-sm text-muted-foreground">Quem vê quais caixas de e-mail. Só administradores.</p>
+        <p v-else-if="section === 'agente'" class="text-sm text-muted-foreground">O agente do atendimento respondendo e-mail: onde ele responde e as regras do e-mail. Só administradores.</p>
         <p v-else class="text-sm text-muted-foreground">Caixas de e-mail para administradores e leitores expressamente autorizados.</p>
       </div>
       <div v-if="section === 'mailboxes'" class="flex gap-2">
@@ -793,9 +796,11 @@ onBeforeUnmount(() => {
         >{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
       </button>
       <button v-if="canAdministerUsers" type="button" role="tab" :aria-selected="section === 'admin'" :disabled="sending || deleting || !!resolving" class="-mb-px shrink-0 border-b-2 px-3 py-1.5 text-sm" :class="section === 'admin' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" data-mail-admin-tab @click="chooseSection('admin')">Administração</button>
+      <button v-if="canAdministerUsers" type="button" role="tab" :aria-selected="section === 'agente'" :disabled="sending || deleting || !!resolving" class="-mb-px shrink-0 border-b-2 px-3 py-1.5 text-sm" :class="section === 'agente' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" data-mail-agente-tab @click="chooseSection('agente')">Agente</button>
     </div>
 
     <AtendimentoMailUsuarios v-if="canAdministerUsers && section === 'admin'" @mudou="changedAdministration" />
+    <AtendimentoMailAgente v-if="canAdministerUsers && section === 'agente'" />
 
     <AtendimentoMailFilas
       v-if="seesQueues && section === 'queues'"

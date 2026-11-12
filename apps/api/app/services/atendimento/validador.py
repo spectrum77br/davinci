@@ -1305,7 +1305,8 @@ def validar(
         motivos.append(f"passa do limite de {limite} caracteres ({len(limpo)})")
 
     plano = plano_de(limpo)
-    if links_permitidos and origem == ORIGEM_IA and plataforma == "shopee":
+    # E-mail do agente (12/11/2026): o link do formulário de SAC do site (`email_agente`).
+    if links_permitidos and origem == ORIGEM_IA and (plataforma == "shopee" or canal == "email"):
         plano = _sem_os_links_permitidos(plano, links_permitidos)
     # Zap (26/10/2026): o canal da própria marca — o contato não é "fora da loja".
     zap = e_zap(plataforma, canal)

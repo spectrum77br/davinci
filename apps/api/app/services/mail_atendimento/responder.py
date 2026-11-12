@@ -88,6 +88,7 @@ from app.services.atendimento.constantes import (
     AUTOR_LOJA,
     AUTOR_SISTEMA,
     CONVERSA_BLOQUEADA,
+    MODO_AUTO,
     MSG_ENVIANDO,
     ORIGEM_HUMANO,
     ORIGEM_IA,
@@ -476,7 +477,7 @@ async def previa(
     origem: str = ORIGEM_HUMANO,
 ) -> Previa:
     """A resposta montada + TODAS as travas de agora (sem o texto). Não grava nada."""
-    from app.services.atendimento import enviar
+    from app.services.atendimento import email_agente, enviar
 
     p = Previa()
     if not get_settings().atendimento_envio_ativo:
@@ -487,7 +488,11 @@ async def previa(
             )
         )
     if origem == ORIGEM_IA:
-        p.bloqueios.append(Bloqueio(enviar.RECUSA_AUTO_DESLIGADO, MOTIVO_IA))
+        # O AGENTE responde e-mail (12/11/2026) só com a chave da loja/site no
+        # AUTOMÁTICO, relida agora (`email_agente.chave_liberada`).
+        chave = await email_agente.chave_liberada(session, conversa)
+        if chave is None or chave.modo != MODO_AUTO:
+            p.bloqueios.append(Bloqueio(enviar.RECUSA_AUTO_DESLIGADO, MOTIVO_IA))
     if conversa.situacao == CONVERSA_BLOQUEADA:
         p.bloqueios.append(
             Bloqueio(
@@ -739,11 +744,21 @@ async def enfileirar_resposta(
     """
     from app.services.atendimento import enviar
 
-    if user is None or origem == ORIGEM_IA:
+    if origem == ORIGEM_IA:
+        # O AGENTE (12/11/2026): pelo mesmo caminho da pessoa, com o usuário dele
+        # (a Central exige um autor) e nunca "enviar mesmo assim".
+        from app.services.atendimento import email_agente
+
+        user = await email_agente.usuario_do_agente(session)
+        confirmar = confirmar_nao_responde = False
+        ultima_vista_id = None
+    if user is None:
         raise enviar.EnvioRecusado(enviar.RECUSA_AUTO_DESLIGADO, MOTIVO_IA)
     ponto = await session.begin_nested()
     try:
         await enviar.travar_conversa(session, conversa)
+        if origem == ORIGEM_IA:
+            await _travas_do_agente(session, conversa, texto_pessoa, rascunho_id)
         recusa = await motivo_sem_envio(
             session,
             conversa,
@@ -848,6 +863,53 @@ async def enfileirar_resposta(
         modo=p.modo,
     )
     return mensagem
+
+
+async def _travas_do_agente(
+    session: AsyncSession,
+    conversa: AtendimentoConversa,
+    texto_pessoa: str,
+    rascunho_id: UUID | None,
+) -> None:
+    """As travas do envio SEM pessoa no e-mail (12/11/2026), as mesmas do `enviar._destino`
+    para a origem IA, com a conversa já travada e relida: o automático ligado no servidor e
+    na chave, a vez da IA, a pausa depois da pessoa, a triagem da Caixa Humano e o validador
+    (com o link do formulário de SAC do site). Levanta `EnvioRecusado`."""
+    from app.services.atendimento import email_agente, enviar, ia, validador
+
+    if not get_settings().atendimento_auto_ativo:
+        raise enviar.EnvioRecusado(enviar.RECUSA_AUTO_DESLIGADO, MOTIVO_IA)
+    chave = await email_agente.chave_liberada(session, conversa)
+    if chave is None or chave.modo != MODO_AUTO:
+        raise enviar.EnvioRecusado(enviar.RECUSA_AUTO_DESLIGADO, MOTIVO_IA)
+    motivo = enviar._motivo_ia_sem_vez(conversa)
+    if motivo:
+        raise enviar.EnvioRecusado(enviar.RECUSA_NAO_AGUARDA, motivo)
+    with email_agente.liberar(conversa.id, chave):
+        if await ia._pausa_humana_ate(session, conversa) is not None:
+            raise enviar.EnvioRecusado(
+                enviar.RECUSA_NAO_AGUARDA,
+                "Uma pessoa respondeu há menos de 30 minutos; a IA aguarda.",
+            )
+        rascunho = (
+            await enviar._rascunho_da_conversa(session, conversa, rascunho_id)
+            if rascunho_id is not None
+            else None
+        )
+        if await ia._motivos_humano_para_auto(session, conversa, rascunho):
+            raise enviar.EnvioRecusado(
+                enviar.RECUSA_NAO_AGUARDA,
+                "A triagem da Caixa Humano exige uma pessoa nesta conversa.",
+            )
+        erros = validador.validar(
+            texto_pessoa,
+            plataforma=conversa.plataforma,
+            canal=conversa.canal,
+            origem=ORIGEM_IA,
+            links_permitidos=email_agente.links_permitidos(conversa),
+        )
+    if erros:
+        raise enviar.EnvioRecusado(enviar.RECUSA_TEXTO_INVALIDO, erros)
 
 
 # ── A fila viva (o `enviar` não aposenta) e a conferência por pessoa ──────

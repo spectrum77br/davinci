@@ -229,6 +229,7 @@ from app.services.atendimento import (
     canais_externos,
     cartoes_plataforma,
     clientes,
+    email_agente,
     enviar,
     foco_devolucao,
     gravar,
@@ -3831,18 +3832,31 @@ async def pedir_rascunho(
             },
         )
     sem_envio = motivo_canal_sem_envio(c.canal, c.plataforma, c.dados)
-    if sem_envio:
+    # O e-mail com a chave do AGENTE ligada na loja/site (12/11/2026): o "Sugerir"
+    # é o agente, como no chat (`email_agente`).
+    chave_email = await email_agente.chave_liberada(session, c) if sem_envio else None
+    if sem_envio and chave_email is None:
         # E-mail do Tuta e Zap (05/10/2026): a IA não os pega (`ia._gerar`
         # também corta). O mesmo código e a mesma frase da trava do envio.
         raise HTTPException(
             409, detail={"code": enviar.RECUSA_CANAL_SEM_ENVIO, "detail": sem_envio}
         )
+    if chave_email is None:
+        return await _pedir_rascunho(session, c, user)
+    with email_agente.liberar(c.id, chave_email):
+        return await _pedir_rascunho(session, c, user)
+
+
+async def _pedir_rascunho(
+    session: AsyncSession, c: AtendimentoConversa, user: User
+) -> RascunhoUnicoOut:
     from app.services.atendimento import ia as ia_svc
 
     # O id antes de tudo: o prazo estourado do agente desfaz a transação (e
     # expira a conversa carregada).
     conversa_id = c.id
-    canal = await session.get(AtendimentoCanal, c.canal_id) if c.canal_id else None
+    canal_id = email_agente.canal_id(c)
+    canal = await session.get(AtendimentoCanal, canal_id) if canal_id else None
     com_agente = agente_config.agente_ligado(get_settings(), canal)
     # O pedido pela tela (`forcar=True`) não passa pelo teto diário dentro da
     # IA e, desde 28/10/2026, nem por limite de pessoa (ver acima): só o teto em

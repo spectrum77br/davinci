@@ -240,7 +240,7 @@ from app.models import (
 )
 from app.redis_client import redis
 from app.services.atendimento import contexto as contexto_svc
-from app.services.atendimento import foco_devolucao, ia, separa_email
+from app.services.atendimento import email_agente, foco_devolucao, ia, separa_email
 from app.services.atendimento import manual as manual_svc
 from app.services.atendimento.constantes import (
     ACAO_AG_CANCELAMENTO,
@@ -639,7 +639,8 @@ def triar(
         motivos.add(HUMANO_AVALIACAO)
     if motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados) == (
         MOTIVO_EMAIL_SO_PESSOA
-    ):
+    ) and not email_agente.liberada(conversa):
+        # O e-mail com a chave do agente ligada (12/11/2026) segue a régua do agente.
         motivos.add(HUMANO_EMAIL)
     nao_achado = bool(
         conversa.canal != CANAL_PERGUNTA
@@ -769,7 +770,8 @@ def _triar_do_agente(
         motivos.add(HUMANO_AVALIACAO)
     if motivo_canal_sem_envio(conversa.canal, conversa.plataforma, conversa.dados) == (
         MOTIVO_EMAIL_SO_PESSOA
-    ):
+    ) and not email_agente.liberada(conversa):
+        # O e-mail com a chave do agente ligada (12/11/2026) segue a régua do agente.
         motivos.add(HUMANO_EMAIL)
 
     # ── O que o cliente escreveu: os sinais e o turno incompleto ──
