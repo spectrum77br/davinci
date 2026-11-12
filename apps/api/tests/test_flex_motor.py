@@ -1096,3 +1096,83 @@ async def test_shipment_check_pede_a_reavaliacao(mundo, monkeypatch):
     assert len(pedidos) == 1
     assert pedidos[0][0] == "flex_reavaliar_run"
     assert pedidos[0][1].startswith("flex_reavaliar:")
+
+
+# ---- Desligar selecionados (12/11/2026) ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_desligar_selecionado_desliga_so_ele_e_nao_religa(db, mundo, monkeypatch):
+    """A pessoa marca UM anúncio ligado e clica em Desligar selecionados: só
+    ele é desligado, a aprovação sai, a trilha guarda quem foi e a rodada
+    seguinte NÃO religa — pede aprovação de novo (tem peça)."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    ml = mundo["ml"]
+    await flex_motor.rodar_motor()
+    await flex_motor.aprovar(mundo["conta_id"], "MLB1", por=None)
+    await flex_motor.aprovar(mundo["conta_id"], "MLB2", por=None)
+    assert {e: ml.estado[e] for e in ("MLB1", "MLB2")} == {"MLB1": True, "MLB2": True}
+    ml.chamadas.clear()
+
+    res = await flex_motor.desligar(mundo["conta_id"], "MLB1", por=mundo["dono_id"])
+    assert res == {"modo": "piloto", "resultado": "ok"}
+    assert ml.escritas == [("desligar", "MLB1")]
+    est = await _estados(db)
+    assert est["MLB1"].observado == "desligado"
+    assert est["MLB1"].motivo == flex_motor.MOTIVO_DESLIGADO_POR_PESSOA
+    assert (est["MLB1"].aprovado_em, est["MLB1"].aguardando_aprovacao) == (None, False)
+    assert est["MLB2"].observado == "ligado"  # o outro fica como estava
+    log = (
+        await db.execute(
+            select(FlexLog).where(FlexLog.external_id == "MLB1").order_by(FlexLog.id.desc())
+        )
+    ).scalars().first()
+    assert (log.acao, log.resultado, log.por) == ("desligar", "ok", mundo["dono_id"])
+    assert (log.estado_antes, log.estado_depois) == ("ligado", "desligado")
+
+    # De novo: já está desligado — nada é chamado.
+    ml.chamadas.clear()
+    res = await flex_motor.desligar(mundo["conta_id"], "MLB1", por=mundo["dono_id"])
+    assert res["resultado"] == "ja_desligado"
+    assert ml.escritas == []
+
+    # A rodada não religa: com peça, espera uma pessoa aprovar outra vez.
+    await flex_motor.rodar_motor()
+    assert ("ligar", "MLB1") not in ml.chamadas
+    est = await _estados(db)
+    assert (est["MLB1"].observado, est["MLB1"].aguardando_aprovacao) == ("desligado", True)
+    assert est["MLB2"].observado == "ligado"
+
+
+@pytest.mark.asyncio
+async def test_desligar_so_em_piloto_e_conta_pronta(db, mundo, monkeypatch):
+    """Em observar não escreve; conta fora de flex_contas, anúncio nunca
+    avaliado e conta saindo de outra cidade (Piracicaba) são recusados sem
+    nenhuma chamada à plataforma."""
+    ml = mundo["ml"]
+    await flex_motor.rodar_motor()  # observar: lê e grava, não escreve
+    with pytest.raises(flex_motor.FlexRegraError) as e:
+        await flex_motor.desligar(mundo["conta_id"], "MLB9", por=None)
+    assert e.value.codigo == "nao_escreve"
+
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "piloto")
+    with pytest.raises(flex_motor.FlexRegraError) as e:
+        await flex_motor.desligar(mundo["outra_id"], "MLB50", por=None)
+    assert e.value.codigo == "conta_nao_permitida"
+    with pytest.raises(flex_motor.FlexRegraError) as e:
+        await flex_motor.desligar(mundo["conta_id"], "MLB404", por=None)
+    assert e.value.codigo == "nao_avaliado"
+
+    # A saída do Flex da conta passa a ser Piracicaba: o Flex dela não é desta
+    # tela (o "Desligar tudo" desligava esse também — 12/11/2026).
+    ml.assinatura = flex_api.AssinaturaFlex(
+        True, "in", "assinatura do Flex ativa",
+        origem_cep=ORIGEM_PIRACICABA, origem_cidade="Piracicaba",
+    )
+    await flex_motor.rodar_motor(origem="manual", reler_contas=True)
+    ml.chamadas.clear()
+    with pytest.raises(flex_motor.FlexRegraError) as e:
+        await flex_motor.desligar(mundo["conta_id"], "MLB9", por=None)
+    assert e.value.codigo == "conta_nao_pronta"
+    assert "Piracicaba" in e.value.detalhe
+    assert ml.escritas == []

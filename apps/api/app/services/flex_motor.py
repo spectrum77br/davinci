@@ -188,6 +188,12 @@ _EMERGENCIA_PROGRESSO_S = 2.0
 # Emergência: quanto espera (s) a trava de um anúncio que a rodada está
 # lendo ou escrevendo — uma chamada à plataforma leva poucos segundos.
 _ESPERA_TRAVA_EMERGENCIA = 10.0
+# Uma pessoa desliga o Flex de um anúncio na tela ("Desligar selecionados",
+# 12/11/2026 — Vinicius trocou o "Desligar tudo" por ele: "dai selecionamos
+# antes"). A escrita é a da emergência, só que de um anúncio e só em conta
+# pronta (ver `desligar`); na trilha vira `desligar` com o `por`.
+_DESLIGAR_PESSOA = "desligar_pessoa"
+MOTIVO_DESLIGADO_POR_PESSOA = "desligado por uma pessoa na tela"
 # A conta pode ter Flex? (assinatura do ML / canal da loja Shopee): vale por
 # 1 h — a assinatura muda raramente e é uma chamada por conta.
 _VALIDADE_CONTA = timedelta(hours=1)
@@ -2389,8 +2395,9 @@ async def _escrever(
     confirmação, não liga — fica a falha com espera, e a aprovação continua.
 
     Devolve o tipo do resultado, "ocupado" (outro processo está no anúncio),
-    "mudou" (o estado relido já não pede a escrita) ou, na emergência,
-    "ja_desligado" (relido dentro da trava: nada a desligar)."""
+    "mudou" (o estado relido já não pede a escrita) ou, na emergência e no
+    desligar de uma pessoa (`desligar`), "ja_desligado" (relido dentro da
+    trava: nada a desligar)."""
     agora = _agora()
     async with session_scope() as s:
         chave = _chave_trava(integration_id, external_id)
@@ -2402,8 +2409,10 @@ async def _escrever(
         if not travou:
             return "ocupado"
         est = await s.get(FlexAnuncioEstado, (integration_id, external_id))
-        if acao == "emergencia":
+        if acao in ("emergencia", _DESLIGAR_PESSOA):
             if est is None:
+                if acao == _DESLIGAR_PESSOA:
+                    return "mudou"
                 est = FlexAnuncioEstado(
                     integration_id=integration_id,
                     external_id=external_id,
@@ -2414,7 +2423,11 @@ async def _escrever(
                 )
                 s.add(est)
             est.desejado = DESLIGADO
-            est.motivo = "emergência: desligado por uma pessoa"
+            est.motivo = (
+                "emergência: desligado por uma pessoa"
+                if acao == "emergencia"
+                else MOTIVO_DESLIGADO_POR_PESSOA
+            )
             est.aguardando_aprovacao = False
             est.aprovado_em = None
             est.aprovado_por = None
@@ -2465,10 +2478,12 @@ async def _escrever(
                 "flex_escrita_inesperada", external_id=external_id, erro=str(exc)[:200]
             )
             res = flex_api.ResultadoFlex(flex_api.ERRO, detalhe=f"inesperado: {str(exc)[:200]}")
-        _aplicar_resultado(est, res, "desligar" if acao == "emergencia" else acao, agora)
+        _aplicar_resultado(
+            est, res, "desligar" if acao in ("emergencia", _DESLIGAR_PESSOA) else acao, agora
+        )
         s.add(
             _log(
-                acao=acao,
+                acao="desligar" if acao == _DESLIGAR_PESSOA else acao,
                 modo=modo,
                 resultado="ok" if res.ok else ("pendente" if _confirmando(res) else "erro"),
                 integration_id=integration_id,
@@ -2848,6 +2863,62 @@ async def aplicar_aprovado(
         "aplicado": bool(resumo.get("ligar_ok")),
         "ocupado": bool(resumo.get("ocupado")),
     }
+
+
+async def desligar(integration_id: UUID, external_id: str, *, por: UUID | None) -> dict:
+    """Uma pessoa desliga o Flex de UM anúncio (tela: "Desligar selecionados",
+    12/11/2026 — no lugar do "Desligar tudo", que desligava também o Flex das
+    contas do ML que saem de Piracicaba).
+
+    Só em piloto/ativo e só em conta PRONTA — a que o robô controla: loja da
+    Shopee com a Entrega Direta ligada, conta do ML com a saída do Flex no
+    local de saída. O Flex de outra cidade não é desta tela (desliga-se no
+    painel da plataforma).
+
+    Tira a aprovação: com peça no local, a rodada seguinte pede aprovação de
+    novo — o motor nunca religa sozinho. Devolve `resultado` = o tipo da
+    escrita (`_escrever`: ok, ja_desligado, ocupado, repetir, erro…)."""
+    m = flex_config.modo()
+    if not flex_config.pode_escrever(m):
+        raise FlexRegraError(
+            "nao_escreve", f"o Flex está em {m}: o sistema não mexe nas plataformas"
+        )
+    await flex_local.carregar()
+    if integration_id not in flex_config.contas():
+        raise FlexRegraError("conta_nao_permitida", "a conta não está em flex_contas")
+    async with session_scope() as s:
+        est = await s.get(FlexAnuncioEstado, (integration_id, external_id))
+        if est is None:
+            raise FlexRegraError("nao_avaliado", "o motor ainda não avaliou este anúncio")
+        plataforma = est.plataforma
+        if plataforma == flex_envio.PLATAFORMA_SHOPEE and not flex_config.shopee_escrita():
+            raise FlexRegraError(
+                "shopee_so_leitura",
+                "na Shopee o DaVinci só confere: desligue a Entrega Direta à mão no Seller Center",
+            )
+        conta = await s.get(FlexConta, integration_id)
+        bloqueio = bloqueio_da_conta(
+            plataforma, conta_flex_da_linha(conta) if conta is not None else None
+        )
+        if bloqueio:
+            raise FlexRegraError("conta_nao_pronta", bloqueio)
+        integ = (await integracoes_permitidas(s, {integration_id})).get(integration_id)
+    if integ is None:
+        raise FlexRegraError("conta_nao_permitida", "a conta não existe mais no DaVinci")
+    cli = await _cliente(integ, {})
+    if cli is None:
+        raise FlexRegraError("sem_acesso", "não deu para acessar a conta na plataforma")
+    tipo = await _escrever(
+        cli,
+        integration_id=integration_id,
+        external_id=external_id,
+        plataforma=plataforma,
+        acao=_DESLIGAR_PESSOA,
+        modo=m,
+        por=por,
+        esperar_trava=_ESPERA_TRAVA_EMERGENCIA,
+    )
+    return {"modo": m, "resultado": tipo}
 
 
 # =============================================================================

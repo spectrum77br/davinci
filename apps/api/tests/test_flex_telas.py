@@ -228,7 +228,7 @@ async def test_anuncios_busca(client: AsyncClient, cena, auth_as: Callable):
 
 @pytest.mark.asyncio
 async def test_anuncio_so_importado_mostra_o_titulo_e_e_achado_pela_busca(
-    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable, monkeypatch
 ):
     """Achado da revisão: o anúncio só importado (sem vínculo — o motor o
     desliga) vinha sem título e a busca pelo nome não o achava. Na Shopee a
@@ -280,6 +280,9 @@ async def test_anuncio_so_importado_mostra_o_titulo_e_e_achado_pela_busca(
         ]
     )
     await db.commit()
+    # A loja também está no Flex (desde 12/11/2026 a tela só mostra as contas
+    # de flex_contas que existem).
+    monkeypatch.setattr(get_settings(), "flex_contas", f"{conta}, {loja_id}")
     auth_as(admin)
     itens = {i["external_id"]: i for i in (await client.get("/api/flex/anuncios")).json()["itens"]}
     assert itens["MLB4"]["titulo"] == "Mochila Executiva Importada"

@@ -169,6 +169,9 @@ def test_limite_por_familia_traduz_o_resto_tambem():
 
 def test_emergencia_e_desconhecido():
     assert _claro("emergência: desligado por uma pessoa") == "Desligado pelo botão de emergência."
+    assert _claro(fm.MOTIVO_DESLIGADO_POR_PESSOA).startswith(
+        "Desligado por uma pessoa (Desligar selecionados)."
+    )
     # O que não casa volta como veio (nunca some da tela).
     assert motivo_claro("algo novo do motor") == "algo novo do motor"
     assert motivo_claro(None) is None

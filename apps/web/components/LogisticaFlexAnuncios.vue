@@ -9,8 +9,9 @@
 //     porquê em português claro;
 //   • APROVA o ligar (orientação do ML: ativar o Flex é decisão do vendedor —
 //     desligar o sistema faz sozinho);
-//   • pede uma conferência agora ("Sincronizar Flex") e tem o botão de
-//     emergência que desliga tudo das contas liberadas;
+//   • pede uma conferência agora ("Sincronizar Flex") e desliga os anúncios
+//     marcados ("Desligar selecionados", 12/11/2026 — no lugar do "Desligar
+//     tudo", que desligava também o Flex do ML que sai de Piracicaba);
 //   • vê os pedidos Flex que o robô não conseguiu passar para o .sp.
 // Nada aqui chama o ML/Shopee direto: tudo passa pelo motor no servidor, que
 // respeita o modo (em "observar" nada é escrito nas plataformas).
@@ -18,7 +19,7 @@
 // Flex (assinatura do ML / Entrega Direta ligada na loja Shopee) e quantos
 // anúncios dela o DaVinci não conhecia; o anúncio pausado aparece marcado;
 // a emergência vira um job com andamento na tela.
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   RefreshCw,
   Search,
@@ -48,6 +49,8 @@ type FlexConta = {
   nome: string | null
   plataforma: string | null
   existe: boolean
+  // Shopee: o shop_id da loja (o link do anúncio: shopee.com.br/product/<loja>/<anúncio>).
+  loja_id?: string | null
   // O Flex DA CONTA (o motor confere de hora em hora): true = pode ter Flex;
   // false = não pode (motivo em flex_motivo); null = ainda não conferida.
   flex_ativo: boolean | null
@@ -167,6 +170,15 @@ const erro = ref<string | null>(null)
 // ---- Filtros (dropdowns rotulados, preferência do dono) ----
 const filtroPlataforma = ref<'' | 'ml' | 'shopee'>('')
 const filtroConta = ref('')
+// 12/11/2026 (revisão): o menu Conta mostra só as contas da plataforma
+// escolhida — antes dava para escolher "Mercado Livre" + uma loja da Shopee e
+// a lista ficava vazia. Trocar a plataforma solta a conta de outra plataforma.
+const contasDoFiltro = computed(() =>
+  (config.value?.contas || []).filter((c) => c.existe && (!filtroPlataforma.value || c.plataforma === filtroPlataforma.value)),
+)
+watch(filtroPlataforma, () => {
+  if (filtroConta.value && !contasDoFiltro.value.some((c) => c.id === filtroConta.value)) filtroConta.value = ''
+})
 // Cada opção vira um filtro do backend (desejado / observado / aguardando).
 const SITUACOES = [
   { key: '', label: 'Todos' },
@@ -185,6 +197,12 @@ const filtroSituacao = ref<Situacao>('')
 type FiltroPecas = 'com' | 'flex' | ''
 const filtroPecas = ref<FiltroPecas>('com')
 const filtroNaoPronta = ref(false)
+// "Ligado, mas deveria desligar" é o anúncio SEM peça: com o "Mostrar: com
+// peça" de fábrica o menu achava sempre 0 (o cartão "Ligados sem peça" já
+// soltava o filtro de peças; o menu agora faz igual).
+watch(filtroSituacao, (s) => {
+  if (s === 'desligar' && filtroPecas.value) filtroPecas.value = ''
+})
 const busca = ref('')
 const buscaAplicada = ref('')
 let buscaTimer: ReturnType<typeof setTimeout> | null = null
@@ -291,12 +309,11 @@ watch(pagina, () => carregarAnuncios())
 // para quem deixou a aba aberta. Não roda com ação em andamento.
 const aprovando = ref<Set<string>>(new Set())
 const sincronizando = ref(false)
-const emergenciaRodando = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
 const recargas: ReturnType<typeof setTimeout>[] = []
 function tick() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
-  if (loading.value || aprovando.value.size || ligandoLote.value || sincronizando.value || emergenciaRodando.value) return
+  if (loading.value || aprovando.value.size || emLote.value || sincronizando.value) return
   carregarAnuncios()
   carregarPedidos()
 }
@@ -309,6 +326,7 @@ onBeforeUnmount(() => {
   if (timer) clearInterval(timer)
   if (buscaTimer) clearTimeout(buscaTimer)
   if (emergenciaTimer) clearTimeout(emergenciaTimer)
+  if (destaqueTimer) clearTimeout(destaqueTimer)
   recargas.forEach((t) => clearTimeout(t))
 })
 
@@ -523,6 +541,12 @@ const regras = computed<{ forte: string; resto: string; antes?: string }[]>(() =
     },
   ]
   if (meio.length && meio[0]! > 0) out.push({ antes: 'Com ', forte: meioTxt, resto: ': fica como está (não liga nem desliga).' })
+  if (c.pode_escrever)
+    out.push({
+      antes: 'Para desligar antes: marque e clique em ',
+      forte: 'Desligar selecionados',
+      resto: ' — o anúncio só volta a ligar se alguém aprovar de novo.',
+    })
   out.push({
     antes: 'Só nas ',
     forte: 'contas prontas',
@@ -580,6 +604,12 @@ function familiasTexto(a: FlexAnuncio): string {
 // Link do anúncio: só o do Mercado Livre é montável com o que o DaVinci tem
 // (MLB123 → produto.mercadolivre.com.br/MLB-123); o da Shopee pede o id da loja.
 function linkAnuncio(a: FlexAnuncio): string | null {
+  if (a.plataforma === 'shopee') {
+    // 12/11/2026: a Shopee também — o shop_id da loja vem da configuração.
+    const loja = (config.value?.contas || []).find((c) => c.id === a.integration_id)?.loja_id
+    const item = a.external_id.trim()
+    return loja && /^\d+$/.test(item) ? `https://shopee.com.br/product/${loja}/${item}` : null
+  }
   if (a.plataforma !== 'ml') return null
   const m = /^MLB(\d+)$/i.exec(a.external_id.trim())
   return m ? `https://produto.mercadolivre.com.br/MLB-${m[1]}` : null
@@ -773,7 +803,7 @@ async function salvarLocal() {
     if (r?.ligados_fora)
       toasts.warning('Anúncios com Flex ligado fora do local', [
         `${r.ligados_fora} anúncio(s) continuam com Flex ligado em contas que não saem de ${cidade}.`,
-        'O sistema não mexe mais neles. Se precisar, use "Desligar tudo (emergência)".',
+        'O sistema não mexe mais neles. Se precisar, desligue pelo painel da plataforma.',
       ])
     editandoLocal.value = false
     emit('mudou')
@@ -885,8 +915,13 @@ async function aprovar(a: FlexAnuncio) {
 // quem tem o botão Aprovar; o botão aprova um por um (o mesmo caminho do
 // Aprovar — confere o saldo no Bling e liga) e no fim mostra o resumo.
 const marcados = ref<Set<string>>(new Set())
-const marcaveis = computed(() => itens.value.filter((a) => podeAprovar(a)))
+// 12/11/2026 ("Desligar selecionados"): o mesmo quadradinho marca quem dá para
+// ligar (tem Aprovar) e quem dá para desligar (Flex ligado em conta pronta);
+// cada botão usa só os seus.
+const marcaveis = computed(() => itens.value.filter((a) => podeAprovar(a) || podeDesligar(a)))
 const marcadosValidos = computed(() => marcaveis.value.filter((a) => marcados.value.has(chave(a))))
+const paraLigar = computed(() => marcadosValidos.value.filter((a) => podeAprovar(a)))
+const paraDesligar = computed(() => marcadosValidos.value.filter((a) => podeDesligar(a)))
 const todosMarcados = computed(
   () => marcaveis.value.length > 0 && marcadosValidos.value.length === marcaveis.value.length,
 )
@@ -904,17 +939,29 @@ function emPromocao(a: FlexAnuncio | null | undefined): boolean {
   const r = a?.recusa || ''
   return r.includes('em promoção') || r.includes('has promotion')
 }
-const ligandoLote = ref(false)
+// Um lote por vez (ligar OU desligar): a barra mostra o andamento.
+const loteAcao = ref<'ligar' | 'desligar' | null>(null)
+const emLote = computed(() => loteAcao.value !== null)
 const loteFeitos = ref(0)
 const loteTotal = ref(0)
+function soltarMarcados(feitos: FlexAnuncio[]) {
+  const s = new Set(marcados.value)
+  for (const a of feitos) s.delete(chave(a))
+  marcados.value = s
+}
+function trocarLinha(k: string, estado: FlexAnuncio | null | undefined) {
+  if (!estado) return
+  const i = itens.value.findIndex((x) => chave(x) === k)
+  if (i >= 0) itens.value.splice(i, 1, estado)
+}
 async function ligarSelecionados() {
-  const lista = [...marcadosValidos.value]
-  if (!lista.length || ligandoLote.value) return
+  const lista = [...paraLigar.value]
+  if (!lista.length || emLote.value) return
   const aviso = config.value?.pode_escrever
     ? `O sistema confere cada anúncio e o saldo no Bling e liga um por um. Anúncio em promoção a Shopee não deixa: ele fica marcado com o nome da promoção.`
     : 'Modo "só observando": as aprovações ficam registradas, mas nada muda na plataforma.'
   if (!confirm(`Ligar o Flex em ${lista.length} anúncio(s)?\n\n${aviso}`)) return
-  ligandoLote.value = true
+  loteAcao.value = 'ligar'
   loteTotal.value = lista.length
   loteFeitos.value = 0
   const r = { ligados: 0, ja: 0, fila: 0, confirmando: 0, promocao: 0, outros: 0, erros: 0 }
@@ -926,10 +973,7 @@ async function ligarSelecionados() {
         `/api/flex/anuncios/${a.integration_id}/${encodeURIComponent(a.external_id)}/aprovar`,
         { method: 'POST' },
       )
-      if (resp.estado) {
-        const i = itens.value.findIndex((x) => chave(x) === k)
-        if (i >= 0) itens.value.splice(i, 1, resp.estado)
-      }
+      trocarLinha(k, resp.estado)
       if (resp.aplicado) r.ligados++
       else if (resp.estado?.observado === 'ligado') r.ja++
       else if (resp.na_fila) r.fila++
@@ -945,8 +989,8 @@ async function ligarSelecionados() {
       loteFeitos.value++
     }
   }
-  ligandoLote.value = false
-  marcados.value = new Set()
+  loteAcao.value = null
+  soltarMarcados(lista)
   const partes = [
     r.ligados && `${r.ligados} ligado(s)`,
     r.ja && `${r.ja} já estava(m) ligado(s)`,
@@ -959,6 +1003,89 @@ async function ligarSelecionados() {
   const tudoCerto = !r.promocao && !r.outros && !r.erros
   ;(tudoCerto ? toasts.success : toasts.warning)(`Ligar selecionados: ${lista.length}`, partes)
   if (r.fila) for (const ms of [45000, 120000]) recargas.push(setTimeout(() => carregarAnuncios(), ms))
+  emit('mudou')
+  carregarAnuncios()
+}
+
+// ---- Desligar vários de uma vez (12/11/2026) ----
+// Vinicius: "e se colocar desligar selecionados… dai selecionamos antes" — no
+// lugar do "Desligar tudo" (que desligava também o Flex do ML que sai de
+// Piracicaba, onde o sistema não religa). Só o Flex que o sistema controla:
+// ligado na plataforma, conta pronta, piloto/ativo. Desligado assim, só volta
+// a ligar com outra aprovação (com peça, ele vai para "Esperando aprovação").
+function podeDesligar(a: FlexAnuncio): boolean {
+  return (
+    props.canEdit &&
+    !!config.value?.pode_escrever &&
+    contasPermitidas.value.has(a.integration_id) &&
+    contaPronta(a) &&
+    !(a.plataforma === 'shopee' && !config.value?.shopee_escrita) &&
+    a.observado === 'ligado'
+  )
+}
+const ERRO_DESLIGAR: Record<string, string> = {
+  nao_escreve: 'O sistema está só observando: não mexe nas plataformas.',
+  conta_nao_permitida: 'Conta fora das liberadas para o Flex.',
+  conta_nao_pronta: 'A conta não está pronta (o sistema não mexe nela): desligue pelo painel da plataforma.',
+  nao_avaliado: 'O sistema ainda não conferiu o anúncio.',
+  shopee_so_leitura: 'Na Shopee o sistema só confere: desligue à mão no Seller Center.',
+  sem_acesso: 'Não deu para acessar a conta na plataforma (reconecte em Integrações).',
+  fora_do_escopo: 'A conta não é da sua equipe.',
+}
+async function desligarSelecionados() {
+  const lista = [...paraDesligar.value]
+  if (!lista.length || emLote.value) return
+  const ok = confirm(
+    `Desligar o Flex em ${lista.length} anúncio(s)?\n\n` +
+      'O sistema desliga um por um na plataforma. Eles NÃO voltam a ligar sozinhos: ' +
+      `com peça em ${localCidade.value}, ficam em "Esperando aprovação" até alguém aprovar de novo.`,
+  )
+  if (!ok) return
+  loteAcao.value = 'desligar'
+  loteTotal.value = lista.length
+  loteFeitos.value = 0
+  const r = { desligados: 0, ja: 0, confirmando: 0, ocupados: 0, promocao: 0, outros: 0, erros: 0 }
+  const motivosErro = new Set<string>()
+  for (const a of lista) {
+    const k = chave(a)
+    aprovando.value = new Set([...aprovando.value, k])
+    try {
+      const resp = await api<{ modo: string; resultado: string; desligado: boolean; estado: FlexAnuncio | null }>(
+        `/api/flex/anuncios/${a.integration_id}/${encodeURIComponent(a.external_id)}/desligar`,
+        { method: 'POST' },
+      )
+      trocarLinha(k, resp.estado)
+      if (resp.resultado === 'ok') r.desligados++
+      else if (resp.resultado === 'ja_desligado') r.ja++
+      else if (resp.resultado === 'ocupado') r.ocupados++
+      else if (resp.estado && shopeeConfirmando(resp.estado)) r.confirmando++
+      else if ((resp.estado?.ultimo_erro || '').includes('em promoção')) r.promocao++
+      else r.outros++
+    } catch (e: any) {
+      r.erros++
+      const d = e?.data?.detail
+      const code = typeof d === 'object' && d && !Array.isArray(d) ? d.code : null
+      motivosErro.add(ERRO_DESLIGAR[code] || (typeof d === 'object' && d?.detalhe) || e?.message || 'erro')
+    } finally {
+      const s = new Set(aprovando.value)
+      s.delete(k)
+      aprovando.value = s
+      loteFeitos.value++
+    }
+  }
+  loteAcao.value = null
+  soltarMarcados(lista)
+  const partes = [
+    r.desligados && `${r.desligados} desligado(s)`,
+    r.ja && `${r.ja} já estava(m) desligado(s)`,
+    r.confirmando && `${r.confirmando} com a Shopee confirmando (até 15 min)`,
+    r.ocupados && `${r.ocupados} o sistema estava mexendo agora — tente de novo em 1 minuto`,
+    r.promocao && `${r.promocao} em promoção: a Shopee não deixa mudar o envio — desligue no Seller Center`,
+    r.outros && `${r.outros} não desligou — veja o erro na linha`,
+    r.erros && `${r.erros} não deu para desligar: ${[...motivosErro].join(' ')}`,
+  ].filter(Boolean) as string[]
+  const tudoCerto = !r.ocupados && !r.promocao && !r.outros && !r.erros
+  ;(tudoCerto ? toasts.success : toasts.warning)(`Desligar selecionados: ${lista.length}`, partes)
   emit('mudou')
   carregarAnuncios()
 }
@@ -1047,44 +1174,9 @@ async function retomarEmergencia() {
   }
 }
 
-async function emergencia() {
-  if (!props.canEdit || emergenciaRodando.value || emergenciaAndando.value) return
-  const c = config.value
-  const simulacao = !c?.pode_escrever
-  // Simulação de verdade: nada muda, nem as aprovações (o servidor só conta).
-  const ok = confirm(
-    simulacao
-      ? 'SIMULAR a emergência?\n\nO modo atual não mexe nas plataformas: o sistema só mostra o que faria — ' +
-          'quantos anúncios desligaria e quantas aprovações retiraria. Nada muda, nem as aprovações.'
-      : 'DESLIGAR O FLEX DE TODOS os anúncios das contas liberadas?\n\n' +
-          'Também retira todas as aprovações AGORA: nada volta a ligar sem uma pessoa aprovar de novo. ' +
-          'O desligamento roda no servidor e o andamento aparece aqui (pode fechar a página).',
-  )
-  if (!ok) return
-  emergenciaRodando.value = true
-  try {
-    const r = await api<FlexEmergencia>('/api/flex/emergencia', { method: 'POST' })
-    if (!r.id) {
-      toasts.warning('Nada a desligar', motivoServidor(r.resumo?.motivo))
-      return
-    }
-    emergenciaAtual.value = r
-    if (r.ja_em_andamento) toasts.info('Já há uma emergência em andamento', 'Acompanhe o andamento abaixo dos botões.')
-    else if (r.escreve && r.resumo?.aprovacoes)
-      toasts.info('Aprovações retiradas', `${r.resumo.aprovacoes} aprovação(ões) retiradas agora. Desligando…`)
-    emit('mudou')
-    acompanharEmergencia(r.id)
-  } catch (e: any) {
-    const d = e?.data?.detail
-    toasts.error(
-      'A emergência não começou',
-      (typeof d === 'object' && d ? d.detalhe || d.code : null) || e?.message || 'erro',
-    )
-  } finally {
-    emergenciaRodando.value = false
-  }
-}
-
+// 12/11/2026: o botão "Desligar tudo" saiu da tela (no lugar dele, "Desligar
+// selecionados"). O andamento continua aparecendo se uma emergência pedida
+// pela API estiver rodando.
 function andamentoTexto(e: FlexEmergencia): string {
   const r = e.resumo || {}
   if (e.status === 'na_fila') return 'Na fila do servidor — começa em instantes.'
@@ -1132,6 +1224,30 @@ async function marcarAcertado(p: FlexPedido) {
 // Mercado Livre / a Shopee ainda não foi lido).
 const conferidos = computed(() => Math.max(0, resumo.value.avaliados - resumo.value.nao_lidos))
 
+// Lista vazia: dizer POR QUÊ (12/11/2026 — com "Mercado Livre" a lista ficava
+// vazia sem explicação: as contas do ML no Flex não têm anúncio de produto com
+// peça no .sp). Os cartões (resumo) já seguem a plataforma e a conta.
+function listaNomes(nomes: string[]): string {
+  if (nomes.length <= 1) return nomes[0] || ''
+  return `${nomes.slice(0, -1).join(', ')} e ${nomes[nomes.length - 1]}`
+}
+const vazioVerTodos = computed(() => !!filtroPecas.value && resumo.value.avaliados > 0 && !(resumo.value.com_peca ?? 0))
+const vazioTexto = computed(() => {
+  const conta = filtroConta.value ? contasDoFiltro.value.find((c) => c.id === filtroConta.value) : null
+  const escopo = conta
+    ? `da conta ${(conta.nome || '').trim()}`
+    : filtroPlataforma.value === 'ml' ? 'do Mercado Livre' : filtroPlataforma.value === 'shopee' ? 'da Shopee' : ''
+  if (resumo.value.avaliados === 0) return escopo ? `Nenhum anúncio ${escopo} no Flex.` : 'Nenhum anúncio avaliado ainda.'
+  if (vazioVerTodos.value) {
+    if (!escopo)
+      return `Nenhum anúncio com peça em ${localCidade.value} ainda — o sistema calcula as peças na próxima conferência (até ${config.value?.intervalo_min ?? 15} min).`
+    const nomes = conta ? [(conta.nome || '').trim()] : contasDoFiltro.value.map((c) => (c.nome || c.id.slice(0, 8)).trim())
+    const quem = nomes.length === 1 ? `a conta ${nomes[0]} não tem` : `as contas ${listaNomes(nomes)} não têm`
+    return `Nenhum anúncio ${escopo} com peça em ${localCidade.value}: ${quem} anúncio de produto com peça no .${localLote.value}.`
+  }
+  return 'Nenhum anúncio com esses filtros.'
+})
+
 // Clique num número do resumo = filtra a lista por aquilo.
 function filtrarPor(s: Situacao) {
   filtroSituacao.value = filtroSituacao.value === s ? '' : s
@@ -1173,6 +1289,16 @@ function querInfo(a: FlexAnuncio): { texto: string; cls: string; title: string }
       ...DESEJADO.ligado!,
       cls: `${DESEJADO.ligado!.cls}${contaPronta(a) ? '' : ' opacity-60'}`,
       title: contaPronta(a) ? 'Tem peça para ter Flex — ligar é à mão no Seller Center' : `Tem peça para ter Flex quando a conta ficar pronta (${motivoConta(a)})`,
+    }
+  }
+  // 12/11/2026 (revisão): com peça de menos, a conta não pronta mostrava "Não
+  // pode ter Flex" (vermelho) e a pronta "Flex desligado" (cinza) — o mesmo
+  // caso. O que pesa aqui são as peças: cinza, apagado, como os outros dela.
+  if (!contaPronta(a) && a.saldo_sp !== null && a.saldo_sp !== undefined && a.saldo_sp < n) {
+    return {
+      ...DESEJADO.desligado!,
+      cls: `${DESEJADO.desligado!.cls} opacity-60`,
+      title: `Só ${a.saldo_sp} peça(s) em ${localCidade.value} — precisa de ${n} para ligar (e a conta ainda não está pronta: ${motivoConta(a)})`,
     }
   }
   return { ...desejadoInfo(a), title: a.motivo_claro || a.motivo || '' }
@@ -1262,13 +1388,47 @@ const agirItens = computed<AgirFlex[]>(() => {
   }
   if (r.aguardando) out.push({ chave: 'aguardando', dot: 'bg-amber-500', titulo: `Esperando sua aprovação · ${r.aguardando}`, detalhe: 'o sistema quer ligar o Flex', acao: 'Ver', fazer: () => clicarCartao('aguardando') })
   if (r.desligar) out.push({ chave: 'desligar', dot: 'bg-red-600', titulo: `Ligados sem peça · ${r.desligar}`, detalhe: config.value?.pode_escrever ? 'o sistema desliga sozinho' : 'desligar (o sistema está só observando)', acao: 'Ver', fazer: () => clicarCartao('desligar') })
+  // 12/11/2026 (revisão): o "Ver" das contas abre o quadro Contas no grupo —
+  // antes filtrava a lista por "conta não pronta" e, sem anúncio do ML com
+  // peça, mostrava os da Shopee.
   const fora = gruposContas.value.find((g) => g.chave === 'fora')?.contas || []
-  if (fora.length) out.push({ chave: 'fora', dot: 'bg-amber-500', titulo: `${fora.length} conta(s) do ML saem de outra cidade`, detalhe: `trocar a saída do Flex para ${localCidade.value} no painel do ML`, acao: 'Ver', fazer: () => clicarCartao('nao_pronta') })
-  const shopee = (config.value?.contas || []).filter((c) => c.existe && c.plataforma === 'shopee' && c.flex_ativo === false)
-  if (shopee.length) out.push({ chave: 'shopee', dot: 'bg-slate-400', titulo: `${shopee.length} loja(s) Shopee sem Entrega Direta`, detalhe: 'ligar no Seller Center e clicar Sincronizar Flex', acao: 'Ver', fazer: () => { filtroPlataforma.value = 'shopee'; clicarCartao('nao_pronta') } })
-  if (r.sem_controle) out.push({ chave: 'sem_controle', dot: 'bg-amber-500', titulo: `Flex ligado fora do controle · ${r.sem_controle}`, detalhe: 'em conta não pronta: só a emergência ou o painel desliga' })
+  if (fora.length) out.push({ chave: 'fora', dot: 'bg-amber-500', titulo: `${fora.length} conta(s) do ML saem de outra cidade`, detalhe: `trocar a saída do Flex para ${localCidade.value} no painel do ML`, acao: 'Ver', fazer: () => abrirGrupoContas('fora') })
+  const shopee = gruposContas.value.find((g) => g.chave === 'shopee')?.contas || []
+  if (shopee.length) out.push({ chave: 'shopee', dot: 'bg-slate-400', titulo: `${shopee.length} loja(s) Shopee sem Entrega Direta`, detalhe: 'ligar no Seller Center e clicar Sincronizar Flex', acao: 'Ver', fazer: () => abrirGrupoContas('shopee') })
+  if (r.sem_controle) {
+    // Flex ligado em conta que o sistema não controla — hoje, o ML que sai de
+    // Piracicaba ("fora do controle" assustava e não dizia o que era).
+    const cidades = [
+      ...new Set(
+        (config.value?.contas || [])
+          .filter((c) => c.existe && c.plataforma === 'ml' && c.flex_ativo === true && c.flex_origem_ok === false && c.flex_origem_cidade)
+          .flatMap((c) => c.flex_origem_cidade!.split(',').map((x) => x.trim()).filter(Boolean)),
+      ),
+    ]
+    out.push({
+      chave: 'sem_controle',
+      dot: 'bg-slate-400',
+      titulo: cidades.length
+        ? `${r.sem_controle.toLocaleString('pt-BR')} anúncios com Flex saindo de ${listaNomes(cidades)}`
+        : `${r.sem_controle.toLocaleString('pt-BR')} anúncios com Flex em conta não pronta`,
+      detalhe: 'o sistema não mexe neles — desligar é pelo painel da plataforma',
+    })
+  }
   return out
 })
+// O "Ver" das contas: abre o grupo no quadro Contas e rola até ele.
+const grupoDestaque = ref<string | null>(null)
+let destaqueTimer: ReturnType<typeof setTimeout> | null = null
+function abrirGrupoContas(chave: string) {
+  gruposAbertos.value = new Set([...gruposAbertos.value, chave])
+  grupoDestaque.value = chave
+  if (destaqueTimer) clearTimeout(destaqueTimer)
+  destaqueTimer = setTimeout(() => (grupoDestaque.value = null), 2500)
+  nextTick(() => {
+    if (typeof document !== 'undefined')
+      document.querySelector(`[data-flex-grupo="${chave}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  })
+}
 const MODO_CHIP: Record<string, { texto: string; cls: string }> = {
   desligado: { texto: 'Desligado', cls: 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300' },
   observar: { texto: 'Só observando', cls: 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300' },
@@ -1397,27 +1557,33 @@ defineExpose({ recarregar: carregarTudo })
           v-if="canEdit"
           type="button"
           class="inline-flex items-center gap-1 rounded-md border border-emerald-600 bg-emerald-600 px-2.5 py-1 text-white hover:bg-emerald-700 disabled:opacity-50"
-          :disabled="!marcadosValidos.length || ligandoLote || modoDesligado"
-          :title="marcadosValidos.length
-            ? `Aprova e liga o Flex nos ${marcadosValidos.length} anúncio(s) marcados, um por um. Pede confirmação.`
-            : 'Marque os anúncios no quadradinho da primeira coluna (só os que têm Aprovar).'"
+          :disabled="!paraLigar.length || emLote || modoDesligado"
+          :title="paraLigar.length
+            ? `Aprova e liga o Flex nos ${paraLigar.length} anúncio(s) marcados, um por um. Pede confirmação.`
+            : 'Marque no quadradinho da primeira coluna os anúncios com Aprovar.'"
           data-flex-ligar-selecionados
           @click="ligarSelecionados"
         >
-          <Check class="size-3.5" :class="ligandoLote ? 'animate-pulse' : ''" />
-          {{ ligandoLote ? `Ligando ${loteFeitos} de ${loteTotal}…` : `Ligar selecionados (${marcadosValidos.length})` }}
+          <Check class="size-3.5" :class="loteAcao === 'ligar' ? 'animate-pulse' : ''" />
+          {{ loteAcao === 'ligar' ? `Ligando ${loteFeitos} de ${loteTotal}…` : `Ligar selecionados (${paraLigar.length})` }}
         </button>
+        <!-- 12/11/2026: no lugar do "Desligar tudo" (que desligava também o
+             Flex do ML que sai de Piracicaba) — só os marcados. -->
         <button
           v-if="canEdit"
           type="button"
           class="inline-flex items-center gap-1 rounded-md border border-red-300 px-2.5 py-1 text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/40"
-          :disabled="emergenciaRodando || emergenciaAndando || modoDesligado"
-          :title="modoDesligado
-            ? 'O Flex automático está desligado — não há o que desligar.'
-            : 'Desliga o Flex de TODOS os anúncios das contas liberadas e retira todas as aprovações. Pede confirmação.'"
-          @click="emergencia"
+          :disabled="!paraDesligar.length || emLote || !config?.pode_escrever"
+          :title="!config?.pode_escrever
+            ? 'O sistema está só observando: não mexe nas plataformas.'
+            : paraDesligar.length
+              ? `Desliga o Flex nos ${paraDesligar.length} anúncio(s) marcados, um por um. Pede confirmação. Eles só voltam a ligar com nova aprovação.`
+              : 'Marque no quadradinho da primeira coluna os anúncios com Flex ligado (Ativado).'"
+          data-flex-desligar-selecionados
+          @click="desligarSelecionados"
         >
-          <PowerOff class="size-3.5" :class="emergenciaRodando || emergenciaAndando ? 'animate-pulse' : ''" /> Desligar tudo
+          <PowerOff class="size-3.5" :class="loteAcao === 'desligar' ? 'animate-pulse' : ''" />
+          {{ loteAcao === 'desligar' ? `Desligando ${loteFeitos} de ${loteTotal}…` : `Desligar selecionados (${paraDesligar.length})` }}
         </button>
       </div>
     </div>
@@ -1446,7 +1612,7 @@ defineExpose({ recarregar: carregarTudo })
         <span class="font-semibold text-muted-foreground">Conta</span>
         <select v-model="filtroConta" class="max-w-[160px] bg-transparent outline-none">
           <option value="">Todas</option>
-          <option v-for="c in (config?.contas || []).filter((x) => x.existe)" :key="c.id" :value="c.id">
+          <option v-for="c in contasDoFiltro" :key="c.id" :value="c.id">
             {{ (c.nome || c.id.slice(0, 8)).trim() }} · {{ nomePlataforma(c.plataforma) }}
           </option>
         </select>
@@ -1528,8 +1694,8 @@ defineExpose({ recarregar: carregarTudo })
                       class="size-3.5 accent-emerald-600 disabled:opacity-30"
                       :checked="todosMarcados"
                       :indeterminate="algunsMarcados"
-                      :disabled="!marcaveis.length || ligandoLote || !canEdit"
-                      :title="marcaveis.length ? `Marcar os ${marcaveis.length} anúncio(s) desta página que esperam aprovação` : 'Nenhum anúncio para aprovar nesta página'"
+                      :disabled="!marcaveis.length || emLote || !canEdit"
+                      :title="marcaveis.length ? `Marcar os ${marcaveis.length} anúncio(s) desta página que dá para ligar (Aprovar) ou desligar (Flex ligado)` : 'Nenhum anúncio para ligar ou desligar nesta página'"
                       data-flex-marcar-todos
                       @change="marcarTodos(($event.target as HTMLInputElement).checked)"
                     />
@@ -1561,7 +1727,9 @@ defineExpose({ recarregar: carregarTudo })
                   :class="[
                     marcados.has(chave(a)) && podeAprovar(a)
                       ? 'bg-emerald-50/80 dark:bg-emerald-950/30'
-                      : a.aguardando_aprovacao ? 'bg-amber-50/60 dark:bg-amber-950/20' : '',
+                      : marcados.has(chave(a)) && podeDesligar(a)
+                        ? 'bg-rose-50/80 dark:bg-rose-950/30'
+                        : a.aguardando_aprovacao ? 'bg-amber-50/60 dark:bg-amber-950/20' : '',
                     !contaPronta(a) ? 'text-muted-foreground' : '',
                   ]"
                 >
@@ -1569,9 +1737,13 @@ defineExpose({ recarregar: carregarTudo })
                     <input
                       type="checkbox"
                       class="size-3.5 accent-emerald-600 disabled:opacity-25"
-                      :checked="podeAprovar(a) && marcados.has(chave(a))"
-                      :disabled="!podeAprovar(a) || ligandoLote || aprovando.has(chave(a))"
-                      :title="podeAprovar(a) ? 'Marcar para ligar com o botão Ligar selecionados' : 'Só dá para marcar anúncio com o botão Aprovar'"
+                      :checked="(podeAprovar(a) || podeDesligar(a)) && marcados.has(chave(a))"
+                      :disabled="!(podeAprovar(a) || podeDesligar(a)) || emLote || aprovando.has(chave(a))"
+                      :title="podeAprovar(a)
+                        ? 'Marcar para ligar com o botão Ligar selecionados'
+                        : podeDesligar(a)
+                          ? 'Marcar para desligar com o botão Desligar selecionados'
+                          : 'Só dá para marcar anúncio com Aprovar (para ligar) ou com o Flex ligado em conta pronta (para desligar)'"
                       data-flex-marcar
                       @change="marcar(a, ($event.target as HTMLInputElement).checked)"
                     />
@@ -1589,7 +1761,7 @@ defineExpose({ recarregar: carregarTudo })
                         target="_blank"
                         rel="noopener"
                         class="text-muted-foreground hover:text-foreground"
-                        title="Abrir o anúncio no Mercado Livre (nova guia)"
+                        :title="a.plataforma === 'shopee' ? 'Abrir o anúncio na Shopee (nova guia)' : 'Abrir o anúncio no Mercado Livre (nova guia)'"
                       ><ExternalLink class="size-3" /></a>
                       <span
                         v-if="statusTexto(a)"
@@ -1648,12 +1820,8 @@ defineExpose({ recarregar: carregarTudo })
                 </tr>
                 <tr v-if="!loading && itens.length === 0">
                   <td colspan="9" class="px-3 py-6 text-center text-muted-foreground">
-                    <template v-if="resumo.avaliados === 0">Nenhum anúncio avaliado ainda.</template>
-                    <template v-else-if="filtroPecas && !(resumo.com_peca ?? 0)">
-                      Nenhum anúncio com peça em {{ localCidade }} ainda — o sistema calcula as peças na próxima conferência (até {{ config?.intervalo_min ?? 15 }} min).
-                      <button type="button" class="ml-1 underline" @click="filtroPecas = ''">ver todos os anúncios</button>
-                    </template>
-                    <template v-else>Nenhum anúncio com esses filtros.</template>
+                    {{ vazioTexto }}
+                    <button v-if="vazioVerTodos" type="button" class="ml-1 underline" @click="filtroPecas = ''">ver todos os anúncios</button>
                   </td>
                 </tr>
               </tbody>
@@ -1661,7 +1829,7 @@ defineExpose({ recarregar: carregarTudo })
           </div>
           <div class="mt-auto flex flex-wrap items-center gap-2 border-t px-3 py-1.5 text-[11px] text-muted-foreground">
             <span class="flex-1 text-center">
-              Cinza = conta que ainda não está pronta para o Flex (o sistema não mexe nela). Ligar: Aprovar, ou marque vários e clique em Ligar selecionados<template v-if="!config?.shopee_escrita"> (na Shopee, à mão no Seller Center)</template>. Desligar o sistema faz sozinho (piloto/ativo).
+              Cinza = conta que ainda não está pronta para o Flex (o sistema não mexe nela). Ligar: Aprovar, ou marque vários e clique em Ligar selecionados<template v-if="!config?.shopee_escrita"> (na Shopee, à mão no Seller Center)</template>. Desligar: o sistema faz sozinho quando a peça acaba (piloto/ativo); para desligar antes, marque e clique em Desligar selecionados.
             </span>
             <template v-if="total > POR_PAGINA">
               <button type="button" class="rounded border p-0.5 disabled:opacity-40" :disabled="pagina <= 1" @click="pagina--"><ChevronLeft class="size-3.5" /></button>
@@ -1716,21 +1884,34 @@ defineExpose({ recarregar: carregarTudo })
                   type="checkbox"
                   class="size-3.5 accent-emerald-600"
                   :checked="marcados.has(chave(a))"
-                  :disabled="ligandoLote"
+                  :disabled="emLote"
                   @change="marcar(a, ($event.target as HTMLInputElement).checked)"
                 />
                 marcar
               </label>
             </div>
-            <span
-              v-else-if="acaoDe(a).tipo === 'chip'"
-              class="inline-block rounded border px-1.5 py-0.5 text-[10px] font-semibold"
-              :class="acaoDe(a).cls"
-            >{{ acaoDe(a).texto }}</span>
-            <div v-else-if="acaoDe(a).tipo === 'texto'" :class="acaoDe(a).cls">{{ acaoDe(a).texto }}</div>
+            <div v-else class="flex items-center gap-3">
+              <span
+                v-if="acaoDe(a).tipo === 'chip'"
+                class="inline-block rounded border px-1.5 py-0.5 text-[10px] font-semibold"
+                :class="acaoDe(a).cls"
+              >{{ acaoDe(a).texto }}</span>
+              <span v-else-if="acaoDe(a).tipo === 'texto'" :class="acaoDe(a).cls">{{ acaoDe(a).texto }}</span>
+              <label v-if="podeDesligar(a)" class="inline-flex items-center gap-1 text-muted-foreground">
+                <input
+                  type="checkbox"
+                  class="size-3.5 accent-rose-600"
+                  :checked="marcados.has(chave(a))"
+                  :disabled="emLote"
+                  @change="marcar(a, ($event.target as HTMLInputElement).checked)"
+                />
+                marcar para desligar
+              </label>
+            </div>
           </div>
-          <div v-if="!loading && itens.length === 0" class="rounded-md border py-6 text-center text-sm text-muted-foreground">
-            {{ resumo.avaliados === 0 ? 'Nenhum anúncio avaliado ainda.' : 'Nenhum anúncio com esses filtros.' }}
+          <div v-if="!loading && itens.length === 0" class="rounded-md border px-3 py-6 text-center text-sm text-muted-foreground">
+            {{ vazioTexto }}
+            <button v-if="vazioVerTodos" type="button" class="ml-1 underline" @click="filtroPecas = ''">ver todos os anúncios</button>
           </div>
           <div v-if="total > POR_PAGINA" class="flex items-center justify-end gap-1 text-xs">
             <button type="button" class="rounded border p-1 disabled:opacity-40" :disabled="pagina <= 1" @click="pagina--"><ChevronLeft class="size-4" /></button>
@@ -1886,7 +2067,13 @@ defineExpose({ recarregar: carregarTudo })
             </div>
           </div>
           <div v-if="config && !config.contas.length" class="px-3 py-2 text-[11px] text-muted-foreground">Nenhuma conta liberada — o sistema não mexe em nenhuma conta.</div>
-          <div v-for="g in gruposContas" :key="g.chave" class="border-b last:border-b-0" :data-flex-grupo="g.chave">
+          <div
+            v-for="g in gruposContas"
+            :key="g.chave"
+            class="border-b transition-colors last:border-b-0"
+            :class="grupoDestaque === g.chave ? 'bg-amber-50 ring-2 ring-inset ring-amber-400 dark:bg-amber-950/30' : ''"
+            :data-flex-grupo="g.chave"
+          >
             <button
               type="button"
               class="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs hover:bg-muted/40 disabled:cursor-default disabled:hover:bg-transparent"

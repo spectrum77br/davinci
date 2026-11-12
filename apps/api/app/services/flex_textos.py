@@ -328,6 +328,14 @@ _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
         re.compile(r"^emergência: desligado por uma pessoa$"),
         lambda m: "Desligado pelo botão de emergência.",
     ),
+    (
+        # Desligar selecionados (12/11/2026 — flex_motor.desligar).
+        re.compile(r"^desligado por uma pessoa na tela$"),
+        lambda m: (
+            "Desligado por uma pessoa (Desligar selecionados). Não volta a ligar sozinho: "
+            "com peça, fica esperando aprovação."
+        ),
+    ),
 ]
 
 

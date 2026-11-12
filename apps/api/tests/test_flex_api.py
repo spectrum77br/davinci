@@ -22,6 +22,7 @@ from app.config import get_settings
 from app.models import (
     BlingOrder,
     FlexAnuncioEstado,
+    FlexConta,
     FlexLog,
     FlexPedido,
     Integration,
@@ -228,6 +229,7 @@ async def test_config_sem_segredo(client: AsyncClient, cena, auth_as: Callable):
         "nome": "vita",
         "plataforma": "ml",
         "existe": True,
+        "loja_id": None,  # só a loja da Shopee tem (o link do anúncio)
         # Ainda não conferida pelo motor: tudo vazio (a tela diz "não conferida").
         "flex_ativo": None,
         "flex_status": None,
@@ -552,8 +554,9 @@ async def test_aguardando_so_conta_contas_liberadas(
     monkeypatch.setattr(cena["cfg"], "flex_contas", "")
     r = (await client.get("/api/flex/anuncios")).json()
     assert r["resumo"]["aguardando"] == 0
-    mlb1 = next(i for i in r["itens"] if i["external_id"] == "MLB1")
-    assert mlb1["aguardando_aprovacao"] is False
+    # 12/11/2026: os anúncios da conta que saiu da lista nem aparecem mais (o
+    # estado antigo dela não vale — eram 1.531 "Flex ligado" de 13 contas).
+    assert (r["total"], r["itens"]) == (0, [])
     r = (await client.get("/api/flex/anuncios?aguardando=true")).json()
     assert r["itens"] == []
     monkeypatch.setattr(cena["cfg"], "flex_contas", str(cena["conta_id"]))
@@ -705,3 +708,115 @@ async def test_emergencia_sem_fila_avisa_e_marca_falhou(
     assert (r.status_code, r.json()["detail"]["code"]) == (503, "fila_indisponivel")
     ultima = (await client.get("/api/flex/emergencia/ultima")).json()
     assert ultima["status"] == "falhou" and "fila" in ultima["erro"]
+
+
+@pytest.mark.asyncio
+async def test_desligar_selecionado(
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable, monkeypatch
+):
+    """POST …/desligar ("Desligar selecionados", 12/11/2026): em observar é
+    409; em piloto, conta pronta, desliga o anúncio e devolve o estado."""
+    auth_as(cena["admin"])
+    base = f"/api/flex/anuncios/{cena['conta_id']}"
+    r = await client.post(f"{base}/MLB2/desligar")
+    assert (r.status_code, r.json()["detail"]["code"]) == (409, "nao_escreve")
+
+    monkeypatch.setattr(cena["cfg"], "flex_modo", "piloto")
+    # Conta sem a leitura do Flex dela: não está pronta — nada é chamado.
+    r = await client.post(f"{base}/MLB2/desligar")
+    assert (r.status_code, r.json()["detail"]["code"]) == (409, "conta_nao_pronta")
+
+    chamadas: list[tuple[str, str]] = []
+
+    class ML:
+        async def desligar_flex(self, item):
+            chamadas.append(("desligar", item))
+            return flex_api.ResultadoFlex(flex_api.OK, has_flex=False, status_http=204)
+
+    async def _montar(integ):
+        return ML()
+
+    monkeypatch.setattr(flex_motor, "montar_cliente", _montar)
+    db.add(
+        FlexConta(
+            integration_id=cena["conta_id"],
+            plataforma="ml",
+            flex_ativo=True,
+            status="in",
+            origem_cep="09750000",
+            origem_cidade="São Bernardo do Campo",
+            origem_lida_em=datetime.now(UTC),
+            lido_em=datetime.now(UTC),
+        )
+    )
+    await db.commit()
+    r = await client.post(f"{base}/MLB2/desligar")
+    assert r.status_code == 200, r.text
+    corpo = r.json()
+    assert (corpo["resultado"], corpo["desligado"], corpo["modo"]) == ("ok", True, "piloto")
+    assert corpo["estado"]["observado"] == "desligado"
+    assert chamadas == [("desligar", "MLB2")]
+    r = await client.post(f"{base}/MLB404/desligar")
+    assert (r.status_code, r.json()["detail"]["code"]) == (404, "nao_avaliado")
+    r = await client.post(f"/api/flex/anuncios/{uuid.uuid4()}/MLB1/desligar")
+    assert (r.status_code, r.json()["detail"]["code"]) == (403, "conta_nao_permitida")
+
+
+@pytest.mark.asyncio
+async def test_lista_e_cartoes_so_das_contas_do_flex_e_seguem_o_filtro(
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable, monkeypatch
+):
+    """Revisão do painel (12/11/2026): a conta arquivada deixava o estado
+    antigo na lista e nos cartões (13 contas do ML, 1.531 "Flex ligado" de
+    08/10); e os cartões não seguiam a Plataforma/Conta escolhidas. A loja da
+    Shopee manda o shop_id para a tela montar o link do anúncio."""
+    agora = datetime.now(UTC)
+    velha = Integration(
+        user_id=cena["admin"].id,
+        platform=IntegrationPlatform.ML,
+        name="jlas2",
+        credentials=encrypt_json({"access_token": "t"}),
+        archived_at=agora,
+    )
+    loja = Integration(
+        user_id=cena["admin"].id,
+        platform=IntegrationPlatform.SHOPEE,
+        name="Barbosa",
+        credentials=encrypt_json({"access_token": "t", "shop_id": 123456}),
+    )
+    db.add_all([velha, loja])
+    await db.flush()
+    db.add(
+        FlexAnuncioEstado(
+            integration_id=velha.id,
+            external_id="MLB900",
+            plataforma="ml",
+            desejado="ligado",
+            motivo="velho",
+            observado="ligado",
+            observado_em=agora - timedelta(days=35),
+            aguardando_aprovacao=False,
+            tentativas=0,
+        )
+    )
+    await db.commit()
+    monkeypatch.setattr(cena["cfg"], "flex_contas", f"{cena['conta_id']}, {velha.id}, {loja.id}")
+    auth_as(cena["admin"])
+
+    corpo = (await client.get("/api/flex/anuncios")).json()
+    assert "MLB900" not in [i["external_id"] for i in corpo["itens"]]
+    assert (corpo["resumo"]["avaliados"], corpo["resumo"]["ligados"]) == (3, 1)
+    corpo = (await client.get("/api/flex/anuncios?observado=ligado")).json()
+    assert [i["external_id"] for i in corpo["itens"]] == ["MLB2"]
+    # Os cartões seguem a plataforma e a conta escolhidas.
+    corpo = (await client.get("/api/flex/anuncios?plataforma=shopee")).json()
+    assert (corpo["total"], corpo["resumo"]["avaliados"], corpo["resumo"]["ligados"]) == (0, 0, 0)
+    corpo = (await client.get(f"/api/flex/anuncios?integration_id={loja.id}")).json()
+    assert corpo["resumo"]["avaliados"] == 0
+    corpo = (await client.get(f"/api/flex/anuncios?integration_id={cena['conta_id']}")).json()
+    assert corpo["resumo"]["avaliados"] == 3
+
+    contas = {c["id"]: c for c in (await client.get("/api/flex/config")).json()["contas"]}
+    assert contas[str(loja.id)]["loja_id"] == "123456"
+    assert contas[str(cena["conta_id"])]["loja_id"] is None
+    assert contas[str(velha.id)]["existe"] is False

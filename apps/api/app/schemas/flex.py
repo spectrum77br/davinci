@@ -22,6 +22,9 @@ class FlexContaOut(BaseModel):
     nome: str | None = None
     plataforma: str | None = None
     existe: bool = True
+    # Shopee: o shop_id da loja (público — é o que aparece no link do anúncio,
+    # shopee.com.br/product/<loja>/<anúncio>); a tela monta o link com ele.
+    loja_id: str | None = None
     flex_ativo: bool | None = None
     flex_status: str | None = None
     flex_detalhe: str | None = None
@@ -192,6 +195,18 @@ class FlexAprovarOut(BaseModel):
     # A rodada do motor estava em andamento: a ligação foi para a fila do
     # worker (tenta de novo em seguida) — a aprovação continua valendo.
     na_fila: bool = False
+
+
+class FlexDesligarOut(BaseModel):
+    """Uma pessoa desligou o Flex de um anúncio ("Desligar selecionados")."""
+
+    modo: str
+    # O tipo da escrita: ok, ja_desligado, ocupado (outro processo no anúncio),
+    # repetir (passageiro — inclui a Shopee confirmando), erro, inelegivel…
+    resultado: str
+    # Desligado agora ou já estava desligado na plataforma.
+    desligado: bool
+    estado: FlexAnuncioOut | None = None
 
 
 class FlexEmergenciaOut(BaseModel):

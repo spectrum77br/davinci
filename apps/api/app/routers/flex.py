@@ -12,9 +12,14 @@ emergência); admin passa sempre (`require_permission`).
   POST /api/flex/sincronizar   roda o motor agora (job no worker), no modo atual
   POST /api/flex/anuncios/{conta}/{anuncio}/aprovar   aprova LIGAR (rodada
                                ocupada: a ligação vai para a fila do worker)
+  POST /api/flex/anuncios/{conta}/{anuncio}/desligar  uma pessoa desliga o
+                               Flex do anúncio agora (só piloto/ativo e conta
+                               pronta; tira a aprovação — "Desligar selecionados")
   POST /api/flex/emergencia    tira as aprovações e põe na fila o job que
                                desliga tudo das contas permitidas
-                               (observar/desligado: só simula)
+                               (observar/desligado: só simula). Desde 12/11/2026
+                               a tela não tem mais o botão ("Desligar tudo"
+                               desligava também o ML de Piracicaba)
   GET  /api/flex/emergencia/ultima   a última emergência (andamento)
   GET  /api/flex/emergencia/{id}     o andamento de uma emergência
   GET  /api/flex/log           últimas linhas da trilha
@@ -77,6 +82,7 @@ from app.schemas.flex import (
     FlexAprovarOut,
     FlexConfigOut,
     FlexContaOut,
+    FlexDesligarOut,
     FlexEmergenciaOut,
     FlexLocalIn,
     FlexLocalOut,
@@ -85,6 +91,7 @@ from app.schemas.flex import (
     FlexResumoOut,
     FlexSincronizarOut,
 )
+from app.security.cipher import decrypt_json
 from app.services import flex_config, flex_envio, flex_local, flex_motor, flex_textos
 
 logger = structlog.get_logger()
@@ -116,6 +123,18 @@ def _plataforma_txt(integ: Integration | None) -> str | None:
     if integ is None:
         return None
     return getattr(integ.platform, "value", str(integ.platform))
+
+
+def _loja_shopee(integ: Integration | None) -> str | None:
+    """O shop_id da loja da Shopee (das credenciais) para a tela montar o link
+    do anúncio — só ele sai daqui, nunca o resto das credenciais."""
+    if integ is None or _plataforma_txt(integ) != flex_envio.PLATAFORMA_SHOPEE:
+        return None
+    try:
+        sid = int((decrypt_json(integ.credentials) or {}).get("shop_id") or 0)
+    except Exception:  # noqa: BLE001 — sem o número, a tela fica sem o link
+        return None
+    return str(sid) if sid > 0 else None
 
 
 async def _escopo(session: AsyncSession, user: User) -> frozenset[UUID] | None:
@@ -275,6 +294,7 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
                 nome=integ.name if integ is not None else None,
                 plataforma=plataforma,
                 existe=integ is not None,
+                loja_id=_loja_shopee(integ),
                 flex_ativo=c.flex_ativo if c else None,
                 flex_status=c.status if c else None,
                 flex_detalhe=c.detalhe if c else None,
@@ -481,6 +501,15 @@ def _aguardando(permitidas: frozenset[UUID]):
     return and_(est.aguardando_aprovacao.is_(True), est.integration_id.in_(list(permitidas)))
 
 
+def _das_contas_do_flex(permitidas: frozenset[UUID]):
+    """Só os anúncios das contas que existem e estão em flex_contas: a conta
+    arquivada (ou tirada da lista) deixa o estado antigo no banco — em
+    12/11/2026 eram 13 contas do ML com 1.531 "Flex ligado" lidos em 08/10."""
+    if not permitidas:
+        return false()
+    return FlexAnuncioEstado.integration_id.in_(list(permitidas))
+
+
 def _com_peca():
     """Anúncio com peça livre no estoque do local de saída (.sp). Desde
     11/11/2026 o motor anota as peças também nas contas que não estão prontas."""
@@ -496,11 +525,21 @@ def _conta_nao_pronta(liberadas: frozenset[UUID]):
 
 
 async def _resumo(
-    session: AsyncSession, escopo: frozenset[UUID] | None, permitidas: frozenset[UUID]
+    session: AsyncSession,
+    escopo: frozenset[UUID] | None,
+    permitidas: frozenset[UUID],
+    *,
+    plataforma: str | None = None,
+    integration_id: UUID | None = None,
 ) -> FlexResumoOut:
-    """O quadro do topo da tela: todos os anúncios avaliados, sem os filtros
-    da lista (o dono vê de cara quantos esperam por ele) — dentro do escopo
-    da equipe."""
+    """O quadro do topo da tela: os anúncios avaliados das contas do Flex,
+    sem os filtros de situação/peças da lista (o dono vê de cara quantos
+    esperam por ele) — dentro do escopo da equipe.
+
+    12/11/2026 (revisão do painel): segue a Plataforma e a Conta escolhidas —
+    com "Mercado Livre" a lista dava 0 e os cartões seguiam com os números da
+    Shopee. E só conta que existe e está em flex_contas: as 13 contas do ML
+    arquivadas deixavam 1.531 "Flex ligado" lidos em 08/10 nos totais."""
     liberadas = await _liberadas(session, permitidas)
     n_liga = flex_motor.ConfigFlex.das_configuracoes().n_liga
     est = FlexAnuncioEstado
@@ -515,9 +554,14 @@ async def _resumo(
         func.count().filter(est.saldo_sp >= n_liga),
         func.count().filter(_conta_nao_pronta(liberadas)),
     ).select_from(est)
+    q = q.where(_das_contas_do_flex(permitidas))
     filtro = _no_escopo(est.integration_id, escopo)
     if filtro is not None:
         q = q.where(filtro)
+    if plataforma is not None:
+        q = q.where(est.plataforma == plataforma)
+    if integration_id is not None:
+        q = q.where(est.integration_id == integration_id)
     row = (await session.execute(q)).one()
     return FlexResumoOut(
         avaliados=int(row[0] or 0),
@@ -558,7 +602,7 @@ async def anuncios(
 ) -> FlexAnunciosOut:
     escopo = await _escopo(session, user)
     permitidas = await _permitidas(session)
-    filtros = []
+    filtros = [_das_contas_do_flex(permitidas)]
     if pecas == "com":
         filtros.append(_com_peca())
     elif pecas == "flex":
@@ -625,7 +669,9 @@ async def anuncios(
     return FlexAnunciosOut(
         total=total,
         itens=[_anuncio_out(est, nome, titulo, permitidas) for est, nome, titulo in rows.all()],
-        resumo=await _resumo(session, escopo, permitidas),
+        resumo=await _resumo(
+            session, escopo, permitidas, plataforma=plataforma, integration_id=integration_id
+        ),
     )
 
 
@@ -727,6 +773,40 @@ async def aprovar(
         motor=res.get("motor"),
         na_fila=na_fila,
         estado=await _estado_out(session, integration_id, external_id.strip()),
+    )
+
+
+@router.post(
+    "/anuncios/{integration_id}/{external_id}/desligar", response_model=FlexDesligarOut
+)
+async def desligar(
+    integration_id: UUID, external_id: str, session: Sessao, user: Agir
+) -> FlexDesligarOut:
+    """Uma pessoa desliga o Flex deste anúncio agora ("Desligar selecionados",
+    12/11/2026). Só em piloto/ativo e em conta pronta (o Flex que o sistema
+    controla); tira a aprovação — volta a ligar só com outra. Conta fora da
+    equipe do usuário: 403."""
+    escopo = await _escopo(session, user)
+    if escopo is not None and integration_id not in escopo:
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail={"code": "fora_do_escopo", "detalhe": "a conta não é da sua equipe"},
+        )
+    ext = external_id.strip()
+    try:
+        res = await flex_motor.desligar(integration_id, ext, por=user.id)
+    except flex_motor.FlexRegraError as exc:
+        raise HTTPException(
+            _ERRO_HTTP.get(exc.codigo, status.HTTP_409_CONFLICT),
+            detail={"code": exc.codigo, "detalhe": exc.detalhe},
+        ) from exc
+    session.expire_all()
+    resultado = str(res.get("resultado"))
+    return FlexDesligarOut(
+        modo=str(res.get("modo")),
+        resultado=resultado,
+        desligado=resultado in ("ok", "ja_desligado"),
+        estado=await _estado_out(session, integration_id, ext),
     )
 
 

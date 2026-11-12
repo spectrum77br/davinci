@@ -965,6 +965,17 @@ async function loadOpcoes() {
   }
 }
 
+// 12/11/2026 (revisão do Flex): com `?tab=flex` a página carregava antes a
+// lista do Mercado Livre (~3 s) e só no onMounted conferia o Flex — a aba Flex
+// aparecia uns 5 s depois e, nesse meio-tempo, a tela era a do ML ("a aba Flex
+// sumiu"). Agora confere o Flex primeiro e já abre nela (a lista que carrega é
+// a dos pedidos Flex, pequena).
+const queryInicial = useRoute().query
+const abrirNoFlex = queryInicial.tab === 'flex' ? await verificarFlex() : false
+if (abrirNoFlex) {
+  tab.value = 'flex'
+  if (queryInicial.sub === 'anuncios' || queryInicial.sub === 'pedidos') flexSub.value = queryInicial.sub
+}
 await Promise.all([refresh(), loadOpcoes()])
 
 // ---- Modal (create + edit compartilham o mesmo formulário) ----
