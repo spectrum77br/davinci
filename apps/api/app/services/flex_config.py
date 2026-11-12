@@ -55,6 +55,8 @@ class Ajustes:
     pedido_no_sp: bool | None = None
     atualizado_em: datetime | None = None
     atualizado_por: UUID | None = None
+    # 0475 (12/11/2026): "Kits entram" — None = vale o `flex_kits` do .env.
+    kits: bool | None = None
 
 
 _SEM_AJUSTE = Ajustes()
@@ -95,7 +97,12 @@ def _da_linha(linha: FlexAjuste | None) -> Ajustes:
         logger.warning("flex_ajuste_modo_invalido", modo=linha.modo)
         m = None
     return Ajustes(
-        m, linha.shopee_escrita, linha.pedido_no_sp, linha.atualizado_em, linha.atualizado_por
+        m,
+        linha.shopee_escrita,
+        linha.pedido_no_sp,
+        linha.atualizado_em,
+        linha.atualizado_por,
+        kits=linha.kits,
     )
 
 
@@ -124,14 +131,16 @@ async def salvar(
     shopee_escrita_nova: bool,
     pedido_no_sp_novo: bool,
     por: UUID | None,
+    kits_novo: bool | None = None,
 ) -> Ajustes:
-    """Grava as três chaves (quem pode é conferido no router). O cache só troca
-    com `usar` depois do commit de quem chama."""
+    """Grava as chaves (quem pode é conferido no router). O cache só troca
+    com `usar` depois do commit de quem chama. `kits_novo` None = não mexe
+    nos kits (tela antiga, sem o campo)."""
     m = (modo_novo or "").strip().lower()
     if m not in FLEX_MODOS:
         raise AjusteInvalidoError("modo_invalido", f"modo {modo_novo!r} não existe")
     linha = await session.get(FlexAjuste, 1, with_for_update=True)
-    antes = (modo(), shopee_escrita(), pedido_no_sp())
+    antes = (modo(), shopee_escrita(), pedido_no_sp(), kits())
     agora = datetime.now(UTC)
     if linha is None:
         linha = FlexAjuste(id=1)
@@ -139,17 +148,27 @@ async def salvar(
     linha.modo = m
     linha.shopee_escrita = bool(shopee_escrita_nova)
     linha.pedido_no_sp = bool(pedido_no_sp_novo)
+    if kits_novo is not None:
+        linha.kits = bool(kits_novo)
     linha.atualizado_em = agora
     linha.atualizado_por = por
     await session.flush()
-    novo = Ajustes(m, bool(shopee_escrita_nova), bool(pedido_no_sp_novo), agora, por)
+    novo = Ajustes(
+        m, bool(shopee_escrita_nova), bool(pedido_no_sp_novo), agora, por, kits=linha.kits
+    )
     logger.info(
         "flex_ajuste_trocado",
-        antes={"modo": antes[0], "shopee_escrita": antes[1], "pedido_no_sp": antes[2]},
+        antes={
+            "modo": antes[0],
+            "shopee_escrita": antes[1],
+            "pedido_no_sp": antes[2],
+            "kits": antes[3],
+        },
         depois={
             "modo": m,
             "shopee_escrita": novo.shopee_escrita,
             "pedido_no_sp": novo.pedido_no_sp,
+            "kits": novo.kits,
         },
         por=str(por) if por else None,
     )
@@ -193,6 +212,14 @@ def pedido_no_sp() -> bool:
     if da_tela is None:
         return bool(getattr(get_settings(), "flex_pedido_no_sp", False))
     return bool(da_tela)
+
+
+def kits() -> bool:
+    """Anúncio de kit entra no Flex? (a tela; sem ela, `flex_kits` do .env).
+    Entra só com o kit .sp cadastrado no Bling — o estoque dele é o da peça
+    mais escassa (Vinicius, 12/11/2026: "desde que tenha tudo em .sp do kit")."""
+    da_tela = ajustes().kits
+    return bool(get_settings().flex_kits) if da_tela is None else bool(da_tela)
 
 
 def espera_envio_min() -> int:

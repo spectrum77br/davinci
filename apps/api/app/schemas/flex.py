@@ -78,6 +78,7 @@ class FlexAjustesOut(BaseModel):
     modo_origem: str = "servidor"
     shopee_escrita_origem: str = "servidor"
     pedido_no_sp_origem: str = "servidor"
+    kits_origem: str = "servidor"
     atualizado_em: datetime | None = None
     atualizado_por: str | None = None  # nome de quem trocou
 
@@ -89,9 +90,12 @@ class FlexAjustesIn(BaseModel):
     modo: Literal["desligado", "observar", "piloto", "ativo"]
     shopee_escrita: bool
     pedido_no_sp: bool
+    # 0475 (12/11/2026): "Kits entram". Sem o campo (tela antiga) = não mexe.
+    kits: bool | None = None
     modo_antes: str | None = Field(default=None, max_length=20)
     shopee_escrita_antes: bool | None = None
     pedido_no_sp_antes: bool | None = None
+    kits_antes: bool | None = None
 
 
 class FlexConfigOut(BaseModel):

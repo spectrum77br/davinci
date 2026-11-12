@@ -349,6 +349,7 @@ async def _ajustes_out(session: AsyncSession) -> FlexAjustesOut:
         modo_origem=flex_config.origem("modo"),
         shopee_escrita_origem=flex_config.origem("shopee_escrita"),
         pedido_no_sp_origem=flex_config.origem("pedido_no_sp"),
+        kits_origem=flex_config.origem("kits"),
         atualizado_em=a.atualizado_em,
         atualizado_por=nome,
     )
@@ -356,9 +357,10 @@ async def _ajustes_out(session: AsyncSession) -> FlexAjustesOut:
 
 @router.put("/ajustes", response_model=FlexAjustesOut)
 async def trocar_ajustes(body: FlexAjustesIn, session: Sessao, user: Agir) -> FlexAjustesOut:
-    """Troca o modo do Flex, a escrita da Shopee e o pedido Flex no .sp
-    (11/11/2026: antes só no .env do servidor). Só admin e o gerente. Vale na
-    próxima rodada do robô (até 15 min) — o "Sincronizar Flex" aplica na hora."""
+    """Troca o modo do Flex, a escrita da Shopee, o pedido Flex no .sp
+    (11/11/2026: antes só no .env do servidor) e, desde 12/11/2026, "Kits
+    entram". Só admin e o gerente. Vale na próxima rodada do robô (até 15 min)
+    — o "Sincronizar Flex" aplica na hora."""
     if not flex_config.pode_ajustar(user):
         raise HTTPException(
             status.HTTP_403_FORBIDDEN,
@@ -370,8 +372,18 @@ async def trocar_ajustes(body: FlexAjustesIn, session: Sessao, user: Agir) -> Fl
     # Trava a linha (dentro de `salvar`) e relê: quem abriu o formulário com
     # outro valor na tela não sobrescreve a troca de outra pessoa.
     await flex_config.carregar(forcar=True)
-    antes = (flex_config.modo(), flex_config.shopee_escrita(), flex_config.pedido_no_sp())
-    mostrado = (body.modo_antes, body.shopee_escrita_antes, body.pedido_no_sp_antes)
+    antes = (
+        flex_config.modo(),
+        flex_config.shopee_escrita(),
+        flex_config.pedido_no_sp(),
+        flex_config.kits(),
+    )
+    mostrado = (
+        body.modo_antes,
+        body.shopee_escrita_antes,
+        body.pedido_no_sp_antes,
+        body.kits_antes,
+    )
     if any(m is not None and m != a for m, a in zip(mostrado, antes, strict=True)):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -386,6 +398,7 @@ async def trocar_ajustes(body: FlexAjustesIn, session: Sessao, user: Agir) -> Fl
             modo_novo=body.modo,
             shopee_escrita_nova=body.shopee_escrita,
             pedido_no_sp_novo=body.pedido_no_sp,
+            kits_novo=body.kits,
             por=user.id,
         )
     except flex_config.AjusteInvalidoError as e:

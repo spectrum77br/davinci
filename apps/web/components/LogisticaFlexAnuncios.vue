@@ -96,6 +96,7 @@ type FlexConfig = {
     modo_origem: string
     shopee_escrita_origem: string
     pedido_no_sp_origem: string
+    kits_origem?: string
     atualizado_em: string | null
     atualizado_por: string | null
   } | null
@@ -560,9 +561,10 @@ const regras = computed<{ forte: string; resto: string; antes?: string }[]>(() =
   out.push({
     forte: c.kits ? 'Kits entram' : 'Kits não entram',
     resto:
-      c.max_anuncios_por_familia > 0
+      (c.kits ? ` só com tudo no .${localLote.value} (vale o kit .${localLote.value} do Bling, com o estoque da peça mais escassa)` : '') +
+      (c.max_anuncios_por_familia > 0
         ? `. No máximo ${c.max_anuncios_por_familia} anúncio(s) com Flex por família.`
-        : '. Sem limite de anúncios por família.',
+        : '. Sem limite de anúncios por família.'),
   })
   out.push({
     antes: 'Confere sozinho a cada ',
@@ -1452,11 +1454,11 @@ const MODOS_OPCOES = [
 ]
 const editandoAjustes = ref(false)
 const salvandoAjustes = ref(false)
-const ajusteForm = ref({ modo: 'observar', shopee_escrita: false, pedido_no_sp: false })
+const ajusteForm = ref({ modo: 'observar', shopee_escrita: false, pedido_no_sp: false, kits: false })
 function abrirAjustes() {
   const c = config.value
   if (!c) return
-  ajusteForm.value = { modo: c.modo, shopee_escrita: !!c.shopee_escrita, pedido_no_sp: !!c.pedido_no_sp }
+  ajusteForm.value = { modo: c.modo, shopee_escrita: !!c.shopee_escrita, pedido_no_sp: !!c.pedido_no_sp, kits: !!c.kits }
   editandoAjustes.value = true
 }
 function simNao(v: boolean) {
@@ -1470,6 +1472,7 @@ async function salvarAjustes() {
   if (f.modo !== c.modo) mudancas.push(`• Modo: ${MODO_CHIP[c.modo]?.texto || c.modo} → ${MODO_CHIP[f.modo]?.texto || f.modo}`)
   if (f.shopee_escrita !== c.shopee_escrita) mudancas.push(`• DaVinci liga/desliga na Shopee: ${simNao(c.shopee_escrita)} → ${simNao(f.shopee_escrita)}`)
   if (f.pedido_no_sp !== c.pedido_no_sp) mudancas.push(`• Pedido Flex vai para o .${localLote.value}: ${simNao(c.pedido_no_sp)} → ${simNao(f.pedido_no_sp)}`)
+  if (f.kits !== !!c.kits) mudancas.push(`• Kits entram: ${simNao(!!c.kits)} → ${simNao(f.kits)}`)
   if (!mudancas.length) {
     editandoAjustes.value = false
     return
@@ -1481,6 +1484,8 @@ async function salvarAjustes() {
     avisos.push('Na Shopee o sistema passa a ligar/desligar a Entrega Direta nos anúncios. Aprove UM primeiro e confira no Seller Center se a Shopee Xpress continuou ligada.')
   if (f.pedido_no_sp)
     avisos.push(`O robô de prioridade passa a levar todo pedido Flex para o estoque .${localLote.value}, e a NF automática espera o tipo de envio ser lido.`)
+  if (f.kits && !c.kits)
+    avisos.push(`Kits entram: o anúncio de kit (celular + fone, relógio…) passa a valer pelo kit .${localLote.value} do Bling, que tem o estoque da peça mais escassa — sem o kit .${localLote.value} cadastrado, não liga. Nada liga sozinho: com peça, ele vai para "Esperando aprovação".`)
   const ok = confirm(
     `Trocar as chaves do Flex?\n\n${mudancas.join('\n')}` +
       (avisos.length ? `\n\n${avisos.join('\n\n')}` : '') +
@@ -1496,6 +1501,7 @@ async function salvarAjustes() {
         modo_antes: c.modo,
         shopee_escrita_antes: c.shopee_escrita,
         pedido_no_sp_antes: c.pedido_no_sp,
+        kits_antes: !!c.kits,
       },
     })
     toasts.success('Chaves do Flex trocadas', mudancas.map((m) => m.replace('• ', '')))
@@ -2124,6 +2130,10 @@ defineExpose({ recarregar: carregarTudo })
                   <span class="text-muted-foreground">Pedido Flex vai para o .{{ localLote }}:&nbsp;</span>
                   <b :class="config.pedido_no_sp ? 'text-emerald-700 dark:text-emerald-400' : ''">{{ config.pedido_no_sp ? 'SIM' : 'NÃO' }}</b>
                 </div>
+                <div :title="`Kit (celular + fone, relógio…) entra no Flex pelo kit .${localLote} do Bling — o estoque dele é o da peça mais escassa; sem o kit .${localLote} cadastrado, não liga.`">
+                  <span class="text-muted-foreground">Kits entram:&nbsp;</span>
+                  <b :class="config.kits ? 'text-emerald-700 dark:text-emerald-400' : ''">{{ config.kits ? 'SIM' : 'NÃO' }}</b>
+                </div>
                 <div class="text-[10.5px] text-muted-foreground">
                   <template v-if="config.ajustes?.atualizado_por">
                     trocado por {{ config.ajustes.atualizado_por }} {{ fmtDesde(config.ajustes.atualizado_em) }}
@@ -2145,6 +2155,10 @@ defineExpose({ recarregar: carregarTudo })
                 <label class="flex items-center gap-1.5 text-[11px]">
                   <input v-model="ajusteForm.pedido_no_sp" type="checkbox" />
                   Pedido Flex vai para o estoque .{{ localLote }} ({{ localCidade }})
+                </label>
+                <label class="flex items-center gap-1.5 text-[11px]" data-flex-ajustes-kits>
+                  <input v-model="ajusteForm.kits" type="checkbox" />
+                  Kits entram (só com tudo no .{{ localLote }}: vale o kit .{{ localLote }} do Bling)
                 </label>
                 <div class="flex gap-1.5">
                   <button type="button" class="rounded-md bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground disabled:opacity-50" :disabled="salvandoAjustes" @click="salvarAjustes">Salvar</button>

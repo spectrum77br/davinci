@@ -166,3 +166,53 @@ async def test_cron_obedece_o_modo_da_tela(db: AsyncSession, monkeypatch):
     await db.commit()
     await worker.flex_motor_tick({})
     assert len(rodou) == 1
+
+
+# ---- "Kits entram" (0475, 12/11/2026) -------------------------------------------
+
+
+def test_kits_da_tela_vencem_o_env(monkeypatch):
+    """Vinicius: "os kit tem que entrar, desde que tenha tudo em .sp do kit" —
+    a chave saiu do .env (flex_kits) para a tela; vazio = vale o .env."""
+    monkeypatch.setattr(get_settings(), "flex_kits", False)
+    assert flex_config.kits() is False
+    assert flex_motor.ConfigFlex.das_configuracoes().kits is False
+    flex_config.usar(flex_config.Ajustes(kits=True))
+    assert flex_config.kits() is True
+    assert flex_motor.ConfigFlex.das_configuracoes().kits is True
+    assert flex_config.origem("kits") == "tela"
+    # Com a chave, o kit vira o kit .sp (o estoque da peça mais escassa).
+    assert flex_motor.analisar_sku("dg053.ci+a003.ci", kits=True) == (
+        "dg053+a003",
+        "dg053.sp+a003.sp",
+    )
+    flex_config.usar(flex_config.Ajustes(kits=None))
+    assert (flex_config.kits(), flex_config.origem("kits")) == (False, "servidor")
+
+
+@pytest.mark.asyncio
+async def test_tela_liga_os_kits_e_a_tela_antiga_nao_mexe(
+    client: AsyncClient, db: AsyncSession, make_user, auth_as: Callable
+):
+    auth_as(await make_user(role=UserRole.ADMIN))
+    c = (await client.get("/api/flex/config")).json()
+    assert (c["kits"], c["ajustes"]["kits_origem"]) == (False, "servidor")
+    base = {"modo": "observar", "shopee_escrita": False, "pedido_no_sp": False}
+    liga = {**base, "kits": True, "kits_antes": False, "modo_antes": "observar"}
+    r = await client.put("/api/flex/ajustes", json=liga)
+    assert r.status_code == 200, r.text
+    assert r.json()["kits_origem"] == "tela"
+    c = (await client.get("/api/flex/config")).json()
+    assert c["kits"] is True
+    linha = await db.get(FlexAjuste, 1)
+    await db.refresh(linha)
+    assert linha.kits is True
+
+    # A tela antiga (sem o campo) troca o resto e NÃO mexe nos kits.
+    r = await client.put("/api/flex/ajustes", json={**base, "modo": "piloto"})
+    assert r.status_code == 200, r.text
+    await db.refresh(linha)
+    assert (linha.modo, linha.kits) == ("piloto", True)
+    # Quem abriu com "kits NÃO" na tela não sobrescreve: 409.
+    r = await client.put("/api/flex/ajustes", json={**base, "kits": False, "kits_antes": False})
+    assert r.status_code == 409

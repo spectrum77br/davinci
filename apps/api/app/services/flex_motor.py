@@ -21,7 +21,10 @@ REGRA (função pura `decidir`, testada em tabela):
     mantém o que está (histerese, pelo estado OBSERVADO na plataforma, ou a
     decisão anterior quando ainda não foi lido) — sem isso o Flex pisca a
     cada venda, e o ML pede para não ligar/desligar em sequência;
-  • kit (SKU com '+') fica fora enquanto flex_kits=False;
+  • kit (SKU com '+') fica fora enquanto "Kits entram" = NÃO (a chave da
+    tela; sem ela, flex_kits do .env). Com SIM, o .sp do kit é o kit .sp do
+    Bling (dg053.ci+a003.ci → dg053.sp+a003.sp), cujo estoque é o da peça
+    mais escassa; sem kit .sp cadastrado, nunca liga;
   • estoque desconhecido (família sem .sp ativo) NUNCA liga;
   • no máximo flex_max_anuncios_por_familia anúncios com Flex por família
     (`decidir_lote`) — o mesmo .sp aparece em N anúncios (clássico, premium,
@@ -273,7 +276,8 @@ class ConfigFlex:
         return cls(
             n_liga=s.flex_n_liga,
             n_desliga=s.flex_n_desliga,
-            kits=bool(s.flex_kits),
+            # A tela vence o .env (0475, 12/11/2026 — "Kits entram").
+            kits=flex_config.kits(),
             max_anuncios_por_familia=s.flex_max_anuncios_por_familia,
         )
 

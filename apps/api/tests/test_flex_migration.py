@@ -31,6 +31,8 @@ _MIGRATION = _VERSOES / "0367_flex.py"
 _MIGRATION_ORIGEM = _VERSOES / "0385_flex_origem.py"
 # 0474 (11/11/2026): o modo, a escrita da Shopee e o pedido no .sp na tela.
 _MIGRATION_AJUSTE = _VERSOES / "0474_flex_ajuste.py"
+# 0475 (12/11/2026): "Kits entram" na tela (flex_ajuste.kits).
+_MIGRATION_KITS = _VERSOES / "0475_flex_ajuste_kits.py"
 TABELAS = [
     "flex_ajuste",  # 0474: os ajustes da tela (editados por pessoas)
     "flex_anuncio_estado",
@@ -120,6 +122,8 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     assert origem.down_revision == "0384_redes_sociais_loja_shopee"
     ajuste = _carregar(_MIGRATION_AJUSTE)
     assert ajuste.revision == "0474_flex_ajuste"
+    kits = _carregar(_MIGRATION_KITS)
+    assert (kits.revision, kits.down_revision) == ("0475_flex_ajuste_kits", "0474_flex_ajuste")
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
@@ -133,14 +137,15 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         ctx = MigrationContext.configure(conn, opts={"target_metadata": Base.metadata})
         with Operations.context(ctx):
             # A 0367 cria; a 0385 completa a flex_conta (o model é o das duas);
-            # a 0474 cria a flex_ajuste.
-            ordem = [mod, origem, ajuste]
+            # a 0474 cria a flex_ajuste e a 0475 põe nela os kits.
+            ordem = [mod, origem, ajuste, kits]
             for m in ordem if passo == "upgrade" else list(reversed(ordem)):
                 getattr(m, passo)()
 
     mod.SCHEMA = rascunho
     origem.SCHEMA = rascunho
     ajuste.SCHEMA = rascunho
+    kits.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade")

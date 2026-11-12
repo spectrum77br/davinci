@@ -345,7 +345,8 @@ class FlexAjuste(Base):
     - `shopee_escrita`: o motor liga/desliga a Entrega Direta nos anúncios
       da Shopee (o `flex_shopee_escrita`);
     - `pedido_no_sp`: o robô de prioridade leva o pedido Flex para o lote do
-      local de saída (o `flex_pedido_no_sp`, com a espera da NF junto).
+      local de saída (o `flex_pedido_no_sp`, com a espera da NF junto);
+    - `kits` (0475, 12/11/2026): o anúncio de kit entra no Flex (o `flex_kits`).
 
     Campo NULL = vale o .env (services/flex_config) — sem linha, nada muda.
     Editada por pessoas: fica COM o gatilho do Histórico."""
@@ -362,6 +363,9 @@ class FlexAjuste(Base):
     modo: Mapped[str | None] = mapped_column(Text, nullable=True)
     shopee_escrita: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     pedido_no_sp: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # 0475 (12/11/2026): kit entra no Flex (o `flex_kits`) — só com o kit .sp
+    # cadastrado no Bling, que tem o estoque da peça mais escassa.
+    kits: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
