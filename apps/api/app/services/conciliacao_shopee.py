@@ -100,6 +100,20 @@ def pedido_do_difal(descricao: str | None) -> str | None:
     return achado.group(1).upper() if achado else None
 
 
+# order_sn da Shopee: AAMMDD + 8 letras/números (261014HQ56E13W)
+_PEDIDO_NO_FIM = re.compile(r"\s-\s*(\d{6}[0-9A-Z]{8})\s*$", re.IGNORECASE)
+
+
+def pedido_do_ajuste(descricao: str | None) -> str | None:
+    """O nº do pedido no fim do texto de um ajuste da Shopee: "Crédito por item perdido
+    ou danificado no envio. Valor do produto descontado de taxas e comissões (−R$ 136,46)
+    - 261014HQ56E13W" (e "… no processo de devolução", "Desconto por pedido com pagamento
+    duplicado - … - <nº>"). 12/11 (Vinicius: "sim, ensina"): os 8 que apareceram desde
+    24/10 foram todos ligados à mão ao pedido desse nº."""
+    achado = _PEDIDO_NO_FIM.search(descricao or "")
+    return achado.group(1).upper() if achado else None
+
+
 def transacao_para_movimento(t: dict[str, Any]) -> dict[str, Any] | None:
     """Um lançamento da carteira → colunas de `conciliacao_movimentos` (sem a loja)."""
     tid = t.get("transaction_id")
@@ -123,6 +137,10 @@ def transacao_para_movimento(t: dict[str, Any]) -> dict[str, Any] | None:
         # ligar (sem nº nenhum, fica sem dono pra uma pessoa ver)
         tipo, classificacao = "imposto", None
         order_sn = order_sn or pedido_do_difal(descricao)
+    elif tipo == "ajuste_shopee" and not order_sn:
+        # 12/11: crédito por item perdido/danificado (e o desconto que desfaz um pagamento
+        # em dobro) traz o nº no fim do texto — vai pro pedido como o vínculo à mão
+        order_sn = pedido_do_ajuste(descricao)
     return {
         "origem": ORIGEM_CARTEIRA,
         "id_externo": str(tid),
@@ -225,6 +243,52 @@ async def ligar_difal_aos_pedidos(
             m.classificacao = None
         if not m.pedido_marketplace:
             m.pedido_marketplace = pedido_do_difal(m.descricao)
+    return await _ligar_pelo_numero(session, rows, lojas_bling, inicio)
+
+
+async def ligar_ajustes_aos_pedidos(
+    session: AsyncSession, loja: ConciliacaoLoja, lojas_bling: set[str], inicio: datetime
+) -> int:
+    """Ajuste da Shopee com o nº do pedido no fim do texto (`pedido_do_ajuste`) vai pro
+    pedido (12/11). A linha nova já chega com o nº; esta passada pega as gravadas antes
+    da regra. O de pedido da Conciliação entra no recebido dele, como o vínculo à mão; o
+    de antes do início vira "pedido anterior ao início". O que uma pessoa mexeu (vinculou,
+    classificou ou desvinculou) fica como está; nº que não é pedido da loja, sem dono."""
+    mov = ConciliacaoMovimento
+    rows = (
+        (
+            await session.execute(
+                select(mov).where(
+                    mov.integration_id == loja.integration_id,
+                    mov.origem == ORIGEM_CARTEIRA,
+                    mov.tipo == "ajuste_shopee",
+                    mov.pedido_bling.is_(None),
+                    mov.vinculado_por.is_(None),
+                    mov.classificacao.is_(None),
+                    mov.descricao.op("~")(r"\s-\s*[0-9]{6}[0-9A-Za-z]{8}\s*$"),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for m in rows:
+        if not m.pedido_marketplace:
+            m.pedido_marketplace = pedido_do_ajuste(m.descricao)
+    com_numero = [m for m in rows if m.pedido_marketplace]
+    return await _ligar_pelo_numero(session, com_numero, lojas_bling, inicio)
+
+
+async def _ligar_pelo_numero(
+    session: AsyncSession,
+    rows: list[ConciliacaoMovimento],
+    lojas_bling: set[str],
+    inicio: datetime,
+) -> int:
+    """Liga cada linha ao pedido do Bling do seu `pedido_marketplace`; pedido de antes do
+    início ganha "anterior ao início" já nesta rodada."""
+    if not rows:
+        return 0
     sns = {m.pedido_marketplace for m in rows if m.pedido_marketplace}
     mapa = await resolver_pedidos_bling(session, sns, lojas_bling) if sns else {}
     numeros = {achado[0] for achado in mapa.values()}

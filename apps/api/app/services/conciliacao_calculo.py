@@ -1476,14 +1476,22 @@ async def recalcular_loja(
     # o pedido compare o valor em vez de dizer "nada liberou e entrou X"
     liberacoes_renomeadas = await _renomear_liberacoes_sem_nome(session, loja)
     difal_ligado = 0
+    ajustes_ligados = 0
     if plataforma_loja == "shopee":
         # 0c. Liberação negativa e compensação da Shopee gravadas como "outro" (22/10)
-        from app.services.conciliacao_shopee import ligar_difal_aos_pedidos, renomear_tipos_novos
+        from app.services.conciliacao_shopee import (
+            ligar_ajustes_aos_pedidos,
+            ligar_difal_aos_pedidos,
+            renomear_tipos_novos,
+        )
 
         liberacoes_renomeadas += await renomear_tipos_novos(session, loja)
         # 0d. ICMS DIFAL vai pro pedido do nº que vem no texto (09/11) — antes da conta
         # dos pedidos, pra entrar no Sobrou já nesta rodada
         difal_ligado = await ligar_difal_aos_pedidos(session, loja, lojas_bling, inicio_dt)
+        # 0e. Crédito por item perdido/danificado (e o desconto de pagamento em dobro) vai
+        # pro pedido do nº no fim do texto (12/11)
+        ajustes_ligados = await ligar_ajustes_aos_pedidos(session, loja, lojas_bling, inicio_dt)
 
     # 1. Pedidos do Bling da loja desde o início (uma linha por item → agrupa por número).
     rows = (
@@ -2194,6 +2202,8 @@ async def recalcular_loja(
             contagem["reserva_maior_que_a_fatura"] = soltas_reserva
     if difal_ligado:
         contagem["difal_ligado"] = difal_ligado
+    if ajustes_ligados:
+        contagem["ajuste_ligado"] = ajustes_ligados
     # Linha sem nº de venda mas do MESMO pagamento de uma linha já ligada a um pedido
     # (16/10: relatório antigo da aguiar sem ORDER_ID; reservas/estornos sem o nº):
     # herda o pedido da irmã.

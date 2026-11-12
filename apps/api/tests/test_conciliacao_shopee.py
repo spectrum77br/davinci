@@ -624,6 +624,136 @@ async def test_difal_da_shopee_vai_pro_pedido_do_texto(db, make_user):
     assert "difal_ligado" not in res
 
 
+async def test_credito_por_item_perdido_vai_pro_pedido_do_fim_do_texto(db, make_user):
+    """12/11 (Vinicius: "sim, ensina"): o crédito da Shopee por item perdido ou danificado
+    vem sem o nº no campo do pedido, mas o texto termina com " - <order_sn>". Os 8 desde
+    24/10 foram ligados à mão ao pedido desse nº; agora o robô liga: o de pedido da
+    Conciliação entra no recebido dele, o de antes do início vira "anterior ao início".
+    O que uma pessoa mexeu fica como está; nº que não é pedido da loja, sem dono."""
+    from app.models import ConciliacaoPedido
+    from app.services.conciliacao_calculo import recalcular_loja
+    from app.services.conciliacao_shopee import pedido_do_ajuste
+
+    d = date(2026, 10, 20)
+    texto = (
+        "Credito por item perdido ou danificado no envio. Valor do produto descontado de "
+        "taxas e comissoes (-R$ 136.46) - {}"
+    )
+    credito = transacao_para_movimento(
+        _tx(
+            101,
+            "ADJUSTMENT_CENTER_ADD",
+            50.0,
+            100.0,
+            _epoch(d, 10),
+            reason=texto.format("261012ABCDEF12"),
+        )
+    )
+    assert credito["tipo"] == "ajuste_shopee" and credito["classificacao"] is None
+    assert credito["pedido_marketplace"] == "261012ABCDEF12" and credito["credito"] == Decimal(
+        "50.00"
+    )
+    assert (
+        pedido_do_ajuste(
+            "Desconto por pedido com pagamento duplicado - retirada de saldo excedente - "
+            "261006VSJYEKH3"
+        )
+        == "261006VSJYEKH3"
+    )
+    # sem " - <nº>" no fim, nada muda: penalidade e meta seguem sem dono
+    assert pedido_do_ajuste("Cobrança de taxa referente ao atingimento de meta de pedidos") is None
+    assert pedido_do_ajuste("Taxa de serviço - Pedido 2610...") is None
+
+    loja = await _loja_shopee(db, make_user)  # início 10/10; o 310001 é de 06/10
+    db.add(
+        BlingOrder(
+            bling_id=5002,
+            numero="310002",
+            numeroloja="261012ABCDEF12",
+            data=datetime(2026, 10, 12, 12, tzinfo=UTC),
+            total=Decimal("150"),
+            totalprodutos=Decimal("150"),
+            situacao="Atendido",
+            loja="204000002",
+            item_index=0,
+            preco_custo=100.0,
+            item_quantidade=1,
+            item_codigo="i223.sa",
+        )
+    )
+
+    def gravada(mov: dict, **kw) -> ConciliacaoMovimento:
+        return ConciliacaoMovimento(
+            integration_id=loja.integration_id, platform=loja.platform, **{**mov, **kw}
+        )
+
+    renda = transacao_para_movimento(
+        _tx(
+            102,
+            "ESCROW_VERIFIED_ADD",
+            130.0,
+            230.0,
+            _epoch(date(2026, 10, 18), 9),
+            "261012ABCDEF12",
+        )
+    )
+    db.add(gravada(renda))
+    # crédito do pedido de dentro, gravado antes da regra (sem o nº)
+    db.add(gravada(credito, pedido_marketplace=None))
+    # crédito do pedido de antes do início, gravado antes da regra
+    antiga = gravada(
+        {
+            **credito,
+            "id_externo": "103",
+            "pedido_marketplace": None,
+            "descricao": texto.format("261006VX383P9J"),
+        }
+    )
+    db.add(antiga)
+    # uma pessoa desvinculou: fica como ela deixou
+    mexida = gravada(
+        {
+            **credito,
+            "id_externo": "104",
+            "pedido_marketplace": None,
+            "descricao": texto.format("261006VX383P9J"),
+        },
+        vinculado_por="cairo sa",
+        vinculado_em=datetime(2026, 10, 20, 15, tzinfo=UTC),
+    )
+    db.add(mexida)
+    # nº que não é pedido desta loja: sem dono
+    de_fora = gravada(
+        {
+            **credito,
+            "id_externo": "105",
+            "pedido_marketplace": None,
+            "descricao": texto.format("2610129ZZZZZZZ"),
+        }
+    )
+    db.add(de_fora)
+    await db.commit()
+    res = await recalcular_loja(db, loja, agora=datetime(2026, 10, 21, 12, tzinfo=UTC))
+    await db.commit()
+    assert res["ajuste_ligado"] == 2
+    await db.refresh(antiga)
+    assert antiga.pedido_bling == "310001" and antiga.classificacao == "anterior_ao_inicio"
+    assert antiga.pedido_marketplace == "261006VX383P9J" and antiga.vinculado_por is None
+    await db.refresh(mexida)
+    assert mexida.pedido_bling is None and mexida.classificacao is None
+    await db.refresh(de_fora)
+    assert de_fora.pedido_bling is None and de_fora.classificacao is None
+    p = (
+        await db.execute(
+            select(ConciliacaoPedido).where(ConciliacaoPedido.pedido_bling == "310002")
+        )
+    ).scalar_one()
+    assert p.recebido == Decimal("180.00")  # renda 130 + crédito 50, como o vínculo à mão
+    # rodada seguinte: nada a ligar
+    res = await recalcular_loja(db, loja, agora=datetime(2026, 10, 21, 13, tzinfo=UTC))
+    assert "ajuste_ligado" not in res
+
+
 async def test_saldo_que_pula_nao_ganha_ajuste_e_os_do_robo_saem(db, make_user):
     """16/10 à noite (Vinicius, essência do painel): a carteira muda de saldo sem listar o
     lançamento (renda 292,39, saldo sobe 291,41) → NÃO se inventa ajuste classificado pra
