@@ -323,6 +323,9 @@ async function principal() {
     const htmlMexe = await mexe.html()
     assert.match(htmlMexe, />\s*Caixas\s*</)
     assert.match(htmlMexe, /data-mail-admin-tab/)
+    // Admin fora da lista de quem mexe (harry potter, 12/11/2026): vê a Administração.
+    const admin = montar('../components/AtendimentoMail.vue', { isAdmin: false, isRoleAdmin: true, canOperate: false, canView: true, stores: [] }, { respostas: { '/api/mail/mailboxes': { items: [] } }, filhos })
+    assert.match(await admin.html(), /data-mail-admin-tab/)
   }
 
   // ------------------------------------------------ a página
