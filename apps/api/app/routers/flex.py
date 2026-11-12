@@ -50,7 +50,7 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, case, exists, false, func, not_, or_, select
+from sqlalchemy import and_, case, exists, false, func, not_, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import worker_pool
@@ -537,6 +537,100 @@ def _conta_nao_pronta(liberadas: frozenset[UUID]):
     return and_(_com_peca(), FlexAnuncioEstado.integration_id.not_in(list(liberadas)))
 
 
+# ---- "Sistema quer" e "Ação" como a tela mostra (12/11/2026) -------------------
+# Vinicius: filtrando "Não pode ter Flex" apareciam linhas com o selo "Pode ter
+# Flex" (o filtro olhava só o `desejado`; a tela mostra "Pode ter Flex" para
+# quem tem peça e só falta a conta ficar pronta, e — desde hoje — para quem a
+# Shopee recusou por PROMOÇÃO: "ele pode ter flex, eu só preciso tirar a
+# promoção"). Os filtros aqui seguem a mesma régua de `querInfo`/`acaoDe` em
+# components/LogisticaFlexAnuncios.vue.
+_CONFIRMANDO_LIKE = "%esperando ela mostrar%"
+
+
+def _recusa_promocao():
+    """A Shopee recusou ligar porque o anúncio está em promoção."""
+    r = func.coalesce(FlexAnuncioEstado.recusa, "")
+    return or_(r.ilike("%em promoção%"), r.ilike("%has promotion%"))
+
+
+def _quer_pode(liberadas: frozenset[UUID], n_liga: int):
+    """Selo "Pode ter Flex": a regra quer ligado — ou tem peça (n_liga+) e só
+    falta a conta ficar pronta, a Shopee só ler, ou tirar a promoção."""
+    est = FlexAnuncioEstado
+    fora = est.integration_id.not_in(list(liberadas)) if liberadas else true()
+    return or_(
+        est.desejado == "ligado",
+        and_(
+            func.coalesce(est.saldo_sp, -1) >= n_liga,
+            or_(
+                fora,
+                func.coalesce(est.motivo, "").startswith("Shopee só leitura"),
+                _recusa_promocao(),
+            ),
+        ),
+    )
+
+
+def _quer_desligado(liberadas: frozenset[UUID], n_liga: int):
+    """Selo "Flex desligado": a regra quer desligado — ou a conta não está
+    pronta e há peça de menos (o cinza igual ao das contas prontas)."""
+    est = FlexAnuncioEstado
+    fora = est.integration_id.not_in(list(liberadas)) if liberadas else true()
+    return and_(
+        not_(_quer_pode(liberadas, n_liga)),
+        or_(
+            est.desejado == "desligado",
+            and_(fora, est.saldo_sp.is_not(None), est.saldo_sp < n_liga),
+        ),
+    )
+
+
+def _quer_nao_pode(liberadas: frozenset[UUID], n_liga: int):
+    """Selo "Não pode ter Flex": o resto (sem vínculo, sem .sp, kit misturado…)."""
+    return and_(
+        not_(_quer_pode(liberadas, n_liga)),
+        not_(_quer_desligado(liberadas, n_liga)),
+    )
+
+
+def _acao(acao: str, liberadas: frozenset[UUID]):
+    """O que a coluna "Ação" mostra. Só conta pronta tem botão/selo; a outra
+    mostra o que falta na conta ("conta_nao_pronta")."""
+    est = FlexAnuncioEstado
+    pronta = est.integration_id.in_(list(liberadas)) if liberadas else false()
+    erro = func.coalesce(est.ultimo_erro, "")
+    if acao == "conta_nao_pronta":
+        return not_(pronta)
+    if acao == "aprovar":
+        return and_(pronta, est.aguardando_aprovacao.is_(True), est.recusa.is_(None))
+    if acao == "tentar_de_novo":
+        return and_(pronta, est.recusa.is_not(None))
+    if acao == "tentar_agora":
+        return and_(
+            pronta,
+            est.aprovado_em.is_not(None),
+            est.desejado == "ligado",
+            func.coalesce(est.observado, "") != "ligado",
+            est.recusa.is_(None),
+            not_(erro.ilike(_CONFIRMANDO_LIKE)),
+        )
+    if acao == "confirmando":
+        return and_(pronta, erro.ilike(_CONFIRMANDO_LIKE))
+    if acao == "ativado":
+        return and_(pronta, est.observado == "ligado", est.desejado == "ligado")
+    if acao == "desativado":
+        return and_(
+            pronta,
+            est.observado == "desligado",
+            est.desejado != "ligado",
+            est.recusa.is_(None),
+            not_(erro.ilike(_CONFIRMANDO_LIKE)),
+        )
+    if acao == "desliga":
+        return _desligar(liberadas)
+    return true()
+
+
 async def _resumo(
     session: AsyncSession,
     escopo: frozenset[UUID] | None,
@@ -607,6 +701,20 @@ async def anuncios(
     pecas: Literal["com", "flex"] | None = None,
     # Com peça, mas a conta ainda não está pronta (o robô não mexe nela).
     conta_nao_pronta: bool = False,
+    # O selo "Sistema quer" como a tela mostra (12/11/2026 — ver `_quer_pode`).
+    quer: Literal["pode", "desligado", "nao_pode"] | None = None,
+    # A coluna "Ação" (12/11/2026: "filtrar somente os tentar de novo etc.").
+    acao: Literal[
+        "aprovar",
+        "tentar_de_novo",
+        "tentar_agora",
+        "confirmando",
+        "ativado",
+        "desativado",
+        "desliga",
+        "conta_nao_pronta",
+    ]
+    | None = None,
     # Busca da tela: id do anúncio, família ou título (sem curinga: `%`/`_`
     # digitados são letras).
     busca: Annotated[str | None, Query(max_length=100)] = None,
@@ -623,6 +731,17 @@ async def anuncios(
         filtros.append(FlexAnuncioEstado.saldo_sp >= n_liga)
     if conta_nao_pronta:
         filtros.append(_conta_nao_pronta(await _liberadas(session, permitidas)))
+    if quer is not None or acao is not None:
+        liberadas = await _liberadas(session, permitidas)
+        n_liga = flex_motor.ConfigFlex.das_configuracoes().n_liga
+        if quer == "pode":
+            filtros.append(_quer_pode(liberadas, n_liga))
+        elif quer == "desligado":
+            filtros.append(_quer_desligado(liberadas, n_liga))
+        elif quer == "nao_pode":
+            filtros.append(_quer_nao_pode(liberadas, n_liga))
+        if acao is not None:
+            filtros.append(_acao(acao, liberadas))
     if (f := _no_escopo(FlexAnuncioEstado.integration_id, escopo)) is not None:
         filtros.append(f)
     if integration_id is not None:

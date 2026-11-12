@@ -186,13 +186,30 @@ const SITUACOES = [
   { key: 'aguardando', label: 'Esperando sua aprovação' },
   { key: 'ligado_agora', label: 'Com Flex ligado agora' },
   { key: 'desligar', label: 'Ligado, mas deveria desligar' },
+  // 12/11/2026: os três seguem o selo "Sistema quer" da tela (servidor:
+  // `quer=`) — antes "Não pode ter Flex" trazia linhas com "Pode ter Flex".
   { key: 'quer_ligado', label: 'Pode ter Flex' },
-  { key: 'quer_desligado', label: 'Flex deve ficar desligado' },
+  { key: 'quer_desligado', label: 'Flex desligado' },
   { key: 'inelegivel', label: 'Não pode ter Flex' },
   { key: 'nao_lido', label: 'Ainda não conferido na plataforma' },
 ] as const
 type Situacao = (typeof SITUACOES)[number]['key']
 const filtroSituacao = ref<Situacao>('')
+// Filtro pela coluna "Ação" (12/11/2026: "quero filtrar somente os tentar de
+// novo etc."). Os nomes são os que aparecem na coluna.
+const ACOES = [
+  { key: '', label: 'Todas' },
+  { key: 'aprovar', label: 'Aprovar' },
+  { key: 'tentar_de_novo', label: 'Tentar de novo' },
+  { key: 'tentar_agora', label: 'Tentar agora' },
+  { key: 'confirmando', label: 'Shopee confirmando' },
+  { key: 'ativado', label: 'Ativado' },
+  { key: 'desativado', label: 'Desativado' },
+  { key: 'desliga', label: 'O sistema desliga' },
+  { key: 'conta_nao_pronta', label: 'Conta não pronta' },
+] as const
+type AcaoFiltro = (typeof ACOES)[number]['key']
+const filtroAcao = ref<AcaoFiltro>('')
 // 11/11/2026 (Vinicius: "preciso ver só os anúncios que são elegíveis ao
 // Flex"): de fábrica a lista mostra só quem tem peça em São Bernardo.
 type FiltroPecas = 'com' | 'flex' | ''
@@ -223,6 +240,7 @@ const filtrosAtivos = computed(
     !!filtroPlataforma.value ||
     !!filtroConta.value ||
     !!filtroSituacao.value ||
+    !!filtroAcao.value ||
     !!busca.value.trim() ||
     filtroPecas.value !== 'com' ||
     filtroNaoPronta.value,
@@ -231,6 +249,7 @@ function limparFiltros() {
   filtroPlataforma.value = ''
   filtroConta.value = ''
   filtroSituacao.value = ''
+  filtroAcao.value = ''
   filtroPecas.value = 'com'
   filtroNaoPronta.value = false
   busca.value = ''
@@ -250,9 +269,10 @@ function queryAnuncios(): string {
   if (s === 'aguardando') qs.set('aguardando', 'true')
   else if (s === 'desligar') qs.set('desligar', 'true')
   else if (s === 'ligado_agora') qs.set('observado', 'ligado')
-  else if (s === 'quer_ligado') qs.set('desejado', 'ligado')
-  else if (s === 'quer_desligado') qs.set('desejado', 'desligado')
-  else if (s === 'inelegivel') qs.set('desejado', 'inelegivel')
+  else if (s === 'quer_ligado') qs.set('quer', 'pode')
+  else if (s === 'quer_desligado') qs.set('quer', 'desligado')
+  else if (s === 'inelegivel') qs.set('quer', 'nao_pode')
+  if (filtroAcao.value) qs.set('acao', filtroAcao.value)
   else if (s === 'nao_lido') qs.set('observado', 'nao_lido')
   return qs.toString()
 }
@@ -299,7 +319,7 @@ async function carregarTudo() {
   await Promise.all([carregarConfig(), carregarAnuncios(), carregarPedidos()])
 }
 
-watch([filtroPlataforma, filtroConta, filtroSituacao, buscaAplicada, filtroPecas, filtroNaoPronta], () => {
+watch([filtroPlataforma, filtroConta, filtroSituacao, filtroAcao, buscaAplicada, filtroPecas, filtroNaoPronta], () => {
   if (pagina.value !== 1) pagina.value = 1
   else carregarAnuncios()
 })
@@ -1293,6 +1313,14 @@ function querInfo(a: FlexAnuncio): { texto: string; cls: string; title: string }
       title: contaPronta(a) ? 'Tem peça para ter Flex — ligar é à mão no Seller Center' : `Tem peça para ter Flex quando a conta ficar pronta (${motivoConta(a)})`,
     }
   }
+  // 12/11/2026 (Vinicius: "ele pode ter flex, eu só preciso tirar a
+  // promoção"): a recusa da Shopee por promoção não é "Não pode ter Flex".
+  if (temPeca && emPromocao(a)) {
+    return {
+      ...DESEJADO.ligado!,
+      title: 'Pode ter Flex — a Shopee só recusou por causa da promoção: tire o anúncio da promoção no Seller Center e clique em Tentar de novo.',
+    }
+  }
   // 12/11/2026 (revisão): com peça de menos, a conta não pronta mostrava "Não
   // pode ter Flex" (vermelho) e a pronta "Flex desligado" (cinza) — o mesmo
   // caso. O que pesa aqui são as peças: cinza, apagado, como os outros dela.
@@ -1343,8 +1371,8 @@ const cartaoAtivo = computed<CartaoFlex | null>(() => {
   if (filtroNaoPronta.value) return 'nao_pronta'
   if (filtroSituacao.value === 'aguardando') return 'aguardando'
   if (filtroSituacao.value === 'desligar') return 'desligar'
-  if (!filtroSituacao.value && filtroPecas.value === 'flex') return 'flex'
-  if (!filtroSituacao.value && filtroPecas.value === 'com') return 'com'
+  if (!filtroSituacao.value && !filtroAcao.value && filtroPecas.value === 'flex') return 'flex'
+  if (!filtroSituacao.value && !filtroAcao.value && filtroPecas.value === 'com') return 'com'
   return null
 })
 const cartoes = computed(() => {
@@ -1361,6 +1389,7 @@ function clicarCartao(k: CartaoFlex) {
   const voltar = cartaoAtivo.value === k && k !== 'com'
   filtroNaoPronta.value = false
   filtroSituacao.value = ''
+  filtroAcao.value = ''
   filtroPecas.value = 'com'
   if (voltar) return
   if (k === 'flex') filtroPecas.value = 'flex'
@@ -1530,8 +1559,7 @@ defineExpose({ recarregar: carregarTudo })
 
 <template>
   <!-- 11/11/2026: padrão de Chamados/Conciliação. O quadro azul virou a barra
-       de cima (modo, saída, botões), os cartões que filtram, a faixa das contas
-       e, à direita, "Onde agir hoje", as contas e "Como o sistema decide". De
+       de cima (modo, saída, botões), os cartões que filtram e, à direita, "Onde agir hoje", as contas e "Como o sistema decide". De
        fábrica a lista mostra só os anúncios com peça no local de saída. -->
   <div class="min-w-0 space-y-2.5">
     <!-- 12/11/2026: só os botões — o modo e as regras estão em "Como o sistema
@@ -1637,6 +1665,12 @@ defineExpose({ recarregar: carregarTudo })
           <option v-for="s in SITUACOES" :key="s.key" :value="s.key">{{ s.label }}</option>
         </select>
       </label>
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2">
+        <span class="font-semibold text-muted-foreground">Ação</span>
+        <select v-model="filtroAcao" class="bg-transparent outline-none" data-flex-filtro-acao>
+          <option v-for="o in ACOES" :key="o.key" :value="o.key">{{ o.label }}</option>
+        </select>
+      </label>
       <label class="inline-flex h-7 min-w-0 items-center gap-1 rounded-md border bg-card px-2">
         <Search class="size-3.5 text-muted-foreground" />
         <input v-model="busca" class="w-56 bg-transparent outline-none" placeholder="buscar anúncio, título ou família" />
@@ -1661,17 +1695,8 @@ defineExpose({ recarregar: carregarTudo })
       </button>
     </div>
 
-    <!-- faixa das contas (no lugar do quadro azul) -->
-    <div class="flex flex-wrap items-center gap-3 rounded-md border bg-card px-3 py-1.5 text-xs">
-      <span class="text-[13px] font-bold">Contas prontas</span>
-      <span class="inline-block h-2.5 w-48 overflow-hidden rounded-full bg-muted">
-        <span class="block h-full bg-[#1f3a5f] dark:bg-slate-300" :style="{ width: `${contasProntasTotal.total ? (100 * contasProntasTotal.prontas) / contasProntasTotal.total : 0}%` }" />
-      </span>
-      <span><b>{{ contasProntasTotal.prontas }} de {{ contasProntasTotal.total }}</b> contas</span>
-      <span v-for="g in gruposContas" :key="g.chave" class="inline-flex items-center gap-1.5 rounded bg-muted px-2 py-0.5 font-semibold" :title="g.acao">
-        <span class="size-[7px] rounded-full" :class="g.cor" />{{ g.contas.length }} {{ g.titulo }}
-      </span>
-    </div>
+    <!-- 12/11/2026: a faixa "Contas prontas" saiu daqui (repetia o quadro
+         Contas, à direita). -->
 
     <div v-if="erro" class="text-sm text-red-500">erro: {{ erro }}</div>
 

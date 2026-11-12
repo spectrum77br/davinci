@@ -820,3 +820,64 @@ async def test_lista_e_cartoes_so_das_contas_do_flex_e_seguem_o_filtro(
     assert contas[str(loja.id)]["loja_id"] == "123456"
     assert contas[str(cena["conta_id"])]["loja_id"] is None
     assert contas[str(velha.id)]["existe"] is False
+
+
+@pytest.mark.asyncio
+async def test_filtros_sistema_quer_e_acao_seguem_a_tela(
+    client: AsyncClient, cena, db: AsyncSession, auth_as: Callable
+):
+    """Revisão de 12/11/2026: o filtro "Não pode ter Flex" mostrava linhas com o
+    selo "Pode ter Flex"; a recusa por promoção é "Pode ter Flex" (só falta
+    tirar a promoção); e o filtro pela coluna Ação ("só os Tentar de novo")."""
+    agora = datetime.now(UTC)
+    db.add(
+        FlexAnuncioEstado(
+            integration_id=cena["conta_id"],
+            external_id="MLB4",
+            plataforma="ml",
+            desejado="inelegivel",
+            motivo="a plataforma recusou ligar: em promoção na Shopee: Desconto da loja",
+            recusa="em promoção na Shopee: Desconto da loja até 25/12 17:00",
+            observado="desligado",
+            observado_em=agora,
+            aguardando_aprovacao=False,
+            tentativas=0,
+            saldo_sp=5,
+        )
+    )
+    await db.commit()
+    auth_as(cena["admin"])
+
+    async def ids(qs: str) -> list[str]:
+        r = await client.get(f"/api/flex/anuncios?{qs}")
+        assert r.status_code == 200, r.text
+        return sorted(i["external_id"] for i in r.json()["itens"])
+
+    # Conta ainda não conferida (não pronta): toda Ação é "conta não pronta".
+    assert await ids("acao=conta_nao_pronta") == ["MLB1", "MLB2", "MLB3", "MLB4"]
+    assert await ids("acao=tentar_de_novo") == []
+
+    db.add(
+        FlexConta(
+            integration_id=cena["conta_id"],
+            plataforma="ml",
+            flex_ativo=True,
+            status="in",
+            origem_cep="09750000",
+            origem_cidade="São Bernardo do Campo",
+            origem_lida_em=agora,
+            lido_em=agora,
+        )
+    )
+    await db.commit()
+    # Sistema quer: o selo que a tela mostra.
+    assert await ids("quer=pode") == ["MLB1", "MLB4"]  # MLB4: só falta a promoção
+    assert await ids("quer=desligado") == ["MLB3"]
+    assert await ids("quer=nao_pode") == ["MLB2"]
+    # Ação.
+    assert await ids("acao=aprovar") == ["MLB1"]
+    assert await ids("acao=tentar_de_novo") == ["MLB4"]
+    assert await ids("acao=desliga") == ["MLB2"]  # ligado e a regra não quer
+    assert await ids("acao=desativado") == ["MLB3"]
+    assert await ids("acao=conta_nao_pronta") == []
+    assert (await client.get("/api/flex/anuncios?acao=qualquer")).status_code == 422
