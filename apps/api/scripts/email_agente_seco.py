@@ -178,6 +178,10 @@ async def main(limite: int) -> None:
                 {
                     "categoria": getattr(r, "categoria", None),
                     "decisao": decisao,
+                    "evidencias": [
+                        e for e in email_agente.evidencias_do_rascunho(r) if e.startswith("email:")
+                    ],
+                    "confianca": getattr(r, "confianca", None),
                     "texto": replay.mascarar_texto(getattr(r, "texto", None), nomes),
                 }
             )

@@ -43,6 +43,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
@@ -473,6 +474,12 @@ def links_permitidos(conversa: Any) -> list[str]:
 
 
 _RX_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+
+
+def site_liberado(conversa_id: Any) -> bool:
+    """A conversa é um e-mail do SAC do SITE liberado para o agente nesta rodada?"""
+    chave = chave_da(SimpleNamespace(id=conversa_id))
+    return chave is not None and chave.site is not None
 
 
 def pedido_do_formulario(texto: str | None, chave: Chave | None) -> bool:

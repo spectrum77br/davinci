@@ -140,6 +140,7 @@ from typing import TYPE_CHECKING, Any
 from app.services.atendimento import (
     condicao_anuncio,
     constantes,
+    email_agente,
     evidencias,
     recursos_equipe,
     sites_marca,
@@ -13127,11 +13128,15 @@ def conferir(
         )
         # Ajuste rf3: o recado ao revisor dentro do rascunho.
         pendencias += conferir_recado_ao_revisor(texto)
-        pendencias += conferir_caminho_da_plataforma(
-            sem_caminho_uranyx(texto) if uranyx_liberado else texto,
-            ctx.plataforma,
-            marcas=marcas_das_fichas([*fichas, *_do_registro(ctx)]),
-        )
+        if not email_agente.site_liberado(ctx.conversa_id):
+            # E-mail do SAC do site (12/11/2026): o canal É a marca — o formulário, o
+            # site oficial e a própria marca são o caminho certo, não "fora da
+            # plataforma" (o validador continua barrando outro link, e-mail e telefone).
+            pendencias += conferir_caminho_da_plataforma(
+                sem_caminho_uranyx(texto) if uranyx_liberado else texto,
+                ctx.plataforma,
+                marcas=marcas_das_fichas([*fichas, *_do_registro(ctx)]),
+            )
         pendencias += conferir_homologado(texto, textos_cliente=clientes)
         # Fontes v1.3, item 10 (21/10/2026): a condição pelo anúncio da conversa
         # (e a fala REAL da loja na conversa, que não pode contradizê-lo).

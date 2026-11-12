@@ -205,6 +205,17 @@ def test_validador_libera_so_o_link_do_formulario_no_email_do_agente():
     )
 
 
+def test_site_liberado_so_no_email_do_site():
+    conversa = SimpleNamespace(id=uuid4(), canal_id=None)
+    assert not email_agente.site_liberado(conversa.id)
+    site = email_agente.Chave(canal_id=uuid4(), modo=MODO_AUTO, site="uranyx")
+    with email_agente.liberar(conversa.id, site):
+        assert email_agente.site_liberado(conversa.id)
+    loja = email_agente.Chave(canal_id=uuid4(), modo=MODO_AUTO)
+    with email_agente.liberar(conversa.id, loja):
+        assert not email_agente.site_liberado(conversa.id)
+
+
 def test_liberar_vale_so_no_bloco():
     conversa = SimpleNamespace(id=uuid4(), canal_id=None)
     chave = email_agente.Chave(canal_id=uuid4(), modo=MODO_AUTO, site="uranyx")
