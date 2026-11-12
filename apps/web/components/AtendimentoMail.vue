@@ -47,7 +47,7 @@ type Detail = Summary & { text: string; html?: string | null; to: string[]; cc: 
 // this visit to /atendimento: the page keeps it, since this component mounts
 // again every time the E-mail tab opens.
 type Section = 'mailboxes' | 'queues' | 'admin'
-const props = withDefaults(defineProps<{ isAdmin: boolean; canOperate?: boolean; canReadQueues?: boolean; canManageQueues?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; conversationCounts?: ContagensDeConversa | null; refreshConversationCounts?: () => Promise<void>; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
+const props = withDefaults(defineProps<{ isAdmin: boolean; isRoleAdmin?: boolean; canOperate?: boolean; canReadQueues?: boolean; canManageQueues?: boolean; canView?: boolean; stores?: ResumoLoja[]; waiting?: number; waitingReady?: boolean; conversationCounts?: ContagensDeConversa | null; refreshConversationCounts?: () => Promise<void>; paused?: boolean; refreshTick?: number; rememberedSection?: '' | Section }>(), { waitingReady: true })
 const unreadCount = computed(() => props.conversationCounts?.nao_lidas?.total || 0)
 const emit = defineEmits<{ (e: 'openConversation', id: string): void; (e: 'update:rememberedSection', value: Section): void }>()
 const { api, url } = useApi()
@@ -124,8 +124,10 @@ const currentStore = computed(() => (storeKey.value ? mailStores.value.find((ite
 // reads it (the conversation queues only — AtendimentoMailFilas `podeMexer`).
 const seesQueues = computed(() => !!props.canOperate || !!props.canView)
 const canAdminister = computed(() => props.isAdmin && !!props.canOperate)
-// A Administração (lista de usuários do e-mail): qualquer admin (12/11/2026).
-const canAdministerUsers = computed(() => props.isAdmin)
+// A Administração (lista de usuários do e-mail): qualquer admin (12/11/2026,
+// "habilite o user harry potter"). `isAdmin` aqui é admin E quem mexe; o papel
+// de admin puro vem em `isRoleAdmin`.
+const canAdministerUsers = computed(() => props.isAdmin || !!props.isRoleAdmin)
 // Email waiting for a reply when the tab opens (13/10/2026 — it no longer
 // counts in the Caixa Humano): the tab opens on "Filas", admins and mailbox
 // owners included. Decided ONCE, when the tab opens (this component mounts

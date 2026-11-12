@@ -1569,6 +1569,7 @@ onBeforeUnmount(() => {
       <LazyAtendimentoMail
         v-show="!emailConversa"
         :is-admin="isAdmin"
+        :is-role-admin="ehAdmin"
         :can-operate="mexe && ehAdmin"
         :can-read-queues="leFilasEmail"
         :can-manage-queues="podeExcluirNasFilasEmail"
