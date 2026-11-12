@@ -185,6 +185,63 @@ def origem_ok(origem_cidade: str | None, local: LocalFlex | None = None) -> bool
     return bool(cidades) and all(mesma_cidade(c, alvo) for c in cidades)
 
 
+async def contas_do_local(session: AsyncSession, local: LocalFlex | None = None) -> frozenset[UUID]:
+    """As contas cujo pedido Flex SAI do local de saída — só o pedido delas o
+    robô de prioridade leva para o lote do local (Vinicius, 12/11/2026: as 4
+    contas do ML com Flex saem de Piracicaba; com o pedido no .sp ligado, a
+    venda Flex delas ia para o estoque de São Bernardo, e a peça sai de
+    Piracicaba). O saldo e o acerto usam `contas_fora_do_local`.
+
+    Só as contas liberadas (`flex_contas`) que o motor já conferiu
+    (`flex_conta`):
+      • ML: TODAS as saídas do Flex da conta (a última cidade lida) na cidade
+        do local — sem cidade lida, não;
+      • Shopee: a loja liberada — a coleta da Entrega Direta não vem na API
+        (o motor também trata a loja liberada como do local)."""
+    from app.models.flex import FlexConta
+    from app.services import flex_config
+
+    liberadas = flex_config.contas()
+    if not liberadas:
+        return frozenset()
+    alvo = local or atual()
+    rows = await session.execute(
+        select(FlexConta.integration_id, FlexConta.plataforma, FlexConta.origem_cidade).where(
+            FlexConta.integration_id.in_(liberadas)
+        )
+    )
+    return frozenset(
+        iid
+        for iid, plataforma, origem_cidade in rows.all()
+        if plataforma == "shopee" or origem_ok(origem_cidade, alvo)
+    )
+
+
+async def contas_fora_do_local(
+    session: AsyncSession, local: LocalFlex | None = None
+) -> frozenset[UUID]:
+    """As contas do ML cuja saída do Flex é SABIDAMENTE em outra cidade (a
+    última cidade lida não é a do local): o pedido Flex delas não tira peça
+    do saldo Flex do local nem espera o acerto do estoque (12/11/2026).
+
+    É o lado oposto de `contas_do_local`, para quem desconta: conta que não
+    se sabe (não conferida, sem cidade lida, Shopee) continua descontando —
+    o lado seguro do saldo."""
+    from app.models.flex import FlexConta
+
+    alvo = local or atual()
+    rows = await session.execute(
+        select(FlexConta.integration_id, FlexConta.origem_cidade).where(
+            FlexConta.plataforma == "ml", FlexConta.origem_cidade.is_not(None)
+        )
+    )
+    return frozenset(
+        iid
+        for iid, origem_cidade in rows.all()
+        if cidades_da_origem(origem_cidade) and not origem_ok(origem_cidade, alvo)
+    )
+
+
 async def salvar(session: AsyncSession, *, cidade: str, lote: str, por: UUID | None) -> LocalFlex:
     """Troca o local (quem pode é conferido no router). Valida e grava na
     sessão de quem chama; o cache só troca com `usar` depois do commit."""

@@ -56,6 +56,11 @@ só. Se o .sp não cobre (saldo virtual do Bling na hora, mesma régua de
 `flex_pedido.alerta`, a trilha em `flex_log` e um aviso no sino dos admins —
 a decisão (separar em SP, transferir peça, cancelar) é de uma pessoa. Ver
 `_decidir_flex`. Liga/desliga por FLEX_PEDIDO_NO_SP (ligado por padrão).
+SÓ O PEDIDO FLEX QUE SAI DO LOCAL (Vinicius, 12/11/2026): as contas do ML
+com Flex saem de Piracicaba — o pedido Flex delas não vai para o .sp. Só o de
+conta liberada cuja saída do Flex é na cidade do local
+(`flex_local.contas_do_local`); o de outra cidade, ou de conta que não se
+sabe (só a Logística marcou), segue como pedido normal.
 Revisão de 02/10/2026: (1) os pedidos Flex da rodada vêm ANTES de todos os
 normais — um normal mais antigo com prioridade .sp não leva a última peça de
 São Bernardo; (2) o .sp que um pedido Flex sem peça precisa fica segurado
@@ -77,6 +82,7 @@ contrato do record_margem_audit) — o sweep próprio comita via session_scope.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -825,16 +831,22 @@ def _reserva_flex(qtd_por_codigo: dict[str, int]) -> Counter:
     return reserva
 
 
-async def _reserva_flex_fora_da_rodada(session: AsyncSession, numeros: set[str]) -> Counter:
+async def _reserva_flex_fora_da_rodada(
+    session: AsyncSession, numeros: set[str], do_local: Collection[UUID]
+) -> Counter:
     """O .sp segurado pelos pedidos Flex sem peça que NÃO estão nesta rodada
     (o gancho do enfileirar só traz os seus pedidos): os que estão em aberto
-    com o aviso gravado (`flex_pedido.alerta`) e ainda fora do .sp."""
+    com o aviso gravado (`flex_pedido.alerta`) e ainda fora do .sp — só das
+    contas cujo Flex sai do local (`flex_local.contas_do_local`)."""
+    if not do_local:
+        return Counter()
     rows = await session.execute(
         select(BlingOrder.numero, BlingOrder.item_codigo, BlingOrder.item_quantidade)
         .join(FlexPedido, FlexPedido.bling_id == BlingOrder.bling_id)
         .where(
             FlexPedido.alerta.is_not(None),
             FlexPedido.no_sp.is_(False),
+            FlexPedido.integration_id.in_(list(do_local)),
             BlingOrder.situacao == _SITUACAO_EM_ABERTO,
             BlingOrder.item_codigo.is_not(None),
         )
@@ -1311,8 +1323,20 @@ async def _aplicar_prioridade_estoque(
     # Pedido Flex: regra própria, obrigatória (ver `_decidir_flex`). Sem
     # prioridade cadastrada e sem o pedido num estoque só, só ele tem o que
     # decidir — os outros nem consultam o Bling.
-    flex = await _pedidos_flex(session, por_pedido) if flex_ligado else {}
+    flex: dict[str, _PedidoFlex] = {}
+    do_local: frozenset = frozenset()
     if flex_ligado:
+        flex = await _pedidos_flex(session, por_pedido)
+        # Só o pedido Flex de conta cuja saída do Flex é no local vai para o
+        # lote dele (Vinicius, 12/11/2026: as contas do ML com Flex saem de
+        # Piracicaba). O de outra cidade — ou de conta que não se sabe — segue
+        # como pedido normal: a peça não sai de São Bernardo.
+        do_local = await flex_local.contas_do_local(session)
+        fora = sorted(n for n, pf in flex.items() if pf.integration_id not in do_local)
+        if fora:
+            summary["flex_outro_local"] = fora
+            logger.info("prioridade_estoque_flex_outro_local", pedidos=fora)
+            flex = {n: pf for n, pf in flex.items() if pf.integration_id in do_local}
         # Pedido ML/Shopee recém-chegado sem o tipo de envio lido: pode ser
         # Flex — fica para a próxima rodada (o enfileirar também o segura).
         esperando = await _esperando_tipo_envio(
@@ -1338,7 +1362,7 @@ async def _aplicar_prioridade_estoque(
     # os de fora (o gancho do enfileirar só traz os seus) vêm do banco.
     reserva: Counter = Counter()
     if flex_ligado:
-        reserva.update(await _reserva_flex_fora_da_rodada(session, set(por_pedido)))
+        reserva.update(await _reserva_flex_fora_da_rodada(session, set(por_pedido), do_local))
     # Pedido Flex reconhecido DEPOIS de entrar na fila da NF (o tipo de envio
     # chegou além da espera — ver `_esperando_tipo_envio`): não troca, avisa.
     flex_na_fila = await _na_fila_da_nf(session, [n for n in por_pedido if n in flex])

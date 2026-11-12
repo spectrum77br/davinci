@@ -983,11 +983,18 @@ async def pedidos(
             if r.item_codigo:
                 d["skus"].append(r.item_codigo)
     out: list[FlexPedidoOut] = []
+    # Conta com a saída do Flex em outra cidade (12/11/2026): não espera acerto.
+    fora = await flex_local.contas_fora_do_local(session) if linhas else frozenset()
     for fp, nome in linhas:
         info = itens.get(fp.bling_id, {})
         skus = info.get("skus", [])
         pendente = flex_motor.acerto_pendente(
-            info.get("situacao"), fp.no_sp, fp.acertado_em, skus, fp.lote
+            info.get("situacao"),
+            fp.no_sp,
+            fp.acertado_em,
+            skus,
+            fp.lote,
+            do_local=fp.integration_id not in fora,
         )
         # O banco trouxe largo (`_saiu_sem_sp`); aqui só fica o que espera
         # mesmo o acerto — o resto segue as réguas de sempre.
@@ -1041,8 +1048,9 @@ async def acertado(bling_id: int, session: Sessao, user: Agir) -> FlexAcertoOut:
         )
     ).all()
     situacao = itens[0][0] if itens else None
+    do_local = fp.integration_id not in await flex_local.contas_fora_do_local(session)
     if not flex_motor.acerto_pendente(
-        situacao, fp.no_sp, fp.acertado_em, [c for _, c in itens], fp.lote
+        situacao, fp.no_sp, fp.acertado_em, [c for _, c in itens], fp.lote, do_local=do_local
     ):
         raise HTTPException(
             status.HTTP_409_CONFLICT,

@@ -109,7 +109,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, text, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -865,10 +865,16 @@ def acerto_pendente(
     acertado_em: datetime | None,
     skus: Iterable[str | None],
     lote: str | None = None,
+    *,
+    do_local: bool = True,
 ) -> bool:
     """O pedido Flex SAIU (em andamento/atendido) sem ter ido ao .sp e ainda
     espera alguém acertar o estoque no Bling? Só conta quem tem peça com lote
-    de venda fora do .sp (é o que o saldo Flex desconta)."""
+    de venda fora do .sp (é o que o saldo Flex desconta). `do_local=False`:
+    a conta tem a saída do Flex em outra cidade (12/11/2026) — a peça saiu de
+    lá, não há o que acertar no .sp."""
+    if not do_local:
+        return False
     if no_sp or acertado_em is not None or str(situacao or "") not in SITUACOES_SAIU:
         return False
     # `lote`: o do PEDIDO (flex_pedido.lote) — trocar o local depois que ele
@@ -920,10 +926,15 @@ async def calcular_saldos(session: AsyncSession, skus_sp: Collection[str]) -> di
         com peça a mais — sem janela de dias: vale até alguém acertar;
       • pedido Flex que o robô LEVOU ao .sp (`sp_em`), em aberto, enquanto o
         produto .sp não foi atualizado depois da troca: a reserva só chega
-        ao `products.stock` pelo webhook do Bling, que às vezes não vem."""
+        ao `products.stock` pelo webhook do Bling, que às vezes não vem.
+
+    Pedido Flex de conta com a saída do Flex em OUTRA cidade (12/11/2026: as
+    contas do ML que saem de Piracicaba) não tira peça daqui; conta que não
+    se sabe de onde sai desconta (lado seguro)."""
     alvos = sorted({s.strip().lower() for s in skus_sp if s and s.strip()})
     if not alvos:
         return {}
+    fora = await flex_local.contas_fora_do_local(session)
     por_sku: dict[str, dict[Any, int]] = defaultdict(dict)
     rows = await session.execute(
         select(
@@ -947,6 +958,12 @@ async def calcular_saldos(session: AsyncSession, skus_sp: Collection[str]) -> di
             # Só os pedidos do lote do local de agora: o que saiu de outro
             # local (antes de uma troca) não tira peça deste estoque.
             FlexPedido.lote == _lote_flex(),
+            or_(
+                FlexPedido.integration_id.is_(None),
+                FlexPedido.integration_id.notin_(list(fora)),
+            )
+            if fora
+            else true(),
             or_(
                 and_(FlexPedido.detectado_em >= corte, situacao.notin_(_SITUACOES_FECHADAS)),
                 and_(situacao.in_(SITUACOES_SAIU), FlexPedido.acertado_em.is_(None)),

@@ -25,8 +25,11 @@ from app.config import get_settings
 from app.models import (
     Alert,
     BlingOrder,
+    FlexConta,
     FlexLog,
     FlexPedido,
+    Integration,
+    IntegrationPlatform,
     Logistica,
     MargemAudit,
     NfFaturamento,
@@ -35,6 +38,7 @@ from app.models import (
     UserRole,
     UserStatus,
 )
+from app.security.cipher import encrypt_json
 from app.services import nf_emissao_gerar
 from app.services import prioridade_estoque as prio
 
@@ -114,17 +118,19 @@ def cenario(db: AsyncSession, monkeypatch):
 
     monkeypatch.setattr(prio, "_mapa_prioridades", _mapa)
 
-    async def _montar(fisico, pedidos, *, flex=(), flex_logistica=()):
+    async def _montar(fisico, pedidos, *, flex=(), flex_logistica=(), conta="sbc"):
+        """`conta`: de qual conta são os pedidos Flex (ver `_contas_flex`)."""
         bling = BlingComReserva(fisico, pedidos)
-        db.add(
-            User(
-                open_id=f"email:{uuid.uuid4().hex[:8]}@x",
-                email=f"{uuid.uuid4().hex[:8]}@x",
-                name="admin",
-                role=UserRole.ADMIN,
-                status=UserStatus.ACTIVE,
-            )
+        admin = User(
+            open_id=f"email:{uuid.uuid4().hex[:8]}@x",
+            email=f"{uuid.uuid4().hex[:8]}@x",
+            name="admin",
+            role=UserRole.ADMIN,
+            status=UserStatus.ACTIVE,
         )
+        db.add(admin)
+        await db.flush()
+        contas = await _contas_flex(db, admin.id, monkeypatch)
         for numero, itens in pedidos.items():
             for i, (cod, q) in enumerate(itens):
                 db.add(
@@ -140,12 +146,14 @@ def cenario(db: AsyncSession, monkeypatch):
                     )
                 )
         for numero in flex:
+            shopee = conta == "shopee"
             db.add(
                 FlexPedido(
                     bling_id=int(numero),
-                    plataforma="ml",
+                    plataforma="shopee" if shopee else "ml",
+                    integration_id=contas[conta],
                     numeroloja=f"2000{numero}",
-                    envio_tipo="self_service",
+                    envio_tipo="90022" if shopee else "self_service",
                     no_sp=False,
                 )
             )
@@ -168,6 +176,49 @@ def cenario(db: AsyncSession, monkeypatch):
         return bling
 
     return _montar
+
+
+async def _contas_flex(db: AsyncSession, user_id, monkeypatch) -> dict[str, uuid.UUID]:
+    """As contas do teste (12/11/2026 — só o pedido Flex que sai do local vai
+    para o .sp):
+      • sbc: ML liberada, saída do Flex em São Bernardo do Campo (o local);
+      • pira: ML liberada, saída do Flex em Piracicaba (como as 4 de hoje);
+      • shopee: loja Shopee liberada com a Entrega Direta ligada;
+      • fora: ML com saída em São Bernardo, mas fora de `flex_contas`."""
+    agora = datetime.now(UTC)
+    contas: dict[str, uuid.UUID] = {}
+    for chave, plataforma, cidade in (
+        ("sbc", IntegrationPlatform.ML, "São Bernardo do Campo"),
+        ("pira", IntegrationPlatform.ML, "Piracicaba"),
+        ("shopee", IntegrationPlatform.SHOPEE, None),
+        ("fora", IntegrationPlatform.ML, "São Bernardo do Campo"),
+    ):
+        integ = Integration(
+            user_id=user_id,
+            platform=plataforma,
+            name=chave,
+            credentials=encrypt_json({"access_token": "t"}),
+        )
+        db.add(integ)
+        await db.flush()
+        contas[chave] = integ.id
+        db.add(
+            FlexConta(
+                integration_id=integ.id,
+                plataforma=plataforma.value,
+                flex_ativo=True,
+                status="in",
+                lido_em=agora,
+                origem_cidade=cidade,
+                origem_lida_em=agora if cidade else None,
+            )
+        )
+    monkeypatch.setattr(
+        get_settings(),
+        "flex_contas",
+        ",".join(str(contas[c]) for c in ("sbc", "pira", "shopee")),
+    )
+    return contas
 
 
 async def _flex(db: AsyncSession, numero: str) -> FlexPedido | None:
@@ -377,8 +428,9 @@ async def test_flex_marcado_so_pela_logistica_e_sem_prioridade(
     db: AsyncSession, cenario, monkeypatch
 ):
     """Pedido que só a Logística marcou Flex (o shipment check ainda não
-    registrou), sem prioridade nenhuma e sem o pedido num estoque só: vai para o
-    .sp e ganha a linha em `flex_pedido`; o pedido normal nem é consultado."""
+    registrou): não se sabe a conta — logo, nem de onde o Flex dela sai. Desde
+    12/11/2026 ele NÃO vai para o .sp (segue como pedido normal; sem prioridade
+    e sem o pedido num estoque só, ninguém mexe). Antes ia."""
     bling = await cenario(
         {"dg053.ci": 10, "dg053.sp": 5},
         {"770001": [("dg053.ci", 1)], "770002": [("dg053.ci", 1)]},
@@ -392,11 +444,81 @@ async def test_flex_marcado_so_pela_logistica_e_sem_prioridade(
     monkeypatch.setattr(prio, "_mapa_prioridades", _vazio)
     resumo = await prio.aplicar_prioridade_estoque(db, numeros=["770001", "770002"])
     await db.commit()
-    assert bling.puts == [("770001", ["dg053.sp"])]
-    assert resumo["flex_pedidos"] == 1 and resumo["avaliados"] == 0
-    fp = await _flex(db, "770001")
-    assert fp is not None and fp.no_sp is True and fp.plataforma == "ml"
-    assert fp.numeroloja == "2000770001"
+    assert bling.puts == []
+    assert resumo["flex_outro_local"] == ["770001"] and "flex_pedidos" not in resumo
+    assert await _flex(db, "770001") is None
+    assert await _alertas(db) == []
+
+
+@pytest.mark.asyncio
+async def test_flex_de_conta_que_sai_de_piracicaba_nao_vai_para_o_sp(db: AsyncSession, cenario):
+    """Vinicius, 12/11/2026: as 4 contas do ML com Flex saem de Piracicaba. O
+    pedido Flex delas não vai para o .sp — a peça sai de lá. Segue como pedido
+    normal (a prioridade CI: fica no CI), sem aviso nem trilha do Flex."""
+    bling = await cenario(
+        {"dg053.ci": 10, "dg053.sp": 5},
+        {"775001": [("dg053.ci", 1)]},
+        flex=["775001"],
+        conta="pira",
+    )
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["775001"])
+    await db.commit()
+    assert bling.puts == []
+    assert resumo["flex_outro_local"] == ["775001"] and "flex_pedidos" not in resumo
+    fp = await _flex(db, "775001")
+    assert fp.no_sp is False and fp.alerta is None
+    assert await _trilha(db, "775001") == []
+    assert await _alertas(db) == []
+
+
+@pytest.mark.asyncio
+async def test_flex_sem_peca_de_piracicaba_nao_ganha_aviso(db: AsyncSession, cenario):
+    """Sem peça no .sp: o pedido Flex de Piracicaba não ganha o aviso "o .sp
+    não cobre" nem o alerta no sino — ele não é de São Bernardo."""
+    bling = await cenario(
+        {"dg053.ci": 10, "dg053.sp": 0},
+        {"776001": [("dg053.ci", 2)]},
+        flex=["776001"],
+        conta="pira",
+    )
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["776001"])
+    await db.commit()
+    assert bling.puts == [] and "flex_sem_sp" not in resumo
+    assert (await _flex(db, "776001")).alerta is None
+    assert await _alertas(db) == []
+
+
+@pytest.mark.asyncio
+async def test_flex_da_loja_shopee_liberada_vai_para_o_sp(db: AsyncSession, cenario):
+    """Loja Shopee liberada (a coleta da Entrega Direta não vem na API — a loja
+    liberada conta como do local): o pedido Flex vai para o .sp."""
+    bling = await cenario(
+        {"dg053.ci": 10, "dg053.sp": 5},
+        {"777001": [("dg053.ci", 1)]},
+        flex=["777001"],
+        conta="shopee",
+    )
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["777001"])
+    await db.commit()
+    assert bling.puts == [("777001", ["dg053.sp"])]
+    assert resumo["flex_trocados"] == 1 and "flex_outro_local" not in resumo
+    assert (await _flex(db, "777001")).no_sp is True
+
+
+@pytest.mark.asyncio
+async def test_flex_de_conta_fora_da_lista_nao_vai_para_o_sp(db: AsyncSession, cenario):
+    """Conta fora de `flex_contas` (mesmo com a saída em São Bernardo): o
+    sistema não controla o Flex dela — o pedido segue como normal."""
+    bling = await cenario(
+        {"dg053.ci": 10, "dg053.sp": 5},
+        {"778001": [("dg053.ci", 1)]},
+        flex=["778001"],
+        conta="fora",
+    )
+    resumo = await prio.aplicar_prioridade_estoque(db, numeros=["778001"])
+    await db.commit()
+    assert bling.puts == []
+    assert resumo["flex_outro_local"] == ["778001"]
 
 
 # ---- revisão de 02/10/2026 ---------------------------------------------------
