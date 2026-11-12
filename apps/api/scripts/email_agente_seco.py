@@ -141,6 +141,7 @@ async def main(limite: int) -> None:
                 modo=modo,
                 site=site,
                 via_formulario=email_agente.via_formulario(conversa),
+                em_andamento=await email_agente.em_andamento(session, conversa),
             )
             feitos += 1
             with email_agente.liberar(conversa.id, chave):
