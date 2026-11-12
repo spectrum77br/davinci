@@ -2774,12 +2774,15 @@ async function aplicarStatusBling(c: Logistica) {
             <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">o que a plataforma diz × o que está no Bling</span>
           </div>
           <div class="overflow-x-auto">
-            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehProprio ? 'min-w-[1300px]' : 'min-w-[1110px]'">
+            <!-- 12/11/2026 (Vinicius: "a localização está muito pequena"): o Produto ficou com
+                 largura fixa e menor, a Divergência saiu, e a Localização é a coluna que
+                 cresce com a tela (quebra em até 2 linhas em vez de cortar com "…"). -->
+            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehProprio ? 'min-w-[1340px]' : 'min-w-[1260px]'">
               <colgroup>
-                <col class="w-[46px]"><col :class="ehProprio ? 'w-[112px]' : 'w-[124px]'"><col :class="ehProprio ? 'w-[70px]' : 'w-[88px]'"><col>
-                <col :class="ehProprio ? 'w-[130px]' : 'w-[200px]'"><col :class="ehProprio ? 'w-[160px]' : 'w-[210px]'">
+                <col class="w-[46px]"><col :class="ehProprio ? 'w-[112px]' : 'w-[124px]'"><col :class="ehProprio ? 'w-[70px]' : 'w-[88px]'"><col :class="ehProprio ? 'w-[180px]' : 'w-[230px]'">
+                <col :class="ehProprio ? 'w-[130px]' : 'w-[200px]'"><col>
                 <template v-if="ehProprio"><col class="w-[80px]"><col class="w-[92px]"></template>
-                <col :class="ehProprio ? 'w-[100px]' : 'w-[104px]'"><col :class="ehProprio ? 'w-[90px]' : 'w-[120px]'">
+                <col :class="ehProprio ? 'w-[100px]' : 'w-[104px]'">
                 <col :class="ehProprio ? 'w-[110px]' : 'w-[140px]'"><col :class="ehProprio ? 'w-[80px]' : 'w-[84px]'">
                 <col v-if="ehProprio" class="w-[100px]">
               </colgroup>
@@ -2787,7 +2790,7 @@ async function aplicarStatusBling(c: Logistica) {
                 <tr>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="4">Pedido</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehProprio ? 4 : 2">Plataforma</th>
-                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="2">Bling</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Bling</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehProprio ? 3 : 2">Caso</th>
                 </tr>
                 <tr>
@@ -2802,7 +2805,6 @@ async function aplicarStatusBling(c: Logistica) {
                     <th class="border-b px-1.5 py-1 text-center font-semibold" title="Data máxima de entrega da Amazon — depois dela a Amazon reembolsa o cliente">Entregar até</th>
                   </template>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Status Bling</th>
-                  <th class="border-b px-1.5 py-1 text-center font-semibold">Divergência</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Chamado</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Regra da aba Status para a combinação deste pedido">Regra</th>
                   <th v-if="ehProprio" class="border-b px-1.5 py-1 text-center font-semibold" title="Suspensão da entrega no Melhor Envio (o pacote volta)">Suspensão</th>
@@ -2810,7 +2812,7 @@ async function aplicarStatusBling(c: Logistica) {
               </thead>
               <tbody>
                 <tr v-if="loading && !rows.length">
-                  <td :colspan="ehProprio ? 13 : 10" class="py-8 text-center text-muted-foreground">
+                  <td :colspan="ehProprio ? 12 : 9" class="py-8 text-center text-muted-foreground">
                     <RefreshCw class="mr-1.5 inline size-4 animate-spin" /> carregando…
                   </td>
                 </tr>
@@ -2840,7 +2842,7 @@ async function aplicarStatusBling(c: Logistica) {
                     >Flex</span>
                     <div v-if="flexAlerta(c)" class="text-[10.5px] font-medium text-rose-700 dark:text-rose-400" :title="flexAlerta(c) || ''">sem peça em {{ flexLocal.cidade }}</div>
                   </td>
-                  <td class="truncate px-1.5 py-1.5" :title="produtoTitulo(c)">{{ produtoResumo(c) }}</td>
+                  <td class="px-1.5 py-1.5" :title="produtoTitulo(c)"><div class="line-clamp-2 break-words leading-tight">{{ produtoResumo(c) }}</div></td>
                   <td class="border-l border-l-slate-300 px-1.5 py-1.5 dark:border-l-slate-600" :title="statusTooltip(c) || assinatura(c)">
                     <!-- 12/11: o status inteiro (sem "…") e o botão de copiar logo depois,
                          pra colar na aba Status ao criar a regra. -->
@@ -2860,13 +2862,13 @@ async function aplicarStatusBling(c: Logistica) {
                   <td class="px-1.5 py-1.5">
                     <div
                       v-if="c.volta_localizacao"
-                      class="truncate text-[11px]"
+                      class="line-clamp-2 break-words text-[11px] leading-tight"
                       :class="c.volta_grave ? 'font-semibold text-rose-700 dark:text-rose-400' : ''"
                       :title="voltaTitulo(c)"
                     >↩ {{ c.volta_localizacao }}</div>
                     <div
                       v-else
-                      class="truncate text-[11px]"
+                      class="line-clamp-2 break-words text-[11px] leading-tight"
                       :title="proprioSemRastreio(c) ? DESTINO_TITLE : c.localizacao || ''"
                     >{{ proprioSemRastreio(c) && c.localizacao ? `Destino: ${c.localizacao}` : c.localizacao || '—' }}</div>
                     <div
@@ -2893,7 +2895,6 @@ async function aplicarStatusBling(c: Logistica) {
                     <span v-if="c.status_bling" class="inline-block w-[92px] truncate rounded py-0.5 text-[11px] font-semibold" :class="corStatusBling(c.status_bling)" :title="c.status_bling">{{ c.status_bling }}</span>
                     <span v-else class="text-muted-foreground">—</span>
                   </td>
-                  <td class="truncate px-1.5 py-1.5 text-center text-[11px]" :class="c.divergencia ? 'font-semibold text-amber-700 dark:text-amber-400' : 'text-muted-foreground'" :title="c.divergencia || ''">{{ c.divergencia || '—' }}</td>
                   <td class="border-l border-l-slate-300 px-1.5 py-1.5 text-center text-[11px] dark:border-l-slate-600">
                     <span
                       v-if="situacaoChamado(c)"
@@ -2917,7 +2918,7 @@ async function aplicarStatusBling(c: Logistica) {
                   </td>
                 </tr>
                 <tr v-if="!loading && filteredRows.length === 0">
-                  <td :colspan="ehProprio ? 13 : 10" class="px-3 py-6 text-center text-muted-foreground">
+                  <td :colspan="ehProprio ? 12 : 9" class="px-3 py-6 text-center text-muted-foreground">
                     {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
                   </td>
                 </tr>
