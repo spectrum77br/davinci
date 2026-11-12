@@ -1286,7 +1286,7 @@ async def test_alerta_margem_alta_avisa_uma_vez(db: AsyncSession, monkeypatch, r
         lucro=350.0,
     )
     await _seed_pedido(db, pedido="502", bling_id=502, margem_baixa=False, margem=0.55)
-    await robo_margem(lista="AAAA1111")
+    await robo_margem(lista="AAAA1111", margem_alta=True)
     await db.commit()
 
     enviados: list[str] = []
@@ -1344,6 +1344,22 @@ async def test_alerta_margem_alta_sem_destinatarios_nao_marca(db: AsyncSession):
     res = await margem_auto_hold.run(db, client=FakeBling(), hoje=HOJE)
 
     assert res == {"held": 0, "reprovados": 0, "pulados": 0, "failed": 0, "alertas": 0}
+    assert await _audits(db, "501") == []
+
+
+async def test_alerta_margem_alta_desligado_por_padrao(
+    db: AsyncSession, monkeypatch, robo_margem
+):
+    """12/11/2026 (Vinicius: "essa margem muito alta eu queria desativar por enquanto"):
+    a caixinha "Avisar margem fora do normal" nasce desligada — nada vai pro Threema e
+    nada é gravado (ligar de novo avisa o que estiver alto naquela hora)."""
+    await _seed_pedido(db, pedido="501", bling_id=501, margem_baixa=False, margem=0.75)
+    await robo_margem(lista="AAAA1111")
+    enviados = _capturar_threema(monkeypatch)
+
+    res = await margem_auto_hold.run(db, client=FakeBling(), hoje=HOJE)
+
+    assert res["alertas"] == 0 and enviados == []
     assert await _audits(db, "501") == []
 
 

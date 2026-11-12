@@ -633,8 +633,14 @@ async def _conferir(
             if row.fechada_em is None and row.aberta_em == agora:
                 r.contadores["segurados_novos"] += 1
 
-        # 2) Margem fora do normal (> 60%) em Em aberto.
-        altas = (await session.execute(text(_margem_alta_sql()))).mappings().all()
+        # 2) Margem fora do normal (> 60%) em Em aberto — só com a caixinha "Avisar
+        #    margem fora do normal" ligada (12/11/2026, nasce desligada). Desligada, a
+        #    rodada não vê nenhuma e o passo 4 fecha as que estavam abertas.
+        altas = (
+            (await session.execute(text(_margem_alta_sql()))).mappings().all()
+            if cfg.get("avisar_margem_alta", False)
+            else []
+        )
         for a in altas:
             pedido = str(a["pedido_bling"])
             row = await r.registrar(

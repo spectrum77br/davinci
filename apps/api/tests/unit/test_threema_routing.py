@@ -588,6 +588,11 @@ async def test_every_ouvidoria_robot_delivers_from_its_profile(settings, monkeyp
         "vigia_margem": "*MARGEM1",
         "vigia_robo_melhorenvio": "*GLOBAL1",
         "vigia_robo_leitura": "*DEVOL01",
+        "vigia_etiquetas": "*ESTOQ01",
+        "vigia_nota_cheia": "*ESTOQ01",
+        "vigia_conciliacao": "*MARGEM1",
+        "denuncia_relatorio_threema": "*GLOBAL1",
+        "robo_juridico": "*GLOBAL1",
     }
     # Robô novo precisa de uma decisão de roteamento, sem fallback silencioso.
     assert set(ouvidoria.ROBOS) == set(expected_senders)

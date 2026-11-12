@@ -10,11 +10,11 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select, text
 
-from app.models import DenunciaRelatorio, ThreemaInformarConfig
+from app.models import DenunciaRelatorio, OuvidoriaRobo, OuvidoriaRodada, ThreemaInformarConfig
 from app.services import denuncia_relatorio_threema as rt
-from app.services import threema
+from app.services import ouvidoria, threema
 
 pytestmark = pytest.mark.asyncio
 
@@ -67,6 +67,24 @@ async def limpo(db):
     await db.execute(delete(DenunciaRelatorio))
     await db.execute(delete(ThreemaInformarConfig))
     await db.commit()
+
+
+async def _limpa_ouvidoria(db) -> None:
+    for tbl in ("ouvidoria_ocorrencias", "ouvidoria_rodadas", "ouvidoria_robos"):
+        await db.execute(text(f"DELETE FROM {tbl}"))  # noqa: S608
+    await db.commit()
+
+
+@pytest.fixture(autouse=True)
+async def robo_ligado(db):
+    """12/11/2026: o envio virou o robô "Relatório da Denúncia" da Ouvidoria, que nasce
+    DESLIGADO. Os testes do envio rodam com ele ligado; os do desligado mudam o modo."""
+    await _limpa_ouvidoria(db)
+    await ouvidoria.sincronizar_catalogo(db)
+    (await db.get(OuvidoriaRobo, rt.ROBO)).modo = "ligado"
+    await db.commit()
+    yield
+    await _limpa_ouvidoria(db)
 
 
 class Lista(list):
@@ -209,3 +227,41 @@ async def test_teste_so_pra_um_e_nao_carimba(db, client, make_user, auth_as, env
     # fora do diretório não manda
     r = await client.post("/api/denuncia/relatorios/2026-10-05/threema/teste", json={"para": "ZZZZ9999"})
     assert r.status_code == 422 and len(enviados) == 1
+
+
+async def test_desligado_na_ouvidoria_nao_manda(db, enviados):
+    """12/11/2026 (Vinicius: "inclui na Ouvidoria › Robôs e deixa desativado"): sem a linha
+    do robô (ninguém abriu o painel ainda) vale o padrão do catálogo, desligado; desligado
+    ou silencioso não manda nem carimba — o relatório do dia segue fechado pra quando ligar."""
+    await _dia(db)
+    await _cadastro(db)
+    await _limpa_ouvidoria(db)
+    assert ouvidoria.ROBOS[rt.ROBO].modo_padrao == "desligado"
+    assert (await rt.enviar_pendente(db, AS_7H07))["motivo"] == "desligado na Ouvidoria › Robôs"
+    await ouvidoria.sincronizar_catalogo(db)
+    await db.commit()
+    assert (await db.get(OuvidoriaRobo, rt.ROBO)).modo == "desligado"
+    (await db.get(OuvidoriaRobo, rt.ROBO)).modo = "silencioso"
+    await db.commit()
+    assert not (await rt.enviar_pendente(db, AS_7H07))["enviado"]
+    assert not enviados and (await db.get(DenunciaRelatorio, ONTEM)).threema_enviado_em is None
+
+
+async def test_envio_vira_rodada_no_painel(db, enviados):
+    """Ligado, cada envio (ou falha) aparece como rodada do robô na Ouvidoria."""
+    await _dia(db)
+    await _cadastro(db)
+    enviados.falhar = True
+    assert (await rt.enviar_pendente(db, AS_7H07))["motivo"] == "envio falhou"
+    enviados.falhar = False
+    assert (await rt.enviar_pendente(db, datetime(2026, 10, 6, 11, 7, tzinfo=UTC)))["enviado"]
+    await db.commit()
+    rodadas = (
+        await db.execute(
+            select(OuvidoriaRodada)
+            .where(OuvidoriaRodada.robo_chave == rt.ROBO)
+            .order_by(OuvidoriaRodada.iniciada_em)
+        )
+    ).scalars().all()
+    assert [r.ok for r in rodadas] == [False, True]
+    assert rodadas[1].resumo == "relatório de 05/10 para 3 pessoa(s)"

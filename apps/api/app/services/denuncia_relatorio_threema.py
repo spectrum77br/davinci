@@ -29,17 +29,44 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.db import session_scope
 from app.models import DenunciaRelatorio, ThreemaInformarConfig
-from app.services import threema
+from app.services import ouvidoria, threema
+from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.denuncia_robo import FUSO
 
 logger = structlog.get_logger()
 
 CONTEXTO = "denuncia_relatorio"
+ROBO = "denuncia_relatorio_threema"  # chave na Ouvidoria › Robôs (12/11/2026)
+
+
+_SWEEP_LOCK_KEY = 0x64726C74  # ascii "drlt" — advisory lock do tick/"Rodar agora"
+
+
+class _EnvioFalhouError(Exception):
+    """Ninguém recebeu: a rodada da Ouvidoria fica marcada como falha."""
+
+
+async def denuncia_relatorio_threema_sweep() -> dict:
+    """Tick do worker (:10 de toda hora) e "Rodar agora" da Ouvidoria: sessão própria,
+    serializado por advisory lock. Quem decide se manda é o `enviar_pendente` (ligado,
+    depois das 7h, relatório de ontem fechado e ainda não enviado)."""
+    async with session_scope() as trava:
+        got = (
+            await trava.execute(
+                text("SELECT pg_try_advisory_xact_lock(:ns, :key)"),
+                {"ns": SYNC_NAMESPACE, "key": _SWEEP_LOCK_KEY},
+            )
+        ).scalar()
+        if not got:
+            return {"skipped": "lock_busy"}
+        async with session_scope() as session:
+            return await enviar_pendente(session)
 HORA_ENVIO = 7  # Brasília
 VALE_LINK = timedelta(days=7)
 _DIA_SEMANA = ("seg", "ter", "qua", "qui", "sex", "sáb", "dom")
@@ -152,6 +179,11 @@ async def enviar_pendente(session: AsyncSession, agora: datetime | None = None) 
     """O relatório de ontem, se já fechado, ainda não enviado e já passou das 7h. Commit fica com
     o caller (o worker roda dentro do session_scope)."""
     agora = agora or datetime.now(UTC)
+    # 12/11/2026 (Vinicius): o envio virou o robô "Relatório da Denúncia" da Ouvidoria ›
+    # Robôs, que nasceu desligado. Só manda ligado; silencioso/desligado não manda nada
+    # (o relatório do dia continua sendo fechado pelo worker, só a mensagem para).
+    if await ouvidoria.modo_efetivo(session, ROBO) != "ligado":
+        return {"enviado": False, "motivo": "desligado na Ouvidoria › Robôs"}
     local = agora.astimezone(FUSO)
     if local.hour < HORA_ENVIO:
         return {"enviado": False, "motivo": "antes das 7h"}
@@ -170,20 +202,25 @@ async def enviar_pendente(session: AsyncSession, agora: datetime | None = None) 
         )
         return {"enviado": False, "motivo": motivo}
     msg = texto(ontem, row.numeros, link_excel(ontem, agora))
+    # A rodada (só quando de fato tenta mandar) é o que a coluna Saúde do painel lê;
+    # envio que não chegou a ninguém sai como rodada com falha.
     try:
-        r = await client.send_to_all(msg, alvos)
-    except threema.ThreemaConfigError as e:
-        r = {"sent": [], "failed": alvos, "erro": str(e)}
-    if not r.get("sent"):
-        logger.warning(
-            "denuncia_relatorio_threema_falhou",
-            dia=ontem.isoformat(),
-            falhou=r.get("failed"),
-            erro=r.get("erro"),
-        )
+        async with ouvidoria.Rodada(session, ROBO) as rodada:
+            try:
+                r = await client.send_to_all(msg, alvos)
+            except threema.ThreemaConfigError as e:
+                r = {"sent": [], "failed": alvos, "erro": str(e)}
+            rodada.contadores["enviados"] = len(r.get("sent") or [])
+            rodada.contadores["falharam"] = len(r.get("failed") or [])
+            if not r.get("sent"):
+                rodada.resumo = f"relatório de {ontem:%d/%m}: ninguém recebeu"
+                raise _EnvioFalhouError(str(r.get("erro") or r.get("failed") or "")[:300])
+            rodada.resumo = f"relatório de {ontem:%d/%m} para {len(r['sent'])} pessoa(s)"
+            row.threema_enviado_em = agora
+            await session.flush()
+    except _EnvioFalhouError as e:
+        logger.warning("denuncia_relatorio_threema_falhou", dia=ontem.isoformat(), erro=str(e))
         return {"enviado": False, "motivo": "envio falhou"}
-    row.threema_enviado_em = agora
-    await session.flush()
     logger.info(
         "denuncia_relatorio_threema", dia=ontem.isoformat(), sent=r["sent"], failed=r.get("failed")
     )

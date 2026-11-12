@@ -366,12 +366,20 @@ async def test_segurado_sem_linha_no_snapshot_abre_assim_mesmo(db: AsyncSession)
 # ─── margem fora do normal ─────────────────────────────────────────────────
 
 
+async def _liga_margem_alta(db: AsyncSession) -> None:
+    """12/11/2026: o aviso de margem fora do normal virou caixinha do robô (nasce desligada)."""
+    robo = await db.get(OuvidoriaRobo, "vigia_margem")
+    robo.config = {**(robo.config or {}), "avisar_margem_alta": True}
+    await db.commit()
+
+
 async def test_margem_alta_abre_e_fecha_quando_o_custo_e_corrigido(db: AsyncSession):
     await _seed_linha(
         db, pedido="291671", bling_id=222, situacao="6", status=None, margem=0.75,
         lucro=300.0,
     )
 
+    await _liga_margem_alta(db)
     res = await vm.vigia_margem_run(db, agora=AGORA)
 
     o = (await _abertas(db))["margem_alta:291671"]
@@ -413,6 +421,7 @@ async def test_margem_alta_nao_depende_do_dedup_do_threema(db: AsyncSession):
     )
     await db.commit()
 
+    await _liga_margem_alta(db)
     await vm.vigia_margem_run(db, agora=AGORA)
 
     assert "margem_alta:291671" in await _abertas(db)
@@ -425,9 +434,31 @@ async def test_margem_alta_so_em_em_aberto(db: AsyncSession):
         margem=0.75,
     )
 
+    await _liga_margem_alta(db)
     await vm.vigia_margem_run(db, agora=AGORA)
 
     assert "margem_alta:291671" not in await _abertas(db)
+
+
+async def test_margem_alta_desligada_por_padrao_nao_abre_e_fecha_as_abertas(db: AsyncSession):
+    """12/11/2026 (Vinicius: "essa margem muito alta eu queria desativar por enquanto"):
+    com a caixinha desligada (padrão) a rodada não vê margem alta, e a que estava
+    aberta fecha como "sumiu" na rodada seguinte."""
+    await _seed_linha(
+        db, pedido="291671", bling_id=222, situacao="6", status=None, margem=0.75
+    )
+    res = await vm.vigia_margem_run(db, agora=AGORA)
+    assert res["margem_alta"] == 0 and "margem_alta:291671" not in await _abertas(db)
+
+    await _liga_margem_alta(db)
+    await vm.vigia_margem_run(db, agora=AGORA + timedelta(minutes=30))
+    assert "margem_alta:291671" in await _abertas(db)
+
+    robo = await db.get(OuvidoriaRobo, "vigia_margem")
+    robo.config = {**robo.config, "avisar_margem_alta": False}
+    await db.commit()
+    res3 = await vm.vigia_margem_run(db, agora=AGORA + timedelta(minutes=60))
+    assert "margem_alta:291671" not in await _abertas(db) and res3["sumiram"] == 1
 
 
 # ─── hook: falha do robô ───────────────────────────────────────────────────
@@ -564,6 +595,7 @@ async def test_resumo_conta_segurados_falhas_abertas_e_margem_alta(db: AsyncSess
         db, pedido_bling="291671", bling_id=222, operacao="liberar", erro="timeout"
     )
 
+    await _liga_margem_alta(db)
     res = await vm.vigia_margem_run(db, agora=AGORA)
 
     assert res["resumo"] == (

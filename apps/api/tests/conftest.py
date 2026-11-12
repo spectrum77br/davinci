@@ -739,11 +739,15 @@ async def robo_margem(db: AsyncSession):
     from app.models import OuvidoriaRobo
     from app.services import ouvidoria
 
-    async def _config(*, lista: str | None = None, modo: str = "ligado") -> None:
+    async def _config(
+        *, lista: str | None = None, modo: str = "ligado", margem_alta: bool = False
+    ) -> None:
         await ouvidoria.sincronizar_catalogo(db)
         robo = await db.get(OuvidoriaRobo, "vigia_margem")
         robo.threema_recipients = lista
         robo.modo = modo
+        # 12/11/2026: o aviso de margem fora do normal virou caixinha (nasce desligada)
+        robo.config = {**(robo.config or {}), "avisar_margem_alta": margem_alta}
         await db.commit()
 
     yield _config

@@ -3327,17 +3327,13 @@ async def denuncia_relatorio_fechar(ctx: dict) -> None:
     — ontem, mesmo sem notícia do mini, e qualquer dia anotado da última semana que ficou aberto.
     De hora em hora e a cada restart: um deploy na virada do dia não deixa o dia sem relatório."""
     from app.services.denuncia_relatorio import fechar_pendentes
-    from app.services.denuncia_relatorio_threema import enviar_pendente
 
     async with session_scope() as s:
         dias = await fechar_pendentes(s, datetime.now(UTC))
     if dias:
         logger.info("denuncia_relatorio_fechado", dias=[d.isoformat() for d in dias])
-    # 06/10 (Vinicius): o de ontem vai pelo Threema a partir das 7h — uma vez (carimbo no dia)
-    async with session_scope() as s:
-        r = await enviar_pendente(s, datetime.now(UTC))
-    if r.get("enviado"):
-        logger.info("denuncia_relatorio_threema_enviado", **r)
+    # 12/11/2026: o Threema do relatório (06/10) saiu daqui e virou o robô "Relatório da
+    # Denúncia" da Ouvidoria › Robôs (`denuncia_relatorio_threema_tick`, nasce desligado).
 
 
 async def conferencia_shopee_agenda(ctx: dict) -> None:
@@ -4479,6 +4475,44 @@ async def conciliacao_amazon_csv_tick(ctx: dict) -> None:
         logger.warning("conciliacao_amazon_csv_tick_falhou", err=str(e)[:300])
 
 
+async def denuncia_relatorio_threema_tick(ctx: dict) -> None:
+    """Relatório da Denúncia (Ouvidoria › Robôs, 12/11/2026): de hora em hora em :10, manda
+    no Threema o relatório de ontem a partir das 7h, uma vez por dia (carimbo no dia).
+    Nasce desligado; desligado/silencioso não manda (o relatório continua sendo fechado
+    pelo `denuncia_relatorio_fechar`)."""
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "denuncia_relatorio_threema")
+        if modo == "desligado":
+            logger.debug("denuncia_relatorio_threema_desligado")
+            return
+        from app.services.denuncia_relatorio_threema import denuncia_relatorio_threema_sweep
+
+        r = await denuncia_relatorio_threema_sweep() or {}
+        if r.get("enviado"):
+            logger.info("denuncia_relatorio_threema_enviado", **r)
+    except Exception:  # noqa: BLE001 — o tick nunca derruba o worker
+        logger.exception("denuncia_relatorio_threema_tick_falhou")
+
+
+async def robo_juridico_tick(ctx: dict) -> None:
+    """Robô Jurídico (Ouvidoria, 12/11/2026): 07:30 BRT confere a atualização das 06:00 dos
+    processos (pedido ao Mac mini, Diário, Jusbrasil) e avisa o que falhou.
+    `desligado`: não roda."""
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "robo_juridico")
+        if modo == "desligado":
+            logger.debug("robo_juridico_desligado")
+            return
+        from app.services.robo_juridico import robo_juridico_sweep
+
+        summary = await robo_juridico_sweep() or {}
+        logger.info("robo_juridico_done", **summary)
+    except Exception:  # noqa: BLE001 — o tick nunca derruba o worker
+        logger.exception("robo_juridico_tick_falhou")
+
+
 async def vigia_conciliacao_tick(ctx: dict) -> None:
     """Vigia de Conciliação (Ouvidoria): 07:00 BRT, a lista "Onde agir hoje" do
     painel vira ocorrências + um Threema. `desligado` no painel: não roda."""
@@ -5508,6 +5542,8 @@ class WorkerSettings:
         vigia_etiquetas_tick,
         vigia_nota_cheia_tick,
         vigia_conciliacao_tick,
+        denuncia_relatorio_threema_tick,
+        robo_juridico_tick,
         juridico_pedido_tick,
         conciliacao_fatura_tick,
         conciliacao_extrato_tick,
@@ -6181,6 +6217,11 @@ class WorkerSettings:
         cron(vigia_nota_cheia_tick, minute=8, run_at_startup=False, timeout=600),
         # Vigia de Conciliação: 07:00 BRT (10:00 UTC), depois da rodada de madrugada.
         cron(vigia_conciliacao_tick, hour=10, minute=0, run_at_startup=False, timeout=600),
+        # Relatório da Denúncia (Ouvidoria): de hora em hora em :10 — manda o de ontem a
+        # partir das 07:10 BRT, uma vez (o fechar de :07 congela o dia antes).
+        cron(denuncia_relatorio_threema_tick, minute=10, run_at_startup=False, timeout=300),
+        # Robô Jurídico (Ouvidoria): 07:30 BRT (10:30 UTC) — confere a atualização das 06:00.
+        cron(robo_juridico_tick, hour=10, minute=30, run_at_startup=False, timeout=300),
         # Jurídico: 06:00 BRT (09:00 UTC) — pedido de leitura ao Mac mini (Diário + Jusbrasil)
         cron(juridico_pedido_tick, hour=9, minute=0, run_at_startup=False, timeout=120),
         cron(conciliacao_amazon_csv_tick, hour=9, minute=0, run_at_startup=False, timeout=120),

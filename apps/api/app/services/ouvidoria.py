@@ -302,12 +302,19 @@ ROBOS: dict[str, RoboDef] = {
         area="margem",
         cadencia_texto="a cada 30 min (:15/:45)",
         plataformas=("ml", "shopee", "tiktok", "amazon"),
-        config_padrao={"cadencia_min": 30, "segurado_horas": 24},
+        # 12/11/2026 (Vinicius): "essa margem muito alta eu queria desativar por enquanto"
+        # — caixinha que liga/desliga o aviso de margem fora do normal (> 60%), no Threema
+        # e no painel. Nasce DESLIGADA; o resto do robô (segurar, reprovar, revisar,
+        # cobrar o segurado) não muda.
+        config_padrao={"cadencia_min": 30, "segurado_horas": 24, "avisar_margem_alta": False},
         env_threema_recipients=None,
         contexto="margem",
         parametros={
             "cadencia_min": Parametro("Cadência esperada", 1, 24 * 60, "min"),
             "segurado_horas": Parametro("Segurado sem decisão", 1, 720, "h"),
+        },
+        rotulos_extras={
+            "avisar_margem_alta": "Avisar margem fora do normal (acima de 60%)",
         },
         modo_padrao="ligado",
         avisos_modo={
@@ -444,6 +451,57 @@ ROBOS: dict[str, RoboDef] = {
         parametros={
             "cadencia_min": Parametro("Cadência esperada", 60, 48 * 60, "min"),
         },
+    ),
+    # 12/11/2026 (Vinicius): "tem algum robô que fica me mandando essa mensagem… não
+    # está na aba Ouvidoria › Robôs… inclui e deixa desativado por enquanto". É o
+    # Threema do relatório do dia da Denúncia (services/denuncia_relatorio_threema, worker
+    # `denuncia_relatorio_fechar`). Entrou DESLIGADO: o relatório do dia continua sendo
+    # fechado (Denúncia › Robô › Ocorrências e o Excel); só a mensagem para. Quem recebe
+    # continua sendo o cadastro da própria Denúncia, não o "Avisar" deste painel.
+    "denuncia_relatorio_threema": RoboDef(
+        chave="denuncia_relatorio_threema",
+        nome="Relatório da Denúncia",
+        descricao=(
+            "Manda no Threema, uma vez por dia a partir das 7h, o resumo do dia anterior do "
+            "robô de Denúncia (anúncios novos, denúncias nas lojas, Anatel, respostas, "
+            "saíram do ar) com o link do Excel. Quem recebe é o cadastro de Denúncia › Robô › "
+            "Ocorrências. Desligado, o relatório continua sendo fechado e o Excel continua "
+            "existindo; só a mensagem não sai."
+        ),
+        area="denuncia",
+        cadencia_texto="1× por dia (a partir das 07:10)",
+        plataformas=(),
+        config_padrao={"cadencia_min": 24 * 60},
+        env_threema_recipients=None,
+        contexto="chamados",
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 60, 48 * 60, "min"),
+        },
+        modo_padrao="desligado",
+    ),
+    # 12/11/2026 (Vinicius): "cria também um robô jurídico… a princípio ele só vai… ver se algum
+    # falhou… vai só me avisar (Cairo) no Threema se algum falhou e não atualizou". Confere a
+    # atualização das 06:00 dos processos (services/robo_juridico). Nasce silencioso: liga
+    # depois de pôr o Cairo no "Avisar" (sem ninguém lá vale a lista geral da Ouvidoria).
+    "robo_juridico": RoboDef(
+        chave="robo_juridico",
+        nome="Robô Jurídico",
+        descricao=(
+            "Confere todo dia às 07:30 a atualização dos processos das 06:00 (o Mac mini lê o "
+            "Diário Oficial e o Jusbrasil de cada processo com nº) e avisa se ela não rodou, não "
+            "terminou ou falhou, ou se algum processo não atualizou no Diário ou no Jusbrasil. "
+            "Não mexe em nada: só avisa."
+        ),
+        area="juridico",
+        cadencia_texto="1× por dia (07:30)",
+        plataformas=(),
+        config_padrao={"cadencia_min": 24 * 60},
+        env_threema_recipients=None,
+        contexto="chamados",
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 60, 48 * 60, "min"),
+        },
+        modo_padrao="silencioso",
     ),
 }
 
@@ -594,6 +652,19 @@ async def modo(session: AsyncSession, chave: str) -> str:
         await session.execute(select(OuvidoriaRobo.modo).where(OuvidoriaRobo.chave == chave))
     ).scalar_one_or_none()
     return m if m in MODOS else "ligado"
+
+
+async def modo_efetivo(session: AsyncSession, chave: str) -> str:
+    """Como `modo`, mas sem linha no banco vale o `modo_padrao` do catálogo (e não
+    'ligado'). Pro robô que NASCE desligado (12/11/2026, Relatório da Denúncia): até
+    alguém abrir o painel, a linha não existe, e o `modo` antigo o trataria como ligado."""
+    m = (
+        await session.execute(select(OuvidoriaRobo.modo).where(OuvidoriaRobo.chave == chave))
+    ).scalar_one_or_none()
+    if m in MODOS:
+        return m
+    d = ROBOS.get(chave)
+    return d.modo_padrao if d else "ligado"
 
 
 async def ativo(session: AsyncSession, chave: str) -> bool:

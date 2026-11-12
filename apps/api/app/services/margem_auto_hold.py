@@ -675,7 +675,15 @@ async def _alertar_margem_alta(session: AsyncSession) -> int:
     mensagem de alerta"). Margem alta assim costuma ser custo errado no
     cadastro. A auditoria (acao='alerta_margem_alta') é o dedup: gravada
     apenas quando pelo menos um destinatário recebeu — Threema fora do ar ou
-    sem cadastro → nada gravado, tenta de novo no próximo tick."""
+    sem cadastro → nada gravado, tenta de novo no próximo tick.
+    12/11/2026 (Vinicius): só com a caixinha "Avisar margem fora do normal" do Robô da
+    Margem ligada na Ouvidoria (nasce desligada) — desligada, nada sai e nada é
+    gravado, então ligar de novo avisa o que estiver alto naquela hora."""
+    from app.services import ouvidoria
+
+    robo = await session.get(OuvidoriaRobo, _OUVIDORIA_ROBO)
+    if not ouvidoria.config_do_robo(robo, _OUVIDORIA_ROBO).get("avisar_margem_alta", False):
+        return 0
     rows = (await session.execute(text(_alerta_margem_alta_sql()))).mappings().all()
     if not rows:
         return 0

@@ -199,8 +199,10 @@ SEIS_ROBOS = {
     "vigia_marketing_comandos": ("marketing", ["shopee", "ml"],
                                  {"cadencia_min": 10, "pendente_min": 30,
                                   "executor_offline_min": 10}),
+    # 12/11/2026: + caixinha do aviso de margem fora do normal, nasce desligada.
     "vigia_margem": ("margem", ["ml", "shopee", "tiktok", "amazon"],
-                     {"cadencia_min": 30, "segurado_horas": 24}),
+                     {"cadencia_min": 30, "segurado_horas": 24,
+                      "avisar_margem_alta": False}),
     # 24/09/2026: o executor do "Suspender entrega" (Mac Santiago).
     "vigia_robo_melhorenvio": ("logistica", ["amazon"],
                                {"cadencia_min": 10, "pendente_min": 30,
@@ -265,11 +267,22 @@ async def test_todo_robo_tem_limite_pra_cada_chave_de_config():
         assert d.modo_padrao in ("ligado", "silencioso", "desligado"), d.chave
 
 
+async def test_relatorio_da_denuncia_nasce_desligado(db):
+    """12/11/2026 (Vinicius: "inclui na Ouvidoria › Robôs e deixa desativado por
+    enquanto"): o Threema do relatório do dia da Denúncia entra no painel desligado."""
+    await svc.sincronizar_catalogo(db)
+    await db.commit()
+    robo = await db.get(OuvidoriaRobo, "denuncia_relatorio_threema")
+    assert robo is not None and robo.modo == "desligado"
+    assert robo.nome == "Relatório da Denúncia" and robo.area == "denuncia"
+
+
 async def test_rotulos_config_traz_rotulo_com_unidade():
     # A tela não conhece robô por robô: o rótulo (e a unidade) vem daqui.
     assert svc.rotulos_config("vigia_margem") == {
         "cadencia_min": "Cadência esperada (min)",
         "segurado_horas": "Segurado sem decisão (h)",
+        "avisar_margem_alta": "Avisar margem fora do normal (acima de 60%)",
     }
     # Parâmetro sem unidade sai só com o rótulo; robô fora do catálogo, vazio.
     assert svc.rotulos_config(ROBO)["amazon_a_cada_rodadas"] == "Amazon a cada N rodadas"
