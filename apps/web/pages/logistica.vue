@@ -439,6 +439,20 @@ function temChamadoAberto(c: Logistica): boolean {
 function problemaSemChamado(c: Logistica): boolean {
   return normKey(c.status_bling) === 'problemas' && !temChamadoAberto(c)
 }
+// Vinicius 12/11/2026 (303624 dizia "pendente: abrir chamado" com o chamado já
+// aberto e até pago): a coluna Chamado só repete o painel de Chamados — "Aberto"
+// (tem chamado aberto lá, alguém está cuidando), "Concluído" (fechado lá) ou nada.
+// Se já foi aberto na plataforma e com qual número é com quem olha o painel de
+// Chamados; o número fica no Raio-X.
+function situacaoChamado(c: Logistica): 'Aberto' | 'Concluído' | null {
+  if (temChamadoAberto(c)) return 'Aberto'
+  if (c.chamado_aba?.resolvido) return 'Concluído'
+  return null
+}
+const COR_SITUACAO_CHAMADO: Record<'Aberto' | 'Concluído', string> = {
+  Aberto: 'bg-blue-100 text-blue-800 dark:bg-blue-950/50 dark:text-blue-300',
+  Concluído: 'bg-muted text-muted-foreground',
+}
 // "A acompanhar" esconde o que chegou ao fim da cadeia (resolvido) sem pedir
 // monitoramento — MENOS o Problemas sem chamado aberto: em 11/11 eram 4 do ML
 // (chamado encerrado, Bling ainda em Problemas) e 1 do TikTok que ninguém via.
@@ -2881,15 +2895,13 @@ async function aplicarStatusBling(c: Logistica) {
                   </td>
                   <td class="truncate px-1.5 py-1.5 text-center text-[11px]" :class="c.divergencia ? 'font-semibold text-amber-700 dark:text-amber-400' : 'text-muted-foreground'" :title="c.divergencia || ''">{{ c.divergencia || '—' }}</td>
                   <td class="border-l border-l-slate-300 px-1.5 py-1.5 text-center text-[11px] dark:border-l-slate-600">
-                    <div
-                      v-if="chamadoAbaResumo(c)"
-                      class="line-clamp-2 leading-tight"
-                      :class="chamadoAbaResumo(c)!.tom === 'pendente' ? 'text-amber-700 dark:text-amber-400' : chamadoAbaResumo(c)!.tom === 'encerrado' ? 'text-muted-foreground' : ''"
-                      :title="chamadoAbaResumo(c)!.texto"
-                    >{{ chamadoAbaResumo(c)!.texto }}</div>
-                    <div v-else-if="c.chamado || !problemaSemChamado(c)" class="truncate font-mono" :title="c.chamado || ''">{{ c.chamado || '—' }}</div>
+                    <span
+                      v-if="situacaoChamado(c)"
+                      class="inline-block rounded px-2 py-0.5 text-[11px] font-semibold"
+                      :class="COR_SITUACAO_CHAMADO[situacaoChamado(c)!]"
+                    >{{ situacaoChamado(c) }}</span>
+                    <span v-else-if="!problemaSemChamado(c)" class="text-muted-foreground">—</span>
                     <div v-if="problemaSemChamado(c)" class="text-[10.5px] font-bold text-red-600 dark:text-red-400" title="Status Bling Problemas e nenhum chamado aberto: ninguém está olhando este pedido">sem chamado aberto</div>
-                    <div v-if="chamadoAutoAviso(c)" class="truncate text-[10px] text-amber-700 dark:text-amber-400" :title="chamadoAutoAviso(c) || ''">robô: {{ chamadoAutoAviso(c) }}</div>
                   </td>
                   <td class="px-1.5 py-1.5 text-center">
                     <span v-if="precisaAtencao(c)" class="rounded bg-amber-100 px-1.5 py-0.5 text-[10.5px] font-semibold text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">sem regra</span>
@@ -3111,12 +3123,13 @@ async function aplicarStatusBling(c: Logistica) {
 
               <section>
                 <h3 class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Chamado</h3>
-                <div
-                  v-if="chamadoAbaResumo(raioRow)"
-                  :class="chamadoAbaResumo(raioRow)!.tom === 'pendente' ? 'text-amber-700 dark:text-amber-400' : chamadoAbaResumo(raioRow)!.tom === 'encerrado' ? 'text-muted-foreground' : ''"
-                >{{ chamadoAbaResumo(raioRow)!.texto }}</div>
-                <div v-if="raioRow.chamado"><span class="text-muted-foreground">Protocolo:</span> <span class="select-all font-mono">{{ raioRow.chamado }}</span></div>
-                <div v-if="!raioRow.chamado && !chamadoAbaResumo(raioRow)" class="text-muted-foreground">sem chamado</div>
+                <span
+                  v-if="situacaoChamado(raioRow)"
+                  class="inline-block rounded px-2 py-0.5 text-[11px] font-semibold"
+                  :class="COR_SITUACAO_CHAMADO[situacaoChamado(raioRow)!]"
+                >{{ situacaoChamado(raioRow) }}</span>
+                <div v-if="raioRow.chamado || raioRow.chamado_aba?.chamado"><span class="text-muted-foreground">Protocolo:</span> <span class="select-all font-mono">{{ raioRow.chamado || raioRow.chamado_aba?.chamado }}</span></div>
+                <div v-if="!situacaoChamado(raioRow)" class="text-muted-foreground">sem chamado</div>
                 <div v-if="problemaSemChamado(raioRow)" class="mt-1 rounded border border-red-300 bg-red-50 px-2 py-1 font-semibold text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
                   Status Problemas e nenhum chamado aberto — ninguém está olhando este pedido.
                 </div>
@@ -3292,7 +3305,7 @@ async function aplicarStatusBling(c: Logistica) {
                 {{ blingLidoResumo(c) }}
               </div>
             </div>
-            <div><span class="text-muted-foreground">Chamado:</span> {{ c.chamado || chamadoAbaResumo(c)?.texto || '—' }}</div>
+            <div><span class="text-muted-foreground">Chamado:</span> {{ situacaoChamado(c) || '—' }}</div>
             <template v-if="tab === 'amazon' && amazonSub === 'proprio'">
               <div>
                 <span class="text-muted-foreground">Previsão transportadora:</span>
