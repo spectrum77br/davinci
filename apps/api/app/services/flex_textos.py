@@ -305,7 +305,7 @@ _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
         lambda m: (
             f"A Shopee não deixa mudar o envio de anúncio em promoção — este está em "
             f"{m['p']}. Tire o anúncio da promoção no Seller Center (ou espere ela acabar) "
-            "e clique em Tentar de novo."
+            "e clique em Tentar novamente."
         ),
     ),
     (
@@ -314,7 +314,7 @@ _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
         lambda m: (
             "A Shopee não deixa mudar o envio de anúncio em promoção (desconto da loja, "
             "Oferta Relâmpago ou campanha). Tire o anúncio da promoção no Seller Center e "
-            "clique em Tentar de novo — se ainda estiver em promoção, o sistema mostra qual."
+            "clique em Tentar novamente — se ainda estiver em promoção, o sistema mostra qual."
         ),
     ),
     (

@@ -603,17 +603,24 @@ def _acao(acao: str, liberadas: frozenset[UUID]):
         return not_(pronta)
     if acao == "aprovar":
         return and_(pronta, est.aguardando_aprovacao.is_(True), est.recusa.is_(None))
+    aprovado_sem_ligar = and_(
+        est.aprovado_em.is_not(None),
+        est.desejado == "ligado",
+        func.coalesce(est.observado, "") != "ligado",
+        est.recusa.is_(None),
+        not_(erro.ilike(_CONFIRMANDO_LIKE)),
+    )
+    if acao == "tentar_novamente":
+        # 12/11/2026: "Tentar de novo" (a plataforma recusou) e "Tentar agora"
+        # (aprovado e ainda não ligou) viraram um botão só, em amarelo.
+        return and_(pronta, or_(est.recusa.is_not(None), aprovado_sem_ligar))
     if acao == "tentar_de_novo":
         return and_(pronta, est.recusa.is_not(None))
     if acao == "tentar_agora":
-        return and_(
-            pronta,
-            est.aprovado_em.is_not(None),
-            est.desejado == "ligado",
-            func.coalesce(est.observado, "") != "ligado",
-            est.recusa.is_(None),
-            not_(erro.ilike(_CONFIRMANDO_LIKE)),
-        )
+        return and_(pronta, aprovado_sem_ligar)
+    if acao == "nao_conferido":
+        # Conta pronta, plataforma ainda não lida (a Ação diz "ainda não conferido").
+        return and_(pronta, est.observado.is_(None))
     if acao == "confirmando":
         return and_(pronta, erro.ilike(_CONFIRMANDO_LIKE))
     if acao == "ativado":
@@ -706,8 +713,10 @@ async def anuncios(
     # A coluna "Ação" (12/11/2026: "filtrar somente os tentar de novo etc.").
     acao: Literal[
         "aprovar",
+        "tentar_novamente",
         "tentar_de_novo",
         "tentar_agora",
+        "nao_conferido",
         "confirmando",
         "ativado",
         "desativado",

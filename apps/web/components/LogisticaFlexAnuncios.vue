@@ -180,33 +180,30 @@ const contasDoFiltro = computed(() =>
 watch(filtroPlataforma, () => {
   if (filtroConta.value && !contasDoFiltro.value.some((c) => c.id === filtroConta.value)) filtroConta.value = ''
 })
-// Cada opção vira um filtro do backend (desejado / observado / aguardando).
-const SITUACOES = [
+// 12/11/2026 (Vinicius: "situação e ação meio que tá duplicando"): saiu o
+// menu "Situação". Ficam dois, cada um IGUAL a uma coluna da tabela — o nome
+// do menu é o da coluna e as opções são os textos que aparecem nela.
+// "Sistema quer" (servidor: `quer=`) segue o selo da coluna (ver querInfo).
+const QUERES = [
   { key: '', label: 'Todos' },
-  { key: 'aguardando', label: 'Esperando sua aprovação' },
-  { key: 'ligado_agora', label: 'Com Flex ligado agora' },
-  { key: 'desligar', label: 'Ligado, mas deveria desligar' },
-  // 12/11/2026: os três seguem o selo "Sistema quer" da tela (servidor:
-  // `quer=`) — antes "Não pode ter Flex" trazia linhas com "Pode ter Flex".
-  { key: 'quer_ligado', label: 'Pode ter Flex' },
-  { key: 'quer_desligado', label: 'Flex desligado' },
-  { key: 'inelegivel', label: 'Não pode ter Flex' },
-  { key: 'nao_lido', label: 'Ainda não conferido na plataforma' },
+  { key: 'pode', label: 'Pode ter Flex' },
+  { key: 'desligado', label: 'Flex desligado' },
+  { key: 'nao_pode', label: 'Não pode ter Flex' },
 ] as const
-type Situacao = (typeof SITUACOES)[number]['key']
-const filtroSituacao = ref<Situacao>('')
-// Filtro pela coluna "Ação" (12/11/2026: "quero filtrar somente os tentar de
-// novo etc."). Os nomes são os que aparecem na coluna.
+type QuerFiltro = (typeof QUERES)[number]['key']
+const filtroQuer = ref<QuerFiltro>('')
+// "Ação" (servidor: `acao=`) segue a coluna Ação (ver acaoDe). "Tentar de
+// novo" e "Tentar agora" viraram "Tentar novamente".
 const ACOES = [
   { key: '', label: 'Todas' },
   { key: 'aprovar', label: 'Aprovar' },
-  { key: 'tentar_de_novo', label: 'Tentar de novo' },
-  { key: 'tentar_agora', label: 'Tentar agora' },
-  { key: 'confirmando', label: 'Shopee confirmando' },
+  { key: 'tentar_novamente', label: 'Tentar novamente' },
   { key: 'ativado', label: 'Ativado' },
   { key: 'desativado', label: 'Desativado' },
   { key: 'desliga', label: 'O sistema desliga' },
+  { key: 'confirmando', label: 'Shopee confirmando' },
   { key: 'conta_nao_pronta', label: 'Conta não pronta' },
+  { key: 'nao_conferido', label: 'Ainda não conferido' },
 ] as const
 type AcaoFiltro = (typeof ACOES)[number]['key']
 const filtroAcao = ref<AcaoFiltro>('')
@@ -214,12 +211,10 @@ const filtroAcao = ref<AcaoFiltro>('')
 // Flex"): de fábrica a lista mostra só quem tem peça em São Bernardo.
 type FiltroPecas = 'com' | 'flex' | ''
 const filtroPecas = ref<FiltroPecas>('com')
-const filtroNaoPronta = ref(false)
-// "Ligado, mas deveria desligar" é o anúncio SEM peça: com o "Mostrar: com
-// peça" de fábrica o menu achava sempre 0 (o cartão "Ligados sem peça" já
-// soltava o filtro de peças; o menu agora faz igual).
-watch(filtroSituacao, (s) => {
-  if (s === 'desligar' && filtroPecas.value) filtroPecas.value = ''
+// "O sistema desliga" é o anúncio SEM peça: com o "Mostrar: com peça" de
+// fábrica a lista viria sempre vazia — solta o filtro de peças.
+watch(filtroAcao, (a) => {
+  if (a === 'desliga' && filtroPecas.value) filtroPecas.value = ''
 })
 const busca = ref('')
 const buscaAplicada = ref('')
@@ -239,19 +234,17 @@ const filtrosAtivos = computed(
   () =>
     !!filtroPlataforma.value ||
     !!filtroConta.value ||
-    !!filtroSituacao.value ||
+    !!filtroQuer.value ||
     !!filtroAcao.value ||
     !!busca.value.trim() ||
-    filtroPecas.value !== 'com' ||
-    filtroNaoPronta.value,
+    filtroPecas.value !== 'com',
 )
 function limparFiltros() {
   filtroPlataforma.value = ''
   filtroConta.value = ''
-  filtroSituacao.value = ''
+  filtroQuer.value = ''
   filtroAcao.value = ''
   filtroPecas.value = 'com'
-  filtroNaoPronta.value = false
   busca.value = ''
   buscaAplicada.value = ''
 }
@@ -264,16 +257,8 @@ function queryAnuncios(): string {
   if (filtroConta.value) qs.set('integration_id', filtroConta.value)
   if (buscaAplicada.value) qs.set('busca', buscaAplicada.value)
   if (filtroPecas.value) qs.set('pecas', filtroPecas.value)
-  if (filtroNaoPronta.value) qs.set('conta_nao_pronta', 'true')
-  const s = filtroSituacao.value
-  if (s === 'aguardando') qs.set('aguardando', 'true')
-  else if (s === 'desligar') qs.set('desligar', 'true')
-  else if (s === 'ligado_agora') qs.set('observado', 'ligado')
-  else if (s === 'quer_ligado') qs.set('quer', 'pode')
-  else if (s === 'quer_desligado') qs.set('quer', 'desligado')
-  else if (s === 'inelegivel') qs.set('quer', 'nao_pode')
+  if (filtroQuer.value) qs.set('quer', filtroQuer.value)
   if (filtroAcao.value) qs.set('acao', filtroAcao.value)
-  else if (s === 'nao_lido') qs.set('observado', 'nao_lido')
   return qs.toString()
 }
 
@@ -319,7 +304,7 @@ async function carregarTudo() {
   await Promise.all([carregarConfig(), carregarAnuncios(), carregarPedidos()])
 }
 
-watch([filtroPlataforma, filtroConta, filtroSituacao, filtroAcao, buscaAplicada, filtroPecas, filtroNaoPronta], () => {
+watch([filtroPlataforma, filtroConta, filtroQuer, filtroAcao, buscaAplicada, filtroPecas], () => {
   if (pagina.value !== 1) pagina.value = 1
   else carregarAnuncios()
 })
@@ -637,14 +622,14 @@ function linkAnuncio(a: FlexAnuncio): string | null {
   return m ? `https://produto.mercadolivre.com.br/MLB-${m[1]}` : null
 }
 // Aprovado, mas ainda não ligou (o Bling não confirmou o saldo, a rodada
-// estava ocupada…): o botão vira "Tentar agora" — antes ficava só o rótulo,
+// estava ocupada…): o botão vira "Tentar novamente" — antes ficava só o rótulo,
 // sem como pedir de novo.
 function aprovadoSemLigar(a: FlexAnuncio): boolean {
   return !!a.aprovado_em && a.desejado === 'ligado' && a.observado !== 'ligado'
 }
 // A Shopee aceitou e ainda não mostra a mudança (leva minutos): não é erro —
 // a próxima leitura confirma (12/11/2026; o texto vem do motor,
-// flex_motor.SHOPEE_CONFIRMANDO). Sem "Tentar agora" enquanto isso.
+// flex_motor.SHOPEE_CONFIRMANDO). Sem "Tentar novamente" enquanto isso.
 function shopeeConfirmando(a: FlexAnuncio): boolean {
   return (a.ultimo_erro || '').includes('esperando ela mostrar')
 }
@@ -662,11 +647,19 @@ function podeAprovar(a: FlexAnuncio): boolean {
       (aprovadoSemLigar(a) && !!config.value?.pode_escrever && !shopeeConfirmando(a)))
   )
 }
-function rotuloAprovar(a: FlexAnuncio): string {
-  if (a.recusa) return 'Tentar de novo'
-  if (aprovadoSemLigar(a)) return 'Tentar agora'
-  return 'Aprovar'
+// 12/11/2026: "Tentar de novo" (a plataforma recusou) e "Tentar agora"
+// (aprovado e ainda não ligou) viraram um nome só, em AMARELO — "não está
+// correto para estar em verde": verde é só o Aprovar.
+function tentarNovamente(a: FlexAnuncio): boolean {
+  return !!a.recusa || aprovadoSemLigar(a)
 }
+function rotuloAprovar(a: FlexAnuncio): string {
+  return tentarNovamente(a) ? 'Tentar novamente' : 'Aprovar'
+}
+const BOTAO_APROVAR =
+  'border-emerald-400 text-emerald-800 hover:bg-emerald-50 dark:border-emerald-700 dark:text-emerald-300 dark:hover:bg-emerald-950/40'
+const BOTAO_TENTAR =
+  'border-amber-400 bg-amber-50 text-amber-800 hover:bg-amber-100 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-300 dark:hover:bg-amber-950/60'
 const STATUS_ANUNCIO: Record<string, string> = {
   paused: 'pausado',
   under_review: 'em revisão',
@@ -910,7 +903,7 @@ async function aprovar(a: FlexAnuncio) {
         'Aprovado, mas ainda não ligou',
         r.estado?.ultimo_erro ||
           r.estado?.motivo_claro ||
-          'Veja o motivo na linha do anúncio. A aprovação continua valendo: o sistema tenta de novo na próxima conferência, ou clique em "Tentar agora".',
+          'Veja o motivo na linha do anúncio. A aprovação continua valendo: o sistema tenta de novo na próxima conferência, ou clique em "Tentar novamente".',
       )
     else toasts.info('Aprovação registrada', 'Só observando: nada mudou na plataforma.')
     emit('mudou')
@@ -1270,10 +1263,6 @@ const vazioTexto = computed(() => {
   return 'Nenhum anúncio com esses filtros.'
 })
 
-// Clique num número do resumo = filtra a lista por aquilo.
-function filtrarPor(s: Situacao) {
-  filtroSituacao.value = filtroSituacao.value === s ? '' : s
-}
 
 // ---- Padrão de Chamados/Conciliação (11/11/2026) ----
 // Conta pronta = o robô mexe nela: liberada, com Flex conferido e (ML) a saída
@@ -1318,7 +1307,7 @@ function querInfo(a: FlexAnuncio): { texto: string; cls: string; title: string }
   if (temPeca && emPromocao(a)) {
     return {
       ...DESEJADO.ligado!,
-      title: 'Pode ter Flex — a Shopee só recusou por causa da promoção: tire o anúncio da promoção no Seller Center e clique em Tentar de novo.',
+      title: 'Pode ter Flex — a Shopee só recusou por causa da promoção: tire o anúncio da promoção no Seller Center e clique em Tentar novamente.',
     }
   }
   // 12/11/2026 (revisão): com peça de menos, a conta não pronta mostrava "Não
@@ -1362,17 +1351,24 @@ function acaoDe(a: FlexAnuncio): Acao {
       title: ligado ? 'O Flex está ligado na plataforma, como o sistema quer.' : 'O Flex está desligado na plataforma, como o sistema quer.',
     }
   }
+  // Conta pronta, plataforma ainda não lida (o filtro Ação "Ainda não conferido").
+  if (!a.observado) return { tipo: 'texto', texto: 'ainda não conferido', cls: 'text-muted-foreground' }
   return { tipo: 'texto', texto: '—', cls: 'text-muted-foreground' }
 }
 
-// Cartões do topo: cada um filtra a lista (clicar de novo volta ao normal).
+// Cartões do topo: ATALHOS dos menus (12/11/2026) — o cartão marca o menu
+// certo, então os menus sempre mostram o filtro que está valendo (antes o
+// cartão filtrava escondido e os menus diziam "Todos"). Clicar de novo volta.
 type CartaoFlex = 'com' | 'flex' | 'aguardando' | 'desligar' | 'nao_pronta'
 const cartaoAtivo = computed<CartaoFlex | null>(() => {
-  if (filtroNaoPronta.value) return 'nao_pronta'
-  if (filtroSituacao.value === 'aguardando') return 'aguardando'
-  if (filtroSituacao.value === 'desligar') return 'desligar'
-  if (!filtroSituacao.value && !filtroAcao.value && filtroPecas.value === 'flex') return 'flex'
-  if (!filtroSituacao.value && !filtroAcao.value && filtroPecas.value === 'com') return 'com'
+  if (filtroQuer.value) return null
+  const a = filtroAcao.value
+  const p = filtroPecas.value
+  if (a === 'aprovar') return 'aguardando'
+  if (a === 'desliga') return 'desligar'
+  if (a === 'conta_nao_pronta' && p === 'com') return 'nao_pronta'
+  if (!a && p === 'flex') return 'flex'
+  if (!a && p === 'com') return 'com'
   return null
 })
 const cartoes = computed(() => {
@@ -1387,18 +1383,14 @@ const cartoes = computed(() => {
 })
 function clicarCartao(k: CartaoFlex) {
   const voltar = cartaoAtivo.value === k && k !== 'com'
-  filtroNaoPronta.value = false
-  filtroSituacao.value = ''
+  filtroQuer.value = ''
   filtroAcao.value = ''
   filtroPecas.value = 'com'
   if (voltar) return
   if (k === 'flex') filtroPecas.value = 'flex'
-  else if (k === 'aguardando') filtroSituacao.value = 'aguardando'
-  else if (k === 'desligar') {
-    // Ligado sem peça tem 0 peça: o filtro "com peça" esconderia todos.
-    filtroSituacao.value = 'desligar'
-    filtroPecas.value = ''
-  } else if (k === 'nao_pronta') filtroNaoPronta.value = true
+  else if (k === 'aguardando') filtroAcao.value = 'aprovar'
+  else if (k === 'desligar') filtroAcao.value = 'desliga' // o watch solta as peças
+  else if (k === 'nao_pronta') filtroAcao.value = 'conta_nao_pronta'
 }
 
 // "Onde agir hoje" (à direita): o que depende de uma pessoa agora.
@@ -1562,10 +1554,13 @@ defineExpose({ recarregar: carregarTudo })
        de cima (modo, saída, botões), os cartões que filtram e, à direita, "Onde agir hoje", as contas e "Como o sistema decide". De
        fábrica a lista mostra só os anúncios com peça no local de saída. -->
   <div class="min-w-0 space-y-2.5">
-    <!-- 12/11/2026: só os botões — o modo e as regras estão em "Como o sistema
-         decide", à direita. -->
-    <div class="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-1.5 text-xs" role="status">
-      <div class="ml-auto flex flex-wrap items-center gap-1.5 font-semibold">
+    <!-- 12/11/2026: os botões vão para a linha das abas da Logística (Vinicius:
+         "tem que ficar padrão na linha de cima") — Teleport para o
+         #flex-acoes-topo de pages/logistica.vue. Só no navegador (ClientOnly):
+         o alvo é da página e o SSR não leva teleport para fora do body. -->
+    <ClientOnly>
+      <Teleport to="#flex-acoes-topo">
+      <div class="flex flex-wrap items-center gap-1.5 font-semibold" data-flex-acoes>
         <button
           type="button"
           class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
@@ -1620,7 +1615,8 @@ defineExpose({ recarregar: carregarTudo })
           {{ loteAcao === 'desligar' ? `Desligando ${loteFeitos} de ${loteTotal}…` : `Desligar selecionados (${paraDesligar.length})` }}
         </button>
       </div>
-    </div>
+      </Teleport>
+    </ClientOnly>
 
     <!-- Andamento da emergência (o job roda no servidor) -->
     <div
@@ -1659,13 +1655,13 @@ defineExpose({ recarregar: carregarTudo })
           <option value="">Todos os anúncios</option>
         </select>
       </label>
-      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2">
-        <span class="font-semibold text-muted-foreground">Situação</span>
-        <select v-model="filtroSituacao" class="bg-transparent outline-none">
-          <option v-for="s in SITUACOES" :key="s.key" :value="s.key">{{ s.label }}</option>
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="O selo da coluna &quot;Sistema quer&quot;">
+        <span class="font-semibold text-muted-foreground">Sistema quer</span>
+        <select v-model="filtroQuer" class="bg-transparent outline-none" data-flex-filtro-quer>
+          <option v-for="o in QUERES" :key="o.key" :value="o.key">{{ o.label }}</option>
         </select>
       </label>
-      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2">
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="O que aparece na coluna &quot;Ação&quot;">
         <span class="font-semibold text-muted-foreground">Ação</span>
         <select v-model="filtroAcao" class="bg-transparent outline-none" data-flex-filtro-acao>
           <option v-for="o in ACOES" :key="o.key" :value="o.key">{{ o.label }}</option>
@@ -1815,12 +1811,13 @@ defineExpose({ recarregar: carregarTudo })
                     <button
                       v-if="acaoDe(a).tipo === 'aprovar'"
                       type="button"
-                      class="inline-flex items-center gap-1 rounded-md border border-emerald-400 px-2 py-0.5 font-semibold text-emerald-800 hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-700 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
+                      class="inline-flex items-center gap-1 rounded-md border px-2 py-0.5 font-semibold disabled:opacity-50"
+                      :class="tentarNovamente(a) ? BOTAO_TENTAR : BOTAO_APROVAR"
                       :disabled="aprovando.has(chave(a))"
                       :title="a.recusa
-                        ? 'Tentar ligar o Flex de novo neste anúncio'
+                        ? 'A plataforma recusou ligar (veja o porquê na linha). Arrumou? Tentar novamente'
                         : aprovadoSemLigar(a)
-                          ? 'Aprovado em ' + fmtDataHora(a.aprovado_em) + ', mas ainda não ligou: tentar agora'
+                          ? 'Aprovado em ' + fmtDataHora(a.aprovado_em) + ', mas ainda não ligou: tentar novamente'
                           : 'Aprovar: ligar o Flex neste anúncio'"
                       @click="aprovar(a)"
                     >
@@ -1904,7 +1901,8 @@ defineExpose({ recarregar: carregarTudo })
             <div v-if="podeAprovar(a)" class="flex items-center gap-3">
               <button
                 type="button"
-                class="inline-flex items-center gap-1 rounded border border-emerald-400 px-2 py-1 font-medium text-emerald-800 disabled:opacity-50 dark:text-emerald-300"
+                class="inline-flex items-center gap-1 rounded border px-2 py-1 font-medium disabled:opacity-50"
+                :class="tentarNovamente(a) ? BOTAO_TENTAR : BOTAO_APROVAR"
                 :disabled="aprovando.has(chave(a))"
                 @click="aprovar(a)"
               >

@@ -74,7 +74,7 @@ async def test_recusa_por_promocao_diz_qual():
     assert claro == (
         "A Shopee não deixa mudar o envio de anúncio em promoção — este está em Oferta "
         "Relâmpago até 29/11 23:59. Tire o anúncio da promoção no Seller Center (ou espere "
-        "ela acabar) e clique em Tentar de novo."
+        "ela acabar) e clique em Tentar novamente."
     )
 
 
@@ -95,4 +95,4 @@ async def test_outra_recusa_fica_como_veio():
 def test_recusa_antiga_sem_o_nome_ganha_frase():
     claro = flex_textos.motivo_claro(f"a plataforma recusou ligar: 200 {RECUSA}")
     assert claro.startswith("A Shopee não deixa mudar o envio de anúncio em promoção (")
-    assert "Tentar de novo" in claro
+    assert "Tentar novamente" in claro

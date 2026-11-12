@@ -877,6 +877,9 @@ async def test_filtros_sistema_quer_e_acao_seguem_a_tela(
     # Ação.
     assert await ids("acao=aprovar") == ["MLB1"]
     assert await ids("acao=tentar_de_novo") == ["MLB4"]
+    # "Tentar de novo" + "Tentar agora" = "Tentar novamente" (um botão só).
+    assert await ids("acao=tentar_novamente") == ["MLB4"]
+    assert await ids("acao=nao_conferido") == []
     assert await ids("acao=desliga") == ["MLB2"]  # ligado e a regra não quer
     assert await ids("acao=desativado") == ["MLB3"]
     assert await ids("acao=conta_nao_pronta") == []

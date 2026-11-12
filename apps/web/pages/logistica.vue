@@ -2558,6 +2558,10 @@ async function aplicarStatusBling(c: Logistica) {
         </button>
       </div>
       <div class="ml-auto flex flex-wrap items-center justify-end gap-1.5 text-xs font-semibold">
+        <!-- 12/11/2026: os botões da sub-aba Anúncios Flex (Atualizar, Sincronizar,
+             Ligar/Desligar selecionados) vêm para esta linha — o componente
+             LogisticaFlexAnuncios teleporta para cá (antes ocupavam uma linha só deles). -->
+        <div v-if="flexAnuncios" id="flex-acoes-topo" class="flex flex-wrap items-center justify-end gap-1.5" />
         <template v-if="tab !== 'status' && !flexAnuncios">
           <button
             type="button"
