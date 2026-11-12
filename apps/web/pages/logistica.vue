@@ -2787,10 +2787,13 @@ async function aplicarStatusBling(c: Logistica) {
           <div class="overflow-x-auto">
             <!-- 12/11/2026 (Vinicius: "a localização está muito pequena"): o Produto ficou com
                  largura fixa e menor, a Divergência saiu, e a Localização é a coluna que
-                 cresce com a tela (quebra em até 2 linhas em vez de cortar com "…"). -->
+                 cresce com a tela (quebra em até 2 linhas em vez de cortar com "…").
+                 Mesmo dia ("o pedido está cortando, preciso dele inteiro"): Pedido com 136px —
+                 o nº mais longo é o da Amazon (19 caracteres = 121px na fonte mono de 10,5px,
+                 TikTok 18 = 114px) + 12px de respiro. Os 12px saem da Localização. -->
             <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehProprio ? 'min-w-[1340px]' : 'min-w-[1260px]'">
               <colgroup>
-                <col class="w-[46px]"><col :class="ehProprio ? 'w-[112px]' : 'w-[124px]'"><col :class="ehProprio ? 'w-[70px]' : 'w-[88px]'"><col :class="ehProprio ? 'w-[180px]' : 'w-[230px]'">
+                <col class="w-[46px]"><col class="w-[136px]"><col :class="ehProprio ? 'w-[70px]' : 'w-[88px]'"><col :class="ehProprio ? 'w-[180px]' : 'w-[230px]'">
                 <col :class="ehProprio ? 'w-[130px]' : 'w-[200px]'"><col>
                 <template v-if="ehProprio"><col class="w-[80px]"><col class="w-[92px]"></template>
                 <col :class="ehProprio ? 'w-[100px]' : 'w-[104px]'">
@@ -2842,7 +2845,7 @@ async function aplicarStatusBling(c: Logistica) {
                   <td class="px-1.5 py-1.5 text-center">
                     <div class="font-mono font-bold">{{ c.pedido_bling || '—' }}</div>
                     <!-- Um clique seleciona o nº da plataforma pra copiar, sem abrir o Raio-X. -->
-                    <div class="truncate font-mono text-[10.5px] text-muted-foreground"><span class="cursor-text select-all" @click.stop>{{ c.pedido_marketplace || '' }}</span></div>
+                    <div class="truncate font-mono text-[10.5px] text-muted-foreground" :title="c.pedido_marketplace || undefined"><span class="cursor-text select-all" @click.stop>{{ c.pedido_marketplace || '' }}</span></div>
                   </td>
                   <td class="px-1.5 py-1.5 text-center">
                     <div class="truncate" :title="c.conta || ''">{{ c.conta || '—' }}</div>
