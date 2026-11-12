@@ -46,6 +46,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from pydantic import ValidationError
 from sqlalchemy import DateTime, Uuid, func, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,6 +58,7 @@ from app.models.mail_atendimento import MailCaixaIndice, MailMailboxSettings
 from app.models.user import User
 from app.routers.atendimento import _nomes_das_lojas
 from app.routers.mail import MailReader, readable_mailbox
+from app.schemas.mail_bridge_sync import BridgeSnapshot
 from app.security.cipher import decrypt_json
 from app.services.atendimento import acesso, separa_email
 from app.services.atendimento import lojas as lojas_svc
@@ -385,6 +387,35 @@ def _pastas_do_catalogo(mailbox: MailMailbox) -> dict[str, pastas.PastaDoEmail]:
     return saida
 
 
+def _pastas_atuais(mailbox: MailMailbox, itens: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Do not resurrect removed personal folders from retained historical mail.
+
+    Only a validated, acknowledged full inventory can narrow the sidebar.
+    Stored messages and their original placement remain available in Todas and
+    search; system/unreadable folders and legacy mailboxes keep their fallback.
+    """
+    catalogo = decrypt_json(mailbox.config_enc).get("bridge_folder_catalog")
+    if not isinstance(catalogo, dict) or catalogo.get("inventory_ready") is not True:
+        return itens
+    try:
+        snapshot = BridgeSnapshot.model_validate(
+            {
+                "version": catalogo.get("version"),
+                "complete": True,
+                "observed_at": catalogo.get("observed_at"),
+                "folders": catalogo.get("folders"),
+                "messages": [],
+            }
+        )
+    except ValidationError:
+        return itens
+    atuais = {
+        indice.chave_da_pasta(mailbox.id, pastas.do_conteudo(folder_content(f.model_dump())))
+        for f in snapshot.folders
+    }
+    return [item for item in itens if item["tipo"] != "pessoal" or item["id"] in atuais]
+
+
 async def montar_pastas(
     session: AsyncSession,
     mailbox: MailMailbox,
@@ -392,6 +423,7 @@ async def montar_pastas(
     *,
     cad: rotear.Cadastro | None = None,
     loja: str | None = None,
+    incluir_historicas: bool = False,
 ) -> list[dict[str, Any]]:
     """As pastas da caixa (índice + catálogo para dono/admin), com nome e números,
     na ordem do Tuta. Usada também pela lista de usuários do e-mail (12/11/2026)."""
@@ -437,7 +469,7 @@ async def montar_pastas(
     itens.sort(key=indice.ordem_das_pastas)
     for item in itens:
         item.pop("chave")
-    return itens
+    return itens if incluir_historicas else _pastas_atuais(mailbox, itens)
 
 
 @router.get("/mailboxes/{mailbox_id}/pastas")
@@ -461,7 +493,8 @@ async def pastas_da_caixa(
         )
         faltam = int(await session.scalar(select(func.count()).select_from(faltando)) or 0)
     cad = base.cad
-    itens = await montar_pastas(session, mailbox, user, cad=cad, loja=loja)
+    # Count all retained mail before hiding removed folders from the sidebar.
+    itens = await montar_pastas(session, mailbox, user, cad=cad, loja=loja, incluir_historicas=True)
 
     lojas_todas = await _contar_lojas(session, mailbox.id, cad, pasta=None, user=user)
     lojas_filtradas = (
@@ -491,7 +524,7 @@ async def pastas_da_caixa(
                 "quantidade": sum(i["quantidade"] for i in itens),
                 "total": sum(i["total"] for i in itens),
             },
-            *itens,
+            *_pastas_atuais(mailbox, itens),
         ],
         "lojas": lojas,
         "faltam": faltam,
