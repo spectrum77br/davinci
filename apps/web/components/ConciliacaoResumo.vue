@@ -330,13 +330,26 @@ function naContaDe(lojas: LojaResumo[]) {
   return com.length ? Math.round(com.reduce((s, v) => s + v, 0) * 100) / 100 : null
 }
 
-function agir(a: Agir) {
-  if (a.acao === 'extrato') emit('abrir-extrato', a.loja, a.dia || dia.value)
-  else if (a.acao === 'pedidos') emit('ver-pedidos', a.loja, a.filtro || {})
-  else if (a.acao === 'sincronizar') {
-    if (props.canEdit) emit('sincronizar', a.loja)
-    else emit('abrir-extrato', a.loja, a.dia || dia.value)
+// 12/11 (Vinicius): "Abrir extrato" e "Ver pedidos" do Onde agir abrem numa aba nova
+// do navegador e o Resumo fica onde está. O link é o mesmo do vigia no Threema
+// (/conciliacao?visao=extrato&loja=&dia= ou ?visao=pedidos&loja=&situacao=&etapa=).
+// "Sincronizar" continua um botão: dispara a leitura e não troca de tela.
+const router = useRouter()
+function linkDe(a: Agir): string | null {
+  const extrato = a.acao === 'extrato' || (a.acao === 'sincronizar' && !props.canEdit)
+  if (extrato) {
+    return router.resolve({ path: '/conciliacao', query: { visao: 'extrato', loja: a.loja, dia: a.dia || dia.value } }).href
   }
+  if (a.acao === 'pedidos') {
+    const query: Record<string, string> = { visao: 'pedidos', loja: a.loja }
+    if (a.filtro?.situacao) query.situacao = a.filtro.situacao
+    if (a.filtro?.etapa) query.etapa = a.filtro.etapa
+    return router.resolve({ path: '/conciliacao', query }).href
+  }
+  return null
+}
+function agir(a: Agir) {
+  if (a.acao === 'sincronizar' && props.canEdit) emit('sincronizar', a.loja)
 }
 function rotuloAcao(a: Agir) {
   if (a.acao === 'extrato') return 'Abrir extrato'
@@ -622,7 +635,8 @@ onMounted(() => {
                 <div class="font-bold">{{ a.titulo }}</div>
                 <div class="text-[11px] text-muted-foreground">{{ a.detalhe }}</div>
               </div>
-              <button type="button" class="shrink-0 rounded-md bg-primary px-2 py-1 text-[11px] font-semibold text-primary-foreground" @click="agir(a)">{{ rotuloAcao(a) }}</button>
+              <a v-if="linkDe(a)" :href="linkDe(a)!" target="_blank" rel="noopener" title="abre numa aba nova" class="shrink-0 rounded-md bg-primary px-2 py-1 text-[11px] font-semibold text-primary-foreground">{{ rotuloAcao(a) }}</a>
+              <button v-else type="button" class="shrink-0 rounded-md bg-primary px-2 py-1 text-[11px] font-semibold text-primary-foreground" @click="agir(a)">{{ rotuloAcao(a) }}</button>
             </div>
             <div v-if="!dados.agir.length" class="rounded-md border border-emerald-300 bg-emerald-50 px-2.5 py-3 text-center text-xs text-emerald-800 dark:bg-emerald-950/20 dark:text-emerald-300">nada pra agir: dia fechado e sem pendência em todas as lojas</div>
           </div>
