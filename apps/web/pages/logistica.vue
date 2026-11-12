@@ -1235,15 +1235,45 @@ function statusResumoData(c: Logistica): string {
 // o rótulo do campo, o valor em PT e desde quando está assim. O backend manda
 // tudo pronto em `status_detalhe` (ele sabe os campos de cada plataforma);
 // o fallback antigo cobre resposta velha de cache, sem data.
-function statusTooltip(c: Logistica): string {
+// Campo extra do ML que o backend manda cru (fora da assinatura).
+const ROTULO_EXTRA: Record<string, string> = { return_destino: 'Destino da devolução' }
+const VALOR_EXTRA: Record<string, Record<string, string>> = {
+  return_destino: { seller_address: 'loja', warehouse: 'galpão do ML' },
+}
+
+interface StatusLinha {
+  quando: string // "10/11/2026 11:33" ('' = sem data)
+  aprox: boolean // "~": a plataforma não datou este campo
+  rotulo: string
+  valor: string
+}
+
+// Vinicius 12/11: no Raio-X o status vem com a data e a hora NA FRENTE e na
+// ordem em que aconteceu (antes vinha na ordem dos campos: 10/11, 21/10, 09/11…).
+// Mais antigo em cima; campo sem data vai pro fim.
+function statusLinhas(c: Logistica): StatusLinha[] {
   const det = c.status_detalhe || []
-  if (det.length) {
-    const linhas = det.map((l) => {
-      const aprox = l.em && l.fonte && l.fonte !== 'plataforma' ? '~' : ''
-      const quando = l.em ? ` — ${aprox}${fmtDataHora(l.em)} (${fmtDesde(l.em)})` : ''
-      return `${l.rotulo}: ${l.valor}${quando}`
+  return det
+    .map((l, i) => {
+      const t = l.em ? new Date(l.em).getTime() : NaN
+      return {
+        i,
+        t: Number.isNaN(t) ? Infinity : t,
+        quando: fmtDataHora(l.em),
+        aprox: !!(l.em && l.fonte && l.fonte !== 'plataforma'),
+        rotulo: ROTULO_EXTRA[l.campo] || l.rotulo,
+        valor: VALOR_EXTRA[l.campo]?.[l.valor] || l.valor,
+      }
     })
-    if (det.some((l) => l.em && l.fonte && l.fonte !== 'plataforma')) {
+    .sort((a, b) => a.t - b.t || a.i - b.i)
+    .map(({ quando, aprox, rotulo, valor }) => ({ quando, aprox, rotulo, valor }))
+}
+
+function statusTooltip(c: Logistica): string {
+  const det = statusLinhas(c)
+  if (det.length) {
+    const linhas = det.map((l) => `${l.quando ? `${l.aprox ? '~' : ''}${l.quando} — ` : ''}${l.rotulo}: ${l.valor}`)
+    if (det.some((l) => l.aprox)) {
       linhas.push('', '~ data aproximada: a plataforma não informa a hora exata deste campo.')
     }
     return linhas.join('\n')
@@ -1614,6 +1644,23 @@ const statusPlataformas = computed(() => {
     if (!vistos.has(k)) vistos.set(k, p)
   }
   return { nomes: [...vistos.values()].sort((a, b) => a.localeCompare(b)), temGeral }
+})
+// Cartões da aba Status (12/11, padrão de Chamados/Conciliação): quantas regras
+// por plataforma; clicar filtra (clicar de novo tira o filtro).
+const statusCartoes = computed(() => {
+  const cont = new Map<string, number>()
+  let geral = 0
+  for (const s of statusRows.value) {
+    const k = (s.plataforma || '').trim().toLowerCase()
+    if (k) cont.set(k, (cont.get(k) || 0) + 1)
+    else geral++
+  }
+  const out = [{ k: '', label: 'Todas as regras', n: statusRows.value.length }]
+  for (const nome of statusPlataformas.value.nomes) {
+    out.push({ k: nome.toLowerCase(), label: plataformaCanonica(nome) || nome, n: cont.get(nome.toLowerCase()) || 0 })
+  }
+  if (geral) out.push({ k: '__geral__', label: 'Geral (sem plataforma)', n: geral })
+  return out
 })
 // Busca pela chave (Status Plataforma) — dá pra colar a chave copiada do painel
 // e conferir se a regra existe cadastrada letra por letra.
@@ -2538,6 +2585,27 @@ async function aplicarStatusBling(c: Logistica) {
             </button>
           </template>
         </template>
+        <!-- Aba Status (12/11): os botões dela no cabeçalho, como nas outras abas. -->
+        <template v-if="tab === 'status'">
+          <button
+            type="button"
+            class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
+            :disabled="statusLoading"
+            title="Recarrega as regras da aba Status"
+            @click="refreshStatus"
+          >
+            <RefreshCw class="size-3.5" :class="statusLoading ? 'animate-spin' : ''" /> Atualizar
+          </button>
+          <button
+            v-if="canEdit"
+            type="button"
+            class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted"
+            title="Junta as regras repetidas (mesmo Status Plataforma e mesmas ações)"
+            @click="abrirJuntarRepetidas"
+          >
+            <Combine class="size-3.5" /> Juntar repetidas
+          </button>
+        </template>
         <button
           v-if="isAdmin"
           type="button"
@@ -2555,6 +2623,14 @@ async function aplicarStatusBling(c: Logistica) {
           @click="openNew"
         >
           <Plus class="size-3.5" /> novo caso
+        </button>
+        <button
+          v-if="canEdit && tab === 'status'"
+          type="button"
+          class="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-primary px-2.5 py-1 text-primary-foreground"
+          @click="openStatusForm"
+        >
+          <Plus class="size-3.5" /> novo status
         </button>
       </div>
     </div>
@@ -2684,10 +2760,10 @@ async function aplicarStatusBling(c: Logistica) {
             <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">o que a plataforma diz × o que está no Bling</span>
           </div>
           <div class="overflow-x-auto">
-            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehProprio ? 'min-w-[1290px]' : 'min-w-[1080px]'">
+            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehProprio ? 'min-w-[1300px]' : 'min-w-[1110px]'">
               <colgroup>
                 <col class="w-[46px]"><col :class="ehProprio ? 'w-[112px]' : 'w-[124px]'"><col :class="ehProprio ? 'w-[70px]' : 'w-[88px]'"><col>
-                <col :class="ehProprio ? 'w-[120px]' : 'w-[170px]'"><col :class="ehProprio ? 'w-[160px]' : 'w-[210px]'">
+                <col :class="ehProprio ? 'w-[130px]' : 'w-[200px]'"><col :class="ehProprio ? 'w-[160px]' : 'w-[210px]'">
                 <template v-if="ehProprio"><col class="w-[80px]"><col class="w-[92px]"></template>
                 <col :class="ehProprio ? 'w-[100px]' : 'w-[104px]'"><col :class="ehProprio ? 'w-[90px]' : 'w-[120px]'">
                 <col :class="ehProprio ? 'w-[110px]' : 'w-[140px]'"><col :class="ehProprio ? 'w-[80px]' : 'w-[84px]'">
@@ -2752,7 +2828,19 @@ async function aplicarStatusBling(c: Logistica) {
                   </td>
                   <td class="truncate px-1.5 py-1.5" :title="produtoTitulo(c)">{{ produtoResumo(c) }}</td>
                   <td class="border-l border-l-slate-300 px-1.5 py-1.5 dark:border-l-slate-600" :title="statusTooltip(c) || assinatura(c)">
-                    <div class="line-clamp-2 text-[11px] leading-tight">{{ assinatura(c) || '—' }}</div>
+                    <!-- 12/11: o status inteiro (sem "…") e o botão de copiar logo depois,
+                         pra colar na aba Status ao criar a regra. -->
+                    <div class="break-words text-[11px] leading-tight">
+                      {{ assinatura(c) || '—' }}
+                      <button
+                        v-if="assinatura(c)"
+                        type="button"
+                        class="ml-0.5 inline-flex align-[-2px] text-muted-foreground hover:text-foreground"
+                        title="Copiar o status (chave) para criar a regra na aba Status"
+                        aria-label="Copiar o status"
+                        @click.stop="copiarChave(c)"
+                      ><Copy class="size-3" /></button>
+                    </div>
                     <div v-if="statusResumoData(c)" class="truncate text-[10px] text-muted-foreground">{{ statusResumoData(c) }}</div>
                   </td>
                   <td class="px-1.5 py-1.5">
@@ -2866,7 +2954,18 @@ async function aplicarStatusBling(c: Logistica) {
 
               <section>
                 <h3 class="mb-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Status na plataforma</h3>
-                <div class="whitespace-pre-line">{{ statusTooltip(raioRow) || assinatura(raioRow) || '—' }}</div>
+                <template v-if="statusLinhas(raioRow).length">
+                  <div v-for="(l, li) in statusLinhas(raioRow)" :key="li" class="flex gap-2 leading-snug">
+                    <span
+                      class="w-[118px] shrink-0 whitespace-nowrap tabular-nums text-muted-foreground"
+                      :title="l.aprox ? 'Data aproximada: a plataforma não informa a hora exata deste campo' : undefined"
+                    ><span class="inline-block w-2">{{ l.aprox ? '~' : '' }}</span>{{ l.quando ? l.quando.replace(',', '') : '—' }}</span>
+                    <span class="min-w-0"><span class="text-muted-foreground">{{ l.rotulo }}:</span> {{ l.valor }}</span>
+                  </div>
+                  <div v-if="statusLinhas(raioRow).some((l) => l.aprox)" class="mt-0.5 text-[10.5px] text-muted-foreground">~ data aproximada: a plataforma não informa a hora exata deste campo.</div>
+                </template>
+                <div v-else class="whitespace-pre-line">{{ statusTooltip(raioRow) || assinatura(raioRow) || '—' }}</div>
+                <div v-if="assinatura(raioRow)" class="mt-1 break-words text-[11px] text-muted-foreground">Chave: {{ assinatura(raioRow) }}</div>
                 <div v-if="raioRow.status_lido_em" class="text-[11px] text-muted-foreground" :title="'Última consulta ao marketplace: ' + fmtDataHora(raioRow.status_lido_em)">lido {{ fmtDesde(raioRow.status_lido_em) }}</div>
                 <div class="mt-1 flex flex-wrap gap-1.5">
                   <button v-if="assinatura(raioRow)" type="button" :class="RAIO_BTN" title="Copiar a chave (Status Plataforma) para colar na aba Status" @click="copiarChave(raioRow)">
@@ -3307,71 +3406,79 @@ async function aplicarStatusBling(c: Logistica) {
     </template>
 
     <!-- ============ ABA STATUS ============ -->
+    <!-- ============ ABA STATUS (12/11: padrão de Chamados/Conciliação, tela inteira —
+         sem "Onde agir hoje" nem Raio-X) ============ -->
     <template v-else-if="tab === 'status'">
-      <div class="flex flex-wrap items-center gap-3">
-        <Button size="sm" variant="ghost" :disabled="statusLoading" @click="refreshStatus">
-          <RefreshCw class="size-4 mr-1" /> recarregar
-        </Button>
-        <label class="flex items-center gap-1.5 text-sm text-muted-foreground">
-          Plataforma:
-          <select
-            v-model="statusFiltroPlataforma"
-            class="h-9 rounded-md border bg-background px-2 text-sm text-foreground"
-          >
-            <option value="">todas</option>
-            <option v-for="p in statusPlataformas.nomes" :key="p" :value="p.toLowerCase()">{{ p }}</option>
+      <!-- filtros (mesmo formato das outras abas) -->
+      <div class="flex flex-wrap items-center gap-1.5 text-xs">
+        <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2">
+          <span class="font-semibold text-muted-foreground">Plataforma</span>
+          <select v-model="statusFiltroPlataforma" class="bg-transparent outline-none">
+            <option value="">Todas</option>
+            <option v-for="p in statusPlataformas.nomes" :key="p" :value="p.toLowerCase()">{{ plataformaCanonica(p) || p }}</option>
             <option v-if="statusPlataformas.temGeral" value="__geral__">Geral (sem plataforma)</option>
           </select>
         </label>
-        <label class="flex items-center gap-1.5 text-sm text-muted-foreground">
-          Status:
-          <div class="relative">
-            <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-            <input
-              v-model="statusBusca"
-              class="h-9 w-80 rounded-md border bg-background pl-8 pr-3 text-sm text-foreground"
-              placeholder="buscar chave (cole a chave copiada)…"
-            />
-          </div>
+        <label class="inline-flex h-7 min-w-0 items-center gap-1 rounded-md border bg-card px-2">
+          <Search class="size-3.5 text-muted-foreground" />
+          <input v-model="statusBusca" class="w-80 bg-transparent outline-none" placeholder="buscar status (cole o status copiado no pedido)…" />
         </label>
-        <Button v-if="canEdit" size="sm" variant="outline" class="ml-auto" @click="abrirJuntarRepetidas">
-          <Combine class="size-4 mr-1" /> Juntar repetidas
-        </Button>
-        <Button v-if="canEdit" size="sm" @click="openStatusForm">
-          <Plus class="size-4 mr-1" /> Novo status
-        </Button>
+        <button
+          v-if="statusFiltroPlataforma || statusBusca"
+          type="button"
+          class="text-muted-foreground underline"
+          @click="statusFiltroPlataforma = ''; statusBusca = ''"
+        >limpar</button>
+        <span class="text-muted-foreground">{{ statusRowsFiltradas.length }} de {{ statusRows.length }} regras</span>
       </div>
 
-      <p class="text-sm text-muted-foreground">
-        Clique numa célula pra editar só aquele campo. Os campos ficam vazios pra o operador
-        preencher à mão. Na "Mensagem do Chamado" dá pra anexar imagens no botão de foto (ou colar uma URL no texto).
-        "Localização contém" é opcional: com palavras ali (ex.: apreendido), a regra só vale pros pedidos
-        cuja Localização tem a palavra, e passa na frente das regras sem condição do mesmo Status Plataforma
-        nos Status Atual que ela lista (nos outros, a regra sem condição continua valendo).
-      </p>
+      <!-- cartões: regras por plataforma; clicar filtra (clicar de novo tira o filtro) -->
+      <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+        <button
+          v-for="k in statusCartoes"
+          :key="k.k || 'todas'"
+          type="button"
+          class="rounded-md border bg-card px-3 py-1.5 text-center hover:bg-muted/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          :class="k.k && statusFiltroPlataforma === k.k ? 'ring-2 ring-primary' : ''"
+          :title="!k.k ? 'mostrar todas' : statusFiltroPlataforma === k.k ? 'tirar o filtro' : `filtrar: ${k.label}`"
+          @click="statusFiltroPlataforma = !k.k || statusFiltroPlataforma === k.k ? '' : k.k"
+        >
+          <span class="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{{ k.label }}</span>
+          <span class="block text-xl font-bold leading-tight">{{ k.n }}</span>
+        </button>
+      </div>
 
       <div v-if="statusError" class="text-sm text-red-500">erro: {{ statusError }}</div>
 
-      <!-- Desktop table (edição inline por célula) -->
-      <div class="hidden md:block border rounded-md overflow-x-auto">
-        <table class="w-full text-sm min-w-[760px] border-collapse [&_th]:border [&_td]:border [&_th]:border-border [&_td]:border-border">
-          <thead class="bg-muted/40 text-left">
-            <tr class="whitespace-nowrap">
-              <th class="px-3 py-2">Plataforma</th>
-              <th class="px-3 py-2">Status Plataforma</th>
-              <th class="px-3 py-2">Status Atual</th>
-              <th class="px-3 py-2" :title="LOCALIZACAO_CONTEM_TITLE">Localização contém</th>
-              <th class="px-3 py-2">Alterar Status Bling</th>
-              <th class="px-3 py-2">Monitoramento</th>
-              <th class="px-3 py-2">Abrir Chamado</th>
-              <th class="px-3 py-2">Mensagem do Chamado</th>
-              <th class="px-3 py-2">Mensagem Bling</th>
-              <th class="px-3 py-2">Mensagem Threema</th>
-              <th v-if="canEdit" class="px-3 py-2 w-10"></th>
+      <!-- Desktop: tabela inteira (edição inline por célula) -->
+      <div class="hidden rounded-md border bg-card md:block">
+        <div class="relative flex items-center justify-center rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+          <span>Regras da aba Status — o que o sistema faz em cada combinação</span>
+          <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 xl:block">clique numa célula para editar</span>
+        </div>
+        <div class="overflow-x-auto">
+        <table class="w-full min-w-[1100px] border-collapse text-[11.5px]">
+          <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
+            <tr>
+              <th class="border-b px-2 py-1 text-center font-semibold" colspan="4">Quando vale</th>
+              <th class="border-b border-l border-l-slate-300 px-2 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="canEdit ? 7 : 6">O que o sistema faz</th>
+            </tr>
+            <tr class="whitespace-nowrap text-left">
+              <th class="border-b px-2 py-1 font-semibold">Plataforma</th>
+              <th class="border-b px-2 py-1 font-semibold">Status Plataforma</th>
+              <th class="border-b px-2 py-1 font-semibold">Status Atual (Bling)</th>
+              <th class="border-b px-2 py-1 font-semibold" :title="LOCALIZACAO_CONTEM_TITLE">Localização contém</th>
+              <th class="border-b border-l border-l-slate-300 px-2 py-1 font-semibold dark:border-l-slate-600">Alterar Status Bling</th>
+              <th class="border-b px-2 py-1 font-semibold">Monitorar</th>
+              <th class="border-b px-2 py-1 font-semibold">Abrir Chamado</th>
+              <th class="border-b px-2 py-1 font-semibold">Mensagem do Chamado</th>
+              <th class="border-b px-2 py-1 font-semibold">Mensagem Bling</th>
+              <th class="border-b px-2 py-1 font-semibold">Mensagem Threema</th>
+              <th v-if="canEdit" class="w-10 border-b px-2 py-1"></th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="s in statusRowsFiltradas" :key="s.id" class="border-t hover:bg-muted/20">
+            <tr v-for="s in statusRowsFiltradas" :key="s.id" class="border-b align-top hover:bg-muted/40">
               <!-- Plataforma (lista: as 4 plataformas ou geral) -->
               <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'plataforma')">
                 <select
@@ -3432,7 +3539,7 @@ async function aplicarStatusBling(c: Logistica) {
                 <span v-else class="text-muted-foreground" :class="canEdit ? 'cursor-text' : ''">—</span>
               </td>
               <!-- Alterar Status Bling (dropdown com os status conhecidos do Bling) -->
-              <td class="px-2 py-1 whitespace-nowrap align-top" @click="startEdit(s, 'alterar_status_bling')">
+              <td class="whitespace-nowrap border-l border-l-slate-300 px-2 py-1 align-top dark:border-l-slate-600" @click="startEdit(s, 'alterar_status_bling')">
                 <select
                   v-if="isEditing(s, 'alterar_status_bling')"
                   v-model="editValue"
@@ -3581,6 +3688,11 @@ async function aplicarStatusBling(c: Logistica) {
             </tr>
           </tbody>
         </table>
+        </div>
+        <div class="border-t px-3 py-1.5 text-center text-[11px] text-muted-foreground">
+          Clique numa célula para editar só aquele campo. Na Mensagem do Chamado dá para anexar imagem (botão de foto) ou colar uma URL.
+          "Localização contém" é opcional — passe o mouse no título da coluna para ver como funciona.
+        </div>
       </div>
 
       <!-- Mobile cards (campos editáveis diretos) -->
