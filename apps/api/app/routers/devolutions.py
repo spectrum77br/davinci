@@ -60,6 +60,7 @@ from app.services import (
     chamados_devolucao,
     devolucao_exclusao,
     devolucao_mensagem_comprador,
+    devolucao_prazo_acompanhamento,
     espelho_situacao,
 )
 from app.services.devolution_delete import (
@@ -1079,6 +1080,7 @@ async def acompanhamento_rows(
     if lojas is not None and not lojas:
         return []
     params: dict = {"situacao": _SITUACAO_AGUARDANDO_DEVOLUCAO}
+    hoje = datetime.now(SAO_PAULO).date()
     filtro_loja = ""
     if lojas is not None:
         filtro_loja = "AND v.bling_loja_id::text = ANY(:lojas)"
@@ -1235,22 +1237,41 @@ async def acompanhamento_rows(
             devolucao_tipo_auto=tipo_auto,
             devolucao_destino_auto=destino_auto,
         )
-        out.append(
-            _com_status_da_devolucao(
-                d,
-                localizacao_manual=localizacao_manual,
-                lg_plataforma=lg_plataforma,
-                lg_meli_status=lg_meli_status,
-                status_auto=status_auto,
-                fonte_auto=fonte_auto,
-                localizacao_auto=d.pop("localizacao_auto", None),
-                pacote_entregue_em=pacote_entregue_em,
-                tipo_auto=tipo_auto,
-                destino_auto=destino_auto,
-            )
+        linha = _com_status_da_devolucao(
+            d,
+            localizacao_manual=localizacao_manual,
+            lg_plataforma=lg_plataforma,
+            lg_meli_status=lg_meli_status,
+            status_auto=status_auto,
+            fonte_auto=fonte_auto,
+            localizacao_auto=d.pop("localizacao_auto", None),
+            pacote_entregue_em=pacote_entregue_em,
+            tipo_auto=tipo_auto,
+            destino_auto=destino_auto,
         )
+        linha.update(_prazos_da_linha(linha, lg_meli_status, hoje))
+        out.append(linha)
         d.pop("localizacao_auto_data", None)
     return out
+
+
+def _prazos_da_linha(linha: dict, meli_status: dict | None, hoje: date) -> dict:
+    """Prazo de 45 dias e "Amazon: cancelar devolução" (12/11/2026,
+    services/devolucao_prazo_acompanhamento) — a mesma conta no GET e no PATCH."""
+    return devolucao_prazo_acompanhamento.avaliar(
+        fila=linha.get("fila"),
+        plataforma=linha.get("plataforma"),
+        entrada=linha.get("aguardando_devolucao_data"),
+        hoje=hoje,
+        observacao=linha.get("observacao"),
+        localizacao=" ".join(
+            x for x in (linha.get("localizacao"), linha.get("entrega_localizacao")) if x
+        ),
+        lancada=bool(linha.get("lancada")),
+        chegou_em=linha.get("devolucao_chegou_em"),
+        reembolso=linha.get("reembolso"),
+        meli_status=meli_status,
+    )
 
 
 # ── Vídeo da expedição (Vinicius 17/09) ─────────────────────────────────
@@ -1536,9 +1557,17 @@ async def patch_acompanhamento_rastreio(
         status_datas=lg["lg_status_datas"] if lg else None,
     )
     hoje_sp = datetime.now(SAO_PAULO).date()
+    lancada = (
+        await session.execute(
+            select(func.count())
+            .select_from(Devolution)
+            .where(Devolution.pedido_bling == pedido_bling)
+        )
+    ).scalar_one() > 0
     d = _com_status_da_devolucao(
         {
             "pedido_bling": row.pedido_bling,
+            "lancada": lancada,
             "observacao": row.observacao,
             "rastreio": row.rastreio or row.rastreio_auto or (lg["rastreio"] if lg else None),
             "localizacao": row.localizacao or (lg["localizacao"] if lg else None),
@@ -1582,6 +1611,11 @@ async def patch_acompanhamento_rastreio(
         tipo_auto=row.devolucao_tipo_auto,
         destino_auto=row.devolucao_destino_auto,
     )
+    # Prazo de 45 dias / Amazon: a observação nova pode mudar o prazo na hora.
+    d["plataforma"] = (lg["lg_plataforma"] if lg else None) or None
+    d.update(_prazos_da_linha(d, lg["lg_meli_status"] if lg else None, hoje_sp))
+    d.pop("plataforma", None)
+    d.pop("lancada", None)
     return AcompanhamentoRastreioOut(**d)
 
 

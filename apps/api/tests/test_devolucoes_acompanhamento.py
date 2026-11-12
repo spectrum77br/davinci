@@ -95,10 +95,10 @@ _ITEM_A = UUID("aaaaaaaa-0000-0000-0000-000000000001")
 _ITEM_B = UUID("aaaaaaaa-0000-0000-0000-000000000002")
 
 
-async def _seed_acompanhamento(db: AsyncSession, schema: str) -> None:
-    """Dois itens do MESMO pedido 555001 em 83957 (entrou há 5 dias) e a view
-    fake com as colunas que o endpoint consome."""
-    entrada = datetime.now(_SP).date() - timedelta(days=5)
+async def _seed_acompanhamento(db: AsyncSession, schema: str, dias: int = 5) -> None:
+    """Dois itens do MESMO pedido 555001 em 83957 (entrou há `dias` dias) e a
+    view fake com as colunas que o endpoint consome."""
+    entrada = datetime.now(_SP).date() - timedelta(days=dias)
     await db.execute(text(f'DROP VIEW IF EXISTS "{schema}".vw_devolucoes'))
     await db.execute(
         text(
@@ -312,6 +312,43 @@ async def test_patch_observacao_salva_limpa_e_aparece_na_lista(
         )
         assert r3.status_code == 200
         assert r3.json()["observacao"] is None
+    finally:
+        await _drop_view(db, schema)
+
+
+async def test_prazo_de_45_dias_e_observacao_que_segura(
+    client, db: AsyncSession, make_user, auth_as
+):
+    """12/11/2026: 50 dias em devolução sem o pacote chegar → "vencido" (a
+    tela avisa: lançar Não devolvido + Problemas + chamado). Escrever na
+    observação "aguarde 60 dias" segura na hora (a resposta do PATCH já vem
+    com o prazo novo); pedido já lançado sai da regra."""
+    user = await make_user(permissions=_perm())
+    auth_as(user)
+    schema = get_settings().database_schema
+    await _seed_acompanhamento(db, schema, dias=50)
+    try:
+        itens = (await client.get("/api/devolutions/acompanhamento")).json()["items"]
+        assert {i["prazo_estado"] for i in itens} == {"vencido"}
+        assert itens[0]["prazo_dias_restantes"] == -5
+        assert "Não devolvido" in itens[0]["prazo_texto"]
+        assert itens[0]["amazon_cancelar"] is False
+
+        r = await client.patch(
+            "/api/devolutions/acompanhamento/555001",
+            json={"observacao": "10/11 chamado aberto, aguarde 60 dias"},
+        )
+        assert r.status_code == 200
+        assert (r.json()["prazo_estado"], r.json()["prazo_origem"]) == (None, "observacao")
+        assert r.json()["prazo_dias_restantes"] == 10
+
+        await db.execute(
+            text("INSERT INTO devolutions (pedido_bling, conta) VALUES ('555001', 'Shopee Jlas')")
+        )
+        await db.execute(text("UPDATE devolucao_rastreio SET observacao = NULL"))
+        await db.commit()
+        itens = (await client.get("/api/devolutions/acompanhamento")).json()["items"]
+        assert {i["prazo_estado"] for i in itens} == {None}
     finally:
         await _drop_view(db, schema)
 

@@ -459,7 +459,27 @@ class AcompanhamentoVideoSolicitarIn(BaseModel):
     motivo: str | None = Field(default=None, max_length=500)
 
 
-class AcompanhamentoItemOut(AcompanhamentoVideoFields):
+class AcompanhamentoPrazoFields(BaseModel):
+    """Prazos da aba (12/11/2026, services/devolucao_prazo_acompanhamento): 45 dias em
+    devolução sem o pacote chegar → lançar Não devolvido + Problemas +
+    chamado (por enquanto só AVISA); Amazon 14 dias sem o cliente postar e
+    sem reembolso → cancelar a devolução no Seller Central.
+
+    `prazo_estado`: "vencido" | "vence_logo" (faltam 5 dias ou menos) |
+    "excecao" (passou de 45 dias, mas extraviado / não recebido) | None.
+    `prazo_origem`: "padrao" (45 dias) | "observacao" (prazo novo escrito na
+    observação). `prazo_texto` é o balão."""
+
+    prazo_estado: Literal["vencido", "vence_logo", "excecao"] | None = None
+    prazo_ate: date | None = None
+    prazo_dias_restantes: int | None = None
+    prazo_origem: Literal["padrao", "observacao"] | None = None
+    prazo_texto: str | None = None
+    amazon_cancelar: bool = False
+    amazon_cancelar_texto: str | None = None
+
+
+class AcompanhamentoItemOut(AcompanhamentoVideoFields, AcompanhamentoPrazoFields):
     """Linha (por ITEM do pedido) da aba Acompanhamento — pedidos hoje em
     'Aguardando Devolução' (83957) no Bling, com cliente e rastreio manual."""
 
@@ -541,7 +561,7 @@ class AcompanhamentoRastreioPatch(BaseModel):
     fila: FilaDevolucao | Literal["regra"] | None = None
 
 
-class AcompanhamentoRastreioOut(BaseModel):
+class AcompanhamentoRastreioOut(AcompanhamentoPrazoFields):
     pedido_bling: str
     # Observação livre por PEDIDO (espelhada na linha depois de editar).
     observacao: str | None = None

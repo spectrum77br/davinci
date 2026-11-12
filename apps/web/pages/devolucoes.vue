@@ -1395,6 +1395,18 @@ type AcompanhamentoRow = {
   video_enviado_por: string | null
   video_sem_motivo: string | null
   video_refazer_motivo: string | null
+} & PrazoFields
+// Prazos (12/11/2026, services/devolucao_prazo_acompanhamento): 45 dias sem o pacote chegar
+// → lançar Não devolvido + Problemas + chamado (por enquanto só avisa); Amazon
+// 14 dias sem o cliente postar e sem reembolso → cancelar no Seller Central.
+type PrazoFields = {
+  prazo_estado: 'vencido' | 'vence_logo' | 'excecao' | null
+  prazo_ate: string | null
+  prazo_dias_restantes: number | null
+  prazo_origem: 'padrao' | 'observacao' | null
+  prazo_texto: string | null
+  amazon_cancelar: boolean
+  amazon_cancelar_texto: string | null
 }
 type Fila = 'acompanhamento' | 'fraude'
 type VideoStatus = 'nao_solicitado' | 'pendente' | 'enviado' | 'sem_video'
@@ -1427,9 +1439,9 @@ type RastreioSaved = {
   reembolso_detalhe: string | null
   fila: Fila
   fila_manual: boolean
-}
+} & PrazoFields
 
-type Tab = 'acompanhamento' | 'fraude' | 'lancamentos'
+type Tab ='acompanhamento' | 'fraude' | 'lancamentos'
 // Acompanhamento é a aba inicial (folha do Eduardo, 2026-09-02); Fraude
 // (Vinicius 17/09) é a mesma tabela, só com os pedidos em que NÃO volta
 // pacote (só dinheiro) — outra pessoa cuida; a aba Lançamentos guarda TODO o
@@ -1453,6 +1465,9 @@ const acompSearch = ref('')
 const acompPlataformaFilter = ref('all')
 const acompLojaFilter = ref('all')
 const acompParadoFilter = ref<'all' | '7' | '15' | '30'>('all')
+// Prazos (12/11/2026): 'prazo' = passou dos 45 dias ou vence em até 5 dias;
+// 'amazon' = Amazon sem postar há 14 dias (cancelar no Seller Central).
+const acompRegraFilter = ref<'all' | 'prazo' | 'amazon'>('all')
 // Só pedidos com prazo de resposta da loja vencendo em 24 h (ou vencido).
 const acompPrazoFilter = ref(false)
 // Status de devolução do pacote (10/09): 'chegou' = Devolvido ("Chegou em"
@@ -1535,6 +1550,10 @@ const acompFiltered = computed(() => {
     if (acompChegadaFilter.value === 'chegou' && !r.devolucao_chegou_em) return false
     if (acompChegadaFilter.value === 'pendente' && r.devolucao_chegou_em) return false
     if (acompPrazoFilter.value && !contestacaoUrgente(r.prazo_resposta)) return false
+    // (Na aba Fraude não há prazo de 45 dias: o filtro só vale no Acompanhamento.)
+    const regra = filaAtiva.value === 'acompanhamento' ? acompRegraFilter.value : 'all'
+    if (regra === 'prazo' && r.prazo_estado !== 'vencido' && r.prazo_estado !== 'vence_logo') return false
+    if (regra === 'amazon' && !r.amazon_cancelar) return false
     if (term) {
       const hay = [
         r.pedido_bling, r.pedido_marketplace, r.cliente, r.sku, r.produto,
@@ -1558,6 +1577,13 @@ const acompSemLocalizacao = computed(() => pedidosDe(acompNaFila.value.filter((r
 const acompParados15 = computed(() => pedidosDe(acompNaFila.value.filter((r) => (r.dias_em_devolucao ?? 0) >= 15)).size)
 // Pedidos cujo prazo de resposta na plataforma vence em menos de 24 h (ou já venceu).
 const acompPrazoUrgente = computed(() => pedidosDe(acompNaFila.value.filter((r) => contestacaoUrgente(r.prazo_resposta))).size)
+// Prazos (12/11/2026): passou dos 45 dias / vence em até 5 dias; Amazon sem postar.
+const acompPrazo45Vencidos = computed(() => pedidosDe(acompNaFila.value.filter((r) => r.prazo_estado === 'vencido')).size)
+const acompPrazo45Logo = computed(() => pedidosDe(acompNaFila.value.filter((r) => r.prazo_estado === 'vence_logo')).size)
+const acompAmazonCancelar = computed(() => pedidosDe(acompNaFila.value.filter((r) => r.amazon_cancelar)).size)
+function filtrarRegra(regra: 'prazo' | 'amazon') {
+  acompRegraFilter.value = acompRegraFilter.value === regra ? 'all' : regra
+}
 
 // Data pura (YYYY-MM-DD) SEM passar por new Date() — evita o clássico
 // "-1 dia" do fuso (Date interpreta como meia-noite UTC).
@@ -1566,6 +1592,19 @@ function fmtDateOnly(v: string | null): string {
   const [y, m, d] = v.split('-')
   if (!y || !m || !d) return v
   return `${d}/${m}/${y.slice(2)}`
+}
+// Texto curto do prazo de 45 dias embaixo dos dias (o balão tem a frase toda).
+function prazoChip(row: AcompanhamentoRow): { texto: string; cls: string } | null {
+  if (row.prazo_estado === 'vencido') return { texto: 'passou do prazo', cls: 'text-red-600 dark:text-red-400' }
+  if (row.prazo_estado === 'vence_logo') {
+    const n = row.prazo_dias_restantes ?? 0
+    return { texto: n === 1 ? 'vence amanhã' : `vence em ${n}d`, cls: 'text-amber-700 dark:text-amber-400' }
+  }
+  if (row.prazo_estado === 'excecao') return { texto: 'fora da regra', cls: 'text-muted-foreground' }
+  if (row.prazo_origem === 'observacao' && row.prazo_ate) {
+    return { texto: `prazo ${fmtDateOnly(row.prazo_ate).slice(0, 5)} (obs.)`, cls: 'text-muted-foreground' }
+  }
+  return null
 }
 function diasBadgeClass(dias: number | null): string {
   if (dias == null) return 'bg-muted text-muted-foreground'
@@ -1620,6 +1659,13 @@ async function saveRastreio(
         r.reembolso_detalhe = res.reembolso_detalhe
         r.fila = res.fila
         r.fila_manual = res.fila_manual
+        // Prazo de 45 dias: a observação nova pode segurar o pedido na hora.
+        // (O aviso da Amazon não depende da observação: fica o do GET.)
+        r.prazo_estado = res.prazo_estado
+        r.prazo_ate = res.prazo_ate
+        r.prazo_dias_restantes = res.prazo_dias_restantes
+        r.prazo_origem = res.prazo_origem
+        r.prazo_texto = res.prazo_texto
       }
     }
   } catch (e: any) {
@@ -2736,12 +2782,42 @@ async function backfillAddresses() {
         {{ acompError }}
       </div>
 
-      <div class="grid grid-cols-2 lg:grid-cols-5 gap-2">
+      <div class="grid grid-cols-2 gap-2" :class="tab === 'fraude' ? 'lg:grid-cols-5' : 'lg:grid-cols-7'">
         <StatCard :label="tab === 'fraude' ? 'Casos de fraude' : 'Pedidos em devolução'" :value="acompTotalPedidos" :icon="tab === 'fraude' ? ShieldAlert : PackageSearch" compact />
         <StatCard label="Sem rastreio" :value="acompSemRastreio" :icon="AlertCircle" tone="warning" compact />
         <StatCard label="Sem localização" :value="acompSemLocalizacao" :icon="Clock" tone="warning" compact />
         <StatCard label="Parados 15+ dias" :value="acompParados15" :icon="Clock" tone="danger" compact />
         <StatCard label="Responder em 24 h" :value="acompPrazoUrgente" :icon="AlertTriangle" tone="danger" hint="prazo da plataforma" compact />
+        <!-- Prazos (12/11/2026): clicar filtra a lista; clicar de novo solta. -->
+        <button
+          v-if="tab !== 'fraude'"
+          type="button"
+          class="rounded-lg text-left ring-offset-2 transition"
+          :class="acompRegraFilter === 'prazo' ? 'ring-2 ring-red-400' : 'hover:brightness-95'"
+          title="Passou de 45 dias em devolução sem o pacote chegar (ou vence em até 5 dias). Fora da regra: prazo novo escrito na observação, extraviado, não recebido, pedido já lançado. Por enquanto o sistema só avisa — depois ele lança sozinho: Não devolvido, Bling em Problemas e chamado."
+          data-devolucao-prazo45
+          @click="filtrarRegra('prazo')"
+        >
+          <StatCard
+            label="Passou de 45 dias"
+            :value="acompPrazo45Vencidos"
+            :icon="Clock"
+            tone="danger"
+            :hint="acompPrazo45Logo ? `+${acompPrazo45Logo} vencem em até 5 dias` : 'lançar Não devolvido'"
+            compact
+          />
+        </button>
+        <button
+          v-if="tab !== 'fraude'"
+          type="button"
+          class="rounded-lg text-left ring-offset-2 transition"
+          :class="acompRegraFilter === 'amazon' ? 'ring-2 ring-red-400' : 'hover:brightness-95'"
+          title="Amazon: 14 dias ou mais e o cliente não postou a devolução (sem reembolso). Cancelar a devolução no Seller Central › Gerenciar devoluções — a API da Amazon não tem esse comando."
+          data-devolucao-amazon-cancelar
+          @click="filtrarRegra('amazon')"
+        >
+          <StatCard label="Amazon: cancelar devolução" :value="acompAmazonCancelar" :icon="AlertTriangle" tone="warning" hint="cliente não postou em 14 dias" compact />
+        </button>
       </div>
 
       <div class="flex flex-wrap items-center gap-2">
@@ -2776,6 +2852,11 @@ async function backfillAddresses() {
           <input v-model="acompPrazoFilter" type="checkbox" class="size-3.5" />
           Responder em 24 h
         </label>
+        <select v-if="tab !== 'fraude'" v-model="acompRegraFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Prazos: 45 dias sem o pacote chegar; Amazon sem o cliente postar em 14 dias">
+          <option value="all">todos os prazos</option>
+          <option value="prazo">passou de 45 dias / vence logo</option>
+          <option value="amazon">Amazon: cancelar devolução</option>
+        </select>
         <span class="ml-auto text-xs text-muted-foreground">
           {{ acompFiltered.length }} de {{ acompNaFila.length }} itens · rastreio, localização e observação salvam ao sair do campo
         </span>
@@ -2879,6 +2960,19 @@ async function backfillAddresses() {
                   :class="diasBadgeClass(row.dias_em_devolucao)"
                 >{{ row.dias_em_devolucao }}d</span>
                 <span v-else class="text-muted-foreground">—</span>
+                <!-- Prazos (12/11/2026): o aviso embaixo dos dias; o balão diz o porquê. -->
+                <div
+                  v-if="prazoChip(row)"
+                  class="mt-0.5 whitespace-nowrap text-[10px] font-semibold"
+                  :class="prazoChip(row)!.cls"
+                  :title="row.prazo_texto || ''"
+                  data-devolucao-prazo
+                >{{ prazoChip(row)!.texto }}</div>
+                <div
+                  v-if="row.amazon_cancelar"
+                  class="mt-0.5 whitespace-nowrap text-[10px] font-semibold text-amber-700 dark:text-amber-400"
+                  :title="row.amazon_cancelar_texto || ''"
+                >cancelar devolução</div>
               </td>
               <td class="px-2 py-1 whitespace-nowrap">
                 <span
