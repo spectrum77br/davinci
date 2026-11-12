@@ -21,8 +21,10 @@ from app.services.nf_etiqueta_declaracao import (
 from app.services.nf_etiqueta_juntar import redimensionar_para_etiqueta
 from app.services.nf_etiqueta_picking import (
     escrever_picking,
+    escrever_picking_livre,
     ler_picking,
     parece_pedido_shopee,
+    plataforma_pelo_numero,
 )
 from app.services.nf_etiqueta_transform import transformar_etiqueta
 from tests.declaracao_sintetica import (
@@ -676,3 +678,153 @@ def test_criar_se_faltar_so_onde_o_transform_apagou_um_rodape():
     # a etiqueta que tinha rodapé (apagado pelo transform) ganha
     apagado = _blob_antigo()
     assert escrever_picking(apagado, [_item("a1")], None, criar_se_faltar=True)[1] == "ok"
+
+
+# --- rodapé LIVRE: Amazon, TikTok, Carrefour, SEDEX (12/11/2026) -----------
+
+
+def _etiqueta_livre(
+    w: float = 300.0, h: float = 442.0, *, fim: float = 380.0, up: bool = True
+) -> bytes:
+    """Etiqueta sem rodapé (Amazon/TikTok/Carrefour/SEDEX): linha 'UP…' do
+    Upseller no topo (quando `up`), moldura e um bloco preto (código de
+    barras) que termina em `fim`."""
+    doc = fitz.open()
+    p = doc.new_page(width=w, height=h)
+    if up:
+        p.insert_text((20, 12), "UP2NYY266996 12/11/2026 08:29:54", fontsize=8)
+    p.draw_rect(fitz.Rect(0.06 * w, 0.04 * h, 0.96 * w, fim), color=(0, 0, 0), width=1)
+    p.draw_rect(fitz.Rect(0.1 * w, fim - 0.1 * h, 0.5 * w, fim - 2), color=None, fill=(0, 0, 0))
+    return doc.tobytes()
+
+
+def _pe(pdf: bytes) -> tuple[list[tuple[float, float, str, float]], float]:
+    """(spans do rodapé livre (topo/fundo da tinta, texto, fs), altura)."""
+    page = fitz.open(stream=pdf, filetype="pdf")[0]
+    out = []
+    for bl in page.get_text("dict")["blocks"]:
+        for ln in bl.get("lines", []):
+            for sp in ln["spans"]:
+                y, fs, t = sp["origin"][1], sp["size"], sp["text"].strip()
+                if t and y > page.rect.height * 0.5 and not t.startswith("DUIMP"):
+                    out.append((y - _SOBE * fs, y + _DESCE * fs, t, fs))
+    return sorted(out), page.rect.height
+
+
+def test_livre_amazon_1_sku_abaixo_do_conteudo_com_ref_sem_deadline():
+    pdf = _etiqueta_livre(fim=380.0)
+    novo, st, det = escrever_picking_livre(pdf, [_item("b048.18")], plataforma="amazon")
+    assert st == "ok", det
+    assert "encolhida=0" in det
+    pe, h = _pe(novo)
+    textos = [t for _a, _b, t, _f in pe]
+    assert textos[0] == "SKU: 1; Total Items: 1; #UP2NYY266996"
+    assert "1. b048.18" in textos and "*1" in textos
+    assert min(a for a, *_ in pe) > 380.0  # não cobre o conteúdo
+    assert max(b for _a, b, *_ in pe) < h
+    assert "Deadline" not in _texto(novo, 0)
+
+
+def test_livre_amazon_3_skus_encolhe_8_por_cento_e_cabe():
+    pdf = _etiqueta_livre(fim=422.0)  # como a real: imagem até 422 de 442
+    itens = [_item("b048.18"), _item("b011.18"), _item("b005.18", 2)]
+    novo, st, det = escrever_picking_livre(pdf, itens, plataforma="amazon")
+    assert st == "ok", det
+    assert "encolhida=1" in det and "mais=0" in det
+    pe, h = _pe(novo)
+    textos = [t for _a, _b, t, _f in pe]
+    assert textos[0] == "SKU: 3; Total Items: 4; #UP2NYY266996"
+    for t in ("1. b048.18", "2. b011.18", "3. b005.18", "( *2 )"):
+        assert t in textos
+    assert min(a for a, *_ in pe) > 422.0 * 0.92
+    assert max(b for _a, b, *_ in pe) < h
+    # o conteúdo encolheu preso no topo (a linha UP continua lá em cima)
+    assert "UP2NYY266996 12/11/2026" in _texto(novo, 0)
+
+
+def test_livre_tiktok_nao_encolhe_e_desvia_da_duimp():
+    pdf = transformar_etiqueta(_etiqueta_livre(fim=390.0), duimp="26BR0000000001")
+    novo, st, det = escrever_picking_livre(pdf, [_item("dg078.pi+a003.pi")], plataforma="tiktok")
+    assert st == "ok", det
+    assert "encolhida=0" in det
+    pe, _h = _pe(novo)
+    assert pe[0][2] == "SKU: 1; Total Items: 1; #UP2NYY266996"
+    assert min(a for a, *_ in pe) > 390.0
+    _fim, _topo = _sem_sobrepor_duimp(novo)
+
+
+def test_livre_sedex_escala_a_fonte_com_a_largura_e_sem_ref():
+    pdf = _etiqueta_livre(577.5, 813.0, fim=700.0, up=False)
+    novo, st, det = escrever_picking_livre(pdf, [_item("b011.18", 2)], plataforma="amazon")
+    assert st == "ok", det
+    pe, h = _pe(novo)
+    cab = pe[0]
+    assert cab[2] == "SKU: 1; Total Items: 2"  # sem a linha UP: sem '#'
+    assert cab[3] == pytest.approx(9.0 * 577.5 / 300.0, abs=0.05)
+    assert min(a for a, *_ in pe) > 700.0 and max(b for _a, b, *_ in pe) < h
+    # na impressora (reduzida pro tamanho da etiqueta) volta a ~9 pt
+    impressa = redimensionar_para_etiqueta(novo)
+    assert _pe(impressa)[0][0][3] == pytest.approx(9.0, abs=0.6)
+
+
+def test_livre_carrefour_sem_ref():
+    pdf = _etiqueta_livre(298.0, 419.0, fim=360.0, up=False)
+    novo, st, det = escrever_picking_livre(pdf, [_item("b017.12.20")], plataforma="carrefour")
+    assert st == "ok", det
+    pe, _h = _pe(novo)
+    assert pe[0][2] == "SKU: 1; Total Items: 1"
+    assert sorted(t for _a, _b, t, _f in pe[1:]) == ["*1", "1. b017.12.20"]
+
+
+def test_livre_sem_faixa_ou_shopee_ou_lixo_devolve_igual():
+    itens = [_item("b048.18")]
+    # conteúdo até a borda, sem Amazon pra encolher
+    cheia = _etiqueta_livre(fim=440.0)
+    assert escrever_picking_livre(cheia, itens, plataforma="tiktok")[:2] == (cheia, "sem_rodape")
+    # Shopee com rodapé: não é com esta função
+    shopee = etiqueta_shopee([("dg062.pi+a003.pi", 1)])
+    assert escrever_picking_livre(shopee, itens, plataforma="shopee")[:2] == (shopee, "sem_rodape")
+    # nunca levanta
+    novo, st, _d = escrever_picking_livre(b"lixo", itens, plataforma="amazon")
+    assert (novo, st) == (b"lixo", "erro")
+    assert escrever_picking_livre(cheia, [], plataforma="amazon")[:2] == (cheia, "sem_itens")
+
+
+@pytest.mark.parametrize(
+    ("numeroloja", "esperado"),
+    [
+        ("261107NM1344HA", "shopee"),
+        ("702-1234567-1234567", "amazon"),
+        ("5778955150001-A", "carrefour"),
+        ("579876543210987654", "tiktok"),
+        ("5798765432109876543", "tiktok"),
+        ("2000012345678901", None),  # ML
+        ("PO-211-01234567890", None),  # Temu
+        ("", None),
+        (None, None),
+    ],
+)
+def test_plataforma_pelo_numero(numeroloja, esperado):
+    assert plataforma_pelo_numero(numeroloja) == esperado
+
+
+def test_livre_amazon_encolhida_com_duimp_mantem_a_fonte_e_nao_cobre():
+    """A DUIMP do transform usa 'hebo' na mesma página: depois de encolher,
+    o cabeçalho continua em Helvetica-Bold (não cai pra Times) e o rodapé
+    não encosta na DUIMP."""
+    pdf = transformar_etiqueta(_etiqueta_livre(fim=422.0), duimp="26BR0000000001")
+    itens = [_item("b048.18"), _item("b011.18"), _item("b005.18")]
+    novo, st, det = escrever_picking_livre(pdf, itens, plataforma="amazon")
+    assert st == "ok" and "encolhida=1" in det, det
+    page = fitz.open(stream=novo, filetype="pdf")[0]
+    spans = [
+        s for b in page.get_text("dict")["blocks"] for ln in b.get("lines", [])
+        for s in ln["spans"] if s["text"].strip()
+    ]
+    cab = next(s for s in spans if s["text"].startswith("SKU: 3"))
+    assert cab["font"] == "Helvetica-Bold"
+    duimp = next(s for s in spans if s["text"].startswith("DUIMP"))
+    rodape = [s for s in spans if s["origin"][1] >= cab["origin"][1] - 0.1]
+    fim_duimp = duimp["origin"][1] + _DESCE * duimp["size"]
+    topo_rodape = min(s["origin"][1] - _SOBE * s["size"] for s in rodape)
+    assert duimp not in rodape and fim_duimp < topo_rodape

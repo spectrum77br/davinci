@@ -23,7 +23,9 @@ derrubar uma impressão ou uma subida que funcionavam sem ela.
 Os mesmos itens alimentam o rodapé de picking da Shopee (09/11/2026,
 `nf_etiqueta_picking`). `pedidos_da_shopee` diz, na impressão, quais pedidos
 são da Shopee (só eles ganham rodapé quando o blob guardado não tem) — com a
-mesma regra de nunca levantar.
+mesma regra de nunca levantar. Desde 12/11/2026 `plataformas_dos_pedidos`
+devolve a plataforma de cada pedido: Amazon, TikTok e Carrefour ganham o
+rodapé LIVRE na impressão (`escrever_picking_livre`).
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingOrder, StoreInfo
 from app.services.nf_etiqueta_declaracao import ItemDeclaracao, formatar_item
-from app.services.nf_etiqueta_picking import parece_pedido_shopee
+from app.services.nf_etiqueta_picking import plataforma_pelo_numero
 
 logger = structlog.get_logger()
 
@@ -105,22 +107,21 @@ async def itens_do_pedido(session: AsyncSession, numero: str | None) -> list[Ite
     return (await itens_dos_pedidos(session, [numero])).get(numero, [])
 
 
-async def pedidos_da_shopee(
+async def plataformas_dos_pedidos(
     session: AsyncSession, numeros: Iterable[str | None], *, origem: str
-) -> set[str]:
-    """Números (de `numeros`) cujo pedido é da Shopee — só eles ganham o rodapé
-    de picking na impressão quando o blob guardado não tem (etiquetas subidas
-    entre 04/08 e 09/11/2026, quando o transform só apagava; o
-    `escrever_picking` ainda confere o rastro do rodapé apagado no blob).
+) -> dict[str, str]:
+    """numero → plataforma do pedido ('shopee', 'amazon', 'tiktok',
+    'carrefour', 'ml'…), pra regra do rodapé de picking na impressão.
 
     Pela loja do pedido: `bling_orders.loja` → `store_info.bling_store_id` →
     `platform` (mesma ligação do lease do executor). Loja que não está em
-    `store_info`: pelo formato do nº da Shopee (`parece_pedido_shopee`). Uma
-    consulta só, num SAVEPOINT; NUNCA levanta — na falha devolve vazio (a
-    etiqueta antiga imprime sem rodapé, como hoje) e loga warning."""
+    `store_info`: pelo formato do nº do pedido no marketplace
+    (`plataforma_pelo_numero`). Número sem plataforma conhecida não aparece.
+    Uma consulta só, num SAVEPOINT; NUNCA levanta — na falha devolve vazio
+    (a etiqueta imprime como hoje) e loga warning."""
     nums = [n for n in dict.fromkeys(numeros) if n]
     if not nums:
-        return set()
+        return {}
     try:
         async with session.begin_nested():
             rows = (
@@ -146,7 +147,7 @@ async def pedidos_da_shopee(
             total=len(nums),
             erro=f"{type(exc).__name__}: {exc}"[:300],
         )
-        return set()
+        return {}
     plataformas: dict[str, set[str]] = {}
     numerolojas: dict[str, set[str]] = {}
     for r in rows:
@@ -154,15 +155,27 @@ async def pedidos_da_shopee(
             plataformas.setdefault(r.numero, set()).add(r.plataforma)
         if r.numeroloja:
             numerolojas.setdefault(r.numero, set()).add(r.numeroloja)
-    out: set[str] = set()
+    out: dict[str, str] = {}
     for n in nums:
-        plats = plataformas.get(n)
+        plats = plataformas.get(n) or {
+            p for p in map(plataforma_pelo_numero, numerolojas.get(n, ())) if p
+        }
         if plats:
-            if "shopee" in plats:
-                out.add(n)
-        elif any(parece_pedido_shopee(x) for x in numerolojas.get(n, ())):
-            out.add(n)
+            # Shopee primeiro (regra de 09/11, igual a antes); senão a 1ª.
+            out[n] = "shopee" if "shopee" in plats else sorted(plats)[0]
     return out
+
+
+async def pedidos_da_shopee(
+    session: AsyncSession, numeros: Iterable[str | None], *, origem: str
+) -> set[str]:
+    """Números (de `numeros`) cujo pedido é da Shopee — só eles ganham o rodapé
+    de picking na impressão quando o blob guardado não tem (etiquetas subidas
+    entre 04/08 e 09/11/2026, quando o transform só apagava; o
+    `escrever_picking` ainda confere o rastro do rodapé apagado no blob).
+    Atalho de `plataformas_dos_pedidos`; NUNCA levanta."""
+    plats = await plataformas_dos_pedidos(session, numeros, origem=origem)
+    return {n for n, p in plats.items() if p == "shopee"}
 
 
 async def itens_para_declaracao(

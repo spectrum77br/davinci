@@ -69,14 +69,19 @@ from app.services.bling_situacoes import (
 from app.services.estoque_relatorio_pdf import relatorio_pedidos_pdf
 from app.services.link_mega import com_https, erro_link_mega
 from app.services.nf_etiqueta_declaracao import ItemDeclaracao, reescrever_declaracao
-from app.services.nf_etiqueta_itens import itens_para_declaracao, pedidos_da_shopee
+from app.services.nf_etiqueta_itens import itens_para_declaracao, plataformas_dos_pedidos
 from app.services.nf_etiqueta_juntar import (
     EtiquetaJuntarError,
     juntar_etiqueta_nf,
     juntar_varios,
     redimensionar_para_etiqueta,
 )
-from app.services.nf_etiqueta_picking import escrever_picking, ler_picking
+from app.services.nf_etiqueta_picking import (
+    PLATAFORMAS_LIVRES,
+    escrever_picking,
+    escrever_picking_livre,
+    ler_picking,
+)
 from app.services.sku_tags import VALID_TAGS as _VALID_TAGS
 from app.services.sku_tags import classify_sku_tag as _classify_sku_tag
 from app.services.sku_tags import sql_clause_for_tag as _sql_clause_for_tag
@@ -1063,7 +1068,12 @@ async def list_estoque_pedidos(
 
 
 def _picking_para_impressao(
-    pdf: bytes, pedido: str, itens: list[ItemDeclaracao], *, shopee: bool
+    pdf: bytes,
+    pedido: str,
+    itens: list[ItemDeclaracao],
+    *,
+    shopee: bool,
+    plataforma: str | None = None,
 ) -> bytes:
     """Rodapé de picking da cópia impressa com os itens ATUAIS do Bling
     (09/11/2026): o rodapé que já está no blob é realinhado (troca depois da
@@ -1071,12 +1081,21 @@ def _picking_para_impressao(
     04/08 e hoje, quando o transform só apagava) ganha um — sem #ref/Deadline,
     só onde o transform apagou um rodapé (layout da Shopee que nunca teve,
     como o de DANFE no pé, fica sem) e se a faixa de baixo da etiqueta
-    estiver vazia. Qualquer falha imprime como estava."""
+    estiver vazia. Qualquer falha imprime como estava.
+
+    12/11/2026: Amazon (e o SEDEX do Melhor Envio do pedido Amazon), TikTok e
+    Carrefour ganham o rodapé na faixa em branco do pé
+    (`escrever_picking_livre`, sem Deadline). ML e o resto: nada muda."""
     try:
         rodape = ler_picking(pdf)
         if rodape is None and not shopee:
-            return pdf  # TikTok/ML/Amazon: nada a fazer, sem ler a página de novo
-        novo, status, detalhe = escrever_picking(pdf, itens, rodape, criar_se_faltar=shopee)
+            if plataforma not in PLATAFORMAS_LIVRES:
+                return pdf  # ML/Temu/Magalu: nada a fazer
+            novo, status, detalhe = escrever_picking_livre(pdf, itens, plataforma=plataforma)
+        else:
+            novo, status, detalhe = escrever_picking(
+                pdf, itens, rodape, criar_se_faltar=shopee
+            )
     except Exception as exc:  # noqa: BLE001 — nunca trava a impressão
         novo, status, detalhe = pdf, "erro", f"{type(exc).__name__}: {exc}"[:300]
     # 'igual' (blob já alinhado) e 'sem_rodape' (TikTok, ML, Amazon, Shopee
@@ -1095,6 +1114,7 @@ def _pdf_para_impressao(
     itens: list[ItemDeclaracao] | None = None,
     *,
     shopee: bool = False,
+    plataforma: str | None = None,
 ) -> bytes:
     """PDF final de UM pedido: etiqueta, ou etiqueta + NF quando é correios.
 
@@ -1135,7 +1155,9 @@ def _pdf_para_impressao(
             logger.warning("nf_etiqueta_declaracao", **log)
         elif status not in ("igual", "sem_declaracao"):
             logger.info("nf_etiqueta_declaracao", **log)
-        base = _picking_para_impressao(base, row.pedido_bling, itens, shopee=shopee)
+        base = _picking_para_impressao(
+            base, row.pedido_bling, itens, shopee=shopee, plataforma=plataforma
+        )
     try:
         pdf = redimensionar_para_etiqueta(base)
     except EtiquetaJuntarError:
@@ -1323,14 +1345,18 @@ async def get_pedidos_etiquetas_lote(
     itens_por_pedido = await itens_para_declaracao(
         session, [r.pedido_bling for r in ordenados], origem="impressao_lote"
     )
-    # Quais são da Shopee (rodapé de picking nas etiquetas antigas sem ele).
-    shopee = await pedidos_da_shopee(
+    # Plataforma de cada pedido (rodapé de picking: Shopee nas etiquetas
+    # antigas sem ele; Amazon/TikTok/Carrefour na faixa livre do pé).
+    plataformas = await plataformas_dos_pedidos(
         session, [r.pedido_bling for r in ordenados], origem="impressao_lote"
     )
     try:
         partes = [
             _pdf_para_impressao(
-                r, itens_por_pedido.get(r.pedido_bling), shopee=r.pedido_bling in shopee
+                r,
+                itens_por_pedido.get(r.pedido_bling),
+                shopee=plataformas.get(r.pedido_bling) == "shopee",
+                plataforma=plataformas.get(r.pedido_bling),
             )
             for r in ordenados
         ]
@@ -1404,9 +1430,14 @@ async def get_pedido_etiqueta(
     itens_por_pedido = await itens_para_declaracao(
         session, [row.pedido_bling], origem="impressao"
     )
-    shopee = await pedidos_da_shopee(session, [row.pedido_bling], origem="impressao")
+    plataforma = (
+        await plataformas_dos_pedidos(session, [row.pedido_bling], origem="impressao")
+    ).get(row.pedido_bling)
     conteudo = _pdf_para_impressao(
-        row, itens_por_pedido.get(row.pedido_bling), shopee=row.pedido_bling in shopee
+        row,
+        itens_por_pedido.get(row.pedido_bling),
+        shopee=plataforma == "shopee",
+        plataforma=plataforma,
     )
     if row.impressa_em is None and carimbar:
         # Abrir a etiqueta é imprimir — carimba pra tela marcar "Impressa"

@@ -72,7 +72,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import fitz  # PyMuPDF
@@ -826,4 +826,308 @@ def escrever_picking(
     try:
         return _escrever(pdf_bytes, itens, rodape, criar_se_faltar)
     except Exception as exc:  # noqa: BLE001 — nunca trava subida nem impressão
+        return pdf_bytes, "erro", f"{type(exc).__name__}: {exc}"[:300]
+
+
+# ---------------------------------------------------------------------------
+# Rodapé LIVRE: Amazon, TikTok, Carrefour, SEDEX/Melhor Envio (12/11/2026)
+# ---------------------------------------------------------------------------
+#
+# Pedido do Eduardo (12/11): o rodapé de picking sai TAMBÉM na impressão das
+# etiquetas que nunca tiveram (Amazon, TikTok J&T/Jadlog, Carrefour e o SEDEX
+# do Melhor Envio do pedido Amazon). Só na CÓPIA da impressão — a subida e o
+# blob guardado não mudam, então nunca há um rodapé "nosso" a reler aqui.
+#
+# Onde: a faixa em branco MAIS BAIXA do pé da página da etiqueta, achada pelos
+# PIXELS (a Amazon e o SEDEX são uma imagem só da página inteira): nunca cobre
+# código de barras, endereço nem as linhas DUIMP do transform. Página maior
+# que a do Upseller (SEDEX 577,5×813) é reduzida na impressão
+# (`redimensionar_para_etiqueta`), então a fonte cresce na mesma razão
+# (k = largura/300). Amazon que não cabe inteira: o conteúdo da página
+# encolhe 8% (preso no topo, centralizado) e o rodapé vai no espaço liberado;
+# se ainda não couber, "+N itens". Sem Deadline. "#<UP…>" só quando a linha
+# do topo do Upseller ("UP2NYY266996 12/11/2026 08:29:54") existe.
+
+# Nº do pedido no marketplace (`bling_orders.numeroloja`) quando a loja não
+# está em `store_info`.
+_RE_PEDIDO_AMAZON = re.compile(r"^\d{3}-\d{7}-\d{7}$")
+_RE_PEDIDO_CARREFOUR = re.compile(r"^\d+-[A-Z]$")
+_RE_PEDIDO_TIKTOK = re.compile(r"^\d{18,19}$")
+
+PLATAFORMAS_LIVRES = frozenset({"amazon", "tiktok", "carrefour"})
+
+_REF_LARGURA = 300.0  # largura da página do Upseller (onde 9/8 pt foram medidos)
+_PIXEL_TINTA = 200  # pixel (0..255) abaixo disto é tinta
+_GAP_LIVRE = 2.0  # vão entre o conteúdo de cima e a tinta do cabeçalho (× k)
+_MIN_TOPO_LIVRE = 0.55
+_ENCOLHE = 0.92  # Amazon que não cabe: o conteúdo da página encolhe 8%
+_RE_UP = re.compile(r"\b(UP[0-9A-Z]{6,})\s+\d{2}/\d{2}/\d{4}")
+
+
+def plataforma_pelo_numero(numeroloja: str | None) -> str | None:
+    """'shopee' | 'amazon' | 'carrefour' | 'tiktok' pelo formato do nº do
+    pedido no marketplace; None = não reconhecido (ML 16 dígitos, Temu…)."""
+    n = (numeroloja or "").strip().upper()
+    if not n:
+        return None
+    if parece_pedido_shopee(n):
+        return "shopee"
+    if _RE_PEDIDO_AMAZON.match(n):
+        return "amazon"
+    if _RE_PEDIDO_CARREFOUR.match(n):
+        return "carrefour"
+    if _RE_PEDIDO_TIKTOK.match(n):
+        return "tiktok"
+    return None
+
+
+def _escala(page: fitz.Page) -> float:
+    return max(1.0, page.rect.width / _REF_LARGURA)
+
+
+def _faixa_do_pe(
+    page: fitz.Page, escala: float, spans: list[dict], minimo: float
+) -> tuple[float, float, float, float, bool] | None:
+    """(y0, y1, x0, x1, até_o_fim) da faixa em branco onde o rodapé nasce.
+
+    Pelos PIXELS do pé (texto, imagem e vetor contam igual). Sobe da borda de
+    baixo enquanto só houver branco, linhas DUIMP ou traço fino (≤ 2,5 pt × k:
+    a moldura); o primeiro conteúdo de verdade fecha a 'zona do pé'. Dentro
+    dela, a faixa em branco MAIS BAIXA com pelo menos `minimo` de altura —
+    nunca sobe pra dentro da etiqueta. Molduras verticais nas pontas (≤ 6% da
+    largura, escuras em > 60% do pé) ficam de fora e limitam x0/x1."""
+    w, h = page.rect.width, page.rect.height
+    clip = fitz.Rect(0, h * _MIN_TOPO_LIVRE, w, h)
+    pix = page.get_pixmap(clip=clip, dpi=72, colorspace=fitz.csGRAY, annots=False)
+    s, W, H = pix.samples, pix.width, pix.height
+    if W == 0 or H == 0:
+        return None
+    sx, sy = W / w, H / clip.height
+    borda = int(W * 0.06)
+    xl, xr = 0, W
+    for x in range(borda):
+        if sum(1 for y in range(H) if s[y * W + x] < _PIXEL_TINTA) > 0.6 * H:
+            xl = x + 1
+    for x in range(W - 1, W - borda - 1, -1):
+        if sum(1 for y in range(H) if s[y * W + x] < _PIXEL_TINTA) > 0.6 * H:
+            xr = x
+    if xr - xl < W * 0.5:
+        return None
+    vazia = [min(s[y * W + xl : y * W + xr]) >= _PIXEL_TINTA for y in range(H)]
+    duimp = [False] * H
+    for sp in spans:
+        if _e_duimp(sp):
+            o, fs = float(sp["origin"][1]), float(sp["size"])
+            ya = max(0, int((o - _GLIFO_SOBE * fs - clip.y0) * sy) - 1)
+            yb = min(H, int((o + _DESCE * fs - clip.y0) * sy) + 2)
+            for y in range(ya, yb):
+                duimp[y] = True
+    fino = 2.5 * escala * sy
+    y, zona = H - 1, 0
+    while y >= 0:
+        if vazia[y] or duimp[y]:
+            y -= 1
+            continue
+        z = y
+        while z >= 0 and not vazia[z] and not duimp[z]:
+            z -= 1
+        if (y - z) <= fino:  # traço fino (moldura): segue subindo
+            y = z
+            continue
+        zona = y + 1  # 1ª linha abaixo do conteúdo
+        break
+    melhor = None
+    y = zona
+    while y < H:
+        if vazia[y] and not duimp[y]:
+            z = y
+            while z < H and vazia[z] and not duimp[z]:
+                z += 1
+            if (z - y) / sy >= minimo:
+                melhor = (y, z)
+            y = z
+        else:
+            y += 1
+    if melhor is None:
+        return None
+    y, z = melhor
+    # moldura que não passa pela faixa (TikTok: termina acima) não estreita
+    while xl > 0 and all(s[r * W + xl - 1] >= _PIXEL_TINTA for r in range(y, z)):
+        xl -= 1
+    while xr < W and all(s[r * W + xr] >= _PIXEL_TINTA for r in range(y, z)):
+        xr += 1
+    ate_o_fim = all(vazia[r] or duimp[r] for r in range(z, H))
+    return clip.y0 + y / sy, clip.y0 + z / sy, xl / sx, xr / sx, ate_o_fim
+
+
+def _livre_px(page: fitz.Page, rect: fitz.Rect) -> bool:
+    pix = page.get_pixmap(clip=rect, dpi=72, colorspace=fitz.csGRAY, annots=False)
+    return not pix.samples or min(pix.samples) >= _PIXEL_TINTA
+
+
+def _ref_do_topo(spans: list[dict], altura: float) -> str | None:
+    """O 'UP2NYY266996' da linha do topo que o Upseller imprime."""
+    for s in spans:
+        if float(s["origin"][1]) <= altura * 0.08:
+            m = _RE_UP.search(s["text"])
+            if m:
+                return m.group(1)
+    return None
+
+
+@dataclass(frozen=True)
+class _Livre:
+    plano: _Plano
+    x_esq: float
+    lv: float  # largura da página 'virtual' (k = 1) em que o plano foi feito
+    k: float
+
+
+def _plano_livre(
+    page: fitz.Page, lista: list[tuple[str, int]], ref: str | None
+) -> _Livre | None:
+    w, h = page.rect.width, page.rect.height
+    k = _escala(page)
+    spans = _spans(page)
+    minimo = (13.5 + 2 * _GAP_LIVRE) * k  # cabeçalho + 1 item a 6 pt
+    faixa = _faixa_do_pe(page, k, spans, minimo)
+    if faixa is None:
+        return None
+    fy0, fy1, fx0, fx1, ate_o_fim = faixa
+    topo = fy0 + _GAP_LIVRE * k
+    limite = h - _MARGEM_PAGINA * k if ate_o_fim else fy1 - _GAP_LIVRE * k
+    duimp = [_tinta(s)[0] for s in spans if _e_duimp(s) and _tinta(s)[0] > topo]
+    if duimp:
+        limite = min(limite, min(duimp) - _FOLGA_DUIMP * k)
+    x_esq = max(_X_ESQ * k, fx0 + 2.0 * k)
+    x_dir = min(w - _X_ESQ * k, fx1 - 2.0 * k)
+    # _planejar numa página 'virtual' de largura (x_dir - x_esq)/k (+ as
+    # margens dele), reescalada e deslocada pra começar em (x_esq, topo).
+    lv = (x_dir - x_esq) / k + 2 * _X_ESQ
+    p = _planejar(lista, ref, None, 0.0, (limite - topo) / k, lv)
+    if p is None:
+        return None
+    # Sobrando altura, desce até 4 pt (× k) pra não colar no conteúdo de cima.
+    topo += min(max(0.0, (limite - topo) / k - p.fundo) / 2, 4.0) * k
+    plano = _Plano(
+        fs_cab=p.fs_cab * k,
+        fs_item=p.fs_item * k,
+        cabecalho=p.cabecalho,
+        base_cab=topo + p.base_cab * k,
+        linhas=tuple((e, d, topo + b * k) for e, d, b in p.linhas),
+        fundo=topo + p.fundo * k,
+        mais=p.mais,
+    )
+    if not _livre_px(page, fitz.Rect(x_esq - 1, topo - 1, x_dir + 1, plano.fundo + 0.5)):
+        return None
+    return _Livre(plano, x_esq, lv, k)
+
+
+def _encolhida(
+    doc: fitz.Document, idx: int, antes: Callable[[fitz.Page], None] | None = None
+) -> fitz.Document:
+    """Cópia do PDF com o conteúdo da página `idx` encolhido 8%, preso no
+    topo e centralizado (o pé ganha ~8% da altura em branco).
+
+    `antes` escreve na página nova ANTES do conteúdo encolhido entrar: com
+    a fonte já usada lá dentro (o 'hebo' da DUIMP), o `insert_text` depois
+    do `show_pdf_page` reaproveitava o nome da fonte do Form XObject e a
+    página ficava sem ela (o texto saía em Times)."""
+    out = fitz.open()
+    for i in range(doc.page_count):
+        if i != idx:
+            out.insert_pdf(doc, from_page=i, to_page=i)
+            continue
+        w, h = doc[i].rect.width, doc[i].rect.height
+        nova = out.new_page(width=w, height=h)
+        if antes is not None:
+            antes(nova)
+        nw, nh = w * _ENCOLHE, h * _ENCOLHE
+        nova.show_pdf_page(fitz.Rect((w - nw) / 2, 0, (w + nw) / 2, nh), doc, i)
+    return out
+
+
+def _inserir_livre(page: fitz.Page, livre: _Livre) -> None:
+    plano, x_esq, lv, k = livre.plano, livre.x_esq, livre.lv, livre.k
+    preto = (0, 0, 0)
+    page.insert_text(
+        (x_esq, plano.base_cab), plano.cabecalho, fontsize=plano.fs_cab, fontname=_FONTE_CAB,
+        color=preto,
+    )
+
+    def real(v: float) -> float:
+        return x_esq + (v - _X_ESQ) * k
+
+    for esq, dir_, base in plano.linhas:
+        page.insert_text(
+            (x_esq, base), esq, fontsize=plano.fs_item, fontname=_FONTE_SKU, color=preto
+        )
+        if dir_:
+            larg = _largura(dir_, _FONTE_QTD, plano.fs_item)
+            x = min(real(lv * _X_QTD), real(lv - _MARGEM_PAGINA) - larg)
+            page.insert_text(
+                (x, base), dir_, fontsize=plano.fs_item, fontname=_FONTE_QTD, color=preto
+            )
+
+
+def _escrever_livre(
+    pdf_bytes: bytes, itens: Sequence[ItemDeclaracao] | None, plataforma: str | None
+) -> tuple[bytes, str, str]:
+    lista = _itens_limpos(list(itens or []))
+    if not lista:
+        return pdf_bytes, "sem_itens", ""
+    if not pdf_bytes:
+        return pdf_bytes, "erro", "pdf_vazio"
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    if doc.needs_pass or doc.page_count == 0:
+        return pdf_bytes, "erro", "pdf_ilegivel"
+    idx = _pagina_da_etiqueta(doc)
+    if idx is None:
+        return pdf_bytes, "sem_rodape", "so_declaracao"
+    page = doc[idx]
+    if page.rotation:
+        return pdf_bytes, "sem_rodape", f"pagina={idx} girada {page.rotation}"
+    spans = _spans(page)
+    if _ler(page, spans)[0] is not None:
+        # Já tem rodapé (Shopee): é o caminho do `escrever_picking`.
+        return pdf_bytes, "sem_rodape", f"pagina={idx} ja_tem_rodape"
+    ref = _ref_do_topo(spans, page.rect.height)
+    lista = _ordem_do_papel(pdf_bytes, lista, None)
+    livre = _plano_livre(page, lista, ref)
+    encolheu = False
+    if plataforma == "amazon" and (livre is None or livre.plano.mais):
+        livre2 = _plano_livre(_encolhida(doc, idx)[idx], lista, ref)
+        if livre2 is not None and (livre is None or livre2.plano.mais < livre.plano.mais):
+            livre, encolheu = livre2, True
+    if livre is None:
+        return pdf_bytes, "sem_rodape", f"pagina={idx} sem_faixa_livre itens={len(lista)}"
+    plano = livre.plano
+    if encolheu:
+        doc = _encolhida(doc, idx, antes=lambda p: _inserir_livre(p, livre))
+    else:
+        _inserir_livre(page, livre)
+    novo = doc.tobytes(garbage=3, deflate=True, no_new_id=True)
+    return (
+        novo,
+        "ok",
+        f"pagina={idx} livre fs={plano.fs_item:g} itens={len(lista)} mais={plano.mais}"
+        f" encolhida={int(encolheu)}",
+    )
+
+
+def escrever_picking_livre(
+    pdf_bytes: bytes,
+    itens: Sequence[ItemDeclaracao] | None,
+    *,
+    plataforma: str | None = None,
+) -> tuple[bytes, str, str]:
+    """Rodapé de picking na etiqueta que nunca teve (Amazon, TikTok,
+    Carrefour, SEDEX), na faixa em branco mais baixa do pé — SÓ na cópia da
+    impressão. `plataforma='amazon'` pode encolher o conteúdo 8% quando não
+    cabe tudo. Mesmos status do `escrever_picking` (`ok` = bytes novos;
+    `sem_rodape` = sem faixa livre / já tem rodapé; `sem_itens`; `erro`).
+    Nunca levanta: falha devolve os bytes de ENTRADA."""
+    try:
+        return _escrever_livre(pdf_bytes, itens, plataforma)
+    except Exception as exc:  # noqa: BLE001 — nunca trava a impressão
         return pdf_bytes, "erro", f"{type(exc).__name__}: {exc}"[:300]

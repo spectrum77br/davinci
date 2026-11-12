@@ -798,14 +798,14 @@ async def test_impressao_shopee_pelo_formato_do_numero_quando_a_loja_nao_esta_ca
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("plataforma", "numeroloja"),
-    [("tiktok", "579876543210987654"), (None, "2000012345678901")],
+    [("ml", "2000012345678901"), (None, "2000012345678901")],
 )
 async def test_impressao_nao_shopee_nao_cria_rodape(
     client: AsyncClient, db: AsyncSession, admin_view: User,
     auth_as: Callable[[User | None], None], plataforma, numeroloja,
 ):
-    """Loja que não é Shopee (ou nº que não tem o formato da Shopee): a
-    etiqueta sem rodapé sai sem rodapé."""
+    """Loja do ML (ou nº sem formato conhecido): a etiqueta sem rodapé sai
+    sem rodapé. (TikTok/Amazon/Carrefour ganham o rodapé livre: 12/11.)"""
     from app.services.nf_etiqueta_picking import ler_picking
 
     numero = "960003" if plataforma else "960004"
@@ -818,6 +818,32 @@ async def test_impressao_nao_shopee_nao_cria_rodape(
     assert r.status_code == 200, r.text
     assert ler_picking(r.content) is None
     assert "Total Items" not in _texto(r.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("plataforma", "numeroloja"),
+    [("tiktok", "579876543210987654"), (None, "702-1234567-1234567")],
+)
+async def test_impressao_tiktok_amazon_ganham_rodape_livre_sem_gravar(
+    client: AsyncClient, db: AsyncSession, admin_view: User,
+    auth_as: Callable[[User | None], None], plataforma, numeroloja,
+):
+    """12/11/2026: TikTok (pela loja) e Amazon (pelo formato do nº) ganham o
+    rodapé de picking na faixa em branco do pé, só na cópia impressa."""
+    numero = "960012" if plataforma else "960013"
+    blob = _etiqueta_shopee_antiga()
+    await _seed_shopee(
+        db, admin_view, numero, blob, plataforma=plataforma, numeroloja=numeroloja,
+    )
+    auth_as(admin_view)
+    r = await client.get(f"/api/estoque/pedidos/{numero}/etiqueta")
+    assert r.status_code == 200, r.text
+    texto = _texto(r.content)
+    assert "SKU: 1; Total Items: 1" in texto
+    assert "dg054.sp+a001.sp" in texto
+    assert "Deadline" not in texto
+    assert await _blob_no_banco(db, numero) == blob
 
 
 @pytest.mark.asyncio
@@ -956,8 +982,9 @@ async def test_impressao_bling_inverteu_a_ordem_rodape_na_ordem_da_declaracao(
 
 
 def test_impressao_nao_shopee_sem_rodape_nem_tenta_escrever(monkeypatch: pytest.MonkeyPatch):
-    """TikTok/ML/Amazon (sem rodapé e não é Shopee): sai na hora, sem ler a
-    página de novo — a impressão em lote roda dentro do endpoint async."""
+    """ML/Temu (sem rodapé, não é Shopee nem plataforma do rodapé livre): sai
+    na hora, sem ler a página de novo — a impressão em lote roda dentro do
+    endpoint async."""
     from app.routers import estoque as estoque_router
     from app.services.nf_etiqueta_transform import transformar_etiqueta
     from tests.declaracao_sintetica import sem_declaracao
@@ -966,6 +993,7 @@ def test_impressao_nao_shopee_sem_rodape_nem_tenta_escrever(monkeypatch: pytest.
         raise AssertionError("escrever_picking não devia rodar")
 
     monkeypatch.setattr(estoque_router, "escrever_picking", _nao_chame)
+    monkeypatch.setattr(estoque_router, "escrever_picking_livre", _nao_chame)
     blob = transformar_etiqueta(sem_declaracao())
     itens = [ItemDeclaracao("b027.24", "Mala", "Branca", 1)]
     assert estoque_router._picking_para_impressao(blob, "960011", itens, shopee=False) is blob
