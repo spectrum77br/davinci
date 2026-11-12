@@ -296,7 +296,7 @@ let timer: ReturnType<typeof setInterval> | null = null
 const recargas: ReturnType<typeof setTimeout>[] = []
 function tick() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
-  if (loading.value || aprovando.value.size || sincronizando.value || emergenciaRodando.value) return
+  if (loading.value || aprovando.value.size || ligandoLote.value || sincronizando.value || emergenciaRodando.value) return
   carregarAnuncios()
   carregarPedidos()
 }
@@ -313,42 +313,12 @@ onBeforeUnmount(() => {
 })
 
 // ---- Textos ----
-const MODOS: Record<string, { titulo: string; texto: string; cls: string }> = {
-  desligado: {
-    titulo: 'Flex automático: DESLIGADO',
-    texto: 'O sistema não confere nem mexe no Flex de nenhum anúncio. A lista abaixo mostra a última conferência feita, se houver.',
-    cls: 'border-zinc-300 bg-zinc-50 text-zinc-800 dark:border-zinc-700 dark:bg-zinc-900/40 dark:text-zinc-200',
-  },
-  observar: {
-    titulo: 'Flex automático: SÓ OBSERVANDO',
-    texto: 'O sistema confere os anúncios e mostra o que faria, mas não liga nem desliga nada no Mercado Livre ou na Shopee.',
-    cls: 'border-sky-300 bg-sky-50 text-sky-900 dark:border-sky-700 dark:bg-sky-950/40 dark:text-sky-200',
-  },
-  piloto: {
-    titulo: 'Flex automático: PILOTO',
-    texto: 'O sistema DESLIGA sozinho o Flex dos anúncios sem peça suficiente em {local}, só nas contas prontas (quadro Contas, à direita). Para LIGAR, ele espera você aprovar.',
-    cls: 'border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-700 dark:bg-amber-950/40 dark:text-amber-200',
-  },
-  ativo: {
-    titulo: 'Flex automático: ATIVO',
-    texto: 'O sistema DESLIGA sozinho o Flex dos anúncios sem peça suficiente em {local}, nas contas prontas (quadro Contas, à direita). Para LIGAR, ele espera você aprovar.',
-    cls: 'border-emerald-300 bg-emerald-50 text-emerald-900 dark:border-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200',
-  },
-}
-// Enquanto a configuração não chega, nada de "DESLIGADO": seria mentira.
-const CARREGANDO = {
-  titulo: 'Flex automático',
-  texto: 'Lendo a configuração…',
-  cls: 'border-zinc-300 bg-zinc-50 text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/40 dark:text-zinc-300',
-}
+// (12/11/2026: a frase do modo saiu da barra de cima — o modo e as regras
+// ficam em "Como o sistema decide", à direita.)
 // Local de saída do Flex (cidade + lote). Até a configuração chegar, o de
 // fábrica — os textos nunca ficam sem cidade.
 const localCidade = computed(() => config.value?.local?.cidade || 'São Bernardo do Campo')
 const localLote = computed(() => config.value?.local?.lote || 'sp')
-const modoInfo = computed(() => {
-  const m = config.value ? MODOS[config.value.modo] || MODOS.desligado! : CARREGANDO
-  return { ...m, texto: m.texto.replaceAll('{local}', localCidade.value) }
-})
 const modoDesligado = computed(() => !config.value || config.value.modo === 'desligado')
 
 function nomePlataforma(p: string | null | undefined): string {
@@ -534,19 +504,48 @@ function alternarGrupo(chave: string) {
   else n.add(chave)
   gruposAbertos.value = n
 }
-const regraTexto = computed(() => {
+// As regras em tópicos (12/11/2026: "escreve melhor, deixa por tópico tipo
+// regras, 1 tal tal, 2 tal tal") — o forte em negrito, o resto normal.
+const regras = computed<{ forte: string; resto: string; antes?: string }[]>(() => {
   const c = config.value
-  if (!c) return ''
-  const pecas = (n: number) => (n === 1 ? '1 peça livre' : `${n} peças livres`)
-  return (
-    `Liga com ${pecas(c.n_liga)} ou mais em ${localCidade.value} (estoque .${localLote.value}) e desliga com menos de ${c.n_desliga}. ` +
-    (c.max_anuncios_por_familia > 0
-      ? `No máximo ${c.max_anuncios_por_familia} anúncio(s) com Flex por família. `
-      : 'Sem limite de anúncios com Flex por família. ') +
-    `Kits ${c.kits ? 'entram' : 'não entram'}. ` +
-    `Confere sozinho a cada ${c.intervalo_min} min` +
-    (c.pode_escrever ? `, mudando até ${c.teto_escritas_por_rodada} anúncios por vez.` : '.')
+  if (!c) return []
+  const pecas = (n: number) => (n === 1 ? '1 peça' : `${n} peças`)
+  const meio = Array.from({ length: Math.max(0, c.n_liga - c.n_desliga) }, (_, i) => c.n_desliga + i)
+  const meioTxt = meio.length === 1 ? pecas(meio[0]!) : meio.length === 2 ? `${meio[0]} ou ${meio[1]} peças` : `${meio[0]} a ${meio[meio.length - 1]} peças`
+  const out: { forte: string; resto: string; antes?: string }[] = [
+    {
+      forte: 'Liga',
+      resto: ` com ${pecas(c.n_liga)} ou mais livres em ${localCidade.value} (estoque .${localLote.value}) — depois que você aprova.`,
+    },
+    {
+      forte: 'Desliga sozinho',
+      resto: ` quando fica com menos de ${pecas(c.n_desliga)}${c.n_desliga === 1 ? ' (acabou a peça)' : ''}${c.pode_escrever ? '' : ' — no Piloto ou Ativo'}.`,
+    },
+  ]
+  if (meio.length && meio[0]! > 0) out.push({ antes: 'Com ', forte: meioTxt, resto: ': fica como está (não liga nem desliga).' })
+  out.push({
+    antes: 'Só nas ',
+    forte: 'contas prontas',
+    resto: `: Shopee com a Entrega Direta ligada na loja; Mercado Livre com a saída do Flex em ${localCidade.value}.`,
+  })
+  out.push(
+    c.shopee_escrita
+      ? { forte: 'Shopee em promoção', resto: ' não deixa mudar o envio: tire o anúncio da promoção e aprove de novo.' }
+      : { antes: 'Na ', forte: 'Shopee', resto: ' o sistema só confere: ligar e desligar é à mão no Seller Center.' },
   )
+  out.push({
+    forte: c.kits ? 'Kits entram' : 'Kits não entram',
+    resto:
+      c.max_anuncios_por_familia > 0
+        ? `. No máximo ${c.max_anuncios_por_familia} anúncio(s) com Flex por família.`
+        : '. Sem limite de anúncios por família.',
+  })
+  out.push({
+    antes: 'Confere sozinho a cada ',
+    forte: `${c.intervalo_min} min`,
+    resto: ` (ou no Sincronizar Flex)${c.pode_escrever ? `, até ${c.teto_escritas_por_rodada} anúncios por vez` : ''}.`,
+  })
+  return out
 })
 
 const DESEJADO: Record<string, { texto: string; cls: string }> = {
@@ -880,6 +879,90 @@ async function aprovar(a: FlexAnuncio) {
   }
 }
 
+// ---- Ligar vários de uma vez (12/11/2026) ----
+// Vinicius: "um quadradinho para ticar, selecionar os que quero aprovar tudo
+// de uma vez" + "ligar todos selecionados" ao lado do Desligar tudo. Marca só
+// quem tem o botão Aprovar; o botão aprova um por um (o mesmo caminho do
+// Aprovar — confere o saldo no Bling e liga) e no fim mostra o resumo.
+const marcados = ref<Set<string>>(new Set())
+const marcaveis = computed(() => itens.value.filter((a) => podeAprovar(a)))
+const marcadosValidos = computed(() => marcaveis.value.filter((a) => marcados.value.has(chave(a))))
+const todosMarcados = computed(
+  () => marcaveis.value.length > 0 && marcadosValidos.value.length === marcaveis.value.length,
+)
+const algunsMarcados = computed(() => marcadosValidos.value.length > 0 && !todosMarcados.value)
+function marcar(a: FlexAnuncio, sim: boolean) {
+  const s = new Set(marcados.value)
+  if (sim) s.add(chave(a))
+  else s.delete(chave(a))
+  marcados.value = s
+}
+function marcarTodos(sim: boolean) {
+  marcados.value = sim ? new Set(marcaveis.value.map(chave)) : new Set()
+}
+function emPromocao(a: FlexAnuncio | null | undefined): boolean {
+  const r = a?.recusa || ''
+  return r.includes('em promoção') || r.includes('has promotion')
+}
+const ligandoLote = ref(false)
+const loteFeitos = ref(0)
+const loteTotal = ref(0)
+async function ligarSelecionados() {
+  const lista = [...marcadosValidos.value]
+  if (!lista.length || ligandoLote.value) return
+  const aviso = config.value?.pode_escrever
+    ? `O sistema confere cada anúncio e o saldo no Bling e liga um por um. Anúncio em promoção a Shopee não deixa: ele fica marcado com o nome da promoção.`
+    : 'Modo "só observando": as aprovações ficam registradas, mas nada muda na plataforma.'
+  if (!confirm(`Ligar o Flex em ${lista.length} anúncio(s)?\n\n${aviso}`)) return
+  ligandoLote.value = true
+  loteTotal.value = lista.length
+  loteFeitos.value = 0
+  const r = { ligados: 0, ja: 0, fila: 0, confirmando: 0, promocao: 0, outros: 0, erros: 0 }
+  for (const a of lista) {
+    const k = chave(a)
+    aprovando.value = new Set([...aprovando.value, k])
+    try {
+      const resp = await api<{ aplicado: boolean; na_fila: boolean; modo: string; estado: FlexAnuncio | null }>(
+        `/api/flex/anuncios/${a.integration_id}/${encodeURIComponent(a.external_id)}/aprovar`,
+        { method: 'POST' },
+      )
+      if (resp.estado) {
+        const i = itens.value.findIndex((x) => chave(x) === k)
+        if (i >= 0) itens.value.splice(i, 1, resp.estado)
+      }
+      if (resp.aplicado) r.ligados++
+      else if (resp.estado?.observado === 'ligado') r.ja++
+      else if (resp.na_fila) r.fila++
+      else if (resp.estado && shopeeConfirmando(resp.estado)) r.confirmando++
+      else if (emPromocao(resp.estado)) r.promocao++
+      else r.outros++
+    } catch {
+      r.erros++
+    } finally {
+      const s = new Set(aprovando.value)
+      s.delete(k)
+      aprovando.value = s
+      loteFeitos.value++
+    }
+  }
+  ligandoLote.value = false
+  marcados.value = new Set()
+  const partes = [
+    r.ligados && `${r.ligados} ligado(s)`,
+    r.ja && `${r.ja} já estava(m) ligado(s)`,
+    r.confirmando && `${r.confirmando} com a Shopee confirmando (até 15 min)`,
+    r.fila && `${r.fila} na fila (1–2 min)`,
+    r.promocao && `${r.promocao} em promoção — veja o nome na linha`,
+    r.outros && `${r.outros} ainda não ligou — veja o motivo na linha`,
+    r.erros && `${r.erros} não deu para aprovar`,
+  ].filter(Boolean) as string[]
+  const tudoCerto = !r.promocao && !r.outros && !r.erros
+  ;(tudoCerto ? toasts.success : toasts.warning)(`Ligar selecionados: ${lista.length}`, partes)
+  if (r.fila) for (const ms of [45000, 120000]) recargas.push(setTimeout(() => carregarAnuncios(), ms))
+  emit('mudou')
+  carregarAnuncios()
+}
+
 // ---- Emergência (job no servidor, com andamento) ----
 // O botão só tira as aprovações e põe o job na fila; o servidor desliga em
 // paralelo e grava o andamento, que a tela consulta a cada 2 s (também
@@ -1094,7 +1177,7 @@ function querInfo(a: FlexAnuncio): { texto: string; cls: string; title: string }
   }
   return { ...desejadoInfo(a), title: a.motivo_claro || a.motivo || '' }
 }
-type Acao = { tipo: 'aprovar' | 'texto'; texto?: string; cls?: string; dot?: string }
+type Acao = { tipo: 'aprovar' | 'texto' | 'chip'; texto?: string; cls?: string; dot?: string; title?: string }
 function acaoDe(a: FlexAnuncio): Acao {
   if (podeAprovar(a)) return { tipo: 'aprovar' }
   const n = config.value?.n_liga ?? 3
@@ -1112,7 +1195,17 @@ function acaoDe(a: FlexAnuncio): Acao {
   if (a.observado === 'ligado' && a.desejado !== 'ligado') {
     return { tipo: 'texto', texto: config.value?.pode_escrever ? 'o sistema desliga' : 'deveria desligar', cls: 'font-semibold text-rose-700 dark:text-rose-400' }
   }
-  if (a.observado && (a.observado === 'ligado') === (a.desejado === 'ligado')) return { tipo: 'texto', texto: '✓ certo', cls: 'text-emerald-700 dark:text-emerald-400' }
+  // 12/11/2026: no lugar do "✓ certo", a etiqueta no modelo da coluna
+  // "Sistema quer" — Ativado (verde) / Desativado (cinza).
+  if (a.observado && (a.observado === 'ligado') === (a.desejado === 'ligado')) {
+    const ligado = a.observado === 'ligado'
+    return {
+      tipo: 'chip',
+      texto: ligado ? 'Ativado' : 'Desativado',
+      cls: (ligado ? DESEJADO.ligado : DESEJADO.desligado)!.cls,
+      title: ligado ? 'O Flex está ligado na plataforma, como o sistema quer.' : 'O Flex está desligado na plataforma, como o sistema quer.',
+    }
+  }
   return { tipo: 'texto', texto: '—', cls: 'text-muted-foreground' }
 }
 
@@ -1275,10 +1368,9 @@ defineExpose({ recarregar: carregarTudo })
        e, à direita, "Onde agir hoje", as contas e "Como o sistema decide". De
        fábrica a lista mostra só os anúncios com peça no local de saída. -->
   <div class="min-w-0 space-y-2.5">
+    <!-- 12/11/2026: só os botões — o modo e as regras estão em "Como o sistema
+         decide", à direita. -->
     <div class="flex flex-wrap items-center gap-2 rounded-md border bg-card px-3 py-1.5 text-xs" role="status">
-      <!-- 12/11/2026: o modo (Piloto, Só observando…) sai daqui — ele já está
-           em "Como o sistema decide › Chaves do Flex", à direita. -->
-      <span class="text-muted-foreground" :title="modoInfo.texto">{{ modoInfo.texto }}</span>
       <div class="ml-auto flex flex-wrap items-center gap-1.5 font-semibold">
         <button
           type="button"
@@ -1300,6 +1392,20 @@ defineExpose({ recarregar: carregarTudo })
           @click="sincronizar"
         >
           <RefreshCw class="size-3.5" :class="sincronizando ? 'animate-spin' : ''" /> Sincronizar Flex
+        </button>
+        <button
+          v-if="canEdit"
+          type="button"
+          class="inline-flex items-center gap-1 rounded-md border border-emerald-600 bg-emerald-600 px-2.5 py-1 text-white hover:bg-emerald-700 disabled:opacity-50"
+          :disabled="!marcadosValidos.length || ligandoLote || modoDesligado"
+          :title="marcadosValidos.length
+            ? `Aprova e liga o Flex nos ${marcadosValidos.length} anúncio(s) marcados, um por um. Pede confirmação.`
+            : 'Marque os anúncios no quadradinho da primeira coluna (só os que têm Aprovar).'"
+          data-flex-ligar-selecionados
+          @click="ligarSelecionados"
+        >
+          <Check class="size-3.5" :class="ligandoLote ? 'animate-pulse' : ''" />
+          {{ ligandoLote ? `Ligando ${loteFeitos} de ${loteTotal}…` : `Ligar selecionados (${marcadosValidos.length})` }}
         </button>
         <button
           v-if="canEdit"
@@ -1406,8 +1512,9 @@ defineExpose({ recarregar: carregarTudo })
             <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">o que o sistema quer × o que está na plataforma</span>
           </div>
           <div class="overflow-x-auto">
-            <table class="w-full min-w-[1000px] table-fixed border-collapse text-[11.5px]">
+            <table class="w-full min-w-[1030px] table-fixed border-collapse text-[11.5px]">
               <colgroup>
+                <col class="w-[30px]">
                 <col class="w-[112px]"><col>
                 <col class="w-[70px]"><col class="w-[60px]">
                 <col class="w-[104px]"><col class="w-[108px]">
@@ -1415,6 +1522,18 @@ defineExpose({ recarregar: carregarTudo })
               </colgroup>
               <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
+                  <th class="border-b px-1 py-1 text-center align-middle" rowspan="2">
+                    <input
+                      type="checkbox"
+                      class="size-3.5 accent-emerald-600 disabled:opacity-30"
+                      :checked="todosMarcados"
+                      :indeterminate="algunsMarcados"
+                      :disabled="!marcaveis.length || ligandoLote || !canEdit"
+                      :title="marcaveis.length ? `Marcar os ${marcaveis.length} anúncio(s) desta página que esperam aprovação` : 'Nenhum anúncio para aprovar nesta página'"
+                      data-flex-marcar-todos
+                      @change="marcarTodos(($event.target as HTMLInputElement).checked)"
+                    />
+                  </th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="2">Anúncio</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="2">{{ localCidade }}</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="2">Flex</th>
@@ -1440,10 +1559,23 @@ defineExpose({ recarregar: carregarTudo })
                   :key="chave(a)"
                   class="border-b align-middle hover:bg-muted/40"
                   :class="[
-                    a.aguardando_aprovacao ? 'bg-amber-50/60 dark:bg-amber-950/20' : '',
+                    marcados.has(chave(a)) && podeAprovar(a)
+                      ? 'bg-emerald-50/80 dark:bg-emerald-950/30'
+                      : a.aguardando_aprovacao ? 'bg-amber-50/60 dark:bg-amber-950/20' : '',
                     !contaPronta(a) ? 'text-muted-foreground' : '',
                   ]"
                 >
+                  <td class="px-1 py-1.5 text-center">
+                    <input
+                      type="checkbox"
+                      class="size-3.5 accent-emerald-600 disabled:opacity-25"
+                      :checked="podeAprovar(a) && marcados.has(chave(a))"
+                      :disabled="!podeAprovar(a) || ligandoLote || aprovando.has(chave(a))"
+                      :title="podeAprovar(a) ? 'Marcar para ligar com o botão Ligar selecionados' : 'Só dá para marcar anúncio com o botão Aprovar'"
+                      data-flex-marcar
+                      @change="marcar(a, ($event.target as HTMLInputElement).checked)"
+                    />
+                  </td>
                   <td class="px-1.5 py-1.5 text-center">
                     <div class="truncate" :class="contaPronta(a) ? 'text-foreground' : ''" :title="a.conta || ''">{{ a.conta || '—' }}</div>
                     <div class="text-[10px] text-muted-foreground">{{ nomePlataforma(a.plataforma) }}</div>
@@ -1492,6 +1624,12 @@ defineExpose({ recarregar: carregarTudo })
                       <Check class="size-3.5" :class="aprovando.has(chave(a)) ? 'animate-pulse' : ''" />
                       {{ rotuloAprovar(a) }}
                     </button>
+                    <span
+                      v-else-if="acaoDe(a).tipo === 'chip'"
+                      class="inline-block w-[98px] truncate rounded border py-0.5 text-[10.5px] font-semibold"
+                      :class="acaoDe(a).cls"
+                      :title="acaoDe(a).title"
+                    >{{ acaoDe(a).texto }}</span>
                     <span v-else class="inline-flex items-center gap-1.5" :class="acaoDe(a).cls">
                       <span v-if="acaoDe(a).dot" class="size-[7px] shrink-0 rounded-full" :class="acaoDe(a).dot" />
                       {{ acaoDe(a).texto }}
@@ -1509,7 +1647,7 @@ defineExpose({ recarregar: carregarTudo })
                   </td>
                 </tr>
                 <tr v-if="!loading && itens.length === 0">
-                  <td colspan="8" class="px-3 py-6 text-center text-muted-foreground">
+                  <td colspan="9" class="px-3 py-6 text-center text-muted-foreground">
                     <template v-if="resumo.avaliados === 0">Nenhum anúncio avaliado ainda.</template>
                     <template v-else-if="filtroPecas && !(resumo.com_peca ?? 0)">
                       Nenhum anúncio com peça em {{ localCidade }} ainda — o sistema calcula as peças na próxima conferência (até {{ config?.intervalo_min ?? 15 }} min).
@@ -1523,7 +1661,7 @@ defineExpose({ recarregar: carregarTudo })
           </div>
           <div class="mt-auto flex flex-wrap items-center gap-2 border-t px-3 py-1.5 text-[11px] text-muted-foreground">
             <span class="flex-1 text-center">
-              Cinza = conta que ainda não está pronta para o Flex (o sistema não mexe nela). Ligar: ML pede Aprovar; Shopee é à mão no Seller Center. Desligar o sistema faz sozinho (piloto/ativo).
+              Cinza = conta que ainda não está pronta para o Flex (o sistema não mexe nela). Ligar: Aprovar, ou marque vários e clique em Ligar selecionados<template v-if="!config?.shopee_escrita"> (na Shopee, à mão no Seller Center)</template>. Desligar o sistema faz sozinho (piloto/ativo).
             </span>
             <template v-if="total > POR_PAGINA">
               <button type="button" class="rounded border p-0.5 disabled:opacity-40" :disabled="pagina <= 1" @click="pagina--"><ChevronLeft class="size-3.5" /></button>
@@ -1564,15 +1702,31 @@ defineExpose({ recarregar: carregarTudo })
             <div v-if="recusaAparte(a)" class="text-rose-700 dark:text-rose-400">A plataforma recusou ligar: {{ a.recusa }}</div>
             <div v-if="shopeeConfirmando(a)" class="text-muted-foreground">{{ CONFIRMANDO_TXT }}</div>
             <div v-else-if="erroAparte(a)" class="text-rose-700 dark:text-rose-400">Último erro: {{ a.ultimo_erro }}</div>
-            <button
-              v-if="podeAprovar(a)"
-              type="button"
-              class="inline-flex items-center gap-1 rounded border border-emerald-400 px-2 py-1 font-medium text-emerald-800 disabled:opacity-50 dark:text-emerald-300"
-              :disabled="aprovando.has(chave(a))"
-              @click="aprovar(a)"
-            >
-              <Check class="size-3.5" /> {{ rotuloAprovar(a) }}
-            </button>
+            <div v-if="podeAprovar(a)" class="flex items-center gap-3">
+              <button
+                type="button"
+                class="inline-flex items-center gap-1 rounded border border-emerald-400 px-2 py-1 font-medium text-emerald-800 disabled:opacity-50 dark:text-emerald-300"
+                :disabled="aprovando.has(chave(a))"
+                @click="aprovar(a)"
+              >
+                <Check class="size-3.5" /> {{ rotuloAprovar(a) }}
+              </button>
+              <label class="inline-flex items-center gap-1 text-muted-foreground">
+                <input
+                  type="checkbox"
+                  class="size-3.5 accent-emerald-600"
+                  :checked="marcados.has(chave(a))"
+                  :disabled="ligandoLote"
+                  @change="marcar(a, ($event.target as HTMLInputElement).checked)"
+                />
+                marcar
+              </label>
+            </div>
+            <span
+              v-else-if="acaoDe(a).tipo === 'chip'"
+              class="inline-block rounded border px-1.5 py-0.5 text-[10px] font-semibold"
+              :class="acaoDe(a).cls"
+            >{{ acaoDe(a).texto }}</span>
             <div v-else-if="acaoDe(a).tipo === 'texto'" :class="acaoDe(a).cls">{{ acaoDe(a).texto }}</div>
           </div>
           <div v-if="!loading && itens.length === 0" class="rounded-md border py-6 text-center text-sm text-muted-foreground">
@@ -1814,8 +1968,12 @@ defineExpose({ recarregar: carregarTudo })
                 </div>
               </div>
             </div>
-            <div>{{ regraTexto }}</div>
-            <div v-if="!config.shopee_escrita">Na Shopee o sistema só confere: ligar ou desligar lá é feito à mão no Seller Center.</div>
+            <div class="space-y-1" data-flex-regras>
+              <div class="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Regras</div>
+              <ol class="list-decimal space-y-1 pl-4">
+                <li v-for="(r, i) in regras" :key="i">{{ r.antes || '' }}<b>{{ r.forte }}</b>{{ r.resto }}</li>
+              </ol>
+            </div>
             <div class="text-[10.5px] text-muted-foreground">
               A lista de contas liberadas fica na configuração do servidor.
               <template v-if="contasFantasma"> {{ contasFantasma }} conta(s) da configuração não existem mais no DaVinci.</template>
