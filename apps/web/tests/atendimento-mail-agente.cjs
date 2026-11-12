@@ -22,7 +22,7 @@ function carregar(nome) {
 const tick = async () => { for (let i = 0; i < 3; i++) { await new Promise((r) => setTimeout(r, 0)); await Vue.nextTick() } }
 const click = async (el) => { assert.ok(el, 'elemento existe'); el.dispatchEvent(new window.MouseEvent('click', { bubbles: true })); await tick() }
 const site = (o) => ({ site: 'uranyx', nome: 'Uranyx', canal_id: 'c1', ligado: false, modo: null, formulario: 'https://uranyx.com.br/sac', ...o })
-const fixa = { id: 'r1', chave: 'formulario_sac', titulo: 'Reclamação no SAC sem o formulário', instrucao: 'Peça o formulário.', ativa: true, ordem: 0, fixa: true, atualizada_em: null }
+const fixa = { id: 'r1', chave: 'formulario_sac', titulo: 'Reclamação no SAC sem o formulário', instrucao: 'Peça o formulário.', ativa: true, sites: [], responde_sozinho: true, ordem: 0, fixa: true, atualizada_em: null }
 async function run() {
   const M = carregar('AtendimentoMailAgente.vue')
   assert.equal(M.estadoDoSite(site({})), 'desligado')
@@ -51,9 +51,15 @@ async function run() {
   const uranyx = el.querySelector('[data-agente-site="uranyx"]')
   assert.match(uranyx.textContent, /SAC Uranyx.*desligado/s)
   assert.match(uranyx.textContent, /uranyx\.com\.br\/sac/)
-  assert.match(el.querySelector('[data-agente-lojas]').textContent, /Shopee · Kia.*responde sozinho/s)
+  // Só os sites: as lojas não aparecem.
+  assert.equal(el.querySelector('[data-agente-lojas]'), null)
+  assert.ok(el.querySelector('[data-agente-so-sites]'))
+  assert.equal(M.ondeVale([]), 'Uranyx e Charlots')
+  assert.equal(M.ondeVale(['charlots']), 'Charlots')
   const regra = el.querySelector('[data-agente-regra="r1"]')
   assert.match(regra.textContent, /do sistema/)
+  assert.match(regra.querySelector('[data-agente-regra-onde]').textContent, /Uranyx e Charlots/)
+  assert.match(regra.querySelector('[data-agente-regra-sozinho]').textContent, /responde sozinho/)
   assert.equal(regra.querySelector('[aria-label^="Apagar"]'), null)
   // Responde sozinho no SAC da Uranyx.
   await click(uranyx.querySelector('[data-agente-site-estado="auto"]'))
@@ -68,9 +74,11 @@ async function run() {
   const form = el.querySelector('[data-agente-form-nova]')
   form.querySelector('input').value = 'Nota fiscal'; form.querySelector('input').dispatchEvent(new window.Event('input'))
   form.querySelector('textarea').value = 'Diga que a nota vai no e-mail.'; form.querySelector('textarea').dispatchEvent(new window.Event('input'))
+  const so = form.querySelector('[data-agente-nova-site="charlots"]'); so.checked = true; so.dispatchEvent(new window.Event('change'))
+  const soz = form.querySelector('[data-agente-nova-sozinho]'); soz.checked = true; soz.dispatchEvent(new window.Event('change'))
   form.dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })); await tick()
   assert.equal(chamadas.at(-1).opts.method, 'POST')
-  assert.deepEqual(chamadas.at(-1).opts.body, { titulo: 'Nota fiscal', instrucao: 'Diga que a nota vai no e-mail.' })
+  assert.deepEqual(chamadas.at(-1).opts.body, { titulo: 'Nota fiscal', instrucao: 'Diga que a nota vai no e-mail.', sites: ['charlots'], responde_sozinho: true })
   assert.ok(el.querySelector('[data-agente-regra="r2"]'))
   // Servidor sem o agente: só "Desligado" fica clicável.
   dados = { ...dados, disponivel: false }

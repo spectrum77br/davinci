@@ -1288,12 +1288,15 @@ async def montar_pacote(
         regras_email = await contexto_svc._seguro(
             session,
             "agente_regras_email",
-            lambda: email_agente.regras_ativas(session),
+            lambda: email_agente.regras_ativas(session, chave_email.site),
             [],
             conversa.id,
         )
         bloco_email = email_agente.bloco_do_pacote(chave_email, regras_email)
-        ctx.permitir(textos=[bloco_email])
+        # As regras são citáveis (`email:<id>`): a que "responde sozinho" libera o envio.
+        ctx.permitir(
+            ids=[email_agente.id_da_regra(r) for r in regras_email], textos=[bloco_email]
+        )
         partes.append("E-MAIL:\n" + bloco_email)
     # Kia ao vivo (21/10/2026, rascunho 610dcd76: "evidência citada sem prova
     # (regra:rastreio)" sem o `consultar_manual`): os ids que ESTES dados provam,

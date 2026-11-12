@@ -3,12 +3,12 @@
 // O Eduardo: "a chave usa mesma do atendimento e como se fosse a extensao do
 // atendimento pro email so", "o do email pode deixar ali na parte de email mesmo a
 // config do agente deixe bem intuitivo" e "so admin mexe no agente ok e ve".
-//   1. Sites (o SAC da Uranyx e da Charlots, sem loja): liga aqui — Desligado,
-//      Só sugere (a equipe confere e envia) ou Responde sozinho;
-//   2. Lojas: a MESMA chave do atendimento (o botão "Agente (Claude)" da loja na
-//      aba Lojas) — aqui só a lista de onde ele já responde e-mail;
-//   3. Regras do e-mail: entram no agente só quando o canal é e-mail. A do
-//      formulário de SAC é do sistema (desliga e edita, não apaga).
+//   1. Sites (o SAC da Uranyx e da Charlots): liga aqui — Desligado, Só sugere (a
+//      equipe confere e envia) ou Responde sozinho. Por enquanto SÓ os sites (o
+//      dono: "deixe por eqt so os sites"); as lojas ficam de fora;
+//   2. Regras do e-mail: entram no agente só quando o canal é e-mail; cada uma diz
+//      onde vale (Uranyx, Charlots ou os dois) e se a resposta que a segue sai
+//      sozinha. A do formulário de SAC é do sistema (desliga e edita, não apaga).
 // Backend: routers/mail_agente.py + services/atendimento/email_agente.py.
 export type SiteDoAgente = {
   site: string
@@ -25,6 +25,9 @@ export type RegraDoAgente = {
   titulo: string
   instrucao: string
   ativa: boolean
+  sites: string[]
+  responde_sozinho: boolean
+  id_agente?: string
   ordem: number
   fixa: boolean
   atualizada_em: string | null
@@ -35,13 +38,18 @@ export type EstadoDoSite = 'desligado' | 'copiloto' | 'auto'
 export const ESTADOS_DO_SITE: { valor: EstadoDoSite; rotulo: string; dica: string }[] = [
   { valor: 'desligado', rotulo: 'Desligado', dica: 'A equipe responde o e-mail do SAC, como hoje.' },
   { valor: 'copiloto', rotulo: 'Só sugere', dica: 'O agente escreve a resposta na conversa; a equipe confere e envia.' },
-  { valor: 'auto', rotulo: 'Responde sozinho', dica: 'Sai sozinho o pedido para abrir pelo formulário de SAC; o resto fica como sugestão para a equipe.' },
+  { valor: 'auto', rotulo: 'Responde sozinho', dica: 'Sai sozinha a resposta que segue uma regra marcada "Responde sozinho", com confiança alta e o verificador aprovando; o resto fica como sugestão para a equipe.' },
 ]
 export function estadoDoSite(s: SiteDoAgente): EstadoDoSite {
   return s.ligado && s.modo ? s.modo : 'desligado'
 }
 export const NOME_PLATAFORMA: Record<string, string> = {
   shopee: 'Shopee', ml: 'Mercado Livre', tiktok: 'TikTok', amazon: 'Amazon', magalu: 'Magalu', carrefour: 'Carrefour',
+}
+export const SITES_DAS_REGRAS = [{ valor: 'uranyx', rotulo: 'Uranyx' }, { valor: 'charlots', rotulo: 'Charlots' }]
+export function ondeVale(sites: string[] | undefined): string {
+  const lista = (sites || []).map((s) => SITES_DAS_REGRAS.find((x) => x.valor === s)?.rotulo || s)
+  return lista.length && lista.length < SITES_DAS_REGRAS.length ? lista.join(', ') : 'Uranyx e Charlots'
 }
 export function rotuloDoModo(modo: string | null | undefined): string {
   return modo === 'auto' ? 'responde sozinho' : modo === 'copiloto' ? 'só sugere' : 'desligado'
@@ -60,8 +68,8 @@ const ocupado = ref('')
 const erro = ref('')
 const aviso = ref('')
 const editando = ref('')
-const form = reactive({ titulo: '', instrucao: '' })
-const nova = reactive({ aberta: false, titulo: '', instrucao: '' })
+const form = reactive({ titulo: '', instrucao: '', sites: [] as string[], responde_sozinho: false })
+const nova = reactive({ aberta: false, titulo: '', instrucao: '', sites: [] as string[], responde_sozinho: false })
 let descartado = false
 
 const CODIGOS: Record<string, string> = {
@@ -118,13 +126,15 @@ function editar(r: RegraDoAgente) {
   editando.value = r.id
   form.titulo = r.titulo
   form.instrucao = r.instrucao
+  form.sites = [...(r.sites || [])]
+  form.responde_sozinho = !!r.responde_sozinho
 }
 async function salvarRegra(r: RegraDoAgente) {
   if (ocupado.value) return
   ocupado.value = r.id
   erro.value = ''
   try {
-    substituir(await api<RegraDoAgente>(`${BASE}/regras/${r.id}`, { method: 'PATCH', body: { titulo: form.titulo, instrucao: form.instrucao } }))
+    substituir(await api<RegraDoAgente>(`${BASE}/regras/${r.id}`, { method: 'PATCH', body: { titulo: form.titulo, instrucao: form.instrucao, sites: form.sites, responde_sozinho: form.responde_sozinho } }))
     editando.value = ''
     aviso.value = 'Regra salva.'
   } catch (e) {
@@ -147,9 +157,9 @@ async function criarRegra() {
   ocupado.value = 'nova'
   erro.value = ''
   try {
-    const r = await api<RegraDoAgente>(`${BASE}/regras`, { method: 'POST', body: { titulo: nova.titulo, instrucao: nova.instrucao } })
+    const r = await api<RegraDoAgente>(`${BASE}/regras`, { method: 'POST', body: { titulo: nova.titulo, instrucao: nova.instrucao, sites: nova.sites, responde_sozinho: nova.responde_sozinho } })
     if (dados.value) dados.value.regras = [...dados.value.regras, r]
-    Object.assign(nova, { aberta: false, titulo: '', instrucao: '' })
+    Object.assign(nova, { aberta: false, titulo: '', instrucao: '', sites: [], responde_sozinho: false })
     aviso.value = 'Regra criada.'
   } catch (e) {
     if (!descartado) erro.value = textoErro(e, 'Não consegui criar a regra.')
@@ -207,18 +217,7 @@ onBeforeUnmount(() => { descartado = true })
         </div>
       </div>
 
-      <!-- 2. Lojas -->
-      <div class="space-y-2">
-        <h4 class="text-sm font-semibold">Lojas <span class="font-normal text-muted-foreground">— a mesma chave do atendimento</span></h4>
-        <p class="text-xs text-muted-foreground">Quando o agente está ligado no atendimento de uma loja (botão "Agente (Claude)" na aba Lojas), ele responde o e-mail dela também, no mesmo modo e com os mesmos assuntos liberados.</p>
-        <div v-if="dados.lojas.length" class="flex flex-wrap gap-1.5" data-agente-lojas>
-          <span v-for="l in dados.lojas" :key="l.canal_id" class="rounded border px-2 py-1 text-xs" :data-agente-loja="l.canal_id">
-            <span class="text-muted-foreground">{{ NOME_PLATAFORMA[l.plataforma] || l.plataforma }} ·</span> {{ l.loja }}
-            <span class="ml-1 text-[10px]" :class="l.modo === 'auto' ? 'text-indigo-700 dark:text-indigo-300' : 'text-muted-foreground'">{{ rotuloDoModo(l.modo) }}</span>
-          </span>
-        </div>
-        <p v-else class="text-xs text-muted-foreground">Nenhuma loja com o agente ligado.</p>
-      </div>
+      <p class="text-xs text-muted-foreground" data-agente-so-sites>Por enquanto o agente responde e-mail só no SAC dos sites. O e-mail das lojas continua com a equipe.</p>
 
       <!-- 3. Regras -->
       <div class="space-y-2">
@@ -226,10 +225,16 @@ onBeforeUnmount(() => { descartado = true })
           <h4 class="text-sm font-semibold">Regras do e-mail</h4>
           <button type="button" class="inline-flex items-center gap-1 rounded border px-2.5 py-1.5 text-xs disabled:opacity-50" :disabled="!!ocupado || nova.aberta" data-agente-nova-regra @click="nova.aberta = true"><Plus class="size-3.5" /> Nova regra</button>
         </div>
-        <p class="text-xs text-muted-foreground">Valem só no e-mail, acima das regras do chat.</p>
+        <p class="text-xs text-muted-foreground">Valem só no e-mail, acima das regras do chat. O agente escolhe a regra que bate com o e-mail; com "Responde sozinho", a resposta sai sem a equipe conferir (no site em "Responde sozinho", com confiança alta e o verificador aprovando).</p>
         <form v-if="nova.aberta" class="space-y-2 rounded-lg border p-3" data-agente-form-nova @submit.prevent="criarRegra">
           <input v-model="nova.titulo" required minlength="3" maxlength="120" placeholder="Quando… (ex.: cliente pede nota fiscal)" class="w-full rounded border bg-background px-2 py-1.5 text-sm" />
           <textarea v-model="nova.instrucao" required minlength="10" maxlength="4000" rows="3" placeholder="O que o agente faz nesse caso" class="w-full rounded border bg-background px-2 py-1.5 text-sm" />
+          <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+            <span class="text-muted-foreground">Vale em:</span>
+            <label v-for="op in SITES_DAS_REGRAS" :key="op.valor" class="flex items-center gap-1"><input v-model="nova.sites" type="checkbox" :value="op.valor" :data-agente-nova-site="op.valor" /> {{ op.rotulo }}</label>
+            <span class="text-muted-foreground">(nenhum marcado = os dois)</span>
+            <label class="flex items-center gap-1 font-medium"><input v-model="nova.responde_sozinho" type="checkbox" data-agente-nova-sozinho /> Responde sozinho</label>
+          </div>
           <div class="flex gap-2">
             <button type="submit" class="rounded bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-50" :disabled="!!ocupado">Criar</button>
             <button type="button" class="rounded border px-3 py-1.5 text-xs" @click="nova.aberta = false">Cancelar</button>
@@ -239,7 +244,11 @@ onBeforeUnmount(() => { descartado = true })
           <div v-for="r in dados.regras" :key="r.id" class="space-y-1.5 p-3" :class="r.ativa ? '' : 'opacity-60'" :data-agente-regra="r.id">
             <div class="flex items-start justify-between gap-3">
               <div class="min-w-0">
-                <p class="text-sm font-medium">{{ r.titulo }} <span v-if="r.fixa" class="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground" title="Usada pelo sistema: sai sozinha no SAC dos sites em Responde sozinho">do sistema</span></p>
+                <p class="text-sm font-medium">{{ r.titulo }} <span v-if="r.fixa" class="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-normal text-muted-foreground" title="Usada pelo sistema: só sai sozinha com o link do formulário da marca">do sistema</span></p>
+                <p class="mt-0.5 flex flex-wrap gap-1.5 text-[11px]">
+                  <span class="rounded border px-1.5 py-0.5 text-muted-foreground" data-agente-regra-onde>{{ ondeVale(r.sites) }}</span>
+                  <span class="rounded px-1.5 py-0.5" :class="r.responde_sozinho ? 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300' : 'bg-muted text-muted-foreground'" data-agente-regra-sozinho>{{ r.responde_sozinho ? 'responde sozinho' : 'só sugere' }}</span>
+                </p>
               </div>
               <div class="flex shrink-0 items-center gap-2">
                 <button type="button" role="switch" :aria-checked="r.ativa" :aria-label="`${r.ativa ? 'Desligar' : 'Ligar'} a regra ${r.titulo}`" class="relative h-5 w-9 rounded-full transition-colors disabled:opacity-50" :class="r.ativa ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600'" :disabled="!!ocupado" data-agente-regra-ativa @click="alternarRegra(r)"><span class="absolute top-0.5 size-4 rounded-full bg-white shadow transition-all" :class="r.ativa ? 'left-[18px]' : 'left-0.5'" /></button>
@@ -249,7 +258,13 @@ onBeforeUnmount(() => { descartado = true })
             </div>
             <form v-if="editando === r.id" class="space-y-2" @submit.prevent="salvarRegra(r)">
               <input v-model="form.titulo" required minlength="3" maxlength="120" class="w-full rounded border bg-background px-2 py-1.5 text-sm" />
-              <textarea v-model="form.instrucao" required minlength="10" maxlength="4000" rows="5" class="w-full rounded border bg-background px-2 py-1.5 text-sm" />
+              <textarea v-model="form.instrucao" required minlength="10" maxlength="4000" rows="8" class="w-full rounded border bg-background px-2 py-1.5 text-sm" />
+              <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+                <span class="text-muted-foreground">Vale em:</span>
+                <label v-for="op in SITES_DAS_REGRAS" :key="op.valor" class="flex items-center gap-1"><input v-model="form.sites" type="checkbox" :value="op.valor" /> {{ op.rotulo }}</label>
+                <span class="text-muted-foreground">(nenhum marcado = os dois)</span>
+                <label class="flex items-center gap-1 font-medium"><input v-model="form.responde_sozinho" type="checkbox" data-agente-editar-sozinho /> Responde sozinho</label>
+              </div>
               <div class="flex gap-2">
                 <button type="submit" class="rounded bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-50" :disabled="!!ocupado">Salvar</button>
                 <button type="button" class="rounded border px-3 py-1.5 text-xs" @click="editando = ''">Cancelar</button>

@@ -6996,13 +6996,13 @@ async def _talvez_enviar(
                 in manual_svc.ids_so_humano(await manual_svc.categorias_ativas(session))
             ):
                 motivo = "assunto_so_humano"
-            if motivo in email_agente.TRAVAS_DO_ASSUNTO and await email_agente.sai_pelo_formulario(
-                session, conversa, rascunho.texto
+            if motivo in email_agente.TRAVAS_DO_ASSUNTO and await email_agente.sai_pela_regra(
+                session, conversa, rascunho
             ):
-                # E-mail do SAC do site (12/11/2026, a regra `formulario_sac`): o
-                # pedido de abrir pelo formulário sai sozinho no automático sem o
-                # assunto liberado — o resto das travas (verificador, turno, Caixa
-                # Humano, pausa) segue igual.
+                # E-mail do SAC do site (12/11/2026): a resposta que segue uma regra do
+                # e-mail marcada "responde sozinho" (o agente a cita) sai no automático
+                # sem o assunto liberado — o resto das travas (confiança, verificador,
+                # turno, Caixa Humano, pausa) segue igual.
                 motivo = None
             if motivo is None:
                 # O verificador semântico (20/10/2026): obrigatório para sair sozinho.

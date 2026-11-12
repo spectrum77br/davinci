@@ -74,12 +74,14 @@ async def _canal_do_site(db, site: str = "uranyx") -> AtendimentoCanal:
     return canal
 
 
-async def _regra(db) -> MailAgenteRegra:
+async def _regra(db, **kw) -> MailAgenteRegra:
     r = MailAgenteRegra(
         chave=email_agente.CHAVE_FORMULARIO,
         titulo="Reclamação no SAC sem o formulário",
         instrucao="Peça para abrir pelo formulário de SAC do site.",
         ordem=0,
+        responde_sozinho=True,
+        **kw,
     )
     db.add(r)
     await db.commit()
@@ -109,12 +111,17 @@ async def _sac_direto(db, cena, **kw) -> AtendimentoConversa:
 
 def test_bloco_do_pacote_tem_assinatura_formulario_e_regras():
     chave = email_agente.Chave(canal_id=uuid4(), modo=MODO_AUTO, site="uranyx")
-    regra = SimpleNamespace(titulo="Regra X", instrucao="Faça Y.")
+    regra = SimpleNamespace(titulo="Regra X", instrucao="Faça Y.", chave=None, id=uuid4())
     bloco = email_agente.bloco_do_pacote(chave, [regra])
     assert "E-MAIL" in bloco and "NÃO escreva assinatura" in bloco
     assert "NÃO veio pelo formulário" in bloco
     assert URL_URANYX in bloco and "número de série" in bloco
-    assert "- Regra X: Faça Y." in bloco
+    assert f"- [email:{str(regra.id)[:8]}] Regra X: Faça Y." in bloco
+    assert "https://uranyx.com.br" in bloco and "evidencias" in bloco
+    andamento = email_agente.Chave(
+        canal_id=uuid4(), modo=MODO_AUTO, site="uranyx", em_andamento=True
+    )
+    assert "atendimento em andamento" in email_agente.bloco_do_pacote(andamento, [])
     charlots = email_agente.Chave(canal_id=uuid4(), modo=MODO_AUTO, site="charlots")
     assert "https://charlots.com.br/sac" in email_agente.bloco_do_pacote(charlots, [])
     assert "tamanho" in email_agente.bloco_do_pacote(charlots, [])
@@ -130,6 +137,11 @@ def test_pedido_do_formulario_so_com_o_link_da_marca_e_sem_protocolo():
     assert email_agente.pedido_do_formulario(f"Abra em {URL_URANYX}/.", chave)
     assert not email_agente.pedido_do_formulario("Sem link nenhum.", chave)
     assert not email_agente.pedido_do_formulario(f"{URL_URANYX} e https://x.com", chave)
+    assert email_agente.pedido_do_formulario(f"{URL_URANYX} ou https://uranyx.com.br", chave)
+    andamento = email_agente.Chave(
+        canal_id=uuid4(), modo=MODO_AUTO, site="uranyx", em_andamento=True
+    )
+    assert not email_agente.pedido_do_formulario(PEDIDO, andamento)
     assert not email_agente.pedido_do_formulario("https://charlots.com.br/sac", chave)
     veio = email_agente.Chave(canal_id=uuid4(), modo=MODO_AUTO, site="uranyx", via_formulario=True)
     assert not email_agente.pedido_do_formulario(PEDIDO, veio)
@@ -147,6 +159,28 @@ def test_site_da_marca_e_via_formulario():
     assert email_agente.site_da_conversa(c("outra")) is None
     assert email_agente.via_formulario(c("uranyx", "US-26-0001"))
     assert not email_agente.via_formulario(c("uranyx"))
+
+
+def test_email_em_massa_nem_vai_ao_agente():
+    assert email_agente.parece_em_massa("Promoção! Abrir no navegador")
+    assert email_agente.parece_em_massa("Não consegue visualizar? Veja online")
+    assert email_agente.parece_em_massa("/// Painel · Atacado Novo cadastro para analisar")
+    assert email_agente.parece_em_massa("Oferta" + "\u034f " * 10)
+    assert not email_agente.parece_em_massa("Comprei a air fryer e ela não liga mais.")
+    assert not email_agente.parece_em_massa(None)
+
+
+def test_libera_pela_regra_so_a_citada_e_marcada_no_automatico():
+    auto = email_agente.Chave(canal_id=uuid4(), modo=MODO_AUTO, site="uranyx")
+    que_saem = frozenset({"email:formulario_sac", "email:abcd1234"})
+    assert email_agente.libera_pela_regra(["email:abcd1234"], "Olá!", auto, que_saem)
+    assert not email_agente.libera_pela_regra(["email:outra"], "Olá!", auto, que_saem)
+    assert not email_agente.libera_pela_regra([], "Olá!", auto, que_saem)
+    # A do formulário só com o pedido do formulário de verdade.
+    assert email_agente.libera_pela_regra(["email:formulario_sac"], PEDIDO, auto, que_saem)
+    assert not email_agente.libera_pela_regra(["email:formulario_sac"], "Sem link.", auto, que_saem)
+    copiloto = email_agente.Chave(canal_id=uuid4(), modo=MODO_COPILOTO, site="uranyx")
+    assert not email_agente.libera_pela_regra(["email:abcd1234"], "Olá!", copiloto, que_saem)
 
 
 def test_validador_libera_so_o_link_do_formulario_no_email_do_agente():
@@ -178,7 +212,7 @@ def test_liberar_vale_so_no_bloco():
     with email_agente.liberar(conversa.id, chave):
         assert email_agente.liberada(conversa)
         assert email_agente.canal_id(conversa) == chave.canal_id
-        assert email_agente.links_permitidos(conversa) == [URL_URANYX]
+        assert email_agente.links_permitidos(conversa) == [URL_URANYX, "https://uranyx.com.br"]
     assert not email_agente.liberada(conversa)
 
 
@@ -220,7 +254,22 @@ async def test_trava_do_email_caixa_aviso_e_loja(db, cena, agente_ligado):
     )
 
 
-async def test_loja_usa_a_chave_do_canal_do_pos_compra(db, cena, agente_ligado):
+async def test_em_massa_fica_fora_e_resposta_da_equipe_marca_em_andamento(db, cena, agente_ligado):
+    await _canal_do_site(db)
+    await email_agente.ligar_site(db, "uranyx", modo=MODO_AUTO)
+    await db.commit()
+    massa = await _sac_direto(
+        db, cena, de="news@loja.com.br", assunto="Black", corpo="Oferta! Abrir no navegador"
+    )
+    assert await email_agente.motivo_fora(db, massa) == email_agente.FORA_EM_MASSA
+    c = await _sac_direto(db, cena)
+    chave = await email_agente.chave_liberada(db, c)
+    assert chave is not None and chave.em_andamento is False
+
+
+async def test_loja_fica_de_fora_por_enquanto_e_usa_o_pos_compra_quando_ligar(
+    db, cena, agente_ligado, monkeypatch
+):
     c = SimpleNamespace(
         id=uuid4(),
         canal="email",
@@ -240,6 +289,8 @@ async def test_loja_usa_a_chave_do_canal_do_pos_compra(db, cena, agente_ligado):
         )
     )
     await db.commit()
+    assert await email_agente.canal_da_chave(db, c) is None  # o dono: só os sites
+    monkeypatch.setattr(email_agente, "LOJAS_LIGADAS", True)
     assert (await email_agente.canal_da_chave(db, c)).id == pos.id
 
 
@@ -301,21 +352,43 @@ async def test_agente_nao_envia_link_que_nao_e_o_do_formulario(
     assert (await db.execute(select(MailOutbox))).first() is None
 
 
-async def test_formulario_passa_so_pelas_travas_do_assunto(db, cena, agente_ligado):
+async def test_regra_que_responde_sozinho_passa_so_pelas_travas_do_assunto(db, cena, agente_ligado):
     await _regra(db)
+    charlots = MailAgenteRegra(
+        titulo="Só Charlots",
+        instrucao="Algo da Charlots.",
+        sites=["charlots"],
+        responde_sozinho=True,
+    )
+    db.add(charlots)
+    await db.commit()
+
+    def rasc(texto, *evid):
+        return SimpleNamespace(texto=texto, fatos={"agente": {"evidencias": list(evid)}})
+
     conversa = SimpleNamespace(id=uuid4(), canal_id=None)
     auto = email_agente.Chave(canal_id=uuid4(), modo=MODO_AUTO, site="uranyx")
     with email_agente.liberar(conversa.id, auto):
-        assert await email_agente.sai_pelo_formulario(db, conversa, PEDIDO)
-        assert not await email_agente.sai_pelo_formulario(db, conversa, "Sem link.")
+        assert await email_agente.sai_pela_regra(db, conversa, rasc(PEDIDO, "email:formulario_sac"))
+        assert not await email_agente.sai_pela_regra(db, conversa, rasc(PEDIDO))
+        assert not await email_agente.sai_pela_regra(
+            db, conversa, rasc("Sem link.", "email:formulario_sac")
+        )
+        # A regra só da Charlots não vale na Uranyx.
+        so_charlots = email_agente.id_da_regra(charlots)
+        assert not await email_agente.sai_pela_regra(db, conversa, rasc("Olá!", so_charlots))
     copiloto = email_agente.Chave(canal_id=uuid4(), modo=MODO_COPILOTO, site="uranyx")
     with email_agente.liberar(conversa.id, copiloto):
-        assert not await email_agente.sai_pelo_formulario(db, conversa, PEDIDO)
-    r = await db.scalar(select(MailAgenteRegra))
+        assert not await email_agente.sai_pela_regra(
+            db, conversa, rasc(PEDIDO, "email:formulario_sac")
+        )
+    r = await db.scalar(select(MailAgenteRegra).where(MailAgenteRegra.chave.is_not(None)))
     r.ativa = False
     await db.commit()
     with email_agente.liberar(conversa.id, auto):
-        assert not await email_agente.sai_pelo_formulario(db, conversa, PEDIDO)
+        assert not await email_agente.sai_pela_regra(
+            db, conversa, rasc(PEDIDO, "email:formulario_sac")
+        )
     assert "acao_pessoa" not in email_agente.TRAVAS_DO_ASSUNTO
     assert "sem_auto" not in email_agente.TRAVAS_DO_ASSUNTO
 
@@ -366,11 +439,24 @@ async def test_tela_so_admin_liga_site_e_mexe_nas_regras(
     r = await client.put(f"{API}/sites/uranyx", json={"modo": None})
     assert next(s for s in r.json()["sites"] if s["site"] == "uranyx")["ligado"] is False
     r = await client.post(
-        f"{API}/regras", json={"titulo": "Tom", "instrucao": "Sempre trate por você."}
+        f"{API}/regras",
+        json={
+            "titulo": "Tom",
+            "instrucao": "Sempre trate por você.",
+            "sites": ["charlots"],
+            "responde_sozinho": True,
+        },
     )
     assert r.status_code == 201, r.text
+    assert (r.json()["sites"], r.json()["responde_sozinho"]) == (["charlots"], True)
+    assert r.json()["id_agente"].startswith("email:")
+    assert corpo["lojas"] == []  # só os sites por enquanto
     nova = r.json()["id"]
-    r = await client.patch(f"{API}/regras/{nova}", json={"ativa": False})
-    assert r.json()["ativa"] is False
+    r = await client.patch(f"{API}/regras/{nova}", json={"ativa": False, "sites": []})
+    assert (r.json()["ativa"], r.json()["sites"]) == (False, [])
+    r = await client.post(
+        f"{API}/regras", json={"titulo": "X", "instrucao": "y" * 10, "sites": ["x"]}
+    )
+    assert r.status_code == 422
     assert (await client.delete(f"{API}/regras/{fixa.id}")).status_code == 409
     assert (await client.delete(f"{API}/regras/{nova}")).status_code == 204

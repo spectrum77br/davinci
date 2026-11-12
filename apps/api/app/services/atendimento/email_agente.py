@@ -62,10 +62,14 @@ from app.services.atendimento.constantes import (
     MODO_AUTO,
     MODO_COPILOTO,
     PLATAFORMA_SITE,
+    URL_SITE,
 )
 
 logger = structlog.get_logger()
 
+# As LOJAS ficam de fora por enquanto (o dono, 12/11/2026: "deixe por eqt so os sites");
+# ligar aqui é o e-mail da loja seguir a chave do atendimento dela.
+LOJAS_LIGADAS = False
 # O canal da loja cuja chave vale para o e-mail dela (o "depois da compra").
 CANAL_DA_CHAVE: dict[str, str] = {
     "shopee": "chat",
@@ -140,6 +144,7 @@ FORA_HISTORICO = "historico_de_vendas"
 FORA_NAO_E_CLIENTE = "nao_e_cliente"
 FORA_ENCAMINHADO = "encaminhado"
 FORA_INFORMATIVO = "informativo"
+FORA_EM_MASSA = "em_massa"
 
 # O usuário do agente: o autor do job na fila da Central (sem senha: ninguém loga).
 OPEN_ID_AGENTE = "system:agente-email"
@@ -155,6 +160,8 @@ class Chave:
     modo: str
     site: str | None = None
     via_formulario: bool = False
+    # A equipe já respondeu nesta conversa (um atendimento em andamento).
+    em_andamento: bool = False
 
     @property
     def formulario(self) -> Formulario | None:
@@ -237,6 +244,10 @@ async def canal_da_chave(session: AsyncSession, conversa: Any) -> AtendimentoCan
         if site is None:
             return None
         return await canal_do_site(session, site)
+    if not LOJAS_LIGADAS:
+        # O dono, 12/11/2026: "deixe por enquanto só os sites" — várias lojas estão no
+        # automático do atendimento e o e-mail delas ficaria respondido sem ninguém ver.
+        return None
     nome = CANAL_DA_CHAVE.get(conversa.plataforma or "")
     if conversa.integration_id is None or nome is None:
         return None
@@ -296,7 +307,70 @@ async def motivo_fora(session: AsyncSession, conversa: Any) -> str | None:
         return FORA_NAO_E_CLIENTE
     if meta.motivo == SEM_LOJA_ENCAMINHADO:
         return FORA_ENCAMINHADO
+    if parece_em_massa(await _ultima_do_cliente(session, conversa)):
+        return FORA_EM_MASSA
     return None
+
+
+# O e-mail EM MASSA (levantamento do SAC de 12/11/2026: a maior parte do sac@ é
+# propaganda, aviso de sistema e notificação): nem vai ao modelo (custo e risco).
+_MARCAS_EM_MASSA = (
+    "abrir no navegador",
+    "ver no navegador",
+    "veja online",
+    "não consegue visualizar",
+    "nao consegue visualizar",
+    "caso não esteja visualizando",
+    "configurar recebimento de e-mails",
+    "unsubscribe",
+    "descadastr",
+    "cancelar inscrição",
+    "rather not get more emails",
+    "responder a este e-mail escr",
+    "/// painel",
+    "abrir no painel",
+)
+_RX_INVISIVEIS = re.compile("[\u034f\u200b-\u200f\u00ad\ufeff]")
+
+
+def parece_em_massa(texto: str | None) -> bool:
+    """Newsletter, propaganda, aviso de sistema ou notificação do painel do site? PURA."""
+    t = (texto or "").lower()
+    if any(m in t for m in _MARCAS_EM_MASSA):
+        return True
+    return len(_RX_INVISIVEIS.findall(t)) >= 8
+
+
+async def _ultima_do_cliente(session: AsyncSession, conversa: Any) -> str | None:
+    from app.models import AtendimentoMensagem
+    from app.services.atendimento.constantes import AUTOR_CLIENTE
+
+    return await session.scalar(
+        select(AtendimentoMensagem.texto)
+        .where(
+            AtendimentoMensagem.conversa_id == conversa.id,
+            AtendimentoMensagem.autor == AUTOR_CLIENTE,
+        )
+        .order_by(AtendimentoMensagem.created_at.desc())
+        .limit(1)
+    )
+
+
+async def em_andamento(session: AsyncSession, conversa: Any) -> bool:
+    """A equipe (ou o agente) já respondeu nesta conversa?"""
+    from app.models import AtendimentoMensagem
+    from app.services.atendimento.constantes import AUTOR_LOJA
+
+    return bool(
+        await session.scalar(
+            select(AtendimentoMensagem.id)
+            .where(
+                AtendimentoMensagem.conversa_id == conversa.id,
+                AtendimentoMensagem.autor == AUTOR_LOJA,
+            )
+            .limit(1)
+        )
+    )
 
 
 async def chave_liberada(session: AsyncSession, conversa: Any) -> Chave | None:
@@ -323,22 +397,33 @@ async def chave_liberada(session: AsyncSession, conversa: Any) -> Chave | None:
         modo=canal.modo,
         site=site_da_conversa(conversa),
         via_formulario=via_formulario(conversa),
+        em_andamento=await em_andamento(session, conversa),
     )
 
 
 # ── As regras e o pacote ──────────────────────────────────────────────────
 
 
-async def regras_ativas(session: AsyncSession) -> list[MailAgenteRegra]:
-    return list(
-        (
-            await session.execute(
-                select(MailAgenteRegra)
-                .where(MailAgenteRegra.ativa.is_(True))
-                .order_by(MailAgenteRegra.ordem, MailAgenteRegra.created_at)
-            )
-        ).scalars()
-    )
+def id_da_regra(regra: Any) -> str:
+    """O id que o agente cita em `evidencias` quando segue a regra ("email:formulario_sac")."""
+    return f"email:{regra.chave or str(regra.id)[:8]}"
+
+
+def vale_no_site(regra: Any, site: str | None) -> bool:
+    sites = [str(x) for x in (getattr(regra, "sites", None) or [])]
+    return not sites or (site is not None and site in sites)
+
+
+async def regras_ativas(session: AsyncSession, site: str | None = None) -> list[MailAgenteRegra]:
+    """As regras ligadas que valem neste site (sem site: todas as ligadas)."""
+    linhas = (
+        await session.execute(
+            select(MailAgenteRegra)
+            .where(MailAgenteRegra.ativa.is_(True))
+            .order_by(MailAgenteRegra.ordem, MailAgenteRegra.created_at)
+        )
+    ).scalars()
+    return [r for r in linhas if site is None or vale_no_site(r, site)]
 
 
 def bloco_do_pacote(chave: Chave, regras: list[Any]) -> str:
@@ -361,13 +446,20 @@ def bloco_do_pacote(chave: Chave, regras: list[Any]) -> str:
             )
         )
         linhas.append(f"Formulário de SAC do site: {formulario.url}")
+        linhas.append(f"Site oficial da marca: {URL_SITE.get(chave.site or '', '')}")
         linhas.append("O que o formulário pede:")
         linhas.extend(f"- {c}" for c in formulario.campos)
         linhas.append("Ao enviar o formulário, o cliente recebe o número do protocolo na hora.")
+    if chave.em_andamento:
+        linhas.append("A equipe JÁ respondeu nesta conversa: é um atendimento em andamento.")
     if regras:
-        linhas.append("REGRAS DO E-MAIL (do dono; valem acima das regras gerais do chat):")
+        linhas.append(
+            "REGRAS DO E-MAIL (do dono; valem acima das regras gerais do chat). Quando a "
+            "resposta seguir uma delas, cite o id dela (o que está entre colchetes) em "
+            "`evidencias`:"
+        )
         for r in regras:
-            linhas.append(f"- {r.titulo}: {r.instrucao}")
+            linhas.append(f"- [{id_da_regra(r)}] {r.titulo}: {r.instrucao}")
     return "\n".join(linhas)
 
 
@@ -375,7 +467,9 @@ def links_permitidos(conversa: Any) -> list[str]:
     """As URLs que o agente pode escrever neste e-mail (o formulário de SAC do site)."""
     chave = chave_da(conversa)
     formulario = chave.formulario if chave is not None else None
-    return [formulario.url] if formulario is not None else []
+    if formulario is None:
+        return []
+    return [formulario.url, *([URL_SITE[chave.site]] if chave.site in URL_SITE else [])]
 
 
 _RX_URL = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -387,11 +481,12 @@ def pedido_do_formulario(texto: str | None, chave: Chave | None) -> bool:
     Só no SAC do site, no atendimento que NÃO veio pelo formulário, e com o link
     do formulário da marca no texto (e nenhum outro link). PURA.
     """
-    if chave is None or chave.via_formulario or chave.formulario is None:
+    if chave is None or chave.via_formulario or chave.em_andamento or chave.formulario is None:
         return False
     alvo = chave.formulario.url.rstrip("/").lower()
-    urls = [u.rstrip(".,;:!?)").rstrip("/").lower() for u in _RX_URL.findall(texto or "")]
-    return bool(urls) and all(u == alvo for u in urls)
+    site = URL_SITE.get(chave.site or "", "").rstrip("/").lower()
+    urls = {u.rstrip(".,;:!?)").rstrip("/").lower() for u in _RX_URL.findall(texto or "")}
+    return alvo in urls and urls <= {alvo, site}
 
 
 # As travas do ASSUNTO (`ia.trava_do_agente` e o só-pessoa do manual) que o pedido do
@@ -408,21 +503,51 @@ TRAVAS_DO_ASSUNTO = frozenset(
 )
 
 
-async def regra_formulario_ativa(session: AsyncSession) -> bool:
-    return bool(
-        await session.scalar(
-            select(MailAgenteRegra.ativa).where(MailAgenteRegra.chave == CHAVE_FORMULARIO)
-        )
+async def ids_que_saem(session: AsyncSession, chave: Chave | None) -> frozenset[str]:
+    """Os ids das regras ligadas, deste site, marcadas "responde sozinho"."""
+    if chave is None:
+        return frozenset()
+    return frozenset(
+        id_da_regra(r) for r in await regras_ativas(session, chave.site) if r.responde_sozinho
     )
 
 
-async def sai_pelo_formulario(session: AsyncSession, conversa: Any, texto: str | None) -> bool:
-    """O rascunho do e-mail liberado é o pedido do formulário, com a regra ativa e a
-    chave no automático? (o envio sozinho sem o assunto liberado na loja/site)"""
-    chave = chave_da(conversa)
-    if chave is None or chave.modo != MODO_AUTO or not pedido_do_formulario(texto, chave):
+def libera_pela_regra(
+    evidencias: Any, texto: str | None, chave: Chave | None, que_saem: frozenset[str]
+) -> bool:
+    """O rascunho cita uma regra do e-mail que "responde sozinho"? PURA.
+
+    Só com a chave no automático. A do formulário (`email:formulario_sac`) vale só
+    se o texto é o pedido do formulário (`pedido_do_formulario`: o link da marca,
+    sem protocolo, sem atendimento em andamento).
+    """
+    if chave is None or chave.modo != MODO_AUTO:
         return False
-    return await regra_formulario_ativa(session)
+    citadas = {" ".join(str(e or "").split()) for e in (evidencias or [])} & que_saem
+    formulario = f"email:{CHAVE_FORMULARIO}"
+    if formulario in citadas and not pedido_do_formulario(texto, chave):
+        citadas.discard(formulario)
+    return bool(citadas)
+
+
+def evidencias_do_rascunho(rascunho: Any) -> list[str]:
+    fatos = getattr(rascunho, "fatos", None)
+    agente = fatos.get("agente") if isinstance(fatos, dict) else None
+    evid = agente.get("evidencias") if isinstance(agente, dict) else None
+    return [str(e) for e in evid] if isinstance(evid, list) else []
+
+
+async def sai_pela_regra(session: AsyncSession, conversa: Any, rascunho: Any) -> bool:
+    """O rascunho do e-mail liberado segue uma regra que "responde sozinho" (no automático)?"""
+    chave = chave_da(conversa)
+    if chave is None or chave.modo != MODO_AUTO:
+        return False
+    return libera_pela_regra(
+        evidencias_do_rascunho(rascunho),
+        getattr(rascunho, "texto", None),
+        chave,
+        await ids_que_saem(session, chave),
+    )
 
 
 # ── O usuário do agente ───────────────────────────────────────────────────
@@ -548,6 +673,9 @@ async def onde_responde(session: AsyncSession) -> dict[str, list[dict]]:
                 "formulario": formulario.url,
             }
         )
+    lojas_on: list[dict] = []
+    if not LOJAS_LIGADAS:
+        return {"disponivel": disponivel, "sites": sites, "lojas": lojas_on}
     linhas = (
         await session.execute(
             select(AtendimentoCanal, Integration)
@@ -559,7 +687,6 @@ async def onde_responde(session: AsyncSession) -> dict[str, list[dict]]:
             )
         )
     ).all()
-    lojas_on: list[dict] = []
     for canal, integration in linhas:
         if CANAL_DA_CHAVE.get(canal.plataforma) != canal.canal:
             continue

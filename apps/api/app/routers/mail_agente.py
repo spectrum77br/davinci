@@ -4,12 +4,13 @@ O Eduardo: "a chave usa mesma do atendimento e como se fosse a extensao do
 atendimento pro email so", "o do email pode deixar ali na parte de email mesmo a
 config do agente deixe bem intuitivo" e "so admin mexe no agente ok e ve".
 
-- GET  /                    → onde o agente responde e-mail (os sites, com o liga/
-                               desliga; as lojas pela chave do atendimento) e as regras;
+- GET  /                    → onde o agente responde e-mail (por enquanto só o SAC dos
+                               sites, com o liga/desliga) e as regras;
 - PUT  /sites/{site}        → liga (sugere = copiloto; responde sozinho = automático)
                                ou desliga o agente no e-mail do SAC do site;
-- POST/PATCH/DELETE /regras → as regras do e-mail (a do formulário de SAC só
-                               desliga/edita, não apaga).
+- POST/PATCH/DELETE /regras → as regras do e-mail: onde valem (os sites) e se a
+                               resposta que as segue sai sozinha (a do formulário de
+                               SAC só desliga/edita, não apaga).
 
 A regra mora em `services/atendimento/email_agente.py`.
 """
@@ -43,11 +44,17 @@ Titulo = Annotated[str, Field(min_length=3, max_length=120)]
 Instrucao = Annotated[str, Field(min_length=10, max_length=4000)]
 
 
+Site = Literal["uranyx", "charlots"]
+
+
 class RegraIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
     titulo: Titulo
     instrucao: Instrucao
     ativa: bool = True
+    # Onde vale (vazio = os dois sites) e se a resposta que a segue sai sozinha.
+    sites: list[Site] = Field(default_factory=list, max_length=2)
+    responde_sozinho: bool = False
 
 
 class RegraPatch(BaseModel):
@@ -56,6 +63,8 @@ class RegraPatch(BaseModel):
     instrucao: Instrucao | None = None
     ativa: bool | None = None
     ordem: int | None = Field(default=None, ge=0, le=999)
+    sites: list[Site] | None = Field(default=None, max_length=2)
+    responde_sozinho: bool | None = None
 
 
 class SitePut(BaseModel):
@@ -71,6 +80,9 @@ def _regra_out(r: MailAgenteRegra) -> dict:
         "titulo": r.titulo,
         "instrucao": r.instrucao,
         "ativa": r.ativa,
+        "sites": list(r.sites or []),
+        "responde_sozinho": r.responde_sozinho,
+        "id_agente": email_agente.id_da_regra(r),
         "ordem": r.ordem,
         "fixa": r.chave is not None,
         "atualizada_em": r.updated_at.isoformat() if r.updated_at else None,
@@ -118,6 +130,8 @@ async def criar_regra(body: RegraIn, session: Session, user: Admin) -> dict:
         titulo=body.titulo.strip(),
         instrucao=body.instrucao.strip(),
         ativa=body.ativa,
+        sites=sorted(set(body.sites)),
+        responde_sozinho=body.responde_sozinho,
         ordem=int(ordem or 0) + 1,
         updated_by=user.id,
     )
@@ -142,6 +156,10 @@ async def editar_regra(regra_id: UUID, body: RegraPatch, session: Session, user:
         r.ativa = body.ativa
     if "ordem" in campos and body.ordem is not None:
         r.ordem = body.ordem
+    if "sites" in campos and body.sites is not None:
+        r.sites = sorted(set(body.sites))
+    if "responde_sozinho" in campos and body.responde_sozinho is not None:
+        r.responde_sozinho = body.responde_sozinho
     r.updated_by = user.id
     await session.commit()
     await session.refresh(r)

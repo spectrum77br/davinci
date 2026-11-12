@@ -2994,11 +2994,16 @@ async def no_rascunho(
             if (
                 motivo in email_agente.TRAVAS_DO_ASSUNTO | {NAO_RODA_SO_HUMANO}
                 and chave_email is not None
-                and chave_email.modo == constantes.MODO_AUTO
-                and email_agente.pedido_do_formulario(final.texto, chave_email)
+                and email_agente.libera_pela_regra(
+                    saida.evidencias(proposta),
+                    final.texto,
+                    chave_email,
+                    await email_agente.ids_que_saem(session, chave_email),
+                )
             ):
-                # E-mail do SAC do site (12/11/2026): o pedido do formulário sai sem o
-                # assunto liberado (`ia._talvez_enviar`) — o verificador confere igual.
+                # E-mail do SAC do site (12/11/2026): a resposta que segue uma regra
+                # "responde sozinho" sai sem o assunto liberado (`ia._talvez_enviar`) —
+                # o verificador confere igual.
                 motivo = None
     except Exception as e:  # noqa: BLE001 — sem saber, não roda (e a trava barra)
         logger.warning("atendimento_agente_verificador_elegibilidade", err=type(e).__name__)
