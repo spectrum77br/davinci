@@ -129,7 +129,7 @@ def follow(erp, products, components):
     Once a store is switched the catalog is the ERP's: nothing more comes from Bling."""
     from app.erp_local import bling_mirror
 
-    report = {"created": 0, "refused": {}}
+    report = {"created": 0, "refused": {}, "renamed": {}}
     with erp.connection() as db:
         if bling_mirror.switched(db):
             return {"state": "stopped"}
@@ -139,6 +139,13 @@ def follow(erp, products, components):
             if source:
                 origin[str(source)] = row["sku"]
     by_id = {str(p.get("bling_product_id")): p for p in products if p.get("bling_product_id")}
+    # A code changed in Bling for a product already here (b028.24 → z002800.mala, 12/11/2026) is
+    # reported, not applied: the code is the key of balances, movements, kits and fiscal data, so
+    # a person decides before anything is renamed.
+    for bid, here in origin.items():
+        there = str((by_id.get(bid) or {}).get("sku") or "").strip()
+        if there and there.lower() != here.lower():
+            report["renamed"][here] = there
     parts_of = {}
     for c in components:
         parts_of.setdefault(str(c["kit_bling_product_id"]), []).append(c)

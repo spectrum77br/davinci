@@ -47,7 +47,7 @@ def test_new_bling_products_come_in_linked_and_kits_find_their_parts(erp):
         {"kit_bling_product_id": "901", "component_bling_product_id": "900", "quantity": "2"},
     ]
     report = catalog_follow.follow(erp, products, components)
-    assert report == {"created": 2, "refused": {}}
+    assert report == {"created": 2, "refused": {}, "renamed": {}}
     assert kind(erp, "novo.ci") == "simple" and kind(erp, "combo.ci") == "kit"
     with erp.connection() as db:
         origin = json.loads(
@@ -119,3 +119,11 @@ def test_new_products_stop_coming_from_bling_once_a_store_is_switched(erp):
         )
     assert catalog_follow.follow(erp, [row("900", "novo.ci")], []) == {"state": "stopped"}
     assert kind(erp, "novo.ci") is None
+
+
+def test_a_code_changed_in_bling_is_reported_not_applied(erp):
+    link(erp, "demo.aparelho", "100")
+    report = catalog_follow.follow(erp, [row("100", "z002800.mala")], [])
+    assert report["renamed"] == {"demo.aparelho": "z002800.mala"}
+    assert report["created"] == 0
+    assert kind(erp, "demo.aparelho") == "simple" and kind(erp, "z002800.mala") is None
