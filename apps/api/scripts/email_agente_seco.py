@@ -80,8 +80,27 @@ def _decisao(conversa: Any, r: Any, chave: email_agente.Chave, canal: Any) -> st
     return motivo or "SAIRIA SOZINHO"
 
 
+def _regras_da_migration() -> list[SimpleNamespace]:
+    """As regras da 0477 em memória (antes do deploy a tabela ainda não existe)."""
+    import importlib.util
+    from pathlib import Path
+    from uuid import UUID
+
+    caminho = Path(__file__).resolve().parents[1] / "alembic/versions/0477_mail_agente_regras.py"
+    spec = importlib.util.spec_from_file_location("m0477", caminho)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return [SimpleNamespace(**{**r, "id": UUID(r["id"]), "ativa": True}) for r in mod.REGRAS]
+
+
 async def main(limite: int) -> None:
     guardados: dict = {}
+    regras = _regras_da_migration()
+
+    async def _regras_ativas(_session, site=None):
+        return [r for r in regras if site is None or email_agente.vale_no_site(r, site)]
+
+    email_agente.regras_ativas = _regras_ativas  # sem a tabela (antes do deploy)
 
     async def _salvar(_session, conversa, rascunho):
         guardados[conversa.id] = rascunho
@@ -148,7 +167,7 @@ async def main(limite: int) -> None:
                 try:
                     r = await ia._gerar(session, conversa, forcar=False)
                 except Exception as e:  # noqa: BLE001
-                    linha["decisao"] = f"erro {type(e).__name__}"
+                    linha["decisao"] = f"erro {type(e).__name__}: {str(e)[:120]}"
                     print(json.dumps(linha, ensure_ascii=False), flush=True)
                     await session.rollback()
                     continue
