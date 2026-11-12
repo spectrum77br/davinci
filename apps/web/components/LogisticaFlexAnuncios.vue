@@ -591,6 +591,13 @@ function linkAnuncio(a: FlexAnuncio): string | null {
 function aprovadoSemLigar(a: FlexAnuncio): boolean {
   return !!a.aprovado_em && a.desejado === 'ligado' && a.observado !== 'ligado'
 }
+// A Shopee aceitou e ainda não mostra a mudança (leva minutos): não é erro —
+// a próxima leitura confirma (12/11/2026; o texto vem do motor,
+// flex_motor.SHOPEE_CONFIRMANDO). Sem "Tentar agora" enquanto isso.
+function shopeeConfirmando(a: FlexAnuncio): boolean {
+  return (a.ultimo_erro || '').includes('esperando ela mostrar')
+}
+const CONFIRMANDO_TXT = 'A Shopee aceitou — esperando ela mostrar a mudança (o sistema confere na próxima leitura, até 15 min).'
 function podeAprovar(a: FlexAnuncio): boolean {
   return (
     props.canEdit &&
@@ -599,7 +606,9 @@ function podeAprovar(a: FlexAnuncio): boolean {
     !contasSemFlex.value.has(a.integration_id) &&
     // Na Shopee só se confere (sem flex_shopee_escrita): aprovar não ligaria nada.
     !(a.plataforma === 'shopee' && !config.value?.shopee_escrita) &&
-    (a.aguardando_aprovacao || !!a.recusa || (aprovadoSemLigar(a) && !!config.value?.pode_escrever))
+    (a.aguardando_aprovacao ||
+      !!a.recusa ||
+      (aprovadoSemLigar(a) && !!config.value?.pode_escrever && !shopeeConfirmando(a)))
   )
 }
 function rotuloAprovar(a: FlexAnuncio): string {
@@ -1094,6 +1103,7 @@ function acaoDe(a: FlexAnuncio): Acao {
     return { tipo: 'texto', texto: motivoConta(a), cls: 'text-muted-foreground', dot: a.plataforma === 'shopee' ? 'bg-slate-400' : 'bg-amber-500' }
   }
   if (a.aguardando_aprovacao) return { tipo: 'texto', texto: 'esperando aprovação', cls: 'text-amber-700 dark:text-amber-400' }
+  if (shopeeConfirmando(a)) return { tipo: 'texto', texto: 'Shopee confirmando', cls: 'text-muted-foreground' }
   if (aprovadoSemLigar(a)) return { tipo: 'texto', texto: 'aprovado — falta ligar', cls: 'text-muted-foreground' }
   if (shopeeSoLeitura(a) || (a.plataforma === 'shopee' && !config.value?.shopee_escrita)) {
     if (a.observado !== 'ligado' && (a.saldo_sp ?? -1) >= n) return { tipo: 'texto', texto: 'ligar no Seller Center', cls: 'font-semibold text-blue-700 dark:text-blue-400' }
@@ -1490,7 +1500,8 @@ defineExpose({ recarregar: carregarTudo })
                   <td class="px-1.5 py-1.5 text-[11px]">
                     <div class="line-clamp-2 leading-tight" :title="a.motivo_claro || a.motivo || ''">{{ a.motivo_claro || a.motivo || '—' }}</div>
                     <div v-if="recusaAparte(a)" class="truncate text-rose-700 dark:text-rose-400" :title="a.recusa || ''">A plataforma recusou ligar: {{ a.recusa }}</div>
-                    <div v-if="erroAparte(a)" class="truncate text-rose-700 dark:text-rose-400" :title="a.ultimo_erro || ''">
+                    <div v-if="shopeeConfirmando(a)" class="truncate text-muted-foreground" :title="CONFIRMANDO_TXT">{{ CONFIRMANDO_TXT }}</div>
+                    <div v-else-if="erroAparte(a)" class="truncate text-rose-700 dark:text-rose-400" :title="a.ultimo_erro || ''">
                       Último erro: {{ a.ultimo_erro }}
                       <template v-if="a.proxima_tentativa"> · tenta de novo {{ fmtCurto(a.proxima_tentativa) }}</template>
                       <template v-else-if="a.proxima_leitura"> · confere de novo {{ fmtCurto(a.proxima_leitura) }}</template>
@@ -1551,7 +1562,8 @@ defineExpose({ recarregar: carregarTudo })
             </div>
             <div>{{ a.motivo_claro || a.motivo || '—' }}</div>
             <div v-if="recusaAparte(a)" class="text-rose-700 dark:text-rose-400">A plataforma recusou ligar: {{ a.recusa }}</div>
-            <div v-if="erroAparte(a)" class="text-rose-700 dark:text-rose-400">Último erro: {{ a.ultimo_erro }}</div>
+            <div v-if="shopeeConfirmando(a)" class="text-muted-foreground">{{ CONFIRMANDO_TXT }}</div>
+            <div v-else-if="erroAparte(a)" class="text-rose-700 dark:text-rose-400">Último erro: {{ a.ultimo_erro }}</div>
             <button
               v-if="podeAprovar(a)"
               type="button"

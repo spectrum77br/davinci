@@ -226,6 +226,10 @@ SITUACOES_SAIU = (str(SITUACAO_EM_ANDAMENTO), str(SITUACAO_ATENDIDO))
 # que o DaVinci reativava (estoque republicado) voltava a vender pelo Flex sem
 # .sp até o dia seguinte.
 _ESPERA_RECUSA_DESLIGAR = timedelta(hours=1)
+# A Shopee aceitou a escrita e a releitura logo depois ainda mostra o anúncio
+# como antes: espera (REPETIR), não erro — a tela mostra em cinza
+# (components/LogisticaFlexAnuncios.vue procura "esperando ela mostrar").
+SHOPEE_CONFIRMANDO = "a Shopee aceitou — esperando ela mostrar a mudança"
 _ESPERA_MAXIMA = timedelta(hours=6)
 
 
@@ -1960,6 +1964,16 @@ async def _gravar(
                         est.recusa = None
                     if (est.ultimo_erro or "").startswith("leitura:"):
                         est.ultimo_erro = None
+                    if (est.observado == LIGADO) == (d.desejado == LIGADO) and (
+                        est.ultimo_erro or est.proxima_tentativa or est.tentativas
+                    ):
+                        # A plataforma já está como o sistema quer (12/11/2026: a
+                        # Shopee mostrou a Entrega Direta ligada minutos depois de
+                        # "aceitou, mas não mudou"): a escrita valeu — some o erro
+                        # e a nova tentativa ("✓ certo" com "Último erro" embaixo).
+                        est.ultimo_erro = None
+                        est.tentativas = 0
+                        est.proxima_tentativa = None
                     est.leitura_falhas = 0
                     est.proxima_leitura = None
                     mudou_algo = True
@@ -2159,10 +2173,17 @@ async def _chamar(
             flex_api.ERRO, detalhe="a Shopee aceitou, mas a conferência não leu o anúncio"
         )
     if depois.has_flex is not ligar:
-        return flex_api.ResultadoFlex(
-            flex_api.ERRO, detalhe="a Shopee aceitou, mas o canal Flex não mudou"
-        )
+        # A Shopee às vezes leva minutos para MOSTRAR a mudança (12/11/2026:
+        # 58202772455 apareceu ligado ~4 min depois). Não é erro: espera — a
+        # próxima rodada lê antes de mandar de novo (e, lido como se quer, o
+        # aviso some).
+        return flex_api.ResultadoFlex(flex_api.REPETIR, detalhe=SHOPEE_CONFIRMANDO)
     return flex_api.ResultadoFlex(flex_api.OK, has_flex=ligar, status_http=res.status_http)
+
+
+def _confirmando(res: flex_api.ResultadoFlex) -> bool:
+    """A Shopee aceitou a escrita e ainda não mostra a mudança."""
+    return res.tipo == flex_api.REPETIR and res.detalhe == SHOPEE_CONFIRMANDO
 
 
 async def _qual_promocao(
@@ -2449,7 +2470,7 @@ async def _escrever(
             _log(
                 acao=acao,
                 modo=modo,
-                resultado="ok" if res.ok else "erro",
+                resultado="ok" if res.ok else ("pendente" if _confirmando(res) else "erro"),
                 integration_id=integration_id,
                 external_id=external_id,
                 plataforma=plataforma,

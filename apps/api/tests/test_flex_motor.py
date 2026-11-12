@@ -1007,6 +1007,41 @@ async def test_shopee_escreve_com_a_lista_completa_e_confere(db, mundo, shopee, 
     assert (await _estados(db))["777"].observado == "desligado"
 
 
+@pytest.mark.asyncio
+async def test_shopee_aceita_e_demora_para_mostrar(db, mundo, shopee, monkeypatch):
+    """12/11/2026 (58202772455): a Shopee aceitou a escrita e a releitura logo
+    depois ainda mostrava o anúncio como antes — minutos depois, mostrou certo.
+    Não é erro: espera (pendente), sem "Tentar agora"; e quando a leitura vê o
+    anúncio como o sistema quer, o aviso e a nova tentativa somem."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "ativo")
+    monkeypatch.setattr(mundo["cfg"], "flex_shopee_escrita", True)
+    atrasada: dict[str, list[dict]] = {}
+
+    async def _atualizar(item_id, logistic_info, *, ligar, canais_flex):
+        payload = flex_api.payload_canais(logistic_info, canais_flex, ligar)
+        shopee.chamadas.append(("atualizar", (str(item_id), payload)))
+        atrasada[str(item_id)] = [dict(c) for c in payload]  # ainda não aparece
+        return ResultadoFlex(flex_api.OK, has_flex=ligar, status_http=200)
+
+    monkeypatch.setattr(shopee, "atualizar_canal_flex", _atualizar)
+    await flex_motor.rodar_motor()
+    est = (await _estados(db))["777"]
+    assert est.ultimo_erro == f"desligar: {flex_motor.SHOPEE_CONFIRMANDO}"
+    assert est.tentativas == 1 and est.proxima_tentativa is not None
+    assert ("desligar", "pendente") in await _trilha(db, "777")
+
+    # A Shopee passa a mostrar: a rodada seguinte lê, vê desligado (o que o
+    # sistema quer) e limpa o aviso — sem escrever de novo.
+    shopee.canais.update(atrasada)
+    escritas_antes = len(shopee.escritas)
+    await flex_motor.rodar_motor()
+    db.expire_all()
+    est = (await _estados(db))["777"]
+    assert est.observado == "desligado"
+    assert (est.ultimo_erro, est.tentativas, est.proxima_tentativa) == (None, 0, None)
+    assert len(shopee.escritas) == escritas_antes
+
+
 # ---- worker e gancho ---------------------------------------------------------------------
 
 
