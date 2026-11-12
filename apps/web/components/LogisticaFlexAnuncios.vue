@@ -678,8 +678,20 @@ function recusaAparte(a: FlexAnuncio): boolean {
 // "Último erro" repetindo a recusa que o "Por quê" já explica em português
 // (12/11/2026: "ligar: 200 product.error_busi: …" embaixo da frase): esconde.
 function erroAparte(a: FlexAnuncio): boolean {
-  if (!a.ultimo_erro) return false
+  if (!a.ultimo_erro || faltaGtin(a)) return false
   return !(a.recusa && a.ultimo_erro === `ligar: ${a.recusa}`)
+}
+// 12/11/2026: a Shopee recusa ligar o anúncio sem código de barras ("The GTIN
+// code is required for this category") — o erro vinha cru, em inglês, em
+// vermelho. Vira o porquê em português (como a promoção), sem a linha crua.
+const GTIN_TXT =
+  'A Shopee pede o código de barras (GTIN/EAN) deste anúncio para mudar o envio. Preencha no Seller Center e clique em Tentar novamente.'
+function faltaGtin(a: FlexAnuncio | null | undefined): boolean {
+  return /\bGTIN\b/i.test(a?.ultimo_erro || '')
+}
+function porQue(a: FlexAnuncio): string {
+  if (faltaGtin(a)) return GTIN_TXT
+  return a.motivo_claro || a.motivo || '—'
 }
 function chave(a: FlexAnuncio): string {
   return `${a.integration_id}/${a.external_id}`
@@ -901,7 +913,7 @@ async function aprovar(a: FlexAnuncio) {
     } else if (r.modo === 'piloto' || r.modo === 'ativo')
       toasts.warning(
         'Aprovado, mas ainda não ligou',
-        r.estado?.ultimo_erro ||
+        (faltaGtin(r.estado) ? GTIN_TXT : r.estado?.ultimo_erro) ||
           r.estado?.motivo_claro ||
           'Veja o motivo na linha do anúncio. A aprovação continua valendo: o sistema tenta de novo na próxima conferência, ou clique em "Tentar novamente".',
       )
@@ -1836,7 +1848,7 @@ defineExpose({ recarregar: carregarTudo })
                     </span>
                   </td>
                   <td class="px-1.5 py-1.5 text-[11px]">
-                    <div class="line-clamp-2 leading-tight" :title="a.motivo_claro || a.motivo || ''">{{ a.motivo_claro || a.motivo || '—' }}</div>
+                    <div class="line-clamp-2 leading-tight" :title="porQue(a)">{{ porQue(a) }}</div>
                     <div v-if="recusaAparte(a)" class="truncate text-rose-700 dark:text-rose-400" :title="a.recusa || ''">A plataforma recusou ligar: {{ a.recusa }}</div>
                     <div v-if="shopeeConfirmando(a)" class="truncate text-muted-foreground" :title="CONFIRMANDO_TXT">{{ CONFIRMANDO_TXT }}</div>
                     <div v-else-if="erroAparte(a)" class="truncate text-rose-700 dark:text-rose-400" :title="a.ultimo_erro || ''">
@@ -1894,7 +1906,7 @@ defineExpose({ recarregar: carregarTudo })
                 <span v-if="a.observado_em" class="text-muted-foreground"> · conferido {{ fmtDesde(a.observado_em) }}</span>
               </div>
             </div>
-            <div>{{ a.motivo_claro || a.motivo || '—' }}</div>
+            <div>{{ porQue(a) }}</div>
             <div v-if="recusaAparte(a)" class="text-rose-700 dark:text-rose-400">A plataforma recusou ligar: {{ a.recusa }}</div>
             <div v-if="shopeeConfirmando(a)" class="text-muted-foreground">{{ CONFIRMANDO_TXT }}</div>
             <div v-else-if="erroAparte(a)" class="text-rose-700 dark:text-rose-400">Último erro: {{ a.ultimo_erro }}</div>
