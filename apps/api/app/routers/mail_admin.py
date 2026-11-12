@@ -1,8 +1,8 @@
 """Administração da aba E-mail (12/11/2026): a lista de usuários.
 
 Uma linha por usuário (login, nome, caixas, estado, criação, último acesso) e,
-no Editar, cada conta de e-mail com as pastas dela em checkbox. Só admin que mexe no /atendimento
-(`acesso.pode_mexer`) vê e grava. A regra mora em
+no Editar, cada conta de e-mail com as pastas dela em checkbox. Qualquer admin
+ativo vê e grava. A regra mora em
 `services/mail_atendimento/usuarios.py`; a antiga (regra por pessoa × caixa ×
 loja × venda e a lixeira geral) saiu — a lixeira de cada caixa continua em
 Caixas › Lixeira desta caixa.
@@ -22,23 +22,15 @@ from app.deps.auth import require_admin
 from app.models import User
 from app.models.mail import MailMailbox
 from app.routers import mail_caixa
-from app.routers.atendimento import _so_admin
-from app.services.atendimento import acesso
 from app.services.mail_atendimento import usuarios
 
+# Qualquer admin ativo (12/11/2026, o Eduardo: "habilite o user harry potter a ver
+# a administracao tambem"; antes era só quem mexe no /atendimento).
 router = APIRouter(
-    prefix="/api/atendimento/email/admin", tags=["mail"], dependencies=[Depends(_so_admin)]
+    prefix="/api/atendimento/email/admin", tags=["mail"], dependencies=[Depends(require_admin)]
 )
 Session = Annotated[AsyncSession, Depends(get_session)]
-
-
-def _admin(user: Annotated[User, Depends(require_admin)]) -> User:
-    if not acesso.pode_mexer(user):
-        raise HTTPException(403, detail={"code": "atendimento_permission_required"})
-    return user
-
-
-Admin = Annotated[User, Depends(_admin)]
+Admin = Annotated[User, Depends(require_admin)]
 
 
 PastaChave = Annotated[str, Field(pattern=r"^(s\d{1,2}|p[0-9a-f]{31}|x)$")]

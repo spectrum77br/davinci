@@ -76,10 +76,11 @@ async def test_so_admin_que_mexe_ve_e_grava(client, cena, make_user, auth_as, mo
         auth_as(quem)
         assert (await client.get(ADMIN)).status_code == 403
         assert (await _put(client, pessoa, caixas=[cena.geral])).status_code == 403
-    # Admin fora da lista de quem mexe no /atendimento também não.
+    # Qualquer admin, mesmo fora da lista de quem mexe no /atendimento (harry potter).
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", "outro@example.com")
     auth_as(cena.dono)
-    assert (await client.get(ADMIN)).status_code == 403
+    assert (await client.get(ADMIN)).status_code == 200
+    assert (await _put(client, pessoa, caixas=[cena.geral])).status_code == 200
 
 
 async def test_lista_mostra_admin_com_todas_e_usuario_com_as_dele(

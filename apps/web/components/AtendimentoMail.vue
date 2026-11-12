@@ -124,6 +124,8 @@ const currentStore = computed(() => (storeKey.value ? mailStores.value.find((ite
 // reads it (the conversation queues only — AtendimentoMailFilas `podeMexer`).
 const seesQueues = computed(() => !!props.canOperate || !!props.canView)
 const canAdminister = computed(() => props.isAdmin && !!props.canOperate)
+// A Administração (lista de usuários do e-mail): qualquer admin (12/11/2026).
+const canAdministerUsers = computed(() => props.isAdmin)
 // Email waiting for a reply when the tab opens (13/10/2026 — it no longer
 // counts in the Caixa Humano): the tab opens on "Filas", admins and mailbox
 // owners included. Decided ONCE, when the tab opens (this component mounts
@@ -133,12 +135,12 @@ const canAdminister = computed(() => props.isAdmin && !!props.canOperate)
 const initialSectionResolved = ref(props.waitingReady !== false)
 const chosenSection = ref<'' | Section>(props.rememberedSection || (initialSectionResolved.value && seesQueues.value && (props.waiting ?? 0) > 0 ? 'queues' : ''))
 function chooseSection(value: Section) {
-  if (sending.value || deleting.value || composerActive.value || resolving.value || (value === 'admin' && !canAdminister.value)) return
+  if (sending.value || deleting.value || composerActive.value || resolving.value || (value === 'admin' && !canAdministerUsers.value)) return
   chosenSection.value = value
   emit('update:rememberedSection', value)
 }
 const section = computed(() => {
-  if (chosenSection.value === 'admin' && canAdminister.value) return 'admin'
+  if (chosenSection.value === 'admin' && canAdministerUsers.value) return 'admin'
   if (chosenSection.value === 'queues' && seesQueues.value) return 'queues'
   if (chosenSection.value === 'mailboxes') return 'mailboxes'
   if (!initialSectionResolved.value) return 'loading'
@@ -758,7 +760,7 @@ onBeforeUnmount(() => {
     <p v-if="section === 'loading'" role="status" class="rounded border p-4 text-sm text-muted-foreground">Carregando e-mails…</p>
 
     <!-- Sections: the mailboxes (this screen) and the Atendimento queues (who operates Atendimento) -->
-    <div v-if="seesQueues || canAdminister" class="flex gap-1 overflow-x-auto border-b" role="tablist" aria-label="Seções do e-mail" data-mail-sections>
+    <div v-if="seesQueues || canAdministerUsers" class="flex gap-1 overflow-x-auto border-b" role="tablist" aria-label="Seções do e-mail" data-mail-sections>
       <button
         v-if="isAdmin || mailboxes.length"
         type="button"
@@ -788,10 +790,10 @@ onBeforeUnmount(() => {
           data-mail-unread
         >{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
       </button>
-      <button v-if="canAdminister" type="button" role="tab" :aria-selected="section === 'admin'" :disabled="sending || deleting || !!resolving" class="-mb-px shrink-0 border-b-2 px-3 py-1.5 text-sm" :class="section === 'admin' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" data-mail-admin-tab @click="chooseSection('admin')">Administração</button>
+      <button v-if="canAdministerUsers" type="button" role="tab" :aria-selected="section === 'admin'" :disabled="sending || deleting || !!resolving" class="-mb-px shrink-0 border-b-2 px-3 py-1.5 text-sm" :class="section === 'admin' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" data-mail-admin-tab @click="chooseSection('admin')">Administração</button>
     </div>
 
-    <AtendimentoMailUsuarios v-if="canAdminister && section === 'admin'" @mudou="changedAdministration" />
+    <AtendimentoMailUsuarios v-if="canAdministerUsers && section === 'admin'" @mudou="changedAdministration" />
 
     <AtendimentoMailFilas
       v-if="seesQueues && section === 'queues'"
