@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.models import MailMessage, UserRole
-from app.models.mail_admin import MailAcesso, MailLixeira
+from app.models.mail_admin import MailLixeira
 from app.models.mail_atendimento import MailCaixaIndice
 from app.routers import mail_caixa
 from app.services.mail_atendimento import administracao as mail_admin
@@ -118,55 +118,6 @@ async def test_busca_respeita_lixeira_local_e_restauracao(db, cena, client, auth
     ]
 
 
-async def test_concessao_filtrada_nao_libera_busca_nem_decifra_mensagem(
-    db, cena, client, make_user, auth_as, monkeypatch
-):
-    permitido = await entrar(
-        db, cena.geral, pasta="problema ml", assunto="Pedido permitido", recebido_em=_min(2)
-    )
-    negado = await entrar(
-        db,
-        cena.geral,
-        pasta="problema shopee",
-        # A Shopee da Barbosa no alias dela (22max, 21/10/2026).
-        para=["22max@tuta.com"],
-        assunto="Assunto invisível Shopee",
-        recebido_em=_min(1),
-    )
-    await indice.rodar(db)
-    pessoa = await make_user(role=UserRole.USER)
-    db.add(
-        MailAcesso(
-            mailbox_id=cena.geral.id,
-            user_id=pessoa.id,
-            modo="selecionadas",
-            lojas_permitidas=[f"f:{cena.loja_ml.id}", f"i:{cena.ml.id}"],
-            lojas_bloqueadas=[],
-            tipos_permitidos=["informativo", "chamado", "venda"],
-            pedidos_permitidos=[],
-        )
-    )
-    await db.commit()
-    decifrados = []
-    original = ponte.decifrar
-
-    def medir(m):
-        decifrados.append(m.id)
-        return original(m)
-
-    monkeypatch.setattr(ponte, "decifrar", medir)
-    auth_as(pessoa)
-    for q in ("Pedido permitido", "invisivel", "Shopee"):
-        result = await client.get(f"/api/mail/mailboxes/{cena.geral.id}/lista", params={"q": q})
-        assert result.status_code == 403 and result.json()["detail"]["code"] == "admin_only"
-    assert decifrados == []
-    # O filtro interno que também atende e-mails de lojas continua restrito.
-    visiveis = set(
-        await db.scalars(select(MailMessage.id).where(mail_admin.filtro_mensagem(pessoa)))
-    )
-    assert permitido in visiveis and negado not in visiveis
-
-
 async def test_busca_nao_concede_acesso_a_outra_caixa(db, cena, client, make_user, auth_as):
     pessoa = await make_user(role=UserRole.USER)
     await entrar(db, cena.geral, assunto="Assunto pesquisado")
@@ -223,55 +174,6 @@ async def test_busca_vazia_equivale_a_lista_e_termo_longo_recusado(db, cena, cli
     assert await _lista(client, cena.geral, q="   ") == normal
     r = await client.get(f"/api/mail/mailboxes/{cena.geral.id}/lista", params={"q": "x" * 121})
     assert r.status_code == 422
-
-
-async def test_versao_de_acesso_muda_com_pedido_permitido_mesmo_com_iguais_contagens(
-    db, cena, client, make_user, auth_as
-):
-    from tests.test_mail_admin import _salvar
-    from tests.test_mail_ponte import pedido_existe
-    from tests.test_mail_venda_rotas import X, Y, _caso
-
-    await pedido_existe(db, cena.ml, X)
-    await pedido_existe(db, cena.ml, Y)
-    x = await _caso(db, cena, "12345678", X)
-    y = await _caso(db, cena, "87654321", Y)
-    pessoa = await make_user(role=UserRole.USER)
-    auth_as(cena.dono)
-    primeira = await _salvar(
-        client,
-        cena,
-        pessoa,
-        modo="selecionadas",
-        lojas_permitidas=[f"i:{cena.ml.id}"],
-        pedidos_permitidos=[{"loja": f"i:{cena.ml.id}", "numero": X}],
-    )
-    auth_as(pessoa)
-    assert (await client.get(f"/api/mail/mailboxes/{cena.geral.id}/pastas")).status_code == 403
-    # Mantém a cobertura da invalidação interna sem liberar a caixa ao usuário.
-    antes = await mail_caixa._acesso_versao(db, cena.geral, pessoa)
-    assert list(
-        await db.scalars(select(MailMessage.id).where(mail_admin.filtro_mensagem(pessoa)))
-    ) == [x.message_id]
-    auth_as(cena.dono)
-    await _salvar(
-        client,
-        cena,
-        pessoa,
-        modo="selecionadas",
-        lojas_permitidas=[f"i:{cena.ml.id}"],
-        pedidos_permitidos=[{"loja": f"i:{cena.ml.id}", "numero": Y}],
-        expected_updated_at=primeira["updated_at"],
-    )
-    auth_as(pessoa)
-    assert (await client.get(f"/api/mail/mailboxes/{cena.geral.id}/pastas")).status_code == 403
-    depois = await mail_caixa._acesso_versao(db, cena.geral, pessoa)
-    assert depois != antes
-    assert list(
-        await db.scalars(select(MailMessage.id).where(mail_admin.filtro_mensagem(pessoa)))
-    ) == [y.message_id]
-    assert len(depois) == 64
-    assert X not in depois and Y not in depois
 
 
 async def test_versao_de_acesso_nao_muda_com_sync_ou_email_novo_mas_muda_com_lixeira(

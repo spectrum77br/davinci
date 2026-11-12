@@ -47,8 +47,7 @@ import structlog
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import MailMailbox, MailMessage, MailOutbox, User, UserRole
-from app.models.mail_admin import MailAcesso
+from app.models import MailMailbox, MailMessage, MailOutbox, User
 from app.models.mail_atendimento import (
     MailAgenteV2,
     MailFolder,
@@ -276,10 +275,6 @@ async def caixas_visiveis(session: AsyncSession, user: User) -> list[MailMailbox
     saida: list[MailMailbox] = []
     for mailbox in caixas:
         cfg = await config_caixa.config_da_caixa(session, mailbox.id)
-        if user.role != UserRole.ADMIN:
-            politica = await session.get(MailAcesso, (mailbox.id, user.id))
-            if politica is not None and politica.modo == "bloqueado":
-                continue
         if (
             cfg.empresa
             or mail_central.allowed(mailbox, user)
@@ -306,9 +301,7 @@ async def linha_da_caixa(
     agora = datetime.now(UTC)
     visto = _utc(mailbox.last_seen_at)
     online = visto is not None and visto > agora - timedelta(minutes=3)
-    filtrada = recorte_email is not None or (
-        user is not None and await administracao.tem_politica(session, mailbox.id, user)
-    )
+    filtrada = recorte_email is not None
     contagens = {
         estado: int(n)
         for estado, n in (

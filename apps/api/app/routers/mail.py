@@ -131,7 +131,7 @@ async def user_message(
     read: bool = False,
 ) -> tuple[MailMessage, MailMailbox]:
     query = select(MailMessage).where(
-        MailMessage.id == message_id, mail_admin.filtro_mensagem(user)
+        MailMessage.id == message_id, mail_admin.filtro_da_caixa(user)
     )
     if lock:
         query = query.with_for_update()
@@ -178,9 +178,6 @@ async def list_mailboxes(session: Session, user: MailReader, response: Response)
             item["pode_responder"] = await mail_admin.pode_responder_caixa(session, mailbox, user)
             item["pode_compor"] = await mail_composer.can_compose(session, mailbox, user)
             item["pode_gerenciar"] = acesso.opera_caixa_email(user, excluir=True)
-        if await mail_admin.tem_politica(session, mailbox.id, user):
-            # A concessão é de mensagens, não da lista de aliases das outras lojas.
-            item.update(address="", aliases=[], leitura_filtrada=True)
         items.append(item)
     return {"items": items}
 
@@ -257,7 +254,7 @@ async def list_messages(
             select(MailMessage)
             .where(
                 MailMessage.mailbox_id == mailbox_id,
-                mail_admin.filtro_mensagem(user),
+                mail_admin.filtro_da_caixa(user),
             )
             .order_by(MailMessage.received_at.desc(), MailMessage.id.desc())
             .offset(offset)
@@ -284,7 +281,7 @@ async def list_trash(
         .where(
             MailMessage.mailbox_id == mailbox_id,
             MailLixeira.excluido_em.is_not(None),
-            mail_admin.filtro_mensagem(user, incluir_lixeira=True),
+            mail_admin.filtro_da_caixa(user, incluir_lixeira=True),
         )
         .order_by(MailLixeira.excluido_em.desc(), MailMessage.id.desc())
         .offset(offset).limit(limit + 1)
@@ -297,7 +294,7 @@ async def managed_message(session, message_id, user):
     message = await session.scalar(
         select(MailMessage).where(
             MailMessage.id == message_id,
-            mail_admin.filtro_mensagem(user, incluir_lixeira=True),
+            mail_admin.filtro_da_caixa(user, incluir_lixeira=True),
         ).with_for_update()
     )
     if message is None:
@@ -367,12 +364,6 @@ async def get_message(message_id: UUID, session: Session, user: MailReader, resp
         strict=caixa_cfg.remetente_estrito,
         main_allowed=not caixa_cfg.empresa,
     )
-    if await mail_admin.tem_politica(session, mailbox.id, user):
-        # A message-scoped grant must not reveal the other stores' aliases.
-        visible_senders = {*reply["receiving_aliases"], reply["from_address"]}
-        reply["allowed_from_addresses"] = [
-            address for address in reply["allowed_from_addresses"] if address in visible_senders
-        ]
     response.headers["Cache-Control"] = "no-store"
     return {
         **service.message_view(message, detail=True),
@@ -424,14 +415,6 @@ async def reply(message_id: UUID, request: Request, session: Session, user: Mail
         .execution_options(populate_existing=True)
     )
     body = await limited_body(request, ReplyIn, 512 * 1024)
-    recorte = await mail_admin.remetentes_da_concessao(session, mailbox, message, user)
-    if recorte is not None:
-        # Concessão filtrada: só o remetente que a pessoa vê. Qualquer outro
-        # (de outra loja, inexistente ou o principal) = o MESMO código, antes de
-        # todas as outras recusas — sem dar pista de quais endereços existem.
-        permitidos, padrao = recorte
-        if str(body.from_address or padrao or "").lower() not in permitidos:
-            raise fail("sender_not_authorized", 409)
     try:
         job = await service.queue_reply(session, mailbox, message, user, body)
     except service.MailError as error:
@@ -450,7 +433,7 @@ async def resolve_outbox(job_id: UUID, body: OutboxResolve, session: Session, us
     dono = user.role == UserRole.ADMIN
     if not dono and job.message_id is not None and not await session.scalar(
         select(MailMessage.id).where(
-            MailMessage.id == job.message_id, mail_admin.filtro_mensagem(user),
+            MailMessage.id == job.message_id, mail_admin.filtro_da_caixa(user),
         )
     ):
         raise fail("job_not_found")

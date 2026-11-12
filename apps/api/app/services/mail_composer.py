@@ -27,7 +27,6 @@ async def can_compose(session, mailbox, user):
     # enviar a mensagem"): Nova mensagem, rascunhos, encaminhar, anexos.
     return (
         await mail_admin.pode_responder_caixa(session, mailbox, user)
-        and not await mail_admin.tem_politica(session, mailbox.id, user)
         and not await mailbox_settings.bloqueia_resposta(session, mailbox.id, user)
     )
 
@@ -39,7 +38,7 @@ async def source_message(session, mailbox, user, message_id):
         select(MailMessage).where(
             MailMessage.id == message_id,
             MailMessage.mailbox_id == mailbox.id,
-            mail_admin.filtro_mensagem(user),
+            mail_admin.filtro_da_caixa(user),
         )
     )
     if message is None:

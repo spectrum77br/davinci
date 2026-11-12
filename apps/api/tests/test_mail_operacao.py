@@ -4,21 +4,37 @@
 PostgreSQL local e HTTP em processo; o conector é simulado, sem transporte externo.
 """
 
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import func, select
 
 from app.config import get_settings
-from app.models.mail import MailDraft, MailMailbox, MailOutbox
-from app.models.mail_admin import MailAcesso, MailLixeira
+from app.models.mail import MailDraft, MailMailbox, MailMessage, MailOutbox
+from app.models.mail_admin import MailLixeira
 from app.models.mail_atendimento import MailMailboxSettings
+from app.services.mail_atendimento import administracao
 from tests.test_mail_central import ROOT, account, claim, enable, ingest
 from tests.test_mail_composer import compose, file_data
 
 
 def grants(*, edit=True, delete=True):
     return {"atendimento_email_operacao": {"view": True, "edit": edit, "delete": delete}}
+
+
+@pytest.fixture(autouse=True)
+def _sem_recorte_de_privado(monkeypatch):
+    """Estes testes são dos DIREITOS de operação com e-mails genéricos (que o
+    índice chamaria de privados). O recorte do e-mail privado/de segurança para
+    quem não é admin nem dono (12/11/2026) tem os testes em test_mail_usuarios.py."""
+    monkeypatch.setattr(
+        administracao,
+        "filtro_da_caixa",
+        lambda user, message_id=MailMessage.id, *, incluir_lixeira=False: (
+            administracao.filtro_mensagem(user, message_id, incluir_lixeira=incluir_lixeira)
+        ),
+    )
 
 
 async def operator(db, account, make_user, *, owner=False, permissions=None, company=False):
@@ -177,7 +193,7 @@ async def test_operacao_nao_concede_outras_caixas_nem_configuracao(
     make_user,
     auth_as,
 ):
-    mid = await ingest(client, account)
+    await ingest(client, account)
     other = await client.post(
         f"{ROOT}/mailboxes",
         json={
@@ -204,9 +220,8 @@ async def test_operacao_nao_concede_outras_caixas_nem_configuracao(
         ("patch", f"{ROOT}/mailboxes/{box}/settings", {"ponte_ligada": True}),
         ("get", f"{ROOT}/mailboxes/{box}/leitores", None),
         ("put", f"{ROOT}/mailboxes/{box}/leitores", {"leitores": []}),
-        ("get", "/api/atendimento/email/admin", None),
-        ("get", "/api/atendimento/email/admin/lixeira", None),
-        ("post", f"/api/atendimento/email/admin/emails/{mid}/excluir", {}),
+        ("get", "/api/atendimento/email/admin/usuarios", None),
+        ("put", f"/api/atendimento/email/admin/usuarios/{uuid4()}", {"ligado": True}),
     ):
         response = await getattr(client, method)(
             path, **({"json": body} if body is not None else {})
@@ -291,7 +306,7 @@ async def test_revogar_operacao_impede_conector_de_enviar_fila_pendente(
     assert job.status == "failed" and job.error_code == "author_access_revoked"
 
 
-async def test_bloqueio_da_caixa_vence_operacao_e_leitor_existente(
+async def test_caixa_desmarcada_vence_operacao(  # 12/11/2026: a lista de usuários
     client,
     account,
     db,
@@ -302,7 +317,8 @@ async def test_bloqueio_da_caixa_vence_operacao_e_leitor_existente(
     await enable(client, account)
     user = await operator(db, account, make_user)
     box = UUID(account["mailbox"]["id"])
-    db.add(MailAcesso(mailbox_id=box, user_id=user.id, modo="bloqueado"))
+    cfg = await db.get(MailMailboxSettings, box)
+    cfg.leitores = []
     await db.commit()
     auth_as(user)
     assert (await client.get(f"{ROOT}/mailboxes")).json()["items"] == []
@@ -318,7 +334,7 @@ async def test_bloqueio_da_caixa_vence_operacao_e_leitor_existente(
         assert response.status_code == 404, (path, response.text)
 
 
-async def test_politica_filtrada_nao_libera_compositor_nem_envio_pendente(
+async def test_caixa_desmarcada_nao_libera_compositor_nem_envio_pendente(
     client,
     account,
     db,
@@ -331,20 +347,15 @@ async def test_politica_filtrada_nao_libera_compositor_nem_envio_pendente(
     auth_as(user)
     queued = await client.post(f"{ROOT}/mailboxes/{box}/send", json=compose())
     assert queued.status_code == 202, queued.text
-    db.add(
-        MailAcesso(
-            mailbox_id=box,
-            user_id=user.id,
-            modo="padrao",
-            tipos_permitidos=["informativo", "chamado", "venda"],
-        )
-    )
+    cfg = await db.get(MailMailboxSettings, box)
+    cfg.leitores = []
     await db.commit()
     context = await client.get(f"{ROOT}/mailboxes/{box}/compose-context")
-    assert context.status_code == 200, context.text
-    assert context.json()["can_compose"] is False
-    assert context.json()["allowed_from_addresses"] == []
-    assert (await client.post(f"{ROOT}/mailboxes/{box}/send", json=compose())).status_code == 403
+    assert context.status_code == 404, context.text
+    assert (await client.post(f"{ROOT}/mailboxes/{box}/send", json=compose())).status_code in (
+        403,
+        404,
+    )
     assert await claim(client, account) == []
     job = await db.get(MailOutbox, UUID(queued.json()["id"]))
     await db.refresh(job)
@@ -379,84 +390,6 @@ async def test_lixeira_tem_permissao_propria_escopo_e_restauracao(
     assert (await client.get(f"{ROOT}/mailboxes/{box}/trash")).json()["items"] == []
     await db.refresh(item)
     assert item.restaurado_por == user.id and item.excluido_em is None
-
-
-async def test_dono_nao_admin_filtrado_so_responde_com_remetente_visivel(
-    client,
-    account,
-    db,
-    make_user,
-    auth_as,
-):
-    mid = await ingest(client, account)
-    await enable(client, account)
-    user = await operator(db, account, make_user, owner=True)
-    box = UUID(account["mailbox"]["id"])
-    db.add(
-        MailAcesso(
-            mailbox_id=box,
-            user_id=user.id,
-            modo="padrao",
-            tipos_permitidos=["informativo", "chamado", "venda"],
-        )
-    )
-    await db.commit()
-    auth_as(user)
-    detail = await client.get(f"{ROOT}/messages/{mid}")
-    assert detail.status_code == 200, detail.text
-    assert detail.json()["reply"]["allowed_from_addresses"] == ["support@example.com"]
-    denied = await client.post(
-        f"{ROOT}/messages/{mid}/reply",
-        json={
-            "request_id": str(uuid4()),
-            "text": "Remetente fora da concessão",
-            "from_address": "owner@example.com",
-        },
-    )
-    assert denied.status_code == 409, denied.text
-    assert denied.json()["detail"]["code"] == "sender_not_authorized"
-    accepted = await client.post(
-        f"{ROOT}/messages/{mid}/reply",
-        json={
-            "request_id": str(uuid4()),
-            "text": "Remetente que recebeu a mensagem",
-            "from_address": "support@example.com",
-        },
-    )
-    assert accepted.status_code == 202, accepted.text
-
-
-async def test_lixeira_filtrada_nao_lista_nem_restaura_mensagem_fora_da_politica(
-    client,
-    account,
-    db,
-    make_user,
-    auth_as,
-):
-    mid = await ingest(client, account)
-    user = await operator(db, account, make_user)
-    box = UUID(account["mailbox"]["id"])
-    auth_as(user)
-    deleted = await client.post(f"{ROOT}/messages/{mid}/trash", json={})
-    assert deleted.status_code == 200, deleted.text
-    policy = MailAcesso(
-        mailbox_id=box,
-        user_id=user.id,
-        modo="padrao",
-        tipos_permitidos=["chamado"],
-    )
-    db.add(policy)
-    await db.commit()
-    listed = await client.get(f"{ROOT}/mailboxes/{box}/trash")
-    assert listed.status_code == 200 and listed.json()["items"] == []
-    restored = await client.post(f"{ROOT}/messages/{mid}/restore")
-    assert restored.status_code == 404, restored.text
-    item = await db.get(MailLixeira, UUID(mid))
-    await db.refresh(item)
-    assert item.excluido_em is not None and item.restaurado_por is None
-    await db.delete(policy)
-    await db.commit()
-    assert (await client.post(f"{ROOT}/messages/{mid}/restore")).status_code == 200
 
 
 async def test_lixeira_preserva_restricao_de_admin_que_nao_mexe(
@@ -505,12 +438,8 @@ async def test_conferencia_de_envio_proprio_exige_mensagem_ainda_visivel(
         json={"lease_token": leased["lease_token"], "status": "uncertain"},
     )
     assert receipt.status_code == 200, receipt.text
-    policy = MailAcesso(
-        mailbox_id=box,
-        user_id=user.id,
-        modo="padrao",
-        tipos_permitidos=["chamado"],
-    )
+    # A origem sai do alcance (a lixeira local; a regra por pessoa saiu em 12/11/2026).
+    policy = MailLixeira(message_id=UUID(mid), excluido_em=datetime.now(UTC))
     db.add(policy)
     await db.commit()
     assert (await client.get(f"{ROOT}/messages/{mid}")).status_code == 404

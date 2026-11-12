@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import delete, select
 
 from app.models import AtendimentoConversa, AtendimentoMensagem
-from app.models.mail_admin import MailAcesso, MailLixeira
+from app.models.mail_admin import MailLixeira
 from app.models.mail_atendimento import MailMessageMeta
 from tests.lojas_da_pessoa import dar_lojas
 from tests.test_atendimento_email_lidos_lote import _conversa
@@ -125,10 +125,6 @@ async def test_notificacoes_respeitam_lojas_acl_e_lixeira(
     r = await _contagens(client)
     assert r["nao_lidas"]["total"] == r["nao_lidas"]["aguardando"] == 1
     assert r["nao_lidas"]["chamados"] == 0
-    db.add(MailAcesso(mailbox_id=cena.geral.id, user_id=user.id, modo="bloqueado"))
-    await db.commit()
-    r = await _contagens(client)
-    assert r["nao_lidas"]["total"] == r["nao_lidas"]["aguardando"] == 0
     assert await db.scalar(select(AtendimentoConversa.visto_em).where(
         AtendimentoConversa.id == minha.id
     )) is None

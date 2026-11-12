@@ -50,9 +50,9 @@ from sqlalchemy import DateTime, Uuid, func, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.models import AtendimentoConversa, Integration, Marca, StoreInfo
+from app.models import AtendimentoConversa, Integration, Marca, StoreInfo, UserRole
 from app.models.mail import MailMailbox, MailMessage
-from app.models.mail_admin import MailAcesso, MailLixeira
+from app.models.mail_admin import MailLixeira
 from app.models.mail_atendimento import MailCaixaIndice, MailMailboxSettings
 from app.models.user import User
 from app.routers.atendimento import _nomes_das_lojas
@@ -244,7 +244,7 @@ async def _contar_lojas(
     caixa = indice.linhas_da_caixa(mailbox_id)
     q = (
         select(caixa.c.chave, func.count())
-        .where(mail_admin.filtro_mensagem(user, caixa.c.message_id))
+        .where(mail_admin.filtro_da_caixa(user, caixa.c.message_id))
         .group_by(caixa.c.chave)
     )
     if pasta is not None:
@@ -264,7 +264,7 @@ async def _contar_pastas(
         i = MailCaixaIndice
         q = (
             select(i.pasta_chave, i.pasta_tipo, func.count())
-            .where(i.mailbox_id == mailbox_id, mail_admin.filtro_mensagem(user, i.message_id))
+            .where(i.mailbox_id == mailbox_id, mail_admin.filtro_da_caixa(user, i.message_id))
             .group_by(i.pasta_chave, i.pasta_tipo)
         )
     else:
@@ -272,7 +272,7 @@ async def _contar_pastas(
         q = (
             select(caixa.c.pasta_chave, caixa.c.pasta_tipo, func.count())
             .where(caixa.c.chave.in_(indice.equivalentes(loja, cad)))
-            .where(mail_admin.filtro_mensagem(user, caixa.c.message_id))
+            .where(mail_admin.filtro_da_caixa(user, caixa.c.message_id))
             .group_by(caixa.c.pasta_chave, caixa.c.pasta_tipo)
         )
     return {(c, t): int(n) for c, t, n in (await session.execute(q)).all()}
@@ -293,7 +293,7 @@ async def _nomes_das_pastas(
             .where(
                 i.mailbox_id == mailbox_id,
                 i.pasta_chave.in_(pessoais),
-                mail_admin.filtro_mensagem(user, i.message_id),
+                mail_admin.filtro_da_caixa(user, i.message_id),
             )
             .order_by(i.pasta_chave, i.recebido_em.desc(), i.message_id.desc())
         )
@@ -317,7 +317,6 @@ async def _acesso_versao(session: AsyncSession, mailbox: MailMailbox, user: User
     Não inclui heartbeat/sync nem a chegada de novos e-mails: a pessoa pode
     percorrer os resultados sem a lista recomeçar a cada atualização do Mac.
     """
-    politica = await session.get(MailAcesso, (mailbox.id, user.id), populate_existing=True)
     settings = await session.get(MailMailboxSettings, mailbox.id, populate_existing=True)
     scope = await escopo_do_atendimento(session, user)
     lixeira = (
@@ -354,19 +353,6 @@ async def _acesso_versao(session: AsyncSession, mailbox: MailMailbox, user: User
         }
         if settings
         else None,
-        "politica": {
-            campo: getattr(politica, campo)
-            for campo in (
-                "modo",
-                "lojas_permitidas",
-                "lojas_bloqueadas",
-                "tipos_permitidos",
-                "pedidos_permitidos",
-                "updated_at",
-            )
-        }
-        if politica
-        else None,
         "lixeira": list(lixeira),
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
@@ -399,28 +385,16 @@ def _pastas_do_catalogo(mailbox: MailMailbox) -> dict[str, pastas.PastaDoEmail]:
     return saida
 
 
-@router.get("/mailboxes/{mailbox_id}/pastas")
-async def pastas_da_caixa(
-    mailbox_id: UUID,
-    session: Session,
-    user: MailReader,
-    response: Response,
-    loja: str | None = Query(default=None, max_length=40),
-    pasta: str | None = Query(default=None, max_length=40),
-) -> dict[str, Any]:
-    mailbox = await readable_mailbox(session, mailbox_id, user)
-    loja, pasta = _loja(loja), _pasta(pasta)
-    base, faltam = await indice.preparar(session, mailbox)
-    await session.commit()
-    if faltam:
-        faltando = (
-            indice._faltando(base, so_urgente=True)
-            .where(mail_admin.filtro_mensagem(user))
-            .subquery()
-        )
-        faltam = int(await session.scalar(select(func.count()).select_from(faltando)) or 0)
-    cad = base.cad
-
+async def montar_pastas(
+    session: AsyncSession,
+    mailbox: MailMailbox,
+    user: User,
+    *,
+    cad: rotear.Cadastro | None = None,
+    loja: str | None = None,
+) -> list[dict[str, Any]]:
+    """As pastas da caixa (índice + catálogo para dono/admin), com nome e números,
+    na ordem do Tuta. Usada também pela lista de usuários do e-mail (12/11/2026)."""
     todas = await _contar_pastas(session, mailbox.id, cad, loja=None, user=user)
     filtradas = (
         todas
@@ -428,9 +402,10 @@ async def pastas_da_caixa(
         else await _contar_pastas(session, mailbox.id, cad, loja=loja, user=user)
     )
     nomes = await _nomes_das_pastas(session, mailbox.id, {c for c, _t in todas}, user)
-    # A restricted reader only learns folders through messages they can read.
-    # Full mailbox readers also see new/empty folders immediately after sync.
-    if not await mail_admin.tem_politica(session, mailbox.id, user):
+    # O dono e o admin veem também as pastas novas/vazias logo após o sync. Quem
+    # o admin marcou na caixa (12/11/2026) só conhece as pastas pelos e-mails que
+    # pode ler: o nome de uma pasta particular do dono nunca aparece para ele.
+    if user.role == UserRole.ADMIN or mailbox.owner_user_id == user.id:
         for chave, lida in _pastas_do_catalogo(mailbox).items():
             todas.setdefault((chave, lida.tipo_tuta), 0)
             nomes[chave] = (indice.nome_da_pasta(lida), lida.caminho)
@@ -462,6 +437,31 @@ async def pastas_da_caixa(
     itens.sort(key=indice.ordem_das_pastas)
     for item in itens:
         item.pop("chave")
+    return itens
+
+
+@router.get("/mailboxes/{mailbox_id}/pastas")
+async def pastas_da_caixa(
+    mailbox_id: UUID,
+    session: Session,
+    user: MailReader,
+    response: Response,
+    loja: str | None = Query(default=None, max_length=40),
+    pasta: str | None = Query(default=None, max_length=40),
+) -> dict[str, Any]:
+    mailbox = await readable_mailbox(session, mailbox_id, user)
+    loja, pasta = _loja(loja), _pasta(pasta)
+    base, faltam = await indice.preparar(session, mailbox)
+    await session.commit()
+    if faltam:
+        faltando = (
+            indice._faltando(base, so_urgente=True)
+            .where(mail_admin.filtro_da_caixa(user))
+            .subquery()
+        )
+        faltam = int(await session.scalar(select(func.count()).select_from(faltando)) or 0)
+    cad = base.cad
+    itens = await montar_pastas(session, mailbox, user, cad=cad, loja=loja)
 
     lojas_todas = await _contar_lojas(session, mailbox.id, cad, pasta=None, user=user)
     lojas_filtradas = (
@@ -488,8 +488,8 @@ async def pastas_da_caixa(
                 "nome": "Todas",
                 "caminho": None,
                 "tipo": "todas",
-                "quantidade": sum(filtradas.values()),
-                "total": sum(todas.values()),
+                "quantidade": sum(i["quantidade"] for i in itens),
+                "total": sum(i["total"] for i in itens),
             },
             *itens,
         ],
@@ -643,13 +643,13 @@ async def lista_da_caixa(
     if faltam:
         faltando = (
             indice._faltando(base, so_urgente=True)
-            .where(mail_admin.filtro_mensagem(user))
+            .where(mail_admin.filtro_da_caixa(user))
             .subquery()
         )
         faltam = int(await session.scalar(select(func.count()).select_from(faltando)) or 0)
 
     caixa = indice.linhas_da_caixa(mailbox.id)
-    consulta = select(caixa).where(mail_admin.filtro_mensagem(user, caixa.c.message_id))
+    consulta = select(caixa).where(mail_admin.filtro_da_caixa(user, caixa.c.message_id))
     if pasta is not None:
         consulta = consulta.where(caixa.c.pasta_chave == pasta)
     if loja is not None:

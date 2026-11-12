@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 
 from app.models import AtendimentoConversa, AtendimentoMensagem, UserRole
 from app.models.mail import MailMessage, MailOutbox
-from app.models.mail_admin import MailAcesso, MailAdminEvento, MailLixeira
+from app.models.mail_admin import MailAdminEvento, MailLixeira
 from app.models.mail_atendimento import MailMailboxSettings, MailMessageMeta
 from app.routers import atendimento_email_lixeira as router
 from app.security.cipher import encrypt_json
@@ -193,7 +193,7 @@ async def test_admin_fora_da_lista_de_operacao_nao_exclui(
     assert await _excluidos(db) == set()
 
 
-@pytest.mark.parametrize("restricao", ["nenhuma", "loja", "caixa", "politica"])
+@pytest.mark.parametrize("restricao", ["nenhuma", "loja", "caixa"])
 async def test_operador_explicito_mantem_escopo_e_acesso_da_caixa(
     db,
     cena,
@@ -213,8 +213,6 @@ async def test_operador_explicito_mantem_escopo_e_acesso_da_caixa(
     if restricao != "caixa":
         cfg = await db.get(MailMailboxSettings, cena.geral.id)
         cfg.leitores = [str(pessoa.id)]
-    if restricao == "politica":
-        db.add(MailAcesso(mailbox_id=cena.geral.id, user_id=pessoa.id, modo="bloqueado"))
     await db.commit()
     auth_as(pessoa)
     response = await client.post(_url(meta.conversa_id), json=await _snapshot(db, meta.conversa_id))
@@ -404,7 +402,7 @@ async def test_lote_emails_nao_inclui_novas_chegadas_e_pode_restaurar(
 
 
 @pytest.mark.parametrize("tipo", ["conversas", "emails"])
-@pytest.mark.parametrize("restricao", ["nenhuma", "caixa", "politica", "loja"])
+@pytest.mark.parametrize("restricao", ["nenhuma", "caixa", "loja"])
 async def test_lote_mantem_permissao_e_escopo_da_operacao_individual(
     db,
     cena,
@@ -425,8 +423,6 @@ async def test_lote_mantem_permissao_e_escopo_da_operacao_individual(
     if restricao != "caixa":
         cfg = await db.get(MailMailboxSettings, cena.geral.id)
         cfg.leitores = [str(pessoa.id)]
-    if restricao == "politica":
-        db.add(MailAcesso(mailbox_id=cena.geral.id, user_id=pessoa.id, modo="bloqueado"))
     await db.commit()
     auth_as(pessoa)
     ident = meta.conversa_id if tipo == "conversas" else meta.message_id

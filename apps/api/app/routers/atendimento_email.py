@@ -129,7 +129,6 @@ from app.models import (
     User,
     UserRole,
 )
-from app.models.mail_admin import MailAcesso
 from app.models.mail_atendimento import (
     AtendimentoRegraPastaEmail,
     MailFolder,
@@ -2667,8 +2666,7 @@ async def resolver_envio(
 async def _caixas_das_pastas(session: AsyncSession, user: User) -> set[UUID]:
     """As caixas cujas pastas esta pessoa (que mexe) vê: as que ela vê na Saúde e
     as com ponte (é o que a ponte lê). As pastas de uma caixa PRIVADA (o
-    conector v2 manda a lista inteira da conta) só para quem abre a caixa. A caixa
-    com a ponte que a política bloqueou para a pessoa fica de fora (04/11/2026)."""
+    conector v2 manda a lista inteira da conta) só para quem abre a caixa."""
     visiveis = {m.id for m in await saude.caixas_visiveis(session, user)}
     visiveis |= {
         mid
@@ -2680,16 +2678,6 @@ async def _caixas_das_pastas(session: AsyncSession, user: User) -> set[UUID]:
             )
         ).all()
     }
-    if user.role != UserRole.ADMIN:
-        visiveis -= set(
-            (
-                await session.execute(
-                    select(MailAcesso.mailbox_id).where(
-                        MailAcesso.user_id == user.id, MailAcesso.modo == "bloqueado"
-                    )
-                )
-            ).scalars()
-        )
     return visiveis
 
 

@@ -15,56 +15,45 @@ pessoa, as lojas, as caixas ou o acesso às configurações e credenciais. A
 permissão de leitura e as permissões antigas, sozinhas, continuam sem enviar.
 O conector revalida a concessão antes de despachar cada mensagem.
 
-A aba **E-mail → Administração** fica disponível para administradores que
-podem operar o Atendimento. As regras abaixo controlam mensagens vinculadas
-às lojas e vendas; elas não concedem acesso à caixa completa.
+## Administração: a lista de usuários (12/11/2026)
 
-## Acesso das pessoas
+A aba **E-mail → Administração** é uma lista de usuários, no modelo das
+subcontas de um ERP. Só administradores que operam o Atendimento a veem e
+mexem nela. Cada linha mostra o e-mail (login), o nome, a **permissão de
+caixas** (Todas as caixas, Caixas específicas ou Nenhuma caixa), o **estado**
+(ligado/desligado), a data de criação, o último acesso e **Editar**.
 
-Escolha uma caixa e uma pessoa. Administradores continuam podendo administrar
-todas as caixas e não recebem restrições individuais de leitura.
+- **Estado** liga/desliga a permissão `atendimento_email_leitura` do usuário
+  (a mesma da tela de permissões), que abre as **Caixas** na aba E-mail.
+  Desligar também tira a operação (`atendimento_email_operacao`). Ligar não
+  concede responder nem as Filas das lojas.
+- **Editar** mostra cada conta de e-mail com as pastas dela em checkbox
+  (Entrada, informativo, SAC dos sites, as pastas das lojas…). Marcar a **conta
+  inteira** libera todas as pastas, também as criadas depois; marcar pastas
+  soltas libera só elas (`mail_leitor_pastas`). Marcar qualquer coisa de uma
+  conta coloca o usuário na lista de leitores dela (a mesma do "Quem mais vê").
+  "Todas as caixas" marca as contas existentes inteiras; uma conta cadastrada
+  depois precisa ser marcada.
+- Administrador vê todas as caixas e não é editado aqui. O dono de uma caixa
+  já a vê.
+- Dentro de uma caixa, quem não é administrador nem dono vê apenas os e-mails
+  das lojas (loja, site, sem loja). O e-mail particular do dono (caixa "só
+  aliases de loja") e os de segurança (código, senha, acesso) nunca aparecem
+  para ele, nem os nomes de pastas vazias da conta. Um e-mail ainda não
+  indexado fica oculto até a indexação (a cada minuto).
+- O Atendimento e as lojas por pessoa não mudam por esta tela.
 
-- **Manter o acesso atual:** mantém as permissões de caixa e de equipe que a
-  pessoa já possui, aplicando as restrições escolhidas abaixo. Não concede
-  acesso novo à caixa inteira.
-- **Somente selecionadas:** concede leitura dos e-mails das lojas selecionadas
-  pelas áreas das lojas e vendas. Uma seleção vazia não libera nenhuma mensagem. Não concede
-  permissão para responder nem amplia a equipe comercial no Atendimento.
-- **Bloquear:** impede a leitura dos e-mails dessa caixa pela pessoa.
-
-Uma loja bloqueada prevalece sobre uma loja permitida. O administrador pode
-limitar as categorias **Informativo**, **Chamado** e **Venda**. Uma lista de
-pedidos não vazia limita ainda mais a seleção: cada pedido precisa corresponder
-à sua loja, na sua plataforma. Número de pedido ou identidade do comprador,
-isoladamente, não concede acesso a outro e-mail.
-
-As regras valem também para e-mails antigos, listas e contagens, leitura direta,
-anexos e o botão **E-mails desta venda**. E-mails sem informação suficiente para
-comprovar uma seleção restrita não são liberados por aproximação.
-
-Uma conversa pode guardar e-mails de vendas diferentes. Se parte dela estiver
-bloqueada ou na lixeira, a conversa completa fica oculta para evitar expor o
-histórico ou a prévia do item indisponível. Os e-mails individualmente permitidos
-continuam acessíveis pelas áreas das lojas e pela respectiva venda.
-
-O formulário mostra quem alterou a regra e quando. Se outro administrador
-salvar a mesma regra durante a edição, a gravação é recusada e o formulário
-preserva a edição local para conferência.
-
-## Pastas e exibição
-
-A seção reúne as regras de pastas já existentes e o atalho para configurar a
-caixa, seus endereços e a ponte para o Atendimento.
-Uma regra de pasta controla o que entra no Atendimento; uma regra de acesso
-controla o que cada pessoa consegue ler no DaVinci.
+A antiga regra por pessoa × caixa × loja × venda (tabela `mail_acessos`) e a
+lixeira geral da Administração saíram; a migration 0476 apaga a tabela, que
+estava vazia, e cria `mail_leitor_pastas`. Cada inclusão ou retirada de leitor
+e cada troca de pastas fica registrada em `mail_admin_eventos`.
 
 ## Lixeira do DaVinci
 
 No detalhe da mensagem em **Caixas**, um administrador ou operador com
 a permissão de exclusão pode escolher
 **Excluir do DaVinci**, conferir a mensagem selecionada e informar um motivo.
-Essa exclusão é reversível em **Lixeira desta caixa**. Administradores também
-podem restaurar em **Administração → Lixeira do DaVinci**.
+Essa exclusão é reversível em **Lixeira desta caixa**.
 
 O original e as pastas do Tuta não são alterados. A sincronização e o
 reprocessamento não desfazem uma exclusão local. O conteúdo cifrado permanece

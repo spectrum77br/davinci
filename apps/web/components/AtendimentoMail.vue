@@ -694,12 +694,6 @@ function changedAdministration() {
   detail.value = null; openedSummary.value = null
   folders.value = []; mailStores.value = []; organizing.value = 0
 }
-function configureFromAdministration(id: string) {
-  if (!canAdminister.value) return
-  mailboxId.value = id
-  configuring.value = true
-  chooseSection('mailboxes')
-}
 watch(section, (value, previous) => {
   if (value !== 'mailboxes') {
     clearTimeout(timer); timer = undefined
@@ -752,7 +746,7 @@ onBeforeUnmount(() => {
       <div>
         <h2 class="flex items-center gap-2 text-lg font-semibold"><Mail class="h-5 w-5" /> E-mail</h2>
         <p v-if="section === 'queues'" class="text-sm text-muted-foreground" data-mail-filas-descricao>{{ canOperate ? 'Os e-mails das lojas que precisam de alguém: sem loja, sem vínculo, chamados dos sites, falta responder, suspeitos, resumos e respostas a conferir.' : canReadQueues ? 'Os e-mails das suas lojas e os que ainda não têm loja: sem loja, sem vínculo, falta responder, suspeitos, resumos e respostas a conferir. Aqui você só vê.' : 'Os chamados dos sites, os e-mails das lojas esperando resposta e todas as conversas de e-mail.' }}</p>
-        <p v-else-if="section === 'admin'" class="text-sm text-muted-foreground">Acessos por pessoa, loja e venda, regras de exibição e lixeira do DaVinci.</p>
+        <p v-else-if="section === 'admin'" class="text-sm text-muted-foreground">Quem vê quais caixas de e-mail. Só administradores.</p>
         <p v-else class="text-sm text-muted-foreground">Caixas de e-mail para administradores e leitores expressamente autorizados.</p>
       </div>
       <div v-if="section === 'mailboxes'" class="flex gap-2">
@@ -797,7 +791,7 @@ onBeforeUnmount(() => {
       <button v-if="canAdminister" type="button" role="tab" :aria-selected="section === 'admin'" :disabled="sending || deleting || !!resolving" class="-mb-px shrink-0 border-b-2 px-3 py-1.5 text-sm" :class="section === 'admin' ? 'border-primary font-medium' : 'border-transparent text-muted-foreground hover:text-foreground'" data-mail-admin-tab @click="chooseSection('admin')">Administração</button>
     </div>
 
-    <AtendimentoMailAdministracao v-if="canAdminister && section === 'admin'" :mailbox-id="mailboxId" @mudou="changedAdministration" @configurar="configureFromAdministration" />
+    <AtendimentoMailUsuarios v-if="canAdminister && section === 'admin'" @mudou="changedAdministration" />
 
     <AtendimentoMailFilas
       v-if="seesQueues && section === 'queues'"

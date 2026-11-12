@@ -54,7 +54,6 @@ from tests.test_atendimento_separa_email import URL, _ids
 from tests.test_atendimento_separa_email import admin as admin
 from tests.test_atendimento_separa_email import quem_le as quem_le
 from tests.test_atendimento_separa_email_ui import _historico
-from tests.test_mail_admin_atendimento import _salvar
 from tests.test_mail_ponte import AGORA, _config, _integ, cena, conversa, entrar, meta_de, rodar
 
 EMAIL = f"{URL}/email"
@@ -596,22 +595,13 @@ async def test_concessao_nova_abre_aba_sem_tornar_admin(db, cena, client, quem_l
     assert result.status_code == 403, result.text
 
 
-async def test_loja_bloqueada_e_escopo_cortam_os_numeros(
+async def test_escopo_corta_os_numeros(
     db, cena, client, make_user, auth_as, admin
 ):
     h = await _historico(db, cena)
     await _na_pasta(db, cena, h["ml"], "problemas")
     await _na_pasta(db, cena, h["oliveira"], "problemas")
-    leitor = await make_user(role=UserRole.USER)
-    await dar_lojas(db, leitor, cena.ml, cena.oliveira_ml)
-    await _salvar(client, auth_as, cena, leitor, lojas_bloqueadas=[f"i:{cena.ml.id}"])
-    lojas = await _por_loja(client)
-    # A loja continua na barra (é loja dele), mas sem o e-mail bloqueado.
-    assert lojas[str(cena.ml.id)]["grupos"]["problemas"] == _vazio()
-    assert lojas[str(cena.oliveira_ml.id)]["grupos"]["problemas"]["abertas"] == 1
-    params = {"caixa": "email", "filtro": "todas", "grupo_email": "problemas"}
-    assert await _ids(client, **params, integration_id=str(cena.ml.id)) == set()
-
+    # (12/11/2026: a regra "loja bloqueada" por pessoa saiu com a administração antiga.)
     # Quem tem só a Barbosa do ML (30/10/2026, as lojas por pessoa): só a linha dela.
     membro = await make_user()
     await dar_lojas(db, membro, cena.ml, escopo.chave(escopo.FICHA, cena.loja_ml.id))

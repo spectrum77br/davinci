@@ -3,13 +3,12 @@
 
 O Eduardo, 27/10: "otimiza pra abrir rápido" — a barra de lojas levava ~5 s
 para quem não é admin (o JIT do Postgres compilando as subconsultas correlatas
-de `filtro_conversa`). Quem não tem regra nenhuma em `mail_acessos` (o admin,
-ou a pessoa ativa sem linha) vê tudo menos a LIXEIRA local: o atalho troca o
+de `filtro_conversa`). Quem está ativo (e o admin) vê tudo menos a LIXEIRA
+local: o atalho troca o
 filtro por uma lista de ids pronta. Aqui: o MESMO resultado que o filtro
 inteiro, conversa a conversa e e-mail a e-mail — com a lixeira vazia, com o
 e-mail excluído (a meta), com a CÓPIA da mensagem que aponta para um original
-excluído, com o restaurado — e quem tem regra (ou não está ativo) segue no
-filtro inteiro.
+excluído, com o restaurado — e quem não está ativo segue no filtro inteiro.
 """
 
 from __future__ import annotations
@@ -28,7 +27,6 @@ from app.services.atendimento import separa_email
 from app.services.mail_atendimento import administracao
 from tests.test_atendimento_separa_email import admin as admin
 from tests.test_atendimento_separa_email_ui import _historico
-from tests.test_mail_admin_atendimento import _salvar
 from tests.test_mail_ponte import AGORA, _config, cena
 
 
@@ -128,18 +126,13 @@ async def test_o_atalho_da_o_mesmo_que_o_filtro_inteiro(db, cena, make_user):
         assert h["novo"] in vistas
 
 
-async def test_quem_tem_regra_ou_nao_esta_ativo_segue_no_filtro_inteiro(
-    db, cena, client, auth_as, make_user, admin
-):
-    h = await _historico(db, cena)
+async def test_quem_nao_esta_ativo_segue_no_filtro_inteiro(db, cena, make_user):
+    """12/11/2026: sem a regra por pessoa (`mail_acessos` saiu), só quem não está
+    ativo fica no filtro inteiro (que não deixa nada); o resto, sempre o atalho."""
     leitor = await make_user(role=UserRole.USER)
-    await _salvar(client, auth_as, cena, leitor, lojas_bloqueadas=[f"i:{cena.ml.id}"])
-    visao = await _confere(db, leitor)
-    assert visao.exato, "com regra em mail_acessos: o filtro inteiro, sem atalho"
-    assert h["ml"] not in await _conversas(db, visao.filtro_conversa())
+    assert not (await _confere(db, leitor)).exato
     parado = await make_user(role=UserRole.USER)
     parado.status = UserStatus.SUSPENDED
     await db.commit()
     assert (await _confere(db, parado)).exato
-    # O admin nunca tem regra: sempre o atalho.
     assert not (await _confere(db, cena.dono)).exato

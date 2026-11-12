@@ -11,7 +11,6 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.models import UserRole
 from app.models.mail import MailDraft, MailMailbox, MailOutbox
-from app.models.mail_admin import MailAcesso
 from app.models.mail_atendimento import MailMailboxSettings
 from app.schemas.mail import ComposeDraftIn, ComposeSendIn
 from app.security.cipher import decrypt_json
@@ -226,32 +225,6 @@ async def test_new_uncertain_mail_is_resolved_only_by_its_author(
     assert resolved.status_code == 200, resolved.text
     assert resolved.json()["status"] == "failed"
     assert await claim(client, account) == []
-
-
-async def test_filtered_grant_revokes_composer_and_pending_new_mail(client, account, db):
-    await enable(client, account)
-    accepted = await send(client, account, compose())
-    assert accepted.status_code == 202
-    # Administrators intentionally bypass mailbox filters. Keep ownership but
-    # remove admin status before applying the limited message grant.
-    account["admin"].role = UserRole.USER
-    account["admin"].permissions = {"atendimento_email_operacao": {"view": True, "edit": True}}
-    db.add(
-        MailAcesso(
-            mailbox_id=UUID(account["mailbox"]["id"]), user_id=account["admin"].id, modo="padrao"
-        )
-    )
-    await db.commit()
-    context = await client.get(f"{ROOT}/mailboxes/{account['mailbox']['id']}/compose-context")
-    assert context.status_code == 200
-    assert context.json()["can_compose"] is False
-    assert context.json()["allowed_from_addresses"] == []
-    rejected = await send(client, account, compose())
-    assert rejected.status_code == 403
-    assert await claim(client, account) == []
-    job = await db.get(MailOutbox, UUID(accepted.json()["id"]))
-    await db.refresh(job)
-    assert job.error_code == "author_access_revoked"
 
 
 async def test_combined_forwarded_and_uploaded_attachment_size(client, account, monkeypatch):

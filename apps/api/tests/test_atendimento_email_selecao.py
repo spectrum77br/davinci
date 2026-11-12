@@ -8,7 +8,7 @@ import pytest
 from sqlalchemy import func, select, update
 
 from app.models import AtendimentoConversa, AtendimentoMensagem, MailMessage, UserRole
-from app.models.mail_admin import MailAcesso, MailLixeira
+from app.models.mail_admin import MailLixeira
 from app.models.mail_atendimento import MailMessageMeta
 from app.routers import atendimento_email_selecao as router
 from app.security.cipher import encrypt_json
@@ -148,10 +148,6 @@ async def test_selecao_respeita_lojas_acesso_da_caixa_e_lixeira(
     r = await client.post(SELECAO, json={"fila": "sem_loja"})
     assert r.status_code == 200, r.text
     assert r.json()["itens"] == [{"id": str(meu)}]
-    db.add(MailAcesso(mailbox_id=cena.geral.id, user_id=user.id, modo="bloqueado"))
-    await db.commit()
-    r = await client.post(SELECAO, json={"fila": "sem_loja"})
-    assert r.status_code == 200 and r.json()["itens"] == [], r.text
 
 
 @pytest.mark.parametrize("permissions", [{}, {"atendimento_email_aba": {"view": True}},

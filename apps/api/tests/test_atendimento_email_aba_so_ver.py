@@ -36,7 +36,6 @@ from app.models import (
     StoreInfo,
     UserRole,
 )
-from app.models.mail_admin import MailAcesso
 from app.models.mail_atendimento import MailCaixaIndice, MailMessageMeta, MailOutboxMeta
 from app.security.cipher import encrypt_bytes, encrypt_json
 from app.services.atendimento import acesso, escopo
@@ -500,16 +499,6 @@ async def test_pastas_e_regras_com_os_numeros_dele(mundo, client, db, auth_as, c
     por_id = {p["id"]: p for p in (await client.get(f"{EMAIL}/pastas")).json()["itens"]}
     guardar = por_id[str(mundo.guardar.id)]
     assert (guardar["total_30d"], guardar["guardados"]) == (3, 3)
-
-
-async def test_pastas_da_caixa_bloqueada_para_ele_somem(mundo, client, db):
-    db.add(
-        MailAcesso(mailbox_id=mundo.avisos.mailbox_id, user_id=mundo.marrocos.id, modo="bloqueado")
-    )
-    await db.commit()
-    r = await client.get(f"{EMAIL}/pastas")
-    assert r.status_code == 200 and not r.json()["itens"]
-    assert (await client.get(f"{EMAIL}/informativos")).json()["itens"] == []
 
 
 async def test_saude_so_com_os_numeros_dele(mundo, client, auth_as, cena):

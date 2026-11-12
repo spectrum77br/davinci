@@ -12,6 +12,7 @@ from app.models.mail import MailDraft, MailMailbox, MailMessage, MailOutbox
 from app.models.mail_atendimento import MailMailboxSettings
 from app.routers.mail import require_mail_manager, require_mail_operator, require_mail_reader
 from tests.test_mail_central import ROOT, account, enable, ingest, message
+from tests.test_mail_usuarios import de_loja
 
 
 def human_routes(box, mid, aid, job, draft):
@@ -168,6 +169,7 @@ async def test_excecao_nova_le_so_a_caixa_liberada_sem_poder_escrever(
 ):
     box = account["mailbox"]["id"]
     mid = await ingest(client, account)
+    await de_loja(db, UUID(mid))  # 12/11/2026: o leitor vê só o e-mail das lojas
     aid = (await client.get(f"{ROOT}/messages/{mid}")).json()["attachments"][0]["id"]
     await enable(client, account)
     other = await client.post(f"{ROOT}/mailboxes", json={

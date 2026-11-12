@@ -21,7 +21,7 @@ from app.models import (
 )
 from app.models.atendimento import AtendimentoConversa, AtendimentoMensagem
 from app.models.mail import MailAttachment, MailMailbox, MailMessage
-from app.models.mail_admin import MailAcesso
+from app.models.mail_admin import MailLixeira
 from app.models.mail_atendimento import MailMessageMeta
 from app.models.pricing import PricingProduct, StoreInfo
 from app.models.segment import Segment
@@ -739,20 +739,24 @@ async def test_trocar_o_pedido_mantem_o_caso_confirmado_e_solta_o_outro(
 
 
 async def test_resumo_do_sac_segue_a_trava_do_email(client, db, make_user, auth_as):
-    """Quem tem a caixa do SAC bloqueada (`MailAcesso`) não lê o formulário pelo
-    Resumo do SAC — a mesma trava do /historico: só o protocolo, as datas e o
-    estado; sem Comprador/Compra/Produto/Defeito e sem os anexos."""
+    """Com o e-mail do SAC fora do alcance da pessoa (12/11/2026: a lixeira local;
+    a regra por pessoa × caixa saiu) o Resumo do SAC não mostra o formulário — a
+    mesma trava do /historico: só o protocolo, as datas e o estado; sem
+    Comprador/Compra/Produto/Defeito e sem os anexos."""
     g = await _garantia(db, entrega=_hoje() - timedelta(days=10))
     caso = await _caso(db, g)
     conv = await db.get(AtendimentoConversa, caso.conversa_id)
     conv.dados = {**conv.dados, "fonte": "tuta"}
     await db.commit()
     foto = await _anexo(db, caso, "IMG_0001.jpg", "image/jpeg")
-    caixa = (await db.get(MailMessage, foto.message_id)).mailbox_id
-    bloqueada = await make_user(permissions=CONSULTA)
-    db.add(MailAcesso(mailbox_id=caixa, user_id=bloqueada.id, modo="bloqueado"))
-    await db.commit()
+    auth_as(await make_user(permissions=CONSULTA))
+    d = (await client.get(f"/api/garantias/{g.id}/sac")).json()
+    assert len(d["secoes"]) == 5 and [a["nome"] for a in d["anexos"]] == ["IMG_0001.jpg"]
+    assert (await client.get(d["anexos"][0]["url"])).status_code == 200
 
+    db.add(MailLixeira(message_id=foto.message_id, excluido_em=datetime.now(UTC)))
+    await db.commit()
+    bloqueada = await make_user(permissions=CONSULTA)
     auth_as(bloqueada)
     r = await client.get(f"/api/garantias/{g.id}/sac")
     assert r.status_code == 200, r.text
@@ -768,8 +772,3 @@ async def test_resumo_do_sac_segue_a_trava_do_email(client, db, make_user, auth_
     # O /historico fecha igual.
     h = (await client.get(f"/api/garantias/{g.id}/historico")).json()
     assert (h["conversas"], h["restrito"]) == ([], True)
-
-    auth_as(await make_user(permissions=CONSULTA))
-    d = (await client.get(f"/api/garantias/{g.id}/sac")).json()
-    assert len(d["secoes"]) == 5 and [a["nome"] for a in d["anexos"]] == ["IMG_0001.jpg"]
-    assert (await client.get(d["anexos"][0]["url"])).status_code == 200

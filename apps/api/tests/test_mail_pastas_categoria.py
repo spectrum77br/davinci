@@ -42,7 +42,6 @@ from app.models import (
     MailMessage,
     UserRole,
 )
-from app.models.mail_admin import MailAcesso
 from app.models.mail_atendimento import MailFolder, MailMailboxSettings, MailMessageMeta
 from app.services.mail_atendimento import administracao, pastas, ponte, regras, saude
 from tests.test_mail_ponte import (
@@ -570,39 +569,6 @@ async def test_informativos_so_para_quem_mexe(db, cena, client, auth_as, make_us
     r = await client.get(f"{EMAIL}/informativos")
     assert r.status_code == 403
     assert r.json()["detail"]["code"] == "atendimento_so_quem_mexe"
-
-
-async def test_tipo_permitido_filtra_a_linha_informativa_sem_mensagem(db, cena, make_user):
-    await categorizar(db, cena.geral, "novidades ml", "informativo")
-    mid = await entrar(db, cena.geral, pasta="novidades ml", assunto="Novidades")
-    await rodar(db)
-    pessoa = await make_user(role=UserRole.USER)
-    acesso = MailAcesso(
-        mailbox_id=cena.geral.id,
-        user_id=pessoa.id,
-        modo="padrao",
-        lojas_permitidas=[],
-        lojas_bloqueadas=[],
-        tipos_permitidos=["chamado", "venda"],
-        pedidos_permitidos=[],
-    )
-    db.add(acesso)
-    await db.commit()
-
-    async def visivel() -> bool:
-        return bool(
-            await db.scalar(
-                select(func.count()).where(
-                    MailMessageMeta.message_id == mid,
-                    administracao.filtro_mensagem(pessoa, MailMessageMeta.message_id),
-                )
-            )
-        )
-
-    assert await visivel() is False
-    acesso.tipos_permitidos = ["informativo"]
-    await db.commit()
-    assert await visivel() is True
 
 
 # ─────────────── chamado: a Pós-venda (o contrato) ───────────────

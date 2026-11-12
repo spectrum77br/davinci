@@ -278,8 +278,8 @@ async def test_quem_so_le_le_tudo_e_nao_mexe_em_nada(client, make_user, auth_as,
     for metodo, molde, caminho in chamadas:
         r = await client.request(metodo, caminho)
         if molde.startswith(URL + "/email/admin"):
-            # Administração de acesso/lixeira (19/10): nem leitura do painel
-            # fica disponível a leitores ou a admins fora da lista operacional.
+            # Administração do e-mail (a lista de usuários, 12/11/2026): nem a
+            # leitura fica disponível a leitores ou a admins fora da lista operacional.
             assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
         elif molde in {
             f"{URL}/email/conversas/{{conversa_id}}/lixeira",

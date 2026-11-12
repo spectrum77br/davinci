@@ -5,8 +5,7 @@ from uuid import uuid4
 from sqlalchemy import func, select
 
 from app.models import UserRole
-from app.models.mail_admin import MailAcesso
-from app.models.mail_atendimento import MailFolder
+from app.models.mail_atendimento import MailFolder, MailMailboxSettings
 from app.security.cipher import decrypt_json, encrypt_json
 from tests.test_mail_caixa import _pastas
 from tests.test_mail_ponte import _caixa, entrar
@@ -87,14 +86,19 @@ async def test_catalog_merges_existing_counts_and_keeps_store_filter_totals(
     ]
 
 
-async def test_restricted_reader_does_not_learn_empty_catalog_names(
+async def test_marked_reader_does_not_learn_owner_empty_catalog_names(
     db, cena, client, make_user, auth_as
 ):
-    person = await make_user(role=UserRole.USER)
-    caixa = _caixa(person, "Própria", "own@example.com", [], "catalog-test-token-0123456789")
+    """12/11/2026: quem o admin marcou na caixa não conhece as pastas vazias
+    (o nome de uma pasta particular do dono); o dono, sim."""
+    person = await make_user(
+        role=UserRole.USER, permissions={"atendimento_email_leitura": {"view": True}}
+    )
+    caixa = _caixa(cena.dono, "Do dono", "own@example.com", [], "catalog-test-token-0123456789")
     db.add(caixa)
     await db.commit()
-    db.add(MailAcesso(mailbox_id=caixa.id, user_id=person.id, modo="padrao"))
+    db.add(MailMailboxSettings(mailbox_id=caixa.id, leitores=[str(person.id)]))
+    await db.commit()
     await _catalog(db, caixa, [("private", "Banco particular", "custom")])
     auth_as(person)
     assert [x["nome"] for x in (await _pastas(client, caixa))["pastas"]] == ["Todas"]
