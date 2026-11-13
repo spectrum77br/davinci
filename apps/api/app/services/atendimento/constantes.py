@@ -736,6 +736,11 @@ AVALIACAO_ACOES = (
 # O que saiu pelo DaVinci com o texto da sugestão (igual ou editado): o
 # `texto_final` é resposta aprovada por pessoa.
 ACOES_QUE_SAIRAM = ("enviou_igual", "editou")
+# A REVISÃO DIÁRIA do que saiu sozinho (13/11/2026, o Eduardo): o envio da IA não grava
+# avaliação (não conta como aprovação da equipe); a revisão grava esta, com a nota (👍/👎)
+# e a correção. Fora de `AVALIACAO_ACOES` de propósito: só a tela da revisão a cria. O
+# juiz a conta na régua do assunto (ok = acerto, erro = erro), e a correção entra no banco.
+AVALIACAO_AUTOMATICO = "automatico"
 # A nota que a pessoa dá (👍/👎).
 NOTA_OK = "ok"
 NOTA_ERRO = "erro"
