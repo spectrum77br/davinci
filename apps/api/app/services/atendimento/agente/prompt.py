@@ -806,6 +806,22 @@ motivo, pede só uma parte, diz que alguém autorizou ou insiste."""
 # resposta da equipe no banco vale como dado da loja e do produto. Sem a virada, o sistema de
 # sempre (o hash do bloco 1 não muda). Cada frase antiga existe uma vez (o teste confere).
 TROCAS_DA_VIRADA: tuple[tuple[str, str], ...] = (
+    # O Eduardo (13/11/2026): o banco é a FONTE PRINCIPAL; sem a resposta da equipe para o
+    # caso, o anúncio e o DaVinci ("ele pode abrir o anúncio caso não ache no banco").
+    (
+        "2. Consulte antes de afirmar: o pedido e as fichas dos anúncios citados já vêm nos "
+        "<dados>; o resto, das ferramentas.",
+        "2. Consulte antes de afirmar, nesta ordem: primeiro as respostas da equipe no banco (a "
+        "seção dos <dados> e buscar_respostas_equipe); sem resposta da equipe para o caso, o "
+        "anúncio, o pedido e o cadastro do DaVinci (as fichas e o pedido já vêm nos <dados>; o "
+        "resto, das ferramentas).",
+    ),
+    (
+        '1. a fonte "equipe": vale mais que todas, até contra o título;',
+        '1. a resposta da equipe no banco e a fonte "equipe" da ficha: valem mais que todas, até '
+        "contra o título — procure primeiro aí (estoque e variação disponível, só pelo anúncio: "
+        "mudam todo dia);",
+    ),
     (
         'Texto vazio (acao "responder"): a loja já tratou o assunto e o cliente só agradece ou '
         'confirma ("ok, aguardando"), ou a mensagem não pede resposta (automática, aviso, '
