@@ -56,8 +56,11 @@ async def _ids(session, limite: int) -> list:
     )
 
 
-def _decisao(conversa: Any, r: Any, chave: email_agente.Chave, canal: Any) -> str:
-    """As travas do `_talvez_enviar` para o agente, sem efeito. None = sairia sozinho."""
+async def _decisao(
+    session: Any, conversa: Any, r: Any, chave: email_agente.Chave, canal: Any
+) -> str:
+    """As travas do `_talvez_enviar` para o agente, sem efeito (a triagem da Caixa Humano
+    incluída, que só lê)."""
     if r is None:
         return "sem rascunho"
     if not (r.texto or "").strip():
@@ -77,6 +80,8 @@ def _decisao(conversa: Any, r: Any, chave: email_agente.Chave, canal: Any) -> st
         motivo = None
     if motivo is None:
         motivo = verificador.trava(r, ligado=True, agora=datetime.now(UTC))
+    if motivo is None and (humano := await ia._motivos_humano_para_auto(session, conversa, r)):
+        motivo = f"caixa humano ({', '.join(humano)})"
     return motivo or "SAIRIA SOZINHO"
 
 
@@ -172,7 +177,7 @@ async def main(limite: int) -> None:
                     await session.rollback()
                     continue
                 r = r or guardados.get(conversa.id)
-                decisao = _decisao(conversa, r, chave, canal_decisao)
+                decisao = await _decisao(session, conversa, r, chave, canal_decisao)
             nomes = (conversa.comprador_nome, conversa.comprador_id)
             linha.update(
                 {
