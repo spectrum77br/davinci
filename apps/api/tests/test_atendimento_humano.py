@@ -1906,6 +1906,32 @@ async def test_script_seco_nao_grava_e_gravar_preenche(db, make_user, ctx_falso,
     assert (await _cache(db, a))["motivos"] == ["assunto"]
 
 
+# ─────────────── "Precisa de ação" (13/11/2026) ───────────────
+
+
+async def test_precisa_de_acao_so_os_motivos_de_acao(client, db, make_user, pessoa, ctx_falso):
+    """A Caixa Humano sai; o filtro "Precisa de ação" da Caixa (`filtro=acao`) traz só os
+    motivos em que a pessoa tem de AGIR (a reclamação aberta), nunca a dúvida da IA."""
+    from app.services.atendimento import precisa_acao
+
+    dono = await make_user()
+    integ, canal = await _loja_db(db, dono)
+    reclama = await _conversa(db, integ, canal, "A", "e aí, vão resolver ou não?")
+    reclama.etiqueta = "reclamacao"
+    await db.commit()
+    so_assunto = await _conversa(db, integ, canal, "B", "quero cancelar meu pedido")
+    await _recalcular()
+    assert "reclamacao" in (await _cache(db, reclama))["motivos"]
+    assert (await _cache(db, so_assunto))["motivos"] == ["assunto"]
+
+    r = await client.get(f"{URL}/conversas", params={"filtro": "acao"})
+    assert _ids(r) == [str(reclama.id)]
+    res = (await client.get(f"{URL}/resumo")).json()
+    assert res["precisa_acao"] == 1
+    assert precisa_acao.precisa_de_acao(["ia", "reclamacao"]) is True
+    assert precisa_acao.precisa_de_acao(["ia", "assunto", "atendente"]) is False
+
+
 async def test_a_linha_da_duvida_e_a_aprovacao_da_equipe_no_rascunho(
     client, db, make_user, pessoa, monkeypatch
 ):

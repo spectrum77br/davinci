@@ -103,6 +103,8 @@ export type ResumoPlataforma = {
   // "Afiliados" do menu Filtrar. A API antiga não manda (sem número).
   afiliados?: number
   aguardando_pagamento?: number
+  // "Precisa de ação" (13/11/2026): o número do filtro `acao` (a API antiga não manda).
+  precisa_acao?: number
 }
 // `nao_lidas` = o número da PLATAFORMA (o mesmo contador vermelho do Duoke) e
 // `status_canal` = a saúde da leitura da loja (spec Duoke 2.4). Opcionais: a
@@ -141,6 +143,8 @@ export type ResumoLoja = {
   // Os chats de afiliado abertos da loja (ver ResumoPlataforma).
   afiliados?: number
   aguardando_pagamento?: number
+  // "Precisa de ação" (13/11/2026): o número do filtro `acao` (a API antiga não manda).
+  precisa_acao?: number
 }
 export type Resumo = {
   plataformas: ResumoPlataforma[]
@@ -157,6 +161,8 @@ export type Resumo = {
   // Os chats de afiliado abertos somando as plataformas (29/10/2026).
   afiliados?: number
   aguardando_pagamento?: number
+  // "Precisa de ação" (13/11/2026): o número do filtro `acao` (a API antiga não manda).
+  precisa_acao?: number
   // Lojas sem ler além do limite (05/10/2026): a faixa da Caixa e a marca
   // da aba "Lojas e modo". Opcional: a API antiga não manda (sem faixa).
   leitura_parada?: LeituraParada[]
@@ -1424,6 +1430,7 @@ export const ROTULO_HUMANO: Record<string, string> = {
   xingamento: 'Cliente exaltado',
   atendente: 'Pediu atendente',
   instrucao: 'Texto com cara de instrução',
+  oferta_de_brinde: 'Oferta de brinde enviada',
   e_mail: 'E-mail: só pessoa',
   pedido_nao_achado: 'Pedido não achado no Bling',
   sem_dado: 'Falta dado (rastreio/NF)',

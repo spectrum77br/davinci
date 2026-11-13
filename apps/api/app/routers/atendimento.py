@@ -579,6 +579,10 @@ FILTROS = (
     # pra botar um filtro a mais ali em filtros aguardando pagamento pra gente
     # ver essas").
     "aguardando_pagamento",
+    # "Precisa de ação" (13/11/2026, o Eduardo: a Caixa Humano sai e tudo fica na Caixa,
+    # com a marca nos casos em que a pessoa tem de agir na plataforma): os motivos de AÇÃO
+    # que a triagem grava (`services/atendimento/precisa_acao.py`), em qualquer loja.
+    "acao",
     # Os chats de AFILIADO da Shopee (29/10/2026, o dono: "afiliados não tá
     # dando pra ver no comunicador e no duoke dá, queria que desse pra ver ali
     # também") — os não fechados, como o selo "parceiro" do Duoke.
@@ -587,6 +591,7 @@ FILTROS = (
 FILTRO_EMAIL_SEM_VINCULO = "email_sem_vinculo"
 FILTRO_AFILIADO = "afiliado"
 FILTRO_AGUARDANDO_PAGAMENTO = "aguardando_pagamento"
+FILTRO_PRECISA_ACAO = "acao"
 # A caixa da lista (09/10/2026): "" = a Caixa; "humano" = a Caixa Humano (só o
 # que falta responder e a IA não pode — `services/atendimento/humano.py`);
 # "email" (13/10/2026) = SÓ as conversas de e-mail da ponte, que saíram das
@@ -2307,6 +2312,7 @@ async def resumo(
 ) -> ResumoOut:
     """Contadores da fila (por plataforma e por loja), saúde dos canais e as chaves."""
     from app.services.atendimento import humano as humano_svc
+    from app.services.atendimento import precisa_acao as precisa_acao_svc
 
     scope = await escopo_do_atendimento(session, user)
     agora = datetime.now(UTC)
@@ -2365,6 +2371,8 @@ async def resumo(
     modos_humano = humano_svc.modos_da_caixa()
     lojas_humano = await humano_svc.lojas_da_caixa(session, modos_humano)
     na_caixa_humano = func.count().filter(humano_svc.caixa_humano_sql(lojas_humano, agora))
+    # "Precisa de ação" (13/11/2026): o número do filtro `filtro=acao` da Caixa.
+    com_acao = func.count().filter(precisa_acao_svc.precisa_de_acao_sql())
     # Os chats de AFILIADO não fechados (29/10/2026): o número do filtro
     # "Afiliados" do menu Filtrar (`filtro=afiliado`, a mesma régua).
     afiliados = func.count().filter(aberta, gravar.chat_de_afiliado_sql())
@@ -2401,6 +2409,7 @@ async def resumo(
         duoke,
         afiliados,
         aguardando_pagamento,
+        com_acao,
         *por_etiqueta,
     ).where(cond).group_by(
         AtendimentoConversa.integration_id, AtendimentoConversa.plataforma, canal_sem_integracao
@@ -2413,7 +2422,7 @@ async def resumo(
     await session.execute(text("SET LOCAL jit = off"))
     linhas_lojas = (await session.execute(q_loja)).all()
     por_plataforma: dict[str, PlataformaResumoOut] = {}
-    for _i, p, _rc, _conta, a, v, x, r, n, h, _d, af, ap, *etq in linhas_lojas:
+    for _i, p, _rc, _conta, a, v, x, r, n, h, _d, af, ap, pa, *etq in linhas_lojas:
         total = por_plataforma.setdefault(
             p,
             PlataformaResumoOut(
@@ -2429,6 +2438,7 @@ async def resumo(
         total.humano += int(h or 0)
         total.afiliados += int(af or 0)
         total.aguardando_pagamento += int(ap or 0)
+        total.precisa_acao += int(pa or 0)
         for etiqueta, quantidade in _etiquetas(etq).items():
             total.etiquetas[etiqueta] += quantidade
     canais = await _canais(session, scope)
@@ -2479,8 +2489,9 @@ async def resumo(
             nao_lidas_duoke=int(d or 0),
             afiliados=int(af or 0),
             aguardando_pagamento=int(ap or 0),
+            precisa_acao=int(pa or 0),
         )
-        for i, p, rc, conta, a, _v, x, _r, n, h, d, af, ap, *etq in linhas_lojas
+        for i, p, rc, conta, a, _v, x, _r, n, h, d, af, ap, pa, *etq in linhas_lojas
     }
     # O número da plataforma = a soma das lojas dela; o Direct já somou o
     # dele (`+=`) sem passar pela consulta de conversas.
@@ -2538,6 +2549,7 @@ async def resumo(
         nao_lidas_duoke=sum(p.nao_lidas_duoke for p in plataformas),
         afiliados=sum(p.afiliados for p in plataformas),
         aguardando_pagamento=sum(p.aguardando_pagamento for p in plataformas),
+        precisa_acao=sum(p.precisa_acao for p in plataformas),
         lojas=sorted(
             barra,
             key=lambda lj: (
@@ -2687,6 +2699,7 @@ async def _listar_marketplace(
     filtro_email: Any = None,
 ) -> list[dict[str, Any]]:
     from app.services.atendimento import humano as humano_svc
+    from app.services.atendimento import precisa_acao as precisa_acao_svc
 
     agora = datetime.now(UTC)
     tem = _pendente_existe()
@@ -2855,6 +2868,9 @@ async def _listar_marketplace(
             AtendimentoConversa.situacao != CONVERSA_FECHADA,
             brinde_svc.aguardando_pagamento_sql(agora),
         )
+    elif filtro == FILTRO_PRECISA_ACAO:
+        # "Precisa de ação" (13/11/2026): o turno atual com motivo de ação da pessoa.
+        consulta = consulta.where(precisa_acao_svc.precisa_de_acao_sql())
     elif filtro in ETIQUETAS:
         # Pela ETIQUETA (status atual): Pré-venda, Pós-venda, Reclamação,
         # Devolução, Ag. cancelamento — as abertas (a fechada sai, como em
@@ -3170,7 +3186,13 @@ async def listar_conversas(
         and (filtro not in ETIQUETAS or filtro == ETIQUETA_MIDIA)
         # O e-mail das lojas e o chamado do site nunca são o Direct — nem o
         # chat de afiliado da Shopee (29/10/2026) nem a oferta do brinde (06/11/2026).
-        and filtro not in (FILTRO_EMAIL_SEM_VINCULO, FILTRO_AFILIADO, FILTRO_AGUARDANDO_PAGAMENTO)
+        and filtro
+        not in (
+            FILTRO_EMAIL_SEM_VINCULO,
+            FILTRO_AFILIADO,
+            FILTRO_AGUARDANDO_PAGAMENTO,
+            FILTRO_PRECISA_ACAO,
+        )
         and tipo_chamado is None
         # A Caixa Humano é a régua da IA da caixa: o Direct (adaptador só
         # leitura, sem IA) não entra nela.

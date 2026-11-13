@@ -43,6 +43,10 @@ export const ABAS_LISTA: OpcaoFiltro[] = [
   { value: 'aguardando', label: 'Falta responder', hint: 'como o Pendente do Duoke: as conversas de chat em que o comprador falou por último (qualquer mensagem da loja responde, até a automática) ou que estão não lidas na Shopee/TikTok, e a reclamação do Mercado Livre com mensagem nova (a bolinha) — fora isso, avaliação, reclamação/devolução, carrinho e comentários ficam nos filtros próprios' },
 ]
 export const FILTROS_MENU: OpcaoFiltro[] = [
+  // "Precisa de ação" (13/11/2026, o Eduardo: a Caixa Humano sai e tudo fica na Caixa, com
+  // a marca nos casos em que a pessoa tem de agir na plataforma — reembolso, cancelamento,
+  // troca, mediação): os motivos de AÇÃO da triagem (`filtro=acao`).
+  { value: 'acao', label: 'Precisa de ação', hint: 'a pessoa tem de agir na plataforma: reclamação ou mediação, Ag. cancelamento, devolução, chamado, avaliação baixa, foto ou vídeo para analisar, NF para enviar — o rascunho da IA já está escrito, a ação é sua' },
   { value: 'vencendo', label: 'Vencendo', hint: 'o prazo da fila acaba em menos de 2 h (na fila, a resposta automática não conta)' },
   { value: 'vencidas', label: 'Vencidas', hint: 'passou do prazo da fila sem resposta de pessoa (a automática não conta)' },
   { value: 'automatica', label: 'Só resposta automática', hint: 'o robô do Duoke (ou uma campanha) respondeu e nenhuma pessoa ainda' },
@@ -285,6 +289,12 @@ function aguardandoPagamentoDe(linhas: { aguardando_pagamento?: number }[]): num
   if (!linhas.every((x) => typeof x?.aguardando_pagamento === 'number')) return null
   return linhas.reduce((s, x) => s + (Number(x.aguardando_pagamento) || 0), 0)
 }
+// "Precisa de ação" (13/11/2026), a mesma conta.
+function precisaAcaoDe(linhas: { precisa_acao?: number }[]): number | null {
+  if (!linhas.length) return 0
+  if (!linhas.every((x) => typeof x?.precisa_acao === 'number')) return null
+  return linhas.reduce((s, x) => s + (Number(x.precisa_acao) || 0), 0)
+}
 const contagem = computed((): Record<string, number | null> => {
   const r = props.resumo
   if (!r) return {}
@@ -307,6 +317,7 @@ const contagem = computed((): Record<string, number | null> => {
       humano: naHumano([semIntegracao]),
       afiliado: semIntegracao.afiliados ?? null,
       aguardando_pagamento: semIntegracao.aguardando_pagamento ?? null,
+      acao: semIntegracao.precisa_acao ?? null,
       ...porEtiqueta([semIntegracao.etiquetas]),
     }
   }
@@ -320,6 +331,7 @@ const contagem = computed((): Record<string, number | null> => {
       humano: l ? naHumano([l]) : 0,
       afiliado: l ? (l.afiliados ?? null) : 0,
       aguardando_pagamento: l ? (l.aguardando_pagamento ?? null) : 0,
+      acao: l ? (l.precisa_acao ?? null) : 0,
       ...porEtiqueta(l ? [l.etiquetas] : []),
     }
   }
@@ -336,6 +348,7 @@ const contagem = computed((): Record<string, number | null> => {
     // Os chats de afiliado abertos (29/10/2026); a API antiga não manda: sem número.
     afiliado: f.plataforma ? afiliadosDe(ps) : (r.afiliados ?? null),
     aguardando_pagamento: f.plataforma ? aguardandoPagamentoDe(ps) : (r.aguardando_pagamento ?? null),
+    acao: f.plataforma ? precisaAcaoDe(ps) : (r.precisa_acao ?? null),
     // Sem plataforma escolhida, o total do topo; com ela, o da plataforma
     // (a que não tem conversa não manda `etiquetas`: conta zero).
     ...(f.plataforma
@@ -347,6 +360,8 @@ function contadorCls(value: string, n: number | null | undefined) {
   if (!n) return 'bg-muted text-muted-foreground'
   if (value === 'vencidas') return 'bg-red-500 text-white'
   if (value === 'vencendo' || value === 'a_conferir') return 'bg-amber-500 text-white'
+  // Precisa de ação (13/11/2026): pede a pessoa, como o vencido.
+  if (value === 'acao') return 'bg-red-500 text-white'
   // Afiliados (29/10/2026): a cor do selo da linha.
   if (value === 'afiliado') return 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
   // Etiqueta: a cor dela (Reclamação vermelho, Devolução roxo…).
@@ -551,6 +566,7 @@ const VAZIO: Record<string, string> = {
   fechadas: 'Nenhuma conversa fechada com esses filtros.',
   afiliado: 'Nenhum chat de afiliado aberto com esses filtros.',
   aguardando_pagamento: 'Nenhuma oferta de brinde esperando pagamento com esses filtros.',
+  acao: 'Nenhuma conversa esperando uma ação sua na plataforma com esses filtros.',
   todas: 'Nenhuma conversa com esses filtros.',
 }
 // Os comentários das redes não entram no "Falta responder" (só o chat,

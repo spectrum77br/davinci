@@ -1235,6 +1235,8 @@ class PlataformaResumoOut(BaseModel):
     afiliados: int = 0
     # A oferta do brinde sem pagamento (06/11/2026): `filtro=aguardando_pagamento`.
     aguardando_pagamento: int = 0
+    # "Precisa de ação" (13/11/2026): o número do filtro `filtro=acao` (`precisa_acao.py`).
+    precisa_acao: int = 0
 
 
 class LojaResumoOut(BaseModel):
@@ -1286,6 +1288,8 @@ class LojaResumoOut(BaseModel):
     afiliados: int = 0
     # A oferta do brinde sem pagamento (06/11/2026): `filtro=aguardando_pagamento`.
     aguardando_pagamento: int = 0
+    # "Precisa de ação" da loja (ver PlataformaResumoOut).
+    precisa_acao: int = 0
     # Na Caixa Humano (ver PlataformaResumoOut).
     humano: int = 0
 
@@ -1365,6 +1369,8 @@ class ResumoOut(BaseModel):
     afiliados: int = 0
     # A oferta do brinde sem pagamento (06/11/2026): `filtro=aguardando_pagamento`.
     aguardando_pagamento: int = 0
+    # "Precisa de ação" (13/11/2026), somando as plataformas: `filtro=acao`.
+    precisa_acao: int = 0
     lojas: list[LojaResumoOut]
     canais: list[CanalOut]
     flags: FlagsOut

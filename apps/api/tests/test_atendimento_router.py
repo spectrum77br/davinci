@@ -843,6 +843,8 @@ async def test_instagram_aparece_so_leitura(client, db, make_user, pessoa):
         "afiliados": 0,
         # 06/11/2026: a oferta do brinde é da Shopee e do TikTok.
         "aguardando_pagamento": 0,
+        # 13/11/2026: "Precisa de ação" — o Direct (sem IA) não tem triagem.
+        "precisa_acao": 0,
     } in resumo["plataformas"]
 
 

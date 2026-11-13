@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BarChart3, BookOpen, Bot, Eye, Fullscreen, Inbox, Library, Mail, Maximize2, MessageSquareText, Minimize2, RotateCcw, Store, TriangleAlert, UserRound } from 'lucide-vue-next'
+import { BarChart3, BookOpen, Bot, Eye, Fullscreen, Inbox, Library, Mail, Maximize2, MessageSquareText, Minimize2, RotateCcw, Store, TriangleAlert } from 'lucide-vue-next'
 import { useResizeObserver, useWindowSize } from '@vueuse/core'
 import {
   AVISO_SO_LEITURA,
@@ -87,7 +87,9 @@ definePageMeta({ middleware: ['atendimento'] })
 type Aba = 'caixa' | 'humano' | 'mail' | 'lojas' | 'manual' | 'modelos' | 'automaticas' | 'metricas' | 'banco'
 const ABAS: { value: Aba; label: string; icon: any }[] = [
   { value: 'caixa', label: 'Caixa', icon: Inbox },
-  { value: 'humano', label: 'Caixa Humano', icon: UserRound },
+  // A Caixa Humano SAIU (13/11/2026, o Eduardo: "deixaremos só a caixa normal"): tudo fica na
+  // Caixa, com o rascunho da IA escrito, e o que pede a pessoa agir na plataforma tem o filtro
+  // "Precisa de ação" (`filtro=acao`). Um link antigo com `?tab=humano` abre a Caixa.
   { value: 'mail', label: 'E-mail', icon: Inbox },
   { value: 'lojas', label: 'Lojas e modo', icon: Store },
   { value: 'manual', label: 'Manual da IA', icon: BookOpen },
@@ -1307,14 +1309,6 @@ onBeforeUnmount(() => {
           :aria-label="`${naoLidasDuoke} mensagem(ns) não lida(s)`"
           data-marca-caixa
         >{{ naoLidasDuoke > 99 ? '99+' : naoLidasDuoke }}</span>
-        <!-- Caixa Humano: quantas esperam uma pessoa (a IA não pode responder) -->
-        <span
-          v-if="a.value === 'humano' && resumo?.humano"
-          class="ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white tabular-nums"
-          :title="`${resumo.humano} conversa(s) esperando uma pessoa: falta responder e a IA não pode`"
-          :aria-label="`${resumo.humano} esperando uma pessoa`"
-          data-marca-humano
-        >{{ resumo.humano > 99 ? '99+' : resumo.humano }}</span>
         <span
           v-if="a.value === 'lojas' && semLer.length"
           class="ml-0.5 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-semibold leading-4 text-white"

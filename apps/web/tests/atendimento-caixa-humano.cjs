@@ -104,7 +104,8 @@ const HUM = (motivos, extra = {}) => ({
   const tipo = (plataformaSfc.descriptor.script.content.match(/export type HumanoConversa = \{([\s\S]*?)\n\}/) || [])[1] || ''
   const chavesTs = [...tipo.matchAll(/^ {2}([a-z_]+)\??: /gm)].map((m) => m[1])
   // `na_caixa` (14/10/2026): a loja nos modos da Caixa Humano; True por padrão (a API antiga).
-  assert.deepEqual(campos, ['motivos', 'rotulos', 'assuntos', 'assuntos_rotulos', 'na_caixa'])
+  // `pos_envio` (23/10/2026, D1 "responde e marca"): a IA já respondeu e a ação continua com a pessoa.
+  assert.deepEqual(campos, ['motivos', 'rotulos', 'assuntos', 'assuntos_rotulos', 'na_caixa', 'pos_envio'])
   assert.match(bloco('HumanoOut'), /^ {4}na_caixa: bool = True$/m)
   assert.deepEqual(chavesTs, campos, 'o tipo da tela = o HumanoOut')
   assert.match(bloco('ConversaResumoOut'), /^ {4}humano: HumanoOut \| None = None$/m)
@@ -148,7 +149,8 @@ const HUM = (motivos, extra = {}) => ({
   assert.match(rota, /^_CURSOR_TURNO = "turno:"$/m)
   assert.match(rota, /pelo_prazo = filtro in FILTROS_PELO_PRAZO and not caixa_humano/)
   assert.match(rota, /antes_de, pelo_prazo=pelo_prazo, pelo_turno=caixa_humano/)
-  assert.match(rota, /consulta = consulta\.order_by\(turno\.desc\(\), id_txt\.desc\(\)\)/)
+  // Item 9 (03/11/2026): a evidência recebida no topo (o grupo 0), depois o turno.
+  assert.match(rota, /consulta = consulta\.order_by\(case\(\(prio, 0\), else_=1\), turno\.desc\(\), id_txt\.desc\(\)\)/)
   const novo = { id: 'b', turno_em: '2026-10-14T11:00:00Z', prazo_resposta_em: '2026-10-14T23:00:00Z', ultima_mensagem_em: null }
   const velho = { id: 'a', turno_em: '2026-10-14T09:00:00Z', prazo_resposta_em: '2026-10-14T21:00:00Z', ultima_mensagem_em: null }
   assert.equal(P.vemDepoisNaLista(velho, novo, L.filtroPadrao('humano'), 'humano'), true, 'a mais recente em cima')
@@ -246,6 +248,29 @@ const HUM = (motivos, extra = {}) => ({
   assert.equal(P.plataformaNosModos(canais, ['instagram', 'facebook'], ['auto']), false)
   assert.equal(P.plataformaNosModos(canais, [], ['auto']), null, 'sem plataforma: não se aplica')
 
+  // "Precisa de ação" (13/11/2026): o primeiro do menu Filtrar, vermelho, com o número
+  // do /resumo (o total, a plataforma e a loja); a API conhece o filtro.
+  assert.equal(L.FILTROS_MENU[0].value, 'acao')
+  assert.equal(L.FILTROS_MENU[0].label, 'Precisa de ação')
+  {
+    const rotaApi = api('routers/atendimento.py')
+    const filtrosDaApi = [...((rotaApi.match(/^FILTROS = \(([\s\S]*?)^\)/m) || [])[1] || '').matchAll(/"([a-z_]+)"/g)].map((m) => m[1])
+    assert.ok(filtrosDaApi.includes('acao'))
+    assert.match(rotaApi, /elif filtro == FILTRO_PRECISA_ACAO:\n\s+# [^\n]*\n\s+consulta = consulta\.where\(precisa_acao_svc\.precisa_de_acao_sql\(\)\)/)
+    const sch = api('schemas/atendimento.py')
+    const blocoDe = (nome) => (sch.match(new RegExp(`^class ${nome}\\(BaseModel\\):([\\s\\S]*?)^class `, 'm')) || [])[1] || ''
+    for (const c of ['PlataformaResumoOut', 'LojaResumoOut', 'ResumoOut']) assert.match(blocoDe(c), /^ {4}precisa_acao: int = 0$/m, c)
+    const tiposTs = plataformaSfc.descriptor.script.content
+    for (const t of ['ResumoPlataforma', 'ResumoLoja', 'Resumo']) {
+      const corpo = (tiposTs.match(new RegExp(`export type ${t} = \\{([\\s\\S]*?)\\n\\}`)) || [])[1] || ''
+      assert.match(corpo, /^ {2}precisa_acao\?: number$/m, t)
+    }
+    const lista = listaSfc.descriptor.script.content + listaSfc.descriptor.scriptSetup.content
+    assert.match(lista, /acao: f\.plataforma \? precisaAcaoDe\(ps\) : \(r\.precisa_acao \?\? null\)/)
+    assert.match(lista, /acao: l \? \(l\.precisa_acao \?\? null\) : 0/)
+    assert.match(lista, /if \(value === 'acao'\) return 'bg-red-500 text-white'/)
+  }
+
   // O menu Filtrar na Caixa Humano: sem o que nunca entra nela.
   assert.deepEqual(L.opcoesDoFiltrar('').map((f) => f.value), L.FILTROS_MENU.map((f) => f.value))
   const naHumano = L.opcoesDoFiltrar('humano').map((f) => f.value)
@@ -309,17 +334,19 @@ const HUM = (motivos, extra = {}) => ({
 const pagina = paginaSfc.descriptor.scriptSetup.content
 const paginaTpl = paginaSfc.descriptor.template.content
 {
-  // A aba logo depois da Caixa, com o ícone de pessoa; `?tab=humano` abre nela.
+  // A Caixa Humano SAIU (13/11/2026, o Eduardo: "deixaremos só a caixa normal"): sem a
+  // aba nem o número dela; um link antigo `?tab=humano` abre a Caixa (a aba do link só
+  // vale se estiver na lista). O que pede a pessoa agir: o filtro "Precisa de ação".
   const abas = [...(pagina.match(/const ABAS[\s\S]*?\n\]/) || [''])[0].matchAll(/value: '([a-z]+)', label: '([^']+)', icon: (\w+)/g)].map((m) => [m[1], m[2], m[3]])
-  assert.deepEqual(abas.slice(0, 2), [['caixa', 'Caixa', 'Inbox'], ['humano', 'Caixa Humano', 'UserRound']])
-  assert.match(pagina, /type Aba = 'caixa' \| 'humano' \|/)
-  assert.match(pagina, /import \{[^}]*\bUserRound\b[^}]*\} from 'lucide-vue-next'/)
-  // O número da aba: o `humano` do /resumo, vermelho.
-  assert.match(paginaTpl, /v-if="a\.value === 'humano' && resumo\?\.humano"[\s\S]{0,500}data-marca-humano\s*>\{\{ resumo\.humano > 99 \? '99\+' : resumo\.humano \}\}<\/span>/)
+  assert.deepEqual(abas[0], ['caixa', 'Caixa', 'Inbox'])
+  assert.ok(!abas.some((a) => a[0] === 'humano'), 'sem a aba Caixa Humano')
+  assert.doesNotMatch(pagina, /\bUserRound\b/)
+  assert.doesNotMatch(paginaTpl, /data-marca-humano/)
+  assert.match(pagina, /const aba = ref<Aba>\(abasDe\(veAbaEmail\.value\)\.some\(\(a\) => a\.value === abaQuery\) \? \(abaQuery as Aba\) : 'caixa'\)/)
   // As MESMAS colunas (lojas | lista | conversa) nas duas.
   assert.match(pagina, /const naCaixa = computed\(\(\) => aba\.value === 'caixa' \|\| aba\.value === 'humano'\)/)
   assert.match(paginaTpl, /<!-- Caixa: lojas \| fila \| conversa \+ pedido -->[\s\S]*?<div\s+v-show="naCaixa"\s+ref="caixaEl"/)
-  assert.match(paginaTpl, /<AtendimentoLojas\s+v-model:filtros="filtros"\s+v-model:recolhida="lojasRecolhidas"\s+v-model:emails-abertos="lojasEmailsAbertos"\s+:resumo="resumo"\s+:numero="emHumano \? 'humano' : 'nao_lidas_duoke'"/)
+  assert.match(paginaTpl, /<AtendimentoLojas\s+v-model:filtros="filtros"\s+v-model:recolhida="lojasRecolhidas"\s+v-model:emails-abertos="lojasEmailsAbertos"\s+(?:v-model:grupos-abertos="gruposEmailsAbertos"\s+)?:resumo="resumo"\s+:numero="emHumano \? 'humano' : 'nao_lidas_duoke'"/)
   assert.match(paginaTpl, /<AtendimentoLista\s+v-show="!emailsDaLoja && !emailsNoCelular"\s+v-model:filtros="filtros"[\s\S]*?:caixa="emHumano \? 'humano' : ''"/)
   // O vazio sem loja no modo abre "Lojas e modo" (14/10/2026).
   assert.match(paginaTpl, /<AtendimentoLista\s+v-show="!emailsDaLoja && !emailsNoCelular"\s+v-model:filtros="filtros"[^/]*?@abrir-aba="abrirAba"\s*\/>/)

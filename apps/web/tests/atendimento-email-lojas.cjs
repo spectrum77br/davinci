@@ -924,7 +924,9 @@ async function principal() {
       assert.ok(admin.abasVisiveis.value.some((a) => a.value === 'mail'), 'admin: a aba E-mail como antes')
       assert.equal(admin.aba.value, 'mail')
       const leitor = montarAbas(false, 'mail')
-      assert.deepEqual(leitor.abasVisiveis.value.map((a) => a.value), ['caixa', 'humano', 'lojas', 'manual', 'modelos', 'automaticas', 'metricas'])
+      // Sem a Caixa Humano (13/11/2026): o `?tab=humano` antigo também cai na Caixa.
+      assert.deepEqual(leitor.abasVisiveis.value.map((a) => a.value), ['caixa', 'lojas', 'manual', 'modelos', 'automaticas', 'metricas'])
+      assert.equal(montarAbas(true, 'humano').aba.value, 'caixa')
       assert.equal(leitor.aba.value, 'caixa', 'o ?tab=mail de quem não é admin cai na Caixa')
       assert.equal(montarAbas(false, 'lojas').aba.value, 'lojas')
       // O Banco de respostas (13/11/2026): só admin — a permissão da aba E-mail não o abre.
