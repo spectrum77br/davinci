@@ -1693,6 +1693,7 @@ async def _responder(
             pergunta=_pergunta_do_turno(base, gatilho),
             cliente=cliente,
             modelo=ctx.modelo or get_settings().atendimento_agente_modelo,
+            session=session,
         )
     ):
         c = await conferir_proposta(session, conversa, gatilho, base, ctx, p_do_modelo, pac)

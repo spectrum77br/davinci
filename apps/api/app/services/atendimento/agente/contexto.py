@@ -625,6 +625,9 @@ class ContextoAgente:
     # ações de `ACOES_QUE_O_BANCO_SOLTA` ficam para depois do envio.
     banco_confere: dict | None = None
     banco_bateu: str | None = None
+    # As respostas do banco achadas pelo RASCUNHO (`confere_banco._pelo_rascunho`): candidatas
+    # da conferência além das do pacote (registradas em `pares_do_pacote`, sem ir ao modelo).
+    banco_pelo_rascunho: list[str] = field(default_factory=list)
     # D1 (decisão do dono, 23/10/2026 ~12:40): o "responde e marca" — a devolução/
     # reclamação aberta na plataforma com o turno só informativo
     # (`acao_pessoa.responde_e_marca_do_turno`): as ações de `acao_pessoa.ACOES_POS_ENVIO`

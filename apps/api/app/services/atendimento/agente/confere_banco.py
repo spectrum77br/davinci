@@ -46,7 +46,12 @@ DIFERENTE = "diferente"
 # A virada (13/11/2026): UMA chamada com todas as respostas do banco que o pacote mostrou (o
 # teste de 242 conversas: com 3 chamadas, uma por candidata na ordem do pacote, só 12 de 124
 # bateram — a candidata da vez costumava ser de outra pergunta).
-MAX_CANDIDATAS = 8
+MAX_CANDIDATAS = 12
+# As respostas achadas no banco pelo próprio RASCUNHO (o índice cobre a pergunta e a resposta da
+# equipe): a resposta parecida que a equipe já deu se acha melhor pela resposta do que pela
+# pergunta do cliente (o teste de 242 conversas: as 8 do pacote, pela pergunta, eram muitas
+# vezes de outro assunto).
+MAX_PELO_RASCUNHO = 6
 MAX_CHARS = 900
 MAX_CHARS_CASO = 420
 MAX_TOKENS = 500
@@ -152,11 +157,75 @@ def candidatas(
 
     citadas = [i for i in dict.fromkeys(str(e or "").strip() for e in evidencias) if _serve(i)]
     do_tipo = [i for i, par in do_pacote.items() if _serve(i) and par.get("tipo") == categoria]
+    pelo_rascunho = [i for i in getattr(ctx, "banco_pelo_rascunho", None) or [] if _serve(i)]
     outras = [i for i in do_pacote if _serve(i)]
-    ids = list(dict.fromkeys([*citadas, *do_tipo, *outras]))[:MAX_CANDIDATAS]
+    ids = list(dict.fromkeys([*citadas, *do_tipo, *pelo_rascunho, *outras]))[:MAX_CANDIDATAS]
     return [
         (i, str(do_pacote[i].get("pergunta") or ""), str(do_pacote[i]["resposta"])) for i in ids
     ]
+
+
+async def _pelo_rascunho(
+    session: AsyncSession | None,
+    ctx: Any,
+    *,
+    categoria: str | None,
+    texto: str | None,
+    pergunta: str | None,
+) -> None:
+    """Busca no banco as respostas parecidas com o RASCUNHO e as põe entre as candidatas
+    (`ctx.banco_pelo_rascunho`, registradas em `pares_do_pacote`: o portão lê o
+    `banco_tipos`). As mesmas regras do pacote: da mesma loja (fora da ficha do produto),
+    sem dado pessoal nem máscara de dado. Uma vez por execução. Nunca levanta."""
+    from app.services.atendimento import banco_respostas
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    if session is None or not (texto or "").strip() or getattr(ctx, "banco_pelo_rascunho", None):
+        return
+    try:
+        achados = await banco_respostas.buscar(
+            session,
+            pergunta=" ".join(f"{pergunta or ''} {texto}".split())[:600],
+            plataforma=ctx.plataforma,
+            integration_id=ctx.integration_id,
+            item_ids=sorted(getattr(ctx, "anuncios_do_pacote", None) or ()),
+            modelos=(),
+            tipo=categoria,
+            conversa_id=ctx.conversa_id,
+            as_of=ctx.agora(),
+            limite=MAX_PELO_RASCUNHO * 3,
+        )
+    except Exception as e:  # noqa: BLE001 — sem a busca, confere só com o pacote
+        logger.warning("atendimento_confere_banco_busca_falhou", err=type(e).__name__)
+        return
+    ja = set(getattr(ctx, "pares_do_pacote", None) or {})
+    novos: list[dict] = []
+    for a in achados:
+        i = agente_ctx.id_par(a["id"])
+        if i in ja:
+            continue
+        if not a["mesma_loja"] and a["tipo"] not in banco_respostas.TIPOS_SO_DO_PRODUTO:
+            continue
+        if not pares.serve_ao_pacote(a["resposta"]) or pares.tem_mascara_de_dado(a["pergunta"]):
+            continue
+        novos.append(
+            {
+                "id": i,
+                "pergunta": pares.para_o_pacote(a["pergunta"], pares.MAX_CHARS_PERGUNTA_PACOTE),
+                "resposta": pares.para_o_pacote(a["resposta"], pares.MAX_CHARS_RESPOSTA_PACOTE),
+                "tipo": a["tipo"],
+                "mesma_loja": bool(a["mesma_loja"]),
+                "mesmo_anuncio": bool(a["mesmo_anuncio"]),
+                "mesmo_produto": bool(a["mesmo_modelo"]),
+                "fonte_de_produto": False,
+                "com_anuncio": bool(a.get("item_id")),
+                "idade_dias": int(a["idade_dias"]),
+            }
+        )
+        if len(novos) >= MAX_PELO_RASCUNHO:
+            break
+    ctx.registrar_pares(novos)
+    ctx.banco_pelo_rascunho = [n["id"] for n in novos]
 
 
 def _virada(ctx: Any) -> bool:
@@ -262,6 +331,7 @@ async def solta_a_pessoa(
     pergunta: str | None,
     cliente: Any,
     modelo: str,
+    session: AsyncSession | None = None,
 ) -> bool:
     """A virada: o rascunho que pede PESSOA diz o mesmo que a resposta da equipe no banco?
     Bateu: `ctx.banco_bateu` (o par) e o "responde e marca" (`ctx.responde_e_marca`) — as ações
@@ -272,6 +342,7 @@ async def solta_a_pessoa(
             ctx, texto=texto, categoria=categoria, acoes=acoes
         ):
             return False
+        await _pelo_rascunho(session, ctx, categoria=categoria, texto=texto, pergunta=pergunta)
         cands = candidatas(ctx, categoria, evidencias)
         if not cands:
             return False
@@ -308,8 +379,11 @@ async def conferir(
     try:
         if cliente is None or not vale_conferir(ctx, categoria, texto):
             return {}
+        if await _assunto_ja_sai(session, ctx, categoria or ""):
+            return {}
+        await _pelo_rascunho(session, ctx, categoria=categoria, texto=texto, pergunta=pergunta)
         cands = candidatas(ctx, categoria, evidencias)
-        if not cands or await _assunto_ja_sai(session, ctx, categoria or ""):
+        if not cands:
             return {}
         registro = await _conferir_candidatas(
             ctx, cands, texto=texto, pergunta=pergunta, cliente=cliente, modelo=modelo

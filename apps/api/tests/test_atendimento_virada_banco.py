@@ -404,3 +404,52 @@ def test_a_correcao_da_pessoa_vem_antes_na_busca():
     assert corrigiu > escreveu
     # A correção de 1 mês ainda vem antes da resposta de ontem com o mesmo texto.
     assert b.nota_banco(0.5, idade_dias=30, correcao=True, **comum) > escreveu
+
+
+async def test_o_rascunho_tambem_busca_no_banco(monkeypatch):
+    """A resposta parecida que a equipe já deu se acha pelo RASCUNHO (o índice do banco cobre a
+    pergunta e a resposta): ela entra entre as candidatas e o portão a conhece."""
+    from app.services.atendimento import banco_respostas
+
+    base = {"mesmo_anuncio": False, "mesmo_modelo": False, "item_id": None, "idade_dias": 3}
+    achados = [
+        {
+            "id": "b77",
+            "pergunta": "a loja fica onde?",
+            "resposta": "Enviamos de SP, com nota fiscal!",
+            "tipo": "indefinido",
+            "mesma_loja": True,
+            **base,
+        },
+        {  # outra loja, e não é da ficha do produto: não entra
+            "id": "b78",
+            "pergunta": "a loja fica onde?",
+            "resposta": "Enviamos do Paraná, de outra loja!",
+            "tipo": "indefinido",
+            "mesma_loja": False,
+            **base,
+        },
+    ]
+
+    async def falso(session, **kw):
+        return achados
+
+    monkeypatch.setattr(banco_respostas, "buscar", falso)
+    ctx = _ctx()
+    cliente = _Cliente("mesma", caso="par:b77")
+    assert await confere_banco.solta_a_pessoa(
+        ctx,
+        texto="Enviamos de SP!",
+        categoria="prazo_antes_compra",
+        acoes=[constantes.ACAO_DADO_INDISPONIVEL],
+        evidencias=[],
+        pergunta="de onde vocês enviam?",
+        cliente=cliente,
+        modelo="m",
+        session=object(),
+    )
+    assert ctx.banco_bateu == "par:b77" and ctx.banco_pelo_rascunho == ["par:b77"]
+    assert ctx.para_fatos()["banco_tipos"]["par:b77"] == "indefinido"
+    assert ia.bateu_com_o_banco(ctx.para_fatos(), "prazo_antes_compra", "Enviamos de SP!")
+    conteudo = str(cliente.pedidos[0]["messages"])
+    assert "par:b77" in conteudo and "par:b78" not in conteudo
