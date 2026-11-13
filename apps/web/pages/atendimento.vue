@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BarChart3, BookOpen, Bot, Eye, Fullscreen, Inbox, Mail, Maximize2, MessageSquareText, Minimize2, RotateCcw, Store, TriangleAlert, UserRound } from 'lucide-vue-next'
+import { BarChart3, BookOpen, Bot, Eye, Fullscreen, Inbox, Library, Mail, Maximize2, MessageSquareText, Minimize2, RotateCcw, Store, TriangleAlert, UserRound } from 'lucide-vue-next'
 import { useResizeObserver, useWindowSize } from '@vueuse/core'
 import {
   AVISO_SO_LEITURA,
@@ -84,7 +84,7 @@ definePageMeta({ middleware: ['atendimento'] })
 //   chega à aba E-mail (um link de dentro da conversa) vai para a Caixa, e a
 //   de e-mail que chega à Caixa pelo id (`?conversa=`) vem para a aba E-mail.
 
-type Aba = 'caixa' | 'humano' | 'mail' | 'lojas' | 'manual' | 'modelos' | 'automaticas' | 'metricas'
+type Aba = 'caixa' | 'humano' | 'mail' | 'lojas' | 'manual' | 'modelos' | 'automaticas' | 'metricas' | 'banco'
 const ABAS: { value: Aba; label: string; icon: any }[] = [
   { value: 'caixa', label: 'Caixa', icon: Inbox },
   { value: 'humano', label: 'Caixa Humano', icon: UserRound },
@@ -94,6 +94,9 @@ const ABAS: { value: Aba; label: string; icon: any }[] = [
   { value: 'modelos', label: 'Respostas prontas', icon: MessageSquareText },
   { value: 'automaticas', label: 'Automáticas', icon: Bot },
   { value: 'metricas', label: 'Métricas', icon: BarChart3 },
+  // O BANCO DE RESPOSTAS (13/11/2026, o Eduardo): a revisão diária do que a IA mandou sozinha
+  // (👍/👎 e a correção, que entra no banco) e a busca no banco. Só admin (`abasDe`), como a API.
+  { value: 'banco', label: 'Banco de respostas', icon: Library },
 ]
 
 const { api } = useApi()
@@ -137,7 +140,7 @@ const veAbaEmail = computed(() => ehAdmin.value || podeVerAbaEmail.value || pode
 // permissão da aba, nas lojas dele (a mesma conta de `acesso.le_filas_email`).
 const leFilasEmail = computed(() => (mexe.value && ehAdmin.value) || (!ehAdmin.value && podeVerAbaEmail.value))
 function abasDe(veEmail: boolean) {
-  return ABAS.filter((a) => a.value !== 'mail' || veEmail)
+  return ABAS.filter((a) => (a.value !== 'mail' || veEmail) && (a.value !== 'banco' || ehAdmin.value))
 }
 const abasVisiveis = computed(() => abasDe(veAbaEmail.value))
 
@@ -1083,6 +1086,7 @@ watch(telaCheiaAtiva, (v) => {
 const ROTULO_NA_BARRA: Record<Aba, string> = {
   caixa: 'Caixa', humano: 'Humano', mail: 'E-mail', lojas: 'Lojas',
   manual: 'Manual', modelos: 'Prontas', automaticas: 'Automát.', metricas: 'Métricas',
+  banco: 'Banco',
 }
 // Os números das abas de cima, na barra de ícones.
 const marcasNaBarra = computed(() => {
@@ -1589,6 +1593,7 @@ onBeforeUnmount(() => {
     <LazyAtendimentoModelos v-if="aba === 'modelos'" :can-edit="canEdit" :can-delete="canDelete" @mudou="(l: Modelo[]) => (modelos = l)" />
     <LazyAtendimentoAutomaticas v-if="aba === 'automaticas'" :can-edit="canEdit" @abrir-conversa="abrirConversaNaCaixa" />
     <LazyAtendimentoMetricas v-if="aba === 'metricas'" />
+    <LazyAtendimentoBanco v-if="aba === 'banco' && ehAdmin" :pode-revisar="isAdmin" />
     </div>
   </div>
 </template>

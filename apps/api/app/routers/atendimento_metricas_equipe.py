@@ -15,9 +15,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps.auth import require_admin
 from app.models import User
+from app.routers.atendimento import _so_admin
 from app.services.atendimento import metricas_equipe
 
-router = APIRouter(prefix="/api/atendimento/metricas", tags=["atendimento"])
+# A mesma trava da caixa das outras rotas do atendimento e, por rota, só admin.
+router = APIRouter(
+    prefix="/api/atendimento/metricas", tags=["atendimento"], dependencies=[Depends(_so_admin)]
+)
 
 
 @router.get("/equipes")

@@ -916,8 +916,9 @@ async function principal() {
       const abas = trecho('type Aba = ', "const { api } = useApi()")
       const ini = trecho('function abasDe(veEmail: boolean)', '// `?tab=lojas` abre direto na aba')
       const aba0 = trecho("const abaQuery = typeof route.query.tab", "const conversaQuery =")
-      const montarAbas = (admin, tab) => new Function('computed', 'ref', 'veAbaEmail', 'route', 'Inbox', 'UserRound', 'Store', 'BookOpen', 'MessageSquareText', 'Bot', 'BarChart3', `${abas}\n${ini}\n${aba0}\nreturn { ABAS, abasVisiveis, aba }`)(
-        Vue.computed, Vue.ref, Vue.ref(admin), { query: { tab } }, 'i', 'u', 's', 'b', 'm', 'bot', 'bar',
+      // `veEmail`: quem vê a aba E-mail sem ser admin (a permissão da aba) — o padrão é o admin.
+      const montarAbas = (admin, tab, veEmail = admin) => new Function('computed', 'ref', 'veAbaEmail', 'ehAdmin', 'route', 'Inbox', 'UserRound', 'Store', 'BookOpen', 'MessageSquareText', 'Bot', 'BarChart3', 'Library', `${abas}\n${ini}\n${aba0}\nreturn { ABAS, abasVisiveis, aba }`)(
+        Vue.computed, Vue.ref, Vue.ref(veEmail), Vue.ref(admin), { query: { tab } }, 'i', 'u', 's', 'b', 'm', 'bot', 'bar', 'lib',
       )
       const admin = montarAbas(true, 'mail')
       assert.ok(admin.abasVisiveis.value.some((a) => a.value === 'mail'), 'admin: a aba E-mail como antes')
@@ -926,6 +927,12 @@ async function principal() {
       assert.deepEqual(leitor.abasVisiveis.value.map((a) => a.value), ['caixa', 'humano', 'lojas', 'manual', 'modelos', 'automaticas', 'metricas'])
       assert.equal(leitor.aba.value, 'caixa', 'o ?tab=mail de quem não é admin cai na Caixa')
       assert.equal(montarAbas(false, 'lojas').aba.value, 'lojas')
+      // O Banco de respostas (13/11/2026): só admin — a permissão da aba E-mail não o abre.
+      assert.deepEqual(admin.abasVisiveis.value.map((a) => a.value), ['caixa', 'humano', 'mail', 'lojas', 'manual', 'modelos', 'automaticas', 'metricas', 'banco'])
+      assert.equal(montarAbas(true, 'banco').aba.value, 'banco')
+      assert.equal(montarAbas(false, 'banco').aba.value, 'caixa', 'o ?tab=banco de quem não é admin cai na Caixa')
+      const soEmail = montarAbas(false, 'banco', true)
+      assert.ok(soEmail.abasVisiveis.value.some((a) => a.value === 'mail') && !soEmail.abasVisiveis.value.some((a) => a.value === 'banco'))
     }
     {
       // abrirAba('mail') e a conversa de e-mail de quem não é admin: na Caixa.

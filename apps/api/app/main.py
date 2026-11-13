@@ -18,6 +18,8 @@ from app.routers import atendimento as atendimento_router
 from app.routers import atendimento_abas as atendimento_abas_router
 from app.routers import atendimento_automacoes as atendimento_automacoes_router
 from app.routers import atendimento_avaliacoes as atendimento_avaliacoes_router
+from app.routers import atendimento_banco as atendimento_banco_router
+from app.routers import atendimento_metricas_equipe as atendimento_metricas_equipe_router
 from app.routers import atendimento_brinde as atendimento_brinde_router
 from app.routers import atendimento_carrinhos as atendimento_carrinhos_router
 from app.routers import atendimento_email as atendimento_email_router
@@ -350,6 +352,11 @@ app.include_router(atendimento_abas_router.router)
 app.include_router(atendimento_lida_router.router)
 # 30/10/2026: as lojas de cada pessoa no atendimento (Usuários › Lojas no atendimento).
 app.include_router(atendimento_lojas_pessoa_router.router)
+# 13/11/2026: a aba "Banco de respostas" (só admin) — a revisão diária do que a IA mandou
+# sozinha (👍/👎 e a correção, que entra no banco) e a busca no banco. Mesma trava da caixa.
+app.include_router(atendimento_banco_router.router)
+# 13/11/2026: as métricas por equipe e a análise do dia (aba Métricas, só admin).
+app.include_router(atendimento_metricas_equipe_router.router)
 # Mensagens automáticas (05/10/2026): a aba "Automáticas" — as regras por
 # loja (modo seco até a troca), o registro sem texto e a conta com o Duoke.
 app.include_router(atendimento_automacoes_router.router)

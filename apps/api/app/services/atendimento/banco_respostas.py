@@ -152,7 +152,8 @@ class RespostaNova:
     """Uma resposta pronta para gravar (já generalizada). Os campos de `AtendimentoResposta`."""
 
     chave: str
-    conversa_id: UUID
+    # None só na correção da revisão diária (`resposta_da_correcao`, ver lá embaixo).
+    conversa_id: UUID | None
     resposta_msg_id: UUID
     plataforma: str
     canal: str
@@ -1110,3 +1111,205 @@ async def exemplos_da_politica_de_entrega(
         if len(saida) >= pares.MAX_PARES_DA_POLITICA:
             break
     return saida
+
+
+# ── A correção da revisão diária (13/11/2026) ─────────────────────────────────
+#
+# A tela do banco (routers/atendimento_banco.py): no 👎 ao que a IA mandou SOZINHA, a correção
+# da pessoa ENTRA NO BANCO como resposta AJUSTADA por pessoa (`FONTE_AJUSTOU`) para a pergunta
+# daquele envio — o turno INTEIRO do cliente logo antes dele, com as falas de sempre
+# (`pares._entra`). As regras são as da montagem (`respostas_da_conversa`): fora a conversa com
+# cara de instrução, o que tem cara de dado pessoal (antes E depois da máscara), o que ensina o
+# proibido, a pergunta só de cortesia, a resposta sem conteúdo ou curta demais; só a versão
+# generalizada; o tipo é o assunto do rascunho (sem ele, a palavra-chave).
+#
+# A chave é a de sempre (`chave_de`: a conversa e a 1ª mensagem do envio da IA — que a
+# montagem nunca rende, porque o turno com resposta da IA não entra) e a gravação é o upsert
+# `_gravar`: a correção refeita troca a anterior (a mais nova vence; `respondido_em` = a hora
+# da correção). A linha nasce SEM `conversa_id`: o `indexar` e o `indexar_conversa` aposentam a
+# resposta da conversa que a montagem não rende de novo — e ela nunca rende a correção. O 👍
+# depois do 👎, ou a correção nova que não serve, aposenta a anterior (nunca apaga).
+
+CORRECAO_OK = "ok"
+CORRECAO_FORA_DO_BANCO = "plataforma"
+CORRECAO_SEM_ENVIO = "sem_envio"
+CORRECAO_SEM_PERGUNTA = "sem_pergunta"
+CORRECAO_INJECAO = "injecao"
+# O envio da IA que conta como "saiu": `revisar` também (até alguém conferir, é resposta).
+STATUS_QUE_SAIRAM = (constantes.MSG_ENVIADA, constantes.MSG_REVISAR)
+
+
+def saiu_sozinha(m: Any, rascunho_id: UUID | None = None) -> bool:
+    """A mensagem é o envio SOZINHO da IA (do rascunho `rascunho_id`, quando vem)? PURA."""
+    return (
+        getattr(m, "origem", None) == constantes.ORIGEM_IA
+        and getattr(m, "autor", None) == constantes.AUTOR_LOJA
+        and getattr(m, "status", None) in STATUS_QUE_SAIRAM
+        and getattr(m, "rascunho_id", None) is not None
+        and (rascunho_id is None or m.rascunho_id == rascunho_id)
+    )
+
+
+def turno_do_cliente_antes(
+    mensagens: Sequence[Any],
+    resposta_ids: Collection[UUID],
+    *,
+    comprador: tuple[str | None, ...] = (),
+    repetidas: Collection[str] = frozenset(),
+) -> Any | None:
+    """O turno INTEIRO do cliente logo antes da resposta (a 1ª de `resposta_ids` na ordem das
+    mensagens), com as falas do `agente.pares` (`_entra`). None sem a resposta entre as
+    mensagens ou sem turno do cliente logo antes dela. PURA."""
+    ids = set(resposta_ids)
+    antes: list[Any] = []
+    for m in mensagens:
+        if m.id in ids:
+            break
+        antes.append(m)
+    else:
+        return None
+    turnos = pares._turnos([m for m in antes if pares._entra(m, repetidas, comprador)])
+    if not turnos or turnos[-1].autor != constantes.AUTOR_CLIENTE:
+        return None
+    return turnos[-1]
+
+
+def resposta_da_correcao(
+    turno: Any,
+    correcao: str,
+    *,
+    conversa: Any,
+    resposta_msg_id: UUID,
+    nomes: tuple[str | None, ...],
+    tipo: str | None,
+    titulo: str | None,
+    em: datetime,
+) -> tuple[RespostaNova | None, str]:
+    """A correção como resposta do banco, ou (None, o motivo — os códigos da contagem da
+    montagem). As regras de `respostas_da_conversa`, na mesma ordem. PURA."""
+    plataforma, canal = conversa.plataforma, conversa.canal
+    pergunta_crua = turno.texto
+    resposta_crua = pares.sem_citacao(correcao)
+    if not pergunta_crua.strip() or not resposta_crua.strip():
+        return None, "sem_texto"
+    if pares.tem_dado_pessoal(pergunta_crua) or pares.tem_dado_pessoal(resposta_crua):
+        return None, "dado_pessoal"
+    if not ia._par_seguro(pergunta_crua, resposta_crua):
+        return None, "inseguro"
+    if ia._ensina_o_proibido(resposta_crua, plataforma, canal, de_pessoa=True):
+        return None, "proibido"
+    pergunta = pares.generalizar(pergunta_crua, nomes)
+    resposta = pares.generalizar(resposta_crua, nomes)
+    if not seguro(pergunta) or not seguro(resposta):
+        return None, "dado_pessoal"
+    if pares.so_cumprimento(pergunta):
+        return None, "so_cortesia"
+    if sem_conteudo(resposta):
+        return None, "sem_conteudo"
+    if curta_demais(pergunta, resposta):
+        return None, "curta"
+    titulo = titulo or getattr(conversa, "anuncio_titulo", None) or None
+    nova = RespostaNova(
+        chave=chave_de(conversa.id, resposta_msg_id),
+        conversa_id=None,  # fora do refazer da conversa (ver acima)
+        resposta_msg_id=resposta_msg_id,
+        plataforma=plataforma,
+        canal=canal,
+        integration_id=getattr(conversa, "integration_id", None),
+        loja=((getattr(conversa, "conta", None) or "").strip() or None),
+        item_id=(getattr(conversa, "anuncio_id", None) or None) and str(conversa.anuncio_id)[:64],
+        anuncio_titulo=(titulo or None) and titulo[:300],
+        modelos=modelos_do(titulo),
+        tipo=(tipo or tipos_pergunta.tipo_de(pergunta_crua))[:32],
+        pergunta=pergunta,
+        resposta=resposta,
+        fonte=FONTE_AJUSTOU,
+        perguntado_em=pares._momento(turno.mensagens[-1]),
+        respondido_em=em,
+        # O cliente não viu a correção: não há o "depois" dela.
+        cliente_depois=DEPOIS_SEM_RETORNO,
+    )
+    return nova, CORRECAO_OK
+
+
+async def retirar_correcao(session: AsyncSession, chave: str) -> int:
+    """Aposenta a correção da revisão de `chave` (o 👍 depois do 👎, ou a correção nova que não
+    serve). Só a linha da revisão (sem conversa, ajustada por pessoa); nunca apaga. Sem commit."""
+    t = AtendimentoResposta
+    res = await session.execute(
+        update(t)
+        .where(
+            t.chave == chave,
+            t.conversa_id.is_(None),
+            t.fonte == FONTE_AJUSTOU,
+            t.status == STATUS_ATIVA,
+        )
+        .values(status=STATUS_APOSENTADA, updated_at=func.now())
+    )
+    return res.rowcount or 0
+
+
+async def gravar_correcao(
+    session: AsyncSession,
+    *,
+    conversa: AtendimentoConversa,
+    rascunho: AtendimentoRascunho,
+    correcao: str,
+    agora: datetime | None = None,
+) -> tuple[RespostaNova | None, str]:
+    """O 👎 da revisão diária: a correção entra no banco (ver acima). Sem commit.
+
+    Devolve (a resposta gravada, `CORRECAO_OK`) ou (None, o motivo); a correção que não serve
+    aposenta a anterior do mesmo envio. Nada de texto no log (quem chama registra o código).
+    """
+    if conversa.plataforma not in PLATAFORMAS:
+        return None, CORRECAO_FORA_DO_BANCO
+    msgs = (await _mensagens(session, [conversa.id])).get(conversa.id, [])
+    envio = [m.id for m in msgs if saiu_sozinha(m, rascunho.id)]
+    if not envio:
+        return None, CORRECAO_SEM_ENVIO
+    info = (await _rascunhos(session, [conversa.id])).get(conversa.id) or Rascunhos()
+    nova: RespostaNova | None = None
+    if info.injecao or pares._tem_injecao(
+        [m.texto for m in msgs if m.autor == constantes.AUTOR_CLIENTE]
+    ):
+        motivo = CORRECAO_INJECAO
+    else:
+        repetidas = (
+            await _repetidas_com_cache(session, conversa.integration_id)
+            if conversa.integration_id is not None
+            else frozenset()
+        )
+        turno = turno_do_cliente_antes(
+            msgs,
+            envio,
+            comprador=(conversa.comprador_nome, conversa.comprador_id),
+            repetidas=repetidas,
+        )
+        motivo = CORRECAO_SEM_PERGUNTA
+        if turno is not None:
+            nomes = await ia._NomesDoPedido(session).de(
+                conversa.comprador_nome,
+                conversa.comprador_id,
+                conversa.pedido_marketplace,
+                conversa.integration_id,
+            )
+            titulo = None
+            if conversa.anuncio_id:
+                item = str(conversa.anuncio_id)
+                titulo = (await _titulos(session, {item})).get(item)
+            nova, motivo = resposta_da_correcao(
+                turno,
+                correcao,
+                conversa=conversa,
+                resposta_msg_id=envio[0],
+                nomes=nomes,
+                tipo=rascunho.categoria,
+                titulo=titulo,
+                em=agora or datetime.now(UTC),
+            )
+    if nova is None:
+        await retirar_correcao(session, chave_de(conversa.id, envio[0]))
+        return None, motivo
+    await _gravar(session, [nova])
+    return nova, CORRECAO_OK

@@ -309,6 +309,22 @@ async def test_quem_so_le_le_tudo_e_nao_mexe_em_nada(client, make_user, auth_as,
             # de qualquer loja e de endereço interno.
             assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
             assert r.json()["detail"]["code"] == "atendimento_so_quem_mexe", (metodo, caminho)
+        elif metodo == "GET" and molde in (URL + "/metricas/equipes", URL + "/metricas/analise"):
+            # As métricas por equipe (13/11/2026, routers/atendimento_metricas_equipe.py):
+            # só admin.
+            if quem == "admin_fora_da_lista":
+                assert r.status_code not in (401, 403), (metodo, caminho, r.status_code, r.text)
+            else:
+                assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
+                assert r.json()["detail"]["code"] == "admin_only", (metodo, caminho)
+        elif metodo == "GET" and molde.startswith(URL + "/banco/"):
+            # O banco de respostas (13/11/2026, routers/atendimento_banco.py): a leitura
+            # também é só de admin (a escrita segue a régua de sempre, abaixo).
+            if quem == "admin_fora_da_lista":
+                assert r.status_code not in (401, 403), (metodo, caminho, r.status_code, r.text)
+            else:
+                assert r.status_code == 403, (metodo, caminho, r.status_code, r.text)
+                assert r.json()["detail"]["code"] == "so_admin", (metodo, caminho)
         elif (
             metodo == "GET"
             or (metodo, molde) in rota.ROTAS_DE_QUEM_LE
