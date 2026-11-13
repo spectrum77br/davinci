@@ -52,7 +52,7 @@ const props = defineProps<{ modo?: 'juridico' }>()
 // limpo") e ficou só no tooltip do chip. No histórico entrou a "instrução pro
 // robô": recado que não vai pra plataforma — o robô lê na próxima passada.
 
-type Origem = 'margem' | 'logistica' | 'devolucao' | 'vendas'
+type Origem = 'margem' | 'logistica' | 'devolucao' | 'vendas' | 'melhor_envio'
 type Canal = 'api' | 'robo' | 'manual'
 
 const ORIGENS: { value: Origem; label: string }[] = [
@@ -61,6 +61,9 @@ const ORIGENS: { value: Origem; label: string }[] = [
   { value: 'devolucao', label: 'Devolução' },
   { value: 'vendas', label: 'Vendas' },
 ]
+// 13/11: atendimento do Melhor Envio entra sozinho (leitura pela API) — aparece no
+// filtro e no rótulo, mas não é origem de chamado criado à mão.
+const ORIGENS_TODAS: { value: Origem; label: string }[] = [...ORIGENS, { value: 'melhor_envio', label: 'Melhor Envio' }]
 const CANAIS: { value: Canal; label: string; hint: string }[] = [
   { value: 'manual', label: 'manual', hint: 'só registra no histórico' },
   // 17/09: era "API ML" — aparecia assim em linha de TikTok/Shopee e confundia.
@@ -362,7 +365,7 @@ const RESUMO_CONCLUIDO: ResumoGrupo = { key: 'concluido', label: 'Concluído', c
 const resumoParcial = computed(() => items.value.length < total.value)
 const resumoTotalLabel = computed(() => mostrar.value === 'abertos' ? 'Chamados abertos' : mostrar.value === 'resolvidos' ? 'Chamados concluídos' : 'Chamados')
 const resumoPorOrigem = computed(() => {
-  const partes = ORIGENS.map((o) => ({ label: o.label, n: items.value.filter((r) => r.origem === o.value).length })).filter((x) => x.n > 0)
+  const partes = ORIGENS_TODAS.map((o) => ({ label: o.label, n: items.value.filter((r) => r.origem === o.value).length })).filter((x) => x.n > 0)
   if (!partes.length) return ''
   const texto = partes.map((x) => `${x.label} ${x.n}`).join(' · ')
   return resumoParcial.value ? `nesta página: ${texto}` : texto
@@ -389,8 +392,8 @@ const visiveis = computed(() => {
 })
 
 // ----------------------------------------------------------------- abas de plataforma
-const NOME_ABA: Record<string, string> = { 'mercado livre': 'Mercado Livre', shopee: 'Shopee', tiktok: 'TikTok', amazon: 'Amazon' }
-const ORDEM_ABA = ['mercado livre', 'shopee', 'tiktok', 'amazon']
+const NOME_ABA: Record<string, string> = { 'mercado livre': 'Mercado Livre', shopee: 'Shopee', tiktok: 'TikTok', amazon: 'Amazon', 'melhor envio': 'Melhor Envio' }
+const ORDEM_ABA = ['mercado livre', 'shopee', 'tiktok', 'amazon', 'melhor envio']
 const plataformaAbas = computed(() => {
   const totais = plataformaTotais.value
   const posicao = (p: string) => { const i = ORDEM_ABA.indexOf(p); return i < 0 ? ORDEM_ABA.length : i }
@@ -568,6 +571,11 @@ function textoDaLeitura(p: AtualizarPedido, st: AtualizarAndamento | null): stri
     qtd(r.encerrados || 0, 'encerrado', 'encerrados'),
   ]
   if (r.falhas) partes.push(qtd(r.falhas, 'com erro', 'com erro'))
+  // 13/11: atendimentos do Melhor Envio (lidos na mesma passada).
+  if (r.me_lidos || r.me_novos) {
+    const falas = r.me_falas ? ` (${qtd(r.me_falas, 'mensagem nova', 'mensagens novas')})` : ''
+    partes.push(`Melhor Envio: ${qtd(r.me_lidos || 0, 'atendimento lido', 'atendimentos lidos')}${falas}`)
+  }
   return `${agora} · ${partes.join(' · ')}${outra}${proxima}`
 }
 async function atualizarTudo() {
@@ -712,6 +720,8 @@ const ERROS: Record<string, string> = {
   // 19/09: a plataforma não liberava pela API e o robô assumiu por outro caminho (Seller Center)
   substituida_pelo_robo: 'o robô assumiu por outro caminho',
   chamado_instrucao_vazia: 'digite a instrução',
+  // 13/11: atendimento do Melhor Envio só é lido por enquanto.
+  melhor_envio_responder_no_site: 'por enquanto responda no site do Melhor Envio (Envios › Atendimentos) — a resposta aparece aqui na próxima leitura',
 }
 
 function apiError(e: any) {
@@ -829,7 +839,7 @@ function fmtCurto(v: string | null) {
 }
 
 function origemLabel(o: Origem) {
-  return ORIGENS.find((x) => x.value === o)?.label || o
+  return ORIGENS_TODAS.find((x) => x.value === o)?.label || o
 }
 
 function anexoUrl(id: string) {
@@ -1956,6 +1966,7 @@ const PLATAFORMA_NA: Record<string, string> = {
   shopee: 'na Shopee',
   tiktok: 'na TikTok',
   amazon: 'na Amazon',
+  'melhor envio': 'no Melhor Envio',
 }
 function plataformaNa(p: string | null | undefined): string {
   return PLATAFORMA_NA[nomePlataforma(p)] || 'na plataforma'
@@ -2236,7 +2247,7 @@ async function confirmarExcluir() {
         <span class="font-semibold text-muted-foreground">Origem</span>
         <select v-model="origemFilter" class="bg-transparent outline-none">
           <option value="all">Todas</option>
-          <option v-for="o in ORIGENS" :key="o.value" :value="o.value">{{ o.label }}</option>
+          <option v-for="o in ORIGENS_TODAS" :key="o.value" :value="o.value">{{ o.label }}</option>
         </select>
       </label>
       <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="filtrar por conta (ex. ML Aguiar 2)">

@@ -2128,8 +2128,23 @@ async def chamados_atualizar_api(ctx: dict) -> dict[str, int]:
             return {"pulado_ja_rodando": 1}
         async with session_scope() as s:
             resumo = await chamados_devolucao_sync.sync_respostas(s)
+        resumo.update(await _chamados_melhor_envio_passada())
         logger.info("chamados_atualizar_done", **resumo)
         return {k: v for k, v in resumo.items() if isinstance(v, int)}
+
+
+async def _chamados_melhor_envio_passada() -> dict:
+    """13/11: atendimentos do Melhor Envio (Envios › Atendimentos) na aba Chamados —
+    só leitura, pelo token da Conciliação. Roda dentro da trava da leitura (:25 e
+    botão Atualizar). Falha aqui não derruba a leitura das plataformas."""
+    from app.services import chamados_melhor_envio
+
+    try:
+        async with session_scope() as s:
+            return await chamados_melhor_envio.sincronizar(s)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("chamados_melhor_envio_falhou", err=str(e)[:300])
+        return {"me_falhas": 1}
 
 
 async def marketing_postagens_metricas_agora(ctx: dict) -> None:
@@ -2687,6 +2702,7 @@ async def chamados_replica_automatica(ctx: dict) -> None:
             async with session_scope() as s:
                 resp = await chamados_devolucao_sync.sync_respostas(s)
             logger.info("chamados_devolucao_sync_done", **resp)
+            await _chamados_melhor_envio_passada()
         else:
             logger.info("chamados_devolucao_sync_pulado", reason="botao_atualizar_rodando")
     # 07/10 (296301): recurso mandado pela tela depois da decisão — sem novidade,

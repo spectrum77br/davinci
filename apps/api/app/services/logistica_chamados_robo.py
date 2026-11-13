@@ -77,7 +77,9 @@ async def _chamado_de_outra_origem(session: AsyncSession, row: Logistica) -> Cha
             select(Chamado)
             .where(
                 Chamado.pedido_bling == numero,
-                Chamado.origem != "logistica",
+                # 13/11: atendimento do Melhor Envio é com a transportadora, não
+                # com a plataforma — não conta como "alguém já cuida do caso".
+                Chamado.origem.not_in(("logistica", "melhor_envio")),
                 Chamado.resolvido.is_(False),
             )
             .order_by(Chamado.created_at.desc())

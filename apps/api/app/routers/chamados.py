@@ -1360,6 +1360,11 @@ async def replicar(
     despacha pelo canal do chamado (api → ML na hora; robo → fila; manual →
     só registro). Falha de envio não perde a mensagem: fica `falhou` + erro."""
     ch = await _get_da_equipe(session, user, chamado_id)
+    if ch.origem == "melhor_envio":
+        # 13/11 (passo 2): o atendimento do Melhor Envio só é LIDO; responder pelo
+        # DaVinci é o passo 3. Sem esta trava a réplica ficava "registrada" no
+        # histórico parecendo enviada, e o ME nunca recebia.
+        raise HTTPException(422, detail={"code": "melhor_envio_responder_no_site"})
     texto = (texto or "").strip()
     if not texto:
         raise HTTPException(422, detail={"code": "chamado_mensagem_vazia"})
@@ -3245,6 +3250,9 @@ def _trabalho_do_cerebro(plataforma: str | None, canais: list[str]):
         & or_(~encerrado, falou_depois)
         & nao_fechado_por_gente
         & resposta_nova
+        # 13/11: atendimento do Melhor Envio é só leitura (passo 2) — a IA não
+        # tem por onde responder; quem cuida é gente (Análise Humano).
+        & (Chamado.origem != "melhor_envio")
     )
     if plataforma:
         plat = plataforma.strip().lower()

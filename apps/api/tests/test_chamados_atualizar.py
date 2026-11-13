@@ -129,10 +129,23 @@ async def test_worker_le_e_devolve_o_resumo(monkeypatch):
         lidas.append(1)
         return {"verificados": 7, "novos": 2, "encerrados": 1, "falhas": 0}
 
+    async def _me():
+        lidas.append("me")
+        return {"me_lidos": 1, "me_falas": 3, "me_em": "13/11"}
+
     monkeypatch.setattr(worker.chamados_devolucao_sync, "sync_respostas", _sync)
+    monkeypatch.setattr(worker, "_chamados_melhor_envio_passada", _me)
     resumo = await worker.chamados_atualizar_api({"redis": None})
-    assert resumo == {"verificados": 7, "novos": 2, "encerrados": 1, "falhas": 0}
-    assert lidas == [1]
+    # 13/11: a mesma passada lê os atendimentos do Melhor Envio (só os números voltam)
+    assert resumo == {
+        "verificados": 7,
+        "novos": 2,
+        "encerrados": 1,
+        "falhas": 0,
+        "me_lidos": 1,
+        "me_falas": 3,
+    }
+    assert lidas == [1, "me"]
 
     # Com a leitura do :25 em andamento (trava ocupada), não lê de novo.
     class _Ocupado:
@@ -141,4 +154,4 @@ async def test_worker_le_e_devolve_o_resumo(monkeypatch):
 
     resumo = await worker.chamados_atualizar_api({"redis": _Ocupado()})
     assert resumo == {"pulado_ja_rodando": 1}
-    assert lidas == [1]
+    assert lidas == [1, "me"]
