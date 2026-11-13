@@ -262,3 +262,45 @@ async def test_aplicar_guarda_o_retrato_e_so_grava_listas_com_a_chave(db: AsyncS
     await db.refresh(canal)
     assert resumo["mudaram"] == 1 and canal.auto_categorias == ["rastreio"]
     assert canal.auto_agente == ["rastreio"] and canal.auto_orientacao == []
+
+
+def test_a_revisao_do_que_saiu_sozinho_e_julgada_pelo_codigo():
+    assert juiz_edicao.pela_revisao("ok") == juiz_edicao.IGUAL
+    assert juiz_edicao.pela_revisao("erro") == juiz_edicao.CONTEUDO
+    assert juiz_edicao.pela_revisao(None) is None
+
+
+async def test_a_revisao_conta_na_regua_e_a_nota_trocada_troca_o_julgamento(
+    db: AsyncSession, make_user
+):
+    """O envio da IA não tem decisão de pessoa: o 👍/👎 da revisão diária é a decisão
+    (`AVALIACAO_AUTOMATICO`). O código julga — o modelo nunca é chamado — e a nota
+    trocada depois troca o julgamento."""
+    from app.services.atendimento import constantes
+
+    conversa = await _conversa(db, make_user, comprador_nome="Maria Souza")
+    r = "O F105 tem NFC."
+    a = await _decisao(db, conversa, acao=constantes.AVALIACAO_AUTOMATICO, rascunho=r, final=None)
+    # Sem nota ainda: não é decisão (nada a julgar).
+    cliente = _ClienteFalso("conteudo")
+    resumo = await juiz_edicao.rodada(db, cliente=cliente, modelo="claude-sonnet-5-5")
+    assert resumo["gravados"] == 0 and cliente.chamadas == 0
+
+    a.nota = constantes.NOTA_OK
+    await db.commit()
+    resumo = await juiz_edicao.rodada(db, cliente=cliente, modelo="claude-sonnet-5-5")
+    assert resumo["gravados"] == 1 and cliente.chamadas == 0
+    j = await db.scalar(select(AtendimentoJulgamento))
+    assert (j.julgamento, j.pelo_codigo, j.modelo) == ("igual", True, None)
+    assert j.motivo == juiz_edicao.MOTIVO_REVISAO_OK
+    # Julgada e igual à nota: não volta.
+    assert (await juiz_edicao.rodada(db, cliente=cliente, modelo="x"))["gravados"] == 0
+
+    a.nota = constantes.NOTA_ERRO
+    a.correcao = "Tem NFC sim."
+    await db.commit()
+    resumo = await juiz_edicao.rodada(db, cliente=cliente, modelo="claude-sonnet-5-5")
+    assert resumo["gravados"] == 1 and cliente.chamadas == 0
+    db.expire_all()
+    j = await db.scalar(select(AtendimentoJulgamento))
+    assert (j.julgamento, j.motivo) == ("conteudo", juiz_edicao.MOTIVO_REVISAO_ERRO)

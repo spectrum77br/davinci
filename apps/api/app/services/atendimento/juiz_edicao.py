@@ -42,6 +42,25 @@ JULGAMENTOS = (IGUAL, FORMA, CONTEUDO, OUTRA_ACAO, SO_SAUDACAO)
 ACERTOS = frozenset({IGUAL, FORMA})
 ERROS = frozenset({CONTEUDO, OUTRA_ACAO})
 
+# A REVISÃO DIÁRIA do que saiu sozinho (13/11/2026): o envio da IA não tem decisão de pessoa;
+# o 👍/👎 da revisão (`constantes.AVALIACAO_AUTOMATICO`) é a decisão. O código julga — o
+# modelo nunca é chamado —, e a nota trocada depois troca o julgamento. Assim a régua do
+# assunto continua viva depois que ele passa a sair sozinho.
+MOTIVO_REVISAO_OK = "revisão: certo"
+MOTIVO_REVISAO_ERRO = "revisão: errou"
+
+
+def pela_revisao(nota: str | None) -> str | None:
+    """O julgamento da revisão do que saiu sozinho: ok = igual, erro = conteúdo. PURA."""
+    from app.services.atendimento import constantes
+
+    if nota == constantes.NOTA_OK:
+        return IGUAL
+    if nota == constantes.NOTA_ERRO:
+        return CONTEUDO
+    return None
+
+
 LIMIAR_IGUAL = 0.97
 LIMIAR_FORMA = 0.92
 MAX_CHARS_TEXTO = 900
@@ -192,7 +211,7 @@ TIMEOUT_S = 60.0
 
 async def _pendentes(session: Any, *, desde: Any, limite: int) -> list[Any]:
     """As avaliações de rascunho com texto ainda sem julgamento, as mais novas primeiro."""
-    from sqlalchemy import select
+    from sqlalchemy import and_, case, or_, select
 
     from app.models import (
         AtendimentoAvaliacao,
@@ -201,15 +220,19 @@ async def _pendentes(session: Any, *, desde: Any, limite: int) -> list[Any]:
         AtendimentoRascunho,
     )
     from app.models.atendimento import AtendimentoJulgamento
+    from app.services.atendimento import constantes
 
     a, r, c, m = AtendimentoAvaliacao, AtendimentoRascunho, AtendimentoConversa, AtendimentoMensagem
     j = AtendimentoJulgamento
+    revisao = a.acao == constantes.AVALIACAO_AUTOMATICO
+    da_nota = case((a.nota == constantes.NOTA_OK, IGUAL), else_=CONTEUDO)
     return list(
         (
             await session.execute(
                 select(
                     a.id.label("avaliacao_id"),
                     a.acao,
+                    a.nota,
                     a.texto_final,
                     a.created_at.label("decidido_em"),
                     r.id.label("rascunho_id"),
@@ -227,8 +250,19 @@ async def _pendentes(session: Any, *, desde: Any, limite: int) -> list[Any]:
                 .outerjoin(m, m.id == r.mensagem_gatilho_id)
                 .outerjoin(j, j.avaliacao_id == a.id)
                 .where(
-                    j.id.is_(None),
-                    a.acao.in_(("enviou_igual", "editou", "escreveu_do_zero")),
+                    or_(
+                        and_(
+                            j.id.is_(None),
+                            a.acao.in_(("enviou_igual", "editou", "escreveu_do_zero")),
+                        ),
+                        # A revisão do que saiu sozinho: ainda sem julgamento, ou a nota
+                        # trocou depois do julgamento.
+                        and_(
+                            revisao,
+                            a.nota.in_((constantes.NOTA_OK, constantes.NOTA_ERRO)),
+                            or_(j.id.is_(None), j.julgamento != da_nota),
+                        ),
+                    ),
                     a.created_at >= desde,
                     r.texto.is_not(None),
                     r.texto != "",
@@ -271,7 +305,7 @@ async def rodada(
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from app.models.atendimento import AtendimentoJulgamento
-    from app.services.atendimento import ia
+    from app.services.atendimento import constantes, ia
     from app.services.atendimento.agente import custo
 
     agora = agora or datetime.now(UTC)
@@ -279,7 +313,29 @@ async def rodada(
     contagem: dict[str, int] = {"pendentes": len(linhas)}
     nomes_svc = ia._NomesDoPedido(session)
     novos: list[dict[str, Any]] = []
+    revisadas: list[dict[str, Any]] = []
     for linha in linhas:
+        if linha.acao == constantes.AVALIACAO_AUTOMATICO:
+            julg = pela_revisao(linha.nota)
+            if julg is None:
+                continue
+            contagem[julg] = contagem.get(julg, 0) + 1
+            revisadas.append(
+                {
+                    "avaliacao_id": linha.avaliacao_id,
+                    "rascunho_id": linha.rascunho_id,
+                    "plataforma": linha.plataforma,
+                    "integration_id": linha.integration_id,
+                    "tipo": (linha.categoria or "indefinido")[:32],
+                    "julgamento": julg,
+                    "motivo": MOTIVO_REVISAO_OK if julg == IGUAL else MOTIVO_REVISAO_ERRO,
+                    "pelo_codigo": True,
+                    "modelo": None,
+                    "custo_usd": None,
+                    "decidido_em": linha.decidido_em,
+                }
+            )
+            continue
         julg = pelo_codigo(linha.acao, linha.rascunho, linha.texto_final)
         motivo, usado, gasto = "", None, 0.0
         if julg is None:
@@ -333,6 +389,20 @@ async def rodada(
     if novos:
         stmt = pg_insert(AtendimentoJulgamento).values(novos)
         await session.execute(stmt.on_conflict_do_nothing(index_elements=["avaliacao_id"]))
+    if revisadas:
+        # A nota da revisão trocada depois troca o julgamento (o mesmo `avaliacao_id`).
+        stmt = pg_insert(AtendimentoJulgamento).values(revisadas)
+        await session.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["avaliacao_id"],
+                set_={
+                    "julgamento": stmt.excluded.julgamento,
+                    "motivo": stmt.excluded.motivo,
+                    "decidido_em": stmt.excluded.decidido_em,
+                },
+            )
+        )
+    if novos or revisadas:
         await session.commit()
-    contagem["gravados"] = len(novos)
+    contagem["gravados"] = len(novos) + len(revisadas)
     return contagem
