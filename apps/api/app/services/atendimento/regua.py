@@ -75,20 +75,41 @@ async def _contagens(session: AsyncSession, chave: Any, filtro: Any) -> dict[Any
     return {tuple(linha[: len(colunas)]): (int(linha.d), int(linha.a or 0)) for linha in linhas}
 
 
+def desde_da_regua() -> Any:
+    """O começo da medida (`atendimento_regua_desde`), ou None (sem corte). 13/11/2026."""
+    from datetime import UTC, datetime
+
+    from app.config import get_settings
+
+    bruto = (get_settings().atendimento_regua_desde or "").strip()
+    if not bruto:
+        return None
+    try:
+        quando = datetime.fromisoformat(bruto.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return quando if quando.tzinfo else quando.replace(tzinfo=UTC)
+
+
 async def taxas_da_loja(
     session: AsyncSession, *, plataforma: str, integration_id: UUID | None
 ) -> dict[str, Taxa]:
     """Tipo → a taxa que vale para esta loja (a dela com `MIN_DECISOES`, senão a da plataforma)."""
     from app.models.atendimento import AtendimentoJulgamento as J
 
+    desde = desde_da_regua()
+    corte = J.decidido_em >= desde if desde is not None else True
+
     da_loja = (
         await _contagens(
-            session, (J.tipo,), and_(J.plataforma == plataforma, J.integration_id == integration_id)
+            session,
+            (J.tipo,),
+            and_(J.plataforma == plataforma, J.integration_id == integration_id, corte),
         )
         if integration_id is not None
         else {}
     )
-    da_plataforma = await _contagens(session, (J.tipo,), J.plataforma == plataforma)
+    da_plataforma = await _contagens(session, (J.tipo,), and_(J.plataforma == plataforma, corte))
     saida: dict[str, Taxa] = {}
     for (tipo,), (d, a) in da_plataforma.items():
         saida[tipo] = Taxa(tipo=tipo, decisoes=d, acertos=a, escopo="plataforma")
@@ -112,6 +133,25 @@ class Listas:
     auto_categorias: tuple[str, ...]
     auto_agente: tuple[str, ...]
     auto_orientacao: tuple[str, ...]
+
+
+def reprovados(taxas: dict[str, Taxa]) -> set[str]:
+    """Os tipos COM medida (`MIN_DECISOES`) abaixo da régua — a prova para tirar. PURA."""
+    return {t for t, x in taxas.items() if x.decisoes >= MIN_DECISOES and not x.liberado}
+
+
+def com_o_piso(atuais: Listas, da_regua: Listas, fora: set[str]) -> Listas:
+    """As listas da virada (o Eduardo, 13/11/2026: nada piora): o que já estava + o que a
+    régua soltou, menos o que tem prova de que erra (`reprovados`). PURA."""
+
+    def juntar(a: tuple[str, ...], b: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(c for c in dict.fromkeys((*a, *b)) if c not in fora)
+
+    return Listas(
+        auto_categorias=juntar(atuais.auto_categorias, da_regua.auto_categorias),
+        auto_agente=juntar(atuais.auto_agente, da_regua.auto_agente),
+        auto_orientacao=juntar(atuais.auto_orientacao, da_regua.auto_orientacao),
+    )
 
 
 def listas_liberadas(taxas: dict[str, Taxa], categorias: Any) -> Listas:
@@ -185,15 +225,17 @@ async def aplicar(
         resumo["canais"] += 1
         resumo["linhas"] += len(linhas)
         resumo["tipos_liberados"] += sum(1 for t in taxas.values() if t.liberado)
-        novas = (
-            list(listas.auto_categorias),
-            list(listas.auto_agente),
-            list(listas.auto_orientacao),
-        )
         atuais = (
             list(canal.auto_categorias or []),
             list(canal.auto_agente or []),
             list(canal.auto_orientacao or []),
+        )
+        # O piso (13/11/2026): o que já saía sozinho continua, até a régua provar que erra.
+        listas = com_o_piso(Listas(*(tuple(x) for x in atuais)), listas, reprovados(taxas))
+        novas = (
+            list(listas.auto_categorias),
+            list(listas.auto_agente),
+            list(listas.auto_orientacao),
         )
         if gravar_listas and novas != atuais:
             canal.auto_categorias, canal.auto_agente, canal.auto_orientacao = novas

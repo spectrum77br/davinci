@@ -6475,6 +6475,64 @@ def liberado_pela_regua(agente: Mapping[str, Any], categoria: str | None, canal:
     return categoria in listas
 
 
+# "Bateu com a do banco, faz sentido, já manda" (o Eduardo, 13/11/2026): o rascunho que é
+# praticamente a resposta que a equipe já deu (o banco do MESMO tipo, no escopo da busca: a
+# mesma loja, o mesmo modelo) sai sozinho mesmo antes de a régua ter medida do assunto. Os
+# sensíveis continuam pedindo a régua (90%); a ação de pessoa, o verificador e o resto do
+# portão continuam valendo. A comparação: o miolo (sem saudação, fecho, nome e pontuação),
+# com os números como "#".
+LIMIAR_BATEU_COM_O_BANCO = 0.85
+TRAVAS_QUE_O_BANCO_SOLTA = frozenset(
+    {
+        "assunto_nao_liberado",
+        "assunto_nao_liberado_agente",
+        "orientacao_nao_liberada",
+        "assunto_de_produto",
+    }
+)
+
+
+def _miolo_sem_numeros(texto: str | None) -> str:
+    from app.services.atendimento import juiz_edicao
+
+    return re.sub(r"\d+", "#", juiz_edicao.miolo(texto))
+
+
+def bateu_com_o_banco(agente: Mapping[str, Any], categoria: str | None, texto: str | None) -> bool:
+    """O rascunho diz o mesmo que uma resposta do banco do mesmo tipo? PURA (13/11/2026).
+
+    Pelo SENTIDO (`agente.confere_banco`, gravado em `fatos.agente.banco_confere` quando o
+    agente fechou o rascunho); por garantia, também o texto praticamente igual (o miolo).
+    """
+    import difflib
+
+    from app.services.atendimento import tipos_pergunta
+
+    if not agente.get("regua") or not categoria or categoria in tipos_pergunta.SENSIVEIS:
+        return False
+    tipos = agente.get("banco_tipos")
+    if not isinstance(tipos, Mapping):
+        return False
+    conf = agente.get("banco_confere")
+    if (
+        isinstance(conf, Mapping)
+        and conf.get("veredito") == "mesma"
+        and tipos.get(conf.get("id")) == categoria
+    ):
+        return True
+    respostas = agente.get("banco_respostas")
+    meu = _miolo_sem_numeros(texto)
+    if not isinstance(respostas, Mapping) or not meu:
+        return False
+    for i, resposta in respostas.items():
+        if tipos.get(i) != categoria:
+            continue
+        deles = _miolo_sem_numeros(resposta)
+        if deles and difflib.SequenceMatcher(None, meu, deles).ratio() >= LIMIAR_BATEU_COM_O_BANCO:
+            return True
+    return False
+
+
 def sem_banco_do_tipo(agente: Mapping[str, Any], categoria: str | None) -> bool:
     """O portão do banco segura este rascunho? PURA."""
     from app.services.atendimento import tipos_pergunta
@@ -6499,9 +6557,14 @@ def trava_do_agente(
     As travas do assunto (`_trava_do_assunto`) e, passando nelas, o portão do banco.
     """
     motivo = _trava_do_assunto(rascunho, canal, etiquetas=etiquetas, ligado=ligado)
-    if motivo is None and sem_banco_do_tipo(
-        _fatos_do_agente(rascunho), getattr(rascunho, "categoria", None)
+    agente = _fatos_do_agente(rascunho)
+    categoria = getattr(rascunho, "categoria", None)
+    if motivo in TRAVAS_QUE_O_BANCO_SOLTA and bateu_com_o_banco(
+        agente, categoria, getattr(rascunho, "texto", None)
     ):
+        # O assunto ainda não está nas listas, mas a resposta é a da equipe (13/11/2026).
+        motivo = None
+    if motivo is None and sem_banco_do_tipo(agente, categoria):
         return MOTIVO_SEM_BANCO
     return motivo
 

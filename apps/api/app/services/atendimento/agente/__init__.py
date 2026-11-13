@@ -1756,6 +1756,21 @@ async def _responder(
         codigos.append(conf.codigo)
     fatos_do_verificador = {"verificador": conf.registro} if conf.registro is not None else {}
     fatos_do_verificador.update(fatos_do_corte)
+    # "Bateu com a do banco, faz sentido, já manda" (13/11/2026): a conferência pelo sentido
+    # com a resposta da equipe do mesmo tipo (`confere_banco`; só com a régua e o banco).
+    from app.services.atendimento.agente import confere_banco
+
+    fatos_do_verificador.update(
+        await confere_banco.conferir(
+            session,
+            ctx,
+            categoria=final.categoria,
+            texto=final.texto,
+            pergunta=getattr(gatilho, "texto", None),
+            cliente=cliente,
+            modelo=ctx.modelo or get_settings().atendimento_agente_modelo,
+        )
+    )
     ctx.parada = PARADA_FIM
     ex._ms()
     return ex.pronto(

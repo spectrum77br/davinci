@@ -639,6 +639,10 @@ class Settings(BaseSettings):
     # alguma dúvida?" e o chat da avaliação (o brinde e o lembrete já saíam). Ligar junto com
     # a virada; desligada, nada muda.
     atendimento_automacoes_eventos_no_auto: bool = False
+    # A RÉGUA mede só a partir daqui (ISO 8601; vazio = os últimos 30 dias). 13/11/2026, a
+    # virada: só o agente novo (Opus + banco, desde 2026-11-13T13:49:00+00:00) — o resultado
+    # do agente antigo não segura o novo.
+    atendimento_regua_desde: str = ""
     atendimento_automacoes_shopee_auto_reply: bool = False
     # O brinde do pedido não pago no TikTok (05/11/2026):
     #   • `atendimento_tiktok_nao_pagos_ativa`: a rodada `atendimento_tiktok_nao_pagos`

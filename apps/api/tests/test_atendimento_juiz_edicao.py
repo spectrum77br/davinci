@@ -260,8 +260,83 @@ async def test_aplicar_guarda_o_retrato_e_so_grava_listas_com_a_chave(db: AsyncS
 
     resumo = await regua.aplicar(db, gravar_listas=True)
     await db.refresh(canal)
-    assert resumo["mudaram"] == 1 and canal.auto_categorias == ["rastreio"]
+    # O piso (13/11/2026, o Eduardo: nada piora na virada): o que já saía sozinho
+    # (agradecimento) continua; a régua SOMA o rastreio.
+    assert resumo["mudaram"] == 1 and canal.auto_categorias == ["agradecimento", "rastreio"]
     assert canal.auto_agente == ["rastreio"] and canal.auto_orientacao == []
+
+    # Com prova de que erra (20+ decisões abaixo da régua), o assunto sai da lista.
+    for i in range(20):
+        a = await _decisao(
+            db, conversa, acao="editou", rascunho="x", final="y", categoria="agradecimento"
+        )
+        db.add(
+            AtendimentoJulgamento(
+                avaliacao_id=a.id,
+                rascunho_id=a.rascunho_id,
+                plataforma="shopee",
+                integration_id=conversa.integration_id,
+                tipo="agradecimento",
+                julgamento="conteudo",
+                decidido_em=agora - timedelta(minutes=i),
+            )
+        )
+    await db.commit()
+    await regua.aplicar(db, gravar_listas=True)
+    await db.refresh(canal)
+    assert canal.auto_categorias == ["rastreio"]
+
+
+async def test_a_regua_mede_so_desde_a_data_configurada(db: AsyncSession, make_user, monkeypatch):
+    """A virada (13/11/2026): só o agente novo conta — o antigo não segura o novo."""
+    conversa = await _conversa(db, make_user)
+    agora = datetime.now(UTC)
+    for i, quando in enumerate([agora - timedelta(days=2)] * 3 + [agora - timedelta(hours=1)] * 2):
+        a = await _decisao(
+            db, conversa, acao="editou", rascunho="x", final="y", categoria="rastreio"
+        )
+        db.add(
+            AtendimentoJulgamento(
+                avaliacao_id=a.id,
+                rascunho_id=a.rascunho_id,
+                plataforma="shopee",
+                integration_id=conversa.integration_id,
+                tipo="rastreio",
+                julgamento="conteudo" if i < 3 else "igual",
+                decidido_em=quando,
+            )
+        )
+    await db.commit()
+    taxas = await regua.taxas_da_loja(
+        db, plataforma="shopee", integration_id=conversa.integration_id
+    )
+    assert (taxas["rastreio"].decisoes, taxas["rastreio"].acertos) == (5, 2)
+    monkeypatch.setattr(
+        get_settings(), "atendimento_regua_desde", (agora - timedelta(days=1)).isoformat()
+    )
+    taxas = await regua.taxas_da_loja(
+        db, plataforma="shopee", integration_id=conversa.integration_id
+    )
+    assert (taxas["rastreio"].decisoes, taxas["rastreio"].acertos) == (2, 2)
+    monkeypatch.setattr(get_settings(), "atendimento_regua_desde", "lixo")
+    assert regua.desde_da_regua() is None
+
+
+def test_o_piso_soma_e_so_tira_com_prova():
+    atuais = regua.Listas(("agradecimento",), (), ("garantia",))
+    da_regua = regua.Listas(("rastreio",), ("rastreio",), ())
+    assert regua.com_o_piso(atuais, da_regua, set()) == regua.Listas(
+        ("agradecimento", "rastreio"), ("rastreio",), ("garantia",)
+    )
+    assert regua.com_o_piso(atuais, da_regua, {"garantia", "rastreio"}) == regua.Listas(
+        ("agradecimento",), (), ()
+    )
+    taxas = {
+        "a": regua.Taxa("a", 25, 10, "loja"),  # medido e abaixo: reprovado
+        "b": regua.Taxa("b", 5, 0, "loja"),  # sem medida: fica
+        "c": regua.Taxa("c", 25, 24, "loja"),  # medido e acima: liberado
+    }
+    assert regua.reprovados(taxas) == {"a"}
 
 
 def test_a_revisao_do_que_saiu_sozinho_e_julgada_pelo_codigo():

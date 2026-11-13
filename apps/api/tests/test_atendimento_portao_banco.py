@@ -171,3 +171,62 @@ def test_o_contexto_grava_a_regua_so_quando_ligada(monkeypatch):
     assert agente_ctx.regua_ativa() is True
     monkeypatch.setattr(get_settings(), "atendimento_regua_ativa", False)
     assert agente_ctx.regua_ativa() is False
+
+
+# ── "Bateu com a do banco, faz sentido, já manda" (13/11/2026) ───────────────
+
+
+def _banco(resposta: str, tipo: str = "rastreio") -> dict:
+    return {
+        "regua": True,
+        "banco_exigido": True,
+        "banco_tipos": {"par:b7": tipo},
+        "banco_respostas": {"par:b7": resposta},
+    }
+
+
+def test_rascunho_igual_ao_do_banco_sai_mesmo_sem_o_assunto_na_lista():
+    canal = _canal(auto_categorias=[], auto_agente=[])
+    banco = "Olá [NOME]! Seu pedido foi postado em 10/11 pela J&T, código JT123. Obrigado!"
+    r = _rascunho("rastreio", _banco(banco))
+    r.texto = "Oi, Maria! Seu pedido foi postado em 12/11 pela J&T, código JT987654. Obrigada!"
+    assert ia.bateu_com_o_banco(r.fatos["agente"], "rastreio", r.texto)
+    assert ia.trava_do_agente(r, canal) is None
+    # Texto diferente: continua esperando a régua.
+    r.texto = "Seu pedido ainda está em separação, deve sair amanhã."
+    assert ia.trava_do_agente(r, canal) == "assunto_nao_liberado"
+
+
+def test_o_banco_nao_solta_sensivel_nem_acao_nem_outro_tipo():
+    canal = _canal(auto_categorias=[], auto_agente=[], auto_orientacao=[])
+    texto = "O reembolso é feito pela própria Shopee, pela mesma forma de pagamento."
+    sens = _rascunho("reembolso", _banco(texto, tipo="reembolso"))
+    sens.texto = texto
+    assert not ia.bateu_com_o_banco(sens.fatos["agente"], "reembolso", texto)
+    assert ia.trava_do_agente(sens, canal) == "orientacao_nao_liberada"
+    acao = _rascunho("rastreio", _banco("Seu pedido foi postado."))
+    acao.texto = "Seu pedido foi postado."
+    acao.fatos["agente"]["acoes_pessoa"] = ["reclamacao_aberta"]
+    assert ia.trava_do_agente(acao, canal) == "acao_pessoa"
+    outro = _rascunho("prazo_envio", _banco("Seu pedido foi postado.", tipo="rastreio"))
+    outro.texto = "Seu pedido foi postado."
+    assert not ia.bateu_com_o_banco(outro.fatos["agente"], "prazo_envio", outro.texto)
+    sem_regua = _banco("Seu pedido foi postado.")
+    sem_regua["regua"] = False
+    assert not ia.bateu_com_o_banco(sem_regua, "rastreio", "Seu pedido foi postado.")
+
+
+def test_o_contexto_grava_as_respostas_do_banco_com_a_marca():
+    ctx = agente_ctx.ContextoAgente(
+        conversa_id="c",
+        gatilho_id=None,
+        canal_id=None,
+        integration_id=None,
+        plataforma="shopee",
+        canal="chat",
+        modo="auto",
+    )
+    ctx.registrar_pares([{"id": "par:b10", "tipo": "rastreio", "pergunta": "p", "resposta": "r1"}])
+    assert "banco_respostas" not in ctx.para_fatos()
+    ctx.banco_exigido = True
+    assert ctx.para_fatos()["banco_respostas"] == {"par:b10": "r1"}

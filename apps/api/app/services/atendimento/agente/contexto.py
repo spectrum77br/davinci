@@ -127,6 +127,8 @@ EVIDENCIA_NO_TEXTO = re.compile(
 PREFIXOS_SEM_PROVA = ("par:",)
 # As respostas do BANCO (`banco_respostas`, 13/11/2026) no pacote: `par:b<id>`.
 PREFIXO_BANCO = "par:b"
+# O tanto de cada resposta do banco que vai para o `fatos` (o portão compara o miolo).
+MAX_RESPOSTA_BANCO = 700
 
 
 def regua_ativa() -> bool:
@@ -1100,6 +1102,14 @@ class ContextoAgente:
                 i: str(par["tipo"])
                 for i, par in self.pares_do_pacote.items()
                 if i.startswith(PREFIXO_BANCO) and par.get("tipo")
+            }
+            # "Bateu com a do banco, faz sentido, já manda" (o Eduardo, 13/11/2026): a
+            # resposta (já mascarada no banco) de cada uma, para o portão comparar com o
+            # rascunho (`ia.bateu_com_o_banco`).
+            extra["banco_respostas"] = {
+                i: str(par.get("resposta") or "")[:MAX_RESPOSTA_BANCO]
+                for i, par in self.pares_do_pacote.items()
+                if i.startswith(PREFIXO_BANCO) and par.get("tipo") and par.get("resposta")
             }
         if self.fechou_sem_ferramentas:
             # Rodada "fechar o eval" (23/10/2026): só quando houve.
