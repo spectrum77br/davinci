@@ -115,7 +115,7 @@ class RespostaBancoOut(BaseModel):
     modelos: list[str]
     pergunta: str
     resposta: str
-    # equipe_fora | equipe_escreveu | equipe_ajustou
+    # equipe_fora | equipe_escreveu | equipe_ajustou | equipe_aprovou
     fonte: str
     # A correção da revisão diária (o 👎 ao que a IA mandou sozinha).
     da_revisao: bool = False

@@ -61,7 +61,7 @@ class _Cliente:
     def __init__(self, veredito: str, caso: str | None = "par:b1"):
         self.messages = self
         self.veredito = veredito
-        self.caso = caso if veredito == "mesma" else None
+        self.caso = caso if veredito in ("mesma", "serve") else None
         self.pedidos: list[dict] = []
 
     async def create(self, **kwargs):
@@ -292,7 +292,9 @@ def test_o_sistema_da_virada_nunca_deixa_a_caixa_vazia():
     antes, depois = prompt.bloco_geral(), prompt.bloco_geral(virada=True)
     for velho, novo in prompt.TROCAS_DA_VIRADA:
         assert antes.count(velho) == 1, velho[:40]
-        assert velho not in depois and novo in depois
+        assert novo in depois
+        if velho not in novo:  # a troca que só acrescenta mantém a frase antiga
+            assert velho not in depois
     assert 'texto "" (vazio)' not in depois
     assert "só o TOM" not in depois
     assert "De nada, tenha um ótimo dia!" in depois
@@ -491,3 +493,65 @@ def test_o_reset_negado_nao_e_sugestao_de_reset():
     )
     assert not any(validador.sugere_reset(t) for t in nao)
     assert all(validador.sugere_reset(t) for t in sim)
+
+
+def test_pedido_aguardando_pagamento_nao_pede_segurar_o_envio():
+    """Mini, 13/11: "cancela essa compra" com o cartão "aguardando pagamento" (o pedido fora do
+    sistema, com o número na conversa) pedia "segurar o envio" — não há envio a segurar."""
+    from app.services.atendimento.agente import acao_pessoa
+
+    def cartao(status):
+        return SimpleNamespace(
+            anexos=[{"tipo": "pedido", "pedido": "2611136DF7CD2X", "status": status}],
+            payload={},
+        )
+
+    conversa = SimpleNamespace(canal="chat", pedido_marketplace="2611136DF7CD2X")
+    assert not acao_pessoa.pode_nao_ter_saido(None, conversa, ctx={}, recentes=[cartao("UNPAID")])
+    # Pago (o pedido no sistema) ou pronto para enviar: segura como sempre.
+    assert acao_pessoa.pode_nao_ter_saido(
+        None, conversa, ctx={}, recentes=[cartao("READY_TO_SHIP")]
+    )
+    assert acao_pessoa.pode_nao_ter_saido(
+        None, conversa, ctx={"pedido": {"x": 1}}, recentes=[cartao("UNPAID")]
+    )
+
+
+def test_a_oferta_do_brinde_so_trava_a_resposta_que_fala_do_brinde():
+    """O Eduardo, 13/11: "sinto que está mandando coisa pro humano que ele pode fazer" — a oferta
+    da AirTag prendia a conversa por 7 dias; na virada, só a resposta que fala do brinde."""
+    base = {"regua": True, "modo": "auto", "acoes_pessoa": []}
+
+    def r(texto, agente=base):
+        return SimpleNamespace(
+            texto=texto,
+            categoria="cancelamento",
+            prompt_versao=constantes.PROMPT_VERSAO_AGENTE,
+            fatos={"agente": dict(agente)},
+        )
+
+    assert ia.brinde_nao_trava(r("Você pode cancelar pelo próprio pedido, em Minhas Compras."))
+    assert not ia.brinde_nao_trava(r("O brinde vai junto com o seu celular."))
+    assert not ia.brinde_nao_trava(r("A AirTag de presente segue no pedido."))
+    # Fora da virada (sem a régua), como antes: trava.
+    assert not ia.brinde_nao_trava(r("Pode cancelar pelo app.", {"modo": "auto"}))
+    assert not ia.brinde_nao_trava(None)
+
+
+async def test_mesma_pergunta_a_resposta_da_equipe_vira_a_sugestao():
+    """O Eduardo, 13/11: "tem respostas suficientes no banco". A mesma pergunta de um caso do
+    banco, com a resposta da equipe servindo a este cliente: ela vira a sugestão."""
+    ctx = _ctx()
+    p = _proposta(texto="Não temos essa informação no anúncio.")
+    assert await _soltar(ctx, p, _Cliente("serve", caso="par:b1"))
+    assert ctx.texto_do_banco == "Enviamos de SP!" and ctx.banco_bateu == "par:b1"
+    assert ctx.para_fatos()["texto_do_banco"] is True
+    assert ia.bateu_com_o_banco(
+        {**ctx.para_fatos(), "banco_confere": ctx.banco_confere}, "prazo_antes_compra", "x"
+    )
+    # A resposta da equipe com máscara de dado (código, data de outro pedido) não serve.
+    mascarada = _ctx()
+    mascarada.pares_do_pacote["par:b1"]["resposta"] = "Seu código de rastreio é [CODIGO]."
+    assert not await _soltar(mascarada, p, _Cliente("serve", caso="par:b1"))
+    assert mascarada.texto_do_banco is None
+    assert mascarada.banco_confere["veredito"] == "diferente"

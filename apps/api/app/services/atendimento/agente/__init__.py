@@ -1696,6 +1696,17 @@ async def _responder(
             session=session,
         )
     ):
+        if ctx.texto_do_banco:
+            # A mesma pergunta de um caso do banco, e a resposta da equipe serve a este cliente:
+            # ela vira a sugestão (a ação do modelo continua, para depois do envio).
+            p_do_modelo = p_do_modelo.model_copy(
+                update={
+                    "texto": ctx.texto_do_banco,
+                    "evidencias": list(
+                        dict.fromkeys([*p_do_modelo.evidencias, str(ctx.banco_bateu)])
+                    ),
+                }
+            )
         c = await conferir_proposta(session, conversa, gatilho, base, ctx, p_do_modelo, pac)
     p, conferida = c.proposta, c.conferida
     if c.sem_resposta:

@@ -227,6 +227,7 @@ nunca vai para o log — só ids, categoria, status e tokens.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import importlib
 import json
@@ -3332,6 +3333,11 @@ async def _motivos_humano_para_auto(
     triagem = await humano.triar_conversa(
         session, conversa, so_humano=await humano.assuntos_so_humano(session)
     )
+    if brinde_nao_trava(rascunho) and HUMANO_OFERTA_BRINDE in triagem.motivos:
+        # A virada: a resposta que não fala do brinde não fica presa pela oferta.
+        triagem = dataclasses.replace(
+            triagem, motivos=tuple(m for m in triagem.motivos if m != HUMANO_OFERTA_BRINDE)
+        )
     if bateu_com_o_banco_no_rascunho(rascunho):
         # A virada (13/11/2026): o rascunho que diz o mesmo que a resposta da equipe no banco
         # responde "como qualquer outra conversa" — só o que nunca sai sozinho segura.
@@ -6572,7 +6578,7 @@ def bateu_com_o_banco(agente: Mapping[str, Any], categoria: str | None, texto: s
     conf = agente.get("banco_confere")
     if (
         isinstance(conf, Mapping)
-        and conf.get("veredito") == "mesma"
+        and conf.get("veredito") in ("mesma", "serve")
         # A virada: a resposta do banco que o pacote mostrou (a conferência leu a pergunta que
         # a equipe respondeu: outra pergunta é "diferente"); os sensíveis também (85%).
         and conf.get("id") in tipos
@@ -7025,6 +7031,25 @@ MOTIVO_OFERTA_DE_BRINDE = "oferta_de_brinde"
 JANELA_OFERTA_DE_BRINDE = timedelta(days=7)
 
 
+# A VIRADA (13/11/2026, o Eduardo: "sinto que está mandando coisa pro humano que ele pode fazer"):
+# o agente vê a oferta na conversa (a automática entra no pacote); a resposta dele que NÃO fala do
+# brinde não fica presa pelos 7 dias — a que fala (brinde, presente, AirTag, chaveiro) continua
+# com a pessoa, para nunca negar o brinde.
+_FALA_DO_BRINDE = re.compile(
+    r"\b(?:brinde\w*|presente\w*|air\s*tag\w*|chaveiro\w*|mimo\w*|gift\w*|cortesia)\b"
+)
+
+
+def brinde_nao_trava(rascunho: Any | None) -> bool:
+    """O rascunho do AGENTE na virada (`fatos.agente.regua`) sem falar do brinde? PURA."""
+    if rascunho is None or not rascunho_do_agente(rascunho):
+        return False
+    if not _fatos_do_agente(rascunho).get("regua"):
+        return False
+    plano = " ".join(validador.plano_de(getattr(rascunho, "texto", None) or "").split())
+    return bool(plano) and not _FALA_DO_BRINDE.search(plano)
+
+
 async def _oferta_de_brinde_recente(session: AsyncSession, conversa: AtendimentoConversa) -> bool:
     """A oferta do brinde saiu nesta conversa nos últimos 7 dias? Pelo registro do motor."""
     from app.models import AtendimentoAutomacaoRegistro as Registro
@@ -7069,9 +7094,9 @@ async def _talvez_enviar(
         do_agente = rascunho_do_agente(rascunho)
         from app.services.atendimento import nf_automatica
 
-        if await _oferta_de_brinde_recente(session, conversa):
+        if not brinde_nao_trava(rascunho) and await _oferta_de_brinde_recente(session, conversa):
             # A sugestão fica para a pessoa; a conversa entra na Caixa Humano pela
-            # espera da IA (`humano.ia_sem_resposta`).
+            # espera da IA (`humano.ia_sem_resposta`). Na virada, só a que fala do brinde.
             await _registrar_auto_envio(session, conversa, rascunho, MOTIVO_OFERTA_DE_BRINDE)
             return False
         if do_agente and nf_automatica.candidato(rascunho):

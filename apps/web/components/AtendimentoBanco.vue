@@ -72,6 +72,7 @@ export const FONTES: Record<string, string> = {
   equipe_fora: 'equipe, por fora (Duoke/Seller Center)',
   equipe_escreveu: 'equipe, no DaVinci',
   equipe_ajustou: 'equipe ajustou o rascunho da IA',
+  equipe_aprovou: 'equipe mandou o rascunho da IA sem mudar',
 }
 export function fonteLabel(r: Pick<RespostaBanco, 'fonte' | 'da_revisao'>): string {
   if (r.da_revisao) return 'correção da revisão diária'

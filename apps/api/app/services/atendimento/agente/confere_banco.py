@@ -28,6 +28,7 @@ parecido, ele responde normal como qualquer outra conversa"; "os sensíveis abai
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -42,7 +43,15 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 MESMA = "mesma"
+# A virada (13/11/2026, o Eduardo: "sinto que está mandando coisa pro humano que ele pode fazer —
+# tem respostas suficientes no banco"): o caso do banco é a MESMA pergunta e a resposta da equipe
+# serve a este cliente como está, mas o rascunho disse outra coisa — a resposta da EQUIPE vira a
+# sugestão (`solta_a_pessoa` → `ctx.texto_do_banco`), com as mesmas regras e o verificador.
+SERVE = "serve"
 DIFERENTE = "diferente"
+VEREDITOS_QUE_SOLTAM = frozenset({MESMA, SERVE})
+MAX_CHARS_TEXTO_DO_BANCO = 600
+_MARCACAO = re.compile(r"\[[^\]]+\]|\{[^}]+\}")
 # A virada (13/11/2026): UMA chamada com todas as respostas do banco que o pacote mostrou (o
 # teste de 242 conversas: com 3 chamadas, uma por candidata na ordem do pacote, só 12 de 124
 # bateram — a candidata da vez costumava ser de outra pergunta).
@@ -68,8 +77,11 @@ pergunta) e a proposta segue o que a equipe fez nele: a mesma informação ou po
 mesmo encaminhamento. Pode ter outras palavras, mais cortesia ou o dado do pedido deste \
 cliente; não pode afirmar o que a equipe não afirmou, prometer outra coisa nem pedir outra \
 ação ao cliente. Diga o id desse caso.
-- "diferente": nenhum caso é o mesmo pedido, ou a proposta contradiz, promete ou orienta \
-diferente da equipe. O id fica null.
+- "serve": um dos casos é o MESMO pedido do cliente e a resposta da equipe serve a ESTE \
+cliente como está (não depende de dado de outro pedido, de outro produto ou de outra \
+situação), mas a proposta diz outra coisa. Diga o id desse caso.
+- "diferente": nenhum caso é o mesmo pedido, ou a resposta da equipe não serve a este cliente \
+como está. O id fica null.
 
 Na dúvida, "diferente"."""
 
@@ -77,7 +89,7 @@ Na dúvida, "diferente"."""
 class Veredito(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
     id: str | None
-    veredito: Literal["mesma", "diferente"]
+    veredito: Literal["mesma", "serve", "diferente"]
     motivo: str
 
 
@@ -313,16 +325,52 @@ async def _conferir_candidatas(
         gasto = uso.custo_usd
     v = veredito_da_mensagem(mensagem)
     ids = [i for i, _p, _r in cands]
-    if v is not None and v.veredito == MESMA:
+    if v is not None and v.veredito in VEREDITOS_QUE_SOLTAM:
         escolhido = v.id if v.id in ids else (ids[0] if len(ids) == 1 else None)
         if escolhido:
             return {
                 "id": escolhido,
-                "veredito": MESMA,
+                "veredito": v.veredito,
                 "motivo": v.motivo[:160],
                 "custo_usd": round(gasto, 6),
             }
     return {"id": None, "veredito": DIFERENTE, "custo_usd": round(gasto, 6)}
+
+
+async def texto_do_banco(session: AsyncSession | None, ctx: Any, caso: str) -> str | None:
+    """A resposta da EQUIPE no caso do banco, pronta para ir como sugestão: sem a citação do
+    Duoke, sem o "[NOME]", sem o cumprimento do começo; None se ela tem máscara de dado (data,
+    código, valor de outro pedido), dado pessoal ou é longa. Lê a linha inteira do banco (o
+    pacote mostra a resposta cortada); sem a sessão, a do pacote quando não foi cortada."""
+    from app.services.atendimento import banco_respostas as banco_svc
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    bruto = None
+    if session is not None and caso.startswith(agente_ctx.PREFIXO_BANCO):
+        from app.models.atendimento import AtendimentoResposta
+
+        try:
+            linha = await session.get(
+                AtendimentoResposta, int(caso[len(agente_ctx.PREFIXO_BANCO) :])
+            )
+        except Exception:  # noqa: BLE001 — sem a linha, a do pacote
+            linha = None
+        if linha is not None and linha.status == banco_svc.STATUS_ATIVA:
+            bruto = linha.resposta
+    if bruto is None:
+        par = (getattr(ctx, "pares_do_pacote", None) or {}).get(caso) or {}
+        bruto = par.get("resposta")
+        if not bruto or str(bruto).endswith("…"):
+            return None
+    texto = pares.para_o_pacote(bruto, MAX_CHARS_TEXTO_DO_BANCO + 1)
+    if not texto or len(texto) > MAX_CHARS_TEXTO_DO_BANCO:
+        return None
+    if pares.tem_mascara_de_dado(texto) or pares.tem_dado_pessoal(texto):
+        return None
+    if _MARCACAO.search(texto):
+        # Sobrou máscara ou lacuna ([código], [data], {rastreio}): é de outro pedido.
+        return None
+    return texto[0].upper() + texto[1:]
 
 
 async def solta_a_pessoa(
@@ -355,7 +403,15 @@ async def solta_a_pessoa(
         )
         registro["pessoa"] = True
         ctx.banco_confere = registro
-        if registro.get("veredito") == MESMA and registro.get("id"):
+        if registro.get("veredito") == SERVE and registro.get("id"):
+            # A resposta da equipe vira a sugestão (quem chama troca o texto e confere de novo).
+            texto_da_equipe = await texto_do_banco(session, ctx, registro["id"])
+            if not texto_da_equipe:
+                registro["veredito"] = DIFERENTE
+                registro["serve_sem_texto"] = True
+                return False
+            ctx.texto_do_banco = texto_da_equipe
+        if registro.get("veredito") in VEREDITOS_QUE_SOLTAM and registro.get("id"):
             ctx.banco_bateu = registro["id"]
             ctx.responde_e_marca = True
             return True

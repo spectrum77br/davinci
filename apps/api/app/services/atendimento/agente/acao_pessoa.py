@@ -3634,6 +3634,8 @@ def pode_nao_ter_saido(
         return True
     if _so_cartoes_cancelados(conversa, ctx, recentes or ()):
         return False
+    if _so_cartoes_nao_pagos(conversa, ctx, recentes or ()):
+        return False
     return ha_pedido(conversa, ctx, recentes or ())
 
 
@@ -3675,6 +3677,26 @@ def _so_cartoes_cancelados(
     status = [st for m in recentes for st in _status_dos_cartoes(m)]
     return bool(status) and all(
         st is not None and "cancel" in validador.plano_de(st) for st in status
+    )
+
+
+# O pedido que ainda está AGUARDANDO PAGAMENTO (13/11/2026, Mini: "cancela essa compra" com o
+# cartão "Aguardando pagamento" pediu "segurar o envio"): sem pagamento não há envio a segurar
+# — o próprio cliente cancela pelo app (a resposta diz como).
+_AGUARDANDO_PAGAMENTO = re.compile(r"\b(?:aguardando\s+pagamento|nao\s+pago|a\s+pagar|unpaid)\b")
+
+
+def _so_cartoes_nao_pagos(
+    conversa: Any, ctx: Mapping[str, Any] | None, recentes: Sequence[Any]
+) -> bool:
+    """O pedido NÃO está no sistema (o não pago não vai ao Bling — mesmo com o número na
+    conversa) e TODO cartão do chat diz "aguardando pagamento"? PURA. Pago depois, o pedido
+    entra no sistema (`ctx["pedido"]`) e a regra de sempre volta."""
+    if isinstance(ctx, Mapping) and ctx.get("pedido"):
+        return False
+    status = [st for m in recentes for st in _status_dos_cartoes(m)]
+    return bool(status) and all(
+        st is not None and _AGUARDANDO_PAGAMENTO.search(validador.plano_de(st)) for st in status
     )
 
 

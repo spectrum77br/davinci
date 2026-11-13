@@ -445,8 +445,8 @@ def arquivos(
             "| produto | os códigos de modelo do anúncio (vazio quando não dá para saber) |",
             "| anuncio | o id do anúncio na plataforma |",
             "| status | ativa (só as ativas vêm para a cópia) |",
-            "| fonte | equipe_fora (Duoke/Seller Center), equipe_escreveu ou equipe_ajustou "
-            "(no DaVinci) |",
+            "| fonte | equipe_fora (Duoke/Seller Center), equipe_escreveu, equipe_ajustou ou "
+            "equipe_aprovou (no DaVinci) |",
             "| perguntado_em / respondido_em | datas (as recentes pesam mais) |",
             "| cliente_depois | o que o cliente fez em até 72 h: "
             + ", ".join(f"{k} = {v}" for k, v in DEPOIS_ROTULO.items())

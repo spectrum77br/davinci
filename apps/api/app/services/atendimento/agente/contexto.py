@@ -628,6 +628,9 @@ class ContextoAgente:
     # As respostas do banco achadas pelo RASCUNHO (`confere_banco._pelo_rascunho`): candidatas
     # da conferência além das do pacote (registradas em `pares_do_pacote`, sem ir ao modelo).
     banco_pelo_rascunho: list[str] = field(default_factory=list)
+    # A resposta da EQUIPE no banco que virou a sugestão (`confere_banco.SERVE`): a mesma
+    # pergunta, a resposta dela serve a este cliente como está.
+    texto_do_banco: str | None = None
     # D1 (decisão do dono, 23/10/2026 ~12:40): o "responde e marca" — a devolução/
     # reclamação aberta na plataforma com o turno só informativo
     # (`acao_pessoa.responde_e_marca_do_turno`): as ações de `acao_pessoa.ACOES_POS_ENVIO`
@@ -1151,6 +1154,9 @@ class ContextoAgente:
         if self.banco_bateu:
             # A virada: o par do banco que soltou a ação de pessoa (responde e marca).
             extra["banco_bateu"] = self.banco_bateu
+        if self.texto_do_banco:
+            # A resposta da equipe no banco virou a sugestão (só a marca; o texto é o rascunho).
+            extra["texto_do_banco"] = True
         if self.banco_exigido and _portao_banco_ligado():
             # O portão "sem_banco" ligado (desligado desde a virada de 13/11/2026).
             extra["portao_banco"] = True

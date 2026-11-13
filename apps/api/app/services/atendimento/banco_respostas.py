@@ -82,6 +82,10 @@ logger = structlog.get_logger()
 FONTE_FORA = "equipe_fora"
 FONTE_ESCREVEU = "equipe_escreveu"
 FONTE_AJUSTOU = "equipe_ajustou"
+# A virada (13/11/2026, o Eduardo: "mandei — já foi pro banco pra próxima?"): a sugestão da IA que
+# a pessoa mandou SEM mudar também é resposta que a equipe assinou embaixo — entra no banco, para a
+# próxima pergunta igual achar o caso e sair sozinha.
+FONTE_APROVOU = "equipe_aprovou"
 STATUS_ATIVA = "ativa"
 STATUS_SUBSTITUIDA = "substituida"
 STATUS_APOSENTADA = "aposentada"
@@ -296,8 +300,9 @@ def respostas_da_conversa(
             acao = rascunhos.acao_por_rascunho.get(getattr(primeira, "rascunho_id", None))
             if acao == _ACAO_ENVIOU_IGUAL:
                 _somar(contagem, "rascunho_igual")
-                continue
-            fonte = FONTE_AJUSTOU if acao == _ACAO_EDITOU else FONTE_ESCREVEU
+                fonte = FONTE_APROVOU
+            else:
+                fonte = FONTE_AJUSTOU if acao == _ACAO_EDITOU else FONTE_ESCREVEU
         pergunta_crua = turno.texto
         resposta_crua = pares.sem_citacao(turnos[i + 1].texto)
         if not pergunta_crua.strip() or not resposta_crua.strip():

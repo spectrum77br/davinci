@@ -181,7 +181,9 @@ def test_ia_e_rascunho_enviado_igual_nunca_entram_ajustado_entra():
         ),
     ]
     contagem = {}
-    assert _montar(igual, rascunhos=rascunhos, contagem=contagem) == []
+    # A virada (13/11/2026): a sugestão mandada sem mudar também entra (a equipe aprovou).
+    (aprovada,) = _montar(igual, rascunhos=rascunhos, contagem=contagem)
+    assert aprovada.fonte == banco_respostas.FONTE_APROVOU
     assert contagem["rascunho_igual"] == 1
 
     ajustou = [
@@ -414,7 +416,7 @@ async def test_indexar_grava_idempotente_e_aposenta_o_que_deixou_de_valer(
     assert r.status == banco_respostas.STATUS_APOSENTADA
 
 
-async def test_indexar_rascunho_editado_entra_enviado_igual_nao(db: AsyncSession, make_user):
+async def test_indexar_rascunho_editado_e_enviado_igual_entram(db: AsyncSession, make_user):
     conversa = await _conversa(db, make_user)
     g1 = await _msg(db, conversa, "Tem NFC esse modelo para pagar?", ha=timedelta(hours=3))
     igual = AtendimentoRascunho(
@@ -467,9 +469,11 @@ async def test_indexar_rascunho_editado_entra_enviado_igual_nao(db: AsyncSession
     await banco_respostas.indexar(
         db, desde=datetime.now(UTC) - timedelta(days=1), guardar_cursor=False
     )
-    [r] = await _respostas(db, conversa.id)
-    assert r.resposta_msg_id == m2.id and r.fonte == banco_respostas.FONTE_AJUSTOU
-    assert r.tipo == "espec_celular"
+    # A virada (13/11/2026): a sugestão mandada sem mudar entra também (a equipe aprovou).
+    respostas = {r.resposta_msg_id: r for r in await _respostas(db, conversa.id)}
+    assert respostas[m2.id].fonte == banco_respostas.FONTE_AJUSTOU
+    assert respostas[m2.id].tipo == "espec_celular"
+    assert respostas[m1.id].fonte == banco_respostas.FONTE_APROVOU
 
 
 # ─────────────── a rota do robô ───────────────

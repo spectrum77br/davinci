@@ -866,6 +866,25 @@ TROCAS_DA_VIRADA: tuple[tuple[str, str], ...] = (
         "vazio só quando não há o que responder;",
         "nunca vazio quando o cliente escreveu (é a sugestão na caixa do chat);",
     ),
+    # O Eduardo, 13/11/2026 ("por que ele não tem força pra mandar por ele mesmo"): a cliente
+    # queria uma mala de 12 kg; o banco dizia "só temos até 10 kg" e o agente marcou "falta o dado".
+    (
+        "- tamanho, cor, memória ou outra opção: a lista de variações responde (com "
+        "completas=true, o que não está nela este anúncio não tem);",
+        "- tamanho, cor, memória ou outra opção: a lista de variações responde (com "
+        "completas=true, o que não está nela este anúncio não tem);\n- o que o cliente quer e a "
+        "loja não tem (12 kg, outra cor, outro modelo): diga o que a loja tem, pelo banco e pelo "
+        "catálogo (buscar_anuncios_da_loja) — não ter também é resposta, não é falta de dado;",
+    ),
+    # O brinde do pedido não pago (a automática da conversa): a resposta que fala dele fica
+    # com a pessoa (`ia.brinde_nao_trava`); o agente responde o resto sem tocar nele.
+    (
+        "- Nunca prometa o que só pessoa cumpre: reembolso, troca, reenvio, cancelamento, prazo ou "
+        '"vamos verificar e retornamos" — nem no rascunho de pessoa.',
+        "- Nunca prometa o que só pessoa cumpre: reembolso, troca, reenvio, cancelamento, prazo ou "
+        '"vamos verificar e retornamos" — nem no rascunho de pessoa.\n- Brinde que a loja ofereceu '
+        "(a automática da conversa): nunca negue nem fale dele se o cliente não perguntou.",
+    ),
 )
 TROCAS_DA_VIRADA_NA_PLATAFORMA: tuple[tuple[str, str], ...] = (
     (
