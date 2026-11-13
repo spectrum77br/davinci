@@ -125,6 +125,23 @@ EVIDENCIA_NO_TEXTO = re.compile(
 
 # Prefixos que nunca provam nada (exemplo de outro cliente).
 PREFIXOS_SEM_PROVA = ("par:",)
+# As respostas do BANCO (`banco_respostas`, 13/11/2026) no pacote: `par:b<id>`.
+PREFIXO_BANCO = "par:b"
+
+
+def banco_exigido_para(plataforma: str | None, canal: str | None) -> bool:
+    """O portão do banco vale nesta conversa? (13/11/2026) Só com o agente lendo o banco E
+    a régua por tipo ligada, numa plataforma que o banco cobre e fora do e-mail."""
+    from app.config import get_settings
+    from app.services.atendimento import banco_respostas
+
+    s = get_settings()
+    return bool(
+        s.atendimento_agente_le_banco
+        and s.atendimento_regua_ativa
+        and plataforma in banco_respostas.PLATAFORMAS
+        and canal != constantes.CANAL_EMAIL
+    )
 
 
 def _limpo(valor: str | None) -> str:
@@ -548,6 +565,11 @@ class ContextoAgente:
     # (`acao_pessoa.devolucao_de_rotina`): o envio sozinho não para no "em andamento"
     # dela (`ia.andamento_no_rascunho` lê a marca no `para_fatos`).
     devolucao_de_rotina: bool = False
+    # O PORTÃO DO BANCO (13/11/2026, o Eduardo: sai sozinho só com a resposta do banco que
+    # encaixa no caso): com a régua por tipo ligada e o agente lendo o banco, numa
+    # plataforma que o banco cobre (nunca e-mail nem WhatsApp). O `para_fatos` grava a marca
+    # e os tipos das respostas do banco que o pacote mostrou; `ia.trava_do_agente` decide.
+    banco_exigido: bool = False
     # D1 (decisão do dono, 23/10/2026 ~12:40): o "responde e marca" — a devolução/
     # reclamação aberta na plataforma com o turno só informativo
     # (`acao_pessoa.responde_e_marca_do_turno`): as ações de `acao_pessoa.ACOES_POS_ENVIO`
@@ -666,6 +688,7 @@ class ContextoAgente:
         if (getattr(conversa, "pedido_marketplace", None) or "").strip():
             ctx.aceitar_pedido(*contexto_svc._chaves_do_pedido(conversa))
         ctx.aceitar_anuncio(getattr(conversa, "anuncio_id", None))
+        ctx.banco_exigido = banco_exigido_para(conversa.plataforma, conversa.canal)
         return ctx
 
     # ── tempo ──
@@ -1053,6 +1076,16 @@ class ContextoAgente:
         if self.produto_pelo_anuncio:
             # Liberações L1/L2 (23/10/2026): só quando há (o registro de antes não muda).
             extra["produto_pelo_anuncio"] = True
+        if self.banco_exigido:
+            # O portão do banco (13/11/2026): a marca e o tipo de cada resposta do banco que
+            # o pacote mostrou (`par:b<id>` → tipo). Só com a marca (o registro de antes não
+            # muda).
+            extra["banco_exigido"] = True
+            extra["banco_tipos"] = {
+                i: str(par["tipo"])
+                for i, par in self.pares_do_pacote.items()
+                if i.startswith(PREFIXO_BANCO) and par.get("tipo")
+            }
         if self.fechou_sem_ferramentas:
             # Rodada "fechar o eval" (23/10/2026): só quando houve.
             extra["fechou_sem_ferramentas"] = True

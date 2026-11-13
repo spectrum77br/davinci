@@ -6446,6 +6446,27 @@ def andamento_no_rascunho(rascunho: Any, etiquetas: Collection[str] = ()) -> boo
     )
 
 
+# O PORTÃO DO BANCO (13/11/2026, o Eduardo: "bateu com a do banco, faz sentido, já manda").
+# Com a marca do agente (`fatos.agente.banco_exigido`: a régua por tipo ligada e o agente
+# lendo o banco, numa plataforma que o banco cobre — nunca e-mail), o rascunho só sai
+# sozinho quando o pacote mostrou ao menos uma resposta da equipe do banco do MESMO tipo que
+# ele declarou; o escopo (a mesma loja, o mesmo modelo) já vem da busca do banco. A cortesia
+# não pede banco. Vem DEPOIS das travas do assunto (que não mudam de nome).
+MOTIVO_SEM_BANCO = "sem_banco"
+
+
+def sem_banco_do_tipo(agente: Mapping[str, Any], categoria: str | None) -> bool:
+    """O portão do banco segura este rascunho? PURA."""
+    from app.services.atendimento import tipos_pergunta
+
+    if not agente.get("banco_exigido"):
+        return False
+    if tipos_pergunta.grupo(categoria) == tipos_pergunta.GRUPO_CORTESIA:
+        return False
+    tipos = agente.get("banco_tipos")
+    return not (isinstance(tipos, Mapping) and categoria in set(tipos.values()))
+
+
 def trava_do_agente(
     rascunho: Any,
     canal: Any,
@@ -6454,6 +6475,25 @@ def trava_do_agente(
     ligado: bool = True,
 ) -> str | None:
     """Por que o rascunho do AGENTE não sai sozinho neste canal (o código do motivo), ou None. PURA.
+
+    As travas do assunto (`_trava_do_assunto`) e, passando nelas, o portão do banco.
+    """
+    motivo = _trava_do_assunto(rascunho, canal, etiquetas=etiquetas, ligado=ligado)
+    if motivo is None and sem_banco_do_tipo(
+        _fatos_do_agente(rascunho), getattr(rascunho, "categoria", None)
+    ):
+        return MOTIVO_SEM_BANCO
+    return motivo
+
+
+def _trava_do_assunto(
+    rascunho: Any,
+    canal: Any,
+    *,
+    etiquetas: Collection[str] = (),
+    ligado: bool = True,
+) -> str | None:
+    """As travas do assunto do agente (antes do portão do banco). PURA.
 
     A parte do ASSUNTO do envio automático (ver o bloco acima); `canal` =
     `AtendimentoCanal` (ou algo com `auto_categorias`/`auto_orientacao`);

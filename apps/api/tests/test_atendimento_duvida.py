@@ -94,7 +94,6 @@ def test_todo_codigo_da_linha_e_um_motivo_que_o_portao_grava():
         p.read_text(encoding="utf-8") for p in (raiz / "ia.py", raiz / "agente" / "verificador.py")
     )
     literais = set(re.findall(r'"([a-z_]+)"', fontes))
-    novos = {"sem_banco"}  # o portão novo do banco (ainda não gravado)
     codigos = set(duvida.FRASES) | duvida.ASSUNTO_NAO_LIBERADO | {duvida.CAIXA_HUMANO}
-    for codigo in codigos - novos:
+    for codigo in codigos:
         assert codigo in literais, codigo
