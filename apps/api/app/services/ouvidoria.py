@@ -503,6 +503,40 @@ ROBOS: dict[str, RoboDef] = {
         },
         modo_padrao="silencioso",
     ),
+    # 12/11/2026 (Vinicius, depois de 2 pedidos de Entrega Direta de um Apple Watch sem peça
+    # na Atlas Shopee): "cria um robô e coloca em Ouvidoria › Robôs… ele vai olhar e vai me
+    # avisar, o Cairo: não estou conseguindo desativar os anúncios tal… se preciso ir lá e
+    # desativar?" (services/vigia_flex). Nasce silencioso: liga depois de pôr o Cairo no
+    # "Avisar".
+    "vigia_flex": RoboDef(
+        chave="vigia_flex",
+        nome="Vigia do Flex",
+        descricao=(
+            "Anúncio com Flex (ML) ou Entrega Direta (Shopee) LIGADO sem peça no local de "
+            "saída que o robô do Flex não consegue desligar — a Shopee recusa anúncio em "
+            "promoção ou sem GTIN — e diz o que a pessoa precisa fazer (tirar da promoção, "
+            "preencher o GTIN, desligar à mão). Também avisa se a lista de anúncios da Shopee "
+            "parou de atualizar (anúncio novo fica invisível ao robô do Flex). Fecha sozinho "
+            "quando o anúncio desliga. Não mexe em nada: só avisa."
+        ),
+        area="logistica",
+        cadencia_texto="a cada 30 min (:24/:54)",
+        plataformas=("ml", "shopee"),
+        config_padrao={"cadencia_min": 30, "tentativas_minimas": 2, "horas_importacao": 4},
+        env_threema_recipients=None,
+        # "logistica" e não "flex": o assunto "flex" não tem remetente próprio
+        # na configuração do Threema — com as conversas separadas o aviso
+        # ficaria sem quem mandar.
+        contexto="logistica",
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 15, 24 * 60, "min"),
+            "tentativas_minimas": Parametro("Outros erros: avisar depois de", 1, 20, "tentativas"),
+            "horas_importacao": Parametro(
+                "Lista de anúncios da Shopee parada há mais de", 2, 72, "h"
+            ),
+        },
+        modo_padrao="silencioso",
+    ),
 }
 
 # Threema ID: 8 caracteres (A-Z, 0-9); ID de gateway começa com "*".

@@ -4566,6 +4566,41 @@ async def vigia_nota_cheia_tick(ctx: dict) -> None:
         logger.exception("vigia_nota_cheia_unhandled")
 
 
+async def vigia_flex_tick(ctx: dict) -> None:
+    """Vigia do Flex (robô da Ouvidoria, 12/11/2026): anúncio com Flex/Entrega
+    Direta ligado sem peça que o robô do Flex NÃO consegue desligar (promoção,
+    GTIN, erro da plataforma) e lista de anúncios da Shopee parada — avisa o
+    Cairo no Threema o que precisa de uma pessoa."""
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo(s, "vigia_flex")
+        if modo == "desligado":
+            logger.debug("vigia_flex_desligado")
+            return
+        from app.services.vigia_flex import vigia_flex_sweep
+
+        summary = await vigia_flex_sweep() or {}
+        if any(summary.get(k) for k in ("novas", "sumiram", "avisadas")):
+            logger.info("vigia_flex_done", **summary)
+        else:
+            logger.debug("vigia_flex_noop", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("vigia_flex_unhandled")
+
+
+async def shopee_anuncios_import_tick(ctx: dict) -> None:
+    """Lista de anúncios da Shopee (todas as lojas) a cada 1h30 — o robô do
+    Flex só confere anúncio que o DaVinci conhece (Vinicius, 12/11/2026). Só a
+    lista; vínculo continua com a varredura das 10h."""
+    try:
+        from app.services.listings_import import importar_anuncios_shopee_sweep
+
+        summary = await importar_anuncios_shopee_sweep() or {}
+        logger.info("shopee_anuncios_import_done", **summary)
+    except Exception:  # noqa: BLE001
+        logger.exception("shopee_anuncios_import_unhandled")
+
+
 async def vigia_margem_tick(ctx: dict) -> None:
     """Robô da Margem (Ouvidoria), :15/:45 — desde 25/09/2026 o robô que age
     e o fiscal são um só: `vigia_margem_sweep` reconstrói o snapshot, o robô
@@ -5541,6 +5576,8 @@ class WorkerSettings:
         vigia_robo_leitura_tick,
         vigia_etiquetas_tick,
         vigia_nota_cheia_tick,
+        vigia_flex_tick,
+        shopee_anuncios_import_tick,
         vigia_conciliacao_tick,
         denuncia_relatorio_threema_tick,
         robo_juridico_tick,
@@ -6215,6 +6252,28 @@ class WorkerSettings:
         # Vigia de Nota Cheia: 1×/h em :08, 4 min depois do espelho das NF-e
         # (pos_vendas_notas_sync em :04…) — a das 07:08 é a que cobra o dia.
         cron(vigia_nota_cheia_tick, minute=8, run_at_startup=False, timeout=600),
+        # Vigia do Flex (Ouvidoria): :24/:54, uns 12 min depois das rodadas do
+        # Flex de :12/:42 — o que segue ligado errado depois delas é o preso.
+        cron(vigia_flex_tick, minute={24, 54}, run_at_startup=False, timeout=300),
+        # Lista de anúncios da Shopee a cada 1h30 (Vinicius, 12/11/2026):
+        # 00:46, 02:16, 03:46, 05:16… (UTC) — 11 min antes de uma rodada do
+        # Flex (:57/:27), que já lê os anúncios novos.
+        cron(
+            shopee_anuncios_import_tick,
+            hour={0, 3, 6, 9, 12, 15, 18, 21},
+            minute=46,
+            run_at_startup=False,
+            timeout=1800,
+            name="cron:shopee_anuncios_import_a",
+        ),
+        cron(
+            shopee_anuncios_import_tick,
+            hour={2, 5, 8, 11, 14, 17, 20, 23},
+            minute=16,
+            run_at_startup=False,
+            timeout=1800,
+            name="cron:shopee_anuncios_import_b",
+        ),
         # Vigia de Conciliação: 07:00 BRT (10:00 UTC), depois da rodada de madrugada.
         cron(vigia_conciliacao_tick, hour=10, minute=0, run_at_startup=False, timeout=600),
         # Relatório da Denúncia (Ouvidoria): de hora em hora em :10 — manda o de ontem a

@@ -96,6 +96,7 @@ _ROBOS_COM_SWEEP = (
     "vigia_conciliacao",
     "denuncia_relatorio_threema",
     "robo_juridico",
+    "vigia_flex",
 )
 # chave do robô → fábrica que devolve a coroutine da varredura (import tardio).
 RUNNERS: dict[str, Callable[[], Callable[[], Awaitable[dict]]]] = {

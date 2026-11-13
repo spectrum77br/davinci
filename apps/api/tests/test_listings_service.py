@@ -351,3 +351,106 @@ async def test_run_import_listings_unsupported_platform(
     await db.refresh(job)
     assert job.status == BackgroundJobStatus.FAILED
     assert job.error == "platform_not_supported:bling"
+
+
+# ---- 12/11/2026: SKU de dois produtos, falha marcada e a lista de 1h30 -------
+
+
+@pytest.mark.asyncio
+async def test_link_by_sku_pula_sku_de_dois_produtos(db: AsyncSession, user: User):
+    """Dois produtos com o mesmo SKU derrubavam a importação inteira no fim
+    ("more than one row returned by a subquery"). Agora o SKU ambíguo fica
+    sem vínculo e o resto liga normal."""
+    integ = await _make_integration(db, user)
+    outro = User(
+        open_id=f"email:dup-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        email=f"dup-{uuid.uuid4().hex[:6]}@davinci-test.com",
+        role=UserRole.USER,
+        status=UserStatus.ACTIVE,
+    )
+    db.add(outro)
+    await db.flush()
+    unico = Product(user_id=user.id, sku="SKU-OK", name="Ok", stock=0, min_stock=0)
+    db.add_all(
+        [
+            unico,
+            Product(user_id=user.id, sku="DUP-1", name="A", stock=0, min_stock=0),
+            Product(user_id=outro.id, sku="DUP-1", name="B", stock=0, min_stock=0),
+        ]
+    )
+    await db.flush()
+    for ext, sku in (("e1", "DUP-1"), ("e2", "SKU-OK")):
+        db.add(
+            Listing(
+                user_id=user.id,
+                integration_id=integ.id,
+                platform=IntegrationPlatform.SHOPEE,
+                external_id=ext,
+                sku=sku,
+                title=ext,
+                status=ListingStatus.ACTIVE,
+            )
+        )
+    await db.commit()
+
+    report = await run_auto_import_link(db)
+    assert report["linked"] == 1
+    by_ext = {r.external_id: r for r in (await db.execute(select(Listing))).scalars()}
+    assert by_ext["e1"].product_id is None
+    assert by_ext["e2"].product_id == unico.id
+
+
+@pytest.mark.asyncio
+async def test_run_import_listings_falha_marca_a_tarefa(db: AsyncSession, user: User, monkeypatch):
+    """Antes a tarefa ficava "rodando" para sempre: a transação abortada
+    derrubava também o commit do `finally`."""
+    integ = await _make_integration(db, user)
+    job = BackgroundJob(
+        type=BackgroundJobType.IMPORT_LISTINGS,
+        status=BackgroundJobStatus.PENDING,
+        created_by=user.id,
+        payload={"integration_id": str(integ.id)},
+    )
+    db.add(job)
+    await db.commit()
+
+    async def _quebra(self, **kw):
+        yield {"external_id": "1", "sku": "x", "title": "t", "status": "active", "raw": {}}
+        raise RuntimeError("shopee_list_failed status=500")
+
+    from app.services.marketplaces import shopee as shopee_mod
+
+    monkeypatch.setattr(shopee_mod.ShopeeClient, "list_listings", _quebra)
+    await run_import_listings(db, job_id=job.id, user_id=user.id, integration_id=integ.id)
+    await db.refresh(job)
+    assert job.status == BackgroundJobStatus.FAILED
+    assert "shopee_list_failed" in (job.error or "")
+    assert job.finished_at is not None
+
+
+@pytest.mark.asyncio
+async def test_lista_da_shopee_so_atualiza_a_lista(db: AsyncSession, user: User, monkeypatch):
+    """A importação de 1h30 grava a lista e NÃO cria vínculo nem liga o anúncio
+    ao produto (quem cria vínculo é a varredura das 10h)."""
+    from app.models import ProductLink
+    from app.services.listings_import import importar_anuncios_conta
+
+    integ = await _make_integration(db, user)
+    db.add(Product(user_id=user.id, sku="SKU-1", name="Widget", stock=0, min_stock=0))
+    await db.commit()
+
+    async def _dois(self, **kw):
+        for ext in ("1001", "1002"):
+            yield {"external_id": ext, "sku": "SKU-1", "title": ext, "status": "active", "raw": {}}
+
+    from app.services.marketplaces import shopee as shopee_mod
+
+    monkeypatch.setattr(shopee_mod.ShopeeClient, "list_listings", _dois)
+    r = await importar_anuncios_conta(db, integ)
+    assert r == {"created": 2, "updated": 0, "skipped": 0}
+    rows = (await db.execute(select(Listing))).scalars().all()
+    assert {x.external_id for x in rows} == {"1001", "1002"}
+    assert all(x.product_id is None and x.imported_at is not None for x in rows)
+    assert (await db.execute(select(ProductLink))).scalars().all() == []
+    r = await importar_anuncios_conta(db, integ)
+    assert r == {"created": 0, "updated": 2, "skipped": 0}

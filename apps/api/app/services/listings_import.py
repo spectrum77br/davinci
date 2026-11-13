@@ -293,6 +293,16 @@ async def _link_by_sku(session: AsyncSession) -> int:
         .where(Product.sku == Listing.sku)
         .correlate(Listing)
     )
+    # SKU de MAIS de um produto não se adivinha (12/11/2026: dois produtos com
+    # o mesmo SKU faziam a subquery escalar devolver 2 linhas e a importação
+    # inteira caía no fim — "more than one row returned by a subquery"). Igual
+    # ao `_SkuIndex` do auto_link, que recusa colisão: fica sem vínculo.
+    quantos = (
+        select(func.count(Product.id))
+        .where(Product.sku == Listing.sku)
+        .correlate(Listing)
+        .scalar_subquery()
+    )
     res = await session.execute(
         update(Listing)
         .where(
@@ -301,10 +311,10 @@ async def _link_by_sku(session: AsyncSession) -> int:
                 Listing.product_id.is_(None),
                 Listing.sku.is_not(None),
                 func.length(func.trim(Listing.sku)) > 0,
-                matching_product_subq.exists(),
+                quantos == 1,
             )
         )
-        .values(product_id=matching_product_subq.scalar_subquery())
+        .values(product_id=matching_product_subq.limit(1).scalar_subquery())
     )
     return (res.rowcount or 0) + await _link_magalu_by_sku(session)
 
@@ -356,6 +366,9 @@ async def run_import_listings(
             job.processed = (job.processed or 0) + 1
             if job.processed % 25 == 0:
                 await _heartbeat(session, job)
+        # Os anúncios lidos ficam gravados mesmo se o vínculo abaixo falhar
+        # (12/11/2026: a falha no fim desfazia as últimas leituras).
+        await session.commit()
 
         # Auto-link in the same job so the user sees linked counts up-front.
         summary["linked"] = await _link_by_sku(session)
@@ -368,6 +381,10 @@ async def run_import_listings(
         job.result = summary
     except Exception as e:  # noqa: BLE001
         logger.exception("import_listings_failed", job_id=str(job_id))
+        # A transação abortada não aceita mais nada: sem o rollback o commit do
+        # `finally` também falhava e a tarefa ficava "rodando" para sempre.
+        await session.rollback()
+        await session.refresh(job)
         job.status = BackgroundJobStatus.FAILED
         job.error = f"{type(e).__name__}: {e}"[:1000]
     finally:
@@ -385,3 +402,89 @@ async def run_auto_import_link(session: AsyncSession) -> dict[str, int]:
         "linked": total_linked,
         "product_links": total_product_links,
     }
+
+
+# ---- Lista de anúncios da Shopee, sozinha, a cada 1h30 (12/11/2026) -----------
+#
+# Vinicius, 12/11/2026: a lista de anúncios da Shopee no DaVinci parou em
+# maio, e o robô do Flex só confere o anúncio que o DaVinci CONHECE — o
+# anúncio criado depois, sem vínculo, ficava invisível (25 com Entrega Direta
+# ligada sem peça só apareceram depois de importar à mão). "Vamos colocar a
+# cada 1h30." Aqui é SÓ a lista: nada de `_link_by_sku` nem
+# `_create_product_links_for_matched` — promover a lista em vínculo
+# ressuscitava vínculo apagado de propósito (ver o comentário acima); quem
+# cria vínculo continua sendo a varredura das 10h (auto_link).
+
+_SHOPEE_SWEEP_LOCK_KEY = 0x6C73686F  # ascii "lsho"
+
+
+async def importar_anuncios_conta(session: AsyncSession, integ: Integration) -> dict[str, int]:
+    """Lê TODOS os anúncios da conta pela API (ativos, pausados e banidos) e
+    atualiza a lista (`listings`). Grava de 25 em 25 — uma falha no meio
+    não perde o que já foi lido."""
+    client = _client_for_listings(session, integ)
+    if client is None:
+        return {"created": 0, "updated": 0, "skipped": 0}
+    resumo = {"created": 0, "updated": 0, "skipped": 0}
+    n = 0
+    async for norm in client.list_listings():
+        resumo[await _upsert_listing(session, user_id=integ.user_id, integ=integ, norm=norm)] += 1
+        n += 1
+        if n % 25 == 0:
+            await session.commit()
+    await session.commit()
+    return resumo
+
+
+async def importar_anuncios_shopee_sweep() -> dict[str, Any]:
+    """Tick do worker: todas as lojas Shopee não arquivadas, uma por vez, cada
+    uma na sua sessão (loja com erro não derruba as outras). Uma rodada por
+    vez (trava no banco)."""
+    from app.db import session_scope
+    from app.services.advisory_lock import SYNC_NAMESPACE
+
+    async with session_scope() as trava:
+        got = (
+            await trava.execute(
+                sa_text("SELECT pg_try_advisory_xact_lock(:ns, :key)"),
+                {"ns": SYNC_NAMESPACE, "key": _SHOPEE_SWEEP_LOCK_KEY},
+            )
+        ).scalar()
+        if not got:
+            return {"skipped": "lock_busy"}
+        async with session_scope() as s:
+            ids = [
+                i
+                for (i,) in (
+                    await s.execute(
+                        select(Integration.id).where(
+                            Integration.platform == IntegrationPlatform.SHOPEE,
+                            Integration.archived_at.is_(None),
+                        )
+                    )
+                ).all()
+            ]
+        out: dict[str, Any] = {"lojas": len(ids), "ok": 0, "falhas": 0, "anuncios": 0}
+        for iid in ids:
+            async with session_scope() as s:
+                integ = await s.get(Integration, iid)
+                if integ is None:
+                    continue
+                try:
+                    r = await importar_anuncios_conta(s, integ)
+                except Exception as e:  # noqa: BLE001 — uma loja não derruba as outras
+                    await s.rollback()
+                    out["falhas"] += 1
+                    logger.warning(
+                        "shopee_anuncios_import_falhou",
+                        integration_id=str(iid),
+                        conta=integ.name,
+                        erro=f"{type(e).__name__}: {e}"[:300],
+                    )
+                    continue
+                out["ok"] += 1
+                out["anuncios"] += r["created"] + r["updated"]
+                logger.info(
+                    "shopee_anuncios_import_conta", integration_id=str(iid), conta=integ.name, **r
+                )
+        return out
