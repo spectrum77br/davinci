@@ -16,12 +16,14 @@ log.
 A VIRADA (13/11/2026, o Eduardo: "não existirá mais esse 'precisa de pessoa'... se bater e for
 parecido, ele responde normal como qualquer outra conversa"; "os sensíveis abaixa pra 85%"):
 - os sensíveis e a cortesia também conferem;
-- o rascunho que pede PESSOA confere ANTES da 1ª camada (`solta_a_pessoa`): bateu, a ação de
+- o rascunho que a 1ª camada SEGURA para pessoa confere (`solta_a_pessoa`): bateu, a ação de
   pessoa vira marca de depois do envio (`ctx.banco_bateu`; menos
-  `contexto.ACOES_QUE_O_BANCO_NAO_SOLTA`) e o rascunho segue como qualquer outro (o
-  verificador, as travas duras);
-- as candidatas: primeiro as respostas do banco que o rascunho CITOU (par:b…), depois as do
-  mesmo tipo; o modelo lê também a pergunta que a equipe respondeu ("diferente" se era outra).
+  `contexto.ACOES_QUE_O_BANCO_NAO_SOLTA`), a 1ª camada roda de novo com a marca e os motivos
+  de estado e decisão viram aviso (`checagens.motivo_que_o_banco_solta`); as regras de texto
+  e o verificador continuam;
+- as candidatas: as respostas do banco que o rascunho CITOU (par:b…), as do mesmo tipo e as
+  mais parecidas; o modelo lê também a pergunta que a equipe respondeu ("diferente" se era
+  outra).
 """
 
 from __future__ import annotations
@@ -121,7 +123,10 @@ def candidatas(
     ctx: Any, categoria: str | None, evidencias: Sequence[str] = ()
 ) -> list[tuple[str, str, str]]:
     """As respostas do banco que o pacote mostrou para conferir: (id, pergunta, resposta) —
-    primeiro as que o rascunho CITOU, depois as do MESMO tipo; até `MAX_CANDIDATAS`. PURA."""
+    primeiro as que o rascunho CITOU, depois as do MESMO tipo, depois as mais parecidas (a
+    ordem do pacote); até `MAX_CANDIDATAS`. O tipo do banco nem sempre é o do agente (o
+    "defeito" do banco para a "troca_devolucao" dele; muito "indefinido"): a conferência lê as
+    duas perguntas e diz "diferente" quando a da equipe era outra. PURA."""
     from app.services.atendimento.agente import contexto as agente_ctx
 
     do_pacote = getattr(ctx, "pares_do_pacote", None) or {}
@@ -136,7 +141,8 @@ def candidatas(
 
     citadas = [i for i in dict.fromkeys(str(e or "").strip() for e in evidencias) if _serve(i)]
     do_tipo = [i for i, par in do_pacote.items() if _serve(i) and par.get("tipo") == categoria]
-    ids = list(dict.fromkeys([*citadas, *do_tipo]))[:MAX_CANDIDATAS]
+    outras = [i for i in do_pacote if _serve(i)]
+    ids = list(dict.fromkeys([*citadas, *do_tipo, *outras]))[:MAX_CANDIDATAS]
     return [
         (i, str(do_pacote[i].get("pergunta") or ""), str(do_pacote[i]["resposta"])) for i in ids
     ]
@@ -158,25 +164,15 @@ def vale_conferir(ctx: Any, categoria: str | None, texto: str | None) -> bool:
 
 
 def vale_soltar_a_pessoa(
-    ctx: Any,
-    *,
-    texto: str | None,
-    categoria: str | None,
-    acao_do_modelo: str | None,
-    pessoa_do_modelo: bool,
+    ctx: Any, *, texto: str | None, categoria: str | None, acoes: Sequence[str] = ()
 ) -> bool:
-    """O rascunho pede pessoa e a conferência com o banco pode soltá-lo (`solta_a_pessoa`)?
-    PURA. Só na virada, com texto, e quando nenhuma ação é das que o banco não solta."""
+    """O rascunho que a 1ª camada segura pode ser solto pela conferência com o banco
+    (`solta_a_pessoa`)? PURA. Só na virada, com texto, e sem ação das que o banco não solta."""
     from app.services.atendimento.agente import contexto as agente_ctx
 
     if not _virada(ctx) or not (texto or "").strip() or not categoria:
         return False
-    acoes = set(getattr(ctx, "acoes_codigo", None) or ())
-    if acao_do_modelo:
-        acoes.add(acao_do_modelo)
-    if not acoes and not pessoa_do_modelo:
-        return False
-    return not (acoes & agente_ctx.ACOES_QUE_O_BANCO_NAO_SOLTA)
+    return not (set(acoes or ()) & agente_ctx.ACOES_QUE_O_BANCO_NAO_SOLTA)
 
 
 async def _assunto_ja_sai(session: AsyncSession, ctx: Any, categoria: str) -> bool:
@@ -249,8 +245,7 @@ async def solta_a_pessoa(
     *,
     texto: str | None,
     categoria: str | None,
-    acao_do_modelo: str | None,
-    pessoa_do_modelo: bool,
+    acoes: Sequence[str],
     evidencias: Sequence[str],
     pergunta: str | None,
     cliente: Any,
@@ -262,11 +257,7 @@ async def solta_a_pessoa(
     quando conferiu. Nunca levanta."""
     try:
         if cliente is None or not vale_soltar_a_pessoa(
-            ctx,
-            texto=texto,
-            categoria=categoria,
-            acao_do_modelo=acao_do_modelo,
-            pessoa_do_modelo=pessoa_do_modelo,
+            ctx, texto=texto, categoria=categoria, acoes=acoes
         ):
             return False
         cands = candidatas(ctx, categoria, evidencias)

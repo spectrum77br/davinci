@@ -81,11 +81,14 @@ def test_so_confere_quando_vale():
         _ctx(acoes_codigo=["reclamacao_aberta"]), "garantia", "x"
     )
     assert not confere_banco.vale_conferir(_ctx(regua=False), "garantia", "x")
+    # O do mesmo tipo primeiro, depois as outras do pacote (o tipo do banco nem sempre é o do
+    # agente: a conferência lê as duas perguntas).
     assert confere_banco.candidatas(ctx, "garantia") == [
-        ("par:b1", "p", "A garantia é pela Uranyx.")
+        ("par:b1", "p", "A garantia é pela Uranyx."),
+        ("par:b2", "p", "Saiu pela J&T."),
     ]
-    assert confere_banco.candidatas(ctx, "defeito") == []
-    # A que o rascunho CITOU vem primeiro, mesmo de outro tipo; id fora do pacote não conta.
+    assert [i for i, _p, _r in confere_banco.candidatas(ctx, "rastreio")] == ["par:b2", "par:b1"]
+    # A que o rascunho CITOU vem primeiro; id fora do pacote não conta.
     assert [i for i, _p, _r in confere_banco.candidatas(ctx, "garantia", ["par:b2", "par:b9"])] == [
         "par:b2",
         "par:b1",
@@ -131,9 +134,11 @@ async def test_diferente_nao_solta_e_sem_banco_nem_chama(db):
         }
     }
     nada = _Cliente("mesma")
+    sem_banco = _ctx()
+    sem_banco.pares_do_pacote = {}
     assert (
         await confere_banco.conferir(
-            db, _ctx(), categoria="defeito", texto="x", pergunta="?", cliente=nada, modelo="m"
+            db, sem_banco, categoria="defeito", texto="x", pergunta="?", cliente=nada, modelo="m"
         )
         == {}
     )

@@ -1105,6 +1105,16 @@ def _rastro(
         "evidencias": _lista(fatos_agente.get("evidencias")),
         "sistema": fatos_agente.get("sistema"),
     }
+    conf = fatos_agente.get("banco_confere")
+    if isinstance(conf, Mapping) or fatos_agente.get("banco_bateu"):
+        # A virada (13/11/2026): a conferência com o banco — só o id e o veredito.
+        conf = conf if isinstance(conf, Mapping) else {}
+        rastro["banco"] = {
+            "bateu": fatos_agente.get("banco_bateu"),
+            "id": conf.get("id"),
+            "veredito": conf.get("veredito"),
+            "pessoa": bool(conf.get("pessoa")),
+        }
     if captura is not None and captura.corpo is not None:
         pac = captura.pacote()
         rastro["pacote"] = (

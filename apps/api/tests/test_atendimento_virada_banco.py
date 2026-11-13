@@ -94,13 +94,13 @@ def _proposta(**campos: Any) -> saida.Proposta:
     return saida.Proposta(**{**base, **campos})
 
 
-async def _soltar(ctx, p: saida.Proposta, cliente) -> bool:
+async def _soltar(ctx, p: saida.Proposta, cliente, acoes=None) -> bool:
+    acoes = list(acoes if acoes is not None else [*ctx.acoes_codigo, *saida.acoes_do_modelo(p)])
     return await confere_banco.solta_a_pessoa(
         ctx,
         texto=p.texto,
         categoria=p.assunto,
-        acao_do_modelo=p.acao_pessoa,
-        pessoa_do_modelo=saida.precisa_pessoa(p),
+        acoes=acoes,
         evidencias=saida.evidencias(p),
         pergunta="Essa empresa é de qual estado?",
         cliente=cliente,
@@ -168,11 +168,8 @@ async def test_o_banco_nao_solta_instrucao_nf_nem_endereco_nem_fora_da_virada():
         assert not await _soltar(ctx2, _proposta(), _Cliente("mesma"))
     fora = _ctx(regua=False)
     assert not await _soltar(fora, _proposta(), _Cliente("mesma"))
-    # Sem texto não há o que conferir; sem pessoa, quem confere é a de depois.
+    # Sem texto não há o que conferir.
     assert not await _soltar(_ctx(), _proposta(texto=""), _Cliente("mesma"))
-    assert not await _soltar(
-        _ctx(), _proposta(acao="responder", acao_pessoa=None), _Cliente("mesma")
-    )
 
 
 def test_depois_do_envio_so_com_a_marca_do_banco():
@@ -314,3 +311,65 @@ def test_a_regua_nunca_vale_no_e_mail_nem_fora_do_banco(monkeypatch):
     assert not agente_ctx.regua_vale_para("whatsapp", "chat")
     monkeypatch.setattr(get_settings(), "atendimento_regua_ativa", False)
     assert not agente_ctx.regua_vale_para("shopee", "chat")
+
+
+def test_bateu_com_o_banco_os_motivos_de_estado_viram_aviso():
+    from app.services.atendimento.agente.checagens import motivo_que_o_banco_solta
+
+    soltos = [
+        "pedido com chamado ou devolução",
+        "reclamação ou devolução aberta na plataforma",
+        ia.MOTIVO_RESPOSTA_DE_GARANTIA,
+        ia.MOTIVO_RECUSA_DE_DIREITO,
+        "o cliente avaliou mal a loja",
+        "cliente insistiu em falar com uma pessoa (3º pedido seguido)",
+        "ação de pessoa: Procon, Justiça, golpe ou ofensa — o cliente ameaçou",
+        "ação de pessoa: Segurar o envio (cancelamento antes da postagem)",
+    ]
+    assert all(motivo_que_o_banco_solta(m) for m in soltos)
+    presos = [
+        "ação de pessoa: Enviar o arquivo da NF — anexar",
+        "ação de pessoa: Alterar o endereço antes da postagem",
+        "ação de pessoa: Texto com cara de instrução",
+        'manda para fora da plataforma ("nosso endereço")',
+        "promete o que só pessoa cumpre",
+    ]
+    assert not any(motivo_que_o_banco_solta(m) for m in presos)
+
+
+def test_separar_avisos_na_virada():
+    from app.services.atendimento.agente.checagens import separar_avisos
+
+    conferida = SimpleNamespace(
+        texto="Pode devolver pelo app.",
+        motivos=[
+            "reclamação ou devolução aberta na plataforma",
+            "cliente insistiu em falar com uma pessoa",
+            'manda para fora da plataforma ("nosso endereço")',
+        ],
+        avisos=[],
+        sem_auto=[],
+        precisa_humano=True,
+    )
+    import dataclasses as _dc
+
+    @_dc.dataclass
+    class _C:
+        texto: str
+        motivos: list
+        avisos: list
+        sem_auto: list
+        precisa_humano: bool
+
+    c = _C(**vars(conferida))
+    so_regua = separar_avisos(c, modo="auto", pessoa_do_modelo=False, regua=True)
+    assert "cliente insistiu em falar com uma pessoa" in so_regua.avisos
+    assert "reclamação ou devolução aberta na plataforma" in so_regua.motivos
+    bateu = separar_avisos(c, modo="auto", pessoa_do_modelo=False, banco_bateu=True, regua=True)
+    assert bateu.motivos == ['manda para fora da plataforma ("nosso endereço")']
+    assert bateu.precisa_humano is True  # a regra de texto continua dura
+    sem = _C(**{**vars(conferida), "motivos": conferida.motivos[:2]})
+    assert (
+        separar_avisos(sem, modo="auto", pessoa_do_modelo=False, banco_bateu=True).precisa_humano
+        is False
+    )

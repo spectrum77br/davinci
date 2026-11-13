@@ -13588,12 +13588,57 @@ def motivo_e_aviso(motivo: str) -> bool:
     return m.startswith(antes) and m.endswith(depois)
 
 
+# A VIRADA (13/11/2026). O Eduardo: "o cliente pedir atendente — ele é o próprio atendente";
+# "se bater e for parecido no banco, ele responde normal como qualquer outra conversa". Com a
+# régua, o "insistiu em falar com uma pessoa" é só aviso; e no rascunho que bateu com a
+# resposta da equipe no banco (`ctx.banco_bateu`), os motivos do ESTADO e da DECISÃO da 1ª
+# camada também viram aviso (o verificador lê): a ação de pessoa (menos as que o banco não
+# solta), o pedido com chamado ou devolução, a reclamação ou devolução aberta, a garantia, a
+# recusa de direito e os sinais do cartão do cliente. As regras de TEXTO (promessa, Pix,
+# fora da plataforma, rótulo interno, lacuna, instrução...) continuam duras.
+_INSISTIU_EM_PESSOA = "cliente insistiu em falar com uma pessoa"
+_ACAO_DE_PESSOA = "ação de pessoa: "
+
+
+def _motivos_que_o_banco_solta() -> frozenset[str]:
+    from app.services.atendimento import ia as ia_svc
+    from app.services.atendimento import validador
+
+    return frozenset(
+        {
+            _MOTIVO_DO_LEGADO_ANDAMENTO,
+            "reclamação ou devolução aberta na plataforma",
+            ia_svc.MOTIVO_RESPOSTA_DE_GARANTIA,
+            ia_svc.MOTIVO_RECUSA_DE_DIREITO,
+            validador.MOTIVO_NEGA_GARANTIA,
+            *ia_svc.SINAIS_PARA_PESSOA.values(),
+        }
+    )
+
+
+def motivo_que_o_banco_solta(motivo: str) -> bool:
+    """O motivo da 1ª camada vira aviso no rascunho que bateu com o banco? PURA."""
+    m = str(motivo or "")
+    if m.startswith(_INSISTIU_EM_PESSOA) or m in _motivos_que_o_banco_solta():
+        return True
+    if m.startswith(_ACAO_DE_PESSOA):
+        presas = {constantes.rotulo_acao_pessoa(a) for a in agente_ctx.ACOES_QUE_O_BANCO_NAO_SOLTA}
+        return not any(m[len(_ACAO_DE_PESSOA) :].startswith(r) for r in presas)
+    return False
+
+
 def separar_avisos(
-    conferida: SaidaConferida, *, modo: str, pessoa_do_modelo: bool
+    conferida: SaidaConferida,
+    *,
+    modo: str,
+    pessoa_do_modelo: bool,
+    banco_bateu: bool = False,
+    regua: bool = False,
 ) -> SaidaConferida:
     """No AUTOMÁTICO do agente, os motivos que são só aviso (`motivo_e_aviso`) saem dos
     `motivos`/`sem_auto` e vão para os `avisos`; o `precisa_humano` fica com o que é duro
-    (e com a escolha "pessoa" do próprio modelo). No copiloto, a mesma. PURA."""
+    (e com a escolha "pessoa" do próprio modelo). No copiloto, a mesma. A virada
+    (`regua`, `banco_bateu`): ver `motivo_que_o_banco_solta`. PURA."""
     if modo != constantes.MODO_AUTO:
         return conferida
     from app.services.atendimento import ia as ia_svc
@@ -13608,7 +13653,11 @@ def separar_avisos(
             # `GENERICA_COM_PERGUNTA`).
             if MOTIVO_ESCLARECIMENTO_COM_PENDENTE not in avisos:
                 avisos.append(MOTIVO_ESCLARECIMENTO_COM_PENDENTE)
-        elif motivo_e_aviso(m):
+        elif (
+            motivo_e_aviso(m)
+            or (regua and str(m or "").startswith(_INSISTIU_EM_PESSOA))
+            or (banco_bateu and motivo_que_o_banco_solta(m))
+        ):
             if m not in avisos:
                 avisos.append(m)
         else:

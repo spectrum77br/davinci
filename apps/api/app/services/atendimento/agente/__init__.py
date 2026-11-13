@@ -1270,7 +1270,11 @@ async def _conferir_a_proposta(
     # (a ficha no automático, a indução de assunto, o pedido não identificado, a frase da
     # lacuna tirada…) vira aviso; o `precisa_humano` fica com o duro e com o "pessoa" do modelo.
     conferida = checagens.separar_avisos(
-        conferida, modo=base.modo, pessoa_do_modelo=bool(entrada["precisa_humano"])
+        conferida,
+        modo=base.modo,
+        pessoa_do_modelo=bool(entrada["precisa_humano"]),
+        banco_bateu=bool(ctx.banco_bateu),
+        regua=bool(ctx.regua),
     )
     final = checagens.aplicar(conferida, chk, acoes_pessoa=ctx.acoes_pessoa, modo=base.modo)
     # D3 do dono: a URL entra só aqui, depois de toda a 1ª camada (o verificador vê a lacuna).
@@ -1668,23 +1672,30 @@ async def _responder(
     # dela (a `conferir_proposta` troca a "pessoa"/etiqueta por "responder" e guarda a ação
     # à parte — conferir de novo a já trocada perdia a etiqueta que o modelo escolheu).
     p_do_modelo = p
-    # A VIRADA (13/11/2026, o Eduardo: "não existirá mais esse 'precisa de pessoa'"): o
-    # rascunho que pede pessoa e diz o mesmo que a resposta da equipe no banco (pelo sentido)
-    # responde e marca — antes da 1ª camada, para ele seguir como qualquer outro rascunho.
+    c = await conferir_proposta(session, conversa, gatilho, base, ctx, p, pac)
+    # A VIRADA (13/11/2026, o Eduardo: "não existirá mais esse 'precisa de pessoa'; se bater e
+    # for parecido no banco, ele responde normal"): o rascunho que a 1ª camada segura para
+    # pessoa e diz o mesmo que a resposta da equipe no banco (pelo SENTIDO) responde e marca —
+    # a 1ª camada roda de novo com a marca, e o rascunho segue como qualquer outro (as regras
+    # de texto continuam duras; o verificador lê o resto como aviso).
     from app.services.atendimento.agente import confere_banco
 
-    await confere_banco.solta_a_pessoa(
-        ctx,
-        texto=p.texto,
-        categoria=saida.assunto_valido(p.assunto, base.ids_categorias)[0],
-        acao_do_modelo=p.acao_pessoa,
-        pessoa_do_modelo=saida.precisa_pessoa(p),
-        evidencias=saida.evidencias(p),
-        pergunta=_pergunta_do_turno(base, gatilho),
-        cliente=cliente,
-        modelo=ctx.modelo or get_settings().atendimento_agente_modelo,
-    )
-    c = await conferir_proposta(session, conversa, gatilho, base, ctx, p, pac)
+    if (
+        not c.sem_resposta
+        and c.final is not None
+        and (c.final.precisa_humano or ctx.acoes_pessoa)
+        and await confere_banco.solta_a_pessoa(
+            ctx,
+            texto=c.final.texto,
+            categoria=c.final.categoria,
+            acoes=ctx.acoes_pessoa,
+            evidencias=saida.evidencias(p_do_modelo),
+            pergunta=_pergunta_do_turno(base, gatilho),
+            cliente=cliente,
+            modelo=ctx.modelo or get_settings().atendimento_agente_modelo,
+        )
+    ):
+        c = await conferir_proposta(session, conversa, gatilho, base, ctx, p_do_modelo, pac)
     p, conferida = c.proposta, c.conferida
     if c.sem_resposta:
         # "ok", "obrigado", aviso: nada a responder e nada que segure — o
