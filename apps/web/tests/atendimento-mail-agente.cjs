@@ -33,7 +33,7 @@ async function run() {
   window.confirm = () => true
   responder = async (url, opts = {}) => {
     chamadas.push({ url, opts })
-    if (url === '/api/atendimento/email/agente' && !opts.method) return dados
+    if (url === '/api/atendimento/email/admin/agente' && !opts.method) return dados
     const s = /sites\/(\w+)$/.exec(url)
     if (s && opts.method === 'PUT') { dados = { ...dados, sites: dados.sites.map((x) => (x.site === s[1] ? { ...x, ligado: !!opts.body.modo, modo: opts.body.modo } : x)) }; return dados }
     if (url.endsWith('/regras') && opts.method === 'POST') return { ...fixa, id: 'r2', chave: null, fixa: false, ...opts.body, ativa: true }

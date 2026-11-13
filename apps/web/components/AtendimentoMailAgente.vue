@@ -60,7 +60,7 @@ export function rotuloDoModo(modo: string | null | undefined): string {
 import { Bot, Loader2, Plus, RefreshCw, Trash2 } from 'lucide-vue-next'
 import { erroDaApi } from '~/components/AtendimentoPlataforma.vue'
 
-const BASE = '/api/atendimento/email/agente'
+const BASE = '/api/atendimento/email/admin/agente'
 const { api } = useApi()
 const dados = ref<AgenteDoEmail | null>(null)
 const carregando = ref(false)

@@ -4,7 +4,7 @@ O Eduardo: "a chave usa mesma do atendimento e como se fosse a extensao do
 atendimento pro email so", "o do email pode deixar ali na parte de email mesmo a
 config do agente deixe bem intuitivo" e "so admin mexe no agente ok e ve".
 
-- GET  /                    → onde o agente responde e-mail (por enquanto só o SAC dos
+- GET  (raiz)               → onde o agente responde e-mail (por enquanto só o SAC dos
                                sites, com o liga/desliga) e as regras;
 - PUT  /sites/{site}        → liga (sugere = copiloto; responde sozinho = automático)
                                ou desliga o agente no e-mail do SAC do site;
@@ -35,7 +35,9 @@ from app.services.atendimento import email_agente
 logger = structlog.get_logger()
 
 router = APIRouter(
-    prefix="/api/atendimento/email/agente", tags=["mail"], dependencies=[Depends(require_admin)]
+    prefix="/api/atendimento/email/admin/agente",
+    tags=["mail"],
+    dependencies=[Depends(require_admin)],
 )
 Session = Annotated[AsyncSession, Depends(get_session)]
 Admin = Annotated[User, Depends(require_admin)]

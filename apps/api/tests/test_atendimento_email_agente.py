@@ -10,7 +10,7 @@
 - o envio do agente sai pelo MESMO caminho da pessoa (a fila da Central, a
   assinatura da marca), com o usuário do agente, só no automático;
 - o pedido do formulário passa por cima só das travas do ASSUNTO;
-- a tela (GET/PUT/POST/PATCH/DELETE /api/atendimento/email/agente) é só de admin.
+- a tela (GET/PUT/POST/PATCH/DELETE /api/atendimento/email/admin/agente) é só de admin.
 
 Postgres local + HTTP em processo; nada de modelo, Tuta ou envio de verdade.
 """
@@ -42,7 +42,7 @@ from tests.test_mail_ponte import cena as cena  # noqa: F401 — o mundo da pont
 from tests.test_mail_ponte import entrar, meta_de, rodar
 from tests.test_mail_responder import _jobs, _ligar_envio
 
-API = "/api/atendimento/email/agente"
+API = "/api/atendimento/email/admin/agente"
 URL_URANYX = "https://uranyx.com.br/sac"
 PEDIDO = (
     "Olá, Maria! Para analisarmos o defeito, abra o atendimento pelo formulário de SAC: "
@@ -230,7 +230,7 @@ def test_liberar_vale_so_no_bloco():
 # ─────────────── a chave e a trava (banco) ───────────────
 
 
-async def test_sac_do_site_so_com_a_chave_do_site_ligada(db, cena, agente_ligado):
+async def test_sac_do_site_so_com_a_chave_do_site_ligada(db, cena, agente_ligado, monkeypatch):
     await _canal_do_site(db)
     c = await _sac_direto(db, cena)
     assert motivo_canal_sem_envio(c.canal, c.plataforma, c.dados) == MOTIVO_EMAIL_SO_PESSOA
@@ -242,8 +242,8 @@ async def test_sac_do_site_so_com_a_chave_do_site_ligada(db, cena, agente_ligado
     assert chave is not None and chave.modo == MODO_COPILOTO
     assert (chave.site, chave.via_formulario) == ("uranyx", False)
     # Sem a chave Claude no servidor, nada.
-    agente_ligado.atendimento_agente_api_key = ""
-    agente_ligado.atendimento_llm_api_key = ""
+    monkeypatch.setattr(agente_ligado, "atendimento_agente_api_key", "")
+    monkeypatch.setattr(agente_ligado, "atendimento_llm_api_key", "")
     assert await email_agente.chave_liberada(db, c) is None
 
 
