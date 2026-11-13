@@ -539,6 +539,70 @@ async def _repetidas(session: AsyncSession, integration_id: UUID) -> frozenset[s
     return frozenset(k for k in achadas if k)
 
 
+# O texto repetido da loja muda devagar: 1 h de cache por processo (o envio por pessoa
+# reindexa a conversa na hora e não pode varrer todas as mensagens da loja a cada vez).
+_CACHE_REPETIDAS_S = 3600.0
+_cache_repetidas: dict[tuple[str, UUID], tuple[float, frozenset[str]]] = {}
+
+
+async def _repetidas_com_cache(session: AsyncSession, integration_id: UUID) -> frozenset[str]:
+    from app.config import get_settings
+
+    chave = (get_settings().database_schema, integration_id)
+    agora = time.monotonic()
+    guardado = _cache_repetidas.get(chave)
+    if guardado is not None and guardado[0] > agora:
+        return guardado[1]
+    valor = await _repetidas(session, integration_id)
+    _cache_repetidas[chave] = (agora + _CACHE_REPETIDAS_S, valor)
+    return valor
+
+
+async def indexar_conversa(session: AsyncSession, conversa: AtendimentoConversa) -> int:
+    """Refaz AGORA as respostas DESTA conversa (o envio por pessoa: "entra na hora", o
+    Eduardo, 13/11/2026). Mesmas regras do `indexar`; não faz commit. Devolve quantas valem."""
+    if conversa.plataforma not in PLATAFORMAS:
+        return 0
+    msgs = (await _mensagens(session, [conversa.id])).get(conversa.id, [])
+    if not any(m.autor == constantes.AUTOR_LOJA for m in msgs):
+        return 0
+    rascunhos = (await _rascunhos(session, [conversa.id])).get(conversa.id)
+    titulo = None
+    if conversa.anuncio_id:
+        titulo = (await _titulos(session, {str(conversa.anuncio_id)})).get(str(conversa.anuncio_id))
+    repetidas = (
+        await _repetidas_com_cache(session, conversa.integration_id)
+        if conversa.integration_id is not None
+        else frozenset()
+    )
+    nomes = await ia._NomesDoPedido(session).de(
+        conversa.comprador_nome,
+        conversa.comprador_id,
+        conversa.pedido_marketplace,
+        conversa.integration_id,
+    )
+    novas = respostas_da_conversa(
+        msgs,
+        conversa=conversa,
+        nomes=nomes,
+        repetidas=repetidas,
+        rascunhos=rascunhos,
+        titulo=titulo,
+    )
+    await _gravar(session, novas)
+    validas = [r.chave for r in novas]
+    await session.execute(
+        update(AtendimentoResposta)
+        .where(
+            AtendimentoResposta.conversa_id == conversa.id,
+            AtendimentoResposta.status == STATUS_ATIVA,
+            AtendimentoResposta.chave.not_in(validas) if validas else true(),
+        )
+        .values(status=STATUS_APOSENTADA, updated_at=func.now())
+    )
+    return len(novas)
+
+
 async def _cursor(session: AsyncSession) -> datetime:
     from app.redis_client import redis
 

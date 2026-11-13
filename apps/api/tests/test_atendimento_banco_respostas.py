@@ -818,3 +818,24 @@ def test_eval_tem_o_braco_do_opus_e_le_o_banco_so_no_processo(monkeypatch, tmp_p
     codigo = rodar.main(["--amostra", str(amostra), "--braco", "O1", "--le-banco"])
     assert codigo == rodar.SEM_CHAVE
     assert s.atendimento_agente_le_banco is True
+
+
+async def test_indexar_uma_conversa_na_hora(db: AsyncSession, make_user):
+    conversa = await _conversa(db, make_user)
+    await _msg(db, conversa, "Olá, a mala de 20 tem rodinhas removíveis?", ha=timedelta(minutes=30))
+    await _msg(
+        db,
+        conversa,
+        "Só o tamanho 18 tem rodinhas removíveis, a de 20 não.",
+        autor="loja",
+        origem="davinci_humano",
+        ha=timedelta(minutes=20),
+    )
+    assert await banco_respostas.indexar_conversa(db, conversa) == 1
+    await db.commit()
+    [r] = await _respostas(db, conversa.id)
+    assert r.fonte == banco_respostas.FONTE_ESCREVEU and r.tipo == "espec_mala"
+    # De novo: a mesma linha, nada repetido.
+    assert await banco_respostas.indexar_conversa(db, conversa) == 1
+    await db.commit()
+    assert len(await _respostas(db, conversa.id)) == 1

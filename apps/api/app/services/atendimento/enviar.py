@@ -1669,6 +1669,12 @@ async def _par_depois_do_envio(
         if not agente_config.agente_ligado(s, canal):
             return
         await par_na_hora(session, conversa)
+        if getattr(s, "atendimento_banco_respostas_ativo", False):
+            # O banco de respostas (13/11/2026): a resposta que a pessoa escreveu ou
+            # ajustou entra na hora (o cron de hora em hora cobre o resto).
+            from app.services.atendimento import banco_respostas
+
+            await banco_respostas.indexar_conversa(session, conversa)
         await session.commit()
     except Exception as e:  # noqa: BLE001 — o envio já está gravado; o cron indexa depois
         logger.warning(
