@@ -54,6 +54,7 @@ python3 ferramentas/davinci_chamados.py exemplos --plataforma shopee --limite 5
 python3 ferramentas/davinci_chamados.py anexos --id <chamado_id> --pasta tmp/<pedido>
 python3 ferramentas/davinci_chamados.py guardar-print --id <chamado_id> --mensagem <analise_id> --arquivo tmp/x.png
 python3 ferramentas/davinci_chamados.py decidir --json '{"chamado_id": "…", "classe": "…", "resumo": "…", "acao": "humano"}'
+python3 ferramentas/davinci_chamados.py decidir --json '{"chamado_id": "…", "classe": "…", "resumo": "Feito na tela (…): …", "acao": "esperar", "protocolo": "2120860248672489476", "conversa": [{"quem": "nos", "texto": "…", "quando": "2026-11-12T11:02"}, {"quem": "plataforma", "texto": "…", "quando": "2026-11-12T11:05", "autor": "Ana · atendente Shopee"}]}'
 ```
 
 - `decidir` **sempre com `--json '…'` numa linha só** (heredoc e arquivo são
@@ -130,6 +131,23 @@ ela mostra; persistindo a dúvida, `humano` explicando a contradição.
   **"Feito na tela (loja):"** — sempre assim, e só nesse caso. É por esse começo
   que a coluna "Última ação" da aba sabe que o caso andou. Só leu ou conferiu:
   comece por "Conferido na tela" ou "Sem novidade". Tentou e não saiu: "Não saiu:".
+- **`conversa`** — sempre que você **conversou na tela** (chat do Assistente do
+  Vendedor, atendente, robô da plataforma, formulário, chat da TikTok): mande as
+  falas **desta rodada**, na ordem da tela, com o texto **copiado como está** (não
+  resuma). Sem isso a coluna "Conversa com a plataforma" do chamado fica em branco
+  — o protocolo do chat da atendente da Shopee não abre no Portal, então nenhum robô
+  traz essa conversa depois (296423, 13/11). Cada fala:
+  `{"quem": "nos", "texto": "…", "quando": "2026-11-12T11:02"}` (o que você
+  escreveu) ou `{"quem": "plataforma", "texto": "…", "quando": "2026-11-12T11:05",
+  "autor": "Ana · atendente Shopee"}` (o que ela respondeu). `quando` = a hora que
+  a tela mostra, horário de Brasília; sem hora na tela, a hora em que você mandou ou
+  leu. `autor` = o nome que a tela mostra + quem é. Menu e saudação automática
+  ("Selecione uma opção", "Olá, sou o assistente…") podem ficar de fora; o que for
+  sobre o caso entra inteiro. Não repita o que já está em `mensagens`. Até 60 falas.
+- **`protocolo`** — o número que a plataforma deu nesta rodada (protocolo do chat,
+  da solicitação, da consulta). Vira o nº do chamado se ele ainda está "sem nº".
+  Com mais de um número, mande o da solicitação que vai trazer a resposta e cite
+  os outros no `resumo`.
 
 ## Melhor Envio (atendimento com a transportadora)
 

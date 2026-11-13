@@ -995,6 +995,88 @@ async def registrar(
     return out
 
 
+# 13/11/2026 (Vinicius, 296423: "a tela do chamado está em branco"): a IA de Chamado
+# conversa NA TELA com a atendente da Shopee (Assistente do Vendedor) e o protocolo
+# desse chat não é consulta do Portal — conferido na KFA: /detail/<nº> abre vazio e
+# a busca "ID da Consulta" diz "Sem consulta". Nenhum robô de leitura traz essa
+# conversa; quem tem o texto é a IA, que manda as falas junto da decisão.
+JANELA_FALA_TELA = timedelta(minutes=5)
+
+
+async def gravar_conversa_da_tela(
+    session: AsyncSession,
+    ch: Chamado,
+    falas: list,
+    *,
+    autor_nosso: str,
+    agora: datetime,
+) -> int:
+    """Grava as falas que a IA viu na tela (`AgentFalaTelaIn`: quem, texto, quando,
+    autor) como conversa do chamado. A nossa vira réplica JÁ ENVIADA (nenhuma fila
+    manda de novo); a da plataforma vira resposta. As duas aparecem na "Conversa
+    com a plataforma" com a hora da tela.
+
+    Ficam de fora a repetida (mesmo lado, mesmo texto, até 5 min de diferença — a
+    IA pode mandar de novo numa rodada seguinte) e a nossa fala mandada como se
+    fosse deles. Todas ficam ANTES de `agora`, inclusive o `updated_at`: a análise
+    que vem junto é gravada em `agora` e tem de ser a mais nova, senão a IA
+    acordaria pra ler a resposta que ela mesma acabou de gravar. Não commita."""
+    existentes = (
+        await session.execute(
+            select(
+                ChamadoMensagem.direcao,
+                ChamadoMensagem.texto,
+                ChamadoMensagem.enviada_at,
+                ChamadoMensagem.created_at,
+            ).where(
+                ChamadoMensagem.chamado_id == ch.id,
+                ChamadoMensagem.direcao.in_(("enviada", "recebida")),
+            )
+        )
+    ).all()
+    vistas = [(d, _chave(t), e or c) for d, t, e, c in existentes if (t or "").strip()]
+    nossas = {k for d, k, _q in vistas if d == "enviada"}
+    plat = (ch.plataforma or "").strip().capitalize() or "Plataforma"
+    novas = 0
+    total = len(falas)
+    for pos, fala in enumerate(falas):
+        texto = limpar_html(fala.texto or "").strip()
+        if not texto:
+            continue
+        direcao = "enviada" if fala.quem == "nos" else "recebida"
+        chave = _chave(texto)
+        if direcao == "recebida" and chave in nossas:
+            continue
+        quando, _clampada = _quando_valido(ch, fala.quando, agora)
+        # A tela mostra só HH:MM: falas do mesmo minuto ficam na ordem em que vieram.
+        quando = min(
+            quando + timedelta(milliseconds=pos),
+            agora - timedelta(seconds=total - pos),
+        )
+        if any(
+            d == direcao and k == chave and q is not None and abs(q - quando) <= JANELA_FALA_TELA
+            for d, k, q in vistas
+        ):
+            continue
+        nossa = direcao == "enviada"
+        m = chamados_svc.nova_mensagem(
+            ch,
+            texto=texto,
+            tipo="replica" if nossa else "resposta",
+            direcao=direcao,
+            autor_nome=autor_nosso if nossa else (fala.autor or f"{plat} · na tela"),
+            status="enviada" if nossa else "registrada",
+        )
+        m.canal = "robo"
+        m.created_at = m.enviada_at = m.updated_at = quando
+        session.add(m)
+        vistas.append((direcao, chave, quando))
+        if nossa:
+            nossas.add(chave)
+        novas += 1
+    return novas
+
+
 async def furar_a_fila(session: AsyncSession, ch: Chamado) -> None:
     """Botão Atualizar num caso de tela: não há API pra consultar, então o que
     "atualizar" pode significar é "lê este antes dos outros" — zera a âncora e o

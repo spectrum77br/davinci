@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
@@ -877,6 +878,25 @@ class AgentAnalisarOut(BaseModel):
 AcaoAnalise = Literal["esperar", "responder", "resolver", "humano"]
 
 
+class AgentFalaTelaIn(BaseModel):
+    """13/11/2026 (296423): uma fala da conversa que a IA de Chamado teve NA TELA
+    da plataforma (chat da atendente no Assistente do Vendedor, formulário) e que
+    nenhum robô de leitura alcança. `quem`: `nos` (o que a IA escreveu) ou
+    `plataforma` (atendente, robô da plataforma). `quando` = a hora que a tela
+    mostra; data sem fuso é horário de São Paulo."""
+
+    quem: Literal["nos", "plataforma"]
+    texto: str = Field(min_length=1, max_length=4000)
+    quando: datetime
+    # quem falou do lado de lá, como a tela mostra ("Ana · atendente Shopee")
+    autor: str | None = Field(default=None, max_length=80)
+
+    _clean = field_validator("autor", mode="before")(_clean_optional_text)
+
+
+_PROTOCOLO_TELA = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{3,39}$")
+
+
 class AgentAnaliseIn(BaseModel):
     """Decisão do cérebro sobre a última resposta da plataforma (ou sobre uma
     instrução/bloqueio): registra a análise no histórico e executa a ação
@@ -899,8 +919,19 @@ class AgentAnaliseIn(BaseModel):
     # deixou o perfil aberto ali — o DaVinci avisa no Threema quem está no
     # cadastro `chamados_ia` (services/chamados_ia_aviso). Só com `humano`.
     parado: Literal["captcha", "login"] | None = None
+    # 13/11/2026 (296423, Vinicius: "a tela do chamado está em branco"): a IA falou
+    # com a atendente da Shopee na tela e só a decisão dela (coluna da direita)
+    # chegava ao chamado. O protocolo do chat da atendente não é consulta do Portal
+    # (conferido na tela da KFA), então nenhum robô de leitura traz essa conversa:
+    # quem tem o texto é a própria IA. `conversa` = as falas DESTA rodada, na ordem
+    # da tela; entram na "Conversa com a plataforma". `protocolo` = o nº que a
+    # plataforma deu; vira o nº do chamado se ele ainda não tem.
+    conversa: list[AgentFalaTelaIn] = Field(default_factory=list, max_length=60)
+    protocolo: str | None = None
 
-    _clean = field_validator("texto_replica", "observacao", mode="before")(_clean_optional_text)
+    _clean = field_validator("texto_replica", "observacao", "protocolo", mode="before")(
+        _clean_optional_text
+    )
 
     @model_validator(mode="after")
     def _replica_precisa_texto(self) -> "AgentAnaliseIn":
@@ -908,6 +939,8 @@ class AgentAnaliseIn(BaseModel):
             raise ValueError("texto_replica é obrigatório quando acao=responder")
         if self.parado and self.acao != "humano":
             raise ValueError("parado só vale com acao=humano")
+        if self.protocolo and not _PROTOCOLO_TELA.match(self.protocolo):
+            raise ValueError("protocolo: só letras, números, . _ / - (4 a 40)")
         return self
 
 
@@ -918,6 +951,8 @@ class AgentAnaliseOut(BaseModel):
     resolvido: bool
     # com `parado`: o que aconteceu com o aviso no Threema, em texto de gente
     aviso: str | None = None
+    # 13/11/2026: falas da `conversa` que entraram (as repetidas ficam de fora)
+    conversa_gravada: int = 0
 
 
 class AgentExemplosIn(BaseModel):

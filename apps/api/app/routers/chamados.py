@@ -3536,6 +3536,29 @@ async def agent_analise(
         )
         assumido.canal = "robo"
         session.add(assumido)
+    # 13/11/2026 (296423): a conversa que a IA teve na tela entra na coluna da
+    # esquerda e o protocolo que a plataforma deu vira o nº do chamado. O nº não
+    # marca `chamado_de_tela`: protocolo do chat da atendente não é consulta do
+    # Portal, e a fila de leitura abriria uma página vazia de 3 em 3 h.
+    agora = datetime.now(UTC)
+    conversa_gravada = 0
+    if body.conversa:
+        conversa_gravada = await chamados_leitura.gravar_conversa_da_tela(
+            session,
+            ch,
+            body.conversa,
+            autor_nosso=f"{cerebro.nome or 'IA de Chamado'} · na tela",
+            agora=agora,
+        )
+    if body.protocolo and not (ch.chamado or "").strip():
+        ch.chamado = body.protocolo
+        session.add(
+            svc.registrar_sistema(
+                ch,
+                f"Protocolo {body.protocolo} anotado pela {cerebro.nome or 'IA de Chamado'} "
+                "(visto na tela da plataforma)",
+            )
+        )
     analise = svc.nova_mensagem(
         ch,
         texto=(
@@ -3551,6 +3574,10 @@ async def agent_analise(
         status="registrada",
     )
     analise.canal = "robo"
+    if conversa_gravada:
+        # Mesmo relógio das falas gravadas acima (todas antes de `agora`): a análise
+        # fica sendo a mais nova e a IA não acorda pra ler o que ela mesma gravou.
+        analise.created_at = analise.updated_at = agora
     session.add(analise)
     # 11/11/2026 (297650): a IA abre/retoma consulta pelo Fale conosco do ML e cita
     # o número na análise; sem ligar, ninguém trazia a conversa dela pro chamado.
@@ -3702,6 +3729,8 @@ async def agent_analise(
         replica=str(replica.id) if replica else None,
         cerebro=cerebro.nome,
         parado=body.parado,
+        conversa_gravada=conversa_gravada,
+        protocolo=body.protocolo,
     )
     return AgentAnaliseOut(
         chamado_id=ch.id,
@@ -3709,6 +3738,7 @@ async def agent_analise(
         replica_id=replica.id if replica else None,
         resolvido=ch.resolvido,
         aviso=aviso,
+        conversa_gravada=conversa_gravada,
     )
 
 

@@ -59,6 +59,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -338,6 +339,24 @@ def _validar(d: dict) -> str | None:
     # 30/09 (297130): parou na tela (captcha/login) → o DaVinci avisa no Threema
     if d.get("parado") is not None and (d["parado"] not in ("captcha", "login") or d["acao"] != "humano"):
         return 'parado: "captcha" ou "login", e só com acao=humano'
+    # 13/11 (296423): a conversa que você teve na tela e o protocolo que a
+    # plataforma deu entram no chamado (coluna da esquerda e nº do chamado).
+    conversa = d.get("conversa")
+    if conversa is not None:
+        if not isinstance(conversa, list) or len(conversa) > 60:
+            return "conversa: lista de até 60 falas"
+        for i, f in enumerate(conversa, 1):
+            if not isinstance(f, dict) or set(f) - {"quem", "texto", "quando", "autor"}:
+                return f"conversa[{i}]: só quem, texto, quando e autor"
+            if f.get("quem") not in ("nos", "plataforma"):
+                return f'conversa[{i}]: quem tem que ser "nos" ou "plataforma"'
+            if not (f.get("texto") or "").strip():
+                return f"conversa[{i}]: texto vazio"
+            if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", f.get("quando") or ""):
+                return f'conversa[{i}]: quando no formato "2026-11-12T11:05" (hora da tela)'
+    protocolo = d.get("protocolo")
+    if protocolo is not None and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._/-]{3,39}$", str(protocolo)):
+        return "protocolo: só letras, números, . _ / - (4 a 40)"
     return None
 
 
@@ -359,6 +378,8 @@ def cmd_decidir(cfg: dict[str, str], a: argparse.Namespace) -> None:
         "observacao",
         "reabrir",
         "parado",
+        "conversa",
+        "protocolo",
     }
     extras = set(d) - campos
     if extras:
