@@ -930,7 +930,7 @@ async function principal() {
       assert.equal(leitor.aba.value, 'caixa', 'o ?tab=mail de quem não é admin cai na Caixa')
       assert.equal(montarAbas(false, 'lojas').aba.value, 'lojas')
       // O Banco de respostas (13/11/2026): só admin — a permissão da aba E-mail não o abre.
-      assert.deepEqual(admin.abasVisiveis.value.map((a) => a.value), ['caixa', 'humano', 'mail', 'lojas', 'manual', 'modelos', 'automaticas', 'metricas', 'banco'])
+      assert.deepEqual(admin.abasVisiveis.value.map((a) => a.value), ['caixa', 'mail', 'lojas', 'manual', 'modelos', 'automaticas', 'metricas', 'banco'])
       assert.equal(montarAbas(true, 'banco').aba.value, 'banco')
       assert.equal(montarAbas(false, 'banco').aba.value, 'caixa', 'o ?tab=banco de quem não é admin cai na Caixa')
       const soEmail = montarAbas(false, 'banco', true)
