@@ -1141,6 +1141,39 @@ async def atendimento_julgar_edicoes(ctx: dict) -> dict | None:
     return resumo
 
 
+# A análise do dia das métricas por equipe (13/11/2026): 07:40 de São Paulo (10:40 UTC).
+_ATENDIMENTO_ANALISE_HORA = 10
+_ATENDIMENTO_ANALISE_MINUTO = 40
+
+
+async def atendimento_analise_diaria(ctx: dict) -> dict | None:
+    """Uma vez por dia: o agente lê as métricas por equipe (ontem e 7 dias), os assuntos que
+    mais erram e os motivos do juiz, e escreve a análise para o dono (aba Métricas,
+    `services/atendimento/metricas_equipe.py`). Fica no Redis; sem a chave do agente, nada.
+    """
+    import anthropic
+
+    from app.services.atendimento import agente_config, ia
+    from app.services.atendimento import metricas_equipe as _metricas
+
+    chave = agente_config.chave_do_agente(_settings)
+    if not chave:
+        return None
+    async with session_scope() as s:
+        try:
+            async with anthropic.AsyncAnthropic(
+                api_key=chave, base_url=ia.BASE_CLAUDE, max_retries=2
+            ) as cliente:
+                analise = await _metricas.gerar_analise(
+                    s, cliente=cliente, modelo=_settings.atendimento_agente_modelo
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.error("atendimento_analise_diaria_falhou", err=type(e).__name__)
+            return None
+    logger.info("atendimento_analise_diaria_tick", gerada=analise is not None)
+    return {"gerada": analise is not None}
+
+
 async def atendimento_indexar_pares(ctx: dict) -> dict | None:
     """De hora em hora (:34): os pares pergunta × resposta da equipe (agente, 20/10/2026).
 
@@ -5715,6 +5748,7 @@ class WorkerSettings:
         func(atendimento_indexar_pares, timeout=600),
         func(atendimento_indexar_banco, timeout=600),
         func(atendimento_julgar_edicoes, timeout=900),
+        func(atendimento_analise_diaria, timeout=300),
         func(atendimento_sites_marca, timeout=300),
         func(atendimento_replay_agente, timeout=3600, max_tries=1),
         # Importação do histórico (28/09/2026): SÓ aqui, nunca em `cron_jobs` —
@@ -6169,6 +6203,14 @@ class WorkerSettings:
             minute=_ATENDIMENTO_JUIZ_MINUTOS,
             run_at_startup=False,
             timeout=900,
+        ),
+        # A análise do dia das métricas por equipe (13/11/2026).
+        cron(
+            atendimento_analise_diaria,
+            hour=_ATENDIMENTO_ANALISE_HORA,
+            minute=_ATENDIMENTO_ANALISE_MINUTO,
+            run_at_startup=False,
+            timeout=300,
         ),
         cron(
             atendimento_sites_marca,
