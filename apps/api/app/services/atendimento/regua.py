@@ -155,6 +155,8 @@ async def aplicar(
         )
     ).all()
     resumo = {"canais": 0, "linhas": 0, "mudaram": 0, "tipos_liberados": 0}
+    # O assunto SENSÍVEL que a régua solta agora numa loja (13/11/2026, o Eduardo quer saber).
+    sensiveis_soltos: list[tuple[Any, Taxa]] = []
     for canal in canais:
         taxas = await taxas_da_loja(
             session, plataforma=canal.plataforma, integration_id=canal.integration_id
@@ -196,5 +198,39 @@ async def aplicar(
         if gravar_listas and novas != atuais:
             canal.auto_categorias, canal.auto_agente, canal.auto_orientacao = novas
             resumo["mudaram"] += 1
+        if gravar_listas:
+            sensiveis_soltos.extend(
+                (canal, t)
+                for t in taxas.values()
+                if t.liberado and t.tipo in tipos_pergunta.SENSIVEIS and t.tipo not in hoje
+            )
     await session.commit()
+    if sensiveis_soltos:
+        await _avisar_sensiveis_soltos(session, sensiveis_soltos)
     return resumo
+
+
+async def _avisar_sensiveis_soltos(session: AsyncSession, soltos: list[tuple[Any, Taxa]]) -> None:
+    """Um aviso no Telegram por loja e assunto sensível soltos (uma vez por dia). Nunca levanta."""
+    from app.models import Integration
+    from app.services.atendimento import alertas_sensiveis
+    from app.services.atendimento.agente import custo
+
+    try:
+        ids = {c.integration_id for c, _ in soltos if c.integration_id}
+        nomes = dict(
+            (
+                await session.execute(
+                    select(Integration.id, Integration.name).where(Integration.id.in_(ids))
+                )
+            ).all()
+        )
+        for canal, t in soltos:
+            await custo.avisar_uma_vez_por_dia(
+                f"regua_sensivel:{canal.id}:{t.tipo}",
+                alertas_sensiveis.aviso_da_regua(
+                    t.tipo, nomes.get(canal.integration_id), t.fracao, t.decisoes
+                ),
+            )
+    except Exception:  # noqa: BLE001 — o aviso nunca derruba a régua
+        return

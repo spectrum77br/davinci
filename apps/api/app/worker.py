@@ -1141,6 +1141,27 @@ async def atendimento_julgar_edicoes(ctx: dict) -> dict | None:
     return resumo
 
 
+# O aviso dos envios sozinhos de assunto sensível (13/11/2026): de 5 em 5 minutos.
+_ATENDIMENTO_ALERTA_SENSIVEL_MINUTOS = set(range(2, 60, 5))
+
+
+async def atendimento_alertas_sensiveis(ctx: dict) -> dict | None:
+    """De 5 em 5 minutos: cada envio sozinho de assunto sensível (reembolso, cancelamento,
+    troca, reclamação forte) vira um aviso no Telegram, com o assunto, a loja e o link — o
+    Eduardo, 13/11/2026 (`services/atendimento/alertas_sensiveis.py`)."""
+    from app.services.atendimento import alertas_sensiveis as _alertas
+
+    async with session_scope() as s:
+        try:
+            n = await _alertas.avisar_envios_sensiveis(s)
+        except Exception as e:  # noqa: BLE001
+            logger.error("atendimento_alertas_sensiveis_falhou", err=type(e).__name__)
+            return None
+    if n:
+        logger.info("atendimento_alertas_sensiveis_tick", avisos=n)
+    return {"avisos": n}
+
+
 # A análise do dia das métricas por equipe (13/11/2026): 07:40 de São Paulo (10:40 UTC).
 _ATENDIMENTO_ANALISE_HORA = 10
 _ATENDIMENTO_ANALISE_MINUTO = 40
@@ -5749,6 +5770,7 @@ class WorkerSettings:
         func(atendimento_indexar_banco, timeout=600),
         func(atendimento_julgar_edicoes, timeout=900),
         func(atendimento_analise_diaria, timeout=300),
+        func(atendimento_alertas_sensiveis, timeout=120),
         func(atendimento_sites_marca, timeout=300),
         func(atendimento_replay_agente, timeout=3600, max_tries=1),
         # Importação do histórico (28/09/2026): SÓ aqui, nunca em `cron_jobs` —
@@ -6203,6 +6225,13 @@ class WorkerSettings:
             minute=_ATENDIMENTO_JUIZ_MINUTOS,
             run_at_startup=False,
             timeout=900,
+        ),
+        # O aviso dos envios sozinhos de assunto sensível (13/11/2026).
+        cron(
+            atendimento_alertas_sensiveis,
+            minute=_ATENDIMENTO_ALERTA_SENSIVEL_MINUTOS,
+            run_at_startup=False,
+            timeout=120,
         ),
         # A análise do dia das métricas por equipe (13/11/2026).
         cron(
