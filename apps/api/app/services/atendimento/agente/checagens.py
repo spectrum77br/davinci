@@ -13355,6 +13355,7 @@ def aplicar(
     *,
     acoes_pessoa: Sequence[str],
     modo: str,
+    virada: bool = False,
 ) -> SaidaConferida:
     """A `SaidaConferida` final (`dataclasses.replace`). PURA.
 
@@ -13392,7 +13393,9 @@ def aplicar(
             lista.append(motivo)
 
     for p in [*acoes, *checagens.pendencias]:
-        if modo == constantes.MODO_AUTO and not pendencia_dura(p):
+        if modo == constantes.MODO_AUTO and (
+            not pendencia_dura(p) or (virada and p.codigo in DURAS_QUE_A_VIRADA_SOLTA)
+        ):
             # O portão (27/10/2026): no automático, o que não é DURO só avisa — o aviso vai à
             # pessoa e ao verificador (a seção AVISOS DAS CHECAGENS); não segura sozinho.
             _junta(avisos, p.motivo)
@@ -13628,6 +13631,25 @@ def _motivos_que_o_banco_solta() -> frozenset[str]:
     )
 
 
+def _motivos_que_a_virada_solta() -> tuple[frozenset[str], tuple[str, ...]]:
+    """(exatos, começos) das regras da 1ª camada antiga que, na virada, só AVISAM (o Eduardo,
+    13/11/2026: "essas aqui já podemos cortar todas — agora a pegada do agente é outra; no banco
+    tem sobre esses assuntos, ele pode responder"). O verificador continua lendo o texto."""
+    from app.services.atendimento import ia as ia_svc
+
+    return (
+        frozenset({ia_svc.MOTIVO_RESPOSTA_DE_GARANTIA, ia_svc.MOTIVO_RECUSA_DE_DIREITO}),
+        (ia_svc.MOTIVO_NUMERO_INVENTADO, _INSISTIU_EM_PESSOA),
+    )
+
+
+def motivo_que_a_virada_solta(motivo: str) -> bool:
+    """O motivo da 1ª camada antiga só avisa na virada? PURA."""
+    exatos, comecos = _motivos_que_a_virada_solta()
+    m = str(motivo or "")
+    return m in exatos or m.startswith(comecos)
+
+
 def motivo_que_o_banco_solta(motivo: str) -> bool:
     """O motivo da 1ª camada vira aviso no rascunho que bateu com o banco? PURA."""
     m = str(motivo or "")
@@ -13667,7 +13689,7 @@ def separar_avisos(
                 avisos.append(MOTIVO_ESCLARECIMENTO_COM_PENDENTE)
         elif (
             motivo_e_aviso(m)
-            or (regua and str(m or "").startswith(_INSISTIU_EM_PESSOA))
+            or (regua and motivo_que_a_virada_solta(m))
             or (banco_bateu and motivo_que_o_banco_solta(m))
         ):
             if m not in avisos:
@@ -14175,6 +14197,11 @@ MOTIVO_PALAVRA_CHAVE_SEM_ENVIO = (
     "orienta a palavra-chave ou o código de retirada da entrega sem o pedido enviado (pessoa)"
 )
 DURAS = DURAS | {PROMESSA_DURA, PALAVRA_CHAVE_SEM_ENVIO, ENDERECO_NO_ML}
+# A VIRADA (13/11/2026, o Eduardo: "pode cortar todas"): a promessa de ação da equipe ("está
+# registrado", "seguiu para o responsável") e a instrução física sem o anúncio do modelo só AVISAM
+# (o verificador lê). A promessa de RESULTADO (reembolso, troca, aprovação), o Pix, o caminho fora
+# da plataforma e o resto das DURAS continuam segurando.
+DURAS_QUE_A_VIRADA_SOLTA = frozenset({PROMESSA_DURA, FISICO_SEM_O_MODELO})
 
 _PEDE_O_DADO_AO_CLIENTE = re.compile(
     r"\b(?:me\s+(?:diga|diz|conta|conte|informe|mande|envie|fala|fale|passe)|se\s+(?:voce\s+|vc\s+)?"

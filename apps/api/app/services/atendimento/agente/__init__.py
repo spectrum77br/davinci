@@ -834,6 +834,10 @@ def _ja_tratado_pela_loja(
     "Sugerir" (a pessoa pediu a sugestão)."""
     if base.forcar or ctx.acoes_codigo:
         return False
+    if getattr(ctx, "regua", False) and (conferida.texto or "").strip():
+        # A virada (13/11/2026, o Eduardo: "pode cortar"): o agradecimento depois de a loja
+        # tratar recebe a cortesia que a equipe dá — o rascunho com texto segue.
+        return False
     if not acao_pessoa.turno_so_de_reconhecimento(base.recentes, gatilho):
         return False
     cortesia = checagens.so_cortesia_de_fechamento(conferida.texto)
@@ -1276,7 +1280,9 @@ async def _conferir_a_proposta(
         banco_bateu=bool(ctx.banco_bateu),
         regua=bool(ctx.regua),
     )
-    final = checagens.aplicar(conferida, chk, acoes_pessoa=ctx.acoes_pessoa, modo=base.modo)
+    final = checagens.aplicar(
+        conferida, chk, acoes_pessoa=ctx.acoes_pessoa, modo=base.modo, virada=bool(ctx.regua)
+    )
     # D3 do dono: a URL entra só aqui, depois de toda a 1ª camada (o verificador vê a lacuna).
     final = checagens.com_os_links_do_anuncio(
         final, ctx, plataforma=conversa.plataforma, canal=conversa.canal

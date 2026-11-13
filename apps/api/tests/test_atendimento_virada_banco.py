@@ -555,3 +555,72 @@ async def test_mesma_pergunta_a_resposta_da_equipe_vira_a_sugestao():
     assert not await _soltar(mascarada, p, _Cliente("serve", caso="par:b1"))
     assert mascarada.texto_do_banco is None
     assert mascarada.banco_confere["veredito"] == "diferente"
+
+
+def test_na_virada_as_regras_antigas_de_texto_so_avisam():
+    """O Eduardo, 13/11: "essas aqui já podemos cortar todas — agora a pegada do agente é outra".
+    Fala de garantia, número fora do sistema, recusa de direito, insistiu em pessoa, promessa de
+    ação da equipe, instrução física e o agradecimento depois de tratado: só avisam (o verificador
+    lê). Pix, fora da plataforma e a promessa de RESULTADO continuam segurando."""
+    import dataclasses as _dc
+
+    from app.services.atendimento import agente as agente_svc
+    from app.services.atendimento.agente.checagens import (
+        FISICO_SEM_O_MODELO,
+        PIX_OU_BANCO,
+        PROMESSA_DURA,
+        Checagens,
+        PendenciaAgente,
+        aplicar,
+        separar_avisos,
+    )
+
+    @_dc.dataclass
+    class _C:
+        texto: str
+        motivos: list
+        avisos: list
+        sem_auto: list
+        precisa_humano: bool
+        erros: list = _dc.field(default_factory=list)
+        avisos_auto: list = _dc.field(default_factory=list)
+        status: str = "pendente"
+        motivo_modelo: str = ""
+
+    velhas = [
+        ia.MOTIVO_RESPOSTA_DE_GARANTIA,
+        f"{ia.MOTIVO_NUMERO_INVENTADO} (40)",
+        ia.MOTIVO_RECUSA_DE_DIREITO,
+        "cliente insistiu em falar com uma pessoa",
+    ]
+    c = _C("A pulseira é M/L.", [*velhas, "fala de Pix, dados bancários — pessoa"], [], [], True)
+    fora = separar_avisos(c, modo="auto", pessoa_do_modelo=False, regua=True)
+    assert fora.motivos == ["fala de Pix, dados bancários — pessoa"]
+    assert set(velhas) <= set(fora.avisos)
+    # Sem a virada, como antes: seguram.
+    assert set(velhas) <= set(separar_avisos(c, modo="auto", pessoa_do_modelo=False).motivos)
+
+    sem_regra = _C("A pulseira é M/L.", [], [], [], False)
+    pend = Checagens(
+        pendencias=[
+            PendenciaAgente(
+                PROMESSA_DURA, "promete ação da equipe ('está registrado')", False, False
+            ),
+            PendenciaAgente(
+                FISICO_SEM_O_MODELO, "instrução física do aparelho ('gaveta')", False, False
+            ),
+        ]
+    )
+    solto = aplicar(sem_regra, pend, acoes_pessoa=[], modo="auto", virada=True)
+    assert solto.precisa_humano is False and len(solto.avisos) == 2
+    assert aplicar(sem_regra, pend, acoes_pessoa=[], modo="auto").precisa_humano is True
+    pix = Checagens(pendencias=[PendenciaAgente(PIX_OU_BANCO, "fala de Pix", True, False)])
+    assert aplicar(sem_regra, pix, acoes_pessoa=[], modo="auto", virada=True).precisa_humano
+
+    # O agradecimento depois de a loja tratar: na virada, a cortesia segue (não é descartada).
+    base = SimpleNamespace(forcar=False, recentes=[])
+    p = _proposta(acao="responder", acao_pessoa=None, texto="De nada, tenha um ótimo dia!")
+    com_texto = SimpleNamespace(texto="De nada, tenha um ótimo dia!")
+    assert (
+        agente_svc._ja_tratado_pela_loja(p, com_texto, _ctx(acoes_codigo=[]), base, None) is False
+    )
