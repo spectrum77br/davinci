@@ -272,8 +272,6 @@ import {
   ShoppingCart,
   Sparkles,
   StickyNote,
-  ThumbsDown,
-  ThumbsUp,
   Mail,
   Trash2,
   TriangleAlert,
@@ -2424,10 +2422,9 @@ async function sugerir() {
 }
 
 const MOTIVOS_DESCARTE = ['informação errada', 'não respondeu o que o cliente perguntou', 'tom inadequado', 'assunto para pessoa', 'cliente já foi atendido']
-// Os mesmos limites do backend (DescartarIn / AvaliacaoIn): o campo não deixa
-// passar, em vez de o 422 voltar depois.
+// O mesmo limite do backend (DescartarIn): o campo não deixa passar, em vez de o
+// 422 voltar depois.
 const MAX_MOTIVO = 2000
-const MAX_CORRECAO = 4000
 // `salvando` = id da sugestão sendo descartada.
 const descarte = reactive({ aberto: false, motivo: '', salvando: null as string | null })
 async function confirmarDescarte() {
@@ -4576,29 +4573,10 @@ watch(() => props.conversaId, (novo, velho) => {
             </div>
           </div>
 
-          <!-- depois do envio: a sugestão estava boa? -->
-          <div v-if="aval.rascunhoId && canEdit" class="space-y-1 rounded-md border bg-muted/40 px-2.5 py-1.5 text-xs">
-            <div class="flex flex-wrap items-center gap-1.5">
-              <Sparkles class="size-3.5 text-violet-600 dark:text-violet-400" />
-              <template v-if="aval.nota">
-                <span class="text-muted-foreground">Guardado — a IA aprende com isso.</span>
-              </template>
-              <template v-else>
-                <span>{{ aval.usada ? 'Você usou a sugestão da IA. Ela estava boa?' : 'Você respondeu sem a sugestão da IA. O que ela errou?' }}</span>
-                <span class="ml-auto flex items-center gap-1">
-                  <button v-if="aval.usada" type="button" class="inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-emerald-700 hover:bg-emerald-500/10 disabled:opacity-50 dark:text-emerald-300" title="a sugestão estava boa" :disabled="aval.salvando" @click="avaliar('ok')"><ThumbsUp class="size-3.5" /> boa</button>
-                  <button type="button" class="inline-flex items-center gap-1 rounded border bg-background px-1.5 py-0.5 text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-300" title="a sugestão errou — dizer o que era o certo" :disabled="aval.salvando" @click="aval.abrindo = !aval.abrindo"><ThumbsDown class="size-3.5" /> errou</button>
-                </span>
-              </template>
-              <button type="button" class="rounded p-0.5 text-muted-foreground hover:bg-muted" title="dispensar" aria-label="dispensar" @click="limparAval"><X class="size-3.5" /></button>
-            </div>
-            <div v-if="aval.abrindo && !aval.nota" class="flex flex-wrap items-end gap-1.5">
-              <textarea v-model="aval.correcao" rows="2" :maxlength="MAX_CORRECAO" class="min-w-[220px] flex-1 rounded-md border bg-background px-2 py-1 text-xs" placeholder="o que estava errado — e como seria o certo?" aria-label="o que a sugestão errou e como seria o certo" />
-              <Button size="sm" class="h-7 text-xs" :disabled="!aval.correcao.trim() || aval.salvando" @click="avaliar('erro')">
-                <Loader2 v-if="aval.salvando" class="mr-1 size-3.5 animate-spin" /><Check v-else class="mr-1 size-3.5" /> salvar correção
-              </Button>
-            </div>
-          </div>
+          <!-- O "a sugestão estava boa?" depois do envio SAIU (13/11/2026, o Eduardo: "as msgs já
+               vão pro banco quando enviadas"): mandar igual já é a aprovação; a edição, o juiz
+               separa forma de conteúdo (`juiz_edicao`); o que a pessoa escreveu ou ajustou entra
+               no banco na hora. O 👍/👎 fica na revisão diária do que saiu sozinho. -->
 
           <!-- Avaliação (RF8): a resposta sai no anúncio, para qualquer comprador. -->
           <div v-if="conversa.canal === 'avaliacao' && podeDigitar" class="flex items-start gap-1.5 px-0.5 text-[11px] leading-4 text-amber-800 dark:text-amber-300" data-aviso-publica>

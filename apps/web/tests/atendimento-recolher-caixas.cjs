@@ -240,7 +240,8 @@ async function principal() {
   // ------------------------------------------------ a sugestão da IA (caixa de resposta)
   {
     const ini = tpl.indexOf('<div v-if="rascunho" class="space-y-1 rounded-md border border-violet')
-    const fim = tpl.indexOf('<!-- depois do envio: a sugestão estava boa? -->')
+    // O "estava boa?" saiu (13/11/2026): o fim da caixa da sugestão é o aviso dele.
+    const fim = tpl.indexOf('<!-- O "a sugestão estava boa?" depois do envio SAIU')
     assert.ok(ini > 0 && fim > ini, 'a caixa da sugestão')
     const caixa = tpl.slice(ini, fim)
     // O corpo (porquê, rastro do agente, validador) é a ÚNICA parte que recolhe;
