@@ -10,7 +10,7 @@ tela fixa o painel na mão (`fila_manual`) e a regra não mexe mais.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -19,9 +19,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import DevolucaoRastreio, UserRole
-from app.routers.devolutions import _fila
-from app.services import logistica_meli, logistica_shopee
+from app.models import DevolucaoRastreio, Logistica, UserRole
+from app.routers.devolutions import _fila, _tipo_do_painel
+from app.services import logistica_meli, logistica_rules, logistica_shopee
 
 pytestmark = pytest.mark.asyncio
 
@@ -187,3 +187,145 @@ async def test_soltar_volta_pra_regra(client, db, make_user, auth_as):
         assert (por[vazio]["fila"], por[vazio]["fila_manual"]) == ("fraude", False)
     finally:
         await _derruba_view(db)
+
+
+# --- 307271 (13/11/2026): "Não recebi meu pacote", Apenas reembolso ----------
+# Caiu em Acompanhamento e o Vinicius moveu na mão pra Fraude. Duas lacunas:
+# (1) o tipo só olhava `needs_logistics` — a "Solução do Reembolso: Apenas
+# reembolso" do Seller Center é o `return_solution` 1, que o robô de Chamados
+# já lia; (2) o pedido entra na aba logo que a varredura de pós-venda vê o caso,
+# mas o tipo só chegava com o sync do retorno (:10/:40) — até 30 min em
+# Acompanhamento. Agora a varredura grava o tipo na Logística junto do status e
+# o painel usa esse tipo enquanto o sync não lê o pedido.
+
+
+def test_shopee_apenas_reembolso_pela_solucao_do_caso():
+    tipo = logistica_shopee._tipo_do_caso
+    assert tipo({"status": "REQUESTED", "return_solution": 1, "needs_logistics": True}) == "REFUND"
+    assert tipo({"return_solution": "1"}) == "REFUND"
+    assert tipo({"return_solution": 0, "needs_logistics": False}) == "REFUND"
+    assert tipo({"return_solution": 0}) == "RETURN_AND_REFUND"  # 0 não é "ausente"
+    assert tipo({"return_solution": None}) is None
+    assert tipo({}) is None
+
+
+def test_tipo_do_painel_antes_e_depois_do_sync():
+    lg = {"order_status": "TO_RETURN", "return_status": "REQUESTED", "return_type": "REFUND"}
+    assert _tipo_do_painel(None, None, lg) == "REFUND"  # sync ainda não leu → tipo da Logística
+    assert _tipo_do_painel(None, "", lg) == "REFUND"
+    # Sync já leu: manda ele — inclusive o None de propósito do pacote voltando pela ida (303572).
+    assert _tipo_do_painel(None, "shopee", lg) is None
+    assert _tipo_do_painel("RETURN_AND_REFUND", "shopee", lg) == "RETURN_AND_REFUND"
+    assert _tipo_do_painel(None, None, {"return_status": "REQUESTED"}) is None  # ML/Amazon: sem tipo
+    assert _tipo_do_painel(None, None, None) is None
+
+
+async def test_get_e_patch_usam_tipo_da_logistica_ate_o_sync_ler(client, db, make_user, auth_as):
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    novo, ida, sem_tipo = (f"5{uuid4().hex[:6]}" for _ in range(3))
+    await _monta(db, [novo, ida, sem_tipo])
+
+    def _lg(pedido: str, **meli) -> Logistica:
+        return Logistica(
+            plataforma="Shopee", conta="mega", pedido_bling=pedido, pedido_marketplace=f"MP-{pedido}",
+            rastreio=f"BR{pedido}", meli_status={"order_status": "TO_RETURN", **meli},
+        )
+
+    db.add_all([
+        # Acabou de entrar: a varredura gravou o caso, o sync ainda não passou.
+        _lg(novo, return_status="REQUESTED", return_type="REFUND"),
+        # Sync já leu e decidiu que o pacote volta pela ida (tipo None de propósito).
+        _lg(ida, return_status="ACCEPTED", return_type="REFUND"),
+        DevolucaoRastreio(pedido_bling=ida, fonte_auto="shopee", devolucao_status_auto="ACCEPTED"),
+        # Linha da Logística sem tipo (caso antigo, ML/Amazon): fica onde sempre esteve.
+        _lg(sem_tipo, return_status="REQUESTED"),
+    ])
+    await db.commit()
+    try:
+        r = await client.get("/api/devolutions/acompanhamento")
+        assert r.status_code == 200
+        por = {i["pedido_bling"]: i for i in r.json()["items"]}
+        assert (por[novo]["fila"], por[novo]["fila_manual"]) == ("fraude", False)
+        assert (por[ida]["fila"], por[ida]["fila_manual"]) == ("acompanhamento", False)
+        assert (por[sem_tipo]["fila"], por[sem_tipo]["fila_manual"]) == ("acompanhamento", False)
+
+        # Editar a linha cria o devolucao_rastreio SEM fonte_auto: a resposta
+        # (que o front espelha na tela) segue a mesma regra do GET.
+        r = await client.patch(f"/api/devolutions/acompanhamento/{novo}", json={"observacao": "olhar"})
+        assert r.status_code == 200, r.text
+        assert (r.json()["fila"], r.json()["fila_manual"]) == ("fraude", False)
+    finally:
+        await _derruba_view(db)
+
+
+class _FakeSweepShopee:
+    def __init__(self, returns: list[dict]):
+        self.returns = returns
+
+    async def get_order_status_map(self, order_sns):
+        return {str(s): {"status": "TO_RETURN", "update_time": 1789650000} for s in order_sns}
+
+    async def get_return_list(self, **_):
+        return [dict(d) for d in self.returns]
+
+
+async def test_sweep_shopee_grava_o_tipo_junto_do_status(db, monkeypatch):
+    sn = f"2611{uuid4().hex[:10].upper()}"
+    linha = Logistica(
+        plataforma="Shopee", conta="mega", pedido_bling=f"6{uuid4().hex[:6]}", pedido_marketplace=sn,
+        data=date.today(), meli_status={"order_status": "TO_RETURN", "logistics_status": "LOGISTICS_PICKUP_DONE"},
+    )
+    db.add(linha)
+    await db.commit()
+    caso = {"order_sn": sn, "return_sn": "R307271", "status": "REQUESTED", "create_time": 1789640000,
+            "update_time": 1789650000, "return_solution": 1, "needs_logistics": True}
+    fake = _FakeSweepShopee([caso])
+
+    async def _integ(session, conta):
+        return conta
+
+    monkeypatch.setattr(logistica_shopee, "_shopee_integration_for_conta", _integ)
+    monkeypatch.setattr(logistica_shopee, "_build_shopee_client", lambda s, i, *, lock=None: fake)
+
+    out = await logistica_shopee.sweep_pos_venda(db)
+    await db.refresh(linha)
+    assert linha.meli_status["return_status"] == "REQUESTED"
+    assert linha.meli_status["return_type"] == "REFUND"
+    assert linha.id in out["ids"]  # status novo → regra da aba Status roda
+    assert "return_type" in (linha.status_datas or {})
+    assert {"campo": "return_type", "rotulo": "Tipo do caso", "valor": "Só reembolso (produto fica com o cliente)"} in (
+        logistica_rules.detalhe_para("Shopee", linha.meli_status)
+    )
+
+    # Só o tipo mudou: grava, mas não conta como mudança (a assinatura não usa o tipo).
+    fake.returns[0].update(return_solution=0, needs_logistics=True)
+    out = await logistica_shopee.sweep_pos_venda(db)
+    await db.refresh(linha)
+    assert linha.meli_status["return_type"] == "RETURN_AND_REFUND"
+    assert linha.meli_status["return_status"] == "REQUESTED"
+    assert linha.id not in out["ids"]
+
+    # Nada mudou: não regrava.
+    antes = dict(linha.status_datas or {})
+    out = await logistica_shopee.sweep_pos_venda(db)
+    await db.refresh(linha)
+    assert linha.status_datas == antes and linha.id not in out["ids"]
+
+
+async def test_reenrich_shopee_preserva_o_tipo_do_caso(db, monkeypatch):
+    linha = Logistica(
+        plataforma="Shopee", conta="mega", pedido_bling=f"7{uuid4().hex[:6]}", pedido_marketplace="2611XYZ",
+        meli_status={"order_status": "TO_RETURN", "return_status": "REQUESTED", "return_type": "REFUND"},
+    )
+    db.add(linha)
+    await db.commit()
+
+    async def _enr(client, order_sn):
+        return {"meli_status": {"order_status": "TO_RETURN", "logistics_status": "LOGISTICS_PICKUP_DONE"}}
+
+    monkeypatch.setattr(logistica_shopee, "build_enrichment", _enr)
+    await logistica_shopee.enrich_row(db, linha, client_cache={"mega": object()})
+    assert linha.meli_status["return_status"] == "REQUESTED"
+    assert linha.meli_status["return_type"] == "REFUND"
+    assert linha.meli_status["logistics_status"] == "LOGISTICS_PICKUP_DONE"

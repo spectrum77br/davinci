@@ -217,12 +217,14 @@ async def enrich_row(
 
     enr = await build_enrichment(client, order_sn)
     meli = enr["meli_status"]
-    # `return_status` vem do sweep de pós-venda (returns API), não do
-    # build_enrichment — preserva no re-enrich, senão a devolução detectada
-    # sumiria da assinatura no tick seguinte e a regra de status regrediria.
-    ret = (row.meli_status or {}).get("return_status")
-    if ret:
-        meli = {**meli, "return_status": ret}
+    # `return_status`/`return_type` vêm do sweep de pós-venda (returns API),
+    # não do build_enrichment — preserva no re-enrich, senão a devolução
+    # detectada sumiria da assinatura no tick seguinte e a regra de status
+    # regrediria (e o tipo do caso sumiria da aba Devoluções).
+    for campo in ("return_status", "return_type"):
+        val = (row.meli_status or {}).get(campo)
+        if val:
+            meli = {**meli, campo: val}
     # Antes de trocar o status: o carimbo compara o valor velho com o novo.
     row.status_datas = logistica_datas.aplicar(row, meli, enr.get("datas"))
     row.meli_status = meli
@@ -356,14 +358,14 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
                 conta=conta, err=str(e)[:200],
             )
             devolucoes = []
-        melhor: dict[str, tuple[bool, int, str]] = {}
+        melhor: dict[str, tuple[bool, int, str, str | None]] = {}
         for d in devolucoes:
             sn = str(d.get("order_sn") or "").strip()
             st = str(d.get("status") or "").strip().upper()
             if not sn or not st:
                 continue
             vivo = st not in logistica_rules._SHOPEE_RETURN_ENCERRADO
-            cand = (vivo, int(d.get("update_time") or 0), st)
+            cand = (vivo, int(d.get("update_time") or 0), st, _tipo_do_caso(d))
             if sn not in melhor or cand[:2] > melhor[sn][:2]:
                 melhor[sn] = cand
         # Devolução de venda fora da janela de 45 dias: casa com a linha velha
@@ -388,21 +390,36 @@ async def sweep_pos_venda(session: AsyncSession) -> dict:
             got = melhor.get((r.pedido_marketplace or "").strip())
             if got is None:
                 continue
-            st = got[2]
-            atual = ((r.meli_status or {}).get("return_status") or "").strip().upper()
-            if st != atual:
-                meli = dict(r.meli_status or {})
-                meli["return_status"] = st
+            st, tipo = got[2], got[3]
+            antes = r.meli_status or {}
+            mudou_status = st != (antes.get("return_status") or "").strip().upper()
+            # Tipo do caso (só reembolso × pacote volta) junto do status, como
+            # o TikTok já faz: o pedido entra na aba Devoluções logo depois
+            # deste sinal e o sync do retorno (:10/:40) só lê o tipo até 30 min
+            # depois — sem isto o só reembolso ficava esse tempo em
+            # Acompanhamento (307271, 13/11/2026). Tipo sozinho não conta como
+            # "mudou": a assinatura da Shopee não usa o tipo.
+            mudou_tipo = tipo != (antes.get("return_type") or None)
+            if not (mudou_status or mudou_tipo):
+                continue
+            meli = dict(antes)
+            meli["return_status"] = st
+            if tipo:
+                meli["return_type"] = tipo
+            else:
+                meli.pop("return_type", None)
+            datas_ret: dict[str, dict[str, str]] = {}
+            if mudou_status:
                 # Carimba a data da devolução (update_time da Shopee) — é a
                 # "última movimentação" da aba Acompanhamento; sem isso o
                 # carimbo ficava parado no dia da 1ª devolução (caso 291981).
-                datas_ret: dict[str, dict[str, str]] = {}
                 logistica_datas.propor(
                     datas_ret, "return_status", got[1] or None,
                     logistica_datas.FONTE_PLATAFORMA,
                 )
-                r.status_datas = logistica_datas.aplicar(r, meli, datas_ret)
-                r.meli_status = meli
+            r.status_datas = logistica_datas.aplicar(r, meli, datas_ret)
+            r.meli_status = meli
+            if mudou_status:
                 r.status_lido_em = datetime.now(UTC)
                 mudados.add(r.id)
                 n_returns += 1
@@ -577,16 +594,24 @@ def _reembolso_do_caso(
 
 
 def _tipo_do_caso(d: dict) -> str | None:
-    """`needs_logistics` da Shopee → tipo no vocabulário do TikTok, que a aba
-    Acompanhamento já entende: False = SÓ reembolso (o cliente fica com o
-    produto; "não recebi"/"chegou vazio") → "REFUND"; True = pacote volta →
-    "RETURN_AND_REFUND"; ausente → None. É isso que separa a aba Fraude
-    (Vinicius 17/09: "o cliente alega que chegou vazio, pede reembolso sem
-    devolução — outra pessoa cuida") da Acompanhamento."""
+    """Tipo do caso da Shopee no vocabulário do TikTok, que a aba
+    Acompanhamento já entende: SÓ reembolso (o cliente fica com o produto;
+    "não recebi"/"chegou vazio") → "REFUND"; pacote volta →
+    "RETURN_AND_REFUND"; sem nenhum dos dois campos → None. É isso que separa
+    a aba Fraude (Vinicius 17/09: "o cliente alega que chegou vazio, pede
+    reembolso sem devolução — outra pessoa cuida") da Acompanhamento.
+
+    Só reembolso = `needs_logistics` false OU `return_solution` 1 — a
+    "Solução do Reembolso: Apenas reembolso" do Seller Center. O robô de
+    Chamados (`chamados_devolucao`) e o Atendimento já liam os dois; aqui só o
+    primeiro valia, e o 261104CSC117JM / 307271 ("Não recebi meu pacote",
+    Apenas reembolso — 13/11/2026) caiu em Acompanhamento."""
     needs = d.get("needs_logistics")
-    if needs is False:
+    sol = d.get("return_solution")  # 0 é valor de verdade: nada de `or ""`
+    solucao = "" if sol is None else str(sol).strip()
+    if needs is False or solucao == "1":
         return "REFUND"
-    if needs is True:
+    if needs is True or solucao == "0":
         return "RETURN_AND_REFUND"
     return None
 

@@ -1047,9 +1047,19 @@ SHOPEE_LOG_LABELS_PT: dict[str, str] = {
 
 _CAMPOS_POR_PLATAFORMA: dict[str, tuple[list[str], dict[str, str], dict[str, dict[str, str]]]] = {
     "shopee": (
-        ["order_status", "logistics_status"],
-        {"order_status": "Status do pedido", "logistics_status": "Status do envio"},
-        {"order_status": SHOPEE_STATUS_LABELS_PT, "logistics_status": SHOPEE_LOG_LABELS_PT},
+        # `return_type`: gravado pelo sweep de pós-venda (13/11/2026), mesmo
+        # vocabulário do TikTok — "Só reembolso" = a aba Fraude.
+        ["order_status", "logistics_status", "return_type"],
+        {
+            "order_status": "Status do pedido",
+            "logistics_status": "Status do envio",
+            "return_type": "Tipo do caso",
+        },
+        {
+            "order_status": SHOPEE_STATUS_LABELS_PT,
+            "logistics_status": SHOPEE_LOG_LABELS_PT,
+            "return_type": TIKTOK_RETURN_TYPE_LABELS_PT,
+        },
     ),
     "tiktok": (
         ["order_status", "return_type", "return_status"],

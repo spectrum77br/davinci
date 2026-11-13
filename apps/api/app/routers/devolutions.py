@@ -899,6 +899,25 @@ def _fila(fila_manual: str | None, devolucao_tipo_auto: str | None) -> tuple[str
     return "acompanhamento", False
 
 
+def _tipo_do_painel(
+    tipo_auto: str | None, fonte_auto: str | None, lg_meli_status: dict | None
+) -> str | None:
+    """Tipo do caso que decide o painel (`_fila`). Manda o do sync do retorno
+    (`devolucao_rastreio`), que também corrige o tipo quando o pacote volta
+    pela ida (303572 → None de propósito). Enquanto o sync ainda não leu o
+    pedido (`fonte_auto` vazio — ele roda às :10/:40), vale o tipo que a
+    varredura de pós-venda gravou na linha da Logística junto com o status do
+    caso (Shopee e TikTok; ML/Amazon não gravam): o pedido entra em Aguardando
+    Devolução por causa desse mesmo sinal, então o tipo já está lá. Sem isso o
+    só reembolso entrava em Acompanhamento e ficava até a próxima rodada
+    (307271, 13/11/2026)."""
+    if (fonte_auto or "").strip():
+        return tipo_auto
+    if not isinstance(lg_meli_status, dict):
+        return None
+    return str(lg_meli_status.get("return_type") or "").strip() or None
+
+
 def _chegou_em(
     *,
     plataforma: str | None,
@@ -1198,7 +1217,9 @@ async def acompanhamento_rows(
         tipo_auto = d.pop("devolucao_tipo_auto", None)
         destino_auto = d.pop("devolucao_destino_auto", None)
         fonte_auto = d.pop("fonte_auto", None)
-        d["fila"], d["fila_manual"] = _fila(d.pop("fila_manual", None), tipo_auto)
+        d["fila"], d["fila_manual"] = _fila(
+            d.pop("fila_manual", None), _tipo_do_painel(tipo_auto, fonte_auto, lg_meli_status)
+        )
         d["video_status"] = _video_status(
             link=d.get("video_link"),
             solicitado_em=d.get("video_solicitado_em"),
@@ -1557,6 +1578,12 @@ async def patch_acompanhamento_rastreio(
         status_datas=lg["lg_status_datas"] if lg else None,
     )
     hoje_sp = datetime.now(SAO_PAULO).date()
+    fila, fila_manual = _fila(
+        row.fila_manual,
+        _tipo_do_painel(
+            row.devolucao_tipo_auto, row.fonte_auto, lg["lg_meli_status"] if lg else None
+        ),
+    )
     lancada = (
         await session.execute(
             select(func.count())
@@ -1587,8 +1614,8 @@ async def patch_acompanhamento_rastreio(
             "reembolso_valor": row.reembolso_valor_auto,
             "reembolso_em": row.reembolso_em_auto,
             "reembolso_detalhe": row.reembolso_detalhe_auto,
-            "fila": _fila(row.fila_manual, row.devolucao_tipo_auto)[0],
-            "fila_manual": _fila(row.fila_manual, row.devolucao_tipo_auto)[1],
+            "fila": fila,
+            "fila_manual": fila_manual,
             "devolucao_chegou_em": _chegou_em(
                 plataforma=lg["lg_plataforma"] if lg else None,
                 meli_status=lg["lg_meli_status"] if lg else None,
