@@ -478,7 +478,7 @@ def pecas(monkeypatch, redis_falso, ajustes) -> _Pecas:
         p.checagens.append({"proposta": proposta, "fichas": fichas})
         return checagens.Checagens(pendencias=list(p.pendencias))
 
-    def aplicar(conferida, chk, *, acoes_pessoa, modo):
+    def aplicar(conferida, chk, *, acoes_pessoa, modo, virada=False):
         if not p.aplicar_fiel:
             return conferida
         motivos = [
