@@ -3632,7 +3632,50 @@ def pode_nao_ter_saido(
         return False
     if ctx is None and recentes is None:
         return True
+    if _so_cartoes_cancelados(conversa, ctx, recentes or ()):
+        return False
     return ha_pedido(conversa, ctx, recentes or ())
+
+
+def _status_dos_cartoes(m: Any) -> list[str | None]:
+    """O status de cada cartão de pedido da mensagem (o anexo enriquecido); None quando o
+    cartão não diz (o item cru da plataforma)."""
+    saida: list[str | None] = [
+        str(a.get("status")) if a.get("status") else None
+        for a in getattr(m, "anexos", None) or []
+        if isinstance(a, Mapping) and a.get("tipo") == "pedido" and a.get("pedido")
+    ]
+    payload = getattr(m, "payload", None)
+    if (
+        isinstance(payload, Mapping)
+        and (
+            payload.get("message_type") == constantes.TIPO_SHOPEE_CARTAO_PEDIDO
+            or payload.get("type") == constantes.TIPO_TIKTOK_CARTAO_PEDIDO
+        )
+        and not saida
+    ):
+        saida.append(None)
+    return saida
+
+
+def _so_cartoes_cancelados(
+    conversa: Any, ctx: Mapping[str, Any] | None, recentes: Sequence[Any]
+) -> bool:
+    """O pedido só aparece pelo cartão do chat e TODO cartão diz cancelado? PURA.
+
+    O eval de 13/11/2026: "Cancela" num chat da Shopee em que o único pedido era o cartão
+    com status "Cancelado" (o pedido fora do sistema) — o código não sabia o estado, ficou
+    no lado seguro e pediu "segurar envio" (nos dois modelos). Cancelado não tem envio a
+    segurar. Cartão sem status, pedido no contexto ou na conversa: a regra de antes.
+    """
+    if isinstance(ctx, Mapping) and ctx.get("pedido"):
+        return False
+    if (getattr(conversa, "pedido_marketplace", None) or "").strip():
+        return False
+    status = [st for m in recentes for st in _status_dos_cartoes(m)]
+    return bool(status) and all(
+        st is not None and "cancel" in validador.plano_de(st) for st in status
+    )
 
 
 # ── Os OUTROS pedidos lidos pelas ferramentas (revisão de 20/10/2026) ─────
