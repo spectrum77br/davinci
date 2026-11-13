@@ -6455,6 +6455,22 @@ def andamento_no_rascunho(rascunho: Any, etiquetas: Collection[str] = ()) -> boo
 MOTIVO_SEM_BANCO = "sem_banco"
 
 
+def liberado_pela_regua(agente: Mapping[str, Any], categoria: str | None, canal: Any) -> bool:
+    """O assunto "só de pessoa" foi solto pela RÉGUA neste canal? PURA (13/11/2026).
+
+    O Eduardo: o agente responde todos os assuntos; sai sozinho o tipo que bate a aprovação
+    da equipe (80%; 90% em reembolso, cancelamento, troca e reclamação). Com a régua ligada
+    quando o rascunho nasceu (`fatos.agente.regua`), as listas do canal são dela — o assunto
+    nelas passou na régua, e o "só pessoa" de sempre deixa de prendê-lo.
+    """
+    if not agente.get("regua") or not categoria:
+        return False
+    listas = set(getattr(canal, "auto_categorias", None) or []) | set(
+        getattr(canal, "auto_orientacao", None) or []
+    )
+    return categoria in listas
+
+
 def sem_banco_do_tipo(agente: Mapping[str, Any], categoria: str | None) -> bool:
     """O portão do banco segura este rascunho? PURA."""
     from app.services.atendimento import tipos_pergunta
@@ -6559,7 +6575,7 @@ def _trava_do_assunto(
         # Os assuntos de produto fora do `auto_categorias` (um valor antigo do
         # `auto_agente` no banco não solta).
         return "assunto_de_produto"
-    if categoria in CATEGORIAS_SO_HUMANO:
+    if categoria in CATEGORIAS_SO_HUMANO and not liberado_pela_regua(agente, categoria, canal):
         return "assunto_so_humano"
     return None
 
@@ -7003,6 +7019,8 @@ async def _talvez_enviar(
                 and rascunho.categoria not in ASSUNTOS_ORIENTACAO
                 and rascunho.categoria
                 in manual_svc.ids_so_humano(await manual_svc.categorias_ativas(session))
+                # A régua (13/11/2026): o assunto que ela soltou no canal não fica preso.
+                and not liberado_pela_regua(_fatos_do_agente(rascunho), rascunho.categoria, canal)
             ):
                 motivo = "assunto_so_humano"
             if motivo is None:

@@ -129,6 +129,13 @@ PREFIXOS_SEM_PROVA = ("par:",)
 PREFIXO_BANCO = "par:b"
 
 
+def regua_ativa() -> bool:
+    """A régua por tipo decide as listas do envio sozinho? (`atendimento_regua_ativa`)"""
+    from app.config import get_settings
+
+    return bool(get_settings().atendimento_regua_ativa)
+
+
 def banco_exigido_para(plataforma: str | None, canal: str | None) -> bool:
     """O portão do banco vale nesta conversa? (13/11/2026) Só com o agente lendo o banco E
     a régua por tipo ligada, numa plataforma que o banco cobre e fora do e-mail."""
@@ -570,6 +577,10 @@ class ContextoAgente:
     # plataforma que o banco cobre (nunca e-mail nem WhatsApp). O `para_fatos` grava a marca
     # e os tipos das respostas do banco que o pacote mostrou; `ia.trava_do_agente` decide.
     banco_exigido: bool = False
+    # A RÉGUA por tipo ligada quando o rascunho nasceu (13/11/2026): as listas do canal são
+    # dela, e o assunto que ela soltou (≥ 80%; 90% nos sensíveis) não fica preso no "só
+    # pessoa" (`ia.liberado_pela_regua`).
+    regua: bool = False
     # D1 (decisão do dono, 23/10/2026 ~12:40): o "responde e marca" — a devolução/
     # reclamação aberta na plataforma com o turno só informativo
     # (`acao_pessoa.responde_e_marca_do_turno`): as ações de `acao_pessoa.ACOES_POS_ENVIO`
@@ -689,6 +700,7 @@ class ContextoAgente:
             ctx.aceitar_pedido(*contexto_svc._chaves_do_pedido(conversa))
         ctx.aceitar_anuncio(getattr(conversa, "anuncio_id", None))
         ctx.banco_exigido = banco_exigido_para(conversa.plataforma, conversa.canal)
+        ctx.regua = regua_ativa()
         return ctx
 
     # ── tempo ──
@@ -1076,6 +1088,9 @@ class ContextoAgente:
         if self.produto_pelo_anuncio:
             # Liberações L1/L2 (23/10/2026): só quando há (o registro de antes não muda).
             extra["produto_pelo_anuncio"] = True
+        if self.regua:
+            # A régua ligada quando o rascunho nasceu (13/11/2026): só quando está.
+            extra["regua"] = True
         if self.banco_exigido:
             # O portão do banco (13/11/2026): a marca e o tipo de cada resposta do banco que
             # o pacote mostrou (`par:b<id>` → tipo). Só com a marca (o registro de antes não

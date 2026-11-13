@@ -115,3 +115,59 @@ def test_o_contexto_grava_a_marca_e_os_tipos_so_com_o_portao():
     assert fatos["banco_exigido"] is True
     # Só as do banco (`par:b…`) e com tipo.
     assert fatos["banco_tipos"] == {"par:b10": "rastreio"}
+
+
+# ── A régua solta o assunto "só de pessoa" (13/11/2026) ──────────────────────
+# Dos 8 assuntos "só de pessoa", 7 são de orientação: a lista `auto_orientacao` (que a
+# régua escreve) já os solta. O único fora dela é a reclamação forte — é ela que o
+# `liberado_pela_regua` solta.
+
+
+def test_so_pessoa_continua_preso_sem_a_regua():
+    canal = _canal(auto_categorias=["reclamacao_forte"], auto_agente=["reclamacao_forte"])
+    r = _rascunho("reclamacao_forte", {})
+    assert ia.trava_do_agente(r, canal) == "assunto_so_humano"
+
+
+def test_a_regua_solta_o_assunto_que_ela_pos_na_lista():
+    canal = _canal(
+        auto_categorias=["reclamacao_forte"],
+        auto_agente=["reclamacao_forte"],
+        auto_orientacao=["reembolso"],
+    )
+    r = _rascunho("reclamacao_forte", {"regua": True})
+    assert ia.liberado_pela_regua(r.fatos["agente"], "reclamacao_forte", canal)
+    assert ia.trava_do_agente(r, canal) is None
+    # O de orientação sai pela lista dele, como sempre.
+    assert ia.trava_do_agente(_rascunho("reembolso", {"regua": True}), canal) is None
+    # Fora da lista do canal (a régua não soltou): o assunto continua não liberado.
+    fora = _rascunho("cancelamento", {"regua": True})
+    assert ia.trava_do_agente(fora, canal) in duvida.ASSUNTO_NAO_LIBERADO
+    # E o portão do banco continua valendo depois.
+    sem_banco = _rascunho(
+        "reclamacao_forte", {"regua": True, "banco_exigido": True, "banco_tipos": {}}
+    )
+    assert ia.trava_do_agente(sem_banco, canal) == "sem_banco"
+    # A ação de pessoa nunca é solta pela régua.
+    acao = _rascunho("reclamacao_forte", {"regua": True})
+    acao.fatos["agente"]["acoes_pessoa"] = ["reclamacao_aberta"]
+    assert ia.trava_do_agente(acao, canal) == "acao_pessoa"
+
+
+def test_o_contexto_grava_a_regua_so_quando_ligada(monkeypatch):
+    ctx = agente_ctx.ContextoAgente(
+        conversa_id="c",
+        gatilho_id=None,
+        canal_id=None,
+        integration_id=None,
+        plataforma="shopee",
+        canal="chat",
+        modo="auto",
+    )
+    assert "regua" not in ctx.para_fatos()
+    ctx.regua = True
+    assert ctx.para_fatos()["regua"] is True
+    monkeypatch.setattr(get_settings(), "atendimento_regua_ativa", True)
+    assert agente_ctx.regua_ativa() is True
+    monkeypatch.setattr(get_settings(), "atendimento_regua_ativa", False)
+    assert agente_ctx.regua_ativa() is False
