@@ -1184,7 +1184,7 @@ async def test_m_matriz_do_envio_automatico(
     # O pedido ao modelo: o configurado (o Sonnet 5.5 desde o item 5 da rodada "redondo",
     # 23/10/2026), o esforço, nada de amostragem nem de raciocínio.
     (pedido,) = api.pedidos
-    assert pedido["model"] == agente_ligado.atendimento_agente_modelo == "claude-sonnet-5-5"
+    assert pedido["model"] == agente_ligado.atendimento_agente_modelo == "claude-opus-5-5"
     assert pedido["output_config"]["effort"] == agente_ligado.atendimento_agente_effort
     assert not {"temperature", "top_p", "top_k", "thinking"} & set(pedido)
 

@@ -86,15 +86,17 @@ def _padrao(nome: str) -> Any:
     return Settings.model_fields[nome].default
 
 
-def test_5_o_padrao_e_o_sonnet_e_o_verificador_continua_no_haiku():
-    assert _padrao("atendimento_agente_modelo") == SONNET
+def test_5_o_padrao_e_o_opus_e_o_verificador_continua_no_haiku():
+    # 13/11/2026 (o dono, "opus com 50 dol"): Sonnet → Opus 5.5 e o teto do dia 30 → 50.
+    assert _padrao("atendimento_agente_modelo") == "claude-opus-5-5"
     assert _padrao("atendimento_agente_effort") == "medium"
     assert _padrao("atendimento_agente_prazo_s") == 60
     assert _padrao("atendimento_agente_teto_usd_conversa") == 0.50
-    assert _padrao("atendimento_agente_teto_usd_dia") == 30.0
+    assert _padrao("atendimento_agente_teto_usd_dia") == 50.0
     assert v.MODELO == HAIKU and v.argumentos("x")["model"] == HAIKU
     # O Sonnet 5.5 tem o fallback do servidor; o Haiku não.
     assert agente._com_fallback(SONNET) and not agente._com_fallback(HAIKU)
+    assert agente._com_fallback("claude-opus-5-5")
 
 
 def test_5_o_preco_do_sonnet_e_o_do_sonnet_5_do_fallback():
@@ -144,14 +146,15 @@ async def test_5_o_teto_novo_da_conversa_cabe_o_sonnet_frio(redis_falso, monkeyp
         await custo.registrar(frio, SONNET, conversa_id="c-haiku", uso=custo.Uso())
 
 
-async def test_5_o_pedido_do_sonnet_pelo_padrao(pecas, monkeypatch):
+async def test_5_o_pedido_do_padrao(pecas, monkeypatch):
     monkeypatch.setattr(
         get_settings(), "atendimento_agente_modelo", _padrao("atendimento_agente_modelo")
     )
     r, api, _ = await _rodar(pecas, [_final()])
     corpo = api.pedidos[0]
-    assert corpo["model"] == SONNET
-    # Sonnet 5.5: nada de `thinking` (o {"type": "disabled"} dá 400 nele) nem amostragem.
+    # O padrão desde 13/11/2026 é o Opus 5.5 (era o Sonnet 5.5): o mesmo pedido.
+    assert corpo["model"] == "claude-opus-5-5"
+    # Nada de `thinking` (o {"type": "disabled"} dá 400 nele) nem amostragem.
     for proibido in ("thinking", "temperature", "top_p", "top_k"):
         assert proibido not in corpo
     assert corpo["output_config"]["effort"] == "medium"

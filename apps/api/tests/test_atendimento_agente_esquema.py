@@ -747,12 +747,13 @@ def test_configuracao_padrao_do_agente():
     assert padrao["atendimento_agente_api_key"] == ""
     # Item 5 da rodada "redondo" (23/10/2026): o Sonnet 5.5, o prazo de 60 s e os tetos
     # de US$ 10 por dia e US$ 0,50 por conversa (o verificador continua no Haiku).
-    assert padrao["atendimento_agente_modelo"] == "claude-sonnet-5-5"
+    # 13/11/2026 (o dono, "opus com 50 dol"): o Opus 5.5 e o teto do dia 50.
+    assert padrao["atendimento_agente_modelo"] == "claude-opus-5-5"
     assert padrao["atendimento_agente_effort"] == "medium"
     # Rodada "fechar o eval" (23/10/2026): 5 → 8 pedidos, o último sem ferramentas.
     assert padrao["atendimento_agente_max_turnos"] == 8
     assert padrao["atendimento_agente_prazo_s"] == 60
-    assert padrao["atendimento_agente_teto_usd_dia"] == 30.0
+    assert padrao["atendimento_agente_teto_usd_dia"] == 50.0
     assert padrao["atendimento_agente_teto_usd_conversa"] == 0.50
     assert padrao["atendimento_agente_replay"] is False
     assert padrao["atendimento_agente_replay_plataformas"] == "shopee"

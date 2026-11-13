@@ -739,7 +739,11 @@ class Settings(BaseSettings):
     # `top_p` ou `top_k`; o esforço vai em `output_config.effort`. O VERIFICADOR
     # continua no Haiku 5.5 (`agente.verificador.MODELO`, fixo no código). Voltar ao
     # Haiku é só `ATENDIMENTO_AGENTE_MODELO=claude-haiku-5-5` no .env (e os tetos).
-    atendimento_agente_modelo: str = "claude-sonnet-5-5"
+    # 13/11/2026 (o dono, "opus com 50 dol"): o Opus 5.5. No eval cego com o banco de
+    # respostas (40 conversas reais, nota sem saber o modelo) empatou com o Sonnet em
+    # "mandaria sem editar" (62% × 65%), não teve erro grave (o Sonnet teve 1, numa
+    # disputa) e foi melhor em reembolso; custa ~US$ 0,07 por resposta (o Sonnet, 0,033).
+    atendimento_agente_modelo: str = "claude-opus-5-5"
     # low | medium | high — o eval decide; `medium` (o eval S1) é o ponto de partida
     # do Sonnet 5.5 para várias ferramentas por resposta.
     atendimento_agente_effort: str = "medium"
@@ -763,8 +767,9 @@ class Settings(BaseSettings):
     # ~US$ 0,035 por resposta (frio, com o cache gravado, 0,09–0,11) — o da conversa
     # 0,05 → 0,50 (várias rodadas numa conversa) e o do dia 5 → 10. 28/10/2026 (o
     # dono, "mude pra 30 dol"): 10 → 30 — o "Sugerir" de toda a equipe passou para o
-    # agente (o legado da Groq saiu) e soma no mesmo dia do automático.
-    atendimento_agente_teto_usd_dia: float = 30.0
+    # agente (o legado da Groq saiu) e soma no mesmo dia do automático. 13/11/2026 (o
+    # dono, "opus com 50 dol"): 30 → 50 com o Opus (~2× o Sonnet por resposta).
+    atendimento_agente_teto_usd_dia: float = 50.0
     atendimento_agente_teto_usd_conversa: float = 0.50
     # O dia dos TESTES (o replay da noite, o eval e a calibração) é outro (o dono,
     # 28/10/2026: em 27/10 o eval comeu o dia único e o agente ao vivo parou às 13:06):
