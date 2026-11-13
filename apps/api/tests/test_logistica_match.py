@@ -1007,6 +1007,10 @@ async def test_list_pedido_flex_sem_regra_flex_fica_vermelho(
     # Pedido comum: a regra da Shopee, sem ação → resolvido (escondido).
     assert linhas["308934"]["acao_status_id"] == rs.json()["id"]
     assert linhas["308934"]["acao_resolvido"] is True
+    # O pedido Flex fica só na aba Flex (13/11/2026) para quem vê o Flex.
+    assert "308933" not in linhas
+    lista = (await client.get("/api/logistica?envio=flex")).json()
+    linhas = {x["pedido_bling"]: x for x in lista}
     # Pedido Flex: nenhuma regra Shopee Flex → vermelho.
     assert linhas["308933"]["acao_match"] is False
     assert linhas["308933"]["acao_resolvido"] is False

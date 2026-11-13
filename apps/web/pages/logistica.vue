@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine, Download } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine, Download, Truck } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
 definePageMeta({
@@ -2713,6 +2713,20 @@ async function aplicarStatusBling(c: Logistica) {
             <MapPin class="size-3.5" :class="atualizandoRastreio ? 'animate-pulse' : ''" />
             {{ atualizandoRastreio ? 'Buscando…' : 'Correios' }}
           </button>
+          <!-- Aba Flex (13/11/2026, 2ª prévia): consulta AGORA todos os Flex na
+               transportadora — no lugar do Correios (o Flex não passa pelos Correios). -->
+          <button
+            v-if="tab === 'flex' && podeVerFlex"
+            type="button"
+            class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
+            :disabled="consultandoTracken"
+            title="Consulta agora todos os pedidos Flex no rastreio da transportadora (Tracken). A aba Flex aberta já faz isso sozinha de 30 em 30 min."
+            data-atualizar-tracken
+            @click="consultarTracken()"
+          >
+            <Truck class="size-3.5" :class="consultandoTracken ? 'animate-pulse' : ''" />
+            {{ consultandoTracken ? 'Consultando…' : 'Atualizar Tracken' }}
+          </button>
           <button
             type="button"
             class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
@@ -2923,19 +2937,6 @@ async function aplicarStatusBling(c: Logistica) {
       <div class="hidden items-stretch gap-3 md:grid xl:grid-cols-[minmax(0,1fr)_340px]">
         <div class="flex min-w-0 flex-col rounded-md border bg-card">
           <div class="relative flex items-center justify-center rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
-            <!-- Aba Flex (13/11/2026): consulta AGORA todos os Flex na transportadora
-                 (o robô lê sozinho de 30 em 30 min). -->
-            <button
-              v-if="ehFlexTab"
-              type="button"
-              class="absolute left-3 inline-flex items-center gap-1 rounded border border-white/40 bg-white/10 px-2 py-0.5 text-[11px] font-semibold hover:bg-white/20 disabled:opacity-60"
-              title="Consulta agora todos os pedidos Flex no rastreio da transportadora (Tracken). A aba Flex aberta já faz isso sozinha de 30 em 30 min."
-              :disabled="consultandoTracken"
-              data-atualizar-tracken
-              @click="consultarTracken()"
-            >
-              <RefreshCw class="size-3" :class="consultandoTracken ? 'animate-spin' : ''" /> Atualizar Tracken
-            </button>
             <span>{{ tituloTabela }}</span>
             <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">o que a plataforma diz × o que está no Bling<template v-if="ehFlexTab"> × o que a transportadora diz</template></span>
           </div>
@@ -2950,14 +2951,17 @@ async function aplicarStatusBling(c: Logistica) {
                  branco"): Bling e Nº na plataforma viraram colunas separadas, o Produto mostra o
                  SKU da venda e Produto/Status/Localização DIVIDEM a sobra da tela (27/17/22%; na
                  Amazon 22/12/18%) — a Localização mostra o texto inteiro, sem cortar. Na aba Flex
-                 entra a coluna Tracken (220px). -->
+                 entra a coluna Tracken (220px).
+                 Mesmo dia, 2ª prévia ("sobrou muito espaço entre produto e status… o que sobrar
+                 deixa a localização"): SKU numa coluna própria ANTES do Produto; Produto 250px e
+                 Status 190px fixos (Amazon 200/140); a sobra vai toda para a Localização. -->
             <!-- 13/11/2026: na aba Amazon, DBA e Envio próprio juntos — a coluna Envio
                  (96px: cabe "Envio próprio" na etiqueta) entra depois da Data; Previsão,
                  Entregar até e Suspensão ficam pra todos e saem "—" no DBA. -->
-            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehAmazonTab ? 'min-w-[1520px]' : ehFlexTab ? 'min-w-[1570px]' : 'min-w-[1350px]'">
+            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehAmazonTab ? 'min-w-[1680px]' : ehFlexTab ? 'min-w-[1680px]' : 'min-w-[1460px]'">
               <colgroup>
-                <col class="w-[46px]"><col v-if="ehAmazonTab" class="w-[96px]"><col class="w-[76px]"><col class="w-[150px]"><col :class="ehAmazonTab ? 'w-[70px]' : 'w-[84px]'">
-                <col :class="ehAmazonTab ? 'w-[22%]' : 'w-[27%]'"><col :class="ehAmazonTab ? 'w-[12%]' : 'w-[17%]'"><col :class="ehAmazonTab ? 'w-[18%]' : 'w-[22%]'">
+                <col class="w-[46px]"><col v-if="ehAmazonTab" class="w-[96px]"><col class="w-[76px]"><col :class="ehAmazonTab ? 'w-[160px]' : 'w-[150px]'"><col :class="ehAmazonTab ? 'w-[70px]' : 'w-[84px]'">
+                <col class="w-[130px]"><col :class="ehAmazonTab ? 'w-[200px]' : 'w-[250px]'"><col :class="ehAmazonTab ? 'w-[140px]' : 'w-[190px]'"><col>
                 <template v-if="ehAmazonTab"><col class="w-[80px]"><col class="w-[92px]"></template>
                 <col :class="ehAmazonTab ? 'w-[100px]' : 'w-[104px]'">
                 <col v-if="ehFlexTab" class="w-[220px]">
@@ -2966,7 +2970,7 @@ async function aplicarStatusBling(c: Logistica) {
               </colgroup>
               <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th class="border-b px-1.5 py-1 text-center font-semibold" :colspan="ehAmazonTab ? 6 : 5">Pedido</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" :colspan="ehAmazonTab ? 7 : 6">Pedido</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 4 : 2">Plataforma</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Bling</th>
                   <th v-if="ehFlexTab" class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Transportadora</th>
@@ -2978,7 +2982,8 @@ async function aplicarStatusBling(c: Logistica) {
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido no Bling">Bling</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido na plataforma (um clique seleciona para copiar)">Nº na plataforma</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold">Conta</th>
-                  <th class="border-b px-1.5 py-1 text-left font-semibold" title="Produto e, embaixo, o SKU da venda">Produto · SKU</th>
+                  <th class="border-b px-1.5 py-1 text-left font-semibold" title="SKU da venda (o que saiu do estoque)">SKU</th>
+                  <th class="border-b px-1.5 py-1 text-left font-semibold">Produto</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-left font-semibold dark:border-l-slate-600" title="Status na plataforma (passe o mouse para ver campo a campo e desde quando)">Status</th>
                   <th class="border-b px-1.5 py-1 text-left font-semibold">Localização</th>
                   <template v-if="ehAmazonTab">
@@ -2994,7 +2999,7 @@ async function aplicarStatusBling(c: Logistica) {
               </thead>
               <tbody>
                 <tr v-if="loading && !rows.length">
-                  <td :colspan="(ehAmazonTab ? 14 : 10) + (ehFlexTab ? 1 : 0)" class="py-8 text-center text-muted-foreground">
+                  <td :colspan="(ehAmazonTab ? 15 : 11) + (ehFlexTab ? 1 : 0)" class="py-8 text-center text-muted-foreground">
                     <RefreshCw class="mr-1.5 inline size-4 animate-spin" /> carregando…
                   </td>
                 </tr>
@@ -3031,12 +3036,15 @@ async function aplicarStatusBling(c: Logistica) {
                     >Flex</span>
                     <div v-if="flexAlerta(c)" class="text-[10.5px] font-medium text-rose-700 dark:text-rose-400" :title="flexAlerta(c) || ''">sem peça em {{ flexLocal.cidade }}</div>
                   </td>
+                  <td class="px-1.5 py-1.5 font-mono text-[10.5px]" :title="produtoTitulo(c)">
+                    <template v-if="(c.produtos || []).length">
+                      <div v-for="(p, k) in (c.produtos || []).slice(0, 3)" :key="k" class="truncate" :class="k ? 'mt-1' : ''">{{ p.sku || '—' }}</div>
+                    </template>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
                   <td class="px-1.5 py-1.5" :title="produtoTitulo(c)">
                     <template v-if="(c.produtos || []).length">
-                      <div v-for="(p, k) in (c.produtos || []).slice(0, 3)" :key="k" :class="k ? 'mt-1' : ''">
-                        <div class="line-clamp-2 break-words leading-tight">{{ p.nome || '—' }}<b v-if="p.quantidade && p.quantidade > 1"> ×{{ p.quantidade }}</b></div>
-                        <span v-if="p.sku" class="mt-0.5 inline-block max-w-full truncate rounded border bg-muted/40 px-1 font-mono text-[10px] text-muted-foreground">{{ p.sku }}</span>
-                      </div>
+                      <div v-for="(p, k) in (c.produtos || []).slice(0, 3)" :key="k" class="line-clamp-2 break-words leading-tight" :class="k ? 'mt-1' : ''">{{ p.nome || '—' }}<b v-if="p.quantidade && p.quantidade > 1"> ×{{ p.quantidade }}</b></div>
                       <div v-if="(c.produtos || []).length > 3" class="text-[10px] text-muted-foreground">+{{ (c.produtos || []).length - 3 }} item(ns)</div>
                     </template>
                     <span v-else class="text-muted-foreground">—</span>
@@ -3126,7 +3134,7 @@ async function aplicarStatusBling(c: Logistica) {
                   </td>
                 </tr>
                 <tr v-if="!loading && filteredRows.length === 0">
-                  <td :colspan="(ehAmazonTab ? 14 : 10) + (ehFlexTab ? 1 : 0)" class="px-3 py-6 text-center text-muted-foreground">
+                  <td :colspan="(ehAmazonTab ? 15 : 11) + (ehFlexTab ? 1 : 0)" class="px-3 py-6 text-center text-muted-foreground">
                     {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
                   </td>
                 </tr>

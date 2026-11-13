@@ -185,12 +185,13 @@ async def test_logistica_com_selo_para_quem_ve(
     auth_as(await _pessoa(db, make_user, "heisenberg"))
     r = await client.get("/api/logistica?plataforma=ml")
     por_pedido = {c["pedido_bling"]: c for c in r.json()}
-    assert por_pedido["V1"]["envio_flex"] is True
-    assert por_pedido["V1"]["envio_tipo"] == "self_service"
+    # 13/11/2026: o pedido Flex fica só na aba Flex para quem vê o Flex.
+    assert "V1" not in por_pedido
     assert por_pedido["V2"]["envio_flex"] is False
     r = await client.get("/api/logistica?envio=flex")
     assert r.status_code == 200
     assert [c["pedido_bling"] for c in r.json()] == ["V1"]
+    assert r.json()[0]["envio_tipo"] == "self_service"
 
 
 @pytest.mark.asyncio

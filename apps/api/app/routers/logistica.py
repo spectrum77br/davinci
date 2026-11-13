@@ -15,9 +15,9 @@ Gated pelo recurso `logistica`.
 """
 
 import hashlib
+from collections.abc import Sequence
 from contextvars import ContextVar
 from datetime import UTC, datetime
-from collections.abc import Sequence
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -952,8 +952,8 @@ async def list_logistica(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("logistica", "view"))],
     plataforma: Annotated[str | None, Query()] = None,
-    # `envio=flex`: a aba Flex. É uma visão A MAIS — o pedido continua nas
-    # abas ML/Shopee (com o selo); aqui junta os dois marketplaces. Valor
+    # `envio=flex`: a aba Flex — junta ML e Shopee. Desde 13/11/2026 o pedido
+    # Flex sai das abas ML/Shopee para quem vê o Flex (ver acima). Valor
     # desconhecido é 422, não "sem filtro" (a tela nunca pode achar que está
     # vendo só Flex quando está vendo tudo).
     envio: Annotated[Literal["flex"] | None, Query()] = None,
@@ -965,6 +965,16 @@ async def list_logistica(
     if plataforma:
         label = _PLATAFORMA_LABELS.get(plataforma.strip().lower(), plataforma)
         stmt = stmt.where(Logistica.plataforma == label)
+        # 13/11/2026 (Vinicius: "o flex está aparecendo na sub aba shopee e também
+        # na flex — deixa apenas na flex"): quem vê a aba Flex não vê o pedido
+        # Flex nas abas ML/Shopee. Quem NÃO vê o Flex continua vendo ali — não
+        # tem a aba Flex e o pedido sumiria para ele.
+        if (
+            envio != "flex"
+            and flex_config.pode_ver(user)
+            and label.strip().lower() in _PLATAFORMAS_FLEX
+        ):
+            stmt = stmt.where(Logistica.envio_flex.is_not(True))
     if envio == "flex":
         if not flex_config.pode_ver(user):
             raise HTTPException(404, detail="Not Found")

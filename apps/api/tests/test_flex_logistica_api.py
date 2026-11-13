@@ -101,16 +101,18 @@ async def test_aba_flex_junta_ml_e_shopee_so_com_envio_flex(
 
 
 @pytest.mark.asyncio
-async def test_aba_ml_continua_mostrando_o_pedido_flex_com_o_selo(
+async def test_aba_ml_nao_mostra_o_pedido_flex_para_quem_ve_o_flex(
     client: AsyncClient, db: AsyncSession, admin: User, auth_as: Callable[[User | None], None]
 ):
+    """Vinicius, 13/11/2026: "deixa apenas na sub aba flex" — quem tem a aba
+    Flex não vê o pedido Flex de novo na aba ML/Shopee."""
     auth_as(admin)
     ids = await _linhas(db)
 
     r = await client.get("/api/logistica?plataforma=ml")
     por_id = {c["id"]: c for c in r.json()}
-    assert {ids["ml_flex"], ids["ml_comum"], ids["ml_nao_lido"]} <= set(por_id)
-    assert por_id[ids["ml_flex"]]["envio_flex"] is True
+    assert {ids["ml_comum"], ids["ml_nao_lido"]} <= set(por_id)
+    assert ids["ml_flex"] not in por_id
     assert por_id[ids["ml_comum"]]["envio_flex"] is False
     assert por_id[ids["ml_nao_lido"]]["envio_flex"] is None
     assert por_id[ids["ml_nao_lido"]]["envio_tipo"] is None
