@@ -1022,6 +1022,10 @@ class Settings(BaseSettings):
     flex_n_liga: int = 3
     flex_n_desliga: int = 1
     flex_kits: bool = False
+    # Aprovar sozinho (13/11/2026): o motor aprova LIGAR o anúncio que passou em
+    # todas as conferências, menos o desligado por uma pessoa. A tela manda
+    # (flex_ajuste.aprovar_sozinho); isto vale só sem ajuste na tela.
+    flex_aprovar_sozinho: bool = False
     flex_max_anuncios_por_familia: int = 0
     flex_teto_escritas_por_rodada: int = 50
     flex_shopee_canais: str = "90022"

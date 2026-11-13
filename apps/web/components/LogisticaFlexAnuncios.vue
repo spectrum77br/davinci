@@ -78,6 +78,8 @@ type FlexConfig = {
   n_liga: number
   n_desliga: number
   kits: boolean
+  // 13/11/2026: o sistema aprova sozinho LIGAR o anúncio que passou em tudo.
+  aprovar_sozinho?: boolean
   max_anuncios_por_familia: number
   teto_escritas_por_rodada: number
   shopee_canais: string[]
@@ -98,6 +100,7 @@ type FlexConfig = {
     pedido_no_sp_origem: string
     kits_origem?: string
     contas_origem?: string
+    aprovar_sozinho_origem?: string
     atualizado_em: string | null
     atualizado_por: string | null
   } | null
@@ -120,7 +123,13 @@ type FlexAnuncio = {
   observado_em: string | null
   aguardando_aprovacao: boolean
   aprovado_em: string | null
+  // Aprovado com `aprovado_por` vazio = o sistema aprovou (Aprovar sozinho).
+  aprovado_por?: string | null
   aplicado_em: string | null
+  // 13/11/2026: uma pessoa desligou (no DaVinci ou no painel da plataforma) —
+  // o sistema não religa sozinho, espera alguém aprovar.
+  desligado_mao_em?: string | null
+  desligado_mao_por?: string | null
   tentativas: number
   proxima_tentativa: string | null
   ultimo_erro: string | null
@@ -1492,7 +1501,7 @@ const MODOS_OPCOES = [
 ]
 const editandoAjustes = ref(false)
 const salvandoAjustes = ref(false)
-const ajusteForm = ref({ modo: 'observar', shopee_escrita: false, pedido_no_sp: false, kits: false, contas: [] as string[] })
+const ajusteForm = ref({ modo: 'observar', shopee_escrita: false, pedido_no_sp: false, kits: false, aprovar_sozinho: false, contas: [] as string[] })
 // As contas que podem entrar no Flex (12/11/2026: antes a lista só mudava no
 // servidor). Marcadas = as que estão na lista do robô agora.
 const contasOpcoes = computed(() => config.value?.contas_opcoes || [])
@@ -1523,6 +1532,7 @@ function abrirAjustes() {
     shopee_escrita: !!c.shopee_escrita,
     pedido_no_sp: !!c.pedido_no_sp,
     kits: !!c.kits,
+    aprovar_sozinho: !!c.aprovar_sozinho,
     contas: [...contasNoFlexAgora.value],
   }
   editandoAjustes.value = true
@@ -1539,6 +1549,7 @@ async function salvarAjustes() {
   if (f.shopee_escrita !== c.shopee_escrita) mudancas.push(`• DaVinci liga/desliga na Shopee: ${simNao(c.shopee_escrita)} → ${simNao(f.shopee_escrita)}`)
   if (f.pedido_no_sp !== c.pedido_no_sp) mudancas.push(`• Pedido Flex vai para o .${localLote.value}: ${simNao(c.pedido_no_sp)} → ${simNao(f.pedido_no_sp)}`)
   if (f.kits !== !!c.kits) mudancas.push(`• Kits entram: ${simNao(!!c.kits)} → ${simNao(f.kits)}`)
+  if (f.aprovar_sozinho !== !!c.aprovar_sozinho) mudancas.push(`• Aprovar sozinho: ${simNao(!!c.aprovar_sozinho)} → ${simNao(f.aprovar_sozinho)}`)
   const antesContas = new Set(contasNoFlexAgora.value)
   const depoisContas = new Set(f.contas)
   const entram = f.contas.filter((id) => !antesContas.has(id))
@@ -1551,7 +1562,7 @@ async function salvarAjustes() {
   }
   const avisos: string[] = []
   if (f.modo === 'piloto' || f.modo === 'ativo')
-    avisos.push(`Em ${f.modo}, o sistema DESLIGA sozinho o Flex dos anúncios sem peça em ${localCidade.value} (nas contas prontas). Ligar continua precisando de Aprovar.`)
+    avisos.push(`Em ${f.modo}, o sistema DESLIGA sozinho o Flex dos anúncios sem peça em ${localCidade.value} (nas contas prontas). ${f.aprovar_sozinho ? 'Com "Aprovar sozinho", ele também LIGA sozinho os que passarem em tudo.' : 'Ligar continua precisando de Aprovar.'}`)
   if (f.shopee_escrita && (f.modo === 'piloto' || f.modo === 'ativo'))
     avisos.push('Na Shopee o sistema passa a ligar/desligar a Entrega Direta nos anúncios. Aprove UM primeiro e confira no Seller Center se a Shopee Xpress continuou ligada.')
   if (f.pedido_no_sp)
@@ -1560,8 +1571,10 @@ async function salvarAjustes() {
     avisos.push(`Conta do Mercado Livre só passa a ter Flex de verdade com o Flex ativo no ML e a saída em ${localCidade.value}. Senão ela aparece como "conta não pronta" e o sistema não mexe nela.`)
   if (saem.length)
     avisos.push('Tirar uma conta NÃO desliga o Flex que já está ligado nos anúncios dela — o sistema só para de mexer nela.')
+  if (f.aprovar_sozinho && !c.aprovar_sozinho)
+    avisos.push(`Aprovar sozinho: o sistema passa a LIGAR o Flex, sem esperar ninguém, em todo anúncio (Shopee e Mercado Livre) que passar nas conferências — conta pronta, anúncio ativo, ${c.n_liga}+ peças em ${localCidade.value} conferidas no Bling. O anúncio que uma pessoa desligou (aqui ou no painel da plataforma) NÃO volta sozinho: espera alguém clicar Aprovar.`)
   if (f.kits && !c.kits)
-    avisos.push(`Kits entram: o anúncio de kit (celular + fone, relógio…) passa a valer pelo kit .${localLote.value} do Bling, que tem o estoque da peça mais escassa — sem o kit .${localLote.value} cadastrado, não liga. Nada liga sozinho: com peça, ele vai para "Esperando aprovação".`)
+    avisos.push(`Kits entram: o anúncio de kit (celular + fone, relógio…) passa a valer pelo kit .${localLote.value} do Bling, que tem o estoque da peça mais escassa — sem o kit .${localLote.value} cadastrado, não liga. ${f.aprovar_sozinho ? 'Com "Aprovar sozinho", o kit com peça liga sozinho.' : 'Nada liga sozinho: com peça, ele vai para "Esperando aprovação".'}`)
   const ok = confirm(
     `Trocar as chaves do Flex?\n\n${mudancas.join('\n')}` +
       (avisos.length ? `\n\n${avisos.join('\n\n')}` : '') +
@@ -1578,6 +1591,7 @@ async function salvarAjustes() {
         shopee_escrita_antes: c.shopee_escrita,
         pedido_no_sp_antes: c.pedido_no_sp,
         kits_antes: !!c.kits,
+        aprovar_sozinho_antes: !!c.aprovar_sozinho,
         // Só manda as contas quando a tela tem a lista (quem pode trocar).
         ...(contasOpcoes.value.length ? { contas: f.contas, contas_antes: contasNoFlexAgora.value } : {}),
       },
@@ -1875,7 +1889,7 @@ defineExpose({ recarregar: carregarTudo })
                       :title="a.recusa
                         ? 'A plataforma recusou ligar (veja o porquê na linha). Arrumou? Tentar novamente'
                         : aprovadoSemLigar(a)
-                          ? 'Aprovado em ' + fmtDataHora(a.aprovado_em) + ', mas ainda não ligou: tentar novamente'
+                          ? 'Aprovado' + (a.aprovado_por ? '' : ' pelo sistema') + ' em ' + fmtDataHora(a.aprovado_em) + ', mas ainda não ligou: tentar novamente'
                           : 'Aprovar: ligar o Flex neste anúncio'"
                       @click="aprovar(a)"
                     >
@@ -1896,6 +1910,12 @@ defineExpose({ recarregar: carregarTudo })
                   <td class="px-1.5 py-1.5 text-[11px]">
                     <div class="line-clamp-2 leading-tight" :title="porQue(a)">{{ porQue(a) }}</div>
                     <div v-if="recusaAparte(a)" class="truncate text-rose-700 dark:text-rose-400" :title="a.recusa || ''">A plataforma recusou ligar: {{ a.recusa }}</div>
+                    <div
+                      v-if="a.desligado_mao_em && a.observado !== 'ligado'"
+                      class="truncate text-amber-700 dark:text-amber-400"
+                      data-flex-desligado-mao
+                      :title="`Uma pessoa desligou o Flex deste anúncio ${a.desligado_mao_por ? 'no DaVinci' : 'no painel da plataforma'} em ${fmtDataHora(a.desligado_mao_em)}. O sistema não religa sozinho: só volta com Aprovar.`"
+                    >Desligado à mão {{ fmtDesde(a.desligado_mao_em) }} — só volta com Aprovar</div>
                     <div v-if="shopeeConfirmando(a)" class="truncate text-muted-foreground" :title="CONFIRMANDO_TXT">{{ CONFIRMANDO_TXT }}</div>
                     <div v-else-if="erroAparte(a)" class="truncate text-rose-700 dark:text-rose-400" :title="a.ultimo_erro || ''">
                       Último erro: {{ a.ultimo_erro }}
@@ -2215,6 +2235,10 @@ defineExpose({ recarregar: carregarTudo })
                   <span class="text-muted-foreground">Kits entram:&nbsp;</span>
                   <b :class="config.kits ? 'text-emerald-700 dark:text-emerald-400' : ''">{{ config.kits ? 'SIM' : 'NÃO' }}</b>
                 </div>
+                <div data-flex-ajustes-aprovar-sozinho :title="`Com SIM, o sistema liga sozinho o Flex do anúncio que passou em tudo (conta pronta, anúncio ativo, ${config.n_liga}+ peças em ${localCidade} conferidas no Bling). O que uma pessoa desligou espera alguém aprovar.`">
+                  <span class="text-muted-foreground">Aprovar sozinho:&nbsp;</span>
+                  <b :class="config.aprovar_sozinho ? 'text-emerald-700 dark:text-emerald-400' : ''">{{ config.aprovar_sozinho ? 'SIM' : 'NÃO' }}</b>
+                </div>
                 <div data-flex-ajustes-contas :title="[...contasNoFlexResumo.ml.map((n) => `${n} (ML)`), ...contasNoFlexResumo.shopee.map((n) => `${n} (Shopee)`)].join('\n')">
                   <span class="text-muted-foreground">Contas no Flex:&nbsp;</span>
                   <b>{{ contasNoFlexResumo.ml.length }}</b> do ML<template v-if="contasNoFlexResumo.ml.length"> ({{ contasNoFlexResumo.ml.join(', ') }})</template>
@@ -2245,6 +2269,10 @@ defineExpose({ recarregar: carregarTudo })
                 <label class="flex items-center gap-1.5 text-[11px]" data-flex-ajustes-kits>
                   <input v-model="ajusteForm.kits" type="checkbox" />
                   Kits entram (só com tudo no .{{ localLote }}: vale o kit .{{ localLote }} do Bling)
+                </label>
+                <label class="flex items-center gap-1.5 text-[11px]" data-flex-ajustes-aprovar-sozinho-form>
+                  <input v-model="ajusteForm.aprovar_sozinho" type="checkbox" />
+                  Aprovar sozinho (liga o que passar em tudo; o desligado à mão espera aprovação)
                 </label>
                 <div v-if="contasOpcoesGrupos.length" class="space-y-1 rounded border px-1.5 py-1" data-flex-ajustes-contas-form>
                   <div class="text-[11px] font-medium">Contas em que o sistema mexe</div>

@@ -35,6 +35,8 @@ _MIGRATION_AJUSTE = _VERSOES / "0474_flex_ajuste.py"
 _MIGRATION_KITS = _VERSOES / "0475_flex_ajuste_kits.py"
 # 0477 (12/11/2026): as contas do Flex na tela (flex_ajuste.contas).
 _MIGRATION_CONTAS = _VERSOES / "0477_flex_ajuste_contas.py"
+# 0481 (13/11/2026): "Aprovar sozinho" e o "desligado à mão".
+_MIGRATION_APROVAR = _VERSOES / "0481_flex_aprovar_sozinho.py"
 TABELAS = [
     "flex_ajuste",  # 0474: os ajustes da tela (editados por pessoas)
     "flex_anuncio_estado",
@@ -131,6 +133,11 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         "0477_flex_ajuste_contas",
         "0476_mail_usuarios_pastas",
     )
+    aprovar = _carregar(_MIGRATION_APROVAR)
+    assert (aprovar.revision, aprovar.down_revision) == (
+        "0481_flex_aprovar_sozinho",
+        "0480_atendimento_julgamentos",
+    )
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
@@ -144,9 +151,9 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         ctx = MigrationContext.configure(conn, opts={"target_metadata": Base.metadata})
         with Operations.context(ctx):
             # A 0367 cria; a 0385 completa a flex_conta (o model é o das duas);
-            # a 0474 cria a flex_ajuste, a 0475 põe nela os kits e a 0477
-            # as contas.
-            ordem = [mod, origem, ajuste, kits, contas]
+            # a 0474 cria a flex_ajuste, a 0475 põe nela os kits, a 0477
+            # as contas e a 0481 o "Aprovar sozinho" e o "desligado à mão".
+            ordem = [mod, origem, ajuste, kits, contas, aprovar]
             for m in ordem if passo == "upgrade" else list(reversed(ordem)):
                 getattr(m, passo)()
 
@@ -155,6 +162,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     ajuste.SCHEMA = rascunho
     kits.SCHEMA = rascunho
     contas.SCHEMA = rascunho
+    aprovar.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade")
@@ -197,6 +205,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert "ON DELETE SET NULL" in fks["fk_flex_pedido_integration_id_integrations"]
         assert "ON DELETE CASCADE" in fks["fk_flex_anuncio_estado_integration_id_integrations"]
         assert "ON DELETE SET NULL" in fks["fk_flex_anuncio_estado_aprovado_por_users"]
+        assert "ON DELETE SET NULL" in fks["fk_flex_anuncio_estado_desligado_mao_por_users"]
 
         # As colunas da Logística nascem vazias e sem default (não reescreve).
         cols = {(c[0], c[1]): c for c in da_migration["colunas"]}

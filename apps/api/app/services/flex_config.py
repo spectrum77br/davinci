@@ -61,6 +61,9 @@ class Ajustes:
     # 0477 (12/11/2026): as contas em que o robô mexe — None = vale o
     # `flex_contas` do .env; vazio = nenhuma conta.
     contas: frozenset[UUID] | None = None
+    # 0481 (13/11/2026): "Aprovar sozinho" — None = vale o
+    # `flex_aprovar_sozinho` do .env.
+    aprovar_sozinho: bool | None = None
 
 
 _SEM_AJUSTE = Ajustes()
@@ -108,6 +111,7 @@ def _da_linha(linha: FlexAjuste | None) -> Ajustes:
         linha.atualizado_por,
         kits=linha.kits,
         contas=frozenset(linha.contas) if linha.contas is not None else None,
+        aprovar_sozinho=linha.aprovar_sozinho,
     )
 
 
@@ -138,15 +142,16 @@ async def salvar(
     por: UUID | None,
     kits_novo: bool | None = None,
     contas_novas: Iterable[UUID] | None = None,
+    aprovar_sozinho_novo: bool | None = None,
 ) -> Ajustes:
     """Grava as chaves (quem pode é conferido no router). O cache só troca
-    com `usar` depois do commit de quem chama. `kits_novo` / `contas_novas`
-    None = não mexe (tela antiga, sem o campo)."""
+    com `usar` depois do commit de quem chama. `kits_novo` / `contas_novas` /
+    `aprovar_sozinho_novo` None = não mexe (tela antiga, sem o campo)."""
     m = (modo_novo or "").strip().lower()
     if m not in FLEX_MODOS:
         raise AjusteInvalidoError("modo_invalido", f"modo {modo_novo!r} não existe")
     linha = await session.get(FlexAjuste, 1, with_for_update=True)
-    antes = (modo(), shopee_escrita(), pedido_no_sp(), kits(), contas())
+    antes = (modo(), shopee_escrita(), pedido_no_sp(), kits(), contas(), aprovar_sozinho())
     agora = datetime.now(UTC)
     if linha is None:
         linha = FlexAjuste(id=1)
@@ -158,6 +163,8 @@ async def salvar(
         linha.kits = bool(kits_novo)
     if contas_novas is not None:
         linha.contas = sorted(set(contas_novas), key=str)
+    if aprovar_sozinho_novo is not None:
+        linha.aprovar_sozinho = bool(aprovar_sozinho_novo)
     linha.atualizado_em = agora
     linha.atualizado_por = por
     await session.flush()
@@ -169,6 +176,7 @@ async def salvar(
         por,
         kits=linha.kits,
         contas=frozenset(linha.contas) if linha.contas is not None else None,
+        aprovar_sozinho=linha.aprovar_sozinho,
     )
     depois_contas = novo.contas if novo.contas is not None else antes[4]
     logger.info(
@@ -179,6 +187,7 @@ async def salvar(
             "pedido_no_sp": antes[2],
             "kits": antes[3],
             "contas": len(antes[4]),
+            "aprovar_sozinho": antes[5],
         },
         depois={
             "modo": m,
@@ -186,6 +195,9 @@ async def salvar(
             "pedido_no_sp": novo.pedido_no_sp,
             "kits": novo.kits,
             "contas": len(depois_contas),
+            "aprovar_sozinho": (
+                novo.aprovar_sozinho if novo.aprovar_sozinho is not None else antes[5]
+            ),
         },
         contas_entraram=sorted(str(i) for i in depois_contas - antes[4]),
         contas_sairam=sorted(str(i) for i in antes[4] - depois_contas),
@@ -239,6 +251,17 @@ def kits() -> bool:
     mais escassa (Vinicius, 12/11/2026: "desde que tenha tudo em .sp do kit")."""
     da_tela = ajustes().kits
     return bool(get_settings().flex_kits) if da_tela is None else bool(da_tela)
+
+
+def aprovar_sozinho() -> bool:
+    """O sistema aprova sozinho LIGAR o anúncio que passou em todas as
+    conferências? (a tela; sem ela, `flex_aprovar_sozinho` do .env). Vale para
+    Shopee e ML (Vinicius, 13/11/2026). O desligado por uma pessoa nunca volta
+    sozinho (`flex_anuncio_estado.desligado_mao_em`)."""
+    da_tela = ajustes().aprovar_sozinho
+    if da_tela is None:
+        return bool(getattr(get_settings(), "flex_aprovar_sozinho", False))
+    return bool(da_tela)
 
 
 def espera_envio_min() -> int:

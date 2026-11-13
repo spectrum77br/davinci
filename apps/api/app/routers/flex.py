@@ -354,6 +354,7 @@ async def config(session: Sessao, user: Ver) -> FlexConfigOut:
         n_liga=cfg.n_liga,
         n_desliga=cfg.n_desliga,
         kits=cfg.kits,
+        aprovar_sozinho=flex_config.aprovar_sozinho(),
         max_anuncios_por_familia=cfg.max_anuncios_por_familia,
         teto_escritas_por_rodada=max(0, int(s.flex_teto_escritas_por_rodada or 0)),
         shopee_canais=sorted(flex_envio.canais_shopee_flex()),
@@ -384,6 +385,7 @@ async def _ajustes_out(session: AsyncSession) -> FlexAjustesOut:
         pedido_no_sp_origem=flex_config.origem("pedido_no_sp"),
         kits_origem=flex_config.origem("kits"),
         contas_origem=flex_config.origem("contas"),
+        aprovar_sozinho_origem=flex_config.origem("aprovar_sozinho"),
         atualizado_em=a.atualizado_em,
         atualizado_por=nome,
     )
@@ -415,12 +417,14 @@ async def trocar_ajustes(body: FlexAjustesIn, session: Sessao, user: Agir) -> Fl
         flex_config.shopee_escrita(),
         flex_config.pedido_no_sp(),
         flex_config.kits(),
+        flex_config.aprovar_sozinho(),
     )
     mostrado = (
         body.modo_antes,
         body.shopee_escrita_antes,
         body.pedido_no_sp_antes,
         body.kits_antes,
+        body.aprovar_sozinho_antes,
     )
     # As contas: compara só as ATIVAS (as que a tela mostra para marcar) — id
     # arquivado que ficou no .env não conta como "alguém trocou".
@@ -460,6 +464,7 @@ async def trocar_ajustes(body: FlexAjustesIn, session: Sessao, user: Agir) -> Fl
             pedido_no_sp_novo=body.pedido_no_sp,
             kits_novo=body.kits,
             contas_novas=body.contas,
+            aprovar_sozinho_novo=body.aprovar_sozinho,
             por=user.id,
         )
     except flex_config.AjusteInvalidoError as e:

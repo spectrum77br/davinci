@@ -81,6 +81,8 @@ class FlexAjustesOut(BaseModel):
     kits_origem: str = "servidor"
     # 0477 (12/11/2026): a lista de contas em que o robô mexe.
     contas_origem: str = "servidor"
+    # 0481 (13/11/2026): "Aprovar sozinho".
+    aprovar_sozinho_origem: str = "servidor"
     atualizado_em: datetime | None = None
     atualizado_por: str | None = None  # nome de quem trocou
 
@@ -103,6 +105,9 @@ class FlexAjustesIn(BaseModel):
     # mostrava (só as contas ativas — as de `contas_opcoes`).
     contas: list[UUID] | None = Field(default=None, max_length=500)
     contas_antes: list[UUID] | None = Field(default=None, max_length=500)
+    # 0481 (13/11/2026): "Aprovar sozinho". Sem o campo (tela antiga) = não mexe.
+    aprovar_sozinho: bool | None = None
+    aprovar_sozinho_antes: bool | None = None
 
 
 class FlexContaOpcaoOut(BaseModel):
@@ -125,6 +130,8 @@ class FlexConfigOut(BaseModel):
     n_liga: int
     n_desliga: int
     kits: bool
+    # 0481 (13/11/2026): o sistema aprova sozinho o LIGAR que passou em tudo.
+    aprovar_sozinho: bool = False
     max_anuncios_por_familia: int
     teto_escritas_por_rodada: int
     shopee_canais: list[str]
@@ -160,9 +167,16 @@ class FlexAnuncioOut(BaseModel):
     observado: str | None = None
     observado_em: datetime | None = None
     aguardando_aprovacao: bool
+    # `aprovado_em` com `aprovado_por` vazio = o sistema aprovou ("Aprovar
+    # sozinho", 13/11/2026).
     aprovado_por: UUID | None = None
     aprovado_em: datetime | None = None
     aplicado_em: datetime | None = None
+    # Uma pessoa desligou (no DaVinci ou no painel da plataforma): o sistema
+    # não religa sozinho — espera alguém aprovar. `desligado_mao_por` vazio =
+    # foi no painel da plataforma.
+    desligado_mao_em: datetime | None = None
+    desligado_mao_por: UUID | None = None
     tentativas: int
     proxima_tentativa: datetime | None = None
     ultimo_erro: str | None = None

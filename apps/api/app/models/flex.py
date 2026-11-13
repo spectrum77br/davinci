@@ -241,6 +241,20 @@ class FlexAnuncioEstado(Base):
     # desliga (ao ser reativado não volta vendendo Flex sem controle).
     status_anuncio: Mapped[str | None] = mapped_column(Text, nullable=True)
     status_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 0481 (13/11/2026): uma pessoa desligou o Flex deste anúncio — no DaVinci
+    # ("Desligar selecionados", emergência; `desligado_mao_por` = quem) ou no
+    # painel da plataforma (lido desligado com a regra querendo ligado;
+    # `desligado_mao_por` NULL). Com "Aprovar sozinho" ligado, o sistema NÃO
+    # religa este anúncio sozinho: ele espera alguém clicar Aprovar. Some quando
+    # alguém aprova ou o anúncio é lido ligado.
+    desligado_mao_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    desligado_mao_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -372,6 +386,9 @@ class FlexAjuste(Base):
     contas: Mapped[list[UUID] | None] = mapped_column(
         ARRAY(PG_UUID(as_uuid=True)), nullable=True
     )
+    # 0481 (13/11/2026): o sistema aprova sozinho LIGAR o anúncio que passou
+    # em todas as conferências (o `flex_aprovar_sozinho`); NULL = vale o .env.
+    aprovar_sozinho: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -197,6 +197,9 @@ _ESPERA_TRAVA_EMERGENCIA = 10.0
 # pronta (ver `desligar`); na trilha vira `desligar` com o `por`.
 _DESLIGAR_PESSOA = "desligar_pessoa"
 MOTIVO_DESLIGADO_POR_PESSOA = "desligado por uma pessoa na tela"
+# Começo do motivo na trilha quando o próprio sistema aprova LIGAR ("Aprovar
+# sozinho", 13/11/2026) — a tela mostra "aprovado pelo sistema".
+MOTIVO_APROVADO_SOZINHO = "aprovado sozinho pelo sistema (tudo certo)"
 # A conta pode ter Flex? (assinatura do ML / canal da loja Shopee): vale por
 # 1 h — a assinatura muda raramente e é uma chamada por conta.
 _VALIDADE_CONTA = timedelta(hours=1)
@@ -2045,6 +2048,13 @@ async def _gravar(
     if not lista:
         return []
     acoes: list[_Acao] = []
+    # "Aprovar sozinho" (13/11/2026): só onde a aprovação liga de verdade —
+    # modo que escreve, rodada que pode ligar e, na Shopee, com a escrita
+    # ligada (senão a aprovação ficaria pendurada e dispararia depois).
+    aprova_sozinho = (
+        flex_config.aprovar_sozinho() and flex_config.pode_escrever(modo) and not so_desligar
+    )
+    shopee_escreve = flex_config.shopee_escrita()
     async with session_scope() as s:
         ids = {a.integration_id for a in lista}
         rows = await s.execute(
@@ -2142,6 +2152,63 @@ async def _gravar(
                 est.aprovado_em = None
                 est.aprovado_por = None
                 mudou_algo = True
+            # Desligado à mão (13/11/2026): lido ligado, a marca some (alguém
+            # religou, ou a ligação aprovada valeu). Lido DESLIGADO quando
+            # estava ligado e a regra quer ligado = alguém desligou no painel
+            # da plataforma — o sistema não religa sozinho.
+            if est.observado == LIGADO and est.desligado_mao_em is not None:
+                est.desligado_mao_em = None
+                est.desligado_mao_por = None
+                mudou_algo = True
+            elif (
+                mudou_obs
+                and observado_antes == LIGADO
+                and est.observado == DESLIGADO
+                and d.desejado == LIGADO
+                and est.desligado_mao_em is None
+            ):
+                est.desligado_mao_em = agora
+                est.desligado_mao_por = None
+                mudou_algo = True
+            # Aprovar sozinho: o anúncio que pediria aprovação — a regra quer
+            # ligado (peça no local, anúncio ativo, conta pronta) e ele foi
+            # LIDO desligado — é aprovado pelo sistema, menos o que uma pessoa
+            # desligou. A ligação segue as mesmas conferências de sempre
+            # (leitura fresca, conta relida — por ter aprovação, a rodada
+            # seguinte relê —, saldo no Bling na hora de escrever).
+            if (
+                aprova_sozinho
+                and not a.bloqueio
+                and (a.plataforma != flex_envio.PLATAFORMA_SHOPEE or shopee_escreve)
+                and d.desejado == LIGADO
+                and est.observado == DESLIGADO
+                and est.aprovado_em is None
+                and est.desligado_mao_em is None
+            ):
+                est.aprovado_em = agora
+                est.aprovado_por = None
+                mudou_algo = True
+                resumo["aprovado_sozinho"] = resumo.get("aprovado_sozinho", 0) + 1
+                s.add(
+                    _log(
+                        acao="aprovar",
+                        modo=modo,
+                        resultado="ok",
+                        integration_id=a.integration_id,
+                        external_id=a.external_id,
+                        plataforma=a.plataforma,
+                        estado_antes=est.observado,
+                        estado_depois=LIGADO,
+                        saldo_sp=d.saldo,
+                        sku=",".join(d.skus_sp) or None,
+                        motivo=(
+                            f"{MOTIVO_APROVADO_SOZINHO}: {d.motivo}"
+                            if d.motivo
+                            else MOTIVO_APROVADO_SOZINHO
+                        ),
+                        por=None,
+                    )
+                )
             # Pede aprovação só de quem foi LIDO desligado: sem leitura não se
             # sabe (nas contas "in" o Flex já está ligado na maioria) — pedir
             # ali era um aviso falso, e aprovar deixava a aprovação pendurada.
@@ -2544,6 +2611,10 @@ async def _escrever(
             est.aguardando_aprovacao = False
             est.aprovado_em = None
             est.aprovado_por = None
+            # Uma pessoa desligou: com "Aprovar sozinho" o sistema não religa
+            # este anúncio — espera alguém aprovar (13/11/2026).
+            est.desligado_mao_em = agora
+            est.desligado_mao_por = por
             if est.observado == DESLIGADO:
                 # Relido DENTRO da trava: a plataforma está desligada (a
                 # rodada que segurava a trava não chegou a ligar). Nada a
@@ -2937,6 +3008,9 @@ async def aprovar(integration_id: UUID, external_id: str, *, por: UUID | None) -
         est.aprovado_em = agora
         est.aguardando_aprovacao = False
         est.recusa = None
+        # Uma pessoa aprovou: o "desligado à mão" deixa de valer.
+        est.desligado_mao_em = None
+        est.desligado_mao_por = None
         est.atualizado_em = agora
         s.add(
             _log(
