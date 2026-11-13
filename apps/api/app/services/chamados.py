@@ -378,7 +378,12 @@ def _robo_atende(ch: Chamado) -> bool:
     padrão — se o robô não pedir aquela plataforma, a resposta fica parada com cara
     de atendida. A regra de 19/09 é deliberada (ver test_chamados_status_aba) e não
     foi mexida aqui, e a decisão de mudar a rota é do Vinicius."""
-    return ch.canal == "robo" or (ch.canal == "manual" and _eh_ml(ch))
+    # 13/11: o atendimento do Melhor Envio a IA de Chamado responde sozinha.
+    return (
+        ch.canal == "robo"
+        or (ch.canal == "manual" and _eh_ml(ch))
+        or ch.origem == "melhor_envio"
+    )
 
 
 class ChamadoError(Exception):

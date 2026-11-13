@@ -3245,9 +3245,13 @@ def _trabalho_do_cerebro(plataforma: str | None, canais: list[str]):
         & or_(~encerrado, falou_depois)
         & nao_fechado_por_gente
         & resposta_nova
-        # 13/11: atendimento do Melhor Envio é só leitura (passo 2) — a IA não
-        # tem por onde responder; quem cuida é gente (Análise Humano).
-        & (Chamado.origem != "melhor_envio")
+        # 13/11: no Melhor Envio a conversa inteira vem da leitura, inclusive o que
+        # digitamos no site — só é "resposta nova" se a atendente falou por último.
+        & or_(
+            Chamado.origem != "melhor_envio",
+            env.c.ult.is_(None),
+            rec.c.ult > env.c.ult,
+        )
     )
     if plataforma:
         plat = plataforma.strip().lower()
@@ -3484,12 +3488,17 @@ async def agent_analise(
     # canal `api` do Mercado Livre, com instrução de PESSOA, a IA responde direto
     # na reclamação (mesmo envio da Réplica manual). Sem instrução, segue só
     # sugerindo (`humano`). Shopee/TikTok não têm API de mensagem na disputa.
-    via_api = (
-        body.acao == "responder"
-        and ch.canal == "api"
-        and com_instrucao
-        and svc._eh_ml(ch)
-        and not (ch.origem_ref or "").startswith("tiktok_reembolso:")
+    via_api = body.acao == "responder" and (
+        (
+            ch.canal == "api"
+            and com_instrucao
+            and svc._eh_ml(ch)
+            and not (ch.origem_ref or "").startswith("tiktok_reembolso:")
+        )
+        # 13/11 (Vinicius, passo 4: "sempre sozinha"): no atendimento do Melhor
+        # Envio a IA responde SEM esperar instrução — sai pelo mesmo envio da
+        # Réplica da aba (POST do atendimento no ME).
+        or ch.origem == "melhor_envio"
     )
     if body.acao == "responder" and ch.canal != "robo" and not via_api:
         # Réplica de robô só sai pelo robô de browser (Tuta no ML; Seller Center

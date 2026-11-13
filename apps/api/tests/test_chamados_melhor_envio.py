@@ -1,4 +1,5 @@
-"""Atendimentos do Melhor Envio na aba Chamados (13/11/2026, passo 2: só leitura).
+"""Atendimentos do Melhor Envio na aba Chamados (13/11/2026): leitura (passo 2),
+resposta pela aba (passo 3) e a IA de Chamado respondendo sozinha (passo 4).
 
 Caso real: AD952521063BR (Bling 298756), "Falha na entrega" — nós abrimos no site do
 ME em 19/10, a atendente respondeu, a conversa seguiu. O formato dos JSONs abaixo é
@@ -7,18 +8,25 @@ o que a sonda de 13/11 leu com o token da Conciliação.
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime
+import hashlib
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
 
-from app.models import Chamado, ChamadoMensagem
-from app.routers.chamados import _trabalho_do_cerebro
+from app.models import Chamado, ChamadoCerebro, ChamadoMensagem
 from app.services import chamados as chamados_svc
 from app.services import chamados_melhor_envio as cme
 from app.services import melhor_envio as me
 
 ATIVO = 2065437
+
+
+def _agora_iso(*, minutos: int) -> str:
+    """Hora relativa ao relógio do teste (a IA e o DaVinci gravam com o relógio real)."""
+    return (datetime.now(UTC) + timedelta(minutes=minutos)).isoformat().replace("+00:00", "Z")
+
+
 RESOLVIDO = 2011111
 
 
@@ -100,7 +108,7 @@ def fake_me(monkeypatch):
             return estado["envio_http"], {"message": "This action is unauthorized."}
         # o ME guarda a nossa fala na conversa (volta na leitura seguinte)
         estado["tickets"][numero]["interactions"]["comments"].append(
-            _comentario(texto, "2026-11-13T12:30:00.000Z", nossa=True, anexos=len(anexos or []))
+            _comentario(texto, _agora_iso(minutos=1), nossa=True, anexos=len(anexos or []))
         )
         return 200, {"ticket": estado["tickets"][numero]}
 
@@ -234,12 +242,81 @@ async def test_sem_token_nao_faz_nada(db, monkeypatch):
     assert await _chamados_me(db) == []
 
 
-async def test_ia_de_chamado_nao_pega_atendimento_do_melhor_envio(db, fake_me):
+_IA = "cerebro_ia_teste"  # noqa: S105
+_TODAS = {"plataforma": None, "canais": ["robo", "api", "manual"]}
+
+
+@pytest.fixture
+async def ia(db) -> dict:
+    db.add(
+        ChamadoCerebro(
+            nome="IA de Chamado", token_hash=hashlib.sha256(_IA.encode()).hexdigest(), ligada=True
+        )
+    )
+    await db.commit()
+    return {"X-Agent-Token": _IA}
+
+
+async def _casos_da_ia(client, ia) -> set[str]:
+    r = await client.post("/api/chamados/agent/analisar", headers=ia, json=_TODAS)
+    assert r.status_code == 200, r.text
+    return {c["chamado_id"] for c in r.json()["chamados"]}
+
+
+async def test_ia_responde_sozinha_quando_a_atendente_fala(
+    client, make_user, auth_as, db, fake_me, ia
+):
+    """Passo 4 (Vinicius 13/11: "sempre sozinha"): a fala nova da atendente vai pra
+    IA (Status = Análise Robô) e o "responder" dela sai pro ME sem instrução."""
+    auth_as(await make_user(permissions={"chamados": {"view": True, "edit": True}}))
     await cme.sincronizar(db)
     await db.commit()
     [ch] = await _chamados_me(db)
-    rows = (await db.execute(_trabalho_do_cerebro(None, ["robo", "api", "manual"]))).scalars()
-    assert ch.id not in {c.id for c in rows}
+    # a última fala é nossa ("ok aguardando"): nada pra IA
+    assert str(ch.id) not in await _casos_da_ia(client, ia)
+
+    fake_me["tickets"][str(ATIVO)]["interactions"]["comments"].append(
+        _comentario(
+            "Os Correios responderam que o objeto foi localizado. Retorno em breve.",
+            _agora_iso(minutos=-10),
+            nossa=False,
+        )
+    )
+    await cme.sincronizar(db)
+    await db.commit()
+    assert str(ch.id) in await _casos_da_ia(client, ia)
+    lst = await client.get("/api/chamados", params={"plataforma": "melhor envio"})
+    [linha] = lst.json()["items"]
+    assert linha["status_aba"] == "analise_robo"
+
+    r = await client.post(
+        "/api/chamados/agent/analise",
+        headers=ia,
+        json={
+            "chamado_id": str(ch.id),
+            "classe": "me_objeto_localizado",
+            "resumo": "Correios localizaram o objeto; pedir previsão de entrega",
+            "acao": "responder",
+            "texto_replica": "Obrigado! Podem nos passar a previsão de entrega?",
+        },
+    )
+    assert r.status_code == 200, r.text
+    assert fake_me["enviados"][-1]["texto"] == "Obrigado! Podem nos passar a previsão de entrega?"
+    sua = [m for m in await _falas(db, ch) if m.texto.startswith("Obrigado! Podem")]
+    assert [(m.direcao, m.status, m.autor_nome) for m in sua] == [
+        ("enviada", "enviada", "IA de Chamado")
+    ]
+    # já respondeu: sai da fila da IA
+    assert str(ch.id) not in await _casos_da_ia(client, ia)
+
+
+def test_lembrete_de_dois_dias_no_me_e_cobrar_no_atendimento():
+    from app.services import chamados_devolucao_sync as sync
+
+    ch = Chamado(origem=cme.ORIGEM, plataforma=cme.PLATAFORMA, canal="manual")
+    txt = sync._lembrete_txt(ch, datetime(2026, 11, 10, 15, 0, tzinfo=UTC))
+    assert "cobre uma atualização no atendimento" in txt
+    assert "tela" not in txt
 
 
 async def _replicar(client, ch: Chamado, texto: str, *, foto: bool = False):

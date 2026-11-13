@@ -13,9 +13,12 @@ dele em Envios › Atendimentos (ex.: AD952521063BR, "Falha na entrega"). A sond
 
 Cada atendimento ATIVO vira uma linha (origem `melhor_envio`, plataforma "melhor
 envio", canal `manual`, ligada ao pedido do Bling) e a conversa cai no histórico.
-Canal `manual` deixa a linha fora do robô de tela e das varreduras de API do ML;
-quando o atendente do ME fala, a coluna Status vai pra Análise Humano
-(`chamados._robo_atende`). A IA de Chamado ainda não pega estes casos (passo 4).
+Canal `manual` deixa a linha fora do robô de tela e das varreduras de API do ML.
+
+Passo 4 (13/11, Vinicius: "sempre sozinha"): a IA de Chamado pega o caso quando a
+atendente fala e responde sem esperar instrução (`agent_analise`, `via_api`); a
+coluna Status mostra Análise Robô (`chamados._robo_atende`). Dois dias parado depois
+de um "esperar" vira lembrete pra IA cobrar no atendimento (`_lembrete_txt`).
 
 Passo 3 (13/11): a réplica da aba vai pro atendimento no ME (`enviar`), pelo mesmo
 `POST /api/v2/me/tickets/{n}` do botão Enviar da tela. Quando a leitura seguinte

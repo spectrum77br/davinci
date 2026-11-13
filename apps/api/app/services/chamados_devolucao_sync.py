@@ -1235,6 +1235,14 @@ def _le_na_varredura(agora: datetime):
 def _lembrete_txt(ch: Chamado, desde: datetime) -> str:
     dias = chamados_svc.LEMBRETE_ESPERA.days
     ultima = desde.astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m")
+    if ch.origem == "melhor_envio":
+        # 13/11: atendimento do Melhor Envio não tem tela pra conferir — a conversa
+        # inteira já vem pela API. Parado = cobrar a atendente no próprio atendimento.
+        return (
+            f"Lembrete automático: a última análise, de {ultima}, foi aguardar o Melhor "
+            f"Envio e já passaram {dias} dias sem resposta da atendente — cobre uma "
+            "atualização no atendimento (responder, curto, pedindo previsão)."
+        )
     if (
         ch.status_plataforma in chamados_svc.STATUS_DECIDIDOS
         and ch.status_plataforma_at is not None
