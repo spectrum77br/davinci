@@ -81,13 +81,13 @@ def _decisao(conversa: Any, r: Any, chave: email_agente.Chave, canal: Any) -> st
 
 
 def _regras_da_migration() -> list[SimpleNamespace]:
-    """As regras da 0480 em memória (antes do deploy a tabela ainda não existe)."""
+    """As regras da 0481 em memória (antes do deploy a tabela ainda não existe)."""
     import importlib.util
     from pathlib import Path
     from uuid import UUID
 
-    caminho = Path(__file__).resolve().parents[1] / "alembic/versions/0480_mail_agente_regras.py"
-    spec = importlib.util.spec_from_file_location("m0480", caminho)
+    caminho = Path(__file__).resolve().parents[1] / "alembic/versions/0481_mail_agente_regras.py"
+    spec = importlib.util.spec_from_file_location("m0481", caminho)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return [SimpleNamespace(**{**r, "id": UUID(r["id"]), "ativa": True}) for r in mod.REGRAS]
