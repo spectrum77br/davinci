@@ -1077,6 +1077,32 @@ async def gravar_conversa_da_tela(
     return novas
 
 
+NOTA_CONVERSA_MAX = 8000
+
+
+def nota_da_conversa_da_tela(falas: list, *, titulo: str) -> str | None:
+    """A conversa da tela como NOTA (texto de sistema), uma linha por fala com dia e
+    hora de Brasília. 13/11/2026 (297587): na abertura do ML a conversa é com o
+    assistente, antes de existir consulta, e a abertura pode ter falhado pedindo
+    gente — gravada como fala, ela viraria a "última fala" e tiraria o chamado de
+    Análise Humano. Nota aparece na coluna da conversa e não mexe no Status."""
+    linhas = []
+    for f in falas:
+        texto = limpar_html(f.texto or "").strip()
+        if not texto:
+            continue
+        quando = f.quando if f.quando.tzinfo else f.quando.replace(tzinfo=chamados_svc.SAO_PAULO)
+        hora = quando.astimezone(chamados_svc.SAO_PAULO).strftime("%d/%m %H:%M")
+        quem = "nós" if f.quem == "nos" else (f.autor or "plataforma")
+        linhas.append(f"{hora} · {quem}: {texto}")
+    if not linhas:
+        return None
+    nota = f"{titulo}\n" + "\n".join(linhas)
+    if len(nota) > NOTA_CONVERSA_MAX:
+        nota = nota[: NOTA_CONVERSA_MAX - 1].rstrip() + "…"
+    return nota
+
+
 async def furar_a_fila(session: AsyncSession, ch: Chamado) -> None:
     """Botão Atualizar num caso de tela: não há API pra consultar, então o que
     "atualizar" pode significar é "lê este antes dos outros" — zera a âncora e o

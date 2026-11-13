@@ -789,6 +789,8 @@ type Bolha = {
 // o motivo'?"): os eventos de Encerrado saíam em cinza miúdo e passavam batido.
 // Textos novos começam com "Encerrado: "; os outros são os já gravados.
 const RE_ENCERRAMENTO = /^(Encerrado: |Motivo da devolução retirado |Plataforma encerrou o caso|Monitor: plataforma encerrou)|— chamado encerrado;/
+// 13/11/2026: nota com a conversa da IA na tela (`chamados_leitura.nota_da_conversa_da_tela`)
+const RE_NOTA_CONVERSA = /^Conversa n[ao] /
 
 // "Mercado Livre" / "Você" seguido da data, do jeito que o ML escreve na página
 // do caso e no corpo do e-mail.
@@ -2704,9 +2706,12 @@ async function confirmarExcluir() {
               v-if="b.lado === 'sistema' && b.encerramento"
               class="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl border border-amber-300/70 bg-amber-50 px-3 py-1.5 text-center text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-900/20 dark:text-amber-200"
             ><span class="font-semibold">{{ b.quando }}</span> · {{ b.texto }}</div>
+            <!-- 13/11/2026 (297587): a conversa da IA com o assistente do ML vem como
+                 nota de várias linhas ("13/11 10:37 · nós: …") — centralizada não se lê. -->
             <div
               v-else-if="b.lado === 'sistema'"
-              class="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl bg-muted px-3 py-1 text-center text-[11px] italic text-muted-foreground"
+              class="max-w-[85%] whitespace-pre-wrap break-words rounded-2xl bg-muted px-3 py-1 text-[11px] italic text-muted-foreground"
+              :class="RE_NOTA_CONVERSA.test(b.texto) ? 'text-left' : 'text-center'"
               :title="b.quando"
             >{{ b.texto }}</div>
 

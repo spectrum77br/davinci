@@ -2795,6 +2795,10 @@ async def agent_abrir_ml_pegar(
     return t
 
 
+# Nota do robô/IA quando a tarefa não sai (ver `agent_resultado`).
+ERRO_ROBO_MAX = 2000
+
+
 @agent_router.post("/abrir-ml/resultado", response_model=ChamadoMensagemOut)
 async def agent_abrir_ml_resultado(
     body: AgentAbrirMlResultadoIn,
@@ -2835,6 +2839,16 @@ async def agent_abrir_ml_resultado(
     if body.ok:
         ch.leitura_robo_at = None
         ch.leitura_robo_claim_at = None
+    nota = chamados_leitura.nota_da_conversa_da_tela(
+        body.conversa,
+        titulo=(
+            "Conversa no Fale conosco do ML, antes da consulta:"
+            if body.ok
+            else "Conversa no Fale conosco do ML (a consulta não foi aberta):"
+        ),
+    )
+    if nota:
+        session.add(svc.registrar_sistema(ch, nota))  # o commit é o do agent_resultado
     out = await agent_resultado(
         AgentResultadoIn(
             mensagem_id=m.id,
@@ -2923,7 +2937,9 @@ async def agent_resultado(
         elif body.chamado_url and not ch.chamado_url:
             ch.chamado_url = body.chamado_url
     else:
-        erro = (body.erro or "falha no robô")[:300]
+        # 13/11/2026 (297587): eram 300 letras e o fim da nota da IA (o que a pessoa
+        # tem de fazer: "conferir se uma delas é da venda… e ligar o nº") sumia.
+        erro = (body.erro or "falha no robô")[:ERRO_ROBO_MAX]
         tentativas = (m.tentativas or 0) + 1
         if m.tipo == "abertura" and encerrado:
             # 21/09: o chamado foi Encerrado enquanto o robô estava com a tarefa

@@ -323,6 +323,24 @@ def cmd_pendentes(cfg: dict[str, str], _a: argparse.Namespace) -> None:
     print(json.dumps(_casos(cfg), ensure_ascii=False, indent=1))
 
 
+def _validar_conversa(conversa) -> str | None:
+    """`conversa` do `decidir` e do `abrir-ml resultado` (13/11)."""
+    if conversa is None:
+        return None
+    if not isinstance(conversa, list) or len(conversa) > 60:
+        return "conversa: lista de até 60 falas"
+    for i, f in enumerate(conversa, 1):
+        if not isinstance(f, dict) or set(f) - {"quem", "texto", "quando", "autor"}:
+            return f"conversa[{i}]: só quem, texto, quando e autor"
+        if f.get("quem") not in ("nos", "plataforma"):
+            return f'conversa[{i}]: quem tem que ser "nos" ou "plataforma"'
+        if not (f.get("texto") or "").strip():
+            return f"conversa[{i}]: texto vazio"
+        if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", f.get("quando") or ""):
+            return f'conversa[{i}]: quando no formato "2026-11-12T11:05" (hora da tela)'
+    return None
+
+
 def _validar(d: dict) -> str | None:
     if not d.get("chamado_id"):
         return "falta chamado_id"
@@ -341,19 +359,9 @@ def _validar(d: dict) -> str | None:
         return 'parado: "captcha" ou "login", e só com acao=humano'
     # 13/11 (296423): a conversa que você teve na tela e o protocolo que a
     # plataforma deu entram no chamado (coluna da esquerda e nº do chamado).
-    conversa = d.get("conversa")
-    if conversa is not None:
-        if not isinstance(conversa, list) or len(conversa) > 60:
-            return "conversa: lista de até 60 falas"
-        for i, f in enumerate(conversa, 1):
-            if not isinstance(f, dict) or set(f) - {"quem", "texto", "quando", "autor"}:
-                return f"conversa[{i}]: só quem, texto, quando e autor"
-            if f.get("quem") not in ("nos", "plataforma"):
-                return f'conversa[{i}]: quem tem que ser "nos" ou "plataforma"'
-            if not (f.get("texto") or "").strip():
-                return f"conversa[{i}]: texto vazio"
-            if not re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", f.get("quando") or ""):
-                return f'conversa[{i}]: quando no formato "2026-11-12T11:05" (hora da tela)'
+    erro = _validar_conversa(d.get("conversa"))
+    if erro:
+        return erro
     protocolo = d.get("protocolo")
     if protocolo is not None and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._/-]{3,39}$", str(protocolo)):
         return "protocolo: só letras, números, . _ / - (4 a 40)"
@@ -525,9 +533,12 @@ def cmd_abrir_ml(cfg: dict[str, str], a: argparse.Namespace) -> None:
             d = json.loads(a.json or "")
         except ValueError as e:
             sys.exit(f"JSON inválido: {e}")
-        extras = set(d) - {"mensagem_id", "ok", "consulta", "erro", "parado"}
+        extras = set(d) - {"mensagem_id", "ok", "consulta", "erro", "parado", "conversa"}
         if extras:
             sys.exit(f"campos desconhecidos: {sorted(extras)}")
+        erro = _validar_conversa(d.get("conversa"))
+        if erro:
+            sys.exit(f"resultado recusado: {erro}")
         resposta = _post(cfg, "abrir-ml/resultado", d)
         with DECISOES.open("a") as f:
             f.write(json.dumps({"quando": datetime.now(timezone.utc).isoformat(), "abrir_ml": d,

@@ -587,6 +587,25 @@ class AgentLeaseOut(BaseModel):
     tarefas: list[AgentTarefaOut]
 
 
+class AgentFalaTelaIn(BaseModel):
+    """13/11/2026 (296423): uma fala da conversa que a IA de Chamado teve NA TELA
+    da plataforma (chat da atendente no Assistente do Vendedor, formulário) e que
+    nenhum robô de leitura alcança. `quem`: `nos` (o que a IA escreveu) ou
+    `plataforma` (atendente, robô da plataforma). `quando` = a hora que a tela
+    mostra; data sem fuso é horário de São Paulo."""
+
+    quem: Literal["nos", "plataforma"]
+    texto: str = Field(min_length=1, max_length=4000)
+    quando: datetime
+    # quem falou do lado de lá, como a tela mostra ("Ana · atendente Shopee")
+    autor: str | None = Field(default=None, max_length=80)
+
+    _clean = field_validator("autor", mode="before")(_clean_optional_text)
+
+
+_PROTOCOLO_TELA = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{3,39}$")
+
+
 class AgentAbrirMlIn(BaseModel):
     """30/09 (passo 4): a IA de Chamado pega UMA abertura do ML pra fazer pelo
     Fale conosco (marca `enviando`: ninguém mais pega)."""
@@ -606,6 +625,11 @@ class AgentAbrirMlResultadoIn(BaseModel):
     erro: str | None = None
     # parou na tela da loja (captcha/login), perfil deixado aberto: avisa no Threema
     parado: Literal["captcha", "login"] | None = None
+    # 13/11/2026 (297587): o que a IA e o assistente do ML disseram no chat antes
+    # da consulta ("a mala não foi entregue… não há compensação pra loja"). Vira uma
+    # nota na coluna da conversa — nota, não fala: abertura que falhou pedindo gente
+    # tem de continuar em Análise Humano, e fala nova mudaria o Status do chamado.
+    conversa: list[AgentFalaTelaIn] = Field(default_factory=list, max_length=60)
 
     _clean = field_validator("erro", mode="before")(_clean_optional_text)
 
@@ -876,25 +900,6 @@ class AgentAnalisarOut(BaseModel):
 
 
 AcaoAnalise = Literal["esperar", "responder", "resolver", "humano"]
-
-
-class AgentFalaTelaIn(BaseModel):
-    """13/11/2026 (296423): uma fala da conversa que a IA de Chamado teve NA TELA
-    da plataforma (chat da atendente no Assistente do Vendedor, formulário) e que
-    nenhum robô de leitura alcança. `quem`: `nos` (o que a IA escreveu) ou
-    `plataforma` (atendente, robô da plataforma). `quando` = a hora que a tela
-    mostra; data sem fuso é horário de São Paulo."""
-
-    quem: Literal["nos", "plataforma"]
-    texto: str = Field(min_length=1, max_length=4000)
-    quando: datetime
-    # quem falou do lado de lá, como a tela mostra ("Ana · atendente Shopee")
-    autor: str | None = Field(default=None, max_length=80)
-
-    _clean = field_validator("autor", mode="before")(_clean_optional_text)
-
-
-_PROTOCOLO_TELA = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{3,39}$")
 
 
 class AgentAnaliseIn(BaseModel):

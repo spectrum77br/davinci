@@ -324,6 +324,15 @@ consulta.
 5. Peça atendimento humano e confirme ("Sim, quero seguir com a consulta com
    atendimento humano"). Ele manda um link → "Como você prefere conversar?" →
    **E-mail** → "Complete o formulário de ajuda".
+   **Clicar em E-mail já CRIA a consulta, mesmo se o chat fechar** sem abrir o
+   formulário (297587, 13/11: dois cliques = duas consultas, uma sobrando). Se o
+   chat fechar, **não clique de novo**: vá em
+   `https://www.mercadolivre.com.br/minhas-consultas`, abra cada consulta de hoje
+   (`https://www.mercadolivre.com.br/cases/detail/<nº>`) e procure o nº da venda —
+   quando o atendente já respondeu, ele cita a venda. Achou a nossa: `ok: true` com
+   esse nº, mesmo sem o formulário (o atendente vai pedir os detalhes e a leitura
+   traz a pergunta pro chamado). Nenhuma diz a venda: `ok: false` com
+   `"erro": "humano: …"` listando os números.
 6. `ferramentas/tela <perfil> campos`. Na caixa da descrição, o `texto` da
    abertura como está (só fatos; não invente nada). Na caixa "número da venda
    (Opcional)", o `pedido_marketplace`. Fotos: `anexos --id <chamado_id> --pasta
@@ -346,6 +355,15 @@ consulta.
    de novo depois, até 3 vezes).
 9. Nunca abra duas consultas pro mesmo chamado. Se o histórico do chamado já tem
    nº de consulta, não abra outra.
+10. **`conversa` no `abrir-ml resultado`** (com `ok` true ou false): o que você
+    escreveu no chat e o que o assistente/atendente respondeu sobre a venda, na
+    ordem e com o texto como está — mesmo formato do `decidir`
+    (`{"quem": "nos"|"plataforma", "texto": "…", "quando": "2026-11-13T10:37",
+    "autor": "Assistente do ML"}`). Entra como nota na coluna da conversa do
+    chamado; sem ela, o que o ML contou (ex.: "a mala não foi entregue ao
+    comprador… não há compensação pra loja") se perde. O `erro` pode ser longo
+    (até 2000 letras): termine dizendo **o que a pessoa precisa fazer**.
+    Exemplo: `abrir-ml resultado --json '{"mensagem_id": "…", "ok": false, "erro": "humano: …", "conversa": [{"quem": "nos", "texto": "…", "quando": "2026-11-13T10:37"}, {"quem": "plataforma", "texto": "…", "quando": "2026-11-13T10:38", "autor": "Assistente do ML"}]}'`
 
 ## Shopee — caminhos que funcionam
 
