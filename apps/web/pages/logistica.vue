@@ -3101,11 +3101,11 @@ async function aplicarStatusBling(c: Logistica) {
                     <span v-if="c.status_bling" class="inline-block w-[92px] truncate rounded py-0.5 text-[11px] font-semibold" :class="corStatusBling(c.status_bling)" :title="c.status_bling">{{ c.status_bling }}</span>
                     <span v-else class="text-muted-foreground">—</span>
                   </td>
-                  <td v-if="ehFlexTab" class="max-w-[200px] border-l border-l-slate-300 px-1.5 py-1.5 text-[11px] leading-tight dark:border-l-slate-600" data-tracken-celula :title="trackenTitulo(c)">
+                  <td v-if="ehFlexTab" class="border-l border-l-slate-300 px-1.5 py-1.5 text-[11px] leading-tight dark:border-l-slate-600" data-tracken-celula :title="trackenTitulo(c)">
                     <template v-if="c.tracken?.achado">
                       <div class="truncate font-semibold" :class="trackenCor(c)">{{ c.tracken.status || '—' }}</div>
-                      <div v-if="c.tracken.entregue_em" class="truncate text-emerald-700 dark:text-emerald-400">entregue {{ fmtDataHora(c.tracken.entregue_em) }}</div>
-                      <div v-else class="truncate text-muted-foreground">{{ c.tracken.ultimo_evento }}<template v-if="c.tracken.ultimo_em"> · {{ fmtDataHora(c.tracken.ultimo_em) }}</template></div>
+                      <div v-if="c.tracken.entregue_em" class="break-words text-emerald-700 dark:text-emerald-400">entregue {{ fmtDataHora(c.tracken.entregue_em) }}</div>
+                      <div v-else class="line-clamp-2 break-words text-muted-foreground">{{ c.tracken.ultimo_evento }}<template v-if="c.tracken.ultimo_em"> · {{ fmtDataHora(c.tracken.ultimo_em) }}</template></div>
                       <div v-if="c.tracken.tentativas" class="font-semibold text-red-600 dark:text-red-400">{{ c.tracken.tentativas }} tentativa(s)</div>
                     </template>
                     <span v-else-if="c.tracken" class="text-muted-foreground">{{ c.tracken.erro || 'ainda não está na transportadora' }}</span>
