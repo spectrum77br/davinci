@@ -145,7 +145,10 @@ def regra_mensagem_bling_para(
     estado não empresta mensagem. None se nenhuma aplicável tiver."""
     assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
     cands = logistica_match.find_matching_rules(
-        rows, assinatura=assinatura, plataforma=row.plataforma, localizacao=row.localizacao
+        rows,
+        assinatura=assinatura,
+        plataforma=logistica_match.plataforma_regra_da_linha(row),
+        localizacao=row.localizacao,
     )
     for r in logistica_match.regras_aplicaveis(cands, row.status_bling):
         if (r.mensagem_bling or "").strip():
@@ -344,7 +347,10 @@ def _regra_status_para(rows: list[LogisticaStatus], row: Logistica) -> Logistica
     geral). None se nenhuma casar."""
     assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
     return logistica_match.find_matching_rule(
-        rows, assinatura=assinatura, plataforma=row.plataforma, localizacao=row.localizacao
+        rows,
+        assinatura=assinatura,
+        plataforma=logistica_match.plataforma_regra_da_linha(row),
+        localizacao=row.localizacao,
     )
 
 
@@ -452,7 +458,10 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
     rows = list((await session.execute(select(LogisticaStatus))).scalars().all())
     assinatura = logistica_rules.assinatura_para(row.plataforma, row.meli_status or {})
     todas = logistica_match.find_matching_rules(
-        rows, assinatura=assinatura, plataforma=row.plataforma, localizacao=row.localizacao
+        rows,
+        assinatura=assinatura,
+        plataforma=logistica_match.plataforma_regra_da_linha(row),
+        localizacao=row.localizacao,
     )
     cands = [c for c in todas if (c.alterar_status_bling or "").strip()]
     if not cands:
@@ -744,7 +753,7 @@ async def aplicar_status_em_lote(
         cands = logistica_match.find_matching_rules(
             status_rows,
             assinatura=assinatura,
-            plataforma=row.plataforma,
+            plataforma=logistica_match.plataforma_regra_da_linha(row),
             localizacao=row.localizacao,
         )
         if not any((c.alterar_status_bling or "").strip() for c in cands):
@@ -813,7 +822,7 @@ async def enviar_threema_em_lote(
         cands = logistica_match.find_matching_rules(
             status_rows,
             assinatura=assinatura,
-            plataforma=row.plataforma,
+            plataforma=logistica_match.plataforma_regra_da_linha(row),
             localizacao=row.localizacao,
         )
         rule = next(

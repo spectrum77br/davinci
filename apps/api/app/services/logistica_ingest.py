@@ -594,7 +594,10 @@ async def _ids_pendentes(
             continue
         assinatura = logistica_rules.assinatura_para(r.plataforma, r.meli_status or {})
         cands = logistica_match.find_matching_rules(
-            regras, assinatura=assinatura, plataforma=r.plataforma, localizacao=r.localizacao
+            regras,
+            assinatura=assinatura,
+            plataforma=logistica_match.plataforma_regra_da_linha(r),
+            localizacao=r.localizacao,
         )
         resolvido = logistica_match.estado_resolvido(
             cands,

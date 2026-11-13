@@ -1639,22 +1639,38 @@ async function refreshStatus() {
 // Plataforma de uma regra: escolhida numa lista, com os MESMOS rótulos que o
 // backend grava em `logistica.plataforma` (o casador compara sem maiúscula, então
 // "mercado livre" antigo casa igual). Vazio = geral (vale pra todas).
-// Só as abas que são marketplace: "Flex" é uma visão (ML + Shopee) e nunca vem
-// em `logistica.plataforma` — uma regra com Plataforma = Flex nunca casaria.
-const STATUS_PLATAFORMA_OPCOES: string[] = PLATAFORMA_TABS.filter((t) => t.key !== 'flex').map(
+// As abas que são marketplace e, para quem vê o Flex, "Shopee Flex" e "Mercado
+// Livre Flex" (13/11/2026): o pedido Flex casa SÓ a regra Flex — sem ela fica
+// vermelho (backend `logistica_match.plataforma_da_regra`). A aba "Flex" em si
+// é uma visão (ML + Shopee), não uma plataforma de regra.
+const STATUS_PLATAFORMA_BASE: string[] = PLATAFORMA_TABS.filter((t) => t.key !== 'flex').map(
   (t) => t.label,
+)
+const STATUS_PLATAFORMA_FLEX: string[] = ['Shopee Flex', 'Mercado Livre Flex']
+const STATUS_PLATAFORMA_OPCOES = computed<string[]>(() =>
+  podeVerFlex.value ? [...STATUS_PLATAFORMA_BASE, ...STATUS_PLATAFORMA_FLEX] : STATUS_PLATAFORMA_BASE,
 )
 function plataformaCanonica(v: string | null | undefined): string {
   const p = (v || '').trim()
-  return STATUS_PLATAFORMA_OPCOES.find((o) => o.toLowerCase() === p.toLowerCase()) || p
+  return (
+    [...STATUS_PLATAFORMA_BASE, ...STATUS_PLATAFORMA_FLEX].find((o) => o.toLowerCase() === p.toLowerCase()) || p
+  )
 }
-// Valor antigo digitado à mão que não é nenhuma das 4 continua na lista (não
-// some da regra sem ninguém ver).
+// Valor antigo digitado à mão que não é nenhuma das opções continua na lista
+// (não some da regra sem ninguém ver).
 function plataformaOpcoesPara(v: string | null | undefined): string[] {
   const p = plataformaCanonica(v)
-  return p && !STATUS_PLATAFORMA_OPCOES.includes(p)
-    ? [...STATUS_PLATAFORMA_OPCOES, p]
-    : STATUS_PLATAFORMA_OPCOES
+  const opcoes = STATUS_PLATAFORMA_OPCOES.value
+  return p && !opcoes.includes(p) ? [...opcoes, p] : opcoes
+}
+// A Plataforma da regra que vale para o pedido (espelho do backend): o Flex
+// usa "Shopee Flex" / "Mercado Livre Flex". Só quem vê o Flex recebe `envio_flex`.
+function plataformaRegraDe(c: Logistica): string {
+  if (c.envio_flex === true) {
+    if (isShopee(c)) return 'Shopee Flex'
+    if (isMl(c)) return 'Mercado Livre Flex'
+  }
+  return c.plataforma || ''
 }
 
 // "Status Atual" pode ter VÁRIOS estados do Bling — a regra vale pra qualquer
@@ -2847,7 +2863,7 @@ async function aplicarStatusBling(c: Logistica) {
                     c.id === raioId ? 'bg-blue-50 shadow-[inset_3px_0_0_hsl(var(--primary))] dark:bg-blue-950/30' : '',
                     c.id !== raioId && precisaAtencao(c) ? 'bg-red-50/70 shadow-[inset_3px_0_0_#dc2626] dark:bg-red-950/30' : '',
                   ]"
-                  :title="precisaAtencao(c) ? 'Sem regra na aba Status para esta combinação' : undefined"
+                  :title="precisaAtencao(c) ? (c.envio_flex === true ? `Pedido Flex sem regra ${plataformaRegraDe(c)} na aba Status para esta combinação` : 'Sem regra na aba Status para esta combinação') : undefined"
                   @click="abrirRaio(c)"
                 >
                   <td class="px-1.5 py-1.5 text-center text-muted-foreground" :title="fmtDate(c.data)">{{ fmtDate(c.data).slice(0, 5) }}</td>
@@ -2937,7 +2953,7 @@ async function aplicarStatusBling(c: Logistica) {
                     <div v-if="problemaSemChamado(c)" class="text-[10.5px] font-bold text-red-600 dark:text-red-400" title="Status Bling Problemas e nenhum chamado aberto: ninguém está olhando este pedido">sem chamado aberto</div>
                   </td>
                   <td class="px-1.5 py-1.5 text-center">
-                    <span v-if="precisaAtencao(c)" class="rounded bg-amber-100 px-1.5 py-0.5 text-[10.5px] font-semibold text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">sem regra</span>
+                    <span v-if="precisaAtencao(c)" class="rounded bg-amber-100 px-1.5 py-0.5 text-[10.5px] font-semibold text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">{{ c.envio_flex === true ? 'sem regra Flex' : 'sem regra' }}</span>
                     <span v-else-if="c.acao_monitorar" class="rounded bg-blue-100 px-1.5 py-0.5 text-[10.5px] font-semibold text-blue-800 dark:bg-blue-950/50 dark:text-blue-300">monitorar</span>
                     <span v-else class="text-muted-foreground">—</span>
                   </td>
@@ -3115,10 +3131,12 @@ async function aplicarStatusBling(c: Logistica) {
                 <div v-if="raioRow.divergencia" class="mt-1 text-amber-700 dark:text-amber-400">Divergência: {{ raioRow.divergencia }}</div>
                 <div class="mt-1">
                   <span class="text-muted-foreground">Regra da aba Status:&nbsp;</span>
-                  <template v-if="precisaAtencao(raioRow)"><b class="text-amber-700 dark:text-amber-400">nenhuma</b> — combinação nova; decidir na aba Status.</template>
+                  <template v-if="precisaAtencao(raioRow) && raioRow.envio_flex === true"><b class="text-amber-700 dark:text-amber-400">nenhuma</b> — pedido Flex: falta a regra <b>{{ plataformaRegraDe(raioRow) }}</b> desta combinação; decidir na aba Status.</template>
+                  <template v-else-if="precisaAtencao(raioRow)"><b class="text-amber-700 dark:text-amber-400">nenhuma</b> — combinação nova; decidir na aba Status.</template>
                   <template v-else-if="raioRow.acao_resumo.length">{{ raioRow.acao_resumo.join(' · ') }}</template>
                   <template v-else>—</template>
                   <span v-if="raioRow.acao_monitorar" class="ml-1 rounded bg-blue-100 px-1 text-[10.5px] font-semibold text-blue-800 dark:bg-blue-950/50 dark:text-blue-300">monitorar</span>
+                  <span v-if="raioRow.envio_flex === true && raioRow.acao_match" class="ml-1 rounded border border-violet-300 bg-violet-50 px-1 text-[10px] font-semibold text-violet-800 dark:border-violet-700 dark:bg-violet-950/40 dark:text-violet-300" title="Pedido Flex: vale a regra Flex da aba Status">{{ plataformaRegraDe(raioRow) }}</span>
                 </div>
                 <div class="mt-1 flex flex-wrap gap-1.5">
                   <button

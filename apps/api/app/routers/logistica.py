@@ -415,7 +415,10 @@ async def _match_rules(session: AsyncSession, c: Logistica) -> list[LogisticaSta
     rows = (await session.execute(select(LogisticaStatus))).scalars().all()
     assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
     return logistica_match.find_matching_rules(
-        list(rows), assinatura=assinatura, plataforma=c.plataforma, localizacao=c.localizacao
+        list(rows),
+        assinatura=assinatura,
+        plataforma=logistica_match.plataforma_regra_da_linha(c),
+        localizacao=c.localizacao,
     )
 
 
@@ -963,7 +966,10 @@ async def list_logistica(
     for c in rows:
         assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
         cands = logistica_match.find_matching_rules(
-            status_rows, assinatura=assinatura, plataforma=c.plataforma, localizacao=c.localizacao
+            status_rows,
+            assinatura=assinatura,
+            plataforma=logistica_match.plataforma_regra_da_linha(c),
+            localizacao=c.localizacao,
         )
         out.append(
             _to_out(

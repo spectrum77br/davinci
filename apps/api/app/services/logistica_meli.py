@@ -853,7 +853,7 @@ async def abrir_chamados_em_lote(
         cands = logistica_match.find_matching_rules(
             status_rows,
             assinatura=assinatura,
-            plataforma=row.plataforma,
+            plataforma=logistica_match.plataforma_regra_da_linha(row),
             localizacao=row.localizacao,
         )
         aplicaveis = logistica_match.regras_aplicaveis(cands, row.status_bling)

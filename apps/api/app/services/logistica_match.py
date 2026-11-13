@@ -132,6 +132,40 @@ def localizacao_casa(rule: LogisticaStatus, localizacao: str | None) -> bool:
     return bool(texto) and any(_norm_texto(p) in texto for p in palavras)
 
 
+# Pedido Flex tem as regras DELE (Vinicius, 13/11/2026: "o flex tem que ter as
+# regras dele; se não tiver regra ele fica vermelho"). Na aba Status a regra do
+# Flex tem Plataforma "Shopee Flex" (Entrega Direta) ou "Mercado Livre Flex"
+# (Envios Flex). O pedido marcado `logistica.envio_flex` casa SÓ essas — a regra
+# da Shopee/ML não vale pra ele; sem regra Flex da chave, fica vermelho como
+# qualquer combinação nova e nenhum robô age nele. A regra Geral (sem
+# plataforma) continua valendo pra todos, Flex inclusive. Pedido ainda não lido
+# (`envio_flex` NULL) segue a regra da plataforma até ser marcado. Caso real:
+# Shopee 26111383SWQS3R / 308933 (Entrega Direta) sumia da aba Flex escondido
+# pela regra "Processado · Em digitação" (sem ação) da Shopee.
+PLATAFORMA_REGRA_FLEX_ML = "Mercado Livre Flex"
+PLATAFORMA_REGRA_FLEX_SHOPEE = "Shopee Flex"
+
+
+def plataforma_da_regra(plataforma: str | None, envio_flex: bool | None) -> str | None:
+    """A Plataforma da aba Status que vale pro pedido: a dele, ou a do Flex
+    ("Shopee Flex" / "Mercado Livre Flex") quando o pedido é Flex."""
+    if envio_flex is True:
+        p = _norm(plataforma)
+        if p in logistica_rules._ML_PLATAFORMAS:
+            return PLATAFORMA_REGRA_FLEX_ML
+        if p in logistica_rules._SHOPEE_PLATAFORMAS:
+            return PLATAFORMA_REGRA_FLEX_SHOPEE
+    return plataforma
+
+
+def plataforma_regra_da_linha(row: object) -> str | None:
+    """`plataforma_da_regra` de uma linha da Logística (`plataforma` +
+    `envio_flex`). É o que todo casador passa como `plataforma` a
+    `find_matching_rules` — tela, motor de status, mensagens e robôs de
+    chamado veem a MESMA regra."""
+    return plataforma_da_regra(getattr(row, "plataforma", None), getattr(row, "envio_flex", None))
+
+
 def find_matching_rule(
     rows: list[LogisticaStatus],
     *,

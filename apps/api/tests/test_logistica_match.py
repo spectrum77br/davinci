@@ -891,3 +891,138 @@ async def test_list_amazon_302142_condicao_nao_tira_a_normal_de_outro_estado(
     # Em andamento: a com condição manda (troca pra Entregue pendente).
     assert linhas["302143"]["acao_status_id"] == rc.json()["id"]
     assert linhas["302143"]["acao_resolvido"] is False
+
+
+# ---- Flex tem as regras dele (Vinicius 13/11/2026, Shopee 308933) ----
+
+
+def test_plataforma_da_regra_flex():
+    pr = logistica_match.plataforma_da_regra
+    assert pr("Shopee", True) == "Shopee Flex"
+    assert pr("Mercado Livre", True) == "Mercado Livre Flex"
+    assert pr(" mercado livre ", True) == "Mercado Livre Flex"
+    # Não é Flex, ou ainda não lido: a plataforma do pedido.
+    assert pr("Shopee", False) == "Shopee"
+    assert pr("Shopee", None) == "Shopee"
+    # Plataforma sem Flex não muda.
+    assert pr("Amazon", True) == "Amazon"
+
+
+def test_pedido_flex_nao_casa_regra_da_shopee():
+    shopee = _rule(plataforma="Shopee", status_plataforma="Processado", status_atual="Em digitação")
+    plat = logistica_match.plataforma_regra_da_linha(
+        _linha(plataforma="Shopee", envio_flex=True)
+    )
+    assert logistica_match.find_matching_rules(
+        [shopee], assinatura="Processado", plataforma=plat, localizacao=None
+    ) == []
+
+
+def test_pedido_flex_casa_so_a_regra_flex():
+    shopee = _rule(plataforma="Shopee", status_plataforma="Processado")
+    flex = _rule(plataforma="Shopee Flex", status_plataforma="Processado", monitoramento=True)
+    flex_row = _linha(plataforma="Shopee", envio_flex=True)
+    normal_row = _linha(plataforma="Shopee", envio_flex=False)
+    for row, esperado in ((flex_row, [flex]), (normal_row, [shopee])):
+        assert logistica_match.find_matching_rules(
+            [shopee, flex],
+            assinatura="Processado",
+            plataforma=logistica_match.plataforma_regra_da_linha(row),
+            localizacao=None,
+        ) == esperado
+
+
+def test_pedido_flex_segue_a_regra_geral():
+    geral = _rule(plataforma=None, status_plataforma="Enviado", monitoramento=True)
+    row = _linha(plataforma="Mercado Livre", envio_flex=True)
+    assert logistica_match.find_matching_rules(
+        [geral],
+        assinatura="Enviado",
+        plataforma=logistica_match.plataforma_regra_da_linha(row),
+        localizacao=None,
+    ) == [geral]
+
+
+def test_robo_status_bling_usa_a_regra_flex():
+    from app.services import logistica_bling
+
+    shopee = _rule(
+        plataforma="Shopee", status_plataforma="Processado", alterar_status_bling="Cancelado"
+    )
+    flex = _rule(
+        plataforma="Shopee Flex",
+        status_plataforma="Processado",
+        alterar_status_bling="Em andamento",
+    )
+    meli = {"order_status": "PROCESSED"}
+    chave = logistica_rules.assinatura_para("Shopee", meli)
+    assert chave == "Processado"
+    row = _linha(plataforma="Shopee", envio_flex=True, meli_status=meli)
+    # Sem regra Flex: o robô não usa a da Shopee.
+    assert logistica_bling.alterar_status_bling_para([shopee], row) is None
+    assert logistica_bling.alterar_status_bling_para([shopee, flex], row) == "Em andamento"
+
+
+def _linha(**kw):
+    from app.models import Logistica
+
+    return Logistica(**kw)
+
+
+@pytest.mark.asyncio
+async def test_list_pedido_flex_sem_regra_flex_fica_vermelho(
+    client: AsyncClient,
+    db: AsyncSession,
+    admin: User,
+    auth_as: Callable[[User | None], None],
+):
+    """Caso 308933: a regra "Shopee · Processado · Em digitação" (sem ação)
+    escondia o pedido da Entrega Direta. Agora o Flex não usa ela: sem regra
+    Shopee Flex, fica vermelho (sem match, não resolvido); com a regra Flex,
+    vale a dela."""
+    from app.models import Logistica
+
+    auth_as(admin)
+    meli = {"order_status": "PROCESSED", "logistics_status": "LOGISTICS_REQUEST_CREATED"}
+    chave = logistica_rules.assinatura_para("Shopee", meli)
+    rs = await client.post(
+        "/api/logistica/status",
+        json={"plataforma": "Shopee", "status_plataforma": chave, "status_atual": ["Em digitação"]},
+    )
+    assert rs.status_code == 201, rs.text
+    for pedido, flex in (("308933", True), ("308934", False)):
+        db.add(
+            Logistica(
+                plataforma="Shopee",
+                pedido_bling=pedido,
+                meli_status=meli,
+                status_bling="Em digitação",
+                envio_flex=flex,
+            )
+        )
+    await db.commit()
+
+    lista = (await client.get("/api/logistica?plataforma=shopee")).json()
+    linhas = {x["pedido_bling"]: x for x in lista}
+    # Pedido comum: a regra da Shopee, sem ação → resolvido (escondido).
+    assert linhas["308934"]["acao_status_id"] == rs.json()["id"]
+    assert linhas["308934"]["acao_resolvido"] is True
+    # Pedido Flex: nenhuma regra Shopee Flex → vermelho.
+    assert linhas["308933"]["acao_match"] is False
+    assert linhas["308933"]["acao_resolvido"] is False
+
+    rf = await client.post(
+        "/api/logistica/status",
+        json={
+            "plataforma": "Shopee Flex",
+            "status_plataforma": chave,
+            "status_atual": ["Em digitação"],
+            "monitoramento": True,
+        },
+    )
+    assert rf.status_code == 201, rf.text
+    lista = (await client.get("/api/logistica?envio=flex")).json()
+    linhas = {x["pedido_bling"]: x for x in lista}
+    assert linhas["308933"]["acao_status_id"] == rf.json()["id"]
+    assert linhas["308933"]["acao_monitorar"] is True
+    assert "308934" not in linhas
