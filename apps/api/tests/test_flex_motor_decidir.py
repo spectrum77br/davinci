@@ -43,6 +43,7 @@ def _anuncio(*skus, ext="MLB1", observado=None, anterior=None, recusa=None, esto
         desejado_anterior=anterior,
         recusa=recusa,
         desde=kw.get("desde"),
+        ligado_pelo_davinci=kw.get("nosso", False),
     )
 
 
@@ -121,11 +122,45 @@ def test_analisar_sku_recusa(sku, trecho):
     ],
 )
 def test_histerese(saldo, observado, anterior, esperado):
-    a = _anuncio("dg053.ci", observado=observado, anterior=anterior)
+    # A histerese é do Flex que o DaVinci ligou (13/11/2026).
+    a = _anuncio("dg053.ci", observado=observado, anterior=anterior, nosso=True)
     d = decidir(a, _saldos(dg053_sp=saldo), CFG)
     assert d.desejado == esperado
     assert d.saldo == saldo
     assert d.familias == ("dg053",)
+
+
+@pytest.mark.parametrize(
+    ("saldo", "observado", "anterior", "esperado"),
+    [
+        # Ligado POR FORA do DaVinci (13/11/2026: app da loja ligou a Entrega
+        # Direta em massa; a histerese segurava 1–2 peças em até 8 anúncios):
+        # sem o saldo de LIGAR, desliga.
+        (2, "ligado", None, "desligado"),
+        (1, "ligado", None, "desligado"),
+        (2, None, "ligado", "desligado"),
+        # Com o saldo de ligar, a regra quer ligado de qualquer jeito.
+        (3, "ligado", None, "ligado"),
+        (5, None, "ligado", "ligado"),
+        # Abaixo de n_desliga: o motivo de sempre.
+        (0, "ligado", None, "desligado"),
+        # Desligado continua precisando de 3 para ligar.
+        (2, "desligado", None, "desligado"),
+    ],
+)
+def test_ligado_por_fora_nao_ganha_histerese(saldo, observado, anterior, esperado):
+    a = _anuncio("dg053.ci", observado=observado, anterior=anterior, nosso=False)
+    d = decidir(a, _saldos(dg053_sp=saldo), CFG)
+    assert d.desejado == esperado
+    assert d.saldo == saldo
+    if esperado == "desligado" and CFG.n_desliga <= saldo < CFG.n_liga and "ligado" in (
+        observado,
+        anterior,
+    ):
+        assert d.motivo == (
+            f"saldo Flex {saldo} em dg053.sp: ligado fora do DaVinci — precisa de 3 para "
+            "continuar ligado"
+        )
 
 
 def test_saldo_flex_desconta_os_pedidos_flex_fora_do_sp():

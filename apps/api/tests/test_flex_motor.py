@@ -1176,3 +1176,87 @@ async def test_desligar_so_em_piloto_e_conta_pronta(db, mundo, monkeypatch):
     assert e.value.codigo == "conta_nao_pronta"
     assert "Piracicaba" in e.value.detalhe
     assert ml.escritas == []
+
+
+# ---- 13/11/2026: ligado POR FORA do DaVinci não ganha a histerese ------------
+#
+# Um app da loja ligou a Entrega Direta em massa na Shopee (12/11, loja por
+# loja) e a histerese (liga com 3, desliga com menos de 1) segurou ligados 45
+# anúncios com 1–2 peças em São Bernardo, cada peça em até 8 anúncios. A
+# histerese agora vale só para o Flex que o DaVinci ligou.
+
+
+@pytest.mark.asyncio
+async def test_ligados_pelo_davinci_pela_trilha(db, mundo):
+    conta = mundo["conta_id"]
+    t0 = datetime(2026, 11, 12, 12, tzinfo=UTC)
+
+    def log(ext, acao, resultado="ok", depois=None, minutos=0):
+        db.add(
+            FlexLog(
+                criado_em=t0 + timedelta(minutes=minutos),
+                integration_id=conta,
+                external_id=ext,
+                plataforma="ml",
+                acao=acao,
+                resultado=resultado,
+                estado_depois=depois,
+                modo="ativo",
+            )
+        )
+
+    log("A1", "ligar")  # o DaVinci ligou
+    log("A2", "ler", depois="desligado")
+    log("A2", "ligar", minutos=5)  # lido desligado, depois o DaVinci ligou
+    log("A3", "ligar")
+    log("A3", "ler", depois="desligado", minutos=5)  # desligaram por fora depois
+    log("A4", "ligar")
+    log("A4", "desligar", minutos=5)  # o DaVinci desligou depois
+    log("A5", "ligar", resultado="erro")  # a plataforma recusou
+    log("A6", "ler", depois="ligado")  # 1ª leitura já ligado (ligado por fora)
+    log("A7", "ligar", resultado="pendente")  # aceito, a plataforma ainda confirmando
+    log("A8", "ligar", resultado="simulado")  # modo observar: não é escrita
+    log("A9", "ligar")
+    log("A9", "desligar", minutos=5)
+    log("A9", "ler", depois="ligado", minutos=10)  # religado por fora
+    await db.commit()
+
+    nossos = await flex_motor._ligados_pelo_davinci(db, [conta])
+    assert {ext for c, ext in nossos if c == conta} == {"A1", "A2", "A7"}
+    assert await flex_motor._ligados_pelo_davinci(db, []) == set()
+
+
+@pytest.mark.asyncio
+async def test_ligado_por_fora_com_saldo_baixo_e_desligado(db, mundo, monkeypatch):
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "ativo")
+    ml = mundo["ml"]
+    ml.estado["MLB1"] = True  # ligado fora do DaVinci: ele nunca ligou
+    await _pedido_flex(db, 900101, "dg053.ci", 3)  # saldo 5 - 3 = 2
+    await flex_motor.rodar_motor()
+    est = await _estados(db)
+    assert (est["MLB1"].desejado, est["MLB1"].saldo_sp) == ("desligado", 2)
+    assert "ligado fora do DaVinci" in est["MLB1"].motivo
+    assert ("desligar", "MLB1") in ml.escritas
+    assert ml.estado["MLB1"] is False
+
+
+@pytest.mark.asyncio
+async def test_religado_por_fora_depois_de_desligado_perde_a_histerese(db, mundo, monkeypatch):
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "ativo")
+    ml = mundo["ml"]
+    await flex_motor.rodar_motor()
+    await flex_motor.aprovar(mundo["conta_id"], "MLB1", por=None)
+    assert ml.estado["MLB1"] is True
+    # Desligado no painel; depois religado por fora (app da loja).
+    ml.estado["MLB1"] = False
+    await flex_motor.rodar_motor()
+    assert (await _estados(db))["MLB1"].observado == "desligado"
+    ml.estado["MLB1"] = True
+    await _pedido_flex(db, 900201, "dg053.ci", 3)  # saldo 2
+    ml.chamadas.clear()
+    await flex_motor.rodar_motor()
+    est = await _estados(db)
+    assert est["MLB1"].desejado == "desligado"
+    assert "ligado fora do DaVinci" in est["MLB1"].motivo
+    assert ("desligar", "MLB1") in ml.escritas
+    assert ml.estado["MLB1"] is False

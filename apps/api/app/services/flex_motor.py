@@ -333,6 +333,11 @@ class Anuncio:
     # O motor consegue LIGAR o Flex aqui? Shopee com `flex_shopee_escrita`
     # desligado: não — pedir aprovação seria um botão que não faz nada.
     pode_ligar: bool = True
+    # O Flex ligado agora foi o DaVinci que ligou (13/11/2026)? Só ele ganha a
+    # histerese: o ligado POR FORA (app da loja, Seller Center, padrão da
+    # conta) precisa do saldo de ligar (`n_liga`) para continuar ligado. Ver
+    # `_ligados_pelo_davinci`.
+    ligado_pelo_davinci: bool = False
 
     @property
     def chave(self) -> tuple[UUID, str]:
@@ -518,11 +523,24 @@ def decidir(anuncio: Anuncio, saldos: Mapping[str, SaldoSp], cfg: ConfigFlex) ->
             menor,
             skus_sp,
         )
-    elif _estado_atual(anuncio) == LIGADO:
+    elif _estado_atual(anuncio) == LIGADO and anuncio.ligado_pelo_davinci:
         d = Decisao(
             LIGADO,
             f"saldo Flex {menor} em {sku_menor}: entre {cfg.n_desliga} e {cfg.n_liga}, "
             "continua ligado (histerese)",
+            familias,
+            menor,
+            skus_sp,
+        )
+    elif _estado_atual(anuncio) == LIGADO:
+        # Ligado POR FORA do DaVinci (13/11/2026: um app da loja ligou a
+        # Entrega Direta em massa na Shopee e a histerese segurou 45 anúncios
+        # com 1–2 peças em São Bernardo, cada peça em até 8 anúncios). Quem
+        # não foi ligado aqui precisa do saldo de LIGAR para ficar ligado.
+        d = Decisao(
+            DESLIGADO,
+            f"saldo Flex {menor} em {sku_menor}: ligado fora do DaVinci — precisa de "
+            f"{cfg.n_liga} para continuar ligado",
             familias,
             menor,
             skus_sp,
@@ -1052,6 +1070,7 @@ class _Estado:
     proxima_leitura: datetime | None = None
     status_anuncio: str | None = None
     status_em: datetime | None = None
+    ligado_pelo_davinci: bool = False
 
 
 async def _fotos_dos_estados(
@@ -1062,6 +1081,7 @@ async def _fotos_dos_estados(
     rows = await session.execute(
         select(FlexAnuncioEstado).where(FlexAnuncioEstado.integration_id.in_(list(ids)))
     )
+    nossos = await _ligados_pelo_davinci(session, ids)
     return {
         (e.integration_id, e.external_id): _Estado(
             plataforma=e.plataforma,
@@ -1074,8 +1094,47 @@ async def _fotos_dos_estados(
             proxima_leitura=e.proxima_leitura,
             status_anuncio=e.status_anuncio,
             status_em=e.status_em,
+            ligado_pelo_davinci=(e.integration_id, e.external_id) in nossos,
         )
         for e in rows.scalars().all()
+    }
+
+
+async def _ligados_pelo_davinci(
+    session: AsyncSession, ids: Collection[UUID]
+) -> set[tuple[UUID, str]]:
+    """Anúncios cujo Flex ligado foi o DaVinci que ligou (13/11/2026): houve um
+    LIGAR do DaVinci (ok, ou aceito pela plataforma e ainda confirmando) DEPOIS
+    da última vez que o anúncio ficou desligado — desligado pelo DaVinci
+    (desligar ok/confirmando) ou lido desligado. O ligado por fora (app da loja
+    que liga a Entrega Direta em massa, Seller Center, padrão da conta do ML,
+    "primeira leitura" já ligado) não entra: não ganha a histerese.
+
+    Fonte: `flex_log` (índice ix_flex_log_anuncio). `simulado` (modo observar)
+    não é escrita e não conta."""
+    if not ids:
+        return set()
+    ligou = func.max(FlexLog.criado_em).filter(
+        FlexLog.acao == "ligar", FlexLog.resultado.in_(("ok", "pendente"))
+    )
+    desligou = func.max(FlexLog.criado_em).filter(
+        or_(
+            and_(FlexLog.acao == "desligar", FlexLog.resultado.in_(("ok", "pendente"))),
+            and_(FlexLog.acao == "ler", FlexLog.estado_depois == DESLIGADO),
+        )
+    )
+    rows = await session.execute(
+        select(FlexLog.integration_id, FlexLog.external_id, ligou, desligou)
+        .where(
+            FlexLog.integration_id.in_(list(ids)),
+            FlexLog.acao.in_(("ligar", "desligar", "ler")),
+        )
+        .group_by(FlexLog.integration_id, FlexLog.external_id)
+    )
+    return {
+        (r[0], str(r[1]))
+        for r in rows.all()
+        if r[2] is not None and (r[3] is None or r[2] > r[3])
     }
 
 
@@ -1099,6 +1158,7 @@ def _com_estado(
                 desejado_anterior=e.desejado,
                 recusa=e.recusa,
                 aprovado=e.aprovado,
+                ligado_pelo_davinci=e.ligado_pelo_davinci,
             )
             if e.status_anuncio and _mais_novo(e.status_em, a.status_em):
                 a = replace(a, status=e.status_anuncio, status_em=e.status_em)
@@ -1115,6 +1175,7 @@ def _com_estado(
                 desejado_anterior=e.desejado,
                 recusa=e.recusa,
                 aprovado=e.aprovado,
+                ligado_pelo_davinci=e.ligado_pelo_davinci,
                 conhecido=False,
                 status=e.status_anuncio,
                 status_em=e.status_em,
