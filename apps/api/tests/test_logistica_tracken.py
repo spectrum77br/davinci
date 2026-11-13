@@ -317,3 +317,35 @@ async def test_botao_atualizar_tracken(
     r = await client.post(f"/api/logistica/{comum.id}/tracken")
     assert r.status_code == 422
     assert (await db.execute(select(LogisticaTracken))).scalars().all()
+
+
+@pytest.mark.asyncio
+async def test_botao_atualizar_todos_os_flex(
+    client: AsyncClient,
+    db: AsyncSession,
+    admin: User,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    await _pedido(
+        db, bling="308933", loja="26111383SWQS3R", rastreio="BR262058740263A",
+        flex=True, cep="06840050",
+    )
+    await _pedido(
+        db, bling="308935", loja="2611NAOCHEGOU", rastreio=None, flex=True, cep="01001000"
+    )
+    original = tracken.rodada
+
+    async def _rodada(**kw):
+        return await original(
+            cliente=_cliente({"26111383SWQS3R|06840050": _RESPOSTA}, []), **kw
+        )
+
+    monkeypatch.setattr(tracken, "rodada", _rodada)
+    auth_as(admin)
+    r = await client.post("/api/logistica/tracken/atualizar")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"alvos": 2, "achados": 1, "nao_achados": 1, "sem_cep": 0, "erros": 0}
+    # Quem não vê o Flex: 404.
+    monkeypatch.setattr(flex_config, "pode_ver", lambda user: False)
+    assert (await client.post("/api/logistica/tracken/atualizar")).status_code == 404

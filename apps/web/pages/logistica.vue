@@ -515,6 +515,27 @@ function trackenTitulo(c: Logistica): string {
   const linhas = (t.historico || []).map((e) => `${e.em ? fmtDataHora(e.em) : '—'} · ${e.descricao || ''}${e.observacao ? ` (${e.observacao})` : ''}`)
   return [`Remessa ${t.remessa || '—'} · ${t.status || ''}`, ...linhas, t.lido_em ? `conferido ${fmtDataHora(t.lido_em)}` : ''].filter(Boolean).join('\n')
 }
+const atualizandoTrackenTodos = ref(false)
+async function atualizarTrackenTodos() {
+  if (atualizandoTrackenTodos.value) return
+  atualizandoTrackenTodos.value = true
+  try {
+    const r = await api<{ alvos: number; achados: number; nao_achados: number; sem_cep: number; erros: number }>(
+      '/api/logistica/tracken/atualizar',
+      { method: 'POST' },
+    )
+    await refresh()
+    const partes = [`${r.achados} achado(s) na transportadora`]
+    if (r.nao_achados) partes.push(`${r.nao_achados} ainda não está(ão) lá`)
+    if (r.sem_cep) partes.push(`${r.sem_cep} sem CEP no Bling`)
+    if (r.erros) partes.push(`${r.erros} com erro`)
+    toasts.success(`Tracken: ${r.alvos} pedido(s) Flex conferido(s)`, partes.join(' · '))
+  } catch (e: any) {
+    toasts.error('Tracken', e?.data?.detail?.code || e?.message || 'erro')
+  } finally {
+    atualizandoTrackenTodos.value = false
+  }
+}
 const atualizandoTracken = ref<Set<string>>(new Set())
 async function atualizarTracken(c: Logistica) {
   if (atualizandoTracken.value.has(c.id)) return
@@ -729,13 +750,6 @@ const tituloTabela = computed(() => {
   const sub = tab.value === 'amazon' && amazonEnvioFilter.value ? ` · ${AMAZON_ENVIO_LABEL[amazonEnvioFilter.value]}` : ''
   return `${nome}${sub} — ${mostrarTudo.value ? 'todos os pedidos' : 'casos a acompanhar'}`
 })
-function produtoResumo(c: Logistica): string {
-  const ps = c.produtos || []
-  if (!ps.length) return '—'
-  const p = ps[0]
-  const q = p.quantidade && p.quantidade > 1 ? ` ×${p.quantidade}` : ''
-  return `${p.nome || '—'}${q}${ps.length > 1 ? ` +${ps.length - 1}` : ''}`
-}
 function produtoTitulo(c: Logistica): string {
   return (c.produtos || []).map((p) => `${p.nome || '—'}${p.quantidade && p.quantidade > 1 ? ` ×${p.quantidade}` : ''}${p.sku ? ` (${p.sku})` : ''}`).join('\n')
 }
@@ -2863,8 +2877,21 @@ async function aplicarStatusBling(c: Logistica) {
       <div class="hidden items-stretch gap-3 md:grid xl:grid-cols-[minmax(0,1fr)_340px]">
         <div class="flex min-w-0 flex-col rounded-md border bg-card">
           <div class="relative flex items-center justify-center rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+            <!-- Aba Flex (13/11/2026): consulta AGORA todos os Flex na transportadora
+                 (o robô lê sozinho de 30 em 30 min). -->
+            <button
+              v-if="ehFlexTab"
+              type="button"
+              class="absolute left-3 inline-flex items-center gap-1 rounded border border-white/40 bg-white/10 px-2 py-0.5 text-[11px] font-semibold hover:bg-white/20 disabled:opacity-60"
+              title="Consulta agora todos os pedidos Flex no rastreio da transportadora (Tracken). O sistema já faz isso sozinho de 30 em 30 min."
+              :disabled="atualizandoTrackenTodos"
+              data-atualizar-tracken
+              @click="atualizarTrackenTodos"
+            >
+              <RefreshCw class="size-3" :class="atualizandoTrackenTodos ? 'animate-spin' : ''" /> Atualizar Tracken
+            </button>
             <span>{{ tituloTabela }}</span>
-            <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">o que a plataforma diz × o que está no Bling</span>
+            <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">o que a plataforma diz × o que está no Bling<template v-if="ehFlexTab"> × o que a transportadora diz</template></span>
           </div>
           <div class="overflow-x-auto">
             <!-- 12/11/2026 (Vinicius: "a localização está muito pequena"): o Produto ficou com
@@ -2872,22 +2899,28 @@ async function aplicarStatusBling(c: Logistica) {
                  cresce com a tela (quebra em até 2 linhas em vez de cortar com "…").
                  Mesmo dia ("o pedido está cortando, preciso dele inteiro"): Pedido com 136px —
                  o nº mais longo é o da Amazon (19 caracteres = 121px na fonte mono de 10,5px,
-                 TikTok 18 = 114px) + 12px de respiro. Os 12px saem da Localização. -->
+                 TikTok 18 = 114px) + 12px de respiro. Os 12px saem da Localização.
+                 13/11/2026 (Vinicius: "um espaço muito grande para localização… uma parte em
+                 branco"): Bling e Nº na plataforma viraram colunas separadas, o Produto mostra o
+                 SKU da venda e Produto/Status/Localização DIVIDEM a sobra da tela (27/17/22%; na
+                 Amazon 22/12/18%) — a Localização mostra o texto inteiro, sem cortar. Na aba Flex
+                 entra a coluna Tracken (220px). -->
             <!-- 13/11/2026: na aba Amazon, DBA e Envio próprio juntos — a coluna Envio
                  (96px: cabe "Envio próprio" na etiqueta) entra depois da Data; Previsão,
                  Entregar até e Suspensão ficam pra todos e saem "—" no DBA. -->
-            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehAmazonTab ? 'min-w-[1430px]' : 'min-w-[1260px]'">
+            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehAmazonTab ? 'min-w-[1520px]' : ehFlexTab ? 'min-w-[1570px]' : 'min-w-[1350px]'">
               <colgroup>
-                <col class="w-[46px]"><col v-if="ehAmazonTab" class="w-[96px]"><col class="w-[136px]"><col :class="ehAmazonTab ? 'w-[70px]' : 'w-[88px]'"><col :class="ehAmazonTab ? 'w-[180px]' : 'w-[230px]'">
-                <col :class="ehAmazonTab ? 'w-[130px]' : 'w-[200px]'"><col>
+                <col class="w-[46px]"><col v-if="ehAmazonTab" class="w-[96px]"><col class="w-[76px]"><col class="w-[150px]"><col :class="ehAmazonTab ? 'w-[70px]' : 'w-[84px]'">
+                <col :class="ehAmazonTab ? 'w-[22%]' : 'w-[27%]'"><col :class="ehAmazonTab ? 'w-[12%]' : 'w-[17%]'"><col :class="ehAmazonTab ? 'w-[18%]' : 'w-[22%]'">
                 <template v-if="ehAmazonTab"><col class="w-[80px]"><col class="w-[92px]"></template>
                 <col :class="ehAmazonTab ? 'w-[100px]' : 'w-[104px]'">
-                <col :class="ehAmazonTab ? 'w-[110px]' : 'w-[140px]'"><col :class="ehAmazonTab ? 'w-[80px]' : 'w-[84px]'">
+                <col v-if="ehFlexTab" class="w-[220px]">
+                <col :class="ehAmazonTab ? 'w-[110px]' : 'w-[120px]'"><col :class="ehAmazonTab ? 'w-[80px]' : 'w-[84px]'">
                 <col v-if="ehAmazonTab" class="w-[100px]">
               </colgroup>
               <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th class="border-b px-1.5 py-1 text-center font-semibold" :colspan="ehAmazonTab ? 5 : 4">Pedido</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" :colspan="ehAmazonTab ? 6 : 5">Pedido</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 4 : 2">Plataforma</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Bling</th>
                   <th v-if="ehFlexTab" class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Transportadora</th>
@@ -2896,9 +2929,10 @@ async function aplicarStatusBling(c: Logistica) {
                 <tr>
                   <th class="border-b px-1.5 py-1 text-center font-semibold">Data</th>
                   <th v-if="ehAmazonTab" class="border-b px-1.5 py-1 text-center font-semibold" title="DBA: a Amazon coleta e entrega · Envio próprio: postamos nos Correios e respondemos pela entrega">Envio</th>
-                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Pedido no Bling e, embaixo, o número na plataforma">Pedido</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido no Bling">Bling</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido na plataforma (um clique seleciona para copiar)">Nº na plataforma</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold">Conta</th>
-                  <th class="border-b px-1.5 py-1 text-left font-semibold">Produto</th>
+                  <th class="border-b px-1.5 py-1 text-left font-semibold" title="Produto e, embaixo, o SKU da venda">Produto · SKU</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-left font-semibold dark:border-l-slate-600" title="Status na plataforma (passe o mouse para ver campo a campo e desde quando)">Status</th>
                   <th class="border-b px-1.5 py-1 text-left font-semibold">Localização</th>
                   <template v-if="ehAmazonTab">
@@ -2914,7 +2948,7 @@ async function aplicarStatusBling(c: Logistica) {
               </thead>
               <tbody>
                 <tr v-if="loading && !rows.length">
-                  <td :colspan="(ehAmazonTab ? 13 : 9) + (ehFlexTab ? 1 : 0)" class="py-8 text-center text-muted-foreground">
+                  <td :colspan="(ehAmazonTab ? 14 : 10) + (ehFlexTab ? 1 : 0)" class="py-8 text-center text-muted-foreground">
                     <RefreshCw class="mr-1.5 inline size-4 animate-spin" /> carregando…
                   </td>
                 </tr>
@@ -2939,11 +2973,9 @@ async function aplicarStatusBling(c: Logistica) {
                       :title="AMAZON_ENVIO_TITLE[amazonSubDe(c)]"
                     >{{ AMAZON_ENVIO_LABEL[amazonSubDe(c)] }}</span>
                   </td>
-                  <td class="px-1.5 py-1.5 text-center">
-                    <div class="font-mono font-bold">{{ c.pedido_bling || '—' }}</div>
-                    <!-- Um clique seleciona o nº da plataforma pra copiar, sem abrir o Raio-X. -->
-                    <div class="truncate font-mono text-[10.5px] text-muted-foreground" :title="c.pedido_marketplace || undefined"><span class="cursor-text select-all" @click.stop>{{ c.pedido_marketplace || '' }}</span></div>
-                  </td>
+                  <td class="px-1.5 py-1.5 text-center font-mono font-bold">{{ c.pedido_bling || '—' }}</td>
+                  <!-- Um clique seleciona o nº da plataforma pra copiar, sem abrir o Raio-X. -->
+                  <td class="truncate px-1.5 py-1.5 text-center font-mono text-[10.5px]" :title="c.pedido_marketplace || undefined"><span v-if="c.pedido_marketplace" class="cursor-text select-all" @click.stop>{{ c.pedido_marketplace }}</span><span v-else class="text-muted-foreground">—</span></td>
                   <td class="px-1.5 py-1.5 text-center">
                     <div class="truncate" :title="c.conta || ''">{{ c.conta || '—' }}</div>
                     <span
@@ -2953,7 +2985,16 @@ async function aplicarStatusBling(c: Logistica) {
                     >Flex</span>
                     <div v-if="flexAlerta(c)" class="text-[10.5px] font-medium text-rose-700 dark:text-rose-400" :title="flexAlerta(c) || ''">sem peça em {{ flexLocal.cidade }}</div>
                   </td>
-                  <td class="px-1.5 py-1.5" :title="produtoTitulo(c)"><div class="line-clamp-2 break-words leading-tight">{{ produtoResumo(c) }}</div></td>
+                  <td class="px-1.5 py-1.5" :title="produtoTitulo(c)">
+                    <template v-if="(c.produtos || []).length">
+                      <div v-for="(p, k) in (c.produtos || []).slice(0, 3)" :key="k" :class="k ? 'mt-1' : ''">
+                        <div class="line-clamp-2 break-words leading-tight">{{ p.nome || '—' }}<b v-if="p.quantidade && p.quantidade > 1"> ×{{ p.quantidade }}</b></div>
+                        <span v-if="p.sku" class="mt-0.5 inline-block max-w-full truncate rounded border bg-muted/40 px-1 font-mono text-[10px] text-muted-foreground">{{ p.sku }}</span>
+                      </div>
+                      <div v-if="(c.produtos || []).length > 3" class="text-[10px] text-muted-foreground">+{{ (c.produtos || []).length - 3 }} item(ns)</div>
+                    </template>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
                   <td class="border-l border-l-slate-300 px-1.5 py-1.5 dark:border-l-slate-600" :title="statusTooltip(c) || assinatura(c)">
                     <!-- 12/11: o status inteiro (sem "…") e o botão de copiar logo depois,
                          pra colar na aba Status ao criar a regra. -->
@@ -2973,13 +3014,13 @@ async function aplicarStatusBling(c: Logistica) {
                   <td class="px-1.5 py-1.5">
                     <div
                       v-if="c.volta_localizacao"
-                      class="line-clamp-2 break-words text-[11px] leading-tight"
+                      class="break-words text-[11px] leading-tight"
                       :class="c.volta_grave ? 'font-semibold text-rose-700 dark:text-rose-400' : ''"
                       :title="voltaTitulo(c)"
                     >↩ {{ c.volta_localizacao }}</div>
                     <div
                       v-else
-                      class="line-clamp-2 break-words text-[11px] leading-tight"
+                      class="break-words text-[11px] leading-tight"
                       :title="proprioSemRastreio(c) ? DESTINO_TITLE : c.localizacao || ''"
                     >{{ proprioSemRastreio(c) && c.localizacao ? `Destino: ${c.localizacao}` : c.localizacao || '—' }}</div>
                     <div
@@ -3039,7 +3080,7 @@ async function aplicarStatusBling(c: Logistica) {
                   </td>
                 </tr>
                 <tr v-if="!loading && filteredRows.length === 0">
-                  <td :colspan="(ehAmazonTab ? 13 : 9) + (ehFlexTab ? 1 : 0)" class="px-3 py-6 text-center text-muted-foreground">
+                  <td :colspan="(ehAmazonTab ? 14 : 10) + (ehFlexTab ? 1 : 0)" class="px-3 py-6 text-center text-muted-foreground">
                     {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
                   </td>
                 </tr>

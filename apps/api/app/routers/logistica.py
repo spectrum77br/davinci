@@ -1018,6 +1018,17 @@ async def list_logistica(
     return out
 
 
+@router.post("/tracken/atualizar")
+async def atualizar_tracken_todos(
+    user: Annotated[User, Depends(require_permission("logistica", "view"))],
+) -> dict[str, int]:
+    """Botão "Atualizar Tracken" da aba Flex: consulta AGORA todos os pedidos
+    Flex (os mesmos do robô de 30 em 30 min) no rastreio da transportadora."""
+    if not flex_config.pode_ver(user):
+        raise HTTPException(404, detail="Not Found")
+    return await tracken.rodada()
+
+
 @router.post("/{logistica_id}/tracken", response_model=LogisticaOut, dependencies=_DA_EQUIPE)
 async def atualizar_tracken(
     logistica_id: UUID,
