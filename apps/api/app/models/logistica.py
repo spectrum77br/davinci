@@ -379,3 +379,48 @@ class LogisticaStatusAnexo(Base, TimestampMixin):
     )
 
     status: Mapped["LogisticaStatus"] = relationship(back_populates="anexos")
+
+
+class LogisticaTracken(Base):
+    """O que a transportadora do Flex (TRACKen / TM Logística) diz do pacote —
+    a coluna "Tracken" da aba Flex (Vinicius, 13/11/2026).
+
+    Lido do rastreio PÚBLICO do Tracken (`api/getconsulta/rastreio`, sem
+    login): número do pedido na plataforma (ou o rastreio) + CEP do cliente.
+    Uma linha por pedido da Logística; o robô relê de 30 em 30 min até a
+    entrega (services/tracken)."""
+
+    __tablename__ = "logistica_tracken"
+
+    logistica_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("logistica.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # A transportadora achou o pedido? (False = consultou e não achou ainda —
+    # o pedido só aparece lá depois que a loja manda o arquivo.)
+    achado: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    remessa: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # "PEDIDO POSTADO", "ENTREGUE"… (sts_nome) e o último evento do histórico.
+    status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ultimo_evento: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ultimo_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    previsao: Mapped[date | None] = mapped_column(Date, nullable=True)
+    entregue_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    recebedor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Eventos que parecem tentativa sem entrega (ausente, recusado, endereço…).
+    tentativas: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    # [{"em": iso, "descricao": str, "observacao": str|None}] — mais antigo primeiro.
+    historico: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    lido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    atualizado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()")
+    )

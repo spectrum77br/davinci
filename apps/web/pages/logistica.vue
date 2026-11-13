@@ -164,6 +164,9 @@ type Logistica = {
   // Entrega Direta") e se é Flex. null = ainda não lido. Selo "Flex".
   envio_tipo?: string | null
   envio_flex?: boolean | null
+  // Coluna "Tracken" da aba Flex (13/11/2026): o que a transportadora do Flex
+  // (TRACKen) diz do pacote. Só vem para quem vê o Flex.
+  tracken?: TrackenInfo | null
   postagem_data?: string | null
   // Previsão dos Correios (Bling) e data máxima da Amazon (LatestDeliveryDate).
   previsao_correios?: string | null
@@ -472,6 +475,64 @@ function escondido(c: Logistica): boolean {
 }
 // Aba Amazon (DBA e Envio próprio juntos): coluna Envio e as colunas do Envio próprio.
 const ehAmazonTab = computed(() => tab.value === 'amazon')
+// Aba Flex: a coluna "Tracken" (a transportadora do Flex, 13/11/2026).
+const ehFlexTab = computed(() => tab.value === 'flex')
+type TrackenEvento = { em: string | null; descricao: string | null; observacao: string | null }
+type TrackenInfo = {
+  achado: boolean
+  remessa: string | null
+  status: string | null
+  ultimo_evento: string | null
+  ultimo_em: string | null
+  previsao: string | null
+  entregue_em: string | null
+  recebedor: string | null
+  observacao: string | null
+  tentativas: number
+  problema: boolean
+  historico: TrackenEvento[]
+  lido_em: string | null
+  erro: string | null
+}
+// Resposta de uma ação na linha (status, chamado…) não traz o Tracken: fica o
+// que a linha já tinha.
+function comTracken(nova: Logistica, velha: Logistica | undefined): Logistica {
+  return nova.tracken === undefined || (nova.tracken === null && velha?.tracken)
+    ? { ...nova, tracken: velha?.tracken ?? null }
+    : nova
+}
+function trackenCor(c: Logistica): string {
+  const t = c.tracken
+  if (!t) return ''
+  if (t.entregue_em) return 'text-emerald-700 dark:text-emerald-400'
+  if (t.problema) return 'text-red-600 dark:text-red-400'
+  return 'text-foreground'
+}
+function trackenTitulo(c: Logistica): string {
+  const t = c.tracken
+  if (!t) return 'Ainda não consultado na transportadora (o robô lê de 30 em 30 min)'
+  if (!t.achado) return `${t.erro || 'A transportadora ainda não tem este pedido'}${t.lido_em ? ` — conferido ${fmtDataHora(t.lido_em)}` : ''}`
+  const linhas = (t.historico || []).map((e) => `${e.em ? fmtDataHora(e.em) : '—'} · ${e.descricao || ''}${e.observacao ? ` (${e.observacao})` : ''}`)
+  return [`Remessa ${t.remessa || '—'} · ${t.status || ''}`, ...linhas, t.lido_em ? `conferido ${fmtDataHora(t.lido_em)}` : ''].filter(Boolean).join('\n')
+}
+const atualizandoTracken = ref<Set<string>>(new Set())
+async function atualizarTracken(c: Logistica) {
+  if (atualizandoTracken.value.has(c.id)) return
+  atualizandoTracken.value = new Set([...atualizandoTracken.value, c.id])
+  try {
+    const nova = await api<Logistica>(`/api/logistica/${c.id}/tracken`, { method: 'POST' })
+    const i = rows.value.findIndex((r) => r.id === c.id)
+    if (i >= 0) rows.value[i] = nova
+    if (nova.tracken?.achado) toasts.success('Tracken atualizado', nova.tracken.status || '')
+    else toasts.info('Tracken', nova.tracken?.erro || 'A transportadora ainda não tem este pedido.')
+  } catch (e: any) {
+    toasts.error('Tracken', e?.data?.detail?.code || e?.message || 'erro')
+  } finally {
+    const s = new Set(atualizandoTracken.value)
+    s.delete(c.id)
+    atualizandoTracken.value = s
+  }
+}
 function noCartao(c: Logistica, k: CartaoFiltro): boolean {
   switch (k) {
     case 'sem_regra': return precisaAtencao(c)
@@ -1397,7 +1458,7 @@ async function atualizarMeli(c: Logistica) {
       method: 'POST',
     })
     const i = rows.value.findIndex((r) => r.id === c.id)
-    if (i >= 0) rows.value[i] = updated
+    if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     error.value = code
@@ -1416,7 +1477,7 @@ async function atualizarShopee(c: Logistica) {
       method: 'POST',
     })
     const i = rows.value.findIndex((r) => r.id === c.id)
-    if (i >= 0) rows.value[i] = updated
+    if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     error.value = code
@@ -1435,7 +1496,7 @@ async function atualizarTiktok(c: Logistica) {
       method: 'POST',
     })
     const i = rows.value.findIndex((r) => r.id === c.id)
-    if (i >= 0) rows.value[i] = updated
+    if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     error.value = code
@@ -1458,7 +1519,7 @@ async function atualizarLocalizacao(c: Logistica) {
       { method: 'POST' },
     )
     const i = rows.value.findIndex((x) => x.id === c.id)
-    if (i >= 0) rows.value[i] = r.linha
+    if (i >= 0) rows.value[i] = comTracken(r.linha, rows.value[i])
     switch (r.resultado) {
       case 'atualizado':
         toasts.success('Localização atualizada', r.linha.localizacao || '')
@@ -1545,7 +1606,7 @@ async function suspenderEntrega(c: Logistica) {
   try {
     const updated = await api<Logistica>(`/api/logistica/${c.id}/suspender-entrega`, { method: 'POST' })
     const i = rows.value.findIndex((x) => x.id === c.id)
-    if (i >= 0) rows.value[i] = updated
+    if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
     toasts.success('Suspensão enviada ao robô', 'O executor vai clicar no Melhor Envio e a linha mostra o resultado.')
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
@@ -1565,7 +1626,7 @@ async function atualizarAmazon(c: Logistica) {
       method: 'POST',
     })
     const i = rows.value.findIndex((r) => r.id === c.id)
-    if (i >= 0) rows.value[i] = updated
+    if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
   } catch (e: any) {
     const code = e?.data?.detail?.code || e?.message || 'erro'
     error.value = code
@@ -2345,7 +2406,7 @@ async function enviarChamado(c: Logistica) {
       method: 'POST',
     })
     const i = rows.value.findIndex((r) => r.id === c.id)
-    if (i >= 0) rows.value[i] = updated
+    if (i >= 0) rows.value[i] = comTracken(updated, rows.value[i])
   } catch (e: any) {
     const code = e?.data?.detail?.code
     error.value =
@@ -2829,6 +2890,7 @@ async function aplicarStatusBling(c: Logistica) {
                   <th class="border-b px-1.5 py-1 text-center font-semibold" :colspan="ehAmazonTab ? 5 : 4">Pedido</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 4 : 2">Plataforma</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Bling</th>
+                  <th v-if="ehFlexTab" class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Transportadora</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 3 : 2">Caso</th>
                 </tr>
                 <tr>
@@ -2844,6 +2906,7 @@ async function aplicarStatusBling(c: Logistica) {
                     <th class="border-b px-1.5 py-1 text-center font-semibold" title="Data máxima de entrega da Amazon — depois dela a Amazon reembolsa o cliente">Entregar até</th>
                   </template>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Status Bling</th>
+                  <th v-if="ehFlexTab" class="border-b border-l border-l-slate-300 px-1.5 py-1 text-left font-semibold dark:border-l-slate-600" title="O que a transportadora do Flex (TRACKen) diz do pacote — lido de 30 em 30 min no rastreio dela">Tracken</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Chamado</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Regra da aba Status para a combinação deste pedido">Regra</th>
                   <th v-if="ehAmazonTab" class="border-b px-1.5 py-1 text-center font-semibold" title="Suspensão da entrega no Melhor Envio (o pacote volta)">Suspensão</th>
@@ -2851,7 +2914,7 @@ async function aplicarStatusBling(c: Logistica) {
               </thead>
               <tbody>
                 <tr v-if="loading && !rows.length">
-                  <td :colspan="ehAmazonTab ? 13 : 9" class="py-8 text-center text-muted-foreground">
+                  <td :colspan="(ehAmazonTab ? 13 : 9) + (ehFlexTab ? 1 : 0)" class="py-8 text-center text-muted-foreground">
                     <RefreshCw class="mr-1.5 inline size-4 animate-spin" /> carregando…
                   </td>
                 </tr>
@@ -2943,6 +3006,16 @@ async function aplicarStatusBling(c: Logistica) {
                     <span v-if="c.status_bling" class="inline-block w-[92px] truncate rounded py-0.5 text-[11px] font-semibold" :class="corStatusBling(c.status_bling)" :title="c.status_bling">{{ c.status_bling }}</span>
                     <span v-else class="text-muted-foreground">—</span>
                   </td>
+                  <td v-if="ehFlexTab" class="max-w-[200px] border-l border-l-slate-300 px-1.5 py-1.5 text-[11px] leading-tight dark:border-l-slate-600" data-tracken-celula :title="trackenTitulo(c)">
+                    <template v-if="c.tracken?.achado">
+                      <div class="truncate font-semibold" :class="trackenCor(c)">{{ c.tracken.status || '—' }}</div>
+                      <div v-if="c.tracken.entregue_em" class="truncate text-emerald-700 dark:text-emerald-400">entregue {{ fmtDataHora(c.tracken.entregue_em) }}</div>
+                      <div v-else class="truncate text-muted-foreground">{{ c.tracken.ultimo_evento }}<template v-if="c.tracken.ultimo_em"> · {{ fmtDataHora(c.tracken.ultimo_em) }}</template></div>
+                      <div v-if="c.tracken.tentativas" class="font-semibold text-red-600 dark:text-red-400">{{ c.tracken.tentativas }} tentativa(s)</div>
+                    </template>
+                    <span v-else-if="c.tracken" class="text-muted-foreground">{{ c.tracken.erro || 'ainda não está na transportadora' }}</span>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
                   <td class="border-l border-l-slate-300 px-1.5 py-1.5 text-center text-[11px] dark:border-l-slate-600">
                     <span
                       v-if="situacaoChamado(c)"
@@ -2966,7 +3039,7 @@ async function aplicarStatusBling(c: Logistica) {
                   </td>
                 </tr>
                 <tr v-if="!loading && filteredRows.length === 0">
-                  <td :colspan="ehAmazonTab ? 13 : 9" class="px-3 py-6 text-center text-muted-foreground">
+                  <td :colspan="(ehAmazonTab ? 13 : 9) + (ehFlexTab ? 1 : 0)" class="px-3 py-6 text-center text-muted-foreground">
                     {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
                   </td>
                 </tr>
@@ -3170,6 +3243,42 @@ async function aplicarStatusBling(c: Logistica) {
                     <MessageCircle class="size-3" :class="refreshingMeli.has(raioRow.id) ? 'animate-pulse' : ''" /> Avisar no Threema
                   </button>
                 </div>
+              </section>
+
+              <section v-if="raioRow.envio_flex === true && podeVerFlex" data-raio-tracken>
+                <h3 class="mb-0.5 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  Tracken (transportadora do Flex)
+                  <button
+                    type="button"
+                    :class="RAIO_BTN"
+                    title="Consulta agora o rastreio da transportadora do Flex (o robô lê sozinho de 30 em 30 min)"
+                    :disabled="atualizandoTracken.has(raioRow.id)"
+                    @click="atualizarTracken(raioRow)"
+                  >
+                    <RefreshCw class="size-3" :class="atualizandoTracken.has(raioRow.id) ? 'animate-spin' : ''" /> Atualizar
+                  </button>
+                </h3>
+                <template v-if="raioRow.tracken?.achado">
+                  <div>
+                    <b :class="trackenCor(raioRow)">{{ raioRow.tracken.status || '—' }}</b>
+                    <span class="text-muted-foreground"> · remessa {{ raioRow.tracken.remessa || '—' }}</span>
+                  </div>
+                  <div v-if="raioRow.tracken.previsao" class="text-muted-foreground">Previsão: {{ fmtDia(raioRow.tracken.previsao) }}</div>
+                  <div v-if="raioRow.tracken.entregue_em" class="text-emerald-700 dark:text-emerald-400">
+                    Entregue {{ fmtDataHora(raioRow.tracken.entregue_em) }}<template v-if="raioRow.tracken.recebedor"> · recebido por {{ raioRow.tracken.recebedor }}</template>
+                  </div>
+                  <div v-if="raioRow.tracken.observacao" class="text-muted-foreground">Observação da entrega: {{ raioRow.tracken.observacao }}</div>
+                  <div v-if="raioRow.tracken.tentativas" class="font-semibold text-red-600 dark:text-red-400">{{ raioRow.tracken.tentativas }} tentativa(s) sem entrega</div>
+                  <ol class="mt-1 space-y-0.5 border-l pl-2">
+                    <li v-for="(e, k) in [...(raioRow.tracken.historico || [])].reverse()" :key="k">
+                      <span class="text-muted-foreground">{{ e.em ? fmtDataHora(e.em) : '—' }}</span>
+                      · {{ e.descricao }}<template v-if="e.observacao"> <span class="text-muted-foreground">({{ e.observacao }})</span></template>
+                    </li>
+                  </ol>
+                </template>
+                <div v-else-if="raioRow.tracken" class="text-muted-foreground">{{ raioRow.tracken.erro || 'A transportadora ainda não tem este pedido.' }}</div>
+                <div v-else class="text-muted-foreground">Ainda não consultado — o robô lê de 30 em 30 min, ou clique em Atualizar.</div>
+                <div v-if="raioRow.tracken?.lido_em" class="text-[10px] text-muted-foreground">conferido {{ fmtDataHora(raioRow.tracken.lido_em) }}</div>
               </section>
 
               <section>

@@ -2,7 +2,7 @@ from datetime import date, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class StatusDetalheOut(BaseModel):
@@ -119,6 +119,35 @@ class MensagensClienteConfigOut(BaseModel):
     templates: list[MensagemTemplateOut] = Field(default_factory=list)
 
 
+class TrackenEventoOut(BaseModel):
+    em: datetime | None = None
+    descricao: str | None = None
+    observacao: str | None = None
+
+
+class TrackenOut(BaseModel):
+    """O que a transportadora do Flex (TRACKen) diz do pacote — coluna
+    "Tracken" da aba Flex (13/11/2026). Só para quem vê o Flex."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    achado: bool = False
+    remessa: str | None = None
+    status: str | None = None
+    ultimo_evento: str | None = None
+    ultimo_em: datetime | None = None
+    previsao: date | None = None
+    entregue_em: datetime | None = None
+    recebedor: str | None = None
+    observacao: str | None = None
+    tentativas: int = 0
+    # Algum evento pede atenção (devolução, tentativa, extravio…).
+    problema: bool = False
+    historico: list[TrackenEventoOut] = Field(default_factory=list)
+    lido_em: datetime | None = None
+    erro: str | None = None
+
+
 class LogisticaOut(BaseModel):
     id: UUID
     data: date | None = None
@@ -166,6 +195,8 @@ class LogisticaOut(BaseModel):
     # lido. Alimenta a aba Flex e o selo "Flex" nas abas ML/Shopee. Só leitura.
     envio_tipo: str | None = None
     envio_flex: bool | None = None
+    # Coluna "Tracken" da aba Flex (13/11/2026): a transportadora do Flex.
+    tracken: TrackenOut | None = None
     postagem_data: date | None = None
     # Previsão de entrega dos Correios (objeto de postagem do Bling) e data
     # máxima de entrega da Amazon (LatestDeliveryDate). Só leitura.

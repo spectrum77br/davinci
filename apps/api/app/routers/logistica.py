@@ -17,6 +17,7 @@ Gated pelo recurso `logistica`.
 import hashlib
 from contextvars import ContextVar
 from datetime import UTC, datetime
+from collections.abc import Sequence
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -39,6 +40,7 @@ from app.models import (
     LogisticaMensagemCliente,
     LogisticaStatus,
     LogisticaStatusAnexo,
+    LogisticaTracken,
     SituacaoBling,
     User,
     UserRole,
@@ -54,6 +56,7 @@ from app.schemas.logistica import (
     LogisticaCreate,
     LogisticaExportIn,
     LogisticaOut,
+    TrackenOut,
     LogisticaPatch,
     LogisticaProdutoOut,
     LogisticaStatusCreate,
@@ -107,6 +110,7 @@ from app.services import (
     logistica_track_sync,
     flex_config,
     threema,
+    tracken,
 )
 from app.worker_pool import get_arq_marketplace_pool
 
@@ -327,6 +331,7 @@ def _to_out(
     mensagens: list[MensagemClienteOut] | None = None,
     chamado_aba: ChamadoAbaOut | None = None,
     volta: DevolucaoRastreio | None = None,
+    tracken_linha: LogisticaTracken | None = None,
 ) -> LogisticaOut:
     """`rules` = candidatas da aba Status que casam a chave deste pedido (máquina
     de estados). A regra ATIVA (desambiguada pela situação atual do Bling) alimenta
@@ -366,6 +371,7 @@ def _to_out(
         servico_envio=c.servico_envio,
         envio_tipo=c.envio_tipo if _ver_flex.get() else None,
         envio_flex=c.envio_flex if _ver_flex.get() else None,
+        tracken=_tracken_out(tracken_linha) if _ver_flex.get() else None,
         postagem_data=c.postagem_data,
         previsao_correios=c.previsao_correios,
         prazo_entrega_amazon=c.prazo_entrega_amazon,
@@ -408,6 +414,31 @@ def _to_out(
         created_at=c.created_at,
         updated_at=c.updated_at,
     )
+
+
+def _tracken_out(tk: LogisticaTracken | None) -> TrackenOut | None:
+    """Coluna "Tracken" (aba Flex): o que a transportadora do Flex diz."""
+    if tk is None:
+        return None
+    out = TrackenOut.model_validate(tk)
+    out.problema = out.tentativas > 0 or any(
+        tracken.eh_problema(t)
+        for t in (out.status, out.ultimo_evento, *(e.descricao for e in out.historico))
+    )
+    return out
+
+
+async def _trackens_map(
+    session: AsyncSession, rows: Sequence[Logistica]
+) -> dict[UUID, LogisticaTracken]:
+    """A leitura do Tracken de cada pedido Flex da página (só quem vê o Flex)."""
+    ids = [c.id for c in rows if c.envio_flex is True]
+    if not ids or not _ver_flex.get():
+        return {}
+    res = await session.execute(
+        select(LogisticaTracken).where(LogisticaTracken.logistica_id.in_(ids))
+    )
+    return {t.logistica_id: t for t in res.scalars().all()}
 
 
 async def _match_rules(session: AsyncSession, c: Logistica) -> list[LogisticaStatus]:
@@ -962,6 +993,8 @@ async def list_logistica(
     chamados_map = await _chamados_aba_map(session, {c.pedido_bling or "" for c in rows})
     # Pacote de volta (devolução) de cada pedido — colunas Rastreio/Localização.
     voltas_map = await _voltas_map(session, {c.pedido_bling or "" for c in rows})
+    # Coluna "Tracken" (aba Flex): a transportadora do Flex.
+    trackens_map = await _trackens_map(session, rows)
     out: list[LogisticaOut] = []
     for c in rows:
         assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
@@ -979,9 +1012,43 @@ async def list_logistica(
                 mensagens=mensagens_map.get(c.id),
                 chamado_aba=chamados_map.get(c.pedido_bling or ""),
                 volta=voltas_map.get(c.pedido_bling or ""),
+                tracken_linha=trackens_map.get(c.id),
             )
         )
     return out
+
+
+@router.post("/{logistica_id}/tracken", response_model=LogisticaOut, dependencies=_DA_EQUIPE)
+async def atualizar_tracken(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("logistica", "view"))],
+) -> LogisticaOut:
+    """Botão "Atualizar Tracken" do Raio-X (aba Flex): consulta AGORA o
+    rastreio público da transportadora do Flex para este pedido. Só quem vê
+    o Flex e só pedido Flex."""
+    if not flex_config.pode_ver(user):
+        raise HTTPException(404, detail="Not Found")
+    c = (
+        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
+    ).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    if c.envio_flex is not True:
+        raise HTTPException(422, detail={"code": "nao_e_flex"})
+    resumo = await tracken.rodada(somente={c.id})
+    if resumo.get("alvos", 0) == 0:
+        raise HTTPException(422, detail={"code": "nao_e_flex"})
+    tk = await session.get(LogisticaTracken, c.id, populate_existing=True)
+    return _to_out(
+        c,
+        await _match_rules(session, c),
+        produtos=await _produtos_for(session, c),
+        mensagens=await _mensagens_for(session, c),
+        chamado_aba=await _chamado_aba_for(session, c),
+        volta=await _volta_for(session, c),
+        tracken_linha=tk,
+    )
 
 
 @router.post("/export.xlsx")

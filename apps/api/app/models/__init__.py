@@ -193,6 +193,7 @@ from app.models.logistica import (
     LogisticaRoboComando,
     LogisticaStatus,
     LogisticaStatusAnexo,
+    LogisticaTracken,
 )
 from app.models.mail import MailAttachment, MailMailbox, MailMessage, MailOutbox
 from app.models.mail_bridge import MailBridgeIdentity
@@ -481,6 +482,7 @@ __all__ = [
     "LogisticaRoboComando",
     "LogisticaStatus",
     "LogisticaStatusAnexo",
+    "LogisticaTracken",
     "MARCA_INPI_STATUS",
     "MARKETPLACES",
     "Marca",
