@@ -148,6 +148,28 @@ class TrackenOut(BaseModel):
     erro: str | None = None
 
 
+class TrackenAlvoOut(BaseModel):
+    """Um pedido Flex que a tela consulta no Tracken (o servidor leva 403)."""
+
+    logistica_id: UUID
+    pedido: str | None = None
+    rastreio: str | None = None
+    cep: str | None = None
+
+
+class TrackenResultadoItemIn(BaseModel):
+    """A resposta crua do Tracken para UM pedido, como a tela recebeu.
+    `lista` = a `list` da resposta (vazia = não achou); `erro` = não deu."""
+
+    logistica_id: UUID
+    lista: list[dict] | None = Field(default=None, max_length=20)
+    erro: str | None = Field(default=None, max_length=300)
+
+
+class TrackenResultadoIn(BaseModel):
+    itens: list[TrackenResultadoItemIn] = Field(max_length=300)
+
+
 class LogisticaOut(BaseModel):
     id: UUID
     data: date | None = None

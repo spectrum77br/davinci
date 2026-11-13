@@ -15,32 +15,37 @@ BR262058740263A — os dois acham; o CEP vale com ou sem traço. A resposta traz
 status (`sts_nome`), o último evento, o histórico com data/hora, previsão,
 entrega, recebedor e observação da entrega.
 
-Quem chama: o cron do worker (`tracken_flex_tick`, de 30 em 30 min) e o botão
-"Atualizar Tracken" do Raio-X. Só pedido Flex (`logistica.envio_flex`) da
-Shopee/ML dos últimos `JANELA_DIAS`; depois de entregue, relê por mais um dia
-(observação/recebedor chegam depois) e para. O CEP vem do espelho do Bling
-(`bling_orders.cep_destino`).
+QUEM CONSULTA É A TELA, NÃO O SERVIDOR. O Tracken fica atrás do Cloudflare e
+responde 403 ao nosso servidor (Hetzner, fora do Brasil) — conferido no ar em
+13/11/2026 ~15h, depois de funcionar deste Mac. Do navegador de quem usa o
+painel ele responde (CORS liberado para qualquer origem; com o corpo em
+`text/plain` não há "preflight"). Então a aba Flex pede ao DaVinci a lista do
+que consultar (`alvos`: pedido, rastreio e CEP), consulta o Tracken e devolve
+a resposta crua, que o DaVinci interpreta aqui (`interpretar`) e grava
+(`gravar`). A tela faz isso ao abrir a aba Flex, de 30 em 30 min enquanto ela
+fica aberta e nos botões "Atualizar Tracken".
+
+Só pedido Flex (`logistica.envio_flex`) da Shopee/ML dos últimos
+`JANELA_DIAS`; depois de entregue, relê por mais um dia (observação/recebedor
+chegam depois) e para. O CEP vem do espelho do Bling (`bling_orders.cep_destino`).
 """
 
 from __future__ import annotations
 
-import asyncio
 import html
 import re
 import unicodedata
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-import httpx
 import structlog
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import session_scope
 from app.models import BlingOrder, Logistica, LogisticaTracken
 from app.services import logistica_rules
 
@@ -53,9 +58,9 @@ _FUSO = ZoneInfo("America/Sao_Paulo")
 JANELA_DIAS = 20
 # Depois de entregue, relê por mais este tempo e para.
 RELER_ENTREGUE = timedelta(hours=24)
-# Entre uma consulta e outra (site de terceiro: sem rajada).
-_PAUSA_S = 0.5
-_TIMEOUT_S = 20.0
+# Defesa: a resposta vem do navegador — nada de texto ou lista sem fim.
+_MAX_TEXTO = 500
+_MAX_EVENTOS = 200
 # Evento que parece tentativa sem entrega (para o contador "Tentativas").
 _TENTATIVA = (
     "ausente",
@@ -72,10 +77,6 @@ _TENTATIVA = (
 _PROBLEMA = ("devol", "extravi", "avari", "roub", "sinistr", "retorn", *_TENTATIVA)
 
 
-class TrackenError(Exception):
-    """O Tracken respondeu algo que não é "achei" nem "não achei"."""
-
-
 def _sem_acento(v: str) -> str:
     return "".join(
         c for c in unicodedata.normalize("NFKD", v) if not unicodedata.combining(c)
@@ -84,12 +85,12 @@ def _sem_acento(v: str) -> str:
 
 def _texto(v: Any) -> str | None:
     """Texto limpo: sem HTML (`&nbsp;`), sem espaço sobrando; vazio = None."""
-    if v is None:
+    if v is None or isinstance(v, (dict, list)):
         return None
     s = html.unescape(str(v)).replace("\xa0", " ")
     s = re.sub(r"<[^>]+>", " ", s)
     s = " ".join(s.split())
-    return s or None
+    return s[:_MAX_TEXTO] or None
 
 
 def _data(v: Any) -> date | None:
@@ -113,9 +114,9 @@ def _quando(dia: Any, hora: Any) -> datetime | None:
     partes = (h.split(":") + ["0", "0"])[:3]
     try:
         hh, mm, ss = (int(p) for p in partes)
+        return datetime(d.year, d.month, d.day, hh, mm, ss, tzinfo=_FUSO).astimezone(UTC)
     except ValueError:
-        hh = mm = ss = 0
-    return datetime(d.year, d.month, d.day, hh, mm, ss, tzinfo=_FUSO).astimezone(UTC)
+        return datetime(d.year, d.month, d.day, tzinfo=_FUSO).astimezone(UTC)
 
 
 def _cep(v: str | None) -> str | None:
@@ -136,7 +137,7 @@ def eh_problema(texto: str | None) -> bool:
 def interpretar(item: Mapping[str, Any]) -> dict[str, Any]:
     """Os campos que a Logística guarda, de UM pedido da resposta."""
     eventos = []
-    for ev in item.get("historico") or []:
+    for ev in (item.get("historico") or [])[:_MAX_EVENTOS]:
         if not isinstance(ev, Mapping):
             continue
         em = _quando(ev.get("hsp_dtstatus"), ev.get("hsp_hrstatus"))
@@ -167,7 +168,7 @@ def interpretar(item: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _mais_novo(lista: list[Any]) -> Mapping[str, Any] | None:
+def mais_novo(lista: Sequence[Any]) -> Mapping[str, Any] | None:
     """O pedido mais novo (maior remessa) quando a busca acha mais de um."""
     itens = [i for i in lista if isinstance(i, Mapping)]
     if not itens:
@@ -180,48 +181,6 @@ def _mais_novo(lista: list[Any]) -> Mapping[str, Any] | None:
             return 0
 
     return max(itens, key=_num)
-
-
-async def consultar(
-    cliente: httpx.AsyncClient, *, cep: str, notafiscal: str = "", pedidonf: str = ""
-) -> Mapping[str, Any] | None:
-    """Uma consulta. None = o Tracken não achou; TrackenError = outra resposta."""
-    corpo = {
-        "cpfcnpj": "",
-        "notafiscal": notafiscal,
-        "pedidonf": pedidonf,
-        "codpedido": "",
-        "cepdest": cep,
-    }
-    r = await cliente.post(URL, json=corpo)
-    r.raise_for_status()
-    dados = r.json()
-    if not isinstance(dados, Mapping):
-        raise TrackenError("resposta inesperada do Tracken")
-    if dados.get("success"):
-        return _mais_novo(dados.get("list") or [])
-    erro = _texto(dados.get("error")) or "sem mensagem"
-    if "nenhum registro" in _sem_acento(erro):
-        return None
-    raise TrackenError(erro[:300])
-
-
-async def buscar(
-    cliente: httpx.AsyncClient, *, cep: str, pedido: str | None, rastreio: str | None
-) -> Mapping[str, Any] | None:
-    """Pelo número da venda; senão pelo rastreio (ou id do envio no ML)."""
-    tentativas: list[tuple[str, str]] = []
-    for campo, valor in (("notafiscal", pedido), ("pedidonf", rastreio), ("pedidonf", pedido)):
-        v = (valor or "").strip()
-        if v and (campo, v) not in tentativas:
-            tentativas.append((campo, v))
-    for i, (campo, valor) in enumerate(tentativas):
-        if i:
-            await asyncio.sleep(_PAUSA_S)
-        achado = await consultar(cliente, cep=cep, **{campo: valor})
-        if achado is not None:
-            return achado
-    return None
 
 
 @dataclass(frozen=True)
@@ -249,7 +208,7 @@ async def alvos(
     session: AsyncSession, agora: datetime, somente: Collection[UUID] | None = None
 ) -> list[Alvo]:
     """Pedidos Flex (ML/Shopee) a consultar. `somente`: esses, sem as réguas
-    de janela e de entregue (botão "Atualizar Tracken")."""
+    de janela e de entregue (botão "Atualizar" do Raio-X)."""
     plataformas = tuple(
         sorted(logistica_rules._ML_PLATAFORMAS | logistica_rules._SHOPEE_PLATAFORMAS)
     )
@@ -288,72 +247,30 @@ async def alvos(
     ]
 
 
-async def _gravar(
-    alvo: Alvo, agora: datetime, dados: dict[str, Any] | None, erro: str | None
+async def gravar(
+    session: AsyncSession,
+    logistica_id: UUID,
+    agora: datetime,
+    dados: dict[str, Any] | None,
+    erro: str | None,
 ) -> None:
-    async with session_scope() as s:
-        tk = await s.get(LogisticaTracken, alvo.logistica_id)
-        if tk is None:
-            tk = LogisticaTracken(logistica_id=alvo.logistica_id, achado=False, tentativas=0)
-            tk.historico = []
-            s.add(tk)
-        tk.lido_em = agora
-        tk.atualizado_em = agora
-        tk.erro = erro
-        if dados is not None:
-            tk.achado = True
-            for campo, valor in dados.items():
-                setattr(tk, campo, valor)
-        elif erro is None:
-            # Consultou e não achou: o pedido ainda não chegou à transportadora
-            # (ou o CEP do Bling não bate). O que já se sabia fica.
-            tk.achado = bool(tk.remessa)
-            if tk.remessa:
-                tk.erro = "o Tracken não achou o pedido nesta leitura"
-
-
-async def rodada(
-    *, somente: Collection[UUID] | None = None, cliente: httpx.AsyncClient | None = None
-) -> dict[str, int]:
-    """Consulta os pedidos Flex no Tracken e grava. Erro num pedido não para
-    os outros. `cliente`: os testes passam um falso."""
-    agora = datetime.now(UTC)
-    async with session_scope() as s:
-        lista = await alvos(s, agora, somente)
-    resumo = {"alvos": len(lista), "achados": 0, "nao_achados": 0, "sem_cep": 0, "erros": 0}
-    if not lista:
-        return resumo
-    proprio = cliente is None
-    cli = cliente or httpx.AsyncClient(timeout=_TIMEOUT_S, headers={"User-Agent": "DaVinci"})
-    try:
-        for i, alvo in enumerate(lista):
-            if i:
-                await asyncio.sleep(_PAUSA_S)
-            dados: dict[str, Any] | None = None
-            erro: str | None = None
-            if not alvo.cep:
-                resumo["sem_cep"] += 1
-                erro = "sem o CEP do cliente no Bling"
-            else:
-                try:
-                    item = await buscar(
-                        cli, cep=alvo.cep, pedido=alvo.pedido, rastreio=alvo.rastreio
-                    )
-                except (httpx.HTTPError, TrackenError, ValueError) as e:
-                    resumo["erros"] += 1
-                    erro = f"Tracken: {str(e)[:250] or type(e).__name__}"
-                    logger.warning(
-                        "tracken_consulta_falhou", logistica_id=str(alvo.logistica_id), erro=erro
-                    )
-                else:
-                    if item is None:
-                        resumo["nao_achados"] += 1
-                    else:
-                        resumo["achados"] += 1
-                        dados = interpretar(item)
-            await _gravar(alvo, agora, dados, erro)
-    finally:
-        if proprio:
-            await cli.aclose()
-    logger.info("tracken_rodada", **resumo)
-    return resumo
+    """Grava uma leitura. `dados` = achado; `dados` None e `erro` None =
+    consultou e não achou (o pedido ainda não chegou à transportadora); `erro`
+    = não deu para consultar. Não faz commit."""
+    tk = await session.get(LogisticaTracken, logistica_id)
+    if tk is None:
+        tk = LogisticaTracken(logistica_id=logistica_id, achado=False, tentativas=0)
+        tk.historico = []
+        session.add(tk)
+    tk.lido_em = agora
+    tk.atualizado_em = agora
+    tk.erro = erro
+    if dados is not None:
+        tk.achado = True
+        for campo, valor in dados.items():
+            setattr(tk, campo, valor)
+    elif erro is None:
+        # O que já se sabia fica.
+        tk.achado = bool(tk.remessa)
+        if tk.remessa:
+            tk.erro = "o Tracken não achou o pedido nesta leitura"

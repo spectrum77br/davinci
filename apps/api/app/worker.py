@@ -45,7 +45,6 @@ from app.services import (
     flex_config,
     flex_motor,
     threema,
-    tracken,
 )
 from app.services.advisory_lock import release_stale_sync_locks, try_user_sync_lock
 from app.services.alerts import emit_alert
@@ -4233,17 +4232,6 @@ async def flex_motor_run(ctx: dict, por: str | None = None) -> dict:
     return await flex_motor.rodar_motor(origem="manual", por=quem, reler_contas=True)
 
 
-async def tracken_flex_tick(ctx: dict) -> dict:
-    """Coluna "Tracken" da aba Flex (13/11/2026): relê no rastreio público da
-    transportadora do Flex os pedidos Flex dos últimos dias até a entrega.
-    Sem pedido Flex = um SELECT."""
-    try:
-        return await tracken.rodada()
-    except Exception:  # noqa: BLE001
-        logger.exception("tracken_flex_tick_falhou")
-        return {"erro": 1}
-
-
 async def flex_reavaliar_run(ctx: dict) -> dict:
     """Gancho do pedido Flex: o shipment check acabou de registrar pedido Flex
     novo (services/marketplace_shipment_check._registrar_flex) e o saldo da
@@ -6400,9 +6388,6 @@ class WorkerSettings:
         # zerou → Flex desligado em até X min" é este intervalo; o gancho do
         # pedido Flex (flex_reavaliar_run) só acelera o desligar.
         cron(flex_motor_tick, minute=_minutos_flex(), run_at_startup=False, timeout=900),
-        # Coluna "Tracken" da aba Flex: o rastreio da transportadora do Flex
-        # de 30 em 30 min (:24/:54, minutos livres). Poucos pedidos por dia.
-        cron(tracken_flex_tick, minute={24, 54}, run_at_startup=False, timeout=600),
         # Vigia de importação (robô da Ouvidoria: pedido pago no ML/Shopee/
         # TikTok/Amazon que não caiu no Bling → ocorrência + Threema). 1×/hora
         # em :09 (minuto livre) — Vinicius, 22/09: de 30 em 30 min era mais

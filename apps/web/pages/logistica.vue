@@ -510,50 +510,96 @@ function trackenCor(c: Logistica): string {
 }
 function trackenTitulo(c: Logistica): string {
   const t = c.tracken
-  if (!t) return 'Ainda não consultado na transportadora (o robô lê de 30 em 30 min)'
+  if (!t) return 'Ainda não consultado na transportadora (a aba Flex consulta ao abrir e de 30 em 30 min)'
   if (!t.achado) return `${t.erro || 'A transportadora ainda não tem este pedido'}${t.lido_em ? ` — conferido ${fmtDataHora(t.lido_em)}` : ''}`
   const linhas = (t.historico || []).map((e) => `${e.em ? fmtDataHora(e.em) : '—'} · ${e.descricao || ''}${e.observacao ? ` (${e.observacao})` : ''}`)
   return [`Remessa ${t.remessa || '—'} · ${t.status || ''}`, ...linhas, t.lido_em ? `conferido ${fmtDataHora(t.lido_em)}` : ''].filter(Boolean).join('\n')
 }
-const atualizandoTrackenTodos = ref(false)
-async function atualizarTrackenTodos() {
-  if (atualizandoTrackenTodos.value) return
-  atualizandoTrackenTodos.value = true
+// Quem consulta o Tracken é a TELA (13/11/2026): o Tracken fica atrás do
+// Cloudflare e responde 403 ao nosso servidor (fora do Brasil); do navegador
+// responde (CORS liberado; corpo em text/plain = sem preflight). O DaVinci dá a
+// lista (pedido, rastreio, CEP), a tela consulta e devolve a resposta crua, que
+// o servidor interpreta e grava (routers/logistica: /tracken/alvos e /resultado).
+const TRACKEN_URL = 'https://tracken.app.br/tracken/api/getconsulta/rastreio'
+const TRACKEN_INTERVALO_MS = 30 * 60 * 1000
+type TrackenAlvo = { logistica_id: string; pedido: string | null; rastreio: string | null; cep: string | null }
+type TrackenResultado = { logistica_id: string; lista?: unknown[]; erro?: string }
+async function consultarUmTracken(a: TrackenAlvo): Promise<TrackenResultado> {
+  if (!a.cep) return { logistica_id: a.logistica_id, erro: 'sem o CEP do cliente no Bling' }
+  const tentativas: Array<[string, string]> = []
+  for (const [campo, v] of [['notafiscal', a.pedido], ['pedidonf', a.rastreio], ['pedidonf', a.pedido]] as const) {
+    const valor = (v || '').trim()
+    if (valor && !tentativas.some(([c, x]) => c === campo && x === valor)) tentativas.push([campo, valor])
+  }
+  if (!tentativas.length) return { logistica_id: a.logistica_id, erro: 'pedido sem número da plataforma e sem rastreio' }
+  for (const [campo, valor] of tentativas) {
+    const corpo = { cpfcnpj: '', notafiscal: '', pedidonf: '', codpedido: '', cepdest: a.cep, [campo]: valor }
+    try {
+      const r = await fetch(TRACKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
+        body: JSON.stringify(corpo),
+        credentials: 'omit',
+      })
+      if (!r.ok) return { logistica_id: a.logistica_id, erro: `o Tracken respondeu ${r.status}` }
+      const d = await r.json()
+      if (d?.success && Array.isArray(d.list) && d.list.length) return { logistica_id: a.logistica_id, lista: d.list.slice(0, 20) }
+      const msg = String(d?.error || '')
+      if (d?.success || /nenhum registro/i.test(msg)) continue
+      return { logistica_id: a.logistica_id, erro: msg.slice(0, 250) || 'resposta inesperada do Tracken' }
+    } catch (e: any) {
+      return { logistica_id: a.logistica_id, erro: e?.message || 'sem conexão com o Tracken' }
+    }
+  }
+  return { logistica_id: a.logistica_id, lista: [] }
+}
+const consultandoTracken = ref(false)
+let ultimaConsultaTracken = 0
+async function consultarTracken(ids?: string[], silencioso = false) {
+  if (consultandoTracken.value) return
+  consultandoTracken.value = true
   try {
-    const r = await api<{ alvos: number; achados: number; nao_achados: number; sem_cep: number; erros: number }>(
-      '/api/logistica/tracken/atualizar',
-      { method: 'POST' },
-    )
-    await refresh()
-    const partes = [`${r.achados} achado(s) na transportadora`]
-    if (r.nao_achados) partes.push(`${r.nao_achados} ainda não está(ão) lá`)
-    if (r.sem_cep) partes.push(`${r.sem_cep} sem CEP no Bling`)
-    if (r.erros) partes.push(`${r.erros} com erro`)
-    toasts.success(`Tracken: ${r.alvos} pedido(s) Flex conferido(s)`, partes.join(' · '))
+    const q = ids?.length ? `?ids=${ids.join(',')}` : ''
+    const alvos = await api<TrackenAlvo[]>(`/api/logistica/tracken/alvos${q}`)
+    const itens: TrackenResultado[] = []
+    for (const [i, a] of alvos.entries()) {
+      if (i) await new Promise((r) => setTimeout(r, 400))
+      itens.push(await consultarUmTracken(a))
+    }
+    let r = { gravados: 0, achados: 0 }
+    if (itens.length) r = await api<{ gravados: number; achados: number }>('/api/logistica/tracken/resultado', { method: 'POST', body: { itens } })
+    if (!ids) ultimaConsultaTracken = Date.now()
+    if (itens.length) await refresh()
+    if (!silencioso) {
+      const nao = itens.filter((x) => x.lista && !x.lista.length).length
+      const erros = itens.filter((x) => x.erro).length
+      const partes = [`${r.achados} na transportadora`]
+      if (nao) partes.push(`${nao} ainda não está(ão) lá`)
+      if (erros) partes.push(`${erros} com erro`)
+      toasts.success(`Tracken: ${alvos.length} pedido(s) Flex conferido(s)`, partes.join(' · '))
+    }
   } catch (e: any) {
-    toasts.error('Tracken', e?.data?.detail?.code || e?.message || 'erro')
+    if (!silencioso) toasts.error('Tracken', e?.data?.detail?.code || e?.message || 'erro')
   } finally {
-    atualizandoTrackenTodos.value = false
+    consultandoTracken.value = false
   }
 }
-const atualizandoTracken = ref<Set<string>>(new Set())
-async function atualizarTracken(c: Logistica) {
-  if (atualizandoTracken.value.has(c.id)) return
-  atualizandoTracken.value = new Set([...atualizandoTracken.value, c.id])
-  try {
-    const nova = await api<Logistica>(`/api/logistica/${c.id}/tracken`, { method: 'POST' })
-    const i = rows.value.findIndex((r) => r.id === c.id)
-    if (i >= 0) rows.value[i] = nova
-    if (nova.tracken?.achado) toasts.success('Tracken atualizado', nova.tracken.status || '')
-    else toasts.info('Tracken', nova.tracken?.erro || 'A transportadora ainda não tem este pedido.')
-  } catch (e: any) {
-    toasts.error('Tracken', e?.data?.detail?.code || e?.message || 'erro')
-  } finally {
-    const s = new Set(atualizandoTracken.value)
-    s.delete(c.id)
-    atualizandoTracken.value = s
-  }
+// Sozinho: ao abrir a aba Flex e de 30 em 30 min enquanto ela está aberta (o
+// timer confere de 5 em 5 min; aba do navegador escondida não consulta).
+function trackenAuto() {
+  if (tab.value !== 'flex' || !podeVerFlex.value) return
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+  if (Date.now() - ultimaConsultaTracken < TRACKEN_INTERVALO_MS) return
+  consultarTracken(undefined, true)
 }
+let trackenTimer: ReturnType<typeof setInterval> | null = null
+watch([tab, podeVerFlex], () => trackenAuto())
+onMounted(() => {
+  trackenTimer = setInterval(trackenAuto, 5 * 60 * 1000)
+})
+onBeforeUnmount(() => {
+  if (trackenTimer) clearInterval(trackenTimer)
+})
 function noCartao(c: Logistica, k: CartaoFiltro): boolean {
   switch (k) {
     case 'sem_regra': return precisaAtencao(c)
@@ -2883,12 +2929,12 @@ async function aplicarStatusBling(c: Logistica) {
               v-if="ehFlexTab"
               type="button"
               class="absolute left-3 inline-flex items-center gap-1 rounded border border-white/40 bg-white/10 px-2 py-0.5 text-[11px] font-semibold hover:bg-white/20 disabled:opacity-60"
-              title="Consulta agora todos os pedidos Flex no rastreio da transportadora (Tracken). O sistema já faz isso sozinho de 30 em 30 min."
-              :disabled="atualizandoTrackenTodos"
+              title="Consulta agora todos os pedidos Flex no rastreio da transportadora (Tracken). A aba Flex aberta já faz isso sozinha de 30 em 30 min."
+              :disabled="consultandoTracken"
               data-atualizar-tracken
-              @click="atualizarTrackenTodos"
+              @click="consultarTracken()"
             >
-              <RefreshCw class="size-3" :class="atualizandoTrackenTodos ? 'animate-spin' : ''" /> Atualizar Tracken
+              <RefreshCw class="size-3" :class="consultandoTracken ? 'animate-spin' : ''" /> Atualizar Tracken
             </button>
             <span>{{ tituloTabela }}</span>
             <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">o que a plataforma diz × o que está no Bling<template v-if="ehFlexTab"> × o que a transportadora diz</template></span>
@@ -3292,11 +3338,11 @@ async function aplicarStatusBling(c: Logistica) {
                   <button
                     type="button"
                     :class="RAIO_BTN"
-                    title="Consulta agora o rastreio da transportadora do Flex (o robô lê sozinho de 30 em 30 min)"
-                    :disabled="atualizandoTracken.has(raioRow.id)"
-                    @click="atualizarTracken(raioRow)"
+                    title="Consulta agora o rastreio da transportadora do Flex deste pedido"
+                    :disabled="consultandoTracken"
+                    @click="consultarTracken([raioRow.id])"
                   >
-                    <RefreshCw class="size-3" :class="atualizandoTracken.has(raioRow.id) ? 'animate-spin' : ''" /> Atualizar
+                    <RefreshCw class="size-3" :class="consultandoTracken ? 'animate-spin' : ''" /> Atualizar
                   </button>
                 </h3>
                 <template v-if="raioRow.tracken?.achado">
@@ -3318,7 +3364,7 @@ async function aplicarStatusBling(c: Logistica) {
                   </ol>
                 </template>
                 <div v-else-if="raioRow.tracken" class="text-muted-foreground">{{ raioRow.tracken.erro || 'A transportadora ainda não tem este pedido.' }}</div>
-                <div v-else class="text-muted-foreground">Ainda não consultado — o robô lê de 30 em 30 min, ou clique em Atualizar.</div>
+                <div v-else class="text-muted-foreground">Ainda não consultado — a aba Flex consulta ao abrir e de 30 em 30 min, ou clique em Atualizar.</div>
                 <div v-if="raioRow.tracken?.lido_em" class="text-[10px] text-muted-foreground">conferido {{ fmtDataHora(raioRow.tracken.lido_em) }}</div>
               </section>
 

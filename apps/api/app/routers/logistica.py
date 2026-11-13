@@ -56,7 +56,9 @@ from app.schemas.logistica import (
     LogisticaCreate,
     LogisticaExportIn,
     LogisticaOut,
+    TrackenAlvoOut,
     TrackenOut,
+    TrackenResultadoIn,
     LogisticaPatch,
     LogisticaProdutoOut,
     LogisticaStatusCreate,
@@ -1018,48 +1020,73 @@ async def list_logistica(
     return out
 
 
-@router.post("/tracken/atualizar")
-async def atualizar_tracken_todos(
-    user: Annotated[User, Depends(require_permission("logistica", "view"))],
-) -> dict[str, int]:
-    """Botão "Atualizar Tracken" da aba Flex: consulta AGORA todos os pedidos
-    Flex (os mesmos do robô de 30 em 30 min) no rastreio da transportadora."""
+def _so_quem_ve_flex(user: User) -> None:
     if not flex_config.pode_ver(user):
         raise HTTPException(404, detail="Not Found")
-    return await tracken.rodada()
 
 
-@router.post("/{logistica_id}/tracken", response_model=LogisticaOut, dependencies=_DA_EQUIPE)
-async def atualizar_tracken(
-    logistica_id: UUID,
+@router.get("/tracken/alvos", response_model=list[TrackenAlvoOut])
+async def tracken_alvos(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("logistica", "view"))],
-) -> LogisticaOut:
-    """Botão "Atualizar Tracken" do Raio-X (aba Flex): consulta AGORA o
-    rastreio público da transportadora do Flex para este pedido. Só quem vê
-    o Flex e só pedido Flex."""
-    if not flex_config.pode_ver(user):
-        raise HTTPException(404, detail="Not Found")
-    c = (
-        await session.execute(select(Logistica).where(Logistica.id == logistica_id))
-    ).scalar_one_or_none()
-    if c is None:
-        raise HTTPException(404, detail={"code": "logistica_not_found"})
-    if c.envio_flex is not True:
-        raise HTTPException(422, detail={"code": "nao_e_flex"})
-    resumo = await tracken.rodada(somente={c.id})
-    if resumo.get("alvos", 0) == 0:
-        raise HTTPException(422, detail={"code": "nao_e_flex"})
-    tk = await session.get(LogisticaTracken, c.id, populate_existing=True)
-    return _to_out(
-        c,
-        await _match_rules(session, c),
-        produtos=await _produtos_for(session, c),
-        mensagens=await _mensagens_for(session, c),
-        chamado_aba=await _chamado_aba_for(session, c),
-        volta=await _volta_for(session, c),
-        tracken_linha=tk,
-    )
+    ids: Annotated[str | None, Query(max_length=4000)] = None,
+) -> list[TrackenAlvoOut]:
+    """Coluna "Tracken" (aba Flex): os pedidos Flex que a TELA consulta no
+    rastreio da transportadora — o Tracken responde 403 ao servidor (fora do
+    Brasil), ao navegador não. `ids` (separados por vírgula): só esses (botão
+    do Raio-X); sem `ids`, os dos últimos dias ainda não entregues."""
+    _so_quem_ve_flex(user)
+    somente: set[UUID] | None = None
+    if ids:
+        try:
+            somente = {UUID(i.strip()) for i in ids.split(",") if i.strip()}
+        except ValueError as e:
+            raise HTTPException(422, detail={"code": "ids_invalidos"}) from e
+    lista = await tracken.alvos(session, datetime.now(UTC), somente)
+    return [
+        TrackenAlvoOut(
+            logistica_id=a.logistica_id, pedido=a.pedido, rastreio=a.rastreio, cep=a.cep
+        )
+        for a in lista
+    ]
+
+
+@router.post("/tracken/resultado")
+async def tracken_resultado(
+    body: TrackenResultadoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("logistica", "view"))],
+) -> dict[str, int]:
+    """A tela devolve a resposta crua do Tracken; aqui ela é interpretada e
+    gravada. Só vale para pedido Flex (o resto é ignorado)."""
+    _so_quem_ve_flex(user)
+    pedidos = {i.logistica_id for i in body.itens}
+    flex = set(
+        (
+            await session.execute(
+                select(Logistica.id).where(
+                    Logistica.id.in_(list(pedidos)), Logistica.envio_flex.is_(True)
+                )
+            )
+        ).scalars()
+    ) if pedidos else set()
+    agora = datetime.now(UTC)
+    gravados = achados = 0
+    for item in body.itens:
+        if item.logistica_id not in flex:
+            continue
+        if item.lista is not None:
+            achado = tracken.mais_novo(item.lista)
+            dados = tracken.interpretar(achado) if achado is not None else None
+            erro = None
+            achados += dados is not None
+        else:
+            dados = None
+            erro = f"Tracken: {(item.erro or 'não deu para consultar').strip()[:250]}"
+        await tracken.gravar(session, item.logistica_id, agora, dados, erro)
+        gravados += 1
+    await session.commit()
+    return {"gravados": gravados, "achados": achados}
 
 
 @router.post("/export.xlsx")

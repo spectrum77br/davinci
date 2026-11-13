@@ -4,21 +4,19 @@ O DaVinci lê o rastreio PÚBLICO da transportadora do Flex (TRACKen) — númer
 do pedido + CEP do cliente, sem login — e mostra na aba Flex. A resposta de
 exemplo é a do 308933 de 13/11/2026 (nome e endereço trocados).
 
-Nenhuma chamada externa: um transporte falso do httpx responde no lugar do
-Tracken.
+O Tracken responde 403 ao servidor (fora do Brasil): quem consulta é a tela da
+aba Flex — o DaVinci dá a lista (`/tracken/alvos`) e grava a resposta crua que a
+tela devolve (`/tracken/resultado`). Nenhuma chamada externa aqui.
 """
 
 from __future__ import annotations
 
-import json
 import uuid
 from collections.abc import Callable
 from datetime import UTC, date, datetime
 
-import httpx
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import BlingOrder, Logistica, LogisticaTracken, User, UserRole, UserStatus
@@ -87,28 +85,6 @@ _ENTREGUE = {
 }
 
 
-def _cliente(respostas: dict[str, dict], chamadas: list[dict]) -> httpx.AsyncClient:
-    """Tracken falso: responde pela chave `notafiscal`/`pedidonf` + CEP."""
-
-    def _responder(request: httpx.Request) -> httpx.Response:
-        corpo = json.loads(request.content)
-        chamadas.append(corpo)
-        if not corpo.get("cepdest"):
-            return httpx.Response(
-                200, json={"success": False, "error": "Cep de entrega deve ser preenchido"}
-            )
-        chave = corpo.get("notafiscal") or corpo.get("pedidonf")
-        cep = corpo["cepdest"].replace("-", "")
-        r = respostas.get(f"{chave}|{cep}")
-        if r is None:
-            return httpx.Response(
-                200, json={"success": False, "error": "Nenhum registro encontrado"}
-            )
-        return httpx.Response(200, json=r)
-
-    return httpx.AsyncClient(transport=httpx.MockTransport(_responder))
-
-
 def test_interpretar_a_resposta_real():
     d = tracken.interpretar(_RESPOSTA["list"][0])
     assert d["remessa"] == "636803384"
@@ -167,89 +143,6 @@ async def _pedido(
     return linha
 
 
-@pytest.mark.asyncio
-async def test_rodada_le_so_flex_e_grava(db: AsyncSession):
-    flex = await _pedido(
-        db, bling="308933", loja="26111383SWQS3R", rastreio="BR262058740263A",
-        flex=True, cep="06840050",
-    )
-    # Achado só pelo rastreio (o número da venda não bate).
-    pelo_rastreio = await _pedido(
-        db, bling="308934", loja="XYZ", rastreio="BR1", flex=True, cep="01001-000"
-    )
-    ainda_nao = await _pedido(
-        db, bling="308935", loja="2611NAOCHEGOU", rastreio=None, flex=True, cep="01001000"
-    )
-    sem_cep = await _pedido(
-        db, bling="308936", loja="2611SEMCEP", rastreio=None, flex=True, cep=None
-    )
-    comum = await _pedido(
-        db, bling="308937", loja="2611COMUM", rastreio=None, flex=False, cep="01001000"
-    )
-    chamadas: list[dict] = []
-    cli = _cliente(
-        {"26111383SWQS3R|06840050": _RESPOSTA, "BR1|01001000": _ENTREGUE}, chamadas
-    )
-    resumo = await tracken.rodada(cliente=cli)
-    assert resumo == {"alvos": 4, "achados": 2, "nao_achados": 1, "sem_cep": 1, "erros": 0}
-    # O pedido comum nunca é consultado.
-    assert all(c.get("notafiscal") != "2611COMUM" for c in chamadas)
-    # O CEP vai com traço.
-    assert {c["cepdest"] for c in chamadas} == {"06840-050", "01001-000"}
-
-    t = await db.get(LogisticaTracken, flex.id, populate_existing=True)
-    assert (t.achado, t.status, t.remessa, t.erro) == (True, "PEDIDO POSTADO", "636803384", None)
-    t = await db.get(LogisticaTracken, pelo_rastreio.id, populate_existing=True)
-    assert (t.achado, t.status, t.tentativas) == (True, "ENTREGUE", 1)
-    t = await db.get(LogisticaTracken, ainda_nao.id, populate_existing=True)
-    assert (t.achado, t.erro) == (False, None)
-    t = await db.get(LogisticaTracken, sem_cep.id, populate_existing=True)
-    assert (t.achado, t.erro) == (False, "sem o CEP do cliente no Bling")
-    assert await db.get(LogisticaTracken, comum.id, populate_existing=True) is None
-
-
-@pytest.mark.asyncio
-async def test_entregue_ha_mais_de_um_dia_para_de_ler(db: AsyncSession):
-    linha = await _pedido(
-        db, bling="308940", loja="2611ENTREGUE", rastreio=None, flex=True, cep="01001000"
-    )
-    db.add(
-        LogisticaTracken(
-            logistica_id=linha.id,
-            achado=True,
-            status="ENTREGUE",
-            entregue_em=datetime(2026, 1, 1, tzinfo=UTC),
-            historico=[],
-        )
-    )
-    await db.commit()
-    chamadas: list[dict] = []
-    resumo = await tracken.rodada(cliente=_cliente({}, chamadas))
-    assert resumo["alvos"] == 0 and chamadas == []
-    # O botão do Raio-X lê mesmo assim.
-    resumo = await tracken.rodada(somente={linha.id}, cliente=_cliente({}, chamadas))
-    assert resumo["alvos"] == 1
-
-
-@pytest.mark.asyncio
-async def test_erro_do_tracken_nao_para_os_outros(db: AsyncSession):
-    a = await _pedido(db, bling="308950", loja="2611A", rastreio=None, flex=True, cep="01001000")
-    b = await _pedido(db, bling="308951", loja="2611B", rastreio=None, flex=True, cep="01001000")
-
-    def _responder(request: httpx.Request) -> httpx.Response:
-        corpo = json.loads(request.content)
-        if corpo.get("notafiscal") == "2611A":
-            return httpx.Response(500, text="erro")
-        return httpx.Response(200, json=_RESPOSTA)
-
-    cli = httpx.AsyncClient(transport=httpx.MockTransport(_responder))
-    resumo = await tracken.rodada(cliente=cli)
-    assert (resumo["erros"], resumo["achados"]) == (1, 1)
-    ta = await db.get(LogisticaTracken, a.id, populate_existing=True)
-    assert ta.erro.startswith("Tracken:")
-    assert (await db.get(LogisticaTracken, b.id, populate_existing=True)).achado is True
-
-
 @pytest.fixture
 async def admin(db: AsyncSession) -> User:
     email = f"adm-{uuid.uuid4().hex[:6]}@davinci-test.com"
@@ -261,91 +154,122 @@ async def admin(db: AsyncSession) -> User:
 
 
 @pytest.mark.asyncio
-async def test_aba_flex_mostra_o_tracken_so_para_quem_ve_o_flex(
+async def test_alvos_so_flex_com_cep_e_para_depois_de_entregue(
     client: AsyncClient,
     db: AsyncSession,
     admin: User,
     auth_as: Callable[[User | None], None],
     monkeypatch,
 ):
-    linha = await _pedido(
+    flex = await _pedido(
         db, bling="308933", loja="26111383SWQS3R", rastreio="BR262058740263A",
         flex=True, cep="06840050",
     )
-    await tracken.rodada(cliente=_cliente({"26111383SWQS3R|06840050": _ENTREGUE}, []))
-
-    auth_as(admin)
-    lista = (await client.get("/api/logistica?envio=flex")).json()
-    t = next(x for x in lista if x["id"] == str(linha.id))["tracken"]
-    assert (t["achado"], t["status"], t["tentativas"], t["problema"]) == (True, "ENTREGUE", 1, True)
-    assert t["recebedor"] == "PORTEIRO"
-    assert [e["descricao"] for e in t["historico"]][-1] == "ENTREGA REALIZADA"
-
-    # Quem não vê o Flex: a linha (na aba Shopee) vem sem o Tracken.
-    monkeypatch.setattr(flex_config, "pode_ver", lambda user: False)
-    lista = (await client.get("/api/logistica?plataforma=shopee")).json()
-    assert next(x for x in lista if x["id"] == str(linha.id))["tracken"] is None
-
-
-@pytest.mark.asyncio
-async def test_botao_atualizar_tracken(
-    client: AsyncClient,
-    db: AsyncSession,
-    admin: User,
-    auth_as: Callable[[User | None], None],
-    monkeypatch,
-):
-    linha = await _pedido(
-        db, bling="308933", loja="26111383SWQS3R", rastreio="BR262058740263A",
-        flex=True, cep="06840050",
+    sem_cep = await _pedido(
+        db, bling="308936", loja="2611SEMCEP", rastreio=None, flex=True, cep=None
     )
     comum = await _pedido(
         db, bling="308937", loja="2611COMUM", rastreio=None, flex=False, cep="01001000"
     )
-    original = tracken.rodada
-
-    async def _rodada(**kw):
-        return await original(
-            cliente=_cliente({"26111383SWQS3R|06840050": _RESPOSTA}, []), **kw
+    entregue = await _pedido(
+        db, bling="308940", loja="2611ENTREGUE", rastreio=None, flex=True, cep="01001000"
+    )
+    db.add(
+        LogisticaTracken(
+            logistica_id=entregue.id,
+            achado=True,
+            status="ENTREGUE",
+            entregue_em=datetime(2026, 1, 1, tzinfo=UTC),
+            historico=[],
         )
+    )
+    await db.commit()
 
-    monkeypatch.setattr(tracken, "rodada", _rodada)
     auth_as(admin)
-    r = await client.post(f"/api/logistica/{linha.id}/tracken")
+    r = await client.get("/api/logistica/tracken/alvos")
     assert r.status_code == 200, r.text
-    assert r.json()["tracken"]["status"] == "PEDIDO POSTADO"
-    r = await client.post(f"/api/logistica/{comum.id}/tracken")
-    assert r.status_code == 422
-    assert (await db.execute(select(LogisticaTracken))).scalars().all()
+    por_id = {a["logistica_id"]: a for a in r.json()}
+    assert set(por_id) == {str(flex.id), str(sem_cep.id)}
+    assert por_id[str(flex.id)] == {
+        "logistica_id": str(flex.id),
+        "pedido": "26111383SWQS3R",
+        "rastreio": "BR262058740263A",
+        "cep": "06840-050",
+    }
+    assert por_id[str(sem_cep.id)]["cep"] is None
+    # O botão do Raio-X pede um só — mesmo entregue há dias.
+    r = await client.get(f"/api/logistica/tracken/alvos?ids={entregue.id}")
+    assert [a["logistica_id"] for a in r.json()] == [str(entregue.id)]
+    # Pedido comum nunca é alvo, nem pedido por id.
+    r = await client.get(f"/api/logistica/tracken/alvos?ids={comum.id}")
+    assert r.json() == []
+    # Quem não vê o Flex: 404.
+    monkeypatch.setattr(flex_config, "pode_ver", lambda user: False)
+    assert (await client.get("/api/logistica/tracken/alvos")).status_code == 404
 
 
 @pytest.mark.asyncio
-async def test_botao_atualizar_todos_os_flex(
+async def test_resultado_grava_e_a_aba_flex_mostra(
     client: AsyncClient,
     db: AsyncSession,
     admin: User,
     auth_as: Callable[[User | None], None],
     monkeypatch,
 ):
-    await _pedido(
+    achado = await _pedido(
         db, bling="308933", loja="26111383SWQS3R", rastreio="BR262058740263A",
         flex=True, cep="06840050",
     )
-    await _pedido(
+    ainda_nao = await _pedido(
         db, bling="308935", loja="2611NAOCHEGOU", rastreio=None, flex=True, cep="01001000"
     )
-    original = tracken.rodada
-
-    async def _rodada(**kw):
-        return await original(
-            cliente=_cliente({"26111383SWQS3R|06840050": _RESPOSTA}, []), **kw
-        )
-
-    monkeypatch.setattr(tracken, "rodada", _rodada)
+    com_erro = await _pedido(
+        db, bling="308936", loja="2611ERRO", rastreio=None, flex=True, cep="01001000"
+    )
+    comum = await _pedido(
+        db, bling="308937", loja="2611COMUM", rastreio=None, flex=False, cep="01001000"
+    )
     auth_as(admin)
-    r = await client.post("/api/logistica/tracken/atualizar")
+    r = await client.post(
+        "/api/logistica/tracken/resultado",
+        json={
+            "itens": [
+                {"logistica_id": str(achado.id), "lista": _ENTREGUE["list"]},
+                {"logistica_id": str(ainda_nao.id), "lista": []},
+                {"logistica_id": str(com_erro.id), "erro": "o Tracken respondeu 500"},
+                # Pedido que não é Flex: ignorado.
+                {"logistica_id": str(comum.id), "lista": _RESPOSTA["list"]},
+            ]
+        },
+    )
     assert r.status_code == 200, r.text
-    assert r.json() == {"alvos": 2, "achados": 1, "nao_achados": 1, "sem_cep": 0, "erros": 0}
-    # Quem não vê o Flex: 404.
+    assert r.json() == {"gravados": 3, "achados": 1}
+
+    t = await db.get(LogisticaTracken, achado.id, populate_existing=True)
+    assert (t.achado, t.status, t.tentativas, t.recebedor) == (True, "ENTREGUE", 1, "PORTEIRO")
+    t = await db.get(LogisticaTracken, ainda_nao.id, populate_existing=True)
+    assert (t.achado, t.erro) == (False, None)
+    t = await db.get(LogisticaTracken, com_erro.id, populate_existing=True)
+    assert (t.achado, t.erro) == (False, "Tracken: o Tracken respondeu 500")
+    assert await db.get(LogisticaTracken, comum.id) is None
+
+    lista = (await client.get("/api/logistica?envio=flex")).json()
+    tk = next(x for x in lista if x["id"] == str(achado.id))["tracken"]
+    assert (tk["achado"], tk["status"], tk["problema"]) == (True, "ENTREGUE", True)
+    assert [e["descricao"] for e in tk["historico"]][-1] == "ENTREGA REALIZADA"
+
+    # Achado antes e "não achou" agora: o que se sabia fica.
+    await client.post(
+        "/api/logistica/tracken/resultado",
+        json={"itens": [{"logistica_id": str(achado.id), "lista": []}]},
+    )
+    t = await db.get(LogisticaTracken, achado.id, populate_existing=True)
+    assert (t.achado, t.status) == (True, "ENTREGUE")
+    assert t.erro == "o Tracken não achou o pedido nesta leitura"
+
+    # Quem não vê o Flex: a linha (na aba Shopee) vem sem o Tracken e não grava.
     monkeypatch.setattr(flex_config, "pode_ver", lambda user: False)
-    assert (await client.post("/api/logistica/tracken/atualizar")).status_code == 404
+    lista = (await client.get("/api/logistica?plataforma=shopee")).json()
+    assert next(x for x in lista if x["id"] == str(achado.id))["tracken"] is None
+    r = await client.post("/api/logistica/tracken/resultado", json={"itens": []})
+    assert r.status_code == 404
