@@ -1,7 +1,7 @@
 """Excel do painel Logística (botão "Excel" das abas de marketplace).
 
 Quem decide O QUE vai pra planilha é a tela: os filtros do painel (Mostrar
-tudo, sub-aba DBA × Envio próprio da Amazon, conta, status Bling, período,
+tudo, filtro Envio DBA × Envio próprio da Amazon, conta, status Bling, período,
 busca) vivem no front, e o texto de cada coluna também (Status Plataforma em
 PT, "Destino: …" do Envio próprio, resumo do chamado…). A tela manda as linhas
 já filtradas e formatadas, na ordem em que aparecem; aqui só escrevemos o .xlsx

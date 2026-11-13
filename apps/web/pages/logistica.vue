@@ -70,16 +70,27 @@ async function aoMudarFlex() {
 }
 const tab = ref<PlataformaTab | 'status'>('ml')
 
-// Aba Amazon: a Amazon trata "Delivery by Amazon" (DBA) e "Envio próprio" como
-// dois painéis (Seller Central › Gerenciar pedidos › Logística pelo vendedor),
-// então aqui também. O canal vem do backend (`amazon_canal`: dba/proprio/fba;
-// FBA fica junto do DBA — a Amazon entrega). Sem sinal nenhum é DBA, o normal
-// da operação (Vinicius 15/09); Envio próprio é sempre identificado de forma
-// positiva (MFN sem EasyShip ou serviço dos Correios no Bling).
+// Aba Amazon: "Delivery by Amazon" (DBA) e "Envio próprio" numa tabela só
+// (Vinicius, 13/11/2026 — antes eram duas sub-abas, como no Seller Central).
+// A coluna Envio, logo depois da Data, diz de quem é a entrega, e o filtro
+// Envio mostra um lado só. O canal vem do backend (`amazon_canal`:
+// dba/proprio/fba; FBA conta como DBA — a Amazon entrega). Sem sinal nenhum é
+// DBA, o normal da operação (Vinicius 15/09); Envio próprio é sempre
+// identificado de forma positiva (MFN sem EasyShip ou serviço dos Correios no Bling).
 type AmazonSub = 'dba' | 'proprio'
-const amazonSub = ref<AmazonSub>('dba')
+const amazonEnvioFilter = ref<'' | AmazonSub>('')
 function amazonSubDe(c: { amazon_canal?: string | null }): AmazonSub {
   return c.amazon_canal === 'proprio' ? 'proprio' : 'dba'
+}
+const AMAZON_ENVIO_LABEL: Record<AmazonSub, string> = { dba: 'DBA', proprio: 'Envio próprio' }
+const AMAZON_ENVIO_TITLE: Record<AmazonSub, string> = {
+  dba: 'Delivery by Amazon: a Amazon coleta e entrega',
+  proprio: 'Envio próprio: postamos nos Correios e respondemos pela entrega',
+}
+// Prazo da Amazon e previsão dos Correios só valem no Envio próprio: o prazo
+// vem preenchido no DBA também, mas lá quem entrega (e responde) é a Amazon.
+function ehEnvioProprio(c: Logistica): boolean {
+  return isAmazon(c) && c.amazon_canal === 'proprio'
 }
 
 // Aba Flex: duas sub-abas, no mesmo padrão da Amazon. "Pedidos Flex" é a
@@ -459,15 +470,16 @@ const COR_SITUACAO_CHAMADO: Record<'Aberto' | 'Concluído', string> = {
 function escondido(c: Logistica): boolean {
   return c.acao_resolvido && !c.acao_monitorar && !problemaSemChamado(c)
 }
-const ehProprio = computed(() => tab.value === 'amazon' && amazonSub.value === 'proprio')
+// Aba Amazon (DBA e Envio próprio juntos): coluna Envio e as colunas do Envio próprio.
+const ehAmazonTab = computed(() => tab.value === 'amazon')
 function noCartao(c: Logistica, k: CartaoFiltro): boolean {
   switch (k) {
     case 'sem_regra': return precisaAtencao(c)
     case 'monitorar': return !!c.acao_monitorar
     case 'problemas': return normKey(c.status_bling) === 'problemas'
     case 'chamado': return !!(c.chamado || c.chamado_aba)
-    case 'prazo': return prazoVencido(c)
-    case 'previsao': return previsaoVencida(c)
+    case 'prazo': return ehEnvioProprio(c) && prazoVencido(c)
+    case 'previsao': return ehEnvioProprio(c) && previsaoVencida(c)
     case 'divergencia': return !!c.divergencia
     case 'correios_parado': return ehCorreios(c.rastreio) && !c.entregue_em && leituraVelha(c)
     case 'problemas_sem_chamado': return problemaSemChamado(c)
@@ -488,8 +500,8 @@ const baseRows = computed(() => {
     // Bling (resolvido) E a regra casada não pede monitoramento — nada a fazer.
     // "Mostrar tudo" ligado ignora essa regra e exibe também os escondidos.
     if (!mostrarTudo.value && escondido(c)) return false
-    // Aba Amazon: só a sub-aba escolhida (DBA / Envio próprio / sem classificação).
-    if (tab.value === 'amazon' && amazonSubDe(c) !== amazonSub.value) return false
+    // Aba Amazon: filtro Envio (DBA / Envio próprio; vazio = os dois).
+    if (tab.value === 'amazon' && amazonEnvioFilter.value && amazonSubDe(c) !== amazonEnvioFilter.value) return false
     // Aba Flex: filtro Plataforma (mesmos rótulos que o backend aceita).
     if (tab.value === 'flex' && flexPlataformaFilter.value === 'ml' && !isMl(c)) return false
     if (tab.value === 'flex' && flexPlataformaFilter.value === 'shopee' && !isShopee(c)) return false
@@ -533,15 +545,15 @@ const filteredRows = computed(() => semCartaoRows.value.filter((c) => noCartao(c
 const cartoes = computed(() => {
   const base = semCartaoRows.value
   const n = (k: CartaoFiltro) => base.filter((c) => noCartao(c, k)).length
-  const lista: Array<{ k: CartaoFiltro; label: string; n: number; cor: string; dica: string }> = [
+  const lista: Array<{ k: CartaoFiltro; label: string; n: number; cor: string; dica: string; sub?: string }> = [
     { k: 'all', label: mostrarTudo.value ? 'Pedidos' : 'A acompanhar', n: base.length, cor: '', dica: 'mostrar todos' },
     { k: 'sem_regra', label: 'Sem regra (decidir)', n: n('sem_regra'), cor: 'text-amber-600', dica: 'combinação que nenhuma regra da aba Status cobre' },
     { k: 'monitorar', label: 'Monitorar', n: n('monitorar'), cor: 'text-blue-600', dica: 'a regra da aba Status pede acompanhar' },
     { k: 'problemas', label: 'Problemas no Bling', n: n('problemas'), cor: 'text-red-600', dica: 'Status Bling = Problemas' },
     { k: 'chamado', label: 'Com chamado', n: n('chamado'), cor: 'text-slate-700 dark:text-slate-300', dica: 'tem protocolo ou chamado na aba Chamados' },
   ]
-  if (ehProprio.value) {
-    lista.push({ k: 'prazo', label: 'Prazo Amazon vencido', n: n('prazo'), cor: 'text-red-600', dica: 'passou a data máxima da Amazon e não foi entregue' })
+  if (ehAmazonTab.value) {
+    lista.push({ k: 'prazo', label: 'Prazo Amazon vencido', n: n('prazo'), cor: 'text-red-600', dica: 'Envio próprio que passou a data máxima da Amazon e não foi entregue', sub: 'só Envio próprio' })
   }
   return lista
 })
@@ -635,8 +647,8 @@ const agirItens = computed<AgirItem[]>(() => {
     if (rs.length) out.push({ chave: `g-${k}`, dot, titulo: `${titulo} · ${rs.length}`, detalhe: detalhe(rs), acao: 'Ver', cartao: k })
   }
   const lista = (rs: Logistica[]) => rs.slice(0, 3).map(pedidoDe).join(' · ') + (rs.length > 3 ? ' …' : '')
-  if (ehProprio.value) {
-    grupo('prazo', 'bg-red-600', 'Prazo da Amazon vencido', () => 'a Amazon pode reembolsar o cliente')
+  if (ehAmazonTab.value) {
+    grupo('prazo', 'bg-red-600', 'Prazo da Amazon vencido', () => 'Envio próprio: a Amazon pode reembolsar o cliente')
     grupo('previsao', 'bg-amber-500', 'Previsão da transportadora vencida', lista)
   }
   grupo('sem_regra', 'bg-amber-500', 'Sem regra', () => 'combinação nova: decidir na aba Status')
@@ -653,7 +665,7 @@ function agir(a: AgirItem) {
 }
 const tituloTabela = computed(() => {
   const nome = tab.value === 'flex' ? 'Pedidos Flex' : PLATAFORMA_TABS.find((t) => t.key === tab.value)?.label || ''
-  const sub = tab.value === 'amazon' ? (amazonSub.value === 'proprio' ? ' · Envio próprio' : ' · Amazon DBA') : ''
+  const sub = tab.value === 'amazon' && amazonEnvioFilter.value ? ` · ${AMAZON_ENVIO_LABEL[amazonEnvioFilter.value]}` : ''
   return `${nome}${sub} — ${mostrarTudo.value ? 'todos os pedidos' : 'casos a acompanhar'}`
 })
 function produtoResumo(c: Logistica): string {
@@ -674,10 +686,11 @@ function limparFiltros() {
   dataInicioFilter.value = ''
   dataFimFilter.value = ''
   flexPlataformaFilter.value = ''
+  amazonEnvioFilter.value = ''
   cartaoFiltro.value = 'all'
 }
 
-// Contadores das sub-abas da Amazon (mesma base do painel: respeita "Mostrar tudo").
+// Contadores do filtro Envio da Amazon (mesma base do painel: respeita "Mostrar tudo").
 const amazonCounts = computed(() => {
   const n: Record<AmazonSub, number> = { dba: 0, proprio: 0 }
   for (const c of rows.value) {
@@ -807,7 +820,7 @@ function mensagensResumo(c: Logistica): string {
 
 // ---- Botão "Excel" ----
 // Baixa as linhas que o painel está mostrando: TODAS as páginas, com os
-// filtros da tela (Mostrar tudo, sub-aba DBA × Envio próprio, conta, status
+// filtros da tela (Mostrar tudo, Envio DBA × Envio próprio, conta, status
 // Bling, período, busca) e as mesmas colunas da tabela, na mesma ordem. O texto
 // de cada célula sai daqui (mesmas funções da tabela); o servidor só escreve o
 // .xlsx. Vazio na planilha = "—" na tela.
@@ -821,9 +834,12 @@ function emLinhas(...partes: Array<string | null | undefined>): string {
   return partes.filter(Boolean).join('\n')
 }
 function excelColunas(): ExcelColuna[] {
-  const proprio = tab.value === 'amazon' && amazonSub.value === 'proprio'
+  // Aba Amazon: DBA e Envio próprio juntos — coluna Envio e as do Envio próprio
+  // (no DBA elas saem vazias, como o "—" da tela).
+  const amazon = tab.value === 'amazon'
   const cols: ExcelColuna[] = [
     { titulo: 'Data', tipo: 'data', valor: (c) => c.data },
+    ...(amazon ? [{ titulo: 'Envio', valor: (c: Logistica) => AMAZON_ENVIO_LABEL[amazonSubDe(c)] }] : []),
     { titulo: 'Pedido Bling', valor: (c) => c.pedido_bling },
     { titulo: 'Pedido Marketplace', valor: (c) => c.pedido_marketplace },
     { titulo: 'Plataforma', valor: (c) => `${c.plataforma || ''}${c.envio_flex && podeVerFlex.value ? ' · Flex' : ''}` },
@@ -850,20 +866,20 @@ function excelColunas(): ExcelColuna[] {
     },
     { titulo: 'Devolução (volta)', valor: (c) => voltaTexto(c) },
   ]
-  if (proprio) {
+  if (amazon) {
     cols.push(
       {
         titulo: 'Previsão transportadora',
         valor: (c) => {
           if (c.entregue_em) return `entregue ${fmtDataHora(c.entregue_em)}`
-          if (!c.previsao_correios) return ''
+          if (!ehEnvioProprio(c) || !c.previsao_correios) return ''
           return emLinhas(fmtDia(c.previsao_correios), previsaoVencida(c) ? 'previsão vencida' : null)
         },
       },
       {
         titulo: 'Entregar até (Amazon)',
         valor: (c) =>
-          emLinhas(
+          !ehEnvioProprio(c) ? '' : emLinhas(
             c.prazo_entrega_amazon ? fmtDia(c.prazo_entrega_amazon) : null,
             c.prazo_entrega_amazon && !c.entregue_em ? prazoResumo(c) : null,
             avisosResumo(c),
@@ -876,7 +892,7 @@ function excelColunas(): ExcelColuna[] {
     { titulo: 'Divergência', valor: (c) => c.divergencia },
     { titulo: 'Status Bling', valor: (c) => c.status_bling },
   )
-  if (proprio) cols.push({ titulo: 'Suspensão', valor: (c) => suspensaoResumo(c) })
+  if (amazon) cols.push({ titulo: 'Suspensão', valor: (c) => suspensaoResumo(c) })
   cols.push({
     titulo: 'Chamado',
     valor: (c) => emLinhas(chamadoAbaResumo(c)?.texto || c.chamado, chamadoAutoAviso(c)),
@@ -884,7 +900,7 @@ function excelColunas(): ExcelColuna[] {
   return cols
 }
 function excelAbaNome(): string {
-  if (tab.value === 'amazon') return amazonSub.value === 'proprio' ? 'Amazon Envio próprio' : 'Amazon DBA'
+  if (tab.value === 'amazon') return amazonEnvioFilter.value === 'proprio' ? 'Amazon Envio próprio' : amazonEnvioFilter.value === 'dba' ? 'Amazon DBA' : 'Amazon'
   return PLATAFORMA_TABS.find((t) => t.key === tab.value)?.label || 'Logística'
 }
 async function exportarExcel() {
@@ -938,7 +954,7 @@ function goToPage(p: number) {
   page.value = Math.min(Math.max(1, p), totalPages.value)
 }
 // Filtros mudaram → volta pra 1ª página.
-watch([search, contaFilter, statusBlingFilter, dataInicioFilter, dataFimFilter, amazonSub, flexPlataformaFilter, cartaoFiltro, mostrarTudo], () => {
+watch([search, contaFilter, statusBlingFilter, dataInicioFilter, dataFimFilter, amazonEnvioFilter, flexPlataformaFilter, cartaoFiltro, mostrarTudo], () => {
   page.value = 1
 })
 // Recarregou dados / página ficou fora do intervalo → corrige.
@@ -954,6 +970,7 @@ const filtrosAtivos = computed(
     !!dataInicioFilter.value ||
     !!dataFimFilter.value ||
     cartaoFiltro.value !== 'all' ||
+    (tab.value === 'amazon' && !!amazonEnvioFilter.value) ||
     (tab.value === 'flex' && !!flexPlataformaFilter.value),
 )
 
@@ -1720,11 +1737,6 @@ watch(tab, (t) => {
   raioId.value = null
   cartaoFiltro.value = 'all'
 })
-// O cartão "Prazo Amazon vencido" só existe no Envio próprio.
-watch(amazonSub, () => {
-  raioId.value = null
-  if (cartaoFiltro.value === 'prazo' || cartaoFiltro.value === 'previsao') cartaoFiltro.value = 'all'
-})
 
 // ---- Atualização automática (30s) ----
 // A recarga e os crons atualizam o BANCO de todo mundo, mas cada navegador só
@@ -1778,8 +1790,8 @@ onMounted(() => {
   }
   if (buscaQuery) search.value = buscaQuery
   // `&sub=proprio`: a ocorrência do "Vigia Robô Melhor Envio" é de Envio
-  // próprio — sem isto a aba Amazon abriria no DBA e o pedido não apareceria.
-  if (query.sub === 'proprio' || query.sub === 'dba') amazonSub.value = query.sub
+  // próprio — abre a aba Amazon já com o filtro Envio = Envio próprio.
+  if (query.sub === 'proprio' || query.sub === 'dba') amazonEnvioFilter.value = query.sub
   // `?tab=flex&sub=anuncios`: abre direto a tela dos anúncios Flex.
   if (query.sub === 'anuncios' || query.sub === 'pedidos') flexSub.value = query.sub
   if (!statusLoaded) refreshStatus()
@@ -2499,27 +2511,6 @@ async function aplicarStatusBling(c: Logistica) {
             Status
           </button>
         </div>
-        <!-- Amazon: DBA × Envio próprio (dois painéis, como no Seller Central) -->
-        <div v-if="tab === 'amazon'" class="inline-flex rounded-md border p-px" role="tablist">
-          <button
-            type="button"
-            class="rounded px-2.5 py-1"
-            :class="amazonSub === 'dba' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
-            title="Delivery by Amazon: a Amazon coleta e entrega"
-            @click="amazonSub = 'dba'"
-          >
-            Amazon DBA <span class="font-medium opacity-70">{{ amazonCounts.dba }}</span>
-          </button>
-          <button
-            type="button"
-            class="rounded px-2.5 py-1"
-            :class="amazonSub === 'proprio' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground'"
-            title="Envio próprio: postamos nos Correios e respondemos pela entrega"
-            @click="amazonSub = 'proprio'"
-          >
-            Envio próprio <span class="font-medium opacity-70">{{ amazonCounts.proprio }}</span>
-          </button>
-        </div>
         <!-- Flex: Pedidos × Anúncios -->
         <div v-if="tab === 'flex'" class="inline-flex rounded-md border p-px" role="tablist">
           <button
@@ -2705,6 +2696,15 @@ async function aplicarStatusBling(c: Logistica) {
             <option v-for="c in contas" :key="c" :value="c">{{ c }}</option>
           </select>
         </label>
+        <!-- 13/11/2026: DBA e Envio próprio numa tabela só; o filtro mostra um lado só. -->
+        <label v-if="tab === 'amazon'" class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="DBA: a Amazon coleta e entrega · Envio próprio: postamos nos Correios e respondemos pela entrega">
+          <span class="font-semibold text-muted-foreground">Envio</span>
+          <select v-model="amazonEnvioFilter" class="bg-transparent outline-none">
+            <option value="">Todos</option>
+            <option value="dba">DBA ({{ amazonCounts.dba }})</option>
+            <option value="proprio">Envio próprio ({{ amazonCounts.proprio }})</option>
+          </select>
+        </label>
         <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="A acompanhar: esconde os pedidos que já chegaram ao fim (resolvidos) e não pedem monitoramento">
           <span class="font-semibold text-muted-foreground">Mostrar</span>
           <select v-model="mostrarSel" class="bg-transparent outline-none">
@@ -2758,6 +2758,7 @@ async function aplicarStatusBling(c: Logistica) {
         >
           <span class="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{{ k.label }}</span>
           <span class="block text-xl font-bold leading-tight" :class="k.cor">{{ k.n }}</span>
+          <span v-if="k.sub" class="block text-[10px] leading-tight text-muted-foreground">{{ k.sub }}</span>
         </button>
       </div>
 
@@ -2795,42 +2796,46 @@ async function aplicarStatusBling(c: Logistica) {
                  Mesmo dia ("o pedido está cortando, preciso dele inteiro"): Pedido com 136px —
                  o nº mais longo é o da Amazon (19 caracteres = 121px na fonte mono de 10,5px,
                  TikTok 18 = 114px) + 12px de respiro. Os 12px saem da Localização. -->
-            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehProprio ? 'min-w-[1340px]' : 'min-w-[1260px]'">
+            <!-- 13/11/2026: na aba Amazon, DBA e Envio próprio juntos — a coluna Envio
+                 (96px: cabe "Envio próprio" na etiqueta) entra depois da Data; Previsão,
+                 Entregar até e Suspensão ficam pra todos e saem "—" no DBA. -->
+            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehAmazonTab ? 'min-w-[1430px]' : 'min-w-[1260px]'">
               <colgroup>
-                <col class="w-[46px]"><col class="w-[136px]"><col :class="ehProprio ? 'w-[70px]' : 'w-[88px]'"><col :class="ehProprio ? 'w-[180px]' : 'w-[230px]'">
-                <col :class="ehProprio ? 'w-[130px]' : 'w-[200px]'"><col>
-                <template v-if="ehProprio"><col class="w-[80px]"><col class="w-[92px]"></template>
-                <col :class="ehProprio ? 'w-[100px]' : 'w-[104px]'">
-                <col :class="ehProprio ? 'w-[110px]' : 'w-[140px]'"><col :class="ehProprio ? 'w-[80px]' : 'w-[84px]'">
-                <col v-if="ehProprio" class="w-[100px]">
+                <col class="w-[46px]"><col v-if="ehAmazonTab" class="w-[96px]"><col class="w-[136px]"><col :class="ehAmazonTab ? 'w-[70px]' : 'w-[88px]'"><col :class="ehAmazonTab ? 'w-[180px]' : 'w-[230px]'">
+                <col :class="ehAmazonTab ? 'w-[130px]' : 'w-[200px]'"><col>
+                <template v-if="ehAmazonTab"><col class="w-[80px]"><col class="w-[92px]"></template>
+                <col :class="ehAmazonTab ? 'w-[100px]' : 'w-[104px]'">
+                <col :class="ehAmazonTab ? 'w-[110px]' : 'w-[140px]'"><col :class="ehAmazonTab ? 'w-[80px]' : 'w-[84px]'">
+                <col v-if="ehAmazonTab" class="w-[100px]">
               </colgroup>
               <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="4">Pedido</th>
-                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehProprio ? 4 : 2">Plataforma</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" :colspan="ehAmazonTab ? 5 : 4">Pedido</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 4 : 2">Plataforma</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Bling</th>
-                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehProprio ? 3 : 2">Caso</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 3 : 2">Caso</th>
                 </tr>
                 <tr>
                   <th class="border-b px-1.5 py-1 text-center font-semibold">Data</th>
+                  <th v-if="ehAmazonTab" class="border-b px-1.5 py-1 text-center font-semibold" title="DBA: a Amazon coleta e entrega · Envio próprio: postamos nos Correios e respondemos pela entrega">Envio</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Pedido no Bling e, embaixo, o número na plataforma">Pedido</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold">Conta</th>
                   <th class="border-b px-1.5 py-1 text-left font-semibold">Produto</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-left font-semibold dark:border-l-slate-600" title="Status na plataforma (passe o mouse para ver campo a campo e desde quando)">Status</th>
                   <th class="border-b px-1.5 py-1 text-left font-semibold">Localização</th>
-                  <template v-if="ehProprio">
+                  <template v-if="ehAmazonTab">
                     <th class="border-b px-1.5 py-1 text-center font-semibold" title="Previsão de entrega da transportadora (objeto de postagem do Bling)">Previsão</th>
                     <th class="border-b px-1.5 py-1 text-center font-semibold" title="Data máxima de entrega da Amazon — depois dela a Amazon reembolsa o cliente">Entregar até</th>
                   </template>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Status Bling</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Chamado</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Regra da aba Status para a combinação deste pedido">Regra</th>
-                  <th v-if="ehProprio" class="border-b px-1.5 py-1 text-center font-semibold" title="Suspensão da entrega no Melhor Envio (o pacote volta)">Suspensão</th>
+                  <th v-if="ehAmazonTab" class="border-b px-1.5 py-1 text-center font-semibold" title="Suspensão da entrega no Melhor Envio (o pacote volta)">Suspensão</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-if="loading && !rows.length">
-                  <td :colspan="ehProprio ? 12 : 9" class="py-8 text-center text-muted-foreground">
+                  <td :colspan="ehAmazonTab ? 13 : 9" class="py-8 text-center text-muted-foreground">
                     <RefreshCw class="mr-1.5 inline size-4 animate-spin" /> carregando…
                   </td>
                 </tr>
@@ -2846,6 +2851,15 @@ async function aplicarStatusBling(c: Logistica) {
                   @click="abrirRaio(c)"
                 >
                   <td class="px-1.5 py-1.5 text-center text-muted-foreground" :title="fmtDate(c.data)">{{ fmtDate(c.data).slice(0, 5) }}</td>
+                  <td v-if="ehAmazonTab" class="px-1.5 py-1.5 text-center">
+                    <span
+                      class="inline-block whitespace-nowrap rounded border px-1.5 py-px text-[10.5px] font-bold"
+                      :class="amazonSubDe(c) === 'proprio'
+                        ? 'border-teal-300 bg-teal-50 text-teal-800 dark:border-teal-700 dark:bg-teal-950/40 dark:text-teal-300'
+                        : 'border-slate-300 bg-slate-50 text-slate-700 dark:border-slate-600 dark:bg-slate-900/40 dark:text-slate-300'"
+                      :title="AMAZON_ENVIO_TITLE[amazonSubDe(c)]"
+                    >{{ AMAZON_ENVIO_LABEL[amazonSubDe(c)] }}</span>
+                  </td>
                   <td class="px-1.5 py-1.5 text-center">
                     <div class="font-mono font-bold">{{ c.pedido_bling || '—' }}</div>
                     <!-- Um clique seleciona o nº da plataforma pra copiar, sem abrir o Raio-X. -->
@@ -2895,14 +2909,14 @@ async function aplicarStatusBling(c: Logistica) {
                       :class="leituraVelha(c) ? 'text-amber-700 dark:text-amber-400' : 'text-muted-foreground'"
                     >{{ c.localizacao_at ? `Correios · lido ${fmtDesde(c.rastreio_lido_em || c.localizacao_at)}` : 'sem leitura dos Correios ainda' }}</div>
                   </td>
-                  <template v-if="ehProprio">
+                  <template v-if="ehAmazonTab">
                     <td class="px-1.5 py-1.5 text-center text-[11px]">
                       <span v-if="c.entregue_em" class="text-emerald-700 dark:text-emerald-400" :title="`Entrega registrada em ${fmtDataHora(c.entregue_em)}`">entregue {{ fmtQuando(c.entregue_em) }}</span>
-                      <span v-else-if="c.previsao_correios" :class="previsaoVencida(c) ? 'font-semibold text-rose-700 dark:text-rose-400' : ''">{{ fmtDia(c.previsao_correios).slice(0, 5) }}</span>
+                      <span v-else-if="ehEnvioProprio(c) && c.previsao_correios" :class="previsaoVencida(c) ? 'font-semibold text-rose-700 dark:text-rose-400' : ''">{{ fmtDia(c.previsao_correios).slice(0, 5) }}</span>
                       <span v-else class="text-muted-foreground">—</span>
                     </td>
                     <td class="px-1.5 py-1.5 text-center text-[11px]">
-                      <template v-if="c.prazo_entrega_amazon">
+                      <template v-if="ehEnvioProprio(c) && c.prazo_entrega_amazon">
                         <div :class="prazoVencido(c) ? 'font-semibold text-rose-700 dark:text-rose-400' : ''">{{ fmtDia(c.prazo_entrega_amazon).slice(0, 5) }}</div>
                         <div v-if="!c.entregue_em" class="text-[10px]" :class="prazoVencido(c) ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'">{{ prazoResumo(c) }}</div>
                       </template>
@@ -2927,7 +2941,7 @@ async function aplicarStatusBling(c: Logistica) {
                     <span v-else-if="c.acao_monitorar" class="rounded bg-blue-100 px-1.5 py-0.5 text-[10.5px] font-semibold text-blue-800 dark:bg-blue-950/50 dark:text-blue-300">monitorar</span>
                     <span v-else class="text-muted-foreground">—</span>
                   </td>
-                  <td v-if="ehProprio" class="truncate px-1.5 py-1.5 text-center text-[11px]" :title="c.suspensao_detalhe || ''">
+                  <td v-if="ehAmazonTab" class="truncate px-1.5 py-1.5 text-center text-[11px]" :title="c.suspensao_detalhe || ''">
                     <span
                       v-if="suspensaoResumo(c)"
                       :class="c.suspensao_status === 'solicitada' ? 'text-emerald-700 dark:text-emerald-400' : c.suspensao_status === 'falhou' ? 'text-rose-700 dark:text-rose-400' : 'text-muted-foreground'"
@@ -2936,7 +2950,7 @@ async function aplicarStatusBling(c: Logistica) {
                   </td>
                 </tr>
                 <tr v-if="!loading && filteredRows.length === 0">
-                  <td :colspan="ehProprio ? 12 : 9" class="px-3 py-6 text-center text-muted-foreground">
+                  <td :colspan="ehAmazonTab ? 13 : 9" class="px-3 py-6 text-center text-muted-foreground">
                     {{ rows.length === 0 ? 'nenhum caso' : 'nenhum caso com esses filtros' }}
                   </td>
                 </tr>
@@ -3280,7 +3294,10 @@ async function aplicarStatusBling(c: Logistica) {
             </button>
           </div>
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-            <div><span class="text-muted-foreground">Data:</span> {{ fmtDate(c.data) }}</div>
+            <div>
+              <span class="text-muted-foreground">Data:</span> {{ fmtDate(c.data) }}
+              <span v-if="ehAmazonTab" class="text-muted-foreground" :title="AMAZON_ENVIO_TITLE[amazonSubDe(c)]"> · {{ AMAZON_ENVIO_LABEL[amazonSubDe(c)] }}</span>
+            </div>
             <div>
               <span class="text-muted-foreground">Rastreio:</span> {{ c.rastreio || '—' }}
               <span v-if="c.volta_rastreio" class="text-muted-foreground"> · volta: {{ c.volta_rastreio }}</span>
@@ -3325,7 +3342,7 @@ async function aplicarStatusBling(c: Logistica) {
               </div>
             </div>
             <div><span class="text-muted-foreground">Chamado:</span> {{ situacaoChamado(c) || '—' }}</div>
-            <template v-if="tab === 'amazon' && amazonSub === 'proprio'">
+            <template v-if="ehEnvioProprio(c)">
               <div>
                 <span class="text-muted-foreground">Previsão transportadora:</span>
                 <span v-if="c.entregue_em" class="text-emerald-700 dark:text-emerald-400">entregue {{ fmtQuando(c.entregue_em) }}</span>
@@ -3359,7 +3376,7 @@ async function aplicarStatusBling(c: Logistica) {
             </template>
           </div>
           <button
-            v-if="tab === 'amazon' && amazonSub === 'proprio' && podeSuspender(c)"
+            v-if="ehEnvioProprio(c) && podeSuspender(c)"
             class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded border border-rose-300 text-rose-700 hover:bg-rose-50 disabled:opacity-50 dark:border-rose-700 dark:text-rose-400"
             :disabled="suspendendo.has(c.id)"
             @click.stop="suspenderEntrega(c)"
