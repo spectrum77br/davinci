@@ -437,3 +437,38 @@ def resumo_atendimento(corpo: dict) -> dict:
     varrer(corpo, "", 0)
     simples = {k: _curto(v) for k, v in corpo.items() if not isinstance(v, (dict, list))}
     return {"campos_simples": simples, "forma": forma(corpo), "listas": listas}
+
+
+async def enviar_no_atendimento(
+    token: str,
+    ticket_id: str,
+    *,
+    order_id: str,
+    texto: str,
+    anexos: list[tuple[str, bytes, str]] | None = None,
+) -> tuple[int, dict]:
+    """Nossa mensagem num atendimento do ME — o mesmo que o botão Enviar da tela
+    (13/11, lido no JS do painel): `POST /api/v2/me/tickets/{id}` em multipart com
+    `_method=PUT`, `order_id`, `description` e `attachments[]`. Encerrar
+    (`/tickets/{id}/close`) NÃO existe aqui: fechar o atendimento é com gente."""
+    if not _TICKET_ID_OK.match(ticket_id or ""):
+        return 400, {"message": "id de atendimento inválido"}
+    # Tudo como parte do multipart (a tela manda FormData), não como formulário simples.
+    partes: list[tuple[str, tuple]] = [
+        ("_method", (None, "PUT")),
+        ("order_id", (None, str(order_id))),
+        ("description", (None, texto)),
+    ]
+    for nome, blob, ctype in anexos or []:
+        partes.append(("attachments[]", (nome, blob, ctype or "application/octet-stream")))
+    async with httpx.AsyncClient(timeout=60) as cli:
+        r = await cli.post(
+            f"{ME_BASE_PROD}/api/v2/me/tickets/{ticket_id}",
+            headers=_headers_leitura(token),
+            files=partes,
+        )
+    try:
+        corpo = r.json() if r.content else {}
+    except ValueError:
+        corpo = {"texto": r.text[:200]}
+    return r.status_code, corpo if isinstance(corpo, dict) else {"data": corpo}

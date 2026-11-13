@@ -1360,11 +1360,6 @@ async def replicar(
     despacha pelo canal do chamado (api → ML na hora; robo → fila; manual →
     só registro). Falha de envio não perde a mensagem: fica `falhou` + erro."""
     ch = await _get_da_equipe(session, user, chamado_id)
-    if ch.origem == "melhor_envio":
-        # 13/11 (passo 2): o atendimento do Melhor Envio só é LIDO; responder pelo
-        # DaVinci é o passo 3. Sem esta trava a réplica ficava "registrada" no
-        # histórico parecendo enviada, e o ME nunca recebia.
-        raise HTTPException(422, detail={"code": "melhor_envio_responder_no_site"})
     texto = (texto or "").strip()
     if not texto:
         raise HTTPException(422, detail={"code": "chamado_mensagem_vazia"})

@@ -11,12 +11,15 @@ dele em Envios › Atendimentos (ex.: AD952521063BR, "Falha na entrega"). A sond
 - a conversa: `GET /api/v2/me/tickets/{number}` → `interactions.comments[]`
   (`type_user` "Cliente" = nós; o resto é o atendente do ME).
 
-Este passo SÓ LÊ. Cada atendimento ATIVO vira uma linha (origem `melhor_envio`,
-plataforma "melhor envio", canal `manual`, ligada ao pedido do Bling) e a conversa
-cai no histórico. Responder pelo DaVinci é o passo 3: até lá a réplica é recusada
-com `melhor_envio_responder_no_site`. Canal `manual` deixa a linha fora do robô de
-tela, do cérebro e das varreduras de API do ML; quando o atendente do ME fala, a
-coluna Status vai pra Análise Humano (`chamados._robo_atende`).
+Cada atendimento ATIVO vira uma linha (origem `melhor_envio`, plataforma "melhor
+envio", canal `manual`, ligada ao pedido do Bling) e a conversa cai no histórico.
+Canal `manual` deixa a linha fora do robô de tela e das varreduras de API do ML;
+quando o atendente do ME fala, a coluna Status vai pra Análise Humano
+(`chamados._robo_atende`). A IA de Chamado ainda não pega estes casos (passo 4).
+
+Passo 3 (13/11): a réplica da aba vai pro atendimento no ME (`enviar`), pelo mesmo
+`POST /api/v2/me/tickets/{n}` do botão Enviar da tela. Quando a leitura seguinte
+traz a nossa fala de volta, ela não duplica (`_ja_gravada`, janela de 2 dias).
 
 Atendimento resolvido no ME põe o chamado em Encerrado (aguardando fechamento) —
 nenhum robô conclui (reforma de 19/09). Atendimento já resolvido que nunca entrou
@@ -35,7 +38,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Chamado, ChamadoMensagem
+from app.models import Chamado, ChamadoAnexo, ChamadoMensagem
 from app.services import chamados as chamados_svc
 from app.services import melhor_envio as me
 from app.services.devolucao_returns import iso_to_dt
@@ -46,8 +49,9 @@ logger = structlog.get_logger()
 ORIGEM = "melhor_envio"
 PLATAFORMA = "melhor envio"
 URL_ATENDIMENTOS = "https://melhorenvio.com.br/painel/meus-envios#atendimentos"
-# Réplica pela aba ainda não sai pro ME (passo 3); a tela traduz o código.
-ERRO_RESPONDER_NO_SITE = "melhor_envio_responder_no_site"
+# Erros do envio (a tela traduz os códigos; o resto vai cru, com o HTTP do ME).
+ERRO_SEM_TOKEN = "melhor_envio_sem_token"  # noqa: S105 — código de erro, não senha
+ERRO_ENCERRADO = "melhor_envio_atendimento_encerrado"
 MAX_PAGINAS = 10
 # Status do atendimento no ME que encerram o caso (comparados sem acento/caixa).
 _STATUS_FINAIS = ("resolvido", "fechado", "encerrado", "cancelado", "concluido", "finalizado")
@@ -84,6 +88,7 @@ class Fala:
     texto: str
     quando: datetime | None
     autor: str
+    base: str = ""  # o texto sem o "[N anexos no Melhor Envio]" (eco da réplica com foto)
 
 
 def fala_do_comentario(c: dict) -> Fala | None:
@@ -91,6 +96,7 @@ def fala_do_comentario(c: dict) -> Fala | None:
     bruto = str(c.get("description_html") or c.get("description") or "")
     # O ME embrulha a fala em <html><body> — sozinho, isso não é "HTML" pro limpar_html.
     texto = limpar_html(_INVOLUCRO.sub("", bruto)).strip()
+    base = texto
     anexos = c.get("attachments") if isinstance(c.get("attachments"), list) else []
     if anexos:
         n = len(anexos)
@@ -113,6 +119,7 @@ def fala_do_comentario(c: dict) -> Fala | None:
         texto=texto,
         quando=iso_to_dt(str(c.get("date_creation_raw") or "")) or None,
         autor=autor,
+        base=base,
     )
 
 
@@ -129,10 +136,11 @@ def dia_da_abertura(corpo: dict) -> date | None:
 
 
 async def _ja_gravada(session: AsyncSession, ch: Chamado, f: Fala) -> ChamadoMensagem | None:
+    textos = {f.texto, f.base} - {""} if f.direcao == "enviada" else {f.texto}
     q = select(ChamadoMensagem).where(
         ChamadoMensagem.chamado_id == ch.id,
         ChamadoMensagem.direcao == f.direcao,
-        ChamadoMensagem.texto == f.texto,
+        ChamadoMensagem.texto.in_(sorted(textos)),
     )
     if f.quando is not None:
         janela = _JANELA_NOSSA if f.direcao == "enviada" else _JANELA_DELES
@@ -338,3 +346,44 @@ async def sincronizar(session: AsyncSession) -> dict[str, Any]:
     resumo["me_em"] = datetime.now(UTC).isoformat()
     logger.info("chamados_melhor_envio_sync", **resumo)
     return resumo
+
+
+async def enviar(session: AsyncSession, ch: Chamado, msg: ChamadoMensagem) -> None:
+    """Réplica da aba → atendimento no Melhor Envio. Marca a mensagem `enviada` ou
+    `falhou` (+ `erro`); nunca levanta. Lê o atendimento antes: o envio precisa do
+    `order_id` do ME e atendimento já resolvido lá não recebe resposta daqui."""
+    msg.canal = "api"
+
+    def falhou(erro: str) -> None:
+        msg.status = "falhou"
+        msg.erro = erro[:300]
+        logger.warning("chamado_melhor_envio_envio_falhou", chamado_id=str(ch.id), erro=msg.erro)
+
+    token, _ = await me.token_do_painel(session)
+    if not token:
+        return falhou(ERRO_SEM_TOKEN)
+    numero = str(ch.origem_ref or ch.chamado or "")
+    http, corpo = await me.ler_atendimento(token, numero)
+    if http != 200:
+        return falhou(f"melhor_envio_{http}: {corpo.get('message') or 'não leu o atendimento'}")
+    if not ticket_ativo(corpo.get("status")):
+        return falhou(ERRO_ENCERRADO)
+    anexos = (
+        (await session.execute(select(ChamadoAnexo).where(ChamadoAnexo.mensagem_id == msg.id)))
+        .scalars()
+        .all()
+    )
+    http, resp = await me.enviar_no_atendimento(
+        token,
+        numero,
+        order_id=str(corpo.get("order_id") or ""),
+        texto=msg.texto,
+        anexos=[(a.filename, a.blob, a.content_type) for a in anexos],
+    )
+    if http // 100 != 2:
+        detalhe = resp.get("message") or resp.get("error") or resp.get("texto") or ""
+        return falhou(f"melhor_envio_{http}: {str(detalhe)[:200]}")
+    msg.status = "enviada"
+    msg.erro = None
+    msg.enviada_at = datetime.now(UTC)
+    logger.info("chamado_melhor_envio_enviada", chamado_id=str(ch.id), ticket=numero)

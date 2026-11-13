@@ -720,8 +720,9 @@ const ERROS: Record<string, string> = {
   // 19/09: a plataforma não liberava pela API e o robô assumiu por outro caminho (Seller Center)
   substituida_pelo_robo: 'o robô assumiu por outro caminho',
   chamado_instrucao_vazia: 'digite a instrução',
-  // 13/11: atendimento do Melhor Envio só é lido por enquanto.
-  melhor_envio_responder_no_site: 'por enquanto responda no site do Melhor Envio (Envios › Atendimentos) — a resposta aparece aqui na próxima leitura',
+  // 13/11: réplica do atendimento do Melhor Envio
+  melhor_envio_sem_token: 'sem o token do Melhor Envio no DaVinci (Conciliação › Amazon › Melhor Envio)',
+  melhor_envio_atendimento_encerrado: 'o atendimento já foi resolvido no Melhor Envio — abra outro no site, se precisar',
 }
 
 function apiError(e: any) {
@@ -2841,17 +2842,15 @@ async function confirmarExcluir() {
         <div v-else class="shrink-0 grid gap-4 border-t px-4 py-3 md:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
           <!-- coluna esquerda: réplica manual -->
           <div class="space-y-2 min-w-0">
-            <!-- 13/11: atendimento do Melhor Envio só é lido; a resposta pelo DaVinci vem depois. -->
-            <div v-if="hist.row.origem === 'melhor_envio'" class="text-xs font-medium text-amber-700 dark:text-amber-400">
-              Responda no site do Melhor Envio (Envios › Atendimentos) — a resposta aparece aqui na próxima leitura.
-            </div>
+            <!-- 13/11 (passo 3): a réplica do atendimento do Melhor Envio sai daqui pro ME. -->
+            <div v-if="hist.row.origem === 'melhor_envio'" class="text-xs font-medium truncate">Réplica <span class="text-muted-foreground font-normal">— vai para o atendimento <b>{{ hist.row.chamado }}</b> no Melhor Envio</span></div>
             <div v-else class="text-xs font-medium truncate">Réplica manual <span class="text-muted-foreground font-normal">— resposta à plataforma pelo canal <b>{{ hist.row.canal }}</b></span></div>
             <PopoverRoot :open="replicaBalao" @update:open="replicaBalao = $event">
               <PopoverTrigger as-child>
                 <button
                   id="replica-texto"
                   type="button"
-                  :disabled="!canEdit || hist.row.origem === 'melhor_envio'"
+                  :disabled="!canEdit"
                   class="flex h-9 w-full items-center truncate rounded-md border bg-background px-3 text-left text-sm hover:bg-muted/40 focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-60"
                   :title="hist.texto || 'clique pra escrever a réplica'"
                 >
@@ -2868,7 +2867,7 @@ async function confirmarExcluir() {
                   class="z-[70] w-[440px] max-w-[calc(100vw-16px)] rounded-md border bg-background p-2 shadow-lg"
                   @open-auto-focus="focarCaixa($event, replicaCaixa)"
                 >
-                  <div class="mb-1 text-[11px] font-medium text-muted-foreground">Réplica manual — canal {{ hist.row.canal }}</div>
+                  <div class="mb-1 text-[11px] font-medium text-muted-foreground">{{ hist.row.origem === 'melhor_envio' ? `Réplica — vai para o atendimento ${hist.row.chamado} no Melhor Envio` : `Réplica manual — canal ${hist.row.canal}` }}</div>
                   <textarea
                     ref="replicaCaixa"
                     v-model="hist.texto"

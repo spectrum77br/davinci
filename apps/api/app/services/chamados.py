@@ -1001,6 +1001,18 @@ async def enviar_mensagem(
     enviada_at nela. NÃO commita — o caller controla a transação. Nunca
     levanta: falha vira `status='falhou'` + `erro` (o histórico mostra)."""
     msg.canal = ch.canal
+    if ch.origem == "melhor_envio":
+        # 13/11 (passo 3): atendimento do Melhor Envio — a réplica vai pelo mesmo
+        # envio do botão da tela do ME (canal da linha é `manual`, por isso vem antes).
+        from app.services import chamados_melhor_envio  # lazy: ele importa este módulo
+
+        try:
+            await chamados_melhor_envio.enviar(session, ch, msg)
+        except Exception as e:  # noqa: BLE001
+            msg.status = "falhou"
+            msg.erro = str(e)[:300]
+            logger.warning("chamado_melhor_envio_envio_erro", chamado_id=str(ch.id), err=msg.erro)
+        return msg
     if ch.canal == "manual":
         msg.status = "registrada"
     elif ch.canal == "robo":

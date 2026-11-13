@@ -170,3 +170,41 @@ async def test_ler_atendimento_recusa_id_estranho_sem_rede():
     http, corpo = await ler_atendimento("tok", "../orders")
     assert http == 400
     assert "inválido" in corpo["message"]
+
+
+async def test_enviar_no_atendimento_manda_o_formulario_da_tela():
+    """Igual ao botão Enviar do painel do ME (13/11): multipart com _method=PUT,
+    order_id, description e attachments[]."""
+    import respx
+    from httpx import Response
+
+    from app.services.melhor_envio import enviar_no_atendimento
+
+    with respx.mock(assert_all_called=True) as rx:
+        rota = rx.post("https://melhorenvio.com.br/api/v2/me/tickets/2122992").mock(
+            return_value=Response(200, json={"ticket": {"number": 2122992}})
+        )
+        http, corpo = await enviar_no_atendimento(
+            "tok",
+            "2122992",
+            order_id="a2d0-ord",
+            texto="alguma novidade?",
+            anexos=[("foto.png", b"PNGDATA", "image/png")],
+        )
+    assert http == 200 and corpo["ticket"]["number"] == 2122992
+    req = rota.calls.last.request
+    assert req.headers["authorization"] == "Bearer tok"
+    assert req.headers["content-type"].startswith("multipart/form-data")
+    corpo_req = req.content.decode("latin-1")
+    campos = (("_method", "PUT"), ("order_id", "a2d0-ord"), ("description", "alguma novidade?"))
+    for campo, valor in campos:
+        assert f'name="{campo}"\r\n\r\n{valor}\r\n' in corpo_req
+    assert 'name="attachments[]"; filename="foto.png"' in corpo_req
+    assert "PNGDATA" in corpo_req
+
+
+async def test_enviar_no_atendimento_recusa_id_estranho_sem_rede():
+    from app.services.melhor_envio import enviar_no_atendimento
+
+    http, _ = await enviar_no_atendimento("tok", "1/close", order_id="x", texto="oi")
+    assert http == 400

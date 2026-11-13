@@ -8,7 +8,6 @@ o que a sonda de 13/11 leu com o token da Conciliação.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
-from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
@@ -72,10 +71,13 @@ def fake_me(monkeypatch):
             str(ATIVO): {
                 "number": ATIVO,
                 "status": "Em andamento",
+                "order_id": "a2d06455-ord",
                 "interactions": {"comments": list(CONVERSA)},
             },
         },
         "lidos": [],
+        "enviados": [],
+        "envio_http": 200,
     }
 
     async def _token(session):
@@ -90,7 +92,20 @@ def fake_me(monkeypatch):
         t = estado["tickets"].get(numero)
         return (200, t) if t else (404, {"message": "não achado"})
 
+    async def _enviar(token, numero, *, order_id, texto, anexos=None):
+        estado["enviados"].append(
+            {"numero": numero, "order_id": order_id, "texto": texto, "anexos": anexos or []}
+        )
+        if estado["envio_http"] != 200:
+            return estado["envio_http"], {"message": "This action is unauthorized."}
+        # o ME guarda a nossa fala na conversa (volta na leitura seguinte)
+        estado["tickets"][numero]["interactions"]["comments"].append(
+            _comentario(texto, "2026-11-13T12:30:00.000Z", nossa=True, anexos=len(anexos or []))
+        )
+        return 200, {"ticket": estado["tickets"][numero]}
+
     monkeypatch.setattr(me, "token_do_painel", _token)
+    monkeypatch.setattr(me, "enviar_no_atendimento", _enviar)
     monkeypatch.setattr(me, "ler_envios", _envios)
     monkeypatch.setattr(me, "ler_atendimento", _ticket)
     return estado
@@ -227,15 +242,64 @@ async def test_ia_de_chamado_nao_pega_atendimento_do_melhor_envio(db, fake_me):
     assert ch.id not in {c.id for c in rows}
 
 
-async def test_resposta_pela_aba_e_recusada_por_enquanto(client, make_user, auth_as, db):
+async def _replicar(client, ch: Chamado, texto: str, *, foto: bool = False):
+    files = {"files": ("foto.png", b"\x89PNG\r\n\x1a\nfake", "image/png")} if foto else None
+    return await client.post(f"/api/chamados/{ch.id}/mensagens", data={"texto": texto}, files=files)
+
+
+async def test_resposta_pela_aba_vai_pro_melhor_envio_e_nao_duplica(
+    client, make_user, auth_as, db, fake_me
+):
     auth_as(await make_user(permissions={"chamados": {"view": True, "edit": True}}))
-    ch = Chamado(id=uuid4(), origem=cme.ORIGEM, canal="manual", plataforma=cme.PLATAFORMA)
-    db.add(ch)
+    await cme.sincronizar(db)
     await db.commit()
-    r = await client.post(f"/api/chamados/{ch.id}/mensagens", data={"texto": "alguma novidade?"})
-    assert r.status_code == 422, r.text
-    assert r.json()["detail"]["code"] == "melhor_envio_responder_no_site"
-    assert await _falas(db, ch) == []
+    [ch] = await _chamados_me(db)
+
+    r = await _replicar(client, ch, "Bom dia, alguma novidade?", foto=True)
+    assert r.status_code == 201, r.text
+    assert r.json()["status"] == "enviada"
+    [env] = fake_me["enviados"]
+    assert (env["numero"], env["order_id"], env["texto"]) == (
+        str(ATIVO),
+        "a2d06455-ord",
+        "Bom dia, alguma novidade?",
+    )
+    assert [(nome, ctype) for nome, _blob, ctype in env["anexos"]] == [("foto.png", "image/png")]
+
+    # a leitura seguinte traz a nossa fala de volta (com o aviso do anexo): não duplica
+    r2 = await cme.sincronizar(db)
+    await db.commit()
+    assert r2["me_falas"] == 0
+    nossas = [m for m in await _falas(db, ch) if "alguma novidade" in m.texto]
+    assert len(nossas) == 1
+    assert nossas[0].canal == "api"
+
+
+async def test_resposta_recusada_pelo_me_fica_falhou(client, make_user, auth_as, db, fake_me):
+    auth_as(await make_user(permissions={"chamados": {"view": True, "edit": True}}))
+    await cme.sincronizar(db)
+    await db.commit()
+    [ch] = await _chamados_me(db)
+    fake_me["envio_http"] = 403
+
+    r = await _replicar(client, ch, "alguma novidade?")
+    assert r.status_code == 201, r.text
+    m = r.json()
+    assert m["status"] == "falhou"
+    assert m["erro"].startswith("melhor_envio_403: This action is unauthorized")
+
+
+async def test_atendimento_resolvido_nao_recebe_resposta(client, make_user, auth_as, db, fake_me):
+    auth_as(await make_user(permissions={"chamados": {"view": True, "edit": True}}))
+    await cme.sincronizar(db)
+    await db.commit()
+    [ch] = await _chamados_me(db)
+    fake_me["tickets"][str(ATIVO)]["status"] = "Resolvido"
+
+    r = await _replicar(client, ch, "alguma novidade?")
+    assert r.json()["status"] == "falhou"
+    assert r.json()["erro"] == cme.ERRO_ENCERRADO
+    assert fake_me["enviados"] == []
 
 
 async def test_nome_repetido_gravado_antes_se_ajeita_na_leitura(db, fake_me):
