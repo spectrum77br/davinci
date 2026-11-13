@@ -92,7 +92,7 @@ const ABAS: { value: Aba; label: string; icon: any }[] = [
   // "Precisa de ação" (`filtro=acao`). Um link antigo com `?tab=humano` abre a Caixa.
   { value: 'mail', label: 'E-mail', icon: Inbox },
   { value: 'lojas', label: 'Lojas e modo', icon: Store },
-  { value: 'manual', label: 'Manual da IA', icon: BookOpen },
+  { value: 'manual', label: 'Manual do agente', icon: BookOpen },
   { value: 'modelos', label: 'Respostas prontas', icon: MessageSquareText },
   { value: 'automaticas', label: 'Automáticas', icon: Bot },
   { value: 'metricas', label: 'Métricas', icon: BarChart3 },

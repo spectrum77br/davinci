@@ -714,6 +714,34 @@ async def test_regras_crud(client, make_user, auth_as, pessoa, manual_sem_confli
     assert (await client.get(f"{URL}/regras")).json() == {"regras": [], "conflitos": []}
 
 
+async def test_regras_dizem_quem_mexeu_por_ultimo(
+    client, db, make_user, auth_as, manual_sem_conflito
+):
+    """O Manual do agente (13/11/2026) mostra "editada por Fulano em 12/11": o nome de quem
+    criou ou mexeu por último (`atualizado_por`) vem no POST, no PATCH e no GET /regras."""
+    from app.models.atendimento import AtendimentoRegra
+
+    ana = await make_user(permissions=PODE_TUDO)
+    auth_as(ana)
+    criada = (
+        await client.post(f"{URL}/regras", json={"quando": "q", "faca": "f", "categoria": "outro"})
+    ).json()
+    assert criada["atualizado_por_nome"] == ana.email
+    bia = await make_user(permissions=PODE_TUDO)
+    auth_as(bia)
+    r = await client.patch(f"{URL}/regras/{criada['id']}", json={"faca": "outro texto"})
+    assert r.status_code == 200 and r.json()["atualizado_por_nome"] == bia.email
+    # A regra sem autor (o importador do manual base): sem nome.
+    db.add(AtendimentoRegra(quando="a", faca="b", categoria="rastreio"))
+    await db.commit()
+    lista = (await client.get(f"{URL}/regras")).json()["regras"]
+    assert [(x["id"] == criada["id"], x["atualizado_por_nome"]) for x in lista] == [
+        (True, bia.email),
+        (False, None),
+    ]
+    assert all(x["updated_at"] for x in lista)
+
+
 async def test_modelos_crud(client, make_user, auth_as, pessoa):
     geral = (
         await client.post(f"{URL}/modelos", json={"titulo": "Obrigado", "texto": "Obrigado!"})

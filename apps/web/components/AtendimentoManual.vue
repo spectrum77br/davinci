@@ -1,24 +1,21 @@
-<script setup lang="ts">
-// Aba "Manual da IA" do Atendimento (25/09/2026): as regras QUANDO → FAÇA que
-// a IA lê antes de sugerir cada resposta — as da plataforma/caixa da conversa
-// e as gerais (sem plataforma). Mesmo formato do manual da IA de Chamado
-// (ChamadosIa.vue): escrito como se fala com uma pessoa. Regra: a IA NUNCA
-// escreve as próprias regras — o manual só muda pela mão de alguém daqui;
-// "desativar" guarda a regra sem valer, "apagar" é para sempre.
+<script lang="ts">
+// Aba "Manual do agente" do Atendimento (13/11/2026; antes "Manual da IA", 25/09/2026). O
+// Eduardo: "essa parte aqui não é toda da IA? a gente nem usa mais, usa o agente". A IA antiga
+// não roda mais; o AGENTE lê ao vivo, pelo `consultar_manual`, as regras POR ASSUNTO
+// (`tipo = categoria`) — a política e os fatos de cada assunto, que valem ACIMA do banco de
+// respostas (o jeito de responder vem do banco: o que a equipe já respondeu). As regras de
+// SEGURANÇA e de ESTILO não chegam ao agente (o conteúdo delas está fixo no prompt dele,
+// apps/api/app/services/atendimento/agente/prompt.py): ficam no banco como estão — nada é
+// desativado nem apagado —, só fora da tela.
 //
-// Parte 2 (P7, 28/09/2026) — manual sem regra batendo com regra:
-// - a lista vem AGRUPADA na ordem em que a IA lê: Segurança (vale para toda
-//   mensagem, vem primeiro), Por assunto (só quando a mensagem é daquele
-//   assunto; separadas por assunto, "geral" primeiro) e Estilo (tom e
-//   assinatura, por último); dentro do grupo, pela prioridade (menor antes);
-// - duas regras de assunto ATIVAS para o mesmo assunto/plataforma/caixa se
-//   contradizem: as que já existem vêm em `conflitos` do GET /regras e ficam
-//   em vermelho, dizendo com qual regra batem; a API recusa criar ou ativar
-//   a segunda (409 `regra_conflitante`) e o formulário mostra qual é a outra;
-// - o formulário ganhou tipo, assunto (a lista oficial do GET /categorias) e
-//   prioridade (AtendimentoManualForm).
-// A tela NÃO calcula conflito por conta própria: quem decide o que é
-// conflito é o backend (a mesma regra que recusa o 409).
+// A tela, no padrão da aba do Banco: agrupada por assunto (na ordem do manual; a regra SEM
+// assunto, que o agente não lê, no fim e avisada), com a busca por texto, o filtro da
+// plataforma, as ativas e desativadas de cada assunto, o QUANDO/FAÇA legível — a marca
+// `precisa_humano=true` vira o selo "pessoa decide" (e `=false`, "agente responde") e as
+// lacunas ({numero_pedido}, {rastreio}…) viram chips; só na exibição, o texto salvo não muda —
+// e quem mexeu por último ("editada por Fulano em 12/11", o `atualizado_por_nome` do GET
+// /regras). Criar, editar, ativar/desativar e apagar continuam como antes; a API não deixa
+// nascer conflito (409 `regra_conflitante`) e a tela pinta o que já existe de vermelho.
 //
 // Fatos do agente (Claude, 20/10/2026, spec 5.2): abaixo do manual, a lista
 // mínima de aprovação de `atendimento_fatos` — o que o agente pode AFIRMAR ao
@@ -26,7 +23,112 @@
 // política) espera o admin; só o ativo vale. Quem lê vê (com a fonte e onde o
 // fato vale); só ADMIN aprova — com o texto corrigido antes, se quiser — ou
 // reprova, e os dois ficam com quem e quando (o backend recusa com 403).
-import { BadgeCheck, BookOpen, ExternalLink, Loader2, Palette, Pencil, Plus, RotateCcw, ShieldAlert, Tag, Trash2, TriangleAlert, X } from 'lucide-vue-next'
+import { LACUNAS, categoriaLabel, prioridadeDe, type Categoria, type Regra } from '~/components/AtendimentoPlataforma.vue'
+
+// A regra como o GET /regras manda (o conflito e quem mexeu por último).
+export type RegraDoManual = Regra & { em_conflito?: boolean; conflita_com?: string[]; atualizado_por_nome?: string | null }
+
+// Os pedaços do QUANDO/FAÇA para a tela: o texto, a lacuna que o agente preenche e a marca de
+// quem decide. Só a exibição: o texto salvo não muda.
+export type Pedaco = { tipo: 'texto' | 'lacuna' | 'pessoa' | 'agente'; valor: string; rotulo?: string }
+const RE_MARCAS = /\{([a-z_]+)\}|precisa_humano\s*=\s*(true|false)/gi
+export function rotuloDaLacuna(chave: string): string {
+  return LACUNAS.find((l) => l.chave === chave)?.label || chave.replace(/_/g, ' ')
+}
+export function pedacos(texto: string | null | undefined): Pedaco[] {
+  const t = String(texto ?? '')
+  const saida: Pedaco[] = []
+  let ultimo = 0
+  for (const m of t.matchAll(RE_MARCAS)) {
+    const i = m.index ?? 0
+    if (i > ultimo) saida.push({ tipo: 'texto', valor: t.slice(ultimo, i) })
+    if (m[1]) saida.push({ tipo: 'lacuna', valor: m[1], rotulo: rotuloDaLacuna(m[1]) })
+    else saida.push({ tipo: m[2].toLowerCase() === 'true' ? 'pessoa' : 'agente', valor: m[0] })
+    ultimo = i + m[0].length
+  }
+  if (ultimo < t.length) saida.push({ tipo: 'texto', valor: t.slice(ultimo) })
+  return saida
+}
+
+// "editada por Fulano em 12/11" (o dia de São Paulo); sem autor (o importador), só o dia.
+export function quemEditou(r: Pick<RegraDoManual, 'atualizado_por_nome' | 'updated_at'>): string {
+  const d = r.updated_at ? new Date(r.updated_at) : null
+  const dia = d && !Number.isNaN(d.getTime()) ? d.toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit' }) : ''
+  const nome = (r.atualizado_por_nome || '').trim()
+  if (nome) return dia ? `editada por ${nome} em ${dia}` : `editada por ${nome}`
+  return dia ? `editada em ${dia}` : ''
+}
+
+// A busca: todas as palavras, sem acento nem caixa, no QUANDO, no FAÇA e no assunto.
+export function semAcento(s: string | null | undefined): string {
+  return String(s ?? '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
+}
+export function bateComBusca(r: Pick<RegraDoManual, 'quando' | 'faca' | 'categoria'>, termo: string, nomeDoAssunto = ''): boolean {
+  const palavras = semAcento(termo).split(/\s+/).filter(Boolean)
+  if (!palavras.length) return true
+  const alvo = semAcento(`${r.quando} ${r.faca} ${nomeDoAssunto} ${r.categoria || ''}`)
+  return palavras.every((p) => alvo.includes(p))
+}
+
+// A ordem em que o agente lê as regras de um assunto (`ia.organizar_manual`): a menor
+// prioridade primeiro; a de todas as plataformas (e caixas) antes da específica.
+export function ordemDoAgente<T extends RegraDoManual>(lista: T[]): T[] {
+  return lista
+    .map((r, i) => ({ r, i }))
+    .sort((a, b) =>
+      prioridadeDe(a.r) - prioridadeDe(b.r)
+      || Number(!!a.r.plataforma) - Number(!!b.r.plataforma)
+      || (a.r.plataforma || '').localeCompare(b.r.plataforma || '')
+      || Number(!!a.r.canal) - Number(!!b.r.canal)
+      || (a.r.canal || '').localeCompare(b.r.canal || '')
+      || a.i - b.i)
+    .map((x) => x.r)
+}
+
+export type GrupoDoManual = {
+  chave: string
+  assunto: string | null
+  titulo: string
+  hint: string
+  // O assunto da regra saiu da lista do manual: o agente não o usa.
+  foraDaLista: boolean
+  regras: RegraDoManual[]
+  ativas: number
+  inativas: number
+}
+// Por assunto, na ordem do manual; a regra sem assunto (o agente não lê) no fim. As contagens
+// vêm de `todas` (sem o filtro da tela), as regras de `regras` (as que passam no filtro).
+export function agruparPorAssunto(regras: RegraDoManual[], categorias: Pick<Categoria, 'id' | 'nome' | 'descricao' | 'ordem'>[], todas: RegraDoManual[] = regras): GrupoDoManual[] {
+  const pos = new Map(categorias.map((c, i) => [c.id, c.ordem ?? i]))
+  const info = new Map(categorias.map((c) => [c.id, c]))
+  const por = new Map<string, RegraDoManual[]>()
+  for (const r of regras) por.set(r.categoria || '', [...(por.get(r.categoria || '') || []), r])
+  const conta = (k: string, ativa: boolean) => todas.filter((r) => (r.categoria || '') === k && r.ativa === ativa).length
+  return [...por.entries()]
+    .sort(([a], [b]) => {
+      if (!a || !b) return a ? -1 : b ? 1 : 0
+      const pa = pos.get(a) ?? Number.MAX_SAFE_INTEGER
+      const pb = pos.get(b) ?? Number.MAX_SAFE_INTEGER
+      return pa - pb || categoriaLabel(a).localeCompare(categoriaLabel(b), 'pt-BR')
+    })
+    .map(([k, lista]) => {
+      const c = k ? info.get(k) : undefined
+      return {
+        chave: k || '-',
+        assunto: k || null,
+        titulo: k ? c?.nome || categoriaLabel(k) : 'Sem assunto',
+        hint: (k && c?.descricao) || '',
+        foraDaLista: !!k && !c,
+        regras: ordemDoAgente(lista),
+        ativas: conta(k, true),
+        inativas: conta(k, false),
+      }
+    })
+}
+</script>
+
+<script setup lang="ts">
+import { BadgeCheck, BookOpen, ExternalLink, Loader2, Pencil, Plus, RotateCcw, Search, Trash2, TriangleAlert, X } from 'lucide-vue-next'
 import {
   CATEGORIAS,
   CATEGORIAS_SO_HUMANO,
@@ -36,10 +138,8 @@ import {
   FONTES_FATO,
   PLATAFORMAS_COM_CANAL,
   PRIORIDADE_PADRAO,
-  TIPOS_REGRA,
   alcanceDoFato,
   canalLabel,
-  categoriaLabel,
   categoriasDe,
   comoLista,
   comoObjeto,
@@ -47,14 +147,10 @@ import {
   estadoFatoInfo,
   fmtDataHora,
   plataformaInfo,
-  prioridadeDe,
   registrarCategorias,
   tipoRegraDe,
-  type Categoria,
   type EstadoFato,
   type Fato,
-  type Regra,
-  type TipoRegra,
 } from '~/components/AtendimentoPlataforma.vue'
 import type { ConflitoForm, FormRegra } from '~/components/AtendimentoManualForm.vue'
 
@@ -62,7 +158,7 @@ const props = defineProps<{ canEdit: boolean; canDelete: boolean }>()
 const { api } = useApi()
 const toasts = useToasts()
 
-const regras = ref<Regra[]>([])
+const regras = ref<RegraDoManual[]>([])
 // `conflitos` do GET /regras, cru (o formato é do backend; lido abaixo).
 const conflitosApi = ref<unknown>(null)
 const carregando = ref(false)
@@ -78,7 +174,7 @@ async function carregar(silencioso = false) {
   }
   try {
     const r = await api<unknown>('/api/atendimento/regras')
-    regras.value = comoLista<Regra>(r, 'regras')
+    regras.value = comoLista<RegraDoManual>(r, 'regras')
     conflitosApi.value = r && typeof r === 'object' && !Array.isArray(r) ? ((r as Record<string, unknown>).conflitos ?? null) : null
     erro.value = null
   } catch (e: any) {
@@ -108,7 +204,6 @@ onMounted(() => {
   void carregar()
   void carregarCategorias()
 })
-const infoCategoria = computed(() => new Map(categorias.value.map((c, i) => [c.id, { ...c, pos: c.ordem ?? i }])))
 
 // ─── conflitos ──────────────────────────────────────────────────────────────
 // O backend manda a lista de conflitos; cada item junta as regras que batem
@@ -145,7 +240,7 @@ const conflitos = computed(() => {
   const lista = conflitosApi.value
   if (Array.isArray(lista)) for (const item of lista) ligar(idsDoConflito(item))
   for (const r of regras.value) {
-    const extra = r as Regra & { conflita_com?: unknown; em_conflito?: unknown }
+    const extra = r as RegraDoManual & { em_conflito?: unknown }
     const outras = [...idsDe(r.conflitos), ...idsDe(extra.conflita_com)]
     if (outras.length || r.conflitos === true || extra.em_conflito === true) ligar([r.id, ...outras])
   }
@@ -154,72 +249,41 @@ const conflitos = computed(() => {
 function temConflito(id: string) {
   return conflitos.value.has(id)
 }
-const emConflito = computed(() => regras.value.filter((r) => temConflito(r.id)).length)
 
-// ─── agrupar na ordem em que a IA lê ────────────────────────────────────────
-const ICONE_TIPO: Record<TipoRegra, any> = { seguranca: ShieldAlert, categoria: Tag, estilo: Palette }
-type Grupo = { chave: string; titulo: string; hint: string; soHumano: boolean; regras: Regra[] }
-type Secao = { tipo: TipoRegra; label: string; hint: string; grupos: Grupo[]; total: number }
-
-// Prioridade menor antes; empate fica na ordem em que foram criadas (a API
-// manda por data de criação e o sort é estável).
-function ordenar(l: Regra[]): Regra[] {
-  return l.slice().sort((a, b) => prioridadeDe(a) - prioridadeDe(b))
+// ─── o manual do agente: só as regras por assunto ───────────────────────────
+// Segurança e estilo não chegam ao agente: ficam no banco, fora da tela.
+const doAgente = computed(() => regras.value.filter((r) => tipoRegraDe(r) === 'categoria'))
+const emConflito = computed(() => doAgente.value.filter((r) => temConflito(r.id)).length)
+function nomeDoAssunto(id: string | null | undefined): string {
+  if (!id) return 'Sem assunto'
+  return categorias.value.find((c) => c.id === id)?.nome || categoriaLabel(id)
 }
-function agrupar(lista: Regra[]): Secao[] {
-  return TIPOS_REGRA.map((t) => {
-    const doTipo = lista.filter((r) => tipoRegraDe(r) === t.value)
-    let grupos: Grupo[] = []
-    if (t.value === 'categoria') {
-      const porAssunto = new Map<string, Regra[]>()
-      for (const r of doTipo) {
-        const k = r.categoria || ''
-        porAssunto.set(k, [...(porAssunto.get(k) || []), r])
-      }
-      grupos = [...porAssunto.entries()]
-        .sort(([a], [b]) => {
-          // "geral" primeiro; depois a ordem do manual; assunto fora da lista no fim
-          if (!a) return -1
-          if (!b) return 1
-          const pa = infoCategoria.value.get(a)?.pos ?? Number.MAX_SAFE_INTEGER
-          const pb = infoCategoria.value.get(b)?.pos ?? Number.MAX_SAFE_INTEGER
-          return pa - pb || categoriaLabel(a).localeCompare(categoriaLabel(b), 'pt-BR')
-        })
-        .map(([k, l]) => {
-          const info = k ? infoCategoria.value.get(k) : undefined
-          return {
-            chave: `categoria:${k}`,
-            titulo: k ? (info?.nome || categoriaLabel(k)) : 'Geral — qualquer assunto',
-            hint: k ? (info?.descricao || '') : 'vale para toda mensagem, seja qual for o assunto',
-            soHumano: !!info?.so_humano,
-            regras: ordenar(l),
-          }
-        })
-    } else if (doTipo.length) {
-      grupos = [{ chave: t.value, titulo: '', hint: '', soHumano: false, regras: ordenar(doTipo) }]
-    }
-    return { tipo: t.value, label: t.label, hint: t.hint, grupos, total: doTipo.length }
-  })
-}
-
-// O nº de cada regra sai da lista INTEIRA (sem filtro): "bate com a #7" tem
-// de continuar certo com o filtro de plataforma ligado.
+// O nº de cada regra sai do manual INTEIRO (sem filtro): "bate com a #7" tem
+// de continuar certo com a busca ou o filtro de plataforma ligados.
 const numeros = computed(() => {
   const m = new Map<string, number>()
   let n = 0
-  for (const s of agrupar(regras.value)) for (const g of s.grupos) for (const r of g.regras) m.set(r.id, ++n)
+  for (const g of agruparPorAssunto(doAgente.value, categorias.value)) for (const r of g.regras) m.set(r.id, ++n)
   return m
 })
 
+const busca = ref('')
 const filtroPlataforma = ref('')
 const soConflitos = ref(false)
 const visiveis = computed(() =>
-  regras.value.filter((r) =>
+  doAgente.value.filter((r) =>
     (!filtroPlataforma.value || !r.plataforma || r.plataforma === filtroPlataforma.value)
-    && (!soConflitos.value || temConflito(r.id))),
+    && (!soConflitos.value || temConflito(r.id))
+    && bateComBusca(r, busca.value, nomeDoAssunto(r.categoria))),
 )
-const secoes = computed(() => agrupar(visiveis.value))
-const ativas = computed(() => regras.value.filter((r) => r.ativa).length)
+const grupos = computed(() => agruparPorAssunto(visiveis.value, categorias.value, doAgente.value))
+const ativas = computed(() => doAgente.value.filter((r) => r.ativa).length)
+const assuntosComRegra = computed(() => new Set(doAgente.value.filter((r) => r.ativa && r.categoria).map((r) => r.categoria)).size)
+function limparFiltros() {
+  busca.value = ''
+  filtroPlataforma.value = ''
+  soConflitos.value = false
+}
 watch(emConflito, (n) => {
   if (!n) soConflitos.value = false
 })
@@ -237,26 +301,28 @@ function outrasDoConflito(id: string): { id: string; numero: number | null; quan
   })
 }
 
-// ─── achar uma regra na lista (vindo do conflito) ───────────────────────────
+// ─── achar uma regra na lista (vindo do conflito ou da regra nova) ──────────
 const destacada = ref<string | null>(null)
 let tiraDestaque: ReturnType<typeof setTimeout> | null = null
 onBeforeUnmount(() => { if (tiraDestaque) clearTimeout(tiraDestaque) })
+function rolarAte(id: string) {
+  if (typeof document === 'undefined') return false
+  const el = document.getElementById(id)
+  if (!el) return false
+  let suave = true
+  try {
+    suave = !window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  } catch {
+    // sem matchMedia — rola suave
+  }
+  el.scrollIntoView({ block: 'center', behavior: suave ? 'smooth' : 'auto' })
+  return true
+}
 function verRegra(id: string) {
   // O filtro pode estar escondendo a outra regra: some com ele.
-  if (!visiveis.value.some((r) => r.id === id)) {
-    filtroPlataforma.value = ''
-    soConflitos.value = false
-  }
+  if (!visiveis.value.some((r) => r.id === id)) limparFiltros()
   void nextTick(() => {
-    const el = document.getElementById(`regra-${id}`)
-    if (!el) return
-    let suave = true
-    try {
-      suave = !window.matchMedia('(prefers-reduced-motion: reduce)').matches
-    } catch {
-      // sem matchMedia — rola suave
-    }
-    el.scrollIntoView({ block: 'center', behavior: suave ? 'smooth' : 'auto' })
+    if (!rolarAte(`regra-${id}`)) return
     destacada.value = id
     if (tiraDestaque) clearTimeout(tiraDestaque)
     tiraDestaque = setTimeout(() => { destacada.value = null }, 2500)
@@ -264,6 +330,7 @@ function verRegra(id: string) {
 }
 
 // ─── formulário (nova e edição) ─────────────────────────────────────────────
+// O tipo é sempre "por assunto": a tela só tem o que o agente lê.
 const vazio = (): FormRegra => ({ quando: '', faca: '', plataforma: '', canal: '', tipo: 'categoria', categoria: '', prioridade: PRIORIDADE_PADRAO })
 const nova = ref<FormRegra>(vazio())
 const novaAberta = ref(false)
@@ -275,6 +342,12 @@ const conflitoEdicao = ref<ConflitoForm | null>(null)
 watch(nova, () => { conflitoNova.value = null }, { deep: true })
 watch(edicao, () => { conflitoEdicao.value = null }, { deep: true })
 
+function abrirNova(assunto = '') {
+  nova.value = { ...vazio(), categoria: assunto }
+  conflitoNova.value = null
+  novaAberta.value = true
+  void nextTick(() => { rolarAte('nova-regra') })
+}
 function corpo(f: FormRegra) {
   return {
     quando: f.quando.trim(),
@@ -282,7 +355,6 @@ function corpo(f: FormRegra) {
     plataforma: f.plataforma || null,
     canal: (f.plataforma && f.canal) || null,
     tipo: f.tipo,
-    // Segurança e estilo valem para qualquer assunto.
     categoria: f.tipo === 'categoria' ? f.categoria || null : null,
     prioridade: Number.isFinite(f.prioridade) ? Math.round(f.prioridade) : PRIORIDADE_PADRAO,
   }
@@ -293,7 +365,7 @@ function corpo(f: FormRegra) {
 // sempre que ela vem no corpo e recusa assunto fora da lista (422
 // `categoria_invalida`) — corrigir só o texto do "Faça" obrigava a trocar o
 // assunto. Plataforma e caixa vão juntas (o backend confere o par), e tipo
-// e assunto também (mudar o tipo apaga o assunto).
+// e assunto também.
 type CorpoRegra = ReturnType<typeof corpo>
 function mudancas(f: FormRegra, r: Regra): Partial<CorpoRegra> {
   const novo = corpo(f)
@@ -328,7 +400,7 @@ function fecharNova() {
   novaAberta.value = false
 }
 
-function trocar(r: Regra) {
+function trocar(r: RegraDoManual) {
   const i = regras.value.findIndex((x) => x.id === r.id)
   if (i >= 0) regras.value[i] = r
 }
@@ -367,14 +439,15 @@ function conflitoDe(e: any, ignorar?: string | null): ConflitoForm | null {
 }
 
 async function criar() {
-  if (!nova.value.quando.trim() || !nova.value.faca.trim()) return
+  if (!nova.value.quando.trim() || !nova.value.faca.trim() || !nova.value.categoria) return
   salvando.value = true
   try {
-    const r = comoObjeto<Regra>(await api<unknown>('/api/atendimento/regras', { method: 'POST', body: corpo(nova.value) }), 'regra')
+    const r = comoObjeto<RegraDoManual>(await api<unknown>('/api/atendimento/regras', { method: 'POST', body: corpo(nova.value) }), 'regra')
     if (r) regras.value = [...regras.value, r]
     fecharNova()
-    toasts.success('Regra salva', 'A IA passa a seguir na próxima sugestão.')
+    toasts.success('Regra salva', 'O agente passa a seguir na próxima resposta.')
     await carregar(true)
+    if (r) verRegra(r.id)
   } catch (e: any) {
     const c = conflitoDe(e)
     if (c) conflitoNova.value = c
@@ -391,7 +464,7 @@ function editar(r: Regra) {
     faca: r.faca,
     plataforma: r.plataforma || '',
     canal: r.canal || '',
-    tipo: tipoRegraDe(r),
+    tipo: 'categoria',
     categoria: r.categoria || '',
     prioridade: prioridadeDe(r),
   }
@@ -415,7 +488,7 @@ async function salvarEdicao(r: Regra) {
   }
   salvando.value = true
   try {
-    const x = comoObjeto<Regra>(await api<unknown>(`/api/atendimento/regras/${encodeURIComponent(r.id)}`, { method: 'PATCH', body }), 'regra')
+    const x = comoObjeto<RegraDoManual>(await api<unknown>(`/api/atendimento/regras/${encodeURIComponent(r.id)}`, { method: 'PATCH', body }), 'regra')
     trocar(x ?? { ...r, ...body })
     editando.value = null
     await carregar(true)
@@ -430,7 +503,7 @@ async function salvarEdicao(r: Regra) {
 async function alternar(r: Regra) {
   salvando.value = true
   try {
-    const x = comoObjeto<Regra>(await api<unknown>(`/api/atendimento/regras/${encodeURIComponent(r.id)}`, { method: 'PATCH', body: { ativa: !r.ativa } }), 'regra')
+    const x = comoObjeto<RegraDoManual>(await api<unknown>(`/api/atendimento/regras/${encodeURIComponent(r.id)}`, { method: 'PATCH', body: { ativa: !r.ativa } }), 'regra')
     trocar(x ?? { ...r, ativa: !r.ativa })
     await carregar(true)
   } catch (e: any) {
@@ -448,6 +521,7 @@ async function alternar(r: Regra) {
     salvando.value = false
   }
 }
+
 // ─── fatos do agente: a lista de aprovação ──────────────────────────────────
 // Aprovar e reprovar só admin (o fato é o que o agente afirma, inclusive no
 // automático). `canEdit` já é "mexe e edita" (a fase de observação).
@@ -603,47 +677,50 @@ async function apagar(r: Regra) {
 </script>
 
 <template>
-  <section class="rounded-lg border bg-card">
-    <div class="flex flex-wrap items-center gap-2 border-b px-3 py-2">
-      <BookOpen class="size-4 text-muted-foreground" />
-      <h2 class="text-sm font-semibold">Manual da IA</h2>
-      <span class="text-xs text-muted-foreground">{{ ativas }} ativa(s) de {{ regras.length }}</span>
-      <div class="ml-auto flex items-center gap-2">
+  <section class="space-y-3" data-manual-agente>
+    <div class="flex flex-wrap items-center gap-2">
+      <h2 class="flex items-center gap-1.5 text-sm font-semibold"><BookOpen class="size-4 text-muted-foreground" /> Manual do agente</h2>
+      <span class="text-xs text-muted-foreground" data-contagem>{{ ativas }} regra{{ ativas === 1 ? '' : 's' }} ativa{{ ativas === 1 ? '' : 's' }} em {{ assuntosComRegra }} assunto{{ assuntosComRegra === 1 ? '' : 's' }}</span>
+      <div class="ml-auto flex flex-wrap items-center gap-2">
+        <div class="relative w-full sm:w-64">
+          <Search class="pointer-events-none absolute left-2 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+          <input v-model="busca" class="h-8 w-full rounded-md border bg-background pl-7 pr-2 text-xs" placeholder="buscar no manual…" aria-label="buscar nas regras" maxlength="200" />
+        </div>
         <select v-model="filtroPlataforma" class="h-8 rounded-md border bg-background px-2 text-xs" aria-label="filtrar por plataforma">
-          <option value="">todas as regras</option>
+          <option value="">todas as plataformas</option>
           <option v-for="p in PLATAFORMAS_COM_CANAL" :key="p.value" :value="p.value">valem para {{ p.nome }}</option>
         </select>
         <Button size="sm" variant="outline" class="h-8" :disabled="carregando" title="recarregar o manual" aria-label="recarregar o manual" @click="carregar()">
           <RotateCcw class="size-4" :class="{ 'animate-spin': carregando }" />
         </Button>
-        <Button v-if="props.canEdit && !novaAberta" size="sm" class="h-8" @click="novaAberta = true">
+        <Button v-if="props.canEdit && !novaAberta" size="sm" class="h-8" @click="abrirNova()">
           <Plus class="mr-1.5 size-4" /> nova regra
         </Button>
       </div>
     </div>
-    <p class="border-b px-3 py-2 text-xs text-muted-foreground">
-      A IA lê estas regras antes de cada sugestão, nesta ordem: <b>Segurança</b> (valem para toda mensagem), <b>Por assunto</b> (só quando a mensagem é
-      daquele assunto) e <b>Estilo</b> (tom e assinatura). Escreva como falaria com uma pessoa — <b>quando</b> acontecer isso, <b>faça</b> isso. Nada aqui
-      libera a IA a prometer prazo, valor, troca ou reembolso: isso continua indo para uma pessoa.
+    <p class="text-xs text-muted-foreground" data-explicacao>
+      O agente consulta estas regras antes de responder: são a política e os fatos de cada assunto. O jeito de responder vem do
+      <b>banco de respostas</b>, o que a equipe já respondeu. Quando os dois divergem, <b>vale a regra daqui</b>.
     </p>
 
     <!-- regras que já batem entre si -->
-    <div v-if="emConflito" class="flex flex-wrap items-center gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300" role="alert">
+    <div v-if="emConflito" class="flex flex-wrap items-center gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300" role="alert">
       <TriangleAlert class="size-4 shrink-0" />
       <span class="min-w-0 flex-1">
-        <b>{{ emConflito }} regra{{ emConflito > 1 ? 's' : '' }} em conflito</b> — regras de assunto ativas para o mesmo assunto, plataforma e caixa se
-        contradizem, e a IA não sabe qual seguir. Desative uma ou mude o assunto, a plataforma ou a caixa dela.
+        <b>{{ emConflito }} regra{{ emConflito > 1 ? 's' : '' }} em conflito</b> — regras ativas para o mesmo assunto, plataforma e caixa se
+        contradizem, e o agente não sabe qual seguir. Desative uma ou mude o assunto, a plataforma ou a caixa dela.
       </span>
       <button type="button" class="shrink-0 underline" :aria-pressed="soConflitos" @click="soConflitos = !soConflitos">
         {{ soConflitos ? 'mostrar todas' : 'mostrar só essas' }}
       </button>
     </div>
 
-    <div v-if="erro" class="m-3 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
+    <div v-if="erro" class="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-600 dark:text-red-400">
       {{ erro }} <button type="button" class="ml-2 text-xs underline" @click="carregar()">tentar de novo</button>
     </div>
 
-    <div v-if="novaAberta" class="border-b bg-muted/30 px-3 py-3">
+    <div v-if="novaAberta" id="nova-regra" class="rounded-lg border bg-card px-3 py-3" data-nova-regra>
+      <h3 class="mb-2 text-xs font-semibold">Nova regra</h3>
       <AtendimentoManualForm
         v-model="nova"
         :categorias="categorias"
@@ -656,111 +733,115 @@ async function apagar(r: Regra) {
       />
     </div>
 
-    <div v-if="carregando && !regras.length" class="px-3 py-6 text-center text-sm text-muted-foreground">
-      <Loader2 class="mr-1.5 inline size-4 animate-spin" />carregando…
+    <div v-if="carregando && !regras.length" class="flex items-center gap-2 text-sm text-muted-foreground"><Loader2 class="size-4 animate-spin" /> carregando…</div>
+    <div v-else-if="!doAgente.length && !novaAberta && !erro" class="rounded-lg border bg-card px-3 py-8 text-center text-sm text-muted-foreground">
+      Nenhuma regra ainda. Comece pelo assunto que mais aparece (rastreio, nota fiscal, prazo de envio).
     </div>
-    <div v-else-if="!regras.length && !novaAberta && !erro" class="px-3 py-8 text-center text-sm text-muted-foreground">
-      Nenhuma regra ainda. Comece pela pergunta que mais aparece (rastreio, nota fiscal, prazo de envio).
-    </div>
-    <div v-else-if="!visiveis.length && regras.length" class="px-3 py-8 text-center text-sm text-muted-foreground">
-      Nenhuma regra vale para essa plataforma.
+    <div v-else-if="!visiveis.length && doAgente.length" class="rounded-lg border bg-card px-3 py-6 text-center text-sm text-muted-foreground">
+      Nenhuma regra com esse filtro. <button type="button" class="ml-1 underline" @click="limparFiltros()">limpar</button>
     </div>
 
-    <!-- por tipo (na ordem em que a IA lê) e, no "Por assunto", por assunto -->
-    <template v-if="visiveis.length">
-      <section v-for="s in secoes" :key="s.tipo" class="border-b last:border-b-0">
-        <header class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 bg-muted/40 px-3 py-1.5">
-          <component :is="ICONE_TIPO[s.tipo]" class="size-3.5 shrink-0 self-center text-muted-foreground" aria-hidden="true" />
-          <h3 class="text-xs font-semibold uppercase tracking-wide">{{ s.label }}</h3>
-          <span class="text-[11px] text-muted-foreground">{{ s.hint }}</span>
-          <span class="ml-auto text-[11px] tabular-nums text-muted-foreground">{{ s.total }}</span>
-        </header>
-        <p v-if="!s.grupos.length" class="px-3 py-2 text-xs text-muted-foreground">
-          {{ filtroPlataforma || soConflitos ? 'Nenhuma com esse filtro.' : 'Nenhuma regra deste tipo.' }}
-        </p>
-        <div v-for="g in s.grupos" :key="g.chave">
-          <div v-if="g.titulo" class="flex flex-wrap items-center gap-1.5 border-t px-3 pb-0.5 pt-2" :title="g.hint">
-            <span class="text-xs font-semibold">{{ g.titulo }}</span>
-            <span v-if="g.soHumano" class="rounded bg-amber-500/20 px-1.5 text-[10px] text-amber-800 dark:text-amber-300" title="assunto que nunca sai sozinho — a IA só sugere, uma pessoa responde">só pessoa</span>
-            <span v-if="g.hint" class="min-w-0 truncate text-[11px] text-muted-foreground">{{ g.hint }}</span>
-          </div>
-          <ol class="divide-y">
-            <li
-              v-for="r in g.regras"
-              :id="`regra-${r.id}`"
-              :key="r.id"
-              class="scroll-mt-20 px-3 py-2.5 transition-shadow"
-              :class="[
-                r.ativa ? '' : 'opacity-60',
-                temConflito(r.id) ? 'border-l-2 border-l-red-500 bg-red-500/5' : '',
-                destacada === r.id ? 'ring-2 ring-inset ring-primary/70' : '',
-              ]"
-            >
-              <AtendimentoManualForm
-                v-if="editando === r.id"
-                v-model="edicao"
-                edicao
-                :categorias="categorias"
-                :salvando="salvando"
-                :conflito="conflitoEdicao"
-                @salvar="salvarEdicao(r)"
-                @cancelar="editando = null"
-                @ver-regra="verRegra"
-                @editar-regra="editarPorId"
-              />
-              <!-- Nº + texto de um lado, selos e botões do outro. Os dois só
-                   dividem a linha quando sobram 18rem para o nº + texto; em
-                   espaço curto (celular, tablet com o menu aberto) os selos
-                   descem para baixo do texto. O `flex-wrap` mede o espaço do
-                   CARD, não a largura da tela (o menu lateral e o padding
-                   comem boa parte dela) — breakpoint `sm:` não resolveria. -->
-              <div v-else class="flex flex-wrap items-start gap-x-3 gap-y-1.5">
-                <div class="flex min-w-0 grow basis-72 items-start gap-3">
-                  <span class="mt-0.5 w-6 shrink-0 text-right text-xs font-semibold tabular-nums" :class="temConflito(r.id) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">#{{ numeros.get(r.id) }}</span>
-                  <div class="min-w-0 flex-1 space-y-1">
-                    <div class="grid gap-1 lg:grid-cols-2 lg:gap-4">
-                      <div class="whitespace-pre-line text-sm"><span class="text-[11px] font-semibold uppercase text-muted-foreground">Quando </span>{{ r.quando }}</div>
-                      <div class="whitespace-pre-line text-sm"><span class="text-[11px] font-semibold uppercase text-muted-foreground">Faça </span>{{ r.faca }}</div>
-                    </div>
-                    <!-- com qual regra esta bate -->
-                    <div v-if="temConflito(r.id)" class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-red-700 dark:text-red-300">
-                      <TriangleAlert class="size-3.5 shrink-0" />
-                      <span class="font-medium">Em conflito</span>
-                      <template v-if="outrasDoConflito(r.id).length">
-                        <span>com</span>
-                        <button
-                          v-for="o in outrasDoConflito(r.id)"
-                          :key="o.id"
-                          type="button"
-                          class="max-w-[280px] truncate underline"
-                          :title="`Quando: ${o.quando}`"
-                          @click="verRegra(o.id)"
-                        >{{ o.numero ? `#${o.numero}` : 'outra regra' }} ({{ o.quando }})</button>
-                      </template>
-                      <span class="text-red-700/80 dark:text-red-300/80">— a IA não sabe qual seguir; desative uma ou mude o assunto/loja/caixa.</span>
-                    </div>
-                  </div>
+    <!-- por assunto, na ordem do manual; dentro, na ordem em que o agente lê -->
+    <div v-for="g in grupos" :key="g.chave" class="rounded-lg border bg-card" :data-assunto="g.chave">
+      <header class="flex flex-wrap items-center gap-x-2 gap-y-1 border-b px-3 py-2">
+        <h3 class="text-sm font-semibold">{{ g.titulo }}</h3>
+        <span class="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-800 dark:text-emerald-300" data-ativas>{{ g.ativas }} ativa{{ g.ativas === 1 ? '' : 's' }}</span>
+        <span v-if="g.inativas" class="rounded-full bg-gray-500/15 px-2 py-0.5 text-[11px] text-muted-foreground" data-inativas>{{ g.inativas }} desativada{{ g.inativas === 1 ? '' : 's' }}</span>
+        <span v-if="!g.assunto" class="rounded-full bg-amber-500/20 px-2 py-0.5 text-[11px] text-amber-800 dark:text-amber-300" title="o agente só lê a regra do assunto da mensagem">o agente não lê</span>
+        <span v-else-if="g.foraDaLista" class="rounded-full bg-amber-500/20 px-2 py-0.5 text-[11px] text-amber-800 dark:text-amber-300" title="o assunto saiu da lista do manual: o agente não o usa">assunto fora da lista</span>
+        <span v-if="g.hint" class="min-w-0 basis-full text-[11px] text-muted-foreground sm:basis-auto sm:flex-1 sm:truncate" :title="g.hint">{{ g.hint }}</span>
+        <Button v-if="props.canEdit && g.assunto && !g.foraDaLista" size="sm" variant="ghost" class="ml-auto h-7 px-2 text-xs" :title="`nova regra em ${g.titulo}`" @click="abrirNova(g.assunto)">
+          <Plus class="mr-1 size-3.5" /> regra
+        </Button>
+      </header>
+      <p v-if="!g.assunto" class="border-b bg-amber-500/5 px-3 py-1.5 text-[11px] text-amber-800 dark:text-amber-300">
+        O agente só lê a regra do assunto da mensagem: edite e escolha o assunto para estas valerem.
+      </p>
+      <ol class="divide-y">
+        <li
+          v-for="r in g.regras"
+          :id="`regra-${r.id}`"
+          :key="r.id"
+          class="scroll-mt-20 px-3 py-2.5 transition-shadow"
+          :class="[
+            r.ativa ? '' : 'opacity-60',
+            temConflito(r.id) ? 'border-l-2 border-l-red-500 bg-red-500/5' : '',
+            destacada === r.id ? 'ring-2 ring-inset ring-primary/70' : '',
+          ]"
+          :data-regra="r.id"
+        >
+          <AtendimentoManualForm
+            v-if="editando === r.id"
+            v-model="edicao"
+            edicao
+            :categorias="categorias"
+            :salvando="salvando"
+            :conflito="conflitoEdicao"
+            @salvar="salvarEdicao(r)"
+            @cancelar="editando = null"
+            @ver-regra="verRegra"
+            @editar-regra="editarPorId"
+          />
+          <div v-else class="flex flex-wrap items-start gap-x-3 gap-y-2">
+            <span class="mt-0.5 w-6 shrink-0 text-right text-xs font-semibold tabular-nums" :class="temConflito(r.id) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">#{{ numeros.get(r.id) }}</span>
+            <div class="min-w-0 grow basis-72 space-y-1.5">
+              <div class="grid gap-x-4 gap-y-1.5 lg:grid-cols-2">
+                <div class="min-w-0" data-quando>
+                  <div class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Quando</div>
+                  <p class="whitespace-pre-line break-words text-sm leading-relaxed">
+                    <template v-for="(p, k) in pedacos(r.quando)" :key="k">
+                      <span v-if="p.tipo === 'lacuna'" class="mx-0.5 inline-flex items-center rounded border border-sky-500/40 bg-sky-500/10 px-1 text-[11px] font-medium leading-5 text-sky-800 dark:text-sky-300" :title="`{${p.valor}}: o agente preenche com o dado do pedido`" data-lacuna>{{ p.rotulo }}</span>
+                      <span v-else-if="p.tipo === 'pessoa'" class="mx-0.5 inline-flex items-center rounded-full bg-amber-500/20 px-1.5 text-[11px] font-medium leading-5 text-amber-800 dark:text-amber-300" title="a regra pede que uma pessoa decida antes de a resposta sair" data-pessoa-decide>pessoa decide</span>
+                      <span v-else-if="p.tipo === 'agente'" class="mx-0.5 inline-flex items-center rounded-full bg-emerald-500/15 px-1.5 text-[11px] font-medium leading-5 text-emerald-800 dark:text-emerald-300" title="a regra deixa o agente responder sem uma pessoa" data-agente-responde>agente responde</span>
+                      <template v-else>{{ p.valor }}</template>
+                    </template>
+                  </p>
                 </div>
-                <!-- sem `shrink-0`: sozinha na linha, a coluna encolhe e os selos quebram de linha -->
-                <div class="ml-auto flex max-w-full flex-col items-end gap-1">
-                  <div class="flex flex-wrap items-center justify-end gap-1">
-                    <span class="rounded-full bg-muted px-2 py-0.5 text-[11px]">{{ alcance(r) }}</span>
-                    <span class="rounded-full border px-2 py-0.5 text-[11px] tabular-nums text-muted-foreground" title="menor número = lida antes dentro do grupo">prioridade {{ prioridadeDe(r) }}</span>
-                    <span v-if="!r.ativa" class="rounded-full bg-gray-500/15 px-2 py-0.5 text-[11px] text-muted-foreground">desativada</span>
-                  </div>
-                  <div v-if="props.canEdit" class="flex items-center gap-0.5">
-                    <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" :disabled="salvando" @click="alternar(r)">{{ r.ativa ? 'desativar' : 'ativar' }}</Button>
-                    <Button size="sm" variant="ghost" class="h-7 px-2" title="editar" aria-label="editar a regra" @click="editar(r)"><Pencil class="size-3.5" /></Button>
-                    <Button v-if="props.canDelete" size="sm" variant="ghost" class="h-7 px-2 text-red-600" title="apagar" aria-label="apagar a regra" :disabled="salvando" @click="apagar(r)"><Trash2 class="size-3.5" /></Button>
-                  </div>
-                  <span v-if="r.updated_at" class="text-[10px] text-muted-foreground">{{ fmtDataHora(r.updated_at) }}</span>
+                <div class="min-w-0" data-faca>
+                  <div class="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Faça</div>
+                  <p class="whitespace-pre-line break-words text-sm leading-relaxed">
+                    <template v-for="(p, k) in pedacos(r.faca)" :key="k">
+                      <span v-if="p.tipo === 'lacuna'" class="mx-0.5 inline-flex items-center rounded border border-sky-500/40 bg-sky-500/10 px-1 text-[11px] font-medium leading-5 text-sky-800 dark:text-sky-300" :title="`{${p.valor}}: o agente preenche com o dado do pedido`" data-lacuna>{{ p.rotulo }}</span>
+                      <span v-else-if="p.tipo === 'pessoa'" class="mx-0.5 inline-flex items-center rounded-full bg-amber-500/20 px-1.5 text-[11px] font-medium leading-5 text-amber-800 dark:text-amber-300" title="a regra pede que uma pessoa decida antes de a resposta sair" data-pessoa-decide>pessoa decide</span>
+                      <span v-else-if="p.tipo === 'agente'" class="mx-0.5 inline-flex items-center rounded-full bg-emerald-500/15 px-1.5 text-[11px] font-medium leading-5 text-emerald-800 dark:text-emerald-300" title="a regra deixa o agente responder sem uma pessoa" data-agente-responde>agente responde</span>
+                      <template v-else>{{ p.valor }}</template>
+                    </template>
+                  </p>
                 </div>
               </div>
-            </li>
-          </ol>
-        </div>
-      </section>
-    </template>
+              <!-- com qual regra esta bate -->
+              <div v-if="temConflito(r.id)" class="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-red-700 dark:text-red-300">
+                <TriangleAlert class="size-3.5 shrink-0" />
+                <span class="font-medium">Em conflito</span>
+                <template v-if="outrasDoConflito(r.id).length">
+                  <span>com</span>
+                  <button
+                    v-for="o in outrasDoConflito(r.id)"
+                    :key="o.id"
+                    type="button"
+                    class="max-w-[280px] truncate underline"
+                    :title="`Quando: ${o.quando}`"
+                    @click="verRegra(o.id)"
+                  >{{ o.numero ? `#${o.numero}` : 'outra regra' }} ({{ o.quando }})</button>
+                </template>
+                <span class="text-red-700/80 dark:text-red-300/80">— o agente não sabe qual seguir; desative uma ou mude o assunto/loja/caixa.</span>
+              </div>
+              <div class="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                <span class="rounded-full bg-muted px-2 py-0.5 text-foreground">{{ alcance(r) }}</span>
+                <span v-if="prioridadeDe(r) !== PRIORIDADE_PADRAO" class="rounded-full border px-2 py-0.5 tabular-nums" title="menor número = o agente lê antes, dentro do assunto">prioridade {{ prioridadeDe(r) }}</span>
+                <span v-if="!r.ativa" class="rounded-full bg-gray-500/15 px-2 py-0.5">desativada</span>
+                <span v-if="quemEditou(r)" :title="fmtDataHora(r.updated_at)" data-quem-editou>{{ quemEditou(r) }}</span>
+              </div>
+            </div>
+            <div v-if="props.canEdit" class="ml-auto flex items-center gap-0.5">
+              <Button size="sm" variant="ghost" class="h-7 px-2 text-xs" :disabled="salvando" @click="alternar(r)">{{ r.ativa ? 'desativar' : 'ativar' }}</Button>
+              <Button size="sm" variant="ghost" class="h-7 px-2" title="editar" aria-label="editar a regra" @click="editar(r)"><Pencil class="size-3.5" /></Button>
+              <Button v-if="props.canDelete" size="sm" variant="ghost" class="h-7 px-2 text-red-600" title="apagar" aria-label="apagar a regra" :disabled="salvando" @click="apagar(r)"><Trash2 class="size-3.5" /></Button>
+            </div>
+          </div>
+        </li>
+      </ol>
+    </div>
   </section>
 
   <!-- Fatos do agente (Claude): o que ele pode afirmar — a lista de aprovação -->

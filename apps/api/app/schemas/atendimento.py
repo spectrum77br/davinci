@@ -941,6 +941,9 @@ class RegraOut(BaseModel):
     categoria: str | None = None
     prioridade: int = PRIORIDADE_REGRA_PADRAO
     updated_at: datetime | None = None
+    # Quem mexeu por último (o nome de `atualizado_por`; a tela do Manual do agente mostra
+    # "editada por Fulano em 12/11"). None = regra sem autor (o importador do manual base).
+    atualizado_por_nome: str | None = None
     # As regras ATIVAS com que esta bate (mesmo assunto, plataforma e canal)
     # — a tela pinta de vermelho (GET /regras e a resposta do PATCH). Vêm de
     # antes da trava (manual importado, regra criada antes da parte 2): a

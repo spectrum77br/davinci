@@ -5492,8 +5492,14 @@ async def _conflitos_atuais(session: AsyncSession, r: AtendimentoRegra) -> set[s
     return ids or None
 
 
-def _regra_out(r: AtendimentoRegra, *, conflita_com: set[str] | None = None) -> RegraOut:
-    """`conflita_com=None` = não está em conflito; conjunto (até vazio) = está."""
+def _regra_out(
+    r: AtendimentoRegra,
+    *,
+    conflita_com: set[str] | None = None,
+    nomes: dict[UUID, str | None] | None = None,
+) -> RegraOut:
+    """`conflita_com=None` = não está em conflito; conjunto (até vazio) = está. `nomes` =
+    `users.id → nome`, para dizer quem mexeu por último (`atualizado_por`)."""
     return RegraOut(
         id=r.id,
         quando=r.quando,
@@ -5505,6 +5511,7 @@ def _regra_out(r: AtendimentoRegra, *, conflita_com: set[str] | None = None) -> 
         categoria=r.categoria,
         prioridade=r.prioridade if r.prioridade is not None else PRIORIDADE_REGRA_PADRAO,
         updated_at=_utc(r.updated_at),
+        atualizado_por_nome=(nomes or {}).get(r.atualizado_por) if r.atualizado_por else None,
         em_conflito=conflita_com is not None,
         conflita_com=[UUID(i) for i in sorted(conflita_com or ())],
     )
@@ -5547,8 +5554,9 @@ async def listar_regras(
         ids = _ids_citados(conflito, conhecidos)
         for i in ids:
             vizinhos.setdefault(i, set()).update(ids - {i})
+    nomes = await _nomes(session, {r.atualizado_por for r in regras})
     return ListaRegrasOut(
-        regras=[_regra_out(r, conflita_com=vizinhos.get(str(r.id))) for r in regras],
+        regras=[_regra_out(r, conflita_com=vizinhos.get(str(r.id)), nomes=nomes) for r in regras],
         conflitos=jsonable_encoder(conflitos),
     )
 
@@ -5613,7 +5621,7 @@ async def criar_regra(
         categoria=r.categoria,
         user_id=str(user.id),
     )
-    return _regra_out(r)
+    return _regra_out(r, nomes={user.id: _nome(user)})
 
 
 @router.patch("/regras/{regra_id}", response_model=RegraOut)
@@ -5673,7 +5681,9 @@ async def editar_regra(
     r.atualizado_por = user.id
     await session.commit()
     await session.refresh(r)
-    return _regra_out(r, conflita_com=await _conflitos_atuais(session, r))
+    return _regra_out(
+        r, conflita_com=await _conflitos_atuais(session, r), nomes={user.id: _nome(user)}
+    )
 
 
 @router.delete("/regras/{regra_id}", status_code=status.HTTP_204_NO_CONTENT)

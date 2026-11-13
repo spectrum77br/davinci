@@ -1,9 +1,10 @@
 <script lang="ts">
 import type { TipoRegra } from '~/components/AtendimentoPlataforma.vue'
 
-// O formulário da regra (nova e edição usam o mesmo). `categoria` vazio =
-// geral; só vale para o tipo "Por assunto" (segurança e estilo valem para
-// toda mensagem).
+// O formulário da regra do Manual do agente (nova e edição usam o mesmo). Desde 13/11/2026 a
+// tela só mostra as regras POR ASSUNTO — as que o agente lê (`consultar_manual`): o tipo fica
+// fixo em `categoria` e não aparece. `categoria` vazio = sem assunto (o agente não lê); a regra
+// nova pede o assunto.
 export type FormRegra = {
   quando: string
   faca: string
@@ -23,17 +24,14 @@ export type ConflitoForm = {
 </script>
 
 <script setup lang="ts">
-// Formulário do Manual da IA (Atendimento, parte 2 — P7, 28/09/2026): além do
-// QUANDO → FAÇA e de onde vale (plataforma/caixa), o TIPO da regra
-// (segurança, por assunto, estilo), o ASSUNTO (a lista oficial do GET
-// /categorias) e a PRIORIDADE (menor vem antes). Duas regras de assunto
-// ativas para o mesmo assunto/plataforma/caixa se contradizem — a API recusa
-// a segunda (409 `regra_conflitante`) e o formulário mostra qual é a outra,
-// com o atalho para ela, em vez de um erro solto.
+// Formulário do Manual do agente (antes "Manual da IA", 28/09/2026): o QUANDO → FAÇA, o
+// ASSUNTO (a lista oficial do GET /categorias), onde vale (plataforma/caixa) e a PRIORIDADE
+// (menor = o agente lê antes, dentro do assunto). Duas regras ativas para o mesmo
+// assunto/plataforma/caixa se contradizem — a API recusa a segunda (409 `regra_conflitante`)
+// e o formulário mostra qual é a outra, com o atalho para ela, em vez de um erro solto.
 import { Check, Loader2, TriangleAlert, X } from 'lucide-vue-next'
 import {
   PLATAFORMAS_COM_CANAL,
-  TIPOS_REGRA,
   canaisDa,
   categoriaLabel,
   type Categoria,
@@ -54,13 +52,15 @@ const emit = defineEmits<{
 }>()
 const form = defineModel<FormRegra>({ required: true })
 
-const ok = computed(() => !!form.value.quando.trim() && !!form.value.faca.trim())
+// A regra nova precisa do assunto (sem ele, o agente não a lê); na edição, a que já não tinha
+// continua salvável (corrigir o texto não pode exigir escolher o assunto).
+const ok = computed(() => !!form.value.quando.trim() && !!form.value.faca.trim() && (!!form.value.categoria || !!props.edicao))
 
 function aoMudarPlataforma() {
   if (!canaisDa(form.value.plataforma).some((c) => c.value === form.value.canal)) form.value.canal = ''
 }
 // Assunto que não está mais na lista ativa (a regra antiga guardou um que
-// saiu do manual): continua como opção, senão o select mostraria "geral" e
+// saiu do manual): continua como opção, senão o select mostraria "sem assunto" e
 // salvar trocaria o assunto sem a pessoa ver. Sem mexer nele, o salvar nem
 // manda o assunto (o PATCH da edição leva só o que mudou — AtendimentoManual),
 // e a correção de texto passa mesmo com o assunto fora da lista.
@@ -70,11 +70,6 @@ const opcoesCategoria = computed(() => {
   if (atual && !lista.some((c) => c.id === atual)) return [...lista, { id: atual, nome: `${categoriaLabel(atual)} (fora da lista)`, so_humano: false }]
   return lista
 })
-// Segurança e estilo valem para qualquer assunto: o assunto escolhido antes
-// não pode ficar escondido no select desabilitado (e ir junto no salvar).
-watch(() => form.value.tipo, (t) => {
-  if (t !== 'categoria' && form.value.categoria) form.value.categoria = ''
-})
 function verOutra() {
   const id = props.conflito?.regra?.id
   if (id) emit('verRegra', id)
@@ -83,7 +78,6 @@ function editarOutra() {
   const id = props.conflito?.regra?.id
   if (id) emit('editarRegra', id)
 }
-const hintTipo = computed(() => TIPOS_REGRA.find((t) => t.value === form.value.tipo)?.hint || '')
 function aoMudarPrioridade(e: Event) {
   const n = Number.parseInt((e.target as HTMLInputElement).value, 10)
   form.value.prioridade = Number.isFinite(n) ? Math.min(9999, Math.max(0, n)) : 100
@@ -92,23 +86,12 @@ function aoMudarPrioridade(e: Event) {
 
 <template>
   <div class="space-y-2">
-    <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-[180px_220px_minmax(180px,1fr)_110px]">
-      <label class="block space-y-1">
-        <span class="block text-[11px] font-medium text-muted-foreground">Tipo</span>
-        <select v-model="form.tipo" class="h-9 w-full rounded-md border bg-background px-2 text-sm">
-          <option v-for="t in TIPOS_REGRA" :key="t.value" :value="t.value">{{ t.label }}</option>
-        </select>
-      </label>
+    <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_minmax(200px,1fr)_110px]">
       <label class="block space-y-1">
         <span class="block text-[11px] font-medium text-muted-foreground">Assunto</span>
-        <select
-          v-model="form.categoria"
-          class="h-9 w-full rounded-md border bg-background px-2 text-sm disabled:opacity-60"
-          :disabled="form.tipo !== 'categoria'"
-          :title="form.tipo !== 'categoria' ? 'regra de segurança e de estilo vale para qualquer assunto' : ''"
-        >
-          <option value="">{{ form.tipo === 'categoria' ? 'geral (qualquer assunto)' : 'qualquer assunto' }}</option>
-          <option v-for="c in opcoesCategoria" :key="c.id" :value="c.id">{{ c.nome }}{{ c.so_humano ? ' — só pessoa' : '' }}</option>
+        <select v-model="form.categoria" class="h-9 w-full rounded-md border bg-background px-2 text-sm" aria-label="assunto da regra" data-assunto-da-regra>
+          <option value="" :disabled="!edicao">{{ edicao ? 'sem assunto (o agente não lê)' : 'escolha o assunto…' }}</option>
+          <option v-for="c in opcoesCategoria" :key="c.id" :value="c.id">{{ c.nome }}</option>
         </select>
       </label>
       <div class="space-y-1">
@@ -125,7 +108,7 @@ function aoMudarPrioridade(e: Event) {
         </div>
       </div>
       <label class="block space-y-1">
-        <span class="block text-[11px] font-medium text-muted-foreground" title="a IA lê as regras de cada grupo da menor prioridade para a maior">Prioridade</span>
+        <span class="block text-[11px] font-medium text-muted-foreground" title="dentro do assunto, o agente lê primeiro a de menor número">Prioridade</span>
         <input
           type="number"
           min="0"
@@ -134,12 +117,11 @@ function aoMudarPrioridade(e: Event) {
           inputmode="numeric"
           class="h-9 w-full rounded-md border bg-background px-2 text-sm tabular-nums"
           :value="form.prioridade"
-          title="menor número = lida antes dentro do grupo (padrão 100)"
+          title="menor número = o agente lê antes, dentro do assunto (padrão 100)"
           @change="aoMudarPrioridade"
         />
       </label>
     </div>
-    <p v-if="hintTipo" class="text-[11px] text-muted-foreground">{{ hintTipo }}.</p>
 
     <div class="grid gap-2 lg:grid-cols-2">
       <label class="block space-y-1">
@@ -163,6 +145,10 @@ function aoMudarPrioridade(e: Event) {
         />
       </label>
     </div>
+    <p class="text-[11px] text-muted-foreground">
+      Escreva como falaria com uma pessoa. <code class="rounded bg-muted px-1">{numero_pedido}</code>, <code class="rounded bg-muted px-1">{rastreio}</code> e as outras
+      lacunas o agente preenche com o dado do pedido.
+    </p>
 
     <!-- 409 regra_conflitante: qual é a outra regra, e o atalho para ela -->
     <div v-if="conflito" class="space-y-1 rounded-md border border-red-500/50 bg-red-500/10 px-2.5 py-2 text-xs text-red-700 dark:text-red-300" role="alert">
@@ -171,7 +157,7 @@ function aoMudarPrioridade(e: Event) {
         <span>{{ conflito.texto }}</span>
       </div>
       <div class="pl-5">
-        Duas regras de assunto ativas para o mesmo assunto, plataforma e caixa se contradizem (a IA não sabe qual seguir). Mude o assunto, a plataforma ou a caixa desta — ou desative a outra antes.
+        Duas regras ativas para o mesmo assunto, plataforma e caixa se contradizem (o agente não sabe qual seguir). Mude o assunto, a plataforma ou a caixa desta — ou desative a outra antes.
       </div>
       <div v-if="conflito.regra" class="rounded border border-red-500/30 bg-background/70 px-2 py-1 text-foreground">
         <span v-if="conflito.numero" class="mr-1 font-semibold tabular-nums text-red-700 dark:text-red-300">#{{ conflito.numero }}</span>
