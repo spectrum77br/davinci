@@ -1418,6 +1418,21 @@ def _do_assunto(regras: Iterable[Any], assunto: str) -> list[dict]:
     ]
 
 
+# O BANCO COMO FONTE (o Eduardo, 13/11/2026: "são +1 mês de respostas; o agente pensa
+# corretamente, é um Opus; a gente botou o banco inteiro"): com a régua e o banco ligados
+# (`ctx.banco_exigido`), a resposta que a equipe já deu ao MESMO assunto nesta loja/modelo
+# (os `par:b…` do pacote) vale como fonte, junto com o anúncio — o "precisa_humano=true" da
+# regra fica só para o que ninguém sabe (nem anúncio, nem ferramenta, nem banco) e para a
+# ação de pessoa na plataforma.
+BANCO_COMO_FONTE = (
+    "Decisão do dono: as respostas da equipe do banco no pacote (par:b…) do MESMO assunto "
+    "valem como fonte, junto com o anúncio e as ferramentas: se a equipe já respondeu isto "
+    "para esta loja ou modelo, responda como ela respondeu e cite o par:b. O 'precisa_humano' "
+    "desta regra vale só quando nem o anúncio, nem as ferramentas, nem as respostas da equipe "
+    "têm a informação, ou quando há uma ação de pessoa na plataforma."
+)
+
+
 # O que as decisões do dono mudaram na regra do manual base (revisão "furos"
 # de 20/10/2026; o "Manual v2" com `faca_agente` ainda não existe): sai junto
 # da regra do assunto, para o modelo não receber ordens que brigam. Vale por
@@ -1660,6 +1675,8 @@ async def dados_consultar_manual(
         checagens.tem_espera(r.get("faca")) for r in regras
     ):
         por_cima = f"{por_cima} {SEM_ESPERA_DA_REGRA}" if por_cima else SEM_ESPERA_DA_REGRA
+    if getattr(ctx, "banco_exigido", False):
+        por_cima = f"{por_cima} {BANCO_COMO_FONTE}" if por_cima else BANCO_COMO_FONTE
     if por_cima:
         dados["por_cima_da_regra"] = por_cima
     if len(regras) > 1:

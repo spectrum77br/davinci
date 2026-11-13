@@ -211,10 +211,22 @@ async def principal(
         action="store_true",
         help="o agente lê o banco de respostas (só neste processo; 13/11/2026)",
     )
+    p.add_argument(
+        "--virada",
+        action="store_true",
+        help=(
+            "as condições da virada (13/11/2026): lê o banco, a régua ligada medindo desde o "
+            "banco (o piso, o 'bateu com o banco' pelo sentido) — só neste processo"
+        ),
+    )
     args = p.parse_args(list(argv) if argv is not None else None)
-    if args.le_banco:
+    if args.le_banco or args.virada:
         # Só o processo do eval: o atendimento ao vivo segue com a chave da configuração.
         get_settings().atendimento_agente_le_banco = True
+    if args.virada:
+        s = get_settings()
+        s.atendimento_regua_ativa = True
+        s.atendimento_regua_desde = s.atendimento_regua_desde or "2026-11-13T13:49:00+00:00"
     legado = args.braco == BRACO_LEGADO
     extra: dict[str, Any] = {}
     if not legado:

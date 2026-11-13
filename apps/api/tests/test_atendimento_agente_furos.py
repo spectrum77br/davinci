@@ -1384,6 +1384,19 @@ async def test_consultar_manual_traz_a_decisao_do_dono(
     assert dados["por_cima_da_regra"] == ferramentas.POR_CIMA_DA_REGRA["garantia"]
     dados = await _chamar(ctx, base, conversa, "consultar_manual", assunto="outro", pergunta=None)
     assert "por_cima_da_regra" not in dados
+    # O banco como fonte (13/11/2026): com a régua e o banco ligados, a resposta da equipe do
+    # banco vale junto com o anúncio, e o "precisa_humano" da regra só sem informação nenhuma.
+    ctx = _ctx(conversa, base)  # um contexto novo: a consulta repetida volta curta
+    ctx.banco_exigido = True
+    dados = await _chamar(
+        ctx, base, conversa, "consultar_manual", assunto="garantia", pergunta=None
+    )
+    assert dados["por_cima_da_regra"] == (
+        f"{ferramentas.POR_CIMA_DA_REGRA['garantia']} {ferramentas.BANCO_COMO_FONTE}"
+    )
+    dados = await _chamar(ctx, base, conversa, "consultar_manual", assunto="outro", pergunta=None)
+    assert dados["por_cima_da_regra"] == ferramentas.BANCO_COMO_FONTE
+    assert not any(c.isdigit() for c in ferramentas.BANCO_COMO_FONTE)
 
 
 async def test_ver_garantia_depois_da_compra_marca_a_regra(
