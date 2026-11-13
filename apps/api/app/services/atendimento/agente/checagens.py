@@ -6302,9 +6302,21 @@ _DIZ_A_ORIGEM = re.compile(
 
 
 def _origem_provada(pedido: Mapping | None, ctx: ContextoAgente | None) -> bool:
-    """O bloco do pedido (ou um `ver_pedido`) traz a `origem` provada (fontes §2)?"""
+    """O bloco do pedido (ou um `ver_pedido`) traz a `origem` provada (fontes §2)? Na virada
+    (13/11/2026), também a resposta da equipe da MESMA loja no banco que o rascunho citou
+    ("enviamos de SP")."""
     if isinstance(pedido, Mapping) and pedido.get("origem"):
         return True
+    if ctx is not None and getattr(ctx, "banco_exigido", False):
+        from app.services.atendimento.agente import pares as pares_svc
+
+        for par in ctx.pares_citados(getattr(ctx, "evidencias", None) or []):
+            if (
+                str(par.get("id") or "").startswith(agente_ctx.PREFIXO_BANCO)
+                and par.get("mesma_loja")
+                and pares_svc._ORIGEM_NO_PAR.search(pares_svc._plano_simples(par.get("resposta")))
+            ):
+                return True
 
     def _tem(v: Any) -> bool:
         if isinstance(v, Mapping):

@@ -1338,6 +1338,7 @@ async def montar_pacote(
                     **{f["item_id"]: f.get("titulo") for f in fichas if f.get("titulo")},
                 },
                 limite=limite_equipe,
+                virada=banco,
             ),
             [],
             conversa.id,

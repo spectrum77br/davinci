@@ -416,7 +416,7 @@ async def test_o_rascunho_tambem_busca_no_banco(monkeypatch):
         {
             "id": "b77",
             "pergunta": "a loja fica onde?",
-            "resposta": "Enviamos de SP, com nota fiscal!",
+            "resposta": "Enviamos de São Paulo para todo o Brasil!",
             "tipo": "indefinido",
             "mesma_loja": True,
             **base,
@@ -424,7 +424,7 @@ async def test_o_rascunho_tambem_busca_no_banco(monkeypatch):
         {  # outra loja, e não é da ficha do produto: não entra
             "id": "b78",
             "pergunta": "a loja fica onde?",
-            "resposta": "Enviamos do Paraná, de outra loja!",
+            "resposta": "Enviamos do Paraná para todo o Brasil!",
             "tipo": "indefinido",
             "mesma_loja": False,
             **base,
@@ -453,3 +453,20 @@ async def test_o_rascunho_tambem_busca_no_banco(monkeypatch):
     assert ia.bateu_com_o_banco(ctx.para_fatos(), "prazo_antes_compra", "Enviamos de SP!")
     conteudo = str(cliente.pedidos[0]["messages"])
     assert "par:b77" in conteudo and "par:b78" not in conteudo
+
+
+def test_na_virada_a_origem_da_equipe_vai_ao_pacote_e_prova_a_origem():
+    """ "Essa empresa é de qual estado?": a equipe da MESMA loja responde "enviamos de SP" —
+    na virada essa resposta vai ao pacote e, citada, prova a origem."""
+    from app.services.atendimento.agente import pares as pares_svc
+
+    assert not pares_svc.serve_ao_pacote("Enviamos de SP para todo o Brasil!")
+    assert pares_svc.serve_ao_pacote("Enviamos de SP para todo o Brasil!", virada=True)
+    # A promessa continua fora, com ou sem a virada.
+    assert not pares_svc.serve_ao_pacote("Vamos verificar e enviaremos amanhã!", virada=True)
+    ctx = _ctx()
+    ctx.pares_do_pacote["par:b1"]["mesma_loja"] = True
+    ctx.evidencias = ["par:b1"]
+    assert checagens._origem_provada(None, ctx)
+    ctx.pares_do_pacote["par:b1"]["mesma_loja"] = False  # de outra loja não prova
+    assert not checagens._origem_provada(None, ctx)

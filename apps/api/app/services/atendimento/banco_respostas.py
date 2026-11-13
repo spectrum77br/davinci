@@ -981,6 +981,7 @@ async def exemplos_do_turno(
     as_of: datetime,
     titulos: Mapping[str, str | None] | None = None,
     limite: int = pares.MAX_PARES_PACOTE,
+    virada: bool = False,
 ) -> list[dict]:
     """O `pares.exemplos_do_turno` lendo o BANCO DE RESPOSTAS (a chave
     `atendimento_agente_le_banco`): o mesmo formato e as mesmas regras de lastro.
@@ -1024,7 +1025,12 @@ async def exemplos_do_turno(
     achados = [
         a
         for a in achados
-        if pares.serve_ao_pacote(a["resposta"]) and not pares.tem_mascara_de_dado(a["pergunta"])
+        if pares.serve_ao_pacote(a["resposta"], virada=virada)
+        and not pares.tem_mascara_de_dado(a["pergunta"])
+        # A origem do envio só da MESMA loja (cada loja sai de um lugar).
+        and (
+            a["mesma_loja"] or not pares._ORIGEM_NO_PAR.search(pares._plano_simples(a["resposta"]))
+        )
     ]
     if not achados or limite <= 0:
         return []

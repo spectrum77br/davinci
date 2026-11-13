@@ -1192,7 +1192,7 @@ _FORA_DA_REGUA_DO_AGENTE = re.compile(
     r"|(?:\b[a-z]\.+){3,}"
     # A origem do envio sem o dado, a culpa no transporte e o estoque afirmado (o
     # estoque é só o das variações do anúncio).
-    r"|\benviamos\s+(?:de|do|da)\b|\b(?:foi|feito)\s+no\s+transporte\b"
+    r"|\b(?:foi|feito)\s+no\s+transporte\b"
     r"|\b(?:temos|tem)\s+(?:sim\s+)?(?:no|em)\s+estoque\b|\b(?:temos|tem)\s+estoque\b"
     # Revisão do item 32 (22/10/2026): a chegada/reposição com data ou a caminho ("vai
     # chegar final de novembro", "ainda esta vindo", "logo vamos vender", "em breve") —
@@ -1212,6 +1212,10 @@ _FORA_DA_REGUA_DO_AGENTE = re.compile(
     r"|verificarei|verificaremos|providenciaremos|resolveremos|trocaremos|devolveremos)\b"
     r"|\bvamos\s+(?!la\b)[a-z]+"
 )
+# A origem do envio ("enviamos de SP"): fora do pacote, menos na VIRADA (13/11/2026, o Eduardo:
+# o banco é a fonte principal — "essa empresa é de qual estado?" se responde como a equipe da
+# MESMA loja respondeu; `checagens._origem_provada` aceita a resposta citada).
+_ORIGEM_NO_PAR = re.compile(r"\benviamos\s+(?:de|do|da)\b")
 # O cumprimento do começo da resposta ("bom dia tudo bem ?"): o agente não abre com ele.
 _CUMPRIMENTO_NO_COMECO = re.compile(
     r"^(?:\s*(?:bom\s+dia|boa\s+tarde|boa\s+noite|ol[aá]|oi)\b[\s,!.]*"
@@ -1239,9 +1243,15 @@ def so_de_um_pedido(texto: str | None) -> bool:
     )
 
 
-def serve_ao_pacote(resposta: str | None) -> bool:
+def _plano_simples(texto: str | None) -> str:
+    """O texto sem acento e em minúsculas, os espaços juntos (para as regex do par). PURA."""
+    return " ".join(validador.plano_de(sem_citacao(texto)).split())
+
+
+def serve_ao_pacote(resposta: str | None, *, virada: bool = False) -> bool:
     """O par vai ao pacote? Nem cumprimento, nem o que é de um pedido só, nem o que a
-    régua do agente proíbe, nem dado pessoal, nem cara de instrução. PURA."""
+    régua do agente proíbe, nem dado pessoal, nem cara de instrução. Na `virada`, a origem
+    do envio da equipe vai (`_ORIGEM_NO_PAR`). PURA."""
     texto = sem_citacao(resposta)
     if len(texto) < MIN_CHARS_RESPOSTA_PACOTE or so_cumprimento(texto) or so_de_um_pedido(texto):
         return False
@@ -1249,7 +1259,8 @@ def serve_ao_pacote(resposta: str | None) -> bool:
         return False
     if ensina_o_que_o_agente_nao_faz(texto):
         return False
-    if _FORA_DA_REGUA_DO_AGENTE.search(" ".join(validador.plano_de(texto).split())):
+    plano = " ".join(validador.plano_de(texto).split())
+    if _FORA_DA_REGUA_DO_AGENTE.search(plano) or (not virada and _ORIGEM_NO_PAR.search(plano)):
         return False
     return not ia._tem_injecao(texto, agente=True)
 
@@ -1448,6 +1459,7 @@ async def exemplos_do_turno(
     canal_no_automatico: bool,
     titulos: Mapping[str, str | None] | None = None,
     limite: int = MAX_PARES_PACOTE,
+    virada: bool = False,
 ) -> list[dict]:
     """Os pares para o PACOTE (ver acima), os mais úteis primeiro: o do mesmo anúncio
     ou produto, depois o da mesma loja, depois o resto (a ordem do `buscar` dentro).
@@ -1474,6 +1486,7 @@ async def exemplos_do_turno(
             as_of=as_of,
             titulos=titulos,
             limite=limite,
+            virada=virada,
         )
     consulta = " ".join(str(pergunta or "").split())[:MAX_CHARS_BUSCA_PACOTE]
     itens = [i for i in dict.fromkeys(str(x or "").strip() for x in item_ids) if i]

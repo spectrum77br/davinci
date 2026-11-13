@@ -206,7 +206,11 @@ async def _pelo_rascunho(
             continue
         if not a["mesma_loja"] and a["tipo"] not in banco_respostas.TIPOS_SO_DO_PRODUTO:
             continue
-        if not pares.serve_ao_pacote(a["resposta"]) or pares.tem_mascara_de_dado(a["pergunta"]):
+        if not pares.serve_ao_pacote(a["resposta"], virada=True) or pares.tem_mascara_de_dado(
+            a["pergunta"]
+        ):
+            continue
+        if not a["mesma_loja"] and pares._ORIGEM_NO_PAR.search(pares._plano_simples(a["resposta"])):
             continue
         novos.append(
             {
