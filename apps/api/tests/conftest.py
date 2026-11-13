@@ -486,6 +486,9 @@ _CLEANUP_TABLES = (
     # delas; os fatos (FK → integrations/products) e o instantâneo dos sites
     # da marca (sem FK) — os globais sobreviveriam entre os testes.
     "atendimento_pares",
+    # 0479: o banco de respostas (FK → conversas/integrations, SET NULL): sem a
+    # limpeza, a linha de um teste sobreviveria no seguinte.
+    "atendimento_respostas",
     "atendimento_agente_replay",
     "atendimento_fatos",
     "atendimento_site_produtos",

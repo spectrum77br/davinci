@@ -223,3 +223,47 @@ async def eventos(
         ignorados=resultado.ignorados,
         erros=resultado.erros,
     )
+
+
+# A cópia do banco de respostas para o Obsidian do Mac mini (13/11/2026). Quem busca é o
+# Mac (scripts/obsidian_copia.py, toda noite e ao ligar): o servidor nunca depende dele.
+CHAVE_ULTIMA_COPIA_OBSIDIAN = "atd:banco_obsidian:ultima_copia"
+
+
+@router.get("/banco-obsidian", dependencies=[Depends(_robo_autorizado)])
+async def banco_obsidian(session: Annotated[AsyncSession, Depends(get_session)]) -> Response:
+    """O zip da pasta `DaVinci/` do cofre: as respostas ativas do banco, por tipo, loja e modelo.
+
+    Só leitura e só texto já mascarado (services/atendimento/banco_respostas.py). Grava no
+    Redis a hora da cópia (`atd:banco_obsidian:ultima_copia`): é por ela que se vê que o Mac
+    parou de copiar.
+    """
+    from datetime import UTC, datetime
+
+    from app.redis_client import redis
+    from app.services.atendimento import banco_obsidian as _obsidian
+    from app.services.atendimento import banco_respostas as _banco
+
+    agora = datetime.now(UTC)
+    respostas = await _banco.respostas_ativas(session)
+    conteudo = _obsidian.arquivos(
+        respostas,
+        contagens=await _banco.contagens_por_tipo(session, agora=agora),
+        no_automatico=await _obsidian.lojas_no_automatico(session),
+        agora=agora,
+    )
+    corpo = _obsidian.zip_de(conteudo)
+    try:
+        await redis.set(CHAVE_ULTIMA_COPIA_OBSIDIAN, agora.isoformat())
+    except Exception:  # noqa: BLE001
+        logger.warning("atendimento_banco_obsidian_redis_falhou")
+    logger.info("atendimento_banco_obsidian_copia", respostas=len(respostas), bytes=len(corpo))
+    return Response(
+        content=corpo,
+        media_type="application/zip",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": 'attachment; filename="davinci-respostas.zip"',
+            "X-Respostas": str(len(respostas)),
+        },
+    )

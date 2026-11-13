@@ -1364,6 +1364,13 @@ CONSULTA_DA_POLITICA_DE_ENTREGA = "prazo informado plataforma acesso transporte 
 MAX_PARES_DA_POLITICA = 2
 
 
+def _le_o_banco() -> bool:
+    """O agente lê o banco de respostas (`atendimento_agente_le_banco`, 13/11/2026)?"""
+    from app.config import get_settings
+
+    return bool(getattr(get_settings(), "atendimento_agente_le_banco", False))
+
+
 def politica_da_entrega(resposta: str | None) -> bool:
     """A resposta da equipe é a resposta-padrão da entrega (ver acima)? PURA (D3)."""
     return bool(_POLITICA_DA_ENTREGA.search(validador.plano_de(sem_citacao(resposta))))
@@ -1384,6 +1391,16 @@ async def exemplos_da_politica_de_entrega(
 
     if integration_id is None:
         return []
+    if _le_o_banco():
+        from app.services.atendimento import banco_respostas
+
+        return await banco_respostas.exemplos_da_politica_de_entrega(
+            session,
+            plataforma=plataforma,
+            integration_id=integration_id,
+            conversa_id=conversa_id,
+            as_of=as_of,
+        )
     achados = await buscar(
         session,
         pergunta=CONSULTA_DA_POLITICA_DE_ENTREGA,
@@ -1442,6 +1459,22 @@ async def exemplos_do_turno(
     from app.services.atendimento import ficha as ficha_svc
     from app.services.atendimento.agente import contexto as agente_ctx
 
+    if _le_o_banco():
+        # 13/11/2026: o banco de respostas (só o que PESSOA escreveu ou ajustou), com a busca
+        # por tipo, modelo e loja — services/atendimento/banco_respostas.py.
+        from app.services.atendimento import banco_respostas
+
+        return await banco_respostas.exemplos_do_turno(
+            session,
+            pergunta=pergunta,
+            plataforma=plataforma,
+            integration_id=integration_id,
+            item_ids=item_ids,
+            conversa_id=conversa_id,
+            as_of=as_of,
+            titulos=titulos,
+            limite=limite,
+        )
     consulta = " ".join(str(pergunta or "").split())[:MAX_CHARS_BUSCA_PACOTE]
     itens = [i for i in dict.fromkeys(str(x or "").strip() for x in item_ids) if i]
     comum = {

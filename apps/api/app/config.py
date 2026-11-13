@@ -713,6 +713,14 @@ class Settings(BaseSettings):
     # O que sai sozinho também é do canal (`auto_categorias` e
     # `auto_orientacao`), não daqui.
     atendimento_agente_ativo: bool = True
+    # O banco de respostas (13/11/2026, services/atendimento/banco_respostas.py): o cron
+    # `atendimento_indexar_banco` (:38) enche `atendimento_respostas` com as respostas de
+    # PESSOA, mascaradas. Só dado: não muda o agente. Desligado = o cron sai na hora.
+    atendimento_banco_respostas_ativo: bool = True
+    # O agente LÊ o banco de respostas no lugar dos `atendimento_pares` (13/11/2026): os
+    # exemplos da equipe do pacote e da ferramenta vêm de `atendimento_respostas`. Desligado
+    # até o teste com o Eduardo (o eval liga só no processo dele: `rodar --le-banco`).
+    atendimento_agente_le_banco: bool = False
     atendimento_agente_api_key: str = ""
     # Item 5 da rodada "redondo" (23/10/2026, decisão do dono: "troca para o Sonnet";
     # eval cego de 23/10, 20 turnos reais da Shopee: o Sonnet 5.5 melhor em 9, o Haiku

@@ -1798,6 +1798,82 @@ class AtendimentoPar(Base, TimestampMixin):
     tsv: Mapped[str] = mapped_column(TSVECTOR, nullable=False)
 
 
+class AtendimentoResposta(Base, TimestampMixin):
+    """O BANCO DE RESPOSTAS (13/11/2026, migration 0479): pergunta do cliente × resposta de PESSOA.
+
+    O Eduardo: "no banco entra só as q a pessoa respondeu ou ajustou". Cada linha é
+    um turno do cliente e a resposta que uma pessoa ESCREVEU (no DaVinci, no Duoke ou
+    no Seller Center) ou AJUSTOU a partir do rascunho da IA. Nunca entra o que o
+    agente mandou sozinho nem o rascunho enviado sem mexer: esses só contam ponto na
+    régua do tipo. Assim o agente nunca aprende com ele mesmo.
+
+    Diferente de `atendimento_pares` (exemplo de TOM, 180 dias): aqui a resposta é
+    material de consulta do agente e da equipe, com o TIPO da pergunta (um dos
+    assuntos do agente), a loja, o anúncio e os modelos (`recursos_equipe.codigos_do`
+    no título do anúncio). Só a versão MASCARADA e GENERALIZADA é guardada
+    (`pares.generalizar`), e só se nem a pergunta nem a resposta tiverem cara de dado
+    pessoal ou de um pedido só (services/atendimento/banco_respostas.py). Por isso
+    não há prazo de retenção: não sobra dado de cliente.
+
+    `chave` é fixa (a conversa e a 1ª mensagem da resposta): é o `id` da nota no
+    Obsidian e o que a reimportação usa. `status`: ativa | substituida (uma mais
+    nova do mesmo caso a substituiu) | aposentada (a conversa deixou de render a
+    resposta, ex.: ganhou cara de instrução). Gravar aqui não muda o agente: quem
+    lê, por enquanto, é só a cópia do Obsidian.
+    """
+
+    __tablename__ = "atendimento_respostas"
+    __table_args__ = (
+        Index("ix_atendimento_respostas_tsv", "tsv", postgresql_using="gin"),
+        Index("ix_atendimento_respostas_tipo_plataforma", "tipo", "plataforma", "integration_id"),
+        Index("ix_atendimento_respostas_respondido_em", "respondido_em"),
+        Index("ix_atendimento_respostas_conversa_id", "conversa_id"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    chave: Mapped[str] = mapped_column(String(32), nullable=False, unique=True)
+    # SET NULL: apagar a conversa não apaga o que a equipe ensinou.
+    conversa_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_conversas.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # A 1ª mensagem da loja no turno (sem FK: a mensagem pode sumir com a conversa).
+    resposta_msg_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    canal: Mapped[str] = mapped_column(String(16), nullable=False)
+    integration_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # O nome da loja no momento (a conversa guarda o mesmo retrato).
+    loja: Mapped[str | None] = mapped_column(Text, nullable=True)
+    item_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    anuncio_titulo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Os códigos de modelo do título ("A17", "WP60", "P7"…): o mesmo modelo em vários anúncios.
+    modelos: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
+    # Um dos assuntos do agente (`atendimento_categorias.id`) ou "indefinido".
+    tipo: Mapped[str] = mapped_column(String(32), nullable=False)
+    pergunta: Mapped[str] = mapped_column(Text, nullable=False)
+    resposta: Mapped[str] = mapped_column(Text, nullable=False)
+    # equipe_fora (Duoke/Seller Center) | equipe_escreveu (DaVinci) |
+    # equipe_ajustou (rascunho editado pela pessoa)
+    fonte: Mapped[str] = mapped_column(String(24), nullable=False)
+    # ativa | substituida | aposentada
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="ativa", server_default=text("'ativa'")
+    )
+    substituida_por: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    perguntado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    respondido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # O que o cliente fez em até 72 h: resolveu | continuou | nao_resolveu | sem_retorno.
+    cliente_depois: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    tsv: Mapped[str] = mapped_column(TSVECTOR, nullable=False)
+
+
 class AtendimentoAgenteReplay(Base):
     """O que o agente TERIA feito num gatilho do dia (replay noturno, 20/10/2026).
 

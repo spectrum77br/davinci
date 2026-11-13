@@ -13,7 +13,9 @@ decisão 12). Nada é enviado nem vira rascunho; a sessão é só leitura.
   3. rodar     python -m scripts.agente_eval.rodar --amostra /tmp/agente_eval/amostra.jsonl \\
                  --saida /tmp/agente_eval --braco A2 [--teto-usd 2.0]
                um braço por vez: A1 (Haiku low), A2 (Haiku medium), A3 (Haiku high), S1
-               (Sonnet medium — o padrão ao vivo desde 23/10/2026); ablação:
+               (Sonnet medium — o padrão ao vivo desde 23/10/2026), O1 (Opus 5.5 medium,
+               13/11/2026); --le-banco: o agente lê o banco de respostas (só no
+               processo do eval; a chave ao vivo é `atendimento_agente_le_banco`); ablação:
                A2-sem-equipe, A2-sem-fatos, S1-sem-equipe, S1-sem-fatos. Grava
                resultados_<braço>.jsonl (mascarado) e RETOMA do que já está nele.
                --braco L0: a sugestão que o LEGADO escreveu para cada gatilho, lida
@@ -81,12 +83,16 @@ MODELO_SONNET = "claude-sonnet-5-5"
 # Item 5 da rodada "redondo" (23/10/2026): o padrão do agente virou o Sonnet 5.5 — os
 # braços A continuam o HAIKU (a comparação de antes), com o modelo explícito.
 MODELO_HAIKU = "claude-haiku-5-5"
+# 13/11/2026 (o Eduardo: "tem q ser um modelo bom"): o Opus 5.5 contra o Sonnet de hoje.
+MODELO_OPUS = "claude-opus-5-5"
 # O braço Sonnet custa ~10× o Haiku: o teto da CONVERSA dele é outro (a 1ª
 # requisição com o cache frio já passava dos US$ 0,05 do Haiku; revisão de
 # 20/10/2026). O replay/eval soma na chave PRÓPRIA da conversa
 # (`custo.CHAVE_CONVERSA_REPLAY`): os braços não comem o teto da conversa ao
 # vivo; o DIA é um só.
 TETO_CONVERSA_SONNET_USD = 0.5
+# O Opus 5.5 custa o dobro do Sonnet 5.5 (US$ 4/20 × 2/10 por milhão).
+TETO_CONVERSA_OPUS_USD = 1.0
 BRACOS: dict[str, dict[str, Any]] = {
     "A1": {"modelo": MODELO_HAIKU, "effort": "low"},
     "A2": {"modelo": MODELO_HAIKU, "effort": "medium"},
@@ -95,6 +101,11 @@ BRACOS: dict[str, dict[str, Any]] = {
         "modelo": MODELO_SONNET,
         "effort": "medium",
         "teto_conversa_usd": TETO_CONVERSA_SONNET_USD,
+    },
+    "O1": {
+        "modelo": MODELO_OPUS,
+        "effort": "medium",
+        "teto_conversa_usd": TETO_CONVERSA_OPUS_USD,
     },
 }
 # Ablações (spec 9.1): sem os exemplos da equipe; sem os fatos novos.
@@ -195,7 +206,15 @@ async def principal(
         help="simula o canal neste modo (padrão: o modo de hoje do canal)",
     )
     p.add_argument("--gravar", action="store_true", help="também em atendimento_agente_replay")
+    p.add_argument(
+        "--le-banco",
+        action="store_true",
+        help="o agente lê o banco de respostas (só neste processo; 13/11/2026)",
+    )
     args = p.parse_args(list(argv) if argv is not None else None)
+    if args.le_banco:
+        # Só o processo do eval: o atendimento ao vivo segue com a chave da configuração.
+        get_settings().atendimento_agente_le_banco = True
     legado = args.braco == BRACO_LEGADO
     extra: dict[str, Any] = {}
     if not legado:

@@ -1064,6 +1064,34 @@ _ATENDIMENTO_SITES_MARCA_HORA_UTC, _ATENDIMENTO_SITES_MARCA_MINUTO = 6, 36
 _ATENDIMENTO_REPLAY_HORA_UTC, _ATENDIMENTO_REPLAY_MINUTO = 5, 0
 
 
+# O banco de respostas (13/11/2026) de hora em hora no :38 — par, livre dos outros crons
+# do atendimento listados acima e entre :21 e :54, longe das janelas das postagens.
+_ATENDIMENTO_BANCO_MINUTOS = {38}
+
+
+async def atendimento_indexar_banco(ctx: dict) -> dict | None:
+    """De hora em hora (:38): o banco de respostas — o que PESSOA respondeu, por tipo de pergunta.
+
+    O Eduardo, 13/11/2026: "no banco entra só as q a pessoa respondeu ou ajustou"; o Postgres
+    é o banco vivo e o Obsidian do Mac mini, a cópia (services/atendimento/banco_respostas.py).
+    Só banco: lê as conversas desde o cursor e grava `atendimento_respostas` (mascarado). A
+    primeira carga (o histórico inteiro) cabe numa rodada; o que passar do teto de conversas
+    ou de tempo segue na próxima, do cursor. Não muda o agente.
+    """
+    if not _settings.atendimento_banco_respostas_ativo:
+        return None
+    from app.services.atendimento import banco_respostas as _banco
+
+    async with session_scope() as s:
+        try:
+            resumo = await _banco.indexar(s)
+        except Exception as e:  # noqa: BLE001
+            logger.error("atendimento_indexar_banco_falhou", err=type(e).__name__)
+            return None
+    logger.info("atendimento_indexar_banco_tick", **resumo)
+    return resumo
+
+
 async def atendimento_indexar_pares(ctx: dict) -> dict | None:
     """De hora em hora (:34): os pares pergunta × resposta da equipe (agente, 20/10/2026).
 
@@ -5636,6 +5664,7 @@ class WorkerSettings:
         # O agente (20/10/2026): aqui também para dar para enfileirar à mão.
         # O replay tenta uma vez só: cada tentativa chama o modelo (custo).
         func(atendimento_indexar_pares, timeout=600),
+        func(atendimento_indexar_banco, timeout=600),
         func(atendimento_sites_marca, timeout=300),
         func(atendimento_replay_agente, timeout=3600, max_tries=1),
         # Importação do histórico (28/09/2026): SÓ aqui, nunca em `cron_jobs` —
@@ -6073,6 +6102,14 @@ class WorkerSettings:
         cron(
             atendimento_indexar_pares,
             minute=_ATENDIMENTO_PARES_MINUTOS,
+            run_at_startup=False,
+            timeout=600,
+        ),
+        # O banco de respostas (13/11/2026): de hora em hora; a carga do histórico cabe
+        # numa rodada (teto de 40 mil conversas e 5 min; o que sobrar vai na próxima).
+        cron(
+            atendimento_indexar_banco,
+            minute=_ATENDIMENTO_BANCO_MINUTOS,
             run_at_startup=False,
             timeout=600,
         ),

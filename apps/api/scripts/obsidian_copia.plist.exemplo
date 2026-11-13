@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  LaunchAgent da cópia noturna do banco de respostas para o Obsidian (Mac mini, 13/11/2026).
+  Quem busca é o Mac: o DaVinci nunca chama o Mac nem depende dele ligado.
+
+  Antes de usar:
+    1. Troque os placeholders:
+         __HOME__  -> pasta do usuário   (ex.: /Users/thorfinn)
+         __URL__   -> o DaVinci          (ex.: https://app.hadken.com)
+         __COFRE__ -> o cofre do Obsidian (ex.: /Users/thorfinn/DaVinci-Atendimento)
+    2. O token é o MESMO do robô do Mac mini (ATENDIMENTO_ROBO_TOKEN), no arquivo só seu:
+         ~/.davinci/robo_atendimento.token  (chmod 600)
+    3. Copie o script para fora do clone (o clone é mexido por outras sessões):
+         cp apps/api/scripts/obsidian_copia.py ~/.davinci/obsidian_copia.py
+    4. Teste à mão:
+         /usr/bin/python3 ~/.davinci/obsidian_copia.py - -url __URL__ \
+           - -token-arquivo ~/.davinci/robo_atendimento.token - -cofre __COFRE__
+       (sem os espaços entre os hífens: comentário XML não aceita hífen duplo)
+    5. Instale:
+         cp obsidian_copia.plist.exemplo ~/Library/LaunchAgents/com.davinci.obsidian-copia.plist
+         launchctl load ~/Library/LaunchAgents/com.davinci.obsidian-copia.plist
+       Parar: launchctl unload ~/Library/LaunchAgents/com.davinci.obsidian-copia.plist
+
+  Roda às 03:30 e ao carregar (Mac que estava desligado se atualiza quando liga).
+  Falhou: notificação do macOS, a nota "DaVinci/Cópia falhou.md" no cofre e o log abaixo.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.davinci.obsidian-copia</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>__HOME__/.davinci/obsidian_copia.py</string>
+        <string>--url</string>
+        <string>__URL__</string>
+        <string>--token-arquivo</string>
+        <string>__HOME__/.davinci/robo_atendimento.token</string>
+        <string>--cofre</string>
+        <string>__COFRE__</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/davinci-obsidian-copia.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/davinci-obsidian-copia.log</string>
+</dict>
+</plist>
