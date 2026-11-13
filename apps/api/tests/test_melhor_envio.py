@@ -132,3 +132,41 @@ async def test_client_sem_token_levanta():
             produtos=[{"id": "1", "width": 11, "height": 17, "length": 11,
                        "weight": 0.3, "insurance_value": 100.0, "quantity": 1}],
         )
+
+
+# --- Atendimentos (sonda só-leitura, 13/11/2026) -----------------------------
+def test_resumo_atendimento_acha_a_conversa_e_corta_texto():
+    from app.services.melhor_envio import resumo_atendimento
+
+    corpo = {
+        "id": 2065437,
+        "status": "in_progress",
+        "subject": "Falha na entrega",
+        "order": {"id": "a2d0", "protocol": "ORD-1", "to": {"name": "Fulana"}},
+        "messages": [
+            {"id": i, "body": "x" * 300, "author": {"name": "Natalia", "type": "agent"}}
+            for i in range(5)
+        ],
+    }
+    r = resumo_atendimento(corpo)
+    assert r["campos_simples"] == {
+        "id": 2065437,
+        "status": "in_progress",
+        "subject": "Falha na entrega",
+    }
+    conversa = r["listas"]["messages"]
+    assert conversa["total"] == 5
+    assert len(conversa["primeiros"]) == 3 and len(conversa["ultimos"]) == 3
+    primeiro = conversa["primeiros"][0]
+    assert len(primeiro["body"]) == 161  # 160 + "…"
+    assert primeiro["author"] == {"name": "Natalia", "type": "agent"}
+    assert r["forma"]["order"]["to"] == {"name": "str"}
+
+
+@pytest.mark.asyncio
+async def test_ler_atendimento_recusa_id_estranho_sem_rede():
+    from app.services.melhor_envio import ler_atendimento
+
+    http, corpo = await ler_atendimento("tok", "../orders")
+    assert http == 400
+    assert "inválido" in corpo["message"]

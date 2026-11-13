@@ -6961,16 +6961,28 @@ async def sonda_melhor_envio(
         str | None, Query(description="busca do Melhor Envio (nº do pedido, rastreio…)")
     ] = None,
     page: Annotated[int, Query(ge=1, le=50)] = 1,
+    atendimentos: Annotated[
+        bool, Query(description="só envios com atendimento (a aba Atendimentos do ME)")
+    ] = False,
 ) -> dict[str, Any]:
     """Como o Melhor Envio devolve um envio (só o que interessa pra conciliação; sem
     nome/endereço do cliente): preço pago, desconto, conferência de peso, etiquetas
-    (tags) e campos de referência. Só leitura (15/10)."""
-    from app.services.melhor_envio import ler_envios, token_do_painel
+    (tags) e campos de referência. Só leitura (15/10). 13/11: `atendimentos=true`
+    usa os filtros da aba Atendimentos do ME e mostra os campos de chamado
+    (`tickets`, `ticket_opening`)."""
+    from app.services.melhor_envio import (
+        PARAMS_ATENDIMENTOS,
+        ler_envios,
+        resumir_lista,
+        token_do_painel,
+    )
 
     token, _ = await token_do_painel(session)
     if not token:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail={"code": "sem_token_melhor_envio"})
-    http, corpo = await ler_envios(token, page=page, q=q)
+    http, corpo = await ler_envios(
+        token, page=page, q=q, extra=PARAMS_ATENDIMENTOS if atendimentos else None
+    )
     dados = corpo.get("data") if isinstance(corpo.get("data"), list) else []
 
     def compacto(e: dict[str, Any]) -> dict[str, Any]:
@@ -6998,6 +7010,9 @@ async def sonda_melhor_envio(
             else e.get("additional_info"),
             "conciliation": conc if not isinstance(conc, list) else conc[:3],
             "freight_arrangements": e.get("freight_arrangements"),
+            "can_open_ticket": e.get("can_open_ticket"),
+            "ticket_opening": resumir_lista(e.get("ticket_opening")),
+            "tickets": resumir_lista(e.get("tickets")),
             "products": [
                 {k: p.get(k) for k in ("name", "quantity", "unitary_value") if k in p}
                 for p in (e.get("products") or [])[:3]
@@ -7011,8 +7026,29 @@ async def sonda_melhor_envio(
         "q": q,
         "total": corpo.get("total"),
         "pagina": page,
-        "envios": [compacto(e) for e in dados[:5] if isinstance(e, dict)],
+        "envios": [compacto(e) for e in dados[: 20 if atendimentos else 5] if isinstance(e, dict)],
     }
+
+
+@router.get("/sonda/melhor-envio/atendimento/{ticket_id}")
+async def sonda_melhor_envio_atendimento(
+    ticket_id: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    _user: Annotated[User, Depends(_PERM)],
+) -> dict[str, Any]:
+    """13/11: o token do painel abre a conversa de um atendimento do ME
+    (`GET /api/v2/me/tickets/{id}`, o mesmo que a tela usa)? Devolve o HTTP, o
+    desenho do JSON e as pontas de cada lista (onde a conversa deve estar). Só
+    leitura — não responde nem encerra nada."""
+    from app.services.melhor_envio import ler_atendimento, resumo_atendimento, token_do_painel
+
+    token, _ = await token_do_painel(session)
+    if not token:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail={"code": "sem_token_melhor_envio"})
+    http, corpo = await ler_atendimento(token, ticket_id)
+    if http != 200:
+        return {"http": http, "mensagem": str(corpo.get("message") or corpo)[:200]}
+    return {"http": http, **resumo_atendimento(corpo)}
 
 
 def _numero_ou_422(body: dict[str, Any], campo: str, padrao: float) -> float:

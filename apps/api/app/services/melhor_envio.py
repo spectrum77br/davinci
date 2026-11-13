@@ -20,6 +20,7 @@ não compra, não paga).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING
@@ -320,12 +321,17 @@ async def ler_conta(token: str) -> tuple[int, dict]:
     return r.status_code, corpo if isinstance(corpo, dict) else {"corpo": corpo}
 
 
-async def ler_envios(token: str, *, page: int = 1, q: str | None = None) -> tuple[int, dict]:
+async def ler_envios(
+    token: str, *, page: int = 1, q: str | None = None, extra: dict[str, str | int] | None = None
+) -> tuple[int, dict]:
     """GET /api/v2/me/orders — os envios da conta (preço pago, etiquetas, tags com o
-    nº do pedido). Só leitura."""
+    nº do pedido). Só leitura. `extra` = filtros a mais da própria tela do ME (ex.:
+    `PARAMS_ATENDIMENTOS`)."""
     params: dict[str, str | int] = {"page": page}
     if q:
         params["q"] = q
+    if extra:
+        params.update(extra)
     async with httpx.AsyncClient(timeout=30) as cli:
         r = await cli.get(
             f"{ME_BASE_PROD}/api/v2/me/orders", headers=_headers_leitura(token), params=params
@@ -344,3 +350,90 @@ def nome_da_conta(corpo: dict) -> str | None:
         return str(empresa["name"])[:80]
     nome = " ".join(str(corpo.get(k) or "") for k in ("firstname", "lastname")).strip()
     return nome[:80] or None
+
+
+# ---------------------------------------------------------------------------
+# Atendimentos (chamados) do Melhor Envio — sonda só-leitura (13/11/2026)
+# ---------------------------------------------------------------------------
+# A tela Envios › Atendimentos do ME lista os envios com chamado usando estes
+# filtros no /orders, e abre a conversa em GET /api/v2/me/tickets/{id}. A sonda
+# pergunta se o token do painel (o da Conciliação) enxerga as duas coisas — se
+# sim, a aba Chamados do DaVinci lê pela API; se não, fica com o robô de tela.
+PARAMS_ATENDIMENTOS: dict[str, str | int] = {
+    "per_page": 50,
+    "status": "released,expired,received,posted,paused,delivered,undelivered,suspended",
+    "reverse": "0,1,2",
+    "with_active_ticket": "true",
+}
+_TICKET_ID_OK = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+
+
+async def ler_atendimento(token: str, ticket_id: str) -> tuple[int, dict]:
+    """GET /api/v2/me/tickets/{id} — um atendimento do ME com a conversa. Só leitura."""
+    if not _TICKET_ID_OK.match(ticket_id or ""):
+        return 400, {"message": "id de atendimento inválido"}
+    async with httpx.AsyncClient(timeout=30) as cli:
+        r = await cli.get(
+            f"{ME_BASE_PROD}/api/v2/me/tickets/{ticket_id}", headers=_headers_leitura(token)
+        )
+    try:
+        corpo = r.json() if r.content else {}
+    except ValueError:
+        corpo = {"texto": r.text[:200]}
+    return r.status_code, corpo if isinstance(corpo, dict) else {"data": corpo}
+
+
+def _curto(valor: object, limite: int = 160, fundo: int = 0) -> object:
+    """Valor pra sonda: texto cortado; dict até 2 níveis (o autor da mensagem mora
+    dentro dela); lista vira só a contagem."""
+    if isinstance(valor, str):
+        return valor if len(valor) <= limite else valor[:limite] + "…"
+    if isinstance(valor, dict):
+        if fundo >= 2:
+            return "{…}"
+        return {k: _curto(v, limite, fundo + 1) for k, v in list(valor.items())[:15]}
+    if isinstance(valor, list):
+        return f"lista com {len(valor)}"
+    return valor
+
+
+def forma(valor: object, nivel: int = 0) -> object:
+    """O desenho de um JSON (campos e tipos), sem os valores — até 3 níveis."""
+    if isinstance(valor, dict):
+        if nivel >= 3:
+            return "{…}"
+        return {k: forma(v, nivel + 1) for k, v in valor.items()}
+    if isinstance(valor, list):
+        return [f"lista com {len(valor)}", forma(valor[0], nivel + 1)] if valor else []
+    return type(valor).__name__
+
+
+def resumir_lista(itens: object, n: int = 3) -> object:
+    """Lista de objetos → total + os primeiros e os últimos `n`, com `_curto`."""
+    if not isinstance(itens, list):
+        return _curto(itens)
+    return {
+        "total": len(itens),
+        "primeiros": [_curto(i) for i in itens[:n]],
+        "ultimos": [_curto(i) for i in itens[-n:]] if len(itens) > n else [],
+    }
+
+
+def resumo_atendimento(corpo: dict) -> dict:
+    """Pra sonda: o desenho do atendimento e, de cada lista de objetos (até 2 níveis,
+    onde a conversa deve morar), o total e as pontas."""
+    listas: dict[str, object] = {}
+
+    def varrer(no: object, caminho: str, nivel: int) -> None:
+        if nivel > 2 or not isinstance(no, dict):
+            return
+        for k, v in no.items():
+            onde = f"{caminho}.{k}" if caminho else k
+            if isinstance(v, list) and v and isinstance(v[0], dict):
+                listas[onde] = resumir_lista(v)
+            elif isinstance(v, dict):
+                varrer(v, onde, nivel + 1)
+
+    varrer(corpo, "", 0)
+    simples = {k: _curto(v) for k, v in corpo.items() if not isinstance(v, (dict, list))}
+    return {"campos_simples": simples, "forma": forma(corpo), "listas": listas}
