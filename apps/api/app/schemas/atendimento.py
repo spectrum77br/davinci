@@ -399,6 +399,19 @@ class AgenteResumoOut(BaseModel):
     avisos: list[str] = Field(default_factory=list)
 
 
+class AprovacaoOut(BaseModel):
+    """A régua do assunto no canal (13/11/2026, `regua.py`): a aprovação da EQUIPE nas
+    últimas decisões sobre o rascunho daquele assunto — nunca a certeza do modelo."""
+
+    tipo: str
+    decisoes: int
+    acertos: int
+    fracao: float
+    limiar: float
+    liberado: bool
+    escopo: str
+
+
 class RascunhoOut(BaseModel):
     id: UUID
     texto: str | None = None
@@ -418,6 +431,11 @@ class RascunhoOut(BaseModel):
     # Só no rascunho do AGENTE (`prompt_versao="ag1"`, 20/10/2026): o que ele
     # consultou e as ações de pessoa. None = rascunho do legado.
     agente: AgenteResumoOut | None = None
+    # A LINHA DA DÚVIDA (13/11/2026, `services/atendimento/duvida.py`): por que não saiu
+    # sozinho, em uma frase (a última decisão do portão). None = sem decisão gravada.
+    duvida: str | None = None
+    # A aprovação da equipe no assunto (só com a régua ligada; None = sem régua).
+    aprovacao: AprovacaoOut | None = None
 
 
 class DestinoOut(BaseModel):

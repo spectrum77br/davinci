@@ -391,6 +391,21 @@ export type Rascunho = {
   // Só no rascunho do AGENTE (20/10/2026): o que ele consultou e as ações de
   // pessoa (`linhaDoAgente` escreve). null = a IA de hoje.
   agente?: AgenteResumo | null
+  // A LINHA DA DÚVIDA (13/11/2026): por que não saiu sozinho, em uma frase (a API
+  // antiga não manda).
+  duvida?: string | null
+  // A aprovação da EQUIPE no assunto (só com a régua ligada) — nunca a certeza do modelo.
+  aprovacao?: AprovacaoAssunto | null
+}
+// A régua do assunto no canal (13/11/2026, `regua.py` da API).
+export type AprovacaoAssunto = {
+  tipo: string
+  decisoes: number
+  acertos: number
+  fracao: number
+  limiar: number
+  liberado: boolean
+  escopo: string
 }
 // `enviado_em`, `data_envio` e `nota_fiscal` vão além do mínimo da spec: o
 // contexto.py manda para as lacunas {data_envio} e {nf_numero} (as mesmas da IA).

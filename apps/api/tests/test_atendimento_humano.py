@@ -1904,3 +1904,63 @@ async def test_script_seco_nao_grava_e_gravar_preenche(db, make_user, ctx_falso,
         "motivo_principal": {"shopee": {"assunto": 1}},
     }
     assert (await _cache(db, a))["motivos"] == ["assunto"]
+
+
+async def test_a_linha_da_duvida_e_a_aprovacao_da_equipe_no_rascunho(
+    client, db, make_user, pessoa, monkeypatch
+):
+    """O rascunho que não saiu sozinho leva UMA linha com o porquê (13/11/2026,
+    `duvida.py`): a decisão que o portão gravou; com a régua ligada, a aprovação da EQUIPE
+    no assunto (a linha de `atendimento_regua` do canal) — nunca a certeza do modelo."""
+    from app.models.atendimento import AtendimentoRegua
+
+    dono = await make_user()
+    integ, canal = await _loja_db(db, dono)
+    conv = await _conversa(db, integ, canal, "D1", "cadê meu pedido?")
+    db.add(
+        AtendimentoRascunho(
+            conversa_id=conv.id,
+            texto="Seu pedido está a caminho.",
+            categoria="rastreio",
+            confianca=0.95,
+            precisa_humano=False,
+            status="pendente",
+            fatos={ia.FATO_AUTO_ENVIO: {"motivo": "assunto_nao_liberado", "em": "x"}},
+        )
+    )
+    db.add(
+        AtendimentoRegua(
+            canal_id=canal.id,
+            plataforma="shopee",
+            integration_id=integ.id,
+            tipo="rastreio",
+            decisoes=30,
+            acertos=22,
+            escopo="loja",
+            limiar=0.8,
+            liberado=False,
+            liberado_hoje=False,
+            atualizado_em=datetime.now(UTC),
+        )
+    )
+    await db.commit()
+
+    monkeypatch.setattr(get_settings(), "atendimento_regua_ativa", False)
+    r = (await client.get(f"{URL}/conversas/{conv.id}")).json()["rascunho"]
+    assert r["duvida"] == "Rastreio: o assunto não está liberado para sair sozinho nesta loja."
+    assert r["aprovacao"] is None
+
+    monkeypatch.setattr(get_settings(), "atendimento_regua_ativa", True)
+    r = (await client.get(f"{URL}/conversas/{conv.id}")).json()["rascunho"]
+    assert r["duvida"] == (
+        "Rastreio: 73% de aprovação da equipe nas últimas 30 (sai sozinha com 80%)."
+    )
+    assert r["aprovacao"] == {
+        "tipo": "rastreio",
+        "decisoes": 30,
+        "acertos": 22,
+        "fracao": 0.7333,
+        "limiar": 0.8,
+        "liberado": False,
+        "escopo": "loja",
+    }

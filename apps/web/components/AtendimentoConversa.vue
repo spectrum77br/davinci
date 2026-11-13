@@ -4498,7 +4498,15 @@ watch(() => props.conversaId, (novo, velho) => {
                 <Sparkles class="size-3.5" /> Sugestão da IA
               </button>
               <span v-if="rascunho.categoria" class="text-muted-foreground">· {{ categoriaLabel(rascunho.categoria) }}</span>
-              <span v-if="rascunho.confianca !== null && rascunho.confianca !== undefined" class="text-muted-foreground">· {{ Math.round(rascunho.confianca * 100) }}% de confiança</span>
+              <!-- A régua (13/11/2026, o Eduardo): o número que vale é a aprovação da EQUIPE no
+                   assunto; com ela ligada, a certeza que o modelo declara sai da tela. -->
+              <span
+                v-if="rascunho.aprovacao"
+                class="text-muted-foreground"
+                :title="`das últimas ${rascunho.aprovacao.decisoes} decisões da equipe neste assunto, ${rascunho.aprovacao.acertos} saíram iguais ou só com ajuste de forma; sai sozinha com ${Math.round(rascunho.aprovacao.limiar * 100)}%`"
+                data-sugestao-aprovacao
+              >· {{ Math.round(rascunho.aprovacao.fracao * 100) }}% de aprovação da equipe</span>
+              <span v-else-if="rascunho.confianca !== null && rascunho.confianca !== undefined" class="text-muted-foreground">· {{ Math.round(rascunho.confianca * 100) }}% de confiança</span>
               <!-- O selo só na sugestão do turno ATUAL (14/10/2026, a régua da
                    Caixa Humano): a de antes da última mensagem do cliente ganha
                    o aviso discreto no lugar. -->
@@ -4529,6 +4537,11 @@ watch(() => props.conversaId, (novo, velho) => {
                   </button>
                 </template>
               </span>
+            </div>
+            <!-- A LINHA DA DÚVIDA (13/11/2026): por que ela não saiu sozinha, à vista mesmo com a
+                 sugestão recolhida (a última decisão do portão, `duvida.py` da API). -->
+            <div v-if="rascunho.duvida" class="flex items-start gap-1 text-[11px] text-amber-800 dark:text-amber-300" data-sugestao-duvida>
+              <TriangleAlert class="mt-px size-3.5 shrink-0" aria-hidden="true" />{{ rascunho.duvida }}
             </div>
             <div v-show="sugestaoIaAberta" class="max-h-[22vh] space-y-1 overflow-y-auto overscroll-contain" data-sugestao-ia-corpo>
               <div v-if="!rascunho.texto" class="italic text-muted-foreground">A IA não escreveu uma resposta que possa sair — responda você.</div>

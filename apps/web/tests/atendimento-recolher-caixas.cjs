@@ -301,6 +301,25 @@ async function principal() {
     x.alternarSugestaoIa()
     assert.equal(ls.dados.get(C.SUGESTAO_IA_ABERTA_KEY), '1')
 
+    // A LINHA DA DÚVIDA (13/11/2026): fora do que recolhe, logo antes do corpo — à vista com a
+    // sugestão recolhida; com a régua, a aprovação da EQUIPE no lugar da confiança do modelo.
+    assert.ok(!corpo.includes('rascunho.duvida'), 'a dúvida fica fora do que recolhe')
+    assert.match(caixa, /<div v-if="rascunho\.duvida"[^>]*data-sugestao-duvida>[\s\S]*?\{\{ rascunho\.duvida \}\}\s*<\/div>\s*<div v-show="sugestaoIaAberta"/)
+    x.alternarSugestaoIa()
+    rascunho.duvida = 'Rastreio: 73% de aprovação da equipe nas últimas 30 (sai sozinha com 80%).'
+    rascunho.aprovacao = { tipo: 'rastreio', decisoes: 30, acertos: 22, fracao: 0.7333, limiar: 0.8, liberado: false, escopo: 'loja' }
+    h = await renderizarTrecho(caixa, ctx)
+    assert.ok(escondido(h, 'data-sugestao-ia-corpo'), 'recolhida')
+    assert.match(h, /data-sugestao-duvida[^>]*>[\s\S]*?Rastreio: 73% de aprovação da equipe nas últimas 30 \(sai sozinha com 80%\)\.\s*<\/div>/)
+    assert.match(h, /data-sugestao-aprovacao[^>]*>· 73% de aprovação da equipe</)
+    assert.doesNotMatch(h, /% de confiança/, 'com a régua, sem a certeza do modelo')
+    delete rascunho.duvida
+    delete rascunho.aprovacao
+    x.alternarSugestaoIa()
+    h = await renderizarTrecho(caixa, ctx)
+    assert.doesNotMatch(h, /data-sugestao-duvida|data-sugestao-aprovacao/)
+    assert.match(h, /· 70% de confiança/, 'sem a régua, como antes')
+
     const y = caixasDaConversa(armazenamento({ [C.SUGESTAO_IA_ABERTA_KEY]: '0' }))
     y.montar()
     assert.equal(y.sugestaoIaAberta.value, false)

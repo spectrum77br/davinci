@@ -161,6 +161,7 @@ from app.schemas.atendimento import (
     AcaoPessoaOut,
     AgenteResumoOut,
     ApagarOut,
+    AprovacaoOut,
     AvaliacaoIn,
     AvaliacaoOut,
     AvaliacaoResumoOut,
@@ -1929,10 +1930,18 @@ def _email_da_mensagem(m: AtendimentoMensagem) -> dict[str, Any] | None:
 
 
 def _rascunho_out(
-    r: AtendimentoRascunho | None, *, do_turno_atual: bool | None = None
+    r: AtendimentoRascunho | None,
+    *,
+    do_turno_atual: bool | None = None,
+    regua_linha: Any = None,
 ) -> RascunhoOut | None:
+    from app.services.atendimento import duvida as duvida_svc
+
     if r is None:
         return None
+    # A régua por tipo (13/11/2026): os números só vão para a tela com ela ligada.
+    regua_ativa = bool(get_settings().atendimento_regua_ativa)
+    aprovacao = duvida_svc.aprovacao_de(regua_linha) if regua_ativa else None
     return RascunhoOut(
         id=r.id,
         texto=r.texto,
@@ -1945,6 +1954,25 @@ def _rascunho_out(
         created_at=_utc(r.created_at),
         do_turno_atual=do_turno_atual,
         agente=_resumo_do_agente(r),
+        duvida=duvida_svc.linha(
+            r.fatos if isinstance(r.fatos, dict) else None,
+            r.categoria,
+            aprovacao=aprovacao,
+            regua_ativa=regua_ativa,
+        ),
+        aprovacao=(
+            AprovacaoOut(
+                tipo=aprovacao.tipo,
+                decisoes=aprovacao.decisoes,
+                acertos=aprovacao.acertos,
+                fracao=round(aprovacao.fracao, 4),
+                limiar=aprovacao.limiar,
+                liberado=aprovacao.liberado,
+                escopo=aprovacao.escopo,
+            )
+            if aprovacao is not None
+            else None
+        ),
     )
 
 
@@ -3591,6 +3619,22 @@ async def detalhe_conversa(
         )
     ).first()
     rascunho, momento_r = linha_r if linha_r is not None else (None, None)
+    # A régua do assunto no canal (13/11/2026): a aprovação da equipe na linha da dúvida.
+    regua_linha = None
+    if (
+        rascunho is not None
+        and rascunho.categoria
+        and c.canal_id is not None
+        and get_settings().atendimento_regua_ativa
+    ):
+        from app.models.atendimento import AtendimentoRegua
+
+        regua_linha = await session.scalar(
+            select(AtendimentoRegua).where(
+                AtendimentoRegua.canal_id == c.canal_id,
+                AtendimentoRegua.tipo == rascunho.categoria[:32],
+            )
+        )
     detalhe = {
         "conversa": await _conversa_out(session, c),
         "mensagens": [_mensagem_out(m, conversa=c, nomes=nomes) for m in mensagens],
@@ -3601,6 +3645,7 @@ async def detalhe_conversa(
                 if rascunho is not None
                 else None
             ),
+            regua_linha=regua_linha,
         ),
         "contexto": await _contexto(session, c),
         "envio": await _envio(session, c),
