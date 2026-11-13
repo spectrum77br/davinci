@@ -300,3 +300,17 @@ def test_o_sistema_da_virada_nunca_deixa_a_caixa_vazia():
     # Sem a virada, o sistema de sempre (e o hash dele).
     assert prompt.sistema("shopee", [])[0]["text"] == antes
     assert prompt.hash_do_sistema("shopee", []) != prompt.hash_do_sistema("shopee", [], True)
+
+
+def test_a_regua_nunca_vale_no_e_mail_nem_fora_do_banco(monkeypatch):
+    """O agente de e-mail (SAC dos sites, Amazon) segue as regras dele: a marca da régua nunca
+    vai ao rascunho do e-mail (o "atendente + Procon" continua segurando lá)."""
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "atendimento_regua_ativa", True)
+    assert agente_ctx.regua_vale_para("shopee", "chat")
+    assert not agente_ctx.regua_vale_para("site", "email")
+    assert not agente_ctx.regua_vale_para("amazon", constantes.CANAL_EMAIL)
+    assert not agente_ctx.regua_vale_para("whatsapp", "chat")
+    monkeypatch.setattr(get_settings(), "atendimento_regua_ativa", False)
+    assert not agente_ctx.regua_vale_para("shopee", "chat")

@@ -144,6 +144,19 @@ def regua_ativa() -> bool:
     return bool(get_settings().atendimento_regua_ativa)
 
 
+def regua_vale_para(plataforma: str | None, canal: str | None) -> bool:
+    """A régua por tipo vale nesta conversa (a marca `fatos.agente.regua`)? Ligada E no MESMO
+    escopo do banco: uma plataforma que o banco cobre, fora do e-mail (o SAC dos sites e a
+    Amazon seguem as regras do agente de e-mail; WhatsApp ainda não). 13/11/2026."""
+    from app.services.atendimento import banco_respostas
+
+    return (
+        regua_ativa()
+        and plataforma in banco_respostas.PLATAFORMAS
+        and canal != constantes.CANAL_EMAIL
+    )
+
+
 def banco_exigido_para(plataforma: str | None, canal: str | None) -> bool:
     """O portão do banco vale nesta conversa? (13/11/2026) Só com o agente lendo o banco E
     a régua por tipo ligada, numa plataforma que o banco cobre e fora do e-mail."""
@@ -731,7 +744,7 @@ class ContextoAgente:
             ctx.aceitar_pedido(*contexto_svc._chaves_do_pedido(conversa))
         ctx.aceitar_anuncio(getattr(conversa, "anuncio_id", None))
         ctx.banco_exigido = banco_exigido_para(conversa.plataforma, conversa.canal)
-        ctx.regua = regua_ativa()
+        ctx.regua = regua_vale_para(conversa.plataforma, conversa.canal)
         return ctx
 
     # ── tempo ──
