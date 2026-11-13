@@ -284,6 +284,7 @@ from app.services.atendimento.constantes import (
     ASSUNTOS_SO_PESSOA_NO_AGENTE,
     AUTOR_CLIENTE,
     AUTOR_LOJA,
+    AVALIACAO_AUTOMATICO,
     CANAL_EMAIL,
     CANAL_PERGUNTA,
     CANAL_ZAP,
@@ -2794,6 +2795,9 @@ async def _exemplos_aprovados(
                 and_(
                     ~saiu,
                     AtendimentoAvaliacao.nota == NOTA_OK,
+                    # O 👍 da revisão do que saiu sozinho (13/11/2026) não vira exemplo: o
+                    # texto é da IA, e o Eduardo quer no aprendizado só o que a pessoa escreveu.
+                    AtendimentoAvaliacao.acao != AVALIACAO_AUTOMATICO,
                     AtendimentoRascunho.status.not_in(
                         (RASCUNHO_DESCARTADO, RASCUNHO_BLOQUEADO)
                     ),
