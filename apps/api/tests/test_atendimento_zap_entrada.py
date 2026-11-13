@@ -503,7 +503,7 @@ async def test_reacao_nao_entra_na_fila(db, zap):
 async def test_tipos_traduzidos(db, zap):
     app, _, _ = await cadastrar(db)
     casos = [
-        ("nao_suportada", {}, "outro", "não entrega pela API"),
+        ("nao_suportada", {}, "outro", "Peça para reenviar"),
         ("botao", {"alvo": "wamid.MENU", "texto": "Sim, quero"}, "botao", "Sim, quero"),
         ("lista", {"alvo": "wamid.MENU", "texto": "Opção 2"}, "botao", "Opção 2"),
         ("botao_modelo", {"alvo": "wamid.MODELO", "texto": "Rastrear"}, "botao", "Rastrear"),
@@ -518,6 +518,8 @@ async def test_tipos_traduzidos(db, zap):
     for m, (_, _, _, trecho) in zip(ms, casos, strict=True):
         assert trecho in m.texto, m.texto
     assert all(m.autor == "cliente" for m in ms)
+    assert ms[0].texto == zap_entrada.AVISO_NAO_SUPORTADA
+    assert ms[0].payload["zap"]["nao_suportado"] == "Message type is currently not supported."
     assert ms[1].payload["zap"]["contexto_wamid"] == "wamid.MENU"
     assert ms[1].payload["zap"]["botao"] == {"tipo": "button_reply", "id": "sim-quero"}
     assert ms[2].payload["zap"]["botao"]["tipo"] == "list_reply"
@@ -525,6 +527,25 @@ async def test_tipos_traduzidos(db, zap):
     assert ms[4].payload["zap"]["localizacao"]["lat"] == -23.55052
     assert ms[5].payload["zap"]["contatos"][0]["nome"] == "Maria Fictícia"
     assert conversa.aguardando_resposta is True  # a não suportada conta como fala
+
+
+def test_nao_suportada_pede_o_reenvio_e_guarda_o_tipo_da_meta():
+    """13/11/2026: a frase diz a quem atende o que fazer; o tipo da Meta vai ao payload."""
+    tipo, texto, midia, extra = zap_entrada._traduzir(
+        {"type": "unsupported", "unsupported": {"type": "unknown"}}
+    )
+    assert (tipo, texto, midia) == ("outro", zap_entrada.AVISO_NAO_SUPORTADA, None)
+    assert extra == {"nao_suportado": "unknown"}
+    assert "unknown" not in texto
+    # O álbum: as fotos chegam uma a uma como imagens; o aviso só explica.
+    tipo, texto, _, extra = zap_entrada._traduzir(
+        {"type": "unsupported", "unsupported": {"type": "album"}}
+    )
+    assert (tipo, texto) == ("outro", zap_entrada.AVISO_ALBUM)
+    assert extra == {"nao_suportado": "album"}
+    # Sem nada da Meta: a mesma frase, sem tipo.
+    _, texto, _, extra = zap_entrada._traduzir({"type": "unsupported"})
+    assert texto == zap_entrada.AVISO_NAO_SUPORTADA and extra == {"nao_suportado": None}
 
 
 async def test_ctwa_vai_para_a_conversa_e_a_janela_gratis(db, zap):

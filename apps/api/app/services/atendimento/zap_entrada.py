@@ -729,6 +729,21 @@ async def _conversa(
     return conversa
 
 
+# O que a Meta NÃO entrega pela API oficial (`type: "unsupported"`): a mensagem
+# chega, o conteúdo não. 13/11/2026, o Eduardo ("pq isso acontece se a api
+# responde"): eram 80 avisos em 30 dias, em 38 conversas (78 "unknown", 2
+# "album"), com a frase técnica "não entrega pela API: unknown". A frase agora
+# diz a quem atende o que fazer: pedir o reenvio (há resposta pronta do
+# WhatsApp para isso). No álbum, as fotos chegam uma a uma como imagens (os 2
+# casos de 06 e 07/11 tinham 2 e 8 imagens no mesmo minuto): só o aviso do
+# álbum é que não tem conteúdo.
+AVISO_NAO_SUPORTADA = (
+    "[O cliente mandou algo que o WhatsApp não mostra para empresas, como foto ou "
+    "vídeo de visualização única ou enquete. Peça para reenviar como foto comum ou texto.]"
+)
+AVISO_ALBUM = "[O cliente mandou um álbum: as fotos chegam uma a uma nesta conversa.]"
+
+
 def _traduzir(msg: dict) -> tuple[str, str, dict | None, dict]:
     """Tabela §5.4 → (tipo gravado, texto, mídia da Meta ou None, extra do payload.zap)."""
     tipo_meta = str(msg.get("type") or "")
@@ -813,8 +828,12 @@ def _traduzir(msg: dict) -> tuple[str, str, dict | None, dict]:
                 primeiro.get("error_data") if isinstance(primeiro.get("error_data"), dict) else {}
             )
             qual = _texto(dados_erro.get("details")) or _texto(primeiro.get("title"))
-        aviso = "O cliente mandou algo que o WhatsApp não entrega pela API"
-        return "outro", f"[{aviso}: {qual or 'desconhecido'}]", None, extra
+        # O tipo técnico da Meta ("unknown", "album"…) fica no payload, para
+        # diagnóstico; a tela mostra só a frase de quem atende.
+        extra["nao_suportado"] = qual or None
+        if qual == "album":
+            return "outro", AVISO_ALBUM, None, extra
+        return "outro", AVISO_NAO_SUPORTADA, None, extra
     return "outro", f"[Mensagem do WhatsApp: {tipo_meta or 'sem tipo'}]", None, extra
 
 
