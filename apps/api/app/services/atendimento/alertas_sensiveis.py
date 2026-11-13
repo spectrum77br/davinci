@@ -2,7 +2,7 @@
 
 O Eduardo: cada envio sozinho de assunto sensível (reembolso, cancelamento, troca, reclamação
 forte — `tipos_pergunta.SENSIVEIS`) avisa e entra na revisão diária (a aba Banco de
-respostas); e ele quer saber quando um assunto sensível passa de 90% (a régua solta).
+respostas); e ele quer saber quando um assunto sensível passa da régua dos sensíveis (85%).
 
 - `avisar_envios_sensiveis` (cron de 5 em 5 min): os envios da IA (origem davinci_ia) de
   rascunho sensível desde a última rodada (o cursor no Redis), um aviso no Telegram por envio,
@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from sqlalchemy import select
 
-from app.services.atendimento import constantes, duvida, tipos_pergunta
+from app.services.atendimento import constantes, duvida, regua, tipos_pergunta
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,7 +53,8 @@ def aviso_da_regua(assunto: str, loja: str | None, aprovacao: float, decisoes: i
     """O aviso do assunto sensível que a régua soltou numa loja. PURA."""
     nome = duvida.nome_do_assunto(assunto)
     return (
-        f"✅ Régua: <b>{nome}</b> passou de 90% de aprovação da equipe"
+        f"✅ Régua: <b>{nome}</b> passou de {round(regua.LIMIAR_SENSIVEL * 100)}% de aprovação"
+        " da equipe"
         + (f" em {loja}" if loja else "")
         + f" ({round(aprovacao * 100)}% nas últimas {decisoes} decisões). "
         "A partir de agora, esse assunto sai sozinho quando há resposta do banco que encaixe."

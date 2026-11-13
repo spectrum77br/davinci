@@ -1,10 +1,11 @@
 """A RÉGUA do envio sozinho por tipo de pergunta (13/11/2026).
 
-O Eduardo: "se bater os 80% continua enviando"; nos sensíveis (reembolso, cancelamento,
-troca, mediação, ameaça de processo) 90%. Os 80% são a APROVAÇÃO DA EQUIPE naquele tipo,
-nunca a certeza que o modelo declara: das últimas `JANELA` decisões de pessoa sobre o
-rascunho daquele tipo (os julgamentos do `juiz_edicao`), quantas foram acerto (igual ou só
-forma). Vale a loja quando ela tem `MIN_DECISOES`; senão a plataforma; senão não libera.
+O Eduardo: "se bater os 80% continua enviando"; na virada (13/11/2026) baixou: 75% nos
+normais e 85% nos sensíveis (reembolso, cancelamento, troca, mediação, ameaça de
+processo; eram 80% e 90%). A % é a APROVAÇÃO DA EQUIPE naquele tipo, nunca a certeza que
+o modelo declara: das últimas `JANELA` decisões de pessoa sobre o rascunho daquele tipo (os
+julgamentos do `juiz_edicao`), quantas foram acerto (igual ou só forma). Vale a loja quando
+ela tem `MIN_DECISOES`; senão a plataforma; senão não libera.
 
 `taxas` só lê. Quem decide o envio é o portão do agente, que também exige a resposta do
 banco que encaixa no caso (as regras de lastro de sempre) — a régua sozinha não solta nada.
@@ -23,14 +24,15 @@ from app.services.atendimento import juiz_edicao, tipos_pergunta
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-LIMIAR_PADRAO = 0.80
-LIMIAR_SENSIVEL = 0.90
+# 13/11/2026, o Eduardo (na virada): "85% pros críticos né, pros normais é 75% agora".
+LIMIAR_PADRAO = 0.75
+LIMIAR_SENSIVEL = 0.85
 JANELA = 30
 MIN_DECISOES = 20
 
 
 def limiar(tipo: str | None) -> float:
-    """A régua do tipo (80%; 90% nos sensíveis). PURA."""
+    """A régua do tipo (75%; 85% nos sensíveis). PURA."""
     return LIMIAR_SENSIVEL if tipo in tipos_pergunta.SENSIVEIS else LIMIAR_PADRAO
 
 

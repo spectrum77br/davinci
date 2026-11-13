@@ -49,13 +49,13 @@ def test_com_a_regua_a_aprovacao_da_equipe_e_nunca_a_confianca():
     linha = duvida.linha(
         _decisao("assunto_nao_liberado"), "rastreio", aprovacao=_aprov(30, 22), regua_ativa=True
     )
-    assert linha == "Rastreio: 73% de aprovação da equipe nas últimas 30 (sai sozinha com 80%)."
+    assert linha == "Rastreio: 73% de aprovação da equipe nas últimas 30 (sai sozinha com 75%)."
     poucas = duvida.linha(
         _decisao("assunto_nao_liberado"), "rastreio", aprovacao=_aprov(8, 8), regua_ativa=True
     )
     assert "só 8 decisões" in poucas and "com 20" in poucas
     nenhuma = duvida.linha(_decisao("orientacao_nao_liberada"), "rastreio", regua_ativa=True)
-    assert "ainda não decidiu" in nenhuma and "80%" in nenhuma
+    assert "ainda não decidiu" in nenhuma and "75%" in nenhuma
     soltou = duvida.linha(
         _decisao("assunto_nao_liberado"),
         "rastreio",
@@ -65,9 +65,9 @@ def test_com_a_regua_a_aprovacao_da_equipe_e_nunca_a_confianca():
     assert "liberado" in soltou and "90%" in soltou
 
 
-def test_sensivel_mede_com_90():
+def test_sensivel_mede_com_85():
     linha = duvida.linha(_decisao("assunto_so_humano"), "troca_devolucao", regua_ativa=True)
-    assert "90%" in linha
+    assert "85%" in linha
     assert (
         duvida.nome_do_assunto("troca_devolucao")
         == constantes.CATEGORIAS_INFO["troca_devolucao"][0]

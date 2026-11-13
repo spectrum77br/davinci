@@ -4,7 +4,7 @@
 - o resto vai ao modelo, com os textos mascarados; a resposta dele vira o julgamento;
 - a rodada grava uma linha por avaliação e não repete;
 - a régua: das últimas 30 decisões do tipo, a fração de acerto; a loja vale com 20, senão a
-  plataforma; 80%, e 90% nos sensíveis.
+  plataforma; 75%, e 85% nos sensíveis (eram 80% e 90% até a virada).
 """
 
 from __future__ import annotations
@@ -139,12 +139,12 @@ async def test_regua_por_tipo_loja_e_plataforma(db: AsyncSession, make_user):
         await db.commit()
 
     await julgamentos("rastreio", 18, 2, integ=loja)  # 90% em 20 da loja: libera
-    await julgamentos("reembolso", 17, 3, integ=loja)  # 85% num sensível: não libera
+    await julgamentos("reembolso", 16, 4, integ=loja)  # 80% num sensível: não libera (85%)
     await julgamentos("estoque_variacao", 5, 0, integ=loja)  # só 5 da loja: vale a plataforma
     taxas = await regua.taxas_da_loja(db, plataforma="shopee", integration_id=loja)
     assert taxas["rastreio"].liberado and taxas["rastreio"].escopo == "loja"
-    assert taxas["reembolso"].fracao == 0.85 and not taxas["reembolso"].liberado
-    assert regua.limiar("reembolso") == 0.90 and regua.limiar("rastreio") == 0.80
+    assert taxas["reembolso"].fracao == 0.80 and not taxas["reembolso"].liberado
+    assert regua.limiar("reembolso") == 0.85 and regua.limiar("rastreio") == 0.75
     assert taxas["estoque_variacao"].decisoes == 5 and not taxas["estoque_variacao"].liberado
 
 
@@ -212,7 +212,7 @@ def test_listas_liberadas_separam_produto_e_orientacao():
     taxas = {
         "rastreio": regua.Taxa("rastreio", 30, 27, "loja"),  # 90%: passa
         "espec_celular": regua.Taxa("espec_celular", 30, 25, "loja"),  # 83%: passa (produto)
-        "reembolso": regua.Taxa("reembolso", 30, 26, "loja"),  # 87% num sensível: não passa
+        "reembolso": regua.Taxa("reembolso", 30, 25, "loja"),  # 83% num sensível: não passa
         "garantia": regua.Taxa("garantia", 30, 28, "loja"),  # 93%: passa (orientação)
         "agradecimento": regua.Taxa("agradecimento", 10, 10, "loja"),  # só 10 decisões
     }

@@ -3,10 +3,10 @@
 // faz o agente 1 vez por dia trazer uma análise geral; deixa a tela mais simples; daí se abre o
 // select vai abrir as lojas todas e as %". O que a tela tem de garantir:
 //  - as ROTAS existem no backend (`routers/atendimento_metricas_equipe.py`, no `main.py`, e o
-//    GET /metricas de sempre); a régua da cor é a do envio sozinho (80%) e a hora da análise é
+//    GET /metricas de sempre); a régua da cor é a do envio sozinho (75%) e a hora da análise é
 //    a do cron (07:40 de São Paulo);
-//  - as funções puras: a % de aprovação (para baixo: nunca "80%" sem ter batido a régua), as
-//    cores (≥ 80% verde, 60–79% âmbar, < 60% vermelho, sem decisão "—"), "gerada às HH:MM de
+//  - as funções puras: a % de aprovação (para baixo: nunca "75%" sem ter batido a régua), as
+//    cores (≥ 75% verde, 60–74% âmbar, < 60% vermelho, sem decisão "—"), "gerada às HH:MM de
 //    DD/MM" e a próxima análise, as lojas da escolha (a pior aprovação primeiro) e o par da loja
 //    no GET /metricas (o "no prazo");
 //  - a tela do admin (setup + SSR, API falsa): a análise no topo (ou quando sai a primeira), um
@@ -75,7 +75,7 @@ const M = (() => {
   const chamadas = [...setup.matchAll(/(?<!function )\b(?:api|soDeAdmin)<[^>]+>\(\s*([^,)]+)/g)].map((m) => m[1].trim())
   assert.ok(chamadas.length >= 3)
   for (const c of chamadas) assert.match(c, /^(ROTAS\.|caminho$)/, c)
-  // A cor: a régua do envio sozinho (80%). A hora: o cron (10:40 UTC = 07:40 de São Paulo).
+  // A cor: a régua do envio sozinho (75%). A hora: o cron (10:40 UTC = 07:40 de São Paulo).
   assert.equal(Number(/^LIMIAR_PADRAO = ([\d.]+)/m.exec(api('services/atendimento/regua.py'))[1]), M.REGUA)
   const worker = api('worker.py')
   const hora = Number(/^_ATENDIMENTO_ANALISE_HORA = (\d+)/m.exec(worker)[1])
@@ -91,11 +91,11 @@ const M = (() => {
   assert.equal(M.aprovacao({ decisoes: 4, acertos: 3 }), 0.75)
   assert.equal(M.pctAprovacao(null), '—')
   assert.equal(M.pctAprovacao(0.8), '80%')
-  assert.equal(M.pctAprovacao(0.7999), '79%', 'para baixo: nunca 80% sem bater a régua')
+  assert.equal(M.pctAprovacao(0.7499), '74%', 'para baixo: nunca 75% sem bater a régua')
   assert.equal(M.pctAprovacao(0.29), '29%')
   assert.equal(M.pctAprovacao(1), '100%')
-  assert.match(M.corAprovacao(0.8), /emerald/)
-  assert.match(M.corAprovacao(0.7999), /amber/)
+  assert.match(M.corAprovacao(0.75), /emerald/)
+  assert.match(M.corAprovacao(0.7499), /amber/)
   assert.match(M.corAprovacao(0.6), /amber/)
   assert.match(M.corAprovacao(0.5999), /red/)
   assert.match(M.corAprovacao(null), /muted/)
@@ -217,7 +217,7 @@ async function principal() {
     assert.deepEqual(cartoes.map((c) => c[0]), ['todas', 'e:israel', 'e:londres'])
     const [todas, israel, londres] = cartoes.map((c) => c[1])
     assert.match(todas, />Todas</)
-    assert.match(todas, /text-amber-700[^"]*">75%</)
+    assert.match(todas, /text-emerald-700[^"]*">75%</, '75% já é a régua (desde a virada)')
     assert.match(todas, /60 decisões · 30 saiu sozinho · 42 pela equipe/)
     assert.doesNotMatch(todas, /loja/)
     assert.match(israel, /3 lojas[\s\S]*text-red-600[^"]*">55%</)

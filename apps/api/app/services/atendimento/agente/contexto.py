@@ -1037,7 +1037,14 @@ class ContextoAgente:
             self.etiquetas_pos_envio = self.etiquetas_pos_envio - tirar
 
     def _depois_do_envio(self, acao: str) -> bool:
-        """A ação fica para DEPOIS do envio (D1 ou a etiqueta liberada do turno)?"""
+        """A ação fica para DEPOIS do envio (D1 ou a etiqueta liberada do turno)?
+
+        A virada (13/11/2026, o Eduardo: "o cliente pedir atendente — ele é o próprio
+        atendente, não faz sentido ter ação de pessoa"): com a régua ligada, o "pediu
+        pessoa" não trava a resposta; a conversa só continua marcada.
+        """
+        if self.regua and acao == constantes.ACAO_PEDIU_PESSOA:
+            return True
         return (self.responde_e_marca and acao in ACOES_POS_ENVIO) or (
             acao in ACOES_ETIQUETA and acao in self.etiquetas_pos_envio
         )

@@ -2,7 +2,7 @@
 
 Os códigos são os assuntos do agente (`atendimento_categorias`): o banco de respostas
 guarda cada resposta da equipe com o tipo da pergunta, e é por tipo que a régua de
-envio sozinho é medida (80%, 90% nos sensíveis — o Eduardo, 13/11/2026). Quando a
+envio sozinho é medida (75%, 85% nos sensíveis — o Eduardo, 13/11/2026). Quando a
 pergunta tem rascunho do agente, vale o assunto que ELE declarou
 (`banco_respostas`); este classificador é para o histórico e para a resposta de fora
 (Duoke, Seller Center), que não têm rascunho.
@@ -27,7 +27,7 @@ INDEFINIDO = "indefinido"
 OUTRO = "outro"
 
 # Reembolso, cancelamento, troca/devolução e ameaça (Procon, processo): a régua de
-# envio sozinho é de 90% (o Eduardo, 13/11/2026). A mediação/reclamação aberta é um
+# envio sozinho é de 85% (o Eduardo, 13/11/2026; era 90%). A mediação/reclamação aberta é um
 # ESTADO da conversa (acao_pessoa `reclamacao_aberta`), não um tipo de pergunta.
 SENSIVEIS = frozenset({"reembolso", "cancelamento", "troca_devolucao", "reclamacao_forte"})
 

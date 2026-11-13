@@ -248,3 +248,26 @@ def test_o_portao_do_banco_fica_desligado_sem_a_chave():
     vazio = _rascunho("rastreio", {"banco_exigido": True, "banco_tipos": {}})
     assert ia.trava_do_agente(vazio, _canal()) is None
     assert get_settings().atendimento_portao_banco is False
+
+
+def test_pediu_atendente_nao_trava_com_a_regua():
+    """O Eduardo (13/11/2026): o agente é o próprio atendente — com a régua ligada, o
+    "pediu pessoa" fica só como marca, depois do envio."""
+    from app.services.atendimento import constantes
+
+    ctx = agente_ctx.ContextoAgente(
+        conversa_id="c",
+        gatilho_id=None,
+        canal_id=None,
+        integration_id=None,
+        plataforma="shopee",
+        canal="chat",
+        modo="auto",
+    )
+    ctx.acoes_codigo = [constantes.ACAO_PEDIU_PESSOA]
+    assert ctx.acoes_pessoa == [constantes.ACAO_PEDIU_PESSOA]
+    ctx.regua = True
+    assert ctx.acoes_pessoa == []
+    assert ctx.acoes_pos_envio == [constantes.ACAO_PEDIU_PESSOA]
+    ctx.acoes_codigo = [constantes.ACAO_PEDIU_PESSOA, constantes.ACAO_RECLAMACAO_ABERTA]
+    assert ctx.acoes_pessoa == [constantes.ACAO_RECLAMACAO_ABERTA]

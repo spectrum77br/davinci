@@ -6,7 +6,7 @@
 // 2. o período (24 h, 7, 15, 30 dias) e "atualizar";
 // 3. um cartão por equipe (e um "Todas") com a % de APROVAÇÃO DA IA — das decisões da equipe
 //    sobre o rascunho que o juiz julgou, quantas foram acerto (igual ou só a forma), a mesma
-//    conta da régua do envio sozinho (80%) — e, pequeno, as decisões, o que saiu sozinho e o
+//    conta da régua do envio sozinho (75%) — e, pequeno, as decisões, o que saiu sozinho e o
 //    que a equipe mandou pelo DaVinci (GET /metricas/equipes; a conta é de
 //    apps/api/app/services/atendimento/metricas_equipe.py);
 // 4. o select "Ver lojas…": só ao escolher (todas as equipes, uma equipe ou "sem equipe")
@@ -23,8 +23,9 @@ export const ROTAS = {
   analise: '/api/atendimento/metricas/analise',
 }
 export const PERIODOS = [1, 7, 15, 30]
-// A régua do envio sozinho (`regua.LIMIAR_PADRAO`, 80%): verde a partir dela; âmbar de 60%.
-export const REGUA = 0.8
+// A régua do envio sozinho (`regua.LIMIAR_PADRAO`, 75% desde a virada de 13/11/2026): verde a
+// partir dela; âmbar de 60%.
+export const REGUA = 0.75
 export const ATENCAO = 0.6
 export const FUSO = 'America/Sao_Paulo'
 // O cron `atendimento_analise_diaria` (apps/api/app/worker.py): 07:40 de São Paulo.
@@ -52,7 +53,7 @@ export function aprovacao(n: Pick<Numeros, 'decisoes' | 'acertos'> | null | unde
   if (!n || !n.decisoes) return null
   return (n.acertos || 0) / n.decisoes
 }
-// Para BAIXO: 79,5% aparece "79%" (âmbar) — nunca "80%" sem ter batido a régua.
+// Para BAIXO: 74,5% aparece "74%" (âmbar) — nunca "75%" sem ter batido a régua.
 export function pctAprovacao(a: number | null): string {
   return a === null ? '—' : `${Math.floor(a * 100 + 1e-6)}%`
 }
@@ -261,7 +262,7 @@ function pctPrazo(v: number | null | undefined) {
       <section v-if="equipes" class="space-y-2" data-equipes>
         <div class="flex flex-wrap items-baseline gap-2">
           <h3 class="text-sm font-semibold">Aprovação da IA por equipe</h3>
-          <span class="text-xs text-muted-foreground">Das decisões da equipe sobre o rascunho da IA, quantas o aprovaram (igual ou só a forma). Sai sozinho o assunto com 80%.</span>
+          <span class="text-xs text-muted-foreground">Das decisões da equipe sobre o rascunho da IA, quantas o aprovaram (igual ou só a forma). Sai sozinho o assunto com 75% (85% nos sensíveis).</span>
         </div>
         <div class="grid grid-cols-2 gap-2 md:grid-cols-4">
           <button

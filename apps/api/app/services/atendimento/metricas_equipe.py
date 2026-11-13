@@ -202,8 +202,8 @@ async def resumo(session: AsyncSession, *, dias: int, agora: datetime | None = N
 SISTEMA_ANALISE = (
     "Você é o analista do atendimento ao cliente de uma loja online brasileira (Shopee, "
     "Mercado Livre, TikTok Shop, Amazon). A IA escreve o rascunho de cada resposta; a equipe "
-    "aprova, ajusta ou reescreve; o que a equipe aprova em 80% dos casos de um assunto passa a "
-    "sair sozinho (90% em reembolso, cancelamento, troca e reclamação). Escreva para o dono, em "
+    "aprova, ajusta ou reescreve; o que a equipe aprova em 75% dos casos de um assunto passa a "
+    "sair sozinho (85% em reembolso, cancelamento, troca e reclamação). Escreva para o dono, em "
     "português, direto, em no máximo 10 linhas curtas: 1) como foi ontem (a aprovação da IA, "
     "o que saiu sozinho), 2) a tendência dos 7 dias e a equipe que melhorou ou piorou, 3) os "
     "assuntos em que a IA mais erra e o porquê, pelos motivos, 4) uma ou duas ações concretas "
