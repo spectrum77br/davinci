@@ -3,7 +3,7 @@
 // mostra a aba para admin (`abasDe`, pages/atendimento.vue) e a API recusa os outros com 403
 // `so_admin` (apps/api/app/routers/atendimento_banco.py). Duas partes:
 // - "Revisão do dia": o que a IA mandou SOZINHA no dia — todos os SENSÍVEIS (reembolso,
-//   cancelamento, troca/devolução e reclamação forte: a régua de 90%) e uma amostra de até 20
+//   cancelamento, troca/devolução e reclamação forte: a régua de 85%) e uma amostra de até 20
 //   dos outros, sempre a mesma no mesmo dia —, com a pergunta do cliente (o turno dele logo
 //   antes do envio) e o que saiu. 👍 "certo" conta acerto na régua do assunto; 👎 "errou" pede
 //   "como seria o certo" (vem com o texto da IA para ajustar) e a correção ENTRA NO BANCO como
@@ -345,7 +345,7 @@ const podeMostrarMais = computed(() => !!respostas.value && respostas.value.iten
         </Button>
       </div>
       <p class="text-xs text-muted-foreground">
-        O que a IA mandou <b>sozinha</b> no dia: todos os <b>sensíveis</b> (reembolso, cancelamento, troca e reclamação — a régua de 90%) e uma amostra de
+        O que a IA mandou <b>sozinha</b> no dia: todos os <b>sensíveis</b> (reembolso, cancelamento, troca e reclamação — a régua de 85%) e uma amostra de
         até {{ revisao?.amostra ?? 20 }} dos outros, sempre a mesma no mesmo dia. 👍 conta como acerto na régua do assunto; 👎 conta como erro, e a correção
         entra no banco de respostas como resposta ajustada por pessoa.
       </p>
@@ -378,7 +378,7 @@ const podeMostrarMais = computed(() => !!respostas.value && respostas.value.iten
         >
           <div class="flex flex-wrap items-center gap-1.5 border-b px-3 py-1.5 text-xs">
             <span class="rounded-full bg-muted px-2 py-0.5 font-medium">{{ i.assunto_nome }}</span>
-            <span v-if="i.sensivel" class="rounded-full bg-amber-500/20 px-2 py-0.5 text-amber-800 dark:text-amber-300" title="reembolso, cancelamento, troca ou reclamação: a régua é de 90%" data-sensivel>sensível</span>
+            <span v-if="i.sensivel" class="rounded-full bg-amber-500/20 px-2 py-0.5 text-amber-800 dark:text-amber-300" title="reembolso, cancelamento, troca ou reclamação: a régua é de 85%" data-sensivel>sensível</span>
             <AtendimentoPlataforma :codigo="i.plataforma" />
             <span class="font-medium">{{ i.loja || '—' }}</span>
             <span class="text-muted-foreground">· {{ canalLabel(i.canal) }}</span>

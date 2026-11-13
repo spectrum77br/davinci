@@ -7,6 +7,7 @@ do mesmo tipo) e com os textos mascarados. Desde a virada, os sensíveis e a cor
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from app.services.atendimento import ia
@@ -44,9 +45,10 @@ def _ctx(**campos) -> agente_ctx.ContextoAgente:
 
 
 class _Cliente:
-    def __init__(self, veredito: str):
+    def __init__(self, veredito: str, caso: str | None = "par:b1"):
         self.messages = self
         self.veredito = veredito
+        self.caso = caso if veredito == "mesma" else None
         self.pedidos: list[dict] = []
 
     async def create(self, **kwargs):
@@ -55,7 +57,9 @@ class _Cliente:
             content=[
                 SimpleNamespace(
                     type="text",
-                    text=f'{{"veredito": "{self.veredito}", "motivo": "mesma política"}}',
+                    text=json.dumps(
+                        {"id": self.caso, "veredito": self.veredito, "motivo": "mesma política"}
+                    ),
                 )
             ],
             stop_reason="end_turn",

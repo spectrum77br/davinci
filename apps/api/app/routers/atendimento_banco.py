@@ -24,7 +24,7 @@ chegada). Fica fora o rascunho que uma PESSOA já avaliou na conversa (o 👍/�
 igual, editou, descartou, escreveu do zero); a nota provisória da observação (`observou`)
 vira a da revisão.
 
-A AMOSTRA: todos os sensíveis (`tipos_pergunta.SENSIVEIS`, a régua de 90%) + até 20 dos
+A AMOSTRA: todos os sensíveis (`tipos_pergunta.SENSIVEIS`, a régua de 85%) + até 20 dos
 outros — os já revisados nunca saem da lista; o resto por sorteio com a semente do dia (o
 sha1 do dia e do rascunho): o mesmo dia mostra os mesmos.
 

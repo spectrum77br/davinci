@@ -1563,7 +1563,7 @@ async def _responder(
         ctx=ctx,
         t0=t0,
         sistema_hash=prompt.hash_do_sistema(
-            conversa.plataforma, base.categorias, ctx.banco_exigido
+            conversa.plataforma, base.categorias, virada=ctx.banco_exigido
         ),
         manual_hash=ia.manual_hash(ia.organizar_manual(list(base.regras), None)),
     )
@@ -1597,7 +1597,7 @@ async def _responder(
         modelo=modelo,
         effort=effort,
         max_turnos=max_turnos,
-        sistema=prompt.sistema(conversa.plataforma, base.categorias, ctx.banco_exigido),
+        sistema=prompt.sistema(conversa.plataforma, base.categorias, virada=ctx.banco_exigido),
         tools=ferramentas.ferramentas(ctx, base, conversa),
         texto_do_pacote=pac.texto,
     )

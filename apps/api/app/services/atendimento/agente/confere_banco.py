@@ -43,28 +43,35 @@ logger = structlog.get_logger()
 
 MESMA = "mesma"
 DIFERENTE = "diferente"
-MAX_CANDIDATAS = 3
+# A virada (13/11/2026): UMA chamada com todas as respostas do banco que o pacote mostrou (o
+# teste de 242 conversas: com 3 chamadas, uma por candidata na ordem do pacote, só 12 de 124
+# bateram — a candidata da vez costumava ser de outra pergunta).
+MAX_CANDIDATAS = 8
 MAX_CHARS = 900
-MAX_TOKENS = 400
+MAX_CHARS_CASO = 420
+MAX_TOKENS = 500
 TIMEOUT_S = 30.0
 
 SISTEMA = """\
-Você confere se a RESPOSTA PROPOSTA ao cliente diz o mesmo que a RESPOSTA DA EQUIPE. A \
-resposta da equipe foi dada antes, a outro cliente, à PERGUNTA QUE A EQUIPE RESPONDEU; nomes, \
-pedidos, datas e códigos aparecem mascarados ([NOME], [DATA], [CODIGO]…). Responda só com o \
-JSON pedido.
+Você confere se a RESPOSTA PROPOSTA ao cliente segue o que a equipe já respondeu num caso \
+parecido. Abaixo vêm CASOS DO BANCO: a pergunta de outro cliente e a resposta que a equipe da \
+loja deu; nomes, pedidos, datas e códigos aparecem mascarados ([NOME], [DATA], [CODIGO]…). \
+Responda só com o JSON pedido.
 
-- "mesma": as duas perguntas pedem a mesma coisa e a proposta passa a mesma informação, a \
-mesma política e o mesmo encaminhamento que a equipe deu. Ignore saudação, tom, tamanho, \
-ordem das frases e os dados de cada pedido (data, código, valor do pedido deste cliente).
-- "diferente": a pergunta que a equipe respondeu era outra, ou a proposta afirma algo que a \
-equipe não afirmou, contradiz a equipe, promete outra coisa ou pede outra ação ao cliente.
+- "mesma": um dos casos é o MESMO pedido do cliente (o mesmo assunto e o mesmo tipo de \
+pergunta) e a proposta segue o que a equipe fez nele: a mesma informação ou política e o \
+mesmo encaminhamento. Pode ter outras palavras, mais cortesia ou o dado do pedido deste \
+cliente; não pode afirmar o que a equipe não afirmou, prometer outra coisa nem pedir outra \
+ação ao cliente. Diga o id desse caso.
+- "diferente": nenhum caso é o mesmo pedido, ou a proposta contradiz, promete ou orienta \
+diferente da equipe. O id fica null.
 
 Na dúvida, "diferente"."""
 
 
 class Veredito(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
+    id: str | None
     veredito: Literal["mesma", "diferente"]
     motivo: str
 
@@ -75,26 +82,30 @@ def esquema() -> dict:
     return transform_schema(pydantic.TypeAdapter(Veredito).json_schema())
 
 
-def _corta(t: str | None) -> str:
+def _corta(t: str | None, teto: int = MAX_CHARS) -> str:
     t = " ".join(str(t or "").split())
-    return t if len(t) <= MAX_CHARS else t[: MAX_CHARS - 1] + "…"
+    return t if len(t) <= teto else t[: teto - 1] + "…"
 
 
 def entrada(
     pergunta: str | None,
     proposta: str | None,
-    da_equipe: str | None,
-    pergunta_da_equipe: str | None = None,
+    casos: Sequence[tuple[str, str, str]],
 ) -> str:
     """A mensagem do usuário (os textos já mascarados). PURA."""
-    return (
-        "<dados>\n"
-        f"PERGUNTA DO CLIENTE: {_corta(pergunta) or '(sem texto)'}\n"
-        f"RESPOSTA PROPOSTA: {_corta(proposta)}\n"
-        f"PERGUNTA QUE A EQUIPE RESPONDEU: {_corta(pergunta_da_equipe) or '(sem texto)'}\n"
-        f"RESPOSTA DA EQUIPE: {_corta(da_equipe)}\n"
-        "</dados>"
-    )
+    linhas = [
+        "<dados>",
+        f"PERGUNTA DO CLIENTE: {_corta(pergunta) or '(sem texto)'}",
+        f"RESPOSTA PROPOSTA: {_corta(proposta)}",
+        "CASOS DO BANCO:",
+    ]
+    for i, pergunta_da_equipe, da_equipe in casos:
+        linhas.append(
+            f"- {i} | cliente: «{_corta(pergunta_da_equipe, MAX_CHARS_CASO) or '(sem texto)'}» "
+            f"| equipe: «{_corta(da_equipe, MAX_CHARS_CASO)}»"
+        )
+    linhas.append("</dados>")
+    return "\n".join(linhas)
 
 
 def argumentos(texto: str, *, modelo: str) -> dict[str, Any]:
@@ -196,8 +207,9 @@ async def _conferir_candidatas(
     cliente: Any,
     modelo: str,
 ) -> dict[str, Any]:
-    """O registro da conferência (o 1º "mesma" para): {"id", "veredito", "motivo",
-    "custo_usd"}. Pode levantar (quem chama segura)."""
+    """O registro da conferência (uma chamada com todas as candidatas): {"id", "veredito",
+    "motivo", "custo_usd"}. O id que o modelo deu fora das candidatas não vale. Pode levantar
+    (quem chama segura)."""
     import anthropic
 
     from app.services.atendimento.agente import custo
@@ -207,32 +219,32 @@ async def _conferir_candidatas(
     nomes = list(getattr(ctx, "nomes", ()) or ())
     proposta = pares.generalizar(texto or "", nomes)
     pergunta_m = pares.generalizar(pergunta or "", nomes)
-    gasto = 0.0
-    for i, pergunta_da_equipe, da_equipe in cands:
-        uso = custo.Uso()
-        try:
-            await custo.conferir_teto(uso=uso, replay=replay)
-        except custo.TetoEstourado:
-            break
-        try:
-            mensagem = await cliente.messages.create(
-                **argumentos(
-                    entrada(pergunta_m, proposta, da_equipe, pergunta_da_equipe), modelo=modelo
-                ),
-                timeout=anthropic.Timeout(TIMEOUT_S, connect=10.0),
-            )
-        except anthropic.AnthropicError:
-            break
-        try:
-            gasto += await custo.registrar(
-                mensagem.usage, str(getattr(mensagem, "model", modelo)), uso=uso, replay=replay
-            )
-        except custo.TetoEstourado:
-            gasto += uso.custo_usd
-        v = veredito_da_mensagem(mensagem)
-        if v is not None and v.veredito == MESMA:
+    uso = custo.Uso()
+    nada = {"id": None, "veredito": DIFERENTE, "custo_usd": 0.0}
+    try:
+        await custo.conferir_teto(uso=uso, replay=replay)
+    except custo.TetoEstourado:
+        return nada
+    try:
+        mensagem = await cliente.messages.create(
+            **argumentos(entrada(pergunta_m, proposta, cands), modelo=modelo),
+            timeout=anthropic.Timeout(TIMEOUT_S, connect=10.0),
+        )
+    except anthropic.AnthropicError:
+        return nada
+    try:
+        gasto = await custo.registrar(
+            mensagem.usage, str(getattr(mensagem, "model", modelo)), uso=uso, replay=replay
+        )
+    except custo.TetoEstourado:
+        gasto = uso.custo_usd
+    v = veredito_da_mensagem(mensagem)
+    ids = [i for i, _p, _r in cands]
+    if v is not None and v.veredito == MESMA:
+        escolhido = v.id if v.id in ids else (ids[0] if len(ids) == 1 else None)
+        if escolhido:
             return {
-                "id": i,
+                "id": escolhido,
                 "veredito": MESMA,
                 "motivo": v.motivo[:160],
                 "custo_usd": round(gasto, 6),

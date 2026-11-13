@@ -14,6 +14,7 @@ próprio chat". Aqui:
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from typing import Any
 
@@ -57,9 +58,10 @@ def _ctx(**campos: Any) -> agente_ctx.ContextoAgente:
 
 
 class _Cliente:
-    def __init__(self, veredito: str):
+    def __init__(self, veredito: str, caso: str | None = "par:b1"):
         self.messages = self
         self.veredito = veredito
+        self.caso = caso if veredito == "mesma" else None
         self.pedidos: list[dict] = []
 
     async def create(self, **kwargs):
@@ -67,7 +69,10 @@ class _Cliente:
         return SimpleNamespace(
             content=[
                 SimpleNamespace(
-                    type="text", text=f'{{"veredito": "{self.veredito}", "motivo": "igual"}}'
+                    type="text",
+                    text=json.dumps(
+                        {"id": self.caso, "veredito": self.veredito, "motivo": "igual"}
+                    ),
                 )
             ],
             stop_reason="end_turn",
@@ -132,7 +137,7 @@ async def test_bateu_com_o_banco_a_pessoa_vira_marca_de_depois_do_envio():
     # A conferência leu a pergunta que a equipe respondeu, com o nome mascarado.
     (pedido,) = cliente.pedidos
     conteudo = str(pedido["messages"])
-    assert "PERGUNTA QUE A EQUIPE RESPONDEU: a loja é de qual estado?" in conteudo
+    assert "par:b1 | cliente: «a loja é de qual estado?» | equipe: «Enviamos de SP!»" in conteudo
     assert "Maria Souza" not in conteudo
     # A conferência de depois do verificador reaproveita o registro (sem chamar de novo).
     assert (
@@ -284,7 +289,7 @@ def test_o_pacote_da_virada_mostra_mais_respostas_como_dado():
 
 
 def test_o_sistema_da_virada_nunca_deixa_a_caixa_vazia():
-    antes, depois = prompt.bloco_geral(), prompt.bloco_geral(True)
+    antes, depois = prompt.bloco_geral(), prompt.bloco_geral(virada=True)
     for velho, novo in prompt.TROCAS_DA_VIRADA:
         assert antes.count(velho) == 1, velho[:40]
         assert velho not in depois and novo in depois
@@ -293,10 +298,10 @@ def test_o_sistema_da_virada_nunca_deixa_a_caixa_vazia():
     assert "De nada, tenha um ótimo dia!" in depois
     for velho, novo in prompt.TROCAS_DA_VIRADA_NA_PLATAFORMA:
         assert prompt.bloco_da_plataforma("shopee", []).count(velho) == 1
-        assert novo in prompt.bloco_da_plataforma("shopee", [], True)
+        assert novo in prompt.bloco_da_plataforma("shopee", [], virada=True)
     # Sem a virada, o sistema de sempre (e o hash dele).
     assert prompt.sistema("shopee", [])[0]["text"] == antes
-    assert prompt.hash_do_sistema("shopee", []) != prompt.hash_do_sistema("shopee", [], True)
+    assert prompt.hash_do_sistema("shopee", []) != prompt.hash_do_sistema("shopee", [], virada=True)
 
 
 def test_a_regua_nunca_vale_no_e_mail_nem_fora_do_banco(monkeypatch):
@@ -373,3 +378,17 @@ def test_separar_avisos_na_virada():
         separar_avisos(sem, modo="auto", pessoa_do_modelo=False, banco_bateu=True).precisa_humano
         is False
     )
+
+
+async def test_uma_chamada_com_todos_os_casos_e_o_id_fora_nao_vale():
+    ctx = _ctx()
+    p = _proposta()
+    cliente = _Cliente("mesma", caso="par:b2")
+    assert await _soltar(ctx, p, cliente)
+    assert ctx.banco_bateu == "par:b2"
+    (pedido,) = cliente.pedidos  # uma chamada só, com os dois casos
+    conteudo = str(pedido["messages"])
+    assert "- par:b1 |" in conteudo and "- par:b2 |" in conteudo
+    inventado = _ctx()
+    assert not await _soltar(inventado, _proposta(), _Cliente("mesma", caso="par:b99"))
+    assert inventado.banco_confere["veredito"] == "diferente"

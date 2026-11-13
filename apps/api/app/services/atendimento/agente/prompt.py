@@ -867,7 +867,7 @@ def na_virada(texto: str, trocas: Sequence[tuple[str, str]]) -> str:
 
 
 @functools.cache
-def bloco_geral(virada: bool = False) -> str:
+def bloco_geral(*, virada: bool = False) -> str:
     """O bloco 1 (igual para todas as plataformas). PURA e determinística. `virada` = com o
     banco de respostas e a régua ligados (`TROCAS_DA_VIRADA`)."""
     if virada:
@@ -1035,7 +1035,9 @@ ASSUNTOS_CABECALHO = (
 )
 
 
-def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict], virada: bool = False) -> str:
+def bloco_da_plataforma(
+    plataforma: str, categorias: Sequence[dict], *, virada: bool = False
+) -> str:
     """O bloco 2 da plataforma (regras, assuntos, caminhos do app). PURA e determinística.
 
     Só a plataforma e os assuntos (o manual) entram: a loja, o canal da
@@ -1078,7 +1080,7 @@ def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict], virada: boo
     return na_virada(texto, TROCAS_DA_VIRADA_NA_PLATAFORMA) if virada else texto
 
 
-def sistema(plataforma: str, categorias: Sequence[dict], virada: bool = False) -> list[dict]:
+def sistema(plataforma: str, categorias: Sequence[dict], *, virada: bool = False) -> list[dict]:
     """O `system` do Tool Runner: os 2 blocos, cada um com `cache_control` `CACHE_1H`.
 
     `[{"type": "text", "text": bloco_geral(), "cache_control": CACHE_1H},
@@ -1087,16 +1089,18 @@ def sistema(plataforma: str, categorias: Sequence[dict], virada: bool = False) -
     = 3 dos 4 que a API aceita.
     """
     return [
-        {"type": "text", "text": bloco_geral(virada), "cache_control": dict(CACHE_1H)},
+        {"type": "text", "text": bloco_geral(virada=virada), "cache_control": dict(CACHE_1H)},
         {
             "type": "text",
-            "text": bloco_da_plataforma(plataforma, categorias, virada),
+            "text": bloco_da_plataforma(plataforma, categorias, virada=virada),
             "cache_control": dict(CACHE_1H),
         },
     ]
 
 
-def hash_do_sistema(plataforma: str, categorias: Sequence[dict], virada: bool = False) -> str:
+def hash_do_sistema(plataforma: str, categorias: Sequence[dict], *, virada: bool = False) -> str:
     """16 caracteres hex do sistema inteiro (o rastro e o alerta de cache zerado)."""
-    corpo = json.dumps(sistema(plataforma, categorias, virada), sort_keys=True, ensure_ascii=False)
+    corpo = json.dumps(
+        sistema(plataforma, categorias, virada=virada), sort_keys=True, ensure_ascii=False
+    )
     return hashlib.sha256(corpo.encode()).hexdigest()[:16]
