@@ -392,3 +392,15 @@ async def test_uma_chamada_com_todos_os_casos_e_o_id_fora_nao_vale():
     inventado = _ctx()
     assert not await _soltar(inventado, _proposta(), _Cliente("mesma", caso="par:b99"))
     assert inventado.banco_confere["veredito"] == "diferente"
+
+
+def test_a_correcao_da_pessoa_vem_antes_na_busca():
+    """O Eduardo: alguém corrigiu a sugestão — na próxima parecida, ele acerta."""
+    from app.services.atendimento import banco_respostas as b
+
+    comum = {"mesmo_tipo": True, "mesmo_modelo": False, "mesmo_anuncio": False, "mesma_loja": True}
+    escreveu = b.nota_banco(0.5, idade_dias=1, **comum)
+    corrigiu = b.nota_banco(0.5, idade_dias=1, correcao=True, **comum)
+    assert corrigiu > escreveu
+    # A correção de 1 mês ainda vem antes da resposta de ontem com o mesmo texto.
+    assert b.nota_banco(0.5, idade_dias=30, correcao=True, **comum) > escreveu

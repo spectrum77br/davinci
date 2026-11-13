@@ -1657,6 +1657,11 @@ async def dados_consultar_manual(
                 if (linha.texto or "").strip()
             ]
         )
+        if getattr(ctx, "banco_exigido", False):
+            # A virada (13/11/2026, o Eduardo: "não terá mais respostas prontas — o que ele não
+            # souber, a pessoa corrige ali e manda, e na próxima ele acerta"): a fonte é o
+            # banco de respostas (o que a equipe respondeu de verdade), não a lista da tela.
+            prontas = []
         fatos: list[dict] = []
         if not ctx.sem_fatos:
             plat = ficha.plataforma_do_catalogo(ctx.plataforma)

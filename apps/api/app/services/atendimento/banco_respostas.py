@@ -797,6 +797,10 @@ def ia_enviou_igual(contagem: Mapping[str, Any]) -> tuple[int, float | None]:
 # caso é o agente, e o verificador confere o lastro com as regras de sempre.
 
 MEIA_VIDA_BANCO_DIAS = 90
+# A virada (13/11/2026, o Eduardo: "se ele não sabe e alguém responde editando a sugestão que
+# ele deu, ele tem que acertar essa na próxima ou parecida"): a CORREÇÃO da pessoa sobre o
+# rascunho da IA (`FONTE_AJUSTOU`) vem antes das outras respostas na busca.
+BONUS_CORRECAO_DA_IA = 1.5
 BONUS_MESMO_TIPO = 1.0
 BONUS_MESMO_MODELO = 0.75
 BONUS_MESMO_ANUNCIO_BANCO = 0.75
@@ -821,9 +825,11 @@ def nota_banco(
     mesmo_anuncio: bool,
     mesma_loja: bool,
     idade_dias: float,
+    correcao: bool = False,
 ) -> float:
     """A nota de uma resposta do banco na busca. PURA."""
     bonus = 1.0
+    bonus += BONUS_CORRECAO_DA_IA if correcao else 0.0
     bonus += BONUS_MESMO_TIPO if mesmo_tipo else 0.0
     bonus += BONUS_MESMO_MODELO if mesmo_modelo else 0.0
     bonus += BONUS_MESMO_ANUNCIO_BANCO if mesmo_anuncio else 0.0
@@ -917,6 +923,7 @@ async def buscar(
             mesmo_anuncio=mesmo_anuncio,
             mesma_loja=mesma_loja,
             idade_dias=idade,
+            correcao=linha.fonte == FONTE_AJUSTOU,
         )
         candidatos.append(
             (
