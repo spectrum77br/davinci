@@ -1420,6 +1420,8 @@ def _fatos_comuns(ctx: _Contexto, aut: cat.Automacao, linha: AtendimentoAutomaca
         "canal_sem_acesso": canal is not None and canal.status in _STATUS_SEM_ACESSO,
         "canal_erro": canal is not None and canal.status == "erro",
         "canal_auto": canal is not None and canal.modo == MODO_AUTO,
+        # A virada do agente (13/11/2026): as de evento que ficam saem no automático.
+        "eventos_no_auto": bool(get_settings().atendimento_automacoes_eventos_no_auto),
         "conversa_bloqueada": conversa is not None and conversa.situacao == CONVERSA_BLOQUEADA,
         "etiqueta": conversa.etiqueta if conversa is not None else None,
         # A conversa com alguém da equipe ("Atribuir a mim" ou a IA pausada).

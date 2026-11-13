@@ -142,6 +142,14 @@ TIPO_NAO_PAGO_LEMBRETE = "nao_pago_lembrete"
 ULTIMA_HORA_NAO_PAGO = timedelta(hours=23)
 # Os do não pago que conferem na plataforma, na hora, que o pedido segue não pago.
 TIPOS_NAO_PAGO_AO_VIVO = (TIPO_NAO_PAGO_BRINDE, TIPO_NAO_PAGO_LEMBRETE)
+# As de EVENTO que FICAM na virada do agente (13/11/2026, o Eduardo: "fica só as que envia
+# coisa como carrinho, mensagem chamando" + entregue, avaliação, convite e "ficou alguma
+# dúvida?"): com `atendimento_automacoes_eventos_no_auto` (o fato `eventos_no_auto`), saem
+# também na loja com o agente no automático. As de resposta (menu, opção, aguarde) e o
+# pedido recebido e a pós-conclusão continuam parando lá — é assim que acabam.
+TIPOS_SEGUEM_NO_AUTOMATICO = frozenset(
+    {TIPO_NAO_PAGO, TIPO_ENTREGUE, TIPO_CONVITE, TIPO_DUVIDA_1, TIPO_DUVIDA_2}
+)
 # O que volta para antes da noite (`devido_antes_da_noite`) sai este tanto antes de a
 # janela fechar: o motor roda de 2 em 2 min e a última rodada aberta é a das 20h58 —
 # a 20h59 de antes (09/11/2026) só era vista às 21h00, já fechada (10/11/2026).
@@ -1432,6 +1440,7 @@ def chat_segurado_pela_ia(aut: Automacao, f: dict, regra: Any = None) -> str | N
     if (
         aut.alvo == ALVO_AVALIACAO
         and f.get("canal_auto")
+        and not f.get("eventos_no_auto")
         and not _cond(regra, aut, "com_ia_no_automatico", False)
     ):
         return "ia_no_automatico"
@@ -2625,6 +2634,8 @@ def decidir(aut: Automacao, f: dict, regra: Any = None) -> str | None:
         f.get("canal_auto")
         and aut.alvo != ALVO_AVALIACAO
         and not (aut.tipo in TIPOS_NAO_PAGO_AO_VIVO and _cond(regra, aut, "com_ia_no_automatico"))
+        # A virada do agente (13/11/2026): as de evento que ficam saem no automático.
+        and not (f.get("eventos_no_auto") and aut.tipo in TIPOS_SEGUEM_NO_AUTOMATICO)
     ):
         # A avaliação na loja com a IA no automático é só o CHAT dela
         # (`chat_segurado_pela_ia`, abaixo): a pública não passa pela IA. O brinde

@@ -632,6 +632,13 @@ class Settings(BaseSettings):
     atendimento_automacoes_ativa: bool = False
     atendimento_automacoes_envio: bool = False
     atendimento_automacoes_teto_dia: int = 400
+    # A VIRADA do agente (13/11/2026, o Eduardo): todas as lojas vão para o automático do
+    # agente; as automáticas de RESPOSTA acabam (menu, opções, "aguarde", pedido recebido,
+    # pós-conclusão — no automático elas já não saem) e as de EVENTO que chamam o cliente
+    # FICAM: não pago com cupom ("carrinho"), entregue, convite para seguir a loja, "ficou
+    # alguma dúvida?" e o chat da avaliação (o brinde e o lembrete já saíam). Ligar junto com
+    # a virada; desligada, nada muda.
+    atendimento_automacoes_eventos_no_auto: bool = False
     atendimento_automacoes_shopee_auto_reply: bool = False
     # O brinde do pedido não pago no TikTok (05/11/2026):
     #   • `atendimento_tiktok_nao_pagos_ativa`: a rodada `atendimento_tiktok_nao_pagos`
