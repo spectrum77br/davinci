@@ -804,6 +804,9 @@ async def test_pacote_lendo_o_banco_e_a_chave(db: AsyncSession, make_user, monke
     assert da_loja["mesmo_anuncio"] is True and da_loja["titulo_do_anuncio"].startswith("Celular")
     assert de_fora["mesma_loja"] is False and de_fora["fonte_de_produto"] is False
     assert exemplos[0] is da_loja  # o da mesma loja primeiro
+    # A virada (13/11/2026): cada resposta leva o TIPO dela no banco — é por ele que a
+    # conferência pelo sentido acha a resposta do mesmo tipo (`agente.confere_banco`).
+    assert all(e.get("tipo") for e in exemplos)
 
 
 def test_eval_tem_o_braco_do_opus_e_le_o_banco_so_no_processo(monkeypatch, tmp_path):

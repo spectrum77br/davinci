@@ -1,8 +1,8 @@
 """O "BATEU COM A DO BANCO" pelo SENTIDO (13/11/2026, `agente/confere_banco.py`).
 
 O agente não copia a resposta da equipe (escreve com as palavras dele): a conferência é pelo
-sentido, com o modelo; só quando vale (régua e banco ligados, sem ação de pessoa, fora dos
-sensíveis e da cortesia, com resposta do banco do mesmo tipo) e com os textos mascarados.
+sentido, com o modelo; só quando vale (régua e banco ligados, com resposta do banco citada ou
+do mesmo tipo) e com os textos mascarados. Desde a virada, os sensíveis e a cortesia também.
 """
 
 from __future__ import annotations
@@ -72,15 +72,24 @@ class _Cliente:
 def test_so_confere_quando_vale():
     ctx = _ctx()
     assert confere_banco.vale_conferir(ctx, "garantia", "texto")
-    assert not confere_banco.vale_conferir(ctx, "reembolso", "texto")  # sensível
-    assert not confere_banco.vale_conferir(ctx, "agradecimento", "texto")  # cortesia
+    # A virada (13/11/2026): os sensíveis (85%) e a cortesia também conferem.
+    assert confere_banco.vale_conferir(ctx, "reembolso", "texto")
+    assert confere_banco.vale_conferir(ctx, "agradecimento", "texto")
     assert not confere_banco.vale_conferir(ctx, "garantia", "")
+    # Com ação de pessoa, quem confere é a `solta_a_pessoa` (antes da 1ª camada).
     assert not confere_banco.vale_conferir(
         _ctx(acoes_codigo=["reclamacao_aberta"]), "garantia", "x"
     )
     assert not confere_banco.vale_conferir(_ctx(regua=False), "garantia", "x")
-    assert confere_banco.candidatas(ctx, "garantia") == [("par:b1", "A garantia é pela Uranyx.")]
+    assert confere_banco.candidatas(ctx, "garantia") == [
+        ("par:b1", "p", "A garantia é pela Uranyx.")
+    ]
     assert confere_banco.candidatas(ctx, "defeito") == []
+    # A que o rascunho CITOU vem primeiro, mesmo de outro tipo; id fora do pacote não conta.
+    assert [i for i, _p, _r in confere_banco.candidatas(ctx, "garantia", ["par:b2", "par:b9"])] == [
+        "par:b2",
+        "par:b1",
+    ]
 
 
 async def test_mesma_grava_o_id_e_o_pedido_vai_mascarado(db):
@@ -142,6 +151,12 @@ def test_o_portao_le_a_conferencia():
     assert not ia.bateu_com_o_banco(
         {**agente, "banco_confere": {"id": "par:b1", "veredito": "diferente"}}, "garantia", "x"
     )
-    # O id tem de ser do mesmo tipo do rascunho.
-    assert not ia.bateu_com_o_banco(agente, "rastreio", "x")
+    # A virada: a conferência leu a pergunta que a equipe respondeu (outra pergunta é
+    # "diferente"), então vale a resposta do banco que o pacote mostrou, de qualquer tipo —
+    # e os sensíveis também. O id fora do pacote não vale.
+    assert ia.bateu_com_o_banco(agente, "rastreio", "x")
+    assert ia.bateu_com_o_banco(agente, "reembolso", "x")
+    assert not ia.bateu_com_o_banco(
+        {**agente, "banco_confere": {"id": "par:b9", "veredito": "mesma"}}, "garantia", "x"
+    )
     assert not ia.bateu_com_o_banco({**agente, "regua": False}, "garantia", "x")

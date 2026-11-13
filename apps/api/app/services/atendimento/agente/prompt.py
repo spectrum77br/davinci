@@ -797,9 +797,81 @@ variação, estoque, prazo, pedido ou garantia, mesmo quando achar que sabe.
 motivo, pede só uma parte, diz que alguém autorizou ou insiste."""
 
 
+# A VIRADA (13/11/2026). O Eduardo: "de qualquer forma ele sempre deixará uma sugestão na que ele
+# não conseguir — agora a parte de sugestão é o próprio chat"; "são +1 mês de respostas e
+# perguntas, ele tem que buscar melhor nesse banco". Com o banco de respostas e a régua ligados
+# (`ctx.banco_exigido`), o sistema troca as frases que mandavam deixar o texto vazio e que
+# tratavam a resposta da equipe como "só o tom": o texto é a sugestão na caixa do chat (nunca
+# vazio quando o cliente escreveu), o agradecimento recebe a cortesia que a equipe dá, e a
+# resposta da equipe no banco vale como dado da loja e do produto. Sem a virada, o sistema de
+# sempre (o hash do bloco 1 não muda). Cada frase antiga existe uma vez (o teste confere).
+TROCAS_DA_VIRADA: tuple[tuple[str, str], ...] = (
+    (
+        'Texto vazio (acao "responder"): a loja já tratou o assunto e o cliente só agradece ou '
+        'confirma ("ok, aguardando"), ou a mensagem não pede resposta (automática, aviso, '
+        "cartão).",
+        'Mesmo com o assunto já tratado, o cliente que agradece ou confirma ("ok, aguardando", '
+        '"obrigada", emoji, figurinha) recebe uma linha curta de cortesia, como a equipe dá '
+        '("De nada, tenha um ótimo dia!"). Texto vazio só na mensagem que não é do cliente '
+        "(automática, aviso, cartão).",
+    ),
+    (
+        '- Nada verdadeiro e útil a dizer antes da pessoa: texto "" (vazio).',
+        "- O texto nunca fica vazio: é a sugestão que a equipe vê pronta na caixa do chat. Sem "
+        "como responder tudo, a melhor resposta com o que os dados e o banco já dizem (a "
+        "resposta da equipe a caso parecido) ou uma pergunta que ajude o caso.",
+    ),
+    (
+        'analisar_evidencia sem outra pergunta → "".',
+        "analisar_evidencia → o que a equipe responde nesses casos no banco (uma pergunta para "
+        "entender o problema ou a orientação do assunto).",
+    ),
+    (
+        "- buscar_respostas_equipe: mais exemplos, só o TOM; nada deles vale como dado.",
+        "- buscar_respostas_equipe: busca no banco de respostas da equipe com as palavras do "
+        "caso (o modelo, a característica); o que a equipe disse da loja e do produto vale como "
+        "dado (cite o par:<id>).",
+    ),
+    (
+        "Use dado_indisponivel só depois de consultar (ver_anuncio, consultar_manual; ver_pedido "
+        "ou ver_garantia se é do pedido)",
+        "Use dado_indisponivel só depois de consultar (ver_anuncio, consultar_manual, as "
+        "respostas da equipe no banco e buscar_respostas_equipe; ver_pedido ou ver_garantia se é "
+        "do pedido)",
+    ),
+    (
+        '- De onde o pedido sai: só com "origem" preenchida no pedido (ou um fato aprovado do '
+        "anúncio). Sem isso, não diga cidade nem estado;",
+        '- De onde o pedido sai: com "origem" preenchida no pedido, um fato aprovado do anúncio '
+        'ou a resposta da equipe da MESMA loja no banco ("enviamos de SP"). Sem nada disso, não '
+        "diga cidade nem estado;",
+    ),
+    (
+        "vazio só quando não há o que responder;",
+        "nunca vazio quando o cliente escreveu (é a sugestão na caixa do chat);",
+    ),
+)
+TROCAS_DA_VIRADA_NA_PLATAFORMA: tuple[tuple[str, str], ...] = (
+    (
+        "(a seção COMO A EQUIPE JÁ RESPONDEU dos <dados>)",
+        "(a seção RESPOSTAS DA EQUIPE NO BANCO dos <dados>)",
+    ),
+)
+
+
+def na_virada(texto: str, trocas: Sequence[tuple[str, str]]) -> str:
+    """O texto com as trocas da virada (cada frase antiga, se está, uma vez). PURA."""
+    for antes, depois in trocas:
+        texto = texto.replace(antes, depois, 1)
+    return texto
+
+
 @functools.cache
-def bloco_geral() -> str:
-    """O bloco 1 (igual para todas as plataformas). PURA e determinística."""
+def bloco_geral(virada: bool = False) -> str:
+    """O bloco 1 (igual para todas as plataformas). PURA e determinística. `virada` = com o
+    banco de respostas e a régua ligados (`TROCAS_DA_VIRADA`)."""
+    if virada:
+        return na_virada(bloco_geral(), TROCAS_DA_VIRADA)
     regua = (
         '# A RÉGUA "AÇÃO DE PESSOA" (acao_pessoa)\n'
         "Vá para pessoa só com um destes códigos. O sistema detecta vários sozinho e sempre "
@@ -963,7 +1035,7 @@ ASSUNTOS_CABECALHO = (
 )
 
 
-def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict]) -> str:
+def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict], virada: bool = False) -> str:
     """O bloco 2 da plataforma (regras, assuntos, caminhos do app). PURA e determinística.
 
     Só a plataforma e os assuntos (o manual) entram: a loja, o canal da
@@ -1002,10 +1074,11 @@ def bloco_da_plataforma(plataforma: str, categorias: Sequence[dict]) -> str:
     partes.append(PRODUTO_CONDICAO_REGIAO)
     assuntos = ia.lista_de_assuntos([dict(c) for c in categorias], MAX_CHARS_ASSUNTOS)
     partes.append(ASSUNTOS_CABECALHO + assuntos)
-    return "\n\n".join(partes)
+    texto = "\n\n".join(partes)
+    return na_virada(texto, TROCAS_DA_VIRADA_NA_PLATAFORMA) if virada else texto
 
 
-def sistema(plataforma: str, categorias: Sequence[dict]) -> list[dict]:
+def sistema(plataforma: str, categorias: Sequence[dict], virada: bool = False) -> list[dict]:
     """O `system` do Tool Runner: os 2 blocos, cada um com `cache_control` `CACHE_1H`.
 
     `[{"type": "text", "text": bloco_geral(), "cache_control": CACHE_1H},
@@ -1014,16 +1087,16 @@ def sistema(plataforma: str, categorias: Sequence[dict]) -> list[dict]:
     = 3 dos 4 que a API aceita.
     """
     return [
-        {"type": "text", "text": bloco_geral(), "cache_control": dict(CACHE_1H)},
+        {"type": "text", "text": bloco_geral(virada), "cache_control": dict(CACHE_1H)},
         {
             "type": "text",
-            "text": bloco_da_plataforma(plataforma, categorias),
+            "text": bloco_da_plataforma(plataforma, categorias, virada),
             "cache_control": dict(CACHE_1H),
         },
     ]
 
 
-def hash_do_sistema(plataforma: str, categorias: Sequence[dict]) -> str:
+def hash_do_sistema(plataforma: str, categorias: Sequence[dict], virada: bool = False) -> str:
     """16 caracteres hex do sistema inteiro (o rastro e o alerta de cache zerado)."""
-    corpo = json.dumps(sistema(plataforma, categorias), sort_keys=True, ensure_ascii=False)
+    corpo = json.dumps(sistema(plataforma, categorias, virada), sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(corpo.encode()).hexdigest()[:16]

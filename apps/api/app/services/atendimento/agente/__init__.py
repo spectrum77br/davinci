@@ -796,6 +796,12 @@ def _guardar_avisos(ctx: ContextoAgente, final: SaidaConferida) -> None:
     ctx.sem_auto = list(final.sem_auto)
 
 
+def _pergunta_do_turno(base: BaseDoGerar, gatilho: Any | None) -> str:
+    """O turno do cliente (a rajada) para a conferência com o banco; sem ela, o gatilho."""
+    textos = [t for t in (getattr(base, "textos_rajada", None) or []) if isinstance(t, str)]
+    return " ".join(" ".join(textos).split()) or str(getattr(gatilho, "texto", None) or "")
+
+
 def _nao_pede_resposta(
     p: Proposta, conferida: SaidaConferida, ctx: ContextoAgente, base: BaseDoGerar
 ) -> bool:
@@ -1552,7 +1558,9 @@ async def _responder(
     ex = _Execucao(
         ctx=ctx,
         t0=t0,
-        sistema_hash=prompt.hash_do_sistema(conversa.plataforma, base.categorias),
+        sistema_hash=prompt.hash_do_sistema(
+            conversa.plataforma, base.categorias, ctx.banco_exigido
+        ),
         manual_hash=ia.manual_hash(ia.organizar_manual(list(base.regras), None)),
     )
 
@@ -1585,7 +1593,7 @@ async def _responder(
         modelo=modelo,
         effort=effort,
         max_turnos=max_turnos,
-        sistema=prompt.sistema(conversa.plataforma, base.categorias),
+        sistema=prompt.sistema(conversa.plataforma, base.categorias, ctx.banco_exigido),
         tools=ferramentas.ferramentas(ctx, base, conversa),
         texto_do_pacote=pac.texto,
     )
@@ -1660,6 +1668,22 @@ async def _responder(
     # dela (a `conferir_proposta` troca a "pessoa"/etiqueta por "responder" e guarda a ação
     # à parte — conferir de novo a já trocada perdia a etiqueta que o modelo escolheu).
     p_do_modelo = p
+    # A VIRADA (13/11/2026, o Eduardo: "não existirá mais esse 'precisa de pessoa'"): o
+    # rascunho que pede pessoa e diz o mesmo que a resposta da equipe no banco (pelo sentido)
+    # responde e marca — antes da 1ª camada, para ele seguir como qualquer outro rascunho.
+    from app.services.atendimento.agente import confere_banco
+
+    await confere_banco.solta_a_pessoa(
+        ctx,
+        texto=p.texto,
+        categoria=saida.assunto_valido(p.assunto, base.ids_categorias)[0],
+        acao_do_modelo=p.acao_pessoa,
+        pessoa_do_modelo=saida.precisa_pessoa(p),
+        evidencias=saida.evidencias(p),
+        pergunta=_pergunta_do_turno(base, gatilho),
+        cliente=cliente,
+        modelo=ctx.modelo or get_settings().atendimento_agente_modelo,
+    )
     c = await conferir_proposta(session, conversa, gatilho, base, ctx, p, pac)
     p, conferida = c.proposta, c.conferida
     if c.sem_resposta:
@@ -1757,18 +1781,18 @@ async def _responder(
     fatos_do_verificador = {"verificador": conf.registro} if conf.registro is not None else {}
     fatos_do_verificador.update(fatos_do_corte)
     # "Bateu com a do banco, faz sentido, já manda" (13/11/2026): a conferência pelo sentido
-    # com a resposta da equipe do mesmo tipo (`confere_banco`; só com a régua e o banco).
-    from app.services.atendimento.agente import confere_banco
-
+    # com a resposta da equipe no banco (`confere_banco`; só com a régua e o banco; a de antes
+    # da 1ª camada, quando houve, vale).
     fatos_do_verificador.update(
         await confere_banco.conferir(
             session,
             ctx,
             categoria=final.categoria,
             texto=final.texto,
-            pergunta=getattr(gatilho, "texto", None),
+            pergunta=_pergunta_do_turno(base, gatilho),
             cliente=cliente,
             modelo=ctx.modelo or get_settings().atendimento_agente_modelo,
+            evidencias=ctx.evidencias,
         )
     )
     ctx.parada = PARADA_FIM

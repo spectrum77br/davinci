@@ -156,6 +156,19 @@ EQUIPE_CABECALHO = (
     "produto da loja — dado de pedido nunca vem daqui; cite o par:<id> que seguir):"
 )
 MAX_CHARS_EQUIPE = 1_200
+# A VIRADA (13/11/2026, o Eduardo: "são +1 mês de respostas e perguntas, não é possível que não
+# ache parecida"): com o banco de respostas ligado (`ctx.banco_exigido`), o pacote mostra até
+# `MAX_PARES_BANCO` respostas da equipe (eram 4, em ~1.200 caracteres) e elas valem como DADO
+# da loja e do produto — o cabeçalho diz o que vale e o que nunca vale.
+MAX_PARES_BANCO = 8
+MAX_CHARS_EQUIPE_BANCO = 2_600
+BANCO_CABECALHO = (
+    "RESPOSTAS DA EQUIPE NO BANCO (o que a equipe já respondeu a casos parecidos, outros "
+    "clientes, mascarados). Valem como DADO da loja e do produto — de onde enviamos, o que vem "
+    "na caixa, política, especificação, tamanho, variação —, como a equipe disse; dado de "
+    "pedido (rastreio, data, valor, situação) nunca vem daqui. Responda como a equipe "
+    "respondeu e cite o par:<id> que seguir:"
+)
 
 
 def quando_do_par(par: Mapping[str, Any]) -> str:
@@ -189,17 +202,22 @@ def _onde_do_par(par: Mapping[str, Any]) -> str:
     return f"{loja}, {produto}, {vale}, {quando_do_par(par)}"
 
 
-def secao_da_equipe(pares: Sequence[Mapping[str, Any]]) -> tuple[str | None, list[dict]]:
-    """(o texto da seção, os pares que couberam) — até `MAX_CHARS_EQUIPE`. PURA."""
-    linhas = [EQUIPE_CABECALHO]
-    total = len(EQUIPE_CABECALHO)
+def secao_da_equipe(
+    pares: Sequence[Mapping[str, Any]], *, banco: bool = False
+) -> tuple[str | None, list[dict]]:
+    """(o texto da seção, os pares que couberam) — até `MAX_CHARS_EQUIPE` (com o banco da
+    virada, `BANCO_CABECALHO` e até `MAX_CHARS_EQUIPE_BANCO`). PURA."""
+    cabecalho = BANCO_CABECALHO if banco else EQUIPE_CABECALHO
+    teto = MAX_CHARS_EQUIPE_BANCO if banco else MAX_CHARS_EQUIPE
+    linhas = [cabecalho]
+    total = len(cabecalho)
     cabem: list[dict] = []
     for par in pares:
         linha = (
             f"- {par['id']} ({_onde_do_par(par)}): cliente «{par.get('pergunta') or ''}» → "
             f"equipe «{par.get('resposta') or ''}»"
         )
-        if total + 1 + len(linha) > MAX_CHARS_EQUIPE:
+        if total + 1 + len(linha) > teto:
             break
         linhas.append(linha)
         total += 1 + len(linha)
@@ -1288,7 +1306,17 @@ async def montar_pacote(
         partes.extend(f"- {p}" for p in pendentes)
     # Item 32 (22/10/2026): como a equipe já respondeu o mesmo tipo de pergunta.
     da_equipe: list[dict] = []
-    if busca := _turno_para_a_busca(base):
+    banco = bool(getattr(ctx, "banco_exigido", False))
+    busca = _turno_para_a_busca(base)
+    if not busca and banco:
+        # A virada: o turno só de agradecimento, cumprimento ou "quero atendente" também
+        # procura no banco — a pergunta que ficou sem resposta ou, sem ela, o próprio turno
+        # (o "de nada, tenha um bom dia!" da equipe é a resposta ao "obrigada").
+        busca = " ".join(_perguntas_pendentes(base)) or " ".join(
+            " ".join(t for t in base.textos_rajada if isinstance(t, str)).split()
+        )
+    limite_equipe = MAX_PARES_BANCO if banco else pares_svc.MAX_PARES_PACOTE
+    if busca:
         da_equipe = await contexto_svc._seguro(
             session,
             "agente_pares",
@@ -1309,6 +1337,7 @@ async def montar_pacote(
                     **{a.item_id: a.titulo for a in anuncios if a.titulo},
                     **{f["item_id"]: f.get("titulo") for f in fichas if f.get("titulo")},
                 },
+                limite=limite_equipe,
             ),
             [],
             conversa.id,
@@ -1334,9 +1363,9 @@ async def montar_pacote(
         da_equipe = [
             *(politica or []),
             *(p for p in da_equipe or [] if p.get("id") not in ids_da_politica),
-        ][: pares_svc.MAX_PARES_PACOTE]
+        ][:limite_equipe]
     if da_equipe:
-        secao, mostrados = secao_da_equipe(da_equipe)
+        secao, mostrados = secao_da_equipe(da_equipe, banco=banco)
         if secao:
             partes.append(secao)
             ctx.registrar_pares(mostrados)

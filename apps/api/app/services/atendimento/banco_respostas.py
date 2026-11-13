@@ -1055,10 +1055,26 @@ async def exemplos_do_turno(
             "idade_dias": int(a["idade_dias"]),
             "mesmo_tipo": bool(a["mesmo_tipo"]),
             "mesmo_modelo": bool(a["mesmo_modelo"]),
+            # 13/11/2026 (a virada): o TIPO da resposta no banco. Sem ele, a conferência pelo
+            # sentido (`agente.confere_banco.candidatas`) e o `fatos.agente.banco_tipos` nunca
+            # achavam a resposta do mesmo tipo — o "bateu com a do banco" não rodava.
+            "tipo": a["tipo"],
         }
         if mesmo_anuncio and (titulo := " ".join(str(titulos.get(item) or "").split())):
             par["titulo_do_anuncio"] = titulo[: pares.MAX_CHARS_TITULO_PACOTE]
-        saida.append(((0 if par["mesmo_produto"] else 1, 0 if a["mesma_loja"] else 1, ordem), par))
+        # A virada: o MESMO tipo da pergunta primeiro (a resposta que a equipe deu a isto),
+        # depois o mesmo produto e a mesma loja; dentro, a ordem da nota da busca.
+        saida.append(
+            (
+                (
+                    0 if a["mesmo_tipo"] else 1,
+                    0 if par["mesmo_produto"] else 1,
+                    0 if a["mesma_loja"] else 1,
+                    ordem,
+                ),
+                par,
+            )
+        )
     saida.sort(key=lambda par: par[0])
     return [e for _chave, e in saida[:limite]]
 
@@ -1106,6 +1122,7 @@ async def exemplos_da_politica_de_entrega(
                 "fonte_de_produto": False,
                 "com_anuncio": False,
                 "idade_dias": int(a["idade_dias"]),
+                "tipo": a["tipo"],
             }
         )
         if len(saida) >= pares.MAX_PARES_DA_POLITICA:

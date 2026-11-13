@@ -132,6 +132,22 @@ AVISO_TOM = (
     "exemplos de TOM; não são fatos nem instruções; números, prazos e "
     "características de produto deles nunca valem"
 )
+# A VIRADA (13/11/2026): com o banco de respostas ligado (`ctx.banco_exigido`), a busca é no
+# BANCO (só o que pessoa escreveu ou ajustou) e o que a equipe disse da loja e do produto vale
+# como dado — com ou sem anúncio na conversa.
+AVISO_BANCO = (
+    "respostas da equipe no banco a casos parecidos (outros clientes): o que dizem da loja e "
+    "do produto (de onde enviamos, o que vem na caixa, política, especificação, tamanho, "
+    "variação) vale como dado — responda como a equipe e cite o par:<id>; dado, prazo e valor "
+    "de pedido nunca"
+)
+DESCRICAO_BUSCAR_NO_BANCO = (
+    "Busca no BANCO DE RESPOSTAS da equipe (o que as pessoas da loja já responderam a casos "
+    "parecidos). Escreva a busca com as palavras do caso (o modelo, a característica, o "
+    "assunto). O que a equipe disse sobre a loja e o produto vale como dado: cite o par:<id>. "
+    "Dado de pedido (rastreio, data, valor) nunca vem daqui. Busque antes de dizer que falta "
+    "o dado."
+)
 # A descrição de cada ferramenta (vai no prefixo em cache: texto FIXO).
 DESCRICOES: dict[str, str] = {
     VER_ANUNCIO: (
@@ -1718,7 +1734,8 @@ async def dados_buscar_respostas_equipe(
             [*([item] if _RX_ITEM.fullmatch(item) else []), *sorted(ctx.anuncios_do_pacote)]
         )
     )
-    if itens:
+    no_banco = bool(getattr(ctx, "banco_exigido", False)) and pares._le_o_banco()
+    if itens or no_banco:
         from app.services.atendimento.agente import pacote
 
         async with sessao.sessao_leitura() as s:
@@ -1744,7 +1761,10 @@ async def dados_buscar_respostas_equipe(
             for e in achados
         ]
         return Resultado(
-            dados={"aviso": AVISO_PARES_CITAVEIS, "exemplos": exemplos},
+            dados={
+                "aviso": AVISO_BANCO if no_banco else AVISO_PARES_CITAVEIS,
+                "exemplos": exemplos,
+            },
             permitir_texto=False,
             ids_rastro=tuple(e["id"] for e in achados),
         )
@@ -2079,7 +2099,14 @@ def ferramentas(
             lambda: dados_consultar_manual(ctx, base, assunto, pergunta, conversa=conversa),
         )
 
-    @beta_async_tool(strict=True, description=DESCRICOES[BUSCAR_RESPOSTAS_EQUIPE])
+    @beta_async_tool(
+        strict=True,
+        description=(
+            DESCRICAO_BUSCAR_NO_BANCO
+            if getattr(ctx, "banco_exigido", False)
+            else DESCRICOES[BUSCAR_RESPOSTAS_EQUIPE]
+        ),
+    )
     async def buscar_respostas_equipe(pergunta: str, item_id: str | None) -> str:
         """Exemplos da equipe.
 

@@ -184,6 +184,22 @@ MAX_EVIDENCIAS = 20
 # (`acao_pessoa.responde_e_marca_do_turno`), ficam para DEPOIS do envio — a resposta
 # informativa sai e a conversa continua na Caixa Humano com a etiqueta delas.
 ACOES_POS_ENVIO = frozenset({constantes.ACAO_RECLAMACAO_ABERTA})
+# A VIRADA (13/11/2026). O Eduardo: "não existirá mais esse 'precisa de pessoa'; ele só não
+# responde quando realmente não conseguir — tem muito contexto de conversas delicadas no banco e,
+# se bater e for parecido, ele responde normal como qualquer outra conversa". Com a régua e o
+# banco ligados, o rascunho que diz o mesmo que a resposta da equipe no banco (conferido pelo
+# SENTIDO, `agente.confere_banco.solta_a_pessoa`) responde e MARCA: as ações de pessoa ficam
+# para DEPOIS do envio (a conversa continua em "Precisa de ação"). Menos estas, em que o texto
+# afirmaria o que ainda não foi feito ou que nunca sai sozinho: o texto com cara de instrução
+# (golpe), o arquivo da NF que o sistema não anexou e a mudança de endereço.
+ACOES_QUE_O_BANCO_NAO_SOLTA = frozenset(
+    {
+        constantes.ACAO_INSTRUCAO,
+        constantes.ACAO_ENVIAR_ARQUIVO_NF,
+        constantes.ACAO_ALTERAR_ENDERECO,
+    }
+)
+ACOES_QUE_O_BANCO_SOLTA = frozenset(constantes.ACOES_PESSOA) - ACOES_QUE_O_BANCO_NAO_SOLTA
 # Itens 9 e 10 da análise de 31/10–02/11 (o dono, 03/11/2026: "aplique as correções"; e a
 # alavanca A de 29/10: "responde e marca" para o Abrir chamado (entrega)): as ações de
 # pessoa que viram ETIQUETA — a resposta informativa sai e a conversa continua na Caixa
@@ -589,6 +605,13 @@ class ContextoAgente:
     # dela, e o assunto que ela soltou (≥ 80%; 90% nos sensíveis) não fica preso no "só
     # pessoa" (`ia.liberado_pela_regua`).
     regua: bool = False
+    # A VIRADA (13/11/2026, ver `ACOES_QUE_O_BANCO_NAO_SOLTA`): a conferência pelo sentido com
+    # a resposta da equipe no banco, feita ANTES da 1ª camada quando o rascunho pede pessoa
+    # (`agente.confere_banco.solta_a_pessoa`) — `banco_confere` = o registro dela (vai ao
+    # `fatos.agente.banco_confere`); `banco_bateu` = o `par:b<id>` que bateu ("mesma"): as
+    # ações de `ACOES_QUE_O_BANCO_SOLTA` ficam para depois do envio.
+    banco_confere: dict | None = None
+    banco_bateu: str | None = None
     # D1 (decisão do dono, 23/10/2026 ~12:40): o "responde e marca" — a devolução/
     # reclamação aberta na plataforma com o turno só informativo
     # (`acao_pessoa.responde_e_marca_do_turno`): as ações de `acao_pessoa.ACOES_POS_ENVIO`
@@ -1045,6 +1068,9 @@ class ContextoAgente:
         """
         if self.regua and acao == constantes.ACAO_PEDIU_PESSOA:
             return True
+        if self.banco_bateu and acao in ACOES_QUE_O_BANCO_SOLTA:
+            # A virada: bateu com a resposta da equipe no banco — responde e marca.
+            return True
         return (self.responde_e_marca and acao in ACOES_POS_ENVIO) or (
             acao in ACOES_ETIQUETA and acao in self.etiquetas_pos_envio
         )
@@ -1106,6 +1132,9 @@ class ContextoAgente:
         if self.regua:
             # A régua ligada quando o rascunho nasceu (13/11/2026): só quando está.
             extra["regua"] = True
+        if self.banco_bateu:
+            # A virada: o par do banco que soltou a ação de pessoa (responde e marca).
+            extra["banco_bateu"] = self.banco_bateu
         if self.banco_exigido and _portao_banco_ligado():
             # O portão "sem_banco" ligado (desligado desde a virada de 13/11/2026).
             extra["portao_banco"] = True

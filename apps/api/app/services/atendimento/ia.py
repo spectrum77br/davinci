@@ -299,8 +299,13 @@ from app.services.atendimento.constantes import (
     HUMANO_ACAO_PESSOA,
     HUMANO_ALERTA,
     HUMANO_ATENDENTE,
+    HUMANO_BLOQUEADA,
+    HUMANO_EMAIL,
+    HUMANO_FALHA,
     HUMANO_IA,
+    HUMANO_IA_PAUSADA,
     HUMANO_INSTRUCAO,
+    HUMANO_OFERTA_BRINDE,
     HUMANO_XINGAMENTO,
     LACUNAS,
     MODO_AUTO,
@@ -3327,6 +3332,10 @@ async def _motivos_humano_para_auto(
     triagem = await humano.triar_conversa(
         session, conversa, so_humano=await humano.assuntos_so_humano(session)
     )
+    if bateu_com_o_banco_no_rascunho(rascunho):
+        # A virada (13/11/2026): o rascunho que diz o mesmo que a resposta da equipe no banco
+        # responde "como qualquer outra conversa" — só o que nunca sai sozinho segura.
+        return motivos_que_o_banco_deixa(triagem.motivos, triagem.assuntos)
     if responde_e_marca_no_rascunho(rascunho) and triagem.marca:
         return tuple(m for m in triagem.motivos if m not in triagem.marca)
     if nf_automatica and set(triagem.assuntos) <= {ACAO_ENVIAR_ARQUIVO_NF}:
@@ -3341,6 +3350,47 @@ async def _motivos_humano_para_auto(
             liberados.add(HUMANO_IA)
         return tuple(m for m in triagem.motivos if m not in liberados)
     return triagem.motivos
+
+
+# A VIRADA (13/11/2026): os motivos da triagem que seguram mesmo o rascunho que bateu com a
+# resposta da equipe no banco — o que nunca sai sozinho (instrução/golpe, e-mail, conversa
+# bloqueada na plataforma, triagem com erro, IA pausada na tela, oferta de brinde recente) e a
+# ação de pessoa do turno quando é das que o banco não solta
+# (`agente.contexto.ACOES_QUE_O_BANCO_NAO_SOLTA`).
+MOTIVOS_QUE_O_BANCO_NAO_SOLTA = frozenset(
+    {
+        HUMANO_INSTRUCAO,
+        HUMANO_EMAIL,
+        HUMANO_BLOQUEADA,
+        HUMANO_FALHA,
+        HUMANO_IA_PAUSADA,
+        HUMANO_OFERTA_BRINDE,
+    }
+)
+
+
+def motivos_que_o_banco_deixa(
+    motivos: Collection[str], assuntos: Collection[str] = ()
+) -> tuple[str, ...]:
+    """Os motivos da triagem que ainda seguram o rascunho que bateu com o banco. PURA."""
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    duros = set(MOTIVOS_QUE_O_BANCO_NAO_SOLTA)
+    if set(assuntos) & agente_ctx.ACOES_QUE_O_BANCO_NAO_SOLTA:
+        duros.add(HUMANO_ACAO_PESSOA)
+    return tuple(m for m in motivos if m in duros)
+
+
+def bateu_com_o_banco_no_rascunho(rascunho: Any | None) -> bool:
+    """O rascunho do AGENTE bateu com a resposta da equipe no banco (`bateu_com_o_banco`)?
+    PURA."""
+    if rascunho is None or not rascunho_do_agente(rascunho):
+        return False
+    return bateu_com_o_banco(
+        _fatos_do_agente(rascunho),
+        getattr(rascunho, "categoria", None),
+        getattr(rascunho, "texto", None),
+    )
 
 
 def responde_e_marca_no_rascunho(rascunho: Any | None) -> bool:
@@ -6482,12 +6532,18 @@ def liberado_pela_regua(agente: Mapping[str, Any], categoria: str | None, canal:
 # portão continuam valendo. A comparação: o miolo (sem saudação, fecho, nome e pontuação),
 # com os números como "#".
 LIMIAR_BATEU_COM_O_BANCO = 0.85
+# A VIRADA (13/11/2026, o Eduardo: "se bater e for parecido, ele responde normal como qualquer
+# outra conversa"): o que bateu com a resposta da equipe no banco também não para no assunto
+# só de pessoa nem na devolução/chamado em andamento (a conversa continua marcada). As travas
+# de CONTEÚDO (avisos do verificador, `sem_auto`), o agente desligado e o copiloto continuam.
 TRAVAS_QUE_O_BANCO_SOLTA = frozenset(
     {
         "assunto_nao_liberado",
         "assunto_nao_liberado_agente",
         "orientacao_nao_liberada",
         "assunto_de_produto",
+        "assunto_so_humano",
+        "em_andamento",
     }
 )
 
@@ -6508,7 +6564,7 @@ def bateu_com_o_banco(agente: Mapping[str, Any], categoria: str | None, texto: s
 
     from app.services.atendimento import tipos_pergunta
 
-    if not agente.get("regua") or not categoria or categoria in tipos_pergunta.SENSIVEIS:
+    if not agente.get("regua") or not categoria:
         return False
     tipos = agente.get("banco_tipos")
     if not isinstance(tipos, Mapping):
@@ -6517,9 +6573,14 @@ def bateu_com_o_banco(agente: Mapping[str, Any], categoria: str | None, texto: s
     if (
         isinstance(conf, Mapping)
         and conf.get("veredito") == "mesma"
-        and tipos.get(conf.get("id")) == categoria
+        # A virada: a resposta do banco que o pacote mostrou (a conferência leu a pergunta que
+        # a equipe respondeu: outra pergunta é "diferente"); os sensíveis também (85%).
+        and conf.get("id") in tipos
     ):
         return True
+    if categoria in tipos_pergunta.SENSIVEIS:
+        # O texto praticamente igual (o plano B) não vale para os sensíveis.
+        return False
     respostas = agente.get("banco_respostas")
     meu = _miolo_sem_numeros(texto)
     if not isinstance(respostas, Mapping) or not meu:
@@ -6557,14 +6618,16 @@ def trava_do_agente(
 
     As travas do assunto (`_trava_do_assunto`) e, passando nelas, o portão do banco.
     """
-    motivo = _trava_do_assunto(rascunho, canal, etiquetas=etiquetas, ligado=ligado)
     agente = _fatos_do_agente(rascunho)
     categoria = getattr(rascunho, "categoria", None)
-    if motivo in TRAVAS_QUE_O_BANCO_SOLTA and bateu_com_o_banco(
-        agente, categoria, getattr(rascunho, "texto", None)
-    ):
-        # O assunto ainda não está nas listas, mas a resposta é a da equipe (13/11/2026).
-        motivo = None
+    # O assunto ainda não está nas listas, mas a resposta é a da equipe (13/11/2026): as travas
+    # que o banco solta não param — e as outras continuam conferidas (nunca um "None" cedo).
+    soltas = (
+        TRAVAS_QUE_O_BANCO_SOLTA
+        if bateu_com_o_banco(agente, categoria, getattr(rascunho, "texto", None))
+        else frozenset()
+    )
+    motivo = _trava_do_assunto(rascunho, canal, etiquetas=etiquetas, ligado=ligado, soltas=soltas)
     if motivo is None and sem_banco_do_tipo(agente, categoria):
         return MOTIVO_SEM_BANCO
     return motivo
@@ -6576,17 +6639,20 @@ def _trava_do_assunto(
     *,
     etiquetas: Collection[str] = (),
     ligado: bool = True,
+    soltas: Collection[str] = frozenset(),
 ) -> str | None:
     """As travas do assunto do agente (antes do portão do banco). PURA.
 
     A parte do ASSUNTO do envio automático (ver o bloco acima); `canal` =
     `AtendimentoCanal` (ou algo com `auto_categorias`/`auto_orientacao`);
-    `ligado` = `agente_config.agente_ligado` no canal agora.
+    `ligado` = `agente_config.agente_ligado` no canal agora; `soltas` = os códigos que não
+    param (o "bateu com a do banco", `TRAVAS_QUE_O_BANCO_SOLTA`) — as outras travas
+    continuam conferidas na ordem.
     """
     acoes = acoes_pessoa_do_rascunho(rascunho)
     if acoes is None or acoes:
         return "acao_pessoa"
-    if andamento_no_rascunho(rascunho, etiquetas):
+    if "em_andamento" not in soltas and andamento_no_rascunho(rascunho, etiquetas):
         return "em_andamento"
     if not ligado:
         return "agente_desligado"
@@ -6605,18 +6671,19 @@ def _trava_do_assunto(
     pistas = (
         agente.get("pistas_orientacao") if isinstance(agente.get("pistas_orientacao"), list) else []
     )
-    if any(p in ASSUNTOS_ORIENTACAO and p not in liberadas for p in pistas):
+    if "orientacao_nao_liberada" not in soltas and any(
+        p in ASSUNTOS_ORIENTACAO and p not in liberadas for p in pistas
+    ):
         return "orientacao_nao_liberada"
     categoria = getattr(rascunho, "categoria", None)
     # Rodada 4b (achado 2 da revisão r4): toda pista do turno (e do rascunho)
     # que o assunto declarado não cobre, liberada no canal — o assunto não
     # liberado não sai junto com o liberado.
-    if motivo := motivo_das_pistas_alem(
-        agente.get("pistas_turno"), categoria, canal, agente=agente
-    ):
+    motivo = motivo_das_pistas_alem(agente.get("pistas_turno"), categoria, canal, agente=agente)
+    if motivo and motivo not in soltas:
         return motivo
     if categoria in ASSUNTOS_ORIENTACAO:
-        if categoria not in liberadas:
+        if categoria not in liberadas and "orientacao_nao_liberada" not in soltas:
             return "orientacao_nao_liberada"
         return None
     # Decisão do dono (22/10/2026, item 32): a pergunta de PRODUTO sai sozinha quando a
@@ -6636,14 +6703,20 @@ def _trava_do_assunto(
     if assunto_de_produto_liberado(categoria, canal):
         return None
     if categoria not in (getattr(canal, "auto_categorias", None) or []):
-        return "assunto_nao_liberado"
-    if categoria not in (getattr(canal, "auto_agente", None) or []):
-        return "assunto_nao_liberado_agente"
-    if categoria in ASSUNTOS_SO_PESSOA_NO_AGENTE:
+        if "assunto_nao_liberado" not in soltas:
+            return "assunto_nao_liberado"
+    elif categoria not in (getattr(canal, "auto_agente", None) or []):
+        if "assunto_nao_liberado_agente" not in soltas:
+            return "assunto_nao_liberado_agente"
+    if categoria in ASSUNTOS_SO_PESSOA_NO_AGENTE and "assunto_de_produto" not in soltas:
         # Os assuntos de produto fora do `auto_categorias` (um valor antigo do
         # `auto_agente` no banco não solta).
         return "assunto_de_produto"
-    if categoria in CATEGORIAS_SO_HUMANO and not liberado_pela_regua(agente, categoria, canal):
+    if (
+        categoria in CATEGORIAS_SO_HUMANO
+        and "assunto_so_humano" not in soltas
+        and not liberado_pela_regua(agente, categoria, canal)
+    ):
         return "assunto_so_humano"
     return None
 

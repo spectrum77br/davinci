@@ -9222,6 +9222,10 @@ def responde_e_marca_da_proposta(
     de_depois = (agente_ctx.ACOES_POS_ENVIO if ctx.responde_e_marca else frozenset()) | (
         frozenset(getattr(ctx, "etiquetas_pos_envio", ()) or ()) & agente_ctx.ACOES_ETIQUETA
     )
+    if getattr(ctx, "banco_bateu", None):
+        # A virada (13/11/2026): o rascunho bateu com a resposta da equipe no banco — a ação
+        # de pessoa (menos as de `ACOES_QUE_O_BANCO_NAO_SOLTA`) fica para depois do envio.
+        de_depois |= agente_ctx.ACOES_QUE_O_BANCO_SOLTA
     if (
         not de_depois
         or not (proposta.texto or "").strip()
