@@ -1092,6 +1092,55 @@ async def atendimento_indexar_banco(ctx: dict) -> dict | None:
     return resumo
 
 
+# O juiz da edição (13/11/2026): :28 e :58 — os minutos com menos crons (só o das
+# etiquetas; os pares também têm o motor das automáticas e os ímpares, a leitura das caixas).
+_ATENDIMENTO_JUIZ_MINUTOS = {28, 58}
+
+
+async def atendimento_julgar_edicoes(ctx: dict) -> dict | None:
+    """Duas vezes por hora (:28 e :58): julga as decisões da pessoa sobre o rascunho.
+
+    A régua do envio sozinho por tipo de pergunta (80%, 90% nos sensíveis — o Eduardo,
+    13/11/2026) conta como acerto o rascunho mandado igual ou mexido só na forma
+    (services/atendimento/juiz_edicao.py). O código decide o que dá; o resto vai ao modelo do
+    agente, com os textos mascarados e no teto do dia dele. Sem a chave, só o código.
+    """
+    if not _settings.atendimento_juiz_ativo:
+        return None
+    import anthropic
+
+    from app.services.atendimento import agente_config, ia
+    from app.services.atendimento import juiz_edicao as _juiz
+
+    chave = agente_config.chave_do_agente(_settings)
+    modelo = _settings.atendimento_agente_modelo if chave else None
+    async with session_scope() as s:
+        try:
+            if chave:
+                async with anthropic.AsyncAnthropic(
+                    api_key=chave, base_url=ia.BASE_CLAUDE, max_retries=2
+                ) as cliente:
+                    resumo = await _juiz.rodada(s, cliente=cliente, modelo=modelo)
+            else:
+                resumo = await _juiz.rodada(s)
+        except Exception as e:  # noqa: BLE001
+            logger.error("atendimento_julgar_edicoes_falhou", err=type(e).__name__)
+            return None
+    logger.info("atendimento_julgar_edicoes_tick", **resumo)
+    # A régua por tipo, com os julgamentos de agora: o retrato sempre; as listas dos canais
+    # só com `atendimento_regua_ativa` (services/atendimento/regua.py).
+    from app.services.atendimento import regua as _regua
+
+    async with session_scope() as s:
+        try:
+            resumo["regua"] = await _regua.aplicar(
+                s, gravar_listas=bool(_settings.atendimento_regua_ativa)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("atendimento_regua_falhou", err=type(e).__name__)
+    return resumo
+
+
 async def atendimento_indexar_pares(ctx: dict) -> dict | None:
     """De hora em hora (:34): os pares pergunta × resposta da equipe (agente, 20/10/2026).
 
@@ -5665,6 +5714,7 @@ class WorkerSettings:
         # O replay tenta uma vez só: cada tentativa chama o modelo (custo).
         func(atendimento_indexar_pares, timeout=600),
         func(atendimento_indexar_banco, timeout=600),
+        func(atendimento_julgar_edicoes, timeout=900),
         func(atendimento_sites_marca, timeout=300),
         func(atendimento_replay_agente, timeout=3600, max_tries=1),
         # Importação do histórico (28/09/2026): SÓ aqui, nunca em `cron_jobs` —
@@ -6112,6 +6162,13 @@ class WorkerSettings:
             minute=_ATENDIMENTO_BANCO_MINUTOS,
             run_at_startup=False,
             timeout=600,
+        ),
+        # O juiz da edição (13/11/2026): até 80 decisões por rodada.
+        cron(
+            atendimento_julgar_edicoes,
+            minute=_ATENDIMENTO_JUIZ_MINUTOS,
+            run_at_startup=False,
+            timeout=900,
         ),
         cron(
             atendimento_sites_marca,

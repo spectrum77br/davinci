@@ -721,6 +721,16 @@ class Settings(BaseSettings):
     # exemplos da equipe do pacote e da ferramenta vêm de `atendimento_respostas`. Desligado
     # até o teste com o Eduardo (o eval liga só no processo dele: `rodar --le-banco`).
     atendimento_agente_le_banco: bool = False
+    # O juiz da edição (13/11/2026, services/atendimento/juiz_edicao.py): o cron
+    # `atendimento_julgar_edicoes` (:28 e :58) julga cada decisão da pessoa sobre o rascunho
+    # (forma × conteúdo) — a base da régua do envio sozinho. Usa o modelo do agente e o
+    # teto do dia dele. Desligado = o cron sai na hora.
+    atendimento_juiz_ativo: bool = True
+    # A régua por tipo (13/11/2026, services/atendimento/regua.py): depois do juiz, o mesmo
+    # cron refaz o retrato `atendimento_regua` (sempre) e, com esta chave, escreve nas listas
+    # de cada canal no Automático (`auto_categorias`/`auto_agente`/`auto_orientacao`) os
+    # tipos com 80% de aprovação da equipe (90% nos sensíveis). Desligada até o OK do Eduardo.
+    atendimento_regua_ativa: bool = False
     atendimento_agente_api_key: str = ""
     # Item 5 da rodada "redondo" (23/10/2026, decisão do dono: "troca para o Sonnet";
     # eval cego de 23/10, 20 turnos reais da Shopee: o Sonnet 5.5 melhor em 9, o Haiku

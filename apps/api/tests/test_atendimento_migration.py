@@ -134,6 +134,9 @@ DE_OUTRA_MIGRATION = frozenset(
         "atendimento_brindes",
         # 0479 (13/11/2026): o banco de respostas, em test_atendimento_banco_respostas.py.
         "atendimento_respostas",
+        # 0480 (13/11/2026): o julgamento da edição, em test_atendimento_juiz_edicao.py.
+        "atendimento_julgamentos",
+        "atendimento_regua",
     }
 )
 TABELAS = sorted(

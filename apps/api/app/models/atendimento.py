@@ -1874,6 +1874,88 @@ class AtendimentoResposta(Base, TimestampMixin):
     tsv: Mapped[str] = mapped_column(TSVECTOR, nullable=False)
 
 
+class AtendimentoJulgamento(Base):
+    """O que a pessoa fez com o rascunho, julgado: forma ou conteúdo (13/11/2026, migration 0480).
+
+    Uma linha por avaliação (`enviou_igual`, `editou`, `escreveu_do_zero`) de rascunho com
+    texto: o `juiz_edicao` decide igual | forma | conteudo | outra_acao | so_saudacao (o
+    código o que dá; o modelo o resto, com os textos mascarados). É daqui que sai a régua do
+    envio sozinho por tipo de pergunta e loja (`regua`): acerto = igual ou forma. Nada de
+    texto de cliente: só o código e uma linha do porquê, sem dado pessoal.
+    """
+
+    __tablename__ = "atendimento_julgamentos"
+    __table_args__ = (
+        Index("ix_atendimento_julgamentos_tipo_loja", "tipo", "integration_id", "decidido_em"),
+        Index("ix_atendimento_julgamentos_plataforma", "plataforma", "tipo", "decidido_em"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    avaliacao_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_avaliacoes.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    rascunho_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_rascunhos.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    integration_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("integrations.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # O assunto que o agente declarou no rascunho (`atendimento_rascunhos.categoria`).
+    tipo: Mapped[str] = mapped_column(String(32), nullable=False)
+    # igual | forma | conteudo | outra_acao | so_saudacao
+    julgamento: Mapped[str] = mapped_column(String(16), nullable=False)
+    motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    pelo_codigo: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false")
+    )
+    modelo: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    custo_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
+    # Quando a pessoa decidiu (o `created_at` da avaliação): a ordem da régua.
+    decidido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    criado_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class AtendimentoRegua(Base):
+    """O retrato da régua do envio sozinho, por canal e tipo de pergunta (13/11/2026, 0480).
+
+    Refeito pelo cron `atendimento_regua` (services/atendimento/regua.py): das últimas 30
+    decisões julgadas do tipo, quantas foram acerto, se a conta é da loja ou da plataforma, a
+    régua do tipo (80%, 90% nos sensíveis), se passou e se o tipo está liberado hoje nas
+    listas do canal. É o que a tela de revisão mostra e o que avisa quando um sensível passa.
+    """
+
+    __tablename__ = "atendimento_regua"
+    __table_args__ = (UniqueConstraint("canal_id", "tipo"),)
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    canal_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("atendimento_canais.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    plataforma: Mapped[str] = mapped_column(String(16), nullable=False)
+    integration_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    tipo: Mapped[str] = mapped_column(String(32), nullable=False)
+    decisoes: Mapped[int] = mapped_column(Integer, nullable=False)
+    acertos: Mapped[int] = mapped_column(Integer, nullable=False)
+    # loja | plataforma
+    escopo: Mapped[str] = mapped_column(String(16), nullable=False)
+    limiar: Mapped[float] = mapped_column(Float, nullable=False)
+    liberado: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    liberado_hoje: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    atualizado_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class AtendimentoAgenteReplay(Base):
     """O que o agente TERIA feito num gatilho do dia (replay noturno, 20/10/2026).
 
