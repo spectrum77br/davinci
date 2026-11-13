@@ -4496,13 +4496,15 @@ watch(() => props.conversaId, (novo, velho) => {
               </button>
               <span v-if="rascunho.categoria" class="text-muted-foreground">· {{ categoriaLabel(rascunho.categoria) }}</span>
               <!-- A régua (13/11/2026, o Eduardo): o número que vale é a aprovação da EQUIPE no
-                   assunto; com ela ligada, a certeza que o modelo declara sai da tela. -->
+                   assunto; com ela ligada, a certeza que o modelo declara sai da tela. Com menos
+                   de 20 decisões (`regua.MIN_DECISOES`) a % ainda não é medida — ele viu "0%"
+                   com 1 decisão: a etiqueta diz quantas há. -->
               <span
                 v-if="rascunho.aprovacao"
                 class="text-muted-foreground"
                 :title="`das últimas ${rascunho.aprovacao.decisoes} decisões da equipe neste assunto, ${rascunho.aprovacao.acertos} saíram iguais ou só com ajuste de forma; sai sozinha com ${Math.round(rascunho.aprovacao.limiar * 100)}%`"
                 data-sugestao-aprovacao
-              >· {{ Math.round(rascunho.aprovacao.fracao * 100) }}% de aprovação da equipe</span>
+              >· {{ rascunho.aprovacao.decisoes >= 20 ? `${Math.round(rascunho.aprovacao.fracao * 100)}% de aprovação da equipe` : `medindo: ${rascunho.aprovacao.decisoes} de 20 decisões da equipe` }}</span>
               <span v-else-if="rascunho.confianca !== null && rascunho.confianca !== undefined" class="text-muted-foreground">· {{ Math.round(rascunho.confianca * 100) }}% de confiança</span>
               <!-- O selo só na sugestão do turno ATUAL (14/10/2026, a régua da
                    Caixa Humano): a de antes da última mensagem do cliente ganha

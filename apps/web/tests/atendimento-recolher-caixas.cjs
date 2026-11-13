@@ -314,6 +314,11 @@ async function principal() {
     assert.match(h, /data-sugestao-duvida[^>]*>[\s\S]*?Rastreio: 73% de aprovação da equipe nas últimas 30 \(sai sozinha com 80%\)\.\s*<\/div>/)
     assert.match(h, /data-sugestao-aprovacao[^>]*>· 73% de aprovação da equipe</)
     assert.doesNotMatch(h, /% de confiança/, 'com a régua, sem a certeza do modelo')
+    // Com menos de 20 decisões a % não é medida ainda (o Eduardo viu "0%" com 1 decisão).
+    rascunho.aprovacao = { tipo: 'estoque_variacao', decisoes: 1, acertos: 0, fracao: 0, limiar: 0.75, liberado: false, escopo: 'plataforma' }
+    h = await renderizarTrecho(caixa, ctx)
+    assert.match(h, /data-sugestao-aprovacao[^>]*>· medindo: 1 de 20 decisões da equipe</)
+    assert.doesNotMatch(h, /0% de aprovação/)
     delete rascunho.duvida
     delete rascunho.aprovacao
     x.alternarSugestaoIa()
