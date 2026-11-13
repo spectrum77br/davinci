@@ -6534,10 +6534,11 @@ def bateu_com_o_banco(agente: Mapping[str, Any], categoria: str | None, texto: s
 
 
 def sem_banco_do_tipo(agente: Mapping[str, Any], categoria: str | None) -> bool:
-    """O portão do banco segura este rascunho? PURA."""
+    """O portão do banco segura este rascunho? PURA. Só com `fatos.agente.portao_banco`
+    (a chave `atendimento_portao_banco`, desligada desde a virada de 13/11/2026)."""
     from app.services.atendimento import tipos_pergunta
 
-    if not agente.get("banco_exigido"):
+    if not agente.get("banco_exigido") or not agente.get("portao_banco"):
         return False
     if tipos_pergunta.grupo(categoria) == tipos_pergunta.GRUPO_CORTESIA:
         return False

@@ -643,6 +643,11 @@ class Settings(BaseSettings):
     # virada: só o agente novo (Opus + banco, desde 2026-11-13T13:49:00+00:00) — o resultado
     # do agente antigo não segura o novo.
     atendimento_regua_desde: str = ""
+    # O PORTÃO DO BANCO ("sem_banco": só sai sozinho com resposta do banco do mesmo tipo no
+    # pacote). 13/11/2026: DESLIGADO — no teste da virada ele segurou 11 de 40 respostas de
+    # assuntos que já saíam sozinhos (o pacote nem sempre traz o banco do mesmo tipo). O
+    # código fica; ligar só com o dono.
+    atendimento_portao_banco: bool = False
     atendimento_automacoes_shopee_auto_reply: bool = False
     # O brinde do pedido não pago no TikTok (05/11/2026):
     #   • `atendimento_tiktok_nao_pagos_ativa`: a rodada `atendimento_tiktok_nao_pagos`

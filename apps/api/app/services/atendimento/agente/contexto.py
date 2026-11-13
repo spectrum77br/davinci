@@ -131,6 +131,12 @@ PREFIXO_BANCO = "par:b"
 MAX_RESPOSTA_BANCO = 700
 
 
+def _portao_banco_ligado() -> bool:
+    from app.config import get_settings
+
+    return bool(get_settings().atendimento_portao_banco)
+
+
 def regua_ativa() -> bool:
     """A régua por tipo decide as listas do envio sozinho? (`atendimento_regua_ativa`)"""
     from app.config import get_settings
@@ -1093,6 +1099,9 @@ class ContextoAgente:
         if self.regua:
             # A régua ligada quando o rascunho nasceu (13/11/2026): só quando está.
             extra["regua"] = True
+        if self.banco_exigido and _portao_banco_ligado():
+            # O portão "sem_banco" ligado (desligado desde a virada de 13/11/2026).
+            extra["portao_banco"] = True
         if self.banco_exigido:
             # O portão do banco (13/11/2026): a marca e o tipo de cada resposta do banco que
             # o pacote mostrou (`par:b<id>` → tipo). Só com a marca (o registro de antes não

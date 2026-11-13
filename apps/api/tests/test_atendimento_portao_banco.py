@@ -39,31 +39,40 @@ def test_sem_a_marca_o_portao_nao_muda_nada():
 
 
 def test_com_a_marca_precisa_de_resposta_do_banco_do_mesmo_tipo():
-    sem = _rascunho("rastreio", {"banco_exigido": True, "banco_tipos": {"par:b1": "garantia"}})
+    sem = _rascunho(
+        "rastreio",
+        {"banco_exigido": True, "portao_banco": True, "banco_tipos": {"par:b1": "garantia"}},
+    )
     assert ia.trava_do_agente(sem, _canal()) == ia.MOTIVO_SEM_BANCO == "sem_banco"
-    vazio = _rascunho("rastreio", {"banco_exigido": True, "banco_tipos": {}})
+    vazio = _rascunho("rastreio", {"banco_exigido": True, "portao_banco": True, "banco_tipos": {}})
     assert ia.trava_do_agente(vazio, _canal()) == "sem_banco"
     com = _rascunho(
         "rastreio",
-        {"banco_exigido": True, "banco_tipos": {"par:b1": "garantia", "par:b2": "rastreio"}},
+        {
+            "banco_exigido": True,
+            "portao_banco": True,
+            "banco_tipos": {"par:b1": "garantia", "par:b2": "rastreio"},
+        },
     )
     assert ia.trava_do_agente(com, _canal()) is None
 
 
 def test_as_travas_do_assunto_vem_antes_e_nao_mudam_de_nome():
     """O assunto não liberado continua com o código dele (a regra do e-mail os lê)."""
-    r = _rascunho("garantia", {"banco_exigido": True, "banco_tipos": {}})
+    r = _rascunho("garantia", {"banco_exigido": True, "portao_banco": True, "banco_tipos": {}})
     assert ia.trava_do_agente(r, _canal()) == "orientacao_nao_liberada"
-    r = _rascunho("estoque_variacao", {"banco_exigido": True, "banco_tipos": {}})
+    r = _rascunho(
+        "estoque_variacao", {"banco_exigido": True, "portao_banco": True, "banco_tipos": {}}
+    )
     assert ia.trava_do_agente(r, _canal()) in duvida.ASSUNTO_NAO_LIBERADO
-    pessoa = _rascunho("rastreio", {"banco_exigido": True, "banco_tipos": {}})
+    pessoa = _rascunho("rastreio", {"banco_exigido": True, "portao_banco": True, "banco_tipos": {}})
     pessoa.fatos["agente"]["acoes_pessoa"] = ["reclamacao_aberta"]
     assert ia.trava_do_agente(pessoa, _canal()) == "acao_pessoa"
 
 
 def test_cortesia_nao_pede_banco():
     canal = _canal(auto_categorias=["agradecimento"], auto_agente=["agradecimento"])
-    r = _rascunho("agradecimento", {"banco_exigido": True, "banco_tipos": {}})
+    r = _rascunho("agradecimento", {"banco_exigido": True, "portao_banco": True, "banco_tipos": {}})
     assert not ia.sem_banco_do_tipo(r.fatos["agente"], "agradecimento")
     assert ia.trava_do_agente(r, canal) is None
 
@@ -145,7 +154,8 @@ def test_a_regua_solta_o_assunto_que_ela_pos_na_lista():
     assert ia.trava_do_agente(fora, canal) in duvida.ASSUNTO_NAO_LIBERADO
     # E o portão do banco continua valendo depois.
     sem_banco = _rascunho(
-        "reclamacao_forte", {"regua": True, "banco_exigido": True, "banco_tipos": {}}
+        "reclamacao_forte",
+        {"regua": True, "banco_exigido": True, "portao_banco": True, "banco_tipos": {}},
     )
     assert ia.trava_do_agente(sem_banco, canal) == "sem_banco"
     # A ação de pessoa nunca é solta pela régua.
@@ -230,3 +240,11 @@ def test_o_contexto_grava_as_respostas_do_banco_com_a_marca():
     assert "banco_respostas" not in ctx.para_fatos()
     ctx.banco_exigido = True
     assert ctx.para_fatos()["banco_respostas"] == {"par:b10": "r1"}
+
+
+def test_o_portao_do_banco_fica_desligado_sem_a_chave():
+    """13/11/2026: no teste da virada o portão segurou 11 de 40 respostas de assuntos que já
+    saíam sozinhos — fica desligado (a chave `atendimento_portao_banco`)."""
+    vazio = _rascunho("rastreio", {"banco_exigido": True, "banco_tipos": {}})
+    assert ia.trava_do_agente(vazio, _canal()) is None
+    assert get_settings().atendimento_portao_banco is False
