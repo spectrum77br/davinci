@@ -2841,13 +2841,17 @@ async function confirmarExcluir() {
         <div v-else class="shrink-0 grid gap-4 border-t px-4 py-3 md:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
           <!-- coluna esquerda: réplica manual -->
           <div class="space-y-2 min-w-0">
-            <div class="text-xs font-medium truncate">Réplica manual <span class="text-muted-foreground font-normal">— resposta à plataforma pelo canal <b>{{ hist.row.canal }}</b></span></div>
+            <!-- 13/11: atendimento do Melhor Envio só é lido; a resposta pelo DaVinci vem depois. -->
+            <div v-if="hist.row.origem === 'melhor_envio'" class="text-xs font-medium text-amber-700 dark:text-amber-400">
+              Responda no site do Melhor Envio (Envios › Atendimentos) — a resposta aparece aqui na próxima leitura.
+            </div>
+            <div v-else class="text-xs font-medium truncate">Réplica manual <span class="text-muted-foreground font-normal">— resposta à plataforma pelo canal <b>{{ hist.row.canal }}</b></span></div>
             <PopoverRoot :open="replicaBalao" @update:open="replicaBalao = $event">
               <PopoverTrigger as-child>
                 <button
                   id="replica-texto"
                   type="button"
-                  :disabled="!canEdit"
+                  :disabled="!canEdit || hist.row.origem === 'melhor_envio'"
                   class="flex h-9 w-full items-center truncate rounded-md border bg-background px-3 text-left text-sm hover:bg-muted/40 focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-60"
                   :title="hist.texto || 'clique pra escrever a réplica'"
                 >

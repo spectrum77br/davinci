@@ -101,13 +101,18 @@ def fala_do_comentario(c: dict) -> Fala | None:
     pessoa = c.get("person") if isinstance(c.get("person"), dict) else {}
     nome = str(pessoa.get("name") or c.get("name_requester_comment") or "").strip()
     nossa = _sem_acento(str(c.get("type_user") or "")) == "cliente"
+    if nossa:
+        autor = f"{nome or 'nós'} · no site do Melhor Envio"
+    else:
+        # O ME já assina a atendente como "Natalia A S - Melhor Envio" (visto 13/11).
+        autor = nome or "Atendente"
+        if "melhor envio" not in _sem_acento(autor):
+            autor = f"{autor} · Melhor Envio"
     return Fala(
         direcao="enviada" if nossa else "recebida",
         texto=texto,
         quando=iso_to_dt(str(c.get("date_creation_raw") or "")) or None,
-        autor=f"{nome or 'nós'} · no site do Melhor Envio"
-        if nossa
-        else f"{nome or 'Atendente'} · Melhor Envio",
+        autor=autor,
     )
 
 
@@ -123,8 +128,8 @@ def dia_da_abertura(corpo: dict) -> date | None:
     return min(horas).astimezone(chamados_svc.SAO_PAULO).date() if horas else None
 
 
-async def _ja_gravada(session: AsyncSession, ch: Chamado, f: Fala) -> bool:
-    q = select(ChamadoMensagem.id).where(
+async def _ja_gravada(session: AsyncSession, ch: Chamado, f: Fala) -> ChamadoMensagem | None:
+    q = select(ChamadoMensagem).where(
         ChamadoMensagem.chamado_id == ch.id,
         ChamadoMensagem.direcao == f.direcao,
         ChamadoMensagem.texto == f.texto,
@@ -132,7 +137,7 @@ async def _ja_gravada(session: AsyncSession, ch: Chamado, f: Fala) -> bool:
     if f.quando is not None:
         janela = _JANELA_NOSSA if f.direcao == "enviada" else _JANELA_DELES
         q = q.where(ChamadoMensagem.created_at.between(f.quando - janela, f.quando + janela))
-    return (await session.execute(q.limit(1))).scalar_one_or_none() is not None
+    return (await session.execute(q.limit(1))).scalar_one_or_none()
 
 
 async def gravar_falas(session: AsyncSession, ch: Chamado, corpo: dict) -> int:
@@ -147,7 +152,14 @@ async def gravar_falas(session: AsyncSession, ch: Chamado, corpo: dict) -> int:
         if f.direcao == "enviada":
             tipo = "abertura" if primeira_nossa else "replica"
             primeira_nossa = False
-        if await _ja_gravada(session, ch, f):
+        gravada = await _ja_gravada(session, ch, f)
+        if gravada is not None:
+            # Fala que ESTA leitura gravou (autor "… Melhor Envio") acompanha o
+            # nome atual; a nossa vinda do DaVinci (passo 3) fica com quem mandou.
+            if gravada.autor_nome != f.autor and (gravada.autor_nome or "").endswith(
+                "Melhor Envio"
+            ):
+                gravada.autor_nome = f.autor
             continue
         msg = chamados_svc.nova_mensagem(
             ch,

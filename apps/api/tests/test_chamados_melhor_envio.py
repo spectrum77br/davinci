@@ -42,7 +42,7 @@ def _comentario(texto: str, quando: str, *, nossa: bool, anexos: int = 0) -> dic
         "description_html": f"<html><body>{texto.replace(chr(10), '<br/>')}</body></html>",
         "type_user": "Cliente" if nossa else "Agente",
         "date_creation_raw": quando,
-        "person": {"name": "CASA E DECORAÇÃO" if nossa else "Natalia A S"},
+        "person": {"name": "CASA E DECORAÇÃO" if nossa else "Natalia A S - Melhor Envio"},
         "attachments": [{"url": "https://x"}] * anexos,
     }
 
@@ -119,7 +119,10 @@ def test_fala_do_comentario_nossa_e_do_atendente():
     assert nossa.autor == "CASA E DECORAÇÃO · no site do Melhor Envio"
     assert nossa.quando == datetime(2026, 10, 19, 12, 20, 43, 517000, tzinfo=UTC)
     deles = cme.fala_do_comentario(CONVERSA[1])
-    assert (deles.direcao, deles.autor) == ("recebida", "Natalia A S · Melhor Envio")
+    assert (deles.direcao, deles.autor) == ("recebida", "Natalia A S - Melhor Envio")
+    # sem a assinatura do ME, o nome ganha o "· Melhor Envio"
+    sem = cme.fala_do_comentario({**CONVERSA[1], "person": {"name": "Alessandra T"}})
+    assert sem.autor == "Alessandra T · Melhor Envio"
     assert cme.fala_do_comentario(CONVERSA[2]).texto == "ok aguardando\n[1 anexo no Melhor Envio]"
 
 
@@ -149,7 +152,7 @@ async def test_so_o_atendimento_ativo_vira_linha_com_a_conversa(db, fake_me):
         ("recebida", "resposta"),
         ("enviada", "replica"),
     ]
-    assert falas[1].autor_nome == "Natalia A S · Melhor Envio"
+    assert falas[1].autor_nome == "Natalia A S - Melhor Envio"
     # o resolvido nunca entrou: nem é lido
     assert fake_me["lidos"] == [str(ATIVO)]
 
@@ -233,3 +236,20 @@ async def test_resposta_pela_aba_e_recusada_por_enquanto(client, make_user, auth
     assert r.status_code == 422, r.text
     assert r.json()["detail"]["code"] == "melhor_envio_responder_no_site"
     assert await _falas(db, ch) == []
+
+
+async def test_nome_repetido_gravado_antes_se_ajeita_na_leitura(db, fake_me):
+    """13/11 em produção: a 1ª versão gravou "Natalia A S - Melhor Envio · Melhor
+    Envio". A leitura seguinte acerta o nome sem duplicar a fala."""
+    await cme.sincronizar(db)
+    await db.commit()
+    [ch] = await _chamados_me(db)
+    falas = await _falas(db, ch)
+    falas[1].autor_nome = "Natalia A S - Melhor Envio · Melhor Envio"
+    await db.commit()
+    r = await cme.sincronizar(db)
+    await db.commit()
+    assert r["me_falas"] == 0
+    falas = await _falas(db, ch)
+    assert len(falas) == 3
+    assert falas[1].autor_nome == "Natalia A S - Melhor Envio"
