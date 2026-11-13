@@ -19,8 +19,8 @@ sozinha. As 4 primeiras vêm do levantamento dos e-mails do SAC (60 dias):
 Nada muda no deploy: o agente só responde e-mail do site que o admin ligar
 na aba E-mail › Agente.
 
-Revision ID: 0477_mail_agente_regras
-Revises: 0476_mail_usuarios_pastas
+Revision ID: 0480_mail_agente_regras
+Revises: 0479_atendimento_respostas
 """
 
 from collections.abc import Sequence
@@ -31,8 +31,8 @@ from sqlalchemy.dialects import postgresql as pg
 from alembic import op
 from app.config import get_settings
 
-revision: str = "0477_mail_agente_regras"
-down_revision: str | None = "0476_mail_usuarios_pastas"
+revision: str = "0480_mail_agente_regras"
+down_revision: str | None = "0479_atendimento_respostas"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 SCHEMA = get_settings().database_schema

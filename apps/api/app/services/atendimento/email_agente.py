@@ -92,7 +92,7 @@ SITE_DA_MARCA: dict[str, str] = {
 MODOS_DO_AGENTE = (MODO_COPILOTO, MODO_AUTO)
 # Só a caixa SAC do site (a Admin/dúvidas/atacado fica com a pessoa).
 CAIXA_SAC = "sac"
-# A regra que o código também conhece (a semente da 0477).
+# A regra que o código também conhece (a semente da 0480).
 CHAVE_FORMULARIO = "formulario_sac"
 
 
