@@ -2549,7 +2549,10 @@ function teclaDoMenu(e: KeyboardEvent) {
 const ATALHO_MAX = 8
 const atalhoFechado = ref(false)
 const atalhoIdx = ref(0)
-const buscaAtalho = computed(() => (podeDigitar.value ? buscaDoAtalho(texto.value) : null))
+// Sem respostas prontas carregadas (saíram da tela em 13/11/2026), o "/" não abre nada.
+const buscaAtalho = computed(() =>
+  podeDigitar.value && modelosQueServem.value.length ? buscaDoAtalho(texto.value) : null,
+)
 const atalhoAberto = computed(() => buscaAtalho.value !== null && !atalhoFechado.value)
 const listaAtalho = computed(() => (atalhoAberto.value ? filtrarProntas(modelosQueServem.value, buscaAtalho.value || '').slice(0, ATALHO_MAX) : []))
 watch(buscaAtalho, (b) => {
@@ -4640,7 +4643,7 @@ watch(() => props.conversaId, (novo, velho) => {
               rows="3"
               :disabled="!podeDigitar || caixaPresa"
               class="block max-h-[40vh] min-h-[76px] w-full resize-y rounded-md border bg-background px-2.5 py-2 text-sm [field-sizing:content] focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-not-allowed disabled:opacity-60"
-              :placeholder="podeDigitar ? (conversa.canal === 'avaliacao' ? `Escreva a resposta PÚBLICA à avaliação… (/ respostas prontas · ${dicaDoEnvio})` : rotuloDestino ? `${rotuloDestino}: escreva a mensagem… (/ respostas prontas · ${dicaDoEnvio})` : `Escreva a resposta… (/ respostas prontas · ${dicaDoEnvio})`) : 'Resposta desabilitada nesta conversa'"
+              :placeholder="podeDigitar ? (conversa.canal === 'avaliacao' ? `Escreva a resposta PÚBLICA à avaliação… (${dicaDoEnvio})` : rotuloDestino ? `${rotuloDestino}: escreva a mensagem… (${dicaDoEnvio})` : `Escreva a resposta… (${dicaDoEnvio})`) : 'Resposta desabilitada nesta conversa'"
               aria-label="resposta ao comprador"
               :aria-expanded="atalhoAberto"
               :aria-controls="atalhoAberto && listaAtalho.length ? 'atalho-prontas' : undefined"
@@ -4677,7 +4680,7 @@ watch(() => props.conversaId, (novo, velho) => {
           <div class="flex flex-wrap items-center gap-1.5">
             <!-- Ao fechar, o foco fica na caixa de resposta (onde a resposta
                  pronta entrou), não volta para o botão do menu. -->
-            <PopoverRoot v-model:open="menuModelos">
+            <PopoverRoot v-if="modelosQueServem.length" v-model:open="menuModelos">
               <PopoverTrigger as-child>
                 <Button size="sm" variant="outline" class="h-8 px-2 text-xs" :disabled="!podeDigitar">
                   <MessageSquareText class="mr-1 size-3.5" /> Respostas prontas <ChevronDown class="ml-0.5 size-3.5" />

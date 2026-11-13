@@ -470,3 +470,24 @@ def test_na_virada_a_origem_da_equipe_vai_ao_pacote_e_prova_a_origem():
     assert checagens._origem_provada(None, ctx)
     ctx.pares_do_pacote["par:b1"]["mesma_loja"] = False  # de outra loja não prova
     assert not checagens._origem_provada(None, ctx)
+
+
+def test_o_reset_negado_nao_e_sugestao_de_reset():
+    """Victor, 13/11: "se o aparelho não dá nenhum sinal de vida, não precisa tentar o reset"
+    segurava como "sugere reset ou formatação"."""
+    from app.services.atendimento import validador
+
+    nao = (
+        "Se o aparelho não dá nenhum sinal de vida, não precisa tentar o reset.",
+        "Não precisa formatar o aparelho.",
+        "Sem fazer o reset, deixe carregando por 2 horas.",
+    )
+    sim = (
+        "Faça um reset forçado segurando os botões.",
+        "Se não ligar, faça o reset de fábrica.",
+        "Não esqueça de fazer o reset depois de atualizar.",
+        "Não deixe de fazer o reset.",
+        "Tente restaurar as configurações de fábrica.",
+    )
+    assert not any(validador.sugere_reset(t) for t in nao)
+    assert all(validador.sugere_reset(t) for t in sim)

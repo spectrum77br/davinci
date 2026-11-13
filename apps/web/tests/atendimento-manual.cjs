@@ -62,7 +62,8 @@ const M = requerer('~/components/AtendimentoManual.vue')
   const setup = tela.descriptor.scriptSetup.content
   assert.match(tpl, /<h2[^>]*>[\s\S]*Manual do agente<\/h2>/)
   const explicacao = /<p[^>]*data-explicacao>([\s\S]*?)<\/p>/.exec(tpl)[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
-  assert.equal(explicacao, 'O agente consulta estas regras antes de responder: são a política e os fatos de cada assunto. O jeito de responder vem do banco de respostas, o que a equipe já respondeu. Quando os dois divergem, vale a regra daqui.')
+  // 13/11/2026 (o Eduardo: o banco é a fonte principal): quando divergem, vale o banco.
+  assert.equal(explicacao, 'A fonte principal do agente é o banco de respostas: o que a equipe já respondeu (e a correção mais nova vem primeiro). Estas regras ficam para o que o banco não tem: a política e os fatos de cada assunto. Quando os dois divergem, vale o banco — menos as regras que nunca mudam (promessa, Pix, fora da plataforma, dado pessoal).')
   for (const proibido of [/Nada aqui libera/, /resposta vazia/i, /precisa_humano/, /Manual da IA/, /Segurança/, /Estilo/, /TIPOS_REGRA/, /ICONE_TIPO/]) {
     assert.doesNotMatch(tpl, proibido, String(proibido))
   }

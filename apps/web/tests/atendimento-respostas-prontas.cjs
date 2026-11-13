@@ -260,7 +260,8 @@ async function caixaDeResposta() {
   assert.doesNotMatch(trecho, /PopoverPortal|Teleport/, 'sem portal: aparece na tela cheia')
   assert.match(trecho, /@mousedown\.prevent="usarDoAtalho\(m\)"/, 'o clique não tira o foco da caixa')
   assert.match(tpl, /@keydown="aoTeclar"/)
-  assert.match(tpl, /`Escreva a resposta… \(\/ respostas prontas · \$\{dicaDoEnvio\}\)`/)
+  // 13/11/2026: as respostas prontas saíram da tela — a dica não fala mais do "/".
+  assert.match(tpl, /`Escreva a resposta… \(\$\{dicaDoEnvio\}\)`/)
   assert.match(tpl, /@keydown="teclaDoMenu"/)
   assert.match(tpl, /v-if="m\.equipe_nome"/, 'a equipe aparece no menu')
   // A página passa a mesma lista para a conversa na tela de sempre e na cheia.

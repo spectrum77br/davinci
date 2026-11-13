@@ -104,7 +104,8 @@ async function principal() {
     // As fotos e a NF anexadas não saem pelo Enter (têm o botão delas).
     assert.doesNotMatch(funcao(setup, 'function aoTeclar('), /enviarFoto/)
   }
-  assert.match(tpl, /`Escreva a resposta… \(\/ respostas prontas · \$\{dicaDoEnvio\}\)`/)
+  // 13/11/2026: as respostas prontas saíram da tela — a dica não fala mais do "/".
+  assert.match(tpl, /`Escreva a resposta… \(\$\{dicaDoEnvio\}\)`/)
   assert.match(tpl, /`enviar \(\$\{ehEmail \? 'Ctrl\+Enter' : 'Enter'\}\)`/)
   assert.doesNotMatch(tpl, /\(Ctrl\+Enter envia\)/)
 }

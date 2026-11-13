@@ -699,8 +699,9 @@ async function apagar(r: Regra) {
       </div>
     </div>
     <p class="text-xs text-muted-foreground" data-explicacao>
-      O agente consulta estas regras antes de responder: são a política e os fatos de cada assunto. O jeito de responder vem do
-      <b>banco de respostas</b>, o que a equipe já respondeu. Quando os dois divergem, <b>vale a regra daqui</b>.
+      A fonte principal do agente é o <b>banco de respostas</b>: o que a equipe já respondeu (e a correção mais nova vem
+      primeiro). Estas regras ficam para o que o banco não tem: a política e os fatos de cada assunto. Quando os dois divergem,
+      <b>vale o banco</b> — menos as regras que nunca mudam (promessa, Pix, fora da plataforma, dado pessoal).
     </p>
 
     <!-- regras que já batem entre si -->

@@ -93,7 +93,10 @@ const ABAS: { value: Aba; label: string; icon: any }[] = [
   { value: 'mail', label: 'E-mail', icon: Inbox },
   { value: 'lojas', label: 'Lojas e modo', icon: Store },
   { value: 'manual', label: 'Manual do agente', icon: BookOpen },
-  { value: 'modelos', label: 'Respostas prontas', icon: MessageSquareText },
+  // As RESPOSTAS PRONTAS SAÍRAM (13/11/2026, o Eduardo: "não terá mais respostas prontas — o que
+  // ele não souber, a pessoa corrige ali e manda, e na próxima ele acerta"): a sugestão da IA é a
+  // caixa e o banco de respostas aprende com a correção. Os dados ficam guardados (a tabela não
+  // muda); a aba, o botão da conversa e o "/" somem (a lista nem é carregada).
   { value: 'automaticas', label: 'Automáticas', icon: Bot },
   { value: 'metricas', label: 'Métricas', icon: BarChart3 },
   // O BANCO DE RESPOSTAS (13/11/2026, o Eduardo): a revisão diária do que a IA mandou sozinha
@@ -530,10 +533,14 @@ function aoMudarConversa(c: ConversaResumo) {
 }
 
 // ─── respostas prontas (para o menu da conversa) ────────────────────────────
+const MOSTRA_RESPOSTAS_PRONTAS = false
 const modelos = ref<Modelo[]>([])
 let modelosCarregados = false
 let pedidoModelos: Promise<void> | null = null
 function carregarModelos(forcar = false): Promise<void> {
+  // As respostas prontas saíram da tela (13/11/2026): a lista não é mais carregada — sem ela, o
+  // botão e o "/" da conversa não aparecem.
+  if (!MOSTRA_RESPOSTAS_PRONTAS) return Promise.resolve()
   if (pedidoModelos) return pedidoModelos
   if (modelosCarregados && !forcar) return Promise.resolve()
   pedidoModelos = (async () => {

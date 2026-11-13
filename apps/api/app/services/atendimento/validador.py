@@ -2568,9 +2568,28 @@ def nega_garantia(texto: str) -> bool:
     return bool(_PRAZO_QUE_ACABOU.search(plano))
 
 
+# A frase que NEGA o reset não o sugere (13/11/2026, Victor: "se o aparelho não dá nenhum sinal
+# de vida, não precisa tentar o reset" segurava como "sugere reset"). Só a negação de fazer,
+# tentar, precisar ou recomendar, antes do reset e na MESMA oração; "não esqueça de fazer o
+# reset" continua sugestão.
+_NEGA_O_RESET = re.compile(
+    r"\b(?:nao|nem)\s+(?!esquec\w*|deix\w*\s+de\b)(?:\w+\s+){0,3}?(?:precisa\w*|e\s+necessari\w*"
+    r"|tent\w*|faca\w*|faz\w*"
+    r"|recomend\w*|indic\w*|dev\w*|vale|adianta|consig\w*|consegu\w*|da\s+(?:para|pra))\b"
+    r"|\bsem\s+(?:precisar|fazer|tentar)\b"
+)
+_ORACOES = re.compile(r"[.!?;,:\n]+|\s+(?:mas|porem|entao)\s+")
+
+
 def sugere_reset(texto: str) -> bool:
-    """A resposta sugere reset, formatação ou restauração de fábrica? PURA (agente)."""
-    return bool(_RESET.search(" ".join(plano_de(texto or "").split())))
+    """A resposta sugere reset, formatação ou restauração de fábrica? PURA (agente). A oração
+    que nega o reset (`_NEGA_O_RESET` antes dele) não conta."""
+    plano = " ".join(plano_de(texto or "").split())
+    for oracao in _ORACOES.split(plano):
+        m = _RESET.search(oracao)
+        if m and not _NEGA_O_RESET.search(oracao[: m.start()]):
+            return True
+    return False
 
 
 def _como_data(valor) -> tuple[int, int, int] | None:

@@ -116,14 +116,15 @@ async function run() {
     const m = mount({ tab: 'mail', conversation: 'email1', intercept: (url) => url === '/api/atendimento/modelos' ? models.promise : undefined })
     m.start(); await settle()
     assert.equal(m.count('/conversas?'), 0)
-    assert.equal(m.count('/modelos'), 1, 'deep link da conversa de e-mail busca respostas prontas')
+    // As respostas prontas saíram da tela (13/11/2026): a conversa não as busca mais.
+    assert.equal(m.count('/modelos'), 0, 'as respostas prontas não são carregadas')
     m.state.emailConversa = 'email2'; await settle()
-    assert.equal(m.count('/modelos'), 1, 'trocas rápidas compartilham os metadados em voo')
+    assert.equal(m.count('/modelos'), 0)
     models.resolve([{ id: 'answer' }]); await settle()
     m.state.emailConversa = 'email3'; await settle()
-    assert.equal(m.count('/modelos'), 1, 'metadados resolvidos são reaproveitados nesta visita')
+    assert.equal(m.count('/modelos'), 0)
     await m.state.atualizarTudo()
-    assert.equal(m.count('/modelos'), 2, 'atualização manual permite reler os modelos')
+    assert.equal(m.count('/modelos'), 0, 'nem na atualização manual')
     m.stop()
   }
   {
