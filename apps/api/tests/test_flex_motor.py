@@ -1186,15 +1186,60 @@ async def test_desligar_so_em_piloto_e_conta_pronta(db, mundo, monkeypatch):
 # histerese agora vale só para o Flex que o DaVinci ligou.
 
 
+_T0 = datetime(2026, 11, 12, 12, tzinfo=UTC)
+
+
+def _ev(acao, resultado="ok", depois=None, minutos=0):
+    return (acao, resultado, depois, _T0 + timedelta(minutes=minutos))
+
+
+@pytest.mark.parametrize(
+    ("eventos", "nosso"),
+    [
+        ([_ev("ligar")], True),  # o DaVinci ligou
+        ([_ev("ler", depois="desligado"), _ev("ligar", minutos=5)], True),
+        ([_ev("ligar"), _ev("ler", depois="desligado", minutos=5)], False),  # desligaram por fora
+        ([_ev("ligar"), _ev("desligar", minutos=5)], False),  # o DaVinci desligou
+        ([_ev("ligar"), _ev("emergencia", minutos=5)], False),  # a emergência desligou
+        (
+            [_ev("ligar"), _ev("emergencia", minutos=5), _ev("ler", depois="ligado", minutos=60)],
+            False,  # religado por fora depois da emergência (revisão de 13/11)
+        ),
+        ([_ev("ligar", resultado="erro")], False),  # recusado
+        ([_ev("ler", depois="ligado")], False),  # 1ª leitura já ligado: por fora
+        ([_ev("ligar", resultado="simulado")], False),  # observar: não é escrita
+        ([_ev("ligar", resultado="pendente")], False),  # aceito, nunca confirmado
+        (
+            [_ev("ligar", resultado="pendente"), _ev("ler", depois="ligado", minutos=4)],
+            True,  # a Shopee mostrou ~4 min depois (12/11)
+        ),
+        (
+            [_ev("ligar", resultado="erro"), _ev("ler", depois="ligado", minutos=10)],
+            True,  # 504, mas a plataforma aplicou
+        ),
+        (
+            [_ev("ligar", resultado="pendente"), _ev("ler", depois="ligado", minutos=180)],
+            False,  # ligado bem depois: foi por fora
+        ),
+        (
+            [_ev("ligar"), _ev("desligar", minutos=5), _ev("ler", depois="ligado", minutos=10)],
+            False,  # religado por fora
+        ),
+        ([_ev("ligar"), _ev("desligar", resultado="erro", minutos=5)], True),  # não desligou
+    ],
+)
+def test_nosso_pela_trilha(eventos, nosso):
+    assert flex_motor._nosso_pela_trilha(eventos) is nosso
+
+
 @pytest.mark.asyncio
 async def test_ligados_pelo_davinci_pela_trilha(db, mundo):
     conta = mundo["conta_id"]
-    t0 = datetime(2026, 11, 12, 12, tzinfo=UTC)
 
     def log(ext, acao, resultado="ok", depois=None, minutos=0):
         db.add(
             FlexLog(
-                criado_em=t0 + timedelta(minutes=minutos),
+                criado_em=_T0 + timedelta(minutes=minutos),
                 integration_id=conta,
                 external_id=ext,
                 plataforma="ml",
@@ -1205,24 +1250,21 @@ async def test_ligados_pelo_davinci_pela_trilha(db, mundo):
             )
         )
 
-    log("A1", "ligar")  # o DaVinci ligou
+    log("A1", "ligar")
     log("A2", "ler", depois="desligado")
-    log("A2", "ligar", minutos=5)  # lido desligado, depois o DaVinci ligou
+    log("A2", "ligar", minutos=5)
     log("A3", "ligar")
-    log("A3", "ler", depois="desligado", minutos=5)  # desligaram por fora depois
-    log("A4", "ligar")
-    log("A4", "desligar", minutos=5)  # o DaVinci desligou depois
-    log("A5", "ligar", resultado="erro")  # a plataforma recusou
-    log("A6", "ler", depois="ligado")  # 1ª leitura já ligado (ligado por fora)
-    log("A7", "ligar", resultado="pendente")  # aceito, a plataforma ainda confirmando
-    log("A8", "ligar", resultado="simulado")  # modo observar: não é escrita
+    log("A3", "ler", depois="desligado", minutos=5)
+    log("A6", "ler", depois="ligado")
     log("A9", "ligar")
-    log("A9", "desligar", minutos=5)
-    log("A9", "ler", depois="ligado", minutos=10)  # religado por fora
+    log("A9", "emergencia", minutos=5)
+    log("A9", "ler", depois="ligado", minutos=60)
     await db.commit()
 
-    nossos = await flex_motor._ligados_pelo_davinci(db, [conta])
-    assert {ext for c, ext in nossos if c == conta} == {"A1", "A2", "A7"}
+    pedidos = [(conta, e) for e in ("A1", "A2", "A3", "A6", "A9", "SEM_TRILHA")]
+    assert await flex_motor._ligados_pelo_davinci(db, pedidos) == {(conta, "A1"), (conta, "A2")}
+    # Só os anúncios pedidos: A1 fora da lista não aparece.
+    assert await flex_motor._ligados_pelo_davinci(db, [(conta, "A3")]) == set()
     assert await flex_motor._ligados_pelo_davinci(db, []) == set()
 
 

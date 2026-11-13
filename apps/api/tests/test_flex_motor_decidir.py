@@ -153,14 +153,26 @@ def test_ligado_por_fora_nao_ganha_histerese(saldo, observado, anterior, esperad
     d = decidir(a, _saldos(dg053_sp=saldo), CFG)
     assert d.desejado == esperado
     assert d.saldo == saldo
-    if esperado == "desligado" and CFG.n_desliga <= saldo < CFG.n_liga and "ligado" in (
-        observado,
-        anterior,
-    ):
-        assert d.motivo == (
-            f"saldo Flex {saldo} em dg053.sp: ligado fora do DaVinci — precisa de 3 para "
-            "continuar ligado"
-        )
+    if esperado == "desligado" and CFG.n_desliga <= saldo < CFG.n_liga:
+        if observado == "ligado":
+            assert d.motivo == (
+                f"saldo Flex {saldo} em dg053.sp: ligado fora do DaVinci — precisa de 3 para "
+                "continuar ligado"
+            )
+        else:
+            # Sem leitura (ou lido desligado): ninguém sabe se está ligado.
+            assert d.motivo == f"saldo Flex {saldo} em dg053.sp: precisa de 3 para ligar"
+
+
+def test_shopee_so_leitura_mantem_a_histerese_do_ligado_a_mao():
+    """Shopee sem escrita: todo Flex é ligado à mão no Seller Center e o motor
+    não desliga — a histerese de antes continua (não promete desligar)."""
+    a = replace(
+        _anuncio("dg053.ci", observado="ligado", plataforma="shopee"), pode_ligar=False
+    )
+    d = decidir(a, _saldos(dg053_sp=2), CFG)
+    assert d.desejado == "ligado"
+    assert "histerese" in d.motivo
 
 
 def test_saldo_flex_desconta_os_pedidos_flex_fora_do_sp():

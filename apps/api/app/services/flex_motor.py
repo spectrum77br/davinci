@@ -112,7 +112,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, func, or_, select, text, true, update
+from sqlalchemy import and_, func, or_, select, text, true, tuple_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -523,7 +523,11 @@ def decidir(anuncio: Anuncio, saldos: Mapping[str, SaldoSp], cfg: ConfigFlex) ->
             menor,
             skus_sp,
         )
-    elif _estado_atual(anuncio) == LIGADO and anuncio.ligado_pelo_davinci:
+    elif _estado_atual(anuncio) == LIGADO and (
+        anuncio.ligado_pelo_davinci or not anuncio.pode_ligar
+    ):
+        # Shopee só leitura (`pode_ligar` False): todo Flex é ligado à mão no
+        # Seller Center e o motor não desliga — segue a histerese de antes.
         d = Decisao(
             LIGADO,
             f"saldo Flex {menor} em {sku_menor}: entre {cfg.n_desliga} e {cfg.n_liga}, "
@@ -532,11 +536,12 @@ def decidir(anuncio: Anuncio, saldos: Mapping[str, SaldoSp], cfg: ConfigFlex) ->
             menor,
             skus_sp,
         )
-    elif _estado_atual(anuncio) == LIGADO:
-        # Ligado POR FORA do DaVinci (13/11/2026: um app da loja ligou a
-        # Entrega Direta em massa na Shopee e a histerese segurou 45 anúncios
-        # com 1–2 peças em São Bernardo, cada peça em até 8 anúncios). Quem
-        # não foi ligado aqui precisa do saldo de LIGAR para ficar ligado.
+    elif anuncio.observado == LIGADO:
+        # Ligado POR FORA do DaVinci, com a leitura dizendo ligado (sem leitura
+        # ninguém sabe: cai no "precisa de N para ligar"). 13/11/2026: um app
+        # da loja ligou a Entrega Direta em massa na Shopee e a histerese
+        # segurou 45 anúncios com 1–2 peças em São Bernardo, cada peça em até
+        # 8 anúncios. Quem não foi ligado aqui precisa do saldo de LIGAR.
         d = Decisao(
             DESLIGADO,
             f"saldo Flex {menor} em {sku_menor}: ligado fora do DaVinci — precisa de "
@@ -1081,7 +1086,15 @@ async def _fotos_dos_estados(
     rows = await session.execute(
         select(FlexAnuncioEstado).where(FlexAnuncioEstado.integration_id.in_(list(ids)))
     )
-    nossos = await _ligados_pelo_davinci(session, ids)
+    linhas = rows.scalars().all()
+    nossos = await _ligados_pelo_davinci(
+        session,
+        [
+            (e.integration_id, e.external_id)
+            for e in linhas
+            if e.observado == LIGADO or (e.observado is None and e.desejado == LIGADO)
+        ],
+    )
     return {
         (e.integration_id, e.external_id): _Estado(
             plataforma=e.plataforma,
@@ -1096,46 +1109,81 @@ async def _fotos_dos_estados(
             status_em=e.status_em,
             ligado_pelo_davinci=(e.integration_id, e.external_id) in nossos,
         )
-        for e in rows.scalars().all()
+        for e in linhas
     }
+
+
+# Escrita aceita e ainda sem confirmação (Shopee "confirmando", ou erro de rede
+# depois de a plataforma aplicar): vale como do DaVinci se a leitura mostrar
+# ligado até este tempo depois (12/11/2026: a Shopee levou ~4 min).
+_JANELA_CONFIRMA_LIGAR = timedelta(minutes=30)
+
+
+def _nosso_pela_trilha(eventos: Iterable[tuple[str, str | None, str | None, datetime]]) -> bool:
+    """Pura: o Flex ligado agora foi o DaVinci que ligou? `eventos` = (acao,
+    resultado, estado_depois, criado_em) do `flex_log` do anúncio, em ordem.
+
+    Liga a marca: 'ligar' ok; ou 'ligar' pendente/erro (escrita aceita, sem
+    confirmação) seguido de leitura LIGADO em até `_JANELA_CONFIRMA_LIGAR`.
+    Apaga a marca: 'desligar'/'emergencia' ok ou pendente, e leitura
+    DESLIGADO (o Flex que volta depois disso foi ligado por fora). `simulado`
+    (modo observar) não é escrita."""
+    nosso = False
+    tentativa: datetime | None = None
+    for acao, resultado, depois, em in eventos:
+        if acao == "ligar":
+            if resultado == "ok":
+                nosso, tentativa = True, None
+            elif resultado in ("pendente", "erro"):
+                tentativa = em
+        elif acao in ("desligar", "emergencia"):
+            if resultado in ("ok", "pendente"):
+                nosso, tentativa = False, None
+        elif acao == "ler":
+            if depois == DESLIGADO:
+                nosso, tentativa = False, None
+            elif depois == LIGADO and tentativa is not None:
+                if em - tentativa <= _JANELA_CONFIRMA_LIGAR:
+                    nosso = True
+                tentativa = None
+    return nosso
 
 
 async def _ligados_pelo_davinci(
-    session: AsyncSession, ids: Collection[UUID]
+    session: AsyncSession, chaves: Collection[tuple[UUID, str]]
 ) -> set[tuple[UUID, str]]:
-    """Anúncios cujo Flex ligado foi o DaVinci que ligou (13/11/2026): houve um
-    LIGAR do DaVinci (ok, ou aceito pela plataforma e ainda confirmando) DEPOIS
-    da última vez que o anúncio ficou desligado — desligado pelo DaVinci
-    (desligar ok/confirmando) ou lido desligado. O ligado por fora (app da loja
-    que liga a Entrega Direta em massa, Seller Center, padrão da conta do ML,
-    "primeira leitura" já ligado) não entra: não ganha a histerese.
+    """Dos anúncios `chaves` (os que estão ou estariam ligados), os que o
+    DaVinci ligou (13/11/2026) — `_nosso_pela_trilha` sobre o `flex_log`. O
+    ligado por fora (app da loja que liga a Entrega Direta em massa, Seller
+    Center, padrão da conta do ML, "primeira leitura" já ligado) não entra:
+    não ganha a histerese.
 
-    Fonte: `flex_log` (índice ix_flex_log_anuncio). `simulado` (modo observar)
-    não é escrita e não conta."""
-    if not ids:
-        return set()
-    ligou = func.max(FlexLog.criado_em).filter(
-        FlexLog.acao == "ligar", FlexLog.resultado.in_(("ok", "pendente"))
-    )
-    desligou = func.max(FlexLog.criado_em).filter(
-        or_(
-            and_(FlexLog.acao == "desligar", FlexLog.resultado.in_(("ok", "pendente"))),
-            and_(FlexLog.acao == "ler", FlexLog.estado_depois == DESLIGADO),
+    Só a trilha dos anúncios pedidos (índice ix_flex_log_anuncio), em lotes —
+    nunca o histórico inteiro."""
+    out: set[tuple[UUID, str]] = set()
+    lista = sorted({(c[0], str(c[1])) for c in chaves if c[0] is not None and c[1]})
+    for inicio in range(0, len(lista), 2000):
+        lote = lista[inicio : inicio + 2000]
+        rows = await session.execute(
+            select(
+                FlexLog.integration_id,
+                FlexLog.external_id,
+                FlexLog.acao,
+                FlexLog.resultado,
+                FlexLog.estado_depois,
+                FlexLog.criado_em,
+            )
+            .where(
+                tuple_(FlexLog.integration_id, FlexLog.external_id).in_(lote),
+                FlexLog.acao.in_(("ligar", "desligar", "emergencia", "ler")),
+            )
+            .order_by(FlexLog.integration_id, FlexLog.external_id, FlexLog.criado_em, FlexLog.id)
         )
-    )
-    rows = await session.execute(
-        select(FlexLog.integration_id, FlexLog.external_id, ligou, desligou)
-        .where(
-            FlexLog.integration_id.in_(list(ids)),
-            FlexLog.acao.in_(("ligar", "desligar", "ler")),
-        )
-        .group_by(FlexLog.integration_id, FlexLog.external_id)
-    )
-    return {
-        (r[0], str(r[1]))
-        for r in rows.all()
-        if r[2] is not None and (r[3] is None or r[2] > r[3])
-    }
+        eventos: dict[tuple[UUID, str], list] = defaultdict(list)
+        for iid, ext, acao, resultado, depois, em in rows.all():
+            eventos[(iid, str(ext))].append((acao, resultado, depois, em))
+        out.update(chave for chave, evs in eventos.items() if _nosso_pela_trilha(evs))
+    return out
 
 
 def _com_estado(

@@ -100,7 +100,7 @@ def _claro(motivo: str) -> str:
             _an("dg053.ci", observado="ligado"),
             _sp(dg053_sp=2),
             "O Flex foi ligado fora do DaVinci (aplicativo da loja, Seller Center ou padrão da "
-            "conta) e só fica ligado com 3 ou mais — o robô desliga.",
+            "conta) e só fica ligado com 3 ou mais.",
         ),
         (_an("dg053.ci", recusa="403 item down"), _sp(dg053_sp=5), "não aceitou ligar"),
         # Revisão de 02/10/2026: a conta, o status do anúncio, o anúncio que o

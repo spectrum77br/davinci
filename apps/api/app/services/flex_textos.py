@@ -232,7 +232,7 @@ _REGRAS: list[tuple[re.Pattern[str], Callable[[re.Match[str]], str]]] = [
         lambda m: (
             f"{_so(int(m['n']))} em {_local()} ({m['sku']}). O Flex foi ligado fora do DaVinci "
             f"(aplicativo da loja, Seller Center ou padrão da conta) e só fica ligado com "
-            f"{m['l']} ou mais — o robô desliga."
+            f"{m['l']} ou mais."
         ),
     ),
     (
