@@ -21,6 +21,7 @@ from app.models import (
     ListingStatus,
     Marketplace,
     Product,
+    ProductLink,
     Segment,
     Store,
     StoreStatus,
@@ -280,6 +281,77 @@ async def test_rota_de_contagem_nao_colide_com_produto_por_id(client, auth_as, d
     r = await client.get(f"/api/products/{produtos['mala'].id}")
     assert r.status_code == 200
     assert r.json()["sku"] == "sku-mala"
+
+
+@pytest.mark.asyncio
+async def test_saude_dos_vinculos_e_remover_mortos_por_departamento(client, auth_as, db, make_user):
+    """A faixa "Vínculos: N mortos…" conta só o departamento da tela, e o
+    "Remover os N mortos" (com o mesmo departamento) apaga só esses N."""
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    from sqlalchemy import select
+
+    from app.services.vinculo_saude import apagar_mortos_em_lotes
+
+    admin = await make_user(role=UserRole.ADMIN)
+    produtos = await _cenario(db, admin)
+    integ = await _integracao(db, admin)
+    for chave in ("celular", "catalogo", "mala", "sem"):
+        db.add(
+            ProductLink(
+                user_id=admin.id,
+                product_id=produtos[chave].id,
+                integration_id=integ.id,
+                platform=IntegrationPlatform.SHOPEE,
+                external_id=f"lk-{chave}",
+                external_sku=produtos[chave].sku,
+                morto_desde=datetime.now(UTC),
+                morto_motivo="anúncio excluído na Shopee",
+            )
+        )
+    await db.commit()
+    auth_as(admin)
+
+    async def mortos(dep: str | None = None) -> int:
+        r = await client.get("/api/products", params={"departamento": dep} if dep else {})
+        assert r.status_code == 200, r.text
+        return r.json()["saude"]["mortos"]
+
+    assert await mortos() == 4  # sem o parâmetro, como antes: todos
+    assert await mortos("celular") == 2  # Celular + Catálogo
+    assert await mortos("mala") == 1
+    assert await mortos("eletro") == 0  # a faixa some
+    assert await mortos("sem") == 1
+
+    agendados = []
+
+    class _Pool:
+        async def enqueue_job(self, *a, **k):
+            agendados.append((a, k))
+
+    async def _pool():
+        return _Pool()
+
+    with patch("app.routers.products.get_arq_pool", _pool):
+        r = await client.post(
+            "/api/product-links/remover-mortos", params={"departamento": "eletro"}
+        )
+        assert r.json() == {"agendado": True, "quantidade": 0}
+        r = await client.post(
+            "/api/product-links/remover-mortos", params={"departamento": "celular"}
+        )
+        assert r.json() == {"agendado": True, "quantidade": 2}
+        r = await client.post("/api/product-links/remover-mortos", params={"departamento": "x"})
+        assert r.status_code == 400
+    assert agendados == [(("remover_vinculos_mortos_run", None, True), {"departamento": "celular"})]
+
+    # O job apaga só os do departamento; os de Mala e Sem departamento ficam.
+    assert await apagar_mortos_em_lotes(somente_visiveis=True, departamento="celular", pausa=0) == 2
+    restantes = set((await db.execute(select(ProductLink.external_id))).scalars().all())
+    assert restantes == {"lk-mala", "lk-sem"}
+    assert await mortos("celular") == 0
+    assert await mortos() == 2
 
 
 def test_somar_por_departamento_sem_segmentos():

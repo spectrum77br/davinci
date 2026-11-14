@@ -80,6 +80,13 @@ assert.match(setup, /if \(tab\.value === 'faturamento'\) \{\s*router\.push\(\{ p
 // Quem só tem Faturamento não carrega a Tabela de Preços.
 assert.match(setup, /if \(podePrecos\.value\) \{\s*await loadSegments\(\)\s*await loadAccounts\(\)\s*if \(tab\.value !== 'faturamento'\) \{\s*await loadProducts\(\)\s*await loadIntegrations\(\)/)
 
+// /pricing (sem aba) deixa entrar quem /pricing/[tab] deixa: o redirecionamento
+// para /pricing/tabela leva quem só tem Faturamento ao Faturamento (acima).
+const indice = fs.readFileSync(path.resolve(__dirname, '../pages/pricing/index.vue'), 'utf8')
+assert.match(indice, /permissionAny: \[\s*\{ resource: 'tabela_precos', action: 'view' \},\s*\{ resource: 'faturamento', action: 'view' \},\s*\]/)
+assert.doesNotMatch(indice, /permission: \{/, 'not only tabela_precos any more')
+assert.match(indice, /navigateTo\('\/pricing\/tabela'/)
+
 // Menu: Faturamento saiu; a Tabela de preços fica marcada no Faturamento.
 const menu = fs.readFileSync(path.resolve(__dirname, '../components/AppSidebar.vue'), 'utf8')
 assert.doesNotMatch(menu, /to: '\/faturamento'/)

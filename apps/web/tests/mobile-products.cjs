@@ -73,7 +73,7 @@ function app(component) {
   result.component('Input', { setup: () => () => Vue.h('input') })
   return result
 }
-async function page(canWrite, { query = {}, contagens = DEPARTAMENTOS, can = null } = {}) {
+async function page(canWrite, { query = {}, contagens = DEPARTAMENTOS, can = null, saude = null } = {}) {
   let instance, meta
   const calls = []
   const route = Vue.reactive({ path: '/produtos', query: { ...query } })
@@ -93,7 +93,8 @@ async function page(canWrite, { query = {}, contagens = DEPARTAMENTOS, can = nul
       return { api: async (url, options) => {
         calls.push({ url, options })
         if (url === '/api/products/departamentos') return structuredClone(contagens)
-        if (url.startsWith('/api/products?')) return { items: structuredClone(PRODUCTS), total: 2, page: 1, page_size: 50 }
+        if (url.startsWith('/api/products?')) return { items: structuredClone(PRODUCTS), total: 2, page: 1, page_size: 50, ...(saude ? { saude } : {}) }
+        if (url.startsWith('/api/product-links/remover-mortos')) return { agendado: true, quantidade: saude?.mortos ?? 0 }
         if (url === '/api/integrations') return [
           { id: 'amazon-a', platform: 'amazon', name: 'Loja A' },
           { id: 'shopee-s', platform: 'shopee', name: 'Loja S' },
@@ -220,8 +221,41 @@ async function departamentos() {
   assert.equal(p.state.departamentoDoSegmento(null), 'sem')
   assert.equal(p.state.departamentoDoSegmento('desconhecido'), 'sem')
 }
+async function saudeDosVinculos() {
+  // A faixa "Vínculos: N mortos…" é do departamento da tela (a API conta com o
+  // mesmo ?departamento= da lista) e o "Remover os N mortos" apaga só os dele.
+  const p = await page(true, { query: { dept: 'mala' }, saude: { mortos: 3, sku_divergente: 0, erro: 0 } })
+  let html = await p.html()
+  assert.match(html, /3 mortos \(anúncio encerrado/)
+  assert.match(html, /Remover os 3 mortos/)
+  p.state.confirmandoRemoverMortos = true
+  html = await p.html()
+  assert.match(html, /Apagar 3 vínculos mortos de Mala\?/)
+  p.calls.length = 0
+  globalThis.window = { setTimeout: () => 0 } // o toast
+  try {
+    await p.state.removerMortos()
+  } finally {
+    delete globalThis.window
+  }
+  const remover = p.calls.filter(({ options }) => options?.method === 'POST')
+  assert.deepEqual(remover.map(({ url }) => url), ['/api/product-links/remover-mortos?departamento=mala'])
+  assert.equal(p.state.confirmandoRemoverMortos, false)
+  // Trocar de departamento fecha a confirmação aberta (o número era do outro).
+  p.state.confirmandoRemoverMortos = true
+  p.state.departamento = 'eletro'
+  p.state.aoTrocarDepartamento()
+  assert.equal(p.state.confirmandoRemoverMortos, false)
+  // Departamento sem nenhum: a faixa some.
+  const limpo = await page(true, { query: { dept: 'eletro' }, saude: { mortos: 0, sku_divergente: 0, erro: 0 } })
+  assert.doesNotMatch(await limpo.html(), /Remover os|mortos \(anúncio encerrado/)
+  const semDept = await page(true, { query: { dept: 'sem' }, saude: { mortos: 1, sku_divergente: 0, erro: 0 } })
+  semDept.state.confirmandoRemoverMortos = true
+  assert.match(await semDept.html(), /Apagar 1 vínculos mortos de produtos sem departamento\?/)
+}
 async function run() {
   await departamentos()
+  await saudeDosVinculos()
   const reader = await page(false)
   assert.equal(reader.state.mobileProductView, 'cards', 'default view is a mobile summary')
   assert.equal(reader.state.mobileProductTools, false, 'admin tools do not occupy mobile first screen')

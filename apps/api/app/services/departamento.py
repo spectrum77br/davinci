@@ -27,7 +27,7 @@ from fastapi import HTTPException
 from sqlalchemy import false, not_, or_, select, true
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Listing, Product
+from app.models import Listing, Product, ProductLink
 from app.services.pricing.audit import _load_segment_roots
 
 DEPARTAMENTOS: tuple[str, ...] = ("celular", "mala", "eletro", "sem")
@@ -93,6 +93,14 @@ def condicao_anuncio(departamento: str, idx: dict[UUID, str]):
     if departamento == SEM:
         return or_(Listing.product_id.is_(None), do_produto)
     return do_produto
+
+
+def condicao_vinculo(departamento: str, idx: dict[UUID, str]):
+    """Predicado SQL para ProductLink: pelo segmento do produto do vínculo
+    (o "Remover os N mortos" da tela de Produtos, por departamento)."""
+    return ProductLink.product_id.in_(
+        select(Product.id).where(condicao_segmento(Product.segment_id, departamento, idx))
+    )
 
 
 def somar_por_departamento(

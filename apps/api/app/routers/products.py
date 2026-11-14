@@ -155,11 +155,12 @@ async def list_products(
     count_stmt = select(func.count()).select_from(Product).where(user_scope(Product, user))
     # Departamento (Organização do DaVinci, item 2): Produtos se divide como a
     # Tabela de Preços. Sem o parâmetro, nada muda.
+    cond_dep = None
     if departamento:
         idx = await dep_svc.indice_departamentos(session)
-        cond = dep_svc.condicao_segmento(Product.segment_id, departamento, idx)
-        stmt = stmt.where(cond)
-        count_stmt = count_stmt.where(cond)
+        cond_dep = dep_svc.condicao_segmento(Product.segment_id, departamento, idx)
+        stmt = stmt.where(cond_dep)
+        count_stmt = count_stmt.where(cond_dep)
     # Escopo por equipe: usuário não-admin com equipe(s) só vê os produtos que
     # têm vínculo com uma integração das lojas da sua equipe (admin / sem-equipe
     # = irrestrito). Casamos via EXISTS pra não duplicar linhas.
@@ -254,6 +255,11 @@ async def list_products(
     escopo_links = [user_scope(Product, user), _vinculo_visivel()]
     if not scope.unrestricted:
         escopo_links.append(ProductLink.integration_id.in_(scope.integration_ids))
+    # Com o departamento, a saúde é só dele — a faixa "Vínculos: N mortos…" e
+    # o filtro batem com a lista da tela, e o "Remover os N mortos" (que recebe
+    # o mesmo departamento) apaga exatamente esses N.
+    if cond_dep is not None:
+        escopo_links.append(cond_dep)
     contagem = (
         await session.execute(
             select(
@@ -266,9 +272,6 @@ async def list_products(
             .where(*escopo_links)
         )
     ).one()
-    # A saúde dos vínculos continua contando TODOS os departamentos: o "Remover
-    # os N mortos" apaga os mortos de todos, e o número do botão precisa ser o
-    # que ele apaga.
     saude = SaudeVinculos(mortos=contagem[0], sku_divergente=contagem[1], erro=contagem[2])
     return ProductPage(items=items, total=total, page=page, page_size=page_size, saude=saude)
 
@@ -723,27 +726,40 @@ async def remover_vinculos_mortos(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "delete"))],
+    departamento: str | None = Query(
+        None,
+        description="celular | mala | eletro | sem — só os mortos dos produtos "
+        "deste departamento (o que a tela de Produtos está mostrando)",
+    ),
 ) -> dict:
     """Apaga os vínculos marcados como mortos (anúncio encerrado, excluído ou
     bloqueado no marketplace). A varredura diária já faz isso sozinha depois
     de 30 dias; este botão é o "agora". Roda em segundo plano, em lotes, e
     apaga exatamente o que foi contado: mortos das contas não arquivadas no
-    escopo de quem clicou."""
+    escopo de quem clicou — e, com `departamento`, só os dos produtos dele
+    (sem o parâmetro, de todos, como antes)."""
+    departamento = dep_svc.validar(departamento)
     scope = await resolve_team_scope(session, user)
     integ = None if scope.unrestricted else [str(i) for i in scope.integration_ids]
     cond = [ProductLink.morto_desde.is_not(None), _vinculo_visivel()]
     if integ is not None:
         cond.append(ProductLink.integration_id.in_(scope.integration_ids))
+    if departamento:
+        idx = await dep_svc.indice_departamentos(session)
+        cond.append(dep_svc.condicao_vinculo(departamento, idx))
     quantidade = (
         await session.execute(select(func.count()).select_from(ProductLink).where(*cond))
     ).scalar_one()
     if quantidade:
         pool = await get_arq_pool()
-        await pool.enqueue_job("remover_vinculos_mortos_run", integ, True)
+        # O departamento só vai quando existe: o job antigo continua igual.
+        extra = {"departamento": departamento} if departamento else {}
+        await pool.enqueue_job("remover_vinculos_mortos_run", integ, True, **extra)
     logger.info(
         "vinculos_mortos_remocao_agendada",
         actor_user_id=str(user.id),
         quantidade=quantidade,
+        departamento=departamento,
         **_audit_request_ctx(request),
     )
     return {"agendado": True, "quantidade": quantidade}

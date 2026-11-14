@@ -414,6 +414,7 @@ function aoTrocarDepartamento() {
   selected.value = new Set()
   selectedLinks.value = new Set()
   expanded.value = new Set()
+  confirmandoRemoverMortos.value = false
   if (filtroSegment.value && !segmentFilterOptions.value.some((o) => o.id === filtroSegment.value)) {
     filtroSegment.value = ''
   }
@@ -778,10 +779,19 @@ function dicaVinculo(p: Product, l: ProductLink): string {
   if (l.last_error) linhas.push(l.last_error)
   return linhas.join('\n')
 }
+// A saúde dos vínculos (faixa "Vínculos: N mortos…") é do departamento cuja
+// lista está na tela; o "Remover os N mortos" apaga só os dele.
+const departamentoDaSaude = computed<Departamento>(() => produtosCarregadosDe.value ?? departamento.value)
+const nomeDepartamentoDaSaude = computed(() => departamentoDaSaude.value === 'sem'
+  ? 'produtos sem departamento'
+  : DEPARTAMENTOS.find((d) => d.value === departamentoDaSaude.value)?.label ?? '')
 async function removerMortos() {
   removendoMortos.value = true
   try {
-    const r = await api<{ quantidade: number }>('/api/product-links/remover-mortos', { method: 'POST' })
+    const r = await api<{ quantidade: number }>(
+      `/api/product-links/remover-mortos?departamento=${departamentoDaSaude.value}`,
+      { method: 'POST' },
+    )
     pushToast({
       kind: 'success',
       title: `Removendo ${r.quantidade.toLocaleString('pt-BR')} vínculo(s) morto(s)`,
@@ -2023,7 +2033,7 @@ onUnmounted(() => {
           <Trash2 class="size-4 mr-1.5" /> Remover os {{ saude.mortos.toLocaleString('pt-BR') }} mortos
         </Button>
         <span v-else class="ml-auto flex items-center gap-2">
-          Apagar {{ saude.mortos.toLocaleString('pt-BR') }} vínculos mortos? (sozinhos eles saem em 30 dias)
+          Apagar {{ saude.mortos.toLocaleString('pt-BR') }} vínculos mortos de {{ nomeDepartamentoDaSaude }}? (sozinhos eles saem em 30 dias)
           <Button size="sm" variant="destructive" :disabled="removendoMortos" @click="removerMortos">
             {{ removendoMortos ? 'removendo…' : 'Sim, remover' }}
           </Button>

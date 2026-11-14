@@ -5190,17 +5190,23 @@ async def varredura_vinculos(ctx: dict) -> None:
 
 
 async def remover_vinculos_mortos_run(
-    ctx: dict, integration_ids: list[str] | None = None, somente_visiveis: bool = False
+    ctx: dict,
+    integration_ids: list[str] | None = None,
+    somente_visiveis: bool = False,
+    departamento: str | None = None,
 ) -> None:
     """Botão "Remover mortos" da tela Produtos: apaga já, em lotes, em
-    segundo plano (o botão só conta e agenda)."""
+    segundo plano (o botão só conta e agenda). Com `departamento`, só os
+    mortos dos produtos daquele departamento (o que a tela mostrava)."""
     from app.services import vinculo_saude
 
     ids = [UUID(i) for i in integration_ids] if integration_ids is not None else None
     removidos = await vinculo_saude.apagar_mortos_em_lotes(
-        integration_ids=ids, somente_visiveis=somente_visiveis
+        integration_ids=ids, somente_visiveis=somente_visiveis, departamento=departamento
     )
-    logger.info("vinculos_mortos_removidos_botao", quantidade=removidos)
+    logger.info(
+        "vinculos_mortos_removidos_botao", quantidade=removidos, departamento=departamento
+    )
 
 
 async def auto_import_link(ctx: dict) -> None:

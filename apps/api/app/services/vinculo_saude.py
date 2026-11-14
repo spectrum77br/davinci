@@ -121,16 +121,26 @@ async def apagar_mortos_em_lotes(
     antes_de=None,
     integration_ids: list | None = None,
     somente_visiveis: bool = False,
+    departamento: str | None = None,
     pausa: float = 0.2,
 ) -> int:
     """Apaga vínculos mortos (opcionalmente só os mortos antes de `antes_de`,
-    só destas contas e/ou só os que a tela mostra). Devolve quantos apagou."""
+    só destas contas, só os que a tela mostra e/ou só os dos produtos de um
+    departamento). Devolve quantos apagou."""
     import asyncio
 
     from sqlalchemy import delete, select
 
     from app.db import session_scope
     from app.models import ProductLink
+
+    cond_dep = None
+    if departamento:
+        from app.services import departamento as dep_svc
+
+        async with session_scope() as s:
+            idx = await dep_svc.indice_departamentos(s)
+        cond_dep = dep_svc.condicao_vinculo(departamento, idx)
 
     total = 0
     while True:
@@ -142,6 +152,8 @@ async def apagar_mortos_em_lotes(
                 q = q.where(ProductLink.integration_id.in_(integration_ids))
             if somente_visiveis:
                 q = q.where(condicao_visivel())
+            if cond_dep is not None:
+                q = q.where(cond_dep)
             ids = (
                 await s.execute(q.limit(LOTE_APAGAR).with_for_update(skip_locked=True))
             ).scalars().all()
