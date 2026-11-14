@@ -2127,7 +2127,7 @@ async function conferirTodos() {
 
 <template>
   <div class="controle-estoque min-w-0 space-y-3 p-4" :class="{ 'stock-as-table': mobileTable }">
-    <!-- Header + tabs -->
+    <!-- Header: título à esquerda, botões de ação à direita -->
     <div class="stock-header flex flex-wrap items-center gap-3">
       <div class="stock-title flex items-center gap-2">
         <Boxes class="h-5 w-5 text-primary" />
@@ -2180,27 +2180,32 @@ async function conferirTodos() {
         <ArrowLeftRight class="size-3.5" />
         Transferir estoque
       </button>
-      <div class="stock-tabs flex gap-1 rounded-md bg-muted/40 p-1 w-fit flex-wrap" aria-label="Áreas do controle de estoque">
-        <button
-          v-for="t in visibleTabs"
-          :key="t"
-          :aria-pressed="tab === t"
-          class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
-          :class="tab === t ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
-          @click="tab = t"
-        >
-          <Boxes v-if="t === 'estoque'" class="size-4" />
-          <ClipboardList v-else-if="t === 'pedidos'" class="size-4" />
-          <Truck v-else-if="t === 'envios'" class="size-4" />
-          <FileUp v-else class="size-4" />
-          {{
-            t === 'estoque' ? 'Estoque' :
-            t === 'pedidos' ? 'Pedidos' :
-            t === 'envios' ? 'Envios' :
-            'Upload NF'
-          }}
-        </button>
-      </div>
+    </div>
+
+    <!-- Abas — na linha de baixo do título, alinhadas à esquerda, com o mesmo
+         desenho das sub-abas da Tabela de Preços (13/11/2026: antes ficavam
+         no fim da linha dos botões e pareciam mais um botão). -->
+    <div class="stock-tabs flex flex-wrap gap-1 rounded-md bg-muted/40 p-1 w-fit" aria-label="Áreas do controle de estoque">
+      <button
+        v-for="t in visibleTabs"
+        :key="t"
+        type="button"
+        :aria-pressed="tab === t"
+        class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm transition-colors"
+        :class="tab === t ? 'bg-background shadow-sm' : 'text-muted-foreground hover:text-foreground'"
+        @click="tab = t"
+      >
+        <Boxes v-if="t === 'estoque'" class="h-4 w-4" />
+        <ClipboardList v-else-if="t === 'pedidos'" class="h-4 w-4" />
+        <Truck v-else-if="t === 'envios'" class="h-4 w-4" />
+        <FileUp v-else class="h-4 w-4" />
+        {{
+          t === 'estoque' ? 'Estoque' :
+          t === 'pedidos' ? 'Pedidos' :
+          t === 'envios' ? 'Envios' :
+          'Upload NF'
+        }}
+      </button>
     </div>
 
     <!-- Filters bar -->

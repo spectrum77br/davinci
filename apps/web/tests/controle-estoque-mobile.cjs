@@ -117,6 +117,18 @@ async function run() {
   assert.equal(admin.state.mobileTable, false, 'compact list is the default')
   admin.state.produtos = [structuredClone(PRODUCT)]
   let html = await admin.html()
+  // 13/11/2026: as abas descem para a linha de baixo do título — saem do
+  // cabeçalho (título + botões) e ficam entre ele e a barra de filtros.
+  const header = html.match(/<div class="stock-header[\s\S]*?Transferir estoque\s*<\/button><\/div>/)
+  assert.ok(header, 'header keeps title and action buttons together')
+  assert.doesNotMatch(header[0], /stock-tabs|Upload NF/, 'tabs are no longer inside the header row')
+  const posTabs = html.indexOf('class="stock-tabs')
+  assert.ok(posTabs > header.index + header[0].length, 'tabs come right after the header')
+  assert.ok(posTabs < html.indexOf('class="stock-filters'), 'tabs come before the filters')
+  assert.deepEqual(
+    [...html.slice(posTabs).matchAll(/<button type="button" aria-pressed="(true|false)"[^>]*>[\s\S]*?<\/(?:svg|i)>\s*([^<]+?)\s*<\/button>/g)].slice(0, 4).map((m) => m[2]),
+    ['Estoque', 'Pedidos', 'Envios', 'Upload NF'],
+  )
   let mobile = section(html, 'Produtos em estoque')
   assert.deepEqual(tags(mobile, 'h2'), [PRODUCT.nome])
   assert.deepEqual(tags(mobile, 'dt'), ['Atual', 'Reserva', 'Disponível'])
