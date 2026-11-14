@@ -182,11 +182,13 @@ const sections = computed<Section[]>(() => [
       { to: '/produtos', label: 'Produtos', icon: Package, resource: 'produtos' },
       { to: '/anuncios', label: 'Anúncios', icon: Megaphone, resource: 'anuncios' },
       { to: '/marketing', label: 'Marketing', icon: BarChart3, featureFlag: 'marketing' },
-      { to: '/pricing/tabela', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos' },
+      // 13/11/2026: o Faturamento saiu do menu e virou o botão "Faturamento" da
+      // Tabela de Preços (/pricing/faturamento; /faturamento redireciona). O
+      // item fica marcado em qualquer aba da Tabela, inclusive no Faturamento.
+      { to: '/pricing/tabela', label: 'Tabela de preços', icon: DollarSign, resource: 'tabela_precos', match: ['/pricing', '/faturamento'] },
       // 19/10 (Vinicius): a Margem saiu do menu — já é aba da Conciliação. Quem só tem
       // Margem continua chegando por aqui (a página aceita conciliacao OU margem).
       { to: '/conciliacao', label: 'Conciliação', icon: Scale, resource: 'conciliacao', tambemCom: ['margem'], soComPermissao: true },
-      { to: '/faturamento', label: 'Faturamento', icon: Coins, resource: 'faturamento' },
       { to: '/controle-estoque', label: 'Controle de Estoque', icon: Warehouse, resource: 'controle_estoque' },
     ],
   },

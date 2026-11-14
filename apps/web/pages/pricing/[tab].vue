@@ -2,7 +2,7 @@
 import {
   Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff,
   Lock, Send, Ban, Check, Link2, Copy, Minus,
-  Smartphone, Briefcase, Zap, DollarSign, Settings2, Upload,
+  Smartphone, Briefcase, Zap, DollarSign, Settings2, Upload, Coins,
   ChevronDown, Download, Undo2, Redo2, Search, Tags, Camera, FolderPlus, ScanSearch,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
@@ -20,13 +20,36 @@ definePageMeta({
       return navigateTo({ path: '/pricing/tabela', query: to.query, hash: to.hash }, { replace: true })
     },
     'permission',
+    // Faturamento (13/11/2026, item 6) é o botão ao lado de Celular · Mala ·
+    // Eletro, em /pricing/faturamento. Quem só tem a permissão Faturamento
+    // entra direto nele (sem os departamentos); quem não tem Faturamento e
+    // abre o link dele cai na Tabela de Preços.
+    (to) => {
+      const u = useAuthStore().user
+      if (!u || u.role === 'admin') return
+      const tem = (r: 'tabela_precos' | 'faturamento') => u.permissions?.[r]?.view === true
+      const query = to.query
+      if (to.params.tab === 'faturamento' && !tem('faturamento')) {
+        return navigateTo({ path: '/pricing/tabela', query }, { replace: true })
+      }
+      if (to.params.tab !== 'faturamento' && !tem('tabela_precos')) {
+        return navigateTo({ path: '/pricing/faturamento', query }, { replace: true })
+      }
+    },
   ],
-  permission: { resource: 'tabela_precos', action: 'view' },
+  // Até 13/11/2026 só tabela_precos. O Faturamento saiu do menu e virou botão
+  // daqui, então quem tinha só Faturamento continua chegando nele.
+  permissionAny: [
+    { resource: 'tabela_precos', action: 'view' },
+    { resource: 'faturamento', action: 'view' },
+  ],
 })
 
 // Concorrência (busca na API pública do ML) saiu em 13/11/2026; a rota da API
 // e a permissão tabela_precos_concorrencia continuam, só a aba some.
-type Tab = 'tabela' | 'contas' | 'produtos'
+// 'faturamento' não é sub-aba: é o botão da linha dos departamentos, e as
+// sub-abas (TABS) somem enquanto ele está escolhido.
+type Tab = 'tabela' | 'contas' | 'produtos' | 'faturamento'
 
 const TABS: { key: Tab; label: string; icon: any }[] = [
   { key: 'tabela', label: 'Tabela de Preços', icon: DollarSign },
@@ -40,6 +63,7 @@ const { api } = useApi()
 
 const tab = computed<Tab>(() => {
   const t = route.params.tab as string
+  if (t === 'faturamento') return 'faturamento'
   return (TABS.find((x) => x.key === t)?.key ?? 'tabela') as Tab
 })
 
@@ -47,6 +71,11 @@ function setTab(t: Tab) {
   // Preserve the active department (?dept=) when switching sub-tabs.
   router.push({ path: `/pricing/${t}`, query: { ...route.query } })
 }
+
+// Quem vê o quê na linha dos botões: os departamentos (e as sub-abas) são da
+// Tabela de Preços; o botão Faturamento, da permissão Faturamento.
+const podePrecos = useCan('tabela_precos', 'view')
+const podeFaturamento = useCan('faturamento', 'view')
 
 const canEditContas = useCan('tabela_precos_contas', 'edit')
 const canDeleteContas = useCan('tabela_precos_contas', 'delete')
@@ -219,6 +248,12 @@ const department = computed<DeptKey>({
     return DEPARTMENTS.value.some((d) => d.value === v) ? v : 'celular'
   },
   set(v) {
+    // Com o Faturamento aberto, escolher um departamento volta para a Tabela
+    // de Preços daquele departamento.
+    if (tab.value === 'faturamento') {
+      router.push({ path: '/pricing/tabela', query: { ...route.query, dept: v } })
+      return
+    }
     router.replace({ path: route.path, query: { ...route.query, dept: v } })
   },
 })
@@ -4331,10 +4366,17 @@ function tabelaBadgeClass(p: PricingProduct): string {
 
 // =========================================================== boot
 
-await loadSegments()
-await loadAccounts()
-await loadProducts()
-await loadIntegrations()
+// Quem só tem Faturamento não carrega nada da Tabela de Preços (a API
+// recusaria). No Faturamento, só os departamentos e as contas, que os botões
+// "Celular (N contas)" mostram; produtos e integrações são das sub-abas.
+if (podePrecos.value) {
+  await loadSegments()
+  await loadAccounts()
+  if (tab.value !== 'faturamento') {
+    await loadProducts()
+    await loadIntegrations()
+  }
+}
 
 // Status do MEGA pra pílula do topo: uma vez por visita à aba Produtos e só
 // depois de montar — no servidor a chamada ao sidecar só atrasaria a página,
@@ -4435,23 +4477,41 @@ watch(department, async () => {
 
     <!-- ============================================ Department pills -->
     <div class="flex flex-wrap gap-2">
+      <template v-if="podePrecos">
+        <button
+          v-for="d in DEPARTMENTS"
+          :key="d.value"
+          type="button"
+          class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors"
+          :class="tab !== 'faturamento' && department === d.value
+            ? 'bg-primary text-primary-foreground border-primary'
+            : 'border-border hover:bg-muted'"
+          @click="department = d.value"
+        >
+          <component :is="d.icon" class="h-4 w-4" />
+          {{ d.label }} ({{ accountsByDept[d.value]?.length ?? 0 }} contas)
+        </button>
+      </template>
+      <!-- Faturamento (13/11/2026): saiu do menu e virou este botão, depois de
+           Eletro. Sem número, como era o item do menu. -->
       <button
-        v-for="d in DEPARTMENTS"
-        :key="d.value"
+        v-if="podeFaturamento"
         type="button"
         class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors"
-        :class="department === d.value
+        :class="tab === 'faturamento'
           ? 'bg-primary text-primary-foreground border-primary'
           : 'border-border hover:bg-muted'"
-        @click="department = d.value"
+        data-botao-faturamento
+        @click="tab !== 'faturamento' && setTab('faturamento')"
       >
-        <component :is="d.icon" class="h-4 w-4" />
-        {{ d.label }} ({{ accountsByDept[d.value]?.length ?? 0 }} contas)
+        <Coins class="h-4 w-4" />
+        Faturamento
       </button>
     </div>
 
     <!-- ============================================ Sub-tabs -->
-    <div class="flex flex-wrap gap-1 rounded-md bg-muted/40 p-1 w-fit">
+    <!-- São dos departamentos: somem enquanto o Faturamento está escolhido. -->
+    <div v-if="tab !== 'faturamento'" class="flex flex-wrap gap-1 rounded-md bg-muted/40 p-1 w-fit">
       <button
         v-for="t in TABS"
         :key="t.key"
@@ -6541,6 +6601,11 @@ watch(department, async () => {
         </table>
       </div>
     </section>
+
+    <!-- ============================================ FATURAMENTO -->
+    <!-- A tela de Faturamento de antes (/faturamento), com os mesmos filtros
+         e a mesma tabela (13/11/2026). -->
+    <FaturamentoPainel v-else-if="tab === 'faturamento'" embutido />
 
       <!-- Margens do catálogo: janelinha aberta pelo "% margens" do Catálogo ML
          (aba Contas). Uma margem por tipo da aba; vazio = a da conta. -->

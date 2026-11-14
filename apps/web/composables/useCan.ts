@@ -179,7 +179,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   tabela_precos_concorrencia: 'Tabela Preços — Concorrência (a aba saiu em 13/11/2026: esta permissão não abre mais nada)',
   margem: 'Margem',
   conciliacao: 'Conciliação — pedido × financeiro das lojas (view) e marcar/finalizar (edit)',
-  faturamento: 'Faturamento',
+  faturamento: 'Faturamento (desde 13/11/2026 é o botão Faturamento da Tabela de Preços)',
   controle_estoque: 'Controle de Estoque',
   financeiro_consorcio: 'Consórcio',
   financeiro_suprimentos: 'Certificações',

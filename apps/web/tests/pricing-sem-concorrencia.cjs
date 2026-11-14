@@ -36,14 +36,15 @@ const compiled = ts.transpileModule(codigo, {
 assert.deepEqual(compiled.diagnostics, [])
 const navegacoes = []
 const navigateTo = (to, opts) => { navegacoes.push({ to, opts }); return 'redirecionou' }
-const { TABS, META } = new Function('navigateTo', `${compiled.outputText}\nreturn { TABS, META }`)(navigateTo)
+const useAuthStore = () => ({ user: { role: 'admin', permissions: {} } })
+const { TABS, META } = new Function('navigateTo', 'useAuthStore', `${compiled.outputText}\nreturn { TABS, META }`)(navigateTo, useAuthStore)
 
 // As abas dos departamentos.
 assert.deepEqual(TABS.map((t) => t.label), ['Tabela de Preços', 'Contas', 'Produtos'])
 assert.deepEqual(TABS.map((t) => t.key), ['tabela', 'contas', 'produtos'])
 
-// A permissão da página não muda.
-assert.deepEqual(META.permission, { resource: 'tabela_precos', action: 'view' })
+// A permissão da página: Tabela de Preços (ou, desde o item 6, Faturamento).
+assert.deepEqual(META.permissionAny[0], { resource: 'tabela_precos', action: 'view' })
 assert.ok(META.middleware.includes('permission'), 'the permission middleware still runs')
 
 // O link antigo vai para a Tabela de Preços, com o departamento de antes.

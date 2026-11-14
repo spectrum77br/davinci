@@ -1,5 +1,8 @@
 // Run from apps/web: node tests/faturamento-tipos.cjs
-// Compile and render the real page; only Nuxt auth/API boundaries are mocked.
+// Compile and render the real Faturamento screen; only Nuxt auth/API boundaries
+// are mocked. Since 13/11/2026 it lives in components/FaturamentoPainel.vue and
+// opens as the "Faturamento" button of the Tabela de Preços; /faturamento is a
+// redirect page (checked at the end).
 // The type filter is admin-only; mobile cards retain the desktop rows and totals.
 // Equipe (30/10/2026): the select lists the sales teams by name (Londres,
 // Israel, Marrocos) and only shows up when there is more than one to pick.
@@ -11,7 +14,7 @@ const Vue = require('vue')
 const { renderToString } = require('vue/server-renderer')
 const { parse, compileScript, compileTemplate } = require('vue/compiler-sfc')
 
-const filename = path.resolve(__dirname, '../pages/faturamento.vue')
+const filename = path.resolve(__dirname, '../components/FaturamentoPainel.vue')
 const { descriptor, errors } = parse(fs.readFileSync(filename, 'utf8'), { filename })
 assert.deepEqual(errors, [])
 const script = compileScript(descriptor, { id: 'faturamento-tipos' })
@@ -60,7 +63,7 @@ const RESPONSE = {
   team: null,
 }
 
-async function page(role) {
+async function page(role, props = {}) {
   let instance
   let meta
   const calls = []
@@ -74,10 +77,8 @@ async function page(role) {
     },
   }).default
   component.render = render
-  await renderToString(Vue.createSSRApp(component))
-  assert.deepEqual(meta, {
-    middleware: ['permission'], permission: { resource: 'faturamento', action: 'view' },
-  }, 'the existing page permission is preserved')
+  await renderToString(Vue.createSSRApp(component, props))
+  assert.equal(meta, undefined, 'a component, not a page: the route permission lives in the pages')
   const state = instance.setupState
   return {
     state, calls, auth,
@@ -148,6 +149,21 @@ async function run() {
   const admin = await page('admin')
   let html = await admin.html()
   assertMobileCards(html, RESPONSE)
+  assert.match(html, /<div class="faturamento-page min-w-0 space-y-4 p-4">/, 'standalone keeps the page padding')
+  assert.match(html, /<h1 class="text-xl font-semibold">Faturamento<\/h1>/)
+  // Inside the Tabela de Preços: the same filters and table, no page padding,
+  // and an <h2> under the page's own <h1>.
+  const embutido = await page('admin', { embutido: true })
+  const htmlEmbutido = await embutido.html()
+  assert.match(htmlEmbutido, /<div class="faturamento-page min-w-0 space-y-4">/)
+  assert.match(htmlEmbutido, /<h2 class="text-base font-semibold">Faturamento<\/h2>/)
+  assert.doesNotMatch(htmlEmbutido, /<h1\b/)
+  assert.match(htmlEmbutido, /Pedidos faturáveis \(em aberto, em andamento e entregues\), por loja\./)
+  assertMobileCards(htmlEmbutido, RESPONSE)
+  assert.deepEqual([...htmlEmbutido.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((match) => match[1]),
+    ['Loja', 'Plataforma', 'Tipo', 'Pedidos', 'Faturamento', 'Ticket médio'])
+  assert.match(htmlEmbutido, /id="faturamento-tipo"/)
+  assert.deepEqual(teamOptions(htmlEmbutido), teamOptions(html), 'same team filter embedded')
   assert.match(html, /id="faturamento-tipo"/, 'admin can select a type')
   assert.match(html, /Todos os tipos/)
   assert.deepEqual([...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((match) => match[1]),
@@ -234,6 +250,21 @@ async function run() {
   assert.match(loadingMobile, /role="status"/)
   assert.match(loadingMobile, /carregando/)
   assert.doesNotMatch(loadingMobile, /<article\b|Faturamento total|Nenhum faturamento/)
+
+  // The old /faturamento link: same permission as before, then straight to
+  // /pricing/faturamento keeping the query (bookmarks keep working).
+  const antiga = path.resolve(__dirname, '../pages/faturamento.vue')
+  const pagina = parse(fs.readFileSync(antiga, 'utf8'), { filename: antiga }).descriptor
+  let metaAntiga
+  const navegacoes = []
+  evaluate(compileScript(pagina, { id: 'faturamento-antiga' }).content, {
+    definePageMeta: (value) => { metaAntiga = value },
+    navigateTo: (to, opts) => { navegacoes.push({ to, opts }); return 'redirecionou' },
+  }).default.setup({}, { expose() {} })
+  assert.deepEqual(metaAntiga.permission, { resource: 'faturamento', action: 'view' })
+  assert.equal(metaAntiga.middleware[0], 'permission', 'permission is checked before redirecting')
+  assert.equal(metaAntiga.middleware[1]({ query: { x: '1' }, hash: '' }), 'redirecionou')
+  assert.deepEqual(navegacoes, [{ to: { path: '/pricing/faturamento', query: { x: '1' }, hash: '' }, opts: { replace: true } }])
 }
 
 run().then(() => {
