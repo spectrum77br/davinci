@@ -6,7 +6,9 @@ const { ref, computed, watch, reactive, nextTick } = require('vue')
 const ts = require('typescript')
 const { parse, compileTemplate, compileScript } = require('vue/compiler-sfc')
 
-const components = ['components/IntegrationFormModal.vue', 'pages/integrations.vue', 'pages/companies/[id].vue', 'pages/anuncios.vue']
+// 13/11/2026: a tabela de anúncios (importar inclusive Carrefour) foi para
+// components/ProdutosAnunciosPainel.vue; pages/anuncios.vue só redireciona.
+const components = ['components/IntegrationFormModal.vue', 'pages/integrations.vue', 'pages/companies/[id].vue', 'pages/anuncios.vue', 'components/ProdutosAnunciosPainel.vue']
 let modalScript
 let integrationsScript
 for (const name of components) {

@@ -15,10 +15,14 @@ PAGINAS: dict[str, str] = {
     "/celulares": "Admin › Celulares",
     "/pricing/contas": "Tabela de preços › Contas",
     "/pricing/produtos": "Tabela de preços › Produtos",
+    # Concorrência saiu em 13/11/2026; fica para os registros antigos.
     "/pricing/concorrencia": "Tabela de preços › Concorrência",
+    # Faturamento virou botão da Tabela de Preços em 13/11/2026.
+    "/pricing/faturamento": "Tabela de preços › Faturamento",
     "/pricing": "Tabela de preços",
     "/produtos": "Produtos",
-    "/anuncios": "Anúncios",
+    # Anúncios virou aba de Produtos em 13/11/2026 (/anuncios redireciona).
+    "/anuncios": "Produtos › Anúncios",
     "/marketing": "Marketing",
     "/margem-audit": "Auditoria de pedidos",
     "/margem": "Margem",
@@ -73,8 +77,8 @@ API: dict[str, str] = {
     "/api/anuncio": "Produtos",
     "/api/sync": "Produtos",
     "/api/jobs": "Integrações › Sincronizações",
-    "/api/listings": "Anúncios",
-    "/api/listing-requests": "Anúncios",
+    "/api/listings": "Produtos › Anúncios",
+    "/api/listing-requests": "Produtos › Anúncios",
     "/api/margens": "Margem",
     "/api/estoque": "Controle de Estoque",
     "/api/nf/": "Controle de Estoque",

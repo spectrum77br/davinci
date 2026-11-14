@@ -56,7 +56,8 @@ const stepDefs = [
     title: 'Importar anúncios e vincular',
     body: 'Auto-vincular anúncios aos SKUs do Bling.',
     cta: 'Anúncios',
-    to: '/anuncios',
+    // Anúncios é aba de Produtos desde 13/11/2026.
+    to: '/produtos?aba=anuncios',
   },
 ] as const
 

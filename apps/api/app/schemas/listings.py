@@ -27,11 +27,23 @@ class ListingOut(BaseModel):
     updated_at: datetime
 
 
+class ListingResumo(BaseModel):
+    """Cartões da aba Anúncios (Produtos › Anúncios, 13/11/2026): contam o
+    departamento escolhido inteiro (escopo + departamento), sem os filtros de
+    busca/conta/canal/status da tela."""
+
+    total: int = 0
+    sem_produto: int = 0
+    ativos: int = 0
+    em_revisao: int = 0
+
+
 class ListingPage(BaseModel):
     items: list[ListingOut]
     total: int
     page: int
     page_size: int
+    resumo: ListingResumo | None = None
 
 
 class ListingPatch(BaseModel):

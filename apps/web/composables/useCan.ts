@@ -169,7 +169,7 @@ export const ACTIONS: Action[] = ['view', 'edit', 'delete']
 
 export const RESOURCE_LABELS: Record<Resource, string> = {
   produtos: 'Produtos',
-  anuncios: 'Anúncios',
+  anuncios: 'Anúncios (desde 13/11/2026 é a aba Anúncios de Produtos)',
   marketing: 'Marketing (Ads)',
   marketing_criativos: 'Marketing — Criativos',
   tabela_precos: 'Tabela de Preços',

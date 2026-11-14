@@ -78,6 +78,23 @@ class ProductPage(BaseModel):
     saude: SaudeVinculos | None = None
 
 
+class DepartamentosContagem(BaseModel):
+    """Quantidade por departamento (Organização do DaVinci, 13/11/2026)."""
+
+    celular: int = 0
+    mala: int = 0
+    eletro: int = 0
+    sem: int = 0
+
+
+class DepartamentosOut(BaseModel):
+    """GET /api/products/departamentos. Cada parte é null para quem não pode
+    ver aquela lista (produtos / anuncios)."""
+
+    produtos: DepartamentosContagem | None = None
+    anuncios: DepartamentosContagem | None = None
+
+
 class ProductCreate(BaseModel):
     sku: SkuStr
     name: str = Field(min_length=1)

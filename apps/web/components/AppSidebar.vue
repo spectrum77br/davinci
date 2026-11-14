@@ -2,7 +2,7 @@
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from 'vue'
 import {
   LayoutDashboard, Rocket, Plug, ContactRound, Users,
-  Package, Megaphone, DollarSign, Undo2,
+  Package, DollarSign, Undo2,
   Receipt, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Ship, Landmark, Headset,
@@ -179,8 +179,10 @@ const sections = computed<Section[]>(() => [
   {
     label: 'Operação',
     items: [
-      { to: '/produtos', label: 'Produtos', icon: Package, resource: 'produtos' },
-      { to: '/anuncios', label: 'Anúncios', icon: Megaphone, resource: 'anuncios' },
+      // 13/11/2026: Anúncios saiu do menu e virou a aba "Anúncios" de Produtos,
+      // que se divide em Celular · Mala · Eletro como a Tabela de Preços
+      // (/anuncios redireciona para /produtos?aba=anuncios).
+      { to: '/produtos', label: 'Produtos', icon: Package, resource: 'produtos', match: ['/produtos', '/anuncios'] },
       { to: '/marketing', label: 'Marketing', icon: BarChart3, featureFlag: 'marketing' },
       // 13/11/2026: o Faturamento saiu do menu e virou o botão "Faturamento" da
       // Tabela de Preços (/pricing/faturamento; /faturamento redireciona). O

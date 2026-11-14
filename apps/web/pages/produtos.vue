@@ -1,8 +1,20 @@
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
-import { Plus, Trash2, Download, RefreshCw, ChevronDown, ChevronRight, X, Loader2, Zap, Upload, Search, Tags, Link2 } from 'lucide-vue-next'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
+import {
+  Plus, Trash2, Download, RefreshCw, ChevronDown, ChevronRight, X, Loader2, Zap, Upload, Search, Tags, Link2,
+  Smartphone, Briefcase, CircleDashed, Package, Megaphone,
+} from 'lucide-vue-next'
+import type ProdutosAnunciosPainel from '~/components/ProdutosAnunciosPainel.vue'
 
-definePageMeta({ middleware: ['permission'], permission: { resource: 'produtos', action: 'view' } })
+// 13/11/2026 (Organização do DaVinci, item 2): Anúncios virou aba daqui. Entra
+// quem vê Produtos OU Anúncios; cada aba pede a sua permissão.
+definePageMeta({
+  middleware: ['permission'],
+  permissionAny: [
+    { resource: 'produtos', action: 'view' },
+    { resource: 'anuncios', action: 'view' },
+  ],
+})
 
 type Integration = {
   id: string
@@ -106,6 +118,85 @@ type Job = {
 const { api } = useApi()
 const canEdit = useCan('produtos', 'edit')
 const canDelete = useCan('produtos', 'delete')
+
+// ── Departamento + aba (Organização do DaVinci, 13/11/2026, item 2) ─────────
+// Mesmo padrão da Tabela de Preços: primeiro o departamento (Celular · Mala ·
+// Eletro · Sem departamento), depois a aba (Produtos · Anúncios). Os dois
+// ficam na URL (?dept= e ?aba=), como o ?dept= da Tabela; /anuncios redireciona
+// para ?aba=anuncios. O departamento sai da raiz do segmento do produto
+// (Catálogo entra em Celular); anúncio, pelo produto vinculado — sem produto,
+// Sem departamento. Os botões não têm número; as abas mostram "(N)".
+const route = useRoute()
+const router = useRouter()
+const podeProdutos = useCan('produtos', 'view')
+const podeAnuncios = useCan('anuncios', 'view')
+const podeEditarAnuncios = useCan('anuncios', 'edit')
+
+type Departamento = 'celular' | 'mala' | 'eletro' | 'sem'
+type Aba = 'produtos' | 'anuncios'
+const DEPARTAMENTOS: { value: Departamento; label: string; icon: any }[] = [
+  { value: 'celular', label: 'Celular', icon: Smartphone },
+  { value: 'mala', label: 'Mala', icon: Briefcase },
+  { value: 'eletro', label: 'Eletro', icon: Zap },
+  { value: 'sem', label: 'Sem departamento', icon: CircleDashed },
+]
+// Raiz do segmento → departamento (o mesmo mapa de apps/api/app/services/departamento.py).
+const RAIZ_PARA_DEPARTAMENTO: Record<string, Departamento> = {
+  celular: 'celular', catalogo: 'celular', mala: 'mala', eletro: 'eletro',
+}
+
+type ContagemDepartamentos = Record<Departamento, number>
+type DepartamentosOut = { produtos: ContagemDepartamentos | null; anuncios: ContagemDepartamentos | null }
+const contagens = ref<DepartamentosOut | null>(null)
+async function carregarDepartamentos() {
+  try {
+    contagens.value = await api<DepartamentosOut>('/api/products/departamentos')
+  } catch {
+    // Sem os números: as abas ficam sem "(N)" e o Sem departamento só aparece
+    // se for o escolhido.
+  }
+}
+// "Sem departamento" só aparece quando houver produto ou anúncio nele: é a
+// lista do que falta classificar e some quando acaba.
+const qtdSemDepartamento = computed(() => contagens.value
+  ? (contagens.value.produtos?.sem ?? 0) + (contagens.value.anuncios?.sem ?? 0)
+  : null)
+const mostrarSemDepartamento = computed(() => qtdSemDepartamento.value == null
+  ? route.query.dept === 'sem'
+  : qtdSemDepartamento.value > 0)
+const departamentosVisiveis = computed(() =>
+  DEPARTAMENTOS.filter((d) => d.value !== 'sem' || mostrarSemDepartamento.value))
+// ?dept= ausente, desconhecido ou "sem" já vazio → Celular (como a Tabela).
+const departamento = computed<Departamento>({
+  get() {
+    const q = typeof route.query.dept === 'string' ? route.query.dept : ''
+    return departamentosVisiveis.value.some((d) => d.value === q) ? q as Departamento : 'celular'
+  },
+  set(v) {
+    router.replace({ path: route.path, query: { ...route.query, dept: v } })
+  },
+})
+// Aba: a pedida, se a pessoa pode ver; senão a outra.
+const aba = computed<Aba>(() => {
+  const q = route.query.aba === 'anuncios' ? 'anuncios' : 'produtos'
+  if (q === 'anuncios' && !podeAnuncios.value) return 'produtos'
+  if (q === 'produtos' && !podeProdutos.value) return 'anuncios'
+  return q
+})
+function setAba(a: Aba) {
+  if (a === aba.value) return
+  router.push({ path: route.path, query: { ...route.query, aba: a } })
+}
+const ABAS = computed(() => [
+  { key: 'produtos' as Aba, label: 'Produtos', icon: Package, pode: podeProdutos.value,
+    qtd: contagens.value?.produtos?.[departamento.value] },
+  { key: 'anuncios' as Aba, label: 'Anúncios', icon: Megaphone, pode: podeAnuncios.value,
+    qtd: contagens.value?.anuncios?.[departamento.value] },
+].filter((a) => a.pode))
+const painelAnuncios = ref<InstanceType<typeof ProdutosAnunciosPainel> | null>(null)
+// Departamento cujos produtos estão na tela (para não recarregar à toa ao
+// voltar da aba Anúncios).
+const produtosCarregadosDe = ref<Departamento | null>(null)
 
 const integrations = ref<Integration[]>([])
 const items = ref<Product[]>([])
@@ -260,15 +351,25 @@ type UserSettings = { daily_sync_enabled: boolean }
 const autoSyncEnabled = ref<boolean>(false)
 const togglingAutoSync = ref(false)
 
+// Leitura mais nova vence: resposta de uma leitura anterior (outro
+// departamento, outra página) que chega depois é descartada.
+let seqProdutos = 0
 async function refreshAll() {
+  const minha = ++seqProdutos
   loading.value = true
   error.value = null
   // Com o painel de um anúncio aberto (busca por ID), o texto do campo é o ID
   // do anúncio — mandá-lo como filtro esvaziaria a tabela de produtos à toa.
   const buscaProdutos = anuncioAberto.value ? '' : search.value
   try {
+    // Primeiro os números por departamento (classificar / vincular / importar
+    // mudam as contas): eles decidem se "Sem departamento" ainda existe e,
+    // com isso, qual departamento a tela mostra. Falha aqui não derruba a lista.
+    await carregarDepartamentos()
+    const dept = departamento.value
     const [pg, integ, settings, segs] = await Promise.all([
       api<ProductPage>(`/api/products?page=${page.value}&page_size=${pageSize}` +
+        `&departamento=${dept}` +
         (buscaProdutos ? `&search=${encodeURIComponent(buscaProdutos)}` : '') +
         (filtroIntegration.value ? `&integration_id=${filtroIntegration.value}` : '') +
         (stockFilter.value === 'low' ? `&low_stock=true` : '') +
@@ -279,6 +380,8 @@ async function refreshAll() {
       api<UserSettings>('/api/settings'),
       api<Segment[]>('/api/segments').catch(() => [] as Segment[]),
     ])
+    if (minha !== seqProdutos) return
+    produtosCarregadosDe.value = dept
     items.value = pg.items
     total.value = pg.total
     if (pg.saude) saude.value = pg.saude
@@ -286,12 +389,46 @@ async function refreshAll() {
     autoSyncEnabled.value = settings.daily_sync_enabled
     segments.value = segs
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    if (minha === seqProdutos) error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
-    loading.value = false
+    if (minha === seqProdutos) loading.value = false
   }
 }
-await refreshAll()
+if (aba.value === 'produtos') await refreshAll()
+else await carregarDepartamentos()
+
+// ?dept=sem com o "Sem departamento" já vazio abre o Celular; a URL acompanha,
+// para a tela não pular de volta quando aparecer algo novo para classificar.
+function acertarUrlDoDepartamento() {
+  if (route.query.dept === 'sem' && departamento.value !== 'sem') {
+    router.replace({ path: route.path, query: { ...route.query, dept: departamento.value } })
+  }
+}
+onMounted(acertarUrlDoDepartamento)
+
+// Trocou o departamento: página 1 do novo, sem seleção nem linhas abertas de
+// antes. A aba Anúncios recarrega sozinha (o painel olha o departamento).
+function aoTrocarDepartamento() {
+  acertarUrlDoDepartamento()
+  page.value = 1
+  selected.value = new Set()
+  selectedLinks.value = new Set()
+  expanded.value = new Set()
+  if (filtroSegment.value && !segmentFilterOptions.value.some((o) => o.id === filtroSegment.value)) {
+    filtroSegment.value = ''
+  }
+  if (aba.value === 'produtos') void refreshAll()
+  else produtosCarregadosDe.value = null
+}
+function aoTrocarAba(a: Aba) {
+  if (a === 'anuncios') {
+    selected.value = new Set()
+    return
+  }
+  if (produtosCarregadosDe.value !== departamento.value) void refreshAll()
+}
+watch(departamento, aoTrocarDepartamento)
+watch(aba, aoTrocarAba)
 
 async function toggleAutoSync() {
   if (togglingAutoSync.value) return
@@ -468,8 +605,23 @@ const segmentOptions = computed(() => {
   return out
 })
 
+// Departamento de um segmento, pela raiz (Catálogo → Celular; raiz que não é
+// departamento → Sem departamento) — o mesmo da API.
+function departamentoDoSegmento(segmentId: string | null): Departamento {
+  if (!segmentId) return 'sem'
+  const byId = segmentsById.value
+  let cur: Segment | undefined = byId[segmentId]
+  const seen = new Set<string>()
+  while (cur?.parent_id && !seen.has(cur.id)) {
+    seen.add(cur.id)
+    cur = byId[cur.parent_id]
+  }
+  return (cur && RAIZ_PARA_DEPARTAMENTO[cur.slug]) || 'sem'
+}
+
 // Filter dropdown includes both roots and leaves (so user can filter by
-// "Celular" and see all subtypes, or by a specific leaf).
+// "Celular" and see all subtypes, or by a specific leaf). Desde 13/11/2026 só
+// os segmentos do departamento escolhido (os outros dariam lista vazia).
 const segmentFilterOptions = computed(() => {
   const byId = segmentsById.value
   function pathOf(s: Segment): string {
@@ -484,7 +636,7 @@ const segmentFilterOptions = computed(() => {
     return chain.reverse().join(' / ')
   }
   return segments.value
-    .filter((s) => s.active)
+    .filter((s) => s.active && departamentoDoSegmento(s.id) === departamento.value)
     .map((s) => ({ id: s.id, label: pathOf(s) }))
     .sort((a, b) => a.label.localeCompare(b.label))
 })
@@ -505,6 +657,13 @@ async function setProductSegment(p: Product, segmentId: string | null) {
     })
     Object.assign(p, updated)
     closeSegPicker()
+    // Mudou de departamento (ex.: classificou um de "Sem departamento"): sai
+    // desta lista e os números das abas se atualizam.
+    if (departamentoDoSegmento(updated.segment_id) !== departamento.value) {
+      items.value = items.value.filter((x) => x.id !== p.id)
+      total.value = Math.max(0, total.value - 1)
+      void carregarDepartamentos()
+    }
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   }
@@ -1648,6 +1807,22 @@ onUnmounted(() => {
   <div class="products-page min-w-0 space-y-5">
     <PageHeader title="Produtos" description="SKUs do Bling, custos e links por canal.">
       <template #actions>
+        <!-- Aba Anúncios: os botões da antiga tela /anuncios. -->
+        <template v-if="aba === 'anuncios'">
+          <Button
+            v-if="podeEditarAnuncios"
+            size="sm"
+            variant="outline"
+            :disabled="!painelAnuncios || painelAnuncios.importableIntegrations.length === 0"
+            @click="painelAnuncios?.openImport()"
+          >
+            <Download class="size-4 mr-1.5" /> importar
+          </Button>
+          <Button size="sm" variant="outline" @click="painelAnuncios?.refreshAll()">
+            <RefreshCw class="size-4 mr-1.5" /> recarregar
+          </Button>
+        </template>
+        <template v-else>
         <Button v-if="canEdit" size="sm" variant="outline" class="lg:hidden" :aria-expanded="mobileProductTools" aria-controls="product-tools" @click="mobileProductTools = !mobileProductTools">
           Gerenciar produtos <ChevronDown class="ml-1.5 size-4" :class="mobileProductTools ? 'rotate-180' : ''" />
         </Button>
@@ -1707,9 +1882,59 @@ onUnmounted(() => {
           <Plus class="size-4 mr-1.5" /> Novo Produto
         </Button>
         </div>
+        </template>
       </template>
     </PageHeader>
 
+    <!-- ===================== Departamentos (como a Tabela de Preços) ===== -->
+    <!-- Sem número nos botões (decidido em 12/11); "Sem departamento" só
+         quando houver produto ou anúncio para classificar. -->
+    <div class="flex flex-wrap gap-2" aria-label="Departamentos">
+      <button
+        v-for="d in departamentosVisiveis"
+        :key="d.value"
+        type="button"
+        class="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm transition-colors"
+        :class="departamento === d.value
+          ? 'bg-primary text-primary-foreground border-primary'
+          : 'border-border hover:bg-muted'"
+        :aria-pressed="departamento === d.value"
+        @click="departamento = d.value"
+      >
+        <component :is="d.icon" class="h-4 w-4" />
+        {{ d.label }}
+      </button>
+    </div>
+
+    <!-- ===================== Abas do departamento ======================== -->
+    <div class="flex flex-wrap gap-1 rounded-md bg-muted/40 p-1 w-fit" aria-label="Abas de Produtos">
+      <button
+        v-for="a in ABAS"
+        :key="a.key"
+        type="button"
+        class="inline-flex items-center gap-1.5 rounded px-3 py-1.5 text-sm transition-colors"
+        :class="aba === a.key
+          ? 'bg-background shadow-sm'
+          : 'text-muted-foreground hover:text-foreground'"
+        :aria-pressed="aba === a.key"
+        @click="setAba(a.key)"
+      >
+        <component :is="a.icon" class="h-4 w-4" />
+        {{ a.label }}
+        <span v-if="a.qtd != null" class="text-xs text-muted-foreground">({{ a.qtd.toLocaleString('pt-BR') }})</span>
+      </button>
+    </div>
+
+    <!-- ===================== Aba Anúncios ================================ -->
+    <ProdutosAnunciosPainel
+      v-if="aba === 'anuncios'"
+      ref="painelAnuncios"
+      :departamento="departamento"
+      @mudou="carregarDepartamentos"
+    />
+
+    <!-- ===================== Aba Produtos ================================ -->
+    <template v-else>
     <div v-if="error" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
       {{ error }}
     </div>
@@ -1757,7 +1982,7 @@ onUnmounted(() => {
       </select>
       <select v-model="filtroSegment" class="product-filter-extra h-9 w-[200px] rounded-md border bg-background px-2 text-sm">
         <option value="">Todos segmentos</option>
-        <option value="__none__">— sem segmento</option>
+        <option v-if="departamento === 'sem'" value="__none__">— sem segmento</option>
         <option v-for="s in segmentFilterOptions" :key="s.id" :value="s.id">{{ s.label }}</option>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">
@@ -2323,6 +2548,7 @@ onUnmounted(() => {
         mostrando {{ total === 0 ? 0 : (page - 1) * pageSize + 1 }}-{{ Math.min(page * pageSize, total) }} de {{ total }} produtos
       </span>
     </div>
+    </template>
 
     <!-- Toast stack — top-right, auto-dismisses after 5s. Sits above modals
          (z-[60]) so per-link sync results stay visible even mid-dialog. -->
@@ -2393,7 +2619,7 @@ onUnmounted(() => {
       leave-to-class="opacity-0 translate-y-4"
     >
       <div
-        v-if="selected.size > 0"
+        v-if="aba === 'produtos' && selected.size > 0"
         class="product-selection-actions fixed bottom-4 left-1/2 -translate-x-1/2 z-40 rounded-lg border bg-background shadow-xl px-4 py-3 flex items-center gap-3"
       >
         <span class="text-sm font-medium">

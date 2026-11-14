@@ -10,16 +10,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission, user_scope
+from app.deps.auth import require_permission, require_permission_any, user_scope
 from app.deps.team_scope import resolve_team_scope
 from app.models import (
     Integration,
     IntegrationPlatform,
     LinkSyncStatus,
+    Listing,
     Product,
     ProductLink,
     Segment,
     User,
+    UserRole,
 )
 from app.schemas.products import (
     BlingImportIn,
@@ -30,6 +32,8 @@ from app.schemas.products import (
     BulkLinkDeleteIn,
     BulkSegmentAssignIn,
     CsvImportSummary,
+    DepartamentosContagem,
+    DepartamentosOut,
     ProductCreate,
     ProductLinkOut,
     ProductOut,
@@ -38,6 +42,7 @@ from app.schemas.products import (
     SaudeVinculos,
 )
 from app.security.cipher import decrypt_json
+from app.services import departamento as dep_svc
 from app.services import vinculo_saude
 from app.services.marketplaces.bling import (
     BLING_PRODUCTS_PAGE_SIZE,
@@ -137,11 +142,24 @@ async def list_products(
     vinculos: str | None = Query(
         None, description="mortos | sku (SKU do anúncio ≠ produto) | erro (falha no envio)"
     ),
+    departamento: str | None = Query(
+        None,
+        description="celular (inclui Catálogo) | mala | eletro | sem (sem segmento) — "
+        "pela raiz do segmento do produto (13/11/2026)",
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> ProductPage:
+    departamento = dep_svc.validar(departamento)
     stmt = select(Product).where(user_scope(Product, user))
     count_stmt = select(func.count()).select_from(Product).where(user_scope(Product, user))
+    # Departamento (Organização do DaVinci, item 2): Produtos se divide como a
+    # Tabela de Preços. Sem o parâmetro, nada muda.
+    if departamento:
+        idx = await dep_svc.indice_departamentos(session)
+        cond = dep_svc.condicao_segmento(Product.segment_id, departamento, idx)
+        stmt = stmt.where(cond)
+        count_stmt = count_stmt.where(cond)
     # Escopo por equipe: usuário não-admin com equipe(s) só vê os produtos que
     # têm vínculo com uma integração das lojas da sua equipe (admin / sem-equipe
     # = irrestrito). Casamos via EXISTS pra não duplicar linhas.
@@ -248,8 +266,70 @@ async def list_products(
             .where(*escopo_links)
         )
     ).one()
+    # A saúde dos vínculos continua contando TODOS os departamentos: o "Remover
+    # os N mortos" apaga os mortos de todos, e o número do botão precisa ser o
+    # que ele apaga.
     saude = SaudeVinculos(mortos=contagem[0], sku_divergente=contagem[1], erro=contagem[2])
     return ProductPage(items=items, total=total, page=page, page_size=page_size, saude=saude)
+
+
+def _pode_ver(user: User, recurso: str) -> bool:
+    if user.role == UserRole.ADMIN:
+        return True
+    return bool(((user.permissions or {}).get(recurso) or {}).get("view", False))
+
+
+# Declarada ANTES de /products/{product_id}: senão "departamentos" casa com o
+# {product_id} e vira 422.
+@router.get("/products/departamentos", response_model=DepartamentosOut)
+async def contar_departamentos(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission_any(("produtos", "anuncios"), "view"))],
+) -> DepartamentosOut:
+    """Quantos produtos e anúncios há em cada departamento (Celular, Mala,
+    Eletro e Sem departamento), no mesmo escopo das listas (equipe incluída).
+
+    A tela de Produtos usa para os números das abas "Produtos (N) · Anúncios
+    (N)" e para só mostrar o botão "Sem departamento" quando houver algo nele.
+    Cada parte só vem para quem pode ver aquela lista (senão, null).
+    """
+    idx = await dep_svc.indice_departamentos(session)
+    scope = await resolve_team_scope(session, user)
+    produtos: DepartamentosContagem | None = None
+    anuncios: DepartamentosContagem | None = None
+    if _pode_ver(user, "produtos"):
+        stmt = select(Product.segment_id, func.count()).where(user_scope(Product, user))
+        if not scope.unrestricted:
+            # Mesmo escopo de equipe da listagem (list_products).
+            stmt = stmt.where(
+                select(ProductLink.id)
+                .where(
+                    and_(
+                        ProductLink.product_id == Product.id,
+                        ProductLink.integration_id.in_(scope.integration_ids),
+                    )
+                )
+                .exists()
+            )
+        linhas = (await session.execute(stmt.group_by(Product.segment_id))).all()
+        produtos = DepartamentosContagem(
+            **dep_svc.somar_por_departamento([(r[0], r[1]) for r in linhas], idx)
+        )
+    if _pode_ver(user, "anuncios"):
+        stmt = (
+            select(Product.segment_id, func.count(Listing.id))
+            .select_from(Listing)
+            .outerjoin(Product, Product.id == Listing.product_id)
+            .where(user_scope(Listing, user))
+        )
+        if not scope.unrestricted:
+            # Mesmo escopo de equipe da listagem (list_listings).
+            stmt = stmt.where(Listing.integration_id.in_(scope.integration_ids))
+        linhas = (await session.execute(stmt.group_by(Product.segment_id))).all()
+        anuncios = DepartamentosContagem(
+            **dep_svc.somar_por_departamento([(r[0], r[1]) for r in linhas], idx)
+        )
+    return DepartamentosOut(produtos=produtos, anuncios=anuncios)
 
 
 def _vinculo_visivel():

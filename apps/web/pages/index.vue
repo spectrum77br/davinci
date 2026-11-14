@@ -200,7 +200,7 @@ const onboardingComplete = computed(() => {
       <div class="min-w-0 lg:col-span-2 rounded-xl border bg-card p-3 sm:p-5">
         <div class="flex flex-wrap items-center gap-2 mb-4">
           <h2 class="font-semibold">Anúncios por canal</h2>
-          <NuxtLink to="/anuncios" class="ml-auto text-xs text-primary inline-flex items-center hover:underline">
+          <NuxtLink to="/produtos?aba=anuncios" class="ml-auto text-xs text-primary inline-flex items-center hover:underline">
             ver anúncios <ArrowUpRight class="size-3 ml-0.5" />
           </NuxtLink>
         </div>

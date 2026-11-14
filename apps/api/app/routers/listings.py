@@ -39,8 +39,10 @@ from app.schemas.listings import (
     ListingRequestCreate,
     ListingRequestOut,
     ListingRequestPatch,
+    ListingResumo,
 )
 from app.schemas.products import JobCreatedOut
+from app.services import departamento as dep_svc
 from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
@@ -58,48 +60,62 @@ async def list_listings(
     status_filter: str | None = Query(None, alias="status"),
     search: str | None = Query(None),
     unlinked: bool = Query(False, description="Only listings without product_id"),
+    departamento: str | None = Query(
+        None,
+        description="celular (inclui Catálogo) | mala | eletro | sem — pelo segmento do "
+        "produto vinculado; sem produto vinculado = sem (13/11/2026)",
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> ListingPage:
-    stmt = select(Listing).where(user_scope(Listing, user))
-    count_stmt = select(func.count()).select_from(Listing).where(user_scope(Listing, user))
+    departamento = dep_svc.validar(departamento)
+    # `base` = o que define o conjunto do departamento (escopo + departamento);
+    # `filtros` = o que a pessoa escolhe na tela (conta, canal, status, busca,
+    # sem produto). Os cartões (resumo) contam só a base; a lista e o `total`,
+    # tudo.
+    base = [user_scope(Listing, user)]
 
     # Escopo por equipe: usuário não-admin com equipe(s) só vê os anúncios das
     # integrações das lojas da sua equipe (admin / sem-equipe = irrestrito).
     scope = await resolve_team_scope(session, user)
     if not scope.unrestricted:
-        stmt = stmt.where(Listing.integration_id.in_(scope.integration_ids))
-        count_stmt = count_stmt.where(Listing.integration_id.in_(scope.integration_ids))
+        base.append(Listing.integration_id.in_(scope.integration_ids))
 
+    # Departamento (Organização do DaVinci, item 2): Anúncios virou aba de
+    # Produtos, dividida como a Tabela de Preços. Sem o parâmetro, nada muda.
+    if departamento:
+        idx = await dep_svc.indice_departamentos(session)
+        base.append(dep_svc.condicao_anuncio(departamento, idx))
+
+    filtros = []
     if integration_id:
-        stmt = stmt.where(Listing.integration_id == integration_id)
-        count_stmt = count_stmt.where(Listing.integration_id == integration_id)
+        filtros.append(Listing.integration_id == integration_id)
     if platform:
         try:
             p_enum = IntegrationPlatform(platform)
         except ValueError as e:
             raise HTTPException(400, detail={"code": "invalid_platform"}) from e
-        stmt = stmt.where(Listing.platform == p_enum)
-        count_stmt = count_stmt.where(Listing.platform == p_enum)
+        filtros.append(Listing.platform == p_enum)
     if status_filter:
         try:
             s_enum = ListingStatus(status_filter)
         except ValueError as e:
             raise HTTPException(400, detail={"code": "invalid_status"}) from e
-        stmt = stmt.where(Listing.status == s_enum)
-        count_stmt = count_stmt.where(Listing.status == s_enum)
+        filtros.append(Listing.status == s_enum)
     if search:
         like = f"%{search}%"
-        cond = or_(
-            Listing.title.ilike(like),
-            Listing.sku.ilike(like),
-            Listing.external_id.ilike(like),
+        filtros.append(
+            or_(
+                Listing.title.ilike(like),
+                Listing.sku.ilike(like),
+                Listing.external_id.ilike(like),
+            )
         )
-        stmt = stmt.where(cond)
-        count_stmt = count_stmt.where(cond)
     if unlinked:
-        stmt = stmt.where(Listing.product_id.is_(None))
-        count_stmt = count_stmt.where(Listing.product_id.is_(None))
+        filtros.append(Listing.product_id.is_(None))
+
+    stmt = select(Listing).where(*base, *filtros)
+    count_stmt = select(func.count()).select_from(Listing).where(*base, *filtros)
 
     total = (await session.execute(count_stmt)).scalar_one()
     rows = (
@@ -109,11 +125,31 @@ async def list_listings(
             .limit(page_size)
         )
     ).scalars().all()
+    # Cartões da tela (Total anúncios, Sem produto, Ativos, Em revisão): antes
+    # o front contava só a página de 50; agora vêm do banco, numa consulta só.
+    resumo_row = (
+        await session.execute(
+            select(
+                func.count(),
+                func.count().filter(Listing.product_id.is_(None)),
+                func.count().filter(Listing.status == ListingStatus.ACTIVE),
+                func.count().filter(Listing.status == ListingStatus.UNDER_REVIEW),
+            )
+            .select_from(Listing)
+            .where(*base)
+        )
+    ).one()
     return ListingPage(
         items=[ListingOut.model_validate(r) for r in rows],
         total=total,
         page=page,
         page_size=page_size,
+        resumo=ListingResumo(
+            total=resumo_row[0],
+            sem_produto=resumo_row[1],
+            ativos=resumo_row[2],
+            em_revisao=resumo_row[3],
+        ),
     )
 
 
