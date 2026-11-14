@@ -144,6 +144,13 @@ async function run() {
   assert.match(html, /AC, AM/)
   assert.match(html, /SKU modelo-original/)
   assert.match(html, /loja@example.com/)
+  // 13/11/2026: a coluna Duoke saiu da tabela e do cartão do celular (o dado
+  // continua no banco). Upseller fica, e a ordem é Upseller · Restrição.
+  assert.doesNotMatch(html, /Duoke/, 'Duoke column and mobile detail are gone')
+  assert.match(html, />Upseller<\/th>\s*<th[^>]*>Restrição<\/th>/, 'Restrição follows Upseller directly')
+  const headCells = (html.match(/<thead[\s\S]*?<\/thead>/)[0].match(/<th[\s>]/g) || []).length
+  const rowCells = (html.match(/<tr id="store-row-store1"[\s\S]*?<\/tr>/)[0].replace(/<!--[\s\S]*?-->/g, '').match(/<td[\s>]/g) || []).length
+  assert.equal(rowCells, headCells, 'each store row has one cell per header column')
   assert.equal((html.match(/aria-label="Copiar endereço de envio"/g) || []).length, 2, 'shipping copy appears in mobile cards and the desktop table')
   assert.equal((html.match(/aria-label="Copiar endereço de devolução"/g) || []).length, 2, 'return copy appears in mobile cards and the desktop table')
   s.mobileTableView = true

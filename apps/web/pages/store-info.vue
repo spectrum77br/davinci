@@ -46,7 +46,9 @@ type StoreInfo = {
   has_integration: boolean
   bling_store_id: string | null
   upseseller: boolean | null
-  duoker: boolean | null
+  // `duoker` (Duoke) saiu da tela em 13/11/2026: o Duoke deixa de ser usado
+  // (o atendimento vai pro Comunicador do DaVinci). A coluna continua no
+  // banco e a API ainda devolve o campo — só não aparece mais aqui.
   uf_restrictions: string[] | null
   excecoes: StoreExcecao[] | null
   commercial_team: 1 | 2 | 3 | null
@@ -236,8 +238,7 @@ async function unlinkIntegration(row: StoreInfo) {
   }
 }
 
-// Generic single-field PATCH used by the new Bling ID / UpseSeller / Duoker
-// / UF cells.
+// Generic single-field PATCH used by the new Bling ID / UpseSeller / UF cells.
 async function updateField(row: StoreInfo, field: keyof StoreInfo, value: unknown) {
   if (!canEdit.value) return
   try {
@@ -274,7 +275,7 @@ async function toggleUf(row: StoreInfo, uf: string, checked: boolean) {
   await updateField(row, 'uf_restrictions', next.length ? next : null)
 }
 
-// Tri-state boolean badge helpers (UpseSeller / Duoker). Mirrors the
+// Tri-state boolean badge helpers (UpseSeller). Mirrors the
 // "Sim / ✕ Não / —" visual that Tab.Preço and Integração use, plus an
 // extra null state so the field stays "unset" until the user picks one.
 function labelTriBool(v: boolean | null): string {
@@ -287,7 +288,7 @@ function badgeClassTriBool(v: boolean | null): string {
   if (v === false) return 'bg-red-500/15 text-red-400 border-red-500/40'
   return 'bg-muted/40 text-muted-foreground border-border'
 }
-async function cycleTriBool(row: StoreInfo, field: 'upseseller' | 'duoker') {
+async function cycleTriBool(row: StoreInfo, field: 'upseseller') {
   if (!canEdit.value) return
   const cur = row[field]
   const next: boolean | null = cur === null ? true : cur === true ? false : null
@@ -967,7 +968,6 @@ async function copyAddress(row: StoreInfo, field: 'shipping_address' | 'return_a
                 <div><dt>Integração vinculada</dt><dd>{{ integrationFor(row)?.name || (row.integration_id ? 'Vinculada' : 'Nenhuma') }}</dd></div>
                 <div><dt>Bling ID</dt><dd>{{ row.bling_store_id || '—' }}</dd></div>
                 <div><dt>Upseller</dt><dd>{{ labelTriBool(row.upseseller) }}</dd></div>
-                <div><dt>Duoke</dt><dd>{{ labelTriBool(row.duoker) }}</dd></div>
                 <div><dt>Restrições de UF</dt><dd>{{ row.uf_restrictions?.join(', ') || 'Nenhuma' }}</dd></div>
                 <div><dt>Exceções</dt><dd v-for="(regra, idx) in row.excecoes || []" :key="idx">{{ excecaoLabel(regra) }}</dd><dd v-if="!row.excecoes?.length">Nenhuma</dd></div>
               </dl>
@@ -1008,7 +1008,6 @@ async function copyAddress(row: StoreInfo, field: 'shipping_address' | 'return_a
             <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Integração</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[110px]">Bling ID</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Upseller</th>
-            <th class="text-center px-2 py-2 font-medium border-b border-border w-20">Duoke</th>
             <th class="text-left px-2 py-2 font-medium border-b border-border min-w-[140px]">Restrição</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border min-w-[100px]">Exceções</th>
             <th class="text-center px-2 py-2 font-medium border-b border-border w-12"></th>
@@ -1606,17 +1605,6 @@ async function copyAddress(row: StoreInfo, field: 'shipping_address' | 'return_a
                 @click="canEdit && cycleTriBool(row, 'upseseller')"
               >
                 {{ labelTriBool(row.upseseller) }}
-              </component>
-            </td>
-            <!-- Duoker -->
-            <td class="border border-border px-1 py-1 text-center">
-              <component :is="canEdit ? 'button' : 'span'"
-                :type="canEdit ? 'button' : undefined"
-                class="inline-block px-1.5 py-0.5 rounded border text-[10px] font-semibold transition-colors"
-                :class="badgeClassTriBool(row.duoker)"
-                @click="canEdit && cycleTriBool(row, 'duoker')"
-              >
-                {{ labelTriBool(row.duoker) }}
               </component>
             </td>
             <!-- UF — compact badge showing count; click opens popover anchored
