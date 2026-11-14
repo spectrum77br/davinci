@@ -2,7 +2,7 @@
 import {
   Plus, Trash2, RefreshCw, Save, X, AlertCircle, Loader2, Eye, EyeOff,
   Lock, Send, Ban, Check, Link2, Copy, Minus,
-  Smartphone, Briefcase, Zap, BarChart3, DollarSign, Settings2, Upload,
+  Smartphone, Briefcase, Zap, DollarSign, Settings2, Upload,
   ChevronDown, Download, Undo2, Redo2, Search, Tags, Camera, FolderPlus, ScanSearch,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
@@ -11,17 +11,27 @@ import {
 } from '~/utils/reposicao'
 
 definePageMeta({
-  middleware: ['permission'],
+  middleware: [
+    // A aba Concorrência saiu em 13/11/2026 (Organização do DaVinci, item 4).
+    // O link antigo /pricing/concorrencia abre a Tabela de Preços, mantendo o
+    // ?dept=, em vez de cair numa aba vazia.
+    (to) => {
+      if (to.params.tab !== 'concorrencia') return
+      return navigateTo({ path: '/pricing/tabela', query: to.query, hash: to.hash }, { replace: true })
+    },
+    'permission',
+  ],
   permission: { resource: 'tabela_precos', action: 'view' },
 })
 
-type Tab = 'tabela' | 'contas' | 'produtos' | 'concorrencia'
+// Concorrência (busca na API pública do ML) saiu em 13/11/2026; a rota da API
+// e a permissão tabela_precos_concorrencia continuam, só a aba some.
+type Tab = 'tabela' | 'contas' | 'produtos'
 
 const TABS: { key: Tab; label: string; icon: any }[] = [
   { key: 'tabela', label: 'Tabela de Preços', icon: DollarSign },
   { key: 'contas', label: 'Contas', icon: Settings2 },
   { key: 'produtos', label: 'Produtos', icon: Upload },
-  { key: 'concorrencia', label: 'Concorrência', icon: BarChart3 },
 ]
 
 const route = useRoute()
@@ -4263,44 +4273,6 @@ async function toggleCompare(prod: PricingProduct) {
   }
 }
 
-// =========================================================== competitor
-
-type CompetitorRow = {
-  item_id: string
-  title: string
-  price: number
-  currency: string
-  permalink: string
-  seller_id: number | null
-  condition: string | null
-  sold_quantity: number | null
-  available_quantity: number | null
-  thumbnail: string | null
-}
-
-const competitorQuery = ref('')
-const competitorRows = ref<CompetitorRow[]>([])
-const competitorLoading = ref(false)
-const competitorErr = ref<string | null>(null)
-
-async function searchCompetitor() {
-  const q = competitorQuery.value.trim()
-  if (!q) {
-    competitorRows.value = []
-    return
-  }
-  competitorLoading.value = true
-  competitorErr.value = null
-  try {
-    const params = new URLSearchParams({ q, limit: '20' })
-    competitorRows.value = await api<CompetitorRow[]>(`/api/pricing/competitor-prices?${params}`)
-  } catch (e: any) {
-    competitorErr.value = e?.data?.detail?.code ?? 'search_failed'
-  } finally {
-    competitorLoading.value = false
-  }
-}
-
 // =========================================================== display helpers
 
 function fmtCommission(v: string | number | null) {
@@ -6570,72 +6542,6 @@ watch(department, async () => {
       </div>
     </section>
 
-    <!-- ============================================ CONCORRENCIA -->
-    <section v-else-if="tab === 'concorrencia'" class="space-y-3">
-      <div class="flex flex-wrap items-center gap-2">
-        <input
-          v-model="competitorQuery"
-          placeholder="busca ML (modelo, marca…)"
-          class="border rounded px-2 py-1 text-sm bg-background w-80"
-          @keydown.enter="searchCompetitor"
-        />
-        <button class="btn btn-sm btn-primary" :disabled="competitorLoading" @click="searchCompetitor">
-          <Loader2 v-if="competitorLoading" class="h-4 w-4 animate-spin mr-1" />
-          <RefreshCw v-else class="h-4 w-4 mr-1" />
-          Buscar
-        </button>
-        <span class="text-xs text-muted-foreground">cache 5 min · API pública ML</span>
-      </div>
-
-      <div v-if="competitorErr" class="rounded border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive flex items-center gap-2">
-        <AlertCircle class="h-4 w-4" /> {{ competitorErr }}
-      </div>
-
-      <div class="overflow-x-auto rounded border">
-        <table class="w-full text-sm">
-          <thead class="bg-muted/50 text-left">
-            <tr>
-              <th class="px-3 py-2"></th>
-              <th class="px-3 py-2">Título</th>
-              <th class="px-3 py-2 text-right">Preço</th>
-              <th class="px-3 py-2 text-right">Vendas</th>
-              <th class="px-3 py-2 text-right">Estoque</th>
-              <th class="px-3 py-2">Condição</th>
-              <th class="px-3 py-2"></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-if="competitorLoading && !competitorRows.length">
-              <td class="px-3 py-6 text-center text-muted-foreground" colSpan="7">
-                <Loader2 class="inline h-4 w-4 animate-spin" /> buscando…
-              </td>
-            </tr>
-            <tr v-else-if="!competitorRows.length">
-              <td class="px-3 py-6 text-center text-muted-foreground" colSpan="7">
-                Sem resultados.
-              </td>
-            </tr>
-            <tr v-for="r in competitorRows" :key="r.item_id" class="border-t hover:bg-muted/20">
-              <td class="px-3 py-1">
-                <img v-if="r.thumbnail" :src="r.thumbnail" alt="" class="h-10 w-10 object-cover rounded" />
-              </td>
-              <td class="px-3 py-2 truncate max-w-md">{{ r.title }}</td>
-              <td class="px-3 py-2 text-right font-medium">
-                {{ r.price.toLocaleString('pt-BR', { style: 'currency', currency: r.currency || 'BRL' }) }}
-              </td>
-              <td class="px-3 py-2 text-right text-muted-foreground">{{ r.sold_quantity ?? '—' }}</td>
-              <td class="px-3 py-2 text-right text-muted-foreground">{{ r.available_quantity ?? '—' }}</td>
-              <td class="px-3 py-2 text-xs">{{ r.condition ?? '—' }}</td>
-              <td class="px-3 py-2 text-right">
-                <a v-if="r.permalink" :href="r.permalink" target="_blank" rel="noopener" class="btn btn-xs">
-                  Abrir
-                </a>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
       <!-- Margens do catálogo: janelinha aberta pelo "% margens" do Catálogo ML
          (aba Contas). Uma margem por tipo da aba; vazio = a da conta. -->
     <div

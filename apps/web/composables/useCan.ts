@@ -176,7 +176,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   tabela_precos_contas: 'Tabela Preços — Contas',
   tabela_precos_todas_contas: 'Tabela Preços — Ver todas as contas',
   tabela_precos_produtos: 'Tabela Preços — Produtos',
-  tabela_precos_concorrencia: 'Tabela Preços — Concorrência',
+  tabela_precos_concorrencia: 'Tabela Preços — Concorrência (a aba saiu em 13/11/2026: esta permissão não abre mais nada)',
   margem: 'Margem',
   conciliacao: 'Conciliação — pedido × financeiro das lojas (view) e marcar/finalizar (edit)',
   faturamento: 'Faturamento',
