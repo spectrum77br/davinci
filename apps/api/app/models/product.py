@@ -51,6 +51,11 @@ class Product(Base, TimestampMixin):
     sku: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     category: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Nome da categoria do Bling gravado pela carga antiga (coluna da 0017; o
+    # import de hoje não preenche — a categoria atual é a do `category`, pelo
+    # product_categories). Só leitura aqui: entra no departamento reserva do
+    # produto sem segmento (services/departamento.py).
+    categoria_nome: Mapped[str | None] = mapped_column(Text, nullable=True)
     segment_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("segments.id", ondelete="SET NULL"),

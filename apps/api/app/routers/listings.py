@@ -62,8 +62,9 @@ async def list_listings(
     unlinked: bool = Query(False, description="Only listings without product_id"),
     departamento: str | None = Query(
         None,
-        description="celular (inclui Catálogo) | mala | eletro | sem — pelo segmento do "
-        "produto vinculado; sem produto vinculado = sem (13/11/2026)",
+        description="celular (inclui Catálogo) | mala | eletro | sem — pelo departamento "
+        "do produto vinculado (o segmento; sem ele, a categoria do Bling ou a família do "
+        "SKU); sem produto vinculado = sem (13/11/2026)",
     ),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),

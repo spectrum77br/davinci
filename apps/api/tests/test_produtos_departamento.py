@@ -1,9 +1,11 @@
 """Produtos e Anúncios por departamento (Organização do DaVinci, 13/11/2026, item 2).
 
 Celular (com o Catálogo), Mala, Eletro e Sem departamento — pela raiz do
-segmento do produto; o anúncio vale pelo produto vinculado e, sem produto,
-cai em Sem departamento. O conftest usa create_all (não roda o seed das
-raízes da 0023/0024), então cada teste cria as raízes que usa.
+segmento do produto; sem segmento de raiz conhecida, pelo reserva (categoria
+do Bling, senão a família do SKU, 15/11/2026). O anúncio vale pelo produto
+vinculado e, sem produto, cai em Sem departamento. O conftest usa create_all
+(não roda o seed das raízes da 0023/0024), então cada teste cria as raízes que
+usa.
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
@@ -21,6 +24,7 @@ from app.models import (
     ListingStatus,
     Marketplace,
     Product,
+    ProductCategory,
     ProductLink,
     Segment,
     Store,
@@ -290,8 +294,6 @@ async def test_saude_dos_vinculos_e_remover_mortos_por_departamento(client, auth
     from datetime import UTC, datetime
     from unittest.mock import patch
 
-    from sqlalchemy import select
-
     from app.services.vinculo_saude import apagar_mortos_em_lotes
 
     admin = await make_user(role=UserRole.ADMIN)
@@ -354,16 +356,239 @@ async def test_saude_dos_vinculos_e_remover_mortos_por_departamento(client, auth
     assert await mortos() == 2
 
 
-def test_somar_por_departamento_sem_segmentos():
-    """Sem nenhuma raiz conhecida, tudo é Sem departamento (nada some)."""
-    sid = uuid.uuid4()
-    assert dep_svc.somar_por_departamento([(None, 2), (sid, 3)], {}) == {
-        "celular": 0,
-        "mala": 0,
+def test_somar_e_validar():
+    """Departamento desconhecido (ou nulo) conta como Sem departamento: nada some."""
+    assert dep_svc.somar([("mala", 2), ("celular", 3), (None, 1), ("xyz", 4), ("mala", 1)]) == {
+        "celular": 3,
+        "mala": 3,
         "eletro": 0,
         "sem": 5,
     }
-    assert dep_svc.somar_por_departamento([(sid, 4)], {sid: "mala"})["mala"] == 4
     assert dep_svc.validar(None) is None
     assert dep_svc.validar("") is None
     assert dep_svc.validar("eletro") == "eletro"
+
+
+# ── Reserva (15/11/2026): categoria do Bling, senão a família do SKU ─────────
+
+# (sku, products.categoria_nome, product_categories.name, segmento, esperado).
+# Os de cima são produtos REAIS sem segmento da produção (dry-run de 15/11);
+# os de baixo, os cantos da regra (ordem, acento, caixa, espaço, kit).
+CASOS_RESERVA: list[tuple[str, str | None, str | None, str | None, str]] = [
+    ("dg050.ci+a003.ci", None, "Celular Kit", None, "celular"),
+    ("dg1007.pi+a003.pi+a019.pi+a020.pi", "Celular Kit", "Celular Kit", None, "celular"),
+    ("x064.ci", None, "Celular", None, "celular"),  # só a categoria decide
+    ("z0188", None, "Celular Usado", None, "celular"),
+    ("z0382", None, "Celular", None, "celular"),
+    ("i020.us", None, "Celular Usado", None, "celular"),
+    ("a014.us", None, "Celular Usado", None, "celular"),
+    ("caixa 24", None, "Acessórios Celular", None, "celular"),
+    ("a073.us", None, "Acessórios Celular", None, "celular"),
+    ("a006.sp", None, None, None, "celular"),  # o override de mala é SKU exato
+    ("ha001.110", None, "Eletro", None, "eletro"),
+    ("usl001m1.110", None, None, None, "eletro"),  # família u
+    ("kit4personalizado", None, "Mala Kit", None, "mala"),
+    ("b000.kit15", None, "Mala Usada", None, "mala"),
+    ("z0367.mala", None, "Mala", None, "mala"),
+    ("z0093.mala", None, None, None, "mala"),  # z….mala sem categoria
+    ("z0207.mala.us", None, None, None, "mala"),  # override do sku_tags
+    ("a006", None, "Mala", None, "mala"),
+    ("a075", None, None, None, "mala"),  # override, sem categoria (seria a0NN)
+    ("bp001+a019+a020", None, "Mala Kit", None, "mala"),
+    ("bp003+a019+a020", None, None, None, "mala"),  # família bp
+    ("b069.14.20.24+a075+bp003+a076", "Mala Kit", None, None, "mala"),
+    ("s001", None, "Insumos", None, "sem"),
+    ("a1003", None, None, None, "sem"),
+    ("z0197", None, None, None, "sem"),  # z sem .mala/.eletro: a regra não decide
+    ("t004.sa+a004.sa", None, None, None, "sem"),
+    ("fake.sp", None, None, None, "sem"),
+    ("teste-geral-1", None, "Geral", None, "sem"),
+    # Ordem: segmento de raiz conhecida > categoria_nome > cadastro > família.
+    ("dg053.sp", "Celular", "Celular", "mala", "mala"),
+    ("dg054.sp", None, None, "celular-raiz", "celular"),
+    ("b021.24", None, "Mala", "outra", "mala"),  # raiz desconhecida → reserva
+    ("dg055.sp", None, None, "outra", "celular"),
+    ("x-ordem-1", "Eletro Kit", "Mala", None, "eletro"),
+    ("x-ordem-2", "Embalagem", "Mala", None, "mala"),  # categoria_nome não decide
+    ("dg056.sp", None, "Mala Kit", None, "mala"),  # categoria > família
+    ("u020", "", "Insumos", None, "eletro"),
+    # Acento, caixa e espaço (o Python tira acento por NFKD; o SQL, por tabela).
+    ("x-cat-1", "  ACESSÓRIOS celular", None, None, "celular"),
+    ("x-cat-2", "Elétro Usado", None, None, "eletro"),
+    ("x-cat-3", "\tmala kit", None, None, "mala"),
+    ("x-cat-4", "Malas de bordo", None, None, "mala"),
+    ("x-cat-5", "Kit Celular", None, None, "sem"),  # tem que COMEÇAR com
+    (" DG101.PI ", None, None, None, "celular"),
+    ("U015", None, None, None, "eletro"),
+    ("Z0099.MALA", None, None, None, "mala"),
+    ("I3.sa", None, None, None, "celular"),
+    ("A015", None, None, None, "mala"),
+    ("dg001.us+z0005.mala", None, None, None, "mala"),  # z….mala em qualquer peça
+    ("z0010.eletro", None, None, None, "eletro"),
+    ("zmala", None, None, None, "sem"),
+    ("a0x1", None, None, None, "sem"),
+]
+
+
+@pytest.mark.asyncio
+async def test_reserva_sql_igual_ao_python(db, make_user):
+    """O CASE em SQL (que filtra e conta) e a função em Python dão o mesmo
+    departamento — e o esperado — em SKUs e categorias reais e nos cantos."""
+    user = await make_user()
+    seg = await _segmentos(db)
+    categorias: dict[str, int] = {}
+    for nome in sorted({c[2] for c in CASOS_RESERVA if c[2]}):
+        categorias[nome] = 9000 + len(categorias)
+        db.add(ProductCategory(bling_category_id=categorias[nome], name=nome))
+    await db.flush()
+    for i, (sku, categoria_nome, cadastro, segmento, _) in enumerate(CASOS_RESERVA):
+        db.add(
+            Product(
+                user_id=user.id,
+                sku=sku,
+                name=f"Produto {i}",
+                stock=0,
+                min_stock=0,
+                categoria_nome=categoria_nome,
+                # O id do Bling vem como texto (às vezes com espaço).
+                category=f" {categorias[cadastro]} " if cadastro else None,
+                segment_id=seg[segmento].id if segmento else None,
+            )
+        )
+    await db.commit()
+
+    idx = await dep_svc.indice_departamentos(db)
+    linhas = await db.execute(select(Product.sku, dep_svc.expressao_departamento(idx)))
+    pelo_sql = dict(linhas.all())
+    assert len(pelo_sql) == len(CASOS_RESERVA)
+    for sku, categoria_nome, cadastro, segmento, esperado in CASOS_RESERVA:
+        segment_id = seg[segmento].id if segmento else None
+        pelo_python = dep_svc.departamento_do_produto(
+            segment_id, idx, sku, categoria_nome, cadastro
+        )
+        assert (sku, pelo_sql[sku], pelo_python) == (sku, esperado, esperado)
+
+
+@pytest.mark.asyncio
+async def test_reserva_nas_telas(client, auth_as, db, make_user):
+    """Produto sem segmento entra no departamento da categoria / família em
+    todas as telas: lista de Produtos, contagem, Anúncios (pelo produto
+    vinculado) e o "Remover os N mortos". O segmento de raiz conhecida
+    continua mandando."""
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    admin = await make_user(role=UserRole.ADMIN)
+    seg = await _segmentos(db)
+    integ = await _integracao(db, admin)
+    db.add(ProductCategory(bling_category_id=777, name="Mala Kit"))
+    await db.flush()
+    produtos: dict[str, Product] = {}
+    for sku, categoria_nome, category, segmento in (
+        ("dg101.pi", None, None, None),  # família → Celular
+        ("b021.24", None, "777", None),  # cadastro → Mala
+        ("kit-x", "Eletro", None, None),  # categoria_nome → Eletro
+        ("dg053.sp", "Celular", None, "mala"),  # o segmento manda → Mala
+        ("b050", None, None, "outra"),  # raiz desconhecida → família → Mala
+        ("s001", "Insumos", None, None),  # nada decide → Sem departamento
+    ):
+        p = Product(
+            user_id=admin.id,
+            sku=sku,
+            name=f"Produto {sku}",
+            stock=0,
+            min_stock=0,
+            categoria_nome=categoria_nome,
+            category=category,
+            segment_id=seg[segmento].id if segmento else None,
+        )
+        db.add(p)
+        await db.flush()
+        produtos[sku] = p
+        db.add(
+            Listing(
+                user_id=admin.id,
+                integration_id=integ.id,
+                platform=IntegrationPlatform.SHOPEE,
+                external_id=f"ext-{sku}",
+                sku=sku,
+                title=f"Anúncio {sku}",
+                status=ListingStatus.ACTIVE,
+                product_id=p.id,
+            )
+        )
+        db.add(
+            ProductLink(
+                user_id=admin.id,
+                product_id=p.id,
+                integration_id=integ.id,
+                platform=IntegrationPlatform.SHOPEE,
+                external_id=f"lk-{sku}",
+                external_sku=sku,
+                morto_desde=datetime.now(UTC),
+                morto_motivo="anúncio excluído na Shopee",
+            )
+        )
+    db.add(
+        Listing(
+            user_id=admin.id,
+            integration_id=integ.id,
+            platform=IntegrationPlatform.SHOPEE,
+            external_id="ext-solto",
+            sku="dg999.pi",
+            title="Anúncio sem produto",
+            status=ListingStatus.PAUSED,
+            product_id=None,
+        )
+    )
+    await db.commit()
+    auth_as(admin)
+
+    async def skus(dep: str) -> set[str]:
+        r = await client.get(f"/api/products?departamento={dep}&page_size=200")
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["total"] == len(body["items"])
+        return {i["sku"] for i in body["items"]}
+
+    assert await skus("celular") == {"dg101.pi"}
+    assert await skus("mala") == {"b021.24", "dg053.sp", "b050"}
+    assert await skus("eletro") == {"kit-x"}
+    assert await skus("sem") == {"s001"}
+
+    r = await client.get("/api/products/departamentos")
+    assert r.status_code == 200, r.text
+    assert r.json() == {
+        "produtos": {"celular": 1, "mala": 3, "eletro": 1, "sem": 1},
+        # O anúncio sem produto fica em Sem departamento, mesmo com SKU de celular.
+        "anuncios": {"celular": 1, "mala": 3, "eletro": 1, "sem": 2},
+    }
+
+    async def titulos(dep: str) -> set[str]:
+        r = await client.get(f"/api/listings?departamento={dep}&page_size=200")
+        assert r.status_code == 200, r.text
+        return {i["title"] for i in r.json()["items"]}
+
+    assert await titulos("eletro") == {"Anúncio kit-x"}
+    assert await titulos("sem") == {"Anúncio s001", "Anúncio sem produto"}
+
+    # A faixa de vínculos e o "Remover os N mortos" ficam no mesmo departamento.
+    r = await client.get("/api/products", params={"departamento": "mala"})
+    assert r.json()["saude"]["mortos"] == 3
+
+    class _Pool:
+        async def enqueue_job(self, *a, **k):
+            pass
+
+    async def _pool():
+        return _Pool()
+
+    with patch("app.routers.products.get_arq_pool", _pool):
+        r = await client.post("/api/product-links/remover-mortos", params={"departamento": "mala"})
+    assert r.json() == {"agendado": True, "quantidade": 3}
+
+    # Classificar num segmento de Celular tira o produto da Mala do reserva.
+    produtos["b021.24"].segment_id = seg["celular"].id
+    await db.commit()
+    assert await skus("mala") == {"dg053.sp", "b050"}
+    assert await skus("celular") == {"dg101.pi", "b021.24"}

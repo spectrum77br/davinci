@@ -85,6 +85,24 @@ _RX_CELULAR = re.compile(r"^dg\d", re.I)
 _RX_ELETRO = re.compile(r"^u", re.I)
 _RX_ACESSORIO = re.compile(r"^a0\d{2}", re.I)
 _RX_MALA = re.compile(r"^bp?\d", re.I)
+# As duas regras em tabela, na ordem em que são tentadas: o departamento dos
+# Produtos (services/departamento.py) monta delas o mesmo teste em SQL — por
+# isso os padrões ficam na sintaxe comum ao `re` e ao `~*` do Postgres.
+# Categoria do Bling: pelo começo do nome sem acento.
+PREFIXOS_DA_CATEGORIA: tuple[tuple[str, str], ...] = (
+    ("celular", "celular"),
+    ("acessorio", "celular"),
+    ("eletro", "eletro"),
+    ("mala", "mala"),
+)
+# Família do SKU: `dg` + dígito e `a0NN` = celular, `u` = eletro, `b`/`bp` +
+# dígito = mala.
+FAMILIAS_DO_SKU: tuple[tuple[re.Pattern[str], str], ...] = (
+    (_RX_CELULAR, "celular"),
+    (_RX_ACESSORIO, "celular"),
+    (_RX_ELETRO, "eletro"),
+    (_RX_MALA, "mala"),
+)
 _LOTE = 1000
 # O mapa garantia → linha → departamento fica guardado por pouco tempo (lê
 # todas as garantias); muda a garantia ou a Tabela de Preços, refaz na hora.
@@ -630,26 +648,14 @@ def departamento_da_categoria(categoria: str | None) -> str | None:
     """'Celular Kit' → 'celular'; 'Acessórios Celular' → 'celular'; 'Eletro
     Usado' → 'eletro'; 'Mala Kit' → 'mala'; outra ou vazia → None. PURA."""
     n = _plano(categoria)
-    if n.startswith(("celular", "acessorio")):
-        return "celular"
-    if n.startswith("eletro"):
-        return "eletro"
-    if n.startswith("mala"):
-        return "mala"
-    return None
+    return next((dep for prefixo, dep in PREFIXOS_DA_CATEGORIA if n.startswith(prefixo)), None)
 
 
 def departamento_da_familia(sku: str | None) -> str | None:
     """Sem categoria nenhuma: pela família do SKU (`dg` + dígito e `a0NN` =
     celular, `u` = eletro, `b`/`bp` + dígito = mala); outra → None. PURA."""
     s = (sku or "").strip()
-    if _RX_CELULAR.match(s) or _RX_ACESSORIO.match(s):
-        return "celular"
-    if _RX_ELETRO.match(s):
-        return "eletro"
-    if _RX_MALA.match(s):
-        return "mala"
-    return None
+    return next((dep for rx, dep in FAMILIAS_DO_SKU if rx.match(s)), None)
 
 
 def departamento_da_venda(

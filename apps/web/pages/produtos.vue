@@ -124,8 +124,11 @@ const canDelete = useCan('produtos', 'delete')
 // Eletro · Sem departamento), depois a aba (Produtos · Anúncios). Os dois
 // ficam na URL (?dept= e ?aba=), como o ?dept= da Tabela; /anuncios redireciona
 // para ?aba=anuncios. O departamento sai da raiz do segmento do produto
-// (Catálogo entra em Celular); anúncio, pelo produto vinculado — sem produto,
-// Sem departamento. Os botões não têm número; as abas mostram "(N)".
+// (Catálogo entra em Celular); sem segmento, a API deduz pela categoria do
+// Bling ou pela família do SKU (15/11/2026, services/departamento.py) — por
+// isso há produto sem segmento em Celular, Mala e Eletro. Anúncio, pelo produto
+// vinculado — sem produto, Sem departamento. Os botões não têm número; as abas
+// mostram "(N)".
 const route = useRoute()
 const router = useRouter()
 const podeProdutos = useCan('produtos', 'view')
@@ -415,7 +418,13 @@ function aoTrocarDepartamento() {
   selectedLinks.value = new Set()
   expanded.value = new Set()
   confirmandoRemoverMortos.value = false
-  if (filtroSegment.value && !segmentFilterOptions.value.some((o) => o.id === filtroSegment.value)) {
+  // "— sem segmento" vale em todo departamento (o reserva põe produto sem
+  // segmento em Celular, Mala e Eletro); um segmento de outro departamento, não.
+  if (
+    filtroSegment.value &&
+    filtroSegment.value !== '__none__' &&
+    !segmentFilterOptions.value.some((o) => o.id === filtroSegment.value)
+  ) {
     filtroSegment.value = ''
   }
   if (aba.value === 'produtos') void refreshAll()
@@ -607,7 +616,9 @@ const segmentOptions = computed(() => {
 })
 
 // Departamento de um segmento, pela raiz (Catálogo → Celular; raiz que não é
-// departamento → Sem departamento) — o mesmo da API.
+// departamento → 'sem') — o mesmo da API. O produto sem segmento de raiz
+// conhecida a API ainda põe num departamento pelo reserva (categoria / família
+// do SKU); aqui ele dá 'sem'.
 function departamentoDoSegmento(segmentId: string | null): Departamento {
   if (!segmentId) return 'sem'
   const byId = segmentsById.value
@@ -659,8 +670,13 @@ async function setProductSegment(p: Product, segmentId: string | null) {
     Object.assign(p, updated)
     closeSegPicker()
     // Mudou de departamento (ex.: classificou um de "Sem departamento"): sai
-    // desta lista e os números das abas se atualizam.
-    if (departamentoDoSegmento(updated.segment_id) !== departamento.value) {
+    // desta lista e os números das abas se atualizam. Sem segmento de raiz
+    // conhecida quem decide é o reserva da API (categoria / família do SKU),
+    // que a tela não sabe: recarrega.
+    const novo = departamentoDoSegmento(updated.segment_id)
+    if (novo === 'sem') {
+      void refreshAll()
+    } else if (novo !== departamento.value) {
       items.value = items.value.filter((x) => x.id !== p.id)
       total.value = Math.max(0, total.value - 1)
       void carregarDepartamentos()
@@ -1992,7 +2008,7 @@ onUnmounted(() => {
       </select>
       <select v-model="filtroSegment" class="product-filter-extra h-9 w-[200px] rounded-md border bg-background px-2 text-sm">
         <option value="">Todos segmentos</option>
-        <option v-if="departamento === 'sem'" value="__none__">— sem segmento</option>
+        <option value="__none__">— sem segmento</option>
         <option v-for="s in segmentFilterOptions" :key="s.id" :value="s.id">{{ s.label }}</option>
       </select>
       <span class="ml-auto text-xs text-muted-foreground">

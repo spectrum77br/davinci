@@ -144,8 +144,9 @@ async def list_products(
     ),
     departamento: str | None = Query(
         None,
-        description="celular (inclui Catálogo) | mala | eletro | sem (sem segmento) — "
-        "pela raiz do segmento do produto (13/11/2026)",
+        description="celular (inclui Catálogo) | mala | eletro | sem — pela raiz do "
+        "segmento do produto (13/11/2026); sem segmento, pela categoria do Bling ou a "
+        "família do SKU (15/11/2026)",
     ),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
@@ -158,7 +159,7 @@ async def list_products(
     cond_dep = None
     if departamento:
         idx = await dep_svc.indice_departamentos(session)
-        cond_dep = dep_svc.condicao_segmento(Product.segment_id, departamento, idx)
+        cond_dep = dep_svc.condicao_produto(departamento, idx)
         stmt = stmt.where(cond_dep)
         count_stmt = count_stmt.where(cond_dep)
     # Escopo por equipe: usuário não-admin com equipe(s) só vê os produtos que
@@ -300,8 +301,20 @@ async def contar_departamentos(
     scope = await resolve_team_scope(session, user)
     produtos: DepartamentosContagem | None = None
     anuncios: DepartamentosContagem | None = None
+
+    async def contar(stmt) -> dict[str, int]:
+        # O departamento de cada linha sai do mesmo CASE dos filtros (segmento,
+        # senão o reserva); agrupa por fora, na subconsulta.
+        sub = stmt.subquery()
+        linhas = await session.execute(select(sub.c.dep, func.count()).group_by(sub.c.dep))
+        return dep_svc.somar(linhas.all())
+
     if _pode_ver(user, "produtos"):
-        stmt = select(Product.segment_id, func.count()).where(user_scope(Product, user))
+        stmt = (
+            select(dep_svc.expressao_departamento(idx).label("dep"))
+            .select_from(Product)
+            .where(user_scope(Product, user))
+        )
         if not scope.unrestricted:
             # Mesmo escopo de equipe da listagem (list_products).
             stmt = stmt.where(
@@ -314,13 +327,10 @@ async def contar_departamentos(
                 )
                 .exists()
             )
-        linhas = (await session.execute(stmt.group_by(Product.segment_id))).all()
-        produtos = DepartamentosContagem(
-            **dep_svc.somar_por_departamento([(r[0], r[1]) for r in linhas], idx)
-        )
+        produtos = DepartamentosContagem(**await contar(stmt))
     if _pode_ver(user, "anuncios"):
         stmt = (
-            select(Product.segment_id, func.count(Listing.id))
+            select(dep_svc.expressao_departamento(idx).label("dep"))
             .select_from(Listing)
             .outerjoin(Product, Product.id == Listing.product_id)
             .where(user_scope(Listing, user))
@@ -328,10 +338,7 @@ async def contar_departamentos(
         if not scope.unrestricted:
             # Mesmo escopo de equipe da listagem (list_listings).
             stmt = stmt.where(Listing.integration_id.in_(scope.integration_ids))
-        linhas = (await session.execute(stmt.group_by(Product.segment_id))).all()
-        anuncios = DepartamentosContagem(
-            **dep_svc.somar_por_departamento([(r[0], r[1]) for r in linhas], idx)
-        )
+        anuncios = DepartamentosContagem(**await contar(stmt))
     return DepartamentosOut(produtos=produtos, anuncios=anuncios)
 
 
