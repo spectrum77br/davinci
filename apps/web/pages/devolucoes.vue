@@ -1248,8 +1248,10 @@ const lidoHa = computed(() => {
             <!-- Larguras fixas em tudo, menos na Localização: "o que sobrar deixa a
                  localização" (Vinicius, mesma regra da Logística). Com o menu lateral
                  aberto em tela de 1920 sobra uma rolagem curta pro lado; com ele
-                 recolhido cabe tudo. -->
-            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="veCusto ? 'min-w-[1742px]' : 'min-w-[1658px]'">
+                 recolhido cabe tudo. O mínimo = soma das larguras fixas + ~120 px pra
+                 Localização (16/11: a coluna Cliente entrou com 130 px e a Localização,
+                 sem esse acréscimo, ficou com zero e os títulos encavalaram). -->
+            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="veCusto ? 'min-w-[1872px]' : 'min-w-[1788px]'">
               <colgroup>
                 <col class="w-[42px]"><col class="w-[58px]"><col class="w-[148px]"><col class="w-[88px]"><col class="w-[130px]"><col class="w-[112px]"><col class="w-[168px]">
                 <col class="w-[90px]"><col class="w-[36px]"><col class="w-[90px]"><col class="w-[70px]"><col>
