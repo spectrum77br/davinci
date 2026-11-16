@@ -527,8 +527,11 @@ function ehLargada(como: string | null): boolean {
 }
 // Resolvido pelo sistema quando todas as peças voltaram pro estoque (16/11/2026).
 const SOZINHO = 'Voltou pro estoque (resolvido sozinho)'
+// Resolvido pelo sistema quando a plataforma cancelou o pedido (16/11/2026, 308473).
+const CANCELADO_SOZINHO = 'Cliente cancelou a devolução (resolvido sozinho)'
 function comoTerminou_(como: string | null): string {
   if (como === SOZINHO) return 'voltou pro estoque — o sistema resolveu sozinho'
+  if (como === CANCELADO_SOZINHO) return 'o cliente cancelou na plataforma — o sistema resolveu sozinho'
   return ehLargada(como) ? 'feito antes de mudar o painel' : (como || '')
 }
 function obsDaLinha(i: Item): string {

@@ -21,6 +21,15 @@ leva o pedido pra Resolvido quando todos os itens voltaram.
 E o contrário: pedido que ESTE robô resolveu e deixou de estar todo no
 estoque (estorno, peça nova lançada sem estoque) volta pra lista sozinho.
 Resolução feita por pessoa nunca é tocada.
+
+Cancelado pela plataforma (Vinicius, 16/11/2026, pedido 308473: "quando a
+plataforma cancelar o pedido de reembolso, o painel resolve sozinho"): o caso
+da Shopee/TikTok foi CANCELADO depois da entrada em Aguardando Devolução, o Bling
+já voltou pra Entregue (a regra da Logística faz isso), ninguém lançou nada, não
+há chamado aberto e não saiu reembolso → resolve como "Cliente cancelou a
+devolução (resolvido sozinho)" e cancela o pedido de vídeo que ainda estiver
+travando a equipe. Se o pedido voltar a cair em Aguardando Devolução, a entrada
+nova reabre sozinha (regra do Resolver).
 """
 
 from __future__ import annotations
@@ -41,9 +50,65 @@ SCHEMA = get_settings().database_schema
 
 # "Como terminou" gravado pelo robô (a tela mostra "resolvido sozinho").
 COMO = "Voltou pro estoque (resolvido sozinho)"
+COMO_CANCELADO = "Cliente cancelou a devolução (resolvido sozinho)"
 # Gravado (com `resolvido_at` vazio = aberto) quando uma PESSOA reabre: o robô
 # não fecha de novo o que alguém reabriu.
 REABERTO_A_MAO = "reaberto à mão"
+
+# Situação "Entregue" do Bling (pra onde a regra da Logística leva o cancelado).
+BLING_ENTREGUE = "83953"
+# O status "cancelado" do caso, por plataforma (`logistica.meli_status`).
+_SHOPEE = ("shopee",)
+_TIKTOK = ("tiktok", "tik tok", "tiktok shop")
+_CANCELADO_SHOPEE = "CANCELLED"
+_CANCELADO_TIKTOK = "RETURN_OR_REFUND_REQUEST_CANCEL"
+
+# Cancelado pela plataforma depois da entrada atual, Bling em Entregue, nada
+# lançado, sem chamado aberto, sem reembolso, aberto no painel e não reaberto à
+# mão. A data do cancelamento vem de `status_datas.return_status.em` (texto ISO;
+# comparado como texto pra não quebrar a consulta com um valor estranho).
+_CANCELADOS_SQL = f"""
+WITH cancel AS (
+    SELECT l.pedido_bling AS pedido,
+           max(left(l.status_datas->'return_status'->>'em', 10)) AS cancelado_em
+    FROM "{SCHEMA}".logistica l
+    WHERE COALESCE(btrim(l.pedido_bling), '') <> ''
+      AND ((lower(btrim(COALESCE(l.plataforma, ''))) IN :shopee
+            AND upper(COALESCE(l.meli_status->>'return_status', '')) = :cancel_shopee)
+        OR (lower(btrim(COALESCE(l.plataforma, ''))) IN :tiktok
+            AND upper(COALESCE(l.meli_status->>'return_status', '')) = :cancel_tiktok))
+      AND COALESCE(l.status_datas->'return_status'->>'em', '') <> ''
+    GROUP BY l.pedido_bling
+), ped AS (
+    SELECT bo.numero AS pedido, max(bo.aguardando_devolucao_data) AS entrada,
+           bool_and(bo.situacao = :entregue) AS entregue
+    FROM "{SCHEMA}".bling_orders bo
+    WHERE bo.numero IN (SELECT pedido FROM cancel)
+    GROUP BY bo.numero
+)
+SELECT p.pedido, p.entrada
+FROM ped p
+JOIN cancel c ON c.pedido = p.pedido
+LEFT JOIN "{SCHEMA}".devolucao_rastreio r ON r.pedido_bling = p.pedido
+WHERE p.entregue AND p.entrada IS NOT NULL
+  AND c.cancelado_em >= to_char(p.entrada, 'YYYY-MM-DD')
+  AND NOT EXISTS (SELECT 1 FROM "{SCHEMA}".devolutions d WHERE btrim(d.pedido_bling) = p.pedido)
+  AND NOT EXISTS (SELECT 1 FROM "{SCHEMA}".chamados ch
+                  WHERE ch.pedido_bling = p.pedido AND ch.origem = 'devolucao'
+                    AND NOT ch.resolvido)
+  AND r.reembolso_auto IS NOT TRUE
+  AND (r.resolvido_at IS NULL
+       OR (r.resolvido_at AT TIME ZONE 'America/Sao_Paulo')::date < p.entrada)
+  AND r.resolvido_como IS DISTINCT FROM :reaberto
+"""
+# O pedido de vídeo ainda sem resposta trava a aba Pedidos da equipe: cancela.
+_CANCELAR_VIDEO_SQL = f"""
+UPDATE "{SCHEMA}".devolucao_rastreio
+   SET video_solicitado_em = NULL, video_solicitado_por = NULL,
+       video_refazer_motivo = NULL, updated_at = :agora
+ WHERE pedido_bling = :pedido AND video_solicitado_em IS NOT NULL
+   AND video_enviado_em IS NULL
+"""
 
 # Por pedido: tudo no estoque? E o estado do Resolver (mesma regra do aberto do
 # painel: resolvido antes da entrada ATUAL em Aguardando Devolução não vale).
@@ -203,6 +268,50 @@ async def _reconferir_pecas(session: AsyncSession, agora: datetime) -> int:
     return n
 
 
+async def resolver_cancelados(session: AsyncSession, agora: datetime | None = None) -> int:
+    """Resolve o que a plataforma cancelou (ver o topo). Devolve quantos."""
+    from sqlalchemy import bindparam
+
+    agora = agora or datetime.now(UTC)
+    stmt = text(_CANCELADOS_SQL).bindparams(
+        bindparam("shopee", expanding=True), bindparam("tiktok", expanding=True)
+    )
+    linhas = (
+        await session.execute(
+            stmt,
+            {
+                "shopee": list(_SHOPEE),
+                "tiktok": list(_TIKTOK),
+                "cancel_shopee": _CANCELADO_SHOPEE,
+                "cancel_tiktok": _CANCELADO_TIKTOK,
+                "entregue": BLING_ENTREGUE,
+                "reaberto": REABERTO_A_MAO,
+            },
+        )
+    ).all()
+    n = 0
+    for linha in linhas:
+        res = await session.execute(
+            text(_RESOLVER_SQL),
+            {
+                "pedido": linha.pedido,
+                "agora": agora,
+                "como": COMO_CANCELADO,
+                "entrada": linha.entrada,
+            },
+        )
+        if res.rowcount:
+            await session.execute(
+                text(_CANCELAR_VIDEO_SQL), {"pedido": linha.pedido, "agora": agora}
+            )
+            n += 1
+            logger.info(
+                "devolucao_resolvida_sozinha", pedido_bling=linha.pedido, porque="cancelado"
+            )
+        await session.commit()
+    return n
+
+
 async def rodada(session: AsyncSession, *, reconferir: bool | None = None) -> dict[str, int]:
     """Uma passada por todos os pedidos (worker, a cada 5 min). `reconferir` = olhar
     de novo as peças do que o robô resolveu (padrão: na rodada de :04, 1×/hora)."""
@@ -242,6 +351,12 @@ async def rodada(session: AsyncSession, *, reconferir: bool | None = None) -> di
         elif linha.tudo_no_estoque:
             resumo["falta_peca"] += 1
         await session.commit()
+    try:
+        resumo["cancelados"] = await resolver_cancelados(session, agora)
+    except Exception as e:  # noqa: BLE001 — a regra nova não derruba a do estoque
+        await session.rollback()
+        resumo["cancelados"] = 0
+        logger.error("devolucao_resolver_cancelados_falhou", err=str(e)[:200])
     return resumo
 
 

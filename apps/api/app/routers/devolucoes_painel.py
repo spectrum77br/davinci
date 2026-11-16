@@ -584,7 +584,11 @@ async def resolver(
     # As marcas são do sistema: a da largada, usada à mão, esconderia o pedido
     # de "Resolvidas" e do resumo; a do "resolvido sozinho" diria que foi o
     # sistema.
-    if len(como) < 2 or como in antigo.PAINEL_MARCAS or como == resolver_sozinho.COMO:
+    if (
+        len(como) < 2
+        or como in antigo.PAINEL_MARCAS
+        or como in (resolver_sozinho.COMO, resolver_sozinho.COMO_CANCELADO)
+    ):
         raise HTTPException(422, detail={"code": "como_terminou_invalido"})
     await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
     row = await antigo._rastreio_do_pedido(session, pedido)

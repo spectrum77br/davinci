@@ -4,7 +4,8 @@
 2. "quando tiver estoque lançado de todos os itens da devolução o sistema pode
    resolver sozinho informando que voltou no estoque";
 3. "pedidos como perdimento, extraviado tal ele não vai encerrar" — ficam em
-   "A finalizar" (o `pronto_resolver`) pro adm/Cairo.
+   "A finalizar" (o `pronto_resolver`) pro adm/Cairo;
+4. "quando a plataforma cancelar o pedido de reembolso, o painel resolve sozinho".
 """
 
 from __future__ import annotations
@@ -491,6 +492,82 @@ async def test_produto_sem_lancamento_nao_e_a_finalizar(
     await db.commit()
     itens = (await client.get("/api/devolucoes-painel")).json()["items"]
     assert all(i["pronto_resolver"] == "lançada: Perdimento" for i in itens)
+
+
+# ── 4. Cancelado pela plataforma resolve sozinho (16/11, 308473) ─────────
+
+
+def _logistica(pedido: str, plataforma: str, status: str, em: str):
+    from app.models import Logistica
+
+    return Logistica(
+        pedido_bling=pedido,
+        plataforma=plataforma,
+        meli_status={"return_type": "REFUND", "return_status": status},
+        status_datas={"return_status": {"em": em, "fonte": "plataforma"}},
+    )
+
+
+async def test_cancelado_pela_plataforma_resolve_sozinho_e_destrava_o_video(
+    client, db: AsyncSession, make_user, auth_as
+):
+    hoje = datetime.now(_SP).date()
+    agora_iso = datetime.now(UTC).isoformat()
+    # Shopee: só reembolso cancelado hoje, Bling já em Entregue (a regra da Logística).
+    await _pedido(db, "783001", sozinho.BLING_ENTREGUE, entrada=hoje)
+    db.add(_logistica("783001", "shopee", "CANCELLED", agora_iso))
+    # TikTok: o comprador cancelou; o robô da Fraude tinha pedido o vídeo à equipe.
+    await _pedido(db, "783002", sozinho.BLING_ENTREGUE, entrada=hoje - timedelta(days=2))
+    db.add(_logistica("783002", "tiktok", "RETURN_OR_REFUND_REQUEST_CANCEL", agora_iso))
+    db.add(DevolucaoRastreio(pedido_bling="783002", video_solicitado_em=datetime.now(UTC)))
+    # Não resolvem:
+    # Bling ainda em Aguardando Devolução (a Logística ainda não mexeu).
+    await _pedido(db, "783003", "83957", entrada=hoje)
+    db.add(_logistica("783003", "shopee", "CANCELLED", agora_iso))
+    # Cancelamento ANTERIOR à entrada atual (é de outra devolução).
+    await _pedido(db, "783004", sozinho.BLING_ENTREGUE, entrada=hoje)
+    db.add(_logistica("783004", "shopee", "CANCELLED", "2026-01-02T10:00:00+00:00"))
+    # Alguém já lançou: a pessoa decide.
+    await _pedido(db, "783005", sozinho.BLING_ENTREGUE, entrada=hoje)
+    db.add(_logistica("783005", "shopee", "CANCELLED", agora_iso))
+    db.add(Devolution(pedido_bling="783005", conta="Shopee KFA", sku="a001.sp"))
+    # Chamado da devolução aberto.
+    await _pedido(db, "783006", sozinho.BLING_ENTREGUE, entrada=hoje)
+    db.add(_logistica("783006", "tiktok", "RETURN_OR_REFUND_REQUEST_CANCEL", agora_iso))
+    db.add(Chamado(pedido_bling="783006", origem="devolucao", conta="TikTok Mini"))
+    # Saiu reembolso pro cliente.
+    await _pedido(db, "783007", sozinho.BLING_ENTREGUE, entrada=hoje)
+    db.add(_logistica("783007", "shopee", "CANCELLED", agora_iso))
+    db.add(DevolucaoRastreio(pedido_bling="783007", reembolso_auto=True))
+    # Reaberto por uma pessoa.
+    await _pedido(db, "783008", sozinho.BLING_ENTREGUE, entrada=hoje)
+    db.add(_logistica("783008", "shopee", "CANCELLED", agora_iso))
+    db.add(DevolucaoRastreio(pedido_bling="783008", resolvido_como=sozinho.REABERTO_A_MAO))
+    # "CANCELLED" de outra plataforma (ML) não vale nesta regra.
+    await _pedido(db, "783009", sozinho.BLING_ENTREGUE, entrada=hoje)
+    db.add(_logistica("783009", "mercado livre", "CANCELLED", agora_iso))
+    await db.commit()
+
+    resumo = await sozinho.rodada(db, reconferir=False)
+    assert resumo["cancelados"] == 2, resumo
+    for pedido in ("783001", "783002"):
+        row = await _estado(db, pedido)
+        assert row.resolvido_at is not None and row.resolvido_por is None
+        assert row.resolvido_como == sozinho.COMO_CANCELADO
+    # O pedido de vídeo deixou de travar a aba Pedidos da equipe.
+    assert (await _estado(db, "783002")).video_solicitado_em is None
+    for pedido in ("783003", "783004", "783005", "783006", "783007", "783008", "783009"):
+        row = await _estado(db, pedido)
+        assert row is None or row.resolvido_at is None, pedido
+    # Já resolvido: a próxima rodada não mexe.
+    assert (await sozinho.rodada(db, reconferir=False))["cancelados"] == 0
+    # Ninguém escolhe essa marca à mão no Resolver.
+    auth_as(await make_user(role=UserRole.ADMIN))
+    r = await client.post(
+        "/api/devolucoes-painel/783003/resolver",
+        json={"como_terminou": sozinho.COMO_CANCELADO},
+    )
+    assert r.status_code == 422
 
 
 async def test_worker_agenda_o_robo_a_cada_5_minutos() -> None:
