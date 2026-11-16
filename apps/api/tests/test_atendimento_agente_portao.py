@@ -890,3 +890,39 @@ def test_a_condicao_como_a_equipe_do_mesmo_anuncio_diz():
     assert checagens.condicao_pela_equipe(texto, da_equipe) == {"original", "lacrado"}
     assert checagens.condicao_pela_equipe(texto, []) == frozenset()
     assert checagens.condicao_pela_equipe(texto, ["é usado, não é lacrado"]) == frozenset()
+
+
+def test_a_oferta_com_a_memoria_com_barra_e_o_alem_do_produto_da_conversa():
+    """16/11/2026 (Victor, "quais são outros celulares resistentes a água e queda?"): a oferta certa
+    do WP53 (estoque nas versões S e Pro) ficava com pessoa — "S 16/128" virava o modelo "s16" e
+    "24/256" o "24", que o título não tem; e o "Além do Uranyx WP60" (o da conversa, a comparação)
+    contava como o produto do link do WP53."""
+    import types
+
+    assert checagens._modelos_e_marcas(
+        "disponivel nas versoes wp53 s 16/128 gb e wp53 pro 24/256 gb"
+    ) == ({"wp53"}, set())
+    assert checagens._modelos_e_marcas("temos o c17 e o a18")[0] == {"c17", "a18"}
+    ctx = types.SimpleNamespace(
+        links_anuncio={
+            "58206583443": {
+                "codigo": "b",
+                "url": "https://shopee.com.br/product/1/58206583443",
+                "titulo_plano": "uranyx wp53 24.128 gb resistente a agua e queda nfc",
+                "nome_curto": "",
+            }
+        },
+        anuncios_do_pacote=["58206638787"],
+        buscas_catalogo=[],
+        anuncios_buscados={},
+        nomes=(),
+    )
+    texto = (
+        "Olá! Além do Uranyx WP60, também temos o Uranyx WP53, que é resistente a água e queda. "
+        "Segue o link do anúncio: {link_anuncio:b}."
+    )
+    evid = ["anuncio:58206583443"]
+    assert checagens.conferir_link_do_anuncio(texto, ctx=ctx, evidencias=evid) == []
+    # O link de outro produto continua com pessoa.
+    outro = "Temos o Uranyx A18 Pro Max. Segue o link do anúncio: {link_anuncio:b}."
+    assert checagens.conferir_link_do_anuncio(outro, ctx=ctx, evidencias=evid)

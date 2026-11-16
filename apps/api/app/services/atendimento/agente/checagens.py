@@ -10025,6 +10025,10 @@ _UNIDADE_DEPOIS = re.compile(
 )
 # O milhar e a memória com ponto ("10.000 mAh", "12.128"): não são nome de modelo.
 _NUMERO_COM_PONTO = re.compile(r"\b\d{1,3}\.\d{3}\b")
+# 16/11/2026 (Victor, "WP53 S 16/128 GB e WP53 Pro 24/256 GB"): a memória com barra é a mesma
+# especificação do "16.128" — sem tirá-la, "S 16" virava o modelo "s16" e "24/256" o "24", que
+# nenhum título tem, e a oferta certa ficava com pessoa.
+_MEMORIA_COM_BARRA = re.compile(r"\b\d{1,3}\s*/\s*\d{2,4}(?:\s*gb)?\b")
 
 
 # A especificação colada ao número ("5G", "4G", "108MP", "50W"): não é nome de modelo.
@@ -10033,7 +10037,7 @@ _ESPEC_COLADA = re.compile(r"^\d+(?:g|gb|tb|mb|w|v|mah|mp|hz|k|mm|ml|l|x|p)$")
 
 def _modelos_e_marcas(oracao: str) -> tuple[set[str], set[str]]:
     """(palavras de modelo — com número, fora a especificação —, marcas) da oração. PURA."""
-    ps = catalogo.palavras(_NUMERO_COM_PONTO.sub(" ", oracao))
+    ps = catalogo.palavras(_MEMORIA_COM_BARRA.sub(" ", _NUMERO_COM_PONTO.sub(" ", oracao)))
     modelos: set[str] = set()
     for i, p in enumerate(ps):
         if not any(c.isdigit() for c in p) or _ESPEC_COLADA.match(p):
@@ -10296,6 +10300,9 @@ MOTIVO_LINK_SEM_EVIDENCIA = (
 )
 
 
+_ALEM_DO = re.compile(r"\b(?:alem|fora)\s+d[oa]s?\s+[^,;:]{1,60}[,;:]")
+
+
 def _citou_o_anuncio(item: str, citadas: set[str]) -> bool:
     """A resposta cita o `anuncio:` da busca ou o que o `ver_anuncio` leu desse anúncio?"""
     return bool(
@@ -10352,7 +10359,9 @@ def conferir_link_do_anuncio(
     for sentenca, _pergunta in _sentencas(_plano(texto)):
         for parte in _PARTES_DA_FRASE.split(sentenca):
             lacunas_da_parte = catalogo.lacunas_de_link(parte)
-            limpa = validador.sem_lacuna_de_link(parte)
+            # 16/11/2026 (Victor): "Além do Uranyx WP60, também temos o WP53 … {link}" — o
+            # produto depois do "além do" é a comparação, não o que o link oferece.
+            limpa = _ALEM_DO.sub(" ", validador.sem_lacuna_de_link(parte))
             modelos, marcas = _modelos_e_marcas(limpa)
             nomes = modelos | marcas | _nome_oferecido(limpa, set(), sinal)
             if lacunas_da_parte:
