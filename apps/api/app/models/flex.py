@@ -263,6 +263,15 @@ class FlexAnuncioEstado(Base):
     # importação); `modelos_em` = quando foi lida.
     modelos: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     modelos_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A última tentativa de ler a lista (deu certo ou não) e quantas falharam
+    # seguidas: quem falha espera mais a cada vez e vai para o fim da fila —
+    # não toma a vez dos outros anúncios nem das outras lojas.
+    modelos_falhas: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
+    modelos_tentativa_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

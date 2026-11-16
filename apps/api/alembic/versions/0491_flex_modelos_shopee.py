@@ -11,6 +11,8 @@ via a "xx1" quando ela era a última gravada.
 - flex_anuncio_estado.modelos: a lista inteira do `get_model_list`
   ([{"id", "sku", "estoque"}]); NULL = nunca lida (vale a importação).
 - flex_anuncio_estado.modelos_em: quando foi lida.
+- flex_anuncio_estado.modelos_falhas / modelos_tentativa_em: a leitura que
+  falha espera mais a cada vez e vai para o fim da fila (revisão de 16/11).
 
 Nascem NULL: o robô lê na primeira rodada os anúncios que a regra quer
 ligados, e relê na hora antes de ligar qualquer um.
@@ -46,8 +48,20 @@ def upgrade() -> None:
         sa.Column("modelos_em", sa.DateTime(timezone=True), nullable=True),
         schema=SCHEMA,
     )
+    op.add_column(
+        "flex_anuncio_estado",
+        sa.Column("modelos_falhas", sa.Integer(), server_default=sa.text("0"), nullable=False),
+        schema=SCHEMA,
+    )
+    op.add_column(
+        "flex_anuncio_estado",
+        sa.Column("modelos_tentativa_em", sa.DateTime(timezone=True), nullable=True),
+        schema=SCHEMA,
+    )
 
 
 def downgrade() -> None:
+    op.drop_column("flex_anuncio_estado", "modelos_tentativa_em", schema=SCHEMA)
+    op.drop_column("flex_anuncio_estado", "modelos_falhas", schema=SCHEMA)
     op.drop_column("flex_anuncio_estado", "modelos_em", schema=SCHEMA)
     op.drop_column("flex_anuncio_estado", "modelos", schema=SCHEMA)

@@ -358,3 +358,117 @@ def test_com_modelos_soma_quando_a_importacao_e_mais_nova():
     b = _com_modelos(_anuncio(agora, [("99", "xx1")]),
                      [("11", "dg053.ci", 1), ("99", "xx1", 0)], agora - timedelta(hours=1))
     assert b.modelos_atrasados is False
+
+
+# ---- revisão de 16/11: fila das leituras, "Sincronizar agora", trilha -------------------
+
+
+@pytest.mark.asyncio
+async def test_loja_com_problema_nao_toma_a_vez_das_outras(monkeypatch):
+    """A loja A com o token quebrado (toda leitura falha) e 20 anúncios na
+    frente; a B saudável com 5. A conta que falha 5 seguidas para SEM gastar
+    vaga, o teto conta chamadas, e as contas são intercaladas."""
+    from uuid import uuid4
+
+    a_id, b_id = uuid4(), uuid4()
+    chamadas: list[str] = []
+
+    class Quebrada:
+        async def get_model_list(self, item_id):
+            chamadas.append(f"A{item_id}")
+            raise RuntimeError("token recusado")
+
+    class Boa:
+        async def get_model_list(self, item_id):
+            chamadas.append(f"B{item_id}")
+            return {"model": [PRETA]}
+
+    clis = {a_id: Quebrada(), b_id: Boa()}
+
+    async def _cli(integ, cache):
+        return clis[integ]
+
+    monkeypatch.setattr(flex_motor, "_cliente", _cli)
+    monkeypatch.setattr(flex_motor, "_FOLGA_MODELOS_S", 0)
+
+    def _an(iid, n):
+        return Anuncio(integration_id=iid, external_id=str(n), plataforma="shopee",
+                       cobertas=frozenset({"11"}))
+
+    fila = [_an(a_id, i) for i in range(20)] + [_an(b_id, 100 + i) for i in range(5)]
+    integs = {a_id: a_id, b_id: b_id}
+
+    # Sem intercalar e com teto 6: os 15 de A pulados não gastam vaga.
+    monkeypatch.setattr(flex_motor, "_TETO_MODELOS_SHOPEE", 6)
+    resumo: dict = {}
+    lidos, falhou = await flex_motor._ler_modelos(fila, integs, {}, resumo)
+    assert (len(falhou), len(lidos)) == (5, 1)
+    assert resumo["modelos_adiados"] == 4  # só os de B que ficaram para depois
+
+    # Intercaladas (como a rodada faz) e teto 12: B inteira lida.
+    chamadas.clear()
+    monkeypatch.setattr(flex_motor, "_TETO_MODELOS_SHOPEE", 12)
+    resumo = {}
+    lidos, falhou = await flex_motor._ler_modelos(flex_motor._rodizio(fila), integs, {}, resumo)
+    assert len(lidos) == 5 and len(falhou) == 5
+    assert sum(1 for c in chamadas if c.startswith("A")) == 5
+    assert "modelos_adiados" not in resumo
+
+
+@pytest.mark.asyncio
+async def test_leitura_que_falha_espera_e_nao_vira_ligar_erro(db, loja, monkeypatch):
+    fake = loja["fake"]
+    pedidos: list[str] = []
+
+    async def _quebrada(item_id):
+        pedidos.append(str(item_id))
+        raise RuntimeError("shopee fora do ar")
+
+    monkeypatch.setattr(fake, "get_model_list", _quebrada)
+    await flex_motor.rodar_motor()
+    est = (await _estados(db))["888"]
+    assert est.modelos_falhas >= 1 and est.modelos_tentativa_em is not None
+    assert est.modelos is None
+    assert _ligacoes(fake) == []  # sem a lista não liga
+    trilha = await _trilha(db, "888")
+    assert ("ligar", "erro") not in trilha  # não chamou a Shopee: não é escrita
+    # Espera crescente: a rodada seguinte nem tenta.
+    antes = len(pedidos)
+    await flex_motor.rodar_motor()
+    assert len(pedidos) == antes
+    # Passada a espera, tenta de novo; a Shopee volta e a xx1 aparece.
+    monkeypatch.setattr(fake, "get_model_list", FakeShopee.get_model_list.__get__(fake))
+    await db.execute(text(
+        "UPDATE flex_anuncio_estado SET modelos_tentativa_em = now() - interval '7 hours',"
+        " proxima_tentativa = NULL"
+    ))
+    await db.commit()
+    await flex_motor.rodar_motor()
+    est = (await _estados(db))["888"]
+    assert est.desejado == "inelegivel" and est.modelos_falhas == 0
+    assert _ligacoes(fake) == []
+
+
+def test_barrado_antes_nao_conta_como_ligado_pelo_davinci():
+    t0 = datetime(2026, 11, 16, 12, tzinfo=UTC)
+    eventos = [("ligar", "ignorado", "desligado", t0),
+               ("ler", "ok", "ligado", t0 + timedelta(minutes=10))]
+    assert flex_motor._nosso_pela_trilha(eventos) is False
+
+
+@pytest.mark.asyncio
+async def test_sincronizar_agora_rele_a_lista_e_libera_quem_apagou_a_xx1(db, loja):
+    fake = loja["fake"]
+    await flex_motor.rodar_motor()
+    assert (await _estados(db))["888"].desejado == "inelegivel"
+    fake.modelos["888"] = [dict(PRETA)]  # a xx1 foi apagada no Seller Center
+    await db.execute(
+        text("UPDATE flex_anuncio_estado SET modelos_em = now() - interval '20 minutes'")
+    )
+    await db.commit()
+    await flex_motor.rodar_motor()  # a rodada comum: a lista de 20 min ainda vale
+    assert (await _estados(db))["888"].desejado == "inelegivel"
+    await flex_motor.rodar_motor(reler_contas=True, origem="sincronizar")
+    est = (await _estados(db))["888"]
+    assert (est.desejado, est.observado) == ("ligado", "ligado")
+    assert len(_ligacoes(fake)) == 1

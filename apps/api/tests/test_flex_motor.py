@@ -616,7 +616,8 @@ async def test_ligar_confere_o_saldo_no_bling(db, mundo, monkeypatch):
     assert est.aprovado_em is not None  # a aprovação continua
     assert est.proxima_tentativa is not None
     assert "o Bling mostra só 1 peça(s) livre(s) em dg053.sp" in est.ultimo_erro
-    assert ("ligar", "erro") in await _trilha(db, "MLB1")
+    # Barrado antes de chamar o ML: "ignorado" na trilha, não "erro" (não é escrita).
+    assert ("ligar", "ignorado") in await _trilha(db, "MLB1")
 
     # Bling fora do ar: desconhecido não liga.
     mundo["bling"].clear()

@@ -255,6 +255,9 @@ _TETO_MODELOS_SHOPEE = 150
 _FOLGA_MODELOS_S = 0.2
 _MODELOS_FALHAS_SEGUIDAS = 5
 MOTIVO_SEM_MODELOS = "não deu para ler as variações do anúncio na Shopee"
+# Trilha do LIGAR barrado antes de chamar a plataforma (Bling sem confirmar,
+# variações não lidas): não é escrita — `_nosso_pela_trilha` não conta.
+_BARRADO_ANTES = "ignorado"
 
 
 def _agora() -> datetime:
@@ -365,6 +368,10 @@ class Anuncio:
     # A importação, mais nova que a lista guardada, trouxe uma variação sem
     # vínculo que a lista não tem: a lista está velha — relê na rodada.
     modelos_atrasados: bool = False
+    # Leituras da lista que falharam seguidas e a última tentativa: espera
+    # crescente e fim da fila (revisão de 16/11/2026).
+    modelos_falhas: int = 0
+    modelos_tentativa_em: datetime | None = None
 
     @property
     def chave(self) -> tuple[UUID, str]:
@@ -1006,6 +1013,8 @@ def _escolher_modelos(
     cfg: ConfigFlex,
     alvo: set[tuple[UUID, str]] | None,
     agora: datetime,
+    *,
+    fresco: bool = False,
 ) -> list[Anuncio]:
     """Os anúncios da Shopee cuja lista de variações a rodada relê: em conta
     pronta, ativos, com vínculo vivo, e que a regra quer LIGADOS (para ligar,
@@ -1013,9 +1022,17 @@ def _escolher_modelos(
     impede (apagada na Shopee, o anúncio volta a poder ter Flex). Lista nunca
     lida, mais velha que `_MODELOS_VALIDADE` (na aprovação,
     `_MODELOS_FRESCO_LIGAR`) ou atrasada em relação à importação. O resto não
-    gasta chamada. Nunca lidos primeiro, depois os atrasados e os mais
-    velhos."""
-    validade = _MODELOS_FRESCO_LIGAR if alvo is not None else _MODELOS_VALIDADE
+    gasta chamada.
+
+    `fresco` ("Sincronizar agora"): a validade é a de antes de ligar — quem
+    apagou a variação na Shopee vê o anúncio liberado na hora.
+
+    Leitura que falhou espera mais a cada falha (`_espera`) e vai para o fim
+    da fila — a não ser na aprovação e no "Sincronizar agora". Nunca lidos
+    primeiro, depois os atrasados e os mais velhos; as contas intercaladas
+    (`_rodizio`): uma loja com problema não toma a vez das outras."""
+    pedido = alvo is not None or fresco
+    validade = _MODELOS_FRESCO_LIGAR if pedido else _MODELOS_VALIDADE
     out: list[Anuncio] = []
     for a in anuncios:
         if a.plataforma != flex_envio.PLATAFORMA_SHOPEE or a.bloqueio or not a.cobertas:
@@ -1026,6 +1043,13 @@ def _escolher_modelos(
             continue
         velha = a.modelos_em is None or a.modelos_em < agora - validade
         if not (velha or a.modelos_atrasados):
+            continue
+        if (
+            not pedido
+            and a.modelos_falhas > 0
+            and a.modelos_tentativa_em is not None
+            and a.modelos_tentativa_em > agora - _espera(a.modelos_falhas)
+        ):
             continue
         d = decisoes.get(a.chave)
         quer = d is not None and d.desejado == LIGADO
@@ -1038,6 +1062,7 @@ def _escolher_modelos(
             out.append(a)
     out.sort(
         key=lambda a: (
+            a.modelos_falhas > 0,
             a.modelos_em is not None,
             not a.modelos_atrasados,
             a.modelos_em or agora,
@@ -1045,7 +1070,7 @@ def _escolher_modelos(
             a.external_id,
         )
     )
-    return out
+    return _rodizio(out)
 
 
 async def _pedir_modelos(
@@ -1272,6 +1297,8 @@ class _Estado:
     # A lista inteira de variações da Shopee (16/11/2026); None = nunca lida.
     modelos: tuple[ModeloShopee, ...] | None = None
     modelos_em: datetime | None = None
+    modelos_falhas: int = 0
+    modelos_tentativa_em: datetime | None = None
 
 
 async def _fotos_dos_estados(
@@ -1306,6 +1333,8 @@ async def _fotos_dos_estados(
             ligado_pelo_davinci=(e.integration_id, e.external_id) in nossos,
             modelos=_modelos_do_json(e.modelos),
             modelos_em=e.modelos_em,
+            modelos_falhas=int(e.modelos_falhas or 0),
+            modelos_tentativa_em=e.modelos_tentativa_em,
         )
         for e in linhas
     }
@@ -1412,6 +1441,11 @@ def _com_estado(
                 # A lista inteira de variações da Shopee (16/11/2026): sem ela
                 # a regra só via o último modelo que a importação gravou.
                 a = _com_modelos(a, e.modelos, e.modelos_em)
+            a = replace(
+                a,
+                modelos_falhas=e.modelos_falhas,
+                modelos_tentativa_em=e.modelos_tentativa_em,
+            )
         out.append(a)
     for chave, e in estados.items():
         if chave in vistos:
@@ -2184,35 +2218,50 @@ async def _ler_modelos(
     resumo: dict,
     *,
     prazo: float | None = None,
-) -> dict[tuple[UUID, str], tuple[ModeloShopee, ...]]:
+) -> tuple[dict[tuple[UUID, str], tuple[ModeloShopee, ...]], set[tuple[UUID, str]]]:
     """A lista inteira de variações (`get_model_list`) dos anúncios da Shopee
-    escolhidos (`_escolher_modelos`), até o teto ou o `prazo`; o resto fica
-    para a próxima rodada. Só LEITURA. A conta que falha
-    `_MODELOS_FALHAS_SEGUIDAS` vezes seguidas para nesta rodada."""
+    escolhidos (`_escolher_modelos`), até `_TETO_MODELOS_SHOPEE` CHAMADAS ou o
+    `prazo`; o resto fica para a próxima rodada. Só LEITURA. Devolve (as
+    listas lidas, os anúncios cuja leitura falhou — vão para a espera).
+
+    A conta que falha `_MODELOS_FALHAS_SEGUIDAS` vezes seguidas (ou sem
+    cliente) para nesta rodada SEM gastar vaga: as vagas vão para as outras."""
     out: dict[tuple[UUID, str], tuple[ModeloShopee, ...]] = {}
-    falhas: Counter[UUID] = Counter()
+    falhou: set[tuple[UUID, str]] = set()
+    seguidas: Counter[UUID] = Counter()
+    paradas: set[UUID] = set()
+    chamadas = 0
     for i, a in enumerate(escolhidos):
-        if i >= _TETO_MODELOS_SHOPEE or (prazo is not None and time.monotonic() >= prazo):
-            resumo["modelos_adiados"] = resumo.get("modelos_adiados", 0) + len(escolhidos) - i
-            break
         iid = a.integration_id
-        if falhas[iid] >= _MODELOS_FALHAS_SEGUIDAS:
+        if iid in paradas:
             continue
+        if chamadas >= _TETO_MODELOS_SHOPEE or (
+            prazo is not None and time.monotonic() >= prazo
+        ):
+            resto = sum(1 for x in escolhidos[i:] if x.integration_id not in paradas)
+            resumo["modelos_adiados"] = resumo.get("modelos_adiados", 0) + resto
+            break
         integ = integracoes.get(iid)
         cli = await _cliente(integ, clientes) if integ is not None else None
         if cli is None:
+            paradas.add(iid)
             continue
+        chamadas += 1
         lista = await _pedir_modelos(cli, a.external_id, a.cobertas)
         if lista is None:
-            falhas[iid] += 1
+            falhou.add(a.chave)
+            seguidas[iid] += 1
             resumo["modelos_falhas"] = resumo.get("modelos_falhas", 0) + 1
+            if seguidas[iid] >= _MODELOS_FALHAS_SEGUIDAS:
+                paradas.add(iid)
+                resumo["modelos_contas_paradas"] = resumo.get("modelos_contas_paradas", 0) + 1
             continue
-        falhas[iid] = 0
+        seguidas[iid] = 0
         out[a.chave] = lista
         resumo["modelos_lidos"] = resumo.get("modelos_lidos", 0) + 1
         if _FOLGA_MODELOS_S > 0:
             await asyncio.sleep(_FOLGA_MODELOS_S)
-    return out
+    return out, falhou
 
 
 # =============================================================================
@@ -2277,12 +2326,14 @@ async def _gravar(
     so_desligar: bool,
     resumo: dict,
     modelos_lidos: Mapping[tuple[UUID, str], tuple[ModeloShopee, ...]] | None = None,
+    modelos_falhou: Collection[tuple[UUID, str]] = (),
 ) -> list[_Acao]:
     """Grava desejado/observado/aprovação de cada anúncio avaliado e devolve
     as escritas que a rodada pode fazer. Só a MUDANÇA vira linha no log
     (decidir, ler, pedir_aprovacao) — a rodada de 15 em 15 min não enche a
     trilha com a mesma decisão. `modelos_lidos`: as listas inteiras de
-    variações da Shopee lidas nesta rodada (vão para o estado)."""
+    variações da Shopee lidas nesta rodada (vão para o estado);
+    `modelos_falhou`: as leituras que falharam (espera crescente)."""
     lista = [a for a in anuncios if alvo is None or a.chave in alvo]
     if not lista:
         return []
@@ -2320,8 +2371,10 @@ async def _gravar(
             mudou_algo = novo
             modelos = (modelos_lidos or {}).get(a.chave)
             if modelos is not None:
-                est.modelos = _modelos_para_json(modelos)
-                est.modelos_em = agora
+                _guardar_modelos(est, modelos, agora)
+                mudou_algo = True
+            elif a.chave in modelos_falhou:
+                _falha_modelos(est, agora)
                 mudou_algo = True
 
             lido = leituras.get(a.chave)
@@ -2813,6 +2866,20 @@ async def _conferir_no_bling(session: AsyncSession, skus_sp: Collection[str]) ->
     return None
 
 
+def _guardar_modelos(
+    est: FlexAnuncioEstado, modelos: Iterable[ModeloShopee], agora: datetime
+) -> None:
+    est.modelos = _modelos_para_json(modelos)
+    est.modelos_em = agora
+    est.modelos_tentativa_em = agora
+    est.modelos_falhas = 0
+
+
+def _falha_modelos(est: FlexAnuncioEstado, agora: datetime) -> None:
+    est.modelos_tentativa_em = agora
+    est.modelos_falhas = int(est.modelos_falhas or 0) + 1
+
+
 async def _refs_dos_vinculos(
     session: AsyncSession, integration_id: UUID, external_id: str
 ) -> tuple[set[str], set[str]]:
@@ -2866,9 +2933,9 @@ async def _conferir_modelos(
     if lista is None:
         lista = await _pedir_modelos(cliente, est.external_id, vivas)
         if lista is None:
+            _falha_modelos(est, agora)
             return flex_api.REPETIR, MOTIVO_SEM_MODELOS
-        est.modelos = _modelos_para_json(lista)
-        est.modelos_em = agora
+        _guardar_modelos(est, lista, agora)
     for ref, sku, _estoque in lista:
         if ref in vivas:
             continue
@@ -3000,7 +3067,11 @@ async def _escrever(
                     _log(
                         acao=acao,
                         modo=modo,
-                        resultado="erro",
+                        # Barrado ANTES de chamar a Shopee: "ignorado", não
+                        # "erro" — o "ligar/erro" conta como escrita que pode
+                        # ter valido (`_nosso_pela_trilha`) e daria a histerese
+                        # ao Flex que alguém ligar por fora logo depois.
+                        resultado=_BARRADO_ANTES,
                         integration_id=integration_id,
                         external_id=external_id,
                         plataforma=plataforma,
@@ -3023,7 +3094,7 @@ async def _escrever(
                     _log(
                         acao=acao,
                         modo=modo,
-                        resultado="erro",
+                        resultado=_BARRADO_ANTES,  # não chamou a plataforma
                         integration_id=integration_id,
                         external_id=external_id,
                         plataforma=plataforma,
@@ -3359,10 +3430,13 @@ async def _rodada(
     # (16/11/2026): a importação guarda um modelo só, e a variação sem vínculo
     # aparecia e sumia — o robô desligava e religava o mesmo anúncio.
     modelos_lidos: dict[tuple[UUID, str], tuple[ModeloShopee, ...]] = {}
+    modelos_falhou: set[tuple[UUID, str]] = set()
     if ler:
-        para_modelos = _escolher_modelos(anuncios, decisoes, saldos, cfg, alvo, agora)
+        para_modelos = _escolher_modelos(
+            anuncios, decisoes, saldos, cfg, alvo, agora, fresco=reler_contas
+        )
         if para_modelos:
-            modelos_lidos = await _ler_modelos(
+            modelos_lidos, modelos_falhou = await _ler_modelos(
                 para_modelos, integracoes, clientes, resumo, prazo=prazo
             )
             if modelos_lidos:
@@ -3385,6 +3459,7 @@ async def _rodada(
         so_desligar=so_desligar,
         resumo=resumo,
         modelos_lidos=modelos_lidos,
+        modelos_falhou=modelos_falhou,
     )
     # LIGAR só na conta cuja assinatura (e origem) foi relida AGORA: a
     # aprovação que chegou no meio da rodada, ou a releitura que falhou,
