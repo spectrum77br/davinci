@@ -6505,7 +6505,7 @@ async def _turnos_das_lojas(
 
 # A hora do "Não precisa de resposta" que a PESSOA marcou (ISO UTC, a sessão da Caixa grava no
 # PATCH; o "Precisa de resposta" apaga; a IA não grava) — 16/11/2026.
-CHAVE_SEM_RESPOSTA_EM = "sem_resposta_em"
+CHAVE_SEM_RESPOSTA_EM = gravar.CHAVE_SEM_RESPOSTA_EM  # a mesma chave que o PATCH grava
 
 
 def _contar_resposta(
