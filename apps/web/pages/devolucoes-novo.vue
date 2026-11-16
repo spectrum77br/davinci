@@ -497,6 +497,11 @@ const aberturaDoPedido = computed(
 const SITUACOES_QUE_LANCAM = ['83957', '83960', '83961', '83966', '84677', '545902']
 const podeLancar = computed(() => SITUACOES_QUE_LANCAM.includes(pedidoItem.value?.situacao_bling_id || ''))
 const rascunho = reactive({ observacao: '', rastreio: '', localizacao: '', desde: '' })
+// O que estava nos campos quando a janela abriu. Só vai pro servidor o campo
+// que a PESSOA mudou: rastreio e localização mostram o valor AUTOMÁTICO, e
+// gravar esse valor sem ninguém ter mexido o transformaria em "digitado à
+// mão" (que passa a valer mais que o automático dali em diante).
+const original = reactive({ observacao: '', rastreio: '', localizacao: '', desde: '' })
 const salvando = ref('')
 const videoMotivo = ref('')
 const videoApagando = ref(false)
@@ -515,10 +520,10 @@ function abrirJanela(i: Item) {
 }
 function carregarRascunho() {
   const p = pedidoItem.value
-  rascunho.observacao = p?.observacao || ''
-  rascunho.rastreio = p?.rastreio || ''
-  rascunho.localizacao = p?.localizacao || ''
-  rascunho.desde = p?.aguardando_devolucao_data || ''
+  rascunho.observacao = original.observacao = p?.observacao || ''
+  rascunho.rastreio = original.rastreio = p?.rastreio || ''
+  rascunho.localizacao = original.localizacao = p?.localizacao || ''
+  rascunho.desde = original.desde = p?.aguardando_devolucao_data || ''
 }
 // Fechar (X, Esc, clique fora) salva o que ficou digitado: tirar o campo da
 // tela com Esc não dispara o "saiu do campo", e o texto se perderia.
@@ -531,8 +536,9 @@ function salvarPendentes() {
   if (!p?.pedido_bling || !canEdit.value) return
   const body: Record<string, string> = {}
   for (const campo of ['observacao', 'rastreio', 'localizacao'] as const) {
+    if (rascunho[campo] === original[campo]) continue
     const novo = rascunho[campo].trim()
-    if (novo !== (p[campo] || '')) body[campo] = novo
+    if (novo !== original[campo].trim()) body[campo] = novo
   }
   if (!Object.keys(body).length) return
   const pedido = p.pedido_bling
@@ -575,9 +581,9 @@ function acao(chave: string, titulo: string, fn: () => Promise<unknown>, ok?: st
 function salvarCampo(campo: 'observacao' | 'rastreio' | 'localizacao' | 'desde') {
   const p = pedidoItem.value
   if (!p?.pedido_bling || !canEdit.value) return
+  if (rascunho[campo] === original[campo]) return
   const novo = rascunho[campo].trim()
-  const atual = campo === 'desde' ? (p.aguardando_devolucao_data || '') : (p[campo] || '')
-  if (novo === atual) return
+  if (novo === original[campo].trim()) return
   const body = campo === 'desde' ? { em_devolucao_desde: novo || null } : { [campo]: novo }
   void acao(campo, 'Não salvou', () =>
     api(`/api/devolutions/acompanhamento/${encodeURIComponent(p.pedido_bling!)}`, { method: 'PATCH', body }),
