@@ -601,3 +601,49 @@ class LogisticaExportIn(BaseModel):
     aba: str = Field(max_length=60)
     colunas: list[ExportColunaIn] = Field(min_length=1, max_length=40)
     linhas: list[list[str | None]] = Field(max_length=50_000)
+
+
+class FlexNaoEntregueAvisoOut(BaseModel):
+    """Um aviso anterior deste botão no pedido (nota no histórico do chamado)."""
+
+    em: datetime
+    texto: str
+
+
+class FlexNaoEntreguePreviewOut(BaseModel):
+    """Janela do botão "Não conseguiu entregar" (aba Flex, 16/11/2026): os
+    textos prontos (editáveis), o que o Tracken disse e o que vai acontecer
+    com o chamado do pedido."""
+
+    plataforma: Literal["ml", "shopee"]
+    plataforma_label: str
+    canal_mensagem: str
+    # Mercado Livre: até 350 letras na mensagem ao cliente. Shopee: None.
+    limite_cliente: int | None = None
+    cliente_nome: str | None = None
+    motivo: str | None = None
+    tentativa_em: datetime | None = None
+    tentativas: int = 0
+    texto_chamado: str
+    texto_cliente: str
+    # "aberto" (chamado novo do botão, ou abertura de novo) · "acrescentado"
+    # (abertura do ML ainda na fila ganha a novidade) · "instrucao" (vai como
+    # instrução pra IA, no chamado que o botão já abriu).
+    chamado_acao: Literal["aberto", "acrescentado", "instrucao"]
+    chamado_id: UUID | None = None
+    avisos: list[FlexNaoEntregueAvisoOut] = Field(default_factory=list)
+
+
+class FlexNaoEntregueIn(BaseModel):
+    texto_chamado: str = Field(min_length=1, max_length=4000)
+    texto_cliente: str = Field(default="", max_length=4000)
+    mandar_mensagem: bool = True
+
+
+class FlexNaoEntregueOut(BaseModel):
+    linha: LogisticaOut
+    chamado_id: UUID
+    chamado_acao: Literal["aberto", "acrescentado", "instrucao"]
+    # enviada · falhou · incerta (sem confirmação) · nao_pedida
+    mensagem_status: Literal["enviada", "falhou", "incerta", "nao_pedida"]
+    mensagem_erro: str | None = None

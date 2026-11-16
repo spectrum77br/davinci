@@ -53,6 +53,10 @@ from app.schemas.logistica import (
     ChamadoAbaOut,
     EnviarThreemaIn,
     EnviarThreemaOut,
+    FlexNaoEntregueAvisoOut,
+    FlexNaoEntregueIn,
+    FlexNaoEntregueOut,
+    FlexNaoEntreguePreviewOut,
     LogisticaCreate,
     LogisticaExportIn,
     LogisticaOut,
@@ -95,6 +99,7 @@ from app.schemas.logistica import (
     ThreemaDestinatarioOut,
 )
 from app.services import (
+    flex_nao_entregue,
     logistica_amazon,
     logistica_amazon_bling,
     logistica_amazon_canal,
@@ -334,6 +339,7 @@ def _to_out(
     chamado_aba: ChamadoAbaOut | None = None,
     volta: DevolucaoRastreio | None = None,
     tracken_linha: LogisticaTracken | None = None,
+    cliente_bling: str | None = None,
 ) -> LogisticaOut:
     """`rules` = candidatas da aba Status que casam a chave deste pedido (máquina
     de estados). A regra ATIVA (desambiguada pela situação atual do Bling) alimenta
@@ -380,7 +386,9 @@ def _to_out(
         entregue_em=c.entregue_em,
         problema_correios=c.problema_correios,
         **_volta_campos(volta),
-        cliente_nome=c.cliente_nome,
+        # Aba Flex (16/11/2026): sem o nome gravado na linha (só a Amazon grava),
+        # vale o destinatário do pedido no Bling — só para mostrar.
+        cliente_nome=c.cliente_nome or cliente_bling,
         cliente_email=c.cliente_email,
         bling_enriquecido_em=c.bling_enriquecido_em,
         aviso_previsao_correios_at=c.aviso_previsao_correios_at,
@@ -441,6 +449,31 @@ async def _trackens_map(
         select(LogisticaTracken).where(LogisticaTracken.logistica_id.in_(ids))
     )
     return {t.logistica_id: t for t in res.scalars().all()}
+
+
+async def _nomes_bling_map(
+    session: AsyncSession, rows: Sequence[Logistica]
+) -> dict[str, str]:
+    """Coluna "Cliente" da aba Flex (Vinicius, 16/11/2026): o destinatário do
+    pedido no Bling (espelho; uma linha por item — vale o primeiro nome
+    preenchido), para os pedidos Flex sem o nome gravado. Só quem vê o Flex."""
+    numeros = {
+        (c.pedido_bling or "").strip()
+        for c in rows
+        if c.envio_flex is True and not (c.cliente_nome or "").strip()
+    } - {""}
+    if not numeros or not _ver_flex.get():
+        return {}
+    res = await session.execute(
+        select(BlingOrder.numero, func.min(BlingOrder.nome_destinatario))
+        .where(
+            BlingOrder.numero.in_(sorted(numeros)),
+            BlingOrder.nome_destinatario.is_not(None),
+            BlingOrder.nome_destinatario != "",
+        )
+        .group_by(BlingOrder.numero)
+    )
+    return {str(n): str(nome).strip() for n, nome in res.all() if n and nome}
 
 
 async def _match_rules(session: AsyncSession, c: Logistica) -> list[LogisticaStatus]:
@@ -1007,6 +1040,8 @@ async def list_logistica(
     voltas_map = await _voltas_map(session, {c.pedido_bling or "" for c in rows})
     # Coluna "Tracken" (aba Flex): a transportadora do Flex.
     trackens_map = await _trackens_map(session, rows)
+    # Coluna "Cliente" da aba Flex: o destinatário do pedido no Bling.
+    nomes_bling = await _nomes_bling_map(session, rows)
     out: list[LogisticaOut] = []
     for c in rows:
         assinatura = logistica_rules.assinatura_para(c.plataforma, c.meli_status or {})
@@ -1025,6 +1060,7 @@ async def list_logistica(
                 chamado_aba=chamados_map.get(c.pedido_bling or ""),
                 volta=voltas_map.get(c.pedido_bling or ""),
                 tracken_linha=trackens_map.get(c.id),
+                cliente_bling=nomes_bling.get((c.pedido_bling or "").strip()),
             )
         )
     return out
@@ -1831,6 +1867,131 @@ async def enviar_chamado(
         mensagens=await _mensagens_for(session, c),
         chamado_aba=await _chamado_aba_for(session, c),
         volta=await _volta_for(session, c),
+    )
+
+
+async def _linha_flex_nao_entregue(
+    session: AsyncSession, logistica_id: UUID, user: User, *, travar: bool = False
+) -> tuple[Logistica, str]:
+    """A linha do botão "Não conseguiu entregar": só quem vê o Flex, só pedido
+    Flex do Mercado Livre ou da Shopee. `travar`: FOR UPDATE até o 1º commit —
+    dois cliques ao mesmo tempo no pedido viram um (o 2º vê a nota do 1º)."""
+    _so_quem_ve_flex(user)
+    stmt = select(Logistica).where(Logistica.id == logistica_id)
+    if travar:
+        stmt = stmt.with_for_update()
+    c = (await session.execute(stmt)).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(404, detail={"code": "logistica_not_found"})
+    plataforma = flex_nao_entregue.plataforma_de(c)
+    if plataforma is None:
+        raise HTTPException(422, detail={"code": "nao_e_flex"})
+    return c, plataforma
+
+
+async def _nome_bling_da_linha(session: AsyncSession, c: Logistica) -> str | None:
+    return (c.cliente_nome or "").strip() or (await _nomes_bling_map(session, [c])).get(
+        (c.pedido_bling or "").strip()
+    )
+
+
+@router.get(
+    "/{logistica_id}/flex-nao-entregue",
+    response_model=FlexNaoEntreguePreviewOut,
+    dependencies=_DA_EQUIPE,
+)
+async def flex_nao_entregue_preview(
+    logistica_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> FlexNaoEntreguePreviewOut:
+    """Botão "Não conseguiu entregar" da aba Flex (Vinicius, 16/11/2026): os
+    textos prontos do chamado e da mensagem ao cliente, com o motivo e a hora
+    do Tracken, e o que vai acontecer com o chamado do pedido. Não grava nada."""
+    c, plataforma = await _linha_flex_nao_entregue(session, logistica_id, user)
+    tk = await session.get(LogisticaTracken, c.id)
+    dados = flex_nao_entregue.preview_dados(
+        c, plataforma, tk, await _nome_bling_da_linha(session, c), datetime.now(UTC)
+    )
+    ch, acao = await flex_nao_entregue.como_vai_o_chamado(session, c, plataforma)
+    avisos = await flex_nao_entregue.avisos_anteriores(session, c)
+    return FlexNaoEntreguePreviewOut(
+        **dados,
+        chamado_acao=acao,
+        chamado_id=ch.id if ch is not None else None,
+        avisos=[FlexNaoEntregueAvisoOut(em=m.created_at, texto=m.texto or "") for m in avisos],
+    )
+
+
+@router.post(
+    "/{logistica_id}/flex-nao-entregue",
+    response_model=FlexNaoEntregueOut,
+    dependencies=_DA_EQUIPE,
+)
+async def flex_nao_entregue_enviar(
+    logistica_id: UUID,
+    body: FlexNaoEntregueIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("logistica", "edit"))],
+) -> FlexNaoEntregueOut:
+    """Abre o chamado na loja (aba Chamados → IA de Chamado) e, se pedido, manda
+    a mensagem ao cliente pelo canal da plataforma. O chamado e a nota do clique
+    ("enviando…") são gravados ANTES da mensagem sair, com a linha travada: se a
+    mensagem falhar, o chamado fica e a falha é anotada nele (a pessoa manda à
+    mão); outro clique no pedido nos próximos minutos é 409. Ver
+    services/flex_nao_entregue."""
+    c, plataforma = await _linha_flex_nao_entregue(session, logistica_id, user, travar=True)
+    texto_cliente = body.texto_cliente
+    if plataforma == flex_nao_entregue.PLAT_ML:
+        texto_cliente = flex_nao_entregue.normalizar_ml(texto_cliente)
+    try:
+        flex_nao_entregue.validar(
+            plataforma, body.texto_chamado, texto_cliente, body.mandar_mensagem
+        )
+        await flex_nao_entregue.recusar_repetido(session, c, datetime.now(UTC))
+        ch, acao = await flex_nao_entregue.registrar_chamado(
+            session, c, plataforma, body.texto_chamado, user
+        )
+    except flex_nao_entregue.FlexNaoEntregueError as e:
+        await session.rollback()
+        status_http = 409 if e.code == "acabou_de_avisar" else 422
+        extra = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in e.extra.items()}
+        raise HTTPException(status_http, detail={"code": e.code, **extra}) from e
+    nota = flex_nao_entregue.nota_enviando(
+        ch, acao=acao, user=user, mandar=body.mandar_mensagem
+    )
+    session.add(nota)
+    await session.commit()
+
+    status_msg, erro_msg = flex_nao_entregue.MENSAGEM_NAO_PEDIDA, None
+    if body.mandar_mensagem:
+        status_msg, erro_msg = await flex_nao_entregue.mandar_mensagem(
+            session, c, plataforma, texto_cliente
+        )
+        flex_nao_entregue.completar_nota(
+            nota,
+            plataforma=plataforma,
+            mensagem_status=status_msg,
+            mensagem_erro=erro_msg,
+            texto_cliente=texto_cliente,
+        )
+        await session.commit()
+    await session.refresh(c)
+    return FlexNaoEntregueOut(
+        linha=_to_out(
+            c,
+            await _match_rules(session, c),
+            produtos=await _produtos_for(session, c),
+            mensagens=await _mensagens_for(session, c),
+            chamado_aba=await _chamado_aba_for(session, c),
+            volta=await _volta_for(session, c),
+            tracken_linha=await session.get(LogisticaTracken, c.id),
+            cliente_bling=await _nome_bling_da_linha(session, c),
+        ),
+        chamado_id=ch.id,
+        chamado_acao=acao,
+        mensagem_status=status_msg,
+        mensagem_erro=erro_msg,
     )
 
 

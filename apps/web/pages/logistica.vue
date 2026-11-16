@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine, Download, Truck } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine, Download, Truck, PackageX } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
 definePageMeta({
@@ -494,12 +494,14 @@ type TrackenInfo = {
   lido_em: string | null
   erro: string | null
 }
-// Resposta de uma ação na linha (status, chamado…) não traz o Tracken: fica o
-// que a linha já tinha.
+// Resposta de uma ação na linha (status, chamado…) não traz o Tracken nem o
+// nome do cliente que veio do Bling (coluna Cliente da aba Flex): fica o que a
+// linha já tinha.
 function comTracken(nova: Logistica, velha: Logistica | undefined): Logistica {
-  return nova.tracken === undefined || (nova.tracken === null && velha?.tracken)
+  const out = nova.tracken === undefined || (nova.tracken === null && velha?.tracken)
     ? { ...nova, tracken: velha?.tracken ?? null }
     : nova
+  return !out.cliente_nome && velha?.cliente_nome ? { ...out, cliente_nome: velha.cliente_nome } : out
 }
 function trackenCor(c: Logistica): string {
   const t = c.tracken
@@ -958,6 +960,7 @@ function excelColunas(): ExcelColuna[] {
   // Aba Amazon: DBA e Envio próprio juntos — coluna Envio e as do Envio próprio
   // (no DBA elas saem vazias, como o "—" da tela).
   const amazon = tab.value === 'amazon'
+  const flex = tab.value === 'flex'
   const cols: ExcelColuna[] = [
     { titulo: 'Data', tipo: 'data', valor: (c) => c.data },
     ...(amazon ? [{ titulo: 'Envio', valor: (c: Logistica) => AMAZON_ENVIO_LABEL[amazonSubDe(c)] }] : []),
@@ -971,6 +974,8 @@ function excelColunas(): ExcelColuna[] {
     },
     { titulo: 'SKU', valor: (c) => emLinhas(...(c.produtos || []).map((p) => p.sku || '—')) },
     { titulo: 'Conta', valor: (c) => c.conta },
+    // Aba Flex (16/11/2026): Cliente depois da Conta e sem Localização, como na tabela.
+    ...(flex ? [{ titulo: 'Cliente', valor: (c: Logistica) => c.cliente_nome }] : []),
     { titulo: 'Status Plataforma', valor: (c) => assinatura(c) },
     {
       // A data que aparece embaixo da chave (sem o "há X", que envelhece no arquivo).
@@ -981,10 +986,12 @@ function excelColunas(): ExcelColuna[] {
       },
     },
     { titulo: 'Rastreio', valor: (c) => c.rastreio },
-    {
-      titulo: 'Localização',
-      valor: (c) => (proprioSemRastreio(c) && c.localizacao ? `Destino: ${c.localizacao}` : c.localizacao),
-    },
+    ...(flex
+      ? []
+      : [{
+          titulo: 'Localização',
+          valor: (c: Logistica) => (proprioSemRastreio(c) && c.localizacao ? `Destino: ${c.localizacao}` : c.localizacao),
+        }]),
     { titulo: 'Devolução (volta)', valor: (c) => voltaTexto(c) },
   ]
   if (amazon) {
@@ -2482,6 +2489,154 @@ async function enviarChamado(c: Logistica) {
   }
 }
 
+// ---- Botão "Não conseguiu entregar" (aba Flex, Vinicius 16/11/2026) ----
+// Abre o chamado na loja (aba Chamados → a IA de Chamado abre no ML pelo Fale
+// conosco; na Shopee vai com instrução pra ela abrir pelo Assistente do
+// Vendedor) e manda a mensagem ao cliente (chat da Shopee / pós-venda do ML).
+// A pessoa confere e edita os dois textos antes; nada sai sozinho.
+type FlexNaoEntreguePreview = {
+  plataforma: 'ml' | 'shopee'
+  plataforma_label: string
+  canal_mensagem: string
+  limite_cliente: number | null
+  cliente_nome: string | null
+  motivo: string | null
+  tentativa_em: string | null
+  tentativas: number
+  texto_chamado: string
+  texto_cliente: string
+  chamado_acao: 'aberto' | 'acrescentado' | 'instrucao'
+  chamado_id: string | null
+  avisos: Array<{ em: string; texto: string }>
+}
+type FlexNaoEntregueResposta = {
+  linha: Logistica
+  chamado_id: string
+  chamado_acao: 'aberto' | 'acrescentado' | 'instrucao'
+  mensagem_status: 'enviada' | 'falhou' | 'incerta' | 'nao_pedida'
+  mensagem_erro: string | null
+}
+const FLEX_NAO_ENTREGUE_ERROS: Record<string, string> = {
+  nao_e_flex: 'Este pedido não é Flex do Mercado Livre ou da Shopee.',
+  sem_texto_chamado: 'Escreva o texto do chamado.',
+  sem_texto_cliente: 'Escreva a mensagem ao cliente (ou desmarque o envio).',
+  texto_grande_demais: 'Texto grande demais.',
+  texto_cliente_ml_grande: 'No Mercado Livre a mensagem ao cliente tem no máximo 350 letras.',
+  texto_cliente_ml_caractere: 'O Mercado Livre não aceita emoji e alguns símbolos na mensagem ao cliente.',
+}
+const naoEntregue = reactive({
+  open: false,
+  linha: null as Logistica | null,
+  carregando: false,
+  enviando: false,
+  erro: '' as string,
+  preview: null as FlexNaoEntreguePreview | null,
+  textoChamado: '',
+  textoCliente: '',
+  mandarMensagem: true,
+})
+// Pedido que o Tracken já deu como entregue não mostra o botão.
+function podeNaoEntregue(c: Logistica): boolean {
+  return canEdit.value && podeVerFlex.value && c.envio_flex === true && (isMl(c) || isShopee(c)) && !!c.pedido_marketplace && !c.tracken?.entregue_em
+}
+// Só os caracteres que a mensagem pós-venda do ML aceita (ISO-8859-1). Travessão,
+// aspas curvas e reticências o servidor troca pelos simples (normalizar_ml).
+const ML_TROCAS: Record<string, string> = {
+  '\u2014': '-', '\u2013': '-', '\u2012': '-', '\u2011': '-', '\u2010': '-', '\u2212': '-',
+  '\u201c': '"', '\u201d': '"', '\u201e': '"', '\u2018': "'", '\u2019': "'", '\u201a': "'",
+  '\u2026': '...', '\u2022': '-', '\u200b': '', '\u202f': ' ',
+}
+function normalizarMl(t: string): string {
+  return [...t].map((ch) => ML_TROCAS[ch] ?? ch).join('')
+}
+function soLatin1(t: string): boolean {
+  return [...t].every((ch) => (ch.codePointAt(0) || 0) <= 0xff)
+}
+const naoEntregueClienteTexto = computed(() =>
+  naoEntregue.preview?.plataforma === 'ml' ? normalizarMl(naoEntregue.textoCliente).trim() : naoEntregue.textoCliente.trim(),
+)
+function fecharNaoEntregue() {
+  if (!naoEntregue.enviando) naoEntregue.open = false
+}
+const naoEntregueClienteErro = computed(() => {
+  const p = naoEntregue.preview
+  if (!p || !naoEntregue.mandarMensagem) return ''
+  const t = naoEntregueClienteTexto.value
+  if (!t) return 'Escreva a mensagem ao cliente (ou desmarque o envio).'
+  if (p.limite_cliente && t.length > p.limite_cliente) return `No Mercado Livre a mensagem tem no máximo ${p.limite_cliente} letras.`
+  if (p.plataforma === 'ml' && !soLatin1(t)) return 'O Mercado Livre não aceita emoji e alguns símbolos.'
+  return ''
+})
+const NAO_ENTREGUE_CHAMADO_COMO: Record<FlexNaoEntreguePreview['chamado_acao'], (p: FlexNaoEntreguePreview) => string> = {
+  aberto: (p) =>
+    p.plataforma === 'ml'
+      ? 'O chamado entra na aba Chamados e a IA de Chamado abre no Mercado Livre pelo Fale conosco.'
+      : 'O chamado entra na aba Chamados e vai com uma instrução para a IA de Chamado abrir na Shopee pelo Assistente do Vendedor.',
+  acrescentado: () =>
+    'Este pedido já tem um chamado esperando a IA abrir no Mercado Livre: o texto abaixo entra no fim da abertura.',
+  instrucao: (p) =>
+    `Este pedido já tem o chamado deste botão: o texto abaixo vai como instrução para a IA de Chamado levar à ${p.plataforma_label} no mesmo atendimento (ou abrir, se ainda não abriu).`,
+}
+async function abrirNaoEntregue(c: Logistica) {
+  Object.assign(naoEntregue, {
+    open: true,
+    linha: c,
+    carregando: true,
+    enviando: false,
+    erro: '',
+    preview: null,
+    textoChamado: '',
+    textoCliente: '',
+    mandarMensagem: true,
+  })
+  try {
+    const p = await api<FlexNaoEntreguePreview>(`/api/logistica/${c.id}/flex-nao-entregue`)
+    if (naoEntregue.linha?.id !== c.id) return
+    naoEntregue.preview = p
+    naoEntregue.textoChamado = p.texto_chamado
+    naoEntregue.textoCliente = p.texto_cliente
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    naoEntregue.erro = (code && FLEX_NAO_ENTREGUE_ERROS[code]) || code || e?.message || 'erro'
+  } finally {
+    naoEntregue.carregando = false
+  }
+}
+async function confirmarNaoEntregue() {
+  const c = naoEntregue.linha
+  const p = naoEntregue.preview
+  if (!c || !p || naoEntregue.enviando) return
+  if (!naoEntregue.textoChamado.trim() || naoEntregueClienteErro.value) return
+  naoEntregue.enviando = true
+  naoEntregue.erro = ''
+  try {
+    const r = await api<FlexNaoEntregueResposta>(`/api/logistica/${c.id}/flex-nao-entregue`, {
+      method: 'POST',
+      body: {
+        texto_chamado: naoEntregue.textoChamado,
+        texto_cliente: naoEntregue.mandarMensagem ? naoEntregue.textoCliente : '',
+        mandar_mensagem: naoEntregue.mandarMensagem,
+      },
+    })
+    const i = rows.value.findIndex((x) => x.id === c.id)
+    if (i >= 0) rows.value[i] = comTracken(r.linha, rows.value[i])
+    naoEntregue.open = false
+    const chamado = r.chamado_acao === 'aberto' ? 'Chamado aberto na aba Chamados' : 'Chamado do pedido atualizado'
+    if (r.mensagem_status === 'enviada') toasts.success(chamado, `Mensagem enviada ao cliente pelo ${p.canal_mensagem}.`)
+    else if (r.mensagem_status === 'nao_pedida') toasts.success(chamado, 'Sem mensagem ao cliente.')
+    else if (r.mensagem_status === 'incerta') toasts.error(`${chamado} · mensagem sem confirmação`, r.mensagem_erro || '')
+    else toasts.error(`${chamado} · a mensagem ao cliente NÃO saiu`, `${r.mensagem_erro || ''} — mande à mão.`)
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    naoEntregue.erro =
+      code === 'acabou_de_avisar'
+        ? `Este pedido acabou de ser avisado${e?.data?.detail?.em ? ` (${fmtDataHora(e.data.detail.em)})` : ''}. Confira na aba Chamados antes de mandar de novo — espere uns minutos.`
+        : (code && FLEX_NAO_ENTREGUE_ERROS[code]) || code || e?.message || 'erro'
+  } finally {
+    naoEntregue.enviando = false
+  }
+}
+
 const MENSAGEM_BLING_ERROS: Record<string, string> = {
   logistica_sem_mensagem_bling:
     'Sem regra na aba Status com Mensagem Bling que case com o Status Plataforma deste pedido.',
@@ -2961,17 +3116,19 @@ async function aplicarStatusBling(c: Logistica) {
             <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehAmazonTab ? 'min-w-[1680px]' : ehFlexTab ? 'min-w-[1680px]' : 'min-w-[1460px]'">
               <colgroup>
                 <col class="w-[46px]"><col v-if="ehAmazonTab" class="w-[96px]"><col class="w-[76px]"><col :class="ehAmazonTab ? 'w-[160px]' : 'w-[150px]'"><col :class="ehAmazonTab ? 'w-[70px]' : 'w-[84px]'">
-                <col class="w-[130px]"><col :class="ehAmazonTab ? 'w-[200px]' : 'w-[250px]'"><col :class="ehAmazonTab ? 'w-[140px]' : 'w-[190px]'"><col>
+                <!-- Aba Flex (16/11/2026): Cliente depois da Conta; sem Localização (quem diz onde está o pacote é o Tracken, que fica com a sobra). -->
+                <col v-if="ehFlexTab" class="w-[150px]">
+                <col class="w-[130px]"><col :class="ehAmazonTab ? 'w-[200px]' : 'w-[250px]'"><col :class="ehAmazonTab ? 'w-[140px]' : 'w-[190px]'"><col v-if="!ehFlexTab">
                 <template v-if="ehAmazonTab"><col class="w-[80px]"><col class="w-[92px]"></template>
                 <col :class="ehAmazonTab ? 'w-[100px]' : 'w-[104px]'">
-                <col v-if="ehFlexTab" class="w-[220px]">
+                <col v-if="ehFlexTab">
                 <col :class="ehAmazonTab ? 'w-[110px]' : 'w-[120px]'"><col :class="ehAmazonTab ? 'w-[80px]' : 'w-[84px]'">
                 <col v-if="ehAmazonTab" class="w-[100px]">
               </colgroup>
               <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th class="border-b px-1.5 py-1 text-center font-semibold" :colspan="ehAmazonTab ? 7 : 6">Pedido</th>
-                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 4 : 2">Plataforma</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" :colspan="ehAmazonTab ? 7 : ehFlexTab ? 7 : 6">Pedido</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 4 : ehFlexTab ? 1 : 2">Plataforma</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Bling</th>
                   <th v-if="ehFlexTab" class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600">Transportadora</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="ehAmazonTab ? 3 : 2">Caso</th>
@@ -2982,10 +3139,11 @@ async function aplicarStatusBling(c: Logistica) {
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido no Bling">Bling</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido na plataforma (um clique seleciona para copiar)">Nº na plataforma</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold">Conta</th>
+                  <th v-if="ehFlexTab" class="border-b px-1.5 py-1 text-left font-semibold" title="Nome do cliente (destinatário do pedido no Bling)">Cliente</th>
                   <th class="border-b px-1.5 py-1 text-left font-semibold" title="SKU da venda (o que saiu do estoque)">SKU</th>
                   <th class="border-b px-1.5 py-1 text-left font-semibold">Produto</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-left font-semibold dark:border-l-slate-600" title="Status na plataforma (passe o mouse para ver campo a campo e desde quando)">Status</th>
-                  <th class="border-b px-1.5 py-1 text-left font-semibold">Localização</th>
+                  <th v-if="!ehFlexTab" class="border-b px-1.5 py-1 text-left font-semibold">Localização</th>
                   <template v-if="ehAmazonTab">
                     <th class="border-b px-1.5 py-1 text-center font-semibold" title="Previsão de entrega da transportadora (objeto de postagem do Bling)">Previsão</th>
                     <th class="border-b px-1.5 py-1 text-center font-semibold" title="Data máxima de entrega da Amazon — depois dela a Amazon reembolsa o cliente">Entregar até</th>
@@ -3036,6 +3194,9 @@ async function aplicarStatusBling(c: Logistica) {
                     >Flex</span>
                     <div v-if="flexAlerta(c)" class="text-[10.5px] font-medium text-rose-700 dark:text-rose-400" :title="flexAlerta(c) || ''">sem peça em {{ flexLocal.cidade }}</div>
                   </td>
+                  <td v-if="ehFlexTab" class="px-1.5 py-1.5" :title="c.cliente_nome || undefined">
+                    <div class="line-clamp-2 break-words leading-tight">{{ c.cliente_nome || '—' }}</div>
+                  </td>
                   <td class="px-1.5 py-1.5 font-mono text-[10.5px]" :title="produtoTitulo(c)">
                     <template v-if="(c.produtos || []).length">
                       <div v-for="(p, k) in (c.produtos || []).slice(0, 3)" :key="k" class="truncate" :class="k ? 'mt-1' : ''">{{ p.sku || '—' }}</div>
@@ -3065,7 +3226,7 @@ async function aplicarStatusBling(c: Logistica) {
                     </div>
                     <div v-if="statusResumoData(c)" class="truncate text-[10px] text-muted-foreground">{{ statusResumoData(c) }}</div>
                   </td>
-                  <td class="px-1.5 py-1.5">
+                  <td v-if="!ehFlexTab" class="px-1.5 py-1.5">
                     <div
                       v-if="c.volta_localizacao"
                       class="break-words text-[11px] leading-tight"
@@ -3110,6 +3271,13 @@ async function aplicarStatusBling(c: Logistica) {
                     </template>
                     <span v-else-if="c.tracken" class="text-muted-foreground">{{ c.tracken.erro || 'ainda não está na transportadora' }}</span>
                     <span v-else class="text-muted-foreground">—</span>
+                    <!-- Sem a coluna Localização na aba Flex, o pacote de volta (devolução) aparece aqui. -->
+                    <div
+                      v-if="c.volta_localizacao"
+                      class="mt-0.5 break-words"
+                      :class="c.volta_grave ? 'font-semibold text-rose-700 dark:text-rose-400' : 'text-muted-foreground'"
+                      :title="voltaTitulo(c)"
+                    >↩ {{ c.volta_localizacao }}</div>
                   </td>
                   <td class="border-l border-l-slate-300 px-1.5 py-1.5 text-center text-[11px] dark:border-l-slate-600">
                     <span
@@ -3374,6 +3542,17 @@ async function aplicarStatusBling(c: Logistica) {
                 <div v-else-if="raioRow.tracken" class="text-muted-foreground">{{ raioRow.tracken.erro || 'A transportadora ainda não tem este pedido.' }}</div>
                 <div v-else class="text-muted-foreground">Ainda não consultado — a aba Flex consulta ao abrir e de 30 em 30 min, ou clique em Atualizar.</div>
                 <div v-if="raioRow.tracken?.lido_em" class="text-[10px] text-muted-foreground">conferido {{ fmtDataHora(raioRow.tracken.lido_em) }}</div>
+                <div v-if="podeNaoEntregue(raioRow)" class="mt-1.5">
+                  <button
+                    type="button"
+                    :class="[RAIO_BTN, raioRow.tracken?.tentativas ? 'border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-300' : '']"
+                    title="Abre o chamado na loja avisando que a transportadora não conseguiu entregar e manda mensagem ao cliente — você confere os dois textos antes"
+                    data-nao-entregue
+                    @click="abrirNaoEntregue(raioRow)"
+                  >
+                    <PackageX class="size-3" /> Não conseguiu entregar
+                  </button>
+                </div>
               </section>
 
               <section>
@@ -4298,6 +4477,66 @@ async function aplicarStatusBling(c: Logistica) {
             @click="confirmarJuntarRepetidas"
           >
             {{ juntarModal.saving ? 'Juntando…' : `Juntar ${juntarModal.grupos.length} grupo(s)` }}
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal: Não conseguiu entregar (aba Flex) -->
+    <div v-if="naoEntregue.open" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" data-nao-entregue-janela @click.self="fecharNaoEntregue">
+      <div class="max-h-[90vh] w-full max-w-xl space-y-3 overflow-y-auto rounded-lg border bg-background p-5 text-sm">
+        <div class="flex items-center">
+          <h2 class="text-lg font-semibold">Não conseguiu entregar · {{ naoEntregue.linha?.pedido_bling || naoEntregue.linha?.pedido_marketplace }}</h2>
+          <Button class="ml-auto" size="sm" variant="ghost" :disabled="naoEntregue.enviando" @click="fecharNaoEntregue">
+            <X class="size-4" />
+          </Button>
+        </div>
+        <div v-if="naoEntregue.carregando" class="py-6 text-center text-muted-foreground"><RefreshCw class="mr-1.5 inline size-4 animate-spin" /> preparando os textos…</div>
+        <template v-else-if="naoEntregue.preview">
+          <div class="rounded-md border bg-muted/40 px-3 py-2 text-xs">
+            <div><span class="text-muted-foreground">{{ naoEntregue.linha?.conta || '—' }} · {{ naoEntregue.preview.plataforma_label }} · cliente</span> <b>{{ naoEntregue.preview.cliente_nome || 'sem nome no Bling' }}</b></div>
+            <div v-if="naoEntregue.preview.motivo || naoEntregue.preview.tentativa_em">
+              <span class="text-muted-foreground">Tracken:&nbsp;</span>
+              <b class="text-rose-700 dark:text-rose-400">{{ naoEntregue.preview.motivo || 'tentativa sem entrega' }}</b>
+              <template v-if="naoEntregue.preview.tentativa_em"> · {{ fmtDataHora(naoEntregue.preview.tentativa_em) }}</template>
+              <template v-if="naoEntregue.preview.tentativas > 1"> · {{ naoEntregue.preview.tentativas }} tentativas</template>
+            </div>
+            <div v-else class="text-amber-700 dark:text-amber-400">O Tracken ainda não mostra tentativa sem entrega — confira o motivo e a hora no texto.</div>
+          </div>
+          <div v-if="naoEntregue.preview.avisos.length" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+            <div class="font-semibold">Já avisado antes:</div>
+            <div v-for="(a, k) in naoEntregue.preview.avisos" :key="k" class="mt-0.5 line-clamp-3 break-words">{{ fmtDataHora(a.em) }} · {{ a.texto }}</div>
+          </div>
+          <label class="block space-y-1">
+            <span class="font-semibold">Chamado na loja ({{ naoEntregue.preview.plataforma_label }})</span>
+            <span class="block text-xs text-muted-foreground">{{ NAO_ENTREGUE_CHAMADO_COMO[naoEntregue.preview.chamado_acao](naoEntregue.preview) }}</span>
+            <textarea v-model="naoEntregue.textoChamado" rows="5" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+          </label>
+          <div class="space-y-1">
+            <label class="flex items-center gap-2 font-semibold">
+              <input v-model="naoEntregue.mandarMensagem" type="checkbox" class="size-4" />
+              Mandar mensagem ao cliente <span class="font-normal text-muted-foreground">({{ naoEntregue.preview.canal_mensagem }})</span>
+            </label>
+            <template v-if="naoEntregue.mandarMensagem">
+              <textarea v-model="naoEntregue.textoCliente" rows="4" class="w-full rounded-md border bg-background px-2 py-1.5 text-sm" />
+              <div class="flex gap-2 text-xs">
+                <span v-if="naoEntregueClienteErro" class="font-semibold text-rose-700 dark:text-rose-400">{{ naoEntregueClienteErro }}</span>
+                <span v-else-if="naoEntregue.preview.plataforma === 'ml'" class="text-muted-foreground">O Mercado Livre pode não deixar a loja puxar a conversa; se recusar, o chamado sai mesmo assim e a tela avisa para mandar à mão.</span>
+                <span v-if="naoEntregue.preview.limite_cliente" class="ml-auto shrink-0 tabular-nums" :class="naoEntregueClienteTexto.length > naoEntregue.preview.limite_cliente ? 'font-semibold text-rose-700 dark:text-rose-400' : 'text-muted-foreground'">{{ naoEntregueClienteTexto.length }}/{{ naoEntregue.preview.limite_cliente }}</span>
+              </div>
+            </template>
+          </div>
+        </template>
+        <div v-if="naoEntregue.erro" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs font-semibold text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">{{ naoEntregue.erro }}</div>
+        <div class="flex justify-end gap-2">
+          <Button variant="ghost" :disabled="naoEntregue.enviando" @click="fecharNaoEntregue">Cancelar</Button>
+          <Button
+            :disabled="naoEntregue.enviando || naoEntregue.carregando || !naoEntregue.preview || !naoEntregue.textoChamado.trim() || !!naoEntregueClienteErro"
+            data-nao-entregue-enviar
+            @click="confirmarNaoEntregue"
+          >
+            <Send class="mr-1 size-4" />
+            {{ naoEntregue.enviando ? 'Enviando…' : naoEntregue.mandarMensagem ? 'Abrir chamado e mandar mensagem' : 'Abrir chamado' }}
           </Button>
         </div>
       </div>
