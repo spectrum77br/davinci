@@ -1227,9 +1227,10 @@ const lidoHa = computed(() => {
 
     <div v-if="error" class="text-sm text-red-500">erro: {{ error }}</div>
 
-    <!-- "Onde agir hoje" fica do lado só em tela bem larga. Nas outras vai pra
-         cima da lista, em faixa: a tabela tem 18 colunas e precisa da largura. -->
-    <div class="flex flex-col gap-3 min-[2350px]:grid min-[2350px]:grid-cols-[minmax(0,1fr)_340px] min-[2350px]:items-start">
+    <!-- "Onde agir hoje" do lado da lista a partir de xl, igual Logística e Chamados
+         (Vinicius 16/11: "ficou em cima e não do lado igual é padrão dos outros
+         painéis"); a lista rola de lado dentro dela. Em tela estreita vai pra cima. -->
+    <div class="flex flex-col gap-3 xl:grid xl:grid-cols-[minmax(0,1fr)_340px] xl:items-start">
       <div class="flex min-w-0 flex-col gap-2.5">
         <!-- Tabela -->
         <div class="flex min-w-0 flex-col rounded-md border bg-card">
@@ -1482,9 +1483,9 @@ const lidoHa = computed(() => {
       </div>
 
       <!-- Onde agir hoje -->
-      <div class="order-first flex min-w-0 flex-col rounded-md border bg-card min-[2350px]:order-none">
+      <div class="order-first flex min-w-0 flex-col rounded-md border bg-card xl:order-none">
         <div class="rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-center text-xs font-semibold text-white">Onde agir hoje</div>
-        <div class="grid gap-1.5 p-2 sm:grid-cols-2 xl:grid-cols-4 min-[2350px]:grid-cols-1">
+        <div class="grid gap-1.5 p-2 sm:grid-cols-2 xl:grid-cols-1">
           <div
             v-for="a in agirItens"
             :key="a.chave"
@@ -1498,7 +1499,7 @@ const lidoHa = computed(() => {
             </div>
             <button type="button" class="h-6 rounded-md border bg-background text-[11px] font-semibold hover:bg-muted" :class="recorte === `agir:${a.chave}` ? 'ring-2 ring-primary' : ''" @click="alternarRecorte(`agir:${a.chave}`)">Ver</button>
           </div>
-          <div v-if="!agirItens.length" class="rounded-md border px-2.5 py-3 text-center text-xs text-muted-foreground sm:col-span-2 xl:col-span-4 min-[2350px]:col-span-1">nada pra agir agora</div>
+          <div v-if="!agirItens.length" class="rounded-md border px-2.5 py-3 text-center text-xs text-muted-foreground sm:col-span-2 xl:col-span-1">nada pra agir agora</div>
         </div>
       </div>
     </div>
