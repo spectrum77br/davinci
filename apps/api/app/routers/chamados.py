@@ -344,7 +344,7 @@ async def _to_out(session: AsyncSession, rows: list[Chamado]) -> list[ChamadoOut
             for m in msgs
             if m.direcao in ("enviada", "recebida") and m.status != STATUS_CANCELADA
         ]
-        entregues = [m for m in falas if m.status not in ("pendente", "falhou")]
+        entregues = [m for m in falas if m.status not in ("pendente", "falhou", "segurada")]
         if entregues:
             u = entregues[-1]
             o.ultima_resposta_at = u.enviada_at or u.created_at
@@ -3708,7 +3708,7 @@ async def agent_analise(
                 select(ChamadoMensagem).where(
                     ChamadoMensagem.chamado_id == ch.id,
                     ChamadoMensagem.direcao == "enviada",
-                    ChamadoMensagem.status == "pendente",
+                    ChamadoMensagem.status.in_(("pendente", "segurada")),
                 )
             )
         ).scalars().all()

@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Numeric, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -158,6 +159,21 @@ class DevolucaoRastreio(Base, TimestampMixin):
         nullable=True,
     )
     resolvido_como: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # --- Chamado da devolução (migration 0485, Vinicius 16/11/2026) ---
+    # "Abrir chamado: Sim/Não": None = automático pelo motivo; False = não abrir.
+    abrir_chamado: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # O que a IA achou do motivo antes de a disputa sair (services/
+    # devolucao_conferencia): resultado, sugestão, explicação, a chave do que
+    # ela leu e quem decidiu quando ela segurou.
+    conferencia: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # "Instrução IA" escrita antes de o chamado existir: entra nele quando nasce.
+    instrucao_ia_pendente: Mapped[str | None] = mapped_column(Text, nullable=True)
+    instrucao_ia_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    instrucao_ia_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

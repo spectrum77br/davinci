@@ -84,6 +84,7 @@ from app.models import (
 from app.services import chamados as chamados_svc
 from app.services import chamados_tiktok_reembolso as tiktok_reembolso
 from app.services import devolucao_cartao_video as cartao_video
+from app.services import devolucao_conferencia as conferencia
 from app.services import logistica_meli, logistica_rules, logistica_shopee, logistica_tiktok
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
@@ -399,6 +400,7 @@ def texto_padrao(
     cartao_video: bool = False,
     linhas: list[Devolution] | None = None,
     observacao_extra: str | None = None,
+    link_abertura: str | None = None,
 ) -> str:
     """Mensagem que vai pra plataforma (o operador não digita nada — é
     automático). `reason` é o motivo do ML (SRF*) — nas outras plataformas o
@@ -418,6 +420,11 @@ def texto_padrao(
     ident = _identificacao(dev, linhas)
     if ident:
         linhas_txt.append(ident)
+    # 16/11/2026 (Vinicius): o vídeo da abertura do pacote vai junto. Antes da
+    # observação: a TikTok corta o texto em 500 bytes a partir do fim.
+    abertura = (link_abertura or "").strip()
+    if abertura:
+        linhas_txt.append(f"Vídeo da abertura do pacote: {abertura}")
     obs = _observacao(dev, linhas, observacao_extra)
     if obs:
         linhas_txt.append(f"Observação: {obs}")
@@ -679,6 +686,52 @@ def _e_cartao_video(a: DevolucaoAnexo | ChamadoAnexo) -> bool:
     return a.created_by is None and a.filename == cartao_video.CARTAO_VIDEO_NOME
 
 
+def link_abertura_do_pedido(dev: Devolution, linhas: list[Devolution]) -> str:
+    """Vídeo da abertura do pacote (o "Link abertura" de qualquer linha do pedido,
+    só endereço http). Fora do "Não recebido": o pacote de volta não chegou, um
+    vídeo de abertura contradiz o texto. PURA."""
+    if _motivo(dev) == MOTIVO_NAO_RECEBIDO:
+        return ""
+    for d in [dev, *linhas]:
+        v = (d.link_abertura or "").strip()
+        if v.lower().startswith(("http://", "https://")):
+            return v
+    return ""
+
+
+async def rastreio_do_pedido(session: AsyncSession, pedido: str | None) -> DevolucaoRastreio | None:
+    """A linha do pedido em `devolucao_rastreio` (grão de pedido), ou None."""
+    pb = (pedido or "").strip()
+    if not pb:
+        return None
+    return await session.get(DevolucaoRastreio, pb)
+
+
+async def _instrucao_pendente_pro_chamado(
+    session: AsyncSession, ch: Chamado, rast: DevolucaoRastreio | None
+) -> None:
+    """"Instrução IA" escrita na janela antes de o chamado existir: entra nele
+    como instrução (a IA de Chamado lê primeiro) assim que ele nasce. NÃO commita."""
+    texto = ((rast.instrucao_ia_pendente if rast is not None else None) or "").strip()
+    if not texto:
+        return
+    autor = await session.get(User, rast.instrucao_ia_por) if rast.instrucao_ia_por else None
+    nome = (getattr(autor, "name", None) or getattr(autor, "email", None) or "").strip()
+    m = chamados_svc.nova_mensagem(
+        ch,
+        texto=texto,
+        tipo="instrucao",
+        direcao="sistema",
+        autor_nome=f"Devoluções ({nome})" if nome else "Devoluções",
+        autor_id=rast.instrucao_ia_por,
+        status="registrada",
+    )
+    session.add(m)
+    rast.instrucao_ia_pendente = None
+    rast.instrucao_ia_por = None
+    rast.instrucao_ia_em = None
+
+
 async def _link_video(session: AsyncSession, dev: Devolution, linhas: list[Devolution]) -> str:
     """Link do vídeo da expedição: o "Link envio" de qualquer linha do kit ou,
     sem ele, a coluna Vídeo do Acompanhamento (pedido)."""
@@ -750,7 +803,12 @@ async def garantir_chamado(session: AsyncSession, dev: Devolution) -> Chamado | 
     (`agendar_disparo`), ou None quando não há o que disparar. NÃO commita."""
     if not chamados_svc.motivo_pede_chamado(dev):
         return None
+    rast = await rastreio_do_pedido(session, dev.pedido_bling)
+    if rast is not None and rast.abrir_chamado is False:
+        return None  # 16/11/2026: "Abrir chamado: Não" na janela da devolução
     ch = await chamados_svc.abrir_chamado_devolucao(session, dev)
+    if ch is not None:
+        await _instrucao_pendente_pro_chamado(session, ch, rast)
     if ch is None:
         ch = await chamados_svc.chamado_da_devolucao(session, dev)
     # 19/09: Encerrado (a plataforma já decidiu / o motivo foi retirado) conta como
@@ -798,8 +856,11 @@ async def garantir_chamado(session: AsyncSession, dev: Devolution) -> Chamado | 
         msg.canal = "api"
         session.add(msg)
         await session.flush()
-    elif msg.status in ("falhou", "registrada"):
+    elif msg.status in ("falhou", "registrada", conferencia.STATUS_SEGURADA):
+        # Segurada pela conferência e a pessoa mexeu no lançamento: volta pra
+        # fila e a IA confere de novo o que mudou.
         msg.status = "pendente"
+        msg.erro = None
         msg.canal = "api"
     return ch
 
@@ -929,7 +990,7 @@ async def _encerrar_chamado(session: AsyncSession, ch: Chamado, *, evento: str) 
                 "da plataforma — o DaVinci não tem como cancelar pela API.",
             )
         )
-    elif abertura is not None and abertura.status == "pendente":
+    elif abertura is not None and abertura.status in ("pendente", conferencia.STATUS_SEGURADA):
         abertura.status = "registrada"
         abertura.erro = ERRO_CONTESTACAO_CANCELADA
         fila = "na fila do robô" if abertura.canal == "robo" else "na fila"
@@ -2337,6 +2398,64 @@ async def _disparar_shopee(
     return return_sn, nome_motivo
 
 
+async def _conferir_motivo(
+    session: AsyncSession,
+    ch: Chamado,
+    dev: Devolution,
+    linhas: list[Devolution],
+    msg: ChamadoMensagem,
+    agora: datetime,
+) -> bool:
+    """16/11/2026 (Vinicius: "se não bate, segurar e perguntar"): a IA confere
+    motivo × condição × observação antes de a disputa sair (services/
+    devolucao_conferencia). True = segurou (abertura `segurada`, a pessoa
+    decide na janela da devolução). Sem IA, sem pedido ou sem resposta = segue.
+    NÃO commita."""
+    pb = (dev.pedido_bling or "").strip()
+    if not pb:
+        return False
+    pecas = conferencia.pecas_de(linhas or [dev])
+    rast = await rastreio_do_pedido(session, pb)
+    if not conferencia.ligada():
+        # IA desligada (ou sem chave): o que ela JÁ segurou, com o mesmo
+        # lançamento, continua esperando a decisão de alguém.
+        anterior = (rast.conferencia if rast is not None else None) or {}
+        if anterior.get("resultado") == "nao_bate" and anterior.get("chave") == conferencia.chave(
+            pecas, rast.observacao if rast is not None else None
+        ):
+            msg.status = conferencia.STATUS_SEGURADA
+            msg.erro = conferencia.ERRO_MOTIVO_DIVERGENTE
+            return True
+        return False
+    if rast is None:
+        # Cria já gravada (outra rota pode criar o mesmo pedido enquanto a IA pensa).
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        await session.execute(
+            pg_insert(DevolucaoRastreio)
+            .values(pedido_bling=pb)
+            .on_conflict_do_nothing(index_elements=["pedido_bling"])
+        )
+        rast = await rastreio_do_pedido(session, pb)
+    res = await conferencia.conferir(
+        pecas=pecas,
+        observacao_pedido=rast.observacao if rast is not None else None,
+        plataforma=_nome_plataforma(ch),
+        anterior=rast.conferencia if rast is not None else None,
+        agora=agora,
+    )
+    if res.conferencia is not None and rast is not None:
+        rast.conferencia = res.conferencia
+    if res.evento:
+        session.add(chamados_svc.registrar_sistema(ch, res.evento))
+    if res.segurar:
+        msg.status = conferencia.STATUS_SEGURADA
+        msg.erro = conferencia.ERRO_MOTIVO_DIVERGENTE
+        logger.info("chamado_devolucao_segurado", chamado_id=str(ch.id), pedido_bling=pb)
+        return True
+    return False
+
+
 async def disparar(
     session: AsyncSession,
     ch: Chamado,
@@ -2367,6 +2486,20 @@ async def _disparar(
     msg = await mensagem_abertura(session, ch)
     if msg is None or msg.status == "enviada" or msg.canal == "robo":
         return msg  # canal robo = já está com o robô do formulário
+    if texto_override is None:
+        # 16/11/2026: o disparo AUTOMÁTICO não manda o que alguém parou — chamado
+        # concluído ou Encerrado, abertura cancelada (`registrada`) ou "Abrir
+        # chamado: Não". Antes o job que já estava na fila mandava mesmo assim.
+        # (Ganhamos/perdemos seguem: o ML encerrado contra nós vira formulário.)
+        if (
+            ch.resolvido
+            or ch.status_plataforma == chamados_svc.STATUS_ENCERRADO
+            or msg.status == "registrada"
+        ):
+            return msg
+        rast = await rastreio_do_pedido(session, dev.pedido_bling)
+        if rast is not None and rast.abrir_chamado is False:
+            return msg
     if not chamados_svc.motivo_pede_chamado(dev):
         # Motivo que deixou de abrir chamado (ex. "item incorreto", 07/09): a
         # abertura que ficou pendente falha de vez em vez de retentar pra sempre.
@@ -2375,6 +2508,23 @@ async def _disparar(
         return msg
     plat = plataforma_de(ch.plataforma)
     linhas = await _linhas_do_pedido(session, dev)
+    if texto_override is None:
+        if await _conferir_motivo(session, ch, dev, linhas, msg, agora):
+            return msg  # segurada: a pessoa decide na janela da devolução
+        # A conferência pode ter levado segundos: alguém pode ter dito "Não"
+        # (ou encerrado) nesse meio-tempo. Relê antes de falar com a plataforma.
+        await session.refresh(msg, ["status", "erro"])
+        await session.refresh(ch, ["status_plataforma", "resolvido"])
+        rast = await rastreio_do_pedido(session, dev.pedido_bling)
+        if rast is not None:
+            await session.refresh(rast, ["abrir_chamado"])
+        if (
+            msg.status in ("registrada", "enviada", "enviando")
+            or ch.resolvido
+            or ch.status_plataforma == chamados_svc.STATUS_ENCERRADO
+            or (rast is not None and rast.abrir_chamado is False)
+        ):
+            return msg
     reason = reason_para(dev)
     anexos = await anexos_de(session, [d.id for d in linhas])
     fotos = [a for a in anexos if (a.content_type or "").lower() in ML_FOTO_TIPOS]
@@ -2415,6 +2565,7 @@ async def _disparar(
     msg.texto = (texto_override or "").strip() or texto_padrao(
         dev, reason, fotos=len(fotos_reais), link_envio=link or None,
         cartao_video=cartao is not None, linhas=linhas,
+        link_abertura=link_abertura_do_pedido(dev, linhas) or None,
     )
     referencia = detalhe = None
     try:

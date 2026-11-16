@@ -1401,6 +1401,15 @@ def status_e_motivo_da_aba(
                     f"{_texto_curto(erro, 60)}"
                 )
             return ABA_ANALISE_ROBO, fala_em, quem
+        if st == "segurada":
+            # 16/11/2026: a conferência da IA segurou a contestação da devolução
+            # (o motivo não bate com o que foi lançado) — quem decide é a pessoa,
+            # na janela da devolução.
+            return (
+                ABA_ANALISE_HUMANO,
+                fala_em,
+                "segurada pela IA: o motivo não bate com o lançamento — decidir em Devoluções",
+            )
         if st == "falhou":
             if ia_mandou_aguardar and (_erro_pede_humano(erro) or erro not in ERROS_ACOMPANHADOS):
                 return aguardando_pela_ia
@@ -1505,7 +1514,7 @@ def ultima_acao(msgs: list[ChamadoMensagem]) -> tuple[datetime, str, str | None,
     for m in msgs:
         quando = None
         if m.direcao in ("enviada", "recebida"):
-            if m.status in ("pendente", "enviando", "falhou", "cancelada"):
+            if m.status in ("pendente", "enviando", "falhou", "cancelada", "segurada"):
                 continue
             if m.status == "registrada" and (m.erro or "").strip():
                 continue
