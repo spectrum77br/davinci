@@ -1,5 +1,5 @@
 // node tests/segmentos-duimp-sfc.cjs — Admin › Segmentos › coluna "DUIMP / mensagem"
-// (migration 0487, Eduardo 16/11/2026): o texto que vai na nota/etiqueta quando o
+// (migration 0488, Eduardo 16/11/2026): o texto que vai na nota/etiqueta quando o
 // produto não tem DUIMP na Importação. Trava:
 //  - a coluna existe no cabeçalho e em toda linha (linha normal, "adicionar raiz",
 //    "adicionar subsegmento"), e os colspan acompanham (10 colunas);

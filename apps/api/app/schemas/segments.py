@@ -21,7 +21,7 @@ def _slugify(v: str) -> str:
     return "".join(out).strip("-")
 
 
-# Migration 0487: o texto vai na observação da NF (infCpl) e na etiqueta, onde
+# migration 0488: o texto vai na observação da NF (infCpl) e na etiqueta, onde
 # " | " separa uma DUIMP da outra (uma linha cada) — por isso "|" é recusado.
 # 75 caracteres: o que cabe numa linha "DUIMP: …" da etiqueta de 10 cm na
 # fonte mínima (5,5 pt), mesmo em MAIÚSCULAS (medido com _largura em 16/11).

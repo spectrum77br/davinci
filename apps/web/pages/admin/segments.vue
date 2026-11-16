@@ -146,7 +146,7 @@ async function commitEdit() {
     }
   } else {
     if (!raw && field === 'name') return cancelEdit()
-    // DUIMP padrão (0487): " | " separa as linhas da etiqueta — o texto não pode ter "|".
+    // DUIMP padrão (0488): " | " separa as linhas da etiqueta — o texto não pode ter "|".
     if (field === 'duimp_padrao' && raw.includes('|')) {
       // continua editando com o texto digitado (só tirar o "|")
       error.value = 'A DUIMP/mensagem do segmento não pode ter "|" (ele separa as linhas da etiqueta).'
@@ -167,7 +167,7 @@ async function commitEdit() {
   }
 }
 
-// 422 do servidor no texto da DUIMP padrão (0487) → frase de gente.
+// 422 do servidor no texto da DUIMP padrão (0488) → frase de gente.
 const ERROS_DUIMP: Record<string, string> = {
   duimp_padrao_sem_barra: 'A DUIMP/mensagem do segmento não pode ter "|" (ele separa as linhas da etiqueta).',
   duimp_padrao_muito_longo: 'A DUIMP/mensagem do segmento cabe em até 75 letras (é o que cabe na linha da etiqueta).',

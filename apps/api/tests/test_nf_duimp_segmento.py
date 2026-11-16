@@ -1,4 +1,4 @@
-"""DUIMP padrão do segmento (migration 0487, Eduardo 16/11/2026).
+"""DUIMP padrão do segmento (migration 0488, Eduardo 16/11/2026).
 
 "quando um produto não tiver duimp, ir a mensagem ou duimp que colocarmos,
 deixar por segmento" — usado, avulso e produto fora da tela Importação. Regras

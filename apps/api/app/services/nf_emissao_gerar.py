@@ -300,7 +300,7 @@ async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str
     sem nada fica de fora.
 
     SKU simples: Importação (SKU exato, código-base) e, sem ela, o texto do
-    segmento (0487). Kit "a+b" que não está inteiro na Importação: PEÇA A PEÇA
+    segmento (0488). Kit "a+b" que não está inteiro na Importação: PEÇA A PEÇA
     pela mesma ordem — a peça importada leva a DUIMP dela e só a peça sem DUIMP
     leva o texto do segmento; as partes juntam na ordem das peças (revisão de
     16/11: antes o kit olhava só o código-base da 1ª peça e o resultado mudava
@@ -337,7 +337,7 @@ async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str
     return mapa
 
 
-# ── DUIMP padrão do segmento (migration 0487) ────────────────────────────────
+# ── DUIMP padrão do segmento (migration 0488) ────────────────────────────────
 # Eduardo, 16/11/2026: produto usado, avulso ou fora da tela Importação não tem
 # DUIMP — a nota levava nada. Agora cada segmento (tela Admin › Segmentos) tem
 # um texto, e o SKU que ficou sem DUIMP nos 2 passos de cima leva o texto do

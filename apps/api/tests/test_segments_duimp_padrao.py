@@ -1,4 +1,4 @@
-"""Segmentos › DUIMP padrão (migration 0487, Eduardo 16/11/2026): a coluna da
+"""Segmentos › DUIMP padrão (migration 0488, Eduardo 16/11/2026): a coluna da
 tela grava pelo PATCH de sempre, volta no /tree, e o texto é validado (vazio
 apaga; "|", mais de 75 caracteres (o que cabe na linha da etiqueta) e o que a
 etiqueta não imprime são recusados; travessão/aspas curvas viram os simples)."""

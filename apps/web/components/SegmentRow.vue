@@ -54,7 +54,7 @@ const props = defineProps<{
   adding: boolean
   setEditInputRef: (el: any) => void
   // DUIMP padrão herdada do pai (o mais perto com texto) — o subsegmento vazio
-  // usa esse texto na nota (0487).
+  // usa esse texto na nota (0488).
   duimpHerdada?: string | null
 }>()
 
@@ -119,7 +119,7 @@ function vigentes(n: Segment): SpecialDate[] {
 // dezenas de SKUs por segmento viravam uma coluna de rolagem na tabela).
 const MAX_CHIPS = 2
 
-// DUIMP padrão (0487, Eduardo 16/11/2026): vai na nota/etiqueta do produto que
+// DUIMP padrão (0488, Eduardo 16/11/2026): vai na nota/etiqueta do produto que
 // não tem DUIMP na Importação. Vazio → herda do pai (mostrado em cinza).
 const duimpValendo = computed(() => props.node.duimp_padrao || props.duimpHerdada || null)
 </script>

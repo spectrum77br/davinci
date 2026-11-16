@@ -50,7 +50,7 @@ class Segment(Base, TimestampMixin):
     largura: Mapped[Decimal | None] = mapped_column(Numeric(10, 3), nullable=True)
     comprimento: Mapped[Decimal | None] = mapped_column(Numeric(10, 3), nullable=True)
     peso: Mapped[Decimal | None] = mapped_column(Numeric(10, 3), nullable=True)
-    # Migration 0487 (Eduardo, 16/11/2026): o texto que vai na nota/etiqueta no
+    # migration 0488 (Eduardo, 16/11/2026): o texto que vai na nota/etiqueta no
     # lugar da DUIMP quando o produto não tem DUIMP na Importação (usado, avulso,
     # produto fora da Importação). Subsegmento vazio herda o da raiz. Quem usa:
     # nf_emissao_gerar._texto_segmento_por_sku.

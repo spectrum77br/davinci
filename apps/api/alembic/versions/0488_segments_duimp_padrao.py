@@ -11,8 +11,8 @@ só o SKU que continuar sem DUIMP pega o texto do segmento dele (o do subsegment
 vazio → o da raiz). Mesmo portão de hoje: só faturador com `observacao_duimp`
 (nota cheia) — decisão do dono no mesmo dia.
 
-Revision ID: 0487_segments_duimp_padrao
-Revises: 0486_devolucao_reabre_o_que_nao_terminou
+Revision ID: 0488_segments_duimp_padrao
+Revises: 0487_cairo_devolucoes_resolver
 """
 
 from collections.abc import Sequence
@@ -21,8 +21,8 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "0487_segments_duimp_padrao"
-down_revision: str | None = "0486_devolucao_reabre_o_que_nao_terminou"
+revision: str = "0488_segments_duimp_padrao"
+down_revision: str | None = "0487_cairo_devolucoes_resolver"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

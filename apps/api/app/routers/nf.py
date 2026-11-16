@@ -2391,7 +2391,7 @@ async def nf_agent_command_result(
 
 async def _duimp_do_pedido(session: AsyncSession, numero: str | None) -> str | None:
     """DUIMPs dos itens do pedido (mesma fonte da observação da NF 100%:
-    `import_products.duimp` por SKU e, sem ela, o texto do segmento — 0487),
+    `import_products.duimp` por SKU e, sem ela, o texto do segmento — 0488),
     sem repetir, na ordem dos itens. Nada → None (etiqueta sai sem a linha)."""
     if not numero:
         return None
