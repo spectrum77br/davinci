@@ -13716,12 +13716,27 @@ def separar_avisos(
             motivos.append(m)
     # O `sem_auto` (o que a trava lê) só com o que continua duro.
     sem_auto = [m for m in (getattr(conferida, "sem_auto", None) or []) if m in motivos]
+    desbloqueio: dict[str, str] = {}
+    if (
+        regua
+        and getattr(conferida, "status", None) == constantes.RASCUNHO_BLOQUEADO
+        and not getattr(conferida, "erros", None)
+        and not motivos
+        and (conferida.texto or "").strip()
+    ):
+        # 16/11/2026 (ATV, 12:44, "o produto iria chegar dia 14…"): o número que não veio do
+        # sistema — o "dia 14" que a cliente escreveu — virou aviso na virada, mas o
+        # `conferir_saida` já tinha posto BLOQUEADO por ele: barrado sem motivo, sem o verificador
+        # rodar (6 no dia). Sem erro do validador e sem motivo duro, o rascunho fica pendente e o
+        # verificador decide.
+        desbloqueio["status"] = constantes.RASCUNHO_PENDENTE
     return dataclasses.replace(
         conferida,
         motivos=motivos,
         avisos=avisos,
         sem_auto=sem_auto,
         precisa_humano=bool(pessoa_do_modelo or motivos),
+        **desbloqueio,
     )
 
 

@@ -237,6 +237,7 @@ from app.services.atendimento.constantes import (
     PLATAFORMAS_RESPONDEM_AVALIACAO,
     PLATAFORMAS_ROBO,
     PLATAFORMAS_SEM_AUTO,
+    RASCUNHO_BLOQUEADO,
     RASCUNHO_EDITADO,
     RASCUNHO_ENVIADO,
     RASCUNHO_PENDENTE,
@@ -1613,7 +1614,9 @@ async def _avaliar_rascunho(
     avaliado = False
     if (
         rascunho is not None
-        and rascunho.status in (RASCUNHO_PENDENTE, RASCUNHO_SUBSTITUIDO)
+        # 16/11/2026: a BARRADA também vai para a caixa (o Eduardo: "pra se corrigir, arrumar e
+        # anotar no banco") — o envio a partir dela conta como o da pendente.
+        and rascunho.status in (RASCUNHO_PENDENTE, RASCUNHO_SUBSTITUIDO, RASCUNHO_BLOQUEADO)
         and not await _ja_avaliado(session, rascunho.id)
     ):
         sim = similaridade(texto_digitado, rascunho.texto)
