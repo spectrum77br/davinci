@@ -892,3 +892,69 @@ def test_a_secao_do_padrao_no_pacote():
     assert texto.startswith("PADRÃO DA EQUIPE PARA ESTE TIPO DE CASO (Defeito)")
     assert "- par:b7 (a equipe respondeu assim 4 vezes): «Consegue fazer um vídeo!»" in texto
     assert pacote.secao_do_padrao([], "Defeito") is None
+
+
+async def test_a_reclamacao_presa_confere_com_o_padrao_do_tipo_do_rascunho(
+    db: AsyncSession, make_user
+):
+    import json as _json
+
+    from app.services.atendimento.agente import confere_banco
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    loja = (await _conversa(db, make_user, externo_id="pd3")).integration_id
+    for _ in range(3):
+        await _resposta(db, integ=loja, tipo="defeito", resposta="Consegue fazer um vídeo!")
+    ctx = agente_ctx.ContextoAgente(
+        conversa_id=uuid4(),
+        gatilho_id=None,
+        canal_id=None,
+        integration_id=loja,
+        plataforma="shopee",
+        canal="chat",
+        modo="auto",
+    )
+    ctx.regua, ctx.banco_exigido, ctx.as_of = True, True, datetime.now(UTC)
+
+    class _Serve:
+        def __init__(self):
+            self.messages = self
+            self.pedidos: list[dict] = []
+
+        async def create(self, **kw):
+            self.pedidos.append(kw)
+            caso = kw["messages"][0]["content"].split("- ", 1)[1].split(" |", 1)[0]
+            texto = _json.dumps({"id": caso, "veredito": "serve", "motivo": "o padrão serve"})
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text=texto)],
+                stop_reason="end_turn",
+                model=kw["model"],
+                usage=SimpleNamespace(
+                    input_tokens=300,
+                    output_tokens=20,
+                    cache_read_input_tokens=0,
+                    cache_creation_input_tokens=0,
+                ),
+            )
+
+    cliente = _Serve()
+    soltou = await confere_banco.solta_a_pessoa(
+        ctx,
+        texto="Sentimos muito! Ele desliga em que situação? Usando a câmera, em jogos?",
+        categoria="defeito",
+        acoes=[constantes.ACAO_ANALISAR_EVIDENCIA],
+        evidencias=[],
+        pergunta="meu celular desliga sozinho",
+        cliente=cliente,
+        modelo="claude-opus-5-5",
+        session=db,
+    )
+    # O padrão do tipo do rascunho vai na frente, marcado; a resposta da equipe vira a sugestão
+    # e a ação fica para depois do envio.
+    pedido = cliente.pedidos[0]
+    assert pedido["system"] == confere_banco.SISTEMA_COM_PADRAO
+    primeiro = pedido["messages"][0]["content"].split("CASOS DO BANCO:\n", 1)[1].splitlines()[0]
+    assert "PADRÃO DA EQUIPE (3 respostas iguais" in primeiro
+    assert soltou and ctx.responde_e_marca is True
+    assert ctx.texto_do_banco == "Consegue fazer um vídeo!"
+    assert ctx.para_fatos()["banco_tipos"][ctx.banco_bateu] == "defeito"
