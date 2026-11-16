@@ -50,6 +50,24 @@ MESMA = "mesma"
 SERVE = "serve"
 DIFERENTE = "diferente"
 VEREDITOS_QUE_SOLTAM = frozenset({MESMA, SERVE})
+# A opção B (16/11/2026, o Eduardo: "caso ele tenha esse padrão no banco dessas reclamações ele
+# pode responder, mas continua deixando pelo menos uma notify"): o rascunho preso SÓ por ação de
+# pessoa de reclamação (`ACOES_DO_PADRAO`) sai quando os casos do banco mostram o PADRÃO da
+# equipe para esse tipo de caso (defeito → pede vídeo; devolução → a plataforma analisa…) e ele
+# segue esse padrão — mesmo sem um caso da MESMA pergunta. As ações ficam para depois do envio
+# (o "responde e marca": a conversa fica em "Precisa de ação"). O teste de 16/11: 24 de 129
+# rascunhos, todos com texto, presos só por essas ações.
+PADRAO = "padrao"
+ACOES_DO_PADRAO = frozenset(
+    {
+        "abrir_chamado",
+        "analisar_evidencia",
+        "reclamacao_aberta",
+        "avaliacao_baixa",
+        "segurar_envio",
+        "juridico_fraude_ofensa",
+    }
+)
 MAX_CHARS_TEXTO_DO_BANCO = 600
 _MARCACAO = re.compile(r"\[[^\]]+\]|\{[^}]+\}")
 # A virada (13/11/2026): UMA chamada com todas as respostas do banco que o pacote mostrou (o
@@ -85,11 +103,22 @@ como está. O id fica null.
 
 Na dúvida, "diferente"."""
 
+# A opção B: o mesmo, com o "padrao" (só na conferência do rascunho preso por ação de reclamação).
+_ITEM_PADRAO = (
+    '- "padrao": nenhum caso é o mesmo pedido, mas os casos mostram o PADRÃO da equipe para '
+    "esse tipo de reclamação (defeito → pede vídeo ou foto; devolução ou reembolso → a "
+    "plataforma analisa e devolve pela mesma forma de pagamento; não recebeu → os detalhes do "
+    "envio no pedido) e a proposta segue esse padrão: o mesmo encaminhamento, sem afirmar o que "
+    "a equipe não afirmou, prometer outra coisa nem pedir outra ação ao cliente. Diga o id do "
+    "caso que mostra o padrão.\n"
+)
+SISTEMA_COM_PADRAO = SISTEMA.replace('- "diferente": ', _ITEM_PADRAO + '- "diferente": ', 1)
+
 
 class Veredito(pydantic.BaseModel):
     model_config = pydantic.ConfigDict(extra="forbid")
     id: str | None
-    veredito: Literal["mesma", "serve", "diferente"]
+    veredito: Literal["mesma", "serve", "padrao", "diferente"]
     motivo: str
 
 
@@ -125,12 +154,13 @@ def entrada(
     return "\n".join(linhas)
 
 
-def argumentos(texto: str, *, modelo: str) -> dict[str, Any]:
-    """Os argumentos de `cliente.messages.create`. PURA (sem thinking/temperature)."""
+def argumentos(texto: str, *, modelo: str, padrao: bool = False) -> dict[str, Any]:
+    """Os argumentos de `cliente.messages.create`. PURA (sem thinking/temperature). `padrao`: a
+    conferência do rascunho preso por ação de reclamação (a opção B, `SISTEMA_COM_PADRAO`)."""
     return {
         "model": modelo,
         "max_tokens": MAX_TOKENS,
-        "system": SISTEMA,
+        "system": SISTEMA_COM_PADRAO if padrao else SISTEMA,
         "messages": [{"role": "user", "content": texto}],
         "output_config": {"effort": "low", "format": {"type": "json_schema", "schema": esquema()}},
     }
@@ -147,6 +177,30 @@ def veredito_da_mensagem(mensagem: Any) -> Veredito | None:
     return None
 
 
+# 16/11/2026 (o Eduardo: "como raios pega de outro modelo?"): a pergunta de PRODUTO (a ficha, o que
+# vem na caixa, o acessório que serve, marca e modelo) só se confere com a resposta do banco do
+# MESMO produto ou modelo — no teste de 16/11 o "tem rádio?" recebeu, como "serve", o "não tem
+# rádio" de outro celular (a equipe diz que esse tem). A busca já marca `mesmo_modelo` /
+# `mesmo_produto` (o mapa do banco: cada resposta sabe o anúncio e o modelo); faltava exigir.
+TIPOS_DE_PRODUTO = frozenset(
+    {
+        "espec_celular",
+        "espec_mala",
+        "espec_eletro",
+        "espec_outros",
+        "resistencia_agua",
+        "conteudo_da_caixa",
+        "acessorios_avulsos",
+        "originalidade_condicao",
+    }
+)
+
+
+def do_mesmo_produto(par: Any) -> bool:
+    """A resposta do banco é do mesmo produto ou modelo da conversa? PURA."""
+    return bool(par.get("fonte_de_produto") or par.get("mesmo_modelo") or par.get("mesmo_produto"))
+
+
 def candidatas(
     ctx: Any, categoria: str | None, evidencias: Sequence[str] = ()
 ) -> list[tuple[str, str, str]]:
@@ -161,11 +215,12 @@ def candidatas(
 
     def _serve(i: str) -> bool:
         par = do_pacote.get(i)
-        return (
-            par is not None
-            and i.startswith(agente_ctx.PREFIXO_BANCO)
-            and bool((par.get("resposta") or "").strip())
-        )
+        if par is None or not i.startswith(agente_ctx.PREFIXO_BANCO):
+            return False
+        de_produto = categoria in TIPOS_DE_PRODUTO or par.get("tipo") in TIPOS_DE_PRODUTO
+        if de_produto and not do_mesmo_produto(par):
+            return False  # de outro modelo: não responde a pergunta de produto deste
+        return bool((par.get("resposta") or "").strip())
 
     citadas = [i for i in dict.fromkeys(str(e or "").strip() for e in evidencias) if _serve(i)]
     do_tipo = [i for i, par in do_pacote.items() if _serve(i) and par.get("tipo") == categoria]
@@ -291,10 +346,11 @@ async def _conferir_candidatas(
     pergunta: str | None,
     cliente: Any,
     modelo: str,
+    padrao: bool = False,
 ) -> dict[str, Any]:
     """O registro da conferência (uma chamada com todas as candidatas): {"id", "veredito",
-    "motivo", "custo_usd"}. O id que o modelo deu fora das candidatas não vale. Pode levantar
-    (quem chama segura)."""
+    "motivo", "custo_usd"}. O id que o modelo deu fora das candidatas não vale. `padrao`: aceita
+    o "padrao" (a opção B). Pode levantar (quem chama segura)."""
     import anthropic
 
     from app.services.atendimento.agente import custo
@@ -312,7 +368,7 @@ async def _conferir_candidatas(
         return nada
     try:
         mensagem = await cliente.messages.create(
-            **argumentos(entrada(pergunta_m, proposta, cands), modelo=modelo),
+            **argumentos(entrada(pergunta_m, proposta, cands), modelo=modelo, padrao=padrao),
             timeout=anthropic.Timeout(TIMEOUT_S, connect=10.0),
         )
     except anthropic.AnthropicError:
@@ -325,7 +381,8 @@ async def _conferir_candidatas(
         gasto = uso.custo_usd
     v = veredito_da_mensagem(mensagem)
     ids = [i for i, _p, _r in cands]
-    if v is not None and v.veredito in VEREDITOS_QUE_SOLTAM:
+    soltam = VEREDITOS_QUE_SOLTAM | ({PADRAO} if padrao else set())
+    if v is not None and v.veredito in soltam:
         escolhido = v.id if v.id in ids else (ids[0] if len(ids) == 1 else None)
         if escolhido:
             return {
@@ -398,8 +455,16 @@ async def solta_a_pessoa(
         cands = candidatas(ctx, categoria, evidencias)
         if not cands:
             return False
+        # A opção B: preso SÓ por ação de reclamação, o padrão da equipe também solta.
+        padrao = bool(acoes) and set(acoes) <= ACOES_DO_PADRAO
         registro = await _conferir_candidatas(
-            ctx, cands, texto=texto, pergunta=pergunta, cliente=cliente, modelo=modelo
+            ctx,
+            cands,
+            texto=texto,
+            pergunta=pergunta,
+            cliente=cliente,
+            modelo=modelo,
+            padrao=padrao,
         )
         registro["pessoa"] = True
         ctx.banco_confere = registro
@@ -411,7 +476,8 @@ async def solta_a_pessoa(
                 registro["serve_sem_texto"] = True
                 return False
             ctx.texto_do_banco = texto_da_equipe
-        if registro.get("veredito") in VEREDITOS_QUE_SOLTAM and registro.get("id"):
+        soltam = VEREDITOS_QUE_SOLTAM | ({PADRAO} if padrao else set())
+        if registro.get("veredito") in soltam and registro.get("id"):
             ctx.banco_bateu = registro["id"]
             ctx.responde_e_marca = True
             return True

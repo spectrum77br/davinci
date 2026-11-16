@@ -845,8 +845,9 @@ TROCAS_DA_VIRADA: tuple[tuple[str, str], ...] = (
     (
         "- buscar_respostas_equipe: mais exemplos, só o TOM; nada deles vale como dado.",
         "- buscar_respostas_equipe: busca no banco de respostas da equipe com as palavras do "
-        "caso (o modelo, a característica); o que a equipe disse da loja e do produto vale como "
-        "dado (cite o par:<id>).",
+        "caso (o modelo, a característica); o que a equipe disse da loja vale como dado, e do "
+        "produto só a resposta do mesmo produto ou modelo («vale para produto») — a de outro "
+        "modelo não vale para este (cite o par:<id>).",
     ),
     (
         "Use dado_indisponivel só depois de consultar (ver_anuncio, consultar_manual; ver_pedido "

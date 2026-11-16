@@ -225,3 +225,92 @@ async def test_o_rodar_liga_o_verificador_so_no_processo(monkeypatch):
     assert s.atendimento_verificador_no_replay is True
     assert s.atendimento_verificador_sombra == SONNET
     assert s.atendimento_verificador_modelo == ""
+
+
+# ─────────────── a resposta da equipe à mesma pergunta solta o "não responde" ───────────────
+
+
+def _barrado(**marcas: Any) -> verificador.Resultado:
+    v = _veredito(ok_para_envio_automatico=False, motivos=["não responde o prazo"], **marcas)
+    return verificador.Resultado(ok=False, veredito=verificador.Veredito(**v), pediu=True)
+
+
+def _ctx_do_banco(veredito: str = "serve", *, virada: bool = True) -> Any:
+    return _ctx(
+        banco_exigido=virada,
+        banco_bateu="par:b5040",
+        banco_confere={"id": "par:b5040", "veredito": veredito, "pessoa": True},
+    )
+
+
+def test_a_resposta_do_banco_a_mesma_pergunta_solta_o_nao_responde():
+    r = verificador.respondida_pelo_banco(
+        _barrado(responde_o_que_foi_perguntado=False), _ctx_do_banco()
+    )
+    assert r.ok and r.problemas == [] and r.solto_por == "par:b5040"
+    fatos = r.para_fatos("Reembolso direto com a plataforma, não temos acesso!")
+    assert fatos["ok"] is True and fatos["soltos"] == [verificador.NAO_RESPONDE]
+    assert verificador.respondida_pelo_banco(
+        _barrado(responde_o_que_foi_perguntado=False), _ctx_do_banco("mesma")
+    ).ok
+
+
+@pytest.mark.parametrize(
+    ("marcas", "ctx"),
+    [
+        # A afirmação sem lastro continua valendo (o "não tem rádio" de outro modelo).
+        (
+            {"responde_o_que_foi_perguntado": False, "afirma_sem_lastro": ["não tem rádio"]},
+            _ctx_do_banco(),
+        ),
+        ({"afirma_sem_lastro": ["não tem rádio"]}, _ctx_do_banco()),
+        # Outro veredito da conferência, fora da virada, ou sem o banco ter batido: nada muda.
+        ({"responde_o_que_foi_perguntado": False}, _ctx_do_banco("diferente")),
+        ({"responde_o_que_foi_perguntado": False}, _ctx_do_banco(virada=False)),
+        ({"responde_o_que_foi_perguntado": False}, _ctx(banco_exigido=True)),
+    ],
+)
+def test_o_resto_continua_barrado(marcas, ctx):
+    antes = _barrado(**marcas)
+    depois = verificador.respondida_pelo_banco(antes, ctx)
+    assert depois is antes and not depois.ok
+    assert "soltos" not in depois.para_fatos("x")
+
+
+def test_o_padrao_e_o_sonnet():
+    from app.config import Settings
+
+    assert Settings.model_fields["atendimento_verificador_modelo"].default == SONNET
+
+
+# ─────────────── a resposta de produto do banco só do mesmo produto ou modelo ───────────────
+
+
+def test_a_pergunta_de_produto_so_confere_com_o_mesmo_modelo():
+    from app.services.atendimento.agente import confere_banco
+
+    ctx = _ctx()
+    ctx.registrar_pares(
+        [
+            # O "não tem rádio" de outro celular (o teste de 16/11): fora da conferência.
+            _par("par:b4841", tipo="espec_celular", resposta="Não tem rádio, mas tem Spotify!"),
+            _par("par:b7", tipo="espec_celular", mesmo_modelo=True, resposta="Tem rádio FM!"),
+            _par("par:b9", tipo="reembolso", resposta="Reembolso é com a plataforma!"),
+        ]
+    )
+    # A pergunta de produto: só a resposta do mesmo produto ou modelo.
+    de_produto = [i for i, _p, _r in confere_banco.candidatas(ctx, "espec_celular")]
+    assert de_produto == ["par:b7"]
+    # A pergunta que não é de produto confere com a política de qualquer modelo; a resposta de
+    # produto de outro modelo continua fora.
+    assert [i for i, _p, _r in confere_banco.candidatas(ctx, "reembolso")] == ["par:b9", "par:b7"]
+
+
+def test_o_pacote_marca_a_do_mesmo_modelo_como_valendo_para_produto():
+    from app.services.atendimento.agente import pacote
+
+    mesmo = _par("par:b7", mesmo_modelo=True, mesmo_produto=True, um_modelo=True)
+    assert ", vale para produto," in pacote._onde_do_par(mesmo)
+    outro = _par("par:b8", um_modelo=True)
+    assert "não vale para produto" in pacote._onde_do_par(outro)
+    assert "outro modelo NÃO vale" in pacote.BANCO_CABECALHO

@@ -162,12 +162,18 @@ MAX_CHARS_EQUIPE = 1_200
 # da loja e do produto — o cabeçalho diz o que vale e o que nunca vale.
 MAX_PARES_BANCO = 8
 MAX_CHARS_EQUIPE_BANCO = 2_600
+# 16/11/2026 (o Eduardo: "como raios pega de outro modelo?"): o "não tem rádio" de outro celular
+# saiu como a resposta do "tem rádio?" — o cabeçalho dizia que o banco vale como dado do produto sem
+# dizer de QUAL produto. A linha de cada resposta diz se ela "vale para produto" (o mesmo produto
+# ou modelo, `_onde_do_par`).
 BANCO_CABECALHO = (
     "RESPOSTAS DA EQUIPE NO BANCO (o que a equipe já respondeu a casos parecidos, outros "
-    "clientes, mascarados). Valem como DADO da loja e do produto — de onde enviamos, o que vem "
-    "na caixa, política, especificação, tamanho, variação —, como a equipe disse; dado de "
-    "pedido (rastreio, data, valor, situação) nunca vem daqui. Responda como a equipe "
-    "respondeu e cite o par:<id> que seguir:"
+    "clientes, mascarados). Valem como DADO da loja — de onde enviamos, política, prazo, como "
+    "funciona — como a equipe disse; do PRODUTO (especificação, o que vem na caixa, tamanho, "
+    "acessório que serve) só a linha marcada «vale para produto»: a de outro modelo NÃO vale "
+    "para este (cada modelo tem rádio, NFC, cartão, carregador diferentes). Dado de pedido "
+    "(rastreio, data, valor, situação) nunca vem daqui. Responda como a equipe respondeu e cite "
+    "o par:<id> que seguir:"
 )
 
 
@@ -192,6 +198,10 @@ def _onde_do_par(par: Mapping[str, Any]) -> str:
     else:
         produto = "sem anúncio"
     if par.get("fonte_de_produto"):
+        vale = "vale para produto"
+    elif par.get("um_modelo") and (par.get("mesmo_modelo") or par.get("mesmo_produto")):
+        # O banco (16/11/2026): a resposta do mesmo produto ou modelo, de qualquer loja, na
+        # conversa de um modelo só (o anúncio sem o produto no catálogo também).
         vale = "vale para produto"
     elif par.get("mesmo_anuncio"):
         # O pedido do dono (27/10/2026): o mesmo anúncio com mais de um modelo vale para o

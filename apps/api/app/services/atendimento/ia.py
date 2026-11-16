@@ -6578,7 +6578,12 @@ def bateu_com_o_banco(agente: Mapping[str, Any], categoria: str | None, texto: s
     conf = agente.get("banco_confere")
     if (
         isinstance(conf, Mapping)
-        and conf.get("veredito") in ("mesma", "serve")
+        and (
+            conf.get("veredito") in ("mesma", "serve")
+            # A opção B (16/11/2026): o PADRÃO da equipe para o tipo de reclamação, só na
+            # conferência do rascunho preso por ação de pessoa (as ações ficam para depois).
+            or (conf.get("veredito") == "padrao" and conf.get("pessoa") is True)
+        )
         # A virada: a resposta do banco que o pacote mostrou (a conferência leu a pergunta que
         # a equipe respondeu: outra pergunta é "diferente"); os sensíveis também (85%).
         and conf.get("id") in tipos

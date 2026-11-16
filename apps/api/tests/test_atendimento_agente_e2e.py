@@ -1245,7 +1245,8 @@ def _o_pedido_ao_verificador(api: Api, *, texto: str, pergunta: str) -> str:
     amostragem, o esforço "low", o sistema fixo em cache de 1 h; devolve a entrada."""
     (pedido,) = api.verificador
     assert api.chaves_verificador == [CHAVE] and len(api.clientes) == 1  # o MESMO cliente
-    assert pedido["model"] == MODELO and pedido["max_tokens"] == verificador.MAX_TOKENS
+    assert pedido["model"] == verificador.modelo_do_verificador()
+    assert pedido["max_tokens"] == verificador.MAX_TOKENS
     assert not {"tools", "tool_choice", "temperature", "top_p", "top_k", "thinking"} & set(pedido)
     assert pedido["output_config"]["effort"] == verificador.EFFORT
     assert pedido["output_config"]["format"]["schema"] == verificador.esquema()

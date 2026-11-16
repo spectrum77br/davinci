@@ -63,7 +63,7 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Annotated, Any
@@ -2599,6 +2599,10 @@ class Resultado:
     erro_tipo: str | None = None
     # Quando o veredito foi dado (UTC; a validade do "ok", `VALIDADE_OK`).
     em: datetime = field(default_factory=lambda: datetime.now(UTC))
+    # A virada (16/11/2026, `respondida_pelo_banco`): as marcas que a resposta da equipe no
+    # banco à mesma pergunta soltou, e o `par:b<id>` dela.
+    soltos: tuple[str, ...] = ()
+    solto_por: str | None = None
 
     @classmethod
     def falhou(cls, falha: str, **kw: Any) -> Resultado:
@@ -2642,6 +2646,7 @@ class Resultado:
             "uso": self.uso.para_fatos(),
             "custo_usd": round(self.uso.custo_usd, 6),
             "texto_sha": assinatura_do_texto(texto),
+            **({"soltos": list(self.soltos), "solto_por": self.solto_por} if self.soltos else {}),
         }
 
 
@@ -2982,6 +2987,39 @@ class Conferencia:
     codigo: str | None = None
 
 
+# A VIRADA (16/11/2026, o Eduardo: "ajusta isso"): o "não responde o que foi perguntado" não segura
+# o rascunho que a conferência pelo sentido achou no banco como a resposta da equipe à MESMA
+# pergunta ("mesma"/"serve", `confere_banco.VEREDITOS_QUE_SOLTAM`) — a equipe já respondeu isso
+# assim. No teste de 16/11, 3 dos 6 rascunhos do banco barrados eram a resposta curta da equipe
+# ("Reembolso direto com a plataforma, não temos acesso!"). Só essa marca: a afirmação sem lastro
+# continua valendo (o "não tem rádio" de outro modelo que o banco trouxe segue barrado).
+MARCAS_QUE_O_BANCO_SOLTA = frozenset({NAO_RESPONDE})
+
+
+def respondida_pelo_banco(r: Resultado, ctx: Any) -> Resultado:
+    """O veredito com o "não responde" solto pela resposta da equipe no banco (ver acima). PURA."""
+    from app.services.atendimento.agente import confere_banco
+
+    v = r.veredito
+    conf = getattr(ctx, "banco_confere", None) or {}
+    bateu = getattr(ctx, "banco_bateu", None)
+    if r.ok or v is None or not getattr(ctx, "banco_exigido", False) or not bateu:
+        return r
+    if conf.get("veredito") not in confere_banco.VEREDITOS_QUE_SOLTAM:
+        return r
+    marcas = problemas(v)
+    if not marcas or not set(marcas) <= MARCAS_QUE_O_BANCO_SOLTA:
+        return r
+    solto = v.model_copy(
+        update={
+            "responde_o_que_foi_perguntado": True,
+            "ok_para_envio_automatico": True,
+            "motivos": [],
+        }
+    )
+    return replace(r, ok=aprovado(solto), veredito=solto, soltos=tuple(marcas), solto_por=bateu)
+
+
 def _nao_rodou(motivo: str) -> dict:
     return {"versao": VERSAO, "rodou": False, "ok": False, "motivo": motivo}
 
@@ -3103,11 +3141,13 @@ async def no_rascunho(
                 "declarado": categoria,
             }
             r = await verificar(ctx, proposta, texto, resumo, ctx.rastro, **argumentos_da_vez)
+            r = respondida_pelo_banco(r, ctx)
             if sombra and sombra != modelo_do_verificador():
                 # O eval (16/11/2026): o mesmo texto com o outro modelo, só gravado.
                 r_sombra = await verificar(
                     ctx, proposta, texto, resumo, ctx.rastro, modelo=sombra, **argumentos_da_vez
                 )
+                r_sombra = respondida_pelo_banco(r_sombra, ctx)
     registro = r.para_fatos(final.texto)
     if r_sombra is not None:
         registro["sombra"] = {

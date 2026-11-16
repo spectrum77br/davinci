@@ -799,8 +799,11 @@ class Settings(BaseSettings):
     # sozinho (vai para pessoa). O copiloto e o "Sugerir" não o chamam.
     atendimento_agente_verificador: bool = True
     # O MODELO do verificador (16/11/2026, o Eduardo: "se tiver que trocar o Haiku pelo Sonnet,
-    # faça"): vazio = o do código (`agente.verificador.MODELO`, Haiku 5.5).
-    atendimento_verificador_modelo: str = ""
+    # faça"): vazio = o do código (`agente.verificador.MODELO`, Haiku 5.5). O teste de 16/11 (129
+    # conversas, os dois nos mesmos rascunhos): o Haiku liberou 32 de 70, o Sonnet 38 — 29% → 34%
+    # saindo sozinho —, e nos 12 em que discordaram o Sonnet acertou a maioria; ~US$ 0,02 a
+    # conferência (o Haiku, ~US$ 0,001). Voltar ao Haiku: ATENDIMENTO_VERIFICADOR_MODELO=claude-haiku-5-5.
+    atendimento_verificador_modelo: str = "claude-sonnet-5-5"
     # Só no processo do eval (`scripts.agente_eval.rodar --verificador`): o verificador roda no
     # replay (como ao vivo) e, com o modelo de SOMBRA, roda de novo com ele e grava o veredito ao
     # lado, sem decidir — a comparação dos dois modelos nas mesmas respostas.

@@ -624,3 +624,60 @@ def test_na_virada_as_regras_antigas_de_texto_so_avisam():
     assert (
         agente_svc._ja_tratado_pela_loja(p, com_texto, _ctx(acoes_codigo=[]), base, None) is False
     )
+
+
+# ── A opção B (16/11/2026): o padrão da equipe solta a reclamação e deixa a marca ──────────────
+
+
+class _ClientePadrao(_Cliente):
+    """A conferência que acha o PADRÃO da equipe no caso par:b2 (defeito → pede vídeo)."""
+
+    def __init__(self) -> None:
+        super().__init__("padrao")
+        self.caso = "par:b2"
+
+
+def _reclamacao(**campos: Any) -> saida.Proposta:
+    base = {
+        "texto": "Sentimos muito! Pode mandar um vídeo curto mostrando o problema por aqui?",
+        "assunto": "defeito",
+        "acao_pessoa": constantes.ACAO_ANALISAR_EVIDENCIA,
+        "motivo_pessoa": "analisar o vídeo",
+        "evidencias": ["par:b2"],
+    }
+    return _proposta(**{**base, **campos})
+
+
+async def test_opcao_b_o_padrao_da_equipe_solta_a_reclamacao_e_marca():
+    ctx = _ctx()
+    cliente = _ClientePadrao()
+    assert await _soltar(ctx, _reclamacao(), cliente, acoes=[constantes.ACAO_ANALISAR_EVIDENCIA])
+    # Responde e marca: a ação fica para depois do envio ("Precisa de ação").
+    assert ctx.banco_bateu == "par:b2" and ctx.responde_e_marca is True
+    assert ctx.banco_confere["veredito"] == confere_banco.PADRAO
+    assert cliente.pedidos[0]["system"] == confere_banco.SISTEMA_COM_PADRAO
+    # O envio aceita o padrão só da conferência do rascunho preso por ação de pessoa.
+    agente = {
+        "regua": True,
+        "banco_tipos": {"par:b2": "defeito"},
+        "banco_confere": {"id": "par:b2", "veredito": "padrao", "pessoa": True},
+    }
+    assert ia.bateu_com_o_banco(agente, "defeito", "x")
+    sem_pessoa = {**agente, "banco_confere": {"id": "par:b2", "veredito": "padrao"}}
+    assert not ia.bateu_com_o_banco(sem_pessoa, "defeito", "x")
+
+
+async def test_opcao_b_so_nas_acoes_de_reclamacao():
+    # Falta do dado não é reclamação: o padrão não solta (a conferência nem oferece o "padrao").
+    ctx = _ctx()
+    cliente = _ClientePadrao()
+    p = _reclamacao(acao_pessoa=constantes.ACAO_DADO_INDISPONIVEL)
+    assert not await _soltar(ctx, p, cliente, acoes=[constantes.ACAO_DADO_INDISPONIVEL])
+    assert cliente.pedidos[0]["system"] == confere_banco.SISTEMA
+    assert ctx.banco_bateu is None and not ctx.responde_e_marca
+    # Uma ação fora das de reclamação junto também tira o padrão.
+    ctx2 = _ctx()
+    cliente2 = _ClientePadrao()
+    acoes = [constantes.ACAO_ANALISAR_EVIDENCIA, constantes.ACAO_DADO_INDISPONIVEL]
+    assert not await _soltar(ctx2, _reclamacao(), cliente2, acoes=acoes)
+    assert set(confere_banco.ACOES_DO_PADRAO) <= set(constantes.ACOES_PESSOA)
