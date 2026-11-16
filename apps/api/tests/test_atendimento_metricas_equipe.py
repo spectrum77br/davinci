@@ -188,3 +188,62 @@ async def test_a_analise_do_dia_vai_para_o_redis_sem_texto_de_cliente(db: AsyncS
     assert "mudou o prazo" in corpo
     assert not {"temperature", "top_p", "top_k", "thinking"} & set(pedido)
     assert (await metricas_equipe.ultima_analise())["texto"] == analise["texto"]
+
+
+# ── O "Não precisa de resposta" conta como resposta no tempo (16/11/2026) ──────────
+
+
+async def _cliente(db: AsyncSession, conversa, n: str, quando: datetime):
+    await gravar.gravar_mensagem(
+        db,
+        conversa,
+        externo_id=f"{conversa.externo_id}-c{n}",
+        autor="cliente",
+        texto="Olá",
+        enviada_em=quando,
+        origem=constantes.ORIGEM_CLIENTE,
+    )
+    await db.commit()
+
+
+async def test_o_clique_sem_resposta_fecha_a_espera_na_hora(db: AsyncSession, make_user):
+    from app.deps.team_scope import TeamScope
+    from app.routers import atendimento as rota
+
+    t0 = AGORA - timedelta(hours=5)
+    marcada = await _conversa(db, make_user, externo_id="sr1", comprador_nome="Maria Souza")
+    await _cliente(db, marcada, "1", t0)
+    marcada.dados = {
+        **(marcada.dados or {}),
+        "sem_resposta_em": (t0 + timedelta(minutes=30)).isoformat(),
+    }
+    marcada.sem_resposta_necessaria = True
+    # A espera fechada no clique e uma nova, depois dele, respondida pela loja.
+    outra = await _conversa(db, make_user, externo_id="sr2", comprador_nome="Maria Souza")
+    await _cliente(db, outra, "1", t0)
+    outra.dados = {
+        **(outra.dados or {}),
+        "sem_resposta_em": (t0 + timedelta(minutes=10)).isoformat(),
+    }
+    await db.commit()
+    await _cliente(db, outra, "2", t0 + timedelta(minutes=60))
+    await gravar.gravar_mensagem(
+        db,
+        outra,
+        externo_id=f"{outra.externo_id}-l1",
+        autor="loja",
+        texto="Bom dia! Como posso ajudar?",
+        enviada_em=t0 + timedelta(minutes=90),
+        origem=constantes.ORIGEM_HUMANO,
+    )
+    await db.commit()
+
+    turnos = await rota._turnos_das_lojas(
+        db, TeamScope(unrestricted=True), AGORA - timedelta(days=1), AGORA
+    )
+    por_loja = {k[0]: v for k, v in turnos.items()}
+    a = por_loja[marcada.integration_id]
+    assert (a["tempos"], a["recebidas"], a["vencidas"]) == ([30.0], 1, 0)
+    b = por_loja[outra.integration_id]
+    assert sorted(b["tempos"]) == [10.0, 30.0] and b["vencidas"] == 0
+    assert rota._hora_do_clique("lixo") is None and rota._hora_do_clique(None) is None
