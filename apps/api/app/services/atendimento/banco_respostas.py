@@ -1073,6 +1073,9 @@ async def exemplos_do_turno(
             "idade_dias": int(a["idade_dias"]),
             "mesmo_tipo": bool(a["mesmo_tipo"]),
             "mesmo_modelo": bool(a["mesmo_modelo"]),
+            # 16/11/2026 (a virada): a conversa de UM anúncio de UM modelo — o verificador
+            # aceita a do mesmo produto ou modelo como lastro de produto só nela.
+            "um_modelo": bool(um_modelo),
             # 13/11/2026 (a virada): o TIPO da resposta no banco. Sem ele, a conferência pelo
             # sentido (`agente.confere_banco.candidatas`) e o `fatos.agente.banco_tipos` nunca
             # achavam a resposta do mesmo tipo — o "bateu com a do banco" não rodava.

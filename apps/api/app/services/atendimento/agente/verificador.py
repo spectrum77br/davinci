@@ -355,6 +355,19 @@ logger = structlog.get_logger()
 # A calibração com a chave precisa rodar antes de confiar nos números do v19.
 VERSAO = "v19"
 MODELO = "claude-haiku-5-5"
+
+
+def modelo_do_verificador() -> str:
+    """O modelo do verificador: o configurado (`atendimento_verificador_modelo`) ou `MODELO`."""
+    configurado = str(getattr(get_settings(), "atendimento_verificador_modelo", "") or "")
+    return configurado.strip() or MODELO
+
+
+def _no_replay() -> bool:
+    """O eval pediu o verificador no replay (`atendimento_verificador_no_replay`)?"""
+    return bool(getattr(get_settings(), "atendimento_verificador_no_replay", False))
+
+
 # 26/10/2026: "low" → "medium". Calibração v13 (462 linhas): o medium segura mais ruim
 # (97,3% × 96,4%) e barra menos da metade das boas (12 × 26 de 97), por ~US$ 0,0005
 # a conferência.
@@ -1153,6 +1166,8 @@ class ResumoDoPacote:
     # "mesmo_anuncio", "mesmo_produto", "fonte_de_produto", "titulo_do_anuncio",
     # "idade_dias", …}.
     pares: tuple[dict, ...] = ()
+    # A virada (16/11/2026): o banco de respostas é a fonte principal do agente.
+    virada: bool = False
     # v10 (item 6 da rodada "redondo", 23/10/2026): as buscas no catálogo da loja
     # ({"termo", "anuncios": [{"item_id", "nome_curto", "variacoes_casadas",
     # "disponivel", "da_conversa"}]}) — vazio = a seção não vai (a entrada de antes).
@@ -1490,8 +1505,10 @@ def resumo_do_pacote(
             and conversa_sem_pendencia(base.recentes, gatilho)
         ),
         lacunas=lacunas_com_dado(base.valores),
-        # v9 (item 32): as respostas da equipe que o rascunho cita.
-        pares=tuple(ctx.pares_citados(ctx.evidencias)),
+        # v9 (item 32): as respostas da equipe que o rascunho cita. A virada (16/11/2026): e
+        # TODAS as do banco que o agente viu (`pares_para_o_verificador`).
+        pares=tuple(pares_para_o_verificador(ctx)),
+        virada=bool(getattr(ctx, "banco_exigido", False)),
         # v10 (item 6 da rodada "redondo"): as buscas no catálogo da loja.
         busca=busca_do_contexto(ctx),
         # v12 (D1): a ação que continua com a pessoa depois do envio.
@@ -1912,6 +1929,14 @@ CABECALHO_PARES = (
     "«vale para produto»: o que diz do produto, se as EVIDÊNCIAS não dizem o contrário; "
     "nunca dado, estado, data ou prazo deste pedido):"
 )
+# A virada (16/11/2026): o mesmo nome da seção (o SISTEMA fala dela), com as do banco que o
+# agente viu e não citou — o banco de respostas é a fonte principal do agente.
+CABECALHO_PARES_VIRADA = CABECALHO_PARES.replace(
+    "RESPOSTAS DA EQUIPE CITADAS (",
+    "RESPOSTAS DA EQUIPE CITADAS (as do banco de respostas — as que o rascunho cita e as que o "
+    "agente viu sem citar, todas da equipe; ",
+    1,
+)
 VALE_POLITICA = "vale para política da loja"
 NAO_VALE_POLITICA = "não vale para política da loja"
 VALE_PRODUTO = "vale para produto"
@@ -1919,7 +1944,35 @@ NAO_VALE_PRODUTO = "não vale para produto"
 VALE_PRODUTO_NOMEADO = "vale para produto só no modelo nomeado na resposta"
 
 
-def linhas_dos_pares(pares: Sequence[Mapping[str, Any]], nomes: Iterable[str | None]) -> list[str]:
+# A VIRADA (16/11/2026, o Eduardo: "ajusta isso"): o verificador barrava como "afirma sem lastro"
+# 68 de 103 respostas ao vivo (13–16/11) — ele só via as respostas do banco que o rascunho CITOU, e
+# o produto só valia na do mesmo anúncio de um modelo só. Na virada o banco é a fonte principal: o
+# verificador vê TODAS as respostas do banco que o agente viu, e a da equipe sobre o MESMO produto
+# ou modelo vale para produto (especificação, tamanho, capacidade, o que vem na caixa). Dado,
+# estado, data, prazo e valor de pedido continuam nunca valendo (são de outro pedido).
+MAX_PARES_NO_VERIFICADOR = 10
+
+
+def pares_para_o_verificador(ctx: Any) -> list[dict]:
+    """Os pares que o verificador lê: os citados e, na virada, as outras respostas do banco que
+    o pacote mostrou (e as achadas pelo rascunho). PURA."""
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    citados = [dict(p) for p in ctx.pares_citados(ctx.evidencias)]
+    if not getattr(ctx, "banco_exigido", False):
+        return citados
+    vistos = {p.get("id") for p in citados}
+    do_banco = [
+        dict(p)
+        for i, p in (getattr(ctx, "pares_do_pacote", None) or {}).items()
+        if i.startswith(agente_ctx.PREFIXO_BANCO) and i not in vistos
+    ]
+    return [*citados, *do_banco][:MAX_PARES_NO_VERIFICADOR]
+
+
+def linhas_dos_pares(
+    pares: Sequence[Mapping[str, Any]], nomes: Iterable[str | None], *, virada: bool = False
+) -> list[str]:
     """As linhas de RESPOSTAS DA EQUIPE CITADAS (vazia sem par citado). PURA.
 
     Revisão do item 32 (22/10/2026): "do mesmo anúncio"/"do mesmo produto" só no par que
@@ -1932,9 +1985,17 @@ def linhas_dos_pares(pares: Sequence[Mapping[str, Any]], nomes: Iterable[str | N
     if not pares:
         return []
     nomes = tuple(nomes)
-    linhas = [CABECALHO_PARES]
+    linhas = [CABECALHO_PARES_VIRADA if virada else CABECALHO_PARES]
     for par in pares:
         titulo = _uma_linha(str(par.get("titulo_do_anuncio") or ""), 80)
+        # A virada: a resposta do BANCO sobre o mesmo produto ou modelo (de qualquer loja, o
+        # anúncio sem o produto no catálogo) vale para produto — na conversa de um modelo só;
+        # com outro modelo na conversa, só no modelo que a resposta nomeia.
+        do_mesmo = (
+            virada
+            and str(par.get("id") or "").startswith("par:b")
+            and bool(par.get("mesmo_modelo") or par.get("mesmo_produto"))
+        )
         if par.get("fonte_de_produto") is True:
             produto = (
                 ("do mesmo anúncio «" + titulo + "»" if titulo else "do mesmo anúncio")
@@ -1947,6 +2008,12 @@ def linhas_dos_pares(pares: Sequence[Mapping[str, Any]], nomes: Iterable[str | N
             produto = (
                 "do anúncio «" + titulo + "»" if titulo else "de um anúncio"
             ) + f" desta conversa, que tem outro anúncio ou modelo: {VALE_PRODUTO_NOMEADO}"
+        elif do_mesmo and par.get("um_modelo"):
+            produto = f"do mesmo produto ou modelo, a conversa de um modelo só: {VALE_PRODUTO}"
+        elif do_mesmo:
+            produto = (
+                f"do mesmo produto ou modelo, a conversa com outro modelo: {VALE_PRODUTO_NOMEADO}"
+            )
         else:
             produto = f"de outro anúncio ou sem anúncio: {NAO_VALE_PRODUTO}"
         loja = (
@@ -2420,7 +2487,7 @@ def montar_entrada(
             else []
         ),
         # v9 (item 32): as respostas da equipe que o rascunho cita.
-        *linhas_dos_pares(resumo.pares, nomes),
+        *linhas_dos_pares(resumo.pares, nomes, virada=resumo.virada),
         # v10 (item 6 da rodada "redondo"): a busca no catálogo da loja, só quando houve.
         *linhas_da_busca(resumo.busca, nomes),
         # v11 (liberações L2 e L3, 23/10/2026): a restrição de envio conferida e a condição
@@ -2733,6 +2800,7 @@ async def verificar(
     assunto: str | None = None,
     liberados: Sequence[str] | None = None,
     declarado: str | None = None,
+    modelo: str | None = None,
 ) -> Resultado:
     """O verificador num rascunho do agente. Nunca levanta (falha fechada).
 
@@ -2762,6 +2830,7 @@ async def verificar(
             replay=ctx.modo_replay,
             teto_conversa=ctx.teto_conversa_usd,
             gasto_previo=ctx.uso.custo_usd,
+            modelo=modelo or modelo_do_verificador(),
         )
     except Exception as e:  # noqa: BLE001 — a falha do nosso código também fecha
         logger.warning("atendimento_agente_verificador_erro", err=type(e).__name__)
@@ -2785,7 +2854,7 @@ def por_que_nao_verifica(
     conversa que não dependem do momento) — mais o "Sugerir", o copiloto e o
     replay, que nunca enviam sozinhos.
     """
-    if ctx.modo_replay:
+    if ctx.modo_replay and not _no_replay():
         return "replay"
     if base.forcar:
         return NAO_RODA_SUGERIR
@@ -2972,7 +3041,7 @@ async def no_rascunho(
     (o commit antes da rede, como o laço), chama o verificador e, sem o
     "ok", põe a pendência `CODIGO` (pessoa) com o motivo dele.
     """
-    if ctx.modo_replay:
+    if ctx.modo_replay and not _no_replay():
         return Conferencia(final)
     canal = None
     categoria = None
@@ -2995,6 +3064,8 @@ async def no_rascunho(
     if motivo is not None:
         return Conferencia(final, _nao_rodou(motivo))
 
+    r_sombra: Resultado | None = None
+    sombra = str(getattr(get_settings(), "atendimento_verificador_sombra", "") or "").strip()
     if not get_settings().atendimento_agente_verificador:
         r = Resultado.falhou(FALHA_DESLIGADO)
     elif _instrucao_na_conversa(base, gatilho, final.texto):
@@ -3021,22 +3092,30 @@ async def no_rascunho(
             logger.warning("atendimento_agente_verificador_erro", err=type(e).__name__)
             r = Resultado.falhou(FALHA_INTERNA, detalhe=type(e).__name__)
         else:
-            r = await verificar(
-                ctx,
-                proposta,
-                texto,
-                resumo,
-                ctx.rastro,
-                cliente=cliente,
-                prazo_s=prazo_s,
-                nomes=base.nomes,
-                assunto=final.categoria,
-                liberados=assuntos_liberados(canal, produto=ctx.produto_pelo_anuncio),
+            argumentos_da_vez = {
+                "cliente": cliente,
+                "prazo_s": prazo_s,
+                "nomes": base.nomes,
+                "assunto": final.categoria,
+                "liberados": assuntos_liberados(canal, produto=ctx.produto_pelo_anuncio),
                 # v7: o assunto que a trava liberou (a pergunta de produto vira
                 # `confirmar_variacao`), dito como liberado — não se reavalia.
-                declarado=categoria,
-            )
+                "declarado": categoria,
+            }
+            r = await verificar(ctx, proposta, texto, resumo, ctx.rastro, **argumentos_da_vez)
+            if sombra and sombra != modelo_do_verificador():
+                # O eval (16/11/2026): o mesmo texto com o outro modelo, só gravado.
+                r_sombra = await verificar(
+                    ctx, proposta, texto, resumo, ctx.rastro, modelo=sombra, **argumentos_da_vez
+                )
     registro = r.para_fatos(final.texto)
+    if r_sombra is not None:
+        registro["sombra"] = {
+            "modelo": sombra,
+            "ok": r_sombra.ok,
+            "problemas": list(r_sombra.problemas or [])[:8],
+            "custo_usd": round(r_sombra.uso.custo_usd, 6),
+        }
     # Só códigos e números (nunca o texto do cliente nem o do rascunho).
     logger.info(
         "atendimento_agente_verificador",
@@ -3051,8 +3130,10 @@ async def no_rascunho(
         saida=r.uso.saida,
         custo_usd=round(r.uso.custo_usd, 6),
     )
+    # O eval: o gasto da sombra entra na conta da conversa (o teto do `rodar`).
+    gasto = r.uso.custo_usd + (r_sombra.uso.custo_usd if r_sombra is not None else 0.0)
     if r.ok:
-        return Conferencia(final, registro, r.uso.custo_usd)
+        return Conferencia(final, registro, gasto)
     if r.falha == FALHA_PROVEDOR and r.detalhe in STATUS_QUE_AVISAM:
         # O erro que não passa sozinho (o formato do pedido, a chave, o modelo):
         # TODO rascunho elegível iria para pessoa sem ninguém saber por quê.
@@ -3068,7 +3149,7 @@ async def no_rascunho(
     novo = checagens.aplicar(
         final, checagens.Checagens(pendencias=[pendencia]), acoes_pessoa=[], modo=base.modo
     )
-    return Conferencia(novo, registro, r.uso.custo_usd, CODIGO)
+    return Conferencia(novo, registro, gasto, CODIGO)
 
 
 # ── v17 (an0311, 03/11/2026): o corte da frase sem lastro ─────────────────

@@ -798,6 +798,14 @@ class Settings(BaseSettings):
     # envio sozinho do agente: `false` = nenhum rascunho do agente sai
     # sozinho (vai para pessoa). O copiloto e o "Sugerir" não o chamam.
     atendimento_agente_verificador: bool = True
+    # O MODELO do verificador (16/11/2026, o Eduardo: "se tiver que trocar o Haiku pelo Sonnet,
+    # faça"): vazio = o do código (`agente.verificador.MODELO`, Haiku 5.5).
+    atendimento_verificador_modelo: str = ""
+    # Só no processo do eval (`scripts.agente_eval.rodar --verificador`): o verificador roda no
+    # replay (como ao vivo) e, com o modelo de SOMBRA, roda de novo com ele e grava o veredito ao
+    # lado, sem decidir — a comparação dos dois modelos nas mesmas respostas.
+    atendimento_verificador_no_replay: bool = False
+    atendimento_verificador_sombra: str = ""
     # Item 32 da auditoria ao vivo (22/10/2026, 3c): a devolução já aberta na Shopee
     # ("Em andamento") ou no TikTok ("Esperando o comprador enviar") sem nada para a
     # loja decidir, com o cliente só perguntando o andamento ou o prazo do reembolso,

@@ -219,7 +219,30 @@ async def principal(
             "banco (o piso, o 'bateu com o banco' pelo sentido) — só neste processo"
         ),
     )
+    p.add_argument(
+        "--verificador",
+        action="store_true",
+        help="o verificador roda no replay, como ao vivo (16/11/2026) — só neste processo",
+    )
+    p.add_argument(
+        "--verificador-modelo",
+        default=None,
+        help="o modelo do verificador que decide (padrão: o do código ou da configuração)",
+    )
+    p.add_argument(
+        "--verificador-sombra",
+        default=None,
+        help="roda também com este modelo e grava o veredito ao lado (rastro), sem decidir",
+    )
     args = p.parse_args(list(argv) if argv is not None else None)
+    if args.verificador or args.verificador_modelo or args.verificador_sombra:
+        # Só o processo do eval: ao vivo o verificador segue com a configuração.
+        s = get_settings()
+        s.atendimento_verificador_no_replay = True
+        if args.verificador_modelo:
+            s.atendimento_verificador_modelo = args.verificador_modelo
+        if args.verificador_sombra:
+            s.atendimento_verificador_sombra = args.verificador_sombra
     if args.le_banco or args.virada:
         # Só o processo do eval: o atendimento ao vivo segue com a chave da configuração.
         get_settings().atendimento_agente_le_banco = True

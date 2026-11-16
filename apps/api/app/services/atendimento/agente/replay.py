@@ -1115,6 +1115,21 @@ def _rastro(
             "veredito": conf.get("veredito"),
             "pessoa": bool(conf.get("pessoa")),
         }
+    ver = fatos_agente.get("verificador")
+    if isinstance(ver, Mapping):
+        # O eval do verificador (16/11/2026, `rodar --verificador`): o veredito e o do modelo de
+        # sombra — só códigos e o modelo (nunca o texto).
+        sombra = ver.get("sombra")
+        rastro["verificador"] = {
+            "rodou": ver.get("rodou"),
+            "ok": ver.get("ok"),
+            "modelo": ver.get("modelo"),
+            "motivo": ver.get("motivo"),
+            "falha": ver.get("falha"),
+            "problemas": _lista(ver.get("problemas")),
+            "custo_usd": ver.get("custo_usd"),
+            "sombra": dict(sombra) if isinstance(sombra, Mapping) else None,
+        }
     if captura is not None and captura.corpo is not None:
         pac = captura.pacote()
         rastro["pacote"] = (
