@@ -4986,6 +4986,7 @@ async def conferir_saida(
     garantia_apple_pelo_fato: bool = False,
     ag_cancelamento_etiqueta: bool = False,
     garantia_geral: str | None = None,
+    textos_da_equipe: Sequence[str] = (),
 ) -> SaidaConferida:
     """O código confere o que o modelo disse. Não grava nada; só LÊ o banco
     para saber se a loja respondeu enquanto o modelo escrevia
@@ -5232,7 +5233,9 @@ async def conferir_saida(
             # atributo de condição ou descrição, sem se contradizer — está
             # provada (`checagens.condicao_provada`); a trava do título vale para
             # o resto. O legado não muda.
-            provados = _checagens_r4b.condicao_provada(final, fichas)
+            provados = _checagens_r4b.condicao_provada(
+                final, fichas
+            ) | _checagens_r4b.condicao_pela_equipe(final, textos_da_equipe)
             sem_evidencia = [
                 p.motivo
                 for p in evidencias.conferir_afirmacoes(
