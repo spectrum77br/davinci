@@ -600,7 +600,8 @@ def test_7_o_verificador_conhece_a_excecao():
     assert int(verificador.VERSAO.removeprefix("v")) >= 16
     assert "exatamente assim" not in verificador.SISTEMA.split("4. caminho_fora")[1][:1500]
     assert "ao SAC da Uranyx também é true" in verificador.SISTEMA
-    assert "do aparelho Uranyx, «90 dias», «1 ano», «9 meses»" in verificador.SISTEMA
+    # v20 (16/11/2026): o prazo só o da GARANTIA («prazo_como_a_equipe_diz»).
+    assert "não traga em «prazo_como_a_equipe_diz»" in verificador.SISTEMA
     shopee = prompt.bloco_da_plataforma("shopee", [])
     assert "«tem garantia, mas a única forma é a devolução pela Shopee»" in shopee
     assert "Do Uranyx, nunca prazo em dias, meses ou anos, datas, o app Uranyx" in shopee

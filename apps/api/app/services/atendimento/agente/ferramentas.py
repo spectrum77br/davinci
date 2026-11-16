@@ -89,6 +89,7 @@ from app.services.atendimento.agente import (
     checagens,
     contexto,
     fatos_loja,
+    garantia_equipe,
     pares,
     sessao,
 )
@@ -263,6 +264,9 @@ NUNCA_NA_GARANTIA_URANYX = (
     "90 dias, 1 ano, 9 meses, os meses de hardware ou de software, datas de fim, o app Uranyx, "
     "o site uranyx.com.br/sac e o SAC da Uranyx (decisão do dono, 27/10/2026)"
 )
+# 16/11/2026 (o dono: "diz como a equipe diz"): o prazo volta POR MODELO, o que a equipe diz do
+# modelo do pedido ou do anúncio quando ela concorda (`garantia_equipe.com_o_prazo` põe os números
+# e troca o `nunca`); sem isso, esta regra sem número continua.
 REGRA_URANYX = {
     "a_partir_de": "entrega",
     "como_a_equipe_responde": list(FALAS_DA_GARANTIA_DA_EQUIPE),
@@ -1198,6 +1202,10 @@ async def _calculo(s: AsyncSession, ctx: ContextoAgente, alvo: Alvo) -> Resultad
             status = contexto_svc.STATUS_ENTREGUE_SEM_DATA
         rotulo = contexto_svc.STATUS_GARANTIA_IA[status]
         regra, dos_fatos = await _regra_uranyx(s, ctx)
+        # 16/11/2026: o prazo como a equipe diz, pelo modelo do ITEM do pedido.
+        regra = await garantia_equipe.regra_com_o_prazo(
+            s, regra, [(item or {}).get("descricao")], as_of=ctx.agora()
+        )
         ids += dos_fatos
         periodos = periodos_uranyx(inicio, fim_sw, _hoje(ctx))
     elif linha == LINHA_CHARLOTS:
@@ -1330,6 +1338,11 @@ async def dados_ver_garantia(
             if not registro:
                 return await _calculo(s, ctx, alvo)
         regra, dos_fatos = await _regra_uranyx(s, ctx)
+        # 16/11/2026: o prazo como a equipe diz, pelo produto de cada registro do Painel.
+        regras = [
+            await garantia_equipe.regra_com_o_prazo(s, regra, [g.get("produto")], as_of=ctx.agora())
+            for g in registro
+        ]
     # O pedido já diz de qual compra é (o "de onde" só vale na garantia
     # achada pelo que o comprador citou, sem pedido na conversa). Os períodos
     # da Uranyx (decisões 6 a 8 do dono) pelo início do registro.
@@ -1338,10 +1351,10 @@ async def dados_ver_garantia(
             {
                 **{k: v for k, v in g.items() if k != "de_onde" or alvo is None},
                 **periodos_uranyx(g.get("inicio"), g.get("fim_software"), _hoje(ctx)),
-                "regra": dict(regra),
+                "regra": regra_do_registro,
             }
         )
-        for g in registro
+        for g, regra_do_registro in zip(registro, regras, strict=True)
     ]
     return Resultado(
         dados={
@@ -1376,26 +1389,29 @@ async def _regra_sem_pedido(
     if not item_id or plat is None or ctx.integration_id is None:
         # Sem saber o produto: o agente pergunta qual é (fontes v1.3, decisão 3).
         return Resultado(dados=dados)
-    linhas = {
-        linha_do_item(sku, nome)
-        for nome, sku in (
-            await s.execute(
-                select(Product.name, Product.sku)
-                .join(ProductLink, ProductLink.product_id == Product.id)
-                .where(
-                    ProductLink.integration_id == ctx.integration_id,
-                    ProductLink.platform == plat,
-                    ProductLink.external_id == str(item_id),
-                    ProductLink.morto_desde.is_(None),
-                )
-                .limit(especificacoes.MAX_PRODUTOS)
+    produtos = (
+        await s.execute(
+            select(Product.name, Product.sku)
+            .join(ProductLink, ProductLink.product_id == Product.id)
+            .where(
+                ProductLink.integration_id == ctx.integration_id,
+                ProductLink.platform == plat,
+                ProductLink.external_id == str(item_id),
+                ProductLink.morto_desde.is_(None),
             )
-        ).all()
-    }
+            .limit(especificacoes.MAX_PRODUTOS)
+        )
+    ).all()
+    linhas = {linha_do_item(sku, nome) for nome, sku in produtos}
     regra: dict | None = None
     ids: list[str] = []
     if linhas == {LINHA_URANYX}:
         regra, ids = await _regra_uranyx(s, ctx)
+        # 16/11/2026: o prazo como a equipe diz, quando os produtos do anúncio são de UM modelo
+        # (o anúncio que mistura modelos — "A17 … ou 16.128 Premium" — fica sem prazo).
+        regra = await garantia_equipe.regra_com_o_prazo(
+            s, regra, [nome for nome, _sku in produtos], as_of=ctx.agora()
+        )
     elif linhas == {LINHA_CHARLOTS}:
         fato = await fatos_loja.fato_da_chave(s, CHAVE_GARANTIA_CHARLOTS, agora=ctx.agora())
         if fato is not None:

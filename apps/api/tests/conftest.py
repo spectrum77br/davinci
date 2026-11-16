@@ -778,6 +778,17 @@ def _flex_local_de_fabrica():
 
 
 @pytest.fixture(autouse=True)
+def _garantia_da_equipe_sem_cache():
+    """O prazo da garantia como a equipe diz (`agente.garantia_equipe`, 16/11/2026) fica num
+    cache do processo, por hora: cada teste começa — e termina — sem ele."""
+    from app.services.atendimento.agente import garantia_equipe
+
+    garantia_equipe.limpar_cache()
+    yield
+    garantia_equipe.limpar_cache()
+
+
+@pytest.fixture(autouse=True)
 def _numero_da_caixa_sem_o_corte_do_duoke(monkeypatch):
     """O número da Caixa conta desde que o Duoke foi zerado inteiro
     (`pendente.ZERADO_NO_DUOKE_EM`, 14/10/2026 12:35): nos testes, que usam

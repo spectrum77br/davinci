@@ -616,7 +616,7 @@ def test_o_resumo_le_o_estado_do_turno():
 
 def test_o_sistema_v17_tem_as_regras_novas_e_mantem_as_travas():
     s = v.SISTEMA
-    assert v.VERSAO == "v19"
+    assert v.VERSAO == "v20"
     # as liberações (an0311)
     assert "O QUE O ATENDIMENTO JÁ ENVIOU NESTA CONVERSA" in s
     assert "conferimos pelas opções do anúncio" in s
@@ -624,12 +624,15 @@ def test_o_sistema_v17_tem_as_regras_novas_e_mantem_as_travas():
     assert "o estado que o cliente citou" in s
     assert "Antes da compra (sem pedido), a quem pergunta se tem" in s
     # as travas que não afrouxaram
-    assert "«90 dias», «1 ano», «9 meses», o app Uranyx" in s
+    # v20 (16/11/2026): o prazo só o da GARANTIA («prazo_como_a_equipe_diz», o que a equipe diz
+    # do modelo); o app, o site e o SAC da Uranyx continuam sem lastro.
+    assert "do aparelho Uranyx, o app Uranyx, o site uranyx.com.br/sac e o SAC" in s
+    assert "não traga em «prazo_como_a_equipe_diz»" in s
     assert "«a equipe confere/retorna»" in s
     assert "nunca sustenta estado, data, prazo ou valor de" in s
     assert "Seja rígido." in s
     padrao = "\n".join(v.FRASES_PADRAO_GARANTIA_SHOPEE)
-    assert "nunca «90 dias» nem «1 ano»" in padrao
+    assert "sem prazo nem número, salvo o prazo que a GARANTIA traz" in padrao
 
 
 def test_as_linhas_da_calibracao_an0311():

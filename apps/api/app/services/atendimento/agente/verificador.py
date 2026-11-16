@@ -353,7 +353,12 @@ logger = structlog.get_logger()
 #     ML, `prompt.ORIENTACAO_DA_PLATAFORMA`), dizer isso não é recusa de direito (item 2), e dizer
 #     que dá para alterar, pedir o dado ou mandar à loja não tem lastro.
 # A calibração com a chave precisa rodar antes de confiar nos números do v19.
-VERSAO = "v19"
+# v20 (o dono, 16/11/2026: "diz como a equipe diz; se está no banco, está certo"): do aparelho
+# Uranyx, o prazo que a GARANTIA traz em «prazo_como_a_equipe_diz» tem lastro — o que a equipe
+# diz do MODELO do pedido ou do anúncio (`agente.garantia_equipe`: A18 «90 dias pela loja e 9
+# meses pela marca, completando 1 ano»; A17 «90 dias»); sem ele, «90 dias», «1 ano» e «9 meses»
+# continuam sem lastro (a decisão de 27/10/2026), e outro prazo que não o dele também.
+VERSAO = "v20"
 MODELO = "claude-haiku-5-5"
 
 
@@ -808,7 +813,8 @@ garantia ou o que ela cobre, dizer a REGRA geral — tem garantia, cobre defeito
 aparelho quebrado, molhado ou com mau uso — sem decidir o caso de um aparelho do cliente, NÃO \
 é recusa (é a FRASE-PADRÃO da garantia); e, no item 1 e na lista 6, «tem garantia» e «cobre \
 defeito» ditos antes da compra são essa política, não promessa de cobertura de um pedido — o \
-prazo com número continua contando na lista 6 (do aparelho Uranyx, nunca «90 dias», «1 ano»).
+prazo com número continua contando na lista 6 (do aparelho Uranyx, só o prazo que a GARANTIA \
+traz em «prazo_como_a_equipe_diz»).
 
 3. contradiz_restricao_de_regiao — as EVIDÊNCIAS trazem restrição de envio por \
 estado e o texto diz ou dá a entender que entrega lá; ou diz que entrega no Brasil \
@@ -1073,10 +1079,13 @@ a instrução física do aparelho (onde vai o chip ou o cartão, a gaveta e o pi
 traseira, a bateria) sem o anúncio DO MODELO que a diga nem a resposta da equipe do mesmo \
 produto — o fato aprovado que não diz o modelo não sustenta: muda de modelo para modelo \
 (afirma_sem_lastro); \
-e, do aparelho Uranyx, «90 dias», «1 ano», «9 meses», o app Uranyx, o site \
-uranyx.com.br/sac e o SAC da Uranyx (afirma_sem_lastro; o caminho marca o item 4), mesmo que \
-a garantia ou um fato das EVIDÊNCIAS os traga — a garantia da Apple de 1 ano a partir da \
-ativação, do fato aprovado, continua valendo. Não contam: o receio sem pergunta («tenho medo \
+e, do aparelho Uranyx, o app Uranyx, o site uranyx.com.br/sac e o SAC da Uranyx \
+(afirma_sem_lastro; o caminho marca o item 4), e um prazo («90 dias», «1 ano», «9 meses») que a \
+GARANTIA das EVIDÊNCIAS não traga em «prazo_como_a_equipe_diz» (o que a equipe diz do modelo \
+do pedido ou do anúncio), mesmo que outro fato o traga (afirma_sem_lastro); o prazo de \
+«prazo_como_a_equipe_diz», dito com o par que ele tem («pela loja», «pela marca»), tem \
+lastro — e a garantia da Apple de 1 ano a partir da ativação, do fato aprovado, continua \
+valendo. Não contam: o receio sem pergunta («tenho medo \
 de comprar») acolhido com o que tem lastro (produto novo, compra protegida pela Shopee) trata o \
 turno (item 7 true); pedir o dado para responder na próxima mensagem («me diga o modelo que eu \
 confiro por aqui», «qual é o anúncio? assim eu confiro as opções», «me diga o nome para eu \
@@ -2357,8 +2366,8 @@ FRASES_PADRAO_GARANTIA_SHOPEE: tuple[str, ...] = (
     "Antes da compra (sem pedido), a quem pergunta se tem garantia ou o que ela cobre: tem "
     "garantia; cobre defeito (de fabricação); não cobre aparelho quebrado, molhado ou com mau "
     "uso; conta a partir da entrega; enquanto o app oferece, a devolução é pela Shopee; se "
-    "aparecer defeito, descrever e mandar vídeo e fotos por aqui — sem prazo nem número (do "
-    "aparelho Uranyx, nunca «90 dias» nem «1 ano»).",
+    "aparecer defeito, descrever e mandar vídeo e fotos por aqui — sem prazo nem número, salvo "
+    "o prazo que a GARANTIA traz em «prazo_como_a_equipe_diz» (o que a equipe diz do modelo).",
 )
 FRASE_PADRAO_ACESSORIO = (
     "No momento a loja não tem anúncio de {acessorio} (o fato aprovado das EVIDÊNCIAS): "

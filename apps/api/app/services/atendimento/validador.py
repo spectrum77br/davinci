@@ -2107,7 +2107,8 @@ _PALAVRA_DA_PARTE = (
     (PARTE_HARDWARE, r"hardware|aparelho|fisic\w*|pecas?|componentes?"),
     (PARTE_SOFTWARE, r"software|sistema"),
     (PARTE_LOJA, r"loja"),
-    (PARTE_URANYX, r"uranyx"),
+    # 16/11/2026 (`agente.garantia_equipe`): "9 meses pela marca" é como a equipe diz.
+    (PARTE_URANYX, r"uranyx|marca"),
 )
 # Item 2 da auditoria ao vivo (22/10/2026 22:09, Barbosa Shopee, 3ee1f81e): o verbo de
 # ligação entre o número e o par ("os primeiros 90 dias SÃO com a loja e os 9 meses
@@ -2115,7 +2116,7 @@ _PALAVRA_DA_PARTE = (
 # nunca tem prazo da regra).
 _PARTE_DA_REGRA_DEPOIS = re.compile(
     r"\s+(?:(?:de|da|do|para|pro|pra|no|na|em|o|a|garantia|cobertura|com|seguintes|direto"
-    r"|sao|serao|fica|ficam)\s+){0,5}(?P<parte>"
+    r"|sao|serao|fica|ficam|pela|pelo)\s+){0,5}(?P<parte>"
     + "|".join(p for _n, p in _PALAVRA_DA_PARTE)
     + r")\b"
 )

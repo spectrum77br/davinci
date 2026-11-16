@@ -310,7 +310,7 @@ async def test_r1_o_legado_no_ml_recusa_e_a_shopee_no_envio_nao_muda(db: AsyncSe
 
 def test_v19_o_sistema_diz_o_que_vale():
     s = v.SISTEMA
-    assert v.VERSAO == "v19"
+    assert v.VERSAO == "v20"  # o v20 (16/11/2026) guarda o v19
     assert "o motivo é contexto, não outra pergunta" in s
     # O item 7 novo não muda o critério das outras plataformas (a entrada traz a PLATAFORMA).
     assert "Só com PLATAFORMA Mercado Livre: a pergunta de se chega em certo dia" in s

@@ -185,6 +185,38 @@ PADRAO_CABECALHO = (
 )
 
 
+_GARANTIA_NO_TURNO = re.compile(r"\bgarantia")
+GARANTIA_CABECALHO = "GARANTIA (já consultada para esta conversa, ver_garantia): "
+
+
+def _fala_de_garantia(base: BaseDoGerar) -> bool:
+    """O turno do cliente fala de garantia? PURA."""
+    textos = [*getattr(base, "textos_rajada", ()), *getattr(base, "textos_cliente", ())]
+    return any(
+        isinstance(t, str)
+        and _GARANTIA_NO_TURNO.search(unicodedata.normalize("NFKD", t.casefold()))
+        for t in textos
+    )
+
+
+async def _garantia_consultada(ctx: ContextoAgente, base: BaseDoGerar, conversa: Any) -> str | None:
+    """O `ver_garantia` desta conversa, rodado como a ferramenta (`ferramentas.executar`).
+    Nunca levanta: sem a consulta, nada."""
+    from app.services.atendimento.agente import ferramentas
+
+    try:
+        texto = await ferramentas.executar(
+            ctx,
+            ferramentas.VER_GARANTIA,
+            {"numero": None},
+            lambda: ferramentas.dados_ver_garantia(ctx, base, conversa, None),
+        )
+    except Exception as e:  # noqa: BLE001 — sem a garantia, o pacote de sempre
+        logger.warning("atendimento_agente_garantia_no_pacote", err=type(e).__name__)
+        return None
+    return GARANTIA_CABECALHO + texto if texto else None
+
+
 def secao_do_padrao(padroes: Sequence[Mapping[str, Any]], tipo: str) -> str | None:
     """A seção do PADRÃO DA EQUIPE (vazia sem padrão). PURA."""
     if not padroes:
@@ -1422,6 +1454,14 @@ async def montar_pacote(
             ctx.registrar_pares(padroes)
             ids_do_padrao = {p["id"] for p in padroes}
             da_equipe = [p for p in da_equipe or [] if p.get("id") not in ids_do_padrao]
+    # A GARANTIA já consultada (16/11/2026): no teste, nos 4 casos de garantia o agente não
+    # chamou o `ver_garantia` e respondeu sem a regra ("a garantia legal do CDC"). Na virada,
+    # com "garantia" no turno, a consulta vem pronta (o mesmo `ferramentas.executar`: registra a
+    # garantia e as evidências; a chamada repetida do modelo volta "já consultado").
+    if banco and _fala_de_garantia(base):
+        secao_garantia = await _garantia_consultada(ctx, base, conversa)
+        if secao_garantia:
+            partes.append(secao_garantia)
     if da_equipe:
         secao, mostrados = secao_da_equipe(da_equipe, banco=banco)
         if secao:

@@ -1491,6 +1491,56 @@ async def test_ver_garantia_antes_da_compra_da_a_regra_da_linha_do_anuncio(
     assert [g["status"] for g in ctx.garantias_conferidas] == [None]
 
 
+async def test_ver_garantia_traz_o_prazo_que_a_equipe_diz_do_modelo(
+    db: AsyncSession, make_user, redis_mem: RedisMem
+):
+    """O dono, 16/11/2026: "diz como a equipe diz". O prazo do MODELO — antes da compra, o dos
+    produtos do anúncio; depois, o do item do pedido — quando a equipe concorda
+    (`agente.garantia_equipe`); o item de dois modelos fica com a regra de 27/10."""
+    from app.services.atendimento import validador
+
+    equipe = await _conversa(db, make_user, pedido=None, externo_id="c-equipe")
+    equipe.anuncio_titulo = None
+    await db.commit()
+    for texto in (
+        "o a18 pro max tem 90 dias de garantia pela loja e 9 meses pela marca!",
+        "o a18 pro max tem 1 ano de garantia!",
+        "o modelo a17 pro max tem somente 90 dias de garantia!",
+        "sim o a17 pro max tem garantia de 90 dias!",
+    ):
+        await _msg(
+            db, equipe, texto, autor="loja", origem=constantes.ORIGEM_HUMANO, ha=timedelta(hours=3)
+        )
+
+    # Antes da compra: o anúncio A18 (todos os produtos dele são do A18).
+    conversa, _ = await _kia(db, make_user, redis_mem)
+    base = await _base(db, conversa)
+    ctx = _ctx(conversa, base)
+    regra = (await _chamar(ctx, base, conversa, "ver_garantia", numero=None))["regra"]
+    assert (regra["garantia_anos"], regra["loja_dias"], regra["uranyx_meses"]) == (1, 90, 9)
+    assert regra["prazo_como_a_equipe_diz"].endswith("(o A18, a partir da entrega)")
+    assert validador.prazos_da_regra(ctx.garantias_conferidas) == {
+        (1, "ano", "geral"),
+        (90, "dia", "loja"),
+        (9, "mes", "uranyx"),
+    }
+    # Depois da compra: o item do pedido é o A17 (90 dias).
+    a17 = await _conversa(db, make_user, pedido="251031A17PM01", externo_id="c-a17")
+    await _bling(
+        db, "300031", "251031A17PM01", itens=(("Hotwav A17 Pro Max 12.128 - Preto", "dg057.ci", 1),)
+    )
+    base2 = await _base(db, a17)
+    dados2 = await _chamar(_ctx(a17, base2), base2, a17, "ver_garantia", numero=None)
+    assert dados2["linha"] == "uranyx" and dados2["regra"]["dias"] == 90
+    assert "garantia_anos" not in dados2["regra"]
+    # O item com dois modelos no nome ("A18 … S5"): a regra de 27/10, sem prazo.
+    s5 = await _conversa(db, make_user, pedido="251032A18S5001", externo_id="c-s5")
+    await _bling(db, "300032", "251032A18S5001")
+    base3 = await _base(db, s5)
+    dados3 = await _chamar(_ctx(s5, base3), base3, s5, "ver_garantia", numero=None)
+    assert dados3["regra"] == ferramentas.REGRA_URANYX
+
+
 async def test_sugerir_troca_null_e_a_lacuna_sao_o_pedido_da_conversa(
     db: AsyncSession, make_user, monkeypatch
 ):
