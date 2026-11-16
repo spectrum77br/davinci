@@ -860,9 +860,23 @@ class ContextoAgente:
         saida = []
         for i in dict.fromkeys(_limpo(e) for e in evidencias if e):
             par = self.pares_do_pacote.get(i)
-            if par is not None and (not de_produto or par.get("fonte_de_produto") is True):
+            if par is not None and (not de_produto or self._vale_para_produto(i, par)):
                 saida.append(par)
         return saida
+
+    def _vale_para_produto(self, i: str, par: Mapping[str, Any]) -> bool:
+        """O par vale para produto? O `fonte_de_produto` e, na virada (16/11/2026), a resposta do
+        BANCO do mesmo produto ou modelo na conversa de um modelo só — o mesmo critério do rótulo
+        do verificador (`verificador.linhas_dos_pares`). Antes, o aviso "assunto de produto sem a
+        resposta da equipe do mesmo produto" ia ao verificador com a resposta da equipe citada."""
+        if par.get("fonte_de_produto") is True:
+            return True
+        return bool(
+            self.banco_exigido
+            and i.startswith(PREFIXO_BANCO)
+            and par.get("um_modelo")
+            and (par.get("mesmo_modelo") or par.get("mesmo_produto"))
+        )
 
     def registrar_garantias(self, garantias: Iterable[Mapping[str, Any]]) -> None:
         """O que `ver_garantia` devolveu vira `garantias_conferidas` (sem repetir)."""
