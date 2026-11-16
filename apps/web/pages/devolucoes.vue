@@ -875,6 +875,7 @@ const lancarRef = ref<{
   anexarFotos: (files: File[]) => Promise<boolean>
   removerFoto: (anexoId: string) => Promise<void>
   linhasParaPrevia: () => { sku: string | null; produtos: string | null; quantidade: number; motivo_devolucao: string | null; observacao: string | null }[]
+  prazoContestacao: () => string | null
 } | null>(null)
 // Lançamento em andamento (o Bling pode levar 10–15 s): a janela espera. Fechar
 // no meio deixaria peça sendo criada sem ninguém ver o resultado.
@@ -1750,6 +1751,7 @@ const lidoHa = computed(() => {
                 :observacao="obsDaJanela"
                 :obs-misturadas="obsMisturadas"
                 :prazo="pedidoItem.prazo_tipo ? `${prazoTexto(pedidoItem)} · ${pedidoItem.prazo_tipo}` : ''"
+                :prazo-contestacao="lancarRef?.prazoContestacao() ?? null"
                 @observacao="salvarObsDaJanela"
                 @mudou="aoMudarLancamento"
               />

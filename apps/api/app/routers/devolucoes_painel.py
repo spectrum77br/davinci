@@ -1021,8 +1021,9 @@ async def abrir_chamado(
 ) -> ChamadoJanelaOut:
     """ "Abrir chamado: Sim ou Não" (vale pro pedido). Não: a contestação que
     ainda não saiu é cancelada (o chamado fica Encerrado, nada vai pra
-    plataforma); depois que saiu, não dá — 409 `chamado_ja_saiu`. Sim (depois
-    de um Não): volta ao automático e, se o motivo pede, a contestação sai."""
+    plataforma); depois que saiu, não dá — 409 `chamado_ja_saiu`. Sim: fica
+    gravado que alguém marcou (a tela mostra "marcado à mão"; 16/11/2026 o Sim
+    deixou de vir marcado sozinho) e, se o motivo pede, a contestação sai."""
     pedido = pedido_bling.strip()
     await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
     rast = await antigo._rastreio_do_pedido(session, pedido)
@@ -1054,7 +1055,7 @@ async def abrir_chamado(
         return await _janela(session, pedido)
 
     era_nao = rast.abrir_chamado is False
-    rast.abrir_chamado = None
+    rast.abrir_chamado = True
     rast.updated_by = user.id
     if (
         era_nao
