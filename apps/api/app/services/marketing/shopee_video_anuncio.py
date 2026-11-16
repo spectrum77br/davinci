@@ -5,14 +5,25 @@ O vídeo da Shopee sai DENTRO de uma loja e leva um anúncio dela junto
 conserto: depois de publicado, nem o produto nem a legenda se editam, e
 produto "irrelevante" faz a Shopee apagar o vídeo e tirar ponto da conta.
 
-Regras do dono (rotina v2, 06/10/2026, e o pedido de 08/10):
+Regras do dono (rotina v2, 06/10/2026, o pedido de 08/10 e as decisões de
+16/11/2026):
 
-  • o anúncio AVULSO DEDICADO do aparelho do vídeo — nunca kit
-    ("dg088.ci+a001.ci"), e nunca a vitrine de vários aparelhos quando o
-    dedicado existe;
+  • o anúncio DEDICADO do aparelho do vídeo — nunca a vitrine de vários
+    aparelhos quando o dedicado existe;
+  • kit: até 16/11 nunca. Desde 16/11/2026 o vídeo do aparelho PODE ir no kit
+    "aparelho + acessório" ("dg088.ci+a001.pr", "dg002.pi+a003.pi+a004.pi"):
+    nas lojas de celular (ATLAS, Atv, Mega) quase todo aparelho só está
+    anunciado assim, e o fone/relógio que vem junto não muda o produto do
+    vídeo. O avulso ganha do kit quando os dois são igualmente dedicados.
+    Kit de DOIS aparelhos, ou de aparelho + produto que não é acessório,
+    continua recusado (`SO_KIT`);
   • anúncio vivo e com estoque; sem anúncio na loja = o vídeo não sai NELA
     (motivo DO VÍDEO: o robô pula pro próximo);
-  • vídeo de 3 a 60 s, 720p ou mais, H.264.
+  • o MESMO vídeo nunca sai duas vezes na Shopee (16/11/2026): nem em outra
+    loja, nem de novo na mesma, nem depois de a conta ser apagada;
+  • vídeo de 3 a 60 s, 720p ou mais. O H.264 sobe como está; outro codec
+    da lista fechada (HEVC do iPhone & cia.) o publicador converte pra H.264
+    antes do upload — menos HDR/10 bits, que fica de fora (16/11/2026).
 
 De onde sai o anúncio: `product_links` da integração da conta (o que o sync
 de estoque mantém vivo — o estoque ali é o que o DaVinci mandou por último).
@@ -25,6 +36,7 @@ publicador, pelo client da integração (`conferir_ao_vivo`), só leitura.
 dedicado da vitrine é ser o anúncio MAIS ESPECÍFICO entre os que têm o
 aparelho: o F110L está no 58262693089 (2 bases, F110 Pro e F110L) e na
 vitrine 58269759596 (14 bases, 8 aparelhos) — o de menos bases ganha.
+Acessório não conta como base: o kit "dg088.ci+a001.ci" carrega UM aparelho.
 """
 
 from __future__ import annotations
@@ -39,8 +51,9 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.config import get_settings
 from app.models import (
@@ -52,6 +65,7 @@ from app.models import (
     RedeSocial,
 )
 from app.services.marketing.shopee_video import (
+    CODEC_SHOPEE,
     CODECS_ACEITOS,
     DURACAO_MAX_S,
     DURACAO_MIN_S,
@@ -64,6 +78,8 @@ logger = structlog.get_logger()
 
 # Motivos DO VÍDEO (o robô pula pro próximo; o modal mostra na conta).
 SEM_ANUNCIO = "sem_anuncio_na_loja"
+# Desde 16/11/2026: só em kit que NÃO vale (dois aparelhos, ou aparelho +
+# produto que não é acessório) — o kit "aparelho + acessório" é vinculado.
 SO_KIT = "anuncio_so_em_kit"
 SEM_ESTOQUE = "anuncio_sem_estoque"
 SKU_AMBIGUO = "sku_ambiguo"
@@ -73,7 +89,11 @@ RESOLUCAO_BAIXA = "video_resolucao_baixa"
 FORMATO = "video_formato_nao_aceito"
 ILEGIVEL = "video_ilegivel"
 GRANDE_DEMAIS = "video_grande_demais"
-EM_OUTRA_LOJA = "video_ja_na_shopee_em_outra_loja"
+# O vídeo já está (ou esteve) na Shopee — qualquer conta, a mesma inclusive,
+# e conta já apagada. O TEXTO do código fica o de antes de propósito: a borda
+# (`_HTTP_POR_CODE` → 409) e as frases da tela casam por ele.
+JA_NA_SHOPEE = "video_ja_na_shopee_em_outra_loja"
+EM_OUTRA_LOJA = JA_NA_SHOPEE  # nome antigo (antes de 16/11/2026 só contava outra loja)
 
 MOTIVOS_DO_VIDEO = frozenset(
     {
@@ -87,7 +107,7 @@ MOTIVOS_DO_VIDEO = frozenset(
         FORMATO,
         ILEGIVEL,
         GRANDE_DEMAIS,
-        EM_OUTRA_LOJA,
+        JA_NA_SHOPEE,
     }
 )
 
@@ -113,11 +133,48 @@ def _base(sku: str) -> str:
     return sku.split(".")[0]
 
 
-def _base_aparelho(sku: str) -> str:
-    """A base do APARELHO do SKU: num kit ("dg088.ci+a001.ci") é a do
-    primeiro item (o aparelho); o acessório que vem junto não é outro
-    aparelho e não conta pra dizer quão "vitrine" o anúncio é."""
-    return _base(sku.split("+")[0])
+# Acessório no SKU: "a" + dígitos (a001 fone com fio, a003 fone bluetooth,
+# a004 relógio…), com o sufixo de cor/origem que vier ("a001.pr"). É o que
+# as lojas de celular põem junto do aparelho no kit.
+_RE_ACESSORIO = re.compile(r"a\d+")
+
+
+def _partes(sku: str) -> list[str]:
+    return [p.strip() for p in sku.split("+") if p.strip()]
+
+
+def _eh_acessorio(parte: str) -> bool:
+    return _RE_ACESSORIO.fullmatch(_base(parte)) is not None
+
+
+def _bases_de_produto(sku: str) -> set[str]:
+    """As bases que dizem quão "vitrine" o anúncio é: as de cada parte do SKU
+    que NÃO é acessório. "dg088.ci+a001.ci" → {"dg088"} (o fone que vem junto
+    não é outro aparelho); "dg088.ci+dg089.ci" → as duas.
+
+    "a" + dígitos só é ACESSÓRIO dentro de um kit que tem um produto que não
+    é acessório: sozinho ("a016.pr", o fone vendido avulso) ou num kit só de
+    acessórios ("a001.pr+a003.pi"), ele É o produto do anúncio e conta como
+    base. Sem isso a vitrine de fones (a016/a012/a004/a003) e o anúncio
+    dedicado do a016 empatavam em "zero bases" e o vídeo do fone caía na
+    vitrine, que tem mais estoque."""
+    partes = _partes(sku)
+    produtos = {_base(p) for p in partes if not _eh_acessorio(p)}
+    return produtos or {_base(p) for p in partes}
+
+
+def _aparelho_do_kit(sku_kit: str, base: str) -> str | None:
+    """A parte do aparelho num kit "aparelho + acessório(s)" do aparelho
+    `base` ("dg088.ci+a001.pr" → "dg088.ci"); None quando o kit não é desse
+    tipo — dois aparelhos, aparelho + produto que não é acessório, ou um SKU
+    de kit que não dá pra ler por partes ("kit" sem "+")."""
+    partes = _partes(sku_kit)
+    if len(partes) < 2:
+        return None
+    produtos = [p for p in partes if not _eh_acessorio(p)]
+    if len(produtos) != 1 or _base(produtos[0]) != base:
+        return None
+    return produtos[0]
 
 
 def _eh_kit(sku: str) -> bool:
@@ -138,6 +195,9 @@ class AnuncioEscolhido:
     estoque: int
     bases_no_anuncio: int
     exato: bool
+    # Vinculado pelo kit "aparelho + acessório" (decisão de 16/11/2026), não
+    # por um avulso — fica no snapshot pra dar pra conferir depois.
+    kit: bool = False
 
     def snapshot(self) -> dict[str, Any]:
         """O que vai pro `opcoes.shopee` da postagem: o publicador usa
@@ -148,6 +208,7 @@ class AnuncioEscolhido:
             "skus": self.skus,
             "estoque_no_agendamento": self.estoque,
             "bases_no_anuncio": self.bases_no_anuncio,
+            "kit": self.kit,
         }
 
 
@@ -157,10 +218,16 @@ async def _melhor_item(
     """O anúncio da loja para UM SKU do vídeo, ou o motivo de não ter."""
     externo = func.lower(func.btrim(ProductLink.external_sku))
     kit_pedido = "+" in sku
+    base = _base(sku)
+    # A base do PRIMEIRO item do SKU (no kit, o aparelho vem primeiro): pega
+    # o avulso "dg088.pi" e também o kit "dg088.ci+a001.pr" ou "dg088+a003".
     filtro = (
         externo == sku
         if kit_pedido
-        else or_(externo == sku, func.split_part(externo, ".", 1) == _base(sku))
+        else or_(
+            externo == sku,
+            func.split_part(func.split_part(externo, "+", 1), ".", 1) == base,
+        )
     )
     linhas = (
         await session.execute(
@@ -176,23 +243,53 @@ async def _melhor_item(
     ).all()
     if not linhas:
         return SEM_ANUNCIO
+    # Candidatos: o avulso do aparelho e (desde 16/11/2026) o kit "aparelho +
+    # acessório" dele. Kit de dois aparelhos ou com produto que não é
+    # acessório fica em `recusados`: nunca é vinculado (o vídeo mostra UM
+    # aparelho), mas entra na conta do "mais específico" abaixo.
+    kits_aceitos: list[tuple[Any, str]] = []
+    recusados: list[Any] = []
+    # O vídeo é do aparelho USADO ("dg007.us"): só o anúncio DESSE SKU serve
+    # (avulso ou kit com acessório). O avulso/kit do novo da mesma base é
+    # outro produto — às vezes nem o mesmo aparelho (o dg007.us é o Fire 6
+    # power) — e nem entra na conta do "mais específico".
+    usado_pedido = _eh_usado(sku, None)
     if kit_pedido:
         # O criativo É o kit (vídeo mostra todos os itens): só o kit exato.
         avulsos = [(i, s) for i, s, _n in linhas if s == sku]
-        kits: list[Any] = []
     else:
-        kits = [(i, s) for i, s, _n in linhas if _eh_kit(s)]
         avulsos = [
-            (i, s) for i, s, n in linhas if not _eh_kit(s) and (s == sku or not _eh_usado(s, n))
+            (i, s)
+            for i, s, n in linhas
+            if not _eh_kit(s) and (s == sku or (not usado_pedido and not _eh_usado(s, n)))
         ]
-    if not avulsos:
-        return SO_KIT if kits else SEM_ANUNCIO
+        for i, s, n in linhas:
+            if not _eh_kit(s):
+                continue
+            if usado_pedido and sku not in _partes(s):
+                continue
+            aparelho = _aparelho_do_kit(s, base)
+            # Usado é o mesmo cuidado do avulso, decidido pela PARTE DO
+            # APARELHO: o kit "dg088.us+a001.pr" é de aparelho usado e só vale
+            # pro vídeo do "dg088.us"; o "dg088.ci+a001.us" (o acessório é que
+            # tem o sufixo) é do aparelho novo. Pelo SKU inteiro o `split(".")`
+            # lia "us+a001" e "pr" — o usado passava e o novo era recusado.
+            if aparelho is not None and (aparelho == sku or not _eh_usado(aparelho, n)):
+                kits_aceitos.append((i, aparelho))
+            else:
+                recusados.append(i)
+    if not avulsos and not kits_aceitos:
+        return SO_KIT if recusados else SEM_ANUNCIO
 
-    itens = sorted({str(i) for i, _s in avulsos})
-    exatos = {str(i) for i, s in avulsos if s == sku}
-    itens_kit = sorted({str(i) for i, _s in kits} - set(itens))
-    # Todas as variações VIVAS de cada candidato (avulso E kit): quantos
-    # aparelhos (bases) o anúncio carrega e quanto estoque ele tem.
+    ids_avulsos = {str(i) for i, _s in avulsos}
+    itens = sorted(ids_avulsos | {str(i) for i, _a in kits_aceitos})
+    exatos = {str(i) for i, s in avulsos if s == sku} | {
+        str(i) for i, a in kits_aceitos if a == sku
+    }
+    itens_kit = sorted({str(i) for i in recusados} - set(itens))
+    # Todas as variações VIVAS de cada candidato (e de cada kit recusado):
+    # quantos produtos (bases, sem contar acessório) o anúncio carrega e
+    # quanto estoque ele tem.
     todas = (
         await session.execute(
             select(
@@ -213,13 +310,21 @@ async def _melhor_item(
     for item, s, estoque, titulo in todas:
         d = por_item[str(item)]
         if s:
-            d["bases"].add(_base_aparelho(s))
+            d["bases"] |= _bases_de_produto(s)
         d["estoque"] += max(0, int(estoque or 0))
         d["titulo"] = d["titulo"] or titulo
+    # O mais DEDICADO primeiro (menos aparelhos no anúncio); empatado, o
+    # avulso ganha do kit, depois o SKU exato, depois o estoque. Na Barbosa o
+    # S5/A18 tem o anúncio dele (58266122162, 2 bases) só em KIT, e o único
+    # avulso que o carrega é o "A17 Pro Max" (vários aparelhos): o avulso ali
+    # é a vitrine de OUTRO modelo — vídeo de um aparelho no anúncio de outro é
+    # o "irrelevante" que a Shopee apaga (e tira ponto da conta). Por isso o
+    # avulso só ganha do kit quando é tão dedicado quanto ele.
     ordem = sorted(
         itens,
         key=lambda i: (
             len(por_item[i]["bases"]) or 999,
+            i not in ids_avulsos,
             i not in exatos,
             -por_item[i]["estoque"],
             i,
@@ -227,14 +332,9 @@ async def _melhor_item(
     )
     melhor = ordem[0]
     d = por_item[melhor]
-    # O kit nunca é vinculado — mas ele DIZ qual é o anúncio próprio do
-    # aparelho. Na Barbosa o S5/A18 tem o anúncio dele (58266122162, 2 bases)
-    # só em KIT, e o único avulso que o carrega é o "A17 Pro Max" (8 bases,
-    # dois aparelhos): o avulso "menos vitrine" ali é a vitrine de OUTRO
-    # modelo, e vídeo de um aparelho vinculado ao anúncio de outro é o
-    # "irrelevante" que a Shopee apaga (e tira ponto da conta). Quando o kit
-    # é mais específico que o melhor avulso, o aparelho não tem avulso
-    # dedicado nesta loja: o vídeo não sai nela.
+    # O kit RECUSADO nunca é vinculado — mas ele DIZ qual é o anúncio próprio
+    # do aparelho: quando ele é mais específico que o melhor candidato, o
+    # candidato é vitrine de outro modelo e o vídeo não sai nesta loja.
     bases_kit = [len(por_item[i]["bases"]) for i in itens_kit if por_item[i]["bases"]]
     if bases_kit and min(bases_kit) < (len(d["bases"]) or 999):
         return SO_KIT
@@ -253,6 +353,7 @@ async def _melhor_item(
         estoque=int(d["estoque"]),
         bases_no_anuncio=len(d["bases"]),
         exato=melhor in exatos,
+        kit=kit_pedido or melhor not in ids_avulsos,
     )
 
 
@@ -285,15 +386,16 @@ async def anuncio_para(
     if len({a.item_id for a in achados}) > 1:
         return SKU_AMBIGUO
     if any(m in (SO_KIT, SEM_ESTOQUE) for m in motivos):
-        # Um SKU do vídeo TEM anúncio próprio nesta loja (só que em kit, ou
-        # sem estoque) e outro caiu num avulso: os SKUs não convergem pro
-        # mesmo anúncio dedicado. Vincular o avulso do outro seria pôr um
-        # aparelho do vídeo no anúncio errado. (SKU sem anúncio NENHUM aqui
-        # continua não pesando: é a cor que esta loja não vende.)
+        # Um SKU do vídeo TEM anúncio próprio nesta loja (só que em kit que
+        # não vale, ou sem estoque) e outro caiu num anúncio: os SKUs não
+        # convergem pro mesmo anúncio dedicado. Vincular o anúncio do outro
+        # seria pôr um aparelho do vídeo no anúncio errado. (SKU sem anúncio
+        # NENHUM aqui continua não pesando: é a cor que esta loja não vende.)
         return SKU_AMBIGUO
     escolhido = achados[0]
     escolhido.skus = [s for a in achados for s in a.skus]
     escolhido.exato = any(a.exato for a in achados)
+    escolhido.kit = any(a.kit for a in achados)
     return escolhido
 
 
@@ -306,6 +408,10 @@ class InfoVideo:
     altura: int
     duracao: float | None
     codec: str | None
+    # Opcionais (16/11/2026): o que diz se o vídeo é HDR / 10 bits. None =
+    # o ffprobe não informou (ou retrato montado à mão, nos testes).
+    pix_fmt: str | None = None
+    color_transfer: str | None = None
 
 
 # Cache por (caminho, tamanho, mtime): o modal lista as contas a cada clique e
@@ -325,7 +431,7 @@ async def _ffprobe(caminho: Path) -> InfoVideo | None:
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,codec_name:format=duration",
+            "stream=width,height,codec_name,pix_fmt,color_transfer:format=duration",
             "-of",
             "json",
             str(caminho),
@@ -346,6 +452,8 @@ async def _ffprobe(caminho: Path) -> InfoVideo | None:
             altura=int(trilha["height"]),
             duracao=float(dur) if dur not in (None, "N/A") else None,
             codec=str(trilha.get("codec_name") or "").lower() or None,
+            pix_fmt=str(trilha.get("pix_fmt") or "").lower() or None,
+            color_transfer=str(trilha.get("color_transfer") or "").lower() or None,
         )
     except (ValueError, KeyError, TypeError, IndexError):
         return None
@@ -368,6 +476,21 @@ async def sondar_video(caminho: Path) -> InfoVideo | None:
     return info
 
 
+# HDR: HLG (o padrão do iPhone desde o 12) e PQ (HDR10/Dolby Vision).
+_TRANSFER_HDR = frozenset({"arib-std-b67", "smpte2084"})
+# Mais de 8 bits por canal: "yuv420p10le", "yuv444p12le", "gray10le",
+# "p010le"/"p016le"… O "yuv420p"/"nv12" de sempre não casa.
+_RE_PIX_FMT_PROFUNDO = re.compile(r"(?:p|gray)1[0-6](?:le|be)?$|^p[0-4]1[0-6](?:le|be)$")
+
+
+def eh_hdr(info: InfoVideo) -> bool:
+    """O vídeo é HDR ou de 10+ bits (pelo `pix_fmt` e pelo `color_transfer`)."""
+    pf = (info.pix_fmt or "").strip().lower()
+    return (info.color_transfer or "").strip().lower() in _TRANSFER_HDR or bool(
+        pf and _RE_PIX_FMT_PROFUNDO.search(pf)
+    )
+
+
 def motivo_do_formato(info: InfoVideo | None, tamanho: int | None = None) -> str | None:
     if info is None:
         return ILEGIVEL
@@ -379,11 +502,64 @@ def motivo_do_formato(info: InfoVideo | None, tamanho: int | None = None) -> str
         return RESOLUCAO_BAIXA
     if (info.codec or "") not in CODECS_ACEITOS:
         return FORMATO
+    if (info.codec or "") != CODEC_SHOPEE and eh_hdr(info):
+        # Só no caminho CONVERTIDO (16/11/2026): HDR/10 bits virando H.264 de
+        # 8 bits sai com a cor lavada sem tone-mapping, e na Shopee o vídeo
+        # não se edita depois. O H.264 sobe o original, como sempre subiu.
+        return FORMATO
     return None
 
 
 def caminho_do_arquivo(file: MarketingCreativeFile) -> Path:
     return Path(get_settings().uploads_dir) / (file.file_rel or "")
+
+
+def ja_na_shopee(file_id: Any, creative_id: Any, sha256: Any, *, excluir_id: UUID | None = None):
+    """EXISTS: o vídeo já está (ou pode estar) na Shopee — UMA regra só, a do
+    robô (`autopostagem._ja_na_shopee`, por coluna: correlacionada com o
+    arquivo da consulta de fora) e a da conferência por loja
+    (`motivo_do_video_na_loja`, por valor).
+
+    "Mesmo vídeo" (dono, 16/11/2026): o mesmo arquivo, o mesmo conteúdo
+    (`sha256` não vazio — o mesmo MP4 subido de novo) ou o mesmo CRIATIVO (um
+    criativo = um vídeo na Shopee; outro arquivo dele é outra versão do MESMO
+    vídeo). Qualquer conta de Shopee: outra loja, a própria e loja já apagada
+    (`rede_social_id` NULL — a postagem fica, o vídeo continua lá).
+
+    "Já está": o estado ocupa conta (`STATUS_OCUPA_CONTA`: em voo, no ar ou em
+    dúvida) OU a linha chegou ao upload (`container_id`) ou ao post
+    (`post_external_id`). Uma linha `revisar` cancelada na tela guarda o
+    upload e pode estar no ar; `falhou` de verdade não guarda — o `_falhou` do
+    publicador zera o `container_id` justamente quando está provado que o post
+    não saiu, e cancelado/falhou sem upload provam que nada subiu.
+    """
+    from app.services.marketing.postagens import STATUS_OCUPA_CONTA
+
+    p = aliased(MarketingPostagem)
+    usado = aliased(MarketingCreativeFile)
+    mesmo_video = [p.file_id == file_id, p.creative_id == creative_id]
+    if isinstance(sha256, str):
+        # Por valor: hash vazio nunca vira "todos iguais".
+        if sha256.strip():
+            mesmo_video.append(usado.sha256 == sha256)
+    elif sha256 is not None:
+        mesmo_video.append(and_(sha256 != "", usado.sha256 == sha256))
+    q = (
+        select(p.id)
+        .outerjoin(usado, usado.id == p.file_id)
+        .where(
+            func.lower(func.btrim(p.plataforma)) == PLATAFORMA_SHOPEE,
+            or_(
+                p.status.in_(STATUS_OCUPA_CONTA),
+                p.container_id.isnot(None),
+                p.post_external_id.isnot(None),
+            ),
+            or_(*mesmo_video),
+        )
+    )
+    if excluir_id is not None:
+        q = q.where(p.id != excluir_id)
+    return q.exists()
 
 
 async def motivo_do_video_na_loja(
@@ -397,39 +573,22 @@ async def motivo_do_video_na_loja(
 ) -> str | None:
     """Tudo o que impede ESTE vídeo de sair NESTA conta de Shopee Vídeo.
 
-    Barato primeiro: o banco (outra loja, anúncio), depois o ffprobe.
+    Barato primeiro: o banco (já na Shopee, anúncio), depois o ffprobe.
     `com_formato=False` pula o ffprobe (a tela da fila, que lista tudo).
     """
     if (rede.plataforma or "").strip().lower() != PLATAFORMA_SHOPEE:
         return None
-    # Rodízio: o mesmo vídeo em DUAS lojas da marca é conteúdo repetido aos
-    # olhos da Shopee (rotina v2, regra 2: "uma loja por vídeo"). Conta o que
-    # está em voo, no ar ou em dúvida — mesmo conjunto do teto diário.
-    from app.services.marketing.postagens import STATUS_OCUPA_CONTA
-
-    mesmo_video = MarketingPostagem.file_id == file.id
-    if file.sha256:
-        mesmo_video = or_(
-            mesmo_video,
-            MarketingPostagem.file_id.in_(
-                select(MarketingCreativeFile.id).where(MarketingCreativeFile.sha256 == file.sha256)
-            ),
+    # O mesmo vídeo NUNCA sai duas vezes na Shopee (dono, 16/11/2026). Antes
+    # (rotina v2, regra 2: "uma loja por vídeo") só contava OUTRA loja ainda
+    # existente; agora conta QUALQUER postagem de Shopee deste vídeo — a
+    # regra é a MESMA do sorteio do robô (`ja_na_shopee`). Só sai da conta a
+    # própria linha que está sendo conferida (`excluir_id`).
+    if (
+        await session.execute(
+            select(ja_na_shopee(file.id, creative.id, file.sha256, excluir_id=excluir_id))
         )
-    q = (
-        select(func.count())
-        .select_from(MarketingPostagem)
-        .where(
-            mesmo_video,
-            MarketingPostagem.plataforma == PLATAFORMA_SHOPEE,
-            MarketingPostagem.rede_social_id.isnot(None),
-            MarketingPostagem.rede_social_id != rede.id,
-            MarketingPostagem.status.in_(STATUS_OCUPA_CONTA),
-        )
-    )
-    if excluir_id is not None:
-        q = q.where(MarketingPostagem.id != excluir_id)
-    if (await session.execute(q)).scalar_one():
-        return EM_OUTRA_LOJA
+    ).scalar():
+        return JA_NA_SHOPEE
 
     r = await anuncio_para(session, creative, rede)
     if isinstance(r, str):

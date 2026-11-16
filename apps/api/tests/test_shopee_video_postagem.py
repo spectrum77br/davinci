@@ -4,9 +4,12 @@ Eduardo, 08/10/2026: "Shopee Vídeo como mais uma rede em Marketing ›
 Criativos", começando pela loja Barbosa (Uranyx), poucos por dia, na grade
 da conta. O que este arquivo insiste em provar:
 
-  • O ANÚNCIO certo: o avulso dedicado do aparelho (o de menos aparelhos
-    entre os que têm o SKU), nunca kit, nunca a vitrine quando o dedicado
+  • O ANÚNCIO certo: o dedicado do aparelho (o de menos aparelhos entre os
+    que têm o SKU) — desde 16/11/2026 também o kit "aparelho + acessório",
+    nunca o kit de dois aparelhos —, nunca a vitrine quando o dedicado
     existe, nunca usado; sem anúncio = motivo DO VÍDEO (o robô pula).
+  • O mesmo vídeo nunca sai duas vezes na Shopee (16/11/2026): nem em outra
+    loja, nem de novo na mesma, nem depois de a conta ser apagada.
   • As guardas do vídeo (3–60 s, 720p+, H.264) e da conta (loja, autorização).
   • A legenda: a da biblioteca sai curta (≤ 150, sem WhatsApp) SÓ na Shopee;
     a escrita à mão acima de 150 é recusada (quem escreveu decide o corte).
@@ -299,25 +302,31 @@ async def test_dedicado_ganha_da_vitrine_mesmo_com_menos_estoque(db, make_user):
     assert r.estoque == 56
 
 
-async def test_s5_so_tem_anuncio_proprio_em_kit_nao_cai_na_vitrine_do_a17(db, make_user):
+async def test_s5_vai_pro_kit_proprio_com_fone_nunca_pra_vitrine_do_a17(db, make_user):
     """O retrato real da Barbosa (dados.md): o anúncio PRÓPRIO do S5/A18
-    (58266122162, 2 bases) é KIT, e o único avulso que carrega o S5 é o "A17
-    Pro Max" (22499563693), que mistura dois aparelhos. Vincular o vídeo do S5
-    ao anúncio do A17 é o "irrelevante" que a Shopee apaga (e tira ponto da
-    conta) — o vídeo não sai nesta loja, nem o kit é vinculado."""
+    (58266122162, 2 bases) é KIT com fone, e o único avulso que carrega o S5 é
+    o "A17 Pro Max" (22499563693), que mistura aparelhos. Vincular o vídeo do
+    S5 ao anúncio do A17 é o "irrelevante" que a Shopee apaga (e tira ponto da
+    conta). Até 16/11 o vídeo não saía nesta loja; desde a decisão de
+    16/11/2026 o kit "aparelho + acessório" vale, e é ELE o vinculado."""
     user = await make_user()
     integ = await _cenario_barbosa(db, user)
     marca = await _marca(db)
     rede = await _conta_shopee(db, marca, integ)
     for sku in ("dg089.ci, dg088.ci", "dg088.ci"):
         c, _ = await _criativo(db, marca, sku=sku, nome=f"{sku[:5]}.mp4")
-        assert await anuncio.anuncio_para(db, c, rede) == anuncio.SO_KIT, sku
+        r = await anuncio.anuncio_para(db, c, rede)
+        assert isinstance(r, anuncio.AnuncioEscolhido), (sku, r)
+        assert r.item_id == 58266122162, sku
+        assert r.kit is True and r.snapshot()["kit"] is True
+        # O fone (a001) não conta como aparelho: S5 laranja + prata = 2.
+        assert r.bases_no_anuncio == 2
 
 
 async def test_dois_skus_no_mesmo_avulso_valem_e_kit_menos_especifico_nao_atrapalha(db, make_user):
     """O F112 tem várias cores (bases) no MESMO avulso dedicado: o vídeo com
-    duas cores vale e cai nele. Um kit do aparelho que é TÃO vitrine quanto
-    (ou mais) não muda nada — e nunca é o vinculado."""
+    duas cores vale e cai nele. Um kit do aparelho que é MAIS vitrine (mais
+    bases) não muda nada — o avulso dedicado continua o vinculado."""
     user = await make_user()
     integ = await _loja(db, user)
     for sku in ("dg082.ra", "dg084.ra", "dg085.ra"):
@@ -331,12 +340,130 @@ async def test_dois_skus_no_mesmo_avulso_valem_e_kit_menos_especifico_nao_atrapa
     assert isinstance(r, anuncio.AnuncioEscolhido), r
     assert r.item_id == 58208057789
     assert r.skus == ["dg082.ra", "dg084.ra"]
+    assert r.kit is False
 
 
-async def test_so_kit_na_loja_recusa(db, make_user):
+@pytest.mark.parametrize(
+    ("sku_kit", "exato"),
+    [
+        ("dg088.ci+a001.pr", True),  # Atv/Mega: aparelho + fone com fio, cor no acessório
+        ("dg088.ci+a003", True),  # acessório sem sufixo
+        ("dg088.ci+a003.pi+a004.pi", True),  # ATLAS: aparelho + fone bluetooth + relógio
+        ("dg088+a003", False),  # a parte do APARELHO sem sufixo: casa pela base
+    ],
+)
+async def test_aparelho_so_em_kit_com_acessorio_vincula_o_kit(db, make_user, sku_kit, exato):
+    """Decisão de 16/11/2026: nas lojas de celular (ATLAS, Atv, Mega) quase
+    todo aparelho só está anunciado como aparelho + fone. Sem avulso na loja,
+    o vídeo do aparelho vai no kit dele."""
     user = await make_user()
     integ = await _loja(db, user)
-    await _link(db, user, integ, item="1", sku="dg088.ci+a001.ci")
+    await _link(db, user, integ, item="1", sku=sku_kit, estoque=7)
+    marca = await _marca(db)
+    rede = await _conta_shopee(db, marca, integ)
+    c, _ = await _criativo(db, marca, sku="dg088.ci")
+    r = await anuncio.anuncio_para(db, c, rede)
+    assert isinstance(r, anuncio.AnuncioEscolhido), r
+    assert (r.item_id, r.kit, r.exato, r.estoque) == (1, True, exato, 7)
+    assert r.bases_no_anuncio == 1
+
+
+@pytest.mark.parametrize(
+    ("sku_video", "sku_kit", "vincula"),
+    [
+        # O APARELHO do kit é usado: não vale pro vídeo do aparelho novo…
+        ("dg088.ci", "dg088.us+a001.pr", False),
+        # …e o sufixo "us" do ACESSÓRIO não faz do aparelho novo um usado
+        # (nem pro vídeo da mesma cor, nem pro de outra cor do aparelho).
+        ("dg088.ci", "dg088.ci+a001.us", True),
+        ("dg088.pi", "dg088.ci+a001.us", True),
+        # O kit do usado vale pro vídeo DAQUELE SKU usado.
+        ("dg088.us", "dg088.us+a001.pr", True),
+    ],
+)
+async def test_usado_no_kit_e_decidido_pela_parte_do_aparelho(
+    db, make_user, sku_video, sku_kit, vincula
+):
+    """`dg088.us+a001.pr` lido inteiro dá `split(".")` = ["dg088", "us+a001",
+    "pr"]: o usado passava e o novo com acessório ".us" era recusado."""
+    user = await make_user()
+    integ = await _loja(db, user)
+    await _link(db, user, integ, item="1", sku=sku_kit, estoque=7)
+    marca = await _marca(db)
+    rede = await _conta_shopee(db, marca, integ)
+    c, _ = await _criativo(db, marca, sku=sku_video)
+    r = await anuncio.anuncio_para(db, c, rede)
+    if vincula:
+        assert isinstance(r, anuncio.AnuncioEscolhido), r
+        assert (r.item_id, r.kit) == (1, True)
+    else:
+        assert not isinstance(r, anuncio.AnuncioEscolhido), r
+
+
+async def test_video_de_acessorio_vai_no_anuncio_dedicado_nao_na_vitrine_de_fones(db, make_user):
+    """O "a" + dígitos só é acessório DENTRO de um kit com aparelho. Sozinho
+    ele é o produto: o vídeo do fone a016 vai no anúncio dedicado dele, não
+    na vitrine de fones (a016/a012/a004/a003) que tem mais estoque — antes os
+    dois empatavam em "zero bases" e ganhava o estoque."""
+    user = await make_user()
+    integ = await _loja(db, user)
+    await _link(db, user, integ, item="900", sku="a016.pr", estoque=3)
+    for sku in ("a016.pr", "a012.pr", "a004.pr", "a003.pr"):
+        await _link(db, user, integ, item="800", sku=sku, estoque=500)
+    marca = await _marca(db)
+    rede = await _conta_shopee(db, marca, integ)
+    c, _ = await _criativo(db, marca, sku="a016.pr")
+    r = await anuncio.anuncio_para(db, c, rede)
+    assert isinstance(r, anuncio.AnuncioEscolhido), r
+    assert (r.item_id, r.kit, r.bases_no_anuncio) == (900, False, 1)
+    # No kit com aparelho o acessório continua não contando como base.
+    assert anuncio._bases_de_produto("dg088.ci+a001.ci") == {"dg088"}
+    assert anuncio._bases_de_produto("a001.pr+a003.pi") == {"a001", "a003"}
+    assert anuncio._bases_de_produto("a016.pr") == {"a016"}
+
+
+async def test_avulso_ganha_do_kit_igualmente_dedicado(db, make_user):
+    """Avulso e kit com acessório carregando o MESMO aparelho: o avulso ganha,
+    mesmo com o kit tendo mais estoque e o SKU exato."""
+    user = await make_user()
+    integ = await _loja(db, user)
+    await _link(db, user, integ, item="500", sku="dg088.sp", estoque=3)
+    await _link(db, user, integ, item="600", sku="dg088.ci+a001.ci", estoque=900)
+    marca = await _marca(db)
+    rede = await _conta_shopee(db, marca, integ)
+    c, _ = await _criativo(db, marca, sku="dg088.ci")
+    r = await anuncio.anuncio_para(db, c, rede)
+    assert isinstance(r, anuncio.AnuncioEscolhido), r
+    assert (r.item_id, r.kit) == (500, False)
+
+
+@pytest.mark.parametrize(
+    "sku_kit",
+    [
+        "dg088.ci+dg089.ci",  # dois aparelhos
+        "dg088.ci+a001.ci+dg052.ci",  # dois aparelhos, mesmo com acessório junto
+        "dg088.ci+bp003",  # aparelho + produto que não é acessório
+        "dg088.ci.kit2",  # "kit" sem as partes: não dá pra saber o que vem
+    ],
+)
+async def test_kit_de_dois_aparelhos_ou_com_outro_produto_continua_recusado(db, make_user, sku_kit):
+    user = await make_user()
+    integ = await _loja(db, user)
+    await _link(db, user, integ, item="1", sku=sku_kit)
+    marca = await _marca(db)
+    rede = await _conta_shopee(db, marca, integ)
+    c, _ = await _criativo(db, marca, sku="dg088.ci")
+    assert await anuncio.anuncio_para(db, c, rede) == anuncio.SO_KIT
+
+
+async def test_kit_recusado_mais_especifico_ainda_segura_a_vitrine(db, make_user):
+    """O kit de dois aparelhos nunca é vinculado, mas continua DIZENDO que o
+    avulso mais vitrine que ele é anúncio de outro modelo."""
+    user = await make_user()
+    integ = await _loja(db, user)
+    for sku in ("dg052.ci", "dg088.ci", "dg106.ci"):
+        await _link(db, user, integ, item="22499563693", sku=sku, estoque=50)
+    await _link(db, user, integ, item="9", sku="dg088.ci+dg089.ci")
     marca = await _marca(db)
     rede = await _conta_shopee(db, marca, integ)
     c, _ = await _criativo(db, marca, sku="dg088.ci")
@@ -430,7 +557,10 @@ async def test_cadeia_vencida_pede_reautorizar(db, make_user):
         (anuncio.InfoVideo(1080, 1920, 60.4, "h264"), "video_fora_da_duracao"),
         (anuncio.InfoVideo(1080, 1920, 3.0, "h264"), "video_fora_da_duracao"),
         (anuncio.InfoVideo(480, 854, 20.0, "h264"), "video_resolucao_baixa"),
-        (anuncio.InfoVideo(1080, 1920, 25.4, "hevc"), "video_formato_nao_aceito"),
+        # HEVC passa (16/11/2026): o publicador converte pra H.264 antes do upload.
+        (anuncio.InfoVideo(1080, 1920, 25.4, "hevc"), None),
+        # Codec fora da lista fechada continua de fora.
+        (anuncio.InfoVideo(1080, 1920, 25.4, "mjpeg"), "video_formato_nao_aceito"),
         (None, "video_ilegivel"),
     ],
 )
@@ -467,10 +597,173 @@ async def test_mesmo_video_nao_vai_pra_duas_lojas_da_marca(db, make_user):
     )
     await db.commit()
     tok = (await svc.tokens_por_rede(db, [outra.id])).get(outra.id)
-    assert await svc.pode_publicar(c, f, outra, tok, session=db) == anuncio.EM_OUTRA_LOJA
+    assert await svc.pode_publicar(c, f, outra, tok, session=db) == anuncio.JA_NA_SHOPEE
+
+
+@pytest.mark.parametrize("caso", ["mesma_conta", "conta_apagada", "mesmo_criativo"])
+async def test_mesmo_video_nunca_sai_duas_vezes_na_shopee(db, make_user, caso):
+    """Decisão de 16/11/2026: o mesmo vídeo NUNCA sai duas vezes na Shopee —
+    nem de novo na mesma conta, nem depois de a conta onde saiu ser apagada
+    (a linha fica com `rede_social_id` NULL), nem por outro arquivo do mesmo
+    criativo (um criativo = um vídeo)."""
+    user = await make_user()
+    integ = await _cenario_barbosa(db, user)
+    marca = await _marca(db)
+    barbosa = await _conta_shopee(db, marca, integ)
+    c, f = await _criativo(db, marca, sha="a" * 64)
+    arquivo_postado = f
+    if caso == "mesmo_criativo":
+        # Outra versão do MESMO vídeo (outro arquivo, outro conteúdo).
+        arquivo_postado = MarketingCreativeFile(
+            creative_id=c.id,
+            file_name="video-v2.mp4",
+            file_mime="video/mp4",
+            file_size=76,
+            file_rel=f"creatives/{c.id}/video-v2.mp4",
+            sha256="b" * 64,
+        )
+        db.add(arquivo_postado)
+        await db.flush()
+    p = MarketingPostagem(
+        creative_id=c.id,
+        file_id=arquivo_postado.id,
+        rede_social_id=None if caso == "conta_apagada" else barbosa.id,
+        plataforma="shopee",
+        conta="atlas-apagada" if caso == "conta_apagada" else "barbosa",
+        status="publicado",
+        publicado_em=datetime.now(UTC) - timedelta(days=2),
+    )
+    db.add(p)
+    await db.commit()
+    tok = (await svc.tokens_por_rede(db, [barbosa.id])).get(barbosa.id)
+    assert await svc.pode_publicar(c, f, barbosa, tok, session=db) == anuncio.JA_NA_SHOPEE
+    # Só sai da conta a própria linha que está sendo conferida (o publicador
+    # e o reagendar passam `excluir_id` dela).
+    assert (
+        await anuncio.motivo_do_video_na_loja(db, c, f, barbosa, excluir_id=p.id, com_formato=False)
+        is None
+    )
+
+
+async def test_ja_na_shopee_so_conta_shopee_que_saiu_ou_pode_ter_saido(db, make_user):
+    """O vídeo no Instagram, ou uma tentativa de Shopee que falhou/foi
+    cancelada (provado que não saiu), não seguram o vídeo na Shopee."""
+    user = await make_user()
+    integ = await _cenario_barbosa(db, user)
+    marca = await _marca(db)
+    barbosa = await _conta_shopee(db, marca, integ)
+    ig = await _conta_ig(db, marca)
+    c, f = await _criativo(db, marca)
+    for rede, plataforma, status in (
+        (ig, "instagram", "publicado"),
+        (barbosa, "shopee", "falhou"),
+        (None, "shopee", "cancelado"),
+    ):
+        db.add(
+            MarketingPostagem(
+                creative_id=c.id,
+                file_id=f.id,
+                rede_social_id=rede.id if rede else None,
+                plataforma=plataforma,
+                conta="x",
+                status=status,
+            )
+        )
+    await db.commit()
+    assert await anuncio.motivo_do_video_na_loja(db, c, f, barbosa, com_formato=False) is None
+
+
+@pytest.mark.parametrize(
+    ("status", "campos", "segura"),
+    [
+        # `revisar` cancelado na tela com o upload feito: pode estar no ar.
+        ("cancelado", {"container_id": "br-123"}, True),
+        ("cancelado", {"post_external_id": "POST-1=="}, True),
+        ("falhou", {"container_id": "br-9"}, True),
+        # Cancelado/falhou SEM upload (o `_falhou` zera o container quando o
+        # post comprovadamente não saiu): nada subiu.
+        ("cancelado", {}, False),
+        ("falhou", {}, False),
+    ],
+)
+async def test_linha_que_chegou_ao_upload_segura_o_video_mesmo_cancelada(
+    db, make_user, status, campos, segura
+):
+    user = await make_user()
+    integ = await _cenario_barbosa(db, user)
+    marca = await _marca(db)
+    barbosa = await _conta_shopee(db, marca, integ)
+    c, f = await _criativo(db, marca)
+    db.add(
+        MarketingPostagem(
+            creative_id=c.id,
+            file_id=f.id,
+            rede_social_id=None,
+            plataforma="shopee",
+            conta="atv",
+            status=status,
+            **campos,
+        )
+    )
+    await db.commit()
+    motivo = await anuncio.motivo_do_video_na_loja(db, c, f, barbosa, com_formato=False)
+    assert motivo == (anuncio.JA_NA_SHOPEE if segura else None)
 
 
 # ═══════════════════════════════════════════════════════════════ agendar
+
+
+async def test_agendar_em_duas_lojas_shopee_de_uma_vez_recusa_antes_de_criar(db, make_user):
+    """O mesmo vídeo nunca sai duas vezes na Shopee: marcar duas lojas no mesmo
+    clique criaria uma linha que já nasce condenada (a segunda morre na
+    conferência do publicador). Recusa a operação inteira, sem gravar nada."""
+    user = await make_user()
+    integ = await _cenario_barbosa(db, user)
+    mega = await _loja(db, user, nome="Mega", shop_id=99)
+    await _link(db, user, mega, item="77", sku="dg046.pi")
+    marca = await _marca(db)
+    barbosa = await _conta_shopee(db, marca, integ)
+    outra = await _conta_shopee(db, marca, mega, conta="mega")
+    ig = await _conta_ig(db, marca)
+    c, f = await _criativo(db, marca)
+    for redes in ([barbosa, outra], [ig, barbosa, outra]):
+        with pytest.raises(svc.RoboError) as ei:
+            await svc.agendar(db, creative=c, file=f, redes=redes, legenda="F110L #uranyx")
+        assert ei.value.code == anuncio.JA_NA_SHOPEE
+    assert (await db.execute(select(MarketingPostagem))).scalars().all() == []
+    # Uma loja só (com o Instagram junto) continua valendo.
+    criadas = await svc.agendar(db, creative=c, file=f, redes=[ig, outra], legenda="F110L #uranyx")
+    assert sorted(p.plataforma for p in criadas) == ["instagram", "shopee"]
+
+
+@pytest.mark.parametrize(
+    ("links", "item"),
+    [
+        # O avulso do aparelho NOVO da mesma base nunca leva o vídeo do usado
+        # (o dg007.us às vezes nem é o mesmo aparelho)…
+        ([("1", "dg007.pr")], None),
+        # …nem o kit do novo.
+        ([("1", "dg007.pr+a001.pr")], None),
+        # O kit do usado vale, mesmo com o avulso do novo na loja…
+        ([("1", "dg007.pr"), ("2", "dg007.us+a001")], 2),
+        # …e o avulso do usado também.
+        ([("1", "dg007.pr"), ("3", "dg007.us")], 3),
+    ],
+)
+async def test_video_do_usado_so_vai_no_anuncio_do_proprio_usado(db, make_user, links, item):
+    user = await make_user()
+    integ = await _loja(db, user)
+    for item_id, sku in links:
+        await _link(db, user, integ, item=item_id, sku=sku)
+    marca = await _marca(db)
+    rede = await _conta_shopee(db, marca, integ)
+    c, _ = await _criativo(db, marca, sku="dg007.us")
+    r = await anuncio.anuncio_para(db, c, rede)
+    if item is None:
+        assert r == anuncio.SEM_ANUNCIO
+    else:
+        assert isinstance(r, anuncio.AnuncioEscolhido), r
+        assert r.item_id == item
 
 
 async def test_agendar_grava_snapshot_do_anuncio_e_aigc(db, make_user):
@@ -1682,7 +1975,9 @@ async def test_fila_da_tela_tira_da_shopee_o_video_em_formato_que_o_robo_pula(
         )
     )
     await db.commit()
-    _video_bom["v"] = anuncio.InfoVideo(1080, 1920, 25.4, "hevc")  # o flat_3c.mp4
+    # Codec fora da lista fechada (o HEVC do flat_3c.mp4 passou a valer em
+    # 16/11/2026 — o publicador converte; ver test_shopee_video_transcode.py).
+    _video_bom["v"] = anuncio.InfoVideo(1080, 1920, 25.4, "mjpeg")
     itens = await autopostagem.fila(db, marca.id)
     assert f.id not in {it.arquivo.id for it in itens}
     assert await autopostagem.proximo_criativo(db, shopee_conta) is None

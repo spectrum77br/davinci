@@ -85,12 +85,26 @@ UPLOAD_SCENE = 1
 # Regras do postador (decisão do dono, 06/10/2026, e limites da doc):
 # legenda até 150 (o `edit_video_info` recusa acima), vídeo de 3 a 60 s
 # ("must within {postDuration}s and greater than 3s"; a ajuda BR fala em
-# 1 min), 720p ou mais e H.264 — o que já está provado que a Shopee aceita.
+# 1 min), 720p ou mais e H.264 — o que já está provado que a Shopee aceita
+# (vídeo em outro codec é convertido antes do upload, ver `CODECS_CONVERTIDOS`).
 LEGENDA_MAX = 150
 DURACAO_MIN_S = 3.0
 DURACAO_MAX_S = 60.0
 LADO_MENOR_MIN = 720
-CODECS_ACEITOS = frozenset({"h264"})
+# O que SOBE pra Shopee é sempre H.264.
+CODEC_SHOPEE = "h264"
+# O que o DaVinci ACEITA no criativo (Eduardo, 16/11/2026): os outros codecs
+# de vídeo o publicador converte pra H.264 logo antes do upload
+# (`shopee_video_publicador.convertido_para_shopee`). 21 dos 139 vídeos
+# aprovados das lojas de celular eram HEVC (iPhone) e ficavam fora da Shopee.
+# Lista FECHADA de propósito: codec fora dela (imagem parada tipo mjpeg/png,
+# algo exótico) segue `video_formato_nao_aceito` — melhor o robô pular o
+# vídeo do que publicar uma conversão torta, que na Shopee não se edita.
+# ProRes fica de fora: é sempre 10/12 bits, que a regra do HDR/10 bits
+# (`shopee_video_anuncio.motivo_do_formato`) recusa de qualquer jeito — na
+# lista, ele só passaria quando o ffprobe não informasse o `pix_fmt`.
+CODECS_CONVERTIDOS = frozenset({"hevc", "vp9", "av1", "vp8", "mpeg4", "mpeg2video"})
+CODECS_ACEITOS = frozenset({CODEC_SHOPEE}) | CODECS_CONVERTIDOS
 TAMANHO_MAX = 1024 * 1024 * 1024
 
 # Status do `get_video_detail` (int).
