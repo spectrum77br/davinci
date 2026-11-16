@@ -747,3 +747,49 @@ async def test_chave_nao_depende_da_ordem_das_pecas():
     a = conferencia.Peca("a", "A", "Golpe", "Novo", "x")
     b = conferencia.Peca("b", "B", "Golpe", "Usado", "y")
     assert conferencia.chave([a, b], None) == conferencia.chave([b, a], None)
+
+
+async def test_reabre_o_que_foi_dado_como_resolvido_sem_voltar_pro_estoque(db):
+    """Migration 0486 ("se já voltou estoque tá resolvido"): marca do sistema com
+    peça no técnico ou estoque que não entrou volta pra abertas; sem condição e
+    resolução feita por pessoa ficam."""
+    agora = datetime.now(UTC)
+    casos = {
+        "895001": ("antes do painel novo", {"condicao_produto": "Manutenção"}),
+        "895002": (
+            "antes do painel novo (histórico)",
+            {"condicao_produto": "Novo", "estoque_status": "falhou"},
+        ),
+        "895003": ("antes do painel novo", {"condicao_produto": None}),
+        "895004": ("Voltou pro estoque", {"condicao_produto": "Novo", "estoque_status": "falhou"}),
+        "895005": (
+            "antes do painel novo",
+            {
+                "condicao_produto": "Manutenção",
+                "manutencao_destino": "Usado",
+                "estoque_status": "ok",
+            },
+        ),
+    }
+    for numero, (como, campos) in casos.items():
+        db.add(Devolution(pedido_bling=numero, conta="aguiar", sku="a1", quantidade=1, **campos))
+        db.add(DevolucaoRastreio(pedido_bling=numero, resolvido_at=agora, resolvido_como=como))
+    await db.commit()
+
+    fonte = (
+        Path(__file__).parents[1] / "alembic/versions/0486_devolucao_reabre_o_que_nao_terminou.py"
+    ).read_text()
+    sql = re.search(r'op\.execute\(\s*f"""(.*?)"""', fonte, re.S).group(1)
+    sql = sql.replace('"{SCHEMA}".', "").replace("{sem_condicao}", "")
+    sql = sql.replace("{MARCAS[0]}", "antes do painel novo")
+    sql = sql.replace("{MARCAS[1]}", "antes do painel novo (histórico)")
+    await db.execute(text(sql))
+    await db.commit()
+
+    reabertos = set()
+    for numero in casos:
+        r = await db.get(DevolucaoRastreio, numero)
+        await db.refresh(r)
+        if r.resolvido_at is None:
+            reabertos.add(numero)
+    assert reabertos == {"895001", "895002"}

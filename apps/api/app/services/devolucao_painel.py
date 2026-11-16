@@ -248,19 +248,29 @@ def pronto_pra_resolver(
     chamado_valor: float | None,
 ) -> str | None:
     """Motivo pra aparecer em "Pronto pra resolver" (None = ainda não).
-    Chamado aberto segura (falta a plataforma responder); produto com o
-    técnico ou estoque que não entrou no Bling também. Depois, basta um: o
-    Bling já saiu de Aguardando Devolução/Manutenção; o lançamento terminou;
-    ou o chamado foi concluído com valor ganho ("quando lançar estoque, ou
-    ganhar reembolso")."""
-    if tem_chamado_aberto:
-        return None
+
+    Produto com o técnico ou estoque que não entrou no Bling segura sempre.
+    Lançamento terminado (todas as peças com condição) = a devolução está
+    resolvida MESMO com o chamado aberto (Vinicius 16/11/2026: "se já voltou
+    estoque tá resolvido… o chamado em aberto é outra coisa, podemos resolver
+    a devolução e depois só ajusta o custo do chamado quando o chamado
+    terminar" — a conta do Reembolso lê o chamado na hora). Sem lançamento
+    terminado, chamado aberto segura (é ele que está resolvendo o caso); senão
+    basta um: o Bling já saiu de Aguardando Devolução/Manutenção, ou o chamado
+    foi concluído com valor ganho."""
     # Produto com o técnico ou entrada no estoque que não confirmou: ainda há
     # o que fazer, mesmo com o chamado ganho ou o Bling já em outra situação.
     if any(
         manutencao_pendente(x) or _txt(x.estoque_status) in _ESTOQUE_PENDENTE for x in lancamentos
     ):
         return None
+    terminado = bool(lancamentos) and all(_txt(x.condicao) for x in lancamentos)
+    if tem_chamado_aberto:
+        if not terminado:
+            return None
+        rotulos = sorted({condicao_da_tela(x) or "" for x in lancamentos} - {""})
+        base = "lançada: " + ", ".join(rotulos) if rotulos else "lançada"
+        return f"{base} · o chamado segue aberto"
     sit = _txt(situacao_bling)
     if sit and sit not in SITUACOES_ABERTAS:
         return f"o Bling já está em {situacao_nome or sit}"

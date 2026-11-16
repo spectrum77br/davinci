@@ -1721,6 +1721,8 @@ const lidoHa = computed(() => {
               </div>
               <template v-else>
                 <div v-if="pedidoItem.pronto_resolver" class="mb-2 text-xs"><b class="text-blue-800 dark:text-blue-200">Pronto pra resolver:</b> {{ pedidoItem.pronto_resolver }}.</div>
+                <!-- 16/11 (Vinicius): "se já voltou estoque tá resolvido… o chamado em aberto é outra coisa". -->
+                <div v-if="pedidoItem.tem_chamado_aberto" class="mb-2 text-[11px] text-muted-foreground">O chamado continua na aba Chamados: dá pra resolver a devolução agora — o valor que o chamado ganhar entra no Reembolso quando ele terminar.</div>
                 <div v-if="linhasDaJanela.length > 1" class="mb-2 text-[11px] text-muted-foreground">Vale pro pedido inteiro ({{ linhasDaJanela.length }} produtos): a situação do Bling é do pedido.</div>
                 <div class="grid items-end gap-2 sm:grid-cols-[1fr_1fr_auto]">
                   <label class="block">

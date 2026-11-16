@@ -357,12 +357,37 @@ async def test_pronto_pra_resolver() -> None:
         )
         is None
     )
-    # Chamado aberto segura tudo: falta a plataforma responder.
+    # Chamado aberto NÃO segura o que já voltou pro estoque (Vinicius 16/11: "se já
+    # voltou estoque tá resolvido… o chamado em aberto é outra coisa").
     assert (
         contas.pronto_pra_resolver(
             situacao_bling="545902",
             situacao_nome="Resolvido",
             lancamentos=usado_ok,
+            tem_chamado_aberto=True,
+            chamado_resolvido=False,
+            chamado_valor=None,
+        )
+        == "lançada: Usado · o chamado segue aberto"
+    )
+    # Sem lançamento terminado, o chamado aberto é o que está resolvendo: segura.
+    assert (
+        contas.pronto_pra_resolver(
+            situacao_bling="545902",
+            situacao_nome="Resolvido",
+            lancamentos=[Lancamento(sku="a", condicao=None)],
+            tem_chamado_aberto=True,
+            chamado_resolvido=False,
+            chamado_valor=None,
+        )
+        is None
+    )
+    # Com o técnico segura mesmo com o chamado aberto.
+    assert (
+        contas.pronto_pra_resolver(
+            situacao_bling="84677",
+            situacao_nome="Manutenção",
+            lancamentos=[Lancamento(sku="a", condicao="Manutenção")],
             tem_chamado_aberto=True,
             chamado_resolvido=False,
             chamado_valor=None,
@@ -517,7 +542,11 @@ async def test_lista_pega_quem_caiu_em_devolucao_e_so_sai_no_resolver(
     assert como == {"700004": "Voltou pro estoque", "700005": PAINEL_LARGADA}
     todas = (await client.get("/api/devolucoes-painel?mostrar=todas")).json()
     assert {i["pedido_bling"] for i in todas["items"]} == {
-        "700001", "700002", "700003", "700004", "700005"
+        "700001",
+        "700002",
+        "700003",
+        "700004",
+        "700005",
     }
 
 
