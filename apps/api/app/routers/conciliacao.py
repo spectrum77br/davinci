@@ -2921,6 +2921,75 @@ def _totais_do_dia(
     }
 
 
+def _fins_do_grupo(
+    grupo: list[ConciliacaoMovimento], inicios: set[Decimal] | None
+) -> set[Decimal] | None:
+    """Saldos possíveis no fim de um empate de horário: cada ordem em que toda linha
+    encadeia (saldo da linha = saldo de antes + crédito − débito), partindo de um dos
+    `inicios` (None = saldo de antes desconhecido: a primeira linha vale como está).
+    None quando a busca estoura o teto."""
+    fins: set[Decimal] = set()
+    orcamento = [20_000]
+
+    def dfs(saldo: Decimal | None, restantes: list[ConciliacaoMovimento]) -> bool:
+        orcamento[0] -= 1
+        if orcamento[0] < 0:
+            return False
+        if not restantes:
+            if saldo is not None:
+                fins.add(saldo)
+            return True
+        for k, x in enumerate(restantes):
+            esperado = (saldo or Decimal("0")) + _d0(x.credito) - _d0(x.debito)
+            if saldo is not None and abs(esperado - x.saldo_apos) > _TOL_SALDO:
+                continue
+            if not dfs(x.saldo_apos, restantes[:k] + restantes[k + 1 :]):
+                return False
+        return True
+
+    for inicio in inicios if inicios is not None else [None]:
+        if not dfs(inicio, list(grupo)):
+            return None
+    return fins
+
+
+def _saldo_no_fim(linhas: list[ConciliacaoMovimento], inicio: Decimal) -> Decimal | None:
+    """Saldo que o próprio relatório diz no fim de `linhas`, partindo de `inicio` (o saldo
+    da âncora). None quando a ordem do último empate não se decide (aí vale a soma).
+
+    16/11 (barbosa (ml), "saldo não bate +764,64" em 14/11 sem linha errada): a fatura
+    de 12/11 deixou o saldo do MP em −764,64 e na madrugada o MP cobriu o negativo com o
+    dinheiro segurado pra dívida SEM LINHA no relatório — o 13/11 já começa em 0. Como
+    toda linha seguinte da conta vem em par no mesmo segundo (venda + segurado), a
+    âncora (última linha de horário único) ficou presa na fatura de 12/11, e a soma
+    depois dela levava o −764,64 pra TODO dia seguinte, pra sempre. Aqui cada empate é
+    encadeado no anterior; quando nenhuma ordem encadeia (salto sem linha), o empate
+    recomeça do que o relatório diz. O salto continua aparecendo no dia em que
+    aconteceu (o saldo de antes dele vem daqui) — só não se repete nos dias seguintes."""
+    if any(m.saldo_apos is None for m in linhas):
+        return None
+    ordem = sorted(linhas, key=lambda m: (m.data, str(m.id)))
+    possiveis: set[Decimal] = {inicio}
+    i = 0
+    while i < len(ordem):
+        j = i + 1
+        while j < len(ordem) and ordem[j].data == ordem[i].data:
+            j += 1
+        grupo = ordem[i:j]
+        if len(grupo) > _MAX_EMPATE_BUSCA:
+            return None
+        fins = _fins_do_grupo(grupo, possiveis)
+        if fins is None:
+            return None
+        if not fins:
+            fins = _fins_do_grupo(grupo, None)
+            if not fins:
+                return None
+        possiveis = fins
+        i = j
+    return next(iter(possiveis)) if len(possiveis) == 1 else None
+
+
 async def _saldo_anterior(
     session: AsyncSession, loja: ConciliacaoLoja, dia: date
 ) -> Decimal | None:
@@ -2967,6 +3036,9 @@ async def _saldo_anterior(
             # débito dela inteiro (kia 16/10 18:52:18: venda, segurado e fatura no mesmo
             # segundo). A ordem do empate, como no próprio dia, diz quanto foi pago com o
             # segurado — só o que encadeia (linha faltando continua aparecendo).
+            fim = _saldo_no_fim(ultimo[:i], Decimal(m.saldo_apos))
+            if fim is not None:
+                return fim
             depois = _ordena_dia(ultimo[:i], Decimal(m.saldo_apos)) if i else []
             pago = sum(
                 (getattr(x, "pago_com_reserva", None) or Decimal("0") for x in depois),

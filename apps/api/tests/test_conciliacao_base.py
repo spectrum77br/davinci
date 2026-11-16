@@ -1417,6 +1417,56 @@ async def test_saldo_anterior_nao_conta_duas_vezes_a_fatura_paga_com_o_segurado(
     )  # 0 + 362,32 − 362,32
 
 
+async def test_saldo_anterior_segue_o_relatorio_depois_de_salto_sem_linha(db, make_user):
+    """16/11 (barbosa (ml), 14/11 "saldo não bate +764,64" sem linha errada): a fatura de
+    12/11 deixou o saldo do MP em −764,64; o MP cobriu o negativo com o segurado sem
+    linha, e o 13/11 já começa em 0. Toda linha depois vem em par no mesmo segundo
+    (venda + segurado), a âncora ficava na fatura de 12/11 e o −764,64 ia pra todo dia
+    seguinte. O salto aparece só no dia dele (13/11)."""
+    from app.routers.conciliacao import _movimentos_do_dia, _saldo_anterior, _totais_do_dia
+
+    loja, _integ = await _loja(db, make_user)
+    h = lambda dia, hh, mi, s: datetime(2026, 11, dia, hh, mi, s, tzinfo=UTC)  # noqa: E731
+
+    def linha(tipo, quando, saldo, *, credito="0", debito="0"):
+        m = _mov(loja, tipo, quando, credito=credito, debito=debito)
+        m.saldo_apos = Decimal(saldo)
+        return m
+
+    db.add_all(
+        [
+            # 12/11: venda + segurado, a fatura leva o saldo a −764,64, mais dois pares
+            linha("venda_liberada", h(12, 13, 33, 15), "1322.12", credito="1322.12"),
+            linha("cobranca_divida", h(12, 13, 33, 15), "397.84", debito="924.28"),
+            linha("fatura_cobrada", h(12, 13, 34, 18), "-764.64", debito="1162.48"),
+            linha("venda_liberada", h(12, 17, 11, 23), "82.53", credito="847.17"),
+            linha("cobranca_divida", h(12, 17, 11, 23), "-764.64", debito="847.17"),
+            linha("venda_liberada", h(12, 17, 36, 31), "0", credito="764.64"),
+            linha("cobranca_divida", h(12, 17, 36, 31), "-764.64", debito="764.64"),
+            # 13/11: o saldo já começa em 0 (o MP cobriu o negativo sem linha)
+            linha("cobranca_divida", h(13, 12, 43, 22), "0", debito="1073.23"),
+            linha("venda_liberada", h(13, 12, 43, 22), "1073.23", credito="1073.23"),
+            linha("venda_liberada", h(13, 16, 12, 10), "1697.55", credito="1697.55"),
+            linha("cobranca_divida", h(13, 16, 12, 10), "0", debito="1697.55"),
+            # 14/11: mais um par, tudo certo
+            linha("venda_liberada", h(14, 13, 30, 5), "1073.23", credito="1073.23"),
+            linha("cobranca_divida", h(14, 13, 30, 5), "0", debito="1073.23"),
+        ]
+    )
+    await db.commit()
+
+    async def totais(dia):
+        ant = await _saldo_anterior(db, loja, dia)
+        return ant, _totais_do_dia(await _movimentos_do_dia(db, loja, dia, ant), ant)
+
+    ant13, t13 = await totais(date(2026, 11, 13))
+    assert ant13 == Decimal("-764.64")
+    assert t13["diferenca"] == 764.64  # o salto aparece no dia dele
+    ant14, t14 = await totais(date(2026, 11, 14))
+    assert ant14 == Decimal("0")
+    assert t14["saldo_inicial"] == 0.0 and t14["diferenca"] == 0.0  # e não se repete
+
+
 async def test_status_lista_a_loja_ligada(db, make_user, auth_as, client):
     loja, _integ = await _loja(db, make_user)
     db.add(_mov(loja, "saque", datetime(2026, 10, 1, tzinfo=UTC), debito="9147.00"))
