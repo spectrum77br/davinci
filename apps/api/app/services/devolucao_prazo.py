@@ -90,7 +90,11 @@ async def _prazo_da_plataforma(
         client = await cd._tiktok_client_para(session, None, dev)
         rastreio = await cd._rastreio_devolucao(session, dev, cd.PLAT_TIKTOK)
         preferido = (rastreio.devolucao_id_auto or "").strip() if rastreio else ""
-        caso = await cd._return_tiktok(client, dev, preferido or None)
+        # `_return_tiktok` é síncrono e escolhe entre os casos já baixados —
+        # chamá-lo com o client dava TypeError, engolido em `atualizar_prazos`,
+        # e a TikTok nunca ganhava prazo nem aviso.
+        casos = await cd._casos_tiktok(client, dev)
+        caso = cd._return_tiktok(casos, dev, preferido or None)
         return plat, prazo_tiktok(caso) if caso else None
     return plat, None
 

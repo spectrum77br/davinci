@@ -5,11 +5,12 @@ porque o motivo foi preenchido depois do `return_seller_due_date` da Shopee."""
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
 
-from app.models import Devolution
+from app.models import BlingOrder, DevolucaoRastreio, Devolution, StoreInfo
 from app.services import devolucao_prazo as svc
 
 pytestmark = pytest.mark.asyncio
@@ -138,6 +139,128 @@ async def test_atualizar_prazos_pendente_nao_conta_como_erro(db, monkeypatch):
     assert resumo["erros"] == 0 and resumo["consultadas"] == 1
     await db.refresh(d)
     assert d.prazo_contestacao is None and d.prazo_contestacao_at is not None
+
+
+# ---------------------------------------------------------------- TikTok de verdade
+# Os testes acima trocam `_prazo_da_plataforma` inteiro — por isso não viram que
+# o ramo TikTok chamava `_return_tiktok(client, …)` (a função é síncrona e recebe
+# os CASOS): TypeError engolido em `atualizar_prazos`, e devolução TikTok nunca
+# ganhava prazo nem aviso (achado 16/11/2026). Aqui só o client é falso.
+
+OID_TT = "585585025945338891"
+RID_VIGIA = "4042116781741081611"
+
+
+class _FakeTikTok:
+    """`get_return_list` como a TikTok devolve: o caso que o Acompanhamento
+    conhece, um caso mais novo do mesmo pedido e um só-reembolso (sem pacote)
+    com prazo mais cedo, que não pode contar."""
+
+    def __init__(self, casos: list[dict]) -> None:
+        self.casos = casos
+        self.pedidos: list[list[str]] = []
+
+    async def get_return_list(self, *, order_ids=None, **kw):
+        self.pedidos.append(list(order_ids or []))
+        return [dict(c) for c in self.casos]
+
+
+def _caso(rid: str, tipo: str, prazo: datetime, update_time: int) -> dict:
+    return {
+        "order_id": OID_TT,
+        "return_id": rid,
+        "return_type": tipo,
+        "return_status": "BUYER_SHIPPED_ITEM",
+        "seller_next_action_response": [
+            {"action": "SELLER_RESPOND_RECEIVE_PACKAGE", "deadline": _ts(prazo)}
+        ],
+        "update_time": update_time,
+    }
+
+
+@pytest.fixture
+async def tiktok(db, make_user, monkeypatch):
+    """Pedido TikTok no espelho do Bling (loja → store_info tiktok), linha do
+    Acompanhamento com o id do caso e o client falso no lugar da integração."""
+    user = await make_user()
+    db.add(StoreInfo(user_id=user.id, platform="tiktok", account_name="injox", bling_store_id="77"))
+    db.add(
+        BlingOrder(
+            id=uuid4(),
+            numero="290845",
+            numeroloja=OID_TT,
+            bling_id=123456,
+            situacao="83957",
+            loja="77",
+            data=datetime(2026, 11, 1, 12, 0, tzinfo=UTC),
+            item_index=0,
+            item_codigo="b001.26",
+            item_descricao="Mala Listrada tamanho 26",
+            item_quantidade=1,
+        )
+    )
+    db.add(
+        DevolucaoRastreio(pedido_bling="290845", fonte_auto="tiktok", devolucao_id_auto=RID_VIGIA)
+    )
+    await db.commit()
+
+    agora = datetime.now(UTC).replace(microsecond=0)
+    prazos = {
+        "vigia": agora + timedelta(hours=20),
+        "outro": agora + timedelta(days=3),
+        "reembolso": agora + timedelta(hours=2),
+    }
+    fake = _FakeTikTok(
+        [
+            _caso(RID_VIGIA, "RETURN_AND_REFUND", prazos["vigia"], 10),
+            _caso("4042116781741099999", "RETURN_AND_REFUND", prazos["outro"], 20),
+            _caso("4042116781741000001", "REFUND", prazos["reembolso"], 30),
+        ]
+    )
+    contas: list[str] = []
+
+    async def _client(session, ch, dev):
+        contas.append(dev.conta)
+        return fake
+
+    monkeypatch.setattr(svc.cd, "_tiktok_client_para", _client)
+    fake.prazos = prazos  # type: ignore[attr-defined]
+    fake.contas = contas  # type: ignore[attr-defined]
+    return fake
+
+
+async def test_prazo_da_plataforma_tiktok_caminho_real(db, tiktok):
+    dev = await _dev(db, conta="injox", pedido_bling="290845", pedido_marketplace=OID_TT)
+
+    plat, prazo = await svc._prazo_da_plataforma(db, dev)
+
+    assert plat == svc.cd.PLAT_TIKTOK
+    # o caso do Acompanhamento (não o mais novo, nem o só-reembolso de prazo mais cedo)
+    assert prazo == tiktok.prazos["vigia"]
+    assert tiktok.pedidos == [[OID_TT]] and tiktok.contas == ["injox"]
+
+
+async def test_prazo_da_plataforma_tiktok_sem_caso_com_pacote(db, tiktok):
+    dev = await _dev(db, conta="injox", pedido_bling="290845", pedido_marketplace=OID_TT)
+    tiktok.casos = [c for c in tiktok.casos if c["return_type"] == "REFUND"]
+
+    assert await svc._prazo_da_plataforma(db, dev) == (svc.cd.PLAT_TIKTOK, None)
+
+
+async def test_atualizar_prazos_tiktok_grava_e_avisa(db, tiktok, threema):
+    """Ponta a ponta sem trocar `_prazo_da_plataforma`: a rodada grava o prazo
+    da TikTok (sem contar erro) e o aviso de 24 h dispara pra motivo vazio."""
+    dev = await _dev(db, conta="injox", pedido_bling="290845", pedido_marketplace=OID_TT)
+
+    resumo = await svc.run(db)
+
+    assert resumo["erros"] == 0 and resumo["consultadas"] == 1
+    assert resumo["com_prazo"] == 1 and resumo["sem_api"] == 0
+    assert resumo["avisadas"] == 1
+    await db.refresh(dev)
+    assert dev.prazo_contestacao == tiktok.prazos["vigia"]
+    assert dev.aviso_prazo_at is not None
+    assert "Pedido 290845 (injox)" in threema.enviados[0][0]
 
 
 class _FakeThreema:
