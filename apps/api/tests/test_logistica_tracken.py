@@ -243,7 +243,7 @@ async def test_resultado_grava_e_a_aba_flex_mostra(
         },
     )
     assert r.status_code == 200, r.text
-    assert r.json() == {"gravados": 3, "achados": 1}
+    assert r.json() == {"gravados": 3, "achados": 1, "avisados": 0}
 
     t = await db.get(LogisticaTracken, achado.id, populate_existing=True)
     assert (t.achado, t.status, t.tentativas, t.recebedor) == (True, "ENTREGUE", 1, "PORTEIRO")

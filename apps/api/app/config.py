@@ -1059,6 +1059,11 @@ class Settings(BaseSettings):
     flex_shopee_canais: str = "90022"
     flex_shopee_escrita: bool = False
     flex_intervalo_min: int = 15
+    # "Não conseguiu entregar" automático (Vinicius, 16/11/2026): quando o
+    # Tracken registra tentativa sem entrega num pedido Flex, o sistema abre o
+    # chamado e manda a mensagem ao cliente sozinho (services/flex_nao_entregue).
+    # False = só o botão do Raio-X.
+    flex_nao_entregue_auto: bool = True
     # Quem VÊ o Flex: admin + cairo SA e churchill (services/flex_config.pode_ver,
     # 05/11 e 11/11/2026).
     # A lista `FLEX_USUARIOS` de 05/10 saiu; variável velha no .env é ignorada.

@@ -568,8 +568,8 @@ async function consultarTracken(ids?: string[], silencioso = false) {
       if (i) await new Promise((r) => setTimeout(r, 400))
       itens.push(await consultarUmTracken(a))
     }
-    let r = { gravados: 0, achados: 0 }
-    if (itens.length) r = await api<{ gravados: number; achados: number }>('/api/logistica/tracken/resultado', { method: 'POST', body: { itens } })
+    let r = { gravados: 0, achados: 0, avisados: 0 }
+    if (itens.length) r = await api<{ gravados: number; achados: number; avisados?: number }>('/api/logistica/tracken/resultado', { method: 'POST', body: { itens } }).then((x) => ({ avisados: 0, ...x }))
     if (!ids) ultimaConsultaTracken = Date.now()
     if (itens.length) await refresh()
     if (!silencioso) {
@@ -579,6 +579,13 @@ async function consultarTracken(ids?: string[], silencioso = false) {
       if (nao) partes.push(`${nao} ainda não está(ão) lá`)
       if (erros) partes.push(`${erros} com erro`)
       toasts.success(`Tracken: ${alvos.length} pedido(s) Flex conferido(s)`, partes.join(' · '))
+    }
+    // "Não conseguiu entregar" automático (16/11/2026): avisa mesmo na leitura silenciosa.
+    if (r.avisados) {
+      toasts.success(
+        `Flex: ${r.avisados} pedido(s) com tentativa sem entrega`,
+        'Chamado aberto e mensagem ao cliente enviada sozinho — veja o resultado na aba Chamados.',
+      )
     }
   } catch (e: any) {
     if (!silencioso) toasts.error('Tracken', e?.data?.detail?.code || e?.message || 'erro')
@@ -3552,6 +3559,7 @@ async function aplicarStatusBling(c: Logistica) {
                   >
                     <PackageX class="size-3" /> Não conseguiu entregar
                   </button>
+                  <div class="mt-0.5 text-[10.5px] text-muted-foreground">Automático: quando a transportadora registra tentativa sem entrega, o sistema já abre o chamado e avisa o cliente (com a aba Flex aberta). O botão é para mandar à mão.</div>
                 </div>
               </section>
 

@@ -564,3 +564,142 @@ async def test_mandar_shopee_pega_o_comprador_do_pedido(db: AsyncSession, monkey
     linha.pedido_marketplace = "OUTRO"
     status, msg = await flex_nao_entregue.mandar_mensagem(db, linha, "shopee", "Oi")
     assert (status, msg) == ("falhou", "a Shopee não informou o comprador do pedido")
+
+
+# ---------------------------------------------------------------- automático
+
+
+def _bruto(eventos: list[tuple[datetime, str]], status: str = "EM ROTA", entregue=None) -> list:
+    """Resposta crua do Tracken (como a tela manda) com estes eventos."""
+    sp = flex_nao_entregue.SAO_PAULO
+    hist = [
+        {
+            "hsp_dtstatus": em.astimezone(sp).strftime("%Y-%m-%d"),
+            "hsp_hrstatus": em.astimezone(sp).strftime("%H:%M:%S"),
+            "deschistorico": desc,
+        }
+        for em, desc in eventos
+    ]
+    item = {"codpedido": "636803400", "sts_nome": status, "statushsp": eventos[-1][1]}
+    if entregue is not None:
+        item["hsp_dtentrega"] = entregue.astimezone(sp).strftime("%Y-%m-%d")
+        item["hsp_hrentrega"] = entregue.astimezone(sp).strftime("%H:%M:%S")
+    return [{**item, "historico": hist}]
+
+
+def _resultado(client: AsyncClient, linha: Logistica, lista: list):
+    return client.post(
+        "/api/logistica/tracken/resultado",
+        json={"itens": [{"logistica_id": str(linha.id), "lista": lista}]},
+    )
+
+
+@pytest.mark.asyncio
+async def test_automatico_avisa_uma_vez_por_tentativa(
+    client: AsyncClient,
+    db: AsyncSession,
+    admin: User,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    linha = await _pedido(db, bling="309500", loja="2611AUTO", tentativa=False)
+    enviados: list[str] = []
+
+    async def falso(session, row, texto):
+        enviados.append(texto)
+        return "enviada", None
+
+    monkeypatch.setattr(flex_nao_entregue, "_mandar_shopee", falso)
+    auth_as(admin)
+    agora = datetime.now(UTC).replace(microsecond=0)
+
+    # Sem tentativa: nada.
+    r = await _resultado(client, linha, _bruto([(agora - timedelta(hours=3), "SAIU PARA ENTREGA")]))
+    assert r.json()["avisados"] == 0 and await _chamados(db, "309500") == []
+
+    # A transportadora confirma que não conseguiu → chamado + mensagem na hora.
+    eventos = [
+        (agora - timedelta(hours=3), "SAIU PARA ENTREGA"),
+        (agora - timedelta(minutes=50), "DESTINATÁRIO AUSENTE"),
+    ]
+    r = await _resultado(client, linha, _bruto(eventos))
+    assert r.json() == {"gravados": 1, "achados": 1, "avisados": 1}
+    [ch] = await _chamados(db, "309500")
+    msgs = await _mensagens(db, ch.id)
+    ab = next(m for m in msgs if m.tipo == "abertura")
+    assert ab.autor_nome == flex_nao_entregue.AUTOR_AUTOMATICO and ab.autor_id is None
+    assert "(destinatário ausente)" in ab.texto
+    assert any(m.tipo == "instrucao" for m in msgs)  # Shopee: a IA abre
+    nota = next(m for m in msgs if m.texto.startswith(flex_nao_entregue.PREFIXO_NOTA))
+    assert "(automático (Tracken)): chamado aberto; mensagem ao cliente enviada" in nota.texto
+    assert len(enviados) == 1 and enviados[0].startswith("Olá, Marcio! Tentamos entregar")
+
+    # A mesma leitura de novo (30 min depois, outra aba aberta…): não repete.
+    await _envelhecer(db)
+    r = await _resultado(client, linha, _bruto(eventos))
+    assert r.json()["avisados"] == 0 and len(enviados) == 1
+
+    # Nova tentativa depois do aviso → avisa de novo (no mesmo chamado).
+    eventos.append((agora - timedelta(minutes=2), "ENDEREÇO NÃO LOCALIZADO"))
+    r = await _resultado(client, linha, _bruto(eventos))
+    assert r.json()["avisados"] == 1 and len(enviados) == 2
+    assert "(endereço não localizado)" in enviados[1]
+    assert len(await _chamados(db, "309500")) == 1
+    instr = [m for m in await _mensagens(db, ch.id) if m.tipo == "instrucao"]
+    assert len(instr) == 2 and instr[-1].autor_nome == flex_nao_entregue.AUTOR_AUTOMATICO
+
+
+@pytest.mark.asyncio
+async def test_automatico_nao_dispara_em_velha_entregue_avisada_ou_desligado(
+    client: AsyncClient,
+    db: AsyncSession,
+    admin: User,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    enviados: list[str] = []
+
+    async def falso(session, row, texto):
+        enviados.append(texto)
+        return "enviada", None
+
+    monkeypatch.setattr(flex_nao_entregue, "_mandar_shopee", falso)
+    monkeypatch.setattr(flex_nao_entregue, "_mandar_ml", falso)
+    auth_as(admin)
+    agora = datetime.now(UTC).replace(microsecond=0)
+
+    # Tentativa de anteontem (histórico velho na 1ª leitura): não avisa atrasado.
+    velha = await _pedido(db, bling="309600", loja="2611VELHA", tentativa=False)
+    r = await _resultado(client, velha, _bruto([(agora - timedelta(hours=30), "CLIENTE AUSENTE")]))
+    assert r.json()["avisados"] == 0
+
+    # Teve tentativa, mas já entregou: não avisa.
+    entregue = await _pedido(db, bling="309601", loja="2611ENTREGUE", tentativa=False)
+    lista = _bruto(
+        [(agora - timedelta(hours=2), "CLIENTE AUSENTE"), (agora - timedelta(hours=1), "ENTREGUE")],
+        status="ENTREGUE",
+        entregue=agora - timedelta(hours=1),
+    )
+    assert (await _resultado(client, entregue, lista)).json()["avisados"] == 0
+
+    # A pessoa já avisou pelo botão depois da tentativa: o automático não repete.
+    feito = await _pedido(
+        db, bling="309602", loja="2000016099990001", plataforma="Mercado Livre", conta="atlas"
+    )
+    await _post(client, feito, "à mão")
+    await _envelhecer(db)
+    lista = _bruto([(agora - timedelta(minutes=40), "DESTINATÁRIO AUSENTE")])
+    assert (await _resultado(client, feito, lista)).json()["avisados"] == 0
+    # (a nota da pessoa ficou 10 min mais velha, mas ainda depois da tentativa de 40 min)
+
+    # Chave desligada: só o botão.
+    monkeypatch.setattr(
+        flex_nao_entregue, "get_settings", lambda: SimpleNamespace(flex_nao_entregue_auto=False)
+    )
+    nova = await _pedido(db, bling="309603", loja="2611DESLIGADO", tentativa=False)
+    lista = _bruto([(agora - timedelta(minutes=10), "DESTINATÁRIO AUSENTE")])
+    assert (await _resultado(client, nova, lista)).json()["avisados"] == 0
+    assert enviados == []
+    assert await _chamados(db, "309603") == []

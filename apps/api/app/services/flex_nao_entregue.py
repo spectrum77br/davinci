@@ -37,6 +37,16 @@ conferir e editar antes de sair (nada é automático):
 
 O motivo e a hora vêm do Tracken (a transportadora do Flex): o último evento
 que parece tentativa sem entrega (ausente, recusado, endereço…).
+
+**Automático** (Vinicius, 16/11/2026: "logo que der algum tipo de erro, tanto
+na Shopee quanto no Mercado Livre, a transportadora confirmou que não
+conseguiu, ele já manda e abre o chamado na hora"): quando a leitura do
+Tracken grava uma TENTATIVA sem entrega das últimas 24 h num pedido Flex ainda
+não entregue, e ninguém avisou (à mão ou sozinho) depois dela, o sistema faz o
+mesmo que o botão com os textos prontos — `automatico`. Quem lê o Tracken é a
+TELA da aba Flex (o servidor leva 403), então o automático roda quando a aba
+Flex está aberta em algum lugar (de 30 em 30 min). Chave
+`flex_nao_entregue_auto` (.env) desliga.
 """
 
 from __future__ import annotations
@@ -49,10 +59,11 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Chamado, ChamadoMensagem, Logistica, LogisticaTracken, User
+from app.config import get_settings
+from app.models import BlingOrder, Chamado, ChamadoMensagem, Logistica, LogisticaTracken, User
 from app.services import chamados as chamados_svc
 from app.services import logistica_meli, logistica_rules, logistica_shopee, tracken
 from app.services.atendimento import ml as atendimento_ml
@@ -142,6 +153,22 @@ def _motivo(descricao: str | None, observacao: str | None = None) -> str | None:
     if not partes:
         return None
     return " - ".join(dict.fromkeys(partes)).lower()
+
+
+def tentativa_confirmada(tk: LogisticaTracken | None) -> Tentativa | None:
+    """O último evento que é TENTATIVA sem entrega (com hora) — o gatilho do
+    automático. Devolução, extravio etc. não entram: "vamos tentar de novo"
+    não serve pra eles."""
+    if tk is None:
+        return None
+    for ev in reversed(list(tk.historico or [])):
+        if not isinstance(ev, dict):
+            continue
+        desc, obs = ev.get("descricao"), ev.get("observacao")
+        em = _dt(ev.get("em"))
+        if em is not None and (tracken.eh_tentativa(desc) or tracken.eh_tentativa(obs)):
+            return Tentativa(_motivo(desc, obs), em)
+    return None
 
 
 def ultima_tentativa(tk: LogisticaTracken | None) -> Tentativa:
@@ -340,30 +367,35 @@ async def como_vai_o_chamado(
     return ch, ACAO_INSTRUCAO  # a IA está abrindo / abriu sem nº ainda
 
 
-def _autor(user: User) -> str:
+AUTOR_AUTOMATICO = "automático (Tracken)"
+
+
+def _autor(user: User | None) -> str:
+    if user is None:
+        return AUTOR_AUTOMATICO
     return (user.name or user.email or "").strip() or "usuário"
 
 
-def _instrucao(ch: Chamado, texto: str, user: User) -> ChamadoMensagem:
+def _instrucao(ch: Chamado, texto: str, user: User | None) -> ChamadoMensagem:
     return chamados_svc.nova_mensagem(
         ch,
         texto=texto,
         tipo="instrucao",
         direcao="sistema",
         autor_nome=_autor(user),
-        autor_id=user.id,
+        autor_id=user.id if user is not None else None,
         status="registrada",
     )
 
 
-def _abertura(ch: Chamado, texto: str, user: User, *, status: str) -> ChamadoMensagem:
+def _abertura(ch: Chamado, texto: str, user: User | None, *, status: str) -> ChamadoMensagem:
     m = chamados_svc.nova_mensagem(
         ch,
         texto=texto,
         tipo="abertura",
         direcao="enviada",
         autor_nome=_autor(user),
-        autor_id=user.id,
+        autor_id=user.id if user is not None else None,
         status=status,
     )
     m.canal = "robo"
@@ -385,9 +417,7 @@ def _instrucao_shopee(pedido: str, texto: str, *, ja_tem_numero: bool) -> str:
     )
 
 
-async def _abrir_novo(
-    session: AsyncSession, row: Logistica, plataforma: str, texto: str, user: User
-) -> Chamado:
+async def _abrir_novo(session: AsyncSession, row: Logistica, plataforma: str) -> Chamado:
     """Chamado novo do botão — nunca reaproveita o de outro assunto (por isso
     não passa pelo `abrir_chamado_logistica`, que pega o mais novo do pedido)."""
     ch = Chamado(
@@ -424,9 +454,10 @@ async def registrar_chamado(
     row: Logistica,
     plataforma: str,
     texto: str,
-    user: User,
+    user: User | None,
 ) -> tuple[Chamado, str]:
-    """Abre o chamado do botão (ou leva a novidade ao que ele já abriu). NÃO commita."""
+    """Abre o chamado do botão (ou leva a novidade ao que ele já abriu).
+    `user` None = o automático. NÃO commita."""
     texto = texto.strip()
     pedido = (row.pedido_marketplace or row.pedido_bling or "").strip()
     ch, acao = await como_vai_o_chamado(session, row, plataforma)
@@ -451,7 +482,7 @@ async def registrar_chamado(
             acao = ACAO_INSTRUCAO
     if acao == ACAO_ABERTO:
         if ch is None:
-            ch = await _abrir_novo(session, row, plataforma, texto, user)
+            ch = await _abrir_novo(session, row, plataforma)
         if plataforma == PLAT_ML:
             session.add(_abertura(ch, texto, user, status="pendente"))
         else:
@@ -601,7 +632,7 @@ _O_QUE_FOI_FEITO = {
 }
 
 
-def nota_enviando(ch: Chamado, *, acao: str, user: User, mandar: bool) -> ChamadoMensagem:
+def nota_enviando(ch: Chamado, *, acao: str, user: User | None, mandar: bool) -> ChamadoMensagem:
     """A nota do clique, gravada junto com o chamado (antes da mensagem sair)."""
     msg = NOTA_ENVIANDO if mandar else "sem mensagem ao cliente"
     return chamados_svc.registrar_sistema(
@@ -651,3 +682,100 @@ def preview_dados(
         "texto_chamado": texto_chamado(row, plataforma, t),
         "texto_cliente": texto_cliente(nome, plataforma, t, agora),
     }
+
+
+async def nome_do_cliente(session: AsyncSession, row: Logistica) -> str | None:
+    """O nome gravado na linha (Amazon) ou o destinatário do pedido no Bling."""
+    if (row.cliente_nome or "").strip():
+        return row.cliente_nome.strip()
+    numero = (row.pedido_bling or "").strip()
+    if not numero:
+        return None
+    nome = (
+        await session.execute(
+            select(func.min(BlingOrder.nome_destinatario)).where(
+                BlingOrder.numero == numero,
+                BlingOrder.nome_destinatario.is_not(None),
+                BlingOrder.nome_destinatario != "",
+            )
+        )
+    ).scalar_one_or_none()
+    return (nome or "").strip() or None
+
+
+# ---------------------------------------------------------------- automático
+
+# Só tentativa recente: na 1ª leitura depois de publicar, tentativa velha do
+# histórico não dispara aviso atrasado.
+JANELA_AUTO = timedelta(hours=24)
+# Por leitura (a resposta da tela): o resto fica pra leitura seguinte.
+LIMITE_AUTO = 10
+
+
+async def _avisar_sozinho(session: AsyncSession, logistica_id: Any, agora: datetime) -> bool:
+    """Um pedido: confere e avisa. Commita (a linha fica travada até o 1º)."""
+    row = (
+        await session.execute(
+            select(Logistica).where(Logistica.id == logistica_id).with_for_update()
+        )
+    ).scalar_one_or_none()
+    plataforma = plataforma_de(row) if row is not None else None
+    tk = await session.get(LogisticaTracken, logistica_id) if plataforma else None
+    t = tentativa_confirmada(tk) if tk is not None and tk.entregue_em is None else None
+    if row is None or plataforma is None or t is None or t.em < agora - JANELA_AUTO:
+        await session.commit()  # solta a trava
+        return False
+    ultimo = next(iter(await avisos_anteriores(session, row)), None)
+    if ultimo is not None and (
+        ultimo.created_at >= t.em or ultimo.created_at > agora - JANELA_REPETIDO
+    ):
+        # Já avisado depois desta tentativa (à mão ou sozinho), ou agorinha.
+        await session.commit()
+        return False
+    nome = await nome_do_cliente(session, row)
+    texto_ch = texto_chamado(row, plataforma, t)
+    texto_cli = texto_cliente(nome, plataforma, t, agora)
+    try:
+        validar(plataforma, texto_ch, texto_cli, True)
+        mandar = True
+    except FlexNaoEntregueError:
+        mandar = False
+    ch, acao = await registrar_chamado(session, row, plataforma, texto_ch, None)
+    nota = nota_enviando(ch, acao=acao, user=None, mandar=mandar)
+    session.add(nota)
+    await session.commit()
+    if mandar:
+        status, erro = await mandar_mensagem(session, row, plataforma, texto_cli)
+        completar_nota(
+            nota,
+            plataforma=plataforma,
+            mensagem_status=status,
+            mensagem_erro=erro,
+            texto_cliente=texto_cli,
+        )
+        await session.commit()
+    logger.info(
+        "flex_nao_entregue_automatico",
+        logistica_id=str(logistica_id),
+        chamado_id=str(ch.id),
+        acao=acao,
+        mandou=mandar,
+    )
+    return True
+
+
+async def automatico(session: AsyncSession, ids: list[Any], agora: datetime) -> int:
+    """Depois de gravar a leitura do Tracken: avisa sozinho os pedidos com
+    tentativa nova. Devolve quantos foram avisados. Nunca levanta."""
+    if not ids or not get_settings().flex_nao_entregue_auto:
+        return 0
+    avisados = 0
+    for lid in ids[:LIMITE_AUTO]:
+        try:
+            avisados += await _avisar_sozinho(session, lid, agora)
+        except Exception as e:  # noqa: BLE001 — um pedido não derruba os outros
+            await session.rollback()
+            logger.warning(
+                "flex_nao_entregue_automatico_erro", logistica_id=str(lid), err=str(e)[:300]
+            )
+    return avisados

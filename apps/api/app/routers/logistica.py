@@ -1104,7 +1104,9 @@ async def tracken_resultado(
     user: Annotated[User, Depends(require_permission("logistica", "view"))],
 ) -> dict[str, int]:
     """A tela devolve a resposta crua do Tracken; aqui ela é interpretada e
-    gravada. Só vale para pedido Flex (o resto é ignorado)."""
+    gravada. Só vale para pedido Flex (o resto é ignorado). Depois, o
+    "Não conseguiu entregar" automático (16/11/2026): pedido com tentativa sem
+    entrega nova → chamado aberto e cliente avisado (services/flex_nao_entregue)."""
     _so_quem_ve_flex(user)
     pedidos = {i.logistica_id for i in body.itens}
     flex = set(
@@ -1118,6 +1120,7 @@ async def tracken_resultado(
     ) if pedidos else set()
     agora = datetime.now(UTC)
     gravados = achados = 0
+    com_tentativa: list[UUID] = []
     for item in body.itens:
         if item.logistica_id not in flex:
             continue
@@ -1131,8 +1134,11 @@ async def tracken_resultado(
             erro = f"Tracken: {(item.erro or 'não deu para consultar').strip()[:250]}"
         await tracken.gravar(session, item.logistica_id, agora, dados, erro)
         gravados += 1
+        if dados is not None and dados.get("tentativas"):
+            com_tentativa.append(item.logistica_id)
     await session.commit()
-    return {"gravados": gravados, "achados": achados}
+    avisados = await flex_nao_entregue.automatico(session, com_tentativa, agora)
+    return {"gravados": gravados, "achados": achados, "avisados": avisados}
 
 
 @router.post("/export.xlsx")
@@ -1890,9 +1896,7 @@ async def _linha_flex_nao_entregue(
 
 
 async def _nome_bling_da_linha(session: AsyncSession, c: Logistica) -> str | None:
-    return (c.cliente_nome or "").strip() or (await _nomes_bling_map(session, [c])).get(
-        (c.pedido_bling or "").strip()
-    )
+    return await flex_nao_entregue.nome_do_cliente(session, c)
 
 
 @router.get(
