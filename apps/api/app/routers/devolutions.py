@@ -1109,8 +1109,11 @@ _PAINEL_FONTE_SQL = f"""(
 _PAINEL_FILTRO_LISTA = (
     f"bo2.aguardando_devolucao_data IS NOT NULL "
     f"OR bo2.situacao IN ('{_SITUACAO_AGUARDANDO_DEVOLUCAO}', '84677') "
-    f'OR EXISTS (SELECT 1 FROM "{SCHEMA}".devolutions dx '
-    "WHERE btrim(dx.pedido_bling) = bo2.numero)"
+    # IN (subconsulta sem correlação): o banco monta a lista de pedidos com
+    # lançamento UMA vez (hash). O EXISTS correlacionado dentro do OR varria os
+    # lançamentos pra cada linha do bling_orders e travou a lista (16/11).
+    f'OR bo2.numero IN (SELECT btrim(dx.pedido_bling) FROM "{SCHEMA}".devolutions dx '
+    "WHERE dx.pedido_bling IS NOT NULL)"
 )  # noqa: S608
 # Busca de UM pedido no histórico (nº do Bling ou da plataforma): qualquer
 # situação, aberto ou resolvido — pra achar a devolução antiga que o chamado
