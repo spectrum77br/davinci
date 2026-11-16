@@ -7909,7 +7909,17 @@ async def manter_fila(session: AsyncSession, *, limite: int = 25) -> dict[str, i
     )
     ids = (
         await session.execute(
-            base.where(ultimo_cartao).order_by(c.ultima_do_cliente_em).limit(limite)
+            base.where(
+                ultimo_cartao,
+                # O "Precisa de resposta" da pessoa (16/11/2026) deixa o turno com
+                # ela: fora daqui, senão ocupa as vagas da rodada para sempre.
+                or_(
+                    c.precisa_resposta_em.is_(None),
+                    c.precisa_resposta_em < c.ultima_do_cliente_em,
+                ),
+            )
+            .order_by(c.ultima_do_cliente_em)
+            .limit(limite)
         )
     ).all()
     for conversa_id, canal_id, turno in ids:

@@ -2,7 +2,9 @@
 
 O processamento de cartões não gera nem envia texto. O menu retorna apenas
 a resposta literal aprovada; o chamador mantém as travas de envio. A regra
-exige o Manual vigente, e uma nova fala do cliente reabre a conversa.
+exige o Manual vigente, e uma nova fala do cliente reabre a conversa. O turno
+que a pessoa desfez ("Precisa de resposta", 16/11/2026) fica com ela até a
+próxima fala do cliente (`desfeito_pela_pessoa`).
 """
 
 from __future__ import annotations
@@ -193,6 +195,32 @@ def _utc(valor: datetime | None) -> datetime | None:
 
 def _momento(mensagem: Any) -> datetime | None:
     return _utc(getattr(mensagem, "enviada_em", None) or getattr(mensagem, "created_at", None))
+
+
+def desfeito_pela_pessoa(conversa: Any, gatilho: Any = None) -> bool:
+    """A pessoa desfez o "Não precisa" (clicou "Precisa de resposta") NESTE turno? PURA.
+
+    16/11/2026: a IA marcava o turno só de cartão; a pessoa desfazia; na rodada
+    seguinte a IA marcava de novo. Agora o desfazer (`precisa_resposta_em`,
+    gravado pelo PATCH) é intervenção humana, como a IA pausada: vale para o
+    turno da última fala do comprador (`ultima_do_cliente_em`, o
+    `turno_esperado` de `ia.manter_fila`). O clique é do relógio do banco e a
+    fala, da plataforma: com o `gatilho`, a CHEGADA dele (`created_at`, o mesmo
+    relógio do clique) também segura — um relógio de plataforma adiantado não
+    solta a IA antes da hora. A próxima fala do comprador (escrita e chegada
+    depois do clique) abre turno novo e solta a IA.
+    """
+    from app.services.atendimento import gravar  # tardio, como em `processar`
+
+    clique = _utc(getattr(conversa, "precisa_resposta_em", None))
+    if clique is None:
+        return False
+    turno = _utc(getattr(conversa, "ultima_do_cliente_em", None))
+    if turno is None or clique >= turno:
+        return True
+    # Só a chegada já carregada (nunca vai ao banco).
+    chegada = gravar._chegada_carregada(gatilho) if gatilho is not None else None
+    return chegada is not None and clique >= chegada
 
 
 def _figurinha_estruturada_antiga(mensagem: Any, ultimo_cartao: Any) -> bool:
@@ -414,6 +442,8 @@ async def processar(
             or not _canal_compativel(conversa)
             or conversa.ia_pausada
             or conversa.atribuido_a is not None
+            # A pessoa desfez o "Não precisa" neste turno (16/11/2026): o turno é dela.
+            or desfeito_pela_pessoa(conversa)
             or conversa.situacao in (CONVERSA_FECHADA, CONVERSA_BLOQUEADA)
             or conversa.sem_resposta_necessaria
             or not conversa.aguardando_resposta
@@ -443,7 +473,12 @@ async def processar(
             return False
         gatilho = await ia._ultima_do_cliente(session, conversa)
         recentes = await ia._mensagens_recentes(session, conversa)
-        if gatilho is None or _momento(gatilho) != _utc(conversa.ultima_do_cliente_em):
+        if (
+            gatilho is None
+            or _momento(gatilho) != _utc(conversa.ultima_do_cliente_em)
+            # A chegada do gatilho no relógio do clique (`desfeito_pela_pessoa`).
+            or desfeito_pela_pessoa(conversa, gatilho)
+        ):
             return False
         acolhido = cartao_ja_acolhido(recentes, gatilho)
         if not acolhido:

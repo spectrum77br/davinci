@@ -597,18 +597,19 @@ async def test_sem_resposta_necessaria_tira_da_fila(db: AsyncSession, make_user)
 
 
 def test_o_corte_do_nao_precisa_so_vale_quando_a_fala_nova_reabre():
-    """16/11/2026: o "Não precisa"/"Fechar" guarda `dados.processado_ate`; só a
-    fala NOVA que reabre o aplica — o `visto_em` (e, na base importada, o
-    `notificacoes_visto_em`) vira o maior entre ele e o corte, e a chave sai.
-    A antiga chegando atrasada não reabre nem gasta o corte. A fala que reabre
-    conta sempre: com a chegada antes do corte, o corte fica logo antes dela."""
+    """16/11/2026: o "Não precisa"/"Fechar" guarda o corte `processado_ate` (coluna
+    desde a 0487, não mais `dados`); só a fala NOVA que reabre o aplica — o
+    `visto_em` (e, na base importada, o `notificacoes_visto_em`) vira o maior
+    entre ele e o corte, e o corte sai. A antiga chegando atrasada não reabre
+    nem gasta o corte. A fala que reabre conta sempre: com a chegada antes do
+    corte, o corte fica logo antes dela. Nada disso mexe em `dados`."""
     from types import SimpleNamespace
     from uuid import uuid4
 
     ns = SimpleNamespace
 
     t = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
-    chave = gravar.CHAVE_PROCESSADO_ATE
+    corte = t + timedelta(minutes=5)
 
     def conversa(**campos):
         base = {
@@ -619,7 +620,10 @@ def test_o_corte_do_nao_precisa_so_vale_quando_a_fala_nova_reabre():
             "notificacoes_visto_em": None,
             "notificacoes_corte_em": None,
             "notificacoes_iniciais": {},
-            "dados": {"outra": 1, chave: (t + timedelta(minutes=5)).isoformat()},
+            "processado_ate": corte,
+            "sem_resposta_em": None,
+            "precisa_resposta_em": None,
+            "dados": {"outra": 1},
         }
         return ns(**{**base, **campos})
 
@@ -630,13 +634,13 @@ def test_o_corte_do_nao_precisa_so_vale_quando_a_fala_nova_reabre():
     # A antiga (antes da última fala do comprador): nada muda, o corte fica.
     c = conversa()
     gravar._reabrir_se_nova(c, fala(-1))
-    assert c.sem_resposta_necessaria is True and chave in c.dados
-    # A nova: desmarca, o corte vira o visto, a chave sai (e o resto de `dados` fica).
+    assert c.sem_resposta_necessaria is True and c.processado_ate == corte
+    # A nova: desmarca, o corte vira o visto e sai (`dados` fica como estava).
     c = conversa()
     gravar._reabrir_se_nova(c, fala(10))
     assert c.sem_resposta_necessaria is False
-    assert c.visto_em == t + timedelta(minutes=5)
-    assert c.dados == {"outra": 1}
+    assert c.visto_em == corte
+    assert c.processado_ate is None and c.dados == {"outra": 1}
     # O visto nunca anda para trás (o "Zerar não lidas" depois do clique).
     c = conversa(visto_em=t + timedelta(minutes=8))
     gravar._reabrir_se_nova(c, fala(10))
@@ -649,9 +653,9 @@ def test_o_corte_do_nao_precisa_so_vale_quando_a_fala_nova_reabre():
     # A fechada reabre e aplica o mesmo corte.
     c = conversa(situacao="fechada", sem_resposta_necessaria=False)
     gravar._reabrir_se_nova(c, fala(10))
-    assert (c.situacao, c.visto_em, c.dados) == ("aberta", t + timedelta(minutes=5), {"outra": 1})
-    # Sem a chave (a IA, a Magalu, antes de 16/11/2026): só desmarca.
-    c = conversa(dados={})
+    assert (c.situacao, c.visto_em, c.processado_ate) == ("aberta", corte, None)
+    # Sem o corte (a IA, a Magalu, antes de 16/11/2026): só desmarca.
+    c = conversa(processado_ate=None)
     gravar._reabrir_se_nova(c, fala(10))
     assert (c.sem_resposta_necessaria, c.visto_em) == (False, None)
     # A base importada do Duoke que vale: o visto dela também.
@@ -667,26 +671,34 @@ def test_o_corte_do_nao_precisa_so_vale_quando_a_fala_nova_reabre():
         },
     )
     gravar._reabrir_se_nova(c, fala(10))
-    assert c.notificacoes_visto_em == c.visto_em == t + timedelta(minutes=5)
+    assert c.notificacoes_visto_em == c.visto_em == corte
     # O FAQ do comprador / o mediador: só desliga o "não precisa" — a fechada fica.
     c = conversa(situacao="fechada")
     gravar._desmarcar_pela_fala_nova(c, fala(10))
     assert (c.situacao, c.sem_resposta_necessaria) == ("fechada", False)
-    assert c.visto_em == t + timedelta(minutes=5) and c.dados == {"outra": 1}
+    assert c.visto_em == corte and c.processado_ate is None
     c = conversa(situacao="fechada", sem_resposta_necessaria=False)
     gravar._desmarcar_pela_fala_nova(c, fala(10))
-    assert chave in c.dados, "fechada sem o 'não precisa': fica para a fala do comprador"
+    assert c.processado_ate == corte, "fechada sem o 'não precisa': fica para a fala do comprador"
     c = conversa()
     gravar._desmarcar_pela_fala_nova(c, fala(-1))
-    assert c.sem_resposta_necessaria is True and chave in c.dados
-    # Guardar nunca anda para trás; esquecer apaga só a chave.
+    assert c.sem_resposta_necessaria is True and c.processado_ate == corte
+    # Guardar nunca anda para trás; esquecer apaga só o corte.
     c = conversa()
     gravar.guardar_processado_ate(c, t)
-    assert c.dados[chave] == (t + timedelta(minutes=5)).isoformat()
+    assert c.processado_ate == corte
     gravar.guardar_processado_ate(c, (t + timedelta(minutes=9)).replace(tzinfo=None))
-    assert c.dados[chave] == (t + timedelta(minutes=9)).isoformat()
+    assert c.processado_ate == t + timedelta(minutes=9)
     gravar.esquecer_processado_ate(c)
-    assert c.dados == {"outra": 1}
+    assert c.processado_ate is None
+    # As horas da pessoa: o "Não precisa" (as Métricas) e o "Precisa de resposta"
+    # (a IA não remarca o turno desfeito). Sem fuso é UTC.
+    gravar.guardar_hora_do_clique(c, t.replace(tzinfo=None))
+    assert c.sem_resposta_em == t
+    gravar.esquecer_hora_do_clique(c)
+    gravar.guardar_hora_do_desfazer(c, t + timedelta(minutes=1))
+    assert (c.sem_resposta_em, c.precisa_resposta_em) == (None, t + timedelta(minutes=1))
+    assert c.dados == {"outra": 1}, "nada disso mora mais em `dados` (0487)"
 
 
 async def test_a_fala_que_reabre_conta_mesmo_com_o_corte_depois_da_chegada(

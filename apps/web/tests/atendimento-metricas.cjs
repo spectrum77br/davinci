@@ -8,9 +8,12 @@
 //    GET /metricas de sempre); a régua da cor é a do envio sozinho (75%) e a hora da análise é
 //    a do cron (07:40 de São Paulo);
 //  - as funções puras: a % de aprovação (para baixo), as cores, o que saiu sozinho (para baixo:
-//    nunca a meta de 60% sem ter batido), o negrito da análise sem v-html, as lojas de cada
-//    linha (as de mais respostas primeiro) e as linhas da lista (equipes, "sem equipe" só com
-//    movimento, "todas as lojas" no fim);
+//    nunca a meta de 60% sem ter batido), o no prazo (16/11/2026: para baixo, e a cor sai do
+//    MESMO número que aparece), o negrito da análise sem v-html, as lojas de cada linha (as de
+//    mais respostas primeiro) e as linhas da lista (equipes, "sem equipe" só com movimento,
+//    "todas as lojas" no fim);
+//  - o texto de ajuda diz a régua do tempo de 16/11/2026 (a mensagem ESCRITA, a resposta de
+//    verdade, o cartão e o "ok/obrigado" que não abrem espera, o recibo que não é resposta);
 //  - a tela do admin (setup + SSR, API falsa): a análise no topo com o negrito, o "saiu sozinho"
 //    em cima, a lista das equipes com o tempo médio, o no prazo e a aprovação, o clique que abre
 //    as lojas da linha; o período que relê as equipes (a análise não); sem os cartões grandes e
@@ -103,8 +106,33 @@ const M = (() => {
   assert.match(M.corPrazo(95), /emerald/)
   assert.match(M.corPrazo(80), /amber/)
   assert.match(M.corPrazo(40), /red/)
-  assert.equal(M.pctPrazo(88.6), '89%')
+  // 16/11/2026: o "no prazo" aparece para BAIXO e a cor sai do MESMO número (89,6% aparecia
+  // "90%" em âmbar; 89,47 virava 89,5 no backend e "90%" na tela).
+  assert.equal(M.pctPrazo(88.6), '88%')
+  assert.equal(M.pctPrazo(89.6), '89%', 'nunca 90% sem ter batido a régua da Amazon')
+  assert.match(M.corPrazo(89.6), /amber/)
+  assert.equal(M.pctPrazo(89.5), '89%', 'o 89,47 que o backend manda como 89,5')
+  assert.equal(M.pctPrazo(90), '90%')
+  assert.match(M.corPrazo(90), /emerald/)
+  assert.equal(M.pctPrazo(74.9), '74%')
+  assert.match(M.corPrazo(74.9), /red/)
+  assert.equal(M.pctPrazo(75), '75%')
+  assert.match(M.corPrazo(75), /amber/)
+  assert.equal(M.pctPrazo(100), '100%')
+  assert.equal(M.pctPrazo(0), '0%')
+  assert.match(M.corPrazo(0), /red/)
   assert.equal(M.pctPrazo(null), '—')
+  assert.equal(M.pctPrazo(undefined), '—')
+  assert.match(M.corPrazo(null), /muted/)
+  // Em toda a faixa (o backend manda 1 casa), a cor é a do número que aparece.
+  const corDoInteiro = (n) => (n >= 90 ? /emerald/ : n >= 75 ? /amber/ : /red/)
+  for (let d = 0; d <= 1000; d++) {
+    const v = d / 10
+    const n = Number(M.pctPrazo(v).replace('%', ''))
+    assert.equal(n, M.noPrazoNaTela(v), String(v))
+    assert.ok(n <= v && v < n + 1, `para baixo: ${v} → ${n}`)
+    assert.match(M.corPrazo(v), corDoInteiro(n), `a cor de ${v} é a de ${n}%`)
+  }
   // O que saiu sozinho: o do backend; sem ele, a conta; sem resposta, —.
   assert.equal(M.sozinho({ pct_sozinho: 0.42, ia_enviou: 1, respostas: 100 }), 0.42)
   assert.equal(M.sozinho({ ia_enviou: 3, respostas: 4 }), 0.75)
@@ -267,6 +295,12 @@ async function principal() {
     assert.match(sem, />Sem equipe<[\s\S]*>1 loja<[\s\S]*">50%<[\s\S]*1 de 2[\s\S]*>—<[\s\S]*text-muted-foreground">—<[\s\S]*title="0 de 0 decisões">—</)
     assert.match(todas, />Todas as lojas<[\s\S]*>4 lojas<[\s\S]*">36%<[\s\S]*30 de 82[\s\S]*>3 h<[\s\S]*text-amber-700[^"]*">76%<[\s\S]*text-emerald-700[^"]*" title="45 de 60 decisões">75%</)
     assert.match(html, /<th[^>]*>Equipe<\/th>[\s\S]*Saiu sozinho[\s\S]*Tempo médio[\s\S]*No prazo[\s\S]*Aprovação da IA/)
+    // A régua do tempo (16/11/2026) no texto de ajuda: a mensagem escrita até a resposta de verdade.
+    const ajuda = trecho(html, /Clique na equipe para ver as lojas\.[^<]*/)
+    assert.match(ajuda, /da primeira mensagem escrita do comprador até a resposta de verdade da loja \(pessoa ou IA\)/)
+    assert.match(ajuda, /na média das esperas respondidas/)
+    assert.match(ajuda, /o cartão do produto e o (?:&quot;|")ok\/obrigado(?:&quot;|") sozinhos não abrem espera; robô, campanha e o recibo da foto não são resposta/)
+    assert.doesNotMatch(html, /na média de todas as esperas/, 'a vencida sem resposta não entra na média')
     // O que saiu da tela (16/11): os cartões grandes e o select.
     assert.doesNotMatch(html, /data-cartao|Ver lojas|<select/)
     assert.doesNotMatch(html, /data-lojas-tempo/)
@@ -328,6 +362,9 @@ async function principal() {
     const tabela = trecho(html, /<section[^>]*data-lojas-tempo[\s\S]*?<\/section>/)
     assert.match(tabela, /Esperas[\s\S]*Respondidas[\s\S]*Tempo típico[\s\S]*9 em 10 até[\s\S]*No prazo/)
     assert.match(tabela, /50 vez\(es\) em que o comprador esperou resposta · 44 respondida\(s\)/)
+    assert.match(tabela, /Tempo = da primeira mensagem escrita dessas até a primeira resposta de verdade da loja/)
+    assert.match(tabela, /O cartão do produto ou do pedido e o (?:&quot;|")ok\/obrigado(?:&quot;|") sozinhos não abrem espera\./)
+    assert.match(tabela, /o recibo da foto \((?:&quot;|")a equipe analisa e responde por aqui(?:&quot;|")\) não contam\. Conversa fechada ou bloqueada não fica vencida/)
     // A pior no prazo primeiro.
     assert.ok(tabela.indexOf('Marquezini') < tabela.indexOf('Kia'))
     assert.match(tabela, /font-semibold text-red-600[^"]*">55%</)

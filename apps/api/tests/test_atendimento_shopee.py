@@ -1452,7 +1452,7 @@ async def test_afiliado_marcado_volta_a_contar_quando_ele_escreve(db, make_user,
     await db.refresh(af)
     assert af.sem_resposta_necessaria is False
     assert af.aguardando_resposta is False, "continua fora da fila"
-    assert gravar.CHAVE_PROCESSADO_ATE not in af.dados
+    assert af.processado_ate is None
     assert await _numero(db, af) == (1, 1)
 
     # Fechada (o mesmo corte): a fala nova reabre e conta só ela.
@@ -1516,7 +1516,7 @@ async def test_faq_do_comprador_nao_desmarca_o_nao_precisa(db, make_user, teto):
     await _rodar(db, canal, integ, f)
     await db.refresh(a)
     assert a.sem_resposta_necessaria is False
-    assert gravar.CHAVE_PROCESSADO_ATE not in a.dados
+    assert a.processado_ate is None
     assert await _numero(db, a) == (2, 2)
 
 

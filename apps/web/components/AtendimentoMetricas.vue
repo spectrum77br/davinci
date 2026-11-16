@@ -10,11 +10,16 @@
 // 3. no topo, SAIU SOZINHO: das respostas das lojas no chat (pela IA, pela equipe no DaVinci e
 //    por fora), quantas a IA mandou sozinha — sem as mensagens automáticas (a meta do dono: 60%);
 // 4. a LISTA das equipes (Londres, Israel, Marrocos; "sem equipe" e "todas as lojas" no fim), cada
-//    linha com o que saiu sozinho, o TEMPO MÉDIO da primeira resposta (a média de todas as
-//    esperas), o no prazo e a aprovação da IA (a régua do envio sozinho, 75%); clicar abre as lojas
-//    dela, com os mesmos números (GET /metricas/equipes; a conta é de
+//    linha com o que saiu sozinho, o TEMPO MÉDIO da primeira resposta (a média das esperas
+//    respondidas), o no prazo e a aprovação da IA (a régua do envio sozinho, 75%); clicar abre as
+//    lojas dela, com os mesmos números (GET /metricas/equipes; a conta é de
 //    apps/api/app/services/atendimento/metricas_equipe.py).
 // Saíram os cartões grandes e o select "Ver lojas…" (16/11).
+// O tempo "calculado certinho" (16/11/2026, a auditoria com os dados de produção): a espera vai
+// do comprador ESCREVER até a resposta de verdade da loja (pessoa ou IA) ou o "Não precisa de
+// resposta" — o cartão do produto e o "ok/obrigado" não abrem, o recibo da foto não fecha, a
+// conversa fechada não fica vencida, só o chat entra (a conta é do backend; a tela só explica).
+// O "no prazo" aparece para BAIXO e a cor sai do mesmo número (`noPrazoNaTela`).
 // QUEM NÃO É ADMIN (as rotas das equipes e da análise são só de admin: 403 `admin_only`) vê só a
 // tabela das lojas do GET /metricas — o tempo de resposta, no escopo dele —, como antes. O admin
 // que levar 403 ali (o papel mudou) cai na mesma tabela, sem erro na tela.
@@ -83,11 +88,20 @@ export function corAprovacao(a: number | null): string {
   if (a >= ATENCAO) return 'text-amber-700 dark:text-amber-300'
   return 'text-red-600 dark:text-red-400'
 }
-// "no prazo" (0–100): a régua da Amazon (90%).
+// "no prazo" (0–100) como aparece na tela: o número inteiro, para BAIXO como as outras % daqui
+// (16/11/2026: 89,6% aparecia "90%" em âmbar — o número arredondado para cima e a cor pelo valor
+// cru discordavam; o backend manda 1 casa, e 89,47 virava 89,5 e depois "90%"). Nunca "90%"
+// sem ter batido a régua da Amazon; a cor e o número saem DESTE mesmo inteiro.
+export function noPrazoNaTela(v: number | null | undefined): number | null {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return null
+  return Math.floor(Number(v) + 1e-6)
+}
+// A cor do "no prazo": a régua da Amazon (90%), sobre o número que aparece.
 export function corPrazo(v: number | null | undefined): string {
-  if (v === null || v === undefined) return 'text-muted-foreground'
-  if (v >= 90) return 'text-emerald-700 dark:text-emerald-300'
-  if (v >= 75) return 'text-amber-700 dark:text-amber-300'
+  const n = noPrazoNaTela(v)
+  if (n === null) return 'text-muted-foreground'
+  if (n >= 90) return 'text-emerald-700 dark:text-emerald-300'
+  if (n >= 75) return 'text-amber-700 dark:text-amber-300'
   return 'font-semibold text-red-600 dark:text-red-400'
 }
 // O que saiu sozinho (0–1): o do backend; sem ele, a conta; sem resposta, null.
@@ -105,7 +119,8 @@ export function corSozinho(a: number | null): string {
   return a >= META_SOZINHO ? 'text-emerald-700 dark:text-emerald-300' : ''
 }
 export function pctPrazo(v: number | null | undefined): string {
-  return v === null || v === undefined || Number.isNaN(Number(v)) ? '—' : `${Math.round(Number(v))}%`
+  const n = noPrazoNaTela(v)
+  return n === null ? '—' : `${n}%`
 }
 
 function hhmm(d: Date): string {
@@ -326,7 +341,7 @@ function tempo(min: number | null | undefined) {
       <section v-if="equipes" class="space-y-2" data-equipes>
         <div class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
           <h3 class="text-sm font-semibold">Por equipe</h3>
-          <span class="text-xs text-muted-foreground">Clique na equipe para ver as lojas. Tempo médio = da primeira mensagem do comprador até a primeira resposta da loja, na média de todas as esperas. Aprovação = das decisões da equipe sobre a sugestão da IA, quantas a aprovaram (o assunto sai sozinho com 75%; 85% nos sensíveis).</span>
+          <span class="text-xs text-muted-foreground">Clique na equipe para ver as lojas. Tempo médio = da primeira mensagem escrita do comprador até a resposta de verdade da loja (pessoa ou IA) ou o "Não precisa de resposta", na média das esperas respondidas — o cartão do produto e o "ok/obrigado" sozinhos não abrem espera; robô, campanha e o recibo da foto não são resposta. Aprovação = das decisões da equipe sobre a sugestão da IA, quantas a aprovaram (o assunto sai sozinho com 75%; 85% nos sensíveis).</span>
         </div>
         <div class="overflow-x-auto rounded-lg border">
           <table class="w-full min-w-[620px] text-xs">
@@ -334,8 +349,8 @@ function tempo(min: number | null | undefined) {
               <tr class="text-left">
                 <th class="px-3 py-2 font-semibold">Equipe</th>
                 <th class="px-2 py-2 text-right font-semibold" title="das respostas das lojas no chat, quantas a IA mandou sozinha">Saiu sozinho</th>
-                <th class="px-2 py-2 text-right font-semibold" title="da primeira mensagem do comprador até a primeira resposta da loja, na média de todas as esperas">Tempo médio</th>
-                <th class="px-2 py-2 text-right font-semibold" title="respondidas dentro do prazo da loja (Amazon cobra 90% em 24 h)">No prazo</th>
+                <th class="px-2 py-2 text-right font-semibold" title="da primeira mensagem escrita do comprador até a resposta de verdade da loja, na média das esperas respondidas">Tempo médio</th>
+                <th class="px-2 py-2 text-right font-semibold" title="respondidas dentro do prazo da loja, sobre as respondidas e as que venceram sem resposta (Amazon cobra 90% em 24 h)">No prazo</th>
                 <th class="px-3 py-2 text-right font-semibold" title="das decisões da equipe sobre a sugestão da IA, quantas a aprovaram (igual ou só a forma)">Aprovação da IA</th>
               </tr>
             </thead>
@@ -388,7 +403,7 @@ function tempo(min: number | null | undefined) {
     <section v-else-if="lojas" class="space-y-2" data-lojas-tempo>
       <div class="flex flex-wrap items-baseline gap-2">
         <h3 class="text-sm font-semibold">Por loja</h3>
-        <span class="text-xs text-muted-foreground">{{ totais.recebidas }} vez(es) em que o comprador esperou resposta · {{ totais.respondidas }} respondida(s). Uma "vez" junta as mensagens seguidas do comprador até a loja responder — a mesma conversa pode contar mais de uma. Tempo = da primeira dessas mensagens até a primeira resposta da loja (pelo DaVinci ou por fora). Mensagem automática não é resposta: o robô e as campanhas do Duoke (inclusive o "já segue nossa loja" e a figurinha da campanha), os cartões que a própria Shopee põe na conversa (cupom, logística, pedido de avaliação) e o que o DaVinci manda sozinho (senha da devolução) não contam.</span>
+        <span class="text-xs text-muted-foreground">{{ totais.recebidas }} vez(es) em que o comprador esperou resposta · {{ totais.respondidas }} respondida(s). Uma "vez" junta as mensagens seguidas do comprador até a loja responder — a mesma conversa pode contar mais de uma. Tempo = da primeira mensagem escrita dessas até a primeira resposta de verdade da loja (pelo DaVinci ou por fora) ou o "Não precisa de resposta". O cartão do produto ou do pedido e o "ok/obrigado" sozinhos não abrem espera. Mensagem automática não é resposta: o robô e as campanhas do Duoke (inclusive o "já segue nossa loja" e a figurinha da campanha), os cartões que a própria Shopee põe na conversa (cupom, logística, pedido de avaliação), o que o DaVinci manda sozinho (senha da devolução) e o recibo da foto ("a equipe analisa e responde por aqui") não contam. Conversa fechada ou bloqueada não fica vencida; avaliação, reclamação, comentário e carrinho não entram.</span>
       </div>
       <div class="overflow-x-auto rounded-lg border">
         <table class="w-full min-w-[720px] text-xs">
@@ -399,7 +414,7 @@ function tempo(min: number | null | undefined) {
               <th class="px-2 py-2 text-right font-semibold" title="dessas vezes, quantas a loja já respondeu">Respondidas</th>
               <th class="px-2 py-2 text-right font-semibold" title="metade das esperas foi respondida em até este tempo">Tempo típico</th>
               <th class="px-2 py-2 text-right font-semibold" title="9 em cada 10 esperas foram respondidas em até este tempo">9 em 10 até</th>
-              <th class="px-3 py-2 text-right font-semibold" title="respondidas dentro do prazo da loja (Amazon cobra 90% em 24 h)">No prazo</th>
+              <th class="px-3 py-2 text-right font-semibold" title="respondidas dentro do prazo da loja, sobre as respondidas e as que venceram sem resposta (Amazon cobra 90% em 24 h)">No prazo</th>
             </tr>
           </thead>
           <tbody class="divide-y">

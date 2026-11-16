@@ -211,19 +211,22 @@ async def test_o_clique_sem_resposta_fecha_a_espera_na_hora(db: AsyncSession, ma
     from app.routers import atendimento as rota
 
     t0 = AGORA - timedelta(hours=5)
+    # A hora do clique na COLUNA `sem_resposta_em` (0487, 16/11/2026), pelo mesmo `gravar` do
+    # PATCH — em `dados`, a releitura do sync com um retrato velho a apagava.
     marcada = await _conversa(db, make_user, externo_id="sr1", comprador_nome="Maria Souza")
     await _cliente(db, marcada, "1", t0)
-    marcada.dados = {
-        **(marcada.dados or {}),
-        "sem_resposta_em": (t0 + timedelta(minutes=30)).isoformat(),
-    }
+    gravar.guardar_hora_do_clique(marcada, t0 + timedelta(minutes=30))
     marcada.sem_resposta_necessaria = True
     # A espera fechada no clique e uma nova, depois dele, respondida pela loja.
     outra = await _conversa(db, make_user, externo_id="sr2", comprador_nome="Maria Souza")
     await _cliente(db, outra, "1", t0)
-    outra.dados = {
-        **(outra.dados or {}),
-        "sem_resposta_em": (t0 + timedelta(minutes=10)).isoformat(),
+    gravar.guardar_hora_do_clique(outra, t0 + timedelta(minutes=10))
+    # A chave velha em `dados` (de antes da 0487) não vale mais: a espera fica aberta.
+    velha = await _conversa(db, make_user, externo_id="sr3", comprador_nome="Maria Souza")
+    await _cliente(db, velha, "1", t0)
+    velha.dados = {
+        **(velha.dados or {}),
+        "sem_resposta_em": (t0 + timedelta(minutes=5)).isoformat(),
     }
     await db.commit()
     await _cliente(db, outra, "2", t0 + timedelta(minutes=60))
@@ -246,4 +249,5 @@ async def test_o_clique_sem_resposta_fecha_a_espera_na_hora(db: AsyncSession, ma
     assert (a["tempos"], a["recebidas"], a["vencidas"]) == ([30.0], 1, 0)
     b = por_loja[outra.integration_id]
     assert sorted(b["tempos"]) == [10.0, 30.0] and b["vencidas"] == 0
-    assert rota._hora_do_clique("lixo") is None and rota._hora_do_clique(None) is None
+    c = por_loja[velha.integration_id]
+    assert (c["tempos"], c["recebidas"], c["vencidas"]) == ([], 1, 0), "a chave de `dados` não vale"

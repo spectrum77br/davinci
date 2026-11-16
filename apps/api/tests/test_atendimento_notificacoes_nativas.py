@@ -187,7 +187,7 @@ async def test_abrir_nao_consome_o_seed_e_o_nao_precisa_corta_na_reabertura(db, 
     assert c.sem_resposta_necessaria is False
     assert c.notificacoes_visto_em == seed.created_at
     assert c.visto_em == AGORA, "o legado nunca anda para trás"
-    assert gravar.CHAVE_PROCESSADO_ATE not in c.dados
+    assert c.processado_ate is None
 
 
 async def test_troca_de_epoch_nao_aceita_visto_antigo_e_zerar_explicitamente_funciona(

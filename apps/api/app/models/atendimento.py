@@ -404,6 +404,22 @@ class AtendimentoConversa(Base, TimestampMixin):
     sem_resposta_necessaria: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
+    # ── As horas do "Não precisa de resposta" da PESSOA (migration 0487) ──
+    # Moravam em `dados` até 16/11/2026: a releitura do sync (o ML relendo o
+    # pack, a Magalu) segurava um retrato velho da conversa e regravava
+    # `dados` inteiro, apagando o que o PATCH tinha gravado no meio. Coluna
+    # própria só muda quando alguém a escreve. Quem grava: `gravar`.
+    # O corte: até onde a tela mostrava no "Não precisa"/"Fechar"; vira o
+    # `visto_em` quando a fala nova reabre (`gravar._aplicar_processado_ate`).
+    processado_ate: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A hora do clique "Não precisa" (relógio do banco): conta como resposta
+    # no tempo de resposta das Métricas. O "Precisa de resposta" apaga.
+    sem_resposta_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # A hora do "Precisa de resposta" (o desfazer, relógio do banco): a IA não
+    # remarca sozinha o turno que a pessoa desfez (`sem_demanda.desfeito_pela_pessoa`).
+    precisa_resposta_em: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     atribuido_a: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

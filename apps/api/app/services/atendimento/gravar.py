@@ -1183,60 +1183,73 @@ def sanear_mensagem(
 # O dono: "a notificacao agr so vai sair se responder no chat ou se clicar em
 # um botao n precisa de resposta q bota do lado do enviar msg ali". Abrir não
 # grava mais o visto nas conversas do número (`lida.gravar_visto`). Então o
-# PATCH da conversa guarda em `dados` até onde a tela mostrava (o `ate`, ISO
-# UTC) quando a pessoa marca "Não precisa" ou fecha; sem nada aqui, a fala
-# nova do comprador reabriria contando também as já dispensadas. O corte só
-# vale quando a fala nova reabre (`_aplicar_processado_ate`): o desfazer
-# ("Precisa de resposta", reabrir à mão) só apaga a chave, e a bolinha volta
-# inteira, como era antes do clique.
-CHAVE_PROCESSADO_ATE = "processado_ate"
+# PATCH da conversa guarda até onde a tela mostrava (o `ate`) quando a pessoa
+# marca "Não precisa" ou fecha; sem nada aqui, a fala nova do comprador
+# reabriria contando também as já dispensadas. O corte só vale quando a fala
+# nova reabre (`_aplicar_processado_ate`): o desfazer ("Precisa de resposta",
+# reabrir à mão) só apaga o corte, e a bolinha volta inteira, como era antes
+# do clique.
+#
+# Desde a 0487 (16/11/2026, o reforço) o corte e as horas dos cliques moram em
+# COLUNAS da conversa, não mais em `dados`: a releitura do sync (o ML relendo
+# o pack, a Magalu) segurava um retrato velho da conversa e regravava `dados`
+# inteiro, apagando o que o PATCH tinha gravado no meio. Coluna própria só
+# muda quando alguém a escreve.
 
 
 def guardar_processado_ate(conversa: AtendimentoConversa, corte: datetime) -> None:
-    """O "Não precisa"/"Fechar" da pessoa guarda o corte em `dados`. Sem banco.
+    """O "Não precisa"/"Fechar" da pessoa guarda o corte (`processado_ate`). Sem banco.
 
-    Nunca anda para trás (fica o maior). Um dict NOVO: o JSONB só persiste assim.
+    Nunca anda para trás (fica o maior).
     """
-    dados = dict(conversa.dados) if isinstance(conversa.dados, dict) else {}
     novo = _utc(corte)
-    atual = _iso_utc(dados.get(CHAVE_PROCESSADO_ATE))
+    atual = _utc(getattr(conversa, "processado_ate", None))
     if novo is None or (atual is not None and atual >= novo):
         return
-    dados[CHAVE_PROCESSADO_ATE] = novo.isoformat()
-    conversa.dados = dados
+    conversa.processado_ate = novo
 
 
 def esquecer_processado_ate(conversa: AtendimentoConversa) -> None:
     """O "Precisa de resposta" e o reabrir à mão apagam o corte. Sem banco."""
-    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
-    if CHAVE_PROCESSADO_ATE in dados:
-        conversa.dados = {k: v for k, v in dados.items() if k != CHAVE_PROCESSADO_ATE}
+    if getattr(conversa, "processado_ate", None) is not None:
+        conversa.processado_ate = None
 
 
 # A HORA do clique "Não precisa de resposta" da PESSOA (16/11/2026, o dono:
-# o clique conta como resposta no tempo de resposta das Métricas). ISO UTC,
-# relógio do banco, gravada pelo PATCH da conversa. O "Precisa de resposta"
-# apaga; a fala nova do comprador NÃO apaga (as Métricas fecham a espera
-# antiga nessa hora: `routers/atendimento._turnos_das_lojas`, que lê a mesma
-# chave). O próximo clique sobrescreve. A IA (`sem_demanda`) não grava.
-CHAVE_SEM_RESPOSTA_EM = "sem_resposta_em"
+# o clique conta como resposta no tempo de resposta das Métricas): a coluna
+# `sem_resposta_em`, relógio do banco, gravada pelo PATCH da conversa. O
+# "Precisa de resposta" apaga; a fala nova do comprador NÃO apaga (as
+# Métricas leem a mesma coluna e fecham a espera antiga nessa hora,
+# `_turnos_das_lojas` no router). O próximo clique sobrescreve. A IA
+# (`sem_demanda`) não grava.
 
 
 def guardar_hora_do_clique(conversa: AtendimentoConversa, quando: datetime) -> None:
-    """Grava em `dados` a hora do "Não precisa de resposta" da pessoa. Sem banco."""
+    """Grava a hora do "Não precisa de resposta" da pessoa (`sem_resposta_em`). Sem banco."""
     novo = _utc(quando)
     if novo is None:
         return
-    dados = dict(conversa.dados) if isinstance(conversa.dados, dict) else {}
-    dados[CHAVE_SEM_RESPOSTA_EM] = novo.isoformat()
-    conversa.dados = dados
+    conversa.sem_resposta_em = novo
 
 
 def esquecer_hora_do_clique(conversa: AtendimentoConversa) -> None:
     """O "Precisa de resposta" apaga a hora do clique (não foi resposta). Sem banco."""
-    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
-    if CHAVE_SEM_RESPOSTA_EM in dados:
-        conversa.dados = {k: v for k, v in dados.items() if k != CHAVE_SEM_RESPOSTA_EM}
+    if getattr(conversa, "sem_resposta_em", None) is not None:
+        conversa.sem_resposta_em = None
+
+
+def guardar_hora_do_desfazer(conversa: AtendimentoConversa, quando: datetime) -> None:
+    """Grava a hora do "Precisa de resposta" da pessoa (`precisa_resposta_em`). Sem banco.
+
+    16/11/2026: a IA marcava de novo, na rodada seguinte, o turno só de cartão
+    que a pessoa tinha acabado de desfazer. Com a hora, o `sem_demanda` deixa
+    esse turno com a pessoa (`desfeito_pela_pessoa`, como a IA pausada); a
+    próxima fala do comprador abre turno novo e solta a IA. O próximo desfazer
+    sobrescreve; nada apaga.
+    """
+    novo = _utc(quando)
+    if novo is not None:
+        conversa.precisa_resposta_em = novo
 
 
 def _chegada_carregada(mensagem: Any) -> datetime | None:
@@ -1253,18 +1266,15 @@ def _aplicar_processado_ate(conversa: AtendimentoConversa, mensagem: Any = None)
     `visto_em` = o maior entre ele e o corte; na base importada que vale
     (`notificacoes.estado_valido`), o `notificacoes_visto_em` também, como o
     "Zerar não lidas". O número passa a contar só o que chegou depois do
-    clique. A chave sai. A fala que reabriu conta sempre: se a chegada dela
-    não passa do corte (a transação do sync começou antes do clique), o corte
-    fica logo antes dela. Sem a chave (marcada antes de 16/11/2026, pela IA,
-    pela Magalu), nada muda.
+    clique. O corte sai (`processado_ate` vazio). A fala que reabriu conta
+    sempre: se a chegada dela não passa do corte (a transação do sync começou
+    antes do clique), o corte fica logo antes dela. Sem o corte (marcada antes
+    de 16/11/2026, pela IA, pela Magalu), nada muda.
     """
-    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
-    if CHAVE_PROCESSADO_ATE not in dados:
-        return
-    corte = _iso_utc(dados.get(CHAVE_PROCESSADO_ATE))
-    conversa.dados = {k: v for k, v in dados.items() if k != CHAVE_PROCESSADO_ATE}
+    corte = _utc(getattr(conversa, "processado_ate", None))
     if corte is None:
         return
+    conversa.processado_ate = None
     chegada = _chegada_carregada(mensagem) if mensagem is not None else None
     if chegada is not None and chegada <= corte:
         corte = chegada - timedelta(microseconds=1)

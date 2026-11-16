@@ -51,6 +51,8 @@ e o "Pendente" do Duoke, 15. O que não pode falhar
     `processado_ate`, Python e SQL); "Precisa de resposta" devolve a bolinha
     inteira; fechar e reabrir pela fala nova também conta só a nova; a fala
     que chegou depois do que a tela mostrava recusa o "Não precisa" (409).
+    Desde a 0487 (16/11/2026) o corte e as horas dos cliques são COLUNAS da
+    conversa: a releitura do sync com um retrato velho não os apaga mais.
 """
 
 from __future__ import annotations
@@ -62,9 +64,10 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import db as app_db
 from app.config import get_settings
 from app.models import AtendimentoConversa, AtendimentoMensagem, UserRole
 from app.services.atendimento import gravar, pendente, shopee, tiktok
@@ -1050,7 +1053,9 @@ async def test_a_linha_mostra_o_numero_da_conversa(client, db, make_user, auth_a
 # O dono: "a notificacao agr so vai sair se responder no chat ou se clicar em
 # um botao n precisa de resposta q bota do lado do enviar msg ali". Abrir não
 # apaga mais; o "Não precisa" e o "Fechar" guardam o corte `processado_ate`
-# (o `ate` da tela), que só vale quando a fala nova reabre.
+# (o `ate` da tela), que só vale quando a fala nova reabre. Coluna desde a
+# 0487 (16/11/2026), como a hora do clique (`sem_resposta_em`) e a do desfazer
+# (`precisa_resposta_em`).
 
 QUEM_MEXE = "quem.mexe@davinci-test.com"
 
@@ -1092,8 +1097,7 @@ async def _visto_ate(client, conversa) -> str:
 
 
 def _corte(conversa) -> datetime | None:
-    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
-    return gravar._iso_utc(dados.get(gravar.CHAVE_PROCESSADO_ATE))
+    return gravar._utc(conversa.processado_ate)
 
 
 async def test_nao_precisa_de_resposta_zera_e_so_a_fala_nova_volta(
@@ -1122,18 +1126,20 @@ async def test_nao_precisa_de_resposta_zera_e_so_a_fala_nova_volta(
     assert _corte(conversa) == datetime.fromisoformat(ate)
     assert conversa.visto_em is None, "o corte só vale quando a fala nova reabre"
     # A hora do clique (as Métricas contam como resposta), no relógio do banco.
-    clique = datetime.fromisoformat(conversa.dados[gravar.CHAVE_SEM_RESPOSTA_EM])
+    clique = conversa.sem_resposta_em
     assert clique.tzinfo is not None and clique >= datetime.fromisoformat(ate)
+    assert conversa.precisa_resposta_em is None
+    assert not {"processado_ate", "sem_resposta_em"} & set(conversa.dados), "colunas (0487)"
     itens = (await client.get(f"{URL}/conversas", params={"filtro": "aguardando"})).json()
     assert cid not in {i["id"] for i in itens["itens"]}
     # O comprador escreveu de novo: o "não precisa" sai e só a fala nova conta.
     await _fala(db, conversa, "kia:np:nova")
     assert await _numero_py_sql(db, conversa) == (1, 1)
     assert conversa.sem_resposta_necessaria is False
-    assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
+    assert conversa.processado_ate is None
     assert conversa.visto_em == datetime.fromisoformat(ate)
     # A fala nova não apaga a hora do clique: as Métricas fecham ali a espera antiga.
-    assert conversa.dados[gravar.CHAVE_SEM_RESPOSTA_EM] == clique.isoformat()
+    assert conversa.sem_resposta_em == clique
     d = (await client.get(f"{URL}/conversas/{cid}")).json()
     assert (d["conversa"]["numero_duoke"], d["conversa"]["falta_responder"]) == (1, True)
     await _fala(db, conversa, "kia:np:mais")
@@ -1164,8 +1170,11 @@ async def test_precisa_de_resposta_desfaz_e_devolve_a_bolinha(
     assert corpo["sem_resposta_necessaria"] is False
     assert (corpo["numero_duoke"], corpo["falta_responder"]) == (3, True)
     assert await _numero_py_sql(db, conversa) == (3, 3)
-    assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
-    assert gravar.CHAVE_SEM_RESPOSTA_EM not in conversa.dados, "desfeito não é resposta"
+    assert conversa.processado_ate is None
+    assert conversa.sem_resposta_em is None, "desfeito não é resposta"
+    # A hora do desfazer (relógio do banco): a IA não remarca este turno (`sem_demanda`).
+    assert conversa.precisa_resposta_em is not None
+    assert conversa.precisa_resposta_em >= gravar._utc(conversa.ultima_do_cliente_em)
     assert conversa.visto_em is None
     await _fala(db, conversa, "kia:desfaz:nova")
     assert await _numero_py_sql(db, conversa) == (4, 4)
@@ -1178,6 +1187,62 @@ async def test_precisa_de_resposta_desfaz_e_devolve_a_bolinha(
     assert r.status_code == 200
     await db.refresh(conversa)
     assert _corte(conversa) == primeiro
+
+
+async def test_a_releitura_do_sync_com_retrato_velho_nao_apaga_o_clique(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """O defeito do lost update (16/11/2026): o sync tinha a conversa carregada (um
+    retrato velho), a pessoa marcou "Não precisa" na tela (outra sessão) e a
+    releitura do sync (`upsert_conversa`: o ML relendo o pack, a Magalu)
+    regravou `dados` inteiro com o retrato velho — o corte e a hora do clique,
+    que moravam em `dados`, sumiam. Desde a 0487 são colunas: a releitura não as
+    toca, o "não precisa" fica e a fala nova do comprador ainda conta só ela."""
+    integ, canal = await _loja(db, await make_user(), "kia")
+    conversa = await _cena(db, integ, canal, "kia:velho", ("cliente", 30), ("cliente", 20))
+    cid = conversa.id
+    await _quem_mexe(db, make_user, auth_as, monkeypatch)
+    ate = await _visto_ate(client, conversa)
+    # `conversa` é o retrato do sync, carregado nesta sessão antes do clique.
+    assert conversa.sem_resposta_necessaria is False and conversa.processado_ate is None
+    # No meio: outro processo grava em `dados` (a prova de que a releitura regrava
+    # `dados` com o retrato velho) e a pessoa clica "Não precisa" na tela.
+    async with app_db.SessionLocal() as outra:
+        await outra.execute(
+            text(
+                "UPDATE atendimento_conversas SET dados = dados || CAST(:extra AS jsonb) "
+                "WHERE id = :id"
+            ),
+            {"extra": '{"de_outro": 1}', "id": cid},
+        )
+        await outra.commit()
+    r = await client.patch(
+        f"{URL}/conversas/{cid}", json={"sem_resposta_necessaria": True, "ate": ate}
+    )
+    assert r.status_code == 200, r.text
+    # A releitura do sync na sessão do retrato velho (o pack relido traz `dados`).
+    await gravar.upsert_conversa(
+        db,
+        canal=canal,
+        integration=integ,
+        plataforma="shopee",
+        canal_nome="chat",
+        externo_id="kia:velho",
+        dados={"relido": 1},
+    )
+    await db.commit()
+    db.expire_all()
+    c = await db.get(AtendimentoConversa, cid)
+    assert c.dados.get("relido") == 1
+    assert "de_outro" not in c.dados, "o cenário do defeito: o retrato velho regravou `dados`"
+    assert c.sem_resposta_necessaria is True
+    assert _corte(c) == datetime.fromisoformat(ate)
+    assert c.sem_resposta_em is not None
+    assert await _numero_py_sql(db, c) == (0, 0)
+    # A fala nova do comprador: o corte guardado vale — conta só ela.
+    await _fala(db, c, "kia:velho:nova")
+    assert await _numero_py_sql(db, c) == (1, 1)
+    assert c.visto_em == datetime.fromisoformat(ate) and c.processado_ate is None
 
 
 async def test_fechar_e_reabrir_pela_fala_nova_conta_so_a_nova(
@@ -1205,7 +1270,7 @@ async def test_fechar_e_reabrir_pela_fala_nova_conta_so_a_nova(
     await _fala(db, conversa, "kia:fecha:nova")
     assert conversa.situacao == "aberta" and conversa.aguardando_resposta is True
     assert await _numero_py_sql(db, conversa) == (1, 1)
-    assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
+    assert conversa.processado_ate is None
     # Fecha de novo SEM o `ate`: o corte é a mensagem mais nova; reabrir à mão
     # apaga o corte e a bolinha volta (1).
     r = await client.patch(url, json={"situacao": "fechada"})
@@ -1217,7 +1282,9 @@ async def test_fechar_e_reabrir_pela_fala_nova_conta_so_a_nova(
     r = await client.patch(url, json={"situacao": "aberta"})
     assert r.status_code == 200 and r.json()["conversa"]["numero_duoke"] == 1
     assert await _numero_py_sql(db, conversa) == (1, 1)
-    assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
+    assert conversa.processado_ate is None
+    # Fechar e reabrir não é o "Precisa de resposta": a IA não fica de fora.
+    assert conversa.precisa_resposta_em is None
 
 
 async def test_nao_precisa_recusa_se_chegou_mensagem_que_a_tela_nao_mostrou(
@@ -1250,7 +1317,7 @@ async def test_nao_precisa_recusa_se_chegou_mensagem_que_a_tela_nao_mostrou(
         }
         await db.refresh(conversa)
         assert conversa.sem_resposta_necessaria is False and conversa.ia_pausada is False
-        assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
+        assert conversa.processado_ate is None and conversa.sem_resposta_em is None
     assert await _numero_py_sql(db, conversa) == (4, 4)
     # Depois do que a tela mostrou, só o robô e o e-mail da ponte: marca.
     ate = await _visto_ate(client, conversa)
@@ -1281,7 +1348,7 @@ async def test_nao_precisa_recusa_se_chegou_mensagem_que_a_tela_nao_mostrou(
     )
     assert r.status_code == 200, r.text
     await db.refresh(avaliacao)
-    assert gravar.CHAVE_PROCESSADO_ATE not in avaliacao.dados
+    assert avaliacao.processado_ate is None
 
 
 async def test_mediador_novo_na_reclamacao_do_ml_desmarca_o_nao_precisa(
@@ -2165,3 +2232,39 @@ def teto(monkeypatch):
 
     _f(40)
     return _f
+
+
+async def test_desfazer_a_marcacao_da_ia_nao_apaga_o_clique_antigo(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """16/11/2026 (a revisão): a pessoa clicou "Não precisa" num turno (a hora fica para as
+    Métricas); o comprador escreveu de novo e a IA marcou o turno novo sozinha. O "Precisa de
+    resposta" sobre a marcação da IA não apaga o clique antigo — só o do turno desfeito."""
+    integ, canal = await _loja(db, await make_user(), "kia")
+    conversa = await _cena(db, integ, canal, "kia:ia", ("cliente", 30))
+    await _quem_mexe(db, make_user, auth_as, monkeypatch)
+    url = f"{URL}/conversas/{conversa.id}"
+    ate = await _visto_ate(client, conversa)
+    r = await client.patch(url, json={"sem_resposta_necessaria": True, "ate": ate})
+    assert r.status_code == 200, r.text
+    await db.refresh(conversa)
+    clique = conversa.sem_resposta_em
+    assert clique is not None
+    # O comprador escreve de novo (o turno novo) e a IA marca sozinha (sem hora).
+    await _fala(db, conversa, "kia:ia:nova")
+    await db.refresh(conversa)
+    conversa.sem_resposta_necessaria = True
+    await db.commit()
+    r = await client.patch(url, json={"sem_resposta_necessaria": False})
+    assert r.status_code == 200, r.text
+    await db.refresh(conversa)
+    assert conversa.sem_resposta_em == clique, "o clique do turno antigo fica"
+    assert conversa.precisa_resposta_em is not None
+    # O desfazer do PRÓPRIO clique (o turno dele) apaga a hora.
+    r = await client.patch(url, json={"sem_resposta_necessaria": True})
+    assert r.status_code == 200
+    await db.refresh(conversa)
+    assert conversa.sem_resposta_em is not None and conversa.sem_resposta_em > clique
+    r = await client.patch(url, json={"sem_resposta_necessaria": False})
+    await db.refresh(conversa)
+    assert conversa.sem_resposta_em is None

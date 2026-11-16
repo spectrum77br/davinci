@@ -17,11 +17,16 @@ empresa com as lojas todas, 16/11/2026) não é equipe. Por loja e por equipe, n
 - PELA EQUIPE: as respostas que a pessoa mandou pelo DaVinci (origem `davinci_humano`);
 - 16/11/2026 (o Eduardo: "uma lista em cima a % de mensagens enviadas automático, daí a lista
   mostrando tempo de resposta de cada equipe pegando a média geral, e se abrir mostra
-  específico"): RESPOSTAS = as respostas das lojas no CHAT (pelo DaVinci ou por fora, sem as
-  automáticas nem as que falharam — a régua de `gravar.mensagem_automatica_sql`), SAIU
-  SOZINHO % = as da IA sobre elas; e o TEMPO MÉDIO da primeira resposta (a média de todas as
-  esperas do cliente, a conta de turnos do GET /metricas, `routers.atendimento._turnos_das_lojas`)
-  e o "no prazo".
+  específico"): RESPOSTAS = as respostas de verdade das lojas no CHAT (pelo DaVinci ou por
+  fora; sem as automáticas, as que falharam e o recibo da evidência — `resposta_de_verdade_sql`),
+  SAIU SOZINHO % = as da IA sobre elas; e o TEMPO MÉDIO da primeira resposta (a média das
+  esperas respondidas, a conta de turnos do GET /metricas, `routers.atendimento._turnos_das_lojas`
+  com as réguas da espera abaixo) e o "no prazo".
+- 16/11/2026, o tempo "calculado certinho" (a auditoria com os dados de produção): a espera é
+  do comprador ESCREVER até a loja responder de verdade (pessoa ou IA que manda sozinha) ou até
+  o clique "Não precisa de resposta" — o cartão e a cortesia não abrem, o recibo não fecha, a
+  conversa fechada ou bloqueada não fica vencida, e só o chat entra (ver "A espera do
+  comprador").
 
 A ANÁLISE DO DIA: uma vez por dia o modelo do agente lê esses números (ontem e 7 dias), os
 assuntos que mais erram e os motivos curtos do juiz (já sem dado pessoal) e escreve um
@@ -32,14 +37,17 @@ novo. Nada de texto de cliente entra no pedido nem no log.
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from sqlalchemy import Integer, case, func, select
+from sqlalchemy import Integer, and_, case, false, func, select
 
 from app.services.atendimento import constantes, juiz_edicao
 
@@ -51,6 +59,205 @@ CHAVE_ANALISE_ULTIMA = "atd:analise_diaria:ultima"
 TTL_ANALISE_S = 180 * 24 * 3600
 MAX_TOKENS_ANALISE = 900
 MIN_DECISOES_ASSUNTO = 5
+
+
+# ── A espera do comprador: o que abre e o que fecha (16/11/2026) ────────────────────
+#
+# O Eduardo: o tempo de resposta "calculado certinho" — do comprador ESCREVER até alguém da
+# loja responder DE VERDADE (pessoa ou IA que manda sozinha), ou até o clique "Não precisa de
+# resposta" (a hora do clique, que `routers.atendimento._turnos_das_lojas` lê e passa).
+# A auditoria com os dados de produção do mesmo dia achou o relógio errado em cinco lugares:
+# - o CARTÃO do produto/pedido que o comprador manda sem escrever nada abria a espera: 595 das
+#   770 vencidas de 30 dias eram só o cartão, e a espera contava desde ele quando o comprador
+#   só escrevia horas ou dias depois (46fa04a9: 3.761 min; a IA respondeu em 6,6);
+# - o "ok"/"obrigado"/figurinha depois de a loja responder abria a espera, que esticava até a
+#   pergunta nova (2b96dbfc: 5.968 min; a espera de verdade foi de 2,7);
+# - o RECIBO fixo da IA ("Recebemos o vídeo, obrigado! A equipe analisa e responde por aqui.")
+#   fechava a espera em 3 min, e a pessoa só respondia 15 h depois (mediana);
+# - a conversa FECHADA ou BLOQUEADA continuava vencida;
+# - a avaliação, o comentário e o carrinho entravam como chat (`pendente.do_chat_sql` tira).
+# A conta dos turnos é `routers.atendimento._turnos_das_lojas`; as réguas puras, aqui.
+
+# O que a fala do comprador é para a espera (`fala_do_comprador`).
+FALA = "fala"  # pede resposta: abre a espera
+CARTAO = "cartao"  # o cartão do produto/pedido, sem texto: nunca abre
+CORTESIA = "cortesia"  # só "ok", "obrigado", emoji, figurinha: abre só se a loja perguntou
+# A cortesia é texto curto: o que passa disto é fala (e é o que a consulta traz do texto).
+MAX_CORTESIA = 80
+# Nelas, a espera que ficou aberta sai da conta (nem vencida, nem no prazo), como a do "Não
+# precisa de resposta" sem hora — a fila e a bolinha também tiram a fechada.
+SITUACOES_SEM_ESPERA = frozenset({constantes.CONVERSA_FECHADA, constantes.CONVERSA_BLOQUEADA})
+_TIPO_TEXTO = "texto"
+# A figurinha do comprador: o rótulo que o adaptador grava no lugar do texto (Shopee `sticker`,
+# TikTok `EMOTICONS`, Zap `sticker` — `constantes.rotulo_tipo_plataforma`).
+_FIGURINHA = constantes.rotulo_tipo_plataforma(constantes.TIPO_SHOPEE_FIGURINHA)
+
+# A CORTESIA (16/11/2026): a régua do agente para o "só reconhecimento"
+# (`acao_pessoa.so_reconhecimento`, Kia ao vivo, 21/10/2026: "Ok Aguardando", "Obrigada"), com
+# duas travas a mais — aqui o erro barato é contar uma espera a mais, não a menos:
+# - tem de ter uma palavra de cortesia de verdade (o "ok", o "obrigado", o "beleza"...):
+#   "retorno", "então" e "até amanhã" sozinhos não são;
+# - o cumprimento e a espera ABREM: "oi", "bom dia", "aguardo", "esperando", "por favor" — a
+#   auditoria: "oi", "?" e "alguém?" são espera de verdade, e "aguardo retorno" cobra.
+# "?" derruba (o `so_reconhecimento` já derruba), e passar de `MAX_CORTESIA` também.
+_NUCLEO_DA_CORTESIA = frozenset(
+    """
+    ok okay okk oks blz beleza certo certinho ta bom boa bem entendi entendido entendo
+    combinado perfeito otimo otima show joia legal valeu vlw obrigado obrigada obrigados
+    obrigadas obg obgd brigado brigada grato grata agradeco agradecida agradecido tranquilo
+    tranquila nada
+    """.split()
+)
+_ABREM_ESPERA = frozenset(
+    """
+    oi ola dia tarde noite aguardo aguardando aguardar aguardarei espero esperando esperar
+    favor gentileza retorno
+    """.split()
+)
+
+
+def resposta_de_verdade_sql(m: Any) -> Any:
+    """A mensagem da LOJA que responde o comprador de verdade (16/11/2026), em SQL — nunca NULL.
+
+    Pela pessoa no DaVinci, pela IA que mandou sozinha ou por fora (Duoke, a central da
+    plataforma). Não é: a que falhou (não saiu), a automática (`gravar.mensagem_automatica_sql`:
+    o robô e as campanhas do Duoke, os cartões da plataforma, as automações do DaVinci) e o
+    RECIBO fixo da evidência (`acao_pessoa.TEXTOS_DO_RECIBO`, o item 9 de 03/11/2026: a IA manda
+    na hora, sem o modelo, e a conversa vai para o topo da Caixa Humano — quem responde é a
+    pessoa, depois). O recibo é reconhecido pelo texto exato, o único jeito que ele tem: sai com
+    origem `davinci_ia` e só a chave `envio` no `payload`. `m` = AtendimentoMensagem (ou alias).
+    """
+    from app.services.atendimento import gravar
+    from app.services.atendimento.agente import acao_pessoa
+
+    recibo = func.coalesce(m.texto.in_(sorted(acao_pessoa.TEXTOS_DO_RECIBO)), false())
+    return and_(
+        m.autor == constantes.AUTOR_LOJA,
+        m.status != constantes.MSG_FALHOU,
+        ~gravar.mensagem_automatica_sql(m.texto, m.payload),
+        ~recibo,
+    )
+
+
+def _so_emoji(texto: str) -> bool:
+    """Só emoji (com o tom de pele, o "❤️", e pontuação junto): "👍", "🙏🏻", "❤️!". PURA."""
+    simbolos = 0
+    for ch in texto:
+        if ch.isspace():
+            continue
+        categoria = unicodedata.category(ch)
+        if categoria == "So":
+            simbolos += 1
+        elif categoria not in ("Sk", "Mn", "Me", "Cf") and not categoria.startswith("P"):
+            return False
+    return simbolos > 0
+
+
+def so_cortesia(texto: str | None) -> bool:
+    """A fala do comprador é SÓ cortesia — "ok", "obrigado(a)", "valeu", "blz", emoji (ver
+    acima)? PURA. "ok mas e o rastreio?", "bom dia" e "fico no aguardo" não são."""
+    from app.services.atendimento import validador
+    from app.services.atendimento.agente import acao_pessoa
+
+    bruto = (texto or "").strip()
+    # O tamanho do texto como veio (a consulta traz `MAX_CORTESIA + 1`): o cortado é longo.
+    if not bruto or len(texto or "") > MAX_CORTESIA:
+        return False
+    plano = validador.plano_de(bruto)
+    if "?" in plano:
+        return False
+    if _so_emoji(bruto):
+        return True
+    if not acao_pessoa.so_reconhecimento(bruto):
+        return False
+    palavras = set(re.findall(r"[a-z0-9]+", plano))
+    return bool(palavras & _NUCLEO_DA_CORTESIA) and not palavras & _ABREM_ESPERA
+
+
+def fala_do_comprador(
+    *,
+    tipo: str | None,
+    texto: str | None,
+    payload: Mapping[str, Any] | None = None,
+    tem_anexo: bool = False,
+) -> str:
+    """O que a mensagem do comprador é para a espera: `CARTAO`, `CORTESIA` ou `FALA`. PURA.
+
+    - CARTAO: o cartão do produto/pedido sem texto dele — as réguas da fila e do processamento
+      (`constantes.e_cartao_do_comprador`, pelo item cru; `sem_demanda.cartao_sem_texto`, que
+      também vê o "[Mensagem]" do cartão de variação). O cartão com texto é fala;
+    - CORTESIA: a figurinha (o rótulo "[Figurinha]") e o texto só de cortesia, sem anexo
+      (`so_cortesia`);
+    - FALA: o resto — pergunta, pedido, cumprimento, foto, vídeo, áudio.
+    `payload` basta com as chaves `message_type` (Shopee) e `type` (TikTok) do item cru.
+    """
+    from app.services.atendimento import sem_demanda
+
+    cru = dict(payload or {})
+    if constantes.e_cartao_do_comprador(cru):
+        sem_texto = sem_demanda.cartao_sem_texto(SimpleNamespace(texto=texto, payload=cru))
+        return CARTAO if sem_texto else FALA
+    if (texto or "").strip() == _FIGURINHA:
+        return CORTESIA
+    if (tipo or _TIPO_TEXTO) == _TIPO_TEXTO and not tem_anexo and so_cortesia(texto):
+        return CORTESIA
+    return FALA
+
+
+@dataclass(frozen=True, slots=True)
+class Linha:
+    """Uma mensagem na conta da espera: do comprador (`fala`, de `fala_do_comprador`) ou a
+    resposta de verdade da loja (`resposta_de_verdade_sql`; `pergunta` = ela tinha "?")."""
+
+    cliente: bool
+    quando: datetime
+    fala: str = FALA
+    pergunta: bool = False
+
+
+def esperas(
+    linhas: Iterable[Linha], clique: datetime | None = None
+) -> list[tuple[datetime, datetime | None]]:
+    """As esperas do comprador numa conversa, na ordem: (o começo, o fim). PURA (16/11/2026).
+
+    `linhas` vêm no relógio da plataforma. A espera começa na primeira fala que PEDE resposta
+    depois da última resposta de verdade da loja (as falas seguidas dele juntam na mesma) e
+    termina na próxima resposta de verdade — ou no clique "Não precisa de resposta" (`clique`;
+    só o último fica gravado), se a pessoa marcou antes dela. Fim None = ainda sem resposta
+    (só a última pode ser assim).
+
+    - O CARTÃO nunca abre nem estica: a espera começa na primeira fala escrita depois dele.
+    - A CORTESIA não abre — menos quando responde a uma pergunta da loja (a última resposta de
+      verdade dela tinha "?": o "ok" de "posso cancelar?" é resposta, como em
+      `acao_pessoa.turno_so_de_reconhecimento`). A pergunta de verdade que vem depois abre.
+    - A vez feita só de cartão ou de cortesia não é espera: nem respondida, nem vencida — e a
+      resposta da loja a ela (o "de nada" ao "obrigado") não é tempo de nada.
+    """
+    saida: list[tuple[datetime, datetime | None]] = []
+    inicio: datetime | None = None
+    perguntou = False
+    for linha in linhas:
+        if inicio is not None and clique is not None and inicio <= clique < linha.quando:
+            # A pessoa marcou antes desta mensagem: a espera fechou no clique (sem pergunta).
+            saida.append((inicio, clique))
+            inicio, clique, perguntou = None, None, False
+        if linha.cliente:
+            # A cortesia e o cartão em resposta a uma pergunta da loja são a resposta
+            # do comprador (como `sem_demanda.cartao_abre_visita`): abrem a espera.
+            abre = linha.fala == FALA or (linha.fala in (CORTESIA, CARTAO) and perguntou)
+            if inicio is None and abre:
+                inicio = linha.quando
+            continue
+        if inicio is not None:
+            saida.append((inicio, linha.quando))
+            inicio = None
+        perguntou = linha.pergunta
+    if inicio is not None and clique is not None and clique >= inicio:
+        saida.append((inicio, clique))
+        inicio = None
+    if inicio is not None:
+        saida.append((inicio, None))
+    return saida
 
 
 @dataclass
@@ -102,7 +309,8 @@ class Numeros:
             "pct_sozinho": round(so, 4) if so is not None else None,
             "respondidas": n,
             "tempo_medio_min": round(sum(self.tempos) / n, 1) if n else None,
-            "pct_no_prazo": round(100 * self.no_prazo / decididas, 1) if decididas else None,
+            # Para BAIXO (16/11/2026): 89,95% não pode virar "90%" na tela.
+            "pct_no_prazo": (1000 * self.no_prazo // decididas) / 10 if decididas else None,
         }
 
 
@@ -149,7 +357,7 @@ async def numeros_por_loja(
     """Por integração: as decisões julgadas, os acertos e as respostas da IA e da equipe."""
     from app.models import AtendimentoConversa, AtendimentoMensagem
     from app.models.atendimento import AtendimentoJulgamento as J
-    from app.services.atendimento import gravar, separa_email
+    from app.services.atendimento import pendente
 
     saida: dict[UUID | None, Numeros] = defaultdict(Numeros)
     conta = (
@@ -172,9 +380,11 @@ async def numeros_por_loja(
     for integ, d, a in conta:
         saida[integ].decisoes += int(d or 0)
         saida[integ].acertos += int(a or 0)
-    # As respostas das lojas no CHAT (16/11/2026): a mesma régua da fila e do tempo de resposta
-    # — a mensagem automática (o robô e as campanhas do Duoke, os cartões da plataforma, as
-    # automações do DaVinci) não é resposta; a que falhou não saiu; o e-mail fica na aba dele.
+    # As respostas das lojas no CHAT (16/11/2026): a mesma régua do tempo de resposta
+    # (`resposta_de_verdade_sql`) — a mensagem automática (o robô e as campanhas do Duoke, os
+    # cartões da plataforma, as automações do DaVinci) e o recibo da evidência não são resposta;
+    # a que falhou não saiu. Só o chat (`pendente.do_chat_sql`): o e-mail fica na aba dele, e a
+    # avaliação, a reclamação, o comentário e o carrinho têm os filtros deles.
     m, c = AtendimentoMensagem, AtendimentoConversa
     momento = func.coalesce(m.enviada_em, m.created_at)
     envios = (
@@ -187,10 +397,8 @@ async def numeros_por_loja(
             )
             .join(c, c.id == m.conversa_id)
             .where(
-                m.autor == constantes.AUTOR_LOJA,
-                m.status != constantes.MSG_FALHOU,
-                ~gravar.mensagem_automatica_sql(m.texto, m.payload),
-                separa_email.na_caixa_sql(c),
+                resposta_de_verdade_sql(m),
+                pendente.do_chat_sql(c),
                 momento >= desde,
                 momento < ate,
             )

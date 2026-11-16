@@ -130,12 +130,13 @@ NA PLATAFORMA como antes. A bolinha sai com resposta no chat
 (`pendente.resposta_de_pessoa`) ou com o "Não precisa de resposta" (o PATCH
 da conversa, o botão ao lado do Enviar). Continuam: fechar, o "Zerar não
 lidas" (`zerar_nao_lidas`, abaixo), os 7 dias e a IA no turno só de cartão.
-O "Não precisa" e o "Fechar" guardam o corte `processado_ate` em `dados`
-(até onde a tela mostrava); ele só vira `visto_em` quando a fala nova
-reabre (`gravar._reabrir_se_nova`) — a bolinha conta só a mensagem nova. Fora
-do número (o e-mail da ponte e o do site, a pergunta do ML, a avaliação, o
-comentário, o carrinho, a reclamação da Shopee/TikTok), abrir grava o visto
-como antes. O "marcar como não lida" (`desfazer_visto`) não muda.
+O "Não precisa" e o "Fechar" guardam o corte `processado_ate` (coluna da
+conversa desde a 0487, 16/11/2026: até onde a tela mostrava); ele só vira
+`visto_em` quando a fala nova reabre (`gravar._reabrir_se_nova`) — a
+bolinha conta só a mensagem nova. Fora do número (o e-mail da ponte e o do
+site, a pergunta do ML, a avaliação, o comentário, o carrinho, a reclamação
+da Shopee/TikTok), abrir grava o visto como antes. O "marcar como não lida"
+(`desfazer_visto`) não muda.
 
 Texto de comprador nunca vai para o log — só ids, plataforma e o código do erro.
 """

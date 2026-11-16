@@ -4528,12 +4528,18 @@ async def editar_conversa(
     16/11/2026 (o dono: "a notificacao agr so vai sair se responder no chat
     ou se clicar em um botao n precisa de resposta q bota do lado do enviar
     msg ali"): na conversa do número (`pendente.tem_numero`), marcar "não
-    precisa" e fechar guardam o corte `processado_ate` em `dados` — o `ate`
-    da tela —, que só vale quando a fala nova reabre (`gravar`): aí a
-    bolinha conta só a mensagem nova. "Precisa de resposta" e reabrir à mão
-    apagam o corte (a bolinha volta como era). Marcar "não precisa" com o
-    `ate` e fala do comprador chegada depois dele: 409 `chegou_mensagem`,
-    nada muda.
+    precisa" e fechar guardam o corte `processado_ate` — o `ate` da tela —,
+    que só vale quando a fala nova reabre (`gravar`): aí a bolinha conta só a
+    mensagem nova. "Precisa de resposta" e reabrir à mão apagam o corte (a
+    bolinha volta como era). Marcar "não precisa" com o `ate` e fala do
+    comprador chegada depois dele: 409 `chegou_mensagem`, nada muda.
+
+    Desde a 0487 (16/11/2026, o reforço) o corte e as horas dos cliques são
+    COLUNAS da conversa (`processado_ate`, `sem_resposta_em`,
+    `precisa_resposta_em`), não chaves de `dados`: a releitura do sync com um
+    retrato velho regravava `dados` inteiro e apagava o clique. O "Precisa de
+    resposta" grava a hora dele: a IA não remarca sozinha o turno que a pessoa
+    desfez (`sem_demanda.desfeito_pela_pessoa`).
     """
     if instagram.e_instagram(conversa_id):
         raise _somente_leitura()
@@ -4590,8 +4596,24 @@ async def editar_conversa(
         gravar.guardar_processado_ate(c, await _corte_do_clique(session, c, ate))
     # A hora do clique da pessoa conta como resposta no tempo de resposta
     # (16/11/2026, `_turnos_das_lojas`); o desfazer apaga. Em qualquer conversa.
+    # O desfazer grava a hora dele (relógio do banco): a IA deixa esse turno
+    # com a pessoa (`sem_demanda.desfeito_pela_pessoa`).
     if desmarca:
-        gravar.esquecer_hora_do_clique(c)
+        # Só apaga o clique do turno que está sendo desfeito (o que veio depois da
+        # chegada da última fala do comprador). O clique antigo, de outra espera
+        # (ex.: a pessoa desfaz a marcação da IA num turno novo), fica: as
+        # Métricas já fecharam aquela espera nele.
+        ultima_chegada = await session.scalar(
+            select(func.max(AtendimentoMensagem.created_at)).where(
+                AtendimentoMensagem.conversa_id == c.id,
+                AtendimentoMensagem.autor == AUTOR_CLIENTE,
+            )
+        )
+        if c.sem_resposta_em is not None and (
+            ultima_chegada is None or _utc(c.sem_resposta_em) >= _utc(ultima_chegada)
+        ):
+            gravar.esquecer_hora_do_clique(c)
+        gravar.guardar_hora_do_desfazer(c, await session.scalar(select(func.clock_timestamp())))
     if marca:
         gravar.guardar_hora_do_clique(c, await session.scalar(select(func.clock_timestamp())))
     # Fila e prazo derivam da situação e do "não precisa": refaz do banco.
@@ -6409,10 +6431,19 @@ async def _turnos_das_lojas(
     """Os turnos do cliente por loja, a conta de `_metricas_lojas` (ver lá): por (integração,
     plataforma, canal do robô), {"conta", "recebidas", "tempos" (os minutos de cada primeira
     resposta), "no_prazo", "vencidas"}. A aba Métricas das equipes (16/11/2026) soma os
-    `tempos` de cada equipe para o tempo médio (`metricas_equipe.resumo`)."""
-    # Só o CHAT (13/10/2026): o e-mail da ponte mora na aba E-mail e não
-    # entra no tempo de resposta das lojas (`separa_email`).
-    filtro = [AtendimentoConversa.ultima_mensagem_em >= desde, separa_email.na_caixa_sql()]
+    `tempos` de cada equipe para o tempo médio (`metricas_equipe.resumo`).
+
+    16/11/2026 (o tempo "calculado certinho"): as réguas da espera são de
+    `metricas_equipe` — o que a fala do comprador é (`fala_do_comprador`: cartão, cortesia ou
+    fala), a resposta de verdade da loja (`resposta_de_verdade_sql`) e o laço
+    (`esperas`). Aqui ficam a consulta, o clique e a conta por loja."""
+    from app.services.atendimento import metricas_equipe as regua
+
+    # Só o CHAT (13/10/2026; 16/11/2026, a régua do "Falta responder" e dos números da Caixa,
+    # `pendente.do_chat_sql`): fora o e-mail da ponte (a aba E-mail), a avaliação, a
+    # reclamação/devolução/mediação, o comentário das redes e o carrinho do site — cada um tem
+    # o filtro e o prazo dele, e não estão no chat do Duoke.
+    filtro = [AtendimentoConversa.ultima_mensagem_em >= desde, pendente.do_chat_sql()]
     cond = _clausula_escopo(scope, AtendimentoConversa.integration_id)
     if cond is not None:
         filtro.append(cond)
@@ -6423,43 +6454,68 @@ async def _turnos_das_lojas(
         AtendimentoConversa.plataforma,
         AtendimentoConversa.canal,
         AtendimentoConversa.conta,
+        AtendimentoConversa.situacao,
         AtendimentoConversa.sem_resposta_necessaria,
-        # 16/11/2026: a hora do "Não precisa de resposta" da pessoa (`dados.sem_resposta_em`).
-        AtendimentoConversa.dados[CHAVE_SEM_RESPOSTA_EM].astext.label("sem_resposta_em"),
+        # 16/11/2026: a hora do "Não precisa de resposta" da pessoa. A coluna desde a 0487 (o
+        # mesmo dia): em `dados`, a releitura do sync com um retrato velho apagava o clique.
+        AtendimentoConversa.sem_resposta_em,
     ).where(*filtro)
     conversas = {row.id: row for row in (await session.execute(consulta_conversas)).all()}
     if not conversas:
         return {}
 
-    momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    m = AtendimentoMensagem
+    momento = func.coalesce(m.enviada_em, m.created_at)
+    do_cliente = m.autor == AUTOR_CLIENTE
+    comeco = func.left(m.texto, regua.MAX_CORTESIA + 1)
     linhas = (
         await session.execute(
-            select(AtendimentoMensagem.conversa_id, AtendimentoMensagem.autor, momento)
+            select(
+                m.conversa_id,
+                m.autor,
+                momento.label("quando"),
+                m.tipo,
+                # Do comprador, o que diz se a fala abre a espera (16/11/2026,
+                # `regua.fala_do_comprador`): o começo do texto (a cortesia é curta) e o tipo
+                # do item cru (o cartão). Da loja, só se a resposta perguntou algo.
+                case((do_cliente, comeco), else_=None).label("texto"),
+                case((do_cliente, m.payload["message_type"].astext), else_=None).label("shopee"),
+                case((do_cliente, m.payload["type"].astext), else_=None).label("tiktok"),
+                (m.anexos != func.jsonb_build_array()).label("anexo"),
+                func.coalesce(func.strpos(m.texto, "?") > 0, false()).label("pergunta"),
+            )
             .where(
                 # SUBCONSULTA, não a lista de ids: o asyncpg aceita no máximo
                 # 32.767 parâmetros, e 90 dias de todas as lojas passam disso.
-                AtendimentoMensagem.conversa_id.in_(
-                    select(AtendimentoConversa.id).where(*filtro)
-                ),
+                m.conversa_id.in_(select(AtendimentoConversa.id).where(*filtro)),
                 momento >= desde - _MARGEM_METRICAS,
-                or_(
-                    AtendimentoMensagem.autor == AUTOR_CLIENTE,
-                    and_(
-                        AtendimentoMensagem.autor == AUTOR_LOJA,
-                        AtendimentoMensagem.status != MSG_FALHOU,
-                        ~gravar.mensagem_automatica_sql(
-                            AtendimentoMensagem.texto, AtendimentoMensagem.payload
-                        ),
-                    ),
-                ),
+                or_(do_cliente, regua.resposta_de_verdade_sql(m)),
             )
-            .order_by(AtendimentoMensagem.conversa_id, momento, AtendimentoMensagem.created_at)
+            .order_by(m.conversa_id, momento, m.created_at)
         )
     ).all()
 
-    por_conversa: dict[UUID, list[tuple[str, datetime]]] = {}
-    for conversa_id, autor, quando in linhas:
-        por_conversa.setdefault(conversa_id, []).append((autor, _utc(quando)))
+    por_conversa: dict[UUID, list[regua.Linha]] = {}
+    for row in linhas:
+        cliente = row.autor == AUTOR_CLIENTE
+        fala = (
+            regua.fala_do_comprador(
+                tipo=row.tipo,
+                texto=row.texto,
+                payload={"message_type": row.shopee, "type": row.tiktok},
+                tem_anexo=bool(row.anexo),
+            )
+            if cliente
+            else regua.FALA
+        )
+        por_conversa.setdefault(row.conversa_id, []).append(
+            regua.Linha(
+                cliente=cliente,
+                quando=_utc(row.quando),
+                fala=fala,
+                pergunta=bool(row.pergunta) and not cliente,
+            )
+        )
 
     lojas: dict[tuple[UUID | None, str, UUID | None], dict[str, Any]] = {}
     for conversa_id, msgs in por_conversa.items():
@@ -6479,33 +6535,21 @@ async def _turnos_das_lojas(
         )
         loja["conta"] = loja["conta"] or info.conta
         # O Eduardo (16/11/2026): o "Não precisa de resposta" da pessoa conta como resposta —
-        # fecha a espera que estava aberta na hora do clique (só o último clique fica gravado).
-        clique = _hora_do_clique(info.sem_resposta_em)
-        inicio: datetime | None = None
-        for autor, quando in msgs:
-            if inicio is not None and clique is not None and inicio <= clique < quando:
-                # A pessoa marcou antes desta mensagem: a espera fechou no clique.
-                _contar_resposta(loja, inicio, clique, prazo, desde)
-                inicio, clique = None, None
-            if autor == AUTOR_CLIENTE:
-                inicio = inicio or quando
-                continue
-            if inicio is not None:
-                _contar_resposta(loja, inicio, quando, prazo, desde)
-                inicio = None
-        if inicio is not None and clique is not None and clique >= inicio:
-            _contar_resposta(loja, inicio, clique, prazo, desde)
-            inicio = None
-        if inicio is not None and inicio >= desde and not info.sem_resposta_necessaria:
-            loja["recebidas"] += 1
-            loja["vencidas"] += int(agora - inicio > prazo)
+        # fecha a espera que estava aberta na hora do clique (só o último clique fica gravado;
+        # o PATCH grava, o "Precisa de resposta" apaga, a IA não grava).
+        clique = _utc(info.sem_resposta_em)
+        # A espera que ficou aberta não conta na conversa dispensada ("Não precisa" sem hora).
+        # A FECHADA e a BLOQUEADA continuam contando (16/11/2026, a revisão): senão "Fechar"
+        # vira um jeito de apagar a vencida, e o bloqueio por reclamação é falha da loja.
+        aberta_conta = not info.sem_resposta_necessaria
+        for inicio, fim in regua.esperas(msgs, clique):
+            if fim is not None:
+                _contar_resposta(loja, inicio, fim, prazo, desde)
+            elif inicio >= desde and aberta_conta:
+                loja["recebidas"] += 1
+                loja["vencidas"] += int(agora - inicio > prazo)
 
     return lojas
-
-
-# A hora do "Não precisa de resposta" que a PESSOA marcou (ISO UTC, a sessão da Caixa grava no
-# PATCH; o "Precisa de resposta" apaga; a IA não grava) — 16/11/2026.
-CHAVE_SEM_RESPOSTA_EM = gravar.CHAVE_SEM_RESPOSTA_EM  # a mesma chave que o PATCH grava
 
 
 def _contar_resposta(
@@ -6520,16 +6564,6 @@ def _contar_resposta(
         loja["no_prazo"] += int(tempo <= prazo)
 
 
-def _hora_do_clique(valor: Any) -> datetime | None:
-    """A hora do clique gravada em `dados` (texto ISO) ou None. PURA."""
-    if not valor:
-        return None
-    try:
-        return _utc(datetime.fromisoformat(str(valor).replace("Z", "+00:00")))
-    except ValueError:
-        return None
-
-
 async def _metricas_lojas(
     session: AsyncSession, scope: TeamScope, desde: datetime, agora: datetime
 ) -> list[MetricaLojaOut]:
@@ -6540,7 +6574,8 @@ async def _metricas_lojas(
     primeira resposta da loja que não falhou — pelo DaVinci ou por fora.
     Conta o turno que COMEÇOU no período. `pct_no_prazo` é sobre os turnos
     já decididos: respondidos, e os sem resposta cujo prazo já venceu (o
-    que ainda está no prazo não é nem acerto nem erro).
+    que ainda está no prazo não é nem acerto nem erro). Só a espera
+    respondida entra no tempo; o relógio é o da plataforma.
 
     Mensagem automática não é resposta (05/10/2026) — a MESMA régua da fila
     "Falta responder" (`gravar.recalcular`): o robô e as campanhas do Duoke,
@@ -6552,6 +6587,23 @@ async def _metricas_lojas(
     1.921 das 2.648 primeiras respostas da Shopee, e a mediana de 1 min
     escondia a de quem responde de verdade (com a régua inteira: Shopee
     ~297 min e 48,6% no prazo; TikTok ~753 min e 88,8%).
+
+    16/11/2026, o Eduardo: o tempo "calculado certinho" — do comprador
+    ESCREVER até a loja responder DE VERDADE (pessoa ou IA que manda
+    sozinha) ou até o clique "Não precisa de resposta". A auditoria com os
+    dados de produção do dia achou e aqui ficou (as réguas em
+    `metricas_equipe`, a "espera do comprador"):
+    - o cartão do produto/pedido sem texto não abre nem estica a espera
+      (ela começa na primeira fala escrita); a vez só de cartão não conta;
+    - a fala só de cortesia ("ok", "obrigado", "valeu", "blz", emoji,
+      figurinha) não abre — menos respondendo a uma pergunta da loja; a
+      pergunta de verdade que vem depois abre; a vez só de cortesia não conta;
+    - o recibo fixo da evidência ("Recebemos o vídeo, obrigado! A equipe
+      analisa e responde por aqui.") não fecha a espera;
+    - a espera aberta da conversa fechada ou bloqueada sai da conta (nem
+      vencida), como a do "Não precisa de resposta" sem hora;
+    - só o chat (`pendente.do_chat_sql`): avaliação, reclamação/devolução,
+      comentário das redes e carrinho do site não entram.
     """
     lojas = await _turnos_das_lojas(session, scope, desde, agora)
     if not lojas:
@@ -6574,7 +6626,7 @@ async def _metricas_lojas(
                 ),
                 p90_primeira_resposta_min=round(_p90(tempos), 1) if tempos else None,
                 pct_no_prazo=(
-                    round(100 * loja["no_prazo"] / decididas, 1) if decididas else None
+                    (1000 * loja["no_prazo"] // decididas) / 10 if decididas else None
                 ),
             )
         )

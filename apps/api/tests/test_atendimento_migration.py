@@ -80,6 +80,14 @@ A 0431 (27/10/2026, Onda 4 do Zap — a tela "Números do WhatsApp", a saúde e
 a limpeza) acrescenta a `saude` da WABA, o `caso_migracao` do número (com o
 CHECK A/A2/B) e os índices da retenção e da fila da mídia; roda em cima da
 0430 e o downgrade volta ao catálogo de depois dela.
+
+A 0487 (16/11/2026, o reforço do "Não precisa de resposta") põe na conversa
+as três horas que moravam em `dados` ou não existiam — `processado_ate`,
+`sem_resposta_em` e `precisa_resposta_em` (anuláveis, sem default e sem
+índice) —, leva o que estava em `dados` para elas e tira as chaves; o
+downgrade devolve as chaves e volta o catálogo ao de antes dela. Os dados que
+ela move têm o teste dela (`test_migration_0487_...`, abaixo), sozinha sobre
+uma cópia da conversa.
 """
 
 # ruff: noqa: S608
@@ -115,6 +123,7 @@ _MIGRATION_AGENTE = _VERSOES / "0420_atendimento_agente.py"
 _MIGRATION_ZAP = _VERSOES / "0432_atendimento_zap.py"
 _MIGRATION_ZAP_SAUDE = _VERSOES / "0433_atendimento_zap_saude.py"
 _MIGRATION_CONTINUACAO = _VERSOES / "0436_atendimento_canal_auto_continuacao.py"
+_MIGRATION_NAO_PRECISA = _VERSOES / "0489_atendimento_nao_precisa_colunas.py"
 # A regra de palavras das pastas de e-mail (0387, a camada do atendimento sobre
 # a Central de e-mail) é conferida em `test_mail_atendimento_migration.py`,
 # junto das tabelas `mail_*` da mesma migration. As tabelas novas da 0420 (o
@@ -280,6 +289,10 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     continuacao = _carregar_migration(_MIGRATION_CONTINUACAO)
     assert continuacao.revision == "0436_atendimento_canal_auto_continuacao"
     assert continuacao.down_revision == "0435_marca_emails_sac_admin"
+    # 16/11/2026: as horas do "Não precisa de resposta" em colunas da conversa.
+    nao_precisa = _carregar_migration(_MIGRATION_NAO_PRECISA)
+    assert nao_precisa.revision == "0489_atendimento_nao_precisa_colunas"
+    assert nao_precisa.down_revision == "0488_segments_duimp_padrao"
     # Os valores dos CHECKs da migration são cópia dos do model.
     for na_migration, no_model in (
         (zap.CONTA_STATUS, zap_model.ZAP_CONTA_STATUS),
@@ -364,6 +377,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     zap.SCHEMA = rascunho
     zap_saude.SCHEMA = rascunho
     continuacao.SCHEMA = rascunho
+    nao_precisa.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (mod, robo))
@@ -621,6 +635,12 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         antes_da_0436 = await _catalogo(db, rascunho, rascunho)
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade", (continuacao,))
+        await db.commit()
+
+        # 0487: as três horas do "Não precisa de resposta" na conversa.
+        antes_da_0487 = await _catalogo(db, rascunho, rascunho)
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade", (nao_precisa,))
         await db.commit()
 
         da_migration = await _catalogo(db, rascunho, rascunho)
@@ -942,6 +962,16 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         assert "(recebido_em)" in defs["ix_atendimento_zap_eventos_recebido_em"]
         assert "(status, proxima_em)" in defs["ix_atendimento_zap_midias_status_proxima_em"]
         assert "(apagar_em)" in defs["ix_atendimento_zap_midias_apagar_em"]
+        # 0487: anuláveis, sem default e sem índice.
+        for coluna in ("processado_ate", "sem_resposta_em", "precisa_resposta_em"):
+            assert cols[("atendimento_conversas", coluna)][2] == "timestamptz"
+            assert cols[("atendimento_conversas", coluna)][4:] == ("YES", None)
+
+        # O downgrade da 0487 volta EXATAMENTE ao catálogo de antes dela.
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade", (nao_precisa,))
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes_da_0487
 
         # O downgrade da 0436 volta EXATAMENTE ao catálogo de antes dela.
         conn = await db.connection()
@@ -1049,6 +1079,137 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         await db.commit()
         depois = await _catalogo(db, rascunho, rascunho)
         assert depois["tabelas"] == []
+    finally:
+        await db.rollback()
+        await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_migration_0487_leva_as_horas_do_nao_precisa_para_colunas(db: AsyncSession):
+    """A 0487 (16/11/2026) sozinha, sobre uma cópia da conversa de antes dela: cria
+    as três colunas IGUAIS às do model (nada mais muda na tabela), leva para elas
+    o que estava em `dados` — o corte e a hora do clique; sem fuso é UTC, texto
+    que não é data vira NULL, como no `gravar._iso_utc` — e tira as chaves de
+    `dados` (o resto fica). O downgrade devolve as duas chaves em ISO UTC (o que
+    o código antigo lê), derruba as colunas e o catálogo volta ao de antes."""
+    import json
+
+    from app.services.atendimento import gravar
+
+    schema_model = Base.metadata.schema
+    rascunho = f"{schema_model}_mig0487"
+    mig = _carregar_migration(_MIGRATION_NAO_PRECISA)
+    colunas = ("processado_ate", "sem_resposta_em", "precisa_resposta_em")
+    assert mig.COLUNAS == colunas
+    corte = datetime(2026, 11, 16, 15, 0, 0, 123456, tzinfo=UTC)
+    clique = datetime(2026, 11, 16, 15, 1, tzinfo=UTC)
+    linhas = {
+        "cheia": {
+            "outra": 1,
+            "processado_ate": corte.isoformat(),
+            "sem_resposta_em": clique.isoformat(),
+        },
+        "sem_fuso": {"processado_ate": "2026-11-16T12:00:00", "sem_resposta_em": "lixo"},
+        "nulo": {"processado_ate": None},
+        "sem_chave": {"outra": 2},
+    }
+
+    def _rodar(conn, passo: str) -> None:
+        ctx = MigrationContext.configure(conn, opts={"target_metadata": Base.metadata})
+        with Operations.context(ctx):
+            getattr(mig, passo)()
+
+    async def _linhas() -> dict:
+        return {
+            r.externo_id: r
+            for r in (
+                await db.execute(
+                    text(
+                        "SELECT externo_id, dados, "
+                        + ", ".join(c for c in colunas if c != "precisa_resposta_em")
+                        + f' FROM "{rascunho}".atendimento_conversas'
+                    )
+                )
+            ).all()
+        }
+
+    await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
+    await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
+    mig.SCHEMA = rascunho
+    try:
+        # A conversa de antes da 0487: a do model sem as três colunas.
+        await db.execute(
+            text(
+                f'CREATE TABLE "{rascunho}".atendimento_conversas '
+                f'(LIKE "{schema_model}".atendimento_conversas INCLUDING DEFAULTS)'
+            )
+        )
+        for coluna in colunas:
+            await db.execute(
+                text(f'ALTER TABLE "{rascunho}".atendimento_conversas DROP COLUMN {coluna}')
+            )
+        for externo, dados in linhas.items():
+            await db.execute(
+                text(
+                    f'INSERT INTO "{rascunho}".atendimento_conversas '
+                    "(id, plataforma, canal, externo_id, dados) "
+                    "VALUES (gen_random_uuid(), 'shopee', 'chat', :e, CAST(:d AS jsonb))"
+                ),
+                {"e": externo, "d": json.dumps(dados)},
+            )
+        await db.commit()
+        antes = await _catalogo(db, rascunho, rascunho)
+
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "upgrade")
+        await db.commit()
+        do_model = await _catalogo(db, schema_model, schema_model)
+        depois = await _catalogo(db, rascunho, rascunho)
+        assert depois["colunas"] == [
+            c for c in do_model["colunas"] if c[0] == "atendimento_conversas"
+        ]
+        assert {c[1] for c in depois["colunas"]} - {c[1] for c in antes["colunas"]} == set(colunas)
+        assert not [d for _, _, d in do_model["indices"] if any(c in d for c in colunas)]
+        movidas = await _linhas()
+        cheia = movidas["cheia"]
+        assert (cheia.processado_ate, cheia.sem_resposta_em, cheia.dados) == (
+            corte,
+            clique,
+            {"outra": 1},
+        )
+        assert movidas["sem_fuso"].processado_ate == datetime(2026, 11, 16, 12, tzinfo=UTC)
+        assert movidas["sem_fuso"].sem_resposta_em is None, "texto que não é data"
+        assert movidas["sem_fuso"].dados == {} and movidas["nulo"].dados == {}
+        assert movidas["nulo"].processado_ate is None
+        assert movidas["sem_chave"].dados == {"outra": 2}
+        assert movidas["sem_chave"].processado_ate is None
+
+        # A hora do "Precisa de resposta" nunca morou em `dados`: o downgrade a perde.
+        await db.execute(
+            text(f'UPDATE "{rascunho}".atendimento_conversas SET precisa_resposta_em = now()')
+        )
+        await db.commit()
+        conn = await db.connection()
+        await conn.run_sync(_rodar, "downgrade")
+        await db.commit()
+        assert await _catalogo(db, rascunho, rascunho) == antes
+        voltou = {
+            r[0]: r[1]
+            for r in (
+                await db.execute(
+                    text(f'SELECT externo_id, dados FROM "{rascunho}".atendimento_conversas')
+                )
+            ).all()
+        }
+        assert gravar._iso_utc(voltou["cheia"]["processado_ate"]) == corte
+        assert gravar._iso_utc(voltou["cheia"]["sem_resposta_em"]) == clique
+        assert voltou["cheia"]["outra"] == 1
+        assert set(voltou["sem_fuso"]) == {"processado_ate"}, "o lixo não volta"
+        assert gravar._iso_utc(voltou["sem_fuso"]["processado_ate"]) == datetime(
+            2026, 11, 16, 12, tzinfo=UTC
+        )
+        assert voltou["nulo"] == {} and voltou["sem_chave"] == {"outra": 2}
     finally:
         await db.rollback()
         await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))

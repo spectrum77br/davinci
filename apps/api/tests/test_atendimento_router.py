@@ -1489,7 +1489,8 @@ async def test_metricas_nao_contam_mensagem_automatica_como_resposta(
     assert (loja["recebidas"], loja["respondidas"]) == (3, 2)
     assert loja["mediana_primeira_resposta_min"] == pytest.approx(28.0, abs=0.2)
     assert loja["p90_primeira_resposta_min"] == pytest.approx(46.0, abs=0.2)
-    assert loja["pct_no_prazo"] == pytest.approx(66.7, abs=0.1)
+    # Para baixo (16/11/2026): 2 de 3 = 66,66…% vira 66,6 (nunca a meta sem ter batido).
+    assert loja["pct_no_prazo"] == pytest.approx(66.6, abs=0.01)
 
 
 async def test_metricas_com_mais_de_32767_conversas(client, db, make_user, pessoa):

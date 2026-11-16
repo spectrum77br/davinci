@@ -8,6 +8,7 @@ from uuid import uuid4
 import pytest
 from sqlalchemy import func, select
 
+from app.config import get_settings
 from app.models import (
     AtendimentoAvaliacao,
     AtendimentoCanal,
@@ -15,6 +16,7 @@ from app.models import (
     AtendimentoRascunho,
     AtendimentoRegra,
     IntegrationPlatform,
+    UserRole,
 )
 from app.services.atendimento import gravar, ia, sem_demanda
 from app.services.atendimento.constantes import ETIQUETA_AG_CANCELAMENTO, ORIGEM_NOTA
@@ -315,6 +317,94 @@ async def test_pausa_humana_de_30min_continua_valendo(db, make_user, ia_ligada, 
     )
     assert not await sem_demanda.processar(db, conversa.id, canal_autorizado_id=conversa.canal_id)
     assert not conversa.sem_resposta_necessaria
+
+
+# ── O desfazer da pessoa ("Precisa de resposta") segura a IA (16/11/2026) ─────
+
+
+def test_o_desfazer_da_pessoa_segura_so_o_turno_dele():
+    """O "Precisa de resposta" (`precisa_resposta_em`, relógio do banco) vale para o
+    turno da última fala do comprador: o clique depois dela segura a IA; a fala
+    nova, escrita e chegada depois do clique, solta. A CHEGADA do gatilho também
+    segura: um relógio de plataforma adiantado não solta a IA antes da hora."""
+    clique = AGORA
+    conversa = SimpleNamespace(
+        precisa_resposta_em=None, ultima_do_cliente_em=AGORA - timedelta(minutes=5)
+    )
+    assert not sem_demanda.desfeito_pela_pessoa(conversa), "ninguém desfez"
+    conversa.precisa_resposta_em = clique
+    assert sem_demanda.desfeito_pela_pessoa(conversa)
+    # O comprador escreveu de novo depois do clique: turno novo, a IA decide.
+    conversa.ultima_do_cliente_em = clique + timedelta(seconds=1)
+    assert not sem_demanda.desfeito_pela_pessoa(conversa)
+    nova = SimpleNamespace(created_at=clique + timedelta(seconds=2))
+    assert not sem_demanda.desfeito_pela_pessoa(conversa, nova)
+    # O relógio da plataforma adiantado: a fala "depois" do clique chegou antes dele.
+    adiantada = SimpleNamespace(created_at=clique - timedelta(seconds=30))
+    assert sem_demanda.desfeito_pela_pessoa(conversa, adiantada)
+
+
+async def test_a_ia_nao_remarca_o_turno_que_a_pessoa_desfez(
+    client, db, make_user, auth_as, ia_ligada, monkeypatch
+):
+    """16/11/2026, o reforço do "Não precisa de resposta": o cartão e o menu do robô
+    → a IA marca; a pessoa clica "Precisa de resposta" (o PATCH de verdade, que
+    grava `precisa_resposta_em`); na rodada seguinte a IA NÃO remarca — nem
+    chamada direto com o turno, nem pelo cron —, o turno é da pessoa, como a IA
+    pausada. O comprador escreve de novo (outro cartão; o robô de novo): turno
+    novo, a IA volta a decidir — e marca."""
+    conversa, _, _ = await _cenario(db, make_user, ia_ligada, monkeypatch)
+    assert await sem_demanda.processar(db, conversa.id, canal_autorizado_id=conversa.canal_id)
+    assert conversa.sem_resposta_necessaria and conversa.precisa_resposta_em is None
+    email = "quem.desfaz@davinci-test.com"
+    monkeypatch.setattr(get_settings(), "atendimento_usuarios", email)
+    auth_as(await make_user(email=email, role=UserRole.ADMIN))
+    r = await client.patch(
+        f"/api/atendimento/conversas/{conversa.id}", json={"sem_resposta_necessaria": False}
+    )
+    assert r.status_code == 200, r.text
+    await db.refresh(conversa)
+    clique = conversa.precisa_resposta_em
+    assert clique is not None
+    assert not conversa.sem_resposta_necessaria and conversa.aguardando_resposta
+    # A rodada seguinte da IA (o turno de agora): não remarca.
+    assert not await sem_demanda.processar(
+        db,
+        conversa.id,
+        canal_autorizado_id=conversa.canal_id,
+        turno_esperado=conversa.ultima_do_cliente_em,
+    )
+    assert (await ia.manter_fila(db))["sem_demanda"] == 0
+    await db.refresh(conversa)
+    assert not conversa.sem_resposta_necessaria and conversa.aguardando_resposta
+    # O comprador escreve de novo DEPOIS do clique (outro cartão; o robô responde).
+    depois = max(datetime.now(UTC), clique) + timedelta(seconds=1)
+    await gravar.gravar_mensagem(
+        db,
+        conversa,
+        externo_id="card-de-novo",
+        autor="cliente",
+        texto=None,
+        tipo="produto",
+        enviada_em=depois,
+        payload={"message_type": "item", "content": {"item_id": 456}},
+    )
+    await gravar.gravar_mensagem(
+        db,
+        conversa,
+        externo_id="bot-menu-de-novo",
+        autor="loja",
+        texto=MENU,
+        tipo="texto",
+        origem="externo",
+        enviada_em=depois + timedelta(seconds=1),
+    )
+    await db.commit()
+    assert not sem_demanda.desfeito_pela_pessoa(conversa)
+    assert (await ia.manter_fila(db))["sem_demanda"] == 1
+    await db.refresh(conversa)
+    assert conversa.sem_resposta_necessaria and not conversa.aguardando_resposta
+    assert conversa.precisa_resposta_em == clique, "a IA não apaga o desfazer"
 
 
 async def test_visita_nova_so_com_card_apos_figurinha_de_junho_e_pedido_antigo(

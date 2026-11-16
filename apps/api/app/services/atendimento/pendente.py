@@ -171,14 +171,14 @@ bolinha só sai:
 Continuam valendo: fechar a conversa, o "Zerar não lidas", a janela de 7
 dias (`JANELA_DO_NUMERO`) e a IA no turno só de cartão (`sem_demanda`). A
 régua não muda: o `visto_em` dessas conversas passa a ser "zerado até".
-O CORTE `processado_ate` (`gravar.CHAVE_PROCESSADO_ATE`, em `dados`): o "Não
-precisa" e o "Fechar" guardam até onde a tela mostrava (o `ate` do PATCH).
-Ele não muda o número na hora (o flag e a fechada já tiram a conversa
-inteira). Só vale quando a fala nova reabre (`gravar._reabrir_se_nova`):
-vira o `visto_em` (e o da base importada), e a bolinha conta só a mensagem
-nova. O "Precisa de resposta" e o reabrir à mão apagam o corte: a bolinha
-volta como era antes do clique. O e-mail da ponte/site e as conversas fora
-do número continuam apagando ao abrir.
+O CORTE `processado_ate` (coluna da conversa desde a 0487, 16/11/2026; antes
+morava em `dados`): o "Não precisa" e o "Fechar" guardam até onde a tela
+mostrava (o `ate` do PATCH). Ele não muda o número na hora (o flag e a
+fechada já tiram a conversa inteira). Só vale quando a fala nova reabre
+(`gravar._reabrir_se_nova`): vira o `visto_em` (e o da base importada), e a
+bolinha conta só a mensagem nova. O "Precisa de resposta" e o reabrir à mão
+apagam o corte: a bolinha volta como era antes do clique. O e-mail da
+ponte/site e as conversas fora do número continuam apagando ao abrir.
 
 A RECLAMAÇÃO DO ML ENTRA NO NÚMERO (15/10/2026, as duas conversas do ML que
 faltavam na medição das 10:13). O Duoke junta as mensagens da reclamação/

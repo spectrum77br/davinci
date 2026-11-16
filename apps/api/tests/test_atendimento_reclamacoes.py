@@ -1281,7 +1281,7 @@ async def test_nao_precisa_na_reclamacao_do_ml_e_mediador_novo_volta(db, make_us
     db.expire_all()
     conversa = await _conversa_da_reclamacao(db)
     assert conversa.sem_resposta_necessaria is True
-    assert gravar.CHAVE_PROCESSADO_ATE in conversa.dados
+    assert conversa.processado_ate == corte
     # A fala NOVA do mediador desmarca.
     c["mensagens"][RECLAMACAO_ML].append(
         _msg(2, "mediator", "respondent", "Prazo de 2 dias.", "2026-10-01T13:00:00.000-04:00")
@@ -1291,7 +1291,7 @@ async def test_nao_precisa_na_reclamacao_do_ml_e_mediador_novo_volta(db, make_us
     db.expire_all()
     conversa = await _conversa_da_reclamacao(db)
     assert conversa.sem_resposta_necessaria is False
-    assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
+    assert conversa.processado_ate is None
     assert conversa.visto_em == corte
     # Fechada e marcada: o mediador novo só desliga o "não precisa".
     conversa.situacao = "fechada"
