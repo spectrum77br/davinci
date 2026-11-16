@@ -124,6 +124,10 @@ class FakeShopee:
         self.loja = flex_api.AssinaturaFlex(True, "in", "Entrega Direta ligada na loja")
         # item_status de cada anúncio (get_item_base_info); padrão NORMAL.
         self.status: dict[str, str] = {}
+        # Variações de cada anúncio (get_model_list) e os anúncios em que a
+        # Shopee exige código de barras em TODAS para mudar o envio.
+        self.modelos: dict[str, list[dict]] = {}
+        self.exige_gtin: set[str] = set()
 
     async def ler_canal_loja_flex(self, canais_flex):
         return self.loja
@@ -147,7 +151,33 @@ class FakeShopee:
             )
         return out
 
+    @property
+    def gravacoes_gtin(self):
+        return [c[1] for c in self.chamadas if c[0] == "gtin"]
+
+    async def get_model_list(self, item_id):
+        self.chamadas.append(("modelos", str(item_id)))
+        return {"model": [dict(m) for m in self.modelos.get(str(item_id), [])]}
+
+    async def gravar_gtin_variacoes(self, item_id, modelos):
+        self.chamadas.append(("gtin", (str(item_id), [dict(m) for m in modelos])))
+        por_id = {int(m["model_id"]): m["gtin_code"] for m in modelos}
+        for m in self.modelos.get(str(item_id), []):
+            if int(m["model_id"]) in por_id:
+                m["gtin_code"] = por_id[int(m["model_id"])]
+        return {}
+
     async def atualizar_canal_flex(self, item_id, logistic_info, *, ligar, canais_flex):
+        if str(item_id) in self.exige_gtin and any(
+            not (m.get("gtin_code") or "").strip() for m in self.modelos.get(str(item_id), [])
+        ):
+            self.chamadas.append(("recusado_gtin", str(item_id)))
+            return ResultadoFlex(
+                flex_api.ERRO,
+                status_http=200,
+                detalhe="product.error_busi: The GTIN code is required for this category. "
+                "Please fill in it.",
+            )
         payload = flex_api.payload_canais(logistic_info, canais_flex, ligar)
         self.chamadas.append(("atualizar", (str(item_id), payload)))
         self.canais[str(item_id)] = [dict(c) for c in payload]
@@ -1302,3 +1332,112 @@ async def test_religado_por_fora_depois_de_desligado_perde_a_histerese(db, mundo
     assert "ligado fora do DaVinci" in est["MLB1"].motivo
     assert ("desligar", "MLB1") in ml.escritas
     assert ml.estado["MLB1"] is False
+
+
+# ---- código de barras (GTIN) que a Shopee pede para mudar o envio ------------------------
+
+
+async def _produto(db, dono_id, sku):
+    p = Product(user_id=dono_id, sku=sku, name=sku, stock=0, situacao="A",
+                bling_product_id=abs(hash(sku)) % 10**8)
+    db.add(p)
+    await db.flush()
+    return p
+
+
+@pytest.mark.asyncio
+async def test_shopee_sem_gtin_o_sistema_preenche_e_desliga(db, mundo, shopee, monkeypatch):
+    """16/11/2026: 10 anúncios Shopee com a Entrega Direta ligada e sem peça,
+    e a Shopee recusando desligar: "The GTIN code is required for this
+    category". O sistema preenche as variações vazias — com o código do mesmo
+    celular em outra loja, senão com o de outra variação do anúncio — grava
+    só as vazias, tenta de novo e desliga; a trilha diz o que preencheu."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "ativo")
+    monkeypatch.setattr(mundo["cfg"], "flex_shopee_escrita", True)
+    dono = mundo["dono_id"]
+    await _produto(db, dono, "dg019.pi+a003.pi")
+    outro_kit = await _produto(db, dono, "dg019.ra+a001.ra")
+    outra_loja = Integration(user_id=dono, platform=IntegrationPlatform.SHOPEE, name="outra",
+                             credentials=encrypt_json({"access_token": "t"}))
+    db.add(outra_loja)
+    await db.flush()
+    db.add(ProductLink(user_id=dono, product_id=outro_kit.id, integration_id=outra_loja.id,
+                       platform=IntegrationPlatform.SHOPEE, external_id="888",
+                       variation_id="9", stock=0))
+    await db.commit()
+    shopee.exige_gtin.add("777")
+    dim = {"package_width": 10, "package_height": 18, "package_length": 12}
+    shopee.modelos["777"] = [
+        {"model_id": 1, "model_sku": "dg019.pi+a003.pi", "gtin_code": "", "model_name": "Preto",
+         "tier_index": [0], "weight": "0.4", "dimension": dim},
+        {"model_id": 2, "model_sku": "xx1", "gtin_code": "", "model_name": "Azul",
+         "tier_index": [1]},
+        {"model_id": 3, "model_sku": "b009", "gtin_code": "7908855900595", "model_name": "Azul",
+         "tier_index": [1]},
+    ]
+    shopee.modelos["888"] = [
+        {"model_id": 9, "model_sku": "dg019.ra+a001.ra", "gtin_code": "7908855913533"},
+        {"model_id": 10, "model_sku": "dg019.ra", "gtin_code": "123"},  # inválido: não entra
+    ]
+    await flex_motor.rodar_motor()
+
+    assert shopee.gravacoes_gtin == [
+        (
+            "777",
+            [
+                {"model_id": 1, "model_sku": "dg019.pi+a003.pi", "gtin_code": "7908855913533",
+                 "weight": 0.4,
+                 "dimension": {"package_height": 18, "package_length": 12, "package_width": 10}},
+                {"model_id": 2, "model_sku": "xx1", "gtin_code": "7908855900595"},
+            ],
+        )
+    ]
+    # Recusou, leu as variações (a do anúncio e a da outra loja), gravou, desligou.
+    passos = [c[0] for c in shopee.chamadas if c[0] != "ler"]
+    assert passos == ["recusado_gtin", "modelos", "modelos", "gtin", "atualizar"]
+    est = (await _estados(db))["777"]
+    assert est.observado == "desligado" and est.ultimo_erro is None
+    db.expire_all()
+    motivo = (
+        await db.execute(
+            select(FlexLog.motivo).where(FlexLog.external_id == "777", FlexLog.resultado == "ok",
+                                         FlexLog.acao == "desligar")
+        )
+    ).scalar_one()
+    assert "código de barras preenchido pelo sistema em 2 variação(ões): " in motivo
+    assert "7908855900595, 7908855913533" in motivo
+
+
+@pytest.mark.asyncio
+async def test_shopee_sem_gtin_e_sem_codigo_conhecido_fica_para_a_pessoa(
+    db, mundo, shopee, monkeypatch
+):
+    """Nenhum código do mesmo celular nem de outra variação: nada é gravado,
+    o anúncio continua ligado e o erro diz qual variação ficou sem código."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "ativo")
+    monkeypatch.setattr(mundo["cfg"], "flex_shopee_escrita", True)
+    shopee.exige_gtin.add("777")
+    shopee.modelos["777"] = [
+        {"model_id": 1, "model_sku": "xx1", "gtin_code": "", "model_name": "Azul,64 GB"},
+    ]
+    await flex_motor.rodar_motor()
+    assert shopee.gravacoes_gtin == []
+    assert shopee.escritas == []
+    est = (await _estados(db))["777"]
+    assert "GTIN code is required" in est.ultimo_erro
+    assert "sem código de barras conhecido para 1 variação(ões): Azul,64 GB" in est.ultimo_erro
+    assert est.proxima_tentativa is not None
+
+
+@pytest.mark.asyncio
+async def test_shopee_so_le_nao_preenche_gtin(db, mundo, shopee, monkeypatch):
+    """Sem a escrita da Shopee ligada, nem o código de barras é gravado."""
+    monkeypatch.setattr(mundo["cfg"], "flex_modo", "ativo")
+    shopee.exige_gtin.add("777")
+    shopee.modelos["777"] = [
+        {"model_id": 1, "model_sku": "b009", "gtin_code": "", "model_name": "Azul"},
+        {"model_id": 2, "model_sku": "b009", "gtin_code": "7908855900595", "model_name": "Azul"},
+    ]
+    await flex_motor.rodar_motor()
+    assert shopee.gravacoes_gtin == []
+    assert [c[0] for c in shopee.chamadas if c[0] != "ler"] == []

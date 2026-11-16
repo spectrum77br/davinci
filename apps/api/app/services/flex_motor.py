@@ -105,7 +105,7 @@ import hashlib
 import re
 import time
 from collections import Counter, defaultdict
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -132,7 +132,7 @@ from app.models import (
     ProductLink,
 )
 from app.models.flex import FLEX_STATUS_ANUNCIO
-from app.services import flex_config, flex_envio, flex_local, flex_textos
+from app.services import flex_config, flex_envio, flex_gtin, flex_local, flex_textos
 from app.services.advisory_lock import SYNC_NAMESPACE
 from app.services.bling_situacoes import (
     SITUACAO_ATENDIDO,
@@ -2328,9 +2328,18 @@ async def _gravar(
 
 
 async def _chamar(
-    cliente: Any, plataforma: str, external_id: str, *, ligar: bool
+    cliente: Any,
+    plataforma: str,
+    external_id: str,
+    *,
+    ligar: bool,
+    gtin: Callable[[], Awaitable[flex_gtin.Preenchimento]] | None = None,
 ) -> flex_api.ResultadoFlex:
-    """UMA mudança de Flex na plataforma (já dentro da trava do anúncio)."""
+    """UMA mudança de Flex na plataforma (já dentro da trava do anúncio).
+
+    Shopee recusou por código de barras vazio (16/11/2026) e veio `gtin`: o
+    sistema preenche as variações vazias (services/flex_gtin) e tenta UMA vez
+    de novo. O que ficou sem código vai no detalhe do erro (a tela mostra)."""
     if plataforma == flex_envio.PLATAFORMA_ML:
         if ligar:
             return await cliente.ligar_flex(external_id)
@@ -2351,20 +2360,36 @@ async def _chamar(
     res = await cliente.atualizar_canal_flex(
         external_id, list(antes.canais or ()), ligar=ligar, canais_flex=canais
     )
+    nota = ""
+    if not res.ok and gtin is not None and flex_gtin.recusa_por_gtin(res.detalhe):
+        feito = await gtin()
+        nota = feito.nota()
+        if feito.gravados:
+            res = await cliente.atualizar_canal_flex(
+                external_id, list(antes.canais or ()), ligar=ligar, canais_flex=canais
+            )
+        if not res.ok and flex_gtin.recusa_por_gtin(res.detalhe):
+            extra = "; ".join(t for t in (nota, feito.faltou()) if t)
+            if extra:
+                res = replace(res, detalhe=f"{res.detalhe} — {extra}"[:500])
     if not res.ok:
-        return await _qual_promocao(cliente, external_id, res)
+        return replace(await _qual_promocao(cliente, external_id, res), nota=nota)
     depois = (await cliente.ler_canais_flex([external_id], canais)).get(external_id)
     if depois is None or not depois.ok:
         return flex_api.ResultadoFlex(
-            flex_api.ERRO, detalhe="a Shopee aceitou, mas a conferência não leu o anúncio"
+            flex_api.ERRO,
+            detalhe="a Shopee aceitou, mas a conferência não leu o anúncio",
+            nota=nota,
         )
     if depois.has_flex is not ligar:
         # A Shopee às vezes leva minutos para MOSTRAR a mudança (12/11/2026:
         # 58202772455 apareceu ligado ~4 min depois). Não é erro: espera — a
         # próxima rodada lê antes de mandar de novo (e, lido como se quer, o
         # aviso some).
-        return flex_api.ResultadoFlex(flex_api.REPETIR, detalhe=SHOPEE_CONFIRMANDO)
-    return flex_api.ResultadoFlex(flex_api.OK, has_flex=ligar, status_http=res.status_http)
+        return flex_api.ResultadoFlex(flex_api.REPETIR, detalhe=SHOPEE_CONFIRMANDO, nota=nota)
+    return flex_api.ResultadoFlex(
+        flex_api.OK, has_flex=ligar, status_http=res.status_http, nota=nota
+    )
 
 
 def _confirmando(res: flex_api.ResultadoFlex) -> bool:
@@ -2653,8 +2678,13 @@ async def _escrever(
                     )
                 )
                 return res.tipo
+        gtin = None
+        if plataforma == flex_envio.PLATAFORMA_SHOPEE:
+            gtin = _preencher_gtin(s, cliente, integration_id, external_id)
         try:
-            res = await _chamar(cliente, plataforma, external_id, ligar=(acao == "ligar"))
+            res = await _chamar(
+                cliente, plataforma, external_id, ligar=(acao == "ligar"), gtin=gtin
+            )
         except Exception as exc:  # noqa: BLE001 — os clientes classificam; isto é defesa
             # Um anúncio com resposta inesperada não derruba as outras
             # escritas da rodada: vira erro com espera, como qualquer outro.
@@ -2676,12 +2706,40 @@ async def _escrever(
                 estado_antes=antes,
                 estado_depois=est.observado if res.ok else antes,
                 saldo_sp=est.saldo_sp,
-                motivo=est.motivo,
+                motivo="; ".join(t for t in (est.motivo, res.nota) if t) or None,
                 erro=None if res.ok else res.texto(),
                 por=por,
             )
         )
         return res.tipo
+
+
+def _preencher_gtin(
+    session: AsyncSession, cliente: Any, integration_id: UUID, external_id: str
+) -> Callable[[], Awaitable[flex_gtin.Preenchimento]]:
+    """O preenchimento do código de barras deste anúncio, para o `_chamar`
+    usar só se a Shopee recusar por GTIN. Os anúncios das outras lojas são
+    lidos com o cliente de cada loja (um por loja)."""
+    clientes: dict[UUID, Any] = {}
+
+    async def _cliente_de(iid: UUID) -> Any:
+        if iid == integration_id:
+            return cliente
+        integ = await session.get(Integration, iid)
+        if integ is None or integ.archived_at is not None:
+            return None
+        return await _cliente(integ, clientes)
+
+    async def _fazer() -> flex_gtin.Preenchimento:
+        return await flex_gtin.preencher(
+            session,
+            cliente,
+            integration_id=integration_id,
+            item_id=external_id,
+            cliente_de=_cliente_de,
+        )
+
+    return _fazer
 
 
 async def _aplicar(

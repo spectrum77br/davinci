@@ -1239,6 +1239,30 @@ class ShopeeClient:
             what="shopee_model_list",
         )
 
+    async def gravar_gtin_variacoes(self, item_id: int | str, modelos: list[dict]) -> dict:
+        """ESCREVE o código de barras de até 50 variações
+        (POST /api/v2/product/update_model; cada uma `{model_id, model_sku,
+        gtin_code, weight?, dimension?}` — o `model_sku` é obrigatório na doc).
+        Só o preenchimento do GTIN do Flex chama (services/flex_gtin), dentro
+        da escrita do Flex da Shopee. Levanta em erro de API."""
+        return await self._call(
+            "POST",
+            "/api/v2/product/update_model",
+            json={"item_id": int(item_id), "model": list(modelos)[:50]},
+            what="shopee_gtin_variacoes",
+        )
+
+    async def gravar_gtin_anuncio(self, item_id: int | str, gtin: str) -> dict:
+        """ESCREVE o código de barras de um anúncio SEM variação
+        (POST /api/v2/product/update_item com só `item_id` e `gtin_code`).
+        Mesmo uso do `gravar_gtin_variacoes`. Levanta em erro de API."""
+        return await self._call(
+            "POST",
+            "/api/v2/product/update_item",
+            json={"item_id": int(item_id), "gtin_code": str(gtin)},
+            what="shopee_gtin_anuncio",
+        )
+
     async def promocoes_dos_anuncios(
         self, item_ids: list[int | str]
     ) -> tuple[dict[int, list[dict]], dict[int, str]]:

@@ -698,13 +698,20 @@ function erroAparte(a: FlexAnuncio): boolean {
 // 12/11/2026: a Shopee recusa ligar o anúncio sem código de barras ("The GTIN
 // code is required for this category") — o erro vinha cru, em inglês, em
 // vermelho. Vira o porquê em português (como a promoção), sem a linha crua.
+// 16/11/2026: o sistema preenche sozinho (services/flex_gtin); o que ele não
+// achou vem no fim do erro, depois de " — ", e entra na frase.
 const GTIN_TXT =
-  'A Shopee pede o código de barras (GTIN/EAN) deste anúncio para mudar o envio. Preencha no Seller Center e clique em Tentar novamente.'
+  'A Shopee pede o código de barras (GTIN/EAN) deste anúncio para mudar o envio. O sistema preenche sozinho com o código que o mesmo celular usa nas outras lojas; o que ele não achar fica para preencher no Seller Center (depois clique em Tentar novamente).'
 function faltaGtin(a: FlexAnuncio | null | undefined): boolean {
   return /\bGTIN\b/i.test(a?.ultimo_erro || '')
 }
+function gtinTexto(a: FlexAnuncio | null | undefined): string {
+  const resto = (a?.ultimo_erro || '').split(' — ').slice(1).join(' — ').trim()
+  if (!resto) return GTIN_TXT
+  return `${GTIN_TXT} ${resto.charAt(0).toUpperCase()}${resto.slice(1)}.`
+}
 function porQue(a: FlexAnuncio): string {
-  if (faltaGtin(a)) return GTIN_TXT
+  if (faltaGtin(a)) return gtinTexto(a)
   return a.motivo_claro || a.motivo || '—'
 }
 function chave(a: FlexAnuncio): string {
@@ -927,7 +934,7 @@ async function aprovar(a: FlexAnuncio) {
     } else if (r.modo === 'piloto' || r.modo === 'ativo')
       toasts.warning(
         'Aprovado, mas ainda não ligou',
-        (faltaGtin(r.estado) ? GTIN_TXT : r.estado?.ultimo_erro) ||
+        (faltaGtin(r.estado) ? gtinTexto(r.estado) : r.estado?.ultimo_erro) ||
           r.estado?.motivo_claro ||
           'Veja o motivo na linha do anúncio. A aprovação continua valendo: o sistema tenta de novo na próxima conferência, ou clique em "Tentar novamente".',
       )

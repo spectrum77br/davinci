@@ -100,8 +100,10 @@ def _acao(tipo: str, plataforma: str, external_id: str, erro: str) -> str:
         )
     if tipo == TIPO_GTIN:
         return (
-            "Preencher o código de barras (GTIN) do anúncio — a Shopee só aceita mexer no "
-            f"anúncio com o GTIN. Depois o sistema desliga sozinho. Onde: {onde}"
+            "Preencher o código de barras (GTIN) das variações que o sistema não achou — a "
+            "Shopee só aceita mexer no anúncio com o GTIN (o sistema já preenche sozinho as "
+            "que têm código do mesmo celular em outra loja). Depois o sistema desliga "
+            f"sozinho. Onde: {onde}"
         )
     canal = "a Entrega Direta" if plataforma == "shopee" else "o Flex"
     return f"Desligar {canal} do anúncio à mão. Onde: {onde}"

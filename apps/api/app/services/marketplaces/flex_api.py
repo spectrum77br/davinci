@@ -85,6 +85,9 @@ class ResultadoFlex:
     # get_item_base_info), já nos nomes da importação — ver `status_shopee`.
     # None = a leitura não diz (o GET do Flex do ML só traz `has_flex`).
     status_anuncio: str | None = field(default=None, compare=False)
+    # O que o sistema fez a mais nesta escrita e vai para a trilha (16/11/2026:
+    # "código de barras preenchido pelo sistema em N variações").
+    nota: str = field(default="", compare=False)
 
     @property
     def ok(self) -> bool:
