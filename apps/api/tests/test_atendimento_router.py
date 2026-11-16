@@ -396,6 +396,59 @@ async def test_paginacao_nao_parte_empate_de_horario(client, db, make_user, pess
 # ─────────────── detalhe ───────────────
 
 
+async def test_detalhe_traz_a_barrada_com_texto_para_a_caixa(
+    client, db, make_user, pessoa, _chaves
+):
+    """16/11/2026 (o Eduardo: "se tivesse sido barrado, escrever a sugestão ali pelo menos na
+    mensagem pra se corrigir, arrumar e anotar no banco"): a BARRADA com texto vem para a caixa
+    de resposta (a tela a escreve na mensagem); a barrada sem texto, não."""
+    _integ, _canal, fila = await _fila(db, make_user)
+    c = fila["aguardando"]
+    rascunho = (
+        await db.execute(
+            select(AtendimentoRascunho).where(AtendimentoRascunho.conversa_id == c.id)
+        )
+    ).scalar_one()
+    rascunho.status, rascunho.texto = "bloqueado", None
+    await db.commit()
+    assert (await client.get(f"{URL}/conversas/{c.id}")).json()["rascunho"] is None
+    rascunho.texto = "Seu pedido saiu hoje."
+    await db.commit()
+    d = (await client.get(f"{URL}/conversas/{c.id}")).json()
+    assert (d["rascunho"]["texto"], d["rascunho"]["status"]) == (
+        "Seu pedido saiu hoje.",
+        "bloqueado",
+    )
+    # A pessoa manda a partir dela: conta como o envio da sugestão (o par e o banco).
+    from app.services.atendimento import enviar
+
+    m = AtendimentoMensagem(
+        conversa_id=c.id,
+        externo_id="envio-da-barrada",
+        autor="loja",
+        origem="davinci_humano",
+        tipo="texto",
+        texto="Seu pedido saiu hoje.",
+        enviada_em=datetime.now(UTC),
+        status="enviada",
+    )
+    db.add(m)
+    await db.flush()
+    await enviar._avaliar_rascunho(
+        db,
+        c,
+        m,
+        rascunho=rascunho,
+        texto_digitado="Seu pedido saiu hoje.",
+        user=pessoa,
+        origem="davinci_humano",
+    )
+    await db.commit()
+    av = (await db.execute(select(AtendimentoAvaliacao))).scalar_one()
+    assert av.acao == "enviou_igual" and av.rascunho_id == rascunho.id
+    assert rascunho.status == "enviado"
+
+
 async def test_detalhe_com_rascunho_contexto_e_envio(client, db, make_user, pessoa, _chaves):
     _integ, canal, fila = await _fila(db, make_user)
     c = fila["aguardando"]

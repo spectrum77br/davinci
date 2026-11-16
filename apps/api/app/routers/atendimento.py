@@ -3624,6 +3624,9 @@ async def detalhe_conversa(
 
     # A sugestão pendente e a hora que ela responde: a do turno ATUAL leva o
     # selo "precisa de pessoa" na tela (14/10/2026, `humano.sugestao_do_turno`).
+    # 16/11/2026 (o Eduardo: "se tivesse sido barrado, escrever a sugestão ali pelo menos na
+    # mensagem pra se corrigir, arrumar e anotar no banco"): a BARRADA com texto também vem para
+    # a caixa (a mais nova vence), com o porquê na linha da dúvida — não só o cartão no fim.
     gatilho_r = aliased(AtendimentoMensagem)
     linha_r = (
         await session.execute(
@@ -3634,7 +3637,13 @@ async def detalhe_conversa(
             .outerjoin(gatilho_r, gatilho_r.id == AtendimentoRascunho.mensagem_gatilho_id)
             .where(
                 AtendimentoRascunho.conversa_id == c.id,
-                AtendimentoRascunho.status == RASCUNHO_PENDENTE,
+                or_(
+                    AtendimentoRascunho.status == RASCUNHO_PENDENTE,
+                    and_(
+                        AtendimentoRascunho.status == RASCUNHO_BLOQUEADO,
+                        func.coalesce(func.trim(AtendimentoRascunho.texto), "") != "",
+                    ),
+                ),
             )
             .order_by(AtendimentoRascunho.created_at.desc())
             .limit(1)

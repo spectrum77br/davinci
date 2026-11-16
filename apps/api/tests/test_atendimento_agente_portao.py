@@ -173,6 +173,26 @@ def test_os_motivos_do_legado_que_continuam_duros(motivo):
     assert s.motivos == [motivo] and s.sem_auto == [motivo] and s.precisa_humano
 
 
+def test_na_virada_o_bloqueado_so_pelo_numero_da_cliente_volta_a_pendente():
+    """16/11/2026 (ATV 12:44, "o produto iria chegar dia 14…"): o número que não veio do sistema
+    (o "dia 14" que a cliente escreveu) é aviso na virada; o BLOQUEADO que o `conferir_saida` pôs
+    por ele deixava o rascunho barrado sem motivo, sem o verificador rodar."""
+    motivo = f"{ia.MOTIVO_NUMERO_INVENTADO} (14)"
+    bloqueado = constantes.RASCUNHO_BLOQUEADO
+    c = _conferida(precisa_humano=True, motivos=[motivo], sem_auto=[motivo], status=bloqueado)
+    s = checagens.separar_avisos(c, modo=MODO_AUTO, pessoa_do_modelo=False, regua=True)
+    assert s.status == RASCUNHO_PENDENTE and not s.precisa_humano and motivo in s.avisos
+    # Fora da virada, com erro do validador, com motivo duro ou sem texto: continua bloqueado.
+    assert checagens.separar_avisos(c, modo=MODO_AUTO, pessoa_do_modelo=False).status == bloqueado
+    for outro in (
+        _conferida(motivos=[motivo], erros=["validador: x"], status=bloqueado),
+        _conferida(motivos=[motivo, "pedido com chamado ou devolução"], status=bloqueado),
+        _conferida(texto="", motivos=[motivo], status=bloqueado),
+    ):
+        depois = checagens.separar_avisos(outro, modo=MODO_AUTO, pessoa_do_modelo=False, regua=True)
+        assert depois.status == bloqueado
+
+
 @pytest.mark.parametrize(
     ("conf", "codigo"),
     [(0.3, checagens.CONFIANCA_ABAIXO_DO_PISO), (0.6, checagens.CONFIANCA_BAIXA), (0.8, None)],
