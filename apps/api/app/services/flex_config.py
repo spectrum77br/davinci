@@ -305,9 +305,11 @@ def pode_escrever(modo_atual: str | None = None) -> bool:
 # Além dos admin, quem vê o Flex (Vinicius, 11/11/2026: "libera para cairo e
 # churchil, vamos ver e começar a arrumar"). Mesma régua da aba Estoque
 # Negativo (routers/estoque): cairo SA pelo e-mail (há outro "cairo"),
-# churchill pelo nome.
+# churchill pelo nome. Desde 16/11/2026 (Eduardo: "coloque flex para aparecer para
+# os users israel, marrocos e londres") também as 3 equipes — cada uma vê e mexe só nas
+# lojas da própria equipe (deps/team_scope no router), como nas outras telas.
 _VEEM_EMAILS = frozenset({"sa.geral@tutamail.com"})
-_VEEM_NOMES = frozenset({"churchill"})
+_VEEM_NOMES = frozenset({"churchill", "israel", "marrocos", "londres"})
 # Quem troca o modo, a escrita da Shopee e o pedido no .sp: admin e o gerente
 # (cairo SA) — a mesma régua do "Informar" da Amazon (admins + o gerente).
 _AJUSTAM_EMAILS = frozenset({"sa.geral@tutamail.com"})
@@ -315,7 +317,8 @@ _AJUSTAM_EMAILS = frozenset({"sa.geral@tutamail.com"})
 
 def pode_ver(user) -> bool:
     """Quem vê o Flex: admin ativo (Eduardo, 05/11/2026: "libere o flex
-    somente para os admin") e, desde 11/11/2026, cairo SA e churchill. De
+    somente para os admin") e, desde 11/11/2026, cairo SA e churchill; desde
+    16/11/2026, também israel, marrocos e londres (cada um nas lojas da sua equipe). De
     05/10 a 05/11 era a lista `flex_usuarios` do .env (heisenberg e thorfinn)."""
     if user is None or getattr(user, "status", None) != UserStatus.ACTIVE:
         return False

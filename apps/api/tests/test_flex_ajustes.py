@@ -345,3 +345,20 @@ async def test_so_quem_ajusta_ve_as_opcoes_de_conta(
     auth_as(churchill)
     c = (await client.get("/api/flex/config")).json()
     assert (c["pode_ajustar"], c["contas_opcoes"]) == (False, [])
+
+
+def test_equipes_veem_o_flex_mas_nao_trocam_as_chaves():
+    """16/11/2026 (Eduardo): israel, marrocos e londres passam a ver o Flex (cada um
+    nas lojas da equipe dele, pelo team_scope do router); trocar as chaves continua
+    só com admin e o gerente."""
+    from app.models import UserStatus
+
+    class U:
+        def __init__(self, nome, status=UserStatus.ACTIVE):
+            self.role, self.email, self.status, self.name = UserRole.USER, "x@y.com", status, nome
+
+    for nome in ("israel", "Marrocos", " londres "):
+        assert flex_config.pode_ver(U(nome)) is True
+        assert flex_config.pode_ajustar(U(nome)) is False
+    assert flex_config.pode_ver(U("joana")) is False
+    assert flex_config.pode_ver(U("israel", status=UserStatus.SUSPENDED)) is False
