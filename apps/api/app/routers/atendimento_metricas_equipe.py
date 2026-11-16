@@ -7,6 +7,7 @@ por dia. Só admin (o dono vê as equipes).
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
@@ -15,8 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.deps.auth import require_admin
 from app.models import User
-from app.routers.atendimento import _so_admin
+from app.routers.atendimento import _nomes_das_lojas, _so_admin, _turnos_das_lojas
 from app.services.atendimento import metricas_equipe
+from app.services.atendimento.escopo import escopo_do_atendimento
 
 # A mesma trava da caixa das outras rotas do atendimento e, por rota, só admin.
 router = APIRouter(
@@ -27,11 +29,18 @@ router = APIRouter(
 @router.get("/equipes")
 async def por_equipe(
     session: Annotated[AsyncSession, Depends(get_session)],
-    _user: Annotated[User, Depends(require_admin)],
+    user: Annotated[User, Depends(require_admin)],
     dias: Annotated[int, Query(ge=1, le=90)] = 7,
 ) -> dict:
-    """As equipes com a aprovação da IA, o que saiu sozinho e o que a equipe mandou; as lojas."""
-    return await metricas_equipe.resumo(session, dias=dias)
+    """As equipes com o que saiu sozinho, o tempo médio de resposta, o no prazo e a aprovação
+    da IA; "sem equipe"; as lojas (16/11/2026: a conta de turnos do GET /metricas, do admin)."""
+    agora = datetime.now(UTC)
+    scope = await escopo_do_atendimento(session, user)
+    turnos = await _turnos_das_lojas(session, scope, agora - timedelta(days=dias), agora)
+    nomes = await _nomes_das_lojas(session, {integ for integ, _, _ in turnos})
+    return await metricas_equipe.resumo(
+        session, dias=dias, agora=agora, turnos=turnos, nomes_das_lojas=nomes
+    )
 
 
 @router.get("/analise")

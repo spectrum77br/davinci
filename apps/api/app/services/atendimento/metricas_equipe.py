@@ -4,15 +4,24 @@ O Eduardo: "em métricas ... por equipe e não mais por loja; traz as %; faz o a
 por dia trazer uma análise geral; deixa a tela mais simples; abrindo o select, as lojas
 todas e as %".
 
-EQUIPE = a divisão da planilha "Separação de contas" (Vendedor 1 = londres, 2 = israel,
-3 = marrocos): as lojas de cada pessoa em `atendimento_lojas_pessoa`, montadas pelo mesmo
-escopo das telas (`escopo.escopo_do_atendimento`). Por loja e por equipe, no período:
+EQUIPE = a divisão da planilha "Separação de contas" (Vendedor 1 = Londres, 2 = Israel,
+3 = Marrocos): a pessoa de cada equipe de vendas (`users.sales_teams` 101/102/103,
+`team_scope.NOMES_EQUIPES`) e as lojas dela em `atendimento_lojas_pessoa`, montadas pelo mesmo
+escopo das telas (`escopo.escopo_do_atendimento`). Quem não é de uma das três (o login da
+empresa com as lojas todas, 16/11/2026) não é equipe. Por loja e por equipe, no período:
 
 - APROVAÇÃO DA IA: das decisões da equipe sobre o rascunho (o juiz, `juiz_edicao`: igual ou
   só forma = acerto; conteúdo ou outra ação = erro; só saudação fica fora), quantas foram
   acerto — a mesma conta da régua do envio sozinho;
 - SAIU SOZINHO: as respostas que a IA mandou (origem `davinci_ia`);
-- PELA EQUIPE: as respostas que a pessoa mandou pelo DaVinci (origem `davinci_humano`).
+- PELA EQUIPE: as respostas que a pessoa mandou pelo DaVinci (origem `davinci_humano`);
+- 16/11/2026 (o Eduardo: "uma lista em cima a % de mensagens enviadas automático, daí a lista
+  mostrando tempo de resposta de cada equipe pegando a média geral, e se abrir mostra
+  específico"): RESPOSTAS = as respostas das lojas no CHAT (pelo DaVinci ou por fora, sem as
+  automáticas nem as que falharam — a régua de `gravar.mensagem_automatica_sql`), SAIU
+  SOZINHO % = as da IA sobre elas; e o TEMPO MÉDIO da primeira resposta (a média de todas as
+  esperas do cliente, a conta de turnos do GET /metricas, `routers.atendimento._turnos_das_lojas`)
+  e o "no prazo".
 
 A ANÁLISE DO DIA: uma vez por dia o modelo do agente lê esses números (ontem e 7 dias), os
 assuntos que mais erram e os motivos curtos do juiz (já sem dado pessoal) e escreve um
@@ -24,6 +33,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -49,25 +59,50 @@ class Numeros:
     acertos: int = 0
     ia_enviou: int = 0
     equipe_enviou: int = 0
+    # 16/11/2026: as respostas das lojas no chat (todas as origens, sem as automáticas) e, dos
+    # turnos do cliente, os minutos de cada primeira resposta, as no prazo e as vencidas.
+    respostas: int = 0
+    tempos: list[float] = field(default_factory=list)
+    no_prazo: int = 0
+    vencidas: int = 0
 
     def somar(self, outro: Numeros) -> None:
         self.decisoes += outro.decisoes
         self.acertos += outro.acertos
         self.ia_enviou += outro.ia_enviou
         self.equipe_enviou += outro.equipe_enviou
+        self.respostas += outro.respostas
+        self.tempos.extend(outro.tempos)
+        self.no_prazo += outro.no_prazo
+        self.vencidas += outro.vencidas
 
     @property
     def aprovacao(self) -> float | None:
         return self.acertos / self.decisoes if self.decisoes else None
 
+    @property
+    def sozinho(self) -> float | None:
+        """Das respostas das lojas no chat, a parte que a IA mandou sozinha."""
+        return min(1.0, self.ia_enviou / self.respostas) if self.respostas else None
+
     def para_json(self) -> dict[str, Any]:
         a = self.aprovacao
+        so = self.sozinho
+        n = len(self.tempos)
+        decididas = n + self.vencidas
         return {
             "decisoes": self.decisoes,
             "acertos": self.acertos,
             "aprovacao": round(a, 4) if a is not None else None,
             "ia_enviou": self.ia_enviou,
             "equipe_enviou": self.equipe_enviou,
+            "respostas": self.respostas,
+            # Por fora do DaVinci (Duoke, a central da plataforma).
+            "fora": max(0, self.respostas - self.ia_enviou - self.equipe_enviou),
+            "pct_sozinho": round(so, 4) if so is not None else None,
+            "respondidas": n,
+            "tempo_medio_min": round(sum(self.tempos) / n, 1) if n else None,
+            "pct_no_prazo": round(100 * self.no_prazo / decididas, 1) if decididas else None,
         }
 
 
@@ -76,23 +111,36 @@ class Equipe:
     user_id: UUID
     nome: str
     integration_ids: set[UUID] = field(default_factory=set)
+    numero: int | None = None
 
 
 async def equipes(session: AsyncSession) -> list[Equipe]:
-    """As pessoas com lojas na planilha (`atendimento_lojas_pessoa`) e as integrações delas."""
+    """As equipes do atendimento — Londres, Israel e Marrocos (`users.sales_teams`) — e as
+    integrações das lojas das pessoas delas (`atendimento_lojas_pessoa`), na ordem do número.
+
+    16/11/2026: a tela mostrava o login "cairo sa" (as 165 lojas, sem equipe de vendas) como
+    equipe. Só é equipe quem é de uma das três; duas pessoas da mesma equipe somam as lojas.
+    """
+    from app.deps.team_scope import NOMES_EQUIPES
     from app.models import User
     from app.models.atendimento_lojas_pessoa import AtendimentoLojaPessoa
     from app.services.atendimento import escopo
 
     ids = (await session.scalars(select(AtendimentoLojaPessoa.user_id).distinct())).all()
-    saida: list[Equipe] = []
+    por_numero: dict[int, Equipe] = {}
     for user in (await session.scalars(select(User).where(User.id.in_(ids)))).all():
+        numeros = [n for n in (getattr(user, "sales_teams", None) or []) if n in NOMES_EQUIPES]
+        if not numeros:
+            continue  # sem equipe de vendas (o login da empresa) não é equipe
         scope = await escopo.escopo_do_atendimento(session, user)
         if scope.unrestricted:
             continue  # admin com lojas marcadas não é equipe
-        nome = (getattr(user, "name", None) or getattr(user, "email", None) or "equipe").strip()
-        saida.append(Equipe(user.id, nome, set(scope.integration_ids)))
-    return sorted(saida, key=lambda e: e.nome.casefold())
+        numero = min(numeros)
+        equipe = por_numero.setdefault(
+            numero, Equipe(user.id, NOMES_EQUIPES[numero], numero=numero)
+        )
+        equipe.integration_ids |= set(scope.integration_ids)
+    return [por_numero[n] for n in sorted(por_numero)]
 
 
 async def numeros_por_loja(
@@ -101,6 +149,7 @@ async def numeros_por_loja(
     """Por integração: as decisões julgadas, os acertos e as respostas da IA e da equipe."""
     from app.models import AtendimentoConversa, AtendimentoMensagem
     from app.models.atendimento import AtendimentoJulgamento as J
+    from app.services.atendimento import gravar, separa_email
 
     saida: dict[UUID | None, Numeros] = defaultdict(Numeros)
     conta = (
@@ -123,36 +172,64 @@ async def numeros_por_loja(
     for integ, d, a in conta:
         saida[integ].decisoes += int(d or 0)
         saida[integ].acertos += int(a or 0)
+    # As respostas das lojas no CHAT (16/11/2026): a mesma régua da fila e do tempo de resposta
+    # — a mensagem automática (o robô e as campanhas do Duoke, os cartões da plataforma, as
+    # automações do DaVinci) não é resposta; a que falhou não saiu; o e-mail fica na aba dele.
     m, c = AtendimentoMensagem, AtendimentoConversa
+    momento = func.coalesce(m.enviada_em, m.created_at)
     envios = (
         await session.execute(
             select(
                 c.integration_id,
                 func.count().filter(m.origem == constantes.ORIGEM_IA).label("ia"),
                 func.count().filter(m.origem == constantes.ORIGEM_HUMANO).label("eq"),
+                func.count().label("todas"),
             )
             .join(c, c.id == m.conversa_id)
             .where(
-                m.origem.in_((constantes.ORIGEM_IA, constantes.ORIGEM_HUMANO)),
-                m.enviada_em >= desde,
-                m.enviada_em < ate,
+                m.autor == constantes.AUTOR_LOJA,
+                m.status != constantes.MSG_FALHOU,
+                ~gravar.mensagem_automatica_sql(m.texto, m.payload),
+                separa_email.na_caixa_sql(c),
+                momento >= desde,
+                momento < ate,
             )
             .group_by(c.integration_id)
         )
     ).all()
-    for integ, ia, eq in envios:
+    for integ, ia, eq, todas in envios:
         saida[integ].ia_enviou += int(ia or 0)
         saida[integ].equipe_enviou += int(eq or 0)
+        saida[integ].respostas += int(todas or 0)
     return dict(saida)
 
 
-async def resumo(session: AsyncSession, *, dias: int, agora: datetime | None = None) -> dict:
-    """As equipes (com as % somadas das lojas delas) e as lojas todas, no período."""
+async def resumo(
+    session: AsyncSession,
+    *,
+    dias: int,
+    agora: datetime | None = None,
+    turnos: Mapping[tuple[UUID | None, str, UUID | None], Mapping[str, Any]] | None = None,
+    nomes_das_lojas: Mapping[UUID, str] | None = None,
+) -> dict:
+    """As equipes (com as % somadas das lojas delas), "sem equipe" e as lojas todas, no período.
+
+    `turnos` = os de `routers.atendimento._turnos_das_lojas` no mesmo período (o tempo de
+    resposta; sem eles, nada de tempo); `nomes_das_lojas` = o nome de hoje de cada loja (o da
+    Caixa), no lugar do nome da integração.
+    """
     from app.models import Integration
 
     agora = agora or datetime.now(UTC)
     desde = agora - timedelta(days=dias)
     por_loja = await numeros_por_loja(session, desde, agora)
+    for (integ, _plataforma, _robo), t in (turnos or {}).items():
+        if integ is None:
+            continue  # a loja do robô (sem integração) não é de equipe
+        n = por_loja.setdefault(integ, Numeros())
+        n.tempos.extend(float(x) for x in t.get("tempos") or [])
+        n.no_prazo += int(t.get("no_prazo") or 0)
+        n.vencidas += int(t.get("vencidas") or 0)
     times = await equipes(session)
     dono: dict[UUID, str] = {}
     for t in times:
@@ -177,13 +254,13 @@ async def resumo(session: AsyncSession, *, dias: int, agora: datetime | None = N
         lojas.append(
             {
                 "integration_id": str(i),
-                "loja": nome or "—",
+                "loja": (nomes_das_lojas or {}).get(i) or nome or "—",
                 "plataforma": getattr(plat, "value", plat),
                 "equipe": dono.get(i),
                 **n.para_json(),
             }
         )
-    lojas.sort(key=lambda x: (x["equipe"] or "~", -(x["decisoes"] or 0)))
+    lojas.sort(key=lambda x: (x["equipe"] or "~", -(x["respostas"] or 0), -(x["decisoes"] or 0)))
     total = Numeros()
     saida_times = []
     for t in times:
@@ -192,9 +269,20 @@ async def resumo(session: AsyncSession, *, dias: int, agora: datetime | None = N
             if i in por_loja:
                 soma.somar(por_loja[i])
         saida_times.append({"equipe": t.nome, "lojas": len(t.integration_ids), **soma.para_json()})
-    for n in por_loja.values():
+    sem = Numeros()
+    sem_lojas = 0
+    for i, n in por_loja.items():
         total.somar(n)
-    return {"dias": dias, "equipes": saida_times, "lojas": lojas, "total": total.para_json()}
+        if i is not None and i not in dono:
+            sem.somar(n)
+            sem_lojas += 1
+    return {
+        "dias": dias,
+        "equipes": saida_times,
+        "sem_equipe": {"lojas": sem_lojas, **sem.para_json()},
+        "lojas": lojas,
+        "total": total.para_json(),
+    }
 
 
 # ── A análise do dia ────────────────────────────────────────────────────────────

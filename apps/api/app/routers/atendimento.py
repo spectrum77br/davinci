@@ -6310,29 +6310,13 @@ def _p90(valores: list[float]) -> float:
     return ordenados[max(0, ceil(0.9 * len(ordenados)) - 1)]
 
 
-async def _metricas_lojas(
+async def _turnos_das_lojas(
     session: AsyncSession, scope: TeamScope, desde: datetime, agora: datetime
-) -> list[MetricaLojaOut]:
-    """Primeira resposta por loja, em "turnos" do cliente.
-
-    Um turno começa quando o cliente fala e a última palavra era da loja (ou
-    a conversa começou), junta as mensagens seguidas dele, e termina na
-    primeira resposta da loja que não falhou — pelo DaVinci ou por fora.
-    Conta o turno que COMEÇOU no período. `pct_no_prazo` é sobre os turnos
-    já decididos: respondidos, e os sem resposta cujo prazo já venceu (o
-    que ainda está no prazo não é nem acerto nem erro).
-
-    Mensagem automática não é resposta (05/10/2026) — a MESMA régua da fila
-    "Falta responder" (`gravar.recalcular`): o robô e as campanhas do Duoke,
-    a campanha que começa pelo usuário do comprador ("fulano já segue nossa
-    loja"), a figurinha da campanha e os cartões da Shopee (pelo `payload`) e
-    a que o DaVinci manda sozinho fora do /atendimento (senha da devolução,
-    e-mail de logística da Amazon): `gravar.mensagem_automatica_sql`, no
-    próprio SQL (nem chega ao Python). Medido em produção (7 dias): eram automáticas
-    1.921 das 2.648 primeiras respostas da Shopee, e a mediana de 1 min
-    escondia a de quem responde de verdade (com a régua inteira: Shopee
-    ~297 min e 48,6% no prazo; TikTok ~753 min e 88,8%).
-    """
+) -> dict[tuple[UUID | None, str, UUID | None], dict[str, Any]]:
+    """Os turnos do cliente por loja, a conta de `_metricas_lojas` (ver lá): por (integração,
+    plataforma, canal do robô), {"conta", "recebidas", "tempos" (os minutos de cada primeira
+    resposta), "no_prazo", "vencidas"}. A aba Métricas das equipes (16/11/2026) soma os
+    `tempos` de cada equipe para o tempo médio (`metricas_equipe.resumo`)."""
     # Só o CHAT (13/10/2026): o e-mail da ponte mora na aba E-mail e não
     # entra no tempo de resposta das lojas (`separa_email`).
     filtro = [AtendimentoConversa.ultima_mensagem_em >= desde, separa_email.na_caixa_sql()]
@@ -6350,7 +6334,7 @@ async def _metricas_lojas(
     ).where(*filtro)
     conversas = {row.id: row for row in (await session.execute(consulta_conversas)).all()}
     if not conversas:
-        return []
+        return {}
 
     momento = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
     linhas = (
@@ -6415,6 +6399,35 @@ async def _metricas_lojas(
             loja["recebidas"] += 1
             loja["vencidas"] += int(agora - inicio > prazo)
 
+    return lojas
+
+
+async def _metricas_lojas(
+    session: AsyncSession, scope: TeamScope, desde: datetime, agora: datetime
+) -> list[MetricaLojaOut]:
+    """Primeira resposta por loja, em "turnos" do cliente.
+
+    Um turno começa quando o cliente fala e a última palavra era da loja (ou
+    a conversa começou), junta as mensagens seguidas dele, e termina na
+    primeira resposta da loja que não falhou — pelo DaVinci ou por fora.
+    Conta o turno que COMEÇOU no período. `pct_no_prazo` é sobre os turnos
+    já decididos: respondidos, e os sem resposta cujo prazo já venceu (o
+    que ainda está no prazo não é nem acerto nem erro).
+
+    Mensagem automática não é resposta (05/10/2026) — a MESMA régua da fila
+    "Falta responder" (`gravar.recalcular`): o robô e as campanhas do Duoke,
+    a campanha que começa pelo usuário do comprador ("fulano já segue nossa
+    loja"), a figurinha da campanha e os cartões da Shopee (pelo `payload`) e
+    a que o DaVinci manda sozinho fora do /atendimento (senha da devolução,
+    e-mail de logística da Amazon): `gravar.mensagem_automatica_sql`, no
+    próprio SQL (nem chega ao Python). Medido em produção (7 dias): eram automáticas
+    1.921 das 2.648 primeiras respostas da Shopee, e a mediana de 1 min
+    escondia a de quem responde de verdade (com a régua inteira: Shopee
+    ~297 min e 48,6% no prazo; TikTok ~753 min e 88,8%).
+    """
+    lojas = await _turnos_das_lojas(session, scope, desde, agora)
+    if not lojas:
+        return []
     # O nome de HOJE da loja (P2), não o retrato gravado na conversa.
     nomes = await _nomes_das_lojas(session, {integration_id for integration_id, _, _ in lojas})
     saida: list[MetricaLojaOut] = []
