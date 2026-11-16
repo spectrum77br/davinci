@@ -812,6 +812,8 @@ BONUS_MESMO_ANUNCIO_BANCO = 0.75
 BONUS_MESMA_LOJA_BANCO = 0.25
 PISO_RANK_SEM_PALAVRA = 0.05
 MAX_CANDIDATOS_BANCO = 60
+# As do mesmo modelo ou anúncio com as palavras da pergunta (16/11/2026, ver `buscar`).
+MAX_CANDIDATOS_DO_PRODUTO = 30
 MAX_SEM_PALAVRA = 12
 # O que só vale para o PRODUTO (a ficha): a resposta de outra loja sobre o mesmo produto
 # pode ser lastro. O resto (o que vem na caixa, estoque, preço, prazo, política) varia por
@@ -901,6 +903,25 @@ async def buscar(
             )
         ).all():
             achados[linha.id] = (linha, float(linha.rank or 0.0))
+    if qualquer is not None and (modelos or itens):
+        # 16/11/2026 (o Eduardo: "a lógica de busca está errada?"): as do MESMO modelo ou anúncio
+        # com as palavras da pergunta entram sempre. Na busca geral, a palavra comum
+        # ("carregador", "cartão", "alto-falante") enchia os `MAX_CANDIDATOS_BANCO` lugares com
+        # outros modelos, e a resposta da equipe para ESTE modelo nem chegava à nota (o "o WP60
+        # vem com carregador?" com 7 respostas do WP60 no banco virou "falta o dado").
+        do_produto = [t.item_id.in_(itens)] if itens else []
+        if modelos:
+            do_produto.append(t.modelos.op("?|")(func.cast(modelos, ARRAY(String))))
+        rank = func.ts_rank_cd(t.tsv, qualquer)
+        for linha in (
+            await session.execute(
+                select(*colunas, rank.label("rank"))
+                .where(*base, t.tsv.op("@@")(qualquer), or_(*do_produto))
+                .order_by(rank.desc(), t.respondido_em.desc(), t.id)
+                .limit(MAX_CANDIDATOS_DO_PRODUTO)
+            )
+        ).all():
+            achados.setdefault(linha.id, (linha, float(linha.rank or 0.0)))
     if tipo and tipo != tipos_pergunta.INDEFINIDO and (modelos or itens):
         do_caso = [t.item_id.in_(itens)] if itens else []
         if modelos:
@@ -975,6 +996,157 @@ async def buscar(
     return saida
 
 
+# ── A característica no MESMO modelo (16/11/2026) ─────────────────────────────
+#
+# O teste de 16/11 (129 conversas): dos casos de produto que não saíram, a resposta da equipe para o
+# MESMO modelo estava no banco e a busca não trazia — "o WP60 vem com carregador?" (7 do WP60),
+# "quantos alto-falantes o F110?" (6 do F110: "alto-falante estéreo, 128 dB"). A busca por palavras
+# no banco inteiro enche os lugares com outros modelos ("celular", "tem"), e a grafia não casa
+# ("altofalante" × "alto-falante", "chip virtual" × "eSIM"). Aqui: a CARACTERÍSTICA que a pergunta
+# quer (os grupos abaixo, com sinônimos e grafias) nas respostas da equipe sobre ESTE modelo, de
+# qualquer plataforma (o produto é o mesmo em toda loja).
+CARACTERISTICAS: dict[str, re.Pattern[str]] = {
+    nome: re.compile(padrao)
+    for nome, padrao in {
+        "radio": r"\bradio\b|\bfm\b",
+        "esim": r"\besim\b|\be sim\b|chip virtual|chip digital",
+        "cartao_memoria": r"cartao de memoria|cartao sd|micro ?sd|memoria expansivel|cartao",
+        "alto_falante": r"alto ?falante|auto ?falante|caixa de som|estereo|\bsom\b",
+        "carregador": r"carregador|\bfonte\b|\bcabo\b",
+        "capinha": r"capinha|\bcapa\b|\bcase\b|pelicula",
+        "rede_5g": r"\b5g\b|\b4g\b",
+        "nfc": r"\bnfc\b|aproximacao",
+        "atualizacao": r"atualiza|versao do android|\bandroid\b",
+        "bateria": r"bateria|\bmah\b",
+        "camera": r"camera|\bmp\b|megapixel",
+        "tela": r"\btela\b|polegada",
+        "agua": r"\bagua\b|ip6[78]|prova d|molhar",
+        "dois_chips": r"dois chips?|2 chips?|dual ?chip|duas entradas",
+        "fone": r"\bfone",
+        "cadeado": r"\btsa\b|cadeado",
+        "expansivel": r"expansiv|ziper",
+        "rodas": r"\brodas?\b|rodinhas?",
+        "peso": r"\bkg\b|quilo|\bpeso\b",
+        "medidas": r"medida|\bcm\b|dimens",
+        "processador": r"processador|helio|unisoc|snapdragon|dimensity|tiger",
+        "memoria": r"\bram\b|\brom\b|armazenamento|\bgb\b",
+        "garantia": r"garantia",
+        "nota_fiscal": r"nota fiscal|\bnf\b",
+    }.items()
+}
+MAX_DO_MODELO_SOBRE = 4
+MAX_LINHAS_DO_MODELO = 2500
+
+
+def _sem_acento(texto: str | None) -> str:
+    import unicodedata
+
+    t = unicodedata.normalize("NFKD", str(texto or "").casefold())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", t).split())
+
+
+def _regex_dos_codigos(codigos: Sequence[str]) -> str:
+    """O regex do Postgres (`~*`) do código do modelo como palavra inteira: P8, mas não P80."""
+    return r"\m(" + "|".join(re.escape(c) for c in codigos) + r")\M"
+
+
+def caracteristicas_de(texto: str | None) -> frozenset[str]:
+    """As características de produto que o texto menciona (os grupos de `CARACTERISTICAS`). PURA."""
+    plano = _sem_acento(texto)
+    return frozenset(nome for nome, padrao in CARACTERISTICAS.items() if padrao.search(plano))
+
+
+async def do_modelo_sobre(
+    session: AsyncSession,
+    *,
+    pergunta: str,
+    modelos: Collection[str],
+    integration_id: UUID | None,
+    conversa_id: UUID | None,
+    as_of: datetime,
+) -> list[dict]:
+    """As respostas da equipe sobre ESTE modelo que falam da característica que a pergunta quer
+    (ver acima), no formato de `buscar` (`mesmo_modelo` = True), as que tocam mais
+    características da pergunta primeiro; as mais novas no empate. Sem característica ou sem
+    modelo, nada. Só lê."""
+    quer = caracteristicas_de(pergunta)
+    codigos = sorted({str(m).upper() for m in modelos if m})
+    if not quer or not codigos:
+        return []
+    if as_of.tzinfo is None:
+        as_of = as_of.replace(tzinfo=UTC)
+    t = AtendimentoResposta
+    linhas = (
+        await session.execute(
+            select(
+                t.id,
+                t.pergunta,
+                t.resposta,
+                t.tipo,
+                t.fonte,
+                t.respondido_em,
+                t.integration_id,
+                t.item_id,
+            )
+            .where(
+                t.status == STATUS_ATIVA,
+                t.respondido_em < as_of,
+                or_(
+                    t.modelos.op("?|")(func.cast(codigos, ARRAY(String))),
+                    # A resposta que CITA o modelo ("os modelos P7 e P8 são expansíveis"), mesmo
+                    # marcada pelo título de outro anúncio.
+                    t.resposta.op("~*")(_regex_dos_codigos(codigos)),
+                ),
+                *((t.conversa_id.is_distinct_from(conversa_id),) if conversa_id else ()),
+            )
+            .order_by(t.respondido_em.desc(), t.id)
+            .limit(MAX_LINHAS_DO_MODELO)
+        )
+    ).all()
+    candidatos = []
+    for linha in linhas:
+        if pares.tem_dado_pessoal(linha.pergunta) or pares.tem_dado_pessoal(linha.resposta):
+            continue
+        if pares.ensina_o_que_o_agente_nao_faz(linha.resposta) or sem_conteudo(linha.resposta):
+            continue
+        # A característica tem de estar na RESPOSTA da equipe (a pergunta só ajuda a desempatar).
+        na_resposta = caracteristicas_de(linha.resposta) & quer
+        if not na_resposta:
+            continue
+        na_pergunta = caracteristicas_de(linha.pergunta) & quer
+        nota = 2 * len(na_resposta) + len(na_pergunta)
+        candidatos.append((-nota, -linha.respondido_em.timestamp(), linha.id, linha))
+    candidatos.sort(key=lambda c: c[:3])
+    saida: list[dict] = []
+    vistas: set[str] = set()
+    for _nota, _quando, _id, linha in candidatos:
+        chave = " ".join(linha.resposta.casefold().split())
+        if chave in vistas:
+            continue
+        vistas.add(chave)
+        idade = max(0.0, (as_of - linha.respondido_em).total_seconds() / 86400)
+        saida.append(
+            {
+                "id": f"b{linha.id}",
+                "pergunta": linha.pergunta,
+                "resposta": linha.resposta,
+                "tipo": linha.tipo,
+                "fonte": linha.fonte,
+                "idade_dias": int(idade),
+                "item_id": linha.item_id,
+                "integration_id": linha.integration_id,
+                "mesmo_anuncio": False,
+                "mesmo_modelo": True,
+                "mesma_loja": integration_id is not None and linha.integration_id == integration_id,
+                "mesmo_tipo": False,
+            }
+        )
+        if len(saida) >= MAX_DO_MODELO_SOBRE:
+            break
+    return saida
+
+
 async def exemplos_do_turno(
     session: AsyncSession,
     *,
@@ -1019,7 +1191,23 @@ async def exemplos_do_turno(
     }
     plat = ficha_svc.plataforma_do_catalogo(plataforma)
     mesmos = await pares._anuncios_do_mesmo_produto(session, plat, integration_id, itens)
-    primeiros = await buscar(session, **comum, so_itens=mesmos) if mesmos else []
+    # 16/11/2026: a característica que o cliente quer nas respostas da equipe sobre ESTE modelo.
+    do_modelo = (
+        await do_modelo_sobre(
+            session,
+            pergunta=consulta,
+            modelos=modelos,
+            integration_id=integration_id,
+            conversa_id=conversa_id,
+            as_of=as_of,
+        )
+        if virada
+        else []
+    )
+    primeiros = [
+        *do_modelo,
+        *(await buscar(session, **comum, so_itens=mesmos) if mesmos else []),
+    ]
     gerais = await buscar(session, **comum)
     vistos: set[str] = set()
     achados = []

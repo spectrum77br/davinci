@@ -1028,3 +1028,58 @@ async def test_reclamacao_presa_num_tipo_com_padrao_responde_e_marca_mesmo_sem_i
     ctx2 = _ctx()
     assert not await _soltar(ctx2, [constantes.ACAO_JURIDICO_FRAUDE_OFENSA])
     assert not ctx2.responde_e_marca
+
+
+# ── A característica no MESMO modelo (16/11/2026) ─────────────────────────────
+
+
+def test_as_caracteristicas_da_pergunta():
+    c = banco_respostas.caracteristicas_de
+    assert c("Boa tarde esse celular tem quantos altofalante") == {"alto_falante"}
+    assert c("Funciona chip virtual?") == {"esim"}
+    assert c("Tem rádio am e fm?") == {"radio"}
+    assert c("Esse modelo é expansível e com rodas removíveis?") == {"expansivel", "rodas"}
+    assert c("Vem com o carregador?") == {"carregador"}
+    assert c("obrigado!") == frozenset()
+
+
+async def test_a_busca_traz_a_resposta_do_mesmo_modelo_sobre_a_caracteristica(
+    db: AsyncSession, make_user
+):
+    conversa = await _conversa(db, make_user, externo_id="dm1")
+    loja = conversa.integration_id
+    await _resposta(db, integ=loja, modelos=("F110",), resposta="Alto-falante estéreo, 128 dB!")
+    await _resposta(db, integ=loja, modelos=("F110",), resposta="Sim, tem NFC no Pro!")
+    await _resposta(db, integ=loja, modelos=("A17",), resposta="Alto-falante simples.")
+    # Marcada pelo título de outro anúncio, mas a resposta CITA o modelo.
+    await _resposta(
+        db,
+        integ=loja,
+        modelos=(),
+        tipo="espec_mala",
+        resposta="Os modelos P7 e P8 têm rodas removíveis.",
+    )
+    agora = datetime.now(UTC)
+    achou = await banco_respostas.do_modelo_sobre(
+        db,
+        pergunta="Boa tarde esse celular tem quantos altofalante",
+        modelos={"F110"},
+        integration_id=loja,
+        conversa_id=None,
+        as_of=agora,
+    )
+    assert [a["resposta"] for a in achou] == ["Alto-falante estéreo, 128 dB!"]
+    assert achou[0]["mesmo_modelo"] is True and achou[0]["id"].startswith("b")
+    p8 = await banco_respostas.do_modelo_sobre(
+        db,
+        pergunta="Esse modelo tem rodas removíveis?",
+        modelos={"P8"},
+        integration_id=loja,
+        conversa_id=None,
+        as_of=agora,
+    )
+    assert [a["resposta"] for a in p8] == ["Os modelos P7 e P8 têm rodas removíveis."]
+    # Sem característica na pergunta, ou sem modelo, nada.
+    assert not await banco_respostas.do_modelo_sobre(
+        db, pergunta="oi", modelos={"F110"}, integration_id=loja, conversa_id=None, as_of=agora
+    )

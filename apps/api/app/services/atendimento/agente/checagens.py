@@ -7534,6 +7534,9 @@ def marcas_das_fichas(dados: Sequence[Any]) -> list[str]:
 # ── 6b. Os nomes internos da loja ─────────────────────────────────────────
 
 ROTULO_INTERNO = "rotulo_interno"
+# O começo do motivo da fala do sistema/cadastro da loja (a virada só avisa:
+# `_motivos_que_a_virada_solta`).
+_FALA_DO_SISTEMA_DA_LOJA = "fala do sistema/cadastro da loja"
 # O que é do cadastro e nunca vai ao cliente: a unidade devolvida/avariada
 # ("AVULSO SALVADO", revisão de 20/10/2026). "Usado" e "avulso" não entram:
 # há anúncio de usados e "peças avulsas" é resposta (fato candidato).
@@ -7593,7 +7596,7 @@ def conferir_nomes_internos(texto: str, nomes_da_loja: Sequence[str] = ()) -> li
     if m := _SISTEMAS_INTERNOS.search(plano):
         saida.append(_bloqueia(ROTULO_INTERNO, f'cita um sistema interno da loja ("{m.group(0)}")'))
     elif m := _O_SISTEMA_DA_LOJA.search(plano):
-        saida.append(_suave(ROTULO_INTERNO, f'fala do sistema/cadastro da loja ("{m.group(0)}")'))
+        saida.append(_suave(ROTULO_INTERNO, f'{_FALA_DO_SISTEMA_DA_LOJA} ("{m.group(0)}")'))
     if m := _OUTRO_CLIENTE.search(plano):
         saida.append(_suave(ROTULO_INTERNO, f'fala de outro cliente ("{m.group(0)}")'))
     for nome in dict.fromkeys(_plano(n).strip() for n in nomes_da_loja if isinstance(n, str)):
@@ -13638,8 +13641,23 @@ def _motivos_que_a_virada_solta() -> tuple[frozenset[str], tuple[str, ...]]:
     from app.services.atendimento import ia as ia_svc
 
     return (
-        frozenset({ia_svc.MOTIVO_RESPOSTA_DE_GARANTIA, ia_svc.MOTIVO_RECUSA_DE_DIREITO}),
-        (ia_svc.MOTIVO_NUMERO_INVENTADO, _INSISTIU_EM_PESSOA),
+        frozenset(
+            {
+                ia_svc.MOTIVO_RESPOSTA_DE_GARANTIA,
+                ia_svc.MOTIVO_RECUSA_DE_DIREITO,
+                # 16/11/2026 (o exame das 129 conversas): a resposta igual à da equipe ("para
+                # receber o seu dinheiro de volta, abra a devolução") ficava presa pela lista
+                # fechada do relato de defeito; o verificador lê o texto.
+                MOTIVO_DEFEITO_FORA_DA_ORIENTACAO,
+            }
+        ),
+        (
+            ia_svc.MOTIVO_NUMERO_INVENTADO,
+            _INSISTIU_EM_PESSOA,
+            # 16/11/2026: o "no nosso sistema consta como cancelado" é como a equipe fala; o NOME
+            # de sistema interno (Bling, Upseller, Duoke) continua bloqueado.
+            _FALA_DO_SISTEMA_DA_LOJA,
+        ),
     )
 
 

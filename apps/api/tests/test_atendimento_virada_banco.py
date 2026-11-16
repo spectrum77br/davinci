@@ -681,3 +681,15 @@ async def test_opcao_b_so_nas_acoes_de_reclamacao():
     acoes = [constantes.ACAO_ANALISAR_EVIDENCIA, constantes.ACAO_DADO_INDISPONIVEL]
     assert not await _soltar(ctx2, _reclamacao(), cliente2, acoes=acoes)
     assert set(confere_banco.ACOES_DO_PADRAO) <= set(constantes.ACOES_PESSOA)
+
+
+def test_na_virada_o_defeito_e_o_sistema_da_loja_so_avisam():
+    from app.services.atendimento.agente.checagens import (
+        MOTIVO_DEFEITO_FORA_DA_ORIENTACAO,
+        motivo_que_a_virada_solta,
+    )
+
+    assert motivo_que_a_virada_solta(MOTIVO_DEFEITO_FORA_DA_ORIENTACAO)
+    assert motivo_que_a_virada_solta('fala do sistema/cadastro da loja ("no nosso sistema")')
+    # O nome de sistema interno continua duro.
+    assert not motivo_que_a_virada_solta('cita um sistema interno da loja ("Bling")')
