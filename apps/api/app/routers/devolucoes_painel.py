@@ -26,17 +26,33 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission
 from app.deps.team_scope import resolve_team_scope
-from app.models import Chamado, DevolucaoAnexo, DevolucaoRastreio, Devolution, User, UserRole
+from app.models import (
+    BlingOrder,
+    Chamado,
+    ChamadoMensagem,
+    DevolucaoAnexo,
+    DevolucaoRastreio,
+    Devolution,
+    User,
+    UserRole,
+)
 from app.routers import devolutions as antigo
 from app.schemas.devolutions import AcompanhamentoItemOut
+from app.services import chamados as chamados_svc
+from app.services import chamados_devolucao as cd
+from app.services import (
+    chamados_leitura,
+    devolucao_mensagem_comprador,
+    devolucao_prazo_acompanhamento,
+)
+from app.services import devolucao_conferencia as conferencia
 from app.services import devolucao_painel as contas
-from app.services import devolucao_prazo_acompanhamento
 from app.services.devolution_stock_return import status_estoque
 
 logger = structlog.get_logger()
@@ -91,6 +107,9 @@ class PainelChamadoOut(BaseModel):
     numero: str | None = None
     resolvido: bool = False
     resolvido_at: datetime | None = None
+    # Estado da contestação (mensagem `abertura`): pendente, enviada, segurada
+    # (a IA segurou — "Onde agir hoje"), registrada (cancelada / sem API)…
+    abertura_status: str | None = None
 
 
 class PainelContaOut(BaseModel):
@@ -131,6 +150,8 @@ class PainelItemOut(AcompanhamentoItemOut):
     resolvido_at: datetime | None = None
     resolvido_como: str | None = None
     resolvido_por_nome: str | None = None
+    # "Abrir chamado: Sim/Não" da janela: None = automático pelo motivo.
+    abrir_chamado: bool | None = None
     # 1ª linha do pedido na lista (as outras repetem os dados do pedido).
     primeira_do_pedido: bool = True
     linhas_do_pedido: int = 1
@@ -286,6 +307,23 @@ async def _chamados_por_pedido(
     return out
 
 
+async def _status_das_aberturas(session: AsyncSession, chamado_ids: list[UUID]) -> dict[UUID, str]:
+    """Status da contestação (a `abertura` mais recente) de cada chamado."""
+    if not chamado_ids:
+        return {}
+    rows = (
+        await session.execute(
+            select(ChamadoMensagem.chamado_id, ChamadoMensagem.status)
+            .where(
+                ChamadoMensagem.chamado_id.in_(chamado_ids),
+                ChamadoMensagem.tipo == cd.TIPO_ABERTURA,
+            )
+            .order_by(ChamadoMensagem.created_at)
+        )
+    ).all()
+    return dict(rows)
+
+
 def _chamado_da_conta(chamados: list[Chamado]) -> tuple[bool, float | None]:
     """(tem chamado concluído, valor do concluído mais recente com valor)."""
     for ch in chamados:
@@ -301,12 +339,18 @@ async def montar_itens(
     mostrar: Literal["abertas", "resolvidas", "todas", "pedido"],
     lojas: set[str] | None,
     pedido: str | None = None,
+    desde: date | None = None,
 ) -> list[PainelItemOut]:
-    rows = await antigo.acompanhamento_rows(session, lojas=lojas, painel=mostrar, pedido=pedido)
+    rows = await antigo.acompanhamento_rows(
+        session, lojas=lojas, painel=mostrar, pedido=pedido, resolvidas_desde=desde
+    )
     pedidos = {(r.get("pedido_bling") or "").strip() for r in rows} - {""}
     lancs = await _lancamentos_por_pedido(session, pedidos)
     anexos = await _anexos_por_lancamento(session, [d.id for ds in lancs.values() for d in ds])
     chamados = await _chamados_por_pedido(session, pedidos)
+    aberturas = await _status_das_aberturas(
+        session, [chs[0].id for chs in chamados.values() if chs]
+    )
     admin = _admin(user)
     agora = datetime.now(UTC)
     hoje = agora.astimezone(SAO_PAULO).date()
@@ -408,7 +452,11 @@ async def montar_itens(
         if chs:
             ch = chs[0]
             d["chamado"] = PainelChamadoOut(
-                id=ch.id, numero=ch.chamado, resolvido=ch.resolvido, resolvido_at=ch.resolvido_at
+                id=ch.id,
+                numero=ch.chamado,
+                resolvido=ch.resolvido,
+                resolvido_at=ch.resolvido_at,
+                abertura_status=aberturas.get(ch.id),
             )
         d["tem_chamado_aberto"] = aberto
         d["primeira_do_pedido"] = pedido not in vistos
@@ -447,6 +495,7 @@ async def listar(
     user: Annotated[User, Depends(require_permission("devolucoes", "view"))],
     mostrar: Annotated[Literal["abertas", "resolvidas", "todas"], Query()] = "abertas",
     pedido: Annotated[str | None, Query(max_length=60)] = None,
+    desde: Annotated[date | None, Query()] = None,
 ) -> PainelOut:
     """A lista única do painel novo. Volta inteira (teto de 4000 linhas);
     busca, filtros, cartões e "Onde agir hoje" são contas do navegador sobre
@@ -462,7 +511,9 @@ async def listar(
             session, user, mostrar="pedido", lojas=lojas, pedido=pedido.strip()
         )
     else:
-        items = await montar_itens(session, user, mostrar=mostrar, lojas=lojas)
+        # `desde` (início do Período da tela): até onde ir buscar as Resolvidas —
+        # sem ele, os últimos 60 dias (o histórico antigo vai até maio/2026).
+        items = await montar_itens(session, user, mostrar=mostrar, lojas=lojas, desde=desde)
     return PainelOut(
         items=items,
         total_pedidos=len({i.pedido_bling for i in items if i.pedido_bling}),
@@ -497,7 +548,7 @@ async def resolver(
     como = body.como_terminou.strip()
     # A marca da largada é do sistema: usada à mão, esconderia o pedido de
     # "Resolvidas" e do resumo.
-    if len(como) < 2 or como == antigo.PAINEL_LARGADA:
+    if len(como) < 2 or como in antigo.PAINEL_MARCAS:
         raise HTTPException(422, detail={"code": "como_terminou_invalido"})
     await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
     row = await antigo._rastreio_do_pedido(session, pedido)
@@ -584,6 +635,8 @@ WITH casos AS (
 _RESUMO_ABERTAS_SQL = (
     _RESUMO_ESTADO_CTE + "SELECT count(*) FROM estado WHERE resolvido_dia IS NULL"  # noqa: S608
 )
+# A virada é a largada da 0483/0484 (o dia em que o painel novo entrou); o
+# histórico antigo da 0485 tem marca própria e fica de fora.
 _RESUMO_VIRADA_SQL = f"""
 SELECT min((r.resolvido_at AT TIME ZONE 'America/Sao_Paulo')::date)
 FROM "{SCHEMA}".devolucao_rastreio r WHERE r.resolvido_como = :largada
@@ -594,6 +647,7 @@ _RESUMO_NOVAS_SQL = _RESUMO_ESTADO_CTE + (  # noqa: S608
 _RESUMO_RESOLVIDAS_SQL = _RESUMO_ESTADO_CTE + (  # noqa: S608
     "SELECT resolvido_dia AS dia, count(*) AS n FROM estado "
     "WHERE resolvido_dia >= :desde AND resolvido_como IS DISTINCT FROM :largada "
+    "AND resolvido_como IS DISTINCT FROM :historico "
     "GROUP BY resolvido_dia"
 )
 
@@ -656,7 +710,12 @@ async def resumo(
         x["dia"]: int(x["n"])
         for x in (
             await session.execute(
-                text(_RESUMO_RESOLVIDAS_SQL), {"desde": desde, "largada": antigo.PAINEL_LARGADA}
+                text(_RESUMO_RESOLVIDAS_SQL),
+                {
+                    "desde": desde,
+                    "largada": antigo.PAINEL_LARGADA,
+                    "historico": antigo.PAINEL_LARGADA_HISTORICO,
+                },
             )
         ).mappings()
     }
@@ -698,3 +757,476 @@ async def resumo(
         abertas = abertas - novas.get(dia, 0) + resolvidas.get(dia, 0)
         dia -= timedelta(days=1)
     return ResumoOut(desde=desde, dias=dias, ve_custo=admin)
+
+
+# ── Chamado da devolução, na janela (2ª etapa, Vinicius 16/11/2026) ─────────
+# "Abrir chamado: Sim ou Não", a conferência da IA antes de a disputa sair
+# ("se não bate, segurar e perguntar"), a "Instrução IA" e a prévia do texto
+# que vai pra plataforma. Tudo é do PEDIDO (o chamado é um por pedido).
+
+
+class InstrucaoOut(BaseModel):
+    texto: str
+    autor_nome: str | None = None
+    em: datetime | None = None
+    # A IA de Chamado já fez uma análise depois dela.
+    lida: bool = False
+    # Escrita antes de o chamado existir: entra nele quando ele nascer.
+    esperando_chamado: bool = False
+
+
+class ChamadoJanelaOut(BaseModel):
+    pedido_bling: str
+    # Algum produto lançado tem motivo que abre chamado (Bloqueado, Golpe…).
+    pede_chamado: bool = False
+    motivo: str | None = None
+    abrir_chamado: bool | None = None
+    chamado_id: UUID | None = None
+    numero: str | None = None
+    plataforma: str | None = None
+    status_plataforma: str | None = None
+    resolvido: bool = False
+    abertura_status: str | None = None
+    abertura_erro: str | None = None
+    enviada_at: datetime | None = None
+    conferencia: dict | None = None
+    conferencia_ligada: bool = False
+    instrucoes: list[InstrucaoOut] = Field(default_factory=list)
+
+
+class AbrirChamadoIn(BaseModel):
+    abrir: bool
+
+
+class DecisaoIn(BaseModel):
+    acao: Literal["mandar", "trocar", "nao_abrir"]
+    motivo: str | None = None
+
+
+class InstrucaoIn(BaseModel):
+    texto: str = Field(min_length=1, max_length=2000)
+
+
+class PreviaLinhaIn(BaseModel):
+    sku: str | None = None
+    produtos: str | None = None
+    quantidade: int = 1
+    motivo_devolucao: str | None = None
+    observacao: str | None = None
+
+
+class PreviaIn(BaseModel):
+    linhas: list[PreviaLinhaIn] = Field(default_factory=list, max_length=50)
+    plataforma: str | None = None
+    link_envio: str | None = None
+    link_abertura: str | None = None
+    fotos: int = Field(default=0, ge=0, le=50)
+
+
+class PreviaOut(BaseModel):
+    abre: bool = False
+    motivo: str | None = None
+    texto: str | None = None
+    avisos: list[str] = Field(default_factory=list)
+
+
+def _nome(user: User) -> str:
+    return (user.name or user.email or "").strip() or "alguém"
+
+
+async def _linhas(session: AsyncSession, pedido: str) -> list[Devolution]:
+    return list(
+        (
+            await session.execute(
+                select(Devolution)
+                .where(func.btrim(Devolution.pedido_bling) == pedido)
+                .order_by(Devolution.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def _travar_disparo(session: AsyncSession, ch: Chamado) -> None:
+    """Pega a MESMA trava do job que manda a contestação (worker e cron das
+    pendentes) antes de mexer na abertura. Se o job está no meio do envio — a
+    conferência da IA pode levar dezenas de segundos —, o "Não" ou a decisão
+    daqui não podem ser escritos por cima: 409, a pessoa tenta de novo em
+    seguida e vê o que aconteceu."""
+    pegou = (
+        await session.execute(
+            text("SELECT pg_try_advisory_xact_lock(hashtext(:k))"),
+            {"k": f"chamado_devolucao_disparar:{ch.id}"},
+        )
+    ).scalar()
+    if not pegou:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "chamado_sendo_enviado",
+                "message": "A contestação está sendo enviada agora — "
+                "espere alguns segundos e veja de novo.",
+            },
+        )
+
+
+async def _rastreio(session: AsyncSession, pedido: str) -> DevolucaoRastreio:
+    """A linha do pedido em devolucao_rastreio (cria se não existe), sem exigir
+    o espelho do Bling — o chamado segurado de um pedido fora do espelho também
+    precisa de saída."""
+    row = await session.get(DevolucaoRastreio, pedido)
+    if row is None:
+        row = DevolucaoRastreio(pedido_bling=pedido)
+        session.add(row)
+    return row
+
+
+async def _chamado_do_pedido(session: AsyncSession, pedido: str) -> Chamado | None:
+    """O chamado de devolução mais recente do pedido."""
+    return (
+        await session.execute(
+            select(Chamado)
+            .where(Chamado.pedido_bling == pedido, Chamado.origem == "devolucao")
+            .order_by(Chamado.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def _janela(session: AsyncSession, pedido: str) -> ChamadoJanelaOut:
+    linhas = await _linhas(session, pedido)
+    pede = [d for d in linhas if chamados_svc.motivo_pede_chamado(d)]
+    rast = await session.get(DevolucaoRastreio, pedido)
+    ch = await _chamado_do_pedido(session, pedido)
+    out = ChamadoJanelaOut(
+        pedido_bling=pedido,
+        pede_chamado=bool(pede),
+        motivo=(pede[0].motivo_devolucao if pede else None),
+        abrir_chamado=rast.abrir_chamado if rast is not None else None,
+        conferencia=rast.conferencia if rast is not None else None,
+        conferencia_ligada=conferencia.ligada(),
+    )
+    if ch is not None:
+        abertura = await cd.mensagem_abertura(session, ch)
+        out.chamado_id = ch.id
+        out.numero = ch.chamado
+        out.plataforma = ch.plataforma
+        out.status_plataforma = ch.status_plataforma
+        out.resolvido = ch.resolvido
+        if abertura is not None:
+            out.abertura_status = abertura.status
+            out.abertura_erro = abertura.erro
+            out.enviada_at = abertura.enviada_at
+        msgs = (
+            (
+                await session.execute(
+                    select(ChamadoMensagem)
+                    .where(
+                        ChamadoMensagem.chamado_id == ch.id,
+                        ChamadoMensagem.tipo.in_(("instrucao", "analise")),
+                    )
+                    .order_by(ChamadoMensagem.created_at)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        analises = [m.created_at for m in msgs if m.tipo == "analise" and m.created_at]
+        out.instrucoes = [
+            InstrucaoOut(
+                texto=m.texto,
+                autor_nome=m.autor_nome,
+                em=m.created_at,
+                lida=any(a >= m.created_at for a in analises) if m.created_at else False,
+            )
+            for m in msgs
+            if m.tipo == "instrucao"
+        ]
+    if rast is not None and (rast.instrucao_ia_pendente or "").strip():
+        autor = await session.get(User, rast.instrucao_ia_por) if rast.instrucao_ia_por else None
+        out.instrucoes.append(
+            InstrucaoOut(
+                texto=rast.instrucao_ia_pendente,
+                autor_nome=(autor.name or autor.email) if autor is not None else None,
+                em=rast.instrucao_ia_em,
+                esperando_chamado=True,
+            )
+        )
+    return out
+
+
+@router.get("/{pedido_bling}/chamado", response_model=ChamadoJanelaOut)
+async def chamado_da_janela(
+    pedido_bling: str,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+) -> ChamadoJanelaOut:
+    """O bloco Chamado da janela: Sim/Não, estado da contestação, o que a IA
+    achou e as instruções dadas."""
+    pedido = pedido_bling.strip()
+    await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
+    return await _janela(session, pedido)
+
+
+@router.post("/{pedido_bling}/abrir-chamado", response_model=ChamadoJanelaOut)
+async def abrir_chamado(
+    pedido_bling: str,
+    body: AbrirChamadoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> ChamadoJanelaOut:
+    """ "Abrir chamado: Sim ou Não" (vale pro pedido). Não: a contestação que
+    ainda não saiu é cancelada (o chamado fica Encerrado, nada vai pra
+    plataforma); depois que saiu, não dá — 409 `chamado_ja_saiu`. Sim (depois
+    de um Não): volta ao automático e, se o motivo pede, a contestação sai."""
+    pedido = pedido_bling.strip()
+    await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
+    rast = await antigo._rastreio_do_pedido(session, pedido)
+    ch = await _chamado_do_pedido(session, pedido)
+    if ch is not None and not body.abrir:
+        await _travar_disparo(session, ch)
+    abertura = await cd.mensagem_abertura(session, ch) if ch is not None else None
+    if abertura is not None:
+        await session.refresh(abertura)
+    nome = _nome(user)
+    if not body.abrir:
+        if abertura is not None and abertura.status in ("enviada", "enviando"):
+            raise HTTPException(409, detail={"code": "chamado_ja_saiu"})
+        rast.abrir_chamado = False
+        rast.updated_by = user.id
+        if (
+            ch is not None
+            and not ch.resolvido
+            and ch.status_plataforma not in chamados_svc.STATUS_FINAIS
+        ):
+            await cd._encerrar_chamado(
+                session,
+                ch,
+                evento=f"{nome} marcou “Abrir chamado: Não” na janela da devolução — "
+                "encerrado sem contestar.",
+            )
+        await session.commit()
+        logger.info("devolucao_abrir_chamado_nao", pedido_bling=pedido, user_id=str(user.id))
+        return await _janela(session, pedido)
+
+    era_nao = rast.abrir_chamado is False
+    rast.abrir_chamado = None
+    rast.updated_by = user.id
+    if (
+        era_nao
+        and ch is not None
+        and not ch.resolvido
+        and ch.status_plataforma == chamados_svc.STATUS_ENCERRADO
+        and (abertura is None or abertura.status != "enviada")
+    ):
+        ev = chamados_svc.sair_de_encerrado(
+            ch, f"{nome} marcou “Abrir chamado: Sim” na janela da devolução"
+        )
+        if ev is not None:
+            session.add(ev)
+    await session.commit()
+    dev = next(
+        (d for d in await _linhas(session, pedido) if chamados_svc.motivo_pede_chamado(d)), None
+    )
+    if dev is not None:
+        ch2 = await cd.garantir_chamado(session, dev)
+        await session.commit()
+        if ch2 is not None:
+            await cd.agendar_disparo(session, ch2, dev)
+    logger.info("devolucao_abrir_chamado_sim", pedido_bling=pedido, user_id=str(user.id))
+    return await _janela(session, pedido)
+
+
+@router.post("/{pedido_bling}/chamado/decisao", response_model=ChamadoJanelaOut)
+async def decidir_conferencia(
+    pedido_bling: str,
+    body: DecisaoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> ChamadoJanelaOut:
+    """A IA segurou a contestação (o motivo não bate): a pessoa decide.
+    `mandar` = manda como está; `trocar` = troca o motivo das peças que abrem
+    chamado pelo `motivo` e manda; `nao_abrir` = não contesta (Encerrado)."""
+    pedido = pedido_bling.strip()
+    await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
+    ch = await _chamado_do_pedido(session, pedido)
+    if ch is not None:
+        await _travar_disparo(session, ch)
+    abertura = await cd.mensagem_abertura(session, ch) if ch is not None else None
+    if abertura is not None:
+        await session.refresh(abertura)
+    if ch is None or abertura is None or abertura.status != conferencia.STATUS_SEGURADA:
+        raise HTTPException(409, detail={"code": "nada_segurado"})
+    if ch.resolvido or ch.status_plataforma == chamados_svc.STATUS_ENCERRADO:
+        raise HTTPException(409, detail={"code": "chamado_encerrado"})
+    rast = await _rastreio(session, pedido)
+    linhas = await _linhas(session, pedido)
+    pede = [d for d in linhas if chamados_svc.motivo_pede_chamado(d)]
+    nome = _nome(user)
+    agora = datetime.now(UTC)
+    conf = dict(rast.conferencia or {})
+    conf.update(decidido_por=nome, decidido_em=agora.isoformat(), decisao=body.acao)
+
+    if body.acao == "nao_abrir" or not pede:
+        rast.abrir_chamado = False
+        rast.conferencia = conf
+        await cd._encerrar_chamado(
+            session,
+            ch,
+            evento=(
+                f"{nome} viu o aviso da IA e escolheu não abrir chamado — encerrado sem contestar."
+            ),
+        )
+        await session.commit()
+        return await _janela(session, pedido)
+
+    if body.acao == "trocar":
+        novo = (body.motivo or "").strip()
+        if (
+            novo not in conferencia.MOTIVOS
+            or novo.lower() not in chamados_svc.MOTIVOS_ABREM_CHAMADO
+        ):
+            raise HTTPException(422, detail={"code": "motivo_nao_abre_chamado"})
+        anterior = (pede[0].motivo_devolucao or "").strip()
+        for d in pede:
+            d.motivo_devolucao = novo
+            # As mesmas travas do PATCH de motivo (mala/eletro sem o vídeo do
+            # envio, pedido da Fraude sem vídeo): 422 e nada muda.
+            await antigo._exigir_video_fraude(session, d)
+            antigo._exigir_link_envio(d)
+        if (ch.observacao or "").startswith(chamados_svc.OBS_AUTO_PREFIXO):
+            ch.observacao = f"{chamados_svc.OBS_AUTO_PREFIXO}{novo}"
+        session.add(
+            chamados_svc.registrar_sistema(
+                ch,
+                f'{nome} trocou o motivo de "{anterior}" para "{novo}" (sugestão da IA) e mandou.',
+            )
+        )
+    else:
+        session.add(
+            chamados_svc.registrar_sistema(ch, f"{nome} viu o aviso da IA e mandou como está.")
+        )
+    # O que vale agora já foi visto pela pessoa: a IA não segura de novo. A chave
+    # sai da MESMA leitura do disparo (as linhas do pedido como o worker vê).
+    linhas_disparo = await cd._linhas_do_pedido(session, pede[0])
+    conf["chave"] = conferencia.chave(
+        conferencia.pecas_de(linhas_disparo or [pede[0]]), rast.observacao
+    )
+    conf["resultado"] = "aceito"
+    rast.conferencia = conf
+    abertura.status = "pendente"
+    abertura.erro = None
+    msg_comprador = None
+    if body.acao == "trocar":
+        # Virou "Bloqueado": a Shopee ganha o pedido de senha ao comprador, como no PATCH.
+        msg_comprador = await devolucao_mensagem_comprador.garantir(session, pede[0])
+    await session.commit()
+    await cd.agendar_disparo(session, ch, pede[0])
+    await devolucao_mensagem_comprador.agendar(session, msg_comprador)
+    logger.info(
+        "devolucao_conferencia_decidida", pedido_bling=pedido, acao=body.acao, user_id=str(user.id)
+    )
+    return await _janela(session, pedido)
+
+
+@router.post("/{pedido_bling}/instrucao", response_model=ChamadoJanelaOut)
+async def instruir_ia(
+    pedido_bling: str,
+    body: InstrucaoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> ChamadoJanelaOut:
+    """ "Instrução IA": vai pro chamado como instrução (a IA de Chamado lê
+    primeiro, não vai pra plataforma). Sem chamado ainda, espera e entra nele
+    quando ele nascer."""
+    pedido = pedido_bling.strip()
+    texto = body.texto.strip()
+    if not texto:
+        raise HTTPException(422, detail={"code": "instrucao_vazia"})
+    await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
+    ch = await _chamado_do_pedido(session, pedido)
+    if ch is not None and ch.resolvido:
+        raise HTTPException(422, detail={"code": "chamado_concluido"})
+    if ch is not None:
+        session.add(
+            chamados_svc.nova_mensagem(
+                ch,
+                texto=texto,
+                tipo="instrucao",
+                direcao="sistema",
+                autor_nome=f"Devoluções ({_nome(user)})",
+                autor_id=user.id,
+                status="registrada",
+            )
+        )
+        chamados_leitura.ligar_consulta_do_texto(ch, texto)
+    else:
+        rast = await antigo._rastreio_do_pedido(session, pedido)
+        atual = (rast.instrucao_ia_pendente or "").strip()
+        rast.instrucao_ia_pendente = f"{atual}\n{texto}" if atual else texto
+        rast.instrucao_ia_por = user.id
+        rast.instrucao_ia_em = datetime.now(UTC)
+    await session.commit()
+    logger.info("devolucao_instrucao_ia", pedido_bling=pedido, com_chamado=ch is not None)
+    return await _janela(session, pedido)
+
+
+@router.post("/{pedido_bling}/chamado/previa", response_model=PreviaOut)
+async def previa_do_chamado(
+    pedido_bling: str,
+    body: PreviaIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "view"))],
+) -> PreviaOut:
+    """O texto que a contestação levaria com o que está na janela agora (as
+    peças lançadas e as por lançar, os links e as fotos de Provas). Mesma
+    função do disparo (`texto_padrao`); nada é gravado."""
+    pedido = pedido_bling.strip()
+    await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
+    pm = (
+        await session.execute(
+            select(BlingOrder.numeroloja).where(BlingOrder.numero == pedido).limit(1)
+        )
+    ).scalar_one_or_none()
+    devs = [
+        Devolution(
+            pedido_bling=pedido,
+            pedido_marketplace=pm,
+            sku=(x.sku or "").strip() or None,
+            produtos=(x.produtos or "").strip() or None,
+            quantidade=max(1, x.quantidade or 1),
+            motivo_devolucao=(x.motivo_devolucao or "").strip() or None,
+            observacao=(x.observacao or "").strip() or None,
+            link_envio=(body.link_envio or "").strip() or None,
+            link_abertura=(body.link_abertura or "").strip() or None,
+        )
+        for x in body.linhas
+    ]
+    pede = [d for d in devs if chamados_svc.motivo_pede_chamado(d)]
+    if not pede:
+        return PreviaOut()
+    dev = pede[0]
+    plat = cd.plataforma_de(body.plataforma)
+    avisos: list[str] = []
+    if plat not in cd.COM_API:
+        avisos.append(
+            "Esta plataforma não tem API de contestação: "
+            "o chamado fica registrado pra abrir na mão."
+        )
+    reason = cd.reason_para(dev)
+    if plat == cd.PLAT_ML:
+        reason = cd._reason_ml(dev, [None] * body.fotos)
+    texto_ = cd.texto_padrao(
+        dev,
+        reason,
+        fotos=body.fotos,
+        link_envio=(body.link_envio or "").strip() or None,
+        linhas=devs,
+        link_abertura=cd.link_abertura_do_pedido(dev, devs) or None,
+    )
+    if plat == cd.PLAT_TIKTOK:
+        avisos.append("A TikTok aceita só 500 caracteres: o fim do texto pode ser cortado.")
+    if plat == cd.PLAT_SHOPEE and cd._motivo(dev) == cd.MOTIVO_NAO_RECEBIDO:
+        avisos.append("Na Shopee, o “Não recebido” sai com um texto próprio, mais curto.")
+    return PreviaOut(abre=True, motivo=dev.motivo_devolucao, texto=texto_, avisos=avisos)

@@ -101,7 +101,8 @@ type Item = {
   condicao_tela: string | null
   sku_lancado: string | null
   lancamentos_a_mais: number
-  chamado: { id: string; numero: string | null; resolvido: boolean; resolvido_at: string | null } | null
+  chamado: { id: string; numero: string | null; resolvido: boolean; resolvido_at: string | null; abertura_status?: string | null } | null
+  abrir_chamado?: boolean | null
   tem_chamado_aberto: boolean
   conta: { recebido: number; custo_produto: number; custo_manutencao: number; resultado: number } | null
   pronto_resolver: string | null
@@ -187,7 +188,10 @@ async function load(silencioso = false) {
   // não pode deixar a lista de um modo com o seletor em outro.
   const minha = ++cargaAtual
   try {
-    const res = await api<Painel>(`/api/devolucoes-painel?mostrar=${mostrar.value}`)
+    // Resolvidas/Todas: o início do Período vai pro servidor (o histórico antigo
+    // vem desde maio/2026; sem período, os últimos 60 dias).
+    const desde = mostrar.value !== 'abertas' && dataIni.value ? `&desde=${dataIni.value}` : ''
+    const res = await api<Painel>(`/api/devolucoes-painel?mostrar=${mostrar.value}${desde}`)
     if (minha !== cargaAtual) return
     items.value = res.items
     comoTerminou.value = res.como_terminou
@@ -309,6 +313,7 @@ const base = computed(() => {
 
 type Agir = { chave: string; titulo: string; detalhe: string; dot: string; grave: boolean; teste: (i: Item) => boolean }
 const AGIR: Agir[] = [
+  { chave: 'segurado', titulo: 'Chamado segurado pela IA', detalhe: 'o motivo não bate — decidir antes de mandar', dot: 'bg-red-600', grave: true, teste: (i) => i.chamado?.abertura_status === 'segurada' },
   { chave: 'responder', titulo: 'Responder em 24 h', detalhe: 'prazo da plataforma vencendo', dot: 'bg-red-600', grave: true, teste: urgente },
   { chave: 'estoque', titulo: 'Estoque não entrou no Bling', detalhe: 'conferir e tentar de novo no lançamento', dot: 'bg-red-600', grave: true, teste: estoquePendente },
   { chave: 'falta_lancar', titulo: 'Chegou e falta lançar', detalhe: 'lançar condição e estoque', dot: 'bg-red-600', grave: false, teste: (i) => i.falta_lancar },
@@ -463,6 +468,20 @@ function etiquetaLanc(l: Lancamento): { texto: string; cor: string } {
   if (!l.condicao_tela || ['falhou', 'conferindo', 'sem_confirmacao'].includes(l.estoque_status || '')) return { texto, cor: COR_LANC.pendente }
   return { texto, cor: COR_LANC[texto] || COR_LANC.outro }
 }
+// Marca da largada (o histórico de antes do painel novo): "feito antes de mudar
+// o painel" (Vinicius, 16/11/2026).
+// As duas marcas do sistema: a da virada (0483/0484) e a do histórico (0485).
+const LARGADA = 'antes do painel novo'
+function ehLargada(como: string | null): boolean {
+  return !!como && como.startsWith(LARGADA)
+}
+function comoTerminou_(como: string | null): string {
+  return ehLargada(como) ? 'feito antes de mudar o painel' : (como || '')
+}
+function obsDaLinha(i: Item): string {
+  const marca = i.resolvido && ehLargada(i.resolvido_como) ? 'feito antes de mudar o painel' : ''
+  return [marca, i.observacao || ''].filter(Boolean).join(' · ')
+}
 function tituloLanc(l: Lancamento): string {
   const estoque = l.sku_lancado ? ` · entrou no estoque em ${l.sku_lancado}` : ''
   return `${l.sku || ''}: ${rotuloLanc(l)}${estoque}${l.motivo ? ` · ${l.motivo}` : ''}`
@@ -494,6 +513,7 @@ watch(plataformaTab, () => {
   if (contaFilter.value !== 'all' && !contas.value.includes(contaFilter.value)) contaFilter.value = 'all'
 })
 watch(mostrar, () => { recorte.value = ''; void load() })
+watch(dataIni, () => { if (mostrar.value !== 'abertas') void load() })
 
 // ── Excel (csv que o Excel abre) ────────────────────────────────────────
 function exportar() {
@@ -509,7 +529,7 @@ function exportar() {
     i.reembolso_valor != null ? i.reembolso_valor.toFixed(2).replace('.', ',') : '', i.localizacao, i.rastreio,
     i.video_link ? 'Sim' : i.video_status === 'pendente' ? 'pedido' : '', temAbertura(i) ? 'Sim' : '',
     temFoto(i) ? 'Sim' : '', i.lancamentos.map(rotuloLanc).join(' / '), i.lancamentos.map((l) => l.sku_lancado || l.sku || '').join(' / '),
-    i.chamado ? (i.tem_chamado_aberto ? 'Aberto' : 'Concluído') : '', i.situacao_bling_nome, i.observacao,
+    i.chamado ? (i.tem_chamado_aberto ? 'Aberto' : 'Concluído') : '', i.situacao_bling_nome, obsDaLinha(i),
   ])
   const csv = [cab, ...linhas]
     .map((l) => l.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(';'))
@@ -561,6 +581,7 @@ const envioColado = computed(
 const envioDaJanela = computed(() => envioColado.value || pedidoItem.value?.video_link || '')
 const aberturaDaJanela = computed(() => aberturaDoPedido.value || linkPendente.abertura || '')
 function limparProvas() {
+  obsPendente.value = ''
   linkPendente.envio = linkPendente.abertura = ''
   linkDigitado.envio = linkDigitado.abertura = ''
   editandoLink.envio = editandoLink.abertura = false
@@ -620,7 +641,7 @@ function removerFotoProvas(id: string) {
 }
 // Link ou foto em Provas esperando um lançamento que ainda não foi feito.
 function provasEsperando(): boolean {
-  return !!(linkPendente.envio || linkPendente.abertura || fotosPendentes.value.length)
+  return !!(linkPendente.envio || linkPendente.abertura || fotosPendentes.value.length || obsPendente.value)
 }
 const aberturaDoPedido = computed(
   () => (pedidoItem.value?.lancamentos || []).map((l) => (l.link_abertura || '').trim()).find(Boolean) || null,
@@ -701,6 +722,33 @@ async function aoMudarLancamento() {
   await load(true)
   await relerAvulsas()
   void loadResumo()
+  void chamadoRef.value?.recarregar()
+  void lancarRef.value?.recarregar()
+}
+// ── Bloco Chamado (2ª etapa, 16/11/2026) ──
+const chamadoRef = ref<{ recarregar: () => Promise<void> } | null>(null)
+// As peças como estão na tela agora (lançadas e por lançar) — a prévia do texto.
+const linhasPrevia = computed(() => lancarRef.value?.linhasParaPrevia() ?? [])
+// A observação que vai no texto do chamado: UMA pro pedido ("não tá duplicado o
+// campo observação?"). No banco mora em cada lançamento; sem lançamento ainda,
+// espera aqui e entra junto com o 1º.
+const obsPendente = ref('')
+const obsMisturadas = computed(
+  () => new Set((pedidoItem.value?.lancamentos || []).map((l) => (l.observacao || '').trim()).filter(Boolean)).size > 1,
+)
+const obsDaJanela = computed(() => {
+  const textos = [...new Set((pedidoItem.value?.lancamentos || []).map((l) => (l.observacao || '').trim()).filter(Boolean))]
+  return textos.length ? textos.join(' · ') : obsPendente.value
+})
+async function salvarObsDaJanela(texto: string) {
+  if (!pedidoItem.value?.lancamentos.length || !lancarRef.value) {
+    obsPendente.value = texto
+    if (texto) toasts.push({ kind: 'success', title: 'Observação guardada', lines: ['Entra no lançamento quando você lançar.'] }, 3000)
+    return
+  }
+  const erro = await lancarRef.value.gravarLink('observacao', texto)
+  if (erro) toasts.push({ kind: 'error', title: 'Observação não salva', lines: [erro] }, 8000)
+  else toasts.push({ kind: 'success', title: 'Observação salva', lines: [] }, 2500)
 }
 function mudarSituacao(valor: string, seletor: HTMLSelectElement) {
   const p = pedidoItem.value
@@ -767,9 +815,10 @@ const lancarRef = ref<{
   temMudancaNaoSalva: () => boolean
   ocupado: () => boolean
   recarregar: () => Promise<void> | void
-  gravarLink: (campo: 'link_envio' | 'link_abertura', valor: string) => Promise<string | null>
+  gravarLink: (campo: 'link_envio' | 'link_abertura' | 'observacao', valor: string) => Promise<string | null>
   anexarFotos: (files: File[]) => Promise<boolean>
   removerFoto: (anexoId: string) => Promise<void>
+  linhasParaPrevia: () => { sku: string | null; produtos: string | null; quantidade: number; motivo_devolucao: string | null; observacao: string | null }[]
 } | null>(null)
 // Lançamento em andamento (o Bling pode levar 10–15 s): a janela espera. Fechar
 // no meio deixaria peça sendo criada sem ninguém ver o resultado.
@@ -1135,19 +1184,21 @@ const lidoHa = computed(() => {
             <span>Devoluções — uma linha por produto</span>
             <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">entra sozinho quando cai em Aguardando Devolução × sai só no Resolver</span>
           </div>
-          <div class="overflow-x-auto">
+          <!-- 16/11/2026 (Vinicius, "igual no painel chamado"): a lista tem altura
+               própria e rola aqui dentro — o resumo dos meses fica à vista logo abaixo. -->
+          <div class="max-h-[560px] overflow-auto focus:outline-none" tabindex="0" data-lista-rolagem>
             <!-- Larguras fixas em tudo, menos na Localização: "o que sobrar deixa a
                  localização" (Vinicius, mesma regra da Logística). Com o menu lateral
                  aberto em tela de 1920 sobra uma rolagem curta pro lado; com ele
                  recolhido cabe tudo. -->
-            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="veCusto ? 'min-w-[1684px]' : 'min-w-[1600px]'">
+            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="veCusto ? 'min-w-[1742px]' : 'min-w-[1658px]'">
               <colgroup>
-                <col class="w-[42px]"><col class="w-[58px]"><col class="w-[120px]"><col class="w-[76px]"><col class="w-[112px]"><col class="w-[150px]">
+                <col class="w-[42px]"><col class="w-[58px]"><col class="w-[148px]"><col class="w-[88px]"><col class="w-[112px]"><col class="w-[168px]">
                 <col class="w-[90px]"><col class="w-[36px]"><col class="w-[90px]"><col class="w-[70px]"><col>
                 <col class="w-[40px]"><col class="w-[60px]"><col class="w-[36px]">
                 <col class="w-[150px]"><col class="w-[96px]"><col class="w-[92px]"><col v-if="veCusto" class="w-[84px]"><col class="w-[160px]">
               </colgroup>
-              <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
+              <thead class="sticky top-0 z-10 bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="6">Pedido</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="5">Devolução</th>
@@ -1193,16 +1244,19 @@ const lidoHa = computed(() => {
                 >
                   <td class="px-1.5 py-1.5 text-center text-muted-foreground" :title="ddmmaaaa(i.data)">{{ ddmm(i.data) }}</td>
                   <td class="px-1.5 py-1.5 text-center font-mono font-bold" :class="primeiraVisivel(n) ? '' : 'text-muted-foreground'">{{ i.pedido_bling || '—' }}</td>
-                  <td class="truncate px-1.5 py-1.5 text-center font-mono text-[10.5px]" :title="i.pedido_marketplace || undefined">
+                  <!-- 16/11: sem cortar ("o número do pedido na plataforma tá cortando") — cabe
+                       numa linha até 19 caracteres (TikTok, Amazon); mais que isso quebra. -->
+                  <td class="break-all px-1.5 py-1.5 text-center font-mono text-[10.5px] leading-tight" :title="i.pedido_marketplace || undefined">
                     <span v-if="i.pedido_marketplace" class="cursor-text select-all" @click.stop>{{ i.pedido_marketplace }}</span><span v-else class="text-muted-foreground">—</span>
                   </td>
                   <td class="px-1.5 py-1.5 text-center leading-tight" :title="i.loja || ''">
-                    <div class="truncate">{{ contaDe(i) }}</div>
-                    <div v-if="plataformaTab === 'todas'" class="truncate text-[10px] text-muted-foreground">{{ PLATAFORMA_NOME[plataformaKey(i.plataforma)] || i.plataforma }}</div>
+                    <div class="line-clamp-2 break-words">{{ contaDe(i) }}</div>
+                    <div v-if="plataformaTab === 'todas'" class="whitespace-nowrap text-[10px] text-muted-foreground">{{ PLATAFORMA_NOME[plataformaKey(i.plataforma)] || i.plataforma }}</div>
                   </td>
-                  <td class="truncate px-1.5 py-1.5 font-mono text-[10.5px]" :title="i.sku || ''">{{ i.sku || '—' }}</td>
+                  <!-- SKU de kit ("a+b+c") quebra depois de cada "+" em vez de cortar. -->
+                  <td class="px-1.5 py-1.5 font-mono text-[10.5px] leading-tight [overflow-wrap:anywhere]" :title="i.sku || ''">{{ (i.sku || '—').replace(/\+/g, '+\u200b') }}</td>
                   <td class="px-1.5 py-1.5" :title="i.produto || ''">
-                    <div class="line-clamp-2 break-words leading-tight">{{ i.produto || '—' }}<b v-if="i.quantidade && i.quantidade > 1"> ×{{ i.quantidade }}</b></div>
+                    <div class="line-clamp-3 break-words leading-tight">{{ i.produto || '—' }}<b v-if="i.quantidade && i.quantidade > 1"> ×{{ i.quantidade }}</b></div>
                   </td>
                   <td class="border-l border-l-slate-300 px-1.5 py-1.5 text-center leading-tight dark:border-l-slate-600">
                     <span class="inline-block w-[84px] rounded py-0.5 text-[11px] font-semibold" :class="ETAPA_COR[i.etapa]">{{ ETAPA_LABEL[i.etapa] }}</span>
@@ -1224,7 +1278,7 @@ const lidoHa = computed(() => {
                     </template>
                     <span v-else class="text-muted-foreground">—</span>
                   </td>
-                  <td class="px-1.5 py-1.5 leading-tight" :title="[i.localizacao, i.entrega_localizacao].filter(Boolean).join(' · ')">
+                  <td class="px-1.5 py-1.5 text-center leading-tight" :title="[i.localizacao, i.entrega_localizacao].filter(Boolean).join(' · ')">
                     <div v-if="i.etapa === 'fraude' && !i.localizacao" class="text-muted-foreground">não volta pacote</div>
                     <div v-else class="line-clamp-2 break-words">{{ i.localizacao || '—' }}</div>
                     <div v-if="i.devolucao_chegou_em" class="text-[10px] text-muted-foreground">chegou {{ ddmm(i.devolucao_chegou_em) }}</div>
@@ -1255,7 +1309,8 @@ const lidoHa = computed(() => {
                   </td>
                   <td class="px-1.5 py-1.5 text-center">
                     <span v-if="i.chamado" class="inline-flex items-center gap-1">
-                      <span class="inline-block rounded px-2 py-0.5 text-[11px] font-semibold" :class="i.tem_chamado_aberto ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/50 dark:text-blue-300' : 'bg-muted text-muted-foreground'">{{ i.tem_chamado_aberto ? 'Aberto' : 'Concluído' }}</span>
+                      <span v-if="i.chamado.abertura_status === 'segurada'" class="inline-block rounded bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800 dark:bg-amber-950/50 dark:text-amber-300" title="A IA segurou a contestação: o motivo não bate com o que foi lançado. Decidir na janela.">Segurado</span>
+                      <span v-else class="inline-block rounded px-2 py-0.5 text-[11px] font-semibold" :class="i.tem_chamado_aberto ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/50 dark:text-blue-300' : 'bg-muted text-muted-foreground'">{{ i.tem_chamado_aberto ? 'Aberto' : 'Concluído' }}</span>
                       <a :href="`/chamados?search=${encodeURIComponent(i.pedido_bling || '')}`" target="_blank" rel="noopener" class="inline-flex size-5 items-center justify-center rounded border bg-background text-muted-foreground hover:text-foreground" title="Abrir o chamado na aba Chamados" @click.stop><ExternalLink class="size-3" /></a>
                     </span>
                     <span v-else class="text-muted-foreground">—</span>
@@ -1274,7 +1329,7 @@ const lidoHa = computed(() => {
                     </template>
                     <span v-else class="text-muted-foreground">—</span>
                   </td>
-                  <td class="px-1.5 py-1.5 text-muted-foreground" :title="i.observacao || ''"><div class="line-clamp-2 break-words leading-tight">{{ i.observacao || '' }}</div></td>
+                  <td class="px-1.5 py-1.5 text-muted-foreground" :title="obsDaLinha(i)"><div class="line-clamp-2 break-words leading-tight">{{ obsDaLinha(i) }}</div></td>
                 </tr>
                 <tr v-if="!loading && !filtrados.length">
                   <td :colspan="veCusto ? 19 : 18" class="px-3 py-6 text-center text-muted-foreground">
@@ -1612,6 +1667,7 @@ const lidoHa = computed(() => {
                 :link-envio="envioDaJanela"
                 :link-abertura="aberturaDaJanela"
                 :fotos="fotosPendentes"
+                :observacao="obsDaJanela"
                 @fotos-enviadas="fotosPendentes = []"
                 :can-edit="canEdit"
                 :can-delete="canDelete"
@@ -1621,16 +1677,23 @@ const lidoHa = computed(() => {
             </div>
 
             <div class="rounded-md border p-3">
-              <div class="mb-2 flex items-center text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"><span class="mr-1.5 inline-flex size-[18px] items-center justify-center rounded-full bg-[#1f3a5f] text-[10.5px] font-bold text-white">2</span>Chamado</div>
-              <div class="flex flex-wrap items-center gap-2 text-xs">
-                <template v-if="pedidoItem.chamado">
-                  <span class="inline-block rounded px-2 py-0.5 text-[11px] font-semibold" :class="pedidoItem.tem_chamado_aberto ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/50 dark:text-blue-300' : 'bg-muted text-muted-foreground'">{{ pedidoItem.tem_chamado_aberto ? 'Aberto' : 'Concluído' }}</span>
-                  <span v-if="pedidoItem.chamado.numero" class="font-mono text-muted-foreground">{{ pedidoItem.chamado.numero }}</span>
-                  <a :href="`/chamados?search=${encodeURIComponent(pedidoItem.pedido_bling || '')}`" target="_blank" rel="noopener" class="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold hover:bg-muted"><ExternalLink class="size-3" /> abrir na aba Chamados</a>
-                </template>
-                <span v-else class="text-muted-foreground">sem chamado. Ele abre sozinho ao salvar o lançamento, pelo motivo (Bloqueado, Golpe, Item faltando, Não recebido, Danificado).</span>
-              </div>
-              <div class="mt-2 text-[11px] text-muted-foreground">“Abrir chamado: Sim/Não”, a conferência do motivo e a Instrução pra IA entram na próxima etapa: mexem no robô que abre a disputa, que é tiro único na plataforma.</div>
+              <!-- :key = pedido: trocar de pedido recomeça o bloco (prévia e instrução de um não vazam pro outro). -->
+              <DevolucaoChamado
+                ref="chamadoRef"
+                :key="pedidoItem.pedido_bling || ''"
+                :pedido="pedidoItem.pedido_bling || ''"
+                :plataforma="PLATAFORMA_NOME[plataformaKey(pedidoItem.plataforma)] || pedidoItem.plataforma || ''"
+                :can-edit="canEdit"
+                :linhas="linhasPrevia"
+                :link-envio="envioDaJanela"
+                :link-abertura="aberturaDaJanela"
+                :fotos="fotosDoPedido.length + fotosPendentes.length"
+                :observacao="obsDaJanela"
+                :obs-misturadas="obsMisturadas"
+                :prazo="pedidoItem.prazo_tipo ? `${prazoTexto(pedidoItem)} · ${pedidoItem.prazo_tipo}` : ''"
+                @observacao="salvarObsDaJanela"
+                @mudou="aoMudarLancamento"
+              />
             </div>
 
             <div v-if="veCusto" class="rounded-md border p-3">
@@ -1650,7 +1713,7 @@ const lidoHa = computed(() => {
             <div class="rounded-md border border-blue-300 bg-blue-50/60 p-3 dark:border-blue-800 dark:bg-blue-950/20">
               <div class="mb-2 flex items-center text-[10px] font-semibold uppercase tracking-wide text-blue-900 dark:text-blue-200"><span class="mr-1.5 inline-flex size-[18px] items-center justify-center rounded-full bg-[#1f3a5f] text-[10.5px] font-bold text-white">{{ veCusto ? 4 : 3 }}</span>Resolver <span class="ml-1 font-normal normal-case tracking-normal">· tira o pedido da lista de abertas</span></div>
               <template v-if="pedidoItem.resolvido">
-                <div class="text-xs">Resolvida em <b>{{ ddmmaaaa(pedidoItem.resolvido_at) }}</b><template v-if="pedidoItem.resolvido_por_nome"> por <b>{{ pedidoItem.resolvido_por_nome }}</b></template> · {{ pedidoItem.resolvido_como }}</div>
+                <div class="text-xs">Resolvida em <b>{{ ddmmaaaa(pedidoItem.resolvido_at) }}</b><template v-if="pedidoItem.resolvido_por_nome"> por <b>{{ pedidoItem.resolvido_por_nome }}</b></template> · {{ comoTerminou_(pedidoItem.resolvido_como) }}</div>
                 <button v-if="canEdit" type="button" class="mt-2 rounded-md border bg-background px-2.5 py-1.5 text-xs font-semibold hover:bg-muted disabled:opacity-50" :disabled="!!salvando" title="Volta pra lista de abertas. Não mexe no Bling." @click="reabrir">reabrir</button>
               </template>
               <div v-else-if="foraDaLista" class="text-xs text-muted-foreground">

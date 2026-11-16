@@ -1102,11 +1102,16 @@ _PAINEL_FONTE_SQL = f"""(
     )
     WHERE {{filtro}}
 )"""  # noqa: S608
-# Quem entra na lista: já caiu em Aguardando Devolução, ou está em Manutenção.
+# Quem entra na lista: já caiu em Aguardando Devolução, ou está em Manutenção,
+# ou tem lançamento (16/11/2026: o histórico de antes do painel aparece em
+# Resolvidas — a 0485 marcou como resolvido quem nunca entrou na lista — e a
+# "nova devolução" de um pedido fora da lista fica aberta até o Resolver).
 _PAINEL_FILTRO_LISTA = (
     f"bo2.aguardando_devolucao_data IS NOT NULL "
-    f"OR bo2.situacao IN ('{_SITUACAO_AGUARDANDO_DEVOLUCAO}', '84677')"
-)
+    f"OR bo2.situacao IN ('{_SITUACAO_AGUARDANDO_DEVOLUCAO}', '84677') "
+    f'OR EXISTS (SELECT 1 FROM "{SCHEMA}".devolutions dx '
+    "WHERE btrim(dx.pedido_bling) = bo2.numero)"
+)  # noqa: S608
 # Busca de UM pedido no histórico (nº do Bling ou da plataforma): qualquer
 # situação, aberto ou resolvido — pra achar a devolução antiga que o chamado
 # aponta ou lançar um pedido que ainda não caiu em Aguardando Devolução.
@@ -1117,15 +1122,22 @@ _PAINEL_ABERTO_SQL = (
     "(r.resolvido_at IS NULL OR (bo.aguardando_devolucao_data IS NOT NULL AND "
     "(r.resolvido_at AT TIME ZONE 'America/Sao_Paulo')::date < bo.aguardando_devolucao_data))"
 )
-# Marca da largada (migration 0483): histórico de antes do painel novo — não
-# aparece em "Resolvidas" (o histórico antigo segue na aba Lançamentos).
+# Marca da largada (migrations 0483/0484/0485): histórico de antes do painel
+# novo. Desde 16/11 aparece em "Resolvidas" (a tela escreve "feito antes de
+# mudar o painel"); fica fora só do resumo por mês.
 PAINEL_LARGADA = "antes do painel novo"
+# O histórico antigo (0485): pedido lançado antes do painel que nunca entrou na
+# lista. Marca própria pra não mexer na virada do resumo (a data dele é a do
+# último lançamento, de maio a novembro).
+PAINEL_LARGADA_HISTORICO = "antes do painel novo (histórico)"
+PAINEL_MARCAS = (PAINEL_LARGADA, PAINEL_LARGADA_HISTORICO)
 _PAINEL_EXTRAS_SQL = f"""
                     {_PAINEL_ABERTO_SQL}        AS aberto,
                     v.situacao                  AS situacao_bling_id,
                     v.situacao_nome             AS situacao_bling_nome,
                     r.resolvido_at,
                     r.resolvido_como,
+                    r.abrir_chamado,
                     ures.name                   AS resolvido_por_nome,"""
 
 
@@ -1179,19 +1191,11 @@ async def acompanhamento_rows(
         elif painel == "abertas":
             onde = _PAINEL_ABERTO_SQL
         elif painel == "resolvidas":
-            params["largada"] = PAINEL_LARGADA
             params["desde"] = resolvidas_desde or (hoje - timedelta(days=60))
-            onde = (
-                f"NOT {_PAINEL_ABERTO_SQL} AND r.resolvido_como IS DISTINCT FROM :largada "
-                "AND r.resolvido_at >= :desde"
-            )
+            onde = f"NOT {_PAINEL_ABERTO_SQL} AND r.resolvido_at >= :desde"
         else:
-            params["largada"] = PAINEL_LARGADA
             params["desde"] = resolvidas_desde or (hoje - timedelta(days=60))
-            onde = (
-                f"({_PAINEL_ABERTO_SQL} OR (r.resolvido_como IS DISTINCT FROM :largada "
-                "AND r.resolvido_at >= :desde))"
-            )
+            onde = f"({_PAINEL_ABERTO_SQL} OR r.resolvido_at >= :desde)"
     filtro_loja = ""
     if lojas is not None:
         filtro_loja = "AND v.bling_loja_id::text = ANY(:lojas)"

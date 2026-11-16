@@ -43,6 +43,10 @@ const props = defineProps<{
   linkAbertura?: string
   // Fotos escolhidas em Provas antes de existir lançamento: sobem junto com o 1º.
   fotos?: File[]
+  // 16/11/2026 ("não tá duplicado o campo observação?"): a observação que vai no
+  // texto do chamado mora no bloco Chamado da janela, uma só pro pedido — o
+  // cartão não tem mais o campo. No banco segue por lançamento (`observacao`).
+  observacao?: string
   canEdit: boolean
   canDelete: boolean
   isAdmin: boolean
@@ -418,6 +422,7 @@ function mlStatusLabel(row: DevolutionRow): string {
     return row.chamado_resolvido ? `${plat}: contestação enviada` : `${plat}: aberto`
   }
   if (st === 'pendente') return `${plat}: ${ML_STATUS_ERROS[erro] || 'pendente'}`
+  if (st === 'segurada') return `${plat}: segurado pela IA — o motivo não bate (decidir no bloco Chamado)`
   if (st === 'falhou') return `${plat}: falhou — ${ML_STATUS_ERROS[erro] || erro}`
   if (st === 'registrada') {
     if (erro === 'contestacao_cancelada') return `${plat}: ${ML_STATUS_ERROS.contestacao_cancelada}`
@@ -661,7 +666,7 @@ function novoRascunho(peca: LookupRow): Cartao {
       custo_produto: numTexto(peca.custo_produto),
       custo_manutencao: '',
       tecnico: '',
-      observacao: '',
+      observacao: props.observacao || '',
     },
     fotos: [],
     devolver_estoque: false,
@@ -699,8 +704,7 @@ function rascunhoMexido(c: Cartao): boolean {
   if (c.salvo) return false
   const f = c.f
   return !!(
-    f.condicao_produto || f.motivo_devolucao || f.tecnico || f.observacao
-    || f.custo_manutencao.trim()
+    f.condicao_produto || f.motivo_devolucao || f.tecnico || f.custo_manutencao.trim()
   )
 }
 // Resposta do servidor entra no cartão. `manterEdicao`: o que a pessoa mexeu e
@@ -1890,9 +1894,10 @@ async function removerFoto(anexoId: string): Promise<void> {
 // inteiro. Grava em todos os lançamentos que já existem (só esse campo — o que
 // estiver digitado e não salvo nos cartões fica como está); as peças por
 // lançar pegam pela prop. Devolve a mensagem do problema, ou null se deu certo.
-async function gravarLink(campo: 'link_envio' | 'link_abertura', valor: string): Promise<string | null> {
+async function gravarLink(campo: 'link_envio' | 'link_abertura' | 'observacao', valor: string): Promise<string | null> {
   if (!props.canEdit) return 'Sem permissão para editar'
   const v = (valor || '').trim()
+  if (campo === 'observacao') return gravarEmTodos(campo, v)
   if (v && linkEnvioInvalido(v)) {
     return campo === 'link_envio' ? MSG_LINK_ENVIO_INVALIDO : 'Link da abertura precisa ser um endereço http(s) — não digite texto aqui'
   }
@@ -1908,6 +1913,12 @@ async function gravarLink(campo: 'link_envio' | 'link_abertura', valor: string):
       : linkEnvioRequired(c.salvo!.sku, c.salvo!.motivo_devolucao))
     if (exige) return `Não dá pra apagar: o lançamento de ${exige.salvo!.sku || 'uma peça'} exige esse link`
   }
+  return gravarEmTodos(campo, v)
+}
+// Grava UM campo do pedido em todos os lançamentos que já existem (só esse
+// campo — o que estiver digitado e não salvo nos cartões fica como está).
+async function gravarEmTodos(campo: 'link_envio' | 'link_abertura' | 'observacao', v: string): Promise<string | null> {
+  const alvos = lancados.value.filter((c) => c.salvo && (c.salvo[campo] || '') !== v)
   if (alvos.some((c) => !!c.ocupado)) return 'Tem lançamento sendo salvo. Tente de novo em seguida.'
   let erro: string | null = null
   let gravou = 0
@@ -2108,10 +2119,11 @@ watch(() => props.pedido, () => {
 })
 // Os links moram em Provas: as peças por lançar acompanham o que estiver lá
 // (vídeo respondido pela equipe com a janela aberta, link colado, link apagado).
-watch(() => [props.linkEnvio, props.linkAbertura, props.videoLink] as const, () => {
+watch(() => [props.linkEnvio, props.linkAbertura, props.videoLink, props.observacao] as const, () => {
   for (const c of rascunhos.value) {
     c.f.link_envio = (props.linkEnvio ?? props.videoLink ?? '') || ''
     c.f.link_abertura = props.linkAbertura || ''
+    c.f.observacao = props.observacao || ''
   }
 })
 onBeforeUnmount(() => {
@@ -2182,7 +2194,18 @@ function temMudancaNaoSalva(): boolean {
 function ocupado(): boolean {
   return lancando.value || cartoes.value.some((c) => !!c.ocupado)
 }
-defineExpose({ recarregar, temMudancaNaoSalva, ocupado, gravarLink, anexarFotos, removerFoto })
+// O que a prévia do texto do chamado precisa: as peças como estão AGORA na tela
+// (lançadas e por lançar), com o motivo que a pessoa escolheu.
+function linhasParaPrevia() {
+  return cartoes.value.map((c) => ({
+    sku: skuDe(c) || null,
+    produtos: produtoDe(c) || null,
+    quantidade: qtdDe(c) || 1,
+    motivo_devolucao: c.f.motivo_devolucao || null,
+    observacao: c.f.observacao || null,
+  }))
+}
+defineExpose({ recarregar, temMudancaNaoSalva, ocupado, gravarLink, anexarFotos, removerFoto, linhasParaPrevia })
 </script>
 
 <template>
@@ -2447,16 +2470,6 @@ defineExpose({ recarregar, temMudancaNaoSalva, ocupado, gravarLink, anexarFotos,
             </div>
           </div>
 
-          <label class="block min-w-0 sm:col-span-2 lg:col-span-4">
-            <span :class="ROTULO">Observação</span>
-            <textarea
-              v-model="c.f.observacao"
-              rows="2"
-              class="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-xs disabled:cursor-default disabled:opacity-70"
-              placeholder="observação"
-              :disabled="travado(c)"
-            />
-          </label>
         </div>
 
         <!-- Manutenção: devolver ao estoque (só pra quem pode) -->

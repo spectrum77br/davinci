@@ -804,6 +804,12 @@ class Settings(BaseSettings):
     # saindo sozinho —, e nos 12 em que discordaram o Sonnet acertou a maioria; ~US$ 0,02 a
     # conferência (o Haiku, ~US$ 0,001). Voltar ao Haiku: ATENDIMENTO_VERIFICADOR_MODELO=claude-haiku-5-5.
     atendimento_verificador_modelo: str = "claude-sonnet-5-5"
+    # Conferência do motivo da devolução antes de a disputa sair (16/11/2026, o dono:
+    # "será que o painel consegue analisar o real motivo antes de abrir chamado?" e
+    # "se não bate, segurar e perguntar"). Usa a chave do agente do atendimento; sem a
+    # chave, a disputa sai como sempre saiu. Desligar: DEVOLUCAO_CONFERENCIA_LIGADA=false.
+    devolucao_conferencia_ligada: bool = True
+    devolucao_conferencia_modelo: str = "claude-opus-5-5"
     # Só no processo do eval (`scripts.agente_eval.rodar --verificador`): o verificador roda no
     # replay (como ao vivo) e, com o modelo de SOMBRA, roda de novo com ele e grava o veredito ao
     # lado, sem decidir — a comparação dos dois modelos nas mesmas respostas.

@@ -65,6 +65,9 @@ ROBO = frozenset({
 
 # Falta insumo nosso ou é decisão de gente.
 HUMANO = frozenset({
+    # 16/11/2026: a IA segurou a contestação (o motivo não bate) — alguém decide
+    # na janela da devolução; sem isso, o prazo da plataforma passava calado.
+    "motivo_divergente",
     "devolucao_sem_foto",
     "devolucao_motivo_sem_chamado",
     "devolucao_sem_pedido_marketplace",
@@ -154,7 +157,7 @@ async def varrer(
             .join(Chamado, Chamado.id == ChamadoMensagem.chamado_id)
             .where(
                 ChamadoMensagem.tipo == TIPO_ABERTURA,
-                ChamadoMensagem.status.in_(("pendente", "falhou")),
+                ChamadoMensagem.status.in_(("pendente", "falhou", "segurada")),
                 ChamadoMensagem.canal != "robo",  # já está na fila do robô
                 Chamado.resolvido.is_(False),
             )

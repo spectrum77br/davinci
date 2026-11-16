@@ -20,12 +20,13 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.models import Chamado, DevolucaoAnexo, Devolution, UserRole
 from app.routers.devolutions import PAINEL_LARGADA
 from app.services import devolucao_painel as contas
 from app.services.devolucao_painel import Lancamento
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
 pytestmark = pytest.mark.asyncio
 
@@ -477,7 +478,8 @@ async def test_lista_pega_quem_caiu_em_devolucao_e_so_sai_no_resolver(
     # Resolvido pelo botão: sai das abertas.
     await _pedido(db, "700004", "545902", entrada=hoje - timedelta(days=20))
     await _resolvido(db, "700004", agora - timedelta(days=1), "Voltou pro estoque")
-    # Histórico de antes do painel novo: nunca aparece.
+    # Histórico de antes do painel novo: fora das abertas; desde 16/11 aparece em
+    # Resolvidas ("esses antigos não conseguimos trazer já como resolvidos?").
     await _pedido(db, "700005", "545902", entrada=hoje - timedelta(days=40))
     await _resolvido(db, "700005", agora - timedelta(days=1), PAINEL_LARGADA)
     # Nunca passou por devolução: fora.
@@ -511,10 +513,12 @@ async def test_lista_pega_quem_caiu_em_devolucao_e_so_sai_no_resolver(
     assert por_pedido["700003"][0]["etapa"] == "manutencao"
 
     resolvidas = (await client.get("/api/devolucoes-painel?mostrar=resolvidas")).json()
-    assert {i["pedido_bling"] for i in resolvidas["items"]} == {"700004"}
-    assert resolvidas["items"][0]["resolvido_como"] == "Voltou pro estoque"
+    como = {i["pedido_bling"]: i["resolvido_como"] for i in resolvidas["items"]}
+    assert como == {"700004": "Voltou pro estoque", "700005": PAINEL_LARGADA}
     todas = (await client.get("/api/devolucoes-painel?mostrar=todas")).json()
-    assert {i["pedido_bling"] for i in todas["items"]} == {"700001", "700002", "700003", "700004"}
+    assert {i["pedido_bling"] for i in todas["items"]} == {
+        "700001", "700002", "700003", "700004", "700005"
+    }
 
 
 async def test_resolver_tira_da_lista_e_reabrir_devolve(
