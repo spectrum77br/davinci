@@ -846,3 +846,49 @@ async def test_indexar_uma_conversa_na_hora(db: AsyncSession, make_user):
     assert await banco_respostas.indexar_conversa(db, conversa) == 1
     await db.commit()
     assert len(await _respostas(db, conversa.id)) == 1
+
+
+# ── O PADRÃO DA EQUIPE por tipo (16/11/2026) ─────────────────────────────────
+
+
+async def test_o_padrao_do_tipo_sao_as_respostas_que_a_equipe_mais_repete(
+    db: AsyncSession, make_user
+):
+    loja = (await _conversa(db, make_user, externo_id="pd1")).integration_id
+    outra = (await _conversa(db, make_user, externo_id="pd2")).integration_id
+    assert loja != outra
+    for _ in range(3):
+        await _resposta(db, integ=outra, tipo="defeito", resposta="Consegue fazer um vídeo!")
+    await _resposta(db, integ=loja, tipo="defeito", resposta="consegue fazer um video")
+    for _ in range(2):
+        await _resposta(db, integ=outra, tipo="defeito", resposta="Pode devolver para a Shopee!")
+    # Uma vez só não é padrão; outro tipo, outra plataforma ou inativa também não.
+    await _resposta(db, integ=loja, tipo="defeito", resposta="Já trocou o carregador?")
+    await _resposta(db, integ=loja, tipo="reembolso", resposta="Pode devolver para a Shopee!")
+    await _resposta(db, integ=loja, tipo="defeito", plataforma="ml", resposta="Pode devolver!")
+    await _resposta(db, integ=loja, tipo="defeito", status="aposentada", resposta="Pode devolver!")
+    padroes = await banco_respostas.padroes_do_tipo(
+        db, tipo="defeito", plataforma="shopee", integration_id=loja, as_of=datetime.now(UTC)
+    )
+    assert [(p["padrao"], p["resposta"]) for p in padroes] == [
+        # A mesma resposta com outra pontuação e acento conta junto; a da MESMA loja representa.
+        (4, "consegue fazer um video"),
+        (2, "Pode devolver para a Shopee!"),
+    ]
+    assert padroes[0]["mesma_loja"] is True and padroes[1]["mesma_loja"] is False
+    assert all(p["id"].startswith("par:b") and p["tipo"] == "defeito" for p in padroes)
+    # Tipo de produto (depende do modelo) não tem padrão.
+    assert not await banco_respostas.padroes_do_tipo(
+        db, tipo="espec_celular", plataforma="shopee", integration_id=loja, as_of=datetime.now(UTC)
+    )
+
+
+def test_a_secao_do_padrao_no_pacote():
+    from app.services.atendimento.agente import pacote
+
+    texto = pacote.secao_do_padrao(
+        [{"id": "par:b7", "resposta": "Consegue fazer um vídeo!", "padrao": 4}], "Defeito"
+    )
+    assert texto.startswith("PADRÃO DA EQUIPE PARA ESTE TIPO DE CASO (Defeito)")
+    assert "- par:b7 (a equipe respondeu assim 4 vezes): «Consegue fazer um vídeo!»" in texto
+    assert pacote.secao_do_padrao([], "Defeito") is None

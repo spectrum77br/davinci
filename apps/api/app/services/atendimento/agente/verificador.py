@@ -2016,11 +2016,14 @@ def linhas_dos_pares(
             )
         else:
             produto = f"de outro anúncio ou sem anúncio: {NAO_VALE_PRODUTO}"
-        loja = (
-            f"desta loja: {VALE_POLITICA}"
-            if par.get("mesma_loja")
-            else f"de outra loja: {NAO_VALE_POLITICA}"
-        )
+        if virada and par.get("padrao"):
+            # O padrão da equipe (16/11/2026, `banco_respostas.padroes_do_tipo`): a resposta que
+            # a equipe repetiu para o tipo de caso é a política da empresa, de qualquer loja.
+            loja = f"padrão da equipe, {int(par['padrao'])} respostas iguais: {VALE_POLITICA}"
+        elif par.get("mesma_loja"):
+            loja = f"desta loja: {VALE_POLITICA}"
+        else:
+            loja = f"de outra loja: {NAO_VALE_POLITICA}"
         pergunta = _uma_linha(_mascarar_nomes(str(par.get("pergunta") or ""), nomes), 300)
         resposta = _uma_linha(_mascarar_nomes(str(par.get("resposta") or ""), nomes), 400)
         linhas.append(

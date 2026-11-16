@@ -175,6 +175,27 @@ BANCO_CABECALHO = (
     "(rastreio, data, valor, situação) nunca vem daqui. Responda como a equipe respondeu e cite "
     "o par:<id> que seguir:"
 )
+# O PADRÃO DA EQUIPE (16/11/2026, `banco_respostas.padroes_do_tipo`): o Eduardo — "ele é o
+# atendente, ele tem o padrão do que a empresa faz em caso de reclamação".
+PADRAO_CABECALHO = (
+    "PADRÃO DA EQUIPE PARA ESTE TIPO DE CASO ({tipo}): o que a equipe da loja mais responde "
+    "nesses casos — é assim que a loja atende. Responda seguindo o que servir a este cliente, "
+    "CURTO como a equipe e com cortesia; não acrescente passo a passo, prazo, promessa ou "
+    "informação que a equipe não dá. Cite o par:<id> que seguir:"
+)
+
+
+def secao_do_padrao(padroes: Sequence[Mapping[str, Any]], tipo: str) -> str | None:
+    """A seção do PADRÃO DA EQUIPE (vazia sem padrão). PURA."""
+    if not padroes:
+        return None
+    linhas = [PADRAO_CABECALHO.format(tipo=tipo)]
+    for p in padroes:
+        vezes = int(p.get("padrao") or 0)
+        linhas.append(
+            f"- {p['id']} (a equipe respondeu assim {vezes} vezes): «{p.get('resposta') or ''}»"
+        )
+    return "\n".join(linhas)
 
 
 def quando_do_par(par: Mapping[str, Any]) -> str:
@@ -1375,6 +1396,32 @@ async def montar_pacote(
             *(politica or []),
             *(p for p in da_equipe or [] if p.get("id") not in ids_da_politica),
         ][:limite_equipe]
+    # O PADRÃO DA EQUIPE para o tipo do turno (16/11/2026, a virada): antes das outras respostas
+    # do banco; citável e candidata da conferência (`ctx.registrar_pares`).
+    if banco and busca:
+        from app.services.atendimento import banco_respostas as banco_svc
+        from app.services.atendimento import duvida, tipos_pergunta
+
+        tipo_do_turno = tipos_pergunta.tipo_de(busca)
+        padroes = await contexto_svc._seguro(
+            session,
+            "agente_padroes",
+            lambda: banco_svc.padroes_do_tipo(
+                session,
+                tipo=tipo_do_turno,
+                plataforma=conversa.plataforma,
+                integration_id=conversa.integration_id,
+                as_of=agora,
+            ),
+            [],
+            conversa.id,
+        )
+        secao_padrao = secao_do_padrao(padroes or [], duvida.nome_do_assunto(tipo_do_turno))
+        if padroes and secao_padrao:
+            partes.append(secao_padrao)
+            ctx.registrar_pares(padroes)
+            ids_do_padrao = {p["id"] for p in padroes}
+            da_equipe = [p for p in da_equipe or [] if p.get("id") not in ids_do_padrao]
     if da_equipe:
         secao, mostrados = secao_da_equipe(da_equipe, banco=banco)
         if secao:

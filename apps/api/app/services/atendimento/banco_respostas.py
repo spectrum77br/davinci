@@ -1151,6 +1151,117 @@ async def exemplos_da_politica_de_entrega(
     return saida
 
 
+# ── O PADRÃO DA EQUIPE por tipo de caso (16/11/2026) ──────────────────────────
+#
+# O Eduardo: "ele é o atendente, ele tem o padrão do que a empresa faz em caso de reclamação". O
+# teste de 16/11 (129 conversas): nos 19 rascunhos de reclamação presos para pessoa, o agente
+# escreveu a resposta dele, longa, e o banco mostrava casos de outros assuntos (capinha, chip) —
+# a conferência disse "diferente" nos 19. A equipe responde CURTO e se repete: defeito → "qual
+# seria o defeito?", "consegue fazer um vídeo?", "pode devolver para a plataforma"; reembolso →
+# "o reembolso é feito pela plataforma, não temos acesso". O padrão do tipo = as respostas que a
+# equipe mais repetiu para ele (o miolo igual), na plataforma da conversa: vai ao pacote antes das
+# outras respostas do banco, é candidata da conferência e vale como política para o verificador.
+# Só nos tipos de processo e reclamação (os de produto dependem do modelo; a região e a origem do
+# envio, da loja).
+TIPOS_COM_PADRAO = frozenset(
+    {
+        "cancelamento",
+        "defeito",
+        "desconto",
+        "endereco",
+        "entrega_instrucoes",
+        "entrega_nao_recebida",
+        "garantia",
+        "item_errado_faltando",
+        "nota_fiscal",
+        "pedido_nao_localizado",
+        "prazo_envio",
+        "preco_pagamento",
+        "rastreio",
+        "reclamacao_forte",
+        "reembolso",
+        "troca_devolucao",
+    }
+)
+MAX_PADROES = 5
+MIN_REPETICOES_PADRAO = 2
+MAX_CHARS_PADRAO = 300
+# As mais novas do tipo na plataforma (o padrão de hoje; o tipo com mais respostas tem ~350).
+MAX_LINHAS_PADRAO = 1500
+
+
+def miolo_do_padrao(texto: str | None) -> str:
+    """O texto sem saudação, fecho, pontuação e números — o que conta como "a mesma resposta"."""
+    from app.services.atendimento import juiz_edicao
+
+    return re.sub(r"\d+", "#", juiz_edicao.miolo(texto))
+
+
+async def padroes_do_tipo(
+    session: AsyncSession,
+    *,
+    tipo: str | None,
+    plataforma: str,
+    integration_id: UUID | None,
+    as_of: datetime,
+) -> list[dict]:
+    """As respostas que a equipe mais repetiu para o TIPO de caso na plataforma, no formato do
+    pacote, com `padrao` = quantas vezes (ver acima). A representante de cada uma é a da MESMA
+    loja quando há, senão a mais nova. Só lê."""
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    if tipo not in TIPOS_COM_PADRAO:
+        return []
+    t = AtendimentoResposta
+    linhas = (
+        await session.execute(
+            select(t.id, t.pergunta, t.resposta, t.integration_id, t.respondido_em)
+            .where(
+                t.status == STATUS_ATIVA,
+                t.tipo == tipo,
+                t.plataforma == plataforma,
+                t.respondido_em < as_of,
+            )
+            .order_by(t.respondido_em.desc(), t.id)
+            .limit(MAX_LINHAS_PADRAO)
+        )
+    ).all()
+    grupos: dict[str, list[Any]] = {}
+    for linha in linhas:
+        resposta = linha.resposta or ""
+        if (
+            len(resposta) > MAX_CHARS_PADRAO
+            or not pares.serve_ao_pacote(resposta, virada=True)
+            or pares.tem_mascara_de_dado(resposta)
+            or pares.tem_dado_pessoal(resposta)
+            or pares.tem_dado_pessoal(linha.pergunta)
+        ):
+            continue
+        if miolo := miolo_do_padrao(resposta):
+            grupos.setdefault(miolo, []).append(linha)
+    repetidos = [g for g in grupos.values() if len(g) >= MIN_REPETICOES_PADRAO]
+    repetidos.sort(key=lambda g: (-len(g), -g[0].respondido_em.timestamp()))
+    saida: list[dict] = []
+    for grupo in repetidos[:MAX_PADROES]:
+        rep = next((g for g in grupo if g.integration_id == integration_id), grupo[0])
+        saida.append(
+            {
+                "id": agente_ctx.id_par(f"b{rep.id}"),
+                "pergunta": pares.para_o_pacote(rep.pergunta, pares.MAX_CHARS_PERGUNTA_PACOTE),
+                "resposta": pares.para_o_pacote(rep.resposta, pares.MAX_CHARS_RESPOSTA_PACOTE),
+                "mesma_loja": integration_id is not None and rep.integration_id == integration_id,
+                "mesmo_anuncio": False,
+                "mesmo_produto": False,
+                "fonte_de_produto": False,
+                "com_anuncio": False,
+                "idade_dias": int(max(0.0, (as_of - rep.respondido_em).total_seconds() / 86400)),
+                "tipo": tipo,
+                "padrao": len(grupo),
+            }
+        )
+    return saida
+
+
 # ── A correção da revisão diária (13/11/2026) ─────────────────────────────────
 #
 # A tela do banco (routers/atendimento_banco.py): no 👎 ao que a IA mandou SOZINHA, a correção

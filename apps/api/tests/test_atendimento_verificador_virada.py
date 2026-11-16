@@ -314,3 +314,12 @@ def test_o_pacote_marca_a_do_mesmo_modelo_como_valendo_para_produto():
     outro = _par("par:b8", um_modelo=True)
     assert "não vale para produto" in pacote._onde_do_par(outro)
     assert "outro modelo NÃO vale" in pacote.BANCO_CABECALHO
+
+
+def test_o_padrao_da_equipe_vale_como_politica_para_o_verificador():
+    par = _par("par:b7", padrao=4, resposta="Pode devolver para a Shopee!")
+    assert f"padrão da equipe, 4 respostas iguais: {verificador.VALE_POLITICA}" in _linha(
+        par, virada=True
+    )
+    # Fora da virada, a regra de sempre (de outra loja não vale para a política).
+    assert verificador.NAO_VALE_POLITICA in _linha(par, virada=False)
