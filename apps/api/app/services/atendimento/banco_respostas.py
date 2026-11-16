@@ -1140,6 +1140,8 @@ async def do_modelo_sobre(
                 "mesmo_modelo": True,
                 "mesma_loja": integration_id is not None and linha.integration_id == integration_id,
                 "mesmo_tipo": False,
+                # A característica do modelo (`exemplos_do_turno`: na frente de todas).
+                "caracteristica": True,
             }
         )
         if len(saida) >= MAX_DO_MODELO_SOBRE:
@@ -1262,8 +1264,11 @@ async def exemplos_do_turno(
             "mesmo_tipo": bool(a["mesmo_tipo"]),
             "mesmo_modelo": bool(a["mesmo_modelo"]),
             # 16/11/2026 (a virada): a conversa de UM anúncio de UM modelo — o verificador
-            # aceita a do mesmo produto ou modelo como lastro de produto só nela.
-            "um_modelo": bool(um_modelo),
+            # aceita a do mesmo produto ou modelo como lastro de produto só nela. A resposta da
+            # equipe sobre a característica do modelo (`do_modelo_sobre`) vale também quando o
+            # anúncio tem um código de modelo só (as versões de RAM e memória do mesmo modelo):
+            # com dois modelos no anúncio, só no modelo que a resposta nomeia.
+            "um_modelo": bool(um_modelo) or (bool(a.get("caracteristica")) and len(modelos) == 1),
             # 13/11/2026 (a virada): o TIPO da resposta no banco. Sem ele, a conferência pelo
             # sentido (`agente.confere_banco.candidatas`) e o `fatos.agente.banco_tipos` nunca
             # achavam a resposta do mesmo tipo — o "bateu com a do banco" não rodava.
@@ -1276,6 +1281,9 @@ async def exemplos_do_turno(
         saida.append(
             (
                 (
+                    # 16/11/2026: a característica do mesmo modelo primeiro (antes, "mesmo tipo"
+                    # na frente e o corte do `limite` tiravam essas do pacote).
+                    0 if a.get("caracteristica") else 1,
                     0 if a["mesmo_tipo"] else 1,
                     0 if par["mesmo_produto"] else 1,
                     0 if a["mesma_loja"] else 1,

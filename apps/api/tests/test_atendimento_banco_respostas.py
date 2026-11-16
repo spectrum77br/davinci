@@ -1083,3 +1083,31 @@ async def test_a_busca_traz_a_resposta_do_mesmo_modelo_sobre_a_caracteristica(
     assert not await banco_respostas.do_modelo_sobre(
         db, pergunta="oi", modelos={"F110"}, integration_id=loja, conversa_id=None, as_of=agora
     )
+
+
+async def test_no_pacote_a_caracteristica_do_modelo_vem_primeiro_e_vale_com_um_codigo(
+    db: AsyncSession, make_user
+):
+    conversa = await _conversa(db, make_user, externo_id="dm2")
+    loja = conversa.integration_id
+    # Muitas do MESMO tipo (espec_celular) sobre outra coisa, que antes tomavam os lugares.
+    for n in range(10):
+        await _resposta(db, integ=loja, modelos=("A17",), resposta=f"Sim, tem NFC no Premium {n}!")
+    await _resposta(
+        db, integ=loja, modelos=("A17",), tipo="conteudo_da_caixa", resposta="Vai com carregador!"
+    )
+    pares_ = await banco_respostas.exemplos_do_turno(
+        db,
+        pergunta="Vem com carregador?",
+        plataforma="shopee",
+        integration_id=loja,
+        item_ids=["58200000001"],
+        conversa_id=conversa.id,
+        as_of=datetime.now(UTC),
+        titulos={"58200000001": "Celular Uranyx A17 Pro Max 12/128"},
+        limite=3,
+        virada=True,
+    )
+    assert pares_[0]["resposta"] == "Vai com carregador!"
+    # Anúncio com um código de modelo só: a da característica vale para produto.
+    assert pares_[0]["um_modelo"] is True and pares_[0]["mesmo_produto"] is True
