@@ -7728,11 +7728,25 @@ def _cita_o_anuncio(plano: str, m: re.Match[str]) -> bool:
     return bool(re.match(r"\s*:\s*[\"'“”‘’«]", depois)) and not _REVISAO_OU_ENVIO.search(frase)
 
 
+# 16/11/2026 (Barbosa, mygoogle334): o status da plataforma CITADO entre aspas ("o último status é
+# «Seu pedido foi conferido e liberado para separação»") não é recado ao revisor — o trecho
+# entre aspas que fala do pedido ou do produto. O "texto conferido e aprovado" entre aspas, sem o
+# pedido, continua.
+_ENTRE_ASPAS = re.compile(r"[\"“”«][^\"“”«»\n]{1,240}[\"“”»]")
+
+
+def _cita_o_pedido_entre_aspas(plano: str, m: re.Match[str]) -> bool:
+    return any(
+        a.start() <= m.start() and m.end() <= a.end() and _DO_PEDIDO_OU_PRODUTO.search(a.group(0))
+        for a in _ENTRE_ASPAS.finditer(plano)
+    )
+
+
 def recado_ao_revisor(texto: str | None) -> str | None:
     """O trecho do texto do AGENTE que fala com o revisor/verificador, ou None. PURA."""
     plano = _plano(texto)
     for m in _RECADO_AO_REVISOR.finditer(plano):
-        if _cita_o_anuncio(plano, m):
+        if _cita_o_anuncio(plano, m) or _cita_o_pedido_entre_aspas(plano, m):
             continue
         return " ".join(m.group(0).split())[:40]
     if m := _RECADO_NO_TEXTO_CRU.search(
@@ -9536,6 +9550,16 @@ _PRAZO_DO_REEMBOLSO = re.compile(
     r"|(?:fim|final|comeco|inicio)\s+d[eo]\s+(?:mes|semana)|em\s+breve|logo\s+logo|rapidinho"
     r"|dia\s+\d{1,2}|\d{1,2}\s*/\s*\d{1,2}|r\$\s*\d|\d+\s*reais)\b"
 )
+_DATA_DO_QUE_JA_ACONTECEU = re.compile(
+    r"\b(?:foi|foram|ja\s+foi|ja\s+foram)?\s*(?:postad|enviad|entregu|coletad|comprad|feit|realizad"
+    r"|pag|despachad|separad|faturad|criad|abert|aprovad|cancelad|devolvid)\w*\s+(?:em|no\s+dia|dia)"
+    r"\s+\d{1,2}\s*/\s*\d{1,2}(?:\s*/\s*\d{2,4})?"
+)
+_NEGA_O_PRAZO = re.compile(
+    r"\b(?:nao|nem)\s+(?:\w+\s+){0,3}?(?:dizer|confirmar|garantir|informar|prometer|saber|prever"
+    r"|precisar|afirmar)\s+(?:\w+\s+){0,8}?(?:hoje|amanha|depois\s+de\s+amanha|essa\s+semana"
+    r"|esta\s+semana|nesta\s+semana|em\s+breve|quando)\b"
+)
 _PIX_OU_BANCO = re.compile(
     r"\bpix\b|\bchave\b|\bconta\s+(?:bancaria|corrente|poupanca)\b|\bdados\s+bancarios\b"
     r"|\bagencia\s+e\s+conta\b|\btransferencia\b|\bdeposito\b"
@@ -9575,11 +9599,14 @@ def conferir_responde_e_marca(
         return []
     plano = " ".join(_plano(texto).split())
     achados: list[str] = []
+    # 16/11/2026 (Barbosa, mygoogle334): "foi postado em 12/11/2026" (a data do que já aconteceu,
+    # do pedido) e "não conseguimos dizer se ele chega hoje" (a negativa honesta) não prometem data.
+    sem_o_passado = _DATA_DO_QUE_JA_ACONTECEU.sub(" ", _NEGA_O_PRAZO.sub(" ", plano))
     if disputa and _reembolso_sem_condicao(plano):
         achados.append("dá o reembolso como certo na disputa")
     if _DECIDE_A_DEVOLUCAO.search(plano):
         achados.append("decide ou dá o resultado da devolução/do reembolso")
-    if _PRAZO_DO_REEMBOLSO.search(plano):
+    if _PRAZO_DO_REEMBOLSO.search(sem_o_passado):
         achados.append("promete data, prazo ou valor")
     if _PIX_OU_BANCO.search(plano):
         achados.append("fala de Pix ou dados bancários")

@@ -854,3 +854,24 @@ def test_v16_a_palavra_chave_so_com_o_pedido_enviado():
     assert checagens.conferir_palavra_chave_sem_envio(texto, None, acao="responder")
     for enviado in ({"enviado": True}, {"postado": "sim"}):
         assert checagens.conferir_palavra_chave_sem_envio(texto, enviado, acao="responder") == []
+
+
+def test_o_status_citado_e_a_data_do_que_ja_aconteceu_nao_seguram():
+    """16/11/2026 (Barbosa, mygoogle334): a resposta certa ficava BLOQUEADA por dois alarmes
+    falsos — o status da Shopee citado entre aspas ("conferido e liberado") lido como recado ao
+    revisor, e a data da postagem ("postado em 12/11/2026") e a negativa ("não conseguimos dizer se
+    ele chega hoje") lidas como promessa de prazo no "responde e marca"."""
+    texto = (
+        "Olá! Entendemos a sua preocupação: o seu pedido foi postado em 12/11/2026, e o último "
+        'status é "Seu pedido foi conferido e liberado para separação". Depois do envio, a '
+        "entrega fica com a Shopee e nós não temos acesso ao transporte, então não conseguimos "
+        "dizer se ele chega hoje. Vale o prazo que aparece em Minhas Compras > o pedido."
+    )
+    assert checagens.recado_ao_revisor(texto) is None
+    assert checagens.conferir_responde_e_marca(texto, acao="responder", marca=True) == []
+    # O que continua: o recado de verdade (com ou sem aspas) e a promessa de data.
+    assert checagens.recado_ao_revisor("Texto conferido e aprovado.")
+    assert checagens.recado_ao_revisor('"texto conferido e aprovado"')
+    for promessa in ("O reembolso cai amanhã.", "O reembolso sai dia 20/11.", "Chega hoje."):
+        achados = checagens.conferir_responde_e_marca(promessa, acao="responder", marca=True)
+        assert achados, promessa
