@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Plus, RefreshCw, X, Trash2, Search, Send, ImagePlus, ChevronLeft, ChevronRight, Copy, NotebookPen, ArrowLeftRight, UserRound, MessageCircle, Megaphone, MapPin, Mail, Ban, ExternalLink, Combine, Download, Truck, PackageX } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
+import type { FlexPedidoSemPeca } from '~/components/LogisticaFlexPedidosSemPeca.vue'
 
 definePageMeta({
   middleware: ['permission'],
@@ -96,7 +97,8 @@ function ehEnvioProprio(c: Logistica): boolean {
 // Aba Flex: duas sub-abas, no mesmo padrão da Amazon. "Pedidos Flex" é a
 // lista de sempre (mesmas colunas, filtros e ações); "Anúncios Flex" é a tela
 // do Flex por anúncio (components/LogisticaFlexAnuncios: modo, aprovação,
-// sincronizar, emergência e os pedidos Flex sem peça em SP).
+// sincronizar, emergência). Os pedidos Flex sem peça ficam em Pedidos Flex
+// (LogisticaFlexPedidosSemPeca, 16/11/2026).
 type FlexSub = 'pedidos' | 'anuncios'
 const flexSub = ref<FlexSub>('pedidos')
 const flexAnuncios = computed(() => tab.value === 'flex' && flexSub.value === 'anuncios')
@@ -842,6 +844,9 @@ const flexPedidosCount = computed(() =>
 // esperam aprovação para ligar o Flex — vai no rótulo da sub-aba. Só leitura;
 // se a API do Flex falhar, a Logística segue normal sem os avisos.
 const flexAlertas = ref<Record<string, string>>({})
+// A lista inteira vai para o quadro "Pedidos Flex sem peça", embaixo da lista
+// de Pedidos Flex (16/11/2026: saiu da sub-aba Anúncios Flex).
+const flexPedidosSemPeca = ref<FlexPedidoSemPeca[]>([])
 const flexAguardando = ref(0)
 // Só depois de montar: o refresh() também roda no setup (SSR e de novo na
 // hidratação) e um aviso chegando no meio da hidratação deixaria o HTML do
@@ -851,9 +856,7 @@ async function carregarResumoFlex() {
   if (!flexMontado || !podeVerFlex.value || !['ml', 'shopee', 'flex'].includes(tab.value)) return
   try {
     const [pedidos, anuncios] = await Promise.all([
-      api<Array<{ numero: string | null; alerta: string | null; acerto_pendente?: boolean; lote?: string }>>(
-        '/api/flex/pedidos?so_alerta=true&abertos=true',
-      ),
+      api<FlexPedidoSemPeca[]>('/api/flex/pedidos?so_alerta=true&abertos=true'),
       tab.value === 'flex'
         ? api<{ resumo?: { aguardando: number } }>('/api/flex/anuncios?limit=1')
         : Promise.resolve(null),
@@ -864,10 +867,11 @@ async function carregarResumoFlex() {
       if (p.acerto_pendente)
         mapa[p.numero] =
           `Saiu pelo Flex sem passar pelo .${p.lote || flexLocal.value.lote}: o Bling baixou outro lote. ` +
-          `Acerte o estoque no Bling (transferência para o .${p.lote || flexLocal.value.lote}) e marque em Flex › Anúncios Flex.`
+          `Acerte o estoque no Bling (transferência para o .${p.lote || flexLocal.value.lote}) e marque "Estoque acertado" no quadro Pedidos Flex sem peça, embaixo da lista.`
       else if (p.alerta) mapa[p.numero] = p.alerta
     }
     flexAlertas.value = mapa
+    flexPedidosSemPeca.value = pedidos || []
     if (anuncios) flexAguardando.value = anuncios.resumo?.aguardando || 0
   } catch {
     // informativo — sem os avisos a tela continua funcionando
@@ -884,11 +888,15 @@ function flexSeloTitulo(c: Logistica): string {
   const base = flexSeloTituloBase.value
   return c.envio_tipo ? `${base}\nTipo de envio na plataforma: ${c.envio_tipo}` : base
 }
-// Clique num pedido da lista "sem peça em SP" (sub-aba Anúncios Flex): volta
-// para "Pedidos Flex" já buscando o pedido.
+// Clique num pedido do quadro "sem peça em SP": a lista de Pedidos Flex já
+// busca o pedido.
 function buscarPedidoFlex(numero: string) {
   flexSub.value = 'pedidos'
   search.value = numero
+  if (typeof window !== 'undefined') window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+function irParaSemPeca() {
+  if (typeof document !== 'undefined') document.getElementById('flex-pedidos-sem-sp')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 // ---- Prazos da Amazon (só leitura) ----
@@ -2841,8 +2849,8 @@ async function aplicarStatusBling(c: Logistica) {
           v-if="tab === 'flex' && Object.keys(flexAlertas).length && flexSub === 'pedidos'"
           type="button"
           class="inline-flex items-center gap-1 rounded-md border border-rose-300 bg-rose-50 px-2.5 py-1 text-rose-800 hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-300"
-          :title="`Ver a lista dos pedidos Flex sem peça em ${flexLocal.cidade} (na sub-aba Anúncios Flex)`"
-          @click="flexSub = 'anuncios'"
+          :title="`Ver o quadro dos pedidos Flex sem peça em ${flexLocal.cidade} (embaixo da lista)`"
+          @click="irParaSemPeca"
         >
           {{ Object.keys(flexAlertas).length }} pedido(s) Flex sem peça em {{ flexLocal.cidade }}
         </button>
@@ -2971,7 +2979,6 @@ async function aplicarStatusBling(c: Logistica) {
     <LogisticaFlexAnuncios
       v-if="flexAnuncios"
       :can-edit="canEdit"
-      @buscar-pedido="buscarPedidoFlex"
       @mudou="aoMudarFlex"
     />
 
@@ -3120,7 +3127,7 @@ async function aplicarStatusBling(c: Logistica) {
             <!-- 13/11/2026: na aba Amazon, DBA e Envio próprio juntos — a coluna Envio
                  (96px: cabe "Envio próprio" na etiqueta) entra depois da Data; Previsão,
                  Entregar até e Suspensão ficam pra todos e saem "—" no DBA. -->
-            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehAmazonTab ? 'min-w-[1680px]' : ehFlexTab ? 'min-w-[1680px]' : 'min-w-[1460px]'">
+            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="ehAmazonTab ? 'min-w-[1680px]' : ehFlexTab ? 'min-w-[1680px] [&_td]:text-center [&_th]:text-center' : 'min-w-[1460px]'">
               <colgroup>
                 <col class="w-[46px]"><col v-if="ehAmazonTab" class="w-[96px]"><col class="w-[76px]"><col :class="ehAmazonTab ? 'w-[160px]' : 'w-[150px]'"><col :class="ehAmazonTab ? 'w-[70px]' : 'w-[84px]'">
                 <!-- Aba Flex (16/11/2026): Cliente depois da Conta; sem Localização (quem diz onde está o pacote é o Tracken, que fica com a sobra). -->
@@ -3292,8 +3299,18 @@ async function aplicarStatusBling(c: Logistica) {
                       class="inline-block rounded px-2 py-0.5 text-[11px] font-semibold"
                       :class="COR_SITUACAO_CHAMADO[situacaoChamado(c)!]"
                     >{{ situacaoChamado(c) }}</span>
-                    <span v-else-if="!problemaSemChamado(c)" class="text-muted-foreground">—</span>
+                    <span v-else-if="!problemaSemChamado(c) && !(ehFlexTab && podeNaoEntregue(c))" class="text-muted-foreground">—</span>
                     <div v-if="problemaSemChamado(c)" class="text-[10.5px] font-bold text-red-600 dark:text-red-400" title="Status Bling Problemas e nenhum chamado aberto: ninguém está olhando este pedido">sem chamado aberto</div>
+                    <!-- Aba Flex (16/11/2026): o botão do Raio-X também aqui. -->
+                    <button
+                      v-if="ehFlexTab && podeNaoEntregue(c)"
+                      type="button"
+                      class="mt-0.5 inline-flex items-center gap-0.5 whitespace-nowrap rounded border px-1.5 py-px text-[10px] font-semibold hover:bg-muted"
+                      :class="c.tracken?.tentativas ? 'border-rose-300 bg-rose-50 text-rose-700 hover:bg-rose-100 dark:border-rose-700 dark:bg-rose-950/40 dark:text-rose-300' : 'text-muted-foreground'"
+                      title="Não conseguiu entregar: abre o chamado na loja e manda mensagem ao cliente — você confere os dois textos antes"
+                      data-nao-entregue-linha
+                      @click.stop="abrirNaoEntregue(c)"
+                    ><PackageX class="size-3" /> Não entregou</button>
                   </td>
                   <td class="px-1.5 py-1.5 text-center">
                     <span v-if="precisaAtencao(c)" class="rounded bg-amber-100 px-1.5 py-0.5 text-[10.5px] font-semibold text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">{{ c.envio_flex === true ? 'sem regra Flex' : 'sem regra' }}</span>
@@ -3651,6 +3668,17 @@ async function aplicarStatusBling(c: Logistica) {
           </template>
         </div>
       </div>
+      <!-- 16/11/2026: o quadro dos pedidos Flex sem peça só aqui (saiu de Anúncios Flex). -->
+      <LogisticaFlexPedidosSemPeca
+        v-if="tab === 'flex' && podeVerFlex && flexPedidosSemPeca.length"
+        class="mt-3"
+        :pedidos="flexPedidosSemPeca"
+        :can-edit="canEdit"
+        :cidade="flexLocal.cidade"
+        :lote="flexLocal.lote"
+        @buscar-pedido="buscarPedidoFlex"
+        @mudou="aoMudarFlex"
+      />
       <!-- Mobile cards -->
       <div class="md:hidden space-y-2">
         <div

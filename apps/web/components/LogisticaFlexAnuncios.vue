@@ -27,7 +27,6 @@ import {
   PowerOff,
   Check,
   ExternalLink,
-  TriangleAlert,
   ChevronLeft,
   ChevronRight,
   ChevronDown,
@@ -35,8 +34,6 @@ import {
 
 const props = defineProps<{ canEdit: boolean }>()
 const emit = defineEmits<{
-  // Pede à página para mostrar o pedido na lista "Pedidos Flex".
-  (e: 'buscar-pedido', numero: string): void
   // Algo mudou (aprovação, emergência): a página recarrega os contadores.
   (e: 'mudou'): void
 }>()
@@ -157,28 +154,11 @@ type FlexResumo = {
   da_para_ter?: number
   conta_nao_pronta?: number
 }
-type FlexPedido = {
-  bling_id: number
-  numero: string | null
-  lote?: string
-  plataforma: string
-  conta: string | null
-  numeroloja: string | null
-  prazo: string | null
-  detectado_em: string
-  alerta: string | null
-  situacao: string | null
-  skus: string[]
-  // Saiu sem passar pelo .sp: o saldo Flex segue descontando até alguém
-  // marcar que acertou o estoque no Bling.
-  acerto_pendente: boolean
-}
 
 const config = ref<FlexConfig | null>(null)
 const itens = ref<FlexAnuncio[]>([])
 const total = ref(0)
 const resumo = ref<FlexResumo>({ avaliados: 0, ligados: 0, aguardando: 0, desligar: 0, nao_lidos: 0 })
-const pedidosSemSp = ref<FlexPedido[]>([])
 const loading = ref(false)
 const erro = ref<string | null>(null)
 
@@ -306,16 +286,8 @@ async function carregarAnuncios() {
   }
 }
 
-async function carregarPedidos() {
-  try {
-    pedidosSemSp.value = await api<FlexPedido[]>('/api/flex/pedidos?so_alerta=true&abertos=true')
-  } catch {
-    // Lista informativa: falhar aqui não pode esconder a tabela de anúncios.
-  }
-}
-
 async function carregarTudo() {
-  await Promise.all([carregarConfig(), carregarAnuncios(), carregarPedidos()])
+  await Promise.all([carregarConfig(), carregarAnuncios()])
 }
 
 watch([filtroPlataforma, filtroConta, filtroQuer, filtroAcao, buscaAplicada, filtroPecas], () => {
@@ -335,7 +307,6 @@ function tick() {
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
   if (loading.value || aprovando.value.size || emLote.value || sincronizando.value) return
   carregarAnuncios()
-  carregarPedidos()
 }
 onMounted(() => {
   carregarTudo()
@@ -740,11 +711,6 @@ function fmtDesde(iso: string | null | undefined): string {
   if (seg < 86400) return `há ${Math.floor(seg / 3600)} h`
   const dias = Math.floor(seg / 86400)
   return dias === 1 ? 'há 1 dia' : `há ${dias} dias`
-}
-function prazoVencido(p: FlexPedido): boolean {
-  if (!p.prazo) return false
-  const d = new Date(p.prazo)
-  return !Number.isNaN(d.getTime()) && d.getTime() < Date.now()
 }
 
 const MOTIVO_SERVIDOR: Record<string, string> = {
@@ -1237,36 +1203,6 @@ function andamentoTexto(e: FlexEmergencia): string {
   )
 }
 
-// Pedido Flex que saiu sem passar pelo .sp: a pessoa diz que acertou o
-// estoque no Bling (transferência para o .sp) — o saldo Flex para de descontar.
-const acertando = ref<Set<number>>(new Set())
-async function marcarAcertado(p: FlexPedido) {
-  if (!props.canEdit || acertando.value.has(p.bling_id)) return
-  const ok = confirm(
-    `Pedido ${p.numero || p.bling_id}: você já acertou o estoque no Bling?\n\n` +
-      `Ele saiu pelo Flex (estoque .${p.lote || localLote.value}), mas o Bling baixou outro lote. Confirme só depois ` +
-      `de transferir a peça para o .${p.lote || localLote.value} no Bling — até lá o sistema desconta o pedido das peças livres de lá.`,
-  )
-  if (!ok) return
-  acertando.value = new Set([...acertando.value, p.bling_id])
-  try {
-    await api(`/api/flex/pedidos/${p.bling_id}/acertado`, { method: 'POST' })
-    toasts.success('Estoque acertado', `Pedido ${p.numero || p.bling_id}.`)
-    emit('mudou')
-    await carregarPedidos()
-  } catch (e: any) {
-    const d = e?.data?.detail
-    toasts.error(
-      'Não foi possível marcar',
-      (typeof d === 'object' && d ? d.detalhe || d.code : null) || e?.message || 'erro',
-    )
-    await carregarPedidos()
-  } finally {
-    const s = new Set(acertando.value)
-    s.delete(p.bling_id)
-    acertando.value = s
-  }
-}
 
 // Conferidos de verdade na plataforma (o resto a regra avaliou, mas o
 // Mercado Livre / a Shopee ainda não foi lido).
@@ -1428,20 +1364,9 @@ function clicarCartao(k: CartaoFlex) {
 
 // "Onde agir hoje" (à direita): o que depende de uma pessoa agora.
 type AgirFlex = { chave: string; dot: string; titulo: string; detalhe: string; acao?: string; fazer?: () => void; grave?: boolean }
-function irParaPedidos() {
-  if (typeof document !== 'undefined') document.getElementById('flex-pedidos-sem-sp')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-}
 const agirItens = computed<AgirFlex[]>(() => {
   const out: AgirFlex[] = []
   const r = resumo.value
-  if (pedidosSemSp.value.length) {
-    out.push({
-      chave: 'pedidos', dot: 'bg-red-600', grave: true,
-      titulo: `Pedidos Flex sem peça em ${localCidade.value} · ${pedidosSemSp.value.length}`,
-      detalhe: pedidosSemSp.value.slice(0, 3).map((p) => p.numero || p.bling_id).join(' · ') + (pedidosSemSp.value.length > 3 ? ' …' : ''),
-      acao: 'Ver', fazer: irParaPedidos,
-    })
-  }
   if (r.aguardando) out.push({ chave: 'aguardando', dot: 'bg-amber-500', titulo: `Esperando sua aprovação · ${r.aguardando}`, detalhe: 'o sistema quer ligar o Flex', acao: 'Ver', fazer: () => clicarCartao('aguardando') })
   if (r.desligar) out.push({ chave: 'desligar', dot: 'bg-red-600', titulo: `Ligados sem peça · ${r.desligar}`, detalhe: config.value?.pode_escrever ? 'o sistema desliga sozinho' : 'desligar (o sistema está só observando)', acao: 'Ver', fazer: () => clicarCartao('desligar') })
   // 12/11/2026 (revisão): o "Ver" das contas abre o quadro Contas no grupo —
@@ -2034,80 +1959,6 @@ defineExpose({ recarregar: carregarTudo })
           </div>
         </div>
 
-        <!-- Pedidos Flex sem peça no local de saída (aviso do robô de prioridade, etapa 2) -->
-        <div id="flex-pedidos-sem-sp" class="flex min-w-0 flex-col rounded-md border bg-card">
-          <div class="flex items-center justify-center gap-1.5 rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
-            <TriangleAlert class="size-3.5" :class="pedidosSemSp.length ? 'text-rose-300' : 'text-slate-300'" />
-            Pedidos Flex sem peça em {{ localCidade }} · {{ pedidosSemSp.length }}
-          </div>
-          <p class="border-b px-3 py-1.5 text-[11px] text-muted-foreground">
-            Pedidos Flex saem de {{ localCidade }}. Nestes, o estoque .{{ localLote }} não tinha a peça e o sistema NÃO trocou o lote.
-            Decida: separar em {{ localCidade }}, transferir a peça para o .{{ localLote }} ou cancelar o pedido.
-            Os que já <strong>saíram</strong> sem passar pelo .{{ localLote }} ficam aqui até alguém acertar o estoque no Bling
-            (o Bling baixou outro lote): até lá o sistema desconta o pedido das peças livres em {{ localCidade }}.
-          </p>
-          <div v-if="pedidosSemSp.length" class="overflow-x-auto">
-            <table class="w-full min-w-[860px] border-collapse text-[11.5px]">
-              <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
-                <tr>
-                  <th class="border-b px-2 py-1 text-left font-semibold">Pedido Bling</th>
-                  <th class="border-b px-2 py-1 text-left font-semibold">Pedido na plataforma</th>
-                  <th class="border-b px-2 py-1 text-left font-semibold">Conta</th>
-                  <th class="border-b px-2 py-1 text-left font-semibold">SKU</th>
-                  <th class="border-b px-2 py-1 text-left font-semibold" title="Prazo para despachar dado pela plataforma">Despachar até</th>
-                  <th class="border-b px-2 py-1 text-left font-semibold">O que falta</th>
-                  <th v-if="canEdit" class="border-b px-2 py-1 text-left font-semibold">Ação</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr v-for="p in pedidosSemSp" :key="p.bling_id" class="border-b align-top bg-rose-50/50 dark:bg-rose-950/20">
-                  <td class="whitespace-nowrap px-2 py-1.5">
-                    <button
-                      v-if="p.numero"
-                      type="button"
-                      class="font-mono font-bold underline-offset-2 hover:underline"
-                      title="Mostrar este pedido na lista Pedidos Flex"
-                      @click="emit('buscar-pedido', p.numero)"
-                    >{{ p.numero }}</button>
-                    <span v-else class="text-muted-foreground">{{ p.bling_id }}</span>
-                    <div class="text-[10px] text-muted-foreground" :title="fmtDataHora(p.detectado_em)">visto {{ fmtDesde(p.detectado_em) }}</div>
-                  </td>
-                  <td class="whitespace-nowrap px-2 py-1.5 font-mono">{{ p.numeroloja || '—' }}</td>
-                  <td class="whitespace-nowrap px-2 py-1.5">{{ p.conta || '—' }}<div class="text-[10px] text-muted-foreground">{{ nomePlataforma(p.plataforma) }}</div></td>
-                  <td class="px-2 py-1.5 font-mono">
-                    <div v-for="s in p.skus" :key="s">{{ s }}</div>
-                    <span v-if="!p.skus.length" class="text-muted-foreground">—</span>
-                  </td>
-                  <td class="whitespace-nowrap px-2 py-1.5" :class="prazoVencido(p) ? 'font-medium text-rose-700 dark:text-rose-400' : ''">
-                    {{ p.prazo ? fmtCurto(p.prazo) : '—' }}
-                    <div v-if="prazoVencido(p)" class="text-[10px]">prazo vencido</div>
-                  </td>
-                  <td class="max-w-[380px] px-2 py-1.5">
-                    <div v-if="p.acerto_pendente" class="font-medium text-rose-700 dark:text-rose-400">
-                      Já saiu sem passar pelo .{{ p.lote || localLote }} — acerte o estoque no Bling (transferência para o .{{ p.lote || localLote }}).
-                    </div>
-                    <div v-if="p.alerta">{{ p.alerta }}</div>
-                    <span v-if="!p.alerta && !p.acerto_pendente">—</span>
-                  </td>
-                  <td v-if="canEdit" class="whitespace-nowrap px-2 py-1.5">
-                    <button
-                      v-if="p.acerto_pendente"
-                      type="button"
-                      class="inline-flex items-center gap-1 rounded border border-emerald-400 px-2 py-0.5 font-medium text-emerald-800 hover:bg-emerald-50 disabled:opacity-50 dark:border-emerald-700 dark:text-emerald-300 dark:hover:bg-emerald-950/40"
-                      :disabled="acertando.has(p.bling_id)"
-                      :title="`Já transferi a peça para o .${p.lote || localLote} no Bling: parar de descontar este pedido`"
-                      @click="marcarAcertado(p)"
-                    >
-                      <Check class="size-3.5" /> Estoque acertado
-                    </button>
-                    <span v-else class="text-muted-foreground">—</span>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          <div v-else class="px-3 py-3 text-center text-[11px] text-muted-foreground">Nenhum pedido Flex sem peça em {{ localCidade }}.</div>
-        </div>
       </div>
 
       <!-- À direita: Onde agir hoje, Contas e Como o sistema decide -->
