@@ -1514,6 +1514,99 @@ async def _subir_fotos_tiktok(
 
 _TEXTO_CURTO = ", texto curto — a TikTok recusou o tamanho do longo"
 
+# Só reembolso que a TikTok JÁ PAGOU ao comprador (sem a nossa resposta).
+_TT_SO_REEMBOLSO_PAGO = ("RETURN_OR_REFUND_REQUEST_COMPLETE", "RETURN_OR_REFUND_REQUEST_SUCCESS")
+
+
+def _tiktok_so_reembolso_pago(caso: dict) -> bool:
+    """O só reembolso já foi pago e ninguém contestou (sem recusa nossa, sem
+    arbitragem): a API não tem mais o que responder — a defesa vai pela tela."""
+    status = str(caso.get("return_status") or "").strip().upper()
+    return (
+        not tiktok_reembolso.e_pendente_de_resposta(caso)
+        and status in _TT_SO_REEMBOLSO_PAGO
+        and not caso.get("arbitration_status")
+    )
+
+
+async def _texto_robo_tiktok_reembolso(
+    session: AsyncSession,
+    client: TikTokClient,
+    dev: Devolution,
+    caso: dict,
+    rastreio: DevolucaoRastreio | None,
+    fotos: list[DevolucaoAnexo],
+    texto_operador: str | None,
+) -> tuple[str, str]:
+    """(texto pro robô da Central do Vendedor, nota do histórico) do só reembolso que
+    a TikTok já pagou — 16/11/2026, Vinicius: "painel fraude tem que abrir chamado".
+    Os fatos (alegação, entrega, vídeo) + a observação do lançamento (na Fraude
+    automática, a defesa escrita pela IA) + o pedido de revisão. Sem limite de 500
+    bytes: é texto de tela, não o `comment` da API."""
+    rid = str(caso.get("return_id") or "").strip()
+    oid = (dev.pedido_marketplace or "").strip()
+    linhas = await _linhas_do_pedido(session, dev)
+    video = (rastreio.video_link or "").strip() if rastreio is not None else ""
+    video = video or next(
+        ((d.link_envio or "").strip() for d in linhas if (d.link_envio or "").strip()), ""
+    )
+    fotos_reais = [a for a in fotos if not _e_cartao_video(a)]
+    if not video and not fotos_reais:
+        # Sem prova não adianta pedir revisão (Vinicius 18/09: "não adianta responder
+        # sem as informações corretas"): espera o vídeo, como a recusa pela API.
+        raise _PendenteError("devolucao_sem_video")
+    nota, motivo_txt, eventos = await tiktok_reembolso._nota_e_motivo(client, rid)
+    entrega = await tiktok_reembolso._entrega_dados(client, oid)
+    observacao = " ".join(
+        dict.fromkeys(
+            t for t in (
+                (texto_operador or "").strip(),
+                *((d.observacao or "").strip() for d in linhas),
+            ) if t
+        )
+    )
+    com_problema = linhas_com_problema(dev, linhas)
+    produto = " + ".join(
+        dict.fromkeys(n for d in com_problema if (n := (d.produtos or "").strip()))
+    ) or (dev.produtos or "")
+    valor = (caso.get("refund_amount") or {}).get("refund_total")
+    alegacao = str(caso.get("return_reason_text") or "").strip() or motivo_txt
+    por_prazo = any("TIMEOUT" in str(e.get("event") or "").upper() for e in eventos or [])
+    partes = [
+        f"Pedido {oid}" + (f" ({produto})" if produto else "") + ": o comprador pediu reembolso "
+        "SEM devolver o produto"
+        + (f', alegando "{alegacao}"' if alegacao else "")
+        + (f' ("{" ".join(nota.split())[:200]}")' if nota else "")
+        + ".",
+        "A TikTok aprovou o reembolso"
+        + (f" de R$ {valor}" if valor else "")
+        + (" por falta de resposta no prazo" if por_prazo else "")
+        + " e o valor saiu da loja.",
+    ]
+    if entrega.get("quando"):
+        partes.append(
+            f"O pedido foi entregue em {tiktok_reembolso._fmt(entrega.get('quando'))}"
+            + (f" pela {entrega['transp']}" if entrega.get("transp") else "")
+            + (f" (rastreio {entrega['rastreio']})" if entrega.get("rastreio") else "")
+            + "."
+        )
+    if observacao:
+        partes.append(observacao)
+    if video:
+        partes.append(f"Vídeo da conferência e embalagem do pedido: {video}")
+    if fotos_reais:
+        partes.append(f"Seguem {len(fotos_reais)} foto(s) da expedição em anexo.")
+    partes.append("Pedimos a revisão do caso e o ressarcimento do valor à loja.")
+    nota_hist = (
+        f"A TikTok já pagou o só reembolso {rid}"
+        + (f" (R$ {valor})" if valor else "")
+        + (" por falta de resposta no prazo" if por_prazo else "")
+        + " — não há mais o que responder no caso pela API. Enviado pro robô abrir "
+        "chamado na Central do Vendedor com a defesa e o vídeo; o protocolo aparece aqui "
+        "quando ele abrir."
+    )
+    return "\n".join(partes), nota_hist
+
 
 async def _recusar_reembolso(
     session: AsyncSession,
@@ -1566,11 +1659,15 @@ async def _recusar_reembolso(
     nota, _m, eventos = await tiktok_reembolso._nota_e_motivo(client, rid)
     pedido_em, prova = tiktok_reembolso._pedido_do_comprador(eventos)
     entrega = await tiktok_reembolso._entrega_dados(client, oid)
+    # Sem repetir: a "Observação pro chamado" da janela (e a defesa da Fraude
+    # automática) é gravada igual em todas as linhas do pedido.
     observacao = " ".join(
-        t for t in (
-            (texto_operador or "").strip(),
-            *((d.observacao or "").strip() for d in linhas),
-        ) if t
+        dict.fromkeys(
+            t for t in (
+                (texto_operador or "").strip(),
+                *((d.observacao or "").strip() for d in linhas),
+            ) if t
+        )
     )
     fotos = fotos[:TIKTOK_MAX_FOTOS]
     # Pedido com mais de um produto com problema (24/09): o texto cita todos.
@@ -1632,6 +1729,21 @@ async def _disparar_tiktok(
     # "O sistema verifica se o vigia tem alguma informação; se tiver, responde o caso do
     # vigia; se não tiver, abre o chamado novo" (Vinicius 18/09).
     so_reembolso = _caso_so_reembolso(casos, preferido or None)
+    if (
+        so_reembolso is not None
+        and texto_operador is None
+        and _tiktok_so_reembolso_pago(so_reembolso)
+    ):
+        # 16/11/2026: já pago sem a nossa resposta — antes a ABERTURA falhava
+        # (`tiktok_reembolso_nao_pendente`) e ninguém se defendia; agora a defesa vai
+        # pela tela, como o só reembolso que a Shopee já aprovou. A réplica digitada
+        # (texto_operador) segue como antes: não troca o canal de um chamado vivo.
+        texto_robo, nota_robo = await _texto_robo_tiktok_reembolso(
+            session, client, dev, so_reembolso, rastreio, fotos, texto_operador
+        )
+        if msg is not None:
+            msg.texto = texto_robo
+        raise _RoboError(texto_robo, nota_robo)
     if so_reembolso is not None:
         return await _recusar_reembolso(
             session, ch, dev, client, so_reembolso, fotos, rastreio, msg, texto_operador
@@ -1910,6 +2022,17 @@ def _nota_robo_shopee_reembolso(det: dict, return_sn: str) -> str:
         + (f" em {quando}" if quando else "")
         + " — não há mais o que responder no caso pela API. Enviado pro robô abrir "
         "chamado no Seller Center; o protocolo aparece aqui quando ele abrir."
+    )
+
+
+def _nota_robo_shopee_em_analise(det: dict, return_sn: str) -> str:
+    valor = det.get("refund_amount")
+    return (
+        f"A Shopee está analisando o só reembolso {return_sn}"
+        + (f" (R$ {valor})" if valor else "")
+        + " sem pedir a nossa resposta — não dá pra contestar pela API. Enviado pro robô "
+        "abrir chamado no Seller Center com a defesa e o vídeo; o protocolo aparece aqui "
+        "quando ele abrir."
     )
 
 
@@ -2237,7 +2360,12 @@ async def _disparar_shopee(
     # ele sai pelo robô, então também não espera o caso entrar nos estados em que a
     # disputa caberia — a janela de contestação é de horas (293460: 6h28).
     nao_recebido = motivo == MOTIVO_NAO_RECEBIDO and not so_reembolso
-    if status in ("SELLER_DISPUTE", "JUDGING"):
+    # 16/11/2026: só reembolso que a Shopee analisa SOZINHA (JUDGING sem contestação
+    # nossa — ela não pediu a nossa resposta) não é "já contestada": a defesa vai pela
+    # tela, depois das guardas de contestação abaixo. Só na ABERTURA: a réplica digitada
+    # (texto_operador) segue como antes e não troca o canal de um chamado vivo.
+    em_analise_sem_nos = status == "JUDGING" and so_reembolso and texto_operador is None
+    if status == "SELLER_DISPUTE" or (status == "JUDGING" and not em_analise_sem_nos):
         raise chamados_svc.ChamadoError("shopee_ja_contestada")
     if status in ("CLOSED", "CANCELLED"):
         raise chamados_svc.ChamadoError("shopee_devolucao_encerrada")
@@ -2245,6 +2373,7 @@ async def _disparar_shopee(
         status not in ("REQUESTED", "PROCESSING", "ACCEPTED")
         and not (so_reembolso and status == "REFUND_PAID")
         and not nao_recebido
+        and not em_analise_sem_nos
     ):
         raise _PendenteError("shopee_aguardando_pacote")
     contestacao = det.get("dispute_reason") or []
@@ -2274,6 +2403,13 @@ async def _disparar_shopee(
     # medido ao vivo: vem "PENDING_REQUEST" (sem o prefixo COMPENSATION_ da doc)
     if comp_status.replace("COMPENSATION_", "") in ("REQUESTED", "APPROVED", "REJECTED"):
         raise chamados_svc.ChamadoError("shopee_ja_contestada")
+    if em_analise_sem_nos:
+        if not (link_video or cartao_link or fotos):
+            raise _PendenteError("devolucao_sem_video")  # sem prova, espera o vídeo
+        texto_sr = await _texto_robo_shopee_reembolso(session, dev, det, fotos, texto)
+        if msg is not None:
+            msg.texto = texto_sr
+        raise _RoboError(texto_sr, _nota_robo_shopee_em_analise(det, return_sn))
     # Vinicius 22/09: "quando o item é 'não recebi' não vai poder abrir pela disputa,
     # somente por assistente do vendedor — estamos perdendo tudo". Medido em produção
     # no dia: 4 disputas "não recebi" (id 46) abertas pela API, 0 ganhas, R$ 406,10
@@ -2344,6 +2480,16 @@ async def _disparar_shopee(
                 if texto_so_reembolso
                 else await _texto_robo_shopee_reembolso(session, dev, det, fotos, texto),
                 _nota_robo_shopee_reembolso(det, return_sn),
+            )
+        if so_reembolso and status == "PROCESSING" and texto_operador is None:
+            # 16/11/2026: só reembolso em processamento sem motivo de disputa liberado
+            # — a Fraude automática trata como "em análise"; esperar 45 dias pela API
+            # deixava o pedido sem defesa. A defesa vai pela tela.
+            raise _RoboError(
+                texto
+                if texto_so_reembolso
+                else await _texto_robo_shopee_reembolso(session, dev, det, fotos, texto),
+                _nota_robo_shopee_em_analise(det, return_sn),
             )
         # Medido 07/09: depois do `return_seller_due_date` (prazo de validação do
         # vendedor, ~3 dias após a entrega do pacote) a lista vem VAZIA — a

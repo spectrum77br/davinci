@@ -168,7 +168,12 @@ def entrada(pecas: Sequence[Peca], observacao_pedido: str | None, plataforma: st
             f'- {p.sku or "sem SKU"} ({p.produto or "sem nome"}): motivo "{p.motivo or "—"}"; '
             f'condição "{p.condicao or "—"}"; observação: "{p.observacao or "—"}"'
         )
-    obs = _limpo(observacao_pedido)
+    # O FIM da observação (16/11/2026): os recados mais novos — o da Fraude automática
+    # com a alegação do comprador — ficam embaixo. (A `chave` segue lendo o começo:
+    # mudar ela refaria conferências já decididas.)
+    obs = " ".join(str(observacao_pedido or "").split())
+    if len(obs) > MAX_CHARS_OBS:
+        obs = "…" + obs[-MAX_CHARS_OBS:]
     linhas += ["", f'Observação do pedido (interna, não vai pra plataforma): "{obs or "—"}"']
     return "\n".join(linhas)
 

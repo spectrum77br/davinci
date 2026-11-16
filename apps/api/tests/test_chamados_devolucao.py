@@ -2296,7 +2296,10 @@ async def test_tiktok_so_reembolso_em_fraude_exige_video_pra_lancar(client, make
     assert len(fake.rejects) == 1
 
 
-async def test_tiktok_so_reembolso_ja_decidido_falha_com_desfecho(client, make_user, auth_as, db, ml, monkeypatch):
+async def test_tiktok_so_reembolso_ja_pago_a_defesa_vai_pela_tela(client, make_user, auth_as, db, ml, monkeypatch):
+    # 16/11/2026 (Vinicius: "painel fraude tem que abrir chamado"): antes a abertura
+    # falhava com `tiktok_reembolso_nao_pendente` e ninguém se defendia; agora vira
+    # tarefa do robô da Central do Vendedor com os fatos, a observação e o vídeo.
     user = await make_user(permissions=_perms())
     auth_as(user)
     fake = _FakeTikTokReembolso(status="RETURN_OR_REFUND_REQUEST_COMPLETE")
@@ -2305,15 +2308,43 @@ async def test_tiktok_so_reembolso_ja_decidido_falha_com_desfecho(client, make_u
     r = await client.post(
         "/api/devolutions",
         json={"conta": "mini", "pedido_bling": "296936", "pedido_marketplace": OID_REEMB,
-              "condicao_produto": "Não devolvido", "motivo_devolucao": "Não recebido"},
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Golpe",
+              "observacao": "O vídeo mostra o celular conferido e lacrado antes do envio."},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["chamado_ml_status"] == "falhou" and r.json()["chamado_ml_erro"] == "tiktok_reembolso_nao_pendente"
+    assert r.json()["chamado_ml_status"] == "pendente", r.json()
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "296936"))).scalar_one()
+    assert ch.canal == "robo"
+    abertura = (await db.execute(select(ChamadoMensagem).where(ChamadoMensagem.chamado_id == ch.id,
+                                                               ChamadoMensagem.tipo == "abertura"))).scalar_one()
+    txt = abertura.texto
+    assert abertura.canal == "robo" and abertura.status == "pendente"
+    assert "por falta de resposta no prazo" in txt and "R$ 803.2" in txt, txt
+    assert "caixa de sabonete" in txt and "celular conferido e lacrado" in txt, txt
+    assert "https://drive.x/video-296936" in txt and "entregue em 16/09 17:00" in txt, txt
+    assert "ressarcimento" in txt
     hist = list((await db.execute(select(ChamadoMensagem.texto).where(ChamadoMensagem.chamado_id == ch.id,
                                                                       ChamadoMensagem.tipo == "sistema"))).scalars())
-    assert any("reembolso PAGO" in t and "FALTA DE RESPOSTA" in t for t in hist), hist
+    assert any("já pagou o só reembolso" in t and "Central do Vendedor" in t for t in hist), hist
     assert fake.rejects == []
+
+
+async def test_tiktok_so_reembolso_ja_pago_sem_video_espera_a_prova(client, make_user, auth_as, db, ml, monkeypatch):
+    # Sem vídeo nem foto não vai pedido de revisão nenhum pela tela: espera a prova.
+    user = await make_user(permissions=_perms())
+    auth_as(user)
+    fake = _FakeTikTokReembolso(status="RETURN_OR_REFUND_REQUEST_COMPLETE")
+    await _seed_reembolso(db, user, monkeypatch, fake, fila="acompanhamento", video=None)
+    r = await client.post(
+        "/api/devolutions",
+        json={"conta": "mini", "pedido_bling": "296936", "pedido_marketplace": OID_REEMB,
+              "condicao_produto": "Não devolvido", "motivo_devolucao": "Golpe"},
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["chamado_ml_status"] == "pendente", r.json()
+    assert r.json()["chamado_ml_erro"] == "devolucao_sem_video", r.json()
+    ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "296936"))).scalar_one()
+    assert ch.canal != "robo" and fake.rejects == []
 
 
 async def test_tiktok_com_pacote_e_so_reembolso_decidido_segue_o_pacote(client, make_user, auth_as, db, ml, monkeypatch):

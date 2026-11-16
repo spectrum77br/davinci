@@ -1,10 +1,11 @@
-"""Fraude automática (Vinicius, 16/11/2026): o só reembolso pede o vídeo da
-embalagem sozinho e, quando ele chega, lança "Não devolvido" e a resposta sai.
+"""Fraude automática (Vinicius, 16/11/2026): todo pedido da Fraude pede o vídeo da
+embalagem sozinho e, quando ele chega, a IA lê o que o comprador alegou e escreve a
+defesa; o robô lança "Não devolvido" com o motivo da alegação e o chamado sai.
 
-O caminho do disparo (chamado, IA, recusa na TikTok / disputa na Shopee) é o de
-sempre e tem os testes dele em test_chamados_devolucao.py — aqui, o que é novo:
-quem entra, o vídeo, o motivo tirado da alegação, o que fica pra pessoa, e um
-caminho inteiro com a TikTok de mentira daqueles testes.
+O caminho do disparo (chamado, conferência, recusa na TikTok / disputa na Shopee) é
+o de sempre e tem os testes dele em test_chamados_devolucao.py — aqui, o que é novo:
+quem entra, o vídeo, a leitura da IA (de mentira), o que fica pra pessoa, o "só
+propor" e caminhos inteiros com a TikTok e a Shopee de mentira daqueles testes.
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ from app.routers import devolutions as antigo
 from app.services import chamados_devolucao as cd
 from app.services import devolucao_conferencia as conferencia
 from app.services import devolucao_fraude_auto as auto
+from app.services import devolucao_fraude_defesa as defesa_ia
 
 pytestmark = pytest.mark.asyncio
 _SCHEMA = get_settings().database_schema
@@ -67,17 +69,55 @@ async def visao(db: AsyncSession):
     await db.commit()
 
 
+DEFESA = (
+    "O comprador alega que recebeu um sabonete no lugar do celular; o vídeo mostra o "
+    "celular conferido, embalado e lacrado antes do envio."
+)
+
+
+def _ia(
+    monkeypatch,
+    alegacao: str | None = "vazio_ou_outro_produto",
+    *,
+    defesa: str = DEFESA,
+    pessoa: str = "",
+    lidos: list | None = None,
+) -> None:
+    """A IA da defesa de mentira. `alegacao=None` = a IA não respondeu."""
+
+    async def _f(texto):
+        if lidos is not None:
+            lidos.append(texto)
+        if alegacao is None:
+            return None, "fake"
+        return (
+            defesa_ia.Resposta(
+                alegacao=alegacao,
+                resumo_alegacao="recebeu um sabonete no lugar do celular",
+                defesa=defesa,
+                precisa_pessoa=bool(pessoa),
+                por_que=pessoa,
+            ),
+            "fake",
+        )
+
+    monkeypatch.setattr(defesa_ia, "perguntar", _f)
+
+
 @pytest.fixture
 def ligado(monkeypatch):
-    """Robô ligado e a IA "ligada" com uma resposta de mentira (bate). Sem a IA o
-    robô não lança (ver test_ia_desligada_nao_lanca)."""
+    """Robô ligado (lançando, sem o "só propor") e as duas IAs de mentira: a da
+    defesa (vazio/outro produto) e a conferência (bate). Sem a IA o robô não lança
+    (ver test_ia_desligada_nao_lanca)."""
     monkeypatch.setattr(get_settings(), "devolucao_fraude_auto", auto.LIGADO)
+    monkeypatch.setattr(auto, "SO_PROPOR", False)
     monkeypatch.setattr(conferencia, "ligada", lambda: True)
 
     async def _bate(texto):
         return conferencia.Veredito(bate=True, explicacao="ok"), "fake"
 
     monkeypatch.setattr(conferencia, "perguntar", _bate)
+    _ia(monkeypatch)
 
 
 def _ler(caso: auto.Caso, lidos: list | None = None):
@@ -165,70 +205,142 @@ async def _lancamentos(db: AsyncSession, pedido: str) -> list[Devolution]:
     )
 
 
-# ── A alegação vira o motivo ─────────────────────────────────────────────
+# ── A leitura da IA (defesa) ─────────────────────────────────────────────
+
+_OK = auto.Caso(
+    situacao=auto.RESPONDER, codigo="WRONG_ITEM", texto="veio um sabonete", ida_entregue=True
+)
 
 
-async def test_motivo_da_alegacao() -> None:
-    m = auto.motivo_da_alegacao
-    assert m("shopee", "NOT_RECEIPT", "") == "Não recebido"
-    assert m("shopee", "SUSPICIOUS_PARCEL", "veio vazio") == "Golpe"
-    assert m("shopee", "WRONG_ITEM", "") == "Golpe"
-    assert m("shopee", "MISSING_ITEM", "") == "Item faltando"
-    # O vídeo da embalagem não rebate dano/defeito nem "diferente do anúncio".
-    assert m("shopee", "PHYSICAL_DMG", "") is None
-    assert m("shopee", "FUNCTIONAL_DMG", "") is None
-    assert m("shopee", "NOT_AS_DESCRIBED", "") is None
-    # Código que o sistema não conhece: pessoa, mesmo com texto que parece golpe.
-    assert m("shopee", "ITEM_DAMAGED", "chegou vazio") is None
-    assert m("shopee", "", "chegou vazio") == "Golpe"
-    assert m("tiktok", "Produto diferente da descrição", "") is None
-    assert m("tiktok", "Não recebi o pedido", "") == "Não recebido"
-    assert m("tiktok", "Package not received", "") == "Não recebido"
-    assert m("tiktok", "Pacote vazio", "") == "Golpe"
-    assert m("tiktok", "Pacote recebido, mas faltam alguns itens", "") == "Item faltando"
-    assert m("tiktok", "Recebi produto errado", "") == "Golpe"
-    assert m("tiktok", "Produto danificado", "") is None
-    assert m("tiktok", "Mudei de ideia", "") is None
-    assert m("tiktok", "", "") is None
-    # O motivo padronizado vale antes da nota livre do comprador.
-    assert m("tiktok", "Pacote vazio", "não recebi o carregador") == "Golpe"
-    assert m("tiktok", "", "veio vazio") == "Golpe"
+def _fatos(**kw) -> defesa_ia.Fatos:
+    base = {
+        "plataforma": "Shopee",
+        "situacao": defesa_ia.RESPONDER,
+        "codigo": "WRONG_ITEM",
+        "texto": "veio um sabonete",
+        "produtos": ("Celular A17",),
+        "ida_entregue": True,
+        "entregue_em": "10/11",
+    }
+    return defesa_ia.Fatos(**(base | kw))
 
 
-async def test_decidir() -> None:
-    d = auto.decidir
-    ok = auto.Caso(pendente=True, codigo="WRONG_ITEM", ida_entregue=None)
-    assert d("shopee", ok) == ("Golpe", None)
-    # Ida não entregue: é extravio, não se contesta.
-    motivo, pessoa = d("shopee", auto.Caso(pendente=True, codigo="WRONG_ITEM", ida_entregue=False))
-    assert motivo is None and "NÃO aconteceu" in pessoa
-    # "Não recebi" só com a entrega confirmada.
-    motivo, pessoa = d("shopee", auto.Caso(pendente=True, codigo="NOT_RECEIPT", ida_entregue=None))
-    assert motivo is None and "não está confirmada" in pessoa
-    assert d("shopee", auto.Caso(pendente=True, codigo="NOT_RECEIPT", ida_entregue=True)) == (
-        "Não recebido",
-        None,
+def _resp(
+    alegacao: str = "vazio_ou_outro_produto", defesa: str = DEFESA, pessoa: str = ""
+) -> defesa_ia.Resposta:
+    return defesa_ia.Resposta(
+        alegacao=alegacao,
+        resumo_alegacao="recebeu um sabonete",
+        defesa=defesa,
+        precisa_pessoa=bool(pessoa),
+        por_que=pessoa,
     )
-    motivo, pessoa = d("tiktok", auto.Caso(pendente=True, codigo="Produto danificado"))
-    assert motivo is None and pessoa
-    # Nada lido: tenta de novo (nem motivo nem pessoa).
-    assert d("tiktok", auto.Caso(pendente=True)) == (None, None)
+
+
+async def test_a_alegacao_vira_o_motivo_e_a_defesa_vai_inteira() -> None:
+    d = defesa_ia.decidir
+    r = d(_fatos(), _resp())
+    assert (r.motivo, r.defesa, r.pessoa) == ("Golpe", DEFESA, None)
+    assert d(_fatos(), _resp("faltou_item")).motivo == "Item faltando"
+    assert d(_fatos(), _resp("nao_recebeu")).motivo == "Não recebido"
+    # Dano/defeito e o que não se entende ficam com a pessoa, com o porquê.
+    r = d(_fatos(), _resp("danificado_ou_defeito", pessoa="diz que chegou quebrado"))
+    assert r.motivo is None and r.pessoa == "diz que chegou quebrado"
+    assert d(_fatos(), _resp("outra")).pessoa
+    # A entrega do pedido NÃO aconteceu: extravio, nunca contesta.
+    r = d(_fatos(ida_entregue=False), _resp())
+    assert r.motivo is None and "NÃO aconteceu" in r.pessoa
+    # "Não recebi" só com a entrega confirmada.
+    r = d(_fatos(ida_entregue=None), _resp("nao_recebeu"))
+    assert r.motivo is None and "não está confirmada" in r.pessoa
+    # A IA pediu uma pessoa mesmo com a alegação conhecida.
+    assert d(_fatos(), _resp(pessoa="a alegação não bate com o pedido")).pessoa
+    # Defesa vazia ou curta demais: pessoa.
+    assert d(_fatos(), _resp(defesa="ok")).pessoa
+    # Sem resposta da IA: nada — tenta de novo na próxima rodada.
+    assert d(_fatos(), None) == defesa_ia.Decisao()
+
+
+async def test_dano_pelo_motivo_da_plataforma_fica_com_a_pessoa_sem_perguntar() -> None:
+    perguntas: list[str] = []
+
+    async def _p(texto):
+        perguntas.append(texto)
+        return _resp(), "fake"
+
+    # A IA diria "vazio", mas o motivo padronizado é dano: pessoa (trava fixa).
+    r = await defesa_ia.analisar(_fatos(codigo="PHYSICAL_DMG"), _p)
+    assert r.motivo is None and "dano" in r.pessoa
+    r = await defesa_ia.analisar(_fatos(plataforma="TikTok Shop", codigo="Produto danificado"), _p)
+    assert r.motivo is None and r.pessoa
+    assert defesa_ia.decidir(_fatos(codigo="NOT_AS_DESCRIBED"), _resp()).pessoa
+    # Sem alegação nenhuma: não pergunta (tenta de novo).
+    assert await defesa_ia.analisar(_fatos(codigo="", texto=""), _p) == defesa_ia.Decisao()
+    assert perguntas == []
+    # Motivo de golpe na TikTok passa pela IA normalmente.
+    r = await defesa_ia.analisar(_fatos(plataforma="TikTok Shop", codigo="Pacote vazio"), _p)
+    assert r.motivo == "Golpe" and len(perguntas) == 1
+
+
+async def test_defesa_longa_e_cortada_numa_frase_inteira() -> None:
+    longa = "O comprador alega que recebeu um sabonete. " + (
+        "O vídeo mostra o celular conferido e lacrado antes do envio. " * 8
+    )
+    r = defesa_ia.decidir(_fatos(), _resp(defesa=longa))
+    assert len(r.defesa) <= defesa_ia.MAX_CHARS_DEFESA and r.defesa.endswith(".")
+
+
+async def test_entrada_da_ia_tem_os_fatos_e_a_situacao() -> None:
+    t = defesa_ia.entrada(
+        _fatos(situacao=defesa_ia.PAGO, transportadora="SPX", comprador_mandou_prova=False)
+    )
+    assert "JÁ REEMBOLSOU" in t and "WRONG_ITEM" in t and "veio um sabonete" in t
+    assert "entregue ao comprador em 10/11 pela SPX" in t and "Celular A17" in t
+    assert "mandou foto ou vídeo: não" in t
+    t = defesa_ia.entrada(_fatos(prazo="18/11 14:00", ida_entregue=False))
+    assert "ESPERA a nossa resposta até 18/11 14:00" in t and "NÃO foi entregue" in t
+    assert "ANALISANDO" in defesa_ia.entrada(_fatos(situacao=defesa_ia.EM_ANALISE))
+
+
+async def test_resposta_da_ia_lida_do_json() -> None:
+    class _Bloco:
+        type = "text"
+        text = (
+            '{"alegacao": "faltou_item", "resumo_alegacao": "faltou o carregador", '
+            '"defesa": "x", "precisa_pessoa": false, "por_que": ""}'
+        )
+
+    class _Msg:
+        stop_reason = "end_turn"
+        content = [_Bloco()]
+
+    assert defesa_ia.resposta_da_mensagem(_Msg()).alegacao == "faltou_item"
+    _Bloco.text = (
+        '{"alegacao": "inventada", "resumo_alegacao": "", "defesa": "", '
+        '"precisa_pessoa": false, "por_que": ""}'
+    )
+    assert defesa_ia.resposta_da_mensagem(_Msg()) is None
+    _Msg.stop_reason = "max_tokens"
+    assert defesa_ia.resposta_da_mensagem(_Msg()) is None
+    assert defesa_ia.esquema()["properties"]["alegacao"]["enum"] == list(defesa_ia.ALEGACOES)
 
 
 # ── Quem entra ───────────────────────────────────────────────────────────
 
 
-async def test_so_entra_o_so_reembolso_esperando_a_nossa_resposta(db: AsyncSession, make_user):
-    await _caso(db, make_user, "790001")  # entra
+async def test_entra_todo_so_reembolso_da_fraude_com_prazo_ou_sem(db: AsyncSession, make_user):
+    await _caso(db, make_user, "790001")  # prazo correndo
     await _caso(db, make_user, "790002", fonte="tiktok", acao="SELLER_RESPOND_REFUND", loja="89")
-    await _caso(db, make_user, "790003", prazo=AGORA - timedelta(hours=1))  # prazo vencido
+    # Prazo vencido ou nada pendente (a plataforma já reembolsou / está analisando):
+    # entra também — "painel fraude tem que abrir chamado".
+    await _caso(db, make_user, "790003", prazo=AGORA - timedelta(hours=1))
+    await _caso(db, make_user, "790009", acao="", prazo=AGORA - timedelta(days=3))
     await _caso(db, make_user, "790004", tipo="RETURN")  # volta pacote: Acompanhamento
     await _caso(db, make_user, "790005", fila="acompanhamento")  # pessoa tirou da Fraude
     # Pessoa pôs na Fraude um caso COM pacote ("chegou vazio"): outro fluxo, fica.
     await _caso(db, make_user, "790006", tipo="RETURN", fila="fraude")
     await _caso(db, make_user, "790007", abrir_chamado=False)  # "Abrir chamado: Não"
     await _caso(db, make_user, "790008", situacao="545902")  # Bling fora de Aguardando
-    await _caso(db, make_user, "790009", acao="SHOPEE_CONFERIR_PACOTE")  # não é responder
     await _caso(db, make_user, "790010", fonte="ml", acao="SELLER_RESPOND_REFUND", loja="90")
     await _caso(db, make_user, "790011")
     db.add(Devolution(pedido_bling="790011", conta="mini", sku="a17.sp"))  # já lançado
@@ -238,22 +350,22 @@ async def test_so_entra_o_so_reembolso_esperando_a_nossa_resposta(db: AsyncSessi
         db, make_user, "790013", resolvido_at=AGORA, resolvido_como="Perdimento"
     )  # resolvido
     await _caso(db, make_user, "790014", fila="fraude")  # só reembolso fixado na Fraude: entra
-    await _caso(db, make_user, "790015", acao="SHOPEE_RESPONDER_PROPOSTA")  # negociação: pessoa
     await db.commit()
-    assert sorted(await auto.candidatos(db)) == ["790001", "790002", "790014"]
+    lista = await auto.candidatos(db)
+    assert sorted(lista) == ["790001", "790002", "790003", "790009", "790014"]
+    # Quem a plataforma ainda espera responder vem primeiro (o teto da rodada).
+    assert set(lista[:3]) == {"790001", "790002", "790014"}
 
 
 # ── O vídeo ──────────────────────────────────────────────────────────────
 
 
-async def test_sem_video_le_a_alegacao_e_pede_a_equipe_uma_vez(
+async def test_sem_video_pede_a_equipe_sem_ler_a_plataforma(
     db: AsyncSession, make_user, ligado, visao, monkeypatch
 ):
     await _caso(db, make_user, "791001")
     lidos: list[str] = []
-    monkeypatch.setattr(
-        auto, "_ler_caso", _ler(auto.Caso(pendente=True, codigo="WRONG_ITEM"), lidos)
-    )
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK, lidos))
     r = await auto.rodada(db)
     assert r["video_pedido"] == 1 and r["lancados"] == 0
     rast = await _rast(db, "791001")
@@ -269,20 +381,9 @@ async def test_sem_video_le_a_alegacao_e_pede_a_equipe_uma_vez(
         )
         == "pendente"
     )
-    # Próxima rodada: não pede de novo nem relê a plataforma, espera.
+    # Próxima rodada: não pede de novo, espera; a plataforma nunca foi lida.
     r = await auto.rodada(db)
-    assert r["video_pedido"] == 0 and r["esperando_video"] == 1 and lidos == ["RET791001"]
-
-
-async def test_danificado_nao_pede_video_a_equipe(
-    db: AsyncSession, make_user, ligado, visao, monkeypatch
-):
-    await _caso(db, make_user, "791101")
-    monkeypatch.setattr(auto, "_ler_caso", _ler(auto.Caso(pendente=True, codigo="PHYSICAL_DMG")))
-    r = await auto.rodada(db)
-    assert r["video_pedido"] == 0 and r["pra_pessoa"] == 1
-    rast = await _rast(db, "791101")
-    assert rast.video_solicitado_em is None and auto.NAO_RESPONDE in rast.observacao
+    assert r["video_pedido"] == 0 and r["esperando_video"] == 1 and lidos == []
 
 
 async def test_pedido_de_video_cancelado_nao_volta(db: AsyncSession, make_user, ligado):
@@ -314,43 +415,11 @@ async def test_video_da_expedicao_entra_uma_vez_so(db: AsyncSession, make_user, 
     assert (await _rast(db, "791301")).video_link is None
 
 
-async def test_shopee_ja_decidido_no_seller_center_nao_espera_resposta(
-    db: AsyncSession, make_user, ligado, visao, monkeypatch
-):
-    """Alguém aceitou o reembolso no Seller Center antes do sync de 30 min: o robô
-    relê, vê ACCEPTED e não lança."""
-    from tests.test_chamados_devolucao import _FakeShopee
-
-    fake = _FakeShopee()
-
-    async def _det(return_sn):
-        return {
-            "return_sn": return_sn,
-            "status": "ACCEPTED",
-            "return_solution": 1,
-            "needs_logistics": False,
-            "reason": "SUSPICIOUS_PARCEL",
-        }
-
-    fake.get_return_detail = _det
-
-    async def _c(session, *a):
-        return fake
-
-    monkeypatch.setattr(cd, "_shopee_client_para", _c)
-    await _caso(
-        db, make_user, "791401", video_link="https://mega.nz/file/v#k", video_enviado_em=AGORA
-    )
-    r = await auto.rodada(db)
-    assert r["sem_resposta_pendente"] == 1 and r["lancados"] == 0
-    assert fake.disputes == [] and await _lancamentos(db, "791401") == []
-
-
 async def test_video_da_expedicao_e_usado_e_o_antigo_nao(
     db: AsyncSession, make_user, monkeypatch, visao
 ):
     monkeypatch.setattr(get_settings(), "devolucao_fraude_auto", auto.SO_VIDEO)
-    monkeypatch.setattr(auto, "_ler_caso", _ler(auto.Caso(pendente=True, codigo="WRONG_ITEM")))
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK))
     await _caso(db, make_user, "792001")
     db.add(EstoquePedidoVideo(pedido_bling="792001", link="https://mega.nz/file/emb#k"))
     # Mesmo número de pedido de outro ano: o vídeo é de antes da venda — não serve.
@@ -404,7 +473,7 @@ async def test_equipe_sem_video_fica_pra_pessoa(db: AsyncSession, make_user, lig
 # ── O lançamento sozinho ─────────────────────────────────────────────────
 
 
-async def test_com_video_lanca_nao_devolvido_com_o_motivo_da_alegacao(
+async def test_com_video_a_ia_escreve_a_defesa_e_o_robo_lanca(
     db: AsyncSession, make_user, ligado, visao, monkeypatch
 ):
     await _caso(
@@ -416,14 +485,9 @@ async def test_com_video_lanca_nao_devolvido_com_o_motivo_da_alegacao(
         video_enviado_em=AGORA,
     )
     lidos: list[str] = []
-    monkeypatch.setattr(
-        auto,
-        "_ler_caso",
-        _ler(
-            auto.Caso(pendente=True, codigo="NOT_RECEIPT", texto="não chegou", ida_entregue=True),
-            lidos,
-        ),
-    )
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK, lidos))
+    perguntas: list[str] = []
+    _ia(monkeypatch, lidos=perguntas)
     agendados = _sem_disparo(monkeypatch)
     r = await auto.rodada(db)
     assert r["lancados"] == 1, r
@@ -431,32 +495,86 @@ async def test_com_video_lanca_nao_devolvido_com_o_motivo_da_alegacao(
     # Uma linha por peça (o kit abre em peças, como na janela).
     assert sorted(d.sku for d in linhas) == ["a001.ci", "a17.sp", "f105.ci"]
     for d in linhas:
-        assert d.condicao_produto == "Não devolvido" and d.motivo_devolucao == "Não recebido"
+        # "Veio um sabonete" é Golpe — nunca "Não recebido".
+        assert d.condicao_produto == "Não devolvido" and d.motivo_devolucao == "Golpe"
         assert d.link_envio == "https://mega.nz/file/v#k" and d.conta == "mini"
         assert d.reembolso is True and d.quantidade == 1
-        # A observação da linha vai pra plataforma: o sistema não escreve nela.
-        assert not d.observacao
+        # A defesa é a "Observação pro chamado": vai no texto da plataforma.
+        assert d.observacao == DEFESA
     assert lidos == ["RET794001"] and agendados == ["794001"]
+    # A IA leu a alegação, a situação e os produtos do pedido.
+    assert "veio um sabonete" in perguntas[0] and "ESPERA a nossa resposta" in perguntas[0]
+    assert "Produto a17.sp" in perguntas[0]
     # O chamado nasceu junto, com a abertura pendente esperando o disparo.
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "794001"))).scalar_one()
     assert ch.origem == "devolucao"
     obs = (await _rast(db, "794001")).observacao
-    assert conferencia.MARCA_ROBO in obs and "Não recebido" in obs and "não chegou" in obs
+    assert conferencia.MARCA_ROBO in obs and "Golpe" in obs and "sabonete" in obs
     # Já lançado: sai da lista de candidatos.
     assert "794001" not in await auto.candidatos(db)
 
 
-async def test_caso_que_nao_espera_mais_resposta_nao_lanca(
+async def test_ja_reembolsado_tambem_ganha_a_defesa(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    await _caso(
+        db,
+        make_user,
+        "794051",
+        acao="",
+        prazo=AGORA - timedelta(days=2),
+        video_link="https://mega.nz/file/v#k",
+        video_enviado_em=AGORA,
+    )
+    monkeypatch.setattr(
+        auto,
+        "_ler_caso",
+        _ler(auto.Caso(situacao=auto.PAGO, codigo="SUSPICIOUS_PARCEL", ida_entregue=True)),
+    )
+    perguntas: list[str] = []
+    _ia(monkeypatch, lidos=perguntas)
+    _sem_disparo(monkeypatch)
+    r = await auto.rodada(db)
+    assert r["lancados"] == 1, r
+    assert "JÁ REEMBOLSOU" in perguntas[0]
+    assert [d.motivo_devolucao for d in await _lancamentos(db, "794051")] == ["Golpe"]
+
+
+async def test_cancelado_pelo_comprador_nao_lanca_nem_marca(
     db: AsyncSession, make_user, ligado, visao, monkeypatch
 ):
     await _caso(
         db, make_user, "794101", video_link="https://mega.nz/file/v#k", video_enviado_em=AGORA
     )
-    monkeypatch.setattr(auto, "_ler_caso", _ler(auto.Caso(pendente=False)))
+    monkeypatch.setattr(auto, "_ler_caso", _ler(auto.Caso(situacao=auto.CANCELADO)))
+    perguntas: list[str] = []
+    _ia(monkeypatch, lidos=perguntas)
     r = await auto.rodada(db)
-    assert r["sem_resposta_pendente"] == 1 and r["lancados"] == 0
+    assert r["sem_resposta_pendente"] == 1 and r["lancados"] == 0 and perguntas == []
     assert await _lancamentos(db, "794101") == []
     assert auto.NAO_RESPONDE not in ((await _rast(db, "794101")).observacao or "")
+
+
+async def test_ja_contestado_ou_negociacao_fica_pra_pessoa_sem_perguntar_a_ia(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    for pedido in ("794151", "794152"):
+        await _caso(
+            db, make_user, pedido, video_link="https://mega.nz/file/v#k", video_enviado_em=AGORA
+        )
+
+    async def _por_pedido(session, plataforma, rid, dev):
+        return auto.Caso(situacao=auto.CONTESTADO if rid == "RET794151" else auto.NEGOCIACAO)
+
+    monkeypatch.setattr(auto, "_ler_caso", _por_pedido)
+    perguntas: list[str] = []
+    _ia(monkeypatch, lidos=perguntas)
+    r = await auto.rodada(db)
+    assert r["pra_pessoa"] == 2 and r["lancados"] == 0 and perguntas == []
+    assert "contestado" in (await _rast(db, "794151")).observacao
+    assert "proposta" in (await _rast(db, "794152")).observacao
+    for pedido in ("794151", "794152"):
+        assert auto.NAO_RESPONDE in (await _rast(db, pedido)).observacao
 
 
 async def test_ia_desligada_nao_lanca(db: AsyncSession, make_user, ligado, visao, monkeypatch):
@@ -464,7 +582,7 @@ async def test_ia_desligada_nao_lanca(db: AsyncSession, make_user, ligado, visao
     await _caso(
         db, make_user, "794201", video_link="https://mega.nz/file/v#k", video_enviado_em=AGORA
     )
-    monkeypatch.setattr(auto, "_ler_caso", _ler(auto.Caso(pendente=True, codigo="WRONG_ITEM")))
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK))
     r = await auto.rodada(db)
     assert r["lancados"] == 0 and await _lancamentos(db, "794201") == []
 
@@ -476,26 +594,26 @@ async def test_alegacao_de_danificado_fica_pra_pessoa_e_nao_rele(
         db, make_user, "795001", video_link="https://mega.nz/file/v#k", video_enviado_em=AGORA
     )
     lidos: list[str] = []
-    monkeypatch.setattr(
-        auto,
-        "_ler_caso",
-        _ler(auto.Caso(pendente=True, codigo="PHYSICAL_DMG", texto="tela quebrada"), lidos),
-    )
+    dano = auto.Caso(situacao=auto.RESPONDER, codigo="PHYSICAL_DMG", texto="tela quebrada")
+    monkeypatch.setattr(auto, "_ler_caso", _ler(dano, lidos))
+    _ia(monkeypatch, "danificado_ou_defeito", pessoa="diz que chegou com a tela quebrada")
     r = await auto.rodada(db)
     assert r["pra_pessoa"] == 1 and r["lancados"] == 0
     assert await _lancamentos(db, "795001") == []
-    assert auto.NAO_RESPONDE in (await _rast(db, "795001")).observacao
+    obs = (await _rast(db, "795001")).observacao
+    assert auto.NAO_RESPONDE in obs and "tela quebrada" in obs
     await auto.rodada(db)
     assert len(lidos) == 1  # não relê a plataforma a cada 10 min
 
 
-async def test_alegacao_nao_lida_tenta_de_novo_sem_marcar(
+async def test_ia_sem_resposta_tenta_de_novo_sem_marcar(
     db: AsyncSession, make_user, ligado, visao, monkeypatch
 ):
     await _caso(
         db, make_user, "795101", video_link="https://mega.nz/file/v#k", video_enviado_em=AGORA
     )
-    monkeypatch.setattr(auto, "_ler_caso", _ler(auto.Caso(pendente=True)))
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK))
+    _ia(monkeypatch, None)
     r = await auto.rodada(db)
     assert r["falhas"] == 1 and r["pra_pessoa"] == 0 and r["lancados"] == 0
     assert auto.NAO_RESPONDE not in ((await _rast(db, "795101")).observacao or "")
@@ -514,7 +632,7 @@ async def test_pessoa_lancou_no_meio_o_robo_nao_duplica(
             Devolution(pedido_bling="795201", conta="mini", sku="a17.sp", condicao_produto="Novo")
         )
         await session.commit()
-        return auto.Caso(pendente=True, codigo="WRONG_ITEM")
+        return _OK
 
     monkeypatch.setattr(auto, "_ler_caso", _le_e_alguem_lanca)
     _sem_disparo(monkeypatch)
@@ -534,7 +652,7 @@ async def test_teto_de_lancamentos_por_rodada(
             video_link="https://mega.nz/file/v#k",
             video_enviado_em=AGORA,
         )
-    monkeypatch.setattr(auto, "_ler_caso", _ler(auto.Caso(pendente=True, codigo="WRONG_ITEM")))
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK))
     _sem_disparo(monkeypatch)
     assert (await auto.rodada(db))["lancados"] == auto.TETO_LANCAMENTOS
     assert (await auto.rodada(db))["lancados"] == 2
@@ -546,6 +664,124 @@ async def test_desligado_nao_faz_nada(db: AsyncSession, make_user, monkeypatch):
     r = await auto.rodada(db)
     assert r["modo"] == "desligado" and r["candidatos"] == 0
     assert (await _rast(db, "797001")).video_solicitado_em is None
+
+
+async def test_so_propor_escreve_a_defesa_e_nao_lanca_ate_soltar(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    """1ª subida: com o "só propor", o robô pede o vídeo e escreve a defesa proposta na
+    Observação do pedido — nada é lançado nem vai pra plataforma até o OK."""
+    monkeypatch.setattr(auto, "SO_PROPOR", True)
+    assert auto.modo() == auto.PROPOR
+    await _caso(
+        db, make_user, "797101", video_link="https://mega.nz/file/v#k", video_enviado_em=AGORA
+    )
+    await _caso(db, make_user, "797102")  # sem vídeo: pede, como no ligado
+    lidos: list[str] = []
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK, lidos))
+    perguntas: list[str] = []
+    _ia(monkeypatch, lidos=perguntas)
+    agendados = _sem_disparo(monkeypatch)
+    r = await auto.rodada(db)
+    assert r["propostos"] == 1 and r["lancados"] == 0 and r["video_pedido"] == 1, r
+    assert await _lancamentos(db, "797101") == [] and agendados == []
+    obs = (await _rast(db, "797101")).observacao
+    assert auto.PROPOSTA in obs and DEFESA in obs and 'motivo "Golpe"' in obs
+    # Próxima rodada: não pergunta de novo.
+    r = await auto.rodada(db)
+    assert r["propostos"] == 0 and len(lidos) == 1
+    # Solto: lança com a defesa que foi aprovada — relê o caso (ainda dá pra contestar?)
+    # mas não pergunta de novo à IA (a resposta nova podia mudar o que ele viu).
+    monkeypatch.setattr(auto, "SO_PROPOR", False)
+    _ia(monkeypatch, "faltou_item", defesa="Outra defesa que ninguém aprovou, bem diferente.")
+    r = await auto.rodada(db)
+    assert r["lancados"] == 1, r
+    assert len(perguntas) == 1 and len(lidos) == 2
+    linhas = await _lancamentos(db, "797101")
+    assert [(d.motivo_devolucao, d.observacao) for d in linhas] == [("Golpe", DEFESA)]
+
+
+async def test_proposta_anterior_e_loja_aceitou() -> None:
+    obs = (
+        "recado da equipe\n"
+        f'{auto.MARCA} (16/11 18:00): {auto.PROPOSTA} (motivo "Item faltando") — o comprador '
+        'alega "faltou o carregador"; defesa: "O comprador diz que faltou o carregador; o vídeo '
+        'mostra o kit completo embalado e lacrado". Esperando o OK pra lançar e abrir o chamado.'
+    )
+    assert auto.proposta_anterior(obs) == (
+        "Item faltando",
+        "O comprador diz que faltou o carregador; o vídeo mostra o kit completo embalado e lacrado",
+    )
+    assert auto.proposta_anterior("nada aqui") is None
+    assert auto.proposta_anterior(obs.replace("Item faltando", "Inventado")) is None
+    assert auto._loja_aceitou([{"event": "SELLER_AGREE_REFUND"}])
+    assert auto._loja_aceitou([{"event": "SELLER_AGGREE_RETURN"}])
+    assert not auto._loja_aceitou([{"event": "SELLER_REJECT_APPLICATION_TIMEOUT_REFUND"}])
+    assert not auto._loja_aceitou([{"event": "ORDER_REFUND"}, {"event": "REFUND_SUCCESS"}])
+
+
+async def test_alegacao_vazia_nao_pergunta_e_nao_marca(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    """A TikTok devolve vazio quando a API falha: tenta de novo, sem marcar pra pessoa e
+    sem parar os outros pedidos da rodada."""
+    for pedido in ("797201", "797202"):
+        await _caso(
+            db, make_user, pedido, video_link="https://mega.nz/file/v#k", video_enviado_em=AGORA
+        )
+
+    async def _vazio_no_1(session, plataforma, rid, dev):
+        if rid == "RET797201":
+            return auto.Caso(situacao=auto.RESPONDER, ida_entregue=None)
+        return _OK
+
+    monkeypatch.setattr(auto, "_ler_caso", _vazio_no_1)
+    perguntas: list[str] = []
+    _ia(monkeypatch, lidos=perguntas)
+    _sem_disparo(monkeypatch)
+    r = await auto.rodada(db)
+    assert r["falhas"] == 1 and r["lancados"] == 1 and len(perguntas) == 1, r
+    assert r["pedidos"]["797201"] == "alegação não lida"
+    assert auto.NAO_RESPONDE not in ((await _rast(db, "797201")).observacao or "")
+
+
+async def test_ia_fora_do_ar_para_de_perguntar_na_rodada(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    for pedido in ("797301", "797302", "797303"):
+        await _caso(
+            db, make_user, pedido, video_link="https://mega.nz/file/v#k", video_enviado_em=AGORA
+        )
+    monkeypatch.setattr(auto, "_ler_caso", _ler(_OK))
+    perguntas: list[str] = []
+    _ia(monkeypatch, None, lidos=perguntas)
+    r = await auto.rodada(db)
+    assert len(perguntas) == 1 and r["falhas"] == 1 and r["lancados"] == 0, r
+    assert r["pedidos"]["797303"] == "fica pra próxima rodada"
+
+
+async def test_abrir_chamado_nao_no_meio_da_leitura_nao_lanca(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    await _caso(
+        db, make_user, "797401", video_link="https://mega.nz/file/v#k", video_enviado_em=AGORA
+    )
+
+    async def _le_e_alguem_diz_nao(session, plataforma, rid, dev):
+        await session.execute(
+            text(
+                f'UPDATE "{_SCHEMA}".devolucao_rastreio SET abrir_chamado = false, '  # noqa: S608
+                "observacao = 'nao abrir: cliente devolveu por fora' WHERE pedido_bling = '797401'"
+            )
+        )
+        await session.commit()
+        return _OK
+
+    monkeypatch.setattr(auto, "_ler_caso", _le_e_alguem_diz_nao)
+    agendados = _sem_disparo(monkeypatch)
+    r = await auto.rodada(db)
+    assert r["lancados"] == 0 and agendados == [] and await _lancamentos(db, "797401") == []
+    assert "cliente devolveu por fora" in (await _rast(db, "797401")).observacao
 
 
 # ── O caminho inteiro, com a TikTok e a Shopee de mentira ────────────────
@@ -614,18 +850,44 @@ async def test_tiktok_video_chega_e_a_recusa_do_reembolso_sai(
     """Vídeo da equipe chegou → relê o caso → lança sozinho → chamado → a IA
     confere → a TikTok recebe a recusa do só reembolso com o vídeo no texto."""
     fake, rid = await _tiktok(db, make_user, monkeypatch)
+    perguntas: list[str] = []
+    _ia(monkeypatch, lidos=perguntas)
     r = await auto.rodada(db)
     assert r["lancados"] == 1, r
+    # A IA leu a nota do comprador ("caixa de sabonete") e a entrega da J&T.
+    assert "caixa de sabonete" in perguntas[0] and "J&T Express Brazil" in perguntas[0]
     linhas = await _lancamentos(db, "296936")
-    # "Package received but missing item" (o motivo da TikTok de mentira).
     assert [(d.condicao_produto, d.motivo_devolucao) for d in linhas] == [
-        ("Não devolvido", "Item faltando")
+        ("Não devolvido", "Golpe")
     ]
     assert len(fake.rejects) == 1
     rj = fake.rejects[0]
     assert (rj["return_id"], rj["decision"]) == (rid, "REJECT_REFUND")
     assert "https://mega.nz/file/embalagem#k" in rj["comment"]
+    # A defesa da IA vai no comentário, dentro dos 500 bytes da TikTok.
+    assert "sabonete no lugar do celular" in rj["comment"], rj["comment"]
+    assert len(rj["comment"].encode()) <= 500
     assert (await _abertura(db, "296936")).status == "enviada"
+
+
+async def test_tiktok_ja_pago_a_defesa_vai_pela_tela(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    """Só reembolso que a TikTok já pagou sem a nossa resposta: antes o chamado falhava
+    ("já saiu de pendente"); agora vai pro robô da Central do Vendedor com a defesa."""
+    fake, _rid = await _tiktok(db, make_user, monkeypatch)
+    fake.status_reembolso = "RETURN_OR_REFUND_REQUEST_COMPLETE"
+    perguntas: list[str] = []
+    _ia(monkeypatch, lidos=perguntas)
+    r = await auto.rodada(db)
+    assert r["lancados"] == 1, r
+    assert "JÁ REEMBOLSOU" in perguntas[0]
+    assert fake.rejects == []
+    msg = await _abertura(db, "296936")
+    assert (msg.status, msg.canal) == ("pendente", "robo"), (msg.status, msg.erro)
+    assert DEFESA in msg.texto and "https://mega.nz/file/embalagem#k" in msg.texto
+    assert "A TikTok aprovou o reembolso de R$ 803.2" in msg.texto
+    assert "devolução" not in msg.texto.replace("SEM devolver", "")
 
 
 async def test_lancamento_do_robo_sem_resposta_da_ia_segura(
@@ -730,6 +992,102 @@ async def test_shopee_pacote_vazio_video_chega_e_a_disputa_sai(
     assert "https://mega.nz/file/caixa798#k" in d["text"]
     assert "SEM devolução" in d["text"] and "Recebemos a devolução" not in d["text"], d["text"]
     assert "Contestamos a alegação" in d["text"]
+    assert DEFESA in d["text"], d["text"]
+
+
+async def test_shopee_em_analise_sem_nos_a_defesa_vai_pela_tela(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    """A Shopee analisa o só reembolso sozinha (JUDGING, sem contestação nossa): antes
+    o chamado falhava como "já contestada"; agora a defesa vai pela tela."""
+    from tests.test_chamados_devolucao import _FakeShopee
+
+    fake = _FakeShopee()
+
+    async def _det(return_sn):
+        return {
+            "return_sn": return_sn,
+            "status": "JUDGING",
+            "return_solution": 1,
+            "needs_logistics": False,
+            "reason": "WRONG_ITEM",
+            "text_reason": "veio um sabonete",
+            "refund_amount": 499.9,
+        }
+
+    fake.get_return_detail = _det
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(cd, "_shopee_client_para", _c)
+    monkeypatch.setattr(cd, "ENFILEIRAR", False)
+    await _caso(
+        db,
+        make_user,
+        "798101",
+        conta="mega",
+        loja="92",
+        acao="",
+        video_link="https://mega.nz/file/caixa798101#k",
+        video_enviado_em=AGORA,
+    )
+    perguntas: list[str] = []
+    _ia(monkeypatch, lidos=perguntas)
+    r = await auto.rodada(db)
+    assert r["lancados"] == 1, r
+    assert "ANALISANDO" in perguntas[0]
+    assert fake.disputes == []
+    msg = await _abertura(db, "798101")
+    assert (msg.status, msg.canal) == ("pendente", "robo"), (msg.status, msg.erro)
+    assert DEFESA in msg.texto and "https://mega.nz/file/caixa798101#k" in msg.texto
+
+
+async def test_shopee_em_processamento_sem_motivo_liberado_vai_pela_tela(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    from tests.test_chamados_devolucao import _FakeShopee
+
+    fake = _FakeShopee()
+
+    async def _det(return_sn):
+        return {
+            "return_sn": return_sn,
+            "status": "PROCESSING",
+            "return_solution": 1,
+            "needs_logistics": False,
+            "reason": "MISSING_ITEM",
+            "text_reason": "faltou o carregador",
+        }
+
+    async def _sem_motivos(return_sn):
+        return []
+
+    fake.get_return_detail = _det
+    fake.get_return_dispute_reason = _sem_motivos
+
+    async def _c(session, *a):
+        return fake
+
+    monkeypatch.setattr(cd, "_shopee_client_para", _c)
+    monkeypatch.setattr(cd, "ENFILEIRAR", False)
+    await _caso(
+        db,
+        make_user,
+        "798201",
+        conta="mega",
+        loja="93",
+        acao="",
+        video_link="https://mega.nz/file/caixa798201#k",
+        video_enviado_em=AGORA,
+    )
+    _ia(monkeypatch, "faltou_item")
+    r = await auto.rodada(db)
+    assert r["lancados"] == 1, r
+    assert [d.motivo_devolucao for d in await _lancamentos(db, "798201")] == ["Item faltando"]
+    assert fake.disputes == []
+    msg = await _abertura(db, "798201")
+    assert (msg.status, msg.canal) == ("pendente", "robo"), (msg.status, msg.erro)
 
 
 async def test_worker_agenda_a_fraude_a_cada_10_minutos() -> None:

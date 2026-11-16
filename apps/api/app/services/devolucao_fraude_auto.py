@@ -1,46 +1,51 @@
 # ruff: noqa: E501, S608
-"""Fraude automática (Vinicius, 16/11/2026): o caso sem devolução se responde sozinho.
+"""Fraude automática (Vinicius, 16/11/2026): todo pedido da Fraude vira chamado.
 
-"esses fraude na teoria é toda disputa, reclamação que não vai ter devolução…
-o sistema… solicitar o vídeo automático, o vídeo da embalagem, e quando chegar já
-responder, seja a disputa seja a devolução, reivindicação… daí ele vai abrir um
-chamado já de resposta."
+"esses fraude… toda disputa, reclamação que não vai ter devolução… solicitar o
+vídeo automático… e quando chegar já responder… abrir um chamado já de resposta."
+E, no mesmo dia, depois de ver que só os casos ainda no prazo entravam: "é simples:
+painel fraude tem que abrir chamado… [a IA] solicita os vídeos e, chegando vídeo,
+analisa, faz o lançamento e abre chamado". O chamado é sempre uma DEFESA contra o
+que o comprador alegou ("chegou um sabonete"), nunca "não recebemos a devolução".
 
-Como o sistema reconhece: é a própria plataforma que diz que o caso é SÓ
-REEMBOLSO (TikTok `return_type=REFUND`; Shopee `needs_logistics=false`) — o
-mesmo sinal que já põe o pedido no painel Fraude (`_fila`). Não há palpite.
+Quem entra: o pedido do painel Fraude da TikTok ou da Shopee — a própria plataforma
+diz que é SÓ REEMBOLSO (TikTok `return_type=REFUND`; Shopee `needs_logistics=false`),
+o mesmo sinal do painel — aberto, em Aguardando Devolução, sem lançamento, sem
+chamado e sem "Abrir chamado: Não". Com prazo de resposta correndo ou não: o caso
+que a plataforma já reembolsou ou está analisando também ganha a defesa.
 
-A cada 10 min, para cada pedido na Fraude da TikTok ou da Shopee que a
-plataforma ainda espera a NOSSA resposta (prazo correndo), sem lançamento, sem
-chamado e sem "Abrir chamado: Não":
+A cada 10 min, por pedido:
 
-1. Vídeo da embalagem: se o pedido já tem (o botão Vídeo da aba Pedidos, gravado
-   na expedição), usa. Senão, lê na plataforma o que o comprador alegou e, se for
-   um caso que o robô contesta, pede o vídeo à equipe — o mesmo "pedido de vídeo"
-   do botão, só que sem ninguém clicar (danificado não trava a equipe à toa).
-2. Quando o vídeo existe: relê o caso (ainda é só reembolso esperando a nossa
-   resposta?) e lança sozinho "Não devolvido" em cada peça, com o motivo que
-   contesta a alegação ("não recebi" → Não recebido, só com a entrega da ida
-   confirmada; "veio vazio/errado" → Golpe; "faltou item" → Item faltando) e o
-   vídeo no Link envio. Lançamento e chamado gravam juntos. Daí pra frente é o
-   caminho de sempre: a IA confere o motivo (lançamento do robô SEM a IA conferir
-   não sai — segura pra alguém) e a resposta sai pela API — TikTok recusa o
-   reembolso, Shopee abre a disputa com o texto do só reembolso.
+1. Vídeo da embalagem: o gravado na expedição (botão Vídeo da aba Pedidos), se há;
+   senão pede à equipe — o mesmo "pedido de vídeo" do botão, sem ninguém clicar.
+2. Com o vídeo: relê o caso na plataforma (em que pé está, o que o comprador
+   alegou, a entrega do pedido) e a IA (`devolucao_fraude_defesa`) diz o que ele
+   alega e escreve a defesa. O robô lança "Não devolvido" em cada peça com o motivo
+   da alegação (vazio/outro produto → Golpe; faltou → Item faltando; não chegou →
+   Não recebido, só com a entrega confirmada), o vídeo no Link envio e a defesa na
+   "Observação pro chamado" — lançamento e chamado gravam juntos. Daí é o caminho de
+   sempre: a IA confere o motivo antes de sair (lançamento do robô sem a conferência
+   não sai) e a resposta vai pela API quando a plataforma ainda espera a nossa
+   resposta (TikTok recusa o reembolso, Shopee abre a disputa); já reembolsado ou em
+   análise, vira tarefa da tela (Seller Center) com o mesmo texto.
 
-Fica pra pessoa (cartão "Fraude: responder à mão"): danificado/defeito e alegação
-que o sistema não reconhece, ida não entregue (extravio: é compensação, não
-contestação), "não recebi" sem a entrega confirmada, "não tenho o vídeo", pedido
-de vídeo que alguém cancelou. O robô não mexe em quem uma pessoa já mexeu
-(lançamento, chamado, "Abrir chamado: Não", tirar da Fraude). ML e Amazon ficam de
-fora nesta etapa (não há resposta pela API pra mediação sem devolução).
+Fica pra pessoa (cartão "Fraude: responder à mão"): dano/defeito e alegação que o
+vídeo não rebate, entrega do pedido que não aconteceu (extravio: é compensação),
+"não recebi" sem a entrega confirmada, proposta do comprador (negociação), caso já
+contestado fora do DaVinci, reembolso que a própria loja aceitou (TikTok), "não tenho
+o vídeo" e pedido de vídeo cancelado. A defesa aprovada no "só propor" é a que sai
+quando ele desliga (a IA não é perguntada de novo). O robô
+não mexe em quem uma pessoa já mexeu (lançamento, chamado, "Abrir chamado: Não",
+tirar da Fraude). ML e Amazon ficam de fora nesta etapa.
 
-Interruptor: `DEVOLUCAO_FRAUDE_AUTO` = ligado | so_video | desligado.
+Interruptor: `DEVOLUCAO_FRAUDE_AUTO` = ligado | so_video | desligado. Com `SO_PROPOR`
+ligado, "ligado" só ESCREVE a defesa proposta na Observação do pedido (nada é lançado
+nem vai pra plataforma) — fica desligado: o Vinicius preferiu rodar direto (16/11).
 """
 
 from __future__ import annotations
 
 import re
-import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -51,6 +56,7 @@ from sqlalchemy import bindparam, text
 from app.config import get_settings
 from app.models import DevolucaoRastreio, Devolution, EstoquePedidoVideo
 from app.services import devolucao_conferencia as conferencia
+from app.services import devolucao_fraude_defesa as defesa_ia
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -61,107 +67,60 @@ SCHEMA = get_settings().database_schema
 LIGADO = "ligado"
 SO_VIDEO = "so_video"
 DESLIGADO = "desligado"
+PROPOR = "propor"
+# True = só PROPÕE a defesa (Observação do pedido) em vez de lançar. Vinicius,
+# 16/11/2026: "não precisa por trava, pode colocar para rodar direto".
+SO_PROPOR = False
 
 CONDICAO = "Não devolvido"
-# Ações em que a plataforma espera a nossa resposta ao só reembolso. A proposta
-# do comprador na Shopee (SHOPEE_RESPONDER_PROPOSTA) é negociação: fica pra pessoa.
+# Ações em que a plataforma espera a nossa resposta (vão primeiro na fila da rodada).
 ACOES_RESPONDER = ("SELLER_RESPOND_REFUND", "SHOPEE_RESPONDER_SOLICITACAO")
-# Lançar no máximo isso por rodada (a 1ª rodada não sai em massa).
+# Por rodada (cron de 10 min, teto de 10 min do worker): lançar no máximo isso (a 1ª
+# rodada não sai em massa), perguntar à IA no máximo isso e ler a plataforma no
+# máximo isso (a TikTok devolve 429 em rajada). IA fora do ar = para de perguntar.
 TETO_LANCAMENTOS = 5
+TETO_ANALISES = 5
+TETO_LEITURAS = 10
 # Recados na Observação do pedido (interna: a tela mostra, a IA lê, a plataforma não).
 MARCA = "Fraude automática"
 NAO_RESPONDE = "o sistema não responde esse caso sozinho (responder à mão)"
 VIDEO_PEDIDO = "vídeo da embalagem pedido à equipe"
 ACHADO_EXPEDICAO = "vídeo da embalagem achado na expedição"
+PROPOSTA = "defesa proposta pela IA"
 # A tela (cartão "Fraude: responder à mão", pages/devolucoes.vue) procura este pedaço.
 CARTAO_A_MAO = "responder à mão"
+
+# Em que pé o caso está na plataforma.
+RESPONDER = defesa_ia.RESPONDER
+EM_ANALISE = defesa_ia.EM_ANALISE
+PAGO = defesa_ia.PAGO
+CONTESTADO = "contestado"
+CANCELADO = "cancelado"
+NEGOCIACAO = "negociacao"
+ACEITO_PELA_LOJA = "aceito_pela_loja"
+SEM_CASO = ""  # não deu pra ler / não é mais só reembolso: tenta na próxima rodada
 
 
 def modo() -> str:
     m = (get_settings().devolucao_fraude_auto or "").strip().lower()
+    if m == LIGADO and SO_PROPOR:
+        return PROPOR
     return m if m in (LIGADO, SO_VIDEO) else DESLIGADO
-
-
-# ── O que o comprador alegou → o motivo que contesta ─────────────────────
-
-# Shopee: `reason` do detalhe do caso.
-_SHOPEE: dict[str, str | None] = {
-    "NOT_RECEIPT": "Não recebido",
-    "SUSPICIOUS_PARCEL": "Golpe",  # pacote vazio / violado
-    "WRONG_ITEM": "Golpe",
-    "MISSING_ITEM": "Item faltando",
-    # O vídeo da embalagem não rebate "diferente do anúncio", nem dano/defeito
-    # (a plataforma pede foto do produto): pessoa.
-    "NOT_AS_DESCRIBED": None,
-    "PHYSICAL_DMG": None,
-    "FUNCTIONAL_DMG": None,
-}
-# Texto do motivo (português ou inglês). Ordem importa: o primeiro que casar vale.
-_PADROES: tuple[tuple[str, str | None], ...] = (
-    (r"danific|quebrad|defeit|nao funciona|damag|broken|defect|not work|anuncio|descri", None),
-    (
-        r"nao receb|nao cheg|not receiv|didn.?t receiv|never arriv|not arriv|nao foi entreg",
-        "Não recebido",
-    ),
-    (r"vazi|empty", "Golpe"),
-    (r"falt|missing|incomplet", "Item faltando"),
-    (r"errad|diferent|wrong|different|outro produto", "Golpe"),
-)
-NAO_RECEBIDO = "Não recebido"
-
-
-def _sem_acento(s: str) -> str:
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", s.lower()) if not unicodedata.combining(c)
-    )
-
-
-def motivo_da_alegacao(plataforma: str, codigo: str | None, texto: str | None) -> str | None:
-    """O motivo do lançamento a partir do que o comprador alegou. None = fica pra
-    pessoa (danificado, ou alegação que o sistema não reconhece). Na TikTok o
-    motivo padronizado (`codigo`) vale antes da nota livre do comprador. PURA."""
-    if plataforma == "shopee":
-        cod = (codigo or "").strip().upper()
-        if cod:
-            # Código que o sistema não conhece: pessoa (não adivinha pelo texto).
-            return _SHOPEE.get(cod)
-        textos: tuple[str | None, ...] = (texto,)
-    else:
-        textos = (codigo, texto)
-    for t in textos:
-        alvo = _sem_acento(t or "")
-        if not alvo.strip():
-            continue
-        for padrao, motivo in _PADROES:
-            if re.search(padrao, alvo):
-                return motivo
-    return None
 
 
 @dataclass(frozen=True)
 class Caso:
     """O caso lido AGORA na plataforma."""
 
-    pendente: bool  # ainda é só reembolso esperando a NOSSA resposta
+    situacao: str
     codigo: str = ""
     texto: str = ""
     # A ida chegou ao comprador? True / False (não entregue) / None (não se sabe).
     ida_entregue: bool | None = None
-
-
-def decidir(plataforma: str, caso: Caso) -> tuple[str | None, str | None]:
-    """(motivo do lançamento, por que fica pra pessoa). (None, None) = a alegação
-    não foi lida — tenta de novo na próxima rodada. PURA."""
-    if not (caso.codigo or caso.texto):
-        return None, None
-    motivo = motivo_da_alegacao(plataforma, caso.codigo, caso.texto)
-    if motivo is None:
-        return None, "é um tipo de alegação que o sistema não contesta sozinho"
-    if caso.ida_entregue is False:
-        return None, "a entrega da ida NÃO aconteceu (extravio: pedir compensação, não contestar)"
-    if motivo == NAO_RECEBIDO and caso.ida_entregue is not True:
-        return None, "o comprador diz que não recebeu e a entrega da ida não está confirmada"
-    return motivo, None
+    entregue_em: str = ""
+    transportadora: str = ""
+    comprador_mandou_prova: bool | None = None
+    prazo: str = ""
 
 
 # ── Candidatos ───────────────────────────────────────────────────────────
@@ -176,8 +135,6 @@ WHERE lower(COALESCE(r.fonte_auto, '')) IN ('tiktok', 'shopee')
   -- ("chegou vazio") é outro fluxo: fica com a pessoa.
   AND upper(COALESCE(r.devolucao_tipo_auto, '')) = 'REFUND'
   AND lower(COALESCE(r.fila_manual, '')) <> 'acompanhamento'
-  AND upper(COALESCE(r.acao_auto, '')) IN :acoes
-  AND r.prazo_acao_auto > :agora
   AND r.abrir_chamado IS DISTINCT FROM false
   AND EXISTS (SELECT 1 FROM "{SCHEMA}".bling_orders bo
               WHERE bo.numero = r.pedido_bling AND bo.situacao = '83957')
@@ -188,13 +145,21 @@ WHERE lower(COALESCE(r.fonte_auto, '')) IN ('tiktok', 'shopee')
   AND NOT EXISTS (SELECT 1 FROM "{SCHEMA}".devolutions d WHERE btrim(d.pedido_bling) = r.pedido_bling)
   AND NOT EXISTS (SELECT 1 FROM "{SCHEMA}".chamados c
                   WHERE c.pedido_bling = r.pedido_bling AND c.origem = 'devolucao')
-ORDER BY r.prazo_acao_auto
+-- Primeiro quem a plataforma ainda espera responder (prazo correndo).
+ORDER BY COALESCE(upper(COALESCE(r.acao_auto, '')) IN :acoes
+                  AND r.prazo_acao_auto > :agora, false) DESC,
+         r.prazo_acao_auto NULLS LAST, r.pedido_bling
 """
 _SQL = text(_CANDIDATOS_SQL).bindparams(bindparam("acoes", expanding=True))
 _AINDA_LIVRE = text(
     f"""SELECT NOT EXISTS (SELECT 1 FROM "{SCHEMA}".devolutions d WHERE btrim(d.pedido_bling) = :p)
        AND NOT EXISTS (SELECT 1 FROM "{SCHEMA}".chamados c
-                       WHERE c.pedido_bling = :p AND c.origem = 'devolucao')"""
+                       WHERE c.pedido_bling = :p AND c.origem = 'devolucao')
+       -- Alguém marcou "Abrir chamado: Não" ou tirou da Fraude durante a leitura.
+       AND NOT EXISTS (SELECT 1 FROM "{SCHEMA}".devolucao_rastreio r
+                       WHERE r.pedido_bling = :p
+                         AND (r.abrir_chamado = false
+                              OR lower(COALESCE(r.fila_manual, '')) = 'acompanhamento'))"""
 )
 
 
@@ -205,9 +170,13 @@ class Resumo:
     video_pedido: int = 0
     esperando_video: int = 0
     lancados: int = 0
+    propostos: int = 0
     pra_pessoa: int = 0
     sem_resposta_pendente: int = 0
     falhas: int = 0
+    analises: int = 0
+    leituras: int = 0
+    ia_fora: bool = False
     pedidos: dict[str, str] = field(default_factory=dict)
 
     def como_dict(self) -> dict[str, Any]:
@@ -230,6 +199,45 @@ def _anotar(rast: DevolucaoRastreio, texto: str) -> None:
     rast.observacao = f"{atual}\n{texto}".strip() if atual else texto
 
 
+async def _anotar_e_gravar(session: AsyncSession, rast: DevolucaoRastreio, texto: str) -> None:
+    """Relê a Observação antes de escrever (a leitura da plataforma e a IA levam
+    segundos: uma pessoa pode ter digitado nela no meio) e grava."""
+    await session.refresh(rast, ["observacao"])
+    _anotar(rast, texto)
+    await session.commit()
+
+
+# "… defesa proposta pela IA (motivo "Golpe") — o comprador alega "…"; defesa: "…".
+# Esperando o OK …" — o que o Vinicius aprovou é o que sai quando o "só propor" desliga.
+_RE_PROPOSTA = re.compile(
+    r'defesa proposta pela IA \(motivo "(?P<motivo>[^"]+)"\).*?; defesa: "(?P<defesa>.+?)"\. '
+    r"Esperando o OK"
+)
+
+
+def proposta_anterior(observacao: str | None) -> tuple[str, str] | None:
+    """(motivo, defesa) da última defesa proposta na Observação do pedido. PURA."""
+    achados = list(_RE_PROPOSTA.finditer(observacao or ""))
+    if not achados:
+        return None
+    m = achados[-1]
+    motivo, defesa = m.group("motivo").strip(), m.group("defesa").strip()
+    if motivo not in defesa_ia.ALEGACOES.values() or len(defesa) < 20:
+        return None
+    return motivo, defesa
+
+
+def _loja_aceitou(eventos: list[dict]) -> bool:
+    """A própria loja aceitou o reembolso na TikTok (não foi a plataforma por prazo).
+    PURA."""
+    for ev in eventos or []:
+        nome = str(ev.get("event") or "").upper()
+        if nome.startswith("SELLER_") and "REJECT" not in nome and "TIMEOUT" not in nome:
+            if any(p in nome for p in ("AGREE", "AGGREE", "APPROVE", "ACCEPT")):
+                return True
+    return False
+
+
 async def _video_da_expedicao(session: AsyncSession, pedido: str) -> str | None:
     """O vídeo da embalagem gravado na expedição (botão Vídeo da aba Pedidos), só se
     foi salvo depois da venda ATUAL — o nº do Bling se repete entre anos."""
@@ -248,55 +256,105 @@ async def _video_da_expedicao(session: AsyncSession, pedido: str) -> str | None:
     return row.link.strip()
 
 
+# ── O caso na plataforma ─────────────────────────────────────────────────
+
+_TIKTOK_PAGO = ("RETURN_OR_REFUND_REQUEST_COMPLETE", "RETURN_OR_REFUND_REQUEST_SUCCESS")
+
+
+def _ddmm(fmt: str) -> str:
+    """ "10/11 14:30" → "10/11". PURA."""
+    return (fmt or "").split(" ")[0]
+
+
 async def _ler_caso(session: AsyncSession, plataforma: str, rid: str, dev: Devolution) -> Caso:
-    """O caso lido agora na plataforma: ainda espera a nossa resposta? O que o
-    comprador alegou? A ida chegou?"""
+    """O caso lido agora na plataforma: em que pé está, o que o comprador alegou,
+    a entrega do pedido."""
     from app.services import chamados_devolucao as cd
     from app.services import chamados_tiktok_reembolso as vig
 
     if plataforma == "tiktok":
         client = await cd._tiktok_client_para(session, None, dev)
         caso = cd._caso_so_reembolso(await cd._casos_tiktok(client, dev), rid)
-        if caso is None or not vig.e_pendente_de_resposta(caso):
-            return Caso(pendente=False)
+        if caso is None:
+            return Caso(situacao=SEM_CASO)
+        status = str(caso.get("return_status") or "").strip().upper()
+        if vig.e_pendente_de_resposta(caso):
+            situacao = RESPONDER
+        elif status == vig.STATUS_RECUSADO or caso.get("arbitration_status"):
+            situacao = CONTESTADO
+        elif status in _TIKTOK_PAGO:
+            situacao = PAGO
+        elif status == "RETURN_OR_REFUND_REQUEST_CANCEL":
+            situacao = CANCELADO
+        else:
+            return Caso(situacao=SEM_CASO)
+        if situacao in (CONTESTADO, CANCELADO):
+            return Caso(situacao=situacao)
         rid_atual = str(caso.get("return_id") or rid)
-        nota, motivo_txt, _eventos = await vig._nota_e_motivo(client, rid_atual)
-        codigo = str(caso.get("return_reason_text") or "").strip() or motivo_txt
+        nota, motivo_txt, eventos = await vig._nota_e_motivo(client, rid_atual)
+        if situacao == PAGO and _loja_aceitou(eventos):
+            # Alguém da loja aceitou o reembolso no Seller Center: não contesta sozinho.
+            return Caso(situacao=ACEITO_PELA_LOJA)
+        _pedido_em, prova = vig._pedido_do_comprador(eventos)
         entrega = await vig._entrega_dados(client, (dev.pedido_marketplace or "").strip())
+        prazo = vig.prazo_resposta(caso)
         return Caso(
-            pendente=True, codigo=codigo, texto=nota, ida_entregue=True if entrega else None
+            situacao=situacao,
+            codigo=str(caso.get("return_reason_text") or "").strip() or motivo_txt,
+            texto=nota,
+            ida_entregue=True if entrega else None,
+            entregue_em=_ddmm(vig._fmt(entrega.get("quando"))) if entrega else "",
+            transportadora=str(entrega.get("transp") or "") if entrega else "",
+            comprador_mandou_prova=bool(prova),
+            prazo=vig._fmt(prazo) if prazo else "",
         )
     client = await cd._shopee_client_para(session, None, dev)
     det = await client.get_return_detail(rid)
     status = str(det.get("status") or "").strip().upper()
     so = str(det.get("return_solution")) == "1" or det.get("needs_logistics") is False
+    if not so:
+        return Caso(situacao=SEM_CASO)
     contestacao = det.get("dispute_reason") or []
     if isinstance(contestacao, str):
         contestacao = [contestacao]
     contestada = any(str(x or "").strip() for x in contestacao)
     comp = str((det.get("seller_compensation") or {}).get("seller_compensation_status") or "")
     comp = comp.upper().replace("COMPENSATION_", "")
-    # Só "solicitado" espera a nossa resposta (é onde nasce SHOPEE_RESPONDER_SOLICITACAO):
-    # aceito/em andamento = alguém já decidiu no Seller Center.
-    if not (
-        so
-        and status == "REQUESTED"
-        and not contestada
-        and comp not in ("REQUESTED", "APPROVED", "REJECTED")
-    ):
-        return Caso(pendente=False)
+    neg = det.get("negotiation") if isinstance(det.get("negotiation"), dict) else {}
+    if contestada or status == "SELLER_DISPUTE" or comp in ("REQUESTED", "APPROVED", "REJECTED"):
+        return Caso(situacao=CONTESTADO)
+    if status in ("CANCELLED", "CLOSED"):
+        return Caso(situacao=CANCELADO)
+    if str(neg.get("negotiation_status") or "").strip().upper() == "PENDING_RESPOND":
+        return Caso(situacao=NEGOCIACAO)
+    if status == "REQUESTED":
+        situacao = RESPONDER
+    elif status in ("JUDGING", "PROCESSING"):
+        situacao = EM_ANALISE
+    elif status in ("ACCEPTED", "REFUND_PAID"):
+        situacao = PAGO
+    else:
+        return Caso(situacao=SEM_CASO)
     entrega = await cd._entrega_shopee(session, dev)
-    situacao = entrega.get("situacao") or ""
+    sit_ida = entrega.get("situacao") or ""
     ida: bool | None = None
-    if situacao in cd._SHOPEE_IDA_NAO_ENTREGUE:
+    if sit_ida in cd._SHOPEE_IDA_NAO_ENTREGUE:
         ida = False
-    elif situacao in cd._SHOPEE_IDA_ENTREGUE or entrega.get("entregue_em") is not None:
+    elif sit_ida in cd._SHOPEE_IDA_ENTREGUE or entrega.get("entregue_em") is not None:
         ida = True
+    prova: bool | None = None
+    if "image" in det or "buyer_videos" in det:
+        prova = bool(det.get("image") or det.get("buyer_videos"))
     return Caso(
-        pendente=True,
+        situacao=situacao,
         codigo=str(det.get("reason") or "").strip(),
         texto=" ".join(str(det.get("text_reason") or "").split()),
         ida_entregue=ida,
+        entregue_em=cd._fmt_brt(entrega.get("entregue_em"), "%d/%m")
+        if entrega.get("entregue_em")
+        else "",
+        comprador_mandou_prova=prova,
+        prazo=cd._fmt_brt(det.get("due_date")) if situacao == RESPONDER else "",
     )
 
 
@@ -310,7 +368,7 @@ async def _pecas(session: AsyncSession, pedido: str) -> list[dict]:
     ]
 
 
-def _linha(peca: dict, *, motivo: str, video: str) -> Devolution:
+def _linha(peca: dict, *, motivo: str, video: str, defesa: str = "") -> Devolution:
     return Devolution(
         data=peca.get("data"),
         pedido_bling=(peca.get("pedido_bling") or "").strip(),
@@ -323,65 +381,105 @@ def _linha(peca: dict, *, motivo: str, video: str) -> Devolution:
         condicao_produto=CONDICAO,
         motivo_devolucao=motivo,
         link_envio=video,
+        # A "Observação pro chamado" da janela (vale pro pedido inteiro): é a defesa
+        # que vai no texto da plataforma.
+        observacao=defesa or None,
         # Na Fraude o cliente já foi (ou vai ser) reembolsado pela plataforma.
         reembolso=True,
     )
 
 
-def _o_que(caso: Caso) -> str:
-    return " — ".join(x for x in (caso.codigo, caso.texto) if x)[:200]
+def _o_que(caso: Caso, resumo: str = "") -> str:
+    return (resumo or " — ".join(x for x in (caso.codigo, caso.texto) if x))[:200]
 
 
-async def _avaliar(
+_POR_SITUACAO = {
+    CONTESTADO: "o caso já foi contestado na plataforma fora do DaVinci — registrar o lançamento e o chamado à mão",
+    NEGOCIACAO: "o comprador fez uma proposta na Shopee (negociação) — decidir à mão",
+    ACEITO_PELA_LOJA: "a própria loja aceitou o reembolso no Seller Center — conferir se é pra contestar",
+}
+
+
+async def _analisar(
     session: AsyncSession,
     linha: Any,
     rast: DevolucaoRastreio,
     pecas: list[dict],
     agora: datetime,
     resumo: Resumo,
-) -> tuple[str, Caso] | None:
-    """Lê o caso e decide. Devolve (motivo do lançamento, o caso lido), ou None (e
-    já conta e anota o porquê)."""
+    *,
+    aprovada: tuple[str, str] | None = None,
+) -> tuple[defesa_ia.Decisao, Caso] | None:
+    """Lê o caso e pergunta à IA. Devolve (decisão com motivo e defesa, caso), ou
+    None (e já conta e anota o porquê). `aprovada` = a defesa que o Vinicius viu no
+    "só propor": relê o caso (ainda dá pra contestar?) mas não pergunta de novo."""
     pedido = linha.pedido_bling
     plataforma = (linha.fonte_auto or "").strip().lower()
     rascunho = _linha(pecas[0], motivo="", video="")
+    resumo.leituras += 1
     caso = await _ler_caso(session, plataforma, linha.devolucao_id_auto.strip(), rascunho)
-    if not caso.pendente:
-        # Já respondido, cancelado, aprovado… o sync de 30 min tira da lista.
+    if caso.situacao in (SEM_CASO, CANCELADO):
+        # Cancelado pelo comprador / não é mais só reembolso / leitura vazia: o sync
+        # de 30 min tira da lista; senão, tenta de novo na próxima rodada.
         resumo.sem_resposta_pendente += 1
-        resumo.pedidos[pedido] = "a plataforma não espera mais resposta"
-        return None
-    motivo, pessoa = decidir(plataforma, caso)
-    if pessoa:
-        _anotar(
-            rast,
-            f'{MARCA} ({_hoje_txt(agora)}): o comprador alega "{_o_que(caso)}" — {pessoa}; '
-            f"{NAO_RESPONDE}.",
+        resumo.pedidos[pedido] = (
+            "o comprador cancelou" if caso.situacao == CANCELADO else "caso não lido agora"
         )
-        await session.commit()
-        resumo.pra_pessoa += 1
-        resumo.pedidos[pedido] = f"pessoa: {pessoa}"
         return None
-    if motivo is None:
-        # A leitura voltou vazia (a TikTok devolve vazio quando a API falha).
+    if caso.situacao in _POR_SITUACAO:
+        await _anotar_e_gravar(
+            session,
+            rast,
+            f"{MARCA} ({_hoje_txt(agora)}): {_POR_SITUACAO[caso.situacao]}; {NAO_RESPONDE}.",
+        )
+        resumo.pra_pessoa += 1
+        resumo.pedidos[pedido] = f"pessoa: {caso.situacao}"
+        return None
+    if aprovada is not None:
+        motivo, defesa = aprovada
+        return defesa_ia.Decisao(motivo=motivo, defesa=defesa, resumo=_o_que(caso)), caso
+    if not caso.codigo.strip() and not caso.texto.strip():
+        # A TikTok devolve vazio quando a API falha: não pergunta, tenta de novo.
         resumo.falhas += 1
         resumo.pedidos[pedido] = "alegação não lida"
         return None
-    return motivo, caso
+    resumo.analises += 1
+    fatos = defesa_ia.Fatos(
+        plataforma="TikTok Shop" if plataforma == "tiktok" else "Shopee",
+        situacao=caso.situacao,
+        codigo=caso.codigo,
+        texto=caso.texto,
+        produtos=defesa_ia.produtos_de(pecas),
+        ida_entregue=caso.ida_entregue,
+        entregue_em=caso.entregue_em,
+        transportadora=caso.transportadora,
+        comprador_mandou_prova=caso.comprador_mandou_prova,
+        prazo=caso.prazo,
+    )
+    decisao = await defesa_ia.analisar(fatos)
+    if decisao.pessoa:
+        await _anotar_e_gravar(
+            session,
+            rast,
+            f'{MARCA} ({_hoje_txt(agora)}): o comprador alega "{_o_que(caso, decisao.resumo)}" — '
+            f"{decisao.pessoa}; {NAO_RESPONDE}.",
+        )
+        resumo.pra_pessoa += 1
+        resumo.pedidos[pedido] = f"pessoa: {decisao.pessoa}"
+        return None
+    if not decisao.motivo:
+        # A IA não respondeu (fora do ar, sem chave): tenta na próxima rodada e não
+        # pergunta mais nesta (cada tentativa pode levar minutos).
+        resumo.falhas += 1
+        resumo.ia_fora = True
+        resumo.pedidos[pedido] = "a IA não respondeu"
+        return None
+    return decisao, caso
 
 
 async def _pedir_video(
-    session: AsyncSession, linha: Any, rast: DevolucaoRastreio, agora: datetime, resumo: Resumo
+    session: AsyncSession, pedido: str, rast: DevolucaoRastreio, agora: datetime, resumo: Resumo
 ) -> None:
-    pedido = linha.pedido_bling
-    pecas = await _pecas(session, pedido)
-    if not pecas:
-        resumo.pra_pessoa += 1
-        resumo.pedidos[pedido] = "sem peças na busca"
-        return
-    # Antes de pedir: o caso é dos que o robô contesta? (danificado não trava a equipe)
-    if await _avaliar(session, linha, rast, pecas, agora, resumo) is None:
-        return
     # O mesmo pedido de vídeo do botão (aparece pra equipe do estoque).
     rast.video_solicitado_em = agora
     rast.video_solicitado_por = None
@@ -393,14 +491,20 @@ async def _pedir_video(
 
 
 async def _lancar(
-    session: AsyncSession, linha: Any, rast: DevolucaoRastreio, agora: datetime, resumo: Resumo
+    session: AsyncSession,
+    linha: Any,
+    rast: DevolucaoRastreio,
+    agora: datetime,
+    resumo: Resumo,
+    *,
+    so_propor: bool,
 ) -> None:
     from app.routers import devolutions as antigo
     from app.services import chamados_devolucao as cd
 
     pedido = linha.pedido_bling
     if not conferencia.ligada():
-        # Sem a IA não há conferência nenhuma antes do tiro único: não lança.
+        # Sem a IA não há defesa nem conferência antes do tiro único: não lança.
         resumo.pedidos[pedido] = "IA desligada: não lança sozinho"
         return
     pecas = await _pecas(session, pedido)
@@ -408,24 +512,41 @@ async def _lancar(
         resumo.pra_pessoa += 1
         resumo.pedidos[pedido] = "sem peças na busca"
         return
-    avaliado = await _avaliar(session, linha, rast, pecas, agora, resumo)
-    if avaliado is None:
+    aprovada = None if so_propor else proposta_anterior(rast.observacao)
+    analisado = await _analisar(session, linha, rast, pecas, agora, resumo, aprovada=aprovada)
+    if analisado is None:
         return
-    motivo, caso = avaliado
-    # A leitura da plataforma levou um tempo: alguém lançou ou abriu chamado no meio?
+    decisao, caso = analisado
+    if so_propor:
+        await _anotar_e_gravar(
+            session,
+            rast,
+            f'{MARCA} ({_hoje_txt(agora)}): {PROPOSTA} (motivo "{decisao.motivo}") — o comprador '
+            f'alega "{_o_que(caso, decisao.resumo)}"; defesa: "{decisao.defesa}". '
+            "Esperando o OK pra lançar e abrir o chamado.",
+        )
+        resumo.propostos += 1
+        resumo.pedidos[pedido] = f"proposto: {decisao.motivo}"
+        return
+    # A leitura da plataforma e a IA levaram um tempo: alguém lançou, marcou "Abrir
+    # chamado: Não" ou tirou da Fraude no meio?
     if not (await session.execute(_AINDA_LIVRE, {"p": pedido})).scalar():
-        resumo.pedidos[pedido] = "uma pessoa lançou no meio"
+        resumo.pedidos[pedido] = "uma pessoa mexeu no meio"
         return
+    await session.refresh(rast, ["observacao", "video_link", "abrir_chamado", "fila_manual"])
     video = (rast.video_link or "").strip()
-    linhas = [_linha(p, motivo=motivo, video=video) for p in pecas]
+    if not video:
+        resumo.pedidos[pedido] = "o vídeo foi apagado no meio"
+        return
+    linhas = [_linha(p, motivo=decisao.motivo, video=video, defesa=decisao.defesa) for p in pecas]
     for d in linhas:
         d.tag = antigo._sku_tag(d.sku)
         session.add(d)
     _anotar(
         rast,
-        f'{MARCA} ({_hoje_txt(agora)}): o comprador alega "{_o_que(caso)}" — '
-        f"{conferencia.MARCA_ROBO}: {CONDICAO} / {motivo}, com o vídeo da embalagem; "
-        "a IA confere antes de a resposta sair.",
+        f'{MARCA} ({_hoje_txt(agora)}): o comprador alega "{_o_que(caso, decisao.resumo)}" — '
+        f"{conferencia.MARCA_ROBO}: {CONDICAO} / {decisao.motivo}, com o vídeo da embalagem e "
+        "a defesa escrita pela IA; a IA confere antes de a resposta sair.",
     )
     await session.flush()
     # Lançamento e chamado gravam JUNTOS: sem chamado, não fica lançamento órfão.
@@ -438,8 +559,8 @@ async def _lancar(
     await session.commit()
     await cd.agendar_disparo(session, ch, linhas[0])
     resumo.lancados += 1
-    resumo.pedidos[pedido] = f"lançado: {motivo}"
-    logger.info("devolucao_fraude_auto_lancado", pedido_bling=pedido, motivo=motivo)
+    resumo.pedidos[pedido] = f"lançado: {decisao.motivo}"
+    logger.info("devolucao_fraude_auto_lancado", pedido_bling=pedido, motivo=decisao.motivo)
 
 
 async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dict[str, Any]:
@@ -477,10 +598,7 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                     rast.video_enviado_em = agora
                     rast.video_solicitado_em = rast.video_solicitado_em or agora
                     rast.video_sem_motivo = None
-                    _anotar(
-                        rast,
-                        f"{MARCA} ({_hoje_txt(agora)}): {ACHADO_EXPEDICAO}.",
-                    )
+                    _anotar(rast, f"{MARCA} ({_hoje_txt(agora)}): {ACHADO_EXPEDICAO}.")
                     await session.commit()
                     resumo.video_da_expedicao += 1
                     video = achado
@@ -490,6 +608,7 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                     resumo.pedidos[pedido] = "sem vídeo (equipe)"
                 elif rast.video_solicitado_em is not None:
                     resumo.esperando_video += 1
+                    resumo.pedidos[pedido] = "esperando o vídeo"
                 elif VIDEO_PEDIDO in obs:
                     # O robô pediu e alguém cancelou o pedido: não pede de novo; fica
                     # pra pessoa (aparece no cartão "Fraude: responder à mão").
@@ -502,11 +621,22 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                     resumo.pra_pessoa += 1
                     resumo.pedidos[pedido] = "pedido de vídeo cancelado"
                 else:
-                    await _pedir_video(session, linha, rast, agora, resumo)
+                    await _pedir_video(session, pedido, rast, agora, resumo)
                 continue
-            if m != LIGADO or resumo.lancados >= TETO_LANCAMENTOS:
+            if m not in (LIGADO, PROPOR):
                 continue
-            await _lancar(session, linha, rast, agora, resumo)
+            if m == PROPOR and PROPOSTA in obs:
+                resumo.pedidos[pedido] = "proposta escrita (esperando o OK)"
+                continue
+            if (
+                resumo.lancados >= TETO_LANCAMENTOS
+                or resumo.analises >= TETO_ANALISES
+                or resumo.leituras >= TETO_LEITURAS
+                or resumo.ia_fora
+            ):
+                resumo.pedidos.setdefault(pedido, "fica pra próxima rodada")
+                continue
+            await _lancar(session, linha, rast, agora, resumo, so_propor=m == PROPOR)
         except Exception as e:  # noqa: BLE001 — um pedido ruim não para a rodada
             await session.rollback()
             resumo.falhas += 1
