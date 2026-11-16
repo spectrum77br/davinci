@@ -405,6 +405,28 @@ CAMINHOS_APP_PADRAO: tuple[str, ...] = (
     "falar com a loja: as mensagens da própria compra",
     "Central de Ajuda da {nome}: só para assunto da {nome} (pagamento, conta, cupom)",
 )
+# 16/11/2026 (o teste com o verificador ligado): o que a equipe repete sobre o que é da
+# plataforma e a loja não vê — o verificador barrava como "sem lastro" o "não temos acesso ao
+# nome de quem recebeu", o "o código da devolução vem da Shopee" e o "o prazo é o da plataforma".
+_O_QUE_E_DA_PLATAFORMA = (
+    "código ou etiqueta de envio da devolução: quem manda é {nome}, na própria solicitação "
+    "de devolução; a loja não tem acesso",
+    "a loja não vê quem recebeu a entrega, os dados do pagamento nem o andamento do "
+    "reembolso: isso é com {nome}",
+    "prazos: o da entrega e o do reembolso são os que {nome} informa no pedido",
+)
+_NOMES_DOS_CAMINHOS = {
+    "shopee": "a Shopee",
+    "ml": "o Mercado Livre",
+    "tiktok": "o TikTok Shop",
+    "amazon": "a Amazon",
+}
+# Só para o VERIFICADOR (`verificador.orientacao_aprovada`): no prompt do agente o bloco da
+# plataforma já está no teto de tamanho (os testes de 27/10/2026), e quem barrava era ele.
+FATOS_DA_PLATAFORMA: dict[str, tuple[str, ...]] = {
+    plataforma: tuple(linha.format(nome=nome) for linha in _O_QUE_E_DA_PLATAFORMA)
+    for plataforma, nome in _NOMES_DOS_CAMINHOS.items()
+}
 
 # O que só vale numa plataforma (regras 10, 11 e 12 do manual).
 NOTAS_DA_PLATAFORMA: dict[str, tuple[str, ...]] = {

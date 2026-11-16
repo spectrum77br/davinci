@@ -2099,7 +2099,9 @@ def orientacao_aprovada(assunto: str | None, plataforma_codigo: str = "") -> lis
             linhas += [f"ORIENTAÇÃO APROVADA DO ASSUNTO ({nome}):", f"- {orientacao}"]
     caminhos = prompt.CAMINHOS_APP.get(plataforma_codigo)
     if caminhos:
-        linhas += ["CAMINHOS DO APP:", *(f"- {c}" for c in caminhos)]
+        # 16/11/2026: e o que é da plataforma (a loja não vê, o código da devolução, os prazos).
+        fatos = prompt.FATOS_DA_PLATAFORMA.get(plataforma_codigo, ())
+        linhas += ["CAMINHOS DO APP:", *(f"- {c}" for c in (*caminhos, *fatos))]
     return linhas
 
 
