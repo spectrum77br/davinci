@@ -574,13 +574,13 @@ watch(dataIni, () => { if (mostrar.value !== 'abertas') void load() })
 // ── Excel (csv que o Excel abre) ────────────────────────────────────────
 function exportar() {
   const cab = [
-    'Data', 'Bling', 'Nº na plataforma', 'Plataforma', 'Conta', 'SKU', 'Produto', 'Etapa', 'Dias', 'Prazo',
+    'Data', 'Bling', 'Nº na plataforma', 'Plataforma', 'Conta', 'Cliente', 'SKU', 'Produto', 'Etapa', 'Dias', 'Prazo',
     'Prazo de', 'Reemb. cliente', 'Valor reemb. cliente', 'Localização', 'Rastreio', 'Vídeo envio',
     'Vídeo abertura', 'Foto', 'Condição', 'SKU lançado', 'Chamado', 'Status Bling', 'Observação',
   ]
   const linhas = filtrados.value.map((i) => [
     ddmmaaaa(i.data), i.pedido_bling, i.pedido_marketplace, PLATAFORMA_NOME[plataformaKey(i.plataforma)] || i.plataforma,
-    contaDe(i), i.sku, i.produto, etapaRotulo(i), i.dias_em_devolucao ?? '', i.prazo_em ? ddmmaaaa(i.prazo_em) : '',
+    contaDe(i), i.cliente, i.sku, i.produto, etapaRotulo(i), i.dias_em_devolucao ?? '', i.prazo_em ? ddmmaaaa(i.prazo_em) : '',
     i.prazo_tipo, i.reembolso == null ? '' : i.reembolso ? 'Sim' : 'Não',
     i.reembolso_valor != null ? i.reembolso_valor.toFixed(2).replace('.', ',') : '', i.localizacao, i.rastreio,
     i.video_link ? 'Sim' : i.video_status === 'pendente' ? 'pedido' : '', temAbertura(i) ? 'Sim' : '',
@@ -1251,14 +1251,14 @@ const lidoHa = computed(() => {
                  recolhido cabe tudo. -->
             <table class="w-full table-fixed border-collapse text-[11.5px]" :class="veCusto ? 'min-w-[1742px]' : 'min-w-[1658px]'">
               <colgroup>
-                <col class="w-[42px]"><col class="w-[58px]"><col class="w-[148px]"><col class="w-[88px]"><col class="w-[112px]"><col class="w-[168px]">
+                <col class="w-[42px]"><col class="w-[58px]"><col class="w-[148px]"><col class="w-[88px]"><col class="w-[130px]"><col class="w-[112px]"><col class="w-[168px]">
                 <col class="w-[90px]"><col class="w-[36px]"><col class="w-[90px]"><col class="w-[70px]"><col>
                 <col class="w-[40px]"><col class="w-[60px]"><col class="w-[36px]">
                 <col class="w-[150px]"><col class="w-[96px]"><col class="w-[92px]"><col v-if="veCusto" class="w-[84px]"><col class="w-[160px]">
               </colgroup>
               <thead class="sticky top-0 z-10 bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
                 <tr>
-                  <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="6">Pedido</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="7">Pedido</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="5">Devolução</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="3">Provas</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="veCusto ? 5 : 4">Lançamento</th>
@@ -1268,6 +1268,7 @@ const lidoHa = computed(() => {
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido no Bling">Bling</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido na plataforma (um clique seleciona para copiar)">Nº na plataforma</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold">Conta</th>
+                  <th class="border-b px-1.5 py-1 text-left font-semibold" title="Nome do cliente (cidade/UF no passar do mouse)">Cliente</th>
                   <th class="border-b px-1.5 py-1 text-left font-semibold" title="SKU da venda">SKU</th>
                   <th class="border-b px-1.5 py-1 text-left font-semibold">Produto</th>
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" title="Aguardando = o pacote não chegou · Chegou = chegou (falta lançar ou já lançada) · Manutenção = com o técnico · Fraude = não volta pacote, só dinheiro">Etapa</th>
@@ -1287,7 +1288,7 @@ const lidoHa = computed(() => {
               </thead>
               <tbody>
                 <tr v-if="loading && !items.length">
-                  <td :colspan="veCusto ? 19 : 18" class="py-8 text-center text-muted-foreground"><RefreshCw class="mr-1.5 inline size-4 animate-spin" /> carregando…</td>
+                  <td :colspan="veCusto ? 20 : 19" class="py-8 text-center text-muted-foreground"><RefreshCw class="mr-1.5 inline size-4 animate-spin" /> carregando…</td>
                 </tr>
                 <tr
                   v-for="(i, n) in filtrados"
@@ -1310,6 +1311,10 @@ const lidoHa = computed(() => {
                   <td class="px-1.5 py-1.5 text-center leading-tight" :title="i.loja || ''">
                     <div class="line-clamp-2 break-words">{{ contaDe(i) }}</div>
                     <div v-if="plataformaTab === 'todas'" class="whitespace-nowrap text-[10px] text-muted-foreground">{{ PLATAFORMA_NOME[plataformaKey(i.plataforma)] || i.plataforma }}</div>
+                  </td>
+                  <!-- 16/11/2026 (Vinicius): "depois da conta eu preciso do nome do cliente, isso é muito importante". -->
+                  <td class="px-1.5 py-1.5 leading-tight" :title="[i.cliente, [i.cidade, i.uf].filter(Boolean).join('/')].filter(Boolean).join(' · ')" data-cliente>
+                    <div class="line-clamp-2 break-words">{{ i.cliente || '—' }}</div>
                   </td>
                   <!-- SKU de kit ("a+b+c") quebra depois de cada "+" em vez de cortar. -->
                   <td class="px-1.5 py-1.5 font-mono text-[10.5px] leading-tight [overflow-wrap:anywhere]" :title="i.sku || ''">{{ (i.sku || '—').replace(/\+/g, '+\u200b') }}</td>
@@ -1392,7 +1397,7 @@ const lidoHa = computed(() => {
                   <td class="px-1.5 py-1.5 text-muted-foreground" :title="obsDaLinha(i)"><div class="line-clamp-2 break-words leading-tight">{{ obsDaLinha(i) }}</div></td>
                 </tr>
                 <tr v-if="!loading && !filtrados.length">
-                  <td :colspan="veCusto ? 19 : 18" class="px-3 py-6 text-center text-muted-foreground">
+                  <td :colspan="veCusto ? 20 : 19" class="px-3 py-6 text-center text-muted-foreground">
                     {{ items.length ? 'nenhuma devolução com esses filtros' : 'nenhuma devolução aqui' }}
                     <template v-if="search.trim()">
                       · <button type="button" class="font-semibold text-primary underline disabled:opacity-50" :disabled="procurando" title="Procura o pedido no histórico inteiro: resolvidas, antigas e pedidos que ainda não caíram em Aguardando Devolução" @click="abrirPedido(search)">{{ procurando ? 'procurando…' : `procurar “${search.trim()}” no histórico` }}</button>
