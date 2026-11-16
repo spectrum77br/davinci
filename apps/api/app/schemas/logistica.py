@@ -168,6 +168,12 @@ class TrackenResultadoItemIn(BaseModel):
 
 class TrackenResultadoIn(BaseModel):
     itens: list[TrackenResultadoItemIn] = Field(max_length=300)
+    # Código da leitura que pegou a vez (`/tracken/alvos?leitura=`): renova a vez.
+    leitura: str | None = Field(default=None, max_length=64)
+
+
+class TrackenFimIn(BaseModel):
+    leitura: str = Field(min_length=1, max_length=64)
 
 
 class LogisticaOut(BaseModel):

@@ -703,3 +703,39 @@ async def test_automatico_nao_dispara_em_velha_entregue_avisada_ou_desligado(
     assert (await _resultado(client, nova, lista)).json()["avisados"] == 0
     assert enviados == []
     assert await _chamados(db, "309603") == []
+
+
+@pytest.mark.asyncio
+async def test_automatico_no_maximo_10_por_meia_hora(
+    client: AsyncClient,
+    db: AsyncSession,
+    admin: User,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """16/11/2026: a tela grava um pedido por vez (o Tracken bloqueia quem
+    consulta rápido), então a trava contra leitura errada avisando todo mundo
+    passou de "10 por leitura" para "10 por meia hora"."""
+    enviados: list[str] = []
+
+    async def falso(session, row, texto):
+        enviados.append(texto)
+        return "enviada", None
+
+    monkeypatch.setattr(flex_nao_entregue, "_mandar_shopee", falso)
+    monkeypatch.setattr(flex_nao_entregue, "LIMITE_AUTO", 2)
+    auth_as(admin)
+    agora = datetime.now(UTC).replace(microsecond=0)
+    lista = _bruto([(agora - timedelta(minutes=20), "DESTINATÁRIO AUSENTE")])
+    linhas = [
+        await _pedido(db, bling=f"30970{i}", loja=f"2611LIMITE{i}", tentativa=False)
+        for i in range(3)
+    ]
+    avisados = [(await _resultado(client, x, lista)).json()["avisados"] for x in linhas]
+    assert avisados == [1, 1, 0] and len(enviados) == 2
+    assert await _chamados(db, "309702") == []
+    # Meia hora depois, o que ficou de fora é avisado na leitura seguinte.
+    for _ in range(4):
+        await _envelhecer(db)
+    assert (await _resultado(client, linhas[2], lista)).json()["avisados"] == 1
+    assert len(enviados) == 3

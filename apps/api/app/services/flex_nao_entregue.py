@@ -708,8 +708,26 @@ async def nome_do_cliente(session: AsyncSession, row: Logistica) -> str | None:
 # Só tentativa recente: na 1ª leitura depois de publicar, tentativa velha do
 # histórico não dispara aviso atrasado.
 JANELA_AUTO = timedelta(hours=24)
-# Por leitura (a resposta da tela): o resto fica pra leitura seguinte.
+# Trava contra leitura errada avisando todo mundo: no máximo isto em
+# JANELA_LIMITE_AUTO; o resto fica pra leitura seguinte. (Era "por leitura",
+# mas desde 16/11/2026 a tela grava um pedido por vez — o Tracken bloqueia
+# quem consulta rápido — e cada resposta traz um só.)
 LIMITE_AUTO = 10
+JANELA_LIMITE_AUTO = timedelta(minutes=30)
+
+
+async def _avisados_sozinho_desde(session: AsyncSession, desde: datetime) -> int:
+    return (
+        await session.execute(
+            select(func.count())
+            .select_from(ChamadoMensagem)
+            .where(
+                ChamadoMensagem.tipo == "sistema",
+                ChamadoMensagem.texto.startswith(f"{PREFIXO_NOTA} ({AUTOR_AUTOMATICO})"),
+                ChamadoMensagem.created_at >= desde,
+            )
+        )
+    ).scalar_one()
 
 
 async def _avisar_sozinho(session: AsyncSession, logistica_id: Any, agora: datetime) -> bool:
@@ -770,7 +788,17 @@ async def automatico(session: AsyncSession, ids: list[Any], agora: datetime) -> 
     if not ids or not get_settings().flex_nao_entregue_auto:
         return 0
     avisados = 0
-    for lid in ids[:LIMITE_AUTO]:
+    try:
+        ja = await _avisados_sozinho_desde(session, agora - JANELA_LIMITE_AUTO)
+    except Exception as e:  # noqa: BLE001 — sem saber quantos, na dúvida não manda
+        await session.rollback()
+        logger.warning("flex_nao_entregue_automatico_erro", err=str(e)[:300])
+        return 0
+    restam = LIMITE_AUTO - ja
+    if restam <= 0:
+        logger.warning("flex_nao_entregue_automatico_limite", pedidos=len(ids))
+        return 0
+    for lid in ids[:restam]:
         try:
             avisados += await _avisar_sozinho(session, lid, agora)
         except Exception as e:  # noqa: BLE001 — um pedido não derruba os outros

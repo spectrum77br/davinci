@@ -61,6 +61,7 @@ from app.schemas.logistica import (
     LogisticaExportIn,
     LogisticaOut,
     TrackenAlvoOut,
+    TrackenFimIn,
     TrackenOut,
     TrackenResultadoIn,
     LogisticaPatch,
@@ -1076,11 +1077,16 @@ async def tracken_alvos(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("logistica", "view"))],
     ids: Annotated[str | None, Query(max_length=4000)] = None,
+    tudo: bool = False,
+    leitura: Annotated[str | None, Query(max_length=64)] = None,
 ) -> list[TrackenAlvoOut]:
     """Coluna "Tracken" (aba Flex): os pedidos Flex que a TELA consulta no
     rastreio da transportadora — o Tracken responde 403 ao servidor (fora do
     Brasil), ao navegador não. `ids` (separados por vírgula): só esses (botão
-    do Raio-X); sem `ids`, os dos últimos dias ainda não entregues."""
+    do Raio-X); sem `ids`, os dos últimos dias ainda não entregues e não lidos
+    há pouco; `tudo` (botão "Atualizar Tracken"): também os lidos há pouco.
+    `leitura`: o código da leitura da tela — uma por vez no sistema todo; com
+    outra tela lendo, 409 `tracken_outra_tela`."""
     _so_quem_ve_flex(user)
     somente: set[UUID] | None = None
     if ids:
@@ -1088,7 +1094,9 @@ async def tracken_alvos(
             somente = {UUID(i.strip()) for i in ids.split(",") if i.strip()}
         except ValueError as e:
             raise HTTPException(422, detail={"code": "ids_invalidos"}) from e
-    lista = await tracken.alvos(session, datetime.now(UTC), somente)
+    elif leitura and not await tracken.pegar_vez(leitura):
+        raise HTTPException(409, detail={"code": "tracken_outra_tela"})
+    lista = await tracken.alvos(session, datetime.now(UTC), somente, tudo=tudo)
     return [
         TrackenAlvoOut(
             logistica_id=a.logistica_id, pedido=a.pedido, rastreio=a.rastreio, cep=a.cep
@@ -1137,8 +1145,21 @@ async def tracken_resultado(
         if dados is not None and dados.get("tentativas"):
             com_tentativa.append(item.logistica_id)
     await session.commit()
+    if body.leitura:
+        await tracken.renovar_vez(body.leitura)
     avisados = await flex_nao_entregue.automatico(session, com_tentativa, agora)
     return {"gravados": gravados, "achados": achados, "avisados": avisados}
+
+
+@router.post("/tracken/fim")
+async def tracken_fim(
+    body: TrackenFimIn,
+    user: Annotated[User, Depends(require_permission("logistica", "view"))],
+) -> dict[str, bool]:
+    """A leitura da tela terminou (ou parou): solta a vez para outra tela."""
+    _so_quem_ve_flex(user)
+    await tracken.soltar_vez(body.leitura)
+    return {"ok": True}
 
 
 @router.post("/export.xlsx")

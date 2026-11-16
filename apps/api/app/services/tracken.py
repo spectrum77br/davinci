@@ -23,7 +23,9 @@ painel ele responde (CORS liberado para qualquer origem; com o corpo em
 que consultar (`alvos`: pedido, rastreio e CEP), consulta o Tracken e devolve
 a resposta crua, que o DaVinci interpreta aqui (`interpretar`) e grava
 (`gravar`). A tela faz isso ao abrir a aba Flex, de 30 em 30 min enquanto ela
-fica aberta e nos botões "Atualizar Tracken".
+fica aberta e nos botões "Atualizar Tracken" — devagar, uma consulta por vez
+com folga entre elas: o Tracken bloqueia quem consulta rápido demais (ver
+`RELER_A_CADA`).
 
 Só pedido Flex (`logistica.envio_flex`) da Shopee/ML dos últimos
 `JANELA_DIAS`; depois de entregue, relê por mais um dia (observação/recebedor
@@ -44,8 +46,10 @@ from zoneinfo import ZoneInfo
 
 import structlog
 from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import redis_client
 from app.models import BlingOrder, Logistica, LogisticaTracken
 from app.services import logistica_rules
 
@@ -58,6 +62,60 @@ _FUSO = ZoneInfo("America/Sao_Paulo")
 JANELA_DIAS = 20
 # Depois de entregue, relê por mais este tempo e para.
 RELER_ENTREGUE = timedelta(hours=24)
+# O Tracken (Cloudflare) BLOQUEIA o IP depois de poucas consultas seguidas
+# (16/11/2026: da 6ª em diante, 429 "error 1015", ~2 min bloqueado; no navegador vira
+# "Failed to fetch"). Por isso a lista vem com quem está há mais tempo sem
+# leitura PRIMEIRO (uma leitura cortada recomeça por quem ficou de fora) e a
+# leitura sozinha da tela pula o que foi lido há pouco (outra aba aberta, até
+# em outra máquina, acabou de ler).
+RELER_A_CADA = timedelta(minutes=20)
+# Pedido que a transportadora não tem, já com estes dias de venda: relê só de
+# tempos em tempos (cada um gasta até 3 consultas — pedido, rastreio, pedido
+# como rastreio — e o 306194, Flex de outubro que nunca passou por ela, comia
+# 3 das 5 consultas de cada leitura). 5 dias: venda de sexta despachada na
+# segunda (ou depois de feriado) ainda é lida no ritmo normal.
+NAO_ACHADO_DIAS = 5
+RELER_NAO_ACHADO = timedelta(hours=6)
+# UMA leitura por vez no sistema todo: duas abas abertas (na mesma internet)
+# somam consultas e o Tracken bloqueia as duas. A tela manda um código da
+# leitura; quem pega a vez lê, as outras não (veem o resultado no refresco da
+# lista). A vez se renova a cada pedido gravado e cai sozinha se a aba fechar
+# no meio (folga para a pausa do bloqueio e para o navegador, que atrasa os
+# relógios de aba escondida).
+_CHAVE_VEZ = "tracken:leitura"
+VEZ_SEGUNDOS = 6 * 60
+
+
+async def pegar_vez(leitura: str) -> bool:
+    """A leitura `leitura` pode consultar? (Sem Redis: pode, como antes.)"""
+    try:
+        r = redis_client.redis
+        if await r.set(_CHAVE_VEZ, leitura, nx=True, ex=VEZ_SEGUNDOS):
+            return True
+        return await r.get(_CHAVE_VEZ) == leitura
+    except Exception as e:  # noqa: BLE001 — sem trava não é motivo para não ler
+        logger.warning("tracken_vez_sem_redis", err=str(e)[:200])
+        return True
+
+
+async def renovar_vez(leitura: str) -> None:
+    try:
+        r = redis_client.redis
+        if await r.get(_CHAVE_VEZ) == leitura:
+            await r.expire(_CHAVE_VEZ, VEZ_SEGUNDOS)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("tracken_vez_sem_redis", err=str(e)[:200])
+
+
+async def soltar_vez(leitura: str) -> None:
+    try:
+        r = redis_client.redis
+        if await r.get(_CHAVE_VEZ) == leitura:
+            await r.delete(_CHAVE_VEZ)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("tracken_vez_sem_redis", err=str(e)[:200])
+
+
 # Defesa: a resposta vem do navegador — nada de texto ou lista sem fim.
 _MAX_TEXTO = 500
 _MAX_EVENTOS = 200
@@ -204,11 +262,27 @@ async def _ceps(session: AsyncSession, numeros: Collection[str]) -> dict[str, st
     return {str(n): str(c) for n, c in rows.all() if n and c}
 
 
+def _esperar(
+    log: Logistica, tk: LogisticaTracken | None, hoje: date, tudo: bool
+) -> timedelta | None:
+    """Quanto tempo depois da última leitura o pedido volta à lista (None = já)."""
+    nao_tem = tk is not None and tk.lido_em is not None and not tk.achado and tk.erro is None
+    if nao_tem and log.data is not None and (hoje - log.data).days >= NAO_ACHADO_DIAS:
+        return RELER_NAO_ACHADO
+    return None if tudo else RELER_A_CADA
+
+
 async def alvos(
-    session: AsyncSession, agora: datetime, somente: Collection[UUID] | None = None
+    session: AsyncSession,
+    agora: datetime,
+    somente: Collection[UUID] | None = None,
+    *,
+    tudo: bool = False,
 ) -> list[Alvo]:
-    """Pedidos Flex (ML/Shopee) a consultar. `somente`: esses, sem as réguas
-    de janela e de entregue (botão "Atualizar" do Raio-X)."""
+    """Pedidos Flex (ML/Shopee) a consultar, quem está há mais tempo sem
+    leitura primeiro. `somente`: esses, sem réguas (botão "Atualizar" do
+    Raio-X). `tudo` (botão "Atualizar Tracken"): também o que foi lido há
+    pouco — o pedido que a transportadora não tem continua de 6 em 6 h."""
     plataformas = tuple(
         sorted(logistica_rules._ML_PLATAFORMAS | logistica_rules._SHOPEE_PLATAFORMAS)
     )
@@ -219,21 +293,26 @@ async def alvos(
             Logistica.envio_flex.is_(True),
             func.lower(func.trim(Logistica.plataforma)).in_(plataformas),
         )
+        .order_by(
+            LogisticaTracken.lido_em.asc().nulls_first(),
+            Logistica.data.desc().nulls_last(),
+            Logistica.id,
+        )
     )
     if somente is not None:
         stmt = stmt.where(Logistica.id.in_(list(somente)))
     else:
         corte = (agora - timedelta(days=JANELA_DIAS)).date()
         stmt = stmt.where(or_(Logistica.data.is_(None), Logistica.data >= corte))
+    hoje = agora.astimezone(_FUSO).date()
     linhas = []
     for log, tk in (await session.execute(stmt)).all():
-        if (
-            somente is None
-            and tk is not None
-            and tk.entregue_em is not None
-            and tk.entregue_em < agora - RELER_ENTREGUE
-        ):
-            continue
+        if somente is None and tk is not None:
+            if tk.entregue_em is not None and tk.entregue_em < agora - RELER_ENTREGUE:
+                continue
+            espera = _esperar(log, tk, hoje, tudo)
+            if espera is not None and tk.lido_em is not None and tk.lido_em > agora - espera:
+                continue
         linhas.append(log)
     ceps = await _ceps(session, {str(r.pedido_bling) for r in linhas if r.pedido_bling})
     return [
@@ -259,9 +338,15 @@ async def gravar(
     = não deu para consultar. Não faz commit."""
     tk = await session.get(LogisticaTracken, logistica_id)
     if tk is None:
-        tk = LogisticaTracken(logistica_id=logistica_id, achado=False, tentativas=0)
-        tk.historico = []
-        session.add(tk)
+        # Duas gravações do mesmo pedido ao mesmo tempo (leitura de todos + o
+        # "Atualizar" do Raio-X): a segunda espera a primeira em vez de dar erro.
+        await session.execute(
+            pg_insert(LogisticaTracken)
+            .values(logistica_id=logistica_id, achado=False, tentativas=0, historico=[])
+            .on_conflict_do_nothing(index_elements=[LogisticaTracken.logistica_id])
+        )
+        tk = await session.get(LogisticaTracken, logistica_id, populate_existing=True)
+        assert tk is not None
     tk.lido_em = agora
     tk.atualizado_em = agora
     tk.erro = erro

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from httpx import AsyncClient
@@ -206,6 +206,149 @@ async def test_alvos_so_flex_com_cep_e_para_depois_de_entregue(
     # Quem não vê o Flex: 404.
     monkeypatch.setattr(flex_config, "pode_ver", lambda user: False)
     assert (await client.get("/api/logistica/tracken/alvos")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_alvos_mais_antigo_primeiro_e_pula_o_lido_ha_pouco(
+    client: AsyncClient,
+    db: AsyncSession,
+    admin: User,
+    auth_as: Callable[[User | None], None],
+):
+    """16/11/2026: o Tracken bloqueia o IP depois de 5 consultas seguidas e o
+    309220 ficava sempre depois do 5º. A lista vem com quem está há mais tempo
+    sem leitura primeiro; a leitura sozinha pula o lido há pouco (outra aba
+    acabou de ler); o pedido que a transportadora não tem, já com 5 dias de
+    venda, volta só de 6 em 6 h — até no botão "Atualizar Tracken"."""
+    agora = datetime.now(UTC)
+
+    async def flex(bling: str, loja: str) -> Logistica:
+        return await _pedido(db, bling=bling, loja=loja, rastreio=None, flex=True, cep="01001000")
+
+    def lido(linha: Logistica, antes: timedelta, *, achado: bool, erro: str | None = None):
+        return LogisticaTracken(
+            logistica_id=linha.id, achado=achado, lido_em=agora - antes, erro=erro, historico=[]
+        )
+
+    nunca = await flex("309220", "261116DM18QFVX")
+    velho = await flex("309238", "261116DVAQ4G2V")
+    recente = await flex("309259", "261116EKJX7W0K")
+    com_erro = await flex("309177", "2000016066120677")
+    nao_tem = await flex("306194", "2000015725468989")
+    nao_tem_novo = await flex("309300", "261116NOVO")
+    nao_tem.data = date.today() - timedelta(days=6)
+    com_erro.data = date.today() - timedelta(days=6)
+    db.add_all(
+        [
+            lido(velho, timedelta(minutes=50), achado=True),
+            lido(recente, timedelta(minutes=5), achado=True),
+            # Leitura bloqueada (venda velha, nunca achado): erro gravado — não é
+            # "a transportadora não tem", continua no ritmo normal.
+            lido(com_erro, timedelta(minutes=40), achado=False, erro="Tracken: Failed to fetch"),
+            # Consultado há 1 h e a transportadora não tinha (venda de 6 dias).
+            lido(nao_tem, timedelta(hours=1), achado=False),
+            # Venda de hoje, ainda não chegou: continua no ritmo normal.
+            lido(nao_tem_novo, timedelta(minutes=30), achado=False),
+        ]
+    )
+    await db.commit()
+
+    auth_as(admin)
+    r = await client.get("/api/logistica/tracken/alvos")
+    assert r.status_code == 200, r.text
+    assert [a["logistica_id"] for a in r.json()] == [
+        str(nunca.id), str(velho.id), str(com_erro.id), str(nao_tem_novo.id)
+    ]
+    # Botão "Atualizar Tracken": também o lido há pouco; o que a transportadora não tem, não.
+    r = await client.get("/api/logistica/tracken/alvos?tudo=true")
+    assert [a["logistica_id"] for a in r.json()] == [
+        str(nunca.id), str(velho.id), str(com_erro.id), str(nao_tem_novo.id), str(recente.id)
+    ]
+    # Raio-X: sempre.
+    r = await client.get(f"/api/logistica/tracken/alvos?ids={nao_tem.id}")
+    assert [a["logistica_id"] for a in r.json()] == [str(nao_tem.id)]
+    # Depois de 6 h ele volta.
+    tk = await db.get(LogisticaTracken, nao_tem.id)
+    tk.lido_em = agora - timedelta(hours=7)
+    await db.commit()
+    r = await client.get("/api/logistica/tracken/alvos")
+    assert str(nao_tem.id) in [a["logistica_id"] for a in r.json()]
+
+
+class _RedisFalso:
+    """O pedaço do Redis que a vez da leitura usa (SET NX EX, GET, EXPIRE, DEL)."""
+
+    def __init__(self) -> None:
+        self.d: dict[str, str] = {}
+        self.ttl: dict[str, int] = {}
+
+    async def set(self, k, v, nx=False, ex=None):
+        if nx and k in self.d:
+            return None
+        self.d[k], self.ttl[k] = v, ex
+        return True
+
+    async def get(self, k):
+        return self.d.get(k)
+
+    async def expire(self, k, s):
+        self.ttl[k] = s
+        return True
+
+    async def delete(self, k):
+        self.ttl.pop(k, None)
+        return 1 if self.d.pop(k, None) is not None else 0
+
+
+@pytest.mark.asyncio
+async def test_uma_leitura_por_vez(
+    client: AsyncClient,
+    db: AsyncSession,
+    admin: User,
+    auth_as: Callable[[User | None], None],
+    monkeypatch,
+):
+    """Duas abas (na mesma internet) somariam consultas e o Tracken bloquearia
+    as duas: com o código da leitura, uma lê e a outra recebe 409."""
+    from app import redis_client
+
+    falso = _RedisFalso()
+    monkeypatch.setattr(redis_client, "redis", falso)
+    linha = await _pedido(
+        db, bling="309220", loja="261116DM18QFVX", rastreio=None, flex=True, cep="06673520"
+    )
+    auth_as(admin)
+    url = "/api/logistica/tracken/alvos?leitura="
+    assert (await client.get(url + "aba-A")).status_code == 200
+    assert (await client.get(url + "aba-A")).status_code == 200  # a mesma aba de novo
+    r = await client.get(url + "aba-B")
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "tracken_outra_tela"
+    # O Raio-X (um pedido) não pede a vez.
+    assert (await client.get(f"/api/logistica/tracken/alvos?ids={linha.id}")).status_code == 200
+    # Cada pedido gravado renova a vez; só quem tem a vez renova.
+    falso.ttl[tracken._CHAVE_VEZ] = 5
+    item = {"logistica_id": str(linha.id), "lista": []}
+    await client.post(
+        "/api/logistica/tracken/resultado", json={"itens": [item], "leitura": "aba-B"}
+    )
+    assert falso.ttl[tracken._CHAVE_VEZ] == 5
+    await client.post(
+        "/api/logistica/tracken/resultado", json={"itens": [item], "leitura": "aba-A"}
+    )
+    assert falso.ttl[tracken._CHAVE_VEZ] == tracken.VEZ_SEGUNDOS
+    # Só quem tem a vez solta; depois a outra aba lê.
+    await client.post("/api/logistica/tracken/fim", json={"leitura": "aba-B"})
+    assert (await client.get(url + "aba-B")).status_code == 409
+    await client.post("/api/logistica/tracken/fim", json={"leitura": "aba-A"})
+    assert (await client.get(url + "aba-B")).status_code == 200
+
+    # Sem Redis: lê como antes (sem trava não é motivo para não ler).
+    class _Quebrado:
+        async def set(self, *a, **k):
+            raise ConnectionError("sem redis")
+
+    monkeypatch.setattr(redis_client, "redis", _Quebrado())
+    assert (await client.get(url + "aba-C")).status_code == 200
 
 
 @pytest.mark.asyncio

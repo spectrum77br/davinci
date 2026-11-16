@@ -526,9 +526,41 @@ function trackenTitulo(c: Logistica): string {
 // o servidor interpreta e grava (routers/logistica: /tracken/alvos e /resultado).
 const TRACKEN_URL = 'https://tracken.app.br/tracken/api/getconsulta/rastreio'
 const TRACKEN_INTERVALO_MS = 30 * 60 * 1000
+// O Tracken (Cloudflare) BLOQUEIA o IP de quem consulta rápido demais (16/11/2026:
+// 5 consultas com 3 s entre elas passaram, a 6ª levou 429 "error 1015" e o IP
+// ficou bloqueado ~2 min; 8 com 13 s entre elas passaram). A resposta 429 vem sem
+// CORS, então aqui ela aparece como "Failed to fetch". Por isso:
+// - UMA consulta por vez, 13 s entre quaisquer duas (inclusive as tentativas do
+//   mesmo pedido e o "Atualizar" do Raio-X, que entra na mesma fila);
+// - UMA leitura por vez no sistema todo: a tela pede a vez com um código
+//   (`leitura`); com outra tela lendo, não lê (o refresco da lista mostra o que
+//   a outra gravou) — duas abas na mesma internet somariam consultas;
+// - no bloqueio (ou sem internet), espera a pausa e tenta o pedido mais uma vez;
+//   se continuar, o pedido vai para o fim da fila (o que se sabia dele fica) e a
+//   leitura para — a próxima recomeça por quem ficou de fora.
+const TRACKEN_ESPACO_MS = 13 * 1000
+const TRACKEN_PAUSA_MS = 130 * 1000
+const TRACKEN_TEMPO_MAX_MS = 20 * 1000
+// Leitura cortada (bloqueio, outra tela lendo): a próxima tentativa sozinha vem antes dos 30 min.
+const TRACKEN_RETOMAR_MS = 4 * 60 * 1000
 type TrackenAlvo = { logistica_id: string; pedido: string | null; rastreio: string | null; cep: string | null }
 type TrackenResultado = { logistica_id: string; lista?: unknown[]; erro?: string }
-async function consultarUmTracken(a: TrackenAlvo): Promise<TrackenResultado> {
+let trackenLivreEm = 0
+let trackenFila: Promise<void> = Promise.resolve()
+let trackenParar = false
+const dormir = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+// A vez de consultar o Tracken: uma de cada vez, com a folga (ou a pausa do bloqueio).
+function vezDoTracken(): Promise<void> {
+  const vez = trackenFila.then(async () => {
+    // Relê a cada volta: um bloqueio no meio da espera estica a pausa.
+    for (let falta = trackenLivreEm - Date.now(); falta > 0; falta = trackenLivreEm - Date.now()) await dormir(falta)
+    trackenLivreEm = Date.now() + TRACKEN_ESPACO_MS
+  })
+  trackenFila = vez
+  return vez
+}
+// null = o Tracken bloqueou, não respondeu ou a tela fechou: nada a dizer do pedido.
+async function consultarUmTracken(a: TrackenAlvo): Promise<TrackenResultado | null> {
   if (!a.cep) return { logistica_id: a.logistica_id, erro: 'sem o CEP do cliente no Bling' }
   const tentativas: Array<[string, string]> = []
   for (const [campo, v] of [['notafiscal', a.pedido], ['pedidonf', a.rastreio], ['pedidonf', a.pedido]] as const) {
@@ -538,49 +570,114 @@ async function consultarUmTracken(a: TrackenAlvo): Promise<TrackenResultado> {
   if (!tentativas.length) return { logistica_id: a.logistica_id, erro: 'pedido sem número da plataforma e sem rastreio' }
   for (const [campo, valor] of tentativas) {
     const corpo = { cpfcnpj: '', notafiscal: '', pedidonf: '', codpedido: '', cepdest: a.cep, [campo]: valor }
+    await vezDoTracken()
+    if (trackenParar) return null
+    let r: Response
     try {
-      const r = await fetch(TRACKEN_URL, {
+      r = await fetch(TRACKEN_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'text/plain;charset=UTF-8' },
         body: JSON.stringify(corpo),
         credentials: 'omit',
+        signal: AbortSignal.timeout(TRACKEN_TEMPO_MAX_MS),
       })
-      if (!r.ok) return { logistica_id: a.logistica_id, erro: `o Tracken respondeu ${r.status}` }
-      const d = await r.json()
-      if (d?.success && Array.isArray(d.list) && d.list.length) return { logistica_id: a.logistica_id, lista: d.list.slice(0, 20) }
-      const msg = String(d?.error || '')
-      if (d?.success || /nenhum registro/i.test(msg)) continue
-      return { logistica_id: a.logistica_id, erro: msg.slice(0, 250) || 'resposta inesperada do Tracken' }
-    } catch (e: any) {
-      return { logistica_id: a.logistica_id, erro: e?.message || 'sem conexão com o Tracken' }
+    } catch {
+      trackenLivreEm = Date.now() + TRACKEN_PAUSA_MS
+      return null
     }
+    // (Hoje o 429 cai no catch acima — vem sem CORS; aqui, se um dia vier com.)
+    if (r.status === 429) {
+      trackenLivreEm = Date.now() + TRACKEN_PAUSA_MS
+      return null
+    }
+    if (!r.ok) return { logistica_id: a.logistica_id, erro: `o Tracken respondeu ${r.status}` }
+    let d: any
+    try {
+      d = await r.json()
+    } catch {
+      return { logistica_id: a.logistica_id, erro: 'resposta inesperada do Tracken' }
+    }
+    if (d?.success && Array.isArray(d.list) && d.list.length) return { logistica_id: a.logistica_id, lista: d.list.slice(0, 20) }
+    const msg = String(d?.error || '')
+    if (d?.success || /nenhum registro/i.test(msg)) continue
+    return { logistica_id: a.logistica_id, erro: msg.slice(0, 250) || 'resposta inesperada do Tracken' }
   }
   return { logistica_id: a.logistica_id, lista: [] }
 }
-const consultandoTracken = ref(false)
-let ultimaConsultaTracken = 0
-async function consultarTracken(ids?: string[], silencioso = false) {
-  if (consultandoTracken.value) return
-  consultandoTracken.value = true
+// Bloqueou: espera a pausa (a vez já está atrás dela) e tenta o pedido mais uma vez.
+async function lerUmTracken(a: TrackenAlvo): Promise<TrackenResultado | null> {
+  const x = await consultarUmTracken(a)
+  if (x || trackenParar) return x
+  return await consultarUmTracken(a)
+}
+function codigoLeitura(): string {
   try {
-    const q = ids?.length ? `?ids=${ids.join(',')}` : ''
-    const alvos = await api<TrackenAlvo[]>(`/api/logistica/tracken/alvos${q}`)
-    const itens: TrackenResultado[] = []
-    for (const [i, a] of alvos.entries()) {
-      if (i) await new Promise((r) => setTimeout(r, 400))
-      itens.push(await consultarUmTracken(a))
+    return crypto.randomUUID()
+  } catch {
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+  }
+}
+const consultandoTracken = ref(false)
+const trackenProgresso = ref('')
+const trackenLendoIds = ref<string[]>([])
+let ultimaConsultaTracken = 0
+// `ids` = o botão "Atualizar" do Raio-X (roda junto com a leitura de todos,
+// na mesma fila, sem pedir a vez); sem `ids` = todos (botão do topo = `tudo`;
+// sozinho = silencioso).
+async function consultarTracken(ids?: string[], silencioso = false) {
+  const raio = !!ids?.length
+  if (raio ? ids!.some((i) => trackenLendoIds.value.includes(i)) : consultandoTracken.value) return
+  if (raio) trackenLendoIds.value = [...trackenLendoIds.value, ...ids!]
+  else consultandoTracken.value = true
+  const leitura = raio ? null : codigoLeitura()
+  const gravar = (x: TrackenResultado) =>
+    api<{ gravados: number; achados: number; avisados?: number }>('/api/logistica/tracken/resultado', { method: 'POST', body: { itens: [x], leitura } })
+  try {
+    const q = new URLSearchParams()
+    if (raio) q.set('ids', ids!.join(','))
+    else {
+      q.set('leitura', leitura!)
+      if (!silencioso) q.set('tudo', 'true')
     }
-    let r = { gravados: 0, achados: 0, avisados: 0 }
-    if (itens.length) r = await api<{ gravados: number; achados: number; avisados?: number }>('/api/logistica/tracken/resultado', { method: 'POST', body: { itens } }).then((x) => ({ avisados: 0, ...x }))
-    if (!ids) ultimaConsultaTracken = Date.now()
-    if (itens.length) await refresh()
+    const alvos = await api<TrackenAlvo[]>(`/api/logistica/tracken/alvos?${q}`)
+    const r = { gravados: 0, achados: 0, avisados: 0 }
+    let lidos = 0
+    let nao = 0
+    let erros = 0
+    let cortado = false
+    for (const [i, a] of alvos.entries()) {
+      if (trackenParar) break
+      if (!raio) trackenProgresso.value = `${i + 1}/${alvos.length}`
+      const x = await lerUmTracken(a)
+      if (!x) {
+        cortado = true
+        // Vai para o fim da fila (o que se sabia do pedido fica): um pedido que
+        // sempre falha não trava a leitura de todos.
+        if (!trackenParar) await gravar({ logistica_id: a.logistica_id, erro: 'o Tracken não respondeu (bloqueio por excesso de consultas ou sem internet)' }).catch(() => {})
+        break
+      }
+      lidos++
+      if (x.lista && !x.lista.length) nao++
+      if (x.erro) erros++
+      // Grava um por um: a leitura leva minutos e a aba pode ser fechada no meio.
+      const g = await gravar(x)
+      r.gravados += g.gravados
+      r.achados += g.achados
+      r.avisados += g.avisados || 0
+    }
+    if (!raio) ultimaConsultaTracken = cortado ? Date.now() - TRACKEN_INTERVALO_MS + TRACKEN_RETOMAR_MS : Date.now()
+    if (trackenParar) return
+    if (lidos || cortado) await refresh()
     if (!silencioso) {
-      const nao = itens.filter((x) => x.lista && !x.lista.length).length
-      const erros = itens.filter((x) => x.erro).length
       const partes = [`${r.achados} na transportadora`]
       if (nao) partes.push(`${nao} ainda não está(ão) lá`)
       if (erros) partes.push(`${erros} com erro`)
-      toasts.success(`Tracken: ${alvos.length} pedido(s) Flex conferido(s)`, partes.join(' · '))
+      if (cortado) {
+        partes.push(`o Tracken parou de responder (bloqueio por excesso de consultas ou sem internet) — ${alvos.length - lidos} ficaram para a próxima leitura`)
+        toasts.warning(`Tracken: ${lidos} de ${alvos.length} pedido(s) Flex conferido(s)`, partes.join(' · '))
+      } else {
+        toasts.success(`Tracken: ${alvos.length} pedido(s) Flex conferido(s)`, partes.join(' · '))
+      }
     }
     // "Não conseguiu entregar" automático (16/11/2026): avisa mesmo na leitura silenciosa.
     if (r.avisados) {
@@ -590,9 +687,17 @@ async function consultarTracken(ids?: string[], silencioso = false) {
       )
     }
   } catch (e: any) {
-    if (!silencioso) toasts.error('Tracken', e?.data?.detail?.code || e?.message || 'erro')
+    if (e?.data?.detail?.code === 'tracken_outra_tela') {
+      ultimaConsultaTracken = Date.now() - TRACKEN_INTERVALO_MS + TRACKEN_RETOMAR_MS
+      if (!silencioso) toasts.info('Tracken', 'Outra tela já está consultando o Tracken agora — os resultados aparecem aqui sozinhos em alguns minutos.')
+    } else if (!silencioso) toasts.error('Tracken', e?.data?.detail?.code || e?.message || 'erro')
   } finally {
-    consultandoTracken.value = false
+    if (leitura) api('/api/logistica/tracken/fim', { method: 'POST', body: { leitura } }).catch(() => {})
+    if (raio) trackenLendoIds.value = trackenLendoIds.value.filter((i) => !ids!.includes(i))
+    else {
+      consultandoTracken.value = false
+      trackenProgresso.value = ''
+    }
   }
 }
 // Sozinho: ao abrir a aba Flex e de 30 em 30 min enquanto ela está aberta (o
@@ -610,6 +715,7 @@ onMounted(() => {
 })
 onBeforeUnmount(() => {
   if (trackenTimer) clearInterval(trackenTimer)
+  trackenParar = true
 })
 function noCartao(c: Logistica, k: CartaoFiltro): boolean {
   switch (k) {
@@ -2890,12 +2996,12 @@ async function aplicarStatusBling(c: Logistica) {
             type="button"
             class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
             :disabled="consultandoTracken"
-            title="Consulta agora todos os pedidos Flex no rastreio da transportadora (Tracken). A aba Flex aberta já faz isso sozinha de 30 em 30 min."
+            title="Consulta agora todos os pedidos Flex no rastreio da transportadora (Tracken), um por vez — o Tracken bloqueia quem consulta rápido, então leva uns minutos. A aba Flex aberta já faz isso sozinha de 30 em 30 min."
             data-atualizar-tracken
             @click="consultarTracken()"
           >
             <Truck class="size-3.5" :class="consultandoTracken ? 'animate-pulse' : ''" />
-            {{ consultandoTracken ? 'Consultando…' : 'Atualizar Tracken' }}
+            {{ consultandoTracken ? `Consultando ${trackenProgresso}…` : 'Atualizar Tracken' }}
           </button>
           <button
             type="button"
@@ -3539,10 +3645,10 @@ async function aplicarStatusBling(c: Logistica) {
                     type="button"
                     :class="RAIO_BTN"
                     title="Consulta agora o rastreio da transportadora do Flex deste pedido"
-                    :disabled="consultandoTracken"
+                    :disabled="trackenLendoIds.includes(raioRow.id)"
                     @click="consultarTracken([raioRow.id])"
                   >
-                    <RefreshCw class="size-3" :class="consultandoTracken ? 'animate-spin' : ''" /> Atualizar
+                    <RefreshCw class="size-3" :class="trackenLendoIds.includes(raioRow.id) ? 'animate-spin' : ''" /> Atualizar
                   </button>
                 </h3>
                 <template v-if="raioRow.tracken?.achado">
