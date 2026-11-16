@@ -31,6 +31,11 @@ Resource = Literal[
     # routers/devolutions.py:patch_acompanhamento_rastreio; mesmo nome no
     # useCan.ts.
     "devolucoes_mover",
+    # Devoluções › Resolver e reabrir no painel novo (Vinicius, 16/11/2026:
+    # "somente adm e o Cairo consegue clicar em resolver uma devolução"). Só
+    # `edit` vale; admin sempre pode. Lida em routers/devolucoes_painel.py
+    # (_pode_resolver); mesmo nome no useCan.ts.
+    "devolucoes_resolver",
     "reembolso",
     # Logística — casos de pós-venda a acompanhar + aba Status. Sugestão de
     # status Bling a partir da assinatura de status do Meli.

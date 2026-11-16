@@ -2391,8 +2391,8 @@ async def nf_agent_command_result(
 
 async def _duimp_do_pedido(session: AsyncSession, numero: str | None) -> str | None:
     """DUIMPs dos itens do pedido (mesma fonte da observação da NF 100%:
-    `import_products.duimp` por SKU), sem repetir, na ordem dos itens. Nenhum
-    item importado → None (etiqueta sai sem a linha)."""
+    `import_products.duimp` por SKU e, sem ela, o texto do segmento — 0488),
+    sem repetir, na ordem dos itens. Nada → None (etiqueta sai sem a linha)."""
     if not numero:
         return None
     # 15/09: só faturador de nota cheia (observacao_duimp) leva DUIMP na etiqueta;
@@ -2410,12 +2410,7 @@ async def _duimp_do_pedido(session: AsyncSession, numero: str | None) -> str | N
     if not skus:
         return None
     mapa = await nf_emissao_gerar._duimp_por_sku(session, set(skus))
-    textos: list[str] = []
-    for sku in skus:
-        d = mapa.get(sku)
-        if d and d not in textos:
-            textos.append(d)
-    return " | ".join(textos) or None
+    return nf_emissao_gerar._juntar_duimps(mapa.get(sku) for sku in skus)
 
 
 def _declaracao_do_bling(

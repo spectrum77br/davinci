@@ -33,8 +33,13 @@ pytestmark = pytest.mark.asyncio
 _SP = ZoneInfo("America/Sao_Paulo")
 
 
-def _perm(*, edit: bool = True) -> dict:
-    return {"devolucoes": {"view": True, "edit": edit, "delete": False}}
+def _perm(*, edit: bool = True, resolver: bool | None = None) -> dict:
+    """`resolver` (Resolver/reabrir — só adm e o Cairo, 16/11/2026): por padrão
+    acompanha o `edit` — os testes de antes da regra resolvem como o Cairo."""
+    perm = {"devolucoes": {"view": True, "edit": edit, "delete": False}}
+    if resolver if resolver is not None else edit:
+        perm["devolucoes_resolver"] = {"view": True, "edit": True, "delete": False}
+    return perm
 
 
 # ── Contas puras ─────────────────────────────────────────────────────────

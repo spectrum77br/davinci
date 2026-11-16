@@ -21,6 +21,38 @@ def _slugify(v: str) -> str:
     return "".join(out).strip("-")
 
 
+# migration 0488: o texto vai na observação da NF (infCpl) e na etiqueta, onde
+# " | " separa uma DUIMP da outra (uma linha cada) — por isso "|" é recusado.
+# 75 caracteres: o que cabe numa linha "DUIMP: …" da etiqueta de 10 cm na
+# fonte mínima (5,5 pt), mesmo em MAIÚSCULAS (medido com _largura em 16/11).
+DUIMP_PADRAO_MAX = 75
+# A Helvetica da etiqueta só imprime Latin-1: o que o teclado/Mac troca sozinho
+# (travessão, aspas curvas, reticências) vira o equivalente simples; o resto
+# fora do Latin-1 (emoji etc.) é recusado — sairia "·" na etiqueta.
+_TROCAS = str.maketrans({
+    "\u2014": "-", "\u2013": "-", "\u2012": "-", "\u2212": "-",
+    "\u201c": '"', "\u201d": '"', "\u201e": '"',
+    "\u2018": "'", "\u2019": "'", "\u201a": "'",
+    "\u2026": "...", "\u00a0": " ",
+})
+
+
+def _limpar_duimp_padrao(v: Any) -> str | None:
+    """strip; vazio → None (apaga); "|", caractere que a etiqueta não imprime
+    ou mais de 75 caracteres → erro."""
+    if v is None:
+        return None
+    s = " ".join(str(v).translate(_TROCAS).split())
+    if not s:
+        return None
+    if "|" in s:
+        raise ValueError("duimp_padrao_sem_barra")
+    if any(ord(c) > 0xFF or (ord(c) < 0x20) or (0x7F <= ord(c) < 0xA0) for c in s):
+        raise ValueError("duimp_padrao_caractere_invalido")
+    if len(s) > DUIMP_PADRAO_MAX:
+        raise ValueError("duimp_padrao_muito_longo")
+    return s
+
 class SegmentCreate(BaseModel):
     name: str
     slug: str | None = None
@@ -32,6 +64,12 @@ class SegmentCreate(BaseModel):
     largura: Decimal | None = None
     comprimento: Decimal | None = None
     peso: Decimal | None = None
+    duimp_padrao: str | None = None
+
+    @field_validator("duimp_padrao", mode="before")
+    @classmethod
+    def _v_duimp_padrao(cls, v: Any) -> str | None:
+        return _limpar_duimp_padrao(v)
 
     @field_validator("name", mode="before")
     @classmethod
@@ -69,6 +107,12 @@ class SegmentPatch(BaseModel):
     largura: Decimal | None = None
     comprimento: Decimal | None = None
     peso: Decimal | None = None
+    duimp_padrao: str | None = None
+
+    @field_validator("duimp_padrao", mode="before")
+    @classmethod
+    def _v_duimp_padrao(cls, v: Any) -> str | None:
+        return _limpar_duimp_padrao(v)
 
     @field_validator("name", mode="before")
     @classmethod
@@ -163,6 +207,7 @@ class SegmentOut(BaseModel):
     largura: Decimal | None = None
     comprimento: Decimal | None = None
     peso: Decimal | None = None
+    duimp_padrao: str | None = None
     special_dates: list[SegmentSpecialDateOut] = []
     created_at: datetime
     updated_at: datetime

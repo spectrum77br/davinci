@@ -34,6 +34,8 @@ import re
 
 import fitz  # PyMuPDF
 
+from app.services.nf_etiqueta_declaracao import _largura
+
 _MIN_CHAVE_DIGITOS = 40  # a chave da NF-e tem 44 dígitos
 _MAX_BLOCO_NF = 0.25     # bloco NF nunca passa de 1/4 da altura da página
 _GAP_IMAGEM = 6.0        # imagem só estende o bloco se estiver colada nele
@@ -41,6 +43,27 @@ _MIN_TOPO_PICKING = 0.55  # rodapé de picking só existe na parte de baixo
 _MAX_TOPO_REMETENTE_ML = 0.25  # bloco do remetente do ML fica no topo da etiqueta
 
 _RE_UF_ML = re.compile(r"^BR-[A-Z]{2}$")  # o ML escreve o estado como "BR-SP"
+
+# Linha "DUIMP: ..." no rodapé da etiqueta: Helvetica-Bold 9 pt (14/09). Quando a
+# frase não cabe na largura (16/11: celular com 2 DUIMPs — "…26BR0001329175-1 e
+# 26BR0001193241-5" — saía com o 2º número cortado na borda), a letra encolhe até
+# caber, nunca abaixo de _DUIMP_FS_MIN. Continua UMA linha por DUIMP: o picking
+# (`nf_etiqueta_picking._e_duimp`) reconhece a linha pelo começo "DUIMP".
+_DUIMP_FS = 9.0
+_DUIMP_FS_MIN = 5.5
+_DUIMP_MARGEM = 6.0  # margem esquerda e direita da linha
+
+
+def _fonte_duimp(texto: str, largura: float) -> float:
+    """Maior tamanho (≤ 9 pt, ≥ 5,5 pt) em que `texto` cabe em `largura`.
+
+    Mede com `_largura` da declaração (caractere a caractere): o
+    `fitz.get_text_length` na frase inteira mede a menos quando há acento."""
+    w = _largura(texto, "hebo", _DUIMP_FS)
+    if w <= largura:
+        return _DUIMP_FS
+    # arredonda pra BAIXO (décimo de ponto) pra não estourar por arredondamento
+    return max(_DUIMP_FS_MIN, int(_DUIMP_FS * largura / w * 10) / 10)
 
 
 class EtiquetaTransformError(RuntimeError):
@@ -340,14 +363,16 @@ def transformar_etiqueta(
     if duimp:
         # 14/09 (Eduardo): "tá um pouco pequena — um pouco maior e em negrito".
         # Uma linha por DUIMP (o caller junta várias com " | "), empilhadas de
-        # baixo pra cima no rodapé da etiqueta, Helvetica-Bold 9 pt.
+        # baixo pra cima no rodapé da etiqueta, Helvetica-Bold 9 pt — menor só
+        # quando a frase não cabe na largura (16/11, ver _fonte_duimp).
         first = doc[0]
         r = first.rect
         linhas = [t.strip() for t in duimp.split(" | ") if t.strip()][:3] or [duimp]
-        fs = 9.0
+        largura = r.width - 2 * _DUIMP_MARGEM
         for i, txt in enumerate(reversed(linhas)):
+            texto = f"DUIMP: {txt}"
             first.insert_text(
-                (r.x0 + 6, r.y1 - 4 - i * (fs + 2)), f"DUIMP: {txt}"[:80],
-                fontsize=fs, fontname="hebo", color=(0, 0, 0),
+                (r.x0 + _DUIMP_MARGEM, r.y1 - 4 - i * (_DUIMP_FS + 2)), texto,
+                fontsize=_fonte_duimp(texto, largura), fontname="hebo", color=(0, 0, 0),
             )
     return doc.tobytes()

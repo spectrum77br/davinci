@@ -270,8 +270,10 @@ _DUIMP_BASE_SQL = text(
 )
 
 
-async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str]:
-    """Mapa SKU (minúsculo) → texto da DUIMP. Casa pelo SKU exato e, pra quem
+async def _duimp_da_importacao(
+    session: AsyncSession, skus: set[str]
+) -> dict[str, str]:
+    """Passos 1 e 2: a DUIMP da tela Importação pelo SKU exato e, pra quem
     sobrar, pelo código-base (kit/sem tamanho). SKU sem DUIMP fica de fora."""
     if not skus:
         return {}
@@ -293,15 +295,220 @@ async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str
     return mapa
 
 
+async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str]:
+    """Mapa SKU (minúsculo) → texto da DUIMP (ou a mensagem do segmento). SKU
+    sem nada fica de fora.
+
+    SKU simples: Importação (SKU exato, código-base) e, sem ela, o texto do
+    segmento (0488). Kit "a+b" que não está inteiro na Importação: PEÇA A PEÇA
+    pela mesma ordem — a peça importada leva a DUIMP dela e só a peça sem DUIMP
+    leva o texto do segmento; as partes juntam na ordem das peças (revisão de
+    16/11: antes o kit olhava só o código-base da 1ª peça e o resultado mudava
+    com a ordem das peças)."""
+    skus = {s for s in skus if s}
+    if not skus:
+        return {}
+    kits = {s for s in skus if "+" in s}
+    mapa: dict[str, str] = {}
+    if kits:
+        # o kit cadastrado inteiro na Importação (hoje nenhum) vale como está
+        rows = (
+            await session.execute(_DUIMP_SQL, {"skus": sorted(kits)})
+        ).mappings().all()
+        mapa.update({r["sku"]: r["duimp"] for r in rows})
+        kits -= set(mapa)
+    pecas_de = {k: _pecas_do_sku(k) for k in kits}
+    simples = (skus - set(mapa) - kits) | {p for ps in pecas_de.values() for p in ps}
+    importacao = await _duimp_da_importacao(session, simples)
+    # 3º passo (16/11/2026): quem continua sem DUIMP leva o texto do segmento.
+    segmento = await _texto_segmento_por_sku(
+        session, {s for s in simples if s not in importacao}
+    )
+
+    def _de(s: str) -> str | None:
+        return importacao.get(s) or segmento.get(s)
+
+    for s in skus - set(mapa) - kits:
+        if t := _de(s):
+            mapa[s] = t
+    for k, pecas in pecas_de.items():
+        if t := _juntar_duimps(_de(p) for p in pecas):
+            mapa[k] = t
+    return mapa
+
+
+# ── DUIMP padrão do segmento (migration 0488) ────────────────────────────────
+# Eduardo, 16/11/2026: produto usado, avulso ou fora da tela Importação não tem
+# DUIMP — a nota levava nada. Agora cada segmento (tela Admin › Segmentos) tem
+# um texto, e o SKU que ficou sem DUIMP nos 2 passos de cima leva o texto do
+# segmento dele. Decisões do dono no mesmo dia: a DUIMP da Importação (inclusive
+# a do novo herdada pelo código-base, ex. b014.20us) continua vencendo; e o
+# portão é o mesmo (só faturador com observacao_duimp, nota cheia).
+#
+# O segmento do SKU, peça a peça do kit ("a+b"), nesta ordem:
+#   1. products.segment_id pelo SKU exato;
+#   2. Tabela de Preços (pricing_products.sku é lista com vírgula) pela variante
+#      EXATA — Celular/Mala/Eletro antes de Catálogo, ativa antes de inativa;
+#      nunca pelo código-base (b027 cai em 4 segmentos);
+#   3. os dois de novo sem o lote (dg053.us → dg053);
+#   4. sem segmento: a raiz do departamento reserva (categoria do Bling, a do
+#      cadastro, a família do SKU — services/departamento.py).
+# O texto: o do segmento; vazio → o do pai, até a raiz. Segmento DESATIVADO vale
+# (a "Queima de estoque", desativada, é onde estão os usados de mala).
+
+_PRODUTOS_SEGMENTO_SQL = text(
+    f"""
+    SELECT DISTINCT ON (lower(btrim(p.sku)))
+        lower(btrim(p.sku)) AS sku,
+        p.segment_id        AS segment_id,
+        p.categoria_nome    AS categoria_nome,
+        pc.name             AS categoria_cadastro
+    FROM "{_SCHEMA}".products p
+    LEFT JOIN "{_SCHEMA}".product_categories pc
+      ON pc.bling_category_id::text = btrim(p.category)
+    WHERE lower(btrim(p.sku)) = ANY(:skus)
+    ORDER BY lower(btrim(p.sku)), (p.segment_id IS NULL), p.updated_at DESC
+    """
+)
+
+_TABELA_SEGMENTO_SQL = text(
+    f"""
+    SELECT lower(btrim(v.x)) AS sku, pp.segment_id AS segment_id,
+           pp.is_active      AS ativo
+    FROM "{_SCHEMA}".pricing_products pp,
+         LATERAL regexp_split_to_table(pp.sku::text, ',') AS v(x)
+    WHERE lower(btrim(v.x)) = ANY(:skus)
+    """
+)
+
+
+def _pecas_do_sku(sku: str) -> list[str]:
+    """As peças do kit ("a+b" → [a, b]), sem repetir; SKU simples → [sku]."""
+    pecas: list[str] = []
+    for p in sku.split("+"):
+        p = p.strip().lower()
+        if p and p not in pecas:
+            pecas.append(p)
+    return pecas
+
+
+def _candidatos_da_peca(peca: str) -> list[str]:
+    """A peça e, se ela termina num lote (.ci/.pi/.ra/.sa/.sp/.us/.cd), a peça
+    sem ele."""
+    from app.services.estoque_familia import lote_de
+
+    if lote_de(peca):
+        return [peca, peca.rsplit(".", 1)[0]]
+    return [peca]
+
+
+def _juntar_duimps(textos) -> str | None:
+    """Junta DUIMPs/mensagens na ordem, sem repetir, com " | " (o separador de
+    linha da etiqueta). Um texto que já vem com " | " (kit com peças de
+    segmentos diferentes) entra parte a parte."""
+    partes: list[str] = []
+    for t in textos:
+        for p in (t or "").split(" | "):
+            p = p.strip()
+            if p and p not in partes:
+                partes.append(p)
+    return " | ".join(partes) or None
+
+
+async def _texto_segmento_por_sku(
+    session: AsyncSession, skus: set[str]
+) -> dict[str, str]:
+    """Mapa SKU (minúsculo) → texto do segmento (DUIMP padrão). SKU cujo
+    segmento (e a raiz) está sem texto fica de fora. Ver o bloco acima."""
+    from app.models import Segment
+    from app.services.departamento import departamento_reserva
+
+    skus = {s.strip().lower() for s in skus if s and s.strip()}
+    if not skus:
+        return {}
+    segmentos = (await session.execute(select(Segment))).scalars().all()
+    if not any((s.duimp_padrao or "").strip() for s in segmentos):
+        return {}  # ninguém preencheu: nem consulta produto
+    por_id = {s.id: s for s in segmentos}
+
+    def _raiz(sid: UUID) -> Segment:
+        cur, vistos = por_id[sid], set()
+        while cur.parent_id in por_id and cur.id not in vistos:
+            vistos.add(cur.id)
+            cur = por_id[cur.parent_id]
+        return cur
+
+    def _texto(sid: UUID | None) -> str | None:
+        vistos: set = set()
+        while sid in por_id and sid not in vistos:
+            vistos.add(sid)
+            seg = por_id[sid]
+            if (t := (seg.duimp_padrao or "").strip()):
+                return t
+            sid = seg.parent_id
+        return None
+
+    raiz_do_departamento = {
+        s.slug: s.id for s in segmentos if s.parent_id is None
+    }
+
+    candidatos = sorted(
+        {c for sku in skus for p in _pecas_do_sku(sku) for c in _candidatos_da_peca(p)}
+    )
+    produtos = {
+        r["sku"]: r
+        for r in (
+            await session.execute(_PRODUTOS_SEGMENTO_SQL, {"skus": candidatos})
+        ).mappings().all()
+    }
+    tabela: dict[str, UUID] = {}
+    linhas = (
+        await session.execute(_TABELA_SEGMENTO_SQL, {"skus": candidatos})
+    ).mappings().all()
+    for r in sorted(
+        (r for r in linhas if r["segment_id"] in por_id),
+        key=lambda r: (
+            _raiz(r["segment_id"]).slug == "catalogo",
+            not r["ativo"],
+            str(r["segment_id"]),
+        ),
+    ):
+        tabela.setdefault(r["sku"], r["segment_id"])
+
+    def _segmento_da_peca(peca: str) -> UUID | None:
+        for c in _candidatos_da_peca(peca):
+            prod = produtos.get(c)
+            if prod is not None and prod["segment_id"] in por_id:
+                return prod["segment_id"]
+            if c in tabela:
+                return tabela[c]
+        # 4. sem segmento: a raiz do departamento reserva.
+        prod = next(
+            (produtos[c] for c in _candidatos_da_peca(peca) if c in produtos), None
+        )
+        dep = departamento_reserva(
+            peca,
+            prod["categoria_nome"] if prod is not None else None,
+            prod["categoria_cadastro"] if prod is not None else None,
+        )
+        return raiz_do_departamento.get(dep)
+
+    out: dict[str, str] = {}
+    for sku in skus:
+        texto = _juntar_duimps(
+            _texto(_segmento_da_peca(p)) for p in _pecas_do_sku(sku)
+        )
+        if texto:
+            out[sku] = texto
+    return out
+
+
 def _observacao_duimp(duimp_por_sku: dict[str, str], itens_rows: list) -> str | None:
     """Observação da nota: as DUIMPs dos itens do pedido, sem repetir e na ordem
     dos itens. Nenhum item importado → None (nota sai sem observação)."""
-    textos: list[str] = []
-    for r in itens_rows:
-        duimp = duimp_por_sku.get((r["sku"] or "").strip().lower())
-        if duimp and duimp not in textos:
-            textos.append(duimp)
-    return " | ".join(textos) or None
+    return _juntar_duimps(
+        duimp_por_sku.get((r["sku"] or "").strip().lower()) for r in itens_rows
+    )
 
 
 def _observacao_pedido(

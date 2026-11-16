@@ -830,7 +830,10 @@ async def test_shopee_so_reembolso_pacote_vazio_usa_id_53(client, make_user, aut
     assert d["image_list"] == [{"module_index": 1,
                                 "requirement": "Anexe fotos/vídeos gerados por você no momento da expedição do pedido",
                                 "image_url": ["https://fileproxy/expedicao.jpg"]}]
-    assert "diferente do que enviamos" in d["text"]
+    # 16/11/2026: só reembolso vai com o texto do só reembolso (nada voltou — o
+    # "Recebemos a devolução e o produto devolvido é diferente…" contradizia o caso).
+    assert "SEM devolução" in d["text"] and "pacote vazio" in d["text"], d["text"]
+    assert "Recebemos a devolução" not in d["text"]
     # já contestada (PENDING_REQUEST → REQUESTED) não manda de novo
     ch = (await db.execute(select(Chamado).where(Chamado.pedido_bling == "292617"))).scalar_one()
     msg = await _abertura(db, ch.id)

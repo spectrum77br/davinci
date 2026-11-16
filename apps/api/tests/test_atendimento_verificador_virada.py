@@ -333,3 +333,17 @@ def test_o_padrao_vai_primeiro_ao_verificador():
     ctx.evidencias = []
     ids = [p["id"] for p in verificador.pares_para_o_verificador(ctx)]
     assert ids[0] == "par:b99" and len(ids) == verificador.MAX_PARES_NO_VERIFICADOR
+
+
+def test_a_resposta_do_banco_do_mesmo_modelo_conta_como_da_equipe_para_produto():
+    """O aviso "assunto de produto sem a resposta da equipe do mesmo produto" não vai ao
+    verificador quando o rascunho cita a do banco do mesmo modelo (16/11/2026)."""
+    par = _par("par:b5384", mesmo_produto=True, mesmo_modelo=True, um_modelo=True)
+    ctx = _ctx(banco_exigido=True)
+    ctx.registrar_pares([par, _par("par:b9", mesmo_produto=True)])
+    assert [p["id"] for p in ctx.pares_citados(["par:b5384", "par:b9"], de_produto=True)] == [
+        "par:b5384"
+    ]
+    fora = _ctx(banco_exigido=False)
+    fora.registrar_pares([par])
+    assert fora.pares_citados(["par:b5384"], de_produto=True) == []

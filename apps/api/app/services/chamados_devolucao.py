@@ -2312,6 +2312,15 @@ async def _disparar_shopee(
                 msg.texto = texto
             if not fotos:
                 raise _RoboError(texto, _nota_robo_so_reembolso_sem_prova(det, return_sn))
+    if so_reembolso and not texto_so_reembolso:
+        # 16/11/2026 (revisão da Fraude automática): no só reembolso NADA voltou —
+        # o texto padrão ("Recebemos a devolução e o produto devolvido é diferente…")
+        # contradizia o caso em Golpe / Item faltando / Danificado. Vai o texto do só
+        # reembolso (a alegação do comprador + a entrega da ida), como no "Não recebido".
+        texto = await _texto_robo_shopee_reembolso(session, dev, det, fotos, texto)
+        texto_so_reembolso = True
+        if msg is not None:
+            msg.texto = texto
     if nao_recebido:
         entregue_em = logistica_shopee._entregue_em_do_detalhe(det)
         texto = _texto_nao_recebido(
@@ -2416,6 +2425,27 @@ async def _conferir_motivo(
         return False
     pecas = conferencia.pecas_de(linhas or [dev])
     rast = await rastreio_do_pedido(session, pb)
+    # Lançado sozinho pela Fraude automática: a IA é a única conferência antes do
+    # tiro único — sem ela (desligada ou sem resposta) a contestação ESPERA alguém.
+    robo = conferencia.MARCA_ROBO in ((rast.observacao or "") if rast is not None else "")
+    if robo and not conferencia.ligada():
+        anterior = (rast.conferencia if rast is not None else None) or {}
+        k = conferencia.chave(pecas, rast.observacao if rast is not None else None)
+        if not (anterior.get("chave") == k and anterior.get("resultado") in ("aceito", "bate")):
+            if rast is not None:
+                rast.conferencia = conferencia.segurado_sem_ia(pecas, k, agora)
+            session.add(
+                chamados_svc.registrar_sistema(
+                    ch,
+                    "A conferência da IA está desligada e este lançamento foi feito sozinho "
+                    "pela Fraude automática: a contestação espera alguém conferir na janela "
+                    "da devolução.",
+                )
+            )
+            msg.status = conferencia.STATUS_SEGURADA
+            msg.erro = conferencia.ERRO_MOTIVO_DIVERGENTE
+            return True
+        return False
     if not conferencia.ligada():
         # IA desligada (ou sem chave): o que ela JÁ segurou, com o mesmo
         # lançamento, continua esperando a decisão de alguém.
@@ -2443,6 +2473,7 @@ async def _conferir_motivo(
         plataforma=_nome_plataforma(ch),
         anterior=rast.conferencia if rast is not None else None,
         agora=agora,
+        exigir_ok=robo,
     )
     if res.conferencia is not None and rast is not None:
         rast.conferencia = res.conferencia

@@ -101,6 +101,7 @@ async def create_segment(
         slug=slug,
         sort_order=body.sort_order,
         active=body.active,
+        duimp_padrao=body.duimp_padrao,
     )
     session.add(seg)
     try:

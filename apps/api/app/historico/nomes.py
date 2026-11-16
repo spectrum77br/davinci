@@ -441,6 +441,7 @@ TABELAS: dict[str, str] = {
 
 CAMPOS: dict[str, str] = {
     "price_override": "Preço manual",
+    "duimp_padrao": "DUIMP padrão",
     "cell_status": "Situação da célula",
     "cell_color": "Cor da célula",
     "commission": "Comissão",
