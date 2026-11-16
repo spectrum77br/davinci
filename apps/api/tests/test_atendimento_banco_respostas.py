@@ -1085,6 +1085,25 @@ async def test_a_busca_traz_a_resposta_do_mesmo_modelo_sobre_a_caracteristica(
     )
 
 
+async def test_a_play_store_acha_o_qualquer_aplicativo_da_equipe(db: AsyncSession, make_user):
+    """16/11/2026 (Marquezini, "Play store"): o agente disse que o banco não tinha o dado — a
+    equipe responde "sim, baixa qualquer aplicativo!" sobre o A17, mas aplicativos não era uma
+    característica da busca do mesmo modelo."""
+    conversa = await _conversa(db, make_user, externo_id="ps1")
+    loja = conversa.integration_id
+    await _resposta(db, integ=loja, modelos=("A17",), resposta="sim abaixa qualquer aplicativo!")
+    await _resposta(db, integ=loja, modelos=("A17",), resposta="Sim, vai com carregador.")
+    achou = await banco_respostas.do_modelo_sobre(
+        db,
+        pergunta="Play store",
+        modelos={"A17"},
+        integration_id=loja,
+        conversa_id=None,
+        as_of=datetime.now(UTC),
+    )
+    assert [a["resposta"] for a in achou] == ["sim abaixa qualquer aplicativo!"]
+
+
 async def test_no_pacote_a_caracteristica_do_modelo_vem_primeiro_e_vale_com_um_codigo(
     db: AsyncSession, make_user
 ):

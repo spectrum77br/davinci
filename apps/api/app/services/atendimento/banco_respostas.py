@@ -1032,6 +1032,10 @@ CARACTERISTICAS: dict[str, re.Pattern[str]] = {
         "memoria": r"\bram\b|\brom\b|armazenamento|\bgb\b",
         "garantia": r"garantia",
         "nota_fiscal": r"nota fiscal|\bnf\b",
+        # 16/11/2026 (Marquezini, "Play store"): a equipe responde "sim, baixa qualquer
+        # aplicativo!" — a Play Store e os aplicativos (banco, WhatsApp) são da mesma conversa.
+        "aplicativos": r"play ?store|\bgoogle\b|aplicativ|\bapps?\b|\bapk\b|whats ?app|\bzap\b"
+        r"|instagram|youtube|netflix|\bbaixa\w*",
     }.items()
 }
 MAX_DO_MODELO_SOBRE = 4
