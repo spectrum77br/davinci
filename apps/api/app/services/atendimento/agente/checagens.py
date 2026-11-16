@@ -6817,6 +6817,25 @@ def condicao_provada(texto: str | None, fichas: Sequence[Any]) -> frozenset[str]
     return frozenset(provados)
 
 
+def condicao_pela_equipe(
+    texto: str | None, textos_da_equipe: Sequence[str | None]
+) -> frozenset[str]:
+    """Os campos de condição ("novo", "lacrado", "original") que o texto afirma COMO a resposta
+    da EQUIPE do mesmo anúncio ou do mesmo produto, citada, diz — sem a equipe dizer o contrário
+    em outra. PURA. (16/11/2026, Vortan: "esses aparelhos são original?" → "Sim, são originais,
+    novos e lacrados" ficava BLOQUEADO pela trava do título com o "sim aparelho original lacrado
+    com nota fiscal!" da equipe no mesmo anúncio citado — "se está no banco, está certo".)"""
+    da_equipe: dict[str, set[bool]] = {}
+    for t in textos_da_equipe:
+        for campo, valor in _ditas_da_condicao(t).items():
+            da_equipe.setdefault(campo, set()).add(valor)
+    return frozenset(
+        campo
+        for campo, valor in _ditas_da_condicao(texto).items()
+        if da_equipe.get(campo) == {valor}
+    )
+
+
 def _conflito_de_verdade(campo: Mapping[str, Any]) -> bool:
     """O `conflito_no_anuncio` do campo, sem o falso: os valores que só detalham o mesmo dado
     ("Android / Android 15" — d65181f63951, v16 de 27/10/2026) não se contradizem. PURA."""

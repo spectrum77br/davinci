@@ -1201,6 +1201,13 @@ async def _conferir_a_proposta(
             fichas=[*pac.fichas, *ctx.fichas_lidas],
             pedido=pac.pedido,
         ),
+        # 16/11/2026: a condição (original, novo, lacrado) como a resposta da equipe do MESMO
+        # anúncio ou do mesmo produto, citada, diz (o modelo só não basta: há o usado do A17).
+        textos_da_equipe=[
+            str(par.get("resposta") or "")
+            for par in ctx.pares_citados(ctx.evidencias)
+            if par.get("mesmo_anuncio") or par.get("mesmo_produto")
+        ],
     )
     # Eval real de 21/10/2026: a lacuna que o código não preencheu ("{rastreio}"
     # sem rastreio) nunca fica no rascunho — a frase dela sai (ou, sem resposta

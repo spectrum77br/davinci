@@ -875,3 +875,18 @@ def test_o_status_citado_e_a_data_do_que_ja_aconteceu_nao_seguram():
     for promessa in ("O reembolso cai amanhã.", "O reembolso sai dia 20/11.", "Chega hoje."):
         achados = checagens.conferir_responde_e_marca(promessa, acao="responder", marca=True)
         assert achados, promessa
+
+
+def test_a_condicao_como_a_equipe_do_mesmo_anuncio_diz():
+    """16/11/2026 (Vortan, "esses aparelhos são original?"): a resposta "Sim, são originais, novos
+    e lacrados" ficava BLOQUEADA pela trava do título com a resposta da equipe do MESMO anúncio
+    citada ("sim aparelho original lacrado com nota fiscal!"). O que ela diz vale; o que ela não
+    diz ("novo") e a equipe que se contradiz, não."""
+    texto = "Olá! Sim, são aparelhos Uranyx originais, novos e lacrados."
+    da_equipe = [
+        "bom dia tudo bem, sim aparelho original !",
+        "sim aparelho original lacrado com nota fiscal !",
+    ]
+    assert checagens.condicao_pela_equipe(texto, da_equipe) == {"original", "lacrado"}
+    assert checagens.condicao_pela_equipe(texto, []) == frozenset()
+    assert checagens.condicao_pela_equipe(texto, ["é usado, não é lacrado"]) == frozenset()
