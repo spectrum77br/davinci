@@ -349,3 +349,50 @@ def test_duimp_no_rodape_da_etiqueta():
     assert "DUIMP: 26BR00098765432" in t_com
     assert "26BR00012345678 | 26BR00098765432" not in t_com
     assert "Fulano De Tal" in t_com  # o nome do destinatário continua no remetente
+
+
+def _spans_duimp(pdf: bytes) -> list[dict]:
+    page = fitz.open(stream=pdf, filetype="pdf")[0]
+    return [
+        s
+        for b in page.get_text("dict")["blocks"]
+        for line in b.get("lines", [])
+        for s in line["spans"]
+        if s["text"].startswith("DUIMP")
+    ]
+
+
+def test_duimp_longa_encolhe_e_cabe_inteira_na_etiqueta():
+    """16/11 (Eduardo): celular com 2 DUIMPs — a frase passava da largura e o 2º
+    número saía cortado na borda ("…e 26BR000"). A letra encolhe até caber; a
+    linha continua uma só, começando com "DUIMP" (o picking reconhece assim)."""
+    raw = _etiqueta_sintetica()
+    frase = "produto importado pela duimp 26BR0001329175-1 e 26BR0001193241-5"
+    out = transformar_etiqueta(raw, "Fulano De Tal", duimp=frase)
+    page = fitz.open(stream=out, filetype="pdf")[0]
+    assert f"DUIMP: {frase}" in " ".join(page.get_text().split())
+    spans = _spans_duimp(out)
+    assert len(spans) == 1
+    assert spans[0]["bbox"][2] <= page.rect.width - 5  # termina antes da borda direita
+    assert 5.5 <= spans[0]["size"] < 9
+
+
+def test_duimp_curta_continua_9pt():
+    raw = _etiqueta_sintetica()
+    out = transformar_etiqueta(
+        raw, "Fulano De Tal", duimp="produto importado pela duimp 26BR0001398015-8"
+    )
+    spans = _spans_duimp(out)
+    assert len(spans) == 1 and round(spans[0]["size"], 1) == 9.0
+
+
+def test_duimp_com_acento_tambem_cabe():
+    """Frase cadastrada à mão com acento/'nº': o get_text_length do PyMuPDF
+    mede a menos com não-ASCII; a medição caractere a caractere não estoura."""
+    raw = _etiqueta_sintetica()
+    frase = "Produto de importação própria — DUIMP nº 26BR0001329175-1 e nº 26BR0001193241-5"
+    out = transformar_etiqueta(raw, "Fulano De Tal", duimp=frase)
+    page = fitz.open(stream=out, filetype="pdf")[0]
+    spans = _spans_duimp(out)
+    assert len(spans) == 1
+    assert spans[0]["bbox"][2] <= page.rect.width - 5
