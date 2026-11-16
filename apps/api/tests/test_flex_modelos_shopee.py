@@ -427,7 +427,10 @@ async def test_leitura_que_falha_espera_e_nao_vira_ligar_erro(db, loja, monkeypa
     monkeypatch.setattr(fake, "get_model_list", _quebrada)
     await flex_motor.rodar_motor()
     est = (await _estados(db))["888"]
-    assert est.modelos_falhas >= 1 and est.modelos_tentativa_em is not None
+    # Uma falha só: a conferência antes de ligar não chama a Shopee de novo
+    # logo depois da rodada ter falhado (nem conta a falha duas vezes).
+    assert est.modelos_falhas == 1 and est.modelos_tentativa_em is not None
+    assert pedidos == ["888"]
     assert est.modelos is None
     assert _ligacoes(fake) == []  # sem a lista não liga
     trilha = await _trilha(db, "888")
@@ -472,3 +475,41 @@ async def test_sincronizar_agora_rele_a_lista_e_libera_quem_apagou_a_xx1(db, loj
     est = (await _estados(db))["888"]
     assert (est.desejado, est.observado) == ("ligado", "ligado")
     assert len(_ligacoes(fake)) == 1
+
+
+def test_espera_nao_estoura_com_muitas_falhas():
+    """Revisão de 16/11: com 38 falhas seguidas o timedelta estourava e
+    derrubava toda rodada do Flex."""
+    for n in (0, 1, 5, 37, 38, 100, 10**6):
+        assert flex_motor._espera(n) <= timedelta(hours=6)
+    assert flex_motor._espera(1) == timedelta(minutes=15)
+
+
+def test_sincronizar_agora_le_primeiro_quem_pode_ser_liberado():
+    """No "Sincronizar agora" os barrados só por variação sem vínculo vão na
+    frente dos já ligados (que o portão confere de qualquer jeito)."""
+    from uuid import uuid4
+
+    agora = datetime.now(UTC)
+    conta = uuid4()
+    cfg = flex_motor.ConfigFlex(n_liga=3, n_desliga=1, kits=True, max_anuncios_por_familia=0)
+    saldos = {"dg053.sp": flex_motor.SaldoSp("dg053.sp", 5)}
+
+    def _an(ext, sem, lida_ha):
+        vs = (Variacao(sku="dg053.ci", ref="11", estoque_publicado=3),)
+        if sem:
+            vs += (Variacao(sku="xx1", vinculo=VINCULO_SEM, ref="99", estoque_publicado=0),)
+        return Anuncio(integration_id=conta, external_id=ext, plataforma="shopee",
+                       variacoes=vs, cobertas=frozenset({"11"}),
+                       modelos_em=agora - lida_ha)
+
+    ligado_velho = _an("1", False, timedelta(hours=2))
+    barrado_novo = _an("2", True, timedelta(minutes=40))
+    anuncios = [ligado_velho, barrado_novo]
+    decisoes = {a.chave: flex_motor.decidir(a, saldos, cfg) for a in anuncios}
+    assert decisoes[barrado_novo.chave].desejado == "inelegivel"
+    fila = flex_motor._escolher_modelos(anuncios, decisoes, saldos, cfg, None, agora, fresco=True)
+    assert [a.external_id for a in fila] == ["2", "1"]
+    # Na rodada comum: o de 40 min ainda vale (3 h); só o velho é relido.
+    fila = flex_motor._escolher_modelos(anuncios, decisoes, saldos, cfg, None, agora)
+    assert [a.external_id for a in fila] == []

@@ -1025,7 +1025,8 @@ def _escolher_modelos(
     gasta chamada.
 
     `fresco` ("Sincronizar agora"): a validade é a de antes de ligar — quem
-    apagou a variação na Shopee vê o anúncio liberado na hora.
+    apagou a variação na Shopee vê o anúncio liberado na hora; os que só a
+    variação sem vínculo barra são lidos primeiro.
 
     Leitura que falhou espera mais a cada falha (`_espera`) e vai para o fim
     da fila — a não ser na aprovação e no "Sincronizar agora". Nunca lidos
@@ -1034,6 +1035,10 @@ def _escolher_modelos(
     pedido = alvo is not None or fresco
     validade = _MODELOS_FRESCO_LIGAR if pedido else _MODELOS_VALIDADE
     out: list[Anuncio] = []
+    # Os barrados SÓ por variação sem vínculo: os únicos que a releitura pode
+    # LIBERAR. No "Sincronizar agora" vão na frente (os outros o portão
+    # confere de qualquer jeito antes de ligar).
+    liberaveis: set[tuple[UUID, str]] = set()
     for a in anuncios:
         if a.plataforma != flex_envio.PLATAFORMA_SHOPEE or a.bloqueio or not a.cobertas:
             continue
@@ -1058,10 +1063,13 @@ def _escolher_modelos(
                 a, variacoes=tuple(v for v in a.variacoes if v.vinculo != VINCULO_SEM)
             )
             quer = decidir(so_vinculos, saldos, cfg).desejado == LIGADO
+            if quer:
+                liberaveis.add(a.chave)
         if quer:
             out.append(a)
     out.sort(
         key=lambda a: (
+            fresco and a.chave not in liberaveis,
             a.modelos_falhas > 0,
             a.modelos_em is not None,
             not a.modelos_atrasados,
@@ -1540,9 +1548,12 @@ def _fresco(observado_em: datetime | None, agora: datetime) -> bool:
 
 def _espera(tentativas: int) -> timedelta:
     """Espera crescente depois de uma falha passageira: o intervalo da
-    varredura, dobrando, até 6 h."""
+    varredura, dobrando, até 6 h. O expoente tem teto (revisão de 16/11/2026):
+    com 38 falhas seguidas o `timedelta` estourava (OverflowError) e derrubava
+    toda rodada do Flex."""
     intervalo = max(1, int(get_settings().flex_intervalo_min or 15))
-    espera = timedelta(minutes=intervalo) * (2 ** max(0, tentativas - 1))
+    expoente = min(max(0, int(tentativas or 0) - 1), 10)
+    espera = timedelta(minutes=intervalo) * (2**expoente)
     return min(espera, _ESPERA_MAXIMA)
 
 
@@ -2931,6 +2942,15 @@ async def _conferir_modelos(
         if lista is not None and not lista_confiavel(lista, vivas):
             lista = None
     if lista is None:
+        falhou_agora = (
+            int(est.modelos_falhas or 0) > 0
+            and est.modelos_tentativa_em is not None
+            and est.modelos_tentativa_em >= agora - _MODELOS_FRESCO_LIGAR
+        )
+        if falhou_agora:
+            # A rodada acabou de tentar e falhar: não chama a Shopee de novo
+            # nem conta a mesma falha duas vezes (a espera cresceria em dobro).
+            return flex_api.REPETIR, MOTIVO_SEM_MODELOS
         lista = await _pedir_modelos(cliente, est.external_id, vivas)
         if lista is None:
             _falha_modelos(est, agora)
