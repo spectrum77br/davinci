@@ -1100,9 +1100,17 @@ _PAINEL_FONTE_SQL = f"""(
         (SELECT s3.id FROM "{SCHEMA}".stores s3
           WHERE s3.bling_store_id::text = bo2.loja LIMIT 1)
     )
-    WHERE bo2.aguardando_devolucao_data IS NOT NULL
-       OR bo2.situacao IN ('{_SITUACAO_AGUARDANDO_DEVOLUCAO}', '84677')
+    WHERE {{filtro}}
 )"""  # noqa: S608
+# Quem entra na lista: já caiu em Aguardando Devolução, ou está em Manutenção.
+_PAINEL_FILTRO_LISTA = (
+    f"bo2.aguardando_devolucao_data IS NOT NULL "
+    f"OR bo2.situacao IN ('{_SITUACAO_AGUARDANDO_DEVOLUCAO}', '84677')"
+)
+# Busca de UM pedido no histórico (nº do Bling ou da plataforma): qualquer
+# situação, aberto ou resolvido — pra achar a devolução antiga que o chamado
+# aponta ou lançar um pedido que ainda não caiu em Aguardando Devolução.
+_PAINEL_FILTRO_PEDIDO = "bo2.numero = :pedido OR bo2.numeroloja = :pedido"
 # Aberto = nunca resolvido, ou resolvido ANTES da entrada atual em devolução
 # (o pedido voltou pra Aguardando Devolução: é uma devolução nova).
 _PAINEL_ABERTO_SQL = (
@@ -1125,8 +1133,9 @@ async def acompanhamento_rows(
     session: AsyncSession,
     *,
     lojas: set[str] | None = None,
-    painel: Literal["abertas", "resolvidas", "todas"] | None = None,
+    painel: Literal["abertas", "resolvidas", "todas", "pedido"] | None = None,
     resolvidas_desde: date | None = None,
+    pedido: str | None = None,
 ) -> list[dict]:
     """Linhas da aba Acompanhamento: TODOS os pedidos hoje em 'Aguardando
     Devolução' (83957) no Bling — uma linha por item, com nome do cliente, dia
@@ -1156,13 +1165,18 @@ async def acompanhamento_rows(
         onde = "v.situacao = :situacao"
     else:
         params = {}
-        fonte = _PAINEL_FONTE_SQL
+        fonte = _PAINEL_FONTE_SQL.format(
+            filtro=_PAINEL_FILTRO_PEDIDO if painel == "pedido" else _PAINEL_FILTRO_LISTA
+        )
         extras = _PAINEL_EXTRAS_SQL
         juncao_extra = f'LEFT JOIN "{SCHEMA}".users ures ON ures.id = r.resolvido_por'
         teto = 4000
         # Se um dia bater no teto, corta as mais ANTIGAS, não as novas.
         ordem = "DESC NULLS LAST"
-        if painel == "abertas":
+        if painel == "pedido":
+            params["pedido"] = (pedido or "").strip()
+            onde = "TRUE"
+        elif painel == "abertas":
             onde = _PAINEL_ABERTO_SQL
         elif painel == "resolvidas":
             params["largada"] = PAINEL_LARGADA

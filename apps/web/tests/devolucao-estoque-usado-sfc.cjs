@@ -52,7 +52,7 @@ async function mountModal(props) {
   return { html, state, emitted }
 }
 
-const pageFile = path.join(__dirname, '../pages/devolucoes.vue')
+const pageFile = path.join(__dirname, '../pages/devolucoes-antigo.vue')
 const page = parse(fs.readFileSync(pageFile, 'utf8'), { filename: pageFile })
 assert.deepEqual(page.errors, [])
 const ast = ts.createSourceFile('devolucoes.ts', page.descriptor.scriptSetup.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)

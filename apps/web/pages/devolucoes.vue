@@ -1,1356 +1,59 @@
 <script setup lang="ts">
-import {
-  AlertCircle,
-  ArrowRightLeft,
-  CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
-  Camera,
-  ClipboardList,
-  Clock,
-  Download,
-  ExternalLink,
-  Loader2,
-  Megaphone,
-  PackagePlus,
-  PackageSearch,
-  Paperclip,
-  Plus,
-  RotateCcw,
-  Search,
-  ShieldAlert,
-  Trash2,
-  Undo2,
-  Video,
-  X,
-  AlertTriangle,
-} from 'lucide-vue-next'
-import { isoToday } from '~/lib/date'
-import { erroLinkMega } from '~/lib/linkMega'
+// Painel de Devoluções (refeito em 16/11/2026, Vinicius).
+//
+// Uma lista só: entra quem cair em Aguardando Devolução no Bling e só sai no
+// botão Resolver. Uma linha por produto; clicar abre a janela grande, onde
+// tudo acontece: observação, rastreio, vídeo, Fraude, LANÇAMENTO
+// (components/DevolucaoLancar.vue — estoque no Bling, fotos, chamado
+// automático, lixeira), situação do Bling e Resolver.
+// Padrão visual da Logística / Chamados (faixa azul, cartões, Onde agir hoje).
+//
+// A tela de antes (abas Acompanhamento / Fraude / Lançamentos) está guardada
+// em pages/devolucoes-antigo.vue, fora do menu: é o caminho de volta.
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { Check, Copy, Download, ExternalLink, Megaphone, Plus, RefreshCw, Search, X } from 'lucide-vue-next'
+import { isoDateBrt, isoToday } from '~/lib/date'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'devolucoes', action: 'view' } })
-
-type BlingStockResult = {
-  ok: boolean
-  action: string
-  sku: string | null
-  bling_product_id: number | null
-  message: string
-}
-
-type DevolucaoAnexo = {
-  id: string
-  filename: string
-  content_type: string
-  size_bytes: number
-  ml_file_name: string | null
-  created_at: string
-}
-
-type DevolutionRow = {
-  id: string
-  data: string | null
-  pedido_bling: string | null
-  pedido_marketplace: string | null
-  conta: string
-  cliente?: string | null
-  // Situação ATUAL do pedido no Bling (coluna "Status Bling", 17/09).
-  situacao_bling_id?: number | null
-  situacao_bling_nome?: string | null
-  sku: string | null
-  produtos: string | null
-  custo_produto: number | null
-  condicao_produto: string | null
-  link_abertura: string | null
-  reembolso: boolean
-  motivo_devolucao: string | null
-  link_envio: string | null
-  custo_manutencao: number | null
-  tecnico: string | null
-  devolver_estoque: boolean
-  manutencao: boolean
-  observacao: string | null
-  troca_sku: string | null
-  troca_condicao: string | null
-  estoque_suffix: string | null
-  quantidade: number | null
-  estoque_destino_sku: string | null
-  estoque_nova_tag: string | null
-  manutencao_destino: string | null
-  tag: string | null
-  data_devolvido_estoque: string | null
-  prazo: string | null
-  prazo_contestacao: string | null
-  estoque_mov_sku: string | null
-  estoque_mov_bling_id: number | null
-  estoque_mov_action: string | null
-  estoque_mov_qty: number | null
-  estoque_mov_revertido_at: string | null
-  // Resultado da entrada no Bling (15/10, caso 300588): ok | falhou | conferindo
-  // | sem_confirmacao | null. A data acima é a do PEDIDO; quem diz se entrou é isto.
-  estoque_status?: string | null
-  estoque_erro?: string | null
-  estoque_tentativa_at?: string | null
-  // Produto da entrada que o Bling respondeu com erro (o que está sendo conferido).
-  estoque_conferir_sku?: string | null
-  // "auto_retry" = o Bling recusou por excesso de chamadas e o DaVinci tenta de
-  // novo sozinho a cada ~2 min (até 5 — estoque_auto_tentativas). 21/10.
-  estoque_conferir_action?: string | null
-  estoque_auto_tentativas?: number | null
-  created_at: string
-  updated_at: string
-  bling_stock_result?: BlingStockResult | null
-  // Chamado MAIS RECENTE do pedido (aba Chamados) — preenchido pela listagem.
-  tem_chamado?: boolean
-  chamado_numero?: string | null
-  chamado_resolvido?: boolean | null
-  // Abertura automática no Mercado Livre (pendente | enviada | falhou) + motivo.
-  chamado_ml_status?: string | null
-  chamado_ml_erro?: string | null
-  // Quando a contestação saiu (só com `enviada`): foto anexada depois não vai.
-  chamado_enviada_at?: string | null
-  chamado_plataforma?: string | null
-  // Só na resposta do PATCH que trocou o motivo com chamado aberto (21/09):
-  // atualizado | atualizado_sem_api | substituido | ja_enviada | encerrado | kit_parcial.
-  chamado_troca_motivo?: string | null
-  // Mensagem ao comprador pedindo a senha (motivo Bloqueado; só a Shopee tem
-  // canal): pendente | enviada | falhou | cancelada | sem_canal.
-  senha_status?: string | null
-  senha_enviada_at?: string | null
-  senha_erro?: string | null
-  anexos?: DevolucaoAnexo[]
-}
-
-// Campos extras coletados pelos modais antes de chamar o estoque/situação Bling.
-type StockModalFields = {
-  troca_sku: string | null
-  troca_condicao: string | null
-  estoque_suffix: string | null
-  manutencao_destino: string | null
-  estoque_destino_sku: string | null
-  estoque_nova_tag: string | null
-}
-
-type DevolutionPage = {
-  items: DevolutionRow[]
-  total: number
-  // Pedidos distintos entre as linhas filtradas (linha sem pedido conta 1).
-  total_pedidos: number
-  reembolso_itens: number
-  reembolso_pedidos: number
-  limit: number
-  offset: number
-}
-
-type LookupRow = {
-  data: string | null
-  pedido_bling: string | null
-  pedido_marketplace: string | null
-  conta: string
-  sku: string | null
-  produtos: string | null
-  quantidade: number | null
-  custo_produto: number | null
-  nome_destinatario: string | null
-  cep_destino: string | null
-  ja_devolvido?: boolean
-  situacao_bling_id?: number | null
-  situacao_bling_nome?: string | null
-}
-type SituacaoBling = { id: number; nome: string }
-
-type DevolutionDraft = LookupRow & {
-  condicao_produto: string
-  link_abertura: string
-  reembolso: boolean
-  motivo_devolucao: string
-  link_envio: string
-  fotos: File[]
-  custo_manutencao: number | null
-  tecnico: string
-  devolver_estoque: boolean
-  observacao: string
-}
-
-type ReembolsoFilter = 'all' | 'true' | 'false'
-
-const PAGE_SIZE = 100
-// Mesmas tags/rótulos do Controle de Estoque (pages/controle-estoque.vue).
-// A tag da devolução é derivada do SKU pela mesma regra do backend
-// (app/services/sku_tags.py), então o visual aqui espelha aquela tela.
-const TAG_OPTIONS: { slug: string; label: string }[] = [
-  { slug: 'ci', label: 'CI' },
-  { slug: 'pi', label: 'PI' },
-  { slug: 'ra', label: 'RA' },
-  { slug: 'sa', label: 'SA' },
-  { slug: 'sp', label: 'SP' },
-  { slug: 'us', label: 'Usados' },
-  { slug: 'cd', label: 'Centro de Distribuição' },
-  { slug: 'fake', label: 'Fake' },
-  { slug: 'mala', label: 'Mala' },
-  { slug: 'eletro', label: 'Eletro' },
-  { slug: 'insumos', label: 'Insumos' },
-]
-const TAG_LABELS: Record<string, string> = Object.fromEntries(
-  TAG_OPTIONS.map(o => [o.slug, o.label]),
-)
-const tagLabel = (tag: string | null): string => {
-  if (!tag) return '—'
-  return TAG_LABELS[tag.replace(/^\./, '').toLowerCase()] ?? tag
-}
-
-// Lista final pedida pelo Eduardo (03/09): saem Tamanho, Pacote Suspeito e
-// Embalagem Externa Danificada; "Mudou de ideia" virou "Bloqueado" (03/09 à
-// tarde — migration 0239 renomeou as linhas antigas). Linhas antigas com
-// motivo removido continuam aparecendo no select via option de fallback
-// (mesmo esquema da condição). Bloqueado / Golpe / Item faltando / Não
-// recebido / Danificado (Outros) abrem chamado sozinhos (services/chamados.py).
-const MOTIVOS_DEVOLUCAO = [
-  'Bloqueado',
-  'Golpe',
-  'Item faltando',
-  'Dano funcional / Não funciona',
-  'Item Incorreto',
-  'Não recebido',
-  'Danificado (Outros)',
-] as const
-
-// Motivos que abrem chamado automático (services/chamados_devolucao):
-// Golpe = comprador trocou o produto ("produto diferente", 28/10); Danificado (foto); Item faltando; Não recebido;
-// Bloqueado (mala travada por senha). Item Incorreto NÃO abre (07/09).
-
-// Abertura automática na plataforma — o que a linha mostra enquanto não está "enviada".
-const ML_STATUS_ERROS: Record<string, string> = {
-  devolucao_sem_foto: 'aguardando foto — anexe pela câmera',
-  devolucao_motivo_sem_chamado: 'esse motivo não abre chamado (Item Incorreto saiu da lista em 07/09)',
-  return_review_indisponivel: 'ML ainda não liberou a revisão (o pacote precisa constar entregue) — tenta de novo a cada hora',
-  devolucao_sem_claim: 'sem devolução aberta na plataforma pra esse pedido — tenta de novo a cada hora',
-  devolucao_sem_return: 'sem devolução aberta na plataforma pra esse pedido — tenta de novo a cada hora',
-  devolucao_sem_pedido_marketplace: 'linha sem nº do pedido da plataforma',
-  devolucao_prazo_esgotado: 'ficou 45 dias pendente — abrir na mão',
-  devolucao_nao_encontrada: 'lançamento não encontrado',
-  chamado_sem_integracao_ml: 'conta sem integração ML no DaVinci',
-  chamado_sem_integracao_tiktok: 'conta sem integração TikTok no DaVinci',
-  chamado_sem_integracao_shopee: 'conta sem integração Shopee no DaVinci',
-  tiktok_aguardando_pacote: 'TikTok ainda não liberou a recusa (pacote precisa constar enviado/entregue) — tenta a cada hora',
-  tiktok_arbitragem: 'em arbitragem na TikTok — aguardando',
-  tiktok_quick_refund: 'TikTok já reembolsou (quick refund) — só apelação no Seller Center',
-  tiktok_ja_recusada: 'já recusada na TikTok (feita no Seller Center — veja o histórico do chamado)',
-  tiktok_devolucao_encerrada: 'devolução já encerrada na TikTok (reembolsada/decidida) — nada mais a abrir pela API',
-  ml_claim_encerrada: 'reclamação já encerrada no ML — nada mais a abrir pela API (veja o histórico)',
-  tiktok_motivo_indisponivel: 'TikTok não aceita esse motivo nesse estado',
-  // só reembolso (18/09): o lançamento responde o caso que o vigia achou
-  devolucao_sem_video: 'aguardando o vídeo da expedição (coluna Vídeo da aba Fraude ou Link envio) — tenta a cada hora',
-  tiktok_reembolso_nao_pendente: 'o pedido de só reembolso já foi decidido na TikTok — veja o desfecho no histórico do chamado',
-  tiktok_reembolso_ja_contestado: 'só reembolso já contestado na TikTok (recusado / em arbitragem) — veja o histórico do chamado',
-  shopee_aguardando_pacote: 'Shopee ainda não liberou a disputa — tenta a cada hora',
-  shopee_ja_contestada: 'já contestada na Shopee (disputa feita no Seller Center — veja o histórico)',
-  shopee_devolucao_encerrada: 'devolução já encerrada na Shopee',
-  shopee_motivo_indisponivel: 'Shopee não oferece esse motivo pra essa devolução',
-  shopee_sem_email: 'sem e-mail do operador pra Shopee (DEVOLUCAO_DISPUTE_EMAIL)',
-  plataforma_sem_api: 'sem API — abrir na mão na plataforma',
-  // chamado encerrado pelo motivo (15/09): o que ainda falta fazer na mão
-  retirar_contestacao: 'chamado encerrado aqui — retire a contestação no painel da plataforma',
-  contestacao_cancelada: 'contestação cancelada (chamado encerrado antes de ela sair)',
-}
-const PLAT_NOME: Record<string, string> = { ml: 'ML', tiktok: 'TikTok', shopee: 'Shopee', amazon: 'Amazon' }
-function platNome(row: DevolutionRow): string {
-  const p = (row.chamado_plataforma || 'ml').toLowerCase()
-  return PLAT_NOME[p] || p.toUpperCase()
-}
-function mlStatusLabel(row: DevolutionRow): string {
-  const st = row.chamado_ml_status
-  const erro = row.chamado_ml_erro || ''
-  const plat = platNome(row)
-  if (st === 'enviada') {
-    // Chamado encerrado pelo motivo com a contestação já enviada: a plataforma
-    // não tem API pra cancelar — lembra de retirar no painel.
-    if (erro === 'retirar_contestacao') return `${plat}: ${ML_STATUS_ERROS.retirar_contestacao}`
-    return row.chamado_resolvido ? `${plat}: contestação enviada` : `${plat}: aberto`
-  }
-  if (st === 'pendente') return `${plat}: ${ML_STATUS_ERROS[erro] || 'pendente'}`
-  if (st === 'falhou') return `${plat}: falhou — ${ML_STATUS_ERROS[erro] || erro}`
-  if (st === 'registrada') {
-    if (erro === 'contestacao_cancelada') return `${plat}: ${ML_STATUS_ERROS.contestacao_cancelada}`
-    return plat === 'Amazon' ? 'Amazon: SAFE-T só no Seller Central (sem API) — abrir na mão' : `${plat}: sem API — abrir na mão`
-  }
-  return ''
-}
-// Mensagem ao comprador pedindo a senha (Vinicius 22/09). Shopee pela API e,
-// desde 29/09, TikTok pelo robô do Mac dos robôs (escreve no chat pela tela).
-// No ML a devolução cancela o pedido e o chat fecha; a Amazon só tem e-mail.
-// Por isso `sem_canal` é um estado legítimo, e não erro. Pendente com `erro` =
-// o último recado do robô (loja sem login, perfil em uso…) — segue na fila.
-function senhaLabel(row: DevolutionRow): string {
-  const st = row.senha_status
-  if (!st) return ''
-  if (st === 'enviada') {
-    const d = row.senha_enviada_at ? new Date(row.senha_enviada_at) : null
-    const quando = d ? ` ${d.toLocaleDateString('pt-BR')} ${d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })}` : ''
-    return `Senha pedida ao cliente${quando}`
-  }
-  if (st === 'pendente') return row.senha_erro ? `Senha: na fila — ${row.senha_erro}` : 'Senha: pedido na fila'
-  if (st === 'falhou') {
-    // A Shopee só deixa a loja puxar conversa se o comprador falou com ela nos
-    // últimos 7 dias, comprou nos últimos 30, ou tem devolução em aberto.
-    if (row.senha_erro === 'fora_da_janela_shopee') return 'Senha: a Shopee fechou o chat com esse comprador — pedir por fora'
-    return `Senha: não saiu — ${row.senha_erro || 'erro'}`
-  }
-  if (st === 'cancelada') return 'Senha: pedido cancelado (motivo mudou)'
-  if (st === 'sem_canal') {
-    const plat = platNome(row)
-    return `Senha: ${plat} não deixa falar com o comprador — pedir na mão`
-  }
-  return ''
-}
-// ↻ "pedir de novo" (14/10, 294738): o pedido de senha desistiu depois de 3
-// tentativas (loja deslogada no AdsPower, perfil com problema) e não havia como
-// mandar de novo. Só pra `falhou` — a janela fechada da Shopee é regra dela.
-function podePedirSenhaDeNovo(row: DevolutionRow): boolean {
-  return canEdit.value && row.senha_status === 'falhou' && row.senha_erro !== 'fora_da_janela_shopee'
-}
-const pedindoSenha = ref<Set<string>>(new Set())
-async function pedirSenhaDeNovo(row: DevolutionRow) {
-  if (!podePedirSenhaDeNovo(row) || pedindoSenha.value.has(row.id)) return
-  const plat = platNome(row)
-  if (!confirm(`Pedir de novo a senha ao comprador do pedido ${row.pedido_bling || ''} no chat da ${plat}?\n\nResolva antes o que impediu (ex.: loja deslogada no AdsPower).`)) return
-  pedindoSenha.value = new Set([...pedindoSenha.value, row.id])
-  try {
-    const updated = await api<DevolutionRow>(
-      `/api/devolutions/${encodeURIComponent(row.id)}/senha/pedir-de-novo`,
-      { method: 'POST' },
-    )
-    row.senha_status = updated.senha_status
-    row.senha_erro = updated.senha_erro
-    row.senha_enviada_at = updated.senha_enviada_at
-    pushToast({ kind: 'success', title: 'Senha', lines: ['Pedido de senha de volta na fila do robô.'] })
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: 'Não deu pra pedir de novo', lines: [apiError(e)] })
-  } finally {
-    const s = new Set(pedindoSenha.value)
-    s.delete(row.id)
-    pedindoSenha.value = s
-  }
-}
-function senhaClass(row: DevolutionRow): string {
-  const st = row.senha_status
-  if (st === 'enviada') return 'text-emerald-700 dark:text-emerald-300'
-  if (st === 'falhou') return 'text-red-600 dark:text-red-400'
-  if (st === 'sem_canal') return 'text-sky-700 dark:text-sky-300'
-  if (st === 'cancelada') return 'text-muted-foreground'
-  return 'text-amber-700 dark:text-amber-300'
-}
-function mlStatusClass(row: DevolutionRow): string {
-  const st = row.chamado_ml_status
-  const erro = row.chamado_ml_erro || ''
-  if (st === 'enviada' && erro === 'retirar_contestacao') return 'text-amber-700 dark:text-amber-300 font-medium'
-  if (st === 'enviada') return 'text-emerald-700 dark:text-emerald-300'
-  if (st === 'falhou') return 'text-red-600 dark:text-red-400'
-  if (st === 'registrada' && erro === 'contestacao_cancelada') return 'text-muted-foreground'
-  if (st === 'registrada') return 'text-sky-700 dark:text-sky-300'
-  return 'text-amber-700 dark:text-amber-300'
-}
-// Contestação já saiu na plataforma (08/10, 298350): ela só sai uma vez, então
-// foto anexada depois — inclusive num lançamento apagado e refeito — fica só
-// aqui. Chamado encerrado pelo motivo ("retirar a contestação") não avisa.
-function contestacaoJaSaiu(row: DevolutionRow): boolean {
-  return row.chamado_ml_status === 'enviada' && row.chamado_ml_erro !== 'retirar_contestacao'
-}
-function contestacaoSaiuEm(row: DevolutionRow): string {
-  return row.chamado_enviada_at ? ` em ${fmtDateTime(row.chamado_enviada_at)}` : ''
-}
-// O cartão do vídeo (QR) é gerado pela própria contestação — não é foto "depois".
-function fotoDepoisDaContestacao(row: DevolutionRow, a: DevolucaoAnexo): boolean {
-  if (!contestacaoJaSaiu(row) || !row.chamado_enviada_at) return false
-  if (a.content_type.startsWith('video/') || a.filename === 'video-expedicao.png') return false
-  return new Date(a.created_at).getTime() > new Date(row.chamado_enviada_at).getTime()
-}
-function avisoFotosDepois(row: DevolutionRow): string[] {
-  const plat = platNome(row)
-  return [
-    `A contestação na ${plat} já saiu${contestacaoSaiuEm(row)}, antes destas fotos — e ela só sai uma vez.`,
-    plat === 'Shopee'
-      ? 'As fotos ficam guardadas aqui. Se a Shopee pedir prova extra, elas vão junto.'
-      : 'As fotos ficam guardadas aqui. Pra mandar, use a Réplica manual na aba Chamados.',
-  ]
-}
-
-// Aviso da troca de motivo com chamado aberto (Vinicius 21/09). `encerrado` é o
-// caso de 15/09 (motivo deixou de pedir chamado); os outros três são a troca
-// entre dois motivos que abrem chamado — o que aconteceu depende de onde a
-// contestação antiga estava (ver services/chamados_devolucao.trocar_motivo_chamado).
-function showTrocaMotivoToast(desfecho: string | null | undefined, plat: string) {
-  if (!desfecho) return
-  if (desfecho === 'encerrado') {
-    pushToast({
-      kind: 'warning',
-      title: 'Chamado encerrado',
-      lines: [
-        'O motivo não pede mais chamado, então o chamado da devolução ficou Encerrado — conclua pela aba Chamados.',
-        'Se a contestação já tinha sido enviada na plataforma, desista dela no painel da plataforma.',
-      ],
-    }, 9000)
-  } else if (desfecho === 'atualizado') {
-    pushToast({
-      kind: 'success',
-      title: 'Motivo trocado — mesmo chamado',
-      lines: [
-        'A contestação ainda não tinha saído: ela sai com o motivo novo (anexe as fotos, se o motivo pedir).',
-        'A troca ficou registrada no histórico do chamado.',
-      ],
-    }, 9000)
-  } else if (desfecho === 'atualizado_sem_api') {
-    pushToast({
-      kind: 'warning',
-      title: 'Motivo trocado — plataforma sem API',
-      lines: [
-        `O ${plat} não tem API pra contestar: abra na mão no painel da plataforma já com o motivo novo.`,
-        'A troca ficou registrada no histórico do chamado.',
-      ],
-    }, 9000)
-  } else if (desfecho === 'substituido') {
-    pushToast({
-      kind: 'warning',
-      title: 'Chamado anterior encerrado, outro aberto',
-      lines: [
-        'O chamado antigo ficou Encerrado (conclua pela aba Chamados) e um novo foi aberto com o motivo novo.',
-        `Se o robô já tinha aberto a solicitação no ${plat}, desista dela lá — a plataforma não deixa cancelar pela API.`,
-      ],
-    }, 12000)
-  } else if (desfecho === 'ja_enviada') {
-    pushToast({
-      kind: 'warning',
-      title: 'Contestação anterior já está na plataforma',
-      lines: [
-        `O ${plat} não aceita uma segunda contestação pela API: o chamado é o mesmo, com o relato novo registrado no histórico.`,
-        plat === 'ML'
-          ? 'Responda na mediação com o relato novo — pela réplica da aba Chamados ou no painel do ML.'
-          : 'Responda você no caso aberto no Seller Center com o relato novo e as fotos.',
-      ],
-    }, 12000)
-  }
-}
-
-const CONDICOES_PRODUTO = [
-  'Novo',
-  'Usado',
-  'Manutenção',
-  'Extraviado',
-  // Sucata (10/09): mesmo padrão do Extraviado em todas as regras (link de
-  // abertura obrigatório, reembolso automático, sem estoque, situação no add).
-  'Sucata',
-  'Trocado',
-  'Não devolvido',
-] as const
-
-const TECNICOS = [
-  'SmarPlay',
-  'Bogota',
-  'Shark',
-  'Cybercell',
-  'Factor',
-  'Ozarias',
-] as const
 
 const { api } = useApi()
 const canEdit = useCan('devolucoes', 'edit')
 const canDelete = useCan('devolucoes', 'delete')
-// Mudar o painel (Acompanhamento ↔ Fraude): admin ou `devolucoes_mover`.
-const canMover = useCan('devolucoes_mover', 'edit')
 const isAdmin = useIsAdmin()
-
-// Modal do botão Informar (Threema) — só admins veem o botão.
+// Botão Informar (Threema): só admin, como na tela de antes.
 const informarOpen = ref(false)
+const toasts = useToasts()
 
-// Devolução de estoque é AUTOMÁTICA no insert para todas as condições que
-// disparam estoque (Novo/Usado/Trocado) — sem toggle. A ÚNICA exceção é
-// "Manutenção", que continua manual: aí o toggle aparece e é necessário.
-// Mesmo nas Manutenções, só spectrum77 e sthevem7 podem ver/usar o toggle.
-const _auth = useAuthStore()
-const STOCK_TOGGLE_USERS = [
-  'spectrum77@tuta.com',
-  'sthevem7@tuta.com',
-  'joffer4@tuta.com',
-]
-function canSeeStockToggle(condicao?: string | null): boolean {
-  if (condicao !== 'Manutenção') return false
-  const email = _auth.user?.email?.toLowerCase()
-  return !!email && STOCK_TOGGLE_USERS.includes(email)
-}
-
-// ── Toast system ─────────────────────────────────────────────────────
-type Toast = { id: number; kind: 'success' | 'error' | 'warning' | 'info'; title: string; lines: string[] }
-const toasts = ref<Toast[]>([])
-let _toastId = 0
-// ttl 0 = fica até alguém fechar (o "Atualizando o estoque no Bling…" some
-// quando a resposta chega, não por tempo).
-function pushToast(t: Omit<Toast, 'id'>, ttl = 6000): number {
-  const id = ++_toastId
-  toasts.value = [...toasts.value, { id, ...t }]
-  if (ttl > 0) window.setTimeout(() => { toasts.value = toasts.value.filter((x) => x.id !== id) }, ttl)
-  return id
-}
-const TOAST_CORES: Record<Toast['kind'], { caixa: string; titulo: string; linha: string }> = {
-  success: { caixa: 'border-emerald-400 bg-emerald-50', titulo: 'text-emerald-800', linha: 'text-emerald-700' },
-  error: { caixa: 'border-red-400 bg-red-50', titulo: 'text-red-800', linha: 'text-red-700' },
-  warning: { caixa: 'border-amber-400 bg-amber-50', titulo: 'text-amber-800', linha: 'text-amber-700' },
-  info: { caixa: 'border-sky-400 bg-sky-50', titulo: 'text-sky-800', linha: 'text-sky-700' },
-}
-function dismissToast(id: number) {
-  toasts.value = toasts.value.filter((x) => x.id !== id)
-}
-function showStockToast(sr: BlingStockResult, rowId?: string, linha?: DevolutionRow) {
-  const lines = sr.message ? [sr.message] : []
-  // Recusa por excesso de chamadas: o DaVinci tenta de novo sozinho (21/10) —
-  // aviso âmbar que fecha sozinho quando a entrada entra.
-  if (sr.action === 'error' && rowId && linha && tentandoSozinho(linha)) {
-    fecharAvisoConferindo(rowId)
-    const id = pushToast({
-      kind: 'warning',
-      title: 'Bling ocupado · o DaVinci tenta de novo sozinho',
-      lines: [...lines, 'Ele tenta de novo em alguns minutos (até 5 vezes). Não precisa fazer nada.'],
-    }, 0)
-    avisoConferindo.set(rowId, id)
-    return
-  }
-  // O Bling respondeu erro DEPOIS de receber (15/10, 300334/298826): pode ter
-  // entrado. Fica na tela até a conferência terminar (ou alguém fechar) —
-  // repetir agora dobraria o estoque.
-  if (sr.action === 'unconfirmed') {
-    if (rowId) fecharAvisoConferindo(rowId)
-    const id = pushToast({ kind: 'warning', title: 'Bling · conferindo a entrada', lines }, 0)
-    if (rowId) avisoConferindo.set(rowId, id)
-    return
-  }
-  if (sr.action === 'reverse_incerto') {
-    pushToast({ kind: 'warning', title: 'Bling · o estorno pode ter saído', lines: [...lines, 'Confira o extrato antes de repetir — use “Estorno já saiu” ou “Tentar de novo” na linha.'] }, 0)
-    return
-  }
-  // Correção de estoque: não há linha para conferir — quem confere é a pessoa.
-  if (sr.action === 'unconfirmed_correcao') {
-    pushToast({ kind: 'warning', title: 'Bling · confira o extrato', lines }, 0)
-    return
-  }
-  if (sr.ok) {
-    const title = sr.action === 'product_created_usado'
-      ? 'Bling · produto criado'
-      : sr.action === 'stock_reversed'
-        ? 'Bling · estoque estornado'
-        : 'Bling · estoque atualizado'
-    pushToast({ kind: 'success', title, lines })
-  } else {
-    const titles: Record<string, string> = {
-      no_integration: 'Bling não conectado',
-      no_sku: 'SKU não informado',
-      sku_not_found: 'SKU não encontrado no Bling',
-      create_failed: 'Erro ao criar produto no Bling',
-      error: 'Estoque NÃO entrou no Bling',
-      reverse_error: 'Estorno NÃO saiu no Bling — o estoque continua lá',
-    }
-    // Erro não some sozinho (caso 300588: o aviso de 6 s sumiu e a data ficou
-    // parecendo que tinha entrado). A linha também fica marcada em vermelho.
-    const extra = rowId && sr.action === 'error' ? ['Use “Tentar de novo” na linha.'] : []
-    pushToast(
-      { kind: sr.action === 'error' || sr.action === 'reverse_error' ? 'error' : 'warning', title: titles[sr.action] ?? 'Bling · aviso', lines: [...lines, ...extra] },
-      0,
-    )
-  }
-}
-
-// ── Entrada no estoque do Bling (15/10, caso 300588) ─────────────────
-// `data_devolvido_estoque` é a hora do PEDIDO; o resultado vem em estoque_status.
-const ESTOQUE_PENDENTE = new Set(['falhou', 'conferindo', 'sem_confirmacao'])
-function estoquePendente(row: DevolutionRow): boolean {
-  return ESTOQUE_PENDENTE.has(row.estoque_status || '')
-}
-// SKU onde a entrada vai/foi: o produto que o Bling respondeu com erro, o
-// destino escolhido (ou o z000N já criado). null = z ainda não criado.
-// Mesma ordem do back (return_product_to_bling_stock).
-function skuDaEntrada(row: DevolutionRow): string | null {
-  if (row.estoque_conferir_sku) return row.estoque_conferir_sku
-  if (row.estoque_destino_sku) return row.estoque_destino_sku
-  if (row.estoque_nova_tag) return null
-  const efetivo = (row.condicao_produto === 'Trocado' ? row.troca_sku : row.sku) || ''
-  const base = efetivo.includes('.') ? efetivo.slice(0, efetivo.lastIndexOf('.')) : efetivo
-  if (row.estoque_suffix) return `${base}.${row.estoque_suffix.replace(/^\./, '')}`
-  const condicao = row.condicao_produto === 'Trocado' ? row.troca_condicao
-    : row.condicao_produto === 'Manutenção' ? row.manutencao_destino : row.condicao_produto
-  if (condicao === 'Usado' && !/^(b[0-9]|u)/i.test(efetivo)) return efetivo ? `${base}.us` : null
-  return efetivo || null
-}
-function temEstornoPendente(row: DevolutionRow): boolean {
-  return !!row.estoque_mov_sku && !row.estoque_mov_revertido_at
-}
-// Campos do estoque que o servidor muda: só eles entram na linha da tela (a
-// releitura não pode apagar o que a pessoa está digitando em outra coluna).
-const CAMPOS_ESTOQUE = [
-  'estoque_status', 'estoque_erro', 'estoque_tentativa_at', 'estoque_conferir_sku',
-  'estoque_conferir_action', 'estoque_auto_tentativas',
-  'estoque_mov_sku', 'estoque_mov_bling_id', 'estoque_mov_action', 'estoque_mov_qty',
-  'estoque_mov_revertido_at', 'estoque_destino_sku', 'estoque_nova_tag', 'estoque_suffix',
-  'data_devolvido_estoque', 'situacao_bling_id', 'situacao_bling_nome',
-] as const
-function aplicarEstoque(id: string, r: DevolutionRow) {
-  const linha = items.value.find((i) => i.id === id)
-  if (!linha) return
-  for (const k of CAMPOS_ESTOQUE) (linha as any)[k] = (r as any)[k]
-}
-// Aviso âmbar "conferindo" de cada linha: fecha quando a conferência termina
-// (ou quando a lista recarrega e a linha já não está conferindo).
-const avisoConferindo = new Map<string, number>()
-function fecharAvisosResolvidos() {
-  for (const id of [...avisoConferindo.keys()]) {
-    const linha = items.value.find((i) => i.id === id)
-    if (linha && !acompanharSozinho(linha)) fecharAvisoConferindo(id)
-  }
-}
-function fecharAvisoConferindo(id: string) {
-  const t = avisoConferindo.get(id)
-  if (t != null) dismissToast(t)
-  avisoConferindo.delete(id)
-}
-const tentandoEstoque = ref<Set<string>>(new Set())
-async function acaoEstoque(row: DevolutionRow, url: string, body: Record<string, unknown>) {
-  tentandoEstoque.value = new Set([...tentandoEstoque.value, row.id])
-  const aviso = pushToast({
-    kind: 'info',
-    title: 'Atualizando o estoque no Bling…',
-    lines: [`Pedido ${row.pedido_bling || '—'} · pode levar alguns segundos, não repita`],
-  }, 0)
-  try {
-    const updated = await api<DevolutionRow>(url, { method: 'POST', body })
-    aplicarEstoque(row.id, updated)
-    if (updated.bling_stock_result) showStockToast(updated.bling_stock_result, row.id, updated)
-    else if (updated.estoque_status === 'ok') pushToast({ kind: 'success', title: 'Entrada registrada', lines: [`${updated.estoque_mov_sku || ''} · pedido ${updated.pedido_bling || '—'}`] })
-    agendarConferencia()
-  } catch (e: any) {
-    if (e?.data?.detail?.code === 'estoque_conferindo') {
-      // O DaVinci está tentando agora (worker): relê a linha, sem erro fixo.
-      try { aplicarEstoque(row.id, await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(row.id)}`)) } catch { /* o próximo load corrige */ }
-      pushToast({ kind: 'info', title: 'O DaVinci está tentando agora', lines: ['Aguarde alguns segundos — a linha atualiza sozinha.'] })
-      agendarConferencia()
-    } else {
-      pushToast({ kind: 'error', title: 'Não deu para registrar o estoque', lines: [apiError(e)] }, 0)
-    }
-  } finally {
-    dismissToast(aviso)
-    const next = new Set(tentandoEstoque.value)
-    next.delete(row.id)
-    tentandoEstoque.value = next
-  }
-}
-function linhaComMudanca(row: DevolutionRow): boolean {
-  if (!hasDirty(row.id)) return false
-  pushToast({ kind: 'warning', title: 'Salve a linha antes', lines: ['A linha tem mudança não salva — salve ou desfaça antes de mexer no estoque.'] })
-  return true
-}
-async function tentarEstoqueDeNovo(row: DevolutionRow) {
-  if (!canEdit.value || tentandoEstoque.value.has(row.id) || isSaving(row.id) || linhaComMudanca(row)) return
-  const sku = skuDaEntrada(row)
-  const onde = sku ? `de ${sku}` : 'do produto z criado para este pedido'
-  const semConfirmacao = row.estoque_status === 'sem_confirmacao'
-  const pergunta = semConfirmacao && temEstornoPendente(row)
-    ? `O estorno (saída) da entrada anterior em ${row.estoque_mov_sku} não foi confirmado — ele PODE ter saído.\n\n`
-      + `Abra o extrato de ${row.estoque_mov_sku} no Bling e procure a saída "Estorno devolução pedido ${row.pedido_bling || ''}". `
-      + 'Se ela existir, use "Estorno já saiu" (estornar de novo daria baixa 2×).\n\n'
-      + (row.devolver_estoque ? 'Conferi no Bling e a saída NÃO existe. Estornar e lançar agora?' : 'Conferi no Bling e a saída NÃO existe. Estornar agora?')
-    : semConfirmacao
-    ? `A entrada ${onde} não foi confirmada — ela PODE ter entrado.\n\n`
-      + `Abra o extrato de estoque ${onde} no Bling e procure a entrada `
-      + `"Devolução pedido ${row.pedido_bling || ''}". Se ela existir, use "Já entrou" (lançar de novo dobra o estoque).\n\n`
-      + 'Conferi no Bling e a entrada NÃO existe. Lançar agora?'
-    : temEstornoPendente(row)
-    ? `Dar baixa (estorno) de ${row.estoque_mov_qty ?? 1} un. em ${row.estoque_mov_sku}`
-      + (row.devolver_estoque ? ` e lançar ${row.quantidade ?? 1} un. ${sku ? `em ${sku}` : '(produto z novo)'}` : '')
-      + ' no Bling?'
-    : `Lançar de novo a entrada de ${row.quantidade ?? 1} un. ${sku ? `em ${sku}` : '(produto z novo)'} no Bling?`
-  if (!confirm(pergunta)) return
-  await acaoEstoque(row, `/api/devolutions/${encodeURIComponent(row.id)}/estoque/tentar-de-novo`, { confirmo_conferi_no_bling: semConfirmacao })
-}
-async function estoqueJaEntrou(row: DevolutionRow) {
-  if (!canEdit.value || tentandoEstoque.value.has(row.id) || isSaving(row.id) || linhaComMudanca(row)) return
-  const url = `/api/devolutions/${encodeURIComponent(row.id)}/estoque/ja-entrou`
-  if (temEstornoPendente(row)) {
-    // O que faltava conferir era o ESTORNO (saída) da entrada anterior.
-    const ok = confirm(
-      `Você viu no extrato de ${row.estoque_mov_sku} a saída "Estorno devolução pedido ${row.pedido_bling || ''}"?\n\n`
-        + 'O DaVinci só registra que o estorno saiu (não lança nada no Bling).',
-    )
-    if (!ok) return
-    try {
-      const updated = await api<DevolutionRow>(url, { method: 'POST', body: {} })
-      aplicarEstoque(row.id, updated)
-      pushToast({
-        kind: 'success',
-        title: 'Estorno registrado',
-        lines: [updated.estoque_status === 'falhou' ? 'Falta lançar a entrada nova: use “Tentar de novo”.' : 'A saída já estava no Bling — nada foi lançado.'],
-      })
-    } catch (e: any) {
-      pushToast({ kind: 'error', title: 'Não deu para registrar o estorno', lines: [apiError(e)] }, 0)
-    }
-    return
-  }
-  const sugerido = skuDaEntrada(row) || ''
-  const sku = window.prompt(
-    `Em qual SKU você viu a entrada "Devolução pedido ${row.pedido_bling || ''}" no extrato do Bling?\n\n`
-      + 'O DaVinci só registra (não lança nada no Bling) — e o estorno ao excluir volta a funcionar.',
-    sugerido,
-  )
-  if (!sku || !sku.trim()) return
-  try {
-    await api(url, { method: 'POST', body: { sku: sku.trim() } })
-      .then((updated: any) => { aplicarEstoque(row.id, updated); pushToast({ kind: 'success', title: 'Entrada registrada', lines: [`${updated.estoque_mov_sku || ''} · pedido ${updated.pedido_bling || '—'}`] }) })
-  } catch (e: any) {
-    if (e?.data?.detail?.code === 'estoque_sku_diferente') {
-      if (confirm(`${e.data.detail.message}\n\nSó confirme se a entrada foi lançada à mão nesse SKU.`)) {
-        await acaoEstoque(row, url, { sku: sku.trim(), confirmo_outro_sku: true })
-      }
-      return
-    }
-    pushToast({ kind: 'error', title: 'Não deu para registrar o estoque', lines: [apiError(e)] }, 0)
-  }
-}
-// Linha "conferindo" (o worker confere a cada 2 min, até 10) ou recusada por
-// excesso de chamadas (o worker tenta de novo sozinho): a tela relê só essas
-// linhas a cada 60 s, sem recarregar a lista.
-function tentandoSozinho(row: DevolutionRow): boolean {
-  return row.estoque_status === 'falhou' && row.estoque_conferir_action === 'auto_retry'
-}
-function acompanharSozinho(row: DevolutionRow): boolean {
-  return row.estoque_status === 'conferindo' || tentandoSozinho(row)
-}
-let conferenciaTimer: number | null = null
-let desmontado = false
-function agendarConferencia() {
-  if (import.meta.server || desmontado || conferenciaTimer != null) return
-  if (!items.value.some(acompanharSozinho) && avisoConferindo.size === 0) return
-  conferenciaTimer = window.setTimeout(async () => {
-    conferenciaTimer = null
-    const ids = [...new Set([
-      ...items.value.filter(acompanharSozinho).map((i) => i.id),
-      ...avisoConferindo.keys(),
-    ])]
-    for (const id of ids) {
-      if (desmontado) return
-      try {
-        const r = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(id)}`)
-        if (desmontado) return
-        aplicarEstoque(id, r)
-        if (!acompanharSozinho(r)) fecharAvisoConferindo(id)
-        if (r.estoque_status === 'ok') {
-          pushToast({ kind: 'success', title: 'Bling · entrada confirmada', lines: [`${r.estoque_mov_sku || r.sku || ''} · pedido ${r.pedido_bling || '—'}`] })
-        } else if (r.estoque_status === 'sem_confirmacao') {
-          pushToast({ kind: 'warning', title: 'Bling · entrada não confirmada', lines: [r.estoque_erro || 'Confira o extrato no Bling.'] }, 0)
-        }
-      } catch {
-        // A próxima volta tenta de novo.
-      }
-    }
-    agendarConferencia()
-  }, 60_000)
-}
-onBeforeUnmount(() => {
-  desmontado = true
-  if (conferenciaTimer != null) window.clearTimeout(conferenciaTimer)
-})
-
-const items = ref<DevolutionRow[]>([])
-// Contadores dos cards (API, mesmos filtros da listagem). O grão da tabela é
-// ITEM (uma linha por SKU), então `total` conta linhas e `totalPedidos` conta
-// pedidos distintos — o card mostra pedidos e as linhas como apoio.
-const total = ref(0)
-const totalPedidos = ref(0)
-const reembolsoItens = ref(0)
-const reembolsoPedidos = ref(0)
-const page = ref(1)
-const loading = ref(false)
-const error = ref<string | null>(null)
-
-const search = ref('')
-const reembolsoFilter = ref<ReembolsoFilter>('all')
-const tagFilter = ref('all')
-// Tag destino = tag do SKU em que o item voltou ao estoque (selo verde da
-// coluna "Data devolvido estoque"); pode diferir da origem (saiu .sp, entrou .sa).
-const tagDestinoFilter = ref('all')
-const condicaoFilter = ref('all')
-// Filtro de período (data de devolução = created_at). Inclusivo nas duas pontas.
-const dataInicioFilter = ref('')
-const dataFimFilter = ref('')
-// Mostrar só pedidos que já passaram em manutenção (manutencao = true).
-const manutencaoFilter = ref(false)
-// Filtro de prazo de manutenção (admin): 'vencidas' = só as já vencidas;
-// 7/15/30 = prazo (created_at + 30d, condição Manutenção) vencendo em até N
-// dias (inclui as vencidas).
-const prazoDiasFilter = ref<'all' | 'vencidas' | '7' | '15' | '30'>('all')
-const exporting = ref(false)
-
-const addOpen = ref(false)
-const lookupPedido = ref('')
-const lookupLoading = ref(false)
-const lookupResults = ref<LookupRow[]>([])
-const lookupError = ref<string | null>(null)
-const creating = ref(false)
-const drafts = ref<DevolutionDraft[]>([])
-// Uma entrada por produto criado nesta busca (pedido|sku, repetida se o pedido
-// tem a mesma peça mais de uma vez — o "já feito" conta unidades, 302146).
-const addedThisSession = ref<string[]>([])
-
-const dirtyRows = ref<Set<string>>(new Set())
-const savingRows = ref<Set<string>>(new Set())
-// Linhas em que o operador REALMENTE mexeu no "Link envio" nesta sessão.
-// Sem isso, um texto gravado antes da trava de formato (8426c57, 21/09)
-// congelava a linha inteira: `rowPatchPayload` reenvia o campo em todo save e a
-// guarda barrava antes do PATCH. Caso 292128 (22/09): o pedido não lançava de
-// jeito nenhum por causa de um "nao ha" digitado no campo antes da trava.
-const linkEnvioTocado = ref<Set<string>>(new Set())
-
-// ── Correção de estoque (entrada manual, sem criar devolução) ────────────
-// Reaproveita os modais de destino (resolveStockModals) e a lógica Novo/Usado.
-type ProductHit = { sku: string; name: string; cost_price: number | null; saldo_virtual_total: number | null }
-const CONDICOES_CORRECAO = ['Novo', 'Usado'] as const
-const correcaoOpen = ref(false)
-const correcaoSku = ref('')
-const correcaoCondicao = ref<(typeof CONDICOES_CORRECAO)[number]>('Novo')
-const correcaoQtd = ref(1)
-const correcaoProduto = ref('')
-const correcaoCusto = ref('')
-const correcaoObs = ref('')
-const correcaoSubmitting = ref(false)
-const correcaoError = ref<string | null>(null)
-// Busca de produto (mesma lógica do pedido): mostra SKUs existentes e
-// pré-preenche nome + custo ao selecionar.
-const correcaoResults = ref<ProductHit[]>([])
-const correcaoSearching = ref(false)
-const correcaoShowResults = ref(false)
-let correcaoSearchTimer: ReturnType<typeof setTimeout> | null = null
-
-// ── Modais de estoque (abrem ANTES das chamadas Bling) ───────────────
-// Condições que disparam estoque/situação ao adicionar ou ligar o toggle.
-const STOCK_TRIGGER_CONDICOES = ['Novo', 'Usado', 'Trocado', 'Manutenção']
-function isStockTrigger(condicao: string | null | undefined) {
-  return !!condicao && STOCK_TRIGGER_CONDICOES.includes(condicao)
-}
-// Mala (b+dígito) e Eletro (u…) voltam direto no próprio SKU — sem modal de tag.
-function isMalaOrEletro(sku: string | null | undefined) {
-  return /^(b[0-9]|u)/i.test((sku || '').trim())
-}
-
-type TrocaResult = { sku: string; condicao: 'Novo' | 'Usado' }
-const trocaModal = ref<{ open: boolean; soldSku: string | null; resolve: ((v: TrocaResult | null) => void) | null }>(
-  { open: false, soldSku: null, resolve: null },
-)
-function askTrocaSku(soldSku: string | null): Promise<TrocaResult | null> {
-  return new Promise((resolve) => { trocaModal.value = { open: true, soldSku, resolve } })
-}
-function onTrocaConfirm(payload: TrocaResult) {
-  trocaModal.value.resolve?.(payload)
-  trocaModal.value = { open: false, soldSku: null, resolve: null }
-}
-function onTrocaCancel() {
-  trocaModal.value.resolve?.(null)
-  trocaModal.value = { open: false, soldSku: null, resolve: null }
-}
-
-// Modal de Manutenção: Novo / Usado / Sucata.
-type ManutencaoResult = { tipo: 'Novo' | 'Usado' | 'Sucata' }
-const manutencaoModal = ref<{ open: boolean; sku: string | null; resolve: ((v: ManutencaoResult | null) => void) | null }>(
-  { open: false, sku: null, resolve: null },
-)
-function askManutencao(sku: string | null): Promise<ManutencaoResult | null> {
-  return new Promise((resolve) => { manutencaoModal.value = { open: true, sku, resolve } })
-}
-function onManutencaoConfirm(payload: ManutencaoResult) {
-  manutencaoModal.value.resolve?.(payload)
-  manutencaoModal.value = { open: false, sku: null, resolve: null }
-}
-function onManutencaoCancel() {
-  manutencaoModal.value.resolve?.(null)
-  manutencaoModal.value = { open: false, sku: null, resolve: null }
-}
-
-// Modal de destino de estoque: bin existente, tag p/ criar produto novo
-// (z000N.<tag>) OU `suffix` p/ manter o SKU base.<sufixo> (ex.: .us).
-type EstoqueResult = { destino_sku?: string; nova_tag?: string; suffix?: string }
-const estoqueModal = ref<{ open: boolean; sku: string; condicao: string; fullDestino: boolean; resolve: ((v: EstoqueResult | null) => void) | null }>(
-  { open: false, sku: '', condicao: '', fullDestino: false, resolve: null },
-)
-// fullDestino: modo "destino completo" (correção de mala Novo) — mostra os bins
-// regionais .mala/.pi/.sp. Usado continua no modal de avulso z000N.<tag>.
-function askEstoque(sku: string, condicao: string, fullDestino = false): Promise<EstoqueResult | null> {
-  return new Promise((resolve) => { estoqueModal.value = { open: true, sku, condicao, fullDestino, resolve } })
-}
-function onEstoqueConfirm(payload: EstoqueResult) {
-  estoqueModal.value.resolve?.(payload)
-  estoqueModal.value = { open: false, sku: '', condicao: '', fullDestino: false, resolve: null }
-}
-function onEstoqueCancel() {
-  estoqueModal.value.resolve?.(null)
-  estoqueModal.value = { open: false, sku: '', condicao: '', fullDestino: false, resolve: null }
-}
-
-/**
- * Abre, em sequência, os modais necessários antes de devolver ao estoque.
- * Retorna os campos extras a enviar no body, ou `null` se o usuário
- * cancelar qualquer modal (operação deve ser abortada — sem chamada Bling).
- */
-async function resolveStockModals(
-  condicao: string | null,
-  sku: string | null,
-  devolverEstoque: boolean,
-  // Na correção de estoque a mala Novo NÃO volta direto no avulso: força abrir o
-  // modal de destino pra o operador escolher o bin regional (.mala/.pi/.sp),
-  // igual na devolução de pedido (lá o SKU já vem com o sufixo do pedido).
-  forcarDestinoMala = false,
-): Promise<StockModalFields | null> {
-  const empty: StockModalFields = {
-    troca_sku: null, troca_condicao: null, estoque_suffix: null,
-    manutencao_destino: null, estoque_destino_sku: null, estoque_nova_tag: null,
-  }
-  if (!devolverEstoque || !isStockTrigger(condicao)) return empty
-
-  const out: StockModalFields = { ...empty }
-  let effSku = (sku || '').trim()
-  let effCondicao = condicao as string
-
-  // Manutenção — escolher Novo / Usado / Sucata. Sucata não mexe no estoque.
-  if (condicao === 'Manutenção') {
-    const m = await askManutencao(sku)
-    if (!m) return null
-    out.manutencao_destino = m.tipo
-    if (m.tipo === 'Sucata') return out
-    effCondicao = m.tipo
-  }
-
-  // Trocado — escolher o SKU que de fato voltou + condição (Novo/Usado).
-  if (condicao === 'Trocado') {
-    const r = await askTrocaSku(sku)
-    if (!r) return null
-    out.troca_sku = r.sku
-    out.troca_condicao = r.condicao
-    effSku = r.sku.trim()
-    effCondicao = r.condicao
-  }
-
-  // Mala/Eletro NOVO: volta direto no próprio SKU, sem modal de tag/bin.
-  // Usado segue a lógica de usados (modal → cria z000N.<tag>). Na correção de
-  // estoque (forcarDestinoMala) NÃO pega o atalho: abre o modal pra escolher o
-  // bin regional (.mala/.pi/.sp), já que o avulso base não traz o sufixo.
-  if (effCondicao === 'Novo' && isMalaOrEletro(effSku) && !forcarDestinoMala) {
-    out.estoque_destino_sku = effSku
-    return out
-  }
-
-  // Destino de estoque: bin existente ou criação de produto novo (z000N.<tag>).
-  // Na correção de mala/eletro Novo, permite escolher o bin regional.
-  // Usado precisa manter a opção de criar o avulso z000N.<tag>.
-  const fullDestino = effCondicao === 'Novo' && forcarDestinoMala && isMalaOrEletro(effSku)
-  const dest = await askEstoque(effSku, effCondicao, fullDestino)
-  if (!dest) return null
-  out.estoque_destino_sku = dest.destino_sku ?? null
-  out.estoque_nova_tag = dest.nova_tag ?? null
-  out.estoque_suffix = dest.suffix ?? null
-  return out
-}
-
-const totalPages = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)))
-
-const expandedLookupResults = computed<LookupRow[]>(() => {
-  const rows: LookupRow[] = []
-  for (const row of lookupResults.value) {
-    if (row.sku && row.sku.includes('+')) {
-      const skus = row.sku.split('+').map((s) => s.trim()).filter(Boolean)
-      const splitCost = row.custo_produto != null ? row.custo_produto / skus.length : null
-      for (const s of skus) {
-        rows.push({ ...row, sku: s, custo_produto: splitCost })
-      }
-    } else {
-      rows.push(row)
-    }
-  }
-  return rows
-})
-
-// Unidades já lançadas. O backend marca as que já tinham devolução na hora da
-// busca (por unidade, não por SKU); aqui entram as criadas depois dela, uma
-// unidade por produto criado. Antes a tabela carregada marcava pedido+sku
-// inteiro: kit com 3 malas iguais e uma excluída não deixava relançar (302146).
-const alreadyAddedRows = computed(() => {
-  const restantes = new Map<string, number>()
-  for (const k of addedThisSession.value) restantes.set(k, (restantes.get(k) ?? 0) + 1)
-  const marcadas = new Set<LookupRow>()
-  for (const row of expandedLookupResults.value) {
-    if (row.ja_devolvido === true) {
-      marcadas.add(row)
-      continue
-    }
-    const k = `${row.pedido_bling}|${row.sku}`
-    const n = restantes.get(k) ?? 0
-    if (n > 0) {
-      marcadas.add(row)
-      restantes.set(k, n - 1)
-    }
-  }
-  return marcadas
-})
-
-function isAlreadyAdded(row: LookupRow) {
-  return alreadyAddedRows.value.has(row)
-}
-// Produtos do pedido ainda não adicionados — todos entram de uma vez no rascunho.
-const selectableLookupCount = computed(
-  () => expandedLookupResults.value.filter((r) => !isAlreadyAdded(r)).length,
-)
-const rangeStart = computed(() => total.value === 0 ? 0 : (page.value - 1) * PAGE_SIZE + 1)
-const rangeEnd = computed(() => Math.min(page.value * PAGE_SIZE, total.value))
-const totalCustoManutencao = computed(() => items.value.reduce((a, r) => a + (r.custo_manutencao ?? 0), 0))
-// "35 pedidos" / "1 pedido" — valor e apoio dos cards da aba Lançamentos.
-function qtd(n: number, singular: string, plural: string): string {
-  return `${n} ${n === 1 ? singular : plural}`
-}
-
-const sheetInputClass = 'h-7 w-full rounded-none border-0 bg-transparent px-1 text-xs focus:bg-background focus:outline-none focus:ring-1 focus:ring-primary disabled:cursor-default disabled:opacity-70'
-const sheetSelectClass = `${sheetInputClass} cursor-pointer`
-const sheetMoneyInputClass = `${sheetInputClass} text-right tabular-nums`
-const sheetInputRequiredClass = `${sheetInputClass} ring-1 ring-red-400`
-
-function linkRequired(condicao: string | null | undefined) {
-  return condicao === 'Extraviado' || condicao === 'Sucata' || condicao === 'Manutenção'
-}
-
-// Motivos que abrem chamado automático (espelho de services/chamados.MOTIVOS_ABREM_CHAMADO).
-const MOTIVOS_ABREM_CHAMADO = ['bloqueado', 'mudou de ideia', 'golpe', 'item faltando', 'não recebido', 'danificado (outros)']
-// Mala (b<dígito>, bp*, acessórios a006/a015/a073-a076) ou eletro (celular dg*, airfryer/eletro u*) —
-// espelho de services/chamados_devolucao.produto_mala_ou_eletro; o backend é quem trava (422).
-function isMalaOuEletro(sku: string | null | undefined) {
-  const partes = (sku || '').toLowerCase().replace(/,/g, '+').split('+')
-  return partes.some((p) => {
-    const base = p.trim().split('.')[0]
-    if (!base) return false
-    return /^b\d/.test(base) || /^bp\d/.test(base) || ['a006', 'a015', 'a073', 'a074', 'a075', 'a076'].includes(base) || /^(dg|u)/.test(base)
-  })
-}
-// Trava (Eduardo 04/09): "mala e eletro é obrigatória, desde que esteja nos motivos que abrem chamado".
-// Vinicius 21/09: "não recebido" (o pacote de VOLTA não chegou, o vídeo da ida não prova nada)
-// e "bloqueado" (nome antigo "mudou de ideia": o aparelho voltou com a senha do cliente, a
-// contestação é "item usado") ficam de fora — espelho de MOTIVOS_SEM_LINK_ENVIO em
-// services/chamados_devolucao.link_envio_obrigatorio.
-const MOTIVOS_SEM_LINK_ENVIO = ['não recebido', 'bloqueado', 'mudou de ideia']
-function linkEnvioRequired(sku: string | null | undefined, motivo: string | null | undefined) {
-  const m = (motivo || '').trim().toLowerCase()
-  if (MOTIVOS_SEM_LINK_ENVIO.includes(m)) return false
-  return MOTIVOS_ABREM_CHAMADO.includes(m) && isMalaOuEletro(sku)
-}
-// Vinicius 21/09: Link envio, quando preenchido, tem que ser URL http(s) — a operadora
-// digitava "nao ha, nao recebido" só pra passar na trava e o texto ia parar no QR do cartão
-// da disputa. Espelho do validator do backend (422 link_envio_invalido).
-const MSG_LINK_ENVIO_INVALIDO = 'Link de envio precisa ser um endereço http(s) — não digite texto aqui'
-// Texto antigo, de antes da trava: não barra mais o salvamento da linha, mas
-// continua marcado em vermelho pra alguém apagar ou trocar pelo link de verdade.
-const MSG_LINK_ENVIO_LEGADO =
-  'Texto antigo neste campo (de antes da regra do link). Não atrapalha o salvamento, mas apague ou troque pelo endereço http(s) do envio.'
-function linkEnvioInvalido(link: string | null | undefined) {
-  const v = (link || '').trim()
-  return !!v && !/^https?:\/\//i.test(v)
-}
-// A trava de formato vale pro que o operador digita AGORA. Texto gravado ANTES
-// dela (o "nao ha, nao recebido" que a operadora usava pra passar na trava de
-// mala/eletro) não pode barrar o save: fica de fora do payload e a linha volta a
-// ser editável. Senão condição, custo, técnico e observação ficam todos reféns
-// de um texto digitado meses atrás — e o produto nunca volta ao estoque.
-function linkEnvioLegado(row: DevolutionRow) {
-  return linkEnvioInvalido(row.link_envio) && !linkEnvioTocado.value.has(row.id)
-}
-// Vinicius 23/09: o vídeo da expedição mora na MEGA — link NOVO no Link envio só
-// se for da MEGA com a chave (lib/linkMega). O link que o sistema já tinha continua
-// valendo: o da coluna Vídeo (entra sozinho no lançamento) e o que já estava salvo
-// na linha — pedido embalado antes da troca tem o vídeo no Google Drive. Espelho de
-// _exigir_link_envio_mega no backend. Mensagem do problema, ou null.
-function linkEnvioNaoMega(link: string | null | undefined, pedido: string | null | undefined) {
-  const v = (link || '').trim()
-  if (!v || linkEnvioInvalido(v)) return null
-  if (pedido && (videoLinkPorPedido.value.get(pedido) || '').trim() === v) return null
-  return erroLinkMega(v)
-}
-function linkEnvioNaoMegaRow(row: DevolutionRow) {
-  return linkEnvioTocado.value.has(row.id) ? linkEnvioNaoMega(row.link_envio, row.pedido_bling) : null
-}
-// Guarda que barra o save: o banner no topo passa despercebido pra quem está no
-// meio da tabela (caso 292128 — a operadora marcou "Novo" e saiu achando que
-// tinha lançado). O toast aparece onde ela está olhando; a marca "não salvo" na
-// linha é o que sobra depois que o toast some.
-function bloqueiaSave(msg: string) {
-  error.value = msg
-  pushToast({ kind: 'error', title: 'Linha não salva', lines: [msg] })
-}
-// Trava (Vinicius 18/09): pedido na aba Fraude (só reembolso — o lançamento responde a
-// TikTok com o vídeo) só lança com o vídeo: o link da coluna Vídeo entra sozinho no
-// "Link envio"; sem vídeo e sem link colado, o backend recusa (422 video_obrigatorio).
-const MSG_VIDEO_OBRIGATORIO =
-  'Vídeo obrigatório: pedido na aba Fraude — anexe o vídeo pela coluna Vídeo (ou cole o link no Link envio) antes de lançar'
-function videoFraudeRequired(pedido: string | null | undefined, motivo: string | null | undefined) {
-  if (!pedido || !MOTIVOS_ABREM_CHAMADO.includes((motivo || '').trim().toLowerCase())) return false
-  const row = acompRows.value.find((r) => r.pedido_bling === pedido)
-  return !!row && row.fila === 'fraude' && !row.video_link
-}
-
-function apiError(e: any) {
-  const detail = e?.data?.detail
-  // 422 de validator do Pydantic (ex.: link_envio_invalido no schema) vem como lista
-  // [{msg, loc}] — mostra a msg em vez do "422 Unprocessable Entity" genérico do fetch.
-  if (Array.isArray(detail)) {
-    const msgs = detail
-      .map((d: any) => String(d?.msg || d?.message || '').replace(/^Value error, /, ''))
-      .filter(Boolean)
-    if (msgs.length) return msgs.join('; ')
-  }
-  if (detail && typeof detail === 'object') return detail.message || detail.code || e?.message || 'erro'
-  return detail || e?.message || 'erro'
-}
-
-function brl(v: number | null | undefined) {
-  if (v == null) return '—'
-  return v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
-}
-
-function saldoUn(v: number | null | undefined) {
-  return v == null ? '—' : `${v} un.`
-}
-
-function normalizeUrl(v: string | null | undefined) {
-  if (!v) return ''
-  const trimmed = v.trim()
-  if (!trimmed) return ''
-  if (/^https?:\/\//i.test(trimmed)) return trimmed
-  return `https://${trimmed}`
-}
-
-function fmtDateTime(v: string | null) {
-  if (!v) return '—'
-  const d = new Date(v)
-  if (Number.isNaN(d.getTime())) return v
-  return d.toLocaleString('pt-BR', {
-    day: '2-digit',
-    month: '2-digit',
-    year: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
-
-// Prazo: só a data (dd/mm/aa). Vencido = data no passado (ignora a hora).
-function fmtDate(v: string | null) {
-  if (!v) return '—'
-  const d = new Date(v)
-  if (Number.isNaN(d.getTime())) return v
-  return d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit', year: '2-digit' })
-}
-// Coluna "Reembolso": linha miúda "R$ 744,00 · 16/09" (valor e/ou data).
-function reembolsoSub(row: { reembolso_valor: number | null; reembolso_em: string | null }): string {
-  const partes: string[] = []
-  if (row.reembolso_valor != null) partes.push(brl(row.reembolso_valor))
-  if (row.reembolso_em) {
-    const d = new Date(row.reembolso_em)
-    if (!Number.isNaN(d.getTime())) partes.push(d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' }))
-  }
-  return partes.join(' · ')
-}
-function prazoOverdue(v: string | null): boolean {
-  if (!v) return false
-  const d = new Date(v)
-  if (Number.isNaN(d.getTime())) return false
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  return d.getTime() < today.getTime()
-}
-// Prazo de contestação da plataforma (Shopee/TikTok): urgente = vencido ou < 24 h.
-function contestacaoUrgente(v: string | null): boolean {
-  if (!v) return false
-  return new Date(v).getTime() - Date.now() < 24 * 3600 * 1000
-}
-function contestacaoLabel(v: string | null): string {
-  if (!v) return ''
-  const ms = new Date(v).getTime() - Date.now()
-  if (ms < 0) return 'vencido'
-  const h = Math.floor(ms / 3600000)
-  if (h < 24) return `faltam ${h} h`
-  const d = Math.floor(h / 24)
-  return `faltam ${d} dia${d === 1 ? '' : 's'}`
-}
-// Dias restantes até o prazo (negativo = vencido). Compara só a data.
-function prazoDiasLabel(v: string | null): string {
-  if (!v) return ''
-  const d = new Date(v)
-  if (Number.isNaN(d.getTime())) return ''
-  d.setHours(0, 0, 0, 0)
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  const dias = Math.round((d.getTime() - today.getTime()) / 86_400_000)
-  if (dias > 0) return `faltam ${dias}d`
-  if (dias === 0) return 'vence hoje'
-  return `vencido há ${-dias}d`
-}
-
-// Versão da edição por linha: sobe a cada mudança. O save anota a versão que
-// mandou — se ela mudou enquanto o PATCH estava no ar, alguém mexeu na linha
-// nesse meio-tempo e a resposta não pode apagar isso da tela.
-const rowVersion = new Map<string, number>()
-function markDirty(id: string) {
-  const next = new Set(dirtyRows.value)
-  next.add(id)
-  dirtyRows.value = next
-  rowVersion.set(id, (rowVersion.get(id) ?? 0) + 1)
-}
-function clearDirty(id: string) {
-  const next = new Set(dirtyRows.value)
-  next.delete(id)
-  dirtyRows.value = next
-  const tocado = new Set(linkEnvioTocado.value)
-  tocado.delete(id)
-  linkEnvioTocado.value = tocado
-}
-function hasDirty(id: string) { return dirtyRows.value.has(id) }
-function setSaving(id: string, v: boolean) {
-  const next = new Set(savingRows.value)
-  if (v) next.add(id); else next.delete(id)
-  savingRows.value = next
-}
-function isSaving(id: string) { return savingRows.value.has(id) }
-function numberOrNull(value: string) {
-  if (value === '') return null
-  const parsed = Number(value)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-function setRowNumber(row: DevolutionRow, field: 'custo_produto' | 'custo_manutencao', value: string) {
-  row[field] = numberOrNull(value)
-  markDirty(row.id)
-}
-
-function setRowText(
-  row: DevolutionRow,
-  field: 'condicao_produto' | 'link_abertura' | 'link_envio' | 'motivo_devolucao' | 'tecnico' | 'observacao',
-  value: string,
-) {
-  row[field] = value || null
-  if (field === 'link_envio') {
-    const next = new Set(linkEnvioTocado.value)
-    next.add(row.id)
-    linkEnvioTocado.value = next
-  }
-  markDirty(row.id)
-}
-
-function setRowDevolverEstoque(row: DevolutionRow, value: boolean) {
-  row.devolver_estoque = value
-  markDirty(row.id)
-}
-
-function setRowReembolso(row: DevolutionRow, value: boolean) {
-  row.reembolso = value
-  markDirty(row.id)
-}
-
-// Query string da listagem com os filtros atuais (load e refreshTotals).
-function listParams(limit: number, offset: number): URLSearchParams {
-  const params = new URLSearchParams()
-  params.set('limit', String(limit))
-  params.set('offset', String(offset))
-  if (search.value.trim()) params.set('search', search.value.trim())
-  if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
-  if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
-  if (tagDestinoFilter.value !== 'all') params.set('tag_destino', tagDestinoFilter.value)
-  if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
-  if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
-  if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
-  if (manutencaoFilter.value) params.set('manutencao', 'true')
-  if (isAdmin.value && prazoDiasFilter.value === 'vencidas') params.set('prazo_vencido', 'true')
-  else if (isAdmin.value && prazoDiasFilter.value !== 'all') params.set('prazo_dias', prazoDiasFilter.value)
-  return params
-}
-
-type ListTotals = Pick<DevolutionPage, 'total' | 'total_pedidos' | 'reembolso_itens' | 'reembolso_pedidos'>
-function applyTotals(res: ListTotals) {
-  total.value = res.total
-  totalPedidos.value = res.total_pedidos
-  reembolsoItens.value = res.reembolso_itens
-  reembolsoPedidos.value = res.reembolso_pedidos
-}
-
-async function load() {
-  loading.value = true
-  error.value = null
-  try {
-    const params = listParams(PAGE_SIZE, (page.value - 1) * PAGE_SIZE)
-    const res = await api<DevolutionPage>(`/api/devolutions?${params.toString()}`)
-    items.value = res.items
-    fecharAvisosResolvidos()
-    agendarConferencia()
-    applyTotals(res)
-    dirtyRows.value = new Set()
-    linkEnvioTocado.value = new Set()
-  } catch (e: any) {
-    error.value = apiError(e)
-  } finally {
-    loading.value = false
-  }
-}
-
-// Só os contadores dos cards (mesmos filtros), depois de criar, salvar ou
-// excluir uma linha — sem recarregar a tabela nem perder edições pendentes.
-async function refreshTotals() {
-  try {
-    applyTotals(await api<DevolutionPage>(`/api/devolutions?${listParams(1, 0).toString()}`))
-  } catch {
-    // Mantém o valor otimista; o próximo load() corrige.
-  }
-}
-
-async function exportXlsx() {
-  if (exporting.value) return
-  exporting.value = true
-  try {
-    const params = new URLSearchParams()
-    if (search.value.trim()) params.set('search', search.value.trim())
-    if (reembolsoFilter.value !== 'all') params.set('reembolso', reembolsoFilter.value)
-    if (tagFilter.value !== 'all') params.set('tag', tagFilter.value)
-    if (tagDestinoFilter.value !== 'all') params.set('tag_destino', tagDestinoFilter.value)
-    if (condicaoFilter.value !== 'all') params.set('condicao', condicaoFilter.value)
-    if (dataInicioFilter.value) params.set('data_inicio', dataInicioFilter.value)
-    if (dataFimFilter.value) params.set('data_fim', dataFimFilter.value)
-    if (manutencaoFilter.value) params.set('manutencao', 'true')
-    if (isAdmin.value && prazoDiasFilter.value === 'vencidas') params.set('prazo_vencido', 'true')
-    else if (isAdmin.value && prazoDiasFilter.value !== 'all') params.set('prazo_dias', prazoDiasFilter.value)
-    const blob = await api<Blob>(`/api/devolutions/export.xlsx?${params.toString()}`, { responseType: 'blob' as any })
-    const href = URL.createObjectURL(blob as any)
-    const a = document.createElement('a')
-    a.href = href
-    a.download = `devolucoes_${isoToday()}.xlsx`
-    document.body.appendChild(a)
-    a.click()
-    a.remove()
-    URL.revokeObjectURL(href)
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: 'Erro ao exportar', lines: [apiError(e)] })
-  } finally {
-    exporting.value = false
-  }
-}
-
-// ── Aba Acompanhamento: pedidos hoje em "Aguardando Devolução" no Bling ──
-// Linha por ITEM do pedido (grão da vw_devolucoes). Rastreio/localização são
-// por PEDIDO e preenchidos à mão: salvar numa linha reflete nas linhas irmãs
-// do mesmo pedido. A data da última movimentação é carimbada pelo backend
-// sozinha quando a localização muda.
-type AcompanhamentoRow = {
+type Etapa = 'aguardando' | 'chegou' | 'manutencao' | 'fraude'
+type Lancamento = {
+  id: string
+  sku: string | null
+  produtos: string | null
+  quantidade: number
+  condicao: string | null
+  condicao_tela: string | null
+  motivo: string | null
+  sku_lancado: string | null
+  estoque_status: string | null
+  data_devolvido_estoque: string | null
+  manutencao_pendente: boolean
+  tecnico: string | null
+  prazo_manutencao: string | null
+  link_envio: string | null
+  link_abertura: string | null
+  observacao: string | null
+  anexos: { id: string; content_type: string | null; filename: string | null }[]
+  created_at: string | null
+  custo_produto: number | null
+  custo_manutencao: number | null
+}
+type Item = {
   pedido_bling: string | null
   pedido_marketplace: string | null
   data: string | null
   aguardando_devolucao_data: string | null
-  dias_em_devolucao: number | null
-  // true = data estimada (sinal da Logística / backfill) — mostra "≈".
   aguardando_devolucao_data_estimada: boolean
-  // Dia em que o marketplace confirmou que o pacote de volta CHEGOU aqui
-  // (coluna "Chegou em"); null = ainda não confirmou.
+  dias_em_devolucao: number | null
   devolucao_chegou_em: string | null
   plataforma: string | null
   loja: string | null
@@ -1363,31 +66,22 @@ type AcompanhamentoRow = {
   rastreio: string | null
   localizacao: string | null
   localizacao_data: string | null
-  // Entrega original quando `localizacao` é o status de uma devolução viva.
   entrega_localizacao: string | null
   lancada: boolean
-  // Observação livre por PEDIDO: recado pra quem acompanha o pacote.
   observacao: string | null
-  // "Prazo p/ responder" (16/09): até quando o marketplace espera uma ação da
-  // loja neste caso, e qual (em PT). null = nada pendente da loja.
   prazo_resposta: string | null
   acao_resposta: string | null
-  // "Reembolso" (17/09): true = já saiu dinheiro do nosso (a plataforma
-  // devolveu ao cliente e desconta da loja); false = não saiu (caso vivo, ou a
-  // plataforma pagou do próprio bolso); null = não se sabe. Valor/data do que
-  // foi devolvido ao cliente; `detalhe` vai no balão.
   reembolso: boolean | null
   reembolso_valor: number | null
   reembolso_em: string | null
   reembolso_detalhe: string | null
-  // Painel (17/09): 'acompanhamento' = volta pacote; 'fraude' = só dinheiro
-  // (chegou vazio, reembolso sem devolução, mediação). `fila_manual` = alguém
-  // moveu na mão pelo botão da linha.
-  fila: Fila
+  fila: 'acompanhamento' | 'fraude'
   fila_manual: boolean
-  // Vídeo da expedição (17/09): pedido pela coluna Vídeo à equipe do SKU, que
-  // responde no Controle de Estoque (aba Pedidos travada até responder).
-  video_status: VideoStatus
+  prazo_texto: string | null
+  prazo_ate: string | null
+  amazon_cancelar: boolean
+  amazon_cancelar_texto: string | null
+  video_status: 'nao_solicitado' | 'pendente' | 'enviado' | 'sem_video'
   video_link: string | null
   video_solicitado_em: string | null
   video_solicitado_por: string | null
@@ -1395,2845 +89,1608 @@ type AcompanhamentoRow = {
   video_enviado_por: string | null
   video_sem_motivo: string | null
   video_refazer_motivo: string | null
-} & PrazoFields
-// Prazos (12/11/2026, services/devolucao_prazo_acompanhamento): 45 dias sem o pacote chegar
-// → lançar Não devolvido + Problemas + chamado (por enquanto só avisa); Amazon
-// 14 dias sem o cliente postar e sem reembolso → cancelar no Seller Central.
-type PrazoFields = {
-  prazo_estado: 'vencido' | 'vence_logo' | 'excecao' | null
-  prazo_ate: string | null
-  prazo_dias_restantes: number | null
-  prazo_origem: 'padrao' | 'observacao' | null
-  prazo_texto: string | null
-  amazon_cancelar: boolean
-  amazon_cancelar_texto: string | null
+  situacao_bling_id: string | null
+  situacao_bling_nome: string | null
+  etapa: Etapa
+  falta_lancar: boolean
+  prazo_em: string | null
+  prazo_tipo: string | null
+  prazo_estado: 'vencido' | 'urgente' | null
+  prazo_dica: string | null
+  lancamentos: Lancamento[]
+  condicao_tela: string | null
+  sku_lancado: string | null
+  lancamentos_a_mais: number
+  chamado: { id: string; numero: string | null; resolvido: boolean; resolvido_at: string | null } | null
+  tem_chamado_aberto: boolean
+  conta: { recebido: number; custo_produto: number; custo_manutencao: number; resultado: number } | null
+  pronto_resolver: string | null
+  resolvido: boolean
+  resolvido_at: string | null
+  resolvido_como: string | null
+  resolvido_por_nome: string | null
+  primeira_do_pedido: boolean
+  linhas_do_pedido: number
 }
-type Fila = 'acompanhamento' | 'fraude'
-type VideoStatus = 'nao_solicitado' | 'pendente' | 'enviado' | 'sem_video'
-type VideoOut = { pedido_bling: string } & Pick<
-  AcompanhamentoRow,
-  | 'video_status' | 'video_link' | 'video_solicitado_em' | 'video_solicitado_por'
-  | 'video_enviado_em' | 'video_enviado_por' | 'video_sem_motivo' | 'video_refazer_motivo'
->
-type AcompanhamentoPage = { items: AcompanhamentoRow[]; total_pedidos: number }
-type RastreioSaved = {
-  pedido_bling: string
-  rastreio: string | null
-  localizacao: string | null
-  localizacao_data: string | null
-  // Entrega original quando `localizacao` é o status de uma devolução viva.
-  entrega_localizacao: string | null
-  // "Em devolução desde" efetivo + dias, pra espelhar na linha após editar.
-  aguardando_devolucao_data: string | null
-  dias_em_devolucao: number | null
-  // true = data estimada (sinal da Logística / backfill) — mostra "≈".
-  aguardando_devolucao_data_estimada: boolean
-  // Dia em que o pacote de volta chegou aqui (coluna "Chegou em").
-  devolucao_chegou_em: string | null
-  observacao: string | null
-  prazo_resposta: string | null
-  acao_resposta: string | null
-  reembolso: boolean | null
-  reembolso_valor: number | null
-  reembolso_em: string | null
-  reembolso_detalhe: string | null
-  fila: Fila
-  fila_manual: boolean
-} & PrazoFields
+type Painel = {
+  items: Item[]
+  total_pedidos: number
+  como_terminou: string[]
+  pode_mover_painel: boolean
+  ve_custo: boolean
+  com_cerca_de_equipe: boolean
+}
+type ResumoDia = {
+  dia: string
+  abertas: number
+  novas: number
+  resolvidas: number
+  estoque_novo: number
+  estoque_usado: number
+  perdimento: number
+  manutencao: number
+  recebido: number | null
+  custos: number | null
+  resultado: number | null
+}
 
-type Tab ='acompanhamento' | 'fraude' | 'lancamentos'
-// Acompanhamento é a aba inicial (folha do Eduardo, 2026-09-02); Fraude
-// (Vinicius 17/09) é a mesma tabela, só com os pedidos em que NÃO volta
-// pacote (só dinheiro) — outra pessoa cuida; a aba Lançamentos guarda TODO o
-// conteúdo antigo da página, intacto.
-// 07/10 (Vinicius): `?tab=lancamentos&search=296512` — o atalho do histórico do
-// chamado abre a página já na aba e com o pedido buscado.
-const _route = useRoute()
-const _abaQuery = String(_route.query.tab || '')
-const tab = ref<Tab>(
-  _abaQuery === 'fraude' || _abaQuery === 'lancamentos' ? _abaQuery : 'acompanhamento',
-)
-// As abas Acompanhamento e Fraude compartilham a lista e o markup: o que muda
-// é o painel (`fila`) de cada linha.
-const abaDePedidos = computed(() => tab.value === 'acompanhamento' || tab.value === 'fraude')
-const filaAtiva = computed<Fila>(() => (tab.value === 'fraude' ? 'fraude' : 'acompanhamento'))
+// ── Estado ──────────────────────────────────────────────────────────────
+const items = ref<Item[]>([])
+const comoTerminou = ref<string[]>([])
+const podeMover = ref(false)
+const veCusto = ref(false)
+const comCerca = ref(false)
+const loading = ref(false)
+const error = ref<string | null>(null)
+const lidoEm = ref<Date | null>(null)
+const mostrar = ref<'abertas' | 'resolvidas' | 'todas'>('abertas')
 
-const acompRows = ref<AcompanhamentoRow[]>([])
-const acompLoading = ref(false)
-const acompError = ref<string | null>(null)
-const acompSearch = ref('')
-const acompPlataformaFilter = ref('all')
-const acompLojaFilter = ref('all')
-const acompParadoFilter = ref<'all' | '7' | '15' | '30'>('all')
-// Prazos (12/11/2026): 'prazo' = passou dos 45 dias ou vence em até 5 dias;
-// 'amazon' = Amazon sem postar há 14 dias (cancelar no Seller Central).
-const acompRegraFilter = ref<'all' | 'prazo' | 'amazon'>('all')
-// Só pedidos com prazo de resposta da loja vencendo em 24 h (ou vencido).
-const acompPrazoFilter = ref(false)
-// Status de devolução do pacote (10/09): 'chegou' = Devolvido ("Chegou em"
-// preenchido, a plataforma confirmou); 'pendente' = Não Devolvido.
-const acompChegadaFilter = ref<'all' | 'chegou' | 'pendente'>('all')
-// Chaves "pedido|campo" com PATCH em voo — trava o input e evita corrida.
-const acompSaving = ref<Set<string>>(new Set())
-// Rascunho das células com balão (Última localização / Observação, 19/09):
-// o texto digitado no balão fica aqui até fechar; `saveRastreio` compara com
-// o valor da linha e manda pro backend só o que mudou.
-const acompDraft = ref<Record<string, string>>({})
-function draftKey(row: AcompanhamentoRow, field: 'localizacao' | 'observacao'): string {
-  return `${row.pedido_bling}|${field}`
+const PLATAFORMAS = [
+  { key: 'todas', label: 'Todas' },
+  { key: 'ml', label: 'Mercado Livre' },
+  { key: 'shopee', label: 'Shopee' },
+  { key: 'tiktok', label: 'TikTok' },
+  { key: 'amazon', label: 'Amazon' },
+] as const
+type PlataformaKey = (typeof PLATAFORMAS)[number]['key'] | 'outras'
+const plataformaTab = ref<PlataformaKey>('todas')
+const contaFilter = ref('all')
+const etapaFilter = ref<'all' | Etapa>('all')
+const dataIni = ref('')
+const dataFim = ref('')
+const search = ref('')
+// Cartão / etiqueta / "Onde agir" clicado (um por vez; clicar de novo solta).
+const recorte = ref<string>('')
+
+const FILTROS_KEY = 'devolucoes-novo:filtros'
+
+function plataformaKey(p: string | null): PlataformaKey {
+  const s = (p || '').toLowerCase()
+  if (s.includes('mercado') || s === 'ml' || s.includes('meli')) return 'ml'
+  if (s.includes('shopee')) return 'shopee'
+  if (s.includes('tiktok') || s.includes('tik tok')) return 'tiktok'
+  if (s.includes('amazon')) return 'amazon'
+  return 'outras'
 }
-function draftOf(row: AcompanhamentoRow, field: 'localizacao' | 'observacao'): string {
-  return acompDraft.value[draftKey(row, field)] ?? row[field] ?? ''
+const PLATAFORMA_NOME: Record<PlataformaKey, string> = {
+  todas: '', ml: 'Mercado Livre', shopee: 'Shopee', tiktok: 'TikTok', amazon: 'Amazon', outras: '',
 }
-function setDraft(row: AcompanhamentoRow, field: 'localizacao' | 'observacao', value: string) {
-  acompDraft.value = { ...acompDraft.value, [draftKey(row, field)]: value }
+// A coluna é só a conta: "ML Jlas 2" → "Jlas 2" (a plataforma já é a aba).
+function contaDe(i: Item): string {
+  return (i.loja || '—').replace(/^(mercado\s*livre|ml|meli|shopee|tiktok(\s*shop)?|amazon)\s+/i, '').trim() || '—'
 }
-async function saveDraft(row: AcompanhamentoRow, field: 'localizacao' | 'observacao') {
-  const key = draftKey(row, field)
-  const value = acompDraft.value[key]
-  if (value === undefined) return
+
+let cargaAtual = 0
+async function load(silencioso = false) {
+  if (!silencioso) loading.value = true
+  // Só a carga MAIS NOVA vale: trocar "Mostrar" rápido (ou o relógio no meio)
+  // não pode deixar a lista de um modo com o seletor em outro.
+  const minha = ++cargaAtual
   try {
-    await saveRastreio(row, field, value)
-  } finally {
-    const { [key]: _gone, ...rest } = acompDraft.value
-    acompDraft.value = rest
-  }
-}
-
-async function loadAcompanhamento() {
-  acompLoading.value = true
-  acompError.value = null
-  try {
-    const res = await api<AcompanhamentoPage>('/api/devolutions/acompanhamento')
-    acompRows.value = res.items
+    const res = await api<Painel>(`/api/devolucoes-painel?mostrar=${mostrar.value}`)
+    if (minha !== cargaAtual) return
+    items.value = res.items
+    comoTerminou.value = res.como_terminou
+    podeMover.value = res.pode_mover_painel
+    veCusto.value = res.ve_custo
+    comCerca.value = res.com_cerca_de_equipe
+    lidoEm.value = new Date()
+    error.value = null
   } catch (e: any) {
-    acompError.value = apiError(e)
+    if (minha === cargaAtual) error.value = apiError(e)
   } finally {
-    acompLoading.value = false
+    if (minha === cargaAtual) loading.value = false
   }
 }
 
-// "Atualizar clientes": reaproveita o backfill de endereços da aba Lançamentos
-// (busca no Bling nome/cidade dos pedidos em devolução sem endereço) e
-// recarrega a tabela pra mostrar o resultado.
-async function backfillAcompanhamento() {
-  await backfillAddresses()
-  await loadAcompanhamento()
+function apiError(e: any): string {
+  const d = e?.data?.detail
+  if (d && typeof d === 'object') return d.message || d.code || 'erro'
+  if (typeof d === 'string') return d
+  return e?.message || 'erro'
 }
 
-const acompPlataformas = computed(() => {
-  const s = new Set<string>()
-  for (const r of acompRows.value) if (r.plataforma) s.add(r.plataforma)
-  return [...s].sort()
-})
-const acompLojas = computed(() => {
-  const s = new Set<string>()
-  for (const r of acompRows.value) if (r.loja) s.add(r.loja)
-  return [...s].sort()
-})
+// ── Datas e dinheiro ────────────────────────────────────────────────────
+function ddmm(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const dia = iso.length <= 10 ? iso : isoDateBrt(new Date(iso))
+  return `${dia.slice(8, 10)}/${dia.slice(5, 7)}`
+}
+function ddmmaaaa(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const dia = iso.length <= 10 ? iso : isoDateBrt(new Date(iso))
+  return `${dia.slice(8, 10)}/${dia.slice(5, 7)}/${dia.slice(0, 4)}`
+}
+const _HORA = new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' })
+function hhmm(iso: string): string {
+  return _HORA.format(new Date(iso))
+}
+function brl(n: number | null | undefined): string {
+  if (n == null) return '—'
+  return n.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+}
+function valor(n: number | null | undefined): string {
+  if (n == null || n === 0) return '—'
+  return n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+function sinal(n: number): string {
+  return `${n < 0 ? '−' : n > 0 ? '+' : ''} ${brl(Math.abs(n))}`.trim()
+}
+function diasEntre(aIso: string, bIso: string): number {
+  return Math.round((new Date(`${aIso}T12:00:00`).getTime() - new Date(`${bIso}T12:00:00`).getTime()) / 86400000)
+}
 
-// Linhas do painel aberto (Acompanhamento ou Fraude) — cards e filtros
-// contam só o que a pessoa daquele painel vê.
-const acompNaFila = computed(() => acompRows.value.filter((r) => r.fila === filaAtiva.value))
-const acompFilaTotais = computed(() => ({
-  acompanhamento: pedidosDe(acompRows.value.filter((r) => r.fila === 'acompanhamento')).size,
-  fraude: pedidosDe(acompRows.value.filter((r) => r.fila === 'fraude')).size,
-}))
+// Coluna Prazo: a data do prazo da etapa + a palavra dizendo do que é.
+function prazoTexto(i: Item): string {
+  if (!i.prazo_em) return i.prazo_tipo ? 'agora' : '—'
+  const dia = isoDateBrt(new Date(i.prazo_em))
+  const falta = diasEntre(dia, isoToday())
+  const comHora = i.prazo_tipo === 'disputa' || i.prazo_tipo === 'responder' || i.prazo_tipo === 'contestar'
+  if (falta < 0) return `venceu ${ddmm(dia)}`
+  if (falta === 0) return comHora ? `hoje ${hhmm(i.prazo_em)}` : (i.prazo_estado === 'vencido' ? 'venceu hoje' : 'hoje')
+  if (falta === 1) return comHora ? `amanhã ${hhmm(i.prazo_em)}` : 'amanhã'
+  return ddmm(dia)
+}
+function prazoCor(i: Item): string {
+  if (i.prazo_estado === 'vencido') return 'font-bold text-red-600 dark:text-red-400'
+  if (i.prazo_estado === 'urgente') return 'font-bold text-amber-700 dark:text-amber-400'
+  return ''
+}
 
-const acompFiltered = computed(() => {
-  const term = acompSearch.value.trim().toLowerCase()
-  const minDias = acompParadoFilter.value === 'all' ? null : Number(acompParadoFilter.value)
-  return acompNaFila.value.filter((r) => {
-    if (acompPlataformaFilter.value !== 'all' && r.plataforma !== acompPlataformaFilter.value) return false
-    if (acompLojaFilter.value !== 'all' && r.loja !== acompLojaFilter.value) return false
-    if (minDias != null && (r.dias_em_devolucao ?? -1) < minDias) return false
-    if (acompChegadaFilter.value === 'chegou' && !r.devolucao_chegou_em) return false
-    if (acompChegadaFilter.value === 'pendente' && r.devolucao_chegou_em) return false
-    if (acompPrazoFilter.value && !contestacaoUrgente(r.prazo_resposta)) return false
-    // (Na aba Fraude não há prazo de 45 dias: o filtro só vale no Acompanhamento.)
-    const regra = filaAtiva.value === 'acompanhamento' ? acompRegraFilter.value : 'all'
-    if (regra === 'prazo' && r.prazo_estado !== 'vencido' && r.prazo_estado !== 'vence_logo') return false
-    if (regra === 'amazon' && !r.amazon_cancelar) return false
-    if (term) {
-      const hay = [
-        r.pedido_bling, r.pedido_marketplace, r.cliente, r.sku, r.produto,
-        r.rastreio, r.localizacao, r.cidade, r.observacao,
-      ].filter(Boolean).join(' ').toLowerCase()
-      if (!hay.includes(term)) return false
-    }
-    return true
+const ETAPA_LABEL: Record<Etapa, string> = {
+  aguardando: 'Aguardando', chegou: 'Chegou', manutencao: 'Manutenção', fraude: 'Fraude',
+}
+const ETAPA_COR: Record<Etapa, string> = {
+  aguardando: 'bg-sky-100 text-sky-800 dark:bg-sky-950/50 dark:text-sky-300',
+  chegou: 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300',
+  manutencao: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950/50 dark:text-indigo-300',
+  fraude: 'bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300',
+}
+const ESTOQUE_TEXTO: Record<string, string> = {
+  ok: 'entrou no Bling', falhou: 'NÃO entrou no Bling', conferindo: 'conferindo no Bling',
+  sem_confirmacao: 'entrada não confirmada',
+}
+function estoquePendente(i: Item): boolean {
+  return i.lancamentos.some((l) => ['falhou', 'conferindo', 'sem_confirmacao'].includes(l.estoque_status || ''))
+}
+function temAbertura(i: Item): boolean {
+  return i.lancamentos.some((l) => !!(l.link_abertura || '').trim())
+}
+function ehFoto(a: { content_type: string | null }): boolean {
+  return (a.content_type || '').startsWith('image/')
+}
+function temFoto(i: Item): boolean {
+  return i.lancamentos.some((l) => l.anexos.some(ehFoto))
+}
+function urgente(i: Item): boolean {
+  return !!i.prazo_estado && ['disputa', 'responder', 'contestar'].includes(i.prazo_tipo || '')
+}
+
+// ── Filtros ─────────────────────────────────────────────────────────────
+const naAba = computed(() =>
+  plataformaTab.value === 'todas' ? items.value : items.value.filter((i) => plataformaKey(i.plataforma) === plataformaTab.value),
+)
+const contas = computed(() => [...new Set(naAba.value.map(contaDe))].sort((a, b) => a.localeCompare(b)))
+// Base dos cartões e do "Onde agir": aba + conta + período + busca.
+const base = computed(() => {
+  const q = search.value.trim().toLowerCase()
+  return naAba.value.filter((i) => {
+    if (contaFilter.value !== 'all' && contaDe(i) !== contaFilter.value) return false
+    const dia = i.data ? isoDateBrt(new Date(i.data)) : ''
+    if (dataIni.value && (!dia || dia < dataIni.value)) return false
+    if (dataFim.value && (!dia || dia > dataFim.value)) return false
+    if (!q) return true
+    return [
+      i.pedido_bling, i.pedido_marketplace, i.cliente, i.sku, i.produto, i.rastreio, i.localizacao,
+      i.cidade, i.observacao, i.loja, i.sku_lancado,
+    ].some((v) => (v || '').toLowerCase().includes(q))
   })
 })
 
-// Chips por PEDIDO (a tabela tem uma linha por item do pedido).
-function pedidosDe(rows: AcompanhamentoRow[]): Set<string> {
-  const s = new Set<string>()
-  for (const r of rows) if (r.pedido_bling) s.add(r.pedido_bling)
-  return s
+type Agir = { chave: string; titulo: string; detalhe: string; dot: string; grave: boolean; teste: (i: Item) => boolean }
+const AGIR: Agir[] = [
+  { chave: 'responder', titulo: 'Responder em 24 h', detalhe: 'prazo da plataforma vencendo', dot: 'bg-red-600', grave: true, teste: urgente },
+  { chave: 'estoque', titulo: 'Estoque não entrou no Bling', detalhe: 'conferir e tentar de novo no lançamento', dot: 'bg-red-600', grave: true, teste: estoquePendente },
+  { chave: 'falta_lancar', titulo: 'Chegou e falta lançar', detalhe: 'lançar condição e estoque', dot: 'bg-red-600', grave: false, teste: (i) => i.falta_lancar },
+  { chave: 'pronto', titulo: 'Pronto pra resolver', detalhe: 'estoque lançado ou reembolso ganho: falta o Resolver', dot: 'bg-blue-600', grave: false, teste: (i) => !!i.pronto_resolver },
+  { chave: 'prazo45', titulo: 'Passou de 45 dias', detalhe: 'pacote não chegou (ou vence em até 5 dias)', dot: 'bg-amber-500', grave: false, teste: (i) => i.prazo_tipo === 'pacote chegar' && !!i.prazo_estado },
+  { chave: 'amazon', titulo: 'Amazon: cancelar devolução', detalhe: 'cliente não postou em 14 dias', dot: 'bg-amber-500', grave: false, teste: (i) => i.amazon_cancelar },
+  { chave: 'tecnico', titulo: 'Manutenção vencendo', detalhe: 'prazo de 30 dias do técnico', dot: 'bg-amber-500', grave: false, teste: (i) => i.etapa === 'manutencao' && i.prazo_tipo === 'técnico' && (!!i.prazo_estado || (!!i.prazo_em && diasEntre(isoDateBrt(new Date(i.prazo_em)), isoToday()) <= 5)) },
+  { chave: 'sem_rastreio', titulo: 'Sem rastreio', detalhe: 'pacote de volta sem código', dot: 'bg-slate-400', grave: false, teste: (i) => i.etapa === 'aguardando' && !(i.rastreio || '').trim() },
+]
+function pedidos(rows: Item[]): number {
+  return new Set(rows.map((i) => i.pedido_bling)).size
 }
-const acompTotalPedidos = computed(() => pedidosDe(acompNaFila.value).size)
-const acompSemRastreio = computed(() => pedidosDe(acompNaFila.value.filter((r) => !r.rastreio)).size)
-const acompSemLocalizacao = computed(() => pedidosDe(acompNaFila.value.filter((r) => !r.localizacao)).size)
-const acompParados15 = computed(() => pedidosDe(acompNaFila.value.filter((r) => (r.dias_em_devolucao ?? 0) >= 15)).size)
-// Pedidos cujo prazo de resposta na plataforma vence em menos de 24 h (ou já venceu).
-const acompPrazoUrgente = computed(() => pedidosDe(acompNaFila.value.filter((r) => contestacaoUrgente(r.prazo_resposta))).size)
-// Prazos (12/11/2026): passou dos 45 dias / vence em até 5 dias; Amazon sem postar.
-const acompPrazo45Vencidos = computed(() => pedidosDe(acompNaFila.value.filter((r) => r.prazo_estado === 'vencido')).size)
-const acompPrazo45Logo = computed(() => pedidosDe(acompNaFila.value.filter((r) => r.prazo_estado === 'vence_logo')).size)
-const acompAmazonCancelar = computed(() => pedidosDe(acompNaFila.value.filter((r) => r.amazon_cancelar)).size)
-function filtrarRegra(regra: 'prazo' | 'amazon') {
-  acompRegraFilter.value = acompRegraFilter.value === regra ? 'all' : regra
+// Com o filtro Etapa aplicado: é o que a lista mostra antes de qualquer
+// recorte. Etiquetas e "Onde agir" contam daqui — o número do botão é o
+// número de linhas que o clique lista (quem cuida só da Fraude vê só a Fraude).
+const comEtapa = computed(() =>
+  etapaFilter.value === 'all' ? base.value : base.value.filter((i) => i.etapa === etapaFilter.value),
+)
+const agirItens = computed(() =>
+  AGIR.map((a) => ({ ...a, n: pedidos(comEtapa.value.filter((i) => !i.resolvido && a.teste(i))) })).filter((a) => a.n > 0),
+)
+// Os cartões de etapa SÃO o filtro Etapa (clicar troca o filtro, não soma) e
+// contam sempre o total da etapa, com ou sem filtro ligado.
+const cartoes = computed(() => {
+  const r = base.value
+  const titulo = mostrar.value === 'resolvidas' ? 'Resolvidas' : mostrar.value === 'todas' ? 'Abertas + resolvidas' : 'Em aberto'
+  return [
+    { k: 'all', label: titulo, n: pedidos(r), cor: '', sub: 'pedidos' },
+    { k: 'aguardando', label: 'Aguardando', n: pedidos(r.filter((i) => i.etapa === 'aguardando')), cor: 'text-sky-700 dark:text-sky-400', sub: 'pacote a caminho' },
+    { k: 'falta_lancar', label: 'Chegou (falta lançar)', n: pedidos(r.filter((i) => !i.resolvido && i.falta_lancar)), cor: 'text-amber-600 dark:text-amber-400', sub: 'lançar condição' },
+    { k: 'manutencao', label: 'Manutenção', n: pedidos(r.filter((i) => i.etapa === 'manutencao')), cor: 'text-indigo-700 dark:text-indigo-400', sub: 'com o técnico' },
+    { k: 'fraude', label: 'Fraude', n: pedidos(r.filter((i) => i.etapa === 'fraude')), cor: 'text-red-600 dark:text-red-400', sub: 'não volta pacote' },
+  ]
+})
+function cartaoLigado(k: string): boolean {
+  if (k === 'falta_lancar') return recorte.value === 'falta_lancar'
+  if (k === 'all') return false
+  return etapaFilter.value === k && !recorte.value
 }
+function clicarCartao(k: string) {
+  if (k === 'falta_lancar') {
+    etapaFilter.value = 'all'
+    recorte.value = recorte.value === 'falta_lancar' ? '' : 'falta_lancar'
+    return
+  }
+  recorte.value = ''
+  etapaFilter.value = k === 'all' || etapaFilter.value === k ? 'all' : (k as Etapa)
+}
+const SITUACAO_DOT: Record<string, string> = {
+  'aguardando devolução': 'bg-amber-500', manutenção: 'bg-indigo-600', problemas: 'bg-red-600',
+  resolvido: 'bg-emerald-600', extraviado: 'bg-red-600', perdimento: 'bg-slate-500',
+}
+const statusPills = computed(() => {
+  const m = new Map<string, Set<string | null>>()
+  for (const i of comEtapa.value) {
+    const nome = i.situacao_bling_nome || 'sem situação'
+    if (!m.has(nome)) m.set(nome, new Set())
+    m.get(nome)!.add(i.pedido_bling)
+  }
+  return [...m.entries()]
+    .map(([nome, s]) => ({ nome, n: s.size, dot: SITUACAO_DOT[nome.toLowerCase()] || 'bg-slate-400' }))
+    .sort((a, b) => b.n - a.n)
+})
 
-// Data pura (YYYY-MM-DD) SEM passar por new Date() — evita o clássico
-// "-1 dia" do fuso (Date interpreta como meia-noite UTC).
-function fmtDateOnly(v: string | null): string {
-  if (!v) return '—'
-  const [y, m, d] = v.split('-')
-  if (!y || !m || !d) return v
-  return `${d}/${m}/${y.slice(2)}`
-}
-// Texto curto do prazo de 45 dias embaixo dos dias (o balão tem a frase toda).
-function prazoChip(row: AcompanhamentoRow): { texto: string; cls: string } | null {
-  if (row.prazo_estado === 'vencido') return { texto: 'passou do prazo', cls: 'text-red-600 dark:text-red-400' }
-  if (row.prazo_estado === 'vence_logo') {
-    const n = row.prazo_dias_restantes ?? 0
-    return { texto: n === 1 ? 'vence amanhã' : `vence em ${n}d`, cls: 'text-amber-700 dark:text-amber-400' }
+const filtrados = computed(() => {
+  let rows = comEtapa.value
+  const r = recorte.value
+  if (r === 'falta_lancar') rows = rows.filter((i) => !i.resolvido && i.falta_lancar)
+  else if (r.startsWith('bling:')) rows = rows.filter((i) => (i.situacao_bling_nome || 'sem situação') === r.slice(6))
+  else if (r.startsWith('agir:')) {
+    const a = AGIR.find((x) => x.chave === r.slice(5))
+    if (a) rows = rows.filter((i) => !i.resolvido && a.teste(i))
   }
-  if (row.prazo_estado === 'excecao') return { texto: 'fora da regra', cls: 'text-muted-foreground' }
-  if (row.prazo_origem === 'observacao' && row.prazo_ate) {
-    return { texto: `prazo ${fmtDateOnly(row.prazo_ate).slice(0, 5)} (obs.)`, cls: 'text-muted-foreground' }
+  return ordenar(rows)
+})
+// Ordem da lista: primeiro quem tem prazo da plataforma estourando, depois os
+// pedidos mais recentes; os produtos do mesmo pedido ficam juntos.
+function ordenar(rows: Item[]): Item[] {
+  const chave = new Map<string, [number, string]>()
+  for (const i of rows) {
+    const p = i.pedido_bling || ''
+    const u = !i.resolvido && urgente(i) ? 0 : 1
+    const d = i.data || ''
+    const atual = chave.get(p)
+    chave.set(p, atual ? [Math.min(atual[0], u), atual[1] > d ? atual[1] : d] : [u, d])
   }
-  return null
+  return [...rows].sort((a, b) => {
+    const ka = chave.get(a.pedido_bling || '')!
+    const kb = chave.get(b.pedido_bling || '')!
+    if (ka[0] !== kb[0]) return ka[0] - kb[0]
+    if (ka[1] !== kb[1]) return ka[1] < kb[1] ? 1 : -1
+    if (a.pedido_bling !== b.pedido_bling) return (a.pedido_bling || '') < (b.pedido_bling || '') ? 1 : -1
+    return (a.sku || '').localeCompare(b.sku || '')
+  })
 }
-function diasBadgeClass(dias: number | null): string {
-  if (dias == null) return 'bg-muted text-muted-foreground'
-  if (dias >= 15) return 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300'
-  if (dias >= 7) return 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
-  return 'bg-muted text-muted-foreground'
+const filtrosAtivos = computed(
+  () => contaFilter.value !== 'all' || etapaFilter.value !== 'all' || !!dataIni.value || !!dataFim.value || !!search.value.trim() || !!recorte.value,
+)
+function limparFiltros() {
+  contaFilter.value = 'all'
+  etapaFilter.value = 'all'
+  dataIni.value = ''
+  dataFim.value = ''
+  search.value = ''
+  recorte.value = ''
 }
-
-function isSavingRastreio(pedido: string | null, field: string): boolean {
-  return !!pedido && acompSaving.value.has(`${pedido}|${field}`)
-}
-
-// Salva no blur (Enter também: só tira o foco do campo). Campo por PEDIDO:
-// espelha a resposta do backend em todas as linhas do mesmo pedido. Só chama
-// a API se o valor realmente mudou; string vazia limpa o campo.
-async function saveRastreio(
-  row: AcompanhamentoRow,
-  field: 'rastreio' | 'localizacao' | 'em_devolucao_desde' | 'observacao',
-  raw: string,
-) {
-  if (!canEdit.value || !row.pedido_bling) return
-  const value = raw.trim()
-  // "Em devolução desde" na mão (03/09, caso 287144): data vale mais que o
-  // automático; vazio = null = volta ao automático.
-  const atual = field === 'em_devolucao_desde' ? (row.aguardando_devolucao_data ?? '') : (row[field] ?? '')
-  if (atual === value) return
-  const key = `${row.pedido_bling}|${field}`
-  if (acompSaving.value.has(key)) return
-  acompSaving.value = new Set([...acompSaving.value, key])
-  try {
-    const body = field === 'em_devolucao_desde' ? { em_devolucao_desde: value || null } : { [field]: value }
-    const res = await api<RastreioSaved>(
-      `/api/devolutions/acompanhamento/${encodeURIComponent(row.pedido_bling)}`,
-      { method: 'PATCH', body },
-    )
-    for (const r of acompRows.value) {
-      if (r.pedido_bling === res.pedido_bling) {
-        r.rastreio = res.rastreio
-        r.localizacao = res.localizacao
-        r.localizacao_data = res.localizacao_data
-        r.entrega_localizacao = res.entrega_localizacao
-        r.aguardando_devolucao_data = res.aguardando_devolucao_data
-        r.dias_em_devolucao = res.dias_em_devolucao
-        r.aguardando_devolucao_data_estimada = res.aguardando_devolucao_data_estimada
-        r.devolucao_chegou_em = res.devolucao_chegou_em
-        r.observacao = res.observacao
-        r.prazo_resposta = res.prazo_resposta
-        r.acao_resposta = res.acao_resposta
-        r.reembolso = res.reembolso
-        r.reembolso_valor = res.reembolso_valor
-        r.reembolso_em = res.reembolso_em
-        r.reembolso_detalhe = res.reembolso_detalhe
-        r.fila = res.fila
-        r.fila_manual = res.fila_manual
-        // Prazo de 45 dias: a observação nova pode segurar o pedido na hora.
-        // (O aviso da Amazon não depende da observação: fica o do GET.)
-        r.prazo_estado = res.prazo_estado
-        r.prazo_ate = res.prazo_ate
-        r.prazo_dias_restantes = res.prazo_dias_restantes
-        r.prazo_origem = res.prazo_origem
-        r.prazo_texto = res.prazo_texto
-      }
-    }
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: 'Erro ao salvar rastreio', lines: [apiError(e)] })
-  } finally {
-    const next = new Set(acompSaving.value)
-    next.delete(key)
-    acompSaving.value = next
-  }
-}
-
-// Mover o pedido pro outro painel (17/09): fixa a escolha no servidor (a regra
-// automática não mexe mais) e a linha some desta aba na hora — todas as
-// linhas do mesmo pedido vão juntas. 'regra' (10/11) solta o pedido: volta pro
-// painel que a plataforma indica. Só admin ou `devolucoes_mover` (Cairo, 10/11:
-// a equipe ficava passando o mesmo pedido de um painel pro outro).
-async function moverFila(row: AcompanhamentoRow, destino: Fila | 'regra') {
-  if (!canMover.value || !row.pedido_bling) return
-  if (destino !== 'regra' && row.fila === destino) return
-  if (destino === 'regra' && !row.fila_manual) return
-  const key = `${row.pedido_bling}|fila`
-  if (acompSaving.value.has(key)) return
-  acompSaving.value = new Set([...acompSaving.value, key])
-  try {
-    const res = await api<RastreioSaved>(
-      `/api/devolutions/acompanhamento/${encodeURIComponent(row.pedido_bling)}`,
-      { method: 'PATCH', body: { fila: destino } },
-    )
-    for (const r of acompRows.value) {
-      if (r.pedido_bling === res.pedido_bling) {
-        r.fila = res.fila
-        r.fila_manual = res.fila_manual
-      }
-    }
-    pushToast({
-      kind: 'success',
-      title: destino === 'regra'
-        ? `Solto: segue a plataforma (${res.fila === 'fraude' ? 'Fraude' : 'Acompanhamento'})`
-        : destino === 'fraude' ? 'Movido para Fraude' : 'Movido para Acompanhamento',
-      lines: [`Pedido ${row.pedido_bling}`],
-    })
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: 'Erro ao mover o pedido', lines: [apiError(e)] })
-  } finally {
-    const next = new Set(acompSaving.value)
-    next.delete(key)
-    acompSaving.value = next
-  }
-}
-
-// ── Vídeo da expedição (Vinicius 17/09) ──────────────────────────────
-// "solicitar" cria a pendência: a equipe do SKU (mesma cerca de tag da aba
-// Pedidos) fica travada na aba Pedidos do Controle de Estoque até colar o
-// link — que volta pra esta coluna. Apagar o link pede um motivo curto e
-// devolve a pendência pra equipe refazer; "cancelar" desfaz um pedido feito
-// por engano. Grão = pedido: a resposta espelha nas linhas irmãs.
-const videoApagando = ref<string | null>(null)
-const videoMotivo = ref('')
-function aplicarVideo(res: VideoOut) {
-  for (const r of acompRows.value) {
-    if (r.pedido_bling === res.pedido_bling) {
-      r.video_status = res.video_status
-      r.video_link = res.video_link
-      r.video_solicitado_em = res.video_solicitado_em
-      r.video_solicitado_por = res.video_solicitado_por
-      r.video_enviado_em = res.video_enviado_em
-      r.video_enviado_por = res.video_enviado_por
-      r.video_sem_motivo = res.video_sem_motivo
-      r.video_refazer_motivo = res.video_refazer_motivo
-    }
-  }
-}
-async function solicitarVideo(row: AcompanhamentoRow, motivo?: string) {
-  if (!canEdit.value || !row.pedido_bling) return
-  const key = `${row.pedido_bling}|video`
-  if (acompSaving.value.has(key)) return
-  acompSaving.value = new Set([...acompSaving.value, key])
-  try {
-    const res = await api<VideoOut>(
-      `/api/devolutions/acompanhamento/${encodeURIComponent(row.pedido_bling)}/video/solicitar`,
-      { method: 'POST', body: { motivo: motivo?.trim() || null } },
-    )
-    aplicarVideo(res)
-    videoApagando.value = null
-    videoMotivo.value = ''
-    pushToast({
-      kind: 'success',
-      title: motivo ? 'Link apagado — equipe vai refazer' : 'Vídeo solicitado',
-      lines: [`Pedido ${row.pedido_bling}: a equipe do SKU vê no Controle de Estoque`],
-    })
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: 'Erro ao solicitar o vídeo', lines: [apiError(e)] })
-  } finally {
-    const next = new Set(acompSaving.value)
-    next.delete(key)
-    acompSaving.value = next
-  }
-}
-async function cancelarVideo(row: AcompanhamentoRow) {
-  if (!canEdit.value || !row.pedido_bling) return
-  const key = `${row.pedido_bling}|video`
-  if (acompSaving.value.has(key)) return
-  acompSaving.value = new Set([...acompSaving.value, key])
-  try {
-    const res = await api<VideoOut>(
-      `/api/devolutions/acompanhamento/${encodeURIComponent(row.pedido_bling)}/video`,
-      { method: 'DELETE' },
-    )
-    aplicarVideo(res)
-    pushToast({ kind: 'success', title: 'Solicitação de vídeo cancelada', lines: [`Pedido ${row.pedido_bling}`] })
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: 'Erro ao cancelar a solicitação', lines: [apiError(e)] })
-  } finally {
-    const next = new Set(acompSaving.value)
-    next.delete(key)
-    acompSaving.value = next
-  }
-}
-function abrirApagarVideo(row: AcompanhamentoRow) {
-  videoApagando.value = row.pedido_bling
-  videoMotivo.value = ''
-}
-// Link já enviado por pedido — entra pronto no "Link envio" ao lançar.
-const videoLinkPorPedido = computed(() => {
-  const m = new Map<string, string>()
-  for (const r of acompRows.value) {
-    if (r.pedido_bling && r.video_link) m.set(r.pedido_bling, r.video_link)
-  }
+// Conta e aviso de estoque são do PEDIDO: aparecem na 1ª linha dele que está
+// na tela (a busca por SKU pode esconder a 1ª linha de verdade).
+const contaPorPedido = computed(() => {
+  const m = new Map<string, NonNullable<Item['conta']>>()
+  for (const i of [...avulsas.value, ...items.value]) if (i.conta && i.pedido_bling) m.set(i.pedido_bling, i.conta)
   return m
 })
-
-// "Lançar": pula pra aba Lançamentos com o pedido já buscado — mesmo fluxo
-// do botão "adicionar pedido".
-function goLancar(row: AcompanhamentoRow) {
-  if (!row.pedido_bling) return
-  tab.value = 'lancamentos'
-  openAdd()
-  lookupPedido.value = row.pedido_bling
-  void lookupOrder()
+function primeiraVisivel(n: number): boolean {
+  return n === 0 || filtrados.value[n - 1]?.pedido_bling !== filtrados.value[n]?.pedido_bling
+}
+function contaDaLinha(i: Item, n: number): Item['conta'] {
+  return primeiraVisivel(n) && i.pedido_bling ? contaPorPedido.value.get(i.pedido_bling) || null : null
+}
+// Coluna Condição: uma linha por PEÇA lançada. O pedido "celular + brinde"
+// vira duas peças no lançamento (o brinde volta Novo, o celular vai pro
+// técnico): mostrar só a primeira com "+1" não dizia o que era de quem.
+function partesDoSku(sku: string | null): string[] {
+  return (sku || '').toLowerCase().split('+').map((x) => x.trim()).filter(Boolean)
+}
+function lancamentosDaLinha(i: Item, n: number): Lancamento[] {
+  if (i.linhas_do_pedido <= 1) return i.lancamentos
+  const meus = i.lancamentos.filter((l) => partesDoSku(i.sku).includes((l.sku || '').toLowerCase()))
+  if (meus.length || !primeiraVisivel(n)) return meus
+  // Peça que não casa com produto nenhum do pedido (troca de SKU): na 1ª linha.
+  const todos = new Set(items.value.filter((x) => x.pedido_bling === i.pedido_bling).flatMap((x) => partesDoSku(x.sku)))
+  return i.lancamentos.filter((l) => !todos.has((l.sku || '').toLowerCase()))
+}
+function rotuloLanc(l: Lancamento): string {
+  return l.manutencao_pendente ? 'no técnico' : (l.condicao_tela || 'sem condição')
+}
+// Etiqueta da Condição na lista (opção C, escolhida pelo Vinicius em 16/11): a
+// cor diz o destino da peça. Verde só no que terminou bem (Novo no estoque);
+// com a entrada de estoque pendurada a etiqueta fica cinza — "verde parece que
+// resolveu".
+const COR_LANC: Record<string, string> = {
+  Novo: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300',
+  Usado: 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300',
+  Perdimento: 'bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300',
+  tecnico: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950/50 dark:text-indigo-300',
+  outro: 'bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300',
+  pendente: 'bg-muted text-muted-foreground',
+}
+function etiquetaLanc(l: Lancamento): { texto: string; cor: string } {
+  if (l.manutencao_pendente) return { texto: 'Técnico', cor: COR_LANC.tecnico }
+  const texto = l.condicao_tela || 'sem condição'
+  if (!l.condicao_tela || ['falhou', 'conferindo', 'sem_confirmacao'].includes(l.estoque_status || '')) return { texto, cor: COR_LANC.pendente }
+  return { texto, cor: COR_LANC[texto] || COR_LANC.outro }
+}
+function tituloLanc(l: Lancamento): string {
+  const estoque = l.sku_lancado ? ` · entrou no estoque em ${l.sku_lancado}` : ''
+  return `${l.sku || ''}: ${rotuloLanc(l)}${estoque}${l.motivo ? ` · ${l.motivo}` : ''}`
+}
+// "Aguardando Devolução" não cabe numa linha: 1ª palavra em cima, o resto embaixo.
+function duasLinhas(nome: string): [string, string] {
+  const k = nome.indexOf(' ')
+  return k < 0 ? [nome, ''] : [nome.slice(0, k), nome.slice(k + 1)]
+}
+function alternarRecorte(k: string) {
+  recorte.value = recorte.value === k ? '' : k
+}
+function contagemDaAba(k: PlataformaKey): number {
+  const rows = k === 'todas' ? items.value : items.value.filter((i) => plataformaKey(i.plataforma) === k)
+  return pedidos(rows)
 }
 
-// Busca vinda da URL (ver `_abaQuery`) entra antes da 1ª carga — na caixa de busca
-// da aba aberta.
-const _buscaQuery = _route.query.search
-if (typeof _buscaQuery === 'string' && _buscaQuery.trim()) {
-  if (tab.value === 'lancamentos') search.value = _buscaQuery.trim()
-  else acompSearch.value = _buscaQuery.trim()
-}
-
-// As duas abas carregam juntas (paralelo): trocar de aba é instantâneo.
-await Promise.all([load(), loadAcompanhamento()])
-
-let searchTimer: ReturnType<typeof setTimeout> | null = null
-watch(search, () => {
-  if (searchTimer) clearTimeout(searchTimer)
-  searchTimer = setTimeout(() => {
-    page.value = 1
-    load()
-  }, 300)
+// O filtro de cada pessoa fica guardado no navegador dela (a pessoa da Fraude
+// abre já na etapa Fraude; a do Acompanhamento, na dela).
+watch([plataformaTab, contaFilter, etapaFilter], () => {
+  try {
+    localStorage.setItem(FILTROS_KEY, JSON.stringify({ p: plataformaTab.value, c: contaFilter.value, e: etapaFilter.value }))
+  } catch { /* navegador sem armazenamento */ }
 })
-watch([reembolsoFilter, tagFilter, tagDestinoFilter, condicaoFilter, dataInicioFilter, dataFimFilter, manutencaoFilter, prazoDiasFilter], () => { page.value = 1; load() })
-watch(page, () => load())
+watch(plataformaTab, () => {
+  // Com a lista ainda vazia (abertura da página) não dá pra dizer que a conta
+  // salva "não existe nesta aba" — a checagem roda depois da 1ª carga.
+  if (!items.value.length) return
+  if (contaFilter.value !== 'all' && !contas.value.includes(contaFilter.value)) contaFilter.value = 'all'
+})
+watch(mostrar, () => { recorte.value = ''; void load() })
 
-function openAdd() {
-  addOpen.value = true
-  lookupPedido.value = ''
-  lookupResults.value = []
-  lookupError.value = null
-  drafts.value = []
-  addedThisSession.value = []
-}
-function closeAdd() {
-  addOpen.value = false
-  lookupPedido.value = ''
-  lookupResults.value = []
-  lookupError.value = null
-  drafts.value = []
-  addedThisSession.value = []
-}
-
-function openCorrecao() {
-  correcaoSku.value = ''
-  correcaoCondicao.value = 'Novo'
-  correcaoQtd.value = 1
-  correcaoProduto.value = ''
-  correcaoCusto.value = ''
-  correcaoObs.value = ''
-  correcaoError.value = null
-  correcaoResults.value = []
-  correcaoShowResults.value = false
-  correcaoOpen.value = true
-}
-function closeCorrecao() {
-  correcaoOpen.value = false
+// ── Excel (csv que o Excel abre) ────────────────────────────────────────
+function exportar() {
+  const cab = [
+    'Data', 'Bling', 'Nº na plataforma', 'Plataforma', 'Conta', 'SKU', 'Produto', 'Etapa', 'Dias', 'Prazo',
+    'Prazo de', 'Reemb. cliente', 'Valor reemb. cliente', 'Localização', 'Rastreio', 'Vídeo envio',
+    'Vídeo abertura', 'Foto', 'Condição', 'SKU lançado', 'Chamado', 'Status Bling', 'Observação',
+  ]
+  const linhas = filtrados.value.map((i) => [
+    ddmmaaaa(i.data), i.pedido_bling, i.pedido_marketplace, PLATAFORMA_NOME[plataformaKey(i.plataforma)] || i.plataforma,
+    contaDe(i), i.sku, i.produto, ETAPA_LABEL[i.etapa], i.dias_em_devolucao ?? '', i.prazo_em ? ddmmaaaa(i.prazo_em) : '',
+    i.prazo_tipo, i.reembolso == null ? '' : i.reembolso ? 'Sim' : 'Não',
+    i.reembolso_valor != null ? i.reembolso_valor.toFixed(2).replace('.', ',') : '', i.localizacao, i.rastreio,
+    i.video_link ? 'Sim' : i.video_status === 'pendente' ? 'pedido' : '', temAbertura(i) ? 'Sim' : '',
+    temFoto(i) ? 'Sim' : '', i.lancamentos.map(rotuloLanc).join(' / '), i.lancamentos.map((l) => l.sku_lancado || l.sku || '').join(' / '),
+    i.chamado ? (i.tem_chamado_aberto ? 'Aberto' : 'Concluído') : '', i.situacao_bling_nome, i.observacao,
+  ])
+  const csv = [cab, ...linhas]
+    .map((l) => l.map((c) => `"${String(c ?? '').replace(/"/g, '""')}"`).join(';'))
+    .join('\r\n')
+  const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' })
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = `devolucoes-${isoToday()}.csv`
+  a.click()
+  URL.revokeObjectURL(a.href)
 }
 
-// Busca incremental de produtos (debounced) — mesma fonte do modal de troca.
-function onCorrecaoSkuInput() {
-  correcaoShowResults.value = true
-  if (correcaoSearchTimer) clearTimeout(correcaoSearchTimer)
-  correcaoSearchTimer = setTimeout(runCorrecaoSearch, 300)
+// ── Janela ──────────────────────────────────────────────────────────────
+const janela = ref<{ pedido: string; sku: string | null } | null>(null)
+// Pedido que não está na lista carregada (resolvido, antigo, ou que ainda não
+// caiu em Aguardando Devolução): as linhas dele vêm da busca por pedido e
+// ficam aqui só enquanto a janela dele está aberta.
+const avulsas = ref<Item[]>([])
+const linhasDaJanela = computed(() => {
+  if (!janela.value) return []
+  const daLista = items.value.filter((i) => i.pedido_bling === janela.value!.pedido)
+  return daLista.length ? daLista : avulsas.value.filter((i) => i.pedido_bling === janela.value!.pedido)
+})
+// Linha (produto) em foco e a 1ª do pedido (que carrega chamado e conta).
+const foco = computed<Item | null>(
+  () => linhasDaJanela.value.find((i) => i.sku === janela.value?.sku) || linhasDaJanela.value[0] || null,
+)
+const pedidoItem = computed<Item | null>(() => linhasDaJanela.value[0] || null)
+const contaDaJanela = computed(() => (janela.value ? contaPorPedido.value.get(janela.value.pedido) || null : null))
+const anexosDoPedido = computed(() => (pedidoItem.value?.lancamentos || []).flatMap((l) => l.anexos))
+const fotosDoPedido = computed(() => anexosDoPedido.value.filter(ehFoto))
+const outrosAnexos = computed(() => anexosDoPedido.value.filter((a) => !ehFoto(a)))
+// ── Provas: links e fotos valem pro PEDIDO (16/11/2026, Vinicius: "fica
+// duplicado… deixa só em provas; daí no chamado ele leva vídeos e fotos") ──
+// No banco o link e a foto moram no lançamento; a janela cola uma vez só e o
+// bloco do lançamento grava em todos. Sem lançamento ainda, o link colado e as
+// fotos escolhidas ficam esperando aqui e entram junto com o 1º lançamento.
+const linkPendente = reactive({ envio: '', abertura: '' })
+const linkDigitado = reactive({ envio: '', abertura: '' })
+const editandoLink = reactive({ envio: false, abertura: false })
+const gravandoLink = ref(false)
+const fotosPendentes = ref<File[]>([])
+const enviandoFotos = ref(false)
+// Link do envio colado à mão: o do lançamento, ou o que espera o 1º lançamento.
+const envioColado = computed(
+  () => (pedidoItem.value?.lancamentos || []).map((l) => (l.link_envio || '').trim()).find(Boolean) || linkPendente.envio || null,
+)
+// O que vai pro lançamento: o colado; senão o vídeo respondido pela equipe.
+const envioDaJanela = computed(() => envioColado.value || pedidoItem.value?.video_link || '')
+const aberturaDaJanela = computed(() => aberturaDoPedido.value || linkPendente.abertura || '')
+function limparProvas() {
+  linkPendente.envio = linkPendente.abertura = ''
+  linkDigitado.envio = linkDigitado.abertura = ''
+  editandoLink.envio = editandoLink.abertura = false
+  fotosPendentes.value = []
 }
-async function runCorrecaoSearch() {
-  const term = correcaoSku.value.trim()
-  if (!term) { correcaoResults.value = []; return }
-  correcaoSearching.value = true
+function editarLink(qual: 'envio' | 'abertura') {
+  linkDigitado[qual] = (qual === 'envio' ? envioColado.value : aberturaDaJanela.value) || ''
+  editandoLink[qual] = true
+}
+function cancelarLink(qual: 'envio' | 'abertura') {
+  linkDigitado[qual] = ''
+  editandoLink[qual] = false
+}
+async function salvarLinkProvas(qual: 'envio' | 'abertura') {
+  if (gravandoLink.value) return
+  const v = linkDigitado[qual].trim()
+  const atual = ((qual === 'envio' ? envioColado.value : aberturaDaJanela.value) || '').trim()
+  // Campo vazio sem estar trocando um link que existe: a pessoa só passou pelo campo.
+  if (v === atual || (!v && !editandoLink[qual])) {
+    if (v === atual) cancelarLink(qual)
+    return
+  }
+  gravandoLink.value = true
   try {
-    correcaoResults.value = await api<ProductHit[]>(`/api/devolutions/product-search?q=${encodeURIComponent(term)}`)
-  } catch {
-    correcaoResults.value = []
+    const erro = lancarRef.value
+      ? await lancarRef.value.gravarLink(qual === 'envio' ? 'link_envio' : 'link_abertura', v)
+      : 'A janela ainda está carregando o lançamento. Tente de novo.'
+    if (erro) {
+      toasts.push({ kind: 'error', title: 'Link não salvo', lines: [erro] }, 9000)
+      return
+    }
+    // Sem lançamento, o link espera aqui; com lançamento, já foi gravado neles.
+    linkPendente[qual] = pedidoItem.value?.lancamentos.length ? '' : v
+    cancelarLink(qual)
+    toasts.push({ kind: 'success', title: v ? 'Link salvo' : 'Link apagado', lines: pedidoItem.value?.lancamentos.length ? [] : ['Entra no lançamento quando você lançar.'] }, 3000)
   } finally {
-    correcaoSearching.value = false
+    gravandoLink.value = false
   }
 }
-// Selecionar um produto preenche SKU + nome + custo (igual ao fluxo do pedido).
-function pickCorrecaoProduct(r: ProductHit) {
-  correcaoSku.value = r.sku
-  correcaoProduto.value = r.name
-  correcaoCusto.value = r.cost_price != null ? String(r.cost_price) : ''
-  correcaoResults.value = []
-  correcaoShowResults.value = false
-}
-function onCorrecaoSkuBlur() {
-  // Atraso pra permitir que o clique numa opção registre antes de esconder.
-  window.setTimeout(() => { correcaoShowResults.value = false }, 150)
-}
-
-// Correção de estoque: abre os MESMOS modais de destino da página
-// (bin existente / criação de z000N.<tag>) e lança a entrada no Bling via API,
-// sem criar registro de devolução nem mexer na situação de pedido.
-async function submitCorrecao() {
-  if (!canEdit.value || correcaoSubmitting.value) return
-  const sku = correcaoSku.value.trim()
-  if (!sku) { correcaoError.value = 'Informe o SKU'; return }
-  const qtd = Math.max(1, Math.floor(Number(correcaoQtd.value) || 1))
-  correcaoError.value = null
-  // Resolve o destino pelos modais (Novo/Usado seguem a lógica já existente).
-  // forcarDestinoMala=true: na correção a mala Novo NÃO volta direto no avulso —
-  // abre o modal pra o operador escolher o bin regional (.mala/.pi/.sp).
-  const extra = await resolveStockModals(correcaoCondicao.value, sku, true, true)
-  if (extra === null) return // modal cancelado → aborta sem chamar a API
-  correcaoSubmitting.value = true
+async function escolherFotosProvas(ev: Event) {
+  const input = ev.target as HTMLInputElement
+  const files = Array.from(input.files || [])
+  input.value = ''
+  if (!files.length || !canEdit.value) return
+  enviandoFotos.value = true
   try {
-    const sr = await api<BlingStockResult>('/api/devolutions/stock-correction', {
-      method: 'POST',
-      body: {
-        sku,
-        condicao_produto: correcaoCondicao.value,
-        quantidade: qtd,
-        produtos: correcaoProduto.value.trim() || null,
-        custo_produto: numberOrNull(correcaoCusto.value),
-        observacao: correcaoObs.value.trim() || null,
-        troca_sku: extra.troca_sku,
-        troca_condicao: extra.troca_condicao,
-        estoque_suffix: extra.estoque_suffix,
-        estoque_destino_sku: extra.estoque_destino_sku,
-        estoque_nova_tag: extra.estoque_nova_tag,
-        manutencao_destino: extra.manutencao_destino,
-      },
-    })
-    showStockToast(sr)
-    if (sr.ok) closeCorrecao()
-    else correcaoError.value = sr.message || 'falha ao atualizar estoque'
+    // Com lançamento, sobe na hora; sem, espera o 1º lançamento.
+    const subiu = lancarRef.value ? await lancarRef.value.anexarFotos(files) : false
+    if (!subiu) fotosPendentes.value = [...fotosPendentes.value, ...files]
+  } finally {
+    enviandoFotos.value = false
+  }
+}
+function removerFotoProvas(id: string) {
+  if (!window.confirm('Remover este arquivo das provas do pedido?')) return
+  void lancarRef.value?.removerFoto(id)
+}
+// Link ou foto em Provas esperando um lançamento que ainda não foi feito.
+function provasEsperando(): boolean {
+  return !!(linkPendente.envio || linkPendente.abertura || fotosPendentes.value.length)
+}
+const aberturaDoPedido = computed(
+  () => (pedidoItem.value?.lancamentos || []).map((l) => (l.link_abertura || '').trim()).find(Boolean) || null,
+)
+// O link que esperava em Provas já está gravado num lançamento: sai da espera.
+watch(
+  () => [aberturaDoPedido.value, (pedidoItem.value?.lancamentos || []).some((l) => (l.link_envio || '').trim())] as const,
+  ([abertura, envio]) => {
+    if (abertura) linkPendente.abertura = ''
+    if (envio) linkPendente.envio = ''
+  },
+)
+const rascunho = reactive({ observacao: '', rastreio: '', localizacao: '', desde: '' })
+// O que estava nos campos quando a janela abriu. Só vai pro servidor o campo
+// que a PESSOA mudou: rastreio e localização mostram o valor AUTOMÁTICO, e
+// gravar esse valor sem ninguém ter mexido o transformaria em "digitado à
+// mão" (que passa a valer mais que o automático dali em diante).
+const original = reactive({ observacao: '', rastreio: '', localizacao: '', desde: '' })
+const salvando = ref('')
+const videoMotivo = ref('')
+const videoApagando = ref(false)
+const resolverForm = reactive<{ como: string; situacao: string }>({ como: '', situacao: '' })
+const situacoesBling = ref<{ id: number; nome: string }[]>([])
+
+function abrirJanela(i: Item) {
+  if (!i.pedido_bling) return
+  janela.value = { pedido: i.pedido_bling, sku: i.sku }
+  carregarRascunho()
+  limparProvas()
+  videoMotivo.value = ''
+  videoApagando.value = false
+  resolverForm.como = ''
+  resolverForm.situacao = ''
+  if (!situacoesBling.value.length) void carregarSituacoes()
+}
+const procurando = ref(false)
+async function buscarPedido(numero: string): Promise<Item[]> {
+  return (await api<Painel>(`/api/devolucoes-painel?pedido=${encodeURIComponent(numero)}`)).items
+}
+async function abrirPedido(numero: string) {
+  const n = numero.trim()
+  if (!n || procurando.value) return
+  const naLista = items.value.find((i) => i.pedido_bling === n || i.pedido_marketplace === n)
+  if (naLista) return abrirJanela(naLista)
+  procurando.value = true
+  try {
+    const linhas = await buscarPedido(n)
+    if (!linhas.length) {
+      toasts.push({ kind: 'warning', title: `Pedido ${n} não encontrado`, lines: ['Confira o número (do Bling ou da plataforma).'] })
+      return
+    }
+    avulsas.value = linhas
+    abrirJanela(linhas[0])
   } catch (e: any) {
-    correcaoError.value = apiError(e)
+    toasts.push({ kind: 'error', title: 'Não deu pra procurar o pedido', lines: [apiError(e)] })
   } finally {
-    correcaoSubmitting.value = false
+    procurando.value = false
   }
 }
-
-// Um único "usar" para o pedido: traz TODOS os produtos (que ainda não foram
-// adicionados) como linhas de rascunho, cada uma com sua própria condição.
-function selectAllProducts() {
-  drafts.value = expandedLookupResults.value
-    .filter((row) => !isAlreadyAdded(row))
-    .map((row) => ({
-      ...row,
-      condicao_produto: '',
-      link_abertura: '',
-      reembolso: false,
-      motivo_devolucao: '',
-      // Vídeo já enviado pela equipe (coluna Vídeo) vira o Link envio.
-      link_envio: (row.pedido_bling && videoLinkPorPedido.value.get(row.pedido_bling)) || '',
-      fotos: [],
-      custo_manutencao: null,
-      tecnico: '',
-      devolver_estoque: false,
-      observacao: '',
-    }))
+function novaDevolucao() {
+  const n = window.prompt('Número do pedido (do Bling ou da plataforma):')
+  if (n && n.trim()) void abrirPedido(n)
 }
-
-async function lookupOrder() {
-  const pedido = lookupPedido.value.trim()
-  if (!pedido) return
-  lookupLoading.value = true
-  lookupError.value = null
-  lookupResults.value = []
-  drafts.value = []
-  // A busca nova já traz do backend o que foi lançado até agora; contar de
-  // novo o que foi criado nesta sessão esconderia unidades a mais.
-  addedThisSession.value = []
-  try {
-    const res = await api<LookupRow[]>(`/api/devolutions/order-lookup?pedido=${encodeURIComponent(pedido)}`)
-    lookupResults.value = res
-    if (!res.length) lookupError.value = 'nenhum resultado encontrado'
-  } catch (e: any) {
-    lookupError.value = apiError(e)
-  } finally {
-    lookupLoading.value = false
+// Relê as linhas do pedido aberto quando ele veio da busca (não está na lista).
+// `sempre`: relê mesmo com o pedido ainda na lista — é o que se faz ANTES de
+// trocar a lista depois de uma ação (resolver, reabrir, mudar o Bling). Se o
+// pedido sair dela, a janela já tem as linhas e não desmonta nem remonta (o
+// bloco do lançamento perderia o que está digitado).
+async function relerAvulsas(sempre = false) {
+  const p = janela.value?.pedido
+  if (!p || (!sempre && items.value.some((i) => i.pedido_bling === p))) return
+  try { avulsas.value = await buscarPedido(p) } catch { /* fica o que estava */ }
+}
+// O bloco do lançamento criou, alterou ou apagou algo: relê a lista (etapa,
+// condição, chamado e conta mudam) sem mexer no que está digitado nos campos
+// do pedido.
+async function aoMudarLancamento() {
+  await load(true)
+  await relerAvulsas()
+  void loadResumo()
+}
+function mudarSituacao(valor: string, seletor: HTMLSelectElement) {
+  const p = pedidoItem.value
+  if (!p?.pedido_bling || !valor || valor === p.situacao_bling_id) return
+  const nome = situacoesBling.value.find((x) => String(x.id) === valor)?.nome || valor
+  if (
+    lancamentoEmAndamento() || travaResolvidoComEstoquePendente(valor)
+    || !window.confirm(`Mudar o pedido ${p.pedido_bling} no Bling para “${nome}”?`)
+  ) {
+    seletor.value = p.situacao_bling_id || ''
+    return
   }
-}
-
-function buildPayload(d: DevolutionDraft) {
-  return {
-    data: d.data,
-    pedido_bling: d.pedido_bling,
-    pedido_marketplace: d.pedido_marketplace,
-    conta: d.conta,
-    sku: d.sku,
-    produtos: d.produtos,
-    custo_produto: d.custo_produto,
-    condicao_produto: d.condicao_produto || null,
-    link_abertura: d.link_abertura || null,
-    reembolso: d.reembolso,
-    motivo_devolucao: d.motivo_devolucao || null,
-    link_envio: d.link_envio || null,
-    custo_manutencao: d.custo_manutencao,
-    tecnico: d.tecnico || null,
-    devolver_estoque: d.devolver_estoque,
-    observacao: d.observacao || null,
-    quantidade: d.quantidade ?? 1,
-    troca_sku: null as string | null,
-    troca_condicao: null as string | null,
-    estoque_suffix: null as string | null,
-    manutencao_destino: null as string | null,
-    estoque_destino_sku: null as string | null,
-    estoque_nova_tag: null as string | null,
-  }
-}
-
-// Adiciona TODOS os produtos do rascunho de uma vez. Cada produto pode disparar
-// os modais (manutenção / troca / destino de estoque), resolvidos em sequência.
-// Produtos que falharem ou cujo modal for cancelado continuam no rascunho.
-async function createAllDevolutions() {
-  if (!canEdit.value || !drafts.value.length) return
-  // Condição vazia ("—") é aceita (Vinicius, 17/09): a linha entra sem condição
-  // e o operador preenche depois na lista. Sem condição nada dispara (estoque,
-  // reembolso, situação no Bling) — o pedido só não conta como resolvido.
-  for (const d of drafts.value) {
-    if (linkRequired(d.condicao_produto) && !d.link_abertura) {
-      lookupError.value = 'Link de abertura obrigatório para Extraviado / Sucata / Manutenção'
-      return
-    }
-    if (linkEnvioRequired(d.sku, d.motivo_devolucao) && !d.link_envio) {
-      lookupError.value = 'Link de envio obrigatório: mala/eletro com motivo que abre chamado'
-      return
-    }
-    if (linkEnvioInvalido(d.link_envio)) {
-      lookupError.value = MSG_LINK_ENVIO_INVALIDO
-      return
-    }
-    const naoMega = linkEnvioNaoMega(d.link_envio, d.pedido_bling)
-    if (naoMega) {
-      lookupError.value = `Link envio: ${naoMega}`
-      return
-    }
-    if (videoFraudeRequired(d.pedido_bling, d.motivo_devolucao) && !d.link_envio) {
-      lookupError.value = MSG_VIDEO_OBRIGATORIO
-      return
-    }
-  }
-  creating.value = true
-  lookupError.value = null
-  const remaining: DevolutionDraft[] = []
-  let added = 0
-  let pendentesNoAdd = 0
-  const pedidoDoRascunho = drafts.value[0]?.pedido_bling || null
-  try {
-    for (const d of [...drafts.value]) {
-      // No ADD: Novo/Usado/Trocado SEMPRE processam estoque (automático, sem
-      // toggle). Manutenção só processa se o operador ligou o toggle (continua
-      // manual); senão pode ser devolvida ao estoque depois, pela linha salva.
-      // Extraviado, Sucata e demais condições não mexem no estoque.
-      const processAtAdd =
-        ['Novo', 'Usado', 'Trocado'].includes(d.condicao_produto) ||
-        (d.condicao_produto === 'Manutenção' && d.devolver_estoque)
-      let extra: StockModalFields | null = null
-      if (processAtAdd) {
-        // Abre os modais (manutenção / troca / destino) antes da chamada Bling.
-        extra = await resolveStockModals(d.condicao_produto, d.sku, true)
-        if (extra === null) { remaining.push(d); continue } // modal cancelado → mantém
-        d.devolver_estoque = true // processou o estoque → liga o toggle
-      }
-      const body = buildPayload(d)
-      if (extra) Object.assign(body, extra)
-      try {
-        let created = await api<DevolutionRow>('/api/devolutions', { method: 'POST', body })
-        // O resultado do Bling vem só nesta resposta (a das fotos não traz):
-        // guarda antes de subir as fotos.
-        const estoqueSr = created.bling_stock_result
-        const createdId = created.id
-        // Fotos escolhidas no rascunho sobem agora (a linha precisa existir) —
-        // cada upload já re-dispara o chamado no ML se ele estiver esperando foto.
-        let fotosSubiram = 0
-        for (const f of d.fotos || []) {
-          const fd = new FormData()
-          fd.append('file', f)
-          try {
-            created = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(created.id)}/anexos`, { method: 'POST', body: fd })
-            fotosSubiram += 1
-          } catch (e: any) {
-            lookupError.value = `foto ${f.name}: ${apiError(e)}`
-          }
-        }
-        // Lançamento refeito com o chamado do pedido já enviado (298350): as fotos
-        // não vão pra contestação — avisa na hora, em vez de parecer que foram.
-        if (fotosSubiram && contestacaoJaSaiu(created)) {
-          pushToast({
-            kind: 'warning',
-            title: `Pedido ${created.pedido_bling || ''}: fotos não foram pra contestação`,
-            lines: avisoFotosDepois(created),
-          }, 12000)
-        }
-        if (page.value === 1) items.value = [created, ...items.value].slice(0, PAGE_SIZE)
-        total.value += 1
-        // Chave da LINHA DA BUSCA de onde o rascunho veio (o servidor limpa o
-        // SKU — espaço, vazio — e aí a unidade criada não seria contada).
-        addedThisSession.value = [...addedThisSession.value, `${d.pedido_bling}|${d.sku}`]
-        added += 1
-        if (estoqueSr) showStockToast(estoqueSr, createdId, created)
-        if (created.estoque_status === 'falhou' || created.estoque_status === 'conferindo') pendentesNoAdd += 1
-        agendarConferencia()
-      } catch (e: any) {
-        lookupError.value = apiError(e)
-        remaining.push(d)
-      }
-    }
-    drafts.value = remaining
-    if (added > 0) {
-      pushToast({ kind: 'success', title: 'Devoluções adicionadas', lines: [`${added} produto${added === 1 ? '' : 's'}`] })
-      void refreshTotals()
-      // "Status Bling" escolhido no formulário: aplica UMA vez pro pedido,
-      // depois dos produtos criados (o lançamento pode ter mexido na situação
-      // sozinho — Extraviado etc.; a escolha da pessoa vale por último).
-      if (addSituacaoId.value != null && pedidoDoRascunho) {
-        if (addSituacaoId.value === 545902 && pendentesNoAdd > 0) {
-          // A entrada no estoque não entrou (ou está em conferência): o pedido
-          // fica em Aguardando Devolução até a linha resolver (15/10).
-          pushToast({
-            kind: 'warning',
-            title: `Pedido ${pedidoDoRascunho}: não foi para Resolvido`,
-            lines: ['O estoque não entrou no Bling (ou está em conferência). Resolva pela linha; o pedido vai para Resolvido quando a entrada confirmar.'],
-          }, 0)
-        } else {
-          await alterarSituacaoBling(pedidoDoRascunho, addSituacaoId.value)
-        }
-      }
-      addSituacaoId.value = null
-    }
-  } finally {
-    creating.value = false
-  }
-}
-
-// "Status Bling" (Vinicius 17/09): mudar a situação do pedido no Bling direto
-// da aba Lançamentos — o lançamento sozinho só mexe nela em Extraviado /
-// Sucata / Manutenção / Novo-Usado-Trocado, e um pedido lançado como "Não
-// devolvido" ficava pra sempre em Aguardando Devolução (e nas abas
-// Acompanhamento/Fraude). Lista = situações ativas do Bling.
-const situacoesBling = ref<SituacaoBling[]>([])
-// Escolha feita no formulário de adicionar (uma por pedido — todas as linhas do
-// rascunho são do mesmo pedido); aplicada depois que os produtos foram criados.
-const addSituacaoId = ref<number | null>(null)
-const situacaoSaving = ref<Set<string>>(new Set())
-
-async function loadSituacoesBling() {
-  try {
-    const res = await api<{ items: SituacaoBling[] }>('/api/devolutions/situacoes-bling')
-    situacoesBling.value = res.items
-  } catch {
-    situacoesBling.value = []
-  }
-}
-
-// Carrega junto com a página (os `const` acima precisam existir antes — por
-// isso aqui, e não no Promise.all lá em cima).
-void loadSituacoesBling()
-
-function isSavingSituacao(pedido: string | null): boolean {
-  return !!pedido && situacaoSaving.value.has(pedido)
-}
-
-// Muda no Bling e espelha em TODAS as linhas do pedido (grão é item). O
-// backend já atualizou o espelho local, então o pedido some das abas
-// Acompanhamento/Fraude no próximo carregar.
-async function alterarSituacaoBling(pedido: string | null, situacaoId: number | null): Promise<boolean> {
-  if (!canEdit.value || !pedido || situacaoId == null) return false
-  if (situacaoSaving.value.has(pedido)) return false
-  situacaoSaving.value = new Set([...situacaoSaving.value, pedido])
-  try {
-    const res = await api<{ pedido_bling: string; situacao_id: number; situacao_nome: string | null; via_desvio: boolean }>(
+  const pedido = p.pedido_bling
+  void acao('situacao', 'O Bling não mudou', async () => {
+    const res = await api<{ situacao_nome: string | null; via_desvio: boolean }>(
       `/api/devolutions/pedido/${encodeURIComponent(pedido)}/situacao-bling`,
-      { method: 'POST', body: { situacao_id: situacaoId } },
+      { method: 'POST', body: { situacao_id: Number(valor) } },
     )
-    for (const r of items.value) {
-      if (r.pedido_bling === res.pedido_bling) {
-        r.situacao_bling_id = res.situacao_id
-        r.situacao_bling_nome = res.situacao_nome
-      }
-    }
-    pushToast({
-      kind: 'success',
-      title: `Pedido ${pedido} → ${res.situacao_nome || res.situacao_id}`,
+    toasts.push({
+      kind: 'success', title: `Pedido ${pedido} → ${res.situacao_nome || nome}`,
       lines: res.via_desvio ? ['O Bling só aceitou passando por Aguardando Devolução antes.'] : [],
     })
-    return true
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: `Bling não mudou a situação do ${pedido}`, lines: [apiError(e)] })
-    return false
-  } finally {
-    const next = new Set(situacaoSaving.value)
-    next.delete(pedido)
-    situacaoSaving.value = next
-  }
+  }).finally(() => {
+    seletor.value = pedidoItem.value?.situacao_bling_id || ''
+    // As peças que dá pra lançar dependem da situação do Bling (e a lixeira
+    // mostra "hoje: …"): o bloco do lançamento relê, sem perder o digitado.
+    void lancarRef.value?.recarregar()
+  })
 }
-
-function onRowSituacaoChange(row: DevolutionRow, raw: string) {
-  const id = raw ? Number(raw) : null
-  if (id == null || id === (row.situacao_bling_id ?? null)) return
-  void alterarSituacaoBling(row.pedido_bling, id)
+// A busca de peças do lançamento só enxerga pedido nestas situações do Bling
+// (a view vw_devolucoes): Aguardando Devolução, Extraviado, Problemas, 83966,
+// Manutenção e Resolvido. Fora delas a janela avisa em vez de mostrar vazio.
+const SITUACOES_QUE_LANCAM = new Set(['83957', '83960', '83961', '83966', '84677', '545902'])
+// Pedido aberto pela busca que NUNCA entrou em devolução (não está na lista):
+// a janela serve pra mudar o Bling e lançar; não há o que resolver ainda.
+const foraDaLista = computed(() => {
+  const p = pedidoItem.value
+  return !!p && !p.resolvido && !p.aguardando_devolucao_data
+    && !['83957', '84677'].includes(String(p.situacao_bling_id || ''))
+})
+// Aparece quando ainda falta peça por lançar: nenhuma lançada, ou menos
+// lançamentos do que unidades no pedido (kit "a+b" conta cada peça). Caso
+// típico: a 1ª peça foi Perdimento, o Bling foi pra Perdimento e as outras
+// peças sumiram da busca.
+const foraDeLancar = computed(() => {
+  const p = pedidoItem.value
+  if (!p || SITUACOES_QUE_LANCAM.has(String(p.situacao_bling_id || ''))) return false
+  const unidades = linhasDaJanela.value.reduce((n, i) => n + Math.max(1, partesDoSku(i.sku).length) * Math.max(1, i.quantidade || 1), 0)
+  const lancadas = (p.lancamentos || []).reduce((n, l) => n + Math.max(1, l.quantidade || 1), 0)
+  return lancadas < unidades
+})
+function carregarRascunho() {
+  const p = pedidoItem.value
+  rascunho.observacao = original.observacao = p?.observacao || ''
+  rascunho.rastreio = original.rastreio = p?.rastreio || ''
+  rascunho.localizacao = original.localizacao = p?.localizacao || ''
+  rascunho.desde = original.desde = p?.aguardando_devolucao_data || ''
 }
-
-function rowPatchPayload(row: DevolutionRow) {
-  return {
-    custo_produto: row.custo_produto,
-    condicao_produto: row.condicao_produto || null,
-    link_abertura: row.link_abertura || null,
-    reembolso: row.reembolso,
-    motivo_devolucao: row.motivo_devolucao || null,
-    // Texto legado que o operador não tocou: não reenvia — o schema recusaria
-    // com 422 `link_envio_invalido` e a linha nunca mais salvaria nada.
-    ...(linkEnvioLegado(row) ? {} : { link_envio: row.link_envio || null }),
-    custo_manutencao: row.custo_manutencao,
-    tecnico: row.tecnico || null,
-    devolver_estoque: row.devolver_estoque,
-    observacao: row.observacao || null,
-    quantidade: row.quantidade ?? 1,
-    troca_sku: row.troca_sku,
-    troca_condicao: row.troca_condicao,
-    estoque_suffix: row.estoque_suffix,
-    manutencao_destino: row.manutencao_destino,
-    estoque_destino_sku: row.estoque_destino_sku,
-    estoque_nova_tag: row.estoque_nova_tag,
-  }
-}
-
-function applyStockModalFields(row: DevolutionRow, extra: StockModalFields) {
-  row.troca_sku = extra.troca_sku
-  row.troca_condicao = extra.troca_condicao
-  row.estoque_suffix = extra.estoque_suffix
-  row.manutencao_destino = extra.manutencao_destino
-  row.estoque_destino_sku = extra.estoque_destino_sku
-  row.estoque_nova_tag = extra.estoque_nova_tag
-}
-
-// Toggle "devolver estoque" inline: abre os modais antes de salvar/chamar Bling.
-async function toggleRowDevolverEstoque(row: DevolutionRow) {
-  if (!canEdit.value || estoqueTravado(row)) return
-  const next = !row.devolver_estoque
-  if (next && isStockTrigger(row.condicao_produto)) {
-    const extra = await resolveStockModals(row.condicao_produto, row.sku, true)
-    if (extra === null) return // cancelado → não liga o toggle
-    applyStockModalFields(row, extra)
-  }
-  setRowDevolverEstoque(row, next)
-  await saveRow(row, { estoque: true })
-}
-
-// Mudança de condição inline: se devolver_estoque on e condição dispara
-// estoque, abre os modais antes de salvar. Cancelar reverte a condição.
-function estoqueTravado(row: DevolutionRow): boolean {
-  if (row.estoque_status === 'conferindo') {
-    pushToast({ kind: 'warning', title: 'Espere a conferência do estoque', lines: ['O DaVinci ainda está conferindo no Bling se a entrada deste item entrou (até 10 min).'] })
-    return true
-  }
-  if (row.estoque_status === 'sem_confirmacao') {
-    pushToast({ kind: 'warning', title: 'Confira o estoque antes', lines: ['A entrada (ou o estorno) deste item não foi confirmada no Bling. Use “Já entrou” / “Estorno já saiu” ou “Tentar de novo” na linha antes de mudar a condição.'] })
-    return true
-  }
-  return false
-}
-async function changeRowCondicao(row: DevolutionRow, value: string) {
-  if (!canEdit.value) return
-  if (value !== row.condicao_produto && estoqueTravado(row)) {
-    // O select já mostra o valor novo: volta ao salvo.
-    const atual = row.condicao_produto
-    row.condicao_produto = null
-    await nextTick()
-    row.condicao_produto = atual
-    return
-  }
-  const prev = row.condicao_produto
-  setRowText(row, 'condicao_produto', value)
-  // Ao SAIR de Manutenção, o custo de manutenção é obrigatório (registra o
-  // reparo antes de marcar que o pedido passou em manutenção).
-  if (prev === 'Manutenção' && value !== 'Manutenção' && (row.custo_manutencao == null || (row.custo_manutencao as unknown) === '')) {
-    pushToast({
-      kind: 'warning',
-      title: 'Custo de manutenção obrigatório',
-      lines: ['Preencha o custo de manutenção antes de mudar a condição.'],
-    })
-    setRowText(row, 'condicao_produto', prev ?? '')
-    return
-  }
-  if (value === 'Extraviado' || value === 'Sucata' || value === 'Manutenção') setRowReembolso(row, true)
-  // Novo/Usado/Trocado: estoque é automático — ao mudar a condição já abre o
-  // modal (quando precisa) e devolve ao estoque, sem depender do toggle.
-  // Manutenção: continua manual (só processa se o toggle já estiver ligado).
-  const autoStock = ['Novo', 'Usado', 'Trocado'].includes(value)
-  const manualStock = value === 'Manutenção' && row.devolver_estoque
-  if (autoStock || manualStock) {
-    const extra = await resolveStockModals(value, row.sku, true)
-    if (extra === null) {
-      setRowText(row, 'condicao_produto', prev ?? '')
-      return
-    }
-    applyStockModalFields(row, extra)
-    if (autoStock) setRowDevolverEstoque(row, true)
-  }
-  await saveRow(row, { estoque: autoStock || manualStock })
-}
-
-// Save pedido enquanto outro da mesma linha está no ar: espera a resposta e
-// sai logo depois (antes era descartado). Valor = se algum deles mexe no estoque.
-const resaveRows = new Map<string, boolean>()
-
-// `estoque`: o save lança/estorna no Bling — com o Bling limitando chamadas
-// leva 15 s ou mais (caso 294247, 25/09: o z0340 foi criado, mas a operadora
-// viu só "não salvo" e achou que tinha falhado). Mostra o aviso até responder.
-async function saveRow(row: DevolutionRow, opts: { estoque?: boolean } = {}) {
-  if (!canEdit.value || !hasDirty(row.id)) return
-  if (isSaving(row.id)) {
-    resaveRows.set(row.id, (resaveRows.get(row.id) ?? false) || !!opts.estoque)
-    return
-  }
-  if (linkRequired(row.condicao_produto) && !row.link_abertura) {
-    bloqueiaSave('Link de abertura obrigatório para Extraviado / Sucata / Manutenção')
-    return
-  }
-  if (linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio) {
-    bloqueiaSave('Link de envio obrigatório: mala/eletro com motivo que abre chamado')
-    return
-  }
-  if (linkEnvioInvalido(row.link_envio) && !linkEnvioLegado(row)) {
-    bloqueiaSave(MSG_LINK_ENVIO_INVALIDO)
-    return
-  }
-  const naoMega = linkEnvioNaoMegaRow(row)
-  if (naoMega) {
-    bloqueiaSave(`Link envio: ${naoMega}`)
-    return
-  }
-  if (videoFraudeRequired(row.pedido_bling, row.motivo_devolucao) && !row.link_envio) {
-    bloqueiaSave(MSG_VIDEO_OBRIGATORIO)
-    return
-  }
-  setSaving(row.id, true)
-  error.value = null
-  const versaoEnviada = rowVersion.get(row.id) ?? 0
-  const enviado = rowPatchPayload(row)
-  const aviso = opts.estoque
-    ? pushToast({
-        kind: 'info',
-        title: 'Atualizando o estoque no Bling…',
-        lines: [`Pedido ${row.pedido_bling || '—'} · pode levar alguns segundos, não repita`],
-      }, 0)
-    : null
-  try {
-    const updated = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(row.id)}`, {
-      method: 'PATCH',
-      body: enviado,
-    })
-    const idx = items.value.findIndex((i) => i.id === row.id)
-    const atual = idx >= 0 ? items.value[idx] : row
-    // PATCH não devolve `cliente` (só a listagem preenche) — preserva o da linha.
-    const novo: DevolutionRow = { ...updated, cliente: updated.cliente ?? atual.cliente }
-    const editadaNoAr = (rowVersion.get(row.id) ?? 0) !== versaoEnviada
-    if (editadaNoAr) {
-      // O que foi mexido durante o PATCH ainda não está no servidor: fica o da
-      // tela (senão a resposta apagava o texto recém-digitado) e a linha segue
-      // "não salvo" até o próximo save levar.
-      const agora = rowPatchPayload(atual)
-      for (const k of Object.keys(agora) as (keyof typeof agora)[]) {
-        if (agora[k] !== enviado[k]) (novo as any)[k] = atual[k]
-      }
-    }
-    if (idx >= 0) items.value[idx] = novo
-    // Troca de motivo com chamado aberto (21/09): o backend diz o que fez com o
-    // chamado e a operadora vê na hora — o detalhe fica no histórico do chamado.
-    showTrocaMotivoToast(updated.chamado_troca_motivo, platNome(updated))
-    if (!editadaNoAr) clearDirty(row.id)
-    // Reembolso/condição podem mudar quais linhas entram nos filtros e cards.
-    void refreshTotals()
-    if (updated.bling_stock_result) showStockToast(updated.bling_stock_result, row.id, updated)
-    agendarConferencia()
-  } catch (e: any) {
-    bloqueiaSave(apiError(e))
-    // Estoque travado (conferindo / sem confirmação): a mudança não vale — a
-    // linha volta ao que está salvo, senão os botões partiriam do que só
-    // existe na tela (revisão de 15/10).
-    const code = e?.data?.detail?.code
-    if (code === 'estoque_conferindo' || code === 'estoque_sem_confirmacao') {
-      try {
-        const salvo = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(row.id)}`)
-        const i = items.value.findIndex((x) => x.id === row.id)
-        if (i >= 0) items.value[i] = { ...salvo, cliente: salvo.cliente ?? items.value[i].cliente }
-        clearDirty(row.id)
-      } catch {
-        // fica como está; o próximo load corrige
-      }
-    }
-  } finally {
-    if (aviso != null) dismissToast(aviso)
-    setSaving(row.id, false)
-  }
-  if (resaveRows.has(row.id)) {
-    const estoque = resaveRows.get(row.id)
-    resaveRows.delete(row.id)
-    const linha = items.value.find((i) => i.id === row.id)
-    if (linha) await saveRow(linha, { estoque })
-  }
-}
-
-// Fotos escolhidas no RASCUNHO (antes de existir a linha): ficam no draft e
-// sobem logo depois do POST que cria a devolução.
-function pickDraftFotos(d: DevolutionDraft, ev: Event) {
-  const input = ev.target as HTMLInputElement
-  const files = Array.from(input.files || [])
-  input.value = ''
-  if (files.length) d.fotos = [...(d.fotos || []), ...files]
-}
-
-// ---- anexos (fotos/vídeos) da devolução — modal por linha
-const anexosRow = ref<DevolutionRow | null>(null)
-const anexoUploading = ref(false)
-function openAnexos(row: DevolutionRow) {
-  anexosRow.value = row
-}
-function closeAnexos() {
-  anexosRow.value = null
-}
-function anexoUrl(id: string) {
-  return `/api/devolutions/anexos/${id}`
-}
-function isVideo(a: DevolucaoAnexo) {
-  return a.content_type.startsWith('video/')
-}
-function replaceRow(row: DevolutionRow, updated: DevolutionRow) {
-  const merged = { ...updated, cliente: updated.cliente ?? row.cliente }
-  const idx = items.value.findIndex((i) => i.id === row.id)
-  if (idx >= 0) items.value[idx] = merged
-  if (anexosRow.value?.id === row.id) anexosRow.value = merged
-}
-async function uploadAnexo(ev: Event) {
-  const input = ev.target as HTMLInputElement
-  const files = Array.from(input.files || [])
-  input.value = ''
-  const row = anexosRow.value
-  if (!row || !files.length) return
-  anexoUploading.value = true
-  error.value = null
-  try {
-    for (const f of files) {
-      const fd = new FormData()
-      fd.append('file', f)
-      const updated = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(row.id)}/anexos`, { method: 'POST', body: fd })
-      replaceRow(row, updated)
-    }
-  } catch (e: any) {
-    error.value = apiError(e)
-  } finally {
-    anexoUploading.value = false
-  }
-}
-async function removeAnexo(a: DevolucaoAnexo) {
-  const row = anexosRow.value
-  if (!row) return
-  try {
-    await api(`/api/devolutions/anexos/${a.id}`, { method: 'DELETE' })
-    const rest = (row.anexos || []).filter((x) => x.id !== a.id)
-    replaceRow(row, { ...row, anexos: rest })
-  } catch (e: any) {
-    error.value = apiError(e)
-  }
-}
-
-const deleting = ref<Set<string>>(new Set())
-function isDeleting(id: string): boolean {
-  return deleting.value.has(id)
-}
-// Resposta da lixeira (26/10, caso 300978): além do estorno, o que o DaVinci
-// desfez sozinho — prejuízo automático, situação do pedido e chamado — e o que
-// ficou porque alguém já tinha mexido.
-type ExclusaoResult = {
-  ok: boolean
-  estoque_estornado: boolean
-  mensagem: string | null
-  prejuizos_apagados?: { qtd: number; total: number }
-  prejuizos_mantidos?: { tipo: string | null; prejuizo: number | null; reembolso: number | null; valor?: number | null; motivo: string | null }[]
-  situacao_revertida?: { de: string; para: number; nome: string; nome_de?: string | null }
-  situacao_recalculada?: { para: number; nome: string }
-  situacao_aviso?: string
-  situacao_devia_ser?: { para: number; nome: string }
-  chamado_apagado?: boolean
-  chamado_mantido?: { id: string; motivo: string } | null
-  chamado_reapontado?: boolean
-  // O passo do chamado falhou depois de a situação já ter sido gravada.
-  chamado_aviso?: string
-}
-const CONDICOES_COM_PREJUIZO = ['Extraviado', 'Sucata', 'Manutenção']
-// Linhas neutras não decidem a situação do pedido (espelho de
-// linhas_que_contam no back): sobrando só elas, a situação volta.
-const CONDICOES_NEUTRAS = ['Entregue', 'Não devolvido']
-// O que a exclusão desfaz, em português simples, pro diálogo de confirmação.
-// A regra fina é do back (a página pode não ter todas as linhas do pedido),
-// então o texto é condicional.
-function textoDoQueDesfaz(row: DevolutionRow): string {
-  const itens: string[] = []
-  const cond = row.condicao_produto || ''
-  if (CONDICOES_COM_PREJUIZO.includes(cond)) {
-    itens.push(cond === 'Manutenção'
-      ? '• o débito do conserto que o DaVinci lançou sozinho na tela Reembolso para esta linha (se o valor ainda for só o débito do conserto e ninguém conferiu, anotou protocolo ou observação)'
-      : `• o prejuízo ${cond} que o DaVinci lançou sozinho na tela Reembolso para esta linha (se ninguém lançou reembolso, conferiu, anotou protocolo ou observação)`)
-  }
-  if (row.manutencao && cond !== 'Manutenção') {
-    itens.push('• o débito do conserto (Manutenção) que o DaVinci lançou para esta linha, se ninguém mexeu nele')
-  }
-  if (row.pedido_bling) {
-    const outras = items.value.some((i) =>
-      i.id !== row.id && i.pedido_bling === row.pedido_bling
-      && !CONDICOES_NEUTRAS.includes(i.condicao_produto || ''))
-    if (outras) {
-      itens.push('• a situação do pedido no Bling é recalculada pelas outras linhas do pedido (se elas não definirem a situação, volta para a de antes da devolução)')
-    } else {
-      const hoje = row.situacao_bling_nome ? ` (hoje: ${row.situacao_bling_nome})` : ''
-      itens.push(`• se não sobrar outra linha que decida a situação: ela volta no Bling para a de antes da devolução${hoje}, se ninguém mudou à mão`)
-    }
-  }
-  if (row.tem_chamado) {
-    itens.push('• o chamado aberto automaticamente é apagado se nenhuma linha que ficar pedir chamado e ninguém tiver mexido nele (sem protocolo, sem resposta, sem observação)')
-  }
-  return itens.length ? `\n\nO DaVinci também desfaz:\n${itens.join('\n')}\n\nO que alguém já mexeu fica, e você recebe o aviso.` : ''
-}
-// Toast do resultado: o resumo some sozinho; o que NÃO foi desfeito fica até fechar.
-function avisarExclusao(row: DevolutionRow, res: ExclusaoResult) {
-  const partes: string[] = []
-  if (res.situacao_revertida) partes.push(`Pedido voltou para ${res.situacao_revertida.nome}`)
-  else if (res.situacao_recalculada) partes.push(`Pedido foi para ${res.situacao_recalculada.nome}`)
-  const np = res.prejuizos_apagados?.qtd || 0
-  if (np) partes.push(`${np} prejuízo${np > 1 ? 's' : ''} apagado${np > 1 ? 's' : ''} (${brl(res.prejuizos_apagados?.total)})`)
-  if (res.chamado_apagado) partes.push('chamado apagado')
-  const linhas = partes.length ? [partes.join(' · ')] : []
-  if (res.estoque_estornado) linhas.push(res.mensagem || 'Estoque estornado no Bling.')
-  pushToast({ kind: 'success', title: 'Lançamento excluído', lines: linhas })
-
-  const avisos: string[] = []
-  if (res.situacao_aviso) avisos.push(res.situacao_aviso)
-  for (const m of res.prejuizos_mantidos || []) {
-    const valor = m.valor ?? m.prejuizo
-    const de = valor != null ? ` de ${brl(valor)}` : ''
-    avisos.push(`O prejuízo ${m.tipo || ''}${de} ficou: ${m.motivo || 'alguém mexeu nele'}. Confira na tela Reembolso.`)
-  }
-  if (res.chamado_mantido) avisos.push(`O chamado ficou: ${res.chamado_mantido.motivo}. Confira na aba Chamados.`)
-  if (res.chamado_aviso) avisos.push(res.chamado_aviso)
-  if (avisos.length) {
-    pushToast({
-      kind: res.situacao_devia_ser ? 'error' : 'warning',
-      title: row.pedido_bling ? `Pedido ${row.pedido_bling}: nem tudo foi desfeito` : 'Nem tudo foi desfeito',
-      lines: avisos,
-    }, 0)
-  }
-  // Situação nova (voltou ou recalculada): as outras linhas do pedido e a aba
-  // Acompanhamento (que lista só Aguardando Devolução) refletem na hora — o
-  // back já gravou o espelho.
-  const nova = res.situacao_revertida
-    ? { para: res.situacao_revertida.para, nome: res.situacao_revertida.nome }
-    : res.situacao_recalculada
-  if (nova && row.pedido_bling) {
-    for (const r of items.value) {
-      if (r.pedido_bling === row.pedido_bling) {
-        r.situacao_bling_id = nova.para
-        r.situacao_bling_nome = nova.nome
-      }
-    }
-  }
-  if (nova) void loadAcompanhamento()
-  // Chamado apagado/reapontado: as irmãs que ficaram ainda mostram o selo
-  // dele. Relê cada uma (load() perderia edições não salvas, e zerar às cegas
-  // esconderia um chamado manual do mesmo pedido).
-  if ((res.chamado_apagado || res.chamado_reapontado) && row.pedido_bling) {
-    void atualizarChamadoDasIrmas(row)
-  }
-}
-// Campos do chamado na linha (os que _completar_out preenche no back).
-const CAMPOS_CHAMADO = [
-  'tem_chamado', 'chamado_numero', 'chamado_resolvido', 'chamado_plataforma',
-  'chamado_ml_status', 'chamado_ml_erro', 'chamado_enviada_at',
-] as const
-async function atualizarChamadoDasIrmas(row: DevolutionRow) {
-  const irmas = items.value.filter((i) => i.id !== row.id && i.pedido_bling === row.pedido_bling)
-  for (const irma of irmas) {
-    try {
-      const atual = await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(irma.id)}`)
-      const linha = items.value.find((i) => i.id === irma.id)
-      if (!linha) continue
-      for (const k of CAMPOS_CHAMADO) (linha as any)[k] = (atual as any)[k] ?? null
-      if (!atual.tem_chamado) linha.tem_chamado = false
-    } catch {
-      // o próximo load corrige
-    }
-  }
-}
-async function removeRow(row: DevolutionRow) {
-  if (!canDelete.value || isDeleting(row.id)) return
-  const label = row.sku || row.pedido_bling || 'esta devolução'
-  if (row.estoque_status === 'conferindo') {
-    pushToast({
-      kind: 'warning',
-      title: 'Espere a conferência do estoque',
-      lines: ['O DaVinci ainda está conferindo no Bling se a entrada deste item entrou (até 10 min).'],
-    }, 0)
-    return
-  }
-  if (row.estoque_status === 'sem_confirmacao' && temEstornoPendente(row)) {
-    pushToast({
-      kind: 'warning',
-      title: 'Confira o estorno antes de excluir',
-      lines: ['O estorno anterior pode ter saído no Bling — use “Estorno já saiu” ou “Tentar de novo” na linha (excluir agora daria baixa 2×).'],
-    }, 0)
-    return
-  }
-  // Estoque já devolvido ao Bling: com o movimento registrado, o back dá BAIXA
-  // da mesma quantidade antes de excluir (03/09, Eduardo). Lançamento antigo
-  // sem registro não tem como ser estornado daqui.
-  const estornavel = !!row.estoque_mov_sku && !row.estoque_mov_revertido_at
-  const stockNote = estornavel
-    ? ` O estoque devolvido no Bling (${row.estoque_mov_qty ?? 1} un. de ${row.estoque_mov_sku}) será ESTORNADO automaticamente (saída).`
-    : row.estoque_status === 'falhou'
-      ? ''  // a entrada não aconteceu: nada a estornar
-      : row.estoque_status === 'sem_confirmacao'
-        ? ' A entrada deste item no Bling NÃO foi confirmada: confira o extrato do SKU — se ela entrou, ajuste direto no Bling.'
-        : (row.data_devolvido_estoque
-          ? ' O estoque já devolvido no Bling NÃO será estornado (lançamento antigo, sem registro do movimento) — ajuste-o direto no Bling.'
-          : '')
-  if (!confirm(`Remover o lançamento de "${label}"? Esta ação não pode ser desfeita.${stockNote}${textoDoQueDesfaz(row)}`)) return
-  const next = new Set(deleting.value)
-  next.add(row.id)
-  deleting.value = next
-  error.value = null
-  try {
-    const res = await api<ExclusaoResult>(
-      `/api/devolutions/${encodeURIComponent(row.id)}`,
-      { method: 'DELETE' },
-    )
-    items.value = items.value.filter((i) => i.id !== row.id)
-    total.value = Math.max(0, total.value - 1)
-    void refreshTotals()
-    if (res) avisarExclusao(row, res)
-    // "Adicionar pedido" aberto no mesmo pedido (excluir para relançar como
-    // Usado, 302146): busca de novo para a unidade excluída voltar na hora —
-    // só sem rascunho na tela, que a busca descartaria.
-    if (
-      addOpen.value && !drafts.value.length && row.pedido_bling
-      && lookupResults.value.some((r) => r.pedido_bling === row.pedido_bling)
-    ) {
-      void lookupOrder()
-    }
-  } catch (e: any) {
-    error.value = apiError(e)
-    // O servidor pode ter marcado a linha (estorno que pode ter saído): relê
-    // para os botões certos aparecerem.
-    const code = e?.data?.detail?.code
-    if (code === 'estoque_estorno_falhou' || code === 'estoque_estorno_sem_confirmacao' || code === 'estoque_conferindo') {
-      try {
-        aplicarEstoque(row.id, await api<DevolutionRow>(`/api/devolutions/${encodeURIComponent(row.id)}`))
-      } catch {
-        // o próximo load corrige
-      }
-    }
-  } finally {
-    const done = new Set(deleting.value)
-    done.delete(row.id)
-    deleting.value = done
-  }
-}
-
-const backfilling = ref(false)
-async function backfillAddresses() {
-  if (!canEdit.value || backfilling.value) return
-  backfilling.value = true
-  try {
-    const res = await api<{ processed: number; updated: number; failed: number; message: string }>(
-      '/api/devolutions/backfill-addresses',
-      { method: 'POST' },
-    )
-    pushToast({
-      kind: res.updated > 0 ? 'success' : 'warning',
-      title: 'Backfill de endereços',
-      lines: [res.message, ...(res.failed > 0 ? [`${res.failed} falhou`] : [])],
-    })
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: 'Erro no backfill', lines: [apiError(e)] })
-  } finally {
-    backfilling.value = false
-  }
-}
-
-// 16/11/2026 — painel novo (pages/devolucoes-novo.vue). Ele não lança: manda o
-// pedido pra cá. `?lancar=306120` abre o "adicionar" já com o pedido buscado
-// (mesmo caminho do botão "lançar" do Acompanhamento); `?lancar=novo` só abre
-// o formulário. Roda DEPOIS de montar (a página vem pronta do servidor: mexer
-// no estado antes da 1ª pintura no navegador não aparece) e espera a
-// permissão de editar carregar.
-function _abrirLancarDaUrl(): boolean {
-  const pedido = typeof _route.query.lancar === 'string' ? _route.query.lancar.trim() : ''
-  if (!pedido) return true
-  if (!canEdit.value) return false
-  tab.value = 'lancamentos'
-  openAdd()
-  if (pedido !== 'novo') {
-    lookupPedido.value = pedido
-    void lookupOrder()
-  }
+// Fechar (X, Esc, clique fora) salva o que ficou digitado: tirar o campo da
+// tela com Esc não dispara o "saiu do campo", e o texto se perderia.
+// O lançamento é diferente: lá o salvar é explícito (mexe em estoque e em
+// chamado), então fechar com cartão preenchido e não salvo pergunta antes.
+const lancarRef = ref<{
+  temMudancaNaoSalva: () => boolean
+  ocupado: () => boolean
+  recarregar: () => Promise<void> | void
+  gravarLink: (campo: 'link_envio' | 'link_abertura', valor: string) => Promise<string | null>
+  anexarFotos: (files: File[]) => Promise<boolean>
+  removerFoto: (anexoId: string) => Promise<void>
+} | null>(null)
+// Lançamento em andamento (o Bling pode levar 10–15 s): a janela espera. Fechar
+// no meio deixaria peça sendo criada sem ninguém ver o resultado.
+function lancamentoEmAndamento(): boolean {
+  if (!lancarRef.value?.ocupado()) return false
+  toasts.push({ kind: 'warning', title: 'Espere o lançamento terminar', lines: ['Tem lançamento sendo gravado (o Bling pode demorar alguns segundos).'] })
   return true
 }
+function fecharJanela() {
+  if (lancamentoEmAndamento()) return
+  if (
+    (lancarRef.value?.temMudancaNaoSalva() || provasEsperando())
+    && !window.confirm('Tem lançamento preenchido que ainda não foi salvo (ou link/foto em Provas esperando o lançamento).\n\nFechar mesmo assim? O que não foi salvo se perde.')
+  ) return
+  salvarPendentes()
+  janela.value = null
+}
+// Peça com a entrada de estoque pendurada (não entrou / conferindo / não
+// confirmada): mandar o pedido pra Resolvido assim deixava a peça fora do
+// estoque com o pedido dado como encerrado (a tela de antes recusava).
+const SITUACAO_RESOLVIDO = '545902'
+function travaResolvidoComEstoquePendente(alvo: string): boolean {
+  if (alvo !== SITUACAO_RESOLVIDO || !linhasDaJanela.value.some(estoquePendente)) return false
+  toasts.push({
+    kind: 'warning', title: 'Estoque ainda não entrou',
+    lines: ['Tem peça deste pedido com a entrada de estoque pendente. Resolva no cartão dela (“Tentar de novo” / “Já entrou”) antes de mandar o pedido pra Resolvido.'],
+  }, 9000)
+  return true
+}
+function salvarPendentes() {
+  const p = pedidoItem.value
+  if (!p?.pedido_bling || !canEdit.value) return
+  const body: Record<string, string> = {}
+  for (const campo of ['observacao', 'rastreio', 'localizacao'] as const) {
+    if (rascunho[campo] === original[campo]) continue
+    const novo = rascunho[campo].trim()
+    if (novo !== original[campo].trim()) body[campo] = novo
+  }
+  if (!Object.keys(body).length) return
+  const pedido = p.pedido_bling
+  void acao('campos', 'Não salvou', () =>
+    api(`/api/devolutions/acompanhamento/${encodeURIComponent(pedido)}`, { method: 'PATCH', body }),
+  )
+}
+async function carregarSituacoes() {
+  try {
+    situacoesBling.value = (await api<{ items: { id: number; nome: string }[] }>('/api/devolutions/situacoes-bling')).items
+  } catch { /* o Resolver continua valendo sem mexer no Bling */ }
+}
+
+// Uma ação por vez, em FILA: digitar a observação e clicar direto em
+// "resolver" dispara o salvar do campo e, em seguida, o Resolver — o clique
+// não se perde esperando o salvar terminar. `chave` repetida na fila é
+// ignorada (clique duplo).
+let fila: Promise<void> = Promise.resolve()
+const naFila = new Set<string>()
+function acao(chave: string, titulo: string, fn: () => Promise<unknown>, ok?: string): Promise<void> {
+  if (naFila.has(chave)) return fila
+  naFila.add(chave)
+  fila = fila.then(async () => {
+    salvando.value = chave
+    try {
+      await fn()
+      await relerAvulsas(true)
+      await load(true)
+      if (janela.value && !linhasDaJanela.value.length) janela.value = null
+      else if (!naFila.size || (naFila.size === 1 && naFila.has(chave))) carregarRascunho()
+      if (ok) toasts.push({ kind: 'success', title: ok })
+    } catch (e: any) {
+      toasts.push({ kind: 'error', title: titulo, lines: [apiError(e)] })
+    } finally {
+      naFila.delete(chave)
+      salvando.value = naFila.size ? salvando.value : ''
+    }
+  })
+  return fila
+}
+function salvarCampo(campo: 'observacao' | 'rastreio' | 'localizacao' | 'desde') {
+  const p = pedidoItem.value
+  if (!p?.pedido_bling || !canEdit.value) return
+  if (rascunho[campo] === original[campo]) return
+  const novo = rascunho[campo].trim()
+  if (novo === original[campo].trim()) return
+  const body = campo === 'desde' ? { em_devolucao_desde: novo || null } : { [campo]: novo }
+  void acao(campo, 'Não salvou', () =>
+    api(`/api/devolutions/acompanhamento/${encodeURIComponent(p.pedido_bling!)}`, { method: 'PATCH', body }),
+  )
+}
+function moverFila(destino: 'acompanhamento' | 'fraude' | 'regra') {
+  const p = pedidoItem.value
+  if (!p?.pedido_bling) return
+  void acao('fila', 'Não moveu', () =>
+    api(`/api/devolutions/acompanhamento/${encodeURIComponent(p.pedido_bling!)}`, { method: 'PATCH', body: { fila: destino } }),
+    destino === 'fraude' ? 'Marcado como Fraude' : destino === 'regra' ? 'Solto pra regra da plataforma' : 'Tirado da Fraude',
+  )
+}
+function solicitarVideo(motivo?: string) {
+  const p = pedidoItem.value
+  if (!p?.pedido_bling) return
+  void acao('video', 'Erro ao solicitar o vídeo', async () => {
+    await api(`/api/devolutions/acompanhamento/${encodeURIComponent(p.pedido_bling!)}/video/solicitar`, {
+      method: 'POST', body: { motivo: motivo?.trim() || null },
+    })
+    videoApagando.value = false
+    videoMotivo.value = ''
+  }, motivo ? 'Link apagado: a equipe vai refazer' : 'Vídeo solicitado à equipe do SKU')
+}
+function cancelarVideo() {
+  const p = pedidoItem.value
+  if (!p?.pedido_bling) return
+  void acao('video', 'Erro ao cancelar', () =>
+    api(`/api/devolutions/acompanhamento/${encodeURIComponent(p.pedido_bling!)}/video`, { method: 'DELETE' }),
+    'Solicitação de vídeo cancelada',
+  )
+}
+function resolver() {
+  const p = pedidoItem.value
+  if (!p?.pedido_bling || !resolverForm.como) return
+  if (lancamentoEmAndamento() || travaResolvidoComEstoquePendente(resolverForm.situacao)) return
+  // O lançamento só grava no "salvar"/"lançar": resolver com cartão preenchido e
+  // não salvo tiraria o pedido da lista sem o estoque entrar nem o chamado abrir.
+  if (
+    (lancarRef.value?.temMudancaNaoSalva() || provasEsperando())
+    && !window.confirm('Tem lançamento preenchido que ainda NÃO foi salvo (ou link/foto em Provas esperando o lançamento): o estoque não entrou e o chamado não abriu.\n\nResolver mesmo assim? O que não foi salvo se perde.')
+  ) return
+  const pedido = p.pedido_bling
+  void acao('resolver', 'Não resolveu', async () => {
+    const res = await api<{ situacao_bling_nome: string | null; via_desvio: boolean }>(
+      `/api/devolucoes-painel/${encodeURIComponent(pedido)}/resolver`,
+      { method: 'POST', body: { como_terminou: resolverForm.como, situacao_id: resolverForm.situacao ? Number(resolverForm.situacao) : null } },
+    )
+    toasts.push({
+      kind: 'success', title: `Pedido ${pedido} resolvido`,
+      lines: [`Bling: ${res.situacao_bling_nome || '—'}${res.via_desvio ? ' (o Bling só aceitou passando por Aguardando Devolução)' : ''}`],
+    })
+    if (mostrar.value === 'abertas') janela.value = null
+    void loadResumo()
+  })
+}
+function reabrir() {
+  const p = pedidoItem.value
+  if (!p?.pedido_bling || lancamentoEmAndamento()) return
+  if (
+    lancarRef.value?.temMudancaNaoSalva()
+    && !window.confirm('Tem lançamento preenchido que ainda não foi salvo.\n\nReabrir mesmo assim? O que não foi salvo pode se perder.')
+  ) return
+  void acao('resolver', 'Não reabriu', async () => {
+    await api(`/api/devolucoes-painel/${encodeURIComponent(p.pedido_bling!)}/reabrir`, { method: 'POST' })
+    void loadResumo()
+  }, `Pedido ${p.pedido_bling} voltou pra lista de abertas`)
+}
+async function copiar(texto: string | null) {
+  if (!texto) return
+  try {
+    await navigator.clipboard.writeText(texto)
+    toasts.push({ kind: 'success', title: 'Copiado' }, 1500)
+  } catch { /* sem permissão de área de transferência */ }
+}
+function onTecla(e: KeyboardEvent) {
+  if (e.key === 'Escape' && janela.value) fecharJanela()
+}
+
+// ── Resumo por mês ──────────────────────────────────────────────────────
+const resumo = ref<{ desde: string | null; dias: ResumoDia[]; ve_custo: boolean }>({ desde: null, dias: [], ve_custo: false })
+const mesesAbertos = ref<Record<string, boolean>>({})
+const MESES = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro']
+const SEMANA = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb']
+async function loadResumo() {
+  try {
+    resumo.value = await api('/api/devolucoes-painel/resumo')
+    const atual = isoToday().slice(0, 7)
+    if (!(atual in mesesAbertos.value)) mesesAbertos.value = { ...mesesAbertos.value, [atual]: true }
+  } catch { /* o resumo é extra: a lista continua valendo */ }
+}
+const meses = computed(() => {
+  const m = new Map<string, ResumoDia[]>()
+  for (const d of resumo.value.dias) {
+    const k = d.dia.slice(0, 7)
+    if (!m.has(k)) m.set(k, [])
+    m.get(k)!.push(d)
+  }
+  return [...m.entries()].map(([mes, dias]) => ({ mes, dias }))
+})
+function tituloMes(mes: string): string {
+  return `${MESES[Number(mes.slice(5, 7)) - 1]}/${mes.slice(0, 4)}`
+}
+function soma(dias: ResumoDia[], f: (d: ResumoDia) => number | null): number {
+  return dias.reduce((s, d) => s + (f(d) || 0), 0)
+}
+function semana(dia: string): string {
+  return SEMANA[new Date(`${dia}T12:00:00`).getDay()] || ''
+}
+
+// ── Vida da página ──────────────────────────────────────────────────────
+let relogio: ReturnType<typeof setInterval> | null = null
 onMounted(() => {
-  if (_abrirLancarDaUrl()) return
-  const parar = watch(canEdit, () => { if (_abrirLancarDaUrl()) parar() })
+  const q = useRoute().query.search
+  const atalho = typeof q === 'string' ? q.trim() : ''
+  if (atalho) search.value = atalho
+  // Vindo de um atalho, o filtro guardado da última visita não entra: ele
+  // podia esconder justamente o pedido procurado.
+  if (!atalho) {
+    try {
+      const salvo = JSON.parse(localStorage.getItem(FILTROS_KEY) || '{}')
+      if (salvo.p === 'outras' || PLATAFORMAS.some((p) => p.key === salvo.p)) plataformaTab.value = salvo.p
+      if (['all', 'aguardando', 'chegou', 'manutencao', 'fraude'].includes(salvo.e)) etapaFilter.value = salvo.e
+      if (typeof salvo.c === 'string') contaFilter.value = salvo.c
+    } catch { /* filtro salvo inválido: começa limpo */ }
+  }
+  void load().then(() => {
+    if (contaFilter.value !== 'all' && !contas.value.includes(contaFilter.value)) contaFilter.value = 'all'
+    // Atalho de outra tela (Chamados → ?search=306120): abre a janela do pedido.
+    // Se ele já saiu da lista, vem do histórico, em vez de uma lista vazia.
+    if (!atalho) return
+    const exato = items.value.some((i) => i.pedido_bling === atalho || i.pedido_marketplace === atalho)
+    if (exato || !filtrados.value.length) void abrirPedido(atalho)
+  })
+  void loadResumo()
+  window.addEventListener('keydown', onTecla)
+  // Relê sozinho de 2 em 2 min, só com a janela fechada (não atropela quem digita).
+  relogio = setInterval(() => {
+    if (!janela.value && !loading.value && document.visibilityState === 'visible') void load(true)
+  }, 120000)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onTecla)
+  if (relogio) clearInterval(relogio)
+})
+const lidoHa = computed(() => {
+  if (!lidoEm.value) return ''
+  return `lido às ${_HORA.format(lidoEm.value)}`
 })
 </script>
 
 <template>
-  <div class="space-y-5">
-    <PageHeader
-      title="Devoluções"
-      :description="tab === 'acompanhamento'
-        ? 'Pedidos aguardando devolução no Bling — rastreio e última localização do pacote.'
-        : 'Controle manual de devoluções por pedido.'"
-    >
-      <template #actions>
-        <template v-if="tab === 'acompanhamento'">
-          <Button
-            v-if="isAdmin"
-            size="sm"
-            variant="outline"
-            title="Enviar no Threema a lista de pedidos aguardando devolução"
-            @click="informarOpen = true"
-          >
-            <Megaphone class="size-4 mr-1.5" />
-            informar
-          </Button>
-          <Button size="sm" variant="outline" :disabled="acompLoading" @click="loadAcompanhamento">
-            <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': acompLoading }" />
-            atualizar
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            :disabled="!canEdit || backfilling"
-            title="Busca no Bling o nome/cidade dos pedidos em devolução que estão sem esses dados"
-            @click="backfillAcompanhamento"
-          >
-            <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': backfilling }" />
-            atualizar clientes
-          </Button>
-        </template>
-        <template v-else>
-          <Button size="sm" variant="outline" :disabled="loading" @click="load">
-            <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': loading }" />
-            atualizar
-          </Button>
-          <Button size="sm" variant="outline" :disabled="!canEdit || backfilling" @click="backfillAddresses">
-            <RotateCcw class="size-4 mr-1.5" :class="{ 'animate-spin': backfilling }" />
-            atualizar endereços
-          </Button>
-          <Button size="sm" :disabled="!canEdit" @click="openAdd">
-            <Plus class="size-4 mr-1.5" />
-            adicionar pedido
-          </Button>
-          <Button size="sm" variant="outline" :disabled="!canEdit" @click="openCorrecao">
-            <PackagePlus class="size-4 mr-1.5" />
-            correção de estoque
-          </Button>
-        </template>
-      </template>
-    </PageHeader>
-
-    <!-- Abas (mesmo estilo do Controle de Estoque) -->
-    <div class="flex gap-1 rounded-md bg-muted/40 p-1 w-fit flex-wrap">
-      <button
-        class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
-        :class="tab === 'acompanhamento' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
-        @click="tab = 'acompanhamento'"
-      >
-        <PackageSearch class="size-4" />
-        Acompanhamento
-        <span class="rounded bg-muted px-1.5 text-[11px] tabular-nums">{{ acompFilaTotais.acompanhamento }}</span>
-      </button>
-      <!-- Fraude (17/09): pedidos em que NÃO volta pacote — só dinheiro
-           (chegou vazio, reembolso sem devolução, mediação). Mesma tabela. -->
-      <button
-        class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
-        :class="tab === 'fraude' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
-        title="Pedidos em que não volta pacote: o cliente alega que chegou vazio / não recebeu, pede reembolso sem devolver ou abre mediação só de dinheiro"
-        @click="tab = 'fraude'"
-      >
-        <ShieldAlert class="size-4" />
-        Fraude
-        <span class="rounded bg-muted px-1.5 text-[11px] tabular-nums">{{ acompFilaTotais.fraude }}</span>
-      </button>
-      <button
-        class="px-3 py-1.5 rounded text-sm transition-colors inline-flex items-center gap-1.5"
-        :class="tab === 'lancamentos' ? 'bg-background shadow-sm font-medium' : 'hover:bg-background/60 text-muted-foreground'"
-        @click="tab = 'lancamentos'"
-      >
-        <ClipboardList class="size-4" />
-        Lançamentos
-      </button>
-    </div>
-
-    <!-- ══ Abas Acompanhamento / Fraude — pedidos em Aguardando Devolução no
-         Bling; a mesma tabela, filtrada pelo painel (`fila`) de cada linha ══ -->
-    <template v-if="abaDePedidos">
-      <div v-if="acompError" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
-        <AlertCircle class="size-4" />
-        {{ acompError }}
-      </div>
-
-      <div class="grid grid-cols-2 gap-2" :class="tab === 'fraude' ? 'lg:grid-cols-5' : 'lg:grid-cols-7'">
-        <StatCard :label="tab === 'fraude' ? 'Casos de fraude' : 'Pedidos em devolução'" :value="acompTotalPedidos" :icon="tab === 'fraude' ? ShieldAlert : PackageSearch" compact />
-        <StatCard label="Sem rastreio" :value="acompSemRastreio" :icon="AlertCircle" tone="warning" compact />
-        <StatCard label="Sem localização" :value="acompSemLocalizacao" :icon="Clock" tone="warning" compact />
-        <StatCard label="Parados 15+ dias" :value="acompParados15" :icon="Clock" tone="danger" compact />
-        <StatCard label="Responder em 24 h" :value="acompPrazoUrgente" :icon="AlertTriangle" tone="danger" hint="prazo da plataforma" compact />
-        <!-- Prazos (12/11/2026): clicar filtra a lista; clicar de novo solta. -->
+  <div class="min-w-0 space-y-2.5">
+    <!-- Topo -->
+    <div class="flex flex-wrap items-center gap-3 rounded-md border bg-card px-3 py-1.5">
+      <h1 class="text-[15px] font-bold">Devoluções</h1>
+      <div class="flex flex-wrap gap-0.5 text-xs font-semibold">
         <button
-          v-if="tab !== 'fraude'"
+          v-for="t in PLATAFORMAS"
+          :key="t.key"
           type="button"
-          class="rounded-lg text-left ring-offset-2 transition"
-          :class="acompRegraFilter === 'prazo' ? 'ring-2 ring-red-400' : 'hover:brightness-95'"
-          title="Passou de 45 dias em devolução sem o pacote chegar (ou vence em até 5 dias). Fora da regra: prazo novo escrito na observação, extraviado, não recebido, pedido já lançado. Por enquanto o sistema só avisa — depois ele lança sozinho: Não devolvido, Bling em Problemas e chamado."
-          data-devolucao-prazo45
-          @click="filtrarRegra('prazo')"
+          class="border-b-2 px-2.5 py-1"
+          :class="plataformaTab === t.key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+          @click="plataformaTab = t.key"
         >
-          <StatCard
-            label="Passou de 45 dias"
-            :value="acompPrazo45Vencidos"
-            :icon="Clock"
-            tone="danger"
-            :hint="acompPrazo45Logo ? `+${acompPrazo45Logo} vencem em até 5 dias` : 'lançar Não devolvido'"
-            compact
-          />
+          {{ t.label }} <span class="font-medium text-muted-foreground">{{ contagemDaAba(t.key) }}</span>
         </button>
         <button
-          v-if="tab !== 'fraude'"
+          v-if="contagemDaAba('outras') || plataformaTab === 'outras'"
           type="button"
-          class="rounded-lg text-left ring-offset-2 transition"
-          :class="acompRegraFilter === 'amazon' ? 'ring-2 ring-red-400' : 'hover:brightness-95'"
-          title="Amazon: 14 dias ou mais e o cliente não postou a devolução (sem reembolso). Cancelar a devolução no Seller Central › Gerenciar devoluções — a API da Amazon não tem esse comando."
-          data-devolucao-amazon-cancelar
-          @click="filtrarRegra('amazon')"
+          class="border-b-2 px-2.5 py-1"
+          :class="plataformaTab === 'outras' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+          title="Plataformas fora das quatro (Temu, AliExpress, Shein, Magalu…)"
+          @click="plataformaTab = 'outras'"
         >
-          <StatCard label="Amazon: cancelar devolução" :value="acompAmazonCancelar" :icon="AlertTriangle" tone="warning" hint="cliente não postou em 14 dias" compact />
+          Outras <span class="font-medium text-muted-foreground">{{ contagemDaAba('outras') }}</span>
         </button>
       </div>
-
-      <div class="flex flex-wrap items-center gap-2">
-        <div class="relative">
-          <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-          <input
-            v-model="acompSearch"
-            class="h-9 w-72 rounded-md border bg-background pl-8 pr-3 text-sm"
-            placeholder="buscar pedido, cliente, sku, rastreio…"
-          />
-        </div>
-        <select v-model="acompPlataformaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Filtrar por plataforma">
-          <option value="all">todas plataformas</option>
-          <option v-for="p in acompPlataformas" :key="p" :value="p">{{ p }}</option>
-        </select>
-        <select v-model="acompLojaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Filtrar por loja">
-          <option value="all">todas lojas</option>
-          <option v-for="l in acompLojas" :key="l" :value="l">{{ l }}</option>
-        </select>
-        <select v-model="acompParadoFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Só pedidos que estão em devolução há N dias ou mais">
-          <option value="all">qualquer tempo</option>
-          <option value="7">parados 7+ dias</option>
-          <option value="15">parados 15+ dias</option>
-          <option value="30">parados 30+ dias</option>
-        </select>
-        <select v-model="acompChegadaFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Devolvido = a plataforma ou o rastreio confirmou que o pacote de volta chegou aqui (coluna Chegou em). Não Devolvido = sem confirmação ainda, não quer dizer que está a caminho.">
-          <option value="all">Todos Status</option>
-          <option value="chegou">Devolvido</option>
-          <option value="pendente">Não Devolvido</option>
-        </select>
-        <label class="inline-flex items-center gap-1.5 h-9 rounded-md border bg-background px-2 text-sm cursor-pointer" title="Só pedidos cujo prazo de resposta na plataforma vence em menos de 24 h ou já venceu">
-          <input v-model="acompPrazoFilter" type="checkbox" class="size-3.5" />
-          Responder em 24 h
-        </label>
-        <select v-if="tab !== 'fraude'" v-model="acompRegraFilter" class="h-9 rounded-md border bg-background px-2 text-sm" title="Prazos: 45 dias sem o pacote chegar; Amazon sem o cliente postar em 14 dias">
-          <option value="all">todos os prazos</option>
-          <option value="prazo">passou de 45 dias / vence logo</option>
-          <option value="amazon">Amazon: cancelar devolução</option>
-        </select>
-        <span class="ml-auto text-xs text-muted-foreground">
-          {{ acompFiltered.length }} de {{ acompNaFila.length }} itens · rastreio, localização e observação salvam ao sair do campo
-        </span>
-      </div>
-
-      <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
-        <table class="min-w-[2000px] text-xs border-collapse">
-          <thead class="sticky top-0 z-20 bg-background">
-            <tr>
-              <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="15">Pedido aguardando devolução (Bling)</th>
-              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="3" title="Preenchido sozinho: código e status do PACOTE QUE VOLTA (devolução na Shopee/TikTok/ML, atualizado a cada 30 min) — senão o rastreio da entrega original (Logística). O que você digitar aqui vale mais que o automático">Rastreio</th>
-              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="4">Devolução</th>
-            </tr>
-            <tr class="border-b">
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px]">Data pedido</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Pedido Bling</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px]">Pedido Marketplace</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[100px]">Plataforma</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px]">Loja</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px]">Cliente</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px]">Cidade/UF</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]">SKU</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[210px]">Produto</th>
-              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[45px]">Qtd</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[125px]" title="Dia em que o pedido entrou em Aguardando Devolução">Em devolução desde</th>
-              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px]" title="Há quantos dias o pedido está aguardando devolução">Dias</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]" title="Dia em que a plataforma ou o rastreio confirmou que o pacote de volta chegou aqui. Vazio = sem confirmação ainda. Reembolso pago ou caso fechado não contam como chegada.">Chegou em</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-red-50 dark:bg-red-900/20" title="Até quando a plataforma espera uma resposta da loja neste caso (TikTok: confirmar/recusar o pacote recebido, responder ao reembolso; Shopee: conferir o pacote recebido em 3 dias, enviar evidências, responder à proposta). Mercado Livre: revisar a devolução recebida — prazo calculado, entrega + 3 dias). Passado o prazo ela decide sozinha. Vermelho = menos de 24 h ou vencido. Passe o mouse na célula pra ver o que fazer.">Prazo p/ responder</th>
-              <!-- Reembolso (17/09): "estamos com o dinheiro ainda ou já devolveu
-                   pro cliente?" — Sim = saiu do nosso (valor e data embaixo);
-                   Não = ainda com a gente (inclui quando a plataforma pagou do
-                   próprio bolso). -->
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px] bg-sky-50 dark:bg-sky-900/20" title="Já saiu dinheiro do nosso? Sim = a plataforma devolveu ao cliente e desconta da loja (valor e data embaixo). Não = o dinheiro continua com a gente — caso ainda aberto, cancelado, ou a plataforma pagou do próprio bolso (cobertura do Mercado Livre, compensação da Shopee). Vazio = a plataforma não informou ainda. Passe o mouse na célula pra ver a fonte.">Reembolso</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[160px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Rastreio</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[220px] bg-amber-50 dark:bg-amber-900/20">Última localização</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[135px] bg-amber-50 dark:bg-amber-900/20" title="Preenchida sozinha quando a localização muda">Data últ. movimentação</th>
-              <!-- Observação (10/09): recado livre por pedido pra quem acompanha o
-                   pacote — salva ao sair do campo, como rastreio/localização. -->
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Recado livre pra quem acompanha este pacote — salva ao sair do campo">Observação</th>
-              <!-- Vídeo (17/09): vídeo da expedição do pedido. "solicitar" trava
-                   a aba Pedidos da equipe do SKU no Controle de Estoque até ela
-                   colar o link; apagar o link (com motivo) devolve pra refazer. -->
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-emerald-50 dark:bg-emerald-900/20" title="Vídeo da expedição do pedido. Solicitar = a equipe do SKU fica travada na aba Pedidos do Controle de Estoque até colar o link (ou responder que não tem o vídeo). Apagar o link, com motivo, devolve pra equipe refazer.">Vídeo</th>
-              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[95px] bg-emerald-50 dark:bg-emerald-900/20">Lançada</th>
-              <!-- Painel (17/09): botão pra mover o pedido pro outro painel quando a
-                   plataforma classificou errado (a regra automática não mexe mais). -->
-              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-emerald-50 dark:bg-emerald-900/20" title="Acompanhamento = volta pacote; Fraude = só dinheiro (chegou vazio, reembolso sem devolução). A plataforma decide sozinha pelo tipo do caso; o botão fixa o painel na mão e o ↶ solta de volta pra plataforma. Só admin ou quem tem a permissão de mover muda o painel.">Painel</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-if="acompLoading && !acompRows.length">
-              <td colspan="22" class="py-8 text-center text-muted-foreground">
-                <Loader2 class="size-4 inline animate-spin mr-1.5" />
-                carregando…
-              </td>
-            </tr>
-            <tr v-else-if="!acompFiltered.length">
-              <td colspan="22" class="py-8 text-center text-muted-foreground">{{ tab === 'fraude' ? 'nenhum caso de fraude' : 'nenhum pedido aguardando devolução' }}</td>
-            </tr>
-            <tr
-              v-for="row in acompFiltered"
-              :key="`${row.pedido_bling}-${row.sku}`"
-              class="border-t hover:brightness-95 dark:hover:brightness-110"
-            >
-              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
-              <td class="px-2 py-1 font-mono whitespace-nowrap">{{ row.pedido_bling || '—' }}</td>
-              <td class="px-2 py-1 font-mono text-muted-foreground whitespace-nowrap">{{ row.pedido_marketplace || '—' }}</td>
-              <td class="px-2 py-1 whitespace-nowrap">{{ row.plataforma || '—' }}</td>
-              <td class="px-2 py-1 whitespace-nowrap">{{ row.loja || '—' }}</td>
-              <td class="px-2 py-1">{{ row.cliente || '—' }}</td>
-              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ row.cidade ? `${row.cidade}${row.uf ? ' — ' + row.uf : ''}` : (row.uf || '—') }}</td>
-              <td class="px-2 py-1 font-mono text-xs">{{ row.sku || '—' }}</td>
-              <td class="px-2 py-1 text-muted-foreground">{{ row.produto || '—' }}</td>
-              <td class="px-2 py-1 text-center tabular-nums">{{ row.quantidade ?? '—' }}</td>
-              <td class="px-1 py-0.5 whitespace-nowrap">
-                <!-- "Em devolução desde": automático (devolução aberta no marketplace /
-                     sinal da Logística / entrada no Bling); editável na mão quando o
-                     automático não bate (03/09, caso 287144). Vazio = volta ao automático. -->
-                <div v-if="canEdit" class="flex items-center gap-1">
-                  <span
-                    v-if="row.aguardando_devolucao_data_estimada"
-                    class="text-amber-600 dark:text-amber-400 text-xs font-semibold"
-                    title="Data ESTIMADA (pelo último movimento do pacote no marketplace) — o Bling não informa o histórico. Se souber a data certa, corrija ao lado."
-                  >≈</span>
-                  <input
-                    type="date"
-                    :value="row.aguardando_devolucao_data || ''"
-                    :disabled="isSavingRastreio(row.pedido_bling, 'em_devolucao_desde')"
-                    class="w-[128px] text-xs border rounded px-1.5 py-1 bg-background text-foreground"
-                    :class="row.aguardando_devolucao_data_estimada ? 'border-amber-300 dark:border-amber-700' : ''"
-                    title="Dia em que o pedido entrou em devolução (automático). Se estiver errado, escolha a data certa; apagar volta ao automático."
-                    @change="(e) => saveRastreio(row, 'em_devolucao_desde', (e.target as HTMLInputElement).value)"
-                  />
-                </div>
-                <span v-else class="text-muted-foreground">{{ row.aguardando_devolucao_data_estimada ? '≈ ' : '' }}{{ fmtDateOnly(row.aguardando_devolucao_data) }}</span>
-              </td>
-              <td class="px-2 py-1 text-center">
-                <span
-                  v-if="row.dias_em_devolucao != null"
-                  class="inline-flex rounded px-1.5 py-0.5 text-[11px] font-medium tabular-nums"
-                  :class="diasBadgeClass(row.dias_em_devolucao)"
-                >{{ row.dias_em_devolucao }}d</span>
-                <span v-else class="text-muted-foreground">—</span>
-                <!-- Prazos (12/11/2026): o aviso embaixo dos dias; o balão diz o porquê. -->
-                <div
-                  v-if="prazoChip(row)"
-                  class="mt-0.5 whitespace-nowrap text-[10px] font-semibold"
-                  :class="prazoChip(row)!.cls"
-                  :title="row.prazo_texto || ''"
-                  data-devolucao-prazo
-                >{{ prazoChip(row)!.texto }}</div>
-                <div
-                  v-if="row.amazon_cancelar"
-                  class="mt-0.5 whitespace-nowrap text-[10px] font-semibold text-amber-700 dark:text-amber-400"
-                  :title="row.amazon_cancelar_texto || ''"
-                >cancelar devolução</div>
-              </td>
-              <td class="px-2 py-1 whitespace-nowrap">
-                <span
-                  v-if="row.devolucao_chegou_em"
-                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
-                  title="A plataforma ou o rastreio confirmou que o pacote voltou pra você"
-                >
-                  <CheckCircle2 class="size-3" />
-                  {{ fmtDateOnly(row.devolucao_chegou_em) }}
-                </span>
-                <span v-else class="text-muted-foreground">—</span>
-              </td>
-              <td class="px-2 py-1 whitespace-nowrap bg-red-50/40 dark:bg-red-900/10">
-                <div v-if="row.prazo_resposta" class="flex flex-col gap-0.5" :title="row.acao_resposta || 'Responder na plataforma'">
-                  <span :class="contestacaoUrgente(row.prazo_resposta) ? 'font-medium text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ fmtDateTime(row.prazo_resposta) }}</span>
-                  <span class="text-[10px]" :class="contestacaoUrgente(row.prazo_resposta) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ contestacaoLabel(row.prazo_resposta) }}</span>
-                </div>
-                <span v-else class="text-muted-foreground">—</span>
-              </td>
-              <td class="px-2 py-1 whitespace-nowrap bg-sky-50/40 dark:bg-sky-900/10" :title="row.reembolso_detalhe || (row.reembolso == null ? 'A plataforma ainda não informou' : '')">
-                <div v-if="row.reembolso != null" class="flex flex-col gap-0.5">
-                  <span
-                    class="inline-flex w-fit items-center rounded px-1.5 py-0.5 text-[11px] font-medium"
-                    :class="row.reembolso ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' : 'bg-muted text-muted-foreground'"
-                  >{{ row.reembolso ? 'Sim' : 'Não' }}</span>
-                  <span v-if="row.reembolso && reembolsoSub(row)" class="text-[10px] text-muted-foreground">{{ reembolsoSub(row) }}</span>
-                </div>
-                <span v-else class="text-muted-foreground">—</span>
-              </td>
-              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-                <input
-                  :value="row.rastreio || ''"
-                  :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'rastreio')"
-                  :class="sheetInputClass"
-                  placeholder="código de rastreio"
-                  @keydown.enter="(e) => (e.target as HTMLInputElement).blur()"
-                  @blur="(e) => saveRastreio(row, 'rastreio', (e.target as HTMLInputElement).value)"
-                />
-              </td>
-              <!-- 19/09 (Vinicius): texto longo — a célula mostra só o começo; clicou,
-                   abre o balão com o texto inteiro (ObservacaoPopover), editável. -->
-              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <!-- Largura fixa (a do cabeçalho): o botão do balão não tem tamanho
-                     próprio como o input tinha, e a célula esticava até o texto. -->
-                <div class="w-[220px]">
-                <ObservacaoPopover
-                  :model-value="draftOf(row, 'localizacao')"
-                  :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'localizacao')"
-                  :titulo="`Última localização · ${row.pedido_bling || ''}`"
-                  :dica="row.entrega_localizacao ? `Status da devolução (automático). Entrega original: ${row.entrega_localizacao}` : ''"
-                  placeholder="onde o pacote está"
-                  @update:model-value="(v) => setDraft(row, 'localizacao', v)"
-                  @save="saveDraft(row, 'localizacao')"
-                />
-                </div>
-              </td>
-              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10" title="Preenchida sozinha quando a localização muda">
-                {{ fmtDateTime(row.localizacao_data) }}
-              </td>
-              <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-                <div class="w-[240px]">
-                <ObservacaoPopover
-                  :model-value="draftOf(row, 'observacao')"
-                  :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'observacao')"
-                  :titulo="`Observação · ${row.pedido_bling || ''}`"
-                  placeholder="recado pra quem acompanha"
-                  @update:model-value="(v) => setDraft(row, 'observacao', v)"
-                  @save="saveDraft(row, 'observacao')"
-                />
-                </div>
-              </td>
-              <!-- Vídeo (17/09): solicitar → solicitado → link (apagar com
-                   motivo devolve pra equipe) | sem vídeo (motivo + pedir de novo). -->
-              <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10">
-                <div v-if="videoApagando === row.pedido_bling" class="flex items-center gap-1">
-                  <input
-                    v-model="videoMotivo"
-                    class="h-6 w-44 rounded border border-amber-400 bg-background px-1 text-[11px] focus:outline-none focus:ring-1 focus:ring-primary"
-                    placeholder="motivo pra refazer (ex.: não mostra o lacre)"
-                    @keydown.enter.prevent="videoMotivo.trim().length >= 3 && solicitarVideo(row, videoMotivo)"
-                    @keydown.esc="videoApagando = null"
-                  />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    class="h-6 px-1.5 text-[11px]"
-                    :disabled="videoMotivo.trim().length < 3 || isSavingRastreio(row.pedido_bling, 'video')"
-                    title="Apagar o link e devolver pra equipe refazer"
-                    @click="solicitarVideo(row, videoMotivo)"
-                  >
-                    apagar
-                  </Button>
-                  <button type="button" class="text-muted-foreground hover:text-foreground" title="Deixar como está" @click="videoApagando = null">
-                    <X class="size-3" />
-                  </button>
-                </div>
-                <div v-else-if="row.video_status === 'enviado' && row.video_link" class="flex items-center gap-1">
-                  <a
-                    :href="normalizeUrl(row.video_link)"
-                    target="_blank"
-                    rel="noopener"
-                    class="inline-flex items-center gap-1 text-primary underline min-w-0"
-                    :title="`Enviado por ${row.video_enviado_por || '?'} em ${fmtDateTime(row.video_enviado_em)}\n${row.video_link}`"
-                  >
-                    <ExternalLink class="size-3 shrink-0" />
-                    <span class="truncate max-w-[120px]">{{ row.video_link.replace(/^https?:\/\//i, '') }}</span>
-                  </a>
-                  <button
-                    v-if="canEdit"
-                    type="button"
-                    class="text-muted-foreground hover:text-red-500"
-                    title="Apagar o link e pedir pra equipe refazer"
-                    @click="abrirApagarVideo(row)"
-                  >
-                    <Trash2 class="size-3" />
-                  </button>
-                </div>
-                <div v-else-if="row.video_status === 'pendente'" class="flex items-center gap-1">
-                  <span
-                    class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 whitespace-nowrap"
-                    :title="`Pedido por ${row.video_solicitado_por || '?'} em ${fmtDateTime(row.video_solicitado_em)}${row.video_refazer_motivo ? ' — refazer: ' + row.video_refazer_motivo : ''}. A equipe do SKU vê no Controle de Estoque.`"
-                  >
-                    <Clock class="size-3" />
-                    {{ row.video_refazer_motivo ? 'refazer' : 'solicitado' }} {{ fmtDate(row.video_solicitado_em) }}
-                  </span>
-                  <button
-                    v-if="canEdit"
-                    type="button"
-                    class="text-muted-foreground hover:text-red-500 disabled:opacity-50"
-                    :disabled="isSavingRastreio(row.pedido_bling, 'video')"
-                    title="Cancelar a solicitação (pedido por engano)"
-                    @click="cancelarVideo(row)"
-                  >
-                    <X class="size-3" />
-                  </button>
-                </div>
-                <div v-else-if="row.video_status === 'sem_video'" class="flex items-center gap-1">
-                  <span
-                    class="inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300 truncate max-w-[120px]"
-                    :title="`${row.video_enviado_por || '?'} em ${fmtDateTime(row.video_enviado_em)}: ${row.video_sem_motivo || ''}`"
-                  >
-                    sem vídeo: {{ row.video_sem_motivo }}
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    class="h-6 px-1.5 text-[11px]"
-                    :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'video')"
-                    title="Pedir o vídeo de novo"
-                    @click="solicitarVideo(row)"
-                  >
-                    <RotateCcw class="size-3" />
-                  </Button>
-                </div>
-                <Button
-                  v-else
-                  size="sm"
-                  variant="outline"
-                  class="h-6 px-2 text-[11px]"
-                  :disabled="!canEdit || isSavingRastreio(row.pedido_bling, 'video')"
-                  title="Pedir o vídeo da expedição deste pedido à equipe do SKU (Controle de Estoque)"
-                  @click="solicitarVideo(row)"
-                >
-                  <Video class="size-3 mr-1" />
-                  solicitar
-                </Button>
-              </td>
-              <td class="px-2 py-1 text-center bg-emerald-50/40 dark:bg-emerald-900/10">
-                <span
-                  v-if="row.lancada"
-                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
-                  title="Este pedido já tem devolução lançada na aba Lançamentos"
-                >
-                  <CheckCircle2 class="size-3" />
-                  lançada
-                </span>
-                <Button
-                  v-else
-                  size="sm"
-                  variant="outline"
-                  class="h-6 px-2 text-[11px]"
-                  :disabled="!canEdit"
-                  title="Abrir a aba Lançamentos com este pedido já buscado"
-                  @click="goLancar(row)"
-                >
-                  lançar
-                </Button>
-              </td>
-              <td class="px-1 py-0.5 text-center bg-emerald-50/40 dark:bg-emerald-900/10">
-                <!-- Cairo 10/11: mudar o painel é só de admin ou de quem tem
-                     "mover entre Acompanhamento e Fraude"; os demais só veem
-                     se o pedido segue a plataforma ou foi fixado na mão. -->
-                <div v-if="canMover" class="inline-flex items-center gap-1">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    class="h-6 px-2 text-[11px]"
-                    :disabled="isSavingRastreio(row.pedido_bling, 'fila')"
-                    :title="(row.fila_manual ? 'Movido na mão. ' : 'Classificado pela plataforma. ') + (row.fila === 'fraude' ? 'Mandar de volta pro Acompanhamento (volta pacote)' : 'Mandar pra Fraude (só dinheiro, não volta pacote)')"
-                    @click="moverFila(row, row.fila === 'fraude' ? 'acompanhamento' : 'fraude')"
-                  >
-                    <ArrowRightLeft class="size-3 mr-1" />
-                    {{ row.fila === 'fraude' ? 'Acompanhamento' : 'Fraude' }}
-                  </Button>
-                  <Button
-                    v-if="row.fila_manual"
-                    size="sm"
-                    variant="ghost"
-                    class="h-6 w-6 p-0"
-                    :disabled="isSavingRastreio(row.pedido_bling, 'fila')"
-                    title="Soltar: o pedido foi fixado na mão neste painel. Soltando, ele volta pro painel que a plataforma indica e acompanha as mudanças do caso."
-                    @click="moverFila(row, 'regra')"
-                  >
-                    <Undo2 class="size-3" />
-                  </Button>
-                </div>
-                <span
-                  v-else
-                  class="text-[11px] text-muted-foreground"
-                  :title="row.fila_manual ? 'Fixado neste painel na mão. Só o admin ou quem tem a permissão de mover muda o painel.' : 'O painel segue a plataforma: Fraude = não volta pacote (só dinheiro). Só o admin ou quem tem a permissão de mover muda.'"
-                >
-                  {{ row.fila_manual ? 'fixado na mão' : 'automático' }}
-                </span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </template>
-
-    <!-- ══ Aba Lançamentos — conteúdo original da página, intacto ══ -->
-    <div v-if="tab === 'lancamentos' && error" class="flex items-center gap-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm text-red-400">
-      <AlertCircle class="size-4" />
-      {{ error }}
-    </div>
-
-    <div v-show="tab === 'lancamentos'" class="grid grid-cols-2 lg:grid-cols-3 gap-2">
-      <StatCard label="Total devoluções" :value="qtd(totalPedidos, 'pedido', 'pedidos')" :hint="qtd(total, 'item', 'itens')" :icon="Undo2" compact />
-      <StatCard label="Enviada para Reembolso" :value="qtd(reembolsoPedidos, 'pedido', 'pedidos')" :hint="qtd(reembolsoItens, 'item', 'itens')" :icon="Clock" tone="warning" compact />
-      <StatCard label="Custo manutenção (pág.)" :value="brl(totalCustoManutencao)" tone="danger" compact />
-    </div>
-
-    <div v-if="tab === 'lancamentos' && addOpen" class="rounded-md border bg-background">
-      <div class="flex flex-wrap items-end gap-3 border-b px-3 py-3">
-        <label class="space-y-1">
-          <span class="text-[11px] font-medium text-muted-foreground">Buscar pedido</span>
-          <div class="relative">
-            <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-            <input
-              v-model="lookupPedido"
-              class="h-9 w-80 rounded-md border bg-background pl-8 pr-3 text-sm"
-              placeholder="Pedido, nome do cliente ou CEP"
-              @keydown.enter.prevent="lookupOrder"
-            />
-          </div>
-        </label>
-        <Button size="sm" :disabled="lookupLoading || !lookupPedido.trim()" @click="lookupOrder">
-          <Loader2 v-if="lookupLoading" class="size-4 mr-1.5 animate-spin" />
-          <Search v-else class="size-4 mr-1.5" />
-          buscar
-        </Button>
-        <Button size="sm" variant="ghost" @click="closeAdd">
-          <X class="size-4 mr-1.5" />
-          fechar
-        </Button>
-        <span v-if="lookupError" class="text-sm text-red-400">{{ lookupError }}</span>
-      </div>
-
-      <div v-if="expandedLookupResults.length > 0" class="overflow-auto border-b">
-        <table class="w-full text-xs border-collapse">
-          <thead class="bg-background">
-            <tr>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Data</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]">Pedido Bling</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[155px]">Pedido Marketplace</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[155px]">Conta</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px]">Cliente</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]">CEP</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]">SKU</th>
-              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[50px]">Qtd</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produto</th>
-              <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Custo</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="(row, i) in expandedLookupResults"
-              :key="`${row.pedido_bling}-${row.sku}-${row.conta}-${i}`"
-              class="border-t"
-              :class="isAlreadyAdded(row) ? 'opacity-50' : ''"
-            >
-              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
-              <td class="px-2 py-1 font-mono">{{ row.pedido_bling || '—' }}</td>
-              <td class="px-2 py-1 font-mono text-muted-foreground">{{ row.pedido_marketplace || '—' }}</td>
-              <td class="px-2 py-1">{{ row.conta }}</td>
-              <td class="px-2 py-1">{{ row.nome_destinatario || '—' }}</td>
-              <td class="px-2 py-1 font-mono text-muted-foreground">{{ row.cep_destino || '—' }}</td>
-              <td class="px-2 py-1 font-mono text-xs">{{ row.sku || '—' }}</td>
-              <td class="px-2 py-1 text-center tabular-nums">{{ row.quantidade ?? '—' }}</td>
-              <td class="px-2 py-1 text-muted-foreground">{{ row.produtos || '—' }}</td>
-              <td v-if="isAdmin" class="px-2 py-1 text-right tabular-nums">{{ brl(row.custo_produto) }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Um único "usar" para o pedido inteiro — traz todos os produtos como rascunho. -->
-      <div
-        v-if="expandedLookupResults.length > 0 && !drafts.length"
-        class="flex flex-wrap items-center gap-3 border-b px-3 py-2"
-      >
-        <Button size="sm" :disabled="!canEdit || selectableLookupCount === 0" @click="selectAllProducts">
-          <Plus class="size-4 mr-1.5" />
-          usar {{ selectableLookupCount }} produto{{ selectableLookupCount === 1 ? '' : 's' }}
-        </Button>
-        <span v-if="selectableLookupCount === 0" class="text-xs text-muted-foreground">
-          todos os produtos deste pedido já foram adicionados
-        </span>
-      </div>
-
-      <div v-if="drafts.length" class="overflow-auto">
-        <table class="min-w-[1600px] w-full text-xs border-collapse">
-          <thead class="bg-background">
-            <tr>
-              <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="6">Identificação</th>
-              <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 9 : 8">Devolução</th>
-            </tr>
-            <tr>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px]">Data</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]">Pedido Bling</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[155px]">Pedido Marketplace</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px]">Conta</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]">SKU</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produtos</th>
-              <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Condição</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-amber-50 dark:bg-amber-900/20" title="Link das fotos/vídeo feitos na expedição do pedido — prova pra contestar pacote vazio/item errado. Obrigatório pra mala e eletro quando o motivo abre chamado">Link envio</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
-              <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px] bg-amber-50 dark:bg-amber-900/20" title="Fotos da devolução — vão como evidência do chamado automático no Mercado Livre">Foto</th>
-              <!-- Reembolso saiu da tela (03/09): liga sozinho por custo+técnico
-                   / Extraviado / Sucata / Manutenção; segue no filtro, no card e no export. -->
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Motivo</th>
-              <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Devolver estoque</th>
-              <!-- Status Bling (17/09): pra onde mandar o pedido no Bling já no
-                   lançamento (uma escolha por pedido; aplicada depois de criar). -->
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-sky-50 dark:bg-sky-900/20" title="Situação do pedido no Bling. Escolha pra onde mandar ao lançar (uma escolha vale pro pedido inteiro). Vazio = não mexe — o lançamento continua mudando sozinho só em Extraviado / Sucata / Manutenção / Novo / Usado / Trocado.">Status Bling</th>
-              <!-- Observação já no lançamento (10/09): antes só dava pra
-                   preencher na listagem, depois de criar. Mesma coluna
-                   verde da tabela de baixo; o payload já mandava o campo. -->
-              <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(d, i) in drafts" :key="i" class="border-t">
-              <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(d.data) }}</td>
-              <td class="px-2 py-1 font-mono">{{ d.pedido_bling || '—' }}</td>
-              <td class="px-2 py-1 font-mono text-muted-foreground">{{ d.pedido_marketplace || '—' }}</td>
-              <td class="px-2 py-1">{{ d.conta }}</td>
-              <td class="px-2 py-1 font-mono">{{ d.sku || '—' }}</td>
-              <td class="px-2 py-1 text-muted-foreground">{{ d.produtos || '—' }}</td>
-              <td v-if="isAdmin" class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-                <input v-model.number="d.custo_produto" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
-              </td>
-              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <select v-model="d.condicao_produto" :class="sheetSelectClass" @change="(e) => { if (['Extraviado', 'Sucata', 'Manutenção'].includes((e.target as HTMLSelectElement).value)) d.reembolso = true }">
-                  <option value="">—</option>
-                  <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
-                </select>
-              </td>
-              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input
-                  v-model="d.link_envio"
-                  :class="(linkEnvioRequired(d.sku, d.motivo_devolucao) && !d.link_envio) || linkEnvioInvalido(d.link_envio) || linkEnvioNaoMega(d.link_envio, d.pedido_bling) ? sheetInputRequiredClass : sheetInputClass"
-                  :placeholder="linkEnvioRequired(d.sku, d.motivo_devolucao) ? 'obrigatório (mala/eletro)' : 'link da MEGA'"
-                  :title="linkEnvioInvalido(d.link_envio) ? MSG_LINK_ENVIO_INVALIDO : (linkEnvioNaoMega(d.link_envio, d.pedido_bling) || undefined)"
-                />
-              </td>
-              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input
-                  v-model="d.link_abertura"
-                  :class="linkRequired(d.condicao_produto) && !d.link_abertura ? sheetInputRequiredClass : sheetInputClass"
-                  :placeholder="linkRequired(d.condicao_produto) ? 'obrigatório' : ''"
-                />
-              </td>
-              <td class="px-1 py-0.5 text-center bg-amber-50/40 dark:bg-amber-900/10">
-                <label
-                  class="inline-flex cursor-pointer items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] hover:bg-muted"
-                  :class="d.fotos?.length ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'"
-                  :title="d.fotos?.length ? d.fotos.map((f) => f.name).join(', ') : 'anexar foto (JPG/PNG/PDF) — sobe junto com o lançamento'"
-                >
-                  <Camera class="size-3.5" />
-                  {{ d.fotos?.length || '' }}
-                  <input type="file" multiple accept="image/jpeg,image/png,application/pdf" class="hidden" @change="(e) => pickDraftFotos(d, e)" />
-                </label>
-              </td>
-              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <select v-model="d.motivo_devolucao" :class="sheetSelectClass">
-                  <option value="">—</option>
-                  <option v-for="m in MOTIVOS_DEVOLUCAO" :key="m" :value="m">{{ m }}</option>
-                </select>
-              </td>
-              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <input v-model.number="d.custo_manutencao" type="text" inputmode="decimal" :class="sheetMoneyInputClass" />
-              </td>
-              <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-                <select v-model="d.tecnico" :class="sheetSelectClass">
-                  <option value="">—</option>
-                  <option v-for="t in TECNICOS" :key="t" :value="t">{{ t }}</option>
-                </select>
-              </td>
-              <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
-                <button
-                  v-if="canSeeStockToggle(d.condicao_produto)"
-                  type="button"
-                  role="switch"
-                  :aria-checked="d.devolver_estoque"
-                  :class="[
-                    'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
-                    d.devolver_estoque ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600',
-                  ]"
-                  @click="d.devolver_estoque = !d.devolver_estoque"
-                >
-                  <span
-                    :class="[
-                      'inline-block size-4 transform rounded-full bg-white shadow transition-transform',
-                      d.devolver_estoque ? 'translate-x-4' : 'translate-x-0.5',
-                    ]"
-                  />
-                </button>
-                <span v-else class="text-muted-foreground">—</span>
-              </td>
-              <td class="px-1 py-0.5 bg-sky-50/40 dark:bg-sky-900/10" :title="d.situacao_bling_nome ? `Hoje no Bling: ${d.situacao_bling_nome}` : ''">
-                <select v-model="addSituacaoId" :class="sheetSelectClass" :disabled="!canEdit">
-                  <option :value="null">{{ d.situacao_bling_nome ? `manter: ${d.situacao_bling_nome}` : 'não mexer' }}</option>
-                  <option v-for="sit in situacoesBling" :key="sit.id" :value="sit.id">{{ sit.nome }}</option>
-                </select>
-              </td>
-              <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-                <input v-model="d.observacao" :class="sheetInputClass" placeholder="observação" />
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Um único "adicionar" cria todos os produtos do rascunho de uma vez. -->
-      <div v-if="drafts.length" class="flex flex-wrap items-center justify-end gap-3 border-t px-3 py-2">
-        <span v-if="lookupError" class="mr-auto text-sm text-red-400">{{ lookupError }}</span>
-        <Button size="sm" :disabled="creating || !canEdit" @click="createAllDevolutions">
-          <Loader2 v-if="creating" class="size-4 mr-1.5 animate-spin" />
-          <Plus v-else class="size-4 mr-1.5" />
-          adicionar {{ drafts.length }} produto{{ drafts.length === 1 ? '' : 's' }}
-        </Button>
-      </div>
-    </div>
-
-    <div v-show="tab === 'lancamentos'" class="flex flex-wrap items-center gap-2">
-      <div class="relative">
-        <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-        <input
-          v-model="search"
-          class="h-9 w-72 rounded-md border bg-background pl-8 pr-3 text-sm"
-          placeholder="buscar pedido, conta, sku, motivo…"
-        />
-      </div>
-      <select v-model="reembolsoFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
-        <option value="all">todas</option>
-        <option value="true">enviada para reembolso</option>
-        <option value="false">sem reembolso</option>
-      </select>
-      <select
-        v-model="tagFilter"
-        class="h-9 rounded-md border bg-background px-2 text-sm"
-        title="Tag de origem: a do SKU vendido"
-      >
-        <option value="all">todas tags origem</option>
-        <option v-for="opt in TAG_OPTIONS" :key="opt.slug" :value="opt.slug">origem: {{ opt.label }}</option>
-      </select>
-      <select
-        v-model="tagDestinoFilter"
-        class="h-9 rounded-md border bg-background px-2 text-sm"
-        title="Tag de destino: a do SKU em que o item voltou ao estoque (selo verde em 'Data devolvido estoque'). Estornado não conta."
-      >
-        <option value="all">todas tags destino</option>
-        <option v-for="opt in TAG_OPTIONS" :key="opt.slug" :value="opt.slug">destino: {{ opt.label }}</option>
-      </select>
-      <select v-model="condicaoFilter" class="h-9 rounded-md border bg-background px-2 text-sm">
-        <option value="all">todas condições</option>
-        <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
-      </select>
-      <div class="flex items-center gap-1.5 h-9 rounded-md border bg-background px-2" title="Período da data de devolução">
-        <span class="text-xs text-muted-foreground">de</span>
-        <input
-          v-model="dataInicioFilter"
-          type="date"
-          :max="dataFimFilter || undefined"
-          title="Data inicial"
-          class="bg-transparent text-sm focus:outline-none"
-        />
-        <span class="text-xs text-muted-foreground">até</span>
-        <input
-          v-model="dataFimFilter"
-          type="date"
-          :min="dataInicioFilter || undefined"
-          title="Data final"
-          class="bg-transparent text-sm focus:outline-none"
-        />
-        <button
-          v-if="dataInicioFilter || dataFimFilter"
-          type="button"
-          title="Limpar período"
-          class="text-muted-foreground hover:text-foreground"
-          @click="dataInicioFilter = ''; dataFimFilter = ''"
-        >
-          <X class="size-3.5" />
+      <div class="ml-auto flex flex-wrap items-center justify-end gap-1.5 text-xs font-semibold">
+        <span class="text-[11px] font-normal text-muted-foreground">{{ lidoHa }}</span>
+        <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50" :disabled="loading" title="Recarrega a lista (ela também se atualiza sozinha a cada 2 minutos)" @click="load(); loadResumo()">
+          <RefreshCw class="size-3.5" :class="loading ? 'animate-spin' : ''" /> Atualizar
+        </button>
+        <button type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50" :disabled="!filtrados.length" :title="`Baixa as ${filtrados.length} linhas que estão aparecendo (arquivo que o Excel abre)`" @click="exportar">
+          <Download class="size-3.5" /> Excel
+        </button>
+        <button v-if="isAdmin" type="button" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted" title="Enviar no Threema a lista de pedidos aguardando devolução e escolher quem recebe os avisos de prazo" @click="informarOpen = true">
+          <Megaphone class="size-3.5" /> Informar
+        </button>
+        <a v-if="canEdit" href="/devolucoes-antigo?tab=lancamentos" target="_blank" rel="noopener" class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 font-normal text-muted-foreground hover:bg-muted" title="O que ainda mora na tela de antes: correção de estoque (entrada sem devolução), histórico completo dos lançamentos com os filtros de tag e a planilha deles">ferramentas antigas</a>
+        <button v-if="canEdit" type="button" class="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-primary px-2.5 py-1 text-primary-foreground" title="Lançar a devolução de um pedido que não está na lista (digite o número do Bling ou o da plataforma)" @click="novaDevolucao">
+          <Plus class="size-3.5" /> nova devolução
         </button>
       </div>
-      <label class="flex items-center gap-1.5 h-9 rounded-md border bg-background px-2.5 text-sm cursor-pointer select-none" title="Mostrar só pedidos que já passaram em manutenção">
-        <input v-model="manutencaoFilter" type="checkbox" class="size-4 rounded border accent-primary" />
-        <span class="whitespace-nowrap">manutenções realizadas</span>
+    </div>
+
+    <!-- Filtros -->
+    <div class="flex flex-wrap items-center gap-1.5 text-xs">
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2">
+        <span class="font-semibold text-muted-foreground">Conta</span>
+        <select v-model="contaFilter" class="max-w-[150px] bg-transparent outline-none">
+          <option value="all">Todas</option>
+          <option v-for="c in contas" :key="c" :value="c">{{ c }}</option>
+        </select>
       </label>
-      <select
-        v-if="isAdmin"
-        v-model="prazoDiasFilter"
-        class="h-9 rounded-md border bg-background px-2 text-sm"
-        title="Prazo de manutenção vencendo em até N dias (inclui vencidos)"
-      >
-        <option value="all">todos prazos</option>
-        <option value="vencidas">vencidas</option>
-        <option value="7">prazo em 7 dias</option>
-        <option value="15">prazo em 15 dias</option>
-        <option value="30">prazo em 30 dias</option>
-      </select>
-      <Button size="sm" variant="outline" :disabled="exporting" @click="exportXlsx">
-        <Download class="size-4 mr-1.5" :class="{ 'animate-pulse': exporting }" />
-        exportar xlsx
-      </Button>
-      <span class="ml-auto text-xs text-muted-foreground">
-        {{ rangeStart }}–{{ rangeEnd }} de {{ total }} · enviada p/ reembolso {{ reembolsoItens }} · manutenção {{ brl(totalCustoManutencao) }}
-      </span>
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="Abertas: o que ainda não foi resolvido. Resolvidas: o que saiu no botão Resolver nos últimos 60 dias.">
+        <span class="font-semibold text-muted-foreground">Mostrar</span>
+        <select v-model="mostrar" class="bg-transparent outline-none">
+          <option value="abertas">Abertas</option>
+          <option value="resolvidas">Resolvidas</option>
+          <option value="todas">Todas</option>
+        </select>
+      </label>
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="Fica guardado neste navegador: quem cuida da Fraude abre sempre na Fraude">
+        <span class="font-semibold text-muted-foreground">Etapa</span>
+        <select v-model="etapaFilter" class="bg-transparent outline-none">
+          <option value="all">Todas</option>
+          <option value="aguardando">Aguardando</option>
+          <option value="chegou">Chegou</option>
+          <option value="manutencao">Manutenção</option>
+          <option value="fraude">Fraude</option>
+        </select>
+      </label>
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="Período da data do pedido">
+        <span class="font-semibold text-muted-foreground">Período</span>
+        <input v-model="dataIni" type="date" :max="dataFim || undefined" class="bg-transparent outline-none" />
+        <span class="text-muted-foreground">até</span>
+        <input v-model="dataFim" type="date" :min="dataIni || undefined" class="bg-transparent outline-none" />
+      </label>
+      <label class="inline-flex h-7 min-w-0 items-center gap-1 rounded-md border bg-card px-2">
+        <Search class="size-3.5 text-muted-foreground" />
+        <input v-model="search" class="w-72 bg-transparent outline-none" placeholder="buscar pedido, produto, SKU, cliente, rastreio" />
+      </label>
+      <button v-if="filtrosAtivos" type="button" class="text-muted-foreground underline" @click="limparFiltros">limpar</button>
+      <span class="text-muted-foreground">{{ pedidos(filtrados) }} pedidos · {{ filtrados.length }} de {{ naAba.length }} produtos</span>
     </div>
 
-    <div v-show="tab === 'lancamentos'" class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
-      <table class="min-w-[2360px] text-xs border-collapse">
-        <thead class="sticky top-0 z-20 bg-background">
-          <tr>
-            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" colspan="9">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" :colspan="isAdmin ? 13 : 12">Devolução</th>
-            <th class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="1">Observação</th>
-            <th v-if="isAdmin" class="px-2 py-1 text-left text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-slate-50 dark:bg-slate-800/40" colspan="1">Atualização</th>
-          </tr>
-          <tr class="border-b">
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px]">Data</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]">Data Devolução</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px]">Pedido Bling</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[155px]">Pedido Marketplace</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px]">Conta</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px]">Cliente</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[130px]">SKU</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px]">Tags</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px]">Produtos</th>
-            <th v-if="isAdmin" class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Custo produto</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Condição</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-amber-50 dark:bg-amber-900/20" title="Link das fotos/vídeo feitos na expedição do pedido — prova pra contestar pacote vazio/item errado. Obrigatório pra mala e eletro quando o motivo abre chamado">Link envio</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Link abertura</th>
-            <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[60px] bg-amber-50 dark:bg-amber-900/20" title="Fotos e vídeos da devolução — as fotos vão como evidência do chamado automático na plataforma (ML, TikTok, Shopee)">Foto</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[180px] bg-amber-50 dark:bg-amber-900/20">Motivo</th>
-            <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px] bg-amber-50 dark:bg-amber-900/20" title="Chamado mais recente deste pedido na aba Chamados — clique pra abrir">Chamado</th>
-            <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Custo manutenção</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Técnico</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-amber-50 dark:bg-amber-900/20">Devolver estoque</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-amber-50 dark:bg-amber-900/20">Data devolvido estoque</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Prazo</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20" title="Até quando a plataforma aceita contestar a devolução recebida (Shopee/TikTok). Vermelho = menos de 24 h ou vencido.">Prazo contest.</th>
-            <!-- Status Bling (17/09): situação atual do pedido no Bling + seletor
-                 pra mudar na hora (mesmo PATCH da aba Status da Logística). -->
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-sky-50 dark:bg-sky-900/20" title="Situação atual do pedido no Bling. Escolher outra muda no Bling na hora (vale pro pedido inteiro) e o pedido sai das abas Acompanhamento/Fraude se deixar de ser Aguardando Devolução.">Status Bling</th>
-            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[240px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Observação</th>
-            <th v-if="isAdmin" class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[120px] bg-slate-50 dark:bg-slate-800/40 border-l-[3px] border-gray-400 dark:border-gray-600">Atualizado</th>
-            <th v-if="canDelete" class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[50px]"></th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-if="loading && !items.length">
-            <td :colspan="(isAdmin ? 25 : 23) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">
-              <Loader2 class="size-4 inline animate-spin mr-1.5" />
-              carregando…
-            </td>
-          </tr>
-          <tr v-else-if="!items.length">
-            <td :colspan="(isAdmin ? 25 : 23) + (canDelete ? 1 : 0)" class="py-8 text-center text-muted-foreground">sem registros</td>
-          </tr>
-          <tr
-            v-for="row in items"
-            :key="row.id"
-            class="border-t hover:brightness-95 dark:hover:brightness-110"
-            :class="isSaving(row.id) ? 'border-l-4 border-l-sky-400' : hasDirty(row.id) ? 'border-l-4 border-l-amber-400' : ''"
-          >
-            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">
-              <!-- Marca de linha não salva (22/09): antes, quando uma guarda
-                   barrava o save, o único sinal era o banner lá no topo da
-                   página — a operadora marcava "Novo", via o select mudar e saía
-                   achando que tinha lançado (caso 292128). Enquanto o save está
-                   no ar a marca é "salvando…" — o lançamento no Bling pode levar
-                   15 s e "não salvo" nesse meio-tempo parecia erro (caso 294247). -->
-              <span
-                v-if="isSaving(row.id)"
-                class="mr-1 inline-flex items-center gap-0.5 rounded bg-sky-100 px-1 text-[10px] font-semibold text-sky-800 dark:bg-sky-900/40 dark:text-sky-200"
-                title="Salvando esta linha — espere terminar antes de repetir"
-              ><Loader2 class="size-2.5 animate-spin" />salvando…</span>
-              <span
-                v-else-if="hasDirty(row.id)"
-                class="mr-1 rounded bg-amber-100 px-1 text-[10px] font-semibold text-amber-800 dark:bg-amber-900/40 dark:text-amber-200"
-                title="Alterações não salvas nesta linha — o salvamento foi barrado ou ainda não aconteceu"
-              >não salvo</span>
-              {{ fmtDateTime(row.data) }}
-            </td>
-            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.created_at) }}</td>
-            <td class="px-2 py-1 font-mono whitespace-nowrap">{{ row.pedido_bling || '—' }}</td>
-            <td class="px-2 py-1 font-mono text-muted-foreground whitespace-nowrap">{{ row.pedido_marketplace || '—' }}</td>
-            <td class="px-2 py-1 whitespace-nowrap">{{ row.conta }}</td>
-            <td class="px-2 py-1 whitespace-nowrap">{{ row.cliente || '—' }}</td>
-            <td class="px-2 py-1 font-mono text-xs">{{ row.sku || '—' }}</td>
-            <td class="px-2 py-1 text-xs text-muted-foreground whitespace-nowrap">{{ tagLabel(row.tag) }}</td>
-            <td class="px-2 py-1 text-muted-foreground">{{ row.produtos || '—' }}</td>
-            <td v-if="isAdmin" class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-              <input
-                :value="row.custo_produto ?? ''"
-                :disabled="!canEdit"
-                type="text"
-                inputmode="decimal"
-                :class="sheetMoneyInputClass"
-                @input="(e) => setRowNumber(row, 'custo_produto', (e.target as HTMLInputElement).value)"
-                @blur="saveRow(row)"
-              />
-            </td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <select
-                :value="row.condicao_produto || ''"
-                :disabled="!canEdit"
-                :class="sheetSelectClass"
-                @change="(e) => changeRowCondicao(row, (e.target as HTMLSelectElement).value)"
-              >
-                <option value="">—</option>
-                <option v-for="c in CONDICOES_PRODUTO" :key="c" :value="c">{{ c }}</option>
-                <option
-                  v-if="row.condicao_produto && !(CONDICOES_PRODUTO as readonly string[]).includes(row.condicao_produto)"
-                  :value="row.condicao_produto"
-                >{{ row.condicao_produto }}</option>
-              </select>
-            </td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <div class="flex items-center gap-1">
-                <input
-                  :value="row.link_envio || ''"
-                  :disabled="!canEdit"
-                  :class="(linkEnvioRequired(row.sku, row.motivo_devolucao) && !row.link_envio) || linkEnvioInvalido(row.link_envio) || linkEnvioNaoMegaRow(row) ? sheetInputRequiredClass : sheetInputClass"
-                  :placeholder="linkEnvioRequired(row.sku, row.motivo_devolucao) ? 'obrigatório (mala/eletro)' : 'link da MEGA'"
-                  :title="linkEnvioLegado(row) ? MSG_LINK_ENVIO_LEGADO : (linkEnvioInvalido(row.link_envio) ? MSG_LINK_ENVIO_INVALIDO : (linkEnvioNaoMegaRow(row) || undefined))"
-                  @input="(e) => setRowText(row, 'link_envio', (e.target as HTMLInputElement).value)"
-                  @blur="saveRow(row)"
-                />
-                <a
-                  v-if="row.link_envio"
-                  :href="normalizeUrl(row.link_envio)"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title="Abrir em nova guia"
-                  class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-                >
-                  <ExternalLink class="size-3.5" />
-                </a>
-              </div>
-            </td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <div class="flex items-center gap-1">
-                <input
-                  :value="row.link_abertura || ''"
-                  :disabled="!canEdit"
-                  :class="linkRequired(row.condicao_produto) && !row.link_abertura ? sheetInputRequiredClass : sheetInputClass"
-                  :placeholder="linkRequired(row.condicao_produto) ? 'obrigatório' : ''"
-                  @input="(e) => setRowText(row, 'link_abertura', (e.target as HTMLInputElement).value)"
-                  @blur="saveRow(row)"
-                />
-                <a
-                  v-if="row.link_abertura"
-                  :href="normalizeUrl(row.link_abertura)"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  title="Abrir em nova guia"
-                  class="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-                >
-                  <ExternalLink class="size-3.5" />
-                </a>
-              </div>
-            </td>
-            <td class="px-1 py-0.5 text-center bg-amber-50/40 dark:bg-amber-900/10">
-              <button
-                type="button"
-                class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] hover:bg-muted"
-                :class="(row.anexos || []).length ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'"
-                title="Fotos e vídeos da devolução — as fotos vão como evidência do chamado no Mercado Livre"
-                @click="openAnexos(row)"
-              >
-                <Camera class="size-3.5" />
-                {{ (row.anexos || []).length || '' }}
-              </button>
-            </td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <select
-                :value="row.motivo_devolucao || ''"
-                :disabled="!canEdit"
-                :class="sheetSelectClass"
-                @change="(e) => { setRowText(row, 'motivo_devolucao', (e.target as HTMLSelectElement).value); saveRow(row) }"
-              >
-                <option value="">—</option>
-                <option v-for="m in MOTIVOS_DEVOLUCAO" :key="m" :value="m">{{ m }}</option>
-                <option
-                  v-if="row.motivo_devolucao && !(MOTIVOS_DEVOLUCAO as readonly string[]).includes(row.motivo_devolucao)"
-                  :value="row.motivo_devolucao"
-                >{{ row.motivo_devolucao }}</option>
-              </select>
-            </td>
-            <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
-              <NuxtLink
-                v-if="row.tem_chamado"
-                :to="{ path: '/chamados', query: row.pedido_bling ? { search: row.pedido_bling } : {} }"
-                class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium hover:brightness-95 dark:hover:brightness-110"
-                :class="row.chamado_resolvido
-                  ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300'
-                  : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'"
-                :title="row.chamado_resolvido ? 'Chamado resolvido — abrir na aba Chamados' : 'Chamado em aberto — abrir na aba Chamados'"
-              >
-                <CheckCircle2 v-if="row.chamado_resolvido" class="size-3" />
-                <Clock v-else class="size-3" />
-                {{ row.chamado_numero || 'sim' }}
-              </NuxtLink>
-              <span v-else class="text-muted-foreground">—</span>
-              <div
-                v-if="row.chamado_ml_status"
-                class="mt-0.5 max-w-[140px] whitespace-normal text-[10px] leading-tight"
-                :class="mlStatusClass(row)"
-                :title="mlStatusLabel(row)"
-              >{{ mlStatusLabel(row) }}</div>
-              <div
-                v-if="row.senha_status"
-                class="mt-0.5 max-w-[140px] whitespace-normal text-[10px] leading-tight"
-                :class="senhaClass(row)"
-                :title="senhaLabel(row)"
-              >{{ senhaLabel(row) }}<button
-                  v-if="podePedirSenhaDeNovo(row)"
-                  type="button"
-                  class="ml-1 inline-flex items-center rounded border border-current px-1 align-middle text-[10px] font-medium hover:bg-red-50 disabled:opacity-50 dark:hover:bg-red-900/20"
-                  :disabled="pedindoSenha.has(row.id)"
-                  title="Pedir de novo a senha ao comprador (resolva antes o que impediu, ex.: loja deslogada)"
-                  @click.stop="pedirSenhaDeNovo(row)"
-                >{{ pedindoSenha.has(row.id) ? '…' : '↻ pedir de novo' }}</button></div>
-            </td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <input
-                :value="row.custo_manutencao ?? ''"
-                :disabled="!canEdit"
-                type="text"
-                inputmode="decimal"
-                :class="sheetMoneyInputClass"
-                @input="(e) => setRowNumber(row, 'custo_manutencao', (e.target as HTMLInputElement).value)"
-                @blur="saveRow(row)"
-              />
-            </td>
-            <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
-              <select
-                :value="row.tecnico || ''"
-                :disabled="!canEdit"
-                :class="sheetSelectClass"
-                @change="(e) => { setRowText(row, 'tecnico', (e.target as HTMLSelectElement).value); saveRow(row) }"
-              >
-                <option value="">—</option>
-                <option v-for="t in TECNICOS" :key="t" :value="t">{{ t }}</option>
-                <option
-                  v-if="row.tecnico && !(TECNICOS as readonly string[]).includes(row.tecnico)"
-                  :value="row.tecnico"
-                >{{ row.tecnico }}</option>
-              </select>
-            </td>
-            <td class="px-2 py-1 text-center bg-amber-50/40 dark:bg-amber-900/10">
-              <button
-                v-if="canSeeStockToggle(row.condicao_produto)"
-                type="button"
-                role="switch"
-                :aria-checked="row.devolver_estoque"
-                :disabled="!canEdit"
-                :class="[
-                  'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:cursor-default disabled:opacity-70',
-                  row.devolver_estoque ? 'bg-primary' : 'bg-gray-300 dark:bg-gray-600',
-                ]"
-                @click="toggleRowDevolverEstoque(row)"
-              >
-                <span
+    <!-- Cartões -->
+    <div class="grid grid-cols-2 gap-2 lg:grid-cols-5">
+      <button
+        v-for="k in cartoes"
+        :key="k.label"
+        type="button"
+        class="rounded-md border bg-card px-3 py-1.5 text-center hover:bg-muted/40 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        :class="cartaoLigado(k.k) ? 'ring-2 ring-primary' : ''"
+        @click="clicarCartao(k.k)"
+      >
+        <span class="block text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{{ k.label }}</span>
+        <span class="block text-xl font-bold leading-tight" :class="k.cor">{{ k.n }}</span>
+        <span class="block text-[10px] leading-tight text-muted-foreground">{{ k.sub }}</span>
+      </button>
+    </div>
+
+    <!-- Status Bling -->
+    <div v-if="statusPills.length" class="flex flex-wrap items-center gap-3 rounded-md border bg-card px-3 py-1.5 text-xs">
+      <span class="text-[13px]">Status Bling dos pedidos</span>
+      <button
+        v-for="sp in statusPills"
+        :key="sp.nome"
+        type="button"
+        class="inline-flex items-center gap-1.5 rounded bg-muted px-2 py-0.5 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+        :class="recorte === `bling:${sp.nome}` ? 'ring-2 ring-primary' : ''"
+        @click="alternarRecorte(`bling:${sp.nome}`)"
+      >
+        <span class="size-[7px] rounded-full" :class="sp.dot" />
+        {{ sp.n }} {{ sp.nome }}
+      </button>
+      <span class="ml-auto hidden text-[11px] text-muted-foreground lg:inline">clique numa etiqueta ou num cartão para filtrar</span>
+    </div>
+
+    <div v-if="error" class="text-sm text-red-500">erro: {{ error }}</div>
+
+    <!-- "Onde agir hoje" fica do lado só em tela bem larga. Nas outras vai pra
+         cima da lista, em faixa: a tabela tem 18 colunas e precisa da largura. -->
+    <div class="flex flex-col gap-3 min-[2350px]:grid min-[2350px]:grid-cols-[minmax(0,1fr)_340px] min-[2350px]:items-start">
+      <div class="flex min-w-0 flex-col gap-2.5">
+        <!-- Tabela -->
+        <div class="flex min-w-0 flex-col rounded-md border bg-card">
+          <div class="relative flex items-center justify-center rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+            <span>Devoluções — uma linha por produto</span>
+            <span class="absolute right-3 hidden text-[11px] font-normal text-slate-300 2xl:block">entra sozinho quando cai em Aguardando Devolução × sai só no Resolver</span>
+          </div>
+          <div class="overflow-x-auto">
+            <!-- Larguras fixas em tudo, menos na Localização: "o que sobrar deixa a
+                 localização" (Vinicius, mesma regra da Logística). Com o menu lateral
+                 aberto em tela de 1920 sobra uma rolagem curta pro lado; com ele
+                 recolhido cabe tudo. -->
+            <table class="w-full table-fixed border-collapse text-[11.5px]" :class="veCusto ? 'min-w-[1684px]' : 'min-w-[1600px]'">
+              <colgroup>
+                <col class="w-[42px]"><col class="w-[58px]"><col class="w-[120px]"><col class="w-[76px]"><col class="w-[112px]"><col class="w-[150px]">
+                <col class="w-[90px]"><col class="w-[36px]"><col class="w-[90px]"><col class="w-[70px]"><col>
+                <col class="w-[40px]"><col class="w-[60px]"><col class="w-[36px]">
+                <col class="w-[150px]"><col class="w-[96px]"><col class="w-[92px]"><col v-if="veCusto" class="w-[84px]"><col class="w-[160px]">
+              </colgroup>
+              <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" colspan="6">Pedido</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="5">Devolução</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="3">Provas</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="veCusto ? 5 : 4">Lançamento</th>
+                </tr>
+                <tr>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Data do pedido">Data</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido no Bling">Bling</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido na plataforma (um clique seleciona para copiar)">Nº na plataforma</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold">Conta</th>
+                  <th class="border-b px-1.5 py-1 text-left font-semibold" title="SKU da venda">SKU</th>
+                  <th class="border-b px-1.5 py-1 text-left font-semibold">Produto</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" title="Aguardando = o pacote não chegou · Chegou = chegou (falta lançar ou já lançada) · Manutenção = com o técnico · Fraude = não volta pacote, só dinheiro">Etapa</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Há quantos dias o pedido está em devolução (desde que caiu em Aguardando Devolução). Não recomeça quando a etapa muda.">Dias</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="O prazo que está correndo nesta etapa, o mais próximo de vencer. A palavra de baixo diz do que é: disputa, responder, contestar, pacote chegar (45 dias) ou técnico (30 dias).">Prazo</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold leading-tight" title="O dinheiro já voltou pro cliente? Sim = a plataforma devolveu e desconta da loja. Não = ainda está com a gente.">Reemb. cliente</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold">Localização</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" title="Vídeo da expedição do pedido">Envio</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Vídeo da abertura do pacote que voltou">Abertura</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Fotos da devolução">Foto</th>
+                  <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" title="Uma linha por peça lançada: como ficou (Novo, Usado, Perdimento, no técnico) e o SKU em que entrou no estoque">Condição</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Chamado mais recente do pedido. O botãozinho abre na aba Chamados.">Chamado</th>
+                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Situação do pedido no Bling">Status Bling</th>
+                  <th v-if="veCusto" class="border-b px-1.5 py-1 text-center font-semibold" title="A conta da devolução, por pedido: o que o chamado ganhou menos o custo (produto perdido ou conserto)">Reembolso</th>
+                  <th class="border-b px-1.5 py-1 text-left font-semibold" title="Observação do pedido">Obs.</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-if="loading && !items.length">
+                  <td :colspan="veCusto ? 19 : 18" class="py-8 text-center text-muted-foreground"><RefreshCw class="mr-1.5 inline size-4 animate-spin" /> carregando…</td>
+                </tr>
+                <tr
+                  v-for="(i, n) in filtrados"
+                  :key="`${i.pedido_bling}|${i.sku}|${n}`"
+                  class="cursor-pointer border-b align-middle hover:bg-muted/40"
                   :class="[
-                    'inline-block size-4 transform rounded-full bg-white shadow transition-transform',
-                    row.devolver_estoque ? 'translate-x-4' : 'translate-x-0.5',
+                    janela && janela.pedido === i.pedido_bling ? 'bg-blue-50 shadow-[inset_3px_0_0_hsl(var(--primary))] dark:bg-blue-950/30' : '',
+                    !(janela && janela.pedido === i.pedido_bling) && !i.resolvido && urgente(i) ? 'bg-red-50/70 shadow-[inset_3px_0_0_#dc2626] dark:bg-red-950/30' : '',
+                    i.resolvido ? 'opacity-70' : '',
                   ]"
-                />
-              </button>
-              <span v-else class="text-muted-foreground">—</span>
-            </td>
-            <td class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-amber-50/40 dark:bg-amber-900/10">
-              <div v-if="estoquePendente(row)" class="flex flex-col items-start gap-0.5 max-w-[15rem] whitespace-normal" :data-estoque-status="row.estoque_status">
-                <span
-                  v-if="row.estoque_status === 'conferindo'"
-                  data-estoque-badge="conferindo"
-                  title="O Bling respondeu com erro depois de receber: a entrada pode ter acontecido. O DaVinci confere sozinho em até 10 min — não lance de novo."
-                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
+                  @click="abrirJanela(i)"
                 >
-                  <Loader2 class="size-3 shrink-0 animate-spin" />
-                  Conferindo no Bling…
-                </span>
-                <span
-                  v-else-if="row.estoque_status === 'falhou'"
-                  data-estoque-badge="falhou"
-                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300"
-                >
-                  <AlertCircle class="size-3 shrink-0" />
-                  Estoque NÃO entrou
-                </span>
-                <span
-                  v-else
-                  data-estoque-badge="sem_confirmacao"
-                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300"
-                >
-                  <AlertTriangle class="size-3 shrink-0" />
-                  {{ temEstornoPendente(row) ? 'Estorno não confirmado' : 'Entrada não confirmada' }}
-                </span>
-                <span v-if="row.estoque_erro && row.estoque_status !== 'conferindo'" class="text-[11px] leading-tight text-muted-foreground">{{ row.estoque_erro }}</span>
-                <span
-                  v-if="tentandoSozinho(row)"
-                  data-estoque-tentando-sozinho
-                  class="inline-flex items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-300"
-                >
-                  <Loader2 class="size-3 shrink-0 animate-spin" />
-                  tentando de novo sozinho ({{ row.estoque_auto_tentativas ?? 0 }} de 5)
-                </span>
-                <span class="text-[10px] text-muted-foreground">pedido em {{ fmtDateTime(row.estoque_tentativa_at || row.data_devolvido_estoque) }}</span>
-                <div v-if="canEdit && row.estoque_status !== 'conferindo'" class="mt-0.5 flex flex-wrap gap-1">
-                  <button
-                    v-if="row.estoque_status === 'sem_confirmacao'"
-                    type="button"
-                    data-estoque-ja-entrou
-                    :disabled="tentandoEstoque.has(row.id) || isSaving(row.id)"
-                    :title="temEstornoPendente(row) ? 'Você viu a saída do estorno no extrato do Bling: o DaVinci só registra (não lança nada)' : 'Você viu a entrada no extrato do Bling: o DaVinci só registra (não lança nada)'"
-                    class="inline-flex items-center gap-1 rounded border border-emerald-300 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-60 dark:text-emerald-300"
-                    @click="estoqueJaEntrou(row)"
+                  <td class="px-1.5 py-1.5 text-center text-muted-foreground" :title="ddmmaaaa(i.data)">{{ ddmm(i.data) }}</td>
+                  <td class="px-1.5 py-1.5 text-center font-mono font-bold" :class="primeiraVisivel(n) ? '' : 'text-muted-foreground'">{{ i.pedido_bling || '—' }}</td>
+                  <td class="truncate px-1.5 py-1.5 text-center font-mono text-[10.5px]" :title="i.pedido_marketplace || undefined">
+                    <span v-if="i.pedido_marketplace" class="cursor-text select-all" @click.stop>{{ i.pedido_marketplace }}</span><span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td class="px-1.5 py-1.5 text-center leading-tight" :title="i.loja || ''">
+                    <div class="truncate">{{ contaDe(i) }}</div>
+                    <div v-if="plataformaTab === 'todas'" class="truncate text-[10px] text-muted-foreground">{{ PLATAFORMA_NOME[plataformaKey(i.plataforma)] || i.plataforma }}</div>
+                  </td>
+                  <td class="truncate px-1.5 py-1.5 font-mono text-[10.5px]" :title="i.sku || ''">{{ i.sku || '—' }}</td>
+                  <td class="px-1.5 py-1.5" :title="i.produto || ''">
+                    <div class="line-clamp-2 break-words leading-tight">{{ i.produto || '—' }}<b v-if="i.quantidade && i.quantidade > 1"> ×{{ i.quantidade }}</b></div>
+                  </td>
+                  <td class="border-l border-l-slate-300 px-1.5 py-1.5 text-center leading-tight dark:border-l-slate-600">
+                    <span class="inline-block w-[84px] rounded py-0.5 text-[11px] font-semibold" :class="ETAPA_COR[i.etapa]">{{ ETAPA_LABEL[i.etapa] }}</span>
+                    <div v-if="i.resolvido" class="text-[10px] font-semibold text-emerald-700 dark:text-emerald-400">resolvida</div>
+                    <div v-else-if="i.etapa === 'chegou' && !i.falta_lancar" class="text-[10px] text-muted-foreground">lançada</div>
+                  </td>
+                  <td class="px-1.5 py-1.5 text-center tabular-nums" :title="i.aguardando_devolucao_data ? `em devolução desde ${ddmmaaaa(i.aguardando_devolucao_data)}${i.aguardando_devolucao_data_estimada ? ' (data estimada)' : ''}` : ''">{{ i.dias_em_devolucao ?? '—' }}</td>
+                  <td class="whitespace-nowrap px-1.5 py-1.5 text-center leading-tight" :title="i.prazo_dica || i.prazo_texto || i.amazon_cancelar_texto || ''">
+                    <template v-if="i.prazo_tipo">
+                      <div :class="prazoCor(i)">{{ prazoTexto(i) }}</div>
+                      <div class="text-[10px] text-muted-foreground">{{ i.prazo_tipo }}</div>
+                    </template>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td class="whitespace-nowrap px-1.5 py-1.5 text-center leading-tight" :title="i.reembolso_detalhe || ''">
+                    <template v-if="i.reembolso != null">
+                      <div>{{ i.reembolso ? 'Sim' : 'Não' }}</div>
+                      <div v-if="i.reembolso && i.reembolso_valor != null" class="text-[10px] text-muted-foreground">{{ brl(i.reembolso_valor) }}</div>
+                    </template>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td class="px-1.5 py-1.5 leading-tight" :title="[i.localizacao, i.entrega_localizacao].filter(Boolean).join(' · ')">
+                    <div v-if="i.etapa === 'fraude' && !i.localizacao" class="text-muted-foreground">não volta pacote</div>
+                    <div v-else class="line-clamp-2 break-words">{{ i.localizacao || '—' }}</div>
+                    <div v-if="i.devolucao_chegou_em" class="text-[10px] text-muted-foreground">chegou {{ ddmm(i.devolucao_chegou_em) }}</div>
+                    <div v-else-if="i.localizacao_data" class="text-[10px] text-muted-foreground">últ. mov. {{ ddmm(i.localizacao_data) }}</div>
+                  </td>
+                  <td class="border-l border-l-slate-300 px-1.5 py-1.5 text-center dark:border-l-slate-600" :title="i.video_status === 'pendente' ? `pedido à equipe em ${ddmm(i.video_solicitado_em)}` : i.video_sem_motivo ? `sem vídeo: ${i.video_sem_motivo}` : ''">
+                    <Check v-if="i.video_link" class="inline size-3.5 text-emerald-700 dark:text-emerald-400" />
+                    <span v-else-if="i.video_status === 'pendente'" class="text-[10.5px] font-semibold text-amber-700 dark:text-amber-400">pedido</span>
+                    <span v-else-if="i.video_status === 'sem_video'" class="text-[10.5px] text-red-600 dark:text-red-400">sem</span>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td class="px-1.5 py-1.5 text-center">
+                    <Check v-if="temAbertura(i)" class="inline size-3.5 text-emerald-700 dark:text-emerald-400" /><span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td class="px-1.5 py-1.5 text-center">
+                    <Check v-if="temFoto(i)" class="inline size-3.5 text-emerald-700 dark:text-emerald-400" /><span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td class="border-l border-l-slate-300 px-1.5 py-1.5 leading-snug dark:border-l-slate-600">
+                    <template v-if="lancamentosDaLinha(i, n).length">
+                      <div v-for="l in lancamentosDaLinha(i, n).slice(0, 3)" :key="l.id" class="flex items-center gap-1.5 py-[1px]" :title="tituloLanc(l)">
+                        <span class="inline-block min-w-[72px] shrink-0 whitespace-nowrap rounded px-1 py-[1px] text-center text-[10.5px] font-semibold" :class="etiquetaLanc(l).cor">{{ etiquetaLanc(l).texto }}</span>
+                        <span class="truncate font-mono text-[10.5px]" :class="l.sku_lancado ? '' : 'text-muted-foreground'">{{ l.sku_lancado || l.sku }}</span>
+                      </div>
+                      <div v-if="lancamentosDaLinha(i, n).length > 3" class="text-[10px] text-muted-foreground">+{{ lancamentosDaLinha(i, n).length - 3 }} peça(s)</div>
+                    </template>
+                    <div v-else class="text-center text-muted-foreground">—</div>
+                    <div v-if="primeiraVisivel(n) && estoquePendente(i)" class="text-[10px] font-bold text-red-600 dark:text-red-400">estoque não entrou</div>
+                  </td>
+                  <td class="px-1.5 py-1.5 text-center">
+                    <span v-if="i.chamado" class="inline-flex items-center gap-1">
+                      <span class="inline-block rounded px-2 py-0.5 text-[11px] font-semibold" :class="i.tem_chamado_aberto ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/50 dark:text-blue-300' : 'bg-muted text-muted-foreground'">{{ i.tem_chamado_aberto ? 'Aberto' : 'Concluído' }}</span>
+                      <a :href="`/chamados?search=${encodeURIComponent(i.pedido_bling || '')}`" target="_blank" rel="noopener" class="inline-flex size-5 items-center justify-center rounded border bg-background text-muted-foreground hover:text-foreground" title="Abrir o chamado na aba Chamados" @click.stop><ExternalLink class="size-3" /></a>
+                    </span>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td class="px-1.5 py-1.5 text-center text-[11px] leading-tight" :title="i.situacao_bling_nome || ''">
+                    <template v-if="i.situacao_bling_nome">
+                      <div>{{ duasLinhas(i.situacao_bling_nome)[0] }}</div>
+                      <div v-if="duasLinhas(i.situacao_bling_nome)[1]" class="text-[10px] text-muted-foreground">{{ duasLinhas(i.situacao_bling_nome)[1] }}</div>
+                    </template>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td v-if="veCusto" class="overflow-hidden whitespace-nowrap px-1.5 py-1.5 text-center leading-tight" :title="contaDaLinha(i, n) ? `recebido ${brl(contaDaLinha(i, n)!.recebido)} − custo ${brl(contaDaLinha(i, n)!.custo_produto + contaDaLinha(i, n)!.custo_manutencao)}` : ''">
+                    <template v-if="contaDaLinha(i, n)">
+                      <div class="font-semibold" :class="contaDaLinha(i, n)!.resultado < 0 ? 'text-red-700 dark:text-red-400' : 'text-emerald-700 dark:text-emerald-400'">{{ sinal(contaDaLinha(i, n)!.resultado) }}</div>
+                      <div class="text-[10px] text-muted-foreground">{{ contaDaLinha(i, n)!.recebido ? 'líquido' : 'só custo' }}</div>
+                    </template>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td class="px-1.5 py-1.5 text-muted-foreground" :title="i.observacao || ''"><div class="line-clamp-2 break-words leading-tight">{{ i.observacao || '' }}</div></td>
+                </tr>
+                <tr v-if="!loading && !filtrados.length">
+                  <td :colspan="veCusto ? 19 : 18" class="px-3 py-6 text-center text-muted-foreground">
+                    {{ items.length ? 'nenhuma devolução com esses filtros' : 'nenhuma devolução aqui' }}
+                    <template v-if="search.trim()">
+                      · <button type="button" class="font-semibold text-primary underline disabled:opacity-50" :disabled="procurando" title="Procura o pedido no histórico inteiro: resolvidas, antigas e pedidos que ainda não caíram em Aguardando Devolução" @click="abrirPedido(search)">{{ procurando ? 'procurando…' : `procurar “${search.trim()}” no histórico` }}</button>
+                    </template>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="border-t px-3 py-1.5 text-center text-[11px] text-muted-foreground">
+            Clique na linha abre a janela da devolução. Reemb. cliente = o dinheiro já voltou pro cliente<template v-if="veCusto"> · Reembolso = a conta do pedido: o que o chamado ganhou menos o custo</template>. Vermelho = prazo da plataforma em menos de 24 h.
+          </div>
+        </div>
+
+        <!-- Meses -->
+        <div v-if="resumo.desde" class="flex min-w-0 flex-col rounded-md border bg-card">
+          <div class="flex items-center justify-between rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-xs font-semibold text-white">
+            <span>Meses — como ficou cada mês</span>
+            <span class="text-[11px] font-normal text-slate-300">mostrar abre os dias · conta a partir de {{ ddmmaaaa(resumo.desde) }}</span>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="w-full min-w-[900px] border-collapse text-xs">
+              <thead class="bg-muted text-[10px] uppercase tracking-wide text-muted-foreground">
+                <tr>
+                  <th class="border-b px-2.5 py-1" />
+                  <th class="border-b border-l border-l-slate-300 px-2.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="3">Devoluções</th>
+                  <th class="border-b border-l border-l-slate-300 px-2.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="4">Lançado (unidades)</th>
+                  <th v-if="resumo.ve_custo" class="border-b border-l border-l-slate-300 px-2.5 py-1 text-center font-semibold dark:border-l-slate-600" colspan="3">Reembolso (R$)</th>
+                </tr>
+                <tr>
+                  <th class="border-b px-2.5 py-1 text-left font-semibold">Mês / dia</th>
+                  <th class="border-b border-l border-l-slate-300 px-2.5 py-1 text-right font-semibold dark:border-l-slate-600" title="Como o mês ou o dia terminou">Abertas</th>
+                  <th class="border-b px-2.5 py-1 text-right font-semibold" title="Caíram em Aguardando Devolução">Novas</th>
+                  <th class="border-b px-2.5 py-1 text-right font-semibold" title="Saíram no botão Resolver">Resolvidas</th>
+                  <th class="border-b border-l border-l-slate-300 px-2.5 py-1 text-right font-semibold dark:border-l-slate-600">Estoque novo</th>
+                  <th class="border-b px-2.5 py-1 text-right font-semibold">Estoque usado</th>
+                  <th class="border-b px-2.5 py-1 text-right font-semibold">Perdimento</th>
+                  <th class="border-b px-2.5 py-1 text-right font-semibold" title="Foram pro técnico">Manutenção</th>
+                  <template v-if="resumo.ve_custo">
+                    <th class="border-b border-l border-l-slate-300 px-2.5 py-1 text-right font-semibold dark:border-l-slate-600" title="O que os chamados concluídos ganharam">Recebido</th>
+                    <th class="border-b px-2.5 py-1 text-right font-semibold" title="Produto perdido + conserto">Custos</th>
+                    <th class="border-b px-2.5 py-1 text-right font-semibold" title="Recebido menos custos">Resultado</th>
+                  </template>
+                </tr>
+              </thead>
+              <tbody>
+                <template v-for="m in meses" :key="m.mes">
+                  <tr class="h-[30px] border-b bg-muted/60 font-bold tabular-nums">
+                    <td class="whitespace-nowrap px-2.5">{{ tituloMes(m.mes) }} <button type="button" class="ml-1 font-semibold text-primary underline" @click="mesesAbertos = { ...mesesAbertos, [m.mes]: !mesesAbertos[m.mes] }">{{ mesesAbertos[m.mes] ? 'esconder' : 'mostrar' }}</button></td>
+                    <td class="border-l border-l-slate-300 px-2.5 text-right dark:border-l-slate-600">{{ m.dias[0]?.abertas }}</td>
+                    <td class="px-2.5 text-right text-blue-700 dark:text-blue-300">+{{ soma(m.dias, (d) => d.novas) }}</td>
+                    <td class="px-2.5 text-right text-emerald-700 dark:text-emerald-300">−{{ soma(m.dias, (d) => d.resolvidas) }}</td>
+                    <td class="border-l border-l-slate-300 px-2.5 text-right dark:border-l-slate-600">{{ soma(m.dias, (d) => d.estoque_novo) }}</td>
+                    <td class="px-2.5 text-right">{{ soma(m.dias, (d) => d.estoque_usado) }}</td>
+                    <td class="px-2.5 text-right text-red-700 dark:text-red-300">{{ soma(m.dias, (d) => d.perdimento) }}</td>
+                    <td class="px-2.5 text-right text-indigo-700 dark:text-indigo-300">{{ soma(m.dias, (d) => d.manutencao) }}</td>
+                    <template v-if="resumo.ve_custo">
+                      <td class="border-l border-l-slate-300 px-2.5 text-right text-emerald-700 dark:border-l-slate-600 dark:text-emerald-300">{{ valor(soma(m.dias, (d) => d.recebido)) }}</td>
+                      <td class="px-2.5 text-right text-red-700 dark:text-red-300">{{ valor(soma(m.dias, (d) => d.custos)) }}</td>
+                      <td class="px-2.5 text-right" :class="soma(m.dias, (d) => d.resultado) < 0 ? 'text-red-700 dark:text-red-300' : 'text-emerald-700 dark:text-emerald-300'">{{ valor(soma(m.dias, (d) => d.resultado)) }}</td>
+                    </template>
+                  </tr>
+                  <tr
+                    v-for="d in m.dias"
+                    v-show="mesesAbertos[m.mes]"
+                    :key="d.dia"
+                    class="h-[30px] border-b tabular-nums"
+                    :class="d.dia === isoToday() ? 'bg-amber-50 dark:bg-amber-950/20' : ''"
                   >
-                    <CheckCircle2 class="size-3" />
-                    {{ temEstornoPendente(row) ? 'Estorno já saiu' : 'Já entrou' }}
-                  </button>
-                  <button
-                    type="button"
-                    data-estoque-tentar
-                    :disabled="tentandoEstoque.has(row.id) || isSaving(row.id)"
-                    class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-medium hover:bg-muted disabled:opacity-60"
-                    @click="tentarEstoqueDeNovo(row)"
-                  >
-                    <Loader2 v-if="tentandoEstoque.has(row.id)" class="size-3 animate-spin" />
-                    <RotateCcw v-else class="size-3" />
-                    Tentar de novo
-                  </button>
+                    <td class="whitespace-nowrap px-2.5 pl-5 font-bold">{{ ddmm(d.dia) }} <span class="font-normal text-muted-foreground">{{ semana(d.dia) }}<template v-if="d.dia === isoToday()"> (hoje)</template></span></td>
+                    <td class="border-l border-l-slate-300 px-2.5 text-right font-bold dark:border-l-slate-600">{{ d.abertas }}</td>
+                    <td class="px-2.5 text-right" :class="d.novas ? 'font-semibold text-blue-700 dark:text-blue-300' : 'text-muted-foreground'">{{ d.novas ? `+${d.novas}` : 0 }}</td>
+                    <td class="px-2.5 text-right" :class="d.resolvidas ? 'font-semibold text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'">{{ d.resolvidas ? `−${d.resolvidas}` : 0 }}</td>
+                    <td class="border-l border-l-slate-300 px-2.5 text-right dark:border-l-slate-600" :class="d.estoque_novo ? '' : 'text-muted-foreground'">{{ d.estoque_novo }}</td>
+                    <td class="px-2.5 text-right" :class="d.estoque_usado ? '' : 'text-muted-foreground'">{{ d.estoque_usado }}</td>
+                    <td class="px-2.5 text-right" :class="d.perdimento ? 'text-red-700 dark:text-red-300' : 'text-muted-foreground'">{{ d.perdimento }}</td>
+                    <td class="px-2.5 text-right" :class="d.manutencao ? 'text-indigo-700 dark:text-indigo-300' : 'text-muted-foreground'">{{ d.manutencao }}</td>
+                    <template v-if="resumo.ve_custo">
+                      <td class="border-l border-l-slate-300 px-2.5 text-right dark:border-l-slate-600" :class="d.recebido ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'">{{ valor(d.recebido) }}</td>
+                      <td class="px-2.5 text-right" :class="d.custos ? 'text-red-700 dark:text-red-300' : 'text-muted-foreground'">{{ valor(d.custos) }}</td>
+                      <td class="px-2.5 text-right font-bold" :class="(d.resultado || 0) < 0 ? 'text-red-700 dark:text-red-300' : d.resultado ? 'text-emerald-700 dark:text-emerald-300' : 'text-muted-foreground'">{{ valor(d.resultado) }}</td>
+                    </template>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+          <div class="border-t px-3 py-1.5 text-[11px] text-muted-foreground">
+            Abertas = como o mês ou o dia terminou. Novas = caíram em Aguardando Devolução. Resolvidas = saíram no Resolver. Lançado = unidades lançadas no dia, pela condição.<template v-if="resumo.ve_custo"> Recebido = o que os chamados ganharam. Custos = produto perdido e conserto. Resultado = recebido menos custos.</template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Onde agir hoje -->
+      <div class="order-first flex min-w-0 flex-col rounded-md border bg-card min-[2350px]:order-none">
+        <div class="rounded-t-md bg-[#1f3a5f] px-3 py-1.5 text-center text-xs font-semibold text-white">Onde agir hoje</div>
+        <div class="grid gap-1.5 p-2 sm:grid-cols-2 xl:grid-cols-4 min-[2350px]:grid-cols-1">
+          <div
+            v-for="a in agirItens"
+            :key="a.chave"
+            class="grid grid-cols-[12px_minmax(0,1fr)_58px] items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs"
+            :class="a.grave ? 'border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-950/40' : ''"
+          >
+            <span class="size-[7px] rounded-full" :class="a.dot" />
+            <div class="min-w-0">
+              <div class="truncate font-bold" :class="a.grave ? 'text-red-700 dark:text-red-300' : ''" :title="a.titulo">{{ a.titulo }} · {{ a.n }}</div>
+              <div class="truncate text-[11px] text-muted-foreground" :title="a.detalhe">{{ a.detalhe }}</div>
+            </div>
+            <button type="button" class="h-6 rounded-md border bg-background text-[11px] font-semibold hover:bg-muted" :class="recorte === `agir:${a.chave}` ? 'ring-2 ring-primary' : ''" @click="alternarRecorte(`agir:${a.chave}`)">Ver</button>
+          </div>
+          <div v-if="!agirItens.length" class="rounded-md border px-2.5 py-3 text-center text-xs text-muted-foreground sm:col-span-2 xl:col-span-4 min-[2350px]:col-span-1">nada pra agir agora</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Janela grande -->
+    <div v-if="janela && foco && pedidoItem" class="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/50 p-4" @mousedown.self="fecharJanela">
+      <div class="w-full max-w-[1760px] rounded-md border bg-card shadow-2xl">
+        <div class="relative flex items-center justify-center rounded-t-md bg-[#1f3a5f] px-3 py-2 text-[13px] font-semibold text-white">
+          <span>Devolução · {{ pedidoItem.pedido_bling }} · {{ foco.produto || '' }}</span>
+          <button type="button" class="absolute right-2 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-normal text-slate-300 hover:text-white" @click="fecharJanela">fechar <X class="size-3.5" /></button>
+        </div>
+        <div class="flex flex-wrap items-center gap-2 border-b px-4 py-2 text-xs">
+          <span v-if="foraDaLista" class="inline-block rounded bg-muted px-2 py-0.5 text-center text-[11px] font-semibold text-muted-foreground" title="Este pedido ainda não caiu em Aguardando Devolução no Bling">fora da lista</span>
+          <span v-else class="inline-block w-[84px] rounded py-0.5 text-center text-[11px] font-semibold" :class="ETAPA_COR[pedidoItem.etapa]">{{ ETAPA_LABEL[pedidoItem.etapa] }}</span>
+          <span class="font-semibold">{{ contaDe(pedidoItem) }} · {{ PLATAFORMA_NOME[plataformaKey(pedidoItem.plataforma)] || pedidoItem.plataforma || '—' }}</span>
+          <span class="text-muted-foreground">pedido de {{ ddmmaaaa(pedidoItem.data) }}<template v-if="pedidoItem.dias_em_devolucao != null"> · em devolução há {{ pedidoItem.dias_em_devolucao }} dia(s)</template></span>
+          <label v-if="canEdit && situacoesBling.length" class="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-[11px]" title="Muda a situação do pedido no Bling na hora (vale pro pedido inteiro). Não resolve a devolução: pra tirar da lista é o Resolver.">
+            Bling:
+            <select class="max-w-[190px] bg-transparent outline-none" :value="pedidoItem.situacao_bling_id || ''" :disabled="!!salvando" @change="mudarSituacao(($event.target as HTMLSelectElement).value, $event.target as HTMLSelectElement)">
+              <option v-if="!situacoesBling.some((x) => String(x.id) === pedidoItem!.situacao_bling_id)" :value="pedidoItem.situacao_bling_id || ''">{{ pedidoItem.situacao_bling_nome || '—' }}</option>
+              <option v-for="x in situacoesBling" :key="x.id" :value="String(x.id)">{{ x.nome }}</option>
+            </select>
+          </label>
+          <span v-else class="rounded bg-muted px-2 py-0.5 text-[11px]">Bling: {{ pedidoItem.situacao_bling_nome || '—' }}</span>
+          <span v-if="pedidoItem.prazo_tipo" class="rounded px-2 py-0.5 text-[11px] font-semibold" :class="pedidoItem.prazo_estado ? 'bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300' : 'bg-muted'" :title="pedidoItem.prazo_dica || pedidoItem.prazo_texto || ''">prazo: {{ prazoTexto(pedidoItem) }} · {{ pedidoItem.prazo_tipo }}</span>
+          <span v-if="pedidoItem.resolvido" class="rounded bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300">resolvida</span>
+          <template v-if="podeMover && canEdit && !pedidoItem.resolvido && !foraDaLista">
+            <button v-if="pedidoItem.fila !== 'fraude'" type="button" class="rounded-md border px-2 py-0.5 text-[11px] font-semibold hover:bg-muted disabled:opacity-50" :disabled="!!salvando" title="Não volta pacote: só dinheiro (chegou vazio, reembolso sem devolução)" @click="moverFila('fraude')">marcar Fraude</button>
+            <button v-else type="button" class="rounded-md border px-2 py-0.5 text-[11px] font-semibold hover:bg-muted disabled:opacity-50" :disabled="!!salvando" title="Volta pacote: sai da Fraude" @click="moverFila('acompanhamento')">tirar da Fraude</button>
+            <button v-if="pedidoItem.fila_manual" type="button" class="text-[11px] text-muted-foreground underline" :disabled="!!salvando" title="Fixado na mão. Soltar devolve a decisão pra regra da plataforma." @click="moverFila('regra')">soltar pra regra</button>
+          </template>
+          <span v-else-if="pedidoItem.fila_manual" class="text-[11px] text-muted-foreground">painel fixado na mão</span>
+          <div v-if="linhasDaJanela.length > 1" class="ml-auto flex flex-wrap items-center gap-1.5">
+            <span class="text-muted-foreground">produtos deste pedido:</span>
+            <button
+              v-for="l in linhasDaJanela"
+              :key="l.sku || ''"
+              type="button"
+              class="max-w-[220px] truncate rounded-md px-2 py-0.5 font-semibold"
+              :class="l.sku === foco.sku ? 'bg-primary text-primary-foreground' : 'border hover:bg-muted'"
+              :title="l.produto || ''"
+              @click="janela = { pedido: janela.pedido, sku: l.sku }"
+            >{{ l.produto || l.sku }}</button>
+          </div>
+        </div>
+
+        <div class="grid gap-3 p-4 lg:grid-cols-[360px_minmax(0,1fr)_minmax(0,660px)]">
+          <!-- O que o sistema já sabe -->
+          <div class="space-y-3">
+            <div class="text-center text-[12px] font-bold text-[#1f3a5f] dark:text-sky-300">O que o sistema já sabe</div>
+            <div class="rounded-md border p-3">
+              <div class="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Pedido</div>
+              <dl class="grid grid-cols-[120px_minmax(0,1fr)] gap-x-2 gap-y-1 text-xs">
+                <dt class="text-muted-foreground">Produto</dt><dd class="font-semibold">{{ foco.produto || '—' }}</dd>
+                <dt class="text-muted-foreground">SKU da venda</dt><dd class="font-mono font-semibold">{{ foco.sku || '—' }}</dd>
+                <dt class="text-muted-foreground">Quantidade</dt><dd class="font-semibold">{{ foco.quantidade ?? '—' }}</dd>
+                <dt class="text-muted-foreground">Pedido Bling</dt><dd class="font-mono font-semibold">{{ pedidoItem.pedido_bling }}</dd>
+                <dt class="text-muted-foreground">Nº na plataforma</dt>
+                <dd class="font-mono font-semibold">{{ pedidoItem.pedido_marketplace || '—' }} <button v-if="pedidoItem.pedido_marketplace" type="button" class="align-[-2px] text-muted-foreground hover:text-foreground" title="Copiar" @click="copiar(pedidoItem.pedido_marketplace)"><Copy class="size-3" /></button></dd>
+                <dt class="text-muted-foreground">Cliente</dt><dd class="font-semibold">{{ pedidoItem.cliente || '—' }}<template v-if="pedidoItem.cidade"> · {{ pedidoItem.cidade }}/{{ pedidoItem.uf }}</template></dd>
+              </dl>
+            </div>
+            <div class="rounded-md border p-3">
+              <div class="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Caso na plataforma</div>
+              <dl class="grid grid-cols-[120px_minmax(0,1fr)] gap-x-2 gap-y-1 text-xs">
+                <dt class="text-muted-foreground">Prazo</dt>
+                <dd class="font-semibold"><template v-if="pedidoItem.prazo_tipo">{{ prazoTexto(pedidoItem) }} · {{ pedidoItem.prazo_tipo }}<div v-if="pedidoItem.prazo_dica || pedidoItem.prazo_texto" class="font-normal text-muted-foreground">{{ pedidoItem.prazo_dica || pedidoItem.prazo_texto }}</div></template><template v-else>—</template></dd>
+                <dt class="text-muted-foreground">Reemb. cliente</dt>
+                <dd class="font-semibold">
+                  <template v-if="pedidoItem.reembolso === true">Sim<template v-if="pedidoItem.reembolso_valor != null"> · {{ brl(pedidoItem.reembolso_valor) }}</template><template v-if="pedidoItem.reembolso_em"> · {{ ddmm(pedidoItem.reembolso_em) }}</template></template>
+                  <template v-else-if="pedidoItem.reembolso === false">Não · o dinheiro ainda está com a gente</template>
+                  <template v-else>a plataforma ainda não informou</template>
+                </dd>
+                <dt class="text-muted-foreground">Em devolução desde</dt>
+                <dd class="flex items-center gap-1.5 font-semibold">
+                  <input v-model="rascunho.desde" type="date" class="h-6 rounded border bg-background px-1 text-xs" :disabled="!canEdit || !!salvando" title="A data digitada vale mais que a automática; apagar volta ao automático" @change="salvarCampo('desde')" />
+                  <span v-if="pedidoItem.aguardando_devolucao_data_estimada" class="font-normal text-muted-foreground" title="Data estimada: corrija se souber a certa">≈ estimada</span>
+                </dd>
+              </dl>
+            </div>
+            <div class="rounded-md border p-3">
+              <div class="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Pacote</div>
+              <dl class="grid grid-cols-[120px_minmax(0,1fr)] items-center gap-x-2 gap-y-1 text-xs">
+                <dt class="text-muted-foreground">Rastreio</dt>
+                <dd class="flex items-center gap-1">
+                  <input v-model="rascunho.rastreio" class="h-6 w-full rounded border bg-background px-1.5 font-mono text-xs" placeholder="código de rastreio" :disabled="!canEdit || !!salvando" title="O que você digitar vale mais que o automático" @blur="salvarCampo('rastreio')" @keydown.enter.prevent="($event.target as HTMLInputElement).blur()" />
+                  <button v-if="pedidoItem.rastreio" type="button" class="text-muted-foreground hover:text-foreground" title="Copiar rastreio" @click="copiar(pedidoItem.rastreio)"><Copy class="size-3.5" /></button>
+                </dd>
+                <dt class="text-muted-foreground">Localização</dt>
+                <dd><input v-model="rascunho.localizacao" class="h-6 w-full rounded border bg-background px-1.5 text-xs" placeholder="onde o pacote está" :disabled="!canEdit || !!salvando" @blur="salvarCampo('localizacao')" @keydown.enter.prevent="($event.target as HTMLInputElement).blur()" /></dd>
+                <template v-if="pedidoItem.entrega_localizacao"><dt class="text-muted-foreground">Entrega da ida</dt><dd class="font-semibold">{{ pedidoItem.entrega_localizacao }}</dd></template>
+                <dt class="text-muted-foreground">Últ. movimentação</dt><dd class="font-semibold">{{ ddmmaaaa(pedidoItem.localizacao_data) }}</dd>
+                <dt class="text-muted-foreground">Chegou em</dt><dd class="font-semibold">{{ pedidoItem.devolucao_chegou_em ? ddmmaaaa(pedidoItem.devolucao_chegou_em) : 'sem confirmação ainda' }}</dd>
+              </dl>
+            </div>
+          </div>
+
+          <!-- Provas -->
+          <div class="space-y-3">
+            <div class="text-center text-[12px] font-bold text-[#1f3a5f] dark:text-sky-300">Provas</div>
+            <div class="rounded-md border p-3">
+              <div class="grid gap-3 md:grid-cols-2">
+                <div>
+                  <div class="mb-1 text-[11px] font-semibold">Vídeo do envio
+                    <Check v-if="pedidoItem.video_link || envioColado" class="inline size-3.5 text-emerald-700 dark:text-emerald-400" />
+                    <span v-else-if="pedidoItem.video_status === 'pendente'" class="text-amber-700 dark:text-amber-400">pedido</span>
+                    <span v-else class="text-red-600 dark:text-red-400">falta</span>
+                  </div>
+                  <template v-if="pedidoItem.video_link">
+                    <a :href="pedidoItem.video_link" target="_blank" rel="noopener" class="flex h-[110px] items-center justify-center rounded-md border bg-muted text-[13px] text-muted-foreground hover:text-foreground">▶ abrir vídeo</a>
+                    <div class="mt-1 text-[11px] text-muted-foreground">enviado por {{ pedidoItem.video_enviado_por || 'equipe' }} em {{ ddmm(pedidoItem.video_enviado_em) }}</div>
+                    <div v-if="canEdit && !videoApagando" class="mt-1.5"><button type="button" class="rounded-md border px-2 py-1 text-[11px] font-semibold hover:bg-muted" title="Apaga o link e devolve pra equipe refazer (pede o motivo)" @click="videoApagando = true">apagar e pedir de novo</button></div>
+                    <div v-if="videoApagando" class="mt-1.5 flex gap-1.5">
+                      <input v-model="videoMotivo" class="h-7 w-full rounded border bg-background px-1.5 text-xs" placeholder="motivo pra refazer (ex.: não mostra o lacre)" @keydown.enter.prevent="videoMotivo.trim().length >= 3 && solicitarVideo(videoMotivo)" />
+                      <button type="button" class="rounded-md border px-2 text-[11px] font-semibold hover:bg-muted disabled:opacity-50" :disabled="videoMotivo.trim().length < 3 || !!salvando" @click="solicitarVideo(videoMotivo)">pedir</button>
+                      <button type="button" class="text-[11px] text-muted-foreground underline" @click="videoApagando = false">cancelar</button>
+                    </div>
+                  </template>
+                  <template v-else-if="envioColado && !editandoLink.envio">
+                    <a :href="envioColado" target="_blank" rel="noopener" class="flex h-[110px] items-center justify-center rounded-md border bg-muted text-[13px] text-muted-foreground hover:text-foreground">▶ abrir vídeo</a>
+                    <div class="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+                      <span>{{ linkPendente.envio ? 'link colado — entra no lançamento' : 'link colado no lançamento' }}</span>
+                      <button v-if="canEdit" type="button" class="font-semibold text-primary underline" @click="editarLink('envio')">trocar link</button>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div class="flex h-[110px] items-center justify-center rounded-md border border-dashed px-3 text-center text-xs text-muted-foreground">
+                      <template v-if="pedidoItem.video_status === 'pendente'">pedido à equipe do SKU em {{ ddmm(pedidoItem.video_solicitado_em) }}<template v-if="pedidoItem.video_solicitado_por"> por {{ pedidoItem.video_solicitado_por }}</template><template v-if="pedidoItem.video_refazer_motivo"> · refazer: {{ pedidoItem.video_refazer_motivo }}</template></template>
+                      <template v-else-if="pedidoItem.video_status === 'sem_video'">a equipe respondeu: sem vídeo — {{ pedidoItem.video_sem_motivo }}</template>
+                      <template v-else>sem vídeo ainda</template>
+                    </div>
+                    <div v-if="canEdit" class="mt-1.5 flex gap-1.5">
+                      <button v-if="pedidoItem.video_status !== 'pendente'" type="button" class="rounded-md border px-2 py-1 text-[11px] font-semibold hover:bg-muted disabled:opacity-50" :disabled="!!salvando" title="A equipe do SKU vê o pedido na aba Pedidos do Controle de Estoque" @click="solicitarVideo()">{{ pedidoItem.video_status === 'sem_video' ? 'pedir de novo' : 'solicitar vídeo' }}</button>
+                      <button v-else type="button" class="rounded-md border px-2 py-1 text-[11px] font-semibold hover:bg-muted disabled:opacity-50" :disabled="!!salvando" @click="cancelarVideo">cancelar pedido</button>
+                    </div>
+                    <!-- Quem já tem o link (MEGA) cola aqui, uma vez só: vale pro pedido inteiro. -->
+                    <div v-if="canEdit" class="mt-1.5 flex items-center gap-1.5">
+                      <input v-model="linkDigitado.envio" class="h-7 w-full rounded border bg-background px-2 text-xs" placeholder="ou cole aqui o link do vídeo do envio (MEGA)" :disabled="gravandoLink" data-provas-envio @keydown.enter.prevent="salvarLinkProvas('envio')" @blur="salvarLinkProvas('envio')" />
+                      <button v-if="editandoLink.envio" type="button" class="whitespace-nowrap text-[11px] text-muted-foreground underline" @mousedown.prevent="cancelarLink('envio')">cancelar</button>
+                    </div>
+                  </template>
+                </div>
+                <div>
+                  <div class="mb-1 text-[11px] font-semibold">Vídeo da abertura
+                    <Check v-if="aberturaDaJanela" class="inline size-3.5 text-emerald-700 dark:text-emerald-400" /><span v-else class="text-red-600 dark:text-red-400">falta</span>
+                  </div>
+                  <template v-if="aberturaDaJanela && !editandoLink.abertura">
+                    <a :href="aberturaDaJanela" target="_blank" rel="noopener" class="flex h-[110px] items-center justify-center rounded-md border bg-muted text-[13px] text-muted-foreground hover:text-foreground">▶ abrir vídeo</a>
+                    <div class="mt-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+                      <span>{{ linkPendente.abertura ? 'link colado — entra no lançamento' : 'vale pro pedido inteiro' }}</span>
+                      <button v-if="canEdit" type="button" class="font-semibold text-primary underline" @click="editarLink('abertura')">trocar link</button>
+                    </div>
+                  </template>
+                  <template v-else>
+                    <div class="flex h-[110px] items-center justify-center rounded-md border border-dashed px-3 text-center text-xs text-muted-foreground">sem vídeo da abertura ainda</div>
+                    <div v-if="canEdit" class="mt-1.5 flex items-center gap-1.5">
+                      <input v-model="linkDigitado.abertura" class="h-7 w-full rounded border bg-background px-2 text-xs" placeholder="cole aqui o link do vídeo da abertura" :disabled="gravandoLink" data-provas-abertura @keydown.enter.prevent="salvarLinkProvas('abertura')" @blur="salvarLinkProvas('abertura')" />
+                      <button v-if="editandoLink.abertura" type="button" class="whitespace-nowrap text-[11px] text-muted-foreground underline" @mousedown.prevent="cancelarLink('abertura')">cancelar</button>
+                    </div>
+                  </template>
                 </div>
               </div>
-              <div v-else class="flex flex-col items-start gap-0.5">
-                <span>{{ fmtDateTime(row.data_devolvido_estoque) }}</span>
-                <span
-                  v-if="row.estoque_mov_sku && !row.estoque_mov_revertido_at"
-                  :title="`Estoque devolvido no Bling: +${row.estoque_mov_qty ?? 1} un. em ${row.estoque_mov_sku}`"
-                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
-                >{{ row.estoque_mov_sku }}</span>
-                <span
-                  v-else-if="row.estoque_mov_sku && row.estoque_mov_revertido_at"
-                  :title="`Estoque estornado em ${fmtDateTime(row.estoque_mov_revertido_at)} · baixa de ${row.estoque_mov_qty ?? 1} un. em ${row.estoque_mov_sku}`"
-                  class="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-mono bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300"
-                >
-                  <Undo2 class="size-2.5 shrink-0" />
-                  <span class="line-through">{{ row.estoque_mov_sku }}</span>
+            </div>
+            <div class="rounded-md border p-3">
+              <div class="mb-1 flex items-center gap-2 text-[11px] font-semibold">
+                <span>Fotos da devolução <span class="font-normal text-muted-foreground">({{ fotosDoPedido.length + fotosPendentes.length }}) · vão como evidência do chamado, junto com os vídeos</span></span>
+                <label v-if="canEdit" class="ml-auto inline-flex cursor-pointer items-center gap-1 whitespace-nowrap rounded-md border px-2 py-1 text-[11px] font-semibold hover:bg-muted" :class="enviandoFotos ? 'pointer-events-none opacity-50' : ''" title="Foto (JPG/PNG), PDF ou vídeo. Vale pro pedido inteiro: não precisa repetir por produto.">
+                  <Plus class="size-3" /> {{ enviandoFotos ? 'enviando…' : 'adicionar fotos' }}
+                  <input type="file" class="hidden" multiple accept="image/jpeg,image/png,application/pdf,video/mp4,video/quicktime,video/webm" data-provas-fotos @change="escolherFotosProvas" />
+                </label>
+              </div>
+              <div v-if="fotosDoPedido.length" class="grid grid-cols-4 gap-2">
+                <div v-for="f in fotosDoPedido" :key="f.id" class="group relative h-[92px] overflow-hidden rounded-md border bg-muted">
+                  <a :href="`/api/devolutions/anexos/${f.id}`" target="_blank" rel="noopener" class="block size-full" :title="f.filename || ''">
+                    <img :src="`/api/devolutions/anexos/${f.id}`" class="size-full object-cover" alt="foto da devolução" loading="lazy" />
+                  </a>
+                  <button v-if="canEdit" type="button" class="absolute right-1 top-1 hidden size-5 items-center justify-center rounded bg-background/90 text-muted-foreground hover:text-red-600 group-hover:inline-flex" title="Remover esta foto" @click="removerFotoProvas(f.id)"><X class="size-3.5" /></button>
+                </div>
+              </div>
+              <div v-else-if="!fotosPendentes.length" class="rounded-md border border-dashed px-3 py-4 text-center text-xs text-muted-foreground">nenhuma foto ainda</div>
+              <!-- Escolhidas antes de existir lançamento: sobem sozinhas junto com o 1º lançamento. -->
+              <div v-if="fotosPendentes.length" class="mt-2 rounded-md border border-amber-300 bg-amber-50/60 px-2 py-1.5 text-[11px] dark:border-amber-800 dark:bg-amber-950/20">
+                <div class="mb-1 font-semibold text-amber-900 dark:text-amber-200">{{ fotosPendentes.length }} arquivo(s) esperando o lançamento — sobem sozinhos quando você lançar</div>
+                <div class="flex flex-wrap gap-1.5">
+                  <span v-for="(f, k) in fotosPendentes" :key="k" class="inline-flex max-w-[200px] items-center gap-1 rounded border bg-background px-1.5 py-0.5">
+                    <span class="truncate">{{ f.name }}</span>
+                    <button type="button" class="text-muted-foreground hover:text-red-600" title="Tirar da fila" @click="fotosPendentes.splice(k, 1)"><X class="size-3" /></button>
+                  </span>
+                </div>
+              </div>
+              <!-- Vídeo e PDF anexados não são foto: viram link (não baixa o arquivo pra mostrar). -->
+              <div v-if="outrosAnexos.length" class="mt-2 flex flex-wrap gap-1.5">
+                <span v-for="a in outrosAnexos" :key="a.id" class="inline-flex max-w-[240px] items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold">
+                  <a :href="`/api/devolutions/anexos/${a.id}`" target="_blank" rel="noopener" class="inline-flex min-w-0 items-center gap-1 hover:underline" :title="a.filename || ''"><ExternalLink class="size-3 shrink-0" /> <span class="truncate">{{ (a.content_type || '').startsWith('video/') ? 'vídeo' : 'arquivo' }} · {{ a.filename || 'anexo' }}</span></a>
+                  <button v-if="canEdit" type="button" class="text-muted-foreground hover:text-red-600" title="Remover este arquivo" @click="removerFotoProvas(a.id)"><X class="size-3" /></button>
                 </span>
               </div>
-            </td>
-            <td class="px-2 py-1 whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10">
-              <div
-                v-if="row.condicao_produto === 'Manutenção' && row.prazo"
-                class="flex flex-col gap-0.5"
-                :title="'Prazo: 30 dias da inserção'"
-              >
-                <span :class="prazoOverdue(row.prazo) ? 'font-medium text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ fmtDate(row.prazo) }}</span>
-                <span class="text-[10px]" :class="prazoOverdue(row.prazo) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ prazoDiasLabel(row.prazo) }}</span>
+            </div>
+            <div class="rounded-md border p-3">
+              <div class="mb-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Observação do pedido</div>
+              <textarea v-model="rascunho.observacao" rows="3" class="w-full resize-y rounded-md border bg-background px-2 py-1.5 text-xs" placeholder="recado pra quem acompanha (escrever “aguarde 60 dias” ou “até 30/11” segura o prazo de 45 dias)" :disabled="!canEdit || !!salvando" @blur="salvarCampo('observacao')" />
+            </div>
+          </div>
+
+          <!-- O que a pessoa faz -->
+          <div class="space-y-3">
+            <div class="text-center text-[12px] font-bold text-[#1f3a5f] dark:text-sky-300">O que a pessoa faz</div>
+
+            <div class="rounded-md border p-3">
+              <div class="mb-2 flex items-center text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"><span class="mr-1.5 inline-flex size-[18px] items-center justify-center rounded-full bg-[#1f3a5f] text-[10.5px] font-bold text-white">1</span>Lançamento <span class="ml-1 font-normal normal-case tracking-normal">· uma peça por cartão · condição, estoque e motivo</span></div>
+              <div v-if="foraDeLancar" class="mb-2 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11.5px] text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                Este pedido está em <b>{{ pedidoItem.situacao_bling_nome || 'outra situação' }}</b> no Bling<template v-if="pedidoItem.lancamentos.length"> e ainda tem produto sem lançamento</template>. Pra lançar, mude ali em cima, em <b>Bling:</b>, para <b>Aguardando Devolução</b> — as peças que faltam aparecem aqui em seguida.
               </div>
-              <span v-else class="text-muted-foreground">—</span>
-            </td>
-            <td class="px-2 py-1 whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10">
-              <div v-if="row.prazo_contestacao" class="flex flex-col gap-0.5" :title="'Prazo da plataforma para contestar a devolução'">
-                <span :class="contestacaoUrgente(row.prazo_contestacao) ? 'font-medium text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ fmtDateTime(row.prazo_contestacao) }}</span>
-                <span class="text-[10px]" :class="contestacaoUrgente(row.prazo_contestacao) ? 'text-red-600 dark:text-red-400' : 'text-muted-foreground'">{{ contestacaoLabel(row.prazo_contestacao) }}</span>
-              </div>
-              <span v-else class="text-muted-foreground">—</span>
-            </td>
-            <td class="px-1 py-0.5 bg-sky-50/40 dark:bg-sky-900/10">
-              <select
-                :value="row.situacao_bling_id ?? ''"
-                :disabled="!canEdit || !row.pedido_bling || isSavingSituacao(row.pedido_bling)"
-                :class="sheetSelectClass"
-                :title="row.situacao_bling_nome ? `Hoje no Bling: ${row.situacao_bling_nome}` : 'Situação desconhecida'"
-                @change="(e) => onRowSituacaoChange(row, (e.target as HTMLSelectElement).value)"
-              >
-                <option v-if="row.situacao_bling_id == null" value="">—</option>
-                <option v-else-if="!situacoesBling.some((s) => s.id === row.situacao_bling_id)" :value="row.situacao_bling_id">{{ row.situacao_bling_nome || row.situacao_bling_id }}</option>
-                <option v-for="sit in situacoesBling" :key="sit.id" :value="sit.id">{{ sit.nome }}</option>
-              </select>
-            </td>
-            <td class="px-1 py-0.5 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
-              <div class="w-[240px]">
-              <ObservacaoPopover
-                :model-value="row.observacao"
-                :disabled="!canEdit"
-                :titulo="`Observação · ${row.pedido_bling || row.pedido_marketplace || ''}`"
-                @update:model-value="(v) => setRowText(row, 'observacao', v)"
-                @save="saveRow(row)"
+              <!-- :key = pedido: trocar de pedido recomeça o bloco do zero (rascunho de um não vaza pro outro). -->
+              <DevolucaoLancar
+                ref="lancarRef"
+                :key="pedidoItem.pedido_bling || ''"
+                :pedido="pedidoItem.pedido_bling || ''"
+                :fila="pedidoItem.fila"
+                :video-link="pedidoItem.video_link"
+                :link-envio="envioDaJanela"
+                :link-abertura="aberturaDaJanela"
+                :fotos="fotosPendentes"
+                @fotos-enviadas="fotosPendentes = []"
+                :can-edit="canEdit"
+                :can-delete="canDelete"
+                :is-admin="isAdmin"
+                @mudou="aoMudarLancamento"
               />
-              </div>
-            </td>
-            <td v-if="isAdmin" class="px-2 py-1 whitespace-nowrap text-muted-foreground bg-slate-50/40 dark:bg-slate-800/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Última alteração feita neste registro">{{ fmtDateTime(row.updated_at) }}</td>
-            <td v-if="canDelete" class="px-2 py-1 text-center">
-              <button
-                type="button"
-                :disabled="isDeleting(row.id)"
-                title="Remover lançamento (estoque devolvido ao Bling é estornado automaticamente quando o movimento está registrado)"
-                class="inline-flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-red-100 hover:text-red-600 disabled:cursor-default disabled:opacity-50 dark:hover:bg-red-900/30 dark:hover:text-red-400"
-                @click="removeRow(row)"
-              >
-                <Loader2 v-if="isDeleting(row.id)" class="size-3.5 animate-spin" />
-                <Trash2 v-else class="size-3.5" />
-              </button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-
-    <div v-if="tab === 'lancamentos' && total > PAGE_SIZE" class="flex items-center justify-between gap-2">
-      <span class="text-xs text-muted-foreground">
-        página {{ page }} de {{ totalPages }} · {{ PAGE_SIZE }}/página
-      </span>
-      <div class="flex items-center gap-1">
-        <Button size="sm" variant="outline" :disabled="page <= 1 || loading" @click="page = 1">«</Button>
-        <Button size="sm" variant="outline" :disabled="page <= 1 || loading" @click="page = page - 1">
-          <ChevronLeft class="size-4" />
-        </Button>
-        <input
-          v-model.number="page"
-          type="number"
-          :min="1"
-          :max="totalPages"
-          class="w-16 rounded-md border bg-background px-2 py-1 text-center text-sm"
-          @change="page = Math.min(Math.max(1, page), totalPages)"
-        />
-        <Button size="sm" variant="outline" :disabled="page >= totalPages || loading" @click="page = page + 1">
-          <ChevronRight class="size-4" />
-        </Button>
-        <Button size="sm" variant="outline" :disabled="page >= totalPages || loading" @click="page = totalPages">»</Button>
-      </div>
-    </div>
-
-    <!-- Bling stock result toasts — top-right; sucesso some em 6 s, erro e "conferindo" ficam até fechar (15/10) -->
-    <div class="fixed top-4 right-4 z-[60] flex flex-col gap-2 w-[min(380px,calc(100vw-2rem))]">
-      <TransitionGroup
-        enter-active-class="transition duration-150 ease-out"
-        enter-from-class="opacity-0 translate-x-4"
-        enter-to-class="opacity-100 translate-x-0"
-        leave-active-class="transition duration-100 ease-in"
-        leave-from-class="opacity-100"
-        leave-to-class="opacity-0"
-      >
-        <div
-          v-for="t in toasts"
-          :key="t.id"
-          class="rounded-lg border-2 shadow-lg px-3 py-2 text-sm"
-          :class="TOAST_CORES[t.kind].caixa"
-        >
-          <div class="flex items-start justify-between gap-2">
-            <div class="flex-1 min-w-0">
-              <div class="font-semibold" :class="TOAST_CORES[t.kind].titulo">
-                <Loader2 v-if="t.kind === 'info'" class="size-3.5 inline animate-spin mr-1 -mt-0.5" />{{ t.title }}
-              </div>
-              <ul v-if="t.lines.length" class="mt-0.5 space-y-0.5 font-mono text-xs">
-                <li
-                  v-for="(ln, i) in t.lines"
-                  :key="i"
-                  :class="TOAST_CORES[t.kind].linha"
-                >{{ ln }}</li>
-              </ul>
             </div>
-            <button
-              class="shrink-0 opacity-60 hover:opacity-100"
-              :class="TOAST_CORES[t.kind].titulo"
-              @click="dismissToast(t.id)"
-            >
-              <X class="size-4" />
-            </button>
-          </div>
-        </div>
-      </TransitionGroup>
-    </div>
 
-    <!-- Anexos da devolução: fotos (evidência do chamado no ML) e vídeos (só guardados) -->
-    <div
-      v-if="anexosRow"
-      class="fixed inset-0 bg-black/60 flex items-center justify-center z-40 p-4"
-      @click.self="closeAnexos"
-    >
-      <div class="bg-background border rounded-lg w-full max-w-lg p-5 space-y-4">
-        <div class="flex items-start">
-          <div>
-            <h2 class="text-lg font-semibold">Fotos e vídeos da devolução</h2>
-            <p class="text-sm text-muted-foreground">
-              Pedido {{ anexosRow.pedido_bling || '—' }} · {{ anexosRow.conta }} · motivo {{ anexosRow.motivo_devolucao || '—' }}.
-              As fotos (JPG/PNG) vão como evidência do chamado automático na plataforma (ML, TikTok, Shopee; Amazon é manual).
-              Arquivo de vídeo fica só guardado aqui: a API do ML não aceita vídeo anexo, então ele não vai junto do chamado.
-            </p>
-          </div>
-          <Button class="ml-auto" size="sm" variant="ghost" @click="closeAnexos">
-            <X class="size-4" />
-          </Button>
-        </div>
-        <div
-          v-if="anexosRow.chamado_ml_status"
-          class="rounded border px-2 py-1 text-xs"
-          :class="mlStatusClass(anexosRow)"
-        >{{ mlStatusLabel(anexosRow) }}</div>
-        <div
-          v-if="contestacaoJaSaiu(anexosRow)"
-          class="rounded border border-amber-500/40 bg-amber-500/5 px-2 py-1 text-xs text-amber-800 dark:text-amber-200"
-        >
-          A contestação já saiu{{ contestacaoSaiuEm(anexosRow) }}. Foto anexada agora não vai junto: ela só sai uma vez.
-          <template v-if="platNome(anexosRow) === 'Shopee'"> Se a Shopee pedir prova extra, as fotos daqui vão.</template>
-        </div>
-        <div class="flex flex-wrap gap-3">
-          <div v-for="a in anexosRow.anexos || []" :key="a.id" class="relative">
-            <a :href="anexoUrl(a.id)" target="_blank" rel="noopener" :title="a.filename">
-              <video v-if="isVideo(a)" :src="anexoUrl(a.id)" class="h-24 w-24 rounded border object-cover" muted />
-              <div v-else-if="a.content_type === 'application/pdf'" class="flex h-24 w-24 items-center justify-center rounded border text-xs">PDF</div>
-              <img v-else :src="anexoUrl(a.id)" :alt="a.filename" class="h-24 w-24 rounded border object-cover" />
-            </a>
-            <div class="mt-0.5 w-24 truncate text-[10px] text-muted-foreground" :title="a.filename">
-              <span v-if="a.ml_file_name" class="text-emerald-600" title="já enviada ao ML">✓ </span>{{ a.filename }}
-            </div>
-            <div
-              v-if="fotoDepoisDaContestacao(anexosRow, a)"
-              class="w-24 text-[10px] font-medium text-amber-700 dark:text-amber-300"
-              :title="`Anexada em ${fmtDateTime(a.created_at)}, depois da contestação`"
-            >não foi na contestação</div>
-            <button
-              v-if="canEdit"
-              type="button"
-              class="absolute -right-1.5 -top-1.5 rounded-full border bg-background p-0.5 text-red-500 hover:bg-red-500/10"
-              title="remover"
-              @click="removeAnexo(a)"
-            >
-              <X class="size-3" />
-            </button>
-          </div>
-          <div v-if="!(anexosRow.anexos || []).length" class="text-sm text-muted-foreground">nenhum anexo ainda</div>
-        </div>
-        <label v-if="canEdit" class="inline-flex cursor-pointer items-center gap-1.5 rounded border px-2 py-1 text-xs hover:bg-muted">
-          <Loader2 v-if="anexoUploading" class="size-3.5 animate-spin" />
-          <Paperclip v-else class="size-3.5" />
-          anexar foto / vídeo
-          <input
-            type="file"
-            multiple
-            accept="image/jpeg,image/png,application/pdf,video/mp4,video/quicktime,video/webm"
-            class="hidden"
-            :disabled="anexoUploading"
-            @change="uploadAnexo"
-          />
-        </label>
-      </div>
-    </div>
-
-    <!-- Correção de estoque: entrada manual via API, sem criar devolução -->
-    <div
-      v-if="correcaoOpen"
-      class="fixed inset-0 bg-black/60 flex items-center justify-center z-40 p-4"
-      @click.self="closeCorrecao"
-    >
-      <div class="bg-background border rounded-lg w-full max-w-md p-5 space-y-4">
-        <div class="flex items-start">
-          <div>
-            <h2 class="text-lg font-semibold">Correção de estoque</h2>
-            <p class="text-sm text-muted-foreground">
-              Adiciona unidades de um SKU direto ao estoque Bling — sem criar devolução.
-            </p>
-          </div>
-          <Button class="ml-auto" size="sm" variant="ghost" @click="closeCorrecao">
-            <X class="size-4" />
-          </Button>
-        </div>
-
-        <div class="space-y-1">
-          <span class="text-[11px] font-medium text-muted-foreground">SKU</span>
-          <div class="relative">
-            <Search class="absolute left-2.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-            <input
-              v-model="correcaoSku"
-              autocomplete="off"
-              class="h-9 w-full rounded-md border bg-background pl-8 pr-3 text-sm font-mono"
-              placeholder="buscar SKU ou nome do produto"
-              @input="onCorrecaoSkuInput"
-              @focus="correcaoShowResults = true"
-              @blur="onCorrecaoSkuBlur"
-              @keydown.enter.prevent
-            />
-            <div
-              v-if="correcaoShowResults && (correcaoSearching || correcaoResults.length)"
-              class="absolute z-10 mt-1 w-full rounded-md border bg-background shadow-lg max-h-56 overflow-auto"
-            >
-              <div v-if="correcaoSearching" class="py-3 text-center text-xs text-muted-foreground">
-                <Loader2 class="size-3.5 inline animate-spin mr-1.5" /> buscando…
+            <div class="rounded-md border p-3">
+              <div class="mb-2 flex items-center text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"><span class="mr-1.5 inline-flex size-[18px] items-center justify-center rounded-full bg-[#1f3a5f] text-[10.5px] font-bold text-white">2</span>Chamado</div>
+              <div class="flex flex-wrap items-center gap-2 text-xs">
+                <template v-if="pedidoItem.chamado">
+                  <span class="inline-block rounded px-2 py-0.5 text-[11px] font-semibold" :class="pedidoItem.tem_chamado_aberto ? 'bg-blue-100 text-blue-800 dark:bg-blue-950/50 dark:text-blue-300' : 'bg-muted text-muted-foreground'">{{ pedidoItem.tem_chamado_aberto ? 'Aberto' : 'Concluído' }}</span>
+                  <span v-if="pedidoItem.chamado.numero" class="font-mono text-muted-foreground">{{ pedidoItem.chamado.numero }}</span>
+                  <a :href="`/chamados?search=${encodeURIComponent(pedidoItem.pedido_bling || '')}`" target="_blank" rel="noopener" class="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[11px] font-semibold hover:bg-muted"><ExternalLink class="size-3" /> abrir na aba Chamados</a>
+                </template>
+                <span v-else class="text-muted-foreground">sem chamado. Ele abre sozinho ao salvar o lançamento, pelo motivo (Bloqueado, Golpe, Item faltando, Não recebido, Danificado).</span>
               </div>
-              <button
-                v-for="r in correcaoResults"
-                :key="r.sku"
-                type="button"
-                class="flex w-full items-center gap-2 border-t px-2 py-1.5 text-left text-xs first:border-t-0 hover:bg-primary/10"
-                @mousedown.prevent="pickCorrecaoProduct(r)"
-              >
-                <span class="shrink-0 font-mono">{{ r.sku }}</span>
-                <span class="flex-1 truncate text-muted-foreground">{{ r.name }}</span>
-                <span class="shrink-0 tabular-nums text-muted-foreground" title="saldo virtual">{{ saldoUn(r.saldo_virtual_total) }}</span>
-              </button>
+              <div class="mt-2 text-[11px] text-muted-foreground">“Abrir chamado: Sim/Não”, a conferência do motivo e a Instrução pra IA entram na próxima etapa: mexem no robô que abre a disputa, que é tiro único na plataforma.</div>
+            </div>
+
+            <div v-if="veCusto" class="rounded-md border p-3">
+              <div class="mb-1.5 flex items-center text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"><span class="mr-1.5 inline-flex size-[18px] items-center justify-center rounded-full bg-[#1f3a5f] text-[10.5px] font-bold text-white">3</span>Reembolso <span class="ml-1 font-normal normal-case tracking-normal">· a conta deste pedido, preenchida sozinha</span></div>
+              <table v-if="contaDaJanela" class="w-full border-collapse text-xs tabular-nums">
+                <tbody>
+                  <tr><td class="w-[112px] whitespace-nowrap py-1 text-right font-semibold" :class="contaDaJanela.recebido ? 'text-emerald-700 dark:text-emerald-400' : 'text-muted-foreground'">+ {{ brl(contaDaJanela.recebido) }}</td><td class="py-1 pl-3">recebido pelo chamado <span class="text-muted-foreground">{{ pedidoItem.chamado ? (pedidoItem.tem_chamado_aberto ? '· ainda aberto' : '· concluído') : '· sem chamado' }}</span></td></tr>
+                  <tr v-if="contaDaJanela.custo_produto"><td class="whitespace-nowrap py-1 text-right font-semibold text-red-700 dark:text-red-400">− {{ brl(contaDaJanela.custo_produto) }}</td><td class="py-1 pl-3">custo do produto <span class="text-muted-foreground">· perdimento ou extraviado</span></td></tr>
+                  <tr v-if="contaDaJanela.custo_manutencao"><td class="whitespace-nowrap py-1 text-right font-semibold text-red-700 dark:text-red-400">− {{ brl(contaDaJanela.custo_manutencao) }}</td><td class="py-1 pl-3">custo de manutenção</td></tr>
+                  <tr class="border-t"><td class="whitespace-nowrap py-1.5 text-right text-[13px] font-bold" :class="contaDaJanela.resultado < 0 ? 'text-red-700 dark:text-red-400' : 'text-emerald-700 dark:text-emerald-400'">{{ sinal(contaDaJanela.resultado) }}</td><td class="py-1.5 pl-3 font-bold">resultado</td></tr>
+                </tbody>
+              </table>
+              <div v-else class="text-xs text-muted-foreground">nada a contar ainda: sem custo lançado e sem chamado concluído com valor.</div>
+              <div class="mt-1 text-[11px] text-muted-foreground">Recebido = o valor informado ao concluir o chamado, quando é lucro. Chamado concluído com prejuízo conta R$ 0,00 aqui, pra não descontar o mesmo produto duas vezes.</div>
+            </div>
+
+            <div class="rounded-md border border-blue-300 bg-blue-50/60 p-3 dark:border-blue-800 dark:bg-blue-950/20">
+              <div class="mb-2 flex items-center text-[10px] font-semibold uppercase tracking-wide text-blue-900 dark:text-blue-200"><span class="mr-1.5 inline-flex size-[18px] items-center justify-center rounded-full bg-[#1f3a5f] text-[10.5px] font-bold text-white">{{ veCusto ? 4 : 3 }}</span>Resolver <span class="ml-1 font-normal normal-case tracking-normal">· tira o pedido da lista de abertas</span></div>
+              <template v-if="pedidoItem.resolvido">
+                <div class="text-xs">Resolvida em <b>{{ ddmmaaaa(pedidoItem.resolvido_at) }}</b><template v-if="pedidoItem.resolvido_por_nome"> por <b>{{ pedidoItem.resolvido_por_nome }}</b></template> · {{ pedidoItem.resolvido_como }}</div>
+                <button v-if="canEdit" type="button" class="mt-2 rounded-md border bg-background px-2.5 py-1.5 text-xs font-semibold hover:bg-muted disabled:opacity-50" :disabled="!!salvando" title="Volta pra lista de abertas. Não mexe no Bling." @click="reabrir">reabrir</button>
+              </template>
+              <div v-else-if="foraDaLista" class="text-xs text-muted-foreground">
+                Este pedido ainda não entrou em devolução, então não há o que resolver. Ele entra na lista sozinho quando o Bling for para <b>Aguardando Devolução</b> (ali em cima, em <b>Bling:</b>).
+              </div>
+              <template v-else>
+                <div v-if="pedidoItem.pronto_resolver" class="mb-2 text-xs"><b class="text-blue-800 dark:text-blue-200">Pronto pra resolver:</b> {{ pedidoItem.pronto_resolver }}.</div>
+                <div v-if="linhasDaJanela.length > 1" class="mb-2 text-[11px] text-muted-foreground">Vale pro pedido inteiro ({{ linhasDaJanela.length }} produtos): a situação do Bling é do pedido.</div>
+                <div class="grid items-end gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                  <label class="block">
+                    <span class="mb-1 block text-[11px] font-semibold">Como terminou <span class="text-red-500">*</span></span>
+                    <select v-model="resolverForm.como" class="h-8 w-full rounded-md border bg-background px-2 text-xs" :disabled="!canEdit">
+                      <option value="" disabled>escolha…</option>
+                      <option v-for="c in comoTerminou" :key="c" :value="c">{{ c }}</option>
+                    </select>
+                  </label>
+                  <label class="block">
+                    <span class="mb-1 block text-[11px] font-semibold">Nova situação no Bling</span>
+                    <select v-model="resolverForm.situacao" class="h-8 w-full rounded-md border bg-background px-2 text-xs" :disabled="!canEdit">
+                      <option value="">não mexer ({{ pedidoItem.situacao_bling_nome || '—' }})</option>
+                      <option v-for="s in situacoesBling" :key="s.id" :value="String(s.id)">{{ s.nome }}</option>
+                    </select>
+                  </label>
+                  <button type="button" class="inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-md bg-primary px-3 text-xs font-semibold text-primary-foreground disabled:opacity-50" :disabled="!canEdit || !resolverForm.como || !!salvando" @click="resolver"><Check class="size-3.5" /> resolver</button>
+                </div>
+                <div class="mt-1.5 text-[11px] text-muted-foreground">Situação atual no Bling: <b class="text-foreground">{{ pedidoItem.situacao_bling_nome || '—' }}</b>. Dá pra reabrir depois.</div>
+              </template>
             </div>
           </div>
-        </div>
-
-        <div class="space-y-1">
-          <span class="text-[11px] font-medium text-muted-foreground">Condição</span>
-          <div class="flex gap-2">
-            <button
-              v-for="c in CONDICOES_CORRECAO"
-              :key="c"
-              type="button"
-              class="flex-1 rounded-md border px-3 py-2 text-sm transition-colors"
-              :class="correcaoCondicao === c ? 'border-primary bg-primary/10' : 'hover:border-primary/50'"
-              @click="correcaoCondicao = c"
-            >{{ c }}</button>
-          </div>
-        </div>
-
-        <div class="grid grid-cols-2 gap-3">
-          <label class="space-y-1">
-            <span class="text-[11px] font-medium text-muted-foreground">Quantidade</span>
-            <input
-              v-model.number="correcaoQtd"
-              type="number"
-              min="1"
-              class="h-9 w-full rounded-md border bg-background px-3 text-sm tabular-nums"
-            />
-          </label>
-          <label v-if="isAdmin" class="space-y-1">
-            <span class="text-[11px] font-medium text-muted-foreground">Custo (opcional)</span>
-            <input
-              v-model="correcaoCusto"
-              type="text"
-              inputmode="decimal"
-              class="h-9 w-full rounded-md border bg-background px-3 text-sm text-right tabular-nums"
-            />
-          </label>
-        </div>
-
-        <label class="block space-y-1">
-          <span class="text-[11px] font-medium text-muted-foreground">Produto (opcional, p/ criar avulso)</span>
-          <input
-            v-model="correcaoProduto"
-            class="h-9 w-full rounded-md border bg-background px-3 text-sm"
-            placeholder="nome do produto"
-          />
-        </label>
-
-        <label class="block space-y-1">
-          <span class="text-[11px] font-medium text-muted-foreground">Observação</span>
-          <input
-            v-model="correcaoObs"
-            class="h-9 w-full rounded-md border bg-background px-3 text-sm"
-            placeholder="observação do movimento no Bling"
-            @keydown.enter.prevent="submitCorrecao"
-          />
-        </label>
-
-        <p v-if="correcaoError" class="text-sm text-red-400">{{ correcaoError }}</p>
-
-        <div class="flex justify-end gap-2 pt-1">
-          <Button size="sm" variant="ghost" @click="closeCorrecao">cancelar</Button>
-          <Button size="sm" :disabled="correcaoSubmitting || !canEdit || !correcaoSku.trim()" @click="submitCorrecao">
-            <Loader2 v-if="correcaoSubmitting" class="size-4 mr-1.5 animate-spin" />
-            <PackagePlus v-else class="size-4 mr-1.5" />
-            seguir
-          </Button>
         </div>
       </div>
     </div>
 
-    <!-- Modais que abrem ANTES das chamadas de estoque/produtos Bling -->
-    <DevolucaoManutencaoModal
-      :open="manutencaoModal.open"
-      :sku="manutencaoModal.sku"
-      @confirm="onManutencaoConfirm"
-      @cancel="onManutencaoCancel"
-    />
-    <DevolucaoTrocaSkuModal
-      :open="trocaModal.open"
-      :sold-sku="trocaModal.soldSku"
-      @confirm="onTrocaConfirm"
-      @cancel="onTrocaCancel"
-    />
-    <DevolucaoEstoqueModal
-      :open="estoqueModal.open"
-      :sku="estoqueModal.sku"
-      :condicao="estoqueModal.condicao"
-      :full-destino="estoqueModal.fullDestino"
-      @confirm="onEstoqueConfirm"
-      @cancel="onEstoqueCancel"
-    />
-
-    <!-- Modal do botão INFORMAR (só admins) — lista do Acompanhamento no Threema -->
+    <!-- Informar (só admin): mesma lista e mesmo cadastro de avisos da tela de antes. -->
     <InformarThreemaModal
       :open="informarOpen"
       contexto="devolucoes"
       contexto-auto="devolucoes_auto"
       enviar-com-auto
-      descricao="Quem está marcado recebe no Threema o aviso automático de prazo: quando falta menos de 24 h pra loja responder na plataforma (TikTok: confirmar ou recusar o pacote recebido; Shopee: conferir o pacote recebido, enviar evidências, responder à proposta; Mercado Livre: revisar a devolução recebida em 3 dias), e um último aviso faltando 4 h — por caso e por prazo. O pedido de só reembolso tem aviso próprio pela aba Chamados. 'Enviar agora' manda a lista dos pedidos aguardando devolução (a mesma da aba Acompanhamento), com dias parados, última localização e prazo. A seleção fica salva."
+      descricao="Quem está marcado recebe no Threema o aviso automático de prazo: quando falta menos de 24 h pra loja responder na plataforma (TikTok: confirmar ou recusar o pacote recebido; Shopee: conferir o pacote recebido, enviar evidências, responder à proposta; Mercado Livre: revisar a devolução recebida em 3 dias), e um último aviso faltando 4 h — por caso e por prazo. O pedido de só reembolso tem aviso próprio pela aba Chamados. 'Enviar agora' manda a lista dos pedidos aguardando devolução, com dias parados, última localização e prazo. A seleção fica salva."
       @close="informarOpen = false"
     />
   </div>

@@ -29,6 +29,9 @@ PAGINAS: dict[str, str] = {
     "/conciliacao": "Conciliação",
     "/faturamento": "Faturamento",
     "/controle-estoque": "Controle de Estoque",
+    # 16/11/2026: a tela de antes (abas Acompanhamento/Fraude/Lançamentos) ficou
+    # guardada fora do menu; o painel novo passou a morar em /devolucoes.
+    "/devolucoes-antigo": "Devoluções (tela antiga)",
     "/devolucoes": "Devoluções",
     "/reembolso": "Reembolso",
     "/logistica": "Logística",
@@ -83,6 +86,7 @@ API: dict[str, str] = {
     "/api/estoque": "Controle de Estoque",
     "/api/nf/": "Controle de Estoque",
     "/api/devolutions": "Devoluções",
+    "/api/devolucoes-painel": "Devoluções",
     "/api/refunds": "Reembolso",
     "/api/logistica": "Logística",
     "/api/conciliacao": "Conciliação",

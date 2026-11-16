@@ -198,8 +198,6 @@ const sections = computed<Section[]>(() => [
     label: 'Pós-venda',
     items: [
       { to: '/devolucoes', label: 'Devoluções', icon: Undo2, resource: 'devolucoes' },
-      // 16/11/2026: painel novo em teste, ao lado do de sempre (que continua acima).
-      { to: '/devolucoes-novo', label: 'Devoluções (novo)', icon: Undo2, resource: 'devolucoes' },
       { to: '/reembolso', label: 'Reembolso', icon: Receipt, resource: 'reembolso' },
       { to: '/logistica', label: 'Logística', icon: Headset, resource: 'logistica' },
       { to: '/notas-fiscais', label: 'Notas fiscais', icon: FileText, resource: 'notas_fiscais' },

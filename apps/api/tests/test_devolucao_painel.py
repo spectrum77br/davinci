@@ -13,18 +13,19 @@ pode mudar — a lista nova reusa a mesma leitura com outra fonte.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.models import Chamado, DevolucaoAnexo, Devolution, UserRole
 from app.routers.devolutions import PAINEL_LARGADA
 from app.services import devolucao_painel as contas
 from app.services.devolucao_painel import Lancamento
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 pytestmark = pytest.mark.asyncio
 
@@ -80,7 +81,9 @@ async def test_etapa_manutencao_ganha_de_fraude_e_de_chegou() -> None:
     )
     assert (
         contas.etapa(
-            fila="acompanhamento", situacao_bling="83957", chegou_em=date(2026, 11, 14),
+            fila="acompanhamento",
+            situacao_bling="83957",
+            chegou_em=date(2026, 11, 14),
             lancamentos=[],
         )
         == "chegou"
@@ -88,14 +91,18 @@ async def test_etapa_manutencao_ganha_de_fraude_e_de_chegou() -> None:
     # Lançamento de produto recebido prova a chegada; "Não devolvido" não.
     assert (
         contas.etapa(
-            fila="acompanhamento", situacao_bling="83957", chegou_em=None,
+            fila="acompanhamento",
+            situacao_bling="83957",
+            chegou_em=None,
             lancamentos=[Lancamento(sku="a", condicao="Usado")],
         )
         == "chegou"
     )
     assert (
         contas.etapa(
-            fila="acompanhamento", situacao_bling="83957", chegou_em=None,
+            fila="acompanhamento",
+            situacao_bling="83957",
+            chegou_em=None,
             lancamentos=[Lancamento(sku="a", condicao="Não devolvido")],
         )
         == "aguardando"
@@ -112,36 +119,61 @@ async def test_prazo_da_etapa_pega_o_mais_proximo() -> None:
     agora = datetime(2026, 11, 16, 15, 0, tzinfo=UTC)
     # Fraude com disputa vencendo em 3 h: urgente, e a palavra é "disputa".
     p = contas.prazo_da_etapa(
-        etapa_="fraude", agora=agora, prazo_resposta=agora + timedelta(hours=3),
-        acao_resposta="responder ao reembolso", prazo_45_ate=None, prazo_45_estado=None,
-        amazon_cancelar=False, lancamentos=[],
+        etapa_="fraude",
+        agora=agora,
+        prazo_resposta=agora + timedelta(hours=3),
+        acao_resposta="responder ao reembolso",
+        prazo_45_ate=None,
+        prazo_45_estado=None,
+        amazon_cancelar=False,
+        lancamentos=[],
     )
     assert (p["prazo_tipo"], p["prazo_estado"]) == ("disputa", "urgente")
     assert p["prazo_dica"] == "responder ao reembolso"
     # Aguardando: 45 dias longe = sem estado; nos 5 dias finais = urgente.
     longe = contas.prazo_da_etapa(
-        etapa_="aguardando", agora=agora, prazo_resposta=None, acao_resposta=None,
-        prazo_45_ate=date(2026, 12, 22), prazo_45_estado=None, amazon_cancelar=False,
+        etapa_="aguardando",
+        agora=agora,
+        prazo_resposta=None,
+        acao_resposta=None,
+        prazo_45_ate=date(2026, 12, 22),
+        prazo_45_estado=None,
+        amazon_cancelar=False,
         lancamentos=[],
     )
     assert (longe["prazo_tipo"], longe["prazo_estado"]) == ("pacote chegar", None)
     perto = contas.prazo_da_etapa(
-        etapa_="aguardando", agora=agora, prazo_resposta=None, acao_resposta=None,
-        prazo_45_ate=date(2026, 11, 19), prazo_45_estado="vence_logo", amazon_cancelar=False,
+        etapa_="aguardando",
+        agora=agora,
+        prazo_resposta=None,
+        acao_resposta=None,
+        prazo_45_ate=date(2026, 11, 19),
+        prazo_45_estado="vence_logo",
+        amazon_cancelar=False,
         lancamentos=[],
     )
     assert perto["prazo_estado"] == "urgente"
     # No dia 45 a régua já diz "passou do prazo", mesmo antes da meia-noite.
     venceu = contas.prazo_da_etapa(
-        etapa_="aguardando", agora=agora, prazo_resposta=None, acao_resposta=None,
-        prazo_45_ate=date(2026, 11, 16), prazo_45_estado="vencido", amazon_cancelar=False,
+        etapa_="aguardando",
+        agora=agora,
+        prazo_resposta=None,
+        acao_resposta=None,
+        prazo_45_ate=date(2026, 11, 16),
+        prazo_45_estado="vencido",
+        amazon_cancelar=False,
         lancamentos=[],
     )
     assert venceu["prazo_estado"] == "vencido"
     # Manutenção: o prazo do técnico; vencido quando já passou.
     tecnico = contas.prazo_da_etapa(
-        etapa_="manutencao", agora=agora, prazo_resposta=None, acao_resposta=None,
-        prazo_45_ate=None, prazo_45_estado=None, amazon_cancelar=False,
+        etapa_="manutencao",
+        agora=agora,
+        prazo_resposta=None,
+        acao_resposta=None,
+        prazo_45_ate=None,
+        prazo_45_estado=None,
+        amazon_cancelar=False,
         lancamentos=[
             Lancamento(sku="a", condicao="Manutenção", prazo_manutencao=agora - timedelta(days=1))
         ],
@@ -149,8 +181,13 @@ async def test_prazo_da_etapa_pega_o_mais_proximo() -> None:
     assert (tecnico["prazo_tipo"], tecnico["prazo_estado"]) == ("técnico", "vencido")
     # Entre dois prazos correndo, vale o que vence antes.
     dois = contas.prazo_da_etapa(
-        etapa_="chegou", agora=agora, prazo_resposta=agora + timedelta(days=3),
-        acao_resposta=None, prazo_45_ate=None, prazo_45_estado=None, amazon_cancelar=False,
+        etapa_="chegou",
+        agora=agora,
+        prazo_resposta=agora + timedelta(days=3),
+        acao_resposta=None,
+        prazo_45_ate=None,
+        prazo_45_estado=None,
+        amazon_cancelar=False,
         lancamentos=[
             Lancamento(sku="a", condicao="Usado", prazo_contestacao=agora + timedelta(days=1))
         ],
@@ -158,15 +195,21 @@ async def test_prazo_da_etapa_pega_o_mais_proximo() -> None:
     assert dois["prazo_tipo"] == "contestar"
     # Alarme falso que NÃO pode aparecer (revisão de 16/11):
     comum = dict(  # noqa: C408
-        agora=agora, acao_resposta=None, prazo_45_ate=None, prazo_45_estado=None,
+        agora=agora,
+        acao_resposta=None,
+        prazo_45_ate=None,
+        prazo_45_estado=None,
         amazon_cancelar=False,
     )
     # …contestação depois que o motivo foi escolhido (a contestação já saiu);
     ja_contestou = contas.prazo_da_etapa(
-        etapa_="chegou", prazo_resposta=None,
+        etapa_="chegou",
+        prazo_resposta=None,
         lancamentos=[
             Lancamento(
-                sku="a", condicao="Usado", motivo="Golpe",
+                sku="a",
+                condicao="Usado",
+                motivo="Golpe",
                 prazo_contestacao=agora + timedelta(hours=2),
             )
         ],
@@ -175,7 +218,9 @@ async def test_prazo_da_etapa_pega_o_mais_proximo() -> None:
     assert ja_contestou["prazo_tipo"] is None
     # …ou com chamado no pedido;
     com_chamado = contas.prazo_da_etapa(
-        etapa_="chegou", prazo_resposta=None, tem_chamado=True,
+        etapa_="chegou",
+        prazo_resposta=None,
+        tem_chamado=True,
         lancamentos=[
             Lancamento(sku="a", condicao="Usado", prazo_contestacao=agora + timedelta(hours=2))
         ],
@@ -185,8 +230,11 @@ async def test_prazo_da_etapa_pega_o_mais_proximo() -> None:
     # …prazo de resposta com o pedido fora de Aguardando Devolução (congelado:
     # o robô só relê a plataforma de quem está lá);
     congelado = contas.prazo_da_etapa(
-        etapa_="manutencao", prazo_resposta=agora + timedelta(hours=2), lancamentos=[],
-        situacao_bling="84677", **comum,
+        etapa_="manutencao",
+        prazo_resposta=agora + timedelta(hours=2),
+        lancamentos=[],
+        situacao_bling="84677",
+        **comum,
     )
     assert congelado["prazo_tipo"] is None
     # …e prazo vencido há mais de 2 dias (a plataforma já decidiu sozinha).
@@ -200,13 +248,25 @@ async def test_prazo_da_etapa_pega_o_mais_proximo() -> None:
     assert (recente["prazo_tipo"], recente["prazo_estado"]) == ("disputa", "vencido")
     # Nada correndo.
     nada = contas.prazo_da_etapa(
-        etapa_="chegou", agora=agora, prazo_resposta=None, acao_resposta=None,
-        prazo_45_ate=None, prazo_45_estado=None, amazon_cancelar=False, lancamentos=[],
+        etapa_="chegou",
+        agora=agora,
+        prazo_resposta=None,
+        acao_resposta=None,
+        prazo_45_ate=None,
+        prazo_45_estado=None,
+        amazon_cancelar=False,
+        lancamentos=[],
     )
     assert nada["prazo_tipo"] is None and nada["prazo_em"] is None
     amazon = contas.prazo_da_etapa(
-        etapa_="aguardando", agora=agora, prazo_resposta=None, acao_resposta=None,
-        prazo_45_ate=None, prazo_45_estado=None, amazon_cancelar=True, lancamentos=[],
+        etapa_="aguardando",
+        agora=agora,
+        prazo_resposta=None,
+        acao_resposta=None,
+        prazo_45_ate=None,
+        prazo_45_estado=None,
+        amazon_cancelar=True,
+        lancamentos=[],
     )
     assert (amazon["prazo_tipo"], amazon["prazo_estado"]) == ("cancelar na Amazon", "urgente")
 
@@ -216,30 +276,36 @@ async def test_conta_do_reembolso_exemplo_do_vinicius_700_menos_100() -> None:
     ficaria 600" """
     conta = contas.conta_do_reembolso(
         lancamentos=[Lancamento(sku="a", condicao="Manutenção", custo_manutencao=100)],
-        chamado_resolvido=True, chamado_valor=700,
+        chamado_resolvido=True,
+        chamado_valor=700,
     )
     assert conta == {
-        "recebido": 700.0, "custo_produto": 0.0, "custo_manutencao": 100.0, "resultado": 600.0,
+        "recebido": 700.0,
+        "custo_produto": 0.0,
+        "custo_manutencao": 100.0,
+        "resultado": 600.0,
     }
 
 
 async def test_conta_do_reembolso_nao_dobra_o_prejuizo() -> None:
     # Perdimento com o chamado ainda aberto: só o custo do produto.
     perd = [Lancamento(sku="a", condicao="Sucata", custo_produto=612)]
-    assert contas.conta_do_reembolso(
-        lancamentos=perd, chamado_resolvido=False, chamado_valor=None
-    )["resultado"] == -612.0
+    assert (
+        contas.conta_do_reembolso(lancamentos=perd, chamado_resolvido=False, chamado_valor=None)[
+            "resultado"
+        ]
+        == -612.0
+    )
     # Chamado concluído com PREJUÍZO −612: recebido conta 0 (o prejuízo do
     # chamado já é o produto perdido) — fica −612, não −1.224.
-    conta = contas.conta_do_reembolso(
-        lancamentos=perd, chamado_resolvido=True, chamado_valor=-612
-    )
+    conta = contas.conta_do_reembolso(lancamentos=perd, chamado_resolvido=True, chamado_valor=-612)
     assert conta["recebido"] == 0.0 and conta["resultado"] == -612.0
     # Custo do produto só conta em Perdimento/Extraviado (Novo voltou inteiro).
     assert (
         contas.conta_do_reembolso(
             lancamentos=[Lancamento(sku="a", condicao="Novo", custo_produto=612)],
-            chamado_resolvido=False, chamado_valor=None,
+            chamado_resolvido=False,
+            chamado_valor=None,
         )
         is None
     )
@@ -254,46 +320,93 @@ async def test_pronto_pra_resolver() -> None:
     usado_ok = [Lancamento(sku="a", condicao="Usado", estoque_status="ok")]
     base = {"tem_chamado_aberto": False, "chamado_resolvido": False, "chamado_valor": None}
     # Bling já saiu de Aguardando Devolução / Manutenção.
-    assert contas.pronto_pra_resolver(
-        situacao_bling="545902", situacao_nome="Resolvido", lancamentos=[], **base
-    ) == "o Bling já está em Resolvido"
+    assert (
+        contas.pronto_pra_resolver(
+            situacao_bling="545902", situacao_nome="Resolvido", lancamentos=[], **base
+        )
+        == "o Bling já está em Resolvido"
+    )
     # Lançada com estoque confirmado.
-    assert contas.pronto_pra_resolver(
-        situacao_bling="83957", situacao_nome="Aguardando Devolução", lancamentos=usado_ok, **base
-    ) == "lançada: Usado"
+    assert (
+        contas.pronto_pra_resolver(
+            situacao_bling="83957",
+            situacao_nome="Aguardando Devolução",
+            lancamentos=usado_ok,
+            **base,
+        )
+        == "lançada: Usado"
+    )
     # Estoque que não entrou no Bling segura.
-    assert contas.pronto_pra_resolver(
-        situacao_bling="83957", situacao_nome=None,
-        lancamentos=[Lancamento(sku="a", condicao="Usado", estoque_status="falhou")], **base
-    ) is None
+    assert (
+        contas.pronto_pra_resolver(
+            situacao_bling="83957",
+            situacao_nome=None,
+            lancamentos=[Lancamento(sku="a", condicao="Usado", estoque_status="falhou")],
+            **base,
+        )
+        is None
+    )
     # Com o técnico segura (inclusive com o Bling em Manutenção).
-    assert contas.pronto_pra_resolver(
-        situacao_bling="84677", situacao_nome="Manutenção",
-        lancamentos=[Lancamento(sku="a", condicao="Manutenção")], **base
-    ) is None
+    assert (
+        contas.pronto_pra_resolver(
+            situacao_bling="84677",
+            situacao_nome="Manutenção",
+            lancamentos=[Lancamento(sku="a", condicao="Manutenção")],
+            **base,
+        )
+        is None
+    )
     # Chamado aberto segura tudo: falta a plataforma responder.
-    assert contas.pronto_pra_resolver(
-        situacao_bling="545902", situacao_nome="Resolvido", lancamentos=usado_ok,
-        tem_chamado_aberto=True, chamado_resolvido=False, chamado_valor=None,
-    ) is None
+    assert (
+        contas.pronto_pra_resolver(
+            situacao_bling="545902",
+            situacao_nome="Resolvido",
+            lancamentos=usado_ok,
+            tem_chamado_aberto=True,
+            chamado_resolvido=False,
+            chamado_valor=None,
+        )
+        is None
+    )
     # …mesmo com o chamado já ganho ou o Bling já em outra situação.
-    assert contas.pronto_pra_resolver(
-        situacao_bling="84677", situacao_nome="Manutenção",
-        lancamentos=[Lancamento(sku="a", condicao="Manutenção")],
-        tem_chamado_aberto=False, chamado_resolvido=True, chamado_valor=700,
-    ) is None
-    assert contas.pronto_pra_resolver(
-        situacao_bling="545902", situacao_nome="Resolvido",
-        lancamentos=[Lancamento(sku="a", condicao="Novo", estoque_status="falhou")], **base
-    ) is None
+    assert (
+        contas.pronto_pra_resolver(
+            situacao_bling="84677",
+            situacao_nome="Manutenção",
+            lancamentos=[Lancamento(sku="a", condicao="Manutenção")],
+            tem_chamado_aberto=False,
+            chamado_resolvido=True,
+            chamado_valor=700,
+        )
+        is None
+    )
+    assert (
+        contas.pronto_pra_resolver(
+            situacao_bling="545902",
+            situacao_nome="Resolvido",
+            lancamentos=[Lancamento(sku="a", condicao="Novo", estoque_status="falhou")],
+            **base,
+        )
+        is None
+    )
     # "ou ganhar reembolso": chamado concluído com valor.
-    assert contas.pronto_pra_resolver(
-        situacao_bling="83957", situacao_nome=None, lancamentos=[],
-        tem_chamado_aberto=False, chamado_resolvido=True, chamado_valor=389,
-    ) == "chamado concluído com valor ganho"
-    assert contas.pronto_pra_resolver(
-        situacao_bling="83957", situacao_nome=None, lancamentos=[], **base
-    ) is None
+    assert (
+        contas.pronto_pra_resolver(
+            situacao_bling="83957",
+            situacao_nome=None,
+            lancamentos=[],
+            tem_chamado_aberto=False,
+            chamado_resolvido=True,
+            chamado_valor=389,
+        )
+        == "chamado concluído com valor ganho"
+    )
+    assert (
+        contas.pronto_pra_resolver(
+            situacao_bling="83957", situacao_nome=None, lancamentos=[], **base
+        )
+        is None
+    )
 
 
 async def test_lancamento_da_linha() -> None:
@@ -329,8 +442,12 @@ async def _pedido(
                 """
             ),
             {
-                "id": uuid4(), "numero": numero, "mkt": f"MKT-{numero}", "situacao": situacao,
-                "entrada": entrada, "sku": sku if i == 0 else f"{sku}-{i}",
+                "id": uuid4(),
+                "numero": numero,
+                "mkt": f"MKT-{numero}",
+                "situacao": situacao,
+                "entrada": entrada,
+                "sku": sku if i == 0 else f"{sku}-{i}",
                 "produto": f"Produto {numero}-{i}",
             },
         )
@@ -385,7 +502,8 @@ async def test_lista_pega_quem_caiu_em_devolucao_e_so_sai_no_resolver(
     # Aguardando sem nada lançado: o prazo dos 45 dias aparece sempre.
     assert a[0]["prazo_tipo"] == "pacote chegar" and a[0]["prazo_estado"] is None
     assert a[0]["prazo_em"][:10] in (
-        (hoje + timedelta(days=40)).isoformat(), (hoje + timedelta(days=41)).isoformat()
+        (hoje + timedelta(days=40)).isoformat(),
+        (hoje + timedelta(days=41)).isoformat(),
     )
     b = por_pedido["700002"][0]
     assert b["situacao_bling_id"] == "545902"
@@ -508,7 +626,8 @@ async def test_excecao_dos_45_dias_nao_vira_prazo_vencido(
     assert por["736001"]["prazo_tipo"] is None and por["736001"]["prazo_estado"] is None
     assert "fora da regra" in (por["736001"]["prazo_texto"] or "")
     assert (por["736002"]["prazo_tipo"], por["736002"]["prazo_estado"]) == (
-        "pacote chegar", "vencido",
+        "pacote chegar",
+        "vencido",
     )
 
 
@@ -561,8 +680,13 @@ async def test_lancamento_chamado_e_conta_so_o_admin_ve_custo(
     )
     db.add(
         Chamado(
-            pedido_bling="740001", origem="devolucao", conta="Shopee Mini", resolvido=True,
-            resolvido_at=datetime.now(UTC), valor_recuperado=700, chamado="CH-1",
+            pedido_bling="740001",
+            origem="devolucao",
+            conta="Shopee Mini",
+            resolvido=True,
+            resolvido_at=datetime.now(UTC),
+            valor_recuperado=700,
+            chamado="CH-1",
         )
     )
     await db.commit()
@@ -580,7 +704,10 @@ async def test_lancamento_chamado_e_conta_so_o_admin_ve_custo(
     assert primeira["chamado"]["resolvido"] is True and primeira["tem_chamado_aberto"] is False
     # A conta é do PEDIDO: aparece uma vez (700 − 100 = 600), não em cada linha.
     assert primeira["conta"] == {
-        "recebido": 700.0, "custo_produto": 0.0, "custo_manutencao": 100.0, "resultado": 600.0,
+        "recebido": 700.0,
+        "custo_produto": 0.0,
+        "custo_manutencao": 100.0,
+        "resultado": 600.0,
     }
     assert segunda["conta"] is None and segunda["primeira_do_pedido"] is False
 
@@ -598,7 +725,9 @@ async def test_resumo_comeca_na_virada(client, db: AsyncSession, make_user, auth
     agora = datetime.now(UTC)
     # Sem virada marcada não há o que contar.
     assert (await client.get("/api/devolucoes-painel/resumo")).json() == {
-        "desde": None, "dias": [], "ve_custo": False,
+        "desde": None,
+        "dias": [],
+        "ve_custo": False,
     }
     await _pedido(db, "750000", "545902", entrada=hoje - timedelta(days=30))
     await _resolvido(db, "750000", agora - timedelta(days=2), PAINEL_LARGADA)  # a virada
@@ -638,3 +767,86 @@ async def test_resumo_comeca_na_virada(client, db: AsyncSession, make_user, auth
     body = (await client.get("/api/devolucoes-painel/resumo")).json()
     assert body["ve_custo"] is False
     assert all(d["custos"] is None and d["recebido"] is None for d in body["dias"])
+
+
+async def test_busca_por_pedido_acha_no_historico_inteiro(
+    client, db: AsyncSession, make_user, auth_as
+):
+    """`?pedido=` traz UM pedido de qualquer lugar: resolvido, da largada, ou
+    que nunca caiu em Aguardando Devolução (pra lançar pela janela) — pelo nº
+    do Bling ou pelo da plataforma."""
+    auth_as(await make_user(permissions=_perm()))
+    hoje = datetime.now(_SP).date()
+    agora = datetime.now(UTC)
+    await _pedido(db, "760001", "545902", entrada=hoje - timedelta(days=40))
+    await _resolvido(db, "760001", agora - timedelta(days=3), PAINEL_LARGADA)
+    await _pedido(db, "760002", "9", entrada=None)  # nunca passou por devolução
+    await _pedido(db, "760003", "83957", entrada=hoje)
+    await db.commit()
+
+    lista = (await client.get("/api/devolucoes-painel")).json()["items"]
+    assert [i["pedido_bling"] for i in lista] == ["760003"]
+    antigo = (await client.get("/api/devolucoes-painel?pedido=760001")).json()["items"]
+    assert [i["pedido_bling"] for i in antigo] == ["760001"]
+    assert antigo[0]["resolvido"] is True and antigo[0]["resolvido_como"] == PAINEL_LARGADA
+    fora = (await client.get("/api/devolucoes-painel?pedido=MKT-760002")).json()["items"]
+    assert [i["pedido_bling"] for i in fora] == ["760002"]
+    assert fora[0]["resolvido"] is False and fora[0]["dias_em_devolucao"] is None
+    assert (await client.get("/api/devolucoes-painel?pedido=999999")).json()["items"] == []
+
+
+async def test_largada_das_lancadas_segue_a_regua_do_pronto_pra_resolver(db: AsyncSession):
+    """Migration 0484 ("os pedidos que já estava com estoque lançado antigo
+    deixa tudo como finalizado"): nasce finalizado só o pedido em que TUDO
+    que foi lançado já terminou — nada com o técnico, nenhuma entrada de
+    estoque pendente, nenhum chamado aberto, todas as peças com condição."""
+    hoje = datetime.now(_SP).date()
+
+    async def lanc(pedido: str, sku: str, **campos) -> None:
+        db.add(Devolution(pedido_bling=pedido, conta="Shopee KFA", sku=sku, quantidade=1, **campos))
+
+    await _pedido(db, "770001", "83957", entrada=hoje - timedelta(days=60))
+    await lanc("770001", "a", condicao_produto="Novo", estoque_status="ok")  # terminou
+    await _pedido(db, "770002", "84677", entrada=hoje - timedelta(days=60))
+    await lanc("770002", "a", condicao_produto="Novo", estoque_status="ok")
+    await lanc("770002", "b", condicao_produto="Manutenção")  # celular com o técnico: fica
+    await _pedido(db, "770003", "83957", entrada=hoje - timedelta(days=60))
+    await lanc(
+        "770003", "a", condicao_produto="Usado", estoque_status="falhou"
+    )  # estoque não entrou
+    await _pedido(db, "770004", "83957", entrada=hoje - timedelta(days=60))
+    await lanc("770004", "a", condicao_produto="Extraviado")
+    db.add(Chamado(pedido_bling="770004", origem="devolucao", conta="Shopee KFA"))  # chamado aberto
+    await _pedido(db, "770005", "83957", entrada=hoje - timedelta(days=60))
+    await lanc("770005", "a", condicao_produto=None)  # sem condição
+    await _pedido(db, "770006", "84677", entrada=hoje - timedelta(days=60))
+    await lanc(
+        "770006",
+        "a",
+        condicao_produto="Manutenção",
+        manutencao_destino="Usado",
+        estoque_status="ok",
+    )
+    await _pedido(db, "770007", "83957", entrada=hoje - timedelta(days=2))  # sem lançamento: fica
+    await db.commit()
+
+    fonte = (
+        Path(__file__).parents[1] / "alembic/versions/0484_devolucao_painel_lancadas_finalizadas.py"
+    ).read_text()
+    sql = re.search(r'op\.execute\(\s*f"""(.*?)"""', fonte, re.S).group(1)
+    sql = sql.replace('"{SCHEMA}".', "").replace("{LARGADA}", PAINEL_LARGADA)
+    await db.execute(text(sql))
+    await db.commit()
+    marcados = (
+        (
+            await db.execute(
+                text(
+                    "SELECT pedido_bling FROM devolucao_rastreio "
+                    "WHERE resolvido_at IS NOT NULL ORDER BY 1"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert marcados == ["770001", "770006"]

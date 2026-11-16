@@ -298,10 +298,11 @@ async def montar_itens(
     session: AsyncSession,
     user: User,
     *,
-    mostrar: Literal["abertas", "resolvidas", "todas"],
+    mostrar: Literal["abertas", "resolvidas", "todas", "pedido"],
     lojas: set[str] | None,
+    pedido: str | None = None,
 ) -> list[PainelItemOut]:
-    rows = await antigo.acompanhamento_rows(session, lojas=lojas, painel=mostrar)
+    rows = await antigo.acompanhamento_rows(session, lojas=lojas, painel=mostrar, pedido=pedido)
     pedidos = {(r.get("pedido_bling") or "").strip() for r in rows} - {""}
     lancs = await _lancamentos_por_pedido(session, pedidos)
     anexos = await _anexos_por_lancamento(session, [d.id for ds in lancs.values() for d in ds])
@@ -445,13 +446,23 @@ async def listar(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("devolucoes", "view"))],
     mostrar: Annotated[Literal["abertas", "resolvidas", "todas"], Query()] = "abertas",
+    pedido: Annotated[str | None, Query(max_length=60)] = None,
 ) -> PainelOut:
     """A lista única do painel novo. Volta inteira (teto de 4000 linhas);
     busca, filtros, cartões e "Onde agir hoje" são contas do navegador sobre
-    ela. Quem tem equipe de vendas só recebe as lojas da equipe."""
+    ela. Quem tem equipe de vendas só recebe as lojas da equipe.
+
+    `pedido` (nº do Bling ou da plataforma) ignora o `mostrar`: traz só esse
+    pedido, do histórico inteiro — a devolução antiga que o chamado aponta, ou
+    o pedido que ainda não caiu em Aguardando Devolução e alguém quer lançar."""
     scope = await resolve_team_scope(session, user)
     lojas = antigo._lojas_da_equipe(scope)
-    items = await montar_itens(session, user, mostrar=mostrar, lojas=lojas)
+    if pedido and pedido.strip():
+        items = await montar_itens(
+            session, user, mostrar="pedido", lojas=lojas, pedido=pedido.strip()
+        )
+    else:
+        items = await montar_itens(session, user, mostrar=mostrar, lojas=lojas)
     return PainelOut(
         items=items,
         total_pedidos=len({i.pedido_bling for i in items if i.pedido_bling}),
@@ -505,8 +516,11 @@ async def resolver(
     sit_id, sit_nome = await _situacao_atual(session, pedido)
     logger.info(
         "devolucao_painel_resolvido",
-        pedido_bling=pedido, como=row.resolvido_como, situacao=sit_id,
-        via_desvio=via_desvio, user_id=str(user.id),
+        pedido_bling=pedido,
+        como=row.resolvido_como,
+        situacao=sit_id,
+        via_desvio=via_desvio,
+        user_id=str(user.id),
     )
     return ResolverOut(
         pedido_bling=pedido,
@@ -540,9 +554,7 @@ async def reabrir(
     row.updated_by = user.id
     await session.commit()
     sit_id, sit_nome = await _situacao_atual(session, pedido)
-    logger.info(
-        "devolucao_painel_reaberto", pedido_bling=pedido, era=como, user_id=str(user.id)
-    )
+    logger.info("devolucao_painel_reaberto", pedido_bling=pedido, era=como, user_id=str(user.id))
     return ResolverOut(
         pedido_bling=pedido, resolvido=False, situacao_bling_id=sit_id, situacao_bling_nome=sit_nome
     )
@@ -615,7 +627,7 @@ async def resumo(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("devolucoes", "view"))],
 ) -> ResumoOut:
-    """"Meses — como ficou cada mês": por dia, a partir da VIRADA (o dia em
+    """ "Meses — como ficou cada mês": por dia, a partir da VIRADA (o dia em
     que o painel novo entrou). Antes dela não existe data de saída — não dá
     pra dizer quantas estavam abertas em setembro ou outubro.
 
@@ -659,9 +671,7 @@ async def resumo(
     if admin:
         recebidos = {
             x["dia"]: float(x["recebido"] or 0)
-            for x in (
-                await session.execute(text(_RESUMO_CHAMADO_SQL), {"desde": desde})
-            ).mappings()
+            for x in (await session.execute(text(_RESUMO_CHAMADO_SQL), {"desde": desde})).mappings()
         }
 
     dias: list[ResumoDiaOut] = []

@@ -54,7 +54,8 @@ function confirm() {
           :class="selected === o.value ? 'border-primary bg-primary/10' : 'hover:border-primary/50'"
           @click="selected = o.value"
         >
-          <span class="text-sm font-medium">{{ o.value }}</span>
+          <!-- 16/11/2026 (Vinicius): na tela é Perdimento; no banco segue Sucata. -->
+          <span class="text-sm font-medium">{{ o.value === 'Sucata' ? 'Perdimento' : o.value }}</span>
           <span class="text-[11px] text-muted-foreground">{{ o.hint }}</span>
         </button>
       </div>
