@@ -76,6 +76,9 @@ cor, tamanho, características diferentes).
    - outra: arrependimento, desistência, ou não dá para entender o que alega.
    Quando o motivo padronizado e o texto do comprador não combinam, vale o texto; se ainda \
 assim houver dúvida, escolha "outra".
+   Se a entrada trouxer uma INSTRUÇÃO da equipe, siga-a: ela manda contestar e diz o que \
+defender. Escolha em alegacao a opção que melhor corresponde ao que a instrução manda \
+contestar ("outra" só se nem a instrução der pra entender) e use o que ela diz na defesa.
 2. resumo_alegacao — o que o comprador alega, em português simples, numa frase curta.
 3. defesa — o trecho que a plataforma vai ler no meio do texto da loja (o sistema já põe a \
 identificação do pedido, a entrega, o link do vídeo e o pedido final). Regras:
@@ -151,6 +154,9 @@ class Fatos:
     transportadora: str = ""
     comprador_mandou_prova: bool | None = None
     prazo: str = ""  # "18/11 14:00" (até quando a plataforma espera a resposta)
+    # "Abrir chamado: Sim" + "Instrução IA" da equipe (16/11/2026): vale mais que a
+    # leitura da IA — pode mandar contestar o que ela deixaria pra pessoa.
+    instrucao: str = ""
 
 
 _SITUACAO_PT = {
@@ -185,6 +191,8 @@ def entrada(f: Fatos) -> str:
         f"Entrega do pedido: {entrega}",
         "Vídeo da embalagem: temos (o link vai junto do texto)",
     ]
+    if (f.instrucao or "").strip():
+        linhas.append(f'INSTRUÇÃO da equipe: "{_limpo(f.instrucao, 1200)}"')
     return "\n".join(linhas)
 
 

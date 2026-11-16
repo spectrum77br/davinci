@@ -25,6 +25,7 @@ from app.models import (
     Devolution,
     EstoquePedidoVideo,
     StoreInfo,
+    UserRole,
 )
 from app.models.chamado import ChamadoMensagem
 from app.routers import devolutions as antigo
@@ -1152,6 +1153,109 @@ async def test_shopee_em_processamento_sem_motivo_liberado_vai_pela_tela(
     assert fake.disputes == []
     msg = await _abertura(db, "798201")
     assert (msg.status, msg.canal) == ("pendente", "robo"), (msg.status, msg.erro)
+
+
+# ── "Abrir chamado: Sim" + "Instrução IA" na Fraude (16/11/2026) ──────────
+
+_LARGADO = (
+    'Fraude automática (16/11 16:37): o comprador alega "desisti da compra" — o sistema '
+    "não entendeu; o sistema não responde esse caso sozinho (responder à mão)."
+)
+_INSTR = "o cliente diz que desistiu, mas recebeu o produto certo — contestar com o vídeo"
+
+
+async def test_sim_com_instrucao_reabre_o_que_ficou_pra_pessoa_e_responde(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    await _caso(
+        db,
+        make_user,
+        "799101",
+        video_link="https://mega.nz/file/v#k",
+        video_enviado_em=AGORA,
+        observacao=_LARGADO,
+        abrir_chamado=True,
+        instrucao_ia_pendente=_INSTR,
+        instrucao_ia_em=AGORA - timedelta(minutes=3),
+    )
+    monkeypatch.setattr(
+        auto,
+        "_ler_caso",
+        _ler(auto.Caso(situacao=auto.PAGO, codigo="OTHER", texto="desisti", ida_entregue=True)),
+    )
+    perguntas: list[str] = []
+    _ia(monkeypatch, "vazio_ou_outro_produto", lidos=perguntas)
+    agendados = _sem_disparo(monkeypatch)
+    r = await auto.rodada(db)
+    assert r["lancados"] == 1, r
+    # A IA leu a instrução da equipe junto com a alegação.
+    assert "INSTRUÇÃO da equipe" in perguntas[0] and "desistiu" in perguntas[0]
+    assert [d.motivo_devolucao for d in await _lancamentos(db, "799101")] == ["Golpe"]
+    assert agendados == ["799101"]
+    rast = await _rast(db, "799101")
+    assert "seguindo a instrução da equipe" in rast.observacao
+    # A instrução entrou no chamado (a IA de Chamado lê) e saiu da espera.
+    assert rast.instrucao_ia_pendente is None
+
+
+async def test_instrucao_lida_e_ainda_pra_pessoa_nao_rele_e_a_janela_mostra(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch, client, auth_as
+):
+    await _caso(
+        db,
+        make_user,
+        "799201",
+        video_link="https://mega.nz/file/v#k",
+        video_enviado_em=AGORA,
+        observacao=_LARGADO,
+        abrir_chamado=True,
+        instrucao_ia_pendente="ver isso aí",
+        instrucao_ia_em=AGORA - timedelta(minutes=3),
+    )
+    lidos: list[str] = []
+    monkeypatch.setattr(
+        auto,
+        "_ler_caso",
+        _ler(auto.Caso(situacao=auto.PAGO, codigo="OTHER", texto="?", ida_entregue=True), lidos),
+    )
+    _ia(monkeypatch, "outra", pessoa="a instrução não diz o que contestar")
+    r = await auto.rodada(db)
+    assert r["pra_pessoa"] == 1 and r["lancados"] == 0, r
+    await auto.rodada(db)
+    assert len(lidos) == 1  # a mesma instrução não é relida
+    auth_as(await make_user(role=UserRole.ADMIN))
+    j = (await client.get("/api/devolucoes-painel/799201/chamado")).json()
+    assert j["fraude"] is True and j["tem_lancamento"] is False
+    assert j["ia_nao_abriu"] == "a instrução não diz o que contestar", j
+
+
+async def test_reembolso_aceito_pela_loja_so_contesta_com_instrucao(
+    db: AsyncSession, make_user, ligado, visao, monkeypatch
+):
+    aceito = auto.Caso(
+        situacao=auto.ACEITO_PELA_LOJA, codigo="Pacote vazio", texto="vazio", ida_entregue=True
+    )
+    monkeypatch.setattr(auto, "_ler_caso", _ler(aceito))
+    perguntas: list[str] = []
+    _ia(monkeypatch, lidos=perguntas)
+    _sem_disparo(monkeypatch)
+    # Sem instrução: pessoa.
+    await _caso(
+        db, make_user, "799301", video_link="https://mega.nz/file/v#k", video_enviado_em=AGORA
+    )
+    r = await auto.rodada(db)
+    assert r["pra_pessoa"] == 1 and perguntas == [], r
+    # Com Sim + instrução: contesta, e a IA sabe que a plataforma já reembolsou.
+    rast = await _rast(db, "799301")
+    rast.abrir_chamado = True
+    rast.instrucao_ia_pendente = (
+        "foi aceito sem querer, contestar: veio vazio segundo ele, o vídeo mostra completo"
+    )
+    rast.instrucao_ia_em = AGORA
+    await db.commit()
+    r = await auto.rodada(db)
+    assert r["lancados"] == 1, r
+    assert "JÁ REEMBOLSOU" in perguntas[0]
 
 
 async def test_worker_agenda_a_fraude_a_cada_10_minutos() -> None:

@@ -36,6 +36,7 @@ type Janela = {
   instrucoes: Instrucao[]
   ia_nao_abriu?: string | null
   tem_lancamento?: boolean
+  fraude?: boolean
 }
 type LinhaPrevia = { sku: string | null; produtos: string | null; quantidade: number; motivo_devolucao: string | null; observacao: string | null }
 type Previa = { abre: boolean; motivo: string | null; texto: string | null; avisos: string[] }
@@ -190,8 +191,12 @@ const estado = computed<{ texto: string; cor: string; dica: string } | null>(() 
   if (escolha.value === 'sim') {
     if (j.ia_nao_abriu) return { texto: 'IA não abriu', cor: VERMELHO, dica: `${j.ia_nao_abriu}. Escreva uma instrução nova (ou escolha o motivo no lançamento) que a IA olha de novo.` }
     if (!j.conferencia_ligada) return { texto: 'IA desligada', cor: CINZA, dica: 'A IA está desligada: escolha um motivo que abra chamado no lançamento.' }
-    if (!j.tem_lancamento) return { texto: 'Lance as peças primeiro', cor: AMARELO, dica: 'A IA abre o chamado pela instrução depois que as peças forem lançadas.' }
-    if (temInstrucaoEsperando.value) return { texto: 'IA vai abrir', cor: AMARELO, dica: 'A IA lê a instrução, escolhe o motivo, escreve o texto e abre o chamado (em até 10 min). A conferência olha antes de sair.' }
+    if (!j.tem_lancamento && !j.fraude) return { texto: 'Lance as peças primeiro', cor: AMARELO, dica: 'A IA abre o chamado pela instrução depois que as peças forem lançadas.' }
+    if (temInstrucaoEsperando.value) {
+      return j.fraude && !j.tem_lancamento
+        ? { texto: 'IA vai abrir', cor: AMARELO, dica: 'O robô da Fraude refaz a análise seguindo a instrução, lança e abre o chamado (em até 10 min; precisa do vídeo da embalagem). A conferência olha antes de sair.' }
+        : { texto: 'IA vai abrir', cor: AMARELO, dica: 'A IA lê a instrução, escolhe o motivo, escreve o texto e abre o chamado (em até 10 min). A conferência olha antes de sair.' }
+    }
     return { texto: 'Falta instrução IA', cor: AMARELO, dica: 'Nenhum motivo lançado abre chamado: escreva a instrução pra IA dizendo o que contestar — ela abre o chamado.' }
   }
   return { texto: 'Sem chamado', cor: CINZA, dica: 'Nenhum motivo lançado abre chamado' }

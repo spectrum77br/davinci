@@ -57,6 +57,7 @@ from sqlalchemy import bindparam, text
 
 from app.config import get_settings
 from app.models import DevolucaoRastreio, Devolution, EstoquePedidoVideo
+from app.services import devolucao_chamado_instrucao as pela_instrucao
 from app.services import devolucao_conferencia as conferencia
 from app.services import devolucao_fraude_defesa as defesa_ia
 
@@ -295,8 +296,9 @@ async def _ler_caso(session: AsyncSession, plataforma: str, rid: str, dev: Devol
         rid_atual = str(caso.get("return_id") or rid)
         nota, motivo_txt, eventos = await vig._nota_e_motivo(client, rid_atual)
         if situacao == PAGO and _loja_aceitou(eventos):
-            # Alguém da loja aceitou o reembolso no Seller Center: não contesta sozinho.
-            return Caso(situacao=ACEITO_PELA_LOJA)
+            # Alguém da loja aceitou o reembolso no Seller Center: não contesta sozinho —
+            # só com "Sim" + instrução (lê a alegação mesmo assim).
+            situacao = ACEITO_PELA_LOJA
         _pedido_em, prova = vig._pedido_do_comprador(eventos)
         entrega = await vig._entrega_dados(client, (dev.pedido_marketplace or "").strip())
         prazo = vig.prazo_resposta(caso)
@@ -411,10 +413,15 @@ async def _analisar(
     resumo: Resumo,
     *,
     aprovada: tuple[str, str] | None = None,
+    instrucao: str = "",
+    chave_instr: str = "",
 ) -> tuple[defesa_ia.Decisao, Caso] | None:
     """Lê o caso e pergunta à IA. Devolve (decisão com motivo e defesa, caso), ou
     None (e já conta e anota o porquê). `aprovada` = a defesa que o Vinicius viu no
-    "só propor": relê o caso (ainda dá pra contestar?) mas não pergunta de novo."""
+    "só propor": relê o caso (ainda dá pra contestar?) mas não pergunta de novo.
+    `instrucao` = "Abrir chamado: Sim" + "Instrução IA" da equipe: a IA segue o que
+    ela manda (e o reembolso aceito pela própria loja pode ser contestado);
+    `chave_instr` vai no recado pra mesma instrução não ser relida."""
     pedido = linha.pedido_bling
     plataforma = (linha.fonte_auto or "").strip().lower()
     rascunho = _linha(pecas[0], motivo="", video="")
@@ -428,11 +435,14 @@ async def _analisar(
             "o comprador cancelou" if caso.situacao == CANCELADO else "caso não lido agora"
         )
         return None
+    if caso.situacao == ACEITO_PELA_LOJA and instrucao:
+        caso = Caso(**{**caso.__dict__, "situacao": PAGO})
     if caso.situacao in _POR_SITUACAO:
         await _anotar_e_gravar(
             session,
             rast,
-            f"{MARCA} ({_hoje_txt(agora)}): {_POR_SITUACAO[caso.situacao]}; {NAO_RESPONDE}.",
+            f"{MARCA} ({_hoje_txt(agora)}): {_POR_SITUACAO[caso.situacao]}; {NAO_RESPONDE}."
+            + (f" {chave_instr}" if chave_instr else ""),
         )
         resumo.pra_pessoa += 1
         resumo.pedidos[pedido] = f"pessoa: {caso.situacao}"
@@ -457,6 +467,7 @@ async def _analisar(
         transportadora=caso.transportadora,
         comprador_mandou_prova=caso.comprador_mandou_prova,
         prazo=caso.prazo,
+        instrucao=instrucao,
     )
     decisao = await defesa_ia.analisar(fatos)
     if decisao.pessoa:
@@ -464,7 +475,7 @@ async def _analisar(
             session,
             rast,
             f'{MARCA} ({_hoje_txt(agora)}): o comprador alega "{_o_que(caso, decisao.resumo)}" — '
-            f"{decisao.pessoa}; {NAO_RESPONDE}.",
+            f"{decisao.pessoa}; {NAO_RESPONDE}." + (f" {chave_instr}" if chave_instr else ""),
         )
         resumo.pra_pessoa += 1
         resumo.pedidos[pedido] = f"pessoa: {decisao.pessoa}"
@@ -500,6 +511,8 @@ async def _lancar(
     resumo: Resumo,
     *,
     so_propor: bool,
+    instrucao: str = "",
+    chave_instr: str = "",
 ) -> None:
     from app.routers import devolutions as antigo
     from app.services import chamados_devolucao as cd
@@ -514,8 +527,18 @@ async def _lancar(
         resumo.pra_pessoa += 1
         resumo.pedidos[pedido] = "sem peças na busca"
         return
-    aprovada = None if so_propor else proposta_anterior(rast.observacao)
-    analisado = await _analisar(session, linha, rast, pecas, agora, resumo, aprovada=aprovada)
+    aprovada = None if so_propor or instrucao else proposta_anterior(rast.observacao)
+    analisado = await _analisar(
+        session,
+        linha,
+        rast,
+        pecas,
+        agora,
+        resumo,
+        aprovada=aprovada,
+        instrucao=instrucao,
+        chave_instr=chave_instr,
+    )
     if analisado is None:
         return
     decisao, caso = analisado
@@ -548,7 +571,9 @@ async def _lancar(
         rast,
         f'{MARCA} ({_hoje_txt(agora)}): o comprador alega "{_o_que(caso, decisao.resumo)}" — '
         f"{conferencia.MARCA_ROBO}: {CONDICAO} / {decisao.motivo}, com o vídeo da embalagem e "
-        "a defesa escrita pela IA; a IA confere antes de a resposta sair.",
+        "a defesa escrita pela IA"
+        + (" seguindo a instrução da equipe" if instrucao else "")
+        + "; a IA confere antes de a resposta sair.",
     )
     await session.flush()
     # Lançamento e chamado gravam JUNTOS: sem chamado, não fica lançamento órfão.
@@ -580,7 +605,14 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
             if rast is None:
                 continue
             obs = rast.observacao or ""
-            if NAO_RESPONDE in obs:
+            # "Abrir chamado: Sim" + "Instrução IA" (16/11/2026): o que o robô deixou pra
+            # pessoa volta a ser analisado, seguindo a instrução — uma vez por instrução.
+            instr = (rast.instrucao_ia_pendente or "").strip() if rast.abrir_chamado is True else ""
+            chave_instr = (
+                pela_instrucao.chave_da_instrucao(rast.instrucao_ia_em, instr) if instr else ""
+            )
+            com_instrucao = bool(instr) and chave_instr not in obs
+            if NAO_RESPONDE in obs and not com_instrucao:
                 # Já lido e deixado pra pessoa: não relê a plataforma a cada rodada.
                 resumo.pra_pessoa += 1
                 resumo.pedidos[pedido] = "pessoa (já avisado)"
@@ -611,7 +643,7 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
                 elif rast.video_solicitado_em is not None:
                     resumo.esperando_video += 1
                     resumo.pedidos[pedido] = "esperando o vídeo"
-                elif VIDEO_PEDIDO in obs:
+                elif VIDEO_PEDIDO in obs and not com_instrucao:
                     # O robô pediu e alguém cancelou o pedido: não pede de novo; fica
                     # pra pessoa (aparece no cartão "Fraude: responder à mão").
                     _anotar(
@@ -638,7 +670,16 @@ async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dic
             ):
                 resumo.pedidos.setdefault(pedido, "fica pra próxima rodada")
                 continue
-            await _lancar(session, linha, rast, agora, resumo, so_propor=m == PROPOR)
+            await _lancar(
+                session,
+                linha,
+                rast,
+                agora,
+                resumo,
+                so_propor=m == PROPOR,
+                instrucao=instr if com_instrucao else "",
+                chave_instr=chave_instr if com_instrucao else "",
+            )
         except Exception as e:  # noqa: BLE001 — um pedido ruim não para a rodada
             await session.rollback()
             resumo.falhas += 1

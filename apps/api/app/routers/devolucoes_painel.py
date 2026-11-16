@@ -839,6 +839,9 @@ class ChamadoJanelaOut(BaseModel):
     ia_nao_abriu: str | None = None
     # Há peça lançada (a IA da instrução só abre chamado de pedido lançado).
     tem_lancamento: bool = False
+    # Pedido no painel Fraude: aí quem lança e abre é o robô da Fraude (com a
+    # instrução, quando houver) — não precisa lançar antes.
+    fraude: bool = False
 
 
 class AbrirChamadoIn(BaseModel):
@@ -954,6 +957,8 @@ async def _janela(session: AsyncSession, pedido: str) -> ChamadoJanelaOut:
         conferencia=rast.conferencia if rast is not None else None,
         conferencia_ligada=conferencia.ligada(),
         tem_lancamento=bool(linhas),
+        fraude=rast is not None
+        and antigo._fila(rast.fila_manual, rast.devolucao_tipo_auto)[0] == "fraude",
     )
     if ch is not None:
         abertura = await cd.mensagem_abertura(session, ch)
@@ -998,7 +1003,7 @@ async def _janela(session: AsyncSession, pedido: str) -> ChamadoJanelaOut:
             rast.instrucao_ia_em, rast.instrucao_ia_pendente.strip()
         )
         if ch is None and chave in (rast.observacao or ""):
-            out.ia_nao_abriu = pela_instrucao.ultimo_nao_abriu(rast.observacao)
+            out.ia_nao_abriu = pela_instrucao.porque_da_chave(rast.observacao, chave)
         autor = await session.get(User, rast.instrucao_ia_por) if rast.instrucao_ia_por else None
         out.instrucoes.append(
             InstrucaoOut(

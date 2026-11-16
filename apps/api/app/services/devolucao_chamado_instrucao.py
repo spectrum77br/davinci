@@ -269,6 +269,19 @@ def ultimo_nao_abriu(observacao: str | None) -> str | None:
     return achados[-1].strip() if achados else None
 
 
+def porque_da_chave(observacao: str | None, chave: str) -> str | None:
+    """O porquê no recado que leva a chave da instrução — também o da Fraude
+    automática ("… — <porquê>; o sistema não responde…"). PURA."""
+    nao_abriu = ultimo_nao_abriu(observacao)
+    if nao_abriu:
+        return nao_abriu
+    for linha in reversed((observacao or "").splitlines()):
+        if chave in linha:
+            miolo = linha.replace(chave, "").split("; o sistema não responde")[0]
+            return miolo.split(" — ")[-1].strip(" .;") or "a IA deixou pra pessoa"
+    return None
+
+
 # ── Rodada ───────────────────────────────────────────────────────────────
 
 # Fora da lista: pedido cujo motivo já abre chamado (o caminho normal cuida) e a
