@@ -1,7 +1,7 @@
 """Segmentos › DUIMP padrão (migration 0487, Eduardo 16/11/2026): a coluna da
 tela grava pelo PATCH de sempre, volta no /tree, e o texto é validado (vazio
-apaga; "|" e mais de 200 caracteres são recusados — o " | " separa as linhas
-da etiqueta)."""
+apaga; "|", mais de 75 caracteres (o que cabe na linha da etiqueta) e o que a
+etiqueta não imprime são recusados; travessão/aspas curvas viram os simples)."""
 
 from __future__ import annotations
 
@@ -65,10 +65,20 @@ async def test_patch_recusa_barra_e_texto_longo(client, db, make_user, auth_as):
 
     r = await client.patch(f"/api/segments/{seg.id}", json={"duimp_padrao": "a | b"})
     assert r.status_code == 422
-    r = await client.patch(f"/api/segments/{seg.id}", json={"duimp_padrao": "x" * 201})
+    r = await client.patch(f"/api/segments/{seg.id}", json={"duimp_padrao": "x" * 76})
     assert r.status_code == 422
-    r = await client.patch(f"/api/segments/{seg.id}", json={"duimp_padrao": "x" * 200})
+    assert "duimp_padrao_muito_longo" in r.text
+    r = await client.patch(f"/api/segments/{seg.id}", json={"duimp_padrao": "x" * 75})
     assert r.status_code == 200
+    for ruim in ("usado 😀", "tab\x00nul"):
+        r = await client.patch(f"/api/segments/{seg.id}", json={"duimp_padrao": ruim})
+        assert r.status_code == 422, ruim
+    # o que o Mac troca sozinho vira o simples (a etiqueta imprimiria "·")
+    r = await client.patch(
+        f"/api/segments/{seg.id}", json={"duimp_padrao": "mala usada — “sem” DUIMP…"}
+    )
+    assert r.status_code == 200
+    assert r.json()["duimp_padrao"] == 'mala usada - "sem" DUIMP...'
 
 
 async def test_patch_exige_permissao_de_editar(client, db, make_user, auth_as):

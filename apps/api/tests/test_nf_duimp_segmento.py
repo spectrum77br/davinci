@@ -170,11 +170,11 @@ async def test_texto_do_subsegmento_e_heranca_da_raiz(db: AsyncSession, admin: U
 
 async def test_segmento_desativado_vale(db: AsyncSession, admin: User):
     """A "Queima de estoque" está desativada e é onde estão os usados de mala."""
-    seg = await _arvore(db, mala=_MSG_MALA, queima="mala usada — sem DUIMP")
+    seg = await _arvore(db, mala=_MSG_MALA, queima="mala usada - sem DUIMP")
     db.add(_produto(admin, "z0331.mala", seg["queima"]))
     await db.commit()
     assert await g._texto_segmento_por_sku(db, {"z0331.mala"}) == {
-        "z0331.mala": "mala usada — sem DUIMP",
+        "z0331.mala": "mala usada - sem DUIMP",
     }
 
 
@@ -204,6 +204,53 @@ async def test_sem_segmento_cai_na_raiz_do_departamento(db: AsyncSession, admin:
     await db.commit()
     assert await g._texto_segmento_por_sku(db, {"z0217", "fake.fake"}) == {
         "z0217": _MSG_CEL,
+    }
+
+
+async def test_kit_peca_importada_leva_a_duimp_e_nao_depende_da_ordem(
+    db: AsyncSession, admin: User
+):
+    """Revisão de 16/11: no kit, cada peça segue a mesma ordem do SKU simples —
+    a peça com DUIMP na Importação leva a DUIMP dela, só a peça sem DUIMP leva o
+    texto do segmento, e trocar a ordem das peças só troca a ordem das linhas."""
+    seg = await _arvore(db, cel_regular=_MSG_CEL, cel_acess=_MSG_ACESS, mala=_MSG_MALA)
+    db.add_all([
+        ImportProduct(categoria="celular", sku="a001.cd", custo_bling=Decimal("0"),
+                      duimp=_DUIMP_MALA),           # código-base a001 tem DUIMP
+        ImportProduct(categoria="mala", sku="b104.20", custo_bling=Decimal("0"),
+                      duimp=_DUIMP_MALA),
+        ImportProduct(categoria="mala", sku="a075", custo_bling=Decimal("0")),  # sem DUIMP
+        _produto(admin, "dg1022.pi", seg["cel_regular"]),
+        _produto(admin, "a001.pi", seg["cel_acess"]),
+        _produto(admin, "a075", seg["mala_acess"]),
+    ])
+    await db.commit()
+    out = await g._duimp_por_sku(
+        db, {"dg1022.pi+a001.pi", "a001.pi+dg1022.pi", "b104.20+a075", "a001.pi"}
+    )
+    assert out == {
+        "dg1022.pi+a001.pi": f"{_MSG_CEL} | {_DUIMP_MALA}",
+        "a001.pi+dg1022.pi": f"{_DUIMP_MALA} | {_MSG_CEL}",
+        # 1ª peça com DUIMP: a outra peça (sem DUIMP) ainda leva o texto (raiz Mala)
+        "b104.20+a075": f"{_DUIMP_MALA} | {_MSG_MALA}",
+        "a001.pi": _DUIMP_MALA,
+    }
+
+
+async def test_kit_sem_texto_em_segmento_nenhum_so_leva_duimps(
+    db: AsyncSession, admin: User
+):
+    """Sem texto nos segmentos (logo depois de publicar), o kit leva só as
+    DUIMPs da Importação das peças."""
+    await _arvore(db)
+    db.add_all([
+        ImportProduct(categoria="mala", sku="b104.20", custo_bling=Decimal("0"),
+                      duimp=_DUIMP_MALA),
+        ImportProduct(categoria="mala", sku="a075", custo_bling=Decimal("0")),
+    ])
+    await db.commit()
+    assert await g._duimp_por_sku(db, {"b104.20+a075+bp003"}) == {
+        "b104.20+a075+bp003": _DUIMP_MALA,
     }
 
 

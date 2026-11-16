@@ -270,8 +270,10 @@ _DUIMP_BASE_SQL = text(
 )
 
 
-async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str]:
-    """Mapa SKU (minúsculo) → texto da DUIMP. Casa pelo SKU exato e, pra quem
+async def _duimp_da_importacao(
+    session: AsyncSession, skus: set[str]
+) -> dict[str, str]:
+    """Passos 1 e 2: a DUIMP da tela Importação pelo SKU exato e, pra quem
     sobrar, pelo código-base (kit/sem tamanho). SKU sem DUIMP fica de fora."""
     if not skus:
         return {}
@@ -290,9 +292,48 @@ async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str
             d = por_base.get(s.split(".", 1)[0])
             if d:
                 mapa[s] = d
+    return mapa
+
+
+async def _duimp_por_sku(session: AsyncSession, skus: set[str]) -> dict[str, str]:
+    """Mapa SKU (minúsculo) → texto da DUIMP (ou a mensagem do segmento). SKU
+    sem nada fica de fora.
+
+    SKU simples: Importação (SKU exato, código-base) e, sem ela, o texto do
+    segmento (0487). Kit "a+b" que não está inteiro na Importação: PEÇA A PEÇA
+    pela mesma ordem — a peça importada leva a DUIMP dela e só a peça sem DUIMP
+    leva o texto do segmento; as partes juntam na ordem das peças (revisão de
+    16/11: antes o kit olhava só o código-base da 1ª peça e o resultado mudava
+    com a ordem das peças)."""
+    skus = {s for s in skus if s}
+    if not skus:
+        return {}
+    kits = {s for s in skus if "+" in s}
+    mapa: dict[str, str] = {}
+    if kits:
+        # o kit cadastrado inteiro na Importação (hoje nenhum) vale como está
+        rows = (
+            await session.execute(_DUIMP_SQL, {"skus": sorted(kits)})
+        ).mappings().all()
+        mapa.update({r["sku"]: r["duimp"] for r in rows})
+        kits -= set(mapa)
+    pecas_de = {k: _pecas_do_sku(k) for k in kits}
+    simples = (skus - set(mapa) - kits) | {p for ps in pecas_de.values() for p in ps}
+    importacao = await _duimp_da_importacao(session, simples)
     # 3º passo (16/11/2026): quem continua sem DUIMP leva o texto do segmento.
-    if sobram := {s for s in skus if s not in mapa}:
-        mapa.update(await _texto_segmento_por_sku(session, sobram))
+    segmento = await _texto_segmento_por_sku(
+        session, {s for s in simples if s not in importacao}
+    )
+
+    def _de(s: str) -> str | None:
+        return importacao.get(s) or segmento.get(s)
+
+    for s in skus - set(mapa) - kits:
+        if t := _de(s):
+            mapa[s] = t
+    for k, pecas in pecas_de.items():
+        if t := _juntar_duimps(_de(p) for p in pecas):
+            mapa[k] = t
     return mapa
 
 

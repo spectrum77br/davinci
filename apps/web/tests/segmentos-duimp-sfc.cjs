@@ -3,9 +3,11 @@
 // produto não tem DUIMP na Importação. Trava:
 //  - a coluna existe no cabeçalho e em toda linha (linha normal, "adicionar raiz",
 //    "adicionar subsegmento"), e os colspan acompanham (10 colunas);
-//  - raiz e subsegmento editam (clique na célula, texto de uma linha, até 200);
+//  - raiz e subsegmento editam (clique na célula, texto de uma linha, até 75 — o que cabe na etiqueta);
 //  - subsegmento vazio mostra em cinza o texto herdado do pai ("↳ …");
-//  - "|" é barrado na tela (o " | " separa as linhas da etiqueta).
+//  - "|" é barrado na tela sem perder o texto digitado (o " | " separa as linhas
+//    da etiqueta); o 422 do servidor vira frase de gente;
+//  - quem só vê não ganha cursor/dica de edição.
 // Só dados FALSOS; nenhuma rede.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
@@ -44,6 +46,14 @@ const pagina = sfc('pages/admin/segments.vue')
   assert.match(script, /duimp_padrao: string \| null/)
   assert.match(script, /type EditField = 'name' \| 'min_margin' \| DimField \| 'duimp_padrao'/)
   assert.match(script, /field === 'duimp_padrao' && raw\.includes\('\|'\)/, 'barra o "|" na tela')
+  {
+    const i = script.indexOf("field === 'duimp_padrao' && raw.includes('|')")
+    const bloco = script.slice(i, script.indexOf('}', i))
+    assert.ok(!bloco.includes('cancelEdit'), 'com "|" continua editando (não joga o texto fora)')
+  }
+  for (const codigo of ['duimp_padrao_sem_barra', 'duimp_padrao_muito_longo', 'duimp_padrao_caractere_invalido']) {
+    assert.ok(script.includes(codigo), `frase para o 422 ${codigo}`)
+  }
 }
 
 // ---------------------------------------------------------------- linha (render de verdade)
@@ -96,9 +106,15 @@ async function html(node, extra = {}) {
   const vazio = await html(seg('ele', 'Eletro', null, [seg('e1', '1', null)]))
   assert.ok(!vazio.includes('↳'), 'nada herdado')
 
-  // editando: input de texto até 200 caracteres
+  // editando: input de texto até 75 caracteres
   const ed = await html(seg('cel', 'Celular', 'x'), { editing: { id: 'cel', field: 'duimp_padrao' }, editValue: 'x' })
-  assert.match(ed, /<input[^>]*type="text"[^>]*maxlength="200"/, 'campo de texto com limite')
+  assert.match(ed, /<input[^>]*type="text"[^>]*maxlength="75"/, 'campo de texto com limite')
+
+  // quem só vê: sem cursor de clique nem dica de edição na célula
+  const so = await html(seg('cel', 'Celular', null), { canEdit: false })
+  assert.ok(!so.includes('Clique para escrever'), 'sem dica de edição para quem só vê')
+  const ve = await html(seg('cel', 'Celular', null))
+  assert.ok(ve.includes('Clique para escrever'), 'dica de edição para quem edita')
 
   // linha "adicionar subsegmento" com as 10 células
   const add = await html(seg('cel', 'Celular', null), { addingUnder: 'cel' })

@@ -260,12 +260,13 @@ const duimpValendo = computed(() => props.node.duimp_padrao || props.duimpHerdad
 
     <!-- DUIMP padrão (raiz e subsegmentos) -->
     <td
-      class="border border-border px-3 py-1.5 text-xs cursor-pointer max-w-64"
+      class="border border-border px-3 py-1.5 text-xs max-w-64"
       :class="{
+        'cursor-pointer': canEdit,
         'ring-2 ring-blue-500 ring-inset bg-background': isEditing(node.id, 'duimp_padrao'),
         'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(node.id, 'duimp_padrao'),
       }"
-      :title="duimpValendo ? `Vai na nota quando o produto não tem DUIMP na Importação:\n${duimpValendo}` : 'Clique para escrever a DUIMP/mensagem do segmento'"
+      :title="duimpValendo ? `Vai na nota quando o produto não tem DUIMP na Importação:\n${duimpValendo}` : (canEdit ? 'Clique para escrever a DUIMP/mensagem do segmento' : undefined)"
       @click="!isEditing(node.id, 'duimp_padrao') && emit('start-edit', node, 'duimp_padrao')"
     >
       <input
@@ -273,7 +274,7 @@ const duimpValendo = computed(() => props.node.duimp_padrao || props.duimpHerdad
         :ref="setEditInputRef"
         :value="editValue"
         type="text"
-        maxlength="200"
+        maxlength="75"
         placeholder="ex.: produto importado pela duimp 26BR…"
         class="w-full text-xs bg-transparent outline-none"
         @input="(e: any) => emit('update:edit-value', e.target.value)"
