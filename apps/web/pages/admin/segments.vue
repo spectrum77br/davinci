@@ -36,6 +36,7 @@ type Segment = {
   largura: string | null
   comprimento: string | null
   peso: string | null
+  duimp_padrao: string | null
   special_dates: SpecialDate[]
   created_at: string
   updated_at: string
@@ -43,7 +44,7 @@ type Segment = {
 
 type TreeNode = Segment & { children: TreeNode[] }
 type DimField = 'altura' | 'largura' | 'comprimento' | 'peso'
-type EditField = 'name' | 'min_margin' | DimField
+type EditField = 'name' | 'min_margin' | DimField | 'duimp_padrao'
 const dimFields: DimField[] = ['altura', 'largura', 'comprimento', 'peso']
 
 const { api } = useApi()
@@ -145,6 +146,11 @@ async function commitEdit() {
     }
   } else {
     if (!raw && field === 'name') return cancelEdit()
+    // DUIMP padrão (0487): " | " separa as linhas da etiqueta — o texto não pode ter "|".
+    if (field === 'duimp_padrao' && raw.includes('|')) {
+      error.value = 'A DUIMP/mensagem do segmento não pode ter "|" (ele separa as linhas da etiqueta).'
+      return cancelEdit()
+    }
     payload[field] = raw || null
   }
 
@@ -420,18 +426,22 @@ async function removeSpecial(sd: SpecialDate) {
             <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Largura <span class="text-muted-foreground font-normal">(cm)</span></th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-28">Comprim. <span class="text-muted-foreground font-normal">(cm)</span></th>
             <th class="text-right px-3 py-2 font-medium border-b border-border w-24">Peso <span class="text-muted-foreground font-normal">(kg)</span></th>
+            <th
+              class="text-left px-3 py-2 font-medium border-b border-border w-64"
+              title="Vai na nota e na etiqueta (nota cheia) quando o produto não tem DUIMP na Importação. Subsegmento vazio usa o da raiz."
+            >DUIMP / mensagem <span class="text-muted-foreground font-normal">(sem DUIMP)</span></th>
             <th class="text-center px-3 py-2 font-medium border-b border-border w-20">Ativo</th>
             <th class="text-center px-3 py-2 font-medium border-b border-border w-32">Ações</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !tree.length">
-            <td colspan="9" class="text-center py-6 text-muted-foreground">
+            <td colspan="10" class="text-center py-6 text-muted-foreground">
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
           <tr v-else-if="!tree.length && addingUnder === undefined">
-            <td colspan="9" class="text-center py-8 text-muted-foreground">Nenhum segmento.</td>
+            <td colspan="10" class="text-center py-8 text-muted-foreground">Nenhum segmento.</td>
           </tr>
 
           <template v-for="node in tree" :key="node.id">
@@ -479,6 +489,7 @@ async function removeSpecial(sd: SpecialDate) {
             <td class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
             <td class="border border-border text-xs text-muted-foreground px-3">—</td>
             <td v-for="f in dimFields" :key="f" class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
+            <td class="border border-border text-xs text-muted-foreground px-3">—</td>
             <td class="border border-border text-xs text-muted-foreground px-3 text-center">—</td>
             <td class="border border-border px-1 py-1 text-center">
               <div class="flex gap-0.5 justify-center">

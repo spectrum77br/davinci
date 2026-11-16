@@ -21,6 +21,25 @@ def _slugify(v: str) -> str:
     return "".join(out).strip("-")
 
 
+# Migration 0487: o texto vai na observação da NF (infCpl) e na etiqueta, onde
+# " | " separa uma DUIMP da outra (uma linha cada) — por isso "|" é recusado.
+DUIMP_PADRAO_MAX = 200
+
+
+def _limpar_duimp_padrao(v: Any) -> str | None:
+    """strip; vazio → None (apaga); "|" ou mais de 200 caracteres → erro."""
+    if v is None:
+        return None
+    s = " ".join(str(v).split())
+    if not s:
+        return None
+    if "|" in s:
+        raise ValueError("duimp_padrao_sem_barra")
+    if len(s) > DUIMP_PADRAO_MAX:
+        raise ValueError("duimp_padrao_muito_longo")
+    return s
+
+
 class SegmentCreate(BaseModel):
     name: str
     slug: str | None = None
@@ -32,6 +51,12 @@ class SegmentCreate(BaseModel):
     largura: Decimal | None = None
     comprimento: Decimal | None = None
     peso: Decimal | None = None
+    duimp_padrao: str | None = None
+
+    @field_validator("duimp_padrao", mode="before")
+    @classmethod
+    def _v_duimp_padrao(cls, v: Any) -> str | None:
+        return _limpar_duimp_padrao(v)
 
     @field_validator("name", mode="before")
     @classmethod
@@ -69,6 +94,12 @@ class SegmentPatch(BaseModel):
     largura: Decimal | None = None
     comprimento: Decimal | None = None
     peso: Decimal | None = None
+    duimp_padrao: str | None = None
+
+    @field_validator("duimp_padrao", mode="before")
+    @classmethod
+    def _v_duimp_padrao(cls, v: Any) -> str | None:
+        return _limpar_duimp_padrao(v)
 
     @field_validator("name", mode="before")
     @classmethod
@@ -163,6 +194,7 @@ class SegmentOut(BaseModel):
     largura: Decimal | None = None
     comprimento: Decimal | None = None
     peso: Decimal | None = None
+    duimp_padrao: str | None = None
     special_dates: list[SegmentSpecialDateOut] = []
     created_at: datetime
     updated_at: datetime

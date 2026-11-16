@@ -28,13 +28,14 @@ type Segment = {
   largura: string | null
   comprimento: string | null
   peso: string | null
+  duimp_padrao: string | null
   special_dates: SpecialDate[]
   created_at: string
   updated_at: string
 }
 type TreeNode = Segment & { children: TreeNode[] }
 type DimField = 'altura' | 'largura' | 'comprimento' | 'peso'
-type EditField = 'name' | 'min_margin' | DimField
+type EditField = 'name' | 'min_margin' | DimField | 'duimp_padrao'
 type Editing = { id: string; field: EditField } | null
 
 const dimFields: DimField[] = ['altura', 'largura', 'comprimento', 'peso']
@@ -52,6 +53,9 @@ const props = defineProps<{
   newName: string
   adding: boolean
   setEditInputRef: (el: any) => void
+  // DUIMP padrão herdada do pai (o mais perto com texto) — o subsegmento vazio
+  // usa esse texto na nota (0487).
+  duimpHerdada?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -114,6 +118,10 @@ function vigentes(n: Segment): SpecialDate[] {
 // Até 2 condições: chips; acima disso, um chip só com a contagem (10/09:
 // dezenas de SKUs por segmento viravam uma coluna de rolagem na tabela).
 const MAX_CHIPS = 2
+
+// DUIMP padrão (0487, Eduardo 16/11/2026): vai na nota/etiqueta do produto que
+// não tem DUIMP na Importação. Vazio → herda do pai (mostrado em cinza).
+const duimpValendo = computed(() => props.node.duimp_padrao || props.duimpHerdada || null)
 </script>
 
 <template>
@@ -250,6 +258,34 @@ const MAX_CHIPS = 2
       <span v-else>{{ Number(node[f]).toString() }}</span>
     </td>
 
+    <!-- DUIMP padrão (raiz e subsegmentos) -->
+    <td
+      class="border border-border px-3 py-1.5 text-xs cursor-pointer max-w-64"
+      :class="{
+        'ring-2 ring-blue-500 ring-inset bg-background': isEditing(node.id, 'duimp_padrao'),
+        'bg-emerald-50 dark:bg-emerald-900/20': isFlashed(node.id, 'duimp_padrao'),
+      }"
+      :title="duimpValendo ? `Vai na nota quando o produto não tem DUIMP na Importação:\n${duimpValendo}` : 'Clique para escrever a DUIMP/mensagem do segmento'"
+      @click="!isEditing(node.id, 'duimp_padrao') && emit('start-edit', node, 'duimp_padrao')"
+    >
+      <input
+        v-if="isEditing(node.id, 'duimp_padrao')"
+        :ref="setEditInputRef"
+        :value="editValue"
+        type="text"
+        maxlength="200"
+        placeholder="ex.: produto importado pela duimp 26BR…"
+        class="w-full text-xs bg-transparent outline-none"
+        @input="(e: any) => emit('update:edit-value', e.target.value)"
+        @blur="emit('commit-edit')"
+        @keydown.enter.prevent="emit('commit-edit')"
+        @keydown.escape.prevent="emit('cancel-edit')"
+      />
+      <span v-else-if="node.duimp_padrao" class="block truncate">{{ node.duimp_padrao }}</span>
+      <span v-else-if="duimpHerdada" class="block truncate text-muted-foreground italic">↳ {{ duimpHerdada }}</span>
+      <span v-else class="text-muted-foreground">—</span>
+    </td>
+
     <!-- active -->
     <td class="border border-border px-3 py-1.5 text-center">
       <button
@@ -308,6 +344,7 @@ const MAX_CHIPS = 2
     <td class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
     <td class="border border-border text-xs text-muted-foreground px-3">—</td>
     <td v-for="f in dimFields" :key="f" class="border border-border text-xs text-muted-foreground px-3 text-right">—</td>
+    <td class="border border-border text-xs text-muted-foreground px-3">—</td>
     <td class="border border-border text-xs text-muted-foreground px-3 text-center">—</td>
     <td class="border border-border px-1 py-1 text-center">
       <div class="flex gap-0.5 justify-center">
@@ -339,6 +376,7 @@ const MAX_CHIPS = 2
       :new-name="newName"
       :adding="adding"
       :set-edit-input-ref="setEditInputRef"
+      :duimp-herdada="duimpValendo"
       @toggle="(id: string) => emit('toggle', id)"
       @start-edit="(n: any, f: any) => emit('start-edit', n, f)"
       @commit-edit="emit('commit-edit')"
