@@ -111,7 +111,9 @@ Duoke com 9 numa conversa só). A régua nova, por conversa:
       – do que a pessoa já VIU da conversa no DaVinci (`visto_em`, migration
         0399 — "visto no DaVinci", como abrir no Duoke: a tela grava pela
         pessoa que mexe na caixa, em qualquer modo de loja,
-        `services/atendimento/lida.py`), no relógio do DAVINCI: a CHEGADA da
+        `services/atendimento/lida.py`; desde 16/11/2026, nas conversas do
+        número, só o "Zerar não lidas" e o corte do "Não precisa"/"Fechar"
+        gravam — "ABRIR NÃO APAGA MAIS", abaixo), no relógio do DAVINCI: a CHEGADA da
         mensagem (`created_at`). O sync traz a mensagem do comprador ~1 min
         depois de ele mandar (medido em produção em 15/10/2026, 24 h: mediana
         de 70 s na Shopee — p90 de 213 s —, 65 s na TikTok, 61 s no ML); a
@@ -149,11 +151,34 @@ todas sem a marca — a dos 9 com a automática por último): cada linha de chat
 leva o número dela pela MESMA régua (`numero_duoke` da lista e do detalhe,
 `nao_lidas_duoke_sql` por linha) e, na Caixa, a bolinha da linha é ele, com ou
 sem a marca — a soma das bolinhas das conversas de uma loja é o número da
-loja, e abrir a conversa apaga a bolinha dela (o negrito e o filtro "Falta
-responder" continuam a régua (a)/(b): a conversa aberta que ninguém
-respondeu segue em negrito, sem bolinha, como no Duoke). Fora do chat (a
+loja, e (até 16/11/2026 — abaixo, "ABRIR NÃO APAGA MAIS") abrir a conversa
+apagava a bolinha dela (o negrito e o filtro "Falta responder" continuam a
+régua (a)/(b)). Fora do chat (a
 avaliação, a reclamação…) a linha não tem número (`None`) e a bolinha segue
 a de antes; a Caixa Humano também.
+
+ABRIR NÃO APAGA MAIS (16/11/2026). O dono: "a notificacao agr so vai sair se
+responder no chat ou se clicar em um botao n precisa de resposta q bota do
+lado do enviar msg ali". Nas conversas do número (`tem_numero`: o chat e a
+reclamação do ML, fora a pergunta do ML), abrir não grava mais o `visto_em`
+nem o `notificacoes_visto_em` (`lida.gravar_visto` só confere quem é). A
+bolinha só sai:
+  • com resposta no chat (`resposta_de_pessoa`: a pessoa pelo DaVinci, a
+    resposta de fora que o sync traz, a da IA que saiu sozinha; o robô e as
+    automações não contam);
+  • com o "Não precisa de resposta" (o PATCH da conversa; o botão fica ao
+    lado do Enviar).
+Continuam valendo: fechar a conversa, o "Zerar não lidas", a janela de 7
+dias (`JANELA_DO_NUMERO`) e a IA no turno só de cartão (`sem_demanda`). A
+régua não muda: o `visto_em` dessas conversas passa a ser "zerado até".
+O CORTE `processado_ate` (`gravar.CHAVE_PROCESSADO_ATE`, em `dados`): o "Não
+precisa" e o "Fechar" guardam até onde a tela mostrava (o `ate` do PATCH).
+Ele não muda o número na hora (o flag e a fechada já tiram a conversa
+inteira). Só vale quando a fala nova reabre (`gravar._reabrir_se_nova`):
+vira o `visto_em` (e o da base importada), e a bolinha conta só a mensagem
+nova. O "Precisa de resposta" e o reabrir à mão apagam o corte: a bolinha
+volta como era antes do clique. O e-mail da ponte/site e as conversas fora
+do número continuam apagando ao abrir.
 
 A RECLAMAÇÃO DO ML ENTRA NO NÚMERO (15/10/2026, as duas conversas do ML que
 faltavam na medição das 10:13). O Duoke junta as mensagens da reclamação/
@@ -512,6 +537,35 @@ def fora_do_numero(conversa: Any) -> bool:
     return onde in FORA_DO_NUMERO
 
 
+def tem_numero(conversa: Any) -> bool:
+    """A linha desta conversa mostra o número da Caixa? PURA.
+
+    `do_numero` sem a pergunta do ML (`fora_do_numero`): o mesmo corte que faz
+    o `numero_duoke` da linha ser número (`routers/atendimento._resumo_dict`).
+    Desde 16/11/2026 é a conversa em que abrir não apaga a bolinha: ela só sai
+    com resposta ou com "Não precisa de resposta" (`lida.gravar_visto`, o
+    PATCH da conversa e "ABRIR NÃO APAGA MAIS", no topo).
+    """
+    return do_numero(conversa) and not fora_do_numero(conversa)
+
+
+def conta_no_numero(conversa: Any, mensagem: Any) -> bool:
+    """A mensagem é das que somam no número DESTA conversa? PURA, sem os marcos.
+
+    A do comprador (`do_comprador_no_numero` com o `comprador_id` da conversa:
+    também a `sistema` dele, o FAQ) e, na reclamação do ML, a do mediador —
+    fora o e-mail da ponte gravado num chat. Não olha a resposta de pessoa,
+    o visto nem os 7 dias (isso é `mensagem_no_numero`). 16/11/2026: é a
+    "fala nova" do "Não precisa de resposta" — a trava de corrida do PATCH
+    e a fala que desmarca em `gravar`.
+    """
+    return do_comprador_no_numero(
+        mensagem,
+        getattr(conversa, "comprador_id", None),
+        mediador=reclamacao_no_numero(conversa),
+    ) and not separa_email.e_mensagem_de_email(mensagem)
+
+
 def resposta_de_pessoa(mensagem: Any) -> bool:
     """A mensagem é RESPOSTA DE PESSOA da loja para o número? PURA — a gêmea do
     `pessoa` de `nao_lidas_duoke_sql`.
@@ -625,7 +679,8 @@ def entra_no_numero(conversa: Any, agora: datetime | None = None) -> bool:
     if getattr(conversa, "situacao", None) == CONVERSA_FECHADA:
         return False
     # "Não precisa de resposta" = o "marcar como processado" do Duoke, que
-    # zera o não lido (a fala nova do comprador desmarca, `gravar`).
+    # zera o não lido (a fala nova do comprador desmarca, `gravar`; desde
+    # 16/11/2026 com o corte `processado_ate`: volta só a fala nova).
     if getattr(conversa, "sem_resposta_necessaria", False):
         return False
     if notificacoes_svc.estado_valido(conversa):
@@ -772,8 +827,10 @@ def falta_responder_na_caixa(
     o comprador por último, qualquer mensagem da loja responde) OU a conversa
     de chat com mensagem não lida no número (`numero` = `nao_lidas_duoke`) —
     a que só o robô respondeu, a pergunta do FAQ que o comprador clicou.
-    Abriu (o visto apaga a bolinha) e só o robô tinha respondido: sai, como
-    no Duoke. A gêmea de `falta_responder_na_caixa_sql`.
+    Sem bolinha (o "Zerar não lidas"; até 16/11/2026, também abrir) e só o
+    robô tinha respondido: sai, como no Duoke. Desde 16/11/2026 abrir não
+    apaga a bolinha nas conversas do número ("ABRIR NÃO APAGA MAIS", no
+    topo). A gêmea de `falta_responder_na_caixa_sql`.
 
     03/11/2026, o dono (a bolinha do ML com 1 e a aba vazia): "se resolver e
     fazer aparecer sim" — a bolinha vale em toda conversa DO NÚMERO

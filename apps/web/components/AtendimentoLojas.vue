@@ -412,9 +412,12 @@ export function chaveDoGrupoAberto(chaveDaLoja: string, grupo: string): string {
 // Desde 15/10/2026 (o dono: os números têm que bater com o Duoke) a régua é a
 // do NÃO LIDO DO PRÓPRIO DUOKE: nas conversas de chat esperando resposta com
 // o comprador nas últimas 24 h, as mensagens dele desde a última resposta de
-// pessoa da loja ou desde que alguém abriu a conversa no DaVinci — o robô não
-// zera, abrir zera (services/atendimento/pendente.py). O title da loja
-// explica (`TEXTO_NUMERO_DA_LOJA`).
+// pessoa da loja — o robô não zera (services/atendimento/pendente.py). Desde
+// 16/11/2026 (o dono: "a notificacao agr so vai sair se responder no chat ou
+// se clicar em um botao n precisa de resposta q bota do lado do enviar msg
+// ali") ABRIR A CONVERSA NÃO ZERA: zeram responder e o "Não precisa de
+// resposta" do lado do Enviar (e o "Zerar não lidas", como antes). O title da
+// loja explica (`TEXTO_NUMERO_DA_LOJA`).
 import { ChevronRight, ChevronsLeft, ChevronsRight, Inbox, Lock, TriangleAlert, Unplug } from 'lucide-vue-next'
 import type { NumeroDaCaixa } from '~/components/AtendimentoFiltroPlataforma.vue'
 import {

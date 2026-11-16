@@ -156,7 +156,9 @@ assert.match(P.perguntaResolver(true), /^Marcar como resolvido\?[\s\S]*Uma menç
 assert.match(P.perguntaResolver(false), /Nada é publicado na rede/)
 const conversaSfc = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoConversa.vue'), 'utf8')
 assert.match(conversaSfc, /@resolver="patch\(\{ situacao: 'fechada' \}, 'fechar', 'Marcada como resolvida'\)"/, 'a conversa fecha pelo PATCH (a lista acompanha)')
-assert.match(conversaSfc, /v-else-if="conversa\.plataforma === 'amazon' \|\| canalExterno === 'comentario'"/, '"Não precisa de resposta" também no comentário')
+// 16/11/2026: no cabeçalho fica só o do comentário (sem Enviar, responde-se pelo cartão);
+// o do chat e o da Amazon foram para o lado do Enviar (atendimento-nao-precisa-rodape.cjs).
+assert.match(conversaSfc, /<Button\s+v-if="canalExterno === 'comentario'"[\s\S]{0,700}@click="naoPrecisa"/, '"Não precisa de resposta" também no comentário')
 assert.match(servico, /if criada and not linha\.eh_pergunta:\s+#[\s\S]{0,400}conversa\.sem_resposta_necessaria = True/, 'a menção nasce sem a vez da loja')
 // O selo "pergunta" na lista (a frente da fila no Mídia e no Falta responder).
 const lista = fs.readFileSync(path.resolve(__dirname, '../components/AtendimentoLista.vue'), 'utf8')

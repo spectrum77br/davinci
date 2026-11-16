@@ -30,7 +30,12 @@ Respostas:
 
 O /lida grava também o "visto no DaVinci" (`visto_em`), ANTES de tentar a
 plataforma — a pessoa abriu, com ou sem a plataforma aceitar (e no 409 de
-corrida também).
+corrida também). Desde 16/11/2026, só fora do número: nas conversas do
+número (`pendente.tem_numero`) o /lida e o /visto não gravam visto nenhum —
+a bolinha só sai com resposta ou com "Não precisa de resposta" (o dono: "a
+notificacao agr so vai sair se responder no chat ou se clicar em um botao n
+precisa de resposta q bota do lado do enviar msg ali"; `lida.py`, "ABRIR
+NÃO APAGA MAIS"). O /lida continua marcando como lida na plataforma.
 
 O /visto (15/10/2026, decisão do dono: "os números da Caixa têm que bater com
 o Duoke", e lá abrir a conversa zera o número dela) é a rota LEVE que a tela
@@ -40,8 +45,9 @@ qualquer modo de loja, e NUNCA vai à plataforma. Uma rota à parte, e não um
 modo do /lida, para o /lida continuar recusando (409) o que não marca na
 plataforma. Respostas:
   - quem só lê TAMBÉM grava (28/10/2026, `ROTAS_DE_QUEM_LE`: abrir a conversa
-    apaga a notificação dela para todos, como no Duoke "por loja"); 403 só para
-    quem nem vê a caixa;
+    apaga a notificação dela para todos, como no Duoke "por loja" — desde
+    16/11/2026, só fora do número: nas conversas do número responde 200 com
+    o visto que já estava, sem gravar); 403 só para quem nem vê a caixa;
   - 409 `nao_se_aplica` — o Direct do Instagram (não é conversa da Caixa);
   - 404 — fora do escopo da equipe ou não existe;
   - 200 `{visto_em, conversa}` — idempotente (abrir de novo só anda o
@@ -140,6 +146,7 @@ async def marcar_lida(
     c = await _conversa_ou_404(session, conversa_id, scope)
     try:
         # A pessoa abriu: o "visto no DaVinci" vale com ou sem a plataforma.
+        # Na conversa do número ele não grava nada (16/11/2026): só confere quem é.
         await lida_svc.gravar_visto(
             session,
             c,

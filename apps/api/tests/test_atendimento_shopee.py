@@ -1420,26 +1420,104 @@ async def test_afiliado_conta_no_numero_da_caixa_como_no_duoke(db, make_user, te
     assert await _numero(db, af) == (2, 2)
 
 
+async def _corte_do_clique(db: AsyncSession, conversa: AtendimentoConversa) -> datetime:
+    """O que o PATCH "Não precisa"/"Fechar" grava sem o `ate` (16/11/2026): a
+    chegada da mensagem mais nova da conversa."""
+    return await db.scalar(
+        select(func.max(AtendimentoMensagem.created_at)).where(
+            AtendimentoMensagem.conversa_id == conversa.id
+        )
+    )
+
+
 async def test_afiliado_marcado_volta_a_contar_quando_ele_escreve(db, make_user, teto):
+    """16/11/2026: abrir não grava mais o visto. A pessoa marcou "não precisa de
+    resposta" (o "marcar como processado" do Duoke; o PATCH guarda o corte
+    `processado_ate`): zera — e a fala NOVA do afiliado volta a contar SÓ ela
+    (a de antes, já dispensada, não). Fechada, a fala nova reabre igual."""
     integ, canal = await _canal(db, await make_user())
     f = ShopeeFalso()
     _afiliada(f)
     await _rodar(db, canal, integ, f)
     af = (await _conversas(db))["AF1"]
-    # A pessoa abriu (o "visto no DaVinci") e marcou "não precisa de resposta"
-    # (o "marcar como processado" do Duoke): zera...
-    af.visto_em = datetime.now(UTC)
+    assert await _numero(db, af) == (1, 1)
     af.sem_resposta_necessaria = True
+    gravar.guardar_processado_ate(af, await _corte_do_clique(db, af))
     await db.commit()
+    assert af.visto_em is None
     assert await _numero(db, af) == (0, 0)
 
-    # ...e a fala NOVA do afiliado volta a contar (a de antes, já vista, não).
     f.conversa("AF1", msg("AF1", AGORA - timedelta(minutes=5), afiliado=True, texto="oi?"))
     await _rodar(db, canal, integ, f)
     await db.refresh(af)
     assert af.sem_resposta_necessaria is False
     assert af.aguardando_resposta is False, "continua fora da fila"
+    assert gravar.CHAVE_PROCESSADO_ATE not in af.dados
     assert await _numero(db, af) == (1, 1)
+
+    # Fechada (o mesmo corte): a fala nova reabre e conta só ela.
+    af.situacao = "fechada"
+    gravar.guardar_processado_ate(af, await _corte_do_clique(db, af))
+    await gravar.recalcular_conversa(db, af)
+    await db.commit()
+    assert await _numero(db, af) == (0, 0)
+    f.conversa("AF1", msg("AF1", AGORA - timedelta(minutes=1), afiliado=True, texto="e aí?"))
+    await _rodar(db, canal, integ, f)
+    await db.refresh(af)
+    assert af.situacao != "fechada"
+    assert await _numero(db, af) == (1, 1)
+
+
+async def test_faq_do_comprador_nao_desmarca_o_nao_precisa(db, make_user, teto):
+    """16/11/2026: a pergunta do FAQ que o comprador clicou (`bundle_message`, a
+    `sistema` com o `from_id` dele) NÃO desfaz o "não precisa": ela não abre a
+    vez na fila, e desligar o flag reabriria o turno dispensado com o prazo
+    antigo, já vencido (alerta de vencida por um turno que a pessoa dispensou).
+    A próxima fala do comprador desmarca e conta as duas que chegaram depois do
+    clique (o FAQ e ela). O aviso do sistema da loja (o `from_id` da loja)
+    também não desmarca."""
+    integ, canal = await _canal(db, await make_user())
+    f = ShopeeFalso()
+    f.conversa(
+        "A",
+        msg("A", AGORA - timedelta(minutes=30), texto="oi"),
+        msg("A", AGORA - timedelta(minutes=20), texto="tem azul?"),
+    )
+    await _rodar(db, canal, integ, f)
+    a = (await _conversas(db))["A"]
+    assert await _numero(db, a) == (2, 2)
+    a.sem_resposta_necessaria = True
+    gravar.guardar_processado_ate(a, await _corte_do_clique(db, a))
+    await gravar.recalcular_conversa(db, a)
+    await db.commit()
+    assert await _numero(db, a) == (0, 0)
+    # O aviso do sistema da loja: não é do comprador — fica marcada.
+    f.conversa("A", msg("A", AGORA - timedelta(minutes=10), da_loja=True, tipo="notification"))
+    await _rodar(db, canal, integ, f)
+    await db.refresh(a)
+    assert a.sem_resposta_necessaria is True and await _numero(db, a) == (0, 0)
+    # O comprador clicou uma pergunta do FAQ: continua marcada, sem reabrir a vez.
+    f.conversa(
+        "A",
+        msg(
+            "A",
+            AGORA - timedelta(minutes=5),
+            tipo="bundle_message",
+            content={"text": "Qual o prazo de entrega?"},
+        ),
+    )
+    await _rodar(db, canal, integ, f)
+    await db.refresh(a)
+    assert a.sem_resposta_necessaria is True
+    assert a.aguardando_resposta is False, "o turno dispensado não volta para a fila"
+    assert await _numero(db, a) == (0, 0)
+    # A fala do comprador desmarca e conta o FAQ e ela (as duas depois do clique).
+    f.conversa("A", msg("A", AGORA - timedelta(minutes=2), texto="e aí?"))
+    await _rodar(db, canal, integ, f)
+    await db.refresh(a)
+    assert a.sem_resposta_necessaria is False
+    assert gravar.CHAVE_PROCESSADO_ATE not in a.dados
+    assert await _numero(db, a) == (2, 2)
 
 
 async def test_afiliado_fica_fora_da_ia_do_envio_e_do_marcar_lida(db, make_user, teto):

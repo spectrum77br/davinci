@@ -1178,6 +1178,114 @@ def sanear_mensagem(
     return externo_id, sem_nul(texto), sem_nul(list(anexos or [])), sem_nul(dict(payload or {}))
 
 
+# ── O corte do "Não precisa de resposta" e do "Fechar" (16/11/2026) ───────
+#
+# O dono: "a notificacao agr so vai sair se responder no chat ou se clicar em
+# um botao n precisa de resposta q bota do lado do enviar msg ali". Abrir não
+# grava mais o visto nas conversas do número (`lida.gravar_visto`). Então o
+# PATCH da conversa guarda em `dados` até onde a tela mostrava (o `ate`, ISO
+# UTC) quando a pessoa marca "Não precisa" ou fecha; sem nada aqui, a fala
+# nova do comprador reabriria contando também as já dispensadas. O corte só
+# vale quando a fala nova reabre (`_aplicar_processado_ate`): o desfazer
+# ("Precisa de resposta", reabrir à mão) só apaga a chave, e a bolinha volta
+# inteira, como era antes do clique.
+CHAVE_PROCESSADO_ATE = "processado_ate"
+
+
+def guardar_processado_ate(conversa: AtendimentoConversa, corte: datetime) -> None:
+    """O "Não precisa"/"Fechar" da pessoa guarda o corte em `dados`. Sem banco.
+
+    Nunca anda para trás (fica o maior). Um dict NOVO: o JSONB só persiste assim.
+    """
+    dados = dict(conversa.dados) if isinstance(conversa.dados, dict) else {}
+    novo = _utc(corte)
+    atual = _iso_utc(dados.get(CHAVE_PROCESSADO_ATE))
+    if novo is None or (atual is not None and atual >= novo):
+        return
+    dados[CHAVE_PROCESSADO_ATE] = novo.isoformat()
+    conversa.dados = dados
+
+
+def esquecer_processado_ate(conversa: AtendimentoConversa) -> None:
+    """O "Precisa de resposta" e o reabrir à mão apagam o corte. Sem banco."""
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    if CHAVE_PROCESSADO_ATE in dados:
+        conversa.dados = {k: v for k, v in dados.items() if k != CHAVE_PROCESSADO_ATE}
+
+
+# A HORA do clique "Não precisa de resposta" da PESSOA (16/11/2026, o dono:
+# o clique conta como resposta no tempo de resposta das Métricas). ISO UTC,
+# relógio do banco, gravada pelo PATCH da conversa. O "Precisa de resposta"
+# apaga; a fala nova do comprador NÃO apaga (as Métricas fecham a espera
+# antiga nessa hora: `routers/atendimento._turnos_das_lojas`, que lê a mesma
+# chave). O próximo clique sobrescreve. A IA (`sem_demanda`) não grava.
+CHAVE_SEM_RESPOSTA_EM = "sem_resposta_em"
+
+
+def guardar_hora_do_clique(conversa: AtendimentoConversa, quando: datetime) -> None:
+    """Grava em `dados` a hora do "Não precisa de resposta" da pessoa. Sem banco."""
+    novo = _utc(quando)
+    if novo is None:
+        return
+    dados = dict(conversa.dados) if isinstance(conversa.dados, dict) else {}
+    dados[CHAVE_SEM_RESPOSTA_EM] = novo.isoformat()
+    conversa.dados = dados
+
+
+def esquecer_hora_do_clique(conversa: AtendimentoConversa) -> None:
+    """O "Precisa de resposta" apaga a hora do clique (não foi resposta). Sem banco."""
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    if CHAVE_SEM_RESPOSTA_EM in dados:
+        conversa.dados = {k: v for k, v in dados.items() if k != CHAVE_SEM_RESPOSTA_EM}
+
+
+def _chegada_carregada(mensagem: Any) -> datetime | None:
+    """A CHEGADA (`created_at`) da mensagem, se já está carregada. Nunca vai ao banco."""
+    estado = inspect(mensagem, raiseerr=False)
+    if estado is None:
+        return _utc(getattr(mensagem, "created_at", None))
+    return _utc(estado.dict.get("created_at"))
+
+
+def _aplicar_processado_ate(conversa: AtendimentoConversa, mensagem: Any = None) -> None:
+    """A fala nova reabriu: o corte do "Não precisa"/"Fechar" vira o visto. Sem banco.
+
+    `visto_em` = o maior entre ele e o corte; na base importada que vale
+    (`notificacoes.estado_valido`), o `notificacoes_visto_em` também, como o
+    "Zerar não lidas". O número passa a contar só o que chegou depois do
+    clique. A chave sai. A fala que reabriu conta sempre: se a chegada dela
+    não passa do corte (a transação do sync começou antes do clique), o corte
+    fica logo antes dela. Sem a chave (marcada antes de 16/11/2026, pela IA,
+    pela Magalu), nada muda.
+    """
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    if CHAVE_PROCESSADO_ATE not in dados:
+        return
+    corte = _iso_utc(dados.get(CHAVE_PROCESSADO_ATE))
+    conversa.dados = {k: v for k, v in dados.items() if k != CHAVE_PROCESSADO_ATE}
+    if corte is None:
+        return
+    chegada = _chegada_carregada(mensagem) if mensagem is not None else None
+    if chegada is not None and chegada <= corte:
+        corte = chegada - timedelta(microseconds=1)
+    visto = _utc(conversa.visto_em)
+    if visto is None or corte > visto:
+        conversa.visto_em = corte
+    if notificacoes_svc.estado_valido(conversa):
+        visto_nativo = _utc(conversa.notificacoes_visto_em)
+        if visto_nativo is None or corte > visto_nativo:
+            conversa.notificacoes_visto_em = corte
+
+
+def _e_nova(conversa: AtendimentoConversa, mensagem: AtendimentoMensagem) -> bool:
+    """Mais nova que a última fala do comprador (relógio da plataforma)? Sem banco.
+
+    Mensagem ANTIGA chegando atrasada (primeira leitura, reenvio) não reabre.
+    """
+    anterior = conversa.ultima_do_cliente_em
+    return anterior is None or _quando(mensagem) > _utc(anterior)
+
+
 def _reabrir_se_nova(conversa: AtendimentoConversa, mensagem: AtendimentoMensagem) -> None:
     """Cliente escreveu DE NOVO depois de a conversa ser fechada: volta para a fila.
 
@@ -1185,13 +1293,43 @@ def _reabrir_se_nova(conversa: AtendimentoConversa, mensagem: AtendimentoMensage
     fechada (é assim que se perde o prazo da Amazon). Idem o "não precisa de
     resposta": vale para o que já estava lá, não para o que chega depois.
     Mensagem ANTIGA chegando atrasada (primeira leitura, reenvio) não reabre.
+    Reabriu de fato (fechada ou com o "não precisa"): aplica o corte do
+    clique (`_aplicar_processado_ate`, 16/11/2026) — a bolinha conta só a nova.
     """
-    anterior = conversa.ultima_do_cliente_em
-    if anterior is not None and _quando(mensagem) <= _utc(anterior):
+    if not _e_nova(conversa, mensagem):
         return
+    reabriu = conversa.situacao == CONVERSA_FECHADA or bool(conversa.sem_resposta_necessaria)
     if conversa.situacao == CONVERSA_FECHADA:
         conversa.situacao = CONVERSA_ABERTA
     conversa.sem_resposta_necessaria = False
+    if reabriu:
+        _aplicar_processado_ate(conversa, mensagem)
+
+
+def _desmarcar_pela_fala_nova(conversa: AtendimentoConversa, mensagem: AtendimentoMensagem) -> None:
+    """A fala NOVA que soma no número sem ser do `cliente` desliga o "não precisa". Sem banco.
+
+    16/11/2026: na reclamação do ML, a fala do MEDIADOR conta no número
+    (`pendente.conta_no_numero`), mas não reabria: depois do "Não precisa",
+    ela ficava escondida para sempre (a decisão do mediador sem bolinha). Só
+    o flag, com o corte do clique: a conversa FECHADA continua fechada (só a
+    fala do comprador reabre). A vez da reclamação é a da plataforma
+    (`CHAVE_VEZ_DA_LOJA`), então o prazo não volta para o turno antigo. A
+    mesma guarda da `_reabrir_se_nova`: a antiga chegando atrasada não mexe.
+    O FAQ do comprador (`sistema`) fica de fora (ver `gravar_mensagem`).
+    """
+    if not conversa.sem_resposta_necessaria or not _e_nova(conversa, mensagem):
+        return
+    conversa.sem_resposta_necessaria = False
+    _aplicar_processado_ate(conversa, mensagem)
+
+
+def _conta_no_numero(conversa: AtendimentoConversa, mensagem: AtendimentoMensagem) -> bool:
+    """A mensagem soma no número desta conversa (`pendente.tem_numero` e `conta_no_numero`)?"""
+    # Tardio: o `pendente` importa este módulo.
+    from app.services.atendimento import pendente
+
+    return pendente.tem_numero(conversa) and pendente.conta_no_numero(conversa, mensagem)
 
 
 def reabrir_pela_fala_de_fora(conversa: AtendimentoConversa, mensagem: AtendimentoMensagem) -> None:
@@ -1203,6 +1341,8 @@ def reabrir_pela_fala_de_fora(conversa: AtendimentoConversa, mensagem: Atendimen
     Caixa como no Duoke — e o "fechar"/"não precisa de resposta" (o
     "marcar como processado" do Duoke) vale para o que já estava lá: sem
     isto, a conversa de afiliado marcada uma vez nunca mais contaria.
+    Aqui reabre a fechada e desliga o "não precisa", aplicando o corte do
+    clique (`_reabrir_se_nova`).
     """
     _reabrir_se_nova(conversa, mensagem)
     _derivar(conversa)
@@ -1363,6 +1503,16 @@ async def gravar_mensagem(
         return mensagem, True
     if autor == AUTOR_CLIENTE:
         _reabrir_se_nova(conversa, mensagem)
+    elif (
+        autor == AUTOR_MEDIADOR
+        and conversa.sem_resposta_necessaria
+        and _conta_no_numero(conversa, mensagem)
+    ):
+        # O mediador da reclamação do ML (16/11/2026). O FAQ do comprador
+        # (`sistema`) NÃO desmarca: ele não abre a vez na fila, e desligar o
+        # flag reabriria o turno dispensado com o prazo antigo, já vencido
+        # (alerta de vencida por um turno que a pessoa dispensou).
+        _desmarcar_pela_fala_nova(conversa, mensagem)
     recalcular(conversa, [mensagem])
     if _fechava_a_vez(mensagem):
         # A automática que a régua antiga contava (a figurinha 0007, o cartão

@@ -109,19 +109,24 @@ export function filtroPadrao(caixa: string | null | undefined): string {
 // dela é a fila) e com a API antiga (sem o campo), pela fila, como antes.
 // A BOLINHA da linha na Caixa (15/10/2026, o Eduardo: "1 mensagem na kia e
 // nem mostra dessa conversa … no duoke 9") é o NÚMERO DA CONVERSA
-// (`numero_duoke`, a mesma régua do número da loja — o "não lida" do Duoke:
-// as mensagens do comprador desde a última resposta de pessoa ou desde que
-// alguém abriu a conversa), com ou sem o negrito: a conversa em que o robô
-// respondeu por último não está no "Falta responder" e mostra o número; a
-// que alguém abriu fica em negrito sem bolinha. A soma das bolinhas de uma
-// loja é o número dela. Fora do número (`numero_duoke` null: avaliação,
-// reclamação da Shopee/TikTok…) e com a API antiga, a bolinha de antes: só na
-// linha marcada, o maior entre as mensagens do comprador sem resposta e as não
-// lidas. A reclamação do ML tem número desde 15/10/2026 (o Duoke a junta ao
-// pack e conta a mensagem do mediador): a bolinha dela é esse número.
+// (`numero_duoke`, a mesma régua do número da loja: as mensagens do comprador
+// desde a última resposta de pessoa), com ou sem o negrito: a conversa em que
+// o robô respondeu por último não está no "Falta responder" e mostra o
+// número. A soma das bolinhas de uma loja é o número dela. Desde 16/11/2026
+// (o dono: "a notificacao agr so vai sair se responder no chat ou se clicar em
+// um botao n precisa de resposta q bota do lado do enviar msg ali") ABRIR NÃO
+// ZERA: a bolinha sai com a resposta ou com o "Não precisa de resposta" da
+// conversa (e com o "Zerar não lidas", fechar e os 7 dias, como antes); com a
+// conversa aberta, ela sobe a cada mensagem nova. Fora do número
+// (`numero_duoke` null: avaliação, reclamação da Shopee/TikTok…) e com a API
+// antiga, a bolinha de antes: só na linha marcada, o maior entre as mensagens
+// do comprador sem resposta e as não lidas. A reclamação do ML tem número
+// desde 15/10/2026 (o Duoke a junta ao pack e conta a mensagem do mediador):
+// a bolinha dela é esse número.
 // Na Caixa Humano a bolinha também é o número da conversa (26/10/2026, o
-// Eduardo: "as notificações iguais ao Duoke … ainda tá marcando 4"): quem abriu
-// ou respondeu zera; sem o número, pela fila, como antes.
+// Eduardo: "as notificações iguais ao Duoke … ainda tá marcando 4"): quem
+// respondeu (ou marcou "Não precisa de resposta") zera; sem o número, pela
+// fila, como antes.
 type LinhaMarcavel = { aguardando_resposta?: boolean; falta_responder?: boolean; pendentes?: number; nao_lidas?: number; numero_duoke?: number | null }
 export function linhaMarcada(c: LinhaMarcavel, pelaFila = false): boolean {
   return pelaFila || c.falta_responder === undefined ? !!c.aguardando_resposta : !!c.falta_responder

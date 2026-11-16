@@ -596,6 +596,138 @@ async def test_sem_resposta_necessaria_tira_da_fila(db: AsyncSession, make_user)
     assert conversa.situacao == "aberta"
 
 
+def test_o_corte_do_nao_precisa_so_vale_quando_a_fala_nova_reabre():
+    """16/11/2026: o "Não precisa"/"Fechar" guarda `dados.processado_ate`; só a
+    fala NOVA que reabre o aplica — o `visto_em` (e, na base importada, o
+    `notificacoes_visto_em`) vira o maior entre ele e o corte, e a chave sai.
+    A antiga chegando atrasada não reabre nem gasta o corte. A fala que reabre
+    conta sempre: com a chegada antes do corte, o corte fica logo antes dela."""
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    ns = SimpleNamespace
+
+    t = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+    chave = gravar.CHAVE_PROCESSADO_ATE
+
+    def conversa(**campos):
+        base = {
+            "situacao": "aberta",
+            "sem_resposta_necessaria": True,
+            "ultima_do_cliente_em": t,
+            "visto_em": None,
+            "notificacoes_visto_em": None,
+            "notificacoes_corte_em": None,
+            "notificacoes_iniciais": {},
+            "dados": {"outra": 1, chave: (t + timedelta(minutes=5)).isoformat()},
+        }
+        return ns(**{**base, **campos})
+
+    def fala(minutos: int, chegada: int | None = None):
+        chegou = t + timedelta(minutes=chegada if chegada is not None else minutos + 1)
+        return ns(enviada_em=t + timedelta(minutes=minutos), created_at=chegou)
+
+    # A antiga (antes da última fala do comprador): nada muda, o corte fica.
+    c = conversa()
+    gravar._reabrir_se_nova(c, fala(-1))
+    assert c.sem_resposta_necessaria is True and chave in c.dados
+    # A nova: desmarca, o corte vira o visto, a chave sai (e o resto de `dados` fica).
+    c = conversa()
+    gravar._reabrir_se_nova(c, fala(10))
+    assert c.sem_resposta_necessaria is False
+    assert c.visto_em == t + timedelta(minutes=5)
+    assert c.dados == {"outra": 1}
+    # O visto nunca anda para trás (o "Zerar não lidas" depois do clique).
+    c = conversa(visto_em=t + timedelta(minutes=8))
+    gravar._reabrir_se_nova(c, fala(10))
+    assert c.visto_em == t + timedelta(minutes=8)
+    # A fala que reabre chegou ANTES do corte (a transação do sync começou
+    # antes do clique): o corte fica logo antes dela — ela conta.
+    c = conversa()
+    gravar._reabrir_se_nova(c, fala(10, chegada=3))
+    assert c.visto_em == t + timedelta(minutes=3) - timedelta(microseconds=1)
+    # A fechada reabre e aplica o mesmo corte.
+    c = conversa(situacao="fechada", sem_resposta_necessaria=False)
+    gravar._reabrir_se_nova(c, fala(10))
+    assert (c.situacao, c.visto_em, c.dados) == ("aberta", t + timedelta(minutes=5), {"outra": 1})
+    # Sem a chave (a IA, a Magalu, antes de 16/11/2026): só desmarca.
+    c = conversa(dados={})
+    gravar._reabrir_se_nova(c, fala(10))
+    assert (c.sem_resposta_necessaria, c.visto_em) == (False, None)
+    # A base importada do Duoke que vale: o visto dela também.
+    c = conversa(
+        notificacoes_corte_em=t - timedelta(days=20),
+        notificacoes_iniciais={
+            "versao": 1,
+            "snapshot_id": str(uuid4()),
+            "origem": "duoke_snapshot",
+            "hash": "a" * 64,
+            "nao_lidas_ids": [],
+            "observadas_limite_ids": [],
+        },
+    )
+    gravar._reabrir_se_nova(c, fala(10))
+    assert c.notificacoes_visto_em == c.visto_em == t + timedelta(minutes=5)
+    # O FAQ do comprador / o mediador: só desliga o "não precisa" — a fechada fica.
+    c = conversa(situacao="fechada")
+    gravar._desmarcar_pela_fala_nova(c, fala(10))
+    assert (c.situacao, c.sem_resposta_necessaria) == ("fechada", False)
+    assert c.visto_em == t + timedelta(minutes=5) and c.dados == {"outra": 1}
+    c = conversa(situacao="fechada", sem_resposta_necessaria=False)
+    gravar._desmarcar_pela_fala_nova(c, fala(10))
+    assert chave in c.dados, "fechada sem o 'não precisa': fica para a fala do comprador"
+    c = conversa()
+    gravar._desmarcar_pela_fala_nova(c, fala(-1))
+    assert c.sem_resposta_necessaria is True and chave in c.dados
+    # Guardar nunca anda para trás; esquecer apaga só a chave.
+    c = conversa()
+    gravar.guardar_processado_ate(c, t)
+    assert c.dados[chave] == (t + timedelta(minutes=5)).isoformat()
+    gravar.guardar_processado_ate(c, (t + timedelta(minutes=9)).replace(tzinfo=None))
+    assert c.dados[chave] == (t + timedelta(minutes=9)).isoformat()
+    gravar.esquecer_processado_ate(c)
+    assert c.dados == {"outra": 1}
+
+
+async def test_a_fala_que_reabre_conta_mesmo_com_o_corte_depois_da_chegada(
+    db: AsyncSession, make_user
+):
+    """O corte é do relógio do DaVinci; a `created_at` da mensagem é o começo da
+    transação do sync — que pode ter começado antes do clique. A fala NOVA que
+    reabre sempre conta (a chegada dela, lida depois do INSERT, puxa o corte)."""
+    from app.services.atendimento import pendente
+
+    conversa = await _conversa(db, make_user)
+    agora = datetime.now(UTC)
+    for i, minutos in enumerate((30, 20)):
+        await gravar.gravar_mensagem(
+            db,
+            conversa,
+            externo_id=f"c-{i}",
+            autor="cliente",
+            texto="Oi",
+            enviada_em=agora - timedelta(minutes=minutos),
+        )
+    conversa.sem_resposta_necessaria = True
+    gravar.guardar_processado_ate(conversa, agora + timedelta(hours=1))
+    await gravar.recalcular_conversa(db, conversa)
+    await db.commit()
+    await gravar.gravar_mensagem(
+        db, conversa, externo_id="c-nova", autor="cliente", texto="E aí?", enviada_em=agora
+    )
+    await db.commit()
+    await db.refresh(conversa)
+    nova = await db.scalar(
+        select(AtendimentoMensagem).where(AtendimentoMensagem.externo_id == "c-nova")
+    )
+    assert conversa.sem_resposta_necessaria is False
+    assert conversa.visto_em == nova.created_at - timedelta(microseconds=1)
+    numero = await db.scalar(
+        select(pendente.nao_lidas_duoke_sql()).where(AtendimentoConversa.id == conversa.id)
+    )
+    assert numero == 3 - 2, "só a fala nova (as duas de antes chegaram antes dela)"
+
+
 async def test_resposta_que_falhou_nao_conta(db: AsyncSession, make_user):
     conversa = await _conversa(db, make_user)
     await gravar.gravar_mensagem(

@@ -241,6 +241,12 @@ export function rotuloEnviarAnexos(itens: { pdf: boolean }[]): string {
 //   pergunta do ML, na avaliação e no e-mail fica como sempre foi (botão girando
 //   e caixa travada). A memória dela fica fora do componente
 //   (lib/atendimentoFilaMemoria.ts): voltar para a lista não a perde.
+// - A NOTIFICAÇÃO (16/11/2026, o dono: "a notificacao agr so vai sair se
+//   responder no chat ou se clicar em um botao n precisa de resposta q bota do
+//   lado do enviar msg ali"): na conversa do número, abrir não apaga mais a
+//   bolinha — ela sai com a resposta no chat ou com o "Não precisa de resposta"
+//   da linha do Enviar ("Precisa de resposta" desfaz); sem Enviar (observação),
+//   o botão fica embaixo do painel "O que a IA responderia".
 import {
   Archive,
   ArrowLeft,
@@ -300,7 +306,16 @@ import type { Painel } from '~/components/AtendimentoPedido.vue'
 import { CLS_AG_CANCELAMENTO, leituraAgCancelamento } from '~/components/AtendimentoAgCancelamento.vue'
 import { CHAVE_ANEXAR_NA_CAIXA } from '~/components/AtendimentoTrocaSugestoes.vue'
 import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
-import { criarMarcadorDeLida, rotaAoAbrir } from '~/lib/atendimentoLida'
+import {
+  CODIGO_CHEGOU_MENSAGEM,
+  TITULO_NAO_PRECISA,
+  corpoNaoPrecisa,
+  criarMarcadorDeLida,
+  mostraNaoPrecisa,
+  perguntaNaoPrecisa,
+  querMarcarVisto,
+  rotaAoAbrir,
+} from '~/lib/atendimentoLida'
 import {
   INTERVALO_RETENTATIVA_MS,
   MOTIVO_ANEXO_COM_FILA,
@@ -686,15 +701,20 @@ usePollingVisivel(async () => {
 // em que o DaVinci responde (o detalhe diz `marcar_lida`; em Observar, nunca:
 // a plataforma marca e o número de não lidas zera) e, senão, o POST /visto
 // (15/10/2026: só o "visto no DaVinci", em qualquer modo, sem ir à
-// plataforma). Os dois gravam o visto, que zera o número da conversa na
-// Caixa, como abrir no Duoke — a linha recebe o `visto_em` e a página relê os
-// números. Quem passou rápido pela lista com as setas não marca nada. Falhou,
-// segue (a regra inteira em lib/atendimentoLida.ts e
+// plataforma). Quem passou rápido pela lista com as setas não marca nada.
+// Falhou, segue (a regra inteira em lib/atendimentoLida.ts e
 // services/atendimento/lida.py).
 // O POST leva até onde a tela mostrava (`ate` = o `visto_ate` do detalhe: a
 // chegada da mensagem mais nova) e, com a conversa aberta, a releitura que
-// traz mensagem nova grava o visto de novo (`rever`, só o /visto) — como no
-// Duoke, a conversa aberta fica lida (15/10/2026).
+// traz mensagem nova grava o visto de novo (`rever`, só o /visto).
+// 16/11/2026, o dono: "a notificacao agr so vai sair se responder no chat ou
+// se clicar em um botao n precisa de resposta q bota do lado do enviar msg
+// ali". Na conversa do NÚMERO da Caixa (`numero_duoke` é número) abrir NÃO
+// apaga mais a bolinha: nada de /visto ao abrir nem no `rever`; o /lida (loja
+// em que o DaVinci responde) só marca na plataforma. A bolinha sai com a
+// resposta no chat ou com o "Não precisa de resposta" do lado do Enviar
+// (`naoPrecisaDoRodape`). Fora do número (o e-mail do site, a pergunta do
+// ML) abrir continua gravando o visto, como antes.
 type LidaResposta = { marcada?: boolean; motivo?: string | null; aviso?: string | null; visto_em?: string | null; conversa?: ConversaResumo | null }
 async function gravarVisto(id: string, rota: 'lida' | 'visto') {
   const aberto = detalhe.value
@@ -722,7 +742,10 @@ async function gravarVisto(id: string, rota: 'lida' | 'visto') {
 // marcar como não lido ... ao sumir as bolinhas depois de um tempo com a conversa
 // aberta, se ele clicar nisso volta". O POST /nao-lida apaga o visto (a bolinha e
 // o "Falta responder" voltam para TODOS) e ESTA abertura para de gravar o visto;
-// abrir a conversa de novo grava como sempre.
+// abrir a conversa de novo grava como sempre. Na conversa do número (16/11/2026)
+// abrir não grava mais: ele só desfaz o "Zerar não lidas". Com o "não precisa de
+// resposta" ligado o botão some (ali ele não traz a bolinha de volta — quem traz
+// é o "Precisa de resposta").
 const naoLidaAqui = ref<string | null>(null)
 const marcandoNaoLida = ref(false)
 const marcadorLida = criarMarcadorDeLida({
@@ -733,7 +756,13 @@ const marcadorLida = criarMarcadorDeLida({
     const rota = aberto && aberto.conversa.id === id ? rotaAoAbrir(aberto, props.canEdit) : null
     if (rota) await gravarVisto(id, rota)
   },
-  rever: (id) => gravarVisto(id, 'visto'),
+  // Com a conversa aberta, a mensagem nova grava o visto de novo só onde abrir
+  // ainda apaga a notificação (`querMarcarVisto`): na conversa do número, nunca
+  // (16/11/2026) — nem o /visto, nem outro /lida.
+  rever: async (id) => {
+    const aberto = detalhe.value
+    if (aberto && aberto.conversa.id === id && querMarcarVisto(aberto)) await gravarVisto(id, 'visto')
+  },
 })
 // Cada detalhe que chega (ao abrir e no polling) diz se é para chamar, qual
 // rota e até onde a tela mostra.
@@ -2234,9 +2263,14 @@ const dicaDoEnvio = computed(() => (ehEmail.value ? 'Ctrl+Enter envia' : 'Enter 
 // Por conversa, como o envio: a ação da A não trava os botões da B.
 const acoes = reactive(new Map<string, string>())
 const acao = computed(() => acoes.get(props.conversaId) ?? null)
-async function patch(body: Record<string, unknown>, chave: string, ok?: string) {
+// Recusas que mudam o que a tela mostra: relê. `chegou_mensagem` (16/11/2026) =
+// o "Não precisa de resposta" chegou depois de uma mensagem nova do comprador
+// (o `ate` do corpo): a frase do servidor vai no aviso e a mensagem aparece.
+const RELER_APOS_PATCH = new Set([CODIGO_CHEGOU_MENSAGEM])
+// true = salvou (a resposta chegou); false = não foi (ou recusou, com o aviso).
+async function patch(body: Record<string, unknown>, chave: string, ok?: string): Promise<boolean> {
   const d = detalhe.value
-  if (!d || acao.value) return
+  if (!d || acao.value) return false
   const id = d.conversa.id
   acoes.set(id, chave)
   try {
@@ -2251,9 +2285,12 @@ async function patch(body: Record<string, unknown>, chave: string, ok?: string) 
     }
     if (ok) toasts.success(aberta(id) ? ok : `${ok} (${titulo(d.conversa)})`)
     if (aberta(id)) await carregar(id, true)
+    return true
   } catch (e: any) {
     const er = erroDaApi(e, 'Não consegui salvar')
     toasts.error(er.texto, er.motivos)
+    if (RELER_APOS_PATCH.has(e?.data?.detail?.code) && aberta(id)) await carregar(id, true)
+    return false
   } finally {
     acoes.delete(id)
   }
@@ -2283,41 +2320,113 @@ function fecharOuReabrir() {
     ? 'O comprador ainda está esperando resposta. Fechar mesmo assim?'
     : 'Fechar esta conversa?'
   if (!confirm(`${aviso}\n\nA conversa sai da fila; se o comprador escrever de novo, ela volta. Dá para reabrir em "Fechadas".`)) return
-  return patch({ situacao: 'fechada' }, 'fechar', 'Conversa fechada')
+  // O `ate` (16/11/2026): o corte do Fechar para no que a tela mostrava — a
+  // mensagem que chegou e a tela ainda não releu (ou chegou durante o confirm)
+  // continua contando quando a conversa reabrir. A string como veio da API.
+  const ate = detalhe.value?.visto_ate
+  return patch({ situacao: 'fechada', ...(ate ? { ate } : {}) }, 'fechar', 'Conversa fechada')
 }
+// ─── "Não precisa de resposta" ───────────────────────────────────────────────
+// DO LADO DO ENVIAR (16/11/2026) — o dono: "a notificacao agr so vai sair se
+// responder no chat ou se clicar em um botao n precisa de resposta q bota do
+// lado do enviar msg ali". Abrir a conversa do número não apaga mais a bolinha
+// (lib/atendimentoLida.ts); este botão é a outra saída, além de responder. Um
+// clique, sem confirm: desfaz com "Precisa de resposta" (a bolinha volta). Só a
+// reclamação do ML pergunta antes (o prazo do ML continua correndo). O PATCH
+// leva `ate` = até onde a tela mostrava: se o comprador escreveu depois, o
+// servidor recusa (409 `chegou_mensagem`), o aviso diz e a conversa é relida
+// (`patch`). A sugestão da IA que ninguém mexeu sai da caixa — um Enter a
+// mandaria. Quem vê, onde e quando: `mostraNaoPrecisa` (a lib) e
+// `naoPrecisaNoRodape`. Fica na linha do Enviar e, sem Enviar (a observação:
+// loja em Observar, envio desligado, Temu/AliExpress), embaixo do painel "O que
+// a IA responderia". O comentário das redes (fora do número, sem Enviar)
+// continua com o dele no cabeçalho (`naoPrecisa`).
 // Amazon: mensagem que não pede resposta ("obrigado", aviso automático) conta
 // como atrasada se ninguém clicar "Não é necessária resposta" no Seller
 // Central. Por e-mail esse botão não existe; o que existe é o link "Solucionar
 // o caso" do rodapé (`amazon.semResposta`). Com ele, o "Não precisa de
 // resposta" abre um balão com o link de verdade: o clique abre a Amazon numa
 // aba nova E faz o PATCH daqui. Tem de ser um <a target=_blank> clicado pela
-// pessoa — um window.open depois do confirm() cai no bloqueador de pop-up se
-// ela demorar para confirmar. Sem o link, só tira da fila e lembra de marcar lá.
+// pessoa — um window.open depois de um confirm() cai no bloqueador de pop-up se
+// ela demorar para confirmar. Sem o link, marca aqui e lembra de marcar lá (o
+// aviso e a faixa "Marcada como…").
 const amazon = computed(() => linksAmazon(conversa.value))
+// UM balão só (o do rodapé, `naoPrecisaComBalao`): o cabeçalho não tem mais o da Amazon.
 const balaoNaoPrecisa = ref(false)
-function naoPrecisa() {
+const naoPrecisaNoRodape = computed(() =>
+  modoCaixa.value === 'responder'
+  && mostraNaoPrecisa(conversa.value, { podeMexer: props.canEdit, respondePorOutra: respondePorOutra.value, ehEmail: ehEmail.value }))
+const naoPrecisaComBalao = computed(() =>
+  naoPrecisaNoRodape.value && conversa.value?.plataforma === 'amazon' && !!amazon.value.semResposta && !conversa.value?.sem_resposta_necessaria)
+// O balão saiu da tela (a releitura trouxe a conversa respondida): o ref volta a
+// false, senão ele reabre sozinho quando o botão voltar.
+watch(naoPrecisaComBalao, (v) => { if (!v) balaoNaoPrecisa.value = false })
+// O "Não lida" do cabeçalho some na conversa do NÚMERO (16/11/2026): abrir
+// não apaga mais a bolinha, e ali ele só desfaria o corte do "Não precisa de
+// resposta" (as falas dispensadas voltariam para todos). Quem traz a bolinha
+// de volta é o "Precisa de resposta" do rodapé. No e-mail (fora do número), fica.
+const naoLidaVisivel = computed(() => {
   const c = conversa.value
-  if (!c) return
-  const marcar = !c.sem_resposta_necessaria
-  // Comentário/menção das redes (RF7): elogio, emoji — não pede resposta; a
-  // conversa continua no Mídia, só sai do "Falta responder".
-  const aviso = c.plataforma === 'amazon'
-    ? 'A conversa sai da fila de aguardando. Na Amazon, clique também em "Não é necessária resposta" no Seller Central — senão a Amazon conta como atrasada.'
-    : 'A conversa sai da fila de aguardando (continua na lista e no filtro Mídia). Nada é publicado na rede.'
-  if (marcar && !confirm(`Marcar como "não precisa de resposta"?\n\n${aviso}`)) return
-  return patch({ sem_resposta_necessaria: marcar }, 'nao_precisa', marcar ? 'Marcada: não precisa de resposta' : 'Voltou para a fila')
+  return !!c && !c.somente_leitura && typeof c.numero_duoke !== 'number'
+})
+const tituloNaoPrecisa = computed(() => {
+  const c = conversa.value
+  if (c?.sem_resposta_necessaria) return 'Precisa de resposta: desfaz o "não precisa" — a conversa volta para a fila e a notificação volta'
+  if (naoPrecisaComBalao.value) return `${TITULO_NAO_PRECISA}. O balão também abre a Amazon para marcar o caso como resolvido ("Não é necessária resposta").`
+  if (c?.plataforma === 'amazon') return `${TITULO_NAO_PRECISA}. Marque também "Não é necessária resposta" no Seller Central.`
+  if (perguntaNaoPrecisa(c)) return `${TITULO_NAO_PRECISA}. O prazo do Mercado Livre continua correndo.`
+  return TITULO_NAO_PRECISA
+})
+// Marcou: a sugestão intocada (o texto É o que a tela pôs) sai da caixa — na
+// conversa aberta ou na guardada, se a pessoa já trocou. O que ela escreveu fica.
+function tirarSugestaoIntocada(id: string) {
+  if (aberta(id)) {
+    if (texto.value && texto.value === prefill.value) {
+      texto.value = ''
+      prefill.value = ''
+    }
+    return
+  }
+  const g = guardados.get(id)
+  if (g && g.texto && g.texto === g.prefill) guardados.set(id, { texto: '', prefill: '', base: null, rejeitada: g.base ?? g.rejeitada })
+}
+async function marcarNaoPrecisa(ok: string) {
+  const d = detalhe.value
+  if (!d) return
+  const id = d.conversa.id
+  if (await patch(corpoNaoPrecisa(true, d.visto_ate), 'nao_precisa', ok)) tirarSugestaoIntocada(id)
+}
+// O botão do rodapé (e o da observação): marca ou desfaz.
+function naoPrecisaDoRodape() {
+  const c = conversa.value
+  if (!c || acao.value) return
+  if (c.sem_resposta_necessaria) return patch(corpoNaoPrecisa(false), 'nao_precisa', 'Voltou para a fila: precisa de resposta')
+  const pergunta = perguntaNaoPrecisa(c)
+  if (pergunta && !confirm(pergunta)) return
+  return marcarNaoPrecisa(c.plataforma === 'amazon' ? 'Marcada: não precisa de resposta — marque também no Seller Central' : 'Marcada: não precisa de resposta')
 }
 // O <a> do balão segue o caminho normal do navegador (abre a Amazon); aqui só
 // a parte do DaVinci. Se o PATCH falhar, a aba da Amazon já abriu: o erro
 // aparece e o "só marcar aqui" tenta de novo sem abrir outra aba.
 function naoPrecisaComLink() {
   balaoNaoPrecisa.value = false
-  return patch({ sem_resposta_necessaria: true }, 'nao_precisa', 'Marcada: não precisa de resposta — confira na aba da Amazon')
+  return marcarNaoPrecisa('Marcada: não precisa de resposta — confira na aba da Amazon')
 }
 // O balão já foi a confirmação: sem segundo confirm().
 function naoPrecisaSoAqui() {
   balaoNaoPrecisa.value = false
-  return patch({ sem_resposta_necessaria: true }, 'nao_precisa', 'Marcada: não precisa de resposta — marque também no Seller Central')
+  return marcarNaoPrecisa('Marcada: não precisa de resposta — marque também no Seller Central')
+}
+// Comentário/menção das redes (RF7): elogio, emoji — não pede resposta; a
+// conversa continua no Mídia, só sai do "Falta responder". O botão do
+// cabeçalho, com o confirm de sempre (fora do número: sem `ate`).
+function naoPrecisa() {
+  const c = conversa.value
+  if (!c) return
+  const marcar = !c.sem_resposta_necessaria
+  const aviso = 'A conversa sai da fila de aguardando (continua na lista e no filtro Mídia). Nada é publicado na rede.'
+  if (marcar && !confirm(`Marcar como "não precisa de resposta"?\n\n${aviso}`)) return
+  return patch({ sem_resposta_necessaria: marcar }, 'nao_precisa', marcar ? 'Marcada: não precisa de resposta' : 'Voltou para a fila')
 }
 
 // Amazon sem conta: a pessoa diz de qual conta é (as integrações Amazon do
@@ -3608,52 +3717,16 @@ watch(() => props.conversaId, (novo, velho) => {
                   <Pause v-else class="size-3.5" />
                   <span class="ml-1 hidden 2xl:inline">{{ conversa.ia_pausada ? 'Retomar IA' : 'Pausar IA' }}</span>
                 </Button>
-                <!-- Amazon com o link "Solucionar o caso": o balão explica, e o
-                     link de verdade abre a Amazon e marca aqui (naoPrecisaComLink). -->
-                <PopoverRoot v-if="conversa.plataforma === 'amazon' && amazon.semResposta && !conversa.sem_resposta_necessaria" v-model:open="balaoNaoPrecisa">
-                  <PopoverTrigger as-child>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      class="h-7 px-2 text-xs"
-                      :disabled="!!acao"
-                      title="não precisa de resposta — marca aqui e marca o caso como resolvido na Amazon"
-                      aria-label="não precisa de resposta"
-                    >
-                      <Loader2 v-if="acao === 'nao_precisa'" class="size-3.5 animate-spin" />
-                      <MailX v-else class="size-3.5" />
-                      <span class="ml-1 hidden 2xl:inline">Não precisa de resposta</span>
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverPortal>
-                    <PopoverContent
-                      side="bottom"
-                      align="end"
-                      :side-offset="4"
-                      :collision-padding="8"
-                      class="z-[70] w-[320px] max-w-[calc(100vw-16px)] rounded-md border bg-background p-3 text-xs shadow-lg"
-                    >
-                      <p class="text-sm font-medium">Não precisa de resposta?</p>
-                      <p class="mt-1 text-muted-foreground">
-                        A conversa sai da fila de aguardando. O link abre a Amazon numa aba nova e marca o caso como resolvido na Amazon
-                        ("Não é necessária resposta") — sem isso a Amazon conta a mensagem como atrasada.
-                      </p>
-                      <div class="mt-2.5 flex flex-wrap items-center justify-end gap-1.5">
-                        <button type="button" class="rounded px-1.5 py-1 text-muted-foreground underline hover:text-foreground" @click="naoPrecisaSoAqui">só marcar aqui</button>
-                        <Button as="a" size="sm" class="h-7 px-2 text-xs" :href="amazon.semResposta" target="_blank" rel="noopener noreferrer" @click="naoPrecisaComLink">
-                          <ExternalLink class="mr-1 size-3.5" /> Marcar e abrir na Amazon
-                        </Button>
-                      </div>
-                    </PopoverContent>
-                  </PopoverPortal>
-                </PopoverRoot>
+                <!-- Só o do comentário/menção das redes (fora do número, sem Enviar:
+                     responde-se pelo cartão). O do chat e o da Amazon (com o balão do
+                     link) ficam do lado do Enviar desde 16/11/2026 (naoPrecisaDoRodape). -->
                 <Button
-                  v-else-if="conversa.plataforma === 'amazon' || canalExterno === 'comentario'"
+                  v-if="canalExterno === 'comentario'"
                   size="sm"
                   variant="outline"
                   class="h-7 px-2 text-xs"
                   :disabled="!!acao"
-                  :title="conversa.sem_resposta_necessaria ? 'desfazer: volta para a fila' : (conversa.plataforma === 'amazon' ? 'não precisa de resposta (lembre de marcar também no Seller Central)' : 'não precisa de resposta (elogio, emoji): sai do Falta responder, continua no Mídia')"
+                  :title="conversa.sem_resposta_necessaria ? 'desfazer: volta para a fila' : 'não precisa de resposta (elogio, emoji): sai do Falta responder, continua no Mídia'"
                   :aria-label="conversa.sem_resposta_necessaria ? 'precisa de resposta' : 'não precisa de resposta'"
                   @click="naoPrecisa"
                 >
@@ -3773,9 +3846,11 @@ watch(() => props.conversaId, (novo, velho) => {
                 :carregando="painelCarregando"
                 :can-edit="canEdit"
               />
-              <!-- Não lida (03/11/2026): a bolinha e o "Falta responder" voltam para todos. -->
+              <!-- Não lida (03/11/2026): a bolinha e o "Falta responder" voltam para todos.
+                   Some na conversa do número (16/11/2026, `naoLidaVisivel`): quem traz a
+                   bolinha de volta ali é o "Precisa de resposta" do rodapé. No e-mail, fica. -->
               <Button
-                v-if="!conversa.somente_leitura"
+                v-if="naoLidaVisivel"
                 size="sm"
                 variant="ghost"
                 class="h-7 px-2 text-xs"
@@ -4453,9 +4528,11 @@ watch(() => props.conversaId, (novo, velho) => {
             <button v-if="!cartaoExternoAberto" type="button" class="shrink-0 underline hover:text-foreground" @click="cartaoExternoAberto = true">mostrar o cartão</button>
           </div>
 
-          <!-- modo observação: quem responde é o Duoke; aqui, o que a IA responderia -->
+          <template v-else>
+          <!-- modo observação: quem responde é o Duoke; aqui, o que a IA responderia
+               (e, embaixo, só o "Não precisa de resposta" da linha de ação) -->
           <AtendimentoObservacao
-            v-else-if="observacao"
+            v-if="observacao"
             :sugestao="sugestaoAtual"
             :can-edit="canAvaliar"
             :pode-sugerir="podeSugerir"
@@ -4676,8 +4753,12 @@ watch(() => props.conversaId, (novo, velho) => {
           <div v-else-if="lacunas.length && podeDigitar" class="text-[11px] text-amber-800 dark:text-amber-300">
             Troque {{ lacunas.join(', ') }} pelo dado antes de enviar.
           </div>
+          </template>
 
-          <div class="flex flex-wrap items-center gap-1.5">
+          <!-- A linha de ação. Na observação (sem caixa nem Enviar) fica só o "Não
+               precisa de resposta", logo abaixo do painel "O que a IA responderia". -->
+          <div v-if="!observacao || naoPrecisaNoRodape" class="flex flex-wrap items-center gap-1.5" data-linha-de-acao>
+            <template v-if="!observacao">
             <!-- Ao fechar, o foco fica na caixa de resposta (onde a resposta
                  pronta entrou), não volta para o botão do menu. -->
             <PopoverRoot v-if="modelosQueServem.length" v-model:open="menuModelos">
@@ -4721,24 +4802,94 @@ watch(() => props.conversaId, (novo, velho) => {
               <Sparkles v-else class="mr-1 size-3.5" />
               Sugerir resposta
             </Button>
-            <span
-              v-if="limite && podeDigitar"
-              class="ml-auto text-[11px] tabular-nums"
-              :class="acimaDoLimite ? 'font-semibold text-red-600 dark:text-red-400' : tamanho > limite * 0.9 ? 'text-amber-700 dark:text-amber-300' : 'text-muted-foreground'"
-              :title="`limite de ${limite} caracteres neste canal${variasCaixas(conversa.plataforma) ? ` (${canalLabel(conversa.canal)})` : ''}, contados como a plataforma conta (espaços repetidos não contam${conversa.plataforma === 'ml' ? '; emoji sai e … vira ...' : ''})`"
-            >{{ tamanho }}/{{ limite }}</span>
-            <Button
-              size="sm"
-              class="h-8"
-              :class="limite && podeDigitar ? '' : 'ml-auto'"
-              :disabled="!podeEnviar"
-              :title="incertos.has(conversaId) ? 'travado até a conversa mostrar se o último envio saiu' : `enviar (${ehEmail ? 'Ctrl+Enter' : 'Enter'})`"
-              @click="enviar()"
-            >
-              <Loader2 v-if="caixaPresa" class="mr-1.5 size-4 animate-spin" />
-              <Send v-else class="mr-1.5 size-4" />
-              Enviar
-            </Button>
+            </template>
+            <!-- À direita, juntos (o ml-auto é do grupo; sem caber, descem juntos para a
+                 linha de baixo): o contador, o "Não precisa de resposta" e o Enviar. -->
+            <div class="ml-auto flex items-center gap-1.5" data-acoes-do-envio>
+              <span
+                v-if="!observacao && limite && podeDigitar"
+                class="text-[11px] tabular-nums"
+                :class="acimaDoLimite ? 'font-semibold text-red-600 dark:text-red-400' : tamanho > limite * 0.9 ? 'text-amber-700 dark:text-amber-300' : 'text-muted-foreground'"
+                :title="`limite de ${limite} caracteres neste canal${variasCaixas(conversa.plataforma) ? ` (${canalLabel(conversa.canal)})` : ''}, contados como a plataforma conta (espaços repetidos não contam${conversa.plataforma === 'ml' ? '; emoji sai e … vira ...' : ''})`"
+              >{{ tamanho }}/{{ limite }}</span>
+              <!-- NÃO PRECISA DE RESPOSTA (16/11/2026, o dono: "um botao n precisa de
+                   resposta q bota do lado do enviar msg"): tira a bolinha sem responder;
+                   vale com a caixa travada. Amazon com o link "Solucionar o caso": o
+                   balão explica, e o link de verdade abre a Amazon e marca aqui
+                   (naoPrecisaComLink) — o único balão do `balaoNaoPrecisa`. -->
+              <PopoverRoot v-if="naoPrecisaComBalao" v-model:open="balaoNaoPrecisa">
+                <PopoverTrigger as-child>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    class="h-8 px-2 text-xs"
+                    :disabled="!!acao"
+                    :title="tituloNaoPrecisa"
+                    aria-label="Não precisa de resposta"
+                    data-nao-precisa
+                  >
+                    <Loader2 v-if="acao === 'nao_precisa'" class="size-3.5 animate-spin" />
+                    <MailX v-else class="size-3.5" />
+                    <span class="ml-1 sm:hidden">Não precisa</span>
+                    <span class="ml-1 hidden sm:inline">Não precisa de resposta</span>
+                  </Button>
+                </PopoverTrigger>
+                <PopoverPortal>
+                  <PopoverContent
+                    side="top"
+                    align="end"
+                    :side-offset="4"
+                    :collision-padding="8"
+                    class="z-[70] w-[320px] max-w-[calc(100vw-16px)] rounded-md border bg-background p-3 text-xs shadow-lg"
+                    data-balao-nao-precisa
+                  >
+                    <p class="text-sm font-medium">Não precisa de resposta?</p>
+                    <p class="mt-1 text-muted-foreground">
+                      A conversa sai da fila de aguardando. O link abre a Amazon numa aba nova e marca o caso como resolvido na Amazon
+                      ("Não é necessária resposta") — sem isso a Amazon conta a mensagem como atrasada.
+                    </p>
+                    <div class="mt-2.5 flex flex-wrap items-center justify-end gap-1.5">
+                      <button type="button" class="rounded px-1.5 py-1 text-muted-foreground underline hover:text-foreground" @click="naoPrecisaSoAqui">só marcar aqui</button>
+                      <Button as="a" size="sm" class="h-7 px-2 text-xs" :href="amazon.semResposta" target="_blank" rel="noopener noreferrer" @click="naoPrecisaComLink">
+                        <ExternalLink class="mr-1 size-3.5" /> Marcar e abrir na Amazon
+                      </Button>
+                    </div>
+                  </PopoverContent>
+                </PopoverPortal>
+              </PopoverRoot>
+              <Button
+                v-else-if="naoPrecisaNoRodape"
+                size="sm"
+                variant="outline"
+                class="h-8 px-2 text-xs"
+                :disabled="!!acao"
+                :title="tituloNaoPrecisa"
+                :aria-label="conversa.sem_resposta_necessaria ? 'Precisa de resposta' : 'Não precisa de resposta'"
+                data-nao-precisa
+                @click="naoPrecisaDoRodape"
+              >
+                <Loader2 v-if="acao === 'nao_precisa'" class="size-3.5 animate-spin" />
+                <Undo2 v-else-if="conversa.sem_resposta_necessaria" class="size-3.5" />
+                <MailX v-else class="size-3.5" />
+                <span v-if="conversa.sem_resposta_necessaria" class="ml-1">Precisa de resposta</span>
+                <template v-else>
+                  <span class="ml-1 sm:hidden">Não precisa</span>
+                  <span class="ml-1 hidden sm:inline">Não precisa de resposta</span>
+                </template>
+              </Button>
+              <Button
+                v-if="!observacao"
+                size="sm"
+                class="h-8"
+                :disabled="!podeEnviar"
+                :title="incertos.has(conversaId) ? 'travado até a conversa mostrar se o último envio saiu' : `enviar (${ehEmail ? 'Ctrl+Enter' : 'Enter'})`"
+                @click="enviar()"
+              >
+                <Loader2 v-if="caixaPresa" class="mr-1.5 size-4 animate-spin" />
+                <Send v-else class="mr-1.5 size-4" />
+                Enviar
+              </Button>
+            </div>
           </div>
           </template>
         </div>

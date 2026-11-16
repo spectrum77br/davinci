@@ -1251,3 +1251,60 @@ async def test_fechada_pela_pessoa_nao_volta_com_destino(db, make_user, ml):
     await _sync(integ, T0 + timedelta(minutes=10))
     db.expire_all()
     assert (await _conversa_da_reclamacao(db)).situacao == "fechada"
+
+
+async def test_nao_precisa_na_reclamacao_do_ml_e_mediador_novo_volta(db, make_user, ml):
+    """16/11/2026 (o dono: "a notificacao agr so vai sair se responder no chat ou
+    se clicar em um botao n precisa de resposta q bota do lado do enviar msg
+    ali"): a reclamação do ML marcada "Não precisa de resposta" (o PATCH guarda o
+    corte `processado_ate`) e o mediador escreve de novo — a leitura do ML
+    desliga o "não precisa" e aplica o corte (a bolinha conta só a fala nova).
+    A fechada pela pessoa continua fechada: só a fala do comprador reabre."""
+    from app.services.atendimento import gravar
+
+    integ = await _conta(db, await make_user())
+    c = ml.conta()
+    c["abertas"] = [_claim(stage="dispute")]
+    c["mensagens"][RECLAMACAO_ML] = [
+        _msg(1, "mediator", "respondent", "Envie as fotos.", "2026-10-01T10:00:00.000-04:00")
+    ]
+    await _sync(integ)
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    corte = max(m.created_at for m in await _mensagens(db, conversa))
+    conversa.sem_resposta_necessaria = True
+    gravar.guardar_processado_ate(conversa, corte)
+    await db.commit()
+    # A mesma fala relida (a reclamação mexeu, sem mensagem nova) não mexe.
+    c["abertas"] = [_claim(stage="dispute", last_updated="2026-10-01T12:00:00.000-04:00")]
+    await _sync(integ, T0 + timedelta(minutes=5))
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    assert conversa.sem_resposta_necessaria is True
+    assert gravar.CHAVE_PROCESSADO_ATE in conversa.dados
+    # A fala NOVA do mediador desmarca.
+    c["mensagens"][RECLAMACAO_ML].append(
+        _msg(2, "mediator", "respondent", "Prazo de 2 dias.", "2026-10-01T13:00:00.000-04:00")
+    )
+    c["abertas"] = [_claim(stage="dispute", last_updated="2026-10-01T13:00:00.000-04:00")]
+    await _sync(integ, T0 + timedelta(minutes=10))
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    assert conversa.sem_resposta_necessaria is False
+    assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
+    assert conversa.visto_em == corte
+    # Fechada e marcada: o mediador novo só desliga o "não precisa".
+    conversa.situacao = "fechada"
+    conversa.sem_resposta_necessaria = True
+    gravar.guardar_processado_ate(
+        conversa, max(m.created_at for m in await _mensagens(db, conversa))
+    )
+    await db.commit()
+    c["mensagens"][RECLAMACAO_ML].append(
+        _msg(3, "mediator", "respondent", "Decisão em breve.", "2026-10-01T14:00:00.000-04:00")
+    )
+    c["abertas"] = [_claim(stage="dispute", last_updated="2026-10-01T14:00:00.000-04:00")]
+    await _sync(integ, T0 + timedelta(minutes=20))
+    db.expire_all()
+    conversa = await _conversa_da_reclamacao(db)
+    assert (conversa.situacao, conversa.sem_resposta_necessaria) == ("fechada", False)

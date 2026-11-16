@@ -400,9 +400,15 @@ async def test_quem_so_ve_os_numeros_dela(db, make_user, client, auth_as, monkey
     assert await enviar._responde_o_zap(db, marrocos, conversa) is True
 
 
-async def test_marcar_como_nao_lida_volta_a_bolinha_para_todos(db, make_user, client, auth_as):
-    """03/11/2026: abrir apaga a bolinha (o visto); "não lida" a traz de volta — no
-    número da conversa e no "Falta responder" — para todos, sem ir à plataforma."""
+async def test_marcar_como_nao_lida_volta_a_bolinha_para_todos(
+    db, make_user, client, auth_as, monkeypatch
+):
+    """03/11/2026: "não lida" traz a bolinha de volta — no número da conversa e no
+    "Falta responder" — para todos, sem ir à plataforma. Desde 16/11/2026 abrir
+    (o /visto) não apaga mais a bolinha do Zap (é do número): quem apaga é o
+    "Zerar não lidas" (de quem mexe), e o "não lida" o desfaz."""
+    from app.config import get_settings
+    from app.models import UserRole
     from app.services.atendimento import pendente
 
     canal, conversa = await _zap_mini(db)
@@ -420,7 +426,13 @@ async def test_marcar_como_nao_lida_volta_a_bolinha_para_todos(db, make_user, cl
     assert await numero() == 1
     auth_as(londres)
     assert (await client.post(f"{url}/visto")).status_code == 200
+    assert await numero() == 1, "abrir não apaga (16/11/2026)"
+    monkeypatch.setattr(get_settings(), "atendimento_usuarios", "quem.mexe@davinci-test.com")
+    auth_as(await make_user(email="quem.mexe@davinci-test.com", role=UserRole.ADMIN))
+    r = await client.post("/api/atendimento/zerar-nao-lidas", json={})
+    assert r.status_code == 200 and r.json()["conversas"] >= 1, r.text
     assert await numero() == 0
+    auth_as(londres)
     r = await client.post(f"{url}/nao-lida")
     assert r.status_code == 200, r.text
     assert r.json()["visto_em"] is None

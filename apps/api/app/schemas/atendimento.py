@@ -704,6 +704,14 @@ class ConversaPatch(BaseModel):
     `integration_id` só vale para a conversa da Amazon que chegou SEM conta
     identificada (o e-mail não disse de qual das contas era): a pessoa
     escolhe a conta Amazon, e a conversa passa a poder ser respondida.
+
+    `ate` (16/11/2026, opcional): o `visto_ate` do detalhe que a tela
+    mostrava (a chegada da mensagem mais nova). No "Não precisa de resposta"
+    e no "Fechar" de uma conversa do número, vira o corte `processado_ate`
+    (nunca depois do relógio do banco); sem ele, a chegada da mensagem mais
+    nova da conversa. No "Não precisa", chegou fala do comprador depois dele:
+    409 `chegou_mensagem`, nada muda. A tela antiga não manda (e campo a mais
+    é ignorado).
     """
 
     atribuido_a: UUID | None = None
@@ -711,6 +719,7 @@ class ConversaPatch(BaseModel):
     situacao: Literal["aberta", "fechada"] | None = None
     sem_resposta_necessaria: bool | None = None
     integration_id: UUID | None = None
+    ate: datetime | None = None
 
 
 class CopiaAmazonIn(BaseModel):

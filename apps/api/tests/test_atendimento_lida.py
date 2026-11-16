@@ -35,7 +35,14 @@ O que se mede:
   o visto também (antes da plataforma, com ou sem ela aceitar); quem só lê
   não grava; idempotente, nunca volta e não mexe no `updated_at`; o visto é
   ATÉ ONDE A TELA MOSTROU (o `visto_ate` do detalhe — a chegada da mensagem
-  mais nova — volta no POST), nunca depois do relógio do banco.
+  mais nova — volta no POST), nunca depois do relógio do banco;
+- ABRIR NÃO APAGA MAIS (16/11/2026, o dono: "a notificacao agr so vai sair se
+  responder no chat ou se clicar em um botao n precisa de resposta q bota do
+  lado do enviar msg ali"): nas conversas do número (o chat da Shopee e da
+  TikTok, o pós-venda e a reclamação do ML, a Amazon, o Zap) o /visto e o
+  /lida não gravam `visto_em` nem `notificacoes_visto_em` — o número fica; o
+  /lida continua marcando na plataforma. Fora do número (o e-mail do site, a
+  pergunta do ML) o visto acima vale como antes.
 """
 
 from __future__ import annotations
@@ -257,6 +264,45 @@ async def _marcar(client, conversa: AtendimentoConversa | str):
     return await client.post(f"{URL}/conversas/{cid}/lida")
 
 
+async def _email_do_site(
+    db, integ: Integration, externo: str = "<sac-1@uranyx.com.br>"
+) -> AtendimentoConversa:
+    """A conversa de e-mail da ponte (o e-mail do site, `separa_email`): fora do
+    número — abrir continua apagando a bolinha dela (27/10/2026)."""
+    conversa, _ = await gravar.upsert_conversa(
+        db,
+        canal=None,
+        integration=integ,
+        plataforma="site",
+        canal_nome="email",
+        externo_id=externo,
+        comprador_nome="Comprador",
+        dados={"fonte": "tuta"},
+    )
+    for mid, minutos in ((f"{externo}:1", 30), (f"{externo}:2", 20)):
+        await gravar.gravar_mensagem(
+            db,
+            conversa,
+            externo_id=mid,
+            autor="cliente",
+            texto=f"e-mail {mid}",
+            enviada_em=AGORA - timedelta(minutes=minutos),
+        )
+    await db.commit()
+    await db.refresh(conversa)
+    return conversa
+
+
+async def _numero(db, conversa: AtendimentoConversa | str) -> int:
+    """O número da conversa NO BANCO (a régua SQL do /resumo e da linha)."""
+    from app.services.atendimento import pendente
+
+    cid = conversa if isinstance(conversa, str) else str(conversa.id)
+    return int(
+        await db.scalar(select(pendente.nao_lidas_duoke_sql()).where(AtendimentoConversa.id == cid))
+    )
+
+
 # ─────────────── quem mexe, loja em que o DaVinci responde ───────────────
 
 
@@ -412,7 +458,7 @@ async def test_a_equipe_marca_e_quem_nao_ve_leva_403(db, make_user, auth_as, cli
     assert await _nao_lidas(db, conversa) == 0
 
 
-async def test_loja_em_observar_recusa_e_so_grava_o_visto(db, dono, client, plataforma):
+async def test_loja_em_observar_recusa_e_nao_apaga_o_numero(db, dono, client, plataforma):
     integ, canal = await _loja(db, dono, "shopee", "chat", "observar")
     conversa = await _conversa(db, integ, canal)
     r = await _marcar(client, conversa)
@@ -421,9 +467,10 @@ async def test_loja_em_observar_recusa_e_so_grava_o_visto(db, dono, client, plat
     assert "Duoke" in r.json()["detail"]["detail"]
     assert plataforma.chamadas == [] and plataforma.montados == []
     assert await _nao_lidas(db, conversa) == 3
-    # A pessoa abriu (a tela chama o /visto em observar; aqui, a corrida com a
-    # troca de modo): o "visto no DaVinci" vale, nada foi à plataforma.
-    assert await _visto_em(db, conversa) is not None
+    # A pessoa abriu (a corrida com a troca de modo): até 15/11/2026 o visto
+    # valia aqui. Desde 16/11/2026, no chat (do número), abrir não apaga nada.
+    assert await _visto_em(db, conversa) is None
+    assert await _numero(db, conversa) == 2
 
 
 async def test_envio_desligado_recusa(db, dono, client, plataforma, _fase_de_observacao):
@@ -734,20 +781,20 @@ async def _visto_em(db, conversa: AtendimentoConversa | str) -> datetime | None:
 
 
 @pytest.mark.parametrize("modo", ["observar", "auto", "copiloto", "humano"])
-async def test_visto_grava_em_qualquer_modo_sem_ir_a_plataforma(db, dono, client, plataforma, modo):
-    """Quem mexe abriu a conversa: o /visto grava `visto_em` em qualquer modo de
-    loja — inclusive OBSERVAR (o Duoke responde) — e nada vai à plataforma: o
-    não lido dela (e do Duoke) fica como está."""
+async def test_visto_no_numero_nao_apaga_em_modo_nenhum_e_nao_vai_a_plataforma(
+    db, dono, client, plataforma, modo
+):
+    """16/11/2026: no chat (do número), o /visto responde 200 em qualquer modo de
+    loja — a aba antiga ainda chama — mas não grava `visto_em`: o número da
+    conversa fica. Nada vai à plataforma: o não lido dela (e do Duoke) fica."""
     integ, canal = await _loja(db, dono, "shopee", "chat", modo)
     conversa = await _conversa(db, integ, canal)
-    antes = datetime.now(UTC) - timedelta(seconds=1)
     r = await _visto(client, conversa)
     assert r.status_code == 200, r.text
-    visto = await _visto_em(db, conversa)
-    assert visto is not None and visto >= antes
+    assert await _visto_em(db, conversa) is None
     corpo = r.json()
-    assert corpo["visto_em"] and corpo["conversa"]["visto_em"]
-    assert datetime.fromisoformat(corpo["visto_em"]) == visto
+    assert corpo["visto_em"] is None and corpo["conversa"]["visto_em"] is None
+    assert corpo["conversa"]["numero_duoke"] == 2 and await _numero(db, conversa) == 2
     assert plataforma.chamadas == [] and plataforma.montados == []
     assert await _nao_lidas(db, conversa) == 3
 
@@ -755,17 +802,22 @@ async def test_visto_grava_em_qualquer_modo_sem_ir_a_plataforma(db, dono, client
 async def test_visto_com_envio_desligado_e_canal_sem_lida(
     db, dono, client, plataforma, _fase_de_observacao
 ):
-    """O visto não depende do envio nem do "marcar como lida" da plataforma."""
+    """O visto não depende do envio nem do "marcar como lida" da plataforma. Desde
+    16/11/2026 só fora do número: a pergunta do ML grava; o chat e a Amazon (do
+    número) respondem 200 sem gravar."""
     _fase_de_observacao.atendimento_envio_ativo = False
     integ, canal = await _loja(db, dono, "shopee", "chat", "auto")
     conversa = await _conversa(db, integ, canal)
     assert (await _visto(client, conversa)).status_code == 200
-    assert await _visto_em(db, conversa) is not None
-    for plat, canal_nome, externo in (("ml", "pergunta", "q:9"), ("amazon", "email", "<v@a.com>")):
+    assert await _visto_em(db, conversa) is None
+    for plat, canal_nome, externo, grava in (
+        ("ml", "pergunta", "q:9", True),
+        ("amazon", "email", "<v@a.com>", False),
+    ):
         integ_x, canal_x = await _loja(db, dono, plat, canal_nome, "observar")
         outra = await _conversa(db, integ_x, canal_x, externo)
         assert (await _visto(client, outra)).status_code == 200, plat
-        assert await _visto_em(db, outra) is not None, plat
+        assert (await _visto_em(db, outra) is not None) is grava, plat
     # O Direct do Instagram não é conversa da Caixa; o que não existe, 404.
     r = await _visto(client, "ig:00000000-0000-0000-0000-000000000000")
     assert r.status_code == 409 and r.json()["detail"]["code"] == lida.RECUSA_NAO_SE_APLICA
@@ -773,47 +825,171 @@ async def test_visto_com_envio_desligado_e_canal_sem_lida(
     assert plataforma.chamadas == [] and plataforma.montados == []
 
 
-async def test_lida_em_auto_marca_na_plataforma_e_grava_o_visto(db, dono, client, plataforma):
+async def test_lida_em_auto_marca_na_plataforma_e_nao_grava_o_visto(db, dono, client, plataforma):
+    """16/11/2026: o /lida continua marcando como lida NA PLATAFORMA, mas no chat
+    (do número) não grava o visto — o número fica."""
     integ, canal = await _loja(db, dono, "shopee", "chat", "auto")
     conversa = await _conversa(db, integ, canal)
     r = await _marcar(client, conversa)
     assert r.status_code == 200 and r.json()["marcada"] is True
     assert plataforma.chamadas == [("shopee", "2441045667828072817", "7000000000000000002")]
     assert await _nao_lidas(db, conversa) == 0
-    assert await _visto_em(db, conversa) is not None
-    assert r.json()["conversa"]["visto_em"] is not None
+    assert await _visto_em(db, conversa) is None
+    assert r.json()["conversa"]["visto_em"] is None
+    assert r.json()["conversa"]["numero_duoke"] == 2
 
 
-async def test_lida_com_a_plataforma_falhando_grava_o_visto(db, dono, client, plataforma):
-    """A pessoa abriu: o visto vale mesmo que a plataforma recuse (a conversa
-    continua não lida lá e no Duoke)."""
+async def test_lida_com_a_plataforma_falhando_nao_grava_o_visto(db, dono, client, plataforma):
+    """A plataforma recusou: a conversa continua não lida lá e no Duoke — e, desde
+    16/11/2026, o visto do chat não é gravado (antes valia mesmo assim)."""
     plataforma.falha = RuntimeError("shopee_chat_lida error_param: x")
     integ, canal = await _loja(db, dono)
     conversa = await _conversa(db, integ, canal)
     r = await _marcar(client, conversa)
     assert r.status_code == 200 and r.json()["marcada"] is False
     assert await _nao_lidas(db, conversa) == 3
-    assert await _visto_em(db, conversa) is not None
-    assert r.json()["conversa"]["visto_em"] is not None
+    assert await _visto_em(db, conversa) is None
+    assert r.json()["conversa"]["visto_em"] is None
 
 
-async def test_quem_so_le_grava_o_visto_sem_ir_a_plataforma(
+async def test_quem_so_le_abre_sem_apagar_o_numero_e_le_o_email(
     db, make_user, auth_as, client, plataforma
 ):
     """28/10/2026, o Eduardo: "as notificações devem sumir se clicado em algum
-    atendimento" — a equipe abre a conversa e o número dela apaga (o visto no
-    DaVinci, como no Duoke "por loja"). O /visto nunca vai à plataforma."""
+    atendimento" — o /visto de quem só lê também gravava. 16/11/2026: no chat
+    (do número) não apaga mais nada; no e-mail do site (fora do número), abrir
+    continua apagando. O /visto nunca vai à plataforma."""
     dono_loja = await make_user(email=DONO, role=UserRole.ADMIN)
     integ, canal = await _loja(db, dono_loja, "shopee", "chat", "observar")
     conversa = await _conversa(db, integ, canal)
+    email = await _email_do_site(db, integ)
     for leitor in (await make_user(), await make_user(role=UserRole.ADMIN)):
         auth_as(leitor)
         r = await _visto(client, conversa)
         assert r.status_code == 200, r.text
+        assert r.json()["visto_em"] is None
+        r = await _visto(client, email)
+        assert r.status_code == 200, r.text
         assert r.json()["visto_em"] is not None
-    assert await _visto_em(db, conversa) is not None
+    assert await _visto_em(db, conversa) is None and await _numero(db, conversa) == 2
+    assert await _visto_em(db, email) is not None
     assert await _nao_lidas(db, conversa) == 3, "o não lido da plataforma não muda"
     assert plataforma.chamadas == [] and plataforma.montados == []
+
+
+async def test_abrir_nao_apaga_o_numero_nas_conversas_do_numero(db, dono, client, plataforma):
+    """16/11/2026, o dono: "a notificacao agr so vai sair se responder no chat ou se
+    clicar em um botao n precisa de resposta q bota do lado do enviar msg ali".
+    Em toda conversa do número — o chat da Shopee e da TikTok, o pós-venda e a
+    reclamação do ML, a Amazon e o Zap — o /visto e o /lida (com o `ate` da
+    tela) não mexem no `visto_em` nem no `notificacoes_visto_em`, e o número
+    fica igual. O /lida continua marcando na plataforma. O e-mail do site
+    (fora do número) continua apagando ao abrir."""
+    from app.services.atendimento import canais_externos
+
+    casos: dict[str, tuple[AtendimentoConversa, tuple[str, ...]]] = {}
+    integ, canal = await _loja(db, dono, "shopee", "chat", "auto")
+    casos["shopee"] = (await _conversa(db, integ, canal), ("lida", "visto"))
+    integ_t, canal_t = await _loja(db, dono, "tiktok", "chat", "observar")
+    casos["tiktok"] = (await _conversa(db, integ_t, canal_t, "7494560109732334001"), ("visto",))
+    integ_ml, canal_ml = await _loja(db, dono, "ml", "pos_venda", "auto")
+    casos["ml_pos_venda"] = (
+        await _conversa(db, integ_ml, canal_ml, "2000012345678901"),
+        ("lida", "visto"),
+    )
+    integ_a, canal_a = await _loja(db, dono, "amazon", "email", "humano")
+    casos["amazon"] = (await _conversa(db, integ_a, canal_a, "<a1@amazon.com.br>"), ("visto",))
+    # A reclamação do ML: o mediador conta no número.
+    rml, _ = await gravar.upsert_conversa(
+        db,
+        canal=None,
+        integration=integ_ml,
+        plataforma="ml",
+        canal_nome="reclamacao",
+        externo_id="5593269721",
+        comprador_nome="Comprador",
+        situacao="bloqueada",
+        dados={"claim_id": "5593269721"},
+    )
+    for mid, minutos in (("rml:1", 30), ("rml:2", 20)):
+        await gravar.gravar_mensagem(
+            db,
+            rml,
+            externo_id=mid,
+            autor="mediador",
+            texto="mediador",
+            enviada_em=AGORA - timedelta(minutes=minutos),
+        )
+    casos["reclamacao_ml"] = (rml, ("visto",))
+    # O Zap (só admin vê; o dono é admin).
+    canal_z = AtendimentoCanal(
+        plataforma="whatsapp",
+        canal="zap",
+        externo_ref="zap:123456",
+        modo="humano",
+        status="ok",
+        cursor={canais_externos.CHAVE_CURSOR: {"nome": "Mini"}},
+    )
+    db.add(canal_z)
+    await db.flush()
+    zap_c, _ = await gravar.upsert_conversa(
+        db,
+        canal=canal_z,
+        integration=None,
+        plataforma="whatsapp",
+        canal_nome="zap",
+        externo_id="5511999990000",
+        comprador_id="5511999990000",
+    )
+    for mid, minutos in (("wamid.1", 30), ("wamid.2", 20)):
+        await gravar.gravar_mensagem(
+            db,
+            zap_c,
+            externo_id=mid,
+            autor="cliente",
+            texto="oi",
+            enviada_em=AGORA - timedelta(minutes=minutos),
+        )
+    await db.commit()
+    casos["zap"] = (zap_c, ("visto",))
+
+    for nome, (conversa, rotas) in casos.items():
+        cid = str(conversa.id)
+        antes = await _numero(db, cid)
+        assert antes == 2, nome
+        ate = await db.scalar(
+            select(func.max(AtendimentoMensagem.created_at)).where(
+                AtendimentoMensagem.conversa_id == cid
+            )
+        )
+        for rota_leitura in rotas:
+            for corpo in ({"ate": ate.isoformat()}, None):
+                r = await client.post(f"{URL}/conversas/{cid}/{rota_leitura}", json=corpo)
+                assert r.status_code == 200, (nome, rota_leitura, r.text)
+                assert r.json()["conversa"]["numero_duoke"] == antes, (nome, rota_leitura)
+        vistos = (
+            await db.execute(
+                select(
+                    AtendimentoConversa.visto_em, AtendimentoConversa.notificacoes_visto_em
+                ).where(AtendimentoConversa.id == cid)
+            )
+        ).one()
+        assert tuple(vistos) == (None, None), nome
+        assert await _numero(db, cid) == antes, nome
+    # O /lida continua marcando como lida NA PLATAFORMA (e zerando o não lido dela).
+    assert ("shopee", "2441045667828072817", "7000000000000000002") in plataforma.chamadas
+    assert ("ml", "2000012345678901", "999", 20, 5) in plataforma.chamadas
+    assert await _nao_lidas(db, casos["shopee"][0]) == 0
+    # Fora do número (o e-mail do site): abrir apaga, como antes.
+    email = await _email_do_site(db, integ)
+    ate = await db.scalar(
+        select(func.max(AtendimentoMensagem.created_at)).where(
+            AtendimentoMensagem.conversa_id == email.id
+        )
+    )
+    r = await _visto(client, email)
+    assert r.status_code == 200 and r.json()["visto_em"] is not None
+    assert await _visto_em(db, email) >= ate
 
 
 async def test_quem_nao_ve_a_caixa_nao_grava_o_visto(db, make_user, auth_as, client, plataforma):
@@ -831,8 +1007,9 @@ async def test_quem_nao_ve_a_caixa_nao_grava_o_visto(db, make_user, auth_as, cli
 
 
 async def test_visto_idempotente_nunca_volta_e_nao_mexe_no_updated_at(db, dono, client, plataforma):
-    integ, canal = await _loja(db, dono, "shopee", "chat", "observar")
-    conversa = await _conversa(db, integ, canal)
+    """Fora do número (o e-mail do site; desde 16/11/2026 o chat não grava)."""
+    integ, _ = await _loja(db, dono, "shopee", "chat", "observar")
+    conversa = await _email_do_site(db, integ)
     cid = str(conversa.id)
 
     async def atualizada():
@@ -862,9 +1039,10 @@ async def test_visto_guarda_ate_onde_a_tela_mostrou(db, dono, client, plataforma
     mensagem mais nova) e o POST devolve (`{"ate": ...}`): o visto fica nele —
     a mensagem que chegou depois (o sync atrasado, a transação que começou
     antes da abertura) continua contando. Nunca depois do relógio do banco;
-    sem corpo, o relógio do banco. O /lida também."""
+    sem corpo, o relógio do banco. O /lida também. Fora do número (o e-mail do
+    site): desde 16/11/2026 o chat não grava visto ao abrir."""
     integ, canal = await _loja(db, dono, "shopee", "chat", "observar")
-    conversa = await _conversa(db, integ, canal)
+    conversa = await _email_do_site(db, integ)
     cid = str(conversa.id)
     d = (await client.get(f"{URL}/conversas/{cid}")).json()
     chegadas = (
@@ -892,30 +1070,39 @@ async def test_visto_guarda_ate_onde_a_tela_mostrou(db, dono, client, plataforma
     r = await client.post(f"{URL}/conversas/{cid}/visto", json={"ate": velho})
     assert r.status_code == 200
     assert await _visto_em(db, cid) == gravado
-    # O /lida (loja em auto) também leva o `ate`.
-    integ2, canal2 = await _loja(db, dono, "shopee", "chat", "auto")
-    outra = await _conversa(db, integ2, canal2, "2441045667828079999")
+    # O /lida também leva o `ate`: grava o visto ANTES da plataforma — no
+    # e-mail ela recusa (409 `nao_se_aplica`), o visto fica.
+    outra = await _email_do_site(db, integ, "<sac-2@uranyx.com.br>")
     marco = AGORA - timedelta(minutes=25)
     r = await client.post(f"{URL}/conversas/{outra.id}/lida", json={"ate": marco.isoformat()})
-    assert r.status_code == 200 and r.json()["marcada"] is True
+    assert r.status_code == 409 and r.json()["detail"]["code"] == lida.RECUSA_NAO_SE_APLICA
     assert await _visto_em(db, outra) == marco
+    # No chat (do número), o /lida com o `ate` marca na plataforma e não grava.
+    integ2, canal2 = await _loja(db, dono, "shopee", "chat", "auto")
+    chat = await _conversa(db, integ2, canal2, "2441045667828079999")
+    r = await client.post(f"{URL}/conversas/{chat.id}/lida", json={"ate": marco.isoformat()})
+    assert r.status_code == 200 and r.json()["marcada"] is True
+    assert await _visto_em(db, chat) is None
     # `ate` que não é data: 422, nada gravado.
-    terceira = await _conversa(db, integ, canal, "2441045667828078888")
+    terceira = await _email_do_site(db, integ, "<sac-3@uranyx.com.br>")
     r = await client.post(f"{URL}/conversas/{terceira.id}/visto", json={"ate": "ontem"})
     assert r.status_code == 422
     assert await _visto_em(db, terceira) is None
 
 
 @pytest.mark.parametrize("modo,rota_leitura", [("observar", "visto"), ("auto", "lida")])
-async def test_rota_confirma_geracao_nativa_sem_consumir_seed_por_cliente_antigo(
+async def test_abrir_nao_consome_o_seed_nativo_nem_com_a_epoch_certa(
     db, dono, client, plataforma, modo, rota_leitura
 ):
+    """Até 15/11/2026 o /visto e o /lida com o `snapshot_id` certo consumiam o seed
+    importado do Duoke (o `notificacoes_visto_em`). Desde 16/11/2026 abrir não
+    apaga nada no chat: com qualquer epoch, o número e os dois vistos ficam."""
     integ, canal = await _loja(db, dono, "shopee", "chat", modo)
     conversa = await _conversa(db, integ, canal)
     cid = str(conversa.id)
-    # Já foi vista no controle legado. A importação preserva esse marco.
-    assert (await _visto(client, cid)).status_code == 200
-    legacy_visto = await _visto_em(db, cid)
+    # Já foi vista no controle legado (antes de 16/11/2026). A importação preserva.
+    legacy_visto = AGORA - timedelta(hours=2)
+    conversa.visto_em = legacy_visto
     snapshot_id = str(uuid4())
     conversa.notificacoes_corte_em = AGORA - timedelta(minutes=1)
     conversa.notificacoes_iniciais = {
@@ -946,12 +1133,11 @@ async def test_rota_confirma_geracao_nativa_sem_consumir_seed_por_cliente_antigo
     )
     assert resposta.status_code == 200, resposta.text
     atual = resposta.json()["conversa"]
-    assert atual["numero_duoke"] == 0
+    assert atual["numero_duoke"] == 2
     assert atual["aguardando_resposta"] is True
-    assert datetime.fromisoformat(atual["notificacoes_visto_em"]) == datetime.fromisoformat(
-        detalhe["visto_ate"]
-    )
-    assert await _visto_em(db, cid) >= legacy_visto
+    assert atual["notificacoes_visto_em"] is None
+    assert await _visto_em(db, cid) == legacy_visto
+    assert await _numero(db, cid) == 2
 
 
 def test_visto_ate_e_a_chegada_mais_nova():
@@ -981,12 +1167,18 @@ async def test_sem_pessoa_o_servico_recusa(db, make_user, plataforma):
         await lida.marcar_como_lida(db, conversa, user=operador)
     assert await lida.marcar_ao_abrir(db, conversa, None) is False
     leitor = await make_user()
-    # Ninguém (a IA, os crons) nunca grava o visto; quem só lê grava (28/10/2026).
+    # Ninguém (a IA, os crons) nunca grava o visto; quem só lê grava (28/10/2026)
+    # — desde 16/11/2026 só fora do número (o e-mail do site); no chat, nada.
     with pytest.raises(lida.LidaRecusada) as e:
         await lida.gravar_visto(db, conversa, None)
     assert e.value.code == lida.RECUSA_SO_LEITURA
     assert await _visto_em(db, conversa) is None
-    assert await lida.gravar_visto(db, conversa, leitor) is not None
+    assert await lida.gravar_visto(db, conversa, leitor) is None
+    assert await _visto_em(db, conversa) is None
+    email = await _email_do_site(db, integ)
+    with pytest.raises(lida.LidaRecusada):
+        await lida.gravar_visto(db, email, None)
+    assert await lida.gravar_visto(db, email, leitor) is not None
     assert plataforma.chamadas == []
     assert await _nao_lidas(db, conversa) == 3
 

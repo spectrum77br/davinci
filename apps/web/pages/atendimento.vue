@@ -476,10 +476,13 @@ async function carregarMais(confirmando = false) {
 // dela na lista acompanha sem esperar o próximo tique. Se mudou o que os
 // contadores contam (aguardando, o "Falta responder" igual ao Duoke — o
 // `falta_responder` da linha —, "a conferir", as não lidas do número do
-// Duoke — marcou como lida ao abrir —, o "visto no DaVinci" — abriu a
-// conversa, o número dela zera, 15/10/2026 — ou o número da conversa — a
+// Duoke — marcou como lida ao abrir —, o "visto no DaVinci" — fora do
+// número, abriu a conversa, 15/10/2026 — ou o número da conversa — a
 // bolinha da linha; o da loja acompanha), o resumo também é relido —
 // senão o "A conferir (1)" ficava lá até 30 s depois de a pessoa marcar.
+// 16/11/2026: na conversa do número abrir não zera mais; quem zera é a
+// resposta ou o "Não precisa de resposta" (o PATCH da conversa, que chega
+// aqui com o `numero_duoke` novo).
 function aoMudarConversa(c: ConversaResumo) {
   // A conversa de e-mail que chegou à Caixa pelo id (um link antigo, o alerta,
   // o "abrir na aba E-mail" do painel do chat): ela mora na aba E-mail

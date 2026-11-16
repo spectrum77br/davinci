@@ -22,29 +22,52 @@
 //
 // VISTO NO DAVINCI (15/10/2026, o dono: os números da Caixa batem com o
 // Duoke — e lá abrir a conversa zera o número dela): o MESMO gatilho (1,5 s
-// aberta, aba visível, uma vez por abertura) grava `visto_em` para quem mexe,
-// em QUALQUER modo de loja (inclusive Observar) e sem ir à plataforma. UMA
-// chamada por abertura (`rotaAoAbrir`): o /lida quando o detalhe diz
-// `marcar_lida` (ele grava o visto e marca na plataforma) e, senão, o
+// aberta, aba visível, uma vez por abertura) grava `visto_em` em qualquer
+// modo de loja (inclusive Observar) e sem ir à plataforma — desde 16/11/2026,
+// só FORA do número (abaixo). UMA chamada por abertura (`rotaAoAbrir`): o
+// /lida quando o detalhe diz `marcar_lida` (marca na plataforma) e, senão, o
 // POST /api/atendimento/conversas/{id}/visto (só o visto). Quem só lê chama
-// só o /visto (28/10/2026: abrir apaga a notificação para todos, como no
-// Duoke "por loja"); o Direct do Instagram (`ig:`) não é conversa da Caixa.
+// só o /visto (28/10/2026: abrir apagava a notificação para todos — desde
+// 16/11/2026, só fora do número); o Direct do Instagram (`ig:`) não é
+// conversa da Caixa.
 // O POST leva `{ ate }` = o `visto_ate` do detalhe que a tela mostrava (a
 // chegada da mensagem mais nova): o servidor compara o visto com a CHEGADA da
 // mensagem — a que o sync trouxe depois (a pessoa não viu) continua contando.
-// COM A CONVERSA ABERTA (15/10/2026, a revisão — no Duoke, a conversa aberta
-// fica lida): depois da abertura, cada releitura que traz mensagem nova (o
-// `visto_ate` andou), com a aba visível, chama o /visto de novo (`rever`; só
-// o /visto, barato — o /lida continua uma vez por abertura). Falhou, a
-// próxima releitura tenta de novo.
+// COM A CONVERSA ABERTA (15/10/2026, a revisão): depois da abertura, cada
+// releitura que traz mensagem nova (o `visto_ate` andou), com a aba visível,
+// chama o /visto de novo (`rever`; só o /visto — o /lida continua uma vez por
+// abertura). Falhou, a próxima releitura tenta de novo.
+//
+// ABRIR NÃO APAGA MAIS A NOTIFICAÇÃO DO NÚMERO (16/11/2026) — o dono: "a
+// notificacao agr so vai sair se responder no chat ou se clicar em um botao n
+// precisa de resposta q bota do lado do enviar msg ali". Na conversa do NÚMERO
+// da Caixa (`doNumero`: o servidor manda `numero_duoke` como número — o chat,
+// o pós-venda e a reclamação do ML, a Amazon, a Magalu, a Temu, o
+// AliExpress, o Zap) a abertura NÃO grava o visto: nem o /visto ao abrir, nem
+// o `rever` com a conversa aberta. A bolinha só sai com a resposta no chat (a
+// de pessoa pelo DaVinci, a de fora que o sync traz, a da IA que saiu
+// sozinha) ou com o "Não precisa de resposta" do lado do Enviar
+// (AtendimentoConversa; o PATCH com `sem_resposta_necessaria`). O /lida
+// continua indo ao abrir, mas só marca na PLATAFORMA (o servidor não grava o
+// visto do número). Continuam como estão: o "Zerar não lidas" em lote, fechar
+// a conversa, a janela de 7 dias e, fora do número, o e-mail do site e a
+// pergunta do ML — nelas abrir ainda grava o visto, como antes.
 
 export const ATRASO_MARCAR_LIDA_MS = 1500
 
 export type DetalheParaLida = {
-  conversa: { id: string; nao_lidas?: number | null; canal?: string | null }
+  // `numero_duoke` (16/11/2026): número só nas conversas do número da Caixa;
+  // null (ou ausente) fora dele — o e-mail, a pergunta do ML, a avaliação.
+  conversa: { id: string; nao_lidas?: number | null; canal?: string | null; numero_duoke?: number | null }
   marcar_lida?: boolean
   // Até onde a tela mostra (15/10/2026): vai no POST como `ate`.
   visto_ate?: string | null
+}
+
+/** A conversa é do NÚMERO da Caixa (a bolinha que soma na loja)? O servidor
+ *  manda o `numero_duoke` como número só nelas (`pendente.do_numero`). */
+export function doNumero(d: { conversa?: { numero_duoke?: number | null } | null } | null | undefined): boolean {
+  return typeof d?.conversa?.numero_duoke === 'number'
 }
 
 /** A tela deve marcar esta conversa como lida (depois do atraso)? */
@@ -60,19 +83,78 @@ export function querMarcarLida(d: DetalheParaLida | null | undefined, podeMexer:
 }
 
 /** A tela grava o "visto no DaVinci" ao abrir esta conversa (15/10/2026)?
- *  Quem só lê também (28/10/2026, o Eduardo: "as notificações devem sumir se
- *  clicado em algum atendimento") — só o /visto; o /lida continua de quem mexe. */
+ *  Quem só lê também (28/10/2026) — só o /visto; o /lida continua de quem mexe.
+ *  Nunca na conversa do número (16/11/2026: abrir não apaga a notificação dela)
+ *  nem no Direct. */
 export function querMarcarVisto(d: DetalheParaLida | null | undefined): boolean {
   const id = d?.conversa?.id
-  return !!id && !id.startsWith('ig:')
+  return !!id && !id.startsWith('ig:') && !doNumero(d)
 }
 
-/** Qual rota a abertura chama: o /lida (visto + plataforma), o /visto (só o visto) ou nenhuma. */
+/** Qual rota a abertura chama: o /lida (marca na plataforma), o /visto (só o
+ *  visto) ou nenhuma. Na conversa do número (16/11/2026): o /lida ou nenhuma —
+ *  e o /lida dela só marca na plataforma (o servidor não grava o visto). */
 export function rotaAoAbrir(d: DetalheParaLida | null | undefined, podeMexer: boolean): 'lida' | 'visto' | null {
   if (querMarcarLida(d, podeMexer)) return 'lida'
   if (querMarcarVisto(d)) return 'visto'
   return null
 }
+
+// ─── "Não precisa de resposta" do lado do Enviar (16/11/2026) ───────────────
+// A outra saída da bolinha (a primeira é responder). A regra e o corpo do
+// PATCH /api/atendimento/conversas/{id} moram aqui; o botão, no rodapé do
+// AtendimentoConversa (e embaixo do painel "O que a IA responderia", onde não
+// há Enviar).
+
+export type ConversaParaNaoPrecisa = {
+  numero_duoke?: number | null
+  situacao?: string | null
+  falta_responder?: boolean | null
+  aguardando_resposta?: boolean | null
+  sem_resposta_necessaria?: boolean | null
+  somente_leitura?: boolean | null
+  plataforma?: string | null
+  canal?: string | null
+}
+
+/** O botão aparece nesta conversa? Só para quem responde (`podeMexer`), fora do
+ *  Direct (só leitura), do e-mail e da aba que responde por OUTRA conversa; só na
+ *  conversa do número que não está fechada e que tem o que tirar (a bolinha, o
+ *  "Falta responder", a vez da loja) — ou que já está marcada (vira "Precisa de
+ *  resposta", o desfazer). Vale com a caixa travada (bloqueada, reclamação sem
+ *  destino): ali é a única saída além de fechar. */
+export function mostraNaoPrecisa(
+  c: ConversaParaNaoPrecisa | null | undefined,
+  o: { podeMexer: boolean; respondePorOutra?: boolean; ehEmail?: boolean },
+): boolean {
+  if (!c || !o.podeMexer || c.somente_leitura || o.respondePorOutra || o.ehEmail) return false
+  if (typeof c.numero_duoke !== 'number' || c.situacao === 'fechada') return false
+  return c.numero_duoke > 0 || c.falta_responder === true || c.aguardando_resposta === true || c.sem_resposta_necessaria === true
+}
+
+/** O corpo do PATCH. Marcar leva `ate` = o `visto_ate` do detalhe que a tela
+ *  mostrava: chegou mensagem do comprador depois dele, o servidor recusa (409
+ *  `chegou_mensagem`). Sem `visto_ate`, vai sem ele. Desfazer: só o `false` (a
+ *  bolinha volta). */
+export function corpoNaoPrecisa(marcar: boolean, ate?: string | null): { sem_resposta_necessaria: boolean; ate?: string } {
+  if (!marcar) return { sem_resposta_necessaria: false }
+  return ate ? { sem_resposta_necessaria: true, ate } : { sem_resposta_necessaria: true }
+}
+
+// O 409 do PATCH quando chegou mensagem depois do `ate`: a tela mostra a frase
+// do servidor e relê a conversa (a mensagem nova aparece).
+export const CODIGO_CHEGOU_MENSAGEM = 'chegou_mensagem'
+
+/** A reclamação do ML (no número): marcar tira a bolinha, mas o prazo do ML
+ *  continua correndo — pede confirmação. No chat, nenhuma (desfaz com "Precisa
+ *  de resposta"). */
+export function perguntaNaoPrecisa(c: ConversaParaNaoPrecisa | null | undefined): string | null {
+  if (c?.plataforma !== 'ml' || c?.canal !== 'reclamacao') return null
+  return 'Marcar a reclamação como "não precisa de resposta"?\n\nA notificação sai daqui, mas o prazo do Mercado Livre continua correndo: se o comprador ou o mediador esperam a loja, responda pela reclamação.'
+}
+
+// O title do botão (16/11/2026): o que ele faz e quando a notificação volta.
+export const TITULO_NAO_PRECISA = 'Tira a notificação sem responder; volta sozinha se o cliente escrever de novo'
 
 export type RelogioLida = {
   agendar: (fn: () => void, ms: number) => unknown
@@ -88,7 +170,8 @@ export type OpcoesMarcadorLida = {
   // O POST /lida ou /visto (quem chama escolhe a rota e trata a resposta).
   marcar: (id: string) => Promise<unknown>
   // Com a conversa aberta, a releitura trouxe mensagem nova: o POST /visto de
-  // novo (15/10/2026). Sem ele, só a abertura grava.
+  // novo (15/10/2026). Sem ele, só a abertura grava. Quem chama decide se
+  // grava: na conversa do número, nada (16/11/2026, `querMarcarVisto`).
   rever?: (id: string) => Promise<unknown>
   // A conversa aberta AGORA (a prop): a de quando o relógio dispara tem de ser a mesma.
   atual: () => string | null

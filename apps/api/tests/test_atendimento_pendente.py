@@ -43,7 +43,14 @@ e o "Pendente" do Duoke, 15. O que não pode falhar
     DaVinci (`visto_em`) — o robô não zera, a pessoa e o "visto" zeram, o
     não lido da plataforma não entra, fechada/sem fila/fora do chat não
     contam; Python e SQL gêmeos; o /resumo soma por loja e plataforma, e
-    abrir a conversa (POST /visto) zera o número dela.
+    abrir a conversa (POST /visto) zerava o número dela;
+  • ABRIR NÃO APAGA MAIS (16/11/2026, o dono: "a notificacao agr so vai sair
+    se responder no chat ou se clicar em um botao n precisa de resposta q bota
+    do lado do enviar msg ali"): abrir não zera; o "Não precisa de resposta"
+    zera e, quando o comprador escreve de novo, conta SÓ a fala nova (o corte
+    `processado_ate`, Python e SQL); "Precisa de resposta" devolve a bolinha
+    inteira; fechar e reabrir pela fala nova também conta só a nova; a fala
+    que chegou depois do que a tela mostrava recusa o "Não precisa" (409).
 """
 
 from __future__ import annotations
@@ -887,15 +894,15 @@ async def test_resumo_conta_o_numero_do_duoke_so_no_chat(client, db, make_user, 
     assert r["humano"] == sum(p["humano"] for p in r["plataformas"]) == 0
 
 
-async def test_abrir_no_davinci_zera_o_numero_da_conversa(
+async def test_abrir_no_davinci_nao_zera_o_numero_da_conversa(
     client, db, make_user, auth_as, monkeypatch
 ):
-    """Como no Duoke: a pessoa que mexe abre a conversa (POST /visto, a loja em
-    Observar, com o `visto_ate` do detalhe) e o número dela zera no /resumo e
-    na linha; o que CHEGOU depois conta — a mensagem que o comprador mandou
-    antes de abrir e o sync trouxe depois (a revisão de 15/10/2026: sumia), e a
-    que chegou entre a leitura do detalhe e o POST (a tela não mostrou). O robô
-    depois disso não zera nada."""
+    """16/11/2026, o dono: "a notificacao agr so vai sair se responder no chat ou
+    se clicar em um botao n precisa de resposta q bota do lado do enviar msg
+    ali". Até 15/11/2026 abrir (POST /visto) zerava o número, como no Duoke.
+    Agora a pessoa que mexe abre a conversa (com o `visto_ate` do detalhe) e o
+    número dela fica no /resumo e na linha; o que chega depois soma. O robô não
+    zera nada; a resposta de PESSOA zera."""
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", "quem.mexe@davinci-test.com")
     integ, canal = await _loja(db, await make_user(), "kia")
     conversa = await _cena(db, integ, canal, "kia:9", *[("cliente", 90 - i) for i in range(9)])
@@ -913,7 +920,9 @@ async def test_abrir_no_davinci_zera_o_numero_da_conversa(
         (item,) = [i for i in itens if i["id"] == cid]
         return item["numero_duoke"]
 
-    async def chega(externo: str, autor: str = "cliente", segundos: int = 0) -> None:
+    async def chega(
+        externo: str, autor: str = "cliente", segundos: int = 0, texto: str | None = None
+    ) -> None:
         """O sync grava uma mensagem mandada há `segundos` (a transação começa agora)."""
         await db.commit()
         await gravar.gravar_mensagem(
@@ -921,7 +930,7 @@ async def test_abrir_no_davinci_zera_o_numero_da_conversa(
             conversa,
             externo_id=externo,
             autor=autor,
-            texto=MENU_DUOKE if autor == "loja" else "oi?",
+            texto=texto or (MENU_DUOKE if autor == "loja" else "oi?"),
             enviada_em=datetime.now(UTC) - timedelta(seconds=segundos),
         )
         await db.commit()
@@ -932,22 +941,26 @@ async def test_abrir_no_davinci_zera_o_numero_da_conversa(
     assert d["conversa"]["numero_duoke"] == 9 and d["visto_ate"]
     r = await client.post(f"{URL}/conversas/{cid}/visto", json={"ate": d["visto_ate"]})
     assert r.status_code == 200, r.text
-    assert r.json()["visto_em"] and r.json()["conversa"]["numero_duoke"] == 0
-    assert await numero() == 0 and await linha() == 0
-    # Mandada 60 s ANTES de abrir, trazida pelo sync DEPOIS: a pessoa não viu.
+    assert r.json()["visto_em"] is None and r.json()["conversa"]["numero_duoke"] == 9
+    assert await numero() == 9 and await linha() == 9
+    # A tela antiga (sem corpo) também não apaga.
+    assert (await client.post(f"{URL}/conversas/{cid}/visto")).status_code == 200
+    assert await numero() == 9
+    # Mandada 60 s ANTES de abrir, trazida pelo sync DEPOIS: soma.
     await chega("kia:9:atrasada", segundos=60)
-    assert await numero() == 1 and await linha() == 1
-    # A releitura do detalhe mostra a atrasada (`visto_ate` andou); antes do
-    # POST, chega mais uma: a tela não a mostrou — continua contando.
+    assert await numero() == 10 and await linha() == 10
+    # Com a conversa aberta, a tela relê e chama o /visto de novo: nada muda.
     d2 = (await client.get(f"{URL}/conversas/{cid}")).json()
     assert datetime.fromisoformat(d2["visto_ate"]) > datetime.fromisoformat(d["visto_ate"])
-    await chega("kia:9:corrida")
     r = await client.post(f"{URL}/conversas/{cid}/visto", json={"ate": d2["visto_ate"]})
     assert r.status_code == 200
-    assert await numero() == 1 and await linha() == 1
+    assert await numero() == 10 and await linha() == 10
     # O robô respondeu: não zera.
     await chega("kia:9:menu", autor="loja")
-    assert await numero() == 1
+    assert await numero() == 10
+    # A PESSOA respondeu (pelo Duoke; o sync traz): zera.
+    await chega("kia:9:resposta", autor="loja", texto="Oi! Já vou ver o seu pedido.")
+    assert await numero() == 0 and await linha() == 0
 
 
 async def test_a_linha_mostra_o_numero_da_conversa(client, db, make_user, auth_as, monkeypatch):
@@ -955,8 +968,9 @@ async def test_a_linha_mostra_o_numero_da_conversa(client, db, make_user, auth_a
     mensagem na kia e nem mostra dessa conversa"): a mesma régua do número da
     loja, com ou sem a marca do "Falta responder" — a soma das linhas de uma
     loja é o número dela. A conversa com o robô por último (fora do "Falta
-    responder") mostra o número; a aberta no DaVinci fica marcada, sem número.
-    Fora do chat, a linha não tem número (None: a bolinha de antes)."""
+    responder") mostra o número; a aberta no DaVinci continua com ele (16/11/2026:
+    abrir não apaga) e sai com o "Não precisa de resposta". Fora do chat, a
+    linha não tem número (None: a bolinha de antes)."""
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", "quem.mexe@davinci-test.com")
     integ, canal = await _loja(db, await make_user(), "kia")
     robo = await _cena(
@@ -1004,19 +1018,340 @@ async def test_a_linha_mostra_o_numero_da_conversa(client, db, make_user, auth_a
     assert linha_pergunta["numero_duoke"] is None
     assert linha_pergunta["falta_responder"] is True and linha_pergunta["pendentes"] == 1
     assert n == sum(i["numero_duoke"] or 0 for i in itens.values())
-    # Abriu a conversa: o número dela zera na loja e na linha; a marca fica.
+    # Abriu a conversa (16/11/2026): o número dela fica na loja e na linha.
     r = await client.post(f"{URL}/conversas/{aberta.id}/visto")
     assert r.status_code == 200
     n, itens = await ver()
+    assert n == 6
+    assert itens[str(aberta.id)]["numero_duoke"] == 3
+    assert itens[str(aberta.id)]["falta_responder"] is True
+    # O "Não precisa de resposta": zera na loja e na linha, e sai do "Falta responder".
+    d = (await client.get(f"{URL}/conversas/{aberta.id}")).json()
+    r = await client.patch(
+        f"{URL}/conversas/{aberta.id}",
+        json={"sem_resposta_necessaria": True, "ate": d["visto_ate"]},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["conversa"]["numero_duoke"] == 0
+    n, itens = await ver()
     assert n == 3
     assert itens[str(aberta.id)]["numero_duoke"] == 0
-    assert itens[str(aberta.id)]["falta_responder"] is True, "o negrito é do Falta responder"
+    assert itens[str(aberta.id)]["falta_responder"] is False
     assert n == sum(i["numero_duoke"] or 0 for i in itens.values())
     # O detalhe e a resposta das ações levam o mesmo número.
     d = (await client.get(f"{URL}/conversas/{robo.id}")).json()
     assert d["conversa"]["numero_duoke"] == 3
     d = (await client.get(f"{URL}/conversas/{avaliacao.id}")).json()
     assert d["conversa"]["numero_duoke"] is None
+
+
+# ─────────────── "Não precisa de resposta" e o corte (16/11/2026) ───────────────
+#
+# O dono: "a notificacao agr so vai sair se responder no chat ou se clicar em
+# um botao n precisa de resposta q bota do lado do enviar msg ali". Abrir não
+# apaga mais; o "Não precisa" e o "Fechar" guardam o corte `processado_ate`
+# (o `ate` da tela), que só vale quando a fala nova reabre.
+
+QUEM_MEXE = "quem.mexe@davinci-test.com"
+
+
+async def _numero_py_sql(db, conversa) -> tuple[int, int]:
+    """O número da conversa: (régua em Python, gêmea em SQL), com as do banco."""
+    await db.refresh(conversa)
+    msgs = await _mensagens_de(db, conversa)
+    sql = await db.scalar(
+        select(pendente.nao_lidas_duoke_sql()).where(AtendimentoConversa.id == conversa.id)
+    )
+    return pendente.nao_lidas_duoke(conversa, msgs), int(sql)
+
+
+async def _fala(db, conversa, externo: str, autor: str = "cliente", **campos) -> None:
+    """O sync grava uma fala NOVA agora (a transação começa agora)."""
+    await db.commit()
+    await gravar.gravar_mensagem(
+        db,
+        conversa,
+        externo_id=externo,
+        autor=autor,
+        texto=campos.pop("texto", "e aí?"),
+        enviada_em=datetime.now(UTC),
+        **campos,
+    )
+    await db.commit()
+
+
+async def _quem_mexe(db, make_user, auth_as, monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "atendimento_usuarios", QUEM_MEXE)
+    auth_as(await make_user(email=QUEM_MEXE, role=UserRole.ADMIN))
+
+
+async def _visto_ate(client, conversa) -> str:
+    d = (await client.get(f"{URL}/conversas/{conversa.id}")).json()
+    assert d["visto_ate"], d
+    return d["visto_ate"]
+
+
+def _corte(conversa) -> datetime | None:
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    return gravar._iso_utc(dados.get(gravar.CHAVE_PROCESSADO_ATE))
+
+
+async def test_nao_precisa_de_resposta_zera_e_so_a_fala_nova_volta(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """O PATCH "Não precisa de resposta" com o `ate` da tela zera o número (a
+    linha, a loja e o "Falta responder") e guarda o corte; quando o comprador
+    escreve de novo, a bolinha conta SÓ a fala nova — no Python e no SQL —, e
+    não as três que a pessoa já tinha dispensado."""
+    integ, canal = await _loja(db, await make_user(), "kia")
+    conversa = await _cena(
+        db, integ, canal, "kia:np", ("cliente", 30), ("cliente", 20), ("cliente", 10)
+    )
+    await _quem_mexe(db, make_user, auth_as, monkeypatch)
+    cid = str(conversa.id)
+    assert await _numero_py_sql(db, conversa) == (3, 3)
+    ate = await _visto_ate(client, conversa)
+    r = await client.patch(
+        f"{URL}/conversas/{cid}", json={"sem_resposta_necessaria": True, "ate": ate}
+    )
+    assert r.status_code == 200, r.text
+    corpo = r.json()["conversa"]
+    assert corpo["sem_resposta_necessaria"] is True
+    assert (corpo["numero_duoke"], corpo["falta_responder"]) == (0, False)
+    assert await _numero_py_sql(db, conversa) == (0, 0)
+    assert _corte(conversa) == datetime.fromisoformat(ate)
+    assert conversa.visto_em is None, "o corte só vale quando a fala nova reabre"
+    # A hora do clique (as Métricas contam como resposta), no relógio do banco.
+    clique = datetime.fromisoformat(conversa.dados[gravar.CHAVE_SEM_RESPOSTA_EM])
+    assert clique.tzinfo is not None and clique >= datetime.fromisoformat(ate)
+    itens = (await client.get(f"{URL}/conversas", params={"filtro": "aguardando"})).json()
+    assert cid not in {i["id"] for i in itens["itens"]}
+    # O comprador escreveu de novo: o "não precisa" sai e só a fala nova conta.
+    await _fala(db, conversa, "kia:np:nova")
+    assert await _numero_py_sql(db, conversa) == (1, 1)
+    assert conversa.sem_resposta_necessaria is False
+    assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
+    assert conversa.visto_em == datetime.fromisoformat(ate)
+    # A fala nova não apaga a hora do clique: as Métricas fecham ali a espera antiga.
+    assert conversa.dados[gravar.CHAVE_SEM_RESPOSTA_EM] == clique.isoformat()
+    d = (await client.get(f"{URL}/conversas/{cid}")).json()
+    assert (d["conversa"]["numero_duoke"], d["conversa"]["falta_responder"]) == (1, True)
+    await _fala(db, conversa, "kia:np:mais")
+    assert await _numero_py_sql(db, conversa) == (2, 2)
+    # Abrir (a tela nova não chama; a aba antiga, sim) não apaga.
+    assert (await client.post(f"{URL}/conversas/{cid}/visto")).status_code == 200
+    assert await _numero_py_sql(db, conversa) == (2, 2)
+
+
+async def test_precisa_de_resposta_desfaz_e_devolve_a_bolinha(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """O "Precisa de resposta" (o PATCH com `false`) apaga o corte: a bolinha volta
+    inteira, como era antes do clique — e, sem o corte, a fala nova soma em
+    cima dela."""
+    integ, canal = await _loja(db, await make_user(), "kia")
+    conversa = await _cena(
+        db, integ, canal, "kia:desfaz", ("cliente", 30), ("cliente", 20), ("cliente", 10)
+    )
+    await _quem_mexe(db, make_user, auth_as, monkeypatch)
+    url = f"{URL}/conversas/{conversa.id}"
+    ate = await _visto_ate(client, conversa)
+    r = await client.patch(url, json={"sem_resposta_necessaria": True, "ate": ate})
+    assert r.status_code == 200 and r.json()["conversa"]["numero_duoke"] == 0
+    r = await client.patch(url, json={"sem_resposta_necessaria": False})
+    assert r.status_code == 200, r.text
+    corpo = r.json()["conversa"]
+    assert corpo["sem_resposta_necessaria"] is False
+    assert (corpo["numero_duoke"], corpo["falta_responder"]) == (3, True)
+    assert await _numero_py_sql(db, conversa) == (3, 3)
+    assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
+    assert gravar.CHAVE_SEM_RESPOSTA_EM not in conversa.dados, "desfeito não é resposta"
+    assert conversa.visto_em is None
+    await _fala(db, conversa, "kia:desfaz:nova")
+    assert await _numero_py_sql(db, conversa) == (4, 4)
+    # Marcar de novo quando já está marcada não mexe no corte (nem recusa).
+    r = await client.patch(url, json={"sem_resposta_necessaria": True})
+    assert r.status_code == 200
+    await db.refresh(conversa)
+    primeiro = _corte(conversa)
+    r = await client.patch(url, json={"sem_resposta_necessaria": True, "ate": ate})
+    assert r.status_code == 200
+    await db.refresh(conversa)
+    assert _corte(conversa) == primeiro
+
+
+async def test_fechar_e_reabrir_pela_fala_nova_conta_so_a_nova(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """Fechar (decisão de 16/11/2026: continua apagando a notificação) guarda o
+    mesmo corte: a fala nova reabre a conversa e conta só ela. Reabrir à mão
+    apaga o corte: a bolinha volta como era antes de fechar. Sem o `ate` (a
+    tela antiga), o corte é a chegada da mensagem mais nova."""
+    integ, canal = await _loja(db, await make_user(), "kia")
+    conversa = await _cena(
+        db, integ, canal, "kia:fecha", ("cliente", 30), ("cliente", 20), ("cliente", 10)
+    )
+    await _quem_mexe(db, make_user, auth_as, monkeypatch)
+    url = f"{URL}/conversas/{conversa.id}"
+    ate = await _visto_ate(client, conversa)
+    r = await client.patch(url, json={"situacao": "fechada", "ate": ate})
+    assert r.status_code == 200, r.text
+    assert (r.json()["conversa"]["situacao"], r.json()["conversa"]["numero_duoke"]) == (
+        "fechada",
+        0,
+    )
+    assert await _numero_py_sql(db, conversa) == (0, 0)
+    assert _corte(conversa) == datetime.fromisoformat(ate)
+    await _fala(db, conversa, "kia:fecha:nova")
+    assert conversa.situacao == "aberta" and conversa.aguardando_resposta is True
+    assert await _numero_py_sql(db, conversa) == (1, 1)
+    assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
+    # Fecha de novo SEM o `ate`: o corte é a mensagem mais nova; reabrir à mão
+    # apaga o corte e a bolinha volta (1).
+    r = await client.patch(url, json={"situacao": "fechada"})
+    assert r.status_code == 200
+    await db.refresh(conversa)
+    mais_nova = max(m.created_at for m in await _mensagens_de(db, conversa))
+    assert _corte(conversa) == mais_nova
+    assert await _numero_py_sql(db, conversa) == (0, 0)
+    r = await client.patch(url, json={"situacao": "aberta"})
+    assert r.status_code == 200 and r.json()["conversa"]["numero_duoke"] == 1
+    assert await _numero_py_sql(db, conversa) == (1, 1)
+    assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
+
+
+async def test_nao_precisa_recusa_se_chegou_mensagem_que_a_tela_nao_mostrou(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """A trava de corrida: chegou fala que soma no número (o comprador, a
+    `sistema` dele) DEPOIS do `ate` que a tela mostrava → 409 `chegou_mensagem`
+    e nada muda (nem os outros campos do mesmo PATCH). O robô, o e-mail da
+    ponte e a tela antiga (sem `ate`) não recusam. Campo a mais é ignorado."""
+    integ, canal = await _loja(db, await make_user(), "kia")
+    conversa = await _cena(db, integ, canal, "kia:corrida", ("cliente", 30), ("cliente", 20))
+    conversa.comprador_id = "555"
+    await db.commit()
+    await _quem_mexe(db, make_user, auth_as, monkeypatch)
+    url = f"{URL}/conversas/{conversa.id}"
+    for externo, autor, payload in (
+        ("kia:corrida:nova", "cliente", None),
+        ("kia:corrida:faq", "sistema", {"message_type": "bundle_message", "from_id": 555}),
+    ):
+        ate = await _visto_ate(client, conversa)
+        await _fala(db, conversa, externo, autor=autor, payload=payload)
+        r = await client.patch(
+            url, json={"sem_resposta_necessaria": True, "ate": ate, "ia_pausada": True}
+        )
+        assert r.status_code == 409, (externo, r.text)
+        assert r.json()["detail"] == {
+            "code": "chegou_mensagem",
+            "detail": "Chegou mensagem nova do comprador que ainda não apareceu na tela. "
+            "Leia antes de marcar.",
+        }
+        await db.refresh(conversa)
+        assert conversa.sem_resposta_necessaria is False and conversa.ia_pausada is False
+        assert gravar.CHAVE_PROCESSADO_ATE not in conversa.dados
+    assert await _numero_py_sql(db, conversa) == (4, 4)
+    # Depois do que a tela mostrou, só o robô e o e-mail da ponte: marca.
+    ate = await _visto_ate(client, conversa)
+    await _fala(db, conversa, "kia:corrida:menu", autor="loja", texto=MENU_DUOKE)
+    await _nossa(db, conversa, 0, autor="cliente", origem="cliente", payload={"mail": {"id": "x"}})
+    r = await client.patch(
+        url,
+        json={"sem_resposta_necessaria": True, "ate": ate, "notificacoes_migracao_id": "x"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["conversa"]["numero_duoke"] == 0
+    # A tela antiga (sem `ate`) nunca recusa: o corte é a mensagem mais nova.
+    outra = await _cena(db, integ, canal, "kia:antiga", ("cliente", 30))
+    await _fala(db, outra, "kia:antiga:nova")
+    r = await client.patch(f"{URL}/conversas/{outra.id}", json={"sem_resposta_necessaria": True})
+    assert r.status_code == 200, r.text
+    await db.refresh(outra)
+    assert _corte(outra) == max(m.created_at for m in await _mensagens_de(db, outra))
+    # Fora do número (a avaliação): sem corte e sem trava.
+    vez = {CHAVE_VEZ_DA_LOJA: (AGORA - timedelta(minutes=60)).isoformat()}
+    avaliacao = await _cena(
+        db, integ, canal, "kia:av", ("cliente", 60), dados=vez, canal_nome="avaliacao"
+    )
+    ate = await _visto_ate(client, avaliacao)
+    await _fala(db, avaliacao, "kia:av:nova")
+    r = await client.patch(
+        f"{URL}/conversas/{avaliacao.id}", json={"sem_resposta_necessaria": True, "ate": ate}
+    )
+    assert r.status_code == 200, r.text
+    await db.refresh(avaliacao)
+    assert gravar.CHAVE_PROCESSADO_ATE not in avaliacao.dados
+
+
+async def test_mediador_novo_na_reclamacao_do_ml_desmarca_o_nao_precisa(
+    client, db, make_user, auth_as, monkeypatch
+):
+    """Na reclamação do ML o mediador conta no número, mas só a fala do `cliente`
+    desmarcava o "não precisa": depois do clique, a decisão do mediador sumia
+    para sempre. Desde 16/11/2026 a fala NOVA do mediador desliga o "não
+    precisa" (com o corte: conta só ela). A fechada continua fechada (só a fala
+    do comprador reabre); o mediador antigo chegando atrasado não mexe."""
+    integ, _ = await _loja(db, await make_user(), "injox")
+    reclamacao = {"plataforma": "ml", "canal_nome": "reclamacao", "situacao": "bloqueada"}
+    rml = await _cena(
+        db,
+        integ,
+        None,
+        "rml:np",
+        ("loja", 200),
+        ("mediador", 60),
+        ("mediador", 50),
+        **reclamacao,
+    )
+    await _quem_mexe(db, make_user, auth_as, monkeypatch)
+    assert await _numero_py_sql(db, rml) == (2, 2)
+    ate = await _visto_ate(client, rml)
+    r = await client.patch(
+        f"{URL}/conversas/{rml.id}", json={"sem_resposta_necessaria": True, "ate": ate}
+    )
+    assert r.status_code == 200, r.text
+    assert await _numero_py_sql(db, rml) == (0, 0)
+    # O mediador escreveu de novo (sem fala do comprador na conversa, toda fala
+    # nova do mediador passa na guarda).
+    await _fala(db, rml, "rml:np:mediador", autor="mediador", texto="Prazo de 2 dias.")
+    assert rml.sem_resposta_necessaria is False
+    assert rml.situacao == "bloqueada", "continua como estava"
+    assert await _numero_py_sql(db, rml) == (1, 1)
+    # A fechada com "não precisa": o mediador novo só desmarca; ela fica fechada.
+    fechada = await _cena(
+        db, integ, None, "rml:fechada", ("cliente", 90), ("mediador", 60), **reclamacao
+    )
+    ate = await _visto_ate(client, fechada)
+    url = f"{URL}/conversas/{fechada.id}"
+    assert (await client.patch(url, json={"situacao": "fechada", "ate": ate})).status_code == 200
+    r = await client.patch(url, json={"sem_resposta_necessaria": True, "ate": ate})
+    assert r.status_code == 200
+    await _fala(db, fechada, "rml:fechada:mediador", autor="mediador")
+    assert fechada.sem_resposta_necessaria is False and fechada.situacao == "fechada"
+    assert await _numero_py_sql(db, fechada) == (0, 0)
+    # O comprador escreve: reabre, e contam só as duas falas depois do clique.
+    await _fala(db, fechada, "rml:fechada:cliente")
+    assert fechada.situacao != "fechada"
+    assert await _numero_py_sql(db, fechada) == (2, 2)
+    # O mediador ANTIGO (mandado antes da última fala do comprador) chegando
+    # atrasado numa conversa marcada não desmarca.
+    r = await client.patch(
+        url, json={"sem_resposta_necessaria": True, "ate": await _visto_ate(client, fechada)}
+    )
+    assert r.status_code == 200
+    await db.commit()
+    await gravar.gravar_mensagem(
+        db,
+        fechada,
+        externo_id="rml:fechada:atrasado",
+        autor="mediador",
+        texto="mensagem antiga",
+        enviada_em=AGORA - timedelta(minutes=80),
+    )
+    await db.commit()
+    await db.refresh(fechada)
+    assert fechada.sem_resposta_necessaria is True
 
 
 # ─────────────── a reclamação do ML no número (15/10/2026) ───────────────
@@ -1275,7 +1610,8 @@ async def test_reclamacao_do_ml_na_bolinha_aparece_no_falta_responder_e_sai(
     """A reclamação do ML com mensagem nova do mediador está na bolinha da loja
     E no "Falta responder" (o `aguardando` do /resumo por loja e plataforma, o
     filtro e a marca da linha), com o canal e a etiqueta Reclamação. A loja
-    respondeu (pessoa), alguém viu no DaVinci ou fechou: sai dos dois juntos.
+    respondeu (pessoa), alguém marcou "Não precisa de resposta" ou fechou: sai
+    dos dois juntos. Abrir no DaVinci não tira mais (16/11/2026).
     O chat (o pack) segue a régua dele; a reclamação do ML sem bolinha (a vez
     da loja na fila) e a da Shopee/TikTok continuam fora."""
     monkeypatch.setattr(get_settings(), "atendimento_usuarios", "quem.mexe@davinci-test.com")
@@ -1382,10 +1718,20 @@ async def test_reclamacao_do_ml_na_bolinha_aparece_no_falta_responder_e_sai(
     assert falta == ids(vista, fechada, pack)
     assert todas[str(respondida.id)]["falta_responder"] is False
 
-    # Alguém abriu no DaVinci (POST /visto, a régua do visto): sai dos dois.
+    # Alguém abriu no DaVinci (POST /visto): desde 16/11/2026, fica nos dois.
     d = (await client.get(f"{URL}/conversas/{vista.id}")).json()
     assert d["conversa"]["numero_duoke"] == 1 and d["conversa"]["falta_responder"] is True
     r = await client.post(f"{URL}/conversas/{vista.id}/visto", json={"ate": d["visto_ate"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["conversa"]["numero_duoke"] == 1
+    assert r.json()["conversa"]["falta_responder"] is True
+    lojas, plats, falta, todas = await ver()
+    assert (lojas["ml"]["nao_lidas_duoke"], lojas["ml"]["aguardando"]) == (3, 3)
+    # "Não precisa de resposta" (o botão ao lado do Enviar): sai dos dois.
+    r = await client.patch(
+        f"{URL}/conversas/{vista.id}",
+        json={"sem_resposta_necessaria": True, "ate": d["visto_ate"]},
+    )
     assert r.status_code == 200, r.text
     assert r.json()["conversa"]["numero_duoke"] == 0
     assert r.json()["conversa"]["falta_responder"] is False

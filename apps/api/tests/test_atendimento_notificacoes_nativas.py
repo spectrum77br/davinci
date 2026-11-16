@@ -147,27 +147,47 @@ async def test_resposta_real_posterior_baixa_anteriores_sem_apagar_empate(db, ma
     await _numero(db, c, 2)
 
 
-async def test_visto_epoch_atual_obrigatorio_e_mensagem_nova_reabre(db, make_user):
+async def test_abrir_nao_consome_o_seed_e_o_nao_precisa_corta_na_reabertura(db, make_user):
+    """Até 15/11/2026 o visto com a epoch atual consumia o seed. Desde 16/11/2026
+    abrir não apaga nada no chat, com epoch nenhuma (`lida.gravar_visto`). O
+    "Não precisa de resposta" guarda o corte (`processado_ate`); a fala nova
+    reabre e o corte vira também o `notificacoes_visto_em` (como o "Zerar não
+    lidas"): o seed já dispensado não volta, só a fala nova conta."""
     user, _, _, c = await _conversa(db, make_user, seed=["seed"])
     seed = await _mensagem(db, c, "seed", CORTE - timedelta(days=1))
     c.visto_em = AGORA  # leituras da época anterior não consomem este seed.
     await db.commit()
     snapshot = c.notificacoes_iniciais["snapshot_id"]
-    for invalido in (None, "", "not-a-uuid", str(uuid4())):
-        await lida.gravar_visto(db, c, user, seed.created_at, notificacoes_migracao_id=invalido)
+    for epoch in (None, "", "not-a-uuid", str(uuid4()), snapshot):
+        assert (
+            await lida.gravar_visto(db, c, user, seed.created_at, notificacoes_migracao_id=epoch)
+            == AGORA
+        )
         await _numero(db, c, 1)
         assert c.notificacoes_visto_em is None
-    await lida.gravar_visto(db, c, user, seed.created_at, notificacoes_migracao_id=snapshot)
+    # "Não precisa de resposta" (o PATCH): o flag zera e o corte fica guardado.
+    c.sem_resposta_necessaria = True
+    gravar.guardar_processado_ate(c, seed.created_at)
+    await gravar.recalcular_conversa(db, c)
+    await db.commit()
     await _numero(db, c, 0)
-    assert c.visto_em == AGORA
-    assert c.notificacoes_visto_em == seed.created_at
-    await _mensagem(db, c, "new", CORTE + timedelta(hours=1), chegada=AGORA)
+    assert c.notificacoes_visto_em is None
+    # A fala nova do comprador (pelo sync) reabre: conta só ela, não o seed.
+    await db.commit()
+    await gravar.gravar_mensagem(
+        db,
+        c,
+        externo_id="new",
+        autor="cliente",
+        texto="new",
+        enviada_em=CORTE + timedelta(hours=1),
+    )
+    await db.commit()
     await _numero(db, c, 1)
-    # Um retorno antigo da mesma epoch também nunca anda para trás.
-    await lida.gravar_visto(db, c, user, AGORA, notificacoes_migracao_id=snapshot)
-    await lida.gravar_visto(db, c, user, seed.created_at, notificacoes_migracao_id=snapshot)
-    await _numero(db, c, 0)
-    assert c.notificacoes_visto_em == AGORA
+    assert c.sem_resposta_necessaria is False
+    assert c.notificacoes_visto_em == seed.created_at
+    assert c.visto_em == AGORA, "o legado nunca anda para trás"
+    assert gravar.CHAVE_PROCESSADO_ATE not in c.dados
 
 
 async def test_troca_de_epoch_nao_aceita_visto_antigo_e_zerar_explicitamente_funciona(

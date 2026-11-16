@@ -90,7 +90,8 @@ na plataforma" acima:
     Eduardo, ao trocar o Duoke pelo DaVinci: "as notificações devem sumir se
     clicado em algum atendimento" — como o Duoke "por loja", quem da equipe
     abrir apaga para todos (só a marca do DaVinci; o /lida na plataforma
-    continua só de quem mexe). A IA, os crons e os robôs não chamam.
+    continua só de quem mexe). A IA, os crons e os robôs não chamam. Desde
+    16/11/2026, só FORA do número ("ABRIR NÃO APAGA MAIS", abaixo).
   - O QUE grava (15/10/2026, a revisão): ATÉ ONDE A PESSOA VIU, no relógio do
     DaVinci — a CHEGADA (`created_at`) da mensagem mais nova que a tela
     mostrava (`visto_ate`: o detalhe manda, a tela devolve no POST). O sync
@@ -117,6 +118,24 @@ na plataforma" acima:
   - Idempotente: abrir de novo só anda o carimbo para a frente (nunca para
     trás, `GREATEST`). O `updated_at` da conversa não muda: é marca de
     leitura, não mudança da conversa (como a triagem da Caixa Humano).
+
+ABRIR NÃO APAGA MAIS (16/11/2026). O dono: "a notificacao agr so vai sair se
+responder no chat ou se clicar em um botao n precisa de resposta q bota do
+lado do enviar msg ali". Nas conversas do número (`pendente.tem_numero`: o
+chat, o pós-venda e a reclamação do ML, a Amazon, o Zap, a Magalu…; o mesmo
+corte do `numero_duoke` da linha), o `gravar_visto` não grava mais nada: nem
+o `visto_em`, nem o `notificacoes_visto_em`. Ele só confere quem é (o 403 de
+quem não vê) e devolve o que já estava. O /lida continua marcando como lida
+NA PLATAFORMA como antes. A bolinha sai com resposta no chat
+(`pendente.resposta_de_pessoa`) ou com o "Não precisa de resposta" (o PATCH
+da conversa, o botão ao lado do Enviar). Continuam: fechar, o "Zerar não
+lidas" (`zerar_nao_lidas`, abaixo), os 7 dias e a IA no turno só de cartão.
+O "Não precisa" e o "Fechar" guardam o corte `processado_ate` em `dados`
+(até onde a tela mostrava); ele só vira `visto_em` quando a fala nova
+reabre (`gravar._reabrir_se_nova`) — a bolinha conta só a mensagem nova. Fora
+do número (o e-mail da ponte e o do site, a pergunta do ML, a avaliação, o
+comentário, o carrinho, a reclamação da Shopee/TikTok), abrir grava o visto
+como antes. O "marcar como não lida" (`desfazer_visto`) não muda.
 
 Texto de comprador nunca vai para o log — só ids, plataforma e o código do erro.
 """
@@ -413,9 +432,19 @@ async def gravar_visto(
     O marco nativo só avança quando a tela confirma o snapshot_id da epoch
     que realmente exibiu. Um POST antigo que atravessa a importação pode
     atualizar o visto legado, mas nunca consumir o seed recém-importado.
+
+    16/11/2026 ("ABRIR NÃO APAGA MAIS", no topo): na conversa do número
+    (`pendente.tem_numero`) não grava nada — sem UPDATE e sem commit — e
+    devolve o `visto_em` que já estava. A trava de quem é vem antes: quem não
+    vê continua levando `LidaRecusada`. A aba antiga, que ainda chama o
+    /visto ao abrir, também não apaga mais a bolinha.
     """
     if user is None or not acesso.pode_ver(user):
         raise LidaRecusada(RECUSA_SO_LEITURA, "Só quem vê o Atendimento marca como vista.")
+    from app.services.atendimento import pendente
+
+    if pendente.tem_numero(conversa):
+        return conversa.visto_em
     # O relógio do BANCO (o mesmo do `created_at` da mensagem), na hora do
     # UPDATE — o `now()` seria o começo desta transação.
     relogio = func.clock_timestamp()

@@ -4467,6 +4467,55 @@ async def _ligar_conta_amazon(
     c.conta = conta
 
 
+# 16/11/2026: o "Não precisa de resposta" numa conversa do número recusa
+# quando chegou fala do comprador que a tela ainda não mostrava (o `ate`).
+RECUSA_CHEGOU_MENSAGEM = "chegou_mensagem"
+FRASE_CHEGOU_MENSAGEM = (
+    "Chegou mensagem nova do comprador que ainda não apareceu na tela. Leia antes de marcar."
+)
+
+
+async def _chegou_fala_depois(session: AsyncSession, c: AtendimentoConversa, ate: datetime) -> bool:
+    """Chegou fala que soma no número DEPOIS do que a tela mostrava? (16/11/2026)
+
+    Pela CHEGADA (`created_at`, o relógio do `visto_ate`): a do comprador, a
+    `sistema` dele e, na reclamação do ML, a do mediador
+    (`pendente.conta_no_numero`), sem o e-mail da ponte. A conversa já está
+    travada: o sync não grava nada no meio.
+    """
+    linhas = (
+        await session.execute(
+            select(AtendimentoMensagem.autor, AtendimentoMensagem.payload).where(
+                AtendimentoMensagem.conversa_id == c.id,
+                AtendimentoMensagem.created_at > ate,
+                AtendimentoMensagem.autor.in_((AUTOR_CLIENTE, AUTOR_SISTEMA, AUTOR_MEDIADOR)),
+            )
+        )
+    ).all()
+    return any(pendente.conta_no_numero(c, linha) for linha in linhas)
+
+
+async def _corte_do_clique(
+    session: AsyncSession, c: AtendimentoConversa, ate: datetime | None
+) -> datetime:
+    """Até onde vale o "Não precisa"/"Fechar" da pessoa (16/11/2026).
+
+    O `ate` da tela, nunca depois do relógio do banco. Sem ele (a tela
+    antiga), a chegada da mensagem mais nova da conversa, como o "Zerar não
+    lidas"; sem mensagem, o relógio.
+    """
+    if ate is not None:
+        relogio = await session.scalar(select(func.clock_timestamp()))
+        return min(_utc(ate), _utc(relogio))
+    mais_nova = (
+        select(func.max(AtendimentoMensagem.created_at))
+        .where(AtendimentoMensagem.conversa_id == c.id)
+        .scalar_subquery()
+    )
+    relogio, ultima = (await session.execute(select(func.clock_timestamp(), mais_nova))).one()
+    return min(_utc(ultima or relogio), _utc(relogio))
+
+
 @router.patch("/conversas/{conversa_id}", response_model=ConversaUnicaOut)
 async def editar_conversa(
     conversa_id: str,
@@ -4474,7 +4523,18 @@ async def editar_conversa(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(_responde)],
 ) -> ConversaUnicaOut:
-    """Atribuir, pausar a IA, fechar/reabrir, "não precisa de resposta" e a conta Amazon."""
+    """Atribuir, pausar a IA, fechar/reabrir, "não precisa de resposta" e a conta Amazon.
+
+    16/11/2026 (o dono: "a notificacao agr so vai sair se responder no chat
+    ou se clicar em um botao n precisa de resposta q bota do lado do enviar
+    msg ali"): na conversa do número (`pendente.tem_numero`), marcar "não
+    precisa" e fechar guardam o corte `processado_ate` em `dados` — o `ate`
+    da tela —, que só vale quando a fala nova reabre (`gravar`): aí a
+    bolinha conta só a mensagem nova. "Precisa de resposta" e reabrir à mão
+    apagam o corte (a bolinha volta como era). Marcar "não precisa" com o
+    `ate` e fala do comprador chegada depois dele: 409 `chegou_mensagem`,
+    nada muda.
+    """
     if instagram.e_instagram(conversa_id):
         raise _somente_leitura()
     scope = await escopo_do_atendimento(session, user)
@@ -4483,6 +4543,25 @@ async def editar_conversa(
     # entra no recálculo abaixo, e o que ele gravar depois vê o nosso fechar.
     await _travar_ou_409(session, c, "conversa_ocupada")
     campos = body.model_fields_set
+    # As mudanças que mexem no corte (com a conversa ANTES do PATCH).
+    numero = pendente.tem_numero(c)
+    nao_precisa = "sem_resposta_necessaria" in campos and body.sem_resposta_necessaria is not None
+    marca = nao_precisa and body.sem_resposta_necessaria and not c.sem_resposta_necessaria
+    desmarca = nao_precisa and not body.sem_resposta_necessaria and c.sem_resposta_necessaria
+    muda_situacao = "situacao" in campos and body.situacao is not None
+    fecha = muda_situacao and body.situacao == "fechada" and c.situacao != CONVERSA_FECHADA
+    reabre = muda_situacao and body.situacao == "aberta" and c.situacao == CONVERSA_FECHADA
+    ate = body.ate if "ate" in campos else None
+    if numero and marca and ate is not None and await _chegou_fala_depois(session, c, _utc(ate)):
+        logger.info(
+            "atendimento_nao_precisa_recusado",
+            conversa_id=str(c.id),
+            code=RECUSA_CHEGOU_MENSAGEM,
+            user_id=str(user.id),
+        )
+        raise HTTPException(
+            409, detail={"code": RECUSA_CHEGOU_MENSAGEM, "detail": FRASE_CHEGOU_MENSAGEM}
+        )
     if "integration_id" in campos and body.integration_id is not None:
         await _ligar_conta_amazon(session, c, body.integration_id, scope)
     if "atribuido_a" in campos:
@@ -4501,6 +4580,20 @@ async def editar_conversa(
             c.bloqueio_motivo = None
     if "sem_resposta_necessaria" in campos and body.sem_resposta_necessaria is not None:
         c.sem_resposta_necessaria = body.sem_resposta_necessaria
+    # O corte (16/11/2026): primeiro o desfazer, depois o que esconde — no
+    # mesmo PATCH, vale o estado final.
+    # Reabrir à mão com o "não precisa" ainda ligado mantém o corte dele (a
+    # conversa continua dispensada; a fala nova é que aplica o corte).
+    if desmarca or (reabre and not c.sem_resposta_necessaria):
+        gravar.esquecer_processado_ate(c)
+    if numero and (marca or fecha):
+        gravar.guardar_processado_ate(c, await _corte_do_clique(session, c, ate))
+    # A hora do clique da pessoa conta como resposta no tempo de resposta
+    # (16/11/2026, `_turnos_das_lojas`); o desfazer apaga. Em qualquer conversa.
+    if desmarca:
+        gravar.esquecer_hora_do_clique(c)
+    if marca:
+        gravar.guardar_hora_do_clique(c, await session.scalar(select(func.clock_timestamp())))
     # Fila e prazo derivam da situação e do "não precisa": refaz do banco.
     await gravar.recalcular_conversa(session, c)
     await session.commit()

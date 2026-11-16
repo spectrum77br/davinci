@@ -211,7 +211,9 @@ export type ConversaResumo = {
   // "Visto no DaVinci" (15/10/2026): até onde alguém que mexe viu a conversa
   // (POST /visto ou /lida). O número da Caixa só conta a mensagem do
   // comprador que chegou depois dele; a página relê o /resumo quando ele
-  // muda. A API antiga não manda.
+  // muda. A API antiga não manda. Desde 16/11/2026 abrir só grava FORA do
+  // número (o e-mail, a pergunta do ML): na conversa do número, quem o
+  // grava é o "Zerar não lidas" (e o servidor, no "Não precisa de resposta").
   visto_em?: string | null
   // Leitura das conversas de e-mail, pelo horário de chegada no DaVinci.
   email_visto_ate?: string | null
@@ -220,7 +222,10 @@ export type ConversaResumo = {
   notificacoes_visto_em?: string | null
   // O número DESTA conversa na Caixa (15/10/2026): a mesma régua do número da
   // loja — a bolinha da linha (`bolinhaDaLinha`), com ou sem a marca. null
-  // fora do chat (a bolinha de antes); a API antiga não manda.
+  // fora do chat (a bolinha de antes); a API antiga não manda. Ser número é o
+  // sinal de "conversa do número" para a tela (16/11/2026, `doNumero` em
+  // lib/atendimentoLida.ts): abrir não a zera, e o "Não precisa de resposta"
+  // do lado do Enviar aparece.
   numero_duoke?: number | null
   // No "Falta responder" da Caixa, igual ao Duoke (14/10/2026): o comprador
   // por último (até a automática responde) ou não lida na plataforma. A API
@@ -661,10 +666,13 @@ export type Detalhe = {
   pedido_atualizavel?: boolean
   // Marcar como lida ao abrir (14/10/2026): quem vê mexe, a loja num modo em
   // que o DaVinci responde (nunca Observar), plataforma com "lida" e há não
-  // lidas — as travas do POST /lida (lib/atendimentoLida.ts).
+  // lidas — as travas do POST /lida (lib/atendimentoLida.ts). Desde 16/11/2026
+  // o /lida só marca na plataforma: a bolinha do número não sai por abrir.
   marcar_lida?: boolean
   // Até onde esta tela mostra a conversa (15/10/2026): a chegada da mensagem
-  // mais nova do detalhe — volta no POST /visto ou /lida (`{ ate }`).
+  // mais nova do detalhe — volta no POST /visto ou /lida (`{ ate }`) e no
+  // PATCH do "Não precisa de resposta" (16/11/2026: chegou mensagem depois
+  // dele, o servidor recusa com 409 `chegou_mensagem`).
   visto_ate?: string | null
   // As mudanças de etiqueta, da mais antiga para a mais nova.
   etiqueta_historico?: EtiquetaHistorico[]

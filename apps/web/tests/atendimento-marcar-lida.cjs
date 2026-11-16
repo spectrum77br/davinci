@@ -16,6 +16,13 @@
 // do detalhe (até onde a tela mostrou) e, COM A CONVERSA ABERTA, cada releitura que traz
 // mensagem nova (o `visto_ate` andou) chama o /visto de novo (`rever`, a revisão de 15/10/2026:
 // no Duoke a conversa aberta fica lida) — o /lida continua uma vez por abertura.
+// ABRIR NÃO APAGA A NOTIFICAÇÃO DO NÚMERO (16/11/2026, o dono: "a notificacao agr so vai sair
+// se responder no chat ou se clicar em um botao n precisa de resposta q bota do lado do enviar
+// msg ali"): na conversa do número (`numero_duoke` é número) a abertura não chama o /visto, nem
+// ao abrir nem no `rever`; o /lida (loja em que o DaVinci responde) continua, uma vez por
+// abertura, só para a plataforma. Fora do número (o e-mail do site, a pergunta do ML — as
+// conversas sem `numero_duoke` dos cenários abaixo) tudo fica como era. O botão "Não precisa de
+// resposta" está em atendimento-nao-precisa-rodape.cjs.
 const assert = require('node:assert/strict')
 const fs = require('node:fs')
 const path = require('node:path')
@@ -101,17 +108,39 @@ function det(id, extra = {}) {
   assert.equal(L.querMarcarLida({ conversa: { id: 'z', nao_lidas: 0, canal: 'zap' }, marcar_lida: false }, true), false)
   assert.equal(L.querMarcarLida({ conversa: { id: 'z', nao_lidas: 0, canal: 'zap' }, marcar_lida: true }, false), false)
   assert.equal(L.querMarcarLida(null, true), false)
-  // O visto (15/10/2026): quem mexe, em qualquer modo — só não o Direct (`ig:`) e quem só lê.
+  // O visto (15/10/2026), FORA do número (sem `numero_duoke`: o e-mail, a pergunta do ML): em
+  // qualquer modo — só não o Direct (`ig:`).
   assert.equal(L.querMarcarVisto(det('a', { marcar_lida: false })), true)
   assert.equal(L.querMarcarVisto(det('a')), true, 'quem só lê também grava o visto (28/10/2026)')
   assert.equal(L.querMarcarVisto(det('ig:1', { marcar_lida: false })), false)
   assert.equal(L.querMarcarVisto(null), false)
-  // Uma rota por abertura: o /lida (que grava o visto também) ou o /visto.
+  // Uma rota por abertura: o /lida ou o /visto.
   assert.equal(L.rotaAoAbrir(det('a'), true), 'lida')
   assert.equal(L.rotaAoAbrir(det('a', { marcar_lida: false }), true), 'visto', 'Observar: só o visto')
   assert.equal(L.rotaAoAbrir({ conversa: { id: 'a', nao_lidas: 0 }, marcar_lida: true }, true), 'visto', 'já lida: só o visto')
   assert.equal(L.rotaAoAbrir(det('a'), false), 'visto', 'quem só lê: só o visto (28/10/2026)')
   assert.equal(L.rotaAoAbrir(det('ig:1', { marcar_lida: false }), true), null)
+  // 16/11/2026: a conversa do NÚMERO (`numero_duoke` é número, até 0) — abrir não grava o visto.
+  const num = (id, n, extra = {}) => ({ conversa: { id, nao_lidas: 2, numero_duoke: n }, marcar_lida: true, ...extra })
+  assert.equal(L.doNumero(num('a', 0)), true)
+  assert.equal(L.doNumero(num('a', 3)), true)
+  assert.equal(L.doNumero({ conversa: { id: 'e', numero_duoke: null } }), false, 'null = fora do número')
+  assert.equal(L.doNumero(det('a')), false, 'sem o campo (API antiga, e-mail) = fora do número')
+  assert.equal(L.doNumero(null), false)
+  for (const n of [0, 1, 5]) assert.equal(L.querMarcarVisto(num('a', n)), false, `numero_duoke ${n}: abrir não apaga`)
+  assert.equal(L.querMarcarVisto(num('a', 2, { marcar_lida: false })), false, 'nem em Observar')
+  // O /lida (só a plataforma) continua para quem mexe; o resto, nada.
+  assert.equal(L.rotaAoAbrir(num('a', 2), true), 'lida', 'loja em que o DaVinci responde: só marca na plataforma')
+  assert.equal(L.rotaAoAbrir(num('a', 2, { marcar_lida: false }), true), null, 'Observar/sem "lida": nada')
+  assert.equal(L.rotaAoAbrir({ conversa: { id: 'a', nao_lidas: 0, numero_duoke: 2 }, marcar_lida: true }, true), null, 'já lida na plataforma: nada')
+  assert.equal(L.rotaAoAbrir(num('a', 2), false), null, 'quem só lê: nada (não apaga a notificação de ninguém)')
+  assert.equal(L.rotaAoAbrir({ conversa: { id: 'z', nao_lidas: 0, canal: 'zap', numero_duoke: 1 }, marcar_lida: true }, true), 'lida', 'Zap: o tique azul continua')
+  // Fora do número, como hoje: o e-mail (site/ponte), a pergunta do ML; o Direct, nunca.
+  const email = { conversa: { id: 'e1', canal: 'email', nao_lidas: 0, numero_duoke: null }, marcar_lida: false }
+  assert.equal(L.rotaAoAbrir(email, true), 'visto')
+  assert.equal(L.rotaAoAbrir(email, false), 'visto', 'e-mail: quem só lê também')
+  assert.equal(L.rotaAoAbrir({ conversa: { id: 'p1', canal: 'pergunta', nao_lidas: 1, numero_duoke: null }, marcar_lida: false }, true), 'visto', 'pergunta do ML')
+  assert.equal(L.rotaAoAbrir({ conversa: { id: 'ig:9', numero_duoke: null }, marcar_lida: false }, true), null, 'Direct')
 }
 
 function marcador(extra = {}) {
@@ -402,7 +431,8 @@ function marcador(extra = {}) {
   // ───────────────────────── a tela: o bloco do AtendimentoConversa rodando de verdade
   const conversaSfc = sfc('../components/AtendimentoConversa.vue')
   const setup = conversaSfc.descriptor.scriptSetup.content
-  assert.match(setup, /^import \{ criarMarcadorDeLida, rotaAoAbrir \} from '~\/lib\/atendimentoLida'$/m)
+  const importLida = (setup.match(/^import \{([^}]*)\} from '~\/lib\/atendimentoLida'$/m) || [])[1] || ''
+  for (const nome of ['criarMarcadorDeLida', 'rotaAoAbrir', 'querMarcarVisto']) assert.match(importLida, new RegExp(`\\b${nome}\\b`), `importa ${nome}`)
   const ini = setup.indexOf('// ─── marcar como lida ao abrir (14/10/2026)')
   const fim = setup.indexOf('// ─── abas (RF2)', ini)
   assert.ok(ini > 0 && fim > ini, 'o bloco da tela existe')
@@ -411,11 +441,14 @@ function marcador(extra = {}) {
   assert.match(bloco, /rotaAoAbrir\(d, props\.canEdit\) !== null/)
   assert.match(bloco, /rotaAoAbrir\(aberto, props\.canEdit\)/)
   assert.match(bloco, /`\/api\/atendimento\/conversas\/\$\{encodeURIComponent\(id\)\}\/\$\{rota\}`, \{ method: 'POST', body \}/)
-  // A releitura com mensagem nova: só o /visto.
-  assert.match(bloco, /rever: \(id\) => gravarVisto\(id, 'visto'\)/)
+  // A releitura com mensagem nova: só o /visto, e só onde abrir ainda grava (fora do número, 16/11/2026).
+  assert.match(bloco, /rever: async \(id\) => \{\n\s+const aberto = detalhe\.value\n\s+if \(aberto && aberto\.conversa\.id === id && querMarcarVisto\(aberto\)\) await gravarVisto\(id, 'visto'\)\n\s+\},/)
+  assert.match(bloco, /16\/11\/2026, o dono: "a notificacao agr so vai sair se responder no chat/, 'a regra nova, com as palavras do dono')
   // 03/11/2026: depois do "não lida", esta abertura não grava (`naoLidaAqui`).
   assert.match(bloco, /marcadorLida\.abrir\(d\.conversa\.id, naoLidaAqui\.value !== d\.conversa\.id && rotaAoAbrir\(d, props\.canEdit\) !== null, d\.visto_ate \?\? null, d\.conversa\.notificacoes_migracao_id\)/)
 
+  // A conversa de `chegar` é FORA do número (sem `numero_duoke`: o e-mail do site, a pergunta do
+  // ML — onde abrir ainda grava o visto), a não ser que o cenário passe o `numero_duoke`.
   async function tela({ canEdit = true, marcar_lida = true, respostaFalha = false, naoMarcou = false, adiarRespostas = false } = {}) {
     const rel = relogioFalso()
     const Lt = loadLib('../lib/atendimentoLida.ts', {
@@ -438,21 +471,25 @@ function marcador(extra = {}) {
       if (adiarRespostas) return new Promise((resolve) => responder.push(resolve))
       if (respostaFalha) throw new Error('500')
       const id = url.split('/')[4]
+      // O número da conversa como a tela o tem (o servidor relê; aqui, o mesmo).
+      const doNumero = typeof detalhe.value?.conversa?.numero_duoke === 'number'
       const nativo = opts?.body?.notificacoes_migracao_id ? {
         notificacoes_migracao_id: opts.body.notificacoes_migracao_id,
-        notificacoes_visto_em: VISTO, numero_duoke: 0,
+        notificacoes_visto_em: VISTO,
       } : {}
       if (url.endsWith('/visto')) return { visto_em: VISTO, conversa: { id, nao_lidas: 2, plataforma: 'shopee', visto_em: VISTO, ...nativo } }
-      // A plataforma recusou: o /lida responde 200 sem marcar, com o visto gravado.
-      if (naoMarcou) return { marcada: false, motivo: 'plataforma_falhou', aviso: 'x', conversa: { id, nao_lidas: 2, plataforma: 'shopee', visto_em: VISTO } }
-      return { marcada: true, motivo: null, aviso: null, conversa: { id, nao_lidas: 0, plataforma: 'shopee', visto_em: VISTO, ...nativo } }
+      // 16/11/2026: na conversa do número o /lida só marca na plataforma — sem visto, a bolinha fica.
+      const visto = doNumero ? { numero_duoke: detalhe.value.conversa.numero_duoke } : { visto_em: VISTO }
+      // A plataforma recusou: o /lida responde 200 sem marcar (fora do número, com o visto gravado).
+      if (naoMarcou) return { marcada: false, motivo: 'plataforma_falhou', aviso: 'x', conversa: { id, nao_lidas: 2, plataforma: 'shopee', ...visto } }
+      return { marcada: true, motivo: null, aviso: null, conversa: { id, nao_lidas: 0, plataforma: 'shopee', ...visto, ...nativo } }
     }
     const js = transpile(bloco.replace(/^type LidaResposta = .*$/m, ''))
     const rodar = new Function(
-      'criarMarcadorDeLida', 'rotaAoAbrir', 'props', 'detalhe', 'api', 'emit', 'watch', 'onMounted', 'onBeforeUnmount', 'document', 'ref', 'toasts',
+      'criarMarcadorDeLida', 'rotaAoAbrir', 'querMarcarVisto', 'props', 'detalhe', 'api', 'emit', 'watch', 'onMounted', 'onBeforeUnmount', 'document', 'ref', 'toasts',
       js,
     )
-    rodar(Lt.criarMarcadorDeLida, Lt.rotaAoAbrir, props, detalhe, apiFalsa, (e, c) => emitidos.push([e, c]), Vue.watch,
+    rodar(Lt.criarMarcadorDeLida, Lt.rotaAoAbrir, Lt.querMarcarVisto, props, detalhe, apiFalsa, (e, c) => emitidos.push([e, c]), Vue.watch,
       (f) => montar.push(f), (f) => desmontar.push(f), doc, Vue.ref, { success: () => {}, error: () => {} })
     montar.forEach((f) => f())
     const chegar = async (id, nao = 2, visto_ate = null, conversa = {}) => {
@@ -553,10 +590,10 @@ function marcador(extra = {}) {
     // A mensagem nova chegou enquanto outra aba estava à frente: a pessoa
     // ainda não a viu, então o cursor de chegada não pode avançar sozinho.
     t.doc.visibilityState = 'hidden'
-    await t.chegar('c1', 3, B, { ...fila, numero_duoke: 1 })
+    await t.chegar('c1', 3, B, fila)
     await tique()
     assert.equal(t.posts.length, 1)
-    assert.equal(t.detalhe.value.conversa.numero_duoke, 1)
+    assert.equal(t.detalhe.value.conversa.nao_lidas, 3)
     assert.deepEqual(t.corpos, [{ ate: A }])
     t.doc.visibilityState = 'visible'
     t.doc.ouvintes.forEach((f) => f())
@@ -578,8 +615,9 @@ function marcador(extra = {}) {
     await t.chegar('c1', 2, A)
     t.rel.avancar(1500)
     await tique()
+    // Fora do número (`numero_duoke` null: o e-mail do site), onde abrir ainda grava o visto.
     const atual = {
-      numero_duoke: 0, visto_em: B, aguardando_resposta: true,
+      numero_duoke: null, visto_em: B, aguardando_resposta: true,
       falta_responder: true, tem_rascunho: true, ia_pausada: true,
       humano: { motivos: ['ia_pausada'], rotulos: ['IA pausada'], assuntos: [], assuntos_rotulos: [] },
     }
@@ -606,7 +644,7 @@ function marcador(extra = {}) {
   }
 
   // Uma importação muda a geração mesmo sem chegar outra mensagem. O
-  // detalhe já aberto precisa confirmar a leitura dessa nova base.
+  // detalhe já aberto precisa confirmar a leitura dessa nova base (fora do número).
   for (const marcar_lida of [false, true]) {
     const t = await tela({ marcar_lida })
     const A = '2026-10-19T13:00:00.100000Z'
@@ -615,14 +653,27 @@ function marcador(extra = {}) {
     t.rel.avancar(1500)
     await tique()
     await tique()
-    await t.chegar('c1', 2, A, { notificacoes_migracao_id: migracao, numero_duoke: 5 })
+    await t.chegar('c1', 2, A, { notificacoes_migracao_id: migracao })
     assert.equal(t.posts.length, 1, 'a base nova respeita o tempo de abertura')
     t.rel.avancar(1500)
     await tique()
     await tique()
     assert.deepEqual(t.corpos, [{ ate: A }, { ate: A, notificacoes_migracao_id: migracao }])
-    assert.equal(t.detalhe.value.conversa.numero_duoke, 0)
+    assert.equal(t.detalhe.value.conversa.notificacoes_visto_em, '2026-10-15T10:00:00+00:00')
     assert.equal(t.detalhe.value.conversa.notificacoes_migracao_id, migracao)
+  }
+  // Na conversa do NÚMERO (16/11/2026) a base nova também não faz a abertura gravar nada.
+  {
+    const t = await tela({ marcar_lida: false })
+    const A = '2026-10-19T13:00:00.100000Z'
+    await t.chegar('c1', 2, A, { numero_duoke: 2 })
+    t.rel.avancar(1500)
+    await t.chegar('c1', 2, A, { notificacoes_migracao_id: '9269dc7b-6114-4fd9-9eca-e958b2e0afc4', numero_duoke: 5 })
+    t.rel.avancar(60_000)
+    await tique()
+    await tique()
+    assert.deepEqual(t.posts, [])
+    assert.equal(t.detalhe.value.conversa.numero_duoke, 5, 'a bolinha da base importada fica')
   }
 
   // Um POST legado pendente quando a base é importada não pode apagar os
@@ -634,23 +685,24 @@ function marcador(extra = {}) {
     await t.chegar('c1', 2, A)
     t.rel.avancar(1500)
     await tique()
-    await t.chegar('c1', 2, A, { notificacoes_migracao_id: migracao, numero_duoke: 5 })
-    t.responder[0]({ conversa: { id: 'c1', nao_lidas: 0, numero_duoke: 0, visto_em: A } })
+    await t.chegar('c1', 2, A, { notificacoes_migracao_id: migracao })
+    t.responder[0]({ conversa: { id: 'c1', nao_lidas: 0, visto_em: A } })
     await tique()
     await tique()
-    assert.equal(t.detalhe.value.conversa.numero_duoke, 5)
+    assert.equal(t.detalhe.value.conversa.nao_lidas, 2)
+    assert.equal(t.detalhe.value.conversa.visto_em, undefined, 'o visto da base anterior não entra')
     assert.equal(t.detalhe.value.conversa.notificacoes_migracao_id, migracao)
     assert.equal(t.emitidos.length, 0)
     t.rel.avancar(1500)
     await tique()
     assert.deepEqual(t.corpos[1], { ate: A, notificacoes_migracao_id: migracao })
     t.responder[1]({ conversa: {
-      id: 'c1', nao_lidas: 2, numero_duoke: 0, visto_em: A,
+      id: 'c1', nao_lidas: 2, visto_em: A,
       notificacoes_migracao_id: migracao, notificacoes_visto_em: A,
     } })
     await tique()
     await tique()
-    assert.equal(t.detalhe.value.conversa.numero_duoke, 0)
+    assert.equal(t.detalhe.value.conversa.notificacoes_visto_em, A)
     assert.equal(t.emitidos.length, 1)
   }
 
@@ -684,6 +736,72 @@ function marcador(extra = {}) {
     t.rel.avancar(60_000)
     await tique()
     assert.deepEqual(t.posts, [['/api/atendimento/conversas/c1/visto', 'POST']])
+  }
+
+  // ───────────────────────── 16/11/2026: a conversa do NÚMERO — abrir não apaga a notificação
+  // Aberta 60 s, com duas releituras trazendo mensagem nova: nenhum POST /visto. Loja em
+  // Observar (ou plataforma sem "lida"): nenhum POST. A bolinha fica (sobe com as mensagens).
+  {
+    const t = await tela({ marcar_lida: false })
+    await t.chegar('c1', 2, 'A', { numero_duoke: 2, aguardando_resposta: true })
+    t.rel.avancar(20_000)
+    await tique()
+    await t.chegar('c1', 3, 'B', { numero_duoke: 3, aguardando_resposta: true })
+    t.rel.avancar(20_000)
+    await tique()
+    await t.chegar('c1', 4, 'C', { numero_duoke: 4, aguardando_resposta: true })
+    t.rel.avancar(20_000)
+    await tique()
+    await tique()
+    assert.deepEqual(t.posts, [], 'nem a abertura nem o `rever` gravam o visto')
+    assert.deepEqual(t.emitidos, [])
+    assert.equal(t.detalhe.value.conversa.numero_duoke, 4)
+  }
+  // Loja em que o DaVinci responde (`marcar_lida`): UM /lida (só a plataforma), com o `ate`; as
+  // releituras com mensagem nova não chamam nada — nem o /visto, nem outro /lida.
+  {
+    const t = await tela({ marcar_lida: true })
+    await t.chegar('c1', 2, 'A', { numero_duoke: 2 })
+    t.rel.avancar(1500)
+    await tique()
+    await tique()
+    assert.deepEqual(t.posts, [['/api/atendimento/conversas/c1/lida', 'POST']])
+    assert.deepEqual(t.corpos, [{ ate: 'A' }])
+    assert.equal(t.detalhe.value.conversa.nao_lidas, 0, 'a plataforma marcou')
+    assert.equal(t.detalhe.value.conversa.numero_duoke, 2, 'a bolinha do número fica')
+    await t.chegar('c1', 3, 'B', { numero_duoke: 3 })
+    t.rel.avancar(20_000)
+    await t.chegar('c1', 4, 'C', { numero_duoke: 4 })
+    t.rel.avancar(20_000)
+    await tique()
+    await tique()
+    assert.deepEqual(t.posts.map(([u]) => u), ['/api/atendimento/conversas/c1/lida'], 'um /lida por abertura, nenhum /visto')
+  }
+  // Quem só lê: nada (abrir não apaga a notificação de ninguém).
+  {
+    const t = await tela({ canEdit: false })
+    await t.chegar('c1', 2, 'A', { numero_duoke: 2 })
+    t.rel.avancar(60_000)
+    await t.chegar('c1', 3, 'B', { numero_duoke: 3 })
+    await tique()
+    await tique()
+    assert.deepEqual(t.posts, [])
+  }
+  // Fora do número, como hoje: a conversa de e-mail aberta grava o visto ao abrir e com
+  // mensagem nova (o `rever`) — o e-mail do site continua apagando ao abrir.
+  for (const canEdit of [true, false]) {
+    const t = await tela({ canEdit, marcar_lida: false })
+    t.props.conversaId = 'e1'
+    await Vue.nextTick()
+    await t.chegar('e1', 1, 'A', { canal: 'email', numero_duoke: null })
+    t.rel.avancar(1500)
+    await tique()
+    await tique()
+    await t.chegar('e1', 2, 'B', { canal: 'email', numero_duoke: null })
+    await tique()
+    await tique()
+    assert.deepEqual(t.posts, [['/api/atendimento/conversas/e1/visto', 'POST'], ['/api/atendimento/conversas/e1/visto', 'POST']], `e-mail (canEdit=${canEdit})`)
+    assert.deepEqual(t.corpos, [{ ate: 'A' }, { ate: 'B' }])
   }
 
   // Passou rápido: trocou de conversa antes de 1,5 s — a anterior não marca.
@@ -785,7 +903,8 @@ function marcador(extra = {}) {
     assert.match(P, /^ {2}visto_em\?: string \| null$/m, 'o tipo da linha tem o `visto_em`')
     assert.match(rota, /dependencies=\[Depends\(_so_admin\)\]/)
     // Quem só lê NÃO marca na plataforma (o /lida fica fora do ROTAS_DE_QUEM_LE → 403),
-    // mas grava o visto (28/10/2026: abrir apaga a notificação).
+    // mas grava o visto fora do número (28/10/2026; desde 16/11/2026 abrir não apaga a
+    // notificação do número — o e-mail do site continua usando o /visto).
     const lista = rotaDetalhe.slice(rotaDetalhe.indexOf('ROTAS_DE_QUEM_LE = frozenset('), rotaDetalhe.indexOf('SO_LEITURA = {'))
     assert.ok(lista.length > 0)
     assert.doesNotMatch(lista, /\/lida/)
@@ -808,8 +927,9 @@ function marcador(extra = {}) {
     const lista = rotaDetalhe.slice(rotaDetalhe.indexOf('ROTAS_DE_QUEM_LE = frozenset('), rotaDetalhe.indexOf('SO_LEITURA = {'))
     assert.match(lista, /\("POST", "\/api\/atendimento\/conversas\/\{conversa_id\}\/nao-lida"\)/, 'quem só lê também marca')
     const C = sfc('../components/AtendimentoConversa.vue').fonte
-    // O botão no cabeçalho (menos no Direct) e a rota.
-    assert.match(C, /<Button\s+v-if="!conversa\.somente_leitura"[\s\S]*?data-nao-lida\s+@click="marcarNaoLida"/)
+    // O botão no cabeçalho (menos no Direct e, desde 16/11/2026, com o "não precisa de
+    // resposta" ligado — ali ele não traz a bolinha de volta) e a rota.
+    assert.match(C, /<Button\s+v-if="naoLidaVisivel"[\s\S]*?data-nao-lida\s+@click="marcarNaoLida"/)
     assert.match(C, /\/api\/atendimento\/conversas\/\$\{encodeURIComponent\(id\)\}\/nao-lida`, \{ method: 'POST' \}/)
     // ESTA abertura para de gravar o visto (senão a bolinha sumia de novo em 1,5 s);
     // trocar de conversa volta ao normal.
