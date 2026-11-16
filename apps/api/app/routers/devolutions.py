@@ -2022,11 +2022,41 @@ async def lookup_devolution_order(
     lojas = _lojas_da_equipe(await resolve_team_scope(session, user))
     if lojas is not None and not lojas:
         return []
+    expanded = await pecas_do_pedido(session, pedido, lojas=lojas)
+    # Situação atual no Bling (seletor "Status Bling" já no lançamento).
+    situacoes = await _situacoes_por_pedido(session, {r.get("pedido_bling") for r in expanded})
+    for r in expanded:
+        sid, nome = situacoes.get((r.get("pedido_bling") or "").strip(), (None, None))
+        r["situacao_bling_id"], r["situacao_bling_nome"] = sid, nome
+
+    return [DevolutionLookupOut.model_validate({k: v for k, v in r.items() if not k.startswith("_")}) for r in expanded]
+
+
+async def pecas_do_pedido(
+    session: AsyncSession,
+    pedido: str,
+    *,
+    lojas: set[str] | None = None,
+    exato: bool = False,
+) -> list[dict]:
+    """As peças (unidades, com kit aberto em componentes) dos pedidos que a
+    busca acha, com `ja_devolvido` marcado nas que já têm lançamento. É a
+    conta da janela de lançamento ("falta lançar"). `exato` = só o nº do
+    Bling, sem CEP/plataforma/nome (o "resolve sozinho" do painel novo usa).
+    Só enxerga pedido nas situações da `vw_devolucoes`."""
     q_like = f"%{pedido}%"
     # Termo só de dígitos é nº de pedido/CEP: não buscar dentro do nome do
     # destinatário, pois nicknames de marketplace embutem datas/números que
     # casariam por substring e trariam pedidos de outros clientes.
     name_clause = "" if pedido.isdigit() else "OR v.nome_destinatario ILIKE :q_like"
+    busca = (
+        "v.pedido_bling::text = :pedido"
+        if exato
+        else f"""v.pedido_bling::text = :pedido
+                        OR v.pedido_marketplace::text = :pedido
+                        OR v.cep_destino ILIKE :q_like
+                        {name_clause}"""
+    )
     params: dict = {"pedido": pedido, "q_like": q_like}
     loja_clause = ""
     if lojas is not None:
@@ -2065,10 +2095,7 @@ async def lookup_devolution_order(
                     LEFT JOIN "{SCHEMA}".bling_orders bo ON bo.id = v.bling_order_item_id
                     CROSS JOIN generate_series(1, GREATEST(1, COALESCE(v.quantidade::int, 1))) gs(unit_num)
                     WHERE (
-                        v.pedido_bling::text = :pedido
-                        OR v.pedido_marketplace::text = :pedido
-                        OR v.cep_destino ILIKE :q_like
-                        {name_clause}
+                        {busca}
                     )
                     {loja_clause}
                 ) t
@@ -2181,13 +2208,7 @@ async def lookup_devolution_order(
             chave = ((d["pedido_bling"] or "").strip(), d["sku"].strip().lower())
             lancadas.setdefault(chave, []).extend([d["custo"]] * int(d["qtd"]))
     _marcar_unidades_lancadas(expanded, lancadas)
-    # Situação atual no Bling (seletor "Status Bling" já no lançamento).
-    situacoes = await _situacoes_por_pedido(session, {r.get("pedido_bling") for r in expanded})
-    for r in expanded:
-        sid, nome = situacoes.get((r.get("pedido_bling") or "").strip(), (None, None))
-        r["situacao_bling_id"], r["situacao_bling_nome"] = sid, nome
-
-    return [DevolutionLookupOut.model_validate({k: v for k, v in r.items() if not k.startswith("_")}) for r in expanded]
+    return expanded
 
 
 def _marcar_unidades_lancadas(

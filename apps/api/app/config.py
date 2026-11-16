@@ -810,6 +810,10 @@ class Settings(BaseSettings):
     # chave, a disputa sai como sempre saiu. Desligar: DEVOLUCAO_CONFERENCIA_LIGADA=false.
     devolucao_conferencia_ligada: bool = True
     devolucao_conferencia_modelo: str = "claude-opus-5-5"
+    # Fraude automática (16/11/2026, services/devolucao_fraude_auto): o só reembolso
+    # da TikTok/Shopee pede o vídeo da embalagem sozinho e, quando ele chega, lança
+    # "Não devolvido" e a resposta sai pela API. ligado | so_video | desligado.
+    devolucao_fraude_auto: str = "ligado"
     # Só no processo do eval (`scripts.agente_eval.rodar --verificador`): o verificador roda no
     # replay (como ao vivo) e, com o modelo de SOMBRA, roda de novo com ele e grava o veredito ao
     # lado, sem decidir — a comparação dos dois modelos nas mesmas respostas.

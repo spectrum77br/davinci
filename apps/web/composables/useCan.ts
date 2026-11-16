@@ -20,6 +20,7 @@ export type Resource =
   | 'importacao'
   | 'devolucoes'
   | 'devolucoes_mover'
+  | 'devolucoes_resolver'
   | 'reembolso'
   | 'logistica'
   | 'notas_fiscais'
@@ -106,8 +107,9 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     // legado `atendimento_email` continua sem conceder acesso à aba.
     resources: [
       // `devolucoes_mover` (10/11/2026): só o edit vale — muda o painel do
-      // pedido (Devoluções ↔ Fraude). Admin sempre pode.
-      'devolucoes', 'devolucoes_mover', 'reembolso', 'logistica', 'notas_fiscais', 'chamados',
+      // pedido (Devoluções ↔ Fraude). Admin sempre pode. `devolucoes_resolver`
+      // (16/11/2026): idem pro Resolver/reabrir do painel novo.
+      'devolucoes', 'devolucoes_mover', 'devolucoes_resolver', 'reembolso', 'logistica', 'notas_fiscais', 'chamados',
       'garantias', 'garantias_atendimento', 'garantias_cpf',
       'atendimento_email', 'atendimento_email_aba', 'atendimento_email_leitura', 'atendimento_email_operacao',
     ],
@@ -187,6 +189,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   importacao: 'Importação',
   devolucoes: 'Devoluções',
   devolucoes_mover: 'Devoluções — mover pedido entre Acompanhamento e Fraude (editar)',
+  devolucoes_resolver: 'Devoluções — resolver e reabrir (editar)',
   reembolso: 'Reembolso',
   logistica: 'Logística',
   notas_fiscais: 'Notas Fiscais',

@@ -118,6 +118,7 @@ type Painel = {
   total_pedidos: number
   como_terminou: string[]
   pode_mover_painel: boolean
+  pode_resolver: boolean
   ve_custo: boolean
   com_cerca_de_equipe: boolean
 }
@@ -139,6 +140,8 @@ type ResumoDia = {
 const items = ref<Item[]>([])
 const comoTerminou = ref<string[]>([])
 const podeMover = ref(false)
+// Resolver / reabrir: só adm e o Cairo (Vinicius, 16/11/2026).
+const podeResolver = ref(false)
 const veCusto = ref(false)
 const comCerca = ref(false)
 const loading = ref(false)
@@ -196,6 +199,7 @@ async function load(silencioso = false) {
     items.value = res.items
     comoTerminou.value = res.como_terminou
     podeMover.value = res.pode_mover_painel
+    podeResolver.value = !!res.pode_resolver
     veCusto.value = res.ve_custo
     comCerca.value = res.com_cerca_de_equipe
     lidoEm.value = new Date()
@@ -289,6 +293,19 @@ function temFoto(i: Item): boolean {
 function urgente(i: Item): boolean {
   return !!i.prazo_estado && ['disputa', 'responder', 'contestar'].includes(i.prazo_tipo || '')
 }
+// "A finalizar": terminou (Perdimento, Extraviado, não devolveu, o Bling já saiu
+// da devolução…) e não volta inteiro pro estoque — o que volta, o sistema resolve
+// sozinho. Fica pro adm ou o Cairo analisar e clicar Resolver.
+function aFinalizar(i: Item): boolean {
+  return !!i.pronto_resolver
+}
+// Fraude que o robô deixou pra pessoa (services/devolucao_fraude_auto: NAO_RESPONDE)
+// ou em que a equipe respondeu "não tenho o vídeo".
+function fraudeAMao(i: Item): boolean {
+  if (i.etapa !== 'fraude' || i.lancamentos.length) return false
+  // O recado do robô termina em "(responder à mão)" — CARTAO_A_MAO em services/devolucao_fraude_auto.py.
+  return (i.observacao || '').includes('responder à mão') || i.video_status === 'sem_video'
+}
 
 // ── Filtros ─────────────────────────────────────────────────────────────
 const naAba = computed(() =>
@@ -314,10 +331,15 @@ const base = computed(() => {
 type Agir = { chave: string; titulo: string; detalhe: string; dot: string; grave: boolean; teste: (i: Item) => boolean }
 const AGIR: Agir[] = [
   { chave: 'segurado', titulo: 'Chamado segurado pela IA', detalhe: 'o motivo não bate — decidir antes de mandar', dot: 'bg-red-600', grave: true, teste: (i) => i.chamado?.abertura_status === 'segurada' },
+  // 16/11 (Vinicius): a Fraude automática responde sozinha o só reembolso; o que ela
+  // não responde (danificado, alegação estranha, equipe sem vídeo) vem pra cá.
+  { chave: 'fraude_mao', titulo: 'Fraude: responder à mão', detalhe: 'o sistema não responde esse caso sozinho', dot: 'bg-red-600', grave: true, teste: fraudeAMao },
   { chave: 'responder', titulo: 'Responder em 24 h', detalhe: 'prazo da plataforma vencendo', dot: 'bg-red-600', grave: true, teste: urgente },
   { chave: 'estoque', titulo: 'Estoque não entrou no Bling', detalhe: 'conferir e tentar de novo no lançamento', dot: 'bg-red-600', grave: true, teste: estoquePendente },
   { chave: 'falta_lancar', titulo: 'Chegou e falta lançar', detalhe: 'lançar condição e estoque', dot: 'bg-red-600', grave: false, teste: (i) => i.falta_lancar },
-  { chave: 'pronto', titulo: 'Pronto pra resolver', detalhe: 'estoque lançado ou reembolso ganho: falta o Resolver', dot: 'bg-blue-600', grave: false, teste: (i) => !!i.pronto_resolver },
+  // 16/11 (Vinicius): o que volta inteiro pro estoque resolve sozinho; perdimento,
+  // extraviado, não devolveu… "o Cairo ou adm analisa e finaliza".
+  { chave: 'pronto', titulo: 'A finalizar', detalhe: 'perdimento, extraviado, Bling já fora: adm ou Cairo finaliza', dot: 'bg-blue-600', grave: false, teste: aFinalizar },
   { chave: 'prazo45', titulo: 'Passou de 45 dias', detalhe: 'pacote não chegou (ou vence em até 5 dias)', dot: 'bg-amber-500', grave: false, teste: (i) => i.prazo_tipo === 'pacote chegar' && !!i.prazo_estado },
   { chave: 'amazon', titulo: 'Amazon: cancelar devolução', detalhe: 'cliente não postou em 14 dias', dot: 'bg-amber-500', grave: false, teste: (i) => i.amazon_cancelar },
   { chave: 'tecnico', titulo: 'Manutenção vencendo', detalhe: 'prazo de 30 dias do técnico', dot: 'bg-amber-500', grave: false, teste: (i) => i.etapa === 'manutencao' && i.prazo_tipo === 'técnico' && (!!i.prazo_estado || (!!i.prazo_em && diasEntre(isoDateBrt(new Date(i.prazo_em)), isoToday()) <= 5)) },
@@ -346,17 +368,20 @@ const cartoes = computed(() => {
     { k: 'falta_lancar', label: 'Chegou (falta lançar)', n: pedidos(r.filter((i) => !i.resolvido && i.falta_lancar)), cor: 'text-amber-600 dark:text-amber-400', sub: 'lançar condição' },
     { k: 'manutencao', label: 'Manutenção', n: pedidos(r.filter((i) => i.etapa === 'manutencao')), cor: 'text-indigo-700 dark:text-indigo-400', sub: 'com o técnico' },
     { k: 'fraude', label: 'Fraude', n: pedidos(r.filter((i) => i.etapa === 'fraude')), cor: 'text-red-600 dark:text-red-400', sub: 'não volta pacote' },
+    { k: 'a_finalizar', label: 'A finalizar', n: pedidos(r.filter((i) => !i.resolvido && aFinalizar(i))), cor: 'text-blue-700 dark:text-blue-400', sub: 'adm ou Cairo finaliza' },
   ]
 })
+// Os dois cartões que são recorte (não etapa): o cartão liga o recorte.
+const CARTAO_RECORTE: Record<string, string> = { falta_lancar: 'falta_lancar', a_finalizar: 'agir:pronto' }
 function cartaoLigado(k: string): boolean {
-  if (k === 'falta_lancar') return recorte.value === 'falta_lancar'
+  if (k in CARTAO_RECORTE) return recorte.value === CARTAO_RECORTE[k]
   if (k === 'all') return false
   return etapaFilter.value === k && !recorte.value
 }
 function clicarCartao(k: string) {
-  if (k === 'falta_lancar') {
+  if (k in CARTAO_RECORTE) {
     etapaFilter.value = 'all'
-    recorte.value = recorte.value === 'falta_lancar' ? '' : 'falta_lancar'
+    recorte.value = recorte.value === CARTAO_RECORTE[k] ? '' : CARTAO_RECORTE[k]
     return
   }
   recorte.value = ''
@@ -475,7 +500,10 @@ const LARGADA = 'antes do painel novo'
 function ehLargada(como: string | null): boolean {
   return !!como && como.startsWith(LARGADA)
 }
+// Resolvido pelo sistema quando todas as peças voltaram pro estoque (16/11/2026).
+const SOZINHO = 'Voltou pro estoque (resolvido sozinho)'
 function comoTerminou_(como: string | null): string {
+  if (como === SOZINHO) return 'voltou pro estoque — o sistema resolveu sozinho'
   return ehLargada(como) ? 'feito antes de mudar o painel' : (como || '')
 }
 function obsDaLinha(i: Item): string {
@@ -1140,7 +1168,7 @@ const lidoHa = computed(() => {
     </div>
 
     <!-- Cartões -->
-    <div class="grid grid-cols-2 gap-2 lg:grid-cols-5">
+    <div class="grid grid-cols-2 gap-2 lg:grid-cols-6">
       <button
         v-for="k in cartoes"
         :key="k.label"
@@ -1714,17 +1742,21 @@ const lidoHa = computed(() => {
               <div class="mb-2 flex items-center text-[10px] font-semibold uppercase tracking-wide text-blue-900 dark:text-blue-200"><span class="mr-1.5 inline-flex size-[18px] items-center justify-center rounded-full bg-[#1f3a5f] text-[10.5px] font-bold text-white">{{ veCusto ? 4 : 3 }}</span>Resolver <span class="ml-1 font-normal normal-case tracking-normal">· tira o pedido da lista de abertas</span></div>
               <template v-if="pedidoItem.resolvido">
                 <div class="text-xs">Resolvida em <b>{{ ddmmaaaa(pedidoItem.resolvido_at) }}</b><template v-if="pedidoItem.resolvido_por_nome"> por <b>{{ pedidoItem.resolvido_por_nome }}</b></template> · {{ comoTerminou_(pedidoItem.resolvido_como) }}</div>
-                <button v-if="canEdit" type="button" class="mt-2 rounded-md border bg-background px-2.5 py-1.5 text-xs font-semibold hover:bg-muted disabled:opacity-50" :disabled="!!salvando" title="Volta pra lista de abertas. Não mexe no Bling." @click="reabrir">reabrir</button>
+                <button v-if="canEdit && podeResolver" type="button" class="mt-2 rounded-md border bg-background px-2.5 py-1.5 text-xs font-semibold hover:bg-muted disabled:opacity-50" :disabled="!!salvando" title="Volta pra lista de abertas. Não mexe no Bling." @click="reabrir">reabrir</button>
               </template>
               <div v-else-if="foraDaLista" class="text-xs text-muted-foreground">
                 Este pedido ainda não entrou em devolução, então não há o que resolver. Ele entra na lista sozinho quando o Bling for para <b>Aguardando Devolução</b> (ali em cima, em <b>Bling:</b>).
               </div>
               <template v-else>
-                <div v-if="pedidoItem.pronto_resolver" class="mb-2 text-xs"><b class="text-blue-800 dark:text-blue-200">Pronto pra resolver:</b> {{ pedidoItem.pronto_resolver }}.</div>
+                <div v-if="pedidoItem.pronto_resolver" class="mb-2 text-xs"><b class="text-blue-800 dark:text-blue-200">A finalizar:</b> {{ pedidoItem.pronto_resolver }}.</div>
+                <div class="mb-2 text-[11px] text-muted-foreground" data-resolve-sozinho>Quando todas as peças voltarem pro estoque, o sistema resolve sozinho.</div>
                 <!-- 16/11 (Vinicius): "se já voltou estoque tá resolvido… o chamado em aberto é outra coisa". -->
                 <div v-if="pedidoItem.tem_chamado_aberto" class="mb-2 text-[11px] text-muted-foreground">O chamado continua na aba Chamados: dá pra resolver a devolução agora — o valor que o chamado ganhar entra no Reembolso quando ele terminar.</div>
                 <div v-if="linhasDaJanela.length > 1" class="mb-2 text-[11px] text-muted-foreground">Vale pro pedido inteiro ({{ linhasDaJanela.length }} produtos): a situação do Bling é do pedido.</div>
-                <div class="grid items-end gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                <div v-if="!podeResolver" class="rounded border border-dashed bg-background/60 px-2.5 py-2 text-xs text-muted-foreground" data-so-adm-cairo>
+                  Só o <b class="text-foreground">adm</b> e o <b class="text-foreground">Cairo</b> resolvem uma devolução. Situação atual no Bling: <b class="text-foreground">{{ pedidoItem.situacao_bling_nome || '—' }}</b>.
+                </div>
+                <div v-else class="grid items-end gap-2 sm:grid-cols-[1fr_1fr_auto]">
                   <label class="block">
                     <span class="mb-1 block text-[11px] font-semibold">Como terminou <span class="text-red-500">*</span></span>
                     <select v-model="resolverForm.como" class="h-8 w-full rounded-md border bg-background px-2 text-xs" :disabled="!canEdit">
@@ -1741,7 +1773,7 @@ const lidoHa = computed(() => {
                   </label>
                   <button type="button" class="inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-md bg-primary px-3 text-xs font-semibold text-primary-foreground disabled:opacity-50" :disabled="!canEdit || !resolverForm.como || !!salvando" @click="resolver"><Check class="size-3.5" /> resolver</button>
                 </div>
-                <div class="mt-1.5 text-[11px] text-muted-foreground">Situação atual no Bling: <b class="text-foreground">{{ pedidoItem.situacao_bling_nome || '—' }}</b>. Dá pra reabrir depois.</div>
+                <div v-if="podeResolver" class="mt-1.5 text-[11px] text-muted-foreground">Situação atual no Bling: <b class="text-foreground">{{ pedidoItem.situacao_bling_nome || '—' }}</b>. Dá pra reabrir depois.</div>
               </template>
             </div>
           </div>

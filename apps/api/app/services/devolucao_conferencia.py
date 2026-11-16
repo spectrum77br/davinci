@@ -35,6 +35,10 @@ logger = structlog.get_logger()
 
 STATUS_SEGURADA = "segurada"
 ERRO_MOTIVO_DIVERGENTE = "motivo_divergente"
+# Marca que a Fraude automática (services/devolucao_fraude_auto) grava na
+# Observação do pedido quando lança sozinha: lançamento sem pessoa só sai com a
+# IA conferindo — sem resposta dela, segura (16/11/2026, revisão).
+MARCA_ROBO = "lançado sozinho pela Fraude automática"
 
 # Os nomes que a tela mostra (DevolucaoLancar.vue). Perdimento grava `Sucata`.
 MOTIVOS = (
@@ -73,6 +77,14 @@ que foi enviado.
 O que cada CONDIÇÃO quer dizer: Novo e Usado = o produto voltou e entra no estoque; Perdimento = \
 voltou sem conserto; Extraviado = o pacote se perdeu no caminho e nada chegou; Não devolvido = o \
 comprador não devolveu o produto; Trocado = voltou outro produto; Manutenção = foi para o técnico.
+
+Caso SEM devolução (condição "Não devolvido" — o comprador pediu só o reembolso e o produto \
+não volta): aqui o motivo é a ALEGAÇÃO do comprador que a loja está contestando com o vídeo da \
+embalagem, não o estado de um pacote que voltou. "Não recebido" = o comprador diz que não \
+recebeu; "Golpe" = diz que recebeu vazio, violado ou outro produto; "Item faltando" = diz que \
+faltou item. Nada disso contradiz "Não devolvido". A Observação do pedido pode trazer o que o \
+comprador alegou ("Fraude automática: o comprador alega …"): confira o motivo contra essa \
+alegação.
 
 Regras:
 - Marque bate=false SÓ quando houver contradição clara entre o lançamento e o que está escrito \
@@ -239,6 +251,28 @@ def ligada() -> bool:
     )
 
 
+def segurado_sem_ia(
+    pecas: Sequence[Peca], k: str, agora: datetime, *, modelo: str | None = None
+) -> dict[str, Any]:
+    """O que fica gravado quando o lançamento do robô não pôde ser conferido pela
+    IA: aparece como "segurado" na janela, com os botões de sempre (mandar / não
+    abrir). PURA."""
+    return {
+        "chave": k,
+        "em": agora.isoformat(),
+        "modelo": modelo,
+        "motivo_lancado": next((p.motivo for p in pecas if p.motivo), ""),
+        "condicao_lancada": next((p.condicao for p in pecas if p.condicao), ""),
+        "resultado": "nao_bate",
+        "motivo_sugerido": "",
+        "condicao_sugerida": "",
+        "explicacao": (
+            "Lançado sozinho pela Fraude automática e a IA não conferiu (sem resposta ou "
+            "desligada). Confira o motivo e mande — ou não abra."
+        ),
+    }
+
+
 @dataclass(frozen=True)
 class Resultado:
     """O que fazer com a disputa: `segurar` (não manda) ou seguir. `evento` vai
@@ -257,10 +291,12 @@ async def conferir(
     anterior: dict[str, Any] | None,
     agora: datetime | None = None,
     pergunta: Perguntar | None = None,
+    exigir_ok: bool = False,
 ) -> Resultado:
     """Decide se a disputa pode sair. Reaproveita a resposta anterior quando a
     entrada é a mesma (inclusive a decisão da pessoa — "mandar como está" vale
-    até alguém mudar o lançamento)."""
+    até alguém mudar o lançamento). `exigir_ok` (lançado pelo robô): IA sem
+    resposta segura em vez de deixar sair."""
     agora = agora or datetime.now(UTC)
     k = chave(pecas, observacao_pedido)
     anterior = anterior or {}
@@ -268,7 +304,7 @@ async def conferir(
         res = anterior.get("resultado")
         if res == "nao_bate":
             return Resultado(segurar=True, conferencia=None)
-        if res in ("bate", "aceito", "erro"):
+        if res in ("bate", "aceito") or (res == "erro" and not exigir_ok):
             return Resultado(segurar=False, conferencia=None)
     veredito, modelo = await (pergunta or perguntar)(entrada(pecas, observacao_pedido, plataforma))
     base = {
@@ -278,6 +314,15 @@ async def conferir(
         "motivo_lancado": next((p.motivo for p in pecas if p.motivo), ""),
         "condicao_lancada": next((p.condicao for p in pecas if p.condicao), ""),
     }
+    if veredito is None and exigir_ok:
+        return Resultado(
+            segurar=True,
+            conferencia=segurado_sem_ia(pecas, k, agora, modelo=modelo),
+            evento=(
+                "A IA não respondeu e este lançamento foi feito sozinho pela Fraude "
+                "automática: a contestação espera alguém conferir na janela da devolução."
+            ),
+        )
     if veredito is None:
         return Resultado(
             segurar=False,

@@ -14,6 +14,8 @@ Perdimento. Manutenção é etapa: condição "Manutenção" sem destino.
 
 from __future__ import annotations
 
+import re
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
@@ -64,6 +66,7 @@ class Lancamento:
     custo_manutencao: float | None = None
     prazo_manutencao: datetime | None = None
     prazo_contestacao: datetime | None = None
+    quantidade: int = 1
 
 
 def _txt(valor: str | None) -> str:
@@ -246,8 +249,11 @@ def pronto_pra_resolver(
     tem_chamado_aberto: bool,
     chamado_resolvido: bool,
     chamado_valor: float | None,
+    produto_sem_lancamento: bool = False,
 ) -> str | None:
-    """Motivo pra aparecer em "Pronto pra resolver" (None = ainda não).
+    """Motivo pra aparecer em "A finalizar" (antes "Pronto pra resolver"; None =
+    ainda não). `produto_sem_lancamento` = algum produto do pedido ainda não
+    tem lançamento (mala lançada, rodinha não): o lançamento não terminou.
 
     Produto com o técnico ou estoque que não entrou no Bling segura sempre.
     Lançamento terminado (todas as peças com condição) = a devolução está
@@ -264,7 +270,11 @@ def pronto_pra_resolver(
         manutencao_pendente(x) or _txt(x.estoque_status) in _ESTOQUE_PENDENTE for x in lancamentos
     ):
         return None
-    terminado = bool(lancamentos) and all(_txt(x.condicao) for x in lancamentos)
+    terminado = (
+        bool(lancamentos)
+        and all(_txt(x.condicao) for x in lancamentos)
+        and not produto_sem_lancamento
+    )
     if tem_chamado_aberto:
         if not terminado:
             return None
@@ -274,12 +284,38 @@ def pronto_pra_resolver(
     sit = _txt(situacao_bling)
     if sit and sit not in SITUACOES_ABERTAS:
         return f"o Bling já está em {situacao_nome or sit}"
-    if lancamentos and all(_txt(x.condicao) for x in lancamentos):
+    if terminado:
         rotulos = sorted({condicao_da_tela(x) or "" for x in lancamentos} - {""})
         return "lançada: " + ", ".join(rotulos) if rotulos else "lançada"
     if chamado_resolvido and chamado_valor is not None and float(chamado_valor) > 0:
         return "chamado concluído com valor ganho"
     return None
+
+
+def produto_sem_lancamento(
+    linhas: list[tuple[str | None, int | None]], lancamentos: list[Lancamento]
+) -> bool:
+    """Algum produto do pedido ainda sem lançamento? (mala lançada, rodinha não; 2
+    unidades, 1 lançada). `linhas` = (SKU, quantidade) de cada produto do pedido. Kit
+    `a+b` conta peça por peça, como a janela. Pedido de um produto só cujo SKU não
+    aparece em lançamento nenhum (kit do Bling que virou outras peças) não acusa —
+    a mesma folga de `lancamento_da_linha`. Sem lançamento nenhum: False (é "falta
+    lançar", não "A finalizar"). PURA."""
+    if not lancamentos:
+        return False
+    restante: dict[str, int] = defaultdict(int)
+    for x in lancamentos:
+        restante[_txt(x.sku).lower()] += max(1, int(x.quantidade or 1))
+    for sku, qtd in linhas:
+        partes = [p.strip() for p in re.split(r"[+,]", _txt(sku).lower()) if p.strip()] or [""]
+        if len(linhas) == 1 and not any(restante.get(p) for p in partes):
+            continue
+        for p in partes:
+            precisa = max(1, int(qtd or 1))
+            if restante[p] < precisa:
+                return True
+            restante[p] -= precisa
+    return False
 
 
 def lancamento_da_linha(

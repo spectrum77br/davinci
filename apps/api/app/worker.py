@@ -2665,6 +2665,30 @@ async def devolucao_rastreio_sync(ctx: dict) -> None:
     logger.info("devolucao_rastreio_sync_job_done", **summary)
 
 
+async def devolucao_resolver_sozinho(ctx: dict) -> None:
+    """A cada 5 min: devolução com TODAS as peças de volta no estoque sai da
+    lista sozinha ("Voltou pro estoque (resolvido sozinho)") — Vinicius,
+    16/11/2026. Perdimento, Extraviado e afins ficam pro adm/Cairo em "A
+    finalizar". Sem candidato = 1 SELECT."""
+    from app.services import devolucao_resolver_sozinho as svc
+
+    async with session_scope() as s:
+        resumo = await svc.rodada(s)
+    logger.info("devolucao_resolver_sozinho_tick", **resumo)
+
+
+async def devolucao_fraude_auto(ctx: dict) -> None:
+    """A cada 10 min: só reembolso da TikTok/Shopee no painel Fraude, esperando a
+    nossa resposta — pede o vídeo da embalagem e, quando ele chega, lança "Não
+    devolvido" e a resposta sai pela API (Vinicius, 16/11/2026). Sem candidato =
+    1 SELECT."""
+    from app.services import devolucao_fraude_auto as svc
+
+    async with session_scope() as s:
+        resumo = await svc.rodada(s)
+    logger.info("devolucao_fraude_auto_tick", **resumo)
+
+
 async def logistica_track_sync(ctx: dict) -> None:
     """A cada 15 min: registra no 17track o rastreio Correios novo da Logística e
     puxa a localização física real. Eduardo 04/09: "rastreio e localização de
@@ -5859,6 +5883,22 @@ class WorkerSettings:
         # Rastreio do pacote que VOLTA (Acompanhamento de Devoluções), a cada
         # 30 min (:10/:40 — fora dos slots dos ingests e do recarregar).
         cron(devolucao_rastreio_sync, minute={10, 40}, run_at_startup=False, timeout=1500),
+        # Devolução com tudo de volta no estoque se resolve sozinha (16/11/2026),
+        # a cada 5 min (:04/:09/…).
+        cron(
+            devolucao_resolver_sozinho,
+            minute=set(range(4, 60, 5)),
+            run_at_startup=False,
+            timeout=600,
+        ),
+        # Fraude automática (16/11/2026), a cada 10 min (:07/:17/…): depois do
+        # sync das devoluções (:10/:40), que grava o tipo, a ação e o prazo do caso.
+        cron(
+            devolucao_fraude_auto,
+            minute=set(range(7, 60, 10)),
+            run_at_startup=False,
+            timeout=600,
+        ),
         # Prazo de contestação das devoluções (Shopee/TikTok) + aviso Threema,
         # a cada 30 min (:20/:50 — fora dos slots do rastreio de devolução).
         cron(devolucao_prazo_sync, minute={20, 50}, run_at_startup=False, timeout=900),

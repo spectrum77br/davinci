@@ -53,6 +53,7 @@ from app.services import (
 )
 from app.services import devolucao_conferencia as conferencia
 from app.services import devolucao_painel as contas
+from app.services import devolucao_resolver_sozinho as resolver_sozinho
 from app.services.devolution_stock_return import status_estoque
 
 logger = structlog.get_logger()
@@ -163,6 +164,8 @@ class PainelOut(BaseModel):
     # Opções do "Como terminou" do Resolver.
     como_terminou: list[str]
     pode_mover_painel: bool = False
+    # Resolver / reabrir: só admin e quem tem `devolucoes_resolver` (Cairo).
+    pode_resolver: bool = False
     ve_custo: bool = False
     # A pessoa só enxerga as lojas da equipe dela (o resumo por mês é de
     # quem vê todas as lojas).
@@ -214,6 +217,21 @@ def _admin(user: User) -> bool:
     return user.role == UserRole.ADMIN
 
 
+def pode_resolver(user: User) -> bool:
+    """Resolver e reabrir uma devolução: admin ou quem tem `devolucoes_resolver`
+    (edit) — Vinicius, 16/11/2026: "somente adm e o Cairo consegue clicar em
+    resolver uma devolução". O resto da janela (lançar, chamado, provas) segue
+    com `devolucoes` (edit)."""
+    if _admin(user):
+        return True
+    return bool(((user.permissions or {}).get("devolucoes_resolver") or {}).get("edit"))
+
+
+def _exigir_pode_resolver(user: User) -> None:
+    if not pode_resolver(user):
+        raise HTTPException(403, detail={"code": "resolver_sem_permissao"})
+
+
 def _conta_lanc(d: Devolution) -> contas.Lancamento:
     return contas.Lancamento(
         sku=d.sku,
@@ -226,6 +244,7 @@ def _conta_lanc(d: Devolution) -> contas.Lancamento:
         custo_manutencao=d.custo_manutencao,
         prazo_manutencao=d.prazo,
         prazo_contestacao=d.prazo_contestacao,
+        quantidade=d.quantidade or 1,
     )
 
 
@@ -358,6 +377,19 @@ async def montar_itens(
     linhas_por_pedido: dict[str, int] = defaultdict(int)
     for r in rows:
         linhas_por_pedido[(r.get("pedido_bling") or "").strip()] += 1
+    # Pedido com lançamento em que algum PRODUTO ainda não tem o dele (mala
+    # lançada, rodinha não; kit a+b peça por peça; quantidade): o lançamento não
+    # terminou — não é "A finalizar".
+    produtos_do_pedido: dict[str, list[tuple[str | None, int | None]]] = defaultdict(list)
+    for r in rows:
+        produtos_do_pedido[(r.get("pedido_bling") or "").strip()].append(
+            (r.get("sku"), r.get("quantidade"))
+        )
+    produto_sem_lanc = {
+        p
+        for p, prods in produtos_do_pedido.items()
+        if contas.produto_sem_lancamento(prods, [_conta_lanc(x) for x in lancs.get(p, [])])
+    }
 
     vistos: set[str] = set()
     out: list[PainelItemOut] = []
@@ -481,6 +513,7 @@ async def montar_itens(
                 tem_chamado_aberto=aberto,
                 chamado_resolvido=concluido,
                 chamado_valor=valor,
+                produto_sem_lancamento=pedido in produto_sem_lanc,
             )
         out.append(PainelItemOut.model_validate(d))
     return out
@@ -519,6 +552,7 @@ async def listar(
         total_pedidos=len({i.pedido_bling for i in items if i.pedido_bling}),
         como_terminou=list(contas.COMO_TERMINOU),
         pode_mover_painel=antigo._pode_mover_painel(user),
+        pode_resolver=pode_resolver(user),
         ve_custo=_admin(user),
         com_cerca_de_equipe=lojas is not None,
     )
@@ -544,11 +578,13 @@ async def resolver(
     Com `situacao_id`, muda a situação no Bling antes (mesma troca do seletor
     Status Bling: desvio, espelho local e auditoria); se o Bling recusar, nada
     é resolvido."""
+    _exigir_pode_resolver(user)
     pedido = pedido_bling.strip()
     como = body.como_terminou.strip()
-    # A marca da largada é do sistema: usada à mão, esconderia o pedido de
-    # "Resolvidas" e do resumo.
-    if len(como) < 2 or como in antigo.PAINEL_MARCAS:
+    # As marcas são do sistema: a da largada, usada à mão, esconderia o pedido
+    # de "Resolvidas" e do resumo; a do "resolvido sozinho" diria que foi o
+    # sistema.
+    if len(como) < 2 or como in antigo.PAINEL_MARCAS or como == resolver_sozinho.COMO:
         raise HTTPException(422, detail={"code": "como_terminou_invalido"})
     await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
     row = await antigo._rastreio_do_pedido(session, pedido)
@@ -593,6 +629,7 @@ async def reabrir(
     """Desfaz o Resolver: o pedido volta pra lista de abertas. Não mexe no
     Bling (quem resolveu pode ter mudado a situação — trocar de volta é no
     seletor Status Bling)."""
+    _exigir_pode_resolver(user)
     pedido = pedido_bling.strip()
     await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
     row = await session.get(DevolucaoRastreio, pedido)
@@ -601,7 +638,9 @@ async def reabrir(
     como = row.resolvido_como
     row.resolvido_at = None
     row.resolvido_por = None
-    row.resolvido_como = None
+    # Marca que foi uma PESSOA que reabriu: o "resolve sozinho" não fecha de novo
+    # (aberto continua sendo `resolvido_at` vazio; a tela não mostra o como de aberto).
+    row.resolvido_como = resolver_sozinho.REABERTO_A_MAO
     row.updated_by = user.id
     await session.commit()
     sit_id, sit_nome = await _situacao_atual(session, pedido)
