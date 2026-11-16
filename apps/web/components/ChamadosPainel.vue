@@ -2585,14 +2585,15 @@ async function confirmarExcluir() {
             <!-- 09/11 (Vinicius): abre o perfil da loja no AdsPower DESTE computador, já na
                  página do chamado (cada um no seu). -->
             <ChamadoServidor :chamado-id="hist.row.id" :destino="hist.row.chamado_url" />
-            <!-- 07/10 (Vinicius): atalho pra Devoluções numa aba nova, já na aba
-                 Lançamentos e buscando este pedido (é lá que fica o motivo). -->
+            <!-- 07/10 (Vinicius): atalho pra Devoluções numa aba nova, já neste
+                 pedido (é lá que fica o motivo). 16/11: no painel novo o atalho
+                 abre a janela do pedido, mesmo que ele já tenha saído da lista. -->
             <NuxtLink
               v-if="hist.row.origem === 'devolucao' && (hist.row.pedido_bling || hist.row.pedido_marketplace)"
-              :to="{ path: '/devolucoes', query: { tab: 'lancamentos', search: hist.row.pedido_bling || hist.row.pedido_marketplace } }"
+              :to="{ path: '/devolucoes', query: { search: hist.row.pedido_bling || hist.row.pedido_marketplace } }"
               target="_blank"
               class="inline-flex h-7 items-center whitespace-nowrap rounded-md border border-input bg-background px-2 text-sm font-medium hover:bg-accent hover:text-accent-foreground"
-              title="Abrir a Devoluções numa aba nova, na aba Lançamentos, já buscando este pedido"
+              title="Abrir a Devoluções numa aba nova, já na janela deste pedido"
             >
               <ExternalLink class="size-3.5 mr-1" />
               Devoluções

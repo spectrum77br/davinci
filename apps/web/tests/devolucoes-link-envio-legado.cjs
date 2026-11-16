@@ -19,7 +19,7 @@ const transpile = (source) => ts.transpileModule(source, {
   compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
 }).outputText
 
-const pageFile = path.join(__dirname, '../pages/devolucoes.vue')
+const pageFile = path.join(__dirname, '../pages/devolucoes-antigo.vue')
 const page = parse(fs.readFileSync(pageFile, 'utf8'), { filename: pageFile })
 assert.deepEqual(page.errors, [])
 const src = page.descriptor.scriptSetup.content

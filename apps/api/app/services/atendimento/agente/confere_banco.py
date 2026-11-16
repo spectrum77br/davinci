@@ -29,7 +29,7 @@ parecido, ele responde normal como qualquer outra conversa"; "os sensíveis abai
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 import pydantic
@@ -58,6 +58,12 @@ VEREDITOS_QUE_SOLTAM = frozenset({MESMA, SERVE})
 # (o "responde e marca": a conversa fica em "Precisa de ação"). O teste de 16/11: 24 de 129
 # rascunhos, todos com texto, presos só por essas ações.
 PADRAO = "padrao"
+# A regra do dono ao pé da letra (16/11/2026, a 5ª rodada do teste, 36%: a conferência disse
+# "diferente" em 19 de 22 reclamações presas — o rascunho do agente não é IGUAL ao da equipe):
+# preso só por ação de reclamação, num tipo em que a equipe TEM padrão no banco, o rascunho
+# responde e marca mesmo sem a conferência achar igual — o verificador continua conferindo o
+# texto. Jurídico, fraude e ofensa ficam só com a conferência.
+PELO_TIPO = "pelo_tipo"
 ACOES_DO_PADRAO = frozenset(
     {
         "abrir_chamado",
@@ -68,6 +74,7 @@ ACOES_DO_PADRAO = frozenset(
         "juridico_fraude_ofensa",
     }
 )
+ACOES_DO_PADRAO_PELO_TIPO = ACOES_DO_PADRAO - {"juridico_fraude_ofensa"}
 MAX_CHARS_TEXTO_DO_BANCO = 600
 _MARCACAO = re.compile(r"\[[^\]]+\]|\{[^}]+\}")
 # A virada (13/11/2026): UMA chamada com todas as respostas do banco que o pacote mostrou (o
@@ -112,7 +119,16 @@ _ITEM_PADRAO = (
     "a equipe não afirmou, prometer outra coisa nem pedir outra ação ao cliente. Diga o id do "
     "caso que mostra o padrão.\n"
 )
-SISTEMA_COM_PADRAO = SISTEMA.replace('- "diferente": ', _ITEM_PADRAO + '- "diferente": ', 1)
+# O padrão do TIPO do rascunho (16/11/2026, `banco_respostas.padroes_do_tipo`): o caso marcado
+# «PADRÃO DA EQUIPE» é a resposta que a equipe repete para esse tipo de caso, não a de um cliente.
+_CASOS_DO_PADRAO = (
+    "\nOs casos marcados «PADRÃO DA EQUIPE» são a resposta que a equipe repete para esse tipo de "
+    'caso (sem a pergunta de um cliente): "serve" quando ela atende ESTE cliente como está; '
+    '"padrao" quando a proposta já segue o mesmo encaminhamento.'
+)
+SISTEMA_COM_PADRAO = (
+    SISTEMA.replace('- "diferente": ', _ITEM_PADRAO + '- "diferente": ', 1) + _CASOS_DO_PADRAO
+)
 
 
 class Veredito(pydantic.BaseModel):
@@ -137,8 +153,11 @@ def entrada(
     pergunta: str | None,
     proposta: str | None,
     casos: Sequence[tuple[str, str, str]],
+    padroes: Mapping[str, int] | None = None,
 ) -> str:
-    """A mensagem do usuário (os textos já mascarados). PURA."""
+    """A mensagem do usuário (os textos já mascarados). PURA. `padroes`: o id do caso que é o
+    PADRÃO DA EQUIPE para o tipo → quantas vezes ela respondeu assim."""
+    padroes = padroes or {}
     linhas = [
         "<dados>",
         f"PERGUNTA DO CLIENTE: {_corta(pergunta) or '(sem texto)'}",
@@ -146,6 +165,12 @@ def entrada(
         "CASOS DO BANCO:",
     ]
     for i, pergunta_da_equipe, da_equipe in casos:
+        if i in padroes:
+            linhas.append(
+                f"- {i} | PADRÃO DA EQUIPE ({padroes[i]} respostas iguais para este tipo de "
+                f"caso) | equipe: «{_corta(da_equipe, MAX_CHARS_CASO)}»"
+            )
+            continue
         linhas.append(
             f"- {i} | cliente: «{_corta(pergunta_da_equipe, MAX_CHARS_CASO) or '(sem texto)'}» "
             f"| equipe: «{_corta(da_equipe, MAX_CHARS_CASO)}»"
@@ -347,10 +372,12 @@ async def _conferir_candidatas(
     cliente: Any,
     modelo: str,
     padrao: bool = False,
+    padroes: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """O registro da conferência (uma chamada com todas as candidatas): {"id", "veredito",
     "motivo", "custo_usd"}. O id que o modelo deu fora das candidatas não vale. `padrao`: aceita
-    o "padrao" (a opção B). Pode levantar (quem chama segura)."""
+    o "padrao" (a opção B); `padroes`: os casos que são o padrão do tipo (id → vezes). Pode
+    levantar (quem chama segura)."""
     import anthropic
 
     from app.services.atendimento.agente import custo
@@ -368,7 +395,9 @@ async def _conferir_candidatas(
         return nada
     try:
         mensagem = await cliente.messages.create(
-            **argumentos(entrada(pergunta_m, proposta, cands), modelo=modelo, padrao=padrao),
+            **argumentos(
+                entrada(pergunta_m, proposta, cands, padroes), modelo=modelo, padrao=padrao
+            ),
             timeout=anthropic.Timeout(TIMEOUT_S, connect=10.0),
         )
     except anthropic.AnthropicError:
@@ -430,6 +459,44 @@ async def texto_do_banco(session: AsyncSession | None, ctx: Any, caso: str) -> s
     return texto[0].upper() + texto[1:]
 
 
+async def padroes_para_o_verificador(
+    session: AsyncSession | None, ctx: Any, categoria: str | None
+) -> None:
+    """A virada (16/11/2026): o PADRÃO DA EQUIPE do tipo do rascunho no contexto ANTES do
+    verificador, em todo rascunho — "o reembolso é feito pela plataforma" que a equipe repete
+    vale como política para ele (`verificador.linhas_dos_pares`). Nunca levanta."""
+    if not _virada(ctx):
+        return
+    await _padroes_do_rascunho(session, ctx, categoria)
+
+
+async def _padroes_do_rascunho(
+    session: AsyncSession | None, ctx: Any, categoria: str | None
+) -> list[dict]:
+    """O PADRÃO DA EQUIPE para o tipo do RASCUNHO (`banco_respostas.padroes_do_tipo`), já
+    registrado no contexto (citável; o envio lê o tipo dele em `fatos.agente.banco_tipos`).
+    Sem a sessão ou sem padrão, nada. Nunca levanta."""
+    from datetime import UTC, datetime
+
+    from app.services.atendimento import banco_respostas
+
+    if session is None or not categoria:
+        return []
+    try:
+        padroes = await banco_respostas.padroes_do_tipo(
+            session,
+            tipo=categoria,
+            plataforma=str(getattr(ctx, "plataforma", "") or ""),
+            integration_id=getattr(ctx, "integration_id", None),
+            as_of=getattr(ctx, "as_of", None) or datetime.now(UTC),
+        )
+    except Exception as e:  # noqa: BLE001 — sem o padrão, a conferência de sempre
+        logger.warning("atendimento_confere_banco_padrao_falhou", err=type(e).__name__)
+        return []
+    ctx.registrar_pares(padroes)
+    return padroes
+
+
 async def solta_a_pessoa(
     ctx: Any,
     *,
@@ -452,11 +519,20 @@ async def solta_a_pessoa(
         ):
             return False
         await _pelo_rascunho(session, ctx, categoria=categoria, texto=texto, pergunta=pergunta)
+        # A opção B: preso SÓ por ação de reclamação, o padrão da equipe também solta — e o
+        # padrão do TIPO do rascunho vai na frente das candidatas (16/11/2026: o do pacote,
+        # pelo tipo das palavras do cliente, só achou o tipo em 4 de 129 conversas).
+        padrao = bool(acoes) and set(acoes) <= ACOES_DO_PADRAO
+        padroes = await _padroes_do_rascunho(session, ctx, categoria) if padrao else []
         cands = candidatas(ctx, categoria, evidencias)
+        if padroes:
+            ids_padrao = {p["id"] for p in padroes}
+            cands = [
+                *((p["id"], "", str(p["resposta"])) for p in padroes),
+                *(c for c in cands if c[0] not in ids_padrao),
+            ][:MAX_CANDIDATAS]
         if not cands:
             return False
-        # A opção B: preso SÓ por ação de reclamação, o padrão da equipe também solta.
-        padrao = bool(acoes) and set(acoes) <= ACOES_DO_PADRAO
         registro = await _conferir_candidatas(
             ctx,
             cands,
@@ -465,6 +541,7 @@ async def solta_a_pessoa(
             cliente=cliente,
             modelo=modelo,
             padrao=padrao,
+            padroes={p["id"]: int(p.get("padrao") or 0) for p in padroes},
         )
         registro["pessoa"] = True
         ctx.banco_confere = registro
@@ -479,6 +556,12 @@ async def solta_a_pessoa(
         soltam = VEREDITOS_QUE_SOLTAM | ({PADRAO} if padrao else set())
         if registro.get("veredito") in soltam and registro.get("id"):
             ctx.banco_bateu = registro["id"]
+            ctx.responde_e_marca = True
+            return True
+        if padroes and set(acoes) <= ACOES_DO_PADRAO_PELO_TIPO:
+            # A regra do dono: o tipo tem padrão no banco — responde e marca (ver acima).
+            registro.update(id=padroes[0]["id"], veredito=PADRAO, pelo_tipo=True)
+            ctx.banco_bateu = padroes[0]["id"]
             ctx.responde_e_marca = True
             return True
         return False

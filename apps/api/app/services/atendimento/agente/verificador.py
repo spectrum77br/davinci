@@ -1967,6 +1967,8 @@ def pares_para_o_verificador(ctx: Any) -> list[dict]:
         for i, p in (getattr(ctx, "pares_do_pacote", None) or {}).items()
         if i.startswith(agente_ctx.PREFIXO_BANCO) and i not in vistos
     ]
+    # O padrão da equipe (16/11/2026) primeiro: é a política que ela repete.
+    do_banco.sort(key=lambda p: not p.get("padrao"))
     return [*citados, *do_banco][:MAX_PARES_NO_VERIFICADOR]
 
 
@@ -2097,7 +2099,9 @@ def orientacao_aprovada(assunto: str | None, plataforma_codigo: str = "") -> lis
             linhas += [f"ORIENTAÇÃO APROVADA DO ASSUNTO ({nome}):", f"- {orientacao}"]
     caminhos = prompt.CAMINHOS_APP.get(plataforma_codigo)
     if caminhos:
-        linhas += ["CAMINHOS DO APP:", *(f"- {c}" for c in caminhos)]
+        # 16/11/2026: e o que é da plataforma (a loja não vê, o código da devolução, os prazos).
+        fatos = prompt.FATOS_DA_PLATAFORMA.get(plataforma_codigo, ())
+        linhas += ["CAMINHOS DO APP:", *(f"- {c}" for c in (*caminhos, *fatos))]
     return linhas
 
 

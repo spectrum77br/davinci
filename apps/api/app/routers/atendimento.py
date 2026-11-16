@@ -6424,6 +6424,8 @@ async def _turnos_das_lojas(
         AtendimentoConversa.canal,
         AtendimentoConversa.conta,
         AtendimentoConversa.sem_resposta_necessaria,
+        # 16/11/2026: a hora do "Não precisa de resposta" da pessoa (`dados.sem_resposta_em`).
+        AtendimentoConversa.dados[CHAVE_SEM_RESPOSTA_EM].astext.label("sem_resposta_em"),
     ).where(*filtro)
     conversas = {row.id: row for row in (await session.execute(consulta_conversas)).all()}
     if not conversas:
@@ -6476,23 +6478,56 @@ async def _turnos_das_lojas(
             {"conta": info.conta, "recebidas": 0, "tempos": [], "no_prazo": 0, "vencidas": 0},
         )
         loja["conta"] = loja["conta"] or info.conta
+        # O Eduardo (16/11/2026): o "Não precisa de resposta" da pessoa conta como resposta —
+        # fecha a espera que estava aberta na hora do clique (só o último clique fica gravado).
+        clique = _hora_do_clique(info.sem_resposta_em)
         inicio: datetime | None = None
         for autor, quando in msgs:
+            if inicio is not None and clique is not None and inicio <= clique < quando:
+                # A pessoa marcou antes desta mensagem: a espera fechou no clique.
+                _contar_resposta(loja, inicio, clique, prazo, desde)
+                inicio, clique = None, None
             if autor == AUTOR_CLIENTE:
                 inicio = inicio or quando
                 continue
             if inicio is not None:
-                if inicio >= desde:
-                    loja["recebidas"] += 1
-                    tempo = quando - inicio
-                    loja["tempos"].append(tempo.total_seconds() / 60)
-                    loja["no_prazo"] += int(tempo <= prazo)
+                _contar_resposta(loja, inicio, quando, prazo, desde)
                 inicio = None
+        if inicio is not None and clique is not None and clique >= inicio:
+            _contar_resposta(loja, inicio, clique, prazo, desde)
+            inicio = None
         if inicio is not None and inicio >= desde and not info.sem_resposta_necessaria:
             loja["recebidas"] += 1
             loja["vencidas"] += int(agora - inicio > prazo)
 
     return lojas
+
+
+# A hora do "Não precisa de resposta" que a PESSOA marcou (ISO UTC, a sessão da Caixa grava no
+# PATCH; o "Precisa de resposta" apaga; a IA não grava) — 16/11/2026.
+CHAVE_SEM_RESPOSTA_EM = "sem_resposta_em"
+
+
+def _contar_resposta(
+    loja: dict[str, Any], inicio: datetime, quando: datetime, prazo: timedelta, desde: datetime
+) -> None:
+    """A espera que começou em `inicio` respondida em `quando` (a espera de antes do período não
+    entra). Mexe em `loja`."""
+    if inicio >= desde:
+        loja["recebidas"] += 1
+        tempo = quando - inicio
+        loja["tempos"].append(tempo.total_seconds() / 60)
+        loja["no_prazo"] += int(tempo <= prazo)
+
+
+def _hora_do_clique(valor: Any) -> datetime | None:
+    """A hora do clique gravada em `dados` (texto ISO) ou None. PURA."""
+    if not valor:
+        return None
+    try:
+        return _utc(datetime.fromisoformat(str(valor).replace("Z", "+00:00")))
+    except ValueError:
+        return None
 
 
 async def _metricas_lojas(
