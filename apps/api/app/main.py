@@ -62,6 +62,7 @@ from app.routers import imagens as imagens_router
 from app.routers import importacao as importacao_router
 from app.routers import informar as informar_router
 from app.routers import integrations as integrations_router
+from app.routers import ip_celular as ip_celular_router
 from app.routers import jobs as jobs_router
 from app.routers import listings as listings_router
 from app.routers import logistica as logistica_router
@@ -230,6 +231,10 @@ app.include_router(celulares_router.router)
 app.include_router(companies_router.router)
 app.include_router(company_certificates_router.router)
 app.include_router(company_proxy_router.router)
+# Usar este IP no celular (16/11/2026): rotas do admin + página pública do iPhone.
+app.include_router(ip_celular_router.router)
+app.include_router(ip_celular_router.router_publico)
+ip_celular_router.mascarar_codigo_no_access_log()  # código de uso único fora do access log
 app.include_router(adspower_agent_router.router)
 app.include_router(stores_router.router)
 app.include_router(cadastros_router.router)

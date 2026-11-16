@@ -186,6 +186,54 @@ services:
         aliases:
           - worker_marketing_agent
 
+  # IP da loja no celular (16/11/2026, docs/ip-celular.md): intermediário
+  # SOCKS5 entre o iPhone e o proxy da empresa. Mesma imagem da api (não gasta
+  # disco), mas SEM o .env: fica exposto na internet, então recebe só o Redis
+  # e a chave própria (IPCEL_RELAY_KEY, a mesma do .env da api). Sem a chave
+  # ele não escuta nada (recurso desligado). A porta pública só é publicada
+  # no docker-compose.prod.yml.
+  ipcel_relay:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # python direto (não `uv run`): o ambiente já está em /usr/local e o uv
+    # poderia tentar baixar pacotes ao subir.
+    command: ["python", "-m", "app.ip_celular.relay"]
+    environment:
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      IPCEL_RELAY_KEY: ${IPCEL_RELAY_KEY:-}
+      IPCEL_BLOQUEAR: ${IPCEL_BLOQUEAR:-}
+      IPCEL_PORTA: "21080"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    pids_limit: 64
+    # Uma linha por conexão: com o disco apertado, o log gira sozinho.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [davinci_net]
+    healthcheck:
+      # Só o cumprimento SOCKS5 (pede usuário/senha): não autentica nada.
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import socket;
+          s=socket.create_connection(('127.0.0.1',21080),5);
+          s.settimeout(5);
+          s.sendall(bytes([5,1,2]));
+          assert s.recv(2)==bytes([5,2])
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
   # Sidecar MEGAcmd: ponte com a conta MEGA (fotos dos produtos da Tabela
   # de Preços). A API fala com ele em http://megacmd:9000 (rede interna,
   # sem porta no host); a sessão de login persiste no volume. Como a

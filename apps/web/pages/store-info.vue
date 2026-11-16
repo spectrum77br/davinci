@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { TABS_CADASTROS } from '~/lib/navGroups'
-import { Plus, RefreshCw, Trash2, X, Check, Loader2, Eye, EyeOff, Copy, ExternalLink, AlertCircle, Unlink, Link2, Archive, ArchiveRestore } from 'lucide-vue-next'
+import { Plus, RefreshCw, Trash2, X, Check, Loader2, Eye, EyeOff, Copy, ExternalLink, AlertCircle, Unlink, Link2, Archive, ArchiveRestore, Smartphone } from 'lucide-vue-next'
+import type { IpCelularAlvo } from '~/lib/ipCelular'
 
 definePageMeta({
   // `/store-info.` (trailing period) shows up consistently in prod logs —
@@ -144,6 +145,17 @@ const { api } = useApi()
 // quando um usuário tem permissões antigas de edição/exclusão do recurso.
 const canEdit = useIsAdmin()
 const canDelete = canEdit
+
+// "Usar este IP no celular" (16/11/2026): só admin, com a senha extra da tela
+// Empresas (pedida dentro da janela). A API acha a empresa da loja pelo apelido.
+const ipCelular = ref<IpCelularAlvo | null>(null)
+function abrirIpCelular(row: StoreInfo) {
+  const plataforma = platformLabel(row.platform)
+  ipCelular.value = {
+    store_info_id: row.id,
+    titulo: [plataforma, row.account_name].filter(Boolean).join(' · ') || 'Loja',
+  }
+}
 
 const items = ref<StoreInfo[]>([])
 const integrations = ref<IntegrationRef[]>([])
@@ -973,6 +985,7 @@ async function copyAddress(row: StoreInfo, field: 'shipping_address' | 'return_a
               </dl>
               <div v-if="canEdit || canDelete" class="mt-3 flex flex-wrap gap-2">
                 <Button v-if="canEdit" size="sm" variant="outline" @click="openStoreTable(row)">Editar na tabela</Button>
+                <Button v-if="canEdit && !archivedView" size="sm" variant="outline" @click="abrirIpCelular(row)">Usar este IP no celular</Button>
                 <Button v-if="canEdit" size="sm" variant="outline" :disabled="archiveBusy.has(row.id)" @click="archivedView ? unarchiveRow(row) : archiveRow(row)">{{ archivedView ? 'Ativar loja' : 'Arquivar' }}</Button>
                 <Button v-if="canDelete" size="sm" variant="ghost" @click="remove(row)">Excluir</Button>
               </div>
@@ -1643,6 +1656,15 @@ async function copyAddress(row: StoreInfo, field: 'shipping_address' | 'return_a
             <!-- actions: arquivar/ativar + delete -->
             <td class="border border-border px-1 py-1 text-center whitespace-nowrap">
               <button
+                v-if="canEdit && !archivedView"
+                class="p-1 text-blue-600 hover:bg-blue-500/10 rounded"
+                :title="`Usar o IP de ${row.account_name || row.platform} no celular`"
+                :aria-label="`Usar o IP de ${row.account_name || row.platform} no celular`"
+                @click="abrirIpCelular(row)"
+              >
+                <Smartphone class="h-3 w-3" />
+              </button>
+              <button
                 v-if="canEdit && archivedView"
                 class="p-1 text-emerald-500 hover:bg-emerald-500/10 rounded disabled:opacity-40"
                 :title="`Ativar ${row.account_name || row.platform}`"
@@ -1917,6 +1939,7 @@ async function copyAddress(row: StoreInfo, field: 'shipping_address' | 'return_a
         </div>
       </div>
     </div>
+    <IpCelularPainel v-if="canEdit" :alvo="ipCelular" :area="/^\/store-info/" @fechar="ipCelular = null" />
   </div>
 </template>
 

@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { TABS_CADASTROS } from '~/lib/navGroups'
+import type { IpCelularAlvo } from '~/lib/ipCelular'
 import { fmtPct } from '~/lib/nfse'
 import { PCT_EMPRESA_DICA, lerPctEmpresa, pctNormal, pctParaCampo } from '~/lib/percentualEmpresa'
 import { ref, computed, reactive, watch, nextTick } from 'vue'
-import { Plus, RefreshCw, X, ExternalLink, Trash2, Lock, SlidersHorizontal, ShieldCheck, KeyRound, Download, Pencil, Upload, Eye, EyeOff } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, ExternalLink, Trash2, Lock, SlidersHorizontal, ShieldCheck, KeyRound, Download, Pencil, Upload, Eye, EyeOff, Smartphone } from 'lucide-vue-next'
 import {
   MARKETPLACES,
   MARKETPLACE_SHORT,
@@ -104,6 +105,13 @@ function bloquear() {
   trava.trancar()
   grid.value = null
 }
+
+// "Usar este IP no celular" (16/11/2026): a janela é o IpCelularPainel. Só
+// para admin e para empresa com o proxy inteiro (porta, usuário e senha).
+const ipCelular = ref<IpCelularAlvo | null>(null)
+function abrirIpCelular(row: GridRow) {
+  ipCelular.value = { company_id: row.company.id, titulo: row.company.apelido }
+}
 const grid = ref<GridOut | null>(null)
 const storeInfos = ref<StoreInfoLite[]>([])
 const loading = ref(false)
@@ -166,6 +174,7 @@ watch(() => trava.token.value, (agora, antes) => {
   if (!agora && antes) {
     fecharCertificado()
     fecharProxy()
+    ipCelular.value = null
   }
 })
 // A lista e a ficha dividem a chave: vindo de uma para a outra ela já existe
@@ -1525,6 +1534,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
           <div class="mt-3 flex flex-wrap gap-2">
             <Button v-if="isAdmin" size="sm" variant="outline" @click="alternarCertificado(row)">Certificados</Button>
             <Button v-if="isAdmin" size="sm" variant="outline" @click="abrirProxy(row)">Proxy</Button>
+            <Button v-if="isAdmin && row.company.proxy_configurado" size="sm" variant="outline" @click="abrirIpCelular(row)">Usar este IP no celular</Button>
             <Button v-if="canEdit" size="sm" variant="outline" @click="openCompanyTable(row)">Editar na tabela</Button>
           </div>
         </details>
@@ -1808,6 +1818,16 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
                 @click.stop="abrirProxy(row)"
               >
                 <KeyRound class="size-3.5" />
+              </button>
+              <button
+                v-if="isAdmin && !isEditingCell(row, 'ip') && row.company.proxy_configurado"
+                type="button"
+                class="ml-0.5 inline-flex rounded p-0.5 align-middle font-sans text-blue-600 hover:bg-accent"
+                title="Usar este IP no celular"
+                :aria-label="`Usar o IP de ${row.company.apelido} no celular`"
+                @click.stop="abrirIpCelular(row)"
+              >
+                <Smartphone class="size-3.5" />
               </button>
 
             </td>
@@ -2415,6 +2435,7 @@ async function toggleMarketplaceEnabled(row: GridRow, mk: Marketplace) {
         </div>
       </div>
     </div>
+        <IpCelularPainel v-if="isAdmin" :alvo="ipCelular" :area="/^\/companies(\/|$)/" @fechar="ipCelular = null" />
         <!-- Painel do proxy: um só, fora da tabela (a rolagem cortava e o filtro o fechava). -->
         <Teleport to="body">
         <div

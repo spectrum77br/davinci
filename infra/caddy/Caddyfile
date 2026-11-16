@@ -34,11 +34,12 @@
 
 	log {
 		output stdout
-		# O conector do Claude leva o token no path: mascara antes de logar.
+		# O conector do Claude leva o token no path, e o link do "IP da loja no
+		# celular" leva o código de uso único: mascara os dois antes de logar.
 		format filter {
 			wrap console
 			fields {
-				request>uri regexp "claude-mcp/[0-9a-f]+" "claude-mcp/***"
+				request>uri regexp "(claude-mcp|ipcel)/[0-9A-Za-z_-]+" "$1/***"
 			}
 		}
 	}
