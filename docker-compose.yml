@@ -3,6 +3,13 @@ name: davinci
 networks:
   davinci_net:
     driver: bridge
+  # IP da loja no celular (docs/ip-celular.md): rede SÓ do intermediário e do
+  # Redis próprio do recurso. O intermediário fica exposto na internet e não
+  # pode alcançar o Redis principal (sem senha, com os jobs dos workers) nem
+  # o resto da davinci_net. Ponte comum: a saída para a internet (proxies das
+  # empresas) continua.
+  ipcel_net:
+    driver: bridge
 
 services:
   # Local-only DB/Redis. In prod, api/worker connect to pre-existing pg18 + redis7
@@ -50,6 +57,8 @@ services:
     # precisar rastrear PID.
     environment:
       APP_NAME: davinci-api
+      # IP da loja no celular: o Redis próprio do recurso (ver ipcel_redis).
+      IPCEL_REDIS_URL: redis://ipcel_redis:6379/0
     volumes:
       - ./data/uploads:/data/uploads
     healthcheck:
@@ -186,12 +195,51 @@ services:
         aliases:
           - worker_marketing_agent
 
+  # IP da loja no celular (16/11/2026, docs/ip-celular.md): Redis PRÓPRIO do
+  # recurso. Sem disco (os links duram no máximo 4 h; se cair, os links somem
+  # e o intermediário recusa tudo — falha fechada) e por isso sem MISCONF com
+  # o disco cheio. A api fala com ele pela davinci_net; o intermediário, pela
+  # ipcel_net — e só com ele.
+  ipcel_redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 32mb
+      - --maxmemory-policy
+      - noeviction
+      - --protected-mode
+      - "no"
+    user: redis
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [davinci_net, ipcel_net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   # IP da loja no celular (16/11/2026, docs/ip-celular.md): intermediário
   # SOCKS5 entre o iPhone e o proxy da empresa. Mesma imagem da api (não gasta
   # disco), mas SEM o .env: fica exposto na internet, então recebe só o Redis
-  # e a chave própria (IPCEL_RELAY_KEY, a mesma do .env da api). Sem a chave
-  # ele não escuta nada (recurso desligado). A porta pública só é publicada
-  # no docker-compose.prod.yml.
+  # PRÓPRIO do recurso e a chave própria (IPCEL_RELAY_KEY, a mesma do .env da
+  # api). Só na ipcel_net (não alcança o Redis principal, o banco nem a api) e
+  # sem root. Sem a chave ele não escuta nada (recurso desligado). A porta
+  # pública só é publicada no docker-compose.prod.yml.
   ipcel_relay:
     build:
       context: ./apps/api
@@ -201,10 +249,13 @@ services:
     # poderia tentar baixar pacotes ao subir.
     command: ["python", "-m", "app.ip_celular.relay"]
     environment:
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      IPCEL_REDIS_URL: redis://ipcel_redis:6379/0
       IPCEL_RELAY_KEY: ${IPCEL_RELAY_KEY:-}
       IPCEL_BLOQUEAR: ${IPCEL_BLOQUEAR:-}
       IPCEL_PORTA: "21080"
+    depends_on: [ipcel_redis]
+    # nobody: invadido, não é root nem dentro do contêiner.
+    user: "65534:65534"
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -216,7 +267,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-    networks: [davinci_net]
+    networks: [ipcel_net]
     healthcheck:
       # Só o cumprimento SOCKS5 (pede usuário/senha): não autentica nada.
       test:

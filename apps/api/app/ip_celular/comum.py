@@ -16,7 +16,17 @@ Como os dados ficam no Redis (prefixo `davinci:ipcel:`; tudo com validade):
                       temporária cifrados, para a página do celular mostrar
                       UMA vez (GETDEL). Vence em 10 minutos se ninguém abrir.
 - `link:<link_id>`   o que a tela mostra (empresa, nome, quem gerou, prazos).
-- `met:<link_id>`    números do link (bytes, conexões) que o intermediário soma.
+                      Não muda depois de criado (o que muda vai no `met:`).
+- `met:<link_id>`    o que muda, campo a campo (HSET, nunca o cartão inteiro:
+                      abrir e cortar ao mesmo tempo não se apagam): números que
+                      o intermediário soma (bytes, conexões), `aberto_em`/
+                      `aberto_ip` (página do iPhone), `cortado_em`/`cortado_por`
+                      ("Cortar agora"), `preso_ip` (a credencial só vale do
+                      primeiro IP que entrou) e `outro_ip*` (recusas de outro IP).
+- `ver:<token>`      a página do iPhone depois de gastar o link: o POST guarda
+                      aqui (cifrado) o que ela mostra e põe o token num cookie
+                      só daquele endereço. Recarregar ou o iOS descartar a aba
+                      não perde a página (sem o cookie, nada aparece).
 - `usado:<usuario>`  marca de credencial que existiu (vale 1 dia a mais): o
                       iPhone que insiste com uma credencial vencida não conta
                       como tentativa de senha errada (senão o IP do celular
@@ -80,6 +90,9 @@ class Chaves:
 
     def usado(self, usuario: str) -> str:
         return f"{self.p}usado:{usuario}"
+
+    def ver(self, token: str) -> str:
+        return f"{self.p}ver:{token}"
 
     def pagina(self, ip: str) -> str:
         return f"{self.p}pagina:{ip}"
@@ -159,6 +172,37 @@ def contexto_codigo(codigo: str) -> str:
     return f"codigo:{codigo}"
 
 
+def contexto_ver(token: str) -> str:
+    return f"ver:{token}"
+
+
+def chave_do_ip(ip: str) -> str:
+    """Onde a credencial fica presa: o IPv4 exato; no IPv6, o /64 (o celular
+    troca o fim do endereço sozinho). Texto que não é IP fica como veio."""
+    try:
+        x = ipaddress.ip_address((ip or "").split("%", 1)[0])
+    except ValueError:
+        return ip or "?"
+    if isinstance(x, ipaddress.IPv6Address):
+        if x.ipv4_mapped is not None:
+            return str(x.ipv4_mapped)
+        return str(ipaddress.ip_network(f"{x}/64", strict=False))
+    return str(x)
+
+
+def rede_do_ip(ip: str) -> str:
+    """A faixa do IP para o limite de quem ainda não autenticou: /24 no IPv4,
+    /48 no IPv6."""
+    try:
+        x = ipaddress.ip_address((ip or "").split("%", 1)[0])
+    except ValueError:
+        return ip or "?"
+    if isinstance(x, ipaddress.IPv6Address) and x.ipv4_mapped is not None:
+        x = x.ipv4_mapped
+    prefixo = 24 if isinstance(x, ipaddress.IPv4Address) else 48
+    return str(ipaddress.ip_network(f"{x}/{prefixo}", strict=False))
+
+
 # ---------------------------------------------------------------- destinos
 
 # Nomes que sempre apontam para dentro (da máquina ou da rede local).
@@ -236,10 +280,11 @@ def motivo_ip_bloqueado(
 
 def _ipv4_disfarcado(nome: str) -> bool:
     """'127.1', '0x7f.1', '2130706433', '017700000001': o sistema aceita como
-    IPv4 (inet_aton), mas não é um nome — sempre recusado."""
+    IPv4 (inet_aton), mas não é um nome — sempre recusado. (Nome com byte NUL
+    levanta ValueError no inet_aton: não é IPv4 — e o _RX_NOME recusa.)"""
     try:
         socket.inet_aton(nome)
-    except OSError:
+    except (OSError, ValueError):
         return False
     return True
 
@@ -251,6 +296,8 @@ def normalizar_nome(bruto: bytes) -> str | None:
         nome = bruto.decode("ascii").strip().lower()
     except UnicodeDecodeError:
         return None
+    if any(ord(c) < 0x21 or ord(c) == 0x7F for c in nome):
+        return None  # NUL, espaço, controle: não é nome de site
     if nome.endswith("."):
         nome = nome[:-1]
     if nome.startswith("[") and nome.endswith("]"):

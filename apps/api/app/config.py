@@ -1179,6 +1179,11 @@ class Settings(BaseSettings):
     # Começo do link curto (`<base>/api/ipcel/<código>`). Vazio = APP_URL.
     ipcel_link_base: str = ""
     ipcel_prefixo: str = "davinci:ipcel:"
+    # O Redis PRÓPRIO do recurso (serviço `ipcel_redis` no docker compose,
+    # sem disco). O intermediário, exposto na internet, só alcança este — nunca
+    # o Redis principal (sem senha, com os jobs dos workers). Vazio = o
+    # principal (testes e máquina local).
+    ipcel_redis_url: str = ""
     # Limites por link: conexões ao mesmo tempo, banda (bytes/s, somando as
     # conexões) e teto de dados (bytes) — passou, o link é cortado.
     ipcel_max_conexoes: int = 48

@@ -10,9 +10,13 @@ Duas partes:
   mostra o QR de novo, lista os links e corta ("Cortar agora").
 - `router_publico` (/api/ipcel/<código>): a página que abre no iPhone, sem
   login. O GET só mostra o botão — a prévia de link do WhatsApp/iMessage faz
-  GET e não pode gastar o link. O POST gasta o link (uso único) e mostra os
-  botões do Shadowrocket com a credencial TEMPORÁRIA. A senha real do proxy
-  nunca aparece.
+  GET e não pode gastar o link. O POST gasta o link (uso único), põe num
+  cookie SÓ deste endereço um token da página e redireciona (303) para o GET,
+  que com o cookie mostra os botões do Shadowrocket com a credencial
+  TEMPORÁRIA. Recarregar, voltar ou o iOS descartar a aba não perde a página
+  (o código já gasto, sem o cookie, não mostra nada). A senha real do proxy
+  nunca aparece. Também o módulo do Shadowrocket (sem segredo) que segura o
+  UDP/QUIC.
 """
 
 from __future__ import annotations
@@ -25,10 +29,11 @@ from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session
 from app.deps.auth import require_admin
 from app.ip_celular import servico
@@ -61,9 +66,18 @@ class LinkOut(BaseModel):
     minutos: int | None = None
     criado_em: str | None = None
     criado_por: str | None = None
+    # Quem pede gerou este link (só ele vê o QR de novo).
+    meu: bool = False
     expira_em: str | None = None
     ate: str | None = None
     aberto_em: str | None = None
+    aberto_as: str | None = None
+    aberto_ip: str | None = None
+    # A credencial só vale do primeiro IP que entrou; outro IP é recusado.
+    preso_ip: str | None = None
+    outro_ip: str | None = None
+    outro_ip_as: str | None = None
+    outro_ip_n: int = 0
     cortado_em: str | None = None
     link_vence_em: str | None = None
     conexoes: int = 0
@@ -124,19 +138,20 @@ async def criar_link(
 
 @router.get("/links", response_model=list[LinkOut])
 async def listar_links(
-    _admin: Annotated[User, Depends(require_admin)],
+    admin: Annotated[User, Depends(require_admin)],
     company_id: Annotated[UUID | None, Query()] = None,
 ) -> list[LinkOut]:
-    itens = await servico.listar(company_id=str(company_id) if company_id else None)
+    itens = await servico.listar(company_id=str(company_id) if company_id else None, por=admin)
     return [LinkOut(**x) for x in itens]
 
 
 @router.get("/links/{link_id}/qr", response_model=LinkOut)
 async def mostrar_qr(
     link_id: str,
-    _admin: Annotated[User, Depends(require_admin)],
+    admin: Annotated[User, Depends(require_admin)],
 ) -> LinkOut:
-    return LinkOut(**await servico.ver_qr(link_id))
+    """Só quem gerou; fica no Histórico (nomes.REVELACOES)."""
+    return LinkOut(**await servico.ver_qr(link_id, admin))
 
 
 @router.post("/links/{link_id}/cortar", response_model=LinkOut)
@@ -145,6 +160,15 @@ async def cortar_link(
     admin: Annotated[User, Depends(require_admin)],
 ) -> LinkOut:
     return LinkOut(**await servico.cortar(link_id, admin))
+
+
+@router.post("/links/{link_id}/soltar", response_model=LinkOut)
+async def soltar_ip_do_link(
+    link_id: str,
+    admin: Annotated[User, Depends(require_admin)],
+) -> LinkOut:
+    """O celular trocou de rede: o próximo IP que entrar fica com o link."""
+    return LinkOut(**await servico.soltar_ip(link_id, admin))
 
 
 # ---------------------------------------------------------------- página do iPhone
@@ -181,10 +205,11 @@ def _pagina(titulo: str, corpo: str, *, status_code: int = 200) -> HTMLResponse:
 <style>
   :root {{ color-scheme: light dark; }}
   body {{ font-family: -apple-system, system-ui, sans-serif; margin: 0;
-         background: #f4f4f5; color: #18181b; }}
+         padding: 0 16px; background: #f4f4f5; color: #18181b; }}
   .card {{ background: #fff; border-radius: 14px; padding: 22px 18px;
-           margin: 16px auto; max-width: 440px;
+           margin: 16px auto; max-width: 440px; box-sizing: border-box;
            box-shadow: 0 1px 4px rgba(0,0,0,.1); }}
+  a {{ color: #047857; }}
   h1 {{ font-size: 1.15rem; margin: 0 0 6px; }}
   h2 {{ font-size: 1rem; margin: 22px 0 6px; }}
   p, li {{ color: #3f3f46; line-height: 1.5; margin: 6px 0; font-size: .95rem; }}
@@ -222,11 +247,31 @@ def _pagina(titulo: str, corpo: str, *, status_code: int = 200) -> HTMLResponse:
 
 
 _ESPERE = "<p class='erro'>Muitas tentativas. Espere 1 minuto.</p>"
+_DESLIGAR = "shadowrocket://disconnect"
+COOKIE = "ipcel_ver"
+
+
+def _botao_desligar() -> str:
+    return (
+        "<p>Se você já tinha ligado o Shadowrocket com este IP, desligue:</p>"
+        f"<a class='botao perigo' href='{_e(_DESLIGAR)}'>Desligar o Shadowrocket</a>"
+    )
+
+
 _INVALIDO = (
     "<h1>IP da loja no celular</h1>"
     "<p class='erro'>Este link não vale mais: venceu, já foi aberto ou foi cortado.</p>"
-    "<p>Gere outro no DaVinci (Empresas › Usar este IP no celular).</p>"
+    "<p>Se você já tocou em <b>mostrar o IP</b> NESTE iPhone, o proxy já está no "
+    "Shadowrocket: ligue e desligue por lá.</p>"
+    "<p>Para usar de novo, gere outro no DaVinci (Empresas › Usar este IP no celular).</p>"
+    + _botao_desligar()
 )
+_ACABOU = {
+    "vencido": "Acabou o tempo deste IP.",
+    "cortado": "Este IP foi cortado no DaVinci.",
+    "limite_de_dados": "Este IP passou do limite de dados e foi cortado.",
+    "nao_aberto": "Este link venceu.",
+}
 
 
 async def _limite_pagina(request: Request) -> bool:
@@ -245,10 +290,38 @@ async def _limite_pagina(request: Request) -> bool:
     return True
 
 
+@router_publico.get(f"/{servico.NOME_MODULO}")
+async def modulo_shadowrocket() -> PlainTextResponse:
+    """O módulo do Shadowrocket que segura UDP/QUIC (sem segredo: o mesmo para
+    todos). Registrado ANTES do /{codigo}."""
+    return PlainTextResponse(
+        servico.MODULO,
+        headers={"Cache-Control": "no-cache", "X-Robots-Tag": "noindex, nofollow"},
+    )
+
+
+def _https(request: Request) -> bool:
+    proto = (request.headers.get("x-forwarded-proto") or request.url.scheme or "").lower()
+    return proto == "https" or get_settings().is_prod
+
+
 @router_publico.get("/{codigo}")
 async def pagina_do_link(codigo: str, request: Request) -> HTMLResponse:
     if not await _limite_pagina(request):
         return _pagina("Espere um pouco", _ESPERE, status_code=429)
+    # Já gasto NESTE iPhone (cookie só deste endereço): a página de novo.
+    aberta = await servico.pagina_aberta(request.cookies.get(COOKIE), codigo)
+    if aberta is not None:
+        if "acabou" in aberta:
+            corpo = (
+                "<h1>IP da loja no celular</h1>"
+                f"<p class='nome'>{_e(aberta.get('nome') or '')}</p>"
+                f"<p class='erro'>{_e(_ACABOU.get(aberta['acabou'], 'Este IP não vale mais.'))}</p>"
+                "<p>Desligue o Shadowrocket: com ele ligado o iPhone fica sem internet.</p>"
+                f"<a class='botao perigo' href='{_e(_DESLIGAR)}'>Desligar o Shadowrocket</a>"
+            )
+            return _pagina("IP da loja no celular", corpo)
+        return _pagina("IP da loja no celular", _passos(aberta))
     dados = await servico.ver_codigo(codigo)
     if dados is None:
         return _pagina("Link inválido", _INVALIDO, status_code=404)
@@ -256,7 +329,7 @@ async def pagina_do_link(codigo: str, request: Request) -> HTMLResponse:
         "<h1>IP da loja no celular</h1>"
         f"<p class='nome'>{_e(dados['nome'])}</p>"
         f"<p>Vale até <b>{_e(dados['ate'])}</b> (horário de Brasília).</p>"
-        "<div class='caixa'><p class='aviso'><b>Este link funciona UMA vez.</b> "
+        "<div class='caixa'><p class='aviso'><b>Este link funciona UMA vez, em UM iPhone.</b> "
         "Abra no iPhone que vai usar o IP. Ao tocar no botão verde ele se gasta.</p></div>"
         "<p>Precisa do app <b>Shadowrocket</b> (pago, R$ 19,90 — o certo é o da "
         "<i>Shadow Launch Technology Limited</i>). Instale ANTES de tocar no botão:</p>"
@@ -268,52 +341,102 @@ async def pagina_do_link(codigo: str, request: Request) -> HTMLResponse:
 
 
 @router_publico.post("/{codigo}")
-async def abrir_link(codigo: str, request: Request) -> HTMLResponse:
+async def abrir_link(codigo: str, request: Request):
+    """Gasta o link e manda para o GET (303): recarregar não reenvia nada e a
+    página volta enquanto o IP valer, só neste iPhone (cookie só deste
+    endereço, HttpOnly)."""
     if not await _limite_pagina(request):
         return _pagina("Espere um pouco", _ESPERE, status_code=429)
-    dados = await servico.abrir_codigo(codigo, ip=_client_ip(request))
-    if dados is None:
+    destino = f"/api/ipcel/{codigo}"
+    # Reenvio do formulário (Safari "enviar de novo"): com o cookie, só volta.
+    if await servico.pagina_aberta(request.cookies.get(COOKIE), codigo) is not None:
+        return RedirectResponse(destino, status_code=303)
+    aberto = await servico.abrir_codigo(codigo, ip=_client_ip(request))
+    if aberto is None:
         return _pagina("Link inválido", _INVALIDO, status_code=404)
-    lk = servico.links_shadowrocket(dados)
-    ip = (
-        f"<li>No Safari, abra <b>ipinfo.io</b>: deve aparecer o IP <b>{_e(dados['ip'])}</b>.</li>"
-        if dados.get("ip")
-        else "<li>No Safari, abra <b>ipinfo.io</b> e confira o IP.</li>"
+    token, segundos = aberto
+    resp = RedirectResponse(destino, status_code=303)
+    resp.set_cookie(
+        COOKIE,
+        token,
+        max_age=segundos,
+        path=destino,
+        httponly=True,
+        secure=_https(request),
+        samesite="lax",
     )
-    corpo = (
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
+
+
+def _passos(dados: dict) -> str:
+    lk = servico.links_shadowrocket(dados)
+    ip_loja = _e(dados.get("ip") or "da loja")
+    return (
         "<h1>IP da loja no celular</h1>"
         f"<p class='nome'>{_e(dados['nome'])}</p>"
         f"<p>Funciona até <b>{_e(dados['ate'])}</b>. Depois disso o IP para e o celular fica "
         "sem internet até você <b>desligar o Shadowrocket</b>.</p>"
-        "<h2>1. Adicionar no Shadowrocket</h2>"
+        "<p><small>Se esta página sumir, volte por este mesmo link neste iPhone: ela "
+        "aparece de novo enquanto o IP valer. O proxy também já fica guardado no "
+        "Shadowrocket — dá para ligar e desligar por lá.</small></p>"
+        "<h2>1. Proteção contra vazamento (uma vez só)</h2>"
+        "<p>Faz o UDP e o QUIC (que o proxy não leva) serem recusados, em vez de saírem "
+        "pelo IP do celular.</p>"
+        f"<a class='botao' href='{_e(lk['instalar_modulo'])}'>Instalar a proteção no "
+        "Shadowrocket</a>"
+        "<p><small>Não abriu? No Shadowrocket: "
+        "<b>Configuração (Config) › Módulos (Modules) › +</b> e cole este endereço:</small></p>"
+        f"<textarea id='modulo' rows='2' readonly>{_e(lk['modulo'])}</textarea>"
+        "<button type='button' class='secundario' data-copiar='modulo'>"
+        "Copiar o endereço da proteção</button>"
+        "<h2>2. Adicionar o IP no Shadowrocket</h2>"
         f"<a class='botao' href='{_e(lk['add'])}'>Adicionar no Shadowrocket</a>"
         f"<a class='botao secundario' href='{_e(lk['add_codificado'])}'>Não abriu? Tente este</a>"
         "<button type='button' class='secundario' data-copiar='socks'>"
         "Copiar o link do proxy</button>"
         "<p><small>Copiado, abra o Shadowrocket: ele pergunta se quer adicionar.</small></p>"
         f"<textarea id='socks' rows='3' readonly>{_e(lk['socks'])}</textarea>"
-        "<details><summary><small>Outro formato (se nenhum dos acima funcionar)</small></summary>"
+        "<details><summary><small>Outros formatos (se nenhum dos acima funcionar)</small>"
+        "</summary>"
+        f"<textarea id='socks_v2' rows='3' readonly>{_e(lk['socks_v2'])}</textarea>"
+        "<button type='button' class='secundario' data-copiar='socks_v2'>"
+        "Copiar o formato 2</button>"
         f"<textarea id='texto' rows='3' readonly>{_e(lk['texto'])}</textarea>"
-        "<button type='button' class='secundario' data-copiar='texto'>Copiar este formato</button>"
+        "<button type='button' class='secundario' data-copiar='texto'>Copiar o formato 3</button>"
         "</details>"
-        "<h2>2. Antes de ligar</h2>"
+        "<h2>3. Antes de ligar</h2>"
         "<ol>"
         "<li>Feche o app do Mercado Livre (arraste para cima).</li>"
-        "<li>No Shadowrocket, em <b>Roteamento global</b>, escolha <b>Proxy</b>.</li>"
-        "<li>Em Configuração › UDP: ligue <b>Desativar STUN</b>. Se aparecer a opção de UDP "
-        "não suportado, deixe <b>REJECT</b> (nunca DIRECT: sairia pelo IP do celular).</li>"
+        "<li>No Shadowrocket, em <b>Ajustes (Settings) › UDP</b>: ligue "
+        "<b>Desativar STUN (Disable STUN)</b>.</li>"
+        "<li>Em <b>Roteamento global (Global Routing)</b>, escolha <b>Proxy</b> "
+        "(ou toque em <i>Modo Proxy</i> abaixo).</li>"
         "<li>Deixe desligados <b>Sempre ativo</b> e <b>Conectar sob demanda</b>.</li>"
         "</ol>"
-        "<h2>3. Ligar</h2>"
+        "<h2>4. Ligar</h2>"
         f"<a class='botao secundario' href='{_e(lk['selecionar'])}'>Escolher este IP</a>"
         f"<a class='botao secundario' href='{_e(lk['modo_proxy'])}'>Modo Proxy (todo o tráfego)</a>"
         f"<a class='botao' href='{_e(lk['ligar'])}'>Ligar</a>"
         "<p><small>Ou pelo próprio app: toque no nome acima e ligue a chave do topo.</small></p>"
-        "<h2>4. Conferir e usar</h2>"
-        f"<ol>{ip}<li>Abra o app do Mercado Livre e faça a leitura / verificação.</li></ol>"
-        "<h2>5. Quando terminar</h2>"
+        "<h2>5. Conferir ANTES de abrir o Mercado Livre</h2>"
+        "<ol>"
+        "<li>No Safari, abra "
+        "<a href='https://browserleaks.com/ip'>browserleaks.com/ip</a>: tem de aparecer "
+        f"<b>só o IP {ip_loja}</b> — no IPv4 e em qualquer outro lugar da página.</li>"
+        "<li>Abra também <a href='https://browserleaks.com/webrtc'>browserleaks.com/webrtc</a>: "
+        "nenhum IP do seu celular, da sua casa ou da operadora (Vivo, Claro, TIM…).</li>"
+        "</ol>"
+        "<div class='caixa'><p class='aviso'><b>Se aparecer qualquer IPv6 ou qualquer outro IP, "
+        "NÃO abra o Mercado Livre:</b> desligue o Shadowrocket e avise.</p></div>"
+        "<h2>6. Usar</h2>"
+        "<p>Abra o app do Mercado Livre e faça a leitura / verificação.</p>"
+        "<p><small>Este IP só funciona na rede em que você ligou (Wi-Fi ou 4G). Trocou de "
+        "rede no meio? No DaVinci, toque em <b>Soltar o IP</b> no link.</small></p>"
+        "<h2>7. Quando terminar</h2>"
         f"<a class='botao perigo' href='{_e(lk['desligar'])}'>Desligar o Shadowrocket</a>"
-        "<p><small>Este link já foi usado. Não encaminhe esta página: quem tiver o link do "
+        "<p><small>Não encaminhe esta página nem o link do proxy: quem tiver o link do "
         "proxy usa o IP da loja até o fim do prazo (no DaVinci dá para cortar antes).</small></p>"
         "<script>"
         "document.querySelectorAll('[data-copiar]').forEach(function(b){"
@@ -327,4 +450,3 @@ async def abrir_link(codigo: str, request: Request) -> HTMLResponse:
         "});});"
         "</script>"
     )
-    return _pagina("IP da loja no celular", corpo)

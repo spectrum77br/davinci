@@ -5,15 +5,22 @@ da empresa. O que estes testes seguram:
 
 - a credencial temporária leva SÓ ao proxy da sua empresa, com a senha real
   dela; trocar o proxy cifrado de uma credencial pelo de outra não funciona;
-- senha errada recusa; 10 erros bloqueiam o IP (até com a senha certa), mas
-  credencial que venceu não conta;
+- senha errada recusa; 10 erros bloqueiam o IP para senhas erradas, mas a
+  credencial CERTA passa (CGNAT do 4G) e credencial que venceu não conta;
+- quem não autenticou não tranca o celular: vagas separadas, 5 s de prazo e a
+  mais antiga sai quando enche; limite por IP;
+- a credencial fica presa ao primeiro IP que entrou; outro IP é recusado e
+  anotado (a tela solta);
 - destino interno (IP privado, loopback, link-local, do servidor, nome sem
   ponto, localhost, IPv4 disfarçado, nome que aponta para dentro) é recusado
   sem nem chamar o proxy da empresa; proxy da empresa interno também;
 - só TCP CONNECT (UDP ASSOCIATE e BIND recusados) e só usuário/senha;
-- no fim do prazo e no "Cortar agora" as conexões ABERTAS caem;
-- limites de conexões, banda e teto de dados por credencial;
-- Redis fora = ninguém entra;
+- no fim do prazo e no "Cortar agora" as conexões ABERTAS caem, e a que já
+  autenticou e ainda ia pedir o destino também;
+- limites de conexões (também com pedidos juntos), banda e teto de dados;
+- nome que resolve para o proxy da empresa, DNS que não responde e nome com
+  byte NUL: recusados sem traceback;
+- Redis fora = ninguém entra; falha só ao GRAVAR os números não derruba;
 - nenhum segredo no log.
 """
 
@@ -23,6 +30,7 @@ import asyncio
 import ipaddress
 import json
 import logging
+import socket
 import time
 import uuid
 
@@ -37,7 +45,7 @@ from app.ip_celular.comum import (
     motivo_upstream_bloqueado,
     redes_extras,
 )
-from app.ip_celular.relay import Relay
+from app.ip_celular.relay import Recusa, Relay
 from app.redis_client import redis
 from tests.ipcel_apoio import Eco, ProxyFalso, eco_ok, fechou, socks
 
@@ -201,14 +209,24 @@ async def test_senha_errada_e_usuario_que_nao_existe(prefixo, proxies, relay_rod
     assert atlas.vistos == []
 
 
-async def test_dez_erros_bloqueiam_o_ip_ate_com_a_senha_certa(prefixo, proxies, relay_rodando):
+async def test_dez_erros_bloqueiam_o_ip_mas_a_credencial_certa_passa(
+    prefixo, proxies, relay_rodando, caplog
+):
+    """No 4G muitos celulares dividem o mesmo IP (CGNAT): um robô chutando
+    senhas por ele não pode trancar o iPhone com a credencial certa."""
     atlas = await proxies("pxatlas", "SenhaRealAtlas1")
     _relay, porta = await relay_rodando(max_falhas_ip=10)
     u, s, _ = await _credencial(prefixo, atlas)
     for _ in range(10):
         assert (await socks(porta, u, "chute")).auth == b"\x01\x01"
-    assert (await socks(porta, u, s)).auth == b"\x01\x01"
-    assert atlas.vistos == []
+    with caplog.at_level(logging.INFO, logger="ipcel.relay"):
+        assert (await socks(porta, u, "chute")).auth == b"\x01\x01"
+        assert (await socks(porta, "dvnaoexiste123456", "x")).auth == b"\x01\x01"
+    assert "ip_bloqueado_por_tentativas" in caplog.text
+    certo = await socks(porta, u, s)
+    assert certo.auth == b"\x01\x00" and certo.rep == 0
+    assert len(atlas.vistos) == 1
+    certo.fechar()
 
 
 async def test_credencial_vencida_nao_conta_como_tentativa(prefixo, proxies, relay_rodando):
@@ -525,3 +543,263 @@ async def test_log_sem_segredo(prefixo, proxies, relay_rodando, caplog):
         str(atlas.porta),
     ):
         assert segredo not in texto
+
+
+# ---------------------------------------------------------------- achados da revisão (16/11)
+
+
+async def _parado(porta: int):
+    """Conexão que entra e não manda nada (segura uma vaga sem senha)."""
+    return await asyncio.open_connection("127.0.0.1", porta)
+
+
+async def test_conexoes_sem_senha_nao_trancam_o_celular(prefixo, proxies, relay_rodando):
+    """Sem credencial nenhuma, encher as vagas de quem não autenticou não
+    deixa o iPhone de fora: quando enche, sai a mais antiga."""
+    atlas = await proxies("pxatlas", "SenhaRealAtlas1")
+    relay, porta = await relay_rodando(
+        max_pre_auth=16, max_pre_auth_por_ip=1000, max_pre_auth_por_rede=1000
+    )
+    u, s, _ = await _credencial(prefixo, atlas)
+    paradas = [await _parado(porta) for _ in range(16)]
+    await asyncio.sleep(0.2)
+    assert len(relay._pre) == 16
+    inicio = time.monotonic()
+    res = await asyncio.wait_for(socks(porta, u, s), 5)
+    assert res.auth == b"\x01\x00" and res.rep == 0
+    assert time.monotonic() - inicio < 2
+    assert await eco_ok(res)
+    assert len(relay._pre) <= 16  # a mais antiga saiu para o celular entrar
+    res.fechar()
+    for _r, w in paradas:
+        w.transport.abort()
+
+
+async def test_quem_nao_autentica_sai_em_poucos_segundos(prefixo, proxies, relay_rodando):
+    _relay, porta = await relay_rodando(handshake_s=0.5)
+    r, w = await _parado(porta)
+    inicio = time.monotonic()
+    try:
+        dado = await asyncio.wait_for(r.read(10), 3)
+    except (ConnectionError, OSError):
+        dado = b""
+    assert dado == b"" and time.monotonic() - inicio < 2
+    w.transport.abort()
+
+
+async def test_limite_de_vagas_sem_senha_por_ip(prefixo, proxies, relay_rodando):
+    atlas = await proxies("pxatlas", "SenhaRealAtlas1")
+    relay, porta = await relay_rodando(max_pre_auth_por_ip=4)
+    paradas = [await _parado(porta) for _ in range(4)]
+    await asyncio.sleep(0.2)
+    r5, w5 = await _parado(porta)
+    try:
+        dado = await asyncio.wait_for(r5.read(10), 2)
+    except (ConnectionError, OSError):
+        dado = b""
+    assert dado == b""  # a 5ª do mesmo IP nem entra
+    assert len(relay._pre) == 4
+    for _r, w in [*paradas, (r5, w5)]:
+        w.transport.abort()
+    await asyncio.sleep(0.2)
+    u, s, _ = await _credencial(prefixo, atlas)
+    ok = await socks(porta, u, s)
+    assert ok.rep == 0  # as vagas voltaram
+    ok.fechar()
+
+
+async def test_limite_de_conexoes_com_pedidos_juntos(prefixo, proxies, relay_rodando):
+    """A vaga é reservada antes do DNS: 20 pedidos ao mesmo tempo com limite 2
+    abrem só 2."""
+    atlas = await proxies("pxatlas", "SenhaRealAtlas1")
+    relay, porta = await relay_rodando(checar_dns=True)
+
+    async def _dns_lento(nome, porta):
+        await asyncio.sleep(0.3)
+        return ["200.147.35.149"]
+
+    relay._resolver = _dns_lento  # type: ignore[method-assign]
+    u, s, _ = await _credencial(prefixo, atlas, max_conexoes=2)
+    todos = await asyncio.gather(*(socks(porta, u, s, "site.exemplo.com", 443) for _ in range(20)))
+    assert sum(1 for x in todos if x.rep == 0) == 2
+    assert len(atlas.vistos) == 2
+    for x in todos:
+        x.fechar()
+
+
+async def _so_autenticar(porta: int, u: str, s: str):
+    r, w = await asyncio.open_connection("127.0.0.1", porta)
+    w.write(b"\x05\x01\x02")
+    await w.drain()
+    assert await r.readexactly(2) == b"\x05\x02"
+    ub, sb = u.encode(), s.encode()
+    w.write(b"\x01" + bytes([len(ub)]) + ub + bytes([len(sb)]) + sb)
+    await w.drain()
+    assert await r.readexactly(2) == b"\x01\x00"
+    return r, w
+
+
+async def _pedir(r, w, nome: bytes = b"loja.exemplo.com.br") -> int | None:
+    try:
+        w.write(b"\x05\x01\x00\x03" + bytes([len(nome)]) + nome + b"\x01\xbb")
+        await w.drain()
+        cab = await asyncio.wait_for(r.readexactly(10), 3)
+        return cab[1]
+    except (asyncio.IncompleteReadError, ConnectionError, OSError):
+        return None
+
+
+async def test_corte_pega_quem_autenticou_e_ainda_ia_pedir(prefixo, proxies, relay_rodando):
+    """Autenticou, o admin cortou, e só depois veio o pedido: não abre."""
+    atlas = await proxies("pxatlas", "SenhaRealAtlas1")
+    _relay, porta = await relay_rodando(vigia_s=60)
+    u, s, link = await _credencial(prefixo, atlas)
+    r, w = await _so_autenticar(porta, u, s)
+    k = Chaves(prefixo)
+    await redis.delete(k.cred(u))
+    await redis.publish(k.canal_cortar, link)
+    await asyncio.sleep(0.3)
+    assert await _pedir(r, w) != 0
+    assert atlas.vistos == []
+    w.transport.abort()
+
+
+async def test_corte_sem_mensagem_no_meio_da_negociacao(prefixo, proxies, relay_rodando):
+    """A mensagem do canal se perdeu: a conferência da credencial antes de
+    abrir o proxy da empresa recusa mesmo assim."""
+    atlas = await proxies("pxatlas", "SenhaRealAtlas1")
+    _relay, porta = await relay_rodando(vigia_s=60)
+    u, s, _ = await _credencial(prefixo, atlas)
+    r, w = await _so_autenticar(porta, u, s)
+    await redis.delete(Chaves(prefixo).cred(u))  # cortado, sem PUBLISH
+    assert await _pedir(r, w) == 0x01
+    assert atlas.vistos == []
+    w.transport.abort()
+
+
+async def test_nome_que_resolve_para_o_proxy_da_empresa(prefixo, proxies, eco):
+    """O destino não pode ser o proxy da empresa, nem por IP escrito nem por
+    um nome que resolve para ele."""
+    atlas = await proxies("pxatlas", "SenhaRealAtlas1")
+
+    class _R(Relay):
+        async def _abrir_upstream(self, host, porta):
+            return await asyncio.open_connection("127.0.0.1", atlas.porta)
+
+        async def _resolver(self, nome, porta):
+            return {"8-8-4-4.sslip.io": ["8.8.4.4"]}.get(nome, ["200.147.35.149"])
+
+    relay = _R(redis, COFRE, prefixo=prefixo, checar_dns=True, bloquear=["46.225.188.20"])
+    servidor = await relay.iniciar("127.0.0.1", 0)
+    porta = servidor.sockets[0].getsockname()[1]
+    try:
+        u, s, _ = await _credencial(prefixo, atlas, host="8.8.4.4")
+        assert (await socks(porta, u, s, "8.8.4.4", 8080)).rep == 0x02
+        assert (await socks(porta, u, s, "::ffff:8.8.4.4", 8080)).rep == 0x02
+        assert (await socks(porta, u, s, "8-8-4-4.sslip.io", 8080)).rep == 0x02
+        ok = await socks(porta, u, s, "www.mercadolivre.com.br", 443)
+        assert ok.rep == 0
+        ok.fechar()
+        assert [v.destino for v in atlas.vistos] == ["www.mercadolivre.com.br"]
+    finally:
+        servidor.close()
+        await relay.fechar()
+        await servidor.wait_closed()
+
+
+async def test_dns_que_nao_responde_recusa(prefixo, proxies, relay_rodando):
+    """Falha fechada: nome que demora (rebinding lento) ou não existe daqui
+    não segue para o proxy da empresa (código 04)."""
+    atlas = await proxies("pxatlas", "SenhaRealAtlas1")
+    relay, porta = await relay_rodando(checar_dns=True, dns_s=0.3)
+
+    async def _dns(nome, porta):
+        if nome.startswith("lento."):
+            await asyncio.sleep(2)
+            return ["127.0.0.1"]
+        raise socket.gaierror("nao existe")
+
+    relay._resolver = _dns  # type: ignore[method-assign]
+    u, s, _ = await _credencial(prefixo, atlas)
+    assert (await socks(porta, u, s, "lento.rebind.exemplo.com", 80)).rep == 0x04
+    assert (await socks(porta, u, s, "naoexiste.exemplo.com", 80)).rep == 0x04
+    assert atlas.vistos == []
+
+
+async def test_nome_com_byte_nul_sem_traceback(prefixo, proxies, relay_rodando, caplog):
+    atlas = await proxies("pxatlas", "SenhaRealAtlas1")
+    relay, porta = await relay_rodando()
+    u, s, _ = await _credencial(prefixo, atlas)
+    assert motivo_destino_bloqueado("a\x00.exemplo.com", 443) is not None
+    with caplog.at_level(logging.DEBUG):
+        res = await socks(porta, u, s, "a\x00.exemplo.com", 443)
+        await asyncio.sleep(0.1)
+    assert res.rep == 0x02
+    assert "Traceback" not in caplog.text and "Unhandled exception" not in caplog.text
+    assert atlas.vistos == [] and not relay._pre and len(relay._clientes) == 0
+
+
+async def test_erro_inesperado_responde_e_nao_vaza(prefixo, proxies, relay_rodando, caplog):
+    atlas = await proxies("pxatlas", "SenhaRealAtlas1")
+    relay, porta = await relay_rodando()
+
+    async def _quebra(reader):
+        raise RuntimeError("algo estranho")
+
+    relay._pedido = _quebra  # type: ignore[method-assign]
+    u, s, _ = await _credencial(prefixo, atlas)
+    with caplog.at_level(logging.DEBUG):
+        res = await socks(porta, u, s)
+        await asyncio.sleep(0.1)
+    assert res.rep == 0x01
+    assert "erro_inesperado tipo=RuntimeError" in caplog.text
+    assert "Traceback" not in caplog.text and "Unhandled exception" not in caplog.text
+
+
+async def test_credencial_presa_ao_primeiro_ip(prefixo, proxies, relay_rodando):
+    """SOCKS5 não tem cifra: quem copiar a credencial no caminho não usa de
+    outro IP. Outro IP não conta como senha errada e fica anotado para a tela,
+    que solta (o celular trocou de rede)."""
+    atlas = await proxies("pxatlas", "SenhaRealAtlas1")
+    relay, _porta = await relay_rodando(max_falhas_ip=2)
+    u, s, link = await _credencial(prefixo, atlas)
+    k = Chaves(prefixo)
+    cred = await relay._conferir("200.1.1.1", u.encode(), s.encode())
+    assert cred.link_id == link
+    assert await redis.hget(k.met(link), "preso_ip") == "200.1.1.1"
+    assert (await relay._conferir("200.1.1.1", u.encode(), s.encode())).link_id == link
+    for _ in range(5):
+        with pytest.raises(Recusa) as e:
+            await relay._conferir("200.9.9.9", u.encode(), s.encode())
+        assert e.value.motivo == "outro_ip"
+    met = await redis.hgetall(k.met(link))
+    assert met["outro_ip"] == "200.9.9.9" and met["outro_ip_n"] == "5"
+    assert relay._falhas_recentes("200.9.9.9") == 0  # não é senha errada
+    # IPv6: preso ao /64 (o fim do endereço muda sozinho).
+    u6, s6, link6 = await _credencial(prefixo, atlas)
+    await relay._conferir("2804:14c:1:2::10", u6.encode(), s6.encode())
+    await relay._conferir("2804:14c:1:2:abcd::99", u6.encode(), s6.encode())
+    with pytest.raises(Recusa):
+        await relay._conferir("2804:14c:1:3::10", u6.encode(), s6.encode())
+    # Soltar (o que a tela faz): o próximo IP fica com ela.
+    await redis.hdel(k.met(link), "preso_ip")
+    assert (await relay._conferir("200.9.9.9", u.encode(), s.encode())).link_id == link
+    assert await redis.hget(k.met(link), "preso_ip") == "200.9.9.9"
+
+
+async def test_falha_so_ao_gravar_numeros_nao_derruba(prefixo, proxies, relay_rodando):
+    """Disco cheio / MISCONF: gravar os números falha, mas LER funciona — a
+    vigia não pode derrubar o celular por isso."""
+    atlas = await proxies("pxatlas", "SenhaRealAtlas1")
+    relay, porta = await relay_rodando(vigia_s=0.05, redis_fora_max_s=0.01)
+
+    async def _grava_falha():
+        raise RuntimeError("MISCONF")
+
+    relay._descarregar_metricas = _grava_falha  # type: ignore[method-assign]
+    u, s, _ = await _credencial(prefixo, atlas)
+    res = await socks(porta, u, s)
+    assert res.rep == 0
+    await asyncio.sleep(0.5)  # várias voltas da vigia
+    assert await eco_ok(res)
+    res.fechar()

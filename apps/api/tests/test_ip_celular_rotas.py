@@ -7,10 +7,15 @@ testes seguram:
   e com o proxy real CIFRADO no Redis; a senha real e o usuário real do proxy
   nunca aparecem em resposta, página ou log;
 - empresa sem IP / sem senha do proxy / proxy HTTP / IP interno não gera;
-- link curto de uso único: o GET (prévia do WhatsApp) não gasta, o POST gasta,
-  o segundo POST não mostra nada; vence se não abrir;
+- link curto de uso único: o GET (prévia do WhatsApp) não gasta, o POST gasta
+  e redireciona (303) com um cookie SÓ daquele endereço; recarregar volta à
+  mesma página só neste iPhone, sem cookie nada; vence se não abrir;
+- a página manda instalar a proteção (módulo do Shadowrocket) e conferir o
+  vazamento (IPv4, IPv6, WebRTC) antes do ML;
 - lista com status e "Cortar agora" (apaga a credencial e avisa o
-  intermediário pelo canal);
+  intermediário pelo canal); abrir e cortar juntos: cortado vence;
+- "venceu sem abrir" apaga a credencial e não conta no limite;
+- o QR de novo só para quem gerou; a lista mostra de que IP abriram;
 - de ponta a ponta: link → página → Shadowrocket (cliente SOCKS5) →
   intermediário → proxy da empresa, e o corte derruba a conexão aberta.
 """
@@ -86,6 +91,23 @@ async def _admin(make_user, auth_as):
 
 def _codigo(url: str) -> str:
     return url.rsplit("/", 1)[1]
+
+
+async def _abrir(client, caminho: str) -> str:
+    """O que o iPhone faz: toca no botão (POST), segue o 303 com o cookie."""
+    p = await client.post(caminho)
+    assert p.status_code == 303, p.text
+    assert p.headers["location"] == caminho
+    cookie = p.headers["set-cookie"]
+    assert "HttpOnly" in cookie and f"Path={caminho}" in cookie and "SameSite=lax" in cookie
+    g = await client.get(caminho)
+    assert g.status_code == 200, g.text
+    assert g.headers["cache-control"] == "no-store"
+    return g.text
+
+
+async def _item(client, link_id: str) -> dict:
+    return next(x for x in (await client.get(f"{URL}/links")).json() if x["link_id"] == link_id)
 
 
 def _credencial_da_pagina(html: str) -> tuple[str, str, str, int, str]:
@@ -260,21 +282,81 @@ async def test_link_de_uso_unico(client, make_user, auth_as, db):
         assert "socks://" not in g.text and "shadowrocket://add" not in g.text
         assert "Unico · até" in g.text
         assert g.headers["cache-control"] == "no-store"
-    p = await client.post(caminho)
-    assert p.status_code == 200
-    usuario, senha, host, porta, nome = _credencial_da_pagina(p.text)
+    html = await _abrir(client, caminho)
+    usuario, senha, host, porta, nome = _credencial_da_pagina(html)
     assert host == "app.hadken.com" and porta == 21080 and nome.startswith("Unico · até ")
     assert usuario.startswith("dv") and len(senha) >= 28
     for segredo in (SENHA_REAL, USUARIO_REAL):
-        assert segredo not in p.text
-    assert "45.60.1.16" in p.text  # o IP esperado, para conferir no ipinfo.io
-    # Uso único: de novo, nada.
+        assert segredo not in html
+    assert "45.60.1.16" in html  # o IP esperado, para conferir antes do ML
+    # Uso único: sem o cookie deste iPhone, nada (outro aparelho, encaminhado).
+    client.cookies.clear()
     assert (await client.post(caminho)).status_code == 404
-    assert (await client.get(caminho)).status_code == 404
-    # A tela vê "em uso".
+    g = await client.get(caminho)
+    assert g.status_code == 404 and "socks://" not in g.text
+    assert "shadowrocket://disconnect" in g.text  # mas dá para desligar
+    # A tela vê "em uso" e de que IP abriram.
     await _admin(make_user, auth_as)
     itens = (await client.get(f"{URL}/links")).json()
-    assert next(x for x in itens if x["link_id"] == d["link_id"])["status"] == "em_uso"
+    item = next(x for x in itens if x["link_id"] == d["link_id"])
+    assert item["status"] == "em_uso" and item["aberto_as"] and item["aberto_ip"]
+
+
+async def test_pagina_volta_ao_recarregar_so_neste_iphone(client, make_user, auth_as, db):
+    """O iOS descarta a aba ao trocar para o Shadowrocket, ou a pessoa
+    recarrega: a página volta (sem reenviar formulário), enquanto o IP valer."""
+    c = await _empresa(db, apelido="Volta", ip="45.60.1.23")
+    await _admin(make_user, auth_as)
+    d = (await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 15})).json()
+    caminho = "/api/ipcel/" + _codigo(d["url"])
+    auth_as(None)
+    primeira = _credencial_da_pagina(await _abrir(client, caminho))
+    for _ in range(3):  # recarregar
+        g = await client.get(caminho)
+        assert g.status_code == 200 and _credencial_da_pagina(g.text) == primeira
+    # O Safari "enviar de novo o formulário": volta para a mesma página.
+    p = await client.post(caminho)
+    assert p.status_code == 303 and "set-cookie" not in p.headers
+    # O cookie de um link não abre outro link.
+    await _admin(make_user, auth_as)
+    d2 = (await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 15})).json()
+    auth_as(None)
+    outro = "/api/ipcel/" + _codigo(d2["url"])
+    token = client.cookies.get(ip_celular_router.COOKIE)
+    g2 = await client.get(outro, cookies={ip_celular_router.COOKIE: token})
+    assert g2.status_code == 200 and "socks://" not in g2.text  # só o botão do outro
+    # Cortado: a página diz e mostra só o Desligar.
+    await _admin(make_user, auth_as)
+    await client.post(f"{URL}/links/{d['link_id']}/cortar")
+    auth_as(None)
+    g3 = await client.get(caminho)
+    assert g3.status_code == 200 and "foi cortado" in g3.text
+    assert "socks://" not in g3.text and "shadowrocket://disconnect" in g3.text
+
+
+async def test_pagina_protecao_e_conferencia_de_vazamento(client, make_user, auth_as, db):
+    c = await _empresa(db, apelido="Vaza", ip="45.60.1.24")
+    await _admin(make_user, auth_as)
+    d = (await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 15})).json()
+    auth_as(None)
+    html = await _abrir(client, "/api/ipcel/" + _codigo(d["url"]))
+    modulo = "https://app.hadken.com/api/ipcel/davinci-sem-vazamento.sgmodule"
+    assert "shadowrocket://install?module=" + urllib.parse.quote(modulo, safe="") in html
+    assert "Ajustes (Settings) › UDP" in html and "Desativar STUN" in html
+    assert "Configuração › UDP" not in html and "ipinfo.io" not in html
+    assert "browserleaks.com/ip" in html and "browserleaks.com/webrtc" in html
+    assert "qualquer IPv6 ou qualquer outro IP" in html
+    # O módulo (sem segredo): UDP recusado em vez de DIRETO, QUIC bloqueado.
+    m = await client.get("/api/ipcel/davinci-sem-vazamento.sgmodule")
+    assert m.status_code == 200 and m.headers["content-type"].startswith("text/plain")
+    assert "[General]" in m.text
+    assert "udp-policy-not-supported-behaviour = REJECT" in m.text
+    assert "block-quic = all-proxy" in m.text
+    # Formato de reserva estilo v2rayN/Sub-Store: socks://BASE64(usuario:senha)@host:porta#nome
+    usuario, senha, *_ = _credencial_da_pagina(html)
+    mv2 = re.search(r"socks://([A-Za-z0-9%+/=]+)@app\.hadken\.com:21080#", html)
+    assert mv2, html
+    assert base64.b64decode(urllib.parse.unquote(mv2.group(1))).decode() == f"{usuario}:{senha}"
 
 
 async def test_link_vence_se_ninguem_abrir(client, make_user, auth_as, db, ambiente):
@@ -282,12 +364,74 @@ async def test_link_vence_se_ninguem_abrir(client, make_user, auth_as, db, ambie
     await _admin(make_user, auth_as)
     d = (await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 15})).json()
     codigo = _codigo(d["url"])
-    await redis.delete(Chaves(ambiente).codigo(codigo))  # os 10 minutos passaram
+    k = Chaves(ambiente)
+    await _passar_dos_10_minutos(k, d["link_id"])
     assert (await client.get(f"/api/ipcel/{codigo}")).status_code == 404
     assert (await client.post(f"/api/ipcel/{codigo}")).status_code == 404
     itens = (await client.get(f"{URL}/links")).json()
     assert next(x for x in itens if x["link_id"] == d["link_id"])["status"] == "nao_aberto"
     assert (await client.get("/api/ipcel/nao-e-um-codigo!")).status_code == 404
+
+
+async def _passar_dos_10_minutos(k: Chaves, link_id: str) -> None:
+    """O código venceu (Redis apagou) e já passou da folga."""
+    cartao = json.loads(await redis.get(k.link(link_id)))
+    await redis.delete(k.codigo(cartao["codigo"]))
+    cartao["link_vence_em"] = int(time.time()) - 120
+    await redis.set(k.link(link_id), json.dumps(cartao), ex=3600)
+
+
+async def test_venceu_sem_abrir_nao_conta_no_limite(client, make_user, auth_as, db, ambiente):
+    """3 QRs que a câmera não leu: depois de 10 minutos eles venceram e não
+    podem travar a empresa no limite de 3 até o fim do tempo (4 h)."""
+    c = await _empresa(db, apelido="Camera", ip="45.60.1.25")
+    await _admin(make_user, auth_as)
+    k = Chaves(ambiente)
+    ids = []
+    for _ in range(3):
+        d = (
+            await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 240})
+        ).json()
+        ids.append(d["link_id"])
+    r = await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 15})
+    assert r.status_code == 409
+    usuarios = []
+    for i in ids:
+        usuarios.append(json.loads(await redis.get(k.link(i)))["usuario"])
+        await _passar_dos_10_minutos(k, i)
+    itens = {x["link_id"]: x for x in (await client.get(f"{URL}/links")).json()}
+    assert all(itens[i]["status"] == "nao_aberto" for i in ids)
+    # Ninguém tem a senha: a credencial foi apagada.
+    for u in usuarios:
+        assert await redis.get(k.cred(u)) is None
+    r = await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 15})
+    assert r.status_code == 201
+
+
+async def test_abrir_e_cortar_juntos_cortado_vence(client, make_user, auth_as, db, ambiente):
+    """Abrir (iPhone) e cortar (admin) no mesmo instante: um não apaga o
+    outro — o cartão não é regravado, cada um grava o seu campo."""
+    c = await _empresa(db, apelido="Corrida", ip="45.60.1.26")
+    admin = await _admin(make_user, auth_as)
+    k = Chaves(ambiente)
+    from app.ip_celular import servico
+
+    for _ in range(5):
+        d = (
+            await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 15})
+        ).json()
+        codigo = _codigo(d["url"])
+        await asyncio.gather(
+            servico.abrir_codigo(codigo, ip="200.1.2.3"), servico.cortar(d["link_id"], admin)
+        )
+        item = next(x for x in await servico.listar(por=admin) if x["link_id"] == d["link_id"])
+        assert item["status"] == "cortado"
+        cartao = json.loads(await redis.get(k.link(d["link_id"])))
+        assert "aberto_em" not in cartao and "cortado_em" not in cartao
+    # A gravação atrasada do "aberto" depois do corte também não apaga o corte.
+    await redis.hset(k.met(d["link_id"]), "aberto_em", int(time.time()))
+    item = next(x for x in await servico.listar(por=admin) if x["link_id"] == d["link_id"])
+    assert item["status"] == "cortado" and item["cortado_em"]
 
 
 async def test_qr_de_novo_so_enquanto_ninguem_abriu(client, make_user, auth_as, db):
@@ -299,9 +443,66 @@ async def test_qr_de_novo_so_enquanto_ninguem_abriu(client, make_user, auth_as, 
     # A lista não leva o link nem o QR.
     lista = (await client.get(f"{URL}/links")).json()
     assert all(x["url"] is None and x["qr"] is None for x in lista)
+    assert next(x for x in lista if x["link_id"] == d["link_id"])["meu"] is True
     await client.post("/api/ipcel/" + _codigo(d["url"]))
     q2 = await client.get(f"{URL}/links/{d['link_id']}/qr")
     assert q2.status_code == 409
+
+
+async def test_qr_de_novo_so_quem_gerou(client, make_user, auth_as, db):
+    """Outro admin com a senha extra não pega o link de um colega para gastar
+    primeiro."""
+    c = await _empresa(db, apelido="QrDono", ip="45.60.1.27")
+    await _admin(make_user, auth_as)
+    d = (await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 15})).json()
+    await _admin(make_user, auth_as)  # outro admin
+    q = await client.get(f"{URL}/links/{d['link_id']}/qr")
+    assert q.status_code == 403 and q.json()["detail"]["code"] == "so_quem_gerou"
+    item = next(
+        x for x in (await client.get(f"{URL}/links")).json() if x["link_id"] == d["link_id"]
+    )
+    assert item["meu"] is False and item["url"] is None
+
+
+async def test_soltar_o_ip(client, make_user, auth_as, db, ambiente):
+    c = await _empresa(db, apelido="Solta", ip="45.60.1.28")
+    await _admin(make_user, auth_as)
+    d = (await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 15})).json()
+    k = Chaves(ambiente)
+    await redis.hset(
+        k.met(d["link_id"]),
+        mapping={
+            "preso_ip": "200.1.1.1",
+            "outro_ip": "200.9.9.9",
+            "outro_ip_em": 1,
+            "outro_ip_n": 3,
+        },
+    )
+    item = next(
+        x for x in (await client.get(f"{URL}/links")).json() if x["link_id"] == d["link_id"]
+    )
+    assert item["preso_ip"] == "200.1.1.1" and item["outro_ip"] == "200.9.9.9"
+    assert item["outro_ip_n"] == 3
+    r = await client.post(f"{URL}/links/{d['link_id']}/soltar")
+    assert r.status_code == 200 and r.json()["preso_ip"] is None and r.json()["outro_ip"] is None
+    assert await redis.hget(k.met(d["link_id"]), "preso_ip") is None
+    await client.post(f"{URL}/links/{d['link_id']}/cortar")
+    assert (await client.post(f"{URL}/links/{d['link_id']}/soltar")).status_code == 409
+
+
+async def test_redis_proprio_do_recurso(monkeypatch):
+    """Com IPCEL_REDIS_URL o recurso usa o Redis dele (o intermediário só
+    alcança esse); vazio, o principal."""
+    from app.ip_celular import servico
+
+    assert await servico._redis() is redis
+    monkeypatch.setattr(get_settings(), "ipcel_redis_url", "redis://ipcel_redis:6379/0")
+    monkeypatch.setattr(servico, "_redis_proprio", None)
+    proprio = await servico._redis()
+    assert proprio is not redis
+    assert proprio.connection_pool.connection_kwargs["host"] == "ipcel_redis"
+    assert await servico._redis() is proprio
+    await proprio.aclose()
 
 
 async def test_pagina_escapa_o_nome(client, make_user, auth_as, db):
@@ -390,8 +591,8 @@ async def test_ponta_a_ponta_link_pagina_shadowrocket_intermediario_e_corte(
         d = (
             await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 15})
         ).json()
-        pagina = await client.post("/api/ipcel/" + _codigo(d["url"]))
-        usuario, senha, _host, _porta, _nome = _credencial_da_pagina(pagina.text)
+        pagina = await _abrir(client, "/api/ipcel/" + _codigo(d["url"]))
+        usuario, senha, _host, _porta, _nome = _credencial_da_pagina(pagina)
         res = await socks(porta, usuario, senha, "www.mercadolivre.com.br", 443)
         assert res.rep == 0 and await eco_ok(res)
         # Saiu pelo proxy da Ponta, com a senha real dela; a Outra não viu nada.
@@ -411,6 +612,7 @@ async def test_ponta_a_ponta_link_pagina_shadowrocket_intermediario_e_corte(
             x for x in (await client.get(f"{URL}/links")).json() if x["link_id"] == d["link_id"]
         )
         assert item["status"] == "cortado" and item["conexoes"] == 1 and item["bytes_sobe"] > 0
+        assert item["preso_ip"] == "127.0.0.1"  # preso ao IP do "iPhone"
     finally:
         servidor.close()
         await relay.fechar()
@@ -418,3 +620,38 @@ async def test_ponta_a_ponta_link_pagina_shadowrocket_intermediario_e_corte(
         await atlas.fechar()
         await outro.fechar()
         await eco.fechar()
+
+
+async def test_historico_registra_gerar_qr_e_cortar(client, make_user, db):
+    """Tudo no Redis, nada no banco: sem as frases em historico/nomes.py não
+    ficaria rastro de quem gerou, viu o QR de novo e cortou."""
+    from sqlalchemy import select
+
+    from app.models import HistoricoEvento
+    from app.security.jwt import issue_session_token
+
+    c = await _empresa(db, apelido="Rastro", ip="45.60.1.29")
+    eu = await make_user(role=UserRole.ADMIN)
+    token, _, _ = issue_session_token(sub=eu.open_id, role=eu.role.value)
+    client.cookies.set(get_settings().cookie_name, token)
+
+    async def _liberado():
+        return None
+
+    app.dependency_overrides[require_empresas_unlock] = _liberado
+    try:
+        r = await client.post(f"{URL}/links", json={"company_id": str(c.id), "minutos": 15})
+        assert r.status_code == 201, r.text
+        link_id = r.json()["link_id"]
+        assert (await client.get(f"{URL}/links/{link_id}/qr")).status_code == 200
+        assert (await client.post(f"{URL}/links/{link_id}/cortar")).status_code == 200
+    finally:
+        app.dependency_overrides.pop(require_empresas_unlock, None)
+    q = select(HistoricoEvento).where(HistoricoEvento.ator_id == eu.id).order_by(HistoricoEvento.id)
+    evs = (await db.execute(q.execution_options(populate_existing=True))).scalars().all()
+    assert [(e.acao, e.tela) for e in evs] == [
+        ("gerou link para usar o IP da empresa no celular", "Cadastros › Empresas"),
+        ("viu de novo o QR do IP da empresa no celular", "Cadastros › Empresas"),
+        ("cortou o IP da empresa no celular", "Cadastros › Empresas"),
+    ]
+    assert evs[0].itens_texto == "Rastro"

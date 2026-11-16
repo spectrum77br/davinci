@@ -104,6 +104,7 @@ API: dict[str, str] = {
     "/api/automacoes": "Integrações › Automações",
     "/api/alerts": "Integrações › Alertas",
     "/api/companies": "Cadastros › Empresas",
+    "/api/ip-celular": "Cadastros › Empresas",
     "/api/cadastros": "Cadastros › Cadastros",
     "/api/stores": "Cadastros › Empresas",
     "/api/segments": "Cadastros › Segmentos",
@@ -157,6 +158,11 @@ def tela_da_api(caminho: str) -> str | None:
 # --- ações que não mudam o banco mas importam -------------------------------
 # (método, rota) → frase. Sem estas, o evento só fica se o banco mudou.
 ACOES: dict[tuple[str, str], str] = {
+    # Usar este IP no celular (16/11/2026): tudo no Redis, nada no banco — sem
+    # isto não ficaria rastro de quem gerou, cortou ou soltou.
+    ("POST", "/api/ip-celular/links"): "gerou link para usar o IP da empresa no celular",
+    ("POST", "/api/ip-celular/links/{link_id}/cortar"): "cortou o IP da empresa no celular",
+    ("POST", "/api/ip-celular/links/{link_id}/soltar"): "soltou o IP do celular preso a um link",
     ("POST", "/api/celulares/{name}/start"): "ligou um celular",
     ("POST", "/api/celulares/{name}/stop"): "desligou um celular",
     ("POST", "/api/celulares/{name}/restart"): "reiniciou um celular",
@@ -317,6 +323,8 @@ REVELACOES: dict[tuple[str, str], str] = {
     ("GET", "/api/redes-sociais/marca/{marca_id}/sac-senha"): "viu a senha do SAC da marca",
     ("GET", "/api/redes-sociais/{rede_id}/senha"): "viu a senha da rede social",
     ("GET", "/api/companies/{company_id}/proxy/senha"): "viu a senha do proxy da empresa",
+    # Usar este IP no celular: o QR de novo é o link de uso único (só quem gerou).
+    ("GET", "/api/ip-celular/links/{link_id}/qr"): "viu de novo o QR do IP da empresa no celular",
     # Garantias (§6 "quem consultou"): abrir o detalhe mostra nome e CPF.
     ("GET", "/api/garantias/{garantia_id}"): "abriu uma garantia (dados do cliente)",
     # Garantia automática (28/10/2026): o histórico mostra as conversas do

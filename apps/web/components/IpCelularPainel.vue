@@ -19,9 +19,16 @@ type Link = {
   minutos: number | null
   criado_em: string | null
   criado_por: string | null
+  meu: boolean
   expira_em: string | null
   ate: string | null
   aberto_em: string | null
+  aberto_as: string | null
+  aberto_ip: string | null
+  preso_ip: string | null
+  outro_ip: string | null
+  outro_ip_as: string | null
+  outro_ip_n: number
   cortado_em: string | null
   link_vence_em: string | null
   conexoes: number
@@ -67,6 +74,7 @@ const links = ref<Link[]>([])
 const mostrar = ref<'empresa' | 'todas'>('empresa')
 const copiado = ref(false)
 const cortando = ref<string | null>(null)
+const soltando = ref<string | null>(null)
 
 const MENSAGENS: Record<string, string> = {
   empresa_sem_ip: 'Esta empresa não tem IP cadastrado.',
@@ -80,6 +88,8 @@ const MENSAGENS: Record<string, string> = {
   muitos_links_empresa: 'Esta empresa já tem 3 links valendo. Corte um antes de gerar outro.',
   muitos_links: 'Já existem 10 links valendo. Corte algum antes de gerar outro.',
   link_nao_esta_aguardando: 'Este link já foi aberto ou venceu: o QR não vale mais.',
+  so_quem_gerou: 'Só quem gerou o link pode ver o QR de novo.',
+  link_nao_vale_mais: 'Este link não vale mais.',
   link_nao_encontrado: 'Link não encontrado (já acabou).',
   company_not_found: 'Empresa não encontrada.',
   loja_nao_encontrada: 'Loja não encontrada.',
@@ -93,12 +103,13 @@ function mensagem(e: any, padrao: string): string {
 const STATUS: Record<Link['status'], { texto: string; classe: string }> = {
   aguardando: { texto: 'Esperando abrir', classe: 'bg-amber-100 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300' },
   em_uso: { texto: 'Em uso', classe: 'bg-green-100 text-green-800 dark:bg-green-950/50 dark:text-green-300' },
-  nao_aberto: { texto: 'Link venceu sem abrir', classe: 'bg-muted text-muted-foreground' },
+  nao_aberto: { texto: 'Venceu sem abrir (nada foi usado)', classe: 'bg-muted text-muted-foreground' },
   vencido: { texto: 'Acabou o tempo', classe: 'bg-muted text-muted-foreground' },
   cortado: { texto: 'Cortado', classe: 'bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300' },
   limite_de_dados: { texto: 'Cortado: limite de dados', classe: 'bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300' },
 }
-const VALENDO = new Set(['aguardando', 'em_uso', 'nao_aberto'])
+// Só estes ainda podem ser usados (e contam no limite de 3 por empresa).
+const VALENDO = new Set(['aguardando', 'em_uso'])
 
 function mb(n: number): string {
   if (!n) return '0 MB'
@@ -186,6 +197,20 @@ async function cortar(l: Link) {
   }
 }
 
+async function soltar(l: Link) {
+  if (!confirm(`Soltar o IP do link "${l.nome}"? O próximo celular que conectar fica com ele.`)) return
+  soltando.value = l.link_id
+  erro.value = null
+  try {
+    await apiE<Link>(`/api/ip-celular/links/${l.link_id}/soltar`, { method: 'POST' })
+    await atualizarLista()
+  } catch (e: any) {
+    erro.value = mensagem(e, 'não foi possível soltar')
+  } finally {
+    soltando.value = null
+  }
+}
+
 async function copiar() {
   if (!criado.value?.url) return
   try {
@@ -254,7 +279,7 @@ onUnmounted(() => { if (relogio) clearInterval(relogio) })
           <form v-if="!trava.token.value" class="space-y-2" @submit.prevent="trava.desbloquear()">
             <label class="block space-y-1">
               <span class="text-xs font-medium">Senha extra (a mesma da tela Empresas)</span>
-              <Input v-model="trava.senha.value" type="password" inputmode="numeric" autocomplete="off" class="h-9" autofocus />
+              <Input v-model="trava.senha.value" type="password" autocomplete="off" class="h-9" autofocus />
             </label>
             <p v-if="trava.erro.value" role="alert" class="text-xs text-red-600">{{ trava.erro.value }}</p>
             <Button size="sm" type="submit" :disabled="trava.desbloqueando.value || !trava.senha.value">
@@ -346,8 +371,30 @@ onUnmounted(() => { if (relogio) clearInterval(relogio) })
                       {{ l.status === 'em_uso' ? `${l.abertas} conexões abertas · ` : '' }}{{ l.conexoes }} conexões no total · {{ mb(l.bytes_sobe + l.bytes_desce) }}
                       <span v-if="l.criado_por"> · gerado por {{ l.criado_por }}</span>
                     </div>
+                    <div v-if="l.aberto_as || l.preso_ip" class="mt-1 text-muted-foreground">
+                      <span v-if="l.aberto_as">Aberto às {{ l.aberto_as }}<template v-if="l.aberto_ip"> de IP {{ l.aberto_ip }}</template></span>
+                      <span v-if="l.aberto_as && l.preso_ip"> · </span>
+                      <span v-if="l.preso_ip">só funciona do IP {{ l.preso_ip }}</span>
+                    </div>
+                    <div
+                      v-if="l.outro_ip && VALENDO.has(l.status)"
+                      role="alert"
+                      class="mt-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+                    >
+                      Recusou outro IP: {{ l.outro_ip }}<template v-if="l.outro_ip_as"> às {{ l.outro_ip_as }}</template> ({{ l.outro_ip_n }}×).
+                      Se foi o seu celular que trocou de rede, solte o IP. Se não foi, corte.
+                    </div>
                     <div v-if="VALENDO.has(l.status)" class="mt-2 flex flex-wrap gap-2">
-                      <Button v-if="l.status === 'aguardando'" size="sm" variant="outline" class="h-7 text-xs" @click="mostrarQr(l)">Mostrar o QR de novo</Button>
+                      <Button v-if="l.status === 'aguardando' && l.meu" size="sm" variant="outline" class="h-7 text-xs" @click="mostrarQr(l)">Mostrar o QR de novo</Button>
+                      <Button
+                        v-if="l.preso_ip"
+                        size="sm"
+                        variant="outline"
+                        class="h-7 text-xs"
+                        :disabled="soltando === l.link_id"
+                        :title="'O celular trocou de rede (Wi-Fi ↔ 4G): o próximo IP que conectar fica com o link'"
+                        @click="soltar(l)"
+                      >{{ soltando === l.link_id ? 'Soltando…' : 'Soltar o IP' }}</Button>
                       <Button size="sm" variant="destructive" class="h-7 text-xs" :disabled="cortando === l.link_id" @click="cortar(l)">
                         {{ cortando === l.link_id ? 'Cortando…' : 'Cortar agora' }}
                       </Button>
