@@ -1,7 +1,7 @@
 import re
 from datetime import UTC, date, datetime, time, timedelta
 from io import BytesIO
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
@@ -1080,8 +1080,53 @@ def _com_status_da_devolucao(
     return d
 
 
+# ── Painel novo (16/11/2026) ────────────────────────────────────────────
+# Mesma leitura da aba Acompanhamento, mas a lista é "quem já caiu em
+# Aguardando Devolução e ainda não foi RESOLVIDO" (botão Resolver), em
+# qualquer situação do Bling — a view vw_devolucoes só cobre 6 situações, por
+# isso a fonte aqui é o bling_orders direto, com as mesmas colunas.
+_PAINEL_FONTE_SQL = f"""(
+    SELECT bo2.id AS bling_order_item_id, bo2.numero AS pedido_bling,
+           bo2.numeroloja AS pedido_marketplace, bo2.data, bo2.situacao,
+           sb2.nome AS situacao_nome, bo2.loja AS bling_loja_id,
+           s2.apelido_override AS loja_nome, s2.marketplace::text AS plataforma_bling,
+           bo2.item_codigo AS sku, bo2.item_descricao AS produto,
+           bo2.item_quantidade AS quantidade, bo2.nome_destinatario,
+           bo2.cidade_destino, bo2.uf_destino
+    FROM "{SCHEMA}".bling_orders bo2
+    LEFT JOIN "{SCHEMA}".situacao_bling sb2 ON sb2.id::text = bo2.situacao
+    LEFT JOIN "{SCHEMA}".stores s2 ON s2.id = COALESCE(
+        bo2.store_id,
+        (SELECT s3.id FROM "{SCHEMA}".stores s3
+          WHERE s3.bling_store_id::text = bo2.loja LIMIT 1)
+    )
+    WHERE bo2.aguardando_devolucao_data IS NOT NULL
+       OR bo2.situacao IN ('{_SITUACAO_AGUARDANDO_DEVOLUCAO}', '84677')
+)"""  # noqa: S608
+# Aberto = nunca resolvido, ou resolvido ANTES da entrada atual em devolução
+# (o pedido voltou pra Aguardando Devolução: é uma devolução nova).
+_PAINEL_ABERTO_SQL = (
+    "(r.resolvido_at IS NULL OR (bo.aguardando_devolucao_data IS NOT NULL AND "
+    "(r.resolvido_at AT TIME ZONE 'America/Sao_Paulo')::date < bo.aguardando_devolucao_data))"
+)
+# Marca da largada (migration 0483): histórico de antes do painel novo — não
+# aparece em "Resolvidas" (o histórico antigo segue na aba Lançamentos).
+PAINEL_LARGADA = "antes do painel novo"
+_PAINEL_EXTRAS_SQL = f"""
+                    {_PAINEL_ABERTO_SQL}        AS aberto,
+                    v.situacao                  AS situacao_bling_id,
+                    v.situacao_nome             AS situacao_bling_nome,
+                    r.resolvido_at,
+                    r.resolvido_como,
+                    ures.name                   AS resolvido_por_nome,"""
+
+
 async def acompanhamento_rows(
-    session: AsyncSession, *, lojas: set[str] | None = None
+    session: AsyncSession,
+    *,
+    lojas: set[str] | None = None,
+    painel: Literal["abertas", "resolvidas", "todas"] | None = None,
+    resolvidas_desde: date | None = None,
 ) -> list[dict]:
     """Linhas da aba Acompanhamento: TODOS os pedidos hoje em 'Aguardando
     Devolução' (83957) no Bling — uma linha por item, com nome do cliente, dia
@@ -1098,8 +1143,41 @@ async def acompanhamento_rows(
     = todas (o Informar e quem não tem equipe); vazio = nenhuma linha."""
     if lojas is not None and not lojas:
         return []
-    params: dict = {"situacao": _SITUACAO_AGUARDANDO_DEVOLUCAO}
     hoje = datetime.now(SAO_PAULO).date()
+    # `painel` (16/11/2026): a lista do painel novo — ver _PAINEL_FONTE_SQL.
+    # None = a aba Acompanhamento de sempre (SQL idêntico ao de antes).
+    fonte = f'"{SCHEMA}".vw_devolucoes'
+    extras = ""
+    juncao_extra = ""
+    teto = 2000
+    ordem = "ASC NULLS FIRST"
+    if painel is None:
+        params: dict = {"situacao": _SITUACAO_AGUARDANDO_DEVOLUCAO}
+        onde = "v.situacao = :situacao"
+    else:
+        params = {}
+        fonte = _PAINEL_FONTE_SQL
+        extras = _PAINEL_EXTRAS_SQL
+        juncao_extra = f'LEFT JOIN "{SCHEMA}".users ures ON ures.id = r.resolvido_por'
+        teto = 4000
+        # Se um dia bater no teto, corta as mais ANTIGAS, não as novas.
+        ordem = "DESC NULLS LAST"
+        if painel == "abertas":
+            onde = _PAINEL_ABERTO_SQL
+        elif painel == "resolvidas":
+            params["largada"] = PAINEL_LARGADA
+            params["desde"] = resolvidas_desde or (hoje - timedelta(days=60))
+            onde = (
+                f"NOT {_PAINEL_ABERTO_SQL} AND r.resolvido_como IS DISTINCT FROM :largada "
+                "AND r.resolvido_at >= :desde"
+            )
+        else:
+            params["largada"] = PAINEL_LARGADA
+            params["desde"] = resolvidas_desde or (hoje - timedelta(days=60))
+            onde = (
+                f"({_PAINEL_ABERTO_SQL} OR (r.resolvido_como IS DISTINCT FROM :largada "
+                "AND r.resolvido_at >= :desde))"
+            )
     filtro_loja = ""
     if lojas is not None:
         filtro_loja = "AND v.bling_loja_id::text = ANY(:lojas)"
@@ -1111,7 +1189,7 @@ async def acompanhamento_rows(
                 SELECT
                     v.pedido_bling::text        AS pedido_bling,
                     v.pedido_marketplace::text  AS pedido_marketplace,
-                    v.data,
+                    v.data,{extras}
                     -- "Em devolução desde" (decidido em _data_entrada): manual >
                     -- devolução aberta no marketplace > carimbo do sinal na
                     -- Logística > entrada em 83957 no Bling (a 0236 carimbou
@@ -1177,10 +1255,11 @@ async def acompanhamento_rows(
                         SELECT 1 FROM "{SCHEMA}".devolutions d
                         WHERE d.pedido_bling = v.pedido_bling::text
                     ) AS lancada
-                FROM "{SCHEMA}".vw_devolucoes v
+                FROM {fonte} v
                 JOIN "{SCHEMA}".bling_orders bo ON bo.id = v.bling_order_item_id
                 LEFT JOIN "{SCHEMA}".devolucao_rastreio r
                        ON r.pedido_bling = v.pedido_bling::text
+                {juncao_extra}
                 LEFT JOIN "{SCHEMA}".users uvs ON uvs.id = r.video_solicitado_por
                 LEFT JOIN "{SCHEMA}".users uve ON uve.id = r.video_enviado_por
                 LEFT JOIN LATERAL (
@@ -1197,11 +1276,11 @@ async def acompanhamento_rows(
                     ORDER BY l.updated_at DESC NULLS LAST
                     LIMIT 1
                 ) lg ON TRUE
-                WHERE v.situacao = :situacao
+                WHERE {onde}
                   {filtro_loja}
-                ORDER BY bo.aguardando_devolucao_data ASC NULLS FIRST,
+                ORDER BY bo.aguardando_devolucao_data {ordem},
                          v.pedido_bling, v.sku
-                LIMIT 2000
+                LIMIT {teto}
                 """  # noqa: S608
             ),
             params,
@@ -1708,27 +1787,20 @@ async def situacoes_bling(
     return SituacoesBlingOut(items=[SituacaoBlingOut(id=int(i), nome=n) for i, n in rows])
 
 
-@router.post("/pedido/{pedido_bling}/situacao-bling", response_model=SituacaoBlingResult)
-async def alterar_situacao_bling(
-    pedido_bling: str,
-    body: SituacaoBlingPatch,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
-) -> SituacaoBlingResult:
-    """Muda a situação do pedido no Bling NA MÃO, pela aba Lançamentos
-    (Vinicius 17/09): o lançamento sozinho só mexe na situação em Extraviado /
-    Sucata / Manutenção / Novo-Usado-Trocado; "Não devolvido" e afins deixavam
-    o pedido em Aguardando Devolução — e por isso ele não saía da aba Fraude
-    (292022). Mesmo PATCH de situação da aba Status da Logística.
-
-    Se o Bling recusar a transição direta (caminhos de mão única), tenta o
-    desvio por "Aguardando Devolução" e depois o alvo; se nem assim, devolve
-    o motivo do Bling. Atualiza o espelho local na hora (o pedido some das
-    abas Acompanhamento/Fraude sem esperar a sincronização) e grava na
-    auditoria quem mudou."""
-    pedido = pedido_bling.strip()
-    await _exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
-    alvo = int(body.situacao_id)
+async def mudar_situacao_manual(
+    session: AsyncSession,
+    user: User,
+    pedido: str,
+    alvo: int,
+    *,
+    origem: str = "devolucoes_manual",
+) -> tuple[str, bool, int, str | None]:
+    """Muda a situação do pedido no Bling na mão (seletor Status Bling e o
+    Resolver do painel novo): confere a situação, aplica com o desvio por
+    "Aguardando Devolução" quando o Bling recusa o caminho direto, adianta o
+    espelho local e grava a auditoria. NÃO faz commit — quem chama fecha a
+    transação. Devolve (nome da situação, foi por desvio, bling_id, situação
+    antiga)."""
     sit = (
         await session.execute(
             select(SituacaoBling.nome, SituacaoBling.ativo).where(SituacaoBling.id == alvo)
@@ -1780,8 +1852,35 @@ async def alterar_situacao_bling(
         bling_id=bling_id,
         valor_antigo=situacao_antiga,
         valor_novo=alvo,
-        origem="devolucoes_manual",
+        origem=origem,
         mudado_por=user.id,
+    )
+    return sit.nome, via_desvio, bling_id, situacao_antiga
+
+
+@router.post("/pedido/{pedido_bling}/situacao-bling", response_model=SituacaoBlingResult)
+async def alterar_situacao_bling(
+    pedido_bling: str,
+    body: SituacaoBlingPatch,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("devolucoes", "edit"))],
+) -> SituacaoBlingResult:
+    """Muda a situação do pedido no Bling NA MÃO, pela aba Lançamentos
+    (Vinicius 17/09): o lançamento sozinho só mexe na situação em Extraviado /
+    Sucata / Manutenção / Novo-Usado-Trocado; "Não devolvido" e afins deixavam
+    o pedido em Aguardando Devolução — e por isso ele não saía da aba Fraude
+    (292022). Mesmo PATCH de situação da aba Status da Logística.
+
+    Se o Bling recusar a transição direta (caminhos de mão única), tenta o
+    desvio por "Aguardando Devolução" e depois o alvo; se nem assim, devolve
+    o motivo do Bling. Atualiza o espelho local na hora (o pedido some das
+    abas Acompanhamento/Fraude sem esperar a sincronização) e grava na
+    auditoria quem mudou."""
+    pedido = pedido_bling.strip()
+    await _exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
+    alvo = int(body.situacao_id)
+    nome, via_desvio, bling_id, situacao_antiga = await mudar_situacao_manual(
+        session, user, pedido, alvo
     )
     await session.commit()
     logger.info(
@@ -1790,7 +1889,7 @@ async def alterar_situacao_bling(
         via_desvio=via_desvio, user_id=str(user.id),
     )
     return SituacaoBlingResult(
-        pedido_bling=pedido, situacao_id=alvo, situacao_nome=sit.nome, via_desvio=via_desvio
+        pedido_bling=pedido, situacao_id=alvo, situacao_nome=nome, via_desvio=via_desvio
     )
 
 

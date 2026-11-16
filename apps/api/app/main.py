@@ -46,6 +46,7 @@ from app.routers import company_certificates as company_certificates_router
 from app.routers import company_proxy as company_proxy_router
 from app.routers import dashboard as dashboard_router
 from app.routers import dev as dev_router
+from app.routers import devolucoes_painel as devolucoes_painel_router
 from app.routers import devolutions as devolutions_router
 from app.routers import discrepancies as discrepancies_router
 from app.routers import email_padroes as email_padroes_router
@@ -304,6 +305,7 @@ app.include_router(chamados_ia_router.router)
 app.include_router(chamados_emails_router.router)
 app.include_router(chamados_router.router)
 app.include_router(devolutions_router.router)
+app.include_router(devolucoes_painel_router.router)
 # Pós-venda › Atendimento (25/09/2026): caixa única das lojas + rascunho da IA.
 app.include_router(atendimento_router.router)
 app.include_router(mail_router.router)

@@ -145,6 +145,19 @@ class DevolucaoRastreio(Base, TimestampMixin):
     )
     video_sem_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
     video_refazer_motivo: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # --- Painel novo de Devoluções (migration 0483, Vinicius 16/11/2026) ---
+    # "Qualquer coisa que cair em ag devolução ele pega" e só sai no botão
+    # Resolver ("igual do chamado"): o pedido fica na lista enquanto
+    # `resolvido_at` for vazio — ou mais antigo que a ENTRADA atual em
+    # devolução (o pedido voltou pra Aguardando Devolução = devolução nova).
+    # `resolvido_como` é a resposta de "Como terminou".
+    resolvido_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolvido_por: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    resolvido_como: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_by: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),

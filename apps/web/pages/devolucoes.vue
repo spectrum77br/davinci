@@ -2683,6 +2683,28 @@ async function backfillAddresses() {
   }
 }
 
+// 16/11/2026 — painel novo (pages/devolucoes-novo.vue). Ele não lança: manda o
+// pedido pra cá. `?lancar=306120` abre o "adicionar" já com o pedido buscado
+// (mesmo caminho do botão "lançar" do Acompanhamento); `?lancar=novo` só abre
+// o formulário. Roda DEPOIS de montar (a página vem pronta do servidor: mexer
+// no estado antes da 1ª pintura no navegador não aparece) e espera a
+// permissão de editar carregar.
+function _abrirLancarDaUrl(): boolean {
+  const pedido = typeof _route.query.lancar === 'string' ? _route.query.lancar.trim() : ''
+  if (!pedido) return true
+  if (!canEdit.value) return false
+  tab.value = 'lancamentos'
+  openAdd()
+  if (pedido !== 'novo') {
+    lookupPedido.value = pedido
+    void lookupOrder()
+  }
+  return true
+}
+onMounted(() => {
+  if (_abrirLancarDaUrl()) return
+  const parar = watch(canEdit, () => { if (_abrirLancarDaUrl()) parar() })
+})
 </script>
 
 <template>
