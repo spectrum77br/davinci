@@ -1131,6 +1131,10 @@ def _rastro(
             "sombra": dict(sombra) if isinstance(sombra, Mapping) else None,
             # O que a resposta da equipe no banco à mesma pergunta soltou (16/11/2026).
             "soltos": _lista(ver.get("soltos")),
+            # O que saiu com a ressalva (só o perigoso segura, 16/11/2026).
+            "ressalvas": _lista((ver.get("ressalvas") or {}).get("problemas"))
+            if isinstance(ver.get("ressalvas"), Mapping)
+            else [],
         }
     if captura is not None and captura.corpo is not None:
         pac = captura.pacote()

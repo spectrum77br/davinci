@@ -24,7 +24,9 @@ chegada). Fica fora o rascunho que uma PESSOA já avaliou na conversa (o 👍/�
 igual, editou, descartou, escreveu do zero); a nota provisória da observação (`observou`)
 vira a da revisão.
 
-A AMOSTRA: todos os sensíveis (`tipos_pergunta.SENSIVEIS`, a régua de 85%) + até 20 dos
+A AMOSTRA: todas as que saíram COM A RESSALVA do verificador (só o perigoso segura, 16/11/2026:
+o "não" de produto, de política ou de "não responde" sai e vem para cá, primeiro, com o que ele
+apontou), todos os sensíveis (`tipos_pergunta.SENSIVEIS`, a régua de 85%) + até 20 dos
 outros — os já revisados nunca saem da lista; o resto por sorteio com a semente do dia (o
 sha1 do dia e do rascunho): o mesmo dia mostra os mesmos.
 
@@ -94,6 +96,7 @@ from app.services.atendimento import (
     tipos_pergunta,
 )
 from app.services.atendimento import manual as manual_svc
+from app.services.atendimento.agente import verificador
 
 logger = structlog.get_logger()
 
@@ -179,6 +182,8 @@ class Envio:
     correcao: str | None = None
     user_id: UUID | None = None
     avaliado_em: datetime | None = None
+    # O que o verificador apontou quando o envio saiu com a ressalva (16/11/2026).
+    ressalva: str | None = None
 
     @property
     def sensivel(self) -> bool:
@@ -190,10 +195,12 @@ class Envio:
 
 
 def escolher(envios: Sequence[Envio], dia: date, *, maximo: int = MAX_OUTROS) -> list[Envio]:
-    """Todos os sensíveis + até `maximo` dos outros: os já revisados primeiro (nunca saem da
-    lista), o resto pelo sorteio do dia. Os sensíveis vêm antes; dentro, pela hora. PURA."""
-    sensiveis = [e for e in envios if e.sensivel]
-    outros = [e for e in envios if not e.sensivel]
+    """Todos os que saíram com a ressalva do verificador, todos os sensíveis + até `maximo` dos
+    outros: os já revisados primeiro (nunca saem da lista), o resto pelo sorteio do dia. Os com
+    ressalva vêm antes, depois os sensíveis; dentro, pela hora. PURA."""
+    com_ressalva = [e for e in envios if e.ressalva]
+    sensiveis = [e for e in envios if e.sensivel and not e.ressalva]
+    outros = [e for e in envios if not e.sensivel and not e.ressalva]
     revisados = [e for e in outros if e.revisado]
     resto = sorted((e for e in outros if not e.revisado), key=lambda e: sorteio(dia, e.rascunho_id))
     escolhidos = revisados + resto[: max(0, maximo - len(revisados))]
@@ -201,7 +208,9 @@ def escolher(envios: Sequence[Envio], dia: date, *, maximo: int = MAX_OUTROS) ->
     def hora(e: Envio) -> tuple[datetime, str]:
         return e.enviada_em, str(e.rascunho_id)
 
-    return sorted(sensiveis, key=hora) + sorted(escolhidos, key=hora)
+    return (
+        sorted(com_ressalva, key=hora) + sorted(sensiveis, key=hora) + sorted(escolhidos, key=hora)
+    )
 
 
 # ── As consultas ───────────────────────────────────────────────────────────────
@@ -256,6 +265,7 @@ async def _envios(
                 a.correcao,
                 a.user_id,
                 a.updated_at,
+                r.fatos["agente"]["verificador"]["ressalvas"].label("ressalvas"),
             )
             .select_from(_m)
             .join(r, r.id == _m.rascunho_id)
@@ -276,6 +286,7 @@ async def _envios(
             correcao=linha.correcao,
             user_id=linha.user_id,
             avaliado_em=linha.updated_at,
+            ressalva=verificador.texto_da_ressalva({"ressalvas": linha.ressalvas}),
         )
         for linha in linhas
         if linha.acao is None or linha.acao in _ACOES_DA_REVISAO
@@ -465,6 +476,7 @@ async def _itens(session: AsyncSession, envios: Sequence[Envio]) -> list[Revisao
                 assunto=e.categoria,
                 assunto_nome=nome_do_assunto(e.categoria, assuntos),
                 sensivel=e.sensivel,
+                ressalva=e.ressalva,
                 pergunta=perguntas.get(e.rascunho_id),
                 resposta=texto_do_envio(mensagens) or None,
                 com_anexo=any(m.anexos for m in mensagens),
@@ -484,8 +496,9 @@ async def revisao_do_dia(
     user: Admin,
     dia: Annotated[date | None, Query()] = None,
 ) -> RevisaoOut:
-    """O que a IA mandou SOZINHA no dia (padrão: hoje em São Paulo): todos os sensíveis + até
-    20 dos outros (o sorteio do dia), com a revisão de cada um e as contagens do dia."""
+    """O que a IA mandou SOZINHA no dia (padrão: hoje em São Paulo): todas as com a ressalva do
+    verificador, todos os sensíveis + até 20 dos outros (o sorteio do dia), com a revisão de cada
+    um e as contagens do dia."""
     agora = hoje()
     dia = dia or agora
     envios = await _envios(session, intervalo=intervalo_do_dia(dia))
@@ -497,6 +510,7 @@ async def revisao_do_dia(
         contagens=RevisaoContagensOut(
             total=len(envios),
             sensiveis=sum(1 for e in envios if e.sensivel),
+            com_ressalva=sum(1 for e in envios if e.ressalva),
             revisados=sum(1 for e in envios if e.revisado),
             erros=sum(1 for e in envios if e.revisado and e.nota == constantes.NOTA_ERRO),
             mostrados=len(itens),

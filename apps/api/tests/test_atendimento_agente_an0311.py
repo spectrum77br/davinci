@@ -752,8 +752,13 @@ async def test_o_corte_sai_so_com_o_ok_do_texto_cortado(
 
 
 async def test_sem_o_ok_do_texto_cortado_fica_o_de_antes_para_pessoa(
-    db: AsyncSession, make_user, agente_ligado, envios, api, teto_limpo
+    db: AsyncSession, make_user, agente_ligado, envios, api, teto_limpo, monkeypatch
 ):
+    # Todo "não" para pessoa: a chave de 16/11/2026 desligada (ligada, o texto cortado que só
+    # "não responde" sai com a ressalva — `test_o_texto_cortado_sai_com_a_ressalva`).
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "atendimento_verificador_so_perigoso", False)
     conversa = await _no_auto(db, make_user, agente_ligado)
     api.agente = [_ver._mensagem_do_agente(texto=TEXTO_COM_SOBRA)]
     api.veredito = [
@@ -775,6 +780,34 @@ async def test_sem_o_ok_do_texto_cortado_fica_o_de_antes_para_pessoa(
     assert fatos["corte_sem_lastro"]["saiu"] is False
     assert fatos["verificador"]["ok"] is False
     assert v.trava(r, ligado=True) == v.TRAVA_REPROVOU
+
+
+async def test_o_texto_cortado_sai_com_a_ressalva(
+    db: AsyncSession, make_user, agente_ligado, envios, api, teto_limpo
+):
+    """Só o perigoso segura (16/11/2026): o texto inteiro afirma o que a loja fez com o pedido
+    ("foi embrulhado com papel de presente" — segura); o cortado só "não responde" e sai, com a
+    ressalva no registro (a Revisão do dia o mostra)."""
+    conversa = await _no_auto(db, make_user, agente_ligado)
+    api.agente = [_ver._mensagem_do_agente(texto=TEXTO_COM_SOBRA)]
+    api.veredito = [
+        _ok(
+            afirma_sem_lastro=["Ele foi embrulhado com papel de presente"],
+            ok_para_envio_automatico=False,
+        ),
+        _ok(responde_o_que_foi_perguntado=False, ok_para_envio_automatico=False),
+    ]
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    cortado = f"Olá! Seu pedido já foi enviado; o rastreio é {RASTREIO}."
+    assert r.texto == cortado and not r.precisa_humano, r.motivo
+    assert [e["texto"] for e in envios] == [cortado]
+    fatos = r.fatos["agente"]
+    assert fatos["corte_sem_lastro"]["saiu"] is True
+    assert fatos["verificador"]["ok"] is True
+    assert fatos["verificador"]["ressalvas"]["problemas"] == [v.NAO_RESPONDE]
+    assert v.trava(r, ligado=True) is None
 
 
 async def test_com_outra_marca_nem_tenta_o_corte(

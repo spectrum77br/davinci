@@ -2619,6 +2619,11 @@ class Resultado:
     # banco à mesma pergunta soltou, e o `par:b<id>` dela.
     soltos: tuple[str, ...] = ()
     solto_por: str | None = None
+    # Só o perigoso segura (16/11/2026, `so_o_perigoso_segura`): as marcas que SAÍRAM com a
+    # ressalva, as afirmações e os motivos do veredito de antes (a Revisão do dia as mostra).
+    ressalvas: tuple[str, ...] = ()
+    ressalva_afirmacoes: tuple[str, ...] = ()
+    ressalva_motivos: tuple[str, ...] = ()
 
     @classmethod
     def falhou(cls, falha: str, **kw: Any) -> Resultado:
@@ -2663,6 +2668,17 @@ class Resultado:
             "custo_usd": round(self.uso.custo_usd, 6),
             "texto_sha": assinatura_do_texto(texto),
             **({"soltos": list(self.soltos), "solto_por": self.solto_por} if self.soltos else {}),
+            **(
+                {
+                    "ressalvas": {
+                        "problemas": list(self.ressalvas),
+                        "afirma_sem_lastro": list(self.ressalva_afirmacoes),
+                        "motivos": list(self.ressalva_motivos),
+                    }
+                }
+                if self.ressalvas
+                else {}
+            ),
         }
 
 
@@ -3001,6 +3017,10 @@ class Conferencia:
     registro: dict | None = None
     custo_usd: float = 0.0
     codigo: str | None = None
+    # Só o perigoso segura (16/11/2026): a conferência SEM a pendência, com a ressalva no registro,
+    # quando o "não" é só de afirmação de produto ou política ou de "não responde". O
+    # `agente.responder` a usa depois de tentar o corte da frase sem lastro.
+    com_ressalva: Conferencia | None = None
 
 
 # A VIRADA (16/11/2026, o Eduardo: "ajusta isso"): o "não responde o que foi perguntado" não segura
@@ -3034,6 +3054,131 @@ def respondida_pelo_banco(r: Resultado, ctx: Any) -> Resultado:
         }
     )
     return replace(r, ok=aprovado(solto), veredito=solto, soltos=tuple(marcas), solto_por=bateu)
+
+
+# SÓ O PERIGOSO SEGURA (16/11/2026, o Eduardo: "sim, vamos tentar" — à proposta "o verificador
+# só barra o que é perigoso; o resto sai e vai para a Revisão do dia"). O teste de 16/11 (129
+# conversas, com o verificador): 26 "não" do verificador, 4 com marca (promete ação da equipe,
+# nega direito) e 22 só de afirmação de produto ou de política ou de "não responde" — esses
+# saem agora (~39% → ~56% saindo sozinho), ao custo aceito de ~1 em 8 respostas automáticas com
+# um erro de produto, corrigido na revisão (a correção vira resposta no banco). Segura sempre: as
+# MARCAS, o "não liberou" e a afirmação sem lastro sobre o PEDIDO — o estado (enviado,
+# entregue, cancelado, reembolsado), o que o cliente comprou ("a opção que você escolheu"), o
+# pedido que não se acha, datas, prazos e valores. Desligar: ATENDIMENTO_VERIFICADOR_SO_PERIGOSO.
+QUE_SAEM_COM_RESSALVA = frozenset({SEM_LASTRO, NAO_RESPONDE})
+# Os avisos da 1ª camada que deixam o "não" sair com a ressalva são os de PRODUTO (o risco aceito):
+# os fracos (o assunto, a confiança, a resposta pela ficha) sempre; os do conteúdo (a
+# característica fora do anúncio, o produto sem fonte, a variação sem dado) só com a resposta da
+# EQUIPE ou o fato aprovado citado — no teste de 16/11 eram as respostas certas que a equipe deu
+# ("vai com o carregador completo", "já vem uma capinha transparente"); "tem carregamento sem fio"
+# citando só o anúncio que não diz isso é invenção e segura. Qualquer outro aviso com o "não" do
+# verificador são dois sinais e segura — o defeito minimizado ("o zíper é assim mesmo"), o pedido
+# ou o estado sem dado ("Foi sim."), a contradição com o anúncio ou com a equipe, a promessa, a
+# região (os controles das rodadas 4 e 4b).
+AVISOS_FRACOS = frozenset(
+    {checagens.ASSUNTO_DE_PRODUTO, checagens.CONFIANCA_BAIXA, checagens.FICHA_NO_AUTOMATICO, CODIGO}
+)
+AVISOS_DO_PRODUTO_COM_A_EQUIPE = frozenset(
+    {
+        checagens.PRODUTO_SEM_FONTE,
+        checagens.CARACTERISTICA_FORA_DO_ANUNCIO,
+        checagens.VARIACAO_SEM_DADO,
+    }
+)
+_FONTE_DA_EQUIPE = ("par:", "fato:")
+_AFIRMACAO_DO_PEDIDO = re.compile(
+    # o estado do pedido, do envio e do reembolso
+    r"\b(?:ja\s+)?(?:foi|foram|esta|estao|sera|serao|vai\s+ser|vao\s+ser|ficou|ficaram)\s+"
+    r"(?:\w+\s+)?(?:enviad|postad|entregue|despachad|separad|faturad|cancelad|reembolsad"
+    r"|estornad|devolvid|aprovad|coletad|liberad|recusad|negad|processad|emitid|gerad|embalad"
+    r"|embrulhad|testad|conferid|trocad|reservad)\w*"
+    r"|\b(?:ja\s+)?(?:esta|estao)\s+(?:a\s+caminho|em\s+transito|em\s+rota"
+    r"|na\s+transportadora)\b"
+    r"|\b(?:consta|constam|aparece|aparecem)\s+como\s+(?:\w+\s+)?(?:enviad|postad|entregue"
+    r"|despachad|cancelad|reembolsad|estornad|devolvid|aprovad|extraviad|pag)\w*"
+    r"|\b(?:reembolso|estorno|dinheiro|valor)\s+(?:ja\s+)?(?:saiu|caiu|foi|esta|entrou|volt\w*)"
+    # o que o cliente comprou ou recebeu
+    r"|\bvoce\s+(?:comprou|escolheu|pediu|recebeu|selecionou|adquiriu)\b"
+    r"|\b(?:seu|o\s+seu)\s+pedido\s+(?:e|esta|foi|tem|ja|vai|sera|consta|saiu|chega\w*)\b"
+    r"|\bsua\s+compra\s+(?:e|esta|foi|tem|ja|vai|sera|consta)\b"
+    # o pedido que não se acha
+    r"|\bnao\s+(?:encontramos|localizamos|achamos|identificamos)\s+(?:\w+\s+){0,3}?"
+    r"(?:pedido|compra|registro|cadastro|pagamento|nota)"
+    # datas, prazos e valores
+    r"|\b\d{1,2}/\d{1,2}\b|\b(?:amanha|ontem)\b|\bdias?\s+uteis\b"
+    r"|\b(?:ate|em|dentro\s+de)\s+\d+\s*(?:dias?|horas?|semanas?)\b"
+    r"|\b(?:envia\w*|sai|saira|posta\w*|chega\w*)\s+(?:\w+\s+)?hoje\b"
+    r"|\bchega\w*\s+(?:em|ate|no|na|dia|amanha|essa|esta|nesta|nessa)\b"
+    r"|r\$\s*\d|\b\d+,\d{2}\b"
+)
+
+
+def afirmacao_do_pedido(afirmacao: str | None) -> bool:
+    """A afirmação sem lastro fala do PEDIDO (estado, compra, datas, prazos, valores)? PURA."""
+    return bool(_AFIRMACAO_DO_PEDIDO.search(validador.plano_de(afirmacao or "")))
+
+
+def so_o_perigoso_segura(
+    r: Resultado, *, checagens_feitas: Sequence[str] = (), evidencias: Sequence[str] = ()
+) -> Resultado:
+    """O "não" sem marca perigosa solto COM A RESSALVA (ver acima): o veredito aprovado e o de
+    antes nas `ressalvas`. Segura (o mesmo `r`): a marca, o "não liberou", a afirmação sobre o
+    pedido, o aviso da 1ª camada que não é de produto (`checagens_feitas`), o aviso do conteúdo do
+    produto sem a resposta da equipe citada, a afirmação sem lastro sem a resposta da equipe nem o
+    fato aprovado citados ("Sim, o cadeado é TSA." só com o pedido; "tem carregamento sem fio" só
+    com o anúncio), sem veredito ou já "ok". O "não responde" sem afirmação não pede fonte. PURA."""
+    v = r.veredito
+    if r.ok or v is None or r.falha is not None:
+        return r
+    marcas = problemas(v)
+    if not marcas or not set(marcas) <= QUE_SAEM_COM_RESSALVA:
+        return r
+    avisos = set(checagens_feitas)
+    if avisos - AVISOS_FRACOS - AVISOS_DO_PRODUTO_COM_A_EQUIPE:
+        return r
+    fontes = [str(e) for e in evidencias if e and not str(e).startswith("pedido")]
+    if avisos & AVISOS_DO_PRODUTO_COM_A_EQUIPE and not any(
+        f.startswith(_FONTE_DA_EQUIPE) for f in fontes
+    ):
+        return r
+    afirmacoes = _lista(v.afirma_sem_lastro)
+    if afirmacoes and not any(f.startswith(_FONTE_DA_EQUIPE) for f in fontes):
+        # A afirmação sem lastro sai só com a resposta da EQUIPE (o banco) ou o fato aprovado
+        # citado — "se está no banco, está certo" (16/11/2026). Só com o anúncio, segura: o "tem
+        # carregamento sem fio" que o anúncio não diz.
+        return r
+    if any(afirmacao_do_pedido(a) for a in afirmacoes):
+        return r
+    solto = v.model_copy(
+        update={
+            "responde_o_que_foi_perguntado": True,
+            "ok_para_envio_automatico": True,
+            "afirma_sem_lastro": [],
+            "motivos": [],
+        }
+    )
+    return replace(
+        r,
+        ok=aprovado(solto),
+        veredito=solto,
+        ressalvas=tuple(marcas),
+        ressalva_afirmacoes=tuple(afirmacoes),
+        ressalva_motivos=tuple(_lista(v.motivos)),
+    )
+
+
+def texto_da_ressalva(registro: Mapping[str, Any] | None) -> str | None:
+    """A ressalva do registro (`fatos.agente.verificador`), como a Revisão do dia a mostra:
+    «afirma sem lastro («…»), não responde o que foi perguntado». None sem ressalva. PURA."""
+    ressalvas = registro.get("ressalvas") if isinstance(registro, Mapping) else None
+    if not isinstance(ressalvas, Mapping):
+        return None
+    partes: list[str] = []
+    for p in ressalvas.get("problemas") or []:
+        rotulo = ROTULOS.get(str(p), str(p))
+        citadas = "; ".join(f"«{a}»" for a in list(ressalvas.get("afirma_sem_lastro") or [])[:2])
+        partes.append(f"{rotulo} ({citadas})" if p == SEM_LASTRO and citadas else rotulo)
+    return ", ".join(partes)[:500] or None
 
 
 def _nao_rodou(motivo: str) -> dict:
@@ -3205,7 +3350,24 @@ async def no_rascunho(
     novo = checagens.aplicar(
         final, checagens.Checagens(pendencias=[pendencia]), acoes_pessoa=[], modo=base.modo
     )
-    return Conferencia(novo, registro, gasto, CODIGO)
+    # Só o perigoso segura (16/11/2026): o "não" só de produto, política ou "não responde" tem a
+    # alternativa que SAI com a ressalva — o `agente.responder` a usa depois do corte.
+    com_ressalva = None
+    if get_settings().atendimento_verificador_so_perigoso:
+        r_solto = so_o_perigoso_segura(
+            r,
+            checagens_feitas=checagens_feitas,
+            evidencias=saida.evidencias(proposta),
+        )
+        if r_solto.ok:
+            registro_solto = r_solto.para_fatos(final.texto)
+            if "sombra" in registro:
+                registro_solto["sombra"] = registro["sombra"]
+            com_ressalva = Conferencia(final, registro_solto, gasto)
+            logger.info(
+                "atendimento_agente_verificador_ressalva", problemas=list(r_solto.ressalvas)
+            )
+    return Conferencia(novo, registro, gasto, CODIGO, com_ressalva)
 
 
 # ── v17 (an0311, 03/11/2026): o corte da frase sem lastro ─────────────────

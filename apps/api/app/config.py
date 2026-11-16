@@ -804,6 +804,13 @@ class Settings(BaseSettings):
     # saindo sozinho —, e nos 12 em que discordaram o Sonnet acertou a maioria; ~US$ 0,02 a
     # conferência (o Haiku, ~US$ 0,001). Voltar ao Haiku: ATENDIMENTO_VERIFICADOR_MODELO=claude-haiku-5-5.
     atendimento_verificador_modelo: str = "claude-sonnet-5-5"
+    # Só o PERIGOSO segura (16/11/2026, o Eduardo: "sim, vamos tentar"): sem o "ok" do verificador,
+    # o rascunho segura só com a marca perigosa (promete ação da equipe, nega direito ou garantia,
+    # contradiz a restrição de região, manda resolver fora da plataforma, revela dado interno), o
+    # "não liberou" e a afirmação sem lastro sobre o PEDIDO; a afirmação de produto ou de política
+    # e o "não responde" SAEM com a ressalva, e a Revisão do dia mostra todas. Voltar ao de antes
+    # (todo "não" vai para pessoa): ATENDIMENTO_VERIFICADOR_SO_PERIGOSO=false.
+    atendimento_verificador_so_perigoso: bool = True
     # Conferência do motivo da devolução antes de a disputa sair (16/11/2026, o dono:
     # "será que o painel consegue analisar o real motivo antes de abrir chamado?" e
     # "se não bate, segurar e perguntar"). Usa a chave do agente do atendimento; sem a

@@ -1322,12 +1322,15 @@ SEGURADOS = {
 @pytest.mark.parametrize("com_ok", [True, False], ids=["verificador_ok", "verificador_marca"])
 @pytest.mark.parametrize("caso", list(SEGURADOS))
 async def test_n_a_1a_camada_passa_e_o_verificador_segura(
-    db: AsyncSession, make_user, agente_ligado, api, envios, caso, com_ok
+    db: AsyncSession, make_user, agente_ligado, api, envios, caso, com_ok, monkeypatch
 ):
     """O MESMO rascunho: com o "ok" sai sozinho (a 1ª camada não viu nada); com a
     marca do verificador fica pendente, inteiro, para pessoa — com o motivo na
-    tela e na Caixa Humano — e nunca sai depois (reenvio)."""
+    tela e na Caixa Humano — e nunca sai depois (reenvio). (Todo "não" para pessoa: a chave de
+    16/11/2026 desligada — ligada, `test_n_so_o_perigoso_segura`.)"""
     from app.routers.atendimento import _rascunho_out
+
+    monkeypatch.setattr(get_settings(), "atendimento_verificador_so_perigoso", False)
 
     pergunta, texto, veredito, problemas, motivo = SEGURADOS[caso]
     conversa = await _no_automatico(db, make_user, pergunta, auto_categorias=["rastreio"])
@@ -1380,6 +1383,39 @@ async def test_n_a_1a_camada_passa_e_o_verificador_segura(
     r.created_at = datetime.now(UTC) - timedelta(minutes=5)
     await db.commit()
     assert await ia.reenviar_pendentes(db) == 0 and envios == []
+
+
+@pytest.mark.parametrize(
+    ("caso", "sai"),
+    [
+        ("nao_responde", True),
+        ("sem_lastro_fora_do_pedido", False),
+        ("garantia_de_resultado", False),
+    ],
+)
+async def test_n_so_o_perigoso_segura(
+    db: AsyncSession, make_user, agente_ligado, api, envios, caso, sai
+):
+    """Só o perigoso segura (16/11/2026, o Eduardo: "sim, vamos tentar"): o "não responde" sai,
+    com a ressalva no registro; a afirmação sem a resposta da equipe citada ("nossa loja é a mais
+    bem avaliada", só com o pedido) e a marca (a garantia de resultado) continuam com pessoa."""
+    pergunta, texto, veredito, _problemas, motivo = SEGURADOS[caso]
+    conversa = await _no_automatico(db, make_user, pergunta, auto_categorias=["rastreio"])
+    api.roteiro = [_final(texto=texto, assunto="rastreio", evidencias=["pedido"])]
+    api.vereditos = [_do_verificador(entrada=2600, saida=140, **veredito)]
+
+    r = await ia.gerar_rascunho(db, conversa)
+
+    registro = _do_agente(r)["verificador"]
+    if sai:
+        assert not r.precisa_humano and [e["texto"] for e in envios] == [r.texto], r.motivo
+        assert registro["ok"] is True and registro["ressalvas"]["problemas"] == [
+            verificador.NAO_RESPONDE
+        ]
+        assert verificador.trava(r, ligado=True) is None
+    else:
+        assert r.precisa_humano and motivo in r.motivo and envios == [], r.motivo
+        assert registro["ok"] is False and "ressalvas" not in registro
 
 
 def _falha_do_provedor(status: int) -> httpx2.Response:

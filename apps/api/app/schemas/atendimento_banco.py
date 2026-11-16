@@ -43,6 +43,8 @@ class RevisaoItemOut(BaseModel):
     assunto_nome: str
     # Reembolso, cancelamento, troca/devolução e reclamação forte (a régua de 90%).
     sensivel: bool
+    # Saiu com a ressalva do verificador (só o perigoso segura, 16/11/2026): o que ele apontou.
+    ressalva: str | None = None
     # O turno do cliente logo antes do envio (as mensagens seguidas dele, a última incluída).
     pergunta: str | None = None
     # O texto que saiu (as mensagens da IA daquele rascunho, em ordem).
@@ -56,6 +58,7 @@ class RevisaoContagensOut(BaseModel):
     # O que a IA mandou sozinha no dia (sem o que uma pessoa já avaliou na conversa).
     total: int
     sensiveis: int
+    com_ressalva: int = 0
     revisados: int
     erros: int
     mostrados: int

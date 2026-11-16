@@ -1477,6 +1477,9 @@ async def _sem_a_frase_sem_lastro(
         logger.warning("atendimento_agente_corte_erro", err=type(e).__name__)
         registro["porque"] = "erro"
         return Corte(saiu=False, registro=registro)
+    if conf2.codigo and conf2.com_ressalva is not None:
+        # Só o perigoso segura (16/11/2026): o resto sem a frase sai com a ressalva.
+        conf2 = conf2.com_ressalva
     custo2 = float(getattr(conf2, "custo_usd", 0.0) or 0.0)
     chaves = ("rodou", "ok", "falha", "problemas", "afirma_sem_lastro", "motivos", "texto_sha")
     # O 1º "não" (o texto inteiro) e o 2º veredito (o resto): os dois ficam no registro.
@@ -1806,6 +1809,12 @@ async def _responder(
         fatos_do_corte = {"corte_sem_lastro": corte.registro}
         if corte.saiu:
             p, final, codigos, conf = corte.proposta, corte.final, corte.codigos, corte.conferencia
+    if conf.codigo and conf.com_ressalva is not None:
+        # Só o perigoso segura (16/11/2026, o Eduardo: "sim, vamos tentar"): o "não" só de
+        # produto, de política ou de "não responde" — sem corte possível — sai com a ressalva no
+        # registro (a Revisão do dia mostra todas). `ATENDIMENTO_VERIFICADOR_SO_PERIGOSO=false`
+        # volta ao de antes.
+        conf = conf.com_ressalva
     final = conf.final
     _guardar_avisos(ctx, final)
     if conf.codigo:

@@ -34,13 +34,15 @@ export type ItemRevisao = {
   assunto: string | null
   assunto_nome: string
   sensivel: boolean
+  // Saiu com a ressalva do verificador (só o perigoso segura, 16/11/2026): o que ele apontou.
+  ressalva?: string | null
   pergunta: string | null
   resposta: string | null
   com_anexo: boolean
   enviada_em: string | null
   avaliacao: NotaRevisao | null
 }
-export type ContagensRevisao = { total: number; sensiveis: number; revisados: number; erros: number; mostrados: number }
+export type ContagensRevisao = { total: number; sensiveis: number; com_ressalva?: number; revisados: number; erros: number; mostrados: number }
 export type Revisao = { dia: string; hoje: string; amostra: number; contagens: ContagensRevisao; itens: ItemRevisao[] }
 export type BancoDaCorrecao = { entrou: boolean; motivo: string | null; frase: string | null; retirada: boolean }
 export type RevisaoSalva = { item: ItemRevisao; banco: BancoDaCorrecao }
@@ -90,15 +92,17 @@ export function fmtDia(dia: string): string {
   return m ? `${m[3]}/${m[2]}/${m[1]}` : dia
 }
 
-export type FiltroRevisao = 'todos' | 'faltam' | 'sensiveis' | 'erros'
+export type FiltroRevisao = 'todos' | 'faltam' | 'ressalva' | 'sensiveis' | 'erros'
 export const FILTROS_REVISAO: { value: FiltroRevisao; label: string }[] = [
   { value: 'todos', label: 'Todos' },
   { value: 'faltam', label: 'Falta revisar' },
+  { value: 'ressalva', label: 'Com ressalva' },
   { value: 'sensiveis', label: 'Sensíveis' },
   { value: 'erros', label: 'Errou' },
 ]
 export function filtrarRevisao(itens: ItemRevisao[], filtro: FiltroRevisao): ItemRevisao[] {
   if (filtro === 'faltam') return itens.filter((i) => !i.avaliacao)
+  if (filtro === 'ressalva') return itens.filter((i) => !!i.ressalva)
   if (filtro === 'sensiveis') return itens.filter((i) => i.sensivel)
   if (filtro === 'erros') return itens.filter((i) => i.avaliacao?.nota === 'erro')
   return itens
@@ -131,7 +135,7 @@ export function correcaoPronta(texto: string | null | undefined, enviado: string
 </script>
 
 <script setup lang="ts">
-import { Bot, ChevronLeft, ChevronRight, ClipboardCheck, ExternalLink, Library, Loader2, Paperclip, Pencil, RotateCcw, Search, ShieldAlert, ThumbsDown, ThumbsUp, X } from 'lucide-vue-next'
+import { Bot, ChevronLeft, ChevronRight, ClipboardCheck, ExternalLink, Library, Loader2, Paperclip, Pencil, RotateCcw, Search, ShieldAlert, ThumbsDown, ThumbsUp, TriangleAlert, X } from 'lucide-vue-next'
 import { canalLabel, erroDaApi, fmtDataHora, fmtHora } from '~/components/AtendimentoPlataforma.vue'
 
 const props = defineProps<{ podeRevisar: boolean }>()
@@ -346,13 +350,14 @@ const podeMostrarMais = computed(() => !!respostas.value && respostas.value.iten
         </Button>
       </div>
       <p class="text-xs text-muted-foreground">
-        O que a IA mandou <b>sozinha</b> no dia: todos os <b>sensíveis</b> (reembolso, cancelamento, troca e reclamação — a régua de 85%) e uma amostra de
+        O que a IA mandou <b>sozinha</b> no dia: todas as que saíram <b>com ressalva</b> do verificador (o que ele apontou vem no item — confira primeiro), todos os <b>sensíveis</b> (reembolso, cancelamento, troca e reclamação — a régua de 85%) e uma amostra de
         até {{ revisao?.amostra ?? 20 }} dos outros, sempre a mesma no mesmo dia. 👍 conta como acerto na régua do assunto; 👎 conta como erro, e a correção
         entra no banco de respostas como resposta ajustada por pessoa.
       </p>
 
-      <div v-if="contagens" class="grid grid-cols-2 gap-2 md:grid-cols-4" data-contagens>
+      <div v-if="contagens" class="grid grid-cols-2 gap-2 md:grid-cols-5" data-contagens>
         <StatCard label="Mandou sozinha" :value="contagens.total" :icon="Bot" :hint="revisao ? `em ${fmtDia(revisao.dia)}` : ''" compact />
+        <StatCard label="Com ressalva" :value="contagens.com_ressalva ?? 0" :icon="TriangleAlert" tone="warning" hint="todas na lista" compact />
         <StatCard label="Sensíveis" :value="contagens.sensiveis" :icon="ShieldAlert" tone="warning" hint="todos na lista" compact />
         <StatCard label="Revisadas" :value="contagens.revisados" :icon="ClipboardCheck" :hint="`de ${contagens.mostrados} na lista`" compact />
         <StatCard label="Errou" :value="contagens.erros" :icon="ThumbsDown" tone="danger" hint="das revisadas" compact />
@@ -374,7 +379,7 @@ const podeMostrarMais = computed(() => !!respostas.value && respostas.value.iten
           v-for="i in itens"
           :key="i.rascunho_id"
           class="rounded-lg border bg-card"
-          :class="i.sensivel ? 'border-l-2 border-l-amber-500' : ''"
+          :class="i.ressalva ? 'border-l-2 border-l-orange-500' : i.sensivel ? 'border-l-2 border-l-amber-500' : ''"
           :data-revisao="i.rascunho_id"
         >
           <div class="flex flex-wrap items-center gap-1.5 border-b px-3 py-1.5 text-xs">
@@ -392,6 +397,10 @@ const podeMostrarMais = computed(() => !!respostas.value && respostas.value.iten
               class="inline-flex items-center gap-0.5 text-muted-foreground underline hover:text-foreground"
               title="abrir a conversa (outra aba)"
             >conversa <ExternalLink class="size-3" /></a>
+          </div>
+          <div v-if="i.ressalva" class="flex items-start gap-1 border-b bg-orange-500/10 px-3 py-1 text-xs text-orange-800 dark:text-orange-300" data-ressalva>
+            <TriangleAlert class="mt-0.5 size-3 shrink-0" />
+            <span>Saiu com ressalva do verificador: {{ i.ressalva }}</span>
           </div>
           <div class="grid gap-3 px-3 py-2 lg:grid-cols-2">
             <div class="min-w-0">

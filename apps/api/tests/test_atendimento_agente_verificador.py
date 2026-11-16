@@ -861,8 +861,19 @@ async def test_no_automatico_com_o_ok_sai_e_o_pedido_e_o_combinado(
     ],
 )
 async def test_sem_o_ok_fica_para_pessoa_com_o_motivo(
-    db: AsyncSession, make_user, agente_ligado, envios, api, teto_limpo, veredito, no_motivo
+    db: AsyncSession,
+    make_user,
+    agente_ligado,
+    envios,
+    api,
+    teto_limpo,
+    veredito,
+    no_motivo,
+    monkeypatch,
 ):
+    # Todo "não" para pessoa: a chave de 16/11/2026 desligada (ligada, o "não responde" sai com a
+    # ressalva — `tests/test_atendimento_verificador_so_perigoso.py`).
+    monkeypatch.setattr(get_settings(), "atendimento_verificador_so_perigoso", False)
     conversa = await _no_auto(db, make_user, agente_ligado)
     api.agente = [_mensagem_do_agente()]
     api.veredito = [veredito]

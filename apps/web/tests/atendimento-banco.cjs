@@ -94,13 +94,15 @@ const B = (() => {
     { rascunho_id: 'a', sensivel: true, avaliacao: null },
     { rascunho_id: 'b', sensivel: false, avaliacao: { nota: 'ok' } },
     { rascunho_id: 'c', sensivel: false, avaliacao: { nota: 'erro' } },
+    { rascunho_id: 'd', sensivel: false, ressalva: 'não responde o que foi perguntado', avaliacao: { nota: 'ok' } },
   ]
   const ids = (f) => B.filtrarRevisao(itens, f).map((i) => i.rascunho_id)
-  assert.deepEqual(ids('todos'), ['a', 'b', 'c'])
+  assert.deepEqual(ids('todos'), ['a', 'b', 'c', 'd'])
   assert.deepEqual(ids('faltam'), ['a'])
+  assert.deepEqual(ids('ressalva'), ['d'])
   assert.deepEqual(ids('sensiveis'), ['a'])
   assert.deepEqual(ids('erros'), ['c'])
-  assert.deepEqual(B.FILTROS_REVISAO.map((f) => f.value), ['todos', 'faltam', 'sensiveis', 'erros'])
+  assert.deepEqual(B.FILTROS_REVISAO.map((f) => f.value), ['todos', 'faltam', 'ressalva', 'sensiveis', 'erros'])
   const c0 = { total: 5, sensiveis: 1, revisados: 1, erros: 0, mostrados: 5 }
   assert.deepEqual(B.contagensDepois(c0, null, { nota: 'erro' }), { ...c0, revisados: 2, erros: 1 })
   assert.deepEqual(B.contagensDepois(c0, { nota: 'erro' }, { nota: 'ok' }), { ...c0, revisados: 1, erros: -1 })
@@ -182,10 +184,16 @@ const ITEM_COMUM = {
   pergunta: 'tem NFC?', resposta: 'Tem sim, NFC para pagamento.', enviada_em: '2026-11-13T19:00:00Z',
   avaliacao: { nota: 'erro', correcao: 'Não tem NFC.', por: 'Eduardo', em: '2026-11-13T20:00:00Z', no_banco: true },
 }
+// Só o perigoso segura (16/11/2026): o envio que saiu com a ressalva do verificador.
+const ITEM_RESSALVA = {
+  ...ITEM_SENSIVEL, rascunho_id: 'r-3', conversa_id: 'c-3', assunto: 'espec_celular', assunto_nome: 'Ficha técnica do celular', sensivel: false,
+  ressalva: 'afirma sem lastro («vai com o carregador completo»)',
+  pergunta: 'vem carregador?', resposta: 'Sim, vai com o carregador completo.', enviada_em: '2026-11-13T19:30:00Z',
+}
 const REVISAO = {
   dia: '2026-11-13', hoje: '2026-11-13', amostra: 20,
-  contagens: { total: 7, sensiveis: 1, revisados: 1, erros: 1, mostrados: 2 },
-  itens: [ITEM_SENSIVEL, ITEM_COMUM],
+  contagens: { total: 7, sensiveis: 1, com_ressalva: 1, revisados: 1, erros: 1, mostrados: 3 },
+  itens: [ITEM_SENSIVEL, ITEM_COMUM, ITEM_RESSALVA],
 }
 const RESPOSTAS = {
   total: 60,
@@ -214,6 +222,10 @@ async function principal() {
     assert.match(html, /Revisão do dia[\s\S]*Banco/)
     assert.match(html, /data-stat="Mandou sozinha"[^>]*>Mandou sozinha: 7</)
     assert.match(html, /data-stat="Sensíveis"[^>]*>Sensíveis: 1</)
+    assert.match(html, /data-stat="Com ressalva"[^>]*>Com ressalva: 1</)
+    const ressalva = /<li[^>]*data-revisao="r-3"[\s\S]*?<\/li>/.exec(html)[0]
+    assert.match(ressalva, /border-l-orange-500/)
+    assert.match(ressalva, /data-ressalva[\s\S]*Saiu com ressalva do verificador: afirma sem lastro \(«vai com o carregador completo»\)/)
     assert.match(html, /data-stat="Errou"[^>]*>Errou: 1</)
     assert.match(html, /aria-label="filtrar a revisão"[\s\S]*>Todos<[\s\S]*>Falta revisar<[\s\S]*>Sensíveis<[\s\S]*>Errou</)
     assert.match(html, /<input type="date"[^>]*value="2026-11-13"[^>]*max="2026-11-13"/)
@@ -258,7 +270,9 @@ async function principal() {
 
     // Os filtros.
     t.estado.filtro = 'faltam'
-    assert.deepEqual(t.estado.itens.map((i) => i.rascunho_id), [])
+    assert.deepEqual(t.estado.itens.map((i) => i.rascunho_id), ['r-3'])
+    t.estado.filtro = 'ressalva'
+    assert.deepEqual(t.estado.itens.map((i) => i.rascunho_id), ['r-3'])
     t.estado.filtro = 'erros'
     assert.deepEqual(t.estado.itens.map((i) => i.rascunho_id), ['r-2'])
     html = await t.html()

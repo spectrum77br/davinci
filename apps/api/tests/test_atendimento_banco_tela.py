@@ -307,6 +307,7 @@ async def test_revisao_do_dia_lista_o_que_a_ia_mandou_sozinha(client, db, make_u
     assert corpo["contagens"] == {
         "total": 2,
         "sensiveis": 1,
+        "com_ressalva": 0,
         "revisados": 0,
         "erros": 0,
         "mostrados": 2,
@@ -320,6 +321,49 @@ async def test_revisao_do_dia_lista_o_que_a_ia_mandou_sozinha(client, db, make_u
     hoje = (await client.get(f"{URL}/revisao")).json()
     assert hoje["dia"] == hoje["hoje"] == rota_banco.hoje().isoformat()
     assert (await client.get(f"{URL}/revisao", params={"dia": "10/11/2026"})).status_code == 422
+
+
+async def test_o_que_saiu_com_a_ressalva_vem_primeiro_com_o_que_o_verificador_apontou(
+    client, db, make_user, admin
+):
+    """Só o perigoso segura (16/11/2026): o envio com a ressalva do verificador entra sempre na
+    lista, antes dos sensíveis, com o que ele apontou."""
+    dono = await make_user()
+    integ, canal = await _loja(db, dono)
+    c1 = await _conversa(db, integ, canal, "R1")
+    g1 = await _cliente(db, c1, "quero o reembolso", BASE - timedelta(minutes=10))
+    r1, _ = await _envio(
+        db, c1, g1, "O reembolso sai pela Shopee depois da devolução.", BASE, categoria="reembolso"
+    )
+    c2 = await _conversa(db, integ, canal, "R2")
+    g2 = await _cliente(db, c2, "vem carregador?", BASE + timedelta(minutes=5))
+    r2, _ = await _envio(
+        db,
+        c2,
+        g2,
+        "Sim, vai com o carregador completo.",
+        BASE + timedelta(minutes=10),
+        categoria="conteudo_da_caixa",
+    )
+    r2.fatos = {
+        "agente": {
+            "verificador": {
+                "ok": True,
+                "ressalvas": {
+                    "problemas": ["afirma_sem_lastro"],
+                    "afirma_sem_lastro": ["vai com o carregador completo"],
+                    "motivos": [],
+                },
+            }
+        }
+    }
+    await db.commit()
+
+    corpo = (await client.get(f"{URL}/revisao", params={"dia": DIA.isoformat()})).json()
+    assert [i["rascunho_id"] for i in corpo["itens"]] == [str(r2.id), str(r1.id)]
+    assert corpo["itens"][0]["ressalva"] == "afirma sem lastro («vai com o carregador completo»)"
+    assert corpo["itens"][1]["ressalva"] is None and corpo["itens"][1]["sensivel"] is True
+    assert corpo["contagens"]["com_ressalva"] == 1 and corpo["contagens"]["total"] == 2
 
 
 def test_amostra_todos_os_sensiveis_e_ate_20_dos_outros_pelo_sorteio_do_dia():
