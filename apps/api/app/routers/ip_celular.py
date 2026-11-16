@@ -235,6 +235,7 @@ def _pagina(titulo: str, corpo: str, *, status_code: int = 200) -> HTMLResponse:
     .caixa {{ background: #422006; }} .aviso {{ color: #fcd34d; }}
     a.botao.secundario, button.secundario {{ background: #3f3f46; color: #fafafa; }}
     textarea {{ background: #09090b; color: #fafafa; border-color: #3f3f46; }}
+    a {{ color: #6ee7b7; }}
   }}
 </style></head>
 <body><div class="card">{corpo}</div></body></html>"""
