@@ -1136,9 +1136,13 @@ class ContextoAgente:
         if self.pares_do_pacote:
             extra["pares_do_pacote"] = list(self.pares_do_pacote)
             # Decisão do dono (22/10/2026): a pergunta de produto sai sozinha com a
-            # resposta da equipe do MESMO anúncio, de UM modelo (`ia.trava_do_agente`).
+            # resposta da equipe do MESMO anúncio, de UM modelo (`ia.trava_do_agente`). Na
+            # virada (16/11/2026), também a do BANCO do mesmo modelo na conversa de um modelo só
+            # (`_vale_para_produto`, o critério do verificador): antes a trava do envio a
+            # barrava sem motivo ("bloqueado"), com o verificador nem rodando — F110
+            # alto-falante, A18 bateria e a mala M3 no teste de 16/11.
             de_produto = [
-                i for i, par in self.pares_do_pacote.items() if par.get("fonte_de_produto") is True
+                i for i, par in self.pares_do_pacote.items() if self._vale_para_produto(i, par)
             ]
             if de_produto:
                 extra["pares_de_produto"] = de_produto

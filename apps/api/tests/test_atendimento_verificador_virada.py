@@ -347,3 +347,7 @@ def test_a_resposta_do_banco_do_mesmo_modelo_conta_como_da_equipe_para_produto()
     fora = _ctx(banco_exigido=False)
     fora.registrar_pares([par])
     assert fora.pares_citados(["par:b5384"], de_produto=True) == []
+    # A trava do envio lê o mesmo critério (`ia.produto_pela_equipe`, `pares_de_produto`): antes
+    # ela barrava sem motivo a resposta do banco do mesmo modelo que o verificador aceitava.
+    assert ctx.para_fatos()["pares_de_produto"] == ["par:b5384"]
+    assert "pares_de_produto" not in fora.para_fatos()
