@@ -255,6 +255,14 @@ class FlexAnuncioEstado(Base):
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # 0491 (16/11/2026): TODAS as variações do anúncio da Shopee como a Shopee
+    # mostrou (`get_model_list`): [{"id", "sku", "estoque"}]. A importação
+    # guarda um modelo só por anúncio (a última linha gravada vence), e a regra
+    # ora via a variação sem vínculo ("xx1"), ora não: o robô desligava e
+    # religava os mesmos anúncios a cada 1–3 h. NULL = nunca lida (vale a
+    # importação); `modelos_em` = quando foi lida.
+    modelos: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    modelos_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     atualizado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -37,6 +37,8 @@ _MIGRATION_KITS = _VERSOES / "0475_flex_ajuste_kits.py"
 _MIGRATION_CONTAS = _VERSOES / "0477_flex_ajuste_contas.py"
 # 0481 (13/11/2026): "Aprovar sozinho" e o "desligado à mão".
 _MIGRATION_APROVAR = _VERSOES / "0481_flex_aprovar_sozinho.py"
+# 0491 (16/11/2026): a lista inteira de variações da Shopee no estado.
+_MIGRATION_MODELOS = _VERSOES / "0491_flex_modelos_shopee.py"
 TABELAS = [
     "flex_ajuste",  # 0474: os ajustes da tela (editados por pessoas)
     "flex_anuncio_estado",
@@ -138,6 +140,11 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         "0481_flex_aprovar_sozinho",
         "0480_atendimento_julgamentos",
     )
+    modelos = _carregar(_MIGRATION_MODELOS)
+    assert (modelos.revision, modelos.down_revision) == (
+        "0491_flex_modelos_shopee",
+        "0490_devolucao_prazo_tiktok_reconsulta",
+    )
 
     await db.execute(text(f'DROP SCHEMA IF EXISTS "{rascunho}" CASCADE'))
     await db.execute(text(f'CREATE SCHEMA "{rascunho}"'))
@@ -152,8 +159,9 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
         with Operations.context(ctx):
             # A 0367 cria; a 0385 completa a flex_conta (o model é o das duas);
             # a 0474 cria a flex_ajuste, a 0475 põe nela os kits, a 0477
-            # as contas e a 0481 o "Aprovar sozinho" e o "desligado à mão".
-            ordem = [mod, origem, ajuste, kits, contas, aprovar]
+            # as contas, a 0481 o "Aprovar sozinho" e o "desligado à mão" e
+            # a 0491 a lista inteira de variações da Shopee.
+            ordem = [mod, origem, ajuste, kits, contas, aprovar, modelos]
             for m in ordem if passo == "upgrade" else list(reversed(ordem)):
                 getattr(m, passo)()
 
@@ -163,6 +171,7 @@ async def test_migration_bate_com_o_model_e_o_downgrade_desfaz(db: AsyncSession)
     kits.SCHEMA = rascunho
     contas.SCHEMA = rascunho
     aprovar.SCHEMA = rascunho
+    modelos.SCHEMA = rascunho
     try:
         conn = await db.connection()
         await conn.run_sync(_rodar, "upgrade")

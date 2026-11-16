@@ -243,6 +243,18 @@ _ESPERA_RECUSA_DESLIGAR = timedelta(hours=1)
 # (components/LogisticaFlexAnuncios.vue procura "esperando ela mostrar").
 SHOPEE_CONFIRMANDO = "a Shopee aceitou — esperando ela mostrar a mudança"
 _ESPERA_MAXIMA = timedelta(hours=6)
+# Variações da Shopee (16/11/2026 — o vaivém dos anúncios com "xx1"): a lista
+# INTEIRA do `get_model_list` guardada no estado vale para a regra; os
+# anúncios que a regra quer ligados são relidos depois de `_MODELOS_VALIDADE`.
+# LIGAR só com uma lista lida há menos de `_MODELOS_FRESCO_LIGAR` (senão lê na
+# hora). Teto de leituras por rodada, folga entre uma e outra (a importação
+# dorme 0,5 s) e a conta que falha N seguidas para nesta rodada.
+_MODELOS_VALIDADE = timedelta(hours=3)
+_MODELOS_FRESCO_LIGAR = timedelta(minutes=15)
+_TETO_MODELOS_SHOPEE = 150
+_FOLGA_MODELOS_S = 0.2
+_MODELOS_FALHAS_SEGUIDAS = 5
+MOTIVO_SEM_MODELOS = "não deu para ler as variações do anúncio na Shopee"
 
 
 def _agora() -> datetime:
@@ -341,6 +353,18 @@ class Anuncio:
     # conta) precisa do saldo de ligar (`n_liga`) para continuar ligado. Ver
     # `_ligados_pelo_davinci`.
     ligado_pelo_davinci: bool = False
+    # Variações (16/11/2026): os ids que um vínculo VIVO cobre ("" = o
+    # anúncio sem variação) e os que só têm vínculo morto — para refazer as
+    # variações sem vínculo quando chega a lista inteira da Shopee
+    # (`_com_modelos`). `importado_em`: a importação mais nova do anúncio;
+    # `modelos_em`: quando a lista inteira foi lida (None = nunca).
+    cobertas: frozenset[str] = frozenset()
+    refs_mortas: frozenset[str] = frozenset()
+    importado_em: datetime | None = None
+    modelos_em: datetime | None = None
+    # A importação, mais nova que a lista guardada, trouxe uma variação sem
+    # vínculo que a lista não tem: a lista está velha — relê na rodada.
+    modelos_atrasados: bool = False
 
     @property
     def chave(self) -> tuple[UUID, str]:
@@ -839,6 +863,7 @@ async def montar_anuncios(
     )
     vistas: dict[tuple[UUID, str], set[str]] = defaultdict(set)
     status: dict[tuple[UUID, str], tuple[str, datetime | None]] = {}
+    importado: dict[tuple[UUID, str], datetime] = {}
     for iid, ext_bruto, st, quando, ml_variacoes, shopee_modelo in importados.all():
         p = plataforma.get(iid)
         ext = _id_anuncio(p or "", ext_bruto)
@@ -853,6 +878,8 @@ async def montar_anuncios(
         if st == ListingStatus.CLOSED:
             continue  # encerrado não entra pela importação (só o status, acima)
         variacoes.setdefault(chave, [])
+        if quando is not None and (chave not in importado or quando > importado[chave]):
+            importado[chave] = quando
         raw = {"variations": ml_variacoes, "model": shopee_modelo}
         for ref, sku, estoque in variacoes_da_plataforma(p, raw):
             if ref in cobertas.get(chave, set()) or ref in vistas[chave]:
@@ -873,9 +900,172 @@ async def montar_anuncios(
             desde=desde.get((iid, ext)),
             status=status[(iid, ext)][0] if (iid, ext) in status else None,
             status_em=status[(iid, ext)][1] if (iid, ext) in status else None,
+            cobertas=frozenset(cobertas.get((iid, ext), ())),
+            refs_mortas=frozenset(
+                ref
+                for ref in mortas.get((iid, ext), {})
+                if (iid, ext) in cobertas and ref not in cobertas[(iid, ext)]
+            ),
+            importado_em=importado.get((iid, ext)),
         )
         for (iid, ext), vs in variacoes.items()
     ]
+
+
+# ---- Variações da Shopee: a lista INTEIRA (16/11/2026) ----------------------------
+#
+# A importação da Shopee grava cada modelo na MESMA linha do anúncio (`listings`
+# é única por conta + anúncio): sobra o último. A regra via a variação sem
+# vínculo ("xx1") só quando ela era a última gravada — e o robô desligava e
+# religava o anúncio a cada importação. A lista inteira vem do `get_model_list`,
+# guardada em `flex_anuncio_estado.modelos`.
+
+# (id da variação, SKU, estoque) — o formato de `variacoes_da_plataforma`.
+ModeloShopee = tuple[str, str | None, int | None]
+
+
+def modelos_da_resposta(resp: Any) -> tuple[ModeloShopee, ...] | None:
+    """As variações da resposta do `get_model_list` (`{"model": [...]}`); None
+    quando a resposta não traz a lista (formato estranho = não se sabe)."""
+    if not isinstance(resp, Mapping):
+        return None
+    modelos = resp.get("model")
+    if not isinstance(modelos, list):
+        return None
+    out: list[ModeloShopee] = []
+    vistos: set[str] = set()
+    for m in modelos:
+        if not isinstance(m, Mapping):
+            continue
+        pedaco = {"model": m}
+        for ref, sku, estoque in variacoes_da_plataforma(flex_envio.PLATAFORMA_SHOPEE, pedaco):
+            if ref not in vistos:
+                vistos.add(ref)
+                out.append((ref, sku, estoque))
+    return tuple(out)
+
+
+def lista_confiavel(modelos: Collection[ModeloShopee], cobertas: Collection[str]) -> bool:
+    """Lista VAZIA num anúncio com vínculo de variação (id ≠ "") é a Shopee sem
+    mandar as variações, não um anúncio sem variação: não vale."""
+    return bool(modelos) or not any(cobertas)
+
+
+def _modelos_do_json(valor: Any) -> tuple[ModeloShopee, ...] | None:
+    """`flex_anuncio_estado.modelos` → lista; None = nunca lida."""
+    if not isinstance(valor, list):
+        return None
+    out: list[ModeloShopee] = []
+    for m in valor:
+        if not isinstance(m, Mapping):
+            continue
+        ref = _chave_variacao(m.get("id"))
+        if ref:
+            sku = str(m.get("sku") or "").strip() or None
+            out.append((ref, sku, _int_ou_none(m.get("estoque"))))
+    return tuple(out)
+
+
+def _modelos_para_json(modelos: Iterable[ModeloShopee]) -> list[dict[str, Any]]:
+    return [{"id": ref, "sku": sku, "estoque": estoque} for ref, sku, estoque in modelos]
+
+
+def _com_modelos(a: Anuncio, modelos: Iterable[ModeloShopee], em: datetime | None) -> Anuncio:
+    """As variações sem vínculo do anúncio da Shopee pela lista INTEIRA lida em
+    `em`. Lida depois da importação, ela vale sozinha (a variação apagada na
+    Shopee some); lida antes, soma-se ao modelo da importação (a variação
+    criada depois da leitura também conta). Vínculo vivo cobre; o que só tem
+    vínculo morto já entrou como morto. Anúncio sem vínculo vivo não muda (a
+    regra já o nega)."""
+    if a.plataforma != flex_envio.PLATAFORMA_SHOPEE or not a.cobertas:
+        return replace(a, modelos_em=em)
+    modelos = tuple(modelos)
+    substituir = em is not None and (a.importado_em is None or em >= a.importado_em)
+    guardadas = {ref for ref, _sku, _estoque in modelos if ref}
+    atrasados = not substituir and any(
+        v.vinculo == VINCULO_SEM and v.ref and v.ref not in guardadas for v in a.variacoes
+    )
+    base = [v for v in a.variacoes if not (substituir and v.vinculo == VINCULO_SEM)]
+    pular = set(a.cobertas) | set(a.refs_mortas)
+    pular |= {v.ref for v in base if v.vinculo == VINCULO_SEM and v.ref}
+    novas: list[Variacao] = []
+    for ref, sku, estoque in modelos:
+        if not ref or ref in pular:
+            continue
+        pular.add(ref)
+        novas.append(Variacao(sku=sku, estoque_publicado=estoque, vinculo=VINCULO_SEM, ref=ref))
+    return replace(
+        a, variacoes=tuple(base + novas), modelos_em=em, modelos_atrasados=atrasados
+    )
+
+
+def _escolher_modelos(
+    anuncios: Iterable[Anuncio],
+    decisoes: Mapping[tuple[UUID, str], Decisao],
+    saldos: Mapping[str, SaldoSp],
+    cfg: ConfigFlex,
+    alvo: set[tuple[UUID, str]] | None,
+    agora: datetime,
+) -> list[Anuncio]:
+    """Os anúncios da Shopee cuja lista de variações a rodada relê: em conta
+    pronta, ativos, com vínculo vivo, e que a regra quer LIGADOS (para ligar,
+    pedir aprovação ou continuar ligados) — ou que só uma variação sem vínculo
+    impede (apagada na Shopee, o anúncio volta a poder ter Flex). Lista nunca
+    lida, mais velha que `_MODELOS_VALIDADE` (na aprovação,
+    `_MODELOS_FRESCO_LIGAR`) ou atrasada em relação à importação. O resto não
+    gasta chamada. Nunca lidos primeiro, depois os atrasados e os mais
+    velhos."""
+    validade = _MODELOS_FRESCO_LIGAR if alvo is not None else _MODELOS_VALIDADE
+    out: list[Anuncio] = []
+    for a in anuncios:
+        if a.plataforma != flex_envio.PLATAFORMA_SHOPEE or a.bloqueio or not a.cobertas:
+            continue
+        if alvo is not None and a.chave not in alvo:
+            continue
+        if not ativo_na_plataforma(a.status):
+            continue
+        velha = a.modelos_em is None or a.modelos_em < agora - validade
+        if not (velha or a.modelos_atrasados):
+            continue
+        d = decisoes.get(a.chave)
+        quer = d is not None and d.desejado == LIGADO
+        if not quer and any(v.vinculo == VINCULO_SEM for v in a.variacoes):
+            so_vinculos = replace(
+                a, variacoes=tuple(v for v in a.variacoes if v.vinculo != VINCULO_SEM)
+            )
+            quer = decidir(so_vinculos, saldos, cfg).desejado == LIGADO
+        if quer:
+            out.append(a)
+    out.sort(
+        key=lambda a: (
+            a.modelos_em is not None,
+            not a.modelos_atrasados,
+            a.modelos_em or agora,
+            str(a.integration_id),
+            a.external_id,
+        )
+    )
+    return out
+
+
+async def _pedir_modelos(
+    cliente: Any, external_id: str, cobertas: Collection[str]
+) -> tuple[ModeloShopee, ...] | None:
+    """Uma chamada `get_model_list`; None = não deu (erro, resposta sem a
+    lista, lista vazia num anúncio com variação vinculada)."""
+    pedir = getattr(cliente, "get_model_list", None)
+    if pedir is None:
+        return None
+    try:
+        resp = await pedir(int(external_id))
+    except Exception as exc:  # noqa: BLE001 — rede/API: fica para a próxima
+        logger.warning("flex_modelos_falhou", external_id=external_id, erro=str(exc)[:200])
+        return None
+    lista = modelos_da_resposta(resp)
+    if lista is None or not lista_confiavel(lista, cobertas):
+        logger.warning("flex_modelos_sem_lista", external_id=external_id)
+        return None
+    return lista
 
 
 def _demanda_por_peca(
@@ -1079,6 +1269,9 @@ class _Estado:
     status_anuncio: str | None = None
     status_em: datetime | None = None
     ligado_pelo_davinci: bool = False
+    # A lista inteira de variações da Shopee (16/11/2026); None = nunca lida.
+    modelos: tuple[ModeloShopee, ...] | None = None
+    modelos_em: datetime | None = None
 
 
 async def _fotos_dos_estados(
@@ -1111,6 +1304,8 @@ async def _fotos_dos_estados(
             status_anuncio=e.status_anuncio,
             status_em=e.status_em,
             ligado_pelo_davinci=(e.integration_id, e.external_id) in nossos,
+            modelos=_modelos_do_json(e.modelos),
+            modelos_em=e.modelos_em,
         )
         for e in linhas
     }
@@ -1213,6 +1408,10 @@ def _com_estado(
             )
             if e.status_anuncio and _mais_novo(e.status_em, a.status_em):
                 a = replace(a, status=e.status_anuncio, status_em=e.status_em)
+            if e.modelos is not None:
+                # A lista inteira de variações da Shopee (16/11/2026): sem ela
+                # a regra só via o último modelo que a importação gravou.
+                a = _com_modelos(a, e.modelos, e.modelos_em)
         out.append(a)
     for chave, e in estados.items():
         if chave in vistos:
@@ -1978,6 +2177,44 @@ def _com_leituras(
     return out
 
 
+async def _ler_modelos(
+    escolhidos: list[Anuncio],
+    integracoes: Mapping[UUID, Integration],
+    clientes: dict[UUID, Any],
+    resumo: dict,
+    *,
+    prazo: float | None = None,
+) -> dict[tuple[UUID, str], tuple[ModeloShopee, ...]]:
+    """A lista inteira de variações (`get_model_list`) dos anúncios da Shopee
+    escolhidos (`_escolher_modelos`), até o teto ou o `prazo`; o resto fica
+    para a próxima rodada. Só LEITURA. A conta que falha
+    `_MODELOS_FALHAS_SEGUIDAS` vezes seguidas para nesta rodada."""
+    out: dict[tuple[UUID, str], tuple[ModeloShopee, ...]] = {}
+    falhas: Counter[UUID] = Counter()
+    for i, a in enumerate(escolhidos):
+        if i >= _TETO_MODELOS_SHOPEE or (prazo is not None and time.monotonic() >= prazo):
+            resumo["modelos_adiados"] = resumo.get("modelos_adiados", 0) + len(escolhidos) - i
+            break
+        iid = a.integration_id
+        if falhas[iid] >= _MODELOS_FALHAS_SEGUIDAS:
+            continue
+        integ = integracoes.get(iid)
+        cli = await _cliente(integ, clientes) if integ is not None else None
+        if cli is None:
+            continue
+        lista = await _pedir_modelos(cli, a.external_id, a.cobertas)
+        if lista is None:
+            falhas[iid] += 1
+            resumo["modelos_falhas"] = resumo.get("modelos_falhas", 0) + 1
+            continue
+        falhas[iid] = 0
+        out[a.chave] = lista
+        resumo["modelos_lidos"] = resumo.get("modelos_lidos", 0) + 1
+        if _FOLGA_MODELOS_S > 0:
+            await asyncio.sleep(_FOLGA_MODELOS_S)
+    return out
+
+
 # =============================================================================
 # Gravação do estado (+ trilha) e escolha das escritas
 # =============================================================================
@@ -2039,11 +2276,13 @@ async def _gravar(
     por: UUID | None,
     so_desligar: bool,
     resumo: dict,
+    modelos_lidos: Mapping[tuple[UUID, str], tuple[ModeloShopee, ...]] | None = None,
 ) -> list[_Acao]:
     """Grava desejado/observado/aprovação de cada anúncio avaliado e devolve
     as escritas que a rodada pode fazer. Só a MUDANÇA vira linha no log
     (decidir, ler, pedir_aprovacao) — a rodada de 15 em 15 min não enche a
-    trilha com a mesma decisão."""
+    trilha com a mesma decisão. `modelos_lidos`: as listas inteiras de
+    variações da Shopee lidas nesta rodada (vão para o estado)."""
     lista = [a for a in anuncios if alvo is None or a.chave in alvo]
     if not lista:
         return []
@@ -2079,6 +2318,11 @@ async def _gravar(
             desejado_antes = None if novo else est.desejado
             observado_antes = None if novo else est.observado
             mudou_algo = novo
+            modelos = (modelos_lidos or {}).get(a.chave)
+            if modelos is not None:
+                est.modelos = _modelos_para_json(modelos)
+                est.modelos_em = agora
+                mudou_algo = True
 
             lido = leituras.get(a.chave)
             mudou_obs = False
@@ -2569,6 +2813,72 @@ async def _conferir_no_bling(session: AsyncSession, skus_sp: Collection[str]) ->
     return None
 
 
+async def _refs_dos_vinculos(
+    session: AsyncSession, integration_id: UUID, external_id: str
+) -> tuple[set[str], set[str]]:
+    """(variações que um vínculo VIVO cobre, variações só com vínculo morto) de
+    UM anúncio da Shopee — a mesma leitura de `montar_anuncios` (o duplicado
+    da 0333 não conta como morto)."""
+    rows = await session.execute(
+        select(
+            ProductLink.external_id,
+            ProductLink.variation_id,
+            ProductLink.morto_desde,
+            ProductLink.morto_motivo,
+        ).where(
+            ProductLink.integration_id == integration_id,
+            ProductLink.platform == IntegrationPlatform.SHOPEE,
+            or_(
+                ProductLink.external_id == external_id,
+                ProductLink.external_id.like(f"{external_id}\\_%"),
+            ),
+        )
+    )
+    vivas: set[str] = set()
+    mortas: set[str] = set()
+    for ext, variacao, morto_desde, morto_motivo in rows.all():
+        if _id_anuncio(flex_envio.PLATAFORMA_SHOPEE, ext) != external_id:
+            continue
+        ref = _chave_variacao(variacao)
+        if morto_desde is None:
+            vivas.add(ref)
+        elif not eh_duplicado(morto_motivo):
+            mortas.add(ref)
+    return vivas, mortas - vivas
+
+
+async def _conferir_modelos(
+    session: AsyncSession, cliente: Any, est: FlexAnuncioEstado, agora: datetime
+) -> tuple[str, str] | None:
+    """Antes de LIGAR na Shopee (16/11/2026): a lista INTEIRA de variações do
+    anúncio — a guardada, se lida há menos de `_MODELOS_FRESCO_LIGAR`; senão
+    lida agora (e guardada) — contra os vínculos dele.
+
+    None = pode ligar; (INELEGIVEL, motivo) = tem variação que o DaVinci não
+    controla (a regra de sempre: o Flex vale para o anúncio inteiro);
+    (REPETIR, porquê) = não deu para ler — não liga, a aprovação continua."""
+    vivas, mortas = await _refs_dos_vinculos(session, est.integration_id, est.external_id)
+    lista = None
+    if est.modelos_em is not None and est.modelos_em >= agora - _MODELOS_FRESCO_LIGAR:
+        lista = _modelos_do_json(est.modelos)
+        if lista is not None and not lista_confiavel(lista, vivas):
+            lista = None
+    if lista is None:
+        lista = await _pedir_modelos(cliente, est.external_id, vivas)
+        if lista is None:
+            return flex_api.REPETIR, MOTIVO_SEM_MODELOS
+        est.modelos = _modelos_para_json(lista)
+        est.modelos_em = agora
+    for ref, sku, _estoque in lista:
+        if ref in vivas:
+            continue
+        nome = _nome_variacao(Variacao(sku=sku, ref=ref))
+        if ref in mortas:
+            return INELEGIVEL, f"variação {nome} com vínculo morto no DaVinci"
+        return INELEGIVEL, f"variação {nome} sem vínculo com produto do DaVinci"
+    return None
+
+
 async def _travar_esperando(session: AsyncSession, chave: int, espera: float) -> bool:
     """A trava do anúncio, esperando até `espera` segundos que o outro
     processo (a rodada lendo ou escrevendo nele) termine."""
@@ -2655,6 +2965,55 @@ async def _escrever(
         elif acao == "desligar" and not (est.desejado != LIGADO and est.observado == LIGADO):
             return "mudou"
         antes = est.observado
+        if acao == "ligar" and plataforma == flex_envio.PLATAFORMA_SHOPEE:
+            # Toda a lista de variações, fresca, antes de LIGAR (16/11/2026):
+            # a variação que o DaVinci não controla também sairia pelo Flex.
+            barrou = await _conferir_modelos(s, cliente, est, agora)
+            if barrou is not None:
+                tipo_barrou, texto = barrou
+                if tipo_barrou == INELEGIVEL:
+                    est.desejado = INELEGIVEL
+                    est.motivo = texto
+                    est.aguardando_aprovacao = False
+                    est.aprovado_em = None
+                    est.aprovado_por = None
+                    est.atualizado_em = agora
+                    s.add(
+                        _log(
+                            acao="decidir",
+                            modo=modo,
+                            resultado="ok",
+                            integration_id=integration_id,
+                            external_id=external_id,
+                            plataforma=plataforma,
+                            estado_antes=LIGADO,
+                            estado_depois=INELEGIVEL,
+                            saldo_sp=est.saldo_sp,
+                            motivo=texto,
+                            por=por,
+                        )
+                    )
+                    return "mudou"
+                res = flex_api.ResultadoFlex(flex_api.REPETIR, detalhe=texto)
+                _aplicar_resultado(est, res, acao, agora)
+                s.add(
+                    _log(
+                        acao=acao,
+                        modo=modo,
+                        resultado="erro",
+                        integration_id=integration_id,
+                        external_id=external_id,
+                        plataforma=plataforma,
+                        estado_antes=antes,
+                        estado_depois=antes,
+                        saldo_sp=est.saldo_sp,
+                        sku=",".join(sorted(skus_sp)) or None,
+                        motivo=est.motivo,
+                        erro=texto,
+                        por=por,
+                    )
+                )
+                return res.tipo
         if acao == "ligar":
             porque = await _conferir_no_bling(s, skus_sp)
             if porque is not None:
@@ -2996,6 +3355,25 @@ async def _rodada(
             anuncios = _com_leituras(anuncios, leituras, agora)
             decisoes = decidir_lote(anuncios, saldos, cfg)
 
+    # As variações INTEIRAS dos anúncios da Shopee que a regra quer ligados
+    # (16/11/2026): a importação guarda um modelo só, e a variação sem vínculo
+    # aparecia e sumia — o robô desligava e religava o mesmo anúncio.
+    modelos_lidos: dict[tuple[UUID, str], tuple[ModeloShopee, ...]] = {}
+    if ler:
+        para_modelos = _escolher_modelos(anuncios, decisoes, saldos, cfg, alvo, agora)
+        if para_modelos:
+            modelos_lidos = await _ler_modelos(
+                para_modelos, integracoes, clientes, resumo, prazo=prazo
+            )
+            if modelos_lidos:
+                anuncios = [
+                    _com_modelos(a, modelos_lidos[a.chave], agora)
+                    if a.chave in modelos_lidos
+                    else a
+                    for a in anuncios
+                ]
+                decisoes = decidir_lote(anuncios, saldos, cfg)
+
     acoes = await _gravar(
         anuncios,
         decisoes,
@@ -3006,6 +3384,7 @@ async def _rodada(
         por=por,
         so_desligar=so_desligar,
         resumo=resumo,
+        modelos_lidos=modelos_lidos,
     )
     # LIGAR só na conta cuja assinatura (e origem) foi relida AGORA: a
     # aprovação que chegou no meio da rodada, ou a releitura que falhou,
