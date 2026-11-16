@@ -2358,9 +2358,6 @@ const naoPrecisaNoRodape = computed(() =>
   && mostraNaoPrecisa(conversa.value, { podeMexer: props.canEdit, respondePorOutra: respondePorOutra.value, ehEmail: ehEmail.value }))
 const naoPrecisaComBalao = computed(() =>
   naoPrecisaNoRodape.value && conversa.value?.plataforma === 'amazon' && !!amazon.value.semResposta && !conversa.value?.sem_resposta_necessaria)
-// O balão saiu da tela (a releitura trouxe a conversa respondida): o ref volta a
-// false, senão ele reabre sozinho quando o botão voltar.
-watch(naoPrecisaComBalao, (v) => { if (!v) balaoNaoPrecisa.value = false })
 // O "Não lida" do cabeçalho some na conversa do NÚMERO (16/11/2026): abrir
 // não apaga mais a bolinha, e ali ele só desfaria o corte do "Não precisa de
 // resposta" (as falas dispensadas voltariam para todos). Quem traz a bolinha
@@ -2992,6 +2989,12 @@ const agCancelamento = computed(() => {
 // A nota interna funciona SEMPRE (até no modo observação): ela não sai para
 // ninguém. A escolha volta para "Responder" ao trocar de conversa.
 const modoCaixa = ref<'responder' | 'nota'>('responder')
+// O balão do "Não precisa" saiu da tela (a releitura trouxe a conversa
+// respondida): o ref volta a false, senão ele reabre sozinho quando o botão
+// voltar. AQUI, depois do `modoCaixa`: o watch avalia `naoPrecisaComBalao` na
+// hora (16/11/2026 — antes dele, o setup quebrava com "Cannot access
+// 'modoCaixa' before initialization" e a conversa não abria).
+watch(naoPrecisaComBalao, (v) => { if (!v) balaoNaoPrecisa.value = false })
 // Reclamação do ML (28/10/2026): para quem a caixa escreve. Só os destinos que
 // o ML libera agora; segue a aba de mensagens quando a pessoa troca de aba
 // (Mediador → mediador, Reclamação → comprador) e fica no que ela escolheu
