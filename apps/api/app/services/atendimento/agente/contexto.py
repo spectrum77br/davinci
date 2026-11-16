@@ -226,6 +226,15 @@ ACOES_ETIQUETA = frozenset(
         constantes.ACAO_ANALISAR_EVIDENCIA,
     }
 )
+# 16/11/2026 (o Eduardo: "manda ele mandar nesses casos" e "pq tá ok essa também"): as ações de
+# pessoa que ficam para DEPOIS do envio quando a resposta pede ao cliente o que falta
+# (`ContextoAgente.pede_o_dado`): o "Falta o dado" (jerivaldoalves: "mande o número do pedido e um
+# vídeo") e o "Abrir chamado (entrega)" com a resposta pedindo a foto ou o vídeo do que chegou
+# (maricleidepereirasantana, "só recebi uma rodinha": "mande uma foto do que chegou e da
+# embalagem; a equipe analisa e responde por aqui"). A conversa continua marcada para a equipe.
+ACOES_QUE_O_PEDIDO_DO_DADO_SOLTA = frozenset(
+    {constantes.ACAO_DADO_INDISPONIVEL, constantes.ACAO_ABRIR_CHAMADO}
+)
 
 
 def ordenar_acoes(*listas: Iterable[str | None]) -> list[str]:
@@ -637,6 +646,11 @@ class ContextoAgente:
     # (a `reclamacao_aberta`) não travam o envio (`acoes_pessoa`) e ficam para DEPOIS dele
     # (`acoes_pos_envio`, no `para_fatos`): a conversa continua na Caixa Humano.
     responde_e_marca: bool = False
+    # 16/11/2026 (o Eduardo: "manda ele mandar nesses casos"; jerivaldoalves, a câmera frontal):
+    # o que falta é um dado do CLIENTE e a resposta pede exatamente esse dado ("mande o número do
+    # pedido e um vídeo") — o "Falta o dado" fica para DEPOIS do envio: a resposta sai (pelo
+    # verificador, como as outras) e a conversa continua marcada para a equipe.
+    pede_o_dado: bool = False
     # Itens 9 e 10 (03/11/2026): as ações de `ACOES_ETIQUETA` que a régua do turno liberou
     # como etiqueta (`acao_pessoa.etiquetas_do_turno`): não travam o envio (`acoes_pessoa`)
     # e ficam para DEPOIS dele (`acoes_pos_envio`). Vazio = como antes.
@@ -1103,6 +1117,8 @@ class ContextoAgente:
             return True
         if self.banco_bateu and acao in ACOES_QUE_O_BANCO_SOLTA:
             # A virada: bateu com a resposta da equipe no banco — responde e marca.
+            return True
+        if self.pede_o_dado and acao in ACOES_QUE_O_PEDIDO_DO_DADO_SOLTA:
             return True
         return (self.responde_e_marca and acao in ACOES_POS_ENVIO) or (
             acao in ACOES_ETIQUETA and acao in self.etiquetas_pos_envio

@@ -754,6 +754,83 @@ async def test_nf_com_outra_acao_segue_o_caminho_de_sempre(db, make_user, ligado
     assert not str(_decisao(r)).startswith("nf:") and plataforma == []
 
 
+_NF_E_A_CAPINHA = (
+    "Segue o arquivo da nota fiscal do pedido. Sobre a capinha: por ser maior, o Uranyx A18 Pro "
+    "Max S5 Edition não é compatível com capinhas do iPhone, e servem só os acessórios dele."
+)
+
+
+async def _nf_e_outra_resposta(db, conversa, gatilho, *, aprovado: bool) -> AtendimentoRascunho:
+    from app.services.atendimento.agente import verificador
+
+    r = await _rascunho(db, conversa, gatilho, checagens=["caracteristica_fora_do_anuncio"])
+    r.texto = _NF_E_A_CAPINHA
+    if aprovado:
+        agente = dict(r.fatos["agente"])
+        agente["verificador"] = {
+            "rodou": True,
+            "ok": True,
+            "texto_sha": verificador.assinatura_do_texto(_NF_E_A_CAPINHA),
+            "em": datetime.now(UTC).isoformat(),
+        }
+        r.fatos = {**r.fatos, "agente": agente}
+    await db.commit()
+    return r
+
+
+async def test_nf_com_outra_resposta_aprovada_sai_com_o_texto_do_rascunho(
+    db, make_user, ligado, plataforma
+):
+    """16/11/2026 (o Eduardo: "corrige agora e deploya junto"; ezequielsilva784): a NF pedida e a
+    resposta da capinha no mesmo rascunho — com o texto aprovado pelo verificador, a NF sai e a
+    frase é o texto do rascunho (não a fixa); sem o verificador, segura como antes."""
+    conversa, gatilho = await _cenario(db, make_user)
+    r = await _nf_e_outra_resposta(db, conversa, gatilho, aprovado=True)
+    assert nf_automatica.motivo_do_rascunho(r) == "checagens"
+    assert nf_automatica.motivo_do_rascunho(r, texto_aprovado=True) is None
+    assert nf_automatica.legenda_do_envio(r) == _NF_E_A_CAPINHA
+
+    assert await ia._talvez_enviar(db, conversa, r) is True
+
+    assert _decisao(r) == "enviado_nf", _decisao(r)
+    assert [s["tipo"] for s in plataforma] == ["imagem", "texto"]
+    assert plataforma[1]["texto"] == _NF_E_A_CAPINHA
+
+
+async def test_nf_com_outra_resposta_sem_o_verificador_fica_com_a_pessoa(
+    db, make_user, ligado, plataforma
+):
+    conversa, gatilho = await _cenario(db, make_user)
+    r = await _nf_e_outra_resposta(db, conversa, gatilho, aprovado=False)
+    await ia._talvez_enviar(db, conversa, r)
+    assert _decisao(r) == "nf:checagens" and plataforma == []
+
+
+def test_a_nf_sozinha_continua_com_a_frase_fixa():
+    from types import SimpleNamespace
+
+    r = SimpleNamespace(
+        prompt_versao=PROMPT_VERSAO_AGENTE,
+        categoria="nota_fiscal",
+        texto="Segue a nota fiscal.",
+        fatos={
+            "agente": {
+                "acoes_pessoa": ["enviar_arquivo_nf"],
+                "sem_auto": [nf_automatica.MOTIVO_SEM_AUTO_NF],
+                "pistas_turno": ["nota_fiscal"],
+                "modo": "auto",
+            }
+        },
+    )
+    assert nf_automatica.motivo_do_rascunho(r) is None
+    assert nf_automatica.legenda_do_envio(r) == nf_automatica.LEGENDA
+    # O texto aprovado nunca solta outra ação nem o sem_auto de outra coisa.
+    r.fatos["agente"]["sem_auto"] = [nf_automatica.MOTIVO_SEM_AUTO_NF, "validador: x"]
+    assert nf_automatica.motivo_do_rascunho(r, texto_aprovado=True) == "sem_auto"
+    r.fatos["agente"]["acoes_pessoa"] = ["enviar_arquivo_nf", "abrir_chamado"]
+    assert nf_automatica.motivo_do_rascunho(r, texto_aprovado=True) == "outra_acao"
+
+
 # ─────────────── as partes puras ───────────────
 
 

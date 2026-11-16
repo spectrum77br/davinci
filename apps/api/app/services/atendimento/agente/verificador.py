@@ -2878,18 +2878,66 @@ async def verificar(
 # ── Quando roda (a régua do envio sozinho, sem o momento) ─────────────────
 
 
+def nf_com_outra_resposta(
+    final: SaidaConferida,
+    ctx: ContextoAgente,
+    categoria: str | None,
+    checagens_feitas: Sequence[str] = (),
+) -> bool:
+    """O rascunho preso SÓ pela ação "Enviar o arquivo da NF" e que a NF automática não manda
+    sozinha porque o TEXTO trata também de outra coisa? PURA.
+
+    16/11/2026 (o Eduardo: "corrige agora e deploya junto"; ezequielsilva784: "Segue o arquivo da
+    nota fiscal do pedido … Sobre a capinha: …" ficou para pessoa). O verificador confere esse
+    texto (`por_que_nao_verifica` e `por_que_nao_verifica_no_canal` sem a ação da NF); aprovado, a
+    NF sai com ele (`nf_automatica.motivo_do_rascunho(texto_aprovado=True)`). A NF sozinha (sem
+    nada além dela) continua no caminho de sempre, sem o verificador.
+    """
+    from app.services.atendimento import nf_automatica
+
+    da_nf = nf_automatica.MOTIVO_SEM_AUTO_NF
+    if ctx.acoes_pessoa != [constantes.ACAO_ENVIAR_ARQUIVO_NF]:
+        return False
+    if list(getattr(final, "sem_auto", None) or []) != [da_nf]:
+        return False
+    if not all(str(m).startswith(da_nf) for m in final.motivos):
+        return False
+    falso = SimpleNamespace(
+        prompt_versao=constantes.PROMPT_VERSAO_AGENTE,
+        categoria=categoria,
+        texto=final.texto,
+        fatos={
+            "agente": {
+                **ctx.para_fatos(),
+                "checagens": list(checagens_feitas),
+                "avisos_auto": list(getattr(final, "avisos_auto", None) or []),
+                "sem_auto": [da_nf],
+                "pistas_alem": [
+                    p
+                    for p in ia.pistas_alem_do_assunto(ctx.pistas_turno, categoria)
+                    if p not in constantes.ASSUNTOS_SO_PESSOA_NO_AGENTE
+                ],
+            }
+        },
+    )
+    return nf_automatica.motivo_do_rascunho(falso) in nf_automatica.MOTIVOS_DO_TEXTO
+
+
 def por_que_nao_verifica(
     final: SaidaConferida,
     proposta: saida.Proposta,
     ctx: ContextoAgente,
     base: BaseDoGerar,
     conversa: Any,
+    *,
+    sem_a_nf: bool = False,
 ) -> str | None:
     """Por que este rascunho NÃO poderia sair sozinho (sem ler o canal), ou None. PURA.
 
     As travas de conteúdo do `ia._talvez_enviar`, na mesma ordem (e as da
     conversa que não dependem do momento) — mais o "Sugerir", o copiloto e o
-    replay, que nunca enviam sozinhos.
+    replay, que nunca enviam sozinhos. `sem_a_nf` (`nf_com_outra_resposta`): a
+    ação da NF e o motivo dela não contam — o texto vai com a NF.
     """
     if ctx.modo_replay and not _no_replay():
         return "replay"
@@ -2901,9 +2949,9 @@ def por_que_nao_verifica(
         return NAO_RODA_NAO_PENDENTE
     if not final.validador_ok:
         return NAO_RODA_VALIDADOR
-    if final.precisa_humano or ctx.acoes_pessoa:
+    if (final.precisa_humano or ctx.acoes_pessoa) and not sem_a_nf:
         return NAO_RODA_PESSOA
-    if getattr(final, "sem_auto", None):
+    if getattr(final, "sem_auto", None) and not sem_a_nf:
         return NAO_RODA_SEM_AUTO
     if saida.confianca(proposta) < ia.CONFIANCA_AUTO_AGENTE:
         return NAO_RODA_CONFIANCA
@@ -2929,20 +2977,29 @@ def por_que_nao_verifica_no_canal(
     canal: Any,
     *,
     checagens_feitas: Sequence[str] = (),
+    sem_a_nf: bool = False,
 ) -> str | None:
     """O canal liberaria o assunto do rascunho para o agente? (`ia.trava_do_agente`). PURA.
 
     `categoria` = a do rascunho (depois de `ia.assunto_do_agente`);
-    `checagens_feitas` = os códigos das pendências (o andamento).
+    `checagens_feitas` = os códigos das pendências (o andamento); `sem_a_nf`
+    (`nf_com_outra_resposta`): sem a ação da NF e o motivo dela.
     """
     if canal is None or getattr(canal, "modo", None) != constantes.MODO_AUTO:
         return NAO_RODA_FORA_DO_AUTO
+    agente = {**ctx.para_fatos(), "checagens": list(checagens_feitas)}
+    if sem_a_nf:
+        from app.services.atendimento import nf_automatica
+
+        agente["acoes_pessoa"] = [
+            a for a in agente.get("acoes_pessoa") or [] if a != constantes.ACAO_ENVIAR_ARQUIVO_NF
+        ]
+        agente["sem_auto"] = [
+            m for m in agente.get("sem_auto") or [] if m != nf_automatica.MOTIVO_SEM_AUTO_NF
+        ]
     rascunho = SimpleNamespace(
         categoria=categoria,
-        fatos={
-            **dict(base.fatos_gravados or {}),
-            "agente": {**ctx.para_fatos(), "checagens": list(checagens_feitas)},
-        },
+        fatos={**dict(base.fatos_gravados or {}), "agente": agente},
     )
     motivo = ia.trava_do_agente(
         rascunho, canal, etiquetas=acao_pessoa.etiquetas_da_conversa(conversa), ligado=True
@@ -3246,7 +3303,8 @@ async def no_rascunho(
     categoria = None
     try:
         categoria = ia.assunto_do_agente(final.categoria, proposta.acao, base.ids_categorias)
-        motivo = por_que_nao_verifica(final, proposta, ctx, base, conversa)
+        sem_a_nf = nf_com_outra_resposta(final, ctx, categoria, checagens_feitas)
+        motivo = por_que_nao_verifica(final, proposta, ctx, base, conversa, sem_a_nf=sem_a_nf)
         if motivo is None:
             canal = await _canal(session, conversa)
             motivo = por_que_nao_verifica_no_canal(
@@ -3256,6 +3314,7 @@ async def no_rascunho(
                 conversa,
                 canal,
                 checagens_feitas=checagens_feitas,
+                sem_a_nf=sem_a_nf,
             )
     except Exception as e:  # noqa: BLE001 — sem saber, não roda (e a trava barra)
         logger.warning("atendimento_agente_verificador_elegibilidade", err=type(e).__name__)

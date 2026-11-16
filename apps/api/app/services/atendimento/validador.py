@@ -154,6 +154,51 @@ def _sem_emoji(texto: str) -> str:
     return _EMOJI.sub("", texto)
 
 
+# 16/11/2026 (o Eduardo: "pq recusou nessa", a Slush Machine): o chat da Shopee barra a palavra
+# "raspadinha" (no Brasil, também o bilhete de loteria) — status `censored_blacklist`, a mensagem
+# não chega ao comprador. Medido em produção: 35 de 37 respostas com ela em 60 dias, em 18
+# conversas (as 2 que passaram foram para o mesmo afiliado). Na Shopee ela sai com o nome do
+# produto: "de raspadinha" vira "de slush" (a máquina de slush, o nome do anúncio) e o resto vira
+# "bebida congelada" (feminino: o artigo e o adjetivo continuam certos). Os links ficam como estão.
+_DE_RASPADINHA = re.compile(r"\b(de)\s+(raspadinhas?)\b", re.IGNORECASE)
+_RASPADINHA = re.compile(r"\braspadinha(s?)\b", re.IGNORECASE)
+_LINK_NO_TEXTO = re.compile(r"https?://\S+")
+
+
+def _na_caixa_da_original(original: str, nova: str) -> str:
+    if original.isupper():
+        return nova.upper()
+    if original[:1].isupper():
+        return nova[:1].upper() + nova[1:]
+    return nova
+
+
+def _trocar_raspadinha(trecho: str) -> str:
+    trecho = _DE_RASPADINHA.sub(
+        lambda m: f"{m.group(1)} {_na_caixa_da_original(m.group(2), 'slush')}", trecho
+    )
+    return _RASPADINHA.sub(
+        lambda m: _na_caixa_da_original(
+            m.group(0), "bebidas congeladas" if m.group(1) else "bebida congelada"
+        ),
+        trecho,
+    )
+
+
+def sem_palavra_barrada_na_shopee(texto: str) -> str:
+    """O texto sem a palavra que o chat da Shopee barra ("raspadinha", ver acima). PURA."""
+    if not _RASPADINHA.search(texto or ""):
+        return texto
+    partes: list[str] = []
+    pos = 0
+    for m in _LINK_NO_TEXTO.finditer(texto):
+        partes.append(_trocar_raspadinha(texto[pos : m.start()]))
+        partes.append(m.group(0))
+        pos = m.end()
+    partes.append(_trocar_raspadinha(texto[pos:]))
+    return "".join(partes)
+
+
 def normalizar(texto: str, *, plataforma: str, canal: str) -> str:
     """Texto limpo e no alfabeto que a plataforma aceita.
 
@@ -166,12 +211,17 @@ def normalizar(texto: str, *, plataforma: str, canal: str) -> str:
     mensagem INTEIRA por um caractere). O que sobrar fora do ISO-8859-1
     (letra chinesa, "≈") NÃO é apagado em silêncio — apagar muda o sentido
     da frase; o `validar` aponta, e a pessoa decide.
+
+    Shopee: a palavra que o chat barra ("raspadinha") sai com o nome do
+    produto (`sem_palavra_barrada_na_shopee`).
     """
     t = unicodedata.normalize("NFC", texto or "")
     t = t.translate(_INVISIVEIS).translate(_ESPACOS)
     t = t.replace("\r\n", "\n").replace("\r", "\n")
     if plataforma == "ml":
         t = _sem_emoji(t.translate(_TIPOGRAFIA))
+    if plataforma == "shopee":
+        t = sem_palavra_barrada_na_shopee(t)
     linhas = [re.sub(r"[ \t\f\v]+", " ", linha).strip() for linha in t.split("\n")]
     t = "\n".join(linhas)
     t = re.sub(r"\n{3,}", "\n\n", t)

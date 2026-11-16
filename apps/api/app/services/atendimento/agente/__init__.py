@@ -53,7 +53,14 @@ import structlog
 
 from app.config import get_settings
 from app.redis_client import redis
-from app.services.atendimento import agente_config, constantes, ficha_loja, ia, recursos_equipe
+from app.services.atendimento import (
+    agente_config,
+    constantes,
+    ficha_loja,
+    ia,
+    recursos_equipe,
+    validador,
+)
 from app.services.atendimento.agente import (
     acao_pessoa,
     catalogo,
@@ -1723,6 +1730,36 @@ async def _responder(
                     ),
                 }
             )
+        c = await conferir_proposta(session, conversa, gatilho, base, ctx, p_do_modelo, pac)
+    # 16/11/2026 (o Eduardo: "manda ele mandar nesses casos" e "pq tá ok essa também"): as únicas
+    # ações de pessoa são o "Falta o dado" e/ou o "Abrir chamado (entrega)" e a resposta pede ao
+    # cliente o que falta ("mande o número do pedido e um vídeo"; no chamado, a foto ou o vídeo do
+    # que chegou, sem o cliente relatar extravio) — as ações ficam para depois do envio e a 1ª
+    # camada roda de novo (o verificador confere o texto). DEPOIS da virada do banco, nunca no
+    # lugar dela (o Eduardo: "essas mudanças não podem invalidar outras"): o que o banco solta
+    # continua saindo pelo banco; esta regra só pega o que ficou preso.
+    soltas = contexto.ACOES_QUE_O_PEDIDO_DO_DADO_SOLTA
+    if (
+        ctx.regua
+        and not ctx.pede_o_dado
+        and not c.sem_resposta
+        and c.final is not None
+        and c.final.precisa_humano
+        and p_do_modelo.acao_pessoa in (None, *soltas)
+        and ctx.acoes_pessoa
+        and set(ctx.acoes_pessoa) <= soltas
+        and checagens.pede_o_dado_ao_cliente(c.final.texto)
+        and (
+            constantes.ACAO_ABRIR_CHAMADO not in ctx.acoes_pessoa
+            or (
+                checagens.pede_a_evidencia(c.final.texto)
+                and not acao_pessoa.extravio_relatado(
+                    " ".join(validador.plano_de(" ".join(base.textos_rajada or ())).split())
+                )
+            )
+        )
+    ):
+        ctx.pede_o_dado = True
         c = await conferir_proposta(session, conversa, gatilho, base, ctx, p_do_modelo, pac)
     p, conferida = c.proposta, c.conferida
     if c.sem_resposta:
