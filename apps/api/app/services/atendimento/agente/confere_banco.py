@@ -58,6 +58,12 @@ VEREDITOS_QUE_SOLTAM = frozenset({MESMA, SERVE})
 # (o "responde e marca": a conversa fica em "Precisa de ação"). O teste de 16/11: 24 de 129
 # rascunhos, todos com texto, presos só por essas ações.
 PADRAO = "padrao"
+# A regra do dono ao pé da letra (16/11/2026, a 5ª rodada do teste, 36%: a conferência disse
+# "diferente" em 19 de 22 reclamações presas — o rascunho do agente não é IGUAL ao da equipe):
+# preso só por ação de reclamação, num tipo em que a equipe TEM padrão no banco, o rascunho
+# responde e marca mesmo sem a conferência achar igual — o verificador continua conferindo o
+# texto. Jurídico, fraude e ofensa ficam só com a conferência.
+PELO_TIPO = "pelo_tipo"
 ACOES_DO_PADRAO = frozenset(
     {
         "abrir_chamado",
@@ -68,6 +74,7 @@ ACOES_DO_PADRAO = frozenset(
         "juridico_fraude_ofensa",
     }
 )
+ACOES_DO_PADRAO_PELO_TIPO = ACOES_DO_PADRAO - {"juridico_fraude_ofensa"}
 MAX_CHARS_TEXTO_DO_BANCO = 600
 _MARCACAO = re.compile(r"\[[^\]]+\]|\{[^}]+\}")
 # A virada (13/11/2026): UMA chamada com todas as respostas do banco que o pacote mostrou (o
@@ -452,6 +459,17 @@ async def texto_do_banco(session: AsyncSession | None, ctx: Any, caso: str) -> s
     return texto[0].upper() + texto[1:]
 
 
+async def padroes_para_o_verificador(
+    session: AsyncSession | None, ctx: Any, categoria: str | None
+) -> None:
+    """A virada (16/11/2026): o PADRÃO DA EQUIPE do tipo do rascunho no contexto ANTES do
+    verificador, em todo rascunho — "o reembolso é feito pela plataforma" que a equipe repete
+    vale como política para ele (`verificador.linhas_dos_pares`). Nunca levanta."""
+    if not _virada(ctx):
+        return
+    await _padroes_do_rascunho(session, ctx, categoria)
+
+
 async def _padroes_do_rascunho(
     session: AsyncSession | None, ctx: Any, categoria: str | None
 ) -> list[dict]:
@@ -538,6 +556,12 @@ async def solta_a_pessoa(
         soltam = VEREDITOS_QUE_SOLTAM | ({PADRAO} if padrao else set())
         if registro.get("veredito") in soltam and registro.get("id"):
             ctx.banco_bateu = registro["id"]
+            ctx.responde_e_marca = True
+            return True
+        if padroes and set(acoes) <= ACOES_DO_PADRAO_PELO_TIPO:
+            # A regra do dono: o tipo tem padrão no banco — responde e marca (ver acima).
+            registro.update(id=padroes[0]["id"], veredito=PADRAO, pelo_tipo=True)
+            ctx.banco_bateu = padroes[0]["id"]
             ctx.responde_e_marca = True
             return True
         return False

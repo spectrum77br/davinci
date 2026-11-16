@@ -958,3 +958,73 @@ async def test_a_reclamacao_presa_confere_com_o_padrao_do_tipo_do_rascunho(
     assert soltou and ctx.responde_e_marca is True
     assert ctx.texto_do_banco == "Consegue fazer um vídeo!"
     assert ctx.para_fatos()["banco_tipos"][ctx.banco_bateu] == "defeito"
+
+
+async def test_reclamacao_presa_num_tipo_com_padrao_responde_e_marca_mesmo_sem_igual(
+    db: AsyncSession, make_user
+):
+    import json as _json
+
+    from app.services.atendimento.agente import confere_banco
+    from app.services.atendimento.agente import contexto as agente_ctx
+
+    loja = (await _conversa(db, make_user, externo_id="pd4")).integration_id
+    for _ in range(2):
+        await _resposta(db, integ=loja, tipo="defeito", resposta="Pode devolver para a Shopee!")
+
+    def _ctx():
+        ctx = agente_ctx.ContextoAgente(
+            conversa_id=uuid4(),
+            gatilho_id=None,
+            canal_id=None,
+            integration_id=loja,
+            plataforma="shopee",
+            canal="chat",
+            modo="auto",
+        )
+        ctx.regua, ctx.banco_exigido, ctx.as_of = True, True, datetime.now(UTC)
+        return ctx
+
+    class _Diferente:
+        def __init__(self):
+            self.messages = self
+
+        async def create(self, **kw):
+            texto = _json.dumps({"id": None, "veredito": "diferente", "motivo": "outra"})
+            return SimpleNamespace(
+                content=[SimpleNamespace(type="text", text=texto)],
+                stop_reason="end_turn",
+                model=kw["model"],
+                usage=SimpleNamespace(
+                    input_tokens=300,
+                    output_tokens=20,
+                    cache_read_input_tokens=0,
+                    cache_creation_input_tokens=0,
+                ),
+            )
+
+    async def _soltar(ctx, acoes):
+        return await confere_banco.solta_a_pessoa(
+            ctx,
+            texto="Sentimos muito! Pode pedir a devolução em Minhas Compras.",
+            categoria="defeito",
+            acoes=acoes,
+            evidencias=[],
+            pergunta="o celular parou de ligar",
+            cliente=_Diferente(),
+            modelo="claude-opus-5-5",
+            session=db,
+        )
+
+    ctx = _ctx()
+    assert await _soltar(ctx, [constantes.ACAO_ANALISAR_EVIDENCIA])
+    assert ctx.responde_e_marca is True and ctx.banco_confere["pelo_tipo"] is True
+    assert ctx.banco_confere["veredito"] == confere_banco.PADRAO
+    # O envio aceita (o padrão da conferência do rascunho preso; o registro vai ao
+    # `fatos.agente.banco_confere` pelo `agente.responder`).
+    fatos = {**ctx.para_fatos(), "banco_confere": ctx.banco_confere}
+    assert ia.bateu_com_o_banco(fatos, "defeito", "x")
+    # Jurídico, fraude e ofensa só com a conferência.
+    ctx2 = _ctx()
+    assert not await _soltar(ctx2, [constantes.ACAO_JURIDICO_FRAUDE_OFENSA])
+    assert not ctx2.responde_e_marca

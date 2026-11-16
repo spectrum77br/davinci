@@ -1967,6 +1967,8 @@ def pares_para_o_verificador(ctx: Any) -> list[dict]:
         for i, p in (getattr(ctx, "pares_do_pacote", None) or {}).items()
         if i.startswith(agente_ctx.PREFIXO_BANCO) and i not in vistos
     ]
+    # O padrão da equipe (16/11/2026) primeiro: é a política que ela repete.
+    do_banco.sort(key=lambda p: not p.get("padrao"))
     return [*citados, *do_banco][:MAX_PARES_NO_VERIFICADOR]
 
 

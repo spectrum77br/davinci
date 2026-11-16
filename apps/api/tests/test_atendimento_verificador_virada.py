@@ -323,3 +323,13 @@ def test_o_padrao_da_equipe_vale_como_politica_para_o_verificador():
     )
     # Fora da virada, a regra de sempre (de outra loja não vale para a política).
     assert verificador.NAO_VALE_POLITICA in _linha(par, virada=False)
+
+
+def test_o_padrao_vai_primeiro_ao_verificador():
+    ctx = _ctx(banco_exigido=True)
+    ctx.registrar_pares(
+        [*(_par(f"par:b{n}") for n in range(1, 12)), _par("par:b99", padrao=5, tipo="defeito")]
+    )
+    ctx.evidencias = []
+    ids = [p["id"] for p in verificador.pares_para_o_verificador(ctx)]
+    assert ids[0] == "par:b99" and len(ids) == verificador.MAX_PARES_NO_VERIFICADOR

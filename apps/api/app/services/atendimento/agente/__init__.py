@@ -1748,6 +1748,9 @@ async def _responder(
             )
         )
     final, codigos = c.final, c.codigos
+    # A virada (16/11/2026): o padrão da equipe do tipo do rascunho vai ao verificador.
+    if final is not None:
+        await confere_banco.padroes_para_o_verificador(session, ctx, final.categoria)
     # A 2ª camada (20/10/2026): o verificador, só no rascunho que poderia sair
     # sozinho, com o MESMO cliente e o que sobra do prazo; sem o "ok", pessoa.
     conf = await verificador.no_rascunho(
