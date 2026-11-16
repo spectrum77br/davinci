@@ -272,6 +272,13 @@ def exige_foto(dev: Devolution) -> bool:
     return _motivo(dev) in MOTIVOS_EXIGEM_FOTO
 
 
+def _sem_devolucao(dev: Devolution) -> bool:
+    """Caso SEM devolução ("Não devolvido"): o produto ficou com o comprador — não
+    existe foto do dano; a prova é o vídeo da embalagem (16/11/2026, Fraude
+    automática respondendo dano/defeito)."""
+    return (dev.condicao_produto or "").strip() == "Não devolvido"
+
+
 def _base_sku(sku: str | None) -> str:
     """Primeiro SKU da linha (kit vem "dg048.ra+a003.ra"), sem sufixo regional."""
     s = (sku or "").strip().lower()
@@ -1748,8 +1755,8 @@ async def _disparar_tiktok(
         return await _recusar_reembolso(
             session, ch, dev, client, so_reembolso, fotos, rastreio, msg, texto_operador
         )
-    if exige_foto(dev) and not fotos:
-        raise _PendenteError("devolucao_sem_foto")
+    if exige_foto(dev) and not [a for a in fotos if not _e_cartao_video(a)]:
+        raise _PendenteError("devolucao_sem_foto")  # pacote que voltou: foto real do dano
     caso = _return_tiktok(casos, dev, preferido or None)
     if caso is None:
         raise _PendenteError("devolucao_sem_return")
@@ -2725,7 +2732,9 @@ async def _disparar(
     # detalhe; aqui só vai o link.
     cartao_shopee = ""
     if not fotos_reais:
-        cabe_cartao = bool(link) and not exige_foto(dev) and not (
+        # Danificado pede a foto do dano; sem devolução não existe foto — o cartão do
+        # vídeo da embalagem é a prova (a TikTok com pacote continua pedindo foto real).
+        cabe_cartao = bool(link) and (not exige_foto(dev) or _sem_devolucao(dev)) and not (
             plat == PLAT_ML and reason in REASONS_DO_PACOTE
         )
         if cabe_cartao and plat == PLAT_SHOPEE and _motivo(dev) == MOTIVO_NAO_RECEBIDO:

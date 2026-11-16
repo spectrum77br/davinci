@@ -29,8 +29,10 @@ A cada 10 min, por pedido:
    resposta (TikTok recusa o reembolso, Shopee abre a disputa); já reembolsado ou em
    análise, vira tarefa da tela (Seller Center) com o mesmo texto.
 
-Fica pra pessoa (cartão "Fraude: responder à mão"): dano/defeito e alegação que o
-vídeo não rebate, entrega do pedido que não aconteceu (extravio: é compensação),
+Dano/defeito e "diferente do anúncio" também viram defesa com o vídeo (Vinicius,
+16/11, 307238: "teria que responder já, mostrando vídeo e falando que enviamos
+certinho"). Fica pra pessoa (cartão "Fraude: responder à mão"): alegação que não se
+entende, entrega do pedido que não aconteceu (extravio: é compensação),
 "não recebi" sem a entrega confirmada, proposta do comprador (negociação), caso já
 contestado fora do DaVinci, reembolso que a própria loja aceitou (TikTok), "não tenho
 o vídeo" e pedido de vídeo cancelado. A defesa aprovada no "só propor" é a que sai
