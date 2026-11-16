@@ -145,3 +145,46 @@ def test_ml_retorno_em_transito():
     assert not rules.retorno_em_transito("Mercado Livre", {"ship_substatus": "delivered"})
     assert not rules.retorno_em_transito("Shopee", {"ship_substatus": "returned_to_hub"})
     assert not rules.retorno_em_transito("Mercado Livre", {})
+
+
+def test_shopee_so_reembolso_tem_texto_proprio():
+    """16/11/2026 (Vinicius: "fica assim devolução solicitada pelo cliente… vai ter
+    devolução ou não?"): a Shopee chama tudo de "return", mas no só reembolso
+    (`return_type` REFUND) não vem pacote — o texto diz isso."""
+    so = {"return_type": "REFUND"}
+    assert devolucao_status_pt("Shopee", {**so, "return_status": "REQUESTED"}) == (
+        "Só reembolso (sem devolução) — responder na Shopee"
+    )
+    assert devolucao_status_pt("Shopee", {**so, "return_status": "JUDGING"}) == (
+        "Só reembolso (sem devolução) — em análise pela Shopee"
+    )
+    assert devolucao_status_pt("Shopee", {**so, "return_status": "ACCEPTED"}) == (
+        "Só reembolso aceito — o produto fica com o cliente"
+    )
+    assert devolucao_status_pt("Shopee", {**so, "return_status": "NOVO_X"}) == "Só reembolso: NOVO_X"
+    assert devolucao_status_pt("Shopee", {**so, "return_status": "CANCELLED"}) is None
+    # Com pacote (ou sem tipo) continua o texto de devolução.
+    assert devolucao_status_pt("Shopee", {"return_status": "REQUESTED"}) == (
+        "Devolução solicitada pelo cliente — aguardando análise"
+    )
+
+
+def test_situacao_da_ida():
+    from app.services.logistica_rules import situacao_da_ida as ida
+
+    assert ida("Shopee", {"logistics_status": "LOGISTICS_DELIVERY_DONE"}) == "entregue"
+    assert ida("Shopee", {"logistics_status": "LOGISTICS_PICKUP_DONE"}) == "a_caminho"
+    assert ida("Shopee", {"logistics_status": "LOGISTICS_DELIVERY_FAILED"}) == "falhou"
+    assert ida("Shopee", {"logistics_status": "LOGISTICS_LOST"}) == "falhou"
+    assert ida("Shopee", {}) is None
+    assert ida("TikTok", {"order_status": "DELIVERED"}) == "entregue"
+    assert ida("TikTok", {"order_status": "COMPLETED"}) == "entregue"
+    assert ida("TikTok", {"order_status": "IN_TRANSIT"}) == "a_caminho"
+    assert ida("TikTok", {"order_status": "CANCELLED"}) is None
+    assert ida("Mercado Livre", {"ship_status": "delivered"}) == "entregue"
+    assert ida("Mercado Livre", {"ship_status": "shipped"}) == "a_caminho"
+    assert ida("Mercado Livre", {"ship_status": "not_delivered"}) == "falhou"
+    assert ida("Mercado Livre", {"ship_status": "shipped", "ship_substatus": "returning_to_sender"}) == (
+        "falhou"
+    )
+    assert ida("Amazon", {"order_status": "Shipped"}) is None

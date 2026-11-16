@@ -605,6 +605,18 @@ _SHOPEE_RETURN_LABELS_PT = {
     # da ida (SPX). O evento da SPX vai ao lado ("· Pedido devolvido").
     "RTS": "Entrega falhou — pacote de volta pela Shopee Xpress",
 }
+# Shopee SÓ REEMBOLSO (`return_type` REFUND: `needs_logistics` false): a Shopee
+# chama tudo de "return", mas aqui não vem pacote nenhum — o produto fica com o
+# cliente. Vinicius, 16/11/2026: "fica assim devolução solicitada pelo cliente…
+# vai ter devolução ou não?".
+_SHOPEE_REEMBOLSO_LABELS_PT = {
+    "REQUESTED": "Só reembolso (sem devolução) — responder na Shopee",
+    "PROCESSING": "Só reembolso (sem devolução) — em processamento",
+    "JUDGING": "Só reembolso (sem devolução) — em análise pela Shopee",
+    "ACCEPTED": "Só reembolso aceito — o produto fica com o cliente",
+    "SELLER_DISPUTE": "Só reembolso contestado pela loja",
+    "REFUND_PAID": "Só reembolso pago — o produto fica com o cliente",
+}
 _TIKTOK_RETURN_LABELS_PT = {
     "RETURN_OR_REFUND_REQUEST_PENDING": "Devolução solicitada — aguardando resposta",
     "AWAITING_BUYER_SHIP": "Devolução aprovada — aguardando o cliente enviar",
@@ -762,6 +774,55 @@ _RETURN_STATUS_CHEGOU: dict[str, frozenset[str]] = {
 }
 
 
+# A IDA (o envio original até o cliente), pro painel Fraude saber se o cliente
+# pediu reembolso SEM ter recebido (16/11/2026: na Fraude havia pedido ainda a
+# caminho de Manaus, outro com "houve um imprevisto na entrega").
+IDA_ENTREGUE = "entregue"
+IDA_A_CAMINHO = "a_caminho"
+IDA_FALHOU = "falhou"
+_SHOPEE_IDA_FALHOU = frozenset(
+    {"LOGISTICS_DELIVERY_FAILED", "LOGISTICS_LOST", "LOGISTICS_PICKUP_FAILED", "LOGISTICS_RETURNED"}
+)
+_TIKTOK_IDA_ENTREGUE = frozenset({"DELIVERED", "COMPLETED"})
+_TIKTOK_IDA_A_CAMINHO = frozenset({"AWAITING_SHIPMENT", "AWAITING_COLLECTION", "PARTIALLY_SHIPPING", "IN_TRANSIT"})
+_ML_IDA_A_CAMINHO = frozenset({"pending", "handling", "ready_to_ship", "shipped"})
+
+
+def situacao_da_ida(plataforma: str | None, status: dict[str, str] | None) -> str | None:
+    """A ida chegou ao cliente? "entregue" | "a_caminho" | "falhou" | None (não se
+    sabe). Lê o status do envio original que a Logística guarda (Shopee:
+    `logistics_status` da SPX; TikTok: `order_status`; ML: `ship_status`). PURA."""
+    m = status or {}
+    p = (plataforma or "").strip().lower()
+    if p in _SHOPEE_PLATAFORMAS:
+        log = str(m.get("logistics_status") or "").strip().upper()
+        if not log:
+            return None
+        if log == "LOGISTICS_DELIVERY_DONE":
+            return IDA_ENTREGUE
+        if log in _SHOPEE_IDA_FALHOU:
+            return IDA_FALHOU
+        return IDA_A_CAMINHO
+    if p in _TIKTOK_PLATAFORMAS:
+        o = str(m.get("order_status") or "").strip().upper()
+        if o in _TIKTOK_IDA_ENTREGUE:
+            return IDA_ENTREGUE
+        if o in _TIKTOK_IDA_A_CAMINHO:
+            return IDA_A_CAMINHO
+        return None
+    if p in _ML_PLATAFORMAS:
+        sh = str(m.get("ship_status") or "").strip().lower()
+        sub = str(m.get("ship_substatus") or "").strip().lower()
+        if sh == "delivered":
+            return IDA_ENTREGUE
+        if sh == "not_delivered" or sub in RETORNO_EM_TRANSITO:
+            return IDA_FALHOU
+        if sh in _ML_IDA_A_CAMINHO:
+            return IDA_A_CAMINHO
+        return None
+    return None
+
+
 def pacote_volta_pelo_envio(plataforma: str | None, status: dict[str, str] | None) -> bool:
     """True quando o envio ORIGINAL do ML está voltando ou já voltou pro
     vendedor (`returning_to_sender`… ou `returned`): há pacote de volta mesmo
@@ -835,6 +896,8 @@ def devolucao_status_pt(plataforma: str | None, status: dict[str, str] | None) -
     if p in _SHOPEE_PLATAFORMAS:
         if ret in _SHOPEE_RETURN_ENCERRADO:
             return None
+        if str((status or {}).get("return_type") or "").strip().upper() == "REFUND":
+            return _SHOPEE_REEMBOLSO_LABELS_PT.get(ret, f"Só reembolso: {ret}")
         return _SHOPEE_RETURN_LABELS_PT.get(ret, f"Devolução: {ret}")
     if p in _TIKTOK_PLATAFORMAS:
         if ret in _TIKTOK_RETURN_ENCERRADO:

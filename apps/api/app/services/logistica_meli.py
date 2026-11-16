@@ -1570,7 +1570,18 @@ def _com_pacote_voltando(info: ReturnInfo, linhas: list[Logistica]) -> ReturnInf
         return info
     if any(logistica_rules.pacote_volta_pelo_envio(r.plataforma, r.meli_status) for r in linhas):
         return info._replace(return_type=None)
+    # 16/11/2026 (308486): a varredura da Logística já vê uma DEVOLUÇÃO viva do
+    # claim (pronta pra envio, a caminho — inclusive pro galpão do ML, que depois
+    # manda pra loja) enquanto a returns API deste caso não trouxe nada: tem
+    # pacote, não é só reembolso.
+    if any(_devolucao_viva_na_logistica(r.meli_status) for r in linhas):
+        return info._replace(return_type=None)
     return info
+
+
+def _devolucao_viva_na_logistica(meli_status: dict | None) -> bool:
+    ret = str((meli_status or {}).get("return_status") or "").strip().upper()
+    return bool(ret) and ret not in logistica_rules.RETURN_ENCERRADO
 
 
 async def _return_info_for_pedido(client: MercadoLivreClient, pedido: str) -> ReturnInfo | None:

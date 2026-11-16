@@ -511,6 +511,9 @@ class AcompanhamentoItemOut(AcompanhamentoVideoFields, AcompanhamentoPrazoFields
     # status da devolução e a entrega original ("Pedido entregue") vem aqui
     # (tooltip). None = sem devolução viva (localizacao é a entrega mesmo).
     entrega_localizacao: str | None = None
+    # A IDA (envio original) chegou ao cliente? "entregue" | "a_caminho" |
+    # "falhou" | None (16/11/2026: na Fraude, reembolso pedido sem ter recebido).
+    ida_situacao: str | None = None
     # True quando o pedido já tem devolução LANÇADA na aba de lançamentos.
     lancada: bool = False
     # Observação livre por PEDIDO (10/09): recado pra quem acompanha o pacote;

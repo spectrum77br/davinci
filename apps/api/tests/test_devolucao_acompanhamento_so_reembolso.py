@@ -118,3 +118,31 @@ def test_ml_cancelado_com_pacote_de_volta_carimba_chegada_pelo_returned():
     )
     assert chegou is not None and chegou.isoformat() == "2026-09-17"
     assert _fila(None, None) == ("acompanhamento", False)
+
+
+def test_ml_com_devolucao_viva_na_logistica_nao_e_so_reembolso():
+    """308486 (16/11/2026): a returns API do claim não trouxe nada (vira "REFUND",
+    painel Fraude), mas a Logística já vê a devolução pronta pra envio pro galpão
+    do ML — tem pacote: o tipo fica vazio (Acompanhamento)."""
+    from types import SimpleNamespace
+
+    from app.services import logistica_meli
+    from app.services.devolucao_returns import ReturnInfo
+
+    info = ReturnInfo(
+        fonte="ml", status=None, tracking=None, carrier=None, created_at=None,
+        updated_at=None, return_id="999", return_type="REFUND",
+    )
+    viva = SimpleNamespace(
+        plataforma="Mercado Livre",
+        meli_status={"ship_status": "delivered", "return_status": "ready_to_ship",
+                     "return_destino": "warehouse"},
+    )
+    fechada = SimpleNamespace(
+        plataforma="Mercado Livre",
+        meli_status={"ship_status": "delivered", "return_status": "cancelled"},
+    )
+    sem = SimpleNamespace(plataforma="Mercado Livre", meli_status={"ship_status": "delivered"})
+    assert logistica_meli._com_pacote_voltando(info, [viva]).return_type is None
+    assert logistica_meli._com_pacote_voltando(info, [fechada]).return_type == "REFUND"
+    assert logistica_meli._com_pacote_voltando(info, [sem]).return_type == "REFUND"

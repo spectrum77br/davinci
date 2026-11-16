@@ -1307,12 +1307,15 @@ async def acompanhamento_rows(
             params,
         )
     ).mappings().all()
+    from app.services import logistica_rules  # tardio: evita ciclo router↔services
+
     out: list[dict] = []
     for r in rows:
         d = dict(r)
         lg_plataforma = d.pop("lg_plataforma", None)
         lg_meli_status = d.pop("lg_meli_status", None)
         lg_status_datas = d.pop("lg_status_datas", None)
+        d["ida_situacao"] = logistica_rules.situacao_da_ida(lg_plataforma, lg_meli_status)
         status_auto = d.pop("devolucao_status_auto", None)
         tipo_auto = d.pop("devolucao_tipo_auto", None)
         destino_auto = d.pop("devolucao_destino_auto", None)

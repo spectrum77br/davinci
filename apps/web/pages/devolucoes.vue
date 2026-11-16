@@ -67,6 +67,8 @@ type Item = {
   localizacao: string | null
   localizacao_data: string | null
   entrega_localizacao: string | null
+  // A ida (envio original) chegou ao cliente? (16/11: Fraude com a ida a caminho)
+  ida_situacao: 'entregue' | 'a_caminho' | 'falhou' | null
   lancada: boolean
   observacao: string | null
   prazo_resposta: string | null
@@ -274,6 +276,16 @@ const ETAPA_COR: Record<Etapa, string> = {
   manutencao: 'bg-indigo-100 text-indigo-800 dark:bg-indigo-950/50 dark:text-indigo-300',
   fraude: 'bg-red-100 text-red-800 dark:bg-red-950/50 dark:text-red-300',
 }
+// Resolvida é o fim da linha (16/11, Vinicius: "a etapa tem que ir para Resolvida
+// e não ficar chegou lançada ou chegou resolvida"). Só a tela: a etapa de onde ele
+// veio continua valendo pros filtros.
+const COR_RESOLVIDA = 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300'
+function etapaRotulo(i: Item): string {
+  return i.resolvido ? 'Resolvida' : ETAPA_LABEL[i.etapa]
+}
+function etapaCor(i: Item): string {
+  return i.resolvido ? COR_RESOLVIDA : ETAPA_COR[i.etapa]
+}
 const ESTOQUE_TEXTO: Record<string, string> = {
   ok: 'entrou no Bling', falhou: 'NÃO entrou no Bling', conferindo: 'conferindo no Bling',
   sem_confirmacao: 'entrada não confirmada',
@@ -301,8 +313,11 @@ function aFinalizar(i: Item): boolean {
 }
 // Fraude que o robô deixou pra pessoa (services/devolucao_fraude_auto: NAO_RESPONDE)
 // ou em que a equipe respondeu "não tenho o vídeo".
+function idaNaoEntregue(i: Item): boolean {
+  return i.etapa === 'fraude' && !i.lancamentos.length && (i.ida_situacao === 'a_caminho' || i.ida_situacao === 'falhou')
+}
 function fraudeAMao(i: Item): boolean {
-  if (i.etapa !== 'fraude' || i.lancamentos.length) return false
+  if (i.etapa !== 'fraude' || i.lancamentos.length || idaNaoEntregue(i)) return false
   // O recado do robô termina em "(responder à mão)" — CARTAO_A_MAO em services/devolucao_fraude_auto.py.
   return (i.observacao || '').includes('responder à mão') || i.video_status === 'sem_video'
 }
@@ -313,18 +328,25 @@ const naAba = computed(() =>
 )
 const contas = computed(() => [...new Set(naAba.value.map(contaDe))].sort((a, b) => a.localeCompare(b)))
 // Base dos cartões e do "Onde agir": aba + conta + período + busca.
+// Busca sem diferença de acento nem de maiúscula ("oferecido" acha "Oferecido").
+function semAcento(v: string): string {
+  return v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+}
 const base = computed(() => {
-  const q = search.value.trim().toLowerCase()
+  const q = semAcento(search.value.trim())
   return naAba.value.filter((i) => {
     if (contaFilter.value !== 'all' && contaDe(i) !== contaFilter.value) return false
     const dia = i.data ? isoDateBrt(new Date(i.data)) : ''
     if (dataIni.value && (!dia || dia < dataIni.value)) return false
     if (dataFim.value && (!dia || dia > dataFim.value)) return false
     if (!q) return true
+    // 16/11 (Vinicius): também a coluna Obs — o recado do pedido e a observação
+    // de cada lançamento —, o motivo e a condição lançados.
     return [
       i.pedido_bling, i.pedido_marketplace, i.cliente, i.sku, i.produto, i.rastreio, i.localizacao,
-      i.cidade, i.observacao, i.loja, i.sku_lancado,
-    ].some((v) => (v || '').toLowerCase().includes(q))
+      i.cidade, i.observacao, i.loja, i.sku_lancado, obsDaLinha(i), i.resolvido_como,
+      ...i.lancamentos.flatMap((l) => [l.observacao, l.motivo, l.condicao_tela, l.sku_lancado]),
+    ].some((v) => semAcento(String(v || '')).includes(q))
   })
 })
 
@@ -334,6 +356,9 @@ const AGIR: Agir[] = [
   // 16/11 (Vinicius): a Fraude automática responde sozinha o só reembolso; o que ela
   // não responde (danificado, alegação estranha, equipe sem vídeo) vem pra cá.
   { chave: 'fraude_mao', titulo: 'Fraude: responder à mão', detalhe: 'o sistema não responde esse caso sozinho', dot: 'bg-red-600', grave: true, teste: fraudeAMao },
+  // 16/11: reembolso pedido SEM o cliente ter recebido (a ida ainda a caminho ou
+  // falhou) — não é golpe; acompanhar a entrega (se falhar, o pacote volta pela ida).
+  { chave: 'ida', titulo: 'Fraude: ida não entregue', detalhe: 'o cliente pediu reembolso sem ter recebido — acompanhar a entrega', dot: 'bg-amber-500', grave: false, teste: idaNaoEntregue },
   { chave: 'responder', titulo: 'Responder em 24 h', detalhe: 'prazo da plataforma vencendo', dot: 'bg-red-600', grave: true, teste: urgente },
   { chave: 'estoque', titulo: 'Estoque não entrou no Bling', detalhe: 'conferir e tentar de novo no lançamento', dot: 'bg-red-600', grave: true, teste: estoquePendente },
   { chave: 'falta_lancar', titulo: 'Chegou e falta lançar', detalhe: 'lançar condição e estoque', dot: 'bg-red-600', grave: false, teste: (i) => i.falta_lancar },
@@ -552,7 +577,7 @@ function exportar() {
   ]
   const linhas = filtrados.value.map((i) => [
     ddmmaaaa(i.data), i.pedido_bling, i.pedido_marketplace, PLATAFORMA_NOME[plataformaKey(i.plataforma)] || i.plataforma,
-    contaDe(i), i.sku, i.produto, ETAPA_LABEL[i.etapa], i.dias_em_devolucao ?? '', i.prazo_em ? ddmmaaaa(i.prazo_em) : '',
+    contaDe(i), i.sku, i.produto, etapaRotulo(i), i.dias_em_devolucao ?? '', i.prazo_em ? ddmmaaaa(i.prazo_em) : '',
     i.prazo_tipo, i.reembolso == null ? '' : i.reembolso ? 'Sim' : 'Não',
     i.reembolso_valor != null ? i.reembolso_valor.toFixed(2).replace('.', ',') : '', i.localizacao, i.rastreio,
     i.video_link ? 'Sim' : i.video_status === 'pendente' ? 'pedido' : '', temAbertura(i) ? 'Sim' : '',
@@ -1161,7 +1186,7 @@ const lidoHa = computed(() => {
       </label>
       <label class="inline-flex h-7 min-w-0 items-center gap-1 rounded-md border bg-card px-2">
         <Search class="size-3.5 text-muted-foreground" />
-        <input v-model="search" class="w-72 bg-transparent outline-none" placeholder="buscar pedido, produto, SKU, cliente, rastreio" />
+        <input v-model="search" class="w-72 bg-transparent outline-none" placeholder="buscar pedido, produto, SKU, cliente, rastreio, obs" />
       </label>
       <button v-if="filtrosAtivos" type="button" class="text-muted-foreground underline" @click="limparFiltros">limpar</button>
       <span class="text-muted-foreground">{{ pedidos(filtrados) }} pedidos · {{ filtrados.length }} de {{ naAba.length }} produtos</span>
@@ -1287,9 +1312,10 @@ const lidoHa = computed(() => {
                     <div class="line-clamp-3 break-words leading-tight">{{ i.produto || '—' }}<b v-if="i.quantidade && i.quantidade > 1"> ×{{ i.quantidade }}</b></div>
                   </td>
                   <td class="border-l border-l-slate-300 px-1.5 py-1.5 text-center leading-tight dark:border-l-slate-600">
-                    <span class="inline-block w-[84px] rounded py-0.5 text-[11px] font-semibold" :class="ETAPA_COR[i.etapa]">{{ ETAPA_LABEL[i.etapa] }}</span>
-                    <div v-if="i.resolvido" class="text-[10px] font-semibold text-emerald-700 dark:text-emerald-400">resolvida</div>
-                    <div v-else-if="i.etapa === 'chegou' && !i.falta_lancar" class="text-[10px] text-muted-foreground">lançada</div>
+                    <span class="inline-block w-[84px] rounded py-0.5 text-[11px] font-semibold" :class="etapaCor(i)" data-etapa>{{ etapaRotulo(i) }}</span>
+                    <div v-if="!i.resolvido && estoquePendente(i)" class="text-[10px] font-semibold text-red-700 dark:text-red-400">estoque a conferir</div>
+                    <div v-else-if="!i.resolvido && aFinalizar(i)" class="text-[10px] text-blue-700 dark:text-blue-400">a finalizar</div>
+                    <div v-else-if="!i.resolvido && i.etapa === 'chegou' && !i.falta_lancar" class="text-[10px] text-muted-foreground">lançada</div>
                   </td>
                   <td class="px-1.5 py-1.5 text-center tabular-nums" :title="i.aguardando_devolucao_data ? `em devolução desde ${ddmmaaaa(i.aguardando_devolucao_data)}${i.aguardando_devolucao_data_estimada ? ' (data estimada)' : ''}` : ''">{{ i.dias_em_devolucao ?? '—' }}</td>
                   <td class="whitespace-nowrap px-1.5 py-1.5 text-center leading-tight" :title="i.prazo_dica || i.prazo_texto || i.amazon_cancelar_texto || ''">
@@ -1309,6 +1335,7 @@ const lidoHa = computed(() => {
                   <td class="px-1.5 py-1.5 text-center leading-tight" :title="[i.localizacao, i.entrega_localizacao].filter(Boolean).join(' · ')">
                     <div v-if="i.etapa === 'fraude' && !i.localizacao" class="text-muted-foreground">não volta pacote</div>
                     <div v-else class="line-clamp-2 break-words">{{ i.localizacao || '—' }}</div>
+                    <div v-if="i.etapa === 'fraude' && i.ida_situacao && i.ida_situacao !== 'entregue'" class="text-[10px] font-semibold text-amber-700 dark:text-amber-400" data-ida-nao-entregue :title="i.entrega_localizacao || ''">{{ i.ida_situacao === 'falhou' ? 'a entrega da ida falhou' : 'a ida ainda não chegou no cliente' }}</div>
                     <div v-if="i.devolucao_chegou_em" class="text-[10px] text-muted-foreground">chegou {{ ddmm(i.devolucao_chegou_em) }}</div>
                     <div v-else-if="i.localizacao_data" class="text-[10px] text-muted-foreground">últ. mov. {{ ddmm(i.localizacao_data) }}</div>
                   </td>
@@ -1485,7 +1512,7 @@ const lidoHa = computed(() => {
         </div>
         <div class="flex flex-wrap items-center gap-2 border-b px-4 py-2 text-xs">
           <span v-if="foraDaLista" class="inline-block rounded bg-muted px-2 py-0.5 text-center text-[11px] font-semibold text-muted-foreground" title="Este pedido ainda não caiu em Aguardando Devolução no Bling">fora da lista</span>
-          <span v-else class="inline-block w-[84px] rounded py-0.5 text-center text-[11px] font-semibold" :class="ETAPA_COR[pedidoItem.etapa]">{{ ETAPA_LABEL[pedidoItem.etapa] }}</span>
+          <span v-else class="inline-block w-[84px] rounded py-0.5 text-center text-[11px] font-semibold" :class="etapaCor(pedidoItem)">{{ etapaRotulo(pedidoItem) }}</span>
           <span class="font-semibold">{{ contaDe(pedidoItem) }} · {{ PLATAFORMA_NOME[plataformaKey(pedidoItem.plataforma)] || pedidoItem.plataforma || '—' }}</span>
           <span class="text-muted-foreground">pedido de {{ ddmmaaaa(pedidoItem.data) }}<template v-if="pedidoItem.dias_em_devolucao != null"> · em devolução há {{ pedidoItem.dias_em_devolucao }} dia(s)</template></span>
           <label v-if="canEdit && situacoesBling.length" class="inline-flex items-center gap-1 rounded bg-muted px-2 py-0.5 text-[11px]" title="Muda a situação do pedido no Bling na hora (vale pro pedido inteiro). Não resolve a devolução: pra tirar da lista é o Resolver.">
