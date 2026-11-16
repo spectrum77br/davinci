@@ -2573,7 +2573,7 @@ async def _conferir_motivo(
     rast = await rastreio_do_pedido(session, pb)
     # Lançado sozinho pela Fraude automática: a IA é a única conferência antes do
     # tiro único — sem ela (desligada ou sem resposta) a contestação ESPERA alguém.
-    robo = conferencia.MARCA_ROBO in ((rast.observacao or "") if rast is not None else "")
+    robo = conferencia.lancado_pela_ia(rast.observacao if rast is not None else None)
     if robo and not conferencia.ligada():
         anterior = (rast.conferencia if rast is not None else None) or {}
         k = conferencia.chave(pecas, rast.observacao if rast is not None else None)
@@ -2583,9 +2583,9 @@ async def _conferir_motivo(
             session.add(
                 chamados_svc.registrar_sistema(
                     ch,
-                    "A conferência da IA está desligada e este lançamento foi feito sozinho "
-                    "pela Fraude automática: a contestação espera alguém conferir na janela "
-                    "da devolução.",
+                    "A conferência da IA está desligada e este lançamento foi feito pela IA "
+                    "(Fraude automática ou instrução da equipe): a contestação espera alguém "
+                    "conferir na janela da devolução.",
                 )
             )
             msg.status = conferencia.STATUS_SEGURADA

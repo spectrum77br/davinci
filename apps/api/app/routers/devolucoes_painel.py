@@ -835,6 +835,10 @@ class ChamadoJanelaOut(BaseModel):
     conferencia: dict | None = None
     conferencia_ligada: bool = False
     instrucoes: list[InstrucaoOut] = Field(default_factory=list)
+    # "Sim" + instrução: a IA leu e não abriu o chamado — o porquê (etiqueta vermelha).
+    ia_nao_abriu: str | None = None
+    # Há peça lançada (a IA da instrução só abre chamado de pedido lançado).
+    tem_lancamento: bool = False
 
 
 class AbrirChamadoIn(BaseModel):
@@ -949,6 +953,7 @@ async def _janela(session: AsyncSession, pedido: str) -> ChamadoJanelaOut:
         abrir_chamado=rast.abrir_chamado if rast is not None else None,
         conferencia=rast.conferencia if rast is not None else None,
         conferencia_ligada=conferencia.ligada(),
+        tem_lancamento=bool(linhas),
     )
     if ch is not None:
         abertura = await cd.mensagem_abertura(session, ch)
@@ -987,6 +992,13 @@ async def _janela(session: AsyncSession, pedido: str) -> ChamadoJanelaOut:
             if m.tipo == "instrucao"
         ]
     if rast is not None and (rast.instrucao_ia_pendente or "").strip():
+        from app.services import devolucao_chamado_instrucao as pela_instrucao
+
+        chave = pela_instrucao.chave_da_instrucao(
+            rast.instrucao_ia_em, rast.instrucao_ia_pendente.strip()
+        )
+        if ch is None and chave in (rast.observacao or ""):
+            out.ia_nao_abriu = pela_instrucao.ultimo_nao_abriu(rast.observacao)
         autor = await session.get(User, rast.instrucao_ia_por) if rast.instrucao_ia_por else None
         out.instrucoes.append(
             InstrucaoOut(

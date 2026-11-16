@@ -34,6 +34,8 @@ type Janela = {
   conferencia: Conferencia | null
   conferencia_ligada: boolean
   instrucoes: Instrucao[]
+  ia_nao_abriu?: string | null
+  tem_lancamento?: boolean
 }
 type LinhaPrevia = { sku: string | null; produtos: string | null; quantidade: number; motivo_devolucao: string | null; observacao: string | null }
 type Previa = { abre: boolean; motivo: string | null; texto: string | null; avisos: string[] }
@@ -182,13 +184,23 @@ const estado = computed<{ texto: string; cor: string; dica: string } | null>(() 
   }
   if (j.abertura_status === 'pendente') return { texto: 'Na fila', cor: AMARELO, dica: `${porQueNaFila.value || 'Sai sozinho assim que a plataforma liberar'}. ${prazoTxt}`.trim() }
   if (escolha.value === 'nao') return { texto: 'Não abrir', cor: CINZA, dica: 'Nada vai pra plataforma neste pedido' }
-  if (escolha.value === 'sim') return { texto: 'Abre ao lançar', cor: AMARELO, dica: 'Sai sozinho logo depois de lançar' }
+  if (escolha.value === 'sim' && pedePeloMotivo.value) return { texto: 'Abre ao lançar', cor: AMARELO, dica: 'Sai sozinho logo depois de lançar' }
+  // "Sim" marcado à mão sem motivo que abra chamado: quem abre é a IA, lendo a
+  // instrução (services/devolucao_chamado_instrucao, a cada 10 min).
+  if (escolha.value === 'sim') {
+    if (j.ia_nao_abriu) return { texto: 'IA não abriu', cor: VERMELHO, dica: `${j.ia_nao_abriu}. Escreva uma instrução nova (ou escolha o motivo no lançamento) que a IA olha de novo.` }
+    if (!j.conferencia_ligada) return { texto: 'IA desligada', cor: CINZA, dica: 'A IA está desligada: escolha um motivo que abra chamado no lançamento.' }
+    if (!j.tem_lancamento) return { texto: 'Lance as peças primeiro', cor: AMARELO, dica: 'A IA abre o chamado pela instrução depois que as peças forem lançadas.' }
+    if (temInstrucaoEsperando.value) return { texto: 'IA vai abrir', cor: AMARELO, dica: 'A IA lê a instrução, escolhe o motivo, escreve o texto e abre o chamado (em até 10 min). A conferência olha antes de sair.' }
+    return { texto: 'Falta instrução IA', cor: AMARELO, dica: 'Nenhum motivo lançado abre chamado: escreva a instrução pra IA dizendo o que contestar — ela abre o chamado.' }
+  }
   return { texto: 'Sem chamado', cor: CINZA, dica: 'Nenhum motivo lançado abre chamado' }
 })
 // "Às vezes mensagem do chamado deixa um mostrar também": observação, prévia e
 // instrução pra IA ficam fechadas até alguém pedir.
 const mostrarMensagem = ref(false)
 const mostrarInstrucao = ref(false)
+const temInstrucaoEsperando = computed(() => !!janela.value?.instrucoes?.some((i) => i.esperando_chamado))
 const BOTAO_ABRE = 'inline-flex items-center gap-0.5 rounded border px-1.5 py-0.5 text-[11px] font-semibold hover:bg-muted'
 const porQueNaFila = computed(() => {
   const e = janela.value?.abertura_erro || ''
@@ -238,7 +250,11 @@ const base = computed(() => `/api/devolucoes-painel/${encodeURIComponent(props.p
 async function marcarAbrir(sim: boolean) {
   if (!props.canEdit || saiu.value || (sim ? escolha.value === 'sim' && janela.value?.abrir_chamado === true : escolha.value === 'nao')) return
   if (!sim && !window.confirm('Não abrir chamado neste pedido?\n\nA contestação não vai pra plataforma. Dá pra voltar pro Sim enquanto ela não sair.')) return
-  if (await chamar(sim ? 'sim' : 'nao', `${base.value}/abrir-chamado`, { abrir: sim }, sim ? 'Chamado: Sim' : 'Chamado: Não — nada vai pra plataforma')) emit('mudou')
+  if (await chamar(sim ? 'sim' : 'nao', `${base.value}/abrir-chamado`, { abrir: sim }, sim ? 'Chamado: Sim' : 'Chamado: Não — nada vai pra plataforma')) {
+    // Sim sem motivo que abra chamado: quem abre é a IA pela instrução — já mostra a caixa.
+    if (sim && !pedePeloMotivo.value) mostrarInstrucao.value = true
+    emit('mudou')
+  }
 }
 async function decidir(acao: 'mandar' | 'trocar' | 'nao_abrir') {
   if (!props.canEdit) return
@@ -332,7 +348,7 @@ defineExpose({ recarregar })
         <template v-if="saiu">já saiu</template>
         <template v-else-if="escolha === 'nao'" />
         <template v-else-if="pedePeloMotivo && motivoAtual">pelo motivo {{ motivoAtual }}</template>
-        <template v-else-if="escolha === 'sim'">marcado à mão</template>
+        <template v-else-if="escolha === 'sim'">marcado à mão — a IA abre pela instrução</template>
       </span>
     </div>
 

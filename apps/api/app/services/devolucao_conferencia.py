@@ -39,6 +39,17 @@ ERRO_MOTIVO_DIVERGENTE = "motivo_divergente"
 # Observação do pedido quando lança sozinha: lançamento sem pessoa só sai com a
 # IA conferindo — sem resposta dela, segura (16/11/2026, revisão).
 MARCA_ROBO = "lançado sozinho pela Fraude automática"
+# Chamado aberto pela IA a partir da "Instrução IA" (services/devolucao_chamado_
+# instrucao): mesma regra — só sai com a conferência.
+MARCA_IA_INSTRUCAO = "aberto pela IA a partir da instrução"
+
+
+def lancado_pela_ia(observacao_pedido: str | None) -> bool:
+    """O lançamento/chamado foi feito pela IA (Fraude automática ou instrução):
+    sem a conferência responder, a contestação espera alguém. PURA."""
+    obs = observacao_pedido or ""
+    return MARCA_ROBO in obs or MARCA_IA_INSTRUCAO in obs
+
 
 # Os nomes que a tela mostra (DevolucaoLancar.vue). Perdimento grava `Sucata`.
 MOTIVOS = (
@@ -272,8 +283,8 @@ def segurado_sem_ia(
         "motivo_sugerido": "",
         "condicao_sugerida": "",
         "explicacao": (
-            "Lançado sozinho pela Fraude automática e a IA não conferiu (sem resposta ou "
-            "desligada). Confira o motivo e mande — ou não abra."
+            "Feito pela IA (Fraude automática ou instrução da equipe) e a conferência não "
+            "respondeu (sem resposta ou desligada). Confira o motivo e mande — ou não abra."
         ),
     }
 
@@ -324,8 +335,8 @@ async def conferir(
             segurar=True,
             conferencia=segurado_sem_ia(pecas, k, agora, modelo=modelo),
             evento=(
-                "A IA não respondeu e este lançamento foi feito sozinho pela Fraude "
-                "automática: a contestação espera alguém conferir na janela da devolução."
+                "A IA não respondeu e este lançamento foi feito pela IA (Fraude automática ou "
+                "instrução da equipe): a contestação espera alguém conferir na janela da devolução."
             ),
         )
     if veredito is None:
