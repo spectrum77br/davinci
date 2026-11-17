@@ -148,7 +148,7 @@ def regra_mensagem_bling_para(
         rows,
         assinatura=assinatura,
         plataforma=logistica_match.plataforma_regra_da_linha(row),
-        localizacao=row.localizacao,
+        localizacao=logistica_match.localizacao_da_linha(row),
     )
     for r in logistica_match.regras_aplicaveis(cands, row.status_bling):
         if (r.mensagem_bling or "").strip():
@@ -350,7 +350,7 @@ def _regra_status_para(rows: list[LogisticaStatus], row: Logistica) -> Logistica
         rows,
         assinatura=assinatura,
         plataforma=logistica_match.plataforma_regra_da_linha(row),
-        localizacao=row.localizacao,
+        localizacao=logistica_match.localizacao_da_linha(row),
     )
 
 
@@ -438,7 +438,15 @@ async def _cand_infos(session: AsyncSession, rule: LogisticaStatus) -> list[dict
     for de in des or [None]:
         de_id = await _situacao_id_por_nome_opt(session, de) if de else None
         out.append(
-            {"de": de, "de_id": de_id, "de_todos": de_todos, "alvo": alvo, "alvo_id": alvo_id}
+            {
+                "de": de,
+                "de_id": de_id,
+                "de_todos": de_todos,
+                "alvo": alvo,
+                "alvo_id": alvo_id,
+                # Regra com "Localização contém" (só chega aqui se casou).
+                "condicao": logistica_match.tem_condicao_localizacao(rule),
+            }
         )
     return out
 
@@ -461,7 +469,7 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
         rows,
         assinatura=assinatura,
         plataforma=logistica_match.plataforma_regra_da_linha(row),
-        localizacao=row.localizacao,
+        localizacao=logistica_match.localizacao_da_linha(row),
     )
     cands = [c for c in todas if (c.alterar_status_bling or "").strip()]
     if not cands:
@@ -542,6 +550,7 @@ async def _resolve_status(session: AsyncSession, row: Logistica) -> dict:
         "ja_no_alvo": ja_no_alvo,
         "override_humano": override_humano,
         "assinatura": assinatura,
+        "condicao": bool(display.get("condicao")),
     }
 
 
@@ -595,6 +604,25 @@ def correios_confirmam_saida(row: Logistica) -> bool:
     if row.localizacao_at is None:
         return False
     return not logistica_track.evento_pre_postagem(row.localizacao)
+
+
+def transportadora_flex_confirmou(row: Logistica, *, regra_com_condicao: bool) -> bool:
+    """Flex: a transportadora (Tracken) confirmou a saída do pacote pela palavra
+    que o operador escreveu na regra. A regra que decide tem "Localização
+    contém" e, no Flex, essa condição casa só com o texto do Tracken
+    (`logistica_match.localizacao_da_linha`) — então casou, a transportadora
+    disse o que a regra pede (ex.: "coletado").
+
+    Vinicius, 17/11/2026 (Shopee Flex 309413): a Shopee segue "Processado"
+    depois da coleta da transportadora do Flex; sem isto a regra "Processado ·
+    Em digitação · coletado → Em andamento" casaria e seria barrada por
+    `pacote_ainda_com_o_vendedor` (a Shopee não diz SHIPPED). Fora do Flex nada
+    muda: a condição olha a Localização do marketplace/Correios e a trava vale."""
+    return (
+        row.envio_flex is True
+        and regra_com_condicao
+        and bool((row.localizacao_tracken or "").strip())
+    )
 
 
 def pacote_ainda_com_o_vendedor(
@@ -667,8 +695,12 @@ async def apply_alterar_status_bling(
     elif not r["aplicavel"]:
         raise BlingObsError("logistica_status_atual_divergente")
     alvo, alvo_id = r["alvo"], r["alvo_id"]
-    if alvo_id == _SITUACAO_EM_ANDAMENTO_ID and pacote_ainda_com_o_vendedor(
-        row.plataforma, row.meli_status or {}, correios_saiu=correios_confirmam_saida(row)
+    if (
+        alvo_id == _SITUACAO_EM_ANDAMENTO_ID
+        and not transportadora_flex_confirmou(row, regra_com_condicao=r["condicao"])
+        and pacote_ainda_com_o_vendedor(
+            row.plataforma, row.meli_status or {}, correios_saiu=correios_confirmam_saida(row)
+        )
     ):
         logger.info(
             "logistica_status_promocao_barrada",
@@ -754,7 +786,7 @@ async def aplicar_status_em_lote(
             status_rows,
             assinatura=assinatura,
             plataforma=logistica_match.plataforma_regra_da_linha(row),
-            localizacao=row.localizacao,
+            localizacao=logistica_match.localizacao_da_linha(row),
         )
         if not any((c.alterar_status_bling or "").strip() for c in cands):
             # A chave casa regra(s) mas nenhuma muda status (ex.: "Problemas →
@@ -823,7 +855,7 @@ async def enviar_threema_em_lote(
             status_rows,
             assinatura=assinatura,
             plataforma=logistica_match.plataforma_regra_da_linha(row),
-            localizacao=row.localizacao,
+            localizacao=logistica_match.localizacao_da_linha(row),
         )
         rule = next(
             (

@@ -1667,6 +1667,17 @@ async function copiarChave(c: Logistica) {
   }
 }
 
+// Copia o rastreio (coluna Tracken da aba Flex): no Tracken, a busca à mão é por ele.
+async function copiarRastreio(c: Logistica) {
+  if (!c.rastreio) return
+  try {
+    await navigator.clipboard.writeText(c.rastreio)
+    toasts.success('Rastreio copiado', c.rastreio)
+  } catch {
+    toasts.error('Não foi possível copiar')
+  }
+}
+
 // Puxa a assinatura do Meli (8 campos) da API do ML pra uma linha.
 const refreshingMeli = ref<Set<string>>(new Set())
 async function atualizarMeli(c: Logistica) {
@@ -2027,7 +2038,8 @@ function palavrasLocalizacao(v: string | null | undefined): string[] {
 const LOCALIZACAO_CONTEM_TITLE =
   'A regra só vale quando a Localização do pedido tem uma destas palavras (sem diferenciar maiúscula nem acento; separe por ";"). ' +
   'Quando casa, ela passa na frente das regras sem condição do mesmo Status Plataforma, só nos Status Atual que ela lista; ' +
-  'nos outros, a regra sem condição continua valendo. Vazio = sem condição.'
+  'nos outros, a regra sem condição continua valendo. Vazio = sem condição. ' +
+  'Nas regras Flex (Shopee Flex / Mercado Livre Flex) vale o que a coluna Tracken mostra (status e último evento da transportadora).'
 
 watch(tab, (t) => {
   if (t === 'status') {
@@ -3438,6 +3450,15 @@ async function aplicarStatusBling(c: Logistica) {
                     </template>
                     <span v-else-if="c.tracken" class="text-muted-foreground">{{ c.tracken.erro || 'ainda não está na transportadora' }}</span>
                     <span v-else class="text-muted-foreground">—</span>
+                    <!-- O rastreio (17/11/2026): é com ele que se busca o pedido no Tracken à mão. -->
+                    <button
+                      v-if="c.rastreio"
+                      type="button"
+                      class="mx-auto mt-0.5 flex w-fit max-w-full items-center gap-0.5 font-mono text-[10.5px] text-muted-foreground hover:text-foreground"
+                      title="Rastreio — é com ele que se busca o pedido no Tracken. Clique para copiar."
+                      data-tracken-rastreio
+                      @click.stop="copiarRastreio(c)"
+                    ><span class="truncate">{{ c.rastreio }}</span><Copy class="size-3 shrink-0" /></button>
                     <!-- Sem a coluna Localização na aba Flex, o pacote de volta (devolução) aparece aqui. -->
                     <div
                       v-if="c.volta_localizacao"

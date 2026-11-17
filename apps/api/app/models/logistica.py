@@ -159,7 +159,13 @@ class Logistica(Base, TimestampMixin):
     # formulário apaga chave desconhecida de lá).
     envio_tipo: Mapped[str | None] = mapped_column(Text, nullable=True)
     envio_flex: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    postagem_data: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # O que a coluna Tracken mostra ("status · último evento" da transportadora
+    # do Flex) — é a Localização que as regras do Flex olham no "Localização
+    # contém" (Vinicius, 17/11/2026, 309413: a regra "coletado" não casava
+    # porque olhava a Localização da Shopee). Espelho de `logistica_tracken`,
+    # gravado só por `tracken.gravar` (migration 0496).
+    localizacao_tracken: Mapped[str | None] = mapped_column(Text, nullable=True)
+    postagem_data:Mapped[date | None] = mapped_column(Date, nullable=True)
     previsao_correios: Mapped[date | None] = mapped_column(Date, nullable=True)
     # LatestDeliveryDate da SP-API = "Prazo para entrega" do Seller Central
     # (data em Brasília). Depois dela a Amazon reembolsa o cliente.

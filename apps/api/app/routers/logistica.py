@@ -485,7 +485,7 @@ async def _match_rules(session: AsyncSession, c: Logistica) -> list[LogisticaSta
         list(rows),
         assinatura=assinatura,
         plataforma=logistica_match.plataforma_regra_da_linha(c),
-        localizacao=c.localizacao,
+        localizacao=logistica_match.localizacao_da_linha(c),
     )
 
 
@@ -1050,7 +1050,7 @@ async def list_logistica(
             status_rows,
             assinatura=assinatura,
             plataforma=logistica_match.plataforma_regra_da_linha(c),
-            localizacao=c.localizacao,
+            localizacao=logistica_match.localizacao_da_linha(c),
         )
         out.append(
             _to_out(

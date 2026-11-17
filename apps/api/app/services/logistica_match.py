@@ -13,7 +13,8 @@ pra saber o que executar, então o que a UI mostra bate com o que o sistema far�
 Regra pode ter condição na Localização (`localizacao_contem`, 06/10): quando a
 Localização do pedido tem a palavra, as regras com condição passam na frente
 das sem condição da mesma chave — só nos estados do Bling que elas cobrem; nos
-outros, a regra sem condição decide (ver `regras_do_estado`, 16/10).
+outros, a regra sem condição decide (ver `regras_do_estado`, 16/10). No Flex a
+"Localização" é o texto da coluna Tracken (`localizacao_da_linha`, 17/11).
 """
 
 from __future__ import annotations
@@ -164,6 +165,22 @@ def plataforma_regra_da_linha(row: object) -> str | None:
     `find_matching_rules` — tela, motor de status, mensagens e robôs de
     chamado veem a MESMA regra."""
     return plataforma_da_regra(getattr(row, "plataforma", None), getattr(row, "envio_flex", None))
+
+
+def localizacao_da_linha(row: object) -> str | None:
+    """A Localização que a condição "Localização contém" olha: a do pedido, ou
+    — no Flex — o que a coluna Tracken mostra (`localizacao_tracken`: status ·
+    último evento da transportadora). É o que todo casador passa como
+    `localizacao` a `find_matching_rules`, junto com `plataforma_regra_da_linha`.
+
+    Vinicius, 17/11/2026 (Shopee Flex 309413): "no painel Flex não tem
+    localização, ele teria que usar a coluna Tracken para verificar essa
+    regra". A Localização da Shopee no Flex nem aparece na aba (saiu em 16/11)
+    e não fala da coleta; quem diz "COLETADO" é a transportadora. Só o Tracken
+    vale para o Flex: sem leitura dele, a regra com condição não casa."""
+    if getattr(row, "envio_flex", None) is True:
+        return getattr(row, "localizacao_tracken", None)
+    return getattr(row, "localizacao", None)
 
 
 def find_matching_rule(

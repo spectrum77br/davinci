@@ -359,3 +359,24 @@ async def gravar(
         tk.achado = bool(tk.remessa)
         if tk.remessa:
             tk.erro = "o Tracken não achou o pedido nesta leitura"
+    # A Localização que as regras do Flex olham (`Logistica.localizacao_tracken`).
+    log = await session.get(Logistica, logistica_id)
+    if log is not None:
+        log.localizacao_tracken = localizacao_para_regra(tk)
+
+
+def localizacao_para_regra(tk: LogisticaTracken | None) -> str | None:
+    """O texto da coluna Tracken que vale como Localização nas regras do Flex
+    (aba Status, "Localização contém"): status + último evento da
+    transportadora — "MANUSEIO · COLETADO". Só o que ela diz AGORA: o histórico
+    fica de fora (uma palavra antiga não pode continuar casando depois que o
+    pacote andou). Pedido que a transportadora ainda não tem = None.
+
+    Vinicius, 17/11/2026 (309413): regra Shopee Flex · Processado · Em
+    digitação com "coletado" não casava — olhava a Localização da Shopee, que a
+    aba Flex nem mostra; o "COLETADO" estava no Tracken. A migration 0496
+    preenche os já lidos com a mesma conta."""
+    if tk is None or not tk.achado:
+        return None
+    partes = [p.strip() for p in (tk.status, tk.ultimo_evento) if p and p.strip()]
+    return " · ".join(partes) or None

@@ -597,7 +597,7 @@ async def _ids_pendentes(
             regras,
             assinatura=assinatura,
             plataforma=logistica_match.plataforma_regra_da_linha(r),
-            localizacao=r.localizacao,
+            localizacao=logistica_match.localizacao_da_linha(r),
         )
         resolvido = logistica_match.estado_resolvido(
             cands,
