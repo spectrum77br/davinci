@@ -177,7 +177,7 @@ async def test_um_dia_vira_uma_ocorrencia_e_fecha_quando_todos_tem_nota(db, admi
     assert o.chave == "dia:2026-10-13"
     assert o.titulo == "Envios de 13/10 (ter) — 2 de 3 pedidos sem nota cheia"
     assert o.detalhe == f"Shopee barbosa (2): {', '.join(sorted([sem1, sem2]))}"
-    assert o.link == "/notas-fiscais?de=2026-10-13&ate=2026-10-14&nf=sem_produto"
+    assert o.link == "/logistica?tab=notas&de=2026-10-13&ate=2026-10-14&nf=sem_produto"
     assert o.pedido is None and o.dados["sem_nota"] == 2
     assert "1 dia com pedido sem nota cheia (2)" in r["resumo"]
 

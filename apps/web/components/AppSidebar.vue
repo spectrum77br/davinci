@@ -5,7 +5,7 @@ import {
   Package, DollarSign, Undo2,
   Receipt, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
-  Coins, FileText, Ship, Landmark, Headset,
+  Coins, Ship, Landmark, Headset,
   ReceiptText, MessagesSquare, Radar, Flag, Inbox, Smartphone, ShieldCheck, X, Scale, Gavel,
   GitPullRequest,
 } from 'lucide-vue-next'
@@ -204,8 +204,11 @@ const sections = computed<Section[]>(() => [
     items: [
       { to: '/devolucoes', label: 'Devoluções', icon: Undo2, resource: 'devolucoes' },
       { to: '/reembolso', label: 'Reembolso', icon: Receipt, resource: 'reembolso' },
-      { to: '/logistica', label: 'Logística', icon: Headset, resource: 'logistica' },
-      { to: '/notas-fiscais', label: 'Notas fiscais', icon: FileText, resource: 'notas_fiscais' },
+      // 17/11/2026 (Novos procedimentos 7): Notas fiscais saiu do menu e virou a
+      // aba "Notas fiscais" da Logística (/logistica?tab=notas; /notas-fiscais
+      // redireciona). A Logística abre para logistica OU notas_fiscais (quem só
+      // tem Notas fiscais vê só essa aba) e fica marcada nas duas rotas.
+      { to: '/logistica', label: 'Logística', icon: Headset, resource: 'logistica', match: ['/logistica', '/notas-fiscais'] },
       { to: '/chamados', label: 'Chamados', icon: MessagesSquare, resource: 'chamados' },
       // Garantias (07/10/2026): Painel de Garantia Uranyx — cadastro, prazos de
       // hardware/software e os atendimentos vinculados no /atendimento. Só

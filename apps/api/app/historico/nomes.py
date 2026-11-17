@@ -35,7 +35,9 @@ PAGINAS: dict[str, str] = {
     "/devolucoes": "Devoluções",
     "/reembolso": "Reembolso",
     "/logistica": "Logística",
-    "/notas-fiscais": "Notas fiscais",
+    # Notas fiscais virou aba da Logística em 17/11/2026 (Novos procedimentos 7;
+    # /notas-fiscais redireciona para /logistica?tab=notas).
+    "/notas-fiscais": "Logística › Notas fiscais",
     "/chamados": "Chamados",
     "/financeiro/valuation": "Valuation",
     "/financeiro/consorcio": "Consórcio",
@@ -94,7 +96,7 @@ API: dict[str, str] = {
     "/api/refunds": "Reembolso",
     "/api/logistica": "Logística",
     "/api/conciliacao": "Conciliação",
-    "/api/notas-fiscais": "Notas fiscais",
+    "/api/notas-fiscais": "Logística › Notas fiscais",
     "/api/chamados": "Chamados",
     "/api/informar": "Informar (Threema)",
     "/api/financeiro/valuation": "Valuation",

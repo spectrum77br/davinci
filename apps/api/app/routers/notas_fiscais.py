@@ -24,6 +24,15 @@ de uma nota só sai se ela for de pedido da equipe (403
 `pedido_de_outra_equipe`). A consulta direta às contas de emissão (lista ao
 vivo e exports) mistura as notas de todas as equipes: fica só para quem não
 tem equipe. Admin e quem não tem equipe: como sempre.
+
+17/11/2026 (Eduardo, Novos procedimentos 7 — 407aa5da): a tela virou a aba
+Notas fiscais da Logística (/notas-fiscais redireciona) e ganhou:
+- o botão PDF: a DANFE desenhada do XML assinado guardado em `nf_nota.xml`
+  (o mesmo desenho da NF do Atendimento), com a mesma permissão e a mesma
+  cerca de equipe do XML; sem o XML guardado, não há PDF (nada vai ao Bling);
+- a marca "Pedido cancelado — conferir NF": o DaVinci não sabe quando a NF é
+  cancelada (o XML guardado não traz o evento), mas sabe quando o PEDIDO do
+  Bling está em 12 (Cancelado) — a linha avisa para conferir a nota.
 """
 from __future__ import annotations
 
@@ -66,10 +75,12 @@ from app.models.enums import UserRole
 from app.models.nf import NfEtiquetaArquivo, NfNota
 from app.models.pricing import StoreInfo
 from app.schemas.products import JobCreatedOut
+from app.services.atendimento.danfe import DanfeInvalida, gerar_pdf
 from app.services.bling_notas_token_refresh import (
     _apply_token_payload,
     _post_oauth_token,
 )
+from app.services.bling_situacoes import SITUACAO_CANCELADO
 from app.services.marketplaces.bling import (
     BLING_API_BASE,
     _acquire_bling_rate_slot,
@@ -931,6 +942,10 @@ class PosVendaNfOut(BaseModel):
     # "pedido" (complemento == numeroloja, exata) ou "cpf" (CPF + janela de
     # dias) — o front sinaliza a heurística.
     via: str | None = None
+    # 17/11/2026: o XML assinado desta nota está guardado no DaVinci
+    # (`nf_nota`, o coletor) — a tela mostra o botão PDF (a DANFE desenhada
+    # dele, GET /pos-vendas/nota/{id}/pdf). Sem ele não há PDF.
+    xml_guardado: bool = False
 
 
 class PosVendaRowOut(BaseModel):
@@ -952,6 +967,10 @@ class PosVendaRowOut(BaseModel):
     # impressora pela PRIMEIRA vez (impressa_em; reimpressão não conta).
     etiqueta_emissao: str | None = None
     etiqueta_impressao: str | None = None
+    # 17/11/2026: o pedido está em 12 (Cancelado) no Bling. O DaVinci não
+    # sabe se a NF foi cancelada (o XML guardado não traz o evento de
+    # cancelamento; a nota segue "autorizada" aqui) — a tela pede para conferir.
+    pedido_cancelado: bool = False
 
 
 class PosVendasPage(BaseModel):
@@ -1019,6 +1038,10 @@ async def montar_pos_vendas(
                     bo.item_descricao,
                     aggregate_order_by(literal(" | "), bo.item_index),
                 ).label("produtos"),
+                # 17/11/2026: pedido em 12 (Cancelado) → "conferir NF".
+                func.bool_or(bo.situacao == str(SITUACAO_CANCELADO)).label(
+                    "cancelado"
+                ),
             )
             .where(
                 bo.em_andamento_data >= date_from,
@@ -1086,15 +1109,30 @@ async def montar_pos_vendas(
     # (`nf_nota`). O Upseller emite com o certificado da própria empresa, fora
     # do Bling — essas notas NUNCA aparecem no espelho `bling_notas_emitidas`,
     # e sem isso a tela mostrava "—" no envio inteiro.
+    # 17/11/2026: só as colunas que a lista usa — a `xml` (o arquivo assinado
+    # inteiro) é pesada e só o download (XML/PDF) de UMA nota a lê.
     xml_rows = (
         await session.execute(
-            select(NfNota).where(
+            select(
+                NfNota.id,
+                NfNota.chave,
+                NfNota.pedido_bling,
+                NfNota.numero,
+                NfNota.emitente_cnpj,
+                NfNota.emitente_nome,
+                NfNota.destinatario_doc,
+                NfNota.valor,
+                NfNota.data_emissao,
+            ).where(
                 NfNota.situacao == "100",  # cStat da SEFAZ: autorizada
                 NfNota.data_emissao.between(j1, j2)
                 | NfNota.data_emissao.is_(None),
             )
         )
-    ).scalars().all()
+    ).all()
+    # Chaves com o XML guardado aqui: a nota do espelho do Bling com a mesma
+    # chave também ganha o botão PDF (a DANFE sai do XML guardado).
+    chaves_guardadas = {n.chave for n in xml_rows}
 
     notas_in: list[NotaIn] = []
     # Chave marcada com a origem — as duas tabelas têm UUID próprio.
@@ -1122,6 +1160,7 @@ async def montar_pos_vendas(
             data_emissao=(
                 ne.data_emissao.isoformat(sep=" ") if ne.data_emissao else None
             ),
+            xml_guardado=bool(ne.chave_acesso) and ne.chave_acesso in chaves_guardadas,
         )
         if ne.chave_acesso:
             chaves_bling.add(ne.chave_acesso)
@@ -1155,6 +1194,7 @@ async def montar_pos_vendas(
             data_emissao=(
                 n.data_emissao.isoformat(sep=" ") if n.data_emissao else None
             ),
+            xml_guardado=True,
         )
 
     pedidos_in = [
@@ -1203,26 +1243,23 @@ async def montar_pos_vendas(
                 etiqueta_impressao=(
                     etq_impressa.isoformat() if etq_impressa else None
                 ),
+                pedido_cancelado=bool(r.cancelado),
             )
         )
     items.sort(key=lambda i: i.data_envio or "", reverse=True)
     return items
 
 
-@router.get("/pos-vendas/nota/{nota_id}/xml")
-async def download_pos_venda_xml(
-    nota_id: UUID,
-    session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(_PERM)],
-) -> Response:
-    """XML autorizado de UMA nota (botão XML da tabela Pós Vendas). Quem é
-    de equipe só baixa nota de pedido das lojas dela (403
-    `pedido_de_outra_equipe`)."""
+async def _nota_da_linha(
+    session: AsyncSession, user: User, nota_id: UUID
+) -> tuple[BlingNotaEmitida | None, NfNota | None]:
+    """A nota de uma linha do Pós Vendas — (espelho do Bling, None) ou
+    (None, nota do coletor) — com a cerca de equipe já conferida: quem é de
+    equipe só leva nota de pedido das lojas dela (403
+    `pedido_de_outra_equipe`). A MESMA régua para o XML e o PDF (17/11/2026)."""
     lojas = await _lojas_da_equipe(session, user)
     ne = await session.get(BlingNotaEmitida, nota_id)
     if ne is None:
-        # Nota vinda do coletor: o XML assinado já está guardado aqui, não
-        # precisa pedir nada ao Bling.
         n = await session.get(NfNota, nota_id)
         if n is None:
             raise HTTPException(404, detail={"code": "nota_nao_encontrada"})
@@ -1234,13 +1271,7 @@ async def download_pos_venda_xml(
             cpf=n.destinatario_doc,
             emissao=n.data_emissao,
         )
-        return Response(
-            content=n.xml,
-            media_type="application/xml",
-            headers={
-                "Content-Disposition": f'attachment; filename="{n.chave}.xml"'
-            },
-        )
+        return None, n
     await _exigir_nota_da_equipe(
         session,
         lojas,
@@ -1249,6 +1280,30 @@ async def download_pos_venda_xml(
         cpf=ne.cpf_dest,
         emissao=ne.data_emissao,
     )
+    return ne, None
+
+
+@router.get("/pos-vendas/nota/{nota_id}/xml")
+async def download_pos_venda_xml(
+    nota_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM)],
+) -> Response:
+    """XML autorizado de UMA nota (botão XML da tabela Pós Vendas). Quem é
+    de equipe só baixa nota de pedido das lojas dela (403
+    `pedido_de_outra_equipe`)."""
+    ne, n = await _nota_da_linha(session, user, nota_id)
+    if ne is None:
+        # Nota vinda do coletor: o XML assinado já está guardado aqui, não
+        # precisa pedir nada ao Bling.
+        assert n is not None
+        return Response(
+            content=n.xml,
+            media_type="application/xml",
+            headers={
+                "Content-Disposition": f'attachment; filename="{n.chave}.xml"'
+            },
+        )
     conta = await session.get(BlingNota, ne.conta_id)
     if conta is None:
         raise HTTPException(404, detail={"code": "conta_nao_encontrada"})
@@ -1269,4 +1324,66 @@ async def download_pos_venda_xml(
         content=xml_bytes,
         media_type="application/xml",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@router.get("/pos-vendas/nota/{nota_id}/pdf")
+async def download_pos_venda_pdf(
+    nota_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(_PERM)],
+) -> Response:
+    """A DANFE (PDF) de UMA nota — botão PDF da aba Notas fiscais da Logística
+    (17/11/2026, Novos procedimentos 7). Desenhada do XML assinado guardado
+    no DaVinci (`nf_nota.xml`), com o mesmo desenho da NF do Atendimento
+    (`services/atendimento/danfe.gerar_pdf`). Mesma permissão e mesma cerca
+    de equipe do XML (`_nota_da_linha`).
+
+    Nada vai ao Bling: a nota do espelho do Bling usa o XML guardado com a
+    MESMA chave de acesso; sem ele → 404 `xml_nao_guardado` (a tela só mostra
+    o botão quando há XML guardado, `xml_guardado` na lista)."""
+    ne, n = await _nota_da_linha(session, user, nota_id)
+    if n is not None:
+        xml: bytes | None = n.xml
+        chave: str | None = n.chave
+        numero: str | None = n.numero
+    else:
+        assert ne is not None
+        chave, numero = ne.chave_acesso, ne.numero
+        xml = (
+            await session.scalar(select(NfNota.xml).where(NfNota.chave == chave))
+            if chave
+            else None
+        )
+    if not xml:
+        raise HTTPException(
+            404,
+            detail={
+                "code": "xml_nao_guardado",
+                "message": (
+                    "O XML desta nota não está guardado no DaVinci: sem ele não "
+                    "há DANFE. Baixe o XML (ou a DANFE no Bling)."
+                ),
+            },
+        )
+    try:
+        # PyMuPDF é síncrono (centenas de ms com muitos itens): fora do laço.
+        pdf = await asyncio.to_thread(gerar_pdf, bytes(xml))
+    except DanfeInvalida as e:
+        logger.warning("pos_vendas_danfe_invalida", nota=str(nota_id), code=e.code)
+        raise HTTPException(
+            422,
+            detail={
+                "code": "danfe_invalida",
+                "message": "Não deu para desenhar a DANFE deste XML: baixe o XML.",
+            },
+        ) from e
+    fname = f"DANFE_{chave or numero or nota_id}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "Cache-Control": "no-store",
+        },
     )

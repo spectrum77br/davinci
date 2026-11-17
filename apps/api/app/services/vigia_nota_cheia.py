@@ -1,5 +1,5 @@
 """Vigia de Nota Cheia — o robô da Ouvidoria que confere se TODO pedido enviado
-teve a nota cheia emitida e no painel Notas fiscais.
+teve a nota cheia emitida e no painel Notas fiscais (aba da Logística).
 
 Vinicius, 14/10/2026: "o que importa pra mim é saber se tudo foi emitido nota
 cheia — 100% dos pedidos". A nota cheia é a coluna "NF produto" do painel
@@ -69,9 +69,11 @@ _FORA = {str(SITUACAO_CANCELADO), SITUACAO_AGUARDANDO_CANCELAMENTO_STR, "excluid
 # Teto de pedidos escritos no detalhe/dados (o resto vira "… e mais N").
 _MAX_PEDIDOS_LISTADOS = 400
 
+# 17/11/2026: Notas fiscais virou aba da Logística (Novos procedimentos 7);
+# o texto e o link seguem o lugar de hoje (/notas-fiscais ainda redireciona).
 ACAO = (
     "Cobrar quem roda o lote da nota cheia (\"bling 100%\", à noite) e conferir "
-    "no painel Notas fiscais › filtro Sem NF produto"
+    "em Logística › Notas fiscais › filtro Sem NF produto"
 )
 
 _ROTULO_PLATAFORMA = {
@@ -243,7 +245,7 @@ async def vigia_nota_cheia_run(session: AsyncSession, *, agora: datetime | None 
                 detalhe=_detalhe(por_conta),
                 acao=ACAO,
                 link=(
-                    f"/notas-fiscais?de={dia.isoformat()}"
+                    f"/logistica?tab=notas&de={dia.isoformat()}"
                     f"&ate={(dia + timedelta(days=1)).isoformat()}&nf=sem_produto"
                 ),
                 severidade="pessoa",

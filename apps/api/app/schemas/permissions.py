@@ -40,7 +40,8 @@ Resource = Literal[
     # Logística — casos de pós-venda a acompanhar + aba Status. Sugestão de
     # status Bling a partir da assinatura de status do Meli.
     "logistica",
-    # Notas Fiscais — consulta/export de NF-e das contas bling_notas.
+    # Notas Fiscais — consulta/export de NF-e das contas bling_notas. Desde
+    # 17/11/2026 a tela é a aba Notas fiscais da Logística (XML e PDF da DANFE).
     "notas_fiscais",
     # Chamados — aba de Pós-venda que centraliza os chamados abertos nas
     # plataformas (origem Margem/Logística/Devolução), com histórico,

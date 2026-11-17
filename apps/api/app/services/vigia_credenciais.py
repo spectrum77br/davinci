@@ -127,7 +127,8 @@ ACAO_REAUTORIZAR_NF = (
     "bling_notas.authorization_code — não há tela"
 )
 LINK_INTEGRACOES = "/integrations"
-LINK_NOTAS = "/notas-fiscais"
+# 17/11/2026: Notas fiscais é aba da Logística (/notas-fiscais redireciona).
+LINK_NOTAS = "/logistica?tab=notas"
 
 
 @dataclass

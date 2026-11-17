@@ -230,7 +230,7 @@ const rotas = (secoes) => secoes.flatMap((s) => s.items.map((i) => i.to))
   assert.equal(item.adminOnly, undefined, 'não é mais só de admin')
   assert.equal(item.resource, undefined, 'não depende do recurso (fora da tela de Permissões)')
   const posVenda = menuPara(COMUM).find((s) => s.items.some((i) => i.to === '/atendimento'))
-  assert.deepEqual(posVenda.items.map((i) => i.to), ['/devolucoes', '/reembolso', '/logistica', '/notas-fiscais', '/chamados', '/atendimento'])
+  assert.deepEqual(posVenda.items.map((i) => i.to), ['/devolucoes', '/reembolso', '/logistica', '/chamados', '/atendimento'])
 }
 
 // ------------------------------------------------ stores/auth.ts (o contrato do /me)

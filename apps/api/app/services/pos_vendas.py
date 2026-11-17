@@ -1,6 +1,7 @@
 """Pós Vendas: sync das NF-e das contas de emissão + casamento com pedidos.
 
-A página /notas-fiscais (menu "Pós vendas") mostra cada pedido ENVIADO com
+A aba Notas fiscais da Logística (/logistica?tab=notas; até 17/11/2026 a
+página /notas-fiscais, menu "Pós vendas") mostra cada pedido ENVIADO com
 as duas notas fiscais do envio:
 
 - NF EMBALAGEM — emitida pela conta Bling da EMPRESA DONA da loja (traz o

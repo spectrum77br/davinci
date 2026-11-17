@@ -110,6 +110,8 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
       // `devolucoes_mover` (10/11/2026): só o edit vale — muda o painel do
       // pedido (Devoluções ↔ Fraude). Admin sempre pode. `devolucoes_resolver`
       // (16/11/2026): idem pro Resolver/reabrir do painel novo.
+      // `notas_fiscais` (17/11/2026) abre a aba Notas fiscais da Logística:
+      // fica logo depois de `logistica`, como no menu.
       'devolucoes', 'devolucoes_mover', 'devolucoes_resolver', 'reembolso', 'logistica', 'notas_fiscais', 'chamados',
       'garantias', 'garantias_atendimento', 'garantias_cpf',
       'atendimento_email', 'atendimento_email_aba', 'atendimento_email_leitura', 'atendimento_email_operacao',
@@ -193,7 +195,7 @@ export const RESOURCE_LABELS: Record<Resource, string> = {
   devolucoes_resolver: 'Devoluções — resolver e reabrir (editar)',
   reembolso: 'Reembolso',
   logistica: 'Logística',
-  notas_fiscais: 'Notas Fiscais',
+  notas_fiscais: 'Notas Fiscais (desde 17/11/2026 é a aba Notas fiscais da Logística)',
   chamados: 'Chamados',
   garantias: 'Garantias — Consultar (view) e Cadastrar (edit)',
   garantias_atendimento: 'Garantias — Registrar atendimento (edit)',

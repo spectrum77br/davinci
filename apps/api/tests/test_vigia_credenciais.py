@@ -685,7 +685,7 @@ async def test_contas_de_nf_entram_e_convite_pendente_fica_de_fora(db, cenario, 
     o = abertas[f"conta:nf:{sem.id}"]
     assert o.titulo == "Conta sem acesso à API" and o.severidade == "pessoa"
     assert o.conta == "Bling NF semtoken" and o.plataforma == "bling"
-    assert o.acao == vc.ACAO_REAUTORIZAR_NF and o.link == "/notas-fiscais"
+    assert o.acao == vc.ACAO_REAUTORIZAR_NF and o.link == "/logistica?tab=notas"
     assert o.dados["bling_nota_id"] == str(sem.id)
     assert o.dados["erro_classe"] == "credencial_incompleta"
     assert str(ok.id)  # a conta boa não virou ocorrência

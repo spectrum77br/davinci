@@ -6,10 +6,21 @@ import type { FlexPedidoSemPeca } from '~/components/LogisticaFlexPedidosSemPeca
 
 definePageMeta({
   middleware: ['permission'],
-  permission: { resource: 'logistica', action: 'view' },
+  // 17/11/2026 (Novos procedimentos 7): Notas fiscais saiu do menu e virou a
+  // aba "Notas fiscais" daqui (?tab=notas; /notas-fiscais redireciona). Quem
+  // só tem a permissão de Notas fiscais continua chegando nelas: vê a
+  // Logística só com essa aba, sem carregar nada das outras (a API recusaria).
+  permissionAny: [
+    { resource: 'logistica', action: 'view' },
+    { resource: 'notas_fiscais', action: 'view' },
+  ],
 })
 
 const { api } = useApi()
+// Quem vê o quê na barra de abas: as abas de marketplace e a Status são da
+// Logística; a aba Notas fiscais, da permissão Notas fiscais (a de antes).
+const podeLogistica = useCan('logistica', 'view')
+const podeNotas = useCan('notas_fiscais', 'view')
 const canEdit = useCan('logistica', 'edit')
 const isAdmin = useIsAdmin()
 const toasts = useToasts()
@@ -69,7 +80,8 @@ async function verificarFlex(): Promise<boolean> {
 async function aoMudarFlex() {
   await Promise.all([carregarResumoFlex(), verificarFlex()])
 }
-const tab = ref<PlataformaTab | 'status'>('ml')
+// 'notas' = aba Notas fiscais (components/NotasFiscaisPainel, 17/11/2026).
+const tab = ref<PlataformaTab | 'status' | 'notas'>(podeLogistica.value ? 'ml' : 'notas')
 
 // Aba Amazon: "Delivery by Amazon" (DBA) e "Envio próprio" numa tabela só
 // (Vinicius, 13/11/2026 — antes eram duas sub-abas, como no Seller Central).
@@ -236,6 +248,9 @@ const opcoes = ref<Opcoes>({ field_order: [], field_labels: {}, field_options: {
 // do ML chegava depois e a aba Shopee mostrava pedidos do ML (visto em 11/11/2026).
 let refreshSeq = 0
 async function refresh() {
+  // A aba Notas fiscais carrega sozinha (o painel); quem só tem Notas fiscais
+  // não lê nada da Logística.
+  if (tab.value === 'notas' || !podeLogistica.value) return
   const seq = ++refreshSeq
   loading.value = true
   error.value = null
@@ -1257,12 +1272,17 @@ async function loadOpcoes() {
 // sumiu"). Agora confere o Flex primeiro e já abre nela (a lista que carrega é
 // a dos pedidos Flex, pequena).
 const queryInicial = useRoute().query
-const abrirNoFlex = queryInicial.tab === 'flex' ? await verificarFlex() : false
+// `?tab=notas` (o link antigo /notas-fiscais redireciona para cá): abre direto
+// na aba Notas fiscais, sem carregar antes a lista do Mercado Livre. Quem não
+// tem a permissão de Notas fiscais cai no Mercado Livre, como numa aba
+// desconhecida.
+if (queryInicial.tab === 'notas' && podeNotas.value) tab.value = 'notas'
+const abrirNoFlex = podeLogistica.value && queryInicial.tab === 'flex' ? await verificarFlex() : false
 if (abrirNoFlex) {
   tab.value = 'flex'
   if (queryInicial.sub === 'anuncios' || queryInicial.sub === 'pedidos') flexSub.value = queryInicial.sub
 }
-await Promise.all([refresh(), loadOpcoes()])
+if (podeLogistica.value) await Promise.all([refresh(), loadOpcoes()])
 
 // ---- Modal (create + edit compartilham o mesmo formulário) ----
 const modalOpen = ref(false)
@@ -2042,6 +2062,8 @@ const LOCALIZACAO_CONTEM_TITLE =
   'Nas regras Flex (Shopee Flex / Mercado Livre Flex) vale o que a coluna Tracken mostra (status e último evento da transportadora).'
 
 watch(tab, (t) => {
+  // Notas fiscais: o painel carrega os envios dele (nada da Logística).
+  if (t === 'notas') return
   if (t === 'status') {
     if (!statusLoaded) refreshStatus()
   } else {
@@ -2066,6 +2088,7 @@ const AUTO_REFRESH_MS = 30000
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 function autoRefreshTick() {
+  if (tab.value === 'notas') return
   if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
   if (recarregando.value || modalOpen.value || informarOpen.value || informarAmazonOpen.value || mensagensClienteOpen.value) return
   // Alguma ação por linha em andamento (enviar chamado, aplicar no Bling,
@@ -2092,6 +2115,8 @@ function autoRefreshTick() {
 // Pré-carrega a aba Status pra ela abrir instantânea (o vermelho do painel
 // NÃO depende mais dela: vem pronto do backend em acao_match).
 onMounted(() => {
+  // Só Notas fiscais (sem a Logística): nada das abas da Logística carrega.
+  if (!podeLogistica.value) return
   // `?tab=…&q=…` na URL: é assim que a ocorrência do robô "Ocorrência grave
   // nos Correios" (Ouvidoria › Robôs) abre a aba do pedido já filtrada, em vez
   // de largar a pessoa na aba ML sem filtro. Aba desconhecida (uma plataforma
@@ -2954,24 +2979,39 @@ async function aplicarStatusBling(c: Logistica) {
       <h1 class="text-[15px] font-bold">Logística</h1>
       <div class="flex flex-wrap items-center gap-3.5 text-xs font-semibold">
         <div class="flex flex-wrap gap-0.5">
+          <template v-if="podeLogistica">
+            <button
+              v-for="t in ABAS_VISIVEIS"
+              :key="t.key"
+              type="button"
+              class="border-b-2 px-2.5 py-1"
+              :class="tab === t.key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+              @click="tab = t.key"
+            >
+              {{ t.label }}
+              <span v-if="tab === t.key && !flexAnuncios" class="font-medium text-muted-foreground">{{ baseRows.length }}</span>
+            </button>
+            <button
+              type="button"
+              class="border-b-2 px-2.5 py-1"
+              :class="tab === 'status' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+              @click="tab = 'status'"
+            >
+              Status
+            </button>
+          </template>
+          <!-- 17/11/2026 (Novos procedimentos 7): a tela Notas fiscais saiu do
+               menu e virou esta aba, a última. Só para quem tem a permissão de
+               Notas fiscais (a de antes). -->
           <button
-            v-for="t in ABAS_VISIVEIS"
-            :key="t.key"
+            v-if="podeNotas"
             type="button"
             class="border-b-2 px-2.5 py-1"
-            :class="tab === t.key ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
-            @click="tab = t.key"
+            :class="tab === 'notas' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
+            data-aba-notas-fiscais
+            @click="tab = 'notas'"
           >
-            {{ t.label }}
-            <span v-if="tab === t.key && !flexAnuncios" class="font-medium text-muted-foreground">{{ baseRows.length }}</span>
-          </button>
-          <button
-            type="button"
-            class="border-b-2 px-2.5 py-1"
-            :class="tab === 'status' ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'"
-            @click="tab = 'status'"
-          >
-            Status
+            Notas fiscais
           </button>
         </div>
         <!-- Flex: Pedidos × Anúncios -->
@@ -3016,7 +3056,7 @@ async function aplicarStatusBling(c: Logistica) {
              Ligar/Desligar selecionados) vêm para esta linha — o componente
              LogisticaFlexAnuncios teleporta para cá (antes ocupavam uma linha só deles). -->
         <div v-if="flexAnuncios" id="flex-acoes-topo" class="flex flex-wrap items-center justify-end gap-1.5" />
-        <template v-if="tab !== 'status' && !flexAnuncios">
+        <template v-if="tab !== 'status' && tab !== 'notas' && !flexAnuncios">
           <button
             type="button"
             class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted disabled:opacity-50"
@@ -3104,7 +3144,7 @@ async function aplicarStatusBling(c: Logistica) {
           </button>
         </template>
         <button
-          v-if="isAdmin"
+          v-if="isAdmin && tab !== 'notas'"
           type="button"
           class="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 hover:bg-muted"
           title="Manda via Threema a lista dos pedidos acompanhados no painel (só admins)"
@@ -3113,7 +3153,7 @@ async function aplicarStatusBling(c: Logistica) {
           <Megaphone class="size-3.5" /> Informar
         </button>
         <button
-          v-if="canEdit && tab !== 'status' && !flexAnuncios"
+          v-if="canEdit && tab !== 'status' && tab !== 'notas' && !flexAnuncios"
           type="button"
           class="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-primary px-2.5 py-1 text-primary-foreground"
           :title="tab === 'flex' ? 'O caso criado à mão aparece na aba da plataforma (Mercado Livre ou Shopee), não na aba Flex.' : undefined"
@@ -3139,7 +3179,7 @@ async function aplicarStatusBling(c: Logistica) {
     />
 
     <!-- ============ ABAS DE MARKETPLACE (ML/Shopee/Amazon/TikTok/Flex) ============ -->
-    <template v-if="tab !== 'status' && !flexAnuncios">
+    <template v-if="tab !== 'status' && tab !== 'notas' && !flexAnuncios">
       <!-- Sem saldo no 17track a coluna Localização inteira congela. O aviso
            fica FIXO (não é toast) porque explica o estado atual do sistema e
            depende de uma ação fora do DaVinci: comprar créditos. -->
@@ -4523,6 +4563,11 @@ async function aplicarStatusBling(c: Logistica) {
         </div>
       </div>
     </template>
+
+    <!-- ============ ABA NOTAS FISCAIS (17/11/2026, Novos procedimentos 7) ============ -->
+    <!-- A tela Notas fiscais de antes (/notas-fiscais), com os mesmos filtros,
+         colunas e o XML — e o botão PDF e a marca de pedido cancelado. -->
+    <NotasFiscaisPainel v-else-if="tab === 'notas'" embutido />
 
     <!-- Modal "Novo status" (aba Status) -->
     <div v-if="showStatusForm" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="showStatusForm = false">

@@ -750,7 +750,7 @@ const mesmoPy = (a, b, msg) => {
   for (const u of [ADMIN, CONSULTA, CADASTRA]) assert.ok(rotasDe(u).includes('/garantias'), `${u.id} vê Garantias no menu`)
   for (const u of [REGISTRA, COMUM]) assert.ok(!rotasDe(u).includes('/garantias'), `${u.id} não vê (sem Consultar)`)
   const posVendaMenu = menuPara({ status: 'active', ...CONSULTA, atendimento: true }).find((s) => s.label === 'Pós-venda')
-  assert.deepEqual(posVendaMenu.items.map((i) => i.to), ['/devolucoes', '/reembolso', '/logistica', '/notas-fiscais', '/chamados', '/garantias', '/atendimento'])
+  assert.deepEqual(posVendaMenu.items.map((i) => i.to), ['/devolucoes', '/reembolso', '/logistica', '/chamados', '/garantias', '/atendimento'])
   assert.equal(posVendaMenu.items.find((i) => i.to === '/garantias').label, 'Garantias')
 
   // O composable lê do /me (a mesma regra da lib).

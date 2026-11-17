@@ -970,8 +970,10 @@ function linkInfo(link: string | null): { label: string; interno: boolean } | nu
     if (l.startsWith('/devolucoes')) return { label: 'Devoluções', interno: true }
     if (l.startsWith('/chamados')) return { label: 'Chamados', interno: true }
     if (l.startsWith('/margem')) return { label: 'Margem', interno: true }
+    // Notas fiscais é aba da Logística desde 17/11/2026 (/logistica?tab=notas;
+    // as ocorrências antigas com /notas-fiscais redirecionam).
+    if (l.startsWith('/logistica?tab=notas') || l.startsWith('/notas-fiscais')) return { label: 'Notas fiscais', interno: true }
     if (l.startsWith('/logistica')) return { label: 'Logística', interno: true }
-    if (l.startsWith('/notas-fiscais')) return { label: 'Notas fiscais', interno: true }
     if (l.startsWith('/nf-faturamento')) return { label: 'Faturamento NF', interno: true }
     return { label: 'Abrir', interno: true }
   }
