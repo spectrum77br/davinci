@@ -3665,6 +3665,15 @@ async def tuta_devolucoes_tick(ctx: dict) -> None:
     logger.info("tuta_devolucoes_tick_done", enfileirado=bool(cmd))
 
 
+async def carrefour_offer_write_tick(ctx: dict) -> None:
+    """A cada cinco minutos: envia lotes autorizados e confirma STO/PRI + OF22."""
+    from app.services.carrefour_offer_write import run_carrefour_offer_writes
+
+    result = await run_carrefour_offer_writes()
+    if result["checked"] or result["errors"]:
+        logger.info("carrefour_offer_write_tick_done", **result)
+
+
 async def pricing_confirmacao_amazon_tick(ctx: dict) -> None:
     """A cada 10 min: lê na Amazon o preço VIVO dos anúncios enviados pela
     Tabela de Preços e avisa se a loja não aplicou o que o DaVinci mandou.
@@ -5877,6 +5886,7 @@ class WorkerSettings:
         func(conferencia_coletar_servidor, timeout=3600),
     ]
     cron_jobs = [
+        cron(carrefour_offer_write_tick, minute=_FIVE_MIN, run_at_startup=False, timeout=600),
         # A consulta bem-sucedida agenda a próxima em 24h; falhas tentam de novo em 1h.
         # Tick horário e startup recuperam consultas perdidas durante reinícios.
         cron(certificacoes_anatel_sync, minute=35, run_at_startup=True, timeout=240),

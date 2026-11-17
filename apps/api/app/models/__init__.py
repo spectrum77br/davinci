@@ -43,6 +43,7 @@ from app.models.bling_envio_evento import BlingEnvioEvento
 from app.models.bling_kit_component import BlingKitComponent
 from app.models.bling_nota import BlingNota, BlingNotaEmitida
 from app.models.bling_order import BlingOrder, PrevisaoImpressa
+from app.models.carrefour_offer_write import CarrefourOfferBatch, CarrefourOfferWrite
 from app.models.chamado import (
     Chamado,
     ChamadoAnexo,
@@ -326,6 +327,8 @@ from app.models.user import User
 from app.models.user_settings import UserSettings
 
 __all__ = [
+    "CarrefourOfferBatch",
+    "CarrefourOfferWrite",
     "MailAdminEvento",
     "MailLeitorPastas",
     "MailLixeira",

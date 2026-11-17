@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 
 class IntegrationOut(BaseModel):
@@ -19,6 +19,8 @@ class IntegrationOut(BaseModel):
     last_test_ok: bool | None = None
     last_error: str | None = None
     vacation_mode: bool = False
+    carrefour_stock_write_enabled: bool = False
+    carrefour_price_write_enabled: bool = False
     archived_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
@@ -36,6 +38,8 @@ class IntegrationPatch(BaseModel):
     status: str | None = None
     credentials: dict | None = None
     vacation_mode: bool | None = None
+    carrefour_stock_write_enabled: StrictBool | None = None
+    carrefour_price_write_enabled: StrictBool | None = None
 
 
 class TestConnectionOut(BaseModel):

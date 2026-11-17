@@ -20,6 +20,8 @@ type Integration = {
   last_test_ok: boolean | null
   last_error: string | null
   vacation_mode: boolean
+  carrefour_stock_write_enabled?: boolean
+  carrefour_price_write_enabled?: boolean
   created_at: string
   updated_at: string
 }
@@ -44,6 +46,8 @@ const PLATFORM_LABELS: Record<string, string> = {
 const { api } = useApi()
 const items = ref<Integration[]>([])
 const carrefourChecks = ref<Record<string, { checkedAt: string; cached: boolean }>>({})
+type CarrefourWrites = { linked: number; pending: number; review: number; confirmed: number; blocked: boolean; last_error: string | null }
+const carrefourWrites = ref<Record<string, CarrefourWrites | null>>({})
 const companies = ref<Company[]>([])
 const stores = ref<Store[]>([])
 const loading = ref(false)
@@ -81,6 +85,11 @@ async function refresh() {
     items.value = i
     companies.value = c
     stores.value = s
+    const writeStates = await Promise.all(i.filter(x => x.platform === 'carrefour').map(async x => {
+      try { return [x.id, await api<CarrefourWrites>(`/api/integrations/${x.id}/carrefour-writes`)] as const }
+      catch { return [x.id, null] as const }
+    }))
+    carrefourWrites.value = Object.fromEntries(writeStates)
   } catch (e: any) {
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
@@ -241,6 +250,28 @@ async function deleteIntegration(i: Integration) {
 }
 
 const vacationId = ref<string | null>(null)
+const carrefourWriteId = ref<string | null>(null)
+async function toggleCarrefourWrite(i: Integration, kind: 'stock' | 'price') {
+  const field = kind === 'stock' ? 'carrefour_stock_write_enabled' : 'carrefour_price_write_enabled'
+  const enabled = !i[field]
+  const label = kind === 'stock' ? 'estoque' : 'preços'
+  if (enabled && !confirm(
+    `Habilitar envio de ${label} para "${i.name}"?\n\n`
+    + 'Os próximos envios dos produtos vinculados poderão atualizar os anúncios desta loja. '
+    + 'O Carrefour processa as alterações antes de confirmar o resultado.'
+  )) return
+  carrefourWriteId.value = i.id
+  error.value = null
+  try {
+    await api(`/api/integrations/${i.id}`, { method: 'PATCH', body: { [field]: enabled } })
+    await refresh()
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || 'Não foi possível alterar o envio.'
+  } finally {
+    carrefourWriteId.value = null
+  }
+}
+
 async function toggleVacation(i: Integration) {
   const turningOn = !i.vacation_mode
   if (turningOn && !confirm(
@@ -368,8 +399,22 @@ const tab = ref<'integracoes' | 'automacoes'>(
           </div>
           <div class="break-words font-medium">{{ i.name }}</div>
           <p v-if="i.platform === 'carrefour'" class="text-xs text-muted-foreground">
-            Leitura e importação de ofertas. Envio de estoque e preços ainda não disponível.
+            Estoque: {{ i.carrefour_stock_write_enabled ? 'envio habilitado' : 'envio desativado' }}.
+            Preços: {{ i.carrefour_price_write_enabled ? 'envio habilitado' : 'envio desativado' }}.
+            As alterações ficam pendentes até a confirmação do Carrefour.
           </p>
+          <div v-if="i.platform === 'carrefour'" class="text-xs text-muted-foreground">
+            <template v-if="carrefourWrites[i.id]">
+              {{ carrefourWrites[i.id]!.linked }} anúncios vinculados ·
+              {{ carrefourWrites[i.id]!.pending }} envios pendentes ·
+              {{ carrefourWrites[i.id]!.review }} para conferir ·
+              {{ carrefourWrites[i.id]!.confirmed }} confirmados.
+              <p v-if="!carrefourWrites[i.id]!.linked">Vincule os anúncios aos produtos para sincronizar estoque e preços.</p>
+              <p v-if="carrefourWrites[i.id]!.blocked" class="text-amber-600">Envios pausados: uma carga anterior precisa ser conferida no Carrefour.</p>
+              <p v-else-if="carrefourWrites[i.id]!.review" class="text-amber-600">Há alterações não confirmadas. Confira o histórico de sincronização antes de reenviar.</p>
+            </template>
+            <template v-else>Não foi possível consultar a fila de envios.</template>
+          </div>
           <div class="break-words text-xs text-muted-foreground space-y-0.5">
             <div v-if="i.store_id">
               loja: <code>{{ storeById[i.store_id]?.marketplace }}</code> /
@@ -406,7 +451,7 @@ const tab = ref<'integracoes' | 'automacoes'>(
                 : OAUTH_AUTHORIZE_LABELS[i.platform] }}
             </Button>
             <Button
-              v-if="canEdit && i.platform !== 'bling' && i.platform !== 'carrefour'"
+              v-if="canEdit && i.platform !== 'bling' && (i.platform !== 'carrefour' || i.carrefour_stock_write_enabled)"
               size="sm"
               :variant="i.vacation_mode ? 'default' : 'outline'"
               :disabled="vacationId === i.id"
@@ -417,6 +462,14 @@ const tab = ref<'integracoes' | 'automacoes'>(
             >
               {{ vacationId === i.id ? '…' : (i.vacation_mode ? 'Férias ON' : 'Modo férias') }}
             </Button>
+            <template v-if="canEdit && i.platform === 'carrefour'">
+              <Button size="sm" variant="outline" :disabled="carrefourWriteId === i.id" @click="toggleCarrefourWrite(i, 'stock')">
+                {{ i.carrefour_stock_write_enabled ? 'Desativar envio de estoque' : 'Habilitar envio de estoque' }}
+              </Button>
+              <Button size="sm" variant="outline" :disabled="carrefourWriteId === i.id" @click="toggleCarrefourWrite(i, 'price')">
+                {{ i.carrefour_price_write_enabled ? 'Desativar envio de preços' : 'Habilitar envio de preços' }}
+              </Button>
+            </template>
             <Button v-if="canEdit" size="sm" variant="ghost" :aria-label="`Editar integração ${i.name}`" title="editar" @click="openEdit(i)">
               <SquarePen class="size-4" />
             </Button>

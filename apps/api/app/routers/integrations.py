@@ -7,7 +7,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -147,6 +147,7 @@ async def _company_id_for(session: AsyncSession, store_id: UUID | None) -> UUID 
 
 
 def _to_out(i: Integration, company_id: UUID | None, store_id: UUID | None = None) -> IntegrationOut:
+    write_flags = _carrefour_write_flags(i)
     return IntegrationOut(
         id=i.id,
         user_id=i.user_id,
@@ -160,9 +161,78 @@ def _to_out(i: Integration, company_id: UUID | None, store_id: UUID | None = Non
         last_test_ok=i.last_test_ok,
         last_error=i.last_error,
         vacation_mode=i.vacation_mode,
+        **write_flags,
         created_at=i.created_at,
         updated_at=i.updated_at,
     )
+
+
+def _carrefour_write_flags(i: Integration) -> dict[str, bool]:
+    """Expose only the explicit, per-account switches, never credentials."""
+    credentials = (
+        decrypt_json(i.credentials)
+        if i.platform == IntegrationPlatform.CARREFOUR and i.credentials else {}
+    )
+    return {
+        "carrefour_stock_write_enabled": credentials.get("_carrefour_stock_write_enabled") is True,
+        "carrefour_price_write_enabled": credentials.get("_carrefour_price_write_enabled") is True,
+    }
+
+
+def _apply_carrefour_write_flags(i: Integration, data: dict) -> None:
+    flags = {
+        name: data[name]
+        for name in ("carrefour_stock_write_enabled", "carrefour_price_write_enabled")
+        if name in data and data[name] is not None
+    }
+    if not flags:
+        return
+    if i.platform != IntegrationPlatform.CARREFOUR:
+        raise HTTPException(400, detail={"code": "carrefour_only_setting"})
+    credentials = decrypt_json(i.credentials)
+    for name, enabled in flags.items():
+        # Separate PATCH fields are controlled by integracoes/edit. Arbitrary
+        # credentials cannot inject these server-owned switches or A01 cache.
+        credentials[f"_{name}"] = enabled is True
+    i.credentials = encrypt_json(credentials)
+
+
+@router.get("/{integration_id}/carrefour-writes")
+async def carrefour_write_status(
+    integration_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    user: Annotated[User, Depends(require_permission("integracoes", "view"))],
+) -> dict:
+    from app.models import ProductLink
+    from app.models.carrefour_offer_write import CarrefourOfferBatch, CarrefourOfferWrite
+
+    scope = await resolve_team_scope(session, user)
+    if not scope.unrestricted and integration_id not in scope.integration_ids:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+    integration = await session.get(Integration, integration_id)
+    if integration is None or integration.platform != IntegrationPlatform.CARREFOUR:
+        raise HTTPException(404, detail={"code": "integration_not_found"})
+    counts = dict((await session.execute(
+        select(CarrefourOfferWrite.status, func.count())
+        .where(CarrefourOfferWrite.integration_id == integration_id)
+        .group_by(CarrefourOfferWrite.status)
+    )).all())
+    last = await session.scalar(
+        select(CarrefourOfferBatch).where(CarrefourOfferBatch.integration_id == integration_id)
+        .order_by(CarrefourOfferBatch.created_at.desc()).limit(1)
+    )
+    linked = await session.scalar(
+        select(func.count()).select_from(ProductLink)
+        .where(ProductLink.integration_id == integration_id)
+    )
+    return {
+        "linked": linked or 0,
+        "pending": counts.get("queued", 0) + counts.get("submitted", 0),
+        "review": counts.get("review", 0),
+        "confirmed": counts.get("complete", 0),
+        "blocked": last is not None and last.state == "uncertain",
+        "last_error": last.last_error if last else None,
+    }
 
 
 def _make_token_save_callback(session: AsyncSession, integ: Integration):
@@ -271,6 +341,10 @@ async def patch_integration(
     if i is None:
         raise HTTPException(404, detail={"code": "integration_not_found"})
     data = body.model_dump(exclude_unset=True)
+    if {"carrefour_stock_write_enabled", "carrefour_price_write_enabled"} & data.keys():
+        scope = await resolve_team_scope(session, _u)
+        if not scope.unrestricted and i.id not in scope.integration_ids:
+            raise HTTPException(404, detail={"code": "integration_not_found"})
     if i.platform == IntegrationPlatform.CARREFOUR:
         i = await _locked_carrefour_integration(session, i.id)
         _validate_carrefour_store(i.platform, await _resolve_store(session, i))
@@ -292,6 +366,7 @@ async def patch_integration(
         else:
             updated = {**existing, **data["credentials"]}
         i.credentials = encrypt_json(updated)
+    _apply_carrefour_write_flags(i, data)
     await session.commit()
     await session.refresh(i)
     s = await _resolve_store(session, i)

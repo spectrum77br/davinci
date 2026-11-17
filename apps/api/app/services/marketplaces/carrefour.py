@@ -1,19 +1,22 @@
-"""Carrefour Brasil / Mirakl: authenticated reads; the only remote write is M12.
+"""Carrefour Brasil / Mirakl: scoped reads and explicit offer import primitives.
 
 Credentials: api_key, shop_id. The server-owned _carrefour_account_check caches
 A01 for 24 hours; on_token_refresh persists this metadata, not a rotated key.
 Never accept that cache from user input. See docs/carrefour-integracao.md.
 
-Messages (30/10/2026, the atendimento chat): M11 lists inbox threads and M12
-replies on an existing thread. Offers, stock, prices, invoices and shipping
-stay read-only (`update_stock` never calls HTTP).
+Messages: M11 lists inbox threads and M12 replies on an existing thread.
+STO01 and PRI01 submit independent stock/price imports and return a pending ID.
+The integration queue owns activation and confirms processing plus OF22 readback.
+No catalogue or full-offer replacement endpoint is used.
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
+import csv
 import hashlib
+import io
 import json
 import math
 import re
@@ -48,6 +51,14 @@ REPLY_RECIPIENT_TYPES = frozenset({"CUSTOMER", "OPERATOR"})
 # M12 `message_input.body`: minLength 3, maxLength 50000.
 REPLY_BODY_MIN = 3
 REPLY_BODY_MAX = 50000
+
+_SIMPLE_PRICE_FIELDS = frozenset({
+    "channel_code", "context", "discount_end_date", "discount_start_date", "price",
+    "unit_discount_price", "unit_origin_price", "volume_prices",
+})
+_PARTIAL_IMPORT_ID = re.compile(r"^[A-Za-z0-9-]{1,128}$")
+_STOCK_STATUS_PATH = re.compile(r"^/offers/stock/imports/[A-Za-z0-9-]{1,128}/status$")
+_OFFER_READ_PATH = re.compile(r"^/offers/[1-9][0-9]{0,18}$")
 
 
 class CarrefourError(RuntimeError):
@@ -144,6 +155,175 @@ def _normalize_offer(offer: dict) -> dict:
     }
 
 
+def _unsafe_offer(detail: str) -> CarrefourError:
+    return CarrefourError("offer_preservation_required", detail)
+
+
+def _offer_string(value: object, *, empty: bool = False) -> str:
+    if (
+        not isinstance(value, str)
+        or (not empty and not value.strip())
+        or any(ord(c) < 32 and c not in "\n\r\t" for c in value)
+        or any(0xD800 <= ord(c) <= 0xDFFF for c in value)
+    ):
+        raise _unsafe_offer("A oferta contém um campo de texto inválido.")
+    return value
+
+
+def _offer_integer(value: object, *, minimum: int = 0) -> int:
+    if type(value) is not int or not minimum <= value <= 2147483647:
+        raise _unsafe_offer("A oferta contém uma quantidade ou prazo inválido.")
+    return value
+
+
+def _offer_money(value: object, *, requested: bool = False, zero: bool = False) -> Decimal:
+    try:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+            raise ValueError
+        amount = Decimal(str(value))
+        if not amount.is_finite() or amount < 0 or amount > Decimal("999999999.99"):
+            raise ValueError
+        rounded = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if (not zero and rounded <= 0) or (not requested and rounded != amount):
+            raise ValueError
+        return rounded
+    except (ValueError, DecimalException):
+        raise _unsafe_offer(
+            "A oferta contém um preço inválido ou de precisão não suportada."
+        ) from None
+
+
+def _offer_date(value: object) -> str | None:
+    if value is None:
+        return None
+    try:
+        original = _offer_string(value)
+        date = datetime.fromisoformat(original.replace("Z", "+00:00"))
+        if date.utcoffset() is None:
+            raise ValueError
+        return original
+    except (ValueError, TypeError):
+        raise _unsafe_offer("A oferta contém uma data inválida ou sem fuso horário.") from None
+
+
+def _simple_offer_pricing(raw: object) -> tuple[dict, Decimal, Decimal | None]:
+    if not isinstance(raw, dict) or set(raw) - _SIMPLE_PRICE_FIELDS:
+        raise _unsafe_offer("A oferta usa campos de preço não suportados.")
+    if raw.get("channel_code") is not None or raw.get("context") not in (None, {}):
+        raise _unsafe_offer("Preços por canal, cliente ou período exigem revisão antes do envio.")
+    base = _offer_money(raw.get("unit_origin_price"))
+    discount = (
+        _offer_money(raw["unit_discount_price"])
+        if raw.get("unit_discount_price") is not None
+        else None
+    )
+    if discount is not None and discount >= base:
+        raise _unsafe_offer("O desconto da oferta não pode ser preservado com segurança.")
+    effective = _offer_money(raw.get("price"))
+    if effective not in (base, discount):
+        raise _unsafe_offer("O preço efetivo da oferta diverge dos preços informados.")
+    start, end = (_offer_date(raw.get(k)) for k in ("discount_start_date", "discount_end_date"))
+    if discount is None and (start is not None or end is not None):
+        raise _unsafe_offer("A oferta possui datas de desconto sem preço de desconto.")
+    if (
+        start
+        and end
+        and datetime.fromisoformat(start.replace("Z", "+00:00"))
+        > datetime.fromisoformat(end.replace("Z", "+00:00"))
+    ):
+        raise _unsafe_offer("O período de desconto da oferta é inválido.")
+    volumes = raw.get("volume_prices")
+    if not isinstance(volumes, list) or len(volumes) != 1:
+        raise _unsafe_offer("Preços por volume exigem revisão antes do envio.")
+    tier = volumes[0]
+    if (
+        not isinstance(tier, dict)
+        or set(tier) - {"price", "quantity_threshold", "unit_discount_price", "unit_origin_price"}
+        or type(tier.get("quantity_threshold")) is not int
+        or tier["quantity_threshold"] != 1
+        or _offer_money(tier.get("unit_origin_price")) != base
+        or _offer_money(tier.get("price")) != effective
+    ):
+        raise _unsafe_offer("A faixa de preço da oferta não pode ser preservada com segurança.")
+    tier_discount = (
+        _offer_money(tier["unit_discount_price"])
+        if tier.get("unit_discount_price") is not None
+        else None
+    )
+    if tier_discount != discount:
+        raise _unsafe_offer("O desconto da faixa de preço diverge do desconto da oferta.")
+    result = {
+        "channel_code": None,
+        "unit_origin_price": float(base),
+        "unit_discount_price": float(discount) if discount is not None else None,
+        "discount_start_date": start,
+        "discount_end_date": end,
+        "volume_prices": [
+            {
+                "quantity_threshold": 1,
+                "unit_origin_price": float(base),
+                "unit_discount_price": float(discount) if discount is not None else None,
+            }
+        ],
+    }
+    return result, base, discount
+
+
+def _partial_offer_sku(snapshot: dict, expected_sku: str) -> str:
+    if not isinstance(snapshot, dict) or _positive_id(snapshot.get("offer_id")) is None:
+        raise _unsafe_offer("A oferta não possui um identificador válido.")
+    sku = _offer_string(snapshot.get("shop_sku"))
+    if not expected_sku or sku != expected_sku or any(ord(c) < 32 for c in sku):
+        raise CarrefourError("offer_sku_mismatch", "O SKU atual diverge do vínculo autorizado.")
+    return sku
+
+
+def build_stock_update(snapshot: dict, *, qty: int, expected_sku: str) -> dict:
+    """STO01 updates global stock only; no offer/price fields are resubmitted."""
+    sku = _partial_offer_sku(snapshot, expected_sku)
+    if snapshot.get("warehouses") not in (None, []):
+        raise _unsafe_offer("Estoque por depósito exige uma configuração específica.")
+    if snapshot.get("fulfillment") != {"center": {"code": "DEFAULT"}}:
+        raise _unsafe_offer("O centro de atendimento da oferta exige revisão.")
+    _offer_integer(snapshot.get("quantity"))
+    return {"shop_sku": sku, "quantity": _offer_integer(qty)}
+
+
+def build_price_update(snapshot: dict, *, price, expected_sku: str) -> dict:
+    """PRI01 replaces prices only. Restrict it to one default, undiscounted price."""
+    sku = _partial_offer_sku(snapshot, expected_sku)
+    if snapshot.get("currency_iso_code") != "BRL":
+        raise _unsafe_offer("A moeda da oferta não foi confirmada como BRL.")
+    if (
+        snapshot.get("retail_prices") not in (None, [])
+        or snapshot.get("msrp") is not None
+        or snapshot.get("pricing_unit") is not None
+    ):
+        raise _unsafe_offer("Esta modalidade de preço exige revisão antes do envio.")
+    prices = snapshot.get("all_prices")
+    if not isinstance(prices, list) or len(prices) != 1:
+        raise _unsafe_offer("Preços múltiplos exigem revisão antes do envio.")
+    pricing, base, discount = _simple_offer_pricing(prices[0])
+    if discount is not None or snapshot.get("discount") not in (None, {}):
+        raise CarrefourError(
+            "offer_discount_requires_review",
+            "A oferta possui desconto. Revise a promoção antes de alterar o preço.",
+        )
+    if snapshot.get("price") is not None and _offer_money(snapshot["price"]) != base:
+        raise _unsafe_offer("O preço atual diverge da tabela de preços retornada.")
+    if snapshot.get("applicable_pricing") is not None:
+        applicable, _, _ = _simple_offer_pricing(snapshot["applicable_pricing"])
+        if applicable != pricing:
+            raise _unsafe_offer("O preço aplicável diverge do preço padrão da oferta.")
+    return {"shop_sku": sku, "price": float(_offer_money(price, requested=True))}
+
+
+def _partial_import_id(value: object) -> str:
+    if not isinstance(value, str) or not _PARTIAL_IMPORT_ID.fullmatch(value):
+        raise CarrefourError("invalid_import_id", "O identificador da importação é inválido.")
+    return value
+
+
 class CarrefourClient:
     def __init__(self, creds: dict, on_token_refresh=None, integration_id=None):
         self.creds = copy.deepcopy(creds)
@@ -161,7 +341,11 @@ class CarrefourClient:
         return api_key, shop_id
 
     async def _read_json(self, path: str, params: dict | None = None) -> dict:
-        if path not in _READ_PATHS:
+        if (
+            path not in _READ_PATHS and not _OFFER_READ_PATH.fullmatch(path)
+            and not _STOCK_STATUS_PATH.fullmatch(path)
+            and path != "/offers/pricing/imports"
+        ):
             raise CarrefourError("unsupported_read", "Consulta Carrefour não habilitada.")
         api_key, shop_id = self._credentials()
         query = {**(params or {}), "shop_id": shop_id}
@@ -214,6 +398,149 @@ class CarrefourClient:
                     )
                 return data
         raise CarrefourError("request_failed", "Não foi possível concluir a consulta ao Carrefour.")
+
+    async def get_offer(self, offer_id: str | int) -> dict:
+        """OF22, exactly one configured-shop offer; no A01 or broad catalogue read."""
+        ident = _positive_id(offer_id)
+        if ident is None:
+            raise CarrefourError("invalid_offer_id", "O identificador da oferta é inválido.")
+        data = await self._read_json(f"/offers/{ident}")
+        if _positive_id(data.get("offer_id")) != ident:
+            raise CarrefourError("offer_id_mismatch", "O Carrefour retornou outra oferta.")
+        if not isinstance(data.get("shop_sku"), str) or not data["shop_sku"].strip():
+            raise CarrefourError("invalid_offer", "O Carrefour retornou uma oferta sem SKU.")
+        return data
+
+    async def _submit_partial_csv(self, kind: str, items: list[dict]) -> str:
+        # Official STO01/PRI01 contracts. Never fall back to replacing an offer.
+        if (
+            kind not in {"stock", "pricing"} or not isinstance(items, list)
+            or not 1 <= len(items) <= 100
+        ):
+            raise CarrefourError("invalid_offer_batch", "O lote de ofertas é inválido.")
+        field = "quantity" if kind == "stock" else "price"
+        output = io.StringIO(newline="")
+        writer = csv.writer(output, delimiter=";", lineterminator="\n")
+        writer.writerow(["offer-sku", field])
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict) or set(item) != {"shop_sku", field}:
+                raise CarrefourError("invalid_offer_batch", "O lote contém campos não permitidos.")
+            sku = _offer_string(item["shop_sku"])
+            if sku in seen or any(ord(c) < 32 for c in sku):
+                raise CarrefourError(
+                    "invalid_offer_batch", "O lote contém SKUs inválidos ou repetidos."
+                )
+            seen.add(sku)
+            value = (
+                _offer_integer(item[field]) if kind == "stock"
+                else format(_offer_money(item[field]), ".2f")
+            )
+            writer.writerow([sku, value])
+        api_key, shop_id = self._credentials()
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            try:
+                response = await client.post(
+                    f"{CARREFOUR_API_BASE}/offers/{kind}/imports",
+                    params={"shop_id": shop_id},
+                    files={"file": (f"{kind}.csv", output.getvalue().encode("utf-8"), "text/csv")},
+                    headers={"Authorization": api_key, "Accept": "application/json"},
+                )
+            except httpx.HTTPError:
+                raise CarrefourError(
+                    "submission_unknown",
+                    "O resultado do envio é desconhecido. Confira a importação antes de reenviar.",
+                ) from None
+        status = response.status_code
+        if status == 429:
+            delay = _retry_after(response.headers.get("Retry-After"))
+            raise CarrefourError(
+                "rate_limited", f"Limite de envios do Carrefour. Aguarde {delay} segundos.",
+                http_status=status, retry_after=delay,
+            )
+        if status >= 500 or status == 408:
+            raise CarrefourError(
+                "submission_unknown",
+                "O resultado do envio é desconhecido. Confira antes de reenviar.",
+                http_status=status,
+            )
+        if status != 201:
+            raise CarrefourError(
+                "http_error", f"O Carrefour não aceitou a importação (HTTP {status}).",
+                http_status=status,
+            )
+        try:
+            data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError
+            # PRI01 retains the deprecated importId alias on some versions.
+            return _partial_import_id(data.get("import_id") or data.get("importId"))
+        except (ValueError, CarrefourError):
+            raise CarrefourError(
+                "submission_unknown",
+                "O envio foi recebido sem identificador válido. Confira antes de reenviar.",
+                http_status=status,
+            ) from None
+
+    async def submit_stock_updates(self, items: list[dict]) -> str:
+        """STO01, global quantities; price/catalogue fields are never sent."""
+        return await self._submit_partial_csv("stock", items)
+
+    async def submit_price_updates(self, items: list[dict]) -> str:
+        """PRI01, complete default prices validated by build_price_update."""
+        return await self._submit_partial_csv("pricing", items)
+
+    def _normalize_partial_import(
+        self, data: dict, import_id: str, *, optional_counters: bool = False,
+    ) -> dict:
+        _, shop_id = self._credentials()
+        if (
+            not isinstance(data, dict) or data.get("import_id") != import_id
+            or _positive_id(data.get("shop_id")) != shop_id
+            or data.get("status") not in {"WAITING", "RUNNING", "COMPLETE", "FAILED"}
+            or type(data.get("has_error_report")) is not bool
+        ):
+            raise CarrefourError(
+                "invalid_import", "A importação não confirmou identidade e estado."
+            )
+        counters = {}
+        for key in ("lines_in_error", "lines_in_success"):
+            value = data.get(key)
+            # STO02 documents these counters as optional, even at completion.
+            # Preserve unknown terminal counts so the outbox can request review;
+            # never fabricate successful lines or keep polling a completed import.
+            if key not in data and optional_counters:
+                counters[key] = 0 if data["status"] in {"WAITING", "RUNNING"} else None
+                continue
+            if type(value) is not int or value < 0:
+                raise CarrefourError("invalid_import", "A importação retornou contagens inválidas.")
+            counters[key] = value
+        if data.get("offers_in_error") is not None:
+            errors = data["offers_in_error"]
+            if type(errors) is not int or errors < 0:
+                raise CarrefourError("invalid_import", "A importação retornou contagens inválidas.")
+            if counters["lines_in_error"] is not None:
+                counters["lines_in_error"] = max(counters["lines_in_error"], errors)
+        return {
+            **data, **counters, "lines_in_pending": 0,
+        }
+
+    async def get_stock_import(self, import_id: str) -> dict:
+        """STO02 is a single status object, scoped to the configured shop."""
+        ident = _partial_import_id(import_id)
+        data = await self._read_json(f"/offers/stock/imports/{ident}/status")
+        return self._normalize_partial_import(data, ident, optional_counters=True)
+
+    async def get_price_import(self, import_id: str) -> dict:
+        """PRI02 filters its list by import ID; it is not /{id}/status."""
+        ident = _partial_import_id(import_id)
+        response = await self._read_json("/offers/pricing/imports", {"import_id": ident})
+        rows = response.get("data")
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise CarrefourError(
+                "invalid_import", "A consulta não identificou uma única importação."
+            )
+        return self._normalize_partial_import(rows[0], ident)
 
     @staticmethod
     def _cached(check: object, fingerprint: str, now: int) -> bool:
@@ -515,11 +842,31 @@ class CarrefourClient:
         self, link: ProductLink, qty: int, *, bling_store_id: int | None = None,
         force: bool = False,
     ) -> SyncResult:
+        if self._integration_id is not None:
+            from app.services.carrefour_offer_write import enqueue_offer_write
+
+            return await enqueue_offer_write(
+                integration_id=self._integration_id, link=link, qty=qty,
+            )
         return SyncResult(
             status=SyncStatus.REQUIRES_REVIEW,
             error_code="carrefour_write_not_enabled",
             error_detail=(
                 "Carrefour está em modo de leitura. O envio de estoque ainda não foi habilitado."
             ),
+            payload={"mode": "read_only"},
+        )
+
+    async def update_price(self, link: ProductLink, price) -> SyncResult:
+        if self._integration_id is not None:
+            from app.services.carrefour_offer_write import enqueue_offer_write
+
+            return await enqueue_offer_write(
+                integration_id=self._integration_id, link=link, price=price,
+            )
+        return SyncResult(
+            status=SyncStatus.REQUIRES_REVIEW,
+            error_code="carrefour_write_not_enabled",
+            error_detail="O envio de preços precisa de uma integração Carrefour habilitada.",
             payload={"mode": "read_only"},
         )

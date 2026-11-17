@@ -716,6 +716,7 @@ async def push_one(
         IntegrationPlatform.TIKTOK,
         IntegrationPlatform.TEMU,
         IntegrationPlatform.MAGALU,
+        IntegrationPlatform.CARREFOUR,
     }
     if integration.platform not in _SUPPORTED_PLATFORMS:
         return PushOutcome(
@@ -839,6 +840,7 @@ async def push_one(
     per_link: list[dict] = []
     ok_count = 0
     skipped_count = 0
+    pending_count = 0
     fail_count = 0
     first_item: str | None = None
     first_variation: str | None = None
@@ -874,6 +876,11 @@ async def push_one(
             first_item = link.external_id
             first_variation = link.variation_id
         result = resultados[link.id]
+        pending = (
+            integration.platform == IntegrationPlatform.CARREFOUR
+            and result.status == SyncStatus.REQUIRES_REVIEW
+            and result.error_code == "carrefour_write_pending"
+        )
         # SSH-style per-link entry (externalId/success/skipped/message) plus
         # the original status/error_code fields kept for back-compat. UI
         # surfaces `message` directly and uses `skipped` to bucket
@@ -901,6 +908,7 @@ async def push_one(
                 "variation_id": link.variation_id,
                 "status": result.status.value,
                 "error_code": result.error_code,
+                **({"pending": True} if pending else {}),
             }
         )
         if result.status == SyncStatus.OK:
@@ -913,12 +921,27 @@ async def push_one(
         elif result.status == SyncStatus.SKIPPED:
             skipped_count += 1
             pulados_txt.append(f"{link.external_id} ({result.error_code or 'pulado'})")
+        elif pending:
+            pending_count += 1
         else:
             fail_count += 1
             last_error_code = result.error_code or result.status.value
             last_error_detail = result.error_detail
 
-    if ok_count == len(links):
+    if pending_count:
+        # Carrefour accepts an asynchronous import before confirming its
+        # application. Keep the cell unchanged, including mixed batches: an
+        # accepted import is neither an error nor an applied price.
+        agg_ok = False
+        agg_code = "carrefour_write_pending"
+        agg_detail = (
+            f"{pending_count}/{len(links)} envio(s) aguardando confirmação do Carrefour"
+            + (f"; {ok_count} confirmado(s)" if ok_count else "")
+            + (f"; {skipped_count} pulado(s)" if skipped_count else "")
+            + (f"; {fail_count} falha(s): {last_error_code}" if fail_count else "")
+        )
+        post_status = None
+    elif ok_count == len(links):
         agg_ok = True
         agg_code = "ok"
         # Amazon aceita o envio e decide depois se aplica: "ok" aqui é "aceito",
@@ -972,14 +995,15 @@ async def push_one(
         )
         agg_detail = "; ".join(p for p in (agg_detail, aviso) if p)
 
-    await _persist_cell_status(
-        session,
-        user_id=user.id,
-        account_id=account_id,
-        product_id=product_id,
-        new_status=post_status,
-        existing_override=override,
-    )
+    if post_status is not None:
+        await _persist_cell_status(
+            session,
+            user_id=user.id,
+            account_id=account_id,
+            product_id=product_id,
+            new_status=post_status,
+            existing_override=override,
+        )
 
     response = PushOutcome(
         ok=agg_ok,
@@ -989,7 +1013,10 @@ async def push_one(
         item_id=first_item,
         variation_id=first_variation,
         cached=False,
-        payload={"calc": outcome.inputs or {}, "links": per_link},
+        payload={
+            "calc": outcome.inputs or {}, "links": per_link,
+            **({"pending": True, "pending_count": pending_count} if pending_count else {}),
+        },
     )
 
     if idempotency_key:
@@ -1104,6 +1131,10 @@ async def _dispatch_price_update_link(
                 price=price,
                 variation_id=link.variation_id,
             )
+        elif platform == IntegrationPlatform.CARREFOUR:
+            # The client verifies the linked shop, offer ID and exact seller
+            # SKU; its queue confirms the price import and OF22 readback.
+            return await client.update_price(link=link, price=price)
         elif platform == IntegrationPlatform.AMAZON:
             # SSH spec: Amazon addresses listings by seller SKU. Prefer the
             # actual product SKU; fall back to external_sku then external_id

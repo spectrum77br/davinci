@@ -90,6 +90,29 @@ async function run() {
   assert.equal(testState.carrefourCheck(integration), null, 'Key rotation must hide the previous cached result')
   await testState.testIntegration({ id: 'ml', platform: 'ml', last_test_at: null })
   assert.equal(checks.value.ml, undefined, 'Other marketplaces keep their original test display')
+  const toggleCode = integrationsScript.slice(integrationsScript.indexOf('async function toggleCarrefourWrite('), integrationsScript.indexOf('async function toggleVacation('))
+  const toggleJs = ts.transpileModule(toggleCode, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
+  const writeCalls = []
+  let confirmed = false
+  const writeError = ref(null)
+  const writeId = ref(null)
+  const toggle = new Function('api', 'confirm', 'carrefourWriteId', 'error', 'refresh',
+    toggleJs + '\nreturn toggleCarrefourWrite;')(
+    async (url, options) => writeCalls.push({ url, options }), () => confirmed, writeId, writeError, async () => {},
+  )
+  const poofy = { id: 'poofy', name: 'Carrefour Poofy', carrefour_stock_write_enabled: false, carrefour_price_write_enabled: false }
+  await toggle(poofy, 'stock')
+  assert.equal(writeCalls.length, 0, 'Declining activation does not change the account')
+  confirmed = true
+  await toggle(poofy, 'stock')
+  assert.deepEqual(writeCalls.pop(), { url: '/api/integrations/poofy', options: { method: 'PATCH', body: { carrefour_stock_write_enabled: true } } })
+  await toggle(poofy, 'price')
+  assert.deepEqual(writeCalls.pop().options.body, { carrefour_price_write_enabled: true })
+  poofy.carrefour_stock_write_enabled = true
+  confirmed = false
+  await toggle(poofy, 'stock')
+  assert.deepEqual(writeCalls.pop().options.body, { carrefour_stock_write_enabled: false }, 'Stopping writes is always available')
+  assert.equal(writeId.value, null)
   console.log('PASS: 4 Vue components compile; account selection, secret field, explicit save, key rotation, error handling and cached check timestamp')
 }
 run().catch(error => { console.error(error); process.exitCode = 1 })
