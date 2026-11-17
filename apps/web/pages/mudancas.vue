@@ -521,7 +521,7 @@ async function recusar() {
                   {{ detalhe.status === 'pedida' || detalhe.status === 'fazendo' ? 'O robô ainda não terminou de mexer no código.' : 'Nenhuma mudança no código registrada.' }}
                 </p>
                 <template v-else>
-                  <pre class="max-h-[70vh] overflow-auto rounded-md border bg-muted/20 py-2 font-mono text-[12px] leading-5"><span class="inline-block min-w-full"><span v-for="(l, i) in linhasVisiveis" :key="i" class="block px-3" :class="l.cls">{{ l.texto || ' ' }}</span></span></pre>
+                  <pre class="max-h-[70vh] overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/20 py-2 font-mono text-[12px] leading-5"><span v-for="(l, i) in linhasVisiveis" :key="i" class="block px-3" :class="l.cls">{{ l.texto || ' ' }}</span></pre>
                   <p v-if="linhasDiff.length > MAX_LINHAS" class="mt-1 text-xs text-muted-foreground">
                     <template v-if="!diffInteiro">
                       Mostrando {{ MAX_LINHAS.toLocaleString('pt-BR') }} de {{ linhasDiff.length.toLocaleString('pt-BR') }} linhas.
