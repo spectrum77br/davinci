@@ -41,6 +41,12 @@ assert.match(script, /auth\.user\?\.mudancas !== true/, 'middleware olha `mudanc
 assert.match(script, /statusCode: 404/, 'quem não é aprovador recebe 404')
 assert.match(script, /onUnmounted\(\(\) => \{\s*if \(relogio\) clearInterval\(relogio\)/, 'para o relógio ao sair')
 assert.ok(!pagina.template.content.includes('v-html'), 'nada de v-html (diff/descrição vêm de fora)')
+// Revisão de 17/11: a publicação adiada mostra o porquê; o robô parado (fila
+// esperando e ele sumido há 10 min) vira faixa; 404 nunca mostra "Not Found".
+assert.ok(pagina.template.content.includes('Publicação adiada:'), 'motivo da publicação adiada')
+assert.ok(pagina.template.content.includes('O robô do Mac não aparece há mais de 10 minutos'), 'faixa do robô parado')
+assert.match(pagina.scriptSetup.content, /robo_visto_em/, 'lê robo_visto_em da lista')
+assert.match(pagina.scriptSetup.content, /if \(statusErro\(e\) === 404\) return 'Não encontrada\.'/, '404 em português')
 
 const sidebar = sfc('components/AppSidebar.vue')
 {

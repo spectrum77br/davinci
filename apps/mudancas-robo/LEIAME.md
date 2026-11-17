@@ -10,13 +10,16 @@ no servidor). Nada vai para o ar sem o Aprovar.
 1. Pergunta ao DaVinci se há trabalho (`/api/sistema-mudancas-robo/pegar`) — sem IA.
 2. **fazer**: cria a worktree `~/davinci-mudancas/M-N` (branch `mudanca/M-N`) do `origin/main`,
    roda o Claude Code sem tela com `REGRAS.md` e a lista fechada `permissoes.json`, confere os
-   arquivos (lista proibida: banco/migration, permissão, infra, robôs, dependências; até 12
-   arquivos e 400 linhas), roda ruff/pytest dos arquivos mexidos, faz o commit e manda o diff.
+   arquivos (lista proibida: banco/migration, permissão, infra, robôs, dependências,
+   `.gitattributes`, `conftest.py`; binário; até 12 arquivos e 400 linhas), roda as
+   conferências NA CAIXA (ruff, a API carregando, pytest/node dos testes mexidos), faz o commit
+   e manda o diff.
    Pedido que foge das regras volta como **Precisa da equipe**.
-3. **publicar**: confere que a cópia é a APROVADA (mesmo patch), atualiza com o main, confere
-   o disco do servidor (≥ 3,5 GB) e a trava de deploy, faz o push e roda o `davinci-deploy`
-   (que recusa mexer em infra e roda a migration). Outro deploy rodando ou disco cheio:
-   volta para a fila e tenta de novo em 10 min.
+3. **publicar**: confere que a cópia é a APROVADA (mesmo patch), atualiza com o main e roda as
+   conferências de novo na caixa, exige o servidor em dia com o main, confere o disco (≥ 5 GB)
+   e a trava de deploy, faz o push e roda o `davinci-deploy` desacoplado da conexão (que recusa
+   mexer em infra e roda a migration). Outro deploy, disco cheio ou mudança de outra pessoa
+   pendente: volta para a fila e tenta de novo em 10 min (o DaVinci avisa depois de ~1 h).
 4. Um trabalho por vez; avisa que está vivo a cada 5 min (senão o DaVinci devolve o pedido).
 
 ## Instalar (uma vez)
@@ -34,8 +37,17 @@ no servidor). Nada vai para o ar sem o Aprovar.
 - `estado/ultima-rodada` — prova de vida do despertador.
 - Parar: `launchctl unload ~/Library/LaunchAgents/com.davinci.mudancas-robo.plist`.
 
-## Segurança
-- Token próprio (não é o do executor), guardado só no `.env` deste Mac e do servidor.
-- O Claude do robô não lê `.env`/chaves, não usa rede, não faz commit nem push (quem faz é o
-  `rodada.py`, só depois do Aprovar). Os testes que ele roda executam código neste Mac — por
-  isso só administradores pedem mudança e tudo passa pelos olhos de quem aprova.
+## Segurança (revisão de 17/11/2026)
+- **O código da mudança ainda não aprovada nunca roda solto.** O Claude do robô só lê/edita
+  arquivos da pasta do pedido e só executa o `testar.sh`; o `testar.sh` roda tudo dentro da
+  **caixa** (`caixa.sb`, sandbox do macOS): sem rede (só o socket do Postgres), sem ler
+  `~/.ssh`, a pasta do robô, `.env`, `~/.config`, o chaveiro; escrevendo só na pasta do pedido,
+  no cache do uv e numa pasta temporária própria; com ambiente limpo (sem tokens). As
+  conferências do próprio robô também passam pelo `testar.sh`.
+- O git do robô roda sem ganchos; a lista de arquivos proibidos, binários e o tamanho são
+  conferidos de novo no que foi commitado; o diff mostrado é o que vai para o ar (a aprovação
+  vale para ele: `diff_sha` + patch-id na publicação).
+- Publicar só com o servidor em dia com o main (nada de mudança de outra pessoa junto).
+- Token próprio do robô (404 sem ele), guardado só no `.env` deste Mac e do servidor.
+- O que a caixa NÃO impede: os testes leem o Postgres local (que aqui aceita qualquer conexão
+  local), mas sem rede nada sai; e o próprio Claude do robô vê o código do repositório.

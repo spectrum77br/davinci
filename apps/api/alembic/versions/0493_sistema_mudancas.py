@@ -65,6 +65,7 @@ def upgrade() -> None:
         sa.Column("pego_em", sa.DateTime(timezone=True), nullable=True),
         sa.Column("prazo_robo", sa.DateTime(timezone=True), nullable=True),
         sa.Column("tentativas", sa.Integer(), server_default=sa.text("0"), nullable=False),
+        sa.Column("adiamentos", sa.Integer(), server_default=sa.text("0"), nullable=False),
         sa.Column("aprovado_por", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("aprovado_em", sa.DateTime(timezone=True), nullable=True),
         sa.Column("recusado_por", postgresql.UUID(as_uuid=True), nullable=True),

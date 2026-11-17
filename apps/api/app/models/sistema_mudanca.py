@@ -95,6 +95,12 @@ class SistemaMudanca(Base):
     tentativas: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
+    # Quantas vezes a publicação aprovada foi adiada (outro deploy, disco, o
+    # main com mudança de outra pessoa ainda não publicada); passou do limite,
+    # o DaVinci avisa os aprovadores e quem pediu.
+    adiamentos: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default=text("0")
+    )
     aprovado_por: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

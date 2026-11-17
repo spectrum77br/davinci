@@ -1,7 +1,7 @@
 """O robô de mudanças (rodada.py) de ponta a ponta, sem rede e sem IA:
 um "origin" de mentira (repositório nu), um Claude de mentira (script que edita
-um arquivo e responde no formato do --output-format json), o DaVinci de
-mentira (fila em memória) e o servidor de mentira (ssh falso).
+arquivos e responde no formato do --output-format json), o DaVinci de mentira
+(fila em memória) e o servidor de mentira (ssh falso).
 
 Rodar: uv run --directory apps/api --no-sync pytest ../mudancas-robo/tests -q
 """
@@ -26,12 +26,21 @@ def _git(cwd: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def _commit(cwd: Path, msg: str) -> None:
+    _git(cwd, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", msg)
+
+
 @pytest.fixture
 def mundo(tmp_path, monkeypatch):
     raiz = tmp_path / "raiz"
     raiz.mkdir()
-    for nome in ("REGRAS.md", "permissoes.json"):
+    pasta = tmp_path / "mudancas"
+    for nome in ("REGRAS.md", "caixa.sb", "testar.sh"):
         (raiz / nome).write_text((AQUI / nome).read_text())
+    (raiz / "permissoes.json").write_text(
+        (AQUI / "permissoes.json").read_text().replace("__RAIZ__", str(raiz))
+    )
+    (raiz / ".env").write_text(f"PASTA_MUDANCAS={pasta}\n")
     origem = tmp_path / "origem.git"
     _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origem))
     semente = tmp_path / "semente"
@@ -40,17 +49,15 @@ def mundo(tmp_path, monkeypatch):
     (semente / "apps/web/texto.txt").write_text("Olá\n")
     (semente / "outro.txt").write_text("um\n")
     _git(semente, "add", "-A")
-    _git(semente, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "início")
+    _commit(semente, "início")
     _git(semente, "push", "-q", "origin", "HEAD:main")
     repo = tmp_path / "repo"
     _git(tmp_path, "clone", "-q", str(origem), str(repo))
-    _git(repo, "config", "user.email", "robo@t")
-    _git(repo, "config", "user.name", "robo")
 
     claude = tmp_path / "claude_falso.py"
     claude.write_text(
         "import json, os, pathlib, sys\n"
-        "acao = os.environ.get('FALSO_ACAO', 'texto')\n"
+        "acao = pathlib.Path(__file__).with_name('acao').read_text()\n"
         "if acao == 'texto':\n"
         "    pathlib.Path('apps/web/texto.txt').write_text('Oi\\n')\n"
         "    fim = {'resultado': 'pronta', 'resumo': 'Troquei Olá por Oi', 'testes': 'nada'}\n"
@@ -58,48 +65,67 @@ def mundo(tmp_path, monkeypatch):
         "    p = pathlib.Path('apps/api/alembic/versions'); p.mkdir(parents=True)\n"
         "    (p / 'x.py').write_text('x = 1\\n')\n"
         "    fim = {'resultado': 'pronta', 'resumo': 'criei migration', 'testes': ''}\n"
+        "elif acao == 'atributos':\n"
+        "    pathlib.Path('.gitattributes').write_text('*.txt -diff\\n')\n"
+        "    pathlib.Path('apps/web/texto.txt').write_text('Oi\\n')\n"
+        "    fim = {'resultado': 'pronta', 'resumo': 'x', 'testes': ''}\n"
         "elif acao == 'equipe':\n"
         "    fim = {'resultado': 'precisa_equipe', 'resumo': 'Precisa de coluna nova', 'testes': ''}\n"
         "assert '--permission-mode' in sys.argv and 'dontAsk' in sys.argv\n"
         "assert os.environ.get('CLAUDE_CODE_OAUTH_TOKEN') == 'tok-falso'\n"
+        "assert 'SSH_AUTH_SOCK' not in os.environ\n"
         "texto = 'Pronto.\\n' + json.dumps(fim, ensure_ascii=False)\n"
         "print(json.dumps({'type': 'result', 'is_error': False, 'result': texto}))\n"
     )
     exe = tmp_path / "claude"
     exe.write_text(f"#!/bin/sh\nexec {sys.executable} {claude} \"$@\"\n")
     exe.chmod(0o755)
+    arq_acao = tmp_path / "acao"
+    arq_acao.write_text("texto")
 
     monkeypatch.setenv("MUDANCAS_RAIZ", str(raiz))
     monkeypatch.setenv("DAVINCI_API_URL", "http://davinci.invalido")
     monkeypatch.setenv("MUDANCAS_AGENT_TOKEN", "t")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/tmp/agente-falso")
     sys.path.insert(0, str(AQUI))
     import rodada
 
     rodada = importlib.reload(rodada)
     monkeypatch.setattr(rodada, "RAIZ", raiz)
+    monkeypatch.setattr(rodada, "TESTAR", raiz / "testar.sh")
     monkeypatch.setattr(rodada, "REPO", repo)
-    monkeypatch.setattr(rodada, "PASTA", tmp_path / "mudancas")
+    monkeypatch.setattr(rodada, "PASTA", pasta)
     monkeypatch.setitem(rodada.ENV, "CLAUDE_BIN", str(exe))
     monkeypatch.setitem(rodada.ENV, "CLAUDE_CODE_OAUTH_TOKEN", "tok-falso")
+    monkeypatch.setattr(rodada.time, "sleep", lambda s: None)
 
     fila: list[dict] = []
     enviados: list[tuple[str, dict]] = []
+    api_fora = {"vezes": 0}
 
     def _api(metodo, caminho, corpo=None, timeout=60):
         if caminho == "/pegar":
             return {"trabalho": fila.pop(0) if fila else None}
+        if api_fora["vezes"] > 0:
+            api_fora["vezes"] -= 1
+            raise OSError("rede caiu")
         enviados.append((caminho, corpo or {}))
         return {"ok": True}
 
     monkeypatch.setattr(rodada, "api", _api)
-    servidor = {"livre": "10", "trava": "LIVRE", "deploy_rc": 0, "comandos": []}
+    servidor = {"head": None, "livre": "10", "trava": "LIVRE", "deploy_rc": "0", "comandos": []}
 
     def _ssh(comando, timeout=120):
         servidor["comandos"].append(comando)
-        if comando.startswith("df "):
-            return 0, f"{servidor['livre']}\n{servidor['trava']}\n"
-        if "davinci-deploy" in comando:
-            return servidor["deploy_rc"], "== ok"
+        if comando.startswith("git -C /opt/davinci"):
+            head = servidor["head"] or _git(origem, "rev-parse", "main")
+            return 0, f"{head}\n{servidor['livre']}\n{servidor['trava']}\n"
+        if "setsid nohup" in comando:
+            return 0, ""
+        if comando.startswith("cat "):
+            return 0, servidor["deploy_rc"] + "\n"
+        if comando.startswith("tail "):
+            return 0, "== ok"
         return 0, "davinci-api-1 Up 2 minutes (healthy)\n"
 
     monkeypatch.setattr(rodada, "ssh", _ssh)
@@ -111,6 +137,9 @@ def mundo(tmp_path, monkeypatch):
         "semente": semente,
         "servidor": servidor,
         "raiz": raiz,
+        "acao": arq_acao,
+        "api_fora": api_fora,
+        "repo": repo,
     }
     sys.path.remove(str(AQUI))
 
@@ -125,12 +154,31 @@ def _trabalho(acao="fazer", **extra):
         "onde": "tela X",
         "pedido_por_nome": "harry potter",
         "tentativa": 1,
+        "adiamentos": 0,
         **extra,
     }
 
 
 def _resultados(m) -> list[dict]:
     return [c for p, c in m["enviados"] if p.endswith("/resultado")]
+
+
+def _fazer(m) -> dict:
+    m["fila"].append(_trabalho())
+    m["rodada"].main()
+    return _resultados(m)[-1]
+
+
+def _publicar(m, r, **extra) -> dict:
+    m["fila"].append(_trabalho("publicar", commit=r["commit"], branch=r["branch"], **extra))
+    m["rodada"].main()
+    return _resultados(m)[-1]
+
+
+def _main_texto(m) -> str:
+    return subprocess.run(
+        ["git", "show", "main:apps/web/texto.txt"], cwd=m["origem"], capture_output=True, text=True
+    ).stdout
 
 
 def test_sem_trabalho_sai_quieto(mundo):
@@ -140,111 +188,171 @@ def test_sem_trabalho_sai_quieto(mundo):
     assert not (mundo["raiz"] / "estado" / "rodada.trava").exists()
 
 
-def test_fazer_e_publicar(mundo, monkeypatch):
+def test_fazer_e_publicar(mundo):
     m = mundo
-    m["fila"].append(_trabalho())
-    m["rodada"].main()
-    [r] = _resultados(m)
+    r = _fazer(m)
     assert r["status"] == "pronta", r
     assert r["branch"] == "mudanca/M-1" and len(r["commit"]) == 40
     assert "-Olá" in r["diff"] and "+Oi" in r["diff"]
     assert r["arquivos"] == [{"caminho": "apps/web/texto.txt", "mais": 1, "menos": 1}]
     assert r["resumo"] == "Troquei Olá por Oi"
-    # nada foi para o origin ainda
-    assert "Oi" not in subprocess.run(
-        ["git", "show", "main:apps/web/texto.txt"],
-        cwd=m["origem"], capture_output=True, text=True,
-    ).stdout
+    assert _main_texto(m) == "Olá\n"  # nada foi para o origin ainda
 
-    # alguém publica outra coisa no main antes da aprovação (sem conflito)
+    # outra pessoa publica (e o servidor já está com ela) antes da aprovação
     (m["semente"] / "outro.txt").write_text("dois\n")
-    _git(m["semente"], "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "outro")
+    _commit(m["semente"], "outro")
     _git(m["semente"], "push", "-q", "origin", "HEAD:main")
 
-    m["fila"].append(_trabalho("publicar", commit=r["commit"], branch=r["branch"]))
-    m["rodada"].main()
-    r2 = _resultados(m)[-1]
+    r2 = _publicar(m, r)
     assert r2["status"] == "publicada", r2
-    main_texto = subprocess.run(
-        ["git", "show", "main:apps/web/texto.txt"], cwd=m["origem"], capture_output=True, text=True
-    ).stdout
-    assert main_texto == "Oi\n"
-    assert any("davinci-deploy" in c for c in m["servidor"]["comandos"])
+    assert _main_texto(m) == "Oi\n"
+    assert any("setsid nohup" in c and "davinci-deploy" in c for c in m["servidor"]["comandos"])
     assert r2["commit"] != r["commit"]  # rebaseado em cima do "outro"
+    assert not (m["rodada"].PASTA / "M-1").exists()  # cópia removida depois do ar
+
+
+def test_nao_publica_com_mudanca_de_outra_pessoa_pendente(mundo):
+    m = mundo
+    r = _fazer(m)
+    m["servidor"]["head"] = "f" * 40  # o servidor ainda não tem o main de agora
+    r2 = _publicar(m, r)
+    assert r2["status"] == "aprovada" and "outras pessoas" in r2["erro"]
+    assert _main_texto(m) == "Olá\n"
+    assert not any("davinci-deploy" in c for c in m["servidor"]["comandos"])
 
 
 def test_publicar_espera_disco_e_trava(mundo):
     m = mundo
-    m["fila"].append(_trabalho())
-    m["rodada"].main()
-    commit = _resultados(m)[-1]["commit"]
+    r = _fazer(m)
     m["servidor"]["livre"] = "2"
-    m["fila"].append(_trabalho("publicar", commit=commit, branch="mudanca/M-1"))
-    m["rodada"].main()
-    r = _resultados(m)[-1]
-    assert r["status"] == "aprovada" and "GB livres" in r["erro"]
+    r2 = _publicar(m, r)
+    assert r2["status"] == "aprovada" and "GB livres" in r2["erro"]
     m["servidor"]["livre"] = "10"
     m["servidor"]["trava"] = "OCUPADA"
-    m["fila"].append(_trabalho("publicar", commit=commit, branch="mudanca/M-1"))
-    m["rodada"].main()
-    r = _resultados(m)[-1]
-    assert r["status"] == "aprovada" and "outro deploy" in r["erro"]
+    r2 = _publicar(m, r)
+    assert r2["status"] == "aprovada" and "outro deploy" in r2["erro"]
     assert not any("davinci-deploy" in c for c in m["servidor"]["comandos"])
+
+
+def test_deploy_que_falha_depois_do_push_tenta_e_depois_falha_claro(mundo):
+    m = mundo
+    r = _fazer(m)
+    m["servidor"]["deploy_rc"] = "3"
+    r2 = _publicar(m, r)
+    assert r2["status"] == "aprovada" and "deploy falhou" in r2["erro"]
+    assert _main_texto(m) == "Oi\n"  # já está no main
+    r3 = _publicar(m, r, adiamentos=2)  # terceira tentativa
+    assert r3["status"] == "falhou" and "JÁ ESTÁ no main" in r3["erro"]
 
 
 def test_publicar_recusa_copia_diferente_da_aprovada(mundo):
     m = mundo
-    m["fila"].append(_trabalho())
-    m["rodada"].main()
+    r = _fazer(m)
     wt = m["rodada"].PASTA / "M-1"
     (wt / "outro.txt").write_text("mexido depois\n")
-    _git(wt, "commit", "-qam", "mexida fora do robô")
-    m["fila"].append(
-        _trabalho("publicar", commit=_resultados(m)[-1]["commit"], branch="mudanca/M-1")
-    )
-    m["rodada"].main()
-    r = _resultados(m)[-1]
-    assert r["status"] == "falhou" and "não é a mudança aprovada" in r["erro"]
+    _commit(wt, "mexida fora do robô")
+    r2 = _publicar(m, r)
+    assert r2["status"] == "falhou" and "não é a mudança aprovada" in r2["erro"]
+
+
+def test_commit_com_cara_de_comando_nao_roda(mundo, tmp_path):
+    m = mundo
+    alvo = tmp_path / "pwned"
+    r = {"commit": f"HEAD;touch {alvo};#", "branch": "mudanca/M-1"}
+    r2 = _publicar(m, r)
+    assert r2["status"] == "falhou" and not alvo.exists()
+    r2 = _publicar(m, {"commit": "a" * 40, "branch": "origin/main"})
+    assert r2["status"] == "falhou" and "estranho" in r2["erro"]
 
 
 def test_conflito_com_o_main_falha_sem_empurrar(mundo):
     m = mundo
-    m["fila"].append(_trabalho())
-    m["rodada"].main()
-    commit = _resultados(m)[-1]["commit"]
+    r = _fazer(m)
     (m["semente"] / "apps/web/texto.txt").write_text("Olá, mudado por outra pessoa\n")
-    _git(m["semente"], "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "x")
+    _commit(m["semente"], "x")
     _git(m["semente"], "push", "-q", "origin", "HEAD:main")
-    m["fila"].append(_trabalho("publicar", commit=commit, branch="mudanca/M-1"))
-    m["rodada"].main()
-    r = _resultados(m)[-1]
-    assert r["status"] == "falhou" and "não encaixa" in r["erro"]
+    r2 = _publicar(m, r)
+    assert r2["status"] == "falhou" and "não encaixa" in r2["erro"]
     assert not any("davinci-deploy" in c for c in m["servidor"]["comandos"])
 
 
-def test_arquivo_proibido_vira_precisa_equipe(mundo, monkeypatch):
-    monkeypatch.setenv("FALSO_ACAO", "migration")
-    mundo["fila"].append(_trabalho())
-    mundo["rodada"].main()
-    r = _resultados(mundo)[-1]
+def test_arquivo_proibido_vira_precisa_equipe(mundo):
+    mundo["acao"].write_text("migration")
+    r = _fazer(mundo)
     assert r["status"] == "precisa_equipe" and "alembic" in r["erro"]
 
 
-def test_claude_pede_a_equipe(mundo, monkeypatch):
-    monkeypatch.setenv("FALSO_ACAO", "equipe")
-    mundo["fila"].append(_trabalho())
-    mundo["rodada"].main()
-    r = _resultados(mundo)[-1]
+def test_gitattributes_nao_esconde_o_diff(mundo):
+    mundo["acao"].write_text("atributos")
+    r = _fazer(mundo)
+    assert r["status"] == "precisa_equipe" and ".gitattributes" in r["erro"]
+
+
+def test_claude_pede_a_equipe(mundo):
+    mundo["acao"].write_text("equipe")
+    r = _fazer(mundo)
     assert r["status"] == "precisa_equipe" and r["erro"] == "Precisa de coluna nova"
+
+
+def test_erro_de_rede_devolve_para_a_fila(mundo):
+    m = mundo
+    m["rodada"].REPO = m["repo"]
+    _git(m["repo"], "remote", "set-url", "origin", "/caminho/que/nao/existe")
+    m["fila"].append(_trabalho())
+    m["rodada"].main()
+    r = _resultados(m)[-1]
+    assert r["status"] == "pedida" and "erro do ambiente" in r["erro"]
+
+
+def test_resultado_que_nao_chegou_e_reenviado(mundo):
+    m = mundo
+    m["api_fora"]["vezes"] = 1  # a rede cai na hora de mandar o resultado
+    m["fila"].append(_trabalho())
+    m["rodada"].main()
+    assert _resultados(m) == []
+    pendentes = list((m["raiz"] / "estado" / "pendentes").glob("*.json"))
+    assert len(pendentes) == 1
+    m["rodada"].main()  # a próxima rodada reenvia antes de pegar trabalho
+    assert _resultados(m)[-1]["status"] == "pronta"
+    assert not list((m["raiz"] / "estado" / "pendentes").glob("*.json"))
+
+
+def test_conferencias_rodam_na_caixa(mundo, tmp_path):
+    """O testar.sh (o único jeito de rodar código da mudança) não lê a chave
+    nem a pasta do robô, não escreve fora da pasta do pedido e não tem rede."""
+    m = mundo
+    _fazer(m)
+    wt = m["rodada"].PASTA / "M-1"
+    espiao = wt / "espiao.cjs"
+    fora = tmp_path / "fora.txt"
+    espiao.write_text(
+        "const fs=require('fs');const r=[];\n"
+        f"try{{fs.readFileSync('{os.path.expanduser('~/.ssh/coolify')}');r.push('LEU_CHAVE')}}catch(e){{}}\n"
+        f"try{{fs.readdirSync('{m['raiz']}');r.push('LEU_RAIZ')}}catch(e){{}}\n"
+        f"try{{fs.writeFileSync('{fora}','x');r.push('ESCREVEU_FORA')}}catch(e){{}}\n"
+        "try{fs.writeFileSync('dentro.txt','x');r.push('ESCREVEU_DENTRO')}catch(e){}\n"
+        "console.log(r.join(','))\n"
+    )
+    rc, out = m["rodada"].testar(wt, "node", "espiao.cjs", timeout=60)
+    assert "ESCREVEU_DENTRO" in out, out
+    for proibido in ("LEU_CHAVE", "LEU_RAIZ", "ESCREVEU_FORA"):
+        assert proibido not in out, out
+    assert not fora.exists()
+    # fora da pasta de um pedido o testar.sh nem roda
+    rc, out = m["rodada"].testar(tmp_path, "node", "x.cjs", timeout=60)
+    assert rc == 2 and "só roda dentro" in out
 
 
 def test_permissoes_bloqueiam_o_perigoso():
     regras = json.loads((AQUI / "permissoes.json").read_text())["permissions"]
-    for item in ("Bash(git push*)", "Bash(curl *)", "Bash(ssh *)", "WebFetch", "Read(**/.env)",
-                 "Read(~/.ssh/**)", "Edit(apps/api/alembic/**)", "Bash(git commit*)"):
+    for item in ("WebFetch", "Read(~/.ssh/**)", "Read(//**/.env)", "Edit(apps/api/alembic/**)",
+                 "Edit(**/conftest.py)", "Write(**/.gitattributes)"):
         assert item in regras["deny"], item
+    bash = [r for r in regras["allow"] if r.startswith("Bash(")]
+    # só o testar.sh e git status/diff EXATOS (sem curinga que aceite --output)
+    for r in bash:
+        assert r.startswith("Bash(__RAIZ__/testar.sh ") or r in (
+            "Bash(git status)", "Bash(git diff)", "Bash(git diff --stat)"
+        ), r
     assert "Read" not in regras["allow"] and "Read(./**)" in regras["allow"]
-    padrao = __import__("re").compile
-    rodada_src = (AQUI / "rodada.py").read_text()
-    assert "PROIBIDOS" in rodada_src and padrao(r"MAX_ARQUIVOS = \d+").search(rodada_src)
-    assert os.access(AQUI / "instalar.sh", os.X_OK) and os.access(AQUI / "guardar_token.sh", os.X_OK)
+    assert os.access(AQUI / "instalar.sh", os.X_OK) and os.access(AQUI / "testar.sh", os.X_OK)

@@ -101,6 +101,7 @@ function statusErro(e: any): number | null {
 }
 function mensagemErro(e: any): string {
   const d = e?.data?.detail
+  if (statusErro(e) === 404) return 'Não encontrada.'
   if (typeof d === 'string' && d) return d
   if (d && typeof d === 'object' && !Array.isArray(d) && typeof d.detalhe === 'string' && d.detalhe) return d.detalhe
   const st = statusErro(e)
@@ -120,6 +121,14 @@ const FILTROS: { valor: Filtro; rotulo: string; vazio: string }[] = [
 const LIMITE = 100
 const filtro = ref<Filtro>('pronta')
 const itens = ref<ItemLista[]>([])
+// Quando o robô do Mac perguntou por trabalho pela última vez (null = nunca).
+const roboVistoEm = ref<string | null>(null)
+const roboParado = computed(() => {
+  const temFila = itens.value.some((i) => ['pedida', 'aprovada'].includes(i.status))
+  if (!temFila) return false
+  if (!roboVistoEm.value) return true
+  return Date.now() - new Date(roboVistoEm.value).getTime() > 10 * 60 * 1000
+})
 const carregando = ref(false)
 const carregou = ref(false)
 const erroLista = ref<string | null>(null)
@@ -137,6 +146,7 @@ async function carregar(silencioso = false) {
     const r = await api<{ itens: ItemLista[] }>('/api/sistema-mudancas', { query })
     if (meu !== seq) return
     itens.value = Array.isArray(r?.itens) ? r.itens : []
+    roboVistoEm.value = typeof r?.robo_visto_em === 'string' ? r.robo_visto_em : null
     erroLista.value = null
     carregou.value = true
   } catch (e: any) {
@@ -382,6 +392,10 @@ async function recusar() {
     <div v-if="erroLista" class="mb-3 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300">
       {{ erroLista }}
     </div>
+    <div v-if="roboParado" class="mb-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-300">
+      O robô do Mac não aparece há mais de 10 minutos<span v-if="roboVistoEm"> (última vez: {{ fmtCompleta(roboVistoEm) }})</span>
+      e há pedido esperando por ele. Confira se o Mac está ligado e o robô de mudanças carregado.
+    </div>
 
     <div class="table-card overflow-x-auto">
       <table class="w-full text-sm">
@@ -455,6 +469,9 @@ async function recusar() {
                 Aprovada<span v-if="detalhe.aprovado_por_nome"> por {{ detalhe.aprovado_por_nome }}</span>
                 <span v-if="detalhe.aprovado_em"> em {{ fmtCompleta(detalhe.aprovado_em) }}</span>.
                 {{ detalhe.status === 'publicando' ? 'O robô está publicando agora.' : 'O robô vai publicar em seguida.' }}
+                <p v-if="detalhe.status === 'aprovada' && detalhe.erro" class="mt-1 text-amber-800 dark:text-amber-300">
+                  Publicação adiada: {{ detalhe.erro }} — o robô tenta de novo a cada 10 minutos.
+                </p>
               </div>
               <div v-else-if="detalhe.status === 'recusada'" class="mb-4 rounded-md border bg-muted/40 px-3 py-2 text-sm">
                 <p>

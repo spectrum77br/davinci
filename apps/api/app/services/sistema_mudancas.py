@@ -32,6 +32,7 @@ Quem pede: admin ativo, pelo conector (`claude_tarefas.pedir_mudanca`).
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -39,11 +40,12 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import SistemaMudanca, SistemaMudancaAprovador, User, UserRole, UserStatus
 from app.models.enums import AlertSeverity, AlertType
+from app.models.marketing import MarketingAgentHeartbeat
 from app.services.alerts import emit_alert
 
 logger = structlog.get_logger(__name__)
@@ -71,6 +73,15 @@ MAX_TENTATIVAS = 2
 # Publicação adiada pelo robô (outro deploy rodando, disco do servidor): só
 # volta a ser entregue depois disto — o robô roda a cada minuto.
 ESPERA_ADIADA = timedelta(minutes=10)
+# Adiada tantas vezes (~1 h): avisa os aprovadores e quem pediu (uma vez).
+AVISO_ADIAMENTOS = 6
+# O robô só manda commit de verdade e o ramo do próprio pedido.
+_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+# Presença do robô (reaproveita a tabela de presença dos executores).
+PREFIXO_PRESENCA = "mudancas:"
+# Trava do "pegar": dois pedidos de trabalho ao mesmo tempo nunca furam o
+# "um de cada vez".
+_TRAVA_PEGAR = 0x4D554441  # "MUDA"
 
 MAX_TITULO = 200
 MAX_DESCRICAO = 4000
@@ -162,12 +173,24 @@ async def _avisar(
     evento: str,
 ) -> None:
     """Pop-up no sino + Telegram para cada pessoa. Falha no aviso nunca
-    desfaz a mudança de situação (savepoint por pessoa)."""
+    desfaz a mudança de situação (savepoint por pessoa). Para quem aprova, o
+    texto diz onde abrir (e o link vai junto); para quem pediu, não — a tela
+    não existe para ele (acompanha pelo Claude: listar_mudancas)."""
+    aprovadores_ids = {u.id for u in await aprovadores(session)}
     vistos: set[UUID] = set()
     for uid in user_ids:
         if uid is None or uid in vistos:
             continue
         vistos.add(uid)
+        aprova = uid in aprovadores_ids
+        texto = mensagem or ""
+        if aprova:
+            texto = f"{texto} — abra Sistema › Mudanças".strip(" —")
+        else:
+            texto = f"{texto} — pergunte ao Claude: como está a {codigo(m)}?".strip(" —")
+        payload: dict[str, Any] = {"mudanca_id": str(m.id), "codigo": codigo(m), "evento": evento}
+        if aprova:
+            payload["link"] = f"/mudancas?id={m.id}"
         try:
             async with session.begin_nested():
                 await emit_alert(
@@ -176,14 +199,9 @@ async def _avisar(
                     type=AlertType.GENERIC,
                     title=titulo,
                     severity=AlertSeverity.INFO,
-                    message=mensagem,
-                    payload={
-                        "mudanca_id": str(m.id),
-                        "codigo": codigo(m),
-                        "evento": evento,
-                        "link": f"/mudancas?id={m.id}",
-                    },
-                    dedupe_key=f"mudanca:{m.id}:{evento}:{m.tentativas}",
+                    message=texto,
+                    payload=payload,
+                    dedupe_key=f"mudanca:{m.id}:{evento}:{m.tentativas}:{m.adiamentos}",
                     notify_telegram=True,
                 )
         except Exception:  # noqa: BLE001
@@ -388,27 +406,69 @@ async def _soltar_presos(session: AsyncSession, agora: datetime) -> None:
         m.status = "falhou"
         m.erro = f"o robô parou no meio de {etapa} e não voltou — uma pessoa precisa conferir"
         logger.warning("mudanca_robo_parou_falhou", mudanca=codigo(m))
-        await _avisar_aprovadores(
+        await _avisar(
             session,
-            m,
+            [*(u.id for u in await aprovadores(session)), m.pedido_por],
             titulo=f"⚠️ {codigo(m)} falhou",
             mensagem=m.erro,
+            m=m,
             evento="falhou",
         )
 
 
+async def _presenca(session: AsyncSession, robo: str, agora: datetime) -> None:
+    nome = (PREFIXO_PRESENCA + robo)[:64]
+    linha = (
+        await session.execute(
+            select(MarketingAgentHeartbeat).where(MarketingAgentHeartbeat.agent_name == nome)
+        )
+    ).scalar_one_or_none()
+    if linha is None:
+        session.add(MarketingAgentHeartbeat(agent_name=nome, last_seen_at=agora))
+    else:
+        linha.last_seen_at = agora
+
+
+async def robo_visto_em(session: AsyncSession) -> datetime | None:
+    """A última vez que algum robô de mudanças perguntou por trabalho."""
+    return (
+        await session.execute(
+            select(MarketingAgentHeartbeat.last_seen_at)
+            .where(MarketingAgentHeartbeat.agent_name.like(PREFIXO_PRESENCA + "%"))
+            .order_by(MarketingAgentHeartbeat.last_seen_at.desc().nulls_last())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
 async def pegar_trabalho(session: AsyncSession, *, robo: str) -> SistemaMudanca | None:
     """O próximo trabalho do robô (publicar o aprovado antes de fazer um novo),
-    ou None. Um de cada vez."""
+    ou None. Um de cada vez (trava da transação: dois "pegar" ao mesmo tempo
+    esperam um pelo outro). O trabalho que JÁ está com este robô volta para
+    ele (o Mac reiniciou no meio, a resposta se perdeu): retoma."""
     agora = _agora()
+    await session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _TRAVA_PEGAR})
+    await _presenca(session, robo[:120], agora)
     await _soltar_presos(session, agora)
-    ocupado = (
-        await session.execute(
-            select(SistemaMudanca.id).where(SistemaMudanca.status.in_(DO_ROBO)).limit(1)
+    em_andamento = (
+        (
+            await session.execute(
+                select(SistemaMudanca).where(SistemaMudanca.status.in_(DO_ROBO)).limit(1)
+            )
         )
-    ).first()
-    if ocupado is not None:
-        return None
+        .scalars()
+        .first()
+    )
+    if em_andamento is not None:
+        if (em_andamento.robo or "") != robo[:120]:
+            return None
+        em_andamento.prazo_robo = agora + (
+            PRAZO_PUBLICAR if em_andamento.status == "publicando" else PRAZO_FAZER
+        )
+        em_andamento.atualizado_em = agora
+        await session.flush()
+        logger.info("mudanca_retomada", mudanca=codigo(em_andamento), robo=robo)
+        return em_andamento
     adiada_ate = agora - ESPERA_ADIADA
     for status, novo, prazo, ordem in (
         ("aprovada", "publicando", PRAZO_PUBLICAR, SistemaMudanca.aprovado_em),
@@ -457,6 +517,7 @@ def trabalho_dict(m: SistemaMudanca, nomes_: dict[UUID, str]) -> dict[str, Any]:
         "branch": m.branch,
         "commit": m.commit,
         "diff_sha": m.diff_sha,
+        "adiamentos": m.adiamentos,
     }
 
 
@@ -502,7 +563,7 @@ async def registrar_resultado(
     novo = str(dados.get("status") or "")
     agora = _agora()
     if m.status == "fazendo":
-        permitidos = ("pronta", "precisa_equipe", "falhou")
+        permitidos = ("pronta", "precisa_equipe", "falhou", "pedida")
     else:  # publicando
         permitidos = ("publicada", "falhou", "aprovada")
     if novo not in permitidos:
@@ -520,8 +581,11 @@ async def registrar_resultado(
             raise MudancaError("diff_grande", f"o diff passa de {MAX_DIFF} letras")
         commit = str(dados.get("commit") or "").strip()
         branch = str(dados.get("branch") or "").strip()
-        if not commit or not branch:
-            raise MudancaError("sem_commit", "pronta precisa da branch e do commit")
+        if not _COMMIT.match(commit) or branch != f"mudanca/{codigo(m)}":
+            raise MudancaError(
+                "sem_commit",
+                f"pronta precisa do commit (40 letras hex) e do ramo mudanca/{codigo(m)}",
+            )
         m.diff = diff
         m.diff_sha = sha_do_diff(diff)
         m.arquivos = _arquivos(dados.get("arquivos"))
@@ -531,12 +595,20 @@ async def registrar_resultado(
     elif novo == "publicada":
         m.publicado_em = agora
         commit = str(dados.get("commit") or "").strip()
-        if commit:
-            m.commit = commit[:64]
+        if _COMMIT.match(commit):
+            m.commit = commit
         m.erro = None
     elif novo == "aprovada":
-        # Não deu para publicar AGORA (outro deploy no servidor, disco): volta
-        # para a fila de publicar, com o porquê.
+        # Não deu para publicar AGORA (outro deploy no servidor, disco, o main
+        # com mudança de outra pessoa): volta para a fila de publicar, com o
+        # porquê; o robô só tenta de novo depois de ESPERA_ADIADA.
+        m.erro = _corta(dados.get("erro"), MAX_ERRO) or "publicação adiada"
+        m.adiamentos = int(m.adiamentos or 0) + 1
+    elif novo == "pedida":
+        # Erro do ambiente no "fazer" (rede, GitHub, uv): volta para a fila —
+        # até MAX_TENTATIVAS, depois falha.
+        if int(m.tentativas or 0) >= MAX_TENTATIVAS:
+            novo = "falhou"
         m.erro = _corta(dados.get("erro"), MAX_ERRO)
     else:  # falhou / precisa_equipe
         m.erro = _corta(dados.get("erro"), MAX_ERRO) or _corta(dados.get("resumo"), MAX_ERRO)
@@ -547,6 +619,15 @@ async def registrar_resultado(
     await session.flush()
     logger.info("mudanca_resultado", mudanca=codigo(m), status=novo, robo=robo)
 
+    if novo == "aprovada" and m.adiamentos == AVISO_ADIAMENTOS:
+        await _avisar(
+            session,
+            [*(u.id for u in await aprovadores(session)), m.pedido_por],
+            titulo=f"⏳ {codigo(m)} aprovada, mas a publicação está parada",
+            mensagem=f"{m.titulo} — {m.erro or ''}".strip(" —"),
+            m=m,
+            evento="adiada_muito",
+        )
     if novo == "pronta":
         await _avisar_aprovadores(
             session,
@@ -598,6 +679,8 @@ def linha_para_o_claude(m: SistemaMudanca, nomes_: dict[UUID, str]) -> str:
         partes.append(f"recusada por {quem or '?'}: {m.motivo_recusa or ''}")
     if m.status == "publicada":
         partes.append(f"no ar desde {_quando(m.publicado_em)}")
+    if m.status == "aprovada" and m.erro:
+        partes.append(f"publicação adiada: {m.erro[:300]} (o robô tenta de novo a cada 10 min)")
     if m.status in ("falhou", "precisa_equipe") and (m.erro or m.resumo):
         partes.append(f"motivo: {(m.erro or m.resumo or '')[:400]}")
     return " — ".join(partes)

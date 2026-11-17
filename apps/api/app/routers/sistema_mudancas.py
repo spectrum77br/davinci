@@ -18,6 +18,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
@@ -60,12 +61,19 @@ def _erro(exc: svc.MudancaError) -> HTTPException:
     return HTTPException(codigo_http, detail={"code": exc.code, "detalhe": exc.detalhe})
 
 
-async def _mudanca(session: AsyncSession, mudanca_id: str) -> SistemaMudanca:
+async def _mudanca(
+    session: AsyncSession, mudanca_id: str, *, travar: bool = False
+) -> SistemaMudanca:
+    """O pedido; `travar` = SELECT … FOR UPDATE (Aprovar e Recusar ao mesmo
+    tempo: o segundo espera o primeiro e vê a situação nova)."""
     try:
         uid = UUID(mudanca_id)
     except ValueError:
         raise _nao_existe() from None
-    m = await session.get(SistemaMudanca, uid)
+    q = select(SistemaMudanca).where(SistemaMudanca.id == uid)
+    if travar:
+        q = q.with_for_update()
+    m = (await session.execute(q)).scalar_one_or_none()
     if m is None:
         raise _nao_existe()
     return m
@@ -91,7 +99,11 @@ async def listar(
     except svc.MudancaError as exc:
         raise _erro(exc) from exc
     nomes = await svc.nomes(session, [m.pedido_por for m in itens])
-    return {"itens": [svc.resumo_dict(m, nomes) for m in itens]}
+    visto = await svc.robo_visto_em(session)
+    return {
+        "itens": [svc.resumo_dict(m, nomes) for m in itens],
+        "robo_visto_em": visto.isoformat() if visto else None,
+    }
 
 
 @router.get("/{mudanca_id}")
@@ -114,7 +126,7 @@ async def aprovar(
     mudanca_id: str, request: Request, user: Aprovador, session: Sessao
 ) -> dict[str, Any]:
     dados = await _corpo_da_tela(request)
-    m = await _mudanca(session, mudanca_id)
+    m = await _mudanca(session, mudanca_id, travar=True)
     try:
         await svc.aprovar(session, m=m, user=user, diff_sha=dados.get("diff_sha"))
     except svc.MudancaError as exc:
@@ -128,7 +140,7 @@ async def recusar(
     mudanca_id: str, request: Request, user: Aprovador, session: Sessao
 ) -> dict[str, Any]:
     dados = await _corpo_da_tela(request)
-    m = await _mudanca(session, mudanca_id)
+    m = await _mudanca(session, mudanca_id, travar=True)
     try:
         await svc.recusar(session, m=m, user=user, motivo=dados.get("motivo"))
     except svc.MudancaError as exc:
@@ -137,10 +149,12 @@ async def recusar(
     return await _detalhe(session, m)
 
 
-@router.api_route(
-    "/{resto:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False
-)
-async def _qualquer_outro(resto: str, _user: Aprovador) -> None:
+_TODOS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+
+
+@router.api_route("", methods=["POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+@router.api_route("/{resto:path}", methods=_TODOS)
+async def _qualquer_outro(_user: Aprovador, resto: str = "") -> None:
     # Rota/método desconhecido: 404 (mesmo para o aprovador — sem 405/422 que
     # entreguem a existência da tela a quem não é).
     raise _nao_existe()
@@ -158,7 +172,9 @@ async def _token_do_robo(
         or not x_mudancas_token
         or not secrets.compare_digest(x_mudancas_token.encode(), esperado.encode())
     ):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"code": "robo_nao_autorizado"})
+        # 404 igual a rota que não existe: quem não tem o token nem fica
+        # sabendo que há rotas de robô aqui.
+        raise _nao_existe()
 
 
 Robo = Annotated[None, Depends(_token_do_robo)]
@@ -228,3 +244,9 @@ async def resultado(
         raise _erro(exc) from exc
     await session.commit()
     return {"ok": True, "codigo": svc.codigo(m), "status": m.status}
+
+
+@robo_router.api_route("", methods=_TODOS)
+@robo_router.api_route("/{resto:path}", methods=_TODOS)
+async def _robo_outro(_r: Robo, resto: str = "") -> None:
+    raise _nao_existe()

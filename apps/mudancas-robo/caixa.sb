@@ -1,0 +1,44 @@
+;; Caixa (sandbox do macOS) das conferências que o robô de mudanças roda sobre
+;; código ainda NÃO aprovado (pytest/ruff/node dos arquivos que o Claude mexeu).
+;; Revisão de 17/11/2026: esse código rodava solto, com a chave root do
+;; servidor, o push no GitHub e os tokens ao alcance — antes do Aprovar.
+;;
+;; Dentro da caixa:
+;;   - não lê chaves, tokens, .env, a pasta do robô (~/DaVinci) nem o chaveiro;
+;;   - só escreve na worktree do pedido, no admin dela no .git, no cache do uv
+;;     e na pasta temporária própria;
+;;   - SEM rede, a não ser o socket local do Postgres (os testes da API).
+;; Parâmetros (-D): CASA, RAIZ (a pasta do robô, onde quer que esteja), WT,
+;; GITADMIN, UVCACHE e TMP (a pasta temporária SÓ desta caixa — nada de /tmp
+;; comum, onde ficam arquivos de outras sessões e outros robôs).
+(version 1)
+(allow default)
+
+(deny file-read*
+  (subpath (param "RAIZ"))
+  (subpath (string-append (param "CASA") "/.ssh"))
+  (subpath (string-append (param "CASA") "/DaVinci"))
+  (subpath (string-append (param "CASA") "/Library/Keychains"))
+  (subpath (string-append (param "CASA") "/.config"))
+  (subpath (string-append (param "CASA") "/.aws"))
+  (subpath (string-append (param "CASA") "/.docker"))
+  (subpath (string-append (param "CASA") "/.claude"))
+  (literal (string-append (param "CASA") "/.git-credentials"))
+  (literal (string-append (param "CASA") "/.netrc"))
+  (literal (string-append (param "CASA") "/.gitconfig"))
+  (regex #"/\.env($|\.)"))
+
+(deny file-write*
+  (require-all
+    (require-not (subpath (param "WT")))
+    (require-not (subpath (param "GITADMIN")))
+    (require-not (subpath (param "UVCACHE")))
+    (require-not (subpath (param "TMP")))
+    (require-not (subpath "/dev"))))
+
+(deny network*)
+(allow network-outbound (remote unix-socket (path-literal "/private/tmp/.s.PGSQL.5432")))
+
+(deny mach-lookup
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.securityd.xpc"))
