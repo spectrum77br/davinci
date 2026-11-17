@@ -91,8 +91,9 @@ devolução vêm também `link_envio` (vídeo de como embalamos) e `link_abertur
    confirmou, decida parecido.
 3. **Sem instrução nem regra**: prudência.
    - Você **não responde sozinha** à plataforma sem regra ou instrução mandando:
-     `humano`, com o que você responderia no `resumo`. Exceção: o atendimento do
-     **Melhor Envio** (seção própria abaixo).
+     `humano`, com o que você responderia no `resumo`. Exceções: o atendimento do
+     **Melhor Envio** e as aberturas das seções **ABRIR NO ML** e **ABRIR NA LOJA**
+     (seções próprias abaixo).
    - Nada mudou e a bola está com a plataforma → `esperar`.
    - A plataforma já decidiu (pagou, reembolsou, encerrou) → `resolver` com o valor.
 
@@ -183,7 +184,8 @@ entrega parcial, suspensão de entrega.
 
 Você mesma conduz o navegador da loja — não existe mais o `tela.py` do Hermes.
 Só **age** na tela (escreve, envia, clica em enviar/confirmar) com instrução de
-pessoa ou regra do manual que mande; sem isso, só **lê**.
+pessoa, regra do manual que mande ou numa abertura das seções ABRIR NO ML / ABRIR
+NA LOJA; sem isso, só **lê**.
 
 ```bash
 python3 ferramentas/adspower.py achar --conta "Shopee Jlas" --plataforma shopee   # qual perfil
@@ -431,6 +433,94 @@ precisa enviar). Obrigado!" — nunca peça senha de conta. A dispensa da taxa d
 devolução não é compensação pelo produto.
 
 **Não recebido** na Shopee nunca vai pra disputa: é sempre o Assistente do Vendedor.
+
+## Shopee e TikTok — ABRIR na tela (seção "ABRIR NA LOJA")
+
+Desde 17/11/2026 **você** abre na tela os chamados de devolução da Shopee e da
+TikTok que a API não aceita mais: o comprador pediu **só reembolso** (ficou com o
+produto), a plataforma **já pagou** ou **está analisando** sem pedir a nossa
+resposta, e o DaVinci já escreveu a defesa (o `texto` da tarefa) com o vídeo da
+embalagem. Ordem do Vinicius ("joga para o painel de chamado, lá a IA de Chamado
+vai analisar se abriu ou não, caso não ele reabre") — vale **sem instrução de
+pessoa**. A seção **ABRIR NA LOJA** traz até 3; você abre **uma** por rodada.
+Elas **não** usam `decidir`: terminam sempre em `abrir-loja resultado`.
+
+1. **Perfil primeiro**, na ordem da lista: `python3 ferramentas/adspower.py achar --conta "<conta>" --plataforma <shopee|tiktok>`
+   e `ferramentas/tela <perfil> estado`. `PERFIL EM USO` → **não pegue**:
+   `python3 ferramentas/davinci_chamados.py abrir-loja pular --mensagem <mensagem_id>`
+   (não volta por 30 min) e tente a próxima da lista. Confiança baixa no `achar`
+   → pegue e devolva `"ok": false, "erro": "humano: não achei o perfil da loja …"`.
+2. **Pegue**: `python3 ferramentas/davinci_chamados.py abrir-loja pegar --mensagem <mensagem_id>`.
+   409 = alguém já pegou ou o caso andou: pule.
+3. **Leia o chamado inteiro**: `caso --id <chamado_id>` — a defesa (abertura), a
+   nota do sistema com o nº da solicitação na plataforma e em que pé estava ("A
+   Shopee está analisando o só reembolso 2611…", "A TikTok já pagou o só reembolso
+   4043…"), `link_envio` (vídeo da embalagem) e os anexos (cartão com o QR do vídeo).
+   O seu `pegar` deixa no histórico "pegou pra abrir na tela (hora)". Se houver
+   **outro mais antigo** sem resultado depois dele, uma rodada sua morreu no meio: **antes de mandar qualquer coisa**, procure na
+   tela se você já mandou (Raised By Me e o chat na Shopee; o histórico do caso e
+   do atendimento na TikTok). Já mandou → continue de onde parou, sem repetir.
+4. **Confira na tela antes de mandar qualquer coisa** — o caso pode ter mudado:
+   - Shopee: `ir "https://seller.shopee.com.br/portal/sale/returnrefundcancel?keyword=<pedido_marketplace>&keywordType=order_sn"`
+     → a linha mostra o motivo, "Apenas reembolso", o status ("Em análise pela
+     Shopee", "Aprovada"…) e a entrega do pedido ("Entregue", "Postado"…).
+   - TikTok: Pedidos › Devoluções e reembolsos (Gerenciar devoluções) → busque o
+     ID do pedido → abra o caso.
+   - **Pare** (`"ok": false, "erro": "humano: …"`, dizendo o que a tela mostra) se:
+     a tela não mostra **só reembolso** ("Apenas reembolso" na Shopee; reembolso
+     sem devolução na TikTok) — a defesa foi escrita pra isso;
+     a plataforma já decidiu a nosso favor ou o comprador cancelou; já existe
+     contestação/disputa nossa; o comprador diz que **não recebeu** e a tela não
+     mostra o pedido entregue (é extravio, não defesa); o pedido ou o produto da
+     tela não bate com o do chamado.
+5. Shopee: veja **Raised By Me** (seção Shopee acima). Já existe consulta deste
+   pedido → continue por ela e use o nº dela; não abra outra.
+6. **Shopee — como abrir**:
+   - A página da devolução oferece "Fornecer evidências"/"Upload Evidence" ou
+     "Contestar" pra loja → use esse caminho formal (os passos de envio da seção
+     "Evidência pedida"), mas **registre com `abrir-loja resultado`**, nunca com
+     `decidir` (protocolo = o nº da solicitação na plataforma).
+   - Senão, o atendente: avatar "Entre em contato com a Shopee" → "Falar com o
+     nosso atendimento" → **"Disputa de Reembolso e Devolução"** → atendente humano
+     (responda `vivo` ao "Você gostaria que continuássemos?").
+   - Duas mensagens curtas, tiradas do `texto`: (1) o pedido, o que o comprador
+     alega e que ele **não devolveu** o produto; a entrega confirmada; (2) o vídeo
+     da expedição mostra o produto certo conferido e lacrado (cole o link) — peça a
+     **revisão do reembolso e a compensação à loja**. Palavras do motivo: siga "O
+     motivo da disputa que o atendente abre" (caixa vazia → "pacote chegou vazio";
+     outro produto → "produto diferente do enviado"); nunca "não recebemos".
+   - Pediu o vídeo como arquivo: `mega` + `encolher` + `anexar` (regras de vídeo acima).
+   - Protocolo = o nº que o atendente der (ou o da disputa/solicitação que ele abrir).
+7. **TikTok — como abrir**:
+   - Na página do caso, botão de recurso ("Recorrer", "Apelar", "Contestar") →
+     motivo mais próximo da alegação; comentário (até 500 caracteres) tirado do
+     `texto`, com o link do vídeo; no cartão de foto, o cartão do vídeo (`anexos`)
+     ou o próprio vídeo (`mega` + `encolher` 480). Só envie com o cartão aparecendo
+     no print. Antes, confira no histórico do caso se já existe recurso nosso
+     (existindo, não mande outro: `humano` dizendo isso). Protocolo = o nº do
+     recurso, se a tela mostrar; senão `recurso-<ID da devolução>` (com o prefixo).
+   - Sem botão de recurso: Central de ajuda do vendedor › atendimento ("Fale
+     conosco"/chat) → peça a revisão com o texto e o link do vídeo; protocolo = o
+     nº do atendimento.
+   - Nenhum dos dois aparece: `"ok": false, "erro": "humano: …"` dizendo
+     exatamente o que a página do caso mostra (status, botões).
+8. Captcha ou login: pare (seção acima) →
+   `abrir-loja resultado --json '{"mensagem_id": "…", "ok": false, "parado": "captcha"}'` (ou `"login"`).
+9. **Feito** só com prova na tela (protocolo, "Em análise", recurso enviado). `foto`
+   do fim e registre:
+   `python3 ferramentas/davinci_chamados.py abrir-loja resultado --json '{"mensagem_id": "…", "ok": true, "protocolo": "2121…", "resumo": "…", "conversa": [{"quem": "nos", "texto": "…", "quando": "2026-11-17T11:02"}, {"quem": "plataforma", "texto": "…", "quando": "2026-11-17T11:05", "autor": "Ana · atendente Shopee"}]}'`
+   - `resumo`: 1 a 3 frases — o que você fez e o que a plataforma disse (prazo,
+     "em análise"). Vira a análise "Feito na tela" do chamado; se a plataforma
+     não responder em 2 dias, o DaVinci te chama de volta pra conferir na tela.
+   - `conversa`: as falas da tela, como no `decidir` (sempre que conversou).
+   - `"portal": true` **só** se o nº é de solicitação do Portal de Atendimento
+     ("Minhas solicitações de ajuda") — protocolo de chat de atendente não é.
+   - Depois: `guardar-print --id <chamado_id> --mensagem <mensagem_id> --arquivo tmp/…png`
+     e feche o perfil.
+10. Não saiu por algo passageiro (página não carregou, chat caiu): `"ok": false,
+    "erro": "<o que houve>"` → volta pra fila (até 3 vezes). Se já tinha mandado
+    alguma mensagem, diga no `erro` e mande a `conversa` — na próxima, confira
+    Raised By Me antes de repetir qualquer envio.
 
 ## Evidência pedida (Upload Evidence da Shopee)
 

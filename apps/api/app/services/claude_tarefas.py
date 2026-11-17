@@ -33,11 +33,12 @@ from uuid import UUID
 from zoneinfo import ZoneInfo
 
 import structlog
-from sqlalchemy import or_, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models import (
+    AtendimentoMensagem,
     AtendimentoReclamacao,
     BlingOrder,
     Chamado,
@@ -568,7 +569,9 @@ TOOL_CONSULTAR_PEDIDO: dict[str, Any] = {
     "description": (
         "Resumo de um pedido no DaVinci, somente leitura: dados do pedido (Bling), "
         "situação, loja/plataforma, itens, destinatário, logística (status na plataforma, "
-        "rastreio e última localização), chamados, devolução e margem/financeiro. Use quando "
+        "rastreio e última localização), casos na plataforma (reclamação, mediação, "
+        "reivindicação A a Z), conversas do Atendimento e avisos da plataforma, chamados "
+        "abertos pela equipe, devolução e margem/financeiro. Use quando "
         "uma tarefa, pergunta ou mensagem citar um número de pedido — número Bling "
         "(ex.: 295070) ou código do pedido no marketplace. Só administradores."
     ),
@@ -646,7 +649,9 @@ async def _reclamacoes_da_plataforma(
     """As reclamações, mediações e devoluções DA PLATAFORMA do pedido, uma linha cada.
 
     `atendimento_reclamacoes` (lida pelo cron do atendimento: claims do ML,
-    devoluções/disputas de Shopee e TikTok da Logística). Casa pelo nº na
+    devoluções/disputas de Shopee e TikTok da Logística; desde 16/11/2026 a
+    reivindicação A a Z e o estorno da Amazon, lidos do e-mail pela ponte —
+    `mail_atendimento/reivindicacao.py`). Casa pelo nº na
     plataforma (o ORDER, no ML), pelo pack do ML e pelo nº do Bling que a
     Logística grava. Sem isto o 297840 saía "Chamados: nenhum · Devolução:
     nenhuma" com a mediação 5582543195 aberta no ML. Só o que a plataforma
@@ -681,8 +686,11 @@ async def _reclamacoes_da_plataforma(
     for r in linhas:
         t = reclamacoes_svc.para_tela(r)
         nome = t["tipo_rotulo"] + (f" {t['numero']}" if t["numero"] else "")
+        # "na Amazon" (16/11/2026: a reivindicação A a Z lida do e-mail); o resto
+        # como sempre ("no Mercado Livre").
+        onde = "na" if r.plataforma == "amazon" else "no"
         partes = [
-            f"{nome} no {t['plataforma_nome']} (pedido {r.pedido_marketplace or '?'})",
+            f"{nome} {onde} {t['plataforma_nome']} (pedido {r.pedido_marketplace or '?'})",
             "ABERTA" if t["aberta"] else f"ENCERRADA em {_d(r.encerrada_em)}",
         ]
         if t["status_rotulo"]:
@@ -697,6 +705,135 @@ async def _reclamacoes_da_plataforma(
             partes.append(f"aberta em {_d(r.aberta_em)}")
         saida.append(" · ".join(partes))
     return saida
+
+
+# O bloco "Atendimento" (16/11/2026, pedido 306097: a Amazon concedeu uma
+# reivindicação A a Z e o resumo dizia "Chamados: nenhum" — a mensagem do
+# cliente de 13/11, respondida em 14/11, e o e-mail da decisão estavam no
+# Atendimento, que o resumo não olhava). Tetos: as conversas do pedido e os
+# avisos da plataforma (os mais novos, de todas elas juntas).
+_MAX_CONVERSAS_ATENDIMENTO = 6
+_MAX_AVISOS_ATENDIMENTO = 8
+_MAX_AVISOS_POR_CONVERSA = 4
+_MAX_ASSUNTO = 160
+
+_CANAL_TEXTO = {
+    "chat": "chat",
+    "pergunta": "pergunta no anúncio",
+    "pos_venda": "pós-venda",
+    "email": "e-mail",
+    "sac": "SAC",
+    "reclamacao": "reclamação",
+    "avaliacao": "avaliação",
+    "carrinho": "carrinho",
+    "comentario": "comentário",
+    "zap": "WhatsApp",
+}
+_PLATAFORMA_TEXTO = {
+    "ml": "Mercado Livre",
+    "shopee": "Shopee",
+    "tiktok": "TikTok",
+    "amazon": "Amazon",
+    "magalu": "Magalu",
+    "temu": "Temu",
+    "aliexpress": "AliExpress",
+    "carrefour": "Carrefour",
+    "site": "site",
+}
+_SITUACAO_TEXTO = {
+    "aberta": "aberta",
+    "respondida": "respondida",
+    "fechada": "fechada",
+    "bloqueada": "bloqueada pela plataforma",
+}
+
+
+def _curto(v: Any, n: int = _MAX_ASSUNTO) -> str:
+    texto = " ".join(str(v or "").split())
+    return texto if len(texto) <= n else texto[: n - 1].rstrip() + "…"
+
+
+def linha_da_conversa(
+    c: Any, avisos: list[tuple[datetime | None, str]], *, de_email: bool
+) -> str:
+    """Uma conversa do Atendimento numa linha. PURA.
+
+    Canal, plataforma, conta, onde ela está (Caixa ou aba E-mail), a situação,
+    as DATAS da última fala do cliente e da loja e o assunto; depois os avisos
+    da plataforma (mensagens `sistema`) pelo ASSUNTO — o corpo do aviso pode
+    trazer o endereço do comprador, e a fala do cliente fica na tela.
+    `avisos` = (quando, assunto), do mais velho ao mais novo.
+    """
+    canal = _CANAL_TEXTO.get(c.canal, c.canal or "?")
+    plataforma = _PLATAFORMA_TEXTO.get(c.plataforma, c.plataforma or "?")
+    cabeca = f"{canal} {plataforma}" + (f" ({c.conta})" if c.conta else "")
+    partes = [cabeca + (" [aba E-mail]" if de_email else " [Caixa]")]
+    if c.aguardando_resposta:
+        situacao = "FALTA RESPONDER"
+        if c.prazo_resposta_em:
+            situacao += f" (prazo {_d(c.prazo_resposta_em)})"
+    elif c.sem_resposta_necessaria:
+        situacao = "marcada \"não precisa de resposta\""
+    else:
+        situacao = _SITUACAO_TEXTO.get(c.situacao, c.situacao or "?")
+    partes.append(situacao)
+    if c.ultima_do_cliente_em:
+        partes.append(f"última do cliente {_d(c.ultima_do_cliente_em)}")
+    if c.ultima_da_loja_em:
+        partes.append(f"última da loja {_d(c.ultima_da_loja_em)}")
+    dados = c.dados if isinstance(c.dados, dict) else {}
+    if isinstance(dados.get("assunto"), str) and dados["assunto"].strip():
+        partes.append(f"assunto: {_curto(dados['assunto'])}")
+    for quando, assunto in avisos:
+        partes.append(f"aviso da plataforma {_d(quando)}: {_curto(assunto)}")
+    return " · ".join(partes)
+
+
+async def _atendimento_do_pedido(
+    session: AsyncSession, plataforma: str | None, pedido_marketplace: str | None
+) -> list[str]:
+    """As conversas do Atendimento do pedido, uma linha cada (16/11/2026).
+
+    Pelo nº NA PLATAFORMA que o Bling dá ao pedido (o `numeroloja` — achado
+    também pelo nº do Bling), do jeito da Caixa (`etiqueta_fatos.
+    conversas_do_pedido`: no ML também o pack/order). Inclui a conversa de
+    e-mail da ponte (aba E-mail), onde caem os avisos da plataforma — a
+    reivindicação A a Z da Amazon entrou lá. Duas consultas, com teto.
+    """
+    from app.services.atendimento import etiqueta_fatos, separa_email
+    from app.services.atendimento.constantes import AUTOR_SISTEMA
+
+    conversas = await etiqueta_fatos.conversas_do_pedido(
+        session, plataforma, pedido_marketplace, limite=_MAX_CONVERSAS_ATENDIMENTO
+    )
+    if not conversas:
+        return []
+    assunto = AtendimentoMensagem.payload[("mail", "assunto")].astext
+    quando = func.coalesce(AtendimentoMensagem.enviada_em, AtendimentoMensagem.created_at)
+    avisos: dict[Any, list[tuple[datetime | None, str]]] = {}
+    for conversa_id, em, texto_assunto in (
+        await session.execute(
+            select(AtendimentoMensagem.conversa_id, quando, assunto)
+            .where(
+                AtendimentoMensagem.conversa_id.in_([c.id for c in conversas]),
+                AtendimentoMensagem.autor == AUTOR_SISTEMA,
+                func.coalesce(func.btrim(assunto), "") != "",
+            )
+            .order_by(quando.desc())
+            .limit(_MAX_AVISOS_ATENDIMENTO)
+        )
+    ).all():
+        da_conversa = avisos.setdefault(conversa_id, [])
+        if len(da_conversa) < _MAX_AVISOS_POR_CONVERSA:
+            da_conversa.append((em, texto_assunto))
+    return [
+        linha_da_conversa(
+            c,
+            list(reversed(avisos.get(c.id, []))),
+            de_email=separa_email.e_conversa_de_email(c),
+        )
+        for c in conversas
+    ]
 
 
 async def consultar_pedido(session: AsyncSession, *, dono: User, args: dict[str, Any]) -> str:
@@ -784,6 +921,23 @@ async def consultar_pedido(session: AsyncSession, *, dono: User, args: dict[str,
     for linha in na_plataforma:
         linhas.append("Na plataforma: " + linha)
 
+    # O Atendimento (as conversas com o cliente e os avisos da plataforma).
+    # 16/11 (Eduardo): bloco novo num SAVEPOINT com try — se a leitura falhar,
+    # o resumo do pedido continua saindo (antes dele o resumo nunca dependia disso).
+    try:
+        async with session.begin_nested():
+            atendimento = await _atendimento_do_pedido(session, info.get("plataforma"), mkt)
+    except Exception:  # noqa: BLE001
+        logger.warning("consultar_pedido_atendimento_falhou", pedido=num, exc_info=True)
+        atendimento = None
+    if atendimento is None:
+        linhas.append("Atendimento: não deu para ler as conversas agora (ver a aba Atendimento).")
+    else:
+        for linha in atendimento:
+            linhas.append("Atendimento: " + linha)
+        if not atendimento:
+            linhas.append("Atendimento: nenhuma conversa ligada a este pedido.")
+
     cond = [Chamado.pedido_bling == num]
     if mkt:
         cond.append(Chamado.pedido_marketplace == mkt)
@@ -821,7 +975,10 @@ async def consultar_pedido(session: AsyncSession, *, dono: User, args: dict[str,
                 partes.append(f"obs: {ch.observacao[:200]}")
             linhas.append(" · ".join(partes))
     else:
-        linhas.append("Chamados: nenhum.")
+        # "Chamados: nenhum" soava como "nada aconteceu" (306097): o chamado é o
+        # que a EQUIPE abre na aba Chamados; o caso da plataforma e a conversa
+        # com o cliente estão nas linhas acima.
+        linhas.append("Chamados abertos pela equipe (aba Chamados): nenhum.")
 
     cond = [Devolution.pedido_bling == num]
     if mkt:
@@ -1159,6 +1316,136 @@ async def responder_dm(session: AsyncSession, *, dono: User, args: dict[str, Any
     return "Resposta enfileirada. O servidor envia no próximo tick."
 
 
+# ---- mudanças no próprio sistema (Eduardo, 17/11/2026) ------------------------
+#
+# O chefe pede correções rápidas no DaVinci pelo Claude dele; um robô no Mac do
+# Eduardo prepara e testa; SÓ o Eduardo ou o Thorfinn aprovam (tela Sistema ›
+# Mudanças) e aí vai para o ar. Regras em services/sistema_mudancas.
+
+TOOL_PEDIR_MUDANCA: dict[str, Any] = {
+    "name": "pedir_mudanca",
+    "title": "Pedir mudança no sistema DaVinci",
+    "description": (
+        "Pede uma mudança no PRÓPRIO sistema DaVinci: um texto, uma regra, um campo ou uma "
+        "tela que está errada ou deveria funcionar diferente. Um robô prepara e testa a "
+        "mudança e ela só vai para o ar depois que o Eduardo ou o Thorfinn aprovarem — "
+        "avise isso ao usuário. NÃO use para tarefas de pessoas (para isso é "
+        "`criar_tarefa`) nem para mexer em dados de um pedido/produto. Antes de chamar, "
+        "garanta que o pedido está claro: o que acontece hoje, o que deve acontecer, em "
+        "qual tela/menu, e um exemplo (número de pedido, produto, print descrito) se houver "
+        "— se faltar algo importante, pergunte ao usuário primeiro. Uma mudança por pedido. "
+        "Só para administradores."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "titulo": {
+                "type": "string",
+                "description": "Resumo curto da mudança (até 200 letras).",
+            },
+            "descricao": {
+                "type": "string",
+                "description": (
+                    "O pedido completo: como está hoje, como deve ficar, por quê, e um "
+                    "exemplo se houver (até 4000 letras)."
+                ),
+            },
+            "onde": {
+                "type": "string",
+                "description": "Em qual tela, menu, relatório ou robô (se o usuário disse).",
+            },
+        },
+        "required": ["titulo", "descricao"],
+    },
+    "annotations": {
+        "title": "Pedir mudança no sistema DaVinci",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+}
+
+TOOL_LISTAR_MUDANCAS: dict[str, Any] = {
+    "name": "listar_mudancas",
+    "title": "Ver pedidos de mudança no sistema",
+    "description": (
+        "Mostra os pedidos de mudança no sistema e em que pé estão: na fila do robô, robô "
+        "fazendo, esperando aprovação (com o que o robô fez), no ar, recusada (com o "
+        "motivo), precisa da equipe ou falhou. Use quando o usuário perguntar das mudanças "
+        "que pediu. `codigo` (ex.: M-12) mostra só aquela. Só para administradores."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "filtro": {
+                "type": "string",
+                "enum": ["abertas", "todas"],
+                "description": (
+                    "abertas (padrão) = ainda não terminaram; todas = inclui as antigas."
+                ),
+            },
+            "codigo": {"type": "string", "description": "Código da mudança, ex.: M-12."},
+        },
+    },
+    "annotations": {
+        "title": "Ver pedidos de mudança no sistema",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+}
+
+
+async def pedir_mudanca(session: AsyncSession, *, dono: User, args: dict[str, Any]) -> str:
+    from app.services import sistema_mudancas
+
+    try:
+        m = await sistema_mudancas.criar_pedido(
+            session,
+            dono=dono,
+            titulo=args.get("titulo"),
+            descricao=args.get("descricao"),
+            onde=args.get("onde"),
+        )
+    except sistema_mudancas.MudancaError as exc:
+        raise TarefaInvalidaError(
+            f"Não registrei o pedido de mudança: {exc.detalhe}."
+        ) from exc
+    await session.commit()
+    codigo = sistema_mudancas.codigo(m)
+    return (
+        f"Pedido de mudança {codigo} registrado: {m.titulo}. O robô vai preparar e testar a "
+        "mudança; ela só vai para o ar depois que o Eduardo ou o Thorfinn aprovarem. Para "
+        f"acompanhar, pergunte como está a {codigo}."
+    )
+
+
+async def listar_mudancas(session: AsyncSession, *, dono: User, args: dict[str, Any]) -> str:
+    from app.services import sistema_mudancas
+
+    if dono.role != UserRole.ADMIN:
+        raise TarefaInvalidaError("Os pedidos de mudança no sistema são só para administradores.")
+    codigo = str(args.get("codigo") or "").strip()
+    if codigo:
+        m = await sistema_mudancas.por_codigo(session, codigo)
+        if m is None:
+            return f"Não achei a mudança {codigo}."
+        itens = [m]
+    else:
+        filtro = str(args.get("filtro") or "abertas")
+        itens = await sistema_mudancas.listar(
+            session, status="abertas" if filtro != "todas" else None, limite=MAX_LISTA
+        )
+    if not itens:
+        return "Nenhum pedido de mudança em aberto."
+    nomes = await sistema_mudancas.nomes(
+        session, [i for m in itens for i in (m.pedido_por, m.recusado_por)]
+    )
+    return "\n".join(sistema_mudancas.linha_para_o_claude(m, nomes) for m in itens)
+
+
 FERRAMENTAS: dict[str, tuple[dict[str, Any], Any]] = {
     TOOL_CRIAR_TAREFA["name"]: (TOOL_CRIAR_TAREFA, criar_tarefa),
     TOOL_LISTAR_TAREFAS["name"]: (TOOL_LISTAR_TAREFAS, listar_tarefas),
@@ -1166,4 +1453,6 @@ FERRAMENTAS: dict[str, tuple[dict[str, Any], Any]] = {
     TOOL_CONSULTAR_PEDIDO["name"]: (TOOL_CONSULTAR_PEDIDO, consultar_pedido),
     TOOL_LISTAR_DMS["name"]: (TOOL_LISTAR_DMS, listar_dms),
     TOOL_RESPONDER_DM["name"]: (TOOL_RESPONDER_DM, responder_dm),
+    TOOL_PEDIR_MUDANCA["name"]: (TOOL_PEDIR_MUDANCA, pedir_mudanca),
+    TOOL_LISTAR_MUDANCAS["name"]: (TOOL_LISTAR_MUDANCAS, listar_mudancas),
 }

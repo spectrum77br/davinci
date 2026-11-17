@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.services.atendimento.validador import plano_de
+from app.services.mail_atendimento import reivindicacao
 from app.services.mail_atendimento.constantes import FINALIDADES_PENDENTES
 
 TIPO_INFORMATIVO = "informativo"
@@ -128,12 +129,22 @@ def classificar(
     assunto: str | None = None,
     texto: str | None = None,
     remetente_tipo: str | None = None,
+    remetente: str | None = None,
 ) -> Classificacao:
-    """O conteúdo pode distinguir informativo/venda/chamado da finalidade da pasta."""
+    """O conteúdo pode distinguir informativo/venda/chamado da finalidade da pasta.
+
+    `remetente` = o endereço de quem mandou (só para reconhecer a reivindicação
+    A a Z e o estorno da Amazon pelo remetente; sem ele, vale o assunto)."""
     casos = _casos_explicitos(plataforma, assunto, texto)
     caso = next(iter(casos)) if len(casos) == 1 else None
     if len(casos) > 1 or any(len(c) > MAX_CASO_ID for c in casos):
         return Classificacao(TIPO_CHAMADO, casos_ambiguos=True)
+    if reivindicacao.ler(de=remetente, plataforma=plataforma, assunto=assunto, texto=texto):
+        # 16/11/2026 (Eduardo, pedido 306097): a reivindicação da Garantia de A a
+        # Z, o estorno (chargeback) e o "Informação necessária" da Amazon são
+        # caso com dinheiro e prazo — nunca informativo. É o tipo `chamado` da
+        # conversa de e-mail (a fila de pessoa), sem caso nem chamado criado.
+        return Classificacao(TIPO_CHAMADO)
     if caso or plataforma == "site":
         return Classificacao(TIPO_CHAMADO, caso)
     titulo = plano_de(assunto or "")

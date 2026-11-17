@@ -230,7 +230,14 @@ NOME_TIPO = {
     RECLAMACAO_TIPO_MEDIACAO: "Mediação",
     RECLAMACAO_TIPO_DEVOLUCAO: "Devolução",
 }
-NOME_PLATAFORMA = {"ml": "Mercado Livre", "shopee": "Shopee", "tiktok": "TikTok"}
+NOME_PLATAFORMA = {
+    "ml": "Mercado Livre",
+    "shopee": "Shopee",
+    "tiktok": "TikTok",
+    # 16/11/2026: a reivindicação A a Z e o estorno da Amazon, lidos do e-mail
+    # (`mail_atendimento/reivindicacao.py`).
+    "amazon": "Amazon",
+}
 # `externo_id` da devolução da Shopee/TikTok cujo id na plataforma a
 # Logística ainda não tem ("pedido 250930ABC"): troca pelo id quando ele
 # aparecer (`reclamacoes_devolucoes`). Lido assim na linha do tempo:
@@ -1514,6 +1521,9 @@ def url_na_plataforma(
         return links_shopee.url_pedido_shopee(pedido, order_id) if pedido else None
     if r.plataforma == "tiktok" and pedido:
         return f"https://seller-br.tiktok.com/order/detail?order_no={pedido}"
+    if r.plataforma == "amazon" and pedido:
+        # O pedido no Seller Central (a reivindicação e o estorno ficam nele).
+        return f"https://sellercentral.amazon.com.br/orders-v3/order/{pedido}"
     return None
 
 
@@ -1604,6 +1614,13 @@ def para_tela(
     tipo_nome = NOME_TIPO.get(r.tipo, r.tipo)
     if r.plataforma in ("shopee", "tiktok") and r.tipo == RECLAMACAO_TIPO_RECLAMACAO:
         tipo_nome = "Disputa"
+    if r.plataforma == "amazon":
+        # 16/11/2026: o caso da Amazon vem do e-mail, sem id próprio (a chave é
+        # "atoz:<pedido>"): o título é o tipo + o pedido.
+        from app.services.mail_atendimento import reivindicacao
+
+        numero = ""
+        tipo_nome = reivindicacao.NOME_TIPO.get(_id(dados.get("tipo_caso")), tipo_nome)
     pedido_conversa = _id(pedido_da_conversa)
     valor = dados.get("valor_reembolso")
     return {

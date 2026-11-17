@@ -71,6 +71,30 @@ async def test_condicao_da_tela_so_novo_usado_perdimento() -> None:
     assert contas.condicao_da_tela(Lancamento(sku="a", condicao=None)) is None
 
 
+async def test_fechado_em_dia_que_a_peca_teve_destino() -> None:
+    """17/11/2026: "data fechamento" = o dia que lançou no estoque ou que
+    colocou como extraviado etc."""
+    lancou = datetime(2026, 11, 10, 14, tzinfo=UTC)
+    entrou = datetime(2026, 11, 12, 9, tzinfo=UTC)
+
+    def f(lanc: Lancamento, entrada: datetime | None = None) -> datetime | None:
+        return contas.fechado_em(lanc, entrada_estoque=entrada, lancado_em=lancou)
+
+    # entrou no estoque → a entrada (inclusive a volta do técnico)
+    assert f(Lancamento(sku="a", condicao="Novo", estoque_status="ok"), entrou) == entrou
+    assert (
+        f(Lancamento(sku="a", condicao="Manutenção", manutencao_destino="Usado"), entrou) == entrou
+    )
+    # perdimento / extraviado / não devolvido → o dia do lançamento
+    for c in ("Sucata", "Extraviado", "Não devolvido"):
+        assert f(Lancamento(sku="a", condicao=c)) == lancou
+    # ainda não fechou: com o técnico, sem condição, estoque pendente
+    assert f(Lancamento(sku="a", condicao="Manutenção")) is None
+    assert f(Lancamento(sku="a", condicao=None)) is None
+    for st in ("falhou", "conferindo", "sem_confirmacao"):
+        assert f(Lancamento(sku="a", condicao="Novo", estoque_status=st), entrou) is None
+
+
 async def test_etapa_manutencao_ganha_de_fraude_e_de_chegou() -> None:
     com_tecnico = [Lancamento(sku="a", condicao="Manutenção")]
     assert (
@@ -755,6 +779,51 @@ async def test_lancamento_chamado_e_conta_so_o_admin_ve_custo(
     assert all(i["conta"] is None for i in body["items"])
     lanc = body["items"][0]["lancamentos"][0]
     assert lanc["custo_manutencao"] is None and lanc["custo_produto"] is None
+
+
+async def test_linha_traz_estoque_e_data_de_fechamento(
+    client, db: AsyncSession, make_user, auth_as
+):
+    """17/11/2026: filtros da lista por estoque (.sp, .ci, mala…) e pela data
+    de fechamento (o dia que entrou no estoque ou que virou extraviado)."""
+    hoje = datetime.now(_SP).date()
+    await _pedido(db, "750001", "83957", entrada=hoje - timedelta(days=9), sku="f105.ci", itens=3)
+    lancou = datetime(2026, 11, 10, 14, tzinfo=UTC)
+    entrou = datetime(2026, 11, 12, 9, tzinfo=UTC)
+    await db.execute(
+        text(
+            """
+            INSERT INTO devolutions
+                (pedido_bling, conta, sku, quantidade, condicao_produto, created_at,
+                 data_devolvido_estoque, estoque_mov_sku, estoque_status)
+            VALUES ('750001', 'Shopee Mini', 'f105.ci', 1, 'Novo', :lancou, :entrou,
+                    'f105.sp', 'ok'),
+                   ('750001', 'Shopee Mini', 'f105.ci-1', 1, 'Extraviado', :lancou,
+                    NULL, NULL, NULL),
+                   ('750001', 'Shopee Mini', 'f105.ci-2', 1, 'Manutenção', :lancou,
+                    NULL, NULL, NULL)
+            """
+        ),
+        {"lancou": lancou, "entrou": entrou},
+    )
+    await db.commit()
+
+    auth_as(await make_user(permissions=_perm(edit=False)))
+    items = (await client.get("/api/devolucoes-painel")).json()["items"]
+    por_sku = {i["sku"]: i for i in items if i["pedido_bling"] == "750001"}
+    novo, extraviado, tecnico = por_sku["f105.ci"], por_sku["f105.ci-1"], por_sku["f105.ci-2"]
+    assert novo["sku_lancado"] == "f105.sp" and novo["estoque_tag"] == "sp"
+    assert datetime.fromisoformat(novo["fechado_em"]) == entrou
+    assert extraviado["estoque_tag"] is None
+    assert datetime.fromisoformat(extraviado["fechado_em"]) == lancou
+    assert tecnico["estoque_tag"] is None and tecnico["fechado_em"] is None
+    # Cada peça do pedido também traz os dois (kit numa linha só filtra peça por peça).
+    lancs = {x["sku"]: x for x in novo["lancamentos"]}
+    assert lancs["f105.ci"]["estoque_tag"] == "sp"
+    assert datetime.fromisoformat(lancs["f105.ci"]["fechado_em"]) == entrou
+    assert lancs["f105.ci-1"]["estoque_tag"] is None
+    assert datetime.fromisoformat(lancs["f105.ci-1"]["fechado_em"]) == lancou
+    assert lancs["f105.ci-2"]["fechado_em"] is None
 
 
 async def test_resumo_comeca_na_virada(client, db: AsyncSession, make_user, auth_as):

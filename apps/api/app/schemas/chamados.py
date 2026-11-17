@@ -642,6 +642,39 @@ class AgentAbrirMlResultadoIn(BaseModel):
         return self
 
 
+class AgentAbrirLojaResultadoIn(BaseModel):
+    """17/11/2026 (Vinicius: "joga para o painel de chamado, lá a IA de Chamado vai
+    analisar se abriu ou não"): a IA abriu — ou não — NA TELA da Shopee/TikTok o
+    chamado que a API não aceita mais (só reembolso já pago ou em análise pela
+    plataforma). `ok` exige o `protocolo` que a tela mostrou e o `resumo` do que foi
+    feito (vira a análise "Feito na tela", que traz a IA de volta em 2 dias se a
+    plataforma não responder). `portal` = o protocolo é uma consulta do Portal de
+    Atendimento da Shopee ("Minhas solicitações"), que o robô de leitura consegue
+    abrir; protocolo de chat de atendente não abre lá (296423)."""
+
+    mensagem_id: UUID
+    ok: bool
+    protocolo: str | None = None
+    resumo: str | None = Field(default=None, max_length=600)
+    portal: bool = False
+    # "humano: <o que viu>" = vai direto pra Análise Humano (não tenta de novo)
+    erro: str | None = None
+    parado: Literal["captcha", "login"] | None = None
+    conversa: list[AgentFalaTelaIn] = Field(default_factory=list, max_length=60)
+
+    _clean = field_validator("erro", "resumo", "protocolo", mode="before")(_clean_optional_text)
+
+    @model_validator(mode="after")
+    def _coerente(self) -> "AgentAbrirLojaResultadoIn":
+        if self.ok and not (self.protocolo and self.resumo):
+            raise ValueError("ok=true exige protocolo e resumo")
+        if self.protocolo and not _PROTOCOLO_TELA.match(self.protocolo):
+            raise ValueError("protocolo: só letras, números, . _ / - (4 a 40)")
+        if self.ok and self.parado:
+            raise ValueError("parado só com ok=false")
+        return self
+
+
 class AgentMaosMlFilaIn(BaseModel):
     """30/09 (298394): as mãos do ML no Mac Santiago pedem as réplicas pra postar
     nas consultas do formulário de ajuda. `espiar` = modo seco (não marca)."""

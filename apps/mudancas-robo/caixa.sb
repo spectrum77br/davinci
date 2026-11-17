@@ -1,0 +1,79 @@
+;; Caixa (sandbox do macOS) das conferências que o robô de mudanças roda —
+;; SÓ depois do Aprovar, numa cópia nova do commit aprovado (pytest/ruff/node
+;; e a compilação da tela dos arquivos mexidos). Proteção a mais: mesmo
+;; aprovado, o código testado não alcança chaves, tokens, a rede nem os outros
+;; programas deste Mac.
+;;
+;; 3ª revisão (17/11/2026):
+;;   - leitura do HOME inteiro bloqueada; só o necessário é liberado (antes era
+;;     uma lista de bloqueio, e sempre faltava algum segredo: ~/.codex, ~/.davinci…);
+;;   - o Postgres dos testes é DESCARTÁVEL e roda DENTRO da caixa (o de
+;;     ~/Library roda fora dela, como superusuário: COPY … TO PROGRAM saía da caixa);
+;;   - nada de gravar preferências de outros apps (cfprefsd), abrir apps/URLs,
+;;     AppleScript, área de transferência, chaveiro, sinal para outros processos.
+;;
+;; Parâmetros (-D): CASA (o HOME), PASTA (onde ficam as cópias M-N), RAIZ (a
+;; pasta do robô), WT (a cópia do pedido), TMP (pasta temporária SÓ desta
+;; caixa: cache do uv, o Postgres descartável), NODEM e PNPM (os node_modules
+;; da tela, só leitura).
+;; Regra que casa por último vale. O caminho é comparado sem diferenciar
+;; maiúsculas (~/davinci = ~/DaVinci) — testado.
+(version 1)
+(allow default)
+
+;; ── leitura ──────────────────────────────────────────────────────────────
+(deny file-read* (subpath (param "CASA")))
+(allow file-read*
+  (subpath (param "WT"))
+  (subpath (param "TMP"))
+  (subpath (param "NODEM"))
+  (subpath (param "PNPM"))
+  ;; o Python do .venv vem daqui (uv)
+  (subpath (string-append (param "CASA") "/.local/share/uv/python")))
+;; "stat" das pastas do caminho (node e python sobem a árvore) e a lista das
+;; pastas que levam até a cópia (getcwd) — sem ler conteúdo de arquivo.
+(allow file-read-metadata (subpath (param "CASA")))
+(allow file-read*
+  (literal (param "CASA"))
+  (literal (param "PASTA"))
+  (literal (string-append (param "PASTA") "/.tmp-caixa")))
+;; a pasta do robô e qualquer .env: nada, nem o stat
+(deny file-read* (subpath (param "RAIZ")))
+(deny file-read* (regex #"/\.env($|\.)"))
+
+;; ── escrita: só a cópia do pedido (menos o .git dela) e a pasta temporária
+(deny file-write*
+  (require-all
+    (require-not (subpath (param "WT")))
+    (require-not (subpath (param "TMP")))
+    (require-not (subpath "/dev"))))
+;; O arquivo .git da cópia diz ao git onde está o repositório: quem o
+;; reescrevesse levaria o git do robô (fora da caixa) para uma config sua.
+(deny file-write* (literal (string-append (param "WT") "/.git")))
+;; preferências de outros apps (defaults write) gravam FORA da caixa pelo cfprefsd
+(deny user-preference-write)
+
+;; ── rede: nenhuma; só o socket do Postgres descartável (dentro de TMP)
+(deny network*)
+(allow network-bind network-inbound
+  (local unix-socket (path-literal (string-append (param "TMP") "/pg/.s.PGSQL.5432"))))
+(allow network-outbound
+  (remote unix-socket (path-literal (string-append (param "TMP") "/pg/.s.PGSQL.5432"))))
+
+;; ── outros programas do Mac
+(deny mach-lookup
+  (global-name "com.apple.SecurityServer")
+  (global-name "com.apple.securityd.xpc")
+  (global-name "com.apple.coreservices.launchservicesd")
+  (global-name "com.apple.coreservices.appleevents")
+  (global-name "com.apple.pasteboard.1")
+  (global-name-prefix "com.apple.lsd."))
+;; Nada de abrir app/URL (o `open` entrega para o LaunchServices, que roda
+;; FORA da caixa) nem AppleScript.
+(deny lsopen)
+(deny process-exec
+  (literal "/usr/bin/open")
+  (literal "/usr/bin/osascript"))
+;; sinal só entre os processos da própria caixa (o Postgres descartável usa)
+(deny signal)
+(allow signal (target same-sandbox))

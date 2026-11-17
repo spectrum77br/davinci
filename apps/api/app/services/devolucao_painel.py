@@ -79,6 +79,22 @@ def manutencao_pendente(lanc: Lancamento) -> bool:
     return _txt(lanc.condicao) == "Manutenção" and not _txt(lanc.manutencao_destino)
 
 
+def fechado_em(
+    lanc: Lancamento, *, entrada_estoque: datetime | None, lancado_em: datetime | None
+) -> datetime | None:
+    """Data de fechamento da peça (17/11/2026, Vinicius: "data fechamento que é
+    a data que ela lançou no estoque ou colocou como extraviado etc"): o dia em
+    que a peça teve destino. Entrou no estoque (ou voltou do técnico) → a
+    entrada; Perdimento, Extraviado, Não devolvido → o dia do lançamento.
+    Com o técnico, sem condição ou com a entrada no estoque pendente: ainda não
+    fechou (None)."""
+    if not _txt(lanc.condicao) or manutencao_pendente(lanc):
+        return None
+    if _txt(lanc.estoque_status) in _ESTOQUE_PENDENTE:
+        return None
+    return entrada_estoque or lancado_em
+
+
 def condicao_da_tela(lanc: Lancamento) -> str | None:
     """Rótulo da coluna Condição: Novo, Usado ou Perdimento (Vinicius: "não
     existe manutenção. ou é novo, ou usado ou perdimento"). Sucata = Perdimento.

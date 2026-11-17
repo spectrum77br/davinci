@@ -117,6 +117,24 @@ async def test_evento_grave_carimba_problema_uma_vez(db: AsyncSession, fake_17tr
     assert row.problema_correios_em == primeiro
 
 
+@pytest.mark.asyncio
+async def test_delivered_grava_a_hora_do_evento_dos_correios(db: AsyncSession, fake_17track):
+    """16/11 (Eduardo, pedido 306097): o pull traz a hora do EVENTO de entrega
+    (4º item) e é ela que vai pra `entregue_em`, não a hora da leitura."""
+    from datetime import UTC, datetime
+
+    _chamadas, estado = fake_17track
+    db.add(_amazon())
+    await db.commit()
+    evento = datetime(2026, 10, 28, 18, 23, tzinfo=UTC)  # 28/10 15:23 em Brasília
+    estado["eventos"] = [
+        ("AD912266053BR", "Gararu/SE — Objeto entregue ao destinatário", "Delivered", evento)
+    ]
+    await logistica_track_sync.run(db, pedidos=["296762"])
+    row = (await db.execute(select(Logistica))).scalars().one()
+    assert row.entregue_em == evento
+
+
 def test_aplicar_leitura_eventos_no_formato_antigo_continuam_valendo():
     # Fake antigo devolve 2-tuplas: nada quebra.
     r = _amazon()

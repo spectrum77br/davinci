@@ -96,6 +96,7 @@ from app.routers import redes_sociais as redes_sociais_router
 from app.routers import refunds as refunds_router
 from app.routers import segments as segments_router
 from app.routers import settings as settings_router
+from app.routers import sistema_mudancas as sistema_mudancas_router
 from app.routers import sites_custos as sites_custos_router
 from app.routers import sites_estoque as sites_estoque_router
 from app.routers import sites_midia as sites_midia_router
@@ -266,6 +267,8 @@ app.include_router(whatsapp_webhook_router.router)
 app.include_router(settings_router.router)
 app.include_router(alerts_router.router)
 app.include_router(claude_conector_router.router)
+app.include_router(sistema_mudancas_router.router)
+app.include_router(sistema_mudancas_router.robo_router)
 claude_conector_router.mascarar_token_no_access_log()  # token do conector fora do access log
 app.include_router(listings_router.router)
 app.include_router(pricing_router.router)

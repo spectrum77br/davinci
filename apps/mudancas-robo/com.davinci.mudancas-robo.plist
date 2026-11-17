@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Despertador do robô de mudanças do DaVinci: roda o rodada.py a cada minuto
+     (a rodada sai em segundos quando não há trabalho; uma de cada vez pela trava).
+     Instalar: ./instalar.sh (troca __RAIZ__ pela pasta e carrega no launchd). -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.davinci.mudancas-robo</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__RAIZ__/rodada.py</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MUDANCAS_RAIZ</key>
+    <string>__RAIZ__</string>
+  </dict>
+  <key>WorkingDirectory</key>
+  <string>__RAIZ__</string>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__RAIZ__/registros/despertador.log</string>
+  <key>StandardErrorPath</key>
+  <string>__RAIZ__/registros/despertador.log</string>
+</dict>
+</plist>

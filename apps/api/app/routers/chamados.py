@@ -33,10 +33,10 @@ from fastapi import (
     status,
 )
 from fastapi.responses import HTMLResponse
-from sqlalchemy import Text, and_, case, cast, false, func, literal, or_, select
+from sqlalchemy import Text, and_, case, cast, exists, false, func, literal, or_, select
 from sqlalchemy.dialects.postgresql import aggregate_order_by
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import defer, selectinload
+from sqlalchemy.orm import aliased, defer, selectinload
 
 from app.config import get_settings
 from app.db import get_session
@@ -60,6 +60,7 @@ from app.models import (
     ChamadoPedido,
     ChamadoRevisaoDia,
     DevolucaoAnexo,
+    DevolucaoRastreio,
     Devolution,
     Logistica,
     StoreInfo,
@@ -70,6 +71,7 @@ from app.models.chamado import CANAIS, ORIGENS
 from app.redis_client import redis
 from app.schemas.chamados import (
     AgentAbrirMlIn,
+    AgentAbrirLojaResultadoIn,
     AgentAbrirMlResultadoIn,
     AgentAnalisarIn,
     AgentAnalisarOut,
@@ -2804,6 +2806,266 @@ async def agent_abrir_ml_pegar(
 ERRO_ROBO_MAX = 2000
 
 
+async def _ligar_protocolo(
+    session: AsyncSession,
+    ch: Chamado,
+    numero: str,
+    url: str | None,
+    *,
+    de_tela: bool,
+    nota: str,
+) -> None:
+    """O nº que o robô/IA trouxe da tela vira o protocolo do chamado sem nº e volta
+    pra linha de onde o chamado nasceu (Logística, Reembolso de frete). `de_tela`:
+    22/09 — tira o caso da varredura por API (que não conhece protocolo de tela) e o
+    põe na fila de leitura do robô (`chamados.CASO_DE_TELA_SQL`); só pra número que
+    o robô de leitura sabe abrir (consulta do ML, Portal da Shopee)."""
+    ch.chamado = numero
+    ch.chamado_url = url or ch.chamado_url
+    if de_tela:
+        ch.chamado_de_tela = True
+    session.add(svc.registrar_sistema(ch, nota))
+    # Chamado que a Logística encaminhou ao robô do formulário: o
+    # protocolo volta pra linha da Logística (deixa de ser pendência lá).
+    if ch.origem == "logistica" and ch.origem_ref:
+        try:
+            lrow = await session.get(Logistica, UUID(str(ch.origem_ref)))
+        except ValueError:
+            lrow = None
+        if lrow is not None and not (lrow.chamado or "").strip():
+            lrow.chamado = numero
+            lrow.chamado_auto_at = datetime.now(UTC)
+            lrow.chamado_auto_erro = None
+    # 17/11/2026: chamado de frete que o robô criou a partir do Reembolso
+    # (services/chamado_frete_ml): o nº da consulta volta pra linha de lá,
+    # como o robô do Eduardo fazia.
+    refund = await chamado_frete_ml.refund_do_chamado(session, ch)
+    if refund is not None and not (refund.chamado or "").strip():
+        refund.chamado = numero
+        refund.chamado_url = ch.chamado_url or refund.chamado_url
+
+
+# ── Abrir na TELA da Shopee/TikTok (17/11/2026) ──────────────────────────────
+# Vinicius: "ele joga para o painel de chamado, lá no painel de chamado a IA de
+# Chamado vai analisar se abriu ou não, caso não ele reabre como precisar". O que a
+# API não aceita mais (só reembolso que a plataforma já pagou ou está analisando)
+# vira abertura `pendente` no canal robô (`chamados_devolucao._encaminhar_robo`), e
+# ninguém pegava essa fila desde set/2026: 298295 esperou 19 dias, a Fraude
+# automática empilhou 307228, 307238 e 308618. A IA de Chamado agora pega, abre pelo
+# atendimento da plataforma e devolve o protocolo — mesmo desenho do "abrir no ML".
+# Como a coluna `chamados.plataforma` grava as duas ("tiktok shop", "tik tok"…).
+_PLATAFORMAS_LOJA = svc.PLATAFORMAS_SO_COM_PEDIDO
+
+
+def _e_da_loja(ch: Chamado) -> bool:
+    return (ch.plataforma or "").strip().lower() in _PLATAFORMAS_LOJA
+
+
+def _condicoes_abrir_loja(agora: datetime) -> list:
+    """Abertura (ou réplica que a refaz) de chamado de DEVOLUÇÃO Shopee/TikTok, SÓ
+    REEMBOLSO (o tipo do caso na plataforma, o mesmo sinal do painel Fraude), sem nº,
+    na fila do robô. Fica de fora:
+    - a de Logística e o "não recebi o pacote de volta" com pacote: o texto e o
+      caminho da tela (defesa do só reembolso) não servem pra eles;
+    - a que alguém tratou DEPOIS de ir pro robô (análise, instrução ou fala da
+      plataforma): o caso já anda por outro caminho (298295: a IA resolveu pela
+      instrução do Cairo em 04/11 e a abertura de 29/10 ficou `pendente`). Conta a
+      hora em que ela foi pro robô (`updated_at`), não a em que nasceu na API;
+    - pedido com outro chamado de devolução que já tem nº na plataforma (troca de
+      motivo abre outro chamado): abrir de novo duplicaria o caso lá."""
+    depois = aliased(ChamadoMensagem)
+    irmao = aliased(Chamado)
+    return [
+        *_condicoes_da_fila(agora),
+        _SEM_PROTOCOLO,
+        Chamado.origem == "devolucao",
+        ChamadoMensagem.tipo.in_(_TIPOS_ABERTURA_ML),
+        func.lower(func.trim(func.coalesce(Chamado.plataforma, ""))).in_(_PLATAFORMAS_LOJA),
+        exists().where(
+            DevolucaoRastreio.pedido_bling == Chamado.pedido_bling,
+            func.upper(func.trim(func.coalesce(DevolucaoRastreio.devolucao_tipo_auto, "")))
+            == "REFUND",
+        ),
+        ~exists().where(
+            depois.chamado_id == Chamado.id,
+            depois.created_at > ChamadoMensagem.updated_at,
+            or_(depois.tipo.in_(("analise", "instrucao")), depois.direcao == "recebida"),
+        ),
+        ~exists().where(
+            irmao.pedido_bling == Chamado.pedido_bling,
+            irmao.id != Chamado.id,
+            irmao.origem == "devolucao",
+            func.trim(func.coalesce(irmao.chamado, "")) != "",
+        ),
+    ]
+
+
+@agent_router.post("/abrir-loja/fila", response_model=AgentLeaseOut)
+async def agent_abrir_loja_fila(
+    session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
+) -> AgentLeaseOut:
+    """Aberturas da Shopee/TikTok esperando a tela (só olha — não marca nada)."""
+    _so_cadastrado(cerebro)
+    conds = _condicoes_abrir_loja(datetime.now(UTC))
+    return AgentLeaseOut(tarefas=await _entregar(session, conds, 20, marcar=False))
+
+
+@agent_router.post("/abrir-loja/pegar", response_model=AgentTarefaOut)
+async def agent_abrir_loja_pegar(
+    body: AgentAbrirMlIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
+) -> AgentTarefaOut:
+    """A IA vai abrir ESTA na tela: marca `enviando` (ninguém mais pega; se ela
+    sumir, volta pra fila em 30 min). 409 se já não está na fila."""
+    _so_cadastrado(cerebro)
+    achada = (
+        await session.execute(
+            select(ChamadoMensagem.id)
+            .join(Chamado, Chamado.id == ChamadoMensagem.chamado_id)
+            .where(
+                ChamadoMensagem.id == body.mensagem_id,
+                *_condicoes_abrir_loja(datetime.now(UTC)),
+            )
+            .with_for_update(of=ChamadoMensagem)
+        )
+    ).scalar_one_or_none()
+    if achada is None:
+        raise HTTPException(409, detail={"code": "abertura_fora_da_fila"})
+    (t,) = await _entregar(session, [ChamadoMensagem.id == body.mensagem_id], 1, marcar=True)
+    # Marca no histórico: se a rodada morrer no meio (a tarefa volta em 30 min sem
+    # resultado), a IA vê que já esteve na tela e confere antes de mandar de novo.
+    ch = await _get(session, t.chamado_id)
+    quando = datetime.now(svc.SAO_PAULO).strftime("%d/%m %H:%M")
+    session.add(
+        svc.registrar_sistema(
+            ch, f"A {cerebro.row.nome or 'IA de Chamado'} pegou pra abrir na tela ({quando})"
+        )
+    )
+    await session.commit()
+    return t
+
+
+@agent_router.post("/abrir-loja/resultado", response_model=ChamadoMensagemOut)
+async def agent_abrir_loja_resultado(
+    body: AgentAbrirLojaResultadoIn,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    cerebro: Annotated[_Cerebro, Depends(_cerebro)],
+) -> ChamadoMensagemOut:
+    """Abriu: a conversa da tela entra como falas, o protocolo vira o nº do chamado
+    e fica a análise "Feito na tela … → aguardar a plataforma" (o lembrete de 2 dias
+    sem resposta traz a IA de volta pra conferir na tela). Não abriu: as regras do
+    robô (volta pra fila até 3 tentativas; erro que pede gente → Análise Humano) e a
+    conversa vira nota."""
+    row = _so_cadastrado(cerebro)
+    m = (
+        await session.execute(
+            select(ChamadoMensagem)
+            .options(selectinload(ChamadoMensagem.anexos))
+            .where(ChamadoMensagem.id == body.mensagem_id)
+        )
+    ).scalar_one_or_none()
+    if m is None:
+        raise HTTPException(404, detail={"code": "chamado_mensagem_not_found"})
+    ch = await _get(session, m.chamado_id)
+    if not (m.tipo in _TIPOS_ABERTURA_ML and (m.canal or "") == "robo" and _e_da_loja(ch)):
+        raise HTTPException(409, detail={"code": "abertura_fora_da_ia"})
+    if m.status == "enviada":
+        raise HTTPException(409, detail={"code": "abertura_ja_enviada"})
+    nome = row.nome or "IA de Chamado"
+    loja = "Shopee" if (ch.plataforma or "").strip().lower() == "shopee" else "TikTok"
+    encerrado = ch.resolvido or ch.status_plataforma in svc.STATUS_FINAIS
+    if body.ok and encerrado:
+        # Motivo trocado/retirado enquanto a IA estava na tela: o `agent_resultado`
+        # marca "retire a contestação". Sem análise "aguardar" (o lembrete de 2 dias
+        # mandaria a IA conferir um caso que a equipe foi mandada desistir) e a
+        # conversa vai como nota (fala nova tiraria o chamado do Encerrado).
+        nota = chamados_leitura.nota_da_conversa_da_tela(
+            body.conversa, titulo=f"Conversa na tela da {loja} (o chamado já estava Encerrado):"
+        )
+        session.add(
+            svc.registrar_sistema(
+                ch,
+                f"A {nome} abriu na tela da {loja} (protocolo {body.protocolo}) depois de o "
+                "chamado ficar Encerrado.",
+            )
+        )
+        if nota:
+            session.add(svc.registrar_sistema(ch, nota))
+        return await agent_resultado(
+            AgentResultadoIn(mensagem_id=m.id, ok=True, erro=None, chamado=None), session
+        )
+    if body.ok:
+        agora = datetime.now(UTC)
+        # Daqui em diante quem fala com a plataforma por este chamado é a tela: sai
+        # da varredura por API (chamado que o `chamados_pendencias` deixou em `api`
+        # seria lido pelo nº do chat — "essa devolução não existe" de hora em hora).
+        ch.canal = "robo"
+        if body.conversa:
+            await chamados_leitura.gravar_conversa_da_tela(
+                session, ch, body.conversa, autor_nosso=f"{nome} · na tela", agora=agora
+            )
+        if not (ch.chamado or "").strip():
+            await _ligar_protocolo(
+                session, ch, body.protocolo, None, de_tela=body.portal and loja == "Shopee",
+                nota=f"Protocolo {body.protocolo} anotado pela {nome} (aberto na tela da {loja})",
+            )
+        elif ch.chamado.strip() != body.protocolo:
+            session.add(
+                svc.registrar_sistema(
+                    ch,
+                    f"A {nome} abriu na tela da {loja} com o protocolo {body.protocolo}, mas o "
+                    f"chamado já tinha o nº {ch.chamado.strip()} — conferir se ficaram dois.",
+                )
+            )
+        resumo = body.resumo or ""
+        if not resumo.startswith("Feito na tela"):
+            resumo = f"Feito na tela ({ch.conta or loja}): {resumo}"
+        analise = svc.nova_mensagem(
+            ch,
+            texto=f"Análise da {nome} [abertura_na_tela]: {resumo} → {svc.ACAO_ESPERAR_TXT}",
+            tipo="analise",
+            direcao="sistema",
+            autor_nome=nome,
+            status="registrada",
+        )
+        analise.canal = "robo"
+        # Depois das falas gravadas (todas antes de `agora`): a análise é a mais nova
+        # e a IA não acorda pra ler o que ela mesma acabou de gravar.
+        analise.created_at = analise.updated_at = agora
+        session.add(analise)
+        return await agent_resultado(
+            AgentResultadoIn(mensagem_id=m.id, ok=True, erro=None, chamado=None),
+            session,
+        )
+    erro = (body.erro or "").strip()
+    if erro[:7].lower() == "humano:":
+        erro = "humano:" + erro[7:]
+    if body.parado:
+        erro = f"humano: parou na tela ({body.parado}) — {body.erro or 'perfil deixado aberto'}"
+    elif not erro:
+        erro = f"a IA não conseguiu abrir o chamado na {loja}"
+    nota = chamados_leitura.nota_da_conversa_da_tela(
+        body.conversa,
+        titulo=f"Conversa na tela da {loja} (o chamado não foi aberto):",
+    )
+    if nota:
+        session.add(svc.registrar_sistema(ch, nota))  # o commit é o do agent_resultado
+    out = await agent_resultado(
+        AgentResultadoIn(mensagem_id=m.id, ok=False, erro=erro, chamado=None), session
+    )
+    if body.parado:
+        try:
+            ch = await _get(session, m.chamado_id)
+            await chamados_ia_aviso.avisar(session, ch, body.parado, erro)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception("chamados_ia_aviso_falhou", chamado_id=str(m.chamado_id))
+    return out
+
+
 @agent_router.post("/abrir-ml/resultado", response_model=ChamadoMensagemOut)
 async def agent_abrir_ml_resultado(
     body: AgentAbrirMlResultadoIn,
@@ -2919,33 +3181,10 @@ async def agent_resultado(
                 )
             )
         if body.chamado and not (ch.chamado or "").strip():
-            ch.chamado = body.chamado
-            ch.chamado_url = body.chamado_url or ch.chamado_url
-            # 22/09: este número veio DA TELA. É o que tira o caso da varredura por
-            # API (que não conhece protocolo de tela) e o põe na fila de leitura do
-            # robô — ver `chamados.CASO_DE_TELA_SQL`.
-            ch.chamado_de_tela = True
-            session.add(
-                svc.registrar_sistema(ch, f"Protocolo {body.chamado} capturado pelo {AUTOR_ROBO}")
+            await _ligar_protocolo(
+                session, ch, body.chamado, body.chamado_url, de_tela=True,
+                nota=f"Protocolo {body.chamado} capturado pelo {AUTOR_ROBO}",
             )
-            # Chamado que a Logística encaminhou ao robô do formulário: o
-            # protocolo volta pra linha da Logística (deixa de ser pendência lá).
-            if ch.origem == "logistica" and ch.origem_ref:
-                try:
-                    lrow = await session.get(Logistica, UUID(str(ch.origem_ref)))
-                except ValueError:
-                    lrow = None
-                if lrow is not None and not (lrow.chamado or "").strip():
-                    lrow.chamado = body.chamado
-                    lrow.chamado_auto_at = datetime.now(UTC)
-                    lrow.chamado_auto_erro = None
-            # 17/11/2026: chamado de frete que o robô criou a partir do Reembolso
-            # (services/chamado_frete_ml): o nº da consulta volta pra linha de lá,
-            # como o robô do Eduardo fazia.
-            refund = await chamado_frete_ml.refund_do_chamado(session, ch)
-            if refund is not None and not (refund.chamado or "").strip():
-                refund.chamado = body.chamado
-                refund.chamado_url = ch.chamado_url or refund.chamado_url
         elif body.chamado_url and not ch.chamado_url:
             ch.chamado_url = body.chamado_url
     else:

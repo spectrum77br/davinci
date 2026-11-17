@@ -114,6 +114,8 @@ async def test_handshake_e_lista_de_ferramentas(
         "consultar_pedido",
         "listar_dms",
         "responder_dm",
+        "pedir_mudanca",
+        "listar_mudancas",
     ]
     assert tools[0]["inputSchema"]["required"] == ["descricao"]
     assert tools[0]["annotations"]["destructiveHint"] is False
@@ -380,6 +382,8 @@ async def test_lista_pendentes_e_conclui_pelo_codigo(
         "consultar_pedido",
         "listar_dms",
         "responder_dm",
+        "pedir_mudanca",
+        "listar_mudancas",
     ]
 
     r = await client.post(url, json=_tool(3, "listar_tarefas"))
@@ -664,7 +668,9 @@ async def test_consultar_pedido_ramos_vazios_vencido_cancelado_e_rastreio_sem_la
     assert "Pedido Bling 295071" in texto and "situação Bling: Em digitação" in texto
     assert "despachar até" in texto and "PRAZO DE ENVIO VENCIDO, sem despacho registrado" in texto
     assert "Logística: pedido não está no painel de Logística." in texto
-    assert "Chamados: nenhum." in texto and "Devolução: nenhuma." in texto
+    assert "Chamados abertos pela equipe (aba Chamados): nenhum." in texto
+    assert "Devolução: nenhuma." in texto
+    assert "Atendimento: nenhuma conversa ligada a este pedido." in texto
     assert "Margem: pedido não está na tela de Margem." in texto
 
     r = await client.post(url, json=_tool(2, "consultar_pedido", pedido="295072"))

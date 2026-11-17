@@ -117,6 +117,7 @@ from app.services.mail_atendimento import (
     pastas,
     pedido,
     regras,
+    reivindicacao,
     rotear,
     suspeito,
     texto,
@@ -1223,6 +1224,7 @@ async def gravar_na_conversa(
         assunto=protegido.assunto,
         texto=protegido.texto,
         remetente_tipo=meta.remetente_tipo,
+        remetente=email.de,
     )
     venda_pela_pasta = (
         classe_email.tipo_pela_pasta and classe_email.tipo_email == classificacao.TIPO_VENDA
@@ -1765,10 +1767,19 @@ async def processar(
     versao = REGRAS_VERSAO
     if pastas.e_criada(pasta) and not enviado:
         escolhida = regras.categoria_que_vale(pasta)
-        if escolhida in CATEGORIAS_PELA_PASTA:
+        # 16/11/2026 (pedido 306097): a reivindicação A a Z / o estorno da Amazon
+        # (remetente da Amazon) liga como a Entrada mesmo numa pasta Informativa,
+        # de Venda ou sem categoria — a pasta "problemas" é Informativa e o caso
+        # tem débito e prazo. A pasta Chamado continua indo para a Pós-venda.
+        pela_entrada = escolhida != CATEGORIA_CHAMADO and _reivindicacao_da_amazon(email)
+        if escolhida in CATEGORIAS_PELA_PASTA and not pela_entrada:
             versao = REGRAS_VERSAO_CATEGORIA
             categoria = escolhida
-        elif escolhida is None and not await _fio_ou_protocolo_da_equipe(session, email, classe):
+        elif (
+            escolhida is None
+            and not pela_entrada
+            and not await _fio_ou_protocolo_da_equipe(session, email, classe)
+        ):
             return _so_estado(
                 meta,
                 ESTADO_IGNORADO,
@@ -1981,6 +1992,7 @@ async def processar(
             assunto=protegido.assunto,
             texto=protegido.texto,
             remetente_tipo=meta.remetente_tipo,
+            remetente=email.de,
         )
         if categoria == CATEGORIA_CHAMADO:
             # O tipo é chamado pela pasta; o caso rotulado fica (a Pós-venda acha
@@ -2005,6 +2017,21 @@ async def processar(
         # A loja é a ficha (sem integração): entra na conversa dela, com o aviso.
         _alerta(meta, "loja_sem_integracao", ALERTA_LOJA_SEM_INTEGRACAO)
 
+    # 16/11/2026 (pedido 306097): a reivindicação A a Z / o estorno da Amazon
+    # abre a vez da loja mesmo sendo aviso de plataforma com API
+    # (`PLATAFORMAS_EMAIL_SO_AVISO`): a API da Amazon não tem esse caso — o
+    # e-mail é o único lugar dele. Fila de pessoa; nenhum chamado é criado.
+    caso_amazon = (
+        None
+        if categoria == CATEGORIA_VENDA
+        else reivindicacao.ler(
+            de=email.de,
+            plataforma=meta.plataforma,
+            assunto=protegido.assunto,
+            texto=protegido.texto,
+        )
+    )
+
     # A Amazon que já entrou pelo Gmail: a mesma mensagem, ligada (nunca duplicada).
     # (O e-mail de pasta "chamado" vai para a Pós-venda, não para conversa.)
     ja = await _amazon_pelo_gmail(session, email, rota) if categoria != CATEGORIA_CHAMADO else None
@@ -2013,6 +2040,11 @@ async def processar(
         meta.mensagem_id = ja.id
         meta.vinculado_por = "amazon_gmail"
         meta.estado = ESTADO_GRAVADO
+        # 16/11 (Eduardo, revisão): a decisão que já entrou pelo Gmail também
+        # atualiza o espelho (antes saía daqui sem encerrar a linha aberta).
+        await _espelhar_reivindicacao(
+            session, caso_amazon, meta, email, ja.conversa_id, rota, protegido, None, agora
+        )
         return meta.estado
 
     autor = AUTOR_CLIENTE if tipo == REMETENTE_COMPRADOR else AUTOR_SISTEMA
@@ -2024,6 +2056,9 @@ async def processar(
         abre = False
     if classe_email.tipo_email in (classificacao.TIPO_INFORMATIVO, classificacao.TIPO_VENDA):
         abre = False
+    if caso_amazon is not None:
+        # A reivindicação/o estorno da Amazon abre a vez da loja (ver acima).
+        abre = True
 
     # A devolução do servidor do cliente: aviso na conversa do fio (ou nada).
     if enderecos.e_tecnico(email.de):
@@ -2115,6 +2150,11 @@ async def processar(
             _alerta(meta, "suspeito_sem_vinculo", "remetente suspeito: não foi ligado ao pedido")
 
     if categoria == CATEGORIA_CHAMADO:
+        # 16/11 (Eduardo, revisão): a decisão na pasta de Chamado também
+        # atualiza o espelho (sem conversa: o e-mail vai para a Pós-venda).
+        await _espelhar_reivindicacao(
+            session, caso_amazon, meta, email, None, rota, protegido, pedido_achado, agora
+        )
         # A pasta de CHAMADO (decisão 3 do dono): a Pós-venda › Chamados.
         return await _ligar_ao_chamado(
             session,
@@ -2169,6 +2209,9 @@ async def processar(
         externo=externo,
         classe_email=classe_email,
     )
+    await _espelhar_reivindicacao(
+        session, caso_amazon, meta, email, conversa.id, rota, protegido, pedido_achado, agora
+    )
     if rota.site:
         meta.estado = ESTADO_GRAVADO
     else:
@@ -2181,6 +2224,61 @@ async def processar(
             else ESTADO_SEM_VINCULO
         )
     return meta.estado
+
+
+def _reivindicacao_da_amazon(email: Email) -> bool:
+    """Reivindicação A a Z / estorno vindo da Amazon (antes da loja; nunca a
+    retransmissão do comprador)."""
+    caso = reivindicacao.ler(
+        de=email.de,
+        plataforma=None,
+        assunto=email.assunto,
+        texto=texto.legivel(email.texto),
+    )
+    return caso is not None and caso.da_amazon
+
+
+async def _espelhar_reivindicacao(
+    session: AsyncSession,
+    caso: reivindicacao.Reivindicacao | None,
+    meta: MailMessageMeta,
+    email: Email,
+    conversa_id: UUID | None,
+    rota: rotear.Rota,
+    protegido: codigos.Protegido,
+    pedido_achado: str | None,
+    agora: datetime,
+) -> None:
+    """O caso da Amazon em `atendimento_reclamacoes` (16/11/2026, `reivindicacao`).
+
+    Só o remetente do modelo (`oficial`), nunca o e-mail suspeito, só na loja
+    da Amazon. O pedido achado na loja vale mais que o do texto. Num
+    SAVEPOINT: um erro aqui só deixa de espelhar o caso — o e-mail continua
+    gravado e na fila. Nenhum chamado é criado (regra do dono, 21/10: e-mail
+    não cria chamado).
+    """
+    if (
+        caso is None
+        or not caso.oficial
+        or meta.suspeito
+        or rota.plataforma != reivindicacao.PLATAFORMA
+    ):
+        return
+    if pedido_achado and pedido_achado != caso.pedido:
+        caso = replace(caso, pedido=pedido_achado)
+    try:
+        async with session.begin_nested():
+            await reivindicacao.gravar(
+                session,
+                caso,
+                quando=gravar._utc(email.message.received_at) or agora,
+                integration_id=rota.integration_id,
+                conversa_id=conversa_id,
+                assunto=protegido.assunto,
+                mail_message_id=meta.message_id,
+            )
+    except Exception as exc:  # noqa: BLE001 — o espelho nunca derruba o e-mail
+        logger.warning("ponte_reivindicacao_amazon_falhou", err=type(exc).__name__)
 
 
 async def _ligar_ao_chamado(
@@ -2488,6 +2586,18 @@ async def rodar(session: AsyncSession, *, limite: int = PONTE_POR_VOLTA) -> dict
     except Exception as e:  # noqa: BLE001
         await session.rollback()
         logger.warning("mail_ponte_envios_falhou", erro=type(e).__name__)
+    # 16/11 (Eduardo, revisão): a reivindicação/o estorno da Amazon aberto que
+    # nenhum e-mail encerrou fecha sozinho depois de 30 dias sem notícia
+    # (`reivindicacao.encerrar_sem_noticia`) — senão a etiqueta Reclamação e a
+    # IA parada naquele pedido ficavam para sempre.
+    try:
+        fechadas = await reivindicacao.encerrar_sem_noticia(session, agora=datetime.now(UTC))
+        await session.commit()
+        if fechadas:
+            logger.info("mail_ponte_reivindicacao_sem_noticia", fechadas=fechadas)
+    except Exception as e:  # noqa: BLE001 — a próxima volta tenta de novo
+        await session.rollback()
+        logger.warning("mail_ponte_reivindicacao_sem_noticia_falhou", erro=type(e).__name__)
     if resumo["processados"] or resumo["erros"] or resumo["envios"]:
         logger.info("mail_ponte_volta", **resumo, **{f"estado_{k}": v for k, v in estados.items()})
     return resumo

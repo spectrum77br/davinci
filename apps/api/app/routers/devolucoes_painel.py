@@ -55,6 +55,7 @@ from app.services import devolucao_conferencia as conferencia
 from app.services import devolucao_painel as contas
 from app.services import devolucao_resolver_sozinho as resolver_sozinho
 from app.services.devolution_stock_return import status_estoque
+from app.services.sku_tags import classify_sku_tag
 
 logger = structlog.get_logger()
 router = APIRouter(prefix="/api/devolucoes-painel", tags=["devolutions"])
@@ -87,6 +88,9 @@ class PainelLancamentoOut(BaseModel):
     sku_lancado: str | None = None
     estoque_status: str | None = None
     data_devolvido_estoque: datetime | None = None
+    # Filtros da lista (17/11/2026): estoque em que entrou e data de fechamento.
+    estoque_tag: str | None = None
+    fechado_em: datetime | None = None
     manutencao_pendente: bool = False
     tecnico: str | None = None
     prazo_manutencao: datetime | None = None
@@ -141,6 +145,10 @@ class PainelItemOut(AcompanhamentoItemOut):
     lancamentos: list[PainelLancamentoOut] = Field(default_factory=list)
     condicao_tela: str | None = None
     sku_lancado: str | None = None
+    # Filtros da lista (17/11/2026): o estoque em que a peça da linha entrou
+    # (tag do SKU lançado: ci, pi, sp, mala…) e a data de fechamento dela.
+    estoque_tag: str | None = None
+    fechado_em: datetime | None = None
     lancamentos_a_mais: int = 0
     chamado: PainelChamadoOut | None = None
     tem_chamado_aberto: bool = False
@@ -254,6 +262,17 @@ def _sku_lancado(d: Devolution) -> str | None:
     if d.data_devolvido_estoque is None or d.estoque_mov_revertido_at is not None:
         return None
     return (d.estoque_mov_sku or d.estoque_destino_sku or "").strip() or None
+
+
+def _fechado_em(d: Devolution, c: contas.Lancamento) -> datetime | None:
+    """Data de fechamento da peça (ver contas.fechado_em). Entrada estornada
+    (ex.: Usado que virou Perdimento) não vale mais."""
+    estornada = d.estoque_mov_revertido_at is not None
+    return contas.fechado_em(
+        c,
+        entrada_estoque=None if estornada else d.data_devolvido_estoque,
+        lancado_em=d.created_at,
+    )
 
 
 async def _lancamentos_por_pedido(
@@ -460,6 +479,8 @@ async def montar_itens(
                 sku_lancado=_sku_lancado(x),
                 estoque_status=c.estoque_status,
                 data_devolvido_estoque=x.data_devolvido_estoque,
+                estoque_tag=classify_sku_tag(_sku_lancado(x)),
+                fechado_em=_fechado_em(x, c),
                 manutencao_pendente=contas.manutencao_pendente(c),
                 tecnico=x.tecnico,
                 prazo_manutencao=x.prazo,
@@ -478,8 +499,11 @@ async def montar_itens(
         )
         if da_linha is not None:
             i = da_conta.index(da_linha)
+            x = do_pedido[i]
             d["condicao_tela"] = contas.condicao_da_tela(da_linha)
-            d["sku_lancado"] = _sku_lancado(do_pedido[i])
+            d["sku_lancado"] = _sku_lancado(x)
+            d["estoque_tag"] = classify_sku_tag(d["sku_lancado"])
+            d["fechado_em"] = _fechado_em(x, da_linha)
             d["lancamentos_a_mais"] = a_mais
         if chs:
             ch = chs[0]

@@ -2816,6 +2816,26 @@ async def logistica_amazon_avisos(ctx: dict) -> None:
     logger.info("logistica_amazon_avisos_done", **summary)
 
 
+async def amazon_transportadora_correios(ctx: dict) -> None:
+    """A cada 15 min (:11/:26/:41/:56): no envio próprio da Amazon, o pacote
+    que a integração do Bling confirmou com a transportadora "MelhorEnvio"
+    (que a Amazon não reconhece — entrega nunca registrada, risco de A a Z) é
+    reconfirmado com "Correios", mesmo rastreio/serviço/data/itens. Só pacote
+    despachado nas últimas 72 h, no máximo 2 vezes por pedido (Eduardo,
+    16/11/2026). No-op fora do servidor e com
+    `AMAZON_TRANSPORTADORA_CORREIOS=false` no .env — vale só com o worker
+    RECRIADO (`up -d --no-deps --force-recreate worker`); `restart` não relê o
+    .env (ver config.py)."""
+    from app.services import amazon_transportadora as svc  # tardio: httpx + models
+
+    try:
+        async with session_scope() as s:
+            resumo = await svc.rodada(s)
+        logger.info("amazon_transportadora_correios_tick", **resumo)
+    except Exception as e:  # noqa: BLE001 — a rodada seguinte tenta de novo
+        logger.exception("amazon_transportadora_correios_tick_falhou", err=str(e)[:200])
+
+
 async def logistica_cliente_mensagens(ctx: dict) -> None:
     """A cada 15 min (:08/:23/:38/:53): manda ao comprador da Amazon, por
     e-mail pro endereço de retransmissão, o que ainda não foi mandado —
@@ -5964,6 +5984,16 @@ class WorkerSettings:
         ),
         # Amazon Envio próprio: avisos Threema de prazo (08:06 e 16:06 BRT).
         cron(logistica_amazon_avisos, hour={11, 19}, minute=6, run_at_startup=False, timeout=600),
+        # Amazon envio próprio: "MelhorEnvio" → "Correios" a cada 15 min
+        # (:11/:26/:41/:56 — fora da varredura Amazon de :49). Uma tentativa só
+        # (padrão do cron): a rodada seguinte é a retentativa. Timeout < 15 min:
+        # duas rodadas nunca se sobrepõem.
+        cron(
+            amazon_transportadora_correios,
+            minute={11, 26, 41, 56},
+            run_at_startup=False,
+            timeout=600,
+        ),
         # Mensagens ao comprador da Amazon a cada 15 min (:08/:23/:38/:53 —
         # depois do sync do 17track de :05/:20/:35/:50, que é quem carimba
         # entrega e ocorrência grave).

@@ -23,6 +23,7 @@ from app.security.otp import (
     verify_code,
 )
 from app.security.password import dummy_verify, verify_password
+from app.services import sistema_mudancas
 from app.services.app_uranyx import acesso as app_uranyx_acesso
 from app.services.atendimento import acesso as atendimento_acesso
 from app.services.rate_limit import RateLimitError, sliding_window_check
@@ -409,4 +410,12 @@ async def me(
     # Módulo App Uranyx (06/10/2026): a mesma regra da trava da API. Vem
     # SEMPRE, true ou false (contrato conteudo-e-catalogo-v1, seção 6).
     extra["app_uranyx"] = app_uranyx_acesso.liberado(user)
+    # Sistema › Mudanças (17/11/2026): como o Histórico, a chave só aparece
+    # para quem aprova; falha aqui nunca tranca o login.
+    try:
+        async with session.begin_nested():
+            if await sistema_mudancas.pode_aprovar(session, user):
+                extra["mudancas"] = True
+    except Exception:  # noqa: BLE001
+        logger.warning("mudancas_me_falhou")
     return JSONResponse({**out.model_dump(mode="json"), **extra})

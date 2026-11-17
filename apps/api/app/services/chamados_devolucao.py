@@ -279,6 +279,18 @@ def _sem_devolucao(dev: Devolution) -> bool:
     return (dev.condicao_produto or "").strip() == "Não devolvido"
 
 
+def _so_reembolso(plat: str | None, dev: Devolution, rast: DevolucaoRastreio | None) -> bool:
+    """Só reembolso da Shopee/TikTok (o tipo do caso na plataforma, o mesmo sinal do
+    painel Fraude) lançado como "Não devolvido": nada voltou. Golpe COM pacote
+    (voltou outra coisa na caixa) também é "Não devolvido", mas o tipo é devolução."""
+    return (
+        plat in (PLAT_TIKTOK, PLAT_SHOPEE)
+        and _sem_devolucao(dev)
+        and rast is not None
+        and (rast.devolucao_tipo_auto or "").strip().upper() == "REFUND"
+    )
+
+
 def _base_sku(sku: str | None) -> str:
     """Primeiro SKU da linha (kit vem "dg048.ra+a003.ra"), sem sufixo regional."""
     s = (sku or "").strip().lower()
@@ -331,6 +343,21 @@ _INTRO: dict[str, str] = {
     "SRF5": "Recebemos o pacote da devolução sem o produto dentro.",
     "SRF6": "Recebemos a devolução com problema no produto.",
     "SRF7": "O pacote da devolução ainda não chegou até nós.",
+}
+# 17/11/2026 (308618, print do Vinicius: "começa a mensagem com recebemos a
+# devolução"): no SÓ REEMBOLSO da Shopee/TikTok nada voltou, mas o rascunho do
+# chamado — o que a tela mostra no minuto antes do disparo trocar pelo texto do só
+# reembolso — saía com "Recebemos a devolução…". Só no rascunho (`garantir_chamado`):
+# "Não devolvido" também é o golpe COM pacote (voltou outra coisa na caixa), e aí o
+# "Recebemos a devolução e o produto devolvido é diferente" é o certo.
+_SEM_DEVOLUCAO = "O comprador pediu reembolso sem devolver o produto"
+_INTRO_SEM_DEVOLUCAO: dict[str, str] = {
+    "SRF2": f"{_SEM_DEVOLUCAO}, alegando que ele chegou danificado.",
+    "SRF3": f"{_SEM_DEVOLUCAO}, alegando que faltaram itens no pacote.",
+    "SRF4": f"{_SEM_DEVOLUCAO}, alegando que recebeu outro produto ou a caixa vazia.",
+    "SRF5": f"{_SEM_DEVOLUCAO}, alegando que o pacote chegou sem o produto.",
+    "SRF6": f"{_SEM_DEVOLUCAO}, alegando problema no produto.",
+    "SRF7": f"{_SEM_DEVOLUCAO}, alegando que não recebeu o pedido.",
 }
 
 
@@ -408,6 +435,7 @@ def texto_padrao(
     linhas: list[Devolution] | None = None,
     observacao_extra: str | None = None,
     link_abertura: str | None = None,
+    so_reembolso: bool = False,
 ) -> str:
     """Mensagem que vai pra plataforma (o operador não digita nada — é
     automático). `reason` é o motivo do ML (SRF*) — nas outras plataformas o
@@ -421,6 +449,8 @@ def texto_padrao(
             "Recebemos a devolução, mas o produto voltou bloqueado por senha "
             "(trava/cadeado com senha definida pelo comprador), o que impede a revenda."
         )
+    elif so_reembolso:
+        intro = _INTRO_SEM_DEVOLUCAO.get(reason or "", f"{_SEM_DEVOLUCAO}.")
     else:
         intro = _INTRO.get(reason or "", f"Recebemos a devolução com problema ({motivo}).")
     linhas_txt = [intro]
@@ -855,7 +885,10 @@ async def garantir_chamado(session: AsyncSession, dev: Devolution) -> Chamado | 
     if msg is None:
         msg = chamados_svc.nova_mensagem(
             ch,
-            texto=texto_padrao(dev, reason_para(dev), linhas=await _linhas_do_pedido(session, dev)),
+            texto=texto_padrao(
+                dev, reason_para(dev), linhas=await _linhas_do_pedido(session, dev),
+                so_reembolso=_so_reembolso(plat, dev, rast),
+            ),
             tipo=TIPO_ABERTURA,
             autor_nome=chamados_svc.AUTOR_SISTEMA,
             status="pendente",
@@ -2752,6 +2785,8 @@ async def _disparar(
         dev, reason, fotos=len(fotos_reais), link_envio=link or None,
         cartao_video=cartao is not None, linhas=linhas,
         link_abertura=link_abertura_do_pedido(dev, linhas) or None,
+        # 17/11/2026: o disparo que fica pendente/falha deixa este texto na tela.
+        so_reembolso=_so_reembolso(plat, dev, await rastreio_do_pedido(session, dev.pedido_bling)),
     )
     referencia = detalhe = None
     try:

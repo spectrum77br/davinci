@@ -61,7 +61,10 @@ INSTRUCOES = (
     "ele ditar por áudio; `listar_tarefas` quando perguntar o que está pendente ou o que "
     "mandou; `concluir_tarefa` quando disser que terminou algo (confirme qual antes); "
     "`consultar_pedido` quando uma tarefa ou pergunta citar um número de pedido (somente "
-    "leitura). Responda sempre com o texto devolvido pela ferramenta."
+    "leitura); `pedir_mudanca` quando quiser corrigir ou mudar o PRÓPRIO sistema (texto, "
+    "regra, tela) — vai para um robô e só entra no ar depois de aprovada pelo Eduardo ou "
+    "pelo Thorfinn; `listar_mudancas` para ver em que pé estão. Responda sempre com o "
+    "texto devolvido pela ferramenta."
 )
 MAX_CORPO_BYTES = 64 * 1024
 MAX_LOTE = 5

@@ -305,18 +305,33 @@ async def _run(
     return resumo
 
 
+def momento_da_entrega(evento_em: datetime | None, agora: datetime) -> datetime:
+    """O que gravar em `entregue_em`. 16/11 (Eduardo, pedido 306097): a hora do
+    EVENTO de entrega dos Correios, não a da leitura — o DaVinci mostrava
+    29/10 11:01 (reconsulta forçada) pra uma entrega de 28/10 15:23. Sem data
+    do evento no payload, a hora da leitura (como era). Nunca no futuro: data
+    adiantada (relógio/fuso errado do outro lado) vira `agora`."""
+    if evento_em is None:
+        return agora
+    if evento_em.tzinfo is None:
+        evento_em = evento_em.replace(tzinfo=UTC)
+    return min(evento_em, agora)
+
+
 def aplicar_leitura(
     row: Logistica,
     loc: str | None,
     *,
     entregue: bool = False,
+    entregue_evento_em: datetime | None = None,
     agora: datetime | None = None,
 ) -> bool:
     """Aplica na linha uma leitura dos Correios (push do webhook OU pull do
     17track): localização + carimbo, divergência pela regra da plataforma,
-    entrega (`entregue_em`, uma vez) e ocorrência grave (`problema_correios`,
-    na primeira vez que aparece). Devolve True se a LOCALIZAÇÃO mudou — é o
-    que conta como "atualizado" nos resumos."""
+    entrega (`entregue_em`, uma vez — com a hora do EVENTO, `entregue_evento_em`,
+    quando a leitura a traz; ver `momento_da_entrega`) e ocorrência grave
+    (`problema_correios`, na primeira vez que aparece). Devolve True se a
+    LOCALIZAÇÃO mudou — é o que conta como "atualizado" nos resumos."""
     agora = agora or datetime.now(UTC)
     mudou = False
     if loc and logistica_rules.devolucao_manda_localizacao(row.meli_status):
@@ -338,7 +353,7 @@ def aplicar_leitura(
         )
         mudou = True
     if entregue and row.entregue_em is None:
-        row.entregue_em = agora
+        row.entregue_em = momento_da_entrega(entregue_evento_em, agora)
     return mudou
 
 
@@ -379,6 +394,7 @@ def _aplicar_info(row: Logistica, info: dict[str, Any], agora: datetime) -> bool
         row,
         info.get("localizacao"),
         entregue=(info.get("status") == "Delivered"),
+        entregue_evento_em=info.get("entregue_evento_em"),
         agora=agora,
     )
 
@@ -502,28 +518,40 @@ async def _aplicar_localizacoes(
     session: AsyncSession, linhas: list[Logistica], eventos: list[tuple]
 ) -> int:
     """Grava nas linhas a localização que veio do 17track (só o que mudou),
-    recalculando a divergência ML × físico, e carimba entrega ("Delivered")
-    e ocorrência grave. `eventos` = [(numero, localizacao[, status])].
+    recalculando a divergência ML × físico, e carimba entrega ("Delivered",
+    com a hora do evento) e ocorrência grave. `eventos` =
+    [(numero, localizacao[, status[, entregue_evento_em]])].
     Devolve quantas mudaram de localização."""
-    por_numero: dict[str, tuple[str, str]] = {}
+    por_numero: dict[str, tuple[str, str, datetime | None]] = {}
     for ev in eventos:
         n, loc = ev[0], ev[1]
         st = str(ev[2]) if len(ev) > 2 and ev[2] else ""
-        por_numero[_num(n)] = (loc, st)
+        quando = ev[3] if len(ev) > 3 and isinstance(ev[3], datetime) else None
+        por_numero[_num(n)] = (loc, st, quando)
     agora = datetime.now(UTC)
     atualizados = 0
+    carimbou_entrega = False
     graves: list[tuple[str, str, str]] = []
     for r in linhas:
         ev = por_numero.get(_num(r.rastreio_17track))
         if not ev:
             continue
-        loc, st = ev
+        loc, st, quando = ev
         grave_antes = r.problema_correios_em
-        if aplicar_leitura(r, loc, entregue=(st == "Delivered"), agora=agora):
+        entregue_antes = r.entregue_em
+        if aplicar_leitura(
+            r, loc, entregue=(st == "Delivered"), entregue_evento_em=quando, agora=agora
+        ):
             atualizados += 1
             if r.problema_correios_em is not None and r.problema_correios_em != grave_antes:
                 graves.append((r.pedido_bling or "?", r.conta or "?", loc))
-    if atualizados or any(r.entregue_em == agora for r in linhas):
+        # 16/11 (Eduardo): o carimbo agora é a hora do EVENTO, não `agora` — a
+        # comparação antiga (`entregue_em == agora`) nunca mais bateria e a
+        # entrega ficaria sem salvar quando a localização não muda (ex.: na
+        # reconsulta forçada das 07:00/16:30, que não tem commit depois).
+        if entregue_antes is None and r.entregue_em is not None:
+            carimbou_entrega = True
+    if atualizados or carimbou_entrega:
         await session.commit()
     if graves:
         await avisar_graves(graves)

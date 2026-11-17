@@ -56,6 +56,11 @@ from app.models.chamado import (
     ChamadoRevisaoDia,
 )
 from app.models.claude_conector import ClaudeConector
+from app.models.sistema_mudanca import (
+    SistemaMudanca,
+    SistemaMudancaAprovador,
+    SistemaMudancaRobo,
+)
 from app.models.company import Cadastro, CadastroStore, Company, Store
 from app.models.company_certificate import CompanyCertificate
 from app.models.conferencia_shopee import (
@@ -380,6 +385,9 @@ __all__ = [
     "AtendimentoZapMidia",
     "AtendimentoZapNumero",
     "ClaudeConector",
+    "SistemaMudanca",
+    "SistemaMudancaAprovador",
+    "SistemaMudancaRobo",
     "AlertSeverity",
     "AlertType",
     "AuditDismissedSku",
