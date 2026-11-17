@@ -7,8 +7,8 @@
 //   * Resumo    — lançamentos financeiros (lotes fechados + lançamentos
 //                 avulsos). Ajustes manuais de frete NÃO entram aqui —
 //                 vivem só na aba Frete. Linha de total no rodapé.
-//   * Reposição — virou coluna da aba Mala (02/11/2026); os prazos da
-//                 conta ficam na barra âmbar em cima da grade.
+//   * Reposição — virou coluna da aba Mala (02/11/2026); o prazo da conta
+//                 ("Reposição [N] dias") fica na barra de filtros (M-4).
 //
 // V1 caveats:
 //   * Estoque (estoque_bling) e 30d (vendas_30d) vêm do Bling pela API,
@@ -41,9 +41,9 @@ const canDelete = computed(() => {
 })
 
 // ── Types ─────────────────────────────────────────────────────────
-// Aba "reposicao" foi removida — os parâmetros (tempo_reposicao/
-// tempo_estoque) continuam editáveis pela barra âmbar no topo da
-// aba Mala, que é onde realmente importam.
+// Aba "reposicao" foi removida — o prazo (tempo_reposicao) se edita no
+// campo "Reposição" da barra de filtros da aba Mala. O tempo_estoque
+// continua no banco, mas saiu da tela e da conta (M-4, 17/11/2026).
 // Sub-tab interno: 'mala' é a aba principal "Importação" (mantido o key
 // histórico pra não renomear toda a página; o label mostra "Importação").
 type Tab = 'mala' | 'resumo' | 'cotacao' | 'certificacoes' | 'frete'
@@ -698,12 +698,14 @@ async function lancarDiPagamento() {
   }
 }
 
-// ── Reposição (02/11/2026, tarefas do Eduardo) ───────────────────
-// A mesma conta da Tabela de Preços (utils/reposicao.ts):
-//   Reposição = Estoque − vendas 30d × (tempo de reposição + tempo de estoque) ÷ 30
+// ── Reposição (02/11/2026, tarefas do Eduardo; M-4 em 17/11/2026) ─
+// A conta de utils/reposicao.ts com um prazo só, o "Reposição" da barra
+// de filtros (o mesmo valor da Tabela de Preços):
+//   Reposição = Estoque − vendas 30d × Reposição ÷ 30
 // com o necessário arredondado para cima. Negativo = falta (é quanto
 // comprar, em vermelho). Não desconta o que já está em lote aberto.
-// Calculada aqui, então muda na hora ao mexer nos prazos da barra âmbar.
+// O tempo de estoque saiu da conta (era reposição + estoque): vai 0.
+// Calculada aqui, então muda na hora ao mexer no prazo.
 // Sem vendas_30d no produto fica "—": contar como zero daria sobra falsa.
 function prazoDias(v: unknown): number | null {
   // v-model.number devolve '' com o campo apagado.
@@ -713,7 +715,7 @@ function reposicaoDe(row: Product): ResultadoReposicao | null {
   if (row.vendas_30d == null) return null
   return calcularReposicao(
     row.estoque_bling, row.vendas_30d,
-    prazoDias(config.value.tempo_reposicao), prazoDias(config.value.tempo_estoque),
+    prazoDias(config.value.tempo_reposicao), 0,
   )
 }
 function textoReposicao(row: Product): string {
@@ -732,8 +734,7 @@ function tituloReposicao(row: Product): string {
 }
 const formulaReposicao = computed(() => {
   const rep = prazoDias(config.value.tempo_reposicao) ?? '?'
-  const est = prazoDias(config.value.tempo_estoque) ?? '?'
-  return `Reposição = Estoque − vendas 30d × (${rep} + ${est}) ÷ 30`
+  return `Reposição = Estoque − vendas 30d × ${rep} ÷ 30`
 })
 // O arredondamento é só da parte das vendas: "o resultado arredondado para
 // cima" leria −10,5 como −10, e a conta dá −11.
@@ -1491,15 +1492,15 @@ async function removeResumo(row: ResumoRow) {
 }
 
 // ── Config (parâmetros da fórmula de reposição) ───────────────────
-// Editado pela barra âmbar no topo da aba Mala (a aba Reposição foi
-// removida). A coluna Reposição é calculada no front e já muda enquanto
-// o prazo é digitado; o @change só grava (PATCH) — nada na grade
-// depende de recarregar os produtos.
-// Os mesmos prazos também se editam na Tabela de Preços (mesma row): o
-// PATCH leva SÓ o prazo mexido, senão regravaria o outro com o valor de
-// quando esta tela abriu. A resposta traz os dois como estão no servidor,
-// então o outro prazo já aparece atualizado.
-type CampoPrazo = 'tempo_reposicao' | 'tempo_estoque'
+// Editado no campo "Reposição" da barra de filtros da aba Mala (a caixa
+// âmbar com tempo de reposição + tempo de estoque saiu no M-4). A coluna
+// Reposição é calculada no front e já muda enquanto o prazo é digitado;
+// o @change só grava (PATCH) — nada na grade depende de recarregar os
+// produtos.
+// O mesmo prazo também se edita na Tabela de Preços (mesma row): o PATCH
+// leva SÓ o prazo mexido, senão regravaria o tempo_estoque com o valor de
+// quando esta tela abriu. A resposta traz a row como está no servidor.
+type CampoPrazo = 'tempo_reposicao'
 async function saveConfig(campo: CampoPrazo) {
   try {
     // Config é por categoria (migration 0132): a categoria vai por query
@@ -1771,41 +1772,6 @@ onScopeDispose(() => {
 
     <!-- ─── TAB MALA ─────────────────────────────────────────────── -->
     <div v-if="tab === 'mala'" class="space-y-2">
-      <!-- Prazos da Reposição (config por categoria). A coluna Reposição
-           é calculada no front (reposicaoDe) e muda enquanto o prazo é
-           digitado; o @change grava só o prazo daquele campo (saveConfig).
-           A conta fica escrita aqui, à vista, com os números de agora. -->
-      <div class="flex flex-wrap items-center gap-3 bg-amber-50 dark:bg-amber-900/20 border rounded-md px-3 py-2 text-xs">
-        <label class="inline-flex items-center gap-2">
-          <span class="font-semibold uppercase tracking-wide text-[10px]">tempo de reposição</span>
-          <input
-            type="number"
-            min="0"
-            class="h-7 w-20 border rounded px-2 text-right text-sm bg-background"
-            v-model.number="config.tempo_reposicao"
-            :disabled="!canEdit"
-            @change="saveConfig('tempo_reposicao')"
-          />
-          <span class="text-[10px] text-muted-foreground">dias</span>
-        </label>
-        <label class="inline-flex items-center gap-2">
-          <span class="font-semibold uppercase tracking-wide text-[10px]">tempo de estoque</span>
-          <input
-            type="number"
-            min="0"
-            class="h-7 w-20 border rounded px-2 text-right text-sm bg-background"
-            v-model.number="config.tempo_estoque"
-            :disabled="!canEdit"
-            @change="saveConfig('tempo_estoque')"
-          />
-          <span class="text-[10px] text-muted-foreground">dias</span>
-        </label>
-        <p class="ml-auto text-[11px] leading-snug" data-formula-reposicao>
-          <strong>{{ formulaReposicao }}.</strong> <span class="font-semibold text-red-700 dark:text-red-400">Negativo (vermelho)</span>
-          = falta: é quanto comprar. Não desconta o que já está em lote aberto.
-        </p>
-      </div>
-
       <div class="flex flex-wrap items-center gap-2 bg-muted/30 border rounded-md px-3 py-2 text-xs">
         <div class="relative flex-1 min-w-[200px] max-w-sm">
           <Search class="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-muted-foreground" />
@@ -1821,7 +1787,7 @@ onScopeDispose(() => {
         </label>
         <label
           class="inline-flex items-center gap-1"
-          title="Falta = Reposição negativa (comprar). Sobra = zero ou positiva (o estoque cobre o prazo). Sem dado = sem estoque, vendas 30d ou prazos."
+          title="Falta = Reposição negativa (comprar). Sobra = zero ou positiva (o estoque cobre o prazo). Sem dado = sem estoque, vendas 30d ou prazo."
         >
           <span class="text-muted-foreground">reposição:</span>
           <select v-model="reposicaoFiltro" class="h-7 border rounded px-2 bg-background">
@@ -1830,6 +1796,26 @@ onScopeDispose(() => {
             <option value="sobra">sobra</option>
             <option value="sem_dado">sem dado</option>
           </select>
+        </label>
+        <!-- Prazo da Reposição (config por categoria, o mesmo da Tabela de
+             Preços). A coluna Reposição é calculada no front (reposicaoDe)
+             e muda enquanto o prazo é digitado; o @change grava só ele
+             (saveConfig). A conta aparece no balão. -->
+        <label
+          class="inline-flex items-center gap-1"
+          data-prazo-reposicao
+          :title="tituloColunaReposicao"
+        >
+          <span class="text-muted-foreground">Reposição</span>
+          <input
+            type="number"
+            min="0"
+            class="h-7 w-16 border rounded px-2 text-right bg-background"
+            v-model.number="config.tempo_reposicao"
+            :disabled="!canEdit"
+            @change="saveConfig('tempo_reposicao')"
+          />
+          <span class="text-muted-foreground">dias</span>
         </label>
         <span class="text-muted-foreground">
           {{ filteredProducts.length }} SKUs · {{ visibleLotes.length }} lote(s)
@@ -1870,7 +1856,8 @@ onScopeDispose(() => {
               <!-- Colunas fixas (02/11/2026, tarefas do Eduardo): Produto,
                    SKU, Custo e Estoque são os campos do Bling (só o rótulo
                    mudou — eram "modelo/custo/estoque bling"); 30d = vendas
-                   dos últimos 30 dias; Reposição = a conta da barra âmbar.
+                   dos últimos 30 dias; Reposição = a conta com o prazo da
+                   barra de filtros.
                    Consumo diário, memória consumo, reposição estoque, saldo
                    reposição e custo realizado saíram da tela.
                    min-widths: SKU confortável e as numéricas estreitas, só o
@@ -2196,8 +2183,9 @@ onScopeDispose(() => {
               <!-- Estoque e 30d vêm da API, só leitura: Estoque =
                    products.stock pelo SKU (no Celular, a soma dos lotes —
                    o balão lista cada um); 30d = vendas dos últimos 30 dias
-                   (0 é dado: não vendeu). Reposição = a conta da barra
-                   âmbar, feita aqui (reposicaoDe); negativa em vermelho. -->
+                   (0 é dado: não vendeu). Reposição = a conta com o prazo
+                   da barra de filtros, feita aqui (reposicaoDe); negativa
+                   em vermelho. -->
               <td
                 class="calc text-right"
                 :class="isCelular ? 'sticky bg-background z-10' : ''"

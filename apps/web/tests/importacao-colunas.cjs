@@ -6,7 +6,10 @@
 //    reposição estoque, saldo reposição e custo realizado;
 //  - 30d = vendas_30d (0 é "0"; sem o campo, "—") e Reposição calculada na
 //    tela (utils/reposicao.ts): negativa em vermelho com "−", balão com a
-//    conta, explicação visível na barra âmbar, recalcula ao mexer no prazo;
+//    conta, recalcula ao mexer no prazo;
+//  - M-4 (17/11/2026): sem a caixa âmbar; um prazo só, "Reposição [N] dias",
+//    na barra de filtros (depois do filtro reposição, antes da contagem), e
+//    a conta usa só ele (o tempo de estoque não entra mais);
 //  - Estoque do Celular com as parcelas dos lotes no balão;
 //  - Celular: colunas fixas grudadas com left acumulado e o divisor na
 //    Reposição (sombra interna, que anda com a rolagem; claro e escuro);
@@ -16,8 +19,8 @@
 //    sem resultado diz "Nenhum produto com esse filtro." com "Limpar
 //    filtro" (a mensagem de criar produto só com a lista vazia de verdade)
 //    e a Cotação do Celular lista todos, sem o filtro da aba Importação;
-//  - prazos: o PATCH leva só o campo mexido (o outro prazo também se edita
-//    na Tabela de Preços) e a tela fica com a resposta inteira;
+//  - prazo: o PATCH leva só o tempo_reposicao (não regrava o tempo_estoque
+//    da row) e a tela fica com a resposta inteira;
 //  - modal "Criar produto" com os nomes da grade (Produto, Custo).
 // O SSR não renderiza @change/@click: a ligação dos eventos é conferida no
 // AST do template.
@@ -73,12 +76,14 @@ function elementos(no, saida = []) {
 }
 const ELEMENTOS = elementos(descriptor.template.ast)
 const diretiva = (el, nome, arg) => el.props.find((p) => p.type === 7 && p.name === nome && (arg == null || p.arg?.content === arg))
-// Cada prazo grava só ele (@change="saveConfig('<campo>')"); sem o argumento
-// o handler recebia o Event e o PATCH não levaria prazo nenhum.
-for (const campo of ['tempo_reposicao', 'tempo_estoque']) {
-  const input = ELEMENTOS.find((el) => el.tag === 'input' && diretiva(el, 'model')?.exp?.content === `config.${campo}`)
-  assert.ok(input, `campo ${campo} na barra âmbar`)
-  assert.equal(diretiva(input, 'on', 'change')?.exp?.content, `saveConfig('${campo}')`, `${campo}: o @change grava só ele`)
+// O prazo grava só ele (@change="saveConfig('tempo_reposicao')"); sem o
+// argumento o handler recebia o Event e o PATCH não levaria prazo nenhum.
+// O tempo de estoque saiu da tela (M-4).
+{
+  const input = ELEMENTOS.find((el) => el.tag === 'input' && diretiva(el, 'model')?.exp?.content === 'config.tempo_reposicao')
+  assert.ok(input, 'campo Reposição na barra de filtros')
+  assert.equal(diretiva(input, 'on', 'change')?.exp?.content, "saveConfig('tempo_reposicao')", 'o @change grava só ele')
+  assert.ok(!ELEMENTOS.some((el) => el.tag === 'input' && diretiva(el, 'model')?.exp?.content === 'config.tempo_estoque'), 'sem campo de tempo de estoque')
 }
 const botaoLimpar = ELEMENTOS.find((el) => el.tag === 'button' && el.children.some((c) => c.type === 2 && c.content.trim() === 'Limpar filtro'))
 assert.ok(botaoLimpar, 'botão Limpar filtro')
@@ -136,7 +141,8 @@ const lote = (id, nome, o = {}) => ({
   di_numero: null, tem_simulacao_pdf: false, tem_di_pdf: false, di_pagamento: null, ...o,
 })
 const CELULAR = [
-  // Exemplo da tarefa: estoque 0, 100 por mês, 30 + 30 dias → −200.
+  // Exemplo da tarefa: estoque 0, 100 por mês, 60 dias → −200 (o tempo de
+  // estoque de 30 da row não entra mais na conta).
   produto('p1', 'dg053.ci', { estoque_bling: 0, vendas_30d: 100, lote_quantidades: { l1: 5 }, lote_item_ids: { l1: 'i1' } }),
   // Celular: soma dos lotes; 0 venda é dado (mostra "0") → sobra = o estoque.
   produto('p2', 'dg054.ci', { estoque_bling: 8, vendas_30d: 0, estoque_partes: [{ sku: 'dg054.ci', estoque: 3 }, { sku: 'dg054.sp', estoque: 5 }] }),
@@ -148,11 +154,12 @@ const CELULAR = [
   produto('p7', 'dg059.ci', { estoque_bling: 0, vendas_30d: 7 }),
 ]
 const MALA = [
-  // Mala (120 + 30): 1 venda no mês → 5 para 150 dias.
+  // Mala (reposição 150; o estoque 30 não conta): 1 venda no mês → 5 para 150 dias.
   produto('m1', 'a015', { categoria: 'mala', custo_bling: 10, estoque_bling: 0, vendas_30d: 1 }),
   produto('m2', 'b045.18', { categoria: 'mala', custo_bling: 59, estoque_bling: 1648, vendas_30d: 3 }),
 ]
-const CONFIG = { celular: [30, 30], mala: [120, 30], eletro: [60, 30] }
+// [tempo_reposicao, tempo_estoque] da row; só o primeiro entra na conta.
+const CONFIG = { celular: [60, 30], mala: [150, 30], eletro: [60, 30] }
 // `salvo` é a row dos prazos no servidor; o teste mexe nela direto quando
 // faz o papel da Tabela de Preços (que edita os mesmos prazos).
 function apiFalsa(cat, produtos, lotes, chamadas, salvo) {
@@ -352,20 +359,26 @@ const VERMELHO = '!text-red-700'
     assert.equal(fixas[4].title, 'Vendas dos últimos 30 dias (unidades). Kit e conjunto contam em cada peça.')
     assert.equal(
       fixas[5].title,
-      'Reposição = Estoque − vendas 30d × (30 + 30) ÷ 30; a parte das vendas é arredondada para cima. '
+      'Reposição = Estoque − vendas 30d × 60 ÷ 30; a parte das vendas é arredondada para cima. '
       + 'Negativo (vermelho) = falta: é quanto comprar. Positivo = sobra além do prazo. Não desconta o que já está em lote aberto.',
     )
-    // Explicação visível na barra âmbar, com os prazos de agora.
-    const formula = doc.querySelector('[data-formula-reposicao]')
-    assert.equal(
-      texto(formula),
-      'Reposição = Estoque − vendas 30d × (30 + 30) ÷ 30. Negativo (vermelho) = falta: é quanto comprar. Não desconta o que já está em lote aberto.',
-    )
-    assert.ok(formula.closest('.bg-amber-50'), 'na barra dos prazos')
+    // M-4: a caixa âmbar (tempo de reposição, tempo de estoque e a
+    // explicação) saiu da tela.
+    assert.equal(doc.querySelector('[data-formula-reposicao]'), null, 'sem a explicação da caixa âmbar')
+    assert.doesNotMatch(texto(doc.body), /tempo de reposição|tempo de estoque/i, 'sem os dois prazos antigos')
 
     // Filtro único "reposição".
     const select = [...doc.querySelectorAll('select')].find((s) => s.closest('label')?.textContent.includes('reposição:'))
     assert.ok(select, 'select reposição')
+    // Campo "Reposição [60] dias" na barra de filtros: logo depois do filtro
+    // reposição e antes de "N SKUs · N lote(s)", com a conta no balão.
+    const prazo = doc.querySelector('[data-prazo-reposicao]')
+    assert.ok(prazo, 'campo Reposição')
+    assert.equal(texto(prazo), 'Reposição dias')
+    assert.equal(prazo.querySelector('input').value, '60')
+    assert.equal(prazo.title, fixas[5].title, 'balão com a mesma conta da coluna')
+    assert.equal(prazo.previousElementSibling, select.closest('label'), 'logo depois do filtro reposição')
+    assert.match(texto(prazo.nextElementSibling), /^7 SKUs · 2 lote\(s\)$/, 'antes da contagem')
     assert.deepEqual([...select.options].map((o) => [o.value, texto(o)]), [['todos', 'todos'], ['falta', 'falta'], ['sobra', 'sobra'], ['sem_dado', 'sem dado']])
     const skus = () => estado.filteredProducts.map((p) => p.sku)
     assert.equal(estado.filteredProducts.length, CELULAR.length, 'todos = a lista inteira')
@@ -405,51 +418,53 @@ const VERMELHO = '!text-red-700'
 
     // Mexer no prazo recalcula na hora, sem recarregar os produtos.
     const antes = chamadas.length
-    estado.config.tempo_reposicao = 60
+    // Só o prazo de reposição entra: 100 × 90 ÷ 30 = 300 (o tempo de
+    // estoque 30 da row não soma).
+    estado.config.tempo_reposicao = 90
     assert.equal(estado.reposicaoDe(estado.products[0]).valor, -300)
     const doc2 = await deNovo()
     assert.equal(texto(celulaDe(grade(doc2).corpo, 'dg053.ci').reposicao), '−300')
-    assert.match(texto(doc2.querySelector('[data-formula-reposicao]')), /× \(60 \+ 30\) ÷ 30/)
-    // 7 × (15 + 30) ÷ 30 = 10,5 → 11 necessárias: −11 (e não −10).
-    estado.config.tempo_reposicao = 15
+    assert.match(doc2.querySelector('[data-prazo-reposicao]').title, /× 90 ÷ 30/)
+    assert.equal(
+      celulaDe(grade(doc2).corpo, 'dg053.ci').reposicao.title,
+      '100 vendas em 30 dias × 90 dias ÷ 30 = 300 necessárias; estoque 0 → faltam 300 (comprar 300).',
+    )
+    // Mexer no tempo de estoque (que ainda está na row) não muda nada.
+    estado.config.tempo_estoque = 500
+    assert.equal(estado.reposicaoDe(estado.products[0]).valor, -300, 'tempo de estoque fora da conta')
+    estado.config.tempo_estoque = 30
+    // 7 × 45 ÷ 30 = 10,5 → 11 necessárias: −11 (e não −10).
+    estado.config.tempo_reposicao = 45
     assert.equal(estado.reposicaoDe(estado.products.find((p) => p.sku === 'dg059.ci')).valor, -11)
     estado.config.tempo_reposicao = ''
     assert.equal(estado.reposicaoDe(estado.products[0]), null, 'prazo apagado: sem conta')
-    assert.match(estado.formulaReposicao, /\(\? \+ 30\)/)
+    assert.match(estado.formulaReposicao, /× \? ÷ 30/)
     assert.equal(chamadas.length, antes, 'nada foi buscado na API')
-    // O @change grava SÓ o prazo mexido e não recarrega a grade.
-    estado.config.tempo_reposicao = 45
+    // O @change grava SÓ o prazo e não recarrega a grade (100 × 75 ÷ 30 = 250).
+    estado.config.tempo_reposicao = 75
     await estado.saveConfig('tempo_reposicao')
     assert.deepEqual(chamadas.slice(antes).map((c) => `${c.method} ${c.url}`), ['PATCH /api/importacao/config?categoria=celular'])
-    assert.deepEqual(chamadas.at(-1).body, { tempo_reposicao: 45 })
+    assert.deepEqual(chamadas.at(-1).body, { tempo_reposicao: 75 })
     assert.equal(estado.reposicaoDe(estado.products[0]).valor, -250)
-    // A Tabela de Preços (mesma row) mudou o tempo de estoque para 40 depois
-    // que esta tela abriu: gravar o tempo de reposição não volta ele a 30, e
-    // a resposta põe o 40 na tela (100 × (50 + 40) ÷ 30 = 300).
+    // O tempo de estoque da row mudou no servidor depois que esta tela abriu:
+    // gravar a reposição não volta ele a 30, e a conta continua só com a
+    // reposição (100 × 90 ÷ 30 = 300).
     const prazos = () => ({ tempo_reposicao: estado.config.tempo_reposicao, tempo_estoque: estado.config.tempo_estoque })
     servidor.tempo_estoque = 40
-    estado.config.tempo_reposicao = 50
+    estado.config.tempo_reposicao = 90
     await estado.saveConfig('tempo_reposicao')
-    assert.deepEqual(chamadas.at(-1).body, { tempo_reposicao: 50 })
-    assert.deepEqual({ ...servidor }, { tempo_reposicao: 50, tempo_estoque: 40 }, 'o 40 da outra tela fica')
-    assert.deepEqual(prazos(), { tempo_reposicao: 50, tempo_estoque: 40 }, 'a tela mostra o prazo atual do outro campo')
+    assert.deepEqual(chamadas.at(-1).body, { tempo_reposicao: 90 })
+    assert.deepEqual({ ...servidor }, { tempo_reposicao: 90, tempo_estoque: 40 }, 'o 40 do servidor fica')
+    assert.deepEqual(prazos(), { tempo_reposicao: 90, tempo_estoque: 40 }, 'a tela fica com a resposta inteira')
     assert.equal(estado.reposicaoDe(estado.products[0]).valor, -300)
-    // E ao contrário: o tempo de estoque leva só ele.
-    servidor.tempo_reposicao = 45
-    estado.config.tempo_estoque = 30
-    await estado.saveConfig('tempo_estoque')
-    assert.deepEqual(chamadas.at(-1).body, { tempo_estoque: 30 })
-    assert.deepEqual({ ...servidor }, { tempo_reposicao: 45, tempo_estoque: 30 })
-    assert.deepEqual(prazos(), { tempo_reposicao: 45, tempo_estoque: 30 })
-    assert.equal(estado.reposicaoDe(estado.products[0]).valor, -250)
-    // Prazo recusado pelo servidor: a tela volta ao que está salvo (45 + 30).
-    for (const [campo, ruim] of [['tempo_reposicao', 1000], ['tempo_reposicao', ''], ['tempo_reposicao', -1], ['tempo_estoque', 1000]]) {
-      estado.config[campo] = ruim
-      await estado.saveConfig(campo)
-      assert.deepEqual(chamadas.slice(-2).map((c) => [c.method, c.body]), [['PATCH', { [campo]: ruim }], ['GET', undefined]])
-      assert.deepEqual(prazos(), { tempo_reposicao: 45, tempo_estoque: 30 }, `${campo} ${JSON.stringify(ruim)} recusado volta ao salvo`)
+    // Prazo recusado pelo servidor: a tela volta ao que está salvo (90).
+    for (const ruim of [1000, '', -1]) {
+      estado.config.tempo_reposicao = ruim
+      await estado.saveConfig('tempo_reposicao')
+      assert.deepEqual(chamadas.slice(-2).map((c) => [c.method, c.body]), [['PATCH', { tempo_reposicao: ruim }], ['GET', undefined]])
+      assert.deepEqual(prazos(), { tempo_reposicao: 90, tempo_estoque: 40 }, `${JSON.stringify(ruim)} recusado volta ao salvo`)
       assert.match(estado.errorText, /^Prazo inválido: use um número inteiro de dias, de 0 a 999\./)
-      assert.equal(estado.reposicaoDe(estado.products[0]).valor, -250)
+      assert.equal(estado.reposicaoDe(estado.products[0]).valor, -300)
     }
     estado.errorText = null
 
@@ -480,12 +495,13 @@ const VERMELHO = '!text-red-700'
     assert.equal(colunas, 6 + 2 + lotes.length * 2 + 2)
     for (const tr of corpo) assert.equal(tr.children.length, colunas)
     assert.equal(fixas[3].title, 'Estoque do SKU no Bling.')
-    // 120 + 30 dias.
+    // Reposição 150 dias (o tempo de estoque 30 não soma).
     const m1 = celulaDe(corpo, 'a015')
     assert.equal(texto(m1.reposicao), '−5')
     assert.ok(m1.reposicao.classList.contains(VERMELHO))
     assert.equal(texto(celulaDe(corpo, 'b045.18').reposicao), '1633')
-    assert.match(texto(doc.querySelector('[data-formula-reposicao]')), /× \(120 \+ 30\) ÷ 30/)
+    assert.match(fixas[5].title, /× 150 ÷ 30/)
+    assert.equal(doc.querySelector('[data-prazo-reposicao] input').value, '150', 'o campo da barra de filtros também na Mala')
   }
 
   // ═════════════════════════════════════════════ linha "nenhum produto"
