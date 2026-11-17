@@ -38,7 +38,8 @@ def mundo(tmp_path, monkeypatch):
     raiz = tmp_path / "raiz"
     raiz.mkdir()
     pasta = tmp_path / "mudancas"
-    for nome in ("REGRAS.md", "caixa.sb", "testar.sh", "caixa_pytest.py", "conferir_web.cjs"):
+    for nome in ("REGRAS.md", "REGRAS_PERGUNTA.md", "caixa.sb", "testar.sh", "caixa_pytest.py",
+                 "conferir_web.cjs"):
         (raiz / nome).write_text((AQUI / nome).read_text())
     (raiz / "permissoes.json").write_text(
         (AQUI / "permissoes.json").read_text().replace("__RAIZ__", str(raiz))
@@ -62,6 +63,17 @@ def mundo(tmp_path, monkeypatch):
         "import json, os, pathlib, sys\n"
         "acao = pathlib.Path(__file__).with_name('acao').read_text()\n"
         f"ARQ, NOVO = {ARQ!r}, {NOVO!r}\n"
+        "assert '--permission-mode' in sys.argv and 'dontAsk' in sys.argv\n"
+        "a = sys.argv\n"
+        "ferramentas = 'Read,Glob,Grep' if acao.startswith('pergunta') else 'Read,Edit,Write,Glob,Grep'\n"
+        "assert a[a.index('--tools') + 1] == ferramentas, a[a.index('--tools') + 1]\n"
+        "assert a[a.index('--setting-sources') + 1] == 'user' and '--strict-mcp-config' in a\n"
+        "assert os.environ.get('CLAUDE_CODE_OAUTH_TOKEN') == 'tok-falso'\n"
+        "assert os.environ.get('CLAUDE_CODE_DISABLE_AUTO_MEMORY') == '1'\n"
+        "cfg = pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])\n"
+        "assert cfg.is_dir() and cfg.name.startswith(('M-1-', 'P-1-')), cfg\n"
+        "(cfg / 'sobra').write_text('x')  # tem de sumir depois\n"
+        "assert 'SSH_AUTH_SOCK' not in os.environ\n"
         "if acao == 'texto':\n"
         "    pathlib.Path(ARQ).write_text(NOVO)\n"
         "    fim = {'resultado': 'pronta', 'resumo': 'Troquei Olá por Oi', 'testes': 'nada'}\n"
@@ -95,18 +107,17 @@ def mundo(tmp_path, monkeypatch):
         "elif acao == 'tela_quebrada':\n"
         "    pathlib.Path(ARQ).write_text(\"export const t: number = (1\\n\")\n"
         "    fim = {'resultado': 'pronta', 'resumo': 'x', 'testes': ''}\n"
+        "elif acao == 'pergunta':\n"
+        "    assert not any(pathlib.Path('.').glob('**/*.novo'))\n"
+        "    resposta = ('A Margem segura o pedido quando a margem fica negativa.\\n'\n"
+        "                '```python\\nTOKEN = \"abcdef123456789\"\\nchave = \"sk-ant-AAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\\n```')\n"
+        "    print(json.dumps({'type': 'result', 'is_error': False, 'result': resposta}))\n"
+        "    sys.exit(0)\n"
+        "elif acao == 'pergunta_vazia':\n"
+        "    print(json.dumps({'type': 'result', 'is_error': False, 'result': ''}))\n"
+        "    sys.exit(0)\n"
         "elif acao == 'equipe':\n"
         "    fim = {'resultado': 'precisa_equipe', 'resumo': 'Precisa de coluna nova', 'testes': ''}\n"
-        "assert '--permission-mode' in sys.argv and 'dontAsk' in sys.argv\n"
-        "a = sys.argv\n"
-        "assert a[a.index('--tools') + 1] == 'Read,Edit,Write,Glob,Grep'\n"
-        "assert a[a.index('--setting-sources') + 1] == 'user' and '--strict-mcp-config' in a\n"
-        "assert os.environ.get('CLAUDE_CODE_OAUTH_TOKEN') == 'tok-falso'\n"
-        "assert os.environ.get('CLAUDE_CODE_DISABLE_AUTO_MEMORY') == '1'\n"
-        "cfg = pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])\n"
-        "assert cfg.is_dir() and cfg.name.startswith('M-1-'), cfg\n"
-        "(cfg / 'sobra').write_text('x')  # tem de sumir depois\n"
-        "assert 'SSH_AUTH_SOCK' not in os.environ\n"
         "texto = 'Pronto.\\n' + json.dumps(fim, ensure_ascii=False)\n"
         "print(json.dumps({'type': 'result', 'is_error': False, 'result': texto}))\n"
     )
@@ -558,3 +569,52 @@ def test_permissoes_bloqueiam_o_perigoso():
     assert "Bash" in regras["deny"] and "Write(**/hatch.toml)" in regras["deny"]
     assert json.loads((AQUI / "permissoes.json").read_text())["autoMemoryEnabled"] is False
     assert os.access(AQUI / "instalar.sh", os.X_OK) and os.access(AQUI / "testar.sh", os.X_OK)
+
+
+def _pergunta(m) -> dict:
+    m["fila"].append({
+        "id": "id-p1", "codigo": "P-1", "acao": "responder", "tipo": "pergunta",
+        "titulo": "Como a Margem segura um pedido?",
+        "descricao": "Como a Margem decide segurar um pedido?", "onde": "Margem",
+        "pedido_por_nome": "harry potter", "tentativa": 1, "adiamentos": 0,
+    })
+    m["rodada"].main()
+    return _resultados(m)[-1]
+
+
+def test_pergunta_le_o_codigo_e_responde_sem_mudar_nada(mundo):
+    m = mundo
+    m["acao"].write_text("pergunta")
+    antes_main = _git(m["origem"], "rev-parse", "main")
+    antes_ramos = _git(m["repo"], "branch", "--list")
+    r = _pergunta(m)
+    assert r["status"] == "respondida", r
+    assert r["resposta"].startswith("A Margem segura o pedido")
+    # segredo com cara conhecida não sai, mesmo dentro do trecho de código
+    assert "abcdef123456789" not in r["resposta"] and "sk-ant-AAAA" not in r["resposta"]
+    assert r["resposta"].count("[oculto]") == 2
+    # nada foi commitado, empurrado nem criado; a cópia e a configuração sumiram
+    assert _git(m["origem"], "rev-parse", "main") == antes_main
+    assert _git(m["repo"], "branch", "--list") == antes_ramos
+    assert not (m["rodada"].PASTA / "P-1").exists()
+    assert not list((m["rodada"].PASTA / ".claude-robo").glob("P-1-*"))
+    assert "P-1" not in _git(m["repo"], "worktree", "list")
+    assert not any("setsid -f" in c for c in m["servidor"]["comandos"])
+
+
+def test_pergunta_sem_resposta_falha(mundo):
+    mundo["acao"].write_text("pergunta_vazia")
+    r = _pergunta(mundo)
+    assert r["status"] == "falhou" and "não conseguiu responder" in r["erro"]
+
+
+def test_ocultar_segredos(mundo):
+    o = mundo["rodada"].ocultar_segredos
+    assert o('API_KEY = "abc123456"') == 'API_KEY = "[oculto]"'
+    assert o("senha: 'minhasenha1'") == "senha: '[oculto]'"
+    assert o("postgresql://user:segredo@host/db") == "postgresql://[oculto]@host/db"
+    assert o("ghp_" + "a" * 30) == "[oculto]"
+    assert "eyJ" not in o("Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop")
+    # texto comum não muda
+    comum = "A margem é calculada como (preço − custo) ÷ preço; token de 3 letras não conta."
+    assert o(comum) == comum

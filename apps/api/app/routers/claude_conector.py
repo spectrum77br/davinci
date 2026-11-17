@@ -63,8 +63,10 @@ INSTRUCOES = (
     "`consultar_pedido` quando uma tarefa ou pergunta citar um número de pedido (somente "
     "leitura); `pedir_mudanca` quando quiser corrigir ou mudar o PRÓPRIO sistema (texto, "
     "regra, tela) — vai para um robô e só entra no ar depois de aprovada pelo Eduardo ou "
-    "pelo Thorfinn; `listar_mudancas` para ver em que pé estão. Responda sempre com o "
-    "texto devolvido pela ferramenta."
+    "pelo Thorfinn; `listar_mudancas` para ver em que pé estão; "
+    "`perguntar_sobre_o_sistema` quando quiser saber COMO um processo do sistema funciona "
+    "(um robô lê o código e responde em alguns minutos) e `ver_resposta_do_sistema` para "
+    "ler a resposta. Responda sempre com o texto devolvido pela ferramenta."
 )
 MAX_CORPO_BYTES = 64 * 1024
 MAX_LOTE = 5

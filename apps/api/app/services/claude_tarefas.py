@@ -1366,14 +1366,76 @@ TOOL_PEDIR_MUDANCA: dict[str, Any] = {
     },
 }
 
+TOOL_PERGUNTAR_SISTEMA: dict[str, Any] = {
+    "name": "perguntar_sobre_o_sistema",
+    "title": "Perguntar como o sistema DaVinci funciona",
+    "description": (
+        "Pergunta como funciona um processo, uma regra, uma tela ou um robô do PRÓPRIO "
+        "sistema DaVinci (ex.: \"como a Margem decide segurar um pedido?\", \"quando o "
+        "estoque de um kit baixa no Bling?\"). Um robô lê o código do DaVinci (só lê, não "
+        "muda nada) e responde em português, com trechos do código quando ajudar. A "
+        "resposta NÃO é imediata: costuma levar alguns minutos; avise o usuário e, quando "
+        "ele pedir, use `ver_resposta_do_sistema` com o código devolvido (ex.: P-12). "
+        "Uma pergunta por vez, clara e com o contexto (tela, número de pedido, produto). "
+        "Para MUDAR algo no sistema use `pedir_mudanca`. Só para administradores."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "pergunta": {
+                "type": "string",
+                "description": "A pergunta completa, com o contexto (até 4000 letras).",
+            },
+            "onde": {
+                "type": "string",
+                "description": "Em qual tela, menu, relatório ou robô (se o usuário disse).",
+            },
+        },
+        "required": ["pergunta"],
+    },
+    "annotations": {
+        "title": "Perguntar como o sistema DaVinci funciona",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+}
+
+TOOL_VER_RESPOSTA: dict[str, Any] = {
+    "name": "ver_resposta_do_sistema",
+    "title": "Ver a resposta de uma pergunta sobre o sistema",
+    "description": (
+        "Mostra a resposta do robô para uma pergunta feita com `perguntar_sobre_o_sistema` "
+        "(código P-12, por exemplo). Se ainda não respondeu, diz em que pé está. Mostre a "
+        "resposta ao usuário como veio, sem resumir demais. Só para administradores."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "codigo": {"type": "string", "description": "Código da pergunta, ex.: P-12."},
+        },
+        "required": ["codigo"],
+    },
+    "annotations": {
+        "title": "Ver a resposta de uma pergunta sobre o sistema",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+}
+
 TOOL_LISTAR_MUDANCAS: dict[str, Any] = {
     "name": "listar_mudancas",
     "title": "Ver pedidos de mudança no sistema",
     "description": (
-        "Mostra os pedidos de mudança no sistema e em que pé estão: na fila do robô, robô "
-        "fazendo, esperando aprovação (com o que o robô fez), no ar, recusada (com o "
-        "motivo), precisa da equipe ou falhou. Use quando o usuário perguntar das mudanças "
-        "que pediu. `codigo` (ex.: M-12) mostra só aquela. Só para administradores."
+        "Mostra os pedidos de mudança (M-…) e as perguntas sobre o sistema (P-…) e em que "
+        "pé estão: na fila do robô, robô fazendo, esperando aprovação (com o que o robô "
+        "fez), no ar, recusada (com o motivo), precisa da equipe, respondida ou falhou. Use "
+        "quando o usuário perguntar das mudanças ou perguntas que fez. `codigo` (ex.: M-12) "
+        "mostra só aquela; a resposta inteira de uma pergunta é com "
+        "`ver_resposta_do_sistema`. Só para administradores."
     ),
     "inputSchema": {
         "type": "object",
@@ -1422,6 +1484,41 @@ async def pedir_mudanca(session: AsyncSession, *, dono: User, args: dict[str, An
     )
 
 
+async def perguntar_sobre_o_sistema(
+    session: AsyncSession, *, dono: User, args: dict[str, Any]
+) -> str:
+    from app.services import sistema_mudancas
+
+    try:
+        m = await sistema_mudancas.criar_pergunta(
+            session, dono=dono, pergunta=args.get("pergunta"), onde=args.get("onde")
+        )
+    except sistema_mudancas.MudancaError as exc:
+        raise TarefaInvalidaError(f"Não registrei a pergunta: {exc.detalhe}.") from exc
+    await session.commit()
+    codigo = sistema_mudancas.codigo(m)
+    return (
+        f"Pergunta {codigo} registrada. O robô vai ler o código do DaVinci e responder "
+        "(costuma levar alguns minutos). Para ver, peça a resposta da "
+        f"{codigo}."
+    )
+
+
+async def ver_resposta_do_sistema(
+    session: AsyncSession, *, dono: User, args: dict[str, Any]
+) -> str:
+    from app.services import sistema_mudancas
+
+    if dono.role != UserRole.ADMIN:
+        raise TarefaInvalidaError("As perguntas sobre o sistema são só para administradores.")
+    codigo = str(args.get("codigo") or "").strip()
+    m = await sistema_mudancas.por_codigo(session, codigo) if codigo else None
+    if m is None:
+        return f"Não achei a pergunta {codigo or '(sem código)'}."
+    nomes = await sistema_mudancas.nomes(session, [m.pedido_por, m.recusado_por])
+    return sistema_mudancas.resposta_para_o_claude(m, nomes)
+
+
 async def listar_mudancas(session: AsyncSession, *, dono: User, args: dict[str, Any]) -> str:
     from app.services import sistema_mudancas
 
@@ -1455,4 +1552,6 @@ FERRAMENTAS: dict[str, tuple[dict[str, Any], Any]] = {
     TOOL_RESPONDER_DM["name"]: (TOOL_RESPONDER_DM, responder_dm),
     TOOL_PEDIR_MUDANCA["name"]: (TOOL_PEDIR_MUDANCA, pedir_mudanca),
     TOOL_LISTAR_MUDANCAS["name"]: (TOOL_LISTAR_MUDANCAS, listar_mudancas),
+    TOOL_PERGUNTAR_SISTEMA["name"]: (TOOL_PERGUNTAR_SISTEMA, perguntar_sobre_o_sistema),
+    TOOL_VER_RESPOSTA["name"]: (TOOL_VER_RESPOSTA, ver_resposta_do_sistema),
 }

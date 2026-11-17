@@ -528,3 +528,83 @@ async def test_robo_nao_entrega_diff_com_caractere_invisivel(
         client, token, m.id, status="pronta", diff=sujo, commit=C1, branch=f"mudanca/M-{m.numero}"
     )
     assert r.status_code == 409 and r.json()["detail"]["code"] == "diff_invisivel"
+
+
+async def test_pergunta_vai_direto_para_quem_perguntou(
+    client: AsyncClient, db, make_user, auth_as, avisos, token
+):
+    """P-N: o robô só lê o código e a resposta vai direto para quem perguntou,
+    sem aprovação (Eduardo, 17/11)."""
+    chefe, eduardo, _o, comum = await _gente(db, make_user)
+    texto = await claude_tarefas.perguntar_sobre_o_sistema(
+        db, dono=chefe, args={"pergunta": "Como a Margem decide segurar um pedido?"}
+    )
+    assert "Pergunta P-" in texto and "alguns minutos" in texto
+    m = (await db.execute(select(SistemaMudanca))).scalar_one()
+    assert m.tipo == "pergunta" and svc.codigo(m) == f"P-{m.numero}"
+    # quem não é admin não pergunta
+    with pytest.raises(TarefaInvalidaError):
+        await claude_tarefas.perguntar_sobre_o_sistema(db, dono=comum, args={"pergunta": "x"})
+    # ainda sem resposta
+    ainda = await claude_tarefas.ver_resposta_do_sistema(
+        db, dono=chefe, args={"codigo": f"P-{m.numero}"}
+    )
+    assert "ainda não foi respondida" in ainda
+    # o robô pega como "responder"
+    t = await _pegar(client, token)
+    assert t["acao"] == "responder" and t["tipo"] == "pergunta" and t["codigo"] == f"P-{m.numero}"
+    # pergunta não vira "pronta" (nada de aprovação)
+    r = await _resultado(
+        client, token, m.id, status="pronta", diff=DIFF, commit=C1, branch=f"mudanca/P-{m.numero}"
+    )
+    assert r.status_code == 422
+    r = await _resultado(client, token, m.id, status="respondida", resposta="")
+    assert r.status_code == 409
+    resposta = "A Margem segura o pedido quando...\n\n```python\nif margem < 0: ...\n```"
+    r = await _resultado(client, token, m.id, status="respondida", resposta=resposta)
+    assert r.status_code == 200, r.text
+    m = await _recarrega(db, m)
+    assert m.status == "respondida" and m.resposta == resposta and m.aprovado_por is None
+    # aviso só para quem perguntou (nenhum aprovador)
+    resp_avisos = [a for a in avisos if "respondida" in a["title"]]
+    assert {a["user_id"] for a in resp_avisos} == {chefe.id}
+    # o Claude do chefe lê a resposta inteira
+    texto = await claude_tarefas.ver_resposta_do_sistema(
+        db, dono=chefe, args={"codigo": f"P-{m.numero}"}
+    )
+    assert resposta in texto
+    lista = await claude_tarefas.listar_mudancas(db, dono=chefe, args={"filtro": "todas"})
+    assert "(pergunta)" in lista and "Respondida" in lista and "ver_resposta_do_sistema" in lista
+    # aprovadores veem na tela (histórico), sem botão de aprovar
+    auth_as(eduardo)
+    d = (await client.get(f"/api/sistema-mudancas/{m.id}")).json()
+    assert d["tipo"] == "pergunta" and d["resposta"] == resposta and d["pode_aprovar"] is False
+    # resposta longa demais é cortada, não recusada
+    p2 = await svc.criar_pergunta(db, dono=chefe, pergunta="Outra pergunta")
+    await db.commit()
+    await _pegar(client, token)
+    r = await _resultado(
+        client, token, p2.id, status="respondida", resposta="x" * (svc.MAX_RESPOSTA + 500)
+    )
+    assert r.status_code == 200
+    p2 = await _recarrega(db, p2)
+    assert len(p2.resposta) <= svc.MAX_RESPOSTA and p2.resposta.endswith("longa demais]")
+
+
+async def test_pergunta_que_falha_avisa_so_quem_perguntou(
+    client: AsyncClient, db, make_user, avisos, token
+):
+    chefe, eduardo, _o, _c = await _gente(db, make_user)
+    m = await svc.criar_pergunta(db, dono=chefe, pergunta="Como funciona o Flex?")
+    await db.commit()
+    await _pegar(client, token)
+    r = await _resultado(client, token, m.id, status="falhou", erro="o Claude do robô deu erro")
+    assert r.status_code == 200
+    m = await _recarrega(db, m)
+    assert m.status == "falhou"
+    falhas = [a for a in avisos if "não conseguiu responder" in a["title"]]
+    assert {a["user_id"] for a in falhas} == {chefe.id}
+    texto = await claude_tarefas.ver_resposta_do_sistema(
+        db, dono=chefe, args={"codigo": f"P-{m.numero}"}
+    )
+    assert "não conseguiu responder" in texto

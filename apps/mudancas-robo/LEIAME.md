@@ -35,6 +35,15 @@ servidor). Nada do pedido roda — nem teste — antes do Aprovar; nada vai para
    recomeçar conta tentativa — 3 no máximo, e 3 h no total). Erro do ambiente (GitHub fora,
    login do Claude) não gasta tentativa; o pedido só falha se passar 12 h assim.
 
+## Perguntas (P-N): "como funciona tal processo?" (17/11/2026)
+O chefe também pode **perguntar** pelo Claude dele (`perguntar_sobre_o_sistema`). O robô cria
+uma cópia do `origin/main` em `~/davinci-mudancas/P-N`, roda o Claude Code **só com
+Read/Glob/Grep** (sem editar, sem terminal; regras em `REGRAS_PERGUNTA.md`), troca segredo com
+cara conhecida por `[oculto]` e manda a resposta. **Ela vai direto para quem perguntou**, sem
+aprovação (decisão do Eduardo: "a resposta de como funciona e o código pode ir para ele"). O
+Claude dele lê com `ver_resposta_do_sistema`. Nada é commitado; a cópia é apagada no fim. Na
+tela Sistema › Mudanças as perguntas aparecem com a etiqueta "Pergunta", só para histórico.
+
 ## Instalar (uma vez)
 1. No servidor, `MUDANCAS_AGENT_TOKEN=<token longo aleatório>` no `/opt/davinci/.env` e
    `up -d` (o deploy normal) — sem ele as rotas do robô ficam fechadas.

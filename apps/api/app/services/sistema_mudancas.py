@@ -68,6 +68,7 @@ STATUS_TEXTO = {
     "recusada": "Recusada",
     "precisa_equipe": "Precisa da equipe",
     "falhou": "Falhou",
+    "respondida": "Respondida",
 }
 ABERTAS = ("pedida", "fazendo", "pronta", "aprovada", "publicando")
 DO_ROBO = ("fazendo", "publicando")
@@ -104,6 +105,8 @@ MAX_RESUMO = 8000
 MAX_TESTES = 60_000
 MAX_DIFF = 400_000
 MAX_ERRO = 4000
+MAX_PERGUNTA = 4000
+MAX_RESPOSTA = 60_000
 MAX_ARQUIVOS = 200
 
 
@@ -138,7 +141,8 @@ def _agora() -> datetime:
 
 
 def codigo(m: SistemaMudanca) -> str:
-    return f"M-{m.numero}"
+    """M-12 (pedido de mudança) ou P-12 (pergunta) — o número é o mesmo contador."""
+    return f"{'P' if m.tipo == 'pergunta' else 'M'}-{m.numero}"
 
 
 def sha_do_diff(diff: str) -> str:
@@ -263,6 +267,32 @@ async def criar_pedido(
     return m
 
 
+async def criar_pergunta(
+    session: AsyncSession, *, dono: User, pergunta: Any, onde: Any = None
+) -> SistemaMudanca:
+    """Pergunta sobre como o sistema funciona (Eduardo, 17/11: a resposta e o
+    código podem ir direto para quem perguntou). O robô só LÊ o código."""
+    if not pode_pedir(dono):
+        raise MudancaError("so_admin", "perguntar sobre o sistema é só para administradores")
+    texto = _limpo(pergunta, "a pergunta", MAX_PERGUNTA)
+    titulo = " ".join(texto.split())
+    if len(titulo) > MAX_TITULO:
+        titulo = titulo[: MAX_TITULO - 1].rstrip() + "…"
+    m = SistemaMudanca(
+        pedido_por=dono.id,
+        tipo="pergunta",
+        titulo=titulo,
+        descricao=texto,
+        onde=_limpo(onde, "o onde", MAX_ONDE, obrigatorio=False),
+        status="pedida",
+    )
+    session.add(m)
+    await session.flush()
+    await session.refresh(m)
+    logger.info("pergunta_sistema", pergunta=codigo(m), por=str(dono.id))
+    return m
+
+
 async def listar(
     session: AsyncSession, *, status: str | None = None, limite: int = 100
 ) -> list[SistemaMudanca]:
@@ -299,6 +329,7 @@ def resumo_dict(m: SistemaMudanca, nomes_: dict[UUID, str]) -> dict[str, Any]:
     return {
         "id": str(m.id),
         "codigo": codigo(m),
+        "tipo": m.tipo,
         "titulo": m.titulo,
         "status": m.status,
         "status_texto": STATUS_TEXTO.get(m.status, m.status),
@@ -335,6 +366,7 @@ def detalhe_dict(
         "motivo_recusa": m.motivo_recusa,
         "publicado_em": _iso(m.publicado_em),
         "erro": m.erro,
+        "resposta": m.resposta,
         "pode_aprovar": pode_aprovar_ and m.status == "pronta",
         "pode_cancelar": pode_aprovar_ and m.status == "aprovada",
     }
@@ -608,7 +640,12 @@ def trabalho_dict(m: SistemaMudanca, nomes_: dict[UUID, str]) -> dict[str, Any]:
     return {
         "id": str(m.id),
         "codigo": codigo(m),
-        "acao": "publicar" if m.status == "publicando" else "fazer",
+        "acao": (
+            "publicar"
+            if m.status == "publicando"
+            else ("responder" if m.tipo == "pergunta" else "fazer")
+        ),
+        "tipo": m.tipo,
         "titulo": m.titulo,
         "descricao": m.descricao,
         "onde": m.onde,
@@ -663,7 +700,9 @@ async def registrar_resultado(
     _do_robo(m, robo)
     novo = str(dados.get("status") or "")
     agora = _agora()
-    if m.status == "fazendo":
+    if m.status == "fazendo" and m.tipo == "pergunta":
+        permitidos = ("respondida", "falhou", "pedida")
+    elif m.status == "fazendo":
         permitidos = ("pronta", "precisa_equipe", "falhou", "pedida")
     else:  # publicando
         permitidos = ("publicada", "falhou", "aprovada")
@@ -671,10 +710,19 @@ async def registrar_resultado(
         raise MudancaError(
             "status_invalido", f"de '{m.status}' o robô só pode ir para {', '.join(permitidos)}"
         )
-    if m.status == "fazendo":
+    if m.status == "fazendo" and m.tipo != "pergunta":
         m.resumo = _corta(dados.get("resumo"), MAX_RESUMO)
         m.testes = _corta(dados.get("testes"), MAX_TESTES)
-    if novo == "pronta":
+    if novo == "respondida":
+        resposta = str(dados.get("resposta") or "").strip()
+        if not resposta:
+            raise MudancaError("sem_resposta", "respondida precisa da resposta")
+        if len(resposta) > MAX_RESPOSTA:
+            corte = "\n\n[resposta cortada: ficou longa demais]"
+            resposta = resposta[: MAX_RESPOSTA - len(corte)].rstrip() + corte
+        m.resposta = resposta
+        m.erro = None
+    elif novo == "pronta":
         diff = str(dados.get("diff") or "")
         if not diff.strip():
             raise MudancaError("sem_diff", "pronta precisa do diff")
@@ -742,7 +790,25 @@ async def registrar_resultado(
             m=m,
             evento="adiada_muito",
         )
-    if novo == "pronta":
+    if novo == "respondida":
+        await _avisar(
+            session,
+            [m.pedido_por],
+            titulo=f"💬 {codigo(m)} respondida",
+            mensagem=f"{m.titulo} — peça ao Claude: \"qual a resposta da {codigo(m)}?\"",
+            m=m,
+            evento="respondida",
+        )
+    elif novo == "falhou" and m.tipo == "pergunta":
+        await _avisar(
+            session,
+            [m.pedido_por],
+            titulo=f"⚠️ {codigo(m)}: o robô não conseguiu responder",
+            mensagem=f"{m.titulo} — {m.erro or ''}".strip(" —"),
+            m=m,
+            evento="falhou",
+        )
+    elif novo == "pronta":
         await _avisar_aprovadores(
             session,
             m,
@@ -783,9 +849,16 @@ def _quando(v: datetime | None) -> str:
 
 
 def linha_para_o_claude(m: SistemaMudanca, nomes_: dict[UUID, str]) -> str:
-    partes = [f"{codigo(m)} — {m.titulo} — {STATUS_TEXTO.get(m.status, m.status)}"]
+    rotulo = f"{codigo(m)} (pergunta)" if m.tipo == "pergunta" else codigo(m)
+    partes = [f"{rotulo} — {m.titulo} — {STATUS_TEXTO.get(m.status, m.status)}"]
     if m.pedido_por and m.pedido_por in nomes_:
         partes.append(f"pedido por {nomes_[m.pedido_por]} em {_quando(m.criado_em)}")
+    if m.tipo == "pergunta":
+        if m.status == "respondida":
+            partes.append(f"resposta pronta — use `ver_resposta_do_sistema` com {codigo(m)}")
+        elif m.status == "falhou" and m.erro:
+            partes.append(f"motivo: {m.erro[:400]}")
+        return " — ".join(partes)
     if m.status == "pronta" and m.resumo:
         partes.append(f"o que o robô fez: {m.resumo[:400]}")
     if m.status == "recusada":
@@ -798,3 +871,17 @@ def linha_para_o_claude(m: SistemaMudanca, nomes_: dict[UUID, str]) -> str:
     if m.status in ("falhou", "precisa_equipe") and (m.erro or m.resumo):
         partes.append(f"motivo: {(m.erro or m.resumo or '')[:400]}")
     return " — ".join(partes)
+
+
+def resposta_para_o_claude(m: SistemaMudanca, nomes_: dict[UUID, str]) -> str:
+    """O texto inteiro que o Claude de quem perguntou recebe."""
+    if m.tipo != "pergunta":
+        return linha_para_o_claude(m, nomes_)
+    if m.status == "respondida" and m.resposta:
+        return f"{codigo(m)} — {m.titulo}\n\n{m.resposta}"
+    if m.status == "falhou":
+        return f"{codigo(m)}: o robô não conseguiu responder. {m.erro or ''}".strip()
+    return (
+        f"{codigo(m)} ainda não foi respondida ({STATUS_TEXTO.get(m.status, m.status)}). "
+        "O robô lê o código e responde — costuma levar alguns minutos."
+    )

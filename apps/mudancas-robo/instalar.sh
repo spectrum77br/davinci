@@ -9,7 +9,7 @@ PLIST="$HOME/Library/LaunchAgents/com.davinci.mudancas-robo.plist"
 
 mkdir -p "$RAIZ/registros" "$RAIZ/estado" "$RAIZ/claude"
 chmod 700 "$RAIZ" "$RAIZ/claude"
-cp "$AQUI/rodada.py" "$AQUI/REGRAS.md" "$AQUI/caixa.sb" "$AQUI/testar.sh" \
+cp "$AQUI/rodada.py" "$AQUI/REGRAS.md" "$AQUI/REGRAS_PERGUNTA.md" "$AQUI/caixa.sb" "$AQUI/testar.sh" \
    "$AQUI/caixa_pytest.py" "$AQUI/conferir_web.cjs" "$RAIZ/"
 chmod 755 "$RAIZ/testar.sh"
 # permissões do Claude do robô (só arquivos; __RAIZ__ = esta instalação, se aparecer)

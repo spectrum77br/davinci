@@ -25,10 +25,12 @@ definePageMeta({
 
 type Status =
   | 'pedida' | 'fazendo' | 'pronta' | 'aprovada' | 'publicando'
-  | 'publicada' | 'recusada' | 'precisa_equipe' | 'falhou'
+  | 'publicada' | 'recusada' | 'precisa_equipe' | 'falhou' | 'respondida'
 type ItemLista = {
   id: string
   codigo: string
+  // 'pergunta' (P-N, 0496): o robô só leu o código e respondeu direto a quem perguntou
+  tipo?: 'mudanca' | 'pergunta' | string
   titulo: string
   status: Status | string
   status_texto: string
@@ -57,6 +59,8 @@ type Detalhe = ItemLista & {
   pode_aprovar: boolean
   // aprovada e a publicação esperando: dá para desfazer a aprovação
   pode_cancelar?: boolean
+  // pergunta: a resposta do robô (foi direto para quem perguntou)
+  resposta?: string | null
 }
 
 const { api } = useApi()
@@ -74,6 +78,7 @@ const PILL: Record<string, string> = {
   recusada: 'pill-muted',
   precisa_equipe: 'pill-danger',
   falhou: 'pill-danger',
+  respondida: 'pill-success',
 }
 // Só por garantia: o texto vem pronto da API.
 const TEXTO: Record<string, string> = {
@@ -86,6 +91,7 @@ const TEXTO: Record<string, string> = {
   recusada: 'Recusada',
   precisa_equipe: 'Precisa da equipe',
   falhou: 'Falhou',
+  respondida: 'Respondida',
 }
 const pill = (s: string) => PILL[s] || 'pill-muted'
 const textoStatus = (m: { status: string; status_texto?: string | null }) => m.status_texto || TEXTO[m.status] || m.status
@@ -448,7 +454,10 @@ async function recusar() {
             @click="abrir(m.id)"
           >
             <td class="whitespace-nowrap font-mono text-xs font-medium">{{ m.codigo }}</td>
-            <td class="max-w-[28rem]"><span class="line-clamp-2">{{ m.titulo }}</span></td>
+            <td class="max-w-[28rem]">
+              <span v-if="m.tipo === 'pergunta'" class="mr-1.5 rounded bg-sky-500/15 px-1.5 py-0.5 text-[11px] font-medium text-sky-800 dark:text-sky-300">Pergunta</span>
+              <span class="line-clamp-2 inline">{{ m.titulo }}</span>
+            </td>
             <td class="whitespace-nowrap">{{ m.pedido_por_nome || '—' }}</td>
             <td class="whitespace-nowrap text-muted-foreground" :title="`Pedido em ${fmtCompleta(m.criado_em)} · última novidade ${fmtCompleta(m.atualizado_em)}`">
               {{ fmtRel(m.criado_em) }}
@@ -517,12 +526,18 @@ async function recusar() {
               </div>
 
               <section class="mb-5">
-                <h3 class="mb-1 text-sm font-semibold">O que foi pedido</h3>
+                <h3 class="mb-1 text-sm font-semibold">{{ detalhe.tipo === 'pergunta' ? 'A pergunta' : 'O que foi pedido' }}</h3>
                 <p class="whitespace-pre-wrap break-words text-sm">{{ detalhe.descricao || '—' }}</p>
                 <p v-if="detalhe.onde" class="mt-2 text-sm"><span class="text-muted-foreground">Onde:</span> {{ detalhe.onde }}</p>
               </section>
 
-              <section v-if="mostraResumo" class="mb-5">
+              <section v-if="detalhe.tipo === 'pergunta'" class="mb-5">
+                <h3 class="mb-1 text-sm font-semibold">Resposta do robô <span class="font-normal text-muted-foreground">(foi direto para quem perguntou)</span></h3>
+                <pre v-if="detalhe.resposta" class="max-h-[70vh] overflow-auto whitespace-pre-wrap break-words rounded-md border bg-muted/20 p-3 font-sans text-sm leading-6">{{ detalhe.resposta }}</pre>
+                <p v-else class="text-sm text-muted-foreground">O robô ainda não respondeu.</p>
+              </section>
+
+              <section v-if="mostraResumo && detalhe.tipo !== 'pergunta'" class="mb-5">
                 <h3 class="mb-1 text-sm font-semibold">O que o robô fez</h3>
                 <p class="whitespace-pre-wrap break-words text-sm">{{ detalhe.resumo }}</p>
               </section>
@@ -555,7 +570,7 @@ async function recusar() {
                 <pre v-if="testesAbertos" class="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/30 p-3 font-mono text-[11px] leading-4">{{ detalhe.testes }}</pre>
               </section>
 
-              <section class="mb-5">
+              <section v-if="detalhe.tipo !== 'pergunta'" class="mb-5">
                 <h3 class="mb-1 text-sm font-semibold">Mudança no código</h3>
                 <p v-if="!linhasDiff.length" class="text-sm text-muted-foreground">
                   {{ detalhe.status === 'pedida' || detalhe.status === 'fazendo' ? 'O robô ainda não terminou de mexer no código.' : 'Nenhuma mudança no código registrada.' }}

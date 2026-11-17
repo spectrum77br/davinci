@@ -51,7 +51,12 @@ STATUS_MUDANCA = (
     "recusada",
     "precisa_equipe",
     "falhou",
+    # pergunta (0496): o robô leu o código e respondeu direto a quem perguntou
+    "respondida",
 )
+# Pedido de mudança (M-N) ou pergunta sobre como o sistema funciona (P-N, 0496:
+# o robô só LÊ o código e a resposta vai direto a quem perguntou, sem aprovação).
+TIPOS_MUDANCA = ("mudanca", "pergunta")
 
 
 def _in(coluna: str, valores: tuple[str, ...]) -> str:
@@ -60,7 +65,10 @@ def _in(coluna: str, valores: tuple[str, ...]) -> str:
 
 class SistemaMudanca(Base):
     __tablename__ = "sistema_mudanca"
-    __table_args__ = (CheckConstraint(_in("status", STATUS_MUDANCA), name="status"),)
+    __table_args__ = (
+        CheckConstraint(_in("status", STATUS_MUDANCA), name="status"),
+        CheckConstraint(_in("tipo", TIPOS_MUDANCA), name="tipo"),
+    )
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
     # O número que as pessoas falam ("M-12").
@@ -69,6 +77,9 @@ class SistemaMudanca(Base):
     )
     pedido_por: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    tipo: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="mudanca", server_default=text("'mudanca'")
     )
     titulo: Mapped[str] = mapped_column(String(200), nullable=False)
     descricao: Mapped[str] = mapped_column(Text, nullable=False)
@@ -87,6 +98,9 @@ class SistemaMudanca(Base):
     branch: Mapped[str | None] = mapped_column(Text, nullable=True)
     commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
     erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Pergunta: a resposta do robô (texto para quem perguntou; pode ter trechos
+    # do código, nunca segredo — o robô troca por [oculto]).
+    resposta: Mapped[str | None] = mapped_column(Text, nullable=True)
     # O robô: quem pegou, quando, até quando vale (renovado enquanto trabalha)
     # e quantas vezes o pedido foi pego.
     robo: Mapped[str | None] = mapped_column(String(120), nullable=True)
