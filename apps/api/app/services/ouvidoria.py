@@ -655,7 +655,7 @@ def resolver_destinatarios(raw: str | None, diretorio: list[dict[str, str]]) -> 
             raise OuvidoriaError(
                 "destinatarios_invalidos",
                 f'Não conheço "{parte}" — cadastre o Threema dessa pessoa em '
-                "Admin › Usuários (ou informe o ID de 8 letras/números)",
+                "Configurações › Usuários (ou informe o ID de 8 letras/números)",
             )
         ids.append(rid)
     return validar_destinatarios(", ".join(ids))

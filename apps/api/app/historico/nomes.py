@@ -45,11 +45,13 @@ PAGINAS: dict[str, str] = {
     "/imobilizado": "Cadastros › Imobilizado",
     "/garantias": "Pós-venda › Garantias",
     "/importacao": "Importação",
+    # Integrações virou aba de Cadastros em 17/11/2026, com o Histórico dentro
+    # (antes Sistema › Histórico); os nomes seguem o menu de hoje.
     "/sincronizacoes": "Integrações › Sincronizações",
     "/integrations": "Integrações",
     "/alertas": "Integrações › Alertas",
     "/sync-logs": "Sync logs",
-    "/historico": "Sistema › Histórico",
+    "/historico": "Integrações › Histórico",
     "/companies": "Cadastros › Empresas",
     "/cadastros": "Cadastros › Cadastros",
     "/store-info": "Cadastros › Lojas",
@@ -62,11 +64,13 @@ PAGINAS: dict[str, str] = {
     "/nf-cadastros": "NF Faturador",
     "/nf-faturamento": "NF Faturador › Faturamento NF",
     "/ouvidoria": "Ouvidoria › Robôs",
-    "/users": "Admin › Usuários",
-    "/permissoes": "Admin › Permissões",
+    # Usuários (com Permissões) e Faturas viraram abas de Configurações em
+    # 17/11/2026; antes eram Admin › Usuários / Permissões / Faturas.
+    "/users": "Configurações › Usuários",
+    "/permissoes": "Configurações › Permissões",
     "/tarefas": "Tarefas",
-    "/configuracoes": "Admin › Configurações",
-    "/faturas": "Admin › Faturas",
+    "/configuracoes": "Configurações",
+    "/faturas": "Configurações › Faturas",
     "/onboarding": "Primeiros passos",
 }
 
@@ -120,17 +124,17 @@ API: dict[str, str] = {
     "/api/nf-cadastro/faturamento": "NF Faturador › Faturamento NF",
     "/api/nf-cadastro": "NF Faturador",
     "/api/ouvidoria": "Ouvidoria › Robôs",
-    "/api/users": "Admin › Usuários",
+    "/api/users": "Configurações › Usuários",
     "/api/tarefas": "Tarefas",
     "/api/imobilizado": "Cadastros › Imobilizado",
     "/api/garantias": "Pós-venda › Garantias",
     "/api/claude-conector": "Tarefas › Conector do Claude",
     "/api/claude-mcp": "Claude (conector)",
-    "/api/settings": "Admin › Configurações",
+    "/api/settings": "Configurações",
     # Zap (Onda 4, 27/10/2026): a tela fica em Atendimento › Lojas e modo.
     "/api/atendimento/zap": "Atendimento › Números do WhatsApp",
-    "/api/faturas": "Admin › Faturas",
-    "/api/historico": "Sistema › Histórico",
+    "/api/faturas": "Configurações › Faturas",
+    "/api/historico": "Integrações › Histórico",
 }
 
 
