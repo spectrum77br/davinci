@@ -314,7 +314,7 @@ def _conferir_disco(fonte: Path) -> None:
         )
 
 
-PIX_FMT_DIRETO = {"yuv420p", "yuvj420p"}
+PIX_FMT_DIRETO = anuncio_svc.PIX_FMT_DIRETO
 
 
 def precisa_converter(info: anuncio_svc.InfoVideo) -> bool:
@@ -324,10 +324,11 @@ def precisa_converter(info: anuncio_svc.InfoVideo) -> bool:
     (perfil High 4:4:4 — 4 aprovados da Uranyx em 16/11/2026) a maioria dos
     players não toca, e na Shopee o post não se edita depois: passa pela
     mesma conversão. pix_fmt None (ffprobe não disse) = sobe como sempre.
+    A regra mora em `shopee_video_anuncio.sobe_convertido`: é a mesma que a
+    elegibilidade usa pra saber se a guarda de cor (`precisa_mapear_cor`)
+    vale pra este vídeo.
     """
-    if (info.codec or "") != CODEC_SHOPEE:
-        return True
-    return info.pix_fmt is not None and info.pix_fmt not in PIX_FMT_DIRETO
+    return anuncio_svc.sobe_convertido(info)
 
 
 def caminho_convertido(chave: UUID) -> Path:

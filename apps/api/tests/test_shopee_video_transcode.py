@@ -450,30 +450,55 @@ async def test_piso_do_disco_e_3x_o_original_quando_passa_de_2_gb(
         assert ffmpeg.conversoes == []
 
 
-# ─────────────────────────────────────────── HDR / 10 bits fica de fora
+# ──────────────────────── HDR / gama larga fica de fora; 10 bits SDR converte
 
 
 @pytest.mark.parametrize(
-    ("codec", "pix_fmt", "transfer", "motivo"),
+    ("codec", "pix_fmt", "transfer", "primaries", "motivo"),
     [
-        ("hevc", "yuv420p10le", "arib-std-b67", anuncio.FORMATO),  # iPhone HDR (HLG)
-        ("hevc", "yuv420p10le", "bt709", anuncio.FORMATO),  # 10 bits
-        ("hevc", "yuv420p", "arib-std-b67", anuncio.FORMATO),  # HLG marcado
-        ("hevc", "yuv420p", "smpte2084", anuncio.FORMATO),  # PQ / HDR10
-        ("vp9", "p010le", None, anuncio.FORMATO),
+        ("hevc", "yuv420p10le", "arib-std-b67", "bt2020", anuncio.FORMATO),  # iPhone HDR (HLG)
+        ("hevc", "yuv420p10le", "arib-std-b67", None, anuncio.FORMATO),
+        ("hevc", "yuv420p", "arib-std-b67", None, anuncio.FORMATO),  # HLG marcado
+        ("hevc", "yuv420p", "smpte2084", None, anuncio.FORMATO),  # PQ / HDR10
+        # 10 bits sem curva declarada pode ser HDR sem etiqueta: fica de fora.
+        ("vp9", "p010le", None, None, anuncio.FORMATO),
+        ("hevc", "yuv420p10le", None, None, anuncio.FORMATO),
+        ("hevc", "yuv420p10le", "unknown", None, anuncio.FORMATO),
+        # Curva SDR, mas gama larga: a conversão não remapeia a cor.
+        ("hevc", "yuv420p10le", "bt2020-10", "bt2020", anuncio.FORMATO),
+        ("hevc", "yuv420p10le", "bt709", "bt2020", anuncio.FORMATO),
+        ("hevc", "yuv420p10le", "bt709", "smpte432", anuncio.FORMATO),  # Display P3
+        ("hevc", "yuv420p", "bt709", "bt2020", anuncio.FORMATO),
+        # 17/11/2026: 10 bits SDR declarado (o HEVC 10 bits BT.709 do CapCut /
+        # iPhone — a Airfryer BBQ) converte: cair pra 8 bits não muda a cor.
+        ("hevc", "yuv420p10le", "bt709", "bt709", None),
+        ("hevc", "yuv420p10le", "bt709", None, None),
+        ("hevc", "yuv420p10le", "smpte170m", "smpte170m", None),
+        ("hevc", "yuv420p10le", "iec61966-2-1", None, None),
+        ("vp9", "yuv420p10le", "bt709", "unknown", None),
         # SDR de 8 bits converte normal.
-        ("hevc", "yuv420p", "bt709", None),
-        ("hevc", "yuvj420p", None, None),
-        ("hevc", "nv12", None, None),
-        # Só o caminho CONVERTIDO: o H.264 sobe o original, como sempre subiu.
-        ("h264", "yuv420p10le", "arib-std-b67", None),
+        ("hevc", "yuv420p", "bt709", None, None),
+        ("hevc", "yuvj420p", None, None, None),
+        ("hevc", "nv12", None, None, None),
+        # O H.264 4:2:0 de 8 bits sobe o original, sem ffmpeg: a guarda não vale.
+        ("h264", "yuv420p", "arib-std-b67", "bt2020", None),
+        ("h264", "yuv420p", None, None, None),
+        # O H.264 de 10 bits / 4:4:4 TAMBÉM passa pela conversão (16/11/2026),
+        # então a mesma guarda vale pra ele — antes o HLG de 10 bits passava e
+        # saía desbotado do ffmpeg.
+        ("h264", "yuv420p10le", "arib-std-b67", None, anuncio.FORMATO),
+        ("h264", "yuv420p10le", None, None, anuncio.FORMATO),
+        ("h264", "yuv420p10le", "bt709", "bt709", None),
+        ("h264", "yuv444p", "bt709", None, None),
     ],
 )
-async def test_hdr_ou_10_bits_que_precisaria_converter_fica_de_fora(
-    codec, pix_fmt, transfer, motivo
+async def test_so_o_que_precisaria_mapear_cor_na_conversao_fica_de_fora(
+    codec, pix_fmt, transfer, primaries, motivo
 ):
-    info = anuncio.InfoVideo(1080, 1920, 24.2, codec, pix_fmt, transfer)
+    info = anuncio.InfoVideo(1080, 1920, 24.2, codec, pix_fmt, transfer, primaries)
     assert anuncio.motivo_do_formato(info, 10_000) == motivo
+    # A elegibilidade e o publicador usam a MESMA regra de "vai converter".
+    assert pub.precisa_converter(info) == anuncio.sobe_convertido(info)
 
 
 async def test_hevc_hdr_falha_sem_converter_nem_subir(db, make_user, shopee, ffmpeg, sonda, pasta):
@@ -504,7 +529,7 @@ async def test_hevc_hdr_falha_sem_converter_nem_subir(db, make_user, shopee, ffm
 
 
 async def test_sonda_le_pix_fmt_e_color_transfer(monkeypatch, tmp_path):
-    """O ffprobe pede `pix_fmt` e `color_transfer` e o retrato os carrega;
+    """O ffprobe pede `pix_fmt`, `color_transfer` e `color_primaries` e o retrato os carrega;
     sem eles (ffprobe velho, campo ausente) ficam None e nada muda."""
     pedidos: list = []
 
@@ -526,6 +551,7 @@ async def test_sonda_le_pix_fmt_e_color_transfer(monkeypatch, tmp_path):
                     "codec_name": "hevc",
                     "pix_fmt": "yuv420p10le",
                     "color_transfer": "arib-std-b67",
+                    "color_primaries": "bt2020",
                 }
             ],
             "format": {"duration": "12.5"},
@@ -539,17 +565,18 @@ async def test_sonda_le_pix_fmt_e_color_transfer(monkeypatch, tmp_path):
 
     monkeypatch.setattr(anuncio.asyncio, "create_subprocess_exec", criar)
     hdr = await _SONDAR_REAL_FFPROBE(tmp_path / "a.mov")
-    assert (hdr.codec, hdr.pix_fmt, hdr.color_transfer, hdr.duracao) == (
+    assert (hdr.codec, hdr.pix_fmt, hdr.color_transfer, hdr.color_primaries, hdr.duracao) == (
         "hevc",
         "yuv420p10le",
         "arib-std-b67",
+        "bt2020",
         12.5,
     )
     assert anuncio.motivo_do_formato(hdr, 10_000) == anuncio.FORMATO
     simples = await _SONDAR_REAL_FFPROBE(tmp_path / "b.mov")
-    assert (simples.pix_fmt, simples.color_transfer) == (None, None)
+    assert (simples.pix_fmt, simples.color_transfer, simples.color_primaries) == (None, None, None)
     entradas = pedidos[0][pedidos[0].index("-show_entries") + 1]
-    assert "pix_fmt" in entradas and "color_transfer" in entradas
+    assert all(c in entradas for c in ("pix_fmt", "color_transfer", "color_primaries"))
 
 
 # ─────────────────────────────────────────── limpeza e conferência do H.264
@@ -695,6 +722,40 @@ async def test_conversao_de_verdade_limita_lado_menor_a_1080_e_30_fps(monkeypatc
         check=True,
     )
     assert r.stdout.decode().strip() == "30/1"
+
+
+@pytest.mark.skipif(not _tem_libx265(), reason="sem ffmpeg com libx265/libx264 nesta máquina")
+async def test_10_bits_bt709_de_verdade_passa_e_vira_h264_de_8_bits(monkeypatch, tmp_path, pasta):
+    """O caso da Airfryer BBQ (17/11/2026): HEVC Main 10 marcado BT.709 —
+    serve pra Shopee e sai H.264 4:2:0 de 8 bits, ainda BT.709."""
+    monkeypatch.setattr(anuncio, "sondar_video", _SONDAR_REAL)
+    fonte = tmp_path / "dez_bits_sdr.mp4"
+    _hevc_de_teste(
+        fonte,
+        tamanho="720x1280",
+        fps=30,
+        segundos=4,
+        extra=(
+            *("-pix_fmt", "yuv420p10le"),
+            # O libx265 só grava a etiqueta de cor (VUI) pelos próprios parâmetros.
+            *("-x265-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709:log-level=error"),
+        ),
+    )
+    info = await _SONDAR_REAL(fonte)
+    assert (info.codec, info.pix_fmt, info.color_transfer, info.color_primaries) == (
+        "hevc",
+        "yuv420p10le",
+        "bt709",
+        "bt709",
+    )
+    assert anuncio.motivo_do_formato(info, fonte.stat().st_size) is None
+    assert pub.precisa_converter(info)
+    chave = uuid.uuid4()
+    destino, saida, _tamanho = await pub.convertido_para_shopee(chave, fonte)
+    assert (saida.codec, saida.pix_fmt) == ("h264", "yuv420p")
+    assert saida.color_transfer in (None, "bt709")
+    assert anuncio.motivo_do_formato(saida, destino.stat().st_size) is None
+    pub.apagar_convertido(chave)
 
 
 @pytest.mark.skipif(not _tem_libx265(), reason="sem ffmpeg com libx265/libx264 nesta máquina")

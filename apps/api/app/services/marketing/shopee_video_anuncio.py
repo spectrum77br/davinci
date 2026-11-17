@@ -408,10 +408,12 @@ class InfoVideo:
     altura: int
     duracao: float | None
     codec: str | None
-    # Opcionais (16/11/2026): o que diz se o vídeo é HDR / 10 bits. None =
-    # o ffprobe não informou (ou retrato montado à mão, nos testes).
+    # Opcionais (16/11/2026): o que diz se o vídeo é HDR / 10 bits / gama
+    # larga. None = o ffprobe não informou (ou retrato montado à mão, nos
+    # testes).
     pix_fmt: str | None = None
     color_transfer: str | None = None
+    color_primaries: str | None = None
 
 
 # Cache por (caminho, tamanho, mtime): o modal lista as contas a cada clique e
@@ -431,7 +433,7 @@ async def _ffprobe(caminho: Path) -> InfoVideo | None:
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,codec_name,pix_fmt,color_transfer:format=duration",
+            "stream=width,height,codec_name,pix_fmt,color_transfer,color_primaries:format=duration",
             "-of",
             "json",
             str(caminho),
@@ -454,6 +456,7 @@ async def _ffprobe(caminho: Path) -> InfoVideo | None:
             codec=str(trilha.get("codec_name") or "").lower() or None,
             pix_fmt=str(trilha.get("pix_fmt") or "").lower() or None,
             color_transfer=str(trilha.get("color_transfer") or "").lower() or None,
+            color_primaries=str(trilha.get("color_primaries") or "").lower() or None,
         )
     except (ValueError, KeyError, TypeError, IndexError):
         return None
@@ -478,17 +481,50 @@ async def sondar_video(caminho: Path) -> InfoVideo | None:
 
 # HDR: HLG (o padrão do iPhone desde o 12) e PQ (HDR10/Dolby Vision).
 _TRANSFER_HDR = frozenset({"arib-std-b67", "smpte2084"})
+# Curvas SDR que o ffprobe nomeia: o vídeo comum (BT.709, sRGB, o SD antigo).
+# O "bt2020-10"/"bt2020-12" fica de fora de propósito: é SDR, mas de gama
+# larga, e a conversão não remapeia a cor.
+_TRANSFER_SDR = frozenset(
+    {"bt709", "smpte170m", "bt470bg", "bt470m", "smpte240m", "iec61966-2-1", "gamma22", "gamma28"}
+)
+# Gama larga (BT.2020, DCI-P3, Display P3): a conversão não remapeia a cor
+# pro BT.709 que o player da Shopee supõe, e o vídeo sai desbotado.
+_PRIMARIES_LARGAS = frozenset({"bt2020", "smpte431", "smpte432"})
 # Mais de 8 bits por canal: "yuv420p10le", "yuv444p12le", "gray10le",
 # "p010le"/"p016le"… O "yuv420p"/"nv12" de sempre não casa.
 _RE_PIX_FMT_PROFUNDO = re.compile(r"(?:p|gray)1[0-6](?:le|be)?$|^p[0-4]1[0-6](?:le|be)$")
+# O H.264 nestes pix_fmt sobe o original, sem ffmpeg.
+PIX_FMT_DIRETO = frozenset({"yuv420p", "yuvj420p"})
 
 
-def eh_hdr(info: InfoVideo) -> bool:
-    """O vídeo é HDR ou de 10+ bits (pelo `pix_fmt` e pelo `color_transfer`)."""
+def sobe_convertido(info: InfoVideo) -> bool:
+    """O publicador converte este vídeo pra H.264 4:2:0 de 8 bits antes de
+    subir: o que NÃO é H.264, e o H.264 fora do 4:2:0 de 8 bits (o 4:4:4 e o
+    de 10 bits, que a maioria dos players não toca). pix_fmt None (ffprobe
+    não disse) = o H.264 sobe como sempre subiu."""
+    if (info.codec or "") != CODEC_SHOPEE:
+        return True
+    return info.pix_fmt is not None and info.pix_fmt not in PIX_FMT_DIRETO
+
+
+def precisa_mapear_cor(info: InfoVideo) -> bool:
+    """Converter este vídeo pra 8 bits BT.709 sem tone-mapping estraga a cor.
+
+    É o HDR (HLG/PQ), a gama larga (BT.2020/P3) e o 10+ bits SEM curva SDR
+    declarada (pode ser HDR sem etiqueta). O 10 bits SDR declarado (BT.709 —
+    o que o CapCut/iPhone exportam no "HEVC 10 bits" comum) NÃO: cair pra 8
+    bits só arredonda o tom, a cor fica a mesma. Eduardo, 17/11/2026: o vídeo
+    da Airfryer BBQ (HEVC 10 bits BT.709) ficava fora da Shopee à toa — a
+    regra de 16/11 tirava todo 10 bits junto com o HDR.
+    """
+    transfer = (info.color_transfer or "").strip().lower()
+    if transfer in _TRANSFER_HDR:
+        return True
+    if (info.color_primaries or "").strip().lower() in _PRIMARIES_LARGAS:
+        return True
     pf = (info.pix_fmt or "").strip().lower()
-    return (info.color_transfer or "").strip().lower() in _TRANSFER_HDR or bool(
-        pf and _RE_PIX_FMT_PROFUNDO.search(pf)
-    )
+    profundo = bool(pf and _RE_PIX_FMT_PROFUNDO.search(pf))
+    return profundo and transfer not in _TRANSFER_SDR
 
 
 def motivo_do_formato(info: InfoVideo | None, tamanho: int | None = None) -> str | None:
@@ -502,10 +538,12 @@ def motivo_do_formato(info: InfoVideo | None, tamanho: int | None = None) -> str
         return RESOLUCAO_BAIXA
     if (info.codec or "") not in CODECS_ACEITOS:
         return FORMATO
-    if (info.codec or "") != CODEC_SHOPEE and eh_hdr(info):
-        # Só no caminho CONVERTIDO (16/11/2026): HDR/10 bits virando H.264 de
-        # 8 bits sai com a cor lavada sem tone-mapping, e na Shopee o vídeo
-        # não se edita depois. O H.264 sobe o original, como sempre subiu.
+    if sobe_convertido(info) and precisa_mapear_cor(info):
+        # Só no caminho CONVERTIDO (16/11/2026): HDR / gama larga virando
+        # H.264 de 8 bits BT.709 sai com a cor lavada sem tone-mapping, e na
+        # Shopee o vídeo não se edita depois. O que sobe o original (H.264
+        # 4:2:0 de 8 bits) passa, como sempre passou; o 10 bits SDR converte
+        # (17/11/2026, ver `precisa_mapear_cor`).
         return FORMATO
     return None
 
