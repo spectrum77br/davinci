@@ -10,7 +10,7 @@
 //
 // A tela de antes (abas Acompanhamento / Fraude / Lançamentos) está guardada
 // em pages/devolucoes-antigo.vue, fora do menu: é o caminho de volta.
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { Check, Copy, Download, ExternalLink, Megaphone, Plus, RefreshCw, Search, X } from 'lucide-vue-next'
 import { isoDateBrt, isoToday } from '~/lib/date'
 
@@ -36,6 +36,9 @@ type Lancamento = {
   sku_lancado: string | null
   estoque_status: string | null
   data_devolvido_estoque: string | null
+  // Estoque em que entrou (ci, pi, sp, mala…) e o dia em que a peça fechou.
+  estoque_tag: string | null
+  fechado_em: string | null
   manutencao_pendente: boolean
   tecnico: string | null
   prazo_manutencao: string | null
@@ -102,6 +105,8 @@ type Item = {
   lancamentos: Lancamento[]
   condicao_tela: string | null
   sku_lancado: string | null
+  estoque_tag: string | null
+  fechado_em: string | null
   lancamentos_a_mais: number
   chamado: { id: string; numero: string | null; resolvido: boolean; resolvido_at: string | null; abertura_status?: string | null } | null
   abrir_chamado?: boolean | null
@@ -164,6 +169,15 @@ const contaFilter = ref('all')
 const etapaFilter = ref<'all' | Etapa>('all')
 const dataIni = ref('')
 const dataFim = ref('')
+// 17/11/2026 (Vinicius): o Período pode ser pela data do pedido ou pela data de
+// fechamento ("a data que ela lançou no estoque ou colocou como extraviado etc").
+const periodoPor = ref<'pedido' | 'fechamento'>('pedido')
+// 17/11/2026 (Vinicius): "filtrar tudo que voltei para estoque .sp ou .ci ou mala".
+const estoqueFilter = ref('all')
+const ESTOQUES = ['ci', 'pi', 'ra', 'sa', 'sp', 'us', 'cd', 'mala', 'eletro'] as const
+function rotuloEstoque(t: string): string {
+  return t === 'mala' || t === 'eletro' ? t : `.${t}`
+}
 const search = ref('')
 // Cartão / etiqueta / "Onde agir" clicado (um por vez; clicar de novo solta).
 const recorte = ref<string>('')
@@ -332,13 +346,40 @@ const contas = computed(() => [...new Set(naAba.value.map(contaDe))].sort((a, b)
 function semAcento(v: string): string {
   return v.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
 }
+// Peças da linha pros filtros de Estoque e de fechamento: as do mesmo SKU; pedido
+// de uma linha só (kit que virou peças no lançamento) = todas as do pedido.
+type PecaDoFiltro = { estoque_tag: string | null; fechado_em: string | null }
+function pecasDoFiltro(i: Item): PecaDoFiltro[] {
+  if (i.linhas_do_pedido <= 1 && i.lancamentos.length) return i.lancamentos
+  const meus = i.lancamentos.filter((l) => partesDoSku(i.sku).includes((l.sku || '').toLowerCase()))
+  return meus.length ? meus : [{ estoque_tag: i.estoque_tag, fechado_em: i.fechado_em }]
+}
+function diaBrt(iso: string | null): string {
+  return iso ? isoDateBrt(new Date(iso)) : ''
+}
+function noPeriodo(dia: string): boolean {
+  return !!dia && (!dataIni.value || dia >= dataIni.value) && (!dataFim.value || dia <= dataFim.value)
+}
+// O fechamento que a linha mostra (a peça que fechou por último).
+function fechamentoDaLinha(i: Item): string | null {
+  const dias = pecasDoFiltro(i).map((l) => l.fechado_em).filter((d): d is string => !!d)
+  return dias.length ? dias.reduce((a, b) => (a > b ? a : b)) : null
+}
 const base = computed(() => {
   const q = semAcento(search.value.trim())
   return naAba.value.filter((i) => {
     if (contaFilter.value !== 'all' && contaDe(i) !== contaFilter.value) return false
-    const dia = i.data ? isoDateBrt(new Date(i.data)) : ''
-    if (dataIni.value && (!dia || dia < dataIni.value)) return false
-    if (dataFim.value && (!dia || dia > dataFim.value)) return false
+    // Estoque e fechamento valem pra MESMA peça: ".sp de 01 a 15/11" = peça que
+    // entrou no .sp nesses dias.
+    let pecas = pecasDoFiltro(i)
+    if (estoqueFilter.value !== 'all') {
+      pecas = pecas.filter((l) => l.estoque_tag === estoqueFilter.value)
+      if (!pecas.length) return false
+    }
+    if (dataIni.value || dataFim.value) {
+      const dias = periodoPor.value === 'fechamento' ? pecas.map((l) => diaBrt(l.fechado_em)) : [diaBrt(i.data)]
+      if (!dias.some(noPeriodo)) return false
+    }
     if (!q) return true
     // 16/11 (Vinicius): também a coluna Obs — o recado do pedido e a observação
     // de cada lançamento —, o motivo e a condição lançados.
@@ -460,11 +501,14 @@ function ordenar(rows: Item[]): Item[] {
   })
 }
 const filtrosAtivos = computed(
-  () => contaFilter.value !== 'all' || etapaFilter.value !== 'all' || !!dataIni.value || !!dataFim.value || !!search.value.trim() || !!recorte.value,
+  () => contaFilter.value !== 'all' || etapaFilter.value !== 'all' || estoqueFilter.value !== 'all' || periodoPor.value !== 'pedido'
+    || !!dataIni.value || !!dataFim.value || !!search.value.trim() || !!recorte.value,
 )
 function limparFiltros() {
   contaFilter.value = 'all'
   etapaFilter.value = 'all'
+  estoqueFilter.value = 'all'
+  periodoPor.value = 'pedido'
   dataIni.value = ''
   dataFim.value = ''
   search.value = ''
@@ -537,6 +581,45 @@ function comoTerminou_(como: string | null): string {
 function obsDaLinha(i: Item): string {
   const marca = i.resolvido && ehLargada(i.resolvido_como) ? 'feito antes de mudar o painel' : ''
   return [marca, i.observacao || ''].filter(Boolean).join(' · ')
+}
+
+// ── Observação direto na lista (17/11/2026) ────────────────────────────────
+// A mesma Observação do pedido da janela (PATCH do acompanhamento): vale pra
+// todas as linhas do pedido. Enquanto alguém escreve, o relê de 2 em 2 min espera.
+const obsEditando = ref<string | null>(null)
+const obsTexto = ref('')
+function chaveLinha(i: Item, n: number): string {
+  return `${i.pedido_bling}|${i.sku}|${n}`
+}
+function editarObsDaLinha(i: Item, n: number, ev: Event) {
+  if (!canEdit.value || !i.pedido_bling) return // sem editar: o clique abre a janela
+  ev.stopPropagation()
+  obsEditando.value = chaveLinha(i, n)
+  obsTexto.value = i.observacao || ''
+  void nextTick(() => {
+    const el = document.querySelector<HTMLTextAreaElement>('[data-obs-edit]')
+    if (!el) return
+    el.focus()
+    el.setSelectionRange(el.value.length, el.value.length)
+  })
+}
+async function salvarObsDaLinha(i: Item) {
+  if (obsEditando.value === null) return
+  obsEditando.value = null
+  const pedido = i.pedido_bling
+  const novo = obsTexto.value.trim()
+  const antes = i.observacao
+  if (!pedido || novo === (antes || '').trim()) return
+  // Já aparece na lista; se o servidor recusar, volta o que era.
+  for (const x of items.value) if (x.pedido_bling === pedido) x.observacao = novo || null
+  try {
+    await api(`/api/devolutions/acompanhamento/${encodeURIComponent(pedido)}`, { method: 'PATCH', body: { observacao: novo } })
+    toasts.push({ kind: 'success', title: `Observação salva · pedido ${pedido}`, lines: [] }, 2500)
+    void load(true)
+  } catch (e: any) {
+    for (const x of items.value) if (x.pedido_bling === pedido) x.observacao = antes
+    toasts.push({ kind: 'error', title: 'Observação não salva', lines: [apiError(e)] }, 8000)
+  }
 }
 function tituloLanc(l: Lancamento): string {
   const estoque = l.sku_lancado ? ` · entrou no estoque em ${l.sku_lancado}` : ''
@@ -1097,7 +1180,7 @@ onMounted(() => {
   window.addEventListener('keydown', onTecla)
   // Relê sozinho de 2 em 2 min, só com a janela fechada (não atropela quem digita).
   relogio = setInterval(() => {
-    if (!janela.value && !loading.value && document.visibilityState === 'visible') void load(true)
+    if (!janela.value && !loading.value && obsEditando.value === null && document.visibilityState === 'visible') void load(true)
   }, 120000)
 })
 onBeforeUnmount(() => {
@@ -1182,8 +1265,24 @@ const lidoHa = computed(() => {
           <option value="fraude">Fraude</option>
         </select>
       </label>
-      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="Período da data do pedido">
+      <label class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2" title="Estoque em que a peça entrou quando voltou (o SKU lançado). As que já foram resolvidas aparecem em Mostrar: Todas ou Resolvidas.">
+        <span class="font-semibold text-muted-foreground">Estoque</span>
+        <select v-model="estoqueFilter" class="bg-transparent outline-none" data-filtro-estoque>
+          <option value="all">Todos</option>
+          <option v-for="t in ESTOQUES" :key="t" :value="t">{{ rotuloEstoque(t) }}</option>
+        </select>
+      </label>
+      <label
+        class="inline-flex h-7 items-center gap-1 rounded-md border bg-card px-2"
+        :title="periodoPor === 'fechamento'
+          ? 'Data de fechamento: o dia em que a peça entrou no estoque, ou em que foi lançada como Perdimento / Extraviado / Não devolvido. Peça com o técnico ou sem lançamento fica de fora.'
+          : 'Período da data do pedido'"
+      >
         <span class="font-semibold text-muted-foreground">Período</span>
+        <select v-model="periodoPor" class="bg-transparent outline-none" data-periodo-por>
+          <option value="pedido">data do pedido</option>
+          <option value="fechamento">data fechamento</option>
+        </select>
         <input v-model="dataIni" type="date" :max="dataFim || undefined" class="bg-transparent outline-none" />
         <span class="text-muted-foreground">até</span>
         <input v-model="dataFim" type="date" :min="dataIni || undefined" class="bg-transparent outline-none" />
@@ -1266,7 +1365,8 @@ const lidoHa = computed(() => {
                   <th class="border-b border-l border-l-slate-300 px-1.5 py-1 text-center font-semibold dark:border-l-slate-600" :colspan="veCusto ? 5 : 4">Lançamento</th>
                 </tr>
                 <tr>
-                  <th class="border-b px-1.5 py-1 text-center font-semibold" title="Data do pedido">Data</th>
+                  <th v-if="periodoPor === 'fechamento'" class="border-b px-1.5 py-1 text-center font-semibold text-emerald-700 dark:text-emerald-400" title="Data de fechamento: o dia em que a peça entrou no estoque ou foi lançada como Perdimento / Extraviado / Não devolvido (a data do pedido fica no passar do mouse)">Fechou</th>
+                  <th v-else class="border-b px-1.5 py-1 text-center font-semibold" title="Data do pedido">Data</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido no Bling">Bling</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold" title="Número do pedido na plataforma (um clique seleciona para copiar)">Nº na plataforma</th>
                   <th class="border-b px-1.5 py-1 text-center font-semibold">Conta</th>
@@ -1303,7 +1403,11 @@ const lidoHa = computed(() => {
                   ]"
                   @click="abrirJanela(i)"
                 >
-                  <td class="px-1.5 py-1.5 text-center text-muted-foreground" :title="ddmmaaaa(i.data)">{{ ddmm(i.data) }}</td>
+                  <td v-if="periodoPor === 'fechamento'" class="px-1.5 py-1.5 text-center" :title="`pedido de ${ddmmaaaa(i.data)}${fechamentoDaLinha(i) ? ` · fechou em ${ddmmaaaa(fechamentoDaLinha(i))}` : ' · ainda não fechou'}`" data-fechou>
+                    <span v-if="fechamentoDaLinha(i)" class="text-emerald-700 dark:text-emerald-400">{{ ddmm(fechamentoDaLinha(i)) }}</span>
+                    <span v-else class="text-muted-foreground">—</span>
+                  </td>
+                  <td v-else class="px-1.5 py-1.5 text-center text-muted-foreground" :title="ddmmaaaa(i.data)">{{ ddmm(i.data) }}</td>
                   <td class="px-1.5 py-1.5 text-center font-mono font-bold" :class="primeiraVisivel(n) ? '' : 'text-muted-foreground'">{{ i.pedido_bling || '—' }}</td>
                   <!-- 16/11: sem cortar ("o número do pedido na plataforma tá cortando") — cabe
                        numa linha até 19 caracteres (TikTok, Amazon); mais que isso quebra. -->
@@ -1396,7 +1500,34 @@ const lidoHa = computed(() => {
                     </template>
                     <span v-else class="text-muted-foreground">—</span>
                   </td>
-                  <td class="px-1.5 py-1.5 text-muted-foreground" :title="obsDaLinha(i)"><div class="line-clamp-2 break-words leading-tight">{{ obsDaLinha(i) }}</div></td>
+                  <!-- 17/11/2026 (Vinicius): "no campo observação eu queria clicar e poder
+                       escrever na primeira tela" — clica na célula, escreve, Enter (ou sair
+                       do campo) salva; Esc desiste. É a mesma Observação do pedido da janela. -->
+                  <td v-if="obsEditando === chaveLinha(i, n)" class="px-1 py-1" @click.stop>
+                    <textarea
+                      v-model="obsTexto"
+                      rows="2"
+                      class="w-full resize-y rounded border border-primary bg-background px-1.5 py-1 text-[11px] leading-tight outline-none"
+                      placeholder="recado pra quem acompanha"
+                      data-obs-edit
+                      @keydown.enter.exact.prevent="salvarObsDaLinha(i)"
+                      @keydown.esc.stop.prevent="obsEditando = null"
+                      @blur="salvarObsDaLinha(i)"
+                    />
+                  </td>
+                  <td
+                    v-else
+                    class="px-1.5 py-1.5 text-muted-foreground"
+                    :class="canEdit && i.pedido_bling ? 'cursor-text hover:bg-background hover:shadow-[inset_0_0_0_1px_hsl(var(--border))]' : ''"
+                    :title="canEdit && i.pedido_bling ? `${obsDaLinha(i) ? `${obsDaLinha(i)}\n\n` : ''}clique pra escrever a observação` : obsDaLinha(i)"
+                    data-obs
+                    @click="editarObsDaLinha(i, n, $event)"
+                  >
+                    <div class="line-clamp-2 break-words leading-tight">
+                      <template v-if="obsDaLinha(i)">{{ obsDaLinha(i) }}</template>
+                      <span v-else-if="canEdit && i.pedido_bling" class="text-[10px] text-muted-foreground/60">+ obs.</span>
+                    </div>
+                  </td>
                 </tr>
                 <tr v-if="!loading && !filtrados.length">
                   <td :colspan="veCusto ? 20 : 19" class="px-3 py-6 text-center text-muted-foreground">
