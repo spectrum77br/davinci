@@ -69,6 +69,10 @@ def mundo(tmp_path, monkeypatch):
         "    pathlib.Path('.gitattributes').write_text('*.txt -diff\\n')\n"
         "    pathlib.Path('apps/web/texto.txt').write_text('Oi\\n')\n"
         "    fim = {'resultado': 'pronta', 'resumo': 'x', 'testes': ''}\n"
+        "elif acao == 'gitfile':\n"
+        "    pathlib.Path('.git').write_text('gitdir: /tmp/repo-do-atacante\\n')\n"
+        "    pathlib.Path('apps/web/texto.txt').write_text('Oi\\n')\n"
+        "    fim = {'resultado': 'pronta', 'resumo': 'x', 'testes': ''}\n"
         "elif acao == 'equipe':\n"
         "    fim = {'resultado': 'precisa_equipe', 'resumo': 'Precisa de coluna nova', 'testes': ''}\n"
         "assert '--permission-mode' in sys.argv and 'dontAsk' in sys.argv\n"
@@ -288,6 +292,14 @@ def test_gitattributes_nao_esconde_o_diff(mundo):
     assert r["status"] == "precisa_equipe" and ".gitattributes" in r["erro"]
 
 
+def test_arquivo_git_mexido_nao_passa(mundo):
+    """O .git da cópia aponta o git do robô (fora da caixa) para um repositório
+    do atacante, com config que executa comando: o robô para."""
+    mundo["acao"].write_text("gitfile")
+    r = _fazer(mundo)
+    assert r["status"] == "falhou" and ".git" in r["erro"]
+
+
 def test_claude_pede_a_equipe(mundo):
     mundo["acao"].write_text("equipe")
     r = _fazer(mundo)
@@ -331,11 +343,12 @@ def test_conferencias_rodam_na_caixa(mundo, tmp_path):
         f"try{{fs.readdirSync('{m['raiz']}');r.push('LEU_RAIZ')}}catch(e){{}}\n"
         f"try{{fs.writeFileSync('{fora}','x');r.push('ESCREVEU_FORA')}}catch(e){{}}\n"
         "try{fs.writeFileSync('dentro.txt','x');r.push('ESCREVEU_DENTRO')}catch(e){}\n"
+        "try{fs.writeFileSync('.git','gitdir: /tmp/x');r.push('ESCREVEU_PONTEIRO_GIT')}catch(e){}\n"
         "console.log(r.join(','))\n"
     )
     rc, out = m["rodada"].testar(wt, "node", "espiao.cjs", timeout=60)
     assert "ESCREVEU_DENTRO" in out, out
-    for proibido in ("LEU_CHAVE", "LEU_RAIZ", "ESCREVEU_FORA"):
+    for proibido in ("LEU_CHAVE", "LEU_RAIZ", "ESCREVEU_FORA", "ESCREVEU_PONTEIRO_GIT"):
         assert proibido not in out, out
     assert not fora.exists()
     # fora da pasta de um pedido o testar.sh nem roda

@@ -5,11 +5,11 @@
 ;;
 ;; Dentro da caixa:
 ;;   - não lê chaves, tokens, .env, a pasta do robô (~/DaVinci) nem o chaveiro;
-;;   - só escreve na worktree do pedido, no admin dela no .git, no cache do uv
-;;     e na pasta temporária própria;
+;;   - só escreve na worktree do pedido (menos o arquivo .git dela), no cache do
+;;     uv e na pasta temporária própria — nada dentro do repositório principal;
 ;;   - SEM rede, a não ser o socket local do Postgres (os testes da API).
 ;; Parâmetros (-D): CASA, RAIZ (a pasta do robô, onde quer que esteja), WT,
-;; GITADMIN, UVCACHE e TMP (a pasta temporária SÓ desta caixa — nada de /tmp
+;; UVCACHE e TMP (a pasta temporária SÓ desta caixa — nada de /tmp
 ;; comum, onde ficam arquivos de outras sessões e outros robôs).
 (version 1)
 (allow default)
@@ -31,10 +31,12 @@
 (deny file-write*
   (require-all
     (require-not (subpath (param "WT")))
-    (require-not (subpath (param "GITADMIN")))
     (require-not (subpath (param "UVCACHE")))
     (require-not (subpath (param "TMP")))
     (require-not (subpath "/dev"))))
+;; O arquivo .git da pasta do pedido diz ao git onde está o repositório: quem o
+;; reescrevesse levaria o git do robô (fora da caixa) para uma config sua.
+(deny file-write* (literal (string-append (param "WT") "/.git")))
 
 (deny network*)
 (allow network-outbound (remote unix-socket (path-literal "/private/tmp/.s.PGSQL.5432")))

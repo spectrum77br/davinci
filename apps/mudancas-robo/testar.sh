@@ -21,7 +21,6 @@ case "$WT" in
   "$(cd "$PASTA" && pwd -P)"/M-[0-9]*) ;;
   *) echo "testar.sh: só roda dentro da pasta de um pedido ($PASTA/M-N)"; exit 2 ;;
 esac
-GA=$(git -c core.hooksPath=/dev/null rev-parse --path-format=absolute --git-dir)
 TMPC="$(cd "$PASTA" && pwd -P)/.tmp-caixa/$(basename "$WT")"
 mkdir -p "$TMPC"
 
@@ -41,6 +40,6 @@ exec env -i \
   DATABASE_URL="$DB" DAVINCI_TEST_SCHEMA=davinci_test_robo NODE_PATH="$NODEP" \
   UV_CACHE_DIR="$HOME/.cache/uv" UV_OFFLINE=1 \
   /usr/bin/sandbox-exec -f "$RAIZ/caixa.sb" \
-    -D CASA="$HOME" -D RAIZ="$RAIZ" -D WT="$WT" -D GITADMIN="$GA" \
+    -D CASA="$HOME" -D RAIZ="$RAIZ" -D WT="$WT" \
     -D UVCACHE="$HOME/.cache/uv" -D TMP="$TMPC" \
     "$@"

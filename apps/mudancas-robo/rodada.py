@@ -201,6 +201,30 @@ def git(cwd: Path, *args: str, timeout: int = 300) -> str:
     return out.strip()
 
 
+def admin_da(wt: Path) -> Path:
+    """A pasta de controle do git desta cópia, achada pelo REPOSITÓRIO
+    principal (o `gitdir` que aponta de volta para `wt/.git`) — nunca pelo
+    arquivo `wt/.git`, que fica na pasta onde o Claude escreve."""
+    alvo = (wt / ".git").resolve()
+    for adm in (REPO / ".git" / "worktrees").iterdir():
+        try:
+            volta = Path((adm / "gitdir").read_text(encoding="utf-8").strip()).resolve()
+        except OSError:
+            continue
+        if volta == alvo:
+            return adm
+    raise RuntimeError(f"não achei o controle do git de {wt.name} no repositório principal")
+
+
+def gw(wt: Path, *args: str, timeout: int = 300) -> str:
+    """git na cópia do pedido, com a pasta de controle VERDADEIRA."""
+    return git(wt, f"--git-dir={admin_da(wt)}", f"--work-tree={wt}", *args, timeout=timeout)
+
+
+def gw_cmd(wt: Path) -> list[str]:
+    return [*GIT, f"--git-dir={admin_da(wt)}", f"--work-tree={wt}"]
+
+
 def git_rede(cwd: Path, *args: str, timeout: int = 300) -> str:
     """git que usa a rede (fetch/push): falha aqui é do ambiente."""
     rc, out = rodar([*GIT, *args], cwd=cwd, timeout=timeout)
@@ -501,6 +525,7 @@ def fazer(t: dict) -> None:
     if wt.exists():
         remover_worktree(wt)
     git(REPO, "worktree", "add", "-B", branch, str(wt), "origin/main")
+    ponteiro = (wt / ".git").read_text(encoding="utf-8")
     if (wt / "apps/api/pyproject.toml").exists():
         rc, out = rodar(["uv", "sync", "--frozen", "--quiet"], cwd=wt / "apps/api", timeout=900)
         if rc != 0:
@@ -550,17 +575,20 @@ def fazer(t: dict) -> None:
         resultado(mid, "precisa_equipe", resumo=resumo, erro=resumo, testes=testes)
         return
 
-    git(wt, "add", "-A")
-    arquivos = _numstat(git(wt, "diff", "--cached", "--numstat", "-z", *DIFF_SEGURO))
+    if (wt / ".git").read_text(encoding="utf-8") != ponteiro:
+        resultado(mid, "falhou", resumo=resumo, erro="o arquivo .git da cópia foi mexido — não sigo")
+        return
+    gw(wt, "add", "-A")
+    arquivos = _numstat(gw(wt, "diff", "--cached", "--numstat", "-z", *DIFF_SEGURO))
     motivo = _barrar(arquivos)
     if motivo:
         resultado(mid, "precisa_equipe", resumo=resumo, erro=motivo, testes=testes)
         return
 
-    arvore = git(wt, "write-tree")
+    arvore = gw(wt, "write-tree")
     ok, conf = conferencias(wt, arquivos)
-    git(wt, "add", "-A")
-    if git(wt, "write-tree") != arvore:
+    gw(wt, "add", "-A")
+    if gw(wt, "write-tree") != arvore:
         resultado(mid, "falhou", resumo=resumo, erro="as conferências mexeram nos arquivos — refazer")
         return
 
@@ -570,16 +598,16 @@ def fazer(t: dict) -> None:
         "feita pelo robô de mudanças; só vai para o ar depois de aprovada.\n\n"
         f"{resumo[:1500]}\n\n{TRAILER}\n"
     )
-    git(wt, "-c", "user.name=Robô de mudanças", "-c", "user.email=robo-mudancas@davinci",
-        "commit", "-q", "--no-verify", "-m", mensagem)
-    commit = git(wt, "rev-parse", "HEAD")
+    gw(wt, "-c", "user.name=Robô de mudanças", "-c", "user.email=robo-mudancas@davinci",
+       "commit", "-q", "--no-verify", "-m", mensagem)
+    commit = gw(wt, "rev-parse", "HEAD")
     # O que foi commitado de verdade (não o que se viu antes): de novo as regras.
-    final_arq = _numstat(git(wt, "show", "--format=", "--numstat", "-z", *DIFF_SEGURO, "HEAD"))
+    final_arq = _numstat(gw(wt, "show", "--format=", "--numstat", "-z", *DIFF_SEGURO, "HEAD"))
     motivo = _barrar(final_arq)
     if motivo:
         resultado(mid, "precisa_equipe", resumo=resumo, erro=motivo, testes=testes)
         return
-    diff = git(wt, "show", "--format=", "--no-color", *DIFF_SEGURO, "HEAD", timeout=120)
+    diff = gw(wt, "show", "--format=", "--no-color", *DIFF_SEGURO, "HEAD", timeout=120)
     if len(diff) > MAX_DIFF:
         resultado(mid, "precisa_equipe", resumo=resumo, erro="o diff ficou grande demais")
         return
@@ -606,7 +634,7 @@ def _patch_id(cwd: Path, rev: str) -> str:
     if not (COMMIT_OK.match(rev) or rev == "HEAD"):
         return ""
     show = subprocess.Popen(  # noqa: S603
-        [*GIT, "show", "--format=", "-U0", *DIFF_SEGURO, rev],
+        [*gw_cmd(cwd), "show", "--format=", "-U0", *DIFF_SEGURO, rev],
         cwd=str(cwd),
         env=_env_base(),
         stdout=subprocess.PIPE,
@@ -661,11 +689,13 @@ def publicar(t: dict) -> None:
         resultado(mid, "falhou", erro="a cópia local não é a mudança aprovada — peça de novo")
         return
 
-    ja_no_main = rodar([*GIT, "merge-base", "--is-ancestor", "HEAD", "origin/main"], cwd=wt)[0] == 0
+    ja_no_main = (
+        rodar([*gw_cmd(wt), "merge-base", "--is-ancestor", "HEAD", "origin/main"], cwd=wt)[0] == 0
+    )
     if not ja_no_main:
-        rc, _out = rodar([*GIT, "rebase", "-q", "--no-autostash", "origin/main"], cwd=wt)
+        rc, _out = rodar([*gw_cmd(wt), "rebase", "-q", "--no-autostash", "origin/main"], cwd=wt)
         if rc != 0:
-            rodar([*GIT, "rebase", "--abort"], cwd=wt)
+            rodar([*gw_cmd(wt), "rebase", "--abort"], cwd=wt)
             resultado(
                 mid,
                 "falhou",
@@ -675,7 +705,11 @@ def publicar(t: dict) -> None:
         if _patch_id(wt, "HEAD") != patch_aprovado:
             resultado(mid, "falhou", erro="depois de atualizar, a mudança ficou diferente da aprovada")
             return
-        arquivos = _numstat(git(wt, "show", "--format=", "--numstat", "-z", *DIFF_SEGURO, "HEAD"))
+        arquivos = _numstat(gw(wt, "show", "--format=", "--numstat", "-z", *DIFF_SEGURO, "HEAD"))
+        motivo = _barrar(arquivos)
+        if motivo:
+            resultado(mid, "falhou", erro=f"depois de atualizar: {motivo}")
+            return
         ok, conf = conferencias(wt, arquivos)
         if not ok:
             resultado(
@@ -697,7 +731,7 @@ def publicar(t: dict) -> None:
     partes = out.split()
     servidor_head = partes[0] if partes else ""
     livre = float(partes[1]) if len(partes) > 1 and partes[1].isdigit() else 0.0
-    base = git(wt, "rev-parse", "origin/main")
+    base = gw(wt, "rev-parse", "origin/main")
     if not ja_no_main and servidor_head != base:
         _adiar(
             mid,
@@ -715,11 +749,11 @@ def publicar(t: dict) -> None:
         return
 
     if not ja_no_main:
-        rc, out = rodar([*GIT, "push", "-q", "origin", "HEAD:main"], cwd=wt, timeout=180)
+        rc, out = rodar([*gw_cmd(wt), "push", "-q", "origin", "HEAD:main"], cwd=wt, timeout=180)
         if rc != 0:
             _adiar(mid, t, f"o push foi recusado (o main andou?): {out[-200:]}")
             return
-    commit = git(wt, "rev-parse", "HEAD")
+    commit = gw(wt, "rev-parse", "HEAD")
     log(f"{codigo}: no main em {commit[:10]} — deploy")
     rc, saida = deploy(codigo)
     (RAIZ / "registros" / f"{codigo}-deploy.log").write_text(saida[-100_000:], encoding="utf-8")

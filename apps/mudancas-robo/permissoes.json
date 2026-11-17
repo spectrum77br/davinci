@@ -13,6 +13,10 @@
       "Bash(git diff --stat)"
     ],
     "deny": [
+      "Write(.git/**)",
+      "Edit(.git/**)",
+      "Write(.git)",
+      "Edit(.git)",
       "Read(~/.ssh/**)",
       "Read(~/.aws/**)",
       "Read(~/.config/**)",
