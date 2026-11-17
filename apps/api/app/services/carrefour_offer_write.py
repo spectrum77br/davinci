@@ -2,6 +2,8 @@
 
 SUBMITTING is committed before HTTP. An interrupted/ambiguous POST never
 replays automatically. The worker is the only place that submits offers.
+Integration locks use PostgreSQL NO KEY UPDATE: serialize enqueues/setting
+changes while allowing callers to hold FK KEY SHARE locks in an outer session.
 """
 
 from __future__ import annotations
@@ -149,7 +151,7 @@ async def enqueue_offer_write(*, integration_id, link, qty=None, price=None):
                 Integration.id == integration_id,
                 Integration.platform == IntegrationPlatform.CARREFOUR,
             )
-            .with_for_update()
+            .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
         if integration is None:
@@ -254,7 +256,7 @@ async def _claim(integration_id):
                 Integration.id == integration_id,
                 Integration.platform == IntegrationPlatform.CARREFOUR,
             )
-            .with_for_update()
+            .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
         if integration is None:
@@ -417,7 +419,7 @@ async def _reject(batch_id, code, *, uncertain=False):
         await session.scalar(
             select(Integration)
             .where(Integration.id == initial.integration_id)
-            .with_for_update()
+            .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
         batch = await session.scalar(
@@ -572,7 +574,7 @@ async def _refresh_batch_stock(batch_id, integration_id, items):
         await session.scalar(
             select(Integration)
             .where(Integration.id == integration_id)
-            .with_for_update()
+            .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
         batch = await session.scalar(
@@ -648,7 +650,7 @@ async def _prepare(batch_id):
         integration = await session.scalar(
             select(Integration)
             .where(Integration.id == batch.integration_id)
-            .with_for_update()
+            .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
         current = await session.scalar(
@@ -695,7 +697,7 @@ async def _submit(batch_id, prepared_creds):
         integration = await session.scalar(
             select(Integration)
             .where(Integration.id == batch.integration_id)
-            .with_for_update()
+            .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
         batch = await session.scalar(
@@ -817,7 +819,7 @@ async def _confirm(batch_id):
         await session.scalar(
             select(Integration)
             .where(Integration.id == initial.integration_id)
-            .with_for_update()
+            .with_for_update(key_share=True)
             .execution_options(populate_existing=True)
         )
         batch = await session.scalar(

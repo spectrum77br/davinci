@@ -733,3 +733,53 @@ async def test_failed_confirmation_does_not_dispatch_followup_or_retry(env):
     env.clock[0] += timedelta(minutes=5)
     await queue.run_carrefour_offer_writes()
     assert len(env.remote.posts) == 1
+
+
+async def test_enqueue_while_caller_has_flushed_integration_foreign_key(env):
+    """SyncOrchestrator batches SyncLogs in an outer session, as do pricing callers."""
+    ident, link = await env.insert()
+    async with env.sessions.begin() as outer:
+        outer.add(
+            SyncLog(
+                user_id=link.user_id,
+                product_id=link.product_id,
+                product_link_id=link.id,
+                integration_id=ident,
+                platform=IntegrationPlatform.CARREFOUR,
+                action=SyncLogAction.UPDATE_STOCK,
+                status=LinkSyncStatus.PENDING,
+                payload={"caller": "outer-transaction"},
+            )
+        )
+        await outer.flush()  # FK verification holds KEY SHARE on the integration.
+        result = await asyncio.wait_for(
+            queue.enqueue_offer_write(integration_id=ident, link=link, qty=10),
+            timeout=2,
+        )
+        assert result.error_code == "carrefour_write_pending"
+    assert (await env.read()).rows[0].requested_stock == 10
+
+
+async def test_no_key_update_still_blocks_scope_changes_during_post(env):
+    ident, link = await env.insert()
+    await queue.enqueue_offer_write(integration_id=ident, link=link, qty=10)
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_post():
+        entered.set()
+        await asyncio.wait_for(release.wait(), timeout=5)
+
+    env.remote.posting = hold_post
+    sending = asyncio.create_task(queue.run_carrefour_offer_writes())
+    await asyncio.wait_for(entered.wait(), timeout=5)
+    disable = asyncio.create_task(env.edit(ident, **{queue.STOCK_SCOPE: False}))
+    try:
+        await asyncio.sleep(0.05)
+        assert not disable.done(), "scope updates must wait until the active POST is committed"
+    finally:
+        release.set()
+    sent, _ = await asyncio.wait_for(asyncio.gather(sending, disable), timeout=5)
+    assert sent["errors"] == 0 and len(env.remote.posts) == 1
+    async with env.sessions() as session:
+        integration = await session.get(Integration, ident)
+        assert decrypt_json(integration.credentials)[queue.STOCK_SCOPE] is False
