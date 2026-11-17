@@ -178,6 +178,17 @@ function coveragePanel(){
   const t=c.totals||{};
   return panel('Conferência com o Bling',`Cada venda que o Bling tem de ${esc(day(c.from))} a ${esc(day(c.to))}, procurada no que o ERP leu da loja. Atualiza de hora em hora (última às ${esc(when)}): ${t.bling||0} no Bling, ${t.found||0} achadas, ${t.missing||0} faltando, ${t.different||0} com valor diferente. Canceladas no Bling não contam como falta.`,table(['Loja do Bling','Leitura no ERP','No Bling','Achadas','Faltando','Valor'],rows.join('')));
 }
+function shadowPanel(){
+  const s=state.compat_shadow;if(!s)return '';
+  const when=new Date(s.taken_at).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+  const states={read_ok:'lida',token_expired:'pulada (token do Bling perto de vencer)',configuration_missing:'sem conta do Bling',provider_unavailable:'Bling não respondeu'};
+  const kinds={different:'Valor diferente',missing:'Falta no ERP',extra:'Só no ERP',moving:'Saldo (pode mudar entre as leituras)'};
+  const rounds=Object.entries(s.states||{}).map(([k,n])=>`${n} ${esc(states[k]||k)}`).join(' · ');
+  const t=s.totals||{};
+  const rows=(s.routes||[]).map(r=>`<tr><td>${esc(r.name)}</td><td class="num">${r.calls}</td><td class="num">${r.equal}</td><td class="num">${r.different?`<strong>${r.different}</strong>`:'0'}</td><td class="num">${r.missing?`<strong>${r.missing}</strong>`:'0'}</td><td class="num">${r.extra}</td><td class="num">${r.moving}</td><td>${r.errors.length?r.errors.map(e=>`${esc(e.ref)}: Bling ${esc(e.bling)} · ERP ${esc(e.erp)}`).join('<br>'):r.only_bling_items||r.only_erp_items?`${r.only_bling_items} itens só no Bling · ${r.only_erp_items} só no ERP`:''}</td></tr>`).join('');
+  const paths=(s.paths||[]).map(p=>`<li>${esc((s.routes||[]).find(r=>r.route===p.route)?.name||p.route)} · <code>${esc(p.path)}</code> · ${esc(kinds[p.kind]||p.kind)} · ${p.count}×${p.examples.map(e=>`<br><small>${esc(e.ref)}: Bling ${esc(e.bling)} · ERP ${esc(e.erp)}</small>`).join('')}</li>`).join('');
+  return panel('Sombra da API compatível',`As mesmas consultas que o DaVinci faz ao Bling (situações, depósitos, canais, categorias, produtos e saldos), feitas ao Bling e à API do ERP sobre os mesmos ${(s.sample||[]).length} produtos, comparadas campo a campo. Só leitura dos dois lados. De hora em hora, ${(s.sample||[]).length} produtos diferentes a cada vez (última às ${esc(when)}, ${esc(states[s.state]||s.state)}). Rodadas guardadas: ${rounds}. Nesta: ${t.equal||0} campos iguais, ${t.different||0} diferentes, ${t.missing||0} faltando no ERP, ${t.errors||0} com erro. Pedidos, contatos e notas ficam fora: têm dados de comprador e dependem do ensaio de virada.`,table(['Consulta','Chamadas','Iguais','Diferentes','Faltam no ERP','Só no ERP','Saldo','Observação'],rows||empty(8,'Rodada sem comparação.'))+(paths?`<details><summary>Ver ${s.paths.length} de ${s.paths_total} campos com diferença</summary><ul>${paths}</ul></details>`:''));
+}
 document.addEventListener('click',e=>{
   const button=e.target.closest('[data-invoice-for]');if(!button)return;
   const id=button.dataset.invoiceFor;

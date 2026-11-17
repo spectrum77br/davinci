@@ -344,6 +344,13 @@ def main():
                     log.info("conferência com o Bling %s", bling_coverage.run(erp))
                 except (ERPError, OSError, ValueError) as error:
                     log.warning("conferência com o Bling não feita: %s", type(error).__name__)
+                if os.environ.get("ERP_COMPAT_SHADOW", "1") != "0":
+                    from app.erp_local import compat_shadow
+
+                    try:
+                        log.info("sombra da API compatível %s", compat_shadow.run(erp))
+                    except (ERPError, OSError, ValueError, sqlite3.Error) as error:
+                        log.warning("sombra da API compatível não feita: %s", type(error).__name__)
             except ERPError as error:
                 log.warning("referência não atualizada: %s", error.code)
         rounds += 1
