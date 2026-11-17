@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { TABS_CONFIGURACOES, TABS_USUARIOS } from '~/lib/navGroups'
 import { computed, ref } from 'vue'
-import { Plus, RefreshCw, X, Trash2, Bot, Copy } from 'lucide-vue-next'
+import { Plus, RefreshCw, X, Trash2, Bot, Copy, Check, Loader2 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
 
 const { api } = useApi()
@@ -39,6 +39,38 @@ const filteredRows = computed(() => {
   if (!isAdmin.value || filterResponsavel.value === 'all') return rows.value
   return rows.value.filter((t) => t.responsavel_id === filterResponsavel.value)
 })
+
+// ---- Botão do canto da linha (17/11/2026): "Concluir" marca a tarefa como feita
+// (conclusão = hoje, BRT); "Concluída" volta para pendente, com confirmação. Antes
+// só dava abrindo a tarefa e digitando a data. Só admin: a API só deixa admin mudar
+// a data de conclusão (quem não é admin só edita a observação).
+const toasts = useToasts()
+// A mesma contagem da bolinha do menu (AppSidebar busca a cada 15 s): some na hora.
+const minhasPendentes = useState<number>('davinci.pendentes.tarefas', () => 0)
+const marcando = ref<string | null>(null)
+
+async function alternarFeita(t: Tarefa) {
+  if (!isAdmin.value || marcando.value) return
+  const feita = Boolean(t.data_conclusao)
+  if (feita && !confirm('Voltar esta tarefa para pendente?')) return
+  marcando.value = t.id
+  try {
+    const atualizada = await api<Tarefa>(`/api/tarefas/${t.id}`, {
+      method: 'PATCH',
+      body: { data_conclusao: feita ? null : isoToday() },
+    })
+    // Atualiza a linha no lugar (sem recarregar a lista nem pular de posição).
+    const i = rows.value.findIndex((r) => r.id === t.id)
+    if (i >= 0) rows.value[i] = { ...rows.value[i], ...atualizada }
+    if (t.responsavel_id === auth.user?.id) {
+      minhasPendentes.value = Math.max(0, minhasPendentes.value + (feita ? 1 : -1))
+    }
+  } catch (e: any) {
+    toasts.error('Não deu para marcar a tarefa', e?.data?.detail?.code || e?.message || 'erro')
+  } finally {
+    marcando.value = null
+  }
+}
 
 async function refresh() {
   loading.value = true
@@ -323,6 +355,7 @@ function userLabel(u: UserOption) {
             <th class="px-3 py-2">Data conclusão</th>
             <th class="px-3 py-2">Tarefa</th>
             <th class="px-3 py-2">Observação</th>
+            <th v-if="isAdmin" class="px-3 py-2 text-right">Feita?</th>
           </tr>
         </thead>
         <tbody>
@@ -341,9 +374,29 @@ function userLabel(u: UserOption) {
             </td>
             <td class="px-3 py-2">{{ t.tarefa }}</td>
             <td class="px-3 py-2 text-muted-foreground">{{ t.observacao || '—' }}</td>
+            <td v-if="isAdmin" class="px-3 py-2 text-right whitespace-nowrap">
+              <button
+                type="button"
+                data-concluir
+                class="inline-flex items-center gap-1.5 rounded-md border px-2.5 h-8 text-xs font-medium transition-colors disabled:opacity-50"
+                :class="t.data_conclusao
+                  ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/25 dark:text-emerald-300'
+                  : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+                :disabled="marcando === t.id"
+                :aria-pressed="Boolean(t.data_conclusao)"
+                :title="t.data_conclusao
+                  ? `Feita em ${fmtDate(t.data_conclusao)}. Clique para voltar a pendente.`
+                  : 'Marcar como feita (conclusão hoje)'"
+                @click.stop="alternarFeita(t)"
+              >
+                <Loader2 v-if="marcando === t.id" class="size-3.5 animate-spin" />
+                <Check v-else class="size-3.5" />
+                {{ t.data_conclusao ? 'Concluída' : 'Concluir' }}
+              </button>
+            </td>
           </tr>
           <tr v-if="!loading && filteredRows.length === 0">
-            <td colspan="5" class="px-3 py-6 text-center text-muted-foreground">nenhuma tarefa</td>
+            <td :colspan="isAdmin ? 6 : 5" class="px-3 py-6 text-center text-muted-foreground">nenhuma tarefa</td>
           </tr>
         </tbody>
       </table>
@@ -363,8 +416,27 @@ function userLabel(u: UserOption) {
             <div class="font-medium truncate">{{ t.tarefa }}</div>
             <div class="text-xs text-muted-foreground truncate">{{ t.responsavel_name || t.responsavel_email || '—' }}</div>
           </div>
+          <button
+            v-if="isAdmin"
+            type="button"
+            data-concluir
+            class="shrink-0 inline-flex items-center gap-1.5 rounded-md border px-2.5 h-9 text-xs font-medium transition-colors disabled:opacity-50"
+            :class="t.data_conclusao
+              ? 'border-emerald-500/60 bg-emerald-500/15 text-emerald-700 hover:bg-emerald-500/25 dark:text-emerald-300'
+              : 'text-muted-foreground hover:bg-muted hover:text-foreground'"
+            :disabled="marcando === t.id"
+            :aria-pressed="Boolean(t.data_conclusao)"
+            :title="t.data_conclusao
+              ? `Feita em ${fmtDate(t.data_conclusao)}. Clique para voltar a pendente.`
+              : 'Marcar como feita (conclusão hoje)'"
+            @click.stop="alternarFeita(t)"
+          >
+            <Loader2 v-if="marcando === t.id" class="size-3.5 animate-spin" />
+            <Check v-else class="size-3.5" />
+            {{ t.data_conclusao ? 'Concluída' : 'Concluir' }}
+          </button>
           <span
-            v-if="!t.data_conclusao"
+            v-else-if="!t.data_conclusao"
             class="text-[10px] px-1.5 py-0.5 rounded border border-amber-500 text-amber-400 shrink-0"
           >pendente</span>
         </div>
