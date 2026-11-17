@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS product_details_history (
 COMMANDS = {"product.update"}
 CONDITIONS = {"unspecified", "new", "used", "refurbished"}
 PRODUCTIONS = {"", "own", "third_party"}
+# Novos procedimentos 2/6: the shipping check refuses a device whose voltage differs from the SKU's.
+VOLTAGES = {"", "110V", "220V", "bivolt"}
 DIMENSION_UNITS = {"m", "cm", "mm"}
 DEPARTMENTS = {
     "",
@@ -71,6 +73,7 @@ DETAIL_FIELDS = {
     "stock_min",
     "stock_max",
     "crossdocking",
+    "voltage",
 }
 
 
@@ -108,6 +111,7 @@ def empty(status="active"):
         "stock_min": None,
         "stock_max": None,
         "crossdocking": None,
+        "voltage": "",
     }
 
 
@@ -263,6 +267,9 @@ def normalize(raw):
     data["production"] = _choice(
         raw.get("production") or "", PRODUCTIONS, "product_production", "Escolha a produção."
     )
+    data["voltage"] = _choice(
+        raw.get("voltage") or "", VOLTAGES, "product_voltage", "Escolha a voltagem."
+    )
     data["dimension_unit"] = _choice(
         raw.get("dimension_unit", "cm"),
         DIMENSION_UNITS,
@@ -413,6 +420,18 @@ def apply(erp, db, key, p):
         "INSERT INTO product_pricing VALUES (?,?,?) ON CONFLICT(sku) DO UPDATE SET "
         "price=excluded.price,cost_price=excluded.cost_price",
         (product["sku"], *prices),
+    )
+    from app.erp_local import price_table
+
+    actor = db.execute("SELECT actor FROM events WHERE operation_key=?", (key,)).fetchone()
+    price_table.record_cost_change(
+        erp,
+        db,
+        key,
+        product["sku"],
+        price[1] if price else None,
+        prices[1],
+        actor[0] if actor else "ERP",
     )
     store(erp, db, key, product["sku"], current, data)
     if current["status"] != data["status"]:

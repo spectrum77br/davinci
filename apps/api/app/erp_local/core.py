@@ -1032,6 +1032,9 @@ class LocalERP:
             from app.erp_local.deposits import snapshot as depot_snapshot
 
             deposits = depot_snapshot(db)
+            from app.erp_local import price_table
+
+            lines = price_table.index(db)
             for row in db.execute("SELECT rowid AS position,* FROM products ORDER BY sku"):
                 product = dict(row)
                 product["components"] = json.loads(product["components"])
@@ -1039,6 +1042,7 @@ class LocalERP:
                 product["cost_price"] = pricing.get(product["sku"], {}).get("cost_price")
                 product["origin"] = self.origin(db, product["sku"])
                 product["details"] = product_details.details(db, product["sku"])
+                product["price_table"] = price_table.for_sku(lines, product["sku"])
                 product["suppliers"] = suppliers.get(product["sku"], {"version": 0, "rows": []})
                 product["tax"] = tax.get(
                     product["sku"], {"version": 0, "data": product_tax.empty()}

@@ -311,6 +311,32 @@ test('top menu opens navigation without executing business commands',async()=>{
   dom.window.close();
 });
 
+test('the product shows its Tabela de Preços line, warns on a different EAN and keeps voltage',async()=>{
+  const price_table={line:'dg052,dg053,dg054',line_name:'uranyx A17',department:'Celular',ean:'7908855913175',certificate:'Anatel',certificate_number:'07197-26-18234',model:'A17 Pro Max',warranty_months:12,priority:'sp',photos_url:'https://mega.nz/folder/x',packaging_url:''};
+  const p={sku:'dg053.sp',name:'A17',kind:'simple',components:[],balances:[],price:'10',cost_price:'5',price_table,details:{version:1,unit:'UN',status:'active',gtin:'7908855913168',gtin_tax:'',voltage:'bivolt'}};
+  const {dom,document:d,requests}=await setup({products:[p],cost_changes:[{created_at:'2026-11-17T12:00:00+00:00',sku:'dg053.sp',cost_from:'100',cost_to:'120',quantity:'10',result:'200.00',actor:'ana'}]});
+  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  d.querySelector('nav [data-page=products]').click();
+  d.querySelector('[data-edit-product]').click();
+  const form=d.querySelector('#product-edit-form');
+  assert.equal(form.querySelector('[name=voltage]').value,'bivolt');
+  form.querySelector('[data-product-edit-tab=pricetable]').click();
+  const section=form.querySelector('[data-product-section=pricetable]');
+  assert.equal(section.hidden,false);
+  assert.match(section.textContent,/Lido da Tabela de Preços do DaVinci/);
+  assert.equal([...section.querySelectorAll('input')].map(i=>i.value).join('|'),'Celular|7908855913175|Anatel|07197-26-18234|A17 Pro Max|12|.sp');
+  assert.match(section.textContent,/diferente do GTIN do cadastro/);
+  assert.ok(section.querySelector('a[href="https://mega.nz/folder/x"]'));
+  form.querySelector('[name=voltage]').value='220V';
+  form.dispatchEvent(new dom.window.Event('submit',{bubbles:true,cancelable:true}));
+  await new Promise(r=>setImmediate(r));
+  const sent=requests.find(r=>r.kind==='product.update');
+  assert.equal(sent.payload.data.voltage,'220V');
+  d.querySelector('nav [data-page=overview]').click();
+  assert.match(d.body.textContent,/Resultado das mudanças de custo/);
+  assert.ok(d.querySelector('a[href="/api/erp-local/cost-changes.csv"]'));
+});
+
 test('product editing sends metadata with the current version and preserves GTIN as text',async()=>{
   const p={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],price:'10',cost_price:'5',details:{version:7,unit:'UN',status:'active',gtin:'012345678905',gtin_tax:''}};
   const {dom,document:d,requests}=await setup({products:[p]});
