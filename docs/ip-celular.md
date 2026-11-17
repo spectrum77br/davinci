@@ -11,7 +11,7 @@ ler QR code e fazer a verificação do Mercado Livre no iPhone saindo pelo
 ## Como funciona
 
 ```
-DaVinci (tela Empresas ou Lojas, só admin + senha extra)
+DaVinci (tela Cadastros › Empresas, só admin + senha extra)
    └─ "Usar este IP no celular" → 15 min / 1 h / 4 h → link curto de uso único + QR
 
 iPhone (Shadowrocket) ──SOCKS5, credencial TEMPORÁRIA──▶ app.hadken.com:21080 (ipcel_relay)
@@ -20,7 +20,7 @@ iPhone (Shadowrocket) ──SOCKS5, credencial TEMPORÁRIA──▶ app.hadken.c
 ```
 
 1. O admin abre a janela (ícone de celular ao lado da chave do proxy, na coluna
-   IP da tela Empresas; ou na linha da loja, na tela Lojas), escolhe o tempo e
+   IP da tela Cadastros › Empresas — só lá, desde 17/11), escolhe o tempo e
    clica em **Gerar link para o celular** (15 min já vem marcado).
 2. A API cria uma credencial temporária (usuário e senha aleatórios) amarrada a
    ESSA empresa e válida só até o fim do tempo, e devolve um link curto
@@ -179,7 +179,13 @@ o QR de novo, cortou, soltou — com quem e qual empresa), no log da api
    intermediário → `redis://ipcel_redis:6379/0`).
    Sem a chave o recurso fica desligado: a janela diz "ainda não foi ligado no
    servidor" e o intermediário não escuta a porta.
-3. **Deploy normal** (sem listar serviços, sem migration):
+3. **Deploy normal** (sem listar serviços; este recurso não tem migration — mas
+   confira `alembic current` × `alembic heads`: o main pode trazer migration de
+   outra pessoa junto, como a 0492 do Vinicius em 17/11).
+   **Depois de ir ao ar:** o `sudo davinci-deploy` só reconstrói api/web/workers
+   (lista PERMITIDOS) — o `ipcel_relay` fica no código antigo até um deploy
+   pelado ou `docker tag davinci-api:latest davinci-ipcel_relay:latest` + `up -d`.
+   Mexeu em `app/ip_celular/`? Recriar o relay também.
    `docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build`.
    Sobe os serviços novos `ipcel_redis` (imagem `redis:7-alpine`, a mesma do
    `redis7`, já baixada) e `ipcel_relay` (mesma imagem da api), cria a rede

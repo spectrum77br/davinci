@@ -215,6 +215,80 @@ services:
       - noeviction
       - --protected-mode
       - "no"
+      # Revisão 17/11: sem senha e na davinci_net (a api chega por ela), então
+      # quem invadisse o intermediário podia usar REPLICAOF/MIGRATE para falar
+      # com o redis7. Desliga tudo que conecta para fora, troca configuração ou
+      # roda script; o recurso só usa GET/SET/HSET/HMGET/HINCRBY/EXISTS/DEL/
+      # EXPIRE/SADD/SREM/SMEMBERS/PUBLISH/SUBSCRIBE/PING.
+      - --rename-command
+      - REPLICAOF
+      - ""
+      - --rename-command
+      - SLAVEOF
+      - ""
+      - --rename-command
+      - SYNC
+      - ""
+      - --rename-command
+      - PSYNC
+      - ""
+      - --rename-command
+      - MIGRATE
+      - ""
+      - --rename-command
+      - FAILOVER
+      - ""
+      - --rename-command
+      - CLUSTER
+      - ""
+      - --rename-command
+      - CONFIG
+      - ""
+      - --rename-command
+      - DEBUG
+      - ""
+      - --rename-command
+      - MODULE
+      - ""
+      - --rename-command
+      - ACL
+      - ""
+      - --rename-command
+      - SAVE
+      - ""
+      - --rename-command
+      - BGSAVE
+      - ""
+      - --rename-command
+      - BGREWRITEAOF
+      - ""
+      - --rename-command
+      - SHUTDOWN
+      - ""
+      - --rename-command
+      - FLUSHALL
+      - ""
+      - --rename-command
+      - FLUSHDB
+      - ""
+      - --rename-command
+      - KEYS
+      - ""
+      - --rename-command
+      - EVAL
+      - ""
+      - --rename-command
+      - EVALSHA
+      - ""
+      - --rename-command
+      - SCRIPT
+      - ""
+      - --rename-command
+      - FUNCTION
+      - ""
+      - --rename-command
+      - FCALL
+      - ""
     user: redis
     read_only: true
     cap_drop: [ALL]
@@ -260,6 +334,9 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: 128m
+    # Revisão 17/11: meia CPU no máximo — tentativa em massa de senha errada não
+    # tira CPU da api e dos robôs no mesmo servidor.
+    cpus: 0.5
     pids_limit: 64
     # Uma linha por conexão: com o disco apertado, o log gira sozinho.
     logging:

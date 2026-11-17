@@ -41,7 +41,7 @@ type Link = {
 }
 
 const props = withDefaults(defineProps<{ alvo: IpCelularAlvo | null; area?: RegExp }>(), {
-  area: () => /^\/(companies|store-info)(\/|$)/,
+  area: () => /^\/companies(\/|$)/,
 })
 const emit = defineEmits<{ fechar: [] }>()
 
