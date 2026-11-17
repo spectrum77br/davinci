@@ -169,6 +169,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             native_orders,
             payment_methods,
             price_lists,
+            price_table,
             procurement,
             production,
             proposals,
@@ -195,6 +196,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "finance_categories": finance_categories.snapshot(db),
                 "homolog": homolog.info(db),
                 "bling_coverage": bling_coverage.latest(db),
+                "cost_changes": price_table.cost_changes(db, limit=200),
                 "would": would.listing(db) if would.active() else [],
                 "procurement": procurement.snapshot(erp, db),
                 "fiscal": fiscal.snapshot(db, getattr(app.state, "fiscal_readiness", None)),
@@ -406,6 +408,27 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             body.get("last"),
             body.get("reason"),
             *fiscal_context(json.loads(row[0])["address"]["uf"], json.loads(row[0])["cnpj"]),
+        )
+
+    @app.get("/api/erp-local/products/{sku}/links")
+    def product_links(sku: str):
+        from app.erp_local import price_table
+
+        with erp.connection() as db:
+            db.execute("BEGIN")
+            erp.product(db, sku)
+            return {"sku": sku, "rows": price_table.listings(db, sku)}
+
+    @app.get("/api/erp-local/cost-changes.csv")
+    def cost_changes_csv():
+        from app.erp_local import price_table
+
+        with erp.connection() as db:
+            body = price_table.cost_changes_csv(db)
+        return Response(
+            body.encode("utf-8"),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": 'attachment; filename="mudancas-de-custo.csv"'},
         )
 
     @app.get("/api/erp-local/products/{sku}/details/history")

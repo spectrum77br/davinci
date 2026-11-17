@@ -88,6 +88,25 @@ FIELDS = {
     },
     # Tabela de Preços → Prioridade: the stock lot DaVinci's robot moves each product to.
     "priorities": {"id", "sku", "priority"},
+    # Tabela de Preços, per product line: department, certificate, warranty, EAN, photos.
+    "pricing": {
+        "id",
+        "sku",
+        "name",
+        "department",
+        "model",
+        "ean",
+        "warranty_months",
+        "priority",
+        "photos_url",
+        "packaging_url",
+        "certificate",
+        "certificate_number",
+        "certificate_model",
+        "updated_at",
+    },
+    # Bling's order situations as DaVinci keeps them, with which ones are active.
+    "situations": {"id", "name", "active"},
 }
 ITEM_FIELDS = {"sku", "product_id", "name", "quantity", "unit_price"}
 ROOT_FIELDS = {"version", "source", "read_only", "captured_at", "coverage", *FIELDS}

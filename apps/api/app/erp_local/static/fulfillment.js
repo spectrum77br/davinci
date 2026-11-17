@@ -112,7 +112,7 @@ function saleRowExtras(o){
   const store=o.data.channel&&o.data.external_id?esc(JSON.stringify({channel:o.data.channel,store:o.data.store,number:o.data.external_id})):'';
   const names=(state.situations||{}).names||{},current=(state.situations||{}).orders?.[o.id];
   const prints=`<button type="button" data-order-print="${esc(o.id)}">Imprimir</button><button type="button" data-order-print-one="${esc(o.id)}" data-mode="receipt">Imprimir comprovante</button><button type="button" data-order-print-one="${esc(o.id)}" data-mode="detail">Imprimir c/ detalhes</button>${store?`<button type="button" data-one-label='${store}'>Imprimir etiqueta de envio</button><button type="button" data-one-paper="declarations" data-pick='${store}'>Imprimir declaração de conteúdo</button><button type="button" data-one-paper="production" data-pick='${store}'>Relatório de produção</button>`:''}`;
-  const situations=Object.entries(names).filter(([id])=>Number(id)!==current).map(([id,name])=>`<button type="button" data-set-situation="${esc(id)}" data-order="${esc(o.id)}"><span class="situation-dot tone-${situationTone[id]||'other'}"></span>${esc(name)}</button>`).join('');
+  const situations=Object.entries(names).filter(([id])=>Number(id)!==current&&!((state.situations||{}).inactive||[]).includes(id)).map(([id,name])=>`<button type="button" data-set-situation="${esc(id)}" data-order="${esc(o.id)}"><span class="situation-dot tone-${situationTone[id]||'other'}"></span>${esc(name)}</button>`).join('');
   const invoice=state.homolog?`<button type="button" data-invoice-for="${esc(o.id)}">Gerar nota fiscal</button>`:'<button type="button" disabled title="Emissão própria de NF-e ainda em homologação">Gerar nota fiscal</button>';
   return `${invoice}${prints}<button type="button" data-occurrences="${esc(o.id)}">Ocorrências</button><div class="row-menu-group">Situação</div>${situations}`;
 }
@@ -159,6 +159,12 @@ function wouldPanel(){
   const hour=at=>new Date(at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
   const rows=(state.would||[]).map(w=>`<tr><td>${esc(hour(w.at))}</td><td>${esc(w.name)}</td><td>${esc(w.target)}</td><td class="would-text">${esc(w.detail?.would||'')}${['stock','price'].includes(w.action)?` <a href="/api/erp-local/homolog/plans/${w.action}.csv">Baixar a lista</a>`:''}</td></tr>`);
   return panel('O que o ERP faria hoje','Na homologação, cada ação que sairia para as lojas ou para a SEFAZ fica aqui com o que seria mandado. Nada foi enviado.',rows.length?table(['Hora','Ação','Pedido ou nota','O que faria'],rows.join('')):'<p class="empty">Nenhuma ação ainda. Imprima uma etiqueta ou envie uma NF-e para ver o que o ERP faria.</p>');
+}
+function costPanel(){
+  const rows=state.cost_changes||[];if(!rows.length)return '';
+  const total=rows.reduce((sum,r)=>sum+Number(r.result),0),when=t=>new Date(t).toLocaleString('pt-BR',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+  const body=rows.slice(0,30).map(r=>`<tr><td>${esc(when(r.created_at))}</td><td>${copyText(r.sku,'SKU')}</td><td class="num">${brl(r.cost_from)}</td><td class="num">${brl(r.cost_to)}</td><td class="num">${esc(String(Number(r.quantity)))}</td><td class="num ${Number(r.result)<0?'negative':'positive'}">${brl(r.result)}</td><td>${esc(r.actor)}</td></tr>`).join('');
+  return panel('Resultado das mudanças de custo',`Cada mudança de custo de produto simples, com (custo novo − custo anterior) × quantidade em estoque em todos os depósitos na hora da mudança. Soma das ${rows.length} últimas: ${brl(total)}. <a href="/api/erp-local/cost-changes.csv">Baixar a planilha</a> para o resumo da Importação.`,table(['Quando','SKU','Custo anterior','Custo novo','Quantidade','Resultado','Quem'],body));
 }
 function coveragePanel(){
   const c=state.bling_coverage;if(!c)return '';

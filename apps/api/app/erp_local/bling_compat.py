@@ -570,7 +570,7 @@ def apply_situation(erp, db, key, p):
     if not isinstance(p, dict) or set(p) != {"id", "situation_id"}:
         raise ERPError("order_situation", "Informe o pedido e a situação.")
     situation = p["situation_id"]
-    if type(situation) is not int or situation not in SITUATIONS:
+    if type(situation) is not int or str(situation) not in situation_names(db)[0]:
         raise ERPError("order_situation", "A situação informada não existe.")
     doc, _ = erp.document(db, p["id"], "order")
     if situation == 12 and doc["status"] != "cancelled":
@@ -597,7 +597,7 @@ def apply_occurrence(erp, db, key, p):
     if not isinstance(note, str) or len(note) > 500:
         raise ERPError("order_occurrence", "A ocorrência precisa ser texto de até 500 caracteres.")
     situation = p["situation_id"]
-    if type(situation) is not int or situation not in SITUATIONS:
+    if type(situation) is not int or str(situation) not in situation_names(db)[0]:
         raise ERPError("order_situation", "A situação informada não existe.")
     doc, _ = erp.document(db, p["id"], "order")
     from datetime import UTC, datetime
@@ -665,9 +665,30 @@ def own_number(number_id):
     return OWN_NUMBER_START + number_id - FIRST_OWN_ID if number_id > FIRST_OWN_ID else number_id
 
 
+def situation_names(db):
+    """Bling's list as DaVinci keeps it (custom ones included) over the fixed one, and which are
+    turned off there: an inactive situation stays readable on old orders but is not offered."""
+    names, inactive = {str(k): v for k, v in SITUATIONS.items()}, set()
+    try:
+        rows = db.execute("SELECT data FROM reference_rows WHERE kind='situations'").fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    for row in rows:
+        item = json.loads(row[0])
+        identifier = str(item.get("id") or "").strip()
+        if not identifier.isdigit():
+            continue
+        names[identifier] = str(item.get("name") or names.get(identifier) or identifier)
+        if item.get("active") is False:
+            inactive.add(identifier)
+    return names, inactive
+
+
 def situations_snapshot(db):
+    names, inactive = situation_names(db)
     return {
-        "names": {str(k): v for k, v in SITUATIONS.items()},
+        "names": names,
+        "inactive": sorted(inactive, key=int),
         "orders": dict(db.execute("SELECT order_id,situation_id FROM compat_order_situations")),
         "numbers": {
             r[0]: own_number(r[1])
@@ -1095,10 +1116,12 @@ def router(erp):
     def situation_list(module_id: int):
         if module_id != MODULE_SALES:
             return {"data": []}
+        with erp.connection() as db:
+            names, _ = situation_names(db)
         return {
             "data": [
-                {"id": identifier, "nome": name, "idHerdado": 0, "cor": ""}
-                for identifier, name in SITUATIONS.items()
+                {"id": int(identifier), "nome": name, "idHerdado": 0, "cor": ""}
+                for identifier, name in sorted(names.items(), key=lambda item: int(item[0]))
             ]
         }
 
@@ -1162,9 +1185,11 @@ def router(erp):
 
     @api.patch("/pedidos/vendas/{order_id}/situacoes/{situation_id}", dependencies=guard)
     def order_situation(order_id: int, situation_id: int):
-        if situation_id not in SITUATIONS:
-            return _error(400, "A situação informada não existe.", field_code="situation_unknown")
         with erp.connection() as db:
+            if str(situation_id) not in situation_names(db)[0]:
+                return _error(
+                    400, "A situação informada não existe.", field_code="situation_unknown"
+                )
             doc = _find_order(db, order_id)
             if not doc:
                 return _error(404, "O pedido não foi encontrado.", code="RESOURCE_NOT_FOUND")
