@@ -123,8 +123,20 @@ test('kit submission keeps parent SKU separate from component SKU and quantity',
   dom.window.close();
 });
 
+test('the ERP opens on Comece aqui with the video and the written guide',async()=>{
+  const {dom,document:d}=await setup();
+  assert.equal(d.querySelector('nav [data-page].active').dataset.page,'inicio');
+  assert.equal(d.querySelector('.guide-video video').getAttribute('src'),'/assets/como-usar.mp4');
+  assert.equal(d.querySelector('.guide-video track').getAttribute('srclang'),'pt-BR');
+  assert.ok(d.querySelectorAll('.guide-step').length>=8);
+  d.querySelector('.guide-step [data-page=products]').click();
+  assert.equal(d.querySelector('nav [data-page].active').dataset.page,'products');
+  dom.window.close();
+});
+
 test('catalog labels are rendered as text rather than executable markup',async()=>{
   const {dom,document:d}=await setup();
+  d.querySelector('nav [data-page=overview]').click();
   assert.equal(d.querySelectorAll('main img').length,0);
   assert.ok(d.querySelector('main').textContent.includes('<img src=x onerror=alert(1)>'));
   dom.window.close();
@@ -147,6 +159,7 @@ test('purchase submission keeps all rows and emits only a create command',async(
 test('real opening catalog is clearly presented as our own working database',async()=>{
   const {dom,document:d}=await setup({catalog_import:{active_products:1,kits:0,products:1,
     known_stock:1,unknown_stock:0,issues:[],loaded_at:'2026-11-05T14:00:00+00:00'}});
+  d.querySelector('nav [data-page=overview]').click();
   assert.match(d.getElementById('environment').textContent,/NÚCLEO PRÓPRIO/);
   assert.match(d.querySelector('main').textContent,/não as sobrescreve/);
   dom.window.close();

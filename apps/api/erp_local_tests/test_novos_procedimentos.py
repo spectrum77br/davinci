@@ -120,6 +120,7 @@ def test_listings_show_their_link_and_organize_hides_only_invalid_ones(erp):
             _link("3", "p2"),
             _link("4", "p1", store="i2"),
             _link("5", "p3", sku="b056.18.20"),
+            {**_link("6", "p1", sku="demo.aparelho"), "platform": "bling"},
         ],
     )
     with erp.connection() as db:

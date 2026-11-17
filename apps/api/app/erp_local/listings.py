@@ -59,6 +59,9 @@ def classify(db):
     catalog = _catalog(db)
     out = []
     for link in links:
+        if link.get("platform") == "bling":
+            # DaVinci's link of a product to Bling itself, not a store listing.
+            continue
         product = products.get(link.get("product_id")) or {}
         sku = str(product.get("sku") or "").strip()
         store = stores.get(link.get("integration_id")) or {}
