@@ -9,6 +9,9 @@
 //    no que o servidor manda (ADM), o Aprovar do ADM, o "Lançar" desligado com o porquê;
 //  - o diálogo (AtendimentoReembolsoLancar): os campos, os avisos, o corpo, o toast,
 //    as recusas e a resposta que não chegou; o Pix nunca vai para toast nem evento;
+//    17/11/2026 (a revisão): relê o GET ao abrir, manda o nº do Bling que mostrou
+//    (409 pedido_mudou), trava o "Lançar" até fechar quando a resposta não chegou,
+//    o fundo escuro só fecha com o clique inteiro (e pergunta) e o Esc vale sempre;
 //  - o painel (AtendimentoPedido): os dois encaixes, o diálogo fora dos ramos, o
 //    atalho que rola até o bloco e o pedido que muda com o diálogo aberto;
 //  - a conversa (AtendimentoConversa): o atalho na faixa da Caixa Humano.
@@ -169,6 +172,13 @@ async function principal() {
     assert.equal(levado.itens[0].dados_pagamento, null)
     assert.equal(comPix.itens[0].dados_pagamento, PIX)
     assert.deepEqual(levado.pedido, PEDIDO)
+    // O mesmo pedido? (a releitura do diálogo compara com o que o bloco leu, 17/11/2026)
+    assert.equal(RC.mesmoPedido(PEDIDO, { ...PEDIDO, valor_pago: 10, conta: 'outra' }), true, 'o pedido é o número, não o valor')
+    assert.equal(RC.mesmoPedido(PEDIDO, { ...PEDIDO, bling: '300102' }), false)
+    assert.equal(RC.mesmoPedido(PEDIDO, { ...PEDIDO, marketplace: '251117XYZ' }), false)
+    assert.equal(RC.mesmoPedido({ ...PEDIDO, bling: null }, { ...PEDIDO, bling: null }), true, 'ainda sem Bling: o da plataforma')
+    assert.equal(RC.mesmoPedido(PEDIDO, null), false, 'a conversa perdeu o pedido')
+    assert.equal(RC.mesmoPedido(null, undefined), true)
   }
 
   // ------------------------------------------------ o valor digitado
@@ -235,18 +245,29 @@ async function principal() {
     assert.equal(RC.problemaDoForm(f({ forma: 'cupom', dadosPix: '' }), 189.9), null, 'cupom não pede Pix')
     assert.equal(RC.problemaDoForm(f({ dadosPix: 'x'.repeat(RC.PIX_MAX + 1) }), 189.9), `Os dados do Pix passam de ${RC.PIX_MAX} caracteres.`)
 
-    assert.deepEqual(RC.corpoDoReembolso(f({ valorTexto: '1.234,5', detalhe: '  veio riscado ' })), {
-      valor: 1234.5, motivo: 'defeito_avaria', motivo_detalhe: 'veio riscado', forma: 'pix', dados_pagamento: PIX,
+    assert.deepEqual(RC.corpoDoReembolso(f({ valorTexto: '1.234,5', detalhe: '  veio riscado ' }), '300101'), {
+      valor: 1234.5, motivo: 'defeito_avaria', motivo_detalhe: 'veio riscado', forma: 'pix', dados_pagamento: PIX, pedido_bling: '300101',
     })
     // No cupom os dados do Pix não vão, nem se ficaram escritos de antes.
-    assert.deepEqual(RC.corpoDoReembolso(f({ forma: 'cupom' })), {
-      valor: 48, motivo: 'defeito_avaria', motivo_detalhe: null, forma: 'cupom', dados_pagamento: null,
+    assert.deepEqual(RC.corpoDoReembolso(f({ forma: 'cupom' }), '300101'), {
+      valor: 48, motivo: 'defeito_avaria', motivo_detalhe: null, forma: 'cupom', dados_pagamento: null, pedido_bling: '300101',
     })
-    // Nada de pedido, conta, plataforma ou data no corpo: o servidor tira da conversa.
-    assert.deepEqual(Object.keys(RC.corpoDoReembolso(f())).sort(), ['dados_pagamento', 'forma', 'motivo', 'motivo_detalhe', 'valor'])
-    assert.equal(RC.corpoDoReembolso(f({ valorTexto: 'x' })), null)
-    assert.equal(RC.corpoDoReembolso(f({ motivo: '' })), null)
-    assert.equal(RC.corpoDoReembolso(f({ valorTexto: '0,1' })).valor, 0.1)
+    // Conta, plataforma e data não vão: o servidor tira da conversa. Do pedido, só o nº
+    // do Bling que o diálogo mostrou, para o servidor conferir (17/11/2026).
+    assert.deepEqual(Object.keys(RC.corpoDoReembolso(f(), '300101')).sort(), ['dados_pagamento', 'forma', 'motivo', 'motivo_detalhe', 'pedido_bling', 'valor'])
+    assert.equal(RC.corpoDoReembolso(f(), null).pedido_bling, null, 'pedido ainda sem Bling (o servidor recusa com sem_pedido)')
+    assert.equal(RC.corpoDoReembolso(f(), '').pedido_bling, null)
+    assert.equal(RC.corpoDoReembolso(f({ valorTexto: 'x' }), '300101'), null)
+    assert.equal(RC.corpoDoReembolso(f({ motivo: '' }), '300101'), null)
+    assert.equal(RC.corpoDoReembolso(f({ valorTexto: '0,1' }), '300101').valor, 0.1)
+
+    // O que conta como preenchido: o fundo escuro pergunta antes de descartar (17/11/2026).
+    const vazio = { valorTexto: '', motivo: '', detalhe: '', forma: '', dadosPix: '' }
+    assert.equal(RC.formPreenchido(vazio), false)
+    assert.equal(RC.formPreenchido({ ...vazio, valorTexto: '  ', detalhe: ' ', dadosPix: '\n' }), false, 'só espaço não conta')
+    for (const [k, v] of [['valorTexto', '5'], ['motivo', 'frete'], ['detalhe', 'x'], ['forma', 'cupom'], ['dadosPix', PIX]]) {
+      assert.equal(RC.formPreenchido({ ...vazio, [k]: v }), true, k)
+    }
   }
 
   // ------------------------------------------------ os textos de cada lançamento
@@ -278,7 +299,7 @@ async function principal() {
     }, 'a frase do servidor manda')
     const soCodigo = erroHttp(403, { code: 'so_adm_plataforma_reembolsou' })
     assert.equal(RC.erroDoReembolso(soCodigo, P.erroDaApi(soCodigo, 'x')).texto, RC.ERROS_REEMBOLSO.so_adm_plataforma_reembolsou, 'sem frase: a da tela')
-    for (const code of ['sem_pedido', 'valor_acima_do_pago', 'detalhe_obrigatorio', 'pix_sem_dados', 'sem_permissao', 'so_adm_plataforma_reembolsou', 'ja_aprovado', 'aguardando_adm']) {
+    for (const code of ['sem_pedido', 'valor_acima_do_pago', 'detalhe_obrigatorio', 'pix_sem_dados', 'sem_permissao', 'so_adm_plataforma_reembolsou', 'ja_aprovado', 'aguardando_adm', 'pedido_mudou']) {
       assert.ok(RC.ERROS_REEMBOLSO[code], `o código ${code} do contrato tem frase`)
     }
     // A validação do FastAPI (lista) e a rede: as frases de sempre da caixa.
@@ -288,7 +309,7 @@ async function principal() {
     const rede = semRede()
     assert.match(RC.erroDoReembolso(rede, P.erroDaApi(rede, 'x')).motivos.join(' '), /sem conexão/)
     // As recusas que mudam o bloco (relê); a do valor não.
-    for (const code of ['sem_pedido', 'sem_permissao', 'so_adm_plataforma_reembolsou']) assert.ok(RC.RELE_NA_RECUSA.has(code), code)
+    for (const code of ['sem_pedido', 'sem_permissao', 'so_adm_plataforma_reembolsou', 'pedido_mudou']) assert.ok(RC.RELE_NA_RECUSA.has(code), code)
     assert.ok(!RC.RELE_NA_RECUSA.has('valor_acima_do_pago'))
   }
 
@@ -363,6 +384,9 @@ function testarContrato() {
   const codigos = new Set([...servico.matchAll(/ReembolsoRecusado\(\s*\d+,\s*"([a-z_]+)"/g)].map((x) => x[1]))
   assert.ok(codigos.size >= 8, `os códigos do serviço (${[...codigos]})`)
   for (const c of codigos) assert.ok(RC.ERROS_REEMBOLSO[c], `o código ${c} tem frase na tela`)
+  // 17/11/2026: o corpo leva o `pedido_bling` que o diálogo mostrou (o ReembolsoIn acima
+  // compara com o LancarReembolsoIn) e o servidor recusa com 409 pedido_mudou.
+  assert.ok(codigos.has('pedido_mudou'), 'o servidor recusa quando a conversa está em outro pedido')
   // A tela Reembolso: o 409 `aguardando_adm` e as colunas novas do RefundOut.
   assert.match(api('routers/refunds.py'), /"code": "aguardando_adm"/)
   const refundOut = campos('RefundOut', api('schemas/refunds.py'))
@@ -608,13 +632,19 @@ async function testarBloco() {
 
 // ================================================ o diálogo
 const ICONES_DIALOGO = ['HandCoins', 'Loader2', 'Lock', 'TriangleAlert', 'X']
-const RETORNO_DIALOGO = ['props', 'aberto', 'valorTexto', 'motivo', 'detalhe', 'forma', 'dadosPix', 'enviando', 'erro', 'pedido', 'valorPago', 'limite', 'valor', 'porquesAdm', 'anteriores', 'problema', 'qualPedido', 'formatarValor', 'lancar', 'campoValor', 'fechar']
-function montarDialogo(responde, dados = resposta()) {
+const RETORNO_DIALOGO = ['props', 'aberto', 'valorTexto', 'motivo', 'detalhe', 'forma', 'dadosPix', 'enviando', 'erro', 'atual', 'relendo', 'falhaAoReler', 'travado', 'pedido', 'valorPago', 'limite', 'valor', 'porquesAdm', 'anteriores', 'problema', 'bloqueio', 'qualPedido', 'formatarValor', 'reler', 'lancar', 'campoValor', 'fechar', 'apertarFundo', 'clicarFundo']
+// `responde` é o POST. O GET (a releitura ao abrir, 17/11/2026) devolve `get` ou, sem
+// ele, o mesmo que o bloco leu. `confirma` é a resposta do confirm() do fundo escuro.
+function montarDialogo(responde, dados = resposta(), { get, confirma = true } = {}) {
   const p = Vue.reactive({ conversaId: 'c1', dados })
   const aberto = Vue.ref(true)
-  const falsa = apiFalsa(responde)
+  const falsa = apiFalsa((url, opts, n) => {
+    if (opts && opts.method === 'POST') return responde(url, opts, n)
+    return get ? get(url, opts, n) : dados
+  })
   const toasts = toastsFalsos()
   const emitidos = []
+  const perguntas = []
   const estado = setupDe(dialogoSfc, {
     ...RC,
     ref: Vue.ref,
@@ -628,6 +658,7 @@ function montarDialogo(responde, dados = resposta()) {
     useToasts: () => toasts,
     erroDaApi: P.erroDaApi,
     statusDoErro: P.statusDoErro,
+    confirm: (q) => { perguntas.push(q); return confirma },
   }, RETORNO_DIALOGO)
   async function html() {
     const app = Vue.createSSRApp({ setup: () => ({ ...RC, ...estado, dados: p.dados }), render: renderDe(dialogoSfc) })
@@ -635,17 +666,28 @@ function montarDialogo(responde, dados = resposta()) {
     for (const n of ICONES_DIALOGO) app.component(n, icone(n))
     return semComentarios(await renderToString(app))
   }
-  return { props: p, aberto, estado, chamadas: falsa.chamadas, toasts: toasts.lista, emitidos, html }
+  const posts = () => falsa.chamadas.filter((c) => c.metodo === 'POST')
+  return { props: p, aberto, estado, chamadas: falsa.chamadas, posts, toasts: toasts.lista, emitidos, perguntas, html }
+}
+// O mouse no fundo escuro: o alvo é o próprio fundo (FUNDO) ou algo dentro da caixa.
+const FUNDO = { onde: 'fundo' }
+const DENTRO = { onde: 'caixa' }
+const evento = (alvo) => ({ target: alvo, currentTarget: FUNDO, impedido: false, preventDefault() { this.impedido = true } })
+const cliqueNoFundo = (m) => {
+  m.estado.apertarFundo(evento(FUNDO))
+  m.estado.clicarFundo(evento(FUNDO))
 }
 
 async function testarDialogo() {
-  // Aberto: os campos do dono, o pedido da conversa e por que ainda não lança.
+  // Aberto: relê o GET da conversa; os campos do dono, o pedido e por que ainda não lança.
   {
     const m = montarDialogo(() => ({ item: item() }))
+    assert.deepEqual(m.chamadas.map((c) => [c.metodo, c.url]), [['GET', '/api/atendimento/conversas/c1/reembolsos']], 'abriu: relê')
+    await esperar()
     let h = await m.html()
     let t = texto(h)
     assert.match(h, /data-dialogo-reembolso/)
-    assert.match(h, /role="dialog" aria-modal="true" aria-label="Lançar reembolso ao cliente"/)
+    assert.match(h, /role="dialog" aria-modal="true" aria-label="Lançar reembolso ao cliente" tabindex="-1"/)
     assert.match(t, /Lançar reembolso ao cliente Pedido 251117ABC · Bling 300101 · Shopee ATV/, 'de qual pedido é (o da conversa)')
     assert.match(h, /id="reembolso-valor"[^>]*inputmode="decimal"[^>]*autocomplete="off"[^>]*placeholder="0,00"/)
     assert.match(h, /data-valor-pago[^>]*>de R\$.189,90 pagos</, 'mostra "de R$ X pagos"')
@@ -654,13 +696,14 @@ async function testarDialogo() {
     assert.match(h, /<option value disabled>escolha o motivo…<\/option>/)
     assert.deepEqual([...h.matchAll(/data-forma="([^"]+)"/g)].map((x) => x[1]), ['pix', 'cupom'])
     assert.doesNotMatch(h, /data-campo-pix/, 'sem a forma Pix, sem o campo do Pix')
-    assert.doesNotMatch(h, /data-aviso-anteriores|data-aviso-adm|data-aviso-plataforma|data-erro-reembolso/)
+    assert.doesNotMatch(h, /data-aviso-anteriores|data-aviso-adm|data-aviso-plataforma|data-erro-reembolso|data-aviso-releitura/)
     let b = botao(h, 'data-botao-lancar')
     assert.ok(desligado(b))
     assert.ok(b.includes('title="Informe o valor do reembolso."'))
+    assert.doesNotMatch(b, /data-trava/)
     assert.match(h, /data-motivo-sem-lancar[^>]*>Informe o valor do reembolso\.</)
     await m.estado.lancar()
-    assert.equal(m.chamadas.length, 0, 'o clique sem o formulário completo não sai')
+    assert.equal(m.posts().length, 0, 'o clique sem o formulário completo não sai')
 
     // O limite do ADM, ao vivo: 25% de R$ 189,90 = R$ 47,47.
     m.estado.valorTexto.value = '40'
@@ -706,11 +749,12 @@ async function testarDialogo() {
     assert.equal(m.estado.valorTexto.value, 'abc', 'o que não é valor fica como está (o aviso diz o quê)')
     m.estado.valorTexto.value = '48'
 
-    // Lança: o corpo, o toast (sem o Pix), fecha, limpa o Pix e avisa o painel.
+    // Lança: o corpo (com o Bling que o diálogo mostrou), o toast (sem o Pix), fecha,
+    // limpa o Pix e avisa o painel.
     await m.estado.lancar()
-    assert.deepEqual(m.chamadas, [{
+    assert.deepEqual(m.posts(), [{
       url: '/api/atendimento/conversas/c1/reembolsos', metodo: 'POST',
-      body: { valor: 48, motivo: 'outro', motivo_detalhe: 'cliente pediu a diferença de frete', forma: 'pix', dados_pagamento: PIX },
+      body: { valor: 48, motivo: 'outro', motivo_detalhe: 'cliente pediu a diferença de frete', forma: 'pix', dados_pagamento: PIX, pedido_bling: '300101' },
     }])
     assert.equal(m.aberto.value, false, 'fecha')
     assert.equal(m.estado.dadosPix.value, '', 'o Pix não fica na memória da tela')
@@ -720,18 +764,113 @@ async function testarDialogo() {
     assert.equal(await m.html(), '<!--v-if-->'.replace(/<!--[\s\S]*?-->/g, ''), 'fechado, nada na tela')
   }
 
+  // A releitura ao abrir (17/11/2026): o bloco só relê a cada 2 min, e outra pessoa
+  // pode ter lançado nesse meio-tempo. O "Lançar" espera a leitura.
+  {
+    let soltarGet
+    const outro = item({ id: 'r9', valor: 30, criado_por: 'marrocos', dados_pagamento: PIX })
+    const m = montarDialogo(() => ({ item: item() }), resposta(), { get: () => new Promise((r) => { soltarGet = r }) })
+    m.estado.valorTexto.value = '20'
+    m.estado.motivo.value = 'frete'
+    m.estado.forma.value = 'cupom'
+    let h = await m.html()
+    let b = botao(h, 'data-botao-lancar')
+    assert.ok(desligado(b), 'lendo: ainda não lança')
+    assert.ok(b.includes('title="Conferindo os reembolsos que o pedido já tem…"'))
+    assert.match((h.match(/<button[^>]*data-botao-lancar[^>]*>[\s\S]*?<\/button>/) || [''])[0], /data-icone="Loader2"/, 'o botão gira')
+    assert.doesNotMatch(h, /data-aviso-anteriores/, 'o bloco não tinha nenhum')
+    await m.estado.lancar()
+    assert.equal(m.posts().length, 0)
+    soltarGet(resposta({ pode_aprovar: true, itens: [outro] }))
+    await esperar()
+    h = await m.html()
+    assert.match(texto(h), /Este pedido já tem 1 reembolso lançado\. Cliente · R\$ 30,00 · Em aberto · por marrocos/, 'o que a outra pessoa lançou aparece')
+    assert.ok(!h.includes('Banco Exemplo'), 'o Pix do ADM não entra no diálogo')
+    assert.equal(m.estado.atual.value.itens[0].dados_pagamento, null)
+    b = botao(h, 'data-botao-lancar')
+    assert.ok(!desligado(b), 'lido: lança')
+    assert.deepEqual(m.emitidos, [], 'o mesmo pedido: o bloco não precisa reler')
+    await m.estado.lancar()
+    assert.equal(m.posts()[0].body.pedido_bling, '300101')
+  }
+
+  // A conversa já estava em outro pedido: o diálogo mostra o de agora (é o Bling que
+  // vai no POST, com o teto dele) e o bloco relê.
+  {
+    const novo = { ...PEDIDO, bling: '300102', marketplace: '251117XYZ', valor_pago: 40 }
+    const m = montarDialogo(() => ({ item: item() }), resposta(), { get: () => resposta({ pedido: novo }) })
+    await esperar()
+    assert.deepEqual(m.emitidos, [['recarregar']])
+    const h = await m.html()
+    assert.match(texto(h), /Lançar reembolso ao cliente Pedido 251117XYZ · Bling 300102 · Shopee ATV/)
+    assert.match(h, /data-valor-pago[^>]*>de R\$.40,00 pagos</, 'o teto do pedido de agora')
+    m.estado.valorTexto.value = '20'
+    m.estado.motivo.value = 'frete'
+    m.estado.forma.value = 'cupom'
+    await m.estado.lancar()
+    assert.equal(m.posts()[0].body.pedido_bling, '300102')
+  }
+
+  // A releitura falhou: fica o que o bloco leu, com o aviso; o servidor confere no POST.
+  {
+    const m = montarDialogo(() => ({ item: item() }), resposta({ itens: [item()] }), { get: () => erroHttp(503, null) })
+    await esperar()
+    const h = await m.html()
+    assert.match(h, /text-amber-800[^>]*data-aviso-releitura/)
+    assert.match(texto(h), /Não consegui reler os reembolsos do pedido agora: os avisos abaixo são do que o bloco tinha lido\./)
+    assert.match(h, /data-aviso-anteriores/, 'o aviso do que o bloco leu fica')
+    m.estado.valorTexto.value = '20'
+    m.estado.motivo.value = 'frete'
+    m.estado.forma.value = 'cupom'
+    assert.equal(m.estado.bloqueio.value, null, 'lança mesmo assim')
+    await m.estado.lancar()
+    assert.equal(m.posts()[0].body.pedido_bling, '300101')
+    assert.deepEqual(m.emitidos, [['lancado']])
+  }
+
+  // A releitura diz que a pessoa não lança mais (a plataforma reembolsou nesse meio-tempo):
+  // desligado, com o porquê do servidor.
+  {
+    const motivo = 'A plataforma já reembolsou este pedido: só um ADM lança outro reembolso.'
+    const m = montarDialogo(() => ({ item: item() }), resposta(), { get: () => resposta({ pode_lancar: false, motivo_bloqueio: motivo, plataforma_reembolsou: true }) })
+    await esperar()
+    m.estado.valorTexto.value = '20'
+    m.estado.motivo.value = 'frete'
+    m.estado.forma.value = 'cupom'
+    const h = await m.html()
+    const b = botao(h, 'data-botao-lancar')
+    assert.ok(desligado(b))
+    assert.ok(b.includes(`title="${motivo}"`))
+    assert.match(h, /data-aviso-plataforma/)
+    await m.estado.lancar()
+    assert.equal(m.posts().length, 0)
+  }
+
+  // A releitura que chega depois de fechar não vale.
+  {
+    let soltarGet
+    const m = montarDialogo(() => ({}), resposta(), { get: () => new Promise((r) => { soltarGet = r }) })
+    m.estado.fechar()
+    soltarGet(resposta({ pedido: { ...PEDIDO, bling: '999' } }))
+    await esperar()
+    assert.deepEqual(m.emitidos, [], 'ninguém relê por causa dela')
+    assert.equal(m.estado.atual.value.pedido.bling, '300101')
+  }
+
   // Acima do limite: o toast diz que espera o ADM; o ADM lê que já sai aprovado.
   {
     const m = montarDialogo(() => ({ item: item({ valor: 150, situacao: 'aguardando_adm' }) }))
+    await esperar()
     m.estado.valorTexto.value = '150'
     m.estado.motivo.value = 'defeito_avaria'
     m.estado.forma.value = 'cupom'
     m.estado.dadosPix.value = 'ficou de antes'
     assert.equal(m.estado.problema.value, null)
     await m.estado.lancar()
-    assert.equal(m.chamadas[0].body.dados_pagamento, null, 'cupom: os dados do Pix não vão')
+    assert.equal(m.posts()[0].body.dados_pagamento, null, 'cupom: os dados do Pix não vão')
     assert.equal(m.toasts[0][2], 'Aguardando a aprovação de um ADM antes de pagar.')
     const adm = montarDialogo(() => ({}), resposta({ pode_aprovar: true }))
+    await esperar()
     adm.estado.valorTexto.value = '150'
     assert.match(texto(await adm.html()), /Passa do limite \(passa de R\$ 100,00; passa de 25% do valor pago \(R\$ 47,47\)\), mas você é ADM: o reembolso já sai aprovado no seu nome\./)
   }
@@ -740,15 +879,18 @@ async function testarDialogo() {
   {
     const dados = resposta({ plataforma_reembolsou: true, pode_aprovar: true, itens: [item(), item({ id: 'r2', tipo: 'Manutenção', valor: 30, situacao: 'finalizado', criado_por: null })] })
     const m = montarDialogo(() => ({}), dados)
+    await esperar()
     const h = await m.html()
     const t = texto(h)
     assert.match(h, /role="alert"[^>]*data-aviso-anteriores/)
     assert.match(t, /Este pedido já tem 2 reembolsos lançados\. Cliente · R\$ 50,00 · Em aberto · por israel Manutenção · R\$ 30,00 · Finalizado Confira antes de lançar outro/)
     assert.match(t, /A plataforma já devolveu dinheiro deste pedido ao comprador: confira para não pagar duas vezes\./)
     const comDetalhe = montarDialogo(() => ({}), { ...dados, plataforma_detalhe: 'Mercado Livre: dinheiro devolvido ao comprador' })
+    await esperar()
     assert.match(texto(await comDetalhe.html()), /ao comprador \(Mercado Livre: dinheiro devolvido ao comprador\): confira/)
     // Sem o valor pago: o servidor confere o teto e o ADM aprova (o aviso já diz).
     const s = montarDialogo(() => ({}), resposta({ pedido: { ...PEDIDO, valor_pago: null } }))
+    await esperar()
     s.estado.valorTexto.value = '20'
     const ts_ = texto(await s.html())
     assert.match(ts_, /o valor pago não veio: o servidor confere o teto/)
@@ -764,6 +906,7 @@ async function testarDialogo() {
       m.estado.dadosPix.value = PIX
     }
     const v = montarDialogo(() => erroHttp(422, { code: 'valor_acima_do_pago', detail: 'O valor passa do que o comprador pagou (R$ 40,00).' }))
+    await esperar()
     preencher(v)
     await v.estado.lancar()
     assert.equal(v.aberto.value, true, 'continua aberto')
@@ -773,29 +916,164 @@ async function testarDialogo() {
     assert.deepEqual(v.emitidos, [], 'a recusa do valor não relê o bloco')
     assert.equal(v.estado.dadosPix.value, PIX, 'o que foi digitado fica para corrigir')
     assert.equal(v.toasts.length, 0)
+    assert.equal(v.estado.travado.value, null, 'corrigir e lançar de novo pode')
 
     const r = montarDialogo(() => erroHttp(403, { code: 'so_adm_plataforma_reembolsou' }))
+    await esperar()
     preencher(r)
     await r.estado.lancar()
     assert.deepEqual(r.emitidos, [['recarregar']], 'quem pode mudou: o bloco relê')
     assert.ok(texto(await r.html()).includes(RC.ERROS_REEMBOLSO.so_adm_plataforma_reembolsou))
 
-    // A resposta não chegou: o reembolso pode ter entrado — confere antes de repetir.
+    // A conversa mudou de pedido depois que o diálogo abriu (17/11/2026): o servidor
+    // recusa com 409 pedido_mudou. A frase dele aparece, o bloco relê e este diálogo
+    // não lança mais (o cabeçalho segue no pedido em que a pessoa preencheu).
+    const frase = 'O pedido da conversa mudou (agora é o Bling 300102): abra o lançamento de novo.'
+    const x = montarDialogo(() => erroHttp(409, { code: 'pedido_mudou', detail: frase }))
+    await esperar()
+    preencher(x)
+    await x.estado.lancar()
+    assert.equal(x.posts()[0].body.pedido_bling, '300101', 'levou o Bling que o diálogo mostrou')
+    h = await x.html()
+    assert.match(h, /data-erro-reembolso data-code="pedido_mudou"/)
+    assert.ok(texto(h).includes(frase), 'a frase do servidor')
+    assert.match(texto(h), /Lançar reembolso ao cliente Pedido 251117ABC · Bling 300101/)
+    assert.deepEqual(x.emitidos, [['recarregar']], 'o bloco relê')
+    let b = botao(h, 'data-botao-lancar')
+    assert.ok(desligado(b))
+    assert.ok(b.includes('data-trava="pedido_mudou"'))
+    assert.ok(b.includes('title="A conversa está em outro pedido: feche e abra o lançamento de novo."'))
+    await x.estado.lancar()
+    assert.equal(x.posts().length, 1, 'não tenta de novo no pedido velho')
+    // Sem a frase do servidor: a da tela. Fechar pelo fundo não pergunta (o que foi
+    // digitado não serve mais) e não relê de novo (já releu na recusa).
+    const y = montarDialogo(() => erroHttp(409, { code: 'pedido_mudou' }))
+    await esperar()
+    preencher(y)
+    await y.estado.lancar()
+    assert.ok(texto(await y.html()).includes(RC.ERROS_REEMBOLSO.pedido_mudou))
+    cliqueNoFundo(y)
+    assert.equal(y.aberto.value, false)
+    assert.deepEqual(y.perguntas, [])
+    assert.deepEqual(y.emitidos, [['recarregar']])
+
+    // A resposta não chegou: o reembolso pode ter entrado. O "Lançar" fica desligado até
+    // fechar, e ao fechar o bloco relê a lista (17/11/2026).
     for (const falha of [semRede(), erroHttp(502, null)]) {
       const n = montarDialogo(() => falha)
+      await esperar()
       preencher(n)
       await n.estado.lancar()
       h = await n.html()
       assert.match(texto(h), /Não sei se o reembolso entrou: a resposta do servidor não chegou\. Feche e confira a lista do pedido antes de lançar de novo\./)
-      assert.deepEqual(n.emitidos, [['recarregar']])
       assert.equal(n.estado.enviando.value, false)
+      assert.equal(n.estado.travado.value, 'incerto')
+      b = botao(h, 'data-botao-lancar')
+      assert.ok(desligado(b), 'o Lançar fica desligado')
+      assert.ok(b.includes('data-trava="incerto"'))
+      assert.ok(b.includes('title="Feche e confira a lista do pedido: o reembolso pode ter entrado."'))
+      assert.deepEqual(n.emitidos, [], 'o bloco relê ao fechar, não antes')
+      await n.estado.lancar()
+      assert.equal(n.posts().length, 1, 'o clique de novo não manda outro POST')
+      // Mexer nos campos não religa o botão.
+      n.estado.valorTexto.value = '47'
+      assert.ok(desligado(botao(await n.html(), 'data-botao-lancar')))
+      n.estado.fechar()
+      assert.equal(n.aberto.value, false)
+      assert.deepEqual(n.emitidos, [['recarregar']], 'fechou: o bloco relê a lista')
+      assert.equal(n.estado.dadosPix.value, '')
+      await esperar()
+      // Reaberto: em branco e destravado.
+      n.aberto.value = true
+      await esperar()
+      assert.equal(n.estado.travado.value, null)
+      assert.equal(n.estado.erro.value, null)
+      assert.equal(n.estado.bloqueio.value, 'Informe o valor do reembolso.')
     }
+    // Fechar pelo fundo depois da resposta que não chegou: não pergunta e o bloco relê.
+    const z = montarDialogo(() => semRede())
+    await esperar()
+    preencher(z)
+    await z.estado.lancar()
+    cliqueNoFundo(z)
+    assert.equal(z.aberto.value, false)
+    assert.deepEqual(z.perguntas, [])
+    assert.deepEqual(z.emitidos, [['recarregar']])
+  }
+
+  // O fundo escuro (17/11/2026): só o clique que começa e termina nele fecha; com algo
+  // preenchido, pergunta antes de descartar.
+  {
+    const m = montarDialogo(() => ({}), resposta(), { confirma: false })
+    await esperar()
+    // Vazio: o clique no fundo fecha sem perguntar; o mousedown no fundo não tira o foco
+    // da caixa (o Esc segue valendo se a pessoa desistir).
+    const desce = evento(FUNDO)
+    m.estado.apertarFundo(desce)
+    assert.equal(desce.impedido, true)
+    m.estado.clicarFundo(evento(FUNDO))
+    assert.equal(m.aberto.value, false)
+    assert.deepEqual(m.perguntas, [])
+    await esperar()
+    m.aberto.value = true
+    await esperar()
+    m.estado.valorTexto.value = '48'
+    m.estado.motivo.value = 'defeito_avaria'
+    m.estado.forma.value = 'pix'
+    m.estado.dadosPix.value = PIX
+    // O arrasto que começa num campo e solta no fundo: o click cai no fundo, mas não fecha.
+    const dentro = evento(DENTRO)
+    m.estado.apertarFundo(dentro)
+    assert.equal(dentro.impedido, false, 'dentro da caixa o mousedown segue normal (seleção de texto)')
+    m.estado.clicarFundo(evento(FUNDO))
+    assert.equal(m.aberto.value, true, 'não fecha')
+    assert.deepEqual(m.perguntas, [], 'nem pergunta')
+    // O clique dentro da caixa (que sobe até o fundo) também não.
+    m.estado.apertarFundo(evento(DENTRO))
+    m.estado.clicarFundo(evento(DENTRO))
+    assert.equal(m.aberto.value, true)
+    // O clique inteiro no fundo com algo preenchido: pergunta; "Cancelar" mantém tudo.
+    cliqueNoFundo(m)
+    assert.deepEqual(m.perguntas, ['Fechar sem lançar? O que você preencheu neste reembolso se perde.'])
+    assert.equal(m.aberto.value, true)
+    assert.equal(m.estado.dadosPix.value, PIX, 'o Pix digitado continua')
+    // O mousedown velho no fundo não vale para o click de um arrasto depois.
+    m.estado.apertarFundo(evento(FUNDO))
+    m.estado.apertarFundo(evento(DENTRO))
+    m.estado.clicarFundo(evento(FUNDO))
+    assert.equal(m.perguntas.length, 1)
+    // "OK": fecha e limpa o Pix; qualquer campo preenchido pergunta.
+    const ok = montarDialogo(() => ({}), resposta(), { confirma: true })
+    await esperar()
+    ok.estado.detalhe.value = 'só o detalhe'
+    ok.estado.dadosPix.value = PIX
+    cliqueNoFundo(ok)
+    assert.equal(ok.perguntas.length, 1)
+    assert.equal(ok.aberto.value, false)
+    assert.equal(ok.estado.dadosPix.value, '')
+    assert.deepEqual(ok.emitidos, [], 'fechar sem lançar não relê o bloco')
+    // No meio do envio, o fundo não fecha nem pergunta.
+    let soltar
+    const e = montarDialogo(() => new Promise((r) => { soltar = r }))
+    await esperar()
+    e.estado.valorTexto.value = '48'
+    e.estado.motivo.value = 'frete'
+    e.estado.forma.value = 'cupom'
+    const indo = e.estado.lancar()
+    await esperar()
+    cliqueNoFundo(e)
+    assert.equal(e.aberto.value, true)
+    assert.deepEqual(e.perguntas, [])
+    soltar({ item: item() })
+    await indo
+    assert.equal(e.aberto.value, false)
   }
 
   // Durante o envio não fecha; reabrir começa em branco; fechar apaga o Pix.
   {
     let soltar
     const m = montarDialogo(() => new Promise((r) => { soltar = r }))
+    await esperar()
     m.estado.valorTexto.value = '48'
     m.estado.motivo.value = 'frete'
     m.estado.forma.value = 'pix'
@@ -804,7 +1082,7 @@ async function testarDialogo() {
     await esperar()
     assert.equal(m.estado.enviando.value, true)
     await m.estado.lancar()
-    assert.equal(m.chamadas.length, 1, 'o clique repetido não manda outro')
+    assert.equal(m.posts().length, 1, 'o clique repetido não manda outro')
     m.estado.fechar()
     assert.equal(m.aberto.value, true, 'no meio do envio não fecha')
     assert.ok(desligado(botao(await m.html(), 'data-botao-lancar')))
@@ -814,6 +1092,7 @@ async function testarDialogo() {
     m.aberto.value = true
     await esperar()
     for (const k of ['valorTexto', 'motivo', 'detalhe', 'forma', 'dadosPix']) assert.equal(m.estado[k].value, '', `${k} em branco ao reabrir`)
+    assert.equal(m.chamadas.filter((c) => c.metodo === 'GET').length, 2, 'reaberto: relê de novo')
     m.estado.dadosPix.value = 'x'
     m.estado.fechar()
     assert.equal(m.estado.dadosPix.value, '')
@@ -822,12 +1101,20 @@ async function testarDialogo() {
   // O diálogo só fala com a rota dos reembolsos da conversa e nunca manda conta.
   {
     const fonte = dialogoSfc.descriptor.scriptSetup.content
-    assert.equal((fonte.match(/api</g) || []).length, 1, 'uma chamada só: o POST')
+    assert.equal((fonte.match(/api</g) || []).length, 2, 'duas chamadas: a releitura (GET) e o POST')
+    assert.match(fonte, /semPix\(respostaDe\(await api<ReembolsosResposta>\(urlReembolsos\(props\.conversaId\)\)\)\)/, 'a releitura sem o Pix')
     assert.match(fonte, /api<\{ item\?: ItemReembolso \}>\(urlReembolsos\(props\.conversaId\), \{ method: 'POST', body: corpo \}\)/)
+    assert.match(fonte, /corpoDoReembolso\(form\.value, pedido\.value\?\.bling \?\? null\)/, 'o Bling que o diálogo mostra')
     assert.doesNotMatch(fonte, /console\./, 'nada vai para o log')
-    assert.doesNotMatch(dialogoSfc.descriptor.template.content, /#[0-9a-f]{3,8}\b|bg-white|text-black/i)
+    const tpl = dialogoSfc.descriptor.template.content
+    assert.doesNotMatch(tpl, /#[0-9a-f]{3,8}\b|bg-white|text-black/i)
     // Sem <form>: o Enter num campo não lança dinheiro sozinho.
-    assert.doesNotMatch(dialogoSfc.descriptor.template.content, /<form/)
+    assert.doesNotMatch(tpl, /<form/)
+    // O Esc vale mesmo depois de um clique num texto da caixa: a caixa recebe o foco
+    // (tabindex -1, sem contorno), como a do AtendimentoTroca (17/11/2026).
+    assert.match(tpl, /role="dialog"[^>]*tabindex="-1"[^>]*class="[^"]*\boutline-none\b/)
+    assert.match(tpl, /data-dialogo-reembolso\s+@mousedown="apertarFundo"\s+@click="clicarFundo"\s+@keydown\.esc\.stop="fechar"/)
+    assert.doesNotMatch(tpl, /@click\.self/, 'o fundo não fecha com qualquer click (o arrasto que solta fora)')
   }
 }
 

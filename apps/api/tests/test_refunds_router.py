@@ -23,9 +23,15 @@ async def test_list_refunds_requires_view_permission(client, make_user, auth_as)
     assert response.status_code == 403
 
 
-async def test_create_refund_starts_unchecked_and_can_be_patched(client, make_user, auth_as):
+async def test_create_refund_starts_unchecked_and_can_be_patched(
+    client, db: AsyncSession, make_user, auth_as
+):
     user = await make_user(permissions=_refund_permissions())
     auth_as(user)
+    # 17/11/2026: o Cliente lançado por quem não é ADM segue o limite do ADM (o
+    # valor pago é o total do pedido no Bling): R$ 7,25 de R$ 100 não pede o ADM.
+    db.add(BlingOrder(numero="123456", total=100.0))
+    await db.commit()
 
     response = await client.post(
         "/api/refunds",

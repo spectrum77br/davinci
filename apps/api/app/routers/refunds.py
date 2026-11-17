@@ -147,6 +147,74 @@ def _ve_pix(user: User) -> bool:
     return user.role == UserRole.ADMIN
 
 
+# ── O limite do ADM também por aqui (17/11/2026, revisão da 3/6) ─────────────
+# Sem isto a tela antiga fugia do ADM: o "adicionar pedido" com tipo Cliente
+# lançava qualquer valor, e o PATCH subia o valor de uma linha já lançada (ou
+# aprovada) sem pedir o ADM de novo. A regra é a mesma da conversa
+# (`reembolso_cliente.requer_aprovacao`); o valor pago aqui é o total do pedido
+# no Bling (sem ele, vai para o ADM). O ADM continua livre.
+
+
+async def _pago_do_pedido(session: AsyncSession, pedido_bling: str | None) -> int | None:
+    """O total do pedido no Bling, em centavos; None sem o pedido (ou zerado)."""
+    pedido = (pedido_bling or "").strip()
+    if not pedido:
+        return None
+    total = await session.scalar(
+        select(func.max(BlingOrder.total)).where(BlingOrder.numero == pedido)
+    )
+    pago = reembolso_cliente.centavos(total)
+    return pago if pago is not None and pago > 0 else None
+
+
+def _centavos_do_valor(reembolso: float | None) -> int:
+    """O valor do reembolso em centavos, em módulo (o Cliente fica negativo); vazio = 0."""
+    if reembolso is None:
+        return 0
+    return reembolso_cliente.centavos(abs(reembolso)) or 0
+
+
+async def _pede_o_adm(
+    session: AsyncSession, reembolso: float | None, pedido_bling: str | None
+) -> bool:
+    """O reembolso pede o ADM pela regra da conversa? Sem valor, nada a aprovar."""
+    valor = _centavos_do_valor(reembolso)
+    if valor <= 0:
+        return False
+    return reembolso_cliente.requer_aprovacao(valor, await _pago_do_pedido(session, pedido_bling))
+
+
+def _segue_o_limite_do_adm(row: Refund, tipo_depois: str | None) -> bool:
+    """A linha segue o limite do ADM? A que veio do Atendimento (origem, ou com a
+    aprovação/motivo preenchidos) e o reembolso Cliente da tela — senão o
+    "adicionar" pequeno e o PATCH grande (ou Logística → Cliente) fugiam do ADM."""
+    return (
+        row.origem == reembolso_cliente.ORIGEM_ATENDIMENTO
+        or bool(row.requer_aprovacao)
+        or row.motivo is not None
+        or tipo_depois == reembolso_cliente.TIPO_CLIENTE
+    )
+
+
+def _mudou_o_que_o_adm_olha(
+    row: Refund,
+    *,
+    tipo: str | None,
+    reembolso: float | None,
+    pedido_bling: str | None,
+    conta: str | None,
+) -> bool:
+    """O PATCH muda o que o limite olha: o valor PARA MAIS (em módulo), o tipo, o
+    pedido ou a conta? Baixar o valor ou mexer no resto não pede o ADM de novo."""
+    limpo = reembolso_cliente.texto_limpo
+    return (
+        _centavos_do_valor(reembolso) > _centavos_do_valor(row.reembolso)
+        or limpo(tipo) != limpo(row.tipo)
+        or limpo(pedido_bling) != limpo(row.pedido_bling)
+        or limpo(conta) != limpo(row.conta)
+    )
+
+
 async def _nomes_dos_aprovadores(session: AsyncSession, rows) -> dict[UUID, str | None]:
     """{id: nome} de quem aprovou as linhas (uma consulta; nenhuma, sem aprovação)."""
     ids = {r.aprovado_por for r in rows if getattr(r, "aprovado_por", None) is not None}
@@ -722,6 +790,11 @@ async def create_refund(
     session: Annotated[AsyncSession, Depends(get_session)],
     u: Annotated[User, Depends(require_permission("reembolso", "edit"))],
 ) -> RefundOut:
+    agora = datetime.now(UTC)
+    # 17/11/2026 (3/6): o reembolso Cliente lançado por aqui segue o limite do
+    # ADM da conversa; o ADM que lança já aprova (decisão 3), como lá.
+    cliente = body.tipo == reembolso_cliente.TIPO_CLIENTE
+    aprova_na_hora = cliente and u.role == UserRole.ADMIN
     row = Refund(
         data=body.data,
         pedido_bling=body.pedido_bling,
@@ -732,7 +805,7 @@ async def create_refund(
         prejuizo=body.prejuizo,
         reembolso=body.reembolso,
         # Valor já lançado na criação = carimbo agora ("Reembolso em").
-        reembolso_at=datetime.now(UTC) if body.reembolso is not None else None,
+        reembolso_at=agora if body.reembolso is not None else None,
         chamado=body.chamado,
         chamado_url=body.chamado_url,
         chamado_resolvido=body.chamado_resolvido,
@@ -740,6 +813,11 @@ async def create_refund(
         conferido=False,
         observacao=body.observacao,
         created_by=u.id,
+        requer_aprovacao=(
+            await _pede_o_adm(session, body.reembolso, body.pedido_bling) if cliente else False
+        ),
+        aprovado_por=u.id if aprova_na_hora else None,
+        aprovado_em=agora if aprova_na_hora else None,
     )
     session.add(row)
     await session.flush()
@@ -754,8 +832,9 @@ async def create_refund(
         id=str(row.id),
         pedido_bling=row.pedido_bling,
         created_by=str(u.id),
+        requer_aprovacao=row.requer_aprovacao,
     )
-    return _saida(row, ve_pix=ve_pix)
+    return _saida(row, ve_pix=ve_pix, nomes=await _nomes_dos_aprovadores(session, [row]))
 
 
 @router.patch("/{refund_id}", response_model=RefundOut)
@@ -780,14 +859,43 @@ async def patch_refund(
     prev_reembolso = row.reembolso
     # Antes do commit: o rollback do refresh da margem expira o usuário (mesma sessão).
     ve_pix = _ve_pix(_u)
+    admin = _u.role == UserRole.ADMIN
 
     data = body.model_dump(exclude_unset=True)
     if data.get("conta") is None and "conta" in data:
         raise HTTPException(422, detail={"code": "conta_required"})
+
+    # 17/11/2026 (revisão da 3/6): quem não é ADM e muda o valor para mais, o
+    # tipo, o pedido ou a conta de uma linha que segue o limite refaz a conta
+    # do limite; passando dele, a aprovação que havia cai (volta a "Aguardando
+    # ADM"). A conta é a do estado DEPOIS do PATCH (o corpo sobre a linha).
+    def depois(campo: str):
+        return data[campo] if campo in data else getattr(row, campo)
+
+    tipo_depois = depois("tipo")
+    reembolso_depois = _clamp_cliente_reembolso(tipo_depois, depois("reembolso"))
+    requer_depois = bool(row.requer_aprovacao)
+    aprovado_depois = row.aprovado_em is not None
+    refaz_limite = (
+        not admin
+        and _segue_o_limite_do_adm(row, tipo_depois)
+        and _mudou_o_que_o_adm_olha(
+            row,
+            tipo=tipo_depois,
+            reembolso=reembolso_depois,
+            pedido_bling=depois("pedido_bling"),
+            conta=depois("conta"),
+        )
+    )
+    if refaz_limite:
+        requer_depois = await _pede_o_adm(session, reembolso_depois, depois("pedido_bling"))
+        aprovado_depois = aprovado_depois and not requer_depois
+    aguardando_depois = requer_depois and not aprovado_depois
+
     # 3/6 (17/11/2026, decisão 3 do dono): o reembolso que pede o ADM não é
     # Finalizado antes da aprovação — nem pela tela, nem pela API.
     finalizando = data.get("conferido") is True and not row.conferido
-    if finalizando and reembolso_cliente.aguardando_adm(row):
+    if finalizando and aguardando_depois:
         raise HTTPException(
             409,
             detail={
@@ -796,9 +904,32 @@ async def patch_refund(
                 "marcado como Finalizado.",
             },
         )
+    # O já Finalizado (pago) que passa do limite com a mudança: só o ADM muda.
+    fica_finalizado = bool(row.conferido) and data.get("conferido", True) is not False
+    if refaz_limite and aguardando_depois and fica_finalizado:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "finalizado_pede_adm",
+                "detail": "Este reembolso já está Finalizado e a mudança passa do limite: só "
+                "um ADM pode fazê-la.",
+            },
+        )
 
     for key, value in data.items():
         setattr(row, key, value)
+    if refaz_limite:
+        row.requer_aprovacao = requer_depois
+        if requer_depois:
+            row.aprovado_por = None
+            row.aprovado_em = None
+        logger.info(
+            "refund_limite_refeito",
+            id=str(refund_id),
+            requer_aprovacao=requer_depois,
+            aguardando_adm=aguardando_depois,
+            por=str(_u.id),
+        )
 
     # Carimba quando `conferido` transiciona (false->true grava agora; true->false
     # limpa). Única fonte da data usada no quadro "Operacional — 3 meses".

@@ -1,9 +1,9 @@
-"""A migration 0493 (Novos procedimentos 3/6, 17/11/2026) cria EXATAMENTE o que o model declara.
+"""A migration 0494 (Novos procedimentos 3/6, 17/11/2026) cria EXATAMENTE o que o model declara.
 
 O conftest monta o schema pelo `create_all` do model, nunca pela migration: sem
 este teste, uma coluna com outro tamanho/default (ou a FK com outro nome) só
-apareceria no deploy. Aqui a 0493 roda de verdade num schema descartável, em
-cima da `refunds` como ela está em produção (0492), e as colunas novas e a FK
+apareceria no deploy. Aqui a 0494 roda de verdade num schema descartável, em
+cima da `refunds` como ela está em produção (0493), e as colunas novas e a FK
 são comparadas com as do model; o downgrade volta a tabela ao que era, com a
 linha antiga intacta.
 """
@@ -36,11 +36,28 @@ FK = "fk_refunds_aprovado_por_users"
 
 
 def _migration():
-    path = Path(__file__).parents[1] / "alembic/versions/0493_reembolso_cliente_atendimento.py"
+    path = Path(__file__).parents[1] / "alembic/versions/0494_reembolso_cliente_atendimento.py"
     spec = importlib.util.spec_from_file_location("reembolso_cliente_migration", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_0494_esta_na_arvore_e_ha_uma_ponta_so():
+    """17/11/2026: a 0493 desta frente colidia com a 0493_sistema_mudancas da main
+    (o `alembic upgrade head` do deploy parava em "Multiple head revisions")."""
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    api = Path(__file__).parents[1]
+    cfg = Config(str(api / "alembic.ini"))
+    cfg.set_main_option("script_location", str(api / "alembic"))
+    scripts = ScriptDirectory.from_config(cfg)
+    # Uma ponta só (não necessariamente a 0494: a main vai ganhar outras).
+    assert len(scripts.get_heads()) == 1, scripts.get_heads()
+    assert scripts.get_revision("0494_reembolso_cliente_atendimento").down_revision == (
+        "0493_sistema_mudancas"
+    )
 
 
 async def _colunas(conn, schema: str) -> dict[str, tuple]:
@@ -72,10 +89,12 @@ async def _fks(conn, schema: str) -> dict[str, str]:
     return {nome: definicao.replace(f"{schema}.", "") for nome, definicao in linhas}
 
 
-async def test_0493_cria_o_que_o_model_declara_e_o_downgrade_desfaz(db, monkeypatch):
+async def test_0494_cria_o_que_o_model_declara_e_o_downgrade_desfaz(db, monkeypatch):
     migration = _migration()
-    assert migration.down_revision == "0492_devolucao_fraude_reabre_dano"
-    schema = "reembolso_0493_" + uuid4().hex[:12]
+    # 17/11/2026: depois da 0493_sistema_mudancas da main (uma ponta só).
+    assert migration.revision == "0494_reembolso_cliente_atendimento"
+    assert migration.down_revision == "0493_sistema_mudancas"
+    schema = "reembolso_0494_" + uuid4().hex[:12]
     monkeypatch.setattr(migration, "SCHEMA", schema)
 
     def migrar(connection, sentido):
@@ -85,7 +104,7 @@ async def test_0493_cria_o_que_o_model_declara_e_o_downgrade_desfaz(db, monkeypa
     async with db.bind.begin() as conn:
         await conn.execute(text(f'CREATE SCHEMA "{schema}"'))
         try:
-            # A `refunds` de produção antes da 0493 (as colunas da 0065…0160).
+            # A `refunds` de produção antes da 0494 (as colunas da 0065…0160).
             await conn.execute(text(f'CREATE TABLE "{schema}".users (id uuid PRIMARY KEY)'))
             await conn.execute(
                 text(

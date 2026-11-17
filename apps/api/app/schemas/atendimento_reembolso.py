@@ -77,6 +77,9 @@ class LancarReembolsoIn(BaseModel):
     forma: FormaReembolso
     # Chave, banco e nome de quem recebe; obrigatório no Pix, ignorado no cupom.
     dados_pagamento: str | None = None
+    # 17/11/2026: o nº do Bling que o diálogo mostrou (opcional). Só confere: se
+    # a conversa já está em outro pedido, 409 `pedido_mudou` e nada é gravado.
+    pedido_bling: str | None = None
 
 
 class ReembolsoItemRespostaOut(BaseModel):

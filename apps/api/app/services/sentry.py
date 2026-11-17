@@ -101,6 +101,9 @@ def init_sentry(*, component: str) -> bool:
             # POST /redes-sociais/{id}/shopee/iniciar. Com ela (e o
             # partner_id, que é público) dá pra assinar chamadas do app.
             "partner_key",
+            # 17/11/2026: o Pix do reembolso ao cliente (chave, banco e nome)
+            # entra pelo body do POST /atendimento/conversas/{id}/reembolsos.
+            "dados_pagamento",
         ],
         recursive=True,
     )

@@ -206,7 +206,9 @@ const tela = (rel) => fs.readFileSync(path.resolve(__dirname, '../components', r
   const dados = { pedido: { bling: '300101', marketplace: '251117ABC', plataforma: 'shopee', conta: 'Shopee ATV', valor_pago: 189.9 }, plataforma_reembolsou: false, limite: { valor: 100, pct: 25 }, pode_lancar: true, motivo_bloqueio: null, pode_aprovar: false, itens: [] }
   const d = rodarSetup(tela('AtendimentoReembolsoLancar.vue'), 'AtendimentoReembolsoLancar.vue', { conversaId: 'c1', dados, aberto: true })
   assert.equal(d.ok, true, `o setup do AtendimentoReembolsoLancar quebrou: ${d.erro?.stack || d.erro}`)
-  for (const n of ['aberto', 'valorTexto', 'motivo', 'detalhe', 'forma', 'dadosPix', 'porquesAdm', 'anteriores', 'problema', 'qualPedido', 'formatarValor', 'lancar', 'fechar']) {
+  // 17/11/2026: a releitura ao abrir, as travas do "Lançar" e o fundo escuro.
+  for (const n of ['aberto', 'valorTexto', 'motivo', 'detalhe', 'forma', 'dadosPix', 'porquesAdm', 'anteriores', 'problema', 'qualPedido', 'formatarValor', 'lancar', 'fechar',
+    'atual', 'relendo', 'falhaAoReler', 'travado', 'bloqueio', 'reler', 'apertarFundo', 'clicarFundo']) {
     assert.ok(n in d.ligacoes, `AtendimentoReembolsoLancar: ${n} não chegou ao template`)
   }
 }

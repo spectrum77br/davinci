@@ -50,7 +50,7 @@ class Refund(Base, TimestampMixin):
         nullable=True,
     )
 
-    # ── Novos procedimentos 3/6 (17/11/2026, migration 0493) ──────────────────
+    # ── Novos procedimentos 3/6 (17/11/2026, migration 0494) ──────────────────
     # O reembolso ao cliente lançado pela aba Pedido da conversa do Atendimento
     # (`routers/atendimento_reembolso.py`). As regras moram em
     # `services/reembolso_cliente.py`; as linhas antigas ficam com tudo vazio.

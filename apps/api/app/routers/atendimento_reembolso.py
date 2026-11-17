@@ -8,8 +8,10 @@
       tipo, com a situação). Os dados do Pix só para ADM. Só leitura.
   POST /api/atendimento/conversas/{conversa_id}/reembolsos
       "Lançar reembolso ao cliente" (`LancarReembolsoIn`): 201 `{item}`; 403
-      `sem_permissao` / `so_adm_plataforma_reembolsou`; 409 `sem_pedido`; 422
-      `detalhe_obrigatorio` / `pix_sem_dados` / `valor_acima_do_pago`.
+      `sem_permissao` / `so_adm_plataforma_reembolsou`; 409 `sem_pedido` /
+      `pedido_mudou` (o `pedido_bling` que o diálogo mostrou não é mais o da
+      conversa, 17/11/2026); 422 `detalhe_obrigatorio` / `pix_sem_dados` /
+      `valor_acima_do_pago`.
   POST /api/atendimento/reembolsos/{refund_id}/aprovar
       o ADM aprova o que aguarda: 200 `{item}`; 403 para os outros; 409
       `ja_aprovado`; 404 sem o reembolso.
@@ -96,6 +98,7 @@ async def lancar_reembolso(
             motivo_detalhe=body.motivo_detalhe,
             forma=body.forma,
             dados_pagamento=body.dados_pagamento,
+            pedido_bling=body.pedido_bling,
         )
     except reembolso_conversa.ReembolsoRecusado as e:
         raise _recusa(e) from e

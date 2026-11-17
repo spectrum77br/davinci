@@ -809,7 +809,8 @@ function abrirReembolso(d: ReembolsosResposta) {
   reembolsoDados.value = d
   reembolsoDialogo.value = true
 }
-// O pedido mudou com o diálogo aberto: o lançamento cairia no pedido novo. Fecha.
+// O pedido mudou com o diálogo aberto: fecha logo. Desde 17/11/2026 o servidor também
+// recusa o lançamento (409 pedido_mudou) em vez de gravar no pedido novo.
 watch(() => props.conversa.pedido_marketplace, (novo, antes) => {
   if (novo === antes || !reembolsoDialogo.value) return
   reembolsoDialogo.value = false

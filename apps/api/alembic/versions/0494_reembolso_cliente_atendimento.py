@@ -30,8 +30,11 @@ limite (R$ 100, 25% do valor pago ou o valor inteiro). Tudo na MESMA tabela
 catálogo; se a tabela estiver presa por mais que isso, a migration falha
 inteira (nada gravado) e é só rodar de novo.
 
-Revision ID: 0493_reembolso_cliente_atendimento
-Revises: 0492_devolucao_fraude_reabre_dano
+17/11/2026: era 0493; a main ganhou a 0493_sistema_mudancas antes (mesmo pai),
+então esta vem depois dela — uma ponta só.
+
+Revision ID: 0494_reembolso_cliente_atendimento
+Revises: 0493_sistema_mudancas
 """
 
 from collections.abc import Sequence
@@ -41,8 +44,8 @@ from sqlalchemy.dialects import postgresql
 
 from alembic import op
 
-revision: str = "0493_reembolso_cliente_atendimento"
-down_revision: str | None = "0492_devolucao_fraude_reabre_dano"
+revision: str = "0494_reembolso_cliente_atendimento"
+down_revision: str | None = "0493_sistema_mudancas"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

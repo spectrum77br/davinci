@@ -188,7 +188,7 @@ const sheetMoneyInputClass = `${sheetInputClass} text-right tabular-nums [appear
 
 function apiError(e: any) {
   const detail = e?.data?.detail
-  if (detail && typeof detail === 'object') return detail.message || detail.code || e?.message || 'erro'
+  if (detail && typeof detail === 'object') return detail.message || detail.detail || detail.code || e?.message || 'erro'
   return detail || e?.message || 'erro'
 }
 
@@ -584,12 +584,22 @@ async function saveRow(row: RefundRow): Promise<void> {
         })
         // O carimbo "Reembolso em" nasce no backend: reflete sem recarregar.
         row.reembolso_at = saved.reembolso_at
+        // A aprovação do ADM também (17/11/2026): quem não é ADM e sobe o valor
+        // de um reembolso ao cliente faz a linha voltar a "Aguardando ADM".
+        row.requer_aprovacao = saved.requer_aprovacao
+        row.aprovado_em = saved.aprovado_em ?? null
+        row.aprovado_por_nome = saved.aprovado_por_nome ?? null
         error.value = null
       } catch (e: any) {
         // 409 `aguardando_adm` (17/11/2026): a linha espera o ADM e o Finalizado volta.
         if (codigoDoErro(e) === 'aguardando_adm') {
           row.conferido = false
           error.value = TITULO_AGUARDA_ADM
+        } else if (codigoDoErro(e) === 'finalizado_pede_adm') {
+          // 409 (17/11/2026): a mudança num Finalizado passa do limite — só o ADM.
+          // A frase do servidor e a linha relida (a célula não fica com o valor recusado).
+          error.value = apiError(e)
+          await load()
         } else {
           error.value = apiError(e)
         }

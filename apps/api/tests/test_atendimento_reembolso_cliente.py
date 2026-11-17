@@ -39,6 +39,7 @@ from app.historico import nomes as historico_nomes
 from app.main import app
 from app.models import (
     AtendimentoCanal,
+    AtendimentoConversa,
     AtendimentoReclamacao,
     BlingOrder,
     Company,
@@ -498,13 +499,58 @@ async def test_lanca_abaixo_do_limite_em_aberto(client, db, auth_as, cenario, eq
 
 async def test_a_conta_digitada_e_ignorada(client, db, auth_as, cenario, equipe):
     auth_as(equipe)
+    # O `pedido_bling` (17/11/2026) é o que o diálogo mostrou: só confere.
     r = await client.post(
         _url(cenario["conversa"]),
-        json=_corpo(conta="Shopee Outra", pedido_bling="999", plataforma="ml"),
+        json=_corpo(conta="Shopee Outra", pedido_bling=f" {PEDIDO_BLING} ", plataforma="ml"),
     )
     assert r.status_code == 201, r.text
     (row,) = await _refunds(db)
     assert (row.conta, row.pedido_bling, row.plataforma) == ("Shopee ATV", PEDIDO_BLING, "shopee")
+
+
+async def test_pedido_que_mudou_com_o_dialogo_aberto_nao_grava(
+    client, db, auth_as, cenario, equipe
+):
+    """17/11/2026: o diálogo mostrou o pedido A e o comprador citou a compra B
+    (o sync grava B na conversa) antes do clique: 409, nada gravado."""
+    db.add(
+        BlingOrder(
+            numero="300002",
+            numeroloja="251101REEMB02",
+            bling_id=777002,
+            data=datetime(2026, 11, 11, 12, 0, tzinfo=UTC),
+            total=40.0,
+            situacao="9",
+            loja=LOJA_BLING,
+            item_index=0,
+            item_codigo="SKU-2",
+        )
+    )
+    await db.commit()
+    conversa = cenario["conversa"]
+    auth_as(equipe)
+    assert (await client.get(_url(conversa))).json()["pedido"]["bling"] == PEDIDO_BLING
+    # O sync grava o pedido citado (o mesmo chat da Shopee).
+    conversa.pedido_marketplace = "251101REEMB02"
+    await db.commit()
+    r = await client.post(_url(conversa), json=_corpo(10.0, pedido_bling=PEDIDO_BLING))
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == {
+        "code": "pedido_mudou",
+        "detail": "O pedido da conversa mudou. Confira e lance de novo.",
+    }
+    # A conversa sem pedido nenhum também é "mudou" para quem viu um.
+    sem = await _conversa(db, cenario["integ"], cenario["canal"], pedido=None)
+    r = await client.post(_url(sem), json=_corpo(10.0, pedido_bling=PEDIDO_BLING))
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "pedido_mudou"
+    assert await _refunds(db) == []
+    # Com o pedido que o bloco mostra agora (ou sem o campo, como antes), grava em B.
+    r = await client.post(_url(conversa), json=_corpo(10.0, pedido_bling="300002"))
+    assert r.status_code == 201, r.text
+    r = await client.post(_url(conversa), json=_corpo(11.0))
+    assert r.status_code == 201, r.text
+    assert [x.pedido_bling for x in await _refunds(db)] == ["300002", "300002"]
 
 
 async def test_validacoes_do_corpo(client, db, auth_as, cenario, equipe):
@@ -769,16 +815,17 @@ async def test_duplo_clique_grava_uma_vez(client, db, auth_as, cenario, equipe):
 
 
 async def test_tela_reembolso_continua_igual_para_as_linhas_antigas(client, db, make_user, auth_as):
-    """Os reembolsos antigos (sem as colunas novas) saem como antes, em aberto/finalizado."""
+    """Os reembolsos dos outros tipos (sem as colunas novas) saem como antes, em
+    aberto/finalizado. O Cliente segue o limite do ADM desde 17/11/2026 (abaixo)."""
     u = await make_user(permissions=REEMBOLSO_EDIT)
     auth_as(u)
     r = await client.post(
         "/api/refunds",
-        json={"pedido_bling": "C-9", "conta": "Loja X", "tipo": "Cliente", "reembolso": 12},
+        json={"pedido_bling": "C-9", "conta": "Loja X", "tipo": "Manutenção", "reembolso": 12},
     )
     assert r.status_code == 201
     novo = r.json()
-    assert novo["reembolso"] == -12.0
+    assert novo["reembolso"] == 12.0
     assert novo["situacao"] == "em_aberto" and novo["requer_aprovacao"] is False
     assert novo["origem"] is None and novo["dados_pagamento"] is None
     r = await client.patch(f"/api/refunds/{novo['id']}", json={"conferido": True})
@@ -811,3 +858,300 @@ def test_export_nunca_lista_o_pix():
     assert "dados_pagamento" not in campos
     assert "dados_pagamento" in refunds_router._FORA_DO_EXPORT
     assert not any(re.search("pix", rotulo, re.I) for rotulo, _ in refunds_router._EXPORT_COLUMNS)
+
+
+# ─────────────── revisão de 17/11/2026 ───────────────
+
+
+def test_retrato_so_do_mesmo_pedido_e_o_cancelado_no_bling():
+    mesmo = conversa_svc.retrato_do_mesmo_pedido
+    chat = AtendimentoConversa(plataforma="shopee", pedido_marketplace="251101B", dados={})
+    assert mesmo({"pedido": "251101B", "valor_pago": 10}, chat) is not None
+    # O chat foi para o B e o retrato ainda é o da compra A: não vale.
+    assert mesmo({"pedido": "251101A", "valor_pago": 10}, chat) is None
+    # Sem o número no retrato não dá para conferir.
+    assert mesmo({"valor_pago": 10}, chat) is None
+    assert mesmo(None, chat) is None and mesmo({}, chat) is None
+    # ML: a conversa é do pack; o retrato de um pedido só vale com o order à vista
+    # (o nº na loja do Bling ou o `order_id`) ou pelo carimbo da leitura (o pack).
+    ml = AtendimentoConversa(
+        plataforma="ml", pedido_marketplace="PACK1", dados={"pack_id": "PACK1"}
+    )
+    retrato = {"pedido": "ORD1", "pedidos": ["ORD1"], "valor_pago": 50}
+    assert mesmo(retrato, ml) is None
+    assert mesmo(retrato, ml, numeroloja="ORD1") is retrato
+    ml.dados = {"pack_id": "PACK1", "enriquecimento": {"pedido_mkt": {"id": "PACK1"}}}
+    assert mesmo(retrato, ml) is retrato
+    # O carrinho com vários pedidos: o retrato é o do próprio pack.
+    carrinho = AtendimentoConversa(plataforma="ml", pedido_marketplace="PACK2", dados={})
+    assert mesmo({"pedido": "PACK2", "pedidos": ["O1", "O2"]}, carrinho) is not None
+    # O pedido Cancelado no Bling (12), em qualquer plataforma.
+    assert conversa_svc.reembolso_do_bling("12") == "Bling: pedido cancelado"
+    assert conversa_svc.reembolso_do_bling(12) == "Bling: pedido cancelado"
+    assert conversa_svc.reembolso_do_bling("9") is None
+    assert conversa_svc.reembolso_do_bling(None) is None
+
+
+async def test_retrato_de_outro_pedido_no_chat_nao_conta(client, db, auth_as, cenario, equipe):
+    """O chat da Shopee foi para o pedido B (o cartão de outra compra, o foco da
+    devolução) e o retrato ainda é o de A (R$ 600, cancelado depois de pago). O
+    valor pago é o total de B no Bling (R$ 80) e o status de A não diz nada de B."""
+    db.add(
+        BlingOrder(
+            numero="300009",
+            numeroloja="251101REEMB09",
+            bling_id=777009,
+            data=datetime(2026, 11, 12, 12, 0, tzinfo=UTC),
+            total=80.0,
+            situacao="9",
+            loja=LOJA_BLING,
+            item_index=0,
+            item_codigo="SKU-9",
+        )
+    )
+    await db.commit()
+    chat = await _conversa(
+        db,
+        cenario["integ"],
+        cenario["canal"],
+        pedido="251101REEMB09",
+        retrato=_retrato(600.0, status="CANCELLED"),
+    )
+    auth_as(equipe)
+    bloco = (await client.get(_url(chat))).json()
+    assert bloco["pedido"]["bling"] == "300009"
+    assert bloco["pedido"]["valor_pago"] == 80.0
+    assert bloco["plataforma_reembolsou"] is False and bloco["pode_lancar"] is True
+    # O teto e o limite do ADM são os de B.
+    r = await client.post(_url(chat), json=_corpo(95.0))
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "valor_acima_do_pago"
+    r = await client.post(_url(chat), json=_corpo(70.0))
+    assert r.status_code == 201 and r.json()["item"]["situacao"] == "aguardando_adm"
+    # O retrato DE B, quando chega, volta a valer.
+    chat.dados = {**chat.dados, "pedido_mkt": {**_retrato(75.0), "pedido": "251101REEMB09"}}
+    await db.commit()
+    assert (await client.get(_url(chat))).json()["pedido"]["valor_pago"] == 75.0
+
+
+async def test_pedido_cancelado_no_bling_so_adm_lanca(client, db, auth_as, cenario, equipe, adm):
+    """TikTok (sem retrato) com o pedido Cancelado no Bling: a plataforma devolveu
+    sozinha. Só o ADM lança (decisão 5), como na devolução com o reembolso pago."""
+    integ, canal = await _loja(db, cenario["dono"], plataforma="tiktok")
+    await dar_lojas(db, equipe, integ)
+    db.add(
+        BlingOrder(
+            numero="300012",
+            numeroloja="577012345678901",
+            bling_id=777012,
+            data=datetime(2026, 11, 12, 12, 0, tzinfo=UTC),
+            total=400.0,
+            situacao="12",
+            loja=LOJA_BLING,
+            item_index=0,
+            item_codigo="SKU-12",
+        )
+    )
+    await db.commit()
+    conversa = await _conversa(db, integ, canal, plataforma="tiktok", pedido="577012345678901")
+    auth_as(equipe)
+    bloco = (await client.get(_url(conversa))).json()
+    assert bloco["pedido"]["bling"] == "300012"
+    assert bloco["plataforma_reembolsou"] is True
+    assert bloco["plataforma_detalhe"] == "Bling: pedido cancelado"
+    assert bloco["pode_lancar"] is False and "só o ADM" in bloco["motivo_bloqueio"]
+    r = await client.post(_url(conversa), json=_corpo(80.0, forma="pix", dados_pagamento=PIX))
+    assert r.status_code == 403 and r.json()["detail"]["code"] == "so_adm_plataforma_reembolsou"
+    # A Shopee com o retrato velho ("a enviar") e o Bling já Cancelado: idem.
+    velho = await _conversa(
+        db, cenario["integ"], cenario["canal"], retrato=_retrato(status="READY_TO_SHIP")
+    )
+    await db.execute(
+        BlingOrder.__table__.update().where(BlingOrder.numero == PEDIDO_BLING).values(situacao="12")
+    )
+    await db.commit()
+    bloco = (await client.get(_url(velho))).json()
+    assert bloco["plataforma_detalhe"] == "Bling: pedido cancelado"
+    assert bloco["pode_lancar"] is False
+    assert await _refunds(db) == []
+    # O ADM lança (com o aviso).
+    auth_as(adm)
+    bloco = (await client.get(_url(conversa))).json()
+    assert bloco["plataforma_reembolsou"] is True and bloco["pode_lancar"] is True
+    r = await client.post(_url(conversa), json=_corpo(80.0))
+    assert r.status_code == 201, r.text
+
+
+def _corpo_da_tela(valor: float | None, *, conferido: bool = False, **extra) -> dict:
+    """O corpo do `saveRow` da tela Reembolso (pages/reembolso.vue): a linha inteira."""
+    return {
+        "tipo": "Cliente",
+        "prejuizo": 0,
+        "reembolso": valor,
+        "chamado": None,
+        "operacao": None,
+        "conferido": conferido,
+        "observacao": None,
+        **extra,
+    }
+
+
+async def _aprovar(client, auth_as, adm, refund_id) -> None:
+    auth_as(adm)
+    r = await client.post(f"{URL}/reembolsos/{refund_id}/aprovar")
+    assert r.status_code == 200, r.text
+
+
+async def test_patch_da_tela_reembolso_refaz_o_limite_do_adm(
+    client, db, auth_as, cenario, equipe, adm
+):
+    """Na tela Reembolso, quem não é ADM e sobe o valor (ou troca o tipo, o pedido
+    ou a conta) de uma linha do Atendimento refaz o limite: passando dele, a
+    aprovação que havia cai e a linha volta a "Aguardando ADM"."""
+    auth_as(equipe)
+    item = (await client.post(_url(cenario["conversa"]), json=_corpo(30.0))).json()["item"]
+    url = f"/api/refunds/{item['id']}"
+    # Mexer no resto ou baixar o valor não muda nada.
+    r = await client.patch(url, json=_corpo_da_tela(-30.0, observacao="pago no Pix"))
+    assert r.status_code == 200 and r.json()["situacao"] == "em_aberto"
+    r = await client.patch(url, json=_corpo_da_tela(-20.0))
+    assert r.status_code == 200 and r.json()["situacao"] == "em_aberto"
+    # R$ 45 (22,5% de R$ 200) continua dentro do limite.
+    r = await client.patch(url, json=_corpo_da_tela(-45.0))
+    assert r.status_code == 200 and r.json()["situacao"] == "em_aberto"
+    # R$ 500 passa: Aguardando ADM, e o Finalizado é recusado (nem no mesmo corpo).
+    r = await client.patch(url, json=_corpo_da_tela(-600.0, conferido=True))
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "aguardando_adm"
+    r = await client.patch(url, json=_corpo_da_tela(-500.0))
+    assert r.status_code == 200, r.text
+    assert r.json()["situacao"] == "aguardando_adm" and r.json()["requer_aprovacao"] is True
+    r = await client.patch(url, json=_corpo_da_tela(-500.0, conferido=True))
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "aguardando_adm"
+    # Aprovado em R$ 500: a equipe sobe para R$ 1.500 e a aprovação cai.
+    await _aprovar(client, auth_as, adm, item["id"])
+    auth_as(equipe)
+    r = await client.patch(url, json=_corpo_da_tela(-500.0, observacao="conferido"))
+    assert r.json()["situacao"] == "em_aberto" and r.json()["aprovado_por_nome"] == adm.email
+    r = await client.patch(url, json=_corpo_da_tela(-1500.0))
+    assert r.status_code == 200, r.text
+    assert r.json()["situacao"] == "aguardando_adm"
+    assert r.json()["aprovado_em"] is None and r.json()["aprovado_por"] is None
+    # Trocar a conta ou o pedido de uma linha aprovada também volta para o ADM.
+    for mudanca in ({"conta": "Shopee Outra"}, {"pedido_bling": "300099"}):
+        await _aprovar(client, auth_as, adm, item["id"])
+        auth_as(equipe)
+        r = await client.patch(url, json=mudanca)
+        assert r.status_code == 200, r.text
+        assert r.json()["situacao"] == "aguardando_adm", mudanca
+    # O ADM continua livre: sobe o valor e a aprovação dele fica.
+    await _aprovar(client, auth_as, adm, item["id"])
+    r = await client.patch(url, json=_corpo_da_tela(-1600.0))
+    assert r.status_code == 200
+    assert r.json()["situacao"] == "em_aberto" and r.json()["aprovado_em"]
+
+
+async def test_finalizado_que_passa_do_limite_so_o_adm_muda(
+    client, db, auth_as, cenario, equipe, adm
+):
+    auth_as(equipe)
+    item = (await client.post(_url(cenario["conversa"]), json=_corpo(30.0))).json()["item"]
+    url = f"/api/refunds/{item['id']}"
+    r = await client.patch(url, json={"conferido": True})
+    assert r.status_code == 200 and r.json()["situacao"] == "finalizado"
+    assert await _reembolso_no_bling(db) == -30.0
+    # Pago R$ 30: subir para R$ 500 com a linha Finalizada é recusado, e nada muda.
+    for corpo in ({"reembolso": -500.0}, _corpo_da_tela(-500.0, conferido=True)):
+        r = await client.patch(url, json=corpo)
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "finalizado_pede_adm"
+    (row,) = await _refunds(db)
+    assert (row.reembolso, row.conferido) == (-30.0, True)
+    assert await _reembolso_no_bling(db) == -30.0
+    # Dentro do limite (R$ 40, 20%), passa.
+    r = await client.patch(url, json={"reembolso": -40.0})
+    assert r.status_code == 200 and r.json()["situacao"] == "finalizado"
+    # Desmarcando o Finalizado no mesmo corpo, vai para o ADM.
+    r = await client.patch(url, json={"reembolso": -500.0, "conferido": False})
+    assert r.status_code == 200 and r.json()["situacao"] == "aguardando_adm"
+    # O ADM muda a linha Finalizada como quiser.
+    auth_as(adm)
+    do_adm = (await client.post(_url(cenario["conversa"]), json=_corpo(20.0))).json()["item"]
+    r = await client.patch(f"/api/refunds/{do_adm['id']}", json={"conferido": True})
+    assert r.status_code == 200
+    r = await client.patch(f"/api/refunds/{do_adm['id']}", json={"reembolso": -900.0})
+    assert r.status_code == 200 and r.json()["situacao"] == "finalizado"
+
+
+async def test_tela_antiga_cliente_segue_o_limite_do_adm(client, db, auth_as, cenario, equipe, adm):
+    """O "adicionar pedido" da tela Reembolso com tipo Cliente segue o limite do ADM
+    da conversa: o valor pago é o total do pedido no Bling (R$ 200); sem o pedido
+    no Bling, vai para o ADM. O ADM continua livre (e já aprovado)."""
+    auth_as(equipe)
+
+    async def adicionar(pedido: str, valor: float | None, tipo: str = "Cliente") -> dict:
+        r = await client.post(
+            "/api/refunds",
+            json={"pedido_bling": pedido, "conta": "Shopee ATV", "tipo": tipo, "reembolso": valor},
+        )
+        assert r.status_code == 201, r.text
+        return r.json()
+
+    abaixo = await adicionar(PEDIDO_BLING, 30)
+    assert abaixo["reembolso"] == -30.0
+    assert abaixo["situacao"] == "em_aberto" and abaixo["requer_aprovacao"] is False
+    assert abaixo["aprovado_por"] is None
+    acima = await adicionar(PEDIDO_BLING, 60)  # 30% de R$ 200
+    assert acima["situacao"] == "aguardando_adm" and acima["requer_aprovacao"] is True
+    fora = await adicionar("C-9", 12)  # sem o pedido no Bling: o ADM confere
+    assert fora["situacao"] == "aguardando_adm"
+    r = await client.patch(f"/api/refunds/{fora['id']}", json={"conferido": True})
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "aguardando_adm"
+    sem_valor = await adicionar("C-9", None)  # sem valor, nada a aprovar (ainda)
+    assert sem_valor["situacao"] == "em_aberto"
+    # O "adicionar" pequeno e o PATCH grande não fogem do ADM...
+    r = await client.patch(f"/api/refunds/{abaixo['id']}", json={"reembolso": -150})
+    assert r.status_code == 200 and r.json()["situacao"] == "aguardando_adm"
+    r = await client.patch(f"/api/refunds/{sem_valor['id']}", json={"reembolso": 40})
+    assert r.status_code == 200 and r.json()["situacao"] == "aguardando_adm"
+    # ...nem a Logística que vira Cliente.
+    logistica = await adicionar(PEDIDO_BLING, 500, tipo="Logistica")
+    assert logistica["situacao"] == "em_aberto"
+    r = await client.patch(f"/api/refunds/{logistica['id']}", json={"tipo": "Cliente"})
+    assert r.status_code == 200 and r.json()["reembolso"] == -500.0
+    assert r.json()["situacao"] == "aguardando_adm"
+    # O ADM: livre e já aprovado.
+    auth_as(adm)
+    r = await client.post(
+        "/api/refunds",
+        json={
+            "pedido_bling": PEDIDO_BLING,
+            "conta": "Shopee ATV",
+            "tipo": "Cliente",
+            "reembolso": 150,
+        },
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["situacao"] == "em_aberto" and r.json()["requer_aprovacao"] is True
+    assert r.json()["aprovado_por"] == str(adm.id) and r.json()["aprovado_em"]
+    assert r.json()["aprovado_por_nome"] == adm.email
+    r = await client.patch(f"/api/refunds/{r.json()['id']}", json={"conferido": True})
+    assert r.status_code == 200 and r.json()["situacao"] == "finalizado"
+
+
+def test_sentry_mascara_os_dados_do_pix(monkeypatch):
+    """Com o Sentry ligado, um 500 no POST mandaria o corpo (o Pix) em claro: o
+    EventScrubber só mascara as chaves da lista (decisão 7)."""
+    import sentry_sdk
+
+    from app.services import sentry as sentry_svc
+
+    capturado: dict = {}
+    monkeypatch.setattr(sentry_svc, "_initialized", False)
+    monkeypatch.setattr(get_settings(), "sentry_dsn", "https://chave@sentry.invalid/1")
+    monkeypatch.setattr(sentry_sdk, "init", lambda **kw: capturado.update(kw))
+    monkeypatch.setattr(sentry_sdk, "set_tag", lambda *a, **kw: None)
+    assert sentry_svc.init_sentry(component="teste") is True
+    evento = {"request": {"data": {"dados_pagamento": PIX, "valor": 30.0}}}
+    capturado["event_scrubber"].scrub_event(evento)
+    dados = evento["request"]["data"]
+    assert getattr(dados["dados_pagamento"], "value", dados["dados_pagamento"]) == "[Filtered]"
+    assert dados["valor"] == 30.0

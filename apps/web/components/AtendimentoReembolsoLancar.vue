@@ -6,17 +6,25 @@
 //  - Campos do dono: valor (obrigatório, > 0, nunca acima do valor pago), motivo
 //    (a lista) + detalhe (obrigatório no "Outro"), forma (Pix | Cupom) e os dados
 //    do Pix (obrigatórios no Pix). Pedido, loja, plataforma, data e quem lançou o
-//    servidor tira da conversa: nada disso vai no corpo.
+//    servidor tira da conversa. Do pedido, o corpo só leva o nº do Bling que o
+//    diálogo mostrou, para o servidor conferir: se a conversa estiver em outro, a
+//    resposta é 409 `pedido_mudou`, o bloco relê e o diálogo não lança mais.
+//  - Ao abrir, relê o GET da conversa, porque o bloco só relê a cada 2 min. Assim
+//    o aviso dos anteriores sai atualizado. O "Lançar" espera essa leitura.
 //  - Avisa antes, sem bloquear: vai precisar do ADM (> R$ 100, > 25% do pago ou o
 //    valor inteiro), o pedido já tem outro reembolso, a plataforma já devolveu.
 //  - Os dados do Pix ficam num campo protegido: sem autocompletar, sem corretor,
 //    limpos ao fechar, e nunca vão para toast, evento ou log.
-//  - Sem resposta (a rede caiu no meio), o reembolso pode ter entrado: a tela
-//    pede para conferir a lista antes de lançar de novo, e o bloco relê.
+//  - Sem resposta (a rede caiu no meio), o reembolso pode ter entrado. O "Lançar"
+//    fica desligado até fechar, e ao fechar o bloco relê a lista.
+//  - Fecha pelo X, pelo Cancelar, pelo Esc (a caixa tem tabindex, então o Esc vale
+//    mesmo depois de um clique num texto dela) e pelo fundo escuro. O fundo só
+//    fecha com o clique inteiro nele, e pergunta antes se algo foi preenchido.
 import { HandCoins, Loader2, Lock, TriangleAlert, X } from 'lucide-vue-next'
 import { erroDaApi, statusDoErro } from '~/components/AtendimentoPlataforma.vue'
 import {
   DETALHE_MAX,
+  ERROS_REEMBOLSO,
   FORMAS,
   LIMITE_PADRAO,
   MOTIVOS,
@@ -25,10 +33,14 @@ import {
   avisoDeAnteriores,
   corpoDoReembolso,
   erroDoReembolso,
+  formPreenchido,
   lerValor,
+  mesmoPedido,
   moeda,
   porquesDoAdm,
   problemaDoForm,
+  respostaDe,
+  semPix,
   urlReembolsos,
   valorNoCampo,
   type ErroReembolso,
@@ -41,15 +53,17 @@ import {
 
 const props = defineProps<{
   conversaId: string
-  // O que o bloco leu ao abrir: o pedido, o valor pago, o limite e os que já há.
+  // O que o bloco leu: o pedido, o valor pago, o limite e os que já há. O diálogo
+  // começa com isto e relê ao abrir.
   dados: ReembolsosResposta
 }>()
 const aberto = defineModel<boolean>('aberto', { required: true })
 const emit = defineEmits<{
   // Lançou: o painel relê o bloco.
   (e: 'lancado'): void
-  // A recusa mudou o que vale (sem permissão, a plataforma já reembolsou) ou não
-  // se sabe se entrou: o bloco relê.
+  // O bloco relê quando a recusa mudou o que vale (sem permissão, a plataforma já
+  // reembolsou, o pedido mudou), quando a releitura achou outro pedido e quando o
+  // diálogo fecha sem saber se o reembolso entrou.
   (e: 'recarregar'): void
 }>()
 const { api } = useApi()
@@ -62,14 +76,21 @@ const forma = ref<FormaReembolso | ''>('')
 const dadosPix = ref('')
 const enviando = ref(false)
 const erro = ref<ErroReembolso | null>(null)
+// O que o diálogo mostra: o que o bloco leu, até a releitura chegar (17/11/2026).
+const atual = ref<ReembolsosResposta>(props.dados)
+const relendo = ref(false)
+const falhaAoReler = ref(false)
+// O "Lançar" desligado até fechar (17/11/2026): a resposta não chegou ('incerto')
+// ou a conversa já está em outro pedido ('pedido_mudou').
+const travado = ref<'incerto' | 'pedido_mudou' | null>(null)
 
-const pedido = computed(() => props.dados.pedido)
+const pedido = computed(() => atual.value.pedido)
 const valorPago = computed(() => (typeof pedido.value?.valor_pago === 'number' ? pedido.value.valor_pago : null))
-const limite = computed(() => props.dados.limite ?? LIMITE_PADRAO)
+const limite = computed(() => atual.value.limite ?? LIMITE_PADRAO)
 const lido = computed(() => lerValor(valorTexto.value))
 const valor = computed(() => (lido.value && !('erro' in lido.value) ? lido.value.valor : null))
 const porquesAdm = computed(() => (valor.value === null ? [] : porquesDoAdm(valor.value, valorPago.value, limite.value)))
-const anteriores = computed(() => avisoDeAnteriores(props.dados.itens))
+const anteriores = computed(() => avisoDeAnteriores(atual.value.itens))
 const form = computed<FormReembolso>(() => ({
   valorTexto: valorTexto.value,
   motivo: motivo.value,
@@ -78,6 +99,15 @@ const form = computed<FormReembolso>(() => ({
   dadosPix: dadosPix.value,
 }))
 const problema = computed(() => problemaDoForm(form.value, valorPago.value))
+// Por que o "Lançar" está desligado (null = pode lançar), por ordem: as travas, a
+// releitura, quem não lança (o que a releitura disse) e o formulário (17/11/2026).
+const bloqueio = computed<string | null>(() => {
+  if (travado.value === 'incerto') return 'Feche e confira a lista do pedido: o reembolso pode ter entrado.'
+  if (travado.value === 'pedido_mudou') return 'A conversa está em outro pedido: feche e abra o lançamento de novo.'
+  if (relendo.value) return 'Conferindo os reembolsos que o pedido já tem…'
+  if (!atual.value.pode_lancar) return atual.value.motivo_bloqueio || ERROS_REEMBOLSO.sem_permissao
+  return problema.value
+})
 // "Pedido 2510… · Bling 123456 · Shopee ATV": de qual pedido é (o da conversa).
 const qualPedido = computed(() => {
   const p = pedido.value
@@ -94,9 +124,30 @@ function formatarValor() {
   if (valor.value !== null) valorTexto.value = valorNoCampo(valor.value)
 }
 
+// A releitura ao abrir (17/11/2026). Se falhar, fica o que o bloco leu: o servidor
+// confere tudo de novo no POST. O Pix dos anteriores nem entra no diálogo.
+let geracao = 0
+async function reler() {
+  const g = ++geracao
+  relendo.value = true
+  falhaAoReler.value = false
+  try {
+    const r = semPix(respostaDe(await api<ReembolsosResposta>(urlReembolsos(props.conversaId))))
+    if (g !== geracao) return
+    // A conversa já estava em outro pedido: o diálogo mostra o de agora e o bloco relê.
+    if (!mesmoPedido(r.pedido, atual.value.pedido)) emit('recarregar')
+    atual.value = r
+  } catch {
+    if (g === geracao) falhaAoReler.value = true
+  } finally {
+    if (g === geracao) relendo.value = false
+  }
+}
+
 async function lancar() {
-  const corpo = corpoDoReembolso(form.value)
-  if (problema.value || !corpo || enviando.value) return
+  // O nº do Bling que o diálogo mostrou vai junto: o servidor confere com o da conversa.
+  const corpo = corpoDoReembolso(form.value, pedido.value?.bling ?? null)
+  if (bloqueio.value || !corpo || enviando.value) return
   enviando.value = true
   erro.value = null
   try {
@@ -112,24 +163,27 @@ async function lancar() {
   } catch (e: any) {
     const st = statusDoErro(e)
     if (!st || st >= 500) {
-      // A resposta não chegou: o reembolso pode ter entrado. Conferir antes de repetir.
+      // A resposta não chegou: o reembolso pode ter entrado. O "Lançar" fica
+      // desligado até fechar, e ao fechar o bloco relê a lista (17/11/2026).
+      travado.value = 'incerto'
       erro.value = {
         code: null,
         texto: 'Não sei se o reembolso entrou: a resposta do servidor não chegou.',
         motivos: ['Feche e confira a lista do pedido antes de lançar de novo.'],
       }
-      emit('recarregar')
       return
     }
     const er = erroDoReembolso(e, erroDaApi(e, 'Não consegui lançar o reembolso agora'))
     erro.value = er
+    // A conversa está em outro pedido: este diálogo não lança mais (17/11/2026).
+    if (er.code === 'pedido_mudou') travado.value = 'pedido_mudou'
     if (er.code && RELE_NA_RECUSA.has(er.code)) emit('recarregar')
   } finally {
     enviando.value = false
   }
 }
 
-// Aberto: tudo em branco e o cursor no valor. O Esc fecha.
+// Aberto: tudo em branco, relê e põe o cursor no valor.
 const campoValor = ref<HTMLInputElement | null>(null)
 watch(aberto, (v) => {
   if (!v) {
@@ -142,14 +196,38 @@ watch(aberto, (v) => {
   forma.value = ''
   dadosPix.value = ''
   erro.value = null
+  travado.value = null
+  atual.value = props.dados
+  void reler()
   void nextTick(() => campoValor.value?.focus())
 }, { immediate: true })
 
 function fechar() {
   // No meio do lançamento não fecha: a resposta é o que diz se entrou.
   if (enviando.value) return
+  geracao += 1 // a releitura que chegar depois não vale mais
   dadosPix.value = ''
+  // Fecha sem saber se entrou: o bloco relê a lista (17/11/2026).
+  if (travado.value === 'incerto') emit('recarregar')
   aberto.value = false
+}
+
+// O fundo escuro (17/11/2026): só o clique que começa e termina nele fecha. O
+// arrasto que sai de um campo e solta fora da caixa não fecha. Se algo foi
+// preenchido, pergunta antes de descartar (o Pix digitado).
+let apertouNoFundo = false
+function apertarFundo(e: MouseEvent) {
+  apertouNoFundo = e.target === e.currentTarget
+  // O foco fica na caixa, para o Esc seguir fechando se a pessoa desistir.
+  if (apertouNoFundo) e.preventDefault()
+}
+function clicarFundo(e: MouseEvent) {
+  const noFundo = apertouNoFundo && e.target === e.currentTarget
+  apertouNoFundo = false
+  if (!noFundo || enviando.value) return
+  // Com o "Lançar" travado, o que foi digitado não serve mais: fecha sem perguntar.
+  if (!travado.value && formPreenchido(form.value) && !confirm('Fechar sem lançar? O que você preencheu neste reembolso se perde.')) return
+  fechar()
 }
 </script>
 
@@ -158,14 +236,16 @@ function fechar() {
     v-if="aberto"
     class="fixed inset-0 z-[80] flex items-stretch justify-center bg-black/50 sm:items-center sm:p-4"
     data-dialogo-reembolso
-    @click.self="fechar"
+    @mousedown="apertarFundo"
+    @click="clicarFundo"
     @keydown.esc.stop="fechar"
   >
     <div
       role="dialog"
       aria-modal="true"
       aria-label="Lançar reembolso ao cliente"
-      class="flex max-h-full w-full flex-col bg-background text-xs shadow-2xl sm:max-h-[88vh] sm:max-w-md sm:rounded-lg sm:border"
+      tabindex="-1"
+      class="flex max-h-full w-full flex-col bg-background text-xs shadow-2xl outline-none sm:max-h-[88vh] sm:max-w-md sm:rounded-lg sm:border"
     >
       <header class="flex shrink-0 items-start gap-2 border-b px-4 py-3">
         <HandCoins class="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -179,6 +259,10 @@ function fechar() {
       </header>
 
       <div class="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
+        <!-- A releitura ao abrir falhou: os avisos são do que o bloco tinha lido. -->
+        <p v-if="falhaAoReler" class="text-[11px] text-amber-800 dark:text-amber-300" data-aviso-releitura>
+          Não consegui reler os reembolsos do pedido agora: os avisos abaixo são do que o bloco tinha lido.
+        </p>
         <!-- O pedido já tem reembolso nosso (qualquer tipo): avisa, não bloqueia. -->
         <div
           v-if="anteriores"
@@ -193,11 +277,11 @@ function fechar() {
           <p class="mt-1 text-[11px]">Confira antes de lançar outro: o pedido pode ter mais de um reembolso, mas não o mesmo duas vezes.</p>
         </div>
         <p
-          v-if="dados.plataforma_reembolsou"
+          v-if="atual.plataforma_reembolsou"
           class="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-amber-900 dark:text-amber-200"
           data-aviso-plataforma
         >
-          A plataforma já devolveu dinheiro deste pedido ao comprador<template v-if="dados.plataforma_detalhe"> ({{ dados.plataforma_detalhe }})</template>: confira para não pagar duas vezes.
+          A plataforma já devolveu dinheiro deste pedido ao comprador<template v-if="atual.plataforma_detalhe"> ({{ atual.plataforma_detalhe }})</template>: confira para não pagar duas vezes.
         </p>
 
         <!-- valor -->
@@ -230,7 +314,7 @@ function fechar() {
           data-aviso-adm
         >
           <TriangleAlert class="mt-px size-3.5 shrink-0" aria-hidden="true" />
-          <p v-if="dados.pode_aprovar">Passa do limite ({{ porquesAdm.join('; ') }}), mas você é ADM: o reembolso já sai aprovado no seu nome.</p>
+          <p v-if="atual.pode_aprovar">Passa do limite ({{ porquesAdm.join('; ') }}), mas você é ADM: o reembolso já sai aprovado no seu nome.</p>
           <p v-else>Vai precisar da aprovação de um ADM ({{ porquesAdm.join('; ') }}). Até lá fica "Aguardando ADM" e não pode ser pago.</p>
         </div>
 
@@ -296,17 +380,18 @@ function fechar() {
       </div>
 
       <footer class="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t px-4 py-3">
-        <p v-if="problema" class="mr-auto min-w-0 flex-1 text-[11px] text-muted-foreground" data-motivo-sem-lancar>{{ problema }}</p>
+        <p v-if="bloqueio" class="mr-auto min-w-0 flex-1 text-[11px] text-muted-foreground" data-motivo-sem-lancar>{{ bloqueio }}</p>
         <button type="button" class="rounded-md border px-2.5 py-1.5 hover:bg-muted disabled:opacity-60" :disabled="enviando" @click="fechar">Cancelar</button>
         <button
           type="button"
           class="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
-          :disabled="!!problema || enviando"
-          :title="problema || ''"
+          :disabled="!!bloqueio || enviando"
+          :title="bloqueio || ''"
+          :data-trava="travado"
           data-botao-lancar
           @click="lancar"
         >
-          <Loader2 v-if="enviando" class="size-3.5 animate-spin" />
+          <Loader2 v-if="enviando || relendo" class="size-3.5 animate-spin" />
           <HandCoins v-else class="size-3.5" aria-hidden="true" /> Lançar reembolso
         </button>
       </footer>

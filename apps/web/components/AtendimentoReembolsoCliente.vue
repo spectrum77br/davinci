@@ -9,7 +9,8 @@
 //    marca na tela Reembolso). "Não aplicado" é da frente 4/6 (mexe na margem).
 //  - "Lançar reembolso ao cliente" abre o AtendimentoReembolsoLancar, que mora no
 //    painel (como o da troca). Pedido, loja, plataforma, data e quem lançou o
-//    servidor tira da PRÓPRIA conversa: a tela nunca manda conta.
+//    servidor tira da PRÓPRIA conversa: a tela nunca manda conta. O nº do Bling
+//    que o diálogo mostrou vai só para o servidor conferir (17/11/2026).
 //  - Precisa do ADM: valor > R$ 100, > 25% do valor pago ou o valor inteiro. O
 //    ADM que lança já sai aprovado.
 //  - Quem lança o servidor decide (`pode_lancar` e o porquê em `motivo_bloqueio`).
@@ -125,6 +126,9 @@ export type ReembolsoIn = {
   motivo_detalhe: string | null
   forma: FormaReembolso
   dados_pagamento: string | null
+  // O nº do Bling que o diálogo mostrou (17/11/2026). O pedido sai da conversa; o
+  // servidor só confere e, se a conversa estiver em outro, responde 409 pedido_mudou.
+  pedido_bling: string | null
 }
 export const LIMITE_PADRAO: LimiteReembolso = { valor: 100, pct: 25 }
 // Os tetos dos textos, os mesmos do servidor (services/reembolso_cliente.py).
@@ -151,10 +155,17 @@ export function respostaDe(r: any): ReembolsosResposta {
   }
 }
 
-// O que vai para o diálogo: a mesma resposta SEM os dados do Pix (o diálogo só avisa
-// dos lançamentos anteriores; o Pix do ADM não precisa sair do bloco). PURA.
+// O que vai para o diálogo (e o que ele relê): a mesma resposta SEM os dados do Pix
+// (o diálogo só avisa dos lançamentos anteriores; o Pix do ADM não precisa sair do
+// bloco). PURA.
 export function semPix(d: ReembolsosResposta): ReembolsosResposta {
   return { ...d, itens: d.itens.map((i) => ({ ...i, dados_pagamento: null })) }
+}
+
+// É o mesmo pedido (nº do Bling e da plataforma)? A releitura do diálogo compara
+// com o que o bloco leu (17/11/2026). PURA.
+export function mesmoPedido(a: PedidoReembolso | null | undefined, b: PedidoReembolso | null | undefined): boolean {
+  return (a?.bling ?? null) === (b?.bling ?? null) && (a?.marketplace ?? null) === (b?.marketplace ?? null)
 }
 
 const centavos = (v: number) => Math.round(v * 100)
@@ -236,8 +247,9 @@ export function problemaDoForm(f: FormReembolso, valorPago: number | null | unde
   return null
 }
 // O corpo do POST (null = o formulário ainda não fecha). Os dados do Pix só vão
-// com a forma Pix: no cupom não há o que guardar. PURA.
-export function corpoDoReembolso(f: FormReembolso): ReembolsoIn | null {
+// com a forma Pix: no cupom não há o que guardar. `pedidoBling` é o nº do Bling
+// que o diálogo mostrou, para o servidor conferir (17/11/2026). PURA.
+export function corpoDoReembolso(f: FormReembolso, pedidoBling: string | null): ReembolsoIn | null {
   const lido = lerValor(f.valorTexto)
   if (!lido || 'erro' in lido || !f.motivo || !f.forma) return null
   return {
@@ -246,7 +258,12 @@ export function corpoDoReembolso(f: FormReembolso): ReembolsoIn | null {
     motivo_detalhe: f.detalhe.trim() || null,
     forma: f.forma,
     dados_pagamento: f.forma === 'pix' ? f.dadosPix.trim() || null : null,
+    pedido_bling: pedidoBling || null,
   }
+}
+// Algo preenchido? O fundo escuro pergunta antes de descartar (17/11/2026). PURA.
+export function formPreenchido(f: FormReembolso): boolean {
+  return !!(f.valorTexto.trim() || f.motivo || f.detalhe.trim() || f.forma || f.dadosPix.trim())
 }
 
 // O aviso (sem bloquear: decisão 6 do dono) de que o pedido JÁ tem reembolso
@@ -310,9 +327,11 @@ export const ERROS_REEMBOLSO: Record<string, string> = {
   detalhe_longo: `O detalhe passa de ${DETALHE_MAX} caracteres.`,
   pix_longo: `Os dados do Pix passam de ${PIX_MAX} caracteres.`,
   reembolso_nao_encontrado: 'Reembolso não encontrado (leia de novo).',
+  // 17/11/2026: a conversa mudou de pedido depois que o diálogo abriu.
+  pedido_mudou: 'O pedido da conversa mudou depois que você abriu o lançamento: feche e abra de novo, já no pedido certo.',
 }
 // As recusas que mudam o que o bloco mostra (quem pode, o pedido): o bloco relê.
-export const RELE_NA_RECUSA = new Set(['sem_pedido', 'sem_permissao', 'so_adm_plataforma_reembolsou', 'ja_aprovado'])
+export const RELE_NA_RECUSA = new Set(['sem_pedido', 'sem_permissao', 'so_adm_plataforma_reembolsou', 'ja_aprovado', 'pedido_mudou'])
 export type ErroReembolso = { code: string | null; texto: string; motivos: string[] }
 // O erro da API em frase. `lido` é o `erroDaApi` da caixa (as frases de rede, de
 // validação e de permissão); o código vem do `detail`. PURA.

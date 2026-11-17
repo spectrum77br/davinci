@@ -14,17 +14,19 @@ estão em `services/reembolso_cliente.py`; aqui fica o lado da conversa:
     `stores.apelido_override`, senão `store_info.account_name`, pela loja do
     pedido no Bling. A data é a do pedido no Bling.
   • O VALOR PAGO é o que a aba mostra ("Valor pago pelo comprador", o retrato
-    do pedido na plataforma: Shopee e ML); sem retrato (TikTok, Amazon, Magalu),
-    o total do pedido no Bling. Sem nenhum dos dois, não há teto a conferir e
-    o reembolso vai para o ADM (`reembolso_cliente.requer_aprovacao`).
+    do pedido na plataforma: Shopee e ML — só se for DESTE pedido, 17/11/2026);
+    sem retrato (TikTok, Amazon, Magalu), o total do pedido no Bling. Sem
+    nenhum dos dois, não há teto a conferir e o reembolso vai para o ADM
+    (`reembolso_cliente.requer_aprovacao`).
   • QUEM LANÇA (decisão 4): quem responde a conversa — a loja no escopo da
     pessoa (`_conversa_ou_404` no router) — E é ADM ou tem `reembolso.edit`.
   • A PLATAFORMA JÁ REEMBOLSOU (decisão 5): a mesma fonte que a aba Pedido
     mostra — as devoluções/reclamações da conversa (`reclamacoes.
     reclamacoes_da_conversa`, o GET /reclamacoes) DO PEDIDO com o reembolso
     pago (Shopee ACCEPTED/REFUND_PAID, TikTok concluída, ML com o dinheiro
-    devolvido ou encerrada a favor do comprador) e o retrato do pedido
-    cancelado depois de pago. Aí só o ADM lança; para os outros, o motivo.
+    devolvido ou encerrada a favor do comprador), o retrato do pedido
+    cancelado depois de pago e (17/11/2026) o pedido Cancelado no Bling, em
+    qualquer plataforma. Aí só o ADM lança; para os outros, o motivo.
   • O AVISO (decisão 6) é a lista: o bloco mostra os reembolsos que o pedido
     já tem (qualquer tipo, qualquer conta), sem bloquear.
   • Os DADOS DO PIX (decisão 7) vão cifrados e só voltam para ADM; nunca
@@ -58,6 +60,8 @@ from app.models import (
 )
 from app.services import reembolso_cliente as regras
 from app.services.atendimento import acesso, etiqueta_fatos, painel, reclamacoes
+from app.services.atendimento.enriquecer import CHAVE_CARIMBOS, CHAVE_PEDIDO
+from app.services.bling_situacoes import SITUACAO_CANCELADO
 from app.services.reembolso_sync import sync_reembolso_for_pedido
 
 logger = structlog.get_logger()
@@ -77,6 +81,10 @@ SEM_PERMISSAO = (
 )
 SO_QUEM_RESPONDE = "Só quem responde esta conversa lança reembolso."
 SO_ADM_APROVA = "Só o ADM aprova reembolso ao cliente."
+# 17/11/2026: o diálogo mostrou um pedido e a conversa já está em outro.
+PEDIDO_MUDOU = "O pedido da conversa mudou. Confira e lance de novo."
+# 17/11/2026: o pedido Cancelado no Bling (situação 12), em qualquer plataforma.
+BLING_CANCELADO = "Bling: pedido cancelado"
 
 
 def so_adm_plataforma(porque: str) -> str:
@@ -117,6 +125,9 @@ class PedidoDoReembolso:
     conta: str | None
     valor_pago: float | None
     data: datetime | None = None
+    # A situação do pedido no Bling (id em texto, como `bling_orders.situacao`):
+    # o Cancelado (12) conta como "a plataforma já reembolsou" (17/11/2026).
+    situacao_bling: str | None = None
     # Todos os números do pedido (Bling e plataforma, o pack do ML): acham os
     # reembolsos e as devoluções dele.
     numeros: frozenset[str] = field(default_factory=frozenset)
@@ -169,9 +180,54 @@ def valor_pago_do_retrato(retrato: Any) -> float | None:
     return _numero(retrato.get("valor_pago"))
 
 
+def _texto_minusculo(valor: Any) -> str:
+    return str(valor or "").strip().lower()
+
+
+def retrato_do_mesmo_pedido(
+    retrato: Any, conversa: AtendimentoConversa, numeroloja: str | None = None
+) -> dict | None:
+    """O retrato só vale se for do MESMO pedido da conversa; senão None. PURA.
+
+    17/11/2026: o chat da Shopee é um só por comprador e muda de pedido (o
+    cartão de outra compra, o foco da devolução) antes de o retrato ser
+    refeito. O retrato da outra compra dava o valor pago (o teto e o limite do
+    ADM) e o "cancelado depois de pago" errados. A regra de
+    `acao_pessoa.retrato_do_pedido` e da tela (`retratoDoPedido`): o `pedido`
+    do retrato é o `pedido_marketplace`, o nº na loja do pedido no Bling
+    (`numeroloja`) ou o pack/order do ML. No ML o retrato é do pack: vale
+    também um dos pedidos dele ou o carimbo da leitura (o nº que foi lido,
+    como `enriquecer._retrato_de_outro`).
+    """
+    if not isinstance(retrato, dict) or not retrato:
+        return None
+    dados = conversa.dados if isinstance(conversa.dados, dict) else {}
+    chaves = {
+        _texto_minusculo(c)
+        for c in (
+            conversa.pedido_marketplace,
+            numeroloja,
+            dados.get("pack_id"),
+            dados.get("order_id"),
+        )
+    }
+    chaves.discard("")
+    numeros = {_texto_minusculo(retrato.get("pedido"))}
+    if conversa.plataforma == "ml":
+        pedidos = retrato.get("pedidos")
+        if isinstance(pedidos, list):
+            numeros |= {_texto_minusculo(p) for p in pedidos}
+        carimbos = dados.get(CHAVE_CARIMBOS) if isinstance(dados.get(CHAVE_CARIMBOS), dict) else {}
+        marca = carimbos.get(CHAVE_PEDIDO) if isinstance(carimbos.get(CHAVE_PEDIDO), dict) else {}
+        numeros.add(_texto_minusculo(marca.get("id")))
+    numeros.discard("")
+    return retrato if numeros & chaves else None
+
+
 async def _retrato(session: AsyncSession, conversa: AtendimentoConversa) -> dict | None:
     """O retrato do pedido na plataforma: o da conversa ou, na `reclamacao` da
-    Shopee sem o dela, o do chat do mesmo pedido (como o detalhe e o painel)."""
+    Shopee sem o dela, o do chat do mesmo pedido (como o detalhe e o painel).
+    Quem usa confere se é do pedido da conversa (`retrato_do_mesmo_pedido`)."""
     dados = conversa.dados if isinstance(conversa.dados, dict) else {}
     retrato = dados.get("pedido_mkt")
     if isinstance(retrato, dict) and retrato:
@@ -223,15 +279,20 @@ async def pedido_da_conversa(
 
     Com o nº na plataforma mas sem o pedido no Bling, volta o pedido SEM `bling`
     nem `conta` (a tela mostra o número e o porquê de não lançar).
+
+    O retrato de OUTRO pedido (17/11/2026) não conta: o valor pago cai no
+    total do Bling e o status dele não diz se a plataforma reembolsou.
     """
     chaves = [c for c in etiqueta_fatos.chaves_do_pedido(conversa) if c]
-    retrato = await _retrato(session, conversa)
-    pago_retrato = valor_pago_do_retrato(retrato)
     marketplace = regras.texto_limpo(conversa.pedido_marketplace)
     pb = await etiqueta_fatos.pedido_bling_da_conversa(session, conversa) if chaves else None
+    if pb is None and marketplace is None:
+        return None
+    retrato = retrato_do_mesmo_pedido(
+        await _retrato(session, conversa), conversa, pb.numeroloja if pb is not None else None
+    )
+    pago_retrato = valor_pago_do_retrato(retrato)
     if pb is None:
-        if marketplace is None:
-            return None
         return PedidoDoReembolso(
             bling=None,
             marketplace=marketplace,
@@ -259,6 +320,7 @@ async def pedido_da_conversa(
         conta=conta,
         valor_pago=pago_retrato if pago_retrato is not None else _numero(total),
         data=data,
+        situacao_bling=pb.situacao,
         numeros=frozenset(n for n in numeros if n),
         retrato=retrato,
     )
@@ -312,14 +374,25 @@ def reembolso_do_retrato(plataforma: str | None, retrato: Any) -> str | None:
     return f"{nome}: pedido {texto.lower()} depois de pago"
 
 
+def reembolso_do_bling(situacao: Any) -> str | None:
+    """O pedido está Cancelado no Bling (situação 12)? O porquê, ou None. PURA.
+
+    17/11/2026: vale em todas as plataformas — TikTok, Amazon e Magalu não têm
+    retrato, e o da Shopee/ML pode estar velho; o cancelado depois de pago a
+    plataforma devolve sozinha. O raro cancelado nunca pago também trava (só
+    para quem não é ADM).
+    """
+    return BLING_CANCELADO if str(situacao or "").strip() == str(SITUACAO_CANCELADO) else None
+
+
 async def plataforma_reembolsou(
     session: AsyncSession, conversa: AtendimentoConversa, pedido: PedidoDoReembolso
 ) -> str | None:
     """A plataforma já devolveu o dinheiro deste pedido? O porquê (para a tela), ou None.
 
     A fonte é a que a aba Pedido mostra: as devoluções/reclamações da conversa
-    (só as DESTE pedido — o chat do comprador pode ter a de outra compra) e o
-    status do retrato do pedido.
+    (só as DESTE pedido — o chat do comprador pode ter a de outra compra), o
+    status do retrato do pedido e, por último, o pedido Cancelado no Bling.
     """
     # Teto maior que o do cartão (20): o chat do comprador junta os casos de
     # todas as compras dele, e o deste pedido não pode ficar de fora.
@@ -329,7 +402,9 @@ async def plataforma_reembolsou(
         porque = reembolso_da_reclamacao(r)
         if porque:
             return porque
-    return reembolso_do_retrato(conversa.plataforma, pedido.retrato)
+    return reembolso_do_retrato(conversa.plataforma, pedido.retrato) or reembolso_do_bling(
+        pedido.situacao_bling
+    )
 
 
 # ── Os reembolsos do pedido ───────────────────────────────────────────────
@@ -497,13 +572,18 @@ async def lancar(
     motivo_detalhe: str | None,
     forma: str,
     dados_pagamento: str | None,
+    pedido_bling: str | None = None,
 ) -> dict[str, Any]:
     """Grava o reembolso ao cliente do pedido da conversa e devolve o item do bloco.
 
-    As travas, na ordem: permissão (403 `sem_permissao`), pedido (409
+    As travas, na ordem: permissão (403 `sem_permissao`), o pedido que o
+    diálogo mostrou não é mais o da conversa (409 `pedido_mudou`), pedido (409
     `sem_pedido`), plataforma já reembolsou (403 `so_adm_plataforma_reembolsou`,
     menos para ADM), detalhe do "outro" (422 `detalhe_obrigatorio`), dados do
     Pix (422 `pix_sem_dados`) e o teto do valor pago (422 `valor_acima_do_pago`).
+
+    `pedido_bling` (17/11/2026) é o nº do Bling que o diálogo mostrou: só
+    confere — o pedido, a conta e o valor pago continuam saindo da conversa.
     """
     admin = e_admin(user)
     user_id = user.id
@@ -513,6 +593,11 @@ async def lancar(
     if not tem_permissao_de_lancar(user):
         raise ReembolsoRecusado(403, "sem_permissao", SEM_PERMISSAO)
     pedido = await pedido_da_conversa(session, conversa)
+    # O comprador citou outra compra (ou o foco da devolução trocou o pedido)
+    # com o diálogo aberto: não grava no pedido que a pessoa não viu.
+    mostrado = regras.texto_limpo(pedido_bling)
+    if mostrado is not None and (pedido is None or pedido.bling != mostrado):
+        raise ReembolsoRecusado(409, "pedido_mudou", PEDIDO_MUDOU)
     if pedido is None:
         raise ReembolsoRecusado(409, "sem_pedido", SEM_PEDIDO)
     if pedido.bling is None:
