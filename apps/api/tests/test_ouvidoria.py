@@ -256,12 +256,13 @@ async def test_todo_robo_tem_limite_pra_cada_chave_de_config():
     """Chave de config sem `Parametro` passaria pelo PATCH sem limite e
     apareceria crua na tela — os dois defeitos de uma vez. Chave que não é
     número (as caixinhas "Olhar …") não tem limite pra checar, mas precisa do
-    rótulo em `rotulos_extras`, senão aparece crua do mesmo jeito."""
+    rótulo em `rotulos_extras`, senão aparece crua do mesmo jeito. Texto (17/11/2026:
+    "Contas do ML de fora" do Chamado de frete do ML) vira caixa de texto na tela."""
     for d in svc.ROBOS.values():
         assert set(d.config_padrao) == set(d.parametros) | set(d.rotulos_extras), d.chave
         assert not (set(d.parametros) & set(d.rotulos_extras)), d.chave
         for chave in d.rotulos_extras:
-            assert isinstance(d.config_padrao[chave], bool), (d.chave, chave)
+            assert isinstance(d.config_padrao[chave], (bool, str)), (d.chave, chave)
         for chave, p in d.parametros.items():
             assert p.minimo <= int(d.config_padrao[chave]) <= p.maximo, (d.chave, chave)
         assert d.modo_padrao in ("ligado", "silencioso", "desligado"), d.chave

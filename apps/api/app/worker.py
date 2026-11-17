@@ -88,6 +88,7 @@ from app.services.notas_fiscais_export import run_export_notas
 from app.services.ouvidoria import gc_ocorrencias as ouvidoria_gc_ocorrencias
 from app.services.ouvidoria import gc_rodadas as ouvidoria_gc_rodadas
 from app.services.ouvidoria import modo as ouvidoria_modo
+from app.services.ouvidoria import modo_efetivo as ouvidoria_modo_efetivo
 from app.services.ouvidoria import sincronizar_catalogo as ouvidoria_sincronizar_catalogo
 from app.services.pos_vendas import sync_notas_emitidas as run_pos_vendas_sync
 from app.services.pricing.batch import run_push_prices_batch
@@ -4696,6 +4697,27 @@ async def robo_juridico_tick(ctx: dict) -> None:
         logger.exception("robo_juridico_tick_falhou")
 
 
+async def chamado_frete_ml_tick(ctx: dict) -> None:
+    """Chamado de frete do ML (Ouvidoria, 17/11/2026): de hora em hora cria o chamado da
+    diferença de frete do ML lançada no Reembolso (a IA de Chamado abre a consulta) e
+    avisa a consulta que não abriu. `desligado`: não roda — nem cria chamado."""
+    try:
+        async with session_scope() as s:
+            modo = await ouvidoria_modo_efetivo(s, "chamado_frete_ml")
+        if modo == "desligado":
+            logger.debug("chamado_frete_ml_desligado")
+            return
+        from app.services.chamado_frete_ml import chamado_frete_ml_sweep
+
+        summary = await chamado_frete_ml_sweep() or {}
+        if any(summary.get(k) for k in ("criados", "erros", "novas", "sumiram", "avisadas")):
+            logger.info("chamado_frete_ml_done", **summary)
+        else:
+            logger.debug("chamado_frete_ml_noop", **summary)
+    except Exception:  # noqa: BLE001 — o tick nunca derruba o worker
+        logger.exception("chamado_frete_ml_tick_falhou")
+
+
 async def vigia_conciliacao_tick(ctx: dict) -> None:
     """Vigia de Conciliação (Ouvidoria): 07:00 BRT, a lista "Onde agir hoje" do
     painel vira ocorrências + um Threema. `desligado` no painel: não roda."""
@@ -5770,6 +5792,7 @@ class WorkerSettings:
         vigia_conciliacao_tick,
         denuncia_relatorio_threema_tick,
         robo_juridico_tick,
+        chamado_frete_ml_tick,
         juridico_pedido_tick,
         conciliacao_fatura_tick,
         conciliacao_extrato_tick,
@@ -6520,6 +6543,9 @@ class WorkerSettings:
         cron(denuncia_relatorio_threema_tick, minute=10, run_at_startup=False, timeout=300),
         # Robô Jurídico (Ouvidoria): 07:30 BRT (10:30 UTC) — confere a atualização das 06:00.
         cron(robo_juridico_tick, hour=10, minute=30, run_at_startup=False, timeout=300),
+        # Chamado de frete do ML (Ouvidoria, 17/11/2026): de hora em hora em :50 — a
+        # rodada das 06:50 UTC (03:50 BRT) já pega o que o backfill das 03:20 lançou.
+        cron(chamado_frete_ml_tick, minute=50, run_at_startup=False, timeout=600),
         # Jurídico: 06:00 BRT (09:00 UTC) — pedido de leitura ao Mac mini (Diário + Jusbrasil)
         cron(juridico_pedido_tick, hour=9, minute=0, run_at_startup=False, timeout=120),
         cron(conciliacao_amazon_csv_tick, hour=9, minute=0, run_at_startup=False, timeout=120),

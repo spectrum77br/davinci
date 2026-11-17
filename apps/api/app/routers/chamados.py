@@ -139,6 +139,7 @@ from app.schemas.chamados import (
 )
 from app.services import chamados as svc
 from app.services import (
+    chamado_frete_ml,
     chamados_adspower,
     chamados_atualizar,
     chamados_devolucao,
@@ -1114,6 +1115,9 @@ async def delete_chamado(
     user: Annotated[User, Depends(require_permission("chamados", "delete"))],
 ) -> None:
     ch = await _get_da_equipe(session, user, chamado_id)
+    # 17/11/2026: chamado do robô de frete do ML — a linha do Reembolso fica "resolvida"
+    # (senão o robô cria outro na rodada seguinte).
+    await chamado_frete_ml.ao_apagar_chamado(session, ch, _autor(user))
     await session.delete(ch)
     await session.commit()
 
@@ -1816,6 +1820,7 @@ async def excluir_chamado(
             estornos.append(ExcluirEstornoOut(sku=sku, qty=qty, mensagem=r.get("mensagem")))
 
     pedido_bling = ch.pedido_bling
+    await chamado_frete_ml.ao_apagar_chamado(session, ch, _autor(user))
     await session.delete(ch)
     await session.commit()
     logger.info(
@@ -2934,6 +2939,13 @@ async def agent_resultado(
                     lrow.chamado = body.chamado
                     lrow.chamado_auto_at = datetime.now(UTC)
                     lrow.chamado_auto_erro = None
+            # 17/11/2026: chamado de frete que o robô criou a partir do Reembolso
+            # (services/chamado_frete_ml): o nº da consulta volta pra linha de lá,
+            # como o robô do Eduardo fazia.
+            refund = await chamado_frete_ml.refund_do_chamado(session, ch)
+            if refund is not None and not (refund.chamado or "").strip():
+                refund.chamado = body.chamado
+                refund.chamado_url = ch.chamado_url or refund.chamado_url
         elif body.chamado_url and not ch.chamado_url:
             ch.chamado_url = body.chamado_url
     else:

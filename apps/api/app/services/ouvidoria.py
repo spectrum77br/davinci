@@ -537,6 +537,57 @@ ROBOS: dict[str, RoboDef] = {
         },
         modo_padrao="silencioso",
     ),
+    # 17/11/2026 (Vinicius: "parou de abrir chamado cobrando ML do frete" → "pode fazer
+    # então no servidor"): quem cobrava era o robô do computador do Eduardo, que parou em
+    # 27/09 (services/chamado_frete_ml). É o segundo robô do painel que AGE: cria o
+    # chamado e põe na fila da IA de Chamado. Nasce silencioso = cria e registra, sem
+    # Threema; ligar depois de pôr o Cairo no "Avisar".
+    "chamado_frete_ml": RoboDef(
+        chave="chamado_frete_ml",
+        nome="Chamado de frete do ML",
+        descricao=(
+            "Pega a diferença de frete do Mercado Livre lançada no Reembolso (frete cobrado "
+            "maior que o do anúncio, a partir de R$ 5) sem chamado e cria o chamado com o "
+            "texto pronto (frete do anúncio, frete cobrado, link, medidas e peso); a IA de "
+            "Chamado abre a consulta no Fale conosco e o nº volta pro Reembolso. Só venda dos "
+            "últimos 30 dias (depois disso o ML nega) e de 17/11/2026 em diante; pula as "
+            "contas de fora, pedido cancelado e frete que, relido, já não dá diferença. Avisa "
+            "quando a consulta não abre. Pra uma linha não ganhar chamado: Conferido ou "
+            "Chamado resolvido no Reembolso."
+        ),
+        area="margem",
+        cadencia_texto="de hora em hora (:50)",
+        plataformas=("ml",),
+        config_padrao={
+            "cadencia_min": 60,
+            "janela_dias": 30,
+            "por_rodada": 5,
+            "horas_parado": 24,
+            "contas_fora": "",
+        },
+        env_threema_recipients=None,
+        contexto="chamados",
+        parametros={
+            "cadencia_min": Parametro("Cadência esperada", 15, 24 * 60, "min"),
+            "janela_dias": Parametro("Só venda dos últimos", 7, 90, "dias"),
+            "por_rodada": Parametro("Chamados novos por rodada", 1, 50),
+            "horas_parado": Parametro("Avisar se a consulta não abriu em", 2, 168, "h"),
+        },
+        rotulos_extras={
+            "contas_fora": "Contas do ML de fora (bloqueadas), separadas por vírgula",
+        },
+        modo_padrao="silencioso",
+        avisos_modo={
+            "desligado": (
+                "O robô para de criar os chamados de frete do ML: a diferença de frete "
+                "fica só no painel Reembolso, sem ninguém cobrar o Mercado Livre."
+            ),
+            "silencioso": (
+                "O robô continua criando os chamados de frete, mas ninguém recebe o "
+                "Threema quando uma consulta não abre. Só este painel mostra."
+            ),
+        },
+    ),
 }
 
 # Threema ID: 8 caracteres (A-Z, 0-9); ID de gateway começa com "*".
