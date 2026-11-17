@@ -608,3 +608,15 @@ async def test_pergunta_que_falha_avisa_so_quem_perguntou(
         db, dono=chefe, args={"codigo": f"P-{m.numero}"}
     )
     assert "não conseguiu responder" in texto
+
+
+async def test_pergunta_passa_na_frente_dos_pedidos_de_mudanca(
+    client: AsyncClient, db, make_user, avisos, token
+):
+    chefe, *_ = await _gente(db, make_user)
+    m = await _pedido(db, chefe)
+    p = await svc.criar_pergunta(db, dono=chefe, pergunta="Como funciona o Flex?")
+    await db.commit()
+    assert (await _pegar(client, token))["id"] == str(p.id)  # a pergunta, criada depois, sai antes
+    await _resultado(client, token, p.id, status="respondida", resposta="Assim.")
+    assert (await _pegar(client, token))["id"] == str(m.id)

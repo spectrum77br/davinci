@@ -602,9 +602,16 @@ async def pegar_trabalho(session: AsyncSession, *, robo: str) -> SistemaMudanca 
         logger.info("mudanca_retomada", mudanca=codigo(em_andamento), robo=robo)
         return em_andamento
     adiada_ate = agora - ESPERA_ADIADA
+    # Na fila, a PERGUNTA vem antes do pedido de mudança: ela leva ~1 min e o
+    # conector promete "alguns minutos" (no Postgres, false vem antes de true).
     for status, novo, prazo, ordem in (
-        ("aprovada", "publicando", PRAZO_PUBLICAR, SistemaMudanca.aprovado_em),
-        ("pedida", "fazendo", PRAZO_FAZER, SistemaMudanca.criado_em),
+        ("aprovada", "publicando", PRAZO_PUBLICAR, (SistemaMudanca.aprovado_em,)),
+        (
+            "pedida",
+            "fazendo",
+            PRAZO_FAZER,
+            (SistemaMudanca.tipo != "pergunta", SistemaMudanca.criado_em),
+        ),
     ):
         filtro = SistemaMudanca.status == status
         if status in ("aprovada", "pedida"):
@@ -616,7 +623,7 @@ async def pegar_trabalho(session: AsyncSession, *, robo: str) -> SistemaMudanca 
             await session.execute(
                 select(SistemaMudanca)
                 .where(filtro)
-                .order_by(ordem, SistemaMudanca.numero)
+                .order_by(*ordem, SistemaMudanca.numero)
                 .limit(1)
                 .with_for_update(skip_locked=True)
             )

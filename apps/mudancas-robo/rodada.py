@@ -396,7 +396,11 @@ def faxina() -> None:
     if not PASTA.exists():
         return
     limite = time.time() - FAXINA_DIAS * 86400
-    for velho in [*PASTA.glob(".tmp-caixa/M-*"), *PASTA.glob(".claude-robo/M-*")]:
+    for velho in [
+        *PASTA.glob(".tmp-caixa/M-*"),
+        *PASTA.glob(".claude-robo/M-*"),
+        *PASTA.glob(".claude-robo/P-*"),
+    ]:
         try:
             if velho.stat().st_mtime < limite:
                 shutil.rmtree(velho, ignore_errors=True)
@@ -611,6 +615,24 @@ def _saida_do_claude(out: str) -> dict:
     return {}
 
 
+_PASSAGEIRO = (
+    "usage limit", "hit your", "reached your", "rate limit", "overloaded", "529", "high load",
+    "unable to connect", "connection error", "econnreset", "timed out", "/login",
+    "authenticate", "oauth",
+)
+
+
+def _erro_passageiro(saida: dict, texto: str) -> bool:
+    """Erro do Claude que passa sozinho (limite de uso, sobrecarga, rede, login):
+    o pedido volta para a fila (Devolver → 'pedida', espera 10 min e não gasta
+    tentativa) em vez de falhar de vez — senão a fila inteira virava 'falhou'
+    em minutos (revisão de 17/11)."""
+    if saida.get("api_error_status") in (401, 408, 429, 500, 502, 503, 504, 529):
+        return True
+    baixo = (texto or "").lower()
+    return any(marca in baixo for marca in _PASSAGEIRO)
+
+
 def _json_final(texto: str) -> dict:
     for linha in reversed([x.strip() for x in (texto or "").splitlines() if x.strip()]):
         if linha.startswith("{") and linha.endswith("}"):
@@ -698,8 +720,8 @@ def fazer(t: dict) -> None:
     texto = str(saida.get("result") or "")
     if saida.get("is_error") or rc != 0:
         erro = (texto or out)[-600:]
-        if "authenticate" in erro.lower() or "oauth" in erro.lower():
-            raise Devolver(f"o login do Claude do robô falhou (refaça o setup-token): {erro}")
+        if _erro_passageiro(saida, erro):
+            raise Devolver(f"o Claude do robô não está disponível agora: {erro[:200]}")
         resultado(mid, "falhou", erro=f"o Claude do robô deu erro: {erro}")
         return
     final = _json_final(texto)
@@ -872,9 +894,9 @@ def responder(t: dict) -> None:
     texto = str(saida.get("result") or "").strip()
     if saida.get("is_error") or rc != 0 or not texto:
         erro = (texto or out)[-600:]
-        if "authenticate" in erro.lower() or "oauth" in erro.lower():
-            raise Devolver(f"o login do Claude do robô falhou (refaça o setup-token): {erro}")
-        resultado(mid, "falhou", erro="o Claude do robô não conseguiu responder")
+        if _erro_passageiro(saida, erro):
+            raise Devolver(f"o Claude do robô não está disponível agora: {erro[:200]}")
+        resultado(mid, "falhou", erro=f"o Claude do robô não conseguiu responder: {erro[:200]}")
         return
     texto = ocultar_segredos(texto)
     if len(texto) > MAX_RESPOSTA:

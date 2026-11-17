@@ -114,6 +114,14 @@ def mundo(tmp_path, monkeypatch):
         "    print(json.dumps({'type': 'result', 'is_error': False, 'result': resposta}))\n"
         "    print('⚠ Permission mode forced to default — aviso de verdade do Claude Code', file=sys.stderr)\n"
         "    sys.exit(0)\n"
+        "elif acao == 'pergunta_limite':\n"
+        "    print(json.dumps({'type': 'result', 'is_error': True, 'api_error_status': 429,\n"
+        "                      'result': 'Claude AI usage limit reached|1763400000'}))\n"
+        "    sys.exit(1)\n"
+        "elif acao == 'pergunta_sobrecarga':\n"
+        "    print(json.dumps({'type': 'result', 'is_error': True,\n"
+        "                      'result': 'API Error: Repeated 529 Overloaded errors'}))\n"
+        "    sys.exit(1)\n"
         "elif acao == 'pergunta_vazia':\n"
         "    print(json.dumps({'type': 'result', 'is_error': False, 'result': ''}))\n"
         "    sys.exit(0)\n"
@@ -620,3 +628,26 @@ def test_ocultar_segredos(mundo):
     # texto comum não muda
     comum = "A margem é calculada como (preço − custo) ÷ preço; token de 3 letras não conta."
     assert o(comum) == comum
+
+
+def test_pergunta_com_claude_indisponivel_volta_para_a_fila(mundo):
+    """Limite de uso / sobrecarga do Claude não é falha da pergunta: volta para
+    a fila (o DaVinci espera 10 min e não gasta tentativa)."""
+    for acao in ("pergunta_limite", "pergunta_sobrecarga"):
+        mundo["acao"].write_text(acao)
+        r = _pergunta(mundo)
+        assert r["status"] == "pedida" and "não está disponível agora" in r["erro"], (acao, r)
+        assert not (mundo["rodada"].PASTA / "P-1").exists()
+
+
+def test_faxina_limpa_config_velha_das_perguntas(mundo):
+    import os as _os
+    import time as _time
+
+    r = mundo["rodada"]
+    velha = r.PASTA / ".claude-robo" / "P-9-1"
+    velha.mkdir(parents=True)
+    antigo = _time.time() - 30 * 86400
+    _os.utime(velha, (antigo, antigo))
+    r.faxina()
+    assert not velha.exists()
