@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import pytest
 import pytest_asyncio
@@ -202,6 +203,59 @@ async def test_webhook_atualiza_localizacao(client: AsyncClient, db: AsyncSessio
     # Reenvio idêntico é deduplicado (Redis) — não reprocessa.
     r2 = await client.post(f"/api/webhooks/17track/{WEBHOOK_SECRET}", json=payload)
     assert r2.json() == {"ack": True, "duplicate": True}
+
+
+def _push_entregue(number: str, **tempo) -> dict:
+    return {
+        "data": {
+            "accepted": [
+                {
+                    "number": number,
+                    "track_info": {
+                        "latest_status": {"status": "Delivered"},
+                        "latest_event": {
+                            "address": {"city": "Sao Paulo", "state": "SP"},
+                            "description": "Objeto entregue ao destinatário",
+                            **tempo,
+                        },
+                    },
+                }
+            ]
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_webhook_entregue_grava_a_hora_do_evento(client: AsyncClient, db: AsyncSession):
+    """16/11 (Eduardo, pedido 306097): `entregue_em` = hora do evento de
+    entrega dos Correios (28/10 15:23 em Brasília), não a hora do push."""
+    row = Logistica(rastreio="AE071697531BR", localizacao="Enviado")
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+
+    payload = _push_entregue("AE071697531BR", time_iso="2026-10-28T15:23:00-03:00")
+    r = await client.post(f"/api/webhooks/17track/{WEBHOOK_SECRET}", json=payload)
+    assert r.json()["rows"] == 1
+    await db.refresh(row)
+    assert row.entregue_em == datetime(2026, 10, 28, 18, 23, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_webhook_entregue_sem_data_cai_na_hora_do_push(client: AsyncClient, db: AsyncSession):
+    """Push "Delivered" sem data no evento: `entregue_em` = hora do push."""
+    row = Logistica(rastreio="AE071697532BR", localizacao="Enviado")
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+
+    antes = datetime.now(UTC)
+    r = await client.post(
+        f"/api/webhooks/17track/{WEBHOOK_SECRET}", json=_push_entregue("AE071697532BR")
+    )
+    assert r.json()["rows"] == 1
+    await db.refresh(row)
+    assert row.entregue_em is not None and antes <= row.entregue_em <= datetime.now(UTC)
 
 
 # ---- register admin ----

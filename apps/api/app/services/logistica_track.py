@@ -25,6 +25,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 import structlog
@@ -36,6 +37,11 @@ logger = structlog.get_logger()
 _BASE = "https://api.17track.net/track/v2.2"
 # Correios do Brasil no catálogo de carriers do 17track.
 CORREIOS_CARRIER = 2151
+# Fuso de um evento que o 17track manda SEM offset (`_quando`): é a hora local
+# dos Correios. Uma unidade em Manaus/Acre sai 1–2 h mais cedo (Noronha, 1 h
+# mais tarde; o `entregue_em` nunca passa de `agora`) — bem menos que as 3 h
+# de ler como UTC.
+FUSO_CORREIOS = ZoneInfo("America/Sao_Paulo")
 
 
 def _headers() -> dict[str, str]:
@@ -159,10 +165,12 @@ async def register(numbers: list[str]) -> dict[str, Any]:
 _FETCH_BATCH = 40
 
 
-async def fetch(numbers: list[str]) -> list[tuple[str, str, str]]:
-    """Consulta o 17track e devolve [(numero, localizacao, status)] dos que já
-    têm evento. `status` é o `latest_status.status` do 17track ("InTransit",
-    "Delivered", "Exception"…) — "Delivered" carimba a entrega na linha.
+async def fetch(numbers: list[str]) -> list[tuple[str, str, str, datetime | None]]:
+    """Consulta o 17track e devolve [(numero, localizacao, status, entregue_evento_em)]
+    dos que já têm evento. `status` é o `latest_status.status` do 17track
+    ("InTransit", "Delivered", "Exception"…) — "Delivered" carimba a entrega na
+    linha; `entregue_evento_em` é a hora do EVENTO de entrega dos Correios
+    (`quando_entregue`), None quando não é entrega ou o evento veio sem data.
 
     É a rede de segurança do push: o webhook dá o tempo real, mas se ele estiver
     fora do ar (ou nem configurado no painel do 17track) a Localização
@@ -172,7 +180,7 @@ async def fetch(numbers: list[str]) -> list[tuple[str, str, str]]:
     nums = sorted({(n or "").strip() for n in numbers if (n or "").strip()})
     if not nums:
         return []
-    out: list[tuple[str, str, str]] = []
+    out: list[tuple[str, str, str, datetime | None]] = []
     async with httpx.AsyncClient(timeout=40.0) as c:
         for i in range(0, len(nums), _FETCH_BATCH):
             chunk = nums[i : i + _FETCH_BATCH]
@@ -195,7 +203,7 @@ async def fetch(numbers: list[str]) -> list[tuple[str, str, str]]:
                 loc = _fmt_from_track_info(ti)
                 if num and loc:
                     st = str(((ti.get("latest_status") or {}).get("status")) or "").strip()
-                    out.append((num, loc, st))
+                    out.append((num, loc, st, quando_entregue(ti)))
             logger.info(
                 "logistica_17track_fetch", n=len(chunk), status=r.status_code, com_evento=len(out)
             )
@@ -290,9 +298,10 @@ async def fetch_detalhado(numbers: list[str]) -> dict[str, Any]:
     """Como `fetch`, mas devolve também QUANDO o 17track consultou os Correios
     (`sync_at`) e o status do pacote. Leitura pura, sem gastar quota.
 
-    Devolve {"info": {número: {localizacao, sync_at, status, sub_status}},
-    "desconhecidos": [números que o 17track diz não conhecer]}. Levanta
-    `Track17Error` se a resposta não for confiável."""
+    Devolve {"info": {número: {localizacao, sync_at, status, sub_status,
+    entregue_evento_em}}, "desconhecidos": [números que o 17track diz não
+    conhecer]}. `entregue_evento_em` = hora do evento de entrega
+    (`quando_entregue`). Levanta `Track17Error` se a resposta não for confiável."""
     nums = sorted({(n or "").strip() for n in numbers if (n or "").strip()})
     info: dict[str, dict[str, Any]] = {}
     desconhecidos: list[str] = []
@@ -317,6 +326,7 @@ async def fetch_detalhado(numbers: list[str]) -> dict[str, Any]:
                     "sync_at": _sync_at(ti),
                     "status": (st.get("status") or "").strip(),
                     "sub_status": (st.get("sub_status") or "").strip(),
+                    "entregue_evento_em": quando_entregue(ti),
                 }
             _acc, rec = _aceitos_e_recusados(body)
             desconhecidos += [n for n, code in rec.items() if code == ERRO_NAO_REGISTRADO]
@@ -685,42 +695,45 @@ def voltando_ao_remetente(eventos: list[EventoRastreio]) -> bool:
     )
 
 
-def parse_push_entregues(payload: dict) -> set[str]:
-    """Números do push cujo estado é ENTREGUE (mesmo desempacotamento do
-    `parse_push`, sem mexer no contrato dele)."""
+def _itens_push(payload: dict) -> list:
+    """Itens de um push do 17track: o `data` vem como `{accepted:[...]}`, como
+    item único ou como lista."""
     data = payload.get("data")
     if isinstance(data, dict):
         acc = data.get("accepted")
-        items = acc if isinstance(acc, list) else [data]
-    elif isinstance(data, list):
-        items = data
-    else:
-        items = []
-    out: set[str] = set()
-    for it in items:
+        return acc if isinstance(acc, list) else [data]
+    if isinstance(data, list):
+        return data
+    return []
+
+
+def parse_push_entregas(payload: dict) -> dict[str, datetime | None]:
+    """{número: hora do EVENTO de entrega} dos números do push cujo estado é
+    ENTREGUE. A hora é None quando o evento veio sem data — aí quem grava cai
+    na hora da leitura (16/11 (Eduardo): `entregue_em` era sempre a hora em que
+    o DaVinci leu, não a dos Correios)."""
+    out: dict[str, datetime | None] = {}
+    for it in _itens_push(payload):
         if not isinstance(it, dict):
             continue
         number = (it.get("number") or "").strip()
-        if number and entregue_no_push(it.get("track_info") or {}):
-            out.add(number)
+        ti = it.get("track_info") or {}
+        if number and entregue_no_push(ti):
+            out[number] = quando_entregue(ti)
     return out
+
+
+def parse_push_entregues(payload: dict) -> set[str]:
+    """Números do push cujo estado é ENTREGUE (mesmo desempacotamento do
+    `parse_push`, sem mexer no contrato dele)."""
+    return set(parse_push_entregas(payload))
 
 
 def parse_push(payload: dict) -> list[tuple[str, str]]:
     """Extrai [(number, localizacao)] de um push do 17track. Aceita o `data`
     como `{accepted:[...]}` ou como item único. Ignora itens sem localização."""
-    data = payload.get("data")
-    items: list[dict]
-    if isinstance(data, dict):
-        acc = data.get("accepted")
-        items = acc if isinstance(acc, list) else [data]
-    elif isinstance(data, list):
-        items = data
-    else:
-        items = []
-
     out: list[tuple[str, str]] = []
-    for it in items:
+    for it in _itens_push(payload):
         if not isinstance(it, dict):
             continue
         number = (it.get("number") or "").strip()
@@ -759,19 +772,59 @@ def _providers(track_info: dict) -> list[dict]:
     return saida
 
 
-def _quando(ev: dict) -> datetime | None:
-    for chave in ("time_iso", "time_utc", "time_raw"):
-        raw = ev.get(chave)
-        if isinstance(raw, dict):  # time_raw vem como {date, time, timezone}
-            raw = f"{raw.get('date') or ''} {raw.get('time') or ''}".strip()
-        if not raw:
+def _ler_hora(raw: Any) -> tuple[datetime, bool] | None:
+    """(hora, só_a_data) de um campo de data do 17track; None se ilegível.
+    A hora sai SEM fuso quando o campo não traz offset — quem decide o fuso é
+    o `_quando`. `time_raw` vem como {date, time, timezone}: o `timezone`
+    (ex. "-03:00") só vale com a hora; se não encaixar, a hora vale sem ele."""
+    if isinstance(raw, dict):
+        dia = str(raw.get("date") or "").strip()
+        hora = str(raw.get("time") or "").strip()
+        fuso = str(raw.get("timezone") or "").strip()
+        textos = [f"{dia} {hora}{fuso}", f"{dia} {hora}"] if dia and hora else [dia]
+    else:
+        textos = [str(raw or "").strip()]
+    for s in textos:
+        if not s:
             continue
         try:
-            dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
         except ValueError:
             continue
-        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+        return dt, ":" not in s  # "2026-10-28" (sem hora) não tem ":"
     return None
+
+
+def _quando(ev: dict) -> datetime | None:
+    """Hora do evento, sempre com fuso, ou None.
+
+    O 17track manda até três campos: `time_iso` (hora local da transportadora,
+    com o offset quando sabe), `time_utc` (UTC) e `time_raw` (como a
+    transportadora deu). Vale o primeiro que traz o fuso — `time_iso` com
+    offset, `time_utc`, `time_raw` com `timezone` —; senão o que veio SEM fuso,
+    lido como hora de Brasília (é a hora local dos Correios); por último o que
+    veio só com a data: 00:00 de Brasília.
+
+    16/11 (Eduardo): o que vinha sem offset era lido como UTC — o
+    `entregue_em` (que não muda depois de gravado) ficaria 3 h mais cedo, e o
+    `time_raw` só com a data virava 21:00 do dia ANTERIOR em Brasília. Agora o
+    DIA fica sempre certo, que é o que conta nos prazos (garantia, devolução).
+    Só a data não diz a hora: 00:00 é o começo do dia da entrega."""
+    reserva: list[tuple[int, datetime]] = []  # (prioridade, hora) dos sem fuso
+    for chave in ("time_iso", "time_utc", "time_raw"):
+        lido = _ler_hora(ev.get(chave))
+        if lido is None:
+            continue
+        dt, so_data = lido
+        if so_data:
+            reserva.append((2, dt.replace(tzinfo=FUSO_CORREIOS)))
+        elif dt.tzinfo is not None:
+            return dt
+        elif chave == "time_utc":  # é UTC por definição, com ou sem o "Z"
+            return dt.replace(tzinfo=UTC)
+        else:
+            reserva.append((1, dt.replace(tzinfo=FUSO_CORREIOS)))
+    return min(reserva, key=lambda r: r[0])[1] if reserva else None
 
 
 def eventos_de_track_info(track_info: dict) -> list[EventoRastreio]:
@@ -797,6 +850,35 @@ def eventos_de_track_info(track_info: dict) -> list[EventoRastreio]:
             vistos.add(chave)
             out.append(EventoRastreio(quando=quando, descricao=descr, local=local))
     return sorted(out, key=lambda e: e.quando, reverse=True)
+
+
+def quando_entregue(track_info: dict | None) -> datetime | None:
+    """Hora do EVENTO de entrega dos Correios, ou None.
+
+    16/11 (Eduardo, pedido 306097 / AE071697531BR): `logistica.entregue_em`
+    gravava a hora em que o DaVinci LEU a entrega (29/10 11:01, reconsulta
+    forçada) e não a dos Correios (28/10 15:23). Só responde com o 17track
+    dizendo "Delivered" (a mesma regra de `entregue_no_push`); aí o evento de
+    entrega é o mais recente — `latest_event` (v2.2) ou o mais novo de
+    `providers[].events[]` (v2.2 aninhado, v2.4 solto), lidos pelo mesmo
+    `_quando` do cartão de rastreio (sem offset = hora de Brasília; só a data =
+    00:00 de Brasília, o dia certo). Sem data no payload → None (quem grava cai
+    na hora da leitura)."""
+    ti = track_info or {}
+    if not entregue_no_push(ti):
+        return None
+    ultimo = ti.get("latest_event")
+    if isinstance(ultimo, dict):
+        quando = _quando(ultimo)
+        if quando is not None:
+            return quando
+    datas = [
+        q
+        for p in _providers(ti)
+        for ev in p.get("events") or []
+        if isinstance(ev, dict) and (q := _quando(ev)) is not None
+    ]
+    return max(datas) if datas else None
 
 
 async def eventos(numbers: list[str]) -> dict[str, list[EventoRastreio]]:

@@ -190,10 +190,13 @@ FONTES_ENTREGA: tuple[FonteEntrega, ...] = (
         frozenset({"plataforma", "aprox"}),
     ),
 )
-# Último recurso: o rastreio (17track/EasyShip) visto pelo DaVinci. É o
-# instante em que o robô do rastreio VIU a entrega (logistica_track_sync e
-# logistica_amazon gravam `agora`), não a hora do evento: data aproximada —
-# o rótulo diz isso na tela e no log.
+# Último recurso: o rastreio (17track/EasyShip) visto pelo DaVinci. Era o
+# instante em que o robô do rastreio VIU a entrega, não a hora do evento:
+# data aproximada — o rótulo diz isso na tela e no log. Desde 16/11 o
+# 17track grava a hora do EVENTO quando a leitura traz a data
+# (logistica_track_sync.momento_da_entrega); o DBA (logistica_amazon) e as
+# linhas carimbadas antes disso seguem com a hora da leitura (estas até rodar
+# o scripts/backfill_entregue_em_evento.py, que depende do OK do Eduardo).
 FONTE_RASTREIO = "rastreio"
 ORIGEM_ROTULOS = {f.chave: f.rotulo for f in FONTES_ENTREGA} | {
     FONTE_RASTREIO: "Rastreio (17track/EasyShip) — data aproximada: o dia em que o DaVinci viu"

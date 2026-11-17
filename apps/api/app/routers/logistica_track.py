@@ -78,7 +78,9 @@ async def receive_17track_push(
     )
 
     updates = logistica_track.parse_push(parsed)
-    entregues = logistica_track.parse_push_entregues(parsed)
+    # {número: hora do EVENTO de entrega (None sem data)} — 16/11 (Eduardo):
+    # `entregue_em` passa a ser a hora dos Correios, não a do push.
+    entregas = logistica_track.parse_push_entregas(parsed)
     applied = 0
     graves: list[tuple[str, str, str]] = []
     for number, loc in updates:
@@ -94,7 +96,11 @@ async def receive_17track_push(
             # ocorrência grave (Threema + mensagem ao cliente na Amazon).
             grave_antes = row.problema_correios_em
             logistica_track_sync.aplicar_leitura(
-                row, loc, entregue=number in entregues, agora=datetime.now(UTC)
+                row,
+                loc,
+                entregue=number in entregas,
+                entregue_evento_em=entregas.get(number),
+                agora=datetime.now(UTC),
             )
             if row.problema_correios_em is not None and row.problema_correios_em != grave_antes:
                 graves.append((row.pedido_bling or "?", row.conta or "?", loc))
@@ -110,7 +116,7 @@ async def receive_17track_push(
             # Localização + carimbo de chegada (Correios ENTREGUE), com a
             # exceção da perna do galpão do ML — regra no sync do retorno.
             devolucao_rastreio_sync.aplicar_push(
-                dev, loc, entregue=number in entregues, agora=datetime.now(UTC)
+                dev, loc, entregue=number in entregas, agora=datetime.now(UTC)
             )
             applied += 1
     await session.commit()

@@ -316,6 +316,11 @@ async def enrich_row(
         and canal in (logistica_amazon_canal.CANAL_PROPRIO, None)
     ):
         row.bling_enriquecido_em = None
+    # 16/11 (Eduardo): no Correios o `entregue_em` passou a ser a hora do
+    # EVENTO (logistica_track_sync.momento_da_entrega). No DBA continua a hora
+    # da leitura: a SP-API não data o EasyShip "Delivered" — o getOrder só traz
+    # o `LastUpdateDate` do PEDIDO inteiro (mexe com qualquer alteração, antes
+    # ou depois da entrega) e o pacote do EasyShip só o código de rastreio.
     if enr.get("entregue") and row.entregue_em is None:
         row.entregue_em = datetime.now(UTC)
     return True
