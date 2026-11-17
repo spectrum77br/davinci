@@ -129,7 +129,8 @@ const PLATFORM_SPECS: Record<Platform, PlatformSpec> = {
       tone: 'info',
       lines: [
         '**Carrefour:** selecione a loja e informe a chave da API e o ID dessa loja no portal Carrefour.',
-        'Esta conexão permite testar o acesso e importar ofertas para consulta. O envio de estoque e preços ainda não está disponível.',
+        'Esta conexão permite testar o acesso e consultar os anúncios. Depois de salvar, habilite o envio de estoque e de preços separadamente para cada loja na página **Integrações**.',
+        'O envio exige anúncios vinculados aos produtos correspondentes no Bling. O estoque é conferido no Bling antes de cada envio.',
         'O ID da loja fica fixo após salvar. Cada conta Carrefour precisa de sua própria integração.',
       ],
     },

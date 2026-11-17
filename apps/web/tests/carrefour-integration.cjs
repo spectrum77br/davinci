@@ -45,6 +45,10 @@ async function run() {
   }), () => ({ user: { email: 'operator@example.test' } }))
   s.draft.value.platform = 'carrefour'
   await nextTick()
+  const carrefourHint = s.currentSpec.value.hint.lines.join(' ')
+  assert.match(carrefourHint, /habilite o envio de estoque e de preços separadamente para cada loja na página \*\*Integrações\*\*/)
+  assert.match(carrefourHint, /produtos correspondentes no Bling\. O estoque é conferido no Bling antes de cada envio/)
+  assert.doesNotMatch(carrefourHint, /ainda não está disponível/)
   assert.equal(s.currentSpec.value.fields.find(f => f.key === 'api_key').type, 'password')
   assert.deepEqual(s.eligibleStores.value.map(store => store.id), ['vr', 'poofy'])
   s.draft.value.creds = { api_key: 'private-unit-key', shop_id: '123' }
