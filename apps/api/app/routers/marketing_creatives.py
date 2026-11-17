@@ -256,8 +256,16 @@ def _item_fila_out(it: autopostagem.ItemFila, posicoes: dict[UUID, int]) -> dict
         # O robô pula este vídeo em toda conta (ex.: "arquivo_sumiu"); None =
         # sai normal. Ver `autopostagem.ItemFila.bloqueado`.
         "bloqueado": it.bloqueado,
+        # `sorteio: true` = nesta conta o robô SORTEIA (Shopee Vídeo, 16/11/2026):
+        # o vídeo está no monte, não numa vez marcada. Só vai quando é verdade
+        # (chave ausente = fila fixa), pra não mudar o formato das outras.
         "pendente_em": [
-            {"rede_id": str(r.id), "plataforma": r.plataforma, "conta": r.conta}
+            {
+                "rede_id": str(r.id),
+                "plataforma": r.plataforma,
+                "conta": r.conta,
+                **({"sorteio": True} if autopostagem.por_sorteio(r) else {}),
+            }
             for r in it.pendente_em
         ],
     }
@@ -276,6 +284,9 @@ async def get_fila(
     (`autopostagem.fila`), e a posição é contada na fila inteira da marca
     ANTES do corte por equipe — quem só vê a própria equipe vê o número real
     que o robô vai seguir, mesmo que o de cima seja de outra equipe.
+
+    Contas de Shopee Vídeo não seguem a ordem: o robô sorteia
+    (`autopostagem.por_sorteio`), e elas vêm marcadas com `sorteio: true`.
     """
     itens = await autopostagem.fila(session, marca_id)
     posicoes = autopostagem.posicoes_efetivas(itens)

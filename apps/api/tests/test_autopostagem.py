@@ -19,6 +19,7 @@ O que estes testes defendem:
 
 from __future__ import annotations
 
+import random
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -136,8 +137,19 @@ async def _cenario(db, *, com_legenda: bool = True):
     return m, r
 
 
-async def _criativo(db, marca, *, nome: str, quando: datetime, aprovado: bool = True):
-    c = MarketingCreative(modelo=nome, marca=marca.slug, marca_id=marca.id, aprovado=aprovado)
+async def _criativo(
+    db,
+    marca,
+    *,
+    nome: str,
+    quando: datetime,
+    aprovado: bool = True,
+    sha: str | None = None,
+    fila: int | None = None,
+):
+    c = MarketingCreative(
+        modelo=nome, marca=marca.slug, marca_id=marca.id, aprovado=aprovado, fila_posicao=fila
+    )
     c.created_at = quando
     db.add(c)
     await db.flush()
@@ -147,6 +159,7 @@ async def _criativo(db, marca, *, nome: str, quando: datetime, aprovado: bool = 
     caminho.write_bytes(b"\x00\x00\x00\x18ftypmp42-fake")
     f = MarketingCreativeFile(
         creative_id=c.id, file_name=f"{nome}.mp4", file_mime="video/mp4", file_rel=rel,
+        sha256=sha,
     )
     f.created_at = quando
     db.add(f)
@@ -404,3 +417,493 @@ async def test_dia_inteiro_12h_e_19h_com_intervalo_de_7_horas(db, monkeypatch):
         await db.commit()
 
     assert saidas == ["12:03", "19:03"], "um no almoço, outro às 19h — nem 20h, nem só um"
+
+
+# ---------- Shopee Vídeo: sorteio, nunca repetido (Eduardo, 16/11/2026) ----------
+#
+# As lojas de celular da Uranyx (ATLAS, Atv, Mega) postam sozinhas às 12h e
+# 19h, tirando do MESMO acervo aprovado. Duas decisões do dono:
+#   1. o robô SORTEIA o vídeo de cada loja (não a fila fixa);
+#   2. o MESMO vídeo nunca sai duas vezes na Shopee — em loja nenhuma,
+#      incluindo a própria e loja já apagada.
+# A conferência por loja (anúncio, formato) é de outro módulo e vem dublada
+# aqui (`loja_aceita`): estes testes medem o sorteio e o corte do já usado.
+
+
+class _Inverte:
+    """RNG previsível: "embaralhar" = inverter. Mostra QUEM decide a ordem."""
+
+    def shuffle(self, x):
+        x.reverse()
+
+
+class _SemSorteio:
+    def shuffle(self, _x):
+        raise AssertionError("fora da Shopee não tem sorteio")
+
+
+@pytest.fixture
+def loja_aceita(monkeypatch):
+    """A loja aceita todo vídeo; guarda quais chegaram a ser conferidos."""
+    vistos: list = []
+
+    async def _aceita(_session, _criativo, arquivo, _rede, **_kw):
+        vistos.append(arquivo.id)
+        return None
+
+    monkeypatch.setattr(svc, "motivo_do_video_na_loja", _aceita)
+    return vistos
+
+
+async def _uranyx(db) -> Marca:
+    m = Marca(nome="Uranyx", slug="uranyx")
+    db.add(m)
+    await db.commit()
+    return m
+
+
+async def _loja_shopee(db, marca, conta: str, **kw) -> RedeSocial:
+    r = _rede(
+        marca_id=marca.id, plataforma="shopee", conta=conta, adspower_user_id=None,
+        postagem_hora_inicio=12, postagem_max_dia=1, postagem_intervalo_min=420, **kw,
+    )
+    db.add(r)
+    await db.commit()
+    return r
+
+
+async def _postou(db, c, f, rede, *, status="publicado", plataforma=None, **campos):
+    db.add(MarketingPostagem(
+        creative_id=c.id, file_id=f.id, rede_social_id=rede.id if rede else None,
+        plataforma=plataforma or (rede.plataforma if rede else "shopee"),
+        conta=rede.conta if rede else "loja apagada", status=status,
+        publicado_em=datetime.now(UTC) - timedelta(days=2), **campos,
+    ))
+    await db.commit()
+
+
+async def _outro_arquivo(db, c, *, nome: str, quando: datetime) -> MarketingCreativeFile:
+    """Mais um vídeo na MESMA linha do criativo (outra versão do mesmo vídeo)."""
+    rel = f"x/{c.id}-{nome}.mp4"
+    caminho = Path(get_settings().uploads_dir) / rel
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    caminho.write_bytes(b"\x00\x00\x00\x18ftypmp42-fake")
+    f = MarketingCreativeFile(
+        creative_id=c.id, file_name=f"{nome}.mp4", file_mime="video/mp4", file_rel=rel,
+    )
+    f.created_at = quando
+    db.add(f)
+    await db.commit()
+    return f
+
+
+def _semente(n: int) -> random.Random:
+    # Pseudoaleatório DE PROPÓSITO: o teste precisa repetir o mesmo sorteio.
+    return random.Random(n)  # noqa: S311
+
+
+async def _sorteia(db, monkeypatch, rede, semente):
+    monkeypatch.setattr(svc, "_sorteio", _semente(semente))
+    achado = await svc.proximo_criativo(db, rede)
+    return achado[1].id if achado else None
+
+
+async def test_shopee_sorteia_o_video_e_nao_tira_sempre_o_mais_recente(
+    db, monkeypatch, loja_aceita
+):
+    """Decisão 1: na fila fixa toda loja pegaria o mesmo "mais recente"."""
+    m = await _uranyx(db)
+    atlas = await _loja_shopee(db, m, "atlas")
+    agora = datetime.now(UTC)
+    arquivos = set()
+    for i in range(6):
+        _c, f = await _criativo(db, m, nome=f"v{i}", quando=agora - timedelta(days=i))
+        arquivos.add(f.id)
+
+    escolhas = [await _sorteia(db, monkeypatch, atlas, s) for s in range(12)]
+    assert set(escolhas) <= arquivos
+    assert len(set(escolhas)) >= 3, f"sorteio, não fila: {escolhas}"
+    # Reproduzível com a mesma semente: a ordem do SQL é fixa antes do embaralho.
+    assert await _sorteia(db, monkeypatch, atlas, 7) == escolhas[7]
+
+
+async def test_shopee_ignora_a_fila_e_sorteia_no_monte_inteiro(db, monkeypatch, loja_aceita):
+    """Sorteio PURO ("randomiza", 16/11/2026): `fila_posicao` não dá
+    prioridade na Shopee — o vídeo que furou a fila entra no mesmo monte que
+    os outros, e o resto sai mesmo com ele ainda livre."""
+    m = await _uranyx(db)
+    atlas = await _loja_shopee(db, m, "atlas")
+    agora = datetime.now(UTC)
+    prio = {
+        (await _criativo(db, m, nome="prio1", quando=agora - timedelta(days=30), fila=1))[1].id,
+        (await _criativo(db, m, nome="prio2", quando=agora - timedelta(days=20), fila=2))[1].id,
+    }
+    resto = {
+        (await _criativo(db, m, nome=f"novo{i}", quando=agora - timedelta(hours=i)))[1].id
+        for i in range(4)
+    }
+
+    escolhas = [await _sorteia(db, monkeypatch, atlas, s) for s in range(24)]
+    assert set(escolhas) <= prio | resto
+    assert set(escolhas) & resto, f"o resto sai com os priorizados ainda livres: {escolhas}"
+    assert set(escolhas) & prio, f"os priorizados também entram no monte: {escolhas}"
+
+    # Um embaralho só, do monte inteiro (priorizados e resto juntos).
+    class _Anota:
+        def __init__(self):
+            self.montes = []
+
+        def shuffle(self, x):
+            self.montes.append(len(x))
+
+    rng = _Anota()
+    monkeypatch.setattr(svc, "_sorteio", rng)
+    await svc.proximo_criativo(db, atlas)
+    assert rng.montes == [6]
+
+
+async def test_shopee_sorteia_por_criativo_e_leva_o_arquivo_mais_novo(db, monkeypatch):
+    """Um criativo = um vídeo na Shopee: o sorteio é entre CRIATIVOS (o de
+    três arquivos não tem três vezes a chance), e do criativo sorteado vai o
+    arquivo mais novo — a versão antiga só se a nova não serve pra loja."""
+    m = await _uranyx(db)
+    atlas = await _loja_shopee(db, m, "atlas")
+    agora = datetime.now(UTC)
+    c_a, a_velho = await _criativo(db, m, nome="a_v1", quando=agora - timedelta(days=9))
+    a_meio = await _outro_arquivo(db, c_a, nome="a_v2", quando=agora - timedelta(days=5))
+    a_novo = await _outro_arquivo(db, c_a, nome="a_v3", quando=agora - timedelta(days=1))
+    _c_b, b = await _criativo(db, m, nome="b", quando=agora - timedelta(days=3))
+
+    recusados: set = set()
+
+    async def loja(_s, _c, arquivo, _r, **_kw):
+        return "video_formato_nao_aceito" if arquivo.id in recusados else None
+
+    monkeypatch.setattr(svc, "motivo_do_video_na_loja", loja)
+
+    class _Anota:
+        def __init__(self):
+            self.montes = []
+
+        def shuffle(self, x):
+            self.montes.append([[f.id for _c, f in arquivos] for arquivos in x])
+
+    rng = _Anota()
+    monkeypatch.setattr(svc, "_sorteio", rng)
+    assert (await svc.proximo_criativo(db, atlas))[1].id in (a_novo.id, b.id)
+    # O embaralho é de 2 criativos (não de 4 arquivos), cada um com os
+    # arquivos do mais novo pro mais antigo.
+    (monte,) = rng.montes
+    assert sorted(monte, key=len) == [[b.id], [a_novo.id, a_meio.id, a_velho.id]]
+
+    escolhas = [await _sorteia(db, monkeypatch, atlas, s) for s in range(16)]
+    assert set(escolhas) == {a_novo.id, b.id}, "a versão antiga nunca ganha da nova"
+
+    # A tela "Fila do robô" promete o mesmo: na loja Shopee só espera o
+    # arquivo que o sorteio levaria de cada criativo.
+    from app.services.marketing import shopee_video_anuncio as anuncio
+
+    async def _sem_ffprobe(_caminho):
+        return None
+
+    monkeypatch.setattr(anuncio, "sondar_video", _sem_ffprobe)
+
+    async def _na_loja():
+        return {
+            it.arquivo.id
+            for it in await svc.fila(db, m.id)
+            if any(x.id == atlas.id for x in it.pendente_em)
+        }
+
+    assert await _na_loja() == {a_novo.id, b.id}
+
+    # A nova não serve (formato): vai a mais nova que serve, do mesmo criativo.
+    recusados.add(a_novo.id)
+    escolhas = {await _sorteia(db, monkeypatch, atlas, s) for s in range(16)}
+    assert escolhas == {a_meio.id, b.id}
+    assert await _na_loja() == {a_meio.id, b.id}
+
+
+async def test_shopee_video_ja_usado_em_qualquer_loja_nem_entra_no_sorteio(db, monkeypatch):
+    """Decisão 2: nunca o mesmo vídeo duas vezes na Shopee. O corte é no SQL,
+    ANTES da conferência por loja (anúncio + ffprobe): o já usado nem chega
+    a ser conferido."""
+    m = await _uranyx(db)
+    atlas = await _loja_shopee(db, m, "atlas")
+    atv = await _loja_shopee(db, m, "atv")
+    ig = _rede(marca_id=m.id, plataforma="instagram", conta="uranyx_br")
+    db.add(ig)
+    await db.commit()
+    agora = datetime.now(UTC)
+
+    async def cri(nome, **kw):
+        return await _criativo(db, m, nome=nome, quando=agora - timedelta(days=1), **kw)
+
+    # Saem do sorteio:
+    await _postou(db, *(await cri("na_atv")), atv)
+    await _postou(db, *(await cri("em_voo_na_atv")), atv, status="agendado")
+    await _postou(db, *(await cri("em_duvida_na_atv")), atv, status="revisar")
+    await _postou(db, *(await cri("loja_apagada")), None)  # rede_social_id NULL
+    _c, _mesmo_conteudo = await cri("mesmo_conteudo", sha="abc")
+    await _postou(db, *(await cri("reenvio_na_propria", sha="abc")), atlas, status="revisar")
+    await _postou(db, *(await cri("sem_hash_usado", sha="")), atv)
+    # Continuam:
+    c, f_cancelado = await cri("cancelado_na_atv")
+    await _postou(db, c, f_cancelado, atv, status="cancelado")
+    c, f_ig = await cri("so_no_instagram")
+    await _postou(db, c, f_ig, ig)
+    _c, f_sem_hash = await cri("sem_hash_livre", sha="")  # vazio não é "todos iguais"
+
+    vistos = []
+
+    async def recusa(_s, _c, arquivo, _r, **_kw):
+        vistos.append(arquivo.id)
+        return "sem_anuncio_na_loja"
+
+    monkeypatch.setattr(svc, "motivo_do_video_na_loja", recusa)
+    assert await svc.proximo_criativo(db, atlas) is None
+    assert set(vistos) == {f_cancelado.id, f_ig.id, f_sem_hash.id}
+
+
+async def test_shopee_sorteio_usa_a_mesma_regra_do_ja_na_shopee(db, monkeypatch):
+    """A regra do "já está na Shopee" é UMA (a da conferência por loja):
+    linha cancelada que chegou ao upload (`container_id`) ou ao post segura o
+    vídeo; cancelada sem upload não; e outro arquivo do MESMO criativo também
+    tira o criativo do sorteio (um criativo = um vídeo)."""
+    m = await _uranyx(db)
+    atlas = await _loja_shopee(db, m, "atlas")
+    atv = await _loja_shopee(db, m, "atv")
+    agora = datetime.now(UTC)
+
+    async def cri(nome):
+        return await _criativo(db, m, nome=nome, quando=agora - timedelta(days=1))
+
+    # Saem do sorteio:
+    await _postou(db, *(await cri("revisar_cancelado")), atv, status="cancelado",
+                  container_id="br-123")
+    await _postou(db, *(await cri("post_cancelado")), None, status="cancelado",
+                  post_external_id="POST-1==")
+    c_v1, v1 = await cri("versao_1")
+    v2 = await _outro_arquivo(db, c_v1, nome="versao_2", quando=agora)
+    await _postou(db, c_v1, v1, atv)  # a v1 saiu na Atv: a v2 é o MESMO vídeo
+    # Continua:
+    c, f_livre = await cri("cancelado_sem_upload")
+    await _postou(db, c, f_livre, atv, status="cancelado")
+
+    vistos = []
+
+    async def recusa(_s, _c, arquivo, _r, **_kw):
+        vistos.append(arquivo.id)
+        return "sem_anuncio_na_loja"
+
+    monkeypatch.setattr(svc, "motivo_do_video_na_loja", recusa)
+    assert await svc.proximo_criativo(db, atlas) is None
+    assert set(vistos) == {f_livre.id}
+    assert v2.id not in vistos
+
+    # A tela segue a mesma regra: nenhuma loja Shopee espera a v2.
+    from app.services.marketing import shopee_video_anuncio as anuncio
+
+    async def _sem_ffprobe(_caminho):
+        return None
+
+    monkeypatch.setattr(anuncio, "sondar_video", _sem_ffprobe)
+    monkeypatch.setattr(svc, "motivo_do_video_na_loja", lambda *_a, **_k: _nada())
+    por = {it.arquivo.id: {x.conta for x in it.pendente_em} for it in await svc.fila(db, m.id)}
+    assert v2.id not in por
+    assert por[f_livre.id] == {"atlas"}
+
+
+async def _nada():
+    return None
+
+
+async def test_rodada_sorteia_a_vez_so_entre_as_lojas_shopee(monkeypatch):
+    """A loja que vai primeiro tem a primeira escolha do monte comum: a vez
+    muda a cada rodada. As outras redes ficam exatamente onde estavam."""
+    from uuid import uuid4
+
+    tt = _rede(conta="tt", id=uuid4())
+    ig = _rede(plataforma="instagram", conta="ig", id=uuid4())
+    lojas = [_rede(plataforma="shopee", conta=n, id=uuid4()) for n in ("atlas", "atv", "mega")]
+    contas = [tt, lojas[0], ig, lojas[1], lojas[2]]
+
+    primeiras = set()
+    for semente in range(20):
+        monkeypatch.setattr(svc, "_sorteio", _semente(semente))
+        vez = svc._vez_das_contas(contas)
+        assert vez[0] is tt and vez[2] is ig
+        assert sorted(r.conta for r in (vez[1], vez[3], vez[4])) == ["atlas", "atv", "mega"]
+        primeiras.add(vez[1].conta)
+    assert primeiras == {"atlas", "atv", "mega"}, "ninguém é sempre o primeiro"
+
+    monkeypatch.setattr(svc, "_sorteio", _SemSorteio())
+    assert svc._vez_das_contas([tt, ig, lojas[0]]) == [tt, ig, lojas[0]]
+
+
+def _agendar_dublado(monkeypatch):
+    """O `agendar` de verdade da Shopee pede loja, token e anúncio (coberto em
+    test_shopee_video_postagem). Aqui só importa que a postagem nasça."""
+
+    async def agendar(session, *, creative, file, redes, **kw):
+        (rede,) = redes
+        p = MarketingPostagem(
+            creative_id=creative.id, file_id=file.id, rede_social_id=rede.id,
+            plataforma=rede.plataforma, conta=rede.conta, status="pendente",
+            origem=kw.get("origem") or "robo",
+        )
+        session.add(p)
+        await session.commit()
+        return [p]
+
+    monkeypatch.setattr(svc, "agendar", agendar)
+
+
+async def test_rodada_duas_lojas_shopee_nunca_pegam_o_mesmo_video(db, monkeypatch, loja_aceita):
+    from sqlalchemy import select as _sel
+
+    _agendar_dublado(monkeypatch)
+    m = await _uranyx(db)
+    atlas = await _loja_shopee(db, m, "atlas")
+    atv = await _loja_shopee(db, m, "atv")
+    for i in range(2):
+        await _criativo(db, m, nome=f"v{i}", quando=datetime.now(UTC) - timedelta(days=i))
+
+    for semente in range(4):
+        monkeypatch.setattr(svc, "_sorteio", _semente(semente))
+        for p in (await db.execute(_sel(MarketingPostagem))).scalars().all():
+            await db.delete(p)
+        await db.commit()
+        agora = datetime.now(UTC).astimezone(BRT).replace(hour=12, minute=5).astimezone(UTC)
+        assert (await svc.rodada(db, agora=agora))["agendadas"] == 2
+        posts = (await db.execute(_sel(MarketingPostagem))).scalars().all()
+        assert {p.rede_social_id for p in posts} == {atlas.id, atv.id}
+        assert len({p.file_id for p in posts}) == 2, "o mesmo vídeo nunca em duas lojas"
+
+
+async def test_com_um_video_so_quem_tem_a_vez_leva(db, monkeypatch, loja_aceita):
+    from sqlalchemy import select as _sel
+
+    _agendar_dublado(monkeypatch)
+    monkeypatch.setattr(svc, "_sorteio", _Inverte())
+    m = await _uranyx(db)
+    lojas = [await _loja_shopee(db, m, "atlas"), await _loja_shopee(db, m, "atv")]
+    await _criativo(db, m, nome="unico", quando=datetime.now(UTC))
+
+    agora = datetime.now(UTC).astimezone(BRT).replace(hour=12, minute=5).astimezone(UTC)
+    r = await svc.rodada(db, agora=agora)
+    assert r["agendadas"] == 1 and r["sem_criativo"] == 1, r
+    (p,) = (await db.execute(_sel(MarketingPostagem))).scalars().all()
+    # Ordem por id e depois o "embaralho" (aqui: inverter) → vai a de maior id.
+    assert p.rede_social_id == max(lojas, key=lambda x: str(x.id)).id
+
+
+async def test_fora_da_shopee_a_fila_continua_igual_e_sem_sorteio(db, monkeypatch):
+    """TikTok/Instagram/Facebook/YouTube: o mais recente, sem sorteio — e o
+    vídeo que já saiu na Shopee continua valendo nas outras redes."""
+    monkeypatch.setattr(svc, "_sorteio", _SemSorteio())
+    m, r = await _cenario(db)
+    agora = datetime.now(UTC)
+    await _criativo(db, m, nome="antigo", quando=agora - timedelta(days=5))
+    c_nov, f_nov = await _criativo(db, m, nome="novo", quando=agora - timedelta(hours=1))
+    loja = await _loja_shopee(db, m, "atlas", postagem_auto=False)
+    await _postou(db, c_nov, f_nov, loja)
+
+    achado = await svc.proximo_criativo(db, r)
+    assert achado is not None and achado[1].id == f_nov.id
+
+    from sqlalchemy import select as _sel
+
+    quando = datetime.now(UTC).astimezone(BRT).replace(hour=18, minute=30).astimezone(UTC)
+    assert (await svc.rodada(db, agora=quando))["agendadas"] == 1
+    p = (await db.execute(
+        _sel(MarketingPostagem).where(MarketingPostagem.rede_social_id == r.id)
+    )).scalars().one()
+    assert p.file_id == f_nov.id
+
+
+async def test_fila_da_tela_e_o_monte_do_sorteio_na_shopee(db, monkeypatch, loja_aceita):
+    """A tela não pode prometer pra ATLAS o vídeo que já saiu na Atv (nem a
+    cópia dele com o mesmo conteúdo), e marca a conta como sorteio."""
+    from app.routers.marketing_creatives import _item_fila_out
+    from app.services.marketing import shopee_video_anuncio as anuncio
+
+    async def _sem_ffprobe(_caminho):
+        return None
+
+    monkeypatch.setattr(anuncio, "sondar_video", _sem_ffprobe)
+    m = await _uranyx(db)
+    await _loja_shopee(db, m, "atlas")
+    atv = await _loja_shopee(db, m, "atv")
+    ig = _rede(marca_id=m.id, plataforma="instagram", conta="uranyx_br")
+    db.add(ig)
+    await db.commit()
+    agora = datetime.now(UTC)
+    c, f_usado = await _criativo(db, m, nome="usado", quando=agora, sha="abc")
+    await _postou(db, c, f_usado, atv)
+    _c, f_copia = await _criativo(db, m, nome="copia", quando=agora, sha="abc")
+    _c, f_livre = await _criativo(db, m, nome="livre", quando=agora)
+
+    itens = await svc.fila(db, m.id)
+    por = {it.arquivo.id: {x.conta for x in it.pendente_em} for it in itens}
+    assert por[f_usado.id] == {"uranyx_br"}
+    assert por[f_copia.id] == {"uranyx_br"}
+    assert por[f_livre.id] == {"atlas", "atv", "uranyx_br"}
+
+    livre = next(it for it in itens if it.arquivo.id == f_livre.id)
+    saida = {p["conta"]: p.get("sorteio") for p in _item_fila_out(livre, {})["pendente_em"]}
+    assert saida == {"atlas": True, "atv": True, "uranyx_br": None}
+
+
+async def test_shopee_criativo_com_linha_nesta_loja_sai_inteiro_do_sorteio_dela(
+    db, monkeypatch, loja_aceita
+):
+    """Um criativo = um vídeo na Shopee: na loja onde QUALQUER arquivo dele já
+    teve postagem (até cancelada sem upload — uma pessoa disse não ali),
+    nenhum outro arquivo do criativo volta. A tela segue igual. Na outra loja
+    (nada dele tentado lá) e fora da Shopee (por arquivo) nada muda."""
+    from app.services.marketing import shopee_video_anuncio as anuncio
+
+    async def _sem_ffprobe(_caminho):
+        return None
+
+    monkeypatch.setattr(anuncio, "sondar_video", _sem_ffprobe)
+    m = await _uranyx(db)
+    atlas = await _loja_shopee(db, m, "atlas")
+    atv = await _loja_shopee(db, m, "atv")
+    tt = _rede(marca_id=m.id, conta="tt")
+    db.add(tt)
+    await db.commit()
+    agora = datetime.now(UTC)
+    c, v1 = await _criativo(db, m, nome="v1", quando=agora - timedelta(days=2))
+    v2 = await _outro_arquivo(db, c, nome="v2", quando=agora)
+    await _postou(db, c, v1, atlas, status="cancelado")
+    await _postou(db, c, v1, tt, status="cancelado")
+
+    for semente in range(4):
+        assert await _sorteia(db, monkeypatch, atlas, semente) is None, "a v2 é o MESMO vídeo"
+    assert await _sorteia(db, monkeypatch, atv, 0) == v2.id
+    assert (await svc.proximo_criativo(db, tt))[1].id == v2.id, "fora da Shopee: por arquivo"
+
+    por = {it.arquivo.id: {x.conta for x in it.pendente_em} for it in await svc.fila(db, m.id)}
+    assert por[v2.id] == {"atv", "tt"}
+    assert v1.id not in por
+
+
+def test_selo_n_na_fila_ignora_quem_so_espera_conta_de_sorteio():
+    """O "#n na fila" é a ordem da fila FIXA: o sorteio da Shopee ignora a
+    prioridade, então o vídeo que só espera conta de Shopee não ocupa número."""
+    from uuid import uuid4
+
+    loja = _rede(plataforma="shopee", conta="atlas", id=uuid4())
+    tt = _rede(conta="tt", id=uuid4())
+
+    def item(posicao, contas):
+        c = MarketingCreative(id=uuid4(), fila_posicao=posicao)
+        return svc.ItemFila(c, MarketingCreativeFile(id=uuid4(), creative_id=c.id), contas)
+
+    so_shopee, misto, so_tt = item(1, [loja]), item(2, [loja, tt]), item(3, [tt])
+    assert svc.posicoes_efetivas([so_shopee, misto, so_tt]) == {
+        misto.criativo.id: 1,
+        so_tt.criativo.id: 2,
+    }

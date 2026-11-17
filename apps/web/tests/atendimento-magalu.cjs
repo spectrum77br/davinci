@@ -115,6 +115,9 @@ assert.match(erroEnvioLegivel('magalu HTTP 429 too many'), /pediu para esperar/)
 // Os que já existiam não mudaram.
 assert.match(erroEnvioLegivel('sem_pergunta_pendente'), /já foi respondida/)
 assert.match(erroEnvioLegivel('shopee token_http_401'), /reconectada em Integrações/)
+// A Shopee barrou o texto depois de aceitar (16/11/2026: "raspadinha").
+assert.match(erroEnvioLegivel('shopee censored_blacklist'), /Shopee barrou o texto/)
+assert.match(erroEnvioLegivel('shopee blocked'), /Shopee barrou o texto/)
 
 // A conversa: botão do portal, aviso de moderação na caixa, limite com a
 // cópia da tela quando a API não manda, e o canal no painel de observação.

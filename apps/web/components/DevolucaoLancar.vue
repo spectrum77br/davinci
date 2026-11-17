@@ -16,7 +16,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
-  Clock,
   Loader2,
   Plus,
   RotateCcw,
@@ -250,40 +249,6 @@ const MOTIVOS_DEVOLUCAO = [
 
 const TECNICOS = ['SmarPlay', 'Bogota', 'Shark', 'Cybercell', 'Factor', 'Ozarias'] as const
 
-// Abertura automática na plataforma — o que o cartão mostra enquanto não está "enviada".
-const ML_STATUS_ERROS: Record<string, string> = {
-  devolucao_sem_foto: 'aguardando foto — anexe pela câmera',
-  devolucao_motivo_sem_chamado: 'esse motivo não abre chamado (Item Incorreto saiu da lista em 07/09)',
-  return_review_indisponivel: 'ML ainda não liberou a revisão (o pacote precisa constar entregue) — tenta de novo a cada hora',
-  devolucao_sem_claim: 'sem devolução aberta na plataforma pra esse pedido — tenta de novo a cada hora',
-  devolucao_sem_return: 'sem devolução aberta na plataforma pra esse pedido — tenta de novo a cada hora',
-  devolucao_sem_pedido_marketplace: 'linha sem nº do pedido da plataforma',
-  devolucao_prazo_esgotado: 'ficou 45 dias pendente — abrir na mão',
-  devolucao_nao_encontrada: 'lançamento não encontrado',
-  chamado_sem_integracao_ml: 'conta sem integração ML no DaVinci',
-  chamado_sem_integracao_tiktok: 'conta sem integração TikTok no DaVinci',
-  chamado_sem_integracao_shopee: 'conta sem integração Shopee no DaVinci',
-  tiktok_aguardando_pacote: 'TikTok ainda não liberou a recusa (pacote precisa constar enviado/entregue) — tenta a cada hora',
-  tiktok_arbitragem: 'em arbitragem na TikTok — aguardando',
-  tiktok_quick_refund: 'TikTok já reembolsou (quick refund) — só apelação no Seller Center',
-  tiktok_ja_recusada: 'já recusada na TikTok (feita no Seller Center — veja o histórico do chamado)',
-  tiktok_devolucao_encerrada: 'devolução já encerrada na TikTok (reembolsada/decidida) — nada mais a abrir pela API',
-  ml_claim_encerrada: 'reclamação já encerrada no ML — nada mais a abrir pela API (veja o histórico)',
-  tiktok_motivo_indisponivel: 'TikTok não aceita esse motivo nesse estado',
-  // só reembolso (18/09): o lançamento responde o caso que o vigia achou
-  devolucao_sem_video: 'aguardando o vídeo da expedição (Vídeo do envio, aqui na janela, ou o Link envio) — tenta a cada hora',
-  tiktok_reembolso_nao_pendente: 'o pedido de só reembolso já foi decidido na TikTok — veja o desfecho no histórico do chamado',
-  tiktok_reembolso_ja_contestado: 'só reembolso já contestado na TikTok (recusado / em arbitragem) — veja o histórico do chamado',
-  shopee_aguardando_pacote: 'Shopee ainda não liberou a disputa — tenta a cada hora',
-  shopee_ja_contestada: 'já contestada na Shopee (disputa feita no Seller Center — veja o histórico)',
-  shopee_devolucao_encerrada: 'devolução já encerrada na Shopee',
-  shopee_motivo_indisponivel: 'Shopee não oferece esse motivo pra essa devolução',
-  shopee_sem_email: 'sem e-mail do operador pra Shopee (DEVOLUCAO_DISPUTE_EMAIL)',
-  plataforma_sem_api: 'sem API — abrir na mão na plataforma',
-  // chamado encerrado pelo motivo (15/09): o que ainda falta fazer na mão
-  retirar_contestacao: 'chamado encerrado aqui — retire a contestação no painel da plataforma',
-  contestacao_cancelada: 'contestação cancelada (chamado encerrado antes de ela sair)',
-}
 const PLAT_NOME: Record<string, string> = { ml: 'ML', tiktok: 'TikTok', shopee: 'Shopee', amazon: 'Amazon' }
 
 // ── padrão visual da janela (pages/devolucoes-novo.vue) ──────────────────────
@@ -294,7 +259,6 @@ const CAMPO_ERRO = 'border-red-400 ring-1 ring-red-400'
 const CAMPO_LEITURA = 'flex h-8 w-full items-center gap-1 overflow-hidden rounded-md border bg-muted/40 px-2 text-xs'
 const BOTAO = 'rounded-md border px-2.5 py-1.5 text-xs font-semibold hover:bg-muted disabled:opacity-50'
 const BOTAO_PRINCIPAL = 'rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground disabled:opacity-50'
-const TITULO_MIUDO = 'text-[10px] font-semibold uppercase tracking-wide text-muted-foreground'
 const ETIQUETA = 'rounded px-2 py-0.5 text-[11px] font-semibold'
 const COR = {
   ok: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/50 dark:text-emerald-300',
@@ -377,20 +341,6 @@ function prazoDiasLabel(v: string | null | undefined): string {
   if (dias === 0) return 'vence hoje'
   return `vencido há ${-dias}d`
 }
-// Prazo de contestação da plataforma (Shopee/TikTok): urgente = vencido ou < 24 h.
-function contestacaoUrgente(v: string | null | undefined): boolean {
-  if (!v) return false
-  return new Date(v).getTime() - Date.now() < 24 * 3600 * 1000
-}
-function contestacaoLabel(v: string | null | undefined): string {
-  if (!v) return ''
-  const ms = new Date(v).getTime() - Date.now()
-  if (ms < 0) return 'vencido'
-  const h = Math.floor(ms / 3600000)
-  if (h < 24) return `faltam ${h} h`
-  const d = Math.floor(h / 24)
-  return `faltam ${d} dia${d === 1 ? '' : 's'}`
-}
 
 // Texto do campo → número. `null` = vazio; `undefined` = não é número (o cartão
 // não salva — a tela antiga gravava vazio nesse caso e o custo sumia sem aviso).
@@ -410,35 +360,6 @@ function numTexto(v: number | null | undefined): string {
 function platNome(row: DevolutionRow): string {
   const p = (row.chamado_plataforma || 'ml').toLowerCase()
   return PLAT_NOME[p] || p.toUpperCase()
-}
-function mlStatusLabel(row: DevolutionRow): string {
-  const st = row.chamado_ml_status
-  const erro = row.chamado_ml_erro || ''
-  const plat = platNome(row)
-  if (st === 'enviada') {
-    // Chamado encerrado pelo motivo com a contestação já enviada: a plataforma
-    // não tem API pra cancelar — lembra de retirar no painel.
-    if (erro === 'retirar_contestacao') return `${plat}: ${ML_STATUS_ERROS.retirar_contestacao}`
-    return row.chamado_resolvido ? `${plat}: contestação enviada` : `${plat}: aberto`
-  }
-  if (st === 'pendente') return `${plat}: ${ML_STATUS_ERROS[erro] || 'pendente'}`
-  if (st === 'segurada') return `${plat}: segurado pela IA — o motivo não bate (decidir no bloco Chamado)`
-  if (st === 'falhou') return `${plat}: falhou — ${ML_STATUS_ERROS[erro] || erro}`
-  if (st === 'registrada') {
-    if (erro === 'contestacao_cancelada') return `${plat}: ${ML_STATUS_ERROS.contestacao_cancelada}`
-    return plat === 'Amazon' ? 'Amazon: SAFE-T só no Seller Central (sem API) — abrir na mão' : `${plat}: sem API — abrir na mão`
-  }
-  return ''
-}
-function mlStatusClass(row: DevolutionRow): string {
-  const st = row.chamado_ml_status
-  const erro = row.chamado_ml_erro || ''
-  if (st === 'enviada' && erro === 'retirar_contestacao') return 'text-amber-700 dark:text-amber-300 font-medium'
-  if (st === 'enviada') return 'text-emerald-700 dark:text-emerald-300'
-  if (st === 'falhou') return 'text-red-600 dark:text-red-400'
-  if (st === 'registrada' && erro === 'contestacao_cancelada') return 'text-muted-foreground'
-  if (st === 'registrada') return 'text-sky-700 dark:text-sky-300'
-  return 'text-amber-700 dark:text-amber-300'
 }
 // Mensagem ao comprador pedindo a senha (Vinicius 22/09). Shopee pela API e,
 // desde 29/09, TikTok pelo robô do Mac dos robôs. No ML a devolução cancela o
@@ -474,6 +395,11 @@ function senhaClass(row: DevolutionRow): string {
 // ↻ "pedir de novo" (14/10, 294738): o pedido de senha desistiu depois de 3
 // tentativas e não havia como mandar de novo. Só pra `falhou` — a janela
 // fechada da Shopee é regra dela.
+// O pedido de senha que NÃO saiu (precisa de alguém): o resto do andamento não
+// aparece no cartão.
+function senhaComProblema(row: DevolutionRow): boolean {
+  return row.senha_status === 'falhou' || row.senha_status === 'sem_canal'
+}
 function podePedirSenhaDeNovo(row: DevolutionRow): boolean {
   return props.canEdit && row.senha_status === 'falhou' && row.senha_erro !== 'fora_da_janela_shopee'
 }
@@ -517,9 +443,6 @@ function fotoDepoisDaContestacao(row: DevolutionRow, a: DevolucaoAnexo): boolean
   if (!contestacaoJaSaiu(row) || !row.chamado_enviada_at) return false
   if (a.content_type.startsWith('video/') || a.filename === 'video-expedicao.png') return false
   return new Date(a.created_at).getTime() > new Date(row.chamado_enviada_at).getTime()
-}
-function fotosDepois(row: DevolutionRow): number {
-  return (row.anexos || []).filter((a) => fotoDepoisDaContestacao(row, a)).length
 }
 function avisoFotosDepois(row: DevolutionRow): string[] {
   const plat = platNome(row)
@@ -2140,17 +2063,18 @@ onBeforeUnmount(() => {
 // Abre sozinha só a peça que pede ação agora — a primeira que falta lançar — e
 // não dá pra esconder o que a pessoa perderia de vista: estoque que não entrou,
 // erro, salvando, mudança não salva. Pedido de uma peça só fica sempre aberto.
+// 16/11/2026 (Vinicius, de novo): "todos os produtos podem vir na tela fechados,
+// daí se quiser clicamos em mostrar — não precisa vir nenhum aberto": vale também
+// pro pedido de uma peça e pra peça que falta lançar.
 const abertoManual = reactive<Record<string, boolean>>({})
-const recolhivel = computed(() => cartoes.value.length > 1)
+const recolhivel = computed(() => cartoes.value.length > 0)
 function prendeAberto(c: Cartao): boolean {
   if (c.erro || c.ocupado) return true
   return c.salvo ? temMudanca(c) || estoquePendente(c.salvo) : rascunhoMexido(c)
 }
 function aberto(c: Cartao): boolean {
-  if (!recolhivel.value || prendeAberto(c)) return true
-  const manual = abertoManual[c.key]
-  if (manual !== undefined) return manual
-  return !c.salvo && rascunhos.value[0]?.key === c.key
+  if (prendeAberto(c)) return true
+  return abertoManual[c.key] ?? false
 }
 function alternar(c: Cartao) {
   abertoManual[c.key] = !aberto(c)
@@ -2205,7 +2129,16 @@ function linhasParaPrevia() {
     observacao: c.f.observacao || null,
   }))
 }
-defineExpose({ recarregar, temMudancaNaoSalva, ocupado, gravarLink, anexarFotos, removerFoto, linhasParaPrevia })
+// O prazo pra contestar mais próximo entre as peças lançadas (o bloco Chamado
+// mostra uma vez só — antes vinha em vermelho em cada cartão).
+function prazoContestacao(): string | null {
+  const prazos = lancados.value
+    .map((c) => c.salvo?.prazo_contestacao)
+    .filter((v): v is string => !!v)
+    .sort()
+  return prazos[0] || null
+}
+defineExpose({ recarregar, temMudancaNaoSalva, ocupado, gravarLink, anexarFotos, removerFoto, linhasParaPrevia, prazoContestacao })
 </script>
 
 <template>
@@ -2513,48 +2446,20 @@ defineExpose({ recarregar, temMudancaNaoSalva, ocupado, gravarLink, anexarFotos,
           já voltou do técnico: devolver ao estoque ao lançar
         </label>
 
-        <!-- Chamado e senha -->
-        <div v-if="c.salvo" class="space-y-0.5">
-          <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-            <span :class="TITULO_MIUDO">Chamado</span>
-            <a
-              v-if="c.salvo.tem_chamado"
-              :href="`/chamados?search=${encodeURIComponent(c.salvo.pedido_bling || '')}`"
-              target="_blank"
-              rel="noopener"
-              class="inline-flex items-center gap-1 hover:brightness-95 dark:hover:brightness-110"
-              :class="[ETIQUETA, c.salvo.chamado_resolvido ? COR.ok : COR.atencao]"
-              :title="c.salvo.chamado_resolvido ? 'Chamado resolvido — abrir na aba Chamados' : 'Chamado em aberto — abrir na aba Chamados'"
-            >
-              <CheckCircle2 v-if="c.salvo.chamado_resolvido" class="size-3" />
-              <Clock v-else class="size-3" />
-              {{ c.salvo.chamado_numero || 'sim' }}
-            </a>
-            <span v-else class="text-[11px] text-muted-foreground">—</span>
-            <span
-              v-if="c.salvo.prazo_contestacao"
-              class="text-[11px]"
-              :class="contestacaoUrgente(c.salvo.prazo_contestacao) ? 'font-semibold text-red-600 dark:text-red-400' : 'text-muted-foreground'"
-              title="Prazo da plataforma para contestar a devolução"
-            >prazo pra contestar: {{ fmtDateTime(c.salvo.prazo_contestacao) }} · {{ contestacaoLabel(c.salvo.prazo_contestacao) }}</span>
-          </div>
-          <div v-if="c.salvo.chamado_ml_status && mlStatusLabel(c.salvo)" class="text-[11px] leading-tight" :class="mlStatusClass(c.salvo)">{{ mlStatusLabel(c.salvo) }}</div>
-          <!-- As fotos moram em Provas; o aviso de que a contestação já saiu continua aqui, junto do chamado. -->
-          <div v-if="contestacaoJaSaiu(c.salvo)" class="text-[11px] leading-tight text-amber-700 dark:text-amber-400" data-contestacao-saiu>
-            A contestação já saiu{{ contestacaoSaiuEm(c.salvo) }}. Foto anexada agora não vai junto: ela só sai uma vez.
-            <template v-if="fotosDepois(c.salvo)"> {{ fotosDepois(c.salvo) }} foto(s) deste pedido foram anexadas depois e não foram na contestação.</template>
-          </div>
-          <div v-if="c.salvo.senha_status" class="text-[11px] leading-tight" :class="senhaClass(c.salvo)">
-            {{ senhaLabel(c.salvo) }}
-            <button
-              v-if="podePedirSenhaDeNovo(c.salvo)"
-              type="button"
-              class="ml-1 inline-flex items-center rounded border border-current px-1 align-middle text-[10px] font-medium hover:bg-red-50 disabled:opacity-50 dark:hover:bg-red-900/20"
-              :disabled="!!c.ocupado"
-              title="Pedir de novo a senha ao comprador (resolva antes o que impediu, ex.: loja deslogada)"
-              @click="pedirSenhaDeNovo(c)"
-            >{{ c.ocupado === 'senha' ? '…' : '↻ pedir de novo' }}</button>
-          </div>
+        <!-- Chamado (16/11/2026, Vinicius: "tá muito sobrecarregado… pode tirar tudo"):
+             o chamado, o prazo pra contestar e o andamento ficam UMA vez no bloco
+             Chamado da janela. Aqui só o que pede ação nesta peça: o pedido de senha
+             que não saiu. -->
+        <div v-if="c.salvo && senhaComProblema(c.salvo)" class="text-[11px] leading-tight" :class="senhaClass(c.salvo)" data-senha-problema>
+          {{ senhaLabel(c.salvo) }}
+          <button
+            v-if="podePedirSenhaDeNovo(c.salvo)"
+            type="button"
+            class="ml-1 inline-flex items-center rounded border border-current px-1 align-middle text-[10px] font-medium hover:bg-red-50 disabled:opacity-50 dark:hover:bg-red-900/20"
+            :disabled="!!c.ocupado"
+            title="Pedir de novo a senha ao comprador (resolva antes o que impediu, ex.: loja deslogada)"
+            @click="pedirSenhaDeNovo(c)"
+          >{{ c.ocupado === 'senha' ? '…' : '↻ pedir de novo' }}</button>
         </div>
 
         <!-- Erro do cartão + botões -->

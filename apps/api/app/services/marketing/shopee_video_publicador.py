@@ -8,6 +8,11 @@ parou, e a linha volta pra `pendente` ("aguardando a Shopee") até o próximo:
 
     subir → processando → capa → rascunho → postar → publicado
 
+Vídeo que não é H.264 (HEVC do iPhone & cia.) é convertido pelo ffmpeg no
+`subir`, logo antes do upload (decisão de 16/11/2026) — o H.264 sobe como
+sempre subiu. A conversão fica na pasta de trabalho do worker pelo id do
+arquivo: o tique que converteu e ficou sem folga deixa o upload pro próximo.
+
 O progresso mora em `marketing_postagens.opcoes["shopee"]["progresso"]`, e o
 `video_upload_id` vai pro `container_id` ANTES do primeiro byte subir — é a
 mesma regra do Instagram: se o processo morrer no meio, o reconciliador sabe
@@ -44,7 +49,12 @@ pronto fica na Shopee e o "tentar de novo" desta linha só o publica.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
+import os
+import shutil
+import tempfile
+import time
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -66,6 +76,7 @@ from app.models.marketing_postagem import (
 from app.services.marketing import shopee_video_anuncio as anuncio_svc
 from app.services.marketing import shopee_video_conta as conta_svc
 from app.services.marketing.shopee_video import (
+    CODEC_SHOPEE,
     LEGENDA_MAX,
     STATUS_APAGADO,
     STATUS_POSTADO,
@@ -117,6 +128,31 @@ MAX_FALHAS_SEGUIDAS = 5
 # Quantas vezes UMA tentativa pode descartar o upload e subir o arquivo de
 # novo ("avoid uploading the same video multiple times", diz a doc).
 MAX_RESUBIDAS = 1
+
+# Conversão pra H.264 (16/11/2026). O arquivo convertido mora numa pasta de
+# trabalho do worker, com nome FIXO pelo id do arquivo do criativo: o tique
+# que converteu pode ficar sem folga pra subir, e o próximo reaproveita em vez
+# de converter de novo. Sai da pasta quando a postagem termina (publicada,
+# falhou ou revisar) — e a varredura tira o que alguma linha largou ali
+# (cancelada na tela, worker que morreu).
+PASTA_CONVERTIDOS = Path(tempfile.gettempdir()) / "davinci-shopee-h264"
+# Teto do ffmpeg. O tique só COMEÇA a subir (e a converter) com 20 s de sobra
+# nos 600 s do laço do worker; 580 + 300 fica longe do `timeout=1200` do cron
+# — o arq não mata o job no meio. Os HEVC de hoje (1080x1920, até 60 s)
+# convertem em bem menos que isso.
+TIMEOUT_CONVERSAO_S = 300.0
+TIMEOUT_SONDA_AUDIO_S = 20.0
+VALIDADE_CONVERTIDO = timedelta(hours=24)
+# Teto do que sai da conversão: lado menor até 1080 e até 30 quadros/s. Um
+# 4K/60 do iPhone convertido na resolução cheia não cabe nos 300 s com 2
+# threads; 1080p/30 é o que a Shopee mostra de qualquer jeito.
+LADO_MENOR_MAX_CONVERTIDO = 1080
+FPS_MAX_CONVERTIDO = 30
+# Disco livre mínimo pra COMEÇAR uma conversão: o maior entre 2 GB e 3x o
+# original (o H.264 pela metade + o pronto + folga pro resto do servidor). O
+# disco de produção já encheu uma vez (12/11/2026).
+DISCO_MIN_CONVERTER = 2 * 1024**3
+DISCO_FATOR_FONTE = 3
 
 # Ações (o que o worker conta).
 PUBLICADO = "publicado"
@@ -238,6 +274,273 @@ class _PassageiroError(Exception):
     """Não deu pra perguntar agora — o próximo tique tenta de novo."""
 
 
+# ──────────────────────────────────────────── H.264 antes do upload (16/11)
+
+
+class ConversaoError(Exception):
+    """O vídeo não virou H.264: ffmpeg ausente, erro dele, tempo esgotado ou o
+    resultado fora da regra da Shopee. O texto é a frase que vai pra tela."""
+
+
+class PoucoDiscoError(_PassageiroError):
+    """Sem disco livre pra converter AGORA: não converte e a linha espera
+    (`_aguardar` com falha, como os outros passageiros — depois de
+    `MAX_FALHAS_SEGUIDAS` vira `falhou`, sem subir nada)."""
+
+
+def _gb(n: int) -> str:
+    return f"{n / 1024**3:.1f} GB".replace(".", ",")
+
+
+def _conferir_disco(fonte: Path) -> None:
+    """Levanta `PoucoDiscoError` quando a pasta de trabalho não tem o piso
+    livre (`DISCO_MIN_CONVERTER` ou `DISCO_FATOR_FONTE` x o original)."""
+    try:
+        tamanho = fonte.stat().st_size
+    except OSError:
+        tamanho = 0
+    piso = max(DISCO_MIN_CONVERTER, DISCO_FATOR_FONTE * tamanho)
+    try:
+        livre = shutil.disk_usage(PASTA_CONVERTIDOS).free
+    except OSError as e:
+        raise PoucoDiscoError(
+            f"não deu pra medir o disco livre pra converter ({type(e).__name__})"
+        ) from None
+    if livre < piso:
+        logger.warning("shopee_video_conversao_sem_disco", livre=livre, piso=piso)
+        raise PoucoDiscoError(
+            f"pouco disco pra converter o vídeo para H.264 ({_gb(livre)} livres, "
+            f"precisa de {_gb(piso)}) — tenta de novo no próximo ciclo"
+        )
+
+
+PIX_FMT_DIRETO = {"yuv420p", "yuvj420p"}
+
+
+def precisa_converter(info: anuncio_svc.InfoVideo) -> bool:
+    """O que NÃO é H.264, e o H.264 fora do 4:2:0 de 8 bits.
+
+    O H.264 4:2:0 sobe exatamente como antes, sem ffmpeg. O H.264 4:4:4
+    (perfil High 4:4:4 — 4 aprovados da Uranyx em 16/11/2026) a maioria dos
+    players não toca, e na Shopee o post não se edita depois: passa pela
+    mesma conversão. pix_fmt None (ffprobe não disse) = sobe como sempre.
+    """
+    if (info.codec or "") != CODEC_SHOPEE:
+        return True
+    return info.pix_fmt is not None and info.pix_fmt not in PIX_FMT_DIRETO
+
+
+def caminho_convertido(chave: UUID) -> Path:
+    return PASTA_CONVERTIDOS / f"{chave}.mp4"
+
+
+def _parcial(chave: UUID) -> Path:
+    # O ffmpeg escreve aqui e só no fim o arquivo ganha o nome definitivo: um
+    # ffmpeg morto no meio nunca deixa um MP4 cortado pro próximo tique subir.
+    return PASTA_CONVERTIDOS / f"{chave}.parcial.mp4"
+
+
+def apagar_convertido(chave: UUID | None) -> None:
+    """Tira da pasta de trabalho o H.264 deste arquivo. Nunca levanta."""
+    if chave is None:
+        return
+    for arq in (caminho_convertido(chave), _parcial(chave)):
+        try:
+            arq.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning(
+                "shopee_video_convertido_apagar_falhou", arquivo=arq.name, err=type(e).__name__
+            )
+
+
+def _varrer_velhos() -> None:
+    """Apaga o que ficou esquecido na pasta há mais de 24 h (linha cancelada
+    na tela, worker morto antes do desfecho): o disco do servidor já encheu
+    uma vez. Roda a cada visita de linha (`publicar_postagem`). Nunca levanta."""
+    limite = time.time() - VALIDADE_CONVERTIDO.total_seconds()
+    try:
+        arquivos = list(PASTA_CONVERTIDOS.iterdir())
+    except OSError:
+        return
+    for arq in arquivos:
+        with contextlib.suppress(OSError):
+            if arq.stat().st_mtime < limite:
+                arq.unlink(missing_ok=True)
+
+
+def _mais_novo(convertido: Path, fonte: Path) -> bool:
+    try:
+        return convertido.stat().st_mtime >= fonte.stat().st_mtime
+    except OSError:
+        return False
+
+
+# Argumentos agrupados por opção (fora do ruff format), como no
+# `sites_midia_derivados`: é assim que se confere com a regra combinada.
+# fmt: off
+def filtro_convertido() -> str:
+    """Lado menor até 1080 (sem aumentar o menor, mantendo a proporção e as
+    dimensões pares que o yuv420p exige) e até 30 quadros/s (o de 24/25/30
+    fica como está). Os `iw`/`ih` já vêm girados pelo autorrotate do ffmpeg."""
+    lado, fps = LADO_MENOR_MAX_CONVERTIDO, FPS_MAX_CONVERTIDO
+    return (
+        f"scale=w='if(gt(iw,ih),-2,trunc(min(iw,{lado})/2)*2)'"
+        f":h='if(gt(iw,ih),trunc(min(ih,{lado})/2)*2,-2)',"
+        f"fps=fps='min(source_fps,{fps})'"
+    )
+
+
+def cmd_converter(fonte: Path, destino: Path, *, copiar_audio: bool) -> list[str]:
+    """H.264 (libx264, veryfast, CRF 20, yuv420p) com a mesma duração, lado
+    menor até 1080 e até 30 fps (`filtro_convertido`); áudio AAC copiado
+    quando já é AAC (sem comprimir de novo), senão AAC 128k.
+
+    Pé leve na CPU: o servidor tem 4 vCPU divididos com a API. `nice`, 1
+    thread no decodificador (`-threads 1` antes do `-i`) e no filtro
+    (`-filter_threads 1`), e o x264 com 2 threads de codificação e 1 de
+    lookahead. Não é "2 threads" no total: o ffmpeg 7+ ainda abre uma thread
+    por etapa (leitura, decodificação, filtro, codificação, gravação).
+
+    Medido em 16/11/2026 (fora do servidor: ffmpeg 9 num Mac de 10 núcleos,
+    HEVC sintético; o servidor tem o 7.1): sem teto nenhum, ~48 threads e ~8
+    núcleos. Com estes tetos, 9 threads; o 1080x1920/30 fps usa ~2,7 núcleos
+    em média — quem pesa é o x264, o mesmo que o "-threads 2" de antes (que
+    abria 12 threads) — e o 4K/60 cai de ~2,7 pra ~1,8 núcleo, ~40% mais
+    lento (10 s de vídeo em 11 s: o decodificador numa thread vira o
+    gargalo)."""
+    audio = ["-c:a", "copy"] if copiar_audio else ["-c:a", "aac", "-b:a", "128k"]
+    return [
+        "nice", "-n", "10",
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+        "-filter_threads", "1",
+        "-threads", "1", "-i", str(fonte),
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", filtro_convertido(),
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-threads", "2", "-x264-params", "threads=2:lookahead-threads=1",
+        *audio,
+        "-movflags", "+faststart", "-f", "mp4", str(destino),
+    ]
+
+
+def _cmd_audio(fonte: Path) -> list[str]:
+    return ["ffprobe", "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(fonte)]
+# fmt: on
+
+
+async def _rodar(cmd: list[str], timeout: float) -> tuple[int, bytes, bytes]:
+    """Roda sem shell, com teto. Estourou: mata o processo e levanta
+    `TimeoutError`; job cancelado pelo arq também mata — ffmpeg órfão girando
+    no worker não. Binário ausente: `OSError`."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
+        raise
+    except asyncio.CancelledError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        raise
+    return (proc.returncode if proc.returncode is not None else -1), out or b"", err or b""
+
+
+async def _audio_aac(fonte: Path) -> bool:
+    """O áudio já é AAC (todos os HEVC aprovados em 16/11)? Qualquer dúvida
+    = False: comprimir em AAC serve sempre, só custa uma geração a mais."""
+    try:
+        rc, out, _err = await _rodar(_cmd_audio(fonte), TIMEOUT_SONDA_AUDIO_S)
+    except (OSError, TimeoutError):
+        return False
+    return rc == 0 and out.decode("utf-8", "replace").strip().lower() == "aac"
+
+
+async def _conferir_convertido(arquivo: Path) -> tuple[anuncio_svc.InfoVideo, int] | str:
+    """As MESMAS guardas do original (3–60 s, 720p+, até 1 GB) no arquivo que
+    vai subir, e H.264 de fato. Devolve (retrato, tamanho) ou o motivo."""
+    info = await anuncio_svc.sondar_video(arquivo)
+    try:
+        tamanho = arquivo.stat().st_size
+    except OSError:
+        return anuncio_svc.ILEGIVEL
+    motivo = anuncio_svc.motivo_do_formato(info, tamanho)
+    if motivo:
+        return motivo
+    if info is None or info.codec != CODEC_SHOPEE:
+        return anuncio_svc.FORMATO
+    return info, tamanho
+
+
+async def convertido_para_shopee(
+    chave: UUID, fonte: Path, *, timeout_s: float = TIMEOUT_CONVERSAO_S
+) -> tuple[Path, anuncio_svc.InfoVideo, int]:
+    """O vídeo em H.264 pra subir: (arquivo, retrato, tamanho).
+
+    `chave` é o id do arquivo do criativo: o convertido de um tique anterior
+    (mais novo que a fonte e ainda dentro da regra) é reaproveitado sem
+    rodar o ffmpeg. Levanta `ConversaoError` com a frase pra tela.
+    """
+    destino = caminho_convertido(chave)
+    if _mais_novo(destino, fonte):
+        conferido = await _conferir_convertido(destino)
+        if not isinstance(conferido, str):
+            logger.info("shopee_video_convertido_reaproveitado", arquivo=destino.name)
+            return destino, *conferido
+        # Sobrou um convertido que não serve: converte de novo por cima.
+    try:
+        PASTA_CONVERTIDOS.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise ConversaoError(f"sem pasta de trabalho para converter ({type(e).__name__})") from None
+    # Sem o piso livre nem começa (`PoucoDiscoError`, a linha espera). A
+    # varredura dos esquecidos já rodou na visita da linha (`publicar_postagem`).
+    _conferir_disco(fonte)
+    parcial = _parcial(chave)
+    copiar_audio = await _audio_aac(fonte)
+    comeco = time.monotonic()
+    try:
+        cmd = cmd_converter(fonte, parcial, copiar_audio=copiar_audio)
+        try:
+            rc, _out, err = await _rodar(cmd, timeout_s)
+        except TimeoutError:
+            # ANTES do OSError: no Python, TimeoutError é filho de OSError.
+            logger.warning("shopee_video_conversao_estourou", arquivo=destino.name)
+            raise ConversaoError(
+                f"a conversão para H.264 passou de {timeout_s:g} s e foi interrompida"
+            ) from None
+        except OSError:
+            raise ConversaoError("o ffmpeg não está instalado no servidor") from None
+        if rc == 127:  # o `nice` não achou o ffmpeg
+            raise ConversaoError("o ffmpeg não está instalado no servidor")
+        if rc != 0:
+            linhas = err.decode("utf-8", "replace").strip().splitlines()
+            ultima = (linhas[-1] if linhas else "sem mensagem")[-160:]
+            logger.warning("shopee_video_conversao_falhou", arquivo=destino.name, rc=rc, err=ultima)
+            raise ConversaoError(f"o ffmpeg não converteu o vídeo para H.264 ({ultima})")
+        os.replace(parcial, destino)
+    finally:
+        with contextlib.suppress(OSError):
+            parcial.unlink(missing_ok=True)
+    conferido = await _conferir_convertido(destino)
+    if isinstance(conferido, str):
+        apagar_convertido(chave)
+        raise ConversaoError(f"o vídeo convertido para H.264 não serve pra Shopee ({conferido})")
+    logger.info(
+        "shopee_video_convertido",
+        arquivo=destino.name,
+        segundos=round(time.monotonic() - comeco, 1),
+        audio="copiado" if copiar_audio else "aac",
+    )
+    return destino, *conferido
+
+
 class _Linha:
     """O retrato da postagem que a máquina carrega e regrava a cada passo.
 
@@ -256,6 +559,8 @@ class _Linha:
         self.legenda: str = p.legenda or ""
         self.rede_social_id: UUID | None = p.rede_social_id
         self.creative_id: UUID = p.creative_id
+        # A chave do H.264 convertido (quando o original é HEVC & cia.).
+        self.file_id: UUID = p.file_id
         self.conta: str = p.conta or "conta sem @"
         self.attempts: int = p.attempts or 0
         self.status_lido: str = p.status
@@ -311,6 +616,7 @@ async def _publicado(ln: _Linha, post_id: str, *, texto: str) -> str:
         completed_at=agora,
         result=texto[:2000],
     )
+    apagar_convertido(ln.file_id)
     if ln.rede_social_id:
         await conta_svc.registrar_saude(ln.rede_social_id, erro=None)
     logger.info("shopee_video_publicado", postagem=str(ln.id))
@@ -404,6 +710,9 @@ async def _falhou(ln: _Linha, texto: str, *, manter_rascunho: bool = False) -> s
         attempts=ln.attempts + 1,
         result=f"Shopee: {texto}"[:2000],
     )
+    # O "tentar de novo" ou sobe do zero (e converte de novo) ou só publica
+    # o rascunho que ficou na Shopee: o H.264 daqui não serve a nenhum dos dois.
+    apagar_convertido(ln.file_id)
     if tem_rascunho and not manter:
         await _apagar_rascunho(ln, str(vid))
     if ln.rede_social_id:
@@ -423,6 +732,9 @@ async def _revisar(ln: _Linha, texto: str) -> str:
             "na Shopee sozinho; se ele não resolver, confira a loja antes de qualquer coisa."
         )[:2000],
     )
+    # `revisar` só existe com o upload feito (o post pode ter saído): daqui
+    # em diante ninguém sobe este arquivo de novo.
+    apagar_convertido(ln.file_id)
     logger.warning("shopee_video_revisar", postagem=str(ln.id))
     return REVISAR
 
@@ -442,6 +754,10 @@ async def publicar_postagem(
 
     Devolve a ação: publicado | aguardando | falhou | revisar.
     """
+    # A cada visita de linha, não só quando uma conversão nova começa: o H.264
+    # largado por uma linha cancelada na tela (ou por um worker morto) sai em
+    # até 24 h mesmo que nenhum outro HEVC apareça.
+    _varrer_velhos()
     p = await session.get(MarketingPostagem, postagem_id, populate_existing=True)
     if p is None or p.status != STATUS_PUBLICANDO:
         return AGUARDANDO
@@ -620,8 +936,27 @@ async def _avancar(
                     return await _falhou(
                         ln, f"o vídeo não serve pra Shopee ({motivo or 'ilegível'})"
                     )
+                envio, nome_envio = caminho, caminho.name
+                if precisa_converter(info):
+                    # HEVC & cia. (Eduardo, 16/11/2026): a Shopee só aceita
+                    # H.264, então sobe a conversão — com as guardas de
+                    # duração/tamanho refeitas nela. Falha ou tempo esgotado
+                    # fecha a linha com a frase; nada subiu ainda. Pouco disco
+                    # (`PoucoDiscoError`) não converte e espera, como os
+                    # outros passageiros.
+                    try:
+                        envio, info, tamanho = await convertido_para_shopee(ln.file_id, caminho)
+                    except ConversaoError as e:
+                        return await _falhou(ln, f"{e}; nada foi publicado")
+                    nome_envio = f"{caminho.stem}.mp4"
+                    if sobra() < MIN_SOBRA_SUBIR_S:
+                        # A conversão comeu o ciclo: o upload fica pro próximo
+                        # tique, que acha o H.264 pronto na pasta.
+                        return await _aguardar(
+                            ln, "vídeo convertido para H.264 — sobe no próximo ciclo"
+                        )
                 vid, parte = await cliente.iniciar_upload(
-                    file_name=caminho.name,
+                    file_name=nome_envio,
                     file_size=tamanho,
                     duracao_s=max(1, math.ceil(info.duracao or 1)),
                 )
@@ -631,7 +966,7 @@ async def _avancar(
                 # ANTES do primeiro byte: se o processo morrer daqui pra
                 # frente, a linha diz que havia upload em voo.
                 await ln.salvar(container_id=vid)
-                for seq, conteudo in partes_do_arquivo(caminho, parte):
+                for seq, conteudo in partes_do_arquivo(envio, parte):
                     try:
                         await cliente.enviar_parte(vid, seq, conteudo)
                     except ShopeeVideoError as e:

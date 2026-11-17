@@ -1961,8 +1961,9 @@ await load()
               {{ modal.rede.token_erro }}
             </p>
             <p v-if="redeDeLoja" class="text-[11px] text-muted-foreground">
-              Shopee Vídeo: só sai vídeo aprovado, de 3 a 60 s, 720p ou mais (H.264), vinculado ao anúncio avulso
-              do aparelho nesta loja, ativo e com estoque — o vídeo sem anúncio aqui é pulado. A legenda sai curta
+              Shopee Vídeo: só sai vídeo aprovado, de 3 a 60 s, 720p ou mais (outro codec, como o HEVC do iPhone, é
+              convertido pra H.264 sozinho; HDR fica de fora), vinculado ao anúncio do aparelho nesta loja (avulso ou
+              kit com acessório), ativo e com estoque — o vídeo sem anúncio aqui é pulado. A legenda sai curta
               (até 150, sem WhatsApp) e com o selo de conteúdo feito por IA.
             </p>
 

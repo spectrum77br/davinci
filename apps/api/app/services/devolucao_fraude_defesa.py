@@ -19,8 +19,6 @@ do pedido conferido, embalado e lacrado antes do envio), sem inventar detalhe.
 
 from __future__ import annotations
 
-import re
-import unicodedata
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -39,39 +37,16 @@ MAX_CHARS_DEFESA = 150
 MAX_CHARS_RESUMO = 140
 MAX_CHARS_PESSOA = 300
 
-# Trava que não depende da IA (a mesma da 1ª versão do robô): o motivo padronizado
-# de dano/defeito/"diferente do anúncio" fica com a pessoa — o vídeo da embalagem
-# não mostra como o produto chegou e a plataforma pede foto do dano.
-_SHOPEE_PESSOA = {"PHYSICAL_DMG", "FUNCTIONAL_DMG", "NOT_AS_DESCRIBED"}
-_DANO = re.compile(
-    r"danific|quebrad|defeit|nao funciona|damag|broken|defect|not work|anuncio|descri"
-)
-
-
-def _sem_acento(s: str) -> str:
-    return "".join(
-        c for c in unicodedata.normalize("NFKD", s.lower()) if not unicodedata.combining(c)
-    )
-
-
-def codigo_e_de_pessoa(plataforma: str, codigo: str | None) -> bool:
-    """O motivo padronizado da plataforma já diz que é dano/defeito. PURA."""
-    cod = (codigo or "").strip()
-    if not cod:
-        return False
-    if plataforma.lower().startswith("shopee"):
-        return cod.upper() in _SHOPEE_PESSOA
-    return bool(_DANO.search(_sem_acento(cod)))
-
-
-# O que o comprador alega → o motivo do lançamento. Danificado/defeito e o que não
-# se entende ficam com a pessoa: o vídeo da embalagem não mostra como o produto
-# chegou, e a plataforma pede foto do dano.
+# O que o comprador alega → o motivo do lançamento. 16/11/2026 (Vinicius, 307238 —
+# "O item não corresponde à descrição"): "teria que responder já, mostrando vídeo e
+# falando que enviamos certinho" — diferente do anúncio e dano/defeito também
+# viram defesa com o vídeo. Só o que não se entende fica com a pessoa.
 ALEGACOES: dict[str, str | None] = {
     "vazio_ou_outro_produto": "Golpe",
     "faltou_item": "Item faltando",
     "nao_recebeu": "Não recebido",
-    "danificado_ou_defeito": None,
+    "diferente_do_anuncio": "Golpe",
+    "danificado_ou_defeito": "Danificado (Outros)",
     "outra": None,
 }
 
@@ -95,26 +70,32 @@ Responda:
 qualquer no lugar do que comprou (sabonete, pedra, papel, outro aparelho…).
    - faltou_item: recebeu o pedido, mas faltou uma peça, acessório ou unidade.
    - nao_recebeu: diz que o pedido não chegou.
+   - diferente_do_anuncio: diz que o produto não corresponde à descrição/ao anúncio (modelo, \
+cor, tamanho, características diferentes).
    - danificado_ou_defeito: chegou quebrado, amassado, riscado, não liga, com defeito.
-   - outra: arrependimento, "diferente do anúncio" sem dizer o quê, cor/tamanho diferente, \
-ou não dá para entender.
+   - outra: arrependimento, desistência, ou não dá para entender o que alega.
    Quando o motivo padronizado e o texto do comprador não combinam, vale o texto; se ainda \
 assim houver dúvida, escolha "outra".
+   Se a entrada trouxer uma INSTRUÇÃO da equipe, siga-a: ela manda contestar e diz o que \
+defender. Escolha em alegacao a opção que melhor corresponde ao que a instrução manda \
+contestar ("outra" só se nem a instrução der pra entender) e use o que ela diz na defesa.
 2. resumo_alegacao — o que o comprador alega, em português simples, numa frase curta.
 3. defesa — o trecho que a plataforma vai ler no meio do texto da loja (o sistema já põe a \
 identificação do pedido, a entrega, o link do vídeo e o pedido final). Regras:
    - Português do Brasil, educado e firme, primeira pessoa do plural ("enviamos").
    - Diga em poucas palavras o que o comprador alega e o que o vídeo da embalagem mostra: o \
-produto do pedido sendo conferido, embalado e lacrado antes do envio.
+produto do pedido sendo conferido, embalado e lacrado antes do envio. Diferente do anúncio: \
+enviamos exatamente o produto anunciado no pedido. Dano/defeito: o produto saiu conferido e \
+em perfeito estado, bem embalado.
    - NUNCA fale em devolução, pacote de volta ou "não recebemos": neste caso nada volta.
    - Você não assiste ao vídeo: não descreva cor, horário, peso ou detalhe que não está na \
 entrada. Use só fatos da entrada; não invente datas nem números.
    - Sem dados pessoais do comprador, sem link e SEM o pedido final ("pedimos que…").
    - No máximo 150 caracteres.
-4. precisa_pessoa — false quando a loja pode se defender sozinha com o vídeo; true quando: a \
-alegação é danificado_ou_defeito ou outra; o comprador diz que não recebeu e a entrega não está \
-confirmada; a entrega NÃO aconteceu (extravio — o caso é pedir compensação, não contestar); ou a \
-alegação e os fatos não batem.
+4. precisa_pessoa — false quando a loja pode se defender sozinha com o vídeo (vazio, outro \
+produto, faltou item, diferente do anúncio, dano/defeito); true quando: a alegação é outra; o \
+comprador diz que não recebeu e a entrega não está confirmada; a entrega NÃO aconteceu \
+(extravio — o caso é pedir compensação, não contestar); ou a alegação e os fatos não batem.
 5. por_que — quando precisa_pessoa é true, por que uma pessoa precisa olhar (uma frase curta); \
 senão, vazio."""
 
@@ -173,6 +154,9 @@ class Fatos:
     transportadora: str = ""
     comprador_mandou_prova: bool | None = None
     prazo: str = ""  # "18/11 14:00" (até quando a plataforma espera a resposta)
+    # "Abrir chamado: Sim" + "Instrução IA" da equipe (16/11/2026): vale mais que a
+    # leitura da IA — pode mandar contestar o que ela deixaria pra pessoa.
+    instrucao: str = ""
 
 
 _SITUACAO_PT = {
@@ -207,6 +191,8 @@ def entrada(f: Fatos) -> str:
         f"Entrega do pedido: {entrega}",
         "Vídeo da embalagem: temos (o link vai junto do texto)",
     ]
+    if (f.instrucao or "").strip():
+        linhas.append(f'INSTRUÇÃO da equipe: "{_limpo(f.instrucao, 1200)}"')
     return "\n".join(linhas)
 
 
@@ -286,7 +272,6 @@ class Decisao:
 NAO_RECEBEU_SEM_ENTREGA = (
     "o comprador diz que não recebeu e a entrega do pedido não está confirmada"
 )
-_DANO_PESSOA = "o motivo que o comprador escolheu é dano/defeito — o vídeo da embalagem não rebate"
 
 
 def decidir(f: Fatos, r: Resposta | None) -> Decisao:
@@ -300,8 +285,6 @@ def decidir(f: Fatos, r: Resposta | None) -> Decisao:
             resumo=resumo,
             pessoa="a entrega do pedido NÃO aconteceu (extravio: pedir compensação, não contestar)",
         )
-    if codigo_e_de_pessoa(f.plataforma, f.codigo):
-        return Decisao(resumo=resumo, pessoa=_DANO_PESSOA)
     por_que = _limpo(r.por_que, MAX_CHARS_PESSOA)
     if motivo is None:
         return Decisao(
@@ -323,7 +306,7 @@ async def analisar(f: Fatos, pergunta: Perguntar | None = None) -> Decisao:
     falha), nem pergunta: tenta de novo na próxima rodada."""
     if not (f.codigo or "").strip() and not (f.texto or "").strip():
         return Decisao()
-    if codigo_e_de_pessoa(f.plataforma, f.codigo) or f.ida_entregue is False:
+    if f.ida_entregue is False:
         # Já se sabe que é da pessoa: a IA só daria o resumo.
         return decidir(f, Resposta(alegacao="outra", resumo_alegacao=_limpo(f.texto, 140)))
     r, _modelo = await (pergunta or perguntar)(entrada(f))

@@ -21,6 +21,15 @@ fura a fila (o menor primeiro) e só depois vem o resto, do mais recente pro
 mais antigo. A ordem mora em `ordem_da_fila()`, que o robô e a tela "Fila do
 robô" usam juntos — a tela não pode mostrar uma ordem e o robô seguir outra.
 
+SHOPEE VÍDEO É SORTEIO (Eduardo, 16/11/2026). As lojas de celular (ATLAS,
+Atv, Mega — todas Uranyx) tiram do MESMO monte de vídeos aprovados, e um vídeo
+só pode sair UMA vez na Shopee, em qualquer loja. Com a fila fixa, todas as
+lojas disputavam os mesmos vídeos mais recentes, na mesma ordem, e o acervo
+antigo só sairia quando a produção parasse. Lá o robô SORTEIA
+(`proximo_criativo`) — sorteio PURO no monte inteiro, por criativo ("randomiza";
+`fila_posicao` não vale na Shopee) — e as lojas trocam de vez a cada rodada.
+Nas outras redes nada muda.
+
 ELE AGENDA, NÃO PUBLICA. Cria a postagem em `agendado`, que aparece na tela e
 dá pra cancelar antes de sair; o publicador que já existe faz o resto. Duas
 razões: nada acontece invisível, e a lógica de publicar não vira duas cópias
@@ -35,6 +44,7 @@ intervalo, nada em voo pro mesmo vídeo. Um robô que pula as guardas do humano
 from __future__ import annotations
 
 import asyncio
+import random
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
@@ -69,6 +79,11 @@ from app.services.marketing.shopee_video_anuncio import (
 from app.services.marketing.shopee_video_anuncio import motivo_do_video_na_loja
 
 logger = structlog.get_logger()
+
+# O sorteio da Shopee Vídeo. `SystemRandom` porque não há semente pra guardar
+# nem pra reproduzir: o worker reiniciado não repete a mesma sequência de
+# vídeos. Os testes trocam este objeto por um `random.Random(semente)`.
+_sorteio: random.Random = random.SystemRandom()
 
 
 async def contas_ligadas(
@@ -188,6 +203,51 @@ def _candidatos(marca_id: UUID) -> list:
     ]
 
 
+def por_sorteio(rede: RedeSocial) -> bool:
+    """A conta tira o vídeo por SORTEIO (Shopee Vídeo) em vez da fila fixa.
+
+    Eduardo, 16/11/2026: as lojas de celular da Uranyx dividem o mesmo acervo
+    e o vídeo não pode repetir na Shopee — na ordem fixa todas disputavam os
+    mesmos vídeos mais recentes. Nas outras redes a fila continua valendo.
+    """
+    return (rede.plataforma or "").strip().lower() == PLATAFORMA_SHOPEE
+
+
+def _ja_na_shopee():
+    """Condição SQL: o vídeo deste arquivo já está (ou pode estar) em alguma
+    conta de Shopee Vídeo — correlacionada com o `MarketingCreativeFile` da
+    consulta de fora.
+
+    "Nunca o mesmo vídeo duas vezes na Shopee" (Eduardo, 16/11/2026) vale pra
+    TODAS as contas: outra loja, a própria loja e loja já apagada. A regra
+    (mesmo arquivo, mesmo `sha256` não vazio ou mesmo CRIATIVO; em voo, no ar,
+    em dúvida ou com upload/post feito) mora em `shopee_video_anuncio.
+    ja_na_shopee` — a MESMA que a conferência por loja usa, pra o sorteio e o
+    `agendar` nunca discordarem. Na PRÓPRIA conta, cancelado/falhou sem upload
+    já tiram o criativo inteiro da vez pelo `saiu` do `proximo_criativo`.
+
+    `NOT EXISTS` e não `NOT IN`: com `NOT IN`, um único NULL na subconsulta
+    faz a condição valer NULL pra todo mundo e a fila inteira some calada.
+    """
+    return _anuncio_shopee.ja_na_shopee(
+        MarketingCreativeFile.id, MarketingCreativeFile.creative_id, MarketingCreativeFile.sha256
+    )
+
+
+# Recusas da conferência por loja que são do ARQUIVO (outro arquivo do mesmo
+# criativo pode servir). As outras (anúncio, SKU, já na Shopee) valem pro
+# criativo inteiro: o sorteio passa direto pro próximo criativo.
+_MOTIVOS_DO_ARQUIVO_SHOPEE = frozenset(
+    {
+        _anuncio_shopee.FORA_DA_DURACAO,
+        _anuncio_shopee.RESOLUCAO_BAIXA,
+        _anuncio_shopee.FORMATO,
+        _anuncio_shopee.ILEGIVEL,
+        _anuncio_shopee.GRANDE_DEMAIS,
+    }
+)
+
+
 async def proximo_criativo(
     session: AsyncSession,
     rede: RedeSocial,
@@ -210,6 +270,11 @@ async def proximo_criativo(
 
     `excluir` são arquivos que a rodada já viu serem recusados NESTA conta
     por motivo do próprio vídeo (ver `MOTIVOS_DO_VIDEO`): pula pro seguinte.
+
+    Na Shopee Vídeo não é "o primeiro": é SORTEIO puro, por criativo, que
+    ignora `fila_posicao` (ver `por_sorteio`); lá "já saiu nesta conta" é por
+    CRIATIVO (qualquer arquivo dele com postagem nesta loja tira todos) e
+    `excluir` tira o criativo inteiro do arquivo recusado.
     """
     if rede.marca_id is None:
         return None
@@ -233,32 +298,85 @@ async def proximo_criativo(
     #
     # Retomar o que falhou é decisão de gente, no botão de retentar, que sabe
     # conferir a conta antes. O robô só propõe o que nunca foi tentado.
-    saiu = select(MarketingPostagem.file_id).where(
-        MarketingPostagem.rede_social_id == rede.id
-    )
-    filtros = [*_candidatos(rede.marca_id), MarketingCreativeFile.id.notin_(saiu)]
-    if excluir:
+    #
+    # Na Shopee Vídeo o "já tentado aqui" é por CRIATIVO (um criativo = um
+    # vídeo lá): o "não" que uma pessoa deu à v1 nesta loja vale pra v2, que é
+    # o mesmo vídeo. Nas outras redes cada arquivo é uma publicação diferente.
+    if por_sorteio(rede):
+        saiu = MarketingCreative.id.notin_(
+            select(MarketingPostagem.creative_id).where(
+                MarketingPostagem.rede_social_id == rede.id
+            )
+        )
+    else:
+        saiu = MarketingCreativeFile.id.notin_(
+            select(MarketingPostagem.file_id).where(MarketingPostagem.rede_social_id == rede.id)
+        )
+    filtros = [*_candidatos(rede.marca_id), saiu]
+    if excluir and not por_sorteio(rede):
         filtros.append(MarketingCreativeFile.id.notin_(list(excluir)))
     stmt = (
         select(MarketingCreative, MarketingCreativeFile)
         .join(MarketingCreativeFile, MarketingCreativeFile.creative_id == MarketingCreative.id)
         .where(*filtros)
-        .order_by(*ordem_da_fila())
     )
-    if (rede.plataforma or "").strip().lower() == PLATAFORMA_SHOPEE:
-        # Shopee Vídeo: boa parte da fila NÃO serve pra loja (sem anúncio
-        # avulso dela, SKU que cai em dois anúncios, HEVC, abaixo de 720p).
-        # Pular um por rodada esbarraria sempre nos mesmos 5 primeiros
-        # (`MAX_PULOS_POR_CONTA`) e o robô nunca chegaria a um vídeo bom. Aqui
-        # a fila é percorrida em ordem e sai o PRIMEIRO que a loja aceita —
-        # mesma função que o `agendar` roda, então não há dois critérios.
-        for criativo, arquivo in (await session.execute(stmt.limit(200))).all():
-            if motivo_do_arquivo(arquivo):
-                continue
-            if await motivo_do_video_na_loja(session, criativo, arquivo, rede) is None:
-                return criativo, arquivo
+    if por_sorteio(rede):
+        # Shopee Vídeo (Eduardo, 16/11/2026): SORTEIO entre os aprovados da
+        # marca que nunca saíram na Shopee — em loja NENHUMA (`_ja_na_shopee`).
+        # Esse corte vai no SQL, antes das conferências por vídeo: cada uma
+        # custa consulta de anúncio e ffprobe, e o acervo já usado só cresce.
+        #
+        # O monte é a lista INTEIRA (sem `limit`): cortar em 200 pela data e
+        # sortear dentro deixaria o vídeo antigo fora do sorteio pra sempre —
+        # o vício que o sorteio veio tirar. A ordem do SQL é fixa (criativo
+        # pelo id; dentro dele, o arquivo mais novo primeiro), pra o embaralho
+        # ser reproduzível com semente nos testes; quem decide é o `_sorteio`
+        # (e não `ORDER BY random()`, que não dá pra semear).
+        #
+        # Sorteio PURO ("randomiza"): `fila_posicao` não vale aqui — nenhum
+        # grupo sai antes do resto. E o sorteio é por CRIATIVO, não por
+        # arquivo: um criativo = um vídeo na Shopee, e o criativo com três
+        # arquivos não pode ter três vezes a chance do de um. Sorteado o
+        # criativo, vai o arquivo MAIS NOVO dele que a loja aceita (a versão
+        # que substituiu as antigas; a antiga só se a nova não serve, ex.:
+        # formato).
+        #
+        # Boa parte do monte não serve pra ESTA loja (sem anúncio dela, SKU
+        # que cai em dois anúncios, formato): sai o primeiro, na ordem
+        # sorteada, que a loja aceita — mesma função que o `agendar` roda,
+        # então não há dois critérios. Pular um por rodada esbarraria no teto
+        # de pulos (`MAX_PULOS_POR_CONTA`) antes de chegar a um vídeo bom.
+        linhas = (
+            await session.execute(
+                stmt.where(~_ja_na_shopee()).order_by(
+                    MarketingCreative.id,
+                    MarketingCreativeFile.created_at.desc(),
+                    MarketingCreativeFile.id.desc(),
+                )
+            )
+        ).all()
+        # O `excluir` da rodada (o `agendar` recusou um arquivo por motivo do
+        # vídeo — legenda, outra marca…) tira o CRIATIVO inteiro da vez: o
+        # arquivo antigo dele seria a mesma recusa, e ainda ganharia outra
+        # chance no sorteio.
+        fora = {c.id for c, f in linhas if f.id in excluir}
+        por_criativo: dict[UUID, list[tuple[MarketingCreative, MarketingCreativeFile]]] = {}
+        for c, f in linhas:
+            if c.id not in fora:
+                por_criativo.setdefault(c.id, []).append((c, f))
+        monte = list(por_criativo.values())
+        _sorteio.shuffle(monte)
+        for arquivos in monte:
+            for criativo, arquivo in arquivos:  # do mais novo pro mais antigo
+                if motivo_do_arquivo(arquivo):
+                    continue
+                motivo = await motivo_do_video_na_loja(session, criativo, arquivo, rede)
+                if motivo is None:
+                    return criativo, arquivo
+                if motivo not in _MOTIVOS_DO_ARQUIVO_SHOPEE:
+                    break  # vale pro criativo inteiro: próximo sorteado
         return None
-    linha = (await session.execute(stmt.limit(1))).first()
+    linha = (await session.execute(stmt.order_by(*ordem_da_fila()).limit(1))).first()
     return (linha[0], linha[1]) if linha else None
 
 
@@ -308,7 +426,13 @@ async def fila(
 
     Um item por ARQUIVO de vídeo que ainda não saiu em pelo menos uma das
     `contas_da_fila`. Mesmos candidatos e mesma ordem do `proximo_criativo`;
-    "já saiu" também igual — qualquer postagem, em qualquer estado.
+    "já saiu" também igual — qualquer postagem, em qualquer estado (na conta
+    de Shopee, de qualquer arquivo do mesmo criativo).
+
+    Conta de Shopee Vídeo não segue esta ordem (nem `fila_posicao`): lá é
+    sorteio puro (`por_sorteio`), e a conta aparece em `pendente_em` como
+    "pode ser sorteado aqui" — o monte do sorteio, sem posição. A tela marca
+    essas contas como sorteio.
 
     `so_priorizados` corta nos que furaram a fila: é o que a listagem precisa
     pra numerar o selo "#n na fila" sem carregar a fila inteira.
@@ -338,8 +462,43 @@ async def fila(
             )
         ).all()
     }
-    tem_shopee = any((c.plataforma or "").strip().lower() == PLATAFORMA_SHOPEE for c in contas)
+    # Na conta de Shopee o "já saiu" é por CRIATIVO, como no `proximo_criativo`:
+    # a linha de qualquer arquivo dele nesta loja tira TODOS os arquivos dele
+    # da espera dela.
+    lojas_shopee = [c.id for c in contas if por_sorteio(c)]
+    saiu_criativo: set[tuple[UUID, UUID]] = set()
+    if lojas_shopee:
+        saiu_criativo = set(
+            (
+                await session.execute(
+                    select(MarketingPostagem.creative_id, MarketingPostagem.rede_social_id).where(
+                        MarketingPostagem.rede_social_id.in_(lojas_shopee),
+                        MarketingPostagem.creative_id.in_(list({c.id for c, _f in linhas})),
+                    )
+                )
+            )
+            .tuples()
+            .all()
+        )
+    tem_shopee = bool(lojas_shopee)
+    # O vídeo que já está numa loja da Shopee (qualquer uma, ou o mesmo
+    # conteúdo em outro arquivo) não espera mais loja NENHUMA da Shopee: é a
+    # mesma condição que tira o arquivo do sorteio do robô (`_ja_na_shopee`).
+    # Sem ela a tela seguiria prometendo pra ATLAS o vídeo que já saiu na Atv.
+    na_shopee: set[UUID] = set()
     if tem_shopee:
+        na_shopee = set(
+            (
+                await session.execute(
+                    select(MarketingCreativeFile.id).where(
+                        MarketingCreativeFile.id.in_([f.id for _c, f in linhas]),
+                        _ja_na_shopee(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
         # O ffprobe de cada arquivo ANTES do laço, 4 de cada vez: o resultado
         # fica no cache do `sondar_video` (por caminho+tamanho+mtime), e o
         # laço abaixo só lê de lá. Sem isto a primeira carga da tela rodaria
@@ -350,24 +509,41 @@ async def fila(
             async with trava:
                 await _anuncio_shopee.sondar_video(_anuncio_shopee.caminho_do_arquivo(arquivo))
 
-        await asyncio.gather(*(_sonda(f) for _c, f in linhas if (f.file_rel or "").strip()))
+        await asyncio.gather(
+            *(_sonda(f) for _c, f in linhas if (f.file_rel or "").strip() and f.id not in na_shopee)
+        )
     itens = []
+    # (criativo, conta de Shopee) que já têm o arquivo que o sorteio levaria.
+    shopee_com_arquivo: set[tuple[UUID, UUID]] = set()
     for criativo, arquivo in linhas:
-        pendente = [c for c in contas if (arquivo.id, c.id) not in saiu]
-        # Conta de Shopee Vídeo só "espera" o vídeo que a loja dela aceita —
-        # anúncio avulso com estoque E o formato (3–60 s, 720p+, H.264): é a
-        # MESMA conferência do robô (`proximo_criativo`). Sem o formato aqui,
-        # o vídeo HEVC que já saiu nas outras redes voltava pra "Fila do robô"
-        # como pendente na Shopee, e o selo "#n na fila" contava vídeo que o
-        # robô pula — a promessa falsa que esta tela existe pra não fazer.
-        pendente = [
-            c
-            for c in pendente
-            if (c.plataforma or "").strip().lower() != PLATAFORMA_SHOPEE
-            or await motivo_do_video_na_loja(session, criativo, arquivo, c) is None
-        ]
+        bloqueado = motivo_do_arquivo(arquivo)
+        pendente = []
+        for c in contas:
+            if (arquivo.id, c.id) in saiu:
+                continue
+            if not por_sorteio(c):
+                pendente.append(c)
+                continue
+            # Conta de Shopee Vídeo só "espera" o vídeo que a loja dela aceita
+            # — anúncio com estoque E o formato: é a MESMA conferência do robô
+            # (`proximo_criativo`). Sem o formato aqui, o vídeo que o robô
+            # pula voltava pra "Fila do robô" como pendente na Shopee — a
+            # promessa falsa que esta tela existe pra não fazer. E, como o
+            # sorteio é por criativo e leva o arquivo MAIS NOVO que serve, só
+            # esse arquivo espera a loja: a versão antiga não aparece como se
+            # também fosse sair (dentro do criativo a fila já vem do mais novo).
+            if (
+                arquivo.id in na_shopee
+                or (criativo.id, c.id) in saiu_criativo
+                or (criativo.id, c.id) in shopee_com_arquivo
+            ):
+                continue
+            if await motivo_do_video_na_loja(session, criativo, arquivo, c) is None:
+                pendente.append(c)
+                if not bloqueado:  # o robô pula o que sumiu do disco
+                    shopee_com_arquivo.add((criativo.id, c.id))
         if pendente:
-            itens.append(ItemFila(criativo, arquivo, pendente, motivo_do_arquivo(arquivo)))
+            itens.append(ItemFila(criativo, arquivo, pendente, bloqueado))
     return itens
 
 
@@ -379,10 +555,16 @@ def posicoes_efetivas(itens: list[ItemFila]) -> dict[UUID, int]:
     Mostrar esse número cru deixava o selo "#1 na fila" num vídeo que saiu
     semana passada — e o de verdade aparecia como "#2". A tela recebe a
     posição que o robô de fato vai seguir.
+
+    Só conta quem ainda espera conta de fila FIXA: o sorteio da Shopee ignora
+    a prioridade, e o vídeo que só falta sair na Shopee não "vem antes" de
+    ninguém — numerá-lo empurraria o #1 de verdade pra #2 de novo.
     """
     out: dict[UUID, int] = {}
     for it in itens:
-        if it.criativo.fila_posicao is not None and it.criativo.id not in out:
+        if it.criativo.fila_posicao is None or it.criativo.id in out:
+            continue
+        if any(not por_sorteio(c) for c in it.pendente_em):
             out[it.criativo.id] = len(out) + 1
     return out
 
@@ -422,13 +604,35 @@ def _opcoes_do_robo(rede: RedeSocial, criativo: MarketingCreative) -> dict[str, 
     return {}
 
 
+def _vez_das_contas(contas: list[RedeSocial]) -> list[RedeSocial]:
+    """A ordem da rodada: as contas de Shopee Vídeo trocam de lugar ENTRE SI.
+
+    As lojas da Shopee tiram do MESMO monte e o vídeo que uma pega some do
+    sorteio das outras (`_ja_na_shopee`). Na mesma ordem toda rodada, a
+    primeira loja teria sempre a primeira escolha — e, com poucos vídeos que
+    servem em mais de uma loja, as últimas ficariam sem nada. Sorteada a vez,
+    ninguém é sempre o primeiro.
+
+    As outras contas ficam exatamente onde estavam: na fila fixa, cada conta
+    tem o seu "já saiu", e a ordem entre elas não muda o que cada uma pega.
+    A ordem por id ANTES do embaralho só deixa o sorteio reproduzível com
+    semente (testes) — `contas_ligadas` não tem ORDER BY.
+    """
+    shopee = sorted((c for c in contas if por_sorteio(c)), key=lambda c: str(c.id))
+    if len(shopee) < 2:
+        return contas
+    _sorteio.shuffle(shopee)
+    vez = iter(shopee)
+    return [next(vez) if por_sorteio(c) else c for c in contas]
+
+
 async def rodada(session: AsyncSession, *, agora: datetime | None = None) -> dict[str, int]:
     """Uma passada: agenda o que couber na grade de hoje de cada conta."""
     agora = agora or datetime.now(UTC)
     settings = get_settings()
     r = {"contas": 0, "agendadas": 0, "sem_criativo": 0, "recusadas": 0}
 
-    for rede in await contas_ligadas(session):
+    for rede in _vez_das_contas(await contas_ligadas(session)):
         r["contas"] += 1
         # Quais vagas da grade de hoje JÁ CHEGARAM — todas, sem janela.
         agora_brt = agora.astimezone(BRT)

@@ -123,11 +123,11 @@ async def test_nao_antes_de_lancar_nao_abre_chamado(client, make_user, auth_as, 
     ).first() is None
     assert ml.reviews == []
 
-    # Sim de novo: volta ao automático e a contestação sai.
+    # Sim de novo: fica marcado (a tela mostra "marcado à mão") e a contestação sai.
     r = await client.post("/api/devolucoes-painel/880001/abrir-chamado", json={"abrir": True})
     assert r.status_code == 200, r.text
     janela = r.json()
-    assert janela["abrir_chamado"] is None and janela["abertura_status"] == "enviada"
+    assert janela["abrir_chamado"] is True and janela["abertura_status"] == "enviada"
     assert len(ml.reviews) == 1
 
 

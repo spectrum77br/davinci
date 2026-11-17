@@ -2682,11 +2682,23 @@ async def devolucao_fraude_auto(ctx: dict) -> None:
     nossa resposta — pede o vídeo da embalagem e, quando ele chega, lança "Não
     devolvido" e a resposta sai pela API (Vinicius, 16/11/2026). Sem candidato =
     1 SELECT."""
+    from app.services import devolucao_chamado_instrucao as instrucao
     from app.services import devolucao_fraude_auto as svc
 
-    async with session_scope() as s:
-        resumo = await svc.rodada(s)
-    logger.info("devolucao_fraude_auto_tick", **resumo)
+    try:
+        async with session_scope() as s:
+            resumo = await svc.rodada(s)
+        logger.info("devolucao_fraude_auto_tick", **resumo)
+    except Exception as e:  # noqa: BLE001 — a rodada da instrução roda mesmo assim
+        logger.error("devolucao_fraude_auto_tick_falhou", err=str(e)[:200])
+    # "Abrir chamado: Sim" + "Instrução IA" sem motivo que abra chamado: a IA lê e
+    # abre (Vinicius, 16/11/2026). Mesma cadência; não derruba a Fraude.
+    try:
+        async with session_scope() as s:
+            resumo_instr = await instrucao.rodada(s)
+        logger.info("devolucao_chamado_instrucao_tick", **resumo_instr)
+    except Exception as e:  # noqa: BLE001
+        logger.error("devolucao_chamado_instrucao_tick_falhou", err=str(e)[:200])
 
 
 async def logistica_track_sync(ctx: dict) -> None:

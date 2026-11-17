@@ -926,3 +926,19 @@ def test_a_oferta_com_a_memoria_com_barra_e_o_alem_do_produto_da_conversa():
     # O link de outro produto continua com pessoa.
     outro = "Temos o Uranyx A18 Pro Max. Segue o link do anúncio: {link_anuncio:b}."
     assert checagens.conferir_link_do_anuncio(outro, ctx=ctx, evidencias=evid)
+
+
+def test_a_despedida_e_a_resposta_que_trata_o_que_o_cliente_disse():
+    """16/11/2026 (ATV, manoelbneto: "eu amei, amanhã eu volto para comprar outro"): a resposta
+    certa ficava com pessoa — o "Até amanhã!" da despedida lido como prazo, e a "pergunta
+    pendente" com a resposta que trata o que o cliente disse (não é a genérica)."""
+    from app.services.atendimento import ia
+
+    texto = (
+        "Olá! Que bom que você gostou, ficamos muito felizes! Quando quiser comprar outro, é só "
+        "fazer o pedido pelo anúncio aqui na Shopee. Até amanhã!"
+    )
+    assert checagens.conferir_prazo_sem_lastro(texto) == []
+    assert checagens.conferir_prazo_sem_lastro("Seu pedido chega até amanhã.")
+    assert not ia._resposta_generica_do_agente(texto)
+    assert ia._resposta_generica_do_agente("Olá! Como podemos ajudar?")

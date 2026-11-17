@@ -201,6 +201,22 @@ for (const code of ['conta_sem_loja', 'conta_sem_autorizacao_shopee', 'conta_sho
   assert.notEqual(H.motivoConta(code), code)
 }
 assert.match(H.POSTAGEM_ERR_MAP.legenda_longa_shopee, /150/)
+// Shopee Vídeo (16/11/2026): nunca duas vezes (qualquer loja, a mesma
+// inclusive), HEVC convertido (só fica de fora o que não converte) e kit com
+// acessório liberado (só o kit com OUTRO aparelho/produto não vale).
+for (const m of [H.CONTA_MOTIVO_PT, H.POSTAGEM_ERR_MAP]) {
+  // "já saiu" inclui o que está na fila (agendado/em voo) — a regra do backend.
+  assert.match(m.video_ja_na_shopee_em_outra_loja, /já foi postado \(ou está na fila\) na Shopee — em alguma loja, esta inclusive/)
+  // Kit com acessório também vale desde 16/11: "sem anúncio" não é só avulso.
+  assert.match(m.sem_anuncio_na_loja, /\(avulso ou kit com acessório\)/)
+  assert.doesNotMatch(m.sem_anuncio_na_loja, /anúncio avulso desse/)
+  assert.match(m.video_formato_nao_aceito, /não dá pra converter \(ex\.: imagem, HDR\)/)
+  assert.doesNotMatch(m.video_formato_nao_aceito, /tem de ser H\.264/)
+  assert.match(m.anuncio_so_em_kit, /só está em kit com outro aparelho\/produto/)
+}
+// A pill da conta de Shopee na "Fila do robô" marca o sorteio (GET /fila
+// manda `sorteio: true` só nessas contas).
+assert.match(tpl, /<span v-if="c\.sorteio"[^>]*>· sorteio<\/span>/, 'marca de sorteio na pill')
 // Espelha STATUS_EM_VOO de app/models/marketing_postagem.py.
 assert.deepEqual(H.STATUS_EM_VOO, ['agendado', 'pendente', 'containering', 'publicando'])
 
@@ -534,6 +550,8 @@ assert.match(tpl, /moverFila\(i, i - 1\)/, 'botão ↑ (teclado/celular)')
 assert.match(tpl, /moverFila\(i, i \+ 1\)/, 'botão ↓ (teclado/celular)')
 assert.match(tpl, /#\{\{ r\.fila_posicao \}\} na fila/, 'selo da posição na planilha')
 assert.match(tpl, /⤒ frente da fila/, 'botão de furar a fila')
+// O sorteio da Shopee ignora a prioridade: o botão avisa (16/11/2026).
+assert.match(tpl, /title="Põe este vídeo em primeiro na fila do robô da marca[^"]*Shopee[^"]*sorteia[^"]*ignora a prioridade[^"]*"/, 'tooltip do frente da fila fala do sorteio da Shopee')
 assert.match(script, /'\/api\/marketing\/creatives\/fila',\s*\{\s*method: 'PUT'/, 'reordenar = PUT /fila')
 assert.match(script, /\/api\/marketing\/creatives\/fila\?\$\{q\.toString\(\)\}/, 'fila vem de GET /fila?marca_id=')
 {

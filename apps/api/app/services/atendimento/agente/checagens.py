@@ -6576,6 +6576,13 @@ _DIA_QUE_E_ORDEM = re.compile(
 )
 
 
+_DESPEDIDA = re.compile(
+    r"^\W*(?:(?:obrigad[oa]|abracos?|bom\s+dia|boa\s+tarde|boa\s+noite|ate\s+logo)\W+)?"
+    r"ate\s+(?:amanha|logo|mais|breve|a\s+proxima|segunda|terca|quarta|quinta|sexta|sabado|domingo)"
+    r"\W*$"
+)
+
+
 def _trechos_de_prazo(oracao: str, plataforma: str | None = None) -> Iterator[re.Match[str]]:
     yield from _PRAZO_DO_AGENTE.finditer(oracao)
     for m in _DIA_DA_SEMANA.finditer(oracao):
@@ -6604,6 +6611,10 @@ def conferir_prazo_sem_lastro(
     texto = validador.sem_a_entrega_negada_no_ml(texto or "") if plataforma == "ml" else texto
     plano = _plano(texto)
     for oracao in _oracoes_afirmadas(texto or ""):
+        if _DESPEDIDA.match(_plano(oracao)):
+            # 16/11/2026 (ATV, manoelbneto: "amanhã eu volto para comprar outro"): o "Até amanhã!"
+            # da despedida não promete prazo.
+            continue
         if _ECO_DA_NECESSIDADE.search(oracao.strip()):
             # O portão (27/10/2026, 8d3644a22825): "Entendemos a sua necessidade de receber
             # antes da viagem" ecoa o cliente — não promete prazo.
@@ -9274,6 +9285,9 @@ def responde_e_marca_da_proposta(
         # A virada (13/11/2026): o rascunho bateu com a resposta da equipe no banco — a ação
         # de pessoa (menos as de `ACOES_QUE_O_BANCO_NAO_SOLTA`) fica para depois do envio.
         de_depois |= agente_ctx.ACOES_QUE_O_BANCO_SOLTA
+    if getattr(ctx, "pede_o_dado", False):
+        # 16/11/2026: a resposta pede ao cliente o que falta (`ContextoAgente.pede_o_dado`).
+        de_depois |= agente_ctx.ACOES_QUE_O_PEDIDO_DO_DADO_SOLTA
     if (
         not de_depois
         or not (proposta.texto or "").strip()
@@ -14563,6 +14577,45 @@ MOTIVO_ESCLARECIMENTO_COM_PENDENTE = (
     "o cliente tem pergunta pendente e a resposta é uma pergunta de esclarecimento — confira se "
     "o dado que ela pede falta mesmo para responder (o cartão ou o anúncio da conversa já o dão?)"
 )
+
+
+# 16/11/2026 (jerivaldoalves): o pedido ao cliente do dado da COMPRA ou do problema — o número do
+# pedido, o vídeo, a foto, o print, o modelo, o anúncio ("mande por aqui o número do pedido e um
+# vídeo curto").
+_PEDE_O_DADO_DA_COMPRA = re.compile(
+    r"\b(?:mande|mandar|manda|envie|enviar|envia|informe|informar|informa|passe|passar|passa|diga"
+    r"|dizer)\b(?:\s+\w+){0,6}?\s+(?:o\s+|a\s+|os\s+|as\s+|um\s+|uma\s+)?(?:numero\s+(?:do\s+|da\s+)?"
+    r"(?:pedido|compra)|pedido|videos?|fotos?|print|modelo|anuncio|nome\s+do\s+(?:produto|modelo))\b"
+)
+
+
+_PEDE_A_EVIDENCIA = re.compile(
+    r"\b(?:mande|mandar|manda|envie|enviar|envia|anexe|anexar)\b(?:\s+\w+){0,6}?\s+"
+    r"(?:o\s+|a\s+|os\s+|as\s+|um\s+|uma\s+|umas\s+|uns\s+)?(?:fotos?|videos?|imagens?)\b"
+)
+
+
+def pede_a_evidencia(texto: str | None) -> bool:
+    """A resposta pede ao cliente a foto ou o vídeo (do que chegou, do problema)? PURA.
+
+    16/11/2026 (maricleidepereirasantana, "só recebi uma rodinha"): é o que solta o "Abrir chamado
+    (entrega)" para depois do envio (`ContextoAgente.pede_o_dado`)."""
+    plano = _plano(texto)
+    return bool(plano) and not resposta_so_generica(texto) and bool(_PEDE_A_EVIDENCIA.search(plano))
+
+
+def pede_o_dado_ao_cliente(texto: str | None) -> bool:
+    """A resposta pede ao cliente o dado que falta — o da pergunta de esclarecimento (qual
+    produto, modelo, cor, anúncio) ou o da compra e do problema (o número do pedido, o vídeo, a
+    foto)? PURA."""
+    if pergunta_de_esclarecimento(texto):
+        return True
+    plano = _plano(texto)
+    return (
+        bool(plano)
+        and not resposta_so_generica(texto)
+        and bool(_PEDE_O_DADO_DA_COMPRA.search(plano))
+    )
 
 
 def pergunta_de_esclarecimento(texto: str | None) -> bool:

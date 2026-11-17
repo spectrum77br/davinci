@@ -584,7 +584,11 @@ async def resolver(
     # As marcas são do sistema: a da largada, usada à mão, esconderia o pedido
     # de "Resolvidas" e do resumo; a do "resolvido sozinho" diria que foi o
     # sistema.
-    if len(como) < 2 or como in antigo.PAINEL_MARCAS or como == resolver_sozinho.COMO:
+    if (
+        len(como) < 2
+        or como in antigo.PAINEL_MARCAS
+        or como in (resolver_sozinho.COMO, resolver_sozinho.COMO_CANCELADO)
+    ):
         raise HTTPException(422, detail={"code": "como_terminou_invalido"})
     await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
     row = await antigo._rastreio_do_pedido(session, pedido)
@@ -831,6 +835,13 @@ class ChamadoJanelaOut(BaseModel):
     conferencia: dict | None = None
     conferencia_ligada: bool = False
     instrucoes: list[InstrucaoOut] = Field(default_factory=list)
+    # "Sim" + instrução: a IA leu e não abriu o chamado — o porquê (etiqueta vermelha).
+    ia_nao_abriu: str | None = None
+    # Há peça lançada (a IA da instrução só abre chamado de pedido lançado).
+    tem_lancamento: bool = False
+    # Pedido no painel Fraude: aí quem lança e abre é o robô da Fraude (com a
+    # instrução, quando houver) — não precisa lançar antes.
+    fraude: bool = False
 
 
 class AbrirChamadoIn(BaseModel):
@@ -945,6 +956,9 @@ async def _janela(session: AsyncSession, pedido: str) -> ChamadoJanelaOut:
         abrir_chamado=rast.abrir_chamado if rast is not None else None,
         conferencia=rast.conferencia if rast is not None else None,
         conferencia_ligada=conferencia.ligada(),
+        tem_lancamento=bool(linhas),
+        fraude=rast is not None
+        and antigo._fila(rast.fila_manual, rast.devolucao_tipo_auto)[0] == "fraude",
     )
     if ch is not None:
         abertura = await cd.mensagem_abertura(session, ch)
@@ -983,6 +997,13 @@ async def _janela(session: AsyncSession, pedido: str) -> ChamadoJanelaOut:
             if m.tipo == "instrucao"
         ]
     if rast is not None and (rast.instrucao_ia_pendente or "").strip():
+        from app.services import devolucao_chamado_instrucao as pela_instrucao
+
+        chave = pela_instrucao.chave_da_instrucao(
+            rast.instrucao_ia_em, rast.instrucao_ia_pendente.strip()
+        )
+        if ch is None and chave in (rast.observacao or ""):
+            out.ia_nao_abriu = pela_instrucao.porque_da_chave(rast.observacao, chave)
         autor = await session.get(User, rast.instrucao_ia_por) if rast.instrucao_ia_por else None
         out.instrucoes.append(
             InstrucaoOut(
@@ -1017,8 +1038,9 @@ async def abrir_chamado(
 ) -> ChamadoJanelaOut:
     """ "Abrir chamado: Sim ou Não" (vale pro pedido). Não: a contestação que
     ainda não saiu é cancelada (o chamado fica Encerrado, nada vai pra
-    plataforma); depois que saiu, não dá — 409 `chamado_ja_saiu`. Sim (depois
-    de um Não): volta ao automático e, se o motivo pede, a contestação sai."""
+    plataforma); depois que saiu, não dá — 409 `chamado_ja_saiu`. Sim: fica
+    gravado que alguém marcou (a tela mostra "marcado à mão"; 16/11/2026 o Sim
+    deixou de vir marcado sozinho) e, se o motivo pede, a contestação sai."""
     pedido = pedido_bling.strip()
     await antigo._exigir_pedido_da_equipe(session, await resolve_team_scope(session, user), pedido)
     rast = await antigo._rastreio_do_pedido(session, pedido)
@@ -1050,7 +1072,7 @@ async def abrir_chamado(
         return await _janela(session, pedido)
 
     era_nao = rast.abrir_chamado is False
-    rast.abrir_chamado = None
+    rast.abrir_chamado = True
     rast.updated_by = user.id
     if (
         era_nao

@@ -1178,33 +1178,69 @@ def candidato(rascunho: Any) -> bool:
     ]
 
 
-def motivo_do_rascunho(rascunho: Any) -> str | None:
+# 16/11/2026 (o Eduardo: "corrige agora e deploya junto"; ezequielsilva784: "Segue o arquivo da
+# nota fiscal do pedido … Sobre a capinha: …"): os motivos do `motivo_do_rascunho` que são do
+# TEXTO — a resposta trata também de outra coisa. O verificador confere esse texto
+# (`verificador.nf_com_outra_resposta`); aprovado (`verificador.trava`), eles não seguram e a NF sai
+# com o texto do rascunho no lugar da frase fixa (`talvez_enviar`). As travas da NF (a nota certa,
+# do comprador certo) e as da conversa continuam as mesmas.
+MOTIVOS_DO_TEXTO = frozenset(
+    {"assunto", "avisos_auto", "pistas_alem", "pistas_orientacao", "checagens", "outro_assunto"}
+)
+
+
+def motivo_do_rascunho(rascunho: Any, *, texto_aprovado: bool = False) -> str | None:
     """Por que o rascunho não serve para a NF sozinha (None = serve). PURA.
 
     Só a NF no turno: o assunto `nota_fiscal`, gerado no automático, sem
     aviso, sem pista de outro assunto, sem checagem pendente, e o `sem_auto`
-    só com a ação da NF.
+    só com a ação da NF. Com `texto_aprovado` (o verificador aprovou ESTE
+    texto), os motivos do texto (`MOTIVOS_DO_TEXTO`) não seguram.
     """
     from app.services.atendimento import ia
 
     if not candidato(rascunho):
         return "outra_acao"
-    if getattr(rascunho, "categoria", None) != CATEGORIA:
+    if getattr(rascunho, "categoria", None) != CATEGORIA and not texto_aprovado:
         return "assunto"
     agente = _agente(rascunho)
     if agente.get("modo") not in (None, constantes.MODO_AUTO):
         return "gerado_no_copiloto"
-    for chave in ("avisos_auto", "pistas_alem", "pistas_orientacao", "checagens"):
-        if agente.get(chave):
-            return chave
-    # A pista que não é assunto (o agradecimento, a saudação) não pede liberação em lugar
-    # nenhum (`ia.pistas_alem_do_assunto`), nem aqui: "mandem a NF, agradecido" é só a NF.
-    pistas = agente.get("pistas_turno") or []
-    if any(p != CATEGORIA and p not in ia._PISTAS_SEM_ASSUNTO for p in pistas):
-        return "outro_assunto"
+    if not texto_aprovado:
+        for chave in ("avisos_auto", "pistas_alem", "pistas_orientacao", "checagens"):
+            if agente.get(chave):
+                return chave
+        # A pista que não é assunto (o agradecimento, a saudação) não pede liberação em lugar
+        # nenhum (`ia.pistas_alem_do_assunto`), nem aqui: "mandem a NF, agradecido" é só a NF.
+        pistas = agente.get("pistas_turno") or []
+        if any(p != CATEGORIA and p not in ia._PISTAS_SEM_ASSUNTO for p in pistas):
+            return "outro_assunto"
     if list(agente.get("sem_auto") or []) != [MOTIVO_SEM_AUTO_NF]:
         return "sem_auto"
     return None
+
+
+def aprovado_pelo_verificador(rascunho: Any, *, agora: datetime | None = None) -> bool:
+    """O verificador aprovou o texto DESTE rascunho (`verificador.trava` sem motivo)? PURA."""
+    from app.services.atendimento.agente import verificador
+
+    return (
+        verificador.trava(
+            rascunho, ligado=get_settings().atendimento_agente_verificador, agora=agora
+        )
+        is None
+    )
+
+
+def legenda_do_envio(rascunho: Any) -> str:
+    """A frase que acompanha a NF: a fixa na NF sozinha; o texto do rascunho quando ele trata
+    também de outra coisa (só chega aqui aprovado pelo verificador, `_travas_da_conversa`). PURA."""
+    if (
+        motivo_do_rascunho(rascunho) in MOTIVOS_DO_TEXTO
+        and (getattr(rascunho, "texto", "") or "").strip()
+    ):
+        return str(rascunho.texto)
+    return LEGENDA
 
 
 # ── A nota certa, do comprador certo ──────────────────────────────────────
@@ -1645,7 +1681,9 @@ async def _travas_da_conversa(
         return "rascunho_nao_pendente"
     if (rascunho.fatos or {}).get(ia.FATO_PEDIDA_PELA_TELA):
         return "pedida_pela_tela"
-    if motivo := motivo_do_rascunho(rascunho):
+    if motivo := motivo_do_rascunho(
+        rascunho, texto_aprovado=aprovado_pelo_verificador(rascunho, agora=datetime.now(UTC))
+    ):
         return motivo
     if not s.atendimento_agente_verificador:
         # Revisão de 28/10: com o verificador desligado, NENHUM rascunho do agente sai
@@ -1766,7 +1804,7 @@ async def talvez_enviar(
                 rascunho=rascunho,
                 chave=chave,
                 numero=nf.numero,
-                legenda=LEGENDA,
+                legenda=legenda_do_envio(rascunho),
             )
         except enviar.EnvioRecusado as e:
             await ia._registrar_auto_envio(session, conversa, rascunho, f"nf:recusado:{e.code}")

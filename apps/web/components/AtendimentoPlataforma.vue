@@ -2352,6 +2352,9 @@ const ERROS_ENVIO: [RegExp, string][] = [
   [/reclamacao_encerrada/, 'A reclamação foi encerrada no Mercado Livre — a mensagem não saiu.'],
   [/reclamacao_ilegivel/, 'Não consegui conferir a reclamação no Mercado Livre agora — nada saiu. Tente de novo.'],
   [/^ml upload/, 'O anexo não subiu para o Mercado Livre — nada saiu. Anexe de novo para tentar outra vez.'],
+  // Shopee (16/11/2026): o filtro do chat barrou o texto DEPOIS de aceitar — nada chegou ao
+  // comprador. "raspadinha" o DaVinci já troca sozinho; o resto é palavra que a Shopee não aceita.
+  [/^shopee (?:censored_blacklist|blocked)\b/, 'A Shopee barrou o texto por uma palavra que ela não aceita no chat (outra plataforma, contato, link de fora…) — nada chegou ao comprador. Troque a palavra e envie de novo.'],
 ]
 export function erroEnvioLegivel(erro: string | null | undefined): string {
   const e = (erro || '').trim()

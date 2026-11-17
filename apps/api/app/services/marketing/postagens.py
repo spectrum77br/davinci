@@ -521,6 +521,14 @@ async def agendar(
         raise RoboError("criativo_sem_marca")
     if any(r.marca_id != creative.marca_id for r in redes):
         raise RoboError("conta_de_outra_marca")
+    # O mesmo vídeo nunca sai duas vezes na Shopee (dono, 16/11/2026). Duas
+    # lojas no mesmo clique passariam as duas pela conferência por loja (ainda
+    # não há linha nenhuma), e a segunda linha nasceria condenada: o `revalidar`
+    # da hora de publicar a recusa com JA_NA_SHOPEE. Recusa já, sem gravar nada.
+    if sum(1 for r in redes if (r.plataforma or "").strip().lower() == PLATAFORMA_SHOPEE) > 1:
+        from app.services.marketing.shopee_video_anuncio import JA_NA_SHOPEE
+
+        raise RoboError(JA_NA_SHOPEE)
 
     quando = para_utc(agendado_para)
     if quando is not None:

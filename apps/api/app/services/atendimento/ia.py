@@ -552,6 +552,15 @@ MOTIVO_NUMERO_INVENTADO = "número que não veio do sistema"
 # pendente. No agente (an0311, 03/11/2026), a PERGUNTA DE ESCLARECIMENTO que pede o dado que
 # falta vira aviso ao verificador (`agente.checagens.separar_avisos`).
 MOTIVO_PERGUNTA_PENDENTE = "há pergunta concreta pendente — a resposta genérica não a resolve"
+
+
+def _resposta_generica_do_agente(texto: str | None) -> bool:
+    """A resposta do agente é só o cumprimento/o "como podemos ajudar?" (`checagens`)?"""
+    from app.services.atendimento.agente import checagens as _checagens_gen
+
+    return _checagens_gen.resposta_so_generica(texto)
+
+
 # A resposta de dado do produto com a ficha do anúncio nos FATOS não sai
 # sozinha no automático (14/10/2026): a ficha pode ser de antes da última
 # mudança do anúncio, ou de outro anúncio do mesmo produto, e o que acompanha
@@ -4782,6 +4791,20 @@ _ACHAR_O_PEDIDO = re.compile(
 _ORACOES_SEM_PEDIDO = re.compile(r";|,(?!\d)|\bmas\b|\s+e\s+(?=(?:o|a|seu|sua|ele|ela|ja)\b)")
 
 
+def _cumprimento_sem_o_pedido(categoria: str | None, texto: str | None) -> bool:
+    """O cumprimento ou o agradecimento que não fala do pedido? PURA.
+
+    16/11/2026 (Vortan, antonioadrianoferreiraad: o cliente mandou só o cartão do produto, e o
+    texto aprovado "Olá! Em que podemos ajudar sobre esse produto ou pedido?" ficou preso por
+    "pedido não encontrado no sistema" — o pedido era de fevereiro, cancelado, fora do DaVinci):
+    a resposta que só pergunta o que o cliente precisa não depende do pedido. No legado, como
+    no agente, o pedido fora do sistema só segura o texto que fala dele.
+    """
+    return categoria in ("agradecimento", "saudacao_ou_vaga") and not afirma_do_pedido(
+        texto or ""
+    )
+
+
 def afirma_do_pedido(texto: str) -> bool:
     """O texto afirma (ou fala de) o estado do pedido ou do reembolso? PURA (agente).
 
@@ -5087,6 +5110,10 @@ async def conferir_saida(
         # Rodada "fechar o eval" (23/10/2026, 11a4570bdfb5, só o agente): "Eu quem agradeço,
         # voltarei sim" é agradecimento (o "quem" não pergunta nada).
         and not (agente and foco_so_de_agradecimento(foco))
+        # 16/11/2026 (ATV, manoelbneto: "eu amei, amanhã eu volto para comprar outro"): no agente,
+        # só a resposta GENÉRICA ("como podemos ajudar?") deixa a pergunta pendente — a que trata o
+        # que o cliente disse ("quando quiser comprar outro, é só fazer o pedido pelo anúncio") não.
+        and not (agente and not _resposta_generica_do_agente(texto))
     ):
         motivos.append(MOTIVO_PERGUNTA_PENDENTE)
     if (
@@ -5172,7 +5199,7 @@ async def conferir_saida(
         and not (categoria == "nota_fiscal" and nf_politica_aprovada)
     ):
         motivo_do_pedido = "conversa sem pedido identificado"
-    if motivo_do_pedido and not agente:
+    if motivo_do_pedido and not agente and not _cumprimento_sem_o_pedido(categoria, texto):
         motivos.append(motivo_do_pedido)
 
     preenchido, sem_dado, desconhecidas = preencher(texto, valores)

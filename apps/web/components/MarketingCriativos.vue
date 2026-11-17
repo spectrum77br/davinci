@@ -781,17 +781,17 @@ const CONTA_MOTIVO_PT: Record<string, string> = {
   conta_sem_autorizacao_shopee: 'loja ainda não autorizou o app de vídeo — autorize em Cadastros › Redes Sociais',
   conta_shopee_reautorizar: 'autorização da Shopee vencida — autorize de novo',
   conta_shopee_bloqueada: 'Shopee parada: ela recusou (Termos, toggle…) — resolva e libere em Cadastros › Redes Sociais',
-  sem_anuncio_na_loja: 'sem anúncio desse aparelho nesta loja',
-  anuncio_so_em_kit: 'nesta loja o aparelho só está em kit',
+  sem_anuncio_na_loja: 'A loja não tem anúncio desse aparelho (avulso ou kit com acessório)',
+  anuncio_so_em_kit: 'nesta loja o aparelho só está em kit com outro aparelho/produto',
   anuncio_sem_estoque: 'anúncio desta loja sem estoque',
   sku_ambiguo: 'SKU do vídeo cai em mais de um anúncio',
   criativo_sem_sku: 'vídeo sem SKU — não dá pra achar o anúncio',
   video_fora_da_duracao: 'na Shopee o vídeo tem de ter de 3 a 60 s',
   video_resolucao_baixa: 'na Shopee o vídeo tem de ter 720p ou mais',
-  video_formato_nao_aceito: 'na Shopee o vídeo tem de ser H.264',
+  video_formato_nao_aceito: 'formato/codec que a Shopee não aceita e não dá pra converter (ex.: imagem, HDR)',
   video_ilegivel: 'não deu pra ler o vídeo (duração/formato)',
   video_grande_demais: 'vídeo acima de 1 GB',
-  video_ja_na_shopee_em_outra_loja: 'esse vídeo já está em outra loja Shopee da marca',
+  video_ja_na_shopee_em_outra_loja: 'já foi postado (ou está na fila) na Shopee — em alguma loja, esta inclusive',
 }
 
 function motivoConta(motivo: string | null | undefined): string {
@@ -993,17 +993,17 @@ const POSTAGEM_ERROS: Record<string, string> = {
   conta_shopee_reautorizar: 'A autorização da Shopee venceu — autorize de novo em Cadastros › Redes Sociais.',
   conta_shopee_bloqueada:
     'A conta da Shopee está parada: a Shopee recusou por algo que só gente resolve (Termos do Shopee Vídeo, liberação da API…). Resolva e libere a conta em Cadastros › Redes Sociais.',
-  sem_anuncio_na_loja: 'A loja não tem anúncio avulso desse aparelho — o vídeo não sai nela.',
-  anuncio_so_em_kit: 'Nessa loja o aparelho só está em anúncio de kit — vídeo de aparelho sozinho não vai em kit.',
+  sem_anuncio_na_loja: 'A loja não tem anúncio desse aparelho (avulso ou kit com acessório) — o vídeo não sai nela.',
+  anuncio_so_em_kit: 'Nessa loja o aparelho só está em kit com outro aparelho/produto — o vídeo de um aparelho não vai nesse kit.',
   anuncio_sem_estoque: 'O anúncio desse aparelho na loja está sem estoque.',
   sku_ambiguo: 'O SKU do vídeo cai em mais de um anúncio — deixe só o SKU do aparelho que aparece no vídeo.',
   criativo_sem_sku: 'O vídeo não tem SKU — preencha o SKU da linha pra achar o anúncio.',
   video_fora_da_duracao: 'Na Shopee o vídeo tem de ter de 3 a 60 segundos.',
   video_resolucao_baixa: 'Na Shopee o vídeo tem de ter 720p ou mais.',
-  video_formato_nao_aceito: 'Na Shopee o vídeo tem de ser H.264 (este é outro codec).',
+  video_formato_nao_aceito: 'O vídeo está num formato/codec que a Shopee não aceita e não dá pra converter (ex.: imagem, HDR).',
   video_ilegivel: 'Não deu pra ler a duração/formato do vídeo.',
   video_grande_demais: 'O vídeo passa de 1 GB.',
-  video_ja_na_shopee_em_outra_loja: 'Esse vídeo já está (ou esteve) em outra loja Shopee da marca — uma loja por vídeo.',
+  video_ja_na_shopee_em_outra_loja: 'Esse vídeo já foi postado (ou está na fila) na Shopee — em alguma loja, esta inclusive. O mesmo vídeo nunca sai duas vezes lá.',
 }
 const POSTAGEM_ERR_MAP: Record<string, string> = { ...MARCAS_ERROS, ...POSTAGEM_ERROS }
 
@@ -1179,7 +1179,8 @@ function grupoResumo(g: { dia: string; criativos: number; videos: number }, hoje
 // antigo pra frente. Quem guarda a ordem é o backend (`fila_posicao`, a mesma
 // ordenação que o robô usa) — a tela só mostra e reordena.
 
-type FilaConta = { rede_id: string; plataforma: string; conta: string | null }
+// `sorteio: true` = nesta conta (Shopee Vídeo) o robô SORTEIA o vídeo, sem vez marcada.
+type FilaConta = { rede_id: string; plataforma: string; conta: string | null; sorteio?: boolean }
 
 // Um item de GET /api/marketing/creatives/fila: um por ARQUIVO de vídeo, já na
 // ordem do robô.
@@ -2432,7 +2433,7 @@ function filaDropClass(i: number): string {
                     v-if="podeFurarFila(r) && r.fila_posicao !== 1"
                     type="button"
                     class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] bg-background hover:bg-muted disabled:opacity-50"
-                    title="Põe este vídeo em primeiro na fila do robô da marca — ele sai antes dos mais novos"
+                    title="Põe este vídeo em primeiro na fila do robô da marca — ele sai antes dos mais novos. Na Shopee não: lá o robô sorteia e ignora a prioridade."
                     :disabled="filaSaving"
                     @click.stop="frenteDaFila(r)"
                   >
@@ -2585,10 +2586,13 @@ function filaDropClass(i: number): string {
                           v-for="c in a.pendente_em"
                           :key="c.rede_id"
                           class="pill-muted"
-                          :title="`Ainda não saiu em ${plataformaLabel(c.plataforma)} ${contaLabel(c)}`"
+                          :title="c.sorteio
+                            ? `Ainda não saiu em ${plataformaLabel(c.plataforma)} ${contaLabel(c)} — lá o robô sorteia o vídeo (sem vez na fila)`
+                            : `Ainda não saiu em ${plataformaLabel(c.plataforma)} ${contaLabel(c)}`"
                         >
                           <span class="shrink-0">{{ plataformaLabel(c.plataforma) }}</span>
                           <span class="truncate max-w-[110px]">{{ contaLabel(c) }}</span>
+                          <span v-if="c.sorteio" class="shrink-0 text-[10px] opacity-70">· sorteio</span>
                         </span>
                       </div>
                     </div>
