@@ -44,6 +44,8 @@ FOLLOW = {
     "fiscal_company_candidates": ("replace", None),
     # The hourly look-up of every Bling sale in what the ERP read, store by store.
     "bling_coverage": ("mirror", None),
+    # The hourly shadow of the compatible API: the same reads asked of Bling and of the ERP.
+    "compat_shadow": ("mirror", None),
 }
 # The reception state shown on the screen; who owns the store stays "own" here.
 ACCOUNT_STATE = (

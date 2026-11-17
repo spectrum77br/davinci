@@ -8,7 +8,7 @@ import pytest
 
 from app.erp_local import bling_compat, compat_shadow
 from app.erp_local import bling_shadow_probe as probe
-from app.erp_local.core import ERPError, dumps
+from app.erp_local.core import ERPError, LocalERP, dumps
 
 
 def with_origin(erp):
@@ -146,3 +146,17 @@ def test_errors_on_either_side_are_listed(erp):
     (depots,) = [r for r in report["routes"] if r["route"] == "depositos"]
     assert depots["errors"] == [{"ref": "/depositos", "bling": 429, "erp": 200}]
     assert json.dumps(report)
+
+
+def test_the_homologation_shows_the_rounds_kept_in_the_real_base(erp, tmp_path):
+    from app.erp_local import homolog
+
+    with_origin(erp)
+    target = tmp_path / "copy.sqlite3"
+    assert homolog.seed(erp.database, target) is True
+    compat_shadow.run(erp, bling_like(erp), now=0)
+    copy = LocalERP(target)
+    homolog.follow(copy, erp.database)
+    with copy.connection() as db:
+        report = compat_shadow.latest(db)
+    assert report["state"] == "read_ok" and report["totals"]["different"] == 0
