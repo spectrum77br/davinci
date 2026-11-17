@@ -117,7 +117,8 @@ const tela = (rel) => fs.readFileSync(path.resolve(__dirname, '../components', r
   })
   assert.equal(r.ok, true, `o setup do AtendimentoConversa quebrou: ${r.erro?.stack || r.erro}`)
   // Chegou ao fim: o que o template usa, inclusive o que vem depois do modoCaixa.
-  for (const n of ['modoCaixa', 'naoPrecisaNoRodape', 'naoPrecisaComBalao', 'balaoNaoPrecisa', 'detalhe']) {
+  // 17/11/2026: o `irParaCitada` (o clique no bloco da mensagem citada) também.
+  for (const n of ['modoCaixa', 'naoPrecisaNoRodape', 'naoPrecisaComBalao', 'balaoNaoPrecisa', 'detalhe', 'irParaCitada']) {
     assert.ok(n in r.ligacoes, `AtendimentoConversa: ${n} não chegou ao template`)
   }
 }
@@ -126,6 +127,18 @@ const tela = (rel) => fs.readFileSync(path.resolve(__dirname, '../components', r
   assert.equal(r.ok, true, `o setup do AtendimentoMetricas quebrou: ${r.erro?.stack || r.erro}`)
   for (const n of ['carregar', 'grupos', 'visaoAdmin', 'lojasTempo', 'totais', 'tempo']) {
     assert.ok(n in r.ligacoes, `AtendimentoMetricas: ${n} não chegou ao template`)
+  }
+}
+
+{
+  // O bloco da mensagem citada (17/11/2026), com uma citada de verdade.
+  const r = rodarSetup(tela('AtendimentoCitada.vue'), 'AtendimentoCitada.vue', {
+    citada: { externo_id: '700001', mensagem_id: 'm1', autor: 'loja', tipo: 'imagem', texto: null, imagem_url: 'https://img.sp.mms.shopee.sg/x' },
+    de: 'm2',
+  })
+  assert.equal(r.ok, true, `o setup do AtendimentoCitada quebrou: ${r.erro?.stack || r.erro}`)
+  for (const n of ['c', 'miniatura', 'clicavel', 'cores', 'ir']) {
+    assert.ok(n in r.ligacoes, `AtendimentoCitada: ${n} não chegou ao template`)
   }
 }
 

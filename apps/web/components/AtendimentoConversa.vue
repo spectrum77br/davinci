@@ -1340,6 +1340,27 @@ function irPara(ev: EventoCliente) {
   p.set('q', ref)
   window.open(`/logistica?${p.toString()}`, '_blank', 'noopener')
 }
+// A mensagem CITADA (17/11/2026, o dono: "no Duoke isso aparecia e dava para ver
+// qual mala o cliente escolheu"): o clique no bloco em cima do balão rola até ela
+// e a destaca (`mostrarMensagem`), como o "responder" do WhatsApp. Desta conversa
+// mas noutra aba (o pré-venda do chat): a aba dela vem antes. Fora da página (mais
+// antiga que as carregadas): o aviso diz, em vez de não fazer nada.
+function irParaCitada(id: string) {
+  if (!id || mostrarMensagem(id)) return
+  const d = detalhe.value
+  const aba = d?.mensagens.some((m) => m.id === id) ? abasDados.value?.fora_da_aba?.[id] || abaDaConversa.value : null
+  if (aba && aba !== abaAtiva.value) {
+    abaAtiva.value = aba
+    void nextTick(() => {
+      if (!mostrarMensagem(id)) avisarCitadaFora()
+    })
+    return
+  }
+  avisarCitadaFora()
+}
+function avisarCitadaFora() {
+  toasts.info('A mensagem citada não está na tela', 'Ela é mais antiga que as mensagens carregadas aqui.')
+}
 
 // Modo observação: o Duoke responde; aqui só se lê e se avalia a IA. A API
 // diz (`envio.modo_observacao`); a antiga, que não diz, cai na mesma regra
@@ -4153,7 +4174,8 @@ watch(() => props.conversaId, (novo, velho) => {
             </div>
             <div
               v-else-if="lado(l.m) === 'sistema'"
-              class="flex justify-center"
+              class="flex justify-center rounded-md"
+              :class="destacadaId === l.m.id ? 'ring-2 ring-primary/70' : ''"
               :data-msg-id="l.m.id"
             >
               <!-- e-mail que é aviso (da plataforma, de vendas, resposta automática): o cartão do e-mail, no meio -->
@@ -4200,6 +4222,8 @@ watch(() => props.conversaId, (novo, velho) => {
                   :respondendo="!!l.m.email.message_id && emailResponder === l.m.email.message_id"
                   @responder="responderEmail"
                 />
+                <!-- a mensagem CITADA pelo "responder" (17/11/2026): em cima da fala; o clique leva até ela -->
+                <AtendimentoCitada v-if="l.m.citada" :citada="l.m.citada" :de="l.m.id" @ir="irParaCitada" />
                 <!-- apagada (03/11/2026): o texto fica para a equipe, riscado -->
                 <div v-if="l.m.texto" class="whitespace-pre-wrap break-words text-sm leading-relaxed" :class="l.m.apagada ? 'line-through opacity-60' : ''"><template v-for="(p, i) in partesDaMensagem(l.m)" :key="i"><a v-if="p.t === 'url'" :href="p.v" target="_blank" rel="noopener noreferrer" class="break-all underline">{{ p.v }}</a><strong v-else-if="p.t === 'b'" class="font-semibold">{{ p.v }}</strong><template v-else>{{ p.v }}</template></template></div>
                 <div v-else-if="!pecasDaMsg(l.m).length" class="text-sm italic text-muted-foreground">[{{ TIPO_LABEL[l.m.tipo] || 'sem texto' }}]</div>

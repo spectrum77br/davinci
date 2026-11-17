@@ -312,6 +312,29 @@ class ListaConversasOut(BaseModel):
     proximo: str | None = None
 
 
+class CitadaOut(BaseModel):
+    """A mensagem que esta CITA — o "responder" da plataforma (17/11/2026).
+
+    O dono: no Duoke dava para ver em qual mala o comprador respondeu; aqui não.
+    Montada por `services/atendimento/citacao.py` (Shopee `payload.quoted_msg`;
+    Zap `payload.zap.contexto_wamid`). A tela desenha o bloco em cima do balão.
+    """
+
+    # O id da citada na plataforma (o `message_id` da Shopee, o wamid do Zap).
+    externo_id: str
+    # A nossa linha da citada na MESMA conversa (o clique rola até ela); None =
+    # não está gravada aqui.
+    mensagem_id: str | None = None
+    # "loja" | "cliente" (None = não se sabe).
+    autor: str | None = None
+    # texto | imagem | video | produto | pedido | outro
+    tipo: str = "outro"
+    # Até 200 caracteres (o texto, a legenda, o título do anúncio, "Pedido nº").
+    texto: str | None = None
+    # A miniatura (https da plataforma ou a nossa cópia do Zap, caminho relativo).
+    imagem_url: str | None = None
+
+
 class MensagemOut(BaseModel):
     id: str
     autor: str
@@ -358,6 +381,8 @@ class MensagemOut(BaseModel):
     # Duoke): `falhou` com `ERRO_APAGADA`. O balão troca o "não saiu" pelo
     # selo "apagada — o comprador não vê mais" e não oferece "tentar de novo".
     apagada: bool = False
+    # A mensagem citada pelo "responder" (17/11/2026, `CitadaOut`). None = não cita.
+    citada: CitadaOut | None = None
 
 
 class ApagarOut(BaseModel):

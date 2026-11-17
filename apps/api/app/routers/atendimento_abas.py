@@ -55,7 +55,7 @@ from app.routers.atendimento import (
 )
 from app.schemas.atendimento import MensagemOut
 from app.services.atendimento import abas as abas_svc
-from app.services.atendimento import instagram
+from app.services.atendimento import citacao, instagram
 from app.services.atendimento.constantes import CANAL_AVALIACAO
 from app.services.atendimento.escopo import escopo_do_atendimento
 
@@ -214,6 +214,8 @@ async def abas_da_conversa(
             ).scalars()
         }
     nomes = await _nomes(session, {m.autor_user_id for m in completas.values()})
+    # A mensagem citada pelo "responder" (17/11/2026): uma consulta para as páginas.
+    citadas = await citacao.citadas_em_lote(session, completas.values(), por_id)
 
     # A última mensagem de cada conversa (o `ultima_vista_id` do envio): a
     # mais NOVA pela hora — as abas vêm na ordem da tela, e a da reclamação
@@ -253,7 +255,7 @@ async def abas_da_conversa(
             origem = por_id.get(leve.conversa_id)
             if m is None or origem is None:
                 continue
-            base = _mensagem_out(m, conversa=origem, nomes=nomes)
+            base = _mensagem_out(m, conversa=origem, nomes=nomes, citadas=citadas)
             mensagens.append(
                 AbaMensagemOut(**base.model_dump(), conversa_id=str(origem.id), canal=origem.canal)
             )

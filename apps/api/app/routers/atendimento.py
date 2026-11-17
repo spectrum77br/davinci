@@ -104,7 +104,7 @@ import asyncio
 import importlib
 import re
 import statistics
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from math import ceil
@@ -229,6 +229,7 @@ from app.services.atendimento import (
     apagar,
     canais_externos,
     cartoes_plataforma,
+    citacao,
     clientes,
     enviar,
     foco_devolucao,
@@ -1868,8 +1869,13 @@ def _texto_do_mediador(m: AtendimentoMensagem, texto: str | None) -> str | None:
 
 
 def _mensagem_out(
-    m: AtendimentoMensagem, *, conversa: AtendimentoConversa, nomes: dict[UUID, str | None]
+    m: AtendimentoMensagem,
+    *,
+    conversa: AtendimentoConversa,
+    nomes: dict[UUID, str | None],
+    citadas: Mapping[UUID, dict[str, Any]] | None = None,
 ) -> MensagemOut:
+    """`citadas` (17/11/2026) = o `citacao.citadas_em_lote` da página: sem ele, `citada` None."""
     # A fala do AFILIADO (15/10/2026): `sistema` com o `from_id` dele = o
     # `comprador_id` do chat de afiliado — a mesma régua que a conta no número.
     do_afiliado = (
@@ -1913,6 +1919,9 @@ def _mensagem_out(
         # não sabe de plataforma nem de janela.
         pode_apagar_ate=_utc(apagar.pode_apagar_ate(m, conversa)),
         apagada=apagar.apagada(m),
+        # 17/11/2026, o dono: no Duoke dava para ver em qual mala o comprador
+        # respondeu — a citada vai junto, e a tela a desenha em cima do balão.
+        citada=(citadas or {}).get(m.id),
         **(_entrega_do_zap(m) if conversa.canal == CANAL_ZAP else {}),
     )
 
@@ -3620,6 +3629,8 @@ async def detalhe_conversa(
         )
     )
     nomes = await _nomes(session, {m.autor_user_id for m in mensagens})
+    # A mensagem citada pelo "responder" (17/11/2026): uma consulta para a página.
+    citadas = await citacao.citadas_em_lote(session, mensagens, {c.id: c})
     from app.services.atendimento import humano as humano_svc
 
     # A sugestão pendente e a hora que ela responde: a do turno ATUAL leva o
@@ -3668,7 +3679,9 @@ async def detalhe_conversa(
         )
     detalhe = {
         "conversa": await _conversa_out(session, c),
-        "mensagens": [_mensagem_out(m, conversa=c, nomes=nomes) for m in mensagens],
+        "mensagens": [
+            _mensagem_out(m, conversa=c, nomes=nomes, citadas=citadas) for m in mensagens
+        ],
         "rascunho": _rascunho_out(
             rascunho,
             do_turno_atual=(
@@ -4817,8 +4830,10 @@ async def apagar_mensagem(
             409, detail={"code": apagar.PLATAFORMA_RECUSOU, "erro": resultado.erro}
         )
     nomes = await _nomes(session, {m.autor_user_id, user.id})
+    # A tela troca o balão pelo que volta daqui: a citada (17/11/2026) não some.
+    citadas = await citacao.citadas_em_lote(session, [m], {c.id: c})
     return ApagarOut(
-        mensagem=_mensagem_out(m, conversa=c, nomes=nomes),
+        mensagem=_mensagem_out(m, conversa=c, nomes=nomes, citadas=citadas),
         conversa=await _conversa_out(session, c),
         ia_pausada=resultado.ia_pausada,
     )

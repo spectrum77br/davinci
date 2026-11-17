@@ -344,6 +344,21 @@ export type ConversaDetalhe = ConversaResumo & {
   dados?: Record<string, unknown> | null
 }
 export type Anexo = Record<string, unknown>
+// A mensagem CITADA pelo "responder" da plataforma (17/11/2026, o dono: no Duoke
+// dava para ver em qual mala o comprador respondeu). Montada no servidor
+// (services/atendimento/citacao.py); o bloco é o AtendimentoCitada.
+export type Citada = {
+  // O id da citada na plataforma (o `message_id` da Shopee, o wamid do Zap).
+  externo_id: string
+  // A nossa linha da citada nesta conversa (o clique rola até ela); null = não está aqui.
+  mensagem_id: string | null
+  autor: 'loja' | 'cliente' | null
+  tipo: 'texto' | 'imagem' | 'video' | 'produto' | 'pedido' | 'outro'
+  // Até 200 caracteres: o texto, a legenda, o título do anúncio, "Pedido nº".
+  texto: string | null
+  // A miniatura (https da plataforma ou a nossa cópia do Zap, relativa).
+  imagem_url: string | null
+}
 export type Mensagem = {
   id: string
   autor: string
@@ -383,6 +398,8 @@ export type Mensagem = {
   // A mensagem da loja apagada na plataforma (pelo DaVinci ou pelo Duoke):
   // selo cinza "apagada", texto riscado só para a equipe, sem "tentar de novo".
   apagada?: boolean
+  // A mensagem citada (17/11/2026): o bloco em cima do balão. null/ausente = não cita.
+  citada?: Citada | null
 }
 export type Rascunho = {
   id: string
