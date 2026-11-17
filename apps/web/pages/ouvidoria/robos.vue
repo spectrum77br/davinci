@@ -1496,7 +1496,7 @@ const carregandoAba = computed(() => (tab.value === 'robos' ? robosLoading.value
                       <div class="mt-2 text-[11px] text-muted-foreground">
                         <template v-if="contasNaRodada(r.chave) != null">{{ contasNaRodada(r.chave) }} contas na última rodada · </template>
                         conta sem acesso = ocorrência "Conta sem acesso à API"; reautorizar em
-                        <NuxtLink to="/integrations" class="underline underline-offset-2 hover:text-foreground">Sistema › Integrações</NuxtLink>.
+                        <NuxtLink to="/integrations" class="underline underline-offset-2 hover:text-foreground">Cadastros › Integrações</NuxtLink>.
                       </div>
                     </div>
 

@@ -1,11 +1,13 @@
 <script setup lang="ts">
-// Sistema › Histórico (25/09/2026). Eduardo: "uma lista de histórico do que
+// Histórico (25/09/2026; desde 17/11/2026 em Cadastros › Integrações ›
+// Histórico, antes Sistema › Histórico). Eduardo: "uma lista de histórico do que
 // está sendo mudado no davinci, por exemplo alterou a tabela de preços". Só o
 // que PESSOAS mudam; só quem ele liberou vê — para os outros, inclusive
 // admin, esta página responde igual a uma página que não existe.
 import { computed, onMounted, ref, watch } from 'vue'
 import { ArrowRight, History, RefreshCw, Search, UserCheck, X } from 'lucide-vue-next'
 import { isoDateBrt, isoDaysAgo, isoToday } from '~/lib/date'
+import { TABS_CADASTROS, TABS_INTEGRACOES } from '~/lib/navGroups'
 
 definePageMeta({
   middleware: [
@@ -242,6 +244,10 @@ async function mudarAcesso(p: PessoaAcesso, ev: Event) {
 
 <template>
   <div>
+    <div class="space-y-4 mb-5">
+      <RouteTabs :tabs="TABS_CADASTROS" />
+      <RouteTabs :tabs="TABS_INTEGRACOES" sub />
+    </div>
     <PageHeader
       title="Histórico"
       description="O que as pessoas mudaram no DaVinci: quem, quando, em qual tela e o valor de antes e de depois. Robôs não entram; senhas nunca aparecem."

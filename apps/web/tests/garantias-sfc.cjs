@@ -737,7 +737,7 @@ const mesmoPy = (a, b, msg) => {
     src = src.replace(/^import[\s\S]*?from\s+'[^']+'\s*$/gm, '').replace(/import\.meta\.client/g, 'false')
     const params = {
       computed: Vue.computed, ref: Vue.ref, watch: Vue.watch, nextTick: Vue.nextTick, onMounted: () => {}, onScopeDispose: () => {},
-      allowedTabs: nav.allowedTabs, TABS_CADASTROS: nav.TABS_CADASTROS, TABS_NF: nav.TABS_NF, TABS_SISTEMA: nav.TABS_SISTEMA,
+      ...nav, useState: (_k, ini) => Vue.ref(ini()),
       defineProps: () => ({}), withDefaults: (p, d) => ({ ...d, ...p, collapsed: false }), defineEmits: () => () => {},
       useAuthStore: () => ({ user, isAdmin: user.role === 'admin' }), useRoute: () => ({ path: '/' }),
       useRuntimeConfig: () => ({ public: { enableMarketing: false } }), useApi: () => ({ api: async () => ({ count: 0 }) }),

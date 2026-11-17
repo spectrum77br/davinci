@@ -1,14 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onScopeDispose, ref, watch } from 'vue'
 import {
-  LayoutDashboard, Rocket, Plug, ContactRound, Users,
+  LayoutDashboard, Rocket, ContactRound,
   Package, DollarSign, Undo2,
   Receipt, Settings, BarChart3,
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Ship, Landmark, Headset,
-  ReceiptText, MessagesSquare, Radar, History, Flag, Inbox, Smartphone, ShieldCheck, X, Scale, Gavel,
+  ReceiptText, MessagesSquare, Radar, Flag, Inbox, Smartphone, ShieldCheck, X, Scale, Gavel,
 } from 'lucide-vue-next'
-import { allowedTabs, TABS_CADASTROS, TABS_NF, TABS_SISTEMA } from '~/lib/navGroups'
+import { allowedTabs, tabRoutes, TABS_CADASTROS, TABS_CONFIGURACOES, TABS_NF } from '~/lib/navGroups'
 
 const props = withDefaults(defineProps<{ collapsed: boolean; mobile?: boolean; mobileOpen?: boolean }>(), {
   mobile: false,
@@ -67,10 +67,12 @@ const enableCelulares = computed(() => Boolean(runtimeConfig.public.enableCelula
 // every 15s + on auth-state change. Independent from the modal so the
 // dot stays even after the modal is dismissed.
 const { api } = useApi()
-const pendingTarefasCount = ref(0)
+// useState: a barra de abas (RouteTabs) mostra a mesma bolinha na aba.
+const pendingTarefasCount = useState<number>('davinci.pendentes.tarefas', () => 0)
 // Red dot on "Faturas" (admin only) when there are faturas vencidas/vencendo
-// (data_vencimento <= hoje+1). Polls /api/faturas/vencendo-count.
-const pendingFaturasCount = ref(0)
+// (data_vencimento <= hoje+1). Polls /api/faturas/vencendo-count. Desde
+// 17/11/2026 Faturas é aba de Configurações: a bolinha fica em Configurações.
+const pendingFaturasCount = useState<number>('davinci.pendentes.faturas', () => 0)
 
 async function fetchPendingTarefas() {
   if (!auth.user) return
@@ -127,8 +129,6 @@ type Item = {
   resource?: string
   adminOnly?: boolean
   ownerOnly?: boolean
-  // Sistema › Histórico: só quem o Eduardo liberou (nem todo admin).
-  historicoOnly?: boolean
   // /atendimento: só quem vem com `atendimento: true` no /me (fase de
   // observação: toda pessoa ativa, menos o operador de estoque).
   atendimentoOnly?: boolean
@@ -165,7 +165,9 @@ function groupItem(
     // o nome da própria página (ex.: só vê Lojas → item vira "Lojas").
     label: allowed.length === 1 ? allowed[0].label : base.label,
     to: allowed[0].to,
-    match: tabs.map((t) => t.to),
+    // Só as abas que a pessoa vê: Usuários (com Tarefas dentro) é só de admin,
+    // e quem não é admin continua com o item Tarefas marcado em /tarefas.
+    match: allowed.flatMap(tabRoutes),
   }
 }
 
@@ -243,18 +245,17 @@ const sections = computed<Section[]>(() => [
   {
     label: 'Sistema',
     items: [
-      // Sincronizações + Integrações + Alertas viraram abas de um item só.
-      groupItem(TABS_SISTEMA, { label: 'Integrações', icon: Plug }),
-      // Histórico (25/09/2026): quem mudou o quê. Invisível para quem não
-      // está na lista do Eduardo — inclusive admin.
-      { to: '/historico', label: 'Histórico', icon: History, historicoOnly: true },
+      // 17/11/2026 (Novos procedimentos 9): Integrações (Sincronizações ·
+      // Integrações · Alertas) e o Histórico saíram daqui e viraram a aba
+      // Integrações de Cadastros (lib/navGroups, TABS_INTEGRACOES).
       { to: '/margem-audit', label: 'Auditoria de pedidos', icon: ClipboardList, ownerOnly: true },
-    ].filter((x): x is Item => x !== null),
+    ],
   },
   {
     label: 'Cadastros',
     items: [
-      // Empresas + Cadastros + Lojas + Segmentos viraram abas de um item só.
+      // Empresas + Cadastros + Lojas + Segmentos viraram abas de um item só;
+      // Integrações (com Sincronizações, Alertas e Histórico) também.
       groupItem(TABS_CADASTROS, { label: 'Cadastros', icon: ContactRound }),
       // NF (Faturador) + Faturamento NF idem.
       groupItem(TABS_NF, { label: 'NF Faturador', icon: ReceiptText }),
@@ -279,16 +280,15 @@ const sections = computed<Section[]>(() => [
   {
     label: 'Admin',
     items: [
-      // Permissões e Tarefas agora são abas dentro de Usuários.
-      {
-        to: '/users', label: 'Usuários', icon: Users, adminOnly: true,
-        match: ['/users', '/permissoes', '/tarefas'],
-      },
-      { to: '/configuracoes', label: 'Configurações', icon: Settings, resource: 'configuracoes' },
+      // 17/11/2026 (Novos procedimentos 10): Usuários (com Permissões e
+      // Tarefas dentro) e Faturas saíram do menu e viraram abas de
+      // Configurações — as duas só para admin, como antes. Quem não vê
+      // nenhuma aba continua vendo o item, que leva ao 403 como antes.
+      groupItem(TABS_CONFIGURACOES, { label: 'Configurações', icon: Settings })
+        ?? { to: '/configuracoes', label: 'Configurações', icon: Settings, resource: 'configuracoes' },
       // Não-admin segue com o item próprio de Tarefas (vê só as dele;
       // não enxerga Usuários/Permissões). Admin acessa via aba.
       { to: '/tarefas', label: 'Tarefas', icon: ClipboardList, hideForAdmin: true },
-      { to: '/faturas', label: 'Faturas', icon: Receipt, adminOnly: true },
       { to: '/celulares', label: 'Celulares', icon: Smartphone, adminOnly: true, featureFlag: 'celulares' },
     ],
   },
@@ -327,7 +327,6 @@ const visibleSections = computed(() => {
         if (it.adminOnly && !auth.isAdmin) return false
         if (it.hideForAdmin && auth.isAdmin) return false
         if (it.ownerOnly && !isOwner.value) return false
-        if (it.historicoOnly && auth.user?.historico !== true) return false
         if (it.atendimentoOnly && auth.user?.atendimento !== true) return false
         if (it.appUranyxOnly && auth.user?.app_uranyx !== true) return false
         if (
@@ -341,6 +340,18 @@ const visibleSections = computed(() => {
     }))
     .filter((s) => s.items.length > 0)
 })
+
+// Bolinha vermelha do item: tarefas pendentes (item Tarefas ou o grupo que a
+// contém) e faturas vencendo (o grupo com a aba Faturas, só admin busca).
+function pontoDe(it: Item): string | null {
+  const rotas = it.match ?? [it.to]
+  const partes: string[] = []
+  const t = pendingTarefasCount.value
+  const f = pendingFaturasCount.value
+  if (rotas.includes('/tarefas') && t > 0) partes.push(`${t} tarefa${t === 1 ? '' : 's'} pendente${t === 1 ? '' : 's'}`)
+  if (rotas.includes('/faturas') && f > 0) partes.push(`${f} fatura${f === 1 ? '' : 's'} vencendo`)
+  return partes.length ? partes.join(' · ') : null
+}
 
 function isActive(it: Item) {
   if (it.to === '/') return route.path === '/'
@@ -471,20 +482,14 @@ watch(() => route.path, (p) => openSectionOf(p))
                    visually noisy. Expanded layout: right-aligned next
                    to the label. Collapsed: top-right of the icon. -->
               <!-- Pro admin o item Tarefas não existe — a bolinha aparece no
-                   item Usuários (que contém a aba Tarefas via `match`). -->
+                   item Configurações (que contém Usuários › Tarefas e Faturas
+                   via `match`). Uma bolinha só, com as duas contagens. -->
               <span
-                v-if="(it.to === '/tarefas' || (it.match?.includes('/tarefas') ?? false)) && pendingTarefasCount > 0"
+                v-if="pontoDe(it)"
                 :class="compact
                   ? 'absolute top-1 right-1 inline-block size-2.5 rounded-full bg-red-500'
                   : 'ml-auto inline-block size-2.5 rounded-full bg-red-500'"
-                :title="`${pendingTarefasCount} tarefa${pendingTarefasCount === 1 ? '' : 's'} pendente${pendingTarefasCount === 1 ? '' : 's'}`"
-              />
-              <span
-                v-if="it.to === '/faturas' && pendingFaturasCount > 0"
-                :class="compact
-                  ? 'absolute top-1 right-1 inline-block size-2.5 rounded-full bg-red-500'
-                  : 'ml-auto inline-block size-2.5 rounded-full bg-red-500'"
-                :title="`${pendingFaturasCount} fatura${pendingFaturasCount === 1 ? '' : 's'} vencendo`"
+                :title="pontoDe(it) ?? undefined"
               />
             </NuxtLink>
           </li>

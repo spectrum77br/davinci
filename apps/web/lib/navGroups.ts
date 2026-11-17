@@ -12,22 +12,51 @@ export type RouteTab = {
   resource?: Resource
   /** Só admins veem a aba. */
   adminOnly?: boolean
+  /** Só quem vem com esta chave `true` no /me — vale até para admin (o
+   *  Histórico só abre para quem o Eduardo liberou). */
+  soComChave?: 'historico'
+  /** Aba que é um grupo de outras abas (17/11/2026: Integrações dentro de
+   *  Cadastros, Usuários dentro de Configurações). Aparece se a pessoa vê
+   *  alguma delas, leva à primeira que ela vê e fica marcada em todas. */
+  abas?: RouteTab[]
+  /** Bolinha vermelha da aba (as pendências que o menu lateral já conta). */
+  ponto?: 'tarefas' | 'faturas'
 }
 
 type UserLike = {
   role?: string | null
   permissions?: Record<string, Record<string, boolean> | undefined> | null
+  historico?: boolean | null
 } | null | undefined
 
 /** Abas que ESTE usuário pode ver (mesma regra do useCan: admin vê tudo). */
 export function allowedTabs(tabs: RouteTab[], user: UserLike): RouteTab[] {
   if (!user) return []
   const isAdmin = user.role === 'admin'
-  return tabs.filter((t) => {
-    if (t.adminOnly) return isAdmin
-    if (t.resource) return isAdmin || user.permissions?.[t.resource]?.view === true
-    return true
-  })
+  const visiveis: RouteTab[] = []
+  for (const t of tabs) {
+    if (t.soComChave && user[t.soComChave] !== true) continue
+    if (t.adminOnly && !isAdmin) continue
+    if (t.resource && !isAdmin && user.permissions?.[t.resource]?.view !== true) continue
+    if (t.abas) {
+      const dentro = allowedTabs(t.abas, user)
+      if (!dentro.length) continue
+      visiveis.push({ ...t, to: dentro[0].to })
+      continue
+    }
+    visiveis.push(t)
+  }
+  return visiveis
+}
+
+/** Rotas em que a aba fica marcada: a dela ou, num grupo, as de todas as abas de dentro. */
+export function tabRoutes(t: RouteTab): string[] {
+  return t.abas ? t.abas.flatMap(tabRoutes) : [t.to]
+}
+
+/** Pendências (bolinha) da aba e das abas de dentro. */
+export function tabPontos(t: RouteTab): NonNullable<RouteTab['ponto']>[] {
+  return [...(t.ponto ? [t.ponto] : []), ...(t.abas ?? []).flatMap(tabPontos)]
 }
 
 // ── Admin: Usuários é a entrada; Permissões e Tarefas viram abas dentro.
@@ -36,7 +65,30 @@ export function allowedTabs(tabs: RouteTab[], user: UserLike): RouteTab[] {
 export const TABS_USUARIOS: RouteTab[] = [
   { to: '/users', label: 'Usuários', adminOnly: true },
   { to: '/permissoes', label: 'Permissões', adminOnly: true },
-  { to: '/tarefas', label: 'Tarefas' },
+  { to: '/tarefas', label: 'Tarefas', ponto: 'tarefas' },
+]
+
+// ── Configurações (17/11/2026, Novos procedimentos 10): Usuários e Faturas
+// saíram do menu e viraram abas de Configurações. A permissão não muda: as
+// duas continuam só para admin (a aba Usuários leva junto Permissões e
+// Tarefas); quem tem só `configuracoes` vê a tela de antes, sem a barra.
+// Faturas é o painel das faturas a pagar, não o Faturamento das vendas.
+export const TABS_CONFIGURACOES: RouteTab[] = [
+  { to: '/configuracoes', label: 'Configurações', resource: 'configuracoes' },
+  { to: '/users', label: 'Usuários', adminOnly: true, abas: TABS_USUARIOS },
+  { to: '/faturas', label: 'Faturas', adminOnly: true, ponto: 'faturas' },
+]
+
+// ── Integrações (17/11/2026, Novos procedimentos 9): era o item Integrações
+// de Sistema (Sincronizações · Integrações · Alertas) e virou a aba
+// Integrações de Cadastros, com o Histórico dentro. Mesmas permissões de
+// antes; o Histórico continua só para quem o Eduardo liberou (nem todo admin).
+// Precisa vir antes de TABS_CADASTROS, que a usa.
+export const TABS_INTEGRACOES: RouteTab[] = [
+  { to: '/integrations', label: 'Integrações', resource: 'integracoes' },
+  { to: '/sincronizacoes', label: 'Sincronizações', resource: 'sincronizacoes' },
+  { to: '/alertas', label: 'Alertas', resource: 'alertas' },
+  { to: '/historico', label: 'Histórico', soComChave: 'historico' },
 ]
 
 export const TABS_CADASTROS: RouteTab[] = [
@@ -64,15 +116,11 @@ export const TABS_CADASTROS: RouteTab[] = [
   // Sem `resource` de propósito: quem não tem a permissão vê só os itens de
   // que é responsável (a tela e a API filtram). Admin/Gestor veem todos.
   { to: '/imobilizado', label: 'Imobilizado' },
+  // Integrações (17/11/2026): Integrações · Sincronizações · Alertas · Histórico.
+  { to: '/integrations', label: 'Integrações', abas: TABS_INTEGRACOES },
 ]
 
 export const TABS_NF: RouteTab[] = [
   { to: '/nf-cadastros', label: 'NF (Faturador)', resource: 'nf_faturador' },
   { to: '/nf-faturamento', label: 'Faturamento NF', resource: 'nf_faturamento' },
-]
-
-export const TABS_SISTEMA: RouteTab[] = [
-  { to: '/sincronizacoes', label: 'Sincronizações', resource: 'sincronizacoes' },
-  { to: '/integrations', label: 'Integrações', resource: 'integracoes' },
-  { to: '/alertas', label: 'Alertas', resource: 'alertas' },
 ]

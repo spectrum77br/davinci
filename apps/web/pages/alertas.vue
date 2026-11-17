@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { TABS_SISTEMA } from '~/lib/navGroups'
+import { TABS_CADASTROS, TABS_INTEGRACOES } from '~/lib/navGroups'
 import { Bell, AlertTriangle, AlertCircle, Info, CheckCircle2 } from 'lucide-vue-next'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'alertas', action: 'view' } })
@@ -55,7 +55,8 @@ async function onMarkAllRead() {
 
 <template>
   <div class="space-y-5">
-    <RouteTabs :tabs="TABS_SISTEMA" />
+    <RouteTabs :tabs="TABS_CADASTROS" />
+    <RouteTabs :tabs="TABS_INTEGRACOES" sub />
     <PageHeader title="Alertas" description="Eventos que pedem atenção — estoque baixo, anúncio banido, sync falhou.">
       <template #actions>
         <Button size="sm" variant="outline" :disabled="unread === 0 || loading" @click="onMarkAllRead">

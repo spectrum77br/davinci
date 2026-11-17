@@ -66,7 +66,8 @@ new Function('exports', 'require', transpile(fs.readFileSync(path.join(__dirname
 {
   const can = fs.readFileSync(path.join(__dirname, '../composables/useCan.ts'), 'utf8')
   assert.match(can, /\| 'imobilizado'/)
-  assert.match(can, /'email_padroes',[\s\S]*?'imobilizado',\n    \],/, 'no grupo Cadastros da tela de Permissões')
+  // Integrações (17/11/2026) entrou no grupo depois do Imobilizado: o que importa é ele estar no grupo.
+  assert.match(can, /'email_padroes',(?:(?!\n    \],)[\s\S])*?'imobilizado',/, 'no grupo Cadastros da tela de Permissões')
   const py = fs.readFileSync(path.join(__dirname, '../../api/app/schemas/permissions.py'), 'utf8')
   assert.match(py, /^ {4}"imobilizado",$/m, 'mesmo recurso no backend')
   // Aba de Cadastros (Eduardo, 06/10/2026), sem item próprio no menu e sem

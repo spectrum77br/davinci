@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import { TABS_CONFIGURACOES } from '~/lib/navGroups'
 import { Plus, RefreshCw, X, Trash2 } from 'lucide-vue-next'
 
 definePageMeta({
@@ -205,6 +206,7 @@ function statusOf(f: Fatura): Status {
 
 <template>
   <div class="space-y-4">
+    <RouteTabs :tabs="TABS_CONFIGURACOES" />
     <div class="flex flex-wrap items-center gap-3">
       <h1 class="text-2xl font-semibold">Faturas</h1>
       <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">

@@ -61,9 +61,10 @@ export type ResourceGroup = {
 }
 
 // Ordem e agrupamento ESPELHAM a barra lateral (components/AppSidebar.vue):
-// Operação → Pós-venda → Financeiro → Suprimentos → Sistema → Cadastros →
-// Ouvidoria → Admin. Manter os dois em sincronia pra a tela de Permissões
-// refletir o menu.
+// Operação → Pós-venda → Financeiro → Suprimentos → Cadastros → Ouvidoria →
+// Admin. Manter os dois em sincronia pra a tela de Permissões refletir o menu.
+// (Sistema sumiu daqui em 17/11/2026: Integrações foi para Cadastros, e o que
+// sobrou no menu, a Auditoria de pedidos, é só do dono, sem permissão.)
 export const RESOURCE_GROUPS: ResourceGroup[] = [
   {
     label: 'Operação',
@@ -132,10 +133,6 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
     ],
   },
   {
-    label: 'Sistema',
-    resources: ['sincronizacoes', 'sync_logs', 'integracoes', 'alertas'],
-  },
-  {
     label: 'Cadastros',
     resources: [
       'empresa', 'cadastro', 'lojas_info', 'nf_faturador', 'nf_faturamento',
@@ -147,6 +144,10 @@ export const RESOURCE_GROUPS: ResourceGroup[] = [
       // edit = cadastra/edita/transfere; delete = dá baixa (Administrador de
       // patrimônio). Sem view a pessoa vê só os itens dela.
       'imobilizado',
+      // Integrações (17/11/2026, antes no grupo Sistema): a aba Integrações de
+      // Cadastros, com Sincronizações e Alertas dentro. Sync Logs não está no
+      // menu (só /sync-logs), mas é da mesma família.
+      'integracoes', 'sincronizacoes', 'alertas', 'sync_logs',
     ],
   },
   {

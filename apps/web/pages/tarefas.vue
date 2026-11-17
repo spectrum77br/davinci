@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { TABS_USUARIOS } from '~/lib/navGroups'
+import { TABS_CONFIGURACOES, TABS_USUARIOS } from '~/lib/navGroups'
 import { computed, ref } from 'vue'
 import { Plus, RefreshCw, X, Trash2, Bot, Copy } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
@@ -288,7 +288,8 @@ function userLabel(u: UserOption) {
 
 <template>
   <div class="space-y-4">
-    <RouteTabs :tabs="TABS_USUARIOS" />
+    <RouteTabs :tabs="TABS_CONFIGURACOES" />
+    <RouteTabs :tabs="TABS_USUARIOS" sub />
     <div class="flex flex-wrap items-center gap-3">
       <h1 class="text-2xl font-semibold">Tarefas</h1>
       <Button size="sm" variant="ghost" :disabled="loading" @click="refresh">

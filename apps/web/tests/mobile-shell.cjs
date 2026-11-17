@@ -61,6 +61,8 @@ const globals = {
   useRuntimeConfig: () => ({ public: { enableMarketing: false } }),
   useApi: () => ({ api: async () => ({ count: 0 }) }),
   useTelaCheia: () => telaCheia,
+  // As contagens da bolinha (Tarefas/Faturas) ficam num useState, que a barra de abas também lê.
+  useState: (_key, init) => vue.ref(init()),
 }
 
 function evaluate(content, client = false) {

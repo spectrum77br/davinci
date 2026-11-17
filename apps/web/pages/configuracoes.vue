@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Settings, Bell, Lock, Building2, KeyRound, Webhook, Save, Copy } from 'lucide-vue-next'
+import { TABS_CONFIGURACOES } from '~/lib/navGroups'
 
 definePageMeta({
   middleware: ['permission'],
@@ -106,6 +107,7 @@ onMounted(() => {
 
 <template>
   <div class="space-y-5">
+    <RouteTabs :tabs="TABS_CONFIGURACOES" />
     <PageHeader title="Configurações" description="Preferências da conta, notificações e integrações." />
 
     <div class="grid lg:grid-cols-[220px_1fr] gap-6">
