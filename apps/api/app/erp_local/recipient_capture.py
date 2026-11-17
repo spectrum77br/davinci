@@ -239,8 +239,10 @@ def order_recipient(captured):
 
 # Channels whose buyer comes from DaVinci's copy of Bling while Bling is on (no own access yet).
 # Amazon: buyer and address need restricted roles; at the switch they come from our own app.
-FROM_BLING = {"amazon"}
+# Temu: the whole sale comes from the copy until the store authorizes our own app.
+FROM_BLING = {"amazon", "temu"}
 AMAZON_ID = re.compile(r"\d{3}-\d{7}-\d{7}")
+SALE_NUMBERS = {"amazon": AMAZON_ID, "temu": re.compile(r"PO-\d{3}-\d{5,30}")}
 BLING_COPY_SQL = (
     "SELECT coalesce(json_agg(t),'[]') FROM (SELECT DISTINCT ON (numeroloja)"
     " numeroloja::text AS order_id, nome_destinatario AS name,"
@@ -258,7 +260,8 @@ def bling_copy_reader(read=None):
         from app.erp_local.bling_mirror import read_local as read
 
     def reader(*, channel, store, ids):
-        valid = [i for i in ids if AMAZON_ID.fullmatch(str(i))]
+        pattern = SALE_NUMBERS.get(channel)
+        valid = [i for i in ids if pattern and pattern.fullmatch(str(i))]
         if channel not in FROM_BLING or not valid:
             return {}
         rows = read(BLING_COPY_SQL.format(ids=",".join(f"'{i}'" for i in valid)))

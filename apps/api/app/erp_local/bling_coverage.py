@@ -55,6 +55,17 @@ def _account_by_number(db, sales):
     return None
 
 
+def _policy_name(db, channel, store):
+    """The name the store register gives an account (Temu stores enter by their Bling code)."""
+    try:
+        row = db.execute(
+            "SELECT data FROM store_policies WHERE channel=? AND store=?", (channel, store)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return json.loads(row[0]).get("name") if row else None
+
+
 def compare(db, orders, accounts):
     """`orders`: Bling's sales (see bling_coverage_read); `accounts`: {(channel, store): state}."""
     groups = {}
@@ -69,7 +80,11 @@ def compare(db, orders, accounts):
             found = _account_by_number(db, sales)
             if found in accounts:
                 channel, store = found
-                name = name or f"{channel} (loja do Bling sem vínculo no DaVinci)"
+                name = (
+                    name
+                    or _policy_name(db, channel, store)
+                    or f"{channel} (loja do Bling sem vínculo no DaVinci)"
+                )
         account = (channel, store) if (channel, store) in accounts else None
         row = {
             "bling_store": bling_store,

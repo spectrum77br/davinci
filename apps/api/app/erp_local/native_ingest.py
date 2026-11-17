@@ -53,9 +53,13 @@ OPEN_STATUS = {
     "carrefour": {"SHIPPING"},
 }
 CANCELLED = {"CANCELLED", "CANCELED"}
+# Read from DaVinci's copy of Bling, not from the store (Temu, until its own app is authorized):
+# kept and compared like any store, never turned into an own order, since the copy ends with Bling.
+COPIED_FROM_BLING = {"temu"}
 VERIFY_CANCELLATION = 83962
 PROMOTION_REFUSALS = {
     "cancelled": "Pedido cancelado na loja.",
+    "bling_copy": "Lido pela cópia do Bling: vira pedido próprio só com o app da loja autorizado.",
     "not_open": "A loja ainda não liberou este pedido para envio.",
     "cart_waiting": "Carrinho ainda em leitura: aguarde a próxima rodada.",
     "no_items": "Pedido sem itens.",
@@ -255,7 +259,8 @@ def run_account(erp, channel, store, provider, *, now=None, importer=None):
 
 
 def first_lookback(channel):
-    return FIRST_LOOKBACK_WINDOW if channel in CHARGED else CATCH_UP_LOOKBACK_WINDOW
+    long_first = CHARGED | COPIED_FROM_BLING
+    return FIRST_LOOKBACK_WINDOW if channel in long_first else CATCH_UP_LOOKBACK_WINDOW
 
 
 def run_lookback(erp, channel, store, provider, *, now=None, importer=None):
@@ -446,7 +451,9 @@ def _unit_reasons(db, channel, store, account, key, unit):
         return {"cancelled"}
     reasons = set()
     allowed = OPEN_STATUS.get(channel)
-    if allowed is None or any(str(o.get("status") or "").upper() not in allowed for o in live):
+    if channel in COPIED_FROM_BLING:
+        reasons.add("bling_copy")
+    elif allowed is None or any(str(o.get("status") or "").upper() not in allowed for o in live):
         reasons.add("not_open")
     elif channel == "ml":
         from app.erp_local import ml_shipping

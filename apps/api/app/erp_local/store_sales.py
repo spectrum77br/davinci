@@ -10,6 +10,7 @@ from app.erp_local import native_ingest
 
 REASONS = {
     "cancelled": "Cancelado na loja",
+    "bling_copy": "Pela cópia do Bling: vira pedido próprio só com o app da loja",
     "not_open": "Fora da fase de envio (não pago ou já enviado)",
     "cart_waiting": "Carrinho em leitura",
     "no_items": "Sem itens",
@@ -27,6 +28,7 @@ SETTLED = {"cursor": "9999-12-31T00:00:00+00:00"}
 # its key stays on the ERP server (Bling's key belongs to Bling's app and leaves with it).
 COPIED = {"temu": lambda number: number.startswith("PO-")}
 COPY_NOTE = "Pela cópia do Bling: o ERP ainda não lê esta loja direto"
+STATUS_NAMES = {"BLING_COPY": "Cópia do Bling"}
 # Bling store code -> store, as DaVinci's store_info has it (10/11/2026). Temporary like the bridge.
 COPIED_STORES = {
     "205925390": "Barbosa",
@@ -80,12 +82,14 @@ def _copied(db, bling):
         rows = db.execute("SELECT data FROM reference_rows WHERE kind='orders'").fetchall()
     except sqlite3.OperationalError:
         return []
+    # Sales the reception already keeps (Temu from the copy of Bling, since 17/11) show once.
+    read = {r[0] for r in db.execute("SELECT DISTINCT external_id FROM native_order_observations")}
     found = []
     for row in rows:
         order = json.loads(row[0])
         number = str(order.get("store_number") or "")
         channel = next((c for c, match in COPIED.items() if number and match(number)), None)
-        if not channel:
+        if not channel or number in read:
             continue
         live = bling.get(number) or {}
         store = str(order.get("store") or "")
@@ -132,7 +136,14 @@ def listing(db, query="", offset=0, limit=50, situation=None):
                     "store_id": store,
                     "store": names.get((channel, store), store),
                     "created_at": min((o.get("created_at") or "") for o in orders),
-                    "status": ", ".join(sorted({str(o.get("status") or "") for o in orders})),
+                    "status": ", ".join(
+                        sorted(
+                            {
+                                STATUS_NAMES.get(o.get("status"), str(o.get("status") or ""))
+                                for o in orders
+                            }
+                        )
+                    ),
                     "total": f"{total:.2f}",
                     "buyer": (captured or {}).get("buyer", {}).get("name") or "",
                     "skus": skus,

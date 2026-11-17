@@ -237,6 +237,7 @@ READERS = {
     "tiktok": from_tiktok,
     "magalu": from_magalu,
     "amazon": from_bling_copy,
+    "temu": from_bling_copy,
 }
 
 

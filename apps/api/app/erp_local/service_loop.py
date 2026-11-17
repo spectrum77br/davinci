@@ -40,7 +40,8 @@ def archived_stores(db):
     return out
 
 
-# Channels the reception reads (Temu has no reader yet).
+# Channels whose DaVinci integrations the reception adopts. Temu has no integration there and is
+# read from the copy of Bling instead (adopt_bling_copy_stores).
 READABLE = {"ml", "shopee", "tiktok", "amazon", "magalu", "carrefour"}
 
 
@@ -87,6 +88,39 @@ def adopt_new_stores(erp):
             actor="lojas do DaVinci",
         )
         adopted.append(f"{channel}:{found.get('name') or store}")
+    return adopted
+
+
+def adopt_bling_copy_stores(erp):
+    """Temu stores, read from DaVinci's copy of Bling: they have no integration in DaVinci, so they
+    enter by their Bling store code. A policy the store register turned inactive comes back, since
+    the register only knows DaVinci's integrations."""
+    from app.erp_local import temu_order_probe
+
+    with erp.connection() as db:
+        known = {(r[0], r[1]) for r in db.execute("SELECT channel,store FROM ingest_accounts")}
+        for store, name in temu_order_probe.STORES.items():
+            db.execute(
+                "INSERT INTO store_policies VALUES ('temu',?,'identity_review',?,?) "
+                "ON CONFLICT(channel,store) DO UPDATE SET status='identity_review' "
+                "WHERE store_policies.status='inactive'",
+                (
+                    store,
+                    dumps({"name": f"Temu {name}", "copied_from_bling": True}),
+                    erp.now(),
+                ),
+            )
+    adopted = []
+    for store, name in temu_order_probe.STORES.items():
+        if ("temu", store) in known:
+            continue
+        erp.command(
+            f"adopt-bling-copy-v1:temu:{store}",
+            "ingest.account.set",
+            {"channel": "temu", "store": store, "enabled": True},
+            actor="cópia do Bling",
+        )
+        adopted.append(f"temu:{name}")
     return adopted
 
 
@@ -324,7 +358,7 @@ def main():
                 log.warning("proteção de dados não concluída: %s", type(error).__name__)
             daily_check(erp, args.database.parent / f"conferencia-{today}.json")
             stock_daily(erp, args.database.parent / f"conferencia-estoque-{today}.json")
-        adopted = adopt_new_stores(erp)
+        adopted = adopt_new_stores(erp) + adopt_bling_copy_stores(erp)
         if adopted:
             log.info("lojas novas do DaVinci passam a ser lidas %s", adopted)
         log.info("avisos ao DaVinci %s", deliver_notices(erp))

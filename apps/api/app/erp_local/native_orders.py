@@ -60,6 +60,10 @@ def validate(read):
         from app.erp_local.carrefour_orders import validate as validate_carrefour
 
         return validate_carrefour(read)
+    if isinstance(read, dict) and read.get("source") == "temu_bling_copy_v1_read":
+        from app.erp_local.temu_orders import validate as validate_temu
+
+        return validate_temu(read)
     if isinstance(read, dict) and read.get("source") == "tiktok_orders_202309_read":
         from app.erp_local.tiktok_orders import validate as validate_tiktok
 
@@ -406,7 +410,8 @@ def resolve_item(db, store, item, *, channel="amazon"):
     external, variation = (
         (item["listing_id"], item["variation_id"])
         if channel in {"shopee", "tiktok", "carrefour", "magalu", "ml"}
-        else (item["seller_sku"], item["asin"])
+        # Temu (copy of Bling) has no listing link: only its seller code, checked by the caller.
+        else (item.get("seller_sku"), item.get("asin"))
     )
     if not external or channel not in {"carrefour", "magalu", "ml"} and variation in (None, ""):
         return result
