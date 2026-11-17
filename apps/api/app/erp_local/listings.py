@@ -20,11 +20,12 @@ CREATE TABLE IF NOT EXISTS listing_hidden (
 STATES = {
     "linked": "Vinculado",
     "sku_differs": "SKU do anúncio diferente",
+    "excluded": "Produto excluído no Bling",
     "not_in_erp": "Produto fora do ERP",
     "inactive": "Produto inativo",
     "archived": "Loja arquivada",
 }
-INVALID = {"not_in_erp", "inactive", "archived"}
+INVALID = {"excluded", "not_in_erp", "inactive", "archived"}
 PAGE = 100
 
 
@@ -51,8 +52,10 @@ def classify(db):
         links = _rows(db, "links")
     except sqlite3.OperationalError:
         return []
-    db.executescript(SCHEMA)
-    hidden = {r[0]: r[1] for r in db.execute("SELECT id,reason FROM listing_hidden")}
+    try:
+        hidden = {r[0]: r[1] for r in db.execute("SELECT id,reason FROM listing_hidden")}
+    except sqlite3.OperationalError:
+        hidden = {}
     catalog = _catalog(db)
     out = []
     for link in links:
@@ -62,6 +65,10 @@ def classify(db):
         listing_sku = str(link.get("external_sku") or "").strip()
         if store.get("archived_at"):
             state = "archived"
+        elif str(product.get("situacao") or "").upper() == "E":
+            # The listing still points to a product excluded in Bling (5.472 of them on 12/11/2026,
+            # many with stock on the store): nothing to link it to until it is linked again.
+            state = "excluded"
         elif sku.lower() not in catalog:
             state = "not_in_erp"
         elif catalog[sku.lower()] != "active":

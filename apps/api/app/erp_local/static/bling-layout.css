@@ -176,3 +176,4 @@ body[data-screen=products] #subtitle{display:none}
 .coverage-detail td{background:#fafbfd}.coverage-detail ul{margin:8px 0 0;padding-left:18px;line-height:1.9}.coverage-detail summary{cursor:pointer;color:#2b5ed9}
 .imei-line{display:grid;gap:8px;margin:0 0 14px}.imei-unit{display:grid;grid-template-columns:90px 1fr 1fr;gap:8px;align-items:center}.imei-unit span{font-size:11px;color:#5a6d87}@media(max-width:700px){.imei-unit{grid-template-columns:1fr}}
 .cost-centers{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;border:1px solid #d9e2ef;border-radius:5px;padding:8px}.cost-centers legend{font-size:11px;color:#5a6d87}.listings-actions{justify-content:flex-start;flex-wrap:wrap}
+.products-view-tabs{margin:2px 0 10px}

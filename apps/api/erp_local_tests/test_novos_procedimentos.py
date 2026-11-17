@@ -105,7 +105,11 @@ def _link(identifier, product, store="i1", sku=""):
 def test_listings_show_their_link_and_organize_hides_only_invalid_ones(erp):
     _reference(
         erp,
-        products=[{"id": "p1", "sku": "demo.aparelho"}, {"id": "p2", "sku": "nao.existe"}],
+        products=[
+            {"id": "p1", "sku": "demo.aparelho", "situacao": "A"},
+            {"id": "p2", "sku": "nao.existe", "situacao": "A"},
+            {"id": "p3", "sku": "b056.18.20", "situacao": "E"},
+        ],
         integrations=[
             {"id": "i1", "name": "Loja", "archived_at": None},
             {"id": "i2", "name": "Banida", "archived_at": "2026-11-09"},
@@ -115,11 +119,18 @@ def test_listings_show_their_link_and_organize_hides_only_invalid_ones(erp):
             _link("2", "p1", sku="outro.sku"),
             _link("3", "p2"),
             _link("4", "p1", store="i2"),
+            _link("5", "p3", sku="b056.18.20"),
         ],
     )
     with erp.connection() as db:
         states = {r["id"]: r["state"] for r in listings.classify(db)}
-    assert states == {"1": "linked", "2": "sku_differs", "3": "not_in_erp", "4": "archived"}
+    assert states == {
+        "1": "linked",
+        "2": "sku_differs",
+        "3": "not_in_erp",
+        "4": "archived",
+        "5": "excluded",
+    }
     with pytest.raises(ERPError, match="inválidos"):
         run(erp, "product.listings.organize", {"states": ["linked"]})
     assert (
@@ -127,7 +138,7 @@ def test_listings_show_their_link_and_organize_hides_only_invalid_ones(erp):
     )
     with erp.connection() as db:
         view = listings.overview(db)
-        assert view["counts"]["hidden"] == 2 and {r["id"] for r in view["rows"]} == {"1", "2"}
+        assert view["counts"]["hidden"] == 2 and {r["id"] for r in view["rows"]} == {"1", "2", "5"}
         assert {r["id"] for r in listings.overview(db, hidden=True)["rows"]} == {"3", "4"}
     run(erp, "product.listings.show", {"ids": ["3"]})
     with erp.connection() as db:

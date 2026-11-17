@@ -101,6 +101,7 @@ function applyBlingLayout(){
   if(!['overview','logistics','reference'].includes(page)){
     const lists=[...content.children].filter(section=>section.querySelector('table')&&!section.classList.contains('creation-panel'));
     for(const list of lists.reverse())content.prepend(list);
+    const viewTabs=document.getElementById('products-view-tabs');if(viewTabs)content.prepend(viewTabs);
   }
   if(page==='purchases'){const f=document.getElementById('purchase-form');if(purchaseEditing)f?.closest('.panel').classList.add('form-open');updateDocumentTotal(f,document.getElementById('purchase-total'));}
   document.querySelectorAll('.table-wrap').forEach(t=>t.classList.add('bling-table'));
