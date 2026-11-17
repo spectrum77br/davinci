@@ -7,6 +7,7 @@ import {
   ClipboardList, ChevronDown, ChevronLeft, ChevronRight, Warehouse,
   Coins, FileText, Ship, Landmark, Headset,
   ReceiptText, MessagesSquare, Radar, Flag, Inbox, Smartphone, ShieldCheck, X, Scale, Gavel,
+  GitPullRequest,
 } from 'lucide-vue-next'
 import { allowedTabs, tabRoutes, TABS_CADASTROS, TABS_CONFIGURACOES, TABS_NF } from '~/lib/navGroups'
 
@@ -129,6 +130,8 @@ type Item = {
   resource?: string
   adminOnly?: boolean
   ownerOnly?: boolean
+  // Sistema › Mudanças (17/11/2026): só os aprovadores (`mudancas: true` no /me).
+  mudancasOnly?: boolean
   // /atendimento: só quem vem com `atendimento: true` no /me (fase de
   // observação: toda pessoa ativa, menos o operador de estoque).
   atendimentoOnly?: boolean
@@ -248,6 +251,10 @@ const sections = computed<Section[]>(() => [
       // 17/11/2026 (Novos procedimentos 9): Integrações (Sincronizações ·
       // Integrações · Alertas) e o Histórico saíram daqui e viraram a aba
       // Integrações de Cadastros (lib/navGroups, TABS_INTEGRACOES).
+      // Mudanças (17/11/2026): pedidos de mudança no sistema feitos pelo
+      // Claude; o robô prepara e só vai para o ar com aprovação. Invisível
+      // para quem não é aprovador.
+      { to: '/mudancas', label: 'Mudanças', icon: GitPullRequest, mudancasOnly: true },
       { to: '/margem-audit', label: 'Auditoria de pedidos', icon: ClipboardList, ownerOnly: true },
     ],
   },
@@ -327,6 +334,7 @@ const visibleSections = computed(() => {
         if (it.adminOnly && !auth.isAdmin) return false
         if (it.hideForAdmin && auth.isAdmin) return false
         if (it.ownerOnly && !isOwner.value) return false
+        if (it.mudancasOnly && auth.user?.mudancas !== true) return false
         if (it.atendimentoOnly && auth.user?.atendimento !== true) return false
         if (it.appUranyxOnly && auth.user?.app_uranyx !== true) return false
         if (

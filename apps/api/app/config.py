@@ -316,6 +316,10 @@ class Settings(BaseSettings):
     # via env MARKETING_AGENT_TOKEN on the server AND the same value in the
     # marionete .env to turn the integration on.
     marketing_agent_token: str = ""
+    # Sistema › Mudanças (17/11/2026): token do robô do Mac que faz e publica as
+    # mudanças pedidas pelo Claude (apps/mudancas-robo). Próprio — não é o
+    # token do executor. Vazio = rotas do robô fechadas (401).
+    mudancas_agent_token: str = ""
 
     # ─── Conferência Shopee (06/10/2026, docs/conferencia-shopee.md) ──────
     # Relatório de marketing por loja (Mala · Celular · Eletro): o executor do

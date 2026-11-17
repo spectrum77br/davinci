@@ -126,6 +126,10 @@ EXCLUIDAS = re.compile(
     r"|bling_envio_evento$|bling_envio_correcao$|prioridade_estoque_movimentos$|nfse_chamada$"
     # Flex: estado e trilha escritos pela máquina
     r"|flex_(pedido|anuncio_estado|log|conta|emergencia)$"
+    # Sistema › Mudanças (0493): o pedido é escrito pelo robô e já é a trilha
+    # (quem pediu/aprovou/recusou e quando); o diff inteiro seria copiado a
+    # cada passo. `sistema_mudanca_aprovador` (quem aprova) fica COM.
+    r"|sistema_mudanca$"
     # Conferência Shopee: rodadas, coletas e saldos lidos pela máquina (a lista
     # de lojas, `conferencia_shopee_conta`, é editada por pessoas: fica COM)
     r"|conferencia_shopee_(execucao|coleta|saldo)$"

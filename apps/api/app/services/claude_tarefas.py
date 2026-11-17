@@ -1316,6 +1316,136 @@ async def responder_dm(session: AsyncSession, *, dono: User, args: dict[str, Any
     return "Resposta enfileirada. O servidor envia no próximo tick."
 
 
+# ---- mudanças no próprio sistema (Eduardo, 17/11/2026) ------------------------
+#
+# O chefe pede correções rápidas no DaVinci pelo Claude dele; um robô no Mac do
+# Eduardo prepara e testa; SÓ o Eduardo ou o Thorfinn aprovam (tela Sistema ›
+# Mudanças) e aí vai para o ar. Regras em services/sistema_mudancas.
+
+TOOL_PEDIR_MUDANCA: dict[str, Any] = {
+    "name": "pedir_mudanca",
+    "title": "Pedir mudança no sistema DaVinci",
+    "description": (
+        "Pede uma mudança no PRÓPRIO sistema DaVinci: um texto, uma regra, um campo ou uma "
+        "tela que está errada ou deveria funcionar diferente. Um robô prepara e testa a "
+        "mudança e ela só vai para o ar depois que o Eduardo ou o Thorfinn aprovarem — "
+        "avise isso ao usuário. NÃO use para tarefas de pessoas (para isso é "
+        "`criar_tarefa`) nem para mexer em dados de um pedido/produto. Antes de chamar, "
+        "garanta que o pedido está claro: o que acontece hoje, o que deve acontecer, em "
+        "qual tela/menu, e um exemplo (número de pedido, produto, print descrito) se houver "
+        "— se faltar algo importante, pergunte ao usuário primeiro. Uma mudança por pedido. "
+        "Só para administradores."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "titulo": {
+                "type": "string",
+                "description": "Resumo curto da mudança (até 200 letras).",
+            },
+            "descricao": {
+                "type": "string",
+                "description": (
+                    "O pedido completo: como está hoje, como deve ficar, por quê, e um "
+                    "exemplo se houver (até 4000 letras)."
+                ),
+            },
+            "onde": {
+                "type": "string",
+                "description": "Em qual tela, menu, relatório ou robô (se o usuário disse).",
+            },
+        },
+        "required": ["titulo", "descricao"],
+    },
+    "annotations": {
+        "title": "Pedir mudança no sistema DaVinci",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+}
+
+TOOL_LISTAR_MUDANCAS: dict[str, Any] = {
+    "name": "listar_mudancas",
+    "title": "Ver pedidos de mudança no sistema",
+    "description": (
+        "Mostra os pedidos de mudança no sistema e em que pé estão: na fila do robô, robô "
+        "fazendo, esperando aprovação (com o que o robô fez), no ar, recusada (com o "
+        "motivo), precisa da equipe ou falhou. Use quando o usuário perguntar das mudanças "
+        "que pediu. `codigo` (ex.: M-12) mostra só aquela. Só para administradores."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "filtro": {
+                "type": "string",
+                "enum": ["abertas", "todas"],
+                "description": (
+                    "abertas (padrão) = ainda não terminaram; todas = inclui as antigas."
+                ),
+            },
+            "codigo": {"type": "string", "description": "Código da mudança, ex.: M-12."},
+        },
+    },
+    "annotations": {
+        "title": "Ver pedidos de mudança no sistema",
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+}
+
+
+async def pedir_mudanca(session: AsyncSession, *, dono: User, args: dict[str, Any]) -> str:
+    from app.services import sistema_mudancas
+
+    try:
+        m = await sistema_mudancas.criar_pedido(
+            session,
+            dono=dono,
+            titulo=args.get("titulo"),
+            descricao=args.get("descricao"),
+            onde=args.get("onde"),
+        )
+    except sistema_mudancas.MudancaError as exc:
+        raise TarefaInvalidaError(
+            f"Não registrei o pedido de mudança: {exc.detalhe}."
+        ) from exc
+    await session.commit()
+    codigo = sistema_mudancas.codigo(m)
+    return (
+        f"Pedido de mudança {codigo} registrado: {m.titulo}. O robô vai preparar e testar a "
+        "mudança; ela só vai para o ar depois que o Eduardo ou o Thorfinn aprovarem. Para "
+        f"acompanhar, pergunte como está a {codigo}."
+    )
+
+
+async def listar_mudancas(session: AsyncSession, *, dono: User, args: dict[str, Any]) -> str:
+    from app.services import sistema_mudancas
+
+    if dono.role != UserRole.ADMIN:
+        raise TarefaInvalidaError("Os pedidos de mudança no sistema são só para administradores.")
+    codigo = str(args.get("codigo") or "").strip()
+    if codigo:
+        m = await sistema_mudancas.por_codigo(session, codigo)
+        if m is None:
+            return f"Não achei a mudança {codigo}."
+        itens = [m]
+    else:
+        filtro = str(args.get("filtro") or "abertas")
+        itens = await sistema_mudancas.listar(
+            session, status="abertas" if filtro != "todas" else None, limite=MAX_LISTA
+        )
+    if not itens:
+        return "Nenhum pedido de mudança em aberto."
+    nomes = await sistema_mudancas.nomes(
+        session, [i for m in itens for i in (m.pedido_por, m.recusado_por)]
+    )
+    return "\n".join(sistema_mudancas.linha_para_o_claude(m, nomes) for m in itens)
+
+
 FERRAMENTAS: dict[str, tuple[dict[str, Any], Any]] = {
     TOOL_CRIAR_TAREFA["name"]: (TOOL_CRIAR_TAREFA, criar_tarefa),
     TOOL_LISTAR_TAREFAS["name"]: (TOOL_LISTAR_TAREFAS, listar_tarefas),
@@ -1323,4 +1453,6 @@ FERRAMENTAS: dict[str, tuple[dict[str, Any], Any]] = {
     TOOL_CONSULTAR_PEDIDO["name"]: (TOOL_CONSULTAR_PEDIDO, consultar_pedido),
     TOOL_LISTAR_DMS["name"]: (TOOL_LISTAR_DMS, listar_dms),
     TOOL_RESPONDER_DM["name"]: (TOOL_RESPONDER_DM, responder_dm),
+    TOOL_PEDIR_MUDANCA["name"]: (TOOL_PEDIR_MUDANCA, pedir_mudanca),
+    TOOL_LISTAR_MUDANCAS["name"]: (TOOL_LISTAR_MUDANCAS, listar_mudancas),
 }

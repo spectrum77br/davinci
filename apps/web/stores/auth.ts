@@ -16,6 +16,10 @@ export type AuthUser = {
   // Sistema › Histórico (25/09/2026): só vem (true) para quem o Eduardo
   // liberou. Para os outros, inclusive admin, a chave nem existe.
   historico?: boolean
+  // Sistema › Mudanças (17/11/2026): só vem (true) para os aprovadores das
+  // mudanças pedidas pelo Claude (heisenberg e thorfinn). Para os outros a
+  // chave nem existe.
+  mudancas?: boolean
   // /atendimento, fase de observação (07/10/2026): `atendimento` = VÊ a caixa
   // (toda pessoa ativa, menos o operador de estoque); `atendimento_mexe` =
   // responde e muda a caixa (ATENDIMENTO_USUARIOS no .env da api: hoje
