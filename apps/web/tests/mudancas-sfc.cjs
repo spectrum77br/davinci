@@ -54,7 +54,7 @@ assert.match(pagina.scriptSetup.content, /pode_cancelar === true/, 'só com pode
 assert.match(pagina.scriptSetup.content, /cancelando \? 'cancelar' : 'recusar'/, 'chama /cancelar')
 assert.ok(pagina.template.content.includes('caracteres invisíveis'), 'faixa de caractere invisível')
 assert.match(pagina.scriptSetup.content, /const INVISIVEL = /, 'marca caracteres invisíveis')
-// Perguntas (P-N, 0496): etiqueta na lista, resposta na gaveta, sem diff.
+// Perguntas (P-N, 0497): etiqueta na lista, resposta na gaveta, sem diff.
 assert.ok(pagina.template.content.includes("m.tipo === 'pergunta'"), 'etiqueta Pergunta na lista')
 assert.ok(pagina.template.content.includes('Resposta do robô'), 'resposta na gaveta')
 assert.ok(pagina.template.content.includes(`v-if="detalhe.tipo !== 'pergunta'" class="mb-5">\n                <h3 class="mb-1 text-sm font-semibold">Mudança no código`), 'pergunta sem diff')

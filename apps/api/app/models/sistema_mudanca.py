@@ -51,10 +51,10 @@ STATUS_MUDANCA = (
     "recusada",
     "precisa_equipe",
     "falhou",
-    # pergunta (0496): o robô leu o código e respondeu direto a quem perguntou
+    # pergunta (0497): o robô leu o código e respondeu direto a quem perguntou
     "respondida",
 )
-# Pedido de mudança (M-N) ou pergunta sobre como o sistema funciona (P-N, 0496:
+# Pedido de mudança (M-N) ou pergunta sobre como o sistema funciona (P-N, 0497:
 # o robô só LÊ o código e a resposta vai direto a quem perguntou, sem aprovação).
 TIPOS_MUDANCA = ("mudanca", "pergunta")
 

@@ -29,7 +29,7 @@ type Status =
 type ItemLista = {
   id: string
   codigo: string
-  // 'pergunta' (P-N, 0496): o robô só leu o código e respondeu direto a quem perguntou
+  // 'pergunta' (P-N, 0497): o robô só leu o código e respondeu direto a quem perguntou
   tipo?: 'mudanca' | 'pergunta' | string
   titulo: string
   status: Status | string
