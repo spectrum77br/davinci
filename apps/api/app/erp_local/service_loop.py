@@ -40,6 +40,56 @@ def archived_stores(db):
     return out
 
 
+# Channels the reception reads (Temu has no reader yet).
+READABLE = {"ml", "shopee", "tiktok", "amazon", "magalu", "carrefour"}
+
+
+def adopt_new_stores(erp):
+    """A store DaVinci connects after the reception began is read too (ML Atlas, created 12/11/2026,
+    sold 28 times in a week before anyone noticed). Same authority as the others: Bling still owns
+    it and the ERP only reads; its identity waits for a person in the store register."""
+    with erp.connection() as db:
+        try:
+            rows = [
+                json.loads(r[0])
+                for r in db.execute("SELECT data FROM reference_rows WHERE kind='integrations'")
+            ]
+        except sqlite3.Error:
+            return []
+        known = {(r[0], r[1]) for r in db.execute("SELECT channel,store FROM ingest_accounts")}
+    adopted = []
+    for found in rows:
+        channel, store = found.get("platform"), str(found.get("id") or "")
+        if (
+            channel not in READABLE
+            or not store
+            or (channel, store) in known
+            or found.get("status") != "active"
+            or found.get("archived_at")
+            or not found.get("credentials_present")
+        ):
+            continue
+        with erp.connection() as db:
+            db.execute(
+                "INSERT OR IGNORE INTO store_policies VALUES (?,?,?,?,?)",
+                (
+                    channel,
+                    store,
+                    "identity_review",
+                    dumps({"adopted_from_davinci": True, "name": found.get("name") or ""}),
+                    erp.now(),
+                ),
+            )
+        erp.command(
+            f"adopt-store-v1:{channel}:{store}",
+            "ingest.account.set",
+            {"channel": channel, "store": store, "enabled": True},
+            actor="lojas do DaVinci",
+        )
+        adopted.append(f"{channel}:{found.get('name') or store}")
+    return adopted
+
+
 # Reading stopped for these by the store's answer, not by a person: new credentials can fix them.
 RENEWABLE = {"auth_denied", "credentials_missing", "credential_unreadable"}
 
@@ -274,6 +324,9 @@ def main():
                 log.warning("proteção de dados não concluída: %s", type(error).__name__)
             daily_check(erp, args.database.parent / f"conferencia-{today}.json")
             stock_daily(erp, args.database.parent / f"conferencia-estoque-{today}.json")
+        adopted = adopt_new_stores(erp)
+        if adopted:
+            log.info("lojas novas do DaVinci passam a ser lidas %s", adopted)
         log.info("avisos ao DaVinci %s", deliver_notices(erp))
         revived = revive_renewed(erp)
         if revived:
