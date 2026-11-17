@@ -732,6 +732,26 @@ def test_por_que_nao_verifica_no_canal(canal, categoria, motivo):
     assert r == motivo
 
 
+def test_b14_o_verificador_roda_quando_o_banco_ainda_pode_soltar_o_assunto():
+    """B14 (17/11/2026): a conferência com o banco roda depois do verificador e pode soltar o
+    assunto fora das listas — o verificador roda (antes, o rascunho que o banco soltava ficava preso
+    por "verificador não rodou"). Sem a virada, sem texto ou com a trava que o banco não solta,
+    como antes."""
+    canal = types.SimpleNamespace(modo=MODO_AUTO, auto_categorias=["rastreio"], auto_agente=[])
+    virada = _ctx(regua=True, banco_exigido=True)
+    texto = "Olá! O andamento aparece em Minhas Compras > o pedido."
+    no_canal = verificador.por_que_nao_verifica_no_canal
+    assert no_canal("rastreio", virada, _base(), _CONVERSA, canal, texto=texto) is None
+    preso = "assunto_nao_liberado_agente"
+    assert no_canal("rastreio", _ctx(), _base(), _CONVERSA, canal, texto=texto) == preso
+    assert no_canal("rastreio", virada, _base(), _CONVERSA, canal) == preso
+    copiloto = types.SimpleNamespace(modo=MODO_COPILOTO, auto_categorias=[], auto_agente=[])
+    assert (
+        no_canal("rastreio", virada, _base(), _CONVERSA, copiloto, texto=texto)
+        == verificador.NAO_RODA_FORA_DO_AUTO
+    )
+
+
 # ─────────────── a trava do envio (pura) ───────────────
 
 

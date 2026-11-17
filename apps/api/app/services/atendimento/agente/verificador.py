@@ -2978,12 +2978,14 @@ def por_que_nao_verifica_no_canal(
     *,
     checagens_feitas: Sequence[str] = (),
     sem_a_nf: bool = False,
+    texto: str | None = None,
 ) -> str | None:
     """O canal liberaria o assunto do rascunho para o agente? (`ia.trava_do_agente`). PURA.
 
     `categoria` = a do rascunho (depois de `ia.assunto_do_agente`);
     `checagens_feitas` = os códigos das pendências (o andamento); `sem_a_nf`
-    (`nf_com_outra_resposta`): sem a ação da NF e o motivo dela.
+    (`nf_com_outra_resposta`): sem a ação da NF e o motivo dela; `texto` = o do
+    rascunho (a conferência com o banco que ainda vai rodar, B14).
     """
     if canal is None or getattr(canal, "modo", None) != constantes.MODO_AUTO:
         return NAO_RODA_FORA_DO_AUTO
@@ -3001,9 +3003,24 @@ def por_que_nao_verifica_no_canal(
         categoria=categoria,
         fatos={**dict(base.fatos_gravados or {}), "agente": agente},
     )
-    motivo = ia.trava_do_agente(
-        rascunho, canal, etiquetas=acao_pessoa.etiquetas_da_conversa(conversa), ligado=True
-    )
+    etiquetas = acao_pessoa.etiquetas_da_conversa(conversa)
+    motivo = ia.trava_do_agente(rascunho, canal, etiquetas=etiquetas, ligado=True)
+    if motivo in ia.TRAVAS_QUE_O_BANCO_SOLTA:
+        from app.services.atendimento.agente import confere_banco
+
+        if confere_banco.vale_conferir(ctx, categoria, texto):
+            # B14 (17/11/2026, a medição das travas: "verificador_nao_rodou" em 6 rascunhos): a
+            # conferência com o banco roda DEPOIS do verificador e pode soltar o assunto ainda
+            # fora das listas ("bateu com a do banco, já manda", 13/11/2026) — sem o verificador,
+            # o rascunho solto ficava preso por "verificador não rodou". O verificador roda; se o
+            # banco não soltar, a trava do assunto segura no envio, como antes.
+            motivo = ia._trava_do_assunto(
+                rascunho,
+                canal,
+                etiquetas=etiquetas,
+                ligado=True,
+                soltas=ia.TRAVAS_QUE_O_BANCO_SOLTA,
+            )
     if motivo is not None:
         return motivo
     if categoria not in constantes.ASSUNTOS_ORIENTACAO and categoria in manual_svc.ids_so_humano(
@@ -3327,6 +3344,7 @@ async def no_rascunho(
                 canal,
                 checagens_feitas=checagens_feitas,
                 sem_a_nf=sem_a_nf,
+                texto=final.texto,
             )
     except Exception as e:  # noqa: BLE001 — sem saber, não roda (e a trava barra)
         logger.warning("atendimento_agente_verificador_elegibilidade", err=type(e).__name__)
