@@ -340,7 +340,7 @@ const titulos = () => avisos.map((a) => a.title)
     const t = await montar({ linhas: [linha({ condicao_produto: 'Manutenção', link_abertura: 'https://x.y/a', reembolso: true, prazo: '2026-12-16T10:00:00Z', tecnico: 'Shark' })] })
     let [c] = t.cartoes()
     assert.equal(t.campo(c, 'Vai pra manutenção?').value, 'sim')
-    assert.equal(t.campo(c, 'Condição').disabled, true)
+    assert.equal(t.campo(c, 'Condição').disabled, false, 'dá pra clicar em "com o técnico" e trocar (17/11)')
     assert.match(t.campo(c, 'Condição').selectedOptions[0].textContent, /com o técnico/)
     assert.match(c.textContent, /16\/12\/26/)
     assert.equal(t.botao(c, 'voltou do técnico'), undefined, 'e-mail fora da lista não vê')
@@ -688,6 +688,25 @@ const titulos = () => avisos.map((a) => a.title)
     assert.match(m.cartoes()[0].textContent, /Escolha como a peça voltou do técnico/)
     assert.equal(m.alvo.value.ocupado(), false)
     m.fim()
+
+    // (17/11) voltou do técnico pela própria Condição: "com o técnico" → Novo, sem
+    // passar pelo "Vai pra manutenção?". Sai da manutenção, custo obrigatório, modal do estoque.
+    const v = await montar({ pecas: [peca({ ja_devolvido: true })], linhas: [linha({ condicao_produto: 'Manutenção', link_abertura: 'https://x.y/a', reembolso: true, tecnico: 'Shark', prazo: '2026-12-11T10:00:00Z' })] })
+    ;[c] = v.cartoes()
+    await v.escolher(v.campo(c, 'Condição'), 'Novo')
+    c = v.cartoes()[0]
+    assert.equal(v.campo(c, 'Condição').value, 'Novo')
+    assert.equal(v.campo(c, 'Vai pra manutenção?').value, 'nao', 'saiu da manutenção sozinho')
+    await v.clicar(v.botao(c, 'salvar'))
+    assert.equal(corpo('PATCH', /devolutions\/L1$/).length, 0, 'sem custo de manutenção não salva')
+    assert.ok(titulos().includes('Custo de manutenção obrigatório'))
+    await v.digitar(v.campo(c, 'Custo manutenção'), '50')
+    modalResposta.DevolucaoEstoqueModal = { destino_sku: 'f105.sa' }
+    rotas.push({ metodo: 'PATCH', url: '/api/devolutions/L1', resposta: ({ body }) => linha({ ...body, manutencao: true, estoque_status: 'ok', estoque_mov_sku: 'f105.sa' }) })
+    await v.clicar(v.botao(c, 'salvar'))
+    const [pv] = corpo('PATCH', /devolutions\/L1$/)
+    assert.equal(pv.condicao_produto, 'Novo'); assert.equal(pv.devolver_estoque, true); assert.equal(pv.estoque_destino_sku, 'f105.sa'); assert.equal(pv.custo_manutencao, 50)
+    v.fim()
 
     // (3) erro sem resposta no POST: relê; a linha foi criada → vira lançamento, sem 2º POST
     let criada = false

@@ -1218,7 +1218,7 @@ function vaiPraManutencao(c: Cartao): boolean {
 function condicaoDoSeletor(c: Cartao): string {
   return vaiPraManutencao(c) ? NA_MANUTENCAO : c.f.condicao_produto
 }
-// O que o seletor (travado) mostra enquanto a peça está na manutenção.
+// O que o seletor mostra enquanto a peça está na manutenção.
 function rotuloManutencao(c: Cartao): string {
   const s = c.salvo
   if (!s || s.condicao_produto !== 'Manutenção') return 'vai pro técnico'
@@ -1295,10 +1295,15 @@ function trocarCondicao(c: Cartao, valor: string): boolean {
   c.erro = null
   return true
 }
+// 17/11/2026 (Vinicius: "ele não deixa clicar em com o técnico"): o seletor fica
+// aberto na Manutenção. Escolher Novo/Usado/Perdimento nele = a peça voltou do
+// técnico — sai da manutenção (o "Vai pra manutenção?" vira Não sozinho) e o
+// salvar segue as mesmas regras: custo de manutenção obrigatório e modal do estoque.
 function mudarCondicao(c: Cartao, ev: Event) {
   const el = ev.target as HTMLSelectElement
+  const valor = el.value === NA_MANUTENCAO ? 'Manutenção' : el.value
   // Barrada: o seletor já mostra o valor novo — volta ao do cartão.
-  if (!trocarCondicao(c, el.value)) el.value = condicaoDoSeletor(c)
+  if (!trocarCondicao(c, valor)) el.value = condicaoDoSeletor(c)
 }
 function mudarManutencao(c: Cartao, ev: Event) {
   const el = ev.target as HTMLSelectElement
@@ -2307,8 +2312,8 @@ defineExpose({ recarregar, temMudancaNaoSalva, ocupado, gravarLink, anexarFotos,
             <select
               :class="CAMPO"
               :value="condicaoDoSeletor(c)"
-              :disabled="travado(c) || vaiPraManutencao(c)"
-              :title="vaiPraManutencao(c) ? 'A peça está na manutenção: a condição sai quando ela voltar do técnico (ou responda Não em “Vai pra manutenção?”)' : 'Perdimento = produto perdido, não volta pro estoque'"
+              :disabled="travado(c)"
+              :title="vaiPraManutencao(c) ? 'A peça está na manutenção. Voltou do técnico? Escolha como voltou (Novo, Usado ou Perdimento) e salve: sai da manutenção e lança no estoque' : 'Perdimento = produto perdido, não volta pro estoque'"
               @change="mudarCondicao(c, $event)"
             >
               <option value="">—</option>
