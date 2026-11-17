@@ -592,6 +592,25 @@ def _pedido_texto(t: dict) -> str:
     )
 
 
+def _saida_do_claude(out: str) -> dict:
+    """O JSON final do Claude Code (`--output-format json`). A saída junta o
+    que ele escreve na tela e os avisos (ex.: "Permission mode forced to
+    default…" vem DEPOIS do JSON) — procura a linha do resultado de trás para
+    frente em vez de pegar a última linha (17/11: a 1ª resposta real se perdeu
+    assim)."""
+    for linha in reversed((out or "").strip().splitlines()):
+        linha = linha.strip()
+        if not (linha.startswith("{") and linha.endswith("}")):
+            continue
+        try:
+            dado = json.loads(linha)
+        except ValueError:
+            continue
+        if isinstance(dado, dict) and dado.get("type") == "result":
+            return dado
+    return {}
+
+
 def _json_final(texto: str) -> dict:
     for linha in reversed([x.strip() for x in (texto or "").splitlines() if x.strip()]):
         if linha.startswith("{") and linha.endswith("}"):
@@ -675,10 +694,7 @@ def fazer(t: dict) -> None:
     if rc == 124:
         resultado(mid, "falhou", erro=f"o robô passou de {LIMITE_MIN} min sem terminar")
         return
-    try:
-        saida = json.loads(out.strip().splitlines()[-1]) if out.strip() else {}
-    except ValueError:
-        saida = {}
+    saida = _saida_do_claude(out)
     texto = str(saida.get("result") or "")
     if saida.get("is_error") or rc != 0:
         erro = (texto or out)[-600:]
@@ -852,10 +868,7 @@ def responder(t: dict) -> None:
     if rc == 124:
         resultado(mid, "falhou", erro=f"o robô passou de {LIMITE_PERGUNTA_MIN} min sem responder")
         return
-    try:
-        saida = json.loads(out.strip().splitlines()[-1]) if out.strip() else {}
-    except ValueError:
-        saida = {}
+    saida = _saida_do_claude(out)
     texto = str(saida.get("result") or "").strip()
     if saida.get("is_error") or rc != 0 or not texto:
         erro = (texto or out)[-600:]

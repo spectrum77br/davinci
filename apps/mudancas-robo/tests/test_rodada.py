@@ -112,6 +112,7 @@ def mundo(tmp_path, monkeypatch):
         "    resposta = ('A Margem segura o pedido quando a margem fica negativa.\\n'\n"
         "                '```python\\nTOKEN = \"abcdef123456789\"\\nchave = \"sk-ant-AAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\\n```')\n"
         "    print(json.dumps({'type': 'result', 'is_error': False, 'result': resposta}))\n"
+        "    print('⚠ Permission mode forced to default — aviso de verdade do Claude Code', file=sys.stderr)\n"
         "    sys.exit(0)\n"
         "elif acao == 'pergunta_vazia':\n"
         "    print(json.dumps({'type': 'result', 'is_error': False, 'result': ''}))\n"
@@ -120,6 +121,7 @@ def mundo(tmp_path, monkeypatch):
         "    fim = {'resultado': 'precisa_equipe', 'resumo': 'Precisa de coluna nova', 'testes': ''}\n"
         "texto = 'Pronto.\\n' + json.dumps(fim, ensure_ascii=False)\n"
         "print(json.dumps({'type': 'result', 'is_error': False, 'result': texto}))\n"
+        "print('⚠ Permission mode forced to default — aviso de verdade do Claude Code', file=sys.stderr)\n"
     )
     exe = tmp_path / "claude"
     exe.write_text(f"#!/bin/sh\nexec {sys.executable} {claude} \"$@\"\n")
