@@ -122,6 +122,10 @@ def upgrade() -> None:
         ),
         schema=SCHEMA,
     )
+    # Tabela nova nunca analisada + milhares de marcas no 1º "Ocultar" = plano
+    # ruim até o autovacuum passar (Mala: 86 ms → 2,1 s, medido na cópia com os
+    # dados reais). ANALYZE vazia já basta para o planejador medir pelo tamanho.
+    op.execute(f"ANALYZE {SCHEMA}.organizar_ocultos")
 
 
 def downgrade() -> None:

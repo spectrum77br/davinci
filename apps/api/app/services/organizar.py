@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import structlog
 from sqlalchemy import (
     ARRAY,
     and_,
@@ -67,6 +68,8 @@ from app.models import (
     User,
 )
 from app.services.advisory_lock import SYNC_NAMESPACE
+
+logger = structlog.get_logger()
 
 # Dois cliques em "Ocultar" ao mesmo tempo: o segundo recebe 409.
 ORGANIZAR_LOCK_KEY = 0x6F72677A  # ascii "orgz"
@@ -317,6 +320,25 @@ def _uuids(valores) -> Any:
 def _tabela_sql() -> str:
     t = OrganizarOculto.__table__
     return f'"{t.schema}".{t.name}' if t.schema else t.name
+
+
+def _sql_analyze() -> str:
+    return f"ANALYZE {_tabela_sql()}"
+
+
+async def atualizar_estatisticas(session: AsyncSession) -> None:
+    """ANALYZE da tabela de marcas logo depois de um "Ocultar"/"Mostrar de
+    novo" (17/11/2026). Medido na cópia com os dados reais: com a tabela nunca
+    analisada (recém-criada) e 9.428 marcas, a lista de Produtos › Mala foi de
+    86 ms para 2,1 s — o planejador não sabe quantas marcas existem até o
+    autovacuum passar. Melhor esforço: erro aqui só vira aviso no log (a marca
+    já foi gravada). Chamar DEPOIS do commit."""
+    try:
+        await session.execute(text(_sql_analyze()))
+        await session.commit()
+    except Exception as e:  # noqa: BLE001 — nunca derruba o Ocultar
+        await session.rollback()
+        logger.warning("organizar_analyze_falhou", erro=str(e)[:200])
 
 
 async def _fechar_vencidas(session: AsyncSession) -> None:

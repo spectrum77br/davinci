@@ -436,6 +436,49 @@ async def test_aplicar_duas_vezes_nao_duplica(client, db, make_user, auth_as):
     assert all(m.oculto_por == admin.id and m.reexibido_em is None for m in marcas)
 
 
+async def _reltuples(db: AsyncSession) -> float:
+    nome = organizar._tabela_sql()
+    return (
+        await db.execute(
+            text("SELECT reltuples FROM pg_class WHERE oid = CAST(:n AS regclass)"), {"n": nome}
+        )
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_ocultar_e_mostrar_de_novo_atualizam_as_estatisticas(client, db, make_user, auth_as):
+    """Medido na cópia com os dados reais (17/11): tabela nunca analisada +
+    9.428 marcas = lista de Produtos › Mala em 2,1 s em vez de 86 ms. O
+    Ocultar e o Mostrar de novo rodam ANALYZE logo depois do commit."""
+    admin = await _admin(make_user, auth_as)
+    await _cenario(db, admin)
+    await db.execute(text(f"ANALYZE {organizar._tabela_sql()}"))
+    await db.commit()
+    assert await _reltuples(db) == 0
+    r = await _aplicar(client, TODAS)
+    assert r.status_code == 200 and r.json()["ocultados"] == 10
+    assert await _reltuples(db) == 10
+    lote = r.json()["lote_id"]
+    real = organizar.atualizar_estatisticas
+    with patch.object(organizar, "atualizar_estatisticas", wraps=real) as w:
+        r2 = await client.post("/api/produtos/organizar/reexibir", json={"lote_id": lote})
+    assert r2.status_code == 200, r2.text
+    assert w.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_falha_no_analyze_nao_derruba_o_ocultar(client, db, make_user, auth_as):
+    admin = await _admin(make_user, auth_as)
+    await _cenario(db, admin)
+    with patch.object(organizar, "_sql_analyze", return_value="ANALYZE tabela_que_nao_existe"):
+        previa = (await client.get("/api/produtos/organizar/previa")).json()
+        r = await _aplicar(client, TODAS, previa)
+    assert r.status_code == 200, r.text
+    assert r.json()["ocultados"] == 10
+    marcas = (await db.execute(select(OrganizarOculto))).scalars().all()
+    assert len(marcas) == 10
+
+
 @pytest.mark.asyncio
 async def test_dois_cliques_ao_mesmo_tempo_o_segundo_recebe_409(client, db, make_user, auth_as):
     admin = await _admin(make_user, auth_as)

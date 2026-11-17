@@ -85,6 +85,7 @@ async def aplicar(
         await session.rollback()
         raise _http(e) from None
     await session.commit()
+    await svc.atualizar_estatisticas(session)
     logger.info(
         "organizar_aplicado",
         actor_user_id=str(user.id),
@@ -115,6 +116,7 @@ async def reexibir(
         await session.rollback()
         raise _http(e) from None
     await session.commit()
+    await svc.atualizar_estatisticas(session)
     logger.info(
         "organizar_reexibido",
         actor_user_id=str(user.id),
