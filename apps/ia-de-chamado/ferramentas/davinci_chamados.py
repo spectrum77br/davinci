@@ -46,6 +46,14 @@ Comandos (a IA usa pelo terminal):
                            você viu — nada vai pro DaVinci nem pro ML
   abrir-ml [estado|assumir|liberar]
                            a IA abre no ML no lugar do robô antigo (só gente usa)
+  abrir-loja fila          aberturas da Shopee/TikTok esperando a tela (só olha)
+  abrir-loja pegar --mensagem ID
+                           pega a abertura antes de ir pra tela
+  abrir-loja pular --mensagem ID
+                           perfil da loja em uso: não oferece esta por 30 min
+  abrir-loja resultado --json '{"mensagem_id": "…", "ok": true, "protocolo": "…", "resumo": "…"}'
+                           abriu (protocolo + resumo + conversa) ou não ("erro": "…";
+                           "humano: …" vai pra pessoa; "parado": "captcha"|"login")
 
 Toda decisão também fica em ~/DaVinci/ia-de-chamado/decisoes.jsonl. Sem modo teste
 (decisão dele): ligada na aba = decide de verdade.
@@ -85,6 +93,11 @@ TEXTO_MAX = 4000  # por mensagem, no que vai pro prompt
 # 30/09 (passo 4): abrir a consulta do ML pelo Fale conosco. ABRIR_ML no .env:
 # desligado (padrão) | teste (vai até o formulário preenchido e PARA) | real.
 TESTES_ABRIR = PASTA / "estado" / "teste-abrir-ml"
+# 17/11/2026: abrir na TELA da Shopee/TikTok o que a API não aceita mais (só
+# reembolso já pago ou em análise). ABRIR_LOJA no .env: desligado (padrão) | real.
+PULADAS_LOJA = PASTA / "estado" / "abrir-loja-puladas.json"
+PULADA_VALE_S = 30 * 60
+PROTOCOLO_TELA = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{3,39}$")
 
 
 def _cfg() -> dict[str, str]:
@@ -271,6 +284,28 @@ def _aberturas(cfg: dict[str, str], ia: dict) -> list[dict]:
     return tarefas[:1]
 
 
+def _modo_loja(cfg: dict[str, str]) -> str:
+    m = (cfg.get("ABRIR_LOJA") or "desligado").strip().lower()
+    return "real" if m == "real" else "desligado"
+
+
+def _aberturas_loja(cfg: dict[str, str]) -> list[dict]:
+    """Até 3 aberturas da Shopee/TikTok (a IA abre UMA por rodada — é conversa na
+    tela — na primeira cuja loja tem o perfil livre). As que ela pulou por perfil em
+    uso não voltam por 30 min. Erro aqui não derruba a rodada forte (instrução de
+    pessoa e ABRIR NO ML seguem)."""
+    if _modo_loja(cfg) != "real":
+        return []
+    try:
+        tarefas = _post(cfg, "abrir-loja/fila", {}).get("tarefas") or []
+    except (SystemExit, OSError, ValueError) as e:  # HTTP, rede (URLError), JSON
+        print(f"abrir-loja: fila indisponível ({e})", file=sys.stderr)
+        return []
+    agora = time.time()
+    puladas = {k: v for k, v in _ler(PULADAS_LOJA).items() if agora - v < PULADA_VALE_S}
+    return [t for t in tarefas if t["mensagem_id"] not in puladas][:3]
+
+
 def cmd_precheck(cfg: dict[str, str], a: argparse.Namespace) -> None:
     ia = _post(cfg, "cerebro", {})
     if not ia.get("ligada"):
@@ -279,7 +314,8 @@ def cmd_precheck(cfg: dict[str, str], a: argparse.Namespace) -> None:
     tipo = getattr(a, "tipo", "todos") or "todos"
     casos = _casos(cfg, tipo)
     aberturas = _aberturas(cfg, ia) if tipo in ("forte", "todos") else []
-    if not casos and not aberturas:
+    na_loja = _aberturas_loja(cfg) if tipo in ("forte", "todos") else []
+    if not casos and not aberturas and not na_loja:
         print(json.dumps({"wakeAgent": False}))
         return
     print(
@@ -308,6 +344,12 @@ def cmd_precheck(cfg: dict[str, str], a: argparse.Namespace) -> None:
                 "`resultado`."
             )
         print(json.dumps(aberturas, ensure_ascii=False, indent=1))
+    if na_loja:
+        print(
+            "\nABRIR NA LOJA (Shopee/TikTok) — siga a seção \"Shopee e TikTok — ABRIR na tela "
+            "(seção ABRIR NA LOJA)\" do CLAUDE.md; estas NÃO usam `decidir`:"
+        )
+        print(json.dumps(na_loja, ensure_ascii=False, indent=1))
 
 
 def cmd_manual(cfg: dict[str, str], _a: argparse.Namespace) -> None:
@@ -546,6 +588,50 @@ def cmd_abrir_ml(cfg: dict[str, str], a: argparse.Namespace) -> None:
         print(json.dumps({"ok": True, "resposta": resposta}, ensure_ascii=False))
 
 
+def cmd_abrir_loja(cfg: dict[str, str], a: argparse.Namespace) -> None:
+    if a.acao == "fila":
+        print(json.dumps(_post(cfg, "abrir-loja/fila", {}), ensure_ascii=False, indent=1))
+        return
+    if _modo_loja(cfg) != "real":
+        sys.exit("ABRIR_LOJA está desligado neste Mac: `pegar` e `resultado` só ligado (real)")
+    if a.acao in ("pegar", "pular") and not a.mensagem:
+        sys.exit(f"{a.acao} precisa de --mensagem")
+    if a.acao == "pular":
+        puladas = _ler(PULADAS_LOJA)
+        puladas[a.mensagem] = time.time()
+        _gravar(PULADAS_LOJA, puladas)
+        print(json.dumps({"ok": True, "volta_em_min": PULADA_VALE_S // 60}))
+        return
+    if a.acao == "pegar":
+        print(json.dumps(_post(cfg, "abrir-loja/pegar", {"mensagem_id": a.mensagem}),
+                         ensure_ascii=False, indent=1))
+        return
+    try:
+        d = json.loads(a.json or "")
+    except ValueError as e:
+        sys.exit(f"JSON inválido: {e}")
+    extras = set(d) - {"mensagem_id", "ok", "protocolo", "resumo", "portal", "erro", "parado",
+                       "conversa"}
+    if extras:
+        sys.exit(f"campos desconhecidos: {sorted(extras)}")
+    # Recusar AQUI (a IA corrige e manda de novo) em vez de o DaVinci dar 422 depois
+    # de a abertura feita na tela — a tarefa voltaria pra fila em 30 min.
+    if d.get("ok") and not (d.get("protocolo") and d.get("resumo")):
+        sys.exit("ok=true precisa de protocolo e resumo")
+    if d.get("protocolo") and not PROTOCOLO_TELA.match(str(d["protocolo"]).strip()):
+        sys.exit("protocolo: só letras, números, . _ / - (4 a 40), sem espaço — corrija e mande de novo")
+    if len(str(d.get("resumo") or "")) > 600:
+        sys.exit("resumo passa de 600 letras — encurte e mande de novo")
+    erro = _validar_conversa(d.get("conversa"))
+    if erro:
+        sys.exit(f"resultado recusado: {erro}")
+    resposta = _post(cfg, "abrir-loja/resultado", d)
+    with DECISOES.open("a") as f:
+        f.write(json.dumps({"quando": datetime.now(timezone.utc).isoformat(), "abrir_loja": d,
+                            "resposta": resposta}, ensure_ascii=False, default=str) + "\n")
+    print(json.dumps({"ok": True, "resposta": resposta}, ensure_ascii=False))
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd")
@@ -585,6 +671,10 @@ def main() -> None:
     ab.add_argument("--json", help="resultado em JSON, numa linha")
     ab.add_argument("--print", help="(teste) print do formulário preenchido")
     ab.add_argument("--nota", help="(teste) o que você viu e fez")
+    al = sub.add_parser("abrir-loja")
+    al.add_argument("acao", choices=("fila", "pegar", "pular", "resultado"))
+    al.add_argument("--mensagem", help="mensagem_id da abertura")
+    al.add_argument("--json", help="resultado em JSON, numa linha")
     a = p.parse_args()
     if a.cmd is None:  # o agendador do Hermes chama sem argumento
         a.cmd = "precheck"
@@ -603,6 +693,7 @@ def main() -> None:
         "exemplos": cmd_exemplos,
         "guarda": cmd_guarda,
         "abrir-ml": cmd_abrir_ml,
+        "abrir-loja": cmd_abrir_loja,
     }[a.cmd](cfg, a)
 
 
