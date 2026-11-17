@@ -194,3 +194,38 @@ def test_an_account_stopped_for_its_token_reads_again_once_davinci_renews_it(erp
     assert tuple(row) == (1, 0, None)
     # Already revived: the same DaVinci credentials do not turn it on twice.
     assert service_loop.revive_renewed(erp) == []
+
+
+def test_a_store_davinci_connects_later_starts_being_read(erp):
+    with erp.connection() as db:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS reference_rows (kind TEXT, id TEXT, data TEXT NOT NULL,"
+            " search TEXT NOT NULL, PRIMARY KEY(kind,id))"
+        )
+        stores = {
+            "atlas": {"platform": "ml", "status": "active", "credentials_present": True},
+            "banida": {
+                "platform": "ml",
+                "status": "active",
+                "archived_at": "2026-11-09",
+                "credentials_present": True,
+            },
+            "sem-chave": {"platform": "shopee", "status": "active", "credentials_present": False},
+            "temu": {"platform": "temu", "status": "active", "credentials_present": True},
+            "geral": {"platform": "bling", "status": "active", "credentials_present": True},
+        }
+        for store, data in stores.items():
+            db.execute(
+                "INSERT INTO reference_rows VALUES ('integrations',?,?,'')",
+                (store, json.dumps({"id": store, "name": store.title(), **data})),
+            )
+    assert service_loop.adopt_new_stores(erp) == ["ml:Atlas"]
+    with erp.connection() as db:
+        row = db.execute(
+            "SELECT enabled,authority FROM ingest_accounts WHERE channel='ml' AND store='atlas'"
+        ).fetchone()
+        policy = db.execute(
+            "SELECT status FROM store_policies WHERE channel='ml' AND store='atlas'"
+        ).fetchone()
+    assert tuple(row) == (1, "bling") and policy[0] == "identity_review"
+    assert service_loop.adopt_new_stores(erp) == []

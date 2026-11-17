@@ -168,7 +168,7 @@ def listings(db, sku):
     stores = {i["id"]: i for i in rows["integrations"]}
     out = []
     for link in rows["links"]:
-        if link.get("product_id") not in ids:
+        if link.get("product_id") not in ids or link.get("platform") == "bling":
             continue
         store = stores.get(link.get("integration_id")) or {}
         out.append(

@@ -123,8 +123,20 @@ test('kit submission keeps parent SKU separate from component SKU and quantity',
   dom.window.close();
 });
 
+test('the ERP opens on Comece aqui with the video and the written guide',async()=>{
+  const {dom,document:d}=await setup();
+  assert.equal(d.querySelector('nav [data-page].active').dataset.page,'inicio');
+  assert.equal(d.querySelector('.guide-video video').getAttribute('src'),'/assets/como-usar.mp4');
+  assert.equal(d.querySelector('.guide-video track').getAttribute('srclang'),'pt-BR');
+  assert.ok(d.querySelectorAll('.guide-step').length>=8);
+  d.querySelector('.guide-step [data-page=products]').click();
+  assert.equal(d.querySelector('nav [data-page].active').dataset.page,'products');
+  dom.window.close();
+});
+
 test('catalog labels are rendered as text rather than executable markup',async()=>{
   const {dom,document:d}=await setup();
+  d.querySelector('nav [data-page=overview]').click();
   assert.equal(d.querySelectorAll('main img').length,0);
   assert.ok(d.querySelector('main').textContent.includes('<img src=x onerror=alert(1)>'));
   dom.window.close();
@@ -147,6 +159,7 @@ test('purchase submission keeps all rows and emits only a create command',async(
 test('real opening catalog is clearly presented as our own working database',async()=>{
   const {dom,document:d}=await setup({catalog_import:{active_products:1,kits:0,products:1,
     known_stock:1,unknown_stock:0,issues:[],loaded_at:'2026-11-05T14:00:00+00:00'}});
+  d.querySelector('nav [data-page=overview]').click();
   assert.match(d.getElementById('environment').textContent,/NÚCLEO PRÓPRIO/);
   assert.match(d.querySelector('main').textContent,/não as sobrescreve/);
   dom.window.close();
@@ -335,6 +348,29 @@ test('the product shows its Tabela de Preços line, warns on a different EAN and
   d.querySelector('nav [data-page=overview]').click();
   assert.match(d.body.textContent,/Resultado das mudanças de custo/);
   assert.ok(d.querySelector('a[href="/api/erp-local/cost-changes.csv"]'));
+});
+
+test('products list the store listings with Vincular and Organizar, orders take IMEIs and payables a cost split',async()=>{
+  const rows=[{id:'1',channel:'shopee',store:'Shopee Mega',listing:'L1',variation:'',listing_sku:'demo.aparelho',sku:'demo.aparelho',title:'Aparelho',stock:3,price:'10',state:'linked',hidden:false},{id:'2',channel:'shopee',store:'Banida',listing:'L2',variation:'',listing_sku:'',sku:'velho',title:'Velho',stock:0,price:'1',state:'archived',hidden:false}];
+  const order={id:'O1',status:'reserved',data:{external_id:'900151',channel:'local',store:'manual',depot:'geral',total:'10.00',created_at:'2026-11-17T12:00:00Z',items:[{sku:'demo.aparelho',quantity:'2',unit_price:'10.00'}],requirements:{'demo.aparelho':'2'}}};
+  const {dom,document:d,requests}=await setup({rows,counts:{linked:1,archived:1,hidden:0},total:2,orders:[order],order_imeis:{O1:{'demo.aparelho':[['490154203237518']]}}});
+  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  d.querySelector('nav [data-page=products]').click();
+  d.querySelector('[data-products-view=listings]').click();
+  await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  assert.match(d.body.textContent,/Loja arquivada/);
+  for(const name of ['data-listings-refresh','data-listings-link','data-listings-organize'])assert.ok(d.querySelector(`[${name}]`));
+  assert.equal(d.querySelector('[data-copy="L1"]').dataset.copy,'L1');
+  d.querySelector('nav [data-page=orders]').click();
+  d.querySelector('[data-edit-sale="O1"]')?.click();
+  const first=d.querySelector('[data-imei="demo.aparelho"][data-unit="0"][data-slot="0"]');
+  assert.ok(first,'quadro de IMEI no pedido');
+  assert.equal(first.value,'490154203237518');
+  d.querySelector('[data-imei="demo.aparelho"][data-unit="1"][data-slot="0"]').value='356938035643809';
+  d.querySelector('[data-imei-save="demo.aparelho"]').click();
+  await new Promise(r=>setImmediate(r));
+  const sent=requests.find(r=>r.kind==='order.imei.save');
+  assert.deepEqual(sent.payload,{id:'O1',sku:'demo.aparelho',units:[['490154203237518'],['356938035643809']]});
 });
 
 test('product editing sends metadata with the current version and preserves GTIN as text',async()=>{

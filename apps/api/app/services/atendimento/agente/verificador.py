@@ -3086,7 +3086,11 @@ class Conferencia:
 # assim. No teste de 16/11, 3 dos 6 rascunhos do banco barrados eram a resposta curta da equipe
 # ("Reembolso direto com a plataforma, não temos acesso!"). Só essa marca: a afirmação sem lastro
 # continua valendo (o "não tem rádio" de outro modelo que o banco trouxe segue barrado).
-MARCAS_QUE_O_BANCO_SOLTA = frozenset({NAO_RESPONDE})
+# 17/11/2026 (o Eduardo: "às vezes é o próprio juiz que trava" — "sim, se fizer ele ficar mais
+# liberal"): também o "nega direito" — é a resposta da própria equipe à MESMA pergunta ("Não temos
+# como alterar, a logística fica em outra cidade, não temos como trocar!", "Não fazemos troca,
+# somente devolução!"): de 16/11 a 17/11 o juiz barrou essas duas e a equipe mandou igual.
+MARCAS_QUE_O_BANCO_SOLTA = frozenset({NAO_RESPONDE, NEGA})
 
 
 def respondida_pelo_banco(r: Resultado, ctx: Any) -> Resultado:
@@ -3106,6 +3110,7 @@ def respondida_pelo_banco(r: Resultado, ctx: Any) -> Resultado:
     solto = v.model_copy(
         update={
             "responde_o_que_foi_perguntado": True,
+            NEGA: False,
             "ok_para_envio_automatico": True,
             "motivos": [],
         }
@@ -3135,14 +3140,21 @@ QUE_SAEM_COM_RESSALVA = frozenset({SEM_LASTRO, NAO_RESPONDE})
 AVISOS_FRACOS = frozenset(
     {checagens.ASSUNTO_DE_PRODUTO, checagens.CONFIANCA_BAIXA, checagens.FICHA_NO_AUTOMATICO, CODIGO}
 )
+# 17/11/2026 (o juiz mais liberal): o anúncio que se contradiz também é aviso de PRODUTO — com a
+# resposta da equipe citada, a palavra dela decide (como o NFC por variação do A17 Pro Max, que a
+# equipe mandou igual); sem ela, segura como antes.
 AVISOS_DO_PRODUTO_COM_A_EQUIPE = frozenset(
     {
         checagens.PRODUTO_SEM_FONTE,
         checagens.CARACTERISTICA_FORA_DO_ANUNCIO,
         checagens.VARIACAO_SEM_DADO,
+        checagens.ANUNCIO_SE_CONTRADIZ,
     }
 )
-_FONTE_DA_EQUIPE = ("par:", "fato:")
+# A fonte da equipe: a resposta dela no banco, o fato aprovado e (17/11/2026) a regra do Manual,
+# que a equipe escreveu ("o valor do anúncio é o praticado no momento", "a compra e o pagamento são
+# pelo app": o juiz barrou e a equipe mandou igual).
+_FONTE_DA_EQUIPE = ("par:", "fato:", "regra:")
 _AFIRMACAO_DO_PEDIDO = re.compile(
     # o estado do pedido, do envio e do reembolso
     r"\b(?:ja\s+)?(?:foi|foram|esta|estao|sera|serao|vai\s+ser|vao\s+ser|ficou|ficaram)\s+"

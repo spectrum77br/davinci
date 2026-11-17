@@ -33,10 +33,12 @@ FIELDS = {
     "returns.receive": {"id", "receipt_id", "lines", "notes"},
     "returns.reverse": {"id"},
     "returns.cancel": {"id"},
-    "returns.close": {"id", "financial"},
+    "returns.close": {"id", "financial", "outcome"},
     "returns.refund": {"id", "reference", "amount", "reason"},
 }
 COMMANDS = set(FIELDS)
+# Where a piece goes when it does not come back to stock (Novos procedimentos 1/6, reembolsos).
+OUTCOMES = {"extraviado": "Extraviado", "sucata": "Sucata", "manutencao": "Manutenção"}
 
 
 def case(db, identifier):
@@ -185,10 +187,28 @@ def apply(erp, db, key, kind, p):
         raise ERPError(
             "return_financial", "A origem financeira já foi cancelada; concilie o histórico.", 409
         )
-    if not db.execute(
+    outcome = p.get("outcome")
+    received = db.execute(
         "SELECT 1 FROM return_receipts WHERE case_id=? AND status='received'", (row["id"],)
-    ).fetchone():
+    ).fetchone()
+    if outcome is not None and outcome not in OUTCOMES:
+        raise ERPError("return_outcome", "Destino da devolução não reconhecido.")
+    if not received and not outcome:
         raise ERPError("return_empty", "Registre o recebimento físico antes de concluir.", 409)
+    if not received:
+        # Extraviado never arrives; sucata and manutenção do not go back to stock. Only an
+        # administrator closes such a return, saying where the piece went (Novos procedimentos 1/6).
+        from app.erp_local import access
+
+        actor = db.execute("SELECT actor FROM events WHERE operation_key=?", (key,)).fetchone()
+        person = access.who(db, actor[0] if actor else "") or {}
+        if access.enforced() and not person.get("admin"):
+            raise ERPError(
+                "return_outcome_admin",
+                "Só um administrador conclui devolução sem a peça entrar no estoque.",
+                403,
+            )
+        data["outcome"] = outcome
     complete = not any(remaining(db, doc["id"], order).values())
     if not complete and financial != "hold":
         raise ERPError(
@@ -249,8 +269,14 @@ def receive(erp, db, key, row, doc, order, p):
         destination = erp.depot(db, item["destination"])
         settings = deposits.metadata(db, deposits.require_active(db, destination))
         condition = item["condition"]
-        if not isinstance(condition, str) or condition not in {"new", "damaged"}:
+        if not isinstance(condition, str) or condition not in {"new", "damaged", "avulso"}:
             raise ERPError("return_condition", "Informe a condição de cada peça recebida.")
+        # Novos procedimentos 1/6: the piece comes back as new (same SKU, for sale) or as avulso
+        # (opened or used, kept apart in a depot of its own).
+        if condition == "avulso" and settings["purpose"] != "avulso":
+            raise ERPError("return_avulso", "Peça avulsa entra num depósito de avulsos.", 409)
+        if condition == "new" and settings["purpose"] == "avulso":
+            raise ERPError("return_destination", "Peça nova volta a um depósito de venda.")
         identity = (sku, condition, destination)
         if identity in seen:
             raise ERPError(

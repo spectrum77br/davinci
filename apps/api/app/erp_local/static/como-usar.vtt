@@ -1,0 +1,49 @@
+WEBVTT
+
+1
+00:00:00.000 --> 00:00:12.108
+Este é o ERP próprio do DaVinci, que vai substituir o Bling. Esta é a tela Comece aqui, com um vídeo curto e o passo a passo escrito para quem vai fazer a transição.
+
+2
+00:00:12.408 --> 00:00:24.043
+Cada cartão explica uma parte do sistema e tem um atalho para a tela. Enquanto o Bling for o dono das lojas, nada daqui é enviado às lojas, ao Bling ou à SEFAZ.
+
+3
+00:00:24.343 --> 00:00:37.287
+Na Visão geral ficam os números do dia. Na homologação, que usa os pedidos reais, aparecem também a conferência com o Bling, loja a loja, e o que o ERP faria em cada ação.
+
+4
+00:00:37.587 --> 00:00:50.310
+Em Pedidos ficam os pedidos próprios, numerados a partir de novecentos mil e um. Clique no número para copiar e no nome do cliente para abrir. As situações são as mesmas do Bling.
+
+5
+00:00:50.610 --> 00:01:02.293
+Pedido de celular tem o quadro IMEI dos celulares, com um ou dois IMEIs por aparelho. O ERP confere os quinze dígitos e recusa um IMEI que já está em outro pedido.
+
+6
+00:01:02.593 --> 00:01:13.378
+Em Produtos está o cadastro, igual ao do Bling: produto simples ou com composição. No topo, a aba Anúncios mostra todos os anúncios das lojas.
+
+7
+00:01:13.678 --> 00:01:27.066
+Ao abrir um produto, a aba Tabela de Preços traz o que o DaVinci guarda: departamento, EAN, certificado da Anatel ou do Inmetro, garantia, prioridade de estoque e as fotos.
+
+8
+00:01:27.366 --> 00:01:35.227
+A aba Vínculos lista os anúncios de cada loja ligados àquele produto, com o estoque e a última sincronização.
+
+9
+00:01:35.527 --> 00:01:50.572
+Em Produtos, Anúncios, cada anúncio tem uma situação: vinculado, SKU diferente, produto excluído no Bling, fora do ERP ou loja arquivada. Organizar oculta os inválidos só aqui, nunca na loja.
+
+10
+00:01:50.872 --> 00:02:04.989
+Em Estoque você consulta o saldo por depósito e define a prioridade de lote, como SP, CI ou PI, por produto base. O pedido reserva quando entra, baixa no envio e devolve no cancelamento.
+
+11
+00:02:05.289 --> 00:02:16.654
+No Financeiro, a conta a pagar pede categoria, permite dividir em porcentagem entre Celular, Mala e Eletro, e registra o lote de estoque com valor e câmbio.
+
+12
+00:02:16.954 --> 00:02:34.209
+Enviar estoque e preço aos anúncios, emitir nota e pedir etiqueta ficam desligados até a troca. Na troca, o DaVinci passa a falar com o ERP no lugar do Bling, loja a loja, com volta segura. Em caso de dúvida, volte a esta tela.

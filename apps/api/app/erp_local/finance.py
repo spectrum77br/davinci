@@ -41,6 +41,10 @@ COMMANDS = {
 }
 
 ENTRY_FIELDS = {
+    "cost_centers",
+    "lot_number",
+    "lot_value",
+    "exchange_rate",
     "kind",
     "reference",
     "party",
@@ -98,6 +102,84 @@ def entry_plan(amount, due_date, occurrence, count):
     return result
 
 
+COST_CENTERS = {"celular": "Celular", "mala": "Mala", "eletro": "Eletro"}
+
+
+def _management(p):
+    """Novos procedimentos 13: a payable split by % among the three departments (cost centers),
+    and a stock lot with its value and exchange rate, so the lot closes with its difference."""
+    out = {}
+    centers = p.get("cost_centers")
+    if isinstance(centers, str) and centers.strip():
+        try:
+            centers = json.loads(centers)
+        except json.JSONDecodeError:
+            raise ERPError("entry_cost_centers", "Rateio por centro de custo inválido.") from None
+    if centers:
+        if not isinstance(centers, dict) or set(centers) - set(COST_CENTERS):
+            raise ERPError("entry_cost_centers", "Os centros de custo são Celular, Mala e Eletro.")
+        split = {k: number(v, zero=True) for k, v in centers.items() if str(v).strip()}
+        if sum(split.values()) != 100:
+            raise ERPError("entry_cost_centers", "O rateio entre os centros de custo soma 100%.")
+        out["cost_centers"] = {k: str(v) for k, v in split.items() if v}
+    if p.get("lot_number"):
+        out["lot_number"] = text(p["lot_number"], "número do lote", 60)
+        if p.get("lot_value") not in (None, ""):
+            out["lot_value"] = str(number(p["lot_value"], money=True))
+        if p.get("exchange_rate") not in (None, ""):
+            out["exchange_rate"] = str(number(p["exchange_rate"], unit=True))
+    return out
+
+
+def lots(db):
+    """Each stock lot: its value, what its payables add up to and what was paid. Paid above the
+    lot value is a negative difference in the summary; below it, positive."""
+    out = {}
+    for row in db.execute(
+        "SELECT d.data,a.id,a.status FROM documents d JOIN accounts a ON a.document_id=d.id "
+        "WHERE d.kind='financial' AND a.kind='payable' AND a.status!='cancelled'"
+    ):
+        data = json.loads(row[0])
+        lot = data.get("lot_number")
+        if not lot:
+            continue
+        entry = out.setdefault(
+            lot,
+            {
+                "lot": lot,
+                "value": None,
+                "exchange_rate": None,
+                "payables": Decimal(0),
+                "paid": Decimal(0),
+                "open": 0,
+            },
+        )
+        if data.get("lot_value"):
+            entry["value"] = Decimal(data["lot_value"])
+        if data.get("exchange_rate"):
+            entry["exchange_rate"] = data["exchange_rate"]
+        entry["payables"] += Decimal(data["amount"])
+        for installment in db.execute(
+            "SELECT id FROM finance_installments WHERE account_id=?", (row[1],)
+        ):
+            entry["paid"] += paid(db, installment[0])
+        entry["open"] += row[2] == "open"
+    result = []
+    for entry in out.values():
+        difference = entry["value"] - entry["paid"] if entry["value"] is not None else None
+        result.append(
+            {
+                **entry,
+                "value": str(entry["value"]) if entry["value"] is not None else None,
+                "payables": str(entry["payables"]),
+                "paid": str(entry["paid"]),
+                "difference": str(difference) if difference is not None else None,
+                "closed": entry["open"] == 0,
+            }
+        )
+    return sorted(result, key=lambda e: e["lot"])
+
+
 def create_entry(erp, db, p):
     if p.get("kind") not in {"payable", "receivable"}:
         raise ERPError("entry_kind", "Escolha conta a pagar ou a receber.")
@@ -124,6 +206,7 @@ def create_entry(erp, db, p):
         if not db.execute("SELECT 1 FROM finance_banks WHERE id=?", (bank,)).fetchone():
             raise ERPError("entry_bank", "Conta financeira não encontrada.", 404)
         metadata["bank_id"] = bank
+    metadata.update(_management(p))
     dates = {k: day(p.get(k)) for k in ("issued_on", "competence_on", "due_date")}
     occurrence, count = p.get("occurrence", "once"), p.get("count", 1)
     plan = entry_plan(value, dates["due_date"], occurrence, count)
