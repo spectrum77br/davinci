@@ -93,9 +93,11 @@ SSH_CHAVE = str(_caminho("DEPLOY_SSH_CHAVE", str(CASA / ".ssh" / "coolify")))
 MODELO = _cfg("MODELO", "claude-opus-5-5")
 ESFORCO = _cfg("ESFORCO", "high")
 LIMITE_MIN = int(_cfg("LIMITE_MINUTOS", "40"))
-# Medido em bytes (o df -B1G arredonda para cima). 27/10: um build com 5,5 GB
-# livres encheu o disco e derrubou o Redis — 8 GB é a regra da operação.
-DISCO_MIN_GB = float(_cfg("DISCO_MIN_GB", "8"))
+# Medido em bytes (o df -B1G arredonda para cima). Faltando, o robô primeiro
+# apaga SÓ o que não interfere em nada (cache de build sem uso e imagens sem
+# nome — o mesmo que se faz à mão) e mede de novo. 17/11: publicado com 6,2 GB
+# depois dessa limpeza, o build gastou ~1,3 GB (mínimo visto 4,85 GB).
+DISCO_MIN_GB = float(_cfg("DISCO_MIN_GB", "6"))
 FAXINA_DIAS = int(_cfg("FAXINA_DIAS", "7"))
 PATH_ROBO = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 TESTAR = RAIZ / "testar.sh"
@@ -829,6 +831,41 @@ done
 """
 
 
+# Limpeza que não interfere em nada (Eduardo, 17/11: "se precisar apagar algo
+# que não interfere em nada pode apagar"): só o cache de build que nenhuma
+# imagem usa e as imagens sem nome (sobras; o davinci-deploy também apaga).
+# NUNCA volumes, containers, banco, /opt/davinci/data, backups, logs. Só com a
+# trava do davinci-deploy na mão e sem build à mão rodando (28/10: podar cache
+# no meio do build de outra pessoa quebrou o build dela).
+_CMD_LIMPAR = r"""flock -n /run/davinci/deploy.lock sh -c '
+if pgrep -f "[d]ocker[ -]compose .*[[:space:]](build|up)([[:space:]]|$)|[b]uildx" >/dev/null
+then echo limpo=NAO; exit 0; fi
+docker builder prune -f >/dev/null 2>&1
+docker image prune -f >/dev/null 2>&1
+echo limpo=SIM
+' || echo limpo=NAO"""
+
+
+def _limpar_servidor(codigo: str) -> bool:
+    rc, out = ssh(_CMD_LIMPAR, timeout=600)
+    feito = rc == 0 and "limpo=SIM" in out
+    log(f"{codigo}: limpeza do disco do servidor (cache de build e imagens sem uso): "
+        f"{'feita' if feito else 'não deu (deploy/build rodando)'}")
+    return feito
+
+
+def _servidor_com_disco(codigo: str) -> dict:
+    """O estado do servidor; com disco abaixo do mínimo e nada rodando, limpa o
+    que não interfere e mede de novo."""
+    srv = _servidor()
+    if srv["livre"] < DISCO_MIN_GB and srv["trava_livre"] and not srv["construindo"]:
+        antes = srv["livre"]
+        if _limpar_servidor(codigo):
+            srv = _servidor()
+            srv["limpou"] = srv["livre"] - antes
+    return srv
+
+
 def _servidor() -> dict:
     rc, out = ssh(_CMD_SERVIDOR)
     if rc != 0:
@@ -873,7 +910,15 @@ def _no_ar(srv: dict) -> str:
 def _ocupado(srv: dict) -> str:
     """O porquê de não dar para publicar agora no servidor, ou ""."""
     if srv["livre"] < DISCO_MIN_GB:
-        return f"o servidor tem só {srv['livre']:.1f} GB livres (mínimo {DISCO_MIN_GB:.0f})"
+        limpou = (
+            " mesmo depois de apagar o cache de build e as imagens sem uso"
+            if "limpou" in srv
+            else ""
+        )
+        return (
+            f"o servidor tem só {srv['livre']:.1f} GB livres{limpou} (mínimo "
+            f"{DISCO_MIN_GB:.0f}) — precisa liberar disco"
+        )
     if not srv["trava_livre"] or srv["construindo"]:
         return "outro deploy/build está rodando no servidor"
     return ""
@@ -913,7 +958,7 @@ def publicar(t: dict) -> None:
             "peça de novo se ainda quiser",
         )
         return
-    srv = _servidor()
+    srv = _servidor_com_disco(codigo)
     no_ar = _no_ar(srv)
     if ja:
         # Uma tentativa anterior já empurrou: falta o deploy (ou ele terminou
@@ -947,7 +992,7 @@ def publicar(t: dict) -> None:
         if not commit:
             return
         # As conferências levam minutos: confere o servidor DE NOVO antes do push.
-        srv = _servidor()
+        srv = _servidor_com_disco(codigo)
         motivo = _ocupado(srv) or (
             "" if _no_ar(srv) == base else "o servidor mudou durante as conferências"
         )

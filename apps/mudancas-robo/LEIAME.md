@@ -23,7 +23,8 @@ servidor). Nada do pedido roda — nem teste — antes do Aprovar; nada vai para
    **Falhou: não publica** (fica "Falhou" com o motivo; detalhes em `registros/`). Passou:
    exige que o main inteiro já esteja NO AR (não só no git do servidor — vale o que o
    `davinci-deploy` registrou ou imagens mais novas que o HEAD), sem build rodando (nem
-   `docker compose` na mão), disco ≥ 8 GB e a trava livre — confere de novo logo antes do
+   `docker compose` na mão), disco ≥ 6 GB (faltando, apaga SÓ o que não interfere: cache de build
+   sem uso e imagens sem nome — nunca dados, volumes, banco, backups) e a trava livre — confere de novo logo antes do
    push; faz o push e roda o `davinci-deploy` desacoplado da conexão (que recusa mexer em
    infra e roda a migration). Ocupado/disco/mudança de outra pessoa ainda fora do ar: volta
    para a fila e tenta de novo em 10 min (o DaVinci avisa quem aprova a cada ~1 h, e na tela dá

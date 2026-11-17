@@ -149,7 +149,7 @@ def mundo(tmp_path, monkeypatch):
     servidor = {
         "head": None, "livre": "20000000000", "trava": "LIVRE", "build": "NAO",
         "registrado": None, "desde": "", "img_api": "", "img_web": "", "deploy_rc": "0",
-        "comandos": [],
+        "livre_depois_da_limpeza": None, "comandos": [],
     }
 
     def _ssh(comando, timeout=120):
@@ -163,6 +163,12 @@ def mundo(tmp_path, monkeypatch):
                 f"img_api={servidor['img_api']}", f"img_web={servidor['img_web']}",
             ]
             return 0, "\n".join(linhas) + "\n"
+        if comando.startswith("flock -n /run/davinci/deploy.lock sh -c"):
+            if servidor["trava"] != "LIVRE" or servidor["build"] != "NAO":
+                return 0, "limpo=NAO\n"
+            if servidor["livre_depois_da_limpeza"] is not None:
+                servidor["livre"] = servidor["livre_depois_da_limpeza"]
+            return 0, "limpo=SIM\n"
         if "setsid -f" in comando:
             return 0, "INICIADO\n"
         if comando.startswith("cat "):
@@ -271,9 +277,10 @@ def test_nao_publica_com_mudanca_de_outra_pessoa_pendente(mundo):
 def test_publicar_espera_disco_e_trava(mundo):
     m = mundo
     r = _fazer(m)
-    m["servidor"]["livre"] = "7900000000"  # 7,9 GB: o df -B1G mostraria "8"
+    m["servidor"]["livre"] = "5900000000"  # 5,9 GB: o df -B1G mostraria "6"
     r2 = _publicar(m, r)
-    assert r2["status"] == "aprovada" and "7.9 GB livres" in r2["erro"], r2
+    assert r2["status"] == "aprovada" and "5.9 GB livres mesmo depois de apagar" in r2["erro"], r2
+    assert any(c.startswith("flock -n /run/davinci/deploy.lock sh -c") for c in m["servidor"]["comandos"])
     m["servidor"]["livre"] = "20000000000"
     m["servidor"]["trava"] = "OCUPADA"
     r2 = _publicar(m, r)
@@ -283,6 +290,31 @@ def test_publicar_espera_disco_e_trava(mundo):
     r2 = _publicar(m, r)
     assert r2["status"] == "aprovada" and "build" in r2["erro"]
     assert not any("setsid -f" in c for c in m["servidor"]["comandos"])
+
+
+def test_disco_curto_limpa_o_que_nao_interfere_e_publica(mundo):
+    m = mundo
+    r = _fazer(m)
+    m["servidor"]["livre"] = "4600000000"
+    m["servidor"]["livre_depois_da_limpeza"] = "6200000000"
+    r2 = _publicar(m, r)
+    assert r2["status"] == "publicada", r2
+    limpeza = [c for c in m["servidor"]["comandos"] if c.startswith("flock -n")]
+    assert limpeza and "docker builder prune -f" in limpeza[0] and "docker image prune -f" in limpeza[0]
+    # nunca o que interfere: volumes, tudo do cache (-a), containers, sistema
+    for perigo in ("volume", "prune -a", "prune --all", "system prune", "container", "rm -"):
+        assert perigo not in limpeza[0], perigo
+
+
+def test_nao_limpa_com_build_de_outra_pessoa_rodando(mundo):
+    m = mundo
+    r = _fazer(m)
+    m["servidor"]["livre"] = "4600000000"
+    m["servidor"]["build"] = "SIM"
+    m["servidor"]["livre_depois_da_limpeza"] = "6200000000"
+    r2 = _publicar(m, r)
+    assert r2["status"] == "aprovada"
+    assert not any(c.startswith("flock -n") for c in m["servidor"]["comandos"])
 
 
 def test_deploy_que_falha_nao_repete_as_cegas(mundo):
