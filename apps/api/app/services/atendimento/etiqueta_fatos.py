@@ -748,6 +748,14 @@ async def reclamacoes_abertas(
 
 def _motivo_reclamacao(r: AtendimentoReclamacao) -> str:
     """Ex.: "Reclamação 5582543195 aberta no ML" — id e plataforma, sem texto do comprador."""
+    if r.plataforma == "amazon":
+        # 16/11/2026: o caso da Amazon vem do e-mail (`mail_atendimento/
+        # reivindicacao.py`), sem id próprio — a chave é "atoz:<pedido>".
+        from app.services.mail_atendimento import reivindicacao
+
+        dados = r.dados if isinstance(r.dados, dict) else {}
+        nome = reivindicacao.NOME_TIPO.get(str(dados.get("tipo_caso") or ""), "Reclamação")
+        return f"{nome} do pedido {r.pedido_marketplace or '?'} aberta na Amazon"
     plataforma = _NOME_PLATAFORMA.get(r.plataforma, r.plataforma)
     tipo = _NOME_TIPO.get(r.tipo, "Reclamação")
     return f"{tipo} {r.externo_id} aberta no {plataforma}"
@@ -1086,7 +1094,11 @@ async def fatos_da_conversa(session: AsyncSession, conversa: AtendimentoConversa
 
 
 async def conversas_do_pedido(
-    session: AsyncSession, plataforma: str | None, pedido_marketplace: str | None
+    session: AsyncSession,
+    plataforma: str | None,
+    pedido_marketplace: str | None,
+    *,
+    limite: int | None = None,
 ) -> list[AtendimentoConversa]:
     """As conversas de um pedido (nº NA PLATAFORMA), a principal primeiro.
 
@@ -1104,6 +1116,8 @@ async def conversas_do_pedido(
     troca, oferta de troca, devolução) quer a conversa da Caixa. E quem
     escolhe "a do pedido" nunca a escolhe, nem sem chat: `conversa_do_pedido`,
     `conversas_do_pedido_bling` e `reclamacoes_devolucoes.e_com_o_comprador`.
+    `limite` = no máximo tantas (16/11/2026, o resumo do pedido do Claude);
+    None = todas.
     """
     chave = str(pedido_marketplace or "").strip()
     if not chave:
@@ -1131,6 +1145,8 @@ async def conversas_do_pedido(
         AtendimentoConversa.ultima_mensagem_em.desc().nulls_last(),
         AtendimentoConversa.created_at.desc(),
     )
+    if limite is not None:
+        consulta = consulta.limit(limite)
     return list((await session.execute(consulta)).scalars().all())
 
 
