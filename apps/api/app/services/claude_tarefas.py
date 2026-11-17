@@ -922,11 +922,21 @@ async def consultar_pedido(session: AsyncSession, *, dono: User, args: dict[str,
         linhas.append("Na plataforma: " + linha)
 
     # O Atendimento (as conversas com o cliente e os avisos da plataforma).
-    atendimento = await _atendimento_do_pedido(session, info.get("plataforma"), mkt)
-    for linha in atendimento:
-        linhas.append("Atendimento: " + linha)
-    if not atendimento:
-        linhas.append("Atendimento: nenhuma conversa ligada a este pedido.")
+    # 16/11 (Eduardo): bloco novo num SAVEPOINT com try — se a leitura falhar,
+    # o resumo do pedido continua saindo (antes dele o resumo nunca dependia disso).
+    try:
+        async with session.begin_nested():
+            atendimento = await _atendimento_do_pedido(session, info.get("plataforma"), mkt)
+    except Exception:  # noqa: BLE001
+        logger.warning("consultar_pedido_atendimento_falhou", pedido=num, exc_info=True)
+        atendimento = None
+    if atendimento is None:
+        linhas.append("Atendimento: não deu para ler as conversas agora (ver a aba Atendimento).")
+    else:
+        for linha in atendimento:
+            linhas.append("Atendimento: " + linha)
+        if not atendimento:
+            linhas.append("Atendimento: nenhuma conversa ligada a este pedido.")
 
     cond = [Chamado.pedido_bling == num]
     if mkt:
