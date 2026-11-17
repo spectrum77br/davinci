@@ -30,6 +30,7 @@ from app.routers import atendimento_lojas_pessoa as atendimento_lojas_pessoa_rou
 from app.routers import atendimento_painel as atendimento_painel_router
 from app.routers import atendimento_reclamacoes as atendimento_reclamacoes_router
 from app.routers import atendimento_redes as atendimento_redes_router
+from app.routers import atendimento_reembolso as atendimento_reembolso_router
 from app.routers import atendimento_robo as atendimento_robo_router
 from app.routers import atendimento_troca as atendimento_troca_router
 from app.routers import atendimento_zap as atendimento_zap_router
@@ -342,6 +343,8 @@ app.include_router(atendimento_reclamacoes_router.router)
 app.include_router(atendimento_troca_router.router)
 # 05/11/2026: o brinde do pedido não pago (o botão e a lista "Brindes a adicionar").
 app.include_router(atendimento_brinde_router.router)
+# 17/11/2026 (Novos procedimentos 3/6): o reembolso ao cliente pela aba Pedido da conversa.
+app.include_router(atendimento_reembolso_router.router)
 # Avaliações de venda (02/10/2026): a aba ★ Avaliação (Shopee e ML), o
 # "responder em público" (atrás do envio) e o "marcar como tratada".
 app.include_router(atendimento_avaliacoes_router.router)

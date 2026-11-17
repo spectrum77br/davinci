@@ -447,6 +447,13 @@ ROTAS_DE_QUEM_RESPONDE = frozenset(
         # O brinde do pedido não pago (05/11/2026): as mesmas 3 equipes, nas lojas delas.
         ("POST", "/api/atendimento/brindes/{integration_id}/{pedido}/adicionar"),
         ("POST", "/api/atendimento/brindes/{integration_id}/{pedido}/dispensar"),
+        # O reembolso ao cliente pela conversa (Novos procedimentos 3/6, 17/11/2026):
+        # passa pela trava para quem responde, e a rota confere o resto
+        # (`routers/atendimento_reembolso.py`) — lançar é de ADM ou de quem tem
+        # `reembolso.edit`, na conversa das lojas dela; aprovar é só de ADM (qualquer
+        # admin: quem paga pode não estar na lista de quem mexe na caixa).
+        ("POST", "/api/atendimento/conversas/{conversa_id}/reembolsos"),
+        ("POST", "/api/atendimento/reembolsos/{refund_id}/aprovar"),
     }
 )
 

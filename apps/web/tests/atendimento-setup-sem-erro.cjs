@@ -9,7 +9,10 @@
 // API, os composables do Nuxt, as libs, os outros componentes):
 //  - o detector pega o erro: um componente de mentira com o MESMO defeito tem de falhar, e o
 //    consertado tem de passar (sem isso, um Vue que engolisse o erro deixaria tudo verde);
-//  - AtendimentoConversa.vue e AtendimentoMetricas.vue sobem sem erro e chegam ao fim do setup.
+//  - AtendimentoConversa.vue e AtendimentoMetricas.vue sobem sem erro e chegam ao fim do setup;
+//  - 17/11/2026 (Novos procedimentos 3/6, o reembolso ao cliente): o painel do pedido
+//    (AtendimentoPedido.vue), o bloco e o diálogo do reembolso e a tela Reembolso
+//    (pages/reembolso.vue, com `await` no topo: o setup assíncrono, com o detector dele).
 // O nome que o Nuxt importa sozinho (ref, computed, useApi…) vira, na primeira vez que falta, o do
 // Vue (se existir) ou um falso — por isso uma variável que não existe de verdade não é achada
 // aqui (é do typecheck). O que roda depois do setup (a API falsa, os timers) não é deste teste.
@@ -62,6 +65,45 @@ function rodarSetup(fonte, nome, props = {}) {
       )
       const ctx = { emit() {}, expose() {}, attrs: {}, slots: {} }
       const ligacoes = escopo.run(() => mod.exports.default.setup(Vue.shallowReactive({ ...props }), ctx))
+      return { ok: true, ligacoes, globais: nomes }
+    } catch (erro) {
+      const falta = /^(\w+) is not defined$/.exec(erro?.message || '')
+      if (erro instanceof ReferenceError && falta && !(falta[1] in globais)) {
+        globais[falta[1]] = falta[1] in Vue ? Vue[falta[1]] : falso(falta[1])
+        continue
+      }
+      return { ok: false, erro }
+    } finally {
+      escopo.stop()
+      console.warn = avisos
+    }
+  }
+  throw new Error(`${nome}: nomes demais faltando`)
+}
+
+// O setup ASSÍNCRONO (17/11/2026, a tela Reembolso tem `await load()` no topo): o mesmo laço,
+// esperando a promessa — o erro depois do `await` só aparece nela. O `withAsyncContext` do Vue
+// pede um componente montado para voltar a ele depois do await; aqui ele só roda a função.
+const vueSemInstancia = { ...Vue, withAsyncContext: (fn) => [fn(), () => {}] }
+const requererAsync = (m) => (m === 'vue' ? vueSemInstancia : falso(m))
+async function rodarSetupAsync(fonte, nome, props = {}) {
+  const { descriptor, errors } = parse(fonte, { filename: nome })
+  assert.deepEqual(errors, [], nome)
+  const script = compileScript(descriptor, { id: nome, inlineTemplate: false })
+  const js = transpile(script.content).replace(/import\.meta/g, '__importMeta')
+  const globais = {}
+  for (let tentativa = 0; tentativa < 400; tentativa++) {
+    const nomes = Object.keys(globais)
+    const mod = { exports: {} }
+    const avisos = console.warn
+    console.warn = () => {}
+    const escopo = Vue.effectScope(true)
+    try {
+      new Function('module', 'exports', 'require', '__importMeta', ...nomes, js)(
+        mod, mod.exports, requererAsync, META, ...nomes.map((n) => globais[n]),
+      )
+      const ctx = { emit() {}, expose() {}, attrs: {}, slots: {} }
+      const ligacoes = await escopo.run(() => mod.exports.default.setup(Vue.shallowReactive({ ...props }), ctx))
       return { ok: true, ligacoes, globais: nomes }
     } catch (erro) {
       const falta = /^(\w+) is not defined$/.exec(erro?.message || '')
@@ -142,6 +184,66 @@ const tela = (rel) => fs.readFileSync(path.resolve(__dirname, '../components', r
   }
 }
 
-console.log('ok — atendimento-setup-sem-erro')
-// O setup deixa promessas e timers do falso para trás: não são deste teste.
-process.exit(0)
+// ------------------------------------------------ o reembolso ao cliente (Novos procedimentos 3/6, 17/11/2026)
+{
+  // O painel do pedido (agora com o bloco e o diálogo do reembolso), com as props da conversa.
+  const conversa = { id: 'c1', plataforma: 'shopee', canal: 'chat', pedido_marketplace: '251117ABC', somente_leitura: false, email: null, comprador_id: 'b1', afiliado: false }
+  const r = rodarSetup(tela('AtendimentoPedido.vue'), 'AtendimentoPedido.vue', {
+    conversa, contexto: null, pedidoMkt: null, produto: null, produtosConversa: [], canEdit: true,
+  })
+  assert.equal(r.ok, true, `o setup do AtendimentoPedido quebrou: ${r.erro?.stack || r.erro}`)
+  for (const n of ['aba', 'mostrarDevolucao', 'temReembolso', 'chaveReembolso', 'reembolsoSinal', 'reembolsoDialogo', 'reembolsoDados', 'abrirReembolso', 'reembolsoDestacado', 'mostrarReembolso']) {
+    assert.ok(n in r.ligacoes, `AtendimentoPedido: ${n} não chegou ao template`)
+  }
+}
+{
+  // O bloco (lista, Aprovar do ADM, "Lançar") e o diálogo de lançar.
+  const r = rodarSetup(tela('AtendimentoReembolsoCliente.vue'), 'AtendimentoReembolsoCliente.vue', { conversaId: 'c1', sinal: 0, destaque: false })
+  assert.equal(r.ok, true, `o setup do AtendimentoReembolsoCliente quebrou: ${r.erro?.stack || r.erro}`)
+  for (const n of ['dados', 'carregando', 'erro', 'aprovando', 'itens', 'carregar', 'lancar', 'aprovar', 'copiarPix']) {
+    assert.ok(n in r.ligacoes, `AtendimentoReembolsoCliente: ${n} não chegou ao template`)
+  }
+  const dados = { pedido: { bling: '300101', marketplace: '251117ABC', plataforma: 'shopee', conta: 'Shopee ATV', valor_pago: 189.9 }, plataforma_reembolsou: false, limite: { valor: 100, pct: 25 }, pode_lancar: true, motivo_bloqueio: null, pode_aprovar: false, itens: [] }
+  const d = rodarSetup(tela('AtendimentoReembolsoLancar.vue'), 'AtendimentoReembolsoLancar.vue', { conversaId: 'c1', dados, aberto: true })
+  assert.equal(d.ok, true, `o setup do AtendimentoReembolsoLancar quebrou: ${d.erro?.stack || d.erro}`)
+  for (const n of ['aberto', 'valorTexto', 'motivo', 'detalhe', 'forma', 'dadosPix', 'porquesAdm', 'anteriores', 'problema', 'qualPedido', 'formatarValor', 'lancar', 'fechar']) {
+    assert.ok(n in d.ligacoes, `AtendimentoReembolsoLancar: ${n} não chegou ao template`)
+  }
+}
+
+async function assincronos() {
+  // O detector do setup assíncrono pega o mesmo defeito de 16/11 DEPOIS do await.
+  const COM_DEFEITO = `<script setup lang="ts">
+const lista = ref<number[]>([])
+await Promise.resolve()
+const total = computed(() => lista.value.length + extra.value)
+watch(total, () => {}, { immediate: true })
+const extra = ref(1)
+</script>`
+  const r = await rodarSetupAsync(COM_DEFEITO, 'ComDefeitoAsync.vue')
+  assert.equal(r.ok, false, 'o detector assíncrono tem de acusar o setup quebrado')
+  assert.match(r.erro.message, /Cannot access 'extra' before initialization/)
+  const ok = await rodarSetupAsync(COM_DEFEITO.replace('const extra = ref(1)\n', '').replace('await Promise.resolve()', 'await Promise.resolve()\nconst extra = ref(1)'), 'ConsertadoAsync.vue')
+  assert.equal(ok.ok, true, String(ok.erro))
+  assert.equal(ok.ligacoes.total.value, 1)
+
+  // A tela Reembolso (Pós-venda › Reembolso): a aprovação do ADM, Motivo, Forma e o Pix do ADM.
+  const pagina = fs.readFileSync(path.resolve(__dirname, '../pages/reembolso.vue'), 'utf8')
+  const p = await rodarSetupAsync(pagina, 'reembolso.vue')
+  assert.equal(p.ok, true, `o setup da tela Reembolso quebrou: ${p.erro?.stack || p.erro}`)
+  for (const n of ['load', 'saveRow', 'setRowConferido', 'aguardaAdm', 'TITULO_AGUARDA_ADM', 'aprovarRow', 'aprovandoId', 'totalColunas', 'motivoTitulo', 'linkConversa', 'textoAprovacao']) {
+    assert.ok(n in p.ligacoes, `reembolso.vue: ${n} não chegou ao template`)
+  }
+}
+
+assincronos().then(
+  () => {
+    console.log('ok — atendimento-setup-sem-erro')
+    // O setup deixa promessas e timers do falso para trás: não são deste teste.
+    process.exit(0)
+  },
+  (e) => {
+    console.error(e)
+    process.exit(1)
+  },
+)

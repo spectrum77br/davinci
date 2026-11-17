@@ -20,7 +20,7 @@ from app.deps.team_scope import (
     conta_no_escopo,
     resolve_team_scope,
 )
-from app.models import BlingOrder, Refund, SituacaoBling, User
+from app.models import BlingOrder, Refund, SituacaoBling, User, UserRole
 from app.schemas.refunds import (
     RefundCreate,
     RefundExistenteOut,
@@ -32,6 +32,7 @@ from app.schemas.refunds import (
     RefundPatch,
     _clamp_cliente_reembolso,
 )
+from app.services import reembolso_cliente
 from app.services.reembolso_sync import sync_reembolso_for_pedido
 from app.services.verificar_margem import (
     refresh_for_pedido as _refresh_verificar_margem_for_pedido,
@@ -134,6 +135,42 @@ async def _pedido_de_outra_equipe(session: AsyncSession, scope: TeamScope, *pedi
 
 def _erro_outra_equipe() -> HTTPException:
     return HTTPException(403, detail={"code": "pedido_de_outra_equipe"})
+
+
+# ── Novos procedimentos 3/6 (17/11/2026): o reembolso ao cliente da conversa ──
+# Os dados do Pix (decisão 7) só para ADM, na tela e na resposta da API; nunca
+# no export. "Aguardando ADM" não pode ser Finalizado por aqui (decisão 3).
+
+
+def _ve_pix(user: User) -> bool:
+    """Quem vê os dados do Pix na tela Reembolso: só ADM (o mesmo de quem aprova)."""
+    return user.role == UserRole.ADMIN
+
+
+async def _nomes_dos_aprovadores(session: AsyncSession, rows) -> dict[UUID, str | None]:
+    """{id: nome} de quem aprovou as linhas (uma consulta; nenhuma, sem aprovação)."""
+    ids = {r.aprovado_por for r in rows if getattr(r, "aprovado_por", None) is not None}
+    if not ids:
+        return {}
+    return {
+        uid: (nome or email or None)
+        for uid, nome, email in (
+            await session.execute(select(User.id, User.name, User.email).where(User.id.in_(ids)))
+        ).all()
+    }
+
+
+def _saida(row: Refund, *, ve_pix: bool, nomes: dict[UUID, str | None] | None = None) -> RefundOut:
+    """O RefundOut da linha: o RefundOut nunca lê a cifra do Pix (schema); aqui ela
+    vira texto só para ADM. O nome de quem aprovou vem de `nomes`."""
+    out = RefundOut.model_validate(row)
+    if ve_pix and row.dados_pagamento:
+        out.dados_pagamento = reembolso_cliente.ler_dados_pagamento(
+            row.dados_pagamento, refund_id=row.id
+        )
+    if row.aprovado_por is not None and nomes:
+        out.aprovado_por_nome = nomes.get(row.aprovado_por)
+    return out
 
 
 async def _situacoes_by_pedido(
@@ -276,9 +313,12 @@ async def list_refunds(
     situacoes = await _situacoes_by_pedido(
         session, {item.pedido_bling for item in items if item.pedido_bling}
     )
+    # 3/6 (17/11/2026): os dados do Pix só para ADM; o nome de quem aprovou.
+    ve_pix = _ve_pix(user)
+    nomes = await _nomes_dos_aprovadores(session, items)
     out_items = []
     for item in items:
-        out = RefundOut.model_validate(item)
+        out = _saida(item, ve_pix=ve_pix, nomes=nomes)
         if item.pedido_bling:
             out.situacao_bling = situacoes.get(item.pedido_bling)
         out_items.append(out)
@@ -322,7 +362,18 @@ _EXPORT_COLUMNS: list[tuple[str, str]] = [
     ("Situação Bling", "situacao_bling"),
     ("Observação", "observacao"),
     ("Criado em", "created_at"),
+    # 3/6 (17/11/2026): o reembolso ao cliente da conversa, no fim da planilha.
+    # Os dados do Pix NUNCA entram aqui (decisão 7 do dono) — o teste confere.
+    ("Situação", "situacao"),
+    ("Motivo", "motivo"),
+    ("Detalhe do motivo", "motivo_detalhe"),
+    ("Forma de pagamento", "forma_pagamento"),
+    ("Aprovado por", "aprovado_por_nome"),
+    ("Aprovado em", "aprovado_em"),
+    ("Origem", "origem"),
 ]
+# As colunas que a planilha nunca leva (o teste do export confere a lista acima).
+_FORA_DO_EXPORT = frozenset({"dados_pagamento"})
 
 
 @router.get("/export.xlsx")
@@ -354,21 +405,38 @@ async def export_refunds(
     situacoes = await _situacoes_by_pedido(
         session, {r.pedido_bling for r in rows if r.pedido_bling}
     )
+    aprovadores = await _nomes_dos_aprovadores(session, rows)
+
+    # Cinto: o que nunca sai na planilha fica fora mesmo se alguém o listar.
+    colunas = [(label, field) for label, field in _EXPORT_COLUMNS if field not in _FORA_DO_EXPORT]
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Reembolsos"
-    ws.append([label for label, _ in _EXPORT_COLUMNS])
+    ws.append([label for label, _ in colunas])
 
     for r in rows:
         line = []
-        for _, field in _EXPORT_COLUMNS:
+        for _, field in colunas:
             if field == "situacao_bling":
                 line.append(situacoes.get(r.pedido_bling or "", ""))
-            elif field in ("data", "created_at", "reembolso_at"):
+            elif field in ("data", "created_at", "reembolso_at", "aprovado_em"):
                 line.append(_fmt_dt_sp(getattr(r, field, None)))
             elif field in ("conferido", "chamado_resolvido"):
                 line.append("Sim" if getattr(r, field, False) else "Não")
+            elif field == "situacao":
+                line.append(
+                    reembolso_cliente.ROTULO_SITUACAO.get(reembolso_cliente.situacao(r), "")
+                )
+            elif field == "motivo":
+                line.append(reembolso_cliente.MOTIVOS.get(r.motivo or "", r.motivo or ""))
+            elif field == "forma_pagamento":
+                line.append(
+                    reembolso_cliente.FORMAS.get(r.forma_pagamento or "", r.forma_pagamento or "")
+                )
+            elif field == "aprovado_por_nome":
+                nome = aprovadores.get(r.aprovado_por) if r.aprovado_por else None
+                line.append(nome or "")
             else:
                 value = getattr(r, field, None)
                 line.append(value if value is not None else "")
@@ -604,6 +672,7 @@ async def _reembolsos_ja_lancados(
                 tipo=r.tipo if _visivel(r) else None,
                 reembolso=r.reembolso if _visivel(r) else None,
                 conferido=bool(r.conferido),
+                situacao=reembolso_cliente.situacao(r),
                 criado_por=nome if _visivel(r) else None,
                 de_outra_equipe=not _visivel(r),
             )
@@ -675,6 +744,7 @@ async def create_refund(
     session.add(row)
     await session.flush()
     pedido = row.pedido_bling  # lido antes do commit: o rollback do refresh expira o objeto
+    ve_pix = _ve_pix(u)  # idem: o usuário é da mesma sessão
     await _sync_reembolso_to_bling_orders(session, pedido)
     await session.commit()
     await _refresh_margem_snapshot(session, pedido)
@@ -685,7 +755,7 @@ async def create_refund(
         pedido_bling=row.pedido_bling,
         created_by=str(u.id),
     )
-    return RefundOut.model_validate(row)
+    return _saida(row, ve_pix=ve_pix)
 
 
 @router.patch("/{refund_id}", response_model=RefundOut)
@@ -708,10 +778,24 @@ async def patch_refund(
     prev_pedido_bling = row.pedido_bling
     was_conferido = row.conferido
     prev_reembolso = row.reembolso
+    # Antes do commit: o rollback do refresh da margem expira o usuário (mesma sessão).
+    ve_pix = _ve_pix(_u)
 
     data = body.model_dump(exclude_unset=True)
     if data.get("conta") is None and "conta" in data:
         raise HTTPException(422, detail={"code": "conta_required"})
+    # 3/6 (17/11/2026, decisão 3 do dono): o reembolso que pede o ADM não é
+    # Finalizado antes da aprovação — nem pela tela, nem pela API.
+    finalizando = data.get("conferido") is True and not row.conferido
+    if finalizando and reembolso_cliente.aguardando_adm(row):
+        raise HTTPException(
+            409,
+            detail={
+                "code": "aguardando_adm",
+                "detail": "Este reembolso espera a aprovação do ADM: só depois dela pode ser "
+                "marcado como Finalizado.",
+            },
+        )
 
     for key, value in data.items():
         setattr(row, key, value)
@@ -743,7 +827,7 @@ async def patch_refund(
     if prev_pedido_bling and prev_pedido_bling != pedido:
         await _refresh_margem_snapshot(session, prev_pedido_bling)
     await session.refresh(row)
-    return RefundOut.model_validate(row)
+    return _saida(row, ve_pix=ve_pix, nomes=await _nomes_dos_aprovadores(session, [row]))
 
 
 @router.delete("/{refund_id}", status_code=status.HTTP_204_NO_CONTENT)

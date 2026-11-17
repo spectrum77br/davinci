@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-vue-next'
 import { isoToday } from '~/lib/date'
+import { rotuloForma, rotuloMotivo, urlAprovar } from '~/components/AtendimentoReembolsoCliente.vue'
 
 definePageMeta({ middleware: ['permission'], permission: { resource: 'reembolso', action: 'view' } })
 
@@ -39,6 +40,19 @@ type RefundRow = {
   situacao_bling: string | null
   created_at: string
   updated_at: string
+  // Lançado pelo Atendimento (Novos procedimentos 3/6, 17/11/2026): o motivo, a
+  // forma, a aprovação do ADM e a conversa de origem. A API antiga não manda.
+  motivo?: string | null
+  motivo_detalhe?: string | null
+  forma_pagamento?: string | null
+  // Os dados do Pix: a API só manda para o ADM (null para os outros).
+  dados_pagamento?: string | null
+  requer_aprovacao?: boolean
+  aprovado_por?: string | null
+  aprovado_por_nome?: string | null
+  aprovado_em?: string | null
+  origem?: string | null
+  conversa_id?: string | null
 }
 
 type RefundPage = {
@@ -130,6 +144,9 @@ const tipoFilter = ref<'all' | RefundTipo>('all')
 const conferidoFilter = ref<ConferidoFilter>('false')
 // Filtro por data do conferido (Refund.conferido_at), só para admins.
 const isAdmin = useIsAdmin()
+// As colunas da tabela (17/11/2026, Motivo, Forma, Aprovação e o Pix do ADM):
+// Identificação (5, +1 com a Situação Bling) + Reembolso (8) + Conferência (3, +1 do Pix).
+const totalColunas = computed(() => (canSeeSituacaoBling.value ? 6 : 5) + 8 + (isAdmin.value ? 4 : 3))
 const dataInicio = ref('')
 const dataFim = ref('')
 
@@ -173,6 +190,49 @@ function apiError(e: any) {
   const detail = e?.data?.detail
   if (detail && typeof detail === 'object') return detail.message || detail.code || e?.message || 'erro'
   return detail || e?.message || 'erro'
+}
+
+// ─── aprovação do ADM (Novos procedimentos 3/6, 17/11/2026) ─────────────────
+// O reembolso ao cliente lançado pelo Atendimento acima do limite (> R$ 100, > 25%
+// do valor pago ou o valor inteiro) espera um ADM aprovar: até lá o Finalizado
+// fica desligado aqui, e a API recusa com 409 `aguardando_adm`.
+const TITULO_AGUARDA_ADM = 'Aguardando a aprovação de um ADM: só depois de aprovado dá para marcar Finalizado.'
+function aguardaAdm(row: RefundRow): boolean {
+  return row.requer_aprovacao === true && !row.aprovado_em
+}
+function codigoDoErro(e: any): string | null {
+  const d = e?.data?.detail
+  return d && typeof d === 'object' && typeof d.code === 'string' ? d.code : null
+}
+// "aprovado 17/11/26, 11:00 · joana dark" (o nome só quando a API manda).
+function textoAprovacao(row: RefundRow): string {
+  const quem = row.aprovado_por_nome ? ` · ${row.aprovado_por_nome}` : ''
+  return `aprovado ${fmtDateTime(row.aprovado_em ?? null)}${quem}`
+}
+// O motivo escrito ("Defeito ou avaria") e o detalhe no title; '' nas linhas antigas.
+function motivoTitulo(row: RefundRow): string {
+  return [rotuloMotivo(row.motivo), (row.motivo_detalhe || '').trim()].filter(Boolean).join(': ')
+}
+function linkConversa(row: RefundRow): string {
+  return `/atendimento?conversa=${encodeURIComponent(row.conversa_id || '')}`
+}
+// Só o ADM aprova (o mesmo POST do bloco da conversa; a API confere de novo).
+const aprovandoId = ref<string | null>(null)
+async function aprovarRow(row: RefundRow) {
+  if (!isAdmin.value || aprovandoId.value || !aguardaAdm(row)) return
+  aprovandoId.value = row.id
+  try {
+    const r = await api<{ item?: { aprovado_em?: string | null; aprovado_por?: string | null } }>(urlAprovar(row.id), { method: 'POST' })
+    row.aprovado_em = r?.item?.aprovado_em || new Date().toISOString()
+    row.aprovado_por_nome = r?.item?.aprovado_por || row.aprovado_por_nome || null
+    error.value = null
+  } catch (e: any) {
+    // Outro ADM aprovou antes: relê a lista para mostrar quem.
+    if (codigoDoErro(e) === 'ja_aprovado') await load()
+    else error.value = apiError(e)
+  } finally {
+    aprovandoId.value = null
+  }
 }
 
 function brl(v: number | null | undefined) {
@@ -267,6 +327,11 @@ function setDraftReembolso(value: string) {
 }
 
 async function setRowConferido(row: RefundRow, value: boolean) {
+  // Aguardando ADM (17/11/2026): o checkbox já vem desligado; aqui é a segunda trava.
+  if (value && aguardaAdm(row)) {
+    error.value = TITULO_AGUARDA_ADM
+    return
+  }
   row.conferido = value
   await saveRow(row)
 }
@@ -521,7 +586,13 @@ async function saveRow(row: RefundRow): Promise<void> {
         row.reembolso_at = saved.reembolso_at
         error.value = null
       } catch (e: any) {
-        error.value = apiError(e)
+        // 409 `aguardando_adm` (17/11/2026): a linha espera o ADM e o Finalizado volta.
+        if (codigoDoErro(e) === 'aguardando_adm') {
+          row.conferido = false
+          error.value = TITULO_AGUARDA_ADM
+        } else {
+          error.value = apiError(e)
+        }
       }
     })
     .finally(() => {
@@ -848,12 +919,12 @@ async function saveRow(row: RefundRow): Promise<void> {
     </div>
 
     <div class="overflow-auto rounded border max-h-[75vh] focus:outline-none" tabindex="0">
-      <table class="min-w-[1440px] text-xs border-collapse">
+      <table class="min-w-[1760px] text-xs border-collapse">
         <thead class="sticky top-0 z-20 bg-background">
           <tr>
             <th class="px-2 py-1 text-left text-[11px] font-semibold border-b" :colspan="canSeeSituacaoBling ? 6 : 5">Identificação</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="6">Reembolso</th>
-            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" colspan="2">Conferência</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-amber-50 dark:bg-amber-900/20" colspan="8">Reembolso</th>
+            <th class="px-2 py-1 text-center text-[11px] font-semibold border-b border-l-[3px] border-gray-400 dark:border-gray-600 bg-emerald-50 dark:bg-emerald-900/20" :colspan="isAdmin ? 4 : 3">Conferência</th>
           </tr>
           <tr class="border-b">
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px]">Data</th>
@@ -865,22 +936,26 @@ async function saveRow(row: RefundRow): Promise<void> {
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[145px] bg-amber-50 dark:bg-amber-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Tipo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Prejuízo</th>
             <th class="px-2 py-1 text-right font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[110px] bg-amber-50 dark:bg-amber-900/20">Reembolso</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[170px] bg-amber-50 dark:bg-amber-900/20" title="Motivo do reembolso ao cliente lançado pelo Atendimento">Motivo</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[70px] bg-amber-50 dark:bg-amber-900/20" title="Como o cliente recebe: Pix ou cupom">Forma</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[150px] bg-amber-50 dark:bg-amber-900/20">Chamado</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[155px] bg-amber-50 dark:bg-amber-900/20">Operação</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[115px] bg-amber-50 dark:bg-amber-900/20" title="Quando o valor do Reembolso foi lançado no DaVinci">Data</th>
-            <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600">Finalizado</th>
+            <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[140px] bg-emerald-50 dark:bg-emerald-900/20 border-l-[3px] border-gray-400 dark:border-gray-600" title="Acima do limite (> R$ 100, > 25% do valor pago ou o valor inteiro) um ADM aprova antes de pagar">Aprovação</th>
+            <th v-if="isAdmin" class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[200px] bg-emerald-50 dark:bg-emerald-900/20" title="Só o ADM vê; não sai no Excel">Dados do Pix</th>
+            <th class="px-2 py-1 text-center font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[90px] bg-emerald-50 dark:bg-emerald-900/20">Finalizado</th>
             <th class="px-2 py-1 text-left font-semibold text-[11px] text-muted-foreground whitespace-nowrap min-w-[260px] bg-emerald-50 dark:bg-emerald-900/20">Observação</th>
           </tr>
         </thead>
         <tbody>
           <tr v-if="loading && !items.length">
-            <td :colspan="canSeeSituacaoBling ? 14 : 13" class="py-8 text-center text-muted-foreground">
+            <td :colspan="totalColunas" class="py-8 text-center text-muted-foreground">
               <Loader2 class="size-4 inline animate-spin mr-1.5" />
               carregando…
             </td>
           </tr>
           <tr v-else-if="!items.length">
-            <td :colspan="canSeeSituacaoBling ? 14 : 13" class="py-8 text-center text-muted-foreground">sem registros</td>
+            <td :colspan="totalColunas" class="py-8 text-center text-muted-foreground">sem registros</td>
           </tr>
           <tr v-for="row in items" :key="row.id" class="border-t hover:brightness-95 dark:hover:brightness-110">
             <td class="px-2 py-1 whitespace-nowrap text-muted-foreground">{{ fmtDateTime(row.data) }}</td>
@@ -915,6 +990,20 @@ async function saveRow(row: RefundRow): Promise<void> {
                 @change="saveRow(row)"
               />
             </td>
+            <!-- Motivo e forma do lançamento pelo Atendimento (3/6, 17/11/2026); "—" nos antigos. -->
+            <td class="max-w-[220px] px-2 py-1 bg-amber-50/40 dark:bg-amber-900/10" data-col-motivo>
+              <span class="block truncate" :title="motivoTitulo(row)">{{ rotuloMotivo(row.motivo) || '—' }}</span>
+              <span v-if="row.motivo_detalhe" class="block truncate text-[10px] text-muted-foreground" :title="row.motivo_detalhe">{{ row.motivo_detalhe }}</span>
+              <a
+                v-if="row.conversa_id"
+                :href="linkConversa(row)"
+                target="_blank"
+                rel="noopener"
+                class="text-[10px] text-muted-foreground underline hover:text-foreground"
+                title="abrir a conversa do Atendimento de onde saiu o reembolso (outra aba)"
+              >ver conversa</a>
+            </td>
+            <td class="px-2 py-1 whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10" data-col-forma>{{ rotuloForma(row.forma_pagamento) || '—' }}</td>
             <td class="px-1 py-0.5 bg-amber-50/40 dark:bg-amber-900/10">
               <input
                 :value="row.chamado || ''"
@@ -936,12 +1025,43 @@ async function saveRow(row: RefundRow): Promise<void> {
             <td class="px-2 py-1 whitespace-nowrap bg-amber-50/40 dark:bg-amber-900/10 text-muted-foreground">
               {{ fmtDateTime(row.reembolso_at) }}
             </td>
-            <td class="px-2 py-1 text-center bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600">
+            <!-- Aprovação do ADM (3/6): o chip enquanto espera; o ADM aprova daqui também. -->
+            <td class="px-2 py-1 bg-emerald-50/40 dark:bg-emerald-900/10 border-l-[3px] border-gray-400 dark:border-gray-600" data-col-aprovacao>
+              <div v-if="aguardaAdm(row)" class="flex flex-wrap items-center gap-1">
+                <span
+                  class="rounded bg-amber-500/20 px-1.5 py-px text-[10px] font-medium text-amber-900 dark:text-amber-200"
+                  :title="TITULO_AGUARDA_ADM"
+                  data-chip-aguardando-adm
+                >Aguardando ADM</span>
+                <button
+                  v-if="isAdmin"
+                  type="button"
+                  class="rounded border px-1.5 py-px text-[10px] hover:bg-muted disabled:opacity-50"
+                  :disabled="!!aprovandoId"
+                  title="aprovar este reembolso (fica no seu nome); depois, marque Finalizado quando pagar"
+                  data-aprovar-reembolso
+                  @click="aprovarRow(row)"
+                >
+                  <Loader2 v-if="aprovandoId === row.id" class="size-3 inline animate-spin" />
+                  aprovar
+                </button>
+              </div>
+              <span v-else-if="row.requer_aprovacao" class="whitespace-nowrap text-[11px] text-emerald-700 dark:text-emerald-400">{{ textoAprovacao(row) }}</span>
+              <span v-else class="text-muted-foreground">—</span>
+            </td>
+            <!-- Os dados do Pix: só o ADM (a API nem manda para os outros; não saem no Excel). -->
+            <td v-if="isAdmin" class="max-w-[260px] px-2 py-1 bg-emerald-50/40 dark:bg-emerald-900/10" data-col-pix>
+              <span v-if="row.dados_pagamento" class="block whitespace-pre-wrap break-words select-all">{{ row.dados_pagamento }}</span>
+              <span v-else class="text-muted-foreground">—</span>
+            </td>
+            <td class="px-2 py-1 text-center bg-emerald-50/40 dark:bg-emerald-900/10">
               <input
                 :checked="row.conferido"
-                :disabled="!canEdit"
+                :disabled="!canEdit || aguardaAdm(row)"
+                :title="aguardaAdm(row) ? TITULO_AGUARDA_ADM : undefined"
                 type="checkbox"
                 class="size-4 rounded border accent-primary disabled:cursor-default disabled:opacity-70"
+                data-finalizado
                 @change="(e) => setRowConferido(row, (e.target as HTMLInputElement).checked)"
               />
             </td>

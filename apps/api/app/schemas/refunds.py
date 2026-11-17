@@ -1,8 +1,17 @@
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    field_validator,
+    model_validator,
+)
+
+from app.services.reembolso_cliente import situacao as _situacao_do_reembolso
 
 # "Sucata" (10/09): reembolso automático da devolução em condição Sucata — mesmo
 # padrão do Extraviado (prejuízo = custo do produto).
@@ -60,6 +69,41 @@ class RefundOut(BaseModel):
     # Situacao ATUAL do pedido no Bling (lookup em bling_orders na listagem;
     # nao persiste no refund).
     situacao_bling: str | None = None
+    # ── Novos procedimentos 3/6 (17/11/2026): o reembolso ao cliente lançado
+    # pela conversa do Atendimento. Nas linhas antigas, tudo vazio.
+    motivo: str | None = None
+    motivo_detalhe: str | None = None
+    forma_pagamento: str | None = None
+    # Os dados do Pix: NUNCA saem do banco por aqui (a coluna é a cifra). A
+    # rota preenche o texto depois, e só para ADM (`routers/refunds._saida`).
+    dados_pagamento: str | None = None
+    requer_aprovacao: bool = False
+    aprovado_por: UUID | None = None
+    aprovado_em: datetime | None = None
+    origem: str | None = None
+    conversa_id: str | None = None
+    # Calculados (não são coluna): a situação da 3/6 — aguardando_adm |
+    # em_aberto | finalizado (`services/reembolso_cliente.situacao`) — e o
+    # nome de quem aprovou (a rota preenche).
+    situacao: str | None = None
+    aprovado_por_nome: str | None = None
+
+    @field_validator("requer_aprovacao", mode="before")
+    @classmethod
+    def _sem_aprovacao_e_false(cls, valor: object) -> object:
+        # A linha recém-criada (antes do refresh) pode vir com None.
+        return False if valor is None else valor
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _da_linha(cls, data: Any, handler: ModelWrapValidatorHandler["RefundOut"]) -> "RefundOut":
+        out = handler(data)
+        if not isinstance(data, dict | BaseModel):
+            # 17/11/2026 (3/6): montado da LINHA do banco, a coluna é a cifra do
+            # Pix — nunca sai por aqui; a rota põe o texto depois, só para ADM.
+            out.dados_pagamento = None
+        out.situacao = _situacao_do_reembolso(out)
+        return out
 
 
 class RefundCreate(BaseModel):
@@ -183,6 +227,8 @@ class RefundExistenteOut(BaseModel):
     tipo: str | None = None
     reembolso: float | None = None
     conferido: bool = False
+    # 17/11/2026 (3/6): aguardando_adm | em_aberto | finalizado.
+    situacao: str | None = None
     criado_por: str | None = None
     # Lançamento de equipe que o usuário não enxerga: a tela avisa que existe,
     # com a data, mas sem valor, conta nem autor — o suficiente para ele parar e

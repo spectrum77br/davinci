@@ -334,6 +334,12 @@ export function situacaoDoSaldo(it: Pick<ItemEstoque, 'existe' | 'saldo' | 'quan
 //   busca da lista vem até aqui: o pedido pesquisado aparece lá, com destaque, ou no
 //   bloco de cima, se for o da conversa. Com compras na lista, o "Conversa sem pedido
 //   ligado" sai: acima dela, parecia contradizê-la.
+// - Reembolso ao cliente (Novos procedimentos 3/6, 17/11/2026; o dono decidiu o
+//   lugar): o bloco AtendimentoReembolsoCliente logo abaixo de "Valor pago pelo
+//   comprador" e, sem retrato (TikTok, Amazon, Magalu), depois do quadro do pedido.
+//   Lista os reembolsos que o pedido já tem e lança o do tipo Cliente; o diálogo
+//   (AtendimentoReembolsoLancar) mora AQUI, fora dos dois ramos, como o da troca.
+//   O atalho da faixa da conversa chega por `mostrarReembolso`.
 import {
   CheckCircle2,
   ChevronDown,
@@ -392,6 +398,7 @@ import { ordenarReclamacoes, type ReclamacoesResposta } from '~/components/Atend
 import type { AcessoGarantia, SituacaoConversa } from '~/lib/garantias'
 import { pareceCodigoDeCompra, termoEhDoPedido } from '~/components/AtendimentoOutrasCompras.vue'
 import { quemTroca, rotuloEstado, useAcessoDaTroca, type EscolhaTroca } from '~/components/AtendimentoTroca.vue'
+import type { ReembolsosResposta } from '~/components/AtendimentoReembolsoCliente.vue'
 
 const props = withDefaults(defineProps<{
   conversa: ConversaDetalhe
@@ -783,7 +790,51 @@ async function mostrarDevolucao(id: string) {
   const bloco = blocos.find((b) => b.dataset.devolucaoPedido === id) ?? blocos[0]
   bloco?.scrollIntoView({ block: 'center', behavior: 'smooth' })
 }
-defineExpose({ mostrarDevolucao })
+
+// ─── reembolso ao cliente (Novos procedimentos 3/6, 17/11/2026) ─────────────
+// Só com pedido na conversa: pergunta de pré-venda e Direct não têm o que reembolsar.
+const temReembolso = computed(() => !props.conversa.id.startsWith('ig:')
+  && props.conversa.plataforma !== 'instagram'
+  && !!(numeroMarketplace.value || pnl.value?.pedido?.numero_bling || pedido.value?.numero))
+// O pedido da conversa mudou (a devolução prendeu o foco em outro): bloco novo.
+const chaveReembolso = computed(() => `${props.conversa.id}:${props.conversa.pedido_marketplace ?? ''}`)
+// Relê o bloco: depois de lançar e junto com o painel (a cada 2 min e no "atualizar").
+const reembolsoSinal = ref(0)
+watch(() => props.painel, (novo, antes) => {
+  if (novo && antes && novo !== antes) reembolsoSinal.value += 1
+})
+const reembolsoDialogo = ref(false)
+const reembolsoDados = ref<ReembolsosResposta | null>(null)
+function abrirReembolso(d: ReembolsosResposta) {
+  reembolsoDados.value = d
+  reembolsoDialogo.value = true
+}
+// O pedido mudou com o diálogo aberto: o lançamento cairia no pedido novo. Fecha.
+watch(() => props.conversa.pedido_marketplace, (novo, antes) => {
+  if (novo === antes || !reembolsoDialogo.value) return
+  reembolsoDialogo.value = false
+  toasts.info('O pedido da conversa mudou', 'Abra o lançamento do reembolso de novo, já no pedido certo.')
+})
+// O atalho da faixa da conversa (item 9 do dono): volta para a aba Pedido e rola até
+// o bloco, que fica marcado por uns segundos (o mesmo caminho do "ver no pedido").
+const reembolsoDestacado = ref(false)
+let destaqueReembolso: ReturnType<typeof setTimeout> | null = null
+async function mostrarReembolso() {
+  aba.value = 'pedido'
+  await nextTick()
+  const bloco = rolagemPainel.value?.querySelector<HTMLElement>('[data-reembolso-cliente]')
+  if (!bloco) {
+    toasts.info('Esta conversa não tem pedido ligado', 'O reembolso ao cliente é lançado pelo pedido da conversa.')
+    return
+  }
+  bloco.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  reembolsoDestacado.value = true
+  if (destaqueReembolso) clearTimeout(destaqueReembolso)
+  destaqueReembolso = setTimeout(() => {
+    reembolsoDestacado.value = false
+  }, 2500)
+}
+defineExpose({ mostrarDevolucao, mostrarReembolso })
 </script>
 
 <template>
@@ -944,6 +995,16 @@ defineExpose({ mostrarDevolucao })
             <dd class="text-right tabular-nums">{{ pm.pago_em ? fmtDataPlataforma(pm.pago_em) : '—' }}</dd>
           </dl>
 
+          <!-- REEMBOLSO AO CLIENTE (Novos procedimentos 3/6, 17/11/2026): logo abaixo do valor pago -->
+          <AtendimentoReembolsoCliente
+            v-if="temReembolso"
+            :key="chaveReembolso"
+            :conversa-id="conversa.id"
+            :sinal="reembolsoSinal"
+            :destaque="reembolsoDestacado"
+            @lancar="abrirReembolso"
+          />
+
           <!-- nota fiscal -->
           <section v-if="pm.nf && (pm.nf.numero || pm.nf.status)" class="space-y-1">
             <h4 class="text-[13px] font-semibold">Nota fiscal</h4>
@@ -1029,6 +1090,15 @@ defineExpose({ mostrarDevolucao })
               <RotateCcw class="size-3.5" :class="{ 'animate-spin': atualizando }" /> buscar na plataforma
             </button>
           </div>
+          <!-- REEMBOLSO AO CLIENTE (3/6): sem retrato (TikTok, Amazon, Magalu), depois do quadro do pedido -->
+          <AtendimentoReembolsoCliente
+            v-if="temReembolso"
+            :key="chaveReembolso"
+            :conversa-id="conversa.id"
+            :sinal="reembolsoSinal"
+            :destaque="reembolsoDestacado"
+            @lancar="abrirReembolso"
+          />
         </template>
 
         <!-- painel do pedido: carregando / falhou -->
@@ -1497,6 +1567,15 @@ defineExpose({ mostrarDevolucao })
       :conversa-id="conversa.id"
       :troca-aberta="trocaAbertaDoDialogo"
       @mudou="emit('recarregarPainel', false)"
+    />
+    <!-- O lançamento do reembolso ao cliente (3/6): fora dos ramos com e sem retrato. -->
+    <AtendimentoReembolsoLancar
+      v-if="reembolsoDialogo && reembolsoDados"
+      v-model:aberto="reembolsoDialogo"
+      :conversa-id="conversa.id"
+      :dados="reembolsoDados"
+      @lancado="reembolsoSinal += 1"
+      @recarregar="reembolsoSinal += 1"
     />
   </div>
 </template>

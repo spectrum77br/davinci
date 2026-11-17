@@ -259,6 +259,7 @@ import {
   Copy,
   ExternalLink,
   Globe,
+  HandCoins,
   Hash,
   FileText,
   ImagePlus,
@@ -304,6 +305,7 @@ import { conversasComEmail, ehCartaoDeEmail, urlDosCartoes, type CartaoEmail, ty
 import { sinalDeEmails } from '~/components/AtendimentoEmailVenda.vue'
 import type { Painel } from '~/components/AtendimentoPedido.vue'
 import { CLS_AG_CANCELAMENTO, leituraAgCancelamento } from '~/components/AtendimentoAgCancelamento.vue'
+import { pedeReembolso } from '~/components/AtendimentoReembolsoCliente.vue'
 import { CHAVE_ANEXAR_NA_CAIXA } from '~/components/AtendimentoTrocaSugestoes.vue'
 import { abrirEm, type ReclamacoesResposta } from '~/components/AtendimentoReclamacao.vue'
 import {
@@ -2825,7 +2827,8 @@ watch(
   },
 )
 // "ver no pedido" do cartão: abre o painel (se fechado) e rola até o bloco.
-const painelPedidoRef = ref<{ mostrarDevolucao: (id: string) => Promise<void> } | null>(null)
+// 17/11/2026: o painel também rola até o "Reembolso ao cliente" (o atalho da faixa).
+const painelPedidoRef = ref<{ mostrarDevolucao: (id: string) => Promise<void>; mostrarReembolso: () => Promise<void> } | null>(null)
 async function verDevolucaoNoPedido(id: string) {
   if (!pedidoVisivel.value) alternarPedido()
   await nextTick()
@@ -2853,6 +2856,19 @@ const canalExterno = computed<'carrinho' | 'comentario' | null>(() => {
 // diz "Responda pelo Duoke").
 const ehZap = computed(() => conversa.value?.canal === 'zap')
 const semPainelDePedido = computed(() => !!canalExterno.value || ehZap.value)
+// O ATALHO DO REEMBOLSO (Novos procedimentos 3/6, 17/11/2026): na faixa da Caixa
+// Humano, quando a triagem marcou "Aprovar fora da plataforma" (Pix, reembolso
+// parcial, "pago a diferença") ou o assunto reembolso. Abre o painel (se fechado) na
+// aba Pedido e rola até o "Reembolso ao cliente": o mesmo caminho do "ver no pedido".
+const atalhoReembolso = computed(() => {
+  const c = conversa.value
+  return !!c && !c.id.startsWith('ig:') && !semPainelDePedido.value && pedeReembolso(c.humano)
+})
+async function verReembolsoNoPedido() {
+  if (!pedidoVisivel.value) alternarPedido()
+  await nextTick()
+  await painelPedidoRef.value?.mostrarReembolso()
+}
 // O cartão do topo, aberto (padrão) ou recolhido. Recolher só esconde
 // (v-show): o texto que estava sendo escrito na resposta não se perde.
 const cartaoExternoAberto = ref(true)
@@ -3953,6 +3969,17 @@ watch(() => props.conversaId, (novo, velho) => {
             data-faixa-humano-resumo
             @click="alternarCaixaHumano"
           >{{ resumoHumano(conversa.humano) }}</span>
+          <!-- Reembolso fora da plataforma (3/6, 17/11/2026): abre a aba Pedido no bloco. -->
+          <button
+            v-if="atalhoReembolso"
+            type="button"
+            class="ml-auto inline-flex shrink-0 items-center gap-1 rounded px-1 underline hover:bg-amber-500/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-primary"
+            title="abre a aba Pedido no bloco Reembolso ao cliente (lançar o reembolso pelo pedido)"
+            data-atalho-reembolso
+            @click="verReembolsoNoPedido"
+          >
+            <HandCoins class="size-3.5" aria-hidden="true" /> lançar reembolso
+          </button>
         </div>
         <!-- faixas: bloqueio, janela, fechada, não precisa, Ag. cancelamento -->
         <!-- Conversa da reclamação/mediação (canal 'reclamacao'). Desde 28/10/2026

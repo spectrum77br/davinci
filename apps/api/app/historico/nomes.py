@@ -317,6 +317,13 @@ FRASES: dict[tuple[str, str], str] = {
     ("GET", "/api/integrations/shopee/callback/{state}"): "conectou conta da Shopee",
     ("GET", "/api/oauth/{provider}/callback"): "conectou conta de marketplace",
     ("POST", "/api/aprovar/{token}"): "aprovou o pedido pelo celular (Threema)",
+    # Reembolso ao cliente pela conversa (Novos procedimentos 3/6, 17/11/2026). O corpo
+    # não fica (SEM_CORPO: leva os dados do Pix); a linha nova, sim (o Pix vai cifrado).
+    (
+        "POST",
+        "/api/atendimento/conversas/{conversa_id}/reembolsos",
+    ): "lançou reembolso ao cliente pela conversa",
+    ("POST", "/api/atendimento/reembolsos/{refund_id}/aprovar"): "aprovou reembolso ao cliente",
 }
 
 # Ver uma senha ou baixar um certificado: não muda nada, mas precisa ficar.
