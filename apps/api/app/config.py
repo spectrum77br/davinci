@@ -1163,6 +1163,36 @@ class Settings(BaseSettings):
     # NFE.io só com ENV=production E isto. No localhost (chave real no .env) fica false.
     nfse_integrar_liberado: bool = False
 
+    # ─── IP da loja no celular (16/11/2026, app/ip_celular) ─────────────
+    # Eduardo: "se eu jogar um link para o meu celular, o meu celular usa o
+    # IP da loja por um tempo". A API cria uma credencial temporária e o
+    # intermediário SOCKS5 (serviço `ipcel_relay`) leva o iPhone até o proxy
+    # da empresa. Ver docs/ip-celular.md.
+    # `ipcel_relay_key`: chave SÓ deste recurso (32+ caracteres), a mesma no
+    # .env da api e na variável do serviço `ipcel_relay`. Vazia = desligado
+    # (a tela responde "ainda não foi ligado no servidor").
+    ipcel_relay_key: str = ""
+    # Para onde o iPhone aponta o proxy. Vazio = o host do APP_URL.
+    ipcel_host_publico: str = ""
+    # Porta pública do intermediário (aberta no Firewall da Hetzner).
+    ipcel_porta_publica: int = 21080
+    # Começo do link curto (`<base>/api/ipcel/<código>`). Vazio = APP_URL.
+    ipcel_link_base: str = ""
+    ipcel_prefixo: str = "davinci:ipcel:"
+    # O Redis PRÓPRIO do recurso (serviço `ipcel_redis` no docker compose,
+    # sem disco). O intermediário, exposto na internet, só alcança este — nunca
+    # o Redis principal (sem senha, com os jobs dos workers). Vazio = o
+    # principal (testes e máquina local).
+    ipcel_redis_url: str = ""
+    # Limites por link: conexões ao mesmo tempo, banda (bytes/s, somando as
+    # conexões) e teto de dados (bytes) — passou, o link é cortado.
+    ipcel_max_conexoes: int = 48
+    ipcel_banda_bytes_s: int = 3_000_000
+    ipcel_teto_bytes: int = 2_000_000_000
+    # Quantos links valendo ao mesmo tempo (por empresa / no total).
+    ipcel_max_links_empresa: int = 3
+    ipcel_max_links_total: int = 10
+
     @property
     def is_prod(self) -> bool:
         return self.env == "production"

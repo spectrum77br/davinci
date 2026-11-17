@@ -170,6 +170,20 @@ services:
       retries: 3
       start_period: 30s
 
+  # IP da loja no celular (docs/ip-celular.md): a porta 21080 aberta para a
+  # internet (o iPhone no 4G muda de IP, não dá para restringir a origem).
+  # Só IPv4 (app.hadken.com só tem registro A): pelo IPv6 o Docker passaria a
+  # conexão pelo docker-proxy e o intermediário veria o IP do gateway no lugar
+  # do IP do celular (limites e "preso ao IP" errados). Também precisa da regra
+  # de entrada TCP 21080 no Firewall da Hetzner Cloud — sem ela o pacote nem
+  # chega ao servidor. IPCEL_BLOQUEAR: os IPs do próprio servidor, que nunca
+  # podem ser destino nem proxy de empresa.
+  ipcel_relay:
+    ports:
+      - "0.0.0.0:21080:21080"
+    environment:
+      IPCEL_BLOQUEAR: ${IPCEL_BLOQUEAR:-46.225.188.20}
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped

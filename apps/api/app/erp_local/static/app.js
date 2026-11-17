@@ -1,5 +1,5 @@
 'use strict';
-let state, page = 'overview', busy = false;
+let state, page = 'inicio', busy = false;
 const content = document.getElementById('content');
 const notice = document.getElementById('notice');
 const titles = {
@@ -7,6 +7,7 @@ const titles = {
   cash_register: ['Controle de caixa', 'Abertura, movimentos físicos e conferência por forma de pagamento.'],
   proposals: ['Propostas comerciais', 'Propostas, versões e condições para revisão da venda.'],
   reference: ['Conferência da origem', 'Cópia de leitura para comparar com o núcleo próprio durante a transição.'],
+  inicio: ['Comece aqui', 'Vídeo e passo a passo para quem vai fazer a troca do Bling para o ERP.'],
   overview: ['Controle da operação', 'Teste o caminho do produto ao recebimento, com histórico de cada ação.'],
   returns: ['Logística reversa e devoluções', 'Recebimento físico, inspeção e reembolso em etapas separadas.'],
   companies: ['Multiempresa', 'Empresas emissoras e qual emite por loja.'],
@@ -94,6 +95,23 @@ function overview() {
   ].map(([n,title,sub,target])=>`<button class="step" data-page="${target}"><span>${n}</span><h3>${title}</h3><p>${sub}</p></button>`).join('')}</div>${panel('Saldos do cenário local','Kits compartilham os componentes; sua capacidade não deve ser somada ao estoque físico.',stockTable(true))}${panel('Pedidos recentes','Reserva, despacho, cancelamento e devolução de produto novo.',ordersTable(false))}`;
 }
 
+const guideSections=[
+  ['O que é este ERP','O ERP próprio do DaVinci, feito para substituir o Bling. Hoje ele roda ao lado do Bling: lê os pedidos das lojas a cada minuto, acompanha estoque, cadastro e situações, e compara tudo com o Bling. O Bling continua mandando nas lojas até a troca; nada daqui é enviado às lojas, ao Bling ou à SEFAZ.',[]],
+  ['Homologação: o dia normal sem risco','Na homologação (http://localhost:18765) os pedidos reais entram como no Bling e cada ação que sairia para fora (etiqueta, nota, estoque e preço nos anúncios) mostra só "o que faria". Use para treinar a equipe e conferir o dia.',[['overview','Ver o que o ERP faria']]],
+  ['Pedidos','Em Pedidos ficam os pedidos próprios (número 900.001 em diante) e, em Lidos das lojas, as vendas como chegaram. Clique no número do pedido ou da loja para copiar; clique no nome do cliente para abrir. Situações são as mesmas do Bling (Em aberto, Em andamento, Atendido, Cancelado e as personalizadas). Celular tem o quadro IMEI dos celulares: um ou dois por aparelho.',[['orders','Abrir Pedidos']]],
+  ['Produtos e anúncios','Produtos tem o cadastro igual ao do Bling (simples ou com composição). Abra um produto para ver a aba Tabela de Preços (departamento, EAN, certificado, garantia, prioridade, fotos), a aba Vínculos (anúncios daquele produto) e o campo Voltagem. No topo, a aba Anúncios lista todos os anúncios das lojas com a situação de cada um; Organizar oculta os inválidos só aqui.',[['products','Abrir Produtos']]],
+  ['Estoque e depósitos','Estoque mostra saldo físico, reservado e disponível por depósito. Pedido reserva quando entra, baixa no envio e devolve no cancelamento; kit baixa nas peças. Depósitos podem ser de venda, quarentena (avaria) ou avulsos (peça aberta ou usada da devolução). A prioridade de lote (.sp, .ci, .pi…) segue a Tabela de Preços.',[['stock','Abrir Estoque'],['deposits','Abrir Depósitos']]],
+  ['Devoluções','A devolução só conclui depois que a peça entra no estoque, como Nova ou Avulsa. Se a peça não volta (extraviado, sucata, manutenção), só um administrador conclui, informando o destino.',[['returns','Abrir Devoluções']]],
+  ['Financeiro','Contas a pagar com categoria obrigatória, rateio em % entre Celular, Mala e Eletro (soma 100%), e lote de estoque com valor e câmbio; o quadro Lotes de estoque mostra pago e diferença. A Visão geral mostra o resultado de cada mudança de custo e oferece a planilha para a Importação.',[['accounts','Abrir Financeiro']]],
+  ['Conferência com o Bling','Na Visão geral, Conferência com o Bling mostra, loja a loja, as vendas que o Bling tem e se o ERP leu cada uma, com os números que faltam para copiar. É o alarme da troca: nas lojas que o ERP lê, não deve faltar nada.',[['overview','Abrir a Visão geral']]],
+  ['O que ainda não acontece','Enviar estoque e preço aos anúncios, emitir nota e pedir etiqueta de verdade ficam desligados enquanto o Bling é o dono das lojas. Na troca, o DaVinci passa a falar com o ERP no lugar do Bling (etapa 2), loja a loja, com volta segura.',[]],
+];
+function inicioPage(){
+  const video=`<figure class="guide-video"><video controls preload="metadata" src="/assets/como-usar.mp4" poster="/assets/como-usar.jpg"><track kind="captions" src="/assets/como-usar.vtt" srclang="pt-BR" label="Português" default></video><figcaption>Vídeo: como usar o ERP na transição (legendas em português).</figcaption></figure>`;
+  const steps=guideSections.map(([title,text,links],i)=>`<section class="guide-step"><h3><span>${String(i+1).padStart(2,'0')}</span>${esc(title)}</h3><p>${esc(text)}</p>${links.length?`<div class="guide-links">${links.map(([target,label])=>`<button type="button" class="secondary" data-page="${target}">${esc(label)}</button>`).join('')}</div>`:''}</section>`).join('');
+  return panel('Comece aqui','Para quem vai fazer a transição do Bling: assista ao vídeo e siga o passo a passo. Cada parte tem um atalho para a tela.',video+`<div class="guide-steps">${steps}</div>`);
+}
+
 function products() {
   if(editingProduct&&state.products.some(p=>p.sku===editingProduct))return productDetailsForm();
   if(productsView==='listings')return productViewTabs()+listingsPage();
@@ -165,7 +183,7 @@ function render() {
   document.getElementById('title').textContent=title;
   document.getElementById('subtitle').textContent=sub;
   document.querySelectorAll('nav [data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===page));
-  content.innerHTML=({overview,access:accessPage,inbound:inboundPage,guides:guidesPage,companies:companiesPage,products,contacts:contactsPage,cash_register:cashRegisterPage,pos:posPage,proposals:proposalsPage,returns:returnsPage,deposits:depositsPage,sellers:sellersPage,commissions:commissionsPage,price_lists:priceListsPage,categories:categoriesPage,production:productionPage,payment_methods:paymentMethodsPage,inventory:inventoryPage,stock,orders,purchases,accounts,history,connections,reference,channels,parity,costs:costsPage,fiscal:fiscalPage,logistics:logisticsPage,release:releasePage,integrations:integrationsWithIngest}[page])();
+  content.innerHTML=({inicio:inicioPage,overview,access:accessPage,inbound:inboundPage,guides:guidesPage,companies:companiesPage,products,contacts:contactsPage,cash_register:cashRegisterPage,pos:posPage,proposals:proposalsPage,returns:returnsPage,deposits:depositsPage,sellers:sellersPage,commissions:commissionsPage,price_lists:priceListsPage,categories:categoriesPage,production:productionPage,payment_methods:paymentMethodsPage,inventory:inventoryPage,stock,orders,purchases,accounts,history,connections,reference,channels,parity,costs:costsPage,fiscal:fiscalPage,logistics:logisticsPage,release:releasePage,integrations:integrationsWithIngest}[page])();
   applyBlingLayout();
 }
 

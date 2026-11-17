@@ -110,7 +110,13 @@ def test_os_avisos_da_1a_camada_e_as_fontes_citadas():
     fracos = ["ficha_no_automatico", "assunto_de_produto", "confianca_baixa"]
     assert solta(produto, checagens_feitas=fracos, evidencias=DO_BANCO).ok
     assert solta(produto, checagens_feitas=fracos, evidencias=FICHA) is produto
-    for aviso in ("produto_sem_fonte", "caracteristica_fora_do_anuncio", "variacao_sem_dado"):
+    # 17/11/2026 (o juiz mais liberal): o anúncio que se contradiz também, com a equipe citada.
+    for aviso in (
+        "produto_sem_fonte",
+        "caracteristica_fora_do_anuncio",
+        "variacao_sem_dado",
+        "anuncio_se_contradiz",
+    ):
         assert solta(produto, checagens_feitas=[aviso], evidencias=DO_BANCO).ok, aviso
         assert solta(produto, checagens_feitas=[aviso], evidencias=FICHA) is produto, aviso
         com_fato = solta(produto, checagens_feitas=[aviso], evidencias=["fato:12"])
@@ -120,7 +126,6 @@ def test_os_avisos_da_1a_camada_e_as_fontes_citadas():
         "pedido_sem_lastro",
         "estado_sem_dado",
         "variacao_contradiz",
-        "anuncio_se_contradiz",
         "produto_contradiz",
     ):
         assert solta(produto, checagens_feitas=[aviso], evidencias=DO_BANCO) is produto, aviso
@@ -359,3 +364,19 @@ def test_o_assunto_da_rodinha_ja_sai_pela_orientacao_da_loja():
             },
         )
         assert ia.trava_do_agente(rascunho, canal) is None, categoria
+
+
+def test_a_regra_do_manual_vale_como_fonte_da_equipe():
+    """17/11/2026 (o juiz mais liberal): a regra do Manual, que a equipe escreveu, vale como a
+    resposta da equipe — "o valor do anúncio é o praticado no momento" e "a compra e o pagamento
+    são pelo app" (o juiz barrou e a equipe mandou igual). O pedido continua segurando."""
+    solta = verificador.so_o_perigoso_segura
+    politica = _nao(
+        afirma_sem_lastro=["O valor que aparece no anúncio é o praticado no momento"],
+        responde_o_que_foi_perguntado=False,
+    )
+    regra = ["regra:preco_pagamento", "ficha:48107828003"]
+    assert solta(politica, checagens_feitas=["confianca_baixa"], evidencias=regra).ok
+    assert solta(politica, evidencias=["ficha:48107828003"]) is politica
+    do_pedido = _nao(afirma_sem_lastro=["seu pedido já foi enviado"])
+    assert solta(do_pedido, evidencias=regra) is do_pedido

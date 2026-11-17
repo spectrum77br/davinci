@@ -3,6 +3,13 @@ name: davinci
 networks:
   davinci_net:
     driver: bridge
+  # IP da loja no celular (docs/ip-celular.md): rede SÓ do intermediário e do
+  # Redis próprio do recurso. O intermediário fica exposto na internet e não
+  # pode alcançar o Redis principal (sem senha, com os jobs dos workers) nem
+  # o resto da davinci_net. Ponte comum: a saída para a internet (proxies das
+  # empresas) continua.
+  ipcel_net:
+    driver: bridge
 
 services:
   # Local-only DB/Redis. In prod, api/worker connect to pre-existing pg18 + redis7
@@ -50,6 +57,8 @@ services:
     # precisar rastrear PID.
     environment:
       APP_NAME: davinci-api
+      # IP da loja no celular: o Redis próprio do recurso (ver ipcel_redis).
+      IPCEL_REDIS_URL: redis://ipcel_redis:6379/0
     volumes:
       - ./data/uploads:/data/uploads
     healthcheck:
@@ -185,6 +194,173 @@ services:
       davinci_net:
         aliases:
           - worker_marketing_agent
+
+  # IP da loja no celular (16/11/2026, docs/ip-celular.md): Redis PRÓPRIO do
+  # recurso. Sem disco (os links duram no máximo 4 h; se cair, os links somem
+  # e o intermediário recusa tudo — falha fechada) e por isso sem MISCONF com
+  # o disco cheio. A api fala com ele pela davinci_net; o intermediário, pela
+  # ipcel_net — e só com ele.
+  ipcel_redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 32mb
+      - --maxmemory-policy
+      - noeviction
+      - --protected-mode
+      - "no"
+      # Revisão 17/11: sem senha e na davinci_net (a api chega por ela), então
+      # quem invadisse o intermediário podia usar REPLICAOF/MIGRATE para falar
+      # com o redis7. Desliga tudo que conecta para fora, troca configuração ou
+      # roda script; o recurso só usa GET/SET/HSET/HMGET/HINCRBY/EXISTS/DEL/
+      # EXPIRE/SADD/SREM/SMEMBERS/PUBLISH/SUBSCRIBE/PING.
+      - --rename-command
+      - REPLICAOF
+      - ""
+      - --rename-command
+      - SLAVEOF
+      - ""
+      - --rename-command
+      - SYNC
+      - ""
+      - --rename-command
+      - PSYNC
+      - ""
+      - --rename-command
+      - MIGRATE
+      - ""
+      - --rename-command
+      - FAILOVER
+      - ""
+      - --rename-command
+      - CLUSTER
+      - ""
+      - --rename-command
+      - CONFIG
+      - ""
+      - --rename-command
+      - DEBUG
+      - ""
+      - --rename-command
+      - MODULE
+      - ""
+      - --rename-command
+      - ACL
+      - ""
+      - --rename-command
+      - SAVE
+      - ""
+      - --rename-command
+      - BGSAVE
+      - ""
+      - --rename-command
+      - BGREWRITEAOF
+      - ""
+      - --rename-command
+      - SHUTDOWN
+      - ""
+      - --rename-command
+      - FLUSHALL
+      - ""
+      - --rename-command
+      - FLUSHDB
+      - ""
+      - --rename-command
+      - KEYS
+      - ""
+      - --rename-command
+      - EVAL
+      - ""
+      - --rename-command
+      - EVALSHA
+      - ""
+      - --rename-command
+      - SCRIPT
+      - ""
+      - --rename-command
+      - FUNCTION
+      - ""
+      - --rename-command
+      - FCALL
+      - ""
+    user: redis
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 64m
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [davinci_net, ipcel_net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # IP da loja no celular (16/11/2026, docs/ip-celular.md): intermediário
+  # SOCKS5 entre o iPhone e o proxy da empresa. Mesma imagem da api (não gasta
+  # disco), mas SEM o .env: fica exposto na internet, então recebe só o Redis
+  # PRÓPRIO do recurso e a chave própria (IPCEL_RELAY_KEY, a mesma do .env da
+  # api). Só na ipcel_net (não alcança o Redis principal, o banco nem a api) e
+  # sem root. Sem a chave ele não escuta nada (recurso desligado). A porta
+  # pública só é publicada no docker-compose.prod.yml.
+  ipcel_relay:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # python direto (não `uv run`): o ambiente já está em /usr/local e o uv
+    # poderia tentar baixar pacotes ao subir.
+    command: ["python", "-m", "app.ip_celular.relay"]
+    environment:
+      IPCEL_REDIS_URL: redis://ipcel_redis:6379/0
+      IPCEL_RELAY_KEY: ${IPCEL_RELAY_KEY:-}
+      IPCEL_BLOQUEAR: ${IPCEL_BLOQUEAR:-}
+      IPCEL_PORTA: "21080"
+    depends_on: [ipcel_redis]
+    # nobody: invadido, não é root nem dentro do contêiner.
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    # Revisão 17/11: meia CPU no máximo — tentativa em massa de senha errada não
+    # tira CPU da api e dos robôs no mesmo servidor.
+    cpus: 0.5
+    pids_limit: 64
+    # Uma linha por conexão: com o disco apertado, o log gira sozinho.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks: [ipcel_net]
+    healthcheck:
+      # Só o cumprimento SOCKS5 (pede usuário/senha): não autentica nada.
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import socket;
+          s=socket.create_connection(('127.0.0.1',21080),5);
+          s.settimeout(5);
+          s.sendall(bytes([5,1,2]));
+          assert s.recv(2)==bytes([5,2])
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   # Sidecar MEGAcmd: ponte com a conta MEGA (fotos dos produtos da Tabela
   # de Preços). A API fala com ele em http://megacmd:9000 (rede interna,

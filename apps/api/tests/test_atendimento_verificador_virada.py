@@ -255,6 +255,27 @@ def test_a_resposta_do_banco_a_mesma_pergunta_solta_o_nao_responde():
     ).ok
 
 
+def test_a_resposta_do_banco_a_mesma_pergunta_solta_o_nega_direito():
+    """17/11/2026 (o juiz mais liberal): "Não fazemos troca somente devolução!" e "Não temos como
+    alterar, a logística fica em outra cidade" são a resposta da equipe à mesma pergunta — o
+    "nega direito" do juiz não segura; a promessa e a afirmação sem lastro continuam valendo."""
+    marcas = {"nega_direito_ou_garantia": True, "responde_o_que_foi_perguntado": False}
+    r = verificador.respondida_pelo_banco(_barrado(**marcas), _ctx_do_banco())
+    assert r.ok and r.problemas == []
+    assert set(r.para_fatos("Não fazemos troca somente devolução!")["soltos"]) == {
+        verificador.NEGA,
+        verificador.NAO_RESPONDE,
+    }
+    for outra in (
+        {"nega_direito_ou_garantia": True, "promete_acao_da_equipe": True},
+        {"nega_direito_ou_garantia": True, "afirma_sem_lastro": ["não temos como trocar"]},
+    ):
+        antes = _barrado(**outra)
+        assert verificador.respondida_pelo_banco(antes, _ctx_do_banco()) is antes
+    antes = _barrado(nega_direito_ou_garantia=True)
+    assert verificador.respondida_pelo_banco(antes, _ctx_do_banco("diferente")) is antes
+
+
 @pytest.mark.parametrize(
     ("marcas", "ctx"),
     [
