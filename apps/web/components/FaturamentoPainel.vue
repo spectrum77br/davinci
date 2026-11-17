@@ -64,31 +64,44 @@ function shiftMonth(delta: number) {
 const loading = ref(false)
 const error = ref<string | null>(null)
 const data = ref<FaturamentoOut | null>(null)
+// A última resposta boa (17/11/2026): um erro limpa a tabela (data = null),
+// mas o filtro de equipe continua com as equipes dela.
+const ultimaBoa = ref<FaturamentoOut | null>(null)
 
 // Filtro de equipe: null = todas as lojas do escopo do usuário. O <select> só
 // aparece quando o backend devolve mais de uma equipe (admin ou multi-equipe).
 // Desde 30/10/2026 é a equipe de vendas pelo nome (Londres, Israel,
 // Marrocos); API sem `equipes` (a de antes) cai em "Equipe N".
 const team = ref<number | null>(null)
-const equipes = computed<EquipeOpcao[]>(() => data.value?.equipes
-  ?? (data.value?.teams ?? []).map((numero) => ({ numero, nome: `Equipe ${numero}` })))
+const equipes = computed<EquipeOpcao[]>(() => {
+  const resposta = data.value ?? ultimaBoa.value
+  return resposta?.equipes
+    ?? (resposta?.teams ?? []).map((numero) => ({ numero, nome: `Equipe ${numero}` }))
+})
 const department = ref('')
 const mobileFiltersOpen = ref(false)
-// "Catálogo" saiu do filtro em 06/10/2026 (o catálogo do ML virou grupo
-// dentro de cada tipo, na Tabela de Preços). O rótulo fica só para loja
-// antiga que ainda tenha o tipo.
+// 17/11/2026 (Novos procedimentos 7): o filtro "Tipo" é o departamento do
+// PRODUTO vendido — cada loja mostra só o que vendeu daquilo (o backend
+// divide o pedido entre os itens). "Sem categoria" = item que a regra não põe
+// em Celular, Mala nem Eletro; os quatro somam o total sem filtro. Shein saiu
+// (não é departamento de produto). "Catálogo" saiu em 06/10/2026 (virou grupo
+// dentro de cada tipo, na Tabela de Preços). Os rótulos antigos ficam só para
+// a etiqueta de tipo da loja.
 const departmentOptions = [
   { value: 'celular', label: 'Celular' },
-  { value: 'eletro', label: 'Eletro' },
   { value: 'mala', label: 'Mala' },
-  { value: 'shein', label: 'Shein' },
+  { value: 'eletro', label: 'Eletro' },
+  { value: 'sem', label: 'Sem categoria' },
 ]
-const ROTULOS_TIPO_ANTIGO: Record<string, string> = { catalogo: 'Catálogo' }
+const ROTULOS_TIPO_ANTIGO: Record<string, string> = { catalogo: 'Catálogo', shein: 'Shein' }
 function departmentLabel(slug: string): string {
   return departmentOptions.find((option) => option.value === slug)?.label
     ?? ROTULOS_TIPO_ANTIGO[slug]
     ?? slug
 }
+const avisoDepartamento = computed(() => department.value === 'sem'
+  ? 'Mostrando só o que cada loja vendeu sem categoria (fora de Celular, Mala e Eletro).'
+  : `Mostrando só o que cada loja vendeu de ${departmentLabel(department.value)}.`)
 function platformLabel(value: string | null): string {
   if (!value) return '—'
   const platform = value === 'mercadolivre' ? 'ml' : value
@@ -117,8 +130,13 @@ async function load() {
     const qs = new URLSearchParams({ start, end })
     if (team.value != null) qs.set('team', String(team.value))
     if (isAdmin.value && department.value) qs.set('department', department.value)
-    data.value = await api<FaturamentoOut>(`/api/faturamento?${qs.toString()}`)
+    const res = await api<FaturamentoOut>(`/api/faturamento?${qs.toString()}`)
+    data.value = res
+    ultimaBoa.value = res
   } catch (e: any) {
+    // Sem isto a tabela do filtro anterior ficava embaixo do erro, como se
+    // fosse a resposta do filtro novo.
+    data.value = null
     error.value = e?.data?.detail?.code || e?.message || 'erro'
   } finally {
     loading.value = false
@@ -271,7 +289,7 @@ function fmtInt(n: number | null | undefined): string {
     </div>
 
     <p v-if="isAdmin && department" class="text-xs text-muted-foreground">
-      Mostrando o faturamento total das lojas classificadas como {{ departmentLabel(department) }}.
+      {{ avisoDepartamento }}
     </p>
 
     <div v-if="error" class="text-sm text-destructive">{{ error }}</div>
@@ -291,7 +309,7 @@ function fmtInt(n: number | null | undefined): string {
       <p v-if="loading && !data" class="rounded-lg border px-3 py-6 text-center text-sm text-muted-foreground" role="status">
         <Loader2 class="mr-1 inline size-4 animate-spin" /> carregando…
       </p>
-      <p v-else-if="!data?.itens.length" class="rounded-lg border px-3 py-6 text-center text-sm text-muted-foreground">
+      <p v-else-if="!error && !data?.itens.length" class="rounded-lg border px-3 py-6 text-center text-sm text-muted-foreground">
         Nenhum faturamento no período.
         <span v-if="!isAdmin" class="mt-1 block">Você vê apenas lojas das suas equipes de vendas.</span>
       </p>
@@ -343,7 +361,7 @@ function fmtInt(n: number | null | undefined): string {
               <Loader2 class="inline h-4 w-4 animate-spin" /> carregando…
             </td>
           </tr>
-          <tr v-else-if="!data?.itens.length">
+          <tr v-else-if="!error && !data?.itens.length">
             <td colspan="6" class="text-center py-8 text-muted-foreground">
               Nenhum faturamento no período.
               <span v-if="!isAdmin">

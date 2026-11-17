@@ -21,6 +21,17 @@ Definições fixadas com o operador:
   101 Londres, 102 Israel, 103 Marrocos (30/10/2026). A comercial
   (commercial_team) segue no Valuation, não aqui.
 - Período: default últimos 90 dias.
+- Filtro "Tipo" (só admin; 17/11/2026, Novos procedimentos 7): Celular, Mala,
+  Eletro ou Sem categoria É O QUE CADA LOJA VENDEU DAQUILO, não mais o
+  faturamento inteiro das lojas classificadas no tipo (61 das 91 lojas são
+  Celular+Eletro, e "Celular" e "Eletro" davam o mesmo número). O total do
+  pedido (o mesmo max(total) do dedup) se divide entre os itens na proporção
+  de itemvalor × quantidade (soma 0 → partes iguais), o rateio do Valuation;
+  cada item vai para o departamento do PRODUTO (services/departamento.py,
+  `departamento_do_item`: segmento raiz, categorias do Bling, família do SKU).
+  A loja mostra só a sua parte e some se não vendeu o departamento; loja sem
+  tipo, presencial e órfã entram quando venderam. Os 4 somam o total sem
+  filtro. Sem filtro, nada muda.
 """
 from __future__ import annotations
 
@@ -29,14 +40,16 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import Text, case, func, literal, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.deps.auth import require_permission, user_scope
 from app.deps.team_scope import nome_da_equipe
-from app.models import BlingOrder, Segment, StoreInfo, User, UserRole
+from app.models import BlingOrder, StoreInfo, User, UserRole
 from app.schemas.faturamento import FaturamentoLinha, FaturamentoOut
+from app.services import departamento as dep_svc
 from app.services.store_departments import resolve_store_departments
 
 router = APIRouter(prefix="/api/faturamento", tags=["faturamento"])
@@ -63,6 +76,68 @@ class FaturamentoEquipesOut(FaturamentoOut):
 _SITUACOES_FATURAVEIS = ("6", "15", "83953")
 
 
+async def _agg_do_departamento(session: AsyncSession, department: str, filtros: tuple):
+    """CTE `agg` (bling_store_id, pedidos, faturamento) só com a parte de
+    `department` (17/11/2026). Uma consulta agregada: o departamento de cada
+    item sai do mapa calculado uma vez (dep_svc.mapa_dos_itens) e entra como a
+    lista das chaves (SKU + categoria) daquele departamento.
+
+    Por pedido (o mesmo dedup bling_id + loja do total): parte = max(total) ×
+    peso dos itens do departamento ÷ peso de todos, com peso = itemvalor ×
+    quantidade; peso total 0 → pelo número de itens. Pedidos = os que têm
+    item do departamento; só entra loja com algum."""
+    idx = await dep_svc.indice_departamentos(session)
+    mapa = await dep_svc.mapa_dos_itens(session, idx, *filtros)
+    chaves = sorted(chave for chave, dep in mapa.items() if dep == department)
+    # IN (SELECT unnest(...)) e não = ANY(...): o Postgres faz um hash das
+    # chaves uma vez (o ANY de um parâmetro compara linha a linha com a lista
+    # toda — num período longo são milhares de chaves × dezenas de mil itens).
+    do_dep = case(
+        (dep_svc.chave_do_item().in_(select(func.unnest(literal(chaves, ARRAY(Text))))), 1),
+        else_=0,
+    )
+    itens = (
+        select(
+            BlingOrder.bling_id.label("bling_id"),
+            BlingOrder.loja.label("bling_store_id"),
+            BlingOrder.total.label("total"),
+            (
+                func.coalesce(BlingOrder.itemvalor, 0)
+                * func.coalesce(BlingOrder.item_quantidade, 1)
+            ).label("peso"),
+            do_dep.label("do_dep"),
+        )
+        .where(*filtros)
+        .cte("itens")
+    )
+    ped = (
+        select(
+            itens.c.bling_store_id.label("bling_store_id"),
+            func.max(itens.c.total).label("total"),
+            func.sum(itens.c.peso).label("peso"),
+            func.sum(itens.c.peso * itens.c.do_dep).label("peso_dep"),
+            func.count().label("itens"),
+            func.sum(itens.c.do_dep).label("itens_dep"),
+        )
+        .group_by(itens.c.bling_id, itens.c.bling_store_id)
+        .cte("ped")
+    )
+    parte = case(
+        (ped.c.peso != 0, ped.c.total * ped.c.peso_dep / ped.c.peso),
+        else_=ped.c.total * ped.c.itens_dep / ped.c.itens,
+    )
+    return (
+        select(
+            ped.c.bling_store_id.label("bling_store_id"),
+            func.count().label("pedidos"),
+            func.coalesce(func.round(func.sum(parte), 2), 0).label("faturamento"),
+        )
+        .where(ped.c.itens_dep > 0)
+        .group_by(ped.c.bling_store_id)
+        .cte("agg")
+    )
+
+
 @router.get("", response_model=FaturamentoEquipesOut)
 async def list_faturamento(
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -78,16 +153,17 @@ async def list_faturamento(
     zerada se não vendeu — e faz LEFT JOIN nos pedidos agregados. Pedido de
     loja sem cadastro entra como "Sem cadastro" só na visão sem escopo.
     user_scope(StoreInfo, user) + `team` aplicam o filtro de equipe.
+    `department` (só admin: celular, mala, eletro ou sem) troca o total de
+    cada loja pela parte dos itens daquele departamento e tira as lojas que
+    não venderam nada dele (_agg_do_departamento).
     """
     if department is not None:
         if user.role != UserRole.ADMIN:
             raise HTTPException(403, detail={"code": "department_not_allowed"})
-        root_id = await session.scalar(
-            select(Segment.id).where(
-                Segment.parent_id.is_(None), Segment.slug == department,
-            )
-        )
-        if root_id is None:
+        # 17/11/2026: os departamentos do produto (celular, mala, eletro e
+        # "sem" = Sem categoria); outra raiz de segmento (shein, catalogo…)
+        # não é mais filtro.
+        if department not in dep_svc.DEPARTAMENTOS:
             raise HTTPException(400, detail={"code": "invalid_department"})
 
     if end is None:
@@ -116,54 +192,57 @@ async def list_faturamento(
     if team is not None:
         scope_clauses.append(StoreInfo.sales_team == team)
 
-    # A classificação vem da mesma regra de Lojas, carregada em lote.
-    # O filtro afunila o roster antes de montar linhas e somar seus totais.
+    # A classificação vem da mesma regra de Lojas, carregada em lote — hoje
+    # só a etiqueta da coluna "Tipo"; o filtro de departamento é pelos itens
+    # vendidos (ETAPA 1), não afunila mais o roster.
     stores = (
         await session.execute(select(StoreInfo).where(*scope_clauses))
     ).scalars().all()
     departments_by_store = await resolve_store_departments(session, user, stores)
-    selected_store_ids = [
-        store_id for store_id, classification in departments_by_store.items()
-        if department is None or department in classification.departments
-    ]
     # Keep the roster consistent with the batch just classified even when
     # another request creates a store between these two queries.
-    scope_clauses.append(StoreInfo.id.in_(selected_store_ids))
+    scope_clauses.append(StoreInfo.id.in_(list(departments_by_store)))
 
-    # ETAPA 1 — pedidos do período: dedup por bling_id (bling_orders tem uma
-    # linha por item, `total` repete) e agrega por loja Bling (pedidos +
-    # faturamento). `agg` fica com UMA linha por bling_store_id.
-    ord_cte = (
-        select(
-            BlingOrder.bling_id.label("bling_id"),
-            BlingOrder.loja.label("bling_store_id"),
-            func.max(BlingOrder.total).label("total"),
-        )
-        .where(
-            BlingOrder.situacao.in_(_SITUACOES_FATURAVEIS),
-            BlingOrder.data >= start,
-            BlingOrder.data < end,
-        )
-        .group_by(BlingOrder.bling_id, BlingOrder.loja)
-        .cte("ord")
+    filtros_pedido = (
+        BlingOrder.situacao.in_(_SITUACOES_FATURAVEIS),
+        BlingOrder.data >= start,
+        BlingOrder.data < end,
     )
-    agg_cte = (
-        select(
-            ord_cte.c.bling_store_id.label("bling_store_id"),
-            func.count().label("pedidos"),
-            func.coalesce(
-                func.round(func.sum(ord_cte.c.total), 2), 0,
-            ).label("faturamento"),
+    if department is None:
+        # ETAPA 1 — pedidos do período: dedup por bling_id (bling_orders tem
+        # uma linha por item, `total` repete) e agrega por loja Bling (pedidos
+        # + faturamento). `agg` fica com UMA linha por bling_store_id.
+        ord_cte = (
+            select(
+                BlingOrder.bling_id.label("bling_id"),
+                BlingOrder.loja.label("bling_store_id"),
+                func.max(BlingOrder.total).label("total"),
+            )
+            .where(*filtros_pedido)
+            .group_by(BlingOrder.bling_id, BlingOrder.loja)
+            .cte("ord")
         )
-        .group_by(ord_cte.c.bling_store_id)
-        .cte("agg")
-    )
+        agg_cte = (
+            select(
+                ord_cte.c.bling_store_id.label("bling_store_id"),
+                func.count().label("pedidos"),
+                func.coalesce(
+                    func.round(func.sum(ord_cte.c.total), 2), 0,
+                ).label("faturamento"),
+            )
+            .group_by(ord_cte.c.bling_store_id)
+            .cte("agg")
+        )
+    else:
+        # ETAPA 1 com filtro — a mesma, só com a parte do departamento.
+        agg_cte = await _agg_do_departamento(session, department, filtros_pedido)
 
     # ETAPA 2 — roster de lojas do escopo. PARTE de store_info (não dos
     # pedidos) pra TODA loja aparecer, mesmo zerada. LEFT JOIN nos pedidos
     # agregados; loja sem venda fica com pedidos/faturamento = 0. Chave =
     # store_info.id (UUID), única até p/ as ~11 lojas sem bling_store_id.
     # bling_store_id é único em store_info, então o join não faz fan-out.
+    # Com filtro de departamento, só a loja que vendeu aquilo (INNER JOIN).
     roster_stmt = (
         select(
             StoreInfo.id.label("store_uuid"),
@@ -174,8 +253,10 @@ async def list_faturamento(
             func.coalesce(agg_cte.c.faturamento, 0).label("faturamento"),
         )
         .select_from(StoreInfo)
-        .outerjoin(
-            agg_cte, agg_cte.c.bling_store_id == StoreInfo.bling_store_id
+        .join(
+            agg_cte,
+            agg_cte.c.bling_store_id == StoreInfo.bling_store_id,
+            isouter=department is None,
         )
         .where(*scope_clauses)
     )
@@ -206,12 +287,13 @@ async def list_faturamento(
         total_faturamento += fat
 
     # ETAPA 3 — pedidos órfãos (loja sem cadastro em store_info). Só na visão
-    # SEM escopo (admin/usuário sem equipe) e SEM filtro de equipe ou tipo:
-    # órfão não tem essas classificações. Mantém a receita órfã
-    # no total sem furar o escopo de quem é limitado a equipes.
+    # SEM escopo (admin/usuário sem equipe) e SEM filtro de equipe: órfão não
+    # tem equipe. Mantém a receita órfã no total sem furar o escopo de quem é
+    # limitado a equipes. Com filtro de departamento (17/11/2026) o órfão
+    # entra com a parte dele, se vendeu aquilo.
     teams = user.sales_teams or []
     unscoped = user.role == UserRole.ADMIN or not teams
-    if team is None and department is None and unscoped:
+    if team is None and unscoped:
         orphan_stmt = (
             select(
                 agg_cte.c.bling_store_id.label("bling_store_id"),

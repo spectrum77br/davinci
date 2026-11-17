@@ -46,20 +46,31 @@ português (a do garantia.sem_acento_sql, mais as maiúsculas).
 
 O anúncio não tem segmento: vale o departamento do produto vinculado
 (listings.product_id); anúncio sem produto vinculado vai para "sem".
+
+O ITEM VENDIDO (17/11/2026, Faturamento por departamento — "se eu colocar
+faturamento só de celular, é para aparecer só o que vendeu de celular nas
+contas"): a linha de `bling_orders` vale pelo produto do SKU dela
+(`departamento_do_item`): o segmento de raiz conhecida, senão as categorias do
+Bling (a do produto, a do cadastro e, a mais, a do item no pedido), senão a
+família do SKU, senão "sem". SKU sem produto cadastrado: a categoria do item
+no pedido e a família do SKU. Só a categoria do pedido ERRA: SKU novo de
+Eletro (uaf002m1.110) e o composto dg090.pi+a004.pi vêm sem categoria.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy import Text, case, cast, func, literal, or_, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Listing, Product, ProductCategory, ProductLink
+from app.models import BlingOrder, Listing, Product, ProductCategory, ProductLink
 from app.services.garantia import _ACENTOS, _SEM_ACENTO
 from app.services.garantia_resumo import (
     FAMILIAS_DO_SKU,
@@ -259,3 +270,108 @@ def condicao_vinculo(departamento: str, idx: dict[UUID, str]):
     """Predicado SQL para ProductLink: pelo departamento do produto do vínculo
     (o "Remover os N mortos" da tela de Produtos, por departamento)."""
     return ProductLink.product_id.in_(select(Product.id).where(condicao_produto(departamento, idx)))
+
+
+# ── Item vendido (Faturamento por departamento, 17/11/2026) ──────────────────
+
+
+@dataclass(frozen=True)
+class ProdutoDoItem:
+    """O que o departamento precisa do produto cadastrado com o SKU do item."""
+
+    segment_id: UUID | None
+    categoria_nome: str | None = None
+    categoria_cadastro: str | None = None
+
+
+def departamento_do_item(
+    sku: str | None,
+    categoria_do_pedido: str | None,
+    idx: dict[UUID, str],
+    produto: ProdutoDoItem | None = None,
+) -> str:
+    """O departamento de UMA linha de `bling_orders` (o item vendido). PURA.
+
+    O produto do SKU manda, pela mesma regra de `departamento_do_produto`: o
+    segmento de raiz conhecida; senão as categorias do Bling — a do produto, a
+    do cadastro e, por último, a do item no pedido (o `categoria_nome` do
+    pedido sai da mesma categoria do produto no Bling, mas vem até para SKU
+    sem produto aqui) —; senão a família do SKU (`dg090.pi+a004.pi` → celular,
+    `uaf002m1.110` → eletro); nada disso → "sem"."""
+    if produto is not None and produto.segment_id is not None:
+        if (dep := idx.get(produto.segment_id)) is not None:
+            return dep
+    return (
+        departamento_da_categoria(produto.categoria_nome if produto else None)
+        or departamento_da_categoria(produto.categoria_cadastro if produto else None)
+        or departamento_da_categoria(categoria_do_pedido)
+        or departamento_do_sku(sku)
+        or SEM
+    )
+
+
+def chave_do_item():
+    """A chave do mapa de departamentos de cada linha de `bling_orders`: o SKU
+    (minúsculo, sem espaço nas pontas) + a categoria do item, separados pelo
+    chr(31); NULL vira vazio. Sai sempre do SQL (no mapa e na soma), então as
+    duas pontas casam sem depender do lower()/strip() do Python."""
+    return func.concat(
+        func.lower(func.btrim(BlingOrder.item_codigo, _ESPACOS)),
+        func.chr(31),
+        BlingOrder.categoria_nome,
+    )
+
+
+def _prioridade_do_produto(r: Any) -> tuple[bool, float]:
+    return (r.segment_id is None, -(r.updated_at.timestamp() if r.updated_at else 0.0))
+
+
+async def mapa_dos_itens(
+    session: AsyncSession, idx: dict[UUID, str], *filtros: Any
+) -> dict[str, str]:
+    """{chave_do_item: departamento} das linhas de `bling_orders` que passam
+    em `filtros`, calculado UMA vez por requisição: uma consulta para os pares
+    (SKU, categoria) distintos e outra para os produtos desses SKUs. SKU em
+    mais de um produto (um por usuário): vale o que tem segmento, depois o
+    mais recente (a mesma escolha do nf_emissao_gerar)."""
+    pares = (
+        await session.execute(
+            select(
+                chave_do_item().label("chave"),
+                func.lower(func.btrim(BlingOrder.item_codigo, _ESPACOS)).label("sku"),
+                BlingOrder.categoria_nome.label("categoria"),
+            )
+            .where(*filtros)
+            .distinct()
+        )
+    ).all()
+    skus = sorted({p.sku for p in pares if p.sku})
+    produtos: dict[str, ProdutoDoItem] = {}
+    if skus:
+        sku_do_produto = func.lower(func.btrim(Product.sku, _ESPACOS))
+        linhas = (
+            await session.execute(
+                select(
+                    sku_do_produto.label("sku"),
+                    Product.segment_id,
+                    Product.categoria_nome,
+                    ProductCategory.name.label("categoria_cadastro"),
+                    Product.updated_at,
+                )
+                .outerjoin(
+                    ProductCategory,
+                    cast(ProductCategory.bling_category_id, Text) == func.btrim(Product.category),
+                )
+                # IN (SELECT unnest) faz hash da lista (ANY compararia cada
+                # produto com todos os SKUs do período).
+                .where(sku_do_produto.in_(select(func.unnest(literal(skus, ARRAY(Text))))))
+            )
+        ).all()
+        # O com segmento primeiro, depois o mais recente; o 1º de cada SKU fica.
+        for r in sorted(linhas, key=_prioridade_do_produto):
+            produtos.setdefault(
+                r.sku, ProdutoDoItem(r.segment_id, r.categoria_nome, r.categoria_cadastro)
+            )
+    return {
+        p.chave: departamento_do_item(p.sku, p.categoria, idx, produtos.get(p.sku)) for p in pares
+    }

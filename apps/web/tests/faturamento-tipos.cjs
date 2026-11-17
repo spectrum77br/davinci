@@ -4,6 +4,9 @@
 // opens as the "Faturamento" button of the Tabela de Preços; /faturamento is a
 // redirect page (checked at the end).
 // The type filter is admin-only; mobile cards retain the desktop rows and totals.
+// Type filter (17/11/2026, Novos procedimentos 7): Celular · Mala · Eletro ·
+// Sem categoria (no Shein) = what each store SOLD of that department (the API
+// splits each order among its items); an error clears the previous table.
 // Equipe (30/10/2026): the select lists the sales teams by name (Londres,
 // Israel, Marrocos) and only shows up when there is more than one to pick.
 const assert = require('node:assert/strict')
@@ -67,13 +70,21 @@ async function page(role, props = {}) {
   let instance
   let meta
   const calls = []
+  // `falha.erro` set → the next API calls reject with it (as $fetch does).
+  const falha = { erro: null }
   const auth = Vue.reactive({ user: { role } })
   const component = evaluate(script.content, {
     definePageMeta: (value) => { meta = value },
     useAuthStore: () => auth,
     useApi: () => {
       instance = Vue.getCurrentInstance()
-      return { api: async (url) => { calls.push(url); return structuredClone(RESPONSE) } }
+      return {
+        api: async (url) => {
+          calls.push(url)
+          if (falha.erro) throw falha.erro
+          return structuredClone(RESPONSE)
+        },
+      }
     },
   }).default
   component.render = render
@@ -81,7 +92,7 @@ async function page(role, props = {}) {
   assert.equal(meta, undefined, 'a component, not a page: the route permission lives in the pages')
   const state = instance.setupState
   return {
-    state, calls, auth,
+    state, calls, auth, falha,
     // Reuse the executed setup state when exercising interactions. This renders
     // the compiled template again, without starting a fresh page and resetting it.
     html: () => renderToString(Vue.createSSRApp({ setup: () => state, render })),
@@ -98,6 +109,13 @@ function textContent(markup) {
 function tagContents(markup, tag) {
   return [...markup.matchAll(new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)</${tag}>`, 'g'))]
     .map((match) => textContent(match[1]))
+}
+// [value, label] of each Tipo option, or null when the select is not rendered.
+function typeOptions(html) {
+  const select = html.match(/<select\b[^>]*id="faturamento-tipo"[^>]*>([\s\S]*?)<\/select>/)
+  if (!select) return null
+  return [...select[1].matchAll(/<option\b([^>]*)>([\s\S]*?)<\/option>/g)]
+    .map(([, attrs, label]) => [attrs.match(/\bvalue="([^"]*)"/)?.[1] ?? null, textContent(label)])
 }
 // [value, label] of each Equipe option, or null when the select is not rendered.
 function teamOptions(html) {
@@ -166,6 +184,11 @@ async function run() {
   assert.deepEqual(teamOptions(htmlEmbutido), teamOptions(html), 'same team filter embedded')
   assert.match(html, /id="faturamento-tipo"/, 'admin can select a type')
   assert.match(html, /Todos os tipos/)
+  assert.deepEqual(typeOptions(html), [
+    [null, 'Todos os tipos'], ['celular', 'Celular'], ['mala', 'Mala'], ['eletro', 'Eletro'],
+    ['sem', 'Sem categoria'],
+  ], 'the product departments; Shein is not one')
+  assert.doesNotMatch(html, /Shein/)
   assert.deepEqual([...html.matchAll(/<th\b[^>]*>(.*?)<\/th>/g)].map((match) => match[1]),
     ['Loja', 'Plataforma', 'Tipo', 'Pedidos', 'Faturamento', 'Ticket médio'])
   assert.match(html, /Amazon/)
@@ -189,8 +212,32 @@ async function run() {
   assert.ok(admin.query().get('start'))
   assert.ok(admin.query().get('end'))
   html = await admin.html()
-  assert.match(html, /faturamento total das lojas classificadas como Mala/,
-    'copy explains this is store classification, not revenue split by product')
+  assert.match(html, /Mostrando só o que cada loja vendeu de Mala\./,
+    'copy explains this is what each store sold of the department, not its whole revenue')
+  assert.doesNotMatch(html, /classificadas como/)
+  admin.state.department = 'sem'
+  await admin.state.load()
+  assert.equal(admin.query().get('department'), 'sem')
+  assert.match(await admin.html(), /Mostrando só o que cada loja vendeu sem categoria/)
+
+  // An error (e.g. 400 invalid_department) clears the previous table instead of
+  // leaving it under the message as if it were the new filter's answer; the
+  // team filter stays usable.
+  admin.state.department = 'eletro'
+  admin.falha.erro = { data: { detail: { code: 'invalid_department' } } }
+  await admin.state.load()
+  admin.falha.erro = null
+  html = await admin.html()
+  assert.match(html, /invalid_department/)
+  assert.equal(admin.state.data, null)
+  assert.doesNotMatch(html, /<article\b|<tfoot|poofy|Nenhum faturamento/)
+  assert.deepEqual(teamOptions(html), [
+    [null, 'Todas as equipes'], ['101', 'Londres'], ['102', 'Israel'], ['103', 'Marrocos'],
+  ], 'team filter survives the error')
+  await admin.state.load()
+  assert.doesNotMatch(await admin.html(), /invalid_department/, 'next good load clears the error')
+  assertMobileCards(await admin.html(), RESPONSE)
+
   admin.state.department = ''
   await admin.state.load()
   assert.equal(admin.query().has('department'), false, 'clearing selects all types')
@@ -202,7 +249,7 @@ async function run() {
     'stale or manipulated client state must not send an admin filter')
   html = await reader.html()
   assert.doesNotMatch(html, /id="faturamento-tipo"/)
-  assert.doesNotMatch(html, /faturamento total das lojas classificadas/)
+  assert.doesNotMatch(html, /Mostrando só o que cada loja vendeu/)
   assert.match(html, />Tipo<\/th>/, 'readers still see the type column')
   assert.match(html, />Mala<\/span>/, 'readers still see store classifications')
   assertMobileCards(html, RESPONSE)
@@ -268,5 +315,5 @@ async function run() {
 }
 
 run().then(() => {
-  console.log('PASS: real Faturamento SFC renders types for readers; type filter/query admin-only; period/team preserved; Equipe select by name (Londres/Israel/Marrocos), hidden with one team, "Equipe N" without names; mobile cards/desktop values and totals agree after refresh; empty/loading states')
+  console.log('PASS: real Faturamento SFC renders types for readers; type filter/query admin-only (Celular/Mala/Eletro/Sem categoria, what each store sold); error clears the table; period/team preserved; Equipe select by name (Londres/Israel/Marrocos), hidden with one team, "Equipe N" without names; mobile cards/desktop values and totals agree after refresh; empty/loading states')
 }).catch((error) => { console.error(error); process.exitCode = 1 })
