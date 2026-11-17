@@ -374,7 +374,9 @@ const VERMELHO = '!text-red-700'
     // reposição e antes de "N SKUs · N lote(s)", com a conta no balão.
     const prazo = doc.querySelector('[data-prazo-reposicao]')
     assert.ok(prazo, 'campo Reposição')
-    assert.equal(texto(prazo), 'Reposição dias')
+    // O compilador do Vue tira o espaço entre <span> e <input>: confere os
+    // rótulos um a um (o textContent junto daria "Reposiçãodias").
+    assert.deepEqual([...prazo.querySelectorAll('span')].map(texto), ['Reposição', 'dias'])
     assert.equal(prazo.querySelector('input').value, '60')
     assert.equal(prazo.title, fixas[5].title, 'balão com a mesma conta da coluna')
     assert.equal(prazo.previousElementSibling, select.closest('label'), 'logo depois do filtro reposição')
