@@ -55,6 +55,8 @@ type Detalhe = ItemLista & {
   publicado_em: string | null
   erro: string | null
   pode_aprovar: boolean
+  // aprovada e a publicação esperando: dá para desfazer a aprovação
+  pode_cancelar?: boolean
 }
 
 const { api } = useApi()
@@ -242,6 +244,7 @@ function fecharDetalhe() {
 }
 
 const podeDecidir = computed(() => detalhe.value?.status === 'pronta' && detalhe.value?.pode_aprovar === true)
+const podeCancelar = computed(() => detalhe.value?.status === 'aprovada' && detalhe.value?.pode_cancelar === true)
 const parou = computed(() => detalhe.value?.status === 'falhou' || detalhe.value?.status === 'precisa_equipe')
 // Quando parou sem `erro`, o resumo vai para a faixa vermelha (e não repete embaixo).
 const textoParou = computed(() => (parou.value ? detalhe.value?.erro || detalhe.value?.resumo || null : null))
@@ -259,11 +262,20 @@ const MAX_LINHAS = 3000
 // "diff --git" e o primeiro "@@" — assim uma linha removida que começa com
 // "--" (comentário SQL) não vira cabeçalho por engano.
 type LinhaDiff = { texto: string; cls: string }
+// Caracteres invisíveis/de controle (U+202E e cia.) fazem o navegador mostrar
+// um código diferente do que roda ("Trojan Source"): viram um marcador visível
+// e uma faixa vermelha. (O servidor já recusa diff assim; isto é a segunda trava.)
+const INVISIVEL = /(?![\t ])[\p{Cf}\p{Cc}\p{Co}\p{Zl}\p{Zp}\p{Zs}]/gu
+const marcar = (l: string) => l.replace(INVISIVEL, (c) => `⟦U+${c.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}⟧`)
+const temInvisiveis = computed(() => {
+  const diff = detalhe.value?.diff
+  return !!diff && new RegExp(INVISIVEL.source, 'u').test(diff.replace(/\n/g, ''))
+})
 const linhasDiff = computed<LinhaDiff[]>(() => {
   const diff = detalhe.value?.diff
   if (!diff) return []
   let cabecalho = false
-  return diff.replace(/\n$/, '').split('\n').map((l) => {
+  return diff.replace(/\n$/, '').split('\n').map(marcar).map((l) => {
     if (l.startsWith('diff --git')) {
       cabecalho = true
       return { texto: l, cls: 'mt-3 first:mt-0 border-t first:border-t-0 font-semibold text-foreground bg-muted/60' }
@@ -283,6 +295,9 @@ const linhasVisiveis = computed(() => (diffInteiro.value ? linhasDiff.value : li
 
 // ── Aprovar / Recusar ──────────────────────────────────────────────────────
 const enviando = ref<null | 'aprovar' | 'recusar'>(null)
+// A mesma janela de motivo serve para recusar (pronta) e para cancelar uma
+// aprovação cuja publicação ficou parada (aprovada).
+const modoRecusa = ref<'recusar' | 'cancelar'>('recusar')
 const confirmarAberto = ref(false)
 const recusaAberta = ref(false)
 const motivo = ref('')
@@ -319,26 +334,33 @@ async function aprovar() {
   }
 }
 
-function abrirRecusa() {
+function abrirRecusa(modo: 'recusar' | 'cancelar' = 'recusar') {
+  modoRecusa.value = modo
   motivo.value = ''
   recusaAberta.value = true
 }
 async function recusar() {
   const d = detalhe.value
   if (!d || enviando.value || !motivoOk.value) return
+  const cancelando = modoRecusa.value === 'cancelar'
   enviando.value = 'recusar'
   try {
-    const novo = await api<Detalhe>(`/api/sistema-mudancas/${encodeURIComponent(d.id)}/recusar`, {
+    const novo = await api<Detalhe>(`/api/sistema-mudancas/${encodeURIComponent(d.id)}/${cancelando ? 'cancelar' : 'recusar'}`, {
       method: 'POST',
       body: { motivo: motivo.value.trim() },
     })
     recusaAberta.value = false
     if (detalhe.value?.id === d.id && novo && typeof novo === 'object') detalhe.value = novo
-    toast.success(`${d.codigo} recusada`, 'O robô não vai publicar esta mudança.')
+    toast.success(cancelando ? `Aprovação da ${d.codigo} cancelada` : `${d.codigo} recusada`, 'O robô não vai publicar esta mudança.')
     carregar(true)
   } catch (e: any) {
     const code = codigoErro(e)
-    if (code === 'nao_esta_pronta') {
+    if (code === 'nao_esta_aprovada') {
+      recusaAberta.value = false
+      toast.error(`A ${d.codigo} não está mais esperando para publicar`, mensagemErro(e))
+      carregarDetalhe(d.id)
+      carregar(true)
+    } else if (code === 'nao_esta_pronta') {
       recusaAberta.value = false
       toast.error(`A ${d.codigo} não está mais esperando aprovação`, mensagemErro(e))
       carregarDetalhe(d.id)
@@ -539,6 +561,9 @@ async function recusar() {
                   {{ detalhe.status === 'pedida' || detalhe.status === 'fazendo' ? 'O robô ainda não terminou de mexer no código.' : 'Nenhuma mudança no código registrada.' }}
                 </p>
                 <template v-else>
+                  <div v-if="temInvisiveis" class="mb-2 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm font-medium text-red-800 dark:text-red-300">
+                    Esta mudança tem caracteres invisíveis (marcados como ⟦U+…⟧). Eles podem esconder código — não aprove; recuse e chame a equipe.
+                  </div>
                   <pre class="max-h-[70vh] overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/20 py-2 font-mono text-[12px] leading-5"><span v-for="(l, i) in linhasVisiveis" :key="i" class="block px-3" :class="l.cls">{{ l.texto || ' ' }}</span></pre>
                   <p v-if="linhasDiff.length > MAX_LINHAS" class="mt-1 text-xs text-muted-foreground">
                     <template v-if="!diffInteiro">
@@ -573,11 +598,23 @@ async function recusar() {
               type="button"
               class="inline-flex h-9 items-center gap-1.5 rounded-md border border-red-500/40 bg-background px-4 text-sm font-medium text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400"
               :disabled="!!enviando"
-              @click="abrirRecusa"
+              @click="abrirRecusa('recusar')"
             >
               <X class="size-4" /> Recusar
             </button>
             <span class="ml-auto text-xs text-muted-foreground">Confira a mudança no código antes de aprovar.</span>
+          </div>
+          <!-- Aprovada, publicação esperando: dá para desfazer a aprovação -->
+          <div v-else-if="detalhe && podeCancelar" class="flex flex-wrap items-center gap-2 border-t bg-background px-5 py-3">
+            <button
+              type="button"
+              class="inline-flex h-9 items-center gap-1.5 rounded-md border border-red-500/40 bg-background px-4 text-sm font-medium text-red-700 hover:bg-red-500/10 disabled:opacity-50 dark:text-red-400"
+              :disabled="!!enviando"
+              @click="abrirRecusa('cancelar')"
+            >
+              <X class="size-4" /> Cancelar aprovação
+            </button>
+            <span class="ml-auto text-xs text-muted-foreground">Aprovada, esperando para publicar. Cancelar impede o robô de publicar.</span>
           </div>
         </div>
       </div>
@@ -611,8 +648,8 @@ async function recusar() {
     <Teleport to="body">
       <div v-if="recusaAberta && detalhe" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" @click.self="!enviando && (recusaAberta = false)">
         <div class="w-full max-w-md rounded-lg border bg-background p-5 shadow-xl">
-          <h2 class="mb-2 text-lg font-semibold">Recusar a {{ detalhe.codigo }}</h2>
-          <label for="motivo-recusa" class="mb-1 block text-sm">Por que recusar?</label>
+          <h2 class="mb-2 text-lg font-semibold">{{ modoRecusa === 'cancelar' ? `Cancelar a aprovação da ${detalhe.codigo}` : `Recusar a ${detalhe.codigo}` }}</h2>
+          <label for="motivo-recusa" class="mb-1 block text-sm">{{ modoRecusa === 'cancelar' ? 'Por que cancelar?' : 'Por que recusar?' }}</label>
           <textarea
             id="motivo-recusa"
             v-model="motivo"
@@ -635,7 +672,7 @@ async function recusar() {
               @click="recusar"
             >
               <RefreshCw v-if="enviando === 'recusar'" class="size-4 animate-spin" />
-              Recusar
+              {{ modoRecusa === 'cancelar' ? 'Cancelar aprovação' : 'Recusar' }}
             </button>
           </div>
         </div>

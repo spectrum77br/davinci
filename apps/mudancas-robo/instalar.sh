@@ -9,13 +9,13 @@ PLIST="$HOME/Library/LaunchAgents/com.davinci.mudancas-robo.plist"
 
 mkdir -p "$RAIZ/registros" "$RAIZ/estado" "$RAIZ/claude"
 chmod 700 "$RAIZ" "$RAIZ/claude"
-cp "$AQUI/rodada.py" "$AQUI/REGRAS.md" "$AQUI/caixa.sb" "$AQUI/testar.sh" "$RAIZ/"
+cp "$AQUI/rodada.py" "$AQUI/REGRAS.md" "$AQUI/caixa.sb" "$AQUI/testar.sh" \
+   "$AQUI/caixa_pytest.py" "$AQUI/conferir_web.cjs" "$RAIZ/"
 chmod 755 "$RAIZ/testar.sh"
 # permissões do Claude do robô (só arquivos; __RAIZ__ = esta instalação, se aparecer)
 sed "s#__RAIZ__#$RAIZ#g" "$AQUI/permissoes.json" > "$RAIZ/permissoes.json"
-# banco de teste vazio só do robô (Postgres local)
-psql -h /tmp -d postgres -qAtc "select 1 from pg_database where datname='davinci_robo'" | grep -q 1 \
-  || psql -h /tmp -d postgres -qc "create database davinci_robo" || true
+# (os testes usam um Postgres DESCARTÁVEL criado dentro da caixa a cada
+# conferência — o testar.sh cuida; não precisa de banco aqui)
 [ -f "$RAIZ/.env" ] || { cp "$AQUI/.env.example" "$RAIZ/.env"; chmod 600 "$RAIZ/.env"; echo "Criei $RAIZ/.env a partir do exemplo — preencha o MUDANCAS_AGENT_TOKEN."; }
 
 sed "s#__RAIZ__#$RAIZ#g" "$AQUI/com.davinci.mudancas-robo.plist" > "$PLIST"

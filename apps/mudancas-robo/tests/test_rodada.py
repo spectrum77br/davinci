@@ -18,6 +18,9 @@ from pathlib import Path
 import pytest
 
 AQUI = Path(__file__).resolve().parent.parent
+ARQ = "apps/web/lib/texto.ts"
+VELHO = "export const t = 'Olá'\n"
+NOVO = "export const t = 'Oi'\n"
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -35,7 +38,7 @@ def mundo(tmp_path, monkeypatch):
     raiz = tmp_path / "raiz"
     raiz.mkdir()
     pasta = tmp_path / "mudancas"
-    for nome in ("REGRAS.md", "caixa.sb", "testar.sh"):
+    for nome in ("REGRAS.md", "caixa.sb", "testar.sh", "caixa_pytest.py", "conferir_web.cjs"):
         (raiz / nome).write_text((AQUI / nome).read_text())
     (raiz / "permissoes.json").write_text(
         (AQUI / "permissoes.json").read_text().replace("__RAIZ__", str(raiz))
@@ -45,8 +48,8 @@ def mundo(tmp_path, monkeypatch):
     _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origem))
     semente = tmp_path / "semente"
     _git(tmp_path, "clone", "-q", str(origem), str(semente))
-    (semente / "apps/web").mkdir(parents=True)
-    (semente / "apps/web/texto.txt").write_text("Olá\n")
+    (semente / "apps/web/lib").mkdir(parents=True)
+    (semente / ARQ).write_text(VELHO)
     (semente / "outro.txt").write_text("um\n")
     _git(semente, "add", "-A")
     _commit(semente, "início")
@@ -58,25 +61,40 @@ def mundo(tmp_path, monkeypatch):
     claude.write_text(
         "import json, os, pathlib, sys\n"
         "acao = pathlib.Path(__file__).with_name('acao').read_text()\n"
+        f"ARQ, NOVO = {ARQ!r}, {NOVO!r}\n"
         "if acao == 'texto':\n"
-        "    pathlib.Path('apps/web/texto.txt').write_text('Oi\\n')\n"
+        "    pathlib.Path(ARQ).write_text(NOVO)\n"
         "    fim = {'resultado': 'pronta', 'resumo': 'Troquei Olá por Oi', 'testes': 'nada'}\n"
         "elif acao == 'migration':\n"
         "    p = pathlib.Path('apps/api/alembic/versions'); p.mkdir(parents=True)\n"
         "    (p / 'x.py').write_text('x = 1\\n')\n"
         "    fim = {'resultado': 'pronta', 'resumo': 'criei migration', 'testes': ''}\n"
         "elif acao == 'atributos':\n"
-        "    pathlib.Path('.gitattributes').write_text('*.txt -diff\\n')\n"
-        "    pathlib.Path('apps/web/texto.txt').write_text('Oi\\n')\n"
+        "    pathlib.Path('.gitattributes').write_text('*.ts -diff\\n')\n"
+        "    pathlib.Path(ARQ).write_text(NOVO)\n"
         "    fim = {'resultado': 'pronta', 'resumo': 'x', 'testes': ''}\n"
         "elif acao == 'gitfile':\n"
         "    pathlib.Path('.git').write_text('gitdir: /tmp/repo-do-atacante\\n')\n"
-        "    pathlib.Path('apps/web/texto.txt').write_text('Oi\\n')\n"
+        "    pathlib.Path(ARQ).write_text(NOVO)\n"
         "    fim = {'resultado': 'pronta', 'resumo': 'x', 'testes': ''}\n"
         "elif acao == 'teste_quebrado':\n"
         "    p = pathlib.Path('apps/web/tests'); p.mkdir(parents=True)\n"
         "    (p / 'quebra.cjs').write_text(\"require('fs').writeFileSync('RODOU.txt','x');process.exit(1)\\n\")\n"
         "    fim = {'resultado': 'pronta', 'resumo': 'teste novo', 'testes': ''}\n"
+        "elif acao == 'hatch':\n"
+        "    pathlib.Path('apps/api').mkdir(parents=True, exist_ok=True)\n"
+        "    pathlib.Path('apps/api/hatch.toml').write_text('[build.hooks.custom]\\n')\n"
+        "    fim = {'resultado': 'pronta', 'resumo': 'x', 'testes': ''}\n"
+        "elif acao == 'fora':\n"
+        "    pathlib.Path('docs').mkdir()\n"
+        "    pathlib.Path('docs/x.md').write_text('oi\\n')\n"
+        "    fim = {'resultado': 'pronta', 'resumo': 'x', 'testes': ''}\n"
+        "elif acao == 'invisivel':\n"
+        "    pathlib.Path(ARQ).write_text(\"export const t = 'Oi' // \\u202e ok\\n\")\n"
+        "    fim = {'resultado': 'pronta', 'resumo': 'x', 'testes': ''}\n"
+        "elif acao == 'tela_quebrada':\n"
+        "    pathlib.Path(ARQ).write_text(\"export const t: number = (1\\n\")\n"
+        "    fim = {'resultado': 'pronta', 'resumo': 'x', 'testes': ''}\n"
         "elif acao == 'equipe':\n"
         "    fim = {'resultado': 'precisa_equipe', 'resumo': 'Precisa de coluna nova', 'testes': ''}\n"
         "assert '--permission-mode' in sys.argv and 'dontAsk' in sys.argv\n"
@@ -84,6 +102,10 @@ def mundo(tmp_path, monkeypatch):
         "assert a[a.index('--tools') + 1] == 'Read,Edit,Write,Glob,Grep'\n"
         "assert a[a.index('--setting-sources') + 1] == 'user' and '--strict-mcp-config' in a\n"
         "assert os.environ.get('CLAUDE_CODE_OAUTH_TOKEN') == 'tok-falso'\n"
+        "assert os.environ.get('CLAUDE_CODE_DISABLE_AUTO_MEMORY') == '1'\n"
+        "cfg = pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])\n"
+        "assert cfg.is_dir() and cfg.name.startswith('M-1-'), cfg\n"
+        "(cfg / 'sobra').write_text('x')  # tem de sumir depois\n"
         "assert 'SSH_AUTH_SOCK' not in os.environ\n"
         "texto = 'Pronto.\\n' + json.dumps(fim, ensure_ascii=False)\n"
         "print(json.dumps({'type': 'result', 'is_error': False, 'result': texto}))\n"
@@ -125,15 +147,22 @@ def mundo(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rodada, "api", _api)
     servidor = {
-        "head": None, "livre": "10", "trava": "LIVRE", "build": "PARADO", "deploy_rc": "0",
+        "head": None, "livre": "20000000000", "trava": "LIVRE", "build": "NAO",
+        "registrado": None, "desde": "", "img_api": "", "img_web": "", "deploy_rc": "0",
         "comandos": [],
     }
 
     def _ssh(comando, timeout=120):
         servidor["comandos"].append(comando)
-        if comando.startswith("git -C /opt/davinci"):
+        if comando.startswith("cd /opt/davinci"):
             head = servidor["head"] or _git(origem, "rev-parse", "main")
-            return 0, f"{head}\n{servidor['livre']}\n{servidor['trava']}\n{servidor['build']}\n"
+            reg = servidor["registrado"] if servidor["registrado"] is not None else head[:8]
+            linhas = [
+                f"head={head}", f"livre={servidor['livre']}", f"trava={servidor['trava']}",
+                f"build={servidor['build']}", f"registrado={reg}", f"desde={servidor['desde']}",
+                f"img_api={servidor['img_api']}", f"img_web={servidor['img_web']}",
+            ]
+            return 0, "\n".join(linhas) + "\n"
         if "setsid -f" in comando:
             return 0, "INICIADO\n"
         if comando.startswith("cat "):
@@ -191,7 +220,7 @@ def _publicar(m, r, **extra) -> dict:
 
 def _main_texto(m) -> str:
     return subprocess.run(
-        ["git", "show", "main:apps/web/texto.txt"], cwd=m["origem"], capture_output=True, text=True
+        ["git", "show", f"main:{ARQ}"], cwd=m["origem"], capture_output=True, text=True
     ).stdout
 
 
@@ -207,11 +236,12 @@ def test_fazer_e_publicar(mundo):
     r = _fazer(m)
     assert r["status"] == "pronta", r
     assert r["branch"] == "mudanca/M-1" and len(r["commit"]) == 40
-    assert "-Olá" in r["diff"] and "+Oi" in r["diff"]
-    assert r["arquivos"] == [{"caminho": "apps/web/texto.txt", "mais": 1, "menos": 1}]
+    assert "-export const t = 'Olá'" in r["diff"] and "+export const t = 'Oi'" in r["diff"]
+    assert r["arquivos"] == [{"caminho": ARQ, "mais": 1, "menos": 1}]
     assert r["resumo"] == "Troquei Olá por Oi"
     assert "Nada desta mudança rodou" in r["testes"]
-    assert _main_texto(m) == "Olá\n"  # nada foi para o origin ainda
+    assert _main_texto(m) == VELHO  # nada foi para o origin ainda
+    assert not list((m["rodada"].PASTA / ".claude-robo").glob("M-1-*"))  # config do Claude apagada
 
     # outra pessoa publica (e o servidor já está com ela) antes da aprovação
     (m["semente"] / "outro.txt").write_text("dois\n")
@@ -220,8 +250,10 @@ def test_fazer_e_publicar(mundo):
 
     r2 = _publicar(m, r)
     assert r2["status"] == "publicada", r2
-    assert _main_texto(m) == "Oi\n"
-    assert any("setsid -f" in c and "davinci-deploy" in c for c in m["servidor"]["comandos"])
+    assert _main_texto(m) == NOVO
+    assert any("setsid -f" in c and "setsid -f" in c for c in m["servidor"]["comandos"])
+    conf = (m["raiz"] / "registros" / "M-1-conferencias.log").read_text()
+    assert "a tela compila (1 arquivo(s)): ok" in conf  # o .ts mexido foi compilado na caixa
     assert r2["commit"] != r["commit"]  # rebaseado em cima do "outro"
     assert not (m["rodada"].PASTA / "M-1").exists()  # cópia removida depois do ar
 
@@ -232,50 +264,98 @@ def test_nao_publica_com_mudanca_de_outra_pessoa_pendente(mundo):
     m["servidor"]["head"] = "f" * 40  # o servidor ainda não tem o main de agora
     r2 = _publicar(m, r)
     assert r2["status"] == "aprovada" and "outras pessoas" in r2["erro"]
-    assert _main_texto(m) == "Olá\n"
-    assert not any("davinci-deploy" in c for c in m["servidor"]["comandos"])
+    assert _main_texto(m) == VELHO
+    assert not any("setsid -f" in c for c in m["servidor"]["comandos"])
 
 
 def test_publicar_espera_disco_e_trava(mundo):
     m = mundo
     r = _fazer(m)
-    m["servidor"]["livre"] = "2"
+    m["servidor"]["livre"] = "7900000000"  # 7,9 GB: o df -B1G mostraria "8"
     r2 = _publicar(m, r)
-    assert r2["status"] == "aprovada" and "GB livres" in r2["erro"]
-    m["servidor"]["livre"] = "10"
+    assert r2["status"] == "aprovada" and "7.9 GB livres" in r2["erro"], r2
+    m["servidor"]["livre"] = "20000000000"
     m["servidor"]["trava"] = "OCUPADA"
     r2 = _publicar(m, r)
     assert r2["status"] == "aprovada" and "outro deploy" in r2["erro"]
     m["servidor"]["trava"] = "LIVRE"
-    m["servidor"]["build"] = "CONSTRUINDO"  # alguém rodando docker compose na mão
+    m["servidor"]["build"] = "SIM"  # alguém rodando docker compose na mão
     r2 = _publicar(m, r)
     assert r2["status"] == "aprovada" and "build" in r2["erro"]
-    assert not any("davinci-deploy" in c for c in m["servidor"]["comandos"])
+    assert not any("setsid -f" in c for c in m["servidor"]["comandos"])
 
 
-def test_deploy_que_falha_depois_do_push_tenta_e_depois_falha_claro(mundo):
+def test_deploy_que_falha_nao_repete_as_cegas(mundo):
     m = mundo
     r = _fazer(m)
-    m["servidor"]["deploy_rc"] = "3"
+    m["servidor"]["deploy_rc"] = "1"  # o build falhou
     r2 = _publicar(m, r)
-    assert r2["status"] == "aprovada" and "deploy falhou" in r2["erro"]
-    assert _main_texto(m) == "Oi\n"  # já está no main
+    assert r2["status"] == "falhou" and "JÁ no main" in r2["erro"] and "git revert" in r2["erro"]
+    assert _main_texto(m) == NOVO
+    assert sum("setsid -f" in c for c in m["servidor"]["comandos"]) == 1
+
+
+def test_deploy_que_nem_comeca_adia(mundo):
+    m = mundo
+    r = _fazer(m)
+    m["servidor"]["deploy_rc"] = "3"  # davinci-deploy RECUSADO (servidor fora do main…)
+    r2 = _publicar(m, r)
+    assert r2["status"] == "aprovada" and "não começou" in r2["erro"]
+
+
+def test_ja_no_main_refaz_so_o_deploy_ou_vira_publicada(mundo):
+    m = mundo
+    antes = _git(m["origem"], "rev-parse", "main")
+    r = _fazer(m)
+    m["servidor"]["deploy_rc"] = "3"
+    _publicar(m, r)  # empurrou; o deploy não começou
     pushes = _git(m["origem"], "rev-list", "--count", "main")
-    r3 = _publicar(m, r)  # 2ª: acha a mudança no main e só refaz o deploy
-    assert r3["status"] == "aprovada" and "2ª vez" in r3["erro"]
-    assert _git(m["origem"], "rev-list", "--count", "main") == pushes  # sem push de novo
-    r4 = _publicar(m, r)  # 3ª: para e pede uma pessoa
-    assert r4["status"] == "falhou" and "JÁ ESTÁ no main" in r4["erro"]
+    # o servidor ainda roda o de antes: só refaz o deploy, sem push de novo
+    m["servidor"]["registrado"] = antes[:8]
+    m["servidor"]["deploy_rc"] = "0"
+    m["servidor"]["comandos"].clear()
+    r3 = _publicar(m, r)
+    assert r3["status"] == "publicada", r3
+    assert _git(m["origem"], "rev-list", "--count", "main") == pushes
+    assert any("setsid -f" in c for c in m["servidor"]["comandos"])
+    # alguém já publicou (o registrado tem a mudança): publicada sem deploy
+    m["servidor"]["registrado"] = None
+    m["servidor"]["comandos"].clear()
+    r4 = _publicar(m, r)
+    assert r4["status"] == "publicada"
+    assert not any("setsid -f" in c for c in m["servidor"]["comandos"])
 
 
-def test_ja_no_main_e_deploy_terminou_vira_publicada(mundo):
+def test_mudanca_desfeita_no_main_nao_vira_publicada(mundo):
     m = mundo
     r = _fazer(m)
     m["servidor"]["deploy_rc"] = "3"
-    _publicar(m, r)
-    m["servidor"]["deploy_rc"] = "0"  # alguém rodou o deploy e deu certo
+    _publicar(m, r)  # empurrou; o deploy não começou
+    _git(m["semente"], "pull", "-q", "origin", "main")
+    _git(m["semente"], "-c", "user.email=t@t", "-c", "user.name=t", "revert", "--no-edit", "HEAD")
+    _git(m["semente"], "push", "-q", "origin", "HEAD:main")
+    m["servidor"]["deploy_rc"] = "0"
     r3 = _publicar(m, r)
-    assert r3["status"] == "publicada"
+    assert r3["status"] == "falhou" and "desfeita" in r3["erro"]
+
+
+def test_servidor_com_git_na_frente_do_que_esta_no_ar(mundo):
+    """O git do servidor no main não prova que o main está no ar (deploy que
+    falhou no build, reset --hard de outra sessão): o robô espera."""
+    m = mundo
+    antes = _git(m["origem"], "rev-parse", "main")
+    r = _fazer(m)
+    (m["semente"] / "outro.txt").write_text("dois\n")
+    _commit(m["semente"], "outro, ainda não no ar")
+    _git(m["semente"], "push", "-q", "origin", "HEAD:main")
+    m["servidor"]["registrado"] = antes[:8]  # o davinci-deploy registrou o de antes
+    r2 = _publicar(m, r)
+    assert r2["status"] == "aprovada" and "ainda não foram ao ar" in r2["erro"], r2
+    assert not any("setsid -f" in c for c in m["servidor"]["comandos"])
+    # deploy feito à mão: imagens mais novas do que o HEAD → está no ar
+    m["servidor"].update(desde="1000", img_api="2000", img_web="2000")
+    r3 = _publicar(m, r)
+    assert r3["status"] == "publicada", r3
 
 
 def test_publicar_usa_copia_nova_do_commit_aprovado(mundo):
@@ -291,7 +371,7 @@ def test_publicar_usa_copia_nova_do_commit_aprovado(mundo):
     assert r2["status"] == "publicada", r2
     mostra = subprocess.run(["git", "show", "main:outro.txt"], cwd=m["origem"],
                             capture_output=True, text=True).stdout
-    assert mostra == "um\n" and _main_texto(m) == "Oi\n"
+    assert mostra == "um\n" and _main_texto(m) == NOVO
 
 
 def test_nada_roda_antes_de_aprovar_e_teste_quebrado_nao_publica(mundo):
@@ -304,7 +384,7 @@ def test_nada_roda_antes_de_aprovar_e_teste_quebrado_nao_publica(mundo):
     assert r2["status"] == "falhou" and "conferências falharam" in r2["erro"], r2
     assert list(m["rodada"].PASTA.rglob("RODOU.txt"))  # rodou só depois, na caixa
     assert "quebra.cjs" not in _git(m["origem"], "ls-tree", "-r", "--name-only", "main")
-    assert not any("davinci-deploy" in c for c in m["servidor"]["comandos"])
+    assert not any("setsid -f" in c for c in m["servidor"]["comandos"])
 
 
 def test_commit_com_cara_de_comando_nao_roda(mundo, tmp_path):
@@ -320,12 +400,12 @@ def test_commit_com_cara_de_comando_nao_roda(mundo, tmp_path):
 def test_conflito_com_o_main_falha_sem_empurrar(mundo):
     m = mundo
     r = _fazer(m)
-    (m["semente"] / "apps/web/texto.txt").write_text("Olá, mudado por outra pessoa\n")
+    (m["semente"] / ARQ).write_text("export const t = 'mudado por outra pessoa'\n")
     _commit(m["semente"], "x")
     _git(m["semente"], "push", "-q", "origin", "HEAD:main")
     r2 = _publicar(m, r)
     assert r2["status"] == "falhou" and "não encaixa" in r2["erro"]
-    assert not any("davinci-deploy" in c for c in m["servidor"]["comandos"])
+    assert not any("setsid -f" in c for c in m["servidor"]["comandos"])
 
 
 def test_arquivo_proibido_vira_precisa_equipe(mundo):
@@ -346,6 +426,32 @@ def test_arquivo_git_mexido_nao_passa(mundo):
     mundo["acao"].write_text("gitfile")
     r = _fazer(mundo)
     assert r["status"] == "falhou" and ".git" in r["erro"]
+
+
+def test_arquivo_fora_das_pastas_permitidas(mundo):
+    mundo["acao"].write_text("hatch")  # hatch.toml faria o uv sync rodar código
+    r = _fazer(mundo)
+    assert r["status"] == "precisa_equipe" and "hatch.toml" in r["erro"], r
+    mundo["fila"].clear()
+    mundo["acao"].write_text("fora")
+    m2 = _fazer(mundo)
+    assert m2["status"] == "precisa_equipe" and "fora das pastas" in m2["erro"], m2
+
+
+def test_caractere_invisivel_vai_para_a_equipe(mundo):
+    mundo["acao"].write_text("invisivel")
+    r = _fazer(mundo)
+    assert r["status"] == "precisa_equipe" and "U+202E" in r["erro"], r
+
+
+def test_tela_que_nao_compila_nao_publica(mundo):
+    m = mundo
+    m["acao"].write_text("tela_quebrada")
+    r = _fazer(m)
+    assert r["status"] == "pronta", r
+    r2 = _publicar(m, r)
+    assert r2["status"] == "falhou" and "a tela compila" in r2["erro"] and "NÃO" in r2["erro"], r2
+    assert _main_texto(m) == VELHO
 
 
 def test_claude_pede_a_equipe(mundo):
@@ -413,7 +519,10 @@ def test_permissoes_bloqueiam_o_perigoso():
     for item in ("WebFetch", "Read(~/.ssh/**)", "Read(//**/.env)", "Edit(apps/api/alembic/**)",
                  "Edit(**/conftest.py)", "Write(**/.gitattributes)"):
         assert item in regras["deny"], item
-    # o Claude do robô não roda NADA: só ferramentas de arquivo na pasta do pedido
-    assert regras["allow"] == ["Read(./**)", "Edit(./**)", "Write(./**)", "Glob", "Grep"]
-    assert "Bash" in regras["deny"]
+    # o Claude do robô não roda NADA: só arquivos da pasta do pedido (Glob/Grep
+    # sem caminho valeriam para QUALQUER pasta do Mac)
+    assert regras["allow"] == ["Read(./**)", "Edit(./**)", "Write(./**)"]
+    assert regras["blockReadsOutsideWorkingDirectories"] is True
+    assert "Bash" in regras["deny"] and "Write(**/hatch.toml)" in regras["deny"]
+    assert json.loads((AQUI / "permissoes.json").read_text())["autoMemoryEnabled"] is False
     assert os.access(AQUI / "instalar.sh", os.X_OK) and os.access(AQUI / "testar.sh", os.X_OK)

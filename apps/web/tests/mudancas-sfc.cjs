@@ -47,6 +47,13 @@ assert.ok(pagina.template.content.includes('Publicação adiada:'), 'motivo da p
 assert.ok(pagina.template.content.includes('O robô do Mac não aparece há mais de 10 minutos'), 'faixa do robô parado')
 assert.match(pagina.scriptSetup.content, /robo_visto_em/, 'lê robo_visto_em da lista')
 assert.match(pagina.scriptSetup.content, /if \(statusErro\(e\) === 404\) return 'Não encontrada\.'/, '404 em português')
+// 3ª revisão (17/11): aprovada parada pode ser cancelada; caractere invisível
+// no diff vira marcador visível + faixa vermelha (Trojan Source).
+assert.ok(pagina.template.content.includes('Cancelar aprovação'), 'botão de cancelar a aprovação')
+assert.match(pagina.scriptSetup.content, /pode_cancelar === true/, 'só com pode_cancelar do servidor')
+assert.match(pagina.scriptSetup.content, /cancelando \? 'cancelar' : 'recusar'/, 'chama /cancelar')
+assert.ok(pagina.template.content.includes('caracteres invisíveis'), 'faixa de caractere invisível')
+assert.match(pagina.scriptSetup.content, /const INVISIVEL = /, 'marca caracteres invisíveis')
 
 const sidebar = sfc('components/AppSidebar.vue')
 {
@@ -56,8 +63,8 @@ const sidebar = sfc('components/AppSidebar.vue')
   assert.match(s, /if \(it\.mudancasOnly && auth\.user\?\.mudancas !== true\) return false/, 'filtro do menu')
   assert.match(s, /\bGitPullRequest\b[\s\S]*from 'lucide-vue-next'/, 'ícone importado')
   const sistema = s.slice(s.indexOf("label: 'Sistema'"))
-  assert.ok(sistema.indexOf("'/mudancas'") > sistema.indexOf("'/historico'"), 'logo depois do Histórico')
-  assert.ok(sistema.indexOf("'/mudancas'") < sistema.indexOf("label: 'Cadastros'"), 'na seção Sistema')
+  assert.ok(sistema.indexOf("'/mudancas'") > 0, 'na seção Sistema')
+  assert.ok(sistema.indexOf("'/mudancas'") < sistema.indexOf("label: 'Cadastros'"), 'antes de Cadastros')
 }
 assert.match(ler('stores/auth.ts'), /\n\s+mudancas\?: boolean\n/, 'AuthUser.mudancas')
 

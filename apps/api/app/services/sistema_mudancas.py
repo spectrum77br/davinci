@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -85,6 +86,9 @@ ROBO_SUMIDO = timedelta(minutes=10)
 ESPERA_ADIADA = timedelta(minutes=10)
 # Adiada tantas vezes (~1 h): avisa os aprovadores e quem pediu (uma vez).
 AVISO_ADIAMENTOS = 6
+# Erro do ambiente (GitHub, login do Claude, uv) não gasta tentativa; mas o
+# pedido não fica na fila para sempre: passou disto desde o pedido, falha.
+TETO_FILA_AMBIENTE = timedelta(hours=12)
 # O robô só manda commit de verdade e o ramo do próprio pedido.
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 # Trava do "pegar": dois pedidos de trabalho ao mesmo tempo nunca furam o
@@ -110,6 +114,23 @@ class MudancaError(Exception):
         super().__init__(detalhe or code)
         self.code = code
         self.detalhe = detalhe or code
+
+
+def invisiveis(diff: str) -> list[str]:
+    """Caracteres invisíveis/de controle nas linhas acrescentadas do diff
+    (U+202E e cia. fazem a tela mostrar um código diferente do que roda —
+    "Trojan Source"). Devolve os códigos achados, ex.: ["U+202E"]."""
+    achados: set[str] = set()
+    for linha in diff.splitlines():
+        if not linha.startswith("+") or linha.startswith("+++"):
+            continue
+        for ch in linha[1:]:
+            if ch == "\t":
+                continue
+            cat = unicodedata.category(ch)
+            if cat in ("Cf", "Cc", "Co", "Cs", "Zl", "Zp") or (cat == "Zs" and ch != " "):
+                achados.add(f"U+{ord(ch):04X}")
+    return sorted(achados)
 
 
 def _agora() -> datetime:
@@ -315,6 +336,7 @@ def detalhe_dict(
         "publicado_em": _iso(m.publicado_em),
         "erro": m.erro,
         "pode_aprovar": pode_aprovar_ and m.status == "pronta",
+        "pode_cancelar": pode_aprovar_ and m.status == "aprovada",
     }
 
 
@@ -378,6 +400,41 @@ async def recusar(
         mensagem=f"{m.titulo} — motivo: {texto}",
         m=m,
         evento="recusada",
+    )
+    return m
+
+
+async def cancelar(
+    session: AsyncSession, *, m: SistemaMudanca, user: User, motivo: Any
+) -> SistemaMudanca:
+    """Desfaz uma aprovação que ainda não foi ao ar (a publicação ficou parada
+    e o pedido não vale mais). Só antes de o robô começar a publicar."""
+    if m.status != "aprovada":
+        raise MudancaError(
+            "nao_esta_aprovada",
+            f"{codigo(m)} está em '{STATUS_TEXTO.get(m.status, m.status)}' — só dá para cancelar "
+            "a aprovação enquanto a publicação espera",
+        )
+    texto = str(motivo or "").strip()
+    if len(texto) < MIN_MOTIVO or len(texto) > MAX_MOTIVO:
+        raise MudancaError(
+            "motivo_invalido", f"o motivo precisa ter de {MIN_MOTIVO} a {MAX_MOTIVO} letras"
+        )
+    agora = _agora()
+    m.status = "recusada"
+    m.recusado_por = user.id
+    m.recusado_em = agora
+    m.motivo_recusa = f"Aprovação cancelada: {texto}"
+    m.atualizado_em = agora
+    await session.flush()
+    logger.info("mudanca_aprovacao_cancelada", mudanca=codigo(m), por=str(user.id))
+    await _avisar(
+        session,
+        [m.pedido_por, *(u.id for u in await aprovadores(session) if u.id != user.id)],
+        titulo=f"✋ {codigo(m)}: aprovação cancelada",
+        mensagem=f"{m.titulo} — motivo: {texto}",
+        m=m,
+        evento="cancelada",
     )
     return m
 
@@ -623,6 +680,12 @@ async def registrar_resultado(
             raise MudancaError("sem_diff", "pronta precisa do diff")
         if len(diff) > MAX_DIFF:
             raise MudancaError("diff_grande", f"o diff passa de {MAX_DIFF} letras")
+        escondidos = invisiveis(diff)
+        if escondidos:
+            raise MudancaError(
+                "diff_invisivel",
+                "o diff tem caracteres invisíveis/de controle: " + ", ".join(escondidos[:10]),
+            )
         commit = str(dados.get("commit") or "").strip()
         branch = str(dados.get("branch") or "").strip()
         if not _COMMIT.match(commit) or branch != f"mudanca/{codigo(m)}":
@@ -649,11 +712,18 @@ async def registrar_resultado(
         m.erro = _corta(dados.get("erro"), MAX_ERRO) or "publicação adiada"
         m.adiamentos = int(m.adiamentos or 0) + 1
     elif novo == "pedida":
-        # Erro do ambiente no "fazer" (rede, GitHub, uv): volta para a fila —
-        # até MAX_TENTATIVAS, depois falha.
-        if int(m.tentativas or 0) >= MAX_TENTATIVAS:
-            novo = "falhou"
+        # Erro do ambiente no "fazer" (rede, GitHub, login do Claude): volta
+        # para a fila SEM gastar tentativa (uma queda do GitHub não derruba a
+        # fila inteira) e espera ESPERA_ADIADA; falha só se o pedido passar de
+        # TETO_FILA_AMBIENTE sem o robô conseguir trabalhar.
+        m.tentativas = max(0, int(m.tentativas or 0) - 1)
         m.erro = _corta(dados.get("erro"), MAX_ERRO)
+        if m.criado_em is not None and m.criado_em < agora - TETO_FILA_AMBIENTE:
+            novo = "falhou"
+            m.erro = (
+                f"o robô não conseguiu trabalhar neste pedido em "
+                f"{int(TETO_FILA_AMBIENTE.total_seconds() // 3600)} h: {m.erro or ''}"
+            ).strip(": ")
     else:  # falhou / precisa_equipe
         m.erro = _corta(dados.get("erro"), MAX_ERRO) or _corta(dados.get("resumo"), MAX_ERRO)
     m.status = novo
@@ -663,7 +733,7 @@ async def registrar_resultado(
     await session.flush()
     logger.info("mudanca_resultado", mudanca=codigo(m), status=novo, robo=robo)
 
-    if novo == "aprovada" and m.adiamentos == AVISO_ADIAMENTOS:
+    if novo == "aprovada" and m.adiamentos and m.adiamentos % AVISO_ADIAMENTOS == 0:
         await _avisar(
             session,
             [*(u.id for u in await aprovadores(session)), m.pedido_por],

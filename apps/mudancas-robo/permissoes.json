@@ -3,9 +3,7 @@
     "allow": [
       "Read(./**)",
       "Edit(./**)",
-      "Write(./**)",
-      "Glob",
-      "Grep"
+      "Write(./**)"
     ],
     "deny": [
       "Write(.git/**)",
@@ -71,8 +69,19 @@
       "Write(**/pyproject.toml)",
       "Write(**/uv.lock)",
       "Write(**/package.json)",
-      "Write(**/conftest.py)"
-    ]
+      "Write(**/conftest.py)",
+      "Read(~/.davinci/**)",
+      "Read(~/.codex/**)",
+      "Read(~/.openclaw/**)",
+      "Read(~/.zsh_sessions/**)",
+      "Read(~/.claude.json)",
+      "Write(**/hatch.toml)",
+      "Edit(**/hatch.toml)",
+      "Write(**/MANIFEST.in)",
+      "Write(**/.pypirc)"
+    ],
+    "blockReadsOutsideWorkingDirectories": true
   },
+  "autoMemoryEnabled": false,
   "cleanupPeriodDays": 30
 }

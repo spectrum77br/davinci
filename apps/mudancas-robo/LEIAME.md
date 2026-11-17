@@ -16,16 +16,23 @@ servidor). Nada do pedido roda — nem teste — antes do Aprovar; nada vai para
    400 linhas), faz o commit e manda o diff. **Nada roda nesta etapa.**
    Pedido que foge das regras volta como **Precisa da equipe**.
 3. **publicar** (só depois do Aprovar): cria uma cópia NOVA a partir do commit aprovado (nada
-   do que ficou na pasta conta), atualiza com o main (tem de continuar o mesmo patch), instala
-   as dependências DO MAIN e roda as conferências NA CAIXA (ruff, a API carregando, pytest/node
-   dos testes mexidos). **Falhou: não publica** (fica "Falhou" com o motivo). Passou: exige o
-   servidor em dia com o main, sem build rodando (nem `docker compose` na mão), disco ≥ 5 GB e
-   a trava livre; faz o push e roda o `davinci-deploy` desacoplado da conexão (que recusa
-   mexer em infra e roda a migration). Ocupado/disco/mudança de outra pessoa pendente: volta
-   para a fila e tenta de novo em 10 min (o DaVinci avisa depois de ~1 h). Deploy que falha
-   com a mudança já no main: tenta até 3 vezes e depois pede uma pessoa.
+   do que ficou na pasta conta), põe em cima do main conferido com o servidor (tem de continuar
+   o mesmo patch), instala as dependências DO MAIN (sem construir o projeto) e roda as
+   conferências NA CAIXA: ruff de erro grave, a API carregando, pytest dos testes mexidos (num
+   Postgres descartável), a tela compilando (.vue/.ts mexidos) e node dos testes de tela.
+   **Falhou: não publica** (fica "Falhou" com o motivo; detalhes em `registros/`). Passou:
+   exige que o main inteiro já esteja NO AR (não só no git do servidor — vale o que o
+   `davinci-deploy` registrou ou imagens mais novas que o HEAD), sem build rodando (nem
+   `docker compose` na mão), disco ≥ 8 GB e a trava livre — confere de novo logo antes do
+   push; faz o push e roda o `davinci-deploy` desacoplado da conexão (que recusa mexer em
+   infra e roda a migration). Ocupado/disco/mudança de outra pessoa ainda fora do ar: volta
+   para a fila e tenta de novo em 10 min (o DaVinci avisa quem aprova a cada ~1 h, e na tela dá
+   para **Cancelar aprovação**). Deploy que FALHA com a mudança já no main: não repete — fica
+   "Falhou" pedindo uma pessoa (corrigir ou `git revert`). Mudança desfeita no main por uma
+   pessoa: "Falhou", nunca "no ar".
 4. Um trabalho por vez; avisa que está vivo a cada 5 min (senão o DaVinci devolve o pedido;
-   recomeçar conta tentativa — 3 no máximo, e 3 h no total).
+   recomeçar conta tentativa — 3 no máximo, e 3 h no total). Erro do ambiente (GitHub fora,
+   login do Claude) não gasta tentativa; o pedido só falha se passar 12 h assim.
 
 ## Instalar (uma vez)
 1. No servidor, `MUDANCAS_AGENT_TOKEN=<token longo aleatório>` no `/opt/davinci/.env` e
@@ -42,19 +49,24 @@ servidor). Nada do pedido roda — nem teste — antes do Aprovar; nada vai para
 - `estado/ultima-rodada` — prova de vida do despertador.
 - Parar: `launchctl unload ~/Library/LaunchAgents/com.davinci.mudancas-robo.plist`.
 
-## Segurança (2 revisões em 17/11/2026)
+## Segurança (3 revisões em 17/11/2026)
 - **Nenhum código do pedido roda antes do Aprovar.** O Claude do robô só lê e edita arquivos
-  da pasta do pedido (sem terminal). O pior que um pedido malicioso consegue antes da
-  aprovação é um diff ruim — que quem aprova lê.
-- Depois do Aprovar, as conferências rodam na **caixa** (`caixa.sb`, sandbox do macOS): sem
-  rede (só o socket do Postgres), sem ler `~/.ssh`, a pasta do robô, `.env`, `~/.config`,
-  `~/.pgpass`, históricos do terminal, o chaveiro; sem `open`/AppleScript; escrevendo só na
-  cópia do pedido e numa pasta temporária própria; ambiente limpo (sem tokens).
+  da pasta do pedido (sem terminal; a leitura fora da pasta é bloqueada —
+  `blockReadsOutsideWorkingDirectories`); cada pedido usa uma configuração do Claude NOVA e
+  sem memória automática (nada de um pedido chega ao próximo).
+- Só entra código/teste das pastas permitidas (`apps/api/app`, `apps/api/tests` e as pastas da
+  tela); qualquer outro arquivo (configuração de ferramenta, dependência, migration, infra)
+  devolve o pedido para a equipe. Caractere invisível/bidi no código também (e a tela marca
+  ⟦U+…⟧ em vermelho, e o servidor recusa).
+- Depois do Aprovar, as conferências rodam na **caixa** (`caixa.sb`, sandbox do macOS): o HOME
+  inteiro é ilegível, menos a cópia do pedido, a pasta temporária, os node_modules da tela e o
+  Python do uv; sem rede (só o socket do Postgres DESCARTÁVEL, que roda dentro da própria
+  caixa); sem `open`/AppleScript/preferências de outros apps; escreve só na cópia e na pasta
+  temporária; ambiente limpo (sem tokens). Testado: COPY … TO PROGRAM, ler ~/.ssh/~/.codex/
+  ~/.claude.json, Redis em 127.0.0.1, `defaults write`, osascript — tudo barrado.
+- O que vai para o DaVinci (e para quem pediu) é só status e nomes de teste; a saída completa
+  fica em `registros/` neste Mac.
 - O git do robô roda sem ganchos; a lista de arquivos é conferida de novo no que foi
   commitado (sem pular registro estranho); o diff mostrado é o que vai para o ar (a
   aprovação vale para ele: `diff_sha` + patch-id na publicação).
-- Publicar só com o servidor em dia com o main (nada de mudança de outra pessoa junto).
 - Token próprio do robô (404 sem ele), guardado só no `.env` deste Mac e do servidor.
-- O que a caixa NÃO impede (só vale para código JÁ aprovado): o Postgres local aceita
-  qualquer conexão local como qualquer usuário (`trust`), então um teste aprovado poderia
-  mexer nos bancos locais deste Mac — sem rede, nada sai daqui.

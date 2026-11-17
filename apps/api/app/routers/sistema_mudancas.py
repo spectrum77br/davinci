@@ -150,6 +150,21 @@ async def recusar(
     return await _detalhe(session, m)
 
 
+@router.post("/{mudanca_id}/cancelar")
+async def cancelar(
+    mudanca_id: str, request: Request, user: Aprovador, session: Sessao
+) -> dict[str, Any]:
+    """Desfaz a aprovação de uma mudança cuja publicação ficou parada."""
+    dados = await _corpo_da_tela(request)
+    m = await _mudanca(session, mudanca_id, travar=True)
+    try:
+        await svc.cancelar(session, m=m, user=user, motivo=dados.get("motivo"))
+    except svc.MudancaError as exc:
+        raise _erro(exc) from exc
+    await session.commit()
+    return await _detalhe(session, m)
+
+
 _TODOS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
 
 

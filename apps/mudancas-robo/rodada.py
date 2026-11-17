@@ -44,6 +44,7 @@ import sys
 import threading
 import time
 import traceback
+import unicodedata
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -92,8 +93,9 @@ SSH_CHAVE = str(_caminho("DEPLOY_SSH_CHAVE", str(CASA / ".ssh" / "coolify")))
 MODELO = _cfg("MODELO", "claude-opus-5-5")
 ESFORCO = _cfg("ESFORCO", "high")
 LIMITE_MIN = int(_cfg("LIMITE_MINUTOS", "40"))
-DISCO_MIN_GB = float(_cfg("DISCO_MIN_GB", "5"))
-MAX_TENTATIVAS_DEPLOY = int(_cfg("MAX_TENTATIVAS_DEPLOY", "3"))
+# Medido em bytes (o df -B1G arredonda para cima). 27/10: um build com 5,5 GB
+# livres encheu o disco e derrubou o Redis — 8 GB é a regra da operação.
+DISCO_MIN_GB = float(_cfg("DISCO_MIN_GB", "8"))
 FAXINA_DIAS = int(_cfg("FAXINA_DIAS", "7"))
 PATH_ROBO = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 TESTAR = RAIZ / "testar.sh"
@@ -108,8 +110,19 @@ PROIBIDOS = re.compile(
     r"|pyproject\.toml|uv\.lock|uv\.toml|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml"
     r"|\.gitattributes|\.gitmodules|\.gitignore|conftest\.py|\.python-version"
     r"|\.tool-versions|\.npmrc|\.nvmrc|\.yarnrc[^/]*|\.pnpmfile\.cjs|pytest\.ini|setup\.cfg"
-    r"|tox\.ini|setup\.py|hatch_build\.py|sitecustomize\.py|usercustomize\.py|[^/]*\.pth)$"
+    r"|tox\.ini|setup\.py|hatch_build\.py|hatch\.toml|MANIFEST\.in|\.pypirc"
+    r"|sitecustomize\.py|usercustomize\.py|[^/]*\.pth)$"
 )
+# E só estas pastas/extensões (3ª revisão: a lista proibida sempre esquecia um
+# arquivo de configuração — hatch.toml fazia o `uv sync` rodar código).
+PERMITIDOS = re.compile(
+    r"^(apps/api/(app|tests)/[A-Za-z0-9_./-]+\.(py|sql|json|html|txt|md|csv)"
+    r"|apps/web/(pages|components|composables|stores|lib|utils|layouts|middleware|plugins"
+    r"|assets|tests)/[A-Za-z0-9_./@+-]+\.(vue|ts|js|mjs|cjs|css|json|svg))$"
+)
+# ruff que BARRA a publicação: só erro grave (sintaxe, nome indefinido) e
+# caractere invisível/bidi; o resto do ruff é só aviso (o código antigo tem).
+RUFF_GRAVE = "E9,F63,F7,F82,PLE2502,PLE2510,PLE2512,PLE2513,PLE2514,PLE2515"
 CAMINHO_OK = re.compile(r"^[A-Za-z0-9_./@+-]+$")
 COMMIT_OK = re.compile(r"^[0-9a-f]{40}$")
 MAX_ARQUIVOS = 12
@@ -379,6 +392,12 @@ def faxina() -> None:
     if not PASTA.exists():
         return
     limite = time.time() - FAXINA_DIAS * 86400
+    for velho in [*PASTA.glob(".tmp-caixa/M-*"), *PASTA.glob(".claude-robo/M-*")]:
+        try:
+            if velho.stat().st_mtime < limite:
+                shutil.rmtree(velho, ignore_errors=True)
+        except OSError:
+            pass
     for wt in PASTA.glob("M-*"):
         try:
             if wt.is_dir() and wt.stat().st_mtime < limite:
@@ -431,6 +450,23 @@ def _arquivos(wt: Path, *rev: str) -> list[dict]:
     return arquivos
 
 
+def invisiveis(diff: str) -> list[str]:
+    """Caracteres invisíveis/de controle nas linhas acrescentadas do diff
+    (U+202E e cia. fazem a tela mostrar um código diferente do que roda —
+    "Trojan Source"). Igual ao do servidor."""
+    achados: set[str] = set()
+    for linha in diff.splitlines():
+        if not linha.startswith("+") or linha.startswith("+++"):
+            continue
+        for ch in linha[1:]:
+            if ch == "\t":
+                continue
+            cat = unicodedata.category(ch)
+            if cat in ("Cf", "Cc", "Co", "Cs", "Zl", "Zp") or (cat == "Zs" and ch != " "):
+                achados.add(f"U+{ord(ch):04X}")
+    return sorted(achados)
+
+
 def _barrar(arquivos: list[dict]) -> str | None:
     """O motivo de o robô não poder entregar esta mudança, ou None."""
     if not arquivos:
@@ -441,6 +477,9 @@ def _barrar(arquivos: list[dict]) -> str | None:
     proibidos = [a["caminho"] for a in arquivos if PROIBIDOS.search(a["caminho"])]
     if proibidos:
         return f"mexe em arquivo que só a equipe muda: {', '.join(proibidos)[:300]}"
+    fora = [a["caminho"] for a in arquivos if not PERMITIDOS.match(a["caminho"])]
+    if fora:
+        return f"mexe em arquivo fora das pastas que o robô pode mudar: {', '.join(fora)[:300]}"
     binarios = [a["caminho"] for a in arquivos if a["binario"]]
     if binarios:
         return f"arquivo binário na mudança: {', '.join(binarios)[:300]}"
@@ -450,42 +489,82 @@ def _barrar(arquivos: list[dict]) -> str | None:
     return None
 
 
-def conferencias(wt: Path, arquivos: list[dict]) -> tuple[bool, str]:
-    """ruff, a API carregando, pytest dos testes mexidos e node dos testes de
-    tela mexidos — TUDO na caixa. (ok, texto)."""
-    linhas: list[str] = []
+def _nomes_que_falharam(saida: str) -> list[str]:
+    """Só os NOMES dos testes que falharam (sem a mensagem, que pode carregar
+    qualquer coisa que o teste imprimiu) — é o que vai para o DaVinci."""
+    nomes = []
+    for linha in saida.splitlines():
+        if linha.startswith(("FAILED ", "ERROR ")):
+            nomes.append("  " + linha.split(" - ", 1)[0][:200])
+    return nomes[:10]
+
+
+def conferencias(wt: Path, arquivos: list[dict]) -> tuple[bool, str, str]:
+    """ruff (grave barra; estilo só avisa), a API carregando, pytest dos testes
+    mexidos, a tela compilando e node dos testes de tela mexidos — TUDO na
+    caixa. (ok, curto, completo): o curto vai para o DaVinci (status e nomes),
+    o completo fica só em registros/ neste Mac."""
+    curto: list[str] = []
+    longo: list[str] = []
     ok = True
+    existentes = [a["caminho"] for a in arquivos if (wt / a["caminho"]).is_file()]
     py = [
-        a["caminho"][len("apps/api/") :]
-        for a in arquivos
-        if a["caminho"].startswith("apps/api/") and a["caminho"].endswith(".py")
+        c[len("apps/api/") :]
+        for c in existentes
+        if c.startswith("apps/api/") and c.endswith(".py")
     ]
     if py:
-        rc, out = testar(wt, "ruff", *py, timeout=300)
-        linhas.append(f"[robô] ruff ({len(py)} arquivo(s)): {'ok' if rc == 0 else 'COM AVISOS'}")
-        if rc != 0:
-            linhas.append(out[-3000:])
-        rc, out = testar(wt, "importar", timeout=300)
-        linhas.append(f"[robô] a API carrega: {'ok' if rc == 0 else 'NÃO'}")
+        rc, out = testar(wt, "ruff", "--select", RUFF_GRAVE, *py, timeout=300)
+        curto.append(f"[robô] ruff, erros graves ({len(py)} arquivo(s)): {'ok' if rc == 0 else 'FALHOU'}")
         if rc != 0:
             ok = False
-            linhas.append(out[-3000:])
+            longo.append(out[-3000:])
+            curto.extend(["  " + ln[:200] for ln in out.splitlines() if ".py:" in ln][:10])
+        rc, out = testar(wt, "ruff", *py, timeout=300)
+        curto.append(f"[robô] ruff, estilo (só aviso): {'ok' if rc == 0 else 'com avisos'}")
+        if rc != 0:
+            longo.append(out[-3000:])
+        rc, out = testar(wt, "importar", timeout=300)
+        curto.append(f"[robô] a API carrega: {'ok' if rc == 0 else 'NÃO'}")
+        if rc != 0:
+            ok = False
+            longo.append(out[-3000:])
     testes = [p for p in py if p.startswith("tests/") and Path(p).name.startswith("test_")]
     if testes:
         rc, out = testar(wt, "pytest", *testes, timeout=1500)
-        ultima = (out.strip().splitlines() or ["?"])[-1]
-        linhas.append(f"[robô] pytest {' '.join(testes)}: {ultima}")
+        ultima = (out.strip().splitlines() or ["?"])[-1][:200]
+        curto.append(f"[robô] pytest {' '.join(testes)}: {ultima}")
+        if "pulado na caixa" in out:
+            curto.append(
+                "[robô] atenção: teste(s) pulado(s) na caixa por precisar(em) de rede local "
+                "— rodar à mão se importar"
+            )
         if rc != 0:
             ok = False
-            linhas.append(out[-5000:])
-    for a in arquivos:
-        if a["caminho"].startswith("apps/web/tests/") and a["caminho"].endswith(".cjs"):
-            rc, out = testar(wt, "node", a["caminho"], timeout=300)
-            linhas.append(f"[robô] node {a['caminho']}: {'ok' if rc == 0 else 'FALHOU'}")
+            longo.append(out[-5000:])
+            curto.extend(_nomes_que_falharam(out))
+    web = [
+        c
+        for c in existentes
+        if c.startswith("apps/web/")
+        and not c.startswith("apps/web/tests/")
+        and c.endswith((".vue", ".ts", ".js", ".mjs"))
+    ]
+    if web:
+        rc, out = testar(wt, "web", *web, timeout=300)
+        curto.append(f"[robô] a tela compila ({len(web)} arquivo(s)): {'ok' if rc == 0 else 'NÃO'}")
+        if rc != 0:
+            ok = False
+            longo.append(out[-3000:])
+            curto.extend("  " + ln[:200] for ln in out.strip().splitlines()[:-1][:10])
+    for c in existentes:
+        if c.startswith("apps/web/tests/") and c.endswith(".cjs"):
+            rc, out = testar(wt, "node", c, timeout=300)
+            curto.append(f"[robô] node {c}: {'ok' if rc == 0 else 'FALHOU'}")
             if rc != 0:
                 ok = False
-                linhas.append(out[-3000:])
-    return ok, "\n".join(linhas)
+                longo.append(out[-3000:])
+    return ok, "\n".join(curto), "\n".join([*curto, "", *longo])
 
 
 # ── fazer ─────────────────────────────────────────────────────────────────
@@ -521,12 +600,15 @@ def _json_final(texto: str) -> dict:
     return {}
 
 
-def _env_claude() -> dict:
+def _env_claude(config: Path) -> dict:
     env = _env_base()
     env.pop("SSH_AUTH_SOCK", None)
     env.update(
         {
-            "CLAUDE_CONFIG_DIR": str(PASTA / ".claude-robo"),
+            # pasta de configuração NOVA a cada pedido (nada de um pedido —
+            # memória, histórico — chega ao próximo) e sem memória automática
+            "CLAUDE_CONFIG_DIR": str(config),
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
             "CLAUDE_CODE_OAUTH_TOKEN": _cfg("CLAUDE_CODE_OAUTH_TOKEN"),
             "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1",
             "DISABLE_AUTOUPDATER": "1",
@@ -544,7 +626,6 @@ def fazer(t: dict) -> None:
     wt = PASTA / codigo
     log(f"{codigo}: fazer (tentativa {t.get('tentativa')}) — {t['titulo']}")
     PASTA.mkdir(parents=True, exist_ok=True)
-    (PASTA / ".claude-robo").mkdir(exist_ok=True)
     git_rede(REPO, "fetch", "--quiet", "origin", "main")
     if wt.exists():
         remover_worktree(wt)
@@ -564,6 +645,7 @@ def fazer(t: dict) -> None:
         "user",
         "--strict-mcp-config",
         # só ferramentas de arquivo: sem terminal, sem rede, sem subagentes
+        # (e a leitura fica presa à pasta do pedido: permissoes.json)
         "--tools",
         "Read,Edit,Write,Glob,Grep",
         "--model",
@@ -578,7 +660,12 @@ def fazer(t: dict) -> None:
         "json",
     ]
     log(f"{codigo}: Claude começou ({MODELO}, {ESFORCO})")
-    rc, out = rodar(cmd, cwd=wt, env=_env_claude(), timeout=LIMITE_MIN * 60)
+    config = PASTA / ".claude-robo" / f"{codigo}-{int(time.time())}"
+    config.mkdir(parents=True, exist_ok=True)
+    try:
+        rc, out = rodar(cmd, cwd=wt, env=_env_claude(config), timeout=LIMITE_MIN * 60)
+    finally:
+        shutil.rmtree(config, ignore_errors=True)
     (RAIZ / "registros" / f"{codigo}-claude.json").write_text(out[-200_000:], encoding="utf-8")
     log(f"{codigo}: Claude terminou (saída {rc})")
     if rc == 124:
@@ -636,9 +723,20 @@ def fazer(t: dict) -> None:
     if len(diff) > MAX_DIFF:
         resultado(mid, "precisa_equipe", resumo=resumo, erro="o diff ficou grande demais")
         return
+    escondidos = invisiveis(diff)
+    if escondidos:
+        resultado(
+            mid,
+            "precisa_equipe",
+            resumo=resumo,
+            erro="o código tem caracteres invisíveis/de controle (" + ", ".join(escondidos[:10])
+            + ") — podem esconder código de quem aprova",
+        )
+        return
     aviso = (
         "[robô] Nada desta mudança rodou ainda. Depois do Aprovar o robô roda as conferências "
-        "(ruff, a API carregando, os testes mexidos) numa cópia nova; se falharem, NÃO publica."
+        "(ruff, a API carregando, os testes mexidos, a tela compilando) numa cópia nova; "
+        "se falharem, NÃO publica."
     )
     resultado(
         mid,
@@ -655,40 +753,11 @@ def fazer(t: dict) -> None:
 # ── publicar ──────────────────────────────────────────────────────────────
 
 
-def _estado_deploy(codigo: str) -> Path:
-    p = RAIZ / "estado" / "deploy"
-    p.mkdir(parents=True, exist_ok=True)
-    return p / f"{codigo}.tentativas"
-
-
-def _deploys_falhos(codigo: str) -> int:
-    try:
-        return int(_estado_deploy(codigo).read_text().strip() or 0)
-    except (OSError, ValueError):
-        return 0
-
-
 def _adiar(mid: str, motivo: str) -> None:
     """Não deu para publicar AGORA (outro deploy, disco, mudança de outra
     pessoa pendente, rede): volta para a fila do DaVinci, que espera 10 min e
-    avisa quem aprova se isso se repetir."""
+    avisa quem aprova a cada ~1 h de espera (lá dá para cancelar a aprovação)."""
     resultado(mid, "aprovada", erro=motivo)
-
-
-def _deploy_falhou(mid: str, codigo: str, motivo: str) -> None:
-    """O deploy rodou e falhou com a mudança JÁ no main: tenta de novo até
-    MAX_TENTATIVAS_DEPLOY; depois para e pede uma pessoa (que publica)."""
-    n = _deploys_falhos(codigo) + 1
-    _estado_deploy(codigo).write_text(str(n))
-    if n >= MAX_TENTATIVAS_DEPLOY:
-        resultado(
-            mid,
-            "falhou",
-            erro=f"a mudança JÁ ESTÁ no main mas o deploy falhou {n} vezes: {motivo} "
-            "— uma pessoa precisa publicar com o davinci-deploy",
-        )
-        return
-    _adiar(mid, f"o deploy falhou ({n}ª vez; tento de novo): {motivo}")
 
 
 def _no_main(codigo: str, patch: str) -> str:
@@ -703,6 +772,16 @@ def _no_main(codigo: str, patch: str) -> str:
         if COMMIT_OK.match(sha) and _patch_id_repo(sha) == patch:
             return sha
     return ""
+
+
+def _desfeita(commit: str) -> bool:
+    """Uma pessoa desfez a mudança no main (git revert) depois que ela foi."""
+    rc, out = rodar(
+        [*GIT, "log", f"{commit}..origin/main", "--format=%H", "--fixed-strings",
+         f"--grep=This reverts commit {commit}"],
+        cwd=REPO,
+    )
+    return rc == 0 and bool(out.strip())
 
 
 def _patch_id_repo(rev: str) -> str:
@@ -730,25 +809,78 @@ def _patch_id_repo(rev: str) -> str:
     return pid.stdout.split()[0] if pid.returncode == 0 and pid.stdout.strip() else ""
 
 
+# Uma ida ao servidor: HEAD do git, disco em bytes, trava do davinci-deploy,
+# build rodando (inclusive `docker compose` à mão), o último commit que o
+# davinci-deploy registrou como no ar, desde quando o HEAD é o atual e quando
+# as imagens da API e da tela foram feitas.
+_CMD_SERVIDOR = r"""cd /opt/davinci || exit 9
+h=$(git rev-parse HEAD)
+echo "head=$h"
+echo "livre=$(df --output=avail -B1 / | tail -1 | tr -dc 0-9)"
+if flock -n /run/davinci/deploy.lock true; then echo trava=LIVRE; else echo trava=OCUPADA; fi
+if pgrep -f '[d]ocker[ -]compose .*[[:space:]](build|up)([[:space:]]|$)|[b]uildx' >/dev/null
+then echo build=SIM; else echo build=NAO; fi
+echo "registrado=$(grep -oE '(ok|PUBLICADO COM PROBLEMA) em [0-9a-f]{7,40}' /var/log/davinci-deploy.log 2>/dev/null | tail -1 | awk '{print $NF}')"
+echo "desde=$(git reflog --date=unix --format='%H %gd' | awk -v h="$h" '$1==h{t=$2} $1!=h{exit} END{print t}' | tr -dc 0-9)"
+for s in api web; do
+  i=$(docker inspect -f '{{.Image}}' "davinci-$s-1" 2>/dev/null) &&
+  echo "img_$s=$(date -d "$(docker image inspect -f '{{.Created}}' "$i")" +%s)"
+done
+"""
+
+
 def _servidor() -> dict:
-    """HEAD do servidor, disco livre (GB), trava de deploy e build rodando."""
-    rc, out = ssh(
-        "git -C /opt/davinci rev-parse HEAD; df --output=avail -B1G / | tail -1; "
-        "flock -n /run/davinci/deploy.lock true && echo LIVRE || echo OCUPADA; "
-        "pgrep -f '[d]ocker[ -]compose .*[[:space:]](build|up)([[:space:]]|$)|[b]uildx' "
-        ">/dev/null && echo CONSTRUINDO || echo PARADO"
-    )
+    rc, out = ssh(_CMD_SERVIDOR)
     if rc != 0:
         raise Devolver(f"não consegui falar com o servidor: {out[-200:]}")
-    partes = out.split()
-    if len(partes) < 4 or not COMMIT_OK.match(partes[0]):
+    dados = {}
+    for linha in out.splitlines():
+        if "=" in linha:
+            k, v = linha.split("=", 1)
+            dados[k.strip()] = v.strip()
+    if not COMMIT_OK.match(dados.get("head", "")) or not dados.get("livre", "").isdigit():
         raise Devolver(f"resposta estranha do servidor: {out[-200:]}")
     return {
-        "head": partes[0],
-        "livre": float(partes[1]) if partes[1].isdigit() else 0.0,
-        "trava_livre": partes[2] == "LIVRE",
-        "construindo": partes[3] == "CONSTRUINDO",
+        "head": dados["head"],
+        "livre": int(dados["livre"]) / 1e9,
+        "trava_livre": dados.get("trava") == "LIVRE",
+        "construindo": dados.get("build") != "NAO",
+        "registrado": dados.get("registrado", ""),
+        "desde": int(dados.get("desde") or 0),
+        "img_api": int(dados.get("img_api") or 0),
+        "img_web": int(dados.get("img_web") or 0),
     }
+
+
+def _no_ar(srv: dict) -> str:
+    """O commit que está NO AR — não basta o git do servidor estar nele (o
+    davinci-deploy faz o pull ANTES do build, que pode falhar; outra sessão faz
+    `reset --hard` sem construir). Vale o HEAD se o davinci-deploy registrou
+    ele, ou se as imagens da API e da tela são mais novas do que ele (deploy à
+    mão); senão, o último que o davinci-deploy registrou. "" = não sei."""
+    head, reg = srv["head"], srv["registrado"]
+    if len(reg) >= 7 and head.startswith(reg):
+        return head
+    if srv["desde"] and srv["img_api"] > srv["desde"] and srv["img_web"] > srv["desde"]:
+        return head
+    if len(reg) >= 7 and re.fullmatch(r"[0-9a-f]+", reg):
+        rc, out = rodar([*GIT, "rev-parse", "--verify", "--quiet", f"{reg}^{{commit}}"], cwd=REPO)
+        if rc == 0 and COMMIT_OK.match(out.strip()):
+            return out.strip()
+    return ""
+
+
+def _ocupado(srv: dict) -> str:
+    """O porquê de não dar para publicar agora no servidor, ou ""."""
+    if srv["livre"] < DISCO_MIN_GB:
+        return f"o servidor tem só {srv['livre']:.1f} GB livres (mínimo {DISCO_MIN_GB:.0f})"
+    if not srv["trava_livre"] or srv["construindo"]:
+        return "outro deploy/build está rodando no servidor"
+    return ""
+
+
+def _ancestral(a: str, b: str) -> bool:
+    return rodar([*GIT, "merge-base", "--is-ancestor", a, b], cwd=REPO)[0] == 0
 
 
 def publicar(t: dict) -> None:
@@ -770,46 +902,57 @@ def publicar(t: dict) -> None:
     if not patch:
         resultado(mid, "falhou", erro="não consegui ler a mudança aprovada — peça de novo")
         return
+    base = git(REPO, "rev-parse", "origin/main")
 
     ja = _no_main(codigo, patch)
+    if ja and _desfeita(ja):
+        resultado(
+            mid,
+            "falhou",
+            erro="a mudança foi desfeita no main por uma pessoa (git revert) — não publico; "
+            "peça de novo se ainda quiser",
+        )
+        return
     srv = _servidor()
+    no_ar = _no_ar(srv)
     if ja:
-        # Uma tentativa anterior já empurrou: falta o deploy (ou ele terminou e
-        # a resposta se perdeu). O servidor ter o commit NÃO prova que foi ao
-        # ar (o deploy pode ter falhado depois do pull): vale a saída dele.
-        rc, saida = ssh(f"cat /var/lib/davinci/mudancas/{codigo}.rc 2>/dev/null || echo NADA")
-        if rc == 0 and saida.strip() == "0":
+        # Uma tentativa anterior já empurrou: falta o deploy (ou ele terminou
+        # e a resposta se perdeu).
+        if no_ar and _ancestral(ja, no_ar):
             resultado(mid, "publicada", commit=ja)
-            _estado_deploy(codigo).unlink(missing_ok=True)
             return
-        rc, fila = rodar([*GIT, "rev-list", f"{srv['head']}..origin/main"], cwd=REPO)
+        rc, fila = rodar([*GIT, "rev-list", f"{no_ar}..origin/main"], cwd=REPO) if no_ar else (1, "")
         if rc != 0 or not set(fila.split()) <= {ja}:
             _adiar(
                 mid,
                 "a mudança já está no main, mas o main tem também mudanças de outras pessoas "
-                "ainda não publicadas — publico depois que elas forem ao ar",
+                "que ainda não foram ao ar — publico depois que elas forem",
             )
             return
-    else:
-        base = git(REPO, "rev-parse", "origin/main")
-        if srv["head"] != base:
-            _adiar(
-                mid,
-                "o main tem mudanças de outras pessoas ainda não publicadas — "
-                "publico depois que elas forem ao ar",
-            )
-            return
-    if srv["livre"] < DISCO_MIN_GB:
-        _adiar(mid, f"o servidor tem só {srv['livre']:.0f} GB livres (mínimo {DISCO_MIN_GB:.0f})")
+    elif no_ar != base:
+        _adiar(
+            mid,
+            "o main tem mudanças de outras pessoas que ainda não foram ao ar — "
+            "publico depois que elas forem",
+        )
         return
-    if not srv["trava_livre"] or srv["construindo"]:
-        _adiar(mid, "outro deploy/build está rodando no servidor")
+    motivo = _ocupado(srv)
+    if motivo:
+        _adiar(mid, motivo)
         return
 
     commit = ja
     if not ja:
-        commit = _preparar_e_conferir(mid, codigo, branch, aprovado, patch)
+        commit = _preparar_e_conferir(mid, codigo, branch, aprovado, patch, base)
         if not commit:
+            return
+        # As conferências levam minutos: confere o servidor DE NOVO antes do push.
+        srv = _servidor()
+        motivo = _ocupado(srv) or (
+            "" if _no_ar(srv) == base else "o servidor mudou durante as conferências"
+        )
+        if motivo:
+            _adiar(mid, motivo)
             return
         rc, out = rodar([*GIT, "push", "-q", "origin", f"{commit}:refs/heads/main"], cwd=REPO,
                         timeout=180)
@@ -820,25 +963,50 @@ def publicar(t: dict) -> None:
     rc, saida = deploy(codigo)
     (RAIZ / "registros" / f"{codigo}-deploy.log").write_text(saida[-100_000:], encoding="utf-8")
     log(f"{codigo}: deploy terminou (saída {rc})")
+    detalhe = f"registros/{codigo}-deploy.log no Mac do robô"
     if rc == 0 or (rc == 5 and _servidor_saudavel()):
         resultado(mid, "publicada", commit=commit)
-        _estado_deploy(codigo).unlink(missing_ok=True)
         remover_worktree(PASTA / codigo)
-    elif rc in (4, 97):
-        _adiar(mid, "outro deploy pegou a trava antes" if rc == 4 else saida[-300:])
+    elif rc in (3, 4, 97):
+        # nada foi construído: recusado (servidor fora do main, fetch…), trava, ssh
+        _adiar(mid, f"o deploy não começou (saída {rc}): {saida.strip()[-300:]}")
+    elif rc == 5:
+        resultado(
+            mid,
+            "falhou",
+            erro="foi ao ar, mas algum container não ficou saudável — conferir já "
+            f"(sudo davinci-logs api 200; {detalhe})",
+        )
+    elif rc == 98:
+        resultado(
+            mid,
+            "falhou",
+            erro=f"o deploy passou de 50 min sem terminar — conferir no servidor ({detalhe})",
+        )
     else:
-        _deploy_falhou(mid, codigo, f"saída {rc}: {saida[-600:]}")
+        # Não repete às cegas: build/migração que falha com a mudança no main
+        # costuma ser o código — repetir só deixaria o main quebrado mais tempo.
+        resultado(
+            mid,
+            "falhou",
+            erro=f"o deploy falhou (saída {rc}) com a mudança JÁ no main — o que está no ar "
+            "não mudou se o build falhou; uma pessoa precisa corrigir ou desfazer "
+            f"(git revert {commit[:10]}) — {detalhe}",
+        )
 
 
-def _preparar_e_conferir(mid: str, codigo: str, branch: str, aprovado: str, patch: str) -> str:
+def _preparar_e_conferir(
+    mid: str, codigo: str, branch: str, aprovado: str, patch: str, base: str
+) -> str:
     """Cópia NOVA a partir do commit aprovado (nada do que ficou na pasta de
-    quando o Claude trabalhou), atualizada com o main, conferida na caixa.
-    Devolve o commit pronto para empurrar, ou "" (já mandou o resultado)."""
+    quando o Claude trabalhou), em cima do `base` (o main que foi conferido com
+    o servidor), conferida na caixa. Devolve o commit pronto para empurrar, ou
+    "" (já mandou o resultado)."""
     wt = PASTA / codigo
     if wt.exists():
         remover_worktree(wt)
     git(REPO, "worktree", "add", "-q", "-B", branch, str(wt), aprovado)
-    rc, _out = rodar([*gw_cmd(wt), "rebase", "-q", "--no-autostash", "origin/main"], cwd=wt)
+    rc, _out = rodar([*gw_cmd(wt), "rebase", "-q", "--no-autostash", base], cwd=wt)
     if rc != 0:
         rodar([*gw_cmd(wt), "rebase", "--abort"], cwd=wt)
         resultado(
@@ -848,7 +1016,8 @@ def _preparar_e_conferir(mid: str, codigo: str, branch: str, aprovado: str, patc
         )
         return ""
     commit = gw(wt, "rev-parse", "HEAD")
-    if not COMMIT_OK.match(commit) or _patch_id_repo(commit) != patch:
+    pai = gw(wt, "rev-parse", "HEAD^")
+    if not COMMIT_OK.match(commit) or pai != base or _patch_id_repo(commit) != patch:
         resultado(mid, "falhou", erro="depois de atualizar, a mudança ficou diferente da aprovada")
         return ""
     try:
@@ -859,18 +1028,25 @@ def _preparar_e_conferir(mid: str, codigo: str, branch: str, aprovado: str, patc
     if motivo:
         resultado(mid, "falhou", erro=f"depois de atualizar: {motivo}")
         return ""
-    # Dependências do MAIN (pyproject/uv.lock não podem vir no pedido).
+    # Só as dependências DO MAIN, sem construir o projeto: construir lê
+    # configuração da pasta (hatch.toml…) e roda código fora da caixa.
     if (wt / "apps/api/pyproject.toml").exists():
-        rc, out = rodar(["uv", "sync", "--frozen", "--quiet"], cwd=wt / "apps/api", timeout=900)
+        rc, out = rodar(
+            ["uv", "sync", "--frozen", "--no-install-project", "--quiet"],
+            cwd=wt / "apps/api",
+            timeout=900,
+        )
         if rc != 0:
             raise Devolver(f"uv sync falhou: {out[-400:]}")
-    ok, conf = conferencias(wt, arquivos)
-    (RAIZ / "registros" / f"{codigo}-conferencias.log").write_text(conf, encoding="utf-8")
+    ok, curto, completo = conferencias(wt, arquivos)
+    (RAIZ / "registros" / f"{codigo}-conferencias.log").write_text(completo, encoding="utf-8")
     if not ok:
         resultado(
             mid,
             "falhou",
-            erro="as conferências falharam — NÃO publiquei:\n" + conf[-1500:],
+            erro="as conferências falharam — NÃO publiquei:\n"
+            + curto[-1500:]
+            + f"\n(detalhes: registros/{codigo}-conferencias.log no Mac do robô)",
         )
         return ""
     return commit

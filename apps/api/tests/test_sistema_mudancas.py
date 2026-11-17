@@ -386,7 +386,22 @@ async def test_robo_retoma_o_proprio_trabalho_e_a_tela_ve_quando_ele_passou(
     assert (await _pegar(client, token))["id"] == str(m.id)
     await _resultado(client, token, m.id, status="pedida", erro="GitHub fora de novo")
     m = await _recarrega(db, m)
-    assert m.status == "falhou"  # chegou a MAX_TENTATIVAS
+    # erro do ambiente não gasta tentativa: uma queda do GitHub não derruba a fila
+    assert m.status == "pedida" and m.tentativas == 1
+    # ...mas o pedido não fica na fila para sempre: passou de 12 h, falha
+    await db.execute(
+        update(SistemaMudanca)
+        .where(SistemaMudanca.id == m.id)
+        .values(
+            criado_em=datetime.now(UTC) - timedelta(hours=13),
+            atualizado_em=datetime.now(UTC) - timedelta(minutes=11),
+        )
+    )
+    await db.commit()
+    assert (await _pegar(client, token))["id"] == str(m.id)
+    await _resultado(client, token, m.id, status="pedida", erro="GitHub fora ainda")
+    m = await _recarrega(db, m)
+    assert m.status == "falhou" and "12 h" in (m.erro or "")
     # robô sumido com pedido esperando = "robô parado" na tela
     await _pedido(db, chefe, titulo="Outro pedido")
     await db.execute(
@@ -437,3 +452,79 @@ async def test_publicacao_adiada_demais_avisa(client: AsyncClient, db, make_user
     assert "link" in eduardo_aviso["payload"] and "link" not in chefe_aviso["payload"]
     texto = await claude_tarefas.listar_mudancas(db, dono=chefe, args={"codigo": f"M-{m.numero}"})
     assert "publicação adiada: disco cheio" in texto
+    # o aviso se repete a cada AVISO_ADIAMENTOS (ninguém esquece uma aprovada parada)
+    antes = len(parados)
+    for _vez in range(svc.AVISO_ADIAMENTOS):
+        await db.execute(
+            update(SistemaMudanca)
+            .where(SistemaMudanca.id == m.id)
+            .values(status="aprovada", atualizado_em=datetime.now(UTC) - timedelta(minutes=11))
+        )
+        await db.commit()
+        await _pegar(client, token)
+        await _resultado(client, token, m.id, status="aprovada", erro="disco cheio")
+    assert len([a for a in avisos if "publicação está parada" in a["title"]]) == antes * 2
+
+
+async def test_cancelar_aprovacao_parada(
+    client: AsyncClient, db, make_user, auth_as, avisos, token
+):
+    chefe, eduardo, outro_admin, _c = await _gente(db, make_user)
+    m = await _pedido(db, chefe)
+    await db.execute(
+        update(SistemaMudanca)
+        .where(SistemaMudanca.id == m.id)
+        .values(status="aprovada", aprovado_em=datetime.now(UTC), commit=C1, diff=DIFF)
+    )
+    await db.commit()
+    # quem não aprova nem sabe que a rota existe
+    auth_as(outro_admin)
+    r = await client.post(f"/api/sistema-mudancas/{m.id}/cancelar", json={"motivo": "não quero"})
+    assert r.status_code == 404
+    auth_as(eduardo)
+    detalhe = (await client.get(f"/api/sistema-mudancas/{m.id}")).json()
+    assert detalhe["pode_cancelar"] is True and detalhe["pode_aprovar"] is False
+    r = await client.post(f"/api/sistema-mudancas/{m.id}/cancelar", json={"motivo": "x"})
+    assert r.status_code == 422  # motivo curto
+    r = await client.post(
+        f"/api/sistema-mudancas/{m.id}/cancelar", json={"motivo": "o pedido não vale mais"}
+    )
+    assert r.status_code == 200, r.text
+    m = await _recarrega(db, m)
+    assert m.status == "recusada" and m.motivo_recusa.startswith("Aprovação cancelada")
+    assert any("aprovação cancelada" in a["title"] and a["user_id"] == chefe.id for a in avisos)
+    assert await _pegar(client, token) is None  # o robô não publica mais
+    # publicando (robô já no meio) não se cancela
+    p = await _pedido(db, chefe, "Outra")
+    await db.execute(
+        update(SistemaMudanca)
+        .where(SistemaMudanca.id == p.id)
+        .values(status="publicando", robo="mac-eduardo", commit=C1, diff=DIFF)
+    )
+    await db.commit()
+    r = await client.post(
+        f"/api/sistema-mudancas/{p.id}/cancelar", json={"motivo": "tarde demais"}
+    )
+    assert r.status_code == 409
+
+
+def test_invisiveis_acha_trojan_source():
+    limpo = "+++ b/x.py\n+x = 'Olá, mundo'\t# ok\n-velho"
+    assert svc.invisiveis(limpo) == []
+    sujo = "+++ b/x.py\n+if ok: # \u202e } \u2066 return True\n+a\u200bb = 1\n"
+    assert svc.invisiveis(sujo) == ["U+200B", "U+202E", "U+2066"]
+    # só as linhas acrescentadas contam (tirar um caractere invisível é bom)
+    assert svc.invisiveis("-x = '\u202e'\n") == []
+
+
+async def test_robo_nao_entrega_diff_com_caractere_invisivel(
+    client: AsyncClient, db, make_user, avisos, token
+):
+    chefe, *_ = await _gente(db, make_user)
+    m = await _pedido(db, chefe)
+    await _pegar(client, token)
+    sujo = DIFF.replace("+", "+\u202e", 1)
+    r = await _resultado(
+        client, token, m.id, status="pronta", diff=sujo, commit=C1, branch=f"mudanca/M-{m.numero}"
+    )
+    assert r.status_code == 409 and r.json()["detail"]["code"] == "diff_invisivel"
