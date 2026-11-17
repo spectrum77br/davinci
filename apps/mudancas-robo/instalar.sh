@@ -11,7 +11,7 @@ mkdir -p "$RAIZ/registros" "$RAIZ/estado" "$RAIZ/claude"
 chmod 700 "$RAIZ" "$RAIZ/claude"
 cp "$AQUI/rodada.py" "$AQUI/REGRAS.md" "$AQUI/caixa.sb" "$AQUI/testar.sh" "$RAIZ/"
 chmod 755 "$RAIZ/testar.sh"
-# as permissões do Claude do robô apontam para o testar.sh DESTA instalação
+# permissões do Claude do robô (só arquivos; __RAIZ__ = esta instalação, se aparecer)
 sed "s#__RAIZ__#$RAIZ#g" "$AQUI/permissoes.json" > "$RAIZ/permissoes.json"
 # banco de teste vazio só do robô (Postgres local)
 psql -h /tmp -d postgres -qAtc "select 1 from pg_database where datname='davinci_robo'" | grep -q 1 \

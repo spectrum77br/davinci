@@ -123,6 +123,14 @@ def upgrade() -> None:
         ),
         schema=SCHEMA,
     )
+    op.create_table(
+        "sistema_mudanca_robo",
+        sa.Column("robo", sa.String(120), primary_key=True),
+        sa.Column(
+            "visto_em", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
+        ),
+        schema=SCHEMA,
+    )
     nomes = ", ".join(f"'{n}'" for n in APROVADORES)
     op.execute(
         f"""
@@ -142,6 +150,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    op.drop_table("sistema_mudanca_robo", schema=SCHEMA)
     op.drop_table("sistema_mudanca_aprovador", schema=SCHEMA)
     op.drop_index(op.f("ix_sistema_mudanca_status"), table_name="sistema_mudanca", schema=SCHEMA)
     op.drop_table("sistema_mudanca", schema=SCHEMA)

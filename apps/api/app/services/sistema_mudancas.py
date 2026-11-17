@@ -43,9 +43,15 @@ import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import SistemaMudanca, SistemaMudancaAprovador, User, UserRole, UserStatus
+from app.models import (
+    SistemaMudanca,
+    SistemaMudancaAprovador,
+    SistemaMudancaRobo,
+    User,
+    UserRole,
+    UserStatus,
+)
 from app.models.enums import AlertSeverity, AlertType
-from app.models.marketing import MarketingAgentHeartbeat
 from app.services.alerts import emit_alert
 
 logger = structlog.get_logger(__name__)
@@ -69,7 +75,11 @@ DO_ROBO = ("fazendo", "publicando")
 PRAZO_FAZER = timedelta(minutes=45)
 PRAZO_PUBLICAR = timedelta(minutes=40)
 # Quantas vezes um pedido pode ser pego para FAZER (o robô parou no meio).
-MAX_TENTATIVAS = 2
+MAX_TENTATIVAS = 3
+# Teto absoluto de um trabalho com o robô (retomadas incluídas): passou, falha.
+TETO_TRABALHO = timedelta(hours=3)
+# Sem sinal do robô há mais que isto com pedido esperando = "robô parado".
+ROBO_SUMIDO = timedelta(minutes=10)
 # Publicação adiada pelo robô (outro deploy rodando, disco do servidor): só
 # volta a ser entregue depois disto — o robô roda a cada minuto.
 ESPERA_ADIADA = timedelta(minutes=10)
@@ -77,8 +87,6 @@ ESPERA_ADIADA = timedelta(minutes=10)
 AVISO_ADIAMENTOS = 6
 # O robô só manda commit de verdade e o ramo do próprio pedido.
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
-# Presença do robô (reaproveita a tabela de presença dos executores).
-PREFIXO_PRESENCA = "mudancas:"
 # Trava do "pegar": dois pedidos de trabalho ao mesmo tempo nunca furam o
 # "um de cada vez".
 _TRAVA_PEGAR = 0x4D554441  # "MUDA"
@@ -417,28 +425,37 @@ async def _soltar_presos(session: AsyncSession, agora: datetime) -> None:
 
 
 async def _presenca(session: AsyncSession, robo: str, agora: datetime) -> None:
-    nome = (PREFIXO_PRESENCA + robo)[:64]
-    linha = (
-        await session.execute(
-            select(MarketingAgentHeartbeat).where(MarketingAgentHeartbeat.agent_name == nome)
-        )
-    ).scalar_one_or_none()
+    linha = await session.get(SistemaMudancaRobo, robo[:120])
     if linha is None:
-        session.add(MarketingAgentHeartbeat(agent_name=nome, last_seen_at=agora))
+        session.add(SistemaMudancaRobo(robo=robo[:120], visto_em=agora))
     else:
-        linha.last_seen_at = agora
+        linha.visto_em = agora
 
 
 async def robo_visto_em(session: AsyncSession) -> datetime | None:
-    """A última vez que algum robô de mudanças perguntou por trabalho."""
+    """A última vez que algum robô de mudanças deu sinal (pegar ou vivo)."""
     return (
         await session.execute(
-            select(MarketingAgentHeartbeat.last_seen_at)
-            .where(MarketingAgentHeartbeat.agent_name.like(PREFIXO_PRESENCA + "%"))
-            .order_by(MarketingAgentHeartbeat.last_seen_at.desc().nulls_last())
+            select(SistemaMudancaRobo.visto_em)
+            .order_by(SistemaMudancaRobo.visto_em.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
+
+
+async def robo_parado(session: AsyncSession) -> bool:
+    """Há pedido esperando o robô (fila ou com ele) e ele sumiu."""
+    esperando = (
+        await session.execute(
+            select(SistemaMudanca.id)
+            .where(SistemaMudanca.status.in_(("pedida", "aprovada", *DO_ROBO)))
+            .limit(1)
+        )
+    ).first()
+    if esperando is None:
+        return False
+    visto = await robo_visto_em(session)
+    return visto is None or visto < _agora() - ROBO_SUMIDO
 
 
 async def pegar_trabalho(session: AsyncSession, *, robo: str) -> SistemaMudanca | None:
@@ -462,6 +479,32 @@ async def pegar_trabalho(session: AsyncSession, *, robo: str) -> SistemaMudanca 
     if em_andamento is not None:
         if (em_andamento.robo or "") != robo[:120]:
             return None
+        # Retomar conta como tentativa (o robô que cai sempre no mesmo ponto
+        # não fica em laço) e tem teto absoluto.
+        if em_andamento.status == "fazendo":
+            em_andamento.tentativas = int(em_andamento.tentativas or 0) + 1
+        estourou = (
+            em_andamento.pego_em is not None
+            and em_andamento.pego_em < agora - TETO_TRABALHO
+        )
+        if estourou or int(em_andamento.tentativas or 0) > MAX_TENTATIVAS:
+            em_andamento.status = "falhou"
+            em_andamento.robo = None
+            em_andamento.prazo_robo = None
+            em_andamento.erro = (
+                "o robô recomeçou este pedido vezes demais — uma pessoa precisa conferir"
+            )
+            em_andamento.atualizado_em = agora
+            await _avisar(
+                session,
+                [*(u.id for u in await aprovadores(session)), em_andamento.pedido_por],
+                titulo=f"⚠️ {codigo(em_andamento)} falhou",
+                mensagem=em_andamento.erro,
+                m=em_andamento,
+                evento="falhou",
+            )
+            await session.flush()
+            return None
         em_andamento.prazo_robo = agora + (
             PRAZO_PUBLICAR if em_andamento.status == "publicando" else PRAZO_FAZER
         )
@@ -475,8 +518,8 @@ async def pegar_trabalho(session: AsyncSession, *, robo: str) -> SistemaMudanca 
         ("pedida", "fazendo", PRAZO_FAZER, SistemaMudanca.criado_em),
     ):
         filtro = SistemaMudanca.status == status
-        if status == "aprovada":
-            # adiada (o robô devolveu com o porquê em `erro`) espera um pouco
+        if status in ("aprovada", "pedida"):
+            # adiada/devolvida (o robô voltou com o porquê em `erro`) espera um pouco
             filtro = filtro & (
                 SistemaMudanca.erro.is_(None) | (SistemaMudanca.atualizado_em < adiada_ate)
             )
@@ -531,6 +574,7 @@ def _do_robo(m: SistemaMudanca, robo: str) -> None:
 async def renovar(session: AsyncSession, *, m: SistemaMudanca, robo: str) -> SistemaMudanca:
     _do_robo(m, robo)
     agora = _agora()
+    await _presenca(session, robo, agora)
     m.prazo_robo = agora + (PRAZO_PUBLICAR if m.status == "publicando" else PRAZO_FAZER)
     m.atualizado_em = agora
     await session.flush()

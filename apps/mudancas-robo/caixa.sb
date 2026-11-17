@@ -1,7 +1,7 @@
-;; Caixa (sandbox do macOS) das conferências que o robô de mudanças roda sobre
-;; código ainda NÃO aprovado (pytest/ruff/node dos arquivos que o Claude mexeu).
-;; Revisão de 17/11/2026: esse código rodava solto, com a chave root do
-;; servidor, o push no GitHub e os tokens ao alcance — antes do Aprovar.
+;; Caixa (sandbox do macOS) das conferências que o robô de mudanças roda —
+;; desde a 2ª revisão de 17/11/2026, SÓ depois do Aprovar, numa cópia nova do
+;; commit aprovado (pytest/ruff/node dos arquivos mexidos). Proteção a mais:
+;; mesmo aprovado, o código testado não alcança chaves, tokens nem a rede.
 ;;
 ;; Dentro da caixa:
 ;;   - não lê chaves, tokens, .env, a pasta do robô (~/DaVinci) nem o chaveiro;
@@ -9,8 +9,11 @@
 ;;     uv e na pasta temporária própria — nada dentro do repositório principal;
 ;;   - SEM rede, a não ser o socket local do Postgres (os testes da API).
 ;; Parâmetros (-D): CASA, RAIZ (a pasta do robô, onde quer que esteja), WT,
-;; UVCACHE e TMP (a pasta temporária SÓ desta caixa — nada de /tmp
-;; comum, onde ficam arquivos de outras sessões e outros robôs).
+;; TMP (a pasta temporária SÓ desta caixa, com o cache do uv dela — nada de
+;; /tmp comum), NODEM e PNPM (os node_modules da tela, só leitura).
+;; Regra que casa por último vale (por isso os "allow" de leitura vêm antes
+;; do bloqueio de .env repetido no fim). O caminho é comparado sem diferenciar
+;; maiúsculas (~/davinci = ~/DaVinci) — testado.
 (version 1)
 (allow default)
 
@@ -26,12 +29,26 @@
   (literal (string-append (param "CASA") "/.git-credentials"))
   (literal (string-append (param "CASA") "/.netrc"))
   (literal (string-append (param "CASA") "/.gitconfig"))
-  (regex #"/\.env($|\.)"))
+  (literal (string-append (param "CASA") "/.pgpass"))
+  (literal (string-append (param "CASA") "/.zsh_history"))
+  (literal (string-append (param "CASA") "/.bash_history"))
+  (literal (string-append (param "CASA") "/.psql_history"))
+  (subpath (string-append (param "CASA") "/.zsh_sessions"))
+  (subpath (string-append (param "CASA") "/Library/Application Support"))
+  (subpath (string-append (param "CASA") "/Library/Cookies"))
+  (subpath (string-append (param "CASA") "/Library/Mail"))
+  (subpath (string-append (param "CASA") "/Library/Messages")))
+
+;; node_modules da tela (moram dentro de ~/davinci): só leitura. O node segue
+;; os links do pnpm e precisa do "stat" das pastas do caminho (só o stat: nada
+;; de ler conteúdo nem listar a pasta).
+(allow file-read* (subpath (param "NODEM")) (subpath (param "PNPM")))
+(allow file-read-metadata (subpath (string-append (param "CASA") "/DaVinci")))
+(deny file-read* (regex #"/\.env($|\.)"))
 
 (deny file-write*
   (require-all
     (require-not (subpath (param "WT")))
-    (require-not (subpath (param "UVCACHE")))
     (require-not (subpath (param "TMP")))
     (require-not (subpath "/dev"))))
 ;; O arquivo .git da pasta do pedido diz ao git onde está o repositório: quem o
@@ -43,4 +60,15 @@
 
 (deny mach-lookup
   (global-name "com.apple.SecurityServer")
-  (global-name "com.apple.securityd.xpc"))
+  (global-name "com.apple.securityd.xpc")
+  (global-name "com.apple.coreservices.launchservicesd")
+  (global-name "com.apple.coreservices.appleevents")
+  (global-name "com.apple.pasteboard.1")
+  (global-name-prefix "com.apple.lsd."))
+;; Nada de abrir app/URL fora da caixa (o `open` entrega para o LaunchServices,
+;; que roda FORA dela) nem AppleScript.
+(deny lsopen)
+(deny process-exec
+  (literal "/usr/bin/open")
+  (literal "/usr/bin/osascript"))
+(deny signal (target others))

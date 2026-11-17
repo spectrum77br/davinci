@@ -123,12 +123,9 @@ const filtro = ref<Filtro>('pronta')
 const itens = ref<ItemLista[]>([])
 // Quando o robô do Mac perguntou por trabalho pela última vez (null = nunca).
 const roboVistoEm = ref<string | null>(null)
-const roboParado = computed(() => {
-  const temFila = itens.value.some((i) => ['pedida', 'aprovada'].includes(i.status))
-  if (!temFila) return false
-  if (!roboVistoEm.value) return true
-  return Date.now() - new Date(roboVistoEm.value).getTime() > 10 * 60 * 1000
-})
+// O servidor decide (olha a fila inteira, não só o filtro da tela, e o relógio
+// dele — o do computador de quem olha pode estar errado).
+const roboParado = ref(false)
 const carregando = ref(false)
 const carregou = ref(false)
 const erroLista = ref<string | null>(null)
@@ -143,10 +140,14 @@ async function carregar(silencioso = false) {
   try {
     const query: Record<string, string | number> = { limite: LIMITE }
     if (filtro.value !== 'todas') query.status = filtro.value
-    const r = await api<{ itens: ItemLista[] }>('/api/sistema-mudancas', { query })
+    const r = await api<{ itens: ItemLista[]; robo_visto_em?: string | null; robo_parado?: boolean }>(
+      '/api/sistema-mudancas',
+      { query },
+    )
     if (meu !== seq) return
     itens.value = Array.isArray(r?.itens) ? r.itens : []
     roboVistoEm.value = typeof r?.robo_visto_em === 'string' ? r.robo_visto_em : null
+    roboParado.value = r?.robo_parado === true
     erroLista.value = null
     carregou.value = true
   } catch (e: any) {

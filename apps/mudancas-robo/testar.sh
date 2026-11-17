@@ -1,7 +1,7 @@
 #!/bin/sh
-# O ÚNICO jeito de o Claude do robô (e o próprio robô) rodar código da mudança
-# ainda não aprovada: sempre DENTRO da caixa (caixa.sb) — sem rede, sem chaves,
-# sem tokens, escrevendo só na pasta do pedido. Revisão de 17/11/2026.
+# As conferências do robô de mudanças — só DEPOIS do Aprovar (2ª revisão de
+# 17/11/2026), numa cópia nova do commit aprovado — sempre DENTRO da caixa
+# (caixa.sb): sem rede, sem chaves, sem tokens, escrevendo só na pasta do pedido.
 #
 #   testar.sh pytest <arquivos/args>   → pytest da API (banco de teste local, pelo socket)
 #   testar.sh ruff <arquivos .py>      → ruff check da API
@@ -22,7 +22,11 @@ case "$WT" in
   *) echo "testar.sh: só roda dentro da pasta de um pedido ($PASTA/M-N)"; exit 2 ;;
 esac
 TMPC="$(cd "$PASTA" && pwd -P)/.tmp-caixa/$(basename "$WT")"
-mkdir -p "$TMPC"
+mkdir -p "$TMPC/uv"
+# node_modules da tela: a pasta e o depósito do pnpm para onde os links apontam
+NODEM=$(cd "$NODEP" 2>/dev/null && pwd -P || echo /nao-existe)
+PNPM=$(cd "$NODEP/vue" 2>/dev/null && pwd -P | sed 's#/\.pnpm/.*#/.pnpm#' || echo /nao-existe)
+case "$PNPM" in */.pnpm) ;; *) PNPM=/nao-existe ;; esac
 
 [ $# -ge 1 ] || { echo "uso: testar.sh pytest|ruff|node|importar ..."; exit 2; }
 QUE=$1; shift
@@ -38,8 +42,8 @@ exec env -i \
   HOME="$HOME" PATH=/opt/homebrew/bin:/usr/bin:/bin LANG=pt_BR.UTF-8 \
   TMPDIR="$TMPC" \
   DATABASE_URL="$DB" DAVINCI_TEST_SCHEMA=davinci_test_robo NODE_PATH="$NODEP" \
-  UV_CACHE_DIR="$HOME/.cache/uv" UV_OFFLINE=1 \
+  UV_CACHE_DIR="$TMPC/uv" UV_OFFLINE=1 UV_NO_SYNC=1 \
   /usr/bin/sandbox-exec -f "$RAIZ/caixa.sb" \
-    -D CASA="$HOME" -D RAIZ="$RAIZ" -D WT="$WT" \
-    -D UVCACHE="$HOME/.cache/uv" -D TMP="$TMPC" \
+    -D CASA="$HOME" -D RAIZ="$RAIZ" -D WT="$WT" -D TMP="$TMPC" \
+    -D NODEM="$NODEM" -D PNPM="$PNPM" \
     "$@"

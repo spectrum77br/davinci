@@ -130,3 +130,16 @@ class SistemaMudancaAprovador(Base):
     criado_em: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class SistemaMudancaRobo(Base):
+    """Presença do robô do Mac: quando ele perguntou por trabalho (ou avisou
+    que está vivo) pela última vez. Tabela própria — na de presença do
+    executor da Shopee ela esconderia o alarme "executor sem sinal"."""
+
+    __tablename__ = "sistema_mudanca_robo"
+
+    robo: Mapped[str] = mapped_column(String(120), primary_key=True)
+    visto_em: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )

@@ -446,6 +446,7 @@ _CLEANUP_TABLES = (
     "claude_conectores",  # FK -> users: antes de users
     "sistema_mudanca",  # FK SET NULL -> users (0493)
     "sistema_mudanca_aprovador",  # FK -> users: antes de users
+    "sistema_mudanca_robo",  # 0493 (presença do robô)
     "chamados_ia_regras",  # FK -> users: antes de users
     "chamados_ia_avaliacoes",  # FK -> users/chamados: antes dos dois
     "marketing_lives",  # FK -> integrations/users

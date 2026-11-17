@@ -4,13 +4,8 @@
       "Read(./**)",
       "Edit(./**)",
       "Write(./**)",
-      "Bash(__RAIZ__/testar.sh pytest *)",
-      "Bash(__RAIZ__/testar.sh ruff *)",
-      "Bash(__RAIZ__/testar.sh node *)",
-      "Bash(__RAIZ__/testar.sh importar)",
-      "Bash(git status)",
-      "Bash(git diff)",
-      "Bash(git diff --stat)"
+      "Glob",
+      "Grep"
     ],
     "deny": [
       "Write(.git/**)",
@@ -59,7 +54,24 @@
       "Write(scripts/**)",
       "Write(apps/mudancas-robo/**)",
       "WebFetch",
-      "WebSearch"
+      "WebSearch",
+      "Bash",
+      "Read(//Users/*/davinci/**)",
+      "Read(~/.pgpass)",
+      "Read(~/.zsh_history)",
+      "Read(~/.bash_history)",
+      "Read(~/.psql_history)",
+      "Read(~/.local/**)",
+      "Read(~/.cache/**)",
+      "Write(**/*.pth)",
+      "Edit(**/*.pth)",
+      "Write(**/sitecustomize.py)",
+      "Write(**/usercustomize.py)",
+      "Write(**/setup.py)",
+      "Write(**/pyproject.toml)",
+      "Write(**/uv.lock)",
+      "Write(**/package.json)",
+      "Write(**/conftest.py)"
     ]
   },
   "cleanupPeriodDays": 30

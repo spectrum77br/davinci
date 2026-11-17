@@ -73,9 +73,16 @@ def mundo(tmp_path, monkeypatch):
         "    pathlib.Path('.git').write_text('gitdir: /tmp/repo-do-atacante\\n')\n"
         "    pathlib.Path('apps/web/texto.txt').write_text('Oi\\n')\n"
         "    fim = {'resultado': 'pronta', 'resumo': 'x', 'testes': ''}\n"
+        "elif acao == 'teste_quebrado':\n"
+        "    p = pathlib.Path('apps/web/tests'); p.mkdir(parents=True)\n"
+        "    (p / 'quebra.cjs').write_text(\"require('fs').writeFileSync('RODOU.txt','x');process.exit(1)\\n\")\n"
+        "    fim = {'resultado': 'pronta', 'resumo': 'teste novo', 'testes': ''}\n"
         "elif acao == 'equipe':\n"
         "    fim = {'resultado': 'precisa_equipe', 'resumo': 'Precisa de coluna nova', 'testes': ''}\n"
         "assert '--permission-mode' in sys.argv and 'dontAsk' in sys.argv\n"
+        "a = sys.argv\n"
+        "assert a[a.index('--tools') + 1] == 'Read,Edit,Write,Glob,Grep'\n"
+        "assert a[a.index('--setting-sources') + 1] == 'user' and '--strict-mcp-config' in a\n"
         "assert os.environ.get('CLAUDE_CODE_OAUTH_TOKEN') == 'tok-falso'\n"
         "assert 'SSH_AUTH_SOCK' not in os.environ\n"
         "texto = 'Pronto.\\n' + json.dumps(fim, ensure_ascii=False)\n"
@@ -117,15 +124,18 @@ def mundo(tmp_path, monkeypatch):
         return {"ok": True}
 
     monkeypatch.setattr(rodada, "api", _api)
-    servidor = {"head": None, "livre": "10", "trava": "LIVRE", "deploy_rc": "0", "comandos": []}
+    servidor = {
+        "head": None, "livre": "10", "trava": "LIVRE", "build": "PARADO", "deploy_rc": "0",
+        "comandos": [],
+    }
 
     def _ssh(comando, timeout=120):
         servidor["comandos"].append(comando)
         if comando.startswith("git -C /opt/davinci"):
             head = servidor["head"] or _git(origem, "rev-parse", "main")
-            return 0, f"{head}\n{servidor['livre']}\n{servidor['trava']}\n"
-        if "setsid nohup" in comando:
-            return 0, ""
+            return 0, f"{head}\n{servidor['livre']}\n{servidor['trava']}\n{servidor['build']}\n"
+        if "setsid -f" in comando:
+            return 0, "INICIADO\n"
         if comando.startswith("cat "):
             return 0, servidor["deploy_rc"] + "\n"
         if comando.startswith("tail "):
@@ -200,6 +210,7 @@ def test_fazer_e_publicar(mundo):
     assert "-Olá" in r["diff"] and "+Oi" in r["diff"]
     assert r["arquivos"] == [{"caminho": "apps/web/texto.txt", "mais": 1, "menos": 1}]
     assert r["resumo"] == "Troquei Olá por Oi"
+    assert "Nada desta mudança rodou" in r["testes"]
     assert _main_texto(m) == "Olá\n"  # nada foi para o origin ainda
 
     # outra pessoa publica (e o servidor já está com ela) antes da aprovação
@@ -210,7 +221,7 @@ def test_fazer_e_publicar(mundo):
     r2 = _publicar(m, r)
     assert r2["status"] == "publicada", r2
     assert _main_texto(m) == "Oi\n"
-    assert any("setsid nohup" in c and "davinci-deploy" in c for c in m["servidor"]["comandos"])
+    assert any("setsid -f" in c and "davinci-deploy" in c for c in m["servidor"]["comandos"])
     assert r2["commit"] != r["commit"]  # rebaseado em cima do "outro"
     assert not (m["rodada"].PASTA / "M-1").exists()  # cópia removida depois do ar
 
@@ -235,6 +246,10 @@ def test_publicar_espera_disco_e_trava(mundo):
     m["servidor"]["trava"] = "OCUPADA"
     r2 = _publicar(m, r)
     assert r2["status"] == "aprovada" and "outro deploy" in r2["erro"]
+    m["servidor"]["trava"] = "LIVRE"
+    m["servidor"]["build"] = "CONSTRUINDO"  # alguém rodando docker compose na mão
+    r2 = _publicar(m, r)
+    assert r2["status"] == "aprovada" and "build" in r2["erro"]
     assert not any("davinci-deploy" in c for c in m["servidor"]["comandos"])
 
 
@@ -245,18 +260,51 @@ def test_deploy_que_falha_depois_do_push_tenta_e_depois_falha_claro(mundo):
     r2 = _publicar(m, r)
     assert r2["status"] == "aprovada" and "deploy falhou" in r2["erro"]
     assert _main_texto(m) == "Oi\n"  # já está no main
-    r3 = _publicar(m, r, adiamentos=2)  # terceira tentativa
-    assert r3["status"] == "falhou" and "JÁ ESTÁ no main" in r3["erro"]
+    pushes = _git(m["origem"], "rev-list", "--count", "main")
+    r3 = _publicar(m, r)  # 2ª: acha a mudança no main e só refaz o deploy
+    assert r3["status"] == "aprovada" and "2ª vez" in r3["erro"]
+    assert _git(m["origem"], "rev-list", "--count", "main") == pushes  # sem push de novo
+    r4 = _publicar(m, r)  # 3ª: para e pede uma pessoa
+    assert r4["status"] == "falhou" and "JÁ ESTÁ no main" in r4["erro"]
 
 
-def test_publicar_recusa_copia_diferente_da_aprovada(mundo):
+def test_ja_no_main_e_deploy_terminou_vira_publicada(mundo):
+    m = mundo
+    r = _fazer(m)
+    m["servidor"]["deploy_rc"] = "3"
+    _publicar(m, r)
+    m["servidor"]["deploy_rc"] = "0"  # alguém rodou o deploy e deu certo
+    r3 = _publicar(m, r)
+    assert r3["status"] == "publicada"
+
+
+def test_publicar_usa_copia_nova_do_commit_aprovado(mundo):
+    """O que ficou na pasta depois do Claude (commit a mais, arquivo ignorado)
+    não vai junto: a publicação parte do commit aprovado."""
     m = mundo
     r = _fazer(m)
     wt = m["rodada"].PASTA / "M-1"
     (wt / "outro.txt").write_text("mexido depois\n")
     _commit(wt, "mexida fora do robô")
+    (wt / "plantado.txt").write_text("x\n")
     r2 = _publicar(m, r)
-    assert r2["status"] == "falhou" and "não é a mudança aprovada" in r2["erro"]
+    assert r2["status"] == "publicada", r2
+    mostra = subprocess.run(["git", "show", "main:outro.txt"], cwd=m["origem"],
+                            capture_output=True, text=True).stdout
+    assert mostra == "um\n" and _main_texto(m) == "Oi\n"
+
+
+def test_nada_roda_antes_de_aprovar_e_teste_quebrado_nao_publica(mundo):
+    m = mundo
+    m["acao"].write_text("teste_quebrado")
+    r = _fazer(m)
+    assert r["status"] == "pronta", r
+    assert not list(m["rodada"].PASTA.rglob("RODOU.txt"))  # o fazer não rodou nada
+    r2 = _publicar(m, r)
+    assert r2["status"] == "falhou" and "conferências falharam" in r2["erro"], r2
+    assert list(m["rodada"].PASTA.rglob("RODOU.txt"))  # rodou só depois, na caixa
+    assert "quebra.cjs" not in _git(m["origem"], "ls-tree", "-r", "--name-only", "main")
+    assert not any("davinci-deploy" in c for c in m["servidor"]["comandos"])
 
 
 def test_commit_com_cara_de_comando_nao_roda(mundo, tmp_path):
@@ -344,11 +392,15 @@ def test_conferencias_rodam_na_caixa(mundo, tmp_path):
         f"try{{fs.writeFileSync('{fora}','x');r.push('ESCREVEU_FORA')}}catch(e){{}}\n"
         "try{fs.writeFileSync('dentro.txt','x');r.push('ESCREVEU_DENTRO')}catch(e){}\n"
         "try{fs.writeFileSync('.git','gitdir: /tmp/x');r.push('ESCREVEU_PONTEIRO_GIT')}catch(e){}\n"
+        "const cp=require('child_process');\n"
+        "if(cp.spawnSync('/usr/bin/osascript',['-e','return 1']).status===0)r.push('RODOU_OSASCRIPT');\n"
+        "try{require('vue');r.push('VUE_OK')}catch(e){r.push('SEM_VUE_'+e.code)}\n"
         "console.log(r.join(','))\n"
     )
     rc, out = m["rodada"].testar(wt, "node", "espiao.cjs", timeout=60)
-    assert "ESCREVEU_DENTRO" in out, out
-    for proibido in ("LEU_CHAVE", "LEU_RAIZ", "ESCREVEU_FORA", "ESCREVEU_PONTEIRO_GIT"):
+    assert "ESCREVEU_DENTRO" in out and "VUE_OK" in out, out
+    for proibido in ("LEU_CHAVE", "LEU_RAIZ", "ESCREVEU_FORA", "ESCREVEU_PONTEIRO_GIT",
+                     "RODOU_OSASCRIPT"):
         assert proibido not in out, out
     assert not fora.exists()
     # fora da pasta de um pedido o testar.sh nem roda
@@ -361,11 +413,7 @@ def test_permissoes_bloqueiam_o_perigoso():
     for item in ("WebFetch", "Read(~/.ssh/**)", "Read(//**/.env)", "Edit(apps/api/alembic/**)",
                  "Edit(**/conftest.py)", "Write(**/.gitattributes)"):
         assert item in regras["deny"], item
-    bash = [r for r in regras["allow"] if r.startswith("Bash(")]
-    # só o testar.sh e git status/diff EXATOS (sem curinga que aceite --output)
-    for r in bash:
-        assert r.startswith("Bash(__RAIZ__/testar.sh ") or r in (
-            "Bash(git status)", "Bash(git diff)", "Bash(git diff --stat)"
-        ), r
-    assert "Read" not in regras["allow"] and "Read(./**)" in regras["allow"]
+    # o Claude do robô não roda NADA: só ferramentas de arquivo na pasta do pedido
+    assert regras["allow"] == ["Read(./**)", "Edit(./**)", "Write(./**)", "Glob", "Grep"]
+    assert "Bash" in regras["deny"]
     assert os.access(AQUI / "instalar.sh", os.X_OK) and os.access(AQUI / "testar.sh", os.X_OK)

@@ -21,7 +21,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.models import SistemaMudanca, SistemaMudancaAprovador, UserRole
+from app.models import SistemaMudanca, SistemaMudancaAprovador, SistemaMudancaRobo, UserRole
 from app.services import claude_tarefas
 from app.services import sistema_mudancas as svc
 from app.services.claude_tarefas import TarefaInvalidaError
@@ -307,6 +307,8 @@ async def test_robo_que_para_no_meio(client: AsyncClient, db, make_user, avisos,
     t = await _pegar(client, token)  # volta para a fila e é pego de novo
     assert t["tentativa"] == 2
     await _vence()
+    assert (await _pegar(client, token))["tentativa"] == 3
+    await _vence()
     assert await _pegar(client, token) is None
     m = await _recarrega(db, m)
     assert m.status == "falhou" and "parou no meio" in (m.erro or "")
@@ -366,16 +368,45 @@ async def test_robo_retoma_o_proprio_trabalho_e_a_tela_ve_quando_ele_passou(
     assert r.json()["trabalho"] is None
     auth_as(eduardo)
     lista = (await client.get("/api/sistema-mudancas")).json()
-    assert lista["robo_visto_em"]
-    # erro do ambiente: volta para a fila (até MAX_TENTATIVAS)
+    assert lista["robo_visto_em"] and lista["robo_parado"] is False
+    m = await _recarrega(db, m)
+    assert m.tentativas == 2  # retomar conta tentativa (robô que cai sempre não fica em laço)
+    # erro do ambiente: volta para a fila (até MAX_TENTATIVAS) e espera 10 min
     r = await _resultado(client, token, m.id, status="pedida", erro="GitHub fora")
     assert r.status_code == 200
     m = await _recarrega(db, m)
     assert m.status == "pedida" and m.erro == "GitHub fora"
-    await _pegar(client, token)
+    assert await _pegar(client, token) is None
+    await db.execute(
+        update(SistemaMudanca)
+        .where(SistemaMudanca.id == m.id)
+        .values(atualizado_em=datetime.now(UTC) - timedelta(minutes=11))
+    )
+    await db.commit()
+    assert (await _pegar(client, token))["id"] == str(m.id)
     await _resultado(client, token, m.id, status="pedida", erro="GitHub fora de novo")
     m = await _recarrega(db, m)
-    assert m.status == "falhou"  # passou de MAX_TENTATIVAS
+    assert m.status == "falhou"  # chegou a MAX_TENTATIVAS
+    # robô sumido com pedido esperando = "robô parado" na tela
+    await _pedido(db, chefe, titulo="Outro pedido")
+    await db.execute(
+        update(SistemaMudancaRobo).values(visto_em=datetime.now(UTC) - timedelta(minutes=30))
+    )
+    await db.commit()
+    lista = (await client.get("/api/sistema-mudancas")).json()
+    assert lista["robo_parado"] is True
+
+
+async def test_robo_que_recomeca_sempre_falha_no_teto(
+    client: AsyncClient, db, make_user, avisos, token
+):
+    chefe, *_ = await _gente(db, make_user)
+    m = await _pedido(db, chefe)
+    for _ in range(3):  # pegar + 2 retomadas = 3 tentativas
+        assert (await _pegar(client, token))["id"] == str(m.id)
+    assert await _pegar(client, token) is None  # a 4ª passa do teto
+    m = await _recarrega(db, m)
+    assert m.status == "falhou" and "vezes demais" in (m.erro or "")
 
 
 async def test_publicacao_adiada_demais_avisa(client: AsyncClient, db, make_user, avisos, token):

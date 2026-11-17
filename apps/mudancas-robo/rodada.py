@@ -8,23 +8,25 @@ separada do código (worktree), confere e devolve o diff; SÓ o Eduardo ou o
 Thorfinn aprovam na tela; aprovado, este robô PUBLICA (push no main +
 `davinci-deploy` no servidor, com a trava e as recusas dele).
 
-SEGURANÇA (revisão de 17/11/2026): o código da mudança ainda NÃO aprovada nunca
-roda solto neste Mac (que tem a chave root do servidor, o push no GitHub e os
-tokens). O Claude do robô só lê/edita arquivos da pasta do pedido e só executa
-o `testar.sh`, que roda tudo DENTRO da caixa (`caixa.sb`: sem rede, sem chaves,
-sem tokens, escrevendo só na pasta do pedido); as conferências do próprio robô
-também passam pelo `testar.sh`. O git do robô roda sem ganchos.
+SEGURANÇA (2ª revisão de 17/11/2026): NENHUM código da mudança roda antes de
+ela ser aprovada. O Claude do robô só tem Read/Edit/Write/Glob/Grep (sem Bash,
+sem rede, sem MCP, sem as configurações do projeto). Só depois do Aprovar o
+robô cria uma cópia NOVA a partir do commit aprovado e roda as conferências —
+ainda assim dentro da caixa (`testar.sh` → `caixa.sb`: sem rede, sem chaves,
+sem tokens). Falhou a conferência: nada vai para o ar. O git do robô roda sem
+ganchos.
 
 Uma rodada:
   0. Reenvia resultados que não chegaram ao DaVinci (rede caiu) e faz a faxina.
   1. Pergunta ao DaVinci se há trabalho (`/pegar`, sem IA).
   2. `fazer` → worktree `mudanca/M-N`, Claude Code sem tela (REGRAS.md +
-     permissoes.json), confere arquivos (lista proibida, binário, tamanho),
-     roda as conferências na caixa, faz o commit, confere de novo o que foi
-     commitado e manda o diff. `publicar` → confere que a cópia é a APROVADA
-     (mesmo patch), atualiza com o main e confere de novo na caixa, exige que o
-     servidor já esteja no main (sem mudança de outra pessoa pendente), confere
-     disco e trava, empurra e roda o `davinci-deploy` desacoplado da conexão.
+     permissoes.json, só ferramentas de arquivo), confere arquivos (lista
+     proibida, binário, tamanho), faz o commit, confere de novo o que foi
+     commitado e manda o diff. `publicar` → cópia NOVA do commit aprovado,
+     atualiza com o main (mesmo patch), roda as conferências na caixa, exige
+     que o servidor esteja no main (sem mudança de outra pessoa pendente) e sem
+     build rodando, confere disco e trava, empurra e roda o `davinci-deploy`
+     desacoplado da conexão.
   3. Um trabalho por vez (trava por PID); avisa que está vivo a cada 5 min.
 
 Só biblioteca padrão do Python (roda com o /usr/bin/python3 do Mac).
@@ -103,8 +105,10 @@ PROIBIDOS = re.compile(
     r"|infra/|deploy/|apps/executor|apps/mudancas-robo/|apps/ia-de-chamado/|\.claude/"
     r"|\.github/|caddy/|scripts/)"
     r"|(^|/)(\.env[^/]*|docker-compose[^/]*|Dockerfile[^/]*|\.dockerignore|Caddyfile"
-    r"|pyproject\.toml|uv\.lock|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml"
-    r"|\.gitattributes|\.gitmodules|\.gitignore|conftest\.py)$"
+    r"|pyproject\.toml|uv\.lock|uv\.toml|package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml"
+    r"|\.gitattributes|\.gitmodules|\.gitignore|conftest\.py|\.python-version"
+    r"|\.tool-versions|\.npmrc|\.nvmrc|\.yarnrc[^/]*|\.pnpmfile\.cjs|pytest\.ini|setup\.cfg"
+    r"|tox\.ini|setup\.py|hatch_build\.py|sitecustomize\.py|usercustomize\.py|[^/]*\.pth)$"
 )
 CAMINHO_OK = re.compile(r"^[A-Za-z0-9_./@+-]+$")
 COMMIT_OK = re.compile(r"^[0-9a-f]{40}$")
@@ -387,15 +391,20 @@ def faxina() -> None:
 # ── conferências (sempre na caixa) ────────────────────────────────────────
 
 
+class ListaEstranha(ValueError):
+    """A lista de arquivos do git não veio no formato esperado: não entrego."""
+
+
 def _numstat(saida: str) -> list[dict]:
-    """`--numstat -z` → [{caminho, mais, menos, binario}]."""
+    """`--numstat -z` → [{caminho, mais, menos, binario}]. Registro fora do
+    formato = ListaEstranha (nunca pula em silêncio)."""
     arquivos = []
     for parte in saida.split("\0"):
-        if not parte.strip():
+        if not parte.strip("\n"):
             continue
-        campos = parte.strip("\n").split("\t")
-        if len(campos) != 3:
-            continue
+        campos = parte.lstrip("\n").split("\t", 2)
+        if len(campos) != 3 or not campos[2]:
+            raise ListaEstranha(f"registro do git fora do formato: {parte[:120]!r}")
         mais, menos, caminho = campos
         arquivos.append(
             {
@@ -405,6 +414,20 @@ def _numstat(saida: str) -> list[dict]:
                 "binario": mais == "-" or menos == "-",
             }
         )
+    return arquivos
+
+
+def _arquivos(wt: Path, *rev: str) -> list[dict]:
+    """Os arquivos de um commit (`rev`) ou do que está no índice (sem `rev`),
+    conferindo a contagem com `--name-only` (nada escapa da lista)."""
+    if rev:
+        base = ["show", "--format=", *DIFF_SEGURO, *rev]
+    else:
+        base = ["diff", "--cached", *DIFF_SEGURO]
+    arquivos = _numstat(gw(wt, *base[:1], "--numstat", "-z", *base[1:]))
+    nomes = [n for n in gw(wt, *base[:1], "--name-only", "-z", *base[1:]).split("\0") if n.strip("\n")]
+    if len(nomes) != len(arquivos):
+        raise ListaEstranha(f"o git listou {len(nomes)} arquivos e contou {len(arquivos)}")
     return arquivos
 
 
@@ -479,8 +502,9 @@ def _pedido_texto(t: dict) -> str:
             "Descrição:",
             t["descricao"],
             "=====",
-            f"Para rodar testes use SÓ: {TESTAR} pytest|ruff|node|importar ...",
-            "Faça a mudança seguindo as regras do sistema (append). Termine com a linha JSON.",
+            "Você não roda nada (sem terminal): só lê e edita arquivos desta pasta. Os testes",
+            "rodam depois da aprovação. Faça a mudança seguindo as regras do sistema (append).",
+            "Termine com a linha JSON.",
         ]
     )
 
@@ -526,10 +550,6 @@ def fazer(t: dict) -> None:
         remover_worktree(wt)
     git(REPO, "worktree", "add", "-B", branch, str(wt), "origin/main")
     ponteiro = (wt / ".git").read_text(encoding="utf-8")
-    if (wt / "apps/api/pyproject.toml").exists():
-        rc, out = rodar(["uv", "sync", "--frozen", "--quiet"], cwd=wt / "apps/api", timeout=900)
-        if rc != 0:
-            raise Devolver(f"uv sync falhou: {out[-400:]}")
 
     cmd = [
         claude_bin(),
@@ -539,6 +559,13 @@ def fazer(t: dict) -> None:
         (RAIZ / "REGRAS.md").read_text(encoding="utf-8"),
         "--settings",
         str(RAIZ / "permissoes.json"),
+        # só as configurações do robô (nada do .claude/ do projeto) e nenhum MCP
+        "--setting-sources",
+        "user",
+        "--strict-mcp-config",
+        # só ferramentas de arquivo: sem terminal, sem rede, sem subagentes
+        "--tools",
+        "Read,Edit,Write,Glob,Grep",
         "--model",
         MODELO,
         "--effort",
@@ -579,17 +606,12 @@ def fazer(t: dict) -> None:
         resultado(mid, "falhou", resumo=resumo, erro="o arquivo .git da cópia foi mexido — não sigo")
         return
     gw(wt, "add", "-A")
-    arquivos = _numstat(gw(wt, "diff", "--cached", "--numstat", "-z", *DIFF_SEGURO))
-    motivo = _barrar(arquivos)
+    try:
+        motivo = _barrar(_arquivos(wt))
+    except ListaEstranha as e:
+        motivo = str(e)
     if motivo:
         resultado(mid, "precisa_equipe", resumo=resumo, erro=motivo, testes=testes)
-        return
-
-    arvore = gw(wt, "write-tree")
-    ok, conf = conferencias(wt, arquivos)
-    gw(wt, "add", "-A")
-    if gw(wt, "write-tree") != arvore:
-        resultado(mid, "falhou", resumo=resumo, erro="as conferências mexeram nos arquivos — refazer")
         return
 
     mensagem = (
@@ -602,8 +624,11 @@ def fazer(t: dict) -> None:
        "commit", "-q", "--no-verify", "-m", mensagem)
     commit = gw(wt, "rev-parse", "HEAD")
     # O que foi commitado de verdade (não o que se viu antes): de novo as regras.
-    final_arq = _numstat(gw(wt, "show", "--format=", "--numstat", "-z", *DIFF_SEGURO, "HEAD"))
-    motivo = _barrar(final_arq)
+    try:
+        final_arq = _arquivos(wt, "HEAD")
+        motivo = _barrar(final_arq)
+    except ListaEstranha as e:
+        final_arq, motivo = [], str(e)
     if motivo:
         resultado(mid, "precisa_equipe", resumo=resumo, erro=motivo, testes=testes)
         return
@@ -611,13 +636,15 @@ def fazer(t: dict) -> None:
     if len(diff) > MAX_DIFF:
         resultado(mid, "precisa_equipe", resumo=resumo, erro="o diff ficou grande demais")
         return
-    if not ok:
-        resumo = "⚠️ AS CONFERÊNCIAS ACUSARAM PROBLEMA (veja Testes).\n" + resumo
+    aviso = (
+        "[robô] Nada desta mudança rodou ainda. Depois do Aprovar o robô roda as conferências "
+        "(ruff, a API carregando, os testes mexidos) numa cópia nova; se falharem, NÃO publica."
+    )
     resultado(
         mid,
         "pronta",
         resumo=resumo,
-        testes="\n".join(x for x in (testes, conf) if x),
+        testes="\n".join(x for x in (testes, aviso) if x),
         diff=diff,
         branch=branch,
         commit=commit,
@@ -628,21 +655,71 @@ def fazer(t: dict) -> None:
 # ── publicar ──────────────────────────────────────────────────────────────
 
 
-def _patch_id(cwd: Path, rev: str) -> str:
+def _estado_deploy(codigo: str) -> Path:
+    p = RAIZ / "estado" / "deploy"
+    p.mkdir(parents=True, exist_ok=True)
+    return p / f"{codigo}.tentativas"
+
+
+def _deploys_falhos(codigo: str) -> int:
+    try:
+        return int(_estado_deploy(codigo).read_text().strip() or 0)
+    except (OSError, ValueError):
+        return 0
+
+
+def _adiar(mid: str, motivo: str) -> None:
+    """Não deu para publicar AGORA (outro deploy, disco, mudança de outra
+    pessoa pendente, rede): volta para a fila do DaVinci, que espera 10 min e
+    avisa quem aprova se isso se repetir."""
+    resultado(mid, "aprovada", erro=motivo)
+
+
+def _deploy_falhou(mid: str, codigo: str, motivo: str) -> None:
+    """O deploy rodou e falhou com a mudança JÁ no main: tenta de novo até
+    MAX_TENTATIVAS_DEPLOY; depois para e pede uma pessoa (que publica)."""
+    n = _deploys_falhos(codigo) + 1
+    _estado_deploy(codigo).write_text(str(n))
+    if n >= MAX_TENTATIVAS_DEPLOY:
+        resultado(
+            mid,
+            "falhou",
+            erro=f"a mudança JÁ ESTÁ no main mas o deploy falhou {n} vezes: {motivo} "
+            "— uma pessoa precisa publicar com o davinci-deploy",
+        )
+        return
+    _adiar(mid, f"o deploy falhou ({n}ª vez; tento de novo): {motivo}")
+
+
+def _no_main(codigo: str, patch: str) -> str:
+    """O commit desta mudança que JÁ está no origin/main (tentativa anterior
+    empurrou e o deploy não terminou), ou ""."""
+    rc, out = rodar(
+        [*GIT, "log", "origin/main", "-n", "400", "--format=%H",
+         "--fixed-strings", f"--grep=mudança {codigo}:"],
+        cwd=REPO,
+    )
+    for sha in out.split() if rc == 0 else []:
+        if COMMIT_OK.match(sha) and _patch_id_repo(sha) == patch:
+            return sha
+    return ""
+
+
+def _patch_id_repo(rev: str) -> str:
     """O patch-id só das linhas +/- (sem contexto: linha vizinha mexida no main
-    não muda a mudança aprovada). Sem shell."""
-    if not (COMMIT_OK.match(rev) or rev == "HEAD"):
+    não muda a mudança aprovada). Sem shell; no repositório principal."""
+    if not COMMIT_OK.match(rev):
         return ""
     show = subprocess.Popen(  # noqa: S603
-        [*gw_cmd(cwd), "show", "--format=", "-U0", *DIFF_SEGURO, rev],
-        cwd=str(cwd),
+        [*GIT, "show", "--format=", "-U0", *DIFF_SEGURO, rev],
+        cwd=str(REPO),
         env=_env_base(),
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
     )
     pid = subprocess.run(  # noqa: S603
         [*GIT, "patch-id", "--stable"],
-        cwd=str(cwd),
+        cwd=str(REPO),
         env=_env_base(),
         stdin=show.stdout,
         capture_output=True,
@@ -653,20 +730,25 @@ def _patch_id(cwd: Path, rev: str) -> str:
     return pid.stdout.split()[0] if pid.returncode == 0 and pid.stdout.strip() else ""
 
 
-def _adiar(mid: str, t: dict, motivo: str, *, ja_no_main: bool = False) -> None:
-    """Não deu para publicar agora: volta para a fila do DaVinci (ele espera 10
-    min). Depois de MAX_TENTATIVAS_DEPLOY com a mudança JÁ no main, falha com
-    aviso claro (uma pessoa publica)."""
-    adiamentos = int(t.get("adiamentos") or 0)
-    if ja_no_main and adiamentos + 1 >= MAX_TENTATIVAS_DEPLOY:
-        resultado(
-            mid,
-            "falhou",
-            erro=f"a mudança JÁ ESTÁ no main mas não foi publicada ({adiamentos + 1} tentativas): "
-            f"{motivo} — publique com o davinci-deploy",
-        )
-        return
-    resultado(mid, "aprovada", erro=motivo)
+def _servidor() -> dict:
+    """HEAD do servidor, disco livre (GB), trava de deploy e build rodando."""
+    rc, out = ssh(
+        "git -C /opt/davinci rev-parse HEAD; df --output=avail -B1G / | tail -1; "
+        "flock -n /run/davinci/deploy.lock true && echo LIVRE || echo OCUPADA; "
+        "pgrep -f '[d]ocker[ -]compose .*[[:space:]](build|up)([[:space:]]|$)|[b]uildx' "
+        ">/dev/null && echo CONSTRUINDO || echo PARADO"
+    )
+    if rc != 0:
+        raise Devolver(f"não consegui falar com o servidor: {out[-200:]}")
+    partes = out.split()
+    if len(partes) < 4 or not COMMIT_OK.match(partes[0]):
+        raise Devolver(f"resposta estranha do servidor: {out[-200:]}")
+    return {
+        "head": partes[0],
+        "livre": float(partes[1]) if partes[1].isdigit() else 0.0,
+        "trava_livre": partes[2] == "LIVRE",
+        "construindo": partes[3] == "CONSTRUINDO",
+    }
 
 
 def publicar(t: dict) -> None:
@@ -679,105 +761,132 @@ def publicar(t: dict) -> None:
     if not COMMIT_OK.match(aprovado):
         resultado(mid, "falhou", erro="commit aprovado em formato estranho — não publico")
         return
-    wt = PASTA / codigo
     log(f"{codigo}: publicar (commit aprovado {aprovado[:10]})")
     git_rede(REPO, "fetch", "--quiet", "origin", "main")
-    if not wt.exists():
-        git(REPO, "worktree", "add", str(wt), branch)
-    patch_aprovado = _patch_id(wt, aprovado)
-    if not patch_aprovado or _patch_id(wt, "HEAD") != patch_aprovado:
-        resultado(mid, "falhou", erro="a cópia local não é a mudança aprovada — peça de novo")
+    if rodar([*GIT, "cat-file", "-e", f"{aprovado}^{{commit}}"], cwd=REPO)[0] != 0:
+        resultado(mid, "falhou", erro="o commit aprovado não está neste Mac — peça de novo")
+        return
+    patch = _patch_id_repo(aprovado)
+    if not patch:
+        resultado(mid, "falhou", erro="não consegui ler a mudança aprovada — peça de novo")
         return
 
-    ja_no_main = (
-        rodar([*gw_cmd(wt), "merge-base", "--is-ancestor", "HEAD", "origin/main"], cwd=wt)[0] == 0
-    )
-    if not ja_no_main:
-        rc, _out = rodar([*gw_cmd(wt), "rebase", "-q", "--no-autostash", "origin/main"], cwd=wt)
-        if rc != 0:
-            rodar([*gw_cmd(wt), "rebase", "--abort"], cwd=wt)
-            resultado(
+    ja = _no_main(codigo, patch)
+    srv = _servidor()
+    if ja:
+        # Uma tentativa anterior já empurrou: falta o deploy (ou ele terminou e
+        # a resposta se perdeu). O servidor ter o commit NÃO prova que foi ao
+        # ar (o deploy pode ter falhado depois do pull): vale a saída dele.
+        rc, saida = ssh(f"cat /var/lib/davinci/mudancas/{codigo}.rc 2>/dev/null || echo NADA")
+        if rc == 0 and saida.strip() == "0":
+            resultado(mid, "publicada", commit=ja)
+            _estado_deploy(codigo).unlink(missing_ok=True)
+            return
+        rc, fila = rodar([*GIT, "rev-list", f"{srv['head']}..origin/main"], cwd=REPO)
+        if rc != 0 or not set(fila.split()) <= {ja}:
+            _adiar(
                 mid,
-                "falhou",
-                erro="o sistema mudou depois da aprovação e a mudança não encaixa mais — peça de novo",
+                "a mudança já está no main, mas o main tem também mudanças de outras pessoas "
+                "ainda não publicadas — publico depois que elas forem ao ar",
             )
             return
-        if _patch_id(wt, "HEAD") != patch_aprovado:
-            resultado(mid, "falhou", erro="depois de atualizar, a mudança ficou diferente da aprovada")
-            return
-        arquivos = _numstat(gw(wt, "show", "--format=", "--numstat", "-z", *DIFF_SEGURO, "HEAD"))
-        motivo = _barrar(arquivos)
-        if motivo:
-            resultado(mid, "falhou", erro=f"depois de atualizar: {motivo}")
-            return
-        ok, conf = conferencias(wt, arquivos)
-        if not ok:
-            resultado(
+    else:
+        base = git(REPO, "rev-parse", "origin/main")
+        if srv["head"] != base:
+            _adiar(
                 mid,
-                "falhou",
-                erro="depois de atualizar com o main, as conferências falharam — não publiquei:\n"
-                + conf[-1500:],
+                "o main tem mudanças de outras pessoas ainda não publicadas — "
+                "publico depois que elas forem ao ar",
             )
             return
-
-    # Servidor: já no main (nada de outra pessoa pendente), disco e trava.
-    rc, out = ssh(
-        "git -C /opt/davinci rev-parse HEAD; df --output=avail -B1G / | tail -1; "
-        "flock -n /run/davinci/deploy.lock true && echo LIVRE || echo OCUPADA"
-    )
-    if rc != 0:
-        _adiar(mid, t, f"não consegui falar com o servidor: {out[-200:]}", ja_no_main=ja_no_main)
+    if srv["livre"] < DISCO_MIN_GB:
+        _adiar(mid, f"o servidor tem só {srv['livre']:.0f} GB livres (mínimo {DISCO_MIN_GB:.0f})")
         return
-    partes = out.split()
-    servidor_head = partes[0] if partes else ""
-    livre = float(partes[1]) if len(partes) > 1 and partes[1].isdigit() else 0.0
-    base = gw(wt, "rev-parse", "origin/main")
-    if not ja_no_main and servidor_head != base:
-        _adiar(
-            mid,
-            t,
-            "o main tem mudanças de outras pessoas ainda não publicadas — "
-            "publico depois que elas forem ao ar",
-        )
-        return
-    if livre < DISCO_MIN_GB:
-        _adiar(mid, t, f"o servidor tem só {livre:.0f} GB livres (mínimo {DISCO_MIN_GB:.0f})",
-               ja_no_main=ja_no_main)
-        return
-    if "OCUPADA" in out:
-        _adiar(mid, t, "outro deploy está rodando no servidor", ja_no_main=ja_no_main)
+    if not srv["trava_livre"] or srv["construindo"]:
+        _adiar(mid, "outro deploy/build está rodando no servidor")
         return
 
-    if not ja_no_main:
-        rc, out = rodar([*gw_cmd(wt), "push", "-q", "origin", "HEAD:main"], cwd=wt, timeout=180)
-        if rc != 0:
-            _adiar(mid, t, f"o push foi recusado (o main andou?): {out[-200:]}")
+    commit = ja
+    if not ja:
+        commit = _preparar_e_conferir(mid, codigo, branch, aprovado, patch)
+        if not commit:
             return
-    commit = gw(wt, "rev-parse", "HEAD")
+        rc, out = rodar([*GIT, "push", "-q", "origin", f"{commit}:refs/heads/main"], cwd=REPO,
+                        timeout=180)
+        if rc != 0:
+            _adiar(mid, f"o push foi recusado (o main andou?): {out[-200:]}")
+            return
     log(f"{codigo}: no main em {commit[:10]} — deploy")
     rc, saida = deploy(codigo)
     (RAIZ / "registros" / f"{codigo}-deploy.log").write_text(saida[-100_000:], encoding="utf-8")
     log(f"{codigo}: deploy terminou (saída {rc})")
     if rc == 0 or (rc == 5 and _servidor_saudavel()):
         resultado(mid, "publicada", commit=commit)
-        remover_worktree(wt)
-    elif rc == 4:
-        _adiar(mid, t, "outro deploy pegou a trava antes", ja_no_main=True)
+        _estado_deploy(codigo).unlink(missing_ok=True)
+        remover_worktree(PASTA / codigo)
+    elif rc in (4, 97):
+        _adiar(mid, "outro deploy pegou a trava antes" if rc == 4 else saida[-300:])
     else:
-        _adiar(mid, t, f"o deploy falhou (saída {rc}): {saida[-600:]}", ja_no_main=True)
+        _deploy_falhou(mid, codigo, f"saída {rc}: {saida[-600:]}")
+
+
+def _preparar_e_conferir(mid: str, codigo: str, branch: str, aprovado: str, patch: str) -> str:
+    """Cópia NOVA a partir do commit aprovado (nada do que ficou na pasta de
+    quando o Claude trabalhou), atualizada com o main, conferida na caixa.
+    Devolve o commit pronto para empurrar, ou "" (já mandou o resultado)."""
+    wt = PASTA / codigo
+    if wt.exists():
+        remover_worktree(wt)
+    git(REPO, "worktree", "add", "-q", "-B", branch, str(wt), aprovado)
+    rc, _out = rodar([*gw_cmd(wt), "rebase", "-q", "--no-autostash", "origin/main"], cwd=wt)
+    if rc != 0:
+        rodar([*gw_cmd(wt), "rebase", "--abort"], cwd=wt)
+        resultado(
+            mid,
+            "falhou",
+            erro="o sistema mudou depois da aprovação e a mudança não encaixa mais — peça de novo",
+        )
+        return ""
+    commit = gw(wt, "rev-parse", "HEAD")
+    if not COMMIT_OK.match(commit) or _patch_id_repo(commit) != patch:
+        resultado(mid, "falhou", erro="depois de atualizar, a mudança ficou diferente da aprovada")
+        return ""
+    try:
+        arquivos = _arquivos(wt, "HEAD")
+        motivo = _barrar(arquivos)
+    except ListaEstranha as e:
+        arquivos, motivo = [], str(e)
+    if motivo:
+        resultado(mid, "falhou", erro=f"depois de atualizar: {motivo}")
+        return ""
+    # Dependências do MAIN (pyproject/uv.lock não podem vir no pedido).
+    if (wt / "apps/api/pyproject.toml").exists():
+        rc, out = rodar(["uv", "sync", "--frozen", "--quiet"], cwd=wt / "apps/api", timeout=900)
+        if rc != 0:
+            raise Devolver(f"uv sync falhou: {out[-400:]}")
+    ok, conf = conferencias(wt, arquivos)
+    (RAIZ / "registros" / f"{codigo}-conferencias.log").write_text(conf, encoding="utf-8")
+    if not ok:
+        resultado(
+            mid,
+            "falhou",
+            erro="as conferências falharam — NÃO publiquei:\n" + conf[-1500:],
+        )
+        return ""
+    return commit
 
 
 def deploy(codigo: str) -> tuple[int, str]:
     """`davinci-deploy` desacoplado da conexão (cair o ssh não mata o deploy);
-    acompanha pelo arquivo de saída."""
+    acompanha pelo arquivo de saída. 97 = não consegui nem começar."""
     base = f"/var/lib/davinci/mudancas/{codigo}"
     rc, out = ssh(
         f"mkdir -p /var/lib/davinci/mudancas && rm -f {base}.rc && "
-        f"setsid nohup sh -c 'SUDO_USER=robo-mudancas /usr/local/sbin/davinci-deploy "
-        f"> {base}.log 2>&1; echo $? > {base}.rc' > /dev/null 2>&1 < /dev/null &"
+        f"setsid -f sh -c 'SUDO_USER=robo-mudancas /usr/local/sbin/davinci-deploy "
+        f"> {base}.log 2>&1; echo $? > {base}.rc' > /dev/null 2>&1 < /dev/null && echo INICIADO"
     )
-    if rc != 0:
-        return 99, f"não consegui iniciar o deploy: {out[-300:]}"
+    if rc != 0 or "INICIADO" not in out:
+        return 97, f"não consegui iniciar o deploy: {out[-300:]}"
     fim = time.time() + 50 * 60
     while time.time() < fim:
         time.sleep(20)
@@ -833,13 +942,13 @@ def main() -> int:
             except Devolver as e:
                 log(f"{t.get('codigo')}: devolvido ({e})")
                 if publicando:
-                    _adiar(t["id"], t, f"erro do ambiente: {str(e)[:600]}")
+                    _adiar(t["id"], f"erro do ambiente: {str(e)[:600]}")
                 else:
                     resultado(t["id"], "pedida", erro=f"erro do ambiente: {str(e)[:600]}")
             except Exception as e:  # noqa: BLE001
                 log(f"{t.get('codigo')}: ERRO {e}\n{traceback.format_exc()}")
                 if publicando:
-                    _adiar(t["id"], t, f"erro do robô: {str(e)[:600]}")
+                    _adiar(t["id"], f"erro do robô: {str(e)[:600]}")
                 else:
                     resultado(t["id"], "falhou", erro=f"erro do robô: {str(e)[:1500]}")
         return 0

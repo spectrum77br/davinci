@@ -103,6 +103,7 @@ async def listar(
     return {
         "itens": [svc.resumo_dict(m, nomes) for m in itens],
         "robo_visto_em": visto.isoformat() if visto else None,
+        "robo_parado": await svc.robo_parado(session),
     }
 
 
