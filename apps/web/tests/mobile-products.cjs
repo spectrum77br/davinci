@@ -88,6 +88,7 @@ async function page(canWrite, { query = {}, contagens = DEPARTAMENTOS, can = nul
     useRoute: () => route,
     useRouter: () => router,
     useCan: (resource, action) => Vue.ref(can ? can(resource, action) : canWrite || action === 'view'),
+    useIsAdmin: () => Vue.ref(false),
     useApi: () => {
       instance = Vue.getCurrentInstance()
       return { api: async (url, options) => {
@@ -139,7 +140,7 @@ async function departamentos() {
   const lista = p.calls.find(({ url }) => url.startsWith('/api/products?'))
   assert.match(lista.url, /[?&]departamento=celular(&|$)/, 'the list asks only for the chosen department')
   assert.doesNotMatch(html, /data-painel-anuncios/, 'Anúncios panel is not mounted on the Produtos tab')
-  assert.match(html, /Vincular Automático|Sincronizar Todos|Importar do Bling|Novo Produto|<\/header>/)
+  assert.match(html, /Atualizar|Vincular|Sincronizar|Importar do Bling|Novo Produto|<\/header>/)
 
   // Trocar de departamento: URL (?dept=), página 1 e nova leitura.
   p.state.page = 3
@@ -163,12 +164,16 @@ async function departamentos() {
   html = await p.html()
   assert.match(html, /data-painel-anuncios="mala"/)
   assert.doesNotMatch(html, /Resumo dos produtos/)
-  assert.doesNotMatch(html, />\s*importar\s*</, 'importar needs anuncios.edit, like the old page')
+  assert.doesNotMatch(html, />\s*importar\s*</, 'importar left the screen (17/11/2026): the Atualizar reads the lists')
   assert.match(html, />\s*recarregar\s*</)
   assert.doesNotMatch(html, /Importar do Bling|Novo Produto/, 'product tools belong to the Produtos tab')
 
+  // 17/11/2026: o "importar" de uma conta por vez saiu; a barra comum
+  // (Atualizar · Vincular · Sincronizar) aparece também na aba Anúncios.
   const editorAnuncios = await page(true, { query: { aba: 'anuncios' } })
-  assert.match(await editorAnuncios.html(), />\s*importar\s*</, 'whoever edits Anúncios gets importar')
+  html = await editorAnuncios.html()
+  assert.doesNotMatch(html, />\s*importar\s*</, 'no per-account importar any more')
+  assert.match(html, /<\/svg> Atualizar </, 'whoever edits Produtos gets Atualizar on the Anúncios tab')
 
   // Link antigo /anuncios → ?aba=anuncios abre direto o painel, sem ler a lista de produtos.
   const antigo = await page(false, { query: { aba: 'anuncios' } })
@@ -223,35 +228,18 @@ async function departamentos() {
 }
 async function saudeDosVinculos() {
   // A faixa "Vínculos: N mortos…" é do departamento da tela (a API conta com o
-  // mesmo ?departamento= da lista) e o "Remover os N mortos" apaga só os dele.
+  // mesmo ?departamento= da lista). O "Remover os N mortos" saiu da tela em
+  // 17/11/2026 (decisão do dono): o ADM usa o Organizar, que só esconde.
   const p = await page(true, { query: { dept: 'mala' }, saude: { mortos: 3, sku_divergente: 0, erro: 0 } })
-  let html = await p.html()
+  const html = await p.html()
   assert.match(html, /3 mortos \(anúncio encerrado/)
-  assert.match(html, /Remover os 3 mortos/)
-  p.state.confirmandoRemoverMortos = true
-  html = await p.html()
-  assert.match(html, /Apagar 3 vínculos mortos de Mala\?/)
-  p.calls.length = 0
-  globalThis.window = { setTimeout: () => 0 } // o toast
-  try {
-    await p.state.removerMortos()
-  } finally {
-    delete globalThis.window
-  }
-  const remover = p.calls.filter(({ options }) => options?.method === 'POST')
-  assert.deepEqual(remover.map(({ url }) => url), ['/api/product-links/remover-mortos?departamento=mala'])
-  assert.equal(p.state.confirmandoRemoverMortos, false)
-  // Trocar de departamento fecha a confirmação aberta (o número era do outro).
-  p.state.confirmandoRemoverMortos = true
-  p.state.departamento = 'eletro'
-  p.state.aoTrocarDepartamento()
-  assert.equal(p.state.confirmandoRemoverMortos, false)
+  assert.doesNotMatch(html, /Remover os|Sim, remover|Apagar 3 vínculos/)
+  assert.equal(p.state.removerMortos, undefined, 'no delete-the-dead action left on the page')
+  const lista = p.calls.find(({ url }) => url.startsWith('/api/products?'))
+  assert.match(lista.url, /[?&]departamento=mala&ocultos=esconder(&|$)/, 'what the Organizar hid stays out of the list')
   // Departamento sem nenhum: a faixa some.
   const limpo = await page(true, { query: { dept: 'eletro' }, saude: { mortos: 0, sku_divergente: 0, erro: 0 } })
-  assert.doesNotMatch(await limpo.html(), /Remover os|mortos \(anúncio encerrado/)
-  const semDept = await page(true, { query: { dept: 'sem' }, saude: { mortos: 1, sku_divergente: 0, erro: 0 } })
-  semDept.state.confirmandoRemoverMortos = true
-  assert.match(await semDept.html(), /Apagar 1 vínculos mortos de produtos sem departamento\?/)
+  assert.doesNotMatch(await limpo.html(), /mortos \(anúncio encerrado/)
 }
 async function run() {
   await departamentos()

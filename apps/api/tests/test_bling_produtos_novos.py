@@ -226,3 +226,116 @@ async def test_reativacao_so_pelo_id_do_bling(db: AsyncSession, cenario):
     assert resumo["reativados"] == 0
     velho = (await db.execute(select(Product).where(Product.bling_product_id == 1234))).scalar_one()
     assert velho.situacao == "E"
+
+
+# ---- 17/11/2026: botão Atualizar (só cria; trava 'pbln'; IntegrityError) -------
+
+
+@pytest.mark.asyncio
+async def test_botao_atualizar_so_cria_nao_reativa_nem_inativa(db: AsyncSession, cenario):
+    """alterar_situacao=False (o botão): lê a lista inteira e só cria o que
+    falta — o 'I' que está ativo no Bling continua 'I' e o 'A' que sumiu do
+    Bling continua 'A'. O cron diário continua reativando/inativando."""
+    dono, montar = cenario
+    await _ativo(db, dono, "dg078.pi", 555, situacao="I")
+    await _ativo(db, dono, "dg210.pi", 777)  # ativo aqui, fora da lista do Bling
+    montar([
+        {"id": 111, "codigo": "a009.ci", "nome": "Fonte", "situacao": "A"},
+        {"id": 555, "codigo": "dg078.pi", "nome": "C3", "situacao": "A"},
+        {"id": 888, "codigo": "novo.sp", "nome": "Novo", "situacao": "A"},
+    ])
+    resumo = await novos.importar_produtos_novos(
+        db, completo=True, pausa=0, alterar_situacao=False
+    )
+    assert resumo["criados"] == 1 and resumo["skus_criados"] == ["novo.sp"]
+    assert resumo["reativados"] == 0 and "inativados" not in resumo
+    por_id = {
+        p.bling_product_id: p
+        for p in (await db.execute(select(Product))).scalars()
+    }
+    for p in por_id.values():
+        await db.refresh(p)
+    assert por_id[555].situacao == "I"
+    assert por_id[777].situacao == "A"
+
+
+@pytest.mark.asyncio
+async def test_produto_criado_ao_mesmo_tempo_conta_como_ja_existia(
+    db: AsyncSession, cenario, monkeypatch
+):
+    """O webhook de estoque (ou a devolução) criou o mesmo produto no meio:
+    o IntegrityError do índice de SKU desfaz só aquele e a lista segue."""
+    from sqlalchemy.exc import IntegrityError
+
+    _dono, montar = cenario
+    montar([
+        {"id": 901, "codigo": "corrida.sp", "nome": "Corrida", "situacao": "A"},
+        {"id": 902, "codigo": "depois.sp", "nome": "Depois", "situacao": "A"},
+    ])
+    original = bling_product_create.run_auto_create_product_from_bling
+
+    async def _corrida(session, *, bling_product_id, user_id):
+        if bling_product_id == 901:
+            raise IntegrityError("INSERT", {}, Exception("uq_products_user_id_sku"))
+        return await original(session, bling_product_id=bling_product_id, user_id=user_id)
+
+    monkeypatch.setattr(bling_product_create, "run_auto_create_product_from_bling", _corrida)
+    resumo = await novos.importar_produtos_novos(db, completo=True, pausa=0)
+    assert resumo["ja_existia"] == 1 and resumo["criados"] == 1
+    assert resumo["skus_criados"] == ["depois.sp"]
+
+
+@pytest.mark.asyncio
+async def test_trava_pbln_uma_rodada_por_vez(db: AsyncSession, cenario, monkeypatch):
+    """O tick de 15 min, o completo e o botão dividem a trava 'pbln': com ela
+    ocupada a rodada sai na hora ('pulado'); livre, roda normal. Os dois crons
+    passam pela trava."""
+    from sqlalchemy import text as sa_text
+
+    from app import worker
+    from app.db import session_scope
+    from app.services.advisory_lock import SYNC_NAMESPACE
+
+    _dono, montar = cenario
+    montar([{"id": 222, "codigo": "a009.cd", "nome": "Fonte", "situacao": "A"}])
+    async with session_scope() as outra:
+        await outra.execute(
+            sa_text("SELECT pg_advisory_xact_lock(:ns, :k)"),
+            {"ns": SYNC_NAMESPACE, "k": novos._PRODUTOS_NOVOS_LOCK_KEY},
+        )
+        assert await novos.importar_produtos_novos_com_trava(completo=False, pausa=0) == {
+            "pulado": "rodada_automatica_em_andamento"
+        }
+    resumo = await novos.importar_produtos_novos_com_trava(completo=False, pausa=0)
+    assert resumo["criados"] == 1
+
+    chamadas: list[dict] = []
+    respostas = [
+        {"pulado": "rodada_automatica_em_andamento"},  # o tick
+        {"pulado": "rodada_automatica_em_andamento"},  # o completo, 1ª vez
+        {"lidos": 1, "criados": 0},  # o completo, depois de esperar
+    ]
+
+    async def _espiao(**kw):
+        chamadas.append(kw)
+        return respostas.pop(0)
+
+    monkeypatch.setattr(novos, "importar_produtos_novos_com_trava", _espiao)
+    monkeypatch.setattr(worker, "_BLING_COMPLETO_ESPERA_S", 0.0)
+    await worker.produtos_novos_bling_tick({})
+    # O completo diário não desiste com a trava ocupada (17/11/2026: só ele
+    # reativa/inativa — o Atualizar não): espera e tenta de novo.
+    await worker.produtos_novos_bling_completo({})
+    assert chamadas == [{"completo": False}, {"completo": True}, {"completo": True}]
+
+    # Ocupada o tempo todo: tenta o número de vezes e sai sem erro.
+    chamadas.clear()
+
+    async def _sempre_ocupada(**kw):
+        chamadas.append(kw)
+        return {"pulado": "rodada_automatica_em_andamento"}
+
+    monkeypatch.setattr(novos, "importar_produtos_novos_com_trava", _sempre_ocupada)
+    monkeypatch.setattr(worker, "_BLING_COMPLETO_TENTATIVAS", 3)
+    await worker.produtos_novos_bling_completo({})
+    assert chamadas == [{"completo": True}] * 3

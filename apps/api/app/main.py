@@ -86,6 +86,8 @@ from app.routers import nf as nf_router
 from app.routers import nf_upload as nf_upload_router
 from app.routers import notas_fiscais as notas_fiscais_router
 from app.routers import oauth as oauth_router
+from app.routers import organizar as organizar_router
+from app.routers import produtos_atualizar as produtos_atualizar_router
 from app.routers import ouvidoria as ouvidoria_router
 from app.routers import denuncia as denuncia_router
 from app.routers import juridico as juridico_router
@@ -245,6 +247,10 @@ app.include_router(imagens_router.router)
 app.include_router(integrations_router.router)
 app.include_router(oauth_router.router)
 app.include_router(products_router.router)
+# Produtos › Organizar (17/11/2026): só ADM; esconde da tela, nada é apagado.
+app.include_router(organizar_router.router)
+# Produtos › Atualizar (17/11/2026): só lê do Bling/marketplaces, grava no DaVinci.
+app.include_router(produtos_atualizar_router.router)
 # Estoque só leitura para os sites Charlots/Uranyx (30/09/2026). Fecha
 # sozinha se SITES_ESTOQUE_TOKENS estiver vazio; fora do openapi.
 app.include_router(sites_estoque_router.router)

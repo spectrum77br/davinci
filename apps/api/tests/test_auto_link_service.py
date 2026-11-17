@@ -711,7 +711,8 @@ async def test_mass_sync_active_ignora_massa_sem_sinal_de_vida(
     """25/09/2026: reinício no meio do Sincronizar Todos deixava o job RUNNING
     sem heartbeat (o background_jobs_gc só roda às 03:30) e o botão do usuário
     ficava cinza por até 4h. RUNNING calado há mais de 15 min não conta mais;
-    PENDING (ainda na fila, sem heartbeat nenhum) continua contando."""
+    PENDING (ainda na fila, sem heartbeat nenhum) conta só nos primeiros 20
+    min (17/11/2026)."""
     from datetime import UTC, datetime, timedelta
 
     from app.services.advisory_lock import mass_sync_active
@@ -743,16 +744,21 @@ async def test_mass_sync_active_ignora_massa_sem_sinal_de_vida(
     await db.commit()
     assert await mass_sync_active(db, user.id) is not None
 
-    # AUTO_LINK varre uma conta inteira sem dar sinal: calado há 70 min ainda
-    # conta como ativo (vale só a janela de 4h).
+    # 17/11/2026: AUTO_LINK (e o ATUALIZAR, IMPORT_LISTINGS) também dá sinal
+    # a cada 60 s (`sinal_de_vida`), então vale a mesma regra dos 15 min — com
+    # a trava global, um Vincular morto prenderia os botões de todos por 4h.
     job.type = BackgroundJobType.AUTO_LINK
     job.last_heartbeat_at = agora - timedelta(minutes=70)
     job.started_at = agora - timedelta(minutes=80)
     await db.commit()
+    assert await mass_sync_active(db, user.id) is None
+    job.last_heartbeat_at = agora - timedelta(minutes=2)
+    await db.commit()
     assert await mass_sync_active(db, user.id) is not None
     job.type = BackgroundJobType.SYNC_ALL
 
-    # PENDING esperando a fila há 1h (o worker ainda não pegou): continua ativo.
+    # PENDING só trava enquanto é recente (20 min): o worker pega em segundos;
+    # PENDING de 1h é job que ninguém vai pegar.
     job.status = BackgroundJobStatus.PENDING
     job.started_at = None
     job.last_heartbeat_at = None
@@ -761,6 +767,13 @@ async def test_mass_sync_active_ignora_massa_sem_sinal_de_vida(
         BackgroundJob.__table__.update()
         .where(BackgroundJob.id == job.id)
         .values(created_at=agora - timedelta(hours=1))
+    )
+    await db.commit()
+    assert await mass_sync_active(db, user.id) is None
+    await db.execute(
+        BackgroundJob.__table__.update()
+        .where(BackgroundJob.id == job.id)
+        .values(created_at=agora - timedelta(minutes=5))
     )
     await db.commit()
     assert await mass_sync_active(db, user.id) is not None

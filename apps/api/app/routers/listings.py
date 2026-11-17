@@ -43,6 +43,7 @@ from app.schemas.listings import (
 )
 from app.schemas.products import JobCreatedOut
 from app.services import departamento as dep_svc
+from app.services import organizar
 from app.worker_pool import get_arq_pool
 
 logger = structlog.get_logger()
@@ -74,7 +75,10 @@ async def list_listings(
     # `filtros` = o que a pessoa escolhe na tela (conta, canal, status, busca,
     # sem produto). Os cartões (resumo) contam só a base; a lista e o `total`,
     # tudo.
-    base = [user_scope(Listing, user)]
+    # Produtos › Organizar (17/11/2026): o que o ADM ocultou sai da aba (lista,
+    # total e cartões) para todos — conferido na leitura, volta sozinho quando o
+    # motivo deixa de valer. Só a tela: robô nenhum passa por aqui.
+    base = [user_scope(Listing, user), ~organizar.anuncio_oculto()]
 
     # Escopo por equipe: usuário não-admin com equipe(s) só vê os anúncios das
     # integrações das lojas da sua equipe (admin / sem-equipe = irrestrito).

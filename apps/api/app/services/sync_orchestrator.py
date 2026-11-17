@@ -110,6 +110,10 @@ def _confirmed_bling_stock(result: SyncResult) -> bool:
     )
 
 
+# SKUs dos produtos que deram exceção guardados no resultado (a tela lista).
+_AMOSTRA_FALHAS = 20
+
+
 class SyncOrchestrator:
     def __init__(
         self,
@@ -151,6 +155,11 @@ class SyncOrchestrator:
         # SKU → produto (TODOS os produtos, de qualquer dono), montado só se um
         # anúncio aparecer com o SKU trocado (vinculo_saude / ml.update_stock).
         self._sku_index = None
+        # Produtos que deram exceção no run_parallel (somados entre as rodadas
+        # do run_with_retry). Antes sumiam calados e o job saía 'succeeded'.
+        self.falhas_produto = 0
+        # Quais (os primeiros SKUs): a tela mostra no resumo do Sincronizar.
+        self.falhas_amostra: list[str] = []
 
     async def _produto_do_sku(self, sku: str) -> Product | None:
         """O único produto com este SKU (mesma regra do Vincular Automático:
@@ -868,12 +877,13 @@ class SyncOrchestrator:
         processed = 0
         for product in products:
             stmt = select(ProductLink).where(ProductLink.product_id == product.id)
-            if link_filter is not None:
-                stmt = stmt.where(ProductLink.id.in_(link_filter))
             if not self.incluir_mortos:
                 # Vínculo morto nem entra na passada (sem chamada, sem SyncLog).
                 stmt = stmt.where(ProductLink.morto_desde.is_(None))
             links = (await self.session.execute(stmt)).scalars().all()
+            if link_filter is not None:
+                # Filtro em Python, não `IN (...)`: ver run_parallel.
+                links = [vinc for vinc in links if vinc.id in link_filter]
             bling_links = [l for l in links if l.platform == IntegrationPlatform.BLING]
             other_links = [l for l in links if l.platform != IntegrationPlatform.BLING]
             bling_failed = False
@@ -929,6 +939,7 @@ class SyncOrchestrator:
         *,
         only_link_ids: list[UUID] | None = None,
         concurrency: int = SYNC_ALL_CONCURRENCY,
+        finalizar: bool = True,
     ) -> OrchestratorReport:
         """Parallel variant of `run()` for sync_all-style runs.
 
@@ -941,10 +952,16 @@ class SyncOrchestrator:
         The job ORM object on this orchestrator is updated only for
         start/finish bookkeeping. Per-link mutations happen in the sub-
         sessions and are immediately visible to other tasks via the DB.
+
+        `finalizar=False` (rodadas do run_with_retry): grava só o `result` da
+        rodada, sem SUCCEEDED nem finished_at, e não sobrescreve o started_at
+        da primeira rodada. Antes o job aparecia 'concluído' entre as rodadas
+        de nova tentativa, e isso abria a trava de massa durante a espera.
         """
         if self.job is not None:
             self.job.status = BackgroundJobStatus.RUNNING
-            self.job.started_at = datetime.now(UTC)
+            if finalizar or self.job.started_at is None:
+                self.job.started_at = datetime.now(UTC)
             # Note: do not overwrite job.total here. The caller (e.g.
             # sync_all_run worker) pre-counts links so processed/total
             # stays a real ratio. If unset, leave it as-is.
@@ -956,8 +973,11 @@ class SyncOrchestrator:
         user_id = self.user_id
         sem = asyncio.Semaphore(concurrency)
         link_filter = set(only_link_ids) if only_link_ids else None
+        falhas_rodada = 0
+        falhas_ids: list[UUID] = []
 
         async def process_one(pid: UUID) -> OrchestratorReport | None:
+            nonlocal falhas_rodada
             async with sem:
                 try:
                     async with session_scope() as sub_s:
@@ -967,11 +987,17 @@ class SyncOrchestrator:
                         stmt = select(ProductLink).where(
                             ProductLink.product_id == p.id
                         )
-                        if link_filter is not None:
-                            stmt = stmt.where(ProductLink.id.in_(link_filter))
                         if not self.incluir_mortos:
                             stmt = stmt.where(ProductLink.morto_desde.is_(None))
                         links = (await sub_s.execute(stmt)).scalars().all()
+                        if link_filter is not None:
+                            # Filtro em Python, não `IN (...)`: com todas as
+                            # contas a lista passa de 32.767 ids, o limite de
+                            # parâmetros do asyncpg, e TODO produto dava erro
+                            # (05/11/2026, job c89ad1cc: 33.731 vínculos, 0
+                            # enviados e 'succeeded'). A consulta por produto
+                            # já é pequena.
+                            links = [vinc for vinc in links if vinc.id in link_filter]
 
                         sub_job = (
                             await sub_s.get(BackgroundJob, job_id)
@@ -1034,6 +1060,8 @@ class SyncOrchestrator:
                         await sub_s.commit()
                         return sub_orch.report
                 except Exception as e:  # noqa: BLE001
+                    falhas_rodada += 1
+                    falhas_ids.append(pid)
                     logger.exception(
                         "sync_parallel_product_failed",
                         product_id=str(pid),
@@ -1044,6 +1072,18 @@ class SyncOrchestrator:
         tasks = [process_one(pid) for pid in product_ids]
         round_start = datetime.now(UTC)
         results = await asyncio.gather(*tasks, return_exceptions=False)
+        self.falhas_produto += falhas_rodada
+        falta = _AMOSTRA_FALHAS - len(self.falhas_amostra)
+        if falhas_ids and falta > 0:
+            try:
+                skus = (
+                    await self.session.execute(
+                        select(Product.sku).where(Product.id.in_(falhas_ids[:falta]))
+                    )
+                ).scalars().all()
+                self.falhas_amostra += [x for x in skus if x not in self.falhas_amostra]
+            except Exception:  # noqa: BLE001 — a amostra é só para a tela
+                logger.warning("sync_falhas_amostra_falhou", n=len(falhas_ids))
 
         for r in results:
             if r is None:
@@ -1074,19 +1114,54 @@ class SyncOrchestrator:
         self._last_round_retryable_ids = [row[0] for row in retryable_rows]
 
         if self.job is not None:
-            self.job.status = BackgroundJobStatus.SUCCEEDED
-            self.job.finished_at = datetime.now(UTC)
-            self.job.result = {
-                "total_links": self.report.total_links,
-                "ok": self.report.ok,
-                "skipped": self.report.skipped,
-                "retryable": self.report.retryable,
-                "fatal": self.report.fatal,
-                "requires_review": self.report.requires_review,
-            }
+            if finalizar:
+                self.job.status = BackgroundJobStatus.SUCCEEDED
+                self.job.finished_at = datetime.now(UTC)
+            self.job.result = self._resultado()
             await self.session.commit()
 
         return self.report
+
+    async def _falhar_job(self, job_id: UUID | None, e: BaseException) -> None:
+        """Marca o job FAILED numa sessão limpa (a do orquestrador pode estar
+        com a transação abortada). Só mexe em job ainda não terminado."""
+        if job_id is None:
+            return
+        erro = (
+            "interrompido (timeout/reinício)"
+            if isinstance(e, asyncio.CancelledError)
+            else f"{type(e).__name__}: {e}"[:1000]
+        )
+        try:
+            async with session_scope() as s:
+                await s.execute(
+                    update(BackgroundJob)
+                    .where(
+                        BackgroundJob.id == job_id,
+                        BackgroundJob.finished_at.is_(None),
+                    )
+                    .values(
+                        status=BackgroundJobStatus.FAILED,
+                        error=erro,
+                        finished_at=func.now(),
+                        result=self._resultado(),
+                    )
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("sync_falhar_job_falhou", job_id=str(job_id))
+
+    def _resultado(self) -> dict:
+        """O `job.result` do sync em massa (contadores do relatório)."""
+        return {
+            "total_links": self.report.total_links,
+            "ok": self.report.ok,
+            "skipped": self.report.skipped,
+            "retryable": self.report.retryable,
+            "fatal": self.report.fatal,
+            "requires_review": self.report.requires_review,
+            "falhas_produto": self.falhas_produto,
+            "falhas_amostra": list(self.falhas_amostra),
+        }
 
     async def run_with_retry(
         self,
@@ -1101,39 +1176,67 @@ class SyncOrchestrator:
         with progressive waits (30s for the first retry, 15s after that).
 
         Each round inherits the parent SyncOrchestrator's report and job
-        state; the underlying `run_parallel` updates job.status/finished_at
-        on every call so the final state reflects the last round.
+        state. As rodadas rodam com `finalizar=False` (o job continua RUNNING
+        durante a espera de 30 s) e o SUCCEEDED/finished_at é gravado UMA vez,
+        no fim da última rodada.
         """
-        await self.run_parallel(
-            product_ids,
-            only_link_ids=only_link_ids,
-            concurrency=concurrency,
-        )
+        # Copiado antes: depois de um erro a sessão pode não deixar ler o job.
+        job_id = self.job.id if self.job is not None else None
+        if self.job is not None and self.job.finished_at is not None:
+            # Rodada repetida pelo arq depois de uma interrompida (publicação /
+            # reinício: o _falhar_job gravou FAILED + finished_at + erro e o
+            # arq roda o job de novo). Recomeça do zero, como o run_auto_link:
+            # sem isto o job voltava a RUNNING com finished_at preenchido — a
+            # trava global de massa não o via (os botões ficavam livres com o
+            # envio rodando) — e terminava SUCCEEDED com o erro 'interrompido'.
+            self.job.finished_at = None
+            self.job.error = None
+            self.job.processed = 0
+            self.job.last_heartbeat_at = datetime.now(UTC)
         rounds_run = 0
-        for round_idx in range(1, max_rounds):
-            retry_ids = list(self._last_round_retryable_ids)
-            if not retry_ids:
-                break
-            wait_s = (
-                RESYNC_WAIT_FIRST_SECONDS
-                if round_idx == 1
-                else RESYNC_WAIT_SUBSEQUENT_SECONDS
-            )
-            logger.info(
-                "sync_retry_round_waiting",
-                round=round_idx,
-                wait_seconds=wait_s,
-                product_count=len(retry_ids),
-            )
-            await asyncio.sleep(wait_s)
-            # run_parallel will reset _last_round_retryable_ids based on the
-            # outcome of this round's products.
+        try:
             await self.run_parallel(
-                retry_ids,
+                product_ids,
                 only_link_ids=only_link_ids,
                 concurrency=concurrency,
+                finalizar=False,
             )
-            rounds_run = round_idx
+            for round_idx in range(1, max_rounds):
+                retry_ids = list(self._last_round_retryable_ids)
+                if not retry_ids:
+                    break
+                wait_s = (
+                    RESYNC_WAIT_FIRST_SECONDS
+                    if round_idx == 1
+                    else RESYNC_WAIT_SUBSEQUENT_SECONDS
+                )
+                logger.info(
+                    "sync_retry_round_waiting",
+                    round=round_idx,
+                    wait_seconds=wait_s,
+                    product_count=len(retry_ids),
+                )
+                await asyncio.sleep(wait_s)
+                # run_parallel will reset _last_round_retryable_ids based on the
+                # outcome of this round's products.
+                await self.run_parallel(
+                    retry_ids,
+                    only_link_ids=only_link_ids,
+                    concurrency=concurrency,
+                    finalizar=False,
+                )
+                rounds_run = round_idx
+            if self.job is not None:
+                self.job.status = BackgroundJobStatus.SUCCEEDED
+                self.job.finished_at = datetime.now(UTC)
+                self.job.result = self._resultado()
+                await self.session.commit()
+        except (Exception, asyncio.CancelledError) as e:
+            # O job só vira terminal aqui no fim; se a rodada quebrar (ou o
+            # arq cortar no timeout), grava FAILED para não deixar RUNNING
+            # prendendo a trava global de massa até o sinal de vida vencer.
+            await self._falhar_job(job_id, e)
+            raise
         logger.info(
             "sync_orchestrator_with_retry_done",
             retry_rounds=rounds_run,

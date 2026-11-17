@@ -346,7 +346,13 @@ async def test_saude_dos_vinculos_e_remover_mortos_por_departamento(client, auth
         assert r.json() == {"agendado": True, "quantidade": 2}
         r = await client.post("/api/product-links/remover-mortos", params={"departamento": "x"})
         assert r.status_code == 400
-    assert agendados == [(("remover_vinculos_mortos_run", None, True), {"departamento": "celular"})]
+    # pular_ocultos (17/11/2026): o botão (só ADM) não apaga o que o Organizar escondeu
+    assert agendados == [
+        (
+            ("remover_vinculos_mortos_run", None, True),
+            {"pular_ocultos": True, "departamento": "celular"},
+        )
+    ]
 
     # O job apaga só os do departamento; os de Mala e Sem departamento ficam.
     assert await apagar_mortos_em_lotes(somente_visiveis=True, departamento="celular", pausa=0) == 2

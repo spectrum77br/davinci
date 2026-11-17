@@ -7,7 +7,7 @@ and verify their persistent side effects against the real test DB.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -259,19 +259,17 @@ async def test_daily_sync_scheduler_ignores_disabled(
 async def test_daily_sync_scheduler_ignores_outside_window(
     db: AsyncSession, user: User
 ) -> None:
-    """A daily_sync_time at least 1h away from `now` falls outside the 5-min
-    enqueue window and must be ignored."""
+    """A daily_sync_time still ahead of `now`, or more than 4h behind it (the
+    catch-up window since 17/11/2026), must be ignored."""
     from app.worker import SP_TZ
 
     now_sp = datetime.now(SP_TZ).replace(second=0, microsecond=0)
-    far_minutes = 60
-    far = (now_sp - timedelta(minutes=far_minutes)).time()
-    if (
-        time(now_sp.hour, now_sp.minute) <= far
-        <= time(now_sp.hour, now_sp.minute)
-    ):
-        # Pathological boundary — pick something even further in the past.
-        far = (now_sp - timedelta(minutes=180)).time()
+    ahead = now_sp + timedelta(minutes=60)
+    if ahead.date() == now_sp.date():
+        far = ahead.time()
+    else:
+        # Late night: 5h back is still today and past the 4h catch-up window.
+        far = (now_sp - timedelta(hours=5)).time()
 
     db.add(
         UserSettings(

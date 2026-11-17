@@ -20,7 +20,7 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import and_, func, select, update
+from sqlalchemy import and_, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -187,6 +187,62 @@ class _SkuIndex:
         return sorted(self.ambiguous_hits)[:limit]
 
 
+# Amostras do resultado por conta (Vincular, 17/11/2026): o que foi movido ou
+# criado e os SKUs de anúncio sem produto no DaVinci. Com teto, porque o
+# detalhe de cada conta vai para background_job_details (que já é grande).
+_MAX_MUDANCAS = 50
+_MAX_SKUS_SEM_PRODUTO = 20
+
+
+class _Amostras:
+    """Até 50 vínculos movidos/criados e até 20 SKUs sem produto de UMA conta."""
+
+    def __init__(self, conta: str | None):
+        self.conta = conta
+        self.mudancas: list[dict[str, Any]] = []
+        self.skus_sem_produto: list[str] = []
+
+    def mudanca(
+        self,
+        acao: str,
+        *,
+        anuncio: str | None,
+        variacao: str | None,
+        sku_anuncio: str | None,
+        de: str | None,
+        para: str | None,
+    ) -> None:
+        if len(self.mudancas) < _MAX_MUDANCAS:
+            self.mudancas.append(
+                {
+                    "acao": acao,
+                    "conta": self.conta,
+                    "anuncio": anuncio,
+                    "variacao": variacao,
+                    "sku_anuncio": sku_anuncio,
+                    "de": de,
+                    "para": para,
+                }
+            )
+
+    def sem_produto(self, sku: str | None) -> None:
+        sku = (sku or "").strip()
+        if (
+            sku
+            and sku not in self.skus_sem_produto
+            and len(self.skus_sem_produto) < _MAX_SKUS_SEM_PRODUTO
+        ):
+            self.skus_sem_produto.append(sku)
+
+
+def _morto_pelo_status(platform: IntegrationPlatform, status: str | None) -> bool:
+    """O marketplace já dá o anúncio como morto (ML encerrado; TikTok excluído,
+    congelado ou desativado)? Esse anúncio NÃO ganha vínculo novo: foi assim
+    que 3.108 vínculos TikTok mortos foram recriados em 14/11/2026, depois de
+    apagados. O vínculo que já existe continua sendo marcado morto."""
+    return bool(_MORTO_POR_STATUS.get(platform, {}).get((status or "").strip()))
+
+
 def _stats(
     *,
     created: int = 0,
@@ -196,6 +252,9 @@ def _stats(
     repointed: int = 0,
     sku_index: _SkuIndex | None = None,
     error: str | None = None,
+    sku_atualizados: int = 0,
+    mortos_nao_criados: int = 0,
+    amostras: _Amostras | None = None,
 ) -> dict[str, Any]:
     out: dict[str, Any] = {
         "created": created,
@@ -205,6 +264,12 @@ def _stats(
         "sku_ambiguo": 0,
         "repointed": repointed,
         "error": error,
+        # Vínculo que ficou no mesmo produto mas guardava o SKU velho do anúncio
+        # (o movido conta em `repointed`, não aqui).
+        "sku_atualizados": sku_atualizados,
+        "mortos_nao_criados": mortos_nao_criados,
+        "mudancas": list(amostras.mudancas) if amostras else [],
+        "skus_sem_produto": list(amostras.skus_sem_produto) if amostras else [],
     }
     if sku_index is not None and sku_index.ambiguous_count:
         out["sku_ambiguo"] = sku_index.ambiguous_count
@@ -282,6 +347,8 @@ async def _link_tiktok_integration(
     """
     products = (await session.execute(select(Product))).scalars().all()
     sku_index = _SkuIndex(products)
+    products_by_id = {product.id: product for product in products}
+    amostras = _Amostras(integ.name)
 
     # Key on (external_id, variation_id) to match the DB unique index
     # (product_id is NOT part of it). Keying on product_id — as before — meant a
@@ -325,6 +392,8 @@ async def _link_tiktok_integration(
     repointed = 0
     mortos = 0
     revividos = 0
+    sku_atualizados = 0
+    mortos_nao_criados = 0
     error: str | None = None
     page_token: str | None = None
     page_idx = 0
@@ -378,9 +447,13 @@ async def _link_tiktok_integration(
                 sku_id = (sku.get("id") or "").strip()
                 if not sku_id:
                     continue
+                sku_mudou = False
                 visto = existing_by_key.get((product_id, sku_id))
                 if visto is not None:
                     if seller_sku:
+                        if visto.external_sku != seller_sku:
+                            sku_mudou = True
+                            sku_atualizados += 1
                         visto.external_sku = seller_sku
                     efeito = _saude_pelo_status(visto, IntegrationPlatform.TIKTOK, tp.get("status"))
                     mortos += efeito == "morto"
@@ -392,6 +465,7 @@ async def _link_tiktok_integration(
                 if local is None:
                     if motivo == "not_found":
                         not_found += 1
+                        amostras.sem_produto(seller_sku)
                     continue
                 key = (product_id, sku_id)
                 existing_link = existing_by_key.get(key)
@@ -402,6 +476,7 @@ async def _link_tiktok_integration(
                     # seller_sku editado no anúncio TikTok → re-aponta o link
                     # pro produto que o SKU passou a resolver (o sku_id interno
                     # é estável na edição do seller_sku).
+                    antes = products_by_id.get(existing_link.product_id)
                     _repoint_link(
                         existing_link,
                         product_id=local.id,
@@ -410,6 +485,16 @@ async def _link_tiktok_integration(
                         stock=sku.get("stock"),
                     )
                     repointed += 1
+                    # o movido conta como movido, não como SKU atualizado
+                    sku_atualizados -= sku_mudou
+                    amostras.mudanca(
+                        "movido", anuncio=product_id, variacao=sku_id,
+                        sku_anuncio=seller_sku, de=antes.sku if antes else None,
+                        para=local.sku,
+                    )
+                    continue
+                if _morto_pelo_status(IntegrationPlatform.TIKTOK, tp.get("status")):
+                    mortos_nao_criados += 1
                     continue
                 new_link = ProductLink(
                     user_id=integ.user_id,
@@ -428,6 +513,10 @@ async def _link_tiktok_integration(
                 session.add(new_link)
                 existing_by_key[key] = new_link
                 created += 1
+                amostras.mudanca(
+                    "criado", anuncio=product_id, variacao=sku_id,
+                    sku_anuncio=seller_sku, de=None, para=local.sku,
+                )
                 if created % 25 == 0:
                     await _heartbeat(session, job_id)
         if not page_token:
@@ -438,6 +527,8 @@ async def _link_tiktok_integration(
         **_stats(
             created=created, already=already, not_found=not_found,
             sku_vazio=sku_vazio, repointed=repointed, sku_index=sku_index, error=error,
+            sku_atualizados=sku_atualizados, mortos_nao_criados=mortos_nao_criados,
+            amostras=amostras,
         ),
         "mortos": mortos,
         "revividos": revividos,
@@ -650,6 +741,9 @@ async def _link_via_listings(
     mortos = 0
     revividos = 0
     not_published = 0
+    sku_atualizados = 0
+    mortos_nao_criados = 0
+    amostras = _Amostras(integ.name)
     error: str | None = None
 
     async def _flush() -> None:
@@ -694,10 +788,14 @@ async def _link_via_listings(
                     # Do not infer aliases by stripping suffixes such as '-2'.
                     already += 1
                     continue
+            sku_mudou = False
             if existing_link is not None:
                 # O que o anúncio é HOJE: SKU e se morreu/voltou — mesmo quando
                 # o SKU novo não tem produto (fica visível como divergente).
                 if sku and platform != IntegrationPlatform.MAGALU:
+                    if existing_link.external_sku != sku:
+                        sku_mudou = True
+                        sku_atualizados += 1
                     existing_link.external_sku = sku
                 if platform == IntegrationPlatform.ML:
                     _marca_catalogo_ml(existing_link, listing)
@@ -711,11 +809,15 @@ async def _link_via_listings(
             if local is None:
                 if motivo == "not_found":
                     not_found += 1
+                    amostras.sem_produto(match_sku)
                 continue
             if platform == IntegrationPlatform.MAGALU:
                 # Guarde o SKU real do produto, incluindo os '+' do kit.
                 sku = local.sku
                 if existing_link is not None:
+                    if existing_link.external_sku != sku:
+                        sku_mudou = True
+                        sku_atualizados += 1
                     existing_link.external_sku = sku
             if existing_link is not None:
                 if not repoint or existing_link.product_id == local.id:
@@ -723,6 +825,7 @@ async def _link_via_listings(
                     continue
                 # Marketplace SKU changed → re-point the stored row to the
                 # product it now belongs to (see docstring).
+                antes = products_by_id.get(existing_link.product_id)
                 _repoint_link(
                     existing_link,
                     product_id=local.id,
@@ -732,9 +835,19 @@ async def _link_via_listings(
                 )
                 existing_link.listing_type = listing.get("listing_type")
                 repointed += 1
+                # o movido conta como movido, não como SKU atualizado
+                sku_atualizados -= sku_mudou
+                amostras.mudanca(
+                    "movido", anuncio=external_id, variacao=variation_id,
+                    sku_anuncio=sku, de=antes.sku if antes else None, para=local.sku,
+                )
                 continue
             if key in existing_keys:
                 already += 1
+                continue
+            if _morto_pelo_status(platform, listing.get("status")):
+                # Anúncio já encerrado no marketplace: não vira vínculo novo.
+                mortos_nao_criados += 1
                 continue
             novo = ProductLink(
                 user_id=integ.user_id,
@@ -755,6 +868,10 @@ async def _link_via_listings(
                 _marca_catalogo_ml(novo, listing)
             pending.append(novo)
             existing_keys.add(key)
+            amostras.mudanca(
+                "criado", anuncio=external_id, variacao=variation_id,
+                sku_anuncio=sku, de=None, para=local.sku,
+            )
             if len(pending) >= 100:
                 await _flush()
         await _flush()
@@ -779,6 +896,8 @@ async def _link_via_listings(
         **_stats(
             created=created, already=already, not_found=not_found,
             sku_vazio=sku_vazio, repointed=repointed, sku_index=sku_index, error=error,
+            sku_atualizados=sku_atualizados, mortos_nao_criados=mortos_nao_criados,
+            amostras=amostras,
         ),
         "mortos": mortos,
         "revividos": revividos,
@@ -857,6 +976,8 @@ async def _link_amazon_integration(
 
     products = (await session.execute(select(Product))).scalars().all()
     sku_index = _SkuIndex(products)
+    products_by_id = {product.id: product for product in products}
+    amostras = _Amostras(integ.name)
 
     # Same rule as _link_via_listings: dedup on (external_id, variation_id)
     # since the DB unique constraint excludes product_id. existing_by_key is
@@ -881,6 +1002,7 @@ async def _link_amazon_integration(
     not_found = 0
     sku_vazio = 0
     repointed = 0
+    mortos_nao_criados = 0
     error: str | None = None
 
     async def _flush() -> None:
@@ -907,6 +1029,7 @@ async def _link_amazon_integration(
             if local is None:
                 if motivo == "not_found":
                     not_found += 1
+                    amostras.sem_produto(sku)
                 continue
             key = (external_id, variation_id or "")
             existing_link = existing_by_key.get(key)
@@ -918,6 +1041,7 @@ async def _link_amazon_integration(
                 # (chave imutável do anúncio), então editar o SKU cria um
                 # anúncio novo em vez de re-mapear este. Mantido por
                 # uniformidade com ML/Shopee/TikTok.
+                antes = products_by_id.get(existing_link.product_id)
                 _repoint_link(
                     existing_link,
                     product_id=local.id,
@@ -927,6 +1051,15 @@ async def _link_amazon_integration(
                 )
                 existing_link.listing_type = listing.get("listing_type")
                 repointed += 1
+                amostras.mudanca(
+                    "movido", anuncio=external_id, variacao=variation_id,
+                    sku_anuncio=sku, de=antes.sku if antes else None, para=local.sku,
+                )
+                continue
+            # A Amazon não tem status de morto na tabela (inativo é sem
+            # estoque); fica a mesma regra das outras para quando tiver.
+            if _morto_pelo_status(IntegrationPlatform.AMAZON, listing.get("status")):
+                mortos_nao_criados += 1
                 continue
             new_link = ProductLink(
                 user_id=integ.user_id,
@@ -945,6 +1078,10 @@ async def _link_amazon_integration(
             )
             pending.append(new_link)
             existing_by_key[key] = new_link
+            amostras.mudanca(
+                "criado", anuncio=external_id, variacao=variation_id,
+                sku_anuncio=sku, de=None, para=local.sku,
+            )
             if len(pending) >= 100:
                 await _flush()
         await _flush()
@@ -967,6 +1104,7 @@ async def _link_amazon_integration(
     return _stats(
         created=created, already=already, not_found=not_found,
         sku_vazio=sku_vazio, repointed=repointed, sku_index=sku_index, error=error,
+        mortos_nao_criados=mortos_nao_criados, amostras=amostras,
     )
 
 
@@ -1048,11 +1186,144 @@ async def _link_with_retry(
     return stats, True
 
 
+def novo_resumo_vincular() -> dict[str, Any]:
+    """O resumo do Vincular (o job dele e o bloco `vincular` do Atualizar)."""
+    return {
+        "created": 0,
+        "already_present": 0,
+        "skipped": 0,
+        "not_found": 0,
+        "sku_vazio": 0,
+        "sku_ambiguo": 0,
+        "repointed": 0,
+        "mortos": 0,
+        "revividos": 0,
+        "sku_atualizados": 0,
+        "mortos_nao_criados": 0,
+        # Até 50 por conta e até 20 por conta (17/11/2026).
+        "mudancas": [],
+        "skus_sem_produto": [],
+        # `failed_integrations` mantido (o front lê essa chave) e agora é
+        # sinônimo de `pending_integrations`: contas que esgotaram os retries.
+        "failed_integrations": 0,
+        "pending_integrations": 0,
+        "ok_integrations": 0,
+    }
+
+
+async def vincular_contas(
+    job_id: UUID,
+    integ_ids: list[UUID],
+    summary: dict[str, Any],
+    *,
+    etapa: str | None = None,
+    contar_processed: bool = True,
+    por_conta: dict[UUID, dict[str, Any]] | None = None,
+) -> None:
+    """O motor do Vincular: lê as contas ao vivo, até AUTOLINK_CONCURRENCY ao
+    mesmo tempo, cada uma na sua sessão, e soma em `summary` (de
+    `novo_resumo_vincular`). Grava um detalhe por conta no job. Com
+    `por_conta`, anota o resultado de cada conta ({'result': 'ok' | 'pending' |
+    'deferred_to_listings_cron', 'error'}) — o Atualizar só grava a lista do
+    ML/Shopee da conta cujo Vincular terminou 'ok'.
+
+    Usado pelo botão Vincular / varredura das 10h (`run_auto_link`) e, desde
+    17/11/2026, pelo botão Atualizar no fim da leitura das listas: ali os
+    detalhes levam `etapa` e o `processed` (que lá conta contas lidas) não é
+    mexido (`contar_processed=False`)."""
+    sem = asyncio.Semaphore(AUTOLINK_CONCURRENCY)
+    marca = {"etapa": etapa} if etapa else {}
+
+    def _accumulate(stats: dict[str, Any]) -> None:
+        # Bloco 100% síncrono (sem await): seguro entre tasks cooperativas do
+        # asyncio — nenhuma outra corrotina roda no meio de um += sem await.
+        summary["created"] += stats.get("created", 0)
+        summary["already_present"] += stats.get("already_present", 0)
+        summary["not_found"] += stats.get("not_found", 0)
+        summary["sku_vazio"] += stats.get("sku_vazio", 0)
+        summary["sku_ambiguo"] += stats.get("sku_ambiguo", 0)
+        summary["repointed"] += stats.get("repointed", 0)
+        summary["mortos"] += stats.get("mortos", 0)
+        summary["revividos"] += stats.get("revividos", 0)
+        summary["sku_atualizados"] += stats.get("sku_atualizados", 0)
+        summary["mortos_nao_criados"] += stats.get("mortos_nao_criados", 0)
+        summary["mudancas"].extend(stats.get("mudancas") or [])
+        summary["skus_sem_produto"].extend(stats.get("skus_sem_produto") or [])
+
+    async def _run_one(integ_id: UUID) -> None:
+        async with sem:
+            async with session_scope() as sub_s:
+                integ = await sub_s.get(Integration, integ_id)
+                if integ is None:
+                    return
+                if integ.platform not in _ADAPTED_PLATFORMS:
+                    # TEMU etc: sem adapter direto → cai no cron de listings.
+                    summary["skipped"] += 1
+                    if por_conta is not None:
+                        por_conta[integ_id] = {"result": "deferred_to_listings_cron"}
+                    await _append_detail(
+                        sub_s,
+                        job_id,
+                        {
+                            **marca,
+                            "integration_id": str(integ.id),
+                            "integration_name": integ.name,
+                            "platform": integ.platform.value,
+                            "result": "deferred_to_listings_cron",
+                            "note": "Temu auto-link uses listings_import cron",
+                        },
+                    )
+                    return
+                stats, pending = await _link_with_retry(sub_s, job_id, integ)
+                if contar_processed:
+                    await _bump_processed(
+                        sub_s,
+                        job_id,
+                        stats.get("created", 0) + stats.get("repointed", 0),
+                    )
+                if pending:
+                    summary["pending_integrations"] += 1
+                    summary["failed_integrations"] += 1
+                    result = "pending"
+                else:
+                    summary["ok_integrations"] += 1
+                    result = "ok"
+                _accumulate(stats)
+                if por_conta is not None:
+                    por_conta[integ_id] = {"result": result, "error": stats.get("error")}
+                await _append_detail(
+                    sub_s,
+                    job_id,
+                    {
+                        **marca,
+                        "integration_id": str(integ.id),
+                        "integration_name": integ.name,
+                        "platform": integ.platform.value,
+                        "result": result,
+                        "pending": pending,
+                        **stats,
+                    },
+                )
+
+    # Fan-out: uma conta lenta/instável não segura as outras. Cada task tem
+    # seu retry+backoff; uma que estoure de vez fica PENDENTE, nunca some.
+    # return_exceptions: um erro inesperado numa conta (banco fora) só sobe
+    # depois que TODAS terminaram — o Atualizar solta a trava do Flex logo
+    # depois, e nenhuma conta pode estar gravando vínculo ainda.
+    resultados = await asyncio.gather(
+        *[_run_one(i) for i in integ_ids], return_exceptions=True
+    )
+    for r in resultados:
+        if isinstance(r, BaseException):
+            raise r
+
+
 async def run_auto_link(
     session: AsyncSession,
     *,
     job_id: UUID,
     integration_ids: list[UUID] | None,
+    espelhar_lista: bool = False,
 ) -> None:
     job = (
         await session.execute(select(BackgroundJob).where(BackgroundJob.id == job_id))
@@ -1064,6 +1335,12 @@ async def run_auto_link(
     job.status = BackgroundJobStatus.RUNNING
     job.started_at = _now()
     job.last_heartbeat_at = _now()
+    # Rodada repetida pelo arq (reinício/publicação no meio): recomeça do zero.
+    # Sem isto o `processed` relativo passava de 100% e o job ficava com o
+    # finished_at/erro da rodada interrompida.
+    job.processed = 0
+    job.finished_at = None
+    job.error = None
 
     stmt = select(Integration)
     if integration_ids:
@@ -1077,88 +1354,12 @@ async def run_auto_link(
     # (sessions SQLAlchemy não são compartilháveis entre tasks concorrentes).
     integ_ids = [i.id for i in integrations]
 
-    summary = {
-        "created": 0,
-        "already_present": 0,
-        "skipped": 0,
-        "not_found": 0,
-        "sku_vazio": 0,
-        "sku_ambiguo": 0,
-        "repointed": 0,
-        "mortos": 0,
-        "revividos": 0,
-        # `failed_integrations` mantido (o front lê essa chave) e agora é
-        # sinônimo de `pending_integrations`: contas que esgotaram os retries.
-        "failed_integrations": 0,
-        "pending_integrations": 0,
-        "ok_integrations": 0,
-    }
-    sem = asyncio.Semaphore(AUTOLINK_CONCURRENCY)
-
-    def _accumulate(stats: dict[str, Any]) -> None:
-        # Bloco 100% síncrono (sem await): seguro entre tasks cooperativas do
-        # asyncio — nenhuma outra corrotina roda no meio de um += sem await.
-        summary["created"] += stats.get("created", 0)
-        summary["already_present"] += stats.get("already_present", 0)
-        summary["not_found"] += stats.get("not_found", 0)
-        summary["sku_vazio"] += stats.get("sku_vazio", 0)
-        summary["sku_ambiguo"] += stats.get("sku_ambiguo", 0)
-        summary["repointed"] += stats.get("repointed", 0)
-        summary["mortos"] += stats.get("mortos", 0)
-        summary["revividos"] += stats.get("revividos", 0)
-
-    async def _run_one(integ_id: UUID) -> None:
-        async with sem:
-            async with session_scope() as sub_s:
-                integ = await sub_s.get(Integration, integ_id)
-                if integ is None:
-                    return
-                if integ.platform not in _ADAPTED_PLATFORMS:
-                    # TEMU etc: sem adapter direto → cai no cron de listings.
-                    summary["skipped"] += 1
-                    await _append_detail(
-                        sub_s,
-                        job_id,
-                        {
-                            "integration_id": str(integ.id),
-                            "integration_name": integ.name,
-                            "platform": integ.platform.value,
-                            "result": "deferred_to_listings_cron",
-                            "note": "Temu auto-link uses listings_import cron",
-                        },
-                    )
-                    return
-                stats, pending = await _link_with_retry(sub_s, job_id, integ)
-                await _bump_processed(
-                    sub_s,
-                    job_id,
-                    stats.get("created", 0) + stats.get("repointed", 0),
-                )
-                if pending:
-                    summary["pending_integrations"] += 1
-                    summary["failed_integrations"] += 1
-                    result = "pending"
-                else:
-                    summary["ok_integrations"] += 1
-                    result = "ok"
-                _accumulate(stats)
-                await _append_detail(
-                    sub_s,
-                    job_id,
-                    {
-                        "integration_id": str(integ.id),
-                        "integration_name": integ.name,
-                        "platform": integ.platform.value,
-                        "result": result,
-                        "pending": pending,
-                        **stats,
-                    },
-                )
+    summary = novo_resumo_vincular()
 
     try:
-        # Fan-out: uma conta lenta/instável não segura as outras. Cada task tem
-        # seu retry+backoff; uma que estoure de vez fica PENDENTE, nunca some.
-        await asyncio.gather(*[_run_one(i) for i in integ_ids])
+        await vincular_contas(job_id, integ_ids, summary)
+        if espelhar_lista:
+            await _espelhar_na_lista(job_id, integ_ids, summary)
         job.result = summary
         # FAILED só quando NENHUMA integração concluiu (nem ok, nem skipped) e há
         # pendentes. Senão SUCCEEDED — o parcial fica visível em
@@ -1187,5 +1388,58 @@ async def run_auto_link(
         job.status = BackgroundJobStatus.FAILED
         job.error = f"{type(e).__name__}: {e}"[:1000]
     finally:
+        # Timeout do arq e reinício do worker chegam como CancelledError, que
+        # não é Exception: sem isto o job ficava 'running' para sempre na tela
+        # (com finished_at preenchido) e o polling nunca terminava.
+        if job.status in (BackgroundJobStatus.RUNNING, BackgroundJobStatus.PENDING):
+            job.status = BackgroundJobStatus.FAILED
+            job.error = "interrompido (timeout/reinício)"
         job.finished_at = _now()
+        await _gravar_fim(session, job)
+
+
+async def _espelhar_na_lista(
+    job_id: UUID, integ_ids: list[UUID], summary: dict[str, Any]
+) -> None:
+    """Botão Vincular: espelha na aba Anúncios (listings.product_id) o produto
+    dos vínculos vivos. Numa sessão PRÓPRIA e curta, com lock_timeout: um erro
+    aqui (deadlock com a rodada da Shopee, que grava listings de 25 em 25)
+    abortava a transação da sessão principal, o status final se perdia e o
+    job ficava RUNNING prendendo a trava global. Falha vira
+    `lista_anuncios_erro` e não derruba o job."""
+    try:
+        from app.services.produtos_botoes import espelhar_vinculos_na_lista
+
+        async with session_scope() as s:
+            await s.execute(text("SET LOCAL lock_timeout = '5s'"))
+            resultado = await espelhar_vinculos_na_lista(s, integ_ids)
+        # Só depois do commit: se o commit falhar, fica só o erro.
+        summary["lista_anuncios"] = resultado
+    except Exception as e:  # noqa: BLE001 — o espelho é extra; o vínculo já foi feito
+        logger.exception("auto_link_espelho_falhou", job_id=str(job_id))
+        summary["lista_anuncios_erro"] = f"{type(e).__name__}: {e}"[:300]
+
+
+async def _gravar_fim(session: AsyncSession, job: BackgroundJob) -> None:
+    """Grava o estado final do job. Se a sessão principal não consegue mais
+    (transação abortada), grava por UPDATE numa sessão limpa — o job nunca
+    pode ficar RUNNING sem dono, porque a trava de massa é global."""
+    # Copia antes do commit: depois de um rollback o objeto expira e não dá
+    # para lê-lo de novo sem ir ao banco.
+    jid = job.id
+    fim = {
+        "status": job.status,
+        "error": job.error,
+        "result": job.result,
+        "finished_at": job.finished_at,
+    }
+    try:
         await session.commit()
+        return
+    except Exception:  # noqa: BLE001
+        logger.exception("auto_link_fim_commit_falhou", job_id=str(jid))
+        await session.rollback()
+    async with session_scope() as s:
+        await s.execute(
+            update(BackgroundJob).where(BackgroundJob.id == jid).values(**fim)
+        )

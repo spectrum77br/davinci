@@ -28,6 +28,8 @@ from uuid import UUID
 import httpx
 import structlog
 from sqlalchemy import select
+from sqlalchemy import text as sa_text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Integration, IntegrationPlatform, LinkSyncStatus, Product, ProductLink
@@ -182,12 +184,24 @@ async def _inativar_quem_saiu(session: AsyncSession, ativos_bling: list[dict]) -
 
 
 async def importar_produtos_novos(
-    session: AsyncSession, *, completo: bool = False, pausa: float = _PAUSA
+    session: AsyncSession,
+    *,
+    completo: bool = False,
+    pausa: float = _PAUSA,
+    alterar_situacao: bool = True,
 ) -> dict:
-    """Cria no DaVinci os produtos ativos do Bling que ainda não existem aqui."""
+    """Cria no DaVinci os produtos ativos do Bling que ainda não existem aqui.
+
+    `alterar_situacao=False` (botão Atualizar, 17/11/2026): lê a lista inteira
+    e SÓ cria o que falta — não reativa (I→A) nem inativa (A→I) ninguém. O
+    cron diário continua com as duas coisas.
+
+    Produto criado ao mesmo tempo por outro caminho (webhook de estoque,
+    devolução) dá IntegrityError no índice de SKU: desfaz só aquele e conta
+    em `ja_existia`, sem derrubar o resto da lista."""
     resumo = {
         "lidos": 0, "faltando": 0, "criados": 0, "falhas": 0, "reativados": 0,
-        "completo": completo,
+        "ja_existia": 0, "completo": completo,
     }
     integ = await _integracao_bling(session)
     if integ is None:
@@ -218,36 +232,76 @@ async def importar_produtos_novos(
         if not codigo or situacao not in ("A", "ATIVO", ""):
             continue
         if bling_id in ids or codigo.lower() in skus:
-            if completo:
+            if completo and alterar_situacao:
                 resumo["reativados"] += await _reativar(session, bling_id, codigo)
             continue
         resumo["faltando"] += 1
-        res = await bling_product_create.run_auto_create_product_from_bling(
-            session, bling_product_id=bling_id, user_id=integ.user_id
-        )
-        if not res.get("ok"):
-            resumo["falhas"] += 1
-            logger.warning(
-                "produtos_novos_bling_falhou", bling_product_id=bling_id, sku=codigo,
-                erro=res.get("error"),
+        try:
+            res = await bling_product_create.run_auto_create_product_from_bling(
+                session, bling_product_id=bling_id, user_id=integ.user_id
             )
-            continue
-        produto = await session.get(Product, UUID(str(res["product_id"])))
-        if produto is not None:
-            await _garantir_vinculo_bling(
-                session, product=produto, integration=integ, bling_product_id=bling_id
-            )
+            if not res.get("ok"):
+                resumo["falhas"] += 1
+                logger.warning(
+                    "produtos_novos_bling_falhou", bling_product_id=bling_id, sku=codigo,
+                    erro=res.get("error"),
+                )
+                continue
+            produto = await session.get(Product, UUID(str(res["product_id"])))
+            if produto is not None:
+                await _garantir_vinculo_bling(
+                    session, product=produto, integration=integ, bling_product_id=bling_id
+                )
+                ids.add(bling_id)
+                skus.add((produto.sku or "").strip().lower())
+        except IntegrityError:
+            # Outro caminho criou o mesmo produto (ou o vínculo) agora há pouco.
+            await session.rollback()
+            # O rollback expira os objetos da sessão: relê a integração antes
+            # do próximo produto (atributo expirado não carrega sozinho no async).
+            await session.refresh(integ)
+            resumo["ja_existia"] += 1
             ids.add(bling_id)
-            skus.add((produto.sku or "").strip().lower())
+            skus.add(codigo.lower())
+            logger.info("produtos_novos_bling_ja_existia", bling_product_id=bling_id, sku=codigo)
+            continue
         if res.get("created"):
             resumo["criados"] += 1
             criados.append(codigo)
         if pausa:
             await asyncio.sleep(pausa)
 
-    if completo:
+    if completo and alterar_situacao:
         resumo["inativados"] = await _inativar_quem_saiu(session, candidatos)
 
     if resumo["criados"] or resumo["falhas"] or resumo["reativados"] or resumo.get("inativados"):
         logger.info("produtos_novos_bling", **resumo, skus=criados[:50])
+    resumo["skus_criados"] = criados[:50]
     return resumo
+
+
+# Trava dos produtos novos do Bling (ascii "pbln", namespace SYNC do projeto):
+# o tick de 15 min, o completo diário e o botão Atualizar criam os MESMOS
+# produtos — juntos, o segundo caía no índice único de SKU.
+_PRODUTOS_NOVOS_LOCK_KEY = 0x70626C6E
+
+
+async def importar_produtos_novos_com_trava(**kw) -> dict:
+    """`importar_produtos_novos` com a trava 'pbln' (uma rodada por vez).
+    Ocupada → `{'pulado': 'rodada_automatica_em_andamento'}`. A trava fica
+    numa sessão própria e solta assim que a leitura do Bling termina."""
+    from app.db import session_scope
+    from app.services.advisory_lock import SYNC_NAMESPACE
+
+    async with session_scope() as trava:
+        pegou = (
+            await trava.execute(
+                sa_text("SELECT pg_try_advisory_xact_lock(:ns, :k)"),
+                {"ns": SYNC_NAMESPACE, "k": _PRODUTOS_NOVOS_LOCK_KEY},
+            )
+        ).scalar()
+        if not pegou:
+            logger.info("produtos_novos_bling_pulado_trava")
+            return {"pulado": "rodada_automatica_em_andamento"}
+        async with session_scope() as s:
+            return await importar_produtos_novos(s, **kw)

@@ -16,7 +16,7 @@ already linked.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -42,6 +42,7 @@ from app.services.marketplaces.carrefour import CarrefourClient
 from app.services.marketplaces.magalu import MagaluClient
 from app.services.marketplaces.ml import MercadoLivreClient
 from app.services.marketplaces.shopee import ShopeeClient
+from app.services.marketplaces.tiktok import TikTokClient
 
 logger = structlog.get_logger()
 
@@ -69,7 +70,12 @@ def _client_for_listings(session: AsyncSession, integ: Integration):
 
     Bling and Amazon are intentionally not wired here — Bling listings are
     materialized from the `products` table, and Amazon SP-API listings retrieval
-    is out of scope for this phase."""
+    is out of scope for this phase.
+
+    TikTok entra em 17/11/2026 (botão Atualizar): o `list_listings` dele só lê
+    (a busca de produtos é um POST de consulta). O token renovado do TikTok
+    vem em `token_expires_at`, não em `expires_at`: o on_refresh grava as
+    credenciais e não mexe na coluna."""
     creds = decrypt_json(integ.credentials)
 
     async def on_refresh(new_creds: dict) -> None:
@@ -87,6 +93,8 @@ def _client_for_listings(session: AsyncSession, integ: Integration):
         return MagaluClient(creds, on_token_refresh=on_refresh, integration_id=integ.id)
     if integ.platform == IntegrationPlatform.CARREFOUR:
         return CarrefourClient(creds, on_token_refresh=on_refresh, integration_id=integ.id)
+    if integ.platform == IntegrationPlatform.TIKTOK:
+        return TikTokClient(creds, on_token_refresh=on_refresh)
     return None
 
 
@@ -96,8 +104,26 @@ async def _upsert_listing(
     user_id: UUID,
     integ: Integration,
     norm: dict[str, Any],
+    criar_encerrado: bool = True,
+    manter_tipo_ml: bool = False,
 ) -> str:
-    """Returns 'created' | 'updated' | 'skipped'."""
+    """Returns 'created' | 'updated' | 'skipped'.
+
+    `criar_encerrado=False` (botão Atualizar e a rodada da Shopee): anúncio
+    encerrado/excluído que o DaVinci ainda não conhecia não vira linha nova
+    ('skipped'); o que já existe é atualizado normalmente.
+
+    `manter_tipo_ml=True` (botão Atualizar, decisão do dono 17/11/2026): o
+    tipo do anúncio do ML (premium/clássico) não muda — a view da Margem
+    (vw_conciliacao_margens_marketplace) escolhe a conta de preço por ele. Na
+    linha que já existe fica o gravado; na linha NOVA do ML fica NULL.
+    A view escolhe a linha do SKU por `updated_at DESC LIMIT 1` (o LATERAL
+    listing_match, por integration_id+sku+platform): por isso, no ML, a linha
+    que já existe NÃO ganha updated_at novo (senão a ordem da leitura, que no
+    ML não é garantida, trocava premium ↔ clássico a cada clique) e a linha
+    nova entra MAIS VELHA que as outras do mesmo SKU (a de tipo NULL nunca
+    passa na frente). A Flex e a vigia usam `imported_at`, que continua
+    mudando."""
     external_id = (norm.get("external_id") or "").strip()
     if not external_id:
         return "skipped"
@@ -116,15 +142,31 @@ async def _upsert_listing(
     sku = norm.get("sku")
     title = (norm.get("title") or "").strip() or external_id
     status = _coerce_status(norm.get("status"))
+    tipo_fixo = manter_tipo_ml and integ.platform == IntegrationPlatform.ML
 
     if existing is None:
+        if not criar_encerrado and status == ListingStatus.CLOSED:
+            return "skipped"
+        extra: dict[str, Any] = {}
+        if tipo_fixo and sku:
+            mais_velha = (
+                await session.execute(
+                    select(func.min(Listing.updated_at)).where(
+                        Listing.integration_id == integ.id,
+                        Listing.sku == sku,
+                        Listing.platform == integ.platform,
+                    )
+                )
+            ).scalar()
+            if mais_velha is not None:
+                extra["updated_at"] = mais_velha - timedelta(seconds=1)
         row = Listing(
             user_id=user_id,
             integration_id=integ.id,
             platform=integ.platform,
             external_id=external_id,
             sku=sku,
-            listing_type=norm.get("listing_type"),
+            listing_type=None if tipo_fixo else norm.get("listing_type"),
             title=title,
             description=norm.get("description"),
             price=norm.get("price"),
@@ -134,12 +176,14 @@ async def _upsert_listing(
             thumbnail_url=norm.get("thumbnail_url"),
             raw_data=norm.get("raw") or {},
             imported_at=_now(),
+            **extra,
         )
         session.add(row)
         return "created"
 
     existing.sku = sku
-    existing.listing_type = norm.get("listing_type")
+    if not tipo_fixo:
+        existing.listing_type = norm.get("listing_type")
     existing.title = title
     existing.description = norm.get("description")
     existing.price = norm.get("price")
@@ -149,6 +193,10 @@ async def _upsert_listing(
     existing.thumbnail_url = norm.get("thumbnail_url")
     existing.raw_data = norm.get("raw") or {}
     existing.imported_at = _now()
+    if tipo_fixo:
+        # SET updated_at = listings.updated_at: o onupdate do TimestampMixin
+        # não dispara (a linha escolhida pela Margem não muda).
+        existing.updated_at = Listing.updated_at
     return "updated"
 
 
@@ -171,6 +219,19 @@ async def _create_product_links_for_matched(session: AsyncSession) -> int:
     Schema vem de DATABASE_SCHEMA (config confiável, nunca input de usuário):
     o "davinci." hardcoded ignorava o search_path do engine de teste e fazia
     os TESTES gravarem product_links em PRODUÇÃO.
+
+    Filtro de 17/11/2026 (pré-requisito do botão Atualizar, que deixa a lista
+    do ML fresca): a linha da lista é UMA por anúncio, mas o vínculo é por
+    VARIAÇÃO. Só se promove o que a linha diz sem adivinhar — anúncio sem
+    variação (ML sem `variations`, Shopee sem `model`), ainda vivo, de conta
+    não arquivada, das plataformas que a lista representa bem (ML, Shopee,
+    Magalu e Carrefour) e, no ML/Shopee/Carrefour, com o SKU da linha igual
+    ao do produto (o product_id da linha pode ser velho). TikTok e Amazon
+    ficam com o Vincular, que lê a conta ao vivo. A Shopee sem modelo usa a
+    variação '0', a chave que o Vincular grava. O Carrefour NÃO tem leitor no
+    Vincular (cai em 'deferred_to_listings_cron'): esta promoção é o único
+    caminho que cria o vínculo dele — a oferta do Mirakl não tem variação
+    (variation_id NULL, external_id = o da linha).
     """
     schema = get_settings().database_schema
     sql = sa_text(
@@ -185,10 +246,26 @@ async def _create_product_links_for_matched(session: AsyncSession) -> int:
                      ELSE l.external_id END AS link_external_id,
                 CASE WHEN l.platform = 'shopee' AND l.external_id ~ '^[0-9]+_[0-9]+$'
                      THEN split_part(l.external_id, '_', 2)
+                     WHEN l.platform = 'shopee' THEN '0'
                      ELSE NULL END AS link_variation_id
             FROM "{schema}".listings l
             JOIN "{schema}".integrations i ON i.id = l.integration_id
+            JOIN "{schema}".products p ON p.id = l.product_id
             WHERE l.product_id IS NOT NULL
+              AND i.archived_at IS NULL
+              AND l.platform IN ('ml', 'shopee', 'magalu', 'carrefour')
+              AND l.status <> 'closed'
+              -- ML: só item SEM variações (o vínculo de variação é do Vincular)
+              AND (l.platform <> 'ml' OR COALESCE(jsonb_array_length(
+                    CASE WHEN jsonb_typeof(l.raw_data -> 'variations') = 'array'
+                         THEN l.raw_data -> 'variations' END), 0) = 0)
+              -- Shopee: só linha sem modelo
+              AND (l.platform <> 'shopee' OR NOT (l.raw_data ? 'model'))
+              -- ML/Shopee/Carrefour: o SKU da linha é o do produto (minúsculas,
+              -- espaços juntados — a régua do _norm_sku do Vincular)
+              AND (l.platform NOT IN ('ml', 'shopee', 'carrefour') OR
+                   lower(btrim(regexp_replace(COALESCE(l.sku, ''), '\\s+', ' ', 'g')))
+                   = lower(btrim(regexp_replace(COALESCE(p.sku, ''), '\\s+', ' ', 'g'))))
               -- Manual mappings can target any status; automatic promotion
               -- must not recreate an unpublished Magalu predecessor.
               AND (l.platform <> 'magalu' OR (
@@ -421,18 +498,40 @@ _SHOPEE_SWEEP_LOCK_KEY = 0x6C73686F  # ascii "lsho"
 async def importar_anuncios_conta(session: AsyncSession, integ: Integration) -> dict[str, int]:
     """Lê TODOS os anúncios da conta pela API (ativos, pausados e banidos) e
     atualiza a lista (`listings`). Grava de 25 em 25 — uma falha no meio
-    não perde o que já foi lido."""
+    não perde o que já foi lido.
+
+    Desde 17/11/2026 (botão Atualizar): encerrado que o DaVinci não conhecia
+    não vira linha ('skipped'), o tipo do anúncio do ML não muda (Margem) e
+    cada anúncio conta UMA vez — o leitor manda uma linha por variação, todas
+    na mesma linha da lista. `leitura_completa` só vem quando o cliente diz
+    (o ML marca buraco na paginação)."""
     client = _client_for_listings(session, integ)
     if client is None:
         return {"created": 0, "updated": 0, "skipped": 0}
-    resumo = {"created": 0, "updated": 0, "skipped": 0}
+    resumo: dict[str, Any] = {"created": 0, "updated": 0, "skipped": 0}
+    vistos: set[str] = set()
     n = 0
     async for norm in client.list_listings():
-        resumo[await _upsert_listing(session, user_id=integ.user_id, integ=integ, norm=norm)] += 1
+        resultado = await _upsert_listing(
+            session,
+            user_id=integ.user_id,
+            integ=integ,
+            norm=norm,
+            criar_encerrado=False,
+            manter_tipo_ml=True,
+        )
+        ext = (norm.get("external_id") or "").strip()
+        if not ext or ext not in vistos:
+            resumo[resultado] += 1
+            if ext:
+                vistos.add(ext)
         n += 1
         if n % 25 == 0:
             await session.commit()
     await session.commit()
+    completa = getattr(client, "listagem_completa", None)
+    if completa is not None:
+        resumo["leitura_completa"] = bool(completa)
     return resumo
 
 

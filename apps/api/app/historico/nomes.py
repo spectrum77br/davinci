@@ -82,6 +82,8 @@ API: dict[str, str] = {
     "/api/pricing/store-info": "Cadastros › Lojas",
     "/api/pricing": "Tabela de preços",
     "/api/products": "Produtos",
+    # Botões da tela Produtos (17/11/2026): Atualizar e Organizar.
+    "/api/produtos": "Produtos",
     "/api/product-links": "Produtos",
     "/api/anuncio": "Produtos",
     "/api/sync": "Produtos",
@@ -203,6 +205,20 @@ ACOES: dict[tuple[str, str], str] = {
     ("POST", "/api/email-padroes/{padrao_id}/enviar-teste"): "enviou e-mail de teste",
     ("POST", "/api/metrics/reset"): "zerou as métricas",
     ("POST", "/api/product-links/remover-mortos"): "mandou remover os vínculos mortos",
+    # Botões da tela Produtos (17/11/2026). O Organizar fica fora do gatilho
+    # (a marca já é a trilha): o evento vem daqui, com o corpo (chaves/lote).
+    (
+        "POST",
+        "/api/produtos/atualizar",
+    ): "disparou o Atualizar da tela Produtos (produtos novos do Bling e anúncios)",
+    (
+        "POST",
+        "/api/produtos/organizar/aplicar",
+    ): "ocultou itens inválidos da tela Produtos (Organizar)",
+    (
+        "POST",
+        "/api/produtos/organizar/reexibir",
+    ): "mostrou de novo itens ocultos da tela Produtos (Organizar)",
     # Desde 25/09 baixar o certificado é POST com a senha dele no corpo.
     (
         "POST",

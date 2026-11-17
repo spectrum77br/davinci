@@ -47,7 +47,8 @@ from app.schemas.sync import (
 from app.services.advisory_lock import (
     SYNC_NAMESPACE,
     _user_lock_key,
-    mass_sync_active,
+    massa_em_andamento,
+    recusar_se_massa_em_andamento,
 )
 from app.services.anuncio_lookup import lookup_anuncio, vincular_anuncio
 from app.services.job_details import append_job_detail, load_job_details_tail
@@ -69,21 +70,31 @@ async def enqueue_sync_all(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "edit"))],
 ) -> JobCreatedOut:
-    # Exclusividade "só outro massa": recusa se já há um Sincronizar Todos ou
-    # Vincular Automático em andamento p/ este usuário. O sync individual por
-    # SKU NÃO passa por aqui (continua livre).
-    active = await mass_sync_active(session, user.id)
-    if active is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={"code": "sync_already_running", **active},
+    # Exclusividade "só outro massa", GLOBAL (17/11/2026): recusa se já há
+    # Sincronizar, Vincular, Atualizar, a noturna ou a varredura das 10h em
+    # andamento, de QUALQUER pessoa. O sync individual por SKU NÃO passa por
+    # aqui (continua livre).
+    await recusar_se_massa_em_andamento(session)
+    # Usuário de equipe (Londres/Israel/Marrocos) só envia para as contas da
+    # equipe: o que veio no corpo é cortado pelo escopo, e "nenhuma" (null)
+    # vira o escopo inteiro. Admin e quem não tem equipe: igual a antes (null =
+    # todas as contas).
+    integration_ids = body.integration_ids
+    escopo = await resolve_team_scope(session, user)
+    if not escopo.unrestricted:
+        integration_ids = (
+            [i for i in integration_ids if i in escopo.integration_ids]
+            if integration_ids
+            else sorted(escopo.integration_ids, key=str)
         )
+        if not integration_ids:
+            raise HTTPException(400, detail={"code": "sem_contas"})
     job = BackgroundJob(
         type=BackgroundJobType.SYNC_ALL,
         status=BackgroundJobStatus.PENDING,
         created_by=user.id,
         payload={
-            "integration_ids": [str(i) for i in (body.integration_ids or [])],
+            "integration_ids": [str(i) for i in (integration_ids or [])],
             "product_ids": [str(p) for p in (body.product_ids or [])],
             "include_all_stock": bool(body.include_all_stock),
             "force": bool(body.force),
@@ -99,7 +110,7 @@ async def enqueue_sync_all(
         str(user.id),
         body.product_ids and [str(p) for p in body.product_ids],
         bool(body.include_all_stock),
-        body.integration_ids and [str(i) for i in body.integration_ids],
+        integration_ids and [str(i) for i in integration_ids],
         bool(body.force),
     )
     if arq is not None:
@@ -217,11 +228,37 @@ async def sync_active(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_active_user)],
 ) -> dict:
-    """Existe um sync em massa (Sincronizar Todos / Vincular Automático) em
-    andamento p/ este usuário? O front consulta no load + a cada ~10s pra
-    desabilitar os botões de massa mesmo quando outro cliente/aba iniciou."""
-    active = await mass_sync_active(session, user.id)
-    return {"active": active is not None, **(active or {})}
+    """Existe uma massa (Sincronizar, Vincular, Atualizar, a noturna ou a
+    varredura das 10h) em andamento, de QUALQUER pessoa? O front consulta no
+    load + a cada ~10s pra desabilitar os botões de massa e dizer o que está
+    rodando, quem disparou e desde quando.
+
+    `meu` (17/11/2026): a massa é de quem pergunta — a tela de Produtos, ao
+    abrir de novo (recarregou, outra aba), volta a acompanhar o andamento do
+    job dela."""
+    active = await massa_em_andamento(session)
+    vazio = {
+        "job_id": None,
+        "type": None,
+        "tipo": None,
+        "status": None,
+        "gatilho": None,
+        "quem": None,
+        "desde": None,
+        "rotulo": None,
+        "meu": False,
+    }
+    meu = False
+    if active is not None and active.get("job_id"):
+        dono = (
+            await session.execute(
+                select(BackgroundJob.created_by).where(
+                    BackgroundJob.id == UUID(active["job_id"])
+                )
+            )
+        ).scalar_one_or_none()
+        meu = dono == user.id
+    return {"active": active is not None, **vazio, **(active or {}), "meu": meu}
 
 
 @router.post("/sync/product/{product_id}", response_model=JobOut)

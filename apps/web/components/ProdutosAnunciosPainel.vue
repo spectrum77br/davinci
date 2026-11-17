@@ -4,8 +4,10 @@
 // do departamento escolhido (Celular · Mala · Eletro · Sem departamento). Os
 // cartões contam o departamento inteiro (vêm da API em `resumo` — antes eram
 // contados só na página de 50). "Solicitações de anúncio" saiu e não veio
-// (a tabela e a API continuam). Os botões importar / recarregar ficam no
-// cabeçalho da página: ela chama openImport / refreshAll daqui (defineExpose).
+// (a tabela e a API continuam). O "recarregar" fica no cabeçalho da página:
+// ela chama refreshAll daqui (defineExpose). O "importar" de uma conta por vez
+// saiu da tela em 17/11/2026 (quem lê as listas é o botão Atualizar da página);
+// o diálogo continua aqui, sem botão.
 import {
   Activity,
   ChevronDown,
@@ -103,6 +105,9 @@ const PLATFORM_LABEL: Record<string, string> = {
   shopee: 'Shopee',
   amazon: 'Amazon',
   carrefour: 'Carrefour',
+  // Desde 17/11/2026 o "Atualizar" lê também a lista do TikTok e da Magalu.
+  tiktok: 'TikTok',
+  magalu: 'Magalu',
 }
 
 const STATUS_LABEL: Record<Listing['status'], string> = {
@@ -346,6 +351,9 @@ defineExpose({ openImport, refreshAll, importableIntegrations })
         <option value="ml">Mercado Livre</option>
         <option value="shopee">Shopee</option>
         <option value="amazon">Amazon</option>
+        <option value="tiktok">TikTok</option>
+        <option value="magalu">Magalu</option>
+        <option value="carrefour">Carrefour</option>
         <option value="bling">Bling</option>
       </select>
       <select
@@ -474,7 +482,7 @@ defineExpose({ openImport, refreshAll, importableIntegrations })
           </template>
           <tr v-if="items.length === 0">
             <td colspan="10" class="py-8 text-center text-sm text-muted-foreground">
-              {{ loading ? 'carregando…' : 'Nenhum anúncio. Use "importar" para puxar do marketplace.' }}
+              {{ loading ? 'carregando…' : 'Nenhum anúncio. Use "Atualizar" para ler as listas dos marketplaces.' }}
             </td>
           </tr>
         </tbody>

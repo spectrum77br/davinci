@@ -1,6 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 import structlog
@@ -10,7 +10,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
-from app.deps.auth import require_permission, require_permission_any, user_scope
+from app.deps.auth import (
+    require_admin,
+    require_permission,
+    require_permission_any,
+    user_scope,
+)
 from app.deps.team_scope import resolve_team_scope
 from app.models import (
     Integration,
@@ -43,7 +48,7 @@ from app.schemas.products import (
 )
 from app.security.cipher import decrypt_json
 from app.services import departamento as dep_svc
-from app.services import vinculo_saude
+from app.services import organizar, vinculo_saude
 from app.services.marketplaces.bling import (
     BLING_PRODUCTS_PAGE_SIZE,
     BlingClient,
@@ -148,12 +153,28 @@ async def list_products(
         "segmento do produto (13/11/2026); sem segmento, pela categoria do Bling ou a "
         "família do SKU (15/11/2026)",
     ),
+    ocultos: Literal["incluir", "esconder", "so"] = Query(
+        "incluir",
+        description="Produtos › Organizar (17/11/2026): esconder = tira o que o ADM "
+        "ocultou (produto, vínculos, faixa de saúde e ?vinculos=); so = só os produtos "
+        "ocultos. O padrão (incluir) é o de antes: legendas e o seletor de produto da "
+        "aba Anúncios não mudam.",
+    ),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
 ) -> ProductPage:
     departamento = dep_svc.validar(departamento)
     stmt = select(Product).where(user_scope(Product, user))
     count_stmt = select(func.count()).select_from(Product).where(user_scope(Product, user))
+    # Organizar: só a TELA deixa de ver; a marca é conferida na leitura (o
+    # produto que volta a valer reaparece sozinho).
+    esconder = ocultos == "esconder"
+    if ocultos != "incluir":
+        cond_oculto = organizar.produto_oculto()
+        if esconder:
+            cond_oculto = ~cond_oculto
+        stmt = stmt.where(cond_oculto)
+        count_stmt = count_stmt.where(cond_oculto)
     # Departamento (Organização do DaVinci, item 2): Produtos se divide como a
     # Tabela de Preços. Sem o parâmetro, nada muda.
     cond_dep = None
@@ -205,15 +226,17 @@ async def list_products(
         stmt = stmt.where(cond)
         count_stmt = count_stmt.where(cond)
     if vinculos in _FILTROS_VINCULO:
-        cond = (
-            select(ProductLink.id)
-            .where(
-                ProductLink.product_id == Product.id,
-                _vinculo_visivel(),
-                _FILTROS_VINCULO[vinculos](),
-            )
-            .exists()
-        )
+        cond_vinc = [
+            ProductLink.product_id == Product.id,
+            _vinculo_visivel(),
+            _FILTROS_VINCULO[vinculos](),
+        ]
+        # Só a marca do próprio vínculo: o produto oculto já saiu da lista pelo
+        # ~produto_oculto() lá em cima (com o OR das duas marcas aqui dentro o
+        # EXISTS virava SubPlan por linha — 1,2 s com 7 mil produtos).
+        if esconder:
+            cond_vinc.append(~organizar.vinculo_marcado())
+        cond = select(ProductLink.id).where(*cond_vinc).exists()
         stmt = stmt.where(cond)
         count_stmt = count_stmt.where(cond)
 
@@ -233,16 +256,18 @@ async def list_products(
         archived_integs = select(Integration.id).where(
             Integration.archived_at.is_not(None)
         )
+        cond_links = [
+            ProductLink.product_id.in_(ids),
+            or_(
+                ProductLink.integration_id.is_(None),
+                ProductLink.integration_id.not_in(archived_integs),
+            ),
+        ]
+        # As linhas já são de produtos visíveis: basta a marca do vínculo.
+        if esconder:
+            cond_links.append(~organizar.vinculo_marcado())
         links = (
-            await session.execute(
-                select(ProductLink).where(
-                    ProductLink.product_id.in_(ids),
-                    or_(
-                        ProductLink.integration_id.is_(None),
-                        ProductLink.integration_id.not_in(archived_integs),
-                    ),
-                )
-            )
+            await session.execute(select(ProductLink).where(*cond_links))
         ).scalars().all()
     else:
         links = []
@@ -261,6 +286,11 @@ async def list_products(
     # o mesmo departamento) apaga exatamente esses N.
     if cond_dep is not None:
         escopo_links.append(cond_dep)
+    # Com ocultos=esconder a faixa conta só o que a tela mostra: sem a marca
+    # do vínculo e sem a do produto (o Product do join).
+    if esconder:
+        escopo_links.append(~organizar.vinculo_marcado())
+        escopo_links.append(~organizar.produto_oculto())
     contagem = (
         await session.execute(
             select(
@@ -310,10 +340,11 @@ async def contar_departamentos(
         return dep_svc.somar(linhas.all())
 
     if _pode_ver(user, "produtos"):
+        # Organizar: os números das abas batem com a lista (ocultos=esconder).
         stmt = (
             select(dep_svc.expressao_departamento(idx).label("dep"))
             .select_from(Product)
-            .where(user_scope(Product, user))
+            .where(user_scope(Product, user), ~organizar.produto_oculto())
         )
         if not scope.unrestricted:
             # Mesmo escopo de equipe da listagem (list_products).
@@ -333,7 +364,7 @@ async def contar_departamentos(
             select(dep_svc.expressao_departamento(idx).label("dep"))
             .select_from(Listing)
             .outerjoin(Product, Product.id == Listing.product_id)
-            .where(user_scope(Listing, user))
+            .where(user_scope(Listing, user), ~organizar.anuncio_oculto())
         )
         if not scope.unrestricted:
             # Mesmo escopo de equipe da listagem (list_listings).
@@ -732,7 +763,9 @@ async def bulk_delete_product_links(
 async def remover_vinculos_mortos(
     request: Request,
     session: Annotated[AsyncSession, Depends(get_session)],
-    user: Annotated[User, Depends(require_permission("produtos", "delete"))],
+    # 17/11/2026 (decisão 3 do dono): o botão saiu da tela — fica só o
+    # ORGANIZAR (esconde, reversível). O endpoint continua, só para ADM.
+    user: Annotated[User, Depends(require_admin)],
     departamento: str | None = Query(
         None,
         description="celular | mala | eletro | sem — só os mortos dos produtos "
@@ -748,7 +781,14 @@ async def remover_vinculos_mortos(
     departamento = dep_svc.validar(departamento)
     scope = await resolve_team_scope(session, user)
     integ = None if scope.unrestricted else [str(i) for i in scope.integration_ids]
-    cond = [ProductLink.morto_desde.is_not(None), _vinculo_visivel()]
+    # O que o ORGANIZAR ocultou (marca ativa, dele ou do produto) não é
+    # apagado: o job recebe pular_ocultos=True e pula o mesmo — a contagem bate
+    # com o que sai. A limpeza de 30 dias da varredura não pula (vinculo_saude).
+    cond = [
+        ProductLink.morto_desde.is_not(None),
+        _vinculo_visivel(),
+        ~vinculo_saude.com_marca_do_organizar(),
+    ]
     if integ is not None:
         cond.append(ProductLink.integration_id.in_(scope.integration_ids))
     if departamento:
@@ -761,7 +801,9 @@ async def remover_vinculos_mortos(
         pool = await get_arq_pool()
         # O departamento só vai quando existe: o job antigo continua igual.
         extra = {"departamento": departamento} if departamento else {}
-        await pool.enqueue_job("remover_vinculos_mortos_run", integ, True, **extra)
+        await pool.enqueue_job(
+            "remover_vinculos_mortos_run", integ, True, pular_ocultos=True, **extra
+        )
     logger.info(
         "vinculos_mortos_remocao_agendada",
         actor_user_id=str(user.id),

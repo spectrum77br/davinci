@@ -56,7 +56,8 @@ def test_worker_sync_registra_os_4_jobs_de_massa():
     preços da Tabela (02/11/2026), que só existe nesta fila (não entra no
     fallback da default)."""
     names = _fn_names(WorkerSettingsSync.functions)
-    assert names == _SYNC_FN_NAMES | {"conferir_precos_run"}
+    # + o botão Atualizar de Produtos (17/11/2026), também só desta fila.
+    assert names == _SYNC_FN_NAMES | {"conferir_precos_run", "atualizar_run"}
 
 
 def test_worker_sync_consome_da_fila_correta():
@@ -80,6 +81,20 @@ def test_worker_sync_config_de_pool_e_timeout():
         if (getattr(f, "name", None) or getattr(f, "__name__", "")) == "sync_all_run"
     )
     assert getattr(sync_all_fn, "timeout_s", None) == 10800
+    # Botão Vincular (17/11/2026): 1h de teto — 34+ contas lidas ao vivo
+    # passavam dos 30 min da classe nos dias de Amazon lenta.
+    auto_link_fn = next(
+        f for f in WorkerSettingsSync.functions
+        if (getattr(f, "name", None) or getattr(f, "__name__", "")) == "auto_link_run"
+    )
+    assert getattr(auto_link_fn, "timeout_s", None) == 3600
+    # Botão Atualizar (17/11/2026): listas + o Vincular do fim + a espera do
+    # Flex não cabem na 1h do Vincular sozinho.
+    atualizar_fn = next(
+        f for f in WorkerSettingsSync.functions
+        if (getattr(f, "name", None) or getattr(f, "__name__", "")) == "atualizar_run"
+    )
+    assert getattr(atualizar_fn, "timeout_s", None) == 5400
 
 
 def test_default_ainda_tem_os_4_jobs_como_fallback():

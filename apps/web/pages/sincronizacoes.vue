@@ -141,13 +141,24 @@ function fmtRelative(iso: string | null): string {
 function fmtPayloadHint(j: Job): string {
   const p = j.payload || {}
   const r = j.result || {}
+  // Botão Atualizar da tela Produtos (17/11/2026): grava a lista de contas
+  // (integration_ids), não uma conta só.
+  if (p.trigger === 'botao_atualizar') {
+    const n = Array.isArray(p.integration_ids) ? p.integration_ids.length : 0
+    return `Atualizar: ${n} conta${n === 1 ? '' : 's'}`
+  }
   if (j.type === 'import_listings') {
     return `integ ${(p.integration_id as string | undefined)?.slice(0, 8) ?? '?'}`
   }
   if (j.type === 'sync_all') {
     const prods = (p.total_products as number | undefined) ?? null
+    // Produtos que deram erro inteiro (17/11/2026): o resumo do Sincronizar
+    // conta e lista os primeiros SKUs.
+    const falhas = Number(r.falhas_produto ?? 0) || 0
+    const amostra = Array.isArray(r.falhas_amostra) ? (r.falhas_amostra as string[]) : []
     const tail = r.total_links != null
-      ? ` · ${r.ok ?? 0} ok · ${r.fatal ?? 0} fatal · ${r.skipped ?? 0} skip`
+      ? ` · ${r.ok ?? 0} ok · ${r.fatal ?? 0} fatal · ${r.skipped ?? 0} skip` +
+        (falhas ? ` · ${falhas} produto(s) com erro${amostra.length ? `: ${amostra.slice(0, 5).join(', ')}${falhas > 5 ? '…' : ''}` : ''}` : '')
       : ''
     if (prods != null) return `${prods} produtos${tail}`
     return tail.trim().replace(/^· /, '')

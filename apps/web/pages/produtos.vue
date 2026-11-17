@@ -2,7 +2,7 @@
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import {
   Plus, Trash2, Download, RefreshCw, ChevronDown, ChevronRight, X, Loader2, Zap, Upload, Search, Tags, Link2,
-  Smartphone, Briefcase, CircleDashed, Package, Megaphone,
+  Smartphone, Briefcase, CircleDashed, Package, Megaphone, EyeOff, Eye, CloudDownload,
 } from 'lucide-vue-next'
 import type ProdutosAnunciosPainel from '~/components/ProdutosAnunciosPainel.vue'
 
@@ -18,7 +18,7 @@ definePageMeta({
 
 type Integration = {
   id: string
-  platform: 'bling' | 'ml' | 'shopee' | 'amazon'
+  platform: 'bling' | 'ml' | 'shopee' | 'amazon' | 'tiktok' | 'magalu' | 'carrefour' | 'temu'
   name: string
   store_id: string | null
 }
@@ -113,11 +113,14 @@ type Job = {
   error: string | null
   started_at: string | null
   finished_at: string | null
+  created_at?: string | null
 }
 
 const { api } = useApi()
 const canEdit = useCan('produtos', 'edit')
 const canDelete = useCan('produtos', 'delete')
+// Organizar (esconder da tela o que não vale mais) é só do administrador.
+const isAdmin = useIsAdmin()
 
 // ── Departamento + aba (Organização do DaVinci, 13/11/2026, item 2) ─────────
 // Mesmo padrão da Tabela de Preços: primeiro o departamento (Celular · Mala ·
@@ -133,7 +136,6 @@ const route = useRoute()
 const router = useRouter()
 const podeProdutos = useCan('produtos', 'view')
 const podeAnuncios = useCan('anuncios', 'view')
-const podeEditarAnuncios = useCan('anuncios', 'edit')
 
 type Departamento = 'celular' | 'mala' | 'eletro' | 'sem'
 type Aba = 'produtos' | 'anuncios'
@@ -213,8 +215,6 @@ const stockFilter = ref<'' | 'low' | 'ok' | 'zero'>('')
 // Saúde dos vínculos (28/09/2026): mortos, SKU do anúncio diferente, erro.
 const filtroVinculos = ref<'' | 'mortos' | 'sku' | 'erro'>('')
 const saude = ref<SaudeVinculos>({ mortos: 0, sku_divergente: 0, erro: 0 })
-const confirmandoRemoverMortos = ref(false)
-const removendoMortos = ref(false)
 const expanded = ref<Set<string>>(new Set())
 const selected = ref<Set<string>>(new Set())
 // Checked product_links in the expanded rows (Item 4 — batch link delete).
@@ -244,6 +244,10 @@ function mobileLinksFor(product: Product): ProductLink[] {
 const mobilePlatformLabels: Record<string, string> = {
   bling: 'Bling', ml: 'Mercado Livre', shopee: 'Shopee', amazon: 'Amazon',
   tiktok: 'TikTok', magalu: 'Magalu', temu: 'Temu', aliexpress: 'AliExpress',
+  carrefour: 'Carrefour',
+}
+function nomePlataforma(p: string | null | undefined): string {
+  return (p && mobilePlatformLabels[p]) || p || ''
 }
 
 // Busca por ID do anúncio (estado declarado aqui em cima porque `refreshAll`
@@ -279,8 +283,12 @@ function dismissToast(id: number) {
 }
 
 const showImport = ref(false)
+// Barra comum às duas abas (17/11/2026): Atualizar → Vincular → Sincronizar,
+// mais o Organizar (só ADM). showAutoLink = Vincular; showSyncAll = Sincronizar.
+const showAtualizar = ref(false)
 const showAutoLink = ref(false)
 const showSyncAll = ref(false)
+const showOrganizar = ref(false)
 // Força a sincronização em massa a furar as travas do marketplace (zero-guard
 // da B1 + short-circuit de pausado/encerrado), reativando anúncios que o ML
 // pausou sozinho ao zerar o estoque. Igual ao sync individual por produto.
@@ -371,8 +379,11 @@ async function refreshAll() {
     await carregarDepartamentos()
     const dept = departamento.value
     const [pg, integ, settings, segs] = await Promise.all([
+      // ocultos=esconder: o que o ADM escondeu no "Organizar" sai desta lista
+      // (e da faixa "Vínculos"). Só a tela pede isso; robô nenhum lê.
       api<ProductPage>(`/api/products?page=${page.value}&page_size=${pageSize}` +
         `&departamento=${dept}` +
+        `&ocultos=esconder` +
         (buscaProdutos ? `&search=${encodeURIComponent(buscaProdutos)}` : '') +
         (filtroIntegration.value ? `&integration_id=${filtroIntegration.value}` : '') +
         (stockFilter.value === 'low' ? `&low_stock=true` : '') +
@@ -400,6 +411,20 @@ async function refreshAll() {
 if (aba.value === 'produtos') await refreshAll()
 else await carregarDepartamentos()
 
+// As contas (para os diálogos Atualizar / Vincular / Sincronizar) não podem
+// depender da aba Produtos: quem entra direto em ?aba=anuncios (o /anuncios
+// antigo redireciona para lá) abria os diálogos sem nenhuma conta.
+async function carregarContas() {
+  try {
+    integrations.value = await api<Integration[]>('/api/integrations')
+  } catch (e: any) {
+    error.value = e?.data?.detail?.code || e?.message || 'erro'
+  }
+}
+onMounted(() => {
+  if (!integrations.value.length) void carregarContas()
+})
+
 // ?dept=sem com o "Sem departamento" já vazio abre o Celular; a URL acompanha,
 // para a tela não pular de volta quando aparecer algo novo para classificar.
 function acertarUrlDoDepartamento() {
@@ -417,7 +442,6 @@ function aoTrocarDepartamento() {
   selected.value = new Set()
   selectedLinks.value = new Set()
   expanded.value = new Set()
-  confirmandoRemoverMortos.value = false
   // "— sem segmento" vale em todo departamento (o reserva põe produto sem
   // segmento em Celular, Mala e Eletro); um segmento de outro departamento, não.
   if (
@@ -482,13 +506,42 @@ const integrationGroups = computed(() => {
 })
 
 // Contas de marketplace ordenadas por plataforma e, dentro dela, por nome —
-// usada nos diálogos "Vincular Automático" e "Sincronizar Todos".
+// usada nos diálogos "Vincular" e "Sincronizar".
 const marketplaceIntegrationsSorted = computed(() =>
   [...marketplaceIntegrations.value].sort((a, b) => {
     const p = (a.platform as string).localeCompare(b.platform as string)
     return p !== 0 ? p : cmpIntegrationName(a, b)
   }),
 )
+
+// Quem tem leitor em cada botão (o servidor monta a lista de verdade; aqui é
+// só para a prévia mostrar as mesmas contas). Atualizar lê a LISTA de
+// anúncios; Vincular lê os anúncios ao vivo para ligar ao produto.
+const PLATAFORMAS_ATUALIZAR = ['ml', 'shopee', 'tiktok', 'magalu', 'carrefour']
+const PLATAFORMAS_VINCULAR = ['ml', 'shopee', 'tiktok', 'amazon', 'magalu']
+const contasVincular = computed(() =>
+  marketplaceIntegrationsSorted.value.filter((i) => PLATAFORMAS_VINCULAR.includes(i.platform)))
+type GrupoContas = { platform: string; label: string; nomes: string[] }
+function agruparContas(lista: Integration[], ordem: string[]): GrupoContas[] {
+  const grupos: Record<string, string[]> = {}
+  for (const i of lista) (grupos[i.platform] ??= []).push((i.name || '').trim())
+  return Object.keys(grupos)
+    .sort((a, b) => (ordem.indexOf(a) + 1 || 99) - (ordem.indexOf(b) + 1 || 99) || a.localeCompare(b))
+    .map((p) => ({
+      platform: p,
+      label: nomePlataforma(p),
+      nomes: grupos[p].sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' })),
+    }))
+}
+const contasAtualizarPorPlataforma = computed(() => agruparContas(
+  marketplaceIntegrations.value.filter((i) => PLATAFORMAS_ATUALIZAR.includes(i.platform)), PLATAFORMAS_ATUALIZAR))
+const qtdContasAtualizar = computed(() =>
+  contasAtualizarPorPlataforma.value.reduce((n, g) => n + g.nomes.length, 0))
+// Plataformas que ficam fora de cada botão, para a prévia dizer o porquê.
+const plataformasForaDoAtualizar = computed(() => agruparContas(
+  marketplaceIntegrations.value.filter((i) => !PLATAFORMAS_ATUALIZAR.includes(i.platform)), []))
+const plataformasForaDoVincular = computed(() => agruparContas(
+  marketplaceIntegrations.value.filter((i) => !PLATAFORMAS_VINCULAR.includes(i.platform)), []))
 
 type MarketCol = 'shopee' | 'amazon' | 'ml_classico' | 'ml_premium' | 'tiktok' | 'magalu'
 
@@ -526,6 +579,9 @@ function hasIntegrationsForCol(col: MarketCol): boolean {
 }
 
 function manualLink(_p: Product, col: MarketCol) {
+  // Com uma massa rodando (ex.: o Atualizar minimizado), o diálogo mostraria o
+  // andamento DELA como se fosse dele: avisa e não abre.
+  if (avisarSeMassaRodando()) return
   // Backend não expõe endpoint de criação manual de link.
   // Pré-selecionamos as integrações dessa plataforma no dialog de auto-link.
   const platform = col === 'amazon' ? 'amazon' : 'tiktok'
@@ -533,6 +589,7 @@ function manualLink(_p: Product, col: MarketCol) {
     marketplaceIntegrations.value.filter((i) => (i.platform as string) === platform).map((i) => i.id),
   )
   activeJob.value = null
+  avisoMassa.value = null
   showAutoLink.value = true
 }
 
@@ -796,32 +853,9 @@ function dicaVinculo(p: Product, l: ProductLink): string {
   return linhas.join('\n')
 }
 // A saúde dos vínculos (faixa "Vínculos: N mortos…") é do departamento cuja
-// lista está na tela; o "Remover os N mortos" apaga só os dele.
-const departamentoDaSaude = computed<Departamento>(() => produtosCarregadosDe.value ?? departamento.value)
-const nomeDepartamentoDaSaude = computed(() => departamentoDaSaude.value === 'sem'
-  ? 'produtos sem departamento'
-  : DEPARTAMENTOS.find((d) => d.value === departamentoDaSaude.value)?.label ?? '')
-async function removerMortos() {
-  removendoMortos.value = true
-  try {
-    const r = await api<{ quantidade: number }>(
-      `/api/product-links/remover-mortos?departamento=${departamentoDaSaude.value}`,
-      { method: 'POST' },
-    )
-    pushToast({
-      kind: 'success',
-      title: `Removendo ${r.quantidade.toLocaleString('pt-BR')} vínculo(s) morto(s)`,
-      lines: ['Em segundo plano — em instantes somem da lista. Eles já não recebem estoque.'],
-    }, 10000)
-    confirmandoRemoverMortos.value = false
-    if (filtroVinculos.value === 'mortos') filtroVinculos.value = ''
-    await refreshAll()
-  } catch (e: any) {
-    pushToast({ kind: 'error', title: 'Não deu para remover os vínculos mortos', lines: [e?.data?.detail?.code || e?.message || 'erro'] }, 15000)
-  } finally {
-    removendoMortos.value = false
-  }
-}
+// lista está na tela. O "Remover os N mortos" saiu da tela (decisão do dono,
+// 17/11/2026): para tirar os mortos da frente, o ADM usa o Organizar, que só
+// esconde e dá para desfazer.
 
 async function deleteLink(id: string) {
   if (!confirm('Remover link?')) return
@@ -1360,11 +1394,16 @@ function linkedIntegrationsFor(p: Product): Integration[] {
   return marketplaceIntegrations.value.filter((i) => linkedIds.has(i.id))
 }
 
-function openSyncAllDialog() {
+async function openSyncAllDialog() {
+  if (!integrations.value.length) await carregarContas()
+  // O botão Sincronizar é sempre para TODOS os produtos: zera a seleção que um
+  // "Sincronizar Selecionados" cancelado tenha deixado (senão mandava só ela).
+  syncAllProductIds.value = null
   // Pre-select all marketplace integrations (matches SSH default behavior).
   selectedSyncAllIds.value = new Set(marketplaceIntegrations.value.map((i) => i.id))
   forceSyncAll.value = false
   activeJob.value = null
+  avisoMassa.value = null
   showSyncAll.value = true
 }
 
@@ -1382,6 +1421,7 @@ const syncAllProductIds = ref<string[] | null>(null)
 async function runSyncAll() {
   if (selectedSyncAllIds.value.size === 0) return
   activeJob.value = null
+  avisoMassa.value = null
   try {
     const r = await api<{ job_id: string }>('/api/jobs/sync-all', {
       method: 'POST',
@@ -1392,19 +1432,22 @@ async function runSyncAll() {
         force: forceSyncAll.value,
       },
     })
+    dialogoDoJob.value = 'sincronizar'
     startPolling(r.job_id)
     syncAllProductIds.value = null
   } catch (e: any) {
-    if (!handleMassBusy(e)) error.value = e?.data?.detail?.code || e?.message || 'erro'
+    falhaDeMassa(e)
   }
 }
 
 function openSyncSelected() {
   if (selected.value.size === 0) return
+  if (avisarSeMassaRodando()) return
   syncAllProductIds.value = [...selected.value]
   selectedSyncAllIds.value = new Set(marketplaceIntegrations.value.map((i) => i.id))
   forceSyncAll.value = false
   activeJob.value = null
+  avisoMassa.value = null
   showSyncAll.value = true
 }
 
@@ -1490,12 +1533,28 @@ function syncCounters(job: any): {
     total_links: r.total_links ?? job?.total ?? 0,
   }
 }
+// Produtos que deram erro inteiro no Sincronizar (antes sumiam calados).
+function falhasProduto(job: any): number {
+  return Number((job?.result as any)?.falhas_produto ?? 0) || 0
+}
+// Quais (os primeiros SKUs, que o backend guarda no resultado).
+function falhasAmostra(job: any): string[] {
+  const a = (job?.result as any)?.falhas_amostra
+  return Array.isArray(a) ? a : []
+}
+// % da barra: o total do job conta vínculos mortos que não são processados, e o
+// processado pode passar dele — limita em 100.
+function pct(feito: number | null | undefined, total: number | null | undefined): number {
+  const t = Number(total) || 0
+  if (t <= 0) return 0
+  return Math.min(100, Math.max(0, Math.round(((Number(feito) || 0) / t) * 100)))
+}
 // Final summary box color. Green if no failures, amber if any
 // retryable/skipped without fatal, red if any fatal/review.
 function syncSummaryClass(job: any): string {
   if (job?.status === 'failed') return 'border-red-300 bg-red-50 text-red-800'
   const c = syncCounters(job)
-  if (c.fatal > 0 || c.requires_review > 0)
+  if (c.fatal > 0 || c.requires_review > 0 || falhasProduto(job) > 0)
     return 'border-red-300 bg-red-50 text-red-800'
   if (c.skipped > 0 || c.retryable > 0)
     return 'border-amber-300 bg-amber-50 text-amber-800'
@@ -1516,24 +1575,41 @@ function autoLinkCurrent(details: Array<Record<string, any>> | undefined): strin
   const name = last.integration_name || ''
   return name ? `${plat}: ${name}` : plat
 }
-function autoLinkTotals(job: any): {
+type MudancaVinculo = {
+  acao: 'movido' | 'criado'
+  conta?: string | null
+  anuncio?: string | null
+  variacao?: string | null
+  sku_anuncio?: string | null
+  de?: string | null
+  para?: string | null
+}
+// Resumo do Vincular (o job dele e o bloco `vincular` do Atualizar têm o
+// mesmo formato).
+function vincularTotais(res: any): {
   created: number
   movidos: number
+  sku_atualizados: number
   mortos: number
   revividos: number
+  mortos_nao_criados: number
   already: number
   not_found: number
   sku_vazio: number
   sku_ambiguo: number
   pending: number
 } {
-  const r = (job?.result || {}) as Record<string, any>
+  const r = (res || {}) as Record<string, any>
   return {
     created: r.created ?? 0,
     // anúncio que trocou de SKU e teve o vínculo movido para o produto novo
     movidos: r.repointed ?? 0,
+    // vínculo que ficou onde estava mas guardava o SKU velho do anúncio
+    sku_atualizados: r.sku_atualizados ?? 0,
     mortos: r.mortos ?? 0,
     revividos: r.revividos ?? 0,
+    // anúncio já encerrado/excluído no marketplace: não vira vínculo novo
+    mortos_nao_criados: r.mortos_nao_criados ?? 0,
     already: r.already_present ?? 0,
     not_found: r.not_found ?? 0,
     sku_vazio: r.sku_vazio ?? 0,
@@ -1543,7 +1619,56 @@ function autoLinkTotals(job: any): {
     pending: r.pending_integrations ?? r.failed_integrations ?? 0,
   }
 }
-function autoLinkBreakdown(details: Array<Record<string, any>> | undefined): Array<{
+function autoLinkTotals(job: any) {
+  return vincularTotais(job?.result)
+}
+function fmtN(n: number | null | undefined): string {
+  return (Number(n) || 0).toLocaleString('pt-BR')
+}
+// Linhas do resumo do Vincular, em português simples (só o que não é zero,
+// menos os criados, que aparecem sempre).
+function vincularLinhaPrincipal(res: any): string {
+  const t = vincularTotais(res)
+  const partes = [`${fmtN(t.created)} vínculo(s) criado(s)`]
+  if (t.movidos) partes.push(`${fmtN(t.movidos)} movido(s) para o SKU novo do anúncio`)
+  if (t.sku_atualizados) partes.push(`${fmtN(t.sku_atualizados)} SKU(s) atualizado(s) no DaVinci`)
+  if (t.mortos) partes.push(`${fmtN(t.mortos)} marcado(s) como morto(s)`)
+  if (t.revividos) partes.push(`${fmtN(t.revividos)} voltaram a viver`)
+  return partes.join(' · ')
+}
+function vincularLinhaDetalhe(res: any): string {
+  const t = vincularTotais(res)
+  const partes: string[] = []
+  if (t.mortos_nao_criados) partes.push(`${fmtN(t.mortos_nao_criados)} não criado(s) porque o anúncio já está encerrado ou excluído`)
+  partes.push(`${fmtN(t.already)} já existentes`)
+  partes.push(`${fmtN(t.not_found)} sem produto no DaVinci`)
+  if (t.sku_vazio) partes.push(`${fmtN(t.sku_vazio)} sem SKU no anúncio`)
+  if (t.sku_ambiguo) partes.push(`${fmtN(t.sku_ambiguo)} com SKU duplicado no cadastro`)
+  return partes.join(' · ')
+}
+// O que o Vincular acertou na aba Anúncios (o produto mostrado em cada linha).
+function vincularLinhaLista(res: any): string | null {
+  const r = (res || {}) as Record<string, any>
+  if (r.lista_anuncios_erro) return `Aba Anúncios não foi acertada desta vez: ${r.lista_anuncios_erro}`
+  const l = r.lista_anuncios
+  if (!l) return null
+  return `Aba Anúncios: ${fmtN(l.passou_a_ter_produto)} passaram a ter produto · ${fmtN(l.trocou_produto)} trocaram de produto`
+}
+function vincularMudancas(res: any): MudancaVinculo[] {
+  const m = (res as any)?.mudancas
+  return Array.isArray(m) ? m : []
+}
+function vincularSkusSemProduto(res: any): string[] {
+  const s = (res as any)?.skus_sem_produto
+  return Array.isArray(s) ? s : []
+}
+function textoMudanca(m: MudancaVinculo): string {
+  const onde = [m.anuncio, m.variacao].filter(Boolean).join('/')
+  const sufixo = onde ? ` (${onde})` : ''
+  if (m.acao === 'movido') return `movido ${m.de || '?'} → ${m.para || m.sku_anuncio || '?'}${sufixo}`
+  return `criado ${m.para || m.sku_anuncio || '?'}${sufixo}`
+}
+function autoLinkBreakdown(details: Array<Record<string, any>> | undefined, res?: any): Array<{
   integration: string
   platform: string
   created: number
@@ -1555,21 +1680,31 @@ function autoLinkBreakdown(details: Array<Record<string, any>> | undefined): Arr
   result: string
   bad: boolean
   error: string | null
+  mudancas: MudancaVinculo[]
 }> {
-  return (details || []).map((d: any) => ({
-    integration: d.integration_name || (d.integration_id || '').slice(0, 8),
-    platform: d.platform || '',
-    created: d.created ?? 0,
-    already: d.already_present ?? 0,
-    not_found: d.not_found ?? 0,
-    sku_vazio: d.sku_vazio ?? 0,
-    sku_ambiguo: d.sku_ambiguo ?? 0,
-    sku_ambiguo_sample: d.sku_ambiguo_sample ?? [],
-    result: d.result || 'ok',
-    // `pending` (retries esgotados) e o legado `failed` renderizam como aviso.
-    bad: d.result === 'pending' || d.result === 'failed',
-    error: d.error || null,
-  }))
+  const doResumo = vincularMudancas(res)
+  return (details || []).map((d: any) => {
+    const integration = d.integration_name || (d.integration_id || '').slice(0, 8)
+    return {
+      integration,
+      platform: d.platform || '',
+      created: d.created ?? 0,
+      already: d.already_present ?? 0,
+      not_found: d.not_found ?? 0,
+      sku_vazio: d.sku_vazio ?? 0,
+      sku_ambiguo: d.sku_ambiguo ?? 0,
+      sku_ambiguo_sample: d.sku_ambiguo_sample ?? [],
+      result: d.result || 'ok',
+      // `pending` (retries esgotados) e o legado `failed` renderizam como aviso.
+      bad: d.result === 'pending' || d.result === 'failed',
+      error: d.error || null,
+      // Movidos/criados desta conta (até 50): os do detalhe da conta ou, se não
+      // vierem nele, os do resumo com o nome da conta.
+      mudancas: Array.isArray(d.mudancas)
+        ? d.mudancas
+        : doResumo.filter((m) => (m.conta || '').trim() === String(integration).trim()),
+    }
+  })
 }
 function autoLinkSummaryClass(job: any): string {
   if (job?.status === 'failed') return 'border-red-300 bg-red-50 text-red-800'
@@ -1690,10 +1825,67 @@ let pollHandle: number | null = null
 const massSyncActiveRemote = ref(false)
 let massActiveHandle: number | null = null
 
+// O que está rodando (vem do /api/sync/active e do 409). Desde 17/11/2026 a
+// trava é GLOBAL: um Atualizar, Vincular ou Sincronizar de qualquer pessoa, a
+// varredura das 10h ou a sincronização da noite seguram os botões de todos.
+type MassaInfo = {
+  job_id?: string | null
+  tipo?: string | null
+  type?: string | null
+  status?: string | null
+  gatilho?: string | null
+  quem?: string | null
+  desde?: string | null
+  // nome pronto que o servidor manda ("a varredura automática de vínculos")
+  rotulo?: string | null
+  // a massa é de quem está olhando (o /api/sync/active diz): ao abrir a página
+  // de novo, volta a acompanhar o andamento dela
+  meu?: boolean
+}
+const massaAtiva = ref<MassaInfo | null>(null)
+// Aviso dentro do diálogo aberto (409 / sem contas), para a pessoa ver ali
+// mesmo por que nada começou.
+const avisoMassa = ref<string | null>(null)
+const NOME_DO_GATILHO: Record<string, string> = {
+  botao_atualizar: 'um Atualizar',
+  botao_vincular: 'um Vincular',
+  varredura_diaria: 'a varredura automática de vínculos',
+  daily_sync: 'a sincronização automática da noite',
+}
+const NOME_DO_TIPO: Record<string, string> = {
+  sync_all: 'um Sincronizar',
+  auto_link: 'um Vincular',
+  import_listings: 'um Atualizar',
+}
+// Os automáticos rodam em nome do dono: "disparado por" confundiria.
+const GATILHOS_AUTOMATICOS = new Set(['varredura_diaria', 'daily_sync'])
+function fmtHoraMassa(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const hora = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+  const hoje = new Date().toDateString() === d.toDateString()
+  return hoje ? hora : `${d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} ${hora}`
+}
+function descreverMassa(info: MassaInfo | null | undefined, curto = false): string {
+  const i = info || {}
+  const tipo = i.tipo || i.type || ''
+  const oQue = i.rotulo || (i.gatilho && NOME_DO_GATILHO[i.gatilho]) || NOME_DO_TIPO[tipo] || 'outra tarefa em massa'
+  // Sem tipo = a trava curta de dois cliques ao mesmo tempo ("outro disparo em
+  // andamento"): o rótulo já diz tudo.
+  const soRotulo = !tipo && !!i.rotulo
+  let texto = curto ? `Rodando agora: ${oQue}` : soRotulo ? `Já tem ${oQue}` : `Já tem ${oQue} rodando`
+  if (i.quem && !(i.gatilho && GATILHOS_AUTOMATICOS.has(i.gatilho))) texto += `, disparado por ${i.quem}`
+  const desde = fmtHoraMassa(i.desde)
+  if (desde) texto += `, desde ${desde}`
+  return curto ? texto : `${texto}. Espere terminar e tente de novo.`
+}
+
 async function refreshMassActive() {
   try {
-    const r = await api<{ active: boolean }>('/api/sync/active')
+    const r = await api<{ active: boolean } & MassaInfo>('/api/sync/active')
     massSyncActiveRemote.value = !!r.active
+    massaAtiva.value = r.active ? r : null
   } catch {
     /* silencioso — quem garante a exclusividade é o 409 do backend */
   }
@@ -1711,19 +1903,115 @@ const jobActive = computed(
 )
 
 // Trata o 409 "sync_already_running": marca massa ativo (desabilita botões) e
-// mostra aviso amigável. Devolve true se era 409 (o caller não sobrescreve).
+// mostra o que está rodando, quem disparou e desde quando — no aviso da página
+// (vale nas duas abas) e dentro do diálogo. Devolve true se era 409 (o caller
+// não sobrescreve).
 function handleMassBusy(e: any): boolean {
-  if (e?.data?.detail?.code === 'sync_already_running' || e?.status === 409) {
+  const d = e?.data?.detail
+  if (d?.code === 'sync_already_running' || e?.status === 409 || e?.statusCode === 409) {
     massSyncActiveRemote.value = true
-    error.value = 'Já existe uma sincronização em massa rodando; aguarde ela terminar.'
+    const info = d && typeof d === 'object' ? (d as MassaInfo) : null
+    if (info) massaAtiva.value = info
+    const msg = descreverMassa(info)
+    error.value = msg
+    avisoMassa.value = msg
     return true
   }
   return false
 }
+// Erro ao disparar Atualizar / Vincular / Sincronizar.
+function falhaDeMassa(e: any) {
+  if (handleMassBusy(e)) return
+  const d = e?.data?.detail
+  const code = typeof d === 'string' ? d : d?.code
+  const msg = code === 'sem_contas'
+    ? 'Nenhuma conta de marketplace para isso (as suas estão arquivadas ou não têm leitor).'
+    : code === 'forbidden' || code === 'admin_only' || e?.status === 403
+      ? 'Você não tem permissão para isso.'
+      : code || e?.message || 'erro'
+  error.value = msg
+  avisoMassa.value = msg
+}
 
-function openAutoLinkDialog() {
-  selectedAutoLinkIds.value = new Set(marketplaceIntegrations.value.map((i) => i.id))
+// Qual diálogo disparou o job que está rodando (para "ver andamento" reabrir
+// o certo depois de Minimizar: o Atualizar leva ~15–25 min).
+const dialogoDoJob = ref<'atualizar' | 'vincular' | 'sincronizar' | null>(null)
+// O job terminou com o diálogo fechado (a pessoa minimizou — o Atualizar diz
+// "pode fechar esta janela"): fica um aviso na página com o resumo e
+// "ver resultado" até ela fechar. Antes o resultado sumia sem aviso.
+const fimDeMassa = ref<{ texto: string; tom: 'ok' | 'aviso' | 'erro' } | null>(null)
+const jobRodando = computed(() =>
+  activeJob.value != null && (activeJob.value.status === 'running' || activeJob.value.status === 'pending'))
+const andamentoAberto = computed(() =>
+  dialogoDoJob.value != null &&
+  activeJob.value != null &&
+  (jobRodando.value || fimDeMassa.value != null) &&
+  !showAtualizar.value && !showAutoLink.value && !showSyncAll.value)
+function dialogoAberto(): boolean {
+  if (dialogoDoJob.value === 'atualizar') return showAtualizar.value
+  if (dialogoDoJob.value === 'vincular') return showAutoLink.value
+  if (dialogoDoJob.value === 'sincronizar') return showSyncAll.value
+  return false
+}
+function verAndamento() {
+  fimDeMassa.value = null
+  if (dialogoDoJob.value === 'atualizar') showAtualizar.value = true
+  else if (dialogoDoJob.value === 'vincular') showAutoLink.value = true
+  else if (dialogoDoJob.value === 'sincronizar') showSyncAll.value = true
+}
+// Abrir outro diálogo de massa (Sincronizar Selecionados, "+ vincular" da
+// célula) com uma massa rodando: avisa o que está rodando e não abre.
+function avisarSeMassaRodando(): boolean {
+  if (!jobActive.value) return false
+  const msg = massaAtiva.value
+    ? descreverMassa(massaAtiva.value)
+    : 'Já tem uma tarefa em massa rodando. Espere terminar e tente de novo.'
+  error.value = msg
+  return true
+}
+// Uma linha para o aviso da página quando o job termina com o diálogo fechado.
+function resumoDoFim(job: Job): { texto: string; tom: 'ok' | 'aviso' | 'erro' } {
+  const qual = dialogoDoJob.value === 'atualizar' ? 'Atualizar' : dialogoDoJob.value === 'vincular' ? 'Vincular' : 'Sincronizar'
+  if (job.status !== 'succeeded') {
+    const motivo = jobInterrompido(job) ? 'interrompido no meio (o que já foi gravado ficou)' : (job.error || 'falhou')
+    return { texto: `${qual} parou: ${motivo}. Clique em ${qual} de novo.`, tom: 'erro' }
+  }
+  if (dialogoDoJob.value === 'atualizar') {
+    const a = atualizarResultado(job).anuncios || {}
+    const pelaFlex = atualizarContasLidas.value.filter((d) => d.resultado === 'pulada' && /robô do Flex/.test(d.erro || '')).length
+    const partes = [`${fmtN(a.ok)} de ${fmtN(a.contas)} contas lidas`]
+    if (pelaFlex) partes.push(`${fmtN(pelaFlex)} pulada(s) pelo robô do Flex — tente de novo em alguns minutos`)
+    const outrasPuladas = (a.puladas || 0) - pelaFlex
+    if (outrasPuladas > 0) partes.push(`${fmtN(outrasPuladas)} pulada(s)`)
+    if (a.falhas) partes.push(`${fmtN(a.falhas)} com falha`)
+    if (vincularIncompleto(job)) partes.push('o Vincular do fim não terminou — rode o Vincular')
+    const tom = atualizarSummaryClass(job).includes('amber') ? 'aviso' : 'ok'
+    return { texto: `Atualizar terminou: ${partes.join(' · ')}.`, tom }
+  }
+  if (dialogoDoJob.value === 'vincular') {
+    const t = vincularTotais(job.result)
+    return {
+      texto: `Vincular terminou: ${vincularLinhaPrincipal(job.result)}${t.pending ? ` · ${fmtN(t.pending)} conta(s) pendente(s)` : ''}.`,
+      tom: t.pending ? 'aviso' : 'ok',
+    }
+  }
+  const c = syncCounters(job)
+  const falhas = falhasProduto(job)
+  return {
+    texto: `Sincronizar terminou: ${fmtN(c.ok)} sincronizado(s)${c.fatal ? ` · ${fmtN(c.fatal)} com erro` : ''}${falhas ? ` · ${fmtN(falhas)} produto(s) com erro` : ''}.`,
+    tom: syncSummaryClass(job).includes('red') ? 'erro' : syncSummaryClass(job).includes('amber') ? 'aviso' : 'ok',
+  }
+}
+// Job cortado por publicação/reinício (o backend grava esse texto).
+function jobInterrompido(job: any): boolean {
+  return job?.status === 'failed' && /^interrompido/.test(String(job?.error || ''))
+}
+
+async function openAutoLinkDialog() {
+  if (!integrations.value.length) await carregarContas()
+  selectedAutoLinkIds.value = new Set(contasVincular.value.map((i) => i.id))
   activeJob.value = null
+  avisoMassa.value = null
   showAutoLink.value = true
 }
 
@@ -1736,6 +2024,7 @@ function toggleSelectedAutoLink(id: string) {
 async function runAutoLink() {
   if (selectedAutoLinkIds.value.size === 0) return
   activeJob.value = null
+  avisoMassa.value = null
   try {
     const r = await api<{ job_id: string }>('/api/jobs/auto-link', {
       method: 'POST',
@@ -1743,21 +2032,353 @@ async function runAutoLink() {
         integration_ids: Array.from(selectedAutoLinkIds.value),
       },
     })
+    dialogoDoJob.value = 'vincular'
     startPolling(r.job_id)
   } catch (e: any) {
-    if (!handleMassBusy(e)) error.value = e?.data?.detail?.code || e?.message || 'erro'
+    falhaDeMassa(e)
   }
 }
 
-async function runAutoImportLink() {
+// ---------------------------- Atualizar ------------------------------------
+// Lê os produtos novos do Bling e as listas de anúncios dos marketplaces e,
+// no fim, roda o Vincular sozinho (segurando o robô do Flex até terminar).
+// Só grava no DaVinci. As contas quem monta é o servidor (corpo vazio).
+async function abrirAtualizar() {
+  if (!integrations.value.length) await carregarContas()
   activeJob.value = null
+  avisoMassa.value = null
+  showAtualizar.value = true
+}
+async function runAtualizar() {
+  activeJob.value = null
+  avisoMassa.value = null
   try {
-    const r = await api<{ job_id: string }>('/api/jobs/auto-import-link', {
-      method: 'POST',
-    })
+    const r = await api<{ job_id: string }>('/api/produtos/atualizar', { method: 'POST', body: {} })
+    dialogoDoJob.value = 'atualizar'
     startPolling(r.job_id)
   } catch (e: any) {
-    error.value = e?.data?.detail?.code || e?.message || 'erro'
+    falhaDeMassa(e)
+  }
+}
+// Uma linha por conta (a mais nova, se a rodada foi refeita pelo robô).
+const atualizarContasLidas = computed(() => {
+  const porConta = new Map<string, Record<string, any>>()
+  for (const d of jobDetails.value) {
+    if (d.etapa === 'conta') porConta.set(String(d.integration_id ?? d.id), d)
+  }
+  return [...porConta.values()]
+})
+// Fases que o backend marca (etapa 'fase'): a última diz o que está fazendo.
+const atualizarFases = computed(() => jobDetails.value.filter((d) => d.etapa === 'fase'))
+const atualizarVincularProgresso = computed(() => {
+  const total = atualizarFases.value
+    .filter((d) => d.fase === 'vincular')
+    .reduce((n, d) => n + (Number(d.contas) || 0), 0)
+  const feitas = jobDetails.value.filter((d) => d.etapa === 'vincular').length
+  return { feitas: Math.min(feitas, total), total }
+})
+const atualizarTotalContas = computed(() => {
+  const ids = (activeJob.value?.payload as any)?.integration_ids
+  return Array.isArray(ids) ? ids.length : Math.max(0, (activeJob.value?.total ?? 1) - 1)
+})
+const atualizarBlingLido = computed(() =>
+  jobDetails.value.some((d) => d.etapa === 'bling') || !!(activeJob.value?.result as any)?.bling)
+// O que está fazendo agora (as etapas não têm ordem fixa entre Bling e contas).
+const atualizarEtapa = computed(() => {
+  const j = activeJob.value
+  if (!j) return ''
+  if (j.status === 'pending') return 'Na fila, esperando o robô começar…'
+  if (!atualizarBlingLido.value) return 'Lendo os produtos novos do Bling…'
+  const fase = atualizarFases.value.at(-1)?.fase
+  if (fase === 'esperando_flex') return 'Esperando o robô do Flex terminar a rodada dele (até 10 min)…'
+  if (fase === 'vincular') {
+    const v = atualizarVincularProgresso.value
+    return `Ligando os anúncios aos produtos (Vincular): ${fmtN(v.feitas)} de ${fmtN(v.total)} contas…`
+  }
+  if (fase === 'listas_flex') return 'Lendo as listas do Mercado Livre e da Shopee…'
+  return 'Lendo as listas de anúncios…'
+})
+function atualizarResultado(job: any): Record<string, any> {
+  return (job?.result || {}) as Record<string, any>
+}
+const MOTIVO_BLING_PULADO: Record<string, string> = {
+  rodada_automatica_em_andamento: 'a rodada automática de 15 min estava rodando (ela cria os mesmos produtos)',
+}
+function atualizarBlingTexto(job: any): { pulado: string | null; erro: string | null; linha: string; skus: string[] } {
+  const r = atualizarResultado(job)
+  const det = jobDetails.value.find((d) => d.etapa === 'bling') || {}
+  const b = (r.bling || det || {}) as Record<string, any>
+  const pulado = b.pulado
+    ? (typeof b.pulado === 'string' ? (MOTIVO_BLING_PULADO[b.pulado] || b.pulado) : 'pulado')
+    : null
+  return {
+    pulado,
+    erro: b.erro || null,
+    linha: `${fmtN(b.lidos)} lidos · ${fmtN(b.faltando)} faltando no DaVinci · ${fmtN(b.criados)} criados` +
+      (b.falhas ? ` · ${fmtN(b.falhas)} com falha` : ''),
+    skus: Array.isArray(b.skus_criados) ? b.skus_criados : [],
+  }
+}
+function atualizarContaIcone(d: Record<string, any>): string {
+  if (d.resultado === 'ok') return '✓'
+  if (d.resultado === 'pulada') return '⊘'
+  return '⚠'
+}
+function atualizarContaTexto(d: Record<string, any>): string {
+  if (d.resultado === 'pulada') return `pulada${d.erro ? ` — ${d.erro}` : ''}${d.dica ? ` (${d.dica})` : ''}`
+  if (d.resultado !== 'ok') return `falhou${d.erro ? ` — ${d.erro}` : ''}${d.dica ? ` · ${d.dica}` : ''}`
+  let t = `${fmtN(d.novos)} novos · ${fmtN(d.atualizados)} atualizados`
+  if (d.ignorados) t += ` · ${fmtN(d.ignorados)} ignorados (encerrados que o DaVinci não conhecia)`
+  if (d.leitura_completa === false) t += ' · leitura incompleta (o marketplace não mandou tudo; rode de novo depois)'
+  return t
+}
+function atualizarSemLeitura(job: any): string[] {
+  const s = atualizarResultado(job).sem_leitura
+  return Array.isArray(s) ? s.map((p: string) => nomePlataforma(p)) : []
+}
+// "Sem leitura da lista": só a Amazon tem os vínculos lidos no Vincular; Temu
+// e outras não têm leitor nenhum.
+function atualizarSemLeituraTexto(job: any): string | null {
+  const s = atualizarResultado(job).sem_leitura
+  const lista: string[] = Array.isArray(s) ? s : []
+  if (!lista.length) return null
+  const outras = lista.filter((pl) => pl !== 'amazon')
+  const partes: string[] = []
+  if (lista.includes('amazon')) partes.push('os vínculos da Amazon são lidos no Vincular')
+  if (outras.length) partes.push(`${outras.map((pl) => nomePlataforma(pl)).join('/')}: sem leitor`)
+  return `Sem leitura da lista: ${lista.map((pl) => nomePlataforma(pl)).join(', ')} (${partes.join('; ')}).`
+}
+// O Vincular do fim (a proteção do Flex) quebrou ou deixou conta pendente.
+function vincularIncompleto(job: any): boolean {
+  const r = atualizarResultado(job)
+  return !!r.vincular_erro || vincularTotais(r.vincular).pending > 0
+}
+const atualizarVincularPendentes = computed(() =>
+  jobDetails.value.filter((d) => d.etapa === 'vincular' && d.result === 'pending'))
+// O erro do job em texto para a pessoa (o 'Vincular incompleto' já aparece no
+// bloco do Vincular; o interrompido tem aviso próprio).
+function atualizarErroTexto(job: any): string | null {
+  const e = job?.error
+  if (!e || jobInterrompido(job) || /^Vincular incompleto/.test(e)) return null
+  return e
+}
+function atualizarSummaryClass(job: any): string {
+  if (job?.status === 'failed') return 'border-red-300 bg-red-50 text-red-800'
+  const a = atualizarResultado(job).anuncios || {}
+  const flex = atualizarResultado(job).flex || {}
+  if (a.falhas || a.puladas || flex.conseguiu === false || vincularIncompleto(job)) {
+    return 'border-amber-300 bg-amber-50 text-amber-800'
+  }
+  return 'border-emerald-300 bg-emerald-50 text-emerald-800'
+}
+
+// ---------------------------- Organizar (só ADM) ---------------------------
+// Esconde da TELA (Produtos e Anúncios) o que não vale mais. Nada é apagado,
+// nada muda no Bling nem nos marketplaces, o estoque continua sendo enviado.
+// A prévia fica guardada no servidor (token de 30 min): o "Ocultar" grava só o
+// que foi mostrado e ainda vale.
+type OrgChave = {
+  chave: string
+  tabela: string
+  rotulo: string
+  explicacao: string
+  quantidade: number
+  marcado_por_padrao: boolean
+}
+type OrgLote = {
+  lote_id: string
+  oculto_em: string
+  oculto_por_nome: string | null
+  quantidade: number
+  por_chave: Record<string, number>
+}
+type OrgPrevia = {
+  token: string
+  expira_em: string
+  chaves: OrgChave[]
+  ocultos: { total: number; por_chave: Record<string, number> }
+  lotes: OrgLote[]
+}
+type OrgItem = {
+  marcador_id?: string | null
+  registro_id: string
+  sku: string | null
+  nome: string | null
+  conta: string | null
+  anuncio: string | null
+  variacao: string | null
+  sku_anuncio: string | null
+  motivo: string | null
+  data: string | null
+}
+type OrgItens = { itens: OrgItem[]; total: number; pagina: number; por_pagina: number }
+type OrgAplicado = {
+  lote_id: string | null // null quando nada foi escondido
+  ocultados: number
+  por_chave: Record<string, number>
+  sairam_desde_previa: number
+}
+const organizarAba = ref<'organizar' | 'ocultos'>('organizar')
+const orgPrevia = ref<OrgPrevia | null>(null)
+const orgCarregando = ref(false)
+const orgErro = ref<string | null>(null)
+const orgMarcadas = ref<Set<string>>(new Set())
+const orgLista = ref<{ chave: string; ocultos: boolean; pagina: number; dados: OrgItens | null; carregando: boolean } | null>(null)
+let seqOrgLista = 0
+const orgAplicando = ref(false)
+const orgResultado = ref<OrgAplicado | null>(null)
+const orgReexibindo = ref(false)
+
+function orgRotulo(chave: string): string {
+  return orgPrevia.value?.chaves.find((c) => c.chave === chave)?.rotulo || chave
+}
+// Total exato do botão "Ocultar N itens": só as caixas marcadas que têm item.
+const orgChavesParaOcultar = computed(() =>
+  (orgPrevia.value?.chaves || []).filter((c) => orgMarcadas.value.has(c.chave) && c.quantidade > 0))
+const orgTotalMarcado = computed(() => orgChavesParaOcultar.value.reduce((n, c) => n + c.quantidade, 0))
+const orgLoteDoResultado = computed(() =>
+  orgPrevia.value?.lotes.find((l) => l.lote_id === orgResultado.value?.lote_id) || null)
+function orgPorChaveTexto(porChave: Record<string, number> | null | undefined): string {
+  return Object.entries(porChave || {})
+    .filter(([, n]) => n)
+    .map(([k, n]) => `${orgRotulo(k)}: ${fmtN(n)}`)
+    .join(' · ')
+}
+function orgErroTexto(e: any): string {
+  const d = e?.data?.detail
+  const code = typeof d === 'string' ? d : d?.code
+  if (code === 'admin_only' || e?.status === 403) return 'Só o administrador pode organizar.'
+  return code || e?.message || 'erro'
+}
+
+async function abrirOrganizar() {
+  showOrganizar.value = true
+  organizarAba.value = 'organizar'
+  orgResultado.value = null
+  orgLista.value = null
+  orgErro.value = null
+  await carregarPreviaOrganizar(true)
+}
+// padrao=true: as caixas voltam a vir marcadas como o servidor sugere; senão
+// fica o que a pessoa marcou (das chaves que ainda existem).
+async function carregarPreviaOrganizar(padrao = false) {
+  orgCarregando.value = true
+  try {
+    const p = await api<OrgPrevia>('/api/produtos/organizar/previa')
+    const antes = orgMarcadas.value
+    orgMarcadas.value = new Set(
+      p.chaves.filter((c) => (padrao ? c.marcado_por_padrao : antes.has(c.chave))).map((c) => c.chave))
+    orgPrevia.value = p
+  } catch (e: any) {
+    orgErro.value = orgErroTexto(e)
+  } finally {
+    orgCarregando.value = false
+  }
+}
+function alternarChaveOrganizar(chave: string) {
+  const next = new Set(orgMarcadas.value)
+  if (next.has(chave)) next.delete(chave)
+  else next.add(chave)
+  orgMarcadas.value = next
+}
+async function verListaOrganizar(chave: string, ocultos: boolean, pagina = 1) {
+  const minha = ++seqOrgLista
+  const mesma = orgLista.value?.chave === chave && orgLista.value?.ocultos === ocultos
+  orgLista.value = { chave, ocultos, pagina, dados: mesma ? orgLista.value!.dados : null, carregando: true }
+  try {
+    const qs = new URLSearchParams({ chave, ocultos: String(ocultos), pagina: String(pagina) })
+    // "Ver lista" da prévia: exatamente o que ela guardou (o total bate com o
+    // botão "Ocultar N"); o que entrou depois fica para a próxima prévia.
+    if (!ocultos && orgPrevia.value?.token) qs.set('token', orgPrevia.value.token)
+    const dados = await api<OrgItens>(`/api/produtos/organizar/itens?${qs.toString()}`)
+    if (minha !== seqOrgLista) return
+    orgLista.value = { chave, ocultos, pagina, dados, carregando: false }
+  } catch (e: any) {
+    if (minha !== seqOrgLista) return
+    if (e?.data?.detail?.code === 'previa_expirada') {
+      orgErro.value = 'A prévia passou de 30 minutos e venceu. Os números foram lidos de novo: abra a lista outra vez.'
+      orgLista.value = null
+      await carregarPreviaOrganizar()
+      return
+    }
+    orgErro.value = orgErroTexto(e)
+    if (orgLista.value) orgLista.value = { ...orgLista.value, carregando: false }
+  }
+}
+function orgPaginas(d: OrgItens | null | undefined): number {
+  if (!d) return 1
+  return Math.max(1, Math.ceil((d.total || 0) / (d.por_pagina || 100)))
+}
+async function aplicarOrganizar() {
+  const p = orgPrevia.value
+  const chaves = orgChavesParaOcultar.value.map((c) => c.chave)
+  if (!p || !chaves.length || orgAplicando.value) return
+  orgAplicando.value = true
+  orgErro.value = null
+  try {
+    const r = await api<OrgAplicado>('/api/produtos/organizar/aplicar', {
+      method: 'POST',
+      body: { token: p.token, chaves },
+    })
+    orgResultado.value = r
+    orgLista.value = null
+    // A lista, a faixa "Vínculos" e os números das abas já sem os ocultos.
+    await Promise.all([carregarPreviaOrganizar(), recarregarAbaAberta()])
+  } catch (e: any) {
+    const code = e?.data?.detail?.code
+    if (code === 'previa_expirada') {
+      orgErro.value = 'A prévia passou de 30 minutos e venceu. Os números foram lidos de novo: confira e clique outra vez.'
+      orgLista.value = null
+      await carregarPreviaOrganizar()
+    } else if (code === 'organizar_em_andamento') {
+      orgErro.value = 'Outra pessoa está organizando agora. Espere um pouco e tente de novo.'
+    } else {
+      orgErro.value = orgErroTexto(e)
+    }
+  } finally {
+    orgAplicando.value = false
+  }
+}
+async function reexibirOrganizar(
+  filtro: { lote_id?: string; marcador_ids?: string[]; chave?: string },
+  descricao: string,
+) {
+  if (orgReexibindo.value) return
+  orgReexibindo.value = true
+  orgErro.value = null
+  try {
+    const r = await api<{ reexibidos: number }>('/api/produtos/organizar/reexibir', {
+      method: 'POST',
+      body: filtro,
+    })
+    pushToast({
+      kind: 'success',
+      title: `${fmtN(r.reexibidos)} item(ns) voltaram para a tela`,
+      lines: [descricao],
+    }, 8000)
+    if (filtro.lote_id && orgResultado.value?.lote_id === filtro.lote_id) orgResultado.value = null
+    const lista = orgLista.value
+    await Promise.all([carregarPreviaOrganizar(), recarregarAbaAberta()])
+    if (lista?.ocultos) {
+      if (filtro.chave === lista.chave) orgLista.value = null
+      else await verListaOrganizar(lista.chave, true, lista.pagina)
+    }
+  } catch (e: any) {
+    orgErro.value = orgErroTexto(e)
+  } finally {
+    orgReexibindo.value = false
+  }
+}
+
+// Fim de um job (ou do Organizar): recarrega a aba que está aberta e os
+// números das abas. Na aba Anúncios quem relê é o painel; a lista de produtos
+// fica para quando a pessoa voltar para a aba Produtos.
+async function recarregarAbaAberta() {
+  if (aba.value === 'anuncios') {
+    produtosCarregadosDe.value = null
+    await Promise.all([painelAnuncios.value?.refreshAll(), carregarDepartamentos()])
+  } else {
+    await refreshAll() // já relê os números das abas
   }
 }
 
@@ -1785,25 +2406,58 @@ async function fetchDetailDelta(jobId: string) {
 // Poll the lightweight /status endpoint and fetch only the detail delta when
 // the count grows. setTimeout (not setInterval) so we can back off from 1.5s
 // up to 5s while nothing changes, and stop cleanly on a terminal status.
+// PENDING por mais que isto = o robô não vai pegar (ex.: API publicada antes
+// do worker): a tela desiste — é a mesma regra da trava global no servidor.
+const PENDENTE_MAX_MS = 20 * 60 * 1000
 function startPolling(jobId: string) {
   stopPolling()
   jobDetails.value = []
   lastDetailId = 0
   activeJob.value = null
+  fimDeMassa.value = null
   let delay = 1500
   let lastCount = -1
+  let pendenteDesde: number | null = null
   const tick = async () => {
     try {
       const s = await api<Job>(`/api/jobs/${jobId}/status`)
+      // Rodada refeita pelo robô (worker reiniciado no meio): o backend apaga
+      // os detalhes e recomeça — a tela também, senão congelava e duplicava.
+      const anterior = activeJob.value
+      if (
+        (s.details_count ?? 0) < jobDetails.value.length ||
+        (anterior?.id === s.id && anterior?.started_at && s.started_at && anterior.started_at !== s.started_at)
+      ) {
+        jobDetails.value = []
+        lastDetailId = 0
+      }
       activeJob.value = s
       const count = s.details_count ?? 0
       if (count > jobDetails.value.length) await fetchDetailDelta(jobId)
       if (s.status === 'succeeded' || s.status === 'failed' || s.status === 'cancelled') {
         await fetchDetailDelta(jobId) // catch the tail before we stop
         stopPolling()
-        await refreshAll()
+        if (!dialogoAberto() && dialogoDoJob.value) fimDeMassa.value = resumoDoFim(s)
+        await recarregarAbaAberta()
         await refreshMassActive() // re-enable os botões de massa assim que fecha
         return
+      }
+      if (s.status === 'pending') {
+        const criado = s.created_at ? Date.parse(s.created_at) : NaN
+        pendenteDesde ??= Number.isNaN(criado) ? Date.now() : Math.min(criado, Date.now())
+        if (Date.now() - pendenteDesde > PENDENTE_MAX_MS) {
+          stopPolling()
+          activeJob.value = {
+            ...s,
+            status: 'failed',
+            error: 'O robô não pegou o pedido em 20 min. Tente de novo (se repetir, avise o administrador).',
+          }
+          if (!dialogoAberto() && dialogoDoJob.value) fimDeMassa.value = resumoDoFim(activeJob.value)
+          await refreshMassActive()
+          return
+        }
+      } else {
+        pendenteDesde = null
       }
       // Snap back to fast polling on activity; back off when idle.
       delay = count === lastCount ? Math.min(5000, Math.round(delay * 1.4)) : 1500
@@ -1816,8 +2470,28 @@ function startPolling(jobId: string) {
   void tick()
 }
 
+// Qual diálogo mostra a massa (para retomar o andamento ao abrir a página de
+// novo). Os automáticos (varredura das 10h, noturna) não têm diálogo.
+function dialogoDaMassa(m: MassaInfo): 'atualizar' | 'vincular' | 'sincronizar' | null {
+  const tipo = m.tipo || m.type
+  if (m.gatilho === 'botao_atualizar') return 'atualizar'
+  if (m.gatilho && GATILHOS_AUTOMATICOS.has(m.gatilho)) return null
+  if (tipo === 'auto_link') return 'vincular'
+  if (tipo === 'sync_all') return 'sincronizar'
+  return null
+}
+async function retomarMassaMinha() {
+  await refreshMassActive()
+  const m = massaAtiva.value
+  if (!m?.meu || !m.job_id || activeJob.value) return
+  const qual = dialogoDaMassa(m)
+  if (!qual) return
+  dialogoDoJob.value = qual
+  startPolling(m.job_id)
+}
+
 onMounted(() => {
-  void refreshMassActive()
+  void retomarMassaMinha()
   // Poll leve (10s) p/ refletir massa iniciado em outra aba/cliente ou pelo
   // daily_sync — mantém os botões de massa desabilitados p/ todos.
   massActiveHandle = window.setInterval(() => void refreshMassActive(), 10000)
@@ -1833,26 +2507,64 @@ onUnmounted(() => {
   <div class="products-page min-w-0 space-y-5">
     <PageHeader title="Produtos" description="SKUs do Bling, custos e links por canal.">
       <template #actions>
-        <!-- Aba Anúncios: os botões da antiga tela /anuncios. -->
-        <template v-if="aba === 'anuncios'">
-          <Button
-            v-if="podeEditarAnuncios"
-            size="sm"
-            variant="outline"
-            :disabled="!painelAnuncios || painelAnuncios.importableIntegrations.length === 0"
-            @click="painelAnuncios?.openImport()"
-          >
-            <Download class="size-4 mr-1.5" /> importar
-          </Button>
-          <Button size="sm" variant="outline" @click="painelAnuncios?.refreshAll()">
-            <RefreshCw class="size-4 mr-1.5" /> recarregar
-          </Button>
-        </template>
-        <template v-else>
+        <!-- Aba Anúncios: "recarregar" a lista (fica fora do "Gerenciar
+             produtos", que no celular começa fechado). O "importar" de uma
+             conta por vez saiu: quem lê as listas agora é o Atualizar. -->
+        <Button v-if="aba === 'anuncios'" size="sm" variant="outline" @click="painelAnuncios?.refreshAll()">
+          <RefreshCw class="size-4 mr-1.5" /> recarregar
+        </Button>
         <Button v-if="canEdit" size="sm" variant="outline" class="lg:hidden" :aria-expanded="mobileProductTools" aria-controls="product-tools" @click="mobileProductTools = !mobileProductTools">
           Gerenciar produtos <ChevronDown class="ml-1.5 size-4" :class="mobileProductTools ? 'rotate-180' : ''" />
         </Button>
-        <div id="product-tools" class="flex-wrap items-center gap-2 min-w-0" :class="mobileProductTools ? 'flex' : 'hidden lg:flex'">
+        <div v-if="canEdit" id="product-tools" class="flex-wrap items-center gap-2 min-w-0" :class="mobileProductTools ? 'flex' : 'hidden lg:flex'">
+        <!-- Barra comum às duas abas (17/11/2026), na ordem de uso:
+             Atualizar → Vincular → Sincronizar. Organizar só para o ADM. -->
+        <div class="flex flex-wrap items-center gap-2" aria-label="Botões de Produtos e Anúncios">
+          <Button
+            size="sm"
+            variant="outline"
+            :disabled="jobActive"
+            class="border-sky-300 text-sky-700 hover:bg-sky-50"
+            :title="jobActive ? descreverMassa(massaAtiva, true) : 'Lê os produtos novos do Bling e as listas de anúncios dos marketplaces e liga os anúncios aos produtos. Só grava no DaVinci.'"
+            @click="abrirAtualizar"
+          >
+            <CloudDownload class="size-4 mr-1.5" /> Atualizar
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            :disabled="jobActive"
+            class="border-emerald-300 text-emerald-700 hover:bg-emerald-50"
+            :title="jobActive ? descreverMassa(massaAtiva, true) : 'Lê os anúncios ao vivo e acerta o SKU e o vínculo só no DaVinci. Não muda nada no marketplace.'"
+            @click="openAutoLinkDialog"
+          >
+            <Zap class="size-4 mr-1.5" /> Vincular
+          </Button>
+          <Button
+            size="sm"
+            variant="outline"
+            :disabled="jobActive"
+            :title="jobActive ? descreverMassa(massaAtiva, true) : 'Envia o estoque do Bling para os anúncios vinculados.'"
+            @click="openSyncAllDialog"
+          >
+            <RefreshCw class="size-4 mr-1.5" /> Sincronizar
+          </Button>
+          <Button
+            v-if="isAdmin"
+            size="sm"
+            variant="outline"
+            class="border-violet-300 text-violet-700 hover:bg-violet-50"
+            title="Esconde da tela o que não vale mais (só administrador). Nada é apagado e dá para desfazer."
+            @click="abrirOrganizar"
+          >
+            <EyeOff class="size-4 mr-1.5" /> Organizar
+          </Button>
+          <Button v-if="andamentoAberto" size="sm" variant="ghost" @click="verAndamento">
+            <template v-if="jobRodando"><Loader2 class="size-4 mr-1.5 animate-spin" /> ver andamento</template>
+            <template v-else>ver resultado</template>
+          </Button>
+        </div>
+        <template v-if="aba === 'produtos'">
         <label
           v-if="canEdit"
           class="flex items-center gap-2 text-xs px-3 py-1.5 rounded-md border bg-background cursor-pointer select-none"
@@ -1873,29 +2585,6 @@ onUnmounted(() => {
           v-if="canEdit"
           size="sm"
           variant="outline"
-          :disabled="jobActive"
-          class="border-emerald-300 text-emerald-700 hover:bg-emerald-50"
-          @click="openAutoLinkDialog"
-        >
-          <Zap class="size-4 mr-1.5" /> Vincular Automático
-        </Button>
-        <Button
-          v-if="canEdit"
-          size="sm"
-          variant="outline"
-          class="border-sky-300 text-sky-700 hover:bg-sky-50"
-          title="Anexa anúncios já importados ao SKU do produto local (sem chamar marketplace)"
-          @click="runAutoImportLink"
-        >
-          <Link2 class="size-4 mr-1.5" /> Vincular Anúncios
-        </Button>
-        <Button v-if="canEdit" size="sm" variant="outline" :disabled="jobActive" @click="openSyncAllDialog">
-          <RefreshCw class="size-4 mr-1.5" /> Sincronizar Todos
-        </Button>
-        <Button
-          v-if="canEdit"
-          size="sm"
-          variant="outline"
           class="border-orange-300 text-orange-700 hover:bg-orange-50"
           @click="openImport"
         >
@@ -1907,8 +2596,8 @@ onUnmounted(() => {
         <Button v-if="canEdit" size="sm" @click="showNewProduct = true">
           <Plus class="size-4 mr-1.5" /> Novo Produto
         </Button>
-        </div>
         </template>
+        </div>
       </template>
     </PageHeader>
 
@@ -1951,6 +2640,32 @@ onUnmounted(() => {
       </button>
     </div>
 
+    <!-- Avisos da página (erro, "já tem … rodando"): fora das abas, para
+         aparecerem também na aba Anúncios. -->
+    <div v-if="error" class="flex items-start gap-2 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
+      <span class="flex-1">{{ error }}</span>
+      <button class="text-red-500 hover:text-red-700" title="fechar" @click="error = null">
+        <X class="size-4" />
+      </button>
+    </div>
+    <div
+      v-else-if="canEdit && massSyncActiveRemote && massaAtiva"
+      class="rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800"
+    >
+      {{ descreverMassa(massaAtiva, true) }}. Atualizar, Vincular e Sincronizar voltam quando terminar.
+    </div>
+    <!-- Terminou com o diálogo fechado (minimizado): o resumo fica aqui até a
+         pessoa ver ou fechar. -->
+    <div
+      v-if="fimDeMassa"
+      class="flex items-start gap-2 rounded-md border px-3 py-2 text-sm"
+      :class="fimDeMassa.tom === 'erro' ? 'border-red-300 bg-red-50 text-red-800' : fimDeMassa.tom === 'aviso' ? 'border-amber-300 bg-amber-50 text-amber-800' : 'border-emerald-300 bg-emerald-50 text-emerald-800'"
+    >
+      <span class="flex-1">{{ fimDeMassa.texto }}</span>
+      <button class="underline font-medium" @click="verAndamento">ver resultado</button>
+      <button title="fechar" @click="fimDeMassa = null"><X class="size-4" /></button>
+    </div>
+
     <!-- ===================== Aba Anúncios ================================ -->
     <ProdutosAnunciosPainel
       v-if="aba === 'anuncios'"
@@ -1961,9 +2676,6 @@ onUnmounted(() => {
 
     <!-- ===================== Aba Produtos ================================ -->
     <template v-else>
-    <div v-if="error" class="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-700">
-      {{ error }}
-    </div>
 
     <div class="product-filters flex flex-wrap gap-3 items-center" :class="{ 'product-filters-open': mobileProductFilters }">
       <div class="relative w-full min-w-0 sm:flex-1 sm:min-w-[260px]">
@@ -2038,24 +2750,6 @@ onUnmounted(() => {
       <button v-if="saude.erro" class="underline" @click="filtroVinculos = 'erro'; page = 1; refreshAll()">
         {{ saude.erro.toLocaleString('pt-BR') }} com erro no envio
       </button>
-      <template v-if="canDelete && saude.mortos">
-        <Button
-          v-if="!confirmandoRemoverMortos"
-          size="sm"
-          variant="outline"
-          class="ml-auto"
-          @click="confirmandoRemoverMortos = true"
-        >
-          <Trash2 class="size-4 mr-1.5" /> Remover os {{ saude.mortos.toLocaleString('pt-BR') }} mortos
-        </Button>
-        <span v-else class="ml-auto flex items-center gap-2">
-          Apagar {{ saude.mortos.toLocaleString('pt-BR') }} vínculos mortos de {{ nomeDepartamentoDaSaude }}? (sozinhos eles saem em 30 dias)
-          <Button size="sm" variant="destructive" :disabled="removendoMortos" @click="removerMortos">
-            {{ removendoMortos ? 'removendo…' : 'Sim, remover' }}
-          </Button>
-          <Button size="sm" variant="ghost" :disabled="removendoMortos" @click="confirmandoRemoverMortos = false">cancelar</Button>
-        </span>
-      </template>
     </div>
 
     <!-- Anúncio buscado por ID: todas as variações/SKUs agrupados embaixo,
@@ -2163,7 +2857,7 @@ onUnmounted(() => {
       </table>
       <div class="border-t px-4 py-2 text-xs text-muted-foreground">
         Sincroniza só as variações deste anúncio — a conta inteira não é varrida.
-        Variação sem SKU casado com um produto continua de fora (mesma regra do Vincular Automático).
+        Variação sem SKU casado com um produto continua de fora (mesma regra do Vincular).
         Se você trocou o SKU dentro do anúncio, o botão move o vínculo para o produto do SKU novo
         antes de sincronizar — o estoque passa a sair do produto certo.
       </div>
@@ -2432,7 +3126,7 @@ onUnmounted(() => {
                       </div>
                       <div class="space-y-1 max-h-48 overflow-y-auto">
                         <p v-if="linkedIntegrationsFor(p).length === 0" class="text-xs text-muted-foreground italic py-2">
-                          Sem links neste produto. Use "Vincular Automático".
+                          Sem links neste produto. Use "Vincular".
                         </p>
                         <label
                           v-for="integ in linkedIntegrationsFor(p)"
@@ -2828,17 +3522,210 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Vincular Automático dialog (SSH-style) -->
+    <!-- Atualizar (17/11/2026): produtos novos do Bling + listas de anúncios
+         dos marketplaces + Vincular sozinho no fim. Só grava no DaVinci. -->
+    <div v-if="showAtualizar" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showAtualizar = false">
+      <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(620px,95vw)] max-h-[85vh] flex flex-col">
+        <div class="flex items-center justify-between border-b p-4">
+          <div>
+            <h3 class="font-semibold flex items-center gap-2">
+              <CloudDownload class="size-5 text-sky-600" />
+              Atualizar
+            </h3>
+            <p class="text-xs text-muted-foreground mt-1">
+              {{ activeJob && (activeJob.status === 'running' || activeJob.status === 'pending')
+                ? 'Atualizando. Pode fechar esta janela: continua em segundo plano.'
+                : 'Traz para o DaVinci o que é novo no Bling e nas listas de anúncios dos marketplaces.' }}
+            </p>
+          </div>
+          <button @click="showAtualizar = false"><X class="size-4" /></button>
+        </div>
+
+        <!-- Prévia: nada é gravado antes do "Atualizar agora" -->
+        <div v-if="!activeJob" class="p-4 space-y-3 flex-1 overflow-y-auto text-sm">
+          <div>
+            <div class="font-medium">Listas de anúncios que serão lidas ({{ qtdContasAtualizar }} contas)</div>
+            <ul class="mt-1 space-y-1 text-xs">
+              <li v-for="g in contasAtualizarPorPlataforma" :key="g.platform">
+                <span :class="platformBadgeClass(g.platform)">{{ g.label }} ({{ g.nomes.length }})</span>
+                <span class="ml-1 text-muted-foreground">{{ g.nomes.join(', ') }}</span>
+              </li>
+              <li v-if="contasAtualizarPorPlataforma.length === 0" class="text-muted-foreground">
+                Nenhuma conta de marketplace com lista para ler.
+              </li>
+              <li v-for="g in plataformasForaDoAtualizar" :key="`fora-${g.platform}`" class="text-muted-foreground">
+                <template v-if="g.platform === 'amazon'">
+                  Amazon: fora da lista (a lista da Amazon na tela é antiga; os vínculos da Amazon são lidos no Vincular).
+                </template>
+                <template v-else>{{ g.label }}: fora da lista (ainda não tem leitor).</template>
+              </li>
+            </ul>
+          </div>
+          <div class="rounded-md border p-3 text-xs">
+            <div class="font-medium text-sm">Produtos novos do Bling</div>
+            Lê a lista inteira do Bling e cria só os produtos que ainda não existem no DaVinci.
+            Não altera, não reativa e não desativa nenhum produto.
+          </div>
+          <ul class="rounded-md border border-sky-200 bg-sky-50 p-3 text-xs text-sky-800 space-y-1 list-disc pl-6">
+            <li>Depois de ler, liga os anúncios aos produtos sozinho (o mesmo Vincular) e segura o robô do Flex até terminar, para ele não desligar o Flex de anúncio que ainda não foi ligado.</li>
+            <li>Não grava nada no Bling nem nos marketplaces e não envia estoque (isso é o Sincronizar).</li>
+            <li>Leva ~25–45 min (até 1 h se o robô do Flex estiver rodando). Pode fechar esta janela: continua em segundo plano e avisa aqui quando terminar.</li>
+          </ul>
+          <div v-if="avisoMassa || jobActive" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            {{ avisoMassa || descreverMassa(massaAtiva) }}
+          </div>
+        </div>
+
+        <!-- Andamento e resultado -->
+        <div v-else class="p-4 space-y-3 flex-1 overflow-y-auto text-sm">
+          <div v-if="activeJob.status === 'running' || activeJob.status === 'pending'" class="flex items-center gap-2">
+            <Loader2 class="size-4 animate-spin text-sky-600" />
+            <span class="text-muted-foreground">{{ atualizarEtapa }}</span>
+          </div>
+          <div>
+            <div class="flex justify-between text-xs mb-1">
+              <span class="text-muted-foreground tabular-nums">
+                {{ atualizarContasLidas.length }} de {{ atualizarTotalContas }} contas lidas
+              </span>
+              <span class="tabular-nums font-semibold text-sky-600">
+                {{ pct(atualizarContasLidas.length, atualizarTotalContas) }}%
+              </span>
+            </div>
+            <div class="h-2 bg-muted rounded overflow-hidden">
+              <div class="h-full bg-sky-500 transition-all" :style="`width: ${pct(atualizarContasLidas.length, atualizarTotalContas)}%`" />
+            </div>
+            <div v-if="atualizarVincularProgresso.total" class="text-xs text-muted-foreground tabular-nums mt-1">
+              Vincular: {{ fmtN(atualizarVincularProgresso.feitas) }} de {{ fmtN(atualizarVincularProgresso.total) }} contas
+            </div>
+          </div>
+
+          <!-- Uma linha por conta -->
+          <ul v-if="atualizarContasLidas.length" class="max-h-56 overflow-auto text-xs space-y-0.5 bg-muted/30 p-2 rounded">
+            <li
+              v-for="(d, idx) in atualizarContasLidas"
+              :key="idx"
+              :class="d.resultado === 'ok' ? 'text-emerald-700' : 'text-amber-700'"
+            >
+              <span class="font-bold">{{ atualizarContaIcone(d) }}</span>
+              <span class="uppercase font-semibold ml-1">{{ nomePlataforma(d.plataforma) }}</span>
+              {{ d.nome }}: {{ atualizarContaTexto(d) }}
+            </li>
+          </ul>
+
+          <!-- Resultado final -->
+          <div
+            v-if="activeJob.status === 'succeeded' || activeJob.status === 'failed' || activeJob.status === 'cancelled'"
+            class="rounded-md border-2 px-3 py-2 text-sm space-y-2"
+            :class="atualizarSummaryClass(activeJob)"
+          >
+            <div v-if="jobInterrompido(activeJob)" class="text-xs font-medium">
+              Interrompido no meio (publicação ou reinício do robô): o que já foi gravado está nas linhas acima.
+              Clique em Atualizar de novo.
+            </div>
+            <div v-else-if="atualizarErroTexto(activeJob)" class="text-xs">{{ atualizarErroTexto(activeJob) }}</div>
+            <template v-if="!jobInterrompido(activeJob)">
+            <div v-if="atualizarResultado(activeJob).anuncios">
+              <div class="font-semibold">Listas de anúncios</div>
+              <div class="text-xs">
+                {{ fmtN(atualizarResultado(activeJob).anuncios.ok) }} de {{ fmtN(atualizarResultado(activeJob).anuncios.contas) }} contas lidas ·
+                {{ fmtN(atualizarResultado(activeJob).anuncios.novos) }} anúncios novos ·
+                {{ fmtN(atualizarResultado(activeJob).anuncios.atualizados) }} atualizados<template v-if="atualizarResultado(activeJob).anuncios.falhas"> ·
+                {{ fmtN(atualizarResultado(activeJob).anuncios.falhas) }} conta(s) com falha</template><template v-if="atualizarResultado(activeJob).anuncios.puladas"> ·
+                {{ fmtN(atualizarResultado(activeJob).anuncios.puladas) }} pulada(s)</template>
+              </div>
+              <div v-if="atualizarSemLeituraTexto(activeJob)" class="text-xs opacity-80">
+                {{ atualizarSemLeituraTexto(activeJob) }}
+              </div>
+            </div>
+            <div v-if="atualizarResultado(activeJob).flex?.conseguiu === false" class="text-xs font-medium">
+              O robô do Flex estava rodando e não terminou em 10 min: as listas do Mercado Livre e da Shopee não foram gravadas.
+              Tente de novo em alguns minutos.
+            </div>
+            <div v-else-if="(atualizarResultado(activeJob).flex?.esperou_s ?? 0) > 0" class="text-xs opacity-80">
+              Esperou {{ fmtN(atualizarResultado(activeJob).flex.esperou_s) }} s o robô do Flex terminar a rodada dele.
+            </div>
+            <div>
+              <div class="font-semibold">Produtos novos do Bling</div>
+              <div v-if="atualizarBlingTexto(activeJob).pulado" class="text-xs">
+                Pulado: {{ atualizarBlingTexto(activeJob).pulado }}.
+              </div>
+              <div v-else-if="atualizarBlingTexto(activeJob).erro" class="text-xs">
+                Não deu para ler o Bling: {{ atualizarBlingTexto(activeJob).erro }}
+              </div>
+              <template v-else>
+                <div class="text-xs">{{ atualizarBlingTexto(activeJob).linha }}</div>
+                <div v-if="atualizarBlingTexto(activeJob).skus.length" class="text-[11px] font-mono opacity-80 break-words">
+                  Criados: {{ atualizarBlingTexto(activeJob).skus.join(', ') }}
+                </div>
+              </template>
+            </div>
+            <div v-if="atualizarResultado(activeJob).vincular">
+              <div class="font-semibold">Vincular (rodou sozinho)</div>
+              <div v-if="vincularIncompleto(activeJob)" class="text-xs font-medium">
+                O Vincular não terminou<template v-if="atualizarResultado(activeJob).vincular_erro">: {{ atualizarResultado(activeJob).vincular_erro }}</template>.
+                Rode o Vincular antes da próxima rodada do robô do Flex.
+                <ul v-if="atualizarVincularPendentes.length" class="mt-0.5 font-normal">
+                  <li v-for="(d, i) in atualizarVincularPendentes" :key="i">
+                    ⚠ {{ nomePlataforma(d.platform) }} {{ d.integration_name }}{{ d.error ? ` — ${d.error}` : '' }}
+                  </li>
+                </ul>
+              </div>
+              <div class="text-xs">{{ vincularLinhaPrincipal(atualizarResultado(activeJob).vincular) }}</div>
+              <div class="text-xs opacity-80">{{ vincularLinhaDetalhe(atualizarResultado(activeJob).vincular) }}</div>
+              <div v-if="vincularLinhaLista(atualizarResultado(activeJob).vincular)" class="text-xs opacity-80">
+                {{ vincularLinhaLista(atualizarResultado(activeJob).vincular) }}
+              </div>
+              <details v-if="vincularMudancas(atualizarResultado(activeJob).vincular).length" class="text-xs mt-1">
+                <summary class="cursor-pointer underline">Ver {{ vincularMudancas(atualizarResultado(activeJob).vincular).length }} mudança(s)</summary>
+                <ul class="mt-1 font-mono text-[11px] space-y-0.5 max-h-40 overflow-auto">
+                  <li v-for="(m, i) in vincularMudancas(atualizarResultado(activeJob).vincular)" :key="i">
+                    {{ m.conta ? `${m.conta}: ` : '' }}{{ textoMudanca(m) }}
+                  </li>
+                </ul>
+              </details>
+            </div>
+            <div class="text-xs font-medium">
+              Para enviar o estoque aos anúncios novos ou movidos, clique em Sincronizar.
+            </div>
+            </template>
+          </div>
+        </div>
+
+        <div class="border-t p-3 flex gap-2 justify-end">
+          <Button v-if="!activeJob" variant="outline" @click="showAtualizar = false">Cancelar</Button>
+          <Button
+            v-if="!activeJob"
+            class="bg-sky-600 hover:bg-sky-700 text-white"
+            :disabled="jobActive || qtdContasAtualizar === 0"
+            @click="runAtualizar"
+          >
+            <CloudDownload class="size-4 mr-1.5" /> Atualizar agora
+          </Button>
+          <Button
+            v-if="activeJob && (activeJob.status === 'succeeded' || activeJob.status === 'failed' || activeJob.status === 'cancelled')"
+            variant="outline"
+            @click="showAtualizar = false"
+          >
+            Fechar
+          </Button>
+          <Button v-else-if="activeJob" variant="outline" @click="showAtualizar = false">Minimizar</Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Vincular (era o "Vincular Automático"): lê os anúncios ao vivo e acerta
+         o SKU e o vínculo SÓ no DaVinci. -->
     <div v-if="showAutoLink" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showAutoLink = false">
-      <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(560px,95vw)] max-h-[85vh] flex flex-col">
+      <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(600px,95vw)] max-h-[85vh] flex flex-col">
         <div class="flex items-center justify-between border-b p-4">
           <div>
             <h3 class="font-semibold flex items-center gap-2">
               <Zap class="size-5 text-emerald-600" />
-              Vincular Anúncios Automaticamente
+              Vincular
             </h3>
             <p class="text-xs text-muted-foreground mt-1">
-              Selecione as contas que deseja vincular e a plataforma vai buscar os anúncios e vincular automaticamente pelo SKU.
+              Lê os anúncios ao vivo e atualiza o SKU e o vínculo SÓ no DaVinci.
+              Não muda nada no marketplace e não envia estoque.
             </p>
           </div>
           <button @click="showAutoLink = false"><X class="size-4" /></button>
@@ -2848,21 +3735,21 @@ onUnmounted(() => {
         <div v-if="!activeJob" class="p-4 space-y-4 flex-1 overflow-y-auto">
           <div class="space-y-2">
             <div class="flex items-center justify-between">
-              <label class="text-sm font-medium">Selecione as contas para vincular:</label>
+              <label class="text-sm font-medium">Contas que serão lidas:</label>
               <div class="flex gap-2">
-                <Button variant="ghost" size="sm" class="text-xs h-7 px-2" @click="selectedAutoLinkIds = new Set(marketplaceIntegrations.map(i => i.id))">Todas</Button>
+                <Button variant="ghost" size="sm" class="text-xs h-7 px-2" @click="selectedAutoLinkIds = new Set(contasVincular.map(i => i.id))">Todas</Button>
                 <Button variant="ghost" size="sm" class="text-xs h-7 px-2" @click="selectedAutoLinkIds = new Set()">Nenhuma</Button>
               </div>
             </div>
-            <div class="rounded-lg border max-h-[280px] overflow-y-auto">
-              <p v-if="marketplaceIntegrations.length === 0" class="text-sm text-muted-foreground text-center py-4">
-                Nenhuma integração de marketplace conectada.
+            <div class="rounded-lg border max-h-[240px] overflow-y-auto">
+              <p v-if="contasVincular.length === 0" class="text-sm text-muted-foreground text-center py-4">
+                Nenhuma conta de marketplace conectada.
               </p>
               <label
-                v-for="(integ, idx) in marketplaceIntegrationsSorted"
+                v-for="(integ, idx) in contasVincular"
                 :key="integ.id"
                 class="flex items-center gap-3 px-3 py-2.5 hover:bg-muted/40 cursor-pointer transition-colors"
-                :class="idx !== marketplaceIntegrationsSorted.length - 1 ? 'border-b' : ''"
+                :class="idx !== contasVincular.length - 1 ? 'border-b' : ''"
               >
                 <input
                   type="checkbox"
@@ -2873,15 +3760,34 @@ onUnmounted(() => {
                 <span class="text-sm truncate">{{ integ.name }}</span>
               </label>
             </div>
-            <p v-if="marketplaceIntegrations.length > 0" class="text-xs text-muted-foreground">
-              {{ selectedAutoLinkIds.size }} de {{ marketplaceIntegrations.length }} conta(s) selecionada(s)
+            <p v-if="contasVincular.length > 0" class="text-xs text-muted-foreground">
+              {{ selectedAutoLinkIds.size }} de {{ contasVincular.length }} conta(s) selecionada(s)
+            </p>
+            <p v-if="plataformasForaDoVincular.length" class="text-xs text-muted-foreground">
+              {{ plataformasForaDoVincular.map(g => g.label).join('/') }}: sem leitor de vínculo (ficam de fora).
             </p>
           </div>
 
-          <div class="rounded-lg border border-amber-200 bg-amber-50 p-3">
-            <p class="text-xs text-amber-700">
-              <strong>Importante:</strong> Os SKUs precisam ser idênticos entre o Bling e os marketplaces para a vinculação funcionar.
+          <p
+            v-if="aba === 'produtos' && produtosCarregadosDe && (saude.sku_divergente || saude.mortos)"
+            class="text-xs text-muted-foreground"
+          >
+            Agora em {{ DEPARTAMENTOS.find(d => d.value === produtosCarregadosDe)?.label }}:
+            {{ fmtN(saude.sku_divergente) }} vínculo(s) com SKU do anúncio diferente do produto ·
+            {{ fmtN(saude.mortos) }} vínculo(s) morto(s).
+          </p>
+
+          <div class="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800 space-y-1">
+            <p>
+              <strong>O que pode mudar (só no DaVinci):</strong> cria o vínculo que falta, move o vínculo cujo SKU
+              mudou no anúncio, atualiza o SKU guardado, marca ou revive vínculo morto e acerta o produto mostrado na
+              aba Anúncios.
             </p>
+            <p><strong>O que não muda:</strong> nada no marketplace, nada no Bling, nenhum estoque enviado.</p>
+            <p>O SKU tem de ser igual no Bling e no anúncio (o sufixo de lote, como .sp ou .ci, conta).</p>
+          </div>
+          <div v-if="avisoMassa || jobActive" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            {{ avisoMassa || descreverMassa(massaAtiva) }}
           </div>
         </div>
 
@@ -2898,16 +3804,16 @@ onUnmounted(() => {
           <div>
             <div class="flex justify-between text-xs mb-1">
               <span class="text-muted-foreground tabular-nums">
-                {{ activeJob.details_count ?? 0 }} / {{ activeJob.total }} integraçõe(s)
+                {{ activeJob.details_count ?? 0 }} / {{ activeJob.total }} conta(s)
               </span>
               <span class="tabular-nums font-semibold text-emerald-600">
-                {{ activeJob.total > 0 ? Math.round(((activeJob.details_count ?? 0) / activeJob.total) * 100) : 0 }}%
+                {{ pct(activeJob.details_count ?? 0, activeJob.total) }}%
               </span>
             </div>
             <div class="h-2 bg-muted rounded overflow-hidden">
               <div
                 class="h-full bg-emerald-500 transition-all"
-                :style="`width: ${activeJob.total > 0 ? ((activeJob.details_count ?? 0) / activeJob.total) * 100 : 0}%`"
+                :style="`width: ${pct(activeJob.details_count ?? 0, activeJob.total)}%`"
               />
             </div>
           </div>
@@ -2928,34 +3834,51 @@ onUnmounted(() => {
             :class="autoLinkSummaryClass(activeJob)"
           >
             <div class="text-center">
-              <div class="text-lg font-bold tabular-nums">
-                {{ autoLinkTotals(activeJob).created }} produto(s) vinculados<template v-if="autoLinkTotals(activeJob).movidos"> ·
-                {{ autoLinkTotals(activeJob).movidos }} movido(s) para o SKU novo do anúncio</template><template v-if="autoLinkTotals(activeJob).mortos"> ·
-                {{ autoLinkTotals(activeJob).mortos }} anúncio(s) marcado(s) como morto(s)</template><template v-if="autoLinkTotals(activeJob).revividos"> ·
-                {{ autoLinkTotals(activeJob).revividos }} voltaram a viver</template>
+              <!-- Cortado no meio (result vazio): os números estariam zerados e
+                   contradiriam as contas abaixo. -->
+              <div v-if="!activeJob.result" class="text-sm font-medium">
+                {{ jobInterrompido(activeJob)
+                  ? 'Interrompido no meio (publicação ou reinício do robô): o que já foi vinculado está nas contas abaixo. Clique em Vincular de novo.'
+                  : (activeJob.error || 'Parou sem resumo.') }}
               </div>
-              <div class="text-xs mt-0.5 opacity-90">
-                {{ autoLinkTotals(activeJob).already }} já existentes ·
-                {{ autoLinkTotals(activeJob).not_found }} não encontrados<template v-if="autoLinkTotals(activeJob).sku_vazio"> ·
-                {{ autoLinkTotals(activeJob).sku_vazio }} sem SKU no anúncio</template><template v-if="autoLinkTotals(activeJob).sku_ambiguo"> ·
-                {{ autoLinkTotals(activeJob).sku_ambiguo }} com SKU duplicado no cadastro</template>
+              <template v-else>
+              <div class="text-base font-bold tabular-nums">{{ vincularLinhaPrincipal(activeJob.result) }}</div>
+              <div class="text-xs mt-0.5 opacity-90">{{ vincularLinhaDetalhe(activeJob.result) }}</div>
+              <div v-if="vincularLinhaLista(activeJob.result)" class="text-xs mt-0.5 opacity-90">
+                {{ vincularLinhaLista(activeJob.result) }}
+              </div>
+              <div v-if="vincularSkusSemProduto(activeJob.result).length" class="text-[11px] mt-0.5 font-mono opacity-80 break-words">
+                SKUs sem produto no DaVinci: {{ vincularSkusSemProduto(activeJob.result).join(', ') }}
               </div>
               <div v-if="activeJob.error" class="text-xs mt-1 font-mono opacity-90">{{ activeJob.error }}</div>
+              </template>
             </div>
             <!-- Per-integration breakdown -->
             <ul class="mt-2 space-y-0.5 text-xs">
-              <li v-for="(b, idx) in autoLinkBreakdown(jobDetails)" :key="idx" class="flex items-center gap-1">
-                <span class="font-bold">{{ b.bad ? '⚠' : '✓' }}</span>
-                <span class="uppercase font-semibold">{{ b.platform }}</span>
-                <span>({{ b.integration }}):</span>
-                <template v-if="b.bad">
-                  <span class="text-amber-700 font-mono text-[11px]">pendente após retries<template v-if="b.error"> · {{ b.error }}</template></span>
-                </template>
-                <template v-else>
-                  <span>{{ b.created }} vinculados, {{ b.already }} já existentes, {{ b.not_found }} não encontrados<template v-if="b.sku_vazio">, {{ b.sku_vazio }} sem SKU</template><template v-if="b.sku_ambiguo">, {{ b.sku_ambiguo }} SKU duplicado ({{ b.sku_ambiguo_sample.join(', ') }})</template></span>
-                </template>
+              <li v-for="(b, idx) in autoLinkBreakdown(jobDetails, activeJob.result)" :key="idx">
+                <div class="flex items-center gap-1">
+                  <span class="font-bold">{{ b.bad ? '⚠' : '✓' }}</span>
+                  <span class="uppercase font-semibold">{{ b.platform }}</span>
+                  <span>({{ b.integration }}):</span>
+                  <template v-if="b.bad">
+                    <span class="text-amber-700 font-mono text-[11px]">pendente: não deu para ler<template v-if="b.error"> · {{ b.error }}</template></span>
+                  </template>
+                  <template v-else>
+                    <span>{{ b.created }} vinculados, {{ b.already }} já existentes, {{ b.not_found }} sem produto<template v-if="b.sku_vazio">, {{ b.sku_vazio }} sem SKU</template><template v-if="b.sku_ambiguo">, {{ b.sku_ambiguo }} SKU duplicado ({{ b.sku_ambiguo_sample.join(', ') }})</template></span>
+                  </template>
+                </div>
+                <details v-if="b.mudancas.length" class="ml-4">
+                  <summary class="cursor-pointer underline">ver {{ b.mudancas.length }} movido(s)/criado(s)</summary>
+                  <ul class="font-mono text-[11px] space-y-0.5">
+                    <li v-for="(m, i) in b.mudancas" :key="i">{{ textoMudanca(m) }}</li>
+                  </ul>
+                </details>
               </li>
             </ul>
+            <div class="mt-2 text-xs font-medium">
+              Para enviar o estoque aos anúncios movidos ou criados, clique em Sincronizar.
+            </div>
+            <div class="text-[11px] opacity-70">Variação do Mercado Livre sem SKU no anúncio é pulada sem contar.</div>
           </div>
 
           <!-- Live log -->
@@ -2968,8 +3891,8 @@ onUnmounted(() => {
             >
               <span class="font-bold">{{ (d.result === 'failed' || d.result === 'pending') ? '⚠' : '✓' }}</span>
               [{{ (d.platform || '').toUpperCase() }}] {{ d.integration_name || (d.integration_id || '').slice(0, 8) }}:
-              <template v-if="d.result === 'failed' || d.result === 'pending'">pendente após retries<template v-if="d.error"> · {{ d.error }}</template></template>
-              <template v-else>{{ d.created ?? 0 }} vinculados · {{ d.already_present ?? 0 }} já existentes · {{ d.not_found ?? 0 }} não encontrados<template v-if="d.sku_vazio"> · {{ d.sku_vazio }} sem SKU</template><template v-if="d.sku_ambiguo"> · {{ d.sku_ambiguo }} SKU duplicado</template></template>
+              <template v-if="d.result === 'failed' || d.result === 'pending'">pendente: não deu para ler<template v-if="d.error"> · {{ d.error }}</template></template>
+              <template v-else>{{ d.created ?? 0 }} vinculados · {{ d.already_present ?? 0 }} já existentes · {{ d.not_found ?? 0 }} sem produto<template v-if="d.sku_vazio"> · {{ d.sku_vazio }} sem SKU</template><template v-if="d.sku_ambiguo"> · {{ d.sku_ambiguo }} SKU duplicado</template></template>
             </li>
             <li v-if="!jobDetails.length" class="text-muted-foreground italic">
               processando…
@@ -2983,11 +3906,11 @@ onUnmounted(() => {
           <Button
             v-if="!activeJob"
             class="bg-emerald-600 hover:bg-emerald-700 text-white"
-            :disabled="selectedAutoLinkIds.size === 0"
+            :disabled="selectedAutoLinkIds.size === 0 || jobActive"
             @click="runAutoLink"
           >
             <Zap class="size-4 mr-1.5" />
-            Iniciar Vinculação ({{ selectedAutoLinkIds.size }})
+            Vincular agora ({{ selectedAutoLinkIds.size }} contas)
           </Button>
           <Button
             v-if="activeJob && (activeJob.status === 'succeeded' || activeJob.status === 'failed' || activeJob.status === 'cancelled')"
@@ -3007,19 +3930,20 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- Sincronizar Todos dialog (SSH-style) -->
+    <!-- Sincronizar (era o "Sincronizar Todos"; o "Sincronizar Selecionados"
+         usa este mesmo diálogo, só com os produtos marcados). -->
     <div v-if="showSyncAll" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showSyncAll = false">
       <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(560px,95vw)] max-h-[85vh] flex flex-col">
         <div class="flex items-center justify-between border-b p-4">
           <div>
             <h3 class="font-semibold flex items-center gap-2">
               <RefreshCw class="size-5 text-cyan-600" :class="activeJob?.status === 'running' || activeJob?.status === 'pending' ? 'animate-spin' : ''" />
-              Sincronizar Todos os Produtos
+              {{ syncAllProductIds?.length ? `Sincronizar ${syncAllProductIds.length} produto(s) selecionado(s)` : 'Sincronizar' }}
             </h3>
             <p class="text-xs text-muted-foreground mt-1">
               {{ activeJob && (activeJob.status === 'running' || activeJob.status === 'pending')
-                ? 'Sincronização em andamento. Você pode fechar este dialog — o processo continua em segundo plano.'
-                : 'Selecione as contas/plataformas que deseja sincronizar. O estoque do Bling será enviado para as plataformas selecionadas.' }}
+                ? 'Sincronização em andamento. Pode fechar esta janela: continua em segundo plano.'
+                : 'Envia o estoque do Bling, relido agora, para os anúncios vinculados das contas marcadas. Não altera nada no Bling.' }}
             </p>
           </div>
           <button @click="showSyncAll = false"><X class="size-4" /></button>
@@ -3061,8 +3985,13 @@ onUnmounted(() => {
 
           <div class="rounded-lg border border-cyan-200 bg-cyan-50 p-3">
             <p class="text-xs text-cyan-700">
-              <strong>Info:</strong> A sincronização é executada em segundo plano. Você pode fechar esta janela a qualquer momento.
+              Com todas as contas leva ~1 h e divide a fila do Bling com os pedidos.
+              <strong>Não dá para cancelar depois de começar.</strong>
+              Roda em segundo plano: pode fechar esta janela.
             </p>
+          </div>
+          <div v-if="avisoMassa || jobActive" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            {{ avisoMassa || descreverMassa(massaAtiva) }}
           </div>
         </div>
 
@@ -3079,13 +4008,13 @@ onUnmounted(() => {
             <div class="flex justify-between text-xs mb-1">
               <span class="text-muted-foreground tabular-nums">{{ activeJob.processed }} / {{ activeJob.total }} links</span>
               <span class="tabular-nums font-semibold text-cyan-600">
-                {{ activeJob.total > 0 ? Math.round((activeJob.processed / activeJob.total) * 100) : 0 }}%
+                {{ pct(activeJob.processed, activeJob.total) }}%
               </span>
             </div>
             <div class="h-2 bg-muted rounded overflow-hidden">
               <div
                 class="h-full bg-cyan-500 transition-all"
-                :style="`width: ${activeJob.total > 0 ? (activeJob.processed / activeJob.total) * 100 : 0}%`"
+                :style="`width: ${pct(activeJob.processed, activeJob.total)}%`"
               />
             </div>
           </div>
@@ -3128,6 +4057,13 @@ onUnmounted(() => {
               {{ syncCounters(activeJob).skipped }} pulado(s) ·
               {{ syncCounters(activeJob).fatal + syncCounters(activeJob).requires_review }} erro(s)
             </div>
+            <div v-if="falhasProduto(activeJob)" class="text-xs mt-1 font-medium">
+              {{ fmtN(falhasProduto(activeJob)) }} produto(s) deram erro e não foram enviados (rode o
+              Sincronizar de novo; se repetir, abra o produto e use "Sincronizar"):
+              <span v-if="falhasAmostra(activeJob).length" class="font-mono font-normal break-words">
+                {{ falhasAmostra(activeJob).join(', ') }}{{ falhasProduto(activeJob) > falhasAmostra(activeJob).length ? '…' : '' }}
+              </span>
+            </div>
             <div v-if="activeJob.error" class="text-xs mt-1 font-mono opacity-90">{{ activeJob.error }}</div>
           </div>
 
@@ -3168,11 +4104,11 @@ onUnmounted(() => {
           <Button v-if="!activeJob" variant="outline" @click="showSyncAll = false">Cancelar</Button>
           <Button
             v-if="!activeJob"
-            :disabled="selectedSyncAllIds.size === 0"
+            :disabled="selectedSyncAllIds.size === 0 || jobActive"
             @click="runSyncAll"
           >
             <RefreshCw class="size-4 mr-1.5" />
-            Sincronizar ({{ selectedSyncAllIds.size }} contas)
+            Sincronizar agora ({{ selectedSyncAllIds.size }} contas)
           </Button>
           <Button
             v-if="activeJob && (activeJob.status === 'succeeded' || activeJob.status === 'failed' || activeJob.status === 'cancelled')"
@@ -3187,6 +4123,238 @@ onUnmounted(() => {
             @click="showSyncAll = false"
           >
             Minimizar
+          </Button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Organizar (só ADM, 17/11/2026): esconde da TELA o que não vale mais.
+         Nada é apagado; dá para desfazer por lote, por motivo ou por item. -->
+    <div v-if="showOrganizar" class="fixed inset-0 z-50 grid place-items-center bg-black/40" @click.self="showOrganizar = false">
+      <div class="product-dialog bg-background rounded-lg shadow-lg w-[min(860px,95vw)] max-h-[90vh] flex flex-col">
+        <div class="flex items-center justify-between border-b p-4">
+          <div>
+            <h3 class="font-semibold flex items-center gap-2">
+              <EyeOff class="size-5 text-violet-600" />
+              Organizar
+            </h3>
+            <p class="text-xs text-muted-foreground mt-1">
+              Só esconde da tela do DaVinci. Nada é apagado, nada muda no Bling nem nos marketplaces, o estoque
+              continua sendo enviado (inclusive o 0 dos excluídos). Dá para desfazer.
+            </p>
+          </div>
+          <button @click="showOrganizar = false"><X class="size-4" /></button>
+        </div>
+
+        <div class="flex gap-1 border-b px-4 pt-2" aria-label="Abas do Organizar">
+          <button
+            type="button"
+            class="rounded-t px-3 py-1.5 text-sm"
+            :class="organizarAba === 'organizar' ? 'bg-muted font-medium' : 'text-muted-foreground hover:text-foreground'"
+            :aria-pressed="organizarAba === 'organizar'"
+            @click="organizarAba = 'organizar'; orgLista = null"
+          >
+            Organizar
+          </button>
+          <button
+            type="button"
+            class="rounded-t px-3 py-1.5 text-sm"
+            :class="organizarAba === 'ocultos' ? 'bg-muted font-medium' : 'text-muted-foreground hover:text-foreground'"
+            :aria-pressed="organizarAba === 'ocultos'"
+            @click="organizarAba = 'ocultos'; orgLista = null"
+          >
+            Ocultos ({{ fmtN(orgPrevia?.ocultos.total) }})
+          </button>
+        </div>
+
+        <div class="p-4 space-y-3 flex-1 overflow-y-auto text-sm">
+          <div v-if="orgErro" class="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            {{ orgErro }}
+          </div>
+          <div v-if="orgCarregando && !orgPrevia" class="flex items-center gap-2 text-muted-foreground">
+            <Loader2 class="size-4 animate-spin" /> contando…
+          </div>
+
+          <!-- Resultado do último "Ocultar" -->
+          <div v-if="orgResultado" class="rounded-md border-2 border-emerald-300 bg-emerald-50 px-3 py-2 text-emerald-800">
+            <div class="font-semibold">
+              Ocultados: {{ fmtN(orgResultado.ocultados) }}<template v-if="orgLoteDoResultado">
+              (lote de {{ fmtQuando(orgLoteDoResultado.oculto_em) }}<template v-if="orgLoteDoResultado.oculto_por_nome"> por {{ orgLoteDoResultado.oculto_por_nome }}</template>)</template>
+            </div>
+            <div class="text-xs">{{ orgPorChaveTexto(orgResultado.por_chave) }}</div>
+            <div v-if="orgResultado.sairam_desde_previa" class="text-xs">
+              {{ fmtN(orgResultado.sairam_desde_previa) }} saíram da lista desde a prévia (voltaram a valer) e ficaram na tela.
+              Os que entraram depois ficam para a próxima.
+            </div>
+            <div v-if="!orgResultado.ocultados" class="text-xs">
+              Nada foi escondido: tudo o que estava na prévia já tinha saído da lista.
+            </div>
+            <Button
+              v-if="orgResultado.lote_id"
+              size="sm"
+              variant="outline"
+              class="mt-2"
+              :disabled="orgReexibindo"
+              @click="reexibirOrganizar({ lote_id: orgResultado.lote_id }, 'Lote desfeito')"
+            >
+              <Eye class="size-4 mr-1.5" /> Desfazer este lote
+            </Button>
+          </div>
+
+          <!-- Aba Organizar: a prévia, uma caixa por motivo -->
+          <template v-if="orgPrevia && organizarAba === 'organizar'">
+            <div
+              v-for="c in orgPrevia.chaves"
+              :key="c.chave"
+              class="rounded-md border p-3"
+              :class="orgMarcadas.has(c.chave) && c.quantidade > 0 ? 'border-violet-300 bg-violet-50/40' : ''"
+            >
+              <label class="flex items-start gap-2" :class="c.quantidade > 0 ? 'cursor-pointer' : 'opacity-60'">
+                <input
+                  type="checkbox"
+                  class="mt-1"
+                  :checked="orgMarcadas.has(c.chave)"
+                  :disabled="c.quantidade === 0"
+                  @change="alternarChaveOrganizar(c.chave)"
+                />
+                <span class="flex-1">
+                  <span class="font-medium">{{ c.rotulo }}</span>
+                  <span class="ml-1 tabular-nums">— {{ fmtN(c.quantidade) }}</span>
+                  <span class="block text-xs text-muted-foreground">{{ c.explicacao }}</span>
+                </span>
+              </label>
+              <button
+                v-if="c.quantidade > 0"
+                type="button"
+                class="ml-6 mt-1 text-xs underline text-violet-700"
+                @click="verListaOrganizar(c.chave, false)"
+              >
+                Ver lista
+              </button>
+            </div>
+            <p class="text-xs text-muted-foreground">
+              Prévia válida até {{ fmtQuando(orgPrevia.expira_em) }}. Nada é gravado antes do botão "Ocultar".
+            </p>
+          </template>
+
+          <!-- Aba Ocultos: lotes e motivos, com "Mostrar de novo" -->
+          <template v-if="orgPrevia && organizarAba === 'ocultos'">
+            <p v-if="!orgPrevia.ocultos.total" class="text-muted-foreground">Nada escondido agora.</p>
+            <div v-if="orgPrevia.lotes.length" class="space-y-1">
+              <div class="font-medium">Lotes</div>
+              <div
+                v-for="l in orgPrevia.lotes"
+                :key="l.lote_id"
+                class="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-xs"
+              >
+                <span class="flex-1">
+                  {{ fmtQuando(l.oculto_em) }}<template v-if="l.oculto_por_nome"> por {{ l.oculto_por_nome }}</template>
+                  — {{ fmtN(l.quantidade) }} item(ns)
+                  <span class="block text-muted-foreground">{{ orgPorChaveTexto(l.por_chave) }}</span>
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  :disabled="orgReexibindo"
+                  @click="reexibirOrganizar({ lote_id: l.lote_id }, `Lote de ${fmtQuando(l.oculto_em)}`)"
+                >
+                  <Eye class="size-4 mr-1.5" /> Mostrar de novo
+                </Button>
+              </div>
+            </div>
+            <div v-if="orgPrevia.ocultos.total" class="space-y-1">
+              <div class="font-medium">Por motivo</div>
+              <template v-for="(n, chave) in orgPrevia.ocultos.por_chave" :key="chave">
+                <div v-if="n" class="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-xs">
+                  <span class="flex-1">{{ orgRotulo(String(chave)) }} — {{ fmtN(n) }}</span>
+                  <button type="button" class="underline text-violet-700" @click="verListaOrganizar(String(chave), true)">Ver lista</button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    :disabled="orgReexibindo"
+                    @click="reexibirOrganizar({ chave: String(chave) }, orgRotulo(String(chave)))"
+                  >
+                    <Eye class="size-4 mr-1.5" /> Mostrar todos de novo
+                  </Button>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Lista paginada (100 por página) de um motivo -->
+          <div v-if="orgLista" class="rounded-md border">
+            <div class="flex flex-wrap items-center gap-2 border-b bg-muted/40 px-3 py-2 text-xs">
+              <span class="flex-1 font-medium">
+                {{ orgLista.ocultos ? 'Escondidos' : 'Vão ser escondidos' }}: {{ orgRotulo(orgLista.chave) }}
+                <template v-if="orgLista.dados"> — {{ fmtN(orgLista.dados.total) }}</template>
+              </span>
+              <Loader2 v-if="orgLista.carregando" class="size-4 animate-spin" />
+              <template v-if="orgLista.dados && orgPaginas(orgLista.dados) > 1">
+                <Button size="sm" variant="outline" :disabled="orgLista.pagina <= 1 || orgLista.carregando" @click="verListaOrganizar(orgLista.chave, orgLista.ocultos, orgLista.pagina - 1)">‹</Button>
+                <span>página {{ orgLista.pagina }} de {{ orgPaginas(orgLista.dados) }}</span>
+                <Button size="sm" variant="outline" :disabled="orgLista.pagina >= orgPaginas(orgLista.dados) || orgLista.carregando" @click="verListaOrganizar(orgLista.chave, orgLista.ocultos, orgLista.pagina + 1)">›</Button>
+              </template>
+              <button class="text-muted-foreground hover:text-foreground" title="fechar a lista" @click="orgLista = null">
+                <X class="size-4" />
+              </button>
+            </div>
+            <div class="max-h-72 overflow-auto">
+              <table class="w-full text-xs">
+                <thead>
+                  <tr>
+                    <th>SKU</th>
+                    <th>Nome</th>
+                    <th>Conta</th>
+                    <th>Anúncio</th>
+                    <th>Variação</th>
+                    <th>SKU do anúncio</th>
+                    <th>Motivo</th>
+                    <th>Data</th>
+                    <th v-if="orgLista.ocultos"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="it in orgLista.dados?.itens || []" :key="it.marcador_id || it.registro_id">
+                    <td class="font-mono">{{ it.sku || '—' }}</td>
+                    <td class="max-w-[16rem] truncate" :title="it.nome || ''">{{ it.nome || '—' }}</td>
+                    <td>{{ it.conta || '—' }}</td>
+                    <td class="font-mono">{{ it.anuncio || '—' }}</td>
+                    <td class="font-mono">{{ it.variacao || '—' }}</td>
+                    <td class="font-mono">{{ it.sku_anuncio || '—' }}</td>
+                    <td>{{ it.motivo || '—' }}</td>
+                    <td class="whitespace-nowrap">{{ fmtQuando(it.data) }}</td>
+                    <td v-if="orgLista.ocultos" class="text-right">
+                      <button
+                        v-if="it.marcador_id"
+                        type="button"
+                        class="underline text-violet-700 whitespace-nowrap"
+                        :disabled="orgReexibindo"
+                        @click="reexibirOrganizar({ marcador_ids: [it.marcador_id] }, it.sku || it.anuncio || 'item')"
+                      >
+                        Mostrar de novo
+                      </button>
+                    </td>
+                  </tr>
+                  <tr v-if="orgLista.dados && !orgLista.dados.itens.length">
+                    <td :colspan="orgLista.ocultos ? 9 : 8" class="py-3 text-center text-muted-foreground">nada nesta lista</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="border-t p-3 flex flex-wrap gap-2 justify-end">
+          <Button variant="outline" @click="showOrganizar = false">Fechar</Button>
+          <Button
+            v-if="organizarAba === 'organizar'"
+            class="bg-violet-600 hover:bg-violet-700 text-white"
+            :disabled="!orgPrevia || orgTotalMarcado === 0 || orgAplicando || orgCarregando"
+            @click="aplicarOrganizar"
+          >
+            <Loader2 v-if="orgAplicando" class="size-4 mr-1.5 animate-spin" />
+            <EyeOff v-else class="size-4 mr-1.5" />
+            Ocultar {{ fmtN(orgTotalMarcado) }} itens
           </Button>
         </div>
       </div>
@@ -3373,6 +4541,7 @@ onUnmounted(() => {
     min-width: 0;
   }
   #product-tools > * { flex: 1 1 auto; }
+  #product-tools > [aria-label="Botões de Produtos e Anúncios"] > * { flex: 1 1 auto; }
 }
 @media (max-width: 639px) {
   .product-selection-actions {

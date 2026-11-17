@@ -16,15 +16,21 @@ conftest uses for its `DELETE FROM {tbl}` wipes).
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+
+logger = structlog.get_logger()
 
 
 def _schema() -> str:
@@ -112,3 +118,46 @@ async def load_job_details_tail(
         await session.execute(text(sql), {"jid": str(job_id), "lim": limit})
     ).all()
     return [_as_dict(r.entry) for r in rows]
+
+
+@asynccontextmanager
+async def sinal_de_vida(job_id: UUID, intervalo: float = 60) -> AsyncIterator[None]:
+    """Grava `last_heartbeat_at` do job a cada `intervalo` segundos enquanto o
+    bloco roda, numa sessão PRÓPRIA (curta, um UPDATE por batida).
+
+    É o que mantém a trava global de massa (`advisory_lock.massa_em_andamento`)
+    de pé: RUNNING sem sinal há mais de 15 min deixa de travar os botões. O
+    Vincular (e a varredura das 10h) passa minutos dentro de uma conta só sem
+    tocar no job, e o Atualizar lê listas longas; a batida independe do laço
+    deles. Só bate em job não terminado (`finished_at IS NULL`). Erro de banco
+    numa batida é registrado e a próxima tenta de novo — nunca derruba o job.
+    """
+    from app.db import session_scope
+
+    schema = _schema()
+    sql = (
+        f'UPDATE "{schema}".background_jobs SET last_heartbeat_at = now() '  # noqa: S608
+        "WHERE id = :jid AND finished_at IS NULL"
+    )
+
+    async def _bater() -> None:
+        while True:
+            await asyncio.sleep(intervalo)
+            try:
+                async with session_scope() as s:
+                    await s.execute(text(sql), {"jid": str(job_id)})
+            except Exception as e:  # noqa: BLE001 — batida perdida não derruba o job
+                logger.warning(
+                    "sinal_de_vida_falhou",
+                    job_id=str(job_id),
+                    erro=f"{type(e).__name__}: {e}"[:300],
+                )
+
+    tarefa = asyncio.create_task(_bater())
+    try:
+        yield
+    finally:
+        tarefa.cancel()
+        # gather com return_exceptions: espera a batida cancelada terminar sem
+        # engolir um cancelamento do próprio job (timeout/reinício do arq).
+        await asyncio.gather(tarefa, return_exceptions=True)

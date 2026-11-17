@@ -13,6 +13,7 @@ from app.models import (
     BackgroundJob,
     BackgroundJobStatus,
     BackgroundJobType,
+    IntegrationPlatform,
     User,
 )
 from app.schemas.products import (
@@ -24,7 +25,7 @@ from app.schemas.products import (
     JobStats,
     JobStatusOut,
 )
-from app.services.advisory_lock import mass_sync_active
+from app.services.advisory_lock import recusar_se_massa_em_andamento
 from app.services.job_details import count_job_details, load_job_details
 from app.worker_pool import get_arq_pool, get_arq_sync_pool
 
@@ -200,29 +201,48 @@ async def enqueue_auto_link(
     session: Annotated[AsyncSession, Depends(get_session)],
     user: Annotated[User, Depends(require_permission("produtos", "edit"))],
 ) -> JobCreatedOut:
-    # Exclusividade "só outro massa": recusa se já há um Sincronizar Todos ou
-    # Vincular Automático em andamento. Individual por SKU não passa por aqui.
-    active = await mass_sync_active(session, user.id)
-    if active is not None:
-        raise HTTPException(
-            status.HTTP_409_CONFLICT,
-            detail={"code": "sync_already_running", **active},
-        )
+    # Botão "Vincular". Exclusividade "só outro massa", GLOBAL (17/11/2026):
+    # recusa se já há Sincronizar, Vincular, Atualizar, a noturna ou a
+    # varredura das 10h em andamento, de QUALQUER pessoa. Individual por SKU
+    # não passa por aqui.
+    await recusar_se_massa_em_andamento(session)
+    # A lista de contas é SEMPRE montada no servidor: não arquivadas, sem o
+    # Bling, só as da equipe de quem clicou e só das plataformas com leitor de
+    # vínculo. O corpo só pode estreitar. Antes, integration_ids=None lia
+    # todas as integrações, inclusive as 21 ML arquivadas e o Bling.
+    # Import local: produtos_botoes puxa os leitores de anúncio (pesado).
+    from app.services.produtos_botoes import contas_do_botao
+
+    contas = await contas_do_botao(
+        session,
+        user,
+        {
+            IntegrationPlatform.ML,
+            IntegrationPlatform.SHOPEE,
+            IntegrationPlatform.TIKTOK,
+            IntegrationPlatform.AMAZON,
+            IntegrationPlatform.MAGALU,
+        },
+    )
+    ids = [getattr(c, "id", c) for c in contas]
+    if body.integration_ids:
+        pedidas = set(body.integration_ids)
+        ids = [i for i in ids if i in pedidas]
+    if not ids:
+        raise HTTPException(400, detail={"code": "sem_contas"})
+    ids_txt = [str(i) for i in ids]
     job = BackgroundJob(
         type=BackgroundJobType.AUTO_LINK,
         status=BackgroundJobStatus.PENDING,
         created_by=user.id,
-        payload={"integration_ids": [str(i) for i in (body.integration_ids or [])]},
+        total=len(ids_txt),
+        payload={"trigger": "botao_vincular", "integration_ids": ids_txt},
     )
     session.add(job)
     await session.flush()
 
     pool = await get_arq_sync_pool()
-    arq = await pool.enqueue_job(
-        "auto_link_run",
-        str(job.id),
-        body.integration_ids and [str(i) for i in body.integration_ids],
-    )
+    arq = await pool.enqueue_job("auto_link_run", str(job.id), ids_txt)
     if arq is not None:
         job.arq_job_id = arq.job_id
     await session.commit()

@@ -123,10 +123,17 @@ async def apagar_mortos_em_lotes(
     somente_visiveis: bool = False,
     departamento: str | None = None,
     pausa: float = 0.2,
+    pular_ocultos: bool = False,
 ) -> int:
     """Apaga vínculos mortos (opcionalmente só os mortos antes de `antes_de`,
     só destas contas, só os que a tela mostra e/ou só os dos produtos de um
-    departamento). Devolve quantos apagou."""
+    departamento). Devolve quantos apagou.
+
+    `pular_ocultos=True` só no "Remover os N mortos" (endpoint só de ADM,
+    17/11/2026): não apaga o que o Organizar escondeu. A limpeza de 30 dias da
+    varredura NÃO usa — ela continua como se o Organizar não existisse (o Flex
+    lê todo vínculo morto como VINCULO_MORTO; segurar o morto oculto deixava o
+    anúncio inelegível para sempre)."""
     import asyncio
 
     from sqlalchemy import delete, select
@@ -146,6 +153,8 @@ async def apagar_mortos_em_lotes(
     while True:
         async with session_scope() as s:
             q = select(ProductLink.id).where(ProductLink.morto_desde.is_not(None))
+            if pular_ocultos:
+                q = q.where(~com_marca_do_organizar())
             if antes_de is not None:
                 q = q.where(ProductLink.morto_desde < antes_de)
             if integration_ids is not None:
@@ -163,6 +172,30 @@ async def apagar_mortos_em_lotes(
             total += res.rowcount or 0
         await asyncio.sleep(pausa)
     return total
+
+
+def com_marca_do_organizar():
+    """O vínculo (`ProductLink` de fora) tem marca ATIVA do Organizar, dele ou
+    do produto dele — sem conferir se o motivo ainda vale: o que o ADM ocultou
+    não é apagado pelo "Remover os N mortos" nem quando a marca venceu (ex.: a
+    loja foi arquivada depois). Só o remover-mortos usa (contagem e job)."""
+    from sqlalchemy import and_, or_, select
+    from sqlalchemy.orm import aliased
+
+    from app.models import OrganizarOculto, ProductLink
+
+    o = aliased(OrganizarOculto)
+    return (
+        select(o.id)
+        .where(
+            o.reexibido_em.is_(None),
+            or_(
+                and_(o.tabela == "product_links", o.registro_id == ProductLink.id),
+                and_(o.tabela == "products", o.registro_id == ProductLink.product_id),
+            ),
+        )
+        .exists()
+    )
 
 
 def condicao_visivel():

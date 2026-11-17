@@ -130,6 +130,11 @@ EXCLUIDAS = re.compile(
     # (quem pediu/aprovou/recusou e quando); o diff inteiro seria copiado a
     # cada passo. `sistema_mudanca_aprovador` (quem aprova) fica COM.
     r"|sistema_mudanca$"
+    # Produtos › Organizar (0499): a marca já é a trilha (quem ocultou e quem
+    # mostrou de novo, e quando); com o gatilho, um "Ocultar 7.208 itens"
+    # viraria 7.208 linhas aqui. A prévia guarda só ids por 30 min. A ação
+    # continua no Histórico pelo rótulo (historico/nomes.ACOES).
+    r"|organizar_(ocultos|previas)$"
     # Conferência Shopee: rodadas, coletas e saldos lidos pela máquina (a lista
     # de lojas, `conferencia_shopee_conta`, é editada por pessoas: fica COM)
     r"|conferencia_shopee_(execucao|coleta|saldo)$"

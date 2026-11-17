@@ -24,6 +24,7 @@ Credentials shape stored in `integrations.credentials`:
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -40,6 +41,11 @@ if TYPE_CHECKING:
     from app.models import ProductLink
 
 logger = structlog.get_logger()
+
+# Leitura da lista (botão Atualizar): as mesmas proteções do Vincular
+# (auto_link.TIKTOK_PAGE_TIMEOUT_SECONDS e MAX_PAGES do _link_tiktok_integration).
+LISTA_PAGINA_TIMEOUT_S = 45.0
+LISTA_MAX_PAGINAS = 200
 
 # Erro de envio que quer dizer "o produto não aceita mais estoque" (congelado,
 # excluído, desativado pela plataforma) — inclusive depois da tentativa de
@@ -1862,18 +1868,39 @@ class TikTokClient:
     async def list_listings(
         self,
         *,
-        page_size: int = 20,
-        max_pages: int | None = None,
+        page_size: int = 100,
+        max_pages: int | None = LISTA_MAX_PAGINAS,
+        page_timeout: float | None = LISTA_PAGINA_TIMEOUT_S,
     ) -> AsyncIterator[dict]:
-        """Async generator yielding normalized listing dicts for the import service."""
+        """Async generator yielding normalized listing dicts for the import service.
+
+        Páginas de 100 (o máximo da busca, o mesmo do Vincular): com 20 a conta
+        grande pedia 5x mais chamadas (17/11/2026, botão Atualizar).
+
+        As mesmas proteções do Vincular (auto_link._link_tiktok_integration):
+        teto de páginas e prazo POR PÁGINA — a resposta do TikTok já chegou aos
+        pingos, passando do read-timeout do httpx, e travou a leitura. Página
+        que estoura levanta TimeoutError (a conta vira 'falha' no Atualizar);
+        o teto de páginas devolve o que leu com `listagem_completa=False`."""
+        self.listagem_completa = True
         page_token: str | None = None
         page_idx = 0
         while True:
             if max_pages is not None and page_idx >= max_pages:
+                self.listagem_completa = False
+                logger.warning("tiktok_list_listings_max_pages", pages=page_idx)
                 return
-            products, page_token = await self.search_products(
-                page_size=page_size, page_token=page_token
-            )
+            busca = self.search_products(page_size=page_size, page_token=page_token)
+            try:
+                products, page_token = (
+                    await asyncio.wait_for(busca, timeout=page_timeout)
+                    if page_timeout
+                    else await busca
+                )
+            except TimeoutError:
+                raise TimeoutError(
+                    f"a busca do TikTok passou de {page_timeout:.0f} s na página {page_idx + 1}"
+                ) from None
             if not products:
                 return
             for p in products:
@@ -1893,7 +1920,6 @@ class TikTokClient:
 
 
 # ---------------------------------------------------------------- helpers
-
 
 def _sign(
     app_secret: str,
@@ -1918,14 +1944,19 @@ def _sign(
 
 
 def _tiktok_status_to_listing(status: str | None) -> str:
+    # A busca de produtos manda ACTIVATE (no ar) e FREEZE (congelado); antes os
+    # dois caíam em "inactive" (17/11/2026). LIVE/ACTIVE/FROZEN ficam por
+    # compatibilidade. Congelado e desativado pelo TikTok = encerrado, a mesma
+    # régua do Vincular (auto_link._MORTO_POR_STATUS): o Atualizar não cria
+    # linha nova de produto que o Vincular dá como morto, e o Organizar
+    # ('anuncio_encerrado') consegue esconder o que já existia. Desativado pelo
+    # vendedor continua pausado.
     s = (status or "").upper()
-    if s in ("LIVE", "ACTIVE"):
+    if s in ("LIVE", "ACTIVE", "ACTIVATE"):
         return "active"
-    if s in ("SELLER_DEACTIVATED", "PLATFORM_DEACTIVATED"):
+    if s == "SELLER_DEACTIVATED":
         return "paused"
-    if s == "FROZEN":
-        return "under_review"
-    if s == "DELETED":
+    if s in ("FROZEN", "FREEZE", "PLATFORM_DEACTIVATED", "DELETED"):
         return "closed"
     return "inactive"
 

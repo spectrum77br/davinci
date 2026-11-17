@@ -287,6 +287,7 @@ from app.models.conciliacao import (
     ConciliacaoPrevisto,
     ConciliacaoSync,
 )
+from app.models.organizar import OrganizarOculto, OrganizarPrevia
 from app.models.ouvidoria import (
     FECHADA_PELO_ROBO,
     FECHAMENTOS,
@@ -558,6 +559,8 @@ __all__ = [
     "ConciliacaoPrevisto",
     "ConciliacaoSync",
     "ConfiguracaoSegura",
+    "OrganizarOculto",
+    "OrganizarPrevia",
     "OuvidoriaOcorrencia",
     "OuvidoriaRobo",
     "OuvidoriaRodada",

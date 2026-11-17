@@ -205,13 +205,28 @@ async def auto_link_run(
     exclusivos (exclusividade "só outro massa"). Não conseguiu o lock → marca o
     job FAILED com `sync_already_running`. O gate determinístico
     (`mass_sync_active`) no endpoint já recusa a maioria com 409; este lock é o
-    backstop de runtime pra dois jobs que iniciem quase ao mesmo tempo."""
+    backstop de runtime pra dois jobs que iniciem quase ao mesmo tempo.
+
+    17/11/2026: sinal de vida a cada 60 s numa sessão própria (a trava global
+    de massa solta o job calado há 15 min); lista vazia ([], diferente de
+    None) é "nenhuma conta" e vira FAILED 'sem_contas' — nunca o "todas"; e
+    o botão Vincular (trigger 'botao_vincular') espelha o resultado na aba
+    Anúncios no fim."""
+    from app.services.job_details import sinal_de_vida
+
     jid = UUID(job_id)
-    async with session_scope() as s:
+    async with sinal_de_vida(jid), session_scope() as s:
         job = await s.get(BackgroundJob, jid)
         if job is None:
             logger.error("auto_link_run_job_missing", job_id=job_id)
             return
+        if integration_ids is not None and not integration_ids:
+            job.status = BackgroundJobStatus.FAILED
+            job.error = "sem_contas"
+            job.finished_at = datetime.now(UTC)
+            logger.warning("auto_link_run_sem_contas", job_id=job_id)
+            return
+        espelhar_lista = (job.payload or {}).get("trigger") == "botao_vincular"
         async with try_user_sync_lock(s, job.created_by) as acquired:
             if not acquired:
                 job.status = BackgroundJobStatus.FAILED
@@ -223,7 +238,29 @@ async def auto_link_run(
                 s,
                 job_id=jid,
                 integration_ids=[UUID(i) for i in (integration_ids or [])] or None,
+                espelhar_lista=espelhar_lista,
             )
+
+
+async def atualizar_run(ctx: dict, job_id: str, integration_ids: list[str]) -> None:
+    """Botão Atualizar de Produtos (17/11/2026, services/produtos_botoes): lê os
+    produtos novos do Bling e as listas de anúncios das contas montadas no
+    servidor e roda o Vincular nelas (o do ML/Shopee antes da lista, com a trava do Flex). Só
+    lê dos marketplaces e do Bling. Idempotente (rodada repetida pelo arq com o
+    job terminado não faz nada). Lista vazia = nenhuma conta → FAILED."""
+    from app.services.produtos_botoes import run_atualizar
+
+    jid = UUID(job_id)
+    if not integration_ids:
+        async with session_scope() as s:
+            job = await s.get(BackgroundJob, jid)
+            if job is not None and job.finished_at is None:
+                job.status = BackgroundJobStatus.FAILED
+                job.error = "sem_contas"
+                job.finished_at = datetime.now(UTC)
+        logger.warning("atualizar_run_sem_contas", job_id=job_id)
+        return
+    await run_atualizar(jid, [UUID(i) for i in integration_ids])
 
 
 async def sync_all_run(
@@ -2464,14 +2501,27 @@ async def marketing_postagens_reconciliar(ctx: dict) -> None:
     )
 
 
+# Até quanto tempo depois do horário a sincronização da noite ainda sai
+# (17/11/2026): se no horário havia outra massa rodando (Atualizar, Vincular,
+# Sincronizar), ela sai no primeiro tique livre — sem perder o dia e sem cair
+# no meio da tarde.
+_DAILY_SYNC_ATRASO_MAX = timedelta(hours=4)
+
+
 async def daily_sync_scheduler(ctx: dict) -> None:
     """Every 5min: enqueue sync_all for users whose `daily_sync_time` falls
     inside the current 5-minute window in America/Sao_Paulo, only if no
-    sync_all job has been created for that user since BRT midnight."""
+    sync_all job has been created for that user since BRT midnight.
+
+    17/11/2026: com massa em andamento (trava global), não cria o job e sai;
+    a janela passou de 5 min para "do horário até 4 h depois" (o `ja_hoje`
+    impede repetir), então a noturna sai no próximo tique livre."""
+    from app.services.advisory_lock import massa_ocupada_para_robo
+
     now_sp = datetime.now(SP_TZ).replace(second=0, microsecond=0)
-    window_start = (now_sp - timedelta(minutes=5)).time()
-    window_end = now_sp.time()
     sp_midnight = now_sp.replace(hour=0, minute=0)
+    window_start = max(sp_midnight, now_sp - _DAILY_SYNC_ATRASO_MAX).time()
+    window_end = now_sp.time()
     today_cutoff_utc = sp_midnight.astimezone(UTC)
 
     async with session_scope() as s:
@@ -2504,7 +2554,14 @@ async def daily_sync_scheduler(ctx: dict) -> None:
         ).first()
         if ja_hoje is not None:
             return
-        for us in list(rows.scalars())[:1]:
+        quem = list(rows.scalars())[:1]
+        if not quem:
+            return
+        ocupado = await massa_ocupada_para_robo(s)
+        if ocupado is not None:
+            logger.info("daily_sync_adiado_massa", rodando=ocupado.get("rotulo"))
+            return
+        for us in quem:
             job = BackgroundJob(
                 type=BackgroundJobType.SYNC_ALL,
                 status=BackgroundJobStatus.PENDING,
@@ -2522,12 +2579,13 @@ async def daily_sync_scheduler(ctx: dict) -> None:
 
 async def produtos_novos_bling_tick(ctx: dict) -> None:
     """A cada 15 min: produto criado no Bling entra no DaVinci sem esperar
-    movimento de estoque (a009.cd, 29/09/2026). Lê os "últimos incluídos"."""
-    from app.services.bling_produtos_novos import importar_produtos_novos
+    movimento de estoque (a009.cd, 29/09/2026). Lê os "últimos incluídos".
+    Com a trava 'pbln' (17/11/2026): se o completo ou o botão Atualizar estiver
+    criando produtos, esta rodada sai (a próxima, em 15 min, pega o resto)."""
+    from app.services.bling_produtos_novos import importar_produtos_novos_com_trava
 
     try:
-        async with session_scope() as s:
-            await importar_produtos_novos(s, completo=False)
+        await importar_produtos_novos_com_trava(completo=False)
     except Exception:  # noqa: BLE001
         logger.exception("produtos_novos_bling_unhandled")
 
@@ -2565,14 +2623,29 @@ async def nfse_nfeio_sync_empresas(ctx: dict) -> None:
         logger.exception("nfse_nfeio_sync_empresas_unhandled")
 
 
+# O completo diário espera a trava 'pbln' (o Atualizar de Produtos ou o tick de
+# 15 min lendo o Bling) em vez de desistir. Módulo-level para os testes.
+_BLING_COMPLETO_TENTATIVAS = 20
+_BLING_COMPLETO_ESPERA_S = 60.0
+
+
 async def produtos_novos_bling_completo(ctx: dict) -> None:
     """1x por dia: confere TODOS os produtos ativos do Bling (rede de segurança
-    do tick de 15 min — produto que escapou da página dos mais novos)."""
-    from app.services.bling_produtos_novos import importar_produtos_novos
+    do tick de 15 min — produto que escapou da página dos mais novos). Com a
+    trava 'pbln' compartilhada com o tick e o botão Atualizar (17/11/2026).
+
+    Trava ocupada: tenta de novo a cada 1 min, até 20 min. Só ele reativa
+    (I→A) e inativa quem saiu do Bling — o Atualizar não faz isso —, então
+    desistir deixava o dia sem essa conferência."""
+    from app.services.bling_produtos_novos import importar_produtos_novos_com_trava
 
     try:
-        async with session_scope() as s:
-            resumo = await importar_produtos_novos(s, completo=True)
+        for tentativa in range(1, _BLING_COMPLETO_TENTATIVAS + 1):
+            resumo = await importar_produtos_novos_com_trava(completo=True)
+            if not resumo.get("pulado") or tentativa == _BLING_COMPLETO_TENTATIVAS:
+                break
+            logger.info("produtos_novos_bling_completo_esperando_trava", tentativa=tentativa)
+            await asyncio.sleep(_BLING_COMPLETO_ESPERA_S)
         logger.info("produtos_novos_bling_completo", **resumo)
     except Exception:  # noqa: BLE001
         logger.exception("produtos_novos_bling_completo_unhandled")
@@ -4295,15 +4368,40 @@ async def flex_motor_tick(ctx: dict) -> None:
         logger.info("flex_motor_ocupado")
 
 
+# Tentativas dos jobs do Flex que esperam a trava da rodada: devem casar com o
+# registro (flex_reavaliar_run usa o max_tries=3 da fila default;
+# flex_aprovado_run e flex_motor_run, max_tries=10). Na última, o job sai sem
+# erro e deixa para a varredura — em vez do "max retries exceeded" do arq.
+_FLEX_REAVALIAR_TENTATIVAS = 3
+_FLEX_APROVADO_TENTATIVAS = 10
+_FLEX_MOTOR_RUN_TENTATIVAS = 10
+
+
 async def flex_motor_run(ctx: dict, por: str | None = None) -> dict:
     """Botão "Sincronizar" da tela Flex (POST /api/flex/sincronizar): a mesma
-    rodada do cron, agora, com quem pediu na trilha."""
+    rodada do cron, agora, com quem pediu na trilha.
+
+    Rodada ocupada (o cron, ou o Atualizar de Produtos segurando a trava até o
+    fim do Vincular do ML/Shopee — 17/11/2026): tenta de novo a cada 1 min,
+    até 10 vezes, em vez de sair calado — a tela já disse 'enfileirado' e a
+    releitura forçada das contas (assinatura/endereço) se perdia. Na última,
+    sai sem erro e fica para a varredura."""
     try:
         quem = UUID(por) if por else None
     except ValueError:
         quem = None
     await flex_config.carregar(forcar=True)
-    return await flex_motor.rodar_motor(origem="manual", por=quem, reler_contas=True)
+    resumo = await flex_motor.rodar_motor(origem="manual", por=quem, reler_contas=True)
+    if resumo.get("ocupado"):
+        if _tentativa_arq(ctx) >= _FLEX_MOTOR_RUN_TENTATIVAS:
+            logger.info("flex_motor_run_fica_para_a_varredura")
+            return {**resumo, "fica_para_a_varredura": True}
+        raise Retry(defer=60)
+    return resumo
+
+
+def _tentativa_arq(ctx: dict) -> int:
+    return int(ctx.get("job_try") or 1) if isinstance(ctx, dict) else 1
 
 
 async def flex_reavaliar_run(ctx: dict) -> dict:
@@ -4313,10 +4411,18 @@ async def flex_reavaliar_run(ctx: dict) -> dict:
     (pelo último estado lido) o que o novo saldo pede — não espera os 15 min
     da varredura para fechar a torneira. Ligar continua com a varredura +
     aprovação. Se a rodada inteira estiver em andamento, tenta de novo em 1
-    min (o saldo dela pode ser de antes do pedido)."""
+    min (o saldo dela pode ser de antes do pedido).
+
+    Na última tentativa ainda ocupada (a rodada longa, ou o Atualizar de
+    Produtos, que segura a mesma trava no Vincular e na lista do ML/Shopee — 17/11/2026),
+    sai sem erro: a rodada seguinte do cron faz o mesmo desligar, com o saldo
+    relido."""
     await flex_config.carregar(forcar=True)
     resumo = await flex_motor.rodar_motor(ler=False, so_desligar=True, origem="evento")
     if resumo.get("ocupado"):
+        if _tentativa_arq(ctx) >= _FLEX_REAVALIAR_TENTATIVAS:
+            logger.info("flex_reavaliar_fica_para_a_varredura")
+            return {**resumo, "fica_para_a_varredura": True}
         raise Retry(defer=60)
     return resumo
 
@@ -4338,6 +4444,11 @@ async def flex_aprovado_run(
     await flex_config.carregar(forcar=True)
     res = await flex_motor.aplicar_aprovado(iid, external_id, por=quem)
     if res.get("ocupado"):
+        # Última tentativa: sai sem erro no arq (17/11/2026) — a aprovação
+        # continua valendo e a varredura liga.
+        if _tentativa_arq(ctx) >= _FLEX_APROVADO_TENTATIVAS:
+            logger.info("flex_aprovado_fica_para_a_varredura", external_id=external_id)
+            return {**res, "fica_para_a_varredura": True}
         raise Retry(defer=60)
     return res
 
@@ -5242,6 +5353,12 @@ async def faturas_vencimento_scan(ctx: dict) -> None:
         )
 
 
+# A varredura das 10h espera a massa em andamento (ver varredura_vinculos).
+# Módulo-level para os testes encurtarem; o cron tem 3 h de teto.
+_VARREDURA_ESPERA_MAX_S = 3600.0
+_VARREDURA_ESPERA_INTERVALO_S = 60.0
+
+
 async def varredura_vinculos(ctx: dict) -> None:
     """Todo dia: lê as contas inteiras dos marketplaces (o mesmo motor do botão
     "Vincular Automático") e
@@ -5250,44 +5367,69 @@ async def varredura_vinculos(ctx: dict) -> None:
     - marca como MORTO o anúncio encerrado/excluído e revive o que voltou;
     - apaga o vínculo morto há mais de 30 dias.
     Eduardo, 28/09/2026: "estamos deixando links mortos" / "fica travado no
-    link velho e não muda, fazendo ficar sem estoque"."""
-    from app.services import vinculo_saude
+    link velho e não muda, fazendo ficar sem estoque".
 
-    async with session_scope() as s:
-        dono = (
-            await s.execute(
-                select(Product.user_id)
-                .group_by(Product.user_id)
-                .order_by(sa_func.count().desc())
-                .limit(1)
-            )
-        ).scalar_one_or_none()
-        ids = [
-            str(i)
-            for i in (
+    17/11/2026: com um Atualizar, Vincular ou Sincronizar rodando (a trava
+    global de massa), espera — tentando a cada minuto, até 1 h — antes de
+    criar o job; os dois juntos dobravam a leitura no ML (429) e moviam os
+    mesmos vínculos ao mesmo tempo. Sem vaga em 1 h, o Vincular fica para
+    amanhã (a limpeza dos mortos roda igual)."""
+    from app.services import vinculo_saude
+    from app.services.advisory_lock import massa_ocupada_para_robo
+
+    loop = asyncio.get_running_loop()
+    inicio = loop.time()
+    job_id: str | None = None
+    while True:
+        async with session_scope() as s:
+            dono = (
                 await s.execute(
-                    select(Integration.id).where(
-                        Integration.archived_at.is_(None),
-                        # Só marketplaces: o vínculo do Bling é a origem do
-                        # estoque e não é assunto desta varredura.
-                        Integration.platform != IntegrationPlatform.BLING,
-                    )
+                    select(Product.user_id)
+                    .group_by(Product.user_id)
+                    .order_by(sa_func.count().desc())
+                    .limit(1)
                 )
-            ).scalars()
-        ]
-        if dono is None or not ids:
-            return
-        job = BackgroundJob(
-            type=BackgroundJobType.AUTO_LINK,
-            status=BackgroundJobStatus.PENDING,
-            created_by=dono,
-            total=len(ids),
-            payload={"trigger": "varredura_diaria", "integration_ids": ids},
-        )
-        s.add(job)
-        await s.flush()
-        job_id = str(job.id)
-    await auto_link_run(ctx, job_id, ids)
+            ).scalar_one_or_none()
+            ids = [
+                str(i)
+                for i in (
+                    await s.execute(
+                        select(Integration.id).where(
+                            Integration.archived_at.is_(None),
+                            # Só marketplaces: o vínculo do Bling é a origem do
+                            # estoque e não é assunto desta varredura.
+                            Integration.platform != IntegrationPlatform.BLING,
+                        )
+                    )
+                ).scalars()
+            ]
+            if dono is None or not ids:
+                return
+            ocupado = await massa_ocupada_para_robo(s)
+            if ocupado is None:
+                job = BackgroundJob(
+                    type=BackgroundJobType.AUTO_LINK,
+                    status=BackgroundJobStatus.PENDING,
+                    created_by=dono,
+                    total=len(ids),
+                    payload={"trigger": "varredura_diaria", "integration_ids": ids},
+                )
+                s.add(job)
+                await s.flush()
+                job_id = str(job.id)
+                break
+        esperou = loop.time() - inicio
+        if esperou >= _VARREDURA_ESPERA_MAX_S:
+            logger.warning(
+                "varredura_vinculos_pulada_massa",
+                esperou_s=int(esperou),
+                rodando=(ocupado or {}).get("rotulo"),
+            )
+            break
+        logger.info("varredura_vinculos_esperando_massa", rodando=(ocupado or {}).get("rotulo"))
+        await asyncio.sleep(_VARREDURA_ESPERA_INTERVALO_S)
+    if job_id is not None:
+        await auto_link_run(ctx, job_id, ids)
 
     limite = datetime.now(UTC) - timedelta(days=vinculo_saude.DIAS_ATE_REMOVER)
     removidos = await vinculo_saude.apagar_mortos_em_lotes(antes_de=limite)
@@ -5299,15 +5441,21 @@ async def remover_vinculos_mortos_run(
     integration_ids: list[str] | None = None,
     somente_visiveis: bool = False,
     departamento: str | None = None,
+    pular_ocultos: bool = False,
 ) -> None:
     """Botão "Remover mortos" da tela Produtos: apaga já, em lotes, em
     segundo plano (o botão só conta e agenda). Com `departamento`, só os
-    mortos dos produtos daquele departamento (o que a tela mostrava)."""
+    mortos dos produtos daquele departamento (o que a tela mostrava).
+    `pular_ocultos` (17/11/2026, endpoint só de ADM): não apaga o que o
+    Organizar escondeu."""
     from app.services import vinculo_saude
 
     ids = [UUID(i) for i in integration_ids] if integration_ids is not None else None
     removidos = await vinculo_saude.apagar_mortos_em_lotes(
-        integration_ids=ids, somente_visiveis=somente_visiveis, departamento=departamento
+        integration_ids=ids,
+        somente_visiveis=somente_visiveis,
+        departamento=departamento,
+        pular_ocultos=pular_ocultos,
     )
     logger.info(
         "vinculos_mortos_removidos_botao", quantidade=removidos, departamento=departamento
@@ -5812,11 +5960,12 @@ class WorkerSettings:
         # gancho do pedido Flex. 15 min de teto: até 400 leituras do ML + as
         # escritas da rodada, uma de cada vez.
         func(flex_motor_tick, timeout=900),
-        func(flex_motor_run, timeout=900),
+        # Botão "Sincronizar" do Flex com a rodada ocupada: tenta a cada 1 min.
+        func(flex_motor_run, timeout=900, max_tries=_FLEX_MOTOR_RUN_TENTATIVAS),
         func(flex_reavaliar_run, timeout=300),
         # Aprovação com a rodada ocupada: tenta de minuto em minuto (a rodada
         # segura a trava de 4 a 8 min) — 10 vezes cobre uma rodada longa.
-        func(flex_aprovado_run, timeout=300, max_tries=10),
+        func(flex_aprovado_run, timeout=300, max_tries=_FLEX_APROVADO_TENTATIVAS),
         # Emergência: até 3.000 anúncios, 4 de cada vez (~12 min) — e a
         # descoberta das contas antes. Uma tentativa só: o job relido de novo
         # não sabe o que já fez pela metade (apertar o botão de novo continua).
@@ -6853,7 +7002,13 @@ class WorkerSettingsSync:
         # dois em paralelo.
         func(sync_all_run, timeout=10800),
         sync_product_run,
-        auto_link_run,
+        # Botão Vincular: 34+ contas lidas ao vivo (4 por vez) passam dos 30
+        # min do teto da classe nos dias de Amazon lenta.
+        func(auto_link_run, timeout=3600),
+        # Botão Atualizar: Bling + listas (4 contas por vez) + o Vincular das
+        # contas lidas no fim (o mesmo motor do auto_link_run, que sozinho já
+        # tem 1h) + até 10 min esperando a rodada do Flex — 1h30 de teto.
+        func(atualizar_run, timeout=5400),
         refresh_bling_stock_run,
         # Conferência de preços: até 3 contas lidas ao mesmo tempo, nenhuma
         # sessão aberta durante a leitura (cada conta grava numa sessão curta).
@@ -6973,6 +7128,7 @@ __all__ = [
     "audit_run",
     "auth_codes_cleanup",
     "auto_import_link",
+    "atualizar_run",
     "auto_link_run",
     "alerts_cleanup",
     "condicao_especial_gc",

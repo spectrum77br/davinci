@@ -108,13 +108,57 @@ async function refreshAll() {
   await Promise.all([load(), loadStats()])
 }
 
+// 409 "sync_already_running": desde 17/11/2026 a trava de massa é GLOBAL (um
+// Atualizar, Vincular ou Sincronizar de qualquer pessoa, a varredura das 10h ou
+// a sincronização da noite). Mostra o que está rodando, quem disparou e desde
+// quando — o mesmo texto da tela Produtos.
+type MassaInfo = { tipo?: string | null; type?: string | null; gatilho?: string | null; quem?: string | null; desde?: string | null; rotulo?: string | null }
+const NOME_DO_GATILHO: Record<string, string> = {
+  botao_atualizar: 'um Atualizar',
+  botao_vincular: 'um Vincular',
+  varredura_diaria: 'a varredura automática de vínculos',
+  daily_sync: 'a sincronização automática da noite',
+}
+const NOME_DO_TIPO: Record<string, string> = {
+  sync_all: 'um Sincronizar',
+  auto_link: 'um Vincular',
+  import_listings: 'um Atualizar',
+}
+function descreverMassa(info: MassaInfo | null | undefined): string {
+  const i = info || {}
+  const oQue = i.rotulo || (i.gatilho && NOME_DO_GATILHO[i.gatilho]) || NOME_DO_TIPO[i.tipo || i.type || ''] || 'outra tarefa em massa'
+  // Sem tipo = a trava curta de dois cliques ao mesmo tempo ("outro disparo em andamento").
+  let texto = !(i.tipo || i.type) && i.rotulo ? `Já tem ${oQue}` : `Já tem ${oQue} rodando`
+  if (i.quem && i.gatilho !== 'varredura_diaria' && i.gatilho !== 'daily_sync') texto += `, disparado por ${i.quem}`
+  const d = i.desde ? new Date(i.desde) : null
+  if (d && !Number.isNaN(d.getTime())) {
+    const hora = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+    texto += new Date().toDateString() === d.toDateString()
+      ? `, desde ${hora}`
+      : `, desde ${d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} ${hora}`
+  }
+  return `${texto}. Espere terminar e tente de novo.`
+}
+
 async function startSyncAll() {
   activeJob.value = null
-  const r = await api<{ job_id: string }>('/api/jobs/sync-all', {
-    method: 'POST',
-    body: { integration_ids: null, product_ids: null, include_all_stock: true },
-  })
-  startPolling(r.job_id)
+  error.value = null
+  try {
+    const r = await api<{ job_id: string }>('/api/jobs/sync-all', {
+      method: 'POST',
+      body: { integration_ids: null, product_ids: null, include_all_stock: true },
+    })
+    startPolling(r.job_id)
+  } catch (e: any) {
+    const d = e?.data?.detail
+    if (d?.code === 'sync_already_running' || e?.status === 409 || e?.statusCode === 409) {
+      error.value = descreverMassa(d && typeof d === 'object' ? d : null)
+    } else if (d?.code === 'sem_contas') {
+      error.value = 'Nenhuma conta de marketplace para sincronizar.'
+    } else {
+      error.value = (typeof d === 'string' ? d : d?.code) || e?.message || 'erro'
+    }
+  }
 }
 
 function startPolling(jobId: string) {
