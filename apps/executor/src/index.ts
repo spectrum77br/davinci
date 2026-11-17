@@ -35,6 +35,7 @@ import * as melhorenvio from "./melhorenvio";
 import * as tuta from "./tuta";
 import * as tiktok from "./tiktok";
 import * as amazonCsv from "./amazon_csv";
+import * as temuExtrato from "./temu_extrato";
 import * as davinci from "./davinci";
 import { coletarConferencia, type JobConferencia, type ResultadoConferencia } from "./conferencia";
 import { periodoConferencia, resumoConferencia } from "./conferencia_util";
@@ -233,6 +234,28 @@ async function processAmazonCsvCommand(cmd: LeasedLogisticaCommand): Promise<voi
   }
 }
 
+/** Conciliação › Temu lida da tela (17/11): abre Finanças › Pagamentos da loja pelo
+ *  AdsPower, lê extrato, previsto e saldo e envia pro DaVinci. O perfil vem de
+ *  CONCILIACAO_PERFIS (loja=user_id), como o da Amazon por arquivo. */
+async function processTemuExtratoCommand(cmd: LeasedLogisticaCommand): Promise<void> {
+  const p = (cmd.payload || {}) as Record<string, unknown>;
+  const loja = String(p.loja || "").trim();
+  const perfil = cfg.conciliacaoPerfis[loja] || cfg.conciliacaoPerfis[loja.toLowerCase()];
+  if (!loja || !perfil) {
+    await davinci.reportLogistica(cmd.id, "failed", `sem perfil do AdsPower pra loja "${loja}" (CONCILIACAO_PERFIS no executor)`);
+    return;
+  }
+  try {
+    const r = await temuExtrato.lerPagamentos(perfil, { loja });
+    await davinci.reportLogistica(cmd.id, r.ok ? "done" : "failed", JSON.stringify(r).slice(0, 1900));
+    log.info(`Temu extrato ${loja} → ok=${r.ok}${r.reason ? ` (${r.reason})` : ""}`);
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    log.error(`Temu extrato ${loja} falhou: ${msg}`);
+    await davinci.reportLogistica(cmd.id, "failed", msg.slice(0, 1900));
+  }
+}
+
 async function processLogisticaCommand(cmd: LeasedLogisticaCommand): Promise<void> {
   if (cmd.acao === "tuta_devolucoes") {
     await processTutaCommand(cmd);
@@ -244,6 +267,10 @@ async function processLogisticaCommand(cmd: LeasedLogisticaCommand): Promise<voi
   }
   if (cmd.acao === "amazon_transacoes_csv") {
     await processAmazonCsvCommand(cmd);
+    return;
+  }
+  if (cmd.acao === "temu_extrato") {
+    await processTemuExtratoCommand(cmd);
     return;
   }
   if (cmd.acao !== "melhorenvio_suspender") {
@@ -317,7 +344,7 @@ function acoesLogistica(): string[] {
   if (cfg.filas.has("melhorenvio")) acoes.push("melhorenvio_suspender");
   if (cfg.filas.has("tuta")) acoes.push("tuta_devolucoes");
   if (cfg.filas.has("tiktok")) acoes.push("tiktok_senha");
-  if (cfg.filas.has("conciliacao")) acoes.push("amazon_transacoes_csv");
+  if (cfg.filas.has("conciliacao")) acoes.push("amazon_transacoes_csv", "temu_extrato");
   return acoes;
 }
 

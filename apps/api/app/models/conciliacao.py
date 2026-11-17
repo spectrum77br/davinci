@@ -13,6 +13,8 @@ Avaliação e decisões em `docs/conciliacao-avaliacao.md`. Aqui só o formato:
   sobrou, margem), a situação e a etapa (aguardando → conciliado/pendência →
   finalizado → reaberto). Reconstruída pelo recálculo, com as marcas manuais
   preservadas.
+* `conciliacao_previstos` — o previsto por pedido lido da tela da plataforma quando a
+  Margem não lê a venda (Temu).
 * `conciliacao_sync` — controle das leituras (janela do extrato pedida/lida,
   última página da fatura por período e tipo).
 * `conciliacao_dias` — o fechamento do dia por loja (saldo inicial, entradas,
@@ -55,7 +57,10 @@ ORIGEM_CARTEIRA = "shopee_carteira"  # carteira da Shopee (get_wallet_transactio
 # As origens que são "o dinheiro" (uma por plataforma); a fatura do ML é a conta de tarifas.
 ORIGEM_TIKTOK = "tiktok_extrato"  # extratos (statements) diários da TikTok + repasses
 ORIGEM_AMAZON = "amazon_transacoes"  # Finances API: transações dia a dia + repasses
-ORIGENS_EXTRATO = (ORIGEM_EXTRATO, ORIGEM_CARTEIRA, ORIGEM_TIKTOK, ORIGEM_AMAZON)
+# Temu (17/11/2026): sem API de extrato — o robô do Mac mini lê Finanças › Pagamentos ›
+# Extratos na tela do Seller Center e envia (services/conciliacao_temu.py)
+ORIGEM_TEMU = "temu_extrato"
+ORIGENS_EXTRATO = (ORIGEM_EXTRATO, ORIGEM_CARTEIRA, ORIGEM_TIKTOK, ORIGEM_AMAZON, ORIGEM_TEMU)
 ORIGEM_FATURA = "ml_fatura"  # detalhes de faturamento do ML por período
 
 # Situação do pedido na conciliação (o que a coluna mostra).
@@ -113,6 +118,10 @@ class ConciliacaoLoja(Base, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
     ultimo_erro: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Loja do Bling (`bling_orders.loja`) escrita aqui quando a conta não tem integração
+    # de verdade (Temu, 17/11/2026): a `integration_id` é só uma âncora arquivada, sem
+    # nome nem Store pra casar. Vazio = como sempre (tela Lojas / stores).
+    bling_loja: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class ConciliacaoMovimento(Base, TimestampMixin):
@@ -269,6 +278,42 @@ class ConciliacaoPedido(Base, TimestampMixin):
     conferido_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     observacao: Mapped[str | None] = mapped_column(Text, nullable=True)
     recalculado_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ConciliacaoPrevisto(Base, TimestampMixin):
+    """O que a plataforma disse que vai pagar por um pedido, lido da tela dela ANTES de
+    pagar (Temu, 17/11/2026: Finanças › Pagamentos › Pedidos não processados).
+
+    Fica aqui e não na Margem (`marketplace_order_financials`) de propósito: com valor
+    real gravado lá, a Margem passa a acusar "saldo divergente" contra o Bling e o robô
+    `margem_auto_hold` segura os pedidos da Temu. Aqui só a Conciliação lê.
+
+    `valor` acompanha a tela enquanto o pedido aparece nela; quando a Temu paga, o pedido
+    some da lista e o último valor fica — é com ele que o recebido é comparado.
+    `primeiro_valor` guarda a primeira estimativa: se mudou, o motivo do pedido conta."""
+
+    __tablename__ = "conciliacao_previstos"
+    __table_args__ = (
+        UniqueConstraint(
+            "integration_id", "pedido_marketplace", name="uq_conciliacao_previsto_pedido"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=uuid4)
+    integration_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("integrations.id", ondelete="CASCADE"), nullable=False
+    )
+    pedido_marketplace: Mapped[str] = mapped_column(String(120), nullable=False)
+    valor: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    primeiro_valor: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    # data em que a plataforma diz que paga (vazio enquanto ela só diz "entregue + 7 dias")
+    liquidacao_em: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status_pedido: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    primeiro_lido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lido_em: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    raw: Mapped[dict] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb")
+    )
 
 
 class ConciliacaoSync(Base, TimestampMixin):

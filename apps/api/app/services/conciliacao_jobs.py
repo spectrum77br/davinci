@@ -136,7 +136,13 @@ async def sincronizar_loja(
                 return {"skipped": "loja_nao_ligada", "integration_id": str(integration_id)}
             resultado["loja"] = loja.conta
             plataforma = getattr(loja.platform, "value", str(loja.platform))
-            cliente = await _cliente(session, loja) if (fatura or extrato) else None
+            # Temu (17/11): não há API nem credencial — a integração é só uma âncora e a
+            # leitura entra pelo robô da tela (services/conciliacao_temu.py)
+            cliente = (
+                await _cliente(session, loja)
+                if (fatura or extrato) and plataforma != "temu"
+                else None
+            )
             if fatura and plataforma != "ml":
                 fatura = False  # só o ML tem fatura; na Shopee as tarifas já vêm na renda
             if fatura:
@@ -180,6 +186,8 @@ async def sincronizar_loja(
                                 loja=loja.conta,
                                 erro=str(e)[:200],
                             )
+                    elif plataforma == "temu":
+                        resultado["extrato"] = {"modo": "robo", "pulado": True}
                     elif plataforma == "tiktok":
                         resultado["extrato"] = await _salvo(
                             session, run_tiktok_sync(session, loja, cliente)

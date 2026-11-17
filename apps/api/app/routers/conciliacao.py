@@ -1140,7 +1140,8 @@ async def amazon_buscar_transacoes(
     user: Annotated[User, Depends(_PERM_PAINEL_EDIT)],
 ) -> dict[str, Any]:
     """Botão ⟳ da loja por arquivo (16/10): pede ao robô do Mac mini pra baixar o CSV
-    da Amazon e enviar. Fica na fila do robô da Logística (ação amazon_transacoes_csv)."""
+    da Amazon e enviar. Fica na fila do robô da Logística (ação amazon_transacoes_csv).
+    Loja da Temu (17/11): o mesmo botão pede a leitura da tela (ação temu_extrato)."""
     from app.services import logistica_robo
     from app.services.conciliacao_amazon_csv import enfileirar_busca_csv
 
@@ -1150,7 +1151,13 @@ async def amazon_buscar_transacoes(
             status.HTTP_409_CONFLICT,
             detail={"code": "loja_nao_e_upload", "mensagem": "esta loja é lida pela API"},
         )
-    cmd, novo = await enfileirar_busca_csv(session, alvo, user_id=user.id)
+    from app.services.conciliacao_temu import e_loja_temu_por_robo, enfileirar_leitura
+
+    if e_loja_temu_por_robo(alvo):
+        # 17/11: a Temu também entra pelo robô do mini, mas lendo a tela (não é o CSV)
+        cmd, novo = await enfileirar_leitura(session, alvo, user_id=user.id)
+    else:
+        cmd, novo = await enfileirar_busca_csv(session, alvo, user_id=user.id)
     await session.commit()
     visto = await logistica_robo.ultimo_heartbeat(session)
     return {
@@ -1158,7 +1165,84 @@ async def amazon_buscar_transacoes(
         "comando_id": str(cmd.id),
         "enfileirado": novo,
         "robo_visto_em": visto.last_seen_at.isoformat() if visto and visto.last_seen_at else None,
+        # pedido que já estava na fila: desde quando e se o robô já pegou (17/11 — um
+        # executor sem a ação nova nunca pega, e o aviso dizia só "já está na fila")
+        "na_fila_desde": cmd.created_at.isoformat() if cmd.created_at else None,
+        "comando_status": cmd.status,
     }
+
+
+_TEMU_TETO_CORPO = 5 * 1024 * 1024
+
+
+@router.post("/temu/leitura")
+async def temu_leitura_do_robo(
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_session)],
+    x_agent_token: Annotated[str | None, Header()] = None,
+) -> dict[str, Any]:
+    """Leitura da tela da Temu enviada pelo executor do Mac mini (17/11, piloto na Eron):
+    saldo, linhas de Extratos, previsto de Pedidos não processados e saques, em JSON. Só
+    o X-Agent-Token do executor entra (o mesmo da Logística), conferido ANTES de ler o
+    corpo. Leitura incompleta (a tela tem mais linhas do que vieram) é recusada inteira:
+    o saldo depois de cada linha depende de todas."""
+    import json as _json
+    import secrets as _secrets
+
+    from app.config import get_settings
+    from app.services.conciliacao_jobs import fechar_dias_prontos
+    from app.services.conciliacao_temu import (
+        LeituraInvalidaError,
+        e_loja_temu_por_robo,
+        ingerir_leitura,
+    )
+
+    esperado = get_settings().marketing_agent_token
+    if not (esperado and x_agent_token and _secrets.compare_digest(x_agent_token, esperado)):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail={"code": "token_invalido"})
+    try:
+        tamanho = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        tamanho = 0
+    if tamanho > _TEMU_TETO_CORPO:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail={"code": "leitura_grande"}
+        )
+    corpo = await request.body()
+    if len(corpo) > _TEMU_TETO_CORPO:
+        raise HTTPException(
+            status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail={"code": "leitura_grande"}
+        )
+    try:
+        leitura = _json.loads(corpo)
+    except ValueError as e:
+        raise HTTPException(
+            422, detail={"code": "leitura_invalida", "mensagem": "o corpo não é JSON"}
+        ) from e
+    if not isinstance(leitura, dict) or not isinstance(leitura.get("loja"), str):
+        raise HTTPException(
+            422, detail={"code": "leitura_invalida", "mensagem": "informe a loja"}
+        )
+    alvo = await _loja_ou_404(session, leitura["loja"], escrita=True)
+    if not e_loja_temu_por_robo(alvo):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={"code": "loja_nao_e_temu", "mensagem": "esta loja não é lida pela tela"},
+        )
+    await _travar_loja(session, alvo.integration_id)
+    try:
+        stats = await ingerir_leitura(session, alvo, leitura)
+    except LeituraInvalidaError as e:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "leitura_invalida", "mensagem": str(e)},
+        ) from e
+    recalculo = await recalcular_loja(session, alvo)
+    # a rodada da manhã corre antes de o robô chegar: sem fechar aqui, o dia de ontem só
+    # fecharia na rodada de amanhã (mesma regra do botão "Fechar o dia")
+    dias = await fechar_dias_prontos(session, alvo)
+    await session.commit()
+    return {"loja": alvo.conta, **stats, "recalculo": recalculo, "dias": dias}
 
 
 @router.get("/amazon/upload/chave")
@@ -1794,6 +1878,53 @@ def _comparativo(
             "estilo": estilo,
         }
 
+    if plataforma == "temu":
+        # Temu (17/11): a tela dela dá um número só por pedido — o que estima pagar, lido
+        # pelo robô ANTES de pagar. Real = as linhas "Pagamento da encomenda" do extrato;
+        # reembolso e o que mais vier ficam na linha de baixo.
+        previsto_temu = n(p.venda_liquido)
+        if recebido is not None and liberado is not None:
+            depois = round(recebido - liberado, 2)
+        linhas_temu = [
+            linha(
+                "liquido",
+                "Pagamento do pedido (o que a Temu estimou × o que pagou)",
+                previsto_temu,
+                liberado,
+                estilo="bold",
+            ),
+            linha(
+                "depois",
+                "± Reembolsos e ajustes",
+                0.0 if liberado is not None else None,
+                depois,
+                compara=False,
+                estilo="muted",
+            ),
+        ]
+        return {
+            "linhas": _fechar(linhas_temu),
+            "real_rotulo": "extrato da Temu",
+            "comparar": p.situacao != "cancelado" and previsto_temu is not None,
+            "nota": (
+                "venda desfeita: as colunas mostram o que entrou e o que saiu"
+                if p.situacao == "cancelado"
+                else (
+                    "sem previsto: a Temu pagou antes de o robô ler este pedido"
+                    if previsto_temu is None and liberado is not None
+                    else (
+                        None
+                        if liberado is not None
+                        else "a Temu paga 7 dias depois da entrega; até lá não há valor recebido"
+                    )
+                )
+            ),
+            "rodape": (
+                '"Previsto" é o valor estimado em Finanças › Pagamentos › Pedidos não '
+                'processados da Temu; "Real" são as linhas de Extratos'
+            ),
+            "frete_liquido_loja": None,
+        }
     if plataforma == "amazon":
         # As linhas da tela Pagamentos › Transações da Amazon (15/10, seção 24):
         # produto, frete cobrado do cliente, tarifas (comissão, Amazon for All, retenção,
@@ -3774,6 +3905,27 @@ async def _saldo_real_amazon(
     return detalhe["saldo_amazon"] if detalhe else None
 
 
+async def _saldo_real_temu(session: AsyncSession, loja: ConciliacaoLoja) -> dict[str, Any] | None:
+    """O saldo que a tela da Temu mostrava na última leitura do robô (17/11)."""
+    from app.models.conciliacao import ORIGEM_TEMU
+
+    sync = ConciliacaoSync
+    detalhe = (
+        await session.execute(
+            select(sync.detalhe)
+            .where(
+                sync.integration_id == loja.integration_id,
+                sync.origem == ORIGEM_TEMU,
+                sync.status == "lido",
+                sync.detalhe["saldo_temu"].has_key("total"),
+            )
+            .order_by(sync.lido_em.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return detalhe["saldo_temu"] if detalhe else None
+
+
 async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dict[str, Any]:
     """Onde o dinheiro está agora (bloco "Dinheiro nas plataformas", 15/10): na conta
     (último saldo informado pela plataforma), preso a liberar (líquido previsto das
@@ -3894,6 +4046,13 @@ async def _dinheiro_da_loja(session: AsyncSession, loja: ConciliacaoLoja) -> dic
             # o arquivo de transações não traz os repasses pro banco: o saldo não fecha
             na_conta = saldo_em = None
             nota = "por arquivo: repasses pro banco não entram"
+    if plataforma == "temu":
+        # como a Temu informa (Saldo total da tela = reserva + fundos disponíveis): o
+        # saldo da última linha fica velho se a Temu mexer no saldo sem linha no extrato
+        real_temu = await _saldo_real_temu(session, loja)
+        if real_temu is not None and real_temu.get("total") is not None:
+            na_conta = float(real_temu["total"])
+            saldo_em = real_temu.get("lido_em") or saldo_em
     return {
         "na_conta": na_conta,
         "saldo_em": saldo_em,
@@ -4838,7 +4997,14 @@ async def montar_resumo(session: AsyncSession, dia: date | None = None) -> dict[
                     "gravidade": "warn",
                     "loja": loja.conta,
                     "titulo": f"{loja.conta} · {sem_venda} venda(s) não lida(s) com dinheiro",
-                    "detalhe": "entrou dinheiro, mas a Margem ainda não leu a venda",
+                    # Temu (17/11): a venda não vem da Margem — é o previsto que o robô lê
+                    # na tela antes de a Temu pagar
+                    "detalhe": (
+                        "a Temu pagou antes de o robô ler o previsto: conferir o valor e "
+                        "finalizar com motivo"
+                        if getattr(loja.platform, "value", str(loja.platform)) == "temu"
+                        else "entrou dinheiro, mas a Margem ainda não leu a venda"
+                    ),
                     "acao": "pedidos",
                     "filtro": {"situacao": "sem_venda", "etapa": "pendencia,reaberto"},
                 }

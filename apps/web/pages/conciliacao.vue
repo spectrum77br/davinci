@@ -137,6 +137,8 @@ const MARKETPLACES = [
   { key: 'shopee', label: 'Shopee', ativo: true },
   { key: 'amazon', label: 'Amazon', ativo: true },
   { key: 'tiktok', label: 'TikTok', ativo: true },
+  // 17/11: Temu lida da tela pelo robô do Mac mini (piloto na Eron)
+  { key: 'temu', label: 'Temu', ativo: true },
 ]
 type Visao = 'resumo' | 'pedidos' | 'extrato' | 'margem' | 'fechamento'
 const VISOES: Array<{ key: Visao; label: string; ativo: boolean }> = [
@@ -274,6 +276,9 @@ async function removerTokenMe() {
 const lojaAtual = computed(() => lojas.value.find((l) => l.conta === loja.value) || null)
 // Cada aba mostra só as lojas da plataforma dela (15/10: Shopee entrou).
 const lojasDaAba = computed(() => lojas.value.filter((l) => l.platform === tab.value))
+// 17/11: a aba da Temu só existe enquanto houver loja da Temu ligada — desligar a loja
+// (o caminho de volta do piloto) tira a aba em vez de deixar uma aba vazia
+const marketplacesVisiveis = computed(() => MARKETPLACES.filter((m) => m.key !== 'temu' || lojas.value.some((l) => l.platform === 'temu')))
 // "De" padrão com todas as lojas: o início mais antigo entre elas
 const inicioDaAba = computed(() => lojasDaAba.value.map((l) => l.inicio).filter(Boolean).sort()[0] || '')
 const inicioPadrao = computed(() => (loja.value === TODAS ? inicioDaAba.value : lojaAtual.value?.inicio || ''))
@@ -351,11 +356,19 @@ async function enviarUpload() {
     upload.value.ocupado = false
   }
 }
-const nomeVenda = computed(() => (tab.value === 'shopee' ? 'Venda Shopee' : tab.value === 'tiktok' ? 'Venda TikTok' : tab.value === 'amazon' ? 'Venda Amazon' : 'Venda ML'))
+const nomeVenda = computed(() => (tab.value === 'shopee' ? 'Venda Shopee' : tab.value === 'tiktok' ? 'Venda TikTok' : tab.value === 'amazon' ? 'Venda Amazon' : tab.value === 'temu' ? 'Venda Temu' : 'Venda ML'))
 function escolherLojaDaAba() {
   const primeira = lojasDaAba.value[0]
   if (!primeira) {
+    // aba sem loja ligada: limpa a lista (17/11 — ficavam os pedidos da aba anterior
+    // debaixo do cabeçalho da nova)
     loja.value = ''
+    itens.value = []
+    total.value = 0
+    resumo.value = null
+    selecionado.value = null
+    raiox.value = null
+    filtroAplicado.value = null
     return
   }
   if (loja.value === TODAS) {
@@ -630,9 +643,23 @@ function sincronizarLoja(conta: string) {
 }
 async function buscarTransacoes(conta: string) {
   try {
-    const r = await api<{ enfileirado: boolean; robo_visto_em: string | null }>(`/api/conciliacao/lojas/${encodeURIComponent(conta)}/buscar-transacoes`, { method: 'POST' })
+    const r = await api<{ enfileirado: boolean; robo_visto_em: string | null; na_fila_desde?: string | null; comando_status?: string | null }>(`/api/conciliacao/lojas/${encodeURIComponent(conta)}/buscar-transacoes`, { method: 'POST' })
     const visto = r.robo_visto_em ? new Date(r.robo_visto_em) : null
     const online = visto ? Date.now() - visto.getTime() < 5 * 60 * 1000 : false
+    // 17/11: a Temu também vai pelo robô do mini, mas ele lê a tela (não baixa arquivo)
+    if (lojas.value.find((l) => l.conta === conta)?.platform === 'temu') {
+      if (!r.enfileirado) {
+        // já estava na fila: diz desde quando e se o robô já pegou — fila parada há muito
+        // tempo é robô do Mac mini sem a leitura da Temu instalada ou desligado
+        const desde = r.na_fila_desde ? new Date(r.na_fila_desde) : null
+        const minutos = desde ? Math.round((Date.now() - desde.getTime()) / 60000) : null
+        const estado = r.comando_status === 'claimed' ? 'o robô já pegou e está lendo' : 'o robô ainda não pegou'
+        toasts.info?.(`a leitura da Temu já estava na fila${minutos != null ? ` há ${minutos} min` : ''}: ${estado}${r.comando_status !== 'claimed' && minutos != null && minutos > 15 ? '. Confira se o robô do Mac mini está ligado.' : ''}`)
+      }
+      else if (online) toasts.success?.('pedi ao robô a leitura da Temu: o Mac mini vai abrir Finanças › Pagamentos, ler extrato, previsto e saldo e enviar (2 a 3 min)')
+      else toasts.success?.(`pedi ao robô a leitura da Temu, mas o Mac mini não dá sinal${visto ? ` desde ${visto.toLocaleString('pt-BR')}` : ''}.`)
+      return
+    }
     if (!r.enfileirado) toasts.info?.('pedi ao robô o arquivo da Amazon: ele já tinha essa busca na fila')
     else if (online) toasts.success?.('pedi ao robô o arquivo da Amazon: o Mac mini vai abrir a Amazon, baixar e enviar (1 a 2 min)')
     else toasts.success?.(`pedi ao robô o arquivo da Amazon, mas o Mac mini não dá sinal${visto ? ` desde ${visto.toLocaleString('pt-BR')}` : ''}. Se demorar, rode o "KFA Conciliação" no Mac.`)
@@ -697,7 +724,7 @@ await carregarLojas()
 // Link do Vigia de Conciliação (Threema/Ouvidoria): /conciliacao?loja=&visao=extrato&dia= ou
 // ?loja=&visao=pedidos&situacao=|etapa= — abre direto no lugar certo (15/10).
 const q0 = useRoute().query
-if (typeof q0.tab === 'string' && MARKETPLACES.some((m) => m.key === q0.tab && m.ativo)) {
+if (typeof q0.tab === 'string' && marketplacesVisiveis.value.some((m) => m.key === q0.tab && m.ativo)) {
   tab.value = q0.tab
   escolherLojaDaAba()
 }
@@ -736,7 +763,7 @@ await carregar()
         <h1 class="text-base font-bold">Conciliação</h1>
         <div class="flex gap-0.5 border-b">
           <button
-            v-for="m in MARKETPLACES"
+            v-for="m in marketplacesVisiveis"
             :key="m.key"
             type="button"
             class="px-3 py-1.5 text-xs font-semibold border-b-2 -mb-px"
@@ -794,7 +821,7 @@ await carregar()
           type="button"
           class="inline-flex items-center gap-1 rounded-md bg-primary px-2.5 py-1.5 font-semibold text-primary-foreground"
           :disabled="sincronizando || loja === TODAS"
-          :title="loja === TODAS ? 'escolha uma loja no filtro pra sincronizar' : 'Lê a fatura do ML e o extrato do Mercado Pago agora e recalcula os pedidos desta loja'"
+          :title="loja === TODAS ? 'escolha uma loja no filtro pra sincronizar' : tab === 'temu' ? 'Pede ao robô do Mac mini pra ler a tela da Temu agora (extrato, previsto e saldo) e recalcula os pedidos desta loja' : 'Lê a fatura do ML e o extrato do Mercado Pago agora e recalcula os pedidos desta loja'"
           @click="sincronizar()"
         >
           <Loader2 v-if="sincronizando" class="size-3.5 animate-spin" /><Wand2 v-else class="size-3.5" /> Sincronizar agora
@@ -1080,7 +1107,7 @@ await carregar()
                   </tr>
                   <tr v-if="originalAberto === m.id" class="border-b bg-muted/40">
                     <td colspan="5" class="px-2 py-1.5">
-                      <div class="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">{{ m.origem === 'ml_fatura' ? 'Detalhe original da fatura (Mercado Livre)' : m.origem === 'shopee_carteira' ? 'Lançamento original da carteira (Shopee)' : m.origem === 'tiktok_extrato' ? 'Transação original do extrato diário (TikTok)' : m.origem === 'amazon_transacoes' ? 'Transação original (Amazon, Pagamentos › Transações)' : 'Linha original do relatório de liberações (Mercado Pago)' }}</div>
+                      <div class="mb-1 text-[10px] font-semibold uppercase text-muted-foreground">{{ m.origem === 'ml_fatura' ? 'Detalhe original da fatura (Mercado Livre)' : m.origem === 'shopee_carteira' ? 'Lançamento original da carteira (Shopee)' : m.origem === 'tiktok_extrato' ? 'Transação original do extrato diário (TikTok)' : m.origem === 'amazon_transacoes' ? 'Transação original (Amazon, Pagamentos › Transações)' : m.origem === 'temu_extrato' ? 'Linha original (Temu, Finanças › Pagamentos › Extratos)' : 'Linha original do relatório de liberações (Mercado Pago)' }}</div>
                       <div class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
                         <template v-for="(v, k) in m.original || {}" :key="String(k)">
                           <span class="font-mono text-muted-foreground">{{ k }}</span><span class="break-all">{{ typeof v === 'object' ? JSON.stringify(v) : String(v) }}</span>

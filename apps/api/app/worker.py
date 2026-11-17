@@ -4677,6 +4677,16 @@ async def conciliacao_amazon_csv_tick(ctx: dict) -> None:
         logger.info("conciliacao_amazon_csv_tick_done", lojas=novas)
     except Exception as e:  # noqa: BLE001
         logger.warning("conciliacao_amazon_csv_tick_falhou", err=str(e)[:300])
+    # Temu (17/11): mesma hora, mesma fila do mini — uma tarefa `temu_extrato` por loja
+    # da Temu; o executor lê Finanças › Pagamentos na tela e envia a leitura.
+    try:
+        from app.services.conciliacao_temu import enfileirar_leitura_todas
+
+        async with session_scope() as s:
+            novas = await enfileirar_leitura_todas(s)
+        logger.info("conciliacao_temu_tick_done", lojas=novas)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("conciliacao_temu_tick_falhou", err=str(e)[:300])
 
 
 async def denuncia_relatorio_threema_tick(ctx: dict) -> None:

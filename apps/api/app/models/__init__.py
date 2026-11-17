@@ -283,6 +283,7 @@ from app.models.conciliacao import (
     ConciliacaoLoja,
     ConciliacaoMovimento,
     ConciliacaoPedido,
+    ConciliacaoPrevisto,
     ConciliacaoSync,
 )
 from app.models.ouvidoria import (
@@ -547,6 +548,7 @@ __all__ = [
     "ConciliacaoLoja",
     "ConciliacaoMovimento",
     "ConciliacaoPedido",
+    "ConciliacaoPrevisto",
     "ConciliacaoSync",
     "ConfiguracaoSegura",
     "OuvidoriaOcorrencia",

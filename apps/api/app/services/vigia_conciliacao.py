@@ -37,7 +37,13 @@ _ACAO = {
     "sincronizar": "sincronizar a loja e, se continuar, ver o erro da API",
     "pedidos": "abrir a aba Pedidos filtrada e decidir: finalizar com motivo ou abrir chamado",
 }
-_PLATAFORMA = {"ml": "Mercado Livre", "shopee": "Shopee", "amazon": "Amazon", "tiktok": "TikTok"}
+_PLATAFORMA = {
+    "ml": "Mercado Livre",
+    "shopee": "Shopee",
+    "amazon": "Amazon",
+    "tiktok": "TikTok",
+    "temu": "Temu",
+}
 # motivos do bloco "Dias" que são trabalho de pessoa no Extrato daquele dia (os outros —
 # extrato/fatura não lida, repasse da TikTok, pronto pra fechar — não são do dia)
 _MOTIVOS_DIA_ABERTO = ("sem dono", "saldo não bate")

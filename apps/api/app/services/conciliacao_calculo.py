@@ -659,7 +659,14 @@ def situacao_do_pedido(
             estimada = " (estimativa)" if previsao_estimada else ""
             motivo = f"libera em {previsao.astimezone(BRT):%d/%m}{estimada}" if previsao else None
             if sem_margem and venda is None and not dinheiro and not presas:
-                motivo = "sem lançamento no arquivo da Amazon ainda"
+                if plataforma == "temu":
+                    # com o previsto lido fica o "libera em dd/mm"; sem data, a regra dela
+                    if liquido_previsto is None:
+                        motivo = "a Temu ainda não mostrou o previsto deste pedido"
+                    elif motivo is None:
+                        motivo = "a Temu paga 7 dias depois da entrega"
+                else:
+                    motivo = "sem lançamento no arquivo da Amazon ainda"
         if tarifa_devolvida:
             extra = f"o ML já devolveu {mexeu_sem_liberar:.2f} de tarifa (reembolso ao comprador)"
             motivo = f"{motivo} · {extra}" if motivo else extra
@@ -712,7 +719,11 @@ def situacao_do_pedido(
                 # 16/10 (Vinicius: "como pode estar bateu se nem valor tem?"): entrou
                 # dinheiro mas ninguém leu a venda — não dá pra dizer que bateu
                 situacao = "sem_venda"
-                motivo = "entrou dinheiro, mas a venda ainda não foi lida pela Margem"
+                motivo = (
+                    "a Temu pagou antes de o robô ler o previsto deste pedido"
+                    if plataforma == "temu"
+                    else "entrou dinheiro, mas a venda ainda não foi lida pela Margem"
+                )
             else:
                 dif = recebido - venda_liquido
                 if abs(dif) <= TOLERANCIA:
@@ -723,6 +734,20 @@ def situacao_do_pedido(
                     situacao = "recebido_a_mais"
                 if situacao != "bateu":
                     motivo = _motivo_da_diferenca(venda, fatura, liberacoes)
+                    if plataforma == "temu":
+                        # a Temu dá um número só por pedido (sem tarifa nem frete na
+                        # linha): o motivo são os dois valores, ou a etiqueta à parte
+                        etiqueta = _soma([m.debito for m in dinheiro if m.tipo == "frete"])
+                        if abs(liberado_valor - venda_liquido) > TOLERANCIA:
+                            motivo = (
+                                f"a Temu estimou {venda_liquido:.2f} e pagou {liberado_valor:.2f}"
+                            )
+                        elif etiqueta > TOLERANCIA:
+                            motivo = (
+                                f"a Temu cobrou {etiqueta:.2f} de etiqueta à parte do pagamento"
+                            )
+                        else:
+                            motivo = f"recebido {recebido:.2f} × estimado {venda_liquido:.2f}"
                     if abs(liberado_valor - venda_liquido) <= TOLERANCIA and fora:
                         # 22/10 (Barbosa 301789): a liberação bateu; a diferença é o que
                         # veio à parte (compensação da Shopee pela devolução)
@@ -1526,6 +1551,13 @@ async def recalcular_loja(
         .all()
     )
     fin_por_numeroloja = {f.external_order_id: f for f in fins}
+    # Temu (17/11): a Margem não lê a venda; o previsto é o que a tela da Temu disse que
+    # ia pagar, guardado pelo robô antes de pagar (conciliacao_previstos)
+    previstos_temu: dict[str, Any] = {}
+    if plataforma_loja == "temu":
+        from app.services.conciliacao_temu import previstos_dos_pedidos
+
+        previstos_temu = await previstos_dos_pedidos(session, loja, numerolojas)
     movs = (
         (
             await session.execute(
@@ -1720,6 +1752,10 @@ async def recalcular_loja(
         conta_desfeita = conta_ml_desfeita(venda) if plataforma_loja == "ml" else None
         if conta_desfeita and conta_desfeita["liquido"] is not None:
             liquido_previsto = conta_desfeita["liquido"]
+        temu_previsto = previstos_temu.get(numeroloja) if numeroloja else None
+        if temu_previsto is not None:
+            liquido_previsto = _d(temu_previsto.valor)
+            previsao = previsao or temu_previsto.liquidacao_em
         estado_bling = nome_bling.strip().lower()
         args_situacao: dict[str, Any] = {
             "agora": agora,
@@ -1739,6 +1775,18 @@ async def recalcular_loja(
             "sem_margem": loja.modo_extrato == "upload",
         }
         calc = situacao_do_pedido(**args_situacao)
+        if (
+            temu_previsto is not None
+            and temu_previsto.primeiro_valor != temu_previsto.valor
+            and calc["situacao"] != "cancelado"
+        ):
+            # o previsto acompanha a tela até a Temu pagar; se ela mudou a estimativa no
+            # caminho, o pedido conta — não some atrás do "bateu"
+            aviso = (
+                f"a Temu mudou a estimativa de {temu_previsto.primeiro_valor:.2f} "
+                f"para {temu_previsto.valor:.2f} antes de pagar"
+            )
+            calc["motivo"] = f"{calc['motivo']} · {aviso}" if calc["motivo"] else aviso
         # 03/11 (Vinicius, Shopee vortan 306115: "o previsto e o real não era pra ser
         # exatamente isso?"): o previsto é o que a venda prometeu — a conta guardada antes
         # de liberar —, não a que a Shopee fecha na liberação (afiliados, taxas). Recebeu
@@ -1960,6 +2008,8 @@ async def recalcular_loja(
             liquido_gravado = conta_desfeita["liquido"]
         if previsto_mantido is not None:
             liquido_gravado = previsto_mantido
+        if temu_previsto is not None:
+            liquido_gravado = _d(temu_previsto.valor)
         # 19/10 (revisão): o previsto de ANTES da liberação. A Shopee e a TikTok fecham a
         # conta na hora de liberar (afiliados, taxa de serviço) e a Margem relê o pedido —
         # o valor novo substituía o antigo e a diferença sumia atrás do "bateu" (Jlas
@@ -1992,6 +2042,17 @@ async def recalcular_loja(
         # Shopee liberada com a conta da venda guardada: a grade mostra o que a venda
         # prometeu (o real fica no raio-x); o resto, a conta de agora
         grade = prometida if prometida is not None else shopee
+        if temu_previsto is not None and grade is None:
+            # a Temu paga o preço base do pedido: a conta da venda não tem tarifa, frete
+            # nem cupom à parte (o que ela cobrar vem como linha do extrato)
+            grade = {
+                "preco": _d(temu_previsto.valor),
+                "taxas": ZERO,
+                "afiliados": ZERO,
+                "frete_loja": ZERO,
+                "subsidio": ZERO,
+                "cupons": ZERO,
+            }
         valores = {
             "platform": loja.platform,
             "bling_id": cab.bling_id,

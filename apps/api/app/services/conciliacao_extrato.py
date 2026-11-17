@@ -511,7 +511,20 @@ async def classificar_vendas_desfeitas(session: AsyncSession, loja: ConciliacaoL
 
 async def bling_store_ids_da_loja(session: AsyncSession, integration: Integration) -> set[str]:
     """Ids de loja do Bling (`bling_orders.loja`) que pertencem a esta conta:
-    pela tela Lojas (`store_info.account_name`) e pela `stores.integration_id`."""
+    pela tela Lojas (`store_info.account_name`) e pela `stores.integration_id`.
+
+    17/11 (Temu): conta sem integração de verdade traz a loja do Bling escrita na
+    própria loja da Conciliação (`conciliacao_lojas.bling_loja`) — a âncora não tem
+    nome nem Store pra casar, e é só essa loja que vale."""
+    fixa = (
+        await session.execute(
+            select(ConciliacaoLoja.bling_loja).where(
+                ConciliacaoLoja.integration_id == integration.id
+            )
+        )
+    ).scalar_one_or_none()
+    if fixa and str(fixa).strip():
+        return {str(fixa).strip()}
     ids: set[str] = set()
     nome = (integration.name or "").strip().lower()
     # Pelo nome só na MESMA plataforma: a Shopee também tem uma loja "Mini" e os

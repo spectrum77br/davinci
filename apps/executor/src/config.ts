@@ -109,8 +109,9 @@ export const cfg: Config = {
   melhorEnvioAdspowerUserId: str("MELHORENVIO_ADSPOWER_USER_ID"),
   // Conciliação (16/10): loja por arquivo → perfil do AdsPower. Ex.:
   // CONCILIACAO_PERFIS="kfa (amazon)=k1doch5a;outra (amazon)=k1xxxxxx"
+  // 17/11: a Temu lida da tela entra aqui também (eron = perfil 126 "Eron - Temu").
   conciliacaoPerfis: Object.fromEntries(
-    str("CONCILIACAO_PERFIS", "kfa (amazon)=k1doch5a")
+    str("CONCILIACAO_PERFIS", "kfa (amazon)=k1doch5a;eron (temu)=k1dkfq5y")
       .split(";")
       .map((par) => par.split("=").map((x) => x.trim()))
       .filter((par) => par.length === 2 && par[0] && par[1])

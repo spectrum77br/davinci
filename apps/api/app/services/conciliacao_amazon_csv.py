@@ -621,7 +621,13 @@ async def enfileirar_busca_csv_todas(session: AsyncSession) -> list[str]:
     """Cron das 06:00 BRT: uma tarefa por loja por arquivo."""
     from app.services.conciliacao_jobs import lojas_ativas
 
-    lojas = [x for x in await lojas_ativas(session) if x.modo_extrato == "upload"]
+    # 17/11: só Amazon — a Temu também é "upload" (robô da tela) e tem a fila dela
+    lojas = [
+        x
+        for x in await lojas_ativas(session)
+        if x.modo_extrato == "upload"
+        and getattr(x.platform, "value", str(x.platform)) == "amazon"
+    ]
     novas: list[str] = []
     for loja in lojas:
         _cmd, novo = await enfileirar_busca_csv(session, loja)
@@ -648,5 +654,21 @@ async def registrar_resultado_robo(
         if (loja.ultimo_erro or "").startswith("robô:"):
             loja.ultimo_erro = None
     else:
-        loja.ultimo_erro = f"robô: {(cmd.result or 'falhou')[:200]}"
+        loja.ultimo_erro = f"robô: {_motivo_do_robo(cmd.result)[:200]}"
     await session.flush()
+
+
+def _motivo_do_robo(resultado: str | None) -> str:
+    """O executor manda o desfecho em JSON (`{"ok": false, "reason": "…"}`): na loja
+    aparece só o motivo (17/11 — o JSON cru cortado em 200 letras não dizia nada)."""
+    import json
+
+    texto = (resultado or "").strip()
+    if texto.startswith("{"):
+        try:
+            motivo = json.loads(texto).get("reason")
+        except (ValueError, AttributeError):
+            motivo = None
+        if isinstance(motivo, str) and motivo.strip():
+            return motivo.strip()
+    return texto or "falhou"

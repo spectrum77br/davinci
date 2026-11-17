@@ -55,6 +55,9 @@ ACAO_TIKTOK_SENHA = "tiktok_senha"
 # Conciliação (16/10): baixar o CSV de transações da Amazon pelo AdsPower e enviar
 # (loja por arquivo, KFA). Sem `logistica_id`; o vínculo é `payload.integration_id`.
 ACAO_AMAZON_CSV = "amazon_transacoes_csv"
+# Conciliação (17/11): ler Finanças › Pagamentos da Temu na tela (extrato, previsto por
+# pedido e saldo) pelo AdsPower e enviar. Sem `logistica_id`; vínculo = `integration_id`.
+ACAO_TEMU_EXTRATO = "temu_extrato"
 
 STATUS_PENDENTE = "pendente"
 STATUS_SOLICITADA = "solicitada"
@@ -64,7 +67,9 @@ STATUS_FALHOU = "falhou"
 LEASE_STALE = timedelta(minutes=30)
 
 # Só vão pra executor que as pediu pelo nome no lease (ver docstring).
-ACOES_EXCLUSIVAS = frozenset({ACAO_SUSPENDER, ACAO_TIKTOK_SENHA, ACAO_AMAZON_CSV})
+ACOES_EXCLUSIVAS = frozenset(
+    {ACAO_SUSPENDER, ACAO_TIKTOK_SENHA, ACAO_AMAZON_CSV, ACAO_TEMU_EXTRATO}
+)
 
 
 class RoboError(Exception):
@@ -239,7 +244,8 @@ async def registrar_resultado(
         await session.commit()
         logger.info("logistica_robo_resultado", comando=str(comando_id), status=cmd.status)
         return cmd
-    if cmd.acao == ACAO_AMAZON_CSV:
+    if cmd.acao in (ACAO_AMAZON_CSV, ACAO_TEMU_EXTRATO):
+        # o desfecho vale pra loja do `payload.integration_id`, seja Amazon ou Temu
         from app.services.conciliacao_amazon_csv import registrar_resultado_robo
 
         await registrar_resultado_robo(session, cmd, ok=ok)
