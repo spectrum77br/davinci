@@ -116,6 +116,30 @@ class Settings(BaseSettings):
     # Amazon descarta o e-mail). Ver services/logistica_cliente_mensagens.
     amazon_mensagens_cliente: bool = False
 
+    # Amazon envio próprio: transportadora "MelhorEnvio" → "Correios"
+    # (16/11/2026, Eduardo; services/amazon_transportadora). A integração do
+    # Bling confirma o envio com "MelhorEnvio", que a Amazon não reconhece (a
+    # entrega nunca é registrada → risco de A a Z); o worker reconfirma o MESMO
+    # pacote (rastreio, serviço, data e itens iguais) com "Correios", só em
+    # pacote despachado nas últimas 72 h, no máximo 2 vezes por pedido e só no
+    # servidor (ENV=production). LIGADO de fábrica, como o
+    # `flex_nao_entregue_auto` e o `shopee_mensagens_comprador`: a chamada exata
+    # já foi validada à mão em 11 pedidos em 16/11 (HTTP 204, pacote virou
+    # "Correios"). ATENÇÃO: por isso o próprio deploy já liga a escrita na
+    # Amazon (confirmShipment a cada 15 min em todas as contas Amazon); para
+    # publicar desligado, pôr AMAZON_TRANSPORTADORA_CORREIOS=false no .env do
+    # servidor ANTES do deploy.
+    # Freio de mão: AMAZON_TRANSPORTADORA_CORREIOS=false no .env do servidor e
+    # RECRIAR o worker (sem deploy de código):
+    #   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+    #     up -d --no-deps --force-recreate worker
+    # `docker compose restart worker` NÃO basta: o worker recebe o .env pelo
+    # `env_file` do compose e o container guarda as variáveis da hora em que foi
+    # criado (o .env não é lido de dentro do container). Conferir com
+    # `docker exec davinci-worker-1 env | grep AMAZON_TRANSPORTADORA` e, no log,
+    # `amazon_transportadora_correios_tick` com desligado=True.
+    amazon_transportadora_correios: bool = True
+
     # Mensagem ao COMPRADOR pelo chat da Shopee quando a devolução volta
     # travada (motivo "Bloqueado"): pede a senha da tela / o segredo do
     # cadeado. Ver services/devolucao_mensagem_comprador. Ligado — foi pedido
