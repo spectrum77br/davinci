@@ -465,6 +465,16 @@ class LocalERP:
         if kind in payment_methods.COMMANDS:
             return payment_methods.apply(self, db, p)
 
+        if kind in {"product.listings.organize", "product.listings.show"}:
+            from app.erp_local import listings
+
+            return listings.apply(self, db, key, kind, p)
+
+        if kind == "order.imei.save":
+            from app.erp_local import order_imeis
+
+            return order_imeis.apply(self, db, key, p)
+
         if kind == "order.compat_situation":
             from app.erp_local.bling_compat import apply_situation
 

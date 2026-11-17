@@ -167,6 +167,7 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             multi_company,
             native_ingest,
             native_orders,
+            order_imeis,
             payment_methods,
             price_lists,
             price_table,
@@ -197,6 +198,8 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
                 "homolog": homolog.info(db),
                 "bling_coverage": bling_coverage.latest(db),
                 "cost_changes": price_table.cost_changes(db, limit=200),
+                "order_imeis": order_imeis.snapshot(db),
+                "finance_lots": finance.lots(db),
                 "would": would.listing(db) if would.active() else [],
                 "procurement": procurement.snapshot(erp, db),
                 "fiscal": fiscal.snapshot(db, getattr(app.state, "fiscal_readiness", None)),
@@ -418,6 +421,29 @@ def create_app(database: str | Path, *, reference_source=None, refresh_seconds=3
             db.execute("BEGIN")
             erp.product(db, sku)
             return {"sku": sku, "rows": price_table.listings(db, sku)}
+
+    @app.get("/api/erp-local/listings")
+    def listings_overview(state: str = "", q: str = "", offset: int = 0, hidden: bool = False):
+        from app.erp_local import listings
+
+        with erp.connection() as db:
+            return listings.overview(
+                db, state=state, query=q[:100], offset=max(0, offset), hidden=hidden
+            )
+
+    @app.post("/api/erp-local/listings/refresh")
+    def listings_refresh():
+        """Atualizar: read DaVinci's listings and products now, where the server can."""
+        if os.environ.get("ERP_READ_TRANSPORT") != "local":
+            raise ERPError(
+                "listings_refresh",
+                "Aqui os anúncios chegam sozinhos da base do DaVinci (de hora em hora; na "
+                "homologação, a cada 10 minutos).",
+                409,
+            )
+        from app.erp_local.reference import LocalReference
+
+        return ReferenceStore(erp, LocalReference()).refresh()
 
     @app.get("/api/erp-local/cost-changes.csv")
     def cost_changes_csv():

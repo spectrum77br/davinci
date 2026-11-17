@@ -337,6 +337,29 @@ test('the product shows its Tabela de Preços line, warns on a different EAN and
   assert.ok(d.querySelector('a[href="/api/erp-local/cost-changes.csv"]'));
 });
 
+test('products list the store listings with Vincular and Organizar, orders take IMEIs and payables a cost split',async()=>{
+  const rows=[{id:'1',channel:'shopee',store:'Shopee Mega',listing:'L1',variation:'',listing_sku:'demo.aparelho',sku:'demo.aparelho',title:'Aparelho',stock:3,price:'10',state:'linked',hidden:false},{id:'2',channel:'shopee',store:'Banida',listing:'L2',variation:'',listing_sku:'',sku:'velho',title:'Velho',stock:0,price:'1',state:'archived',hidden:false}];
+  const order={id:'O1',status:'reserved',data:{external_id:'900151',channel:'local',store:'manual',depot:'geral',total:'10.00',created_at:'2026-11-17T12:00:00Z',items:[{sku:'demo.aparelho',quantity:'2',unit_price:'10.00'}],requirements:{'demo.aparelho':'2'}}};
+  const {dom,document:d,requests}=await setup({rows,counts:{linked:1,archived:1,hidden:0},total:2,orders:[order],order_imeis:{O1:{'demo.aparelho':[['490154203237518']]}}});
+  dom.window.HTMLElement.prototype.scrollIntoView=()=>{};
+  d.querySelector('nav [data-page=products]').click();
+  d.querySelector('[data-products-view=listings]').click();
+  await new Promise(r=>setImmediate(r));await new Promise(r=>setImmediate(r));
+  assert.match(d.body.textContent,/Loja arquivada/);
+  for(const name of ['data-listings-refresh','data-listings-link','data-listings-organize'])assert.ok(d.querySelector(`[${name}]`));
+  assert.equal(d.querySelector('[data-copy="L1"]').dataset.copy,'L1');
+  d.querySelector('nav [data-page=orders]').click();
+  d.querySelector('[data-edit-sale="O1"]')?.click();
+  const first=d.querySelector('[data-imei="demo.aparelho"][data-unit="0"][data-slot="0"]');
+  assert.ok(first,'quadro de IMEI no pedido');
+  assert.equal(first.value,'490154203237518');
+  d.querySelector('[data-imei="demo.aparelho"][data-unit="1"][data-slot="0"]').value='356938035643809';
+  d.querySelector('[data-imei-save="demo.aparelho"]').click();
+  await new Promise(r=>setImmediate(r));
+  const sent=requests.find(r=>r.kind==='order.imei.save');
+  assert.deepEqual(sent.payload,{id:'O1',sku:'demo.aparelho',units:[['490154203237518'],['356938035643809']]});
+});
+
 test('product editing sends metadata with the current version and preserves GTIN as text',async()=>{
   const p={sku:'demo.aparelho',name:'Aparelho',kind:'simple',components:[],balances:[],price:'10',cost_price:'5',details:{version:7,unit:'UN',status:'active',gtin:'012345678905',gtin_tax:''}};
   const {dom,document:d,requests}=await setup({products:[p]});

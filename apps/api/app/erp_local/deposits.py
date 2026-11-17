@@ -88,7 +88,7 @@ def apply(erp, db, key, p):
         not isinstance(status, str)
         or status not in {"active", "inactive"}
         or not isinstance(purpose, str)
-        or purpose not in {"stock", "quarantine"}
+        or purpose not in {"stock", "quarantine", "avulso"}
         or not isinstance(excluded, bool)
         or not isinstance(default, bool)
     ):
